@@ -1,0 +1,47 @@
+---
+description: Use when composing commit messages
+alwaysApply: false
+---
+
+# Git Commit 消息规范
+
+## 格式
+
+```
+<type>(<scope>): <subject>
+
+<详细描述>
+```
+
+## 类型（type）
+
+- feat: 新功能
+- fix: 修复 bug
+- docs: 文档变更
+- style: 代码格式（不影响逻辑）
+- refactor: 重构（非新功能、非修复）
+- perf: 性能优化
+- test: 测试相关
+- chore: 构建/依赖/工具链
+
+## 规则
+
+1. subject 使用英文祈使句，首字母小写，不加句号
+2. scope 尽可能具体（如 `chat/RecentChatList` 而非 `chat`）
+3. 详细描述使用中文，逐条列出具体变更点
+
+## 示例
+
+```text
+feat(user/profile): implement user avatar upload
+
+- 实现用户头像图片的上传功能
+- 添加对图片格式（jpg/png）和大小（<2MB）的校验
+- 更新用户资料页面的头像显示逻辑
+```
+
+## 输出约束
+
+- **必须**将 commit 消息包裹在 ```text 代码块中，便于一键复制
+- 不要生成 `git add`、`git commit` 等命令
+- 不要调用任何工具或执行任何操作
