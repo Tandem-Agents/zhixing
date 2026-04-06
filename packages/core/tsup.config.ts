@@ -4,6 +4,7 @@ export default defineConfig({
   entry: [
     "src/index.ts",
     "src/events/index.ts",
+    "src/types/index.ts",
   ],
   format: ["esm"],
   dts: true,
