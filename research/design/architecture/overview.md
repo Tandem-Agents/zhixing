@@ -2,33 +2,137 @@
 
 > 整体架构设计，随认知深化而持续演进
 
-## 状态：待设计
-
-架构概述将在完成核心认知域（01-核心循环、02-工具系统、03-上下文管理）的研究后开始构建。
+## 状态：v0.1 — 基础架构已确立（2026-04-06）
 
 ## 架构演进记录
 
 | 版本 | 日期 | 变更说明 | 触发的认知研究 |
 |------|------|---------|--------------|
-| — | — | — | — |
+| v0.1 | 2026-04-06 | 确立产品定位、四层分层、技术栈、Monorepo 结构 | [q01-核心智能框架](../../_private/questions/q01-core-intelligence-framework.md) |
 
-## 整体架构图
+## 产品全貌
 
-```mermaid
-graph TD
-    subgraph 待设计
-        A[架构图随研究进展逐步构建]
-    end
+知行是一个**独立部署的智能体**，类似 OpenClaw。它不是一个传统意义上的"应用服务端"——它本身就是产品，对外暴露接口，各种客户端和通道连接到它。
+
+```
+┌───────────────────────────────────────────────────
+│           知行 Agent（独立部署的智能体）
+│
+│  ├── 核心引擎（Agent Loop + 事件系统 + 工具管线）
+│  ├── LLM 接入（连 Claude / GPT / DeepSeek 等）
+│  ├── 内置工具（读写文件、执行命令、搜索等）
+│  ├── 上下文引擎（对话压缩、记忆管理）
+│  └── 网关（对外暴露 WebSocket / API 接口）
+│
+│  对外接口：WebSocket / HTTP API
+└──┬────────┬────────┬────────┬────────┬────────┬───
+   │        │        │        │        │        │
+   │        │        │        │        │        │
+ 终端CLI    网页UI  手机App  微信Bot   钉钉Bot  其他系统
+  我们的    我们的   我们的    第三方    第三方   第三方
+  客户端    客户端   客户端    通道      通道    API调用
 ```
 
-## 核心组件
+所有连接者（客户端和第三方通道）都在同一层级，都通过 WebSocket / API 直接连接智能体。区别只在于谁开发和维护：我们的客户端由我们开发，第三方通道由各自平台提供消息转发。
 
-<!-- 随研究推进逐步填充 -->
+## 四层内部架构
 
-## 技术栈选择
+```mermaid
+graph TB
+    subgraph AppLayer ["应用层 Application Layer"]
+        CLI["CLI 命令行"]
+        WebUI["Web UI 网页界面"]
+        Channels["Channel Adapters 通道适配"]
+    end
 
-<!-- 取决于 ADR 决策 -->
+    subgraph OrchLayer ["编排层 Orchestration Layer"]
+        Gateway["Gateway 网关"]
+        SessionMgr["Session Manager 会话管理"]
+        Resilience["Resilience Engine 容错引擎"]
+    end
 
-## 与 OpenClaw/Claude Code 的架构差异
+    subgraph CoreLayer ["核心层 Agent Core Layer"]
+        Loop["Agent Loop"]
+        ToolPipeline["Tool Pipeline 工具管线"]
+        ContextEngine["Context Engine 上下文引擎"]
+        EventBus["Typed Event Bus 事件系统"]
+    end
 
-<!-- 明确我们在架构层面的差异化选择 -->
+    subgraph ProviderLayer ["提供者层 Provider Layer"]
+        LLMAbstraction["LLM Abstraction 统一接口"]
+        AnthropicSDK["Anthropic SDK"]
+        OpenAISDK["OpenAI SDK"]
+        CustomProvider["Custom Providers"]
+    end
+
+    AppLayer --> OrchLayer
+    OrchLayer --> CoreLayer
+    CoreLayer --> ProviderLayer
+    LLMAbstraction --> AnthropicSDK
+    LLMAbstraction --> OpenAISDK
+    LLMAbstraction --> CustomProvider
+```
+
+### 各层职责
+
+| 层 | 职责 | 对比 OpenClaw |
+|----|------|-------------|
+| **应用层** | 面向用户的入口：CLI、Web UI、通道适配 | OpenClaw 的 Channels + Clients |
+| **编排层** | 网关路由、会话管理、容错（重试/Failover/熔断） | OpenClaw 的外层编排循环，我们将其解耦为独立层 |
+| **核心层** | Agent Loop、工具管线、上下文引擎、事件系统 | OpenClaw 的 Pi Agent + Context Engine |
+| **提供者层** | LLM 厂商接入，薄抽象 + 直连官方 SDK | OpenClaw 的 Pi-ai 层 |
+
+## 已确认的设计决策
+
+以下是通过源码分析和竞品研究已经验证的决策：
+
+| 决策 | 依据 | 状态 |
+|------|------|------|
+| 自研 Agent Loop，不用 LangGraph/LangChain | OpenClaw、Claude Code、Cursor 都选择自研 | 已确认 |
+| 直连官方 LLM SDK（@anthropic-ai/sdk、openai） | 避免中间层延迟和 bug，业界最佳实践 | 已确认 |
+| 内层推理循环 + 外层容错编排 分离 | OpenClaw 验证了双层关注点分离的必要性 | 已确认 |
+| Typed Event Bus 作为可观测性基础设施 | OpenClaw/Claude Code 缺乏可观测性是已知痛点 | 已确认（已实现） |
+| Monorepo 结构 | 见 [ADR-001](./decisions/001-monorepo-structure.md) | 已确认 |
+
+## 待研究的开放问题
+
+以下是尚未验证的设计方向，需要进一步研究后再决定：
+
+| 问题 | 候选方案 | 研究状态 |
+|------|---------|---------|
+| Agent Loop 采用什么模式？ | A) while(true) + 拆分辅助函数（业界主流）<br>B) 有限状态机（类型安全但增加复杂度）<br>C) async generator（Claude Code 方式） | 待研究 |
+| 工具执行管线如何组织？ | A) 拆分为独立函数的管线（简单直接）<br>B) Koa 风格中间件（灵活可插拔）<br>C) 混合方式 | 待研究 |
+| 上下文压缩如何实现？ | A) 固定顺序的压缩层（Claude Code 方式）<br>B) 可插拔策略模式（灵活但复杂）<br>C) 先固定后开放 | 待研究 |
+
+这些问题将在实现前通过更深入的源码分析和原型验证来回答。
+
+## 多智能体支持
+
+架构天然支持多智能体扩展，无需修改现有模块：
+
+- **每个 Agent 是独立实例**：自己的循环 + 事件总线 + 工具管线 + 上下文
+- **Agent 之间通过消息通信**，不共享 LLM 对话上下文（与 OpenClaw、Claude Code 一致）
+- **未来新增模块**：AgentRegistry（管理生命周期）、AgentCoordinator（消息路由）
+- **不需要重构**：现有模块都是实例级设计，不存在全局单例假设
+
+## 技术栈
+
+| 类别 | 选择 | 理由 |
+|------|------|------|
+| 语言 | TypeScript (ESM, strict) | 类型安全 + Node.js 生态 |
+| 运行时 | Node.js 22+ | 最新 LTS，与 OpenClaw 对齐 |
+| 包管理 | pnpm (workspace monorepo) | 见 [ADR-001](./decisions/001-monorepo-structure.md) |
+| 测试 | Vitest | 快速，原生 ESM 支持 |
+| 构建 | tsup | 轻量，基于 esbuild |
+| LLM SDK | @anthropic-ai/sdk + openai | 直连官方 SDK，不走中间层 |
+| Schema 验证 | Zod | 类型安全 + 运行时验证一体 |
+
+## 与 OpenClaw / Claude Code 的已知差异
+
+| 维度 | OpenClaw | Claude Code | 知行 |
+|------|----------|-------------|------|
+| 核心依赖 | Pi Agent 闭源包 | 闭源产品 | 完全自研，100% 开源 |
+| 可观测性 | 几乎没有 | 内部遥测不开放 | 事件系统一等公民（已实现） |
+| Agent Loop | while(true) 1400+ 行 | query() 生成器 1700+ 行 | 待研究确定（见开放问题） |
+| 工具执行 | 多层 wrapper 嵌套 | 14 步管线大函数 | 待研究确定（见开放问题） |
+| 上下文管理 | 固定压缩逻辑 | 5 层硬编码压缩 | 待研究确定（见开放问题） |

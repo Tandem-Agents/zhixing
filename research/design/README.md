@@ -11,8 +11,8 @@
 | 文档 | 内容 | 状态 |
 |------|------|------|
 | [设计原则](./principles.md) | 知行项目的核心设计哲学与约束 | 🔲 待凝练 |
-| [架构概述](./architecture/overview.md) | 整体架构设计（演进式） | 🔲 待设计 |
-| [架构决策](./architecture/decisions/_index.md) | ADR 索引 | 🔲 待启动 |
+| [架构概述](./architecture/overview.md) | 整体架构设计（演进式） | ✅ v0.1 已确立 |
+| [架构决策](./architecture/decisions/_index.md) | ADR 索引 | ✅ 已启动（1 条） |
 | [功能规格](./specifications/) | 具体功能的实现规格 | 🔲 待启动 |
 | [差异化策略](./differentiators.md) | 我们的独特竞争优势 | 🔲 待研究 |
 
