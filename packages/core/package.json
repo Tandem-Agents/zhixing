@@ -1,7 +1,7 @@
 {
   "name": "@zhixing/core",
   "version": "0.1.0",
-  "description": "知行核心引擎 — 状态机 Agent Loop、事件系统、工具管线",
+  "description": "知行核心引擎 — AsyncGenerator Agent Loop、事件系统、工具管线",
   "type": "module",
   "exports": {
     ".": {
@@ -15,6 +15,10 @@
     "./types": {
       "types": "./dist/types/index.d.ts",
       "import": "./dist/types/index.js"
+    },
+    "./loop": {
+      "types": "./dist/loop/index.d.ts",
+      "import": "./dist/loop/index.js"
     }
   },
   "files": [

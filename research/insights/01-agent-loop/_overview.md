@@ -10,19 +10,19 @@
 
 | # | 问题 | 文件 | 状态 |
 |---|------|------|------|
-| 1 | 什么是 Agent Loop？它的完整生命周期是怎样的？ | — | 🔲 待研究 |
-| 2 | 单轮 Tool Call 的完整流程是什么？ | — | 🔲 待研究 |
-| 3 | 多轮 Tool Call 如何编排？循环何时终止？ | — | 🔲 待研究 |
-| 4 | 流式输出如何与 Agent Loop 配合？ | — | 🔲 待研究 |
-| 5 | 错误处理和重试机制是怎样的？ | — | 🔲 待研究 |
+| 1 | 什么是 Agent Loop？它的完整生命周期是怎样的？ | [q01](../../_private/questions/q01-core-intelligence-framework.md) | ✅ 已研究 |
+| 2 | 单轮 Tool Call 的完整流程是什么？ | [OpenClaw 分析](../../source-analysis/openclaw/agent-loop.md) | ✅ 已研究 |
+| 3 | 多轮 Tool Call 如何编排？循环何时终止？ | [q02](../../_private/questions/q02-agent-loop-design.md) | ✅ 已研究 |
+| 4 | 流式输出如何与 Agent Loop 配合？ | [Claude Code 分析](../../source-analysis/claude-code/agent-loop.md) | ✅ 已研究 |
+| 5 | 错误处理和重试机制是怎样的？ | [Claude Code 分析](../../source-analysis/claude-code/agent-loop.md) | 🔶 已了解机制，实现延后 |
 | 6 | 人机交互（审批/确认）如何嵌入循环？ | — | 🔲 待研究 |
 
-## 对应 OpenClaw 源码
+## 对应源码分析
 
-- `src/agents/` — 智能体核心逻辑
-- `src/flows/` — 流程编排
-- `src/commands/` — 命令/工具定义
+- [OpenClaw Agent Loop 分析](../../source-analysis/openclaw/agent-loop.md) — Pi-Agent-Core 内层 + 外层编排
+- [Claude Code Agent Loop 分析](../../source-analysis/claude-code/agent-loop.md) — query() 异步生成器
 
-## 建议研究顺序
+## 设计决策
 
-先从问题 1 开始建立全局认知，再逐步深入到具体的 Tool Call 流程和编排机制。
+Agent Loop 设计方案已确定，见 [q02-Agent Loop 设计](../../_private/questions/q02-agent-loop-design.md)。
+核心决策：AsyncGenerator + while(true) + 拆分辅助函数，不可变状态转换。

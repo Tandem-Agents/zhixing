@@ -2,12 +2,13 @@
 
 > 整体架构设计，随认知深化而持续演进
 
-## 状态：v0.1 — 基础架构已确立（2026-04-06）
+## 状态：v0.2 — Agent Loop 设计已确定（2026-04-06）
 
 ## 架构演进记录
 
 | 版本 | 日期 | 变更说明 | 触发的认知研究 |
 |------|------|---------|--------------|
+| v0.2 | 2026-04-06 | 确定 Agent Loop 模式、工具管线方案、上下文压缩策略；三个开放问题已决策 | [q02-Agent Loop 设计](../../_private/questions/q02-agent-loop-design.md) |
 | v0.1 | 2026-04-06 | 确立产品定位、四层分层、技术栈、Monorepo 结构 | [q01-核心智能框架](../../_private/questions/q01-core-intelligence-framework.md) |
 
 ## 产品全貌
@@ -94,17 +95,16 @@ graph TB
 | Typed Event Bus 作为可观测性基础设施 | OpenClaw/Claude Code 缺乏可观测性是已知痛点 | 已确认（已实现） |
 | Monorepo 结构 | 见 [ADR-001](./decisions/001-monorepo-structure.md) | 已确认 |
 
-## 待研究的开放问题
+## 已决策的设计问题
 
-以下是尚未验证的设计方向，需要进一步研究后再决定：
+以下问题通过深度源码分析（OpenClaw Pi-Agent-Core + Claude Code query.ts）已做出决策。
+详细分析见 [q02-Agent Loop 设计](../../_private/questions/q02-agent-loop-design.md)。
 
-| 问题 | 候选方案 | 研究状态 |
-|------|---------|---------|
-| Agent Loop 采用什么模式？ | A) while(true) + 拆分辅助函数（业界主流）<br>B) 有限状态机（类型安全但增加复杂度）<br>C) async generator（Claude Code 方式） | 待研究 |
-| 工具执行管线如何组织？ | A) 拆分为独立函数的管线（简单直接）<br>B) Koa 风格中间件（灵活可插拔）<br>C) 混合方式 | 待研究 |
-| 上下文压缩如何实现？ | A) 固定顺序的压缩层（Claude Code 方式）<br>B) 可插拔策略模式（灵活但复杂）<br>C) 先固定后开放 | 待研究 |
-
-这些问题将在实现前通过更深入的源码分析和原型验证来回答。
+| 问题 | 决策 | 依据 |
+|------|------|------|
+| Agent Loop 采用什么模式？ | **AsyncGenerator + while(true) + 拆分辅助函数**<br>Claude Code 的设计原则 + Pi-Agent-Core 的代码组织 | Claude Code 验证了 AsyncGenerator 的背压和返回值优势；Pi 验证了核心循环只需 ~100 行；三者都否定了状态机 |
+| 工具执行管线如何组织？ | **先直接函数调用，后续渐进添加中间件**<br>MVP 用简单的 for 循环 + 直接 call | Pi 用 beforeToolCall/afterToolCall 钩子已足够灵活；Claude Code 的 14 步管线是需求驱动的渐进结果 |
+| 上下文压缩如何实现？ | **延后到 Phase 2，MVP 不实现**<br>循环预留压缩接入点即可 | Claude Code 的 250K API 调用事故说明过早实现压缩可能引入更大问题 |
 
 ## 多智能体支持
 
@@ -132,7 +132,10 @@ graph TB
 | 维度 | OpenClaw | Claude Code | 知行 |
 |------|----------|-------------|------|
 | 核心依赖 | Pi Agent 闭源包 | 闭源产品 | 完全自研，100% 开源 |
-| 可观测性 | 几乎没有 | 内部遥测不开放 | 事件系统一等公民（已实现） |
-| Agent Loop | while(true) 1400+ 行 | query() 生成器 1700+ 行 | 待研究确定（见开放问题） |
-| 工具执行 | 多层 wrapper 嵌套 | 14 步管线大函数 | 待研究确定（见开放问题） |
-| 上下文管理 | 固定压缩逻辑 | 5 层硬编码压缩 | 待研究确定（见开放问题） |
+| 可观测性 | 事件回调 | 内部遥测不开放 | EventBus 一等公民（已实现） |
+| Agent Loop | Pi 内层 ~350 行 + 外层 ~1400 行 | query() 生成器 ~1730 行 | AsyncGenerator + while(true)，核心 ~80 行 + 辅助函数 |
+| 工具执行 | 并行/顺序 + before/after 钩子 | 14 步管线 + 投机执行 | MVP 直接调用，渐进添加管线 |
+| 上下文管理 | Context Engine + 压缩 | 4 层分层压缩 + 断路器 | Phase 2 实现，预留接入点 |
+| 状态管理 | 可变（push to array） | 不可变（每次重建 state） | 不可变（借鉴 Claude Code） |
+| 终止条件 | 隐式（布尔标志） | 10 种 Terminal 枚举 | 判别联合（AgentResult） |
+| 可扩展性 | Hook 驱动（config 注入） | 需改 1730 行核心函数 | 辅助函数独立替换 + 渐进增强 |

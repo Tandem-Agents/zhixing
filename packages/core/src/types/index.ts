@@ -50,7 +50,7 @@ export type {
 export { emptyUsage, mergeUsage } from "./llm.js";
 
 // ─── 事件类型 ───
-export type { AgentEventMap } from "./agent-events.js";
+export type { AgentEventMap, AgentRunEndReason } from "./agent-events.js";
 
 // ─── 错误类型 ───
 export type { AgentErrorType } from "./errors.js";

@@ -11,12 +11,24 @@
  * - context: 上下文管理
  * - error:   错误
  *
- * 扩展方式：向此接口添加新字段即可，EventBus 泛型会自动约束。
+ * 扩展方式：向此类型添加新字段即可，EventBus 泛型会自动约束。
+ *
+ * 使用 type 而非 interface：
+ * TypeScript 的 interface 没有隐式索引签名，无法满足 EventMap (Record<string, unknown>) 约束。
+ * type 别名有隐式索引签名，与泛型约束配合更自然。
+ * 扩展事件时直接修改此定义，或使用交叉类型 AgentEventMap & { ... }。
  */
 
 import type { StreamEvent, StopReason, TokenUsage } from "./llm.js";
 
-export interface AgentEventMap {
+/**
+ * Agent Loop 终止原因。
+ * 与 LLM 的 StopReason 语义不同 —— StopReason 是单次 LLM 调用的停止原因，
+ * AgentRunEndReason 是整个循环的终止原因。
+ */
+export type AgentRunEndReason = "completed" | "max_turns" | "aborted" | "error";
+
+export type AgentEventMap = {
   // ─── Agent 生命周期 ───
 
   "agent:run_start": {
@@ -24,9 +36,10 @@ export interface AgentEventMap {
   };
 
   "agent:run_end": {
-    reason: StopReason;
+    reason: AgentRunEndReason;
     duration: number;
     usage: TokenUsage;
+    error?: string;
   };
 
   // ─── LLM 调用 ───
@@ -102,4 +115,4 @@ export interface AgentEventMap {
     type: string;
     message: string;
   };
-}
+};
