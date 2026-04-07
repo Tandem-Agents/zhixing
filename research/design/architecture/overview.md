@@ -2,12 +2,13 @@
 
 > 整体架构设计，随认知深化而持续演进
 
-## 状态：v0.2 — Agent Loop 设计已确定（2026-04-06）
+## 状态：v0.3 — Provider 层设计已确定（2026-04-07）
 
 ## 架构演进记录
 
 | 版本 | 日期 | 变更说明 | 触发的认知研究 |
 |------|------|---------|--------------|
+| v0.3 | 2026-04-07 | Provider 层详细设计：Protocol 适配器、预设注册表、配置系统、API Key 管理 | [q03-Provider 架构](../../_private/questions/q03-provider-architecture.md) |
 | v0.2 | 2026-04-06 | 确定 Agent Loop 模式、工具管线方案、上下文压缩策略；三个开放问题已决策 | [q02-Agent Loop 设计](../../_private/questions/q02-agent-loop-design.md) |
 | v0.1 | 2026-04-06 | 确立产品定位、四层分层、技术栈、Monorepo 结构 | [q01-核心智能框架](../../_private/questions/q01-core-intelligence-framework.md) |
 
@@ -60,18 +61,22 @@ graph TB
     end
 
     subgraph ProviderLayer ["提供者层 Provider Layer"]
-        LLMAbstraction["LLM Abstraction 统一接口"]
-        AnthropicSDK["Anthropic SDK"]
-        OpenAISDK["OpenAI SDK"]
-        CustomProvider["Custom Providers"]
+        ConfigResolver["Config Resolver<br/>配置解析 + 预设合并"]
+        ProtocolAdapters["Protocol Adapters<br/>协议适配器"]
+        OAICompat["openai-compatible<br/>DeepSeek/Kimi/千问/GLM/硅基..."]
+        AnthropicProto["anthropic-messages<br/>Anthropic Claude"]
+        OpenAISDK["openai SDK"]
+        AnthropicSDK["@anthropic-ai/sdk"]
     end
 
     AppLayer --> OrchLayer
     OrchLayer --> CoreLayer
     CoreLayer --> ProviderLayer
-    LLMAbstraction --> AnthropicSDK
-    LLMAbstraction --> OpenAISDK
-    LLMAbstraction --> CustomProvider
+    ConfigResolver --> ProtocolAdapters
+    ProtocolAdapters --> OAICompat
+    ProtocolAdapters --> AnthropicProto
+    OAICompat --> OpenAISDK
+    AnthropicProto --> AnthropicSDK
 ```
 
 ### 各层职责
@@ -81,7 +86,7 @@ graph TB
 | **应用层** | 面向用户的入口：CLI、Web UI、通道适配 | OpenClaw 的 Channels + Clients |
 | **编排层** | 网关路由、会话管理、容错（重试/Failover/熔断） | OpenClaw 的外层编排循环，我们将其解耦为独立层 |
 | **核心层** | Agent Loop、工具管线、上下文引擎、事件系统 | OpenClaw 的 Pi Agent + Context Engine |
-| **提供者层** | LLM 厂商接入，薄抽象 + 直连官方 SDK | OpenClaw 的 Pi-ai 层 |
+| **提供者层** | Protocol 适配器 + 预设注册表 + 配置解析，直连官方 SDK | OpenClaw 的 Api→Transport 分层，我们简化为 Protocol→SDK |
 
 ## 已确认的设计决策
 
@@ -94,6 +99,9 @@ graph TB
 | 内层推理循环 + 外层容错编排 分离 | OpenClaw 验证了双层关注点分离的必要性 | 已确认 |
 | Typed Event Bus 作为可观测性基础设施 | OpenClaw/Claude Code 缺乏可观测性是已知痛点 | 已确认（已实现） |
 | Monorepo 结构 | 见 [ADR-001](./decisions/001-monorepo-structure.md) | 已确认 |
+| 按 Protocol 而非服务商组织 Provider 适配器 | OpenClaw 验证了协议-传输分层的有效性 | 已确认 |
+| 内置预设注册表 + 用户配置覆盖 | 平衡零配置体验和完全可定制性 | 已确认 |
+| Provider 架构 | 见 [ADR-002](./decisions/002-provider-architecture.md) | 已确认 |
 
 ## 已决策的设计问题
 
@@ -127,6 +135,60 @@ graph TB
 | LLM SDK | @anthropic-ai/sdk + openai | 直连官方 SDK，不走中间层 |
 | Schema 验证 | Zod | 类型安全 + 运行时验证一体 |
 
+## 提供者层详细设计（v0.3 新增）
+
+> 详细调研见 [q03-Provider 架构](../../_private/questions/q03-provider-architecture.md)，决策依据见 [ADR-002](./decisions/002-provider-architecture.md)
+
+### 核心概念
+
+```
+Protocol（协议）────→ 决定用哪个 SDK 适配器
+   ↑
+Provider（服务商）──→ baseUrl + apiKey + 使用哪个 Protocol
+   ↑
+Config（配置）────→ 用户声明要用哪些 Provider
+```
+
+### Protocol 适配器（只需两个）
+
+| Protocol | 覆盖范围 | SDK |
+|----------|---------|-----|
+| `openai-compatible` | DeepSeek、MiniMax、Kimi、千问、GLM、硅基流动、OpenAI、OpenRouter 等 | `openai` |
+| `anthropic-messages` | Anthropic Claude | `@anthropic-ai/sdk` |
+
+### 预设注册表
+
+内置常用服务商的默认配置。新增 OpenAI 兼容服务商只需加一条预设记录，零代码。
+
+内置预设：deepseek、minimax、siliconflow、qwen、kimi、glm、anthropic、openai
+
+### 用户配置
+
+配置文件位置（高优先级覆盖低优先级）：
+
+1. CLI 参数（`--provider`、`--model`）
+2. 环境变量（`ZHIXING_PROVIDER`、`DEEPSEEK_API_KEY` 等）
+3. 项目配置 `./zhixing.config.json`
+4. 用户全局配置 `~/.zhixing/config.json`
+
+三种使用场景：
+
+| 场景 | 用户需要写什么 |
+|------|-------------|
+| 用内置预设 | 只写 `apiKey` |
+| 覆盖预设（代理/聚合平台） | 改 `baseUrl` + `apiKey` |
+| 完全自定义 provider | 写 `baseUrl` + `protocol` + `apiKey` |
+
+### API Key 管理
+
+`apiKey` 字段支持三种格式：`"env:VAR_NAME"` / `"helper:command"` / 明文字符串
+
+解析优先级：配置 apiKey → 预设 envKey 环境变量 → 报错提示
+
+### Quirks 系统
+
+同协议下不同服务商的行为差异（`max_tokens` 字段名、流式 usage 支持等），通过声明式 quirks 处理。预设中包含默认 quirks，自定义 provider 使用最保守的默认值。
+
 ## 与 OpenClaw / Claude Code 的已知差异
 
 | 维度 | OpenClaw | Claude Code | 知行 |
@@ -136,6 +198,9 @@ graph TB
 | Agent Loop | Pi 内层 ~350 行 + 外层 ~1400 行 | query() 生成器 ~1730 行 | AsyncGenerator + while(true)，核心 ~80 行 + 辅助函数 |
 | 工具执行 | 并行/顺序 + before/after 钩子 | 14 步管线 + 投机执行 | MVP 直接调用，渐进添加管线 |
 | 上下文管理 | Context Engine + 压缩 | 4 层分层压缩 + 断路器 | Phase 2 实现，预留接入点 |
+| Provider 接入 | 复杂的 Api→Transport 分层 + Auth Profile 轮换 | 只支持 Anthropic API | Protocol 适配器 + 预设注册表，零代码新增服务商 |
+| 国内服务商 | 部分硬编码支持 | 不支持 | 内置预设全覆盖（DeepSeek/Kimi/千问/GLM 等） |
+| 配置管理 | 散落多文件 + 生成代码 | 三个环境变量（简洁但受限） | JSON 配置 + 环境变量 + CLI 参数 |
 | 状态管理 | 可变（push to array） | 不可变（每次重建 state） | 不可变（借鉴 Claude Code） |
 | 终止条件 | 隐式（布尔标志） | 10 种 Terminal 枚举 | 判别联合（AgentResult） |
 | 可扩展性 | Hook 驱动（config 注入） | 需改 1730 行核心函数 | 辅助函数独立替换 + 渐进增强 |

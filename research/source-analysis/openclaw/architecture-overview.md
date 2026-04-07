@@ -1,6 +1,6 @@
 # OpenClaw — 架构概述
 
-> **分析状态**: ✅ 核心架构已分析（2026-04-05）
+> **分析状态**: ✅ 核心架构 + Provider 层已分析（2026-04-07 更新）
 
 ## 模块定位
 
@@ -127,6 +127,132 @@ graph TB
 - **持久化**：JSONL 格式存储于 `~/.openclaw/agents/<agentId>/sessions/`
 - **Compaction**：长对话自动摘要压缩
 - **记忆引擎**：`packages/memory-host-sdk/` + `extensions/memory-core/`
+
+## 8. LLM Provider/Transport 层
+
+> 2026-04-07 补充分析
+
+### 三层概念模型
+
+OpenClaw 的 LLM 接入不是按"服务商"组织的，而是分三层：
+
+```
+Provider（配置层）→ Api（协议层）→ Transport（实现层）
+```
+
+| 概念 | 含义 | 举例 |
+|------|------|------|
+| **Provider** | 配置中的逻辑 ID，包含 baseUrl + apiKey + models[] | `deepseek`、`moonshot`、`openai` |
+| **Api** | 协议族，决定 HTTP 请求/响应的格式 | `openai-completions`、`openai-responses`、`anthropic-messages`、`google-generative-ai` |
+| **Transport** | 按 Api 分支到具体的流式客户端实现 | `openai-transport-stream.ts`、`anthropic-transport-stream.ts` |
+
+关键：**不是每个服务商一个 transport**。所有 OpenAI 兼容服务商（DeepSeek、Moonshot、DashScope 等）共用同一个 `openai-completions` transport，通过不同的 `baseUrl` 区分。
+
+### Transport 路由
+
+`provider-transport-stream.ts` 按 Api 分支到具体实现：
+
+```typescript
+// src/agents/provider-transport-stream.ts
+function createSupportedTransportStreamFn(api: Api): StreamFn | undefined {
+  switch (api) {
+    case "openai-responses":
+    case "openai-codex-responses":
+      return createOpenAIResponsesTransportStreamFn();
+    case "openai-completions":
+      return createOpenAICompletionsTransportStreamFn();
+    case "anthropic-messages":
+      return createAnthropicMessagesTransportStreamFn();
+    case "google-generative-ai":
+      return createGoogleGenerativeAiTransportStreamFn();
+  }
+}
+```
+
+### Provider 配置结构
+
+```typescript
+// src/config/types.models.ts
+type ModelProviderConfig = {
+  baseUrl: string;
+  apiKey?: SecretInput;
+  auth?: ModelProviderAuthMode;
+  api?: ModelApi;                    // 覆盖协议（否则按 provider 推断）
+  headers?: Record<string, SecretInput>;
+  request?: ConfiguredModelProviderRequest;  // 代理/TLS/超时等
+  models: ModelDefinitionConfig[];
+};
+```
+
+### 兼容层与 Quirks
+
+`openai-completions-compat.ts` 处理同一协议下不同服务商的差异：
+
+- `max_tokens` vs `max_completion_tokens`
+- `thinkingFormat`（openai / openrouter / zai）
+- 是否支持流式 usage、strict mode、developer role 等
+- 按 `endpointClass` / `knownProviderFamily` / `provider` 做条件分支
+
+`provider-attribution.ts` 根据 hostname 归类服务商（含国内厂商）：
+
+```typescript
+const MOONSHOT_NATIVE_BASE_URLS = new Set([
+  "https://api.moonshot.ai/v1",
+  "https://api.moonshot.cn/v1",
+]);
+const MODELSTUDIO_NATIVE_BASE_URLS = new Set([
+  "https://coding-intl.dashscope.aliyuncs.com/v1",
+  "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  // ...
+]);
+```
+
+### API Key 管理
+
+多层解析机制：
+
+1. **配置内联**：`ModelProviderConfig.apiKey`
+2. **环境变量**：每个 provider 有预设的候选变量列表（生成文件 `bundled-provider-auth-env-vars.generated.ts`）
+3. **Auth Profile Store**：持久化的认证配置（`auth-profiles/store.ts`），支持 `api_key` / `token` / `oauth` 类型
+4. **Profile 轮换**：外层循环中 key 失效时切换到下一个 auth profile
+
+```typescript
+// src/agents/model-auth-env.ts
+export function resolveEnvApiKey(provider: string, env = process.env): EnvApiKeyResult | null {
+  const candidates = PROVIDER_ENV_API_KEY_CANDIDATES[normalizeProviderIdForAuth(provider)];
+  for (const envVar of candidates) {
+    const value = env[envVar];
+    if (value) return { envVar, value };
+  }
+  return null;
+}
+```
+
+### 关键入口文件
+
+| 文件 | 职责 |
+|------|------|
+| `src/agents/provider-transport-stream.ts` | 按 Api 选择 transport 实现 |
+| `src/agents/openai-transport-stream.ts` | OpenAI Chat Completions + Responses 流式客户端 |
+| `src/agents/anthropic-transport-stream.ts` | Anthropic Messages 流式客户端 |
+| `src/agents/google-transport-stream.ts` | Google Generative AI 流式客户端 |
+| `src/agents/provider-request-config.ts` | baseUrl / 鉴权 / 代理 / TLS 配置解析 |
+| `src/agents/provider-attribution.ts` | 端点归类、合规 header、能力推断 |
+| `src/agents/openai-completions-compat.ts` | OpenAI 兼容模式 quirks 矩阵 |
+| `src/agents/custom-api-registry.ts` | 向 pi-ai 注册自定义 API 流 |
+| `src/agents/models-config.ts` | 生成/合并 models.json |
+| `src/config/types.models.ts` | Provider/Model 配置类型定义 |
+| `src/agents/model-auth-env.ts` | 环境变量 API Key 解析 |
+| `src/agents/auth-profiles/*.ts` | Auth Profile 持久化与轮换 |
+
+### 设计评价
+
+| 维度 | 评价 |
+|------|------|
+| **协议抽象** | 优秀。Api 概念将"协议"和"服务商"解耦，新增 OpenAI 兼容服务商零代码 |
+| **灵活性** | 高。自定义 baseUrl + 自定义 headers + 自定义 TLS/代理 |
+| **复杂度** | 过高。Auth Profile 轮换、生成的 env var 映射、provider discovery 等对个人部署产品不必要 |
+| **国内服务商** | 有考虑（Moonshot、DashScope），但需要在 `provider-attribution.ts` 硬编码 URL |
 
 ## 技术栈
 

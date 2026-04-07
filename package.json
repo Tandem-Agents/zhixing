@@ -8,7 +8,9 @@
   },
   "packageManager": "pnpm@10.8.0",
   "pnpm": {
-    "onlyBuiltDependencies": ["esbuild"]
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
   },
   "scripts": {
     "build": "pnpm -r run build",
@@ -16,6 +18,10 @@
     "test:watch": "pnpm -r run test:watch",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
-    "clean": "pnpm -r run clean"
+    "clean": "pnpm -r run clean",
+    "playground": "node --env-file=.env --import=tsx/esm playground/chat.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.21.0"
   }
 }

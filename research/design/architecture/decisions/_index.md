@@ -7,6 +7,7 @@
 | # | 标题 | 状态 | 日期 | 关键依据 |
 |---|------|------|------|---------|
 | 001 | [Monorepo 项目结构](001-monorepo-structure.md) | 接受 | 2026-04-06 | OpenClaw 实践 + 业界标准 |
+| 002 | [Provider 层架构](002-provider-architecture.md) | 接受 | 2026-04-07 | OpenClaw + Claude Code 源码分析 |
 
 ## 使用说明
 
