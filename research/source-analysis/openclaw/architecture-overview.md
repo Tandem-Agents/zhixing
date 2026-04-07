@@ -1,6 +1,6 @@
 # OpenClaw — 架构概述
 
-> **分析状态**: ✅ 核心架构 + Provider 层已分析（2026-04-07 更新）
+> **分析状态**: ✅ 核心架构 + Provider 层 + 配置系统已分析（2026-04-07 更新）
 
 ## 模块定位
 
@@ -253,6 +253,88 @@ export function resolveEnvApiKey(provider: string, env = process.env): EnvApiKey
 | **灵活性** | 高。自定义 baseUrl + 自定义 headers + 自定义 TLS/代理 |
 | **复杂度** | 过高。Auth Profile 轮换、生成的 env var 映射、provider discovery 等对个人部署产品不必要 |
 | **国内服务商** | 有考虑（Moonshot、DashScope），但需要在 `provider-attribution.ts` 硬编码 URL |
+
+## 9. 配置系统
+
+> 2026-04-07 补充分析
+
+### 配置文件
+
+- **文件名**: `openclaw.json`（常量 `CONFIG_FILENAME`），支持 JSON5 格式（可写注释）
+- **旧文件名**: `clawdbot.json`（自动迁移）
+- **默认位置**: `~/.openclaw/openclaw.json`
+- **可移动**: 通过 `OPENCLAW_CONFIG_PATH` 或 `OPENCLAW_STATE_DIR` 环境变量
+
+### 路径发现（优先级）
+
+1. `OPENCLAW_CONFIG_PATH` 环境变量（最高，显式指定文件路径）
+2. `OPENCLAW_STATE_DIR/openclaw.json`（状态目录下查找）
+3. `~/.openclaw/openclaw.json`（默认）
+4. `~/.clawdbot/clawdbot.json`（legacy 兼容）
+
+```typescript
+// src/config/paths.ts
+export function resolveConfigPath(
+  env: NodeJS.ProcessEnv = process.env,
+  stateDir: string = resolveStateDir(env),
+): string {
+  const override = env.OPENCLAW_CONFIG_PATH?.trim();
+  if (override) return resolveUserPath(override, env, homedir);
+  // 依次查找 openclaw.json → clawdbot.json
+  const candidates = [
+    path.join(stateDir, CONFIG_FILENAME),
+    ...LEGACY_CONFIG_FILENAMES.map(name => path.join(stateDir, name)),
+  ];
+  return candidates.find(fs.existsSync) ?? path.join(stateDir, CONFIG_FILENAME);
+}
+```
+
+### 首次运行
+
+- **无 init 子命令**，有 `setup` 和 `onboard`（向导）
+- `setup`：检测配置是否存在，不存在则创建最小配置（workspace + gateway mode）
+- `onboard`：完整的引导流程（`wizard/setup.ts` 中多步 `writeConfigFile`）
+- **缺失文件 = 空配置 `{}`**，不会自动创建
+
+### 配置内容（`OpenClawConfig` 类型）
+
+```typescript
+// src/config/types.openclaw.ts — 字段极多
+type OpenClawConfig = {
+  meta?, auth?, acp?, env?, wizard?, diagnostics?, logging?, cli?,
+  update?, browser?, ui?, secrets?, skills?, plugins?, models?,
+  nodeHost?, agents?, tools?, bindings?, broadcast?, audio?, media?,
+  messages?, commands?, approvals?, session?, web?, channels?, cron?,
+  hooks?, discovery?, canvasHost?, talk?, gateway?, memory?, mcp?,
+};
+```
+
+### 模块化配置（`$include`）
+
+支持在主配置中引用其他 JSON/JSON5 文件，deep merge：
+
+```json5
+{
+  "$include": ["./base.json5", "./models.json5"],
+  "gateway": { "mode": "local" }
+}
+```
+
+### 项目级配置
+
+**不存在**。OpenClaw 是「单一活动配置文件路径」模型，没有自动发现当前项目目录下配置的机制。要实现项目级差异需要：
+- 手动设置 `OPENCLAW_CONFIG_PATH` 指向项目内文件
+- 或在主配置中用 `$include` 引入项目片段
+
+### 设计评价
+
+| 维度 | 评价 |
+|------|------|
+| **灵活性** | 高。`OPENCLAW_CONFIG_PATH` + `$include` + JSON5 |
+| **项目级** | ❌ 缺失。单一路径模型不适合多项目场景 |
+| **首次体验** | ⚠️ 需手动运行 setup/onboard |
+| **配置形状** | ❌ 过大。30+ 顶层字段，学习曲线陡峭 |
+| **安全** | ⚠️ `env.vars` 可内联明文密钥 |
 
 ## 技术栈
 

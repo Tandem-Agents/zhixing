@@ -20,5 +20,17 @@ export { ProviderConfigError, resolveFromConfig, resolveProvider } from "./resol
 // 协议适配器
 export { createOpenAICompatibleProvider } from "./adapters/openai-compatible.js";
 
+// 配置加载
+export {
+  getGlobalConfigDir,
+  getGlobalConfigPath,
+  getProjectConfigPath,
+  loadConfig,
+} from "./config-loader.js";
+
 // 一站式工厂
-export { createProvider, createProviderDirect } from "./create-provider.js";
+export {
+  createProvider,
+  createProviderDirect,
+  createProviderFromConfig,
+} from "./create-provider.js";

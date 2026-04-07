@@ -8,6 +8,7 @@
 |---|------|------|------|---------|
 | 001 | [Monorepo 项目结构](001-monorepo-structure.md) | 接受 | 2026-04-06 | OpenClaw 实践 + 业界标准 |
 | 002 | [Provider 层架构](002-provider-architecture.md) | 接受 | 2026-04-07 | OpenClaw + Claude Code 源码分析 |
+| 003 | [配置系统](003-config-system.md) | 接受 | 2026-04-07 | OpenClaw + Claude Code 配置系统对比分析 |
 
 ## 使用说明
 

@@ -5,24 +5,33 @@
  *   1. 复制 .env.example 为 .env 并填入 API Key
  *   2. pnpm playground
  *
- * 可通过环境变量控制行为：
- *   ZHIXING_PROVIDER  — provider ID（默认 siliconflow）
- *   ZHIXING_MODEL     — 模型名称（默认 Pro/MiniMaxAI/MiniMax-M2.5）
- *   ZHIXING_PROMPT    — 用户输入（默认 "你好，请用一句话介绍你自己"）
+ * 配置来源（无需手动传参）：
+ *   - ~/.zhixing/config.json（全局默认，首次自动创建模板）
+ *   - ./zhixing.config.json（项目级覆盖，可选）
+ *   - 环境变量（API Key 等）
+ *
+ * 也可通过环境变量覆盖：
+ *   ZHIXING_PROVIDER  — provider ID
+ *   ZHIXING_MODEL     — 模型名称
+ *   ZHIXING_PROMPT    — 用户输入
  */
 
-import { createProviderDirect } from "@zhixing/providers";
-import { userMessage, extractText } from "@zhixing/core";
-import { drainAgentLoop } from "@zhixing/core/loop";
+import { createProviderFromConfig } from "../packages/providers/src/index.js";
+import { userMessage, extractText } from "../packages/core/src/index.js";
+import { drainAgentLoop } from "../packages/core/src/loop/index.js";
 
-const providerId = process.env["ZHIXING_PROVIDER"] ?? "siliconflow";
-const model = process.env["ZHIXING_MODEL"] ?? "Pro/MiniMaxAI/MiniMax-M2.5";
+// 从配置文件自动加载 provider，零参数
+const { provider, defaultModel, config } = createProviderFromConfig();
+
+// 环境变量可覆盖
+const model = process.env["ZHIXING_MODEL"] ?? defaultModel;
 const prompt = process.env["ZHIXING_PROMPT"] ?? "你好，请用一句话介绍你自己";
 
 console.log("─".repeat(50));
-console.log(`  知行 Playground`);
-console.log(`  Provider: ${providerId}`);
+console.log("  知行 Playground");
+console.log(`  Provider: ${provider.id}`);
 console.log(`  Model:    ${model}`);
+console.log(`  Config:   defaultProvider=${config.defaultProvider ?? "(未设置)"}`);
 console.log(`  Prompt:   ${prompt}`);
 console.log("─".repeat(50));
 console.log();
@@ -30,8 +39,6 @@ console.log();
 // ─── 测试 1: 直接调用 Provider（流式输出）───
 
 console.log("[测试 1] Provider 直接流式调用\n");
-
-const provider = createProviderDirect(providerId);
 
 let fullText = "";
 for await (const event of provider.chat({
@@ -84,5 +91,5 @@ if (result.reason === "completed") {
 }
 
 console.log("\n" + "─".repeat(50));
-console.log("  所有测试通过！Provider 层端到端连通。");
+console.log("  所有测试通过！配置系统 + Provider 层端到端连通。");
 console.log("─".repeat(50));

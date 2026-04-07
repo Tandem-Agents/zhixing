@@ -2,12 +2,13 @@
 
 > 整体架构设计，随认知深化而持续演进
 
-## 状态：v0.3 — Provider 层设计已确定（2026-04-07）
+## 状态：v0.4 — 配置系统设计已确定（2026-04-07）
 
 ## 架构演进记录
 
 | 版本 | 日期 | 变更说明 | 触发的认知研究 |
 |------|------|---------|--------------|
+| v0.4 | 2026-04-07 | 配置系统：多层配置加载、全局/项目/本地三级、首次自动生成 | [q04-配置系统](../../_private/questions/q04-config-system.md) |
 | v0.3 | 2026-04-07 | Provider 层详细设计：Protocol 适配器、预设注册表、配置系统、API Key 管理 | [q03-Provider 架构](../../_private/questions/q03-provider-architecture.md) |
 | v0.2 | 2026-04-06 | 确定 Agent Loop 模式、工具管线方案、上下文压缩策略；三个开放问题已决策 | [q02-Agent Loop 设计](../../_private/questions/q02-agent-loop-design.md) |
 | v0.1 | 2026-04-06 | 确立产品定位、四层分层、技术栈、Monorepo 结构 | [q01-核心智能框架](../../_private/questions/q01-core-intelligence-framework.md) |
@@ -164,13 +165,6 @@ Config（配置）────→ 用户声明要用哪些 Provider
 
 ### 用户配置
 
-配置文件位置（高优先级覆盖低优先级）：
-
-1. CLI 参数（`--provider`、`--model`）
-2. 环境变量（`ZHIXING_PROVIDER`、`DEEPSEEK_API_KEY` 等）
-3. 项目配置 `./zhixing.config.json`
-4. 用户全局配置 `~/.zhixing/config.json`
-
 三种使用场景：
 
 | 场景 | 用户需要写什么 |
@@ -188,6 +182,83 @@ Config（配置）────→ 用户声明要用哪些 Provider
 ### Quirks 系统
 
 同协议下不同服务商的行为差异（`max_tokens` 字段名、流式 usage 支持等），通过声明式 quirks 处理。预设中包含默认 quirks，自定义 provider 使用最保守的默认值。
+
+## 配置系统详细设计（v0.4 新增）
+
+> 详细调研见 [q04-配置系统](../../_private/questions/q04-config-system.md)，决策依据见 [ADR-003](./decisions/003-config-system.md)
+
+### 设计灵感
+
+- **借鉴 Claude Code**：项目共享 + 个人覆盖的分离；`/status` 配置来源追溯
+- **借鉴 OpenClaw**：环境变量覆盖配置路径；`$include` 模块化（未来考虑）
+- **超越两者**：自动生成全局配置模板；仅 3 层（vs OC 的 1 层 / CC 的 5 层）；项目配置放根目录可见
+
+### 配置文件层级（3 层，优先级从高到低）
+
+```
+① 环境变量
+   SILICONFLOW_API_KEY、ZHIXING_CONFIG_PATH 等
+   ↓
+② 项目级（可选）
+   <project>/zhixing.config.json        ← 团队共享，可提交 Git
+   <project>/.zhixing/config.local.json  ← 个人覆盖，自动 gitignore（未来）
+   ↓
+③ 用户全局
+   ~/.zhixing/config.json               ← API Keys、默认 provider、个人偏好
+```
+
+### 合并规则
+
+- 字段级 deep merge，不是文件级替换
+- `providers` 对象按 key 合并
+- 环境变量中的 API Key 优先级最高
+- 缺失文件 = 跳过，不报错
+
+### 配置文件内容
+
+```jsonc
+// ~/.zhixing/config.json
+{
+  "defaultProvider": "siliconflow",
+  "defaultModel": "Pro/MiniMaxAI/MiniMax-M2.5",
+  "providers": {
+    "siliconflow": {
+      "apiKey": "env:SILICONFLOW_API_KEY"
+    }
+  }
+}
+```
+
+```jsonc
+// <project>/zhixing.config.json（可选）
+{
+  "defaultModel": "deepseek-chat",
+  "defaultProvider": "deepseek"
+}
+```
+
+### 首次运行
+
+1. 检测 `~/.zhixing/config.json` 是否存在
+2. 不存在 → 自动创建带注释的模板文件
+3. 检测是否有可用的 API Key（env 或 config）
+4. 有 Key → 正常运行；无 Key → 提示用户配置
+
+### 可移动性
+
+`ZHIXING_CONFIG_PATH` 环境变量覆盖全局配置路径，适配容器/CI/自定义场景。
+
+### 与 OpenClaw / Claude Code 的配置对比
+
+| 维度 | OpenClaw | Claude Code | **知行** |
+|------|----------|-------------|---------|
+| 层级数 | 1 层 | 5 层（含企业托管） | **3 层**（够用不过度） |
+| 项目级 | ✗ 无自动发现 | `.claude/` 隐藏目录 | ✓ `zhixing.config.json` 项目根可见 |
+| 首次体验 | 需手动 setup | 需手动 /config | **自动生成模板** |
+| Key 安全 | Auth Profile 复杂 | apiKeyHelper | `env:VAR` 引用，简洁安全 |
+| 格式 | JSON5（可注释） | JSON（无注释） | JSON（MVP），未来考虑 JSONC |
+| 可移动 | ✓ 环境变量 | ✗ 固定 | ✓ `ZHIXING_CONFIG_PATH` |
+| 配置追溯 | ✗ | ✓ /status | 未来 `zhixing config show` |
 
 ## 与 OpenClaw / Claude Code 的已知差异
 

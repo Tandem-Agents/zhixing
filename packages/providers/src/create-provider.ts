@@ -3,10 +3,16 @@
  *
  * 将配置解析 + 协议适配器选择合二为一。
  * 用户只需传入配置，即可获得 LLMProvider 实例。
+ *
+ * 三种创建方式（从简到完整）：
+ * - createProviderFromConfig() — 自动从配置文件加载，零参数
+ * - createProvider()           — 传入显式 config 对象
+ * - createProviderDirect()     — 指定 provider ID + 配置
  */
 
 import type { LLMProvider } from "@zhixing/core";
 import { createOpenAICompatibleProvider } from "./adapters/openai-compatible.js";
+import { loadConfig } from "./config-loader.js";
 import { resolveFromConfig, resolveProvider } from "./resolve.js";
 import type { ProviderConfig, ResolvedProvider, ZhixingConfig } from "./types.js";
 
@@ -66,4 +72,33 @@ export function createProviderDirect(
 ): LLMProvider {
   const resolved = resolveProvider(providerId, config, env);
   return createFromResolved(resolved);
+}
+
+/**
+ * 从配置文件自动加载 Provider。零参数即可工作。
+ *
+ * 加载顺序：全局配置 → 项目配置 → 环境变量
+ * 返回同时包含 provider 实例和解析后的 defaultModel。
+ *
+ * @example
+ * ```ts
+ * const { provider, defaultModel } = createProviderFromConfig();
+ * for await (const event of provider.chat({
+ *   model: defaultModel,
+ *   messages: [userMessage("你好")],
+ * })) { ... }
+ * ```
+ */
+export function createProviderFromConfig(options: {
+  providerId?: string;
+  cwd?: string;
+  env?: Record<string, string | undefined>;
+} = {}): { provider: LLMProvider; defaultModel: string; config: ZhixingConfig } {
+  const env = options.env ?? process.env;
+  const config = loadConfig({ cwd: options.cwd, env });
+  const resolved = resolveFromConfig(config, options.providerId, env);
+  const provider = createFromResolved(resolved);
+  const defaultModel = resolved.defaultModel ?? config.defaultModel ?? "unknown";
+
+  return { provider, defaultModel, config };
 }
