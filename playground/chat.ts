@@ -1,5 +1,5 @@
 /**
- * 知行 Playground — 快速验证 LLM 连通性
+ * 知行 Playground — 快速验证 LLM + 工具端到端连通性
  *
  * 使用方式：
  *   1. 复制 .env.example 为 .env 并填入 API Key
@@ -19,6 +19,7 @@
 import { createProviderFromConfig } from "../packages/providers/src/index.js";
 import { userMessage, extractText } from "../packages/core/src/index.js";
 import { drainAgentLoop } from "../packages/core/src/loop/index.js";
+import { createReadTool, createWriteTool, createBashTool } from "../packages/tools-builtin/src/index.js";
 
 // 从配置文件自动加载 provider，零参数
 const { provider, defaultModel, config } = createProviderFromConfig();
@@ -63,33 +64,81 @@ for await (const event of provider.chat({
   }
 }
 
-// ─── 测试 2: 通过 Agent Loop 调用 ───
+// ─── 测试 2: 通过 Agent Loop 调用（无工具）───
 
 console.log("\n" + "─".repeat(50));
-console.log("[测试 2] Agent Loop 端到端调用\n");
+console.log("[测试 2] Agent Loop 端到端调用（无工具）\n");
 
-const { result, yields } = await drainAgentLoop({
-  provider,
-  model,
-  messages: [userMessage("天空是什么颜色？请用一个字回答。")],
-  maxTurns: 1,
-  systemPrompt: "你是一个极简助手，用最少的字回答问题。",
-});
+{
+  const { result, yields } = await drainAgentLoop({
+    provider,
+    model,
+    messages: [userMessage("天空是什么颜色？请用一个字回答。")],
+    maxTurns: 1,
+    systemPrompt: "你是一个极简助手，用最少的字回答问题。",
+  });
 
-const textDeltas = yields.filter((y) => y.type === "text_delta");
-process.stdout.write("  ▸ ");
-for (const td of textDeltas) {
-  if (td.type === "text_delta") process.stdout.write(td.text);
+  const textDeltas = yields.filter((y) => y.type === "text_delta");
+  process.stdout.write("  ▸ ");
+  for (const td of textDeltas) {
+    if (td.type === "text_delta") process.stdout.write(td.text);
+  }
+  console.log();
+
+  if (result.reason === "completed") {
+    const answer = extractText(result.message);
+    console.log(`\n  ✓ Agent Loop 完成 | 回答: "${answer}" | 输入 token: ${result.usage.inputTokens} | 输出 token: ${result.usage.outputTokens}`);
+  } else {
+    console.log(`\n  ⚠ Agent Loop 结束 | 原因: ${result.reason}`);
+  }
 }
-console.log();
 
-if (result.reason === "completed") {
-  const answer = extractText(result.message);
-  console.log(`\n  ✓ Agent Loop 完成 | 回答: "${answer}" | 输入 token: ${result.usage.inputTokens} | 输出 token: ${result.usage.outputTokens}`);
-} else {
-  console.log(`\n  ⚠ Agent Loop 结束 | 原因: ${result.reason}`);
+// ─── 测试 3: Agent Loop + 工具调用 ───
+
+console.log("\n" + "─".repeat(50));
+console.log("[测试 3] Agent Loop + 内置工具\n");
+
+{
+  const tools = [createReadTool(), createWriteTool(), createBashTool()];
+  console.log(`  已注册工具: ${tools.map(t => t.name).join(", ")}\n`);
+
+  const { result, yields } = await drainAgentLoop({
+    provider,
+    model,
+    messages: [userMessage("请读取当前目录下的 package.json 文件，告诉我项目名称和版本号。")],
+    tools,
+    maxTurns: 3,
+    workingDirectory: process.cwd(),
+    systemPrompt: "你是一个编程助手。使用提供的工具来完成任务。",
+  });
+
+  // 输出事件流摘要
+  for (const y of yields) {
+    switch (y.type) {
+      case "text_delta":
+        process.stdout.write(y.text);
+        break;
+      case "tool_start":
+        console.log(`\n  🔧 [tool:${y.name}] 开始执行...`);
+        break;
+      case "tool_end":
+        console.log(`  🔧 [tool:${y.name}] 完成 (${y.duration}ms) | 结果前100字: ${y.result.content.slice(0, 100).replace(/\n/g, "\\n")}...`);
+        break;
+      case "turn_complete":
+        console.log(`\n  ↻ 第 ${y.turnCount} 轮完成`);
+        break;
+    }
+  }
+
+  console.log();
+  if (result.reason === "completed") {
+    const answer = extractText(result.message);
+    console.log(`\n  ✓ Agent + Tools 完成 | 输入 token: ${result.usage.inputTokens} | 输出 token: ${result.usage.outputTokens}`);
+  } else {
+    console.log(`\n  ⚠ Agent + Tools 结束 | 原因: ${result.reason}`);
+  }
 }
 
 console.log("\n" + "─".repeat(50));
-console.log("  所有测试通过！配置系统 + Provider 层端到端连通。");
+console.log("  所有测试通过！Provider + Agent Loop + Tools 端到端连通。");
 console.log("─".repeat(50));

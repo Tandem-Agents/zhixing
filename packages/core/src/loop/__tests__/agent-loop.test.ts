@@ -637,6 +637,102 @@ describe("Agent Loop", () => {
   });
 
   // ──────────────────────────────────────
+  // 结果截断（maxResultChars）
+  // ──────────────────────────────────────
+
+  describe("maxResultChars 截断", () => {
+    it("工具结果超出 maxResultChars 时自动截断", async () => {
+      const provider = new MockLLMProvider([
+        { toolCalls: [{ id: "tc1", name: "big_output", input: {} }] },
+        { text: "OK" },
+      ]);
+
+      const bigTool: ToolDefinition = {
+        name: "big_output",
+        description: "returns a huge result",
+        inputSchema: { type: "object" as const },
+        maxResultChars: 50,
+        async call() {
+          return { content: "x".repeat(200) };
+        },
+      };
+
+      const { yields } = await drainAgentLoop(
+        baseParams(provider, { tools: [bigTool] }),
+      );
+
+      const toolEnds = filterYields(yields, "tool_end");
+      expect(toolEnds).toHaveLength(1);
+      if (toolEnds[0].type === "tool_end") {
+        expect(toolEnds[0].result.content).toContain("[truncated:");
+        expect(toolEnds[0].result.content.length).toBeLessThan(200);
+      }
+
+      // 截断后的结果也传递给了 LLM
+      const secondCall = provider.calls[1];
+      const toolResultMsg = secondCall.messages[secondCall.messages.length - 1];
+      const toolResult = toolResultMsg.content[0];
+      if (toolResult.type === "tool_result") {
+        expect(toolResult.content).toContain("[truncated:");
+      }
+    });
+
+    it("未超出 maxResultChars 时不截断", async () => {
+      const provider = new MockLLMProvider([
+        { toolCalls: [{ id: "tc1", name: "small", input: {} }] },
+        { text: "OK" },
+      ]);
+
+      const smallTool: ToolDefinition = {
+        name: "small",
+        description: "returns a small result",
+        inputSchema: { type: "object" as const },
+        maxResultChars: 1000,
+        async call() {
+          return { content: "short result" };
+        },
+      };
+
+      const { yields } = await drainAgentLoop(
+        baseParams(provider, { tools: [smallTool] }),
+      );
+
+      const toolEnds = filterYields(yields, "tool_end");
+      if (toolEnds[0].type === "tool_end") {
+        expect(toolEnds[0].result.content).toBe("short result");
+      }
+    });
+
+    it("错误结果不截断", async () => {
+      const provider = new MockLLMProvider([
+        { toolCalls: [{ id: "tc1", name: "err_tool", input: {} }] },
+        { text: "OK" },
+      ]);
+
+      const errTool: ToolDefinition = {
+        name: "err_tool",
+        description: "returns an error",
+        inputSchema: { type: "object" as const },
+        maxResultChars: 10,
+        async call() {
+          return { content: "a very long error message that exceeds the limit", isError: true };
+        },
+      };
+
+      const { yields } = await drainAgentLoop(
+        baseParams(provider, { tools: [errTool] }),
+      );
+
+      const toolEnds = filterYields(yields, "tool_end");
+      if (toolEnds[0].type === "tool_end") {
+        // 错误消息完整保留，不被截断
+        expect(toolEnds[0].result.content).not.toContain("[truncated:");
+        expect(toolEnds[0].result.content).toContain("very long error");
+      }
+    });
+  });
+
+  // ──────────────────────────────────────
   // drainAgentLoop 便捷函数
   // ──────────────────────────────────────
 

@@ -7,11 +7,13 @@
  * 3. 通过 EventBus 发射工具执行事件
  * 4. 错误隔离：单个工具失败不终止循环，错误作为 tool_result 返回给 LLM
  *
+ * 已实现的管线步骤：
+ * - 结果截断（maxResultChars）—— 防止单个工具输出撑爆上下文
+ *
  * 未来扩展点（不修改当前代码）：
  * - 并行执行 isParallelSafe 的工具
  * - 权限检查中间件
  * - 执行超时
- * - 结果截断（maxResultChars）
  */
 
 import type { IEventBus } from "../events/types.js";
@@ -88,8 +90,11 @@ export async function* executeToolCalls(
     };
 
     try {
-      const toolResult = await deps.executeTool(tool, call.input, context);
+      const rawResult = await deps.executeTool(tool, call.input, context);
       const duration = Date.now() - startTime;
+
+      // 管线步骤：结果截断
+      const toolResult = applyMaxResultChars(rawResult, tool.maxResultChars);
 
       results.push({
         type: "tool_result",
@@ -134,4 +139,29 @@ export async function* executeToolCalls(
   }
 
   return results;
+}
+
+// ─── 管线工具函数 ───
+
+import type { ToolResult } from "../types/tools.js";
+
+/**
+ * 对工具结果应用 maxResultChars 截断。
+ * 错误结果不截断（错误信息通常很短且对调试至关重要）。
+ */
+function applyMaxResultChars(
+  result: ToolResult,
+  maxChars: number | undefined,
+): ToolResult {
+  if (!maxChars || result.isError || result.content.length <= maxChars) {
+    return result;
+  }
+
+  const truncated = result.content.slice(0, maxChars);
+  const omitted = result.content.length - maxChars;
+
+  return {
+    ...result,
+    content: `${truncated}\n\n[truncated: showing first ${maxChars.toLocaleString()} of ${result.content.length.toLocaleString()} chars, ${omitted.toLocaleString()} chars omitted]`,
+  };
 }
