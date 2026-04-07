@@ -2,12 +2,13 @@
 
 > 整体架构设计，随认知深化而持续演进
 
-## 状态：v0.4 — 配置系统设计已确定（2026-04-07）
+## 状态：v0.5 — 工具系统架构已确定（2026-04-07）
 
 ## 架构演进记录
 
 | 版本 | 日期 | 变更说明 | 触发的认知研究 |
 |------|------|---------|--------------|
+| v0.5 | 2026-04-07 | 工具系统：能力安全模型、隔离级别光谱、渐进信任、执行管线、协议/实现分离 | [q05-工具系统安全](../../_private/questions/q05-tool-system-security.md) |
 | v0.4 | 2026-04-07 | 配置系统：多层配置加载、全局/项目/本地三级、首次自动生成 | [q04-配置系统](../../_private/questions/q04-config-system.md) |
 | v0.3 | 2026-04-07 | Provider 层详细设计：Protocol 适配器、预设注册表、配置系统、API Key 管理 | [q03-Provider 架构](../../_private/questions/q03-provider-architecture.md) |
 | v0.2 | 2026-04-06 | 确定 Agent Loop 模式、工具管线方案、上下文压缩策略；三个开放问题已决策 | [q02-Agent Loop 设计](../../_private/questions/q02-agent-loop-design.md) |
@@ -103,6 +104,10 @@ graph TB
 | 按 Protocol 而非服务商组织 Provider 适配器 | OpenClaw 验证了协议-传输分层的有效性 | 已确认 |
 | 内置预设注册表 + 用户配置覆盖 | 平衡零配置体验和完全可定制性 | 已确认 |
 | Provider 架构 | 见 [ADR-002](./decisions/002-provider-architecture.md) | 已确认 |
+| 能力安全模型（Capability-Based Security） | 比工具级 allow/deny 粒度更高，子 Agent 自动收窄 | 已确认 |
+| 隔离级别光谱（6 级，trust→remote） | 工具代码与隔离无关，安全是外部包装 | 已确认 |
+| 渐进式信任（per-operation, per-project） | 解决权限疲劳 vs 安全的矛盾 | 已确认 |
+| 工具系统架构 | 见 [ADR-004](./decisions/004-tool-system-architecture.md) | 已确认 |
 
 ## 已决策的设计问题
 
@@ -260,6 +265,86 @@ Config（配置）────→ 用户声明要用哪些 Provider
 | 可移动 | ✓ 环境变量 | ✗ 固定 | ✓ `ZHIXING_CONFIG_PATH` |
 | 配置追溯 | ✗ | ✓ /status | 未来 `zhixing config show` |
 
+## 工具系统详细设计（v0.5 新增）
+
+> 详细方案见 [工具系统架构方案](../../_private/notes/tool-system-design.md)，决策依据见 [ADR-004](./decisions/004-tool-system-architecture.md)，前置研究见 [q05-工具系统安全](../../_private/questions/q05-tool-system-security.md)
+
+### 设计灵感与超越
+
+- **借鉴 Claude Code**：fail-closed 默认值、bypass-immune 保护区、结果大小管理
+- **借鉴 OpenClaw**：容器隔离思路、工具分类管理、插件工具注册
+- **超越两者**：能力授权取代工具授权、隔离光谱取代二选一、渐进信任取代静态模式
+
+### 三个核心创新
+
+#### 1. 能力安全模型（Capability-Based Security）
+
+不问"能不能用 Bash"，问"有没有 `process.exec` 能力、范围是什么"。
+
+```
+工具声明需要: [process.exec:full, fs.read:./**]
+运行时上下文:  [process.exec:safe, fs.read:./src/**]
+判定: 工具可用，但能力被收窄 → 只能安全执行、只能读 ./src/
+```
+
+- 比 OpenClaw 的 allow/deny 粒度更高——同一工具在不同上下文获得不同权限
+- 子 Agent 自动继承父级能力的子集，零配置
+- Phase 2 实现。MVP 阶段直接执行，不做能力检查
+
+#### 2. 隔离级别光谱
+
+```
+L0 trust     → 直接执行（开发调试）
+L1 confirm   → 危险操作用户确认（默认）
+L2 analyze   → 命令分析 + 确认
+L3 process   → 进程级沙箱（seatbelt/bwrap）
+L4 container → Docker 容器
+L5 remote    → 远程执行环境
+```
+
+关键约束：**工具代码与隔离级别无关。** 隔离是执行管线的外部包装。OpenClaw 为每个工具单独实现沙箱版（`createSandboxedReadTool`）的做法被消除。
+
+Phase 3 实现完整光谱。MVP 固定 L1。
+
+#### 3. 渐进式信任
+
+- 首次操作需确认，多次安全执行后同项目内自动批准
+- 不同项目独立信任状态
+- Bypass-immune 操作永远不自动批准（`.git/` 写入、项目外操作、特权命令）
+
+Phase 2 实现。解决 Claude Code 的"频繁弹窗 vs YOLO auto"两难。
+
+### 工具执行管线（5 阶段 15 步）
+
+```
+验证：工具查找 → 中止检查 → Schema 验证 → 语义验证
+授权：能力检查 → 信任查询 → 用户确认
+守卫：bypass-immune → 命令分析 → 资源限制
+执行：环境选择 → tool.call()
+处理：结果截断 → 信任更新 → 审计日志
+```
+
+渐进实现：
+- Phase 1（MVP）：Schema 验证 + 直接执行 + 结果截断
+- Phase 2：+ 能力检查 + bypass-immune + 确认
+- Phase 3：+ 命令分析 + 隔离环境 + 审计
+
+### 工具统一注册
+
+四类工具统一注册到 `ToolRegistry`：
+
+| 类别 | 来源 | 注册方式 |
+|------|------|---------|
+| 内置工具 | `@zhixing/tools-builtin` | 启动时自动注册 |
+| 插件工具 | npm 包 / 本地文件 | 配置声明，启动时加载 |
+| MCP 工具 | MCP 服务器 | `registerMcp()` 自动发现 |
+| 动态工具 | Agent 运行时创建 | `register()` |
+
+### 结果管理
+
+从 Phase 1 开始：`perToolMaxChars`（默认 50,000）+ 截断提示。
+Phase 2+：会话级聚合预算 + summarize/disk 溢出策略。
+
 ## 与 OpenClaw / Claude Code 的已知差异
 
 | 维度 | OpenClaw | Claude Code | 知行 |
@@ -267,11 +352,17 @@ Config（配置）────→ 用户声明要用哪些 Provider
 | 核心依赖 | Pi Agent 闭源包 | 闭源产品 | 完全自研，100% 开源 |
 | 可观测性 | 事件回调 | 内部遥测不开放 | EventBus 一等公民（已实现） |
 | Agent Loop | Pi 内层 ~350 行 + 外层 ~1400 行 | query() 生成器 ~1730 行 | AsyncGenerator + while(true)，核心 ~80 行 + 辅助函数 |
-| 工具执行 | 并行/顺序 + before/after 钩子 | 14 步管线 + 投机执行 | MVP 直接调用，渐进添加管线 |
+| 工具安全模型 | 工具级 allow/deny + 容器（可选） | 7 层权限 + ~7000 行 Bash AST | **能力授权** + 隔离光谱 + 渐进信任 |
+| 工具隔离 | Docker or 裸奔 | seatbelt/bwrap or 无 | **6 级光谱**，逐级降级，全平台 |
+| 权限疲劳 | 无确认机制 | 频繁弹窗 / YOLO auto | **渐进信任**——越用越少问 |
+| 工具/实现耦合 | 每个工具单独实现沙箱版 | 工具绑定执行环境 | **协议/实现分离** |
+| 不可绕过保护 | 无 | 硬编码在大函数里 | **声明式规则**，可审计 |
+| 工具注册 | 4 种来源手动合并 | 内置 + MCP 分段 | **统一 Registry** |
+| 结果管理 | 无限制 | per-tool 限制 + 落盘 | **分层预算** + 溢出策略 |
 | 上下文管理 | Context Engine + 压缩 | 4 层分层压缩 + 断路器 | Phase 2 实现，预留接入点 |
-| Provider 接入 | 复杂的 Api→Transport 分层 + Auth Profile 轮换 | 只支持 Anthropic API | Protocol 适配器 + 预设注册表，零代码新增服务商 |
-| 国内服务商 | 部分硬编码支持 | 不支持 | 内置预设全覆盖（DeepSeek/Kimi/千问/GLM 等） |
-| 配置管理 | 散落多文件 + 生成代码 | 三个环境变量（简洁但受限） | JSON 配置 + 环境变量 + CLI 参数 |
+| Provider 接入 | 复杂的 Api→Transport + Auth Profile | 只支持 Anthropic API | Protocol 适配器 + 预设注册表 |
+| 国内服务商 | 部分硬编码支持 | 不支持 | 内置预设全覆盖 |
+| 配置管理 | 散落多文件 + 生成代码 | 三个环境变量 | JSON 配置 + 环境变量 |
 | 状态管理 | 可变（push to array） | 不可变（每次重建 state） | 不可变（借鉴 Claude Code） |
 | 终止条件 | 隐式（布尔标志） | 10 种 Terminal 枚举 | 判别联合（AgentResult） |
 | 可扩展性 | Hook 驱动（config 注入） | 需改 1730 行核心函数 | 辅助函数独立替换 + 渐进增强 |

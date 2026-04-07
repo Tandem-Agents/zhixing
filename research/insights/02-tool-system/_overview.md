@@ -10,19 +10,28 @@
 
 | # | 问题 | 文件 | 状态 |
 |---|------|------|------|
-| 1 | 工具是如何定义和注册的？工具描述的 Schema 是什么？ | — | 🔲 待研究 |
-| 2 | 工具是如何传递给 LLM 的？描述格式和策略？ | — | 🔲 待研究 |
-| 3 | 工具执行的沙箱化是如何实现的？ | — | 🔲 待研究 |
-| 4 | 工具执行结果如何序列化并返回给 LLM？ | — | 🔲 待研究 |
-| 5 | 内置工具 vs 插件工具 vs MCP 工具的区别？ | — | 🔲 待研究 |
+| 1 | 工具是如何定义和注册的？工具描述的 Schema 是什么？ | — | ✅ 已研究 |
+| 2 | 工具是如何传递给 LLM 的？描述格式和策略？ | — | ✅ 已研究 |
+| 3 | 工具执行的沙箱化是如何实现的？ | [q05](../../_private/questions/q05-tool-system-security.md) | ✅ 已研究 |
+| 4 | 工具执行结果如何序列化并返回给 LLM？ | — | ✅ 已研究 |
+| 5 | 内置工具 vs 插件工具 vs MCP 工具的区别？ | [q05](../../_private/questions/q05-tool-system-security.md) | ✅ 已研究 |
 
-## 对应 OpenClaw 源码
+## 核心发现
 
-- `src/commands/` — 命令/工具定义与执行
-- `src/process/` — 进程管理与执行隔离
-- `src/plugins/` — 插件系统的工具注册
-- `src/mcp/` — MCP 协议工具集成
+- OpenClaw 工具来自四个来源（Pi 内置 / OpenClaw 核心 / 插件 / MCP），运行时合并后经多层策略管道过滤
+- Claude Code 用 14 步 `checkPermissionsAndCallTool()` 管线处理每次工具调用
+- 两者都采用 fail-closed 默认值——未声明安全属性的工具按最危险处理
+- 工具结果管理是必须的——不做大小限制，一次 `cat` 大文件就能撑爆上下文
 
-## 建议研究顺序
+## 知行设计决策
 
-先理解内置工具的完整流程（注册 → 描述 → 执行 → 结果），再扩展到插件工具和 MCP 工具。
+- 统一 `ToolRegistry` 管理四类工具（内置/插件/MCP/动态）
+- 5 阶段 15 步中间件管线，渐进实现
+- 协议/实现分离——工具定义与执行环境解耦
+- 结果分层预算（per-tool + session 级）
+- 详见 [ADR-004](../../design/architecture/decisions/004-tool-system-architecture.md)
+
+## 对应源码分析
+
+- OpenClaw: `src/agents/pi-tools.ts`, `src/agents/openclaw-tools.ts`, `src/agents/sandbox/`
+- Claude Code: `checkPermissionsAndCallTool()`, `buildTool()`, `StreamingToolExecutor`
