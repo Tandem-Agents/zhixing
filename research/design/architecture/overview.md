@@ -2,12 +2,13 @@
 
 > 整体架构设计，随认知深化而持续演进
 
-## 状态：v0.5 — 工具系统架构已确定（2026-04-07）
+## 状态：v0.6 — CLI 架构已确定（2026-04-07）
 
 ## 架构演进记录
 
 | 版本 | 日期 | 变更说明 | 触发的认知研究 |
 |------|------|---------|--------------|
+| v0.6 | 2026-04-07 | CLI 架构：渐进式三阶段演进、单体+预留 Gateway、MVP 终端方案、系统提示策略、会话管理、命令体系 | [q06-CLI 架构](../../_private/questions/q06-cli-architecture.md) |
 | v0.5 | 2026-04-07 | 工具系统：能力安全模型、隔离级别光谱、渐进信任、执行管线、协议/实现分离 | [q05-工具系统安全](../../_private/questions/q05-tool-system-security.md) |
 | v0.4 | 2026-04-07 | 配置系统：多层配置加载、全局/项目/本地三级、首次自动生成 | [q04-配置系统](../../_private/questions/q04-config-system.md) |
 | v0.3 | 2026-04-07 | Provider 层详细设计：Protocol 适配器、预设注册表、配置系统、API Key 管理 | [q03-Provider 架构](../../_private/questions/q03-provider-architecture.md) |
@@ -108,6 +109,12 @@ graph TB
 | 隔离级别光谱（6 级，trust→remote） | 工具代码与隔离无关，安全是外部包装 | 已确认 |
 | 渐进式信任（per-operation, per-project） | 解决权限疲劳 vs 安全的矛盾 | 已确认 |
 | 工具系统架构 | 见 [ADR-004](./decisions/004-tool-system-architecture.md) | 已确认 |
+| 渐进式 CLI 架构（readline→Ink 三阶段） | OpenClaw pi-tui 闭源、Claude Code Fork Ink 工程量过大 | 已确认 |
+| 单体 CLI + 预留 Gateway 接口 | 零依赖启动优先，EventBus 天然桥接 WebSocket | 已确认 |
+| Commander.js 命令框架 | 两个顶级产品都选了它，行业标准 | 已确认 |
+| 系统提示 static/dynamic 分离 | Claude Code 验证了 prompt cache 优化的价值 | 已确认 |
+| 本地 JSONL 会话持久化 | 同 Claude Code，隐私好、离线可用 | 已确认 |
+| CLI 架构 | 见 [ADR-005](./decisions/005-cli-architecture.md) | 已确认 |
 
 ## 已决策的设计问题
 
@@ -345,6 +352,71 @@ Phase 2 实现。解决 Claude Code 的"频繁弹窗 vs YOLO auto"两难。
 从 Phase 1 开始：`perToolMaxChars`（默认 50,000）+ 截断提示。
 Phase 2+：会话级聚合预算 + summarize/disk 溢出策略。
 
+## CLI 架构详细设计（v0.6 新增）
+
+> 详细调研见 [q06-CLI 架构](../../_private/questions/q06-cli-architecture.md)，决策依据见 [ADR-005](./decisions/005-cli-architecture.md)
+
+### 设计灵感与超越
+
+- **借鉴 Claude Code**：单体零依赖启动、JSONL 会话持久化、system prompt 缓存优化策略
+- **借鉴 OpenClaw**：主题系统（深色/浅色自动检测）、工具执行三态视觉反馈
+- **超越两者**：渐进式 UI 演进（不被框架锁定）、EventBus 驱动的实时可观测仪表盘、MVP 500 行以内
+
+### 三阶段 UI 演进
+
+| 阶段 | 技术方案 | 目标 |
+|------|---------|------|
+| Phase 1（MVP） | readline + chalk + marked-terminal + ora | 验证核心循环端到端可用 |
+| Phase 2 | 引入 Ink（npm 原版） | 支持复杂布局、权限对话框、实时仪表盘 |
+| Phase 3 | 渲染热路径优化（按需） | Claude Code 级别的渲染性能 |
+
+### MVP 命令体系
+
+```bash
+zhixing                     # 交互模式（REPL）
+zhixing -p "prompt"         # 单次模式
+zhixing config              # 配置管理
+```
+
+REPL 斜杠命令（MVP 6 个）：/help, /clear, /model, /status, /config, /exit
+
+### 系统提示策略
+
+```
+System Prompt（静态，跨用户可缓存）：
+  → 角色定义 + 行为规范 + 安全约束
+
+消息注入（动态，每次重建）：
+  → 工作目录上下文
+  → AGENTS.md / RULES 文件
+  → 用户偏好
+```
+
+MVP 只实现静态 system prompt。动态注入 Phase 2。
+
+### 差异化创新：EventBus 驱动的可观测性
+
+利用 EventBus 一等公民地位，CLI 通过 `eventBus.onAny()` 实时显示：
+- 模型 / Token 用量 / 轮次 / 耗时
+- 工具执行状态和时长
+- 上下文压缩触发情况（Phase 2）
+
+这是 OpenClaw 和 Claude Code 都没有提供的用户可见可观测性。
+
+### 与 OpenClaw / Claude Code 的 CLI 对比
+
+| 维度 | OpenClaw | Claude Code | **知行** |
+|------|----------|-------------|---------|
+| 架构范式 | 客户端-网关分离 | 单体 CLI | **单体 + 预留 Gateway** |
+| 终端 UI | pi-tui（闭源） | 深度 Fork Ink | **readline→Ink 渐进演进** |
+| 命令框架 | Commander.js | Commander.js | Commander.js |
+| 渲染复杂度 | 中等 | 极高（游戏引擎级） | **最小可用→按需演进** |
+| 会话存储 | 服务端（Gateway） | 本地 JSONL | **本地 JSONL** |
+| 系统提示 | Bootstrap 文件体系 | static/dynamic 分离 | **static/dynamic 分离** |
+| 斜杠命令 | 23 个 | 100+ 个 | **6 个（MVP）→ 渐进扩展** |
+| 运行时可观测 | 无 | 无 | **EventBus 实时状态** |
+| MVP 代码量 | ~5000 行（TUI） | ~10000 行（REPL+渲染） | **~500 行** |
+
 ## 与 OpenClaw / Claude Code 的已知差异
 
 | 维度 | OpenClaw | Claude Code | 知行 |
@@ -366,3 +438,6 @@ Phase 2+：会话级聚合预算 + summarize/disk 溢出策略。
 | 状态管理 | 可变（push to array） | 不可变（每次重建 state） | 不可变（借鉴 Claude Code） |
 | 终止条件 | 隐式（布尔标志） | 10 种 Terminal 枚举 | 判别联合（AgentResult） |
 | 可扩展性 | Hook 驱动（config 注入） | 需改 1730 行核心函数 | 辅助函数独立替换 + 渐进增强 |
+| CLI 架构 | 客户端-网关 + 闭源 pi-tui | 单体 + 深度 Fork Ink | 单体 + readline→Ink 渐进演进 |
+| CLI 可观测性 | 无 | 无 | EventBus 驱动的实时状态面板 |
+| 系统提示缓存 | 不明确 | static/dynamic 分离优化 | 同 Claude Code，缓存优先 |

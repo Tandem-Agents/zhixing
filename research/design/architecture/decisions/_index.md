@@ -10,6 +10,7 @@
 | 002 | [Provider 层架构](002-provider-architecture.md) | 接受 | 2026-04-07 | OpenClaw + Claude Code 源码分析 |
 | 003 | [配置系统](003-config-system.md) | 接受 | 2026-04-07 | OpenClaw + Claude Code 配置系统对比分析 |
 | 004 | [工具系统架构](004-tool-system-architecture.md) | 接受 | 2026-04-07 | OpenClaw + Claude Code 工具系统深度分析 |
+| 005 | [CLI 架构](005-cli-architecture.md) | 接受 | 2026-04-07 | OpenClaw + Claude Code CLI 架构深度对比 |
 
 ## 使用说明
 
