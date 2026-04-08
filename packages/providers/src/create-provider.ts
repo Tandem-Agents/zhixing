@@ -11,6 +11,7 @@
  */
 
 import type { LLMProvider } from "@zhixing/core";
+import { createAnthropicProvider } from "./adapters/anthropic-messages.js";
 import { createOpenAICompatibleProvider } from "./adapters/openai-compatible.js";
 import { loadConfig } from "./config-loader.js";
 import { resolveFromConfig, resolveProvider } from "./resolve.js";
@@ -24,10 +25,7 @@ function createFromResolved(resolved: ResolvedProvider): LLMProvider {
     case "openai-compatible":
       return createOpenAICompatibleProvider(resolved);
     case "anthropic-messages":
-      throw new Error(
-        `Protocol "anthropic-messages" 尚未实现。` +
-          `请使用 "openai-compatible" 协议或等待后续版本。`,
-      );
+      return createAnthropicProvider(resolved);
     default:
       throw new Error(`未知的 protocol: ${resolved.protocol as string}`);
   }
