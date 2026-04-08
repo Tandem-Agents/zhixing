@@ -5,12 +5,17 @@ import type { ResolvedProvider } from "../types.js";
 import { DEFAULT_QUIRKS } from "../types.js";
 import { createOpenAICompatibleProvider } from "../adapters/openai-compatible.js";
 
-// mock OpenAI SDK
-vi.mock("openai", () => {
-  return {
-    default: vi.fn(),
-  };
+// vi.hoisted 保证 mockCreate 在 vi.mock factory 中可用（解决 ESM 提升时序问题）
+// 构造函数 mock 必须用 function 关键字，箭头函数不能 new
+const { mockCreate, MockOpenAI } = vi.hoisted(() => {
+  const mockCreate = vi.fn();
+  const MockOpenAI = vi.fn(function () {
+    return { chat: { completions: { create: mockCreate } } };
+  });
+  return { mockCreate, MockOpenAI };
 });
+
+vi.mock("openai", () => ({ default: MockOpenAI }));
 
 // 辅助：把 AsyncGenerator 收集为数组
 async function collectEvents(gen: AsyncGenerator<StreamEvent>): Promise<StreamEvent[]> {
@@ -113,19 +118,9 @@ function makeProvider(overrides?: Partial<ResolvedProvider>): ResolvedProvider {
 }
 
 describe("createOpenAICompatibleProvider", () => {
-  let mockCreate: ReturnType<typeof vi.fn>;
-
-  beforeEach(async () => {
-    const OpenAIMod = await import("openai");
-    const OpenAIClass = OpenAIMod.default as unknown as ReturnType<typeof vi.fn>;
-    mockCreate = vi.fn();
-    OpenAIClass.mockImplementation(() => ({
-      chat: {
-        completions: {
-          create: mockCreate,
-        },
-      },
-    }));
+  beforeEach(() => {
+    mockCreate.mockReset();
+    MockOpenAI.mockClear();
   });
 
   it("应正确创建 provider 实例", () => {

@@ -5,12 +5,17 @@ import type { ResolvedProvider } from "../types.js";
 import { DEFAULT_QUIRKS } from "../types.js";
 import { createAnthropicProvider } from "../adapters/anthropic-messages.js";
 
-// mock Anthropic SDK
-vi.mock("@anthropic-ai/sdk", () => {
-  return {
-    default: vi.fn(),
-  };
+// vi.hoisted 保证 mockCreate 在 vi.mock factory 中可用
+// 构造函数 mock 必须用 function 关键字，箭头函数不能 new
+const { mockCreate, MockAnthropic } = vi.hoisted(() => {
+  const mockCreate = vi.fn();
+  const MockAnthropic = vi.fn(function () {
+    return { messages: { create: mockCreate } };
+  });
+  return { mockCreate, MockAnthropic };
 });
+
+vi.mock("@anthropic-ai/sdk", () => ({ default: MockAnthropic }));
 
 async function collectEvents(gen: AsyncGenerator<StreamEvent>): Promise<StreamEvent[]> {
   const events: StreamEvent[] = [];
@@ -134,15 +139,9 @@ function makeProvider(overrides?: Partial<ResolvedProvider>): ResolvedProvider {
 }
 
 describe("createAnthropicProvider", () => {
-  let mockCreate: ReturnType<typeof vi.fn>;
-
-  beforeEach(async () => {
-    const AnthropicMod = await import("@anthropic-ai/sdk");
-    const AnthropicClass = AnthropicMod.default as unknown as ReturnType<typeof vi.fn>;
-    mockCreate = vi.fn();
-    AnthropicClass.mockImplementation(() => ({
-      messages: { create: mockCreate },
-    }));
+  beforeEach(() => {
+    mockCreate.mockReset();
+    MockAnthropic.mockClear();
   });
 
   it("应正确创建 provider 实例", () => {
