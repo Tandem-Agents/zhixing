@@ -2,15 +2,14 @@
 
 > 具体功能模块的实现规格说明，连接架构设计与代码实现
 
-## 状态：待启动
-
-功能规格将在架构概述基本成型后开始编写。
+## 状态：进行中
 
 ## 规格索引
 
 | # | 功能模块 | 文档 | 状态 |
 |---|---------|------|------|
-| — | 暂无规格文档 | — | — |
+| 001 | Anthropic Messages 适配器 | [anthropic-adapter.md](anthropic-adapter.md) | 待审阅 |
+| 002 | Provider 层演进路线 | [provider-layer-evolution.md](provider-layer-evolution.md) | 待审阅 |
 
 ## 编写规范
 
