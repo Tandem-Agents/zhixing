@@ -21,6 +21,9 @@ import { createProviderFromConfig } from "@zhixing/providers";
 import {
   createReadTool,
   createWriteTool,
+  createEditTool,
+  createGlobTool,
+  createGrepTool,
   createBashTool,
 } from "@zhixing/tools-builtin";
 import { buildSystemPrompt } from "./system-prompt.js";
@@ -60,7 +63,14 @@ export function createSession(options: {
   });
 
   const model = options.model ?? defaultModel;
-  const tools = [createReadTool(), createWriteTool(), createBashTool()];
+  const tools = [
+    createReadTool(),
+    createWriteTool(),
+    createEditTool(),
+    createGlobTool(),
+    createGrepTool(),
+    createBashTool(),
+  ];
   const systemPrompt = buildSystemPrompt(process.cwd());
 
   return {

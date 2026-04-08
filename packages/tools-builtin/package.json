@@ -1,7 +1,7 @@
 {
   "name": "@zhixing/tools-builtin",
   "version": "0.1.0",
-  "description": "知行内置工具集 — Read、Write、Bash",
+  "description": "知行内置工具集 — Read、Write、Edit、Glob、Grep、Bash",
   "type": "module",
   "exports": {
     ".": {
@@ -19,7 +19,8 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@zhixing/core": "workspace:*"
+    "@zhixing/core": "workspace:*",
+    "glob": "^13.0.6"
   },
   "devDependencies": {
     "@types/node": "^22.14.1",
