@@ -19,7 +19,9 @@
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "clean": "pnpm -r run clean",
-    "playground": "node --env-file=.env --import=tsx/esm playground/chat.ts"
+    "playground": "node --env-file=.env --import=tsx/esm playground/chat.ts",
+    "cli": "node --env-file=.env --import=tsx/esm packages/cli/src/index.ts",
+    "cli:build": "pnpm --filter @zhixing/cli build"
   },
   "devDependencies": {
     "tsx": "^4.21.0"

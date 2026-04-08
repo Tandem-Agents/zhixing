@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+DIR="$(cd "$(dirname "$0")" && pwd)"
+exec node --env-file="$DIR/.env" --import=tsx/esm "$DIR/packages/cli/src/index.ts" "$@"
