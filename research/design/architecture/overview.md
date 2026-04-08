@@ -2,12 +2,13 @@
 
 > 整体架构设计，随认知深化而持续演进
 
-## 状态：v0.6 — CLI 架构已确定（2026-04-07）
+## 状态：v0.7 — 容错引擎方案已确定（2026-04-08）
 
 ## 架构演进记录
 
 | 版本 | 日期 | 变更说明 | 触发的认知研究 |
 |------|------|---------|--------------|
+| v0.7 | 2026-04-08 | 容错引擎：指数退避、通用熔断器、错误分类、withRetry 包装器、可观测重试事件 | [容错引擎设计](../specifications/resilience-engine.md) |
 | v0.6 | 2026-04-07 | CLI 架构：渐进式三阶段演进、单体+预留 Gateway、MVP 终端方案、系统提示策略、会话管理、命令体系 | [q06-CLI 架构](../../_private/questions/q06-cli-architecture.md) |
 | v0.5 | 2026-04-07 | 工具系统：能力安全模型、隔离级别光谱、渐进信任、执行管线、协议/实现分离 | [q05-工具系统安全](../../_private/questions/q05-tool-system-security.md) |
 | v0.4 | 2026-04-07 | 配置系统：多层配置加载、全局/项目/本地三级、首次自动生成 | [q04-配置系统](../../_private/questions/q04-config-system.md) |
@@ -115,6 +116,11 @@ graph TB
 | 系统提示 static/dynamic 分离 | Claude Code 验证了 prompt cache 优化的价值 | 已确认 |
 | 本地 JSONL 会话持久化 | 同 Claude Code，隐私好、离线可用 | 已确认 |
 | CLI 架构 | 见 [ADR-005](./decisions/005-cli-architecture.md) | 已确认 |
+| 容错通过 deps.callLLM 注入，不侵入 Agent Loop | OpenClaw/Claude Code 容错与循环深度耦合是维护噩梦 | 已确认 |
+| 指数退避 + 抖动 + Retry-After | OpenClaw 无退避；Claude Code 不覆盖连接错误 | 已确认 |
+| 通用 CircuitBreaker 原语 | 两者都硬编码限制，不可复用 | 已确认 |
+| 连接错误（ECONNRESET 等）同等重试 | Claude Code #1 用户报告问题就是连接错误不重试 | 已确认 |
+| 容错引擎架构 | 见 [容错引擎设计](../specifications/resilience-engine.md) | 已确认 |
 
 ## 已决策的设计问题
 
@@ -441,3 +447,11 @@ MVP 只实现静态 system prompt。动态注入 Phase 2。
 | CLI 架构 | 客户端-网关 + 闭源 pi-tui | 单体 + 深度 Fork Ink | 单体 + readline→Ink 渐进演进 |
 | CLI 可观测性 | 无 | 无 | EventBus 驱动的实时状态面板 |
 | 系统提示缓存 | 不明确 | static/dynamic 分离优化 | 同 Claude Code，缓存优先 |
+| 重试退避 | 无通用退避（overloaded 有可选固定延迟，默认 0） | 指数退避 + 抖动（仅 HTTP 层，不覆盖连接错误） | **指数退避 + 抖动 + Retry-After**，覆盖 API 和连接错误 |
+| 容错位置 | 外层循环 1400 行中内联 | query.ts 1730 行中内联 | **独立 resilience 模块**，通过 deps 注入 |
+| 熔断器 | 各处硬编码限制 | 各处硬编码限制 | **通用 CircuitBreaker 原语**，可复用 |
+| 连接错误 | 走通用路径 | 不重试（#1 用户投诉） | **同等重试**，归为 network 类型 |
+| 重试可观测 | log.warn() | 内部遥测 | **EventBus 事件** + CLI 实时渲染 |
+| 韧性范围 | 通道重连各自实现 + 外层循环容错 | 仅 LLM 调用层 | **四层韧性模型**：通道 → 消息处理 → Agent 运行 → 服务，共享原语 |
+| 失败通知 | 无（CLI 打印） | 无（CLI 打印） | **降级回复**：通过通道主动告知用户 |
+| 消息丢失保护 | Gateway 排队 | 不存在此问题 | **本地持久化队列**（至少一次交付） |
