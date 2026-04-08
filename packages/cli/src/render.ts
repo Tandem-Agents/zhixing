@@ -157,6 +157,50 @@ function formatUsage(usage: TokenUsage): string {
   return parts.join(" ");
 }
 
+// ─── 重试事件渲染 ───
+
+/** 渲染重试尝试提示（黄色警告） */
+export function renderRetryAttempt(info: {
+  errorType: string;
+  attempt: number;
+  maxRetries: number;
+  delayMs: number;
+}): void {
+  const delayStr = (info.delayMs / 1000).toFixed(1);
+  process.stdout.write(
+    `\n  ${chalk.yellow("⚠")} ${chalk.yellow(formatErrorType(info.errorType))}` +
+    `${chalk.dim(`, 第 ${info.attempt}/${info.maxRetries} 次重试，等待 ${delayStr}s...`)}`,
+  );
+}
+
+/** 渲染重试成功提示（绿色） */
+export function renderRetrySuccess(info: { attemptsTaken: number }): void {
+  process.stdout.write(
+    `\n  ${chalk.green("✓")} ${chalk.dim(`重试成功（第 ${info.attemptsTaken} 次）`)}\n`,
+  );
+}
+
+/** 渲染重试耗尽提示（红色） */
+export function renderRetryExhausted(info: {
+  totalAttempts: number;
+  lastError: string;
+}): void {
+  process.stdout.write(
+    `\n  ${chalk.red("✗")} ${chalk.red(`重试耗尽（共 ${info.totalAttempts} 次）`)}: ${chalk.dim(info.lastError)}\n`,
+  );
+}
+
+function formatErrorType(errorType: string): string {
+  const labels: Record<string, string> = {
+    rate_limit: "速率限制 (429)",
+    timeout: "请求超时",
+    network: "网络错误",
+    provider_error: "服务端错误",
+    unknown: "未知错误",
+  };
+  return labels[errorType] ?? errorType;
+}
+
 // ─── 错误渲染 ───
 
 export function renderError(error: unknown): void {

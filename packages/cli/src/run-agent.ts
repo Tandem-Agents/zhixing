@@ -15,8 +15,9 @@ import {
   type ToolResultBlock,
   createEventBus,
   userMessage,
+  withRetry,
+  runAgentLoop,
 } from "@zhixing/core";
-import { runAgentLoop } from "@zhixing/core/loop";
 import { createProviderFromConfig } from "@zhixing/providers";
 import {
   createReadTool,
@@ -26,6 +27,11 @@ import {
   createGrepTool,
   createBashTool,
 } from "@zhixing/tools-builtin";
+import {
+  renderRetryAttempt,
+  renderRetryExhausted,
+  renderRetrySuccess,
+} from "./render.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 
 // ─── 类型 ───
@@ -85,6 +91,17 @@ export function createSession(options: {
       const newMessages: Message[] = [];
       let pendingToolResults: ToolResultBlock[] = [];
 
+      // 通过 deps.callLLM 注入容错能力，agent-loop.ts 零修改
+      const resilientCallLLM = withRetry(
+        (request) => provider.chat(request),
+        { eventBus },
+      );
+
+      // 订阅重试事件 → 终端渲染
+      eventBus.on("retry:attempt", renderRetryAttempt);
+      eventBus.on("retry:success", renderRetrySuccess);
+      eventBus.on("retry:exhausted", renderRetryExhausted);
+
       const gen = runAgentLoop({
         provider,
         model,
@@ -93,6 +110,7 @@ export function createSession(options: {
         systemPrompt,
         eventBus,
         workingDirectory: process.cwd(),
+        deps: { callLLM: resilientCallLLM },
       });
 
       while (true) {

@@ -6,6 +6,7 @@ export default defineConfig({
     "src/events/index.ts",
     "src/types/index.ts",
     "src/loop/index.ts",
+    "src/resilience/index.ts",
   ],
   format: ["esm"],
   dts: true,

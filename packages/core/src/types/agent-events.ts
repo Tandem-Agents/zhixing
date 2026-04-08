@@ -19,6 +19,7 @@
  * 扩展事件时直接修改此定义，或使用交叉类型 AgentEventMap & { ... }。
  */
 
+import type { AgentErrorType } from "./errors.js";
 import type { StreamEvent, StopReason, TokenUsage } from "./llm.js";
 
 /**
@@ -100,6 +101,28 @@ export type AgentEventMap = {
     tokensBefore: number;
     tokensAfter: number;
     success: boolean;
+  };
+
+  // ─── 容错 / 重试 ───
+
+  "retry:attempt": {
+    errorType: AgentErrorType;
+    attempt: number;
+    maxRetries: number;
+    delayMs: number;
+    willRetry: boolean;
+  };
+
+  "retry:exhausted": {
+    errorType: AgentErrorType;
+    totalAttempts: number;
+    lastError: string;
+  };
+
+  "retry:success": {
+    errorType: AgentErrorType;
+    attemptsTaken: number;
+    totalDelayMs: number;
   };
 
   // ─── 错误 ───

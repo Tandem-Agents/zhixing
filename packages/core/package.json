@@ -19,6 +19,10 @@
     "./loop": {
       "types": "./dist/loop/index.d.ts",
       "import": "./dist/loop/index.js"
+    },
+    "./resilience": {
+      "types": "./dist/resilience/index.d.ts",
+      "import": "./dist/resilience/index.js"
     }
   },
   "files": [
