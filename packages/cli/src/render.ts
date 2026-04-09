@@ -147,12 +147,13 @@ export function renderSummary(result: AgentResult, durationMs: number): void {
 }
 
 function formatUsage(usage: TokenUsage): string {
+  const input = usage.inputTokens.toLocaleString();
+  const output = usage.outputTokens.toLocaleString();
   const parts = [
-    chalk.dim(`${usage.inputTokens.toLocaleString()} →`),
-    chalk.dim(`${usage.outputTokens.toLocaleString()} tokens`),
+    chalk.dim(`入 ${input} · 出 ${output} tokens`),
   ];
   if (usage.cacheReadTokens) {
-    parts.push(chalk.dim(`(cache: ${usage.cacheReadTokens.toLocaleString()})`));
+    parts.push(chalk.dim(`(缓存 ${usage.cacheReadTokens.toLocaleString()})`));
   }
   return parts.join(" ");
 }
@@ -199,6 +200,76 @@ function formatErrorType(errorType: string): string {
     unknown: "未知错误",
   };
   return labels[errorType] ?? errorType;
+}
+
+// ─── 上下文预算渲染 ───
+
+/** 渲染上下文预算状态（每轮结束后显示） */
+export function renderBudgetStatus(info: {
+  currentTokens: number;
+  effectiveWindow: number;
+  usageRatio: number;
+  status: string;
+}): void {
+  const pct = Math.round(info.usageRatio * 100);
+  const current = formatTokenCount(info.currentTokens);
+  const total = formatTokenCount(info.effectiveWindow);
+  const label = `${pct}% · ${current}/${total} tokens`;
+
+  let colorFn: (s: string) => string;
+  switch (info.status) {
+    case "critical":
+      colorFn = chalk.red;
+      break;
+    case "compact":
+      colorFn = chalk.yellow;
+      break;
+    case "warning":
+      colorFn = chalk.yellow;
+      break;
+    default:
+      colorFn = chalk.dim;
+  }
+
+  process.stdout.write(`  ${colorFn(`[${label}]`)}\n`);
+}
+
+/** 渲染压缩开始 */
+export function renderCompactStart(info: {
+  strategy: string;
+  tokensBefore: number;
+}): void {
+  const tokens = formatTokenCount(info.tokensBefore);
+  process.stdout.write(
+    `  ${chalk.yellow("⟳")} ${chalk.yellow("压缩中")} ${chalk.dim(`(${info.strategy}, ${tokens} tokens)`)}\n`,
+  );
+}
+
+/** 渲染压缩完成 */
+export function renderCompactEnd(info: {
+  strategy: string;
+  tokensBefore: number;
+  tokensAfter: number;
+  success: boolean;
+}): void {
+  if (info.success) {
+    const before = formatTokenCount(info.tokensBefore);
+    const after = formatTokenCount(info.tokensAfter);
+    const saved = formatTokenCount(info.tokensBefore - info.tokensAfter);
+    process.stdout.write(
+      `  ${chalk.green("✓")} ${chalk.dim(`压缩完成: ${before} → ${after} (节省 ${saved})`)}\n`,
+    );
+  } else {
+    process.stdout.write(
+      `  ${chalk.red("✗")} ${chalk.dim(`压缩失败 (${info.strategy})`)}\n`,
+    );
+  }
+}
+
+function formatTokenCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return String(n);
 }
 
 // ─── 错误渲染 ───

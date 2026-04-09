@@ -23,10 +23,16 @@ program
   .option("-p, --print <prompt>", "单次模式：执行 prompt 后退出")
   .option("-m, --model <model>", "指定模型")
   .option("--provider <provider>", "指定 Provider ID")
+  .option("-c, --continue", "继续当前项目最近的会话")
+  .option("-r, --resume [id]", "恢复指定会话（不带 ID 则交互选择）")
+  .option("-n, --name <name>", "为会话命名")
   .action(async (options: {
     print?: string;
     model?: string;
     provider?: string;
+    continue?: boolean;
+    resume?: string | true;
+    name?: string;
   }) => {
     try {
       if (options.print) {
@@ -48,6 +54,9 @@ program
       await startRepl({
         model: options.model,
         provider: options.provider,
+        continue: options.continue,
+        resume: options.resume,
+        name: options.name,
       });
     } catch (err) {
       renderError(err);

@@ -66,8 +66,10 @@
 | L2: 消息丢弃 | `@zhixing/core` | ✅ 已完成 | 9 个单元测试通过（首条+近N轮） |
 | 上下文引擎 | `@zhixing/core` | ✅ 已完成 | 10 个集成测试通过（引擎+策略编排+事件） |
 | Agent Loop 集成 | `@zhixing/core` | ✅ 已完成 | contextManager hook（~10 行改动） |
-| 会话持久化 | `@zhixing/core` | 🔲 待实现 | — |
-| L3: LLM 摘要压缩 | `@zhixing/core` | 🔲 待实现 | 依赖 Provider 层（已完成） |
+| 会话持久化 | `@zhixing/core` | ✅ 已完成 | 34 个单元测试通过（JSONL 序列化 + SessionStore CRUD） |
+| L3: LLM 摘要压缩 | `@zhixing/core` | ✅ 已完成 | 29 个测试通过（7 段模板 + 校验 + CircuitBreaker） |
+| CLI 上下文可视化 | `@zhixing/cli` | ✅ 已完成 | 预算状态 + 压缩过程渲染 |
+| CLI 会话管理 | `@zhixing/cli` | ✅ 已完成 | --continue/--resume/--name + /sessions + /name |
 
 ## 里程碑
 
@@ -86,9 +88,9 @@
 - [x] **M13**: 上下文管理调研 + 方案设计 → Token 估算 + 3 层压缩策略 ✅ 2026-04-08
 - [x] **M14**: Token 估算器实现 → CJK 感知 + 自适应校准 ✅ 2026-04-08
 - [x] **M15**: 上下文预算 + L1/L2 压缩策略 + 引擎 + Agent Loop 集成 ✅ 2026-04-08
-- [ ] **M16**: 会话持久化实现 → JSONL + Session Store + --resume
-- [ ] **M17**: L3 LLM 摘要压缩 → Fork 子对话 + 7 段模板 + CircuitBreaker
-- [ ] **M18**: CLI 上下文状态集成 → 底部预算显示 + 压缩过程可视化
+- [x] **M16**: 会话持久化实现 → JSONL + SessionStore + --resume/--continue ✅ 2026-04-09
+- [x] **M17**: L3 LLM 摘要压缩 → 7 段模板 + 校验 + CircuitBreaker ✅ 2026-04-09
+- [x] **M18**: CLI 上下文状态集成 → 预算显示 + 压缩过程可视化 ✅ 2026-04-09
 
 ---
 

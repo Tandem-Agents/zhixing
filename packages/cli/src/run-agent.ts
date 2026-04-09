@@ -31,6 +31,9 @@ import {
   renderRetryAttempt,
   renderRetryExhausted,
   renderRetrySuccess,
+  renderBudgetStatus,
+  renderCompactStart,
+  renderCompactEnd,
 } from "./render.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 
@@ -45,6 +48,8 @@ export interface AgentSession {
 export interface RunParams {
   messages: Message[];
   onYield?: (event: AgentYield) => void;
+  /** 在渲染 EventBus 事件（重试/预算）前调用，用于暂停 spinner 等 UI 动画 */
+  onBeforeEventRender?: () => void;
 }
 
 export interface RunResult {
@@ -97,10 +102,36 @@ export function createSession(options: {
         { eventBus },
       );
 
+      // 在 EventBus 渲染前暂停 spinner，避免 \r 覆盖输出
+      const pauseUI = params.onBeforeEventRender ?? (() => {});
+
       // 订阅重试事件 → 终端渲染
-      eventBus.on("retry:attempt", renderRetryAttempt);
-      eventBus.on("retry:success", renderRetrySuccess);
-      eventBus.on("retry:exhausted", renderRetryExhausted);
+      eventBus.on("retry:attempt", (info) => {
+        pauseUI();
+        renderRetryAttempt(info);
+      });
+      eventBus.on("retry:success", (info) => {
+        pauseUI();
+        renderRetrySuccess(info);
+      });
+      eventBus.on("retry:exhausted", (info) => {
+        pauseUI();
+        renderRetryExhausted(info);
+      });
+
+      // 订阅上下文事件 → 预算状态 + 压缩过程
+      eventBus.on("context:budget_check", (info) => {
+        pauseUI();
+        renderBudgetStatus(info);
+      });
+      eventBus.on("context:compact_start", (info) => {
+        pauseUI();
+        renderCompactStart(info);
+      });
+      eventBus.on("context:compact_end", (info) => {
+        pauseUI();
+        renderCompactEnd(info);
+      });
 
       const gen = runAgentLoop({
         provider,
@@ -141,11 +172,13 @@ export async function runOnce(options: {
   model?: string;
   provider?: string;
   onYield?: (event: AgentYield) => void;
+  onBeforeEventRender?: () => void;
 }): Promise<RunResult> {
   const session = createSession(options);
   return session.run({
     messages: [userMessage(options.prompt)],
     onYield: options.onYield,
+    onBeforeEventRender: options.onBeforeEventRender,
   });
 }
 

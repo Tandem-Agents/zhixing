@@ -27,6 +27,10 @@
     "./context": {
       "types": "./dist/context/index.d.ts",
       "import": "./dist/context/index.js"
+    },
+    "./session": {
+      "types": "./dist/session/index.d.ts",
+      "import": "./dist/session/index.js"
     }
   },
   "files": [

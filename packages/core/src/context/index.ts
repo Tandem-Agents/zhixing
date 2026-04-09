@@ -42,3 +42,31 @@ export {
   MessageDropStrategy,
   createMessageDropStrategy,
 } from "./strategies/message-drop.js";
+
+export type {
+  LLMSummarizeConfig,
+  SummarizeLLMFn,
+} from "./strategies/llm-summarize.js";
+export {
+  LLMSummarizeStrategy,
+  createSummarizeFn,
+} from "./strategies/llm-summarize.js";
+
+export type { SummarizationTemplate } from "./prompts.js";
+export {
+  MAIN_SESSION_PROMPT,
+  SUB_AGENT_PROMPT,
+  MERGE_SUMMARIES_PROMPT,
+  buildContinuationMessage,
+  buildManualCompactMessage,
+  buildRetryPrompt,
+  getSummarizationPrompt,
+  wrapCustomInstructions,
+} from "./prompts.js";
+
+export type { ValidationResult } from "./validation.js";
+export {
+  REQUIRED_MAIN_SECTIONS,
+  REQUIRED_SUB_SECTIONS,
+  validateSummary,
+} from "./validation.js";
