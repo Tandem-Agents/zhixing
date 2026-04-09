@@ -14,6 +14,7 @@ import type { AgentError } from "../types/errors.js";
 import type { ChatRequest, LLMProvider, StopReason, StreamEvent, TokenUsage } from "../types/llm.js";
 import type { Message } from "../types/messages.js";
 import type { ToolDefinition, ToolExecutionContext, ToolResult } from "../types/tools.js";
+import type { ContextManagerHook } from "../context/types.js";
 
 // ─── Agent Loop 参数 ───
 
@@ -38,6 +39,12 @@ export interface AgentLoopParams {
   eventBus?: IEventBus<AgentEventMap>;
   /** 覆盖默认依赖（用于测试） */
   deps?: Partial<AgentLoopDeps>;
+  /**
+   * 上下文管理器。
+   * 每轮工具执行后，Agent Loop 调用 onTurnComplete() 让上下文管理器
+   * 检查预算并执行压缩。可选 — 不传则不做上下文管理。
+   */
+  contextManager?: ContextManagerHook;
 }
 
 // ─── 依赖注入 ───

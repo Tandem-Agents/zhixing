@@ -136,12 +136,25 @@ export async function* runAgentLoop(
       yield { type: "turn_complete", turnCount: newTurnCount, usage: llmResult.usage };
 
       // ── Advance state (immutable reconstruction) ──
+      let newMessages = [
+        ...state.messages,
+        llmResult.message,
+        toolResultMessage(toolResults),
+      ];
+
+      // ── Context management: 预算检查 + 自动压缩 ──
+      if (params.contextManager) {
+        const cmResult = await params.contextManager.onTurnComplete({
+          messages: newMessages,
+          turnCount: newTurnCount,
+        });
+        if (cmResult.modified) {
+          newMessages = cmResult.messages;
+        }
+      }
+
       state = {
-        messages: [
-          ...state.messages,
-          llmResult.message,
-          toolResultMessage(toolResults),
-        ],
+        messages: newMessages,
         turnCount: newTurnCount,
         totalUsage: usage,
         transition: { reason: "tool_use" },

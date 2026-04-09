@@ -58,9 +58,14 @@
 | Grep 工具 | `@zhixing/tools-builtin` | ✅ 已完成 | 单元测试通过 |
 | CLI (REPL + 单次模式) | `@zhixing/cli` | ✅ 已完成 | 端到端验证 |
 | 容错引擎 | `@zhixing/core` | ✅ 已完成 | 单元测试通过（重试 + 熔断器 + 错误分类） |
-| Token 估算 | `@zhixing/core` | 🔲 待实现（方案已设计） | — |
+| Token 估算器 | `@zhixing/core` | ✅ 已完成 | 37 个单元测试通过（CJK/emoji/校准） |
+| 上下文预算 | `@zhixing/core` | ✅ 已完成 | 20 个单元测试通过（百分比三级阈值） |
+| L1: ToolResult 截断 | `@zhixing/core` | ✅ 已完成 | 13 个单元测试通过（按轮次年龄截断） |
+| L2: 消息丢弃 | `@zhixing/core` | ✅ 已完成 | 9 个单元测试通过（首条+近N轮） |
+| 上下文引擎 | `@zhixing/core` | ✅ 已完成 | 10 个集成测试通过（引擎+策略编排+事件） |
+| Agent Loop 集成 | `@zhixing/core` | ✅ 已完成 | contextManager hook（~10 行改动） |
 | 会话持久化 | `@zhixing/core` | 🔲 待实现 | — |
-| 上下文管理 | `@zhixing/core` | 🔲 待实现（方案已设计） | — |
+| L3: LLM 摘要压缩 | `@zhixing/core` | 🔲 待实现 | 依赖 Provider 层（已完成） |
 
 ## 里程碑
 
@@ -77,9 +82,11 @@
 - [x] **M11**: 容错引擎方案设计完成 ✅ 2026-04-08
 - [x] **M12**: 容错引擎实现 → 指数退避 + 熔断器 + withRetry + 错误分类 ✅ 2026-04-08
 - [x] **M13**: 上下文管理调研 + 方案设计 → Token 估算 + 3 层压缩策略 ✅ 2026-04-08
-- [ ] **M14**: Token 估算器实现 → CJK 感知 + 自适应校准
-- [ ] **M15**: 上下文预算 + L1/L2 压缩策略实现
+- [x] **M14**: Token 估算器实现 → CJK 感知 + 自适应校准 ✅ 2026-04-08
+- [x] **M15**: 上下文预算 + L1/L2 压缩策略 + 引擎 + Agent Loop 集成 ✅ 2026-04-08
 - [ ] **M16**: 会话持久化实现 → JSONL + Session Store + --resume
+- [ ] **M17**: L3 LLM 摘要压缩 → Fork 子对话 + 9 段模板 + CircuitBreaker
+- [ ] **M18**: CLI 上下文状态集成 → 底部预算显示 + 压缩过程可视化
 
 ---
 

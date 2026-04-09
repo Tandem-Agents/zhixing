@@ -91,6 +91,13 @@ export type AgentEventMap = {
 
   // ─── 上下文管理 ───
 
+  "context:budget_check": {
+    currentTokens: number;
+    effectiveWindow: number;
+    usageRatio: number;
+    status: "normal" | "warning" | "compact" | "critical";
+  };
+
   "context:compact_start": {
     strategy: string;
     tokensBefore: number;
@@ -101,6 +108,12 @@ export type AgentEventMap = {
     tokensBefore: number;
     tokensAfter: number;
     success: boolean;
+  };
+
+  "context:calibrate": {
+    estimated: number;
+    actual: number;
+    newRatio: number;
   };
 
   // ─── 容错 / 重试 ───

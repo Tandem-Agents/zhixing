@@ -23,6 +23,10 @@
     "./resilience": {
       "types": "./dist/resilience/index.d.ts",
       "import": "./dist/resilience/index.js"
+    },
+    "./context": {
+      "types": "./dist/context/index.d.ts",
+      "import": "./dist/context/index.js"
     }
   },
   "files": [
