@@ -41,6 +41,7 @@ import {
   renderCompactEnd,
 } from "./render.js";
 import { buildSystemPrompt } from "./system-prompt.js";
+import { loadProjectContext, injectContext } from "./project-context.js";
 
 // ─── 类型 ───
 
@@ -50,6 +51,8 @@ export interface AgentSession {
   run: (params: RunParams) => Promise<RunResult>;
   /** 查询当前消息列表的上下文预算状态 */
   checkBudget: (messages: readonly Message[]) => ContextBudget | undefined;
+  /** 当前 Token 估算器的校准因子（1.0 = 未校准） */
+  readonly calibrationFactor: number;
 }
 
 export interface RunParams {
@@ -74,15 +77,16 @@ export interface RunResult {
  * 创建一个 Agent 会话。会话持有 Provider/Tools/EventBus 实例，
  * 可多次调用 run() 执行不同的对话。
  */
-export function createSession(options: {
+export async function createSession(options: {
   model?: string;
   provider?: string;
-}): AgentSession {
+}): Promise<AgentSession> {
   const { provider, defaultModel, config } = createProviderFromConfig({
     providerId: options.provider,
   });
 
   const model = options.model ?? defaultModel;
+  const cwd = process.cwd();
   const tools = [
     createReadTool(),
     createWriteTool(),
@@ -91,7 +95,10 @@ export function createSession(options: {
     createGrepTool(),
     createBashTool(),
   ];
-  const systemPrompt = buildSystemPrompt(process.cwd());
+  const systemPrompt = buildSystemPrompt({ tools, cwd });
+
+  // 加载项目上下文（ZHIXING.md + 环境信息），注入到首条 user message
+  const projectContext = await loadProjectContext(cwd);
 
   // 从 provider 获取模型信息，构建上下文引擎组件
   // estimator 跨 run() 共享以保持校准状态
@@ -108,6 +115,10 @@ export function createSession(options: {
   return {
     providerId: config.defaultProvider ?? provider.id,
     model,
+
+    get calibrationFactor(): number {
+      return estimator.calibrationFactor;
+    },
 
     checkBudget(messages: readonly Message[]): ContextBudget | undefined {
       if (!modelBudgetInfo) return undefined;
@@ -167,11 +178,14 @@ export function createSession(options: {
         renderCompactEnd(info);
       });
 
+      // 将项目上下文注入到首条 user message（不修改 system prompt，保护缓存前缀）
+      const messagesWithContext = injectContext(params.messages, projectContext);
+
       const gen = runAgentLoop({
         provider,
         model,
         tools,
-        messages: params.messages,
+        messages: messagesWithContext,
         systemPrompt,
         eventBus,
         workingDirectory: process.cwd(),
@@ -183,8 +197,14 @@ export function createSession(options: {
         const { value, done } = await gen.next();
 
         if (done) {
-          // 运行结束后做一次预算快照（覆盖纯文本完成场景）
           const allMessages = [...params.messages, ...newMessages];
+
+          // Token 校准：用 API 返回的真实 token 数校正估算器
+          if (value.usage.inputTokens > 0) {
+            const estimated = estimator.estimateMessages(allMessages);
+            estimator.calibrate(estimated, value.usage.inputTokens);
+          }
+
           const budget = contextEngine?.checkBudget(allMessages);
 
           return {
@@ -214,7 +234,7 @@ export async function runOnce(options: {
   onYield?: (event: AgentYield) => void;
   onBeforeEventRender?: () => void;
 }): Promise<RunResult> {
-  const session = createSession(options);
+  const session = await createSession(options);
   return session.run({
     messages: [userMessage(options.prompt)],
     onYield: options.onYield,

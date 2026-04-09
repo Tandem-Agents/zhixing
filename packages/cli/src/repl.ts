@@ -154,7 +154,7 @@ function buildSlashCommands(rl: readline.Interface): Record<
           console.log(chalk.dim("\n  模型信息不可用，无法计算预算\n"));
           return;
         }
-        renderUsageReport(budget, state.turnCounter);
+        renderUsageReport(budget, state.turnCounter, state.session.calibrationFactor);
       },
     },
     "/context": {
@@ -181,7 +181,7 @@ function buildSlashCommands(rl: readline.Interface): Record<
 // ─── 启动 REPL ───
 
 export async function startRepl(options: ReplOptions): Promise<void> {
-  const agentSession = createSession(options);
+  const agentSession = await createSession(options);
   const renderer = createRenderer();
   const store = new SessionStore(process.cwd());
 

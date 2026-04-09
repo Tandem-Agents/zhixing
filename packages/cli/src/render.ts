@@ -297,7 +297,7 @@ function formatTokenCount(n: number): string {
 
 // ─── /usage 命令渲染 ───
 
-export function renderUsageReport(budget: ContextBudget, turnCount: number): void {
+export function renderUsageReport(budget: ContextBudget, turnCount: number, calibrationFactor?: number): void {
   const pct = Math.round(budget.usageRatio * 100);
   const current = formatTokenCount(budget.currentTokens);
   const effective = formatTokenCount(budget.effectiveWindow);
@@ -307,6 +307,11 @@ export function renderUsageReport(budget: ContextBudget, turnCount: number): voi
   console.log(`  ${chalk.dim("上下文容量")}     ${formatStatusColor(pct, budget.status)}  ${chalk.dim(`(${current} / ${effective})`)}`);
   console.log(`  ${chalk.dim("上下文窗口")}     ${formatTokenCount(budget.contextWindow)}`);
   console.log(`  ${chalk.dim("会话轮次")}       ${turnCount} 轮`);
+  if (calibrationFactor !== undefined) {
+    const calStr = calibrationFactor.toFixed(3);
+    const label = calibrationFactor === 1.0 ? "未校准" : "已校准";
+    console.log(`  ${chalk.dim("估算校准")}       ${calStr} ${chalk.dim(`(${label})`)}`);
+  }
   console.log();
 }
 
