@@ -26,6 +26,8 @@ import {
   renderSummary,
   renderError,
   renderWelcome,
+  renderUsageReport,
+  renderContextVisual,
 } from "./render.js";
 
 // ─── REPL 状态 ───
@@ -142,6 +144,28 @@ function buildSlashCommands(rl: readline.Interface): Record<
         }
         await state.store.rename(state.sessionId, args.trim());
         console.log(chalk.dim(`会话已命名为: ${args.trim()}\n`));
+      },
+    },
+    "/usage": {
+      description: "查看 token 用量详情",
+      handler: (state) => {
+        const budget = state.session.checkBudget(state.messages);
+        if (!budget) {
+          console.log(chalk.dim("\n  模型信息不可用，无法计算预算\n"));
+          return;
+        }
+        renderUsageReport(budget, state.turnCounter);
+      },
+    },
+    "/context": {
+      description: "上下文容量可视化",
+      handler: (state) => {
+        const budget = state.session.checkBudget(state.messages);
+        if (!budget) {
+          console.log(chalk.dim("\n  模型信息不可用，无法计算预算\n"));
+          return;
+        }
+        renderContextVisual(budget);
       },
     },
     "/exit": {
@@ -288,7 +312,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     renderer.startThinking();
 
     try {
-      const { agentResult, newMessages, durationMs } =
+      const { agentResult, newMessages, durationMs, budget } =
         await agentSession.run({
           messages: [...state.messages],
           onYield: (e) => renderer.handleEvent(e),
@@ -297,7 +321,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
 
       renderer.stop();
       state.messages.push(...newMessages);
-      renderSummary(agentResult, durationMs);
+      renderSummary(agentResult, durationMs, budget);
 
       // 持久化本轮对话
       if (state.sessionId) {

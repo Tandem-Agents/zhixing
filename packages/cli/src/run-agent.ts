@@ -11,9 +11,14 @@ import {
   type AgentResult,
   type AgentYield,
   type AgentEventMap,
+  type ContextBudget,
   type Message,
   type ToolResultBlock,
   createEventBus,
+  createContextEngine,
+  createTokenEstimator,
+  createToolResultTrimStrategy,
+  createMessageDropStrategy,
   userMessage,
   withRetry,
   runAgentLoop,
@@ -43,6 +48,8 @@ export interface AgentSession {
   providerId: string;
   model: string;
   run: (params: RunParams) => Promise<RunResult>;
+  /** 查询当前消息列表的上下文预算状态 */
+  checkBudget: (messages: readonly Message[]) => ContextBudget | undefined;
 }
 
 export interface RunParams {
@@ -57,6 +64,8 @@ export interface RunResult {
   /** 本轮产生的新消息（assistant + tool_result），调用方追加到对话历史 */
   newMessages: Message[];
   durationMs: number;
+  /** 运行结束后的上下文预算快照（渐进式摘要行使用） */
+  budget?: ContextBudget;
 }
 
 // ─── 创建会话 ───
@@ -84,9 +93,27 @@ export function createSession(options: {
   ];
   const systemPrompt = buildSystemPrompt(process.cwd());
 
+  // 从 provider 获取模型信息，构建上下文引擎组件
+  // estimator 跨 run() 共享以保持校准状态
+  const modelInfo = provider.models.find((m) => m.id === model) ?? provider.models[0];
+  const estimator = createTokenEstimator();
+  const strategies = [
+    createToolResultTrimStrategy(),
+    createMessageDropStrategy(),
+  ];
+  const modelBudgetInfo = modelInfo
+    ? { contextWindow: modelInfo.contextWindow, maxOutputTokens: modelInfo.maxOutputTokens }
+    : undefined;
+
   return {
     providerId: config.defaultProvider ?? provider.id,
     model,
+
+    checkBudget(messages: readonly Message[]): ContextBudget | undefined {
+      if (!modelBudgetInfo) return undefined;
+      const engine = createContextEngine(estimator, strategies, { modelInfo: modelBudgetInfo });
+      return engine.checkBudget(messages);
+    },
 
     async run(params: RunParams): Promise<RunResult> {
       const eventBus = createEventBus<AgentEventMap>();
@@ -101,6 +128,11 @@ export function createSession(options: {
         (request) => provider.chat(request),
         { eventBus },
       );
+
+      // 每次 run 创建带 eventBus 的引擎实例（事件需绑定到当前 run 的 eventBus）
+      const contextEngine = modelBudgetInfo
+        ? createContextEngine(estimator, strategies, { modelInfo: modelBudgetInfo }, eventBus)
+        : undefined;
 
       // 在 EventBus 渲染前暂停 spinner，避免 \r 覆盖输出
       const pauseUI = params.onBeforeEventRender ?? (() => {});
@@ -119,10 +151,12 @@ export function createSession(options: {
         renderRetryExhausted(info);
       });
 
-      // 订阅上下文事件 → 预算状态 + 压缩过程
+      // 订阅上下文事件 → 仅在 warning+ 时渲染（normal 由摘要行覆盖）
       eventBus.on("context:budget_check", (info) => {
-        pauseUI();
-        renderBudgetStatus(info);
+        if (info.status === "warning" || info.status === "compact" || info.status === "critical") {
+          pauseUI();
+          renderBudgetStatus(info);
+        }
       });
       eventBus.on("context:compact_start", (info) => {
         pauseUI();
@@ -142,16 +176,22 @@ export function createSession(options: {
         eventBus,
         workingDirectory: process.cwd(),
         deps: { callLLM: resilientCallLLM },
+        contextManager: contextEngine,
       });
 
       while (true) {
         const { value, done } = await gen.next();
 
         if (done) {
+          // 运行结束后做一次预算快照（覆盖纯文本完成场景）
+          const allMessages = [...params.messages, ...newMessages];
+          const budget = contextEngine?.checkBudget(allMessages);
+
           return {
             agentResult: value,
             newMessages,
             durationMs: Date.now() - startTime,
+            budget,
           };
         }
 

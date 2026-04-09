@@ -13,7 +13,7 @@
  */
 
 import chalk from "chalk";
-import type { AgentResult, AgentYield, TokenUsage } from "@zhixing/core";
+import type { AgentResult, AgentYield, ContextBudget } from "@zhixing/core";
 
 // ─── Spinner 常量 ───
 
@@ -137,25 +137,46 @@ export function createRenderer(): Renderer {
 
 // ─── 运行结果摘要 ───
 
-export function renderSummary(result: AgentResult, durationMs: number): void {
+/**
+ * 渐进式每轮摘要行。
+ *
+ * 信息密度随上下文使用率递增：
+ *   < 50%  安静期：只显示耗时
+ *   50~75% 感知期：耗时 + 上下文百分比（dim）
+ *   75~85% 警示期：耗时 + 黄色警告百分比
+ *   > 85%  紧急期：耗时 + 红色警告百分比
+ */
+export function renderSummary(
+  _result: AgentResult,
+  durationMs: number,
+  budget?: ContextBudget,
+): void {
   const duration = (durationMs / 1000).toFixed(1);
-  const tokens = formatUsage(result.usage);
+  const parts: string[] = [chalk.dim(`${duration}s`)];
 
-  console.log(
-    `\n${chalk.dim("─")} ${tokens} ${chalk.dim("·")} ${chalk.dim(`${duration}s`)}`,
-  );
-}
+  if (budget) {
+    const pct = Math.round(budget.usageRatio * 100);
+    const contextLabel = `上下文 ${pct}%`;
 
-function formatUsage(usage: TokenUsage): string {
-  const input = usage.inputTokens.toLocaleString();
-  const output = usage.outputTokens.toLocaleString();
-  const parts = [
-    chalk.dim(`入 ${input} · 出 ${output} tokens`),
-  ];
-  if (usage.cacheReadTokens) {
-    parts.push(chalk.dim(`(缓存 ${usage.cacheReadTokens.toLocaleString()})`));
+    switch (budget.status) {
+      case "critical":
+        parts.push(chalk.red(`🔴 ${contextLabel}`));
+        break;
+      case "compact":
+        parts.push(chalk.yellow(`⚠ ${contextLabel}`));
+        break;
+      case "warning":
+        parts.push(chalk.yellow(`⚠ ${contextLabel}`));
+        break;
+      case "normal":
+        if (budget.usageRatio >= 0.5) {
+          parts.push(chalk.dim(contextLabel));
+        }
+        break;
+    }
   }
-  return parts.join(" ");
+
+  console.log(`\n${chalk.dim("─")} ${parts.join(chalk.dim(" · "))}`);
 }
 
 // ─── 重试事件渲染 ───
@@ -255,9 +276,11 @@ export function renderCompactEnd(info: {
   if (info.success) {
     const before = formatTokenCount(info.tokensBefore);
     const after = formatTokenCount(info.tokensAfter);
-    const saved = formatTokenCount(info.tokensBefore - info.tokensAfter);
+    const savedPct = info.tokensBefore > 0
+      ? Math.round(((info.tokensBefore - info.tokensAfter) / info.tokensBefore) * 100)
+      : 0;
     process.stdout.write(
-      `  ${chalk.green("✓")} ${chalk.dim(`压缩完成: ${before} → ${after} (节省 ${saved})`)}\n`,
+      `  ${chalk.green("✓")} ${chalk.dim(`压缩完成: ${before} → ${after} (节省 ${savedPct}%)`)}\n`,
     );
   } else {
     process.stdout.write(
@@ -270,6 +293,63 @@ function formatTokenCount(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
   return String(n);
+}
+
+// ─── /usage 命令渲染 ───
+
+export function renderUsageReport(budget: ContextBudget, turnCount: number): void {
+  const pct = Math.round(budget.usageRatio * 100);
+  const current = formatTokenCount(budget.currentTokens);
+  const effective = formatTokenCount(budget.effectiveWindow);
+
+  console.log(`\n  ${chalk.bold("Token 用量")}`);
+  console.log(chalk.dim("  ─────────────────────────────"));
+  console.log(`  ${chalk.dim("上下文容量")}     ${formatStatusColor(pct, budget.status)}  ${chalk.dim(`(${current} / ${effective})`)}`);
+  console.log(`  ${chalk.dim("上下文窗口")}     ${formatTokenCount(budget.contextWindow)}`);
+  console.log(`  ${chalk.dim("会话轮次")}       ${turnCount} 轮`);
+  console.log();
+}
+
+// ─── /context 命令渲染 ───
+
+export function renderContextVisual(budget: ContextBudget): void {
+  const pct = Math.round(budget.usageRatio * 100);
+  const effective = formatTokenCount(budget.effectiveWindow);
+  const barWidth = 40;
+  const filled = Math.min(barWidth, Math.round((budget.usageRatio) * barWidth));
+  const empty = barWidth - filled;
+
+  const filledChar = budget.status === "critical" ? chalk.red("█")
+    : budget.status === "compact" || budget.status === "warning" ? chalk.yellow("█")
+    : chalk.green("█");
+  const bar = filledChar.repeat(filled) + chalk.dim("░").repeat(empty);
+
+  console.log(`\n  ${chalk.bold("上下文窗口")} ${chalk.dim(`(${effective} tokens)`)}`);
+  console.log(chalk.dim("  ──────────────────────────────────────────────"));
+  console.log(`  [${bar}] ${formatStatusColor(pct, budget.status)}`);
+
+  // 阈值标尺
+  console.log();
+  console.log(`  ${chalk.dim("阈值:")}`);
+  console.log(`    ${chalk.dim("──")} 预警 (75%) ${chalk.dim("─────────")} ${formatTokenCount(Math.round(budget.effectiveWindow * 0.75))}`);
+  console.log(`    ${chalk.dim("──")} 压缩 (85%) ${chalk.dim("─────────")} ${formatTokenCount(Math.round(budget.effectiveWindow * 0.85))}`);
+  console.log(`    ${chalk.dim("──")} 上限 (95%) ${chalk.dim("─────────")} ${formatTokenCount(Math.round(budget.effectiveWindow * 0.95))}`);
+
+  if (budget.status === "warning" || budget.status === "compact" || budget.status === "critical") {
+    console.log();
+    console.log(`  ${chalk.yellow("提示:")} 使用 ${chalk.cyan("/compact")} 手动触发压缩`);
+  }
+  console.log();
+}
+
+function formatStatusColor(pct: number, status: string): string {
+  const label = `${pct}%`;
+  switch (status) {
+    case "critical": return chalk.red.bold(label);
+    case "compact": return chalk.yellow.bold(label);
+    case "warning": return chalk.yellow(label);
+    default: return chalk.green(label);
+  }
 }
 
 // ─── 错误渲染 ───
