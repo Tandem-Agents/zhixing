@@ -47,9 +47,11 @@
 ## 设计产出
 
 - [知行上下文引擎设计方案](../../design/specifications/context-engine.md)
+- [L3 LLM 摘要压缩方案](../../design/specifications/llm-summarization.md) — 7 段模板 + 质量校验 + 续写机制
+- [会话持久化方案](../../design/specifications/session-persistence.md) — JSONL + Turn 级粒度 + 无索引设计
 
 ## 建议研究顺序
 
 ~~先理解上下文的组装结构（什么东西在上下文里），再研究截断/压缩策略，最后关注 Prompt Cache 优化。~~
 
-已完成核心研究。后续关注：Prompt Cache 优化策略（需要实际使用数据支撑）。
+核心研究已完成，含竞品摘要 prompt 模板对比 + 会话持久化对比。后续关注：Prompt Cache 优化策略（需要实际使用数据支撑）。

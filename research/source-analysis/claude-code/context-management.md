@@ -165,6 +165,95 @@ GitHub Issue #42055 记录：早期版本中 `consecutiveFailures` 会递增但*
 | **Reactive 兜底** | 主动压缩失败时，413 触发应急压缩 |
 | **可配置阈值** | 环境变量可调整 auto-compact 触发点 |
 
+## 六、9 段摘要 Prompt 模板详解
+
+### 6.1 九个章节
+
+| # | 章节标题 | 要求 |
+|---|---------|------|
+| 1 | Primary Request and Intent | 逐条覆盖用户的明确请求与意图 |
+| 2 | Key Technical Concepts | 技术栈、框架、关键概念 |
+| 3 | Files and Code Sections | 读/改/建的文件，**完整代码片段**，每个的重要性 |
+| 4 | Errors and Fixes | 错误、用户反馈、被要求改做法的地方 |
+| 5 | Problem Solving | 已解决 + 仍在排查的问题 |
+| 6 | All User Messages | **所有**非 tool result 的用户消息原文列表 |
+| 7 | Pending Tasks | 被明确要求但未完成的事项 |
+| 8 | Current Work | 压缩前正在做的事，含文件名与代码片段 |
+| 9 | Optional Next Step | 与最近用户请求一致的下一步，需**引用原文**减少任务漂移 |
+
+### 6.2 Prompt 结构
+
+- **System prompt**：`You are a helpful AI assistant tasked with summarizing conversations.`
+- **消息列表**：**完整对话历史**
+- **最后追加 user 消息**：摘要任务指令，要求先输出 `<analysis>` 做时间线分析，再输出 `<summary>` 的 9 段结构
+- **关键约束**：`CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.`
+
+### 6.3 缓存优化
+
+**复用同一 system prompt + 工具列表**：压缩调用不换 system prompt，把摘要指令作为末尾 user 消息追加，最大化 prompt cache 命中率。
+
+### 6.4 Partial vs Full Compact
+
+| 维度 | Full compact | Partial compact |
+|------|-------------|-----------------|
+| 范围 | 整段历史 | 只摘要"最近一段"，更早的保留 |
+| 第 8/9 节 | Current Work / Next Step | Work Completed / Context for Continuing Work |
+
+### 6.5 Sub-agent 摘要（5 段）
+
+子 Agent 用更短的 5 段模板：
+
+1. **Task Overview** — 核心请求、成功标准、约束
+2. **Current State** — 已完成内容、文件与路径、关键产出
+3. **Important Discoveries** — 约束、决策、错误、无效尝试
+4. **Next Steps** — 待办、阻塞、优先级
+5. **Context to Preserve** — 用户偏好、领域细节、承诺
+
+### 6.6 Compaction 后续写（Continuation）
+
+1. **续写 user 消息**：说明"会话从先前上下文耗尽处继续"，包含格式化摘要
+2. **Rehydration**：重新注入最近读过的文件（约 5 个文件、~50K token 上限）、plan、skills
+3. **Auto-compact 专用指令**：`Please continue the conversation from where we left off without asking the user any further questions. Continue with the last task.`
+
+## 七、会话持久化
+
+### 7.1 JSONL 格式
+
+每行一条 JSON 记录，**无独立头行**（第一行通常是 `type: "system"` 记录）。
+
+共有字段：
+- `type`：记录类型（`user` / `assistant` / `tool_result` / `system` / `summary` / `result`）
+- `uuid` + `parentUuid`：DAG 结构（非纯线性）
+- `timestamp`、`sessionId`、`cwd`
+- `message`：消息内容（含 `content` 块数组）
+
+### 7.2 存储路径
+
+```
+~/.claude/projects/<项目路径编码>/<session-uuid>.jsonl
+~/.claude/projects/<项目路径编码>/sessions-index.json
+```
+
+路径编码：绝对路径转 `-` 分隔目录名（如 `/home/user/myapp` → `-home-user-myapp`），**不是**密码学哈希。
+
+### 7.3 sessions-index.json
+
+含 `version` + `entries` 数组。**已知问题**：索引不随 JSONL 更新导致 `/resume` 列表过期（多个 GitHub Issue 报告）。
+
+### 7.4 Resume / Continue
+
+| 标志 | 行为 |
+|------|------|
+| `--continue` / `-c` | 加载当前目录最近的对话 |
+| `--resume` / `-r` | 按 session ID 或名称恢复，不传 ID 时进入交互选择器 |
+| `--name` / `-n` | 会话显示名，可用名称恢复 |
+| `--fork-session` | 与 resume/continue 联用，新建 ID 而非沿用旧 ID |
+| `--no-session-persistence` | 不写盘、不可恢复 |
+
+### 7.5 写入时机
+
+JSONL 按行追加。具体 fsync 策略未公开，但按追加模式持久化，单条损坏不影响其余记录。
+
 ## 引用
 
 - [Claude Code from Source - Ch.5 Agent Loop](https://claude-code-from-source.com/ch05-agent-loop/)
