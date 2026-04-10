@@ -12,7 +12,7 @@
 | 模块       | 路径                                       | 职责                                            |
 | -------- | ---------------------------------------- | --------------------------------------------- |
 | **认知研究** | `[insights/](./insights/)`               | 按认知域组织的 Q&A 研究，从源码和公开资料中提取真实有效的认知             |
-| **源码解析** | `[source-analysis/](./source-analysis/)` | 对 OpenClaw、Claude Code 等系统的深度源码分析，作为认知研究的事实基础 |
+| **源码解析** | `[source-analysis/](./source-analysis/)` | 对 OpenClaw、Claude Code、Hermes Agent 等系统的深度源码分析，作为认知研究的事实基础 |
 | **竞品图谱** | `[landscape/](./landscape/)`             | 同类产品的系统化对比分析，识别差异化机会                          |
 | **设计中心** | `[design/](./design/)`                   | 从认知研究中凝练的设计原则、架构决策、功能规格                       |
 | **模板系统** | `[_templates/](./_templates/)`           | 文档模板，确保研究产出的质量一致性                             |
@@ -52,6 +52,7 @@ _private/ + 分析源码  研究结论   → insights/ design/
 
 - **OpenClaw 源码** — [github.com/openclaw/openclaw](https://github.com/openclaw/openclaw)
 - **Claude Code 架构** — 基于公开的架构分析和社区整理
+- **Hermes Agent 源码** — [github.com/NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) — Nous Research 的自主进化型开源智能体
 - **公开资料** — 官方文档、技术博客、论文、社区讨论
 
 ## 与实现的关系

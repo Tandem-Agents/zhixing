@@ -41,6 +41,35 @@
 - **可信度**: ★★★★☆ — 单文档 14 节完整架构参考
 - **内容**: 核心执行循环、上下文管理、多智能体编排、工具系统、权限安全、Hook 系统、技能插件、MCP 集成、状态管理、设计模式
 
+### Hermes Agent 源码
+
+- **仓库**: https://github.com/NousResearch/hermes-agent
+- **本地路径**: `E:\Dev\longxia\hermes-agent-main`
+- **可信度**: ★★★★★ — 开源仓库（MIT），直接阅读源码
+- **版本说明**: v0.6.0 (2026-03-30)
+- **技术栈**: Python，核心文件 ~9,200 行（run_agent.py）
+- **规模**: 48,000+ GitHub Stars，207 贡献者
+
+#### Hermes Agent 官方文档
+
+- **URL**: https://hermes-agent.nousresearch.com/docs/
+- **可信度**: ★★★★★ — 官方开发者文档
+- **内容**: 完整的架构指南（Architecture → Agent Loop → Prompt Assembly → Provider Runtime → Tools → Session → Gateway → Compression）
+- **架构页**: https://hermes-agent.nousresearch.com/docs/developer-guide/architecture/
+
+#### hermes-agent-self-evolution（自进化引擎）
+
+- **仓库**: https://github.com/NousResearch/hermes-agent-self-evolution
+- **可信度**: ★★★★☆ — 官方独立仓库，DSPy + GEPA 进化框架
+- **内容**: 基于遗传帕累托进化的技能/提示/工具自动优化引擎
+
+#### 社区测评与分析
+
+- [Hermes Agent 评测：越用越聪明的开源 AI 智能体](https://www.aixq.cc/18601.html) — AI 星球深度测评
+- [万字详解：OpenClaw "高替" Hermes Agent 的 Skills 系统](https://www.aixq.cc/17820.html) — Skills 系统专项分析
+- [Hermes 智能体记忆系统架构深度解析与设计哲学](https://www.jdon.com/91062-hermes-agent-memory-system-design.html) — 极道记忆系统分析
+- **可信度**: ★★★☆☆ — 需与一级来源交叉验证
+
 ## 二级来源（官方文档与权威资料）
 
 ### Anthropic 官方文档

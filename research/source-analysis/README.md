@@ -29,6 +29,23 @@
 | [架构概述](./claude-code/architecture-overview.md) | 基于公开分析的架构还原 | 🔲 待分析 |
 | [设计模式](./claude-code/key-patterns.md) | 关键设计模式提取 | 🔲 待分析 |
 
+### Hermes Agent
+
+> **仓库**: https://github.com/NousResearch/hermes-agent | **本地**: `E:\Dev\longxia\hermes-agent-main` | **文档**: https://hermes-agent.nousresearch.com/docs/ | **协议**: MIT
+
+Nous Research 开发的自主进化型开源智能体，核心差异化在于 Skills 自主创建/迭代、分层记忆系统和 15 平台消息网关。Python 技术栈，48K+ Stars。
+与 OpenClaw 同为独立部署型智能体，但架构理念和扩展机制存在显著差异，对知行的记忆系统、技能进化、多平台架构设计有重要参考价值。
+
+| 文档 | 内容 | 状态 |
+|------|------|------|
+| 架构概述 | 整体架构鸟瞰图（三层入口 + AIAgent 核心 + 多后端） | 🔲 待分析 |
+| Agent 循环 | 核心对话循环（run_agent.py ~9,200 行） | 🔲 待分析 |
+| Skills 系统 | 自主创建/迭代/进化的技能系统（核心差异化） | 🔲 待分析 |
+| 记忆系统 | 分层记忆架构（MEMORY.md + SQLite + FTS5 + 用户建模） | 🔲 待分析 |
+| 消息网关 | 15 平台统一网关架构（gateway/run.py ~7,500 行） | 🔲 待分析 |
+| 上下文压缩 | 上下文压缩 + Anthropic 前缀缓存策略 | 🔲 待分析 |
+| 设计模式 | 关键设计模式提取（与 OpenClaw/Claude Code 交叉对比） | 🔲 待分析 |
+
 ## 分析规范
 
 - 使用 [`_templates/source-analysis.md`](../_templates/source-analysis.md) 模板

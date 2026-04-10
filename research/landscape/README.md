@@ -17,6 +17,7 @@
 |------|------|------|---------|------|
 | OpenClaw | 独立部署智能体 | 是 | [分析](./products/openclaw.md) | 🔲 待分析 |
 | Claude Code | CLI 编码智能体 | 否 | [分析](./products/claude-code.md) | 🔲 待分析 |
+| Hermes Agent | 自主进化型智能体 | 是 | [分析](./products/hermes-agent.md) | 🔄 分析中 |
 | Cursor | IDE 集成智能体 | 否 | [分析](./products/cursor.md) | 🔲 待分析 |
 | Windsurf | IDE 集成智能体 | 否 | [分析](./products/windsurf.md) | 🔲 待分析 |
 
