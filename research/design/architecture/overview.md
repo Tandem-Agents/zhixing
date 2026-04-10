@@ -2,12 +2,13 @@
 
 > 整体架构设计，随认知深化而持续演进
 
-## 状态：v0.7 — 容错引擎方案已确定（2026-04-08）
+## 状态：v0.8 — 常驻服务架构方案已确定（2026-04-10）
 
 ## 架构演进记录
 
 | 版本 | 日期 | 变更说明 | 触发的认知研究 |
 |------|------|---------|--------------|
+| v0.8 | 2026-04-10 | 常驻服务：入站/调度/出站三层架构、Server/CLI 双模式、Scheduler（并发控制+优先级+Active Hours）、Delivery Pipeline（持久化+去重+免打扰）、Channel Adapter 统一接口、三级渐进 Daemon、消除 Heartbeat 依赖 | [常驻服务架构设计](../specifications/persistent-service.md) |
 | v0.7 | 2026-04-08 | 容错引擎：指数退避、通用熔断器、错误分类、withRetry 包装器、可观测重试事件 | [容错引擎设计](../specifications/resilience-engine.md) |
 | v0.6 | 2026-04-07 | CLI 架构：渐进式三阶段演进、单体+预留 Gateway、MVP 终端方案、系统提示策略、会话管理、命令体系 | [q06-CLI 架构](../../_private/questions/q06-cli-architecture.md) |
 | v0.5 | 2026-04-07 | 工具系统：能力安全模型、隔离级别光谱、渐进信任、执行管线、协议/实现分离 | [q05-工具系统安全](../../_private/questions/q05-tool-system-security.md) |
@@ -121,6 +122,17 @@ graph TB
 | 通用 CircuitBreaker 原语 | 两者都硬编码限制，不可复用 | 已确认 |
 | 连接错误（ECONNRESET 等）同等重试 | Claude Code #1 用户报告问题就是连接错误不重试 | 已确认 |
 | 容错引擎架构 | 见 [容错引擎设计](../specifications/resilience-engine.md) | 已确认 |
+| Server/CLI 双运行模式 | Server（独立部署 + 社交平台接入）与 CLI（终端交互）同等重要；共享同一 Agent 内核 | 已确认 |
+| Server 入站/调度/出站三层分离 | 比 OpenClaw Gateway 单体更清晰，每层可独立测试和扩展 | 已确认 |
+| 应用内 Scheduler（非 OS crontab） | Agent 环境感知 + 自然语言创建 + 跨平台一致性 + 高级错误处理 | 已确认 |
+| 三级渐进 Daemon（前台→后台→OS 服务） | 降低门槛，每级独立有用；大部分用户停在 Level 1 | 已确认 |
+| 简化的 schedule 工具（3+1 概念） | OpenClaw cron 工具 10+ 概念；知行 Task+Schedule+Action+可选 Priority | 已确认 |
+| TaskAction 两种 + 可选 sessionId | agent-turn（默认独立 / 可选持续会话）+ system，覆盖 OpenClaw 4 种 sessionTarget | 已确认 |
+| 不需要 Heartbeat 机制 | OpenClaw 心跳是架构产物；知行直接执行 + Active Hours + Delivery Pipeline 覆盖所有真实需求 | 已确认 |
+| 独立 Delivery Pipeline | 持久化队列 + 去重 + Active Hours 过滤 + 重试；比 OpenClaw 分散投递更可靠 | 已确认 |
+| Active Hours 双层过滤 | Scheduler 层（省 LLM 调用）+ Delivery 层（不打扰用户），urgent 可穿透 | 已确认 |
+| Channel Adapter 独立包 | 统一接口 + 插件式加载，不污染核心包 | 已确认 |
+| 常驻服务架构 | 见 [常驻服务架构设计](../specifications/persistent-service.md) | 已确认 |
 
 ## 已决策的设计问题
 
@@ -455,3 +467,11 @@ MVP 只实现静态 system prompt。动态注入 Phase 2。
 | 韧性范围 | 通道重连各自实现 + 外层循环容错 | 仅 LLM 调用层 | **四层韧性模型**：通道 → 消息处理 → Agent 运行 → 服务，共享原语 |
 | 失败通知 | 无（CLI 打印） | 无（CLI 打印） | **降级回复**：通过通道主动告知用户 |
 | 消息丢失保护 | Gateway 排队 | 不存在此问题 | **本地持久化队列**（至少一次交付） |
+| 常驻架构 | Gateway 单体（Cron+Heartbeat+Queue 耦合，~130 文件） | 无 | **入站/调度/出站三层分离**（<30 文件） |
+| 心跳依赖 | 需要（~1200 行 + 32 文件） | 无 | **不需要**（直接执行覆盖所有需求） |
+| 定时任务创建 | cron 工具（AI 调用，10+ 参数概念） | 无 | **schedule 工具**（3+1 概念） |
+| 服务激活门槛 | `daemon install`（需理解 OS 服务） | 无 | **`zhixing serve`**（零配置） |
+| 免打扰 | heartbeat.activeHours（仅心跳级） | 无 | **双层过滤**（Scheduler + Delivery），urgent 穿透 |
+| 投递管线 | 分散多处、无持久化 | 无 | **独立 Delivery Pipeline**，持久化队列 |
+| 通道适配 | Channel Plugin（紧耦合 Gateway） | 无 | **ChannelAdapter 独立接口**，插件式加载 |
+| 运行模式 | 客户端-Gateway 分离 | 单次 CLI | **Server/CLI 双模式**（独立部署 + 终端接入，同等重要） |

@@ -10,6 +10,8 @@
 |---|---------|------|------|
 | 001 | Anthropic Messages 适配器 | [anthropic-adapter.md](anthropic-adapter.md) | 待审阅 |
 | 002 | Provider 层演进路线 | [provider-layer-evolution.md](provider-layer-evolution.md) | 待审阅 |
+| 003 | 记忆系统 | [memory-system.md](memory-system.md) | 待审阅 |
+| 004 | 常驻服务架构 | [persistent-service.md](persistent-service.md) | 待审阅 |
 
 ## 编写规范
 
