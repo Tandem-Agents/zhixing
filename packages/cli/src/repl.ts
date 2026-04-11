@@ -24,6 +24,8 @@ import {
   SkillsStore,
   PeopleStore,
   JournalStore,
+  inferEffectiveness,
+  applyEffectivenessUpdates,
 } from "@zhixing/core";
 import { type AgentSession, createSession } from "./run-agent.js";
 import {
@@ -423,6 +425,9 @@ export async function startRepl(options: ReplOptions): Promise<void> {
 
   await renderWelcome({ model: agentSession.model });
 
+  // 启动时检测 stale 技能，温和提醒
+  await checkStaleSkills();
+
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -482,7 +487,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     renderer.startThinking();
 
     try {
-      const { agentResult, newMessages, durationMs, budget, toolEndCount } =
+      const { agentResult, newMessages, durationMs, budget, toolEndCount, injectedSkillIds } =
         await agentSession.run({
           messages: [...state.messages],
           onYield: (e) => renderer.handleEvent(e),
@@ -497,6 +502,19 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       state.messages.push(...newMessages);
       state.lastToolEndCount = toolEndCount;
       renderSummary(agentResult, durationMs, budget);
+
+      // 效果推断：根据对话信号更新本轮注入的技能 effectiveness
+      if (injectedSkillIds.length > 0) {
+        const thisRoundMessages = [userMsg, ...newMessages];
+        inferEffectiveness(
+          { injectedSkillIds, turnMessages: thisRoundMessages },
+          new SkillsStore(),
+        ).then((result) => {
+          if (result.updates.length > 0) {
+            applyEffectivenessUpdates(result, new SkillsStore()).catch(() => {});
+          }
+        }).catch(() => {});
+      }
 
       // 持久化本轮对话
       if (state.sessionId) {
@@ -651,6 +669,33 @@ async function renderSkillsAudit(store: SkillsStore): Promise<void> {
 }
 
 // ─── 工具函数 ───
+
+async function checkStaleSkills(): Promise<void> {
+  try {
+    const skillsStore = new SkillsStore();
+    const all = await skillsStore.listAll();
+    if (all.length === 0) return;
+
+    const staleSkills = all.filter((s) => skillsStore.getStatus(s) === "stale");
+    const needsUpdateSkills = all.filter((s) => s.meta.effectiveness === "needs-update");
+
+    const issues: string[] = [];
+    if (staleSkills.length > 0) {
+      issues.push(`${staleSkills.length} 个技能超过 90 天未使用`);
+    }
+    if (needsUpdateSkills.length > 0) {
+      issues.push(`${needsUpdateSkills.length} 个技能需要更新`);
+    }
+
+    if (issues.length > 0) {
+      console.log(
+        chalk.dim(`  💡 ${issues.join("，")}。输入 /skills audit 查看详情\n`),
+      );
+    }
+  } catch {
+    // 静默——启动提醒不应阻塞 REPL
+  }
+}
 
 function formatRelativeTime(date: Date): string {
   const diff = Date.now() - date.getTime();

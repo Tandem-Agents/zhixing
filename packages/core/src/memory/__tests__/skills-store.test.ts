@@ -237,4 +237,73 @@ describe("SkillsStore", () => {
       expect(SkillsStore.formatForContext([])).toBe("");
     });
   });
+
+  // ─── 多维优先级排序 (M7b) ───
+
+  describe("matchByMessage priority sorting", () => {
+    it("helpful 技能排在 unknown 技能前面（同为 trigger 匹配）", async () => {
+      const today = new Date().toISOString().slice(0, 10);
+      await store.save("skill-helpful", makeMeta({
+        title: "Helpful Skill",
+        triggers: ["docker"],
+        effectiveness: "helpful",
+        lastUsedAt: today,
+      }), "...");
+
+      await store.save("skill-unknown", makeMeta({
+        title: "Unknown Skill",
+        triggers: ["docker compose"],
+        effectiveness: "unknown",
+        lastUsedAt: today,
+      }), "...");
+
+      const matches = await store.matchByMessage("docker compose 问题");
+      expect(matches.length).toBe(2);
+      expect(matches[0]!.skill.id).toBe("skill-helpful");
+    });
+
+    it("needs-update 技能排在最后", async () => {
+      const today = new Date().toISOString().slice(0, 10);
+      await store.save("good", makeMeta({
+        title: "Good",
+        triggers: ["nginx"],
+        effectiveness: "helpful",
+        lastUsedAt: today,
+      }), "...");
+
+      await store.save("outdated", makeMeta({
+        title: "Outdated",
+        triggers: ["nginx config"],
+        effectiveness: "needs-update",
+        lastUsedAt: today,
+      }), "...");
+
+      const matches = await store.matchByMessage("nginx config 配置");
+      expect(matches.length).toBe(2);
+      expect(matches[matches.length - 1]!.skill.id).toBe("outdated");
+    });
+
+    it("最近使用的技能优先于长期未使用的", async () => {
+      const today = new Date().toISOString().slice(0, 10);
+      const oldDate = "2024-01-01";
+
+      await store.save("fresh", makeMeta({
+        title: "Fresh",
+        triggers: ["git rebase"],
+        effectiveness: "unknown",
+        lastUsedAt: today,
+      }), "...");
+
+      await store.save("stale", makeMeta({
+        title: "Stale",
+        triggers: ["git rebase onto"],
+        effectiveness: "unknown",
+        lastUsedAt: oldDate,
+      }), "...");
+
+      const matches = await store.matchByMessage("git rebase onto main");
+      expect(matches.length).toBe(2);
+      expect(matches[0]!.skill.id).toBe("fresh");
+    });
+  });
 });

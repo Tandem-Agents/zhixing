@@ -76,6 +76,8 @@ export interface RunResult {
   budget?: ContextBudget;
   /** 本轮工具调用完成次数（tool_end 事件数），用于反思触发 */
   toolEndCount: number;
+  /** 本轮注入的技能 ID 列表（用于效果推断） */
+  injectedSkillIds: string[];
 }
 
 // ─── 创建会话 ───
@@ -243,6 +245,7 @@ export async function createSession(options: {
             durationMs: Date.now() - startTime,
             budget,
             toolEndCount,
+            injectedSkillIds: enrichedContext.injectedSkillIds,
           };
         }
 

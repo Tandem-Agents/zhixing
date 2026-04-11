@@ -88,6 +88,9 @@
 | /skills audit | `@zhixing/cli` | ✅ 已完成 | 健康报告+archive/restore/delete 子命令 |
 | 系统提示（技能进化） | `@zhixing/cli` | ✅ 已完成 | Skill Evolution 指导段+5 个测试通过 |
 | Flush 管线集成 | `@zhixing/cli` | ✅ 已完成 | MemoryFlushStrategy 注入策略链（priority=3） |
+| 效果推断 (M7a) | `@zhixing/core` | ✅ 已完成 | 19 个测试通过（否定检测+推断+持久化） |
+| 检索优先级排序 (M7b) | `@zhixing/core` | ✅ 已完成 | 23 个测试通过（精确度×效果×新鲜度多维排序） |
+| CLI Stale 提醒 (M7c) | `@zhixing/cli` | ✅ 已完成 | 启动时 stale+needs-update 检测 |
 
 ## 里程碑
 
@@ -113,6 +116,7 @@
 - [x] **M20**: 技能进化系统设计 → 四阶段生命周期 + 反思提议 + 使用追踪 + 治理 ✅ 2026-04-10
 - [x] **M21**: 记忆系统全实现 → M1-M6 全部通过（139 个测试）+ Memory 工具 + CLI 集成 ✅ 2026-04-10
 - [x] **M22**: /skills audit + Memory Flush (L1.5) → 治理闭环 + 压缩时自动提取记忆 ✅ 2026-04-10
+- [x] **M23**: M7 效果反馈闭环 → 效果推断 + 检索优先级排序 + CLI stale 提醒（210 个测试通过） ✅ 2026-04-10
 
 ---
 

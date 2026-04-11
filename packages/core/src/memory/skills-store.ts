@@ -218,13 +218,8 @@ export class SkillsStore {
       }
     }
 
-    // trigger 匹配优先于 tag 匹配
-    matches.sort((a, b) => {
-      if (a.matchType !== b.matchType) {
-        return a.matchType === "trigger" ? -1 : 1;
-      }
-      return 0;
-    });
+    // 多维优先级排序：精确度 × 效果 × 新鲜度
+    matches.sort((a, b) => scoreMatch(b) - scoreMatch(a));
 
     return matches;
   }
@@ -448,4 +443,47 @@ export class SkillsStore {
 
     return { id, meta, content: parsed.content, filePath };
   }
+}
+
+// ─── 匹配评分 ───
+
+const MATCH_TYPE_SCORE: Record<SkillMatch["matchType"], number> = {
+  trigger: 1.0,
+  tag: 0.5,
+};
+
+const EFFECTIVENESS_SCORE: Record<SkillEffectiveness, number> = {
+  helpful: 1.0,
+  unknown: 0.8,
+  "needs-update": 0.5,
+  "possibly-irrelevant": 0.3,
+};
+
+const MS_PER_DAY = 86400000;
+const FRESH_DAYS = 30;
+const STALE_DAYS = 90;
+
+/**
+ * 多维优先级评分：精确度 × 效果 × 新鲜度。
+ * 分数越高，排序越靠前。
+ */
+function scoreMatch(match: SkillMatch): number {
+  const precisionScore = MATCH_TYPE_SCORE[match.matchType];
+  const effectScore = EFFECTIVENESS_SCORE[match.skill.meta.effectiveness];
+
+  const lastActive = match.skill.meta.lastUsedAt
+    ? new Date(match.skill.meta.lastUsedAt).getTime()
+    : new Date(match.skill.meta.created).getTime();
+  const daysSince = Math.max(0, (Date.now() - lastActive) / MS_PER_DAY);
+
+  let freshnessScore: number;
+  if (daysSince <= FRESH_DAYS) {
+    freshnessScore = 1.0;
+  } else if (daysSince <= STALE_DAYS) {
+    freshnessScore = 0.8;
+  } else {
+    freshnessScore = 0.5;
+  }
+
+  return precisionScore * effectScore * freshnessScore;
 }
