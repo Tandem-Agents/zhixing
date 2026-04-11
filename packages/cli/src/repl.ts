@@ -22,6 +22,8 @@ import {
   loadProfile,
   getMemoryDir,
   SkillsStore,
+  PeopleStore,
+  JournalStore,
 } from "@zhixing/core";
 import { type AgentSession, createSession } from "./run-agent.js";
 import {
@@ -43,6 +45,10 @@ interface ReplState {
   store: InstanceType<typeof SessionStore>;
   sessionId: string | null;
   turnCounter: number;
+  /** 上一轮的工具调用完成数（用于反思触发） */
+  lastToolEndCount: number;
+  /** 本会话是否已提议过技能（每会话最多 1 次） */
+  hasProposedSkill: boolean;
 }
 
 // ─── 会话恢复选项 ───
@@ -212,6 +218,63 @@ function buildSlashCommands(rl: readline.Interface): Record<
         console.log();
       },
     },
+    "/journal": {
+      description: "查看日志状态",
+      handler: async () => {
+        const jStore = new JournalStore();
+        const plan = await jStore.scan();
+        const { stats, condensePlan, expiredFiles } = plan;
+
+        if (stats.totalFiles === 0) {
+          console.log(
+            `\n${chalk.dim("  日志为空。对话中的信息将自动记录到日志中。\n")}`,
+          );
+          return;
+        }
+
+        console.log(`\n${chalk.bold("  日志状态")} ${chalk.dim(`(${stats.totalFiles} 文件)`)}`);
+        console.log(`  ${chalk.green("●")} 热 (≤30天): ${stats.hotCount}`);
+        console.log(`  ${chalk.yellow("●")} 温 (>30天): ${stats.warmCount}`);
+        console.log(`  ${chalk.blue("●")} 凝练: ${stats.condensedCount}`);
+
+        if (expiredFiles.length > 0) {
+          console.log(`  ${chalk.red("●")} 过期待删除: ${expiredFiles.length}`);
+        }
+        if (condensePlan) {
+          const monthCount = condensePlan.months.length;
+          const fileCount = condensePlan.months.reduce((sum: number, m: { files: string[] }) => sum + m.files.length, 0);
+          console.log(
+            chalk.dim(`\n  💡 ${fileCount} 条日志（${monthCount} 个月）待凝练，首轮对话后自动执行`),
+          );
+        }
+        console.log();
+      },
+    },
+    "/people": {
+      description: "查看关系网络",
+      handler: async () => {
+        const store = new PeopleStore();
+        const people = await store.listAll();
+
+        if (people.length === 0) {
+          console.log(
+            `\n${chalk.dim("  关系网络为空。")}` +
+              `\n${chalk.dim('  对话中说"记住小丽是我女朋友"可以添加关系人。\n')}`,
+          );
+          return;
+        }
+
+        console.log(`\n${chalk.bold("  关系网络")} ${chalk.dim(`(${people.length} 人)`)}`);
+        for (const person of people) {
+          const relation = chalk.dim(` (${person.meta.relation})`);
+          const birthday = person.meta.birthday ? chalk.dim(` 🎂 ${person.meta.birthday}`) : "";
+          console.log(
+            `  ${chalk.cyan("•")} ${person.meta.name}${relation}${birthday}`,
+          );
+        }
+        console.log();
+      },
+    },
     "/usage": {
       description: "查看 token 用量详情",
       handler: (state) => {
@@ -334,6 +397,8 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     store,
     sessionId,
     turnCounter,
+    lastToolEndCount: 0,
+    hasProposedSkill: false,
   };
 
   const slashCommands = buildSlashCommands(rl);
@@ -378,15 +443,20 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     renderer.startThinking();
 
     try {
-      const { agentResult, newMessages, durationMs, budget } =
+      const { agentResult, newMessages, durationMs, budget, toolEndCount } =
         await agentSession.run({
           messages: [...state.messages],
           onYield: (e) => renderer.handleEvent(e),
           onBeforeEventRender: () => renderer.stop(),
+          enrichOptions: {
+            lastToolEndCount: state.lastToolEndCount,
+            hasProposedSkill: state.hasProposedSkill,
+          },
         });
 
       renderer.stop();
       state.messages.push(...newMessages);
+      state.lastToolEndCount = toolEndCount;
       renderSummary(agentResult, durationMs, budget);
 
       // 持久化本轮对话

@@ -42,7 +42,7 @@ import {
   renderCompactEnd,
 } from "./render.js";
 import { buildSystemPrompt } from "./system-prompt.js";
-import { loadProjectContext, injectContext, enrichContextWithSkills } from "./project-context.js";
+import { loadProjectContext, injectContext, enrichContext, type EnrichOptions } from "./project-context.js";
 
 // ─── 类型 ───
 
@@ -61,6 +61,8 @@ export interface RunParams {
   onYield?: (event: AgentYield) => void;
   /** 在渲染 EventBus 事件（重试/预算）前调用，用于暂停 spinner 等 UI 动画 */
   onBeforeEventRender?: () => void;
+  /** 反思相关选项（上一轮工具调用数、是否已提议过） */
+  enrichOptions?: EnrichOptions;
 }
 
 export interface RunResult {
@@ -70,6 +72,8 @@ export interface RunResult {
   durationMs: number;
   /** 运行结束后的上下文预算快照（渐进式摘要行使用） */
   budget?: ContextBudget;
+  /** 本轮工具调用完成次数（tool_end 事件数），用于反思触发 */
+  toolEndCount: number;
 }
 
 // ─── 创建会话 ───
@@ -135,6 +139,7 @@ export async function createSession(options: {
       // 收集本轮产生的新消息，用于 REPL 对话历史
       const newMessages: Message[] = [];
       let pendingToolResults: ToolResultBlock[] = [];
+      let toolEndCount = 0;
 
       // 通过 deps.callLLM 注入容错能力，agent-loop.ts 零修改
       const resilientCallLLM = withRetry(
@@ -180,10 +185,14 @@ export async function createSession(options: {
         renderCompactEnd(info);
       });
 
-      // 根据最后一条用户消息检索匹配的技能
-      const enrichedContext = await enrichContextWithSkills(projectContext, params.messages);
+      // 根据最后一条用户消息检索匹配的技能 + 反思提示
+      const enrichedContext = await enrichContext(
+        projectContext,
+        params.messages,
+        params.enrichOptions,
+      );
 
-      // 将项目上下文 + 匹配的技能注入到首条 user message
+      // 将项目上下文 + 匹配的技能 + 反思提示注入到首条 user message
       const messagesWithContext = injectContext(params.messages, enrichedContext);
 
       const gen = runAgentLoop({
@@ -217,6 +226,7 @@ export async function createSession(options: {
             newMessages,
             durationMs: Date.now() - startTime,
             budget,
+            toolEndCount,
           };
         }
 
@@ -224,6 +234,7 @@ export async function createSession(options: {
         params.onYield?.(value);
 
         // 追踪消息以维护对话历史
+        if (value.type === "tool_end") toolEndCount++;
         trackMessages(value, newMessages, pendingToolResults);
       }
     },

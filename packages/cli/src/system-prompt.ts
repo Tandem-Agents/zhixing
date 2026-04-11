@@ -1,21 +1,23 @@
 /**
  * 系统提示词组装
  *
- * 五段式结构 + 缓存分界标记：
+ * 六段式结构 + 缓存分界标记：
  *
- * ┌─ 静态区（Stable Prefix，可跨会话缓存）────┐
- * │ 1. Identity    — 身份定义（2 句话）      │
- * │ 2. Principles  — 工作原则               │
- * │ 3. Tool Usage  — 从工具列表动态生成      │
- * │ 4. Style       — 输出风格               │
- * │ 5. Safety      — 安全边界               │
- * ├─ __ZHIXING_CACHE_BOUNDARY__ ───────────┤
- * │ 6. Environment — 工作目录、平台（每会话）│
- * └────────────────────────────────────────┘
+ * ┌─ 静态区（Stable Prefix，可跨会话缓存）─────────┐
+ * │ 1. Identity         — 身份定义（2 句话）      │
+ * │ 2. Principles       — 工作原则               │
+ * │ 3. Tool Usage       — 从工具列表动态生成      │
+ * │ 4. Skill Evolution  — 技能进化指导            │
+ * │ 5. Style            — 输出风格               │
+ * │ 6. Safety           — 安全边界               │
+ * ├─ __ZHIXING_CACHE_BOUNDARY__ ────────────────┤
+ * │ 7. Environment      — 工作目录、平台（每会话）│
+ * └──────────────────────────────────────────────┘
  *
  * 设计决策（详见 research/design/specifications/prompt-system.md）：
  * - 缓存分界借鉴 Claude Code / OpenClaw，静态区不含任何会话特有信息
  * - 工具使用段从注册的工具列表动态生成，添加/移除工具时自动适应
+ * - 技能进化指导引导 Agent 在复杂任务后反思并提议保存/更新技能
  * - 环境信息放在分界后（每个项目不同），保护静态区缓存前缀
  * - ZHIXING.md 等项目上下文不进 system prompt，通过 <context> 注入 user messages
  */
@@ -50,6 +52,7 @@ export function buildSystemPrompt(ctx: PromptBuildContext): string {
     buildIdentity(),
     buildPrinciples(),
     buildToolUsage(ctx.tools),
+    buildSkillEvolution(ctx.tools),
     buildStyle(),
     buildSafety(),
   ];
@@ -145,6 +148,46 @@ function buildSafety(): string {
 - Never execute destructive commands (rm -rf /, DROP DATABASE, etc.) without explicit user request
 - Do not access files outside the working directory unless the user's intent is clear
 - Refuse requests that could compromise system security`;
+}
+
+// ─── Segment 4: Skill Evolution（仅当 memory 工具注册时生效） ───
+
+/**
+ * 技能进化指导。
+ *
+ * 引导 Agent 在复杂任务后反思并提议保存/更新技能。
+ * 这不是后台静默操作（区别于 Hermes），而是在回复中自然提议，用户确认后执行。
+ * 零额外 LLM 成本——反思是最终回复的一部分。
+ */
+function buildSkillEvolution(tools: ToolDefinition[]): string {
+  const hasMemory = tools.some((t) => t.name === "memory");
+  if (!hasMemory) return "";
+
+  return `## Skill Evolution
+After completing a complex task (one that required multiple tool calls, trial-and-error, or iterative problem-solving), reflect on whether the approach contains a reusable methodology.
+
+Ask yourself:
+- Did I discover a non-obvious approach through trial and error?
+- Did the user correct my initial approach, revealing a better method?
+- Does a similar skill already exist that should be updated with new learnings?
+
+If the approach is worth saving, propose it naturally at the end of your response:
+
+  "💡 这个过程中我总结了一套方法，要存为技能吗？
+   名称：[skill name]
+   适用场景：[when this would be useful]
+   核心要点：[brief summary]"
+
+If you used an existing skill but found improvements, propose an update:
+
+  "💡 我发现之前的技能「[name]」可以改进，要更新吗？
+   改进点：[what changed]"
+
+Rules:
+- Never silently create or update skills — always propose and wait for confirmation
+- At most one skill proposal per conversation
+- Only propose after complex tasks, not simple Q&A
+- When the user confirms, use the \`memory\` tool with action "save" and category "skill"`;
 }
 
 // ─── Dynamic: Environment ───

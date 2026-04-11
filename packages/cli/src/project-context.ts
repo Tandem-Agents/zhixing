@@ -29,6 +29,10 @@ export interface ProjectContext {
   profile: ProfileData | null;
   /** 动态注入的额外上下文（如匹配的技能），每次对话设置 */
   dynamicContext: string | null;
+  /** 本轮注入的技能 ID 列表（用于更新提议） */
+  injectedSkillIds: string[];
+  /** 反思提示（当上一轮 toolEndCount >= threshold 时注入） */
+  reflectionHint: string | null;
 }
 
 // ─── 加载 ───
@@ -46,16 +50,28 @@ export async function loadProjectContext(cwd: string): Promise<ProjectContext> {
   ]);
   const date = new Date().toISOString().slice(0, 10);
 
-  return { instructions, date, profile, dynamicContext: null };
+  return { instructions, date, profile, dynamicContext: null, injectedSkillIds: [], reflectionHint: null };
+}
+
+/** 反思触发阈值：toolEndCount >= 此值时注入反思提示 */
+export const REFLECTION_THRESHOLD = 8;
+
+export interface EnrichOptions {
+  /** 上一轮的 toolEndCount（用于判断是否触发反思） */
+  lastToolEndCount?: number;
+  /** 本会话是否已经提议过技能（每会话最多 1 次） */
+  hasProposedSkill?: boolean;
 }
 
 /**
- * 根据最后一条用户消息检索匹配的技能，设置到 projectContext.dynamicContext。
+ * 根据最后一条用户消息检索匹配的技能，
+ * 并在合适时机注入反思提示到 dynamicContext。
  * 每次 run() 前调用。
  */
-export async function enrichContextWithSkills(
+export async function enrichContext(
   context: ProjectContext,
   messages: readonly Message[],
+  options: EnrichOptions = {},
 ): Promise<ProjectContext> {
   const lastUser = [...messages].reverse().find((m) => m.role === "user");
   if (!lastUser) return context;
@@ -67,13 +83,68 @@ export async function enrichContextWithSkills(
 
   if (!userText.trim()) return context;
 
+  // 检索匹配的技能
   const retriever = new MemoryRetriever();
   const result = await retriever.retrieve(userText);
 
+  const dynamicParts: string[] = [];
+  const injectedSkillIds: string[] = [];
+
+  if (result.contextText) {
+    dynamicParts.push(result.contextText);
+    injectedSkillIds.push(...result.skills.map((s) => s.skill.id));
+  }
+
+  // 反思提示：上一轮复杂任务后，且本会话未提议过
+  const reflectionHint = buildReflectionHint(options, injectedSkillIds);
+  if (reflectionHint) {
+    dynamicParts.push(reflectionHint);
+  }
+
   return {
     ...context,
-    dynamicContext: result.contextText,
+    dynamicContext: dynamicParts.length > 0 ? dynamicParts.join("\n\n") : null,
+    injectedSkillIds,
+    reflectionHint,
   };
+}
+
+/**
+ * 向后兼容：enrichContextWithSkills 代理到 enrichContext。
+ * @deprecated 使用 enrichContext 代替
+ */
+export async function enrichContextWithSkills(
+  context: ProjectContext,
+  messages: readonly Message[],
+): Promise<ProjectContext> {
+  return enrichContext(context, messages);
+}
+
+/**
+ * 构建反思提示。
+ * 仅在上一轮 toolEndCount >= threshold 且本会话未提议过时返回。
+ */
+function buildReflectionHint(
+  options: EnrichOptions,
+  injectedSkillIds: string[],
+): string | null {
+  const { lastToolEndCount = 0, hasProposedSkill = false } = options;
+
+  if (hasProposedSkill) return null;
+  if (lastToolEndCount < REFLECTION_THRESHOLD) return null;
+
+  const lines = [
+    "# Reflection Hint",
+    `The previous task involved ${lastToolEndCount} tool calls, indicating a complex problem-solving process.`,
+    "Consider whether this experience contains a reusable methodology worth saving as a skill.",
+  ];
+
+  if (injectedSkillIds.length > 0) {
+    lines.push(`Skills used this session: ${injectedSkillIds.join(", ")}`);
+    lines.push("If you found improvements to any of these skills, propose an update.");
+  }
+
+  return lines.join("\n");
 }
 
 async function loadInstructions(cwd: string): Promise<string | null> {
