@@ -113,6 +113,11 @@ function buildToolUsage(tools: ToolDefinition[]): string {
   if (names.has("bash")) {
     lines.push("- Use `bash` for system commands, package management, git operations, and tasks not covered by other tools");
   }
+  if (names.has("memory")) {
+    lines.push("- Use `memory` to save, search, and manage the user's persistent memories (identity, relationships, skills)");
+    lines.push("- When the user says \"remember this\" or shares personal info, save it with `memory`");
+    lines.push("- Always confirm before saving new memories, unless the user explicitly asked you to remember");
+  }
 
   // 通用原则（不依赖具体工具名）
   if (tools.some((t) => t.isParallelSafe)) {

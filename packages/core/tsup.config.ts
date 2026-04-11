@@ -9,6 +9,7 @@ export default defineConfig({
     "src/resilience/index.ts",
     "src/context/index.ts",
     "src/session/index.ts",
+    "src/memory/index.ts",
   ],
   format: ["esm"],
   dts: true,

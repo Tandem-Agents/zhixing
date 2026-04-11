@@ -1,9 +1,19 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { loadProjectContext, injectContext, type ProjectContext } from "../project-context.js";
 import type { Message } from "@zhixing/core";
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
+
+// Mock @zhixing/core 的 loadProfile，避免测试依赖真实文件系统的 ~/.zhixing/me/
+vi.mock("@zhixing/core", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@zhixing/core")>();
+  return {
+    ...actual,
+    loadProfile: vi.fn().mockResolvedValue(null),
+  };
+});
+
+import { loadProjectContext, injectContext, type ProjectContext } from "../project-context.js";
 
 // ─── 辅助 ───
 

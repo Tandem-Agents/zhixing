@@ -15,7 +15,8 @@
 
 import fs from "node:fs/promises";
 import path from "node:path";
-import type { Message } from "@zhixing/core";
+import type { Message, ProfileData } from "@zhixing/core";
+import { loadProfile, formatProfileForContext, MemoryRetriever } from "@zhixing/core";
 
 // ─── 类型 ───
 
@@ -24,6 +25,10 @@ export interface ProjectContext {
   instructions: string | null;
   /** 当前日期（YYYY-MM-DD） */
   date: string;
+  /** 用户身份画像（~/.zhixing/me/profile.md），null 表示未配置 */
+  profile: ProfileData | null;
+  /** 动态注入的额外上下文（如匹配的技能），每次对话设置 */
+  dynamicContext: string | null;
 }
 
 // ─── 加载 ───
@@ -35,10 +40,40 @@ export interface ProjectContext {
  * 两级都不存在时 instructions 为 null。
  */
 export async function loadProjectContext(cwd: string): Promise<ProjectContext> {
-  const instructions = await loadInstructions(cwd);
+  const [instructions, profile] = await Promise.all([
+    loadInstructions(cwd),
+    loadProfile(),
+  ]);
   const date = new Date().toISOString().slice(0, 10);
 
-  return { instructions, date };
+  return { instructions, date, profile, dynamicContext: null };
+}
+
+/**
+ * 根据最后一条用户消息检索匹配的技能，设置到 projectContext.dynamicContext。
+ * 每次 run() 前调用。
+ */
+export async function enrichContextWithSkills(
+  context: ProjectContext,
+  messages: readonly Message[],
+): Promise<ProjectContext> {
+  const lastUser = [...messages].reverse().find((m) => m.role === "user");
+  if (!lastUser) return context;
+
+  const userText = lastUser.content
+    .filter((b): b is { type: "text"; text: string } => b.type === "text")
+    .map((b) => b.text)
+    .join(" ");
+
+  if (!userText.trim()) return context;
+
+  const retriever = new MemoryRetriever();
+  const result = await retriever.retrieve(userText);
+
+  return {
+    ...context,
+    dynamicContext: result.contextText,
+  };
 }
 
 async function loadInstructions(cwd: string): Promise<string | null> {
@@ -118,8 +153,16 @@ export function injectContext(
 function buildContextBlock(context: ProjectContext): string | null {
   const sections: string[] = [];
 
+  if (context.profile) {
+    sections.push(formatProfileForContext(context.profile));
+  }
+
   if (context.instructions) {
     sections.push(`# Project Instructions (ZHIXING.md)\n${context.instructions}`);
+  }
+
+  if (context.dynamicContext) {
+    sections.push(context.dynamicContext);
   }
 
   sections.push(`# Current Date\n${context.date}`);

@@ -19,6 +19,9 @@ import {
   type Message,
   type SessionTurn,
   SessionStore,
+  loadProfile,
+  getMemoryDir,
+  SkillsStore,
 } from "@zhixing/core";
 import { type AgentSession, createSession } from "./run-agent.js";
 import {
@@ -144,6 +147,69 @@ function buildSlashCommands(rl: readline.Interface): Record<
         }
         await state.store.rename(state.sessionId, args.trim());
         console.log(chalk.dim(`会话已命名为: ${args.trim()}\n`));
+      },
+    },
+    "/me": {
+      description: "查看身份画像",
+      handler: async () => {
+        const profile = await loadProfile();
+        if (!profile) {
+          const memDir = getMemoryDir();
+          console.log(
+            `\n${chalk.dim("  未找到身份画像。")}` +
+              `\n${chalk.dim(`  创建 ${memDir}/profile.md 来设置你的身份信息。`)}` +
+              `\n\n${chalk.dim("  示例内容：")}` +
+              `\n${chalk.dim("  ---")}` +
+              `\n${chalk.dim("  name: 你的名字")}` +
+              `\n${chalk.dim("  language: zh-CN")}` +
+              `\n${chalk.dim("  ---")}` +
+              `\n${chalk.dim("  ## 技术栈")}` +
+              `\n${chalk.dim("  TypeScript, React, Node.js\n")}`,
+          );
+          return;
+        }
+        console.log(`\n${chalk.bold("  身份画像")}`);
+        console.log(`  ${chalk.dim("Name:")} ${chalk.cyan(profile.meta.name)}`);
+        if (profile.meta.language) {
+          console.log(`  ${chalk.dim("Language:")} ${profile.meta.language}`);
+        }
+        if (profile.meta.timezone) {
+          console.log(`  ${chalk.dim("Timezone:")} ${profile.meta.timezone}`);
+        }
+        if (profile.content) {
+          console.log();
+          for (const line of profile.content.split("\n")) {
+            console.log(`  ${line}`);
+          }
+        }
+        console.log();
+      },
+    },
+    "/skills": {
+      description: "查看技能库",
+      handler: async () => {
+        const store = new SkillsStore();
+        const skills = await store.listAll();
+
+        if (skills.length === 0) {
+          console.log(
+            `\n${chalk.dim("  技能库为空。")}` +
+              `\n${chalk.dim('  对话中说"存为技能"可以保存方法论。\n')}`,
+          );
+          return;
+        }
+
+        console.log(`\n${chalk.bold("  技能库")} ${chalk.dim(`(${skills.length} 个)`)}`);
+        for (const skill of skills) {
+          const tags = skill.meta.tags.length > 0
+            ? chalk.dim(` [${skill.meta.tags.join(", ")}]`)
+            : "";
+          const usage = chalk.dim(` (使用 ${skill.meta.useCount} 次)`);
+          console.log(
+            `  ${chalk.cyan("•")} ${skill.meta.title}${tags}${usage}`,
+          );
+        }
+        console.log();
       },
     },
     "/usage": {

@@ -31,6 +31,10 @@
     "./session": {
       "types": "./dist/session/index.d.ts",
       "import": "./dist/session/index.js"
+    },
+    "./memory": {
+      "types": "./dist/memory/index.d.ts",
+      "import": "./dist/memory/index.js"
     }
   },
   "files": [

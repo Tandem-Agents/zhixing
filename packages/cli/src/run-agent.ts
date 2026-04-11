@@ -31,6 +31,7 @@ import {
   createGlobTool,
   createGrepTool,
   createBashTool,
+  createMemoryTool,
 } from "@zhixing/tools-builtin";
 import {
   renderRetryAttempt,
@@ -41,7 +42,7 @@ import {
   renderCompactEnd,
 } from "./render.js";
 import { buildSystemPrompt } from "./system-prompt.js";
-import { loadProjectContext, injectContext } from "./project-context.js";
+import { loadProjectContext, injectContext, enrichContextWithSkills } from "./project-context.js";
 
 // ─── 类型 ───
 
@@ -94,6 +95,7 @@ export async function createSession(options: {
     createGlobTool(),
     createGrepTool(),
     createBashTool(),
+    createMemoryTool(),
   ];
   const systemPrompt = buildSystemPrompt({ tools, cwd });
 
@@ -178,8 +180,11 @@ export async function createSession(options: {
         renderCompactEnd(info);
       });
 
-      // 将项目上下文注入到首条 user message（不修改 system prompt，保护缓存前缀）
-      const messagesWithContext = injectContext(params.messages, projectContext);
+      // 根据最后一条用户消息检索匹配的技能
+      const enrichedContext = await enrichContextWithSkills(projectContext, params.messages);
+
+      // 将项目上下文 + 匹配的技能注入到首条 user message
+      const messagesWithContext = injectContext(params.messages, enrichedContext);
 
       const gen = runAgentLoop({
         provider,

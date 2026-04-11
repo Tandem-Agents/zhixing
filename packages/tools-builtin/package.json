@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "知行内置工具集 — Read、Write、Edit、Glob、Grep、Bash",
   "type": "module",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

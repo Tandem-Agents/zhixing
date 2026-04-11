@@ -4,3 +4,4 @@ export * from "./loop/index.js";
 export * from "./resilience/index.js";
 export * from "./context/index.js";
 export * from "./session/index.js";
+export * from "./memory/index.js";
