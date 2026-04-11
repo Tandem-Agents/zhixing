@@ -190,6 +190,8 @@ tags: [family, important]
 
 #### 支柱 3：技能沉淀（Skills）
 
+> **进化能力**：技能不仅是静态存储，还具备完整的进化生命周期。详见 [技能进化系统设计方案](./skills-evolution.md)。
+
 **文件**：`~/.zhixing/me/skills/<slug>.md`
 
 ```markdown
@@ -198,7 +200,21 @@ title: Docker 容器网络调试
 tags: [docker, networking, debug]
 triggers: ["docker network", "容器连不上", "port mapping"]
 created: 2025-06-15
-source: conversation
+updated: 2025-08-03
+source: reflection
+version: 3
+useCount: 7
+lastUsedAt: 2025-08-01
+effectiveness: helpful
+revisions:
+  - version: 1
+    date: 2025-06-15
+    reason: initial
+    summary: "基础排查步骤：检查网络模式、验证 DNS、检查端口映射"
+  - version: 3
+    date: 2025-08-03
+    reason: reflection-update
+    summary: "补充 Docker Compose 网络排查方法"
 ---
 
 ## 问题特征
@@ -217,10 +233,17 @@ source: conversation
 
 **triggers 设计理念**：Skill 不是被动的笔记，而是有"触发条件"的能力单元。当用户遇到匹配的问题时，AI 自动获得这个技能加持，无需用户主动想起。
 
-**与 OpenClaw Skills 的差异**：
-- OpenClaw Skills 是静态的、手动维护的
-- 知行 Skills 可以从对话中提取（AI 提议，用户确认）
-- 知行 Skills 有 `triggers` 做自动匹配，OpenClaw Skills 依赖 prompt 注入
+**进化能力**（详见 [技能进化系统](./skills-evolution.md)）：
+- **4 种创建路径**：显式创建、反思提议、Flush 分流、凝练晋升——全部经过用户确认
+- **使用追踪**：useCount、lastUsedAt、effectiveness，提供技能质量的数据依据
+- **版本迭代**：发现更优方法时提议更新，保留修订历史
+- **生命周期治理**：Active → Stale（90 天未使用）→ Archived，通过 `/skills audit` 管理
+- **安全扫描**：写入前检测注入/外泄威胁模式
+
+**与竞品的差异**：
+- OpenClaw Skills 是静态的、手动维护的、无进化
+- Hermes Skills 有自主进化但**静默写入**——后台子 Agent 不经用户确认直接创建/更新
+- 知行 Skills 兼具进化能力和透明度——Agent 反思 + 提议，用户确认后执行
 
 ### 3.4 暂存层：Journal（对话日志）
 
@@ -679,32 +702,40 @@ interface MemoryToolInput {
 ## 七、"越用越聪明" 的演进路径
 
 ```
-Phase M1-M4: 显式记忆
+Phase M1-M4: 显式记忆 + 进化基础
 用户主动说 "记住" → AI 保存 → 后续对话自动引用
+技能含版本追踪 + 使用追踪 + 安全扫描 + 归档治理
                                     │
-Phase M5: 主动提议                   │
+Phase M5: 主动提议 + 反思触发         │
 AI 检测有价值信息 → 提议保存 → 用户确认 → 保存
+复杂任务后(8+工具调用) → Agent 反思 → 提议新建/更新技能
                                     │
 Phase M6: Journal + Auto Flush       │
 上下文满时 → 自动提取 → 分流到三支柱 + journal/日期.md
 journal 生命周期：日 → 月凝练 → 12 月淘汰
+凝练时发现 SKILL_CANDIDATE → 草拟完整技能 → 用户确认晋升
                                     │
-Phase M7: 召回优化（未来）            │
-跟踪 skill 被引用次数 → 高频技能优先注入 → 低频技能降级
+Phase M7: 召回优化 + 效果反馈（未来）  │
+使用追踪 → 效果推断 → 高效技能优先注入 → Stale 检测 → /skills audit
 ```
 
 **与竞品的对比**：
 
-| 阶段 | OpenClaw | Claude Code | 知行 |
-|------|----------|-------------|------|
-| 显式记忆 | ❌（无记忆工具） | ❌（无记忆工具） | ✅ Phase M2 |
-| 主动提议 | ❌ | ❌ | ✅ Phase M5 |
-| 自动提取 | ✅ Memory Flush（无结构） | ✅ Auto Memory（无结构） | ✅ Phase M6（结构化分流） |
-| 记忆衰减 | ❌（无限累积） | ❌（无限累积） | ✅ Journal 生命周期 |
-| 召回优化 | ✅ Dreaming | ❌ | ✅ Phase M7 |
-| 结构化分类 | ❌（自由文本） | ❌（自由文本） | ✅ 三支柱 |
-| 关系感知 | ❌ | ❌ | ✅ Phase M3 |
-| 技能沉淀 | △（静态 Skills） | ❌ | ✅ Phase M4 |
+| 阶段 | OpenClaw | Claude Code | Hermes | 知行 |
+|------|----------|-------------|--------|------|
+| 显式记忆 | ❌（无记忆工具） | ❌（无记忆工具） | ✅ memory 工具 | ✅ Phase M2 |
+| 主动提议 | ❌ | ❌ | △（系统提示引导） | ✅ Phase M5（提议+确认） |
+| 自动提取 | ✅ Flush（无结构） | ✅ Auto Memory（无结构） | ✅ flush_memories | ✅ Phase M6（结构化分流） |
+| 记忆衰减 | ❌（无限累积） | ❌（无限累积） | ❌（无限累积） | ✅ Journal 生命周期 |
+| 召回优化 | ✅ Dreaming | ❌ | ❌ | ✅ Phase M7 |
+| 结构化分类 | ❌（自由文本） | ❌（自由文本） | △（MEMORY.md + USER.md） | ✅ 三支柱 |
+| 关系感知 | ❌ | ❌ | ❌ | ✅ Phase M3 |
+| 技能沉淀 | △（静态 Skills） | ❌ | ✅（自主创建） | ✅ Phase M4 |
+| **技能进化** | ❌ | ❌ | △（后台静默 patch） | **✅ 反思提议+版本追踪** |
+| **使用追踪** | ❌ | ❌ | ❌ | **✅ useCount+effectiveness** |
+| **技能治理** | ❌ | ❌ | ❌ | **✅ Active→Stale→Archived** |
+| **安全扫描** | ❌ | ❌ | ✅ skills_guard | **✅ 声明式威胁模式** |
+| **写入透明度** | ✅（手动） | △（灰盒） | ❌（后台静默） | **✅ 完全透明** |
 
 ## 八、渐进实现路线
 
@@ -756,38 +787,48 @@ Phase M7: 召回优化（未来）            │
 - `packages/core/src/memory/people-store.ts`
 - `packages/core/src/memory/retriever.ts`（检索）
 
-### Phase M4: 技能沉淀
+### Phase M4: 技能沉淀 + 进化基础
+
+> 详细设计见 [技能进化系统设计方案](./skills-evolution.md)
 
 **做什么**：
-- `skills/` 目录管理
-- Trigger 匹配逻辑：用户消息 vs skill.triggers 子串匹配
-- "存为技能" 对话流（AI 从对话上文提取方法论）
-- `/skills` 斜杠命令
+- M4a：`skills/` 目录管理、Trigger 匹配注入、"存为技能"对话流、`/skills` 命令
+- M4b：内容安全扫描（注入/外泄威胁模式检测）
+- M4c：版本追踪（version + revisions）、归档机制（`skills/.archive/`）、`/skills audit`
 
 **验证**：
-- 解决一个问题后说 "存为技能" → AI 自动提取并保存
-- 后续遇到类似问题 → AI 自动引用之前保存的技能
+- 解决一个问题后说 "存为技能" → AI 自动提取并保存，含完整 frontmatter
+- 后续遇到类似问题 → AI 自动引用，useCount 递增
+- 尝试保存含恶意内容的 skill → 被拦截
+- `/skills audit` 正确分类 Active/Stale/Archived
 
 **交付**：
 - `packages/core/src/memory/skills-store.ts`
-- `packages/core/src/memory/retriever.ts`（扩展 trigger 匹配）
+- `packages/core/src/memory/retriever.ts`（扩展 trigger 匹配 + 使用追踪）
+- `packages/core/src/memory/skill-security.ts`（安全扫描）
+- `packages/core/src/memory/skill-governance.ts`（状态检测 + 归档）
 
-### Phase M5: 主动提议
+### Phase M5: 主动提议 + 反思触发 + 更新提议
+
+> 详细设计见 [技能进化系统设计方案](./skills-evolution.md)
 
 **做什么**：
-- AI 在对话中检测到值得记忆的信息时，主动提议保存
-- 提议格式："我注意到...，要我保存为技能/记住这个人吗？"
-- 用户确认后才保存（尊重用户控制权）
+- M5a：AI 检测到值得记忆的信息时，主动提议保存（原设计）
+- M5b：复杂任务后（toolCallCount >= 8），系统提示引导 Agent 反思并提议保存技能
+- M5c：使用已有 skill 后发现改进点，提议更新而非新建
 
 **验证**：
-- 长对话中解决复杂问题后，AI 主动提议存为技能
-- 首次提到某个人的详细信息时，AI 提议添加到关系网络
+- 长对话解决复杂问题后，AI 在回复中自然地提议存为技能
+- 使用了某 skill 但发现更优方法 → AI 提议更新，确认后 version +1
+- 简单对话（< 3 轮 or < 8 次工具调用）不触发反思
 
 **交付**：
-- `packages/core/src/memory/auto-detect.ts`（意图检测）
-- 系统提示词扩展（何时提议的指导）
+- `packages/core/src/memory/reflection.ts`（反思条件判断）
+- 系统提示词扩展（技能进化指导 + 反思引导 + 更新引导）
 
-### Phase M6: Journal + Auto Flush
+### Phase M6: Journal + Auto Flush + 凝练晋升
+
+> 技能凝练晋升详细设计见 [技能进化系统设计方案](./skills-evolution.md)
 
 **做什么**：
 - `journal/` 目录 CRUD + 文件锁
@@ -797,7 +838,7 @@ Phase M7: 召回优化（未来）            │
   - 手动命令：`/journal`、`/journal gc`
 - 在压缩管线 L1 之后、L2 之前插入 Memory Flush 步骤
 - Flush 逻辑：LLM 提取对话要点 → 分流到三支柱 + journal
-- 凝练中发现的 `[SKILL_CANDIDATE]` 提示用户提升
+- **凝练晋升增强**：凝练 Prompt 要求 LLM 为 `[SKILL_CANDIDATE]` 草拟完整 skill 内容（title、tags、triggers、正文），用户可一键确认晋升为永久技能，source = "condensation"
 
 **验证**：
 - 长对话触发上下文压缩时，journal 中出现当日文件
@@ -805,6 +846,7 @@ Phase M7: 召回优化（未来）            │
 - 创建 >12 月的凝练文件 → 启动会话 → 被即时删除
 - `/journal` 显示日志状态（文件数、年龄分布）
 - 凝练失败时不删除原文件，下次重试
+- **凝练发现方法论 → 草拟完整 skill → 用户确认 → 自动创建 skill 文件**
 
 **交付**：
 - `packages/core/src/memory/journal-store.ts`（CRUD + 扫描 + 过期删除）
@@ -831,13 +873,22 @@ interface PersonMeta {
   tags?: string[];
 }
 
+/**
+ * 增强的 SkillMeta，含进化追踪和使用追踪字段。
+ * 完整类型定义见 skills-evolution.md §五。
+ */
 interface SkillMeta {
   title: string;
   tags: string[];
   triggers: string[];
   created: string;
   updated?: string;
-  source?: "conversation" | "manual";
+  source: "manual" | "conversation" | "reflection" | "flush" | "condensation";
+  version: number;
+  useCount: number;
+  lastUsedAt?: string;
+  effectiveness: "unknown" | "helpful" | "needs-update" | "possibly-irrelevant";
+  revisions?: SkillRevision[];
 }
 
 interface JournalMeta {

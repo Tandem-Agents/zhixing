@@ -2,12 +2,13 @@
 
 > 整体架构设计，随认知深化而持续演进
 
-## 状态：v0.8 — 常驻服务架构方案已确定（2026-04-10）
+## 状态：v0.9 — 技能进化系统方案已确定（2026-04-10）
 
 ## 架构演进记录
 
 | 版本 | 日期 | 变更说明 | 触发的认知研究 |
 |------|------|---------|--------------|
+| v0.9 | 2026-04-10 | 技能进化：四阶段生命周期（创生/使用/进化/治理）、反思提议（系统提示引导，零额外 LLM 成本）、使用追踪（useCount+effectiveness）、版本追踪（revisions）、内容安全扫描、Active→Stale→Archived 治理、/skills audit | [技能进化系统设计](../specifications/skills-evolution.md) |
 | v0.8 | 2026-04-10 | 常驻服务：入站/调度/出站三层架构、Server/CLI 双模式、Scheduler（并发控制+优先级+Active Hours）、Delivery Pipeline（持久化+去重+免打扰）、Channel Adapter 统一接口、三级渐进 Daemon、消除 Heartbeat 依赖 | [常驻服务架构设计](../specifications/persistent-service.md) |
 | v0.7 | 2026-04-08 | 容错引擎：指数退避、通用熔断器、错误分类、withRetry 包装器、可观测重试事件 | [容错引擎设计](../specifications/resilience-engine.md) |
 | v0.6 | 2026-04-07 | CLI 架构：渐进式三阶段演进、单体+预留 Gateway、MVP 终端方案、系统提示策略、会话管理、命令体系 | [q06-CLI 架构](../../_private/questions/q06-cli-architecture.md) |
@@ -133,10 +134,16 @@ graph TB
 | Active Hours 双层过滤 | Scheduler 层（省 LLM 调用）+ Delivery 层（不打扰用户），urgent 可穿透 | 已确认 |
 | Channel Adapter 独立包 | 统一接口 + 插件式加载，不污染核心包 | 已确认 |
 | 常驻服务架构 | 见 [常驻服务架构设计](../specifications/persistent-service.md) | 已确认 |
+| 技能反思提议而非后台静默创建 | Hermes 后台子 Agent 静默写入违反透明原则；知行通过系统提示引导在最终回复中提议，零额外 LLM 成本 | 已确认 |
+| 技能使用追踪（useCount + effectiveness） | Hermes/OpenClaw/Claude Code 都不跟踪技能效果；数据驱动治理 vs 盲目累积 | 已确认 |
+| 技能生命周期 Active→Stale→Archived | 无限累积降低信噪比；90 天未使用标记 stale，归档需用户确认 | 已确认 |
+| 技能写入前安全扫描 | 记忆内容注入 system prompt，需防提示注入/数据外泄；声明式威胁模式 | 已确认 |
+| Trigger 注入 + 领域索引优于三级渐进加载 | Trigger 被动精准注入 + 一行领域索引兜底，优于 Hermes 索引→全文→文件三级工具调用 | 已确认 |
+| 技能进化系统 | 见 [技能进化系统设计](../specifications/skills-evolution.md) | 已确认 |
 
 ## 已决策的设计问题
 
-以下问题通过深度源码分析（OpenClaw Pi-Agent-Core + Claude Code query.ts）已做出决策。
+以下问题通过深度源码分析（OpenClaw Pi-Agent-Core + Claude Code query.ts + Hermes run_agent.py）已做出决策。
 详细分析见 [q02-Agent Loop 设计](../../_private/questions/q02-agent-loop-design.md)。
 
 | 问题 | 决策 | 依据 |
@@ -435,43 +442,30 @@ MVP 只实现静态 system prompt。动态注入 Phase 2。
 | 运行时可观测 | 无 | 无 | **EventBus 实时状态** |
 | MVP 代码量 | ~5000 行（TUI） | ~10000 行（REPL+渲染） | **~500 行** |
 
-## 与 OpenClaw / Claude Code 的已知差异
+## 与 OpenClaw / Claude Code / Hermes 的已知差异
 
-| 维度 | OpenClaw | Claude Code | 知行 |
-|------|----------|-------------|------|
-| 核心依赖 | Pi Agent 闭源包 | 闭源产品 | 完全自研，100% 开源 |
-| 可观测性 | 事件回调 | 内部遥测不开放 | EventBus 一等公民（已实现） |
-| Agent Loop | Pi 内层 ~350 行 + 外层 ~1400 行 | query() 生成器 ~1730 行 | AsyncGenerator + while(true)，核心 ~80 行 + 辅助函数 |
-| 工具安全模型 | 工具级 allow/deny + 容器（可选） | 7 层权限 + ~7000 行 Bash AST | **能力授权** + 隔离光谱 + 渐进信任 |
-| 工具隔离 | Docker or 裸奔 | seatbelt/bwrap or 无 | **6 级光谱**，逐级降级，全平台 |
-| 权限疲劳 | 无确认机制 | 频繁弹窗 / YOLO auto | **渐进信任**——越用越少问 |
-| 工具/实现耦合 | 每个工具单独实现沙箱版 | 工具绑定执行环境 | **协议/实现分离** |
-| 不可绕过保护 | 无 | 硬编码在大函数里 | **声明式规则**，可审计 |
-| 工具注册 | 4 种来源手动合并 | 内置 + MCP 分段 | **统一 Registry** |
-| 结果管理 | 无限制 | per-tool 限制 + 落盘 | **分层预算** + 溢出策略 |
-| 上下文管理 | Context Engine + 压缩 | 4 层分层压缩 + 断路器 | Phase 2 实现，预留接入点 |
-| Provider 接入 | 复杂的 Api→Transport + Auth Profile | 只支持 Anthropic API | Protocol 适配器 + 预设注册表 |
-| 国内服务商 | 部分硬编码支持 | 不支持 | 内置预设全覆盖 |
-| 配置管理 | 散落多文件 + 生成代码 | 三个环境变量 | JSON 配置 + 环境变量 |
-| 状态管理 | 可变（push to array） | 不可变（每次重建 state） | 不可变（借鉴 Claude Code） |
-| 终止条件 | 隐式（布尔标志） | 10 种 Terminal 枚举 | 判别联合（AgentResult） |
-| 可扩展性 | Hook 驱动（config 注入） | 需改 1730 行核心函数 | 辅助函数独立替换 + 渐进增强 |
-| CLI 架构 | 客户端-网关 + 闭源 pi-tui | 单体 + 深度 Fork Ink | 单体 + readline→Ink 渐进演进 |
-| CLI 可观测性 | 无 | 无 | EventBus 驱动的实时状态面板 |
-| 系统提示缓存 | 不明确 | static/dynamic 分离优化 | 同 Claude Code，缓存优先 |
-| 重试退避 | 无通用退避（overloaded 有可选固定延迟，默认 0） | 指数退避 + 抖动（仅 HTTP 层，不覆盖连接错误） | **指数退避 + 抖动 + Retry-After**，覆盖 API 和连接错误 |
-| 容错位置 | 外层循环 1400 行中内联 | query.ts 1730 行中内联 | **独立 resilience 模块**，通过 deps 注入 |
-| 熔断器 | 各处硬编码限制 | 各处硬编码限制 | **通用 CircuitBreaker 原语**，可复用 |
-| 连接错误 | 走通用路径 | 不重试（#1 用户投诉） | **同等重试**，归为 network 类型 |
-| 重试可观测 | log.warn() | 内部遥测 | **EventBus 事件** + CLI 实时渲染 |
-| 韧性范围 | 通道重连各自实现 + 外层循环容错 | 仅 LLM 调用层 | **四层韧性模型**：通道 → 消息处理 → Agent 运行 → 服务，共享原语 |
-| 失败通知 | 无（CLI 打印） | 无（CLI 打印） | **降级回复**：通过通道主动告知用户 |
-| 消息丢失保护 | Gateway 排队 | 不存在此问题 | **本地持久化队列**（至少一次交付） |
-| 常驻架构 | Gateway 单体（Cron+Heartbeat+Queue 耦合，~130 文件） | 无 | **入站/调度/出站三层分离**（<30 文件） |
-| 心跳依赖 | 需要（~1200 行 + 32 文件） | 无 | **不需要**（直接执行覆盖所有需求） |
-| 定时任务创建 | cron 工具（AI 调用，10+ 参数概念） | 无 | **schedule 工具**（3+1 概念） |
-| 服务激活门槛 | `daemon install`（需理解 OS 服务） | 无 | **`zhixing serve`**（零配置） |
-| 免打扰 | heartbeat.activeHours（仅心跳级） | 无 | **双层过滤**（Scheduler + Delivery），urgent 穿透 |
-| 投递管线 | 分散多处、无持久化 | 无 | **独立 Delivery Pipeline**，持久化队列 |
-| 通道适配 | Channel Plugin（紧耦合 Gateway） | 无 | **ChannelAdapter 独立接口**，插件式加载 |
-| 运行模式 | 客户端-Gateway 分离 | 单次 CLI | **Server/CLI 双模式**（独立部署 + 终端接入，同等重要） |
+| 维度 | OpenClaw | Claude Code | Hermes | 知行 |
+|------|----------|-------------|--------|------|
+| 核心依赖 | Pi Agent 闭源包 | 闭源产品 | 开源（MIT） | 完全自研，100% 开源 |
+| 可观测性 | 事件回调 | 内部遥测不开放 | 可选 callback | EventBus 一等公民（已实现） |
+| Agent Loop | Pi 内层 ~350 行 + 外层 ~1400 行 | query() 生成器 ~1730 行 | run_conversation ~9200 行单文件 | AsyncGenerator + while(true)，核心 ~80 行 + 辅助函数 |
+| 工具安全模型 | 工具级 allow/deny + 容器（可选） | 7 层权限 + ~7000 行 Bash AST | 命令审批 + 记忆安全扫描 | **能力授权** + 隔离光谱 + 渐进信任 |
+| 工具隔离 | Docker or 裸奔 | seatbelt/bwrap or 无 | 6 种终端后端 | **6 级光谱**，逐级降级，全平台 |
+| 权限疲劳 | 无确认机制 | 频繁弹窗 / YOLO auto | 命令审批 | **渐进信任**——越用越少问 |
+| 上下文管理 | Context Engine + 压缩 | 4 层分层压缩 + 断路器 | ContextCompressor + 前缀缓存 | Token 估算 + 3 层压缩(L1/L2/L3)，已实现 |
+| Provider 接入 | 复杂的 Api→Transport + Auth Profile | 只支持 Anthropic API | 18+ Provider + 3 种 API mode | Protocol 适配器 + 预设注册表 |
+| 国内服务商 | 部分硬编码支持 | 不支持 | 18+ Provider 含国内 | 内置预设全覆盖 |
+| 配置管理 | 散落多文件 + 生成代码 | 三个环境变量 | config.yaml + profile | JSON 配置 + 环境变量，3 层 deep merge |
+| 容错位置 | 外层循环 1400 行中内联 | query.ts 1730 行中内联 | classify_api_error 内联 | **独立 resilience 模块**，通过 deps 注入 |
+| 常驻架构 | Gateway 单体（~130 文件） | 无 | GatewayRunner 单体 | **入站/调度/出站三层分离**（<30 文件） |
+| 定时任务创建 | cron 工具（10+ 参数概念） | 无 | cron 工具 | **schedule 工具**（3+1 概念） |
+| 投递管线 | 分散多处、无持久化 | 无 | delivery.py 分散 | **独立 Delivery Pipeline**，持久化队列 |
+| 通道适配 | Channel Plugin（紧耦合） | 无 | BasePlatformAdapter（18 平台） | **ChannelAdapter 独立接口**，插件式加载 |
+| 运行模式 | 客户端-Gateway 分离 | 单次 CLI | CLI+Gateway+ACP | **Server/CLI 双模式**（独立部署 + 终端接入，同等重要） |
+| **技能系统** | 静态 Skills 文件 | 无 | 自主进化（后台静默创建） | **进化式技能**（反思提议 + 用户确认 + 版本追踪） |
+| **技能使用追踪** | 无 | 无 | 无 | **useCount + lastUsedAt + effectiveness** |
+| **技能生命周期** | 无限累积 | N/A | 无限累积 | **Active → Stale → Archived**，/skills audit |
+| **技能注入方式** | 全量注入 system prompt | N/A | 三级渐进加载 | **Trigger 精确注入 + 领域索引兜底** |
+| **技能安全扫描** | 无 | N/A | skills_guard | **声明式威胁模式 + 不可见字符检测** |
+| **技能进化透明度** | 手动（可见） | N/A | 后台静默（不可见） | **完全透明**（提议 + 确认） |
+| **技能进化额外成本** | 无 | N/A | 每次 review 一次 API 调用 | **零额外成本**（复用最终回复） |
