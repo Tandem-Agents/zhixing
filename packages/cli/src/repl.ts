@@ -18,6 +18,7 @@ import {
   userMessage,
   type Message,
   type SessionTurn,
+  type SessionCompact,
   SessionStore,
   loadProfile,
   getMemoryDir,
@@ -51,6 +52,8 @@ interface ReplState {
   lastToolEndCount: number;
   /** 本会话是否已提议过技能（每会话最多 1 次） */
   hasProposedSkill: boolean;
+  /** 是否已执行过 Journal 自动凝练 */
+  journalCondenseDone: boolean;
 }
 
 // ─── 会话恢复选项 ───
@@ -338,6 +341,46 @@ function buildSlashCommands(rl: readline.Interface): Record<
         renderContextVisual(budget);
       },
     },
+    "/compact": {
+      description: "手动触发上下文压缩",
+      handler: async (state) => {
+        if (state.messages.length < 4) {
+          console.log(chalk.dim("\n  对话历史过短，无需压缩\n"));
+          return;
+        }
+        const tokensBefore = state.session.checkBudget(state.messages)?.currentTokens ?? 0;
+        console.log(chalk.yellow("\n  ⟳ 正在压缩上下文..."));
+        try {
+          const result = await state.session.forceCompact(
+            [...state.messages],
+            state.turnCounter,
+          );
+          if (result.modified) {
+            state.messages = result.messages;
+            const tokensAfter = result.budget?.currentTokens ?? 0;
+            const pct = result.budget ? Math.round(result.budget.usageRatio * 100) : "?";
+            console.log(chalk.green(`  ✓ 压缩完成，当前上下文占用 ${pct}%\n`));
+            // 写入 compact 行到会话文件
+            if (state.sessionId) {
+              const compact: SessionCompact = {
+                type: "compact",
+                timestamp: new Date().toISOString(),
+                summary: "(manual compact)",
+                turnsCompacted: state.turnCounter,
+                tokensBefore,
+                tokensAfter,
+              };
+              state.store.appendCompact(state.sessionId, compact).catch(() => {});
+            }
+          } else {
+            console.log(chalk.dim("  已无可压缩内容\n"));
+          }
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.log(chalk.red(`  ✗ 压缩失败: ${msg}\n`));
+        }
+      },
+    },
     "/exit": {
       description: "退出",
       handler: () => {
@@ -443,6 +486,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     turnCounter,
     lastToolEndCount: 0,
     hasProposedSkill: false,
+    journalCondenseDone: false,
   };
 
   const slashCommands = buildSlashCommands(rl);
@@ -487,7 +531,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     renderer.startThinking();
 
     try {
-      const { agentResult, newMessages, durationMs, budget, toolEndCount, injectedSkillIds } =
+      const { agentResult, newMessages, durationMs, budget, toolEndCount, injectedSkillIds, compactInfo } =
         await agentSession.run({
           messages: [...state.messages],
           onYield: (e) => renderer.handleEvent(e),
@@ -502,6 +546,19 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       state.messages.push(...newMessages);
       state.lastToolEndCount = toolEndCount;
       renderSummary(agentResult, durationMs, budget);
+
+      // 检测 Agent 是否在本轮回复中提议了技能保存/更新
+      if (!state.hasProposedSkill) {
+        const assistantText = newMessages
+          .filter((m) => m.role === "assistant")
+          .flatMap((m) => m.content)
+          .filter((b): b is { type: "text"; text: string } => b.type === "text")
+          .map((b) => b.text)
+          .join("");
+        if (assistantText.includes("存为技能") || assistantText.includes("保存为技能") || assistantText.includes("SKILL_CANDIDATE") || /💡.*技能/.test(assistantText)) {
+          state.hasProposedSkill = true;
+        }
+      }
 
       // 效果推断：根据对话信号更新本轮注入的技能 effectiveness
       if (injectedSkillIds.length > 0) {
@@ -541,6 +598,25 @@ export async function startRepl(options: ReplOptions): Promise<void> {
             );
           });
           state.turnCounter++;
+        }
+
+        // 首轮对话后异步执行 Journal 生命周期维护
+        if (!state.journalCondenseDone) {
+          state.journalCondenseDone = true;
+          runJournalLifecycle(state.session).catch(() => {});
+        }
+
+        // 自动压缩发生时，写入 compact 行用于会话恢复
+        if (compactInfo) {
+          const compact: SessionCompact = {
+            type: "compact",
+            timestamp: new Date().toISOString(),
+            summary: compactInfo.summary,
+            turnsCompacted: state.turnCounter,
+            tokensBefore: compactInfo.tokensBefore,
+            tokensAfter: compactInfo.tokensAfter,
+          };
+          state.store.appendCompact(state.sessionId, compact).catch(() => {});
         }
       }
     } catch (err) {
@@ -695,6 +771,30 @@ async function checkStaleSkills(): Promise<void> {
   } catch {
     // 静默——启动提醒不应阻塞 REPL
   }
+}
+
+/**
+ * 异步执行 Journal 生命周期维护。
+ * 首轮对话后触发：删除过期文件 + 凝练温日志。
+ * 静默执行，失败不影响用户对话。
+ */
+async function runJournalLifecycle(session: AgentSession): Promise<void> {
+  const jStore = new JournalStore();
+
+  // 先删除过期凝练文件（纯文件操作，极快）
+  await jStore.expireOld();
+
+  // 扫描是否需要凝练
+  const plan = await jStore.scan();
+  if (!plan.condensePlan) return;
+
+  await jStore.condense(plan.condensePlan, {
+    async condense(dailyContents: string): Promise<string> {
+      return session.callText(
+        `请将以下日志内容凝练为简洁的月度摘要，保留关键事实和决策，去掉冗余细节。如果发现可复用的方法论，用 [SKILL_CANDIDATE] 标记。\n\n${dailyContents}`,
+      );
+    },
+  });
 }
 
 function formatRelativeTime(date: Date): string {

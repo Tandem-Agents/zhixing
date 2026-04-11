@@ -54,8 +54,18 @@ export interface AgentSession {
   run: (params: RunParams) => Promise<RunResult>;
   /** 查询当前消息列表的上下文预算状态 */
   checkBudget: (messages: readonly Message[]) => ContextBudget | undefined;
+  /** 手动触发上下文压缩，无论当前预算状态如何 */
+  forceCompact: (messages: Message[], turnCount: number) => Promise<ForceCompactResult>;
+  /** 简易 LLM 文本调用（用于 Journal condense 等辅助任务） */
+  callText: (prompt: string) => Promise<string>;
   /** 当前 Token 估算器的校准因子（1.0 = 未校准） */
   readonly calibrationFactor: number;
+}
+
+export interface ForceCompactResult {
+  modified: boolean;
+  messages: Message[];
+  budget?: ContextBudget;
 }
 
 export interface RunParams {
@@ -78,6 +88,15 @@ export interface RunResult {
   toolEndCount: number;
   /** 本轮注入的技能 ID 列表（用于效果推断） */
   injectedSkillIds: string[];
+  /** 本轮是否发生了上下文压缩（用于写入 compact 行） */
+  compactInfo?: CompactInfo;
+}
+
+export interface CompactInfo {
+  summary: string;
+  turnsCompacted: number;
+  tokensBefore: number;
+  tokensAfter: number;
 }
 
 // ─── 创建会话 ───
@@ -150,6 +169,28 @@ export async function createSession(options: {
       return engine.checkBudget(messages);
     },
 
+    async callText(prompt: string): Promise<string> {
+      return flushCallLLM([userMessage(prompt)]);
+    },
+
+    async forceCompact(messages: Message[], turnCount: number): Promise<ForceCompactResult> {
+      if (!modelBudgetInfo) return { modified: false, messages };
+      const engine = createContextEngine(estimator, strategies, { modelInfo: modelBudgetInfo });
+      const result = await engine.onTurnComplete({ messages, turnCount });
+      if (!result.modified) {
+        // 自动压缩因阈值未达而跳过，强制用较低阈值重试
+        const forceEngine = createContextEngine(estimator, strategies, {
+          modelInfo: modelBudgetInfo,
+          thresholds: { warning: 0, compact: 0, critical: 0.95 },
+        });
+        const forceResult = await forceEngine.onTurnComplete({ messages, turnCount });
+        const budget = engine.checkBudget(forceResult.messages);
+        return { modified: forceResult.modified, messages: forceResult.messages, budget };
+      }
+      const budget = engine.checkBudget(result.messages);
+      return { modified: result.modified, messages: result.messages, budget };
+    },
+
     async run(params: RunParams): Promise<RunResult> {
       const eventBus = createEventBus<AgentEventMap>();
       const startTime = Date.now();
@@ -158,6 +199,7 @@ export async function createSession(options: {
       const newMessages: Message[] = [];
       let pendingToolResults: ToolResultBlock[] = [];
       let toolEndCount = 0;
+      let compactInfo: CompactInfo | undefined;
 
       // 通过 deps.callLLM 注入容错能力，agent-loop.ts 零修改
       const resilientCallLLM = withRetry(
@@ -201,6 +243,14 @@ export async function createSession(options: {
       eventBus.on("context:compact_end", (info) => {
         pauseUI();
         renderCompactEnd(info);
+        if (info.success) {
+          compactInfo = {
+            summary: "(auto-compacted)",
+            turnsCompacted: 0,
+            tokensBefore: info.tokensBefore,
+            tokensAfter: info.tokensAfter,
+          };
+        }
       });
 
       // 根据最后一条用户消息检索匹配的技能 + 反思提示
@@ -246,6 +296,7 @@ export async function createSession(options: {
             budget,
             toolEndCount,
             injectedSkillIds: enrichedContext.injectedSkillIds,
+            compactInfo,
           };
         }
 

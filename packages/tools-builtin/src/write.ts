@@ -20,7 +20,7 @@ export function createWriteTool(): ToolDefinition {
     description:
       "Create or overwrite a file with the given content. " +
       "Parent directories are created automatically if they don't exist. " +
-      "IMPORTANT: This completely replaces the file content. To make targeted edits, prefer using bash with sed or similar.",
+      "IMPORTANT: This completely replaces the file content. For targeted edits, use the edit tool instead.",
     inputSchema: {
       type: "object",
       properties: {

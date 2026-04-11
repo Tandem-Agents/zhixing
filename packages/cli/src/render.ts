@@ -361,10 +361,12 @@ function formatStatusColor(pct: number, status: string): string {
 
 export function renderError(error: unknown): void {
   if (error instanceof Error && error.name === "ProviderConfigError") {
+    const home = process.env.HOME ?? process.env.USERPROFILE ?? "~";
+    const configPath = `${home}/.zhixing/config.json`;
     console.error(
       `\n${chalk.red("✗")} ${chalk.red.bold("配置错误")}: ${error.message}`,
     );
-    console.error(chalk.dim("\n  运行 zhixing config 查看当前配置\n"));
+    console.error(chalk.dim(`\n  请检查配置文件: ${configPath}\n`));
     return;
   }
 
