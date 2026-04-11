@@ -12,7 +12,7 @@
 | 04-提示工程 | 🔲 待开始 | 0 | 0 | — |
 | 05-安全模型 | 🔲 待开始 | 0 | 0 | — |
 | 06-插件架构 | 🔲 待开始 | 0 | 0 | — |
-| 07-会话与记忆 | ✅ 基本完成 | 2 | 2 | 源码分析 + 设计方案已完成 |
+| 07-会话与记忆 | ✅ 基本完成 | 2 | 2 | 源码分析 + 设计方案 + M1-M6 实现已完成 |
 | 08-交互界面 | ✅ 基本完成 | 1 | 1 | q06(CLI 架构) 已完成 |
 | 09-协议与通信 | 🔲 待开始 | 0 | 0 | — |
 | 10-部署与配置 | ✅ 基本完成 | 2 | 2 | q03(Provider) + q04(配置系统) 已完成 |
@@ -43,6 +43,7 @@
 | 上下文引擎方案 | ✅ 已完成 | 03 |
 | L3 LLM 摘要压缩方案 | ✅ 已完成 | 03 |
 | 会话持久化方案 | ✅ 已完成 | 07 |
+| 记忆系统方案 | ✅ 已完成 | 07 |
 | 技能进化系统方案 | ✅ 已完成 | 07 |
 | 差异化策略 | 🔲 待开始 | 竞品分析 + 认知研究 |
 
@@ -72,6 +73,21 @@
 | L3: LLM 摘要压缩 | `@zhixing/core` | ✅ 已完成 | 29 个测试通过（7 段模板 + 校验 + CircuitBreaker） |
 | CLI 上下文可视化 | `@zhixing/cli` | ✅ 已完成 | 预算状态 + 压缩过程渲染 |
 | CLI 会话管理 | `@zhixing/cli` | ✅ 已完成 | --continue/--resume/--name + /sessions + /name |
+| Frontmatter 解析器 | `@zhixing/core` | ✅ 已完成 | 16 个单元测试通过（parse+stringify+roundtrip） |
+| Profile Loader (M1) | `@zhixing/core` | ✅ 已完成 | 9 个测试通过（加载+格式化+容错） |
+| MemoryStore (M2) | `@zhixing/core` | ✅ 已完成 | 15 个测试通过（CRUD+搜索+分类） |
+| Memory 工具 | `@zhixing/tools-builtin` | ✅ 已完成 | 4 个集成测试通过（save/list/search/delete） |
+| PeopleStore (M3) | `@zhixing/core` | ✅ 已完成 | 15 个测试通过（CRUD+人名匹配+关系词映射） |
+| SkillsStore (M4a) | `@zhixing/core` | ✅ 已完成 | 16 个测试通过（CRUD+Trigger+使用追踪+领域索引） |
+| Skill Security (M4b) | `@zhixing/core` | ✅ 已完成 | 24 个测试通过（威胁扫描+block/warn+集成） |
+| Skill Governance (M4c) | `@zhixing/core` | ✅ 已完成 | 12 个测试通过（版本追踪+归档/恢复+状态检测） |
+| Memory Retriever | `@zhixing/core` | ✅ 已完成 | 3 个测试通过（技能+人物检索+使用记录） |
+| JournalStore (M6) | `@zhixing/core` | ✅ 已完成 | 14 个测试通过（追加/扫描/生命周期/凝练） |
+| Memory Flush (L1.5) | `@zhixing/core` | ✅ 已完成 | 13 个测试通过（提取+分流+Journal 追加+降级） |
+| CLI 记忆集成 | `@zhixing/cli` | ✅ 已完成 | enrichContext+反思提示+/me/skills/people/journal |
+| /skills audit | `@zhixing/cli` | ✅ 已完成 | 健康报告+archive/restore/delete 子命令 |
+| 系统提示（技能进化） | `@zhixing/cli` | ✅ 已完成 | Skill Evolution 指导段+5 个测试通过 |
+| Flush 管线集成 | `@zhixing/cli` | ✅ 已完成 | MemoryFlushStrategy 注入策略链（priority=3） |
 
 ## 里程碑
 
@@ -95,6 +111,8 @@
 - [x] **M18**: CLI 上下文状态集成 → 预算显示 + 压缩过程可视化 ✅ 2026-04-09
 - [x] **M19**: Hermes Agent 源码分析 → 核心循环 + Skills 进化 + 分层记忆 + 消息网关 ✅ 2026-04-10
 - [x] **M20**: 技能进化系统设计 → 四阶段生命周期 + 反思提议 + 使用追踪 + 治理 ✅ 2026-04-10
+- [x] **M21**: 记忆系统全实现 → M1-M6 全部通过（139 个测试）+ Memory 工具 + CLI 集成 ✅ 2026-04-10
+- [x] **M22**: /skills audit + Memory Flush (L1.5) → 治理闭环 + 压缩时自动提取记忆 ✅ 2026-04-10
 
 ---
 

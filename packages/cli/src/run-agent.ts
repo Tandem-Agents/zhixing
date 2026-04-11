@@ -19,6 +19,8 @@ import {
   createTokenEstimator,
   createToolResultTrimStrategy,
   createMessageDropStrategy,
+  createMemoryFlushStrategy,
+  MemoryStore,
   userMessage,
   withRetry,
   runAgentLoop,
@@ -110,8 +112,22 @@ export async function createSession(options: {
   // estimator 跨 run() 共享以保持校准状态
   const modelInfo = provider.models.find((m) => m.id === model) ?? provider.models[0];
   const estimator = createTokenEstimator();
+  const memoryStore = new MemoryStore();
+
+  // Flush 用的 LLM 调用：消费流式响应，拼接 text_delta 为完整文本
+  const flushCallLLM = async (msgs: Message[]): Promise<string> => {
+    const chunks: string[] = [];
+    for await (const event of provider.chat({ model, messages: msgs, tools: [] })) {
+      if (event.type === "text_delta") {
+        chunks.push(event.text);
+      }
+    }
+    return chunks.join("") || "[]";
+  };
+
   const strategies = [
     createToolResultTrimStrategy(),
+    createMemoryFlushStrategy({ callLLM: flushCallLLM, store: memoryStore }),
     createMessageDropStrategy(),
   ];
   const modelBudgetInfo = modelInfo

@@ -192,9 +192,42 @@ function buildSlashCommands(rl: readline.Interface): Record<
       },
     },
     "/skills": {
-      description: "查看技能库",
-      handler: async () => {
+      description: "查看技能库 (audit: 健康审查, archive/restore/delete <id>)",
+      handler: async (_state, args) => {
         const store = new SkillsStore();
+        const subcommand = args.trim().split(/\s+/)[0]?.toLowerCase() ?? "";
+        const subArgs = args.trim().split(/\s+/).slice(1).join(" ");
+
+        if (subcommand === "audit") {
+          await renderSkillsAudit(store);
+          return;
+        }
+
+        if (subcommand === "archive" && subArgs) {
+          const ok = await store.archive(subArgs);
+          console.log(ok
+            ? chalk.green(`\n  ✓ 已归档: ${subArgs}\n`)
+            : chalk.red(`\n  ✗ 未找到: ${subArgs}\n`));
+          return;
+        }
+
+        if (subcommand === "restore" && subArgs) {
+          const ok = await store.restore(subArgs);
+          console.log(ok
+            ? chalk.green(`\n  ✓ 已恢复: ${subArgs}\n`)
+            : chalk.red(`\n  ✗ 未找到归档: ${subArgs}\n`));
+          return;
+        }
+
+        if (subcommand === "delete" && subArgs) {
+          const ok = await store.delete(subArgs);
+          console.log(ok
+            ? chalk.green(`\n  ✓ 已删除: ${subArgs}\n`)
+            : chalk.red(`\n  ✗ 未找到: ${subArgs}\n`));
+          return;
+        }
+
+        // 默认：列出所有技能
         const skills = await store.listAll();
 
         if (skills.length === 0) {
@@ -207,15 +240,21 @@ function buildSlashCommands(rl: readline.Interface): Record<
 
         console.log(`\n${chalk.bold("  技能库")} ${chalk.dim(`(${skills.length} 个)`)}`);
         for (const skill of skills) {
+          const status = store.getStatus(skill);
+          const statusBadge = status === "active"
+            ? chalk.green("●")
+            : status === "stale"
+              ? chalk.yellow("○")
+              : chalk.dim("◌");
           const tags = skill.meta.tags.length > 0
             ? chalk.dim(` [${skill.meta.tags.join(", ")}]`)
             : "";
-          const usage = chalk.dim(` (使用 ${skill.meta.useCount} 次)`);
+          const usage = chalk.dim(` (v${skill.meta.version} · ${skill.meta.useCount}次)`);
           console.log(
-            `  ${chalk.cyan("•")} ${skill.meta.title}${tags}${usage}`,
+            `  ${statusBadge} ${skill.meta.title}${tags}${usage}`,
           );
         }
-        console.log();
+        console.log(chalk.dim("\n  提示: /skills audit 查看健康报告\n"));
       },
     },
     "/journal": {
@@ -537,6 +576,78 @@ async function interactiveSessionPicker(
     rl.close();
     return null;
   }
+}
+
+// ─── /skills audit ───
+
+async function renderSkillsAudit(store: SkillsStore): Promise<void> {
+  const [active, archived] = await Promise.all([
+    store.listAll(),
+    store.listArchived(),
+  ]);
+
+  if (active.length === 0 && archived.length === 0) {
+    console.log(chalk.dim("\n  技能库为空，无需审查。\n"));
+    return;
+  }
+
+  const activeList = active.filter((s) => store.getStatus(s) === "active");
+  const staleList = active.filter((s) => store.getStatus(s) === "stale");
+  const needsUpdate = active.filter((s) => s.meta.effectiveness === "needs-update");
+
+  console.log(`\n${chalk.bold("  📊 技能库健康报告")}\n`);
+  console.log(`  ${chalk.green("●")} 活跃 (Active):  ${activeList.length} 个`);
+  console.log(`  ${chalk.yellow("○")} 沉寂 (Stale):   ${staleList.length} 个`);
+  console.log(`  ${chalk.dim("◌")} 归档 (Archived): ${archived.length} 个`);
+
+  if (needsUpdate.length > 0) {
+    console.log(`  ${chalk.red("!")} 待更新:          ${needsUpdate.length} 个`);
+  }
+
+  if (staleList.length > 0) {
+    console.log(chalk.yellow(`\n  沉寂技能（超过 90 天未使用）：`));
+    for (const skill of staleList) {
+      const lastUsed = skill.meta.lastUsedAt ?? skill.meta.created;
+      const daysSince = Math.floor(
+        (Date.now() - new Date(lastUsed).getTime()) / 86400000,
+      );
+      console.log(
+        `  ${chalk.yellow("○")} ${skill.meta.title}` +
+          chalk.dim(` (${skill.id})`) +
+          chalk.dim(` · 使用 ${skill.meta.useCount} 次 · ${daysSince} 天前`),
+      );
+    }
+    console.log(chalk.dim(`\n  操作: /skills archive <id>  归档`));
+    console.log(chalk.dim(`        /skills delete <id>   删除`));
+  }
+
+  if (needsUpdate.length > 0) {
+    console.log(chalk.red(`\n  效果存疑（用户反馈过时或有误）：`));
+    for (const skill of needsUpdate) {
+      console.log(
+        `  ${chalk.red("!")} ${skill.meta.title}` +
+          chalk.dim(` (${skill.id})`) +
+          chalk.dim(` · v${skill.meta.version} · 使用 ${skill.meta.useCount} 次`),
+      );
+    }
+    console.log(chalk.dim(`\n  提示: 对话中提到该技能场景，AI 会自动提议更新`));
+  }
+
+  if (archived.length > 0) {
+    console.log(chalk.dim(`\n  归档技能：`));
+    for (const skill of archived) {
+      console.log(
+        chalk.dim(`  ◌ ${skill.meta.title} (${skill.id})`),
+      );
+    }
+    console.log(chalk.dim(`\n  操作: /skills restore <id>  恢复`));
+  }
+
+  if (staleList.length === 0 && needsUpdate.length === 0) {
+    console.log(chalk.green(`\n  ✓ 所有技能状态健康`));
+  }
+
+  console.log();
 }
 
 // ─── 工具函数 ───
