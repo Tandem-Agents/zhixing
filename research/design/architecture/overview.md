@@ -2,12 +2,14 @@
 
 > 整体架构设计，随认知深化而持续演进
 
-## 状态：v0.9 — 技能进化系统方案已确定（2026-04-10）
+## 状态：v2.0 — 安全系统方案重新设计（2026-04-12）
 
 ## 架构演进记录
 
 | 版本 | 日期 | 变更说明 | 触发的认知研究 |
 |------|------|---------|--------------|
+| v2.0 | 2026-04-12 | 安全系统重新设计：三条原则（操作按影响范围分类、每条放行追溯到用户选择、全平台行为一致）、五个组件（策略引擎、操作分类、权限系统、执行守卫、安全仪表盘）、域无关基础设施——通过边界声明自动覆盖任何业务场景 | [安全系统设计](../specifications/security-system.md) |
+| v1.0 | 2026-04-12 | ~~安全系统初版~~（已被 v2.0 替代）：信任梯度、可组合沙箱、补偿机制——设计反复修改，v2.0 重新设计 | — |
 | v0.9 | 2026-04-10 | 技能进化：四阶段生命周期（创生/使用/进化/治理）、反思提议（系统提示引导，零额外 LLM 成本）、使用追踪（useCount+effectiveness）、版本追踪（revisions）、内容安全扫描、Active→Stale→Archived 治理、/skills audit | [技能进化系统设计](../specifications/skills-evolution.md) |
 | v0.8 | 2026-04-10 | 常驻服务：入站/调度/出站三层架构、Server/CLI 双模式、Scheduler（并发控制+优先级+Active Hours）、Delivery Pipeline（持久化+去重+免打扰）、Channel Adapter 统一接口、三级渐进 Daemon、消除 Heartbeat 依赖 | [常驻服务架构设计](../specifications/persistent-service.md) |
 | v0.7 | 2026-04-08 | 容错引擎：指数退避、通用熔断器、错误分类、withRetry 包装器、可观测重试事件 | [容错引擎设计](../specifications/resilience-engine.md) |
@@ -140,6 +142,13 @@ graph TB
 | 技能写入前安全扫描 | 记忆内容注入 system prompt，需防提示注入/数据外泄；声明式威胁模式 | 已确认 |
 | Trigger 注入 + 领域索引优于三级渐进加载 | Trigger 被动精准注入 + 一行领域索引兜底，优于 Hermes 索引→全文→文件三级工具调用 | 已确认 |
 | 技能进化系统 | 见 [技能进化系统设计](../specifications/skills-evolution.md) | 已确认 |
+| 声明式安全策略引擎（规则是数据非代码） | Claude Code 7000 行命令式 Bash AST 维护不可持续；声明式规则可版本管理、社区贡献、热加载 | 已确认 |
+| 威胁边界模型（保护资源非限制工具） | 工具级 allow/deny 粒度不足；新增 MCP/插件工具需自动受保护 | 已确认 |
+| 操作影响分类 + 显式权限规则 | 按影响范围四级分类（observe/internal/external/critical），三个区域（工作区内/工作区外/外部系统），域无关——上下文分类器（文件系统/Shell）+ 边界影响分类器（通用），不含业务领域分类器 | 已确认 |
+| 执行守卫 + 静默 OS 加固 | 执行守卫（应用层）全平台一致；OS 加固静默增强不影响行为；无补偿机制 | 已确认 |
+| 可观测安全（EventBus + /security 仪表盘） | 三大竞品均无面向用户的安全可观测性；透明安全建立用户信任 | 已确认 |
+| fail-to-confirm 默认安全姿态 | OpenClaw fail-closed（体验差）、Hermes fail-open（不安全）、Claude Code fail-to-prompting（最佳实践） | 已确认 |
+| 安全系统架构 | 见 [ADR-006](./decisions/006-security-system-architecture.md)、[安全系统设计](../specifications/security-system.md) | 已确认 |
 
 ## 已决策的设计问题
 
@@ -449,9 +458,12 @@ MVP 只实现静态 system prompt。动态注入 Phase 2。
 | 核心依赖 | Pi Agent 闭源包 | 闭源产品 | 开源（MIT） | 完全自研，100% 开源 |
 | 可观测性 | 事件回调 | 内部遥测不开放 | 可选 callback | EventBus 一等公民（已实现） |
 | Agent Loop | Pi 内层 ~350 行 + 外层 ~1400 行 | query() 生成器 ~1730 行 | run_conversation ~9200 行单文件 | AsyncGenerator + while(true)，核心 ~80 行 + 辅助函数 |
-| 工具安全模型 | 工具级 allow/deny + 容器（可选） | 7 层权限 + ~7000 行 Bash AST | 命令审批 + 记忆安全扫描 | **能力授权** + 隔离光谱 + 渐进信任 |
-| 工具隔离 | Docker or 裸奔 | seatbelt/bwrap or 无 | 6 种终端后端 | **6 级光谱**，逐级降级，全平台 |
-| 权限疲劳 | 无确认机制 | 频繁弹窗 / YOLO auto | 命令审批 | **渐进信任**——越用越少问 |
+| 工具安全模型 | 工具级 allow/deny + 容器（可选） | 8 层纵深防御 + ~7000 行 Bash AST | Tirith 扫描 + 正则 + Smart(LLM) | **声明式策略引擎** + 威胁边界 + 显式权限规则 |
+| 工具隔离 | Docker or 裸奔 | seatbelt/bwrap or 无 | 6 种终端后端 | **执行守卫**（全平台一致）+ **OS 加固**（静默增强） |
+| 权限疲劳 | 无确认机制 | 频繁弹窗 / YOLO auto | 命令审批 | **低影响操作自动放行** + 用户主动建规则 + 智能建议 |
+| 安全可观测性 | 无 | 无 | 无 | **EventBus + /security 仪表盘** |
+| 安全代码量 | ~3000 行 | ~7000+ 行 | ~2000 行 | **~3000 行（含三期，声明式规则不算代码）** |
+| 安全最低保障 | 无（非沙箱=裸奔） | 无（macOS 弱/Windows 无） | 无（非交互=跳检） | **执行守卫全平台一致，无补偿机制，OS 加固静默增强** |
 | 上下文管理 | Context Engine + 压缩 | 4 层分层压缩 + 断路器 | ContextCompressor + 前缀缓存 | Token 估算 + 3 层压缩(L1/L2/L3)，已实现 |
 | Provider 接入 | 复杂的 Api→Transport + Auth Profile | 只支持 Anthropic API | 18+ Provider + 3 种 API mode | Protocol 适配器 + 预设注册表 |
 | 国内服务商 | 部分硬编码支持 | 不支持 | 18+ Provider 含国内 | 内置预设全覆盖 |
