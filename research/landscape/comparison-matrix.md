@@ -12,7 +12,7 @@
 | **核心交互** | CLI / TUI | CLI | CLI + 15 平台消息网关 + IDE ACP | IDE 内嵌 | IDE 内嵌 | — |
 | **模型支持** | 多模型 | Claude 专属 | 200+ 模型（18+ provider，无锁定） | 多模型 | 多模型 | — |
 | **扩展机制** | MCP | MCP + Hooks | Skills 自主进化 + MCP + 插件系统 | 扩展市场 | — | — |
-| **安全模型** | 命令审批 | 权限层级 | 命令审批 + 记忆安全扫描 + 容器隔离 | 沙箱 | 沙箱 | — |
+| **安全模型** | 容器沙箱(Docker/SSH) + ExecSecurity×ExecAsk 矩阵 + ACP 工具分级 + 危险配置审计 | 8 层纵深防御 + OS 级沙箱(Seatbelt/bubblewrap) + Auto 分类器(Sonnet 4.6) + 23 项 Bash AST 检查 + 服务端紧急开关 | Tirith 外部扫描 + 危险正则 + Smart(LLM)审批 + 容器跳检 + SSRF 预检 + Skills 静态扫描 | 沙箱 | 沙箱 | 能力安全模型 + 6 级隔离光谱 + 渐进信任 + bypass-immune 声明式保护 |
 | **上下文管理** | 压缩策略 | 四层压缩 | 压缩 + Anthropic 前缀缓存 | 上下文引擎 | — | — |
 | **记忆/学习** | 无持久记忆 | CLAUDE.md | 分层记忆 + Skills 闭环学习 + 用户建模 | — | — | 三支柱记忆 + 透明技能进化 + Journal 生命周期 |
 | **多端支持** | CLI | CLI | CLI + Telegram/Discord/Slack/微信等 15 平台 | 桌面 IDE | 桌面 IDE | — |

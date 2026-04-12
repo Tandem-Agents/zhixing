@@ -15,24 +15,30 @@
 | 3 | 文件系统访问的安全策略是什么？ | [q05](../../_private/questions/q05-tool-system-security.md) | ✅ 已研究 |
 | 4 | 敏感信息（密钥、凭证）如何管理？ | — | 🔲 待研究 |
 | 5 | 用户审批流是如何嵌入工作流的？ | [q05](../../_private/questions/q05-tool-system-security.md) | ✅ 已研究 |
+| 6 | 三系统安全模块深度对比（含 Hermes + Claude Code 泄露源码） | [q06](../../_private/questions/q06-security-system-deep-dive.md) | 🔶 待审阅 |
 
 ## 核心发现
 
-### 两种安全哲学
+### 三种安全哲学
 
-- **OpenClaw — 信任用户 + 容器隔离**：容器是可选的（非默认）；非沙箱模式安全靠配置；工具级 allow/deny
-- **Claude Code — 纵深防御 + 进程沙箱**：7 层权限管线；~7000 行 Bash AST 解析；bypass-immune 保护区；macOS seatbelt / Linux bubblewrap
+- **OpenClaw — 信任用户 + 容器隔离**：Docker/SSH 可插拔沙箱（非默认）；ExecSecurity×ExecAsk 矩阵 + ACP 工具分级；两阶段审批防竞态
+- **Hermes — 上下文感知 + 外部扫描**：Tirith 外部扫描器 + 正则危险命令检测 + Smart(LLM) 审批；容器/非交互路径降级检查；`tirith_fail_open` 默认放行
+- **Claude Code — 纵深防御 + OS 级沙箱**：8 层安全管线；2592 行 Bash AST 解析含 23 项编号检查；Seatbelt/bubblewrap OS 级沙箱；Auto 分类器(Sonnet 4.6)逐操作推理；服务端 Feature Flags 即时控制
 
 ### 共同模式
 
-- fail-closed 默认值——未声明安全属性按最危险处理
+- fail-closed 默认值——未声明安全属性按最危险处理（Hermes 部分偏 fail-open）
 - 受保护路径（`.git/` 等）不可绕过
 - 工具结果大小必须限制
+- 分层策略合并（多源规则按优先级合并）
+- Break-Glass 机制（`dangerously*` 前缀 + 可观测性）
+- 权限提示疲劳是共同挑战
 
 ### 各自不足
 
-- OpenClaw：非沙箱模式无安全保障；权限粒度不够
-- Claude Code：~7000 行 Bash 安全代码维护成本极高；权限模式一刀切导致权限疲劳
+- OpenClaw：非沙箱模式安全保障有限；权限粒度仅到工具级；无服务端紧急控制
+- Hermes：非交互路径无前置扫描；`tirith_fail_open: True`；容器后端完全跳检；Smart 审批有 LLM 误判风险
+- Claude Code：~7000 行 Bash 安全代码维护成本极高；Auto 模式每次工具调用加一次推理（延迟+成本）；macOS 沙箱弱于 Linux；权限模式跳跃大
 
 ## 知行设计决策
 
@@ -47,5 +53,7 @@
 
 ## 对应源码分析
 
-- OpenClaw: `src/agents/sandbox/`, `src/agents/tool-policy-pipeline.ts`, `src/infra/exec-approvals.ts`
-- Claude Code: 7 层权限管线, Bash AST (~7000 行), seatbelt/bubblewrap 沙箱
+- [OpenClaw 安全系统](../../source-analysis/openclaw/security-system.md): `src/agents/sandbox/`, `src/security/`, `src/acp/`, `src/infra/exec-approvals.ts`
+- [Hermes 安全系统](../../source-analysis/hermes-agent/security-system.md): `tools/approval.py`, `tools/tirith_security.py`, `tools/terminal_tool.py`, `tools/code_execution_tool.py`
+- [Claude Code 安全系统](../../source-analysis/claude-code/security-system.md): 8 层权限管线, Bash AST (2592 行 / 23 项检查), Seatbelt/bubblewrap 沙箱, yoloClassifier.ts
+- [综合深度调研](../../_private/questions/q06-security-system-deep-dive.md): 三系统交叉对比 + 知行设计启示
