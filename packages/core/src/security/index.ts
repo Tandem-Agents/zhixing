@@ -57,9 +57,45 @@ export type { PermissionStoreOptions } from "./permission-store.js";
 // 权限匹配中间件
 export { PermissionMatcherMiddleware } from "./permission-matcher.js";
 
+// 确认追踪与建议
+export {
+  ConfirmationTracker,
+  suggestPatterns,
+} from "./confirmation-tracker.js";
+export type {
+  IConfirmationTracker,
+  SuggestedPattern,
+  SuggestionStatus,
+} from "./confirmation-tracker.js";
+
+// 命令预解析器
+export {
+  CommandAnalyzerMiddleware,
+  analyzeCommand,
+} from "./command-analyzer.js";
+export type {
+  CommandAnalysis,
+  RedirectSpec,
+  SubcommandInfo,
+} from "./command-analyzer.js";
+
 // 执行守卫
 export { EnvSanitize } from "./env-sanitize.js";
 export { PathGuard } from "./path-guard.js";
+export {
+  ExecutionGuardMiddleware,
+  RateLimitError,
+  TimeoutError,
+  truncateOutput,
+  wrapWithConstraints,
+} from "./execution-guard.js";
+export type {
+  ExecutionConstraints,
+  ExecutionGuardOptions,
+  ToolExecutionProfile,
+} from "./execution-guard.js";
+export { SlidingWindowRateLimiter } from "./rate-limiter.js";
+export type { RateLimitResult } from "./rate-limiter.js";
 
 // 安全审计
 export { SecurityAuditor } from "./security-auditor.js";

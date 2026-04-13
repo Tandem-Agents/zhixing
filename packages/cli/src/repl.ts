@@ -540,6 +540,11 @@ export async function startRepl(options: ReplOptions): Promise<void> {
             lastToolEndCount: state.lastToolEndCount,
             hasProposedSkill: state.hasProposedSkill,
           },
+          // 安全确认对话框走 readline 的 question——pause 渲染避免 spinner 覆盖
+          securityPrompt: async (text) => {
+            renderer.stop();
+            return rl.question(text);
+          },
         });
 
       renderer.stop();

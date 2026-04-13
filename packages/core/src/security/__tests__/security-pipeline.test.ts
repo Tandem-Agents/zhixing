@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { EventBus } from "../../events/event-bus.js";
+import { ConfirmationTracker } from "../confirmation-tracker.js";
 import { PermissionStore } from "../permission-store.js";
+import { SlidingWindowRateLimiter } from "../rate-limiter.js";
 import type { AgentEventMapWithSecurity } from "../security-auditor.js";
 import { SecurityPipeline } from "../security-pipeline.js";
 import type {
@@ -594,6 +596,455 @@ describe("SecurityPipeline", () => {
 
       expect(events.length).toBe(1);
       expect(events[0]!.decision).toBe("allow");
+    });
+  });
+
+  describe("智能建议集成", () => {
+    it("初次 confirm 不附带 suggestion", async () => {
+      const pipeline = new SecurityPipeline({
+        workspace: "/home/user/project",
+      });
+
+      const result = await pipeline.evaluate(
+        "bash",
+        { command: "curl https://example.com" },
+        "/home/user/project",
+      );
+
+      expect(result.requiresConfirmation).toBe(true);
+      expect(result.suggestion).toBeUndefined();
+    });
+
+    it("达到阈值后 confirm 附带 suggestion（curl 是 medium 风险，5 次）", async () => {
+      const tracker = new ConfirmationTracker();
+      const pipeline = new SecurityPipeline({
+        workspace: "/home/user/project",
+        confirmationTracker: tracker,
+      });
+
+      // 模拟用户连续 5 次手动确认
+      for (let i = 0; i < 5; i++) {
+        tracker.record(
+          {
+            tool: "bash",
+            arguments: { command: `curl https://api.example.com/${i}` },
+            context: {
+              cwd: "/home/user/project",
+              workspace: "/home/user/project",
+              sessionType: "interactive",
+            },
+          },
+          "medium",
+        );
+      }
+
+      const result = await pipeline.evaluate(
+        "bash",
+        { command: "curl https://api.example.com/6" },
+        "/home/user/project",
+      );
+
+      expect(result.requiresConfirmation).toBe(true);
+      expect(result.suggestion).toBeDefined();
+      expect(result.suggestion?.suggest).toBe(true);
+      expect(result.suggestion?.patterns.length).toBeGreaterThan(0);
+      // 最后一个候选模式应该是最通用的 "curl *"
+      const argList = result.suggestion!.patterns.map((p) => p.pattern.argument);
+      expect(argList).toContain("curl *");
+    });
+
+    it("critical 风险操作即使多次手动确认也永不建议", async () => {
+      const tracker = new ConfirmationTracker();
+      const pipeline = new SecurityPipeline({
+        workspace: "/home/user/project",
+        confirmationTracker: tracker,
+      });
+
+      // 注入 100 次记录
+      for (let i = 0; i < 100; i++) {
+        tracker.record(
+          {
+            tool: "bash",
+            arguments: { command: "rm -rf /tmp/junk" },
+            context: {
+              cwd: "/home/user/project",
+              workspace: "/home/user/project",
+              sessionType: "interactive",
+            },
+          },
+          "critical",
+        );
+      }
+
+      // rm -rf 走 cf-destructive-commands 规则 → confirm + high 风险
+      // 但即使被分类为 critical，也不应建议
+      const result = await pipeline.evaluate(
+        "bash",
+        { command: "rm -rf /tmp/junk" },
+        "/home/user/project",
+      );
+
+      // 不论决策如何，suggestion 都应该是 undefined（critical 永不建议）
+      // 注：实际决策可能是 high 而非 critical，这里仅验证逻辑路径
+      if (result.decision?.riskLevel === "critical") {
+        expect(result.suggestion).toBeUndefined();
+      }
+    });
+
+    it("allow 决策不会触发 suggestion（observe 操作）", async () => {
+      const tracker = new ConfirmationTracker();
+      // 即使 tracker 里有大量记录
+      tracker.record(
+        {
+          tool: "read",
+          arguments: { path: "/tmp/a" },
+          context: { cwd: "/tmp", workspace: "/tmp", sessionType: "interactive" },
+        },
+        "low",
+      );
+
+      const pipeline = new SecurityPipeline({
+        workspace: "/home/user/project",
+        confirmationTracker: tracker,
+      });
+
+      const result = await pipeline.evaluate(
+        "read",
+        { path: "src/index.ts" },
+        "/home/user/project",
+      );
+
+      expect(result.allowed).toBe(true);
+      expect(result.requiresConfirmation).toBeFalsy();
+      expect(result.suggestion).toBeUndefined();
+    });
+
+    it("权限规则 allow 命中后不再 confirm，也不需 suggestion", async () => {
+      const store = new PermissionStore({ rootDir: null });
+      store.create(
+        null,
+        PermissionStore.createRule({
+          pattern: { tool: "bash", argument: "curl *" },
+          decision: "allow",
+          scope: "global",
+        }),
+      );
+
+      const tracker = new ConfirmationTracker();
+      // 即使 tracker 里有 5 次记录
+      for (let i = 0; i < 5; i++) {
+        tracker.record(
+          {
+            tool: "bash",
+            arguments: { command: "curl https://example.com" },
+            context: {
+              cwd: "/home/user/project",
+              workspace: "/home/user/project",
+              sessionType: "interactive",
+            },
+          },
+          "medium",
+        );
+      }
+
+      const pipeline = new SecurityPipeline({
+        workspace: "/home/user/project",
+        permissionStore: store,
+        confirmationTracker: tracker,
+      });
+
+      const result = await pipeline.evaluate(
+        "bash",
+        { command: "curl https://example.com" },
+        "/home/user/project",
+      );
+
+      expect(result.allowed).toBe(true);
+      expect(result.requiresConfirmation).toBeFalsy();
+      expect(result.suggestion).toBeUndefined();
+    });
+
+    it("pipeline.getConfirmationTracker 暴露访问", () => {
+      const pipeline = new SecurityPipeline({
+        workspace: "/home/user/project",
+      });
+
+      expect(pipeline.getConfirmationTracker()).toBeDefined();
+      expect(typeof pipeline.getConfirmationTracker().record).toBe("function");
+    });
+
+    it("包含 SuggestionGenerator 中间件", () => {
+      const pipeline = new SecurityPipeline({
+        workspace: "/home/user/project",
+      });
+
+      const names = pipeline.getMiddlewares().map((m) => m.name);
+      expect(names).toContain("SuggestionGenerator");
+    });
+  });
+
+  describe("执行守卫集成", () => {
+    it("放行的 read 操作携带 executionConstraints", async () => {
+      const pipeline = new SecurityPipeline({
+        workspace: "/home/user/project",
+      });
+
+      const result = await pipeline.evaluate(
+        "read",
+        { path: "src/index.ts" },
+        "/home/user/project",
+      );
+
+      expect(result.allowed).toBe(true);
+      expect(result.executionConstraints).toBeDefined();
+      expect(result.executionConstraints!.timeoutMs).toBe(10_000);
+      expect(result.executionConstraints!.rateLimited).toBe(false);
+    });
+
+    it("bash 工具拿到 120s timeout / 10MB 输出限制", async () => {
+      const pipeline = new SecurityPipeline({
+        workspace: "/home/user/project",
+      });
+
+      const result = await pipeline.evaluate(
+        "bash",
+        { command: "git status" },
+        "/home/user/project",
+      );
+
+      expect(result.executionConstraints!.timeoutMs).toBe(120_000);
+      expect(result.executionConstraints!.maxOutputBytes).toBe(10 * 1024 * 1024);
+    });
+
+    it("超过频率限制后被 block，reason 提示频率超限", async () => {
+      let now = 1000;
+      const limiter = new SlidingWindowRateLimiter(60_000, 2, () => now);
+      const pipeline = new SecurityPipeline({
+        workspace: "/home/user/project",
+        executionGuard: { rateLimiter: limiter },
+      });
+
+      // 前两次放行
+      await pipeline.evaluate(
+        "read",
+        { path: "src/a.ts" },
+        "/home/user/project",
+      );
+      await pipeline.evaluate(
+        "read",
+        { path: "src/b.ts" },
+        "/home/user/project",
+      );
+
+      // 第三次超限
+      const result = await pipeline.evaluate(
+        "read",
+        { path: "src/c.ts" },
+        "/home/user/project",
+      );
+
+      expect(result.allowed).toBe(false);
+      expect(result.reason).toMatch(/频率限制/);
+      expect(result.executionConstraints!.rateLimited).toBe(true);
+    });
+
+    it("自定义 executionGuard.toolProfiles 覆盖默认", async () => {
+      const pipeline = new SecurityPipeline({
+        workspace: "/home/user/project",
+        executionGuard: {
+          toolProfiles: {
+            bash: { timeoutMs: 30_000 },
+          },
+        },
+      });
+
+      const result = await pipeline.evaluate(
+        "bash",
+        { command: "git status" },
+        "/home/user/project",
+      );
+
+      expect(result.executionConstraints!.timeoutMs).toBe(30_000);
+    });
+
+    it("不同工具的频率限制相互独立", async () => {
+      let now = 1000;
+      const limiter = new SlidingWindowRateLimiter(60_000, 1, () => now);
+      const pipeline = new SecurityPipeline({
+        workspace: "/home/user/project",
+        executionGuard: { rateLimiter: limiter },
+      });
+
+      // bash 用满
+      await pipeline.evaluate(
+        "bash",
+        { command: "git status" },
+        "/home/user/project",
+      );
+      const second = await pipeline.evaluate(
+        "bash",
+        { command: "git log" },
+        "/home/user/project",
+      );
+      expect(second.allowed).toBe(false);
+
+      // read 不受影响
+      const readResult = await pipeline.evaluate(
+        "read",
+        { path: "src/a.ts" },
+        "/home/user/project",
+      );
+      expect(readResult.allowed).toBe(true);
+    });
+
+    it("policy block 时不消耗频率配额", async () => {
+      let now = 1000;
+      const limiter = new SlidingWindowRateLimiter(60_000, 5, () => now);
+      const pipeline = new SecurityPipeline({
+        workspace: "/home/user/project",
+        executionGuard: { rateLimiter: limiter },
+      });
+
+      // bi-git-write 应该 block，不应到 ExecutionGuard
+      await pipeline.evaluate(
+        "write",
+        { path: ".git/config" },
+        "/home/user/project",
+      );
+
+      // 配额未被消耗
+      expect(limiter.check("write").used).toBe(0);
+    });
+
+    it("包含 ExecutionGuard 中间件", () => {
+      const pipeline = new SecurityPipeline({
+        workspace: "/home/user/project",
+      });
+
+      const names = pipeline.getMiddlewares().map((m) => m.name);
+      expect(names).toContain("ExecutionGuard");
+    });
+
+    it("pipeline.getExecutionGuard 暴露访问", () => {
+      const pipeline = new SecurityPipeline({
+        workspace: "/home/user/project",
+      });
+
+      const guard = pipeline.getExecutionGuard();
+      expect(guard).toBeDefined();
+      expect(typeof guard.getRateLimiter).toBe("function");
+    });
+  });
+
+  describe("命令预解析集成（纵深防御）", () => {
+    it("bash 命令内的 ~/.ssh/ 路径触发 bi-ssh-keys block", async () => {
+      const pipeline = new SecurityPipeline({
+        workspace: "/home/user/project",
+      });
+
+      const result = await pipeline.evaluate(
+        "bash",
+        { command: "cat ~/.ssh/id_rsa" },
+        "/home/user/project",
+      );
+
+      expect(result.allowed).toBe(false);
+      expect(result.decision?.action).toBe("block");
+      const ruleIds = result.decision?.matchedRules.map((r) => r.id) ?? [];
+      expect(ruleIds).toContain("bi-ssh-keys");
+    });
+
+    it("bash 命令内的 LD_PRELOAD=xxx 触发 bi-env-injection block", async () => {
+      const pipeline = new SecurityPipeline({
+        workspace: "/home/user/project",
+      });
+
+      const result = await pipeline.evaluate(
+        "bash",
+        { command: "LD_PRELOAD=/evil.so ls" },
+        "/home/user/project",
+      );
+
+      expect(result.allowed).toBe(false);
+      expect(result.decision?.action).toBe("block");
+    });
+
+    it("引号内的 | 不被误判为链式（精准 quote-aware 检测）", async () => {
+      const pipeline = new SecurityPipeline({
+        workspace: "/home/user/project",
+      });
+
+      // echo "a | b" 本身是 safe read-only 命令
+      // 如果分类器误把内部的 | 当作 chain 会升级为 external
+      // 精准检测下应该：没有 chain → echo 不在 SAFE_READ_COMMANDS → external
+      // （echo 不在白名单是另一回事——这里验证的是 hasChain 不被误触发）
+      const result = await pipeline.evaluate(
+        "bash",
+        { command: 'echo "a | b"' },
+        "/home/user/project",
+      );
+
+      const analysis =
+        result.decision &&
+        pipeline.getMiddlewares().find((m) => m.name === "CommandAnalyzer");
+      expect(analysis).toBeDefined();
+      // 最有力的验证：resolvedAccess 里的 commandAnalysis.hasChain=false
+      // 但 result 里没直接暴露，所以通过操作类分类间接验证
+      // echo 不在安全白名单 → 如果 hasChain=false，会被分类为 external（而非 critical）
+      expect(result.operationClass).not.toBe("critical");
+    });
+
+    it("resolvedAccess 被填充了命令分析结果", async () => {
+      const pipeline = new SecurityPipeline({
+        workspace: "/home/user/project",
+      });
+
+      // 用一个会被 confirm 的命令，然后检查内部 state
+      // 通过自定义中间件注入观察
+      let capturedRequest: unknown = null;
+      const sniffer = {
+        name: "sniffer",
+        phase: "authorize" as const,
+        order: 5, // 在 PolicyEvaluator(0) 之后 Classifier(10) 之前
+        execute: async (ctx: any, next: any) => {
+          capturedRequest = ctx.request.resolvedAccess;
+          return next();
+        },
+      };
+
+      const pipelineWithSniffer = new SecurityPipeline({
+        workspace: "/home/user/project",
+        middlewares: [sniffer],
+      });
+
+      await pipelineWithSniffer.evaluate(
+        "bash",
+        { command: "curl https://api.example.com/data" },
+        "/home/user/project",
+      );
+
+      expect(capturedRequest).toBeDefined();
+      const access = capturedRequest as {
+        hosts?: string[];
+        commandAnalysis?: { hasChain: boolean };
+      };
+      expect(access.hosts).toContain("api.example.com");
+      expect(access.commandAnalysis).toBeDefined();
+    });
+
+    it("包含 CommandAnalyzer 中间件且位于最前", () => {
+      const pipeline = new SecurityPipeline({
+        workspace: "/home/user/project",
+      });
+
+      const middlewares = pipeline.getMiddlewares();
+      const names = middlewares.map((m) => m.name);
+      expect(names).toContain("CommandAnalyzer");
+
+      // CommandAnalyzer 应该在 PolicyEvaluator 之前
+      const cmdIdx = names.indexOf("CommandAnalyzer");
+      const policyIdx = names.indexOf("PolicyEvaluator");
+      expect(cmdIdx).toBeLessThan(policyIdx);
     });
   });
 

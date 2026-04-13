@@ -255,6 +255,8 @@ export interface SecurityRequest {
     commands?: string[];
     hosts?: string[];
     envVars?: string[];
+    /** bash/shell 命令的结构化分析（由 CommandAnalyzerMiddleware 填充） */
+    commandAnalysis?: import("./command-analyzer.js").CommandAnalysis;
   };
 }
 
@@ -322,6 +324,10 @@ export interface SecurityMiddlewareState {
   operationClass?: OperationClass;
   /** 匹配到的权限规则（由 PermissionMatcherMiddleware 写入） */
   matchedPermissionRule?: PermissionRule;
+  /** 智能建议（由 SuggestionMiddleware 写入，仅在达到阈值时存在） */
+  suggestion?: import("./confirmation-tracker.js").SuggestionStatus;
+  /** 执行约束（由 ExecutionGuardMiddleware 写入） */
+  executionConstraints?: import("./execution-guard.js").ExecutionConstraints;
   sanitizedEnv?: Record<string, string | undefined>;
   resolvedPaths?: string[];
   [key: string]: unknown;
@@ -342,6 +348,10 @@ export interface SecurityMiddlewareResult {
   decision?: SecurityDecision;
   /** 匹配到的权限规则（若有） */
   matchedPermissionRule?: PermissionRule;
+  /** 智能建议（达到阈值时的"始终允许"提示） */
+  suggestion?: import("./confirmation-tracker.js").SuggestionStatus;
+  /** 执行约束（timeout / output limit / rate limit 状态） */
+  executionConstraints?: import("./execution-guard.js").ExecutionConstraints;
   /** 原因说明 */
   reason?: string;
   /** 修改后的环境变量（由 EnvSanitize 提供） */

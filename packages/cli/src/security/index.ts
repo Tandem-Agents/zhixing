@@ -1,0 +1,19 @@
+/**
+ * CLI 安全子系统入口
+ *
+ * 组装 core 的 SecurityPipeline 与 CLI 特定的 UI 层。
+ */
+
+export {
+  showConfirmationDialog,
+  renderBlockedMessage,
+  type ConfirmationChoice,
+  type PromptFn,
+  type ShowConfirmationOptions,
+} from "./confirmation-ui.js";
+
+export {
+  createSecureExecuteTool,
+  SecurityBlockError,
+  type SecureExecuteToolOptions,
+} from "./secure-executor.js";

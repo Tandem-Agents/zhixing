@@ -1,16 +1,21 @@
 /**
  * 安全中间件管线
  *
- * 将策略评估、操作分类、环境净化、路径守卫、审计记录等中间件串联执行。
+ * 将命令预解析、策略评估、操作分类、权限匹配、建议生成、守卫、审计记录串联执行。
  *
- * Phase 2 管线：
+ * 安全管线：
  *   post-execute (outermost wrapper)
- *     └── authorize
- *           ├── PolicyEvaluator       (order=0)   评估内置/用户规则
- *           └── OperationClassifier   (order=10)  按影响范围分类
- *     └── guard
- *           ├── EnvSanitize           (order=10)  清理危险环境变量
- *           └── PathGuard             (order=20)  路径规范化 + 边界检查
+ *     └── SecurityAuditor        观察最终决策，发射事件
+ *   authorize
+ *     ├── CommandAnalyzer        (order=-10) Shell 命令预解析，填 resolvedAccess
+ *     ├── PolicyEvaluator        (order=0)   评估内置/用户规则
+ *     ├── OperationClassifier    (order=10)  按影响范围分类
+ *     ├── PermissionMatcher      (order=20)  查询用户权限规则
+ *     └── SuggestionGenerator    (order=30)  智能建议（达阈值时）
+ *   guard
+ *     ├── EnvSanitize            (order=10)  清理危险环境变量
+ *     ├── PathGuard              (order=20)  路径规范化 + 边界检查
+ *     └── ExecutionGuard         (order=30)  超时 / 输出 / 频率约束
  *
  * ── Onion 模型排序 ──
  * post-execute 阶段（SecurityAuditor）在数组中位于最前，作为 onion 最外层包装器。
@@ -26,7 +31,14 @@ import {
   CompositeClassifier,
   createDefaultClassifier,
 } from "./classifier.js";
+import { CommandAnalyzerMiddleware } from "./command-analyzer.js";
+import { ConfirmationTracker } from "./confirmation-tracker.js";
+import type { IConfirmationTracker } from "./confirmation-tracker.js";
 import { EnvSanitize } from "./env-sanitize.js";
+import {
+  ExecutionGuardMiddleware,
+  type ExecutionGuardOptions,
+} from "./execution-guard.js";
 import { PathGuard } from "./path-guard.js";
 import { PermissionMatcherMiddleware } from "./permission-matcher.js";
 import { PermissionStore } from "./permission-store.js";
@@ -160,6 +172,38 @@ class OperationClassifierMiddleware implements SecurityMiddleware {
   }
 }
 
+// ─── Suggestion 中间件 ───
+
+/**
+ * 智能建议中间件——authorize 阶段最后一步。
+ * 当决策为 confirm 时，查询 ConfirmationTracker 看是否到达建议阈值。
+ * 不修改决策本身，只把建议状态写入 ctx.state.suggestion 供 UI 渲染。
+ */
+class SuggestionMiddleware implements SecurityMiddleware {
+  readonly name = "SuggestionGenerator";
+  readonly phase = "authorize" as const;
+  readonly order = 30;
+
+  constructor(private readonly tracker: IConfirmationTracker) {}
+
+  async execute(
+    ctx: SecurityMiddlewareContext,
+    next: () => Promise<SecurityMiddlewareResult>,
+  ): Promise<SecurityMiddlewareResult> {
+    const current = ctx.state.decision;
+    if (current?.action === "confirm") {
+      const status = this.tracker.shouldSuggest(
+        ctx.request,
+        current.riskLevel,
+      );
+      if (status.suggest) {
+        ctx.state.suggestion = status;
+      }
+    }
+    return next();
+  }
+}
+
 // ─── 管线选项 ───
 
 export interface SecurityPipelineOptions {
@@ -185,6 +229,15 @@ export interface SecurityPipelineOptions {
    * 生产环境应显式构造 `new PermissionStore({})` 以启用 ~/.zhixing/permissions/ 持久化。
    */
   permissionStore?: IPermissionStore;
+  /**
+   * 确认追踪器。未提供时使用默认的 in-memory tracker。
+   * 跨多次调用共享一个实例才能积累计数。
+   */
+  confirmationTracker?: IConfirmationTracker;
+  /**
+   * 执行守卫选项。控制工具 profile、频率限制窗口、共享 limiter 等。
+   */
+  executionGuard?: ExecutionGuardOptions;
 }
 
 /**
@@ -202,6 +255,8 @@ export class SecurityPipeline {
   private readonly policyEngine: PolicyEngine;
   private readonly classifier: OperationClassifier;
   private readonly permissionStore: IPermissionStore;
+  private readonly confirmationTracker: IConfirmationTracker;
+  private readonly executionGuard: ExecutionGuardMiddleware;
   private readonly sessionType: SessionType;
   private readonly workspace: string | null;
   private readonly workspaceId: string | null;
@@ -219,17 +274,25 @@ export class SecurityPipeline {
     // 默认 store 是纯内存的——生产代码显式传入持久化 store 以避免污染测试环境
     this.permissionStore =
       options.permissionStore ?? new PermissionStore({ rootDir: null });
+    this.confirmationTracker =
+      options.confirmationTracker ?? new ConfirmationTracker();
+    this.executionGuard = new ExecutionGuardMiddleware(
+      options.executionGuard ?? {},
+    );
 
     // 组装中间件管线
     const middlewares: SecurityMiddleware[] = [
+      new CommandAnalyzerMiddleware(),
       new PolicyEvaluatorMiddleware(this.policyEngine),
       new OperationClassifierMiddleware(this.classifier),
       new PermissionMatcherMiddleware(
         this.permissionStore,
         () => this.workspaceId,
       ),
+      new SuggestionMiddleware(this.confirmationTracker),
       new EnvSanitize(),
       new PathGuard(),
+      this.executionGuard,
     ];
 
     // 审计器（post-execute）作为 onion 最外层包装其他中间件
@@ -296,6 +359,16 @@ export class SecurityPipeline {
     return this.permissionStore;
   }
 
+  /** 获取确认追踪器（CLI 在用户选 [y] 后调用 record 累计计数） */
+  getConfirmationTracker(): IConfirmationTracker {
+    return this.confirmationTracker;
+  }
+
+  /** 获取执行守卫实例（用于查询 rate limiter 状态、调试） */
+  getExecutionGuard(): ExecutionGuardMiddleware {
+    return this.executionGuard;
+  }
+
   /** 获取当前工作区的稳定 ID（用于创建 workspace 作用域规则） */
   getWorkspaceId(): string | null {
     return this.workspaceId;
@@ -339,6 +412,8 @@ export class SecurityPipeline {
       operationClass: ctx.state.operationClass,
       decision,
       matchedPermissionRule: ctx.state.matchedPermissionRule,
+      suggestion: ctx.state.suggestion,
+      executionConstraints: ctx.state.executionConstraints,
       reason: decision?.reason,
       sanitizedEnv: ctx.state.sanitizedEnv,
       resolvedPaths: ctx.state.resolvedPaths,

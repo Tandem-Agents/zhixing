@@ -14,6 +14,7 @@ import {
   type ContextBudget,
   type Message,
   type ToolResultBlock,
+  type IPermissionStore,
   createEventBus,
   createContextEngine,
   createTokenEstimator,
@@ -21,6 +22,8 @@ import {
   createMessageDropStrategy,
   createMemoryFlushStrategy,
   MemoryStore,
+  PermissionStore,
+  SecurityPipeline,
   userMessage,
   withRetry,
   runAgentLoop,
@@ -45,6 +48,10 @@ import {
 } from "./render.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { loadProjectContext, injectContext, enrichContext, type EnrichOptions } from "./project-context.js";
+import {
+  createSecureExecuteTool,
+  type PromptFn,
+} from "./security/index.js";
 
 // ─── 类型 ───
 
@@ -60,6 +67,10 @@ export interface AgentSession {
   callText: (prompt: string) => Promise<string>;
   /** 当前 Token 估算器的校准因子（1.0 = 未校准） */
   readonly calibrationFactor: number;
+  /** 安全管线（用于 /trust /security 命令访问权限规则、审计日志等） */
+  readonly securityPipeline: SecurityPipeline;
+  /** 权限规则存储的快捷访问 */
+  readonly permissionStore: IPermissionStore;
 }
 
 export interface ForceCompactResult {
@@ -75,6 +86,11 @@ export interface RunParams {
   onBeforeEventRender?: () => void;
   /** 反思相关选项（上一轮工具调用数、是否已提议过） */
   enrichOptions?: EnrichOptions;
+  /**
+   * 安全确认对话框的提示器。REPL 注入 rl.question；
+   * 不提供时 confirm 决策会被视为 block（适合 CI / 一次性脚本）。
+   */
+  securityPrompt?: PromptFn;
 }
 
 export interface RunResult {
@@ -126,6 +142,18 @@ export async function createSession(options: {
   ];
   const systemPrompt = buildSystemPrompt({ tools, cwd });
 
+  // 安全管线：会话级单例，跨多次 run() 共享权限规则、确认追踪、频率限制状态。
+  // 持久化 store 落盘到 ~/.zhixing/permissions/，规则跨进程保留。
+  const sessionType: "interactive" | "ci" = process.stdin.isTTY
+    ? "interactive"
+    : "ci";
+  const persistentStore = new PermissionStore({});
+  const securityPipeline = new SecurityPipeline({
+    workspace: cwd,
+    sessionType,
+    permissionStore: persistentStore,
+  });
+
   // 加载项目上下文（ZHIXING.md + 环境信息），注入到首条 user message
   const projectContext = await loadProjectContext(cwd);
 
@@ -158,6 +186,8 @@ export async function createSession(options: {
   return {
     providerId: config.defaultProvider ?? provider.id,
     model,
+    securityPipeline,
+    permissionStore: persistentStore,
 
     get calibrationFactor(): number {
       return estimator.calibrationFactor;
@@ -263,6 +293,14 @@ export async function createSession(options: {
       // 将项目上下文 + 匹配的技能 + 反思提示注入到首条 user message
       const messagesWithContext = injectContext(params.messages, enrichedContext);
 
+      // 用 SecurityPipeline 包装工具执行——每次 run() 重新构造 wrapper
+      // 以便绑定本次 run 的 prompt 函数（REPL 提供 rl.question，CI 不提供）
+      const secureExecuteTool = createSecureExecuteTool({
+        pipeline: securityPipeline,
+        originalExecute: (tool, input, context) => tool.call(input, context),
+        prompt: params.securityPrompt,
+      });
+
       const gen = runAgentLoop({
         provider,
         model,
@@ -271,7 +309,10 @@ export async function createSession(options: {
         systemPrompt,
         eventBus,
         workingDirectory: process.cwd(),
-        deps: { callLLM: resilientCallLLM },
+        deps: {
+          callLLM: resilientCallLLM,
+          executeTool: secureExecuteTool,
+        },
         contextManager: contextEngine,
       });
 

@@ -206,7 +206,13 @@ export class ShellClassifier implements OperationClassifier {
     if (this.isDestructive(trimmed)) return "critical";
 
     // 含管道、重定向、链式操作符、命令替换 → 不走快捷路径
-    if (this.hasChainOperators(trimmed)) return "external";
+    // 优先使用 CommandAnalyzer 的精准（quote-aware）结果；
+    // 没有分析结果时（直接使用 classifier 不经 pipeline）回退到保守正则
+    const analysis = request.resolvedAccess?.commandAnalysis;
+    const hasChain = analysis
+      ? analysis.hasChain
+      : this.hasChainOperators(trimmed);
+    if (hasChain) return "external";
 
     const tokens = trimmed.split(/\s+/);
     const executable = this.normalizeExecutable(tokens[0] ?? "");
