@@ -45,6 +45,145 @@ export type RuleAction = "block" | "confirm" | "audit";
 
 export type OperationClass = "observe" | "internal" | "external" | "critical";
 
+// ─── 威胁边界 ───
+
+/**
+ * 威胁边界类型——需要被保护的资源类别。
+ * 工具通过声明自己会跨越哪些边界来获得自动的安全保护。
+ */
+export type BoundaryType =
+  | "filesystem"
+  | "network"
+  | "process"
+  | "secrets"
+  | "system"
+  | "messaging"
+  | "calendar"
+  | "external-service"
+  | "financial";
+
+/**
+ * 工具声明的边界跨越。
+ * 每个工具在定义时附带一组 BoundaryCrossing，描述它会触及哪些安全边界。
+ */
+export interface BoundaryCrossing {
+  /** 被跨越的边界类型 */
+  boundaryType: BoundaryType;
+  /**
+   * 访问模式——工具自由定义的字符串。
+   * 常见值：read / write / exec / send / egress / query / list / create / delete / invite
+   * 读类访问（read / list / query / view / fetch）由分类器识别为 observe。
+   */
+  access: string;
+  /**
+   * 是否需要运行时解析才能确定是否真正触发。
+   * 静态边界（如 ReadTool 的 filesystem.read）始终生效；
+   * 动态边界（如 BashTool 的 filesystem.write）需要解析命令内容才知道是否触发。
+   */
+  dynamic: boolean;
+}
+
+/**
+ * 工具边界查询接口。
+ * 将分类器与完整工具系统解耦——分类器只需知道某个工具声明了什么边界，
+ * 不需要持有 ToolRegistry 的完整引用。Phase 2 使用轻量 lookup，
+ * Phase 3 接入 ADR-004 的完整工具注册表。
+ */
+export interface ToolBoundaryRegistry {
+  getBoundaries(toolName: string): BoundaryCrossing[] | undefined;
+}
+
+// ─── 操作分类器接口 ───
+
+/**
+ * 操作分类器——判断一个操作的影响范围。
+ * 不做决策，只做分类：决策由管线根据分类结果 + 策略 + 权限综合得出。
+ */
+export interface OperationClassifier {
+  classify(request: SecurityRequest): OperationClass;
+}
+
+// ─── 权限规则 ───
+
+/**
+ * 权限决策——用户的明确选择。
+ * 不存在"自动积累的信任分数"，每一条规则都来自用户在确认对话框中的主动选择。
+ */
+export type PermissionDecision = "allow" | "deny";
+
+/**
+ * 权限规则的作用域。
+ * - session：本次会话有效（进程重启后消失，不落盘）
+ * - workspace：当前工作区内有效，落盘到 ~/.zhixing/permissions/<workspace-hash>.json
+ * - global：跨所有工作区有效，落盘到 ~/.zhixing/permissions/global.json
+ */
+export type PermissionScope = "session" | "workspace" | "global";
+
+/**
+ * 权限规则——用户创建的明确授权或拒绝。
+ * 匹配通过 pattern.tool + pattern.argument 的 glob 匹配进行。
+ */
+export interface PermissionRule {
+  id: string;
+  /** 匹配模式：工具名 + 参数 glob */
+  pattern: {
+    /** 工具名（小写），或 "*" 表示任意工具 */
+    tool: string;
+    /** 参数 glob 模式，如 "npm install *"、"src/**"、"*" */
+    argument: string;
+  };
+  decision: PermissionDecision;
+  scope: PermissionScope;
+  createdAt: number;
+  /** 最近一次匹配时间；从未匹配为 0 */
+  lastMatchedAt: number;
+  /** 累计匹配次数 */
+  matchCount: number;
+  /**
+   * 工作区路径（仅 workspace 作用域需要记录，便于 /trust list 展示）。
+   * 实际定位规则使用 workspaceId（hash）。
+   */
+  workspace?: string;
+}
+
+/**
+ * 权限规则存储接口。
+ * 负责管理三种作用域的规则集合，提供匹配、创建、查询、撤销等操作。
+ */
+export interface IPermissionStore {
+  /**
+   * 查询匹配的权限规则。
+   * 按 deny > allow、精确 > 宽泛 的顺序解决冲突。
+   * @param workspaceId 当前工作区标识（null 表示无工作区上下文）
+   * @param request 工具调用请求
+   * @returns 最匹配的规则，或 null 表示无匹配
+   */
+  match(
+    workspaceId: string | null,
+    request: SecurityRequest,
+  ): PermissionRule | null;
+
+  /**
+   * 创建一条规则。
+   * - session 作用域：不落盘
+   * - workspace 作用域：落盘到该工作区文件
+   * - global 作用域：落盘到全局文件
+   */
+  create(workspaceId: string | null, rule: PermissionRule): void;
+
+  /** 列出给定工作区可见的所有规则（session + 该工作区 + global） */
+  list(workspaceId: string | null): PermissionRule[];
+
+  /** 撤销某条规则。返回是否找到并撤销。 */
+  revoke(ruleId: string): boolean;
+
+  /** 清除给定工作区的所有规则（session + workspace 作用域，不影响 global） */
+  reset(workspaceId: string | null): void;
+
+  /** 清除全部规则（包括 global 和所有工作区）。 */
+  resetAll(): void;
+}
+
 // ─── 匹配规格（判别联合） ───
 
 export type MatchSpec =
@@ -179,6 +318,10 @@ export interface SecurityMiddlewareContext {
 
 export interface SecurityMiddlewareState {
   decision?: SecurityDecision;
+  /** 操作影响分类（由 OperationClassifierMiddleware 写入） */
+  operationClass?: OperationClass;
+  /** 匹配到的权限规则（由 PermissionMatcherMiddleware 写入） */
+  matchedPermissionRule?: PermissionRule;
   sanitizedEnv?: Record<string, string | undefined>;
   resolvedPaths?: string[];
   [key: string]: unknown;
@@ -186,8 +329,19 @@ export interface SecurityMiddlewareState {
 
 /** 安全中间件的执行结果 */
 export interface SecurityMiddlewareResult {
-  /** 是否允许继续执行 */
+  /**
+   * 是否允许继续执行（block 时为 false）。
+   * 注意：allowed=true 但 requiresConfirmation=true 时仍需用户确认才能放行。
+   */
   allowed: boolean;
+  /** 是否需要用户确认（Phase 2：external/critical 或策略规则 confirm 动作） */
+  requiresConfirmation?: boolean;
+  /** 操作影响分类 */
+  operationClass?: OperationClass;
+  /** 最终安全决策（包含所有匹配规则、风险等级、建议） */
+  decision?: SecurityDecision;
+  /** 匹配到的权限规则（若有） */
+  matchedPermissionRule?: PermissionRule;
   /** 原因说明 */
   reason?: string;
   /** 修改后的环境变量（由 EnvSanitize 提供） */
@@ -211,6 +365,23 @@ export type SecurityEventMap = {
     decision: SecurityAction;
     matchedRules: string[];
     duration: number;
+    operationClass?: OperationClass;
+  };
+
+  /** 操作被分类（Phase 2） */
+  "security:classified": {
+    tool: string;
+    operation: string;
+    operationClass: OperationClass;
+  };
+
+  /** 匹配到权限规则（Phase 2） */
+  "security:permission_matched": {
+    tool: string;
+    operation: string;
+    ruleId: string;
+    decision: PermissionDecision;
+    scope: PermissionScope;
   };
 
   /** 操作被阻止 */

@@ -51,6 +51,7 @@ export class SecurityAuditor implements SecurityMiddleware {
 
     if (decision) {
       const action: SecurityAction = decision.action;
+      const operationClass = ctx.state.operationClass;
 
       // 发射评估事件
       await this.eventBus.emit("security:evaluation", {
@@ -60,7 +61,29 @@ export class SecurityAuditor implements SecurityMiddleware {
         decision: action,
         matchedRules: decision.matchedRules.map((r) => r.id),
         duration,
+        operationClass,
       });
+
+      // 发射分类事件（Phase 2）
+      if (operationClass) {
+        await this.eventBus.emit("security:classified", {
+          tool: ctx.toolName,
+          operation: this.describeOperation(ctx),
+          operationClass,
+        });
+      }
+
+      // 发射权限匹配事件（Phase 2）
+      const matchedPermRule = ctx.state.matchedPermissionRule;
+      if (matchedPermRule) {
+        await this.eventBus.emit("security:permission_matched", {
+          tool: ctx.toolName,
+          operation: this.describeOperation(ctx),
+          ruleId: matchedPermRule.id,
+          decision: matchedPermRule.decision,
+          scope: matchedPermRule.scope,
+        });
+      }
 
       // 操作被阻止时发射专门事件
       if (action === "block") {

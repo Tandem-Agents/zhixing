@@ -18,6 +18,9 @@ out/
 Thumbs.db
 Desktop.ini
 
+# Claude / Cursor — 个人本地覆盖，不提交（与 Claude Code 惯例一致）
+.claude/settings.local.json
+
 # Editor / IDE
 .vscode/
 !.vscode/settings.json
