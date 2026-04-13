@@ -333,4 +333,123 @@ describe("createSecureExecuteTool", () => {
       expect(exec.callCount()).toBe(0);
     });
   });
+
+  describe("执行约束应用", () => {
+    it("超时强制中止——即使工具不配合 abort", async () => {
+      const pipeline = new SecurityPipeline({
+        workspace: "/tmp/ws",
+        executionGuard: {
+          // 把 read 工具的 timeout 改为 50ms
+          toolProfiles: { read: { timeoutMs: 50 } },
+        },
+      });
+
+      // 不可取消的工具：忽略 signal，sleep 5s
+      const slowExecute: typeof mockExecute extends () => infer R
+        ? R extends { fn: infer F }
+          ? F
+          : never
+        : never = async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+        return { content: "should not reach", isError: false };
+      };
+
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: slowExecute,
+      });
+
+      const start = Date.now();
+      await expect(
+        wrapped(makeTool("read"), { path: "src/index.ts" }, makeContext("/tmp/ws")),
+      ).rejects.toThrow(/超时/);
+      // 应该在 ~50ms 后就返回，远早于工具的 5000ms
+      expect(Date.now() - start).toBeLessThan(500);
+    });
+
+    it("输出超过 maxOutputBytes 时被截断并附加提示", async () => {
+      const pipeline = new SecurityPipeline({
+        workspace: "/tmp/ws",
+        executionGuard: {
+          toolProfiles: { read: { maxOutputBytes: 100 } },
+        },
+      });
+
+      const longContent = "x".repeat(500);
+      const longExecute = async () => ({
+        content: longContent,
+        isError: false,
+      });
+
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: longExecute,
+      });
+
+      const result = await wrapped(
+        makeTool("read"),
+        { path: "src/index.ts" },
+        makeContext("/tmp/ws"),
+      );
+
+      expect(result.content.length).toBeLessThan(longContent.length);
+      expect(result.content).toContain("[输出被截断:");
+      expect(result.content).toContain("500B");
+    });
+
+    it("正常长度的输出不被截断", async () => {
+      const pipeline = new SecurityPipeline({
+        workspace: "/tmp/ws",
+      });
+      const shortExecute = async () => ({
+        content: "ok",
+        isError: false,
+      });
+
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: shortExecute,
+      });
+
+      const result = await wrapped(
+        makeTool("read"),
+        { path: "src/index.ts" },
+        makeContext("/tmp/ws"),
+      );
+
+      expect(result.content).toBe("ok");
+      expect(result.content).not.toContain("[输出被截断");
+    });
+
+    it("传入的 abortSignal 与 pipeline 的 signal 合并", async () => {
+      const pipeline = new SecurityPipeline({ workspace: "/tmp/ws" });
+
+      // 工具会检查 signal 状态
+      let receivedSignal: AbortSignal | undefined;
+      const recordingExecute = async (
+        _tool: ToolDefinition,
+        _input: Record<string, unknown>,
+        ctx: ToolExecutionContext,
+      ) => {
+        receivedSignal = ctx.abortSignal;
+        return { content: "ok", isError: false };
+      };
+
+      const externalController = new AbortController();
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: recordingExecute,
+      });
+
+      await wrapped(
+        makeTool("read"),
+        { path: "src/index.ts" },
+        { workingDirectory: "/tmp/ws", abortSignal: externalController.signal },
+      );
+
+      expect(receivedSignal).toBeDefined();
+      // signal 应该是合并版本，仍未触发
+      expect(receivedSignal!.aborted).toBe(false);
+    });
+  });
 });

@@ -224,6 +224,19 @@ describe("wrapWithConstraints", () => {
     await wrapWithConstraints(async () => "ok", constraints({ timeoutMs: 5000 }));
     expect(Date.now() - start).toBeLessThan(100);
   });
+
+  it("不配合 abort signal 的工具也会被超时打断", async () => {
+    // 模拟"不可取消"的工具：完全忽略 signal
+    const start = Date.now();
+    await expect(
+      wrapWithConstraints(
+        async () => new Promise((resolve) => setTimeout(() => resolve("done"), 5000)),
+        constraints({ timeoutMs: 50 }),
+      ),
+    ).rejects.toBeInstanceOf(TimeoutError);
+    // await 应该在 ~50ms 后就返回，而不是等到 5000ms
+    expect(Date.now() - start).toBeLessThan(500);
+  });
 });
 
 // ─── truncateOutput ───

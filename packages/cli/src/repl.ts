@@ -37,6 +37,10 @@ import {
   renderUsageReport,
   renderContextVisual,
 } from "./render.js";
+import {
+  handleTrustCommand,
+  handleSecurityCommand,
+} from "./security/index.js";
 
 // ─── REPL 状态 ───
 
@@ -379,6 +383,21 @@ function buildSlashCommands(rl: readline.Interface): Record<
           const msg = err instanceof Error ? err.message : String(err);
           console.log(chalk.red(`  ✗ 压缩失败: ${msg}\n`));
         }
+      },
+    },
+    "/trust": {
+      description: "权限规则管理 (list/revoke/reset)",
+      handler: async (state, args) => {
+        await handleTrustCommand(args, {
+          pipeline: state.session.securityPipeline,
+          rl,
+        });
+      },
+    },
+    "/security": {
+      description: "安全状态概览 (rules: 列出策略规则)",
+      handler: (state, args) => {
+        handleSecurityCommand(args, state.session.securityPipeline);
       },
     },
     "/exit": {

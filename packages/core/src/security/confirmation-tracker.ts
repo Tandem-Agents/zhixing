@@ -165,6 +165,8 @@ export interface IConfirmationTracker {
     riskLevel: RiskLevel,
   ): SuggestionStatus;
   reset(request?: SecurityRequest): void;
+  /** 调试/可观测性：返回所有追踪条目（供 /security 展示） */
+  snapshot(): Array<{ key: string; count: number; highestRisk: RiskLevel }>;
 }
 
 interface TrackerEntry {

@@ -13,6 +13,9 @@
 
 import {
   PermissionStore,
+  truncateOutput,
+  wrapWithConstraints,
+  type ExecutionConstraints,
   type IConfirmationTracker,
   type IPermissionStore,
   type SecurityPipeline,
@@ -118,9 +121,93 @@ export function createSecureExecuteTool(
       });
     }
 
-    // 3. 执行实际工具
-    return originalExecute(tool, input, context);
+    // 3. 执行实际工具——应用 pipeline 计算的执行约束
+    return runWithConstraints({
+      tool,
+      input,
+      context,
+      constraints: result.executionConstraints,
+      originalExecute,
+    });
   };
+}
+
+// ─── 应用执行约束 ───
+
+interface RunWithConstraintsParams {
+  tool: ToolDefinition;
+  input: Record<string, unknown>;
+  context: ToolExecutionContext;
+  constraints?: ExecutionConstraints;
+  originalExecute: ExecuteToolFn;
+}
+
+async function runWithConstraints(
+  params: RunWithConstraintsParams,
+): Promise<ToolResult> {
+  const { tool, input, context, constraints, originalExecute } = params;
+
+  if (!constraints) {
+    return originalExecute(tool, input, context);
+  }
+
+  // 用 wrapWithConstraints 应用 timeout（即使工具不配合 abort 也能强制超时）
+  // 同时合并 pipeline 的 abort signal 与调用方已有的 signal
+  const rawResult = await wrapWithConstraints(async (pipelineSignal) => {
+    const combinedSignal = combineSignals(pipelineSignal, context.abortSignal);
+    return originalExecute(tool, input, {
+      ...context,
+      abortSignal: combinedSignal,
+    });
+  }, constraints);
+
+  // 输出超出限制时截断 + 追加提示
+  if (typeof rawResult.content === "string") {
+    const truncated = truncateOutput(rawResult.content, constraints.maxOutputBytes);
+    if (truncated.truncated) {
+      return {
+        ...rawResult,
+        content:
+          truncated.content +
+          `\n\n[输出被截断: 原始 ${formatBytes(truncated.originalBytes)}, 截断到 ${formatBytes(constraints.maxOutputBytes)}]`,
+      };
+    }
+  }
+
+  return rawResult;
+}
+
+/**
+ * 合并多个 AbortSignal——任一触发则结果信号触发。
+ * Node 20.3+ 有原生 AbortSignal.any，此处兼容旧 Node。
+ */
+function combineSignals(
+  ...signals: (AbortSignal | undefined)[]
+): AbortSignal {
+  const valid = signals.filter((s): s is AbortSignal => s !== undefined);
+  if (valid.length === 0) return new AbortController().signal;
+  if (valid.length === 1) return valid[0]!;
+
+  // 优先使用原生实现
+  const native = (AbortSignal as unknown as { any?: (s: AbortSignal[]) => AbortSignal }).any;
+  if (typeof native === "function") return native(valid);
+
+  // fallback：手动转发
+  const controller = new AbortController();
+  for (const sig of valid) {
+    if (sig.aborted) {
+      controller.abort();
+      return controller.signal;
+    }
+    sig.addEventListener("abort", () => controller.abort(), { once: true });
+  }
+  return controller.signal;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
 }
 
 // ─── 用户选择的副作用 ───

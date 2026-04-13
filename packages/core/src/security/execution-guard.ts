@@ -223,20 +223,25 @@ export async function wrapWithConstraints<T>(
 
   const controller = new AbortController();
   let timedOut = false;
-  const timeoutId = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-  }, constraints.timeoutMs);
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
   try {
-    return await fn(controller.signal);
-  } catch (err) {
-    if (timedOut) {
-      throw new TimeoutError(constraints.timeoutMs);
-    }
-    throw err;
+    return await new Promise<T>((resolve, reject) => {
+      timeoutId = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+        reject(new TimeoutError(constraints.timeoutMs));
+      }, constraints.timeoutMs);
+
+      // 即使 fn 不配合 abort signal，外层 timeoutId 的 reject 也会让
+      // Promise.race 立即结束。fn 会在后台继续跑直到自然结束（不可取消的工具）
+      // 但 await 已经返回。
+      fn(controller.signal).then(resolve, (err) => {
+        reject(timedOut ? new TimeoutError(constraints.timeoutMs) : err);
+      });
+    });
   } finally {
-    clearTimeout(timeoutId);
+    if (timeoutId) clearTimeout(timeoutId);
   }
 }
 

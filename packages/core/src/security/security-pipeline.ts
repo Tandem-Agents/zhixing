@@ -374,6 +374,11 @@ export class SecurityPipeline {
     return this.workspaceId;
   }
 
+  /** 获取当前工作区的绝对路径（用于 UI 友好显示） */
+  getWorkspace(): string | null {
+    return this.workspace;
+  }
+
   /** 获取所有中间件（用于调试和测试） */
   getMiddlewares(): readonly SecurityMiddleware[] {
     return this.middlewares;

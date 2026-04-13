@@ -17,3 +17,8 @@ export {
   SecurityBlockError,
   type SecureExecuteToolOptions,
 } from "./secure-executor.js";
+
+export {
+  handleTrustCommand,
+  handleSecurityCommand,
+} from "./commands.js";
