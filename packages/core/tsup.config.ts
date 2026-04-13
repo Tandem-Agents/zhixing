@@ -10,6 +10,7 @@ export default defineConfig({
     "src/context/index.ts",
     "src/session/index.ts",
     "src/memory/index.ts",
+    "src/security/index.ts",
   ],
   format: ["esm"],
   dts: true,

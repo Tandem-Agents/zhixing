@@ -5,3 +5,4 @@ export * from "./resilience/index.js";
 export * from "./context/index.js";
 export * from "./session/index.js";
 export * from "./memory/index.js";
+export * from "./security/index.js";
