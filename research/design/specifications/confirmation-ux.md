@@ -476,7 +476,7 @@ type NonInteractiveStrategy =
 │    始终允许 "npm install *" 全局 (g)                      │
 │    本次会话内允许 "npm install *" (s)                     │
 │    编辑命令后再允许 (e)                                   │
-│    拒绝并告诉 Claude 原因... (n/Esc)                      │
+│    拒绝并告诉知行原因... (n/Esc)                      │
 │                                                           │
 │  ↑↓ 选择 · Enter 确认 · Esc 拒绝 · ? 帮助                 │
 │                                                           │

@@ -11,6 +11,8 @@ export default defineConfig({
     "src/session/index.ts",
     "src/memory/index.ts",
     "src/security/index.ts",
+    "src/confirmation/index.ts",
+    "src/identity/index.ts",
   ],
   format: ["esm"],
   dts: true,

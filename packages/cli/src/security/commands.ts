@@ -14,6 +14,7 @@
 
 import * as readline from "node:readline/promises";
 import chalk from "chalk";
+import { getAgentIdentity } from "@zhixing/core";
 import type {
   PermissionRule,
   PermissionScope,
@@ -122,8 +123,11 @@ function listRules(args: string[], opts: TrustOptions): void {
           : "  当前工作区没有权限规则",
       ),
     );
+    const { displayName } = getAgentIdentity();
     console.log(
-      chalk.dim("  Tip: 智能体首次执行 confirm 操作时选 [a]/[g]/[s] 创建规则\n"),
+      chalk.dim(
+        `  Tip: ${displayName} 首次执行 confirm 操作时选 [a]/[g]/[s] 创建规则\n`,
+      ),
     );
     return;
   }

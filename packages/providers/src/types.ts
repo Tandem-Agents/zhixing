@@ -89,6 +89,18 @@ export interface ProviderConfig {
   quirks?: Partial<ProviderQuirks>;
 }
 
+/**
+ * 智能体身份配置——对应 `zhixing.config.json` 的 `agent` 字段。
+ * 未提供时 core 的 `resolveAgentIdentity` 会回退到默认值 `"知行"`。
+ */
+export interface AgentConfig {
+  /**
+   * 面向用户显示的智能体名字，出现在面板标题、确认对话框等位置。
+   * 留空或不设则为 `"知行"`。
+   */
+  displayName?: string;
+}
+
 /** 顶层配置结构（对应 zhixing.config.json） */
 export interface ZhixingConfig {
   /** 默认使用的 provider ID */
@@ -97,6 +109,8 @@ export interface ZhixingConfig {
   defaultModel?: string;
   /** Provider 配置表 */
   providers?: Record<string, ProviderConfig>;
+  /** 智能体身份配置（名字、人格等） */
+  agent?: AgentConfig;
 }
 
 // ─── 解析后的 Provider ───

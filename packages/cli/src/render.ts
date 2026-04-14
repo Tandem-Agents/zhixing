@@ -13,7 +13,12 @@
  */
 
 import chalk from "chalk";
-import type { AgentResult, AgentYield, ContextBudget } from "@zhixing/core";
+import {
+  type AgentResult,
+  type AgentYield,
+  type ContextBudget,
+  getAgentIdentity,
+} from "@zhixing/core";
 
 // ─── Spinner 常量 ───
 
@@ -381,17 +386,20 @@ export function renderError(error: unknown): void {
  *
  * 视觉序列（TTY 模式，~400ms）：
  *   1. "✦" 出现（80ms 预等待）
- *   2. "知行" 逐字打出（每字 70ms）
+ *   2. 显示名逐字打出（每字 70ms）
  *   3. 模型名淡入
  *   4. 短暂停顿后进入 prompt
  *
  * 非 TTY 环境（管道/CI）降级为静态单行输出。
+ *
+ * 显示名来自 getAgentIdentity()，默认 "知行"，可被 config 覆盖。
  */
 export async function renderWelcome(options: { model: string }): Promise<void> {
   const { model } = options;
+  const { displayName } = getAgentIdentity();
 
   if (!process.stdout.isTTY) {
-    console.log(`知行 · ${model}`);
+    console.log(`${displayName} · ${model}`);
     return;
   }
 
@@ -405,7 +413,7 @@ export async function renderWelcome(options: { model: string }): Promise<void> {
 
   // Phase 2: 名称逐字打出
   process.stdout.write(" ");
-  for (const char of "知行") {
+  for (const char of displayName) {
     process.stdout.write(chalk.bold(char));
     await sleep(70);
   }

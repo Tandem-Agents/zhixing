@@ -2,6 +2,7 @@
 
 // 类型导出
 export type {
+  AgentConfig,
   Protocol,
   ProviderConfig,
   ProviderPreset,

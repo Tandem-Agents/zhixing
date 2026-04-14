@@ -12,7 +12,7 @@
  */
 
 import chalk from "chalk";
-import { suggestPatterns } from "@zhixing/core";
+import { getAgentIdentity, suggestPatterns } from "@zhixing/core";
 import type {
   OperationClass,
   RiskLevel,
@@ -115,9 +115,12 @@ function renderDialog(
   const suggestion = result.suggestion;
 
   console.log();
+  const { displayName } = getAgentIdentity();
   console.log(chalk.yellow("╭─ 安全确认 ────────────────────────────"));
   console.log(chalk.yellow("│"));
-  console.log(`${chalk.yellow("│")} ${chalk.bold("智能体想要执行:")}`);
+  console.log(
+    `${chalk.yellow("│")} ${chalk.bold(`${displayName} 想要执行:`)}`,
+  );
   console.log(`${chalk.yellow("│")}   ${formatOperation(toolName, toolInput)}`);
   console.log(chalk.yellow("│"));
   console.log(

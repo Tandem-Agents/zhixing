@@ -23,7 +23,9 @@ import {
   createMemoryFlushStrategy,
   MemoryStore,
   PermissionStore,
+  resolveAgentIdentity,
   SecurityPipeline,
+  setAgentIdentity,
   userMessage,
   withRetry,
   runAgentLoop,
@@ -128,6 +130,11 @@ export async function createSession(options: {
   const { provider, defaultModel, config } = createProviderFromConfig({
     providerId: options.provider,
   });
+
+  // 应用级身份单例：启动时设一次，后续所有 user-facing 字符串通过
+  // getAgentIdentity() 读取。默认 "知行"，可通过 zhixing.config.json
+  // 的 agent.displayName 覆盖。
+  setAgentIdentity(resolveAgentIdentity(config.agent));
 
   const model = options.model ?? defaultModel;
   const cwd = process.cwd();
