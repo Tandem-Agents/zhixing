@@ -53,5 +53,10 @@ export { emptyUsage, mergeUsage } from "./llm.js";
 export type { AgentEventMap, AgentRunEndReason } from "./agent-events.js";
 
 // ─── 错误类型 ───
-export type { AgentErrorType } from "./errors.js";
-export { AgentError, isAgentError, toAgentError } from "./errors.js";
+export type { AgentErrorType, UserFacingError } from "./errors.js";
+export {
+  AgentError,
+  isAgentError,
+  isUserFacingError,
+  toAgentError,
+} from "./errors.js";

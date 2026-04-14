@@ -40,6 +40,7 @@ import {
 import {
   handleTrustCommand,
   handleSecurityCommand,
+  TerminalConfirmationRenderer,
 } from "./security/index.js";
 
 // ─── REPL 状态 ───
@@ -496,6 +497,26 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     terminal: true,
   });
 
+  // 挂载终端确认渲染器到会话 broker。
+  //
+  // 共存 rl：selectWithInput 会进入 stdin raw mode 并独占 keypress 事件，
+  // 与 readline 的行缓冲冲突。通过 beforeShow/afterShow 两个 hook，渲染器
+  // 在显示面板前 pause rl（停止消费 stdin），结束后 resume rl（恢复主循环）。
+  //
+  // 渲染器生命周期绑到 REPL 退出：rl.on("close") 里 detach。
+  const confirmationRenderer = new TerminalConfirmationRenderer({
+    beforeShow: () => {
+      renderer.stop(); // 暂停 spinner，避免动画覆盖面板
+      rl.pause();
+    },
+    afterShow: () => {
+      rl.resume();
+    },
+  });
+  const detachConfirmationRenderer = confirmationRenderer.attach(
+    agentSession.confirmationBroker,
+  );
+
   const state: ReplState = {
     messages,
     session: agentSession,
@@ -512,6 +533,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
 
   rl.on("close", () => {
     renderer.stop();
+    detachConfirmationRenderer();
     console.log(chalk.dim("\n再见 👋"));
     process.exit(0);
   });

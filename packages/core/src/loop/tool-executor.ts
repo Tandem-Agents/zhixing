@@ -18,6 +18,7 @@
 
 import type { IEventBus } from "../events/types.js";
 import type { AgentEventMap } from "../types/agent-events.js";
+import { isUserFacingError } from "../types/errors.js";
 import type { ToolResultBlock, ToolUseBlock } from "../types/messages.js";
 import type { ToolDefinition, ToolExecutionContext } from "../types/tools.js";
 import type { AgentLoopDeps, AgentYield } from "./types.js";
@@ -115,7 +116,18 @@ export async function* executeToolCalls(
     } catch (err) {
       const duration = Date.now() - startTime;
       const errorMessage = err instanceof Error ? err.message : String(err);
-      const errorContent = `Tool execution failed: ${errorMessage}`;
+
+      // 关键：区分"工具内部故障"和"用户面向错误"。
+      //
+      // 用户面向错误（如 SecurityBlockError 携带的 "用户拒绝此操作。反馈：
+      // 不要用 rm"）已经是一段完整、model-friendly 的反馈——直接原样作为
+      // tool_result 回送给 LLM，模型据此调整行为。
+      //
+      // 工具内部故障（JavaScript 异常、SDK 错误等）则加 "Tool execution
+      // failed: " 前缀，帮模型区分"我做错了"和"用户不同意"。
+      const errorContent = isUserFacingError(err)
+        ? errorMessage
+        : `Tool execution failed: ${errorMessage}`;
 
       results.push({
         type: "tool_result",

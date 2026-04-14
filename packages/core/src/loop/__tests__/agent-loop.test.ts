@@ -278,6 +278,64 @@ describe("Agent Loop", () => {
       }
     });
 
+    it("user-facing 错误 → tool_result 原样使用 error.message，不加前缀", async () => {
+      // 模拟场景：用户拒绝了 LLM 请求的工具调用，并留下反馈。
+      // executeTool 抛 userFacing error，message 已经是 model-friendly 文本。
+      // tool-executor 应识别 userFacing=true 并把 message 原样作为
+      // tool_result.content，不加 "Tool execution failed: " 前缀。
+      const provider = new MockLLMProvider([
+        { toolCalls: [{ id: "tc1", name: "bash", input: { command: "rm -rf /" } }] },
+        { text: "Understood, I'll use rm -i instead" },
+      ]);
+
+      class UserDeclinedError extends Error {
+        readonly userFacing = true as const;
+        constructor(message: string) {
+          super(message);
+          this.name = "UserDeclinedError";
+        }
+      }
+
+      const bashTool = makeTool("bash");
+
+      const { yields, result } = await drainAgentLoop(
+        baseParams(provider, {
+          tools: [bashTool],
+          deps: {
+            executeTool: async () => {
+              throw new UserDeclinedError(
+                "用户拒绝了这次工具调用。用户的反馈：不要用 rm -rf，改用 rm -i。请根据该反馈调整方案。",
+              );
+            },
+          },
+        }),
+      );
+
+      expect(result.reason).toBe("completed");
+
+      // 查看 tool_end 的 content——应该是 user-facing 原文，无前缀
+      const toolEnds = filterYields(yields, "tool_end");
+      expect(toolEnds).toHaveLength(1);
+      if (toolEnds[0].type === "tool_end") {
+        expect(toolEnds[0].result.isError).toBe(true);
+        const content = toolEnds[0].result.content;
+        expect(content).not.toContain("Tool execution failed");
+        expect(content).toContain("用户拒绝了这次工具调用");
+        expect(content).toContain("不要用 rm -rf，改用 rm -i");
+      }
+
+      // LLM 第二次调用应该看到原始反馈（用于自我纠错）
+      expect(provider.callCount).toBe(2);
+      const secondCall = provider.calls[1];
+      const lastMsg = secondCall.messages[secondCall.messages.length - 1];
+      const toolResult = lastMsg.content[0];
+      expect(toolResult.type).toBe("tool_result");
+      if (toolResult.type === "tool_result") {
+        expect(toolResult.content).toContain("不要用 rm -rf，改用 rm -i");
+        expect(toolResult.content).not.toContain("Tool execution failed");
+      }
+    });
+
     it("工具未找到 → 错误作为 tool_result 返回给 LLM", async () => {
       const provider = new MockLLMProvider([
         { toolCalls: [{ id: "tc1", name: "nonexistent", input: {} }] },

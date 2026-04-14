@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { AgentError, isAgentError, toAgentError } from "./errors.js";
+import {
+  AgentError,
+  isAgentError,
+  isUserFacingError,
+  toAgentError,
+} from "./errors.js";
 
 describe("AgentError", () => {
   it("应携带正确的类型和可恢复性标记", () => {
@@ -79,5 +84,39 @@ describe("toAgentError", () => {
 
     const undefinedResult = toAgentError(undefined);
     expect(undefinedResult.message).toBe("undefined");
+  });
+});
+
+describe("isUserFacingError", () => {
+  it("带 userFacing=true 属性的 Error 应返回 true", () => {
+    class CustomUserFacing extends Error {
+      readonly userFacing = true as const;
+    }
+    const err = new CustomUserFacing("用户拒绝");
+    expect(isUserFacingError(err)).toBe(true);
+  });
+
+  it("普通 Error 应返回 false", () => {
+    expect(isUserFacingError(new Error("plain"))).toBe(false);
+  });
+
+  it("userFacing 不是 true 的 Error 应返回 false", () => {
+    const err = Object.assign(new Error("fake"), { userFacing: false });
+    expect(isUserFacingError(err)).toBe(false);
+    const err2 = Object.assign(new Error("fake2"), { userFacing: "yes" });
+    expect(isUserFacingError(err2)).toBe(false);
+  });
+
+  it("非 Error 值应返回 false", () => {
+    expect(isUserFacingError(null)).toBe(false);
+    expect(isUserFacingError(undefined)).toBe(false);
+    expect(isUserFacingError("string")).toBe(false);
+    expect(isUserFacingError({ userFacing: true })).toBe(false);
+  });
+
+  it("AgentError 默认不是 user-facing", () => {
+    expect(isUserFacingError(new AgentError("x", "unknown", false))).toBe(
+      false,
+    );
   });
 });

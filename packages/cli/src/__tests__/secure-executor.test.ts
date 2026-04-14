@@ -13,8 +13,11 @@
 
 import { describe, expect, it, vi } from "vitest";
 import {
+  ConfirmationBroker,
   PermissionStore,
   SecurityPipeline,
+  type ConfirmationDecision,
+  type ConfirmationRequest,
   type ToolDefinition,
   type ToolExecutionContext,
   type ToolResult,
@@ -450,6 +453,294 @@ describe("createSecureExecuteTool", () => {
       expect(receivedSignal).toBeDefined();
       // signal 应该是合并版本，仍未触发
       expect(receivedSignal!.aborted).toBe(false);
+    });
+  });
+
+  // ─── Broker 路径（Step 3） ───
+
+  describe("confirm + broker 路径", () => {
+    /**
+     * 头文件级 helper：创建一个"听命于测试"的假 renderer——订阅 broker 新请求，
+     * 立刻调用预设的 resolve 逻辑。绕过真实 TUI，保持测试纯净。
+     */
+    function attachScriptedRenderer(
+      broker: ConfirmationBroker,
+      produce: (req: ConfirmationRequest) => ConfirmationDecision,
+    ): () => void {
+      return broker.onRequest((req) => {
+        // 微延迟让 requestConfirmation 先完整返回（与真实 renderer 的 async 行为一致）
+        queueMicrotask(() => {
+          broker.resolve(req.id, produce(req));
+        });
+      });
+    }
+
+    it("broker 路径：allow-once 决定 → 执行工具，触发 tracker.record", async () => {
+      const pipeline = new SecurityPipeline({ workspace: "/tmp/ws" });
+      const broker = new ConfirmationBroker();
+      attachScriptedRenderer(broker, () => ({ kind: "allow-once" }));
+
+      const tracker = pipeline.getConfirmationTracker();
+      const exec = mockExecute();
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: exec.fn,
+        broker,
+      });
+
+      await wrapped(
+        makeTool("bash"),
+        { command: "curl https://example.com" },
+        makeContext("/tmp/ws"),
+      );
+
+      expect(exec.callCount()).toBe(1);
+      // 追踪器应累计了一次
+      const snap = tracker.snapshot();
+      expect(snap.length).toBeGreaterThan(0);
+    });
+
+    it("broker 路径：allow-workspace 决定 → 创建 workspace 规则", async () => {
+      const store = new PermissionStore({ rootDir: null });
+      const pipeline = new SecurityPipeline({
+        workspace: "/tmp/ws",
+        permissionStore: store,
+      });
+      const broker = new ConfirmationBroker();
+
+      // 让假 renderer 直接返回 allow-workspace 决定（携带 pattern）
+      attachScriptedRenderer(broker, (req) => {
+        const opt = req.options.find((o) => o.kind === "allow-workspace");
+        if (!opt || opt.kind !== "allow-workspace") {
+          throw new Error("test assumption: allow-workspace 选项应存在");
+        }
+        return { kind: "allow-workspace", pattern: opt.pattern };
+      });
+
+      const exec = mockExecute();
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: exec.fn,
+        broker,
+      });
+
+      await wrapped(
+        makeTool("bash"),
+        { command: "curl https://example.com" },
+        makeContext("/tmp/ws"),
+      );
+
+      const wsRules = store
+        .list(pipeline.getWorkspaceId())
+        .filter((r) => r.scope === "workspace");
+      expect(wsRules.length).toBe(1);
+      expect(exec.callCount()).toBe(1);
+    });
+
+    it("broker 路径：allow-global 决定 → 创建 global 规则", async () => {
+      const store = new PermissionStore({ rootDir: null });
+      const pipeline = new SecurityPipeline({
+        workspace: "/tmp/ws",
+        permissionStore: store,
+      });
+      const broker = new ConfirmationBroker();
+      attachScriptedRenderer(broker, (req) => {
+        const opt = req.options.find((o) => o.kind === "allow-global");
+        if (!opt || opt.kind !== "allow-global") {
+          throw new Error("test assumption: allow-global 选项应存在");
+        }
+        return { kind: "allow-global", pattern: opt.pattern };
+      });
+
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: mockExecute().fn,
+        broker,
+      });
+
+      await wrapped(
+        makeTool("bash"),
+        { command: "curl https://api.example.com" },
+        makeContext("/tmp/ws"),
+      );
+
+      const globalRules = store.list(null).filter((r) => r.scope === "global");
+      expect(globalRules.length).toBe(1);
+    });
+
+    it("broker 路径：allow-session 决定 → 创建 session 规则", async () => {
+      const store = new PermissionStore({ rootDir: null });
+      const pipeline = new SecurityPipeline({
+        workspace: "/tmp/ws",
+        permissionStore: store,
+      });
+      const broker = new ConfirmationBroker();
+      attachScriptedRenderer(broker, (req) => {
+        const opt = req.options.find((o) => o.kind === "allow-session");
+        if (!opt || opt.kind !== "allow-session") {
+          throw new Error("test assumption: allow-session 选项应存在");
+        }
+        return { kind: "allow-session", pattern: opt.pattern };
+      });
+
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: mockExecute().fn,
+        broker,
+      });
+
+      await wrapped(
+        makeTool("bash"),
+        { command: "curl https://example.com" },
+        makeContext("/tmp/ws"),
+      );
+
+      const sessionRules = store
+        .list(pipeline.getWorkspaceId())
+        .filter((r) => r.scope === "session");
+      expect(sessionRules.length).toBe(1);
+    });
+
+    it("broker 路径：deny 决定 → 抛 SecurityBlockError 含原因", async () => {
+      const pipeline = new SecurityPipeline({ workspace: "/tmp/ws" });
+      const broker = new ConfirmationBroker();
+      attachScriptedRenderer(broker, () => ({ kind: "deny" }));
+
+      const exec = mockExecute();
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: exec.fn,
+        broker,
+      });
+
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      try {
+        await expect(
+          wrapped(
+            makeTool("bash"),
+            { command: "curl https://evil.example.com" },
+            makeContext("/tmp/ws"),
+          ),
+        ).rejects.toBeInstanceOf(SecurityBlockError);
+      } finally {
+        logSpy.mockRestore();
+      }
+      expect(exec.callCount()).toBe(0);
+    });
+
+    it("broker 路径：deny 带 reason → reason 进入 SecurityBlockError.message（Step 4 回流到模型）", async () => {
+      const pipeline = new SecurityPipeline({ workspace: "/tmp/ws" });
+      const broker = new ConfirmationBroker();
+      attachScriptedRenderer(broker, () => ({
+        kind: "deny",
+        reason: "不要用 rm，改用 rm -i",
+      }));
+
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: mockExecute().fn,
+        broker,
+      });
+
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      try {
+        const err = await wrapped(
+          makeTool("bash"),
+          { command: "curl https://example.com" },
+          makeContext("/tmp/ws"),
+        ).catch((e) => e);
+
+        expect(err).toBeInstanceOf(SecurityBlockError);
+        expect((err as SecurityBlockError).message).toContain(
+          "不要用 rm，改用 rm -i",
+        );
+        expect((err as SecurityBlockError).reason).toBe(
+          "不要用 rm，改用 rm -i",
+        );
+      } finally {
+        logSpy.mockRestore();
+      }
+    });
+
+    it("broker 路径：cancelled ctrl-c → 抛 SecurityBlockError", async () => {
+      const pipeline = new SecurityPipeline({ workspace: "/tmp/ws" });
+      const broker = new ConfirmationBroker();
+      attachScriptedRenderer(broker, () => ({
+        kind: "cancelled",
+        cause: "user-ctrl-c",
+      }));
+
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: mockExecute().fn,
+        broker,
+      });
+
+      const err = await wrapped(
+        makeTool("bash"),
+        { command: "curl https://example.com" },
+        makeContext("/tmp/ws"),
+      ).catch((e) => e);
+
+      expect(err).toBeInstanceOf(SecurityBlockError);
+      expect((err as SecurityBlockError).reason).toBe("user-ctrl-c");
+    });
+
+    it("feature flag ZHIXING_CONFIRMATION_RENDERER=legacy 时强制走 legacy 路径", async () => {
+      const pipeline = new SecurityPipeline({ workspace: "/tmp/ws" });
+      const broker = new ConfirmationBroker();
+
+      // 给 broker 注册一个会让测试"发现"的 renderer——如果被调用就说明走错路径了
+      let brokerCalled = false;
+      broker.onRequest(() => {
+        brokerCalled = true;
+      });
+
+      const exec = mockExecute();
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: exec.fn,
+        broker,
+        prompt: scriptedPrompt(["y"]), // legacy 路径的 prompt
+        env: { ZHIXING_CONFIRMATION_RENDERER: "legacy" },
+      });
+
+      const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      try {
+        await wrapped(
+          makeTool("bash"),
+          { command: "curl https://example.com" },
+          makeContext("/tmp/ws"),
+        );
+      } finally {
+        logSpy.mockRestore();
+      }
+
+      expect(exec.callCount()).toBe(1);
+      expect(brokerCalled).toBe(false); // 未走 broker 路径
+    });
+
+    it("broker 路径优先级高于 legacy prompt（同时提供时）", async () => {
+      const pipeline = new SecurityPipeline({ workspace: "/tmp/ws" });
+      const broker = new ConfirmationBroker();
+      attachScriptedRenderer(broker, () => ({ kind: "allow-once" }));
+
+      const prompt = vi.fn(scriptedPrompt(["y"]));
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: mockExecute().fn,
+        broker,
+        prompt,
+      });
+
+      await wrapped(
+        makeTool("bash"),
+        { command: "curl https://example.com" },
+        makeContext("/tmp/ws"),
+      );
+
+      // legacy prompt 不应被调用
+      expect(prompt).not.toHaveBeenCalled();
     });
   });
 });

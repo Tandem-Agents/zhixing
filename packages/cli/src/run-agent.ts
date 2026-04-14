@@ -12,9 +12,11 @@ import {
   type AgentYield,
   type AgentEventMap,
   type ContextBudget,
+  type IConfirmationBroker,
   type Message,
   type ToolResultBlock,
   type IPermissionStore,
+  ConfirmationBroker,
   createEventBus,
   createContextEngine,
   createTokenEstimator,
@@ -73,6 +75,11 @@ export interface AgentSession {
   readonly securityPipeline: SecurityPipeline;
   /** 权限规则存储的快捷访问 */
   readonly permissionStore: IPermissionStore;
+  /**
+   * 确认交互 broker——会话级单例，跨多次 run() 共享队列和 grace period。
+   * REPL 负责 attach 一个 TerminalConfirmationRenderer 到它。
+   */
+  readonly confirmationBroker: IConfirmationBroker;
 }
 
 export interface ForceCompactResult {
@@ -161,6 +168,10 @@ export async function createSession(options: {
     permissionStore: persistentStore,
   });
 
+  // 确认交互 broker：会话级单例。渲染器由 REPL 在 attach 时注入。
+  // 非交互模式（CI / 管道）下 broker 自动走 fail-to-deny 策略。
+  const confirmationBroker = new ConfirmationBroker();
+
   // 加载项目上下文（ZHIXING.md + 环境信息），注入到首条 user message
   const projectContext = await loadProjectContext(cwd);
 
@@ -195,6 +206,7 @@ export async function createSession(options: {
     model,
     securityPipeline,
     permissionStore: persistentStore,
+    confirmationBroker,
 
     get calibrationFactor(): number {
       return estimator.calibrationFactor;
@@ -300,12 +312,15 @@ export async function createSession(options: {
       // 将项目上下文 + 匹配的技能 + 反思提示注入到首条 user message
       const messagesWithContext = injectContext(params.messages, enrichedContext);
 
-      // 用 SecurityPipeline 包装工具执行——每次 run() 重新构造 wrapper
-      // 以便绑定本次 run 的 prompt 函数（REPL 提供 rl.question，CI 不提供）
+      // 用 SecurityPipeline 包装工具执行——每次 run() 重新构造 wrapper。
+      // 同时传入 broker（会话级，跨 run 共享队列）和 legacy prompt（回退路径）。
+      // secure-executor 内部按 env `ZHIXING_CONFIRMATION_RENDERER` 决定走哪条。
       const secureExecuteTool = createSecureExecuteTool({
         pipeline: securityPipeline,
         originalExecute: (tool, input, context) => tool.call(input, context),
         prompt: params.securityPrompt,
+        broker: confirmationBroker,
+        sessionType,
       });
 
       const gen = runAgentLoop({

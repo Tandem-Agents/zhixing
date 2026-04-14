@@ -70,3 +70,35 @@ export function toAgentError(error: unknown): AgentError {
 
   return new AgentError(message, "unknown", false, error);
 }
+
+// ─── 用户面向错误 ───
+
+/**
+ * 用户面向错误标记——携带该标记的 error 其 message 已经是可以直接展示给
+ * 用户（和 LLM）的文本，不应再被包上 "Tool execution failed: " 等技术前缀。
+ *
+ * 典型场景：
+ *   - `SecurityBlockError`（用户主动拒绝工具调用）：message 形如
+ *     `"用户拒绝此操作。反馈：不要用 rm"`，应原样作为 tool_result 回送给模型，
+ *     让模型据此调整行为。
+ *   - `PlanModeRejectionError`（计划模式用户否决）：同理。
+ *
+ * 设计决策：
+ *   - **接口而非类**：core 不引入新的错误继承树，cli 等上层只需在自己的
+ *     错误类上加一行 `readonly userFacing = true as const` 即可。
+ *   - **type guard 而非 instanceof**：避免 core 依赖 cli。
+ */
+export interface UserFacingError extends Error {
+  readonly userFacing: true;
+}
+
+/**
+ * 判断一个错误是否为用户面向错误。
+ * tool-executor 用它决定是否给 error message 加前缀。
+ */
+export function isUserFacingError(error: unknown): error is UserFacingError {
+  return (
+    error instanceof Error &&
+    (error as Error & { userFacing?: unknown }).userFacing === true
+  );
+}
