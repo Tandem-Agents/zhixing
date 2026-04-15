@@ -142,13 +142,18 @@ function enterRawMode(stdin: NodeJS.ReadStream): void {
   rawModeRefcount++;
 }
 
-function exitRawMode(stdin: NodeJS.ReadStream): void {
+function exitRawMode(
+  stdin: NodeJS.ReadStream,
+  restoreTo: boolean = false,
+): void {
   if (!stdin.isTTY) return;
   rawModeRefcount--;
   if (rawModeRefcount <= 0) {
     rawModeRefcount = 0;
     if (typeof stdin.setRawMode === "function") {
-      stdin.setRawMode(false);
+      // 恢复到进入前的状态，而不是无条件 false——调用方（如 readline.Interface
+      // 的 question()）可能正处于 raw mode，我们不能替它关掉。
+      stdin.setRawMode(restoreTo);
     }
   }
 }
@@ -194,8 +199,10 @@ export function selectWithInput(
   const theme: Theme = { ...defaultTheme, ...(options.theme ?? {}) };
   const minWidth = options.minWidth ?? 40;
   const maxWidth = options.maxWidth ?? 80;
-  const keyHintBar =
-    options.keyHintBar ?? "↑↓ 选择 · Enter 确认 · Esc 取消";
+  // customHintBar：undefined → 运行时根据 inputMode 渲染默认；
+  //                ""        → 隐藏；
+  //                string    → 固定文案。
+  const customHintBar = options.keyHintBar;
 
   const state: ComponentState = {
     selected: Math.max(
@@ -298,9 +305,18 @@ export function selectWithInput(
       lines.push(theme.border(`╰${"─".repeat(frameWidth - 1)}`));
 
       // ── 快捷键提示条 ──
-      if (keyHintBar) {
+      //
+      // 模式感知：input 模式下的键义和 select 模式完全不同（Enter 是提交而
+      // 不是进入，Esc 是退出输入而不是拒绝），不切换文案会误导用户。
+      const hintBar =
+        customHintBar !== undefined
+          ? customHintBar
+          : state.inputMode
+            ? "Enter 提交 · Esc 退出输入 · Ctrl+C 中止"
+            : "↑↓ 选择 · Enter 确认 · Esc 拒绝 · Ctrl+C 中止";
+      if (hintBar) {
         lines.push(
-          `  ${theme.keyHintBar(clampLine(keyHintBar, frameWidth - 2))}`,
+          `  ${theme.keyHintBar(clampLine(hintBar, frameWidth - 2))}`,
         );
       }
 
@@ -462,6 +478,21 @@ export function selectWithInput(
       finish({ kind: "cancelled", cause: "aborted" });
     };
 
+    // ── 独占 stdin 的状态 snapshot（在 init 中填充，finish 中恢复） ──
+    //
+    // 调用方（典型：REPL 的 readline.Interface 在 terminal=true 模式下）可能
+    // 已经在 stdin 上挂了 'keypress' 监听器用于行编辑 + echo；也可能已经把
+    // stdin 置于 raw mode。`rl.pause()` 只会让 readline 停止"消费 line"，但
+    // 它的监听器依然附着在 stdin 上，一旦我们 `stdin.resume()` 就会照常收到
+    // 每个 keypress 事件 —— 用户打字会被 readline 的 _ttyWrite 在面板外的
+    // cursor 位置 echo 一次（见 spec §6.4 陷阱 3）。
+    //
+    // 保守地只动 'keypress' 事件：readline 的 echo 路径经由这一个事件；
+    // 'data' 是 emitKeypressEvents 的 decoder 挂的（'data' → 'keypress'），
+    // 不能动，否则我们自己也拿不到 keypress 了。
+    let savedKeypressListeners: Array<(...args: unknown[]) => void> = [];
+    let wasRawBefore = false;
+
     // ── 清理 + resolve ──
     let finished = false;
     const finish = (result: SelectResult): void => {
@@ -476,7 +507,20 @@ export function selectWithInput(
         options.signal.removeEventListener("abort", onAbort);
       }
 
-      exitRawMode(stdin);
+      // 恢复 raw mode 到进入前的状态（而不是无脑 false）——见 exitRawMode 内注释。
+      exitRawMode(stdin, wasRawBefore);
+
+      // 恢复调用方预挂的 keypress 监听器。顺序：我们自己的 handleKeypress
+      // 已经 off；这里把 snapshot 的 listeners 一个个 on 回去。
+      if (typeof stdin.on === "function") {
+        for (const listener of savedKeypressListeners) {
+          stdin.on(
+            "keypress",
+            listener as unknown as (...args: unknown[]) => void,
+          );
+        }
+      }
+
       stdout.write(ANSI.showCursor);
       stdout.write("\n"); // 留一行空白，让后续输出不紧贴面板
 
@@ -485,7 +529,24 @@ export function selectWithInput(
     };
 
     // ── 初始化 ──
+    // 1. 先确保 'data' → 'keypress' 的 decoder 就位（emitKeypressEvents 幂等）
     readline.emitKeypressEvents(stdin);
+
+    // 2. snapshot 并摘除所有现有的 'keypress' 监听器（spec §6.4 陷阱 3）
+    if (typeof stdin.listeners === "function") {
+      savedKeypressListeners = stdin
+        .listeners("keypress")
+        .slice() as Array<(...args: unknown[]) => void>;
+    }
+    if (typeof stdin.removeAllListeners === "function") {
+      stdin.removeAllListeners("keypress");
+    }
+
+    // 3. 记住进入前的 raw 状态，供 finish 恢复
+    wasRawBefore = stdin.isTTY
+      ? !!(stdin as unknown as { isRaw?: boolean }).isRaw
+      : false;
+
     enterRawMode(stdin);
     stdout.write(ANSI.hideCursor);
 

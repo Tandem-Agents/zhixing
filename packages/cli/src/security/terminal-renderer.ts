@@ -148,7 +148,8 @@ export class TerminalConfirmationRenderer implements ConfirmationRenderer {
           stdin: this.options.stdin ?? process.stdin,
           stdout: this.options.stdout ?? process.stdout,
           signal: abort.signal,
-          keyHintBar: "↑↓ 选择 · Enter 确认 · Esc/n 拒绝 · Ctrl+C 取消",
+          // keyHintBar 不传 → selectWithInput 在 select/input 模式切换时
+          // 自动渲染不同文案（Enter 在两个模式下语义完全不同）。
         });
       } finally {
         // host 恢复——无论 selectWithInput 成功或抛错都要

@@ -242,3 +242,32 @@ export function renderBlockedMessage(
   }
   console.log(chalk.red("╰────────────────────────────────────────"));
 }
+
+/**
+ * 渲染"用户主动拒绝"的消息——与策略阻止语义不同。
+ *
+ * 策略阻止是 pipeline 对 agent 说"不行"（规则拦截）；
+ * 用户拒绝是用户对 agent 说"不做"（意志表达）。
+ * 两者应有不同的视觉和文案，否则会显示成"原因: 无匹配规则，默认放行"这种
+ * 把审批触发原因当作拒绝原因的滑稽输出。
+ */
+export function renderUserDeniedMessage(
+  toolName: string,
+  toolInput: Record<string, unknown>,
+  userReason?: string,
+): void {
+  console.log();
+  console.log(chalk.yellow("╭─ 已拒绝 ────────────────────────────"));
+  console.log(`${chalk.yellow("│")} ${formatOperation(toolName, toolInput)}`);
+  console.log(chalk.yellow("│"));
+  if (userReason && userReason.trim()) {
+    console.log(
+      `${chalk.yellow("│")} ${chalk.dim("用户反馈:")} ${userReason}`,
+    );
+  } else {
+    console.log(
+      `${chalk.yellow("│")} ${chalk.dim("用户未提供具体原因")}`,
+    );
+  }
+  console.log(chalk.yellow("╰────────────────────────────────────────"));
+}

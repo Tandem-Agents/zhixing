@@ -348,7 +348,7 @@ type NonInteractiveStrategy =
 ### 6.1.1 可行性调研结论（2026-04-13）
 
 > 原方案预留了风险："自研组件工程量可能被低估"。已做专项调研并**证明风险消除**。
-> 调研产物在 `.tmp-tui-probe/`（临时目录）。
+> 调研产物已落地为生产代码 [packages/cli/src/tui/select-with-input.ts](../../../packages/cli/src/tui/select-with-input.ts) + 47 条测试；原型目录 `.tmp-tui-probe/` 完成使命后已删除。
 >
 > **验证路径**：8 个自动化场景全绿 → 真实 Windows Terminal 手动验收 → 一次 cursor off-by-one bug 暴露 → 修复后再次验收通过。bug 的根因与规避已回写到 §6.4。
 
@@ -524,7 +524,7 @@ function rerender() {
 }
 ```
 
-#### 两个致命陷阱
+#### 三个致命陷阱
 
 **陷阱 1：`\n` vs `\r\n`**
 
@@ -551,6 +551,24 @@ for (let i = 0; i < lastRenderHeight; i++) {
 
 **规避**：永远不要用"边清边移"的循环。用"一次到位上移 + 从头逐行覆盖"的模式（见上面"正确的擦除 + 重绘"）。
 
+**陷阱 3：`rl.pause()` 不解绑 readline 的 keypress 监听器**
+
+> 2026-04-15 真实复现。测试用 `ping -c 4 google.com` 走 confirmation，在"允许并补充"input 模式下打中文，发现每个字符除了出现在 input 行，**同时被重复 echo 到面板下方**，混乱叠字。
+
+根因：REPL 的 `readline.createInterface({ terminal: true })` 在内部订阅了 stdin 的 `'keypress'` 事件，每次 keypress 通过 `_ttyWrite` 把可打印字符 echo 到 stdout 的"当前 cursor 列位置"用于行编辑。
+
+常见误解：调用方通过 `rl.pause()` 暂停 readline 消费就够了。实际上：
+
+- `rl.pause()` 只翻 readline 的 `paused` 标志位，让它停止处理 line 事件；**它不 detach 任何监听器**（Node.js 也没有公开 detach API）。
+- SelectWithInput 紧接着 `stdin.resume()` 让数据流恢复 flowing，此时 readline 预挂的 `'keypress'` 监听器照常收到事件。
+- readline 的 `_ttyWrite` 不看 `paused` 标志，照常 echo 字符。
+
+**select 模式下看不出来**，因为方向键 / Enter 不触发 printable echo；**一进 input 模式开始打字就炸**。
+
+**规避**：组件自己保证"独占 stdin"，而不是依赖调用方。进入时 snapshot 现有 `'keypress'` 监听器并全部摘下（保守地只动这一个事件 —— `'data'` 是 `readline.emitKeypressEvents` 的 decoder 所在，不能动），退出时按原顺序恢复。同时用 per-call snapshot 保存 `stdin.isRaw` 原值，退出时恢复到该值而不是无脑 `false`（否则会破坏调用方 `readline.question()` 期望的 raw 状态）。
+
+参考实现：[packages/cli/src/tui/select-with-input.ts](../../../packages/cli/src/tui/select-with-input.ts) 的 `finish()` + 初始化段；回归护栏见测试场景 #17。
+
 #### Step 2 测试的最低门槛
 
 仅靠"全绿 8 个端到端场景"**不够**——这 8 个场景都只断言最终 decision，不触及视觉输出。Step 2 的测试套件里**必须**有两类断言作为护栏：
@@ -562,7 +580,7 @@ for (let i = 0; i < lastRenderHeight; i++) {
 
 #### 参考实现
 
-完整可运行原型见 [.tmp-tui-probe/05-select-with-input.mjs](../../../.tmp-tui-probe/05-select-with-input.mjs)（约 200 行）。Step 2 落地时可直接拷贝核心逻辑，重点改造：
+生产实现见 [packages/cli/src/tui/select-with-input.ts](../../../packages/cli/src/tui/select-with-input.ts)（已完成，含 §6.4 的全部修复）。Step 2 当初的原型约 200 行，落地版本补齐了：
 
 - 加入 `stdout.columns` 自适应 + wcwidth CJK 宽度计算
 - 加入 `process.stdout.on("resize", rerender)`
@@ -834,8 +852,9 @@ interface ConfirmationEvent {
   14. 窄终端（columns < 40）的回退布局
   15. 长命令 body 的 truncate 行为
   16. 外部 signal.abort() → cancelled cause="aborted"
+  17. **stdin 独占护栏**：调用前预挂一个 keypress listener；selectWithInput 生命周期内该 listener 收到 0 次事件；finish 后重新写字符到 stdin，listener 恢复收到（护栏，见 §6.4 陷阱 3）
 
-> ⚠️ **实施前必读 §6.4**。原型第一版在上面这些断言的前 10 条都 PASS，但因为缺少 #11 #12 两条护栏，cursor off-by-one bug 一直到真实 TTY 手动验收才暴露。实施者直接从 [.tmp-tui-probe/05-select-with-input.mjs](../../../.tmp-tui-probe/05-select-with-input.mjs) 拷贝代码前，请先阅读 §6.4 的"致命陷阱"。
+> ⚠️ **历史教训 §6.4**。原型第一版在上面这些断言的前 10 条都 PASS，但因为缺少 #11 #12 两条护栏，cursor off-by-one bug 一直到真实 TTY 手动验收才暴露。后续 Phase 1 集成到 REPL 后又在真实终端暴露了陷阱 3（双消费者 echo），由场景 #17 作为回归护栏。生产版本 [packages/cli/src/tui/select-with-input.ts](../../../packages/cli/src/tui/select-with-input.ts) 已含全部修复；后续改动前请读 §6.4 的"致命陷阱"避免回归。
 
 **行为保证**：
 - ✅ 上/下箭头导航

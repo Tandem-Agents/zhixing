@@ -7,6 +7,7 @@
 export {
   showConfirmationDialog,
   renderBlockedMessage,
+  renderUserDeniedMessage,
   type ConfirmationChoice,
   type PromptFn,
   type ShowConfirmationOptions,

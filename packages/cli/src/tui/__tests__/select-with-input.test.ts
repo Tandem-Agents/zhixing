@@ -578,6 +578,89 @@ describe("selectWithInput — 场景 13-16", () => {
   });
 });
 
+// ─── 场景 17: stdin 监听器独占护栏 (spec §6.4 陷阱 3) ───
+
+describe("selectWithInput — stdin 独占护栏 (§6.4 陷阱 3)", () => {
+  it("17. 已存在的 keypress 监听器在组件运行期间不被触发，结束后恢复", async () => {
+    const { stdin, stdout } = makeStreams();
+
+    // 模拟调用方（如 REPL 的 readline.Interface）预挂的 keypress 监听器。
+    // Bug 场景：SelectWithInput 没摘这些 listener 就 stdin.resume()，导致
+    // 用户在 input 模式打的每个字符被调用方的 listener 也 echo 一次到面板
+    // 外的屏幕位置。见 spec §6.4 陷阱 3 的真实复现案例。
+    const preExistingReceived: Array<string | undefined> = [];
+    const preExistingListener = (str: string | undefined) => {
+      preExistingReceived.push(str);
+    };
+    stdin.on("keypress", preExistingListener);
+
+    const promise = selectWithInput({
+      title: "t",
+      options: makeDefaultOptions(),
+      stdin,
+      stdout,
+      columns: 80,
+    });
+
+    // 触发 bug 原发场景：进入 input 模式打字
+    await sendKeys(stdin, [
+      DOWN, DOWN, // 到 "允许并补充"
+      ENTER,      // 进 input
+      "h", "i",   // 打字——bug 版本下 preExistingListener 会收到两次
+      ENTER,      // 提交
+    ]);
+    const result = await promise;
+
+    expect(result).toEqual({
+      kind: "selected",
+      value: "allow-with-note",
+      note: "hi",
+    });
+
+    // 核心断言：组件生命周期内预挂 listener 一次都没被调用
+    expect(preExistingReceived).toEqual([]);
+
+    // 结束后 listener 应被恢复：写一个字符，验证预挂 listener 重新收得到
+    stdin.write("z");
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(preExistingReceived).toEqual(["z"]);
+
+    stdin.removeListener("keypress", preExistingListener);
+  });
+
+  it("17b. cancel 路径（Ctrl+C）也正确恢复 listener", async () => {
+    const { stdin, stdout } = makeStreams();
+
+    const preExistingReceived: Array<string | undefined> = [];
+    const preExistingListener = (str: string | undefined) => {
+      preExistingReceived.push(str);
+    };
+    stdin.on("keypress", preExistingListener);
+
+    const promise = selectWithInput({
+      title: "t",
+      options: makeDefaultOptions(),
+      stdin,
+      stdout,
+      columns: 80,
+    });
+
+    await sendKeys(stdin, [CTRL_C]);
+    const result = await promise;
+    expect(result).toEqual({ kind: "cancelled", cause: "ctrl-c" });
+
+    // Ctrl+C 期间不应收到任何事件
+    expect(preExistingReceived).toEqual([]);
+
+    // 结束后恢复
+    stdin.write("x");
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(preExistingReceived).toEqual(["x"]);
+
+    stdin.removeListener("keypress", preExistingListener);
+  });
+});
+
 // ─── 额外：hotkey 支持 ───
 
 describe("selectWithInput — hotkey 支持", () => {

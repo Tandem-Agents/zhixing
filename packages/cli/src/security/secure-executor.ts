@@ -32,6 +32,7 @@ import {
 } from "@zhixing/core";
 import {
   renderBlockedMessage,
+  renderUserDeniedMessage,
   showConfirmationDialog,
   type PromptFn,
 } from "./confirmation-ui.js";
@@ -215,7 +216,9 @@ async function handleBrokerPath(params: {
       const reasonText = decision.reason
         ? `用户拒绝了这次工具调用。用户的反馈：${decision.reason}。请根据该反馈调整方案。`
         : `用户拒绝了这次工具调用。`;
-      renderBlockedMessage(toolName, input, result);
+      // 终端面板显示"用户拒绝"语义（不是"策略阻止"）——用 decision.reason
+      // 而不是 result.reason，后者是"为什么需要审批"的触发原因，不是拒绝理由。
+      renderUserDeniedMessage(toolName, input, decision.reason);
       throw new SecurityBlockError(
         reasonText,
         toolName,

@@ -662,6 +662,80 @@ describe("createSecureExecuteTool", () => {
       }
     });
 
+    it("broker 路径：deny 面板显示用户反馈而非策略触发原因（回归护栏）", async () => {
+      // 回归场景：2026-04-15 报告。用户在 confirmation 里选"拒绝并说明原因"
+      // 并输入"算了不做了"，但面板显示的却是"原因: 无匹配规则，默认放行"
+      // —— 那是 pipeline 决定触发 confirmation 的理由，不是用户拒绝的理由。
+      // 根因：secure-executor 的 deny 路径误把 renderBlockedMessage(result)
+      // 当作通用拒绝面板用，忽略了 decision.reason。
+      const pipeline = new SecurityPipeline({ workspace: "/tmp/ws" });
+      const broker = new ConfirmationBroker();
+      attachScriptedRenderer(broker, () => ({
+        kind: "deny",
+        reason: "算了不做了",
+      }));
+
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: mockExecute().fn,
+        broker,
+      });
+
+      const captured: string[] = [];
+      const logSpy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+        captured.push(args.map((a) => String(a)).join(" "));
+      });
+      try {
+        await wrapped(
+          makeTool("bash"),
+          { command: "echo hello" },
+          makeContext("/tmp/ws"),
+        ).catch((e) => e);
+
+        const output = captured.join("\n");
+        // 正确的用户拒绝面板
+        expect(output).toContain("已拒绝");
+        expect(output).toContain("用户反馈");
+        expect(output).toContain("算了不做了");
+        // 不应走到策略阻止面板
+        expect(output).not.toContain("操作被阻止");
+        // 不应把 pipeline 的触发原因当作拒绝原因展示
+        expect(output).not.toContain("无匹配规则");
+      } finally {
+        logSpy.mockRestore();
+      }
+    });
+
+    it("broker 路径：deny 不带 reason 时面板显示占位文案", async () => {
+      const pipeline = new SecurityPipeline({ workspace: "/tmp/ws" });
+      const broker = new ConfirmationBroker();
+      attachScriptedRenderer(broker, () => ({ kind: "deny" }));
+
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: mockExecute().fn,
+        broker,
+      });
+
+      const captured: string[] = [];
+      const logSpy = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+        captured.push(args.map((a) => String(a)).join(" "));
+      });
+      try {
+        await wrapped(
+          makeTool("bash"),
+          { command: "echo hello" },
+          makeContext("/tmp/ws"),
+        ).catch((e) => e);
+
+        const output = captured.join("\n");
+        expect(output).toContain("已拒绝");
+        expect(output).toContain("用户未提供具体原因");
+      } finally {
+        logSpy.mockRestore();
+      }
+    });
+
     it("broker 路径：cancelled ctrl-c → 抛 SecurityBlockError", async () => {
       const pipeline = new SecurityPipeline({ workspace: "/tmp/ws" });
       const broker = new ConfirmationBroker();

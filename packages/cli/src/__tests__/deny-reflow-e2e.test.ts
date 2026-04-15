@@ -70,7 +70,7 @@ function attachScriptedRenderer(
   });
 }
 
-/** 拦截 console.log 避免 renderBlockedMessage 污染测试输出 */
+/** 拦截 console.log 避免 renderUserDeniedMessage / renderBlockedMessage 污染测试输出 */
 function silentConsoleLog<T>(fn: () => Promise<T>): Promise<T> {
   const original = console.log;
   console.log = () => {};
