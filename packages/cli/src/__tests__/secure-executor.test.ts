@@ -538,19 +538,24 @@ describe("createSecureExecuteTool", () => {
     });
 
     it("broker 路径：allow-global 决定 → 创建 global 规则", async () => {
+      // 注：CLI 的 request-builder 自 2026-04-16 起不再生成 allow-global 选项
+      // （详见 request-builder.ts 上方注释），但 broker / executor 仍完整支持
+      // 这种决定 —— 它可能由 /trust 命令、未来的 Web 渲染器或 LLM 分诊产生。
+      // 这个测试守的就是这条 dispatching 路径，所以手动构造 pattern 而不是
+      // 从 req.options 里挖。
       const store = new PermissionStore({ rootDir: null });
       const pipeline = new SecurityPipeline({
         workspace: "/tmp/ws",
         permissionStore: store,
       });
       const broker = new ConfirmationBroker();
-      attachScriptedRenderer(broker, (req) => {
-        const opt = req.options.find((o) => o.kind === "allow-global");
-        if (!opt || opt.kind !== "allow-global") {
-          throw new Error("test assumption: allow-global 选项应存在");
-        }
-        return { kind: "allow-global", pattern: opt.pattern };
-      });
+      attachScriptedRenderer(broker, () => ({
+        kind: "allow-global",
+        pattern: {
+          pattern: { tool: "bash", argument: "curl *" },
+          label: '"curl *"',
+        },
+      }));
 
       const wrapped = createSecureExecuteTool({
         pipeline,
@@ -569,19 +574,22 @@ describe("createSecureExecuteTool", () => {
     });
 
     it("broker 路径：allow-session 决定 → 创建 session 规则", async () => {
+      // 同上：CLI 不再暴露 allow-session 选项（个人助手用户感知不到"会话"
+      // 概念），但 dispatching 路径仍受 broker/executor 支持，留给 /trust
+      // 或未来渲染器使用。手动构造 pattern。
       const store = new PermissionStore({ rootDir: null });
       const pipeline = new SecurityPipeline({
         workspace: "/tmp/ws",
         permissionStore: store,
       });
       const broker = new ConfirmationBroker();
-      attachScriptedRenderer(broker, (req) => {
-        const opt = req.options.find((o) => o.kind === "allow-session");
-        if (!opt || opt.kind !== "allow-session") {
-          throw new Error("test assumption: allow-session 选项应存在");
-        }
-        return { kind: "allow-session", pattern: opt.pattern };
-      });
+      attachScriptedRenderer(broker, () => ({
+        kind: "allow-session",
+        pattern: {
+          pattern: { tool: "bash", argument: "curl *" },
+          label: '"curl *"',
+        },
+      }));
 
       const wrapped = createSecureExecuteTool({
         pipeline,

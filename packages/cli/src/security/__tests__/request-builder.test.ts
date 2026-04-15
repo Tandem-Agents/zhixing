@@ -138,7 +138,9 @@ describe("buildPanelTitle", () => {
 // ─── buildConfirmationOptions ───
 
 describe("buildConfirmationOptions", () => {
-  it("包含 allow-once / allow-with-note / deny-with-reason 三个必选项", () => {
+  // ─── 必选项 + 顺序 + 数量（3 项设计 v2026-04-16） ───
+
+  it("包含 allow-once / allow-workspace / deny-with-reason 三个必选项", () => {
     const opts = buildConfirmationOptions(
       "bash",
       { command: "npm install express" },
@@ -147,62 +149,122 @@ describe("buildConfirmationOptions", () => {
     );
     const kinds = opts.map((o) => o.kind);
     expect(kinds).toContain("allow-once");
-    expect(kinds).toContain("allow-with-note");
+    expect(kinds).toContain("allow-workspace");
     expect(kinds).toContain("deny-with-reason");
   });
 
-  it("有 workspaceId 时包含 allow-workspace", () => {
-    const opts = buildConfirmationOptions(
-      "bash",
-      { command: "npm install" },
-      "ws-1",
-      "interactive",
-    );
-    expect(opts.some((o) => o.kind === "allow-workspace")).toBe(true);
-  });
-
-  it("无 workspaceId 时不生成 allow-workspace，但仍有 allow-global", () => {
-    const opts = buildConfirmationOptions(
-      "bash",
-      { command: "npm install" },
-      null,
-      "interactive",
-    );
-    expect(opts.some((o) => o.kind === "allow-workspace")).toBe(false);
-    expect(opts.some((o) => o.kind === "allow-global")).toBe(true);
-  });
-
-  it("allow-workspace / allow-global / allow-session 各有 pattern", () => {
+  it("有 workspaceId 时正好生成 3 项，顺序固定 once → workspace → deny", () => {
     const opts = buildConfirmationOptions(
       "bash",
       { command: "npm install express" },
       "ws-1",
       "interactive",
     );
-    for (const opt of opts) {
-      if (
-        opt.kind === "allow-workspace" ||
-        opt.kind === "allow-global" ||
-        opt.kind === "allow-session"
-      ) {
-        expect(opt.pattern).toBeDefined();
-        expect(opt.pattern.pattern.tool).toBe("bash");
-      }
+    expect(opts.length).toBe(3);
+    expect(opts[0]!.kind).toBe("allow-once");
+    expect(opts[1]!.kind).toBe("allow-workspace");
+    expect(opts[2]!.kind).toBe("deny-with-reason");
+  });
+
+  it("无 workspaceId 时只生成 2 项（allow-once + deny-with-reason），无 workspace 选项", () => {
+    const opts = buildConfirmationOptions(
+      "bash",
+      { command: "npm install" },
+      null,
+      "interactive",
+    );
+    expect(opts.length).toBe(2);
+    expect(opts[0]!.kind).toBe("allow-once");
+    expect(opts[1]!.kind).toBe("deny-with-reason");
+    expect(opts.some((o) => o.kind === "allow-workspace")).toBe(false);
+  });
+
+  it("不生成 allow-with-note / allow-global / allow-session（broker 仍支持，但 CLI 不暴露）", () => {
+    const opts = buildConfirmationOptions(
+      "bash",
+      { command: "npm install express" },
+      "ws-1",
+      "interactive",
+    );
+    const kinds = opts.map((o) => o.kind);
+    expect(kinds).not.toContain("allow-with-note");
+    expect(kinds).not.toContain("allow-global");
+    expect(kinds).not.toContain("allow-session");
+  });
+
+  // ─── pickWorkspacePattern：避免 exact-command bug ───
+
+  it("子命令型命令使用 subcommand wildcard：npm install foo → 'npm install *'", () => {
+    const opts = buildConfirmationOptions(
+      "bash",
+      { command: "npm install express" },
+      "ws-1",
+      "interactive",
+    );
+    const ws = opts.find((o) => o.kind === "allow-workspace");
+    expect(ws).toBeDefined();
+    if (ws && ws.kind === "allow-workspace") {
+      expect(ws.pattern.pattern.argument).toBe("npm install *");
     }
   });
 
-  it("placeholder 里出现当前 agent displayName（默认 '知行'）", () => {
+  it("子命令型命令同样：git push origin main → 'git push *'", () => {
+    const opts = buildConfirmationOptions(
+      "bash",
+      { command: "git push origin main" },
+      "ws-1",
+      "interactive",
+    );
+    const ws = opts.find((o) => o.kind === "allow-workspace");
+    if (ws && ws.kind === "allow-workspace") {
+      expect(ws.pattern.pattern.argument).toBe("git push *");
+    }
+  });
+
+  it("复合命令落到 executable wildcard：echo \"...\" && pwd && ls → 'echo *'（回归护栏，2026-04-15 用户 bug）", () => {
+    // 这条测试的 bug 现场：原代码 `mid = patterns.length >= 3 ? patterns[1] : patterns[0]`
+    // 在 patterns.length===2 时回退到最精确的整条命令，导致面板显示
+    // `始终允许 "echo "Hello from bash" && pwd && ls"（本工作区）` —— 几乎不可能
+    // 再次命中。修复后应得到 `echo *`。
+    const opts = buildConfirmationOptions(
+      "bash",
+      { command: 'echo "Hello from bash" && pwd && ls' },
+      "ws-1",
+      "interactive",
+    );
+    const ws = opts.find((o) => o.kind === "allow-workspace");
+    expect(ws).toBeDefined();
+    if (ws && ws.kind === "allow-workspace") {
+      // 关键断言：pattern 不应包含原始命令的引号或 &&
+      expect(ws.pattern.pattern.argument).toBe("echo *");
+      expect(ws.pattern.pattern.argument).not.toContain("&&");
+      expect(ws.pattern.pattern.argument).not.toContain('"Hello');
+    }
+  });
+
+  it("单字命令也能产生 executable wildcard：ls → 'ls *'", () => {
     const opts = buildConfirmationOptions(
       "bash",
       { command: "ls" },
       "ws-1",
       "interactive",
     );
-    const allowNote = opts.find((o) => o.kind === "allow-with-note");
-    const denyReason = opts.find((o) => o.kind === "deny-with-reason");
-    expect(allowNote && "placeholder" in allowNote && allowNote.placeholder).toContain(
-      "知行",
+    const ws = opts.find((o) => o.kind === "allow-workspace");
+    if (ws && ws.kind === "allow-workspace") {
+      expect(ws.pattern.pattern.argument).toBe("ls *");
+    }
+  });
+
+  // ─── placeholder ───
+
+  it("deny-with-reason 的 placeholder 里出现当前 agent displayName（默认 '知行'）", () => {
+    const opts = buildConfirmationOptions(
+      "bash",
+      { command: "ls" },
+      "ws-1",
+      "interactive",
     );
+    const denyReason = opts.find((o) => o.kind === "deny-with-reason");
     expect(
       denyReason && "placeholder" in denyReason && denyReason.placeholder,
     ).toContain("知行");

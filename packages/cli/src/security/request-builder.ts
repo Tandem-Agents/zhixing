@@ -129,18 +129,63 @@ export function buildPanelTitle(toolName: string): string {
 // ─── ConfirmationOption 构造 ───
 
 /**
- * 从 SecurityRequest + 匹配规则结果生成用户可选的 ConfirmationOption 列表。
+ * 为"始终允许（本工作区）"挑选最合适的 pattern。
  *
- * 策略：
- *   - 先 allow-once 作为默认焦点（低摩擦）
- *   - allow-with-note 让用户 "批准并补充"（匹配 CC 的 `"Yes, and..."` 模式）
- *   - 基于 suggestPatterns 产生多级粒度的 always-allow 选项
- *   - 最后 deny-with-reason 让用户 "拒绝并说明"（核心差异化——回流到模型）
+ * 设计原则：永远不把"完整原始命令"作为永久授权的 pattern——那种 pattern 下次
+ * 几乎一定不会再命中（参数会变），对用户毫无价值，只是把 confirmation 面板
+ * 的视觉负担留在那里。
  *
- * 粒度选择:
- *   - allow-workspace 用"中等精度"模式（第二个候选）——最常用的默认
- *   - allow-global 用同一个"中等精度"模式
- *   - allow-session 用"最宽泛"模式（最后一个候选）——临时放行多个相关命令
+ * 优先级（从最理想到最兜底）：
+ *   1. **subcommand wildcard**：形如 `npm install *` / `git push *`。
+ *      这是最常用的"工作区永久允许"粒度——把同类操作一并放行，但仍把
+ *      `npm uninstall` / `git push --force` 等危险变体留在 confirmation 之外。
+ *   2. **executable wildcard**：形如 `echo *` / `ls *`。
+ *      用于不存在子命令结构的命令（典型：`echo "..."` 这类带引号 / 复合表达式
+ *      的命令），suggestPatterns 不会生成 "echo something *" 那种二级模式。
+ *   3. **最广义的兜底**：`patterns[length-1]`。覆盖 `write` 工具的 `dir/**` 等
+ *      非命令行类 pattern，以及任何意外的边缘情况。
+ *
+ * 注意：对**危险命令**（`rm -rf /` 这类）走到这里本身就已经是异常情况——
+ * SecurityPipeline 的 builtin-rules 应该在前置 classify/authorize 阶段把它们
+ * 直接 BLOCK 掉，根本不该到 confirmation 面板。所以这里"取最广义"不会
+ * 给危险命令开后门。
+ */
+function pickWorkspacePattern(
+  patterns: SuggestedPattern[],
+): SuggestedPattern | undefined {
+  if (patterns.length === 0) return undefined;
+
+  const subcommandWildcard = patterns.find((p) =>
+    /^\S+\s+\S+\s+\*$/.test(p.pattern.argument),
+  );
+  if (subcommandWildcard) return subcommandWildcard;
+
+  const executableWildcard = patterns.find((p) =>
+    /^\S+\s+\*$/.test(p.pattern.argument),
+  );
+  if (executableWildcard) return executableWildcard;
+
+  return patterns[patterns.length - 1];
+}
+
+/**
+ * 生成用户可选的 ConfirmationOption 列表。
+ *
+ * **当前 CLI 设计：3 个选项**（2026-04-16 从 6 项精简）：
+ *   1. 允许这一次          —— 默认焦点，覆盖 ~60% 的"一次性任务"
+ *   2. 始终允许 pattern    —— 工作区级永久授权，可通过 /trust revoke 撤销
+ *   3. 拒绝并说明原因      —— 核心差异化：拒绝理由会回流给模型
+ *
+ * **不生成但 broker / type 系统仍支持的 kinds**（保留架构灵活性）：
+ *   - allow-with-note      —— 实测罕用，删除以减心智负担
+ *   - allow-session        —— 个人助手用户感知不到"会话"概念；
+ *                             且实现是 in-memory，与对话 session 不挂钩，
+ *                             保留会制造 "为什么 --continue 后又问我" 的假 bug
+ *   - allow-global         —— 高风险低频，应通过 /trust 命令显式管理
+ *
+ * 这三种 kind 仍可以被 /trust 命令、Web/微信渲染器、未来的 LLM 分诊产生，
+ * broker.ts / secure-executor.applyBrokerDecision / terminal-renderer.translate
+ * 都继续完整支持它们的 dispatching。
  */
 export function buildConfirmationOptions(
   toolName: string,
@@ -156,54 +201,24 @@ export function buildConfirmationOptions(
     context: { cwd: "", workspace: null, sessionType },
   });
 
-  // 中间精度：索引 1 或 0（不多于 3 时回退）
-  const mid = patterns.length >= 3 ? patterns[1]! : patterns[0];
-  // 最宽泛：最后一个
-  const broad = patterns.length > 0 ? patterns[patterns.length - 1]! : undefined;
+  const workspacePattern = pickWorkspacePattern(patterns);
 
   const options: ConfirmationOption[] = [];
 
-  // 1. 允许这一次（默认聚焦）
+  // 1. 允许这一次（默认焦点）
   options.push({ kind: "allow-once", label: "允许这一次", hotkey: "y" });
 
-  // 2. 允许并补充——inline input
-  options.push({
-    kind: "allow-with-note",
-    label: "允许并补充指示...",
-    placeholder: `告诉${displayName}接下来该做什么`,
-  });
-
-  // 3. 始终允许（工作区）
-  if (workspaceId && mid) {
+  // 2. 始终允许（本工作区）—— 仅在有 workspaceId 且能找到合理 pattern 时出现
+  if (workspaceId && workspacePattern) {
     options.push({
       kind: "allow-workspace",
-      label: `始终允许 "${mid.pattern.argument}"（本工作区）`,
-      pattern: mid,
+      label: `始终允许 "${workspacePattern.pattern.argument}"（本工作区）`,
+      pattern: workspacePattern,
       hotkey: "a",
     });
   }
 
-  // 4. 始终允许（全局）
-  if (mid) {
-    options.push({
-      kind: "allow-global",
-      label: `始终允许 "${mid.pattern.argument}"（全局）`,
-      pattern: mid,
-      hotkey: "g",
-    });
-  }
-
-  // 5. 会话内允许（最宽泛）
-  if (broad) {
-    options.push({
-      kind: "allow-session",
-      label: `本次会话内允许 "${broad.pattern.argument}"`,
-      pattern: broad,
-      hotkey: "s",
-    });
-  }
-
-  // 6. 拒绝并说明原因——核心差异化，note 回流到模型
+  // 3. 拒绝并说明原因，note 回流到模型
   options.push({
     kind: "deny-with-reason",
     label: "拒绝并说明原因...",
