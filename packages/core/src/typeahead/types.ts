@@ -701,3 +701,50 @@ export interface ITypeaheadBroker {
 
   snapshot(): TypeaheadBrokerSnapshot;
 }
+
+// ─── Renderer 接口（spec §5.6） ───
+
+/**
+ * 渲染器能力声明 —— broker 在构造 SuggestionItem 时可据此裁剪字段，
+ * 避免渲染器不支持的特性被计算出来后浪费。
+ *
+ * 类比 confirmation-ux.md 的 `RendererCapabilities` —— 同一份设计套路。
+ */
+export interface TypeaheadRendererCapabilities {
+  /** 支持 ghost text 显示（inline，不在 dropdown 里） */
+  readonly supportsGhostText: boolean;
+  /** 支持 dropdown 菜单 */
+  readonly supportsDropdown: boolean;
+  /** 支持独立的 argument hint 行 */
+  readonly supportsArgumentHint: boolean;
+  /** 支持 loading 状态显示（spinner） */
+  readonly supportsLoadingState: boolean;
+  /** 支持 icon / tag / color 视觉元素 */
+  readonly supportsRichItem: boolean;
+  /** 支持多列布局（displayText + description 分列） */
+  readonly supportsMultiColumn: boolean;
+  /** 最大可见条目数 */
+  readonly maxVisibleItems: number;
+}
+
+/**
+ * Typeahead 渲染器接口。任何渲染器（CLI/TTY、Web、微信等）实现此接口
+ * 绑定到 broker session 即可消费 state 变化。
+ *
+ * **职责边界**：渲染器只读 state，不写。所有 state 变更都通过 broker 的
+ * 公开方法（updateInput/moveSelection/accept/cancelSession）进行。
+ */
+export interface TypeaheadRenderer {
+  readonly name: string;
+  readonly capabilities: TypeaheadRendererCapabilities;
+
+  /**
+   * 绑定到 broker 的某个 session，开始订阅并渲染。
+   * 返回的 Unsubscribe 提供细粒度解绑；渲染器自己也应该内部记录状态便于
+   * 后续 `detach()` 兜底清理。
+   */
+  attach(sessionId: string): Unsubscribe;
+
+  /** 手动解绑（会话结束、程序退出） */
+  detach(): void;
+}

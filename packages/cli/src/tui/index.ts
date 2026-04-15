@@ -15,3 +15,26 @@ export type {
   SelectWithInputOptions,
   Theme,
 } from "./select-with-input.js";
+
+// ── Typeahead TTY 渲染（Step 4） ──
+export {
+  computeWindow,
+  createTypeaheadPanel,
+  defaultTypeaheadTheme,
+  renderSessionLines,
+} from "./typeahead-panel.js";
+export type {
+  RenderOptions,
+  TypeaheadPanelHandle,
+  TypeaheadPanelOptions,
+  TypeaheadTheme,
+  VisibleWindow,
+} from "./typeahead-panel.js";
+export {
+  createTerminalTypeaheadRenderer,
+  TERMINAL_TYPEAHEAD_CAPABILITIES,
+} from "./typeahead-renderer.js";
+export type {
+  TerminalTypeaheadRenderer,
+  TerminalTypeaheadRendererOptions,
+} from "./typeahead-renderer.js";

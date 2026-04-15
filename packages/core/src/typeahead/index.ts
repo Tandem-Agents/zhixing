@@ -43,6 +43,8 @@ export type {
   TriggerMatch,
   TypeaheadBrokerSnapshot,
   TypeaheadMode,
+  TypeaheadRenderer,
+  TypeaheadRendererCapabilities,
   TypeaheadSessionHandle,
   TypeaheadSessionState,
 } from "./types.js";
