@@ -8,3 +8,4 @@ export * from "./memory/index.js";
 export * from "./security/index.js";
 export * from "./confirmation/index.js";
 export * from "./identity/index.js";
+export * from "./typeahead/index.js";

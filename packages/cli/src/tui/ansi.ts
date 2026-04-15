@@ -23,6 +23,8 @@ export const ANSI = {
   clearLine: "\x1b[2K",
   /** 清除从光标到行尾 */
   clearToEndOfLine: "\x1b[K",
+  /** 清除从光标到屏幕末尾（含当前行的光标右侧 + 下方所有行） */
+  clearBelow: "\x1b[J",
   /** 光标回到行首（carriage return） */
   col0: "\r",
 

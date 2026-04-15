@@ -17,9 +17,15 @@
  * 也能用于未来的 clarify / sudo / secret 等其它 modal 需求。
  */
 
-import * as readline from "node:readline";
+import type * as readline from "node:readline";
 
 import { ANSI } from "./ansi.js";
+import {
+  createPanelRenderer,
+  type PanelRenderer,
+} from "./_internal/cursor-invariants.js";
+import { rawModeController } from "./_internal/raw-mode.js";
+import { acquireStdinOwnership } from "./_internal/stdin-ownership.js";
 import { clampLine, stringWidth } from "./line-width.js";
 
 // ─── 类型 ───
@@ -126,41 +132,15 @@ export interface SelectWithInputOptions {
   keyHintBar?: string;
 }
 
-// ─── Raw mode 引用计数 ───
+// ─── Raw mode refcount shims（向后兼容导出） ───
 //
-// 多个 modal 并存时（未来 clarify + approval 同时存在）不能互相关闭 TTY raw
-// 模式。模块级计数器保证 setRawMode(false) 只在最后一个调用方退出时发生。
-// 非 TTY 流（PassThrough 测试）跳过计数——refcount 永远是 0。
-
-let rawModeRefcount = 0;
-
-function enterRawMode(stdin: NodeJS.ReadStream): void {
-  if (!stdin.isTTY) return;
-  if (rawModeRefcount === 0 && typeof stdin.setRawMode === "function") {
-    stdin.setRawMode(true);
-  }
-  rawModeRefcount++;
-}
-
-function exitRawMode(
-  stdin: NodeJS.ReadStream,
-  restoreTo: boolean = false,
-): void {
-  if (!stdin.isTTY) return;
-  rawModeRefcount--;
-  if (rawModeRefcount <= 0) {
-    rawModeRefcount = 0;
-    if (typeof stdin.setRawMode === "function") {
-      // 恢复到进入前的状态，而不是无条件 false——调用方（如 readline.Interface
-      // 的 question()）可能正处于 raw mode，我们不能替它关掉。
-      stdin.setRawMode(restoreTo);
-    }
-  }
-}
+// 原实现把 raw mode 引用计数放在本文件的模块级变量里。现在已抽到
+// `_internal/raw-mode.ts` 作为通用内核。保留同名导出避免破坏已有测试的
+// 断言（`_getRawModeRefcount` / `_resetRawModeRefcountForTests`）。
 
 /** 测试辅助：读取 refcount。生产代码不应依赖。 */
 export function _getRawModeRefcount(): number {
-  return rawModeRefcount;
+  return rawModeController.activeLeases();
 }
 
 // ─── 组件状态机 ───
@@ -169,7 +149,6 @@ interface ComponentState {
   selected: number;
   inputMode: boolean;
   inputBuffer: string;
-  lastRenderHeight: number;
 }
 
 // ─── 主函数 ───
@@ -211,8 +190,10 @@ export function selectWithInput(
     ),
     inputMode: false,
     inputBuffer: "",
-    lastRenderHeight: 0,
   };
+
+  // 面板渲染器：封装 spec §6.4 的 cursor 不变量
+  const panel: PanelRenderer = createPanelRenderer(stdout);
 
   return new Promise<SelectResult>((resolve) => {
     // ── AbortSignal 早退 ──
@@ -323,22 +304,9 @@ export function selectWithInput(
       return lines;
     };
 
-    // ── 原地重绘（spec §6.4 不变量） ──
+    // ── 原地重绘（委托给 panel renderer，其内部实现 spec §6.4 不变量） ──
     const rerender = (): void => {
-      // 不变量：每次 render 结束时 cursor 位于 (startRow + N, col 0)
-      if (state.lastRenderHeight > 0) {
-        // 一次性上移 N 行，回到起点
-        // 关键：是 N 行，不是 N-1 行！（spec §6.4 陷阱 2）
-        stdout.write(`\x1b[${state.lastRenderHeight}A\r`);
-      }
-      const lines = render();
-      for (const line of lines) {
-        stdout.write(ANSI.col0); // 防御式回到列 0
-        stdout.write(ANSI.clearLine); // 清整行
-        stdout.write(line); // 写新内容
-        stdout.write("\r\n"); // 下一行，列 0（spec §6.4 陷阱 1：必须 \r\n）
-      }
-      state.lastRenderHeight = lines.length;
+      panel.render(render());
     };
 
     // ── 键盘处理 ──
@@ -478,20 +446,16 @@ export function selectWithInput(
       finish({ kind: "cancelled", cause: "aborted" });
     };
 
-    // ── 独占 stdin 的状态 snapshot（在 init 中填充，finish 中恢复） ──
+    // ── 资源句柄（在 init 中 acquire，在 finish 中 release） ──
     //
-    // 调用方（典型：REPL 的 readline.Interface 在 terminal=true 模式下）可能
-    // 已经在 stdin 上挂了 'keypress' 监听器用于行编辑 + echo；也可能已经把
-    // stdin 置于 raw mode。`rl.pause()` 只会让 readline 停止"消费 line"，但
-    // 它的监听器依然附着在 stdin 上，一旦我们 `stdin.resume()` 就会照常收到
-    // 每个 keypress 事件 —— 用户打字会被 readline 的 _ttyWrite 在面板外的
-    // cursor 位置 echo 一次（见 spec §6.4 陷阱 3）。
+    // Stdin 独占：摘除调用方预挂的 'keypress' 监听器，防止 readline 的 echo
+    // 路径在面板外叠字（spec §6.4 陷阱 3）。acquireStdinOwnership 内部会幂等
+    // 调用 readline.emitKeypressEvents 确保 decoder 就位。
     //
-    // 保守地只动 'keypress' 事件：readline 的 echo 路径经由这一个事件；
-    // 'data' 是 emitKeypressEvents 的 decoder 挂的（'data' → 'keypress'），
-    // 不能动，否则我们自己也拿不到 keypress 了。
-    let savedKeypressListeners: Array<(...args: unknown[]) => void> = [];
-    let wasRawBefore = false;
+    // Raw mode lease：让 stdin 进入 raw 模式拿到字节级按键。rawModeController
+    // 是模块级引用计数，多个 modal 并存时末次 release 才真正恢复原状态。
+    const stdinOwnership = acquireStdinOwnership(stdin);
+    const rawModeLease = rawModeController.acquire(stdin);
 
     // ── 清理 + resolve ──
     let finished = false;
@@ -507,19 +471,10 @@ export function selectWithInput(
         options.signal.removeEventListener("abort", onAbort);
       }
 
-      // 恢复 raw mode 到进入前的状态（而不是无脑 false）——见 exitRawMode 内注释。
-      exitRawMode(stdin, wasRawBefore);
-
-      // 恢复调用方预挂的 keypress 监听器。顺序：我们自己的 handleKeypress
-      // 已经 off；这里把 snapshot 的 listeners 一个个 on 回去。
-      if (typeof stdin.on === "function") {
-        for (const listener of savedKeypressListeners) {
-          stdin.on(
-            "keypress",
-            listener as unknown as (...args: unknown[]) => void,
-          );
-        }
-      }
+      // 顺序很重要：先释放 raw mode（可能 restore stdin.isRaw），
+      // 再恢复调用方的 keypress listeners（restore 的是 snapshot 时的状态）。
+      rawModeLease.release();
+      stdinOwnership.release();
 
       stdout.write(ANSI.showCursor);
       stdout.write("\n"); // 留一行空白，让后续输出不紧贴面板
@@ -529,25 +484,6 @@ export function selectWithInput(
     };
 
     // ── 初始化 ──
-    // 1. 先确保 'data' → 'keypress' 的 decoder 就位（emitKeypressEvents 幂等）
-    readline.emitKeypressEvents(stdin);
-
-    // 2. snapshot 并摘除所有现有的 'keypress' 监听器（spec §6.4 陷阱 3）
-    if (typeof stdin.listeners === "function") {
-      savedKeypressListeners = stdin
-        .listeners("keypress")
-        .slice() as Array<(...args: unknown[]) => void>;
-    }
-    if (typeof stdin.removeAllListeners === "function") {
-      stdin.removeAllListeners("keypress");
-    }
-
-    // 3. 记住进入前的 raw 状态，供 finish 恢复
-    wasRawBefore = stdin.isTTY
-      ? !!(stdin as unknown as { isRaw?: boolean }).isRaw
-      : false;
-
-    enterRawMode(stdin);
     stdout.write(ANSI.hideCursor);
 
     stdin.on("keypress", handleKeypress);
@@ -573,7 +509,9 @@ export function selectWithInput(
 /**
  * 仅供测试用：重置 raw mode refcount。
  * 避免测试之间状态泄漏——生产代码**不要**调用。
+ *
+ * 实际委托给 `_internal/raw-mode` 的内核 reset。
  */
 export function _resetRawModeRefcountForTests(): void {
-  rawModeRefcount = 0;
+  rawModeController.resetForTests();
 }
