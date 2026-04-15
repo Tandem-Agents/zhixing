@@ -463,7 +463,12 @@ interface TypeaheadSessionState {
   readonly trigger: TriggerMatch | null;
   /** 当前候选列表 */
   readonly suggestions: readonly SuggestionItem[];
-  /** 选中索引，-1 表示未选 */
+  /**
+   * 选中索引。
+   * **不变量**：`suggestions.length > 0 ⇒ selectedIndex >= 0`（永远指向一个有效 item，默认 0）。
+   * 仅当 `suggestions.length === 0` 时 `selectedIndex === -1`。
+   * 这是「零键执行」原则（§6.5）的核心：用户看到菜单的第一眼就已经有一项被选中，Enter 可直接执行。
+   */
   readonly selectedIndex: number;
   /** 是否在 async 查询中 */
   readonly loading: boolean;
@@ -724,35 +729,283 @@ Fuse 返回后**必须 re-sort**，按以下优先级：
 
 **去重**：MRU 里出现过的就不在下面的组里重复出现（和 Claude Code 一致）。
 
-### 6.4 Skill Usage 持久化
+### 6.4 MRU 评分：有界 Frecency（bounded frecency）
 
 知行的 usage tracking 放在 **`packages/core/src/typeahead/usage-tracker.ts`**，不在 CLI 里（Claude Code 的反例 —— 它把 skill usage 放在 React state 里，换 UI 就丢）。
 
-数据位置：`~/.zhixing/usage.json`，格式：
+**关键决策：不是"无限累加的 count × 时间衰减"，而是有界 frecency**。score 本身是有界的、自衰减的、幂等的；不存累加计数器。
+
+#### 6.4.1 为什么不用 naive count
+
+一个初版设计可能是 `{ count, lastUsedAt }` + 公式 `score = count × exp(-ageHours / 168)`。这看似合理，但有三个会在上线后才暴露的陷阱：
+
+1. **历史明星霸榜**：用户脚本化调用 `/model` 1000 次做配置迁移之后，其 count=1000 的积累会让任何新命令**永远追不上**。即使 `/model` 已经很久没用，`1000 × 0.87 ≈ 870` 依然碾压新命令的个位数 score。
+2. **无界增长**：一年后 `/new` 可能 count=5000。文件大小没问题（JS Number 到 2^53 都安全），但**概念上不干净** —— 系统"有记忆无遗忘"，用户永远摆脱不了刚上手时疯狂试用的命令。
+3. **新旧权重失衡**：新命令要被用 100+ 次才能挑战老命令 —— 这不是 "Most Recently Used"，是 "cumulative popularity contest"。
+
+时间衰减只能缓解 (1) 的极端情况，不能解决本质。真正的解法是**把 score 本身做成有界的**。
+
+#### 6.4.2 EMA 形式的 bounded score
+
+```typescript
+const HALF_LIFE_HOURS = 168;    // 7 天半衰期
+const MAX_SCORE = 32;           // 饱和上限
+const GC_THRESHOLD = 0.01;      // 低于此值的 entry 写入时自动清除
+
+interface UsageEntry {
+  readonly score: number;       // 已应用衰减后的 score，∈ [0, MAX_SCORE]
+  readonly lastUsedAt: number;  // 上次衰减计算的时间戳（epoch ms）
+}
+
+function onUse(prev: UsageEntry | undefined, now: number): UsageEntry {
+  const current = prev ?? { score: 0, lastUsedAt: now };
+  // 1. 先把旧 score 衰减到当前时间
+  const ageHours = Math.max(0, (now - current.lastUsedAt) / 3600_000);  // clock skew defense
+  const decayed = current.score * Math.exp(-ageHours * Math.LN2 / HALF_LIFE_HOURS);
+  // 2. +1 代表这次使用
+  // 3. 卡上限
+  return {
+    score: Math.min(decayed + 1, MAX_SCORE),
+    lastUsedAt: now,
+  };
+}
+
+function currentScore(entry: UsageEntry | undefined, now: number): number {
+  if (!entry) return 0;
+  // 懒衰减：读取时再应用一次时间衰减，不修改磁盘
+  const ageHours = Math.max(0, (now - entry.lastUsedAt) / 3600_000);
+  return entry.score * Math.exp(-ageHours * Math.LN2 / HALF_LIFE_HOURS);
+}
+```
+
+**形式解读**：这是**指数加权移动平均**（EMA）的变体。每次使用 = "先把旧 score 按时间衰减，再 +1，再卡到上限"。读取时再做一次懒衰减。score 本身不是累加器，而是一个**自我稳态的滑动量**。
+
+#### 6.4.3 有界性证明
+
+稳态假设：每 T 小时使用一次，衰减因子 `β = 2^(-T / 168)`。稳态 score 满足不动点方程 `s* = β·s* + 1`，即 `s* = 1 / (1 - β)`。
+
+| 使用频率 | 理论稳态 | 被 MAX_SCORE=32 卡住？ |
+|---|---|---|
+| 每 10 分钟一次 | ≈ 1454 | ✅ → 32 |
+| 每小时一次 | ≈ 243 | ✅ → 32 |
+| 每 3 小时一次 | ≈ 81 | ✅ → 32 |
+| **每天一次** | **≈ 10.5** | ❌ 真实值 |
+| 每 3 天一次 | ≈ 3.4 | ❌ 真实值 |
+| 每周一次 | ≈ 2.0 | ❌ 真实值 |
+| 每月一次 | ≈ 0.26 | ❌ 接近 GC |
+
+**结论**：无论多频繁使用，score 的理论上限严格 ≤ 32。文件大小、排序稳定性、数值溢出都**被数学保证**。
+
+#### 6.4.4 行为曲线（典型场景）
+
+| 场景 | 当前 score | 30 天后 | 60 天后 | 90 天后 |
+|---|---|---|---|---|
+| 之前满分 32，之后完全不用 | 32 | ~1.65 | ~0.085 | **被 GC** |
+| 每天用一次的稳态 | ~10.5 | ~10.5 | ~10.5 | ~10.5 |
+| 每周用一次的稳态 | ~2.0 | ~2.0 | ~2.0 | ~2.0 |
+| 今天开始用的新命令，每天一次 | 1.0 | ~9.3（爬升中） | ~10.4 | ~10.5（到稳态） |
+
+**语义承诺**：
+- **30 天不碰** → score 从满分跌到 1.65，基本退出 top 5，但还在列表里（有心的用户能找回来）
+- **90 天不碰** → score < 0.01，被**自动 GC**，从 usage.json 里移除，节省文件空间
+- **新命令每天用** → 3 周内追到 10.5 稳态，6 周内可以和老的 daily driver 持平
+- **脚本化突发**：连续调用 1000 次 `/model`，score 从 0 爬到 32 就卡住，不会无限上升污染未来
+
+这才是真正的 MRU，而不是 cumulative popularity。
+
+#### 6.4.5 数据格式 v2（破坏性升级）
 
 ```json
 {
-  "version": 1,
+  "version": 2,
   "commands": {
-    "elevated:builtin": { "count": 42, "lastUsedAt": 1713138000000 },
-    "model:builtin": { "count": 15, "lastUsedAt": 1713100000000 }
+    "elevated:builtin":  { "score": 18.3,  "lastUsedAt": 1713138000000 },
+    "model:builtin":     { "score": 8.2,   "lastUsedAt": 1713100000000 }
   }
 }
 ```
 
-**评分公式**：`score = count * exp(-ageHours / 168)` —— 7 天半衰期。平衡"常用"和"最近用"。
+**从 v1 迁移**（若曾经有 v1 部署）：读到 `{ count, lastUsedAt }` 形状时，`score = Math.min(count, MAX_SCORE)`，接着走正常的懒衰减路径。迁移是单向的 —— 旧的 raw count 信息会丢失，但 v1 从未真正上线（spec 更新在实现之前），实际上不会有存量数据。
 
-**接口**：
+#### 6.4.6 接口
 
 ```typescript
 interface UsageTracker {
-  recordUsage(commandId: string): void;      // 写入磁盘（batched）
+  /**
+   * 写入一次使用事件。内部自动：
+   *   1. 懒衰减旧 score
+   *   2. +1
+   *   3. 卡 MAX_SCORE 上限
+   *   4. 顺路 GC 所有 score < GC_THRESHOLD 的 entry
+   *   5. 标记 dirty，等 debounced flush
+   */
+  recordUsage(commandId: string): void;
+
+  /** 读取当前有效 score（已应用懒衰减，不修改磁盘） */
   getScore(commandId: string): number;
+
+  /** 取 top N，按 getScore 降序；N ≤ 实际有效 entry 数量 */
   topN(n: number): Array<{ commandId: string; score: number }>;
+
+  /** 手动触发 GC + flush（通常 recordUsage 时自动跑，测试或程序退出时显式调） */
+  prune(): number;  // 返回被清除的 entry 数
 }
 ```
 
-**批量写盘**：debounced 5 秒 flush，避免每次命令都同步写磁盘。程序退出时 flush 一次。
+#### 6.4.7 边界条件
+
+- **Clock skew**：`now < lastUsedAt` 时（系统时钟被改、NTP 回调）`age = max(0, ...)` 兜底，衰减因子 = 1，score 不会异常上升
+- **首次使用**：无 entry → 新建，score = 1
+- **同毫秒内连续 use**：ageHours=0，衰减因子=1，`decayed + 1 = prev.score + 1`，正常递增
+- **文件损坏 / 格式错误**：日志 warning + 重置为空 usage.json，不让坏文件阻塞 REPL 启动
+- **多进程并发写**（两个 REPL 同时开）：flush 用原子 `rename` 模式（先写 `.tmp` 后 `rename`），last-write-wins 可接受 —— usage 数据不是强一致要求，丢几次事件不影响可用性
+- **版本号不认识**（未来 v3 spec 出来前用了旧 CLI 读）：降级到空文件 + warning，不 crash
+
+#### 6.4.8 GC 策略
+
+GC 发生在两个时机：
+
+1. **`recordUsage` 的内联 GC**：每次写入都顺路遍历一次 commands 表，清除 `currentScore(entry) < GC_THRESHOLD` 的条目。O(N) per write，N ≤ 100 可忽略。
+2. **显式 `prune()`**：测试 / 手动 / 程序退出时调用。返回清除数量用于日志。
+
+**没有后台定时清理** —— 所有 GC 都是同步的、可预测的、可测试的。
+
+#### 6.4.9 批量写盘
+
+debounced 5 秒 flush，避免每次命令都同步写磁盘。程序退出时 flush 一次。内存里 score 实时更新，磁盘最多 5 秒滞后 —— 崩溃时丢 5 秒数据可接受（MRU 不是强一致性数据）。
+
+#### 6.4.10 性能预算
+
+| 操作 | 复杂度 | 实测预期 |
+|---|---|---|
+| `recordUsage` | O(N) GC + 内存写 | < 0.1ms |
+| `getScore` | O(1) | < 0.01ms |
+| `topN(5)` | O(N log N) | < 0.5ms，N ≤ 100 |
+| JSON 磁盘读 | O(file_size) | ~1ms（~1 KB 文件）|
+| JSON 磁盘写 | O(file_size) + atomic rename | ~5ms |
+
+所有操作远低于 100ms 人类感知阈值，不会成为按键响应的瓶颈。
+
+---
+
+### 6.5 零键执行（Zero-keystroke-to-run）原则
+
+这是知行补全系统的**最高 UX 指令**，贯穿所有 provider 和渲染器：**用户看到候选列表的第一眼，就已经有一项被选中，可以直接 Enter 执行**。不需要先按一次 ↓ 把光标从 "无选中" 移到第一项。
+
+#### 6.5.1 两个典型场景
+
+**场景 A：空 query，MRU 预测**
+
+```
+用户按 /                                 ← 仅一个斜杠
+   ↓
+CommandProvider.matchTrigger 命中（query="",  tokenStart=0, tokenEnd=1）
+   ↓
+CommandProvider.query 返回 MRU 排序的列表：
+   [
+     { id: "elevated:builtin",   ... },   ← 最近用过 42 次
+     { id: "model:builtin",      ... },   ← 最近用过 15 次
+     { id: "new:builtin",        ... },
+     { id: "help:builtin",       ... },
+     { id: "status:builtin",     ... },
+     ... (分类组)
+   ]
+   ↓
+broker 设 session.selectedIndex = 0      ← 关键不变量
+   ↓
+面板渲染：
+   ┌─ Commands · 23 · MRU ────────────┐
+   │  ❯  /elevated   Set elevated level│  ← 已选中
+   │     /model      Set model          │
+   │     /new        Start fresh session│
+   │     ...                            │
+   └────────────────────────────────────┘
+   ↓
+用户按 Enter                              ← 零次方向键
+   ↓
+broker.accept(items[0]) → /elevated 执行
+```
+
+**场景 B：部分 query，best match 置顶**
+
+```
+用户输入 /r                               ← "/r"
+   ↓
+CommandProvider.matchTrigger 命中（query="r"）
+   ↓
+CommandProvider.query 走 FuzzyIndex + §6.2 自定义 resort：
+   [
+     { id: "reset:builtin",    ... },     ← 精确 prefix "r"（"reset" 5 字符）
+     { id: "retry:builtin",    ... },     ← 精确 prefix "r"（"retry" 5 字符，name 字母序 tiebreaker）
+     { id: "resume:builtin",   ... },     ← 精确 prefix "r"（"resume" 6 字符）
+     { id: "rollback:builtin", ... },     ← 精确 prefix "r"
+     { id: "reasoning:builtin",... },     ← 精确 prefix "r"
+     { id: "verbose:builtin",  ... },     ← fuzzy，含 "r" 但不是 prefix
+   ]
+   ↓
+broker 设 session.selectedIndex = 0      ← 第一项就是最佳匹配
+   ↓
+面板渲染：
+   ┌─ Commands · 6 matches ───────────┐
+   │  ❯  /reset     Start a new session│  ← 已选中
+   │     /retry     Retry last message │
+   │     /resume    Resume a session   │
+   │     ...                            │
+   └────────────────────────────────────┘
+   ↓
+用户按 Enter                              ← 零次方向键
+   ↓
+broker.accept(items[0]) → /reset 执行
+```
+
+两个场景都符合同一个 UX 不变量：**最有可能是用户想要的那一项永远在 `selectedIndex === 0`**。
+
+#### 6.5.2 不变量的三条落地约束
+
+```
+UX 不变量: suggestions.length > 0 ⇒ selectedIndex === 0  (初次渲染)
+                                ⇒ selectedIndex ∈ [0, len)  (用户导航后)
+```
+
+落地到实现的三条硬约束：
+
+1. **CommandProvider.query 保证输出顺序即推荐顺序**
+   - 非空 query：§6.2 的自定义 resort 已经把"精确 > prefix > fuzzy > MRU tiebreaker"排好 → 索引 0 就是最佳匹配
+   - 空 query：§6.3 的"MRU top 5 → 分类组"排好 → 索引 0 就是最常用
+   - **Provider 内部绝对不返回未排序的结果**，把"谁排第一"的决策握在 provider 手里而不是 renderer 手里
+
+2. **Broker 设置 `selectedIndex` 的时机**
+   - 每次 `query` 返回新结果且 `suggestions.length > 0`：**无条件重置到 0**
+   - 每次 `query` 返回空：设为 -1
+   - 用户按 ↑↓ 导航：只改 selectedIndex，不重新 query
+   - 用户继续打字 → `updateInput` 触发新 query → 新结果 → **再次无条件重置到 0**
+   - 这条规则保证"用户打字时最佳匹配始终在顶"，即使他之前按过 ↓ 手动选了第 3 项
+
+3. **Renderer 的 Enter 处理走统一路径**
+   - `selectedIndex >= 0`：`broker.accept(items[selectedIndex])`（无论用户是否动过方向键）
+   - `selectedIndex === -1`：按普通 draft 提交走 agent loop（没有 suggestions 就没有 guard）
+   - **没有"未选状态"这个中间态**：要么有选中要么没 suggestions
+
+#### 6.5.3 Enter 行为决策表
+
+| 前置状态 | Enter 语义 | 依据 |
+|---|---|---|
+| 无 suggestions（`selectedIndex === -1`） | 普通提交 draft 到 agent loop | 没有 typeahead 参与 |
+| 有 suggestions + 当前选中项 `execute === true` | 执行该项（accept 并 submit） | 场景 A / B |
+| 有 suggestions + 当前选中项 `execute === false` | 填充 draft，`selectedIndex` 保留，不 submit | 等用户继续输入参数（§9.3） |
+| 有 suggestions + 当前选中项是命令 + 命令有必填参数 | `execute=false` 路径，进入 argument 态 | `ArgumentProvider` 接管后续 |
+| 有 suggestions + 但用户正在补 argument 的自由文本（非 enum） | Enter 提交整条 draft 到执行路径 | 不能被 dropdown 吞掉 |
+
+**关键**：零键执行不是"所有 Enter 都执行"，而是"第一项总是被选中、用户不用按方向键"。执行 vs 填充 的分派由 `acceptPayload.execute` 决定，不由 Enter 决定。
+
+#### 6.5.4 和三家竞品的对比
+
+| 场景 | OpenClaw Web | Hermes | Claude Code | **知行** |
+|---|---|---|---|---|
+| 空 `/` 按 Enter | 光标在 index 0 但 handleKeyDown 的 Enter 走 `selectSlashCommand` | prompt_toolkit 默认可能需要先 Tab/↓ 激活菜单 | 已实现（selectedIndex 从 0 开始） | ✅ §6.5 |
+| `/r` 按 Enter | 同上 | 同上，且无 fuzzy 所以"最佳"不一定在顶 | 已实现 + Fuse resort 保证 best 在顶 | ✅ §6.5 + Fuse resort + MRU tiebreaker |
+| MRU 影响空 query 顺序 | ❌ | ❌ | ✅ skill usage score | ✅ core 持久化 |
+| 打字时重置选中到 0 | ✅ | prompt_toolkit 默认 | ✅ | ✅ 显式不变量 |
 
 ---
 
@@ -1538,35 +1791,17 @@ class ArgumentProvider implements SuggestionProvider {
 
 9. **Command 分档 `local/agent/hybrid` 让命令 handler 写法复杂化**：每个 local/hybrid 命令的 handler 要返回结构化 `{ systemMessage? }`。**缓解**：提供 `defineLocalCommand({ name, handler })` helper 辅助书写；`hybrid` 只对系统性命令（`/new` `/model`）开放，大多数命令用 `local` 或 `agent`。
 
-### 12.2 待与用户确认
+### 12.2 已定决策（2026-04-15 锁定）
 
-1. **触发字符集是否扩展到 `:` 或 `!`**？
-   - 设计 A：只 `/` 和 `@`，简单
-   - 设计 B：加 `:emoji` / `!bash` 支持
-   - **推荐 A**，等用户明确需求再加
+以下 7 条在 v1.0 定稿时已与用户确认并锁定。后续如果要改，走 ADR。
 
-2. **空 `/` 时默认聚焦哪一项**？
-   - 设计 A：MRU 最顶（用户最近用的）
-   - 设计 B：builtin 第一个（字母序的 `/abort` 或 `/agents`）
-   - **推荐 A** —— 对熟练用户更友好
-
-3. **Feature flag `ZHIXING_INPUT_TYPEAHEAD` 默认 on 还是 off**？
-   - **推荐 on** —— Phase 1 交付时就默认启用，老 `readline` 路径作为应急回退
-
-4. **`hybrid` 命令执行顺序**：先 local 再 agent，还是先 agent 再 local？
-   - **推荐先 local 再 agent** —— local 能拿到 "已完成" 的副作用，system message 可以描述"用户刚刚做了 X"
-
-5. **`.zhixing/commands/*.md` 的 frontmatter 是否支持 JS 代码片段**？
-   - 设计 A：纯声明（YAML frontmatter + body 作为 prompt 模板）
-   - 设计 B：支持 `handler:` 指向 JS 文件
-   - **推荐 A**，设计 B 留给 plugin SDK
-
-6. **Mid-input trigger 是否对 bash mode 启用**？
-   - **推荐否** —— bash mode 里 `/` 是 Unix 路径分隔符，触发会误判。Phase 3 Step 9 只对 prompt mode 启用。
-
-7. **参数 schema 是否支持 required 但无默认值**？
-   - 用户选完命令后必须输入参数才能执行
-   - **推荐支持**，`ArgumentProvider` 检测到必填未填时 Enter 不执行，显示"`<level>` is required"
+1. **触发字符集**：仅 `/` 和 `@`。不引入 `:emoji` / `!bash`。有明确用户请求再加。
+2. **空 `/` 默认聚焦**：MRU 最顶（详见 §6.5 零键执行原则）。不采用字母序。
+3. **Feature flag `ZHIXING_INPUT_TYPEAHEAD`**：**默认 on**。Phase 1 交付即启用，`ZHIXING_INPUT_TYPEAHEAD=legacy` 回退到旧 `readline` 路径作应急兜底。
+4. **`hybrid` 命令执行顺序**：**先 local 再 agent**。local 副作用完成后再把结构化的 system message 发给 agent（"用户刚刚做了 X，当前状态是 Y"）。Agent 永远看到 "已发生" 的事实，不是 "即将发生" 的意图。
+5. **`.zhixing/commands/*.md` frontmatter**：**纯声明**（YAML frontmatter + body 作 prompt 模板）。不支持 `handler:` 指向 JS 文件。JS handler 能力留给未来的 plugin SDK 专项 spec。
+6. **Mid-input trigger 对 bash mode**：**关闭**。bash mode 里 `/` 是 Unix 路径分隔符，开 mid-input 会误判。Step 9 只对 prompt mode 启用。
+7. **参数 schema 的 required 字段**：**支持**。`ArgumentProvider` 检测到必填参数未填时，Enter 不执行，面板显示 `<name> is required` 错误态。
 
 ---
 
