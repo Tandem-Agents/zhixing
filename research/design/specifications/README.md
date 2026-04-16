@@ -11,9 +11,11 @@
 | 001 | Anthropic Messages 适配器 | [anthropic-adapter.md](anthropic-adapter.md) | 待审阅 |
 | 002 | Provider 层演进路线 | [provider-layer-evolution.md](provider-layer-evolution.md) | 待审阅 |
 | 003 | 记忆系统 | [memory-system.md](memory-system.md) | 待审阅 |
-| 004 | 常驻服务架构 | [persistent-service.md](persistent-service.md) | 待审阅 |
+| 004 | 智能体运行时（常驻服务 + 智能协调） | [persistent-service.md](persistent-service.md) | 待审阅 |
 | 005 | 安全系统 | [security-system.md](security-system.md) | 待审阅 |
 | 006 | 安全确认交互 | [confirmation-ux.md](confirmation-ux.md) | 待审阅 |
+| 007 | 输入补全 | [input-typeahead.md](input-typeahead.md) | 待审阅 |
+| 008 | Server Gateway | [server-gateway.md](server-gateway.md) | 待审阅 |
 
 ## 编写规范
 

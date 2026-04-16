@@ -2,12 +2,14 @@
 
 > 整体架构设计，随认知深化而持续演进
 
-## 状态：v2.0 — 安全系统方案重新设计（2026-04-12）
+## 状态：v2.2 — 智能协调层 + AgentRuntime 范式（2026-04-16）
 
 ## 架构演进记录
 
 | 版本 | 日期 | 变更说明 | 触发的认知研究 |
 |------|------|---------|--------------|
+| v2.2 | 2026-04-16 | **智能体运行时升级**：AgentOrchestrator（背景 Agent 派生/前台推后台/生命周期管理）、Monitor（反应式事件流监控 + 自动反应）、TaskGraph（`after` 任务依赖 + `self-paced` 自定步调）、Harness 显式定位。行业范式从"定时任务+通道"到"Agent Harness+智能协调"的跃迁——知行成为唯一同时覆盖常驻基础设施和智能协调的开源个人助手 | [智能体运行时设计](../specifications/persistent-service.md) |
+| v2.1 | 2026-04-16 | Server Gateway：两层通道适配（Core 3 方法 + Capability Traits）、JSON-RPC 2.0 over WebSocket（~20 方法 v1）、InboundRouter（normalize→debounce→session-bind→agent turn）、会话漫游、智能投递路由、ConfirmationBroker 多通道渲染、钉钉首选通道、OpenAI 兼容 API | [Server Gateway 设计](../specifications/server-gateway.md) |
 | v2.0 | 2026-04-12 | 安全系统重新设计：三条原则（操作按影响范围分类、每条放行追溯到用户选择、全平台行为一致）、五个组件（策略引擎、操作分类、权限系统、执行守卫、安全仪表盘）、域无关基础设施——通过边界声明自动覆盖任何业务场景 | [安全系统设计](../specifications/security-system.md) |
 | v1.0 | 2026-04-12 | ~~安全系统初版~~（已被 v2.0 替代）：信任梯度、可组合沙箱、补偿机制——设计反复修改，v2.0 重新设计 | — |
 | v0.9 | 2026-04-10 | 技能进化：四阶段生命周期（创生/使用/进化/治理）、反思提议（系统提示引导，零额外 LLM 成本）、使用追踪（useCount+effectiveness）、版本追踪（revisions）、内容安全扫描、Active→Stale→Archived 治理、/skills audit | [技能进化系统设计](../specifications/skills-evolution.md) |
@@ -135,7 +137,11 @@ graph TB
 | 独立 Delivery Pipeline | 持久化队列 + 去重 + Active Hours 过滤 + 重试；比 OpenClaw 分散投递更可靠 | 已确认 |
 | Active Hours 双层过滤 | Scheduler 层（省 LLM 调用）+ Delivery 层（不打扰用户），urgent 可穿透 | 已确认 |
 | Channel Adapter 独立包 | 统一接口 + 插件式加载，不污染核心包 | 已确认 |
-| 常驻服务架构 | 见 [常驻服务架构设计](../specifications/persistent-service.md) | 已确认 |
+| 常驻服务架构 | 见 [智能体运行时设计](../specifications/persistent-service.md) | 已确认 |
+| AgentOrchestrator 层管理 agent 实例生命周期 | 背景 Agent 派生/前台推后台/Monitor/TaskGraph；位于内核之上接入层之下，对已实现模块零侵入 | 已确认 |
+| 背景 Agent 走 NonInteractiveResolver | 安全优先——背景任务不应在用户不知情时执行高风险操作；已有代码完全支持 | 已确认 |
+| TaskGraph 是 Scheduler 的扩展（`after` + `self-paced`） | 任务依赖是调度规则的变体，不需要独立系统；复用 TaskStore/ErrorPolicy/EventBus | 已确认 |
+| Monitor 与 Scheduler 分离 | 触发机制根本不同（事件驱动 vs 时间驱动）；Monitor 有 maxTriggers/expiresAt 等独有生命周期 | 已确认 |
 | 技能反思提议而非后台静默创建 | Hermes 后台子 Agent 静默写入违反透明原则；知行通过系统提示引导在最终回复中提议，零额外 LLM 成本 | 已确认 |
 | 技能使用追踪（useCount + effectiveness） | Hermes/OpenClaw/Claude Code 都不跟踪技能效果；数据驱动治理 vs 盲目累积 | 已确认 |
 | 技能生命周期 Active→Stale→Archived | 无限累积降低信噪比；90 天未使用标记 stale，归档需用户确认 | 已确认 |
@@ -469,7 +475,13 @@ MVP 只实现静态 system prompt。动态注入 Phase 2。
 | 国内服务商 | 部分硬编码支持 | 不支持 | 18+ Provider 含国内 | 内置预设全覆盖 |
 | 配置管理 | 散落多文件 + 生成代码 | 三个环境变量 | config.yaml + profile | JSON 配置 + 环境变量，3 层 deep merge |
 | 容错位置 | 外层循环 1400 行中内联 | query.ts 1730 行中内联 | classify_api_error 内联 | **独立 resilience 模块**，通过 deps 注入 |
-| 常驻架构 | Gateway 单体（~130 文件） | 无 | GatewayRunner 单体 | **入站/调度/出站三层分离**（<30 文件） |
+| 常驻架构 | Gateway 单体（~130 文件） | 无（云端 Remote Triggers） | GatewayRunner 单体 | **入站/调度/出站三层分离**（<30 文件） |
+| **背景 Agent** | 无 | ✅ 会话内子 agent + Ctrl+B | 无 | ✅ **AgentOrchestrator + BackgroundAgent** |
+| **反应式监控** | 无 | ✅ Monitor Tool | 无 | ✅ **MonitorSpec（EventBus 天然基础）** |
+| **任务依赖 DAG** | 无 | ✅ Tasks | 无 | ✅ **`after` 调度模式** |
+| **自定步调** | 无 | ✅ /loop | 无 | ✅ **`self-paced` 调度模式** |
+| **Harness 定位** | 隐含 | ✅ Claude Agent SDK | 隐含 | ✅ **显式 AgentRuntime** |
+| **常驻+协调双覆盖** | ⚠️ 只有常驻 | ⚠️ 只有协调 | ⚠️ 只有常驻 | ✅ **唯一两者兼得** |
 | 定时任务创建 | cron 工具（10+ 参数概念） | 无 | cron 工具 | **schedule 工具**（3+1 概念） |
 | 投递管线 | 分散多处、无持久化 | 无 | delivery.py 分散 | **独立 Delivery Pipeline**，持久化队列 |
 | 通道适配 | Channel Plugin（紧耦合） | 无 | BasePlatformAdapter（18 平台） | **ChannelAdapter 独立接口**，插件式加载 |
