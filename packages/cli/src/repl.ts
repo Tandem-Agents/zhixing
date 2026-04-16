@@ -74,6 +74,7 @@ interface ReplState {
 export interface ReplOptions {
   model?: string;
   provider?: string;
+  workspace?: string;
   continue?: boolean;
   resume?: string | true;
   name?: string;
@@ -422,7 +423,11 @@ function buildSlashCommands(rl: readline.Interface): Record<
 // ─── 启动 REPL ───
 
 export async function startRepl(options: ReplOptions): Promise<void> {
-  const agentSession = await createSession(options);
+  const agentSession = await createSession({
+    model: options.model,
+    provider: options.provider,
+    workspace: options.workspace,
+  });
   const renderer = createRenderer();
   const store = new SessionStore(process.cwd());
 
@@ -494,7 +499,10 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     sessionId = header.sessionId;
   }
 
-  await renderWelcome({ model: agentSession.model });
+  await renderWelcome({
+    model: agentSession.model,
+    workspace: agentSession.resolvedWorkspace,
+  });
 
   // 启动时检测 stale 技能，温和提醒
   await checkStaleSkills();
@@ -627,7 +635,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
 
   const getRuntime = (): RuntimeContext => ({
     sessionBusy: state.running,
-    workspaceId: null,
+    workspaceId: agentSession.resolvedWorkspace.path,
     cwd: process.cwd(),
     target: "cli",
     features: {},

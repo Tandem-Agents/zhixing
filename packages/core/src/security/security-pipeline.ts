@@ -192,12 +192,16 @@ class SuggestionMiddleware implements SecurityMiddleware {
   ): Promise<SecurityMiddlewareResult> {
     const current = ctx.state.decision;
     if (current?.action === "confirm") {
-      const status = this.tracker.shouldSuggest(
-        ctx.request,
-        current.riskLevel,
-      );
-      if (status.suggest) {
-        ctx.state.suggestion = status;
+      // bypassImmune 规则永远需要确认，不建议创建自动放行规则
+      const hasBypassImmune = current.matchedRules.some(r => r.bypassImmune);
+      if (!hasBypassImmune) {
+        const status = this.tracker.shouldSuggest(
+          ctx.request,
+          current.riskLevel,
+        );
+        if (status.suggest) {
+          ctx.state.suggestion = status;
+        }
       }
     }
     return next();

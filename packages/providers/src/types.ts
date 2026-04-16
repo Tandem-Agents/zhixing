@@ -90,6 +90,26 @@ export interface ProviderConfig {
 }
 
 /**
+ * 工作区配置——对应 `zhixing.config.json` 的 `workspace` 字段。
+ *
+ * 工作区是安全系统的信任边界：此目录内的常规文件读写被分类为 internal（低影响），
+ * 外部文件操作被分类为 external（需确认）。
+ *
+ * 这是用户级偏好（知行是个人助手，workspace 跟着人走不跟着目录走），
+ * 主要在全局配置 ~/.zhixing/config.json 中设定。
+ * 目录级配置可选覆盖，面向开发者。
+ */
+export interface WorkspaceConfig {
+  /**
+   * 工作区根目录。
+   * 全局配置中必须是绝对路径；目录级配置中可用相对路径（相对于配置文件所在目录）。
+   */
+  root: string;
+  /** 工作区内仍需保护的路径（追加到内置保护路径，如 .git/、.env 等） */
+  protectedPaths?: string[];
+}
+
+/**
  * 智能体身份配置——对应 `zhixing.config.json` 的 `agent` 字段。
  * 未提供时 core 的 `resolveAgentIdentity` 会回退到默认值 `"知行"`。
  */
@@ -111,6 +131,8 @@ export interface ZhixingConfig {
   providers?: Record<string, ProviderConfig>;
   /** 智能体身份配置（名字、人格等） */
   agent?: AgentConfig;
+  /** 工作区配置（安全信任边界） */
+  workspace?: WorkspaceConfig;
 }
 
 // ─── 解析后的 Provider ───

@@ -32,7 +32,12 @@ import {
   withRetry,
   runAgentLoop,
 } from "@zhixing/core";
-import { createProviderFromConfig } from "@zhixing/providers";
+import {
+  createProviderFromConfig,
+  getGlobalConfigPath,
+  resolveWorkspace,
+  type ResolvedWorkspace,
+} from "@zhixing/providers";
 import {
   createReadTool,
   createWriteTool,
@@ -80,6 +85,8 @@ export interface AgentSession {
    * REPL 负责 attach 一个 TerminalConfirmationRenderer 到它。
    */
   readonly confirmationBroker: IConfirmationBroker;
+  /** 解析后的工作区信息（路径 + 来源），供启动展示和 RuntimeContext 使用 */
+  readonly resolvedWorkspace: ResolvedWorkspace;
 }
 
 export interface ForceCompactResult {
@@ -133,6 +140,7 @@ export interface CompactInfo {
 export async function createSession(options: {
   model?: string;
   provider?: string;
+  workspace?: string;
 }): Promise<AgentSession> {
   const { provider, defaultModel, config } = createProviderFromConfig({
     providerId: options.provider,
@@ -145,6 +153,16 @@ export async function createSession(options: {
 
   const model = options.model ?? defaultModel;
   const cwd = process.cwd();
+
+  // 工作区解析：按优先级链 CLI > 目录级配置 > 全局配置 > cwd 兜底
+  const sessionType: "interactive" | "ci" = process.stdin.isTTY
+    ? "interactive"
+    : "ci";
+  const workspace = resolveWorkspace(config, {
+    cliWorkspace: options.workspace,
+    sessionType,
+  });
+
   const tools = [
     createReadTool(),
     createWriteTool(),
@@ -154,16 +172,20 @@ export async function createSession(options: {
     createBashTool(),
     createMemoryTool(),
   ];
-  const systemPrompt = buildSystemPrompt({ tools, cwd });
+  const systemPrompt = buildSystemPrompt({
+    tools,
+    cwd,
+    workspace: workspace.path,
+    workspaceSource: workspace.source,
+    globalConfigPath: getGlobalConfigPath(),
+  });
 
   // 安全管线：会话级单例，跨多次 run() 共享权限规则、确认追踪、频率限制状态。
   // 持久化 store 落盘到 ~/.zhixing/permissions/，规则跨进程保留。
-  const sessionType: "interactive" | "ci" = process.stdin.isTTY
-    ? "interactive"
-    : "ci";
+  // workspace 由 resolveWorkspace 按优先级链解析，不再硬编码 cwd。
   const persistentStore = new PermissionStore({});
   const securityPipeline = new SecurityPipeline({
-    workspace: cwd,
+    workspace: workspace.path,
     sessionType,
     permissionStore: persistentStore,
   });
@@ -207,6 +229,7 @@ export async function createSession(options: {
     securityPipeline,
     permissionStore: persistentStore,
     confirmationBroker,
+    resolvedWorkspace: workspace,
 
     get calibrationFactor(): number {
       return estimator.calibrationFactor;
@@ -380,6 +403,7 @@ export async function runOnce(options: {
   prompt: string;
   model?: string;
   provider?: string;
+  workspace?: string;
   onYield?: (event: AgentYield) => void;
   onBeforeEventRender?: () => void;
 }): Promise<RunResult> {

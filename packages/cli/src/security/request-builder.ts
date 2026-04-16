@@ -192,6 +192,7 @@ export function buildConfirmationOptions(
   input: Record<string, unknown>,
   workspaceId: string | null,
   sessionType: SessionType,
+  flags?: { bypassImmune?: boolean },
 ): ConfirmationOption[] {
   const { displayName } = getAgentIdentity();
 
@@ -209,7 +210,8 @@ export function buildConfirmationOptions(
   options.push({ kind: "allow-once", label: "允许这一次", hotkey: "y" });
 
   // 2. 始终允许（本工作区）—— 仅在有 workspaceId 且能找到合理 pattern 时出现
-  if (workspaceId && workspacePattern) {
+  //    bypassImmune 规则不允许创建持久规则——每次必须确认
+  if (workspaceId && workspacePattern && !flags?.bypassImmune) {
     options.push({
       kind: "allow-workspace",
       label: `始终允许 "${workspacePattern.pattern.argument}"（本工作区）`,
@@ -268,11 +270,16 @@ export function buildConfirmationRequest(
   const body = buildDisplayBody(toolName, input);
   const title = buildPanelTitle(toolName);
 
+  const hasBypassImmune = result.decision?.matchedRules.some(
+    (r) => r.bypassImmune,
+  ) ?? false;
+
   const options = buildConfirmationOptions(
     toolName,
     input,
     workspaceId,
     sessionType,
+    { bypassImmune: hasBypassImmune },
   );
 
   return {

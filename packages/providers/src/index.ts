@@ -8,6 +8,7 @@ export type {
   ProviderPreset,
   ProviderQuirks,
   ResolvedProvider,
+  WorkspaceConfig,
   ZhixingConfig,
 } from "./types.js";
 export { DEFAULT_QUIRKS } from "./types.js";
@@ -23,11 +24,14 @@ export { createOpenAICompatibleProvider } from "./adapters/openai-compatible.js"
 
 // 配置加载
 export {
+  getDefaultWorkspacePath,
   getGlobalConfigDir,
   getGlobalConfigPath,
   getProjectConfigPath,
   loadConfig,
+  resolveWorkspace,
 } from "./config-loader.js";
+export type { ResolvedWorkspace, WorkspaceSource } from "./config-loader.js";
 
 // 一站式工厂
 export {

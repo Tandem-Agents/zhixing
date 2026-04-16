@@ -34,6 +34,12 @@ export const CACHE_BOUNDARY = "\n__ZHIXING_CACHE_BOUNDARY__\n";
 export interface PromptBuildContext {
   tools: ToolDefinition[];
   cwd: string;
+  /** 工作区路径（安全信任边界），null 表示无工作区 */
+  workspace?: string | null;
+  /** 工作区来源标识 */
+  workspaceSource?: string;
+  /** 全局配置文件路径（如 ~/.zhixing/config.json） */
+  globalConfigPath?: string;
   /** shell 名称（如 "powershell"、"zsh"），可选 */
   shell?: string;
 }
@@ -146,7 +152,7 @@ function buildStyle(): string {
 function buildSafety(): string {
   return `## Safety
 - Never execute destructive commands (rm -rf /, DROP DATABASE, etc.) without explicit user request
-- Do not access files outside the working directory unless the user's intent is clear
+- Do not access files outside the workspace unless the user's intent is clear
 - Refuse requests that could compromise system security`;
 }
 
@@ -196,9 +202,22 @@ function buildEnvironment(ctx: PromptBuildContext): string {
   const lines = [
     "## Environment",
     `- Working directory: ${ctx.cwd}`,
-    `- Platform: ${os.platform()} ${os.arch()}`,
-    `- Node.js: ${process.version}`,
   ];
+
+  if (ctx.workspace) {
+    lines.push(`- Workspace: ${ctx.workspace}`);
+    lines.push("- The workspace is the user's trusted zone — routine file reads/writes inside it are low-impact; operations outside require confirmation");
+    if (ctx.workspace !== ctx.cwd) {
+      lines.push("- Note: workspace and working directory differ — workspace is the security boundary, working directory is where the CLI was launched");
+    }
+    if (ctx.globalConfigPath) {
+      lines.push(`- Workspace is configured in: ${ctx.globalConfigPath} (field: workspace.root)`);
+      lines.push("- You CAN help the user change the workspace by editing that config file — the security system will ask the user to confirm (this confirmation cannot be skipped). Changes take effect on next session restart.");
+    }
+  }
+
+  lines.push(`- Platform: ${os.platform()} ${os.arch()}`);
+  lines.push(`- Node.js: ${process.version}`);
 
   if (ctx.shell) {
     lines.push(`- Shell: ${ctx.shell}`);

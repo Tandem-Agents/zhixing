@@ -57,6 +57,22 @@ export const BUILTIN_RULES: SecurityRule[] = [
     message: "禁止设置可用于二进制劫持的环境变量",
   },
 
+  {
+    id: "bi-zhixing-config-write",
+    name: "知行配置文件写保护",
+    description:
+      "修改知行配置目录需要用户确认——包含工作区设置（安全信任边界）和 API 密钥",
+    enabled: true,
+    match: { type: "path", paths: [".zhixing/"], access: "write" },
+    action: "confirm",
+    bypassImmune: true,
+    severity: "critical",
+    category: "privilege_escalation",
+    source: "builtin",
+    message: "此操作将修改知行配置文件",
+    suggestion: "确认修改内容后允许；工作区变更需重启会话生效",
+  },
+
   // ═══ 需确认：默认拦截但用户可批准 ═══
 
   {

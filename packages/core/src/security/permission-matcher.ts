@@ -53,6 +53,13 @@ export class PermissionMatcherMiddleware implements SecurityMiddleware {
       ctx.state.matchedPermissionRule = matched;
 
       if (matched.decision === "allow") {
+        // bypassImmune 规则的 confirm 决策不可被权限规则自动放行——
+        // 改变工作区信任边界、访问密钥目录等操作必须每次确认。
+        const hasBypassImmune = current.matchedRules.some(r => r.bypassImmune);
+        if (hasBypassImmune) {
+          return next();
+        }
+
         // 升级为 allow，guards 仍需运行（准备 sanitized env / resolved paths）
         ctx.state.decision = {
           ...current,

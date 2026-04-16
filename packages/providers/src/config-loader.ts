@@ -85,6 +85,18 @@ export function loadConfig(options: {
 
 // ─── 自动生成全局配置模板 ───
 
+/** 获取平台默认工作区路径。Windows 优先使用 D: 盘（避免 C 盘空间不足）。 */
+export function getDefaultWorkspacePath(): string {
+  const WORKSPACE_DIR_NAME = "ZhixingWorkspace";
+  if (process.platform === "win32") {
+    if (fs.existsSync("D:\\")) {
+      return path.join("D:\\", WORKSPACE_DIR_NAME);
+    }
+    return path.join(os.homedir(), WORKSPACE_DIR_NAME);
+  }
+  return path.join(os.homedir(), WORKSPACE_DIR_NAME);
+}
+
 const CONFIG_TEMPLATE = `{
   "defaultProvider": "siliconflow",
   "defaultModel": "Pro/MiniMaxAI/MiniMax-M2.5",
@@ -92,6 +104,9 @@ const CONFIG_TEMPLATE = `{
     "siliconflow": {
       "apiKey": "env:SILICONFLOW_API_KEY"
     }
+  },
+  "workspace": {
+    "root": "${getDefaultWorkspacePath().replace(/\\/g, "\\\\")}"
   }
 }
 `;
@@ -153,5 +168,74 @@ function deepMergeConfig(base: ZhixingConfig, override: ZhixingConfig): ZhixingC
     }
   }
 
+  // workspace：目录级配置整体覆盖全局配置（不做字段级 merge，
+  // 因为目录级 workspace 含义是"在此目录下工作区换成这个"）
+  if (override.workspace !== undefined) {
+    result.workspace = override.workspace;
+  }
+
   return result;
+}
+
+// ─── 工作区解析 ───
+
+/**
+ * 工作区来源——标记当前生效的工作区是从哪个配置层级得到的。
+ * 智能体可据此向用户说明"你的工作区来自 XX 配置"。
+ */
+export type WorkspaceSource =
+  | "cli"              // CLI --workspace 参数
+  | "directory-config" // 目录级 zhixing.config.json
+  | "global-config"    // 全局 ~/.zhixing/config.json
+  | "cwd-fallback"     // 无配置时回退到当前工作目录
+  | "none";            // 非交互模式且无配置
+
+export interface ResolvedWorkspace {
+  /** 解析后的绝对路径，null 表示无工作区上下文 */
+  path: string | null;
+  /** 工作区来源 */
+  source: WorkspaceSource;
+}
+
+/**
+ * 按优先级链解析工作区：CLI --workspace > 目录级配置 > 全局配置 > cwd 兜底。
+ *
+ * @param config 合并后的配置（loadConfig 返回值）
+ * @param options 解析选项
+ */
+export function resolveWorkspace(
+  config: ZhixingConfig,
+  options: {
+    /** CLI --workspace 参数值 */
+    cliWorkspace?: string;
+    /** 配置来源：合并后的 workspace 字段来自哪层（由 loadConfig 判断） */
+    configSource?: "directory-config" | "global-config";
+    /** 目录级配置文件所在目录（用于解析相对路径） */
+    configDir?: string;
+    /** 会话类型 */
+    sessionType?: "interactive" | "ci";
+  } = {},
+): ResolvedWorkspace {
+  // 优先级 1：CLI --workspace
+  if (options.cliWorkspace) {
+    return { path: path.resolve(options.cliWorkspace), source: "cli" };
+  }
+
+  // 优先级 2/3：配置文件中的 workspace.root
+  if (config.workspace?.root) {
+    const root = config.workspace.root;
+    const resolved = path.isAbsolute(root)
+      ? root
+      : path.resolve(options.configDir ?? process.cwd(), root);
+    const source = options.configSource ?? "global-config";
+    return { path: resolved, source };
+  }
+
+  // 优先级 4：交互模式回退到 cwd
+  if ((options.sessionType ?? "interactive") === "interactive") {
+    return { path: process.cwd(), source: "cwd-fallback" };
+  }
+
+  // 非交互模式且无配置 → 无工作区
+  return { path: null, source: "none" };
 }

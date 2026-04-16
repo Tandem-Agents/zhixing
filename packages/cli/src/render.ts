@@ -394,12 +394,16 @@ export function renderError(error: unknown): void {
  *
  * 显示名来自 getAgentIdentity()，默认 "知行"，可被 config 覆盖。
  */
-export async function renderWelcome(options: { model: string }): Promise<void> {
-  const { model } = options;
+export async function renderWelcome(options: {
+  model: string;
+  workspace?: { path: string | null; source: string };
+}): Promise<void> {
+  const { model, workspace } = options;
   const { displayName } = getAgentIdentity();
 
   if (!process.stdout.isTTY) {
-    console.log(`${displayName} · ${model}`);
+    const wsInfo = workspace?.path ? ` · ${workspace.path}` : "";
+    console.log(`${displayName} · ${model}${wsInfo}`);
     return;
   }
 
@@ -422,7 +426,29 @@ export async function renderWelcome(options: { model: string }): Promise<void> {
   // Phase 3: 模型名静默出现
   await sleep(60);
   console.log(`    ${chalk.dim(model)}`);
+
+  // Phase 4: 工作区信息
+  if (workspace?.path) {
+    const sourceLabel = formatWorkspaceSource(workspace.source);
+    console.log(`    ${chalk.dim(`workspace: ${workspace.path}`)}${sourceLabel}`);
+  }
   console.log();
+}
+
+/** 将工作区来源转为简短的中文标注 */
+function formatWorkspaceSource(source: string): string {
+  switch (source) {
+    case "cli":
+      return chalk.dim(" (--workspace)");
+    case "directory-config":
+      return chalk.dim(" (目录配置)");
+    case "global-config":
+      return "";  // 全局配置是默认来源，不额外标注
+    case "cwd-fallback":
+      return chalk.dim(" (当前目录)");
+    default:
+      return "";
+  }
 }
 
 function sleep(ms: number): Promise<void> {
