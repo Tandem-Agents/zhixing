@@ -832,6 +832,17 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       state.running = false;
     }
   }
+
+  // 循环退出（Ctrl+C / Ctrl+D / readline 异常）→ 关闭 readline 触发 exit。
+  //
+  // 为什么需要：typeahead 路径的 Ctrl+C 由 readInputLine 捕获并 resolve，
+  // 不经过 readline 内部的 close 流程。break 跳出循环后如果不显式 rl.close()，
+  // readline 还持有 stdin → event loop 不空 → 进程不退出 → 用户陷入无 prompt
+  // 的"僵尸态"。rl.close() 触发 rl.on("close") → process.exit(0)。
+  //
+  // Legacy 路径不受影响：readline 内部 Ctrl+C 已经 close 了，这里的 rl.close()
+  // 是幂等的 no-op。
+  rl.close();
 }
 
 // ─── 交互式会话选择器 ───
