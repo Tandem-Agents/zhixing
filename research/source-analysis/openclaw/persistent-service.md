@@ -436,23 +436,428 @@ src/process/
 └── restart-recovery.ts  # 重启恢复
 ```
 
-## 七、各子系统协作全景
+## 七、子系统 6：Channel Plugin 架构（通道适配层）
+
+> 补充分析（2026-04-16）：前 6 个子系统覆盖了 Gateway 的"服务"层面，本节起覆盖"通道"层面——Gateway 如何与外部消息平台集成。
+
+### 7.1 核心接口
+
+**文件**: `src/channels/plugins/types.plugin.ts:82-124`
+
+每个通道是一个 TypeScript 对象，实现 `ChannelPlugin` 接口。不是类继承——是**结构化契约**，约 35 个可选 adapter slot：
+
+```typescript
+type ChannelPlugin<ResolvedAccount, Probe, Audit> = {
+  id: ChannelId;
+  meta: ChannelMeta;
+  capabilities: ChannelCapabilities;
+
+  // === 必须 ===
+  config: ChannelConfigAdapter<ResolvedAccount>;
+
+  // === 运行时 ===
+  gateway?: ChannelGatewayAdapter<ResolvedAccount>;   // 连接管理 (startAccount/stopAccount)
+  outbound?: ChannelOutboundAdapter;                    // 消息发送
+  messaging?: ChannelMessagingAdapter;                  // 会话路由
+
+  // === 安全 ===
+  security?: ChannelSecurityAdapter<ResolvedAccount>;
+  approvals?: ChannelApprovalAdapter;                   // 审批交互
+  approvalCapability?: ChannelApprovalCapability;
+  allowlist?: ChannelAllowlistAdapter;
+
+  // === 平台特化 ===
+  threading?: ChannelThreadingAdapter;                  // 线程/回复
+  streaming?: ChannelStreamingAdapter;                  // 流式消息
+  actions?: ChannelMessageActionAdapter;                // 平台动作 (reaction/pin/read)
+  mentions?: ChannelMentionAdapter;                     // @提及
+  groups?: ChannelGroupAdapter;                         // 群组
+  directory?: ChannelDirectoryAdapter;                  // 频道目录
+
+  // === 生命周期 ===
+  lifecycle?: ChannelLifecycleAdapter;
+  setup?: ChannelSetupAdapter;
+  pairing?: ChannelPairingAdapter;
+  setupWizard?: ChannelPluginSetupWizard;
+
+  // === 其他 ===
+  agentPrompt?: ChannelAgentPromptAdapter;              // 通道专属 system prompt
+  agentTools?: ChannelAgentToolFactory | ChannelAgentTool[];  // 通道专属工具
+  heartbeat?: ChannelHeartbeatAdapter;
+  commands?: ChannelCommandAdapter;
+  bindings?: ChannelConfiguredBindingProvider;
+  conversationBindings?: ChannelConversationBindingSupport;
+  // ...
+};
+```
+
+### 7.2 通道列表
+
+每个通道是独立的 extension 包（`extensions/<channelName>/`）：
+
+| 通道 | 目录 | 协议 |
+|------|------|------|
+| Slack | `extensions/slack/` | Socket Mode / Events API |
+| Discord | `extensions/discord/` | Gateway WebSocket |
+| Telegram | `extensions/telegram/` | Bot API webhook/polling |
+| WhatsApp | `extensions/whatsapp/` | Cloud API webhook |
+| iMessage (BlueBubbles) | `extensions/bluebubbles/` | REST + webhook |
+| iMessage (direct) | `extensions/imessage/` | AppleScript |
+| Signal | `extensions/signal/` | signal-cli daemon |
+| Matrix | `extensions/matrix/` | Matrix SDK |
+| MS Teams | `extensions/msteams/` | Bot Framework |
+| Feishu | `extensions/feishu/` | Lark SDK |
+| IRC | `extensions/irc/` | IRC 协议 |
+| LINE | `extensions/line/` | Messaging API |
+| Google Chat | `extensions/googlechat/` | Chat API |
+| Twitch | `extensions/twitch/` | IRC + Helix API |
+| Nostr | `extensions/nostr/` | Nostr 协议 |
+| Zalo | `extensions/zalo/` | Zalo API |
+
+### 7.3 注册与发现
+
+**入口文件**: 每个 extension 有 `channel-entry.ts`：
+
+```typescript
+// extensions/slack/channel-entry.ts
+export default defineChannelPluginEntry({
+  id: "slack",
+  name: "Slack",
+  plugin: slackPlugin,
+  setRuntime: setSlackRuntime,
+});
+```
+
+**发现流程**（`src/channels/plugins/bundled.ts`）：
+1. `discoverOpenClawPlugins()` 扫描 bundled plugin 目录
+2. `loadPluginManifestRegistry()` 读取 `package.json` 中的 `openclaw` 键
+3. 对每个有 `channels` 的 manifest，通过 `jiti` 加载 `channel-entry.ts`
+4. 结果缓存在 `cachedBundledChannelState`
+
+**外部插件目录**（`src/channels/plugins/catalog.ts`）：
+支持 `~/.openclaw/mpm/plugins.json` + 环境变量 `OPENCLAW_PLUGIN_CATALOG_PATHS` + 官方 `dist/channel-catalog.json`。优先级：config > workspace > global > bundled > external > fallback。
+
+### 7.4 与 Hermes 的对比
+
+| 维度 | OpenClaw `ChannelPlugin` | Hermes `BasePlatformAdapter` |
+|------|--------------------------|------------------------------|
+| 形态 | ~35 个可选 adapter slot | Python ABC 类继承（4 必须 + N 可选覆写） |
+| 粒度 | 极细——每种能力独立 adapter | 粗——一个类包含所有 |
+| 打包 | 独立 npm 包 | 单文件（gateway/platforms/） |
+| 发现 | manifest + catalog + 环境变量 | 枚举硬编码 |
+| 上手成本 | 高（需理解 35 种 slot） | 低（实现 4 方法即可） |
+
+## 八、入站消息流（Inbound Message Flow）
+
+从"Slack 发了一条消息"到"Agent 收到用户消息"的完整路径：
 
 ```
-用户消息 ──→ Gateway ──→ Command Queue (default lane) ──→ Agent Turn
-
-Cron timer ──→ onTimer() ──→ Command Queue (cron lane) ──→
-  ├── main session → enqueueSystemEvent + requestHeartbeatNow
-  └── isolated → runIsolatedAgentTurn ──→ Delivery Pipeline
-
-Heartbeat ──→ 检查 system events ──→ Agent Turn ──→ Reply to Channel
-
-Daemon ──→ OS 保活 Gateway 进程 ──→ 崩溃自动重启
+Slack 事件
+    │
+    ▼
+① ChannelGatewayAdapter.startAccount(ctx)              [启动时建立连接]
+    │ Slack: Socket Mode 长连接 / Events API webhook
+    │
+    ▼
+② HTTP 路由匹配                                        [webhook 通道]
+    │ src/gateway/server/plugins-http.ts
+    │ resolvePluginRoutePathContext() → findMatchingPluginHttpRoutes()
+    │ 部分路由 bypass auth（平台验证回调）
+    │
+    ▼
+③ 消息规范化
+    │ src/channels/plugins/normalize/shared.ts
+    │ 各通道特化：Slack 去 <@U1234>、Discord 去 <@!1234>
+    │ ChannelMentionAdapter.stripMentions() / stripRegexes()
+    │
+    ▼
+④ 入站去抖                                             [防快速连发]
+    │ src/channels/inbound-debounce-policy.ts
+    │ shouldDebounceTextInbound() — 媒体/命令/空文本不去抖
+    │ createChannelInboundDebouncer() — 去抖窗口内连接文本
+    │
+    ▼
+⑤ 会话路由
+    │ ChannelMessagingAdapter.resolveInboundConversation()
+    │ ChannelMessagingAdapter.resolveSessionConversation()
+    │ 映射平台 ID（Slack thread_ts / Telegram topic ID）→ session key
+    │ recordInboundSession() — 记录 lastChannel, to, accountId, threadId
+    │
+    ▼
+⑥ Agent 触发
+    │ dispatchInboundMessage() → dispatchReplyFromConfig()
+    │ 创建 ReplyDispatcher 处理流式 block delivery
+    │ 触发 AI turn
 ```
 
-## 八、与知行的对比思考
+## 九、出站消息流（Outbound Message Flow）
 
-### 8.1 OpenClaw 做对了的
+从"Agent 要回复"到"用户在 Slack 上看到消息"的完整路径：
+
+```
+Agent 回复 (ReplyPayload)
+    │
+    ▼
+① 出站路由
+    │ src/infra/outbound/message.ts
+    │ resolveOutboundChannelPlugin() → resolveMessageChannelSelection()
+    │ resolveOutboundTarget() → buildOutboundSessionContext()
+    │
+    ▼
+② 投递管线                                             [src/infra/outbound/deliver.ts]
+    │ deliverOutboundPayloads()
+    │   1. normalizeReplyPayloadsForDelivery() — 规范化 + 通道清洗
+    │   2. loadChannelOutboundAdapter() — 加载通道发送适配器
+    │   3. 构建 ChannelHandler（chunker, text limits, media support）
+    │   4. chunkByParagraph() / chunkMarkdownTextWithMode() — 分块
+    │   5. 调用 adapter 发送方法
+    │
+    ▼
+③ 发送方法优先级
+    │ ChannelOutboundAdapter 提供多级发送方法：
+    │ sendPayload()        ← 结构化/交互式 payload
+    │ sendFormattedText()  ← 纯文本/markdown 分块
+    │ sendFormattedMedia() ← 媒体 + 标题
+    │ sendText() / sendMedia() ← 降级原语
+    │
+    ▼
+④ 投递模式
+    │ deliveryMode: "direct" | "gateway" | "hybrid"
+    │ direct  → 直接 API 调用（Slack chat.postMessage）
+    │ gateway → 路由到 Gateway WebSocket（需要 daemon）
+    │ hybrid  → 先 direct，失败降级 gateway
+    │
+    ▼
+⑤ 持久化重试队列                                      [delivery-queue-recovery.ts]
+    │ 失败 → enqueueDelivery() → delivery-queue/ 目录
+    │ MAX_RETRIES = 5，指数退避：5s, 25s, 2m, 10m
+    │ PERMANENT_ERROR_PATTERNS → 不可重试错误
+    │ 重启时 recoverPendingDeliveries() 补发
+```
+
+### 9.1 多通道扇出
+
+一条回复**可以**发到多个通道：
+- 显式 `channel` 参数指定目标通道
+- Session 绑定路由（`lastChannel` / `lastRoute`）
+- 跨上下文投递添加 "[from X]" 前缀（`buildCrossContextComponents()`）
+- Mirror/Transcript 投递用于审计日志
+
+## 十、WebSocket RPC 协议
+
+### 10.1 协议版本
+
+`PROTOCOL_VERSION = 3`（`src/gateway/protocol/schema/protocol-schemas.ts`）
+
+### 10.2 帧格式
+
+三种帧类型（判别联合，`src/gateway/protocol/schema/frames.ts`）：
+
+```typescript
+// 请求帧：client → server
+{ type: "req", id: string, method: string, params?: unknown }
+
+// 响应帧：server → client
+{ type: "res", id: string, ok: boolean, payload?: unknown, error?: ErrorShape }
+
+// 事件帧：server → client（推送）
+{ type: "event", event: string, payload?: unknown, seq?: number }
+```
+
+### 10.3 连接握手
+
+```
+Client                                    Server
+  │                                          │
+  │──── WebSocket 连接 ───────────────────→ │
+  │                                          │
+  │ ←── event: connect.challenge ────────── │
+  │     { nonce, ts }                        │
+  │                                          │
+  │──── req: connect ────────────────────→  │
+  │     { minProtocol, maxProtocol,          │
+  │       client: { id, version, platform }, │
+  │       auth: { token/bootstrapToken } }   │
+  │                                          │
+  │ ←── res: HelloOk ───────────────────── │
+  │     { protocol, server, features,        │
+  │       snapshot, policy }                 │
+```
+
+### 10.4 客户端类型
+
+| client.id | client.mode | 用途 |
+|-----------|-------------|------|
+| `cli` | `backend` | CLI 终端 |
+| `webchat` / `control-ui` / `operator-ui` | `frontend` / `observer` | Web 界面 |
+| `ios` / `android` | `frontend` | 移动端 |
+| `gateway-client` | `backend` | 插件 HTTP 路由 |
+| — | `node` | 远程计算节点 |
+
+### 10.5 RPC 方法索引（部分）
+
+| 类别 | 方法 |
+|------|------|
+| **连接** | connect, health |
+| **聊天** | chat.send, chat.history, chat.abort, chat.inject |
+| **会话** | sessions.list, sessions.create, sessions.send, sessions.abort, sessions.patch, sessions.delete, sessions.compact |
+| **配置** | config.get, config.set, config.apply, config.patch, config.schema |
+| **通道** | channels.status, channels.logout |
+| **定时** | cron.list, cron.add, cron.update, cron.remove, cron.run, cron.runs |
+| **审批** | exec.approval.request, exec.approval.resolve, exec.approvals.get |
+| **设备** | device.pair.list, device.pair.approve, device.pair.reject, device.token.rotate |
+| **节点** | node.pair.request, node.list, node.invoke, node.invoke.result |
+| **技能/工具** | skills.status, skills.install, tools.catalog, tools.effective |
+| **模型** | models.list |
+| **Agent** | agent, agent.identity, agents.list, agents.create, agents.update |
+| **语音** | talk.mode, talk.config, talk.speak |
+
+### 10.6 推送事件
+
+| 事件 | 用途 |
+|------|------|
+| `connect.challenge` | 握手 nonce |
+| `tick` | 心跳 |
+| `shutdown` | 优雅停机通知 |
+| `agent.event` | Agent 运行进度/完成 |
+| `chat.event` | 流式聊天增量 |
+| `presence` | 客户端上下线 |
+| `exec.approval.requested` | 待审批通知 |
+| `exec.approval.resolved` | 审批结果 |
+| `session.messages.*` | 会话消息订阅 |
+
+### 10.7 设计评价
+
+| 维度 | 评价 |
+|------|------|
+| **协议成熟度** | ✅ 优秀。版本协商、challenge 握手、能力声明 |
+| **覆盖面** | ✅ 优秀。~60+ RPC 方法覆盖全部 Gateway 能力 |
+| **复杂度** | ⚠️ 高。对第三方客户端开发者门槛高 |
+| **与 Hermes 对比** | Hermes 无此层——CLI 与 Gateway 通过文件/subprocess 间接交互 |
+
+## 十一、会话 ↔ 通道绑定
+
+### 11.1 路由机制
+
+每个 session 在 session store 中维护通道路由信息：
+- `lastChannel` — 最近一次入站的通道 plugin id
+- `lastRoute` — 完整投递上下文 `{ channel, to, accountId, threadId }`
+
+### 11.2 跨通道能力
+
+一个 session **可以**跨多个通道：
+- `lastChannel` 追踪最近的入站通道，但出站可以显式指定任意通道
+- `ChannelConfiguredBindingProvider` 支持将 session 绑定到特定通道/会话对
+- 跨通道投递自动添加来源前缀：`[from Telegram]`
+- `ChannelConversationBindingSupport` 管理会话绑定的生命周期
+
+## 十二、跨通道审批路由
+
+### 12.1 审批流程
+
+```
+① Agent 请求执行审批
+    │ exec.approval.request 工具 → Gateway RPC
+    │
+    ▼
+② ExecApprovalManager 持有待审批项
+    │
+    ▼
+③ 审批转发到用户
+    │ 转发目标由 ChannelApprovalNativeDeliveryCapabilities.preferredSurface 决定：
+    │ ├── "origin"      → 发到触发命令的同一会话
+    │ ├── "approver-dm"  → 发到 owner 的私聊
+    │ └── "both"         → 两个都发
+    │
+    ▼
+④ 通道特化渲染
+    │ Slack → Block Kit 交互按钮
+    │ Telegram → Inline Keyboard
+    │ Discord → Component Row
+    │ buildPendingPayload() / buildResolvedPayload()
+    │
+    ▼
+⑤ 用户点击 approve/deny（平台原生交互）
+    │
+    ▼
+⑥ 通道适配器接收交互 → exec.approval.resolve RPC
+    │
+    ▼
+⑦ Agent 继续执行或中止
+```
+
+### 12.2 跨通道转发
+
+当 `shouldSuppressForwardingFallback` 返回 false 时，审批可以从任意通道转发到任意其他已配置通道。
+
+## 十三、通道特化功能
+
+### 13.1 能力声明
+
+每个通道通过 `ChannelCapabilities` 声明支持的功能：
+
+```typescript
+type ChannelCapabilities = {
+  chatTypes: ("direct" | "group" | "channel" | "thread")[];
+  media: boolean;
+  reactions: boolean;
+  edit: boolean;
+  unsend: boolean;
+  reply: boolean;
+  nativeCommands: boolean;
+  effects: boolean;    // iMessage 消息效果
+  // ...
+};
+```
+
+### 13.2 平台特化处理
+
+| 平台 | 特化能力 |
+|------|---------|
+| **Slack** | thread_ts 解析、Block Kit 渲染、交互式审批按钮 |
+| **Discord** | Guild/Channel 隔离、@bot mention gating、Component Row |
+| **Telegram** | MarkdownV2 格式、Inline Keyboard、Topic ID 映射 |
+| **WhatsApp** | 多媒体消息（audio/video/document）、reaction、已读回执 |
+| **iMessage** | 消息效果（slam, gentle）、双 extension（直接/BlueBubbles） |
+
+### 13.3 流式消息合并
+
+`ChannelStreamingAdapter.blockStreamingCoalesceDefaults` 为每个通道配置流式消息合并参数，避免触发平台 rate limit（如 Discord 限制消息编辑频率）。
+
+## 十四、各子系统协作全景
+
+```
+              ┌────────────────────────────────────────────────────────┐
+              │                   Gateway 进程                         │
+              │                                                        │
+用户消息       │  Channel Plugin     Inbound          Command Queue     │
+(Slack/       │  ┌──────────┐    ┌──────────┐     ┌──────────────┐    │
+Discord/      │  │ gateway   │───▶│ normalize│────▶│ default lane │    │
+Telegram)  ──▶│  │ adapter   │    │ debounce │     │ (串行)       │───▶│ Agent Turn
+              │  └──────────┘    │ route    │     ├──────────────┤    │
+              │                   └──────────┘     │ cron lane    │    │
+              │                                    │ (并发)       │    │
+Cron timer ──▶│  onTimer() ──────────────────────▶│              │───▶│ Agent Turn
+              │                                    ├──────────────┤    │     │
+Heartbeat  ──▶│  检查 system events ─────────────▶│ heartbeat    │───▶│     │
+              │                                    └──────────────┘    │     │
+              │                                                        │     │
+              │  ┌─────────────────────────────────────────────────┐   │     │
+              │  │  Outbound                                       │   │     │
+              │  │  normalize → chunker → adapter.send → retry    │◀──┼─────┘
+              │  │  delivery-queue/ (持久化重试)                    │   │
+              │  └─────────────────────────────────────────────────┘   │
+              │                                                        │
+              │  WebSocket RPC Server (:18789)                        │
+              │  CLI / Web / Mobile 客户端连接                         │
+              └────────────────────────────────────────────────────────┘
+                                │ OS 级保活
+                       Daemon (launchd / systemd / schtasks)
+```
+
+## 十五、与知行的对比思考
+
+### 15.1 OpenClaw 做对了的
 
 1. **OS 级保活**：委托 launchd/systemd，比应用层保活可靠
 2. **Cron 依赖注入**：`CronServiceDeps` 接口完全解耦，易于测试
@@ -460,8 +865,12 @@ Daemon ──→ OS 保活 Gateway 进程 ──→ 崩溃自动重启
 4. **Missed job 追赶**：重启后补执行，不丢任务
 5. **错误退避**：指数退避 + 失败通知，防止无限重试
 6. **Lane 隔离**：不同工作负载互不干扰
+7. **Channel Plugin 细粒度 adapter**：~35 个独立 slot，每种能力可独立演进
+8. **WebSocket RPC 协议**：标准化客户端通信，支持 CLI/Web/Mobile 三端
+9. **持久化投递重试队列**：delivery-queue/ + 指数退避，不丢消息
+10. **跨通道审批**：审批请求可以跨通道转发，平台原生渲染
 
-### 8.2 自然语言创建定时任务
+### 15.2 自然语言创建定时任务
 
 OpenClaw 提供了 `cron` 工具暴露给 AI Agent，支持自然语言创建定时任务：
 
@@ -476,21 +885,26 @@ delayed follow-ups, and recurring tasks.`
 
 但 AI 需要理解并正确填写底层的结构化参数（sessionTarget、wakeMode、payload.kind 等），这对模型的工具调用准确度要求较高。
 
-### 8.3 OpenClaw 做得不够好的
+### 15.3 OpenClaw 做得不够好的
 
-1. **复杂度失控**：Cron 子系统 ~130 个文件，大量 regression fix（issue 编号散布各处）
+1. **复杂度失控**：Cron ~130 文件、Channel Plugin ~35 个 adapter slot——能力强但认知负担重
 2. **Scheduler 与 Gateway 耦合**：Cron 跑在 Gateway 进程内，不能独立扩展
 3. **无任务优先级**：所有 cron job 平等，无法表达"紧急"vs"日常"
 4. **无可观测性**：Cron 执行状态依赖日志文件，无实时 dashboard
-5. **工具参数复杂**：AI 创建 cron job 时需理解 sessionTarget、wakeMode、delivery 等多个概念的组合规则，增加了模型调用出错的概率
+5. **工具参数复杂**：AI 创建 cron job 时需理解多个概念的组合规则
 6. **用户体验**：必须先 `daemon install` 才能用 cron，非零步骤
+7. **通道适配门槛高**：对比 Hermes 的 4 方法基类，OpenClaw 的 35 slot 对第三方通道开发者不友好
 
-### 8.4 Claude Code 为什么没有
+### 15.4 对知行的启示
 
-Claude Code 定位为**编程助手 CLI 工具**，本质是"用户主动发起 → AI 响应"模型。它不需要：
-- 后台运行（用户关闭终端就结束）
-- 定时任务（编程场景无此需求）
-- 多通道（只有终端一个入口）
-- 主动通知（编程助手不会主动推送消息）
+| 启示 | 来源 | 行动 |
+|------|------|------|
+| **WebSocket RPC 协议是必要的** | OpenClaw 唯一有标准化客户端协议的 | 知行 Server 模式需要设计自己的 RPC 协议 |
+| **通道粒度应取中间路线** | OpenClaw 35 slot 过重，Hermes 4 方法过轻 | 核心抽象 4-6 方法 + 可选 capability trait |
+| **持久化投递队列是刚需** | OpenClaw delivery-queue/ + 退避 | 知行的 Outbound 层不能只靠内存态 |
+| **审批跨通道转发有价值** | OpenClaw 的多 surface 审批路由 | 知行的 ConfirmationBroker 已是渲染器无关的，扩展到多通道是自然的 |
+| **Protocol versioning 从第一天就要做** | OpenClaw 已到 v3，Hermes 没有 | 知行 Server 模式的 RPC 协议第一天就带版本号 |
 
-这与个人助手的需求完全不同——个人助手需要 7×24 可达、主动关怀、跨通道投递。
+### 15.5 Claude Code 为什么没有
+
+详见 [Claude Code 常驻服务分析](../claude-code/persistent-service.md)。核心原因：编程助手定位决定了"用户主动发起 → AI 响应"模型，不需要后台运行、多通道、主动通知。但 Claude Code 的 MCP、Daemon Worker、DirectConnect Server 等隐式基础设施说明它正在**渐进地向服务化演进**。
