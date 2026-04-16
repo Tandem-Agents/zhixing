@@ -27,7 +27,15 @@ import {
   JournalStore,
   inferEffectiveness,
   applyEffectivenessUpdates,
+  CommandProvider,
+  DefaultCommandRegistry,
+  DefaultTypeaheadBroker,
+  UsageTracker,
+  type CommandHandlerContext,
+  type RuntimeContext,
 } from "@zhixing/core";
+import { CommandDispatcher } from "./command-dispatcher.js";
+import { readInputLine, type InputLineResult } from "./typeahead-input.js";
 import { type AgentSession, createSession } from "./run-agent.js";
 import {
   createRenderer,
@@ -531,6 +539,101 @@ export async function startRepl(options: ReplOptions): Promise<void> {
 
   const slashCommands = buildSlashCommands(rl);
 
+  // ── Typeahead 路径接入（Phase 1 Step 5） ──
+  //
+  // Feature flag：`ZHIXING_INPUT_TYPEAHEAD`。默认 "on"；显式 "legacy" 回退到
+  // `rl.question` 的行编辑路径。
+  //
+  // 单源真相设计（v2，2026-04-16）：不再调 `registerBuiltinCommands` 注册
+  // 设计层面的 builtin 集合，而是**从 legacy `slashCommands` 派生** typeahead
+  // registry —— 有什么 legacy 命令，panel 里就显示什么，零幽灵命令。
+  //
+  // 所有命令 execution = "local"：
+  //   1. 不把 info 查询泄露给 agent loop（否则 agent 会瞎编 "Claude 3.5 Sonnet"
+  //      这类幻觉，因为它不知道真正的 runtime 状态）
+  //   2. 不产生多余的 agent turn 和 token 消耗
+  //   3. `/new` 清历史后 agent 自然从空白开始，不需要 system message 提醒
+  const typeaheadMode = (process.env.ZHIXING_INPUT_TYPEAHEAD ?? "on").toLowerCase();
+  const useTypeahead = typeaheadMode !== "legacy" && typeaheadMode !== "off";
+
+  let typeaheadBroker: DefaultTypeaheadBroker | null = null;
+  let typeaheadDispatcher: CommandDispatcher | null = null;
+  if (useTypeahead) {
+    const tRegistry = new DefaultCommandRegistry();
+    const usageTracker = new UsageTracker({ rootDir: null });
+    typeaheadBroker = new DefaultTypeaheadBroker({
+      now: () => Date.now(),
+    });
+    typeaheadBroker.register(
+      new CommandProvider({ registry: tRegistry, usageTracker }),
+    );
+    typeaheadDispatcher = new CommandDispatcher({ registry: tRegistry });
+
+    // ── REPL 命令目录：typeahead panel 的单源真相 ──
+    //
+    // 每一条对应一个 legacy `slashCommands` 的 key，跑 local execution，
+    // handler 就是 legacy 闭包的原样包装。新增命令只需要在这里加一行。
+    const REPL_COMMANDS: ReadonlyArray<{
+      readonly name: string;
+      readonly aliases?: readonly string[];
+      readonly description: string;
+      readonly category: "session" | "info" | "tools" | "config";
+      readonly legacyKey: string;
+    }> = [
+      // ─ session ─
+      { name: "new", aliases: ["reset"], description: "开始新会话（清空历史）", category: "session", legacyKey: "/clear" },
+      { name: "clear", description: "清空对话历史", category: "session", legacyKey: "/clear" },
+      { name: "sessions", description: "列出当前项目的会话", category: "session", legacyKey: "/sessions" },
+      { name: "name", description: "为当前会话命名", category: "session", legacyKey: "/name" },
+      { name: "exit", aliases: ["quit"], description: "退出知行", category: "session", legacyKey: "/exit" },
+      // ─ info ─
+      { name: "help", description: "显示帮助信息", category: "info", legacyKey: "/help" },
+      { name: "status", description: "显示会话状态", category: "info", legacyKey: "/status" },
+      { name: "me", description: "查看身份画像", category: "info", legacyKey: "/me" },
+      { name: "model", description: "显示当前模型信息", category: "info", legacyKey: "/model" },
+      { name: "usage", description: "查看 token 用量详情", category: "info", legacyKey: "/usage" },
+      { name: "context", description: "上下文容量可视化", category: "info", legacyKey: "/context" },
+      // ─ tools ─
+      { name: "skills", description: "查看技能库", category: "tools", legacyKey: "/skills" },
+      { name: "journal", description: "查看日志状态", category: "tools", legacyKey: "/journal" },
+      { name: "people", description: "查看关系网络", category: "tools", legacyKey: "/people" },
+      { name: "compact", description: "手动触发上下文压缩", category: "tools", legacyKey: "/compact" },
+      // ─ config ─
+      { name: "trust", description: "权限规则管理", category: "config", legacyKey: "/trust" },
+      { name: "security", description: "安全状态概览", category: "config", legacyKey: "/security" },
+    ];
+
+    for (const cmd of REPL_COMMANDS) {
+      const legacy = slashCommands[cmd.legacyKey];
+      if (!legacy) continue; // 防御式跳过，防止 legacyKey 和 slashCommands 不一致
+      const id = `${cmd.name}:repl`;
+      tRegistry.register({
+        id,
+        name: cmd.name,
+        aliases: cmd.aliases ? [...cmd.aliases] : undefined,
+        description: cmd.description,
+        category: cmd.category,
+        execution: "local",
+        tag: "builtin",
+      });
+      typeaheadDispatcher.registerHandler(id, async (ctx: CommandHandlerContext) => {
+        const rest =
+          typeof ctx.args._rest === "string" ? ctx.args._rest : "";
+        await legacy.handler(state, rest);
+        return {};
+      });
+    }
+  }
+
+  const getRuntime = (): RuntimeContext => ({
+    sessionBusy: state.running,
+    workspaceId: null,
+    cwd: process.cwd(),
+    target: "cli",
+    features: {},
+    now: Date.now(),
+  });
+
   rl.on("close", () => {
     renderer.stop();
     detachConfirmationRenderer();
@@ -538,35 +641,91 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     process.exit(0);
   });
 
+  // ── 旧/新路径都要处理的"命令 fallthrough 到 legacy slashCommands"助手 ──
+  const runLegacyCommand = async (rawDraft: string): Promise<boolean> => {
+    const trimmed = rawDraft.trim();
+    if (!trimmed.startsWith("/")) return false;
+    const [cmd, ...rest] = trimmed.split(/\s+/);
+    const legacy = slashCommands[cmd!];
+    if (!legacy) {
+      console.log(
+        chalk.yellow(`未知命令: ${cmd}`) +
+          chalk.dim("  输入 /help 查看帮助\n"),
+      );
+      return true;
+    }
+    await legacy.handler(state, rest.join(" "));
+    return true;
+  };
+
   // REPL 主循环
   while (true) {
     let input: string;
-    try {
-      input = await rl.question(chalk.green("❯ "));
-    } catch {
-      break;
-    }
 
-    const trimmed = input.trim();
-    if (!trimmed) continue;
-
-    // 斜杠命令
-    if (trimmed.startsWith("/")) {
-      const [cmd, ...rest] = trimmed.split(/\s+/);
-      const command = slashCommands[cmd!];
-      if (command) {
-        await command.handler(state, rest.join(" "));
-      } else {
-        console.log(
-          chalk.yellow(`未知命令: ${cmd}`) +
-            chalk.dim("  输入 /help 查看帮助\n"),
-        );
+    if (useTypeahead && typeaheadBroker && typeaheadDispatcher) {
+      // ── Typeahead 路径 ──
+      rl.pause(); // 让出 stdin 所有权给 readInputLine
+      let result: InputLineResult;
+      try {
+        result = await readInputLine({
+          broker: typeaheadBroker,
+          dispatcher: typeaheadDispatcher,
+          getRuntime,
+        });
+      } finally {
+        rl.resume();
       }
-      continue;
+
+      if (result.kind === "cancelled") {
+        if (result.cause === "ctrl-c" || result.cause === "ctrl-d") break;
+        continue;
+      }
+
+      if (result.kind === "command-dispatched") {
+        const d = result.dispatchResult;
+        if (d.kind === "local-handled") {
+          continue;
+        }
+        if (d.kind === "unknown" || d.kind === "missing-handler") {
+          // Fallthrough 到 legacy（未桥接的 /skills /trust /people 等）
+          await runLegacyCommand(result.text);
+          continue;
+        }
+        if (d.kind === "error") {
+          console.log(chalk.red(`命令执行失败: ${d.error.message}\n`));
+          continue;
+        }
+        if (d.kind === "hybrid") {
+          // 已执行本地副作用；把 systemMessage 作为 user turn 发给 agent
+          input = d.systemMessage;
+        } else {
+          // agent-message
+          input = d.text;
+        }
+      } else {
+        // kind === "text"
+        if (!result.text) continue;
+        input = result.text;
+      }
+    } else {
+      // ── Legacy 路径 ──
+      try {
+        input = await rl.question(chalk.green("❯ "));
+      } catch {
+        break;
+      }
+
+      const trimmed = input.trim();
+      if (!trimmed) continue;
+
+      if (trimmed.startsWith("/")) {
+        await runLegacyCommand(trimmed);
+        continue;
+      }
     }
 
     // 正常对话
-    const userMsg = userMessage(trimmed);
+    const userMsg = userMessage(input.trim());
     state.messages.push(userMsg);
     state.running = true;
     renderer.startThinking();

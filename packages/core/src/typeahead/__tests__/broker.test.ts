@@ -284,9 +284,9 @@ describe("DefaultTypeaheadBroker — 零键执行不变量（spec §6.5）", () 
   });
 });
 
-// ─── MoveSelection 循环导航 ───
+// ─── MoveSelection: clamp 语义（非循环） ───
 
-describe("DefaultTypeaheadBroker — moveSelection", () => {
+describe("DefaultTypeaheadBroker — moveSelection (clamp)", () => {
   function setup() {
     const broker = new DefaultTypeaheadBroker();
     broker.register(
@@ -306,18 +306,32 @@ describe("DefaultTypeaheadBroker — moveSelection", () => {
     expect(broker.getState(handle.id)?.selectedIndex).toBe(1);
   });
 
-  it("末尾下移回到首项（循环）", () => {
+  it("末尾再下移：停在末尾不动（非循环 clamp）", () => {
     const { broker, handle } = setup();
     broker.moveSelection(handle.id, 1);
     broker.moveSelection(handle.id, 1);
-    broker.moveSelection(handle.id, 1);
+    broker.moveSelection(handle.id, 1); // 已到末尾
+    broker.moveSelection(handle.id, 1); // 再按还是末尾
+    expect(broker.getState(handle.id)?.selectedIndex).toBe(2);
+  });
+
+  it("首项再上移：停在首项不动（非循环 clamp）", () => {
+    const { broker, handle } = setup();
+    // 初始 index=0
+    broker.moveSelection(handle.id, -1);
     expect(broker.getState(handle.id)?.selectedIndex).toBe(0);
   });
 
-  it("首项上移到末尾", () => {
+  it("末尾下移**不**触发 listener（clamp 无状态变化）", () => {
     const { broker, handle } = setup();
-    broker.moveSelection(handle.id, -1);
-    expect(broker.getState(handle.id)?.selectedIndex).toBe(2);
+    broker.moveSelection(handle.id, 1);
+    broker.moveSelection(handle.id, 1); // 到末尾 index=2
+    let callCount = 0;
+    broker.onSessionChange(handle.id, () => {
+      callCount++;
+    });
+    broker.moveSelection(handle.id, 1); // 无变化
+    expect(callCount).toBe(0);
   });
 
   it("空 suggestions 时 moveSelection no-op", () => {

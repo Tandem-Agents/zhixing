@@ -624,6 +624,20 @@ interface DynamicCommandSource {
 - **`onChange` 事件**：broker 订阅后重建 FuzzyIndex 缓存。抄 Claude Code 的"按引用身份缓存"，但事件更显式。
 - **`find` vs `findByName`**：`find` 按稳定 id（用于 accept 后查回 def），`findByName` 按 name/alias（用于执行路径的命名解析）。
 
+**2026-04-16 refinement：静态命令的真正所有者是 REPL 不是 core**：
+
+初版设计让 `@zhixing/core/typeahead/builtin-commands.ts` 持有一个"理想化的"内建命令清单（`/new /clear /help /status /model /elevated /fast /verbose /history /debug /exit`），REPL 调 `registerBuiltinCommands(registry)` 一次性注册全部。Phase 1 Step 5 实测暴露三个问题：
+
+1. **幽灵命令**：core 清单里有 `/elevated /fast /verbose` 等尚未在 REPL 实现 handler 的命令，用户能在 panel 看到但执行时"未知命令"
+2. **设计集与实际集的二元分裂**：core 的 builtin-commands.ts 和 REPL 的 `buildSlashCommands()` 不重合 —— core 里有 `/elevated` 但 REPL 没有，REPL 里有 `/skills /journal /trust` 但 core 没有
+3. **handler 归属模糊**：命令在 core 里定义，handler 在 CLI 里实现，绑定关系靠"id 字符串精确匹配"维护，容易漂移
+
+**新约定**：
+- `@zhixing/core/typeahead/builtin-commands.ts` **降级为"命令目录范例"**，只供测试和设计参考使用，**不再作为 REPL 运行时的注册源**
+- REPL 在 bootstrap 时持有一张**本地 `REPL_COMMANDS` 表**（见 `packages/cli/src/repl.ts`），每一行同时定义 `{ name, aliases, description, category, execution, legacyKey }`，循环注册到 registry 并绑定 handler
+- 好处：zero 幽灵命令（每一条都有可执行 handler）、单一增删点（表里加一行就行）、CLI 独立演进不受 core 限制
+- Plugin / 动态 source 不受影响，仍走 `registerDynamicSource` 路径 —— 这条设计没变
+
 ### 5.9 `TypeaheadEventBus` 事件
 
 ```typescript
@@ -986,6 +1000,14 @@ UX 不变量: suggestions.length > 0 ⇒ selectedIndex === 0  (初次渲染)
    - `selectedIndex === -1`：按普通 draft 提交走 agent loop（没有 suggestions 就没有 guard）
    - **没有"未选状态"这个中间态**：要么有选中要么没 suggestions
 
+4. **`moveSelection` 是 clamp 而非 circular**（2026-04-16 确立）
+
+   `broker.moveSelection(sessionId, delta)` 用 `Math.max(0, Math.min(selectedIndex + delta, len - 1))` 计算新索引，**末尾 ↓ 和首项 ↑ 都是 no-op**，不触发 listener、不改 state。
+
+   **Why**：循环导航会让窗口从 `[last-maxVisible, last]` 跳到 `[0, maxVisible]`，整个可见列表瞬间翻转 —— 用户按一次 ↓ 看到的不是"下一项"而是"完全不同的一个列表"，视觉上极其突兀。这条语义和 VSCode / Sublime / 主流 IDE 的 typeahead 一致，符合"滚到头就到头"的物理直觉。副作用是失去"末尾快速跳首项"的快捷键 —— 对 typeahead 而言可接受，用户可以 Esc + 重打 query 快速重定位。
+
+   **真实 bug 来源**：Phase 1 Step 5 初版用了循环导航（`((idx + delta) % len + len) % len`），手动验收时用户反馈"滚到最后一条再按 ↓ 整个列表突然变了"—— 这是强信号表明循环语义不符合直觉。
+
 #### 6.5.3 Enter 行为决策表
 
 | 前置状态 | Enter 语义 | 依据 |
@@ -1113,7 +1135,11 @@ REPL 进入 prompt 模式
    - `description` 右对齐，截断到 `maxDescriptionWidth`
    - `tag`（如 `[workflow]`）在 description 左边
    - `icon` 在 displayText 左边
-3. **滚动窗口**：`OVERLAY_MAX_ITEMS = 8`（比 Claude Code 的 5 多 —— 自研 TUI 有更多空间），选中项居中
+3. **滚动窗口**（2026-04-16 refined）：`maxVisibleItems = 12`（初版 8，手动验收后调大：内建 17 条命令大部分能一屏显示），选中项居中。**恒定高度原则**：当 `total > maxVisibleItems`（可滚动时），面板恒定预留 2 个指示行 slot（top + bottom），内容随位置变化但**行数不变**，消除面板高度抖动。
+   - 可上滚时 top slot 显示 `↑ 上方还有 N 条`（量化剩余）；到顶时显示 `──── 顶部 ────`（边界标记）
+   - 可下滚时 bottom slot 显示 `↓ 下方还有 N 条`；到底时显示 `──── 到底啦 ────`
+   - 不可滚动时（`total ≤ maxVisibleItems`）完全不预留 slot（不浪费行）
+   - 此设计源自 Phase 1 Step 4 手动验收的真实抖动 bug：初版"有则渲染、无则省略"导致选中项从顶部→中部→底部时面板总高在 `N+1 ↔ N+2` 之间跳变
 4. **底部快捷键条**：根据当前 session 动态变化（有 suggestions 时显示完整；无时不显示）
 
 ### 7.4 Ghost Text 渲染
@@ -1342,10 +1368,19 @@ async function dispatchAccepted(result: AcceptResult): Promise<void> {
 }
 ```
 
-**典型归属**：
-- `local`：`/exit`、`/clear`、`/history`、`/config`、`/theme`
+**典型归属**（2026-04-16 基于 Phase 1 Step 5 实测重新分类）：
+- `local`：`/new`、`/clear`、`/exit`、`/help`、`/status`、`/me`、`/model`、`/usage`、`/context`、`/sessions`、`/skills`、`/journal`、`/people`、`/trust`、`/security`、`/compact`、`/name` —— 所有 info 查询 + 所有项目管理命令。**不产生 agent turn**。
 - `agent`：`/background`、`/btw`、`/queue` —— 本质是 system prompt 的便捷入口
-- `hybrid`：`/new`（本地 reset session state + 告诉 agent "用户开了新会话"）、`/model claude-opus-4-6`（本地改 provider 配置 + 告诉 agent "模型已切换"）
+- `hybrid`：**暂无内建命令使用**。这一档为将来"真的需要 agent 知道本地副作用才能正确推理"的场景保留（如 `/switch-workspace` 切工作区，后续对话里 agent 必须知道新 cwd），不开放给 info 类或项目管理类命令。
+
+**⚠️ 反模式警告（2026-04-16 实测教训）**：不要把 **info 查询命令** 设成 `hybrid`。初版 Phase 1 Step 5 里 `/model` 是 hybrid —— local handler 正确打印了 `Pro/MiniMaxAI/MiniMax-M2.5`，随后把 system message "用户查看了当前模型" 丢给 agent，**agent 完全不知道 runtime 模型是什么，凭训练记忆瞎编 "Claude 3.5 Sonnet"**。`/new` 同理：hybrid 的 system message 让 agent 生成了一段欢迎语，纯噪音。
+
+**判断规则**：只有满足**全部**三条的命令才有资格做 hybrid：
+1. 本地副作用改变了 agent 后续推理必须依赖的 runtime 状态（cwd / workspace / tool 能力范围等）
+2. 这个状态**无法** agent 从对话历史里推断出来
+3. 通知 agent 带来的增量价值 > 额外 token + 潜在幻觉风险
+
+不满足任何一条就用 `local`。`/new` 清历史后 agent 从空白开始，天然知道"新会话"；`/model` 改配置但 agent 本身看不见 runtime，告诉它只会诱导幻觉 —— 两条都不该做 hybrid。
 
 **这个分档比 OpenClaw 的 `executeLocal: boolean` 细**，比 Claude Code 的 `type: 'local' | 'local-jsx' | 'prompt'` 更贴场景。
 
@@ -1463,12 +1498,12 @@ class ArgumentProvider implements SuggestionProvider {
 
 #### Step 2 — `CommandRegistry` + `CommandDef` 类型（Core only）
 
-**目标**：在 `@zhixing/core` 下新增 `typeahead/` 模块，实现 `CommandRegistry` 和 `CommandDef` / `ArgSchema` 类型，注册所有内建命令。**不接入 REPL**。
+**目标**：在 `@zhixing/core` 下新增 `typeahead/` 模块，实现 `CommandRegistry` 和 `CommandDef` / `ArgSchema` 类型，**定义**一组参考性 builtin 命令清单。**不接入 REPL**。
 
 **交付物**：
 - `packages/core/src/typeahead/types.ts` —— `CommandDef` / `ArgSchema` / `CommandVisibility` / `RuntimeContext`
 - `packages/core/src/typeahead/registry.ts` —— `DefaultCommandRegistry`
-- `packages/core/src/typeahead/builtin-commands.ts` —— 所有内建命令的 literal list（参考 Hermes 的 `COMMAND_REGISTRY` 精神）
+- `packages/core/src/typeahead/builtin-commands.ts` —— **命令目录范例**（见 §5.8 refinement）：文件存在、测试和设计引用它，但**不作为 Step 5 REPL 的运行时注册源**
 - `packages/core/src/typeahead/usage-tracker.ts` —— `UsageTracker` + 磁盘持久化
 - `packages/core/src/typeahead/__tests__/registry.test.ts` —— ≥ 15 条
 - `packages/core/src/typeahead/__tests__/usage-tracker.test.ts` —— ≥ 10 条
@@ -1476,7 +1511,7 @@ class ArgumentProvider implements SuggestionProvider {
 **验收**：
 - 所有测试全绿
 - 完全不依赖任何 CLI / TTY / UI 代码
-- `builtin-commands.ts` 至少包含 10 个命令（`/new /reset /help /status /model /elevated /fast /verbose /exit /clear`）
+- `builtin-commands.ts` 至少包含 10 个命令（`/new /reset /help /status /model /elevated /fast /verbose /exit /clear`）作为范例 —— 实际 REPL 里用哪些命令在 Step 5 决定
 - 现有 823+ 测试无回归
 
 **代码量估计**：~500 行
@@ -1556,21 +1591,24 @@ class ArgumentProvider implements SuggestionProvider {
 
 **交付物**：
 - `packages/cli/src/input-buffer.ts` —— 持有 draft/cursor/历史/submit 事件的类
-- `packages/cli/src/repl.ts` —— 改造：优先走 typeahead 路径
+- `packages/cli/src/typeahead-input.ts` —— `readInputLine()` 神经中枢（broker + panel + buffer + dispatcher 的整帧编排）
 - `packages/cli/src/command-dispatcher.ts` —— 处理 `local`/`agent`/`hybrid`
-- `packages/cli/src/__tests__/repl-typeahead-integration.test.ts` —— 集成测试 ≥ 8 条
+- `packages/cli/src/repl.ts` —— 改造：在 REPL bootstrap 持有**本地 `REPL_COMMANDS` 表**（见 §5.8 refinement），循环注册到 tRegistry + dispatcher handler；feature flag 走 typeahead 路径，回退走 `rl.question`
+- `packages/cli/src/__tests__/input-buffer.test.ts` + `command-dispatcher.test.ts` + `typeahead-input.test.ts` —— 合计 ≥ 50 条（Phase 1 实测落地 55 条）
 
 **关键测试场景**：
 - Feature flag off：旧路径正常
 - Feature flag on + 无 trigger：draft 正常进 agent loop
-- Feature flag on + `/new`：local handler 跑，agent 收到 system message
+- Feature flag on + `/new`：**local handler 跑，不产生 agent turn**（2026-04-16 refinement —— 见 §9.2 反模式警告）
 - Feature flag on + `/unknown`：suggestions 空 + 提交后 agent loop 拿到 "unknown command" 错误
 - 用户打 `/` 然后 Esc：draft 变回空（Esc 清 trigger token 还是清整个 draft 需要决定，默认清 trigger token）
 - 提交时 typeahead 还有 suggestions → Enter 被吞掉（guard）
 
-**手动验收**：`pnpm run repl` 进 REPL，打 `/` 看到菜单，选命令能执行。
+**REPL 命令表约定**（2026-04-16 Step 5 确立）：`packages/cli/src/repl.ts` 里的 `REPL_COMMANDS` 是本地 readonly 数组，每条 `{ name, aliases?, description, category, execution: "local", legacyKey }`。bootstrap 循环把每条 register 到 tRegistry + 用 legacy handler 绑定 dispatcher。新增命令只需要加一行。**不要**在 REPL 里调 `registerBuiltinCommands(tRegistry)`，避免注册了没 handler 的幽灵命令（见 §5.8 refinement）。
 
-**代码量估计**：~400 行
+**手动验收**：`pnpm run repl` 进 REPL，打 `/` 看到菜单，选命令能执行。`/model` / `/new` 不产生 agent 回复。
+
+**代码量估计**：~400 行（Phase 1 实测 ~1000 行含测试）
 
 ---
 
@@ -1798,7 +1836,7 @@ class ArgumentProvider implements SuggestionProvider {
 1. **触发字符集**：仅 `/` 和 `@`。不引入 `:emoji` / `!bash`。有明确用户请求再加。
 2. **空 `/` 默认聚焦**：MRU 最顶（详见 §6.5 零键执行原则）。不采用字母序。
 3. **Feature flag `ZHIXING_INPUT_TYPEAHEAD`**：**默认 on**。Phase 1 交付即启用，`ZHIXING_INPUT_TYPEAHEAD=legacy` 回退到旧 `readline` 路径作应急兜底。
-4. **`hybrid` 命令执行顺序**：**先 local 再 agent**。local 副作用完成后再把结构化的 system message 发给 agent（"用户刚刚做了 X，当前状态是 Y"）。Agent 永远看到 "已发生" 的事实，不是 "即将发生" 的意图。
+4. **`hybrid` 命令执行顺序**：**先 local 再 agent**（语义层面始终成立）。local 副作用完成后再把结构化的 system message 发给 agent。Agent 永远看到 "已发生" 的事实，不是 "即将发生" 的意图。**但**（2026-04-16 refinement）：`hybrid` 的准入门槛被收紧 —— 只有"agent 必须知道新 runtime 状态才能正确推理"的命令才能用 hybrid。Info 查询 / 项目管理类全部下沉到 `local`。理由：info 查询走 hybrid 会诱导 agent 对它无法感知的 runtime 状态产生幻觉（见 §9.2 反模式警告）。Phase 1 里程碑里所有 17 条内建命令都是 `local`，`hybrid` 这一档暂时没有占用者 —— 这是**合理的**，不是架构过度设计。
 5. **`.zhixing/commands/*.md` frontmatter**：**纯声明**（YAML frontmatter + body 作 prompt 模板）。不支持 `handler:` 指向 JS 文件。JS handler 能力留给未来的 plugin SDK 专项 spec。
 6. **Mid-input trigger 对 bash mode**：**关闭**。bash mode 里 `/` 是 Unix 路径分隔符，开 mid-input 会误判。Step 9 只对 prompt mode 启用。
 7. **参数 schema 的 required 字段**：**支持**。`ArgumentProvider` 检测到必填参数未填时，Enter 不执行，面板显示 `<name> is required` 错误态。

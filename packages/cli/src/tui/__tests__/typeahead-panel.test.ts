@@ -232,12 +232,13 @@ afterEach(() => {
 // ─── computeWindow 纯函数 ───
 
 describe("computeWindow", () => {
-  it("空列表返回空窗口", () => {
+  it("空列表返回空窗口 + isScrollable=false", () => {
     expect(computeWindow(0, 0, 8)).toEqual({
       start: 0,
       end: 0,
       showTopScroll: false,
       showBottomScroll: false,
+      isScrollable: false,
     });
   });
 
@@ -247,16 +248,24 @@ describe("computeWindow", () => {
       end: 0,
       showTopScroll: false,
       showBottomScroll: false,
+      isScrollable: false,
     });
   });
 
-  it("total <= maxVisible 时返回全部（无滚动条）", () => {
+  it("total <= maxVisible 时返回全部 + isScrollable=false", () => {
     expect(computeWindow(5, 2, 8)).toEqual({
       start: 0,
       end: 5,
       showTopScroll: false,
       showBottomScroll: false,
+      isScrollable: false,
     });
+  });
+
+  it("total > maxVisible 时 isScrollable=true（任何选中位置）", () => {
+    for (const sel of [0, 5, 10, 19]) {
+      expect(computeWindow(20, sel, 5).isScrollable).toBe(true);
+    }
   });
 
   it("选中项在开头时贴顶（底部 more...）", () => {
@@ -390,8 +399,8 @@ describe("renderSessionLines", () => {
     const opts: RenderOptions = { ...defaultRenderOpts, maxVisibleItems: 5 };
     const lines = renderSessionLines(state, opts);
     const joined = stripAnsi(lines.join("\n"));
-    expect(joined).toContain("↑ more");
-    expect(joined).toContain("↓ more");
+    expect(joined).toMatch(/↑ 上方还有 \d+ 条/);
+    expect(joined).toMatch(/↓ 下方还有 \d+ 条/);
   });
 
   it("CJK 命令名正常显示（不破坏行宽）", () => {
@@ -403,6 +412,57 @@ describe("renderSessionLines", () => {
     const joined = stripAnsi(lines.join("\n"));
     expect(joined).toContain("/提交");
     expect(joined).toContain("创建一个 commit");
+  });
+
+  it("scrollable 列表：顶/中/底三个选中位置的总行数相等（视觉稳定性）", () => {
+    // 真实 bug 回归：total > maxVisible 时，顶部 showTop=false，中部两个都 true，
+    // 底部 showBottom=false。旧实现"有则渲染"导致总行数在三种状态间跳变
+    // (N+1, N+2, N+1)，用户按 ↓ 导航时整个面板抖动。
+    //
+    // 修复：isScrollable 恒定预留 2 个 slot，slot 无内容时空白渲染，
+    // 三种状态总行数相等。
+    const suggestions = Array.from({ length: 20 }, (_, i) =>
+      makeSuggestion(`cmd${i}:b`, `/cmd${i}`),
+    );
+    const opts: RenderOptions = { ...defaultRenderOpts, maxVisibleItems: 5 };
+
+    const topState = makeState({ suggestions, selectedIndex: 0 });
+    const midState = makeState({ suggestions, selectedIndex: 10 });
+    const bottomState = makeState({ suggestions, selectedIndex: 19 });
+
+    const topLines = renderSessionLines(topState, opts);
+    const midLines = renderSessionLines(midState, opts);
+    const bottomLines = renderSessionLines(bottomState, opts);
+
+    // 三个状态的总行数必须完全相等（顶框 + 2 指示行 slot + maxVisible 候选 + 底框 + hint）
+    expect(topLines.length).toBe(midLines.length);
+    expect(midLines.length).toBe(bottomLines.length);
+
+    // 顶部状态：top slot 是"顶部"边界标记（到顶了），bottom slot 量化下方
+    const topJoined = stripAnsi(topLines.join("\n"));
+    expect(topJoined).toContain("顶部");
+    expect(topJoined).toMatch(/↓ 下方还有 \d+ 条/);
+    // 中部：两个 slot 都是量化内容
+    const midJoined = stripAnsi(midLines.join("\n"));
+    expect(midJoined).toMatch(/↑ 上方还有 \d+ 条/);
+    expect(midJoined).toMatch(/↓ 下方还有 \d+ 条/);
+    // 底部：top 量化上方，bottom "到底啦"
+    const bottomJoined = stripAnsi(bottomLines.join("\n"));
+    expect(bottomJoined).toMatch(/↑ 上方还有 \d+ 条/);
+    expect(bottomJoined).toContain("到底啦");
+  });
+
+  it("非 scrollable 列表：不预留指示 slot（节省行）", () => {
+    const suggestions = Array.from({ length: 3 }, (_, i) =>
+      makeSuggestion(`cmd${i}:b`, `/cmd${i}`),
+    );
+    const opts: RenderOptions = { ...defaultRenderOpts, maxVisibleItems: 8 };
+    const lines = renderSessionLines(
+      makeState({ suggestions, selectedIndex: 0 }),
+      opts,
+    );
+    const joined = stripAnsi(lines.join("\n"));
+    expect(joined).not.toContain("more");
   });
 
   it("同一 state 重复调用产生相同输出（确定性）", () => {

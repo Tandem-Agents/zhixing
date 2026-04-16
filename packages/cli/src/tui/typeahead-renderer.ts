@@ -44,7 +44,7 @@ export const TERMINAL_TYPEAHEAD_CAPABILITIES: TypeaheadRendererCapabilities = {
   supportsLoadingState: true,
   supportsRichItem: true,
   supportsMultiColumn: true,
-  maxVisibleItems: 8,
+  maxVisibleItems: 12,
 };
 
 // ─── Renderer 选项 ───

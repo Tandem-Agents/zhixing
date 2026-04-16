@@ -139,6 +139,19 @@ export interface VisibleWindow {
   readonly end: number; // exclusive
   readonly showTopScroll: boolean;
   readonly showBottomScroll: boolean;
+  /**
+   * 列表长度超过 maxVisible —— 此时 renderer 应**总是预留两个指示行 slot**
+   * （top + bottom），slot 为 false 时渲染为留白。
+   *
+   * 这是为了修 §7.x 的视觉抖动 bug：选中项从顶部→中部→底部时，
+   * showTopScroll/showBottomScroll 会在 {F,T} / {T,T} / {T,F} 之间切换，
+   * 若 renderer 按"有就渲染、没就省略"的朴素策略工作，面板总高会在
+   * 13↔14 行之间跳变，用户视觉上看到整个面板"抖动"。
+   *
+   * 正确 UX：total > maxVisible 时 slot 恒定 = 2，内容按 flag 决定是
+   * "↑ more…" / "↓ more…" 还是空白行；切换时仅行内容变化，总高不变。
+   */
+  readonly isScrollable: boolean;
 }
 
 /**
@@ -151,6 +164,7 @@ export interface VisibleWindow {
  *   - `end - start <= maxVisible`
  *   - `start <= selectedIndex < end`（前提是 total > 0 且 selectedIndex 合法）
  *   - `start >= 0 && end <= total`
+ *   - `isScrollable === (total > maxVisible)`
  */
 export function computeWindow(
   total: number,
@@ -158,7 +172,13 @@ export function computeWindow(
   maxVisible: number,
 ): VisibleWindow {
   if (total <= 0 || maxVisible <= 0) {
-    return { start: 0, end: 0, showTopScroll: false, showBottomScroll: false };
+    return {
+      start: 0,
+      end: 0,
+      showTopScroll: false,
+      showBottomScroll: false,
+      isScrollable: false,
+    };
   }
   if (total <= maxVisible) {
     return {
@@ -166,6 +186,7 @@ export function computeWindow(
       end: total,
       showTopScroll: false,
       showBottomScroll: false,
+      isScrollable: false,
     };
   }
   const clampedSel = Math.max(0, Math.min(selectedIndex, total - 1));
@@ -183,6 +204,7 @@ export function computeWindow(
     end,
     showTopScroll: start > 0,
     showBottomScroll: end < total,
+    isScrollable: true,
   };
 }
 
@@ -259,9 +281,21 @@ export function renderSessionLines(
   // ── 窗口计算 ──
   const win = computeWindow(count, state.selectedIndex, maxVisibleItems);
 
-  if (win.showTopScroll) {
+  // 滚动指示行：scrollable 时**恒定预留 2 个 slot**（顶+底），内容随窗口位置
+  // 变化但行数不变，消除面板高度抖动。文案策略：
+  //
+  //   - 可滚动：`↑ 上方还有 N 条` / `↓ 下方还有 N 条`（量化剩余数量）
+  //   - 到边了：`──── 顶部 ────` / `──── 到底啦 ────`（明确的中文边界提示）
+  //
+  // 非 scrollable（total ≤ maxVisible）时完全不预留 slot —— 不浪费行。
+  if (win.isScrollable) {
+    const aboveCount = win.start;
+    const topContent =
+      aboveCount > 0
+        ? `↑ 上方还有 ${aboveCount} 条`
+        : buildEdgeMarker("顶部", innerWidth - 4);
     lines.push(
-      `${theme.border("│")}  ${theme.hint(clampLine("↑ more…", innerWidth - 2))}`,
+      `${theme.border("│")}  ${theme.hint(clampLine(topContent, innerWidth - 2))}`,
     );
   }
 
@@ -295,9 +329,14 @@ export function renderSessionLines(
     lines.push(clampLine(line, frameWidth));
   }
 
-  if (win.showBottomScroll) {
+  if (win.isScrollable) {
+    const belowCount = count - win.end;
+    const bottomContent =
+      belowCount > 0
+        ? `↓ 下方还有 ${belowCount} 条`
+        : buildEdgeMarker("到底啦", innerWidth - 4);
     lines.push(
-      `${theme.border("│")}  ${theme.hint(clampLine("↓ more…", innerWidth - 2))}`,
+      `${theme.border("│")}  ${theme.hint(clampLine(bottomContent, innerWidth - 2))}`,
     );
   }
 
@@ -309,6 +348,22 @@ export function renderSessionLines(
   lines.push(`  ${theme.hint(clampLine(hint, frameWidth - 2))}`);
 
   return lines;
+}
+
+/**
+ * 构造边界标记，如 `──── 顶部 ────`。左右破折号根据可用宽度尽量对称铺开。
+ * 中文标签（`顶部` / `到底啦`）按 stringWidth 算显示宽度。
+ *
+ * 参数 targetWidth 是目标可见宽度（不含边框字符，典型值 innerWidth - 4）。
+ * 宽度太小时至少保证两侧各有 2 个破折号。
+ */
+function buildEdgeMarker(label: string, targetWidth: number): string {
+  const labelSegment = ` ${label} `;
+  const labelWidth = stringWidth(labelSegment);
+  const dashBudget = Math.max(4, targetWidth - labelWidth);
+  const leftDashes = Math.floor(dashBudget / 2);
+  const rightDashes = dashBudget - leftDashes;
+  return `${"─".repeat(leftDashes)}${labelSegment}${"─".repeat(rightDashes)}`;
 }
 
 /** 根据 provider id 给标题一个友好名字 */
@@ -346,7 +401,7 @@ export function createTypeaheadPanel(
     ...defaultTypeaheadTheme,
     ...(options.theme ?? {}),
   };
-  const maxVisibleItems = options.maxVisibleItems ?? 8;
+  const maxVisibleItems = options.maxVisibleItems ?? 12;
   const minWidth = options.minWidth ?? 40;
   const maxWidth = options.maxWidth ?? 80;
 

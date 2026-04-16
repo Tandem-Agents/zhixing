@@ -341,8 +341,16 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
     if (!session) return;
     const len = session.state.suggestions.length;
     if (len === 0) return;
-    // 循环导航（末尾下一个回到首项）
-    const newIndex = ((session.state.selectedIndex + delta) % len + len) % len;
+    // Clamp 语义（非循环）：末尾 ↓ 无反应，首项 ↑ 无反应。
+    //
+    // Why: 循环导航会让窗口从 `[last-maxVisible, last]` 跳到 `[0, maxVisible]`，
+    // 列表内容整个翻转，用户按 ↓ 一次看到的不是"下一项"而是"完全不同的一个列表"
+    // —— 视觉上极其突兀。VSCode / Sublime / 主流 IDE 的 typeahead 都是 clamp 而
+    // 非 circular，符合"滚到头就到头"的物理直觉。
+    const newIndex = Math.max(
+      0,
+      Math.min(session.state.selectedIndex + delta, len - 1),
+    );
     if (newIndex === session.state.selectedIndex) return;
     this.setSessionState(session, {
       ...session.state,
