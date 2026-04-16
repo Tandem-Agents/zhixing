@@ -27,6 +27,30 @@
 | `<project>/zhixing.config.json` | 项目级 provider/model | ✓ |
 | `<project>/.zhixing/config.local.json` | 个人覆盖（未来） | ✗ |
 
+### 配置 Schema
+
+```typescript
+interface ZhixingConfig {
+  defaultProvider?: string;
+  defaultModel?: string;
+  providers?: Record<string, ProviderConfig>;
+  agent?: AgentConfig;          // displayName 等
+  workspace?: WorkspaceConfig;  // 工作区配置
+}
+
+interface WorkspaceConfig {
+  /**
+   * 工作区根目录——智能体在此范围内的文件操作被视为低影响。
+   * 这是用户级偏好（知行是个人助手，不只是开发工具），主要在全局配置中设定。
+   * 全局配置：必须是绝对路径。
+   * 目录级配置：可用相对路径（相对于配置文件所在目录），面向开发者的可选覆盖。
+   */
+  root: string;
+  /** 工作区内仍需保护的路径（追加到内置保护路径） */
+  protectedPaths?: string[];
+}
+```
+
 ### 关键设计点
 
 1. **首次运行自动生成**全局配置模板（`~/.zhixing/config.json`）
@@ -35,6 +59,9 @@
 4. **`ZHIXING_CONFIG_PATH`** 环境变量可覆盖全局配置路径
 5. **缺失文件 = 跳过**，不报错
 6. **项目配置放根目录** `zhixing.config.json`，可见可发现
+7. **workspace 是用户级偏好**：主要在全局配置中设定（知行是个人助手，workspace 跟着人走不跟着目录走）。目录级配置可选覆盖，面向开发者
+8. **workspace 优先级**：`CLI --workspace` > 目录级配置 > 全局配置（主路径） > `cwd` 兜底。配置文件中设定的工作区不会被运行位置覆盖
+9. **workspace.root 路径解析**：全局配置必须是绝对路径；目录级配置可用相对路径（相对于配置文件所在目录）
 
 ## 理由
 
@@ -67,6 +94,7 @@
 - playground 和测试代码消除硬编码 provider/model
 - 用户首次使用时自动获得配置模板，无需阅读文档即可上手
 - 未来的 CLI 命令可直接读取配置系统
+- `workspace` 字段为安全系统（ADR-006）提供配置驱动的工作区确定机制，取代硬编码 `process.cwd()`。详见 [安全系统设计方案 §3.4](../../specifications/security-system.md)
 
 ## 引用
 

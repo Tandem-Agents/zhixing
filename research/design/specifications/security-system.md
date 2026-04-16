@@ -722,49 +722,218 @@ class BoundaryImpactClassifier implements OperationClassifier {
 
 ### 3.4 工作区配置
 
+#### 设计前提：知行是个人助手，不是开发工具
+
+工作区是"用户信任智能体在哪里操作"的边界。这是一个**用户级偏好**——它跟着人走，不跟着某个代码仓库走。用户整理照片、管理文档、处理下载文件时都需要工作区，这些场景没有"项目"概念。
+
+因此，**工作区的主要配置位置是全局配置（`~/.zhixing/config.json`）**，不是目录级配置。
+
+#### 配置 schema
+
 ```typescript
-// zhixing.config.json
+// ZhixingConfig 扩展（packages/providers/src/types.ts）
+interface ZhixingConfig {
+  // ...existing fields...
+
+  workspace?: {
+    /**
+     * 工作区目录——智能体在此范围内的文件操作被视为低影响。
+     * 全局配置中必须使用绝对路径。
+     * 目录级配置中可使用相对路径（相对于配置文件所在目录）。
+     * 未配置时：CLI 交互模式回退到 cwd，其他模式为 null。
+     */
+    root: string;
+    /** 工作区内仍需保护的路径（追加到内置保护路径之上） */
+    protectedPaths?: string[];
+  };
+}
+```
+
+**主路径——全局配置**（`~/.zhixing/config.json`）：
+
+```json
 {
   "workspace": {
-    // 工作区目录，默认为配置文件所在目录
+    "root": "D:\\Work"
+  }
+}
+```
+
+用户配一次，无论在哪里启动 zhixing、通过微信/钉钉触发、还是通过 API 调用，工作区都指向 `D:\Work`。这是大多数用户的唯一需要。
+
+**可选覆盖——目录级配置**（`<dir>/zhixing.config.json`）：
+
+```json
+{
+  "workspace": {
     "root": ".",
-    // 工作区内仍需保护的路径（追加到内置保护路径之上）
     "protectedPaths": [".env", ".env.*", "secrets/"]
   }
 }
 ```
 
-工作区的确定规则：
+面向开发者：在特定代码仓库中运行 zhixing 时，该目录的配置覆盖全局配置。普通用户不需要知道这一层的存在。
 
-| 启动方式 | 工作区 | 说明 |
-|---------|--------|------|
-| `zhixing`（在某目录下） | 当前目录 | 最常见的用法 |
-| `zhixing --workspace /path` | 指定路径 | 显式指定 |
-| 通过微信/钉钉触发 | `null` | 无工作区，所有文件写入都是 `external` |
-| 通过 API 调用 | 配置指定 | 由 API 调用者决定 |
+#### 优先级：配置优先于运行位置
+
+```
+CLI --workspace  >  目录级配置  >  全局配置（主路径）  >  cwd 兜底
+   (临时覆盖)      (开发者可选)    (用户偏好)            (未配置时)
+```
+
+| 优先级 | 来源 | 说明 |
+|-------|------|------|
+| 1（最高） | `zhixing --workspace /path` | 临时覆盖，本次运行有效 |
+| 2 | 目录级 `zhixing.config.json` → `workspace.root` | 可选，面向开发者的目录级覆盖 |
+| 3 | **全局 `~/.zhixing/config.json` → `workspace.root`** | **主路径——大多数用户在这里配置** |
+| 4（最低） | `process.cwd()` | 兜底——仅在上述三层都未配置时生效 |
+
+**关键设计**：`cwd` 是兜底而非默认。用户在全局配置中设定了工作区后，无论在哪个目录运行 zhixing、从哪个渠道触发，工作区都指向配置的地址，不会被运行位置覆盖。
 
 ```typescript
-function createClassifiers(context: LaunchContext): CompositeClassifier {
-  const composite = new CompositeClassifier();
-  const workspace = context.workspace ?? null;
+function resolveWorkspace(
+  config: ZhixingConfig,
+  options: LaunchOptions,
+): { path: string | null; source: WorkspaceSource } {
+  // 1. CLI 显式指定
+  if (options.workspace) {
+    return { path: path.resolve(options.workspace), source: 'cli' };
+  }
 
-  // 上下文分类器：需要运行时分析的工具
-  const fsClassifier = new FileSystemClassifier(workspace);
-  composite.registerContext('read', fsClassifier);
-  composite.registerContext('write', fsClassifier);
-  composite.registerContext('edit', fsClassifier);
-  composite.registerContext('bash', new ShellClassifier());
+  // 2. 配置文件（目录级 > 全局，由 loadConfig 合并后的结果）
+  if (config.workspace?.root) {
+    const root = config.workspace.root;
+    const resolved = path.isAbsolute(root)
+      ? root
+      : path.resolve(options.configDir, root);
+    return { path: resolved, source: options.configSource };
+  }
 
-  // 所有其他工具使用边界影响分类器（基于工具的边界声明）
-  composite.setBoundaryClassifier(new BoundaryImpactClassifier(context.toolRegistry));
+  // 3. 兜底：当前工作目录（仅 CLI 交互模式有意义）
+  if (options.sessionType === 'interactive') {
+    return { path: process.cwd(), source: 'cwd-fallback' };
+  }
 
-  return composite;
+  // 4. 消息触发 / API 调用且无配置 → 无工作区
+  return { path: null, source: 'none' };
 }
+
+type WorkspaceSource = 'cli' | 'directory-config' | 'global-config' | 'cwd-fallback' | 'none';
+```
+
+**注意**：`resolveWorkspace` 同时返回路径和来源。来源信息用于：
+- 智能体回答"我的工作区在哪"时展示来源
+- 修改工作区时定位应该改哪个配置文件
+
+#### 智能体对工作区的感知与修改
+
+**感知**：智能体知道**当前生效的工作区**及其来源。用户问"我的工作区在哪"时，智能体回答：
+
+> 当前工作区：D:\Work（来源：全局配置）
+
+或
+
+> 当前工作区：E:\Dev\my-project（来源：目录级配置）
+
+工作区路径和来源通过系统提示注入到智能体上下文中。
+
+**修改**：智能体帮用户修改**全局配置**（`~/.zhixing/config.json`）中的 `workspace.root` 字段。因为对个人助手来说，workspace 是用户级偏好——智能体不应该去某个随机目录创建 `zhixing.config.json`。
+
+此操作有特殊安全约束：
+
+> **工作区修改是受保护操作——始终需要用户确认，不可跳过。**
+>
+> 工作区 = 信任边界。改变工作区等于改变"哪些操作免确认"的范围，这是安全系统最根本的参数之一。即使用户已创建"允许写入 config.json"的权限规则，修改 workspace 字段仍然触发确认。
+
+实现方式：修改工作区通过专用的命令/工具路径完成，该路径强制走确认流程，不经过通用的文件写入权限匹配。
+
+**生效时机**：修改后下次会话启动时生效。SecurityPipeline 是会话级单例，运行时不重建。智能体修改后提示用户："已更新工作区配置，下次启动时生效。"
+
+#### 路径解析规则
+
+| 配置层 | 允许的路径格式 | 解析锚点 |
+|-------|-------------|---------|
+| **全局配置**（主路径） | **仅绝对路径** | —（无锚点，加载时校验，相对路径报警告） |
+| 目录级配置（可选） | 相对路径或绝对路径 | 配置文件所在目录 |
+| CLI `--workspace` | 相对路径或绝对路径 | 当前工作目录 `cwd` |
+
+路径解析后，必须经过 `PathGuard.isWithinWorkspace` 的 `realpath` 检查——防止符号链接逃逸。
+
+#### 默认工作区
+
+首次启动时，如果全局配置中没有 `workspace.root`，系统自动创建默认工作区并写入配置。用户零配置即可开始使用。
+
+**默认路径（按平台）**：
+
+```typescript
+function getDefaultWorkspacePath(): string {
+  const WORKSPACE_DIR_NAME = 'ZhixingWorkspace';
+
+  if (process.platform === 'win32') {
+    // Windows：优先 D 盘根目录（C 盘空间管理是常见痛点）
+    // 仅在 D 盘存在时使用，否则回退到用户主目录
+    if (fs.existsSync('D:\\')) {
+      return path.join('D:\\', WORKSPACE_DIR_NAME);
+    }
+    return path.join(os.homedir(), WORKSPACE_DIR_NAME);
+  }
+
+  // macOS / Linux：用户主目录
+  return path.join(os.homedir(), WORKSPACE_DIR_NAME);
+}
+```
+
+| 平台 | 默认路径 | 说明 |
+|------|---------|------|
+| Windows（有 D 盘） | `D:\ZhixingWorkspace` | 避免占用 C 盘空间 |
+| Windows（无 D 盘） | `C:\Users\<user>\ZhixingWorkspace` | 保底 |
+| macOS | `~/ZhixingWorkspace` | 用户主目录 |
+| Linux | `~/ZhixingWorkspace` | 用户主目录 |
+
+**为什么这样选**：
+- **可见**：不是隐藏目录，文件管理器里一眼看到——工作区是用户的空间，不是知行的内部数据
+- **辨识度**：`ZhixingWorkspace` 命名明确，不会和其他文件夹混淆
+- **不在 `~/.zhixing/` 里**：`~/.zhixing/` 是知行的内部数据目录（配置、权限、日志），概念不同
+- **不在 Documents 里**：Documents 可能被 OneDrive/iCloud 同步，智能体频繁读写会触发大量同步
+
+#### 启动时的工作区展示
+
+不同启动场景下的用户提示：
+
+**首次启动**（全局配置中无 workspace 字段）——创建目录 + 写入配置 + 解释：
+
+```
+✨ 首次启动
+
+  工作区已创建：D:\ZhixingWorkspace
+  常规文件读写在此目录内无需逐次确认，危险操作仍会询问你。
+
+  如需修改，告诉我"把工作区改到 xxx"即可。
+```
+
+**正常启动**（工作区已配置且目录存在）——一行简要信息，不打扰：
+
+```
+  工作区：D:\ZhixingWorkspace
+```
+
+**工作区目录不存在**（配置了路径但目录被删除/移动）——警告 + 重建：
+
+```
+⚠ 工作区目录不存在：D:\ZhixingWorkspace
+  已重新创建。如需更换位置，告诉我即可。
+```
+
+**全局配置存在但缺少 workspace 字段**（用户手动删除了配置项）——补上默认值 + 创建目录：
+
+```
+  工作区未配置，已设为默认：D:\ZhixingWorkspace
+  如需修改，告诉我即可。
 ```
 
 ### 3.5 没有工作区上下文时的行为
 
-知行不总是在"项目"里运行。当用户通过微信/钉钉对话触发智能体时，可能没有任何工作区上下文。此时：
+知行不总是有工作区。当用户通过微信/钉钉对话触发智能体且未在全局配置中设定工作区时，没有任何工作区上下文。此时：
 
 - 文件系统分类器中 `workspace = null`，所有文件写入都分类为 `external`
 - Shell 分类器正常工作（安全命令仍然自动放行）
