@@ -397,8 +397,9 @@ export function renderError(error: unknown): void {
 export async function renderWelcome(options: {
   model: string;
   workspace?: { path: string | null; source: string };
+  workspaceDirStatus?: string;
 }): Promise<void> {
-  const { model, workspace } = options;
+  const { model, workspace, workspaceDirStatus } = options;
   const { displayName } = getAgentIdentity();
 
   if (!process.stdout.isTTY) {
@@ -427,12 +428,43 @@ export async function renderWelcome(options: {
   await sleep(60);
   console.log(`    ${chalk.dim(model)}`);
 
-  // Phase 4: 工作区信息
+  // Phase 4: 工作区信息（按场景区分）
   if (workspace?.path) {
-    const sourceLabel = formatWorkspaceSource(workspace.source);
-    console.log(`    ${chalk.dim(`workspace: ${workspace.path}`)}${sourceLabel}`);
+    renderWorkspaceStatus(workspace.path, workspace.source, workspaceDirStatus);
   }
   console.log();
+}
+
+/**
+ * 按启动场景渲染工作区状态：
+ * - created：首次启动，工作区刚创建
+ * - exists：正常启动，一行简要
+ * - skipped（有路径）：目录创建失败，警告
+ * - cwd-fallback：无配置，使用当前目录
+ */
+function renderWorkspaceStatus(
+  wsPath: string,
+  source: string,
+  dirStatus?: string,
+): void {
+  if (dirStatus === "created") {
+    // 首次创建
+    console.log(`    ${chalk.green(`workspace: ${wsPath}`)}`);
+    console.log(`    ${chalk.dim("工作区已创建。常规文件读写在此目录内无需逐次确认。")}`);
+    console.log(`    ${chalk.dim('如需修改，告诉我「把工作区改到 xxx」即可。')}`);
+    return;
+  }
+
+  if (dirStatus === "skipped" && source !== "cwd-fallback" && source !== "none") {
+    // 配置了路径但创建失败
+    console.log(`    ${chalk.yellow(`⚠ workspace: ${wsPath}`)}`);
+    console.log(`    ${chalk.yellow("工作区目录不存在且无法创建，请检查路径或权限。")}`);
+    return;
+  }
+
+  // 正常启动 / cwd-fallback
+  const sourceLabel = formatWorkspaceSource(source);
+  console.log(`    ${chalk.dim(`workspace: ${wsPath}`)}${sourceLabel}`);
 }
 
 /** 将工作区来源转为简短的中文标注 */

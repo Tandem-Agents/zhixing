@@ -34,9 +34,11 @@ import {
 } from "@zhixing/core";
 import {
   createProviderFromConfig,
+  ensureWorkspaceDir,
   getGlobalConfigPath,
   resolveWorkspace,
   type ResolvedWorkspace,
+  type WorkspaceDirStatus,
 } from "@zhixing/providers";
 import {
   createReadTool,
@@ -87,6 +89,8 @@ export interface AgentSession {
   readonly confirmationBroker: IConfirmationBroker;
   /** 解析后的工作区信息（路径 + 来源），供启动展示和 RuntimeContext 使用 */
   readonly resolvedWorkspace: ResolvedWorkspace;
+  /** 工作区目录状态（exists/created/skipped），供启动展示区分场景 */
+  readonly workspaceDirStatus: WorkspaceDirStatus;
 }
 
 export interface ForceCompactResult {
@@ -163,6 +167,9 @@ export async function createSession(options: {
     sessionType,
   });
 
+  // 确保工作区目录存在（首次启动自动创建，目录被删除则重建）
+  const workspaceDirStatus = ensureWorkspaceDir(workspace);
+
   const tools = [
     createReadTool(),
     createWriteTool(),
@@ -230,6 +237,7 @@ export async function createSession(options: {
     permissionStore: persistentStore,
     confirmationBroker,
     resolvedWorkspace: workspace,
+    workspaceDirStatus,
 
     get calibrationFactor(): number {
       return estimator.calibrationFactor;

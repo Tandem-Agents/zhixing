@@ -24,6 +24,7 @@ export { createOpenAICompatibleProvider } from "./adapters/openai-compatible.js"
 
 // 配置加载
 export {
+  ensureWorkspaceDir,
   getDefaultWorkspacePath,
   getGlobalConfigDir,
   getGlobalConfigPath,
@@ -31,7 +32,7 @@ export {
   loadConfig,
   resolveWorkspace,
 } from "./config-loader.js";
-export type { ResolvedWorkspace, WorkspaceSource } from "./config-loader.js";
+export type { ResolvedWorkspace, WorkspaceDirStatus, WorkspaceSource } from "./config-loader.js";
 
 // 一站式工厂
 export {

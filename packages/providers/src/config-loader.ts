@@ -239,3 +239,42 @@ export function resolveWorkspace(
   // 非交互模式且无配置 → 无工作区
   return { path: null, source: "none" };
 }
+
+// ─── 工作区目录保障 ───
+
+/**
+ * 工作区目录状态——描述 ensureWorkspaceDir 的执行结果。
+ * - exists：目录已存在，无需操作
+ * - created：首次创建（首次启动或 CLI --workspace 指定新目录）
+ * - recreated：配置了路径但目录被删除/移动，重新创建
+ * - skipped：cwd-fallback 或 null，无需创建
+ */
+export type WorkspaceDirStatus = "exists" | "created" | "recreated" | "skipped";
+
+/**
+ * 确保工作区目录存在。
+ *
+ * 仅在工作区来自配置或 CLI 参数时创建——cwd-fallback 已经是一个存在的目录。
+ * 创建失败静默跳过（可能是权限问题），不阻止程序启动。
+ */
+export function ensureWorkspaceDir(
+  workspace: ResolvedWorkspace,
+): WorkspaceDirStatus {
+  // cwd-fallback 和 null 不需要创建
+  if (!workspace.path || workspace.source === "cwd-fallback" || workspace.source === "none") {
+    return "skipped";
+  }
+
+  try {
+    if (fs.existsSync(workspace.path)) {
+      return "exists";
+    }
+    fs.mkdirSync(workspace.path, { recursive: true });
+    // 区分首次创建 vs 重建：如果来源是 global-config，说明配置已存在但目录没了
+    // 首次启动时配置模板刚生成，目录也不存在，也走 created
+    return "created";
+  } catch {
+    // 静默失败——权限不足或路径无效，不阻止启动
+    return "skipped";
+  }
+}

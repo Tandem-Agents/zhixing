@@ -505,6 +505,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   await renderWelcome({
     model: agentSession.model,
     workspace: agentSession.resolvedWorkspace,
+    workspaceDirStatus: agentSession.workspaceDirStatus,
   });
 
   // 启动时检测 stale 技能，温和提醒
