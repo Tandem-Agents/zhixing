@@ -574,6 +574,23 @@ export interface SuggestionProvider {
   /** 声明此 provider 是否能返回 ghost text —— broker 会据此决定是否计算 */
   readonly supportsGhostText?: boolean;
 
+  /**
+   * 计算 ghost text（inline 补全提示）。仅在 `supportsGhostText=true` 时被 broker 调用。
+   *
+   * Ghost text 是 prefix-based 的"不用 fuzzy"的精确补全：`/up` → dim `date`。
+   * 与 dropdown（fuzzy）并行存在，不冲突。
+   *
+   * 返回 null 表示：当前 query 没有 unambiguous 的 prefix match（多个候选或零个），
+   * broker 会设 `state.ghostText = null`。
+   */
+  computeGhostText?(match: TriggerMatch): GhostText | null;
+
+  /**
+   * 计算当前参数的 progressive hint。仅 ArgumentProvider 实现。
+   * broker 在 query 完成后调用（和 computeGhostText 同模式）。
+   */
+  computeArgumentHint?(match: TriggerMatch): ArgumentHint | null;
+
   /** 声明此 provider 是否支持 accept 后继续同 provider 的链式 query（比如两段式 /cmd → args） */
   readonly supportsChaining?: boolean;
 }
@@ -689,6 +706,13 @@ export interface ITypeaheadBroker {
   beginSession(initial: TriggerContext): TypeaheadSessionHandle;
   updateInput(sessionId: string, ctx: TriggerContext): void;
   accept(sessionId: string, item: SuggestionItem): AcceptResult | null;
+  /**
+   * 接受当前 ghost text，替换 trigger token 为 `ghostText.fullValue`。
+   * 无 ghost text / 无 trigger / session 不存在时返回 null。
+   *
+   * Tab 按键的首选路径 —— 有 ghost 时 Tab 走这里，不走 dropdown accept。
+   */
+  acceptGhostText(sessionId: string): AcceptResult | null;
   moveSelection(sessionId: string, delta: number): void;
   cancelSession(sessionId: string): void;
 

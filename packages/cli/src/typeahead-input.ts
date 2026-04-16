@@ -200,6 +200,16 @@ export function readInputLine(
       stdout.write(promptPrefix);
       stdout.write(buffer.draft);
 
+      // Step 3.5：Ghost text —— 光标在 draft 末尾且有 ghost 时，追加 dim 后缀。
+      // 光标不在末尾时不显示 —— 避免 mid-cursor 布局复杂化。
+      const cursorAtEnd =
+        buffer.cursor === Array.from(buffer.draft).length;
+      if (cursorAtEnd && lastSessionState?.ghostText?.suffix) {
+        stdout.write(
+          `${ANSI.dim}${lastSessionState.ghostText.suffix}${ANSI.reset}`,
+        );
+      }
+
       // Step 4：计算面板行
       const panelLines = lastSessionState
         ? renderSessionLines(lastSessionState, computeRenderOptions())
@@ -412,6 +422,16 @@ export function readInputLine(
       }
 
       if (key.name === "tab") {
+        // Ghost text 优先 —— 有 ghost 时 Tab 接受 ghost，不走 dropdown accept
+        if (lastSessionState?.ghostText) {
+          const result = options.broker.acceptGhostText(sessionHandle.id);
+          if (result) {
+            buffer.setDraft(result.newDraft, result.newCursor);
+            syncBroker();
+            return;
+          }
+        }
+        // Fallback：接受 dropdown 选中项
         if (hasActiveSuggestions && lastSessionState) {
           const item =
             lastSessionState.suggestions[lastSessionState.selectedIndex];

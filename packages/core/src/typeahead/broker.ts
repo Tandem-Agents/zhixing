@@ -321,6 +321,30 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
     suggestions: readonly SuggestionItem[],
   ): void {
     const selectedIndex = suggestions.length > 0 ? 0 : -1;
+
+    // Ghost text：provider 声明 supportsGhostText + 实现了 computeGhostText 时计算
+    let ghostText: import("./types.js").GhostText | null = null;
+    if (
+      provider.supportsGhostText &&
+      typeof provider.computeGhostText === "function"
+    ) {
+      try {
+        ghostText = provider.computeGhostText(match);
+      } catch {
+        // Provider 出 bug 不传染 —— 和 query 错误同策略
+      }
+    }
+
+    // Argument hint：provider 实现了 computeArgumentHint 时计算
+    let argumentHint: import("./types.js").ArgumentHint | null = null;
+    if (typeof provider.computeArgumentHint === "function") {
+      try {
+        argumentHint = provider.computeArgumentHint(match);
+      } catch {
+        // 和 ghostText / query 错误同策略 —— 不传染
+      }
+    }
+
     this.setSessionState(session, {
       sessionId: session.id,
       activeProvider: provider,
@@ -329,8 +353,8 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
       selectedIndex,
       loading: false,
       stale: false,
-      ghostText: null, // Step 7 填充
-      argumentHint: null, // Step 8 填充
+      ghostText,
+      argumentHint,
     });
   }
 
@@ -404,6 +428,46 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
     });
 
     // Accept 清空 session state（session 本身还活着，等下次 updateInput）
+    this.setSessionState(session, makeEmptyState(sessionId));
+
+    return result;
+  }
+
+  acceptGhostText(sessionId: string): AcceptResult | null {
+    const session = this.sessions.get(sessionId);
+    if (!session) return null;
+    const { ghostText, trigger } = session.state;
+    if (!ghostText || !trigger) return null;
+
+    const draft = session.lastContext.draft;
+    // 按**字符**切片 —— CJK 安全
+    const chars = Array.from(draft);
+    const before = chars.slice(0, trigger.tokenStart).join("");
+    const after = chars.slice(trigger.tokenEnd).join("");
+    const newDraft = before + ghostText.fullValue + after;
+    const newCursor =
+      trigger.tokenStart + Array.from(ghostText.fullValue).length;
+
+    const result: AcceptResult = {
+      newDraft,
+      newCursor,
+      execute: false, // ghost accept 不自动执行 —— 用户可能还要加参数
+    };
+
+    this.emit({
+      type: "typeahead:suggestion-accepted",
+      sessionId,
+      timestamp: this.now(),
+      providerId: session.state.activeProvider?.id ?? "ghost",
+      item: {
+        id: "ghost-text",
+        providerId: session.state.activeProvider?.id ?? "ghost",
+        displayText: ghostText.fullValue,
+      },
+      result,
+    });
+
+    // 清空 session state，等下次 updateInput（新的完整命令名会触发新一轮 match）
     this.setSessionState(session, makeEmptyState(sessionId));
 
     return result;

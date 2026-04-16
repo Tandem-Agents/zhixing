@@ -267,6 +267,14 @@ export function renderSessionLines(
 
   // ── 空结果 / loading 占位 ──
   if (count === 0) {
+    // 有 argumentHint 但无 dropdown 候选（text/path/number 类型）→ 只显示 hint
+    if (state.argumentHint && !state.loading) {
+      lines.push(theme.border(`╰${"─".repeat(frameWidth - 1)}`));
+      lines.push(
+        `  ${theme.hint(clampLine(state.argumentHint.renderedHint, frameWidth - 2))}`,
+      );
+      return lines;
+    }
     const emptyText = state.loading ? "正在加载候选…" : "未找到匹配项";
     lines.push(
       `${theme.border("│")}  ${clampLine(theme.emptyHint(emptyText), innerWidth - 2)}`,
@@ -343,6 +351,13 @@ export function renderSessionLines(
   // ── 底部边框 ──
   lines.push(theme.border(`╰${"─".repeat(frameWidth - 1)}`));
 
+  // ── 参数提示（argumentHint）──
+  if (state.argumentHint) {
+    lines.push(
+      `  ${theme.hint(clampLine(state.argumentHint.renderedHint, frameWidth - 2))}`,
+    );
+  }
+
   // ── 快捷键提示 ──
   const hint = "↑↓ 选择 · Enter 接受 · Tab 接受 · Esc 清空";
   lines.push(`  ${theme.hint(clampLine(hint, frameWidth - 2))}`);
@@ -371,6 +386,8 @@ function titleOfProvider(id: string): string {
   switch (id) {
     case "command":
       return "Commands";
+    case "argument":
+      return "Arguments";
     case "file":
       return "Files";
     case "memory":

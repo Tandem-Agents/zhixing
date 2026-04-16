@@ -117,4 +117,28 @@ export {
 export {
   CommandProvider,
   type CommandProviderOptions,
+  // Step 7: ghost text 纯函数（测试 + 复用）
+  getBestPrefixMatch,
 } from "./providers/command-provider.js";
+
+// ── Step 6: file provider ──
+export {
+  FileProvider,
+  type FileProviderOptions,
+} from "./providers/file-provider.js";
+
+// ── Step 8: argument provider + parsing + hint ──
+export {
+  ArgumentProvider,
+  type ArgumentProviderOptions,
+} from "./providers/argument-provider.js";
+
+export {
+  parseCommandDraft,
+  type ParsedCommandDraft,
+} from "./parse-command-draft.js";
+
+export {
+  renderProgressiveHint,
+  renderFullHintLine,
+} from "./progressive-hint.js";

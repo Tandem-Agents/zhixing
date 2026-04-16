@@ -18,6 +18,7 @@ import { findTriggerToken } from "../trigger-matcher.js";
 import type {
   CommandCategory,
   CommandDef,
+  GhostText,
   ICommandRegistry,
   IUsageTracker,
   SuggestionItem,
@@ -183,6 +184,23 @@ export class CommandProvider implements SuggestionProvider {
     return sorted.map((c) => this.toSuggestionItem(c.payload));
   }
 
+  // ── Ghost Text ──
+
+  /**
+   * 计算 ghost text —— prefix-based 精确补全（不用 fuzzy）。
+   *
+   * 逻辑：在所有命令的 name 和 aliases 中找 prefix match。
+   * 如果恰好只有一个命令匹配（unambiguous），返回对应的 suffix + fullValue。
+   * 多个命令匹配（ambiguous）或零匹配 → null。
+   */
+  computeGhostText(match: TriggerMatch): GhostText | null {
+    const query = match.query;
+    if (!query) return null;
+
+    const commands = this.registry.list(match.runtime);
+    return getBestPrefixMatch(query, commands);
+  }
+
   // ── Item 构造 ──
 
   private toSuggestionItem(cmd: CommandDef): SuggestionItem {
@@ -209,4 +227,65 @@ export class CommandProvider implements SuggestionProvider {
     };
   }
 
+}
+
+// ─── 纯函数：prefix match for ghost text ───
+
+/**
+ * 在命令列表中找 unambiguous prefix match。
+ *
+ * 检查 name + aliases。如果恰好只有一个命令的某个名称以 query 开头，
+ * 返回 `{ suffix, fullValue }`；多个匹配（ambiguous）或零匹配返回 null。
+ *
+ * 优先级：name > alias（同一命令有多个匹配时取 name）。
+ */
+export function getBestPrefixMatch(
+  query: string,
+  commands: readonly CommandDef[],
+): GhostText | null {
+  if (!query) return null;
+
+  const lower = query.toLowerCase();
+
+  // 收集所有匹配的 (command, matchedName)
+  const matches: Array<{ cmd: CommandDef; matchedName: string }> = [];
+
+  for (const cmd of commands) {
+    // 检查 name
+    if (cmd.name.toLowerCase().startsWith(lower)) {
+      matches.push({ cmd, matchedName: cmd.name });
+      continue; // 同一 command 不再查 aliases
+    }
+    // 检查 aliases
+    if (cmd.aliases) {
+      for (const alias of cmd.aliases) {
+        if (alias.toLowerCase().startsWith(lower)) {
+          matches.push({ cmd, matchedName: alias });
+          break; // 同一 command 只取第一个匹配的 alias
+        }
+      }
+    }
+  }
+
+  // 必须恰好一个命令匹配 —— 不是"一个 name"，而是"一个 command"
+  // 用 command id 去重：同一 command 的 name 和 alias 都匹配算一个
+  const uniqueByCmd = new Map<string, { cmd: CommandDef; matchedName: string }>();
+  for (const m of matches) {
+    if (!uniqueByCmd.has(m.cmd.id)) {
+      uniqueByCmd.set(m.cmd.id, m);
+    }
+  }
+
+  if (uniqueByCmd.size !== 1) return null;
+
+  const entry = [...uniqueByCmd.values()][0]!;
+  const { matchedName } = entry;
+
+  // 已经是完整匹配（query === matchedName）→ 不需要 ghost
+  if (lower === matchedName.toLowerCase()) return null;
+
+  return {
+    suffix: matchedName.slice(query.length),
+    fullValue: `/${matchedName}`,
+  };
 }

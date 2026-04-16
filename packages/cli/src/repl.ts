@@ -28,6 +28,8 @@ import {
   inferEffectiveness,
   applyEffectivenessUpdates,
   CommandProvider,
+  FileProvider,
+  ArgumentProvider,
   DefaultCommandRegistry,
   DefaultTypeaheadBroker,
   UsageTracker,
@@ -36,6 +38,7 @@ import {
 } from "@zhixing/core";
 import { CommandDispatcher } from "./command-dispatcher.js";
 import { readInputLine, type InputLineResult } from "./typeahead-input.js";
+import { resolveFileRefs } from "./resolve-file-refs.js";
 import { type AgentSession, createSession } from "./run-agent.js";
 import {
   createRenderer,
@@ -575,6 +578,14 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     typeaheadBroker.register(
       new CommandProvider({ registry: tRegistry, usageTracker }),
     );
+    typeaheadBroker.register(
+      new ArgumentProvider({ registry: tRegistry }),
+    );
+    typeaheadBroker.register(
+      new FileProvider({
+        root: agentSession.resolvedWorkspace.path ?? process.cwd(),
+      }),
+    );
     typeaheadDispatcher = new CommandDispatcher({ registry: tRegistry });
 
     // ── REPL 命令目录：typeahead panel 的单源真相 ──
@@ -732,8 +743,22 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       }
     }
 
+    // ── 解析 @file: 引用 ──
+    let resolvedInput = input.trim();
+    if (resolvedInput.includes("@file:")) {
+      const refResult = await resolveFileRefs(resolvedInput, {
+        workspaceRoot: agentSession.resolvedWorkspace.path ?? process.cwd(),
+      });
+      resolvedInput = refResult.text;
+      if (refResult.errors.length > 0) {
+        for (const err of refResult.errors) {
+          console.log(chalk.yellow(`  ⚠ ${err}`));
+        }
+      }
+    }
+
     // 正常对话
-    const userMsg = userMessage(input.trim());
+    const userMsg = userMessage(resolvedInput);
     state.messages.push(userMsg);
     state.running = true;
     renderer.startThinking();
