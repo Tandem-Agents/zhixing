@@ -47,7 +47,7 @@
 |---|---|---|---|---|---|
 | 交互栈 | `@mariozechner/pi-tui` 黑盒 | Lit 手写 state | `prompt_toolkit` 子类 | Ink + React Compiler | **自研 raw-mode，复用 `SelectWithInput`** |
 | 触发检测 | pi-tui 内部 | `^\/(\S*)$` 严格 | `startswith("/")` | **cursor-aware**（`value.substring(0, cursor)`） | **cursor-aware + Unicode** |
-| Mid-input slash | ? | ❌ | ❌ | ✅ (`findMidInputSlashCommand`) | ✅ Phase 3 |
+| Mid-input slash | ? | ❌ | ❌ | ✅ (`findMidInputSlashCommand`) | ⏸️ P2（空格后触发已支持，见 §12.2 #9） |
 | 过滤算法 | pi-tui 内部（prefix?） | prefix + substring | **纯 prefix** | Fuse.js 加权 fuzzy + 自定义 resort | **Fuse.js + resort + 知行加权** |
 | MRU / 频度排序 | ❌ | ❌ | ❌ | ✅ `skillUsageScore` | ✅ Phase 1 |
 | 分类分组 | ❌ | 按 category | 按源顺序 | 最近用 → builtin → user → project → policy | **Phase 1 即到位** |
@@ -1698,20 +1698,34 @@ class ArgumentProvider implements SuggestionProvider {
 
 ---
 
-#### Step 9 — Mid-input Trigger 支持
+#### Step 9 — Mid-input Trigger 支持 ⏸️ 降级为 P2，暂不实施
 
-**目标**：允许 `/command` 和 `@file` 出现在 draft 中间，不是只在开头。
+> **2026-04-16 决策**：经过 Phase 2 实际验证，`requireBoundary=true`（trigger 字符前必须是空白或行首）已覆盖 mid-input 的绝大多数有效场景。将 `requireBoundary=false` 降级为 P2 优先级，原因如下：
+>
+> **收益有限**：
+> - `请帮我运行 /backup`（空格后触发）—— 当前已支持 ✅
+> - `请查看 @src/foo.ts`（空格后触发）—— 当前已支持 ✅
+> - 唯一增量场景是中文字符紧贴 trigger（如 `查看@src/`，无空格），在真实输入中极少见
+>
+> **风险显著**：
+> - `给 @张三 发消息` → FileProvider 误触发，中文场景下高频
+> - `比较 a/b 和 c/d` → `/` 被误认为 slash command trigger
+> - 消歧义需要引入"负向前缀列表"或"意图推理"等复杂机制，投入产出比低
+>
+> **架构已预留**：`findTriggerToken` 的 `requireBoundary` 参数、provider 的 `matchTrigger` 签名已支持 `false`，技术上随时可启用。如果未来有明确的用户需求（如 IDE 插件场景中 inline `@file` 是刚需），只需改一个布尔值 + 加消歧义规则。
+>
+> **结论**：不做比做错好。当前 `requireBoundary=true` 是正确的默认值。
 
-**交付物**：
+**原目标**（保留供未来参考）：允许 `/command` 和 `@file` 出现在 draft 中间，不是只在开头。
+
+**原交付物**：
 - `trigger-matcher.ts` 扩展：`requireBoundary=false` 时允许 cursor 前是空格或开头
 - `CommandProvider.matchTrigger` 支持 mid-input
 - `FileProvider.matchTrigger` 支持 mid-input（原本就是）
 - 单元测试 ≥ 12 条（不同 cursor 位置、不同 boundary 字符）
 - Regex 用 `\p{L}\p{N}` 而非 `[a-zA-Z0-9]`
 
-**验收**：打 `请帮我运行 /ba` 看到 `/background` 等命令的 ghost + dropdown。
-
-**代码量估计**：~150 行
+**原代码量估计**：~150 行
 
 ---
 
@@ -1784,7 +1798,7 @@ class ArgumentProvider implements SuggestionProvider {
 |---|---|---|---|
 | **Phase 1: `/` 端到端可用** | 1-5 | ~2500 行 | 内核抽取 + Broker + CommandProvider + TTY 渲染器 + REPL 接入。`/command` fuzzy + MRU + 分类 + 执行分派 |
 | **Phase 2: 多触发 + Ghost + Args** | 6-8 | ~900 行 | `@file` 异步；ghost text inline；argumentHint + 参数枚举补全 |
-| **Phase 3: 差异化 + 扩展** | 9-11 | ~1100 行 | Mid-input；`@memory` `@tool`；plugin API + filesystem 命令 |
+| **Phase 3: 差异化 + 扩展** | 10-11 | ~950 行 | `@memory` `@tool`；plugin API + filesystem 命令（Step 9 mid-input 降级为 P2，见 §12.2 #9） |
 | **Phase 4（远期）: 架构验证** | 12 | ~150 行 | Mock Web renderer 证明 core 渲染无关 |
 
 **总代码量预估**：**~4650 行**（含测试）。对比：Claude Code 约 3500 行（命令补全 + PromptInput + FooterSuggestions），Hermes 约 400 行，OpenClaw 约 600 行。
@@ -1801,7 +1815,7 @@ class ArgumentProvider implements SuggestionProvider {
 | 核心/渲染分离 | ❌ | ❌ | ❌ | ❌ | ✅ **Broker + Renderer 接口** |
 | 驭灵就绪 | ❌ | ❌ | ❌ | ❌ | ✅ **Phase 1 即到位** |
 | 触发检测 | ? | 严格正则 | startswith | cursor-aware | ✅ **cursor-aware + Unicode** |
-| Mid-input 触发 | ? | ❌ | ❌ | ✅ | ✅ Phase 3 |
+| Mid-input 触发 | ? | ❌ | ❌ | ✅ | ⏸️ P2（`requireBoundary=true` 已覆盖空格后触发，见 §12.2 #9） |
 | 过滤算法 | ? | prefix + substring | 纯 prefix | Fuse 加权 + resort | ✅ **Fuse 加权 + resort + 知行调参** |
 | MRU 排序 | ❌ | ❌ | ❌ | ✅ | ✅ **core 持久化（非 UI state）** |
 | 分类分组 | ❌ | category | 源顺序 | 多源分层 | ✅ Phase 1 |
@@ -1837,7 +1851,7 @@ class ArgumentProvider implements SuggestionProvider {
 
 5. **Plugin provider 的安全边界**：任意代码运行在 broker 进程里，有能力偷读 draft 和 suggestions。**缓解**：暂时不考虑沙箱（plugin SDK 整体未落地）；Phase 3 Step 11 只支持 filesystem 命令（静态 markdown，无代码）+ trusted plugin API。真正的 sandboxing 留给未来的 `plugin-sdk` 专项 spec。
 
-6. **Mid-input trigger 的视觉干扰**：用户写长段文字时中间打了 `/` 就突然弹菜单，可能打扰。**缓解**：Step 9 的行为用 feature flag `ZHIXING_MID_INPUT_TRIGGER` 控制，默认开但可关；面板的视觉强度（颜色 / 尺寸）可调。
+6. **Mid-input trigger 的视觉干扰**：用户写长段文字时中间打了 `/` 就突然弹菜单，可能打扰。**缓解**：Step 9 已降级为 P2（§12.2 #9）—— `requireBoundary=true` 是更安全的默认值，已覆盖空格后触发的主流场景。如果未来启用 `requireBoundary=false`，需同时引入 feature flag + 消歧义规则。
 
 7. **Argument schema 的类型安全 vs 灵活性**：`ArgSchema` 用判别式联合很严格，但插件作者可能想要"任意对象"作为 arg。**缓解**：保持严格；插件作者用 `kind: "text"` + captureRemaining 自行解析。
 
@@ -1857,6 +1871,7 @@ class ArgumentProvider implements SuggestionProvider {
 6. **Mid-input trigger 对 bash mode**：**关闭**。bash mode 里 `/` 是 Unix 路径分隔符，开 mid-input 会误判。Step 9 只对 prompt mode 启用。
 7. **参数 schema 的 required 字段**：**支持**。`ArgumentProvider` 检测到必填参数未填时，Enter 不执行，面板显示 `<name> is required` 错误态。
 8. **`@file` 搜索根目录**（2026-04-16 追加）：基于「当前生效的工作区」（`resolvedWorkspace.path`），**不是** `process.cwd()`。工作区经过四级解析（CLI `--workspace` > 项目配置 > 全局配置 > cwd fallback），由 `resolveWorkspace()` 统一决定。FileProvider 构造参数为 `{ root: string }`，不自己调 `process.cwd()`。这保证 `@file` 的搜索范围和安全系统的信任边界一致。
+9. **Mid-input trigger 降级为 P2**（2026-04-16 追加）：`requireBoundary=true` 已覆盖"空格后触发"的主流 mid-input 场景（如 `请帮我运行 /backup`）。`requireBoundary=false` 的增量收益极小（仅覆盖中文紧贴 trigger 字符的罕见情况），但引入中文语境误触发风险（`给 @张三 发消息`、`比较 a/b`）。架构已预留 `requireBoundary` 参数，技术上随时可启用。**不做比做错好。**
 
 ---
 
