@@ -14,6 +14,7 @@ import { runOnce } from "./run-agent.js";
 import { startRepl } from "./repl.js";
 import { createRenderer, renderSummary, renderError } from "./render.js";
 import { runServeCommand } from "./serve/command.js";
+import { runRpcCommand, printRpcHelp } from "./rpc/command.js";
 
 const program = new Command();
 
@@ -66,6 +67,60 @@ program
     } catch (err) {
       renderError(err);
       process.exit(1);
+    }
+  });
+
+// ─── zhixing rpc <method> [args]（连接 server 的 RPC 客户端） ───
+//
+// 设计：commander 把 method 之后的所有 token（含 --flag）原样收到 rest，
+// 由 rpc/args.ts 自己解析——避免 commander 对未知 flag 报错。
+program
+  .command("rpc [method] [args...]")
+  .description("调用本地 server 的 RPC 方法（自动发现 + auth）。--watch 模式无需 method")
+  .allowUnknownOption(true)
+  .helpOption(false)
+  .action(async (rawMethod: string | undefined, _args: string[], _opts, cmd) => {
+    // 用 allowUnknownOption + [method] 时，commander 会把 --flag 错误地塞进 method。
+    // 解决：从 process.argv 重新提取真实的 method 和 token 列表。
+    const argv = process.argv;
+    const cmdIdx = argv.indexOf(cmd.name());
+    const allTokens = cmdIdx >= 0 ? argv.slice(cmdIdx + 1) : [];
+
+    // 第一个非 -- 开头的 token 是真正的 method（可能没有）
+    let method: string | undefined;
+    const tokens: string[] = [];
+    let methodPicked = false;
+    for (const t of allTokens) {
+      if (!methodPicked && !t.startsWith("--")) {
+        method = t;
+        methodPicked = true;
+      } else {
+        tokens.push(t);
+      }
+    }
+    void rawMethod; // commander 解析的值不再使用
+
+    // --help / -h 拦截：打印自定义 help 文本
+    if (tokens.includes("--help") || tokens.includes("-h") || method === "help") {
+      printRpcHelp();
+      process.exit(0);
+    }
+
+    const isWatch = tokens.includes("--watch");
+    if (!method && !isWatch) {
+      printRpcHelp();
+      process.exit(2);
+    }
+
+    try {
+      const exitCode = await runRpcCommand({
+        method: method ?? "__watch__",
+        rest: tokens,
+      });
+      process.exit(exitCode);
+    } catch (err) {
+      renderError(err);
+      process.exit(2);
     }
   });
 

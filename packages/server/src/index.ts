@@ -14,6 +14,7 @@ export * from "./session/index.js";
 export * from "./system-handlers.js";
 export * from "./process-lock.js";
 export * from "./lifecycle.js";
+export * from "./client/index.js";
 export * from "./types.js";
 export * from "./context.js";
 export * from "./server.js";
