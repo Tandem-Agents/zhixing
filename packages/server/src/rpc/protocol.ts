@@ -195,9 +195,13 @@ export function encodeNotification(method: string, params?: unknown): string {
   return JSON.stringify(msg);
 }
 
-/** 编码成功响应 */
+/** 编码成功响应。result === undefined 会被规范化为 null —— spec 要求 result 字段必须存在 */
 export function encodeSuccess(id: string | number | null, result: unknown): string {
-  const msg: JsonRpcSuccessResponse = { jsonrpc: "2.0", id, result };
+  const msg: JsonRpcSuccessResponse = {
+    jsonrpc: "2.0",
+    id,
+    result: result === undefined ? null : result,
+  };
   return JSON.stringify(msg);
 }
 

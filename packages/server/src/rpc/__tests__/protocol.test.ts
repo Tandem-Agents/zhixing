@@ -190,6 +190,13 @@ describe("JSON-RPC 2.0 protocol", () => {
       const parsed = JSON.parse(text);
       expect(parsed.id).toBeNull();
     });
+
+    it("encodeSuccess coerces undefined result to null (spec compliance)", () => {
+      const text = encodeSuccess(1, undefined);
+      const parsed = JSON.parse(text);
+      expect(parsed).toEqual({ jsonrpc: "2.0", id: 1, result: null });
+      expect("result" in parsed).toBe(true);
+    });
   });
 
   describe("round-trip", () => {

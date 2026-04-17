@@ -13,6 +13,7 @@
 
 import { createServer, type Server as HttpServer } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
+import type { IEventBus, SchedulerEventMap } from "@zhixing/core";
 import { dispatchRest } from "./routes.js";
 import type { ServerContext } from "./context.js";
 import { DEFAULT_SERVER_CONFIG, type ServerConfig } from "./types.js";
@@ -20,6 +21,7 @@ import { createRpcConnection, type RpcConnection } from "./rpc/connection.js";
 import { RpcDispatcher } from "./rpc/dispatcher.js";
 import { HandlerRegistry } from "./rpc/handlers.js";
 import { buildBuiltinRegistry } from "./rpc/methods/index.js";
+import { createEventBridge, type DisposeBridge } from "./rpc/event-bridge.js";
 
 export interface ZhixingServerInstance {
   /** 实际监听的端口（监听 0 时由 OS 分配） */
@@ -49,6 +51,8 @@ export interface StartServerOptions {
   wsPath?: string;
   /** 错误日志钩子 */
   onError?: (err: unknown, context: { method?: string; messageId?: string | number | null }) => void;
+  /** Scheduler EventBus（提供则自动桥接事件到 RPC 推送） */
+  schedulerEventBus?: IEventBus<SchedulerEventMap>;
 }
 
 /**
@@ -130,6 +134,12 @@ export async function startServer(opts: StartServerOptions): Promise<ZhixingServ
   // 回填实际监听地址到 context，供 status 等端点读取
   ctx.listenAddr = { port: addr.port, host: addr.address };
 
+  // EventBus → RPC notification 桥接（订阅 scheduler 等事件，向所有连接广播）
+  const disposeBridge: DisposeBridge = createEventBridge({
+    connections,
+    schedulerEventBus: opts.schedulerEventBus,
+  });
+
   let closed = false;
 
   return {
@@ -142,6 +152,8 @@ export async function startServer(opts: StartServerOptions): Promise<ZhixingServ
     async close() {
       if (closed) return;
       closed = true;
+      // 0. 取消事件桥接订阅（否则 scheduler 后续事件还会调 conn.notify）
+      disposeBridge();
       // 1. 关闭所有 WebSocket（触发 ws.on("close") → 从 connections 移除）
       for (const conn of connections) {
         conn.close(1001, "Server shutting down");

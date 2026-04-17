@@ -20,6 +20,9 @@ importers:
       '@zhixing/providers':
         specifier: workspace:*
         version: link:../providers
+      '@zhixing/server':
+        specifier: workspace:*
+        version: link:../server
       '@zhixing/tools-builtin':
         specifier: workspace:*
         version: link:../tools-builtin

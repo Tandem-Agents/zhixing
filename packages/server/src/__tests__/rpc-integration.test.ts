@@ -130,7 +130,7 @@ describe("WebSocket + RPC (S2.C)", () => {
     ).rejects.toThrow();
   });
 
-  it("auth with correct token succeeds and returns capabilities", async () => {
+  it("auth with correct token succeeds and returns protocol info", async () => {
     const client = await connect(server.port);
     const response = await client.request("auth", {
       token: TEST_TOKEN,
@@ -142,8 +142,9 @@ describe("WebSocket + RPC (S2.C)", () => {
         protocol: 1,
         server: { version: TEST_VERSION },
       });
+      // capabilities is dependency-driven; this server has no sessions/scheduler injected
       const result = response.result as { capabilities: string[] };
-      expect(result.capabilities).toContain("session");
+      expect(Array.isArray(result.capabilities)).toBe(true);
     }
     client.close();
   });

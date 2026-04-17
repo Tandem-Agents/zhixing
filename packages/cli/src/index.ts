@@ -13,6 +13,7 @@ import { Command } from "commander";
 import { runOnce } from "./run-agent.js";
 import { startRepl } from "./repl.js";
 import { createRenderer, renderSummary, renderError } from "./render.js";
+import { runServeCommand } from "./serve/command.js";
 
 const program = new Command();
 
@@ -62,6 +63,37 @@ program
         resume: options.resume,
         name: options.name,
       });
+    } catch (err) {
+      renderError(err);
+      process.exit(1);
+    }
+  });
+
+// ─── zhixing serve（常驻服务模式） ───
+program
+  .command("serve")
+  .description("启动常驻服务（HTTP + WebSocket + 调度器）")
+  .option("--port <port>", "监听端口", (v) => parseInt(v, 10))
+  .option("--host <host>", "监听地址（默认 127.0.0.1，仅本地访问）")
+  .option("-m, --model <model>", "默认模型（每个会话可覆盖）")
+  .option("--provider <provider>", "Provider ID")
+  .option("-w, --workspace <path>", "工作区目录")
+  .action(async (options: {
+    port?: number;
+    host?: string;
+    model?: string;
+    provider?: string;
+    workspace?: string;
+  }) => {
+    try {
+      await runServeCommand({
+        port: options.port,
+        host: options.host,
+        model: options.model,
+        provider: options.provider,
+        workspace: options.workspace,
+      });
+      process.exit(0);
     } catch (err) {
       renderError(err);
       process.exit(1);

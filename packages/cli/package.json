@@ -17,6 +17,7 @@
   "dependencies": {
     "@zhixing/core": "workspace:*",
     "@zhixing/providers": "workspace:*",
+    "@zhixing/server": "workspace:*",
     "@zhixing/tools-builtin": "workspace:*",
     "chalk": "^5.4.0",
     "commander": "^14.0.0"

@@ -12,6 +12,7 @@
 
 import type { Scheduler } from "@zhixing/core";
 import type { ServerConfig } from "./types.js";
+import type { SessionRegistry } from "./session/index.js";
 
 export interface ServerContext {
   /** 配置（不可变；config.port 是请求的端口，实际端口见 listenAddr） */
@@ -24,6 +25,8 @@ export interface ServerContext {
   readonly token: string;
   /** 调度器实例（S2.E 注入；S2.B/C 阶段为 undefined） */
   scheduler?: Scheduler;
+  /** 会话注册表（S2.D 注入；不传则 session.* 方法不可用） */
+  sessions?: SessionRegistry;
   /** 实际监听的地址（startServer 监听就绪后回填） */
   listenAddr?: { port: number; host: string };
 }
@@ -33,6 +36,7 @@ export interface CreateContextOptions {
   version: string;
   token: string;
   scheduler?: Scheduler;
+  sessions?: SessionRegistry;
 }
 
 export function createServerContext(opts: CreateContextOptions): ServerContext {
@@ -42,5 +46,6 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     token: opts.token,
     startedAt: Date.now(),
     scheduler: opts.scheduler,
+    sessions: opts.sessions,
   };
 }

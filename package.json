@@ -21,7 +21,8 @@
     "clean": "pnpm -r run clean",
     "playground": "node --env-file=.env --import=tsx/esm playground/chat.ts",
     "cli": "node --env-file=.env --import=tsx/esm packages/cli/src/index.ts",
-    "cli:build": "pnpm --filter @zhixing/cli build"
+    "cli:build": "pnpm --filter @zhixing/cli build",
+    "serve": "node --env-file=.env --import=tsx/esm packages/cli/src/index.ts serve"
   },
   "devDependencies": {
     "tsx": "^4.21.0"
