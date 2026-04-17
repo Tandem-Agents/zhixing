@@ -2,7 +2,7 @@
 
 > **状态**: 📐 方案设计（2026-04-09）
 > **前置**: Agent Loop、Context Engine、Session 持久化已完成
-> **关联**: context-engine.md（预算事件）、session-persistence.md（会话追踪）、ADR-005（CLI 架构）
+> **关联**: context-architecture.md（预算事件）、session-persistence.md（会话追踪）、ADR-005（CLI 架构）
 
 ## 零、设计动机
 

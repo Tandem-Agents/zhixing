@@ -1,8 +1,8 @@
 # L3 LLM 摘要压缩方案
 
 > **状态**: 📐 方案设计（2026-04-09）
-> **前置**: context-engine.md Step 2A-2E 已设计；CircuitBreaker 已实现
-> **关联**: context-engine.md Step 2G、phase2-complete-agent.md Phase 2D-3
+> **前置**: context-architecture.md 已设计；CircuitBreaker 已实现
+> **关联**: context-architecture.md §九 LLM 压缩、phase2-complete-agent.md Phase 2D-3
 
 ## 一、竞品摘要模板对比
 
