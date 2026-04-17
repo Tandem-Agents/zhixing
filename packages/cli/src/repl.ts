@@ -35,7 +35,13 @@ import {
   UsageTracker,
   type CommandHandlerContext,
   type RuntimeContext,
+  Scheduler,
+  JsonTaskStore,
+  createEventBus,
+  type SchedulerEventMap,
+  type AgentTurnResult,
 } from "@zhixing/core";
+import { createScheduleTool } from "@zhixing/tools-builtin";
 import { CommandDispatcher } from "./command-dispatcher.js";
 import { readInputLine, type InputLineResult } from "./typeahead-input.js";
 import { resolveFileRefs } from "./resolve-file-refs.js";
@@ -70,6 +76,8 @@ interface ReplState {
   hasProposedSkill: boolean;
   /** 是否已执行过 Journal 自动凝练 */
   journalCondenseDone: boolean;
+  /** Scheduler 实例（S1: CLI 进程内运行） */
+  scheduler: Scheduler | null;
 }
 
 // ─── 会话恢复选项 ───
@@ -413,9 +421,40 @@ function buildSlashCommands(rl: readline.Interface): Record<
         handleSecurityCommand(args, state.session.securityPipeline);
       },
     },
+    "/tasks": {
+      description: "查看定时任务",
+      handler: (state) => {
+        if (!state.scheduler) {
+          console.log(chalk.dim("\n  调度器未初始化\n"));
+          return;
+        }
+        const tasks = state.scheduler.listTasks();
+        if (tasks.length === 0) {
+          console.log(chalk.dim("\n  没有定时任务。对话中说\"每天早上8点提醒我...\"可以创建任务。\n"));
+          return;
+        }
+        console.log(`\n${chalk.bold("  定时任务")} ${chalk.dim(`(${tasks.length} 个, ${state.scheduler.activeTaskCount} 个执行中)`)}`);
+        for (const task of tasks) {
+          const status = task.enabled ? chalk.green("●") : chalk.dim("○");
+          const schedule = formatTaskSchedule(task.schedule);
+          const lastInfo = task.state.lastRunAt
+            ? chalk.dim(` · 上次: ${task.state.lastStatus ?? "?"} ${formatRelativeTime(new Date(task.state.lastRunAt))}`)
+            : chalk.dim(" · 未执行过");
+          const next = task.state.nextRunAt
+            ? chalk.dim(` · 下次: ${new Date(task.state.nextRunAt).toLocaleString()}`)
+            : "";
+          console.log(`  ${status} ${task.name} ${chalk.dim(`(${task.id})`)}`);
+          console.log(`    ${schedule}${lastInfo}${next}`);
+        }
+        console.log();
+      },
+    },
     "/exit": {
       description: "退出",
-      handler: () => {
+      handler: async (state) => {
+        if (state.scheduler) {
+          await state.scheduler.stop();
+        }
         console.log(chalk.dim("再见 👋"));
         process.exit(0);
       },
@@ -426,11 +465,80 @@ function buildSlashCommands(rl: readline.Interface): Record<
 // ─── 启动 REPL ───
 
 export async function startRepl(options: ReplOptions): Promise<void> {
+  // ── Scheduler 初始化（S1: CLI 进程内运行） ──
+  //
+  // 初始化顺序解决循环依赖：
+  // 1. 创建 schedule 工具（捕获 scheduler getter）
+  // 2. 创建 session（包含 schedule 工具）
+  // 3. 创建 scheduler（注入 session.run 作为 runAgentTurn）
+  // 4. 启动 scheduler
+  let schedulerInstance: Scheduler | null = null;
+  const schedulerEventBus = createEventBus<SchedulerEventMap>();
+  const scheduleTool = createScheduleTool(() => {
+    if (!schedulerInstance) throw new Error("Scheduler not initialized yet");
+    return schedulerInstance;
+  });
+
   const agentSession = await createSession({
     model: options.model,
     provider: options.provider,
     workspace: options.workspace,
+    extraTools: [scheduleTool],
   });
+
+  // 构造 runAgentTurn：将 Scheduler 的任务执行桥接到 session.run
+  const runAgentTurn = async (params: {
+    prompt: string;
+    model?: string;
+    tools?: string[];
+    abortSignal?: AbortSignal;
+  }): Promise<AgentTurnResult> => {
+    const startTime = Date.now();
+    try {
+      const result = await agentSession.run({
+        messages: [userMessage(params.prompt)],
+        // 任务执行不渲染到前台（S1 通过 EventBus 通知）
+      });
+      // 提取文本输出
+      const output = result.newMessages
+        .filter((m) => m.role === "assistant")
+        .flatMap((m) => m.content)
+        .filter((b): b is { type: "text"; text: string } => b.type === "text")
+        .map((b) => b.text)
+        .join("\n");
+
+      return {
+        status: result.agentResult.reason === "completed" ? "ok" : "error",
+        output: output || undefined,
+        error: result.agentResult.reason === "error"
+          ? result.agentResult.error.message
+          : undefined,
+        durationMs: result.durationMs,
+      };
+    } catch (err: unknown) {
+      return {
+        status: "error",
+        error: err instanceof Error ? err.message : String(err),
+        durationMs: Date.now() - startTime,
+      };
+    }
+  };
+
+  schedulerInstance = new Scheduler({
+    store: new JsonTaskStore(),
+    runAgentTurn,
+    eventBus: schedulerEventBus,
+    logger: {
+      info: (msg, data) => console.log(chalk.dim(`  [scheduler] ${msg}`), data ? chalk.dim(JSON.stringify(data)) : ""),
+      warn: (msg, data) => console.log(chalk.yellow(`  [scheduler] ${msg}`), data ? chalk.dim(JSON.stringify(data)) : ""),
+      error: (msg, data) => console.log(chalk.red(`  [scheduler] ${msg}`), data ? chalk.dim(JSON.stringify(data)) : ""),
+      debug: () => {},
+    },
+  });
+
+  // 启动 scheduler（加载任务 + 启动 timer loop）
+  await schedulerInstance.start();
+
   const renderer = createRenderer();
   const store = new SessionStore(process.cwd());
 
@@ -547,6 +655,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     lastToolEndCount: 0,
     hasProposedSkill: false,
     journalCondenseDone: false,
+    scheduler: schedulerInstance,
   };
 
   const slashCommands = buildSlashCommands(rl);
@@ -618,6 +727,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       { name: "journal", description: "查看日志状态", category: "tools", legacyKey: "/journal" },
       { name: "people", description: "查看关系网络", category: "tools", legacyKey: "/people" },
       { name: "compact", description: "手动触发上下文压缩", category: "tools", legacyKey: "/compact" },
+      { name: "tasks", description: "查看定时任务", category: "tools", legacyKey: "/tasks" },
       // ─ config ─
       { name: "trust", description: "权限规则管理", category: "config", legacyKey: "/trust" },
       { name: "security", description: "安全状态概览", category: "config", legacyKey: "/security" },
@@ -654,11 +764,48 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     now: Date.now(),
   });
 
-  rl.on("close", () => {
+  rl.on("close", async () => {
     renderer.stop();
     detachConfirmationRenderer();
+    // 优雅停止 Scheduler：等待活跃任务完成 → 保存状态
+    if (schedulerInstance) {
+      await schedulerInstance.stop();
+    }
     console.log(chalk.dim("\n再见 👋"));
     process.exit(0);
+  });
+
+  // ── Scheduler 事件 → 终端渲染 ──
+  //
+  // 任务结果通过 EventBus 通知 REPL，在当前 readline prompt 之上插入通知行。
+  // 与已有的 retry/budget 事件渲染方式一致。
+  schedulerEventBus.on("scheduler:task-completed", (info) => {
+    renderer.stop();
+    console.log(
+      chalk.green(`\n  ✓ 任务完成: ${info.name}`) +
+      chalk.dim(` (${Math.round(info.durationMs / 1000)}s)`) +
+      (info.summary ? `\n  ${chalk.dim(info.summary.slice(0, 120))}` : "") +
+      "\n",
+    );
+  });
+  schedulerEventBus.on("scheduler:task-failed", (info) => {
+    renderer.stop();
+    console.log(
+      chalk.red(`\n  ✗ 任务失败: ${info.name}`) +
+      chalk.dim(` (连续 ${info.consecutiveErrors} 次)`) +
+      `\n  ${chalk.dim(info.error.slice(0, 120))}` +
+      (info.nextRunAt ? chalk.dim(`\n  下次重试: ${new Date(info.nextRunAt).toLocaleTimeString()}`) : "") +
+      "\n",
+    );
+  });
+  schedulerEventBus.on("scheduler:task-disabled", (info) => {
+    renderer.stop();
+    console.log(
+      chalk.red(`\n  ⊘ 任务已自动停用: ${info.name}`) +
+      chalk.dim(`\n  原因: ${info.reason}`) +
+      (info.lastError ? chalk.dim(`\n  最后错误: ${info.lastError.slice(0, 120)}`) : "") +
+      "\n",
+    );
   });
 
   // ── 旧/新路径都要处理的"命令 fallthrough 到 legacy slashCommands"助手 ──
@@ -1045,6 +1192,23 @@ async function runJournalLifecycle(session: AgentSession): Promise<void> {
       );
     },
   });
+}
+
+function formatTaskSchedule(schedule: { kind: string; at?: string; everyMs?: number; expr?: string; tz?: string }): string {
+  switch (schedule.kind) {
+    case "once":
+      return `一次性 ${schedule.at ? new Date(schedule.at).toLocaleString() : ""}`;
+    case "interval": {
+      const ms = schedule.everyMs ?? 0;
+      if (ms < 60_000) return `每 ${Math.round(ms / 1000)} 秒`;
+      if (ms < 3_600_000) return `每 ${Math.round(ms / 60_000)} 分钟`;
+      return `每 ${Math.round(ms / 3_600_000)} 小时`;
+    }
+    case "cron":
+      return `cron "${schedule.expr}"${schedule.tz ? ` (${schedule.tz})` : ""}`;
+    default:
+      return schedule.kind;
+  }
 }
 
 function formatRelativeTime(date: Date): string {

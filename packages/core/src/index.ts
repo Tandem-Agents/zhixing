@@ -9,3 +9,4 @@ export * from "./security/index.js";
 export * from "./confirmation/index.js";
 export * from "./identity/index.js";
 export * from "./typeahead/index.js";
+export * from "./scheduler/index.js";

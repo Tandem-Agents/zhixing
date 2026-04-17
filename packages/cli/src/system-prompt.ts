@@ -127,6 +127,13 @@ function buildToolUsage(tools: ToolDefinition[]): string {
     lines.push("- When the user says \"remember this\" or shares personal info, save it with `memory`");
     lines.push("- Always confirm before saving new memories, unless the user explicitly asked you to remember");
   }
+  if (names.has("schedule")) {
+    lines.push("- Use `schedule` to create, list, update, delete, or run scheduled tasks");
+    lines.push("- When the user wants recurring actions (reminders, periodic checks, timed notifications), create a scheduled task");
+    lines.push('- Convert natural language time to schedule: "每天早上8点" → cron "0 8 * * *", "每30分钟" → interval 1800000, "明天下午3点" → once with ISO datetime');
+    lines.push("- For cron expressions, default timezone to Asia/Shanghai unless the user specifies otherwise");
+    lines.push("- Always confirm the schedule with the user before creating (e.g. \"I'll set up a task to run daily at 8:00 AM\")");
+  }
 
   // 通用原则（不依赖具体工具名）
   if (tools.some((t) => t.isParallelSafe)) {

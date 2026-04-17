@@ -5,4 +5,5 @@ export { createGlobTool } from "./glob.js";
 export { createGrepTool } from "./grep.js";
 export { createBashTool } from "./bash.js";
 export { createMemoryTool } from "./memory.js";
+export { createScheduleTool } from "./schedule.js";
 export { truncateResult, addLineNumbers, resolveToolPath } from "./utils.js";

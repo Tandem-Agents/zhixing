@@ -145,6 +145,8 @@ export async function createSession(options: {
   model?: string;
   provider?: string;
   workspace?: string;
+  /** 额外工具（如 schedule），在内置工具之后注入 */
+  extraTools?: import("@zhixing/core").ToolDefinition[];
 }): Promise<AgentSession> {
   const { provider, defaultModel, config } = createProviderFromConfig({
     providerId: options.provider,
@@ -178,6 +180,7 @@ export async function createSession(options: {
     createGrepTool(),
     createBashTool(),
     createMemoryTool(),
+    ...(options.extraTools ?? []),
   ];
   const systemPrompt = buildSystemPrompt({
     tools,

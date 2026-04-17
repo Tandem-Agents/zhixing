@@ -13,6 +13,7 @@ export default defineConfig({
     "src/security/index.ts",
     "src/confirmation/index.ts",
     "src/identity/index.ts",
+    "src/scheduler/index.ts",
   ],
   format: ["esm"],
   dts: true,
