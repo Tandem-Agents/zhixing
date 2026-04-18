@@ -116,3 +116,18 @@ export {
   assembleSystemPrompt,
   buildToolCatalog,
 } from "./layer-assembler.js";
+
+export type { TierLevel, TierStats } from "./tier-compressor.js";
+export {
+  TIER2_MAX_CHARS,
+  TIER3_MAX_CHARS,
+  applyTierCompression,
+  determineTier,
+} from "./tier-compressor.js";
+
+export type { WindowConfig, WindowResult } from "./window-manager.js";
+export {
+  MIN_RETAIN_TURNS,
+  defaultIsPinned,
+  manageWindow,
+} from "./window-manager.js";

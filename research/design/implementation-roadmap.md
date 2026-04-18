@@ -13,7 +13,7 @@
 | 3b | Transcript 段轮转 | 🔲 待开始 | Step 3 |
 | 4 | ScenarioEvaluator + ContextProfile | ✅ 已完成 | Step 0 |
 | 5 | LayerAssembler + TurnDigest | ✅ 已完成 | Step 4 |
-| 6 | WindowManager + Pinning | 🔲 待开始 | Step 5 |
+| 6 | WindowManager + Pinning | ✅ 已完成 | Step 5 |
 | 7 | ConversationManager + SessionRuntime | 🔲 待开始 | Step 3, 6 |
 | 8 | Ephemeral Conversation + auto-promote | 🔲 待开始 | Step 7 |
 
@@ -560,10 +560,27 @@ packages/core/src/__tests__/window-manager.test.ts
 
 ### 验证
 
-- [ ] 单元测试：pinned 消息在窗口缩小时不被淘汰
-- [ ] 单元测试：20 turn 对话，老 turn 的 tool_result 按 distance 正确降级
-- [ ] 单元测试：budget 接近 COMPACT 时窗口自动缩小
-- [ ] 集成测试：长对话中首条用户消息始终存在
+- [x] 单元测试：pinned 消息在窗口缩小时不被淘汰 (2026-04-18)
+- [x] 单元测试：20 turn 对话，老 turn 的 tool_result 按 distance 正确降级 (2026-04-18)
+- [x] 单元测试：budget 接近 COMPACT 时窗口自动缩小 (2026-04-18)
+- [x] 集成测试：长对话中首条用户消息始终存在 (2026-04-18)
+- [x] 单元测试：TierCompressor 四级压缩 + 幂等性 + 骨架含 tool 名称 (2026-04-18)
+- [x] 单元测试：自定义 isPinned 策略保护指定消息 (2026-04-18)
+- [x] 单元测试：MIN_RETAIN_TURNS 保留最近 2 轮 (2026-04-18)
+- [x] Engine 后向兼容：仅显式提供 profile.tierThresholds 时运行 WindowManager (2026-04-18)
+- [x] 全量 1284 测试通过，core + CLI 构建零错误 (2026-04-18)
+
+### 实现细节
+
+**新建文件：**
+- `packages/core/src/context/tier-compressor.ts` — 四级 tool_result 渐进压缩（Profile 参数化 T1/T2/T3 阈值）
+- `packages/core/src/context/window-manager.ts` — Pin-aware turn 淘汰 + 级联编排
+- `packages/core/src/context/__tests__/tier-compressor.test.ts` — 14 测试
+- `packages/core/src/context/__tests__/window-manager.test.ts` — 13 测试
+
+**改动文件：**
+- `packages/core/src/context/engine.ts` — onTurnComplete 集成 manageWindow（Tier 压缩 + 淘汰在策略管线之前）
+- `packages/core/src/context/index.ts` — 导出 TierCompressor + WindowManager 公开 API
 
 ---
 

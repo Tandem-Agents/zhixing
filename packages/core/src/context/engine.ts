@@ -1,17 +1,18 @@
 /**
- * 上下文引擎 — 预算检查 + 策略编排 + 系统提示组装
+ * 上下文引擎 — 窗口管理 + 策略编排 + 系统提示组装
  *
- * 将 TokenEstimator、Budget、CompactionStrategy、LayerAssembler 整合为统一的 ContextManager。
+ * 将 WindowManager、CompactionStrategy、LayerAssembler 整合为统一的 ContextManager。
  *
  * 职责：
- * 1. 预算管理：估算 token → 检查预算 → 按优先级执行压缩策略
- * 2. 系统提示组装：通过 LayerAssembler 按 ContextProfile 参数组装四层 system prompt
- * 3. Turn 轨迹：存储 TurnDigest，在 Layer 3 中注入面包屑轨迹
+ * 1. 窗口管理：Tier 压缩 → 预算检查 → Pin-aware 淘汰（manageWindow）
+ * 2. 策略兜底：窗口管理后仍超标时，按优先级执行 LLM 压缩等策略
+ * 3. 系统提示组装：通过 LayerAssembler 按 ContextProfile 参数组装四层 system prompt
+ * 4. Turn 轨迹：存储 TurnDigest，在 Layer 3 中注入面包屑轨迹
  *
- * 策略执行遵循成本优先级联原则：
- * - 先做免费操作（ToolResult 截断、消息丢弃）
- * - 每执行一个策略后重新检查预算
- * - 仅在免费策略不够时才调用 LLM 摘要
+ * onTurnComplete 流程：
+ * 1. manageWindow：Tier 压缩（预防性，每轮运行）→ 预算检查 → 淘汰
+ * 2. 如果仍超标：按优先级执行剩余策略（LLM 压缩等）
+ * 3. 发射事件
  */
 
 import type { IEventBus } from "../events/types.js";
@@ -27,11 +28,12 @@ import type {
   ITokenEstimator,
 } from "./types.js";
 import { DEFAULT_THRESHOLDS } from "./types.js";
-import { calculateBudget, type ModelBudgetInfo } from "./budget.js";
+import { calculateBudget, calculateEffectiveWindow, type ModelBudgetInfo } from "./budget.js";
 import { INTERACTIVE_PROFILE, type ContextProfile } from "./context-profile.js";
 import type { TurnDigest } from "./turn-digest.js";
 import type { ToolDeclaration } from "./layer-assembler.js";
 import { assembleSystemPrompt } from "./layer-assembler.js";
+import { manageWindow, defaultIsPinned } from "./window-manager.js";
 
 // ─── 配置 ───
 
@@ -103,17 +105,32 @@ export class ContextEngine implements ContextManagerHook {
   /**
    * Agent Loop 的 hook：每轮结束后调用。
    *
-   * 流程：
-   * 1. 估算 token → 计算预算
-   * 2. 发射 budget_check 事件
-   * 3. 如果状态 ≥ compact，按优先级执行策略
-   * 4. 每个策略执行后重新估算，如果已回到 normal/warning 则停止
+   * 流程（级联淘汰）：
+   * 1. WindowManager：Tier 压缩（预防性）→ 预算检查 → Pin-aware turn 淘汰
+   * 2. 如果仍超标：按优先级执行剩余策略（LLM 压缩等）
+   * 3. 发射事件
    */
   async onTurnComplete(input: ContextManagerInput): Promise<ContextManagerOutput> {
     let { messages } = input;
     const { turnCount } = input;
     let modified = false;
 
+    // ── Step 1: WindowManager 级联（Tier 压缩 + 淘汰） ──
+    if (this.config.profile?.tierThresholds) {
+      const windowResult = manageWindow(messages, {
+        tierThresholds: this.config.profile.tierThresholds,
+        estimator: this.estimator,
+        effectiveWindow: calculateEffectiveWindow(this.config.modelInfo.contextWindow, this.config.modelInfo.maxOutputTokens),
+        compactRatio: this.thresholds.compact,
+        isPinned: defaultIsPinned,
+      });
+      if (windowResult.modified) {
+        messages = windowResult.messages;
+        modified = true;
+      }
+    }
+
+    // ── Step 2: 预算检查 ──
     let budget = this.checkBudget(messages);
 
     await this.eventBus?.emit("context:budget_check", {
@@ -124,9 +141,10 @@ export class ContextEngine implements ContextManagerHook {
     });
 
     if (budget.status !== "compact" && budget.status !== "critical") {
-      return { messages: messages as Message[], modified: false };
+      return { messages: messages as Message[], modified };
     }
 
+    // ── Step 3: 剩余策略兜底（LLM 压缩等） ──
     for (const strategy of this.strategies) {
       const context = { messages, budget, currentTurn: turnCount };
 
@@ -154,7 +172,6 @@ export class ContextEngine implements ContextManagerHook {
           success: true,
         });
 
-        // 压缩后已回到安全区间，停止执行更多策略
         if (budget.status === "normal" || budget.status === "warning") {
           break;
         }
