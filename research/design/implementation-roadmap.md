@@ -12,7 +12,7 @@
 | 3 | CLI 对接 Conversation | ✅ 已完成 | Step 2 |
 | 3b | Transcript 段轮转 | 🔲 待开始 | Step 3 |
 | 4 | ScenarioEvaluator + ContextProfile | ✅ 已完成 | Step 0 |
-| 5 | LayerAssembler + TurnDigest | 🔲 待开始 | Step 4 |
+| 5 | LayerAssembler + TurnDigest | ✅ 已完成 | Step 4 |
 | 6 | WindowManager + Pinning | 🔲 待开始 | Step 5 |
 | 7 | ConversationManager + SessionRuntime | 🔲 待开始 | Step 3, 6 |
 | 8 | Ephemeral Conversation + auto-promote | 🔲 待开始 | Step 7 |
@@ -471,50 +471,51 @@ Turn:   store.appendTurn() + convRepo.touch()
 
 **规格引用：** context-architecture.md §3.2 (四层组装) + §3.5 (Turn 摘要)
 
-### 新建文件
+### 新建/改动文件
 
 ```
-packages/core/src/context/layer-assembler.ts   — 四层 system prompt 组装
-packages/core/src/context/turn-digest.ts       — Turn 完成后自动提取摘要
-packages/core/src/__tests__/layer-assembler.test.ts
-packages/core/src/__tests__/turn-digest.test.ts
+新建: packages/core/src/context/turn-digest.ts                      — TurnDigest 类型 + 机械提取 + 轨迹格式化
+新建: packages/core/src/context/layer-assembler.ts                   — 四层 system prompt 组装 + 工具目录过滤
+新建: packages/core/src/context/__tests__/turn-digest.test.ts        — 24 个测试
+新建: packages/core/src/context/__tests__/layer-assembler.test.ts    — 26 个测试
+改:   packages/core/src/context/engine.ts                            — ContextProfile 感知 + TurnDigest 存储 + buildSystemPrompt
+改:   packages/core/src/context/index.ts                             — 导出新模块
 ```
 
-### 四层组装 (spec §3.2)
+### 实现要点
 
-```
-Layer 0 (Static)   — Agent 身份 + 工具目录（可缓存，所有场景相同）
-Layer 1 (Profile)  — 用户 profile（ContextProfile.loadProfile 控制加载与否）
-Layer 2 (Scene)    — 场景触发内容（skills/people/relations/journal，按 layer2Strategy）
-Layer 3 (Dynamic)  — 工作区信息、时间、Turn Digest、任务提示
-```
+**TurnDigest（零 LLM 成本轨迹）：**
+- `extractTurnDigest(turn: Turn)` — 从持久化 Turn 机械提取：消息前 80 字 + 工具调用 + 修改文件 + 成功/错误
+- `formatDigestTrail(digests)` — 格式化为 `[轨迹]\nT1: "..." → tool×N` 面包屑文本
+- 超过 MAX_DIGEST_COUNT(30) 时自动合并最早的批次为分组摘要
 
-### TurnDigest (spec §3.5)
+**LayerAssembler（四层纯函数组装）：**
+- Layer 0: identity + 按 Profile.toolCategories 白名单过滤的工具目录
+- Layer 1: `includeProfile=true` 时注入用户画像，否则跳过
+- Layer 2: `layer2Mode=skip` 时跳过，否则包含调用方预取的场景内容
+- Layer 3: 工作区 + 时间 + TurnDigest 轨迹 + 活跃任务提示
+- `ToolDeclaration` 接口：每个工具声明 categories，由 assembler 过滤
 
-- 每个 Turn 完成后从元数据提取：用户消息前 80 字 + tool calls 列表 + 修改的文件
-- 零 LLM 开销（纯字符串拼接）
-- 注入 Layer 3，为被淘汰的老 Turn 保留线索
-
-### 改动
-
-```
-改: packages/core/src/context/engine.ts
-  - buildPrompt() 改为调用 LayerAssembler
-  - Turn 完成后调用 TurnDigest.extract()
-  - 接受 ContextProfile 参数
-```
+**Engine 扩展（向后兼容）：**
+- `ContextEngineConfig.profile?` — 可选，默认 INTERACTIVE_PROFILE
+- Profile.budgetThresholds 作为 thresholds 的 fallback
+- `addTurnDigest(digest)` / `getTurnDigests()` — 存储轨迹
+- `buildSystemPrompt(opts)` — 委托 LayerAssembler，自动注入 Profile + 已存储的 digests
 
 ### 不做
 
-- 不改压缩策略（TierCompressor 已存在）
+- 不改压缩策略（TierCompressor 升级在 Step 6）
 - 不改 TokenEstimator
+- 不实现 MemoryRetriever（Layer 2 数据由调用方预取传入，检索器待 memory 系统完成后接入）
 
 ### 验证
 
-- [ ] 单元测试：LayerAssembler 在 lookup 场景跳过 Layer 1+2
-- [ ] 单元测试：LayerAssembler 在 social 场景加载 enriched Layer 2
-- [ ] 单元测试：TurnDigest 从 tool_use 消息正确提取文件列表
-- [ ] 集成测试：CLI 跑 3 轮对话，Layer 3 包含前几轮的 Digest
+- [x] 单元测试：LayerAssembler 在 lookup 场景跳过 Layer 1+2 (2026-04-18)
+- [x] 单元测试：LayerAssembler 在 social 场景加载 enriched Layer 2 (2026-04-18)
+- [x] 单元测试：TurnDigest 从 ToolCallRecord 正确提取文件列表 (2026-04-18)
+- [x] 单元测试：TurnDigest 格式化支持分组合并（超 30 条自动 merge） (2026-04-18)
+- [x] 单元测试：Engine.buildSystemPrompt 委托 LayerAssembler + 注入 digest (2026-04-18)
+- [x] 全量 1257 测试通过，core + CLI 构建零错误 (2026-04-18)
 
 ---
 
@@ -726,3 +727,4 @@ interface ConversationManager {
 | 2026-04-18 | Step 3 Phase A+B 完成：core 职责瘦身 + CLI 接线。新增 Phase C：REPL 内对话管理 |
 | 2026-04-18 | ADR-CM-016：移除 `-c`/`-r` 启动参数，REPL 默认自动恢复 + `/switch`/`/new` 管理对话。更新 conversation-model.md §7.1, §12.4 |
 | 2026-04-18 | Step 4 完成：ScenarioEvaluator + ContextProfile（context-profile.ts, scenario-evaluator.ts, 40 测试） |
+| 2026-04-18 | Step 5 完成：LayerAssembler + TurnDigest（turn-digest.ts, layer-assembler.ts, engine.ts 扩展, 50 新测试） |

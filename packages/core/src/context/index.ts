@@ -14,7 +14,7 @@ export type {
 } from "./types.js";
 export { DEFAULT_THRESHOLDS, MAX_OUTPUT_RESERVE } from "./types.js";
 
-export type { ContextEngineConfig } from "./engine.js";
+export type { BuildSystemPromptOptions, ContextEngineConfig } from "./engine.js";
 export { ContextEngine, createContextEngine } from "./engine.js";
 
 export {
@@ -97,3 +97,22 @@ export {
   resolveCurrentHint,
   resolveInitialHint,
 } from "./scenario-evaluator.js";
+
+export type { TurnDigest } from "./turn-digest.js";
+export {
+  DIGEST_PREVIEW_CHARS,
+  MAX_DIGEST_COUNT,
+  extractTurnDigest,
+  formatDigestTrail,
+} from "./turn-digest.js";
+
+export type {
+  LayerAssemblerInput,
+  LayerResult,
+  ToolDeclaration,
+} from "./layer-assembler.js";
+export {
+  assembleLayers,
+  assembleSystemPrompt,
+  buildToolCatalog,
+} from "./layer-assembler.js";

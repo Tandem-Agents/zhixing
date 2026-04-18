@@ -1,12 +1,12 @@
 /**
- * 上下文引擎 — 预算检查 + 策略编排
+ * 上下文引擎 — 预算检查 + 策略编排 + 系统提示组装
  *
- * 将 TokenEstimator、Budget、CompactionStrategy 整合为统一的 ContextManager。
- * Agent Loop 在每轮结束后调用 onTurnComplete()，引擎自动完成：
- *   1. 估算当前 token 使用量
- *   2. 计算预算状态
- *   3. 如果需要压缩，按策略优先级执行
- *   4. 发射事件（预算检查、压缩开始/结束、校准）
+ * 将 TokenEstimator、Budget、CompactionStrategy、LayerAssembler 整合为统一的 ContextManager。
+ *
+ * 职责：
+ * 1. 预算管理：估算 token → 检查预算 → 按优先级执行压缩策略
+ * 2. 系统提示组装：通过 LayerAssembler 按 ContextProfile 参数组装四层 system prompt
+ * 3. Turn 轨迹：存储 TurnDigest，在 Layer 3 中注入面包屑轨迹
  *
  * 策略执行遵循成本优先级联原则：
  * - 先做免费操作（ToolResult 截断、消息丢弃）
@@ -28,15 +28,32 @@ import type {
 } from "./types.js";
 import { DEFAULT_THRESHOLDS } from "./types.js";
 import { calculateBudget, type ModelBudgetInfo } from "./budget.js";
+import { INTERACTIVE_PROFILE, type ContextProfile } from "./context-profile.js";
+import type { TurnDigest } from "./turn-digest.js";
+import type { ToolDeclaration } from "./layer-assembler.js";
+import { assembleSystemPrompt } from "./layer-assembler.js";
 
 // ─── 配置 ───
 
 export interface ContextEngineConfig {
   modelInfo: ModelBudgetInfo;
   thresholds?: BudgetThresholds;
+  /** 场景 Profile（决定预算阈值、系统提示组装行为）。默认 INTERACTIVE_PROFILE */
+  profile?: ContextProfile;
 }
 
 // ─── 引擎 ───
+
+/** system prompt 组装所需的可选参数 */
+export interface BuildSystemPromptOptions {
+  readonly identity: string;
+  readonly tools?: readonly ToolDeclaration[];
+  readonly userProfile?: string;
+  readonly sceneContent?: string;
+  readonly workspaceContext?: string;
+  readonly currentTime?: string;
+  readonly activeTaskHint?: string;
+}
 
 export class ContextEngine implements ContextManagerHook {
   private readonly estimator: ITokenEstimator;
@@ -44,6 +61,8 @@ export class ContextEngine implements ContextManagerHook {
   private readonly config: ContextEngineConfig;
   private readonly thresholds: BudgetThresholds;
   private readonly eventBus?: IEventBus<AgentEventMap>;
+  private readonly profile: ContextProfile;
+  private readonly digestHistory: TurnDigest[] = [];
 
   constructor(
     estimator: ITokenEstimator,
@@ -54,7 +73,9 @@ export class ContextEngine implements ContextManagerHook {
     this.estimator = estimator;
     this.strategies = [...strategies].sort((a, b) => a.priority - b.priority);
     this.config = config;
-    this.thresholds = config.thresholds ?? DEFAULT_THRESHOLDS;
+    this.thresholds =
+      config.thresholds ?? config.profile?.budgetThresholds ?? DEFAULT_THRESHOLDS;
+    this.profile = config.profile ?? INTERACTIVE_PROFILE;
     this.eventBus = eventBus;
   }
 
@@ -148,6 +169,40 @@ export class ContextEngine implements ContextManagerHook {
     }
 
     return { messages: messages as Message[], modified };
+  }
+
+  /**
+   * 记录一个 Turn 的轨迹摘要。
+   *
+   * 由 Agent Loop 或运行时在每轮完成后调用。
+   * 存储的 digest 会在 buildSystemPrompt() 中自动注入 Layer 3。
+   */
+  addTurnDigest(digest: TurnDigest): void {
+    this.digestHistory.push(digest);
+  }
+
+  /** 获取所有已记录的 Turn 轨迹摘要 */
+  getTurnDigests(): readonly TurnDigest[] {
+    return this.digestHistory;
+  }
+
+  /** 当前使用的 ContextProfile */
+  getProfile(): ContextProfile {
+    return this.profile;
+  }
+
+  /**
+   * 组装 system prompt（四层结构）。
+   *
+   * 委托 LayerAssembler，自动注入 Profile 和已存储的 TurnDigest。
+   * 调用方负责预取 userProfile / sceneContent 等数据。
+   */
+  buildSystemPrompt(opts: BuildSystemPromptOptions): string {
+    return assembleSystemPrompt({
+      profile: this.profile,
+      ...opts,
+      turnDigests: this.digestHistory,
+    });
   }
 }
 
