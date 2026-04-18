@@ -636,9 +636,9 @@ T=0   用户运行 zhixing(在 ~/dev/projectA 目录)
        │   作用域:project(基于 cwd 计算 projectId)
        ├─ 创建 CliChannel(in-process channel)
        ├─ 加载或创建 Conversation
-       │   - 无 -c/-r flag → 创建新 chat-20260417-1 conversation
-       │   - 有 --resume xyz → 加载 xyz
-       │   - 有 -c → 加载本项目最近一个
+       │   - 自动恢复本项目最近活跃对话（convRepo.findLatest()）
+       │   - 无历史对话 → 创建 default conversation
+       │   - REPL 内通过 /new、/switch 管理对话，不依赖启动参数
        ├─ ConversationManager.acquire(convId) → 创建 SessionRuntime #1
        ├─ CliChannel.registerConnection({ id: "cli-pid-12345", ... })
        └─ REPL 启动,prompt 显示当前对话名
@@ -984,7 +984,7 @@ interface ConversationRepository {
   archive(id: string, archived: boolean): Promise<Conversation>;
   delete(id: string): Promise<void>;
   ensureDefault(): Promise<Conversation>;
-  findLatest(): Promise<string | null>;      // list()[0].id — CLI --continue 用
+  findLatest(): Promise<string | null>;      // list()[0].id — REPL 启动时自动恢复用
   touch(id: string): Promise<void>;          // 更新 lastActiveAt — Turn 完成后调用
 }
 
@@ -1067,16 +1067,18 @@ interface ConversationToolInput {
 - 用户:"开个新对话聊运动健身" → AI 调 `conversation.create` + `switch`
 - 用户:"我们前几天聊过啥" → AI 调 `conversation.summary` 看摘要后回答
 
-### 12.4 CLI Flags
+### 12.4 CLI 启动行为
 
 ```bash
-zhixing                                # 默认对话(无 server 时项目级,有 server 时跟随)
-zhixing -k <id>                        # 启动并切到指定对话
-zhixing -c                             # 复用最近对话(逻辑不变)
-zhixing -r [id]                        # 恢复(逻辑不变)
-zhixing -n <name>                      # 启动时给当前对话命名
+zhixing                                # REPL：自动恢复最近对话（无历史则创建 default）
+zhixing -p "问题"                       # 单次模式：执行后退出（ephemeral，Step 8）
 zhixing rpc conversation.send --conversationId=work --text="..."
 ```
+
+> **设计决策（ADR-CM-016）：** 移除 `-c`/`-r`/`-k` 启动参数。
+> REPL 默认自动恢复最近对话，对话切换通过 REPL 内 `/switch` 完成。
+> 自动化场景走 Server RPC，不通过 CLI 启动参数路由。
+> 迁移计划：Step 8 清除遗留 `-c`/`-r` 代码。
 
 ---
 

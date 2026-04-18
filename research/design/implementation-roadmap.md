@@ -9,7 +9,7 @@
 | 0 | 词汇对齐 | ✅ 已完成 | 无 |
 | 1 | ConversationRepository | ✅ 已完成 | Step 0 |
 | 2 | TranscriptStore 适配 | ✅ 已完成 | Step 0, 1 |
-| 3 | CLI 对接 Conversation | 🔨 进行中 | Step 2 |
+| 3 | CLI 对接 Conversation | 🔨 进行中 (Phase A/B ✅, Phase C 待完成) | Step 2 |
 | 4 | ScenarioEvaluator + ContextProfile | 🔲 待开始 | Step 0 |
 | 5 | LayerAssembler + TurnDigest | 🔲 待开始 | Step 4 |
 | 6 | WindowManager + Pinning | 🔲 待开始 | Step 5 |
@@ -286,7 +286,7 @@ Turn:   store.appendTurn() + convRepo.touch()
   - 新增 paths.ts 导出
 ```
 
-### Phase B: CLI 接线
+### Phase B: CLI 接线 ✅
 
 ```
 改: packages/cli/src/repl.ts
@@ -294,13 +294,26 @@ Turn:   store.appendTurn() + convRepo.touch()
   - 初始化: 构造 ConversationRepository(scope) + TranscriptStore(convDir, cwd)
   - 新建对话: convRepo.create() → store.init(conversation.id)
   - 恢复对话: convRepo.findLatest() / convRepo.get() → store.load()
-  - /sessions → /conversations: 调 convRepo.list() 而非 store.list()
+  - /sessions 内部实现: 调 convRepo.list() 而非 store.list()
   - /name: 调 convRepo.rename() 而非 store.rename()
   - Turn 完成后: store.appendTurn() + convRepo.touch()
   - interactiveSessionPicker → interactiveConversationPicker, 入参改为 convRepo
-  - 新增: /new [name] — convRepo.create() + store.init() + 切换
+```
+
+### Phase C: REPL 内对话管理 + 启动行为
+
+**设计决策（ADR-CM-016）：** 对话选择不通过 CLI 启动参数，而是通过 REPL 内命令完成。
+
+- REPL 默认自动恢复最近对话（`convRepo.findLatest()`），无历史则创建 default
+- 自动化场景走 Server RPC，不走 CLI 启动参数
+- `-c`/`-r` 遗留代码在 Step 8 清除
+
+```
+改: packages/cli/src/repl.ts
+  - REPL 启动行为: 自动恢复最近对话，不再创建新 conversation
+  - /sessions → /conversations: 重命名命令
+  - 新增: /new [name] — convRepo.create() + store.init() + 切换到新对话
   - 新增: /switch [id] — 切换到指定 conversation（无参则交互选择）
-  - 新增: /conversations — 列出所有 conversations
 ```
 
 ### 不做
@@ -310,28 +323,31 @@ Turn:   store.appendTurn() + convRepo.touch()
 - 不改渲染层
 - 不改 security pipeline
 - 不碰 RPC/typeahead/serve 中的 `sessionId`（那是不同语义的 session 概念）
+- 不删 `-c`/`-r` 代码（Step 8 统一清除）
 
 ### 验证
 
 **Phase A (Core):**
 
-- [ ] `pnpm --filter @zhixing/core test` 全量通过
-- [ ] TranscriptStore 接口只有: init, appendTurn, appendCompact, load, countTurns, exists
-- [ ] ConversationRepository 接口包含: findLatest, touch
-- [ ] `getZhixingHome()` 和 `getProjectId()` 只在 paths.ts 定义一处
-- [ ] 无 `TranscriptInfo` 类型残留
+- [x] `pnpm --filter @zhixing/core test` 全量通过 (2026-04-18)
+- [x] TranscriptStore 接口只有: init, appendTurn, appendCompact, load, countTurns, exists (2026-04-18)
+- [x] ConversationRepository 接口包含: findLatest, touch (2026-04-18)
+- [x] `getZhixingHome()` 和 `getProjectId()` 只在 paths.ts 定义一处 (2026-04-18)
+- [x] 无 `TranscriptInfo` 类型残留 (2026-04-18)
 
-**Phase B (CLI):**
+**Phase B (CLI 接线):**
 
-- [ ] `pnpm --filter @zhixing/cli build` 零错误
-- [ ] `pnpm cli` 启动 → 自动创建 conversation + transcript
+- [x] `pnpm --filter @zhixing/cli build` 零错误 (2026-04-18)
+- [x] `/name 新名称` → meta.json 更新，transcript.jsonl 不变 (2026-04-18)
+- [x] 多轮对话后 meta.json 的 lastActiveAt 持续更新 (2026-04-18)
+
+**Phase C (REPL 对话管理):**
+
+- [ ] `pnpm cli` 启动 → 自动恢复最近对话（无历史则创建 default）
 - [ ] `/conversations` → 列表显示（数据来自 convRepo）
-- [ ] `/name 新名称` → meta.json 更新，transcript.jsonl 不变
 - [ ] `/new "测试"` → 创建并切换到新 conversation
 - [ ] `/switch` → 交互选择并切换，历史完整加载
-- [ ] 退出后 `-c` → 恢复上次 conversation（通过 convRepo.findLatest）
-- [ ] 退出后 `-r` → 交互选择 conversation
-- [ ] 多轮对话后 meta.json 的 lastActiveAt 持续更新
+- [ ] `/switch <id>` → 直接切换到指定对话
 
 ---
 
@@ -574,6 +590,8 @@ interface ConversationManager {
 改: packages/core/src/conversation/repository.ts   — 支持 ephemeral 标记
 改: packages/server/src/runtime/session-runtime.ts  — auto-promote 检测
 改: packages/cli/src/run-agent.ts                   — -p 模式创建 ephemeral
+改: packages/cli/src/index.ts                       — 移除 -c/-r 启动参数（ADR-CM-016）
+改: packages/cli/src/repl.ts                        — 清除 -c/-r 相关代码路径
 ```
 
 ### Ephemeral 规则 (spec §6)
@@ -626,3 +644,5 @@ interface ConversationManager {
 | 2026-04-18 | 初始版本：Step 0-8 计划制定 |
 | 2026-04-18 | Step 0 词汇对齐完成；Step 1 ConversationRepository 完成 |
 | 2026-04-18 | Step 2 TranscriptStore 适配完成：conversationId 统一、新路径结构、旧 sessionId 在序列化边界迁移 |
+| 2026-04-18 | Step 3 Phase A+B 完成：core 职责瘦身 + CLI 接线。新增 Phase C：REPL 内对话管理 |
+| 2026-04-18 | ADR-CM-016：移除 `-c`/`-r` 启动参数，REPL 默认自动恢复 + `/switch`/`/new` 管理对话。更新 conversation-model.md §7.1, §12.4 |
