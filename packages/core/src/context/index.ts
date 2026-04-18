@@ -70,3 +70,30 @@ export {
   REQUIRED_SUB_SECTIONS,
   validateSummary,
 } from "./validation.js";
+
+export type {
+  ContextProfile,
+  ExhaustedAction,
+  ScenarioHint,
+  TierThresholds,
+  ToolCategory,
+} from "./context-profile.js";
+export {
+  AUTONOMOUS_PROFILE,
+  INTERACTIVE_PROFILE,
+  LOOKUP_PROFILE,
+  hintLevel,
+  hintToProfile,
+} from "./context-profile.js";
+
+export type {
+  CurrentHintContext,
+  InitialHintContext,
+  KeywordClassification,
+} from "./scenario-evaluator.js";
+export {
+  classifyByKeywords,
+  evaluateScenario,
+  resolveCurrentHint,
+  resolveInitialHint,
+} from "./scenario-evaluator.js";

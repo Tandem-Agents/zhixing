@@ -11,7 +11,7 @@
 | 2 | TranscriptStore 适配 | ✅ 已完成 | Step 0, 1 |
 | 3 | CLI 对接 Conversation | ✅ 已完成 | Step 2 |
 | 3b | Transcript 段轮转 | 🔲 待开始 | Step 3 |
-| 4 | ScenarioEvaluator + ContextProfile | 🔲 待开始 | Step 0 |
+| 4 | ScenarioEvaluator + ContextProfile | ✅ 已完成 | Step 0 |
 | 5 | LayerAssembler + TurnDigest | 🔲 待开始 | Step 4 |
 | 6 | WindowManager + Pinning | 🔲 待开始 | Step 5 |
 | 7 | ConversationManager + SessionRuntime | 🔲 待开始 | Step 3, 6 |
@@ -427,39 +427,24 @@ Turn:   store.appendTurn() + convRepo.touch()
 
 **性质：** 纯新代码，不改现有 context 逻辑
 
-### 新建文件
+### 新建/改动文件
 
 ```
-packages/core/src/context/scenario-evaluator.ts   — Turn 1 场景分类
-packages/core/src/context/context-profile.ts      — 场景 → 参数映射
-packages/core/src/__tests__/scenario-evaluator.test.ts
+新建: packages/core/src/context/context-profile.ts      — ScenarioHint + ToolCategory + ContextProfile + 3 内建 Profile + hintToProfile
+新建: packages/core/src/context/scenario-evaluator.ts    — 关键词分类器 + resolveInitialHint + resolveCurrentHint + evaluateScenario
+新建: packages/core/src/context/__tests__/scenario-evaluator.test.ts  — 40 个测试用例
+改:   packages/core/src/conversation/types.ts            — Conversation 新增 currentHint?: ScenarioHint
+改:   packages/core/src/context/index.ts                 — 导出新模块
 ```
 
-### 场景分类 (spec §3.1.1)
+### 实现要点
 
-```
-lookup       — 快速查询，最小上下文
-interactive  — 常规交互，标准配置
-social       — 涉及人际/关系，加载 people + relations
-autonomous   — 后台任务，任务专用工具集
-```
-
-### 关键规则
-
-- 仅 Turn 1 执行分类（基于首条用户消息的关键词/模式匹配，不调 LLM）
-- Sticky：分类结果写入 `Conversation.currentHint`
-- 单调升级：只能从低到高 (lookup → interactive → social → autonomous)
-
-### ContextProfile 输出
-
-```typescript
-interface ContextProfile {
-  loadProfile: boolean;        // 是否加载用户 profile
-  layer2Strategy: 'skip' | 'basic' | 'enriched' | 'minimal';
-  toolScope: 'query' | 'all' | 'task-specific';
-  budgetThresholds: { warning: number; compact: number; critical: number };
-}
-```
+- **ContextProfile 完全参数化**：name / includeProfile / layer2Mode / toolCategories / budgetThresholds / tierThresholds / onExhausted
+- **三个内建 Profile**：INTERACTIVE（social 复用，layer2Mode=enriched）/ AUTONOMOUS / LOOKUP
+- **关键词分类器**：中英文双语 pattern 匹配，social 优先于 lookup，长消息/代码任务自动排除 lookup
+- **hint 生命周期**：Turn 1 初始分类 → Sticky → 单调升级（lookup < interactive < social）
+- **autonomous 运行时不可变**：由业务代码硬编码，resolveCurrentHint 直接 early return
+- **evaluateScenario** 便捷入口：根据 turnCount 自动选择初始分类或当前解析
 
 ### 不做
 
@@ -468,11 +453,13 @@ interface ContextProfile {
 
 ### 验证
 
-- [ ] 单元测试："今天天气怎么样" → lookup
-- [ ] 单元测试："帮我重构这个函数" → interactive
-- [ ] 单元测试："给张三发消息" → social
-- [ ] 单元测试：升级规则 lookup→interactive 可以，interactive→lookup 不可以
-- [ ] 单元测试：ContextProfile 各场景输出参数正确
+- [x] 单元测试："今天天气怎么样" → lookup (2026-04-18)
+- [x] 单元测试："帮我重构这个函数" → interactive (2026-04-18)
+- [x] 单元测试："给张三发消息" → social (2026-04-18)
+- [x] 单元测试：升级规则 lookup→interactive 可以，interactive→lookup 不可以 (2026-04-18)
+- [x] 单元测试：ContextProfile 各场景输出参数正确 (2026-04-18)
+- [x] 单元测试：autonomous 运行时不可变 (2026-04-18)
+- [x] 全量 1198 测试通过，core + CLI 构建零错误 (2026-04-18)
 
 ---
 
@@ -738,3 +725,4 @@ interface ConversationManager {
 | 2026-04-18 | Step 2 TranscriptStore 适配完成：conversationId 统一、新路径结构、旧 sessionId 在序列化边界迁移 |
 | 2026-04-18 | Step 3 Phase A+B 完成：core 职责瘦身 + CLI 接线。新增 Phase C：REPL 内对话管理 |
 | 2026-04-18 | ADR-CM-016：移除 `-c`/`-r` 启动参数，REPL 默认自动恢复 + `/switch`/`/new` 管理对话。更新 conversation-model.md §7.1, §12.4 |
+| 2026-04-18 | Step 4 完成：ScenarioEvaluator + ContextProfile（context-profile.ts, scenario-evaluator.ts, 40 测试） |
