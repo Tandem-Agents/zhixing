@@ -311,9 +311,14 @@ Turn:   store.appendTurn() + convRepo.touch()
 ```
 改: packages/cli/src/repl.ts
   - REPL 启动行为: 自动恢复最近对话，不再创建新 conversation
-  - /sessions → /conversations: 重命名命令
-  - 新增: /new [name] — convRepo.create() + store.init() + 切换到新对话
-  - 新增: /switch [id] — 切换到指定 conversation（无参则交互选择）
+  - /switch 成为对话列表+切换的统一入口:
+    - typeahead async-enum 参数补全: 用户选完 /switch 后 dropdown 自动展示对话列表
+    - /switch <text>: 按 ID 精确匹配 + 按名称模糊匹配（legacy 模式兜底）
+    - /switch（无参、legacy 模式）: 显示编号列表 + 提示语
+  - /conversations → hidden 别名（保留向后兼容，不出现在 typeahead 菜单）
+  - /new [name]: convRepo.create() + store.init() + 切换到新对话
+  - 实现 ConversationArgProvider (ArgChoiceProvider): 查询 convRepo.list() 生成候选
+  - REPL_COMMANDS 注册 /switch 时声明 args: [{ kind: "async-enum", required: true }]
 ```
 
 ### 不做
@@ -344,10 +349,10 @@ Turn:   store.appendTurn() + convRepo.touch()
 **Phase C (REPL 对话管理):**
 
 - [ ] `pnpm cli` 启动 → 自动恢复最近对话（无历史则创建 default）
-- [ ] `/conversations` → 列表显示（数据来自 convRepo）
+- [ ] `/switch` 在 typeahead 中选中后 → dropdown 自动切换为对话列表（ArgumentProvider async-enum）
+- [ ] `/switch 测试` → 按名称模糊匹配并切换（legacy 模式和手动输入兜底）
 - [ ] `/new "测试"` → 创建并切换到新 conversation
-- [ ] `/switch` → 交互选择并切换，历史完整加载
-- [ ] `/switch <id>` → 直接切换到指定对话
+- [ ] `/conversations` 作为 hidden 别名仍可用，不出现在 typeahead 菜单
 
 ---
 

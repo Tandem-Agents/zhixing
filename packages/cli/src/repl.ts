@@ -40,6 +40,10 @@ import {
   UsageTracker,
   type CommandHandlerContext,
   type RuntimeContext,
+  type ArgChoiceProvider,
+  type ArgQueryContext,
+  type ArgChoice,
+  type ArgSchema,
   Scheduler,
   JsonTaskStore,
   createEventBus,
@@ -155,15 +159,15 @@ function buildSlashCommands(rl: readline.Interface): Record<
         );
       },
     },
-    "/sessions": {
-      description: "列出当前项目的会话",
+    "/conversations": {
+      description: "列出当前项目的对话",
       handler: async (state) => {
         const conversations = await state.convRepo.list();
         if (conversations.length === 0) {
-          console.log(chalk.dim("\n  没有保存的会话\n"));
+          console.log(chalk.dim("\n  没有保存的对话\n"));
           return;
         }
-        console.log(`\n${chalk.bold("  保存的会话：")}`);
+        console.log(`\n${chalk.bold("  保存的对话：")}`);
         for (const c of conversations.slice(0, 15)) {
           const label = c.name ? chalk.white(c.name) : chalk.dim("(未命名)");
           const time = formatRelativeTime(new Date(c.lastActiveAt));
@@ -175,6 +179,133 @@ function buildSlashCommands(rl: readline.Interface): Record<
           );
         }
         console.log();
+      },
+    },
+    "/new": {
+      description: "创建新对话",
+      handler: async (state, args) => {
+        const name = args.trim() || undefined;
+        try {
+          const conversation = await state.convRepo.create({
+            name,
+            preferredModel: state.agent.model,
+            preferredProvider: state.agent.providerId,
+          });
+          await state.store.init(conversation.id, {
+            model: state.agent.model,
+            provider: state.agent.providerId,
+          });
+          state.messages = [];
+          state.conversationId = conversation.id;
+          state.turnCounter = 0;
+          state.lastToolEndCount = 0;
+          console.log(
+            chalk.dim(`\n  已创建新对话 ${chalk.cyan(conversation.name)}\n`),
+          );
+        } catch (err) {
+          console.log(
+            chalk.red(
+              `\n  创建对话失败: ${err instanceof Error ? err.message : String(err)}\n`,
+            ),
+          );
+        }
+      },
+    },
+    "/switch": {
+      description: "切换到其他对话",
+      handler: async (state, args) => {
+        const input = args.trim();
+        if (!input) {
+          const conversations = await state.convRepo.list();
+          if (conversations.length === 0) {
+            console.log(chalk.dim("\n  没有可切换的对话\n"));
+            return;
+          }
+          console.log(`\n${chalk.bold("  可用对话：")}`);
+          for (let i = 0; i < Math.min(conversations.length, 15); i++) {
+            const c = conversations[i]!;
+            const label = c.name ? chalk.white(c.name) : chalk.dim("(未命名)");
+            const time = formatRelativeTime(new Date(c.lastActiveAt));
+            const turnCount = await state.store.countTurns(c.id);
+            const current =
+              c.id === state.conversationId ? chalk.green(" ← 当前") : "";
+            console.log(
+              `  ${chalk.yellow(`[${i + 1}]`)} ${label} ${chalk.dim(`(${time}, ${turnCount} 轮)`)}${current}`,
+            );
+          }
+          console.log(chalk.dim(`\n  使用 /switch <序号> 或 /switch <名称> 切换\n`));
+          return;
+        }
+        if (input === state.conversationId) {
+          console.log(chalk.dim("\n  已在当前对话中\n"));
+          return;
+        }
+
+        const conversations = await state.convRepo.list();
+
+        // 按序号选择
+        const num = Number(input);
+        let target: { id: string; name: string } | null = null;
+        if (Number.isInteger(num) && num >= 1 && num <= conversations.length) {
+          const c = conversations[num - 1]!;
+          target = { id: c.id, name: c.name };
+        }
+
+        // 按 ID 精确匹配
+        if (!target) {
+          const conv = await state.convRepo.get(input);
+          if (conv) target = { id: conv.id, name: conv.name };
+        }
+
+        // 按名称模糊匹配
+        if (!target) {
+          const lowerInput = input.toLowerCase();
+          const matches = conversations.filter(
+            (c) => c.name.toLowerCase().includes(lowerInput),
+          );
+          if (matches.length === 1) {
+            target = { id: matches[0]!.id, name: matches[0]!.name };
+          } else if (matches.length > 1) {
+            console.log(`\n${chalk.bold("  多个匹配：")}`);
+            for (let i = 0; i < Math.min(matches.length, 10); i++) {
+              const c = matches[i]!;
+              const time = formatRelativeTime(new Date(c.lastActiveAt));
+              console.log(
+                `  ${chalk.yellow(`[${i + 1}]`)} ${chalk.white(c.name)} ${chalk.dim(`(${time})`)}`,
+              );
+            }
+            console.log(chalk.dim(`\n  请使用更精确的名称或 /switch <序号>\n`));
+            return;
+          }
+        }
+
+        if (!target) {
+          console.log(chalk.red(`\n  对话 "${input}" 不存在\n`));
+          return;
+        }
+        if (target.id === state.conversationId) {
+          console.log(chalk.dim("\n  已在当前对话中\n"));
+          return;
+        }
+
+        try {
+          const loaded = await state.store.load(target.id);
+          state.messages = loaded.messages;
+          state.conversationId = target.id;
+          state.turnCounter = loaded.turnCount;
+          state.lastToolEndCount = 0;
+          console.log(
+            chalk.dim(
+              `\n  已切换到 ${chalk.cyan(target.name)}（${loaded.turnCount} 轮对话）\n`,
+            ),
+          );
+        } catch (err) {
+          console.log(
+            chalk.red(
+              `\n  加载对话失败: ${err instanceof Error ? err.message : String(err)}\n`,
+            ),
+          );
+        }
       },
     },
     "/name": {
@@ -559,23 +690,9 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   let conversationId: string | null = null;
   let turnCounter = 0;
 
-  // 处理会话恢复
-  if (options.continue) {
-    const latest = await convRepo.findLatest();
-    if (latest) {
-      const loaded = await store.load(latest);
-      messages = loaded.messages;
-      conversationId = latest;
-      turnCounter = loaded.turnCount;
-      console.log(
-        chalk.dim(
-          `\n  已恢复会话 ${chalk.cyan(latest)}（${loaded.turnCount} 轮对话）\n`,
-        ),
-      );
-    } else {
-      console.log(chalk.dim("\n  没有找到可恢复的会话，开始新对话\n"));
-    }
-  } else if (options.resume !== undefined) {
+  // ADR-CM-016: 默认自动恢复最近对话
+  // -r (显式指定 ID 恢复) 保留到 Step 8 清除；-c 已被默认行为取代
+  if (options.resume !== undefined) {
     if (typeof options.resume === "string") {
       const conv = await convRepo.get(options.resume);
       if (!conv) {
@@ -589,19 +706,18 @@ export async function startRepl(options: ReplOptions): Promise<void> {
         turnCounter = loaded.turnCount;
         console.log(
           chalk.dim(
-            `\n  已恢复会话 ${chalk.cyan(options.resume)}（${loaded.turnCount} 轮对话）\n`,
+            `\n  已恢复对话 ${chalk.cyan(conv.name)}（${loaded.turnCount} 轮）\n`,
           ),
         );
       } catch (err) {
         console.log(
           chalk.red(
-            `\n  无法恢复会话 ${options.resume}: ${err instanceof Error ? err.message : String(err)}\n`,
+            `\n  无法恢复对话 ${options.resume}: ${err instanceof Error ? err.message : String(err)}\n`,
           ),
         );
         return;
       }
     } else {
-      // --resume 不带 ID → 交互式选择
       conversationId = await interactiveConversationPicker(convRepo);
       if (conversationId) {
         const loaded = await store.load(conversationId);
@@ -609,11 +725,27 @@ export async function startRepl(options: ReplOptions): Promise<void> {
         turnCounter = loaded.turnCount;
         console.log(
           chalk.dim(
-            `\n  已恢复会话 ${chalk.cyan(conversationId)}（${loaded.turnCount} 轮对话）\n`,
+            `\n  已恢复对话 ${chalk.cyan(conversationId)}（${loaded.turnCount} 轮）\n`,
           ),
         );
-      } else {
-        console.log(chalk.dim("\n  开始新对话\n"));
+      }
+    }
+  } else {
+    const latest = await convRepo.findLatest();
+    if (latest) {
+      try {
+        const loaded = await store.load(latest);
+        messages = loaded.messages;
+        conversationId = latest;
+        turnCounter = loaded.turnCount;
+        const conv = await convRepo.get(latest);
+        console.log(
+          chalk.dim(
+            `\n  已恢复对话 ${chalk.cyan(conv?.name ?? latest)}（${loaded.turnCount} 轮）\n`,
+          ),
+        );
+      } catch {
+        // transcript 加载失败 → 降级到创建新对话
       }
     }
   }
@@ -721,6 +853,45 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     );
     typeaheadDispatcher = new CommandDispatcher({ registry: tRegistry });
 
+    // ── ConversationArgProvider: /switch 的 async-enum 参数补全 ──
+    //
+    // 实现 ArgChoiceProvider 接口，查询 convRepo.list() 生成对话候选。
+    // 通过闭包捕获 state（convRepo + store），无需额外依赖注入。
+    const conversationArgProvider: ArgChoiceProvider = {
+      async list(
+        ctx: ArgQueryContext,
+        signal: AbortSignal,
+      ): Promise<readonly ArgChoice[]> {
+        const conversations = await state.convRepo.list();
+        if (signal.aborted) return [];
+
+        const query = ctx.query.toLowerCase();
+        const choices: ArgChoice[] = [];
+        for (const c of conversations.slice(0, 15)) {
+          if (query && !c.name.toLowerCase().includes(query) && !c.id.toLowerCase().includes(query)) {
+            continue;
+          }
+          const time = formatRelativeTime(new Date(c.lastActiveAt));
+          const turnCount = await state.store.countTurns(c.id);
+          const current = c.id === state.conversationId ? " ← 当前" : "";
+          choices.push({
+            value: c.id,
+            label: c.name || c.id,
+            description: `${time}, ${turnCount} 轮${current}`,
+          });
+        }
+        return choices;
+      },
+    };
+
+    const switchArgSchema: ArgSchema = {
+      kind: "async-enum",
+      name: "conversation",
+      description: "目标对话名称或 ID",
+      required: true,
+      provider: conversationArgProvider,
+    };
+
     // ── REPL 命令目录：typeahead panel 的单源真相 ──
     //
     // 每一条对应一个 legacy `slashCommands` 的 key，跑 local execution，
@@ -731,11 +902,14 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       readonly description: string;
       readonly category: "session" | "info" | "tools" | "config";
       readonly legacyKey: string;
+      readonly args?: readonly ArgSchema[];
+      readonly hidden?: boolean;
     }> = [
       // ─ session ─
-      { name: "new", aliases: ["reset"], description: "开始新会话（清空历史）", category: "session", legacyKey: "/clear" },
+      { name: "new", description: "创建新对话", category: "session", legacyKey: "/new" },
       { name: "clear", description: "清空对话历史", category: "session", legacyKey: "/clear" },
-      { name: "sessions", description: "列出当前项目的会话", category: "session", legacyKey: "/sessions" },
+      { name: "conversations", aliases: ["sessions"], description: "列出当前项目的对话", category: "session", legacyKey: "/conversations", hidden: true },
+      { name: "switch", description: "切换到其他对话", category: "session", legacyKey: "/switch", args: [switchArgSchema] },
       { name: "name", description: "为当前会话命名", category: "session", legacyKey: "/name" },
       { name: "exit", aliases: ["quit"], description: "退出知行", category: "session", legacyKey: "/exit" },
       // ─ info ─
@@ -768,6 +942,8 @@ export async function startRepl(options: ReplOptions): Promise<void> {
         category: cmd.category,
         execution: "local",
         tag: "builtin",
+        args: cmd.args ? [...cmd.args] : undefined,
+        hidden: cmd.hidden,
       });
       typeaheadDispatcher.registerHandler(id, async (ctx: CommandHandlerContext) => {
         const rest =

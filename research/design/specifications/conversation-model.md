@@ -942,15 +942,22 @@ interface BackgroundSpawnOptions {
 
 | 命令                     | 用途              | 备注                                              |
 | ---------------------- | --------------- | ----------------------------------------------- |
-| `/list`                | 列出所有对话(默认隐藏归档)  | alias: `/conversations`,`/sessions`(deprecated) |
+| `/switch <id-or-name>` | 列出对话 + 切换到已有对话  | CLI 统一入口: typeahead async-enum 参数补全展示对话列表; 无参时显示编号列表; 支持 ID 精确匹配和名称模糊匹配 |
 | `/new <name>`          | 创建新对话并切换        | **当前 `/new` 是 `/clear` 别名,需要重新分配语义**            |
-| `/switch <id-or-name>` | 切换到已有对话         |                                                 |
 | `/rename <new-name>`   | 重命名当前对话         |                                                 |
 | `/archive [id]`        | 归档(默认归档当前)      |                                                 |
 | `/delete <id>`         | 删除(不可删 default) | 移入回收站                                           |
 | `/history [n]`         | 查看当前对话最近 n 轮    |                                                 |
 | `/clear`               | 清空当前对话内存历史      | 写入 compact 行,旧消息仍在文件                            |
+| `/list`                | `/switch` 无参别名   | hidden; alias: `/conversations`,`/sessions`(deprecated) |
 
+**CLI UX 合并决策（S3.C 实施）：**
+
+在 CLI 模式下,"列出对话"和"切换对话"是同一个用户意图的连续动作——用户看列表几乎必然是为了选一个。因此 `/switch` 同时承担列表和切换功能:
+- **typeahead 模式**: 用户选中 `/switch` 后,ArgumentProvider 的 async-enum 自动展示对话列表作为参数候选,用户箭头选择后直接切换
+- **legacy 模式 / 手动输入**: `/switch <text>` 按名称模糊匹配;`/switch`（无参）显示编号列表 + 提示
+- `/list` / `/conversations` / `/sessions` 保留为 hidden 别名,不出现在 typeahead 菜单
+- Server 模式未来可使用独立的 UI 控件（下拉框/弹窗）,核心查询逻辑在 `ConversationRepository` 层复用
 
 `**/new` 语义迁移**(S2.7 实施):
 
