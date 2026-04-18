@@ -1180,11 +1180,11 @@ type ServerEvents = {
 
 ## 十一、渐进实现路线
 
-每步独立可验证。v2.0 插入 S2.5 和 S3.5 两个新阶段。
+每步独立可验证。v2.0 插入 S2.5 和 S3.5。**v2.1（2026-04-17）插入 S2.7：在 S2.5 前必须先统一会话语义,详见 [conversation-model.md §13](./conversation-model.md#十三渐进实现路线)。**
 
 ```
-S1 Scheduler 核心 ──→ S2 Server 模式 ──→ S2.5 AgentOrchestrator ──→ S3 Delivery Pipeline
-     (调度逻辑)          (前台运行)        (背景Agent + 编排)          (投递 + 免打扰)
+S1 Scheduler 核心 ──→ S2 Server 模式 ──→ S2.7 对话模型统一 ──→ S2.5 AgentOrchestrator ──→ S3 Delivery Pipeline
+     (调度逻辑)          (前台运行)         (Conversation/Runtime/Transcript)   (背景Agent + 编排)          (投递 + 免打扰)
                               │                 │                          │
                               │                 │                          │
                               │                 ▼                          │
@@ -1927,6 +1927,9 @@ interface ScheduleToolInput {
 - 每级的实现独立：Level 1 不依赖 Level 2 的代码
 
 ### ADR-017: 为什么 TaskAction 只有两种
+
+> ⚠️ **修订（2026-04-17）**：本 ADR 中的 `sessionId` 字段在 [conversation-model.md ADR-CM-006](./conversation-model.md#adr-cm-006) 中被重新定义为 `conversationId`,默认 `undefined`(临时一次性 runtime,不写入任何 Transcript)。"持续性会话"语义改为"显式归入指定 Conversation"——避免高频任务污染对话历史。
+
 
 **背景**：OpenClaw 的 Cron 有 sessionTarget（main/isolated/current/session:xxx）、wakeMode（now/next-heartbeat）、payload（systemEvent/agentTurn）多个维度的组合。
 

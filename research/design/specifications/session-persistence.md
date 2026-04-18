@@ -3,6 +3,13 @@
 > **状态**: 📐 方案设计（2026-04-09）
 > **前置**: Agent Loop 完成、消息类型已定义
 > **关联**: phase2-complete-agent.md Phase 2C、ADR-005 决策 6
+>
+> ⚠️ **概念升级（2026-04-17）**：本文档定义的 JSONL 持久化层在 [conversation-model.md](./conversation-model.md) 中被重新定位为 **Transcript 持久化层**——它是 Conversation 概念的磁盘表示。本文档定义的格式（Header / Turn / Compact）和路径策略**完全保留**,仅术语映射如下：
+> - 旧 `SessionStore` → 新 `TranscriptStore`
+> - 旧 `SessionHeader.sessionId` → 新 `Transcript.conversationId`
+> - 路径调整与作用域见 [conversation-model.md §6](./conversation-model.md)
+>
+> 阅读顺序：先看 [conversation-model.md](./conversation-model.md) 理解概念分层,再看本文档了解持久化细节。
 
 ## 一、竞品方案对比
 

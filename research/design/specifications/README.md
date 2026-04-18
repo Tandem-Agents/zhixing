@@ -16,6 +16,8 @@
 | 006 | 安全确认交互 | [confirmation-ux.md](confirmation-ux.md) | 待审阅 |
 | 007 | 输入补全 | [input-typeahead.md](input-typeahead.md) | 待审阅 |
 | 008 | Server Gateway | [server-gateway.md](server-gateway.md) | 待审阅 |
+| 009 | 对话模型（Conversation / SessionRuntime / Transcript） | [conversation-model.md](conversation-model.md) | 设计中 |
+| 010 | 上下文架构（场景参数化 + 多级压缩 + LLM 兜底 + Turn Digest） | [context-architecture.md](context-architecture.md) | 设计中 |
 
 ## 编写规范
 
