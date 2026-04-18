@@ -108,14 +108,26 @@ export function parseRecords(content: string): {
 
 // ─── 类型守卫 ───
 
+/**
+ * 判断并归一化 header。旧文件用 sessionId，新文件用 conversationId。
+ * 读取时统一映射为 conversationId，写入时只写 conversationId。
+ */
 function isTranscriptHeader(value: unknown): value is TranscriptHeader {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    (value as Record<string, unknown>).type === "header" &&
-    typeof (value as Record<string, unknown>).sessionId === "string" &&
-    typeof (value as Record<string, unknown>).version === "number"
-  );
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    (value as Record<string, unknown>).type !== "header" ||
+    typeof (value as Record<string, unknown>).version !== "number"
+  ) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  // 旧格式迁移：sessionId → conversationId
+  if (typeof record.sessionId === "string" && !record.conversationId) {
+    record.conversationId = record.sessionId;
+    delete record.sessionId;
+  }
+  return typeof record.conversationId === "string";
 }
 
 function isTurn(value: unknown): value is Turn {

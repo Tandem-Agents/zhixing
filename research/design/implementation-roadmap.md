@@ -7,9 +7,9 @@
 | Step | 名称 | 状态 | 依赖 |
 |------|------|------|------|
 | 0 | 词汇对齐 | ✅ 已完成 | 无 |
-| 1 | ConversationRepository | 🔲 待开始 | Step 0 |
-| 2 | TranscriptStore 适配 | 🔲 待开始 | Step 0, 1 |
-| 3 | CLI 对接 Conversation | 🔲 待开始 | Step 2 |
+| 1 | ConversationRepository | ✅ 已完成 | Step 0 |
+| 2 | TranscriptStore 适配 | ✅ 已完成 | Step 0, 1 |
+| 3 | CLI 对接 Conversation | 🔨 进行中 | Step 2 |
 | 4 | ScenarioEvaluator + ContextProfile | 🔲 待开始 | Step 0 |
 | 5 | LayerAssembler + TurnDigest | 🔲 待开始 | Step 4 |
 | 6 | WindowManager + Pinning | 🔲 待开始 | Step 5 |
@@ -153,11 +153,11 @@ interface ConversationRepository {
 
 ### 验证
 
-- [ ] 单元测试：create → get 一致
-- [ ] 单元测试：getDefault 自动创建
-- [ ] 单元测试：list 按 scope 隔离
-- [ ] 单元测试：archive 后 list 不返回
-- [ ] 单元测试：rename/delete 正常
+- [x] 单元测试：create → get 一致 (2026-04-18)
+- [x] 单元测试：getDefault 自动创建 (2026-04-18)
+- [x] 单元测试：list 按 scope 隔离 (2026-04-18)
+- [x] 单元测试：archive 后 list 不返回 (2026-04-18)
+- [x] 单元测试：rename/delete 正常 (2026-04-18)
 
 ---
 
@@ -167,58 +167,140 @@ interface ConversationRepository {
 
 **性质：** 接口微调 + 路径变更，JSONL 格式和原子写入逻辑零修改
 
-**规格引用：** [conversation-model.md](specifications/conversation-model.md) §5 Turn + §8 TranscriptStore
+**规格引用：** [conversation-model.md](specifications/conversation-model.md) §5 Turn + §9 Transcript 持久化
 
 ### 改动
 
 ```
-改: packages/core/src/transcript/store.ts
-  - 方法签名: appendTurn(sessionId, turn) → appendTurn(conversationId, turn)
-  - 存储路径: sessions/<id>.jsonl → conversations/<id>/transcript.jsonl
-  - 接受 ConversationRepository 注入 (获取 conversation 路径)
 改: packages/core/src/transcript/types.ts
-  - TranscriptHeader 增加 conversationId 字段
+  - TranscriptHeader: sessionId → conversationId (唯一 ID 字段，无双字段)
+  - TranscriptInfo: sessionId → conversationId
+  - CreateTranscriptOptions: sessionId → conversationId
+  - ITranscriptStore: 所有参数名 sessionId → conversationId
+
+改: packages/core/src/transcript/store.ts
+  - 构造函数: TranscriptStore(cwd) → TranscriptStore(conversationsDir, projectPath)
+  - 存储路径: sessions/<id>.jsonl → conversations/<id>/transcript.jsonl
+  - conversationsDir 由调用方根据 scope 注入，Store 不感知 scope 逻辑
+
+改: packages/core/src/transcript/serializer.ts
+  - isTranscriptHeader 类型守卫：旧 JSONL 的 sessionId 在读取时迁移为 conversationId
+  - 迁移发生在序列化边界，不污染类型系统
 ```
+
+### 设计决策
+
+- **无双字段：** `sessionId` 从类型系统中彻底移除，不保留 optional 兼容字段
+- **无双路径：** 只有一种路径策略 `<conversationsDir>/<id>/transcript.jsonl`
+- **旧格式兼容在序列化边界：** `isTranscriptHeader()` 类型守卫检测 `sessionId` 并自动映射为 `conversationId`，对上层完全透明
 
 ### 不做
 
 - 不改 JSONL 行格式
 - 不改原子写入逻辑
 - 不改 CLI 调用方（Step 3 做）
+- 不改 TranscriptStore 的方法集合（Step 3 做职责瘦身）
 
 ### 验证
 
-- [ ] 现有 transcript 测试全部通过（适配新接口）
-- [ ] 写入路径正确落在 `conversations/<id>/transcript.jsonl`
-- [ ] TranscriptHeader 包含 conversationId
+- [x] 现有 transcript 测试全部通过（适配新接口） (2026-04-18)
+- [x] 写入路径正确落在 `conversations/<id>/transcript.jsonl` (2026-04-18)
+- [x] TranscriptHeader 只有 `conversationId`，无 `sessionId` 字段 (2026-04-18)
+- [x] 旧格式 `sessionId` JSONL 解析后自动迁移为 `conversationId` (2026-04-18)
 
 ---
 
 ## Step 3: CLI 对接 Conversation
 
-**目标：** CLI 使用 ConversationRepository 管理对话身份，支持多会话
+**目标：** 建立 ConversationRepository（身份）与 TranscriptStore（内容）的清晰职责边界，CLI 通过协调两者完成对话生命周期管理
 
-**性质：** 适配现有 CLI 代码
+**性质：** Core 层职责瘦身 + CLI 层接线 + 新斜杠命令
 
-**规格引用：** [conversation-model.md](specifications/conversation-model.md) §9 CLI 集成, §11 用户命令
+**规格引用：** [conversation-model.md](specifications/conversation-model.md) §7 CLI 模式生命周期, §9 Transcript 持久化
 
-### 改动
+### 设计原则
+
+**核心判断：TranscriptStore 是日志系统，不是 CRUD 系统。**
+
+- 所有"对话是什么"的问题 → ConversationRepository（身份、命名、列表、生命周期）
+- 所有"对话说了什么"的问题 → TranscriptStore（写入、读取、计数）
+- CLI 是当前的协调者，Step 7 的 SessionRuntime 会接管这个角色
+
+**职责切割：**
 
 ```
-改: packages/cli/src/run-agent.ts
-  - 启动时 ConversationRepository.getDefault() 获取默认 conversation
-  - -c 恢复上次 conversation (按 lastActiveAt 排序)
-  - -r <id> 恢复指定 conversation
+ConversationRepository              TranscriptStore
+(身份 — meta.json)                  (内容 — transcript.jsonl, append-only)
+──────────────────                  ──────────────────────────────────────
+create()                            init(conversationId, opts)
+get() / list()                      appendTurn(conversationId, turn)
+rename()                            appendCompact(conversationId, compact)
+archive() / delete()                load(conversationId) → LoadedTranscript
+touch()                             countTurns(conversationId)
+findLatest()                        exists(conversationId)
+ensureDefault()
+```
 
+**CLI 协调流：**
+
+```
+创建:   convRepo.create()  → store.init(conversation.id, {model, provider})
+列表:   convRepo.list()    → 可选 store.countTurns() 补充
+恢复:   convRepo.findLatest() 或 convRepo.get() → store.load(id)
+重命名: convRepo.rename()  （不碰 transcript — name 只在 meta.json）
+Turn:   store.appendTurn() + convRepo.touch()
+删除:   convRepo.delete()  （trash 整个目录，包含 transcript.jsonl）
+```
+
+### Phase A: Core 层职责瘦身
+
+```
+新建: packages/core/src/paths.ts
+  - 提取 getZhixingHome() 和 getProjectId() 为共享基础设施
+  - 消除 transcript/store.ts 和 conversation/repository.ts 的重复定义
+
+改: packages/core/src/transcript/types.ts
+  - ITranscriptStore: 移除 list(), rename(), delete()
+  - ITranscriptStore: create() → init(), 增加 countTurns(), exists()
+  - 删除 TranscriptInfo 类型（被 Conversation 取代）
+  - CreateTranscriptOptions: 移除 name 字段（name 只存 meta.json）
+
+改: packages/core/src/transcript/store.ts
+  - TranscriptStore: 移除 list(), rename(), delete(), findLatest()
+  - create() → init(): 语义明确——初始化日志文件，不是创建对话
+  - 新增 countTurns() (委托 serializer), exists()
+  - 导入 getZhixingHome / getProjectId 从 paths.ts
+
+改: packages/core/src/conversation/types.ts
+  - IConversationRepository: 增加 findLatest(), touch()
+
+改: packages/core/src/conversation/repository.ts
+  - 新增 findLatest(): list()[0].id
+  - 导入 getZhixingHome 从 paths.ts（移除私有重复定义）
+
+改: packages/core/src/transcript/index.ts
+  - 移除 TranscriptInfo 导出
+  - init 替代 create
+
+改: packages/core/src/index.ts
+  - 新增 paths.ts 导出
+```
+
+### Phase B: CLI 接线
+
+```
 改: packages/cli/src/repl.ts
-  - Turn 写入走 TranscriptStore(conversationId)
-  - 提示符显示当前 conversation name
-
-改: packages/cli/src/command-dispatcher.ts
-  - 新增: /new [name]      — 创建新 conversation 并切换
-  - 新增: /switch [id]     — 切换到指定 conversation（无参则列表选择）
-  - 新增: /conversations   — 列出所有 conversations
-  - 新增: /rename <name>   — 重命名当前 conversation
+  - 局部变量 transcriptId → conversationId
+  - 初始化: 构造 ConversationRepository(scope) + TranscriptStore(convDir, cwd)
+  - 新建对话: convRepo.create() → store.init(conversation.id)
+  - 恢复对话: convRepo.findLatest() / convRepo.get() → store.load()
+  - /sessions → /conversations: 调 convRepo.list() 而非 store.list()
+  - /name: 调 convRepo.rename() 而非 store.rename()
+  - Turn 完成后: store.appendTurn() + convRepo.touch()
+  - interactiveSessionPicker → interactiveConversationPicker, 入参改为 convRepo
+  - 新增: /new [name] — convRepo.create() + store.init() + 切换
+  - 新增: /switch [id] — 切换到指定 conversation（无参则交互选择）
+  - 新增: /conversations — 列出所有 conversations
 ```
 
 ### 不做
@@ -227,15 +309,29 @@ interface ConversationRepository {
 - 不改 context engine
 - 不改渲染层
 - 不改 security pipeline
+- 不碰 RPC/typeahead/serve 中的 `sessionId`（那是不同语义的 session 概念）
 
 ### 验证
 
-- [ ] `pnpm cli` 启动 → 默认进入 default conversation
-- [ ] `/new "测试"` → 创建并切换
-- [ ] `/conversations` → 列表显示
-- [ ] `/switch` → 切换回 default，历史完整
-- [ ] 退出后 `-c` → 恢复上次 conversation
+**Phase A (Core):**
+
+- [ ] `pnpm --filter @zhixing/core test` 全量通过
+- [ ] TranscriptStore 接口只有: init, appendTurn, appendCompact, load, countTurns, exists
+- [ ] ConversationRepository 接口包含: findLatest, touch
+- [ ] `getZhixingHome()` 和 `getProjectId()` 只在 paths.ts 定义一处
+- [ ] 无 `TranscriptInfo` 类型残留
+
+**Phase B (CLI):**
+
+- [ ] `pnpm --filter @zhixing/cli build` 零错误
+- [ ] `pnpm cli` 启动 → 自动创建 conversation + transcript
+- [ ] `/conversations` → 列表显示（数据来自 convRepo）
+- [ ] `/name 新名称` → meta.json 更新，transcript.jsonl 不变
+- [ ] `/new "测试"` → 创建并切换到新 conversation
+- [ ] `/switch` → 交互选择并切换，历史完整加载
+- [ ] 退出后 `-c` → 恢复上次 conversation（通过 convRepo.findLatest）
 - [ ] 退出后 `-r` → 交互选择 conversation
+- [ ] 多轮对话后 meta.json 的 lastActiveAt 持续更新
 
 ---
 
@@ -528,3 +624,5 @@ interface ConversationManager {
 | 日期 | 变更 |
 |------|------|
 | 2026-04-18 | 初始版本：Step 0-8 计划制定 |
+| 2026-04-18 | Step 0 词汇对齐完成；Step 1 ConversationRepository 完成 |
+| 2026-04-18 | Step 2 TranscriptStore 适配完成：conversationId 统一、新路径结构、旧 sessionId 在序列化边界迁移 |

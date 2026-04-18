@@ -17,7 +17,8 @@ export interface TranscriptHeader {
   type: "header";
   /** 格式版本号，用于未来向前兼容 */
   version: number;
-  sessionId: string;
+  /** 所属 Conversation ID */
+  conversationId: string;
   /** 用户可通过 --name 或 /name 设置的显示名 */
   name: string | null;
   projectPath: string;
@@ -60,17 +61,6 @@ export type TranscriptRecord = TranscriptHeader | Turn | CompactMarker;
 
 // ─── Transcript Store 接口 ───
 
-/** 转录列表项（从 header + 文件系统元数据派生） */
-export interface TranscriptInfo {
-  sessionId: string;
-  name: string | null;
-  createdAt: string;
-  model: string;
-  provider: string;
-  lastAccessedAt: Date;
-  turnCount: number;
-}
-
 /** 加载转录的返回结构 */
 export interface LoadedTranscript {
   header: TranscriptHeader;
@@ -78,19 +68,23 @@ export interface LoadedTranscript {
   turnCount: number;
 }
 
-/** Transcript Store 公共接口 */
+/**
+ * TranscriptStore 公共接口 — append-only 内容日志
+ *
+ * 职责边界（ADR-CM-015）：
+ * - 只负责内容的写入和读取
+ * - 没有 list / rename / delete / findLatest — 这些是身份操作，属于 ConversationRepository
+ */
 export interface ITranscriptStore {
-  create(options: CreateTranscriptOptions): Promise<TranscriptHeader>;
-  appendTurn(sessionId: string, turn: Turn): Promise<void>;
-  appendCompact(sessionId: string, compact: CompactMarker): Promise<void>;
-  load(sessionId: string): Promise<LoadedTranscript>;
-  list(): Promise<TranscriptInfo[]>;
-  rename(sessionId: string, name: string): Promise<void>;
-  delete(sessionId: string): Promise<void>;
+  init(conversationId: string, options: InitTranscriptOptions): Promise<void>;
+  appendTurn(conversationId: string, turn: Turn): Promise<void>;
+  appendCompact(conversationId: string, compact: CompactMarker): Promise<void>;
+  load(conversationId: string): Promise<LoadedTranscript>;
+  countTurns(conversationId: string): Promise<number>;
+  exists(conversationId: string): Promise<boolean>;
 }
 
-export interface CreateTranscriptOptions {
-  name?: string;
+export interface InitTranscriptOptions {
   model: string;
   provider: string;
 }

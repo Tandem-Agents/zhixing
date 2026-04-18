@@ -18,7 +18,7 @@ import {
 const HEADER: TranscriptHeader = {
   type: "header",
   version: 1,
-  sessionId: "20260409-a3f1",
+  conversationId: "20260409-a3f1",
   name: "测试会话",
   projectPath: "E:\\Dev\\longxia\\zhixing",
   createdAt: "2026-04-09T10:00:00.000Z",
@@ -150,6 +150,25 @@ describe("parseRecords", () => {
     const result = parseRecords(content);
     expect(result.header).toEqual(HEADER);
     expect(result.turns).toHaveLength(1);
+  });
+
+  it("旧格式 sessionId 自动迁移为 conversationId", () => {
+    const oldHeader = {
+      type: "header",
+      version: 1,
+      sessionId: "20260409-legacy",
+      name: null,
+      projectPath: "/old",
+      createdAt: "2026-04-09T10:00:00.000Z",
+      model: "m",
+      provider: "p",
+    };
+    const content = JSON.stringify(oldHeader);
+    const result = parseRecords(content);
+
+    expect(result.header).not.toBeNull();
+    expect(result.header!.conversationId).toBe("20260409-legacy");
+    expect((result.header as Record<string, unknown>).sessionId).toBeUndefined();
   });
 });
 

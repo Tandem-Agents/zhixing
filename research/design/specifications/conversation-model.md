@@ -1,7 +1,7 @@
 # 对话模型 (Conversation Model)
 
-> **版本**:v2.1
-> **状态**:📐 设计稿（2026-04-17 修订）
+> **版本**:v2.2
+> **状态**:📐 设计稿（2026-04-18 修订）
 > **关联**:
 >
 > - [session-persistence.md](./session-persistence.md) — Transcript 持久化层（被本文档归并）
@@ -821,10 +821,14 @@ T=3600s 钉钉来新消息
 
 详见 [session-persistence.md](./session-persistence.md) §2.3。本文档仅修订:
 
-- `SessionHeader.sessionId` → `SessionHeader.conversationId`
-- 新增 `meta.json`(从 header 拆出可变字段:name、archived、preferred*)
+- `SessionHeader.sessionId` → `TranscriptHeader.conversationId`
+- 新增 `meta.json`(从 header 拆出可变字段:name、archived、preferredModel/Provider)
 
-`transcript.jsonl` 只追加,`meta.json` 可重写。这样保证消息历史的不可变性。
+**职责边界**:
+
+- `meta.json` — 可变元数据,由 ConversationRepository 读写(name、archived、lastActiveAt、scope 等)
+- `transcript.jsonl` — 不可变内容日志,由 TranscriptStore 追加(Header + Turn + Compact 行)。Header 是不可变的创建快照(conversationId、model、provider、projectPath、createdAt),不含 name 等可变字段
+- 推论:**name 只存 meta.json**。TranscriptStore 不提供 rename。list / delete / findLatest 等身份操作由 ConversationRepository 负责,TranscriptStore 不感知
 
 ### 9.3 上下文架构 → 见 [context-architecture.md](./context-architecture.md)
 
@@ -964,32 +968,61 @@ Server 模式下 ConversationManager 是单例。所有客户端(多个 CLI、We
 
 ## 十二、API 设计
 
-### 12.1 核心组件：Repository + Manager
+### 12.1 核心组件：Repository + TranscriptStore + Manager
 
 > **v2.1 拆分**：原 ConversationManager 拆为 ConversationRepository（core 包,磁盘 CRUD）+ ConversationManager（server 包,运行时生命周期）。见 ADR-CM-015。
+>
+> **v2.2 职责边界**：明确 ConversationRepository（身份 — meta.json）与 TranscriptStore（内容 — transcript.jsonl）的单一职责切割。TranscriptStore 是 append-only 日志系统,不做 CRUD 查询。见 ADR-CM-012、ADR-CM-015。
 
 ```typescript
-/** core 包：纯磁盘 CRUD,不涉及 SessionRuntime 或内存管理 */
+/** core 包：Conversation 身份的磁盘 CRUD (meta.json) */
 interface ConversationRepository {
   list(opts?: { includeArchived?: boolean }): Promise<Conversation[]>;
   get(id: string): Promise<Conversation | null>;
-  create(opts: { name: string; preferredModel?: string; scope?: ConversationScope }): Promise<Conversation>;
+  create(opts: { name?: string; preferredModel?: string; scope?: ConversationScope }): Promise<Conversation>;
   rename(id: string, name: string): Promise<Conversation>;
   archive(id: string, archived: boolean): Promise<Conversation>;
   delete(id: string): Promise<void>;
   ensureDefault(): Promise<Conversation>;
-  history(id: string, opts?: { limit?: number; before?: number }): Promise<Message[]>;
+  findLatest(): Promise<string | null>;      // list()[0].id — CLI --continue 用
+  touch(id: string): Promise<void>;          // 更新 lastActiveAt — Turn 完成后调用
 }
 
-/** server 包：运行时生命周期管理,依赖 ConversationRepository */
+/** core 包：Transcript 内容的 append-only 日志 (transcript.jsonl) */
+interface TranscriptStore {
+  init(conversationId: string, opts: { model: string; provider: string }): Promise<void>;
+  appendTurn(conversationId: string, turn: Turn): Promise<void>;
+  appendCompact(conversationId: string, compact: CompactMarker): Promise<void>;
+  load(conversationId: string): Promise<LoadedTranscript>;
+  countTurns(conversationId: string): Promise<number>;
+  exists(conversationId: string): Promise<boolean>;
+  // 注意：没有 list / rename / delete / findLatest — 这些是身份操作,属于 ConversationRepository
+}
+
+/** server 包：运行时生命周期管理,依赖 Repository + TranscriptStore */
 interface ConversationManager {
   readonly repo: ConversationRepository;
+  readonly transcripts: TranscriptStore;
 
   acquire(id: string): Promise<SessionRuntime>;          // 复用或加载
   release(id: string, connectionId: string): void;       // observer -1
+  history(id: string, opts?: { limit?: number; before?: number }): Promise<Message[]>;  // 委托 TranscriptStore.load()
 
   on(event: ConversationEvent, handler: Handler): Unsubscribe;
 }
+```
+
+**调用方协调模式**:
+
+- Standalone CLI（无 ConversationManager）直接协调 Repository + TranscriptStore
+- Server 模式通过 ConversationManager 统一入口,CLI as Client 走 RPC
+
+```
+创建:   repo.create()  → store.init(conversation.id, {model, provider})
+恢复:   repo.findLatest() → store.load(id)
+Turn:   store.appendTurn() + repo.touch()
+重命名: repo.rename()  （不碰 transcript — name 只在 meta.json）
+删除:   repo.delete()  （trash 整个目录,包含 transcript.jsonl）
 ```
 
 ### 12.2 Server RPC
@@ -1347,14 +1380,26 @@ packages/cli/src/migrate/
 
 ---
 
-### ADR-CM-015：ConversationRepository 与 ConversationManager 分层
+### ADR-CM-015：ConversationRepository / TranscriptStore / ConversationManager 三组件分层
 
-**决策**：`ConversationRepository`（core 包）负责磁盘 CRUD（list / get / create / rename / archive / delete）。`ConversationManager`（server 包）负责运行时生命周期（acquire / release / observer / idle 释放）。两者是依赖关系：Manager 依赖 Repository。
+**决策**：持久化层由两个独立组件构成,运行时层在其上提供统一入口。
+
+| 组件 | 包 | 职责 | 数据 |
+|------|------|------|------|
+| ConversationRepository | core | 对话身份 CRUD（list / get / create / rename / archive / delete / touch / findLatest） | meta.json |
+| TranscriptStore | core | 对话内容 append-only 日志（init / appendTurn / appendCompact / load / countTurns / exists） | transcript.jsonl |
+| ConversationManager | server | 运行时生命周期（acquire / release / observer / history） | 内存 SessionRuntime |
+
+**核心约束**：
+- TranscriptStore **不做身份操作**：没有 list / rename / delete / findLatest。回答"对话是什么"的问题由 Repository 负责
+- ConversationRepository **不读内容**：没有 history / load。回答"对话说了什么"的问题由 TranscriptStore（或 Manager 代理）负责
+- Repository 和 TranscriptStore 互不依赖,由调用方（CLI / Manager）协调
 
 **理由**：
-- Standalone CLI 需要 Conversation 持久化能力但不需要 observer 管理——如果 Repository 在 server 包里,CLI 要么依赖 server 包（依赖反转）要么复制代码（维护负担）
+- Standalone CLI 需要持久化能力但不需要 observer 管理——如果 Repository 在 server 包里,CLI 要么依赖 server 包（依赖反转）要么复制代码（维护负担）
 - 分层后 CLI 只依赖 core,server 依赖 core + 自身,包依赖图干净
-- 与现有架构一致：core/session/store.ts（纯持久化）vs server/session/registry.ts（运行时管理）
+- TranscriptStore 是 log 系统（ADR-CM-012 append-only）,不是 CRUD 系统。将查询/命名/生命周期操作混入日志系统会产生职责模糊和数据 drift（name 在 meta.json 和 JSONL 各存一份）
+- 两个 core 组件共享路径基础设施（`getZhixingHome` / `getProjectId`）但不互相依赖,支持未来独立替换存储后端
 
 ---
 
@@ -1379,8 +1424,9 @@ packages/cli/src/migrate/
 | SessionRuntime         | Conversation 的内存运行实例,短期,管理 messages + provider 连接 + 并发锁           |
 | Turn                   | 一次完整的 agent loop（用户消息 → agent 响应 + 工具调用 → 完成）                    |
 | Transcript             | Conversation 的磁盘表示（JSONL 格式）                                     |
-| ConversationRepository | core 包组件,Conversation 的磁盘 CRUD                                   |
-| ConversationManager    | server 包组件,管理 SessionRuntime 生命周期（acquire / release / observer）   |
+| ConversationRepository | core 包组件,Conversation 身份的磁盘 CRUD（meta.json）                    |
+| TranscriptStore        | core 包组件,Conversation 内容的 append-only 日志（transcript.jsonl）       |
+| ConversationManager    | server 包组件,管理 SessionRuntime 生命周期（acquire / release / observer），统一代理 Repository + TranscriptStore |
 | ChannelAdapter         | 通道适配器接口,定义在 server-gateway.md（connect / disconnect / send + traits） |
 | Connection             | 通道内的一次客户端连接,绑定到 Conversation,驱动 observer 计数                       |
 | Observer               | Connection 对 SessionRuntime 的引用标记,用于释放规则                          |

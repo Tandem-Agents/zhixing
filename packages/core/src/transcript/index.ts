@@ -1,10 +1,9 @@
 export type {
-  CreateTranscriptOptions,
+  InitTranscriptOptions,
   ITranscriptStore,
   LoadedTranscript,
   CompactMarker,
   TranscriptHeader,
-  TranscriptInfo,
   TranscriptRecord,
   Turn,
   ToolCallRecord,
@@ -20,4 +19,8 @@ export {
   writeHeader,
 } from "./serializer.js";
 
-export { TranscriptStore, generateTranscriptId, getProjectId } from "./store.js";
+export {
+  TranscriptStore,
+  getProjectId,
+  getZhixingHome,
+} from "./store.js";
