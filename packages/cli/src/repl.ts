@@ -13,6 +13,7 @@
  */
 
 import * as readline from "node:readline/promises";
+import path from "node:path";
 import chalk from "chalk";
 import {
   userMessage,
@@ -20,6 +21,10 @@ import {
   type Turn,
   type CompactMarker,
   TranscriptStore,
+  getProjectId,
+  getZhixingHome,
+  ConversationRepository,
+  type ConversationScope,
   loadProfile,
   getMemoryDir,
   SkillsStore,
@@ -67,8 +72,9 @@ interface ReplState {
   agent: AgentRuntime;
   running: boolean;
   /** 持久化 */
-  store: InstanceType<typeof TranscriptStore>;
-  transcriptId: string | null;
+  store: TranscriptStore;
+  convRepo: ConversationRepository;
+  conversationId: string | null;
   turnCounter: number;
   /** 上一轮的工具调用完成数（用于反思触发） */
   lastToolEndCount: number;
@@ -142,7 +148,7 @@ function buildSlashCommands(rl: readline.Interface): Record<
           (m) => m.role === "assistant",
         ).length;
         console.log(
-          `\n  ${chalk.dim("Session:")} ${state.transcriptId ?? "(未保存)"}` +
+          `\n  ${chalk.dim("Session:")} ${state.conversationId ?? "(未保存)"}` +
             `\n  ${chalk.dim("Messages:")} ${state.messages.length} (${userMsgs} user, ${assistantMsgs} assistant)` +
             `\n  ${chalk.dim("Model:")} ${chalk.cyan(state.agent.model)}` +
             `\n  ${chalk.dim("Provider:")} ${state.agent.providerId}\n`,
@@ -152,19 +158,20 @@ function buildSlashCommands(rl: readline.Interface): Record<
     "/sessions": {
       description: "列出当前项目的会话",
       handler: async (state) => {
-        const sessions = await state.store.list();
-        if (sessions.length === 0) {
+        const conversations = await state.convRepo.list();
+        if (conversations.length === 0) {
           console.log(chalk.dim("\n  没有保存的会话\n"));
           return;
         }
         console.log(`\n${chalk.bold("  保存的会话：")}`);
-        for (const s of sessions.slice(0, 15)) {
-          const label = s.name ? chalk.white(s.name) : chalk.dim("(未命名)");
-          const time = formatRelativeTime(s.lastAccessedAt);
+        for (const c of conversations.slice(0, 15)) {
+          const label = c.name ? chalk.white(c.name) : chalk.dim("(未命名)");
+          const time = formatRelativeTime(new Date(c.lastActiveAt));
+          const turnCount = await state.store.countTurns(c.id);
           const current =
-            s.sessionId === state.transcriptId ? chalk.green(" ← 当前") : "";
+            c.id === state.conversationId ? chalk.green(" ← 当前") : "";
           console.log(
-            `  ${chalk.cyan(s.sessionId)} ${label} ${chalk.dim(`(${time}, ${s.turnCount} 轮, ${s.model})`)}${current}`,
+            `  ${chalk.cyan(c.id)} ${label} ${chalk.dim(`(${time}, ${turnCount} 轮)`)}${current}`,
           );
         }
         console.log();
@@ -177,11 +184,11 @@ function buildSlashCommands(rl: readline.Interface): Record<
           console.log(chalk.yellow("用法: /name <名称>\n"));
           return;
         }
-        if (!state.transcriptId) {
+        if (!state.conversationId) {
           console.log(chalk.yellow("当前会话尚未保存\n"));
           return;
         }
-        await state.store.rename(state.transcriptId, args.trim());
+        await state.convRepo.rename(state.conversationId, args.trim());
         console.log(chalk.dim(`会话已命名为: ${args.trim()}\n`));
       },
     },
@@ -386,7 +393,7 @@ function buildSlashCommands(rl: readline.Interface): Record<
             const pct = result.budget ? Math.round(result.budget.usageRatio * 100) : "?";
             console.log(chalk.green(`  ✓ 压缩完成，当前上下文占用 ${pct}%\n`));
             // 写入 compact 行到会话文件
-            if (state.transcriptId) {
+            if (state.conversationId) {
               const compact: CompactMarker = {
                 type: "compact",
                 timestamp: new Date().toISOString(),
@@ -395,7 +402,7 @@ function buildSlashCommands(rl: readline.Interface): Record<
                 tokensBefore,
                 tokensAfter,
               };
-              state.store.appendCompact(state.transcriptId, compact).catch(() => {});
+              state.store.appendCompact(state.conversationId, compact).catch(() => {});
             }
           } else {
             console.log(chalk.dim("  已无可压缩内容\n"));
@@ -540,19 +547,25 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   await schedulerInstance.start();
 
   const renderer = createRenderer();
-  const store = new TranscriptStore(process.cwd());
+  const cwd = process.cwd();
+  const projectId = getProjectId(cwd);
+  const zhixingHome = getZhixingHome();
+  const scope: ConversationScope = { kind: "project", projectId, projectPath: cwd };
+  const convRepo = new ConversationRepository(scope);
+  const convDir = path.join(zhixingHome, "projects", projectId, "conversations");
+  const store = new TranscriptStore(convDir, cwd);
 
   let messages: Message[] = [];
-  let transcriptId: string | null = null;
+  let conversationId: string | null = null;
   let turnCounter = 0;
 
   // 处理会话恢复
   if (options.continue) {
-    const latest = await store.findLatest();
+    const latest = await convRepo.findLatest();
     if (latest) {
       const loaded = await store.load(latest);
       messages = loaded.messages;
-      transcriptId = latest;
+      conversationId = latest;
       turnCounter = loaded.turnCount;
       console.log(
         chalk.dim(
@@ -564,10 +577,15 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     }
   } else if (options.resume !== undefined) {
     if (typeof options.resume === "string") {
+      const conv = await convRepo.get(options.resume);
+      if (!conv) {
+        console.log(chalk.red(`\n  对话 "${options.resume}" 不存在\n`));
+        return;
+      }
       try {
         const loaded = await store.load(options.resume);
         messages = loaded.messages;
-        transcriptId = options.resume;
+        conversationId = options.resume;
         turnCounter = loaded.turnCount;
         console.log(
           chalk.dim(
@@ -584,14 +602,14 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       }
     } else {
       // --resume 不带 ID → 交互式选择
-      transcriptId = await interactiveSessionPicker(store);
-      if (transcriptId) {
-        const loaded = await store.load(transcriptId);
+      conversationId = await interactiveConversationPicker(convRepo);
+      if (conversationId) {
+        const loaded = await store.load(conversationId);
         messages = loaded.messages;
         turnCounter = loaded.turnCount;
         console.log(
           chalk.dim(
-            `\n  已恢复会话 ${chalk.cyan(transcriptId)}（${loaded.turnCount} 轮对话）\n`,
+            `\n  已恢复会话 ${chalk.cyan(conversationId)}（${loaded.turnCount} 轮对话）\n`,
           ),
         );
       } else {
@@ -600,14 +618,18 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     }
   }
 
-  // 新会话：创建持久化文件
-  if (!transcriptId) {
-    const header = await store.create({
+  // 新会话：先创建 Conversation（meta.json），再创建 Transcript（transcript.jsonl）
+  if (!conversationId) {
+    const conversation = await convRepo.create({
       name: options.name,
+      preferredModel: agentRuntime.model,
+      preferredProvider: agentRuntime.providerId,
+    });
+    await store.init(conversation.id, {
       model: agentRuntime.model,
       provider: agentRuntime.providerId,
     });
-    transcriptId = header.sessionId;
+    conversationId = conversation.id;
   }
 
   await renderWelcome({
@@ -650,7 +672,8 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     agent: agentRuntime,
     running: false,
     store,
-    transcriptId,
+    convRepo,
+    conversationId,
     turnCounter,
     lastToolEndCount: 0,
     hasProposedSkill: false,
@@ -960,7 +983,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       }
 
       // 持久化本轮对话
-      if (state.transcriptId) {
+      if (state.conversationId) {
         const assistantMsg = newMessages[0];
         if (assistantMsg) {
           const turn: Turn = {
@@ -976,13 +999,14 @@ export async function startRepl(options: ReplOptions): Promise<void> {
                 }
               : undefined,
           };
-          await state.store.appendTurn(state.transcriptId, turn).catch((err) => {
+          await state.store.appendTurn(state.conversationId, turn).catch((err) => {
             console.log(
               chalk.dim(
                 `  [持久化警告] ${err instanceof Error ? err.message : String(err)}`,
               ),
             );
           });
+          state.convRepo.touch(state.conversationId).catch(() => {});
           state.turnCounter++;
         }
 
@@ -1002,7 +1026,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
             tokensBefore: compactInfo.tokensBefore,
             tokensAfter: compactInfo.tokensAfter,
           };
-          state.store.appendCompact(state.transcriptId, compact).catch(() => {});
+          state.store.appendCompact(state.conversationId, compact).catch(() => {});
         }
       }
     } catch (err) {
@@ -1028,11 +1052,11 @@ export async function startRepl(options: ReplOptions): Promise<void> {
 
 // ─── 交互式会话选择器 ───
 
-async function interactiveSessionPicker(
-  store: InstanceType<typeof TranscriptStore>,
+async function interactiveConversationPicker(
+  convRepo: ConversationRepository,
 ): Promise<string | null> {
-  const sessions = await store.list();
-  if (sessions.length === 0) {
+  const conversations = await convRepo.list();
+  if (conversations.length === 0) {
     return null;
   }
 
@@ -1043,13 +1067,13 @@ async function interactiveSessionPicker(
   });
 
   console.log(`\n${chalk.bold("选择要恢复的会话：")}`);
-  const displayed = sessions.slice(0, 10);
+  const displayed = conversations.slice(0, 10);
   for (let i = 0; i < displayed.length; i++) {
-    const s = displayed[i]!;
-    const label = s.name ? chalk.white(s.name) : chalk.dim("(未命名)");
-    const time = formatRelativeTime(s.lastAccessedAt);
+    const c = displayed[i]!;
+    const label = c.name ? chalk.white(c.name) : chalk.dim("(未命名)");
+    const time = formatRelativeTime(new Date(c.lastActiveAt));
     console.log(
-      `  ${chalk.cyan(String(i + 1).padStart(2))}. [${s.sessionId}] ${label} ${chalk.dim(`(${time}, ${s.model})`)}`,
+      `  ${chalk.cyan(String(i + 1).padStart(2))}. [${c.id}] ${label} ${chalk.dim(`(${time})`)}`,
     );
   }
   console.log(`  ${chalk.dim(" 0. 新建会话")}`);
@@ -1060,7 +1084,7 @@ async function interactiveSessionPicker(
 
     const num = parseInt(answer.trim(), 10);
     if (num > 0 && num <= displayed.length) {
-      return displayed[num - 1]!.sessionId;
+      return displayed[num - 1]!.id;
     }
     return null;
   } catch {
