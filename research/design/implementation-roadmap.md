@@ -9,7 +9,8 @@
 | 0 | 词汇对齐 | ✅ 已完成 | 无 |
 | 1 | ConversationRepository | ✅ 已完成 | Step 0 |
 | 2 | TranscriptStore 适配 | ✅ 已完成 | Step 0, 1 |
-| 3 | CLI 对接 Conversation | 🔨 进行中 (Phase A/B ✅, Phase C 待完成) | Step 2 |
+| 3 | CLI 对接 Conversation | ✅ 已完成 | Step 2 |
+| 3b | Transcript 段轮转 | 🔲 待开始 | Step 3 |
 | 4 | ScenarioEvaluator + ContextProfile | 🔲 待开始 | Step 0 |
 | 5 | LayerAssembler + TurnDigest | 🔲 待开始 | Step 4 |
 | 6 | WindowManager + Pinning | 🔲 待开始 | Step 5 |
@@ -27,12 +28,16 @@ Step 2 (TranscriptStore 适配)   │  Step 5 (LayerAssembler)  │
     ↓                           │      ↓                    │
 Step 3 (CLI 对接)               │  Step 6 (WindowManager)   │
     ↓                           │      ↓                    │
+Step 3b (Transcript 段轮转)     │      │                    │
+    ↓                           │      ↓                    │
     └───────────────────────────┴──────┘
                     ↓
             Step 7 (ConversationManager + SessionRuntime)
                     ↓
-            Step 8 (Ephemeral + auto-promote)
+            Step 8 (Ephemeral + auto-promote + /delete)
 ```
+
+> **Step 3b 并行说明：** 段轮转与 Step 4（ScenarioEvaluator）完全独立，可并行推进。Step 5（LayerAssembler）改造 load() 消费方式时受益于段轮转已完成，但不硬性依赖。
 
 ## 设计规格引用
 
@@ -321,6 +326,66 @@ Turn:   store.appendTurn() + convRepo.touch()
   - REPL_COMMANDS 注册 /switch 时声明 args: [{ kind: "async-enum", required: true }]
 ```
 
+---
+
+## Step 3b: Transcript 段轮转
+
+**目标：** 实现 [conversation-model.md](specifications/conversation-model.md) §9.5 段轮转，解决主对话场景下 transcript.jsonl 无限膨胀导致的 load 性能退化
+
+**性质：** 纯内部优化，`ITranscriptStore` 接口不变，调用方无感知
+
+**规格引用：** conversation-model.md §9.5 (段轮转) + ADR-CM-017
+
+### 改动文件
+
+```
+改: packages/core/src/transcript/store.ts
+  - appendCompact() 内部新增轮转逻辑:
+    1. 读当前 header，计算 archivedTurnCount
+    2. 写 transcript.jsonl.new（新 header + compact）
+    3. rename 旧文件 → archive/segment-{epoch}.jsonl
+    4. rename .new → transcript.jsonl
+  - load() 开头加崩溃恢复检查（检测 .new 文件）
+  - countTurns() 使用 header.archivedTurnCount + 活跃段 turn 数
+
+改: packages/core/src/transcript/serializer.ts
+  - readHeader() 支持解析 archivedTurnCount 字段（可选，undefined 视为 0）
+  - countTurns() 优化：先读 header 取 archivedTurnCount，再计活跃段 turn 行数
+
+改: packages/core/src/transcript/types.ts
+  - TranscriptHeader 新增 archivedTurnCount?: number
+
+改: packages/core/src/transcript/__tests__/store.test.ts
+  - 新增段轮转测试用例
+```
+
+### 关键设计点
+
+- **触发条件：** 每次 `appendCompact()` 自动触发，无阈值判断（compact 本身已经是低频事件）
+- **接口不变：** `ITranscriptStore` 接口零改动，轮转是纯内部行为
+- **向后兼容：** `archivedTurnCount` 为可选字段，旧文件 undefined 视为 0
+- **归档段不可变：** 写入后不再修改，天然安全
+- **崩溃安全：** temp file → rename 序列 + load 时恢复检查
+
+### 不做
+
+- 不新增 `loadFullHistory()` 方法（未来导出/搜索功能按需添加）
+- 不做归档段清理策略（保留全部历史）
+- 不做归档段 gzip 压缩
+- 不改 `ITranscriptStore` 接口
+
+### 验证
+
+- [ ] 单元测试：appendCompact 后 archive/ 目录出现归档段文件
+- [ ] 单元测试：轮转后 load() 返回的消息与轮转前一致（compact summary + 后续 turns）
+- [ ] 单元测试：countTurns() 返回总轮数（archivedTurnCount + 活跃段）
+- [ ] 单元测试：多次 compact 后多个归档段，load() 仍然正确
+- [ ] 单元测试：崩溃恢复——手动创建 .new 文件 + 删除活跃段 → load() 自动恢复
+- [ ] 单元测试：旧格式文件（无 archivedTurnCount）正常读取，countTurns 正确
+- [ ] 集成测试：CLI 长对话触发 compact → 观察 archive/ 目录产生 + 下次启动恢复正常
+
+---
+
 ### 不做
 
 - 不改 agent loop
@@ -348,11 +413,11 @@ Turn:   store.appendTurn() + convRepo.touch()
 
 **Phase C (REPL 对话管理):**
 
-- [ ] `pnpm cli` 启动 → 自动恢复最近对话（无历史则创建 default）
-- [ ] `/switch` 在 typeahead 中选中后 → dropdown 自动切换为对话列表（ArgumentProvider async-enum）
-- [ ] `/switch 测试` → 按名称模糊匹配并切换（legacy 模式和手动输入兜底）
-- [ ] `/new "测试"` → 创建并切换到新 conversation
-- [ ] `/conversations` 作为 hidden 别名仍可用，不出现在 typeahead 菜单
+- [x] `pnpm cli` 启动 → 自动恢复最近对话（无历史则创建 default） (2026-04-18)
+- [x] `/switch` 在 typeahead 中选中后 → dropdown 自动切换为对话列表（ArgumentProvider async-enum） (2026-04-18)
+- [x] `/switch 测试` → 按名称模糊匹配并切换（legacy 模式和手动输入兜底） (2026-04-18)
+- [x] `/new "测试"` → 创建并切换到新 conversation (2026-04-18)
+- [x] `/conversations` 作为 hidden 别名仍可用，不出现在 typeahead 菜单 (2026-04-18)
 
 ---
 
@@ -614,9 +679,26 @@ interface ConversationManager {
 - ScenarioEvaluator 升级 hint
 - 用户执行 `/keep` 命令
 
+### `/delete` 命令（随本 Step 一起实施）
+
+**为何在此时机：** Ephemeral + auto-promote 确定后，对话分为 ephemeral / persistent / archived 三态，`/delete` 的语义才明确——仅作用于 persistent 和 archived 对话，ephemeral 无需手动删除。
+
+```
+改: packages/cli/src/repl.ts
+  - 新增 /delete 命令，声明 args: [switchArgSchema]（复用 ConversationArgProvider）
+  - handler: 二次确认 → convRepo.delete(id) → 自动 fallback 到最近对话或创建 default
+  - 约束: 不可删 default 对话；删除当前对话时先 fallback 再删
+```
+
+边界条件：
+- 删除当前活跃对话 → fallback 到 `convRepo.findLatest()` 或创建 default
+- 删除最后一个对话 → 自动创建 default
+- 不可删 default → 提示用户使用 `/clear` 清空内容
+
 ### 不做
 
 - 不实现跨设备同步（S3 阶段）
+- 不实现回收站（软删除）—— MVP 先做硬删除 + 确认，未来按需补充
 
 ### 验证
 
@@ -624,6 +706,9 @@ interface ConversationManager {
 - [ ] `zhixing -p "创建文件 test.txt"` — 触发副作用工具 → auto-promote → 磁盘可见
 - [ ] REPL 模式 — 始终持久化，不受 ephemeral 影响
 - [ ] Server 单次查询 — ephemeral，不写盘
+- [ ] `/delete` 二次确认后删除目标对话，磁盘目录不存在
+- [ ] `/delete` 删除当前对话 → 自动切换到最近对话
+- [ ] `/delete` 对 default 对话 → 拒绝并提示
 
 ---
 
@@ -647,6 +732,8 @@ interface ConversationManager {
 | 日期 | 变更 |
 |------|------|
 | 2026-04-18 | 初始版本：Step 0-8 计划制定 |
+| 2026-04-18 | Step 3 Phase C 验证完成，标记 ✅ |
+| 2026-04-18 | 新增 Step 3b（Transcript 段轮转）；Step 8 补充 /delete 命令 |
 | 2026-04-18 | Step 0 词汇对齐完成；Step 1 ConversationRepository 完成 |
 | 2026-04-18 | Step 2 TranscriptStore 适配完成：conversationId 统一、新路径结构、旧 sessionId 在序列化边界迁移 |
 | 2026-04-18 | Step 3 Phase A+B 完成：core 职责瘦身 + CLI 接线。新增 Phase C：REPL 内对话管理 |

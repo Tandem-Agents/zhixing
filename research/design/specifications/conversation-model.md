@@ -801,10 +801,14 @@ T=3600s 钉钉来新消息
 ├─ conversations/                              ← 用户作用域(server 默认)
 │   ├─ default/
 │   │   ├─ meta.json                           ← Conversation 元数据(name, archived, ...)
-│   │   └─ transcript.jsonl                    ← 消息历史
+│   │   ├─ transcript.jsonl                    ← 活跃段（header + 最近 compact + 后续 turns）
+│   │   └─ archive/                            ← 归档段（不可变，段轮转产生）
+│   │       ├─ segment-1713400000.jsonl
+│   │       └─ segment-1713500000.jsonl
 │   └─ work/
 │       ├─ meta.json
-│       └─ transcript.jsonl
+│       ├─ transcript.jsonl
+│       └─ archive/...
 │
 ├─ projects/                                   ← 项目作用域(standalone CLI 默认)
 │   └─ <projectId-12hex>/
@@ -859,6 +863,102 @@ T=3600s 钉钉来新消息
 Standalone CLI 默认 project 作用域,但不是所有 cwd 都适合当 "project"。当 cwd **缺少项目标识**（无 `.git`、`package.json`、`.zhixing`、`Cargo.toml`、`go.mod` 等任一标志文件/目录）时,自动升级为 **user 作用域**,等同于 `--user-scope`。
 
 理由：用户在 `~` 或 `/tmp` 运行 `zhixing` 时,预期是"跟知行随便聊聊",而不是"在这个目录创建一个项目对话"。如果按 cwd 强行创建项目,同一用户从不同终端 cd 到 `~` 后各自得到不同 projectId（因为 terminal cwd 可能是 `~` 或 `/Users/sunhj`），产生意外的对话隔离。
+
+### 9.5 段轮转（Segment Rotation）
+
+#### 问题
+
+`transcript.jsonl` 是 append-only 文件，每轮 Turn 追加一行。主对话场景下（一个长期使用的对话），文件无限膨胀：
+
+- 500 轮 ≈ 5-25MB，2000 轮 ≈ 20-100MB
+- `load()` 读取并解析整个文件，但 `rebuildMessages()` 只使用最后一个 compact 标记之后的 turns
+- compact 之前的 turns 在文件中是死重——每次 load 都要读但不用
+- 核心瓶颈不是磁盘空间，而是 **load 性能**（对话恢复延迟）
+
+#### 设计：Compact 触发段轮转
+
+Compact 标记的语义是"这个点之前的内容已经摘要化"。利用这个天然边界做段轮转：
+
+**触发时机：** `appendCompact()` 写入 compact 标记时，自动执行轮转。
+
+**轮转过程：**
+
+```
+1. mkdir archive/ (幂等)
+2. 写 transcript.jsonl.new ← header(含 archivedTurnCount) + compact 标记
+3. rename transcript.jsonl → archive/segment-{epoch}.jsonl
+4. rename transcript.jsonl.new → transcript.jsonl
+```
+
+**轮转前后对比：**
+
+```
+轮转前 transcript.jsonl:          轮转后:
+┌─────────────────────┐           transcript.jsonl (活跃段):
+│ header              │           ┌─────────────────────┐
+│ turn 0              │           │ header (archivedTurnCount=50) │
+│ turn 1              │           │ compact (summary)   │
+│ ...                 │           │ turn 50             │
+│ turn 49             │           │ turn 51             │
+│ compact (summary)   │           │ ...                 │
+│ turn 50             │           └─────────────────────┘
+│ turn 51             │
+│ ...                 │           archive/segment-1713400000.jsonl (归档段):
+└─────────────────────┘           ┌─────────────────────┐
+                                  │ header              │
+                                  │ turn 0 ... turn 49  │
+                                  │ compact (summary)   │
+                                  └─────────────────────┘
+```
+
+**效果：**
+
+| 操作 | 轮转前 | 轮转后 |
+|------|--------|--------|
+| `load()` | 读全量文件（可能 50MB） | 只读活跃段（通常 < 1MB） |
+| `countTurns()` | 解析全量文件 | `archivedTurnCount` + 活跃段 turn 数 |
+| 历史审计/导出 | 同一文件 | 遍历 archive/ 目录 |
+| 崩溃影响 | 最多丢最后一行 | 同上，归档段不可变 |
+
+#### Header 扩展
+
+```typescript
+interface TranscriptHeader {
+  // ... 既有字段 ...
+  /** 所有归档段的累计 turn 总数。轮转时计算：旧 archivedTurnCount + 本段 turn 数 */
+  archivedTurnCount?: number;  // 新增，v1 兼容（undefined 视为 0）
+}
+```
+
+`countTurns()` 实现：`(header.archivedTurnCount ?? 0) + 活跃段 turn 行数` = 对话总轮数。  
+无需读 meta.json、无需遍历 archive/，一次读活跃段即可。
+
+#### 崩溃安全
+
+| 崩溃时机 | 磁盘状态 | 恢复策略 |
+|---------|---------|---------|
+| 步骤 2 后、3 前 | 旧 transcript.jsonl + .new 并存 | 删 .new（轮转未开始） |
+| 步骤 3 后、4 前 | 活跃段缺失，.new 存在 | rename .new → transcript.jsonl（完成轮转） |
+| 步骤 4 后 | 正常 | 无需恢复 |
+
+`load()` 开头加恢复检查：检测 `.new` 文件是否存在，据情况完成或回滚。
+
+#### 接口不变性
+
+段轮转是 TranscriptStore 的**内部优化**，`ITranscriptStore` 接口完全不变：
+
+- `appendCompact()` — 签名不变，内部新增轮转逻辑
+- `load()` — 签名和返回类型不变，只是更快（只读活跃段）
+- `countTurns()` — 签名不变，使用 `archivedTurnCount` 加速
+- 其余方法不受影响
+
+未来按需新增 `loadFullHistory()` 用于导出/搜索（遍历 archive/ + 活跃段），当前不实现。
+
+#### 归档段性质
+
+- **不可变（immutable）**：写完即不再修改，天然无并发问题
+- **可清理**：未来可按策略清理过老的归档段（如保留最近 N 段），当前不做
+- **可压缩**：未来可对归档段做 gzip 压缩减少磁盘占用，当前不做
 
 ---
 
@@ -958,6 +1058,23 @@ interface BackgroundSpawnOptions {
 - **legacy 模式 / 手动输入**: `/switch <text>` 按名称模糊匹配;`/switch`（无参）显示编号列表 + 提示
 - `/list` / `/conversations` / `/sessions` 保留为 hidden 别名,不出现在 typeahead 菜单
 - Server 模式未来可使用独立的 UI 控件（下拉框/弹窗）,核心查询逻辑在 `ConversationRepository` 层复用
+
+**`/delete` 延迟实施决策（随 S3.8 Ephemeral 一起落地）：**
+
+`/delete` 是破坏性操作，设计需要在对话生命周期模型（Ephemeral / Promoted / Archived）确定后才能做对。过早实现会导致：
+- 用户误删不可恢复（当前无回收站机制）
+- Ephemeral 对话天然自动清理，大部分"想删的对话"不会持久化到磁盘
+- 归档（`/archive`）和删除的边界不清晰
+
+**实施时机：** Step 8（Ephemeral + auto-promote）完成后，对话分为 ephemeral / persistent / archived 三态，此时 `/delete` 的语义明确：仅作用于 persistent 和 archived 对话。
+
+**交互设计要点：**
+- 复用 `/switch` 的 `ConversationArgProvider`（async-enum 参数补全选择目标对话）
+- 二次确认：`⚠ 确认删除对话「xxx」？此操作不可恢复。(y/N)`，默认 N
+- 不可删 default 对话
+- 删除当前对话后自动 fallback：`convRepo.findLatest()` → 有则切换，无则创建 default
+- 实现方式：删除整个 `conversations/{id}/` 目录（meta.json + transcript.jsonl）
+- 未来可考虑软删除（移入回收站目录，TTL 后真删），但 MVP 先做硬删除 + 确认
 
 `**/new` 语义迁移**(S2.7 实施):
 
@@ -1360,7 +1477,7 @@ packages/cli/src/migrate/
 - 用户对话是资产,磁盘数据保真不可靠压缩改写
 - append-only 文件易于备份、易于审计、并发安全(无锁追加)
 
-**修订（2026-04-17）：** 原 ADR 中的"永不删除"含义过强——转为"append-only + 可归档/清理"（归档不删除 ≠ 永不处理）。具体归档策略见 [context-architecture.md](./context-architecture.md) §十四。
+**修订（2026-04-17）：** 原 ADR 中的"永不删除"含义过强——转为"append-only + 可归档/清理"（归档不删除 ≠ 永不处理）。具体归档策略见 [context-architecture.md](./context-architecture.md) §十四。段轮转机制见 §9.5 + ADR-CM-017。
 
 ---
 
@@ -1420,6 +1537,21 @@ packages/cli/src/migrate/
 - 用户在 `~` 或 `/tmp` 运行 `zhixing` 时,预期是"随便聊聊",不是"创建一个项目对话"
 - 不同终端 cd 到 `~` 后路径可能不同（`~` vs `/Users/sunhj`）,导致意外的 projectId 不一致
 - 用户可通过 `--user-scope` / `--project-scope` 显式覆盖,ambient 只影响默认行为
+
+---
+
+### ADR-CM-017：Transcript 段轮转（Compact 触发）
+
+**决策**：`appendCompact()` 写入 compact 标记时，自动将当前 `transcript.jsonl` 轮转为归档段（`archive/segment-{epoch}.jsonl`），新建活跃段仅含 header + compact 标记。
+
+**理由**：
+- 主对话场景下 transcript.jsonl 无限膨胀，`load()` 每次全量读取是不可接受的性能退化
+- Compact 标记是天然的轮转边界——其语义就是"此前的内容已摘要化"，轮转后活跃段只保留摘要+后续 turns
+- 归档段不可变（immutable），天然安全、易备份、可压缩
+- `ITranscriptStore` 接口完全不变——轮转是纯内部优化，调用方无感知
+- `TranscriptHeader` 新增可选 `archivedTurnCount` 字段，与 v1 格式向后兼容（undefined 视为 0）
+
+**与 ADR-CM-012 的关系**：append-only 原则不变——活跃段仍然是追加写入。轮转不修改或删除任何已有行，而是将整个文件移入归档。ADR-CM-012 修订注记中的"可归档/清理"在此落地。
 
 ---
 
