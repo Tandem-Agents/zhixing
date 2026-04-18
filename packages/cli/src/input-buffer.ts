@@ -8,7 +8,7 @@
  * 不在这里：
  *   - 终端 I/O（属于 TypeaheadInputReader）
  *   - 命令分派（属于 CommandDispatcher）
- *   - 历史记录持久化（属于 SessionStore，本类只持有 in-memory ring buffer）
+ *   - 历史记录持久化（属于 TranscriptStore，本类只持有 in-memory ring buffer）
  *
  * 设计要点：
  *   1. **按字符（code point）操作**，不按 UTF-16 code unit —— CJK / emoji 安全

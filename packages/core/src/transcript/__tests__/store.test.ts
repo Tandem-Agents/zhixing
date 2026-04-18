@@ -3,8 +3,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import type { Message } from "../../types/messages.js";
-import type { SessionCompact, SessionTurn } from "../types.js";
-import { SessionStore, generateSessionId, getProjectId } from "../store.js";
+import type { CompactMarker, Turn } from "../types.js";
+import { TranscriptStore, generateTranscriptId, getProjectId } from "../store.js";
 
 // ─── 测试 fixtures ───
 
@@ -18,7 +18,7 @@ const ASSISTANT_MSG: Message = {
   content: [{ type: "text", text: "好的，正在读取。" }],
 };
 
-function makeTurn(index: number, timestamp?: string): SessionTurn {
+function makeTurn(index: number, timestamp?: string): Turn {
   return {
     type: "turn",
     turnIndex: index,
@@ -82,32 +82,32 @@ describe("getProjectId", () => {
   });
 });
 
-// ─── generateSessionId ───
+// ─── generateTranscriptId ───
 
-describe("generateSessionId", () => {
+describe("generateTranscriptId", () => {
   it("格式为 YYYYMMDD-xxxx", () => {
-    const id = generateSessionId();
+    const id = generateTranscriptId();
     expect(id).toMatch(/^\d{8}-[0-9a-f]{4}$/);
   });
 
   it("日期前缀是今天", () => {
-    const id = generateSessionId();
+    const id = generateTranscriptId();
     const today = new Date().toISOString().slice(0, 10).replace(/-/g, "");
     expect(id.startsWith(today)).toBe(true);
   });
 });
 
-// ─── SessionStore CRUD ───
+// ─── TranscriptStore CRUD ───
 
-describe("SessionStore", () => {
-  let store: SessionStore;
+describe("TranscriptStore", () => {
+  let store: TranscriptStore;
 
   beforeEach(() => {
-    store = new SessionStore("/test/project");
+    store = new TranscriptStore("/test/project");
   });
 
   describe("create", () => {
-    it("创建会话并返回 header", async () => {
+    it("创建转录并返回 header", async () => {
       const header = await store.create({
         model: "deepseek-chat",
         provider: "deepseek",
@@ -194,7 +194,7 @@ describe("SessionStore", () => {
       }
 
       // compact 标记
-      const compact: SessionCompact = {
+      const compact: CompactMarker = {
         type: "compact",
         timestamp: new Date(baseTime + 5000).toISOString(),
         summary: "## 核心目标\n用户想读取 README",
@@ -228,7 +228,7 @@ describe("SessionStore", () => {
   });
 
   describe("list", () => {
-    it("列出所有会话并按时间倒序", async () => {
+    it("列出所有转录并按时间倒序", async () => {
       const h1 = await store.create({
         name: "第一个",
         model: "m1",
@@ -242,17 +242,17 @@ describe("SessionStore", () => {
         provider: "p2",
       });
 
-      const sessions = await store.list();
-      expect(sessions).toHaveLength(2);
+      const transcripts = await store.list();
+      expect(transcripts).toHaveLength(2);
       // 最近的排前面
-      expect(sessions[0].sessionId).toBe(h2.sessionId);
-      expect(sessions[0].name).toBe("第二个");
-      expect(sessions[1].sessionId).toBe(h1.sessionId);
+      expect(transcripts[0].sessionId).toBe(h2.sessionId);
+      expect(transcripts[0].name).toBe("第二个");
+      expect(transcripts[1].sessionId).toBe(h1.sessionId);
     });
 
-    it("无会话时返回空数组", async () => {
-      const sessions = await store.list();
-      expect(sessions).toHaveLength(0);
+    it("无转录时返回空数组", async () => {
+      const transcripts = await store.list();
+      expect(transcripts).toHaveLength(0);
     });
 
     it("包含 turnCount", async () => {
@@ -260,13 +260,13 @@ describe("SessionStore", () => {
       await store.appendTurn(h.sessionId, makeTurn(0));
       await store.appendTurn(h.sessionId, makeTurn(1));
 
-      const sessions = await store.list();
-      expect(sessions[0].turnCount).toBe(2);
+      const transcripts = await store.list();
+      expect(transcripts[0].turnCount).toBe(2);
     });
   });
 
   describe("rename", () => {
-    it("更新会话名称", async () => {
+    it("更新转录名称", async () => {
       const header = await store.create({
         model: "m",
         provider: "p",
@@ -280,21 +280,21 @@ describe("SessionStore", () => {
   });
 
   describe("delete", () => {
-    it("删除会话文件", async () => {
+    it("删除转录文件", async () => {
       const header = await store.create({ model: "m", provider: "p" });
       await store.delete(header.sessionId);
 
-      const sessions = await store.list();
-      expect(sessions).toHaveLength(0);
+      const transcripts = await store.list();
+      expect(transcripts).toHaveLength(0);
     });
 
-    it("删除不存在的会话抛出错误", async () => {
+    it("删除不存在的转录抛出错误", async () => {
       await expect(store.delete("nonexistent")).rejects.toThrow();
     });
   });
 
   describe("findLatest", () => {
-    it("返回最近的会话 ID", async () => {
+    it("返回最近的 session ID", async () => {
       await store.create({ model: "m1", provider: "p1" });
       await new Promise((r) => setTimeout(r, 50));
       const h2 = await store.create({ model: "m2", provider: "p2" });
@@ -303,7 +303,7 @@ describe("SessionStore", () => {
       expect(latest).toBe(h2.sessionId);
     });
 
-    it("无会话时返回 null", async () => {
+    it("无转录时返回 null", async () => {
       const latest = await store.findLatest();
       expect(latest).toBeNull();
     });

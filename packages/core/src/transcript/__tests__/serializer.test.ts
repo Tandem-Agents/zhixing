@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import type { Message } from "../../types/messages.js";
-import type { SessionCompact, SessionHeader, SessionTurn } from "../types.js";
+import type { CompactMarker, TranscriptHeader, Turn } from "../types.js";
 import {
   appendRecord,
   countTurns,
@@ -15,7 +15,7 @@ import {
 
 // ─── 测试 fixtures ───
 
-const HEADER: SessionHeader = {
+const HEADER: TranscriptHeader = {
   type: "header",
   version: 1,
   sessionId: "20260409-a3f1",
@@ -44,7 +44,7 @@ const ASSISTANT_MSG: Message = {
   ],
 };
 
-const TURN: SessionTurn = {
+const TURN: Turn = {
   type: "turn",
   turnIndex: 0,
   timestamp: "2026-04-09T10:00:05.000Z",
@@ -56,7 +56,7 @@ const TURN: SessionTurn = {
   usage: { inputTokens: 100, outputTokens: 50 },
 };
 
-const COMPACT: SessionCompact = {
+const COMPACT: CompactMarker = {
   type: "compact",
   timestamp: "2026-04-09T11:00:00.000Z",
   summary: "## 核心目标\n用户想了解项目结构\n## 技术上下文\nTypeScript monorepo",
@@ -70,7 +70,7 @@ const COMPACT: SessionCompact = {
 let tmpDir: string;
 
 beforeEach(async () => {
-  tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-session-test-"));
+  tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-transcript-test-"));
 });
 
 afterEach(async () => {
@@ -126,7 +126,7 @@ describe("parseRecords", () => {
   });
 
   it("正确处理包含中文的消息", () => {
-    const chineseTurn: SessionTurn = {
+    const chineseTurn: Turn = {
       ...TURN,
       userMessage: {
         role: "user",
@@ -157,7 +157,7 @@ describe("parseRecords", () => {
 
 describe("writeHeader / readHeader", () => {
   it("写入 header 后可正确读取", async () => {
-    const file = tmpFile("session.jsonl");
+    const file = tmpFile("transcript.jsonl");
     await writeHeader(file, HEADER);
 
     const header = await readHeader(file);
@@ -165,7 +165,7 @@ describe("writeHeader / readHeader", () => {
   });
 
   it("自动创建不存在的父目录", async () => {
-    const file = path.join(tmpDir, "deep", "nested", "session.jsonl");
+    const file = path.join(tmpDir, "deep", "nested", "transcript.jsonl");
     await writeHeader(file, HEADER);
 
     const header = await readHeader(file);

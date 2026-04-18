@@ -4,14 +4,9 @@
  * 流程：
  * 1. 加载/生成 token
  * 2. 创建 Scheduler（共享存储 ~/.zhixing/scheduler.json）
- * 3. 创建 SessionFactory（绑定 createSession）
+ * 3. 创建 RuntimeFactory（绑定 createAgentRuntime）
  * 4. 创建 ServerContext + 启动 runServer
  * 5. 等待停机（信号触发或主动 shutdown）
- *
- * 设计要点：
- * - 复用 createSession()——不重复实现 provider/security/tools 设置
- * - Scheduler 的 runAgentTurn 通过 SessionRegistry 调用——任务也走会话化执行
- * - 系统任务 __journal-gc 注入 JournalStore lifecycle（通过 callText 的 LLM 调用）
  */
 
 import {
@@ -26,13 +21,13 @@ import {
   createServerContext,
   runServer,
   buildSystemHandlers,
-  SessionRegistry,
+  RuntimeRegistry,
   DEFAULT_SERVER_CONFIG,
   type RunningServer,
 } from "@zhixing/server";
 import chalk from "chalk";
-import { createSession } from "../run-agent.js";
-import { createCliSessionFactory } from "./session-adapter.js";
+import { createAgentRuntime } from "../run-agent.js";
+import { createCliRuntimeFactory } from "./session-adapter.js";
 import { loadOrCreateToken } from "./token.js";
 
 const SERVER_VERSION = "0.1.0";
@@ -55,30 +50,26 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
     console.log(chalk.dim(`Generated new token: ${tokenInfo.path}`));
   }
 
-  // 2. SessionFactory + SessionRegistry
-  // 每个 session 独立创建 AgentSession（独立 provider + 工具集）
-  const sessionFactory = createCliSessionFactory({
-    createAgentSession: () =>
-      createSession({
+  // 2. RuntimeFactory + RuntimeRegistry
+  const runtimeFactory = createCliRuntimeFactory({
+    createAgentRuntime: () =>
+      createAgentRuntime({
         model: opts.model,
         provider: opts.provider,
         workspace: opts.workspace,
       }),
   });
-  const sessions = new SessionRegistry(sessionFactory);
+  const sessions = new RuntimeRegistry(runtimeFactory);
 
   // 3. Scheduler
-  // runAgentTurn 走 sessions registry：每个调度任务复用同一会话 ID（任务名作为 session 标识）
-  // 这样定时任务能保留对话历史，符合 spec 的「持续性会话」理念
   const schedulerEventBus = createEventBus<SchedulerEventMap>();
   const runAgentTurn = async (params: {
     prompt: string;
   }): Promise<AgentTurnResult> => {
     const startTime = Date.now();
     try {
-      // 调度任务用独立的临时 session（无持久化历史）
-      const session = await sessions.getOrCreate();
-      const gen = session.run(params.prompt);
+      const runtime = await sessions.getOrCreate();
+      const gen = runtime.run(params.prompt);
       let lastText = "";
       while (true) {
         const { value, done } = await gen.next();
@@ -112,7 +103,6 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
   const systemHandlers = buildSystemHandlers({
     journal: {
       runJournalLifecycle: async () => {
-        // S1 阶段 CLI 已实现 journal lifecycle 的简化版，此处直接调用
         const expired = await journalStore.expireOld();
         const plan = await journalStore.scan();
         return {
@@ -153,7 +143,6 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
       },
     });
   } catch (err) {
-    // 启动失败：scheduler 也得 stop
     await scheduler.stop().catch(() => {});
     throw err;
   }
@@ -167,6 +156,6 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
   console.log(chalk.dim(`  Ctrl+C 停止`));
   console.log();
 
-  // 等待停机（SIGTERM/SIGINT 触发，或 runner.shutdown 调用）
+  // 等待停机
   await runner.waitForShutdown();
 }

@@ -1,17 +1,14 @@
 /**
- * AgentSession → ServerSession 适配器
+ * AgentRuntime → SessionRuntime 适配器
  *
- * @zhixing/server 定义了抽象接口 ServerSession（AsyncGenerator 风格），
- * @zhixing/cli 的 AgentSession 是 callback 风格（onYield + Promise<RunResult>）。
+ * @zhixing/server 定义了抽象接口 SessionRuntime（AsyncGenerator 风格），
+ * @zhixing/cli 的 AgentRuntime 是 callback 风格（onYield + Promise<RunResult>）。
  * 此适配器在两者之间架桥。
  *
  * 关键设计：
- * - 一个 AgentSession 实例对应一个 ServerSession（持久化对话历史）
+ * - 一个 AgentRuntime 实例对应一个 SessionRuntime（持久化对话历史）
  * - 用 queue + waiter 模式把 onYield 回调转为 AsyncGenerator yield
  * - abort 通过 AbortController 联动到 SecurityPipeline 等环节
- *
- * 注意：CLI 的 AgentSession 没有 abort 入口（design choice），所以 abort
- * 只能在适配器层标记中断，让下次 run 立即返回错误。
  */
 
 import {
@@ -20,8 +17,8 @@ import {
   type AgentResult,
   type AgentYield,
 } from "@zhixing/core";
-import type { ServerSession, SessionFactory } from "@zhixing/server";
-import type { AgentSession } from "../run-agent.js";
+import type { SessionRuntime, RuntimeFactory } from "@zhixing/server";
+import type { AgentRuntime } from "../run-agent.js";
 
 // ─── 适配器 ───
 
@@ -32,10 +29,10 @@ interface QueueItem {
   error?: unknown;
 }
 
-export function createServerSessionAdapter(
+export function createServerRuntimeAdapter(
   sessionId: string,
-  agentSession: AgentSession,
-): ServerSession {
+  agentRuntime: AgentRuntime,
+): SessionRuntime {
   let messages: Message[] = [];
   let aborted = false;
 
@@ -44,8 +41,7 @@ export function createServerSessionAdapter(
 
     async *run(text): AsyncGenerator<AgentYield, AgentResult> {
       if (aborted) {
-        // 上一次 abort 后立即报错（避免泄漏到 LLM 调用）
-        aborted = false; // 重置，允许下次 run
+        aborted = false;
         throw new Error("Session aborted");
       }
 
@@ -59,7 +55,7 @@ export function createServerSessionAdapter(
       };
 
       // 启动 agent 运行（callback 风格）→ 把事件灌进队列
-      const runPromise = agentSession
+      const runPromise = agentRuntime
         .run({
           messages: [...messages],
           onYield: (event) => {
@@ -88,7 +84,6 @@ export function createServerSessionAdapter(
         if (item.kind === "yield") {
           yield item.value!;
         } else if (item.kind === "done") {
-          // 等 runPromise 完全 settle，避免 unhandled rejection
           await runPromise;
           return item.result!;
         } else {
@@ -104,8 +99,6 @@ export function createServerSessionAdapter(
 
     abort() {
       aborted = true;
-      // CLI 的 AgentSession 当前不暴露 abort signal——只能通过 flag 影响下次 run
-      // S2.5 AgentOrchestrator 阶段会引入更深的 abort 链路
     },
 
     dispose() {
@@ -114,22 +107,22 @@ export function createServerSessionAdapter(
   };
 }
 
-// ─── SessionFactory 实现 ───
+// ─── RuntimeFactory 实现 ───
 
-export interface SessionFactoryOptions {
-  /** 创建 AgentSession 的工厂方法（注入避免对 createSession 的硬依赖） */
-  createAgentSession: () => Promise<AgentSession>;
+export interface RuntimeFactoryOptions {
+  /** 创建 AgentRuntime 的工厂方法（注入避免对 createAgentRuntime 的硬依赖） */
+  createAgentRuntime: () => Promise<AgentRuntime>;
 }
 
 /**
- * 给 @zhixing/server 用的 SessionFactory。
- * 每次 create 都新建一个 AgentSession（独立 provider 连接、独立工具集）。
+ * 给 @zhixing/server 用的 RuntimeFactory。
+ * 每次 create 都新建一个 AgentRuntime（独立 provider 连接、独立工具集）。
  */
-export function createCliSessionFactory(opts: SessionFactoryOptions): SessionFactory {
+export function createCliRuntimeFactory(opts: RuntimeFactoryOptions): RuntimeFactory {
   return {
     async create(sessionId) {
-      const agentSession = await opts.createAgentSession();
-      return createServerSessionAdapter(sessionId, agentSession);
+      const agentRuntime = await opts.createAgentRuntime();
+      return createServerRuntimeAdapter(sessionId, agentRuntime);
     },
   };
 }

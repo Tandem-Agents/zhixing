@@ -1,8 +1,8 @@
 /**
- * SessionStore — 会话持久化存储
+ * TranscriptStore — 转录持久化存储
  *
- * 核心设计（详见 research/design/specifications/session-persistence.md）：
- * - 无独立索引：按需扫描 JSONL 文件 + 读首行 header，避免 Claude Code 的索引同步 bug
+ * 核心设计：
+ * - 无独立索引：按需扫描 JSONL 文件 + 读首行 header
  * - 项目隔离：SHA-256(绝对路径) 前 12 位 hex 作为项目目录
  * - Turn 级粒度：一轮要么完整保存要么不保存
  * - 人类友好 ID：YYYYMMDD-xxxx 格式，比 UUID 好记
@@ -20,15 +20,15 @@ import {
   writeHeader,
 } from "./serializer.js";
 import type {
-  CreateSessionOptions,
-  ISessionStore,
-  LoadedSession,
-  SessionCompact,
-  SessionHeader,
-  SessionInfo,
-  SessionTurn,
+  CreateTranscriptOptions,
+  ITranscriptStore,
+  LoadedTranscript,
+  CompactMarker,
+  TranscriptHeader,
+  TranscriptInfo,
+  Turn,
 } from "./types.js";
-import { SESSION_FORMAT_VERSION } from "./types.js";
+import { TRANSCRIPT_FORMAT_VERSION } from "./types.js";
 
 // ─── 路径工具 ───
 
@@ -38,8 +38,8 @@ export function getProjectId(absolutePath: string): string {
   return createHash("sha256").update(normalized).digest("hex").slice(0, 12);
 }
 
-/** 生成人类友好的 Session ID：YYYYMMDD-xxxx */
-export function generateSessionId(): string {
+/** 生成人类友好的 Transcript ID：YYYYMMDD-xxxx */
+export function generateTranscriptId(): string {
   const date = new Date().toISOString().slice(0, 10).replace(/-/g, "");
   const rand = Math.random().toString(16).slice(2, 6).padEnd(4, "0");
   return `${date}-${rand}`;
@@ -53,9 +53,9 @@ function getZhixingHome(): string {
   );
 }
 
-// ─── SessionStore 实现 ───
+// ─── TranscriptStore 实现 ───
 
-export class SessionStore implements ISessionStore {
+export class TranscriptStore implements ITranscriptStore {
   private readonly projectPath: string;
   private readonly projectId: string;
   private readonly sessionsDir: string;
@@ -107,13 +107,13 @@ export class SessionStore implements ISessionStore {
     return path.join(this.sessionsDir, `${sessionId}.jsonl`);
   }
 
-  async create(options: CreateSessionOptions): Promise<SessionHeader> {
+  async create(options: CreateTranscriptOptions): Promise<TranscriptHeader> {
     await this.ensureProjectDir();
 
-    const sessionId = generateSessionId();
-    const header: SessionHeader = {
+    const sessionId = generateTranscriptId();
+    const header: TranscriptHeader = {
       type: "header",
-      version: SESSION_FORMAT_VERSION,
+      version: TRANSCRIPT_FORMAT_VERSION,
       sessionId,
       name: options.name ?? null,
       projectPath: this.projectPath,
@@ -126,7 +126,7 @@ export class SessionStore implements ISessionStore {
     return header;
   }
 
-  async appendTurn(sessionId: string, turn: SessionTurn): Promise<void> {
+  async appendTurn(sessionId: string, turn: Turn): Promise<void> {
     const file = this.sessionFile(sessionId);
     await this.assertFileExists(file, sessionId);
     await appendRecord(file, turn);
@@ -134,14 +134,14 @@ export class SessionStore implements ISessionStore {
 
   async appendCompact(
     sessionId: string,
-    compact: SessionCompact,
+    compact: CompactMarker,
   ): Promise<void> {
     const file = this.sessionFile(sessionId);
     await this.assertFileExists(file, sessionId);
     await appendRecord(file, compact);
   }
 
-  async load(sessionId: string): Promise<LoadedSession> {
+  async load(sessionId: string): Promise<LoadedTranscript> {
     const file = this.sessionFile(sessionId);
     const { header, turns, compacts } = await loadRecords(file);
 
@@ -153,10 +153,10 @@ export class SessionStore implements ISessionStore {
     return { header, messages, turnCount: turns.length };
   }
 
-  async list(): Promise<SessionInfo[]> {
+  async list(): Promise<TranscriptInfo[]> {
     try {
       const entries = await fs.readdir(this.sessionsDir);
-      const sessions: SessionInfo[] = [];
+      const transcripts: TranscriptInfo[] = [];
 
       for (const entry of entries) {
         if (!entry.endsWith(".jsonl")) continue;
@@ -168,7 +168,7 @@ export class SessionStore implements ISessionStore {
         const stat = await fs.stat(filePath);
         const turnCount = await countTurns(filePath);
 
-        sessions.push({
+        transcripts.push({
           sessionId: header.sessionId,
           name: header.name,
           createdAt: header.createdAt,
@@ -179,7 +179,7 @@ export class SessionStore implements ISessionStore {
         });
       }
 
-      return sessions.sort(
+      return transcripts.sort(
         (a, b) => b.lastAccessedAt.getTime() - a.lastAccessedAt.getTime(),
       );
     } catch {
@@ -197,7 +197,7 @@ export class SessionStore implements ISessionStore {
     }
 
     try {
-      const header = JSON.parse(lines[0]) as SessionHeader;
+      const header = JSON.parse(lines[0]) as TranscriptHeader;
       header.name = name;
       lines[0] = JSON.stringify(header);
       await fs.writeFile(file, lines.join("\n"), "utf-8");
@@ -212,12 +212,12 @@ export class SessionStore implements ISessionStore {
   }
 
   /**
-   * 查找当前项目最近的会话（供 --continue 使用）。
-   * 返回最近修改的会话 ID，无会话时返回 null。
+   * 查找当前项目最近的转录（供 --continue 使用）。
+   * 返回最近修改的 session ID，无转录时返回 null。
    */
   async findLatest(): Promise<string | null> {
-    const sessions = await this.list();
-    const latest = sessions[0];
+    const transcripts = await this.list();
+    const latest = transcripts[0];
     return latest ? latest.sessionId : null;
   }
 
@@ -242,8 +242,8 @@ export class SessionStore implements ISessionStore {
  * 然后只加载 compact 之后的 turns。
  */
 function rebuildMessages(
-  turns: SessionTurn[],
-  compacts: SessionCompact[],
+  turns: Turn[],
+  compacts: CompactMarker[],
 ): Message[] {
   const messages: Message[] = [];
   const lastCompact = compacts.length > 0 ? compacts[compacts.length - 1] : null;

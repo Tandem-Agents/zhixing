@@ -103,7 +103,7 @@ export interface SecureExecuteToolOptions {
   prompt?: PromptFn;
   /**
    * Confirmation broker——broker 路径（默认）。
-   * 由 createSession 构造并持久化于整个会话；渲染器在 REPL 侧 attach。
+   * 由 createAgentRuntime 构造并持久化于整个会话；渲染器在 REPL 侧 attach。
    */
   broker?: IConfirmationBroker;
   /**

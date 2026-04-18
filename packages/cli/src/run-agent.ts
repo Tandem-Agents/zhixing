@@ -66,7 +66,7 @@ import {
 
 // ─── 类型 ───
 
-export interface AgentSession {
+export interface AgentRuntime {
   providerId: string;
   model: string;
   run: (params: RunParams) => Promise<RunResult>;
@@ -135,19 +135,19 @@ export interface CompactInfo {
   tokensAfter: number;
 }
 
-// ─── 创建会话 ───
+// ─── 创建运行时 ───
 
 /**
- * 创建一个 Agent 会话。会话持有 Provider/Tools/EventBus 实例，
+ * 创建一个 Agent 运行时。运行时持有 Provider/Tools/EventBus 实例，
  * 可多次调用 run() 执行不同的对话。
  */
-export async function createSession(options: {
+export async function createAgentRuntime(options: {
   model?: string;
   provider?: string;
   workspace?: string;
   /** 额外工具（如 schedule），在内置工具之后注入 */
   extraTools?: import("@zhixing/core").ToolDefinition[];
-}): Promise<AgentSession> {
+}): Promise<AgentRuntime> {
   const { provider, defaultModel, config } = createProviderFromConfig({
     providerId: options.provider,
   });
@@ -191,8 +191,6 @@ export async function createSession(options: {
   });
 
   // 安全管线：会话级单例，跨多次 run() 共享权限规则、确认追踪、频率限制状态。
-  // 持久化 store 落盘到 ~/.zhixing/permissions/，规则跨进程保留。
-  // workspace 由 resolveWorkspace 按优先级链解析，不再硬编码 cwd。
   const persistentStore = new PermissionStore({});
   const securityPipeline = new SecurityPipeline({
     workspace: workspace.path,
@@ -201,7 +199,6 @@ export async function createSession(options: {
   });
 
   // 确认交互 broker：会话级单例。渲染器由 REPL 在 attach 时注入。
-  // 非交互模式（CI / 管道）下 broker 自动走 fail-to-deny 策略。
   const confirmationBroker = new ConfirmationBroker();
 
   // 加载项目上下文（ZHIXING.md + 环境信息），注入到首条 user message
@@ -347,8 +344,6 @@ export async function createSession(options: {
       const messagesWithContext = injectContext(params.messages, enrichedContext);
 
       // 用 SecurityPipeline 包装工具执行——每次 run() 重新构造 wrapper。
-      // 同时传入 broker（会话级，跨 run 共享队列）和 legacy prompt（回退路径）。
-      // secure-executor 内部按 env `ZHIXING_CONFIRMATION_RENDERER` 决定走哪条。
       const secureExecuteTool = createSecureExecuteTool({
         pipeline: securityPipeline,
         originalExecute: (tool, input, context) => tool.call(input, context),
@@ -418,8 +413,8 @@ export async function runOnce(options: {
   onYield?: (event: AgentYield) => void;
   onBeforeEventRender?: () => void;
 }): Promise<RunResult> {
-  const session = await createSession(options);
-  return session.run({
+  const runtime = await createAgentRuntime(options);
+  return runtime.run({
     messages: [userMessage(options.prompt)],
     onYield: options.onYield,
     onBeforeEventRender: options.onBeforeEventRender,
@@ -430,14 +425,6 @@ export async function runOnce(options: {
 
 /**
  * 从 yield 事件中重建本轮产生的消息序列。
- *
- * Agent Loop 内部维护了完整的消息历史，但不对外暴露。
- * REPL 需要在外部维护历史以实现多轮对话。
- *
- * 重建规则（与 agent-loop.ts 内部行为一致）：
- * - assistant_message → 追加到 newMessages
- * - tool_end → 收集 ToolResultBlock
- * - turn_complete → 将收集的 tool results 组装为 user 消息，追加到 newMessages
  */
 function trackMessages(
   event: AgentYield,

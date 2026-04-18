@@ -20,7 +20,7 @@ import { getAgentIdentity } from "@zhixing/core";
 import { selectWithInput } from "../select-with-input.js";
 
 // 取应用身份（默认 "知行"；被 zhixing.config.json 的 agent.displayName 覆盖时
-// 走 setAgentIdentity 写进单例）。手动测试里没跑 createSession 所以用默认值。
+// 走 setAgentIdentity 写进单例）。手动测试里没跑 createAgentRuntime 所以用默认值。
 const { displayName } = getAgentIdentity();
 
 console.log(`=== SelectWithInput 手动验收 (${displayName}) ===`);

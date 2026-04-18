@@ -10,7 +10,7 @@ export * from "./rpc/dispatcher.js";
 export * from "./rpc/handlers.js";
 export * from "./rpc/methods/index.js";
 export * from "./rpc/event-bridge.js";
-export * from "./session/index.js";
+export * from "./runtime/index.js";
 export * from "./system-handlers.js";
 export * from "./process-lock.js";
 export * from "./lifecycle.js";

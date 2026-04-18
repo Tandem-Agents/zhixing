@@ -14,6 +14,7 @@
 | [架构概述](./architecture/overview.md) | 整体架构设计（演进式） | ✅ v0.1 已确立 |
 | [架构决策](./architecture/decisions/_index.md) | ADR 索引 | ✅ 已启动（1 条） |
 | [功能规格](./specifications/) | 具体功能的实现规格 | 🔲 待启动 |
+| [实现路线图](./implementation-roadmap.md) | Step 0-8 执行计划，连接规格与代码 | 🔄 进行中 |
 | [差异化策略](./differentiators.md) | 我们的独特竞争优势 | 🔲 待研究 |
 
 ## 设计演进原则

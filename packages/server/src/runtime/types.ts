@@ -1,15 +1,15 @@
 /**
- * Server Session 类型定义
+ * Server Runtime 类型定义
  *
  * 设计原则：
- * - ServerSession 是抽象接口，不绑定具体 Agent 实现
- * - SessionFactory 由调用方（CLI 或测试）注入，Server 不依赖 @zhixing/cli
+ * - SessionRuntime 是抽象接口，不绑定具体 Agent 实现
+ * - RuntimeFactory 由调用方（CLI 或测试）注入，Server 不依赖 @zhixing/cli
  * - 流式输出复用 core 的 AgentYield/AgentResult
  */
 
 import type { AgentYield, AgentResult, Message } from "@zhixing/core";
 
-export interface ServerSession {
+export interface SessionRuntime {
   readonly sessionId: string;
   /**
    * 执行一轮对话，AsyncGenerator 流式 yield 事件 → return 最终结果。
@@ -24,12 +24,12 @@ export interface ServerSession {
   dispose(): void;
 }
 
-export interface SessionFactory {
-  /** 创建新会话；sessionId 由 Registry 生成传入 */
-  create(sessionId: string): Promise<ServerSession>;
+export interface RuntimeFactory {
+  /** 创建新运行时；sessionId 由 Registry 生成传入 */
+  create(sessionId: string): Promise<SessionRuntime>;
 }
 
-export interface SessionInfo {
+export interface RuntimeInfo {
   sessionId: string;
   createdAt: string;
   lastActiveAt: string;

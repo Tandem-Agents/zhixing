@@ -1,13 +1,13 @@
 /**
- * ServerSession 适配器测试 — 用 mock AgentSession 验证 callback → AsyncGenerator 桥接
+ * SessionRuntime 适配器测试 — 用 mock AgentRuntime 验证 callback → AsyncGenerator 桥接
  */
 
 import { describe, it, expect } from "vitest";
 import { type AgentResult, type AgentYield, type Message } from "@zhixing/core";
-import { createServerSessionAdapter } from "../session-adapter.js";
-import type { AgentSession, RunParams, RunResult } from "../../run-agent.js";
+import { createServerRuntimeAdapter } from "../session-adapter.js";
+import type { AgentRuntime, RunParams, RunResult } from "../../run-agent.js";
 
-// ─── Mock AgentSession ───
+// ─── Mock AgentRuntime ───
 
 interface MockBehavior {
   /** 推送的 delta 事件 */
@@ -18,9 +18,8 @@ interface MockBehavior {
   reason?: AgentResult["reason"];
 }
 
-function createMockAgentSession(behavior: MockBehavior = {}): AgentSession {
-  // 满足类型签名所需的最小骨架（其他属性测试不会触达）
-  const stub = {} as AgentSession;
+function createMockAgentRuntime(behavior: MockBehavior = {}): AgentRuntime {
+  const stub = {} as AgentRuntime;
   return Object.assign(stub, {
     providerId: "mock",
     model: "mock-model",
@@ -70,11 +69,11 @@ function createMockAgentSession(behavior: MockBehavior = {}): AgentSession {
 
 // ─── Tests ───
 
-describe("createServerSessionAdapter", () => {
+describe("createServerRuntimeAdapter", () => {
   it("yields events from onYield callback then returns final result", async () => {
-    const session = createServerSessionAdapter(
+    const runtime = createServerRuntimeAdapter(
       "test-1",
-      createMockAgentSession({
+      createMockAgentRuntime({
         yields: [
           { type: "text_delta", text: "hi" } as AgentYield,
           { type: "text_delta", text: " there" } as AgentYield,
@@ -83,7 +82,7 @@ describe("createServerSessionAdapter", () => {
     );
 
     const yields: AgentYield[] = [];
-    const gen = session.run("hello");
+    const gen = runtime.run("hello");
     while (true) {
       const { value, done } = await gen.next();
       if (done) {
@@ -97,66 +96,66 @@ describe("createServerSessionAdapter", () => {
   });
 
   it("getHistory returns all messages including new ones from run", async () => {
-    const session = createServerSessionAdapter("test-2", createMockAgentSession());
-    const gen = session.run("hello");
+    const runtime = createServerRuntimeAdapter("test-2", createMockAgentRuntime());
+    const gen = runtime.run("hello");
     while (!(await gen.next()).done) {
       // consume
     }
-    const history = session.getHistory();
+    const history = runtime.getHistory();
     // 1 user (from adapter) + 1 assistant (from mock newMessages)
     expect(history).toHaveLength(2);
     expect(history[0]!.role).toBe("user");
     expect(history[1]!.role).toBe("assistant");
   });
 
-  it("propagates errors from agentSession.run via throw", async () => {
-    const session = createServerSessionAdapter(
+  it("propagates errors from agentRuntime.run via throw", async () => {
+    const runtime = createServerRuntimeAdapter(
       "test-3",
-      createMockAgentSession({ throwError: "boom" }),
+      createMockAgentRuntime({ throwError: "boom" }),
     );
 
-    const gen = session.run("hi");
+    const gen = runtime.run("hi");
     await expect(gen.next()).rejects.toThrow("boom");
   });
 
   it("multiple sequential runs accumulate history", async () => {
-    const session = createServerSessionAdapter("test-4", createMockAgentSession());
+    const runtime = createServerRuntimeAdapter("test-4", createMockAgentRuntime());
 
-    const gen1 = session.run("first");
+    const gen1 = runtime.run("first");
     while (!(await gen1.next()).done) {
       /* consume */
     }
-    const gen2 = session.run("second");
+    const gen2 = runtime.run("second");
     while (!(await gen2.next()).done) {
       /* consume */
     }
 
-    const history = session.getHistory();
+    const history = runtime.getHistory();
     expect(history).toHaveLength(4); // 2 turns × 2 messages
   });
 
   it("dispose clears history", async () => {
-    const session = createServerSessionAdapter("test-5", createMockAgentSession());
-    const gen = session.run("x");
+    const runtime = createServerRuntimeAdapter("test-5", createMockAgentRuntime());
+    const gen = runtime.run("x");
     while (!(await gen.next()).done) {
       /* consume */
     }
-    expect(session.getHistory()).toHaveLength(2);
+    expect(runtime.getHistory()).toHaveLength(2);
 
-    session.dispose();
-    expect(session.getHistory()).toHaveLength(0);
+    runtime.dispose();
+    expect(runtime.getHistory()).toHaveLength(0);
   });
 
   it("abort flag causes next run to throw immediately (then auto-resets)", async () => {
-    const session = createServerSessionAdapter("test-6", createMockAgentSession());
+    const runtime = createServerRuntimeAdapter("test-6", createMockAgentRuntime());
 
-    session.abort();
+    runtime.abort();
 
-    const gen = session.run("after-abort");
+    const gen = runtime.run("after-abort");
     await expect(gen.next()).rejects.toThrow(/aborted/i);
 
     // 下一次 run 应该正常工作（abort 标志已重置）
-    const gen2 = session.run("normal");
+    const gen2 = runtime.run("normal");
     let completed = false;
     while (true) {
       const { done } = await gen2.next();
@@ -169,17 +168,17 @@ describe("createServerSessionAdapter", () => {
   });
 
   it("getHistory respects limit parameter", async () => {
-    const session = createServerSessionAdapter("test-7", createMockAgentSession());
-    const gen1 = session.run("first");
+    const runtime = createServerRuntimeAdapter("test-7", createMockAgentRuntime());
+    const gen1 = runtime.run("first");
     while (!(await gen1.next()).done) {
       /* consume */
     }
-    const gen2 = session.run("second");
+    const gen2 = runtime.run("second");
     while (!(await gen2.next()).done) {
       /* consume */
     }
 
-    const last2 = session.getHistory(2);
+    const last2 = runtime.getHistory(2);
     expect(last2).toHaveLength(2);
     // last 2 should be the second turn
     const lastUser = last2[0] as { role: string; content: Array<{ type: string; text: string }> };

@@ -1,7 +1,7 @@
 /**
  * S2.D 集成测试：session.* RPC 方法 + delta/complete 推送
  *
- * 用 mock SessionFactory（不依赖真实 LLM）。
+ * 用 mock RuntimeFactory（不依赖真实 LLM）。
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -9,8 +9,8 @@ import WebSocket from "ws";
 import type { AgentResult, AgentYield, Message } from "@zhixing/core";
 import { startServer, type ZhixingServerInstance } from "../server.js";
 import { createServerContext } from "../context.js";
-import { SessionRegistry } from "../session/registry.js";
-import type { ServerSession, SessionFactory } from "../session/types.js";
+import { RuntimeRegistry } from "../runtime/registry.js";
+import type { SessionRuntime, RuntimeFactory } from "../runtime/types.js";
 import { DEFAULT_SERVER_CONFIG } from "../types.js";
 import {
   encodeRequest,
@@ -24,7 +24,7 @@ import {
 const TEST_VERSION = "0.1.0-test";
 const TEST_TOKEN = "test-token-session";
 
-// ─── Mock session ───
+// ─── Mock runtime ───
 
 interface MockOptions {
   /** 推送的 delta 数量（默认 2） */
@@ -35,7 +35,7 @@ interface MockOptions {
   yieldDelayMs?: number;
 }
 
-function createMockSession(sessionId: string, opts: MockOptions = {}): ServerSession {
+function createMockRuntime(sessionId: string, opts: MockOptions = {}): SessionRuntime {
   const messages: Message[] = [];
   let aborted = false;
 
@@ -77,10 +77,10 @@ function createMockSession(sessionId: string, opts: MockOptions = {}): ServerSes
   };
 }
 
-function createMockFactory(opts: MockOptions = {}): SessionFactory {
+function createMockFactory(opts: MockOptions = {}): RuntimeFactory {
   return {
     async create(sessionId) {
-      return createMockSession(sessionId, opts);
+      return createMockRuntime(sessionId, opts);
     },
   };
 }
@@ -178,8 +178,8 @@ async function connect(port: number): Promise<RpcClient> {
 describe("session.* RPC (S2.D)", () => {
   let server: ZhixingServerInstance;
 
-  async function startWithFactory(factory: SessionFactory): Promise<void> {
-    const sessions = new SessionRegistry(factory);
+  async function startWithFactory(factory: RuntimeFactory): Promise<void> {
+    const sessions = new RuntimeRegistry(factory);
     const ctx = createServerContext({
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: TEST_VERSION,
@@ -247,7 +247,7 @@ describe("session.* RPC (S2.D)", () => {
     client.close();
   });
 
-  it("session.send with existing sessionId reuses session", async () => {
+  it("session.send with existing sessionId reuses runtime", async () => {
     await startWithFactory(createMockFactory({ deltaCount: 1 }));
     const client = await connect(server.port);
     await client.request("auth", { token: TEST_TOKEN });
@@ -263,15 +263,15 @@ describe("session.* RPC (S2.D)", () => {
 
     const list = await client.request("session.list");
     if (isSuccessResponse(list)) {
-      const sessions = list.result as Array<{ sessionId: string; messageCount: number }>;
-      expect(sessions).toHaveLength(1);
-      expect(sessions[0]!.messageCount).toBe(4); // 2 turns × (user + assistant)
+      const runtimes = list.result as Array<{ sessionId: string; messageCount: number }>;
+      expect(runtimes).toHaveLength(1);
+      expect(runtimes[0]!.messageCount).toBe(4); // 2 turns × (user + assistant)
     }
 
     client.close();
   });
 
-  it("error in session.run is reported via session.complete with error reason", async () => {
+  it("error in runtime.run is reported via session.complete with error reason", async () => {
     await startWithFactory(createMockFactory({ throwError: "boom" }));
     const client = await connect(server.port);
     await client.request("auth", { token: TEST_TOKEN });
@@ -310,8 +310,8 @@ describe("session.* RPC (S2.D)", () => {
     // Should be busy now (run still streaming)
     const listBusy = await client.request("session.list");
     if (isSuccessResponse(listBusy)) {
-      const sessions = listBusy.result as Array<{ busy: boolean }>;
-      expect(sessions[0]!.busy).toBe(true);
+      const runtimes = listBusy.result as Array<{ busy: boolean }>;
+      expect(runtimes[0]!.busy).toBe(true);
     }
 
     await client.waitNotification("session.complete");
@@ -319,8 +319,8 @@ describe("session.* RPC (S2.D)", () => {
     // After complete, busy should be false
     const listIdle = await client.request("session.list");
     if (isSuccessResponse(listIdle)) {
-      const sessions = listIdle.result as Array<{ busy: boolean }>;
-      expect(sessions[0]!.busy).toBe(false);
+      const runtimes = listIdle.result as Array<{ busy: boolean }>;
+      expect(runtimes[0]!.busy).toBe(false);
     }
 
     client.close();
@@ -361,7 +361,7 @@ describe("session.* RPC (S2.D)", () => {
 
   // ─── session.delete ───
 
-  it("session.delete removes session", async () => {
+  it("session.delete removes runtime", async () => {
     await startWithFactory(createMockFactory({ deltaCount: 1 }));
     const client = await connect(server.port);
     await client.request("auth", { token: TEST_TOKEN });
@@ -380,7 +380,7 @@ describe("session.* RPC (S2.D)", () => {
 
   // ─── 配置缺失场景 ───
 
-  it("session.send returns INTERNAL_ERROR when sessions registry is missing", async () => {
+  it("session.send returns INTERNAL_ERROR when runtime registry is missing", async () => {
     const ctx = createServerContext({
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: TEST_VERSION,

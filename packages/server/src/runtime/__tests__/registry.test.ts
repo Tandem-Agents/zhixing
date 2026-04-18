@@ -1,11 +1,11 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import type { AgentResult, AgentYield, Message } from "@zhixing/core";
-import { SessionRegistry } from "../registry.js";
-import type { ServerSession, SessionFactory } from "../types.js";
+import { RuntimeRegistry } from "../registry.js";
+import type { SessionRuntime, RuntimeFactory } from "../types.js";
 
-// ─── 测试用 mock session ───
+// ─── 测试用 mock runtime ───
 
-function createMockSession(sessionId: string): ServerSession {
+function createMockRuntime(sessionId: string): SessionRuntime {
   const messages: Message[] = [];
   let aborted = false;
 
@@ -37,45 +37,45 @@ function createMockSession(sessionId: string): ServerSession {
     get _aborted() {
       return aborted;
     },
-  } as ServerSession & { _aborted: boolean };
+  } as SessionRuntime & { _aborted: boolean };
 }
 
-function createMockFactory(): SessionFactory {
+function createMockFactory(): RuntimeFactory {
   return {
     async create(sessionId) {
-      return createMockSession(sessionId);
+      return createMockRuntime(sessionId);
     },
   };
 }
 
 // ─── 测试 ───
 
-describe("SessionRegistry", () => {
-  let registry: SessionRegistry;
+describe("RuntimeRegistry", () => {
+  let registry: RuntimeRegistry;
 
   beforeEach(() => {
-    registry = new SessionRegistry(createMockFactory());
+    registry = new RuntimeRegistry(createMockFactory());
   });
 
-  it("creates a new session when no sessionId provided", async () => {
-    const session = await registry.getOrCreate();
-    expect(session.sessionId).toMatch(/^sess_/);
+  it("creates a new runtime when no sessionId provided", async () => {
+    const runtime = await registry.getOrCreate();
+    expect(runtime.sessionId).toMatch(/^sess_/);
     expect(registry.list()).toHaveLength(1);
   });
 
-  it("returns existing session when sessionId provided and exists", async () => {
+  it("returns existing runtime when sessionId provided and exists", async () => {
     const s1 = await registry.getOrCreate();
     const s2 = await registry.getOrCreate(s1.sessionId);
     expect(s1).toBe(s2);
     expect(registry.list()).toHaveLength(1);
   });
 
-  it("creates session with specified sessionId when not present", async () => {
-    const session = await registry.getOrCreate("custom-id");
-    expect(session.sessionId).toBe("custom-id");
+  it("creates runtime with specified sessionId when not present", async () => {
+    const runtime = await registry.getOrCreate("custom-id");
+    expect(runtime.sessionId).toBe("custom-id");
   });
 
-  it("list() returns metadata for all sessions", async () => {
+  it("list() returns metadata for all runtimes", async () => {
     await registry.getOrCreate("a");
     await registry.getOrCreate("b");
     const list = registry.list();
@@ -104,24 +104,24 @@ describe("SessionRegistry", () => {
     expect(registry.list()[0]!.messageCount).toBe(2);
   });
 
-  it("abort() returns false for unknown session", () => {
+  it("abort() returns false for unknown runtime", () => {
     expect(registry.abort("nope")).toBe(false);
   });
 
-  it("abort() invokes session.abort and returns true", async () => {
-    const s = (await registry.getOrCreate("a")) as ServerSession & { _aborted: boolean };
+  it("abort() invokes runtime.abort and returns true", async () => {
+    const s = (await registry.getOrCreate("a")) as SessionRuntime & { _aborted: boolean };
     expect(registry.abort("a")).toBe(true);
     expect(s._aborted).toBe(true);
   });
 
-  it("delete() removes session and invokes dispose", async () => {
+  it("delete() removes runtime and invokes dispose", async () => {
     await registry.getOrCreate("a");
     expect(registry.delete("a")).toBe(true);
     expect(registry.has("a")).toBe(false);
     expect(registry.list()).toHaveLength(0);
   });
 
-  it("delete() returns false for unknown session", () => {
+  it("delete() returns false for unknown runtime", () => {
     expect(registry.delete("nope")).toBe(false);
   });
 
@@ -132,7 +132,7 @@ describe("SessionRegistry", () => {
     expect(registry.list()).toHaveLength(0);
   });
 
-  it("getOrCreate updates lastActiveAt on existing session", async () => {
+  it("getOrCreate updates lastActiveAt on existing runtime", async () => {
     const s = await registry.getOrCreate("a");
     const initialLast = registry.list()[0]!.lastActiveAt;
     await new Promise((r) => setTimeout(r, 5));

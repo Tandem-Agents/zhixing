@@ -4,7 +4,7 @@
  * 基于 Node.js readline/promises 的多轮对话循环。
  *
  * 流程：
- * 1. 初始化 SessionStore → 创建或恢复会话
+ * 1. 初始化 TranscriptStore → 创建或恢复会话
  * 2. readline.question() 获取用户输入
  * 3. 如果是斜杠命令，就地处理
  * 4. 否则追加到对话历史，启动 spinner，运行 Agent Loop
@@ -17,9 +17,9 @@ import chalk from "chalk";
 import {
   userMessage,
   type Message,
-  type SessionTurn,
-  type SessionCompact,
-  SessionStore,
+  type Turn,
+  type CompactMarker,
+  TranscriptStore,
   loadProfile,
   getMemoryDir,
   SkillsStore,
@@ -45,7 +45,7 @@ import { createScheduleTool } from "@zhixing/tools-builtin";
 import { CommandDispatcher } from "./command-dispatcher.js";
 import { readInputLine, type InputLineResult } from "./typeahead-input.js";
 import { resolveFileRefs } from "./resolve-file-refs.js";
-import { type AgentSession, createSession } from "./run-agent.js";
+import { type AgentRuntime, createAgentRuntime } from "./run-agent.js";
 import {
   createRenderer,
   renderSummary,
@@ -64,11 +64,11 @@ import {
 
 interface ReplState {
   messages: Message[];
-  session: AgentSession;
+  agent: AgentRuntime;
   running: boolean;
   /** 持久化 */
-  store: InstanceType<typeof SessionStore>;
-  sessionId: string | null;
+  store: InstanceType<typeof TranscriptStore>;
+  transcriptId: string | null;
   turnCounter: number;
   /** 上一轮的工具调用完成数（用于反思触发） */
   lastToolEndCount: number;
@@ -126,8 +126,8 @@ function buildSlashCommands(rl: readline.Interface): Record<
       description: "显示当前模型信息",
       handler: (state) => {
         console.log(
-          `\n  ${chalk.dim("Model:")} ${chalk.cyan(state.session.model)}` +
-            `\n  ${chalk.dim("Provider:")} ${state.session.providerId}` +
+          `\n  ${chalk.dim("Model:")} ${chalk.cyan(state.agent.model)}` +
+            `\n  ${chalk.dim("Provider:")} ${state.agent.providerId}` +
             `\n  ${chalk.dim("Turns:")} ${state.turnCounter}\n`,
         );
       },
@@ -142,10 +142,10 @@ function buildSlashCommands(rl: readline.Interface): Record<
           (m) => m.role === "assistant",
         ).length;
         console.log(
-          `\n  ${chalk.dim("Session:")} ${state.sessionId ?? "(未保存)"}` +
+          `\n  ${chalk.dim("Session:")} ${state.transcriptId ?? "(未保存)"}` +
             `\n  ${chalk.dim("Messages:")} ${state.messages.length} (${userMsgs} user, ${assistantMsgs} assistant)` +
-            `\n  ${chalk.dim("Model:")} ${chalk.cyan(state.session.model)}` +
-            `\n  ${chalk.dim("Provider:")} ${state.session.providerId}\n`,
+            `\n  ${chalk.dim("Model:")} ${chalk.cyan(state.agent.model)}` +
+            `\n  ${chalk.dim("Provider:")} ${state.agent.providerId}\n`,
         );
       },
     },
@@ -162,7 +162,7 @@ function buildSlashCommands(rl: readline.Interface): Record<
           const label = s.name ? chalk.white(s.name) : chalk.dim("(未命名)");
           const time = formatRelativeTime(s.lastAccessedAt);
           const current =
-            s.sessionId === state.sessionId ? chalk.green(" ← 当前") : "";
+            s.sessionId === state.transcriptId ? chalk.green(" ← 当前") : "";
           console.log(
             `  ${chalk.cyan(s.sessionId)} ${label} ${chalk.dim(`(${time}, ${s.turnCount} 轮, ${s.model})`)}${current}`,
           );
@@ -177,11 +177,11 @@ function buildSlashCommands(rl: readline.Interface): Record<
           console.log(chalk.yellow("用法: /name <名称>\n"));
           return;
         }
-        if (!state.sessionId) {
+        if (!state.transcriptId) {
           console.log(chalk.yellow("当前会话尚未保存\n"));
           return;
         }
-        await state.store.rename(state.sessionId, args.trim());
+        await state.store.rename(state.transcriptId, args.trim());
         console.log(chalk.dim(`会话已命名为: ${args.trim()}\n`));
       },
     },
@@ -347,18 +347,18 @@ function buildSlashCommands(rl: readline.Interface): Record<
     "/usage": {
       description: "查看 token 用量详情",
       handler: (state) => {
-        const budget = state.session.checkBudget(state.messages);
+        const budget = state.agent.checkBudget(state.messages);
         if (!budget) {
           console.log(chalk.dim("\n  模型信息不可用，无法计算预算\n"));
           return;
         }
-        renderUsageReport(budget, state.turnCounter, state.session.calibrationFactor);
+        renderUsageReport(budget, state.turnCounter, state.agent.calibrationFactor);
       },
     },
     "/context": {
       description: "上下文容量可视化",
       handler: (state) => {
-        const budget = state.session.checkBudget(state.messages);
+        const budget = state.agent.checkBudget(state.messages);
         if (!budget) {
           console.log(chalk.dim("\n  模型信息不可用，无法计算预算\n"));
           return;
@@ -373,10 +373,10 @@ function buildSlashCommands(rl: readline.Interface): Record<
           console.log(chalk.dim("\n  对话历史过短，无需压缩\n"));
           return;
         }
-        const tokensBefore = state.session.checkBudget(state.messages)?.currentTokens ?? 0;
+        const tokensBefore = state.agent.checkBudget(state.messages)?.currentTokens ?? 0;
         console.log(chalk.yellow("\n  ⟳ 正在压缩上下文..."));
         try {
-          const result = await state.session.forceCompact(
+          const result = await state.agent.forceCompact(
             [...state.messages],
             state.turnCounter,
           );
@@ -386,8 +386,8 @@ function buildSlashCommands(rl: readline.Interface): Record<
             const pct = result.budget ? Math.round(result.budget.usageRatio * 100) : "?";
             console.log(chalk.green(`  ✓ 压缩完成，当前上下文占用 ${pct}%\n`));
             // 写入 compact 行到会话文件
-            if (state.sessionId) {
-              const compact: SessionCompact = {
+            if (state.transcriptId) {
+              const compact: CompactMarker = {
                 type: "compact",
                 timestamp: new Date().toISOString(),
                 summary: "(manual compact)",
@@ -395,7 +395,7 @@ function buildSlashCommands(rl: readline.Interface): Record<
                 tokensBefore,
                 tokensAfter,
               };
-              state.store.appendCompact(state.sessionId, compact).catch(() => {});
+              state.store.appendCompact(state.transcriptId, compact).catch(() => {});
             }
           } else {
             console.log(chalk.dim("  已无可压缩内容\n"));
@@ -410,7 +410,7 @@ function buildSlashCommands(rl: readline.Interface): Record<
       description: "权限规则管理 (list/revoke/reset)",
       handler: async (state, args) => {
         await handleTrustCommand(args, {
-          pipeline: state.session.securityPipeline,
+          pipeline: state.agent.securityPipeline,
           rl,
         });
       },
@@ -418,7 +418,7 @@ function buildSlashCommands(rl: readline.Interface): Record<
     "/security": {
       description: "安全状态概览 (rules: 列出策略规则)",
       handler: (state, args) => {
-        handleSecurityCommand(args, state.session.securityPipeline);
+        handleSecurityCommand(args, state.agent.securityPipeline);
       },
     },
     "/tasks": {
@@ -479,7 +479,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     return schedulerInstance;
   });
 
-  const agentSession = await createSession({
+  const agentRuntime = await createAgentRuntime({
     model: options.model,
     provider: options.provider,
     workspace: options.workspace,
@@ -495,7 +495,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   }): Promise<AgentTurnResult> => {
     const startTime = Date.now();
     try {
-      const result = await agentSession.run({
+      const result = await agentRuntime.run({
         messages: [userMessage(params.prompt)],
         // 任务执行不渲染到前台（S1 通过 EventBus 通知）
       });
@@ -540,10 +540,10 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   await schedulerInstance.start();
 
   const renderer = createRenderer();
-  const store = new SessionStore(process.cwd());
+  const store = new TranscriptStore(process.cwd());
 
   let messages: Message[] = [];
-  let sessionId: string | null = null;
+  let transcriptId: string | null = null;
   let turnCounter = 0;
 
   // 处理会话恢复
@@ -552,7 +552,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     if (latest) {
       const loaded = await store.load(latest);
       messages = loaded.messages;
-      sessionId = latest;
+      transcriptId = latest;
       turnCounter = loaded.turnCount;
       console.log(
         chalk.dim(
@@ -567,7 +567,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       try {
         const loaded = await store.load(options.resume);
         messages = loaded.messages;
-        sessionId = options.resume;
+        transcriptId = options.resume;
         turnCounter = loaded.turnCount;
         console.log(
           chalk.dim(
@@ -584,14 +584,14 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       }
     } else {
       // --resume 不带 ID → 交互式选择
-      sessionId = await interactiveSessionPicker(store);
-      if (sessionId) {
-        const loaded = await store.load(sessionId);
+      transcriptId = await interactiveSessionPicker(store);
+      if (transcriptId) {
+        const loaded = await store.load(transcriptId);
         messages = loaded.messages;
         turnCounter = loaded.turnCount;
         console.log(
           chalk.dim(
-            `\n  已恢复会话 ${chalk.cyan(sessionId)}（${loaded.turnCount} 轮对话）\n`,
+            `\n  已恢复会话 ${chalk.cyan(transcriptId)}（${loaded.turnCount} 轮对话）\n`,
           ),
         );
       } else {
@@ -601,19 +601,19 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   }
 
   // 新会话：创建持久化文件
-  if (!sessionId) {
+  if (!transcriptId) {
     const header = await store.create({
       name: options.name,
-      model: agentSession.model,
-      provider: agentSession.providerId,
+      model: agentRuntime.model,
+      provider: agentRuntime.providerId,
     });
-    sessionId = header.sessionId;
+    transcriptId = header.sessionId;
   }
 
   await renderWelcome({
-    model: agentSession.model,
-    workspace: agentSession.resolvedWorkspace,
-    workspaceDirStatus: agentSession.workspaceDirStatus,
+    model: agentRuntime.model,
+    workspace: agentRuntime.resolvedWorkspace,
+    workspaceDirStatus: agentRuntime.workspaceDirStatus,
   });
 
   // 启动时检测 stale 技能，温和提醒
@@ -642,15 +642,15 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     },
   });
   const detachConfirmationRenderer = confirmationRenderer.attach(
-    agentSession.confirmationBroker,
+    agentRuntime.confirmationBroker,
   );
 
   const state: ReplState = {
     messages,
-    session: agentSession,
+    agent: agentRuntime,
     running: false,
     store,
-    sessionId,
+    transcriptId,
     turnCounter,
     lastToolEndCount: 0,
     hasProposedSkill: false,
@@ -693,7 +693,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     );
     typeaheadBroker.register(
       new FileProvider({
-        root: agentSession.resolvedWorkspace.path ?? process.cwd(),
+        root: agentRuntime.resolvedWorkspace.path ?? process.cwd(),
       }),
     );
     typeaheadDispatcher = new CommandDispatcher({ registry: tRegistry });
@@ -757,7 +757,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
 
   const getRuntime = (): RuntimeContext => ({
     sessionBusy: state.running,
-    workspaceId: agentSession.resolvedWorkspace.path,
+    workspaceId: agentRuntime.resolvedWorkspace.path,
     cwd: process.cwd(),
     target: "cli",
     features: {},
@@ -895,7 +895,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     let resolvedInput = input.trim();
     if (resolvedInput.includes("@file:")) {
       const refResult = await resolveFileRefs(resolvedInput, {
-        workspaceRoot: agentSession.resolvedWorkspace.path ?? process.cwd(),
+        workspaceRoot: agentRuntime.resolvedWorkspace.path ?? process.cwd(),
       });
       resolvedInput = refResult.text;
       if (refResult.errors.length > 0) {
@@ -913,7 +913,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
 
     try {
       const { agentResult, newMessages, durationMs, budget, toolEndCount, injectedSkillIds, compactInfo } =
-        await agentSession.run({
+        await agentRuntime.run({
           messages: [...state.messages],
           onYield: (e) => renderer.handleEvent(e),
           onBeforeEventRender: () => renderer.stop(),
@@ -960,10 +960,10 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       }
 
       // 持久化本轮对话
-      if (state.sessionId) {
+      if (state.transcriptId) {
         const assistantMsg = newMessages[0];
         if (assistantMsg) {
-          const turn: SessionTurn = {
+          const turn: Turn = {
             type: "turn",
             turnIndex: state.turnCounter,
             timestamp: new Date().toISOString(),
@@ -976,7 +976,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
                 }
               : undefined,
           };
-          await state.store.appendTurn(state.sessionId, turn).catch((err) => {
+          await state.store.appendTurn(state.transcriptId, turn).catch((err) => {
             console.log(
               chalk.dim(
                 `  [持久化警告] ${err instanceof Error ? err.message : String(err)}`,
@@ -989,12 +989,12 @@ export async function startRepl(options: ReplOptions): Promise<void> {
         // 首轮对话后异步执行 Journal 生命周期维护
         if (!state.journalCondenseDone) {
           state.journalCondenseDone = true;
-          runJournalLifecycle(state.session).catch(() => {});
+          runJournalLifecycle(state.agent).catch(() => {});
         }
 
         // 自动压缩发生时，写入 compact 行用于会话恢复
         if (compactInfo) {
-          const compact: SessionCompact = {
+          const compact: CompactMarker = {
             type: "compact",
             timestamp: new Date().toISOString(),
             summary: compactInfo.summary,
@@ -1002,7 +1002,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
             tokensBefore: compactInfo.tokensBefore,
             tokensAfter: compactInfo.tokensAfter,
           };
-          state.store.appendCompact(state.sessionId, compact).catch(() => {});
+          state.store.appendCompact(state.transcriptId, compact).catch(() => {});
         }
       }
     } catch (err) {
@@ -1029,7 +1029,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
 // ─── 交互式会话选择器 ───
 
 async function interactiveSessionPicker(
-  store: InstanceType<typeof SessionStore>,
+  store: InstanceType<typeof TranscriptStore>,
 ): Promise<string | null> {
   const sessions = await store.list();
   if (sessions.length === 0) {
@@ -1175,7 +1175,7 @@ async function checkStaleSkills(): Promise<void> {
  * 首轮对话后触发：删除过期文件 + 凝练温日志。
  * 静默执行，失败不影响用户对话。
  */
-async function runJournalLifecycle(session: AgentSession): Promise<void> {
+async function runJournalLifecycle(session: AgentRuntime): Promise<void> {
   const jStore = new JournalStore();
 
   // 先删除过期凝练文件（纯文件操作，极快）

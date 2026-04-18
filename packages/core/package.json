@@ -28,9 +28,9 @@
       "types": "./dist/context/index.d.ts",
       "import": "./dist/context/index.js"
     },
-    "./session": {
-      "types": "./dist/session/index.d.ts",
-      "import": "./dist/session/index.js"
+    "./transcript": {
+      "types": "./dist/transcript/index.d.ts",
+      "import": "./dist/transcript/index.js"
     },
     "./memory": {
       "types": "./dist/memory/index.d.ts",
