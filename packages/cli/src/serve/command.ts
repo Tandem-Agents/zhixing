@@ -86,6 +86,9 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
         provider: opts.provider ?? "default",
       });
     },
+    persistTurn: async (conversationId, turn) => {
+      await transcript.appendTurn(conversationId, turn);
+    },
   });
 
   // 4. Scheduler
@@ -156,7 +159,6 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
     token: tokenInfo.token,
     scheduler,
     conversations,
-    transcript,
   });
 
   let runner: RunningServer;

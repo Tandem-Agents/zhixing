@@ -12,7 +12,7 @@
  * - session.complete { conversationId, result: AgentResult }
  */
 
-import { userMessage, type AgentResult, type Turn, type ITranscriptStore } from "@zhixing/core";
+import { userMessage, type AgentResult, type Turn } from "@zhixing/core";
 import type { MethodEntry } from "../handlers.js";
 import { RpcAppError, RpcErrors } from "../handlers.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
@@ -47,7 +47,6 @@ export function buildSessionSendMethod(): MethodEntry {
       const text = params.text;
 
       const manager = requireConversations(ctx.server);
-      const transcript = ctx.server.transcript;
       const id = params.conversationId ?? params.sessionId;
 
       const managed = await manager.getOrCreate(id);
@@ -57,7 +56,7 @@ export function buildSessionSendMethod(): MethodEntry {
       manager.addObserver(conversationId, connectionId);
 
       const status = manager.enqueue(conversationId, {
-        execute: () => runManagedTurn(managed, text, ctx.connection, manager, transcript),
+        execute: () => runManagedTurn(managed, text, ctx.connection, manager),
         cancel: () => {
           ctx.connection.notify("session.complete", {
             conversationId,
@@ -77,7 +76,7 @@ export function buildSessionSendMethod(): MethodEntry {
 
       if (status === "immediate") {
         manager.setBusy(conversationId, true);
-        void runManagedTurn(managed, text, ctx.connection, manager, transcript);
+        void runManagedTurn(managed, text, ctx.connection, manager);
       }
       // status === "queued": dequeueNext will call execute() when current turn completes
 
@@ -103,7 +102,6 @@ async function runManagedTurn(
   text: string,
   connection: RpcConnection,
   manager: ConversationManager,
-  transcript?: ITranscriptStore,
 ): Promise<void> {
   const conversationId = managed.conversationId;
   const abortController = new AbortController();
@@ -124,7 +122,7 @@ async function runManagedTurn(
       connection.notify("session.delta", { conversationId, sessionId: conversationId, delta: iter.value });
     }
 
-    if (result && result.reason === "completed" && transcript && !abortController.signal.aborted) {
+    if (result && result.reason === "completed" && !abortController.signal.aborted) {
       const turn: Turn = {
         type: "turn",
         turnIndex: managed.turnCount,
@@ -134,8 +132,7 @@ async function runManagedTurn(
         usage: result.usage,
       };
       try {
-        await transcript.appendTurn(conversationId, turn);
-        managed.turnCount++;
+        await manager.recordTurn(conversationId, turn);
       } catch {
         // persistence failure — non-fatal
       }

@@ -603,4 +603,228 @@ describe("ConversationManager", () => {
       expect(executed).toEqual(["queued-task"]);
     });
   });
+
+  // ─── Ephemeral + recordTurn + promote ───
+
+  describe("ephemeral sessions", () => {
+    it("creates ephemeral session that skips loadHistory and initTranscript", async () => {
+      const loaded: string[] = [];
+      const inited: string[] = [];
+      const mgr = new ConversationManager(createMockFactory(), {
+        graceTimeoutMs: 60_000,
+        idleTimeoutMs: 30 * 60_000,
+        idleCheckIntervalMs: 999_999,
+      }, {
+        loadHistory: async (id) => { loaded.push(id); return undefined; },
+        initTranscript: async (id) => { inited.push(id); },
+      });
+
+      const session = await mgr.getOrCreate(undefined, { ephemeral: true });
+      expect(session.ephemeral).toBe(true);
+      expect(loaded).toEqual([]);
+      expect(inited).toEqual([]);
+      mgr.disposeAll();
+    });
+
+    it("ephemeral session accumulates pendingTurns instead of persisting", async () => {
+      const persisted: unknown[] = [];
+      const mgr = new ConversationManager(createMockFactory(), {
+        graceTimeoutMs: 60_000,
+        idleTimeoutMs: 30 * 60_000,
+        idleCheckIntervalMs: 999_999,
+      }, {
+        persistTurn: async (_cid, turn) => { persisted.push(turn); },
+      });
+
+      const session = await mgr.getOrCreate("eph-1", { ephemeral: true });
+      const mockTurn = {
+        type: "turn" as const,
+        turnIndex: 0,
+        timestamp: new Date().toISOString(),
+        userMessage: { role: "user" as const, content: [{ type: "text" as const, text: "hi" }] },
+        assistantMessage: { role: "assistant" as const, content: [{ type: "text" as const, text: "hello" }] },
+        usage: { inputTokens: 1, outputTokens: 1 },
+      };
+
+      await mgr.recordTurn("eph-1", mockTurn);
+
+      expect(persisted).toHaveLength(0);
+      expect(session.pendingTurns).toHaveLength(1);
+      expect(session.turnCount).toBe(1);
+      mgr.disposeAll();
+    });
+
+    it("auto-promotes ephemeral session on 2nd turn", async () => {
+      const persisted: Array<{ cid: string; turn: unknown }> = [];
+      const inited: string[] = [];
+      const mgr = new ConversationManager(createMockFactory(), {
+        graceTimeoutMs: 60_000,
+        idleTimeoutMs: 30 * 60_000,
+        idleCheckIntervalMs: 999_999,
+      }, {
+        persistTurn: async (cid, turn) => { persisted.push({ cid, turn }); },
+        initTranscript: async (id) => { inited.push(id); },
+      });
+
+      const session = await mgr.getOrCreate("eph-auto", { ephemeral: true });
+      const makeTurn = (idx: number) => ({
+        type: "turn" as const,
+        turnIndex: idx,
+        timestamp: new Date().toISOString(),
+        userMessage: { role: "user" as const, content: [{ type: "text" as const, text: `q${idx}` }] },
+        assistantMessage: { role: "assistant" as const, content: [{ type: "text" as const, text: `a${idx}` }] },
+        usage: { inputTokens: 1, outputTokens: 1 },
+      });
+
+      await mgr.recordTurn("eph-auto", makeTurn(0));
+      expect(session.ephemeral).toBe(true);
+      expect(inited).toEqual([]);
+
+      await mgr.recordTurn("eph-auto", makeTurn(1));
+      expect(session.ephemeral).toBe(false);
+      expect(inited).toEqual(["eph-auto"]);
+      expect(persisted).toHaveLength(2);
+      expect(session.pendingTurns).toHaveLength(0);
+      expect(session.turnCount).toBe(2);
+      mgr.disposeAll();
+    });
+
+    it("promote() flushes pendingTurns and calls initTranscript", async () => {
+      const persisted: unknown[] = [];
+      const inited: string[] = [];
+      const mgr = new ConversationManager(createMockFactory(), {
+        graceTimeoutMs: 60_000,
+        idleTimeoutMs: 30 * 60_000,
+        idleCheckIntervalMs: 999_999,
+      }, {
+        persistTurn: async (_cid, turn) => { persisted.push(turn); },
+        initTranscript: async (id) => { inited.push(id); },
+      });
+
+      const session = await mgr.getOrCreate("eph-promote", { ephemeral: true });
+      const mockTurn = {
+        type: "turn" as const,
+        turnIndex: 0,
+        timestamp: new Date().toISOString(),
+        userMessage: { role: "user" as const, content: [{ type: "text" as const, text: "hi" }] },
+        assistantMessage: { role: "assistant" as const, content: [{ type: "text" as const, text: "hello" }] },
+        usage: { inputTokens: 1, outputTokens: 1 },
+      };
+      session.pendingTurns.push(mockTurn);
+
+      const result = await mgr.promote("eph-promote");
+      expect(result).toBe(true);
+      expect(session.ephemeral).toBe(false);
+      expect(inited).toEqual(["eph-promote"]);
+      expect(persisted).toHaveLength(1);
+      expect(session.pendingTurns).toHaveLength(0);
+      mgr.disposeAll();
+    });
+
+    it("promote() returns false for non-ephemeral session", async () => {
+      const result = await manager.promote("nope");
+      expect(result).toBe(false);
+
+      await manager.getOrCreate("persistent");
+      const result2 = await manager.promote("persistent");
+      expect(result2).toBe(false);
+    });
+
+    it("persistent session persists turn immediately via recordTurn", async () => {
+      const persisted: Array<{ cid: string; turn: unknown }> = [];
+      const mgr = new ConversationManager(createMockFactory(), {
+        graceTimeoutMs: 60_000,
+        idleTimeoutMs: 30 * 60_000,
+        idleCheckIntervalMs: 999_999,
+      }, {
+        persistTurn: async (cid, turn) => { persisted.push({ cid, turn }); },
+      });
+
+      await mgr.getOrCreate("persist-1");
+      const mockTurn = {
+        type: "turn" as const,
+        turnIndex: 0,
+        timestamp: new Date().toISOString(),
+        userMessage: { role: "user" as const, content: [{ type: "text" as const, text: "hi" }] },
+        assistantMessage: { role: "assistant" as const, content: [{ type: "text" as const, text: "hello" }] },
+        usage: { inputTokens: 1, outputTokens: 1 },
+      };
+
+      await mgr.recordTurn("persist-1", mockTurn);
+      expect(persisted).toHaveLength(1);
+      expect(persisted[0]!.cid).toBe("persist-1");
+
+      const session = mgr.getSession("persist-1")!;
+      expect(session.turnCount).toBe(1);
+      mgr.disposeAll();
+    });
+
+    it("list() includes ephemeral field", async () => {
+      const mgr = new ConversationManager(createMockFactory(), {
+        graceTimeoutMs: 60_000,
+        idleTimeoutMs: 30 * 60_000,
+        idleCheckIntervalMs: 999_999,
+      });
+
+      await mgr.getOrCreate("pers");
+      await mgr.getOrCreate("eph", { ephemeral: true });
+
+      const list = mgr.list();
+      const pers = list.find(s => s.conversationId === "pers")!;
+      const eph = list.find(s => s.conversationId === "eph")!;
+      expect(pers.ephemeral).toBe(false);
+      expect(eph.ephemeral).toBe(true);
+      mgr.disposeAll();
+    });
+
+    it("promote() is idempotent — partial failure + retry does not duplicate init or turns", async () => {
+      let persistCallCount = 0;
+      const inited: string[] = [];
+      const persisted: number[] = [];
+
+      const mgr = new ConversationManager(createMockFactory(), {
+        graceTimeoutMs: 60_000,
+        idleTimeoutMs: 30 * 60_000,
+        idleCheckIntervalMs: 999_999,
+      }, {
+        initTranscript: async (id) => { inited.push(id); },
+        persistTurn: async (_cid, turn) => {
+          persistCallCount++;
+          if (persistCallCount === 2) {
+            throw new Error("disk full");
+          }
+          persisted.push((turn as { turnIndex: number }).turnIndex);
+        },
+      });
+
+      const session = await mgr.getOrCreate("eph-retry", { ephemeral: true });
+      const makeTurn = (idx: number) => ({
+        type: "turn" as const,
+        turnIndex: idx,
+        timestamp: new Date().toISOString(),
+        userMessage: { role: "user" as const, content: [{ type: "text" as const, text: `q${idx}` }] },
+        assistantMessage: { role: "assistant" as const, content: [{ type: "text" as const, text: `a${idx}` }] },
+        usage: { inputTokens: 1, outputTokens: 1 },
+      });
+
+      session.pendingTurns.push(makeTurn(0), makeTurn(1));
+
+      // First promote: t0 persists, t1 throws
+      await expect(mgr.promote("eph-retry")).rejects.toThrow("disk full");
+      expect(inited).toEqual(["eph-retry"]);
+      expect(persisted).toEqual([0]);
+      expect(session.pendingTurns).toHaveLength(1); // t1 still pending
+      expect(session.ephemeral).toBe(true);
+      expect(session.transcriptInited).toBe(true);
+
+      // Retry promote: should NOT re-init, should only persist t1
+      await mgr.promote("eph-retry");
+      expect(inited).toEqual(["eph-retry"]); // NOT called again
+      expect(persisted).toEqual([0, 1]);
+      expect(session.pendingTurns).toHaveLength(0);
+      expect(session.ephemeral).toBe(false);
+
+      mgr.disposeAll();
+    });
+  });
 });

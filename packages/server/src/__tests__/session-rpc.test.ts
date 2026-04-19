@@ -6,7 +6,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import WebSocket from "ws";
-import type { AgentResult, AgentYield, Message, ITranscriptStore } from "@zhixing/core";
+import type { AgentResult, AgentYield, Message } from "@zhixing/core";
 import { startServer, type ZhixingServerInstance } from "../server.js";
 import { createServerContext } from "../context.js";
 import { ConversationManager } from "../runtime/conversation-manager.js";
@@ -470,32 +470,23 @@ describe("session.* RPC (S2.D)", () => {
 
   // ─── TranscriptStore 集成 (Step 7b) ───
 
-  it("completed turn is persisted to transcript store", async () => {
+  it("completed turn is persisted via ConversationManager.recordTurn", async () => {
     const appendedTurns: Array<{ conversationId: string; turn: unknown }> = [];
-    const mockTranscript: ITranscriptStore = {
-      async init() {},
-      async appendTurn(conversationId, turn) {
-        appendedTurns.push({ conversationId, turn });
-      },
-      async appendCompact() {},
-      async load() {
-        return { header: {} as never, messages: [], turnCount: 0 };
-      },
-      async countTurns() { return 0; },
-      async exists() { return false; },
-    };
 
     const conversations = new ConversationManager(createMockFactory({ deltaCount: 1 }), {
       graceTimeoutMs: 60_000,
       idleTimeoutMs: 30 * 60_000,
       idleCheckIntervalMs: 999_999,
+    }, {
+      persistTurn: async (conversationId, turn) => {
+        appendedTurns.push({ conversationId, turn });
+      },
     });
     const ctx = createServerContext({
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: TEST_VERSION,
       token: TEST_TOKEN,
       conversations,
-      transcript: mockTranscript,
     });
     server = await startServer({ context: ctx });
     const client = await connect(server.port);
@@ -517,28 +508,21 @@ describe("session.* RPC (S2.D)", () => {
     client.close();
   });
 
-  it("error turn is NOT persisted to transcript store", async () => {
+  it("error turn is NOT persisted via ConversationManager.recordTurn", async () => {
     const appendedTurns: unknown[] = [];
-    const mockTranscript: ITranscriptStore = {
-      async init() {},
-      async appendTurn(_cid, turn) { appendedTurns.push(turn); },
-      async appendCompact() {},
-      async load() { return { header: {} as never, messages: [], turnCount: 0 }; },
-      async countTurns() { return 0; },
-      async exists() { return false; },
-    };
 
     const conversations = new ConversationManager(createMockFactory({ throwError: "kaboom" }), {
       graceTimeoutMs: 60_000,
       idleTimeoutMs: 30 * 60_000,
       idleCheckIntervalMs: 999_999,
+    }, {
+      persistTurn: async (_cid, turn) => { appendedTurns.push(turn); },
     });
     const ctx = createServerContext({
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: TEST_VERSION,
       token: TEST_TOKEN,
       conversations,
-      transcript: mockTranscript,
     });
     server = await startServer({ context: ctx });
     const client = await connect(server.port);

@@ -15,7 +15,7 @@
  * - 可测试：grace/idle 超时可通过配置注入
  */
 
-import type { Message } from "@zhixing/core";
+import type { Message, Turn } from "@zhixing/core";
 import type { SessionRuntime, RuntimeFactory } from "./types.js";
 
 // ─── 配置 ───
@@ -45,8 +45,14 @@ export interface ManagedSession {
   lastActiveAt: string;
   busy: boolean;
   readonly observers: Set<string>;
-  /** 已持久化的 turn 数量（用于 turnIndex 计算） */
+  /** 已记录的 turn 数量（用于 turnIndex 计算） */
   turnCount: number;
+  /** true = 纯内存会话，跳过持久化 */
+  ephemeral: boolean;
+  /** transcript 文件已初始化（防止 promote 重试时重复 init） */
+  transcriptInited: boolean;
+  /** ephemeral 模式下累积的待持久化 turns */
+  readonly pendingTurns: Turn[];
 }
 
 // ─── 列表信息 ───
@@ -61,6 +67,7 @@ export interface ManagedSessionInfo {
   readonly busy: boolean;
   readonly observerCount: number;
   readonly pendingCount: number;
+  readonly ephemeral: boolean;
 }
 
 // ─── 释放事件回调 ───
@@ -73,10 +80,14 @@ export type LoadHistory = (conversationId: string) => Promise<Message[] | undefi
 /** 新对话首次创建时的初始化回调（如写入 transcript header）。 */
 export type InitTranscript = (conversationId: string) => Promise<void>;
 
+/** 持久化单个 turn 的回调。由外部注入（如 TranscriptStore.appendTurn）。 */
+export type PersistTurn = (conversationId: string, turn: Turn) => Promise<void>;
+
 export interface ConversationManagerCallbacks {
   onRelease?: OnSessionRelease;
   loadHistory?: LoadHistory;
   initTranscript?: InitTranscript;
+  persistTurn?: PersistTurn;
 }
 
 // ─── 待处理任务 ───
@@ -102,6 +113,7 @@ export class ConversationManager {
   private readonly onRelease?: OnSessionRelease;
   private readonly loadHistory?: LoadHistory;
   private readonly initTranscript?: InitTranscript;
+  private readonly persistTurn?: PersistTurn;
 
   constructor(
     factory: RuntimeFactory,
@@ -121,6 +133,7 @@ export class ConversationManager {
       this.onRelease = callbacksOrOnRelease.onRelease;
       this.loadHistory = callbacksOrOnRelease.loadHistory;
       this.initTranscript = callbacksOrOnRelease.initTranscript;
+      this.persistTurn = callbacksOrOnRelease.persistTurn;
     } else if (loadHistory) {
       this.loadHistory = loadHistory;
     }
@@ -135,7 +148,10 @@ export class ConversationManager {
    * - 传 conversationId 但不存在 → 通过 factory 创建
    * - 不传 → 自动生成 ID 并创建
    */
-  async getOrCreate(conversationId?: string): Promise<ManagedSession> {
+  async getOrCreate(
+    conversationId?: string,
+    options?: { ephemeral?: boolean },
+  ): Promise<ManagedSession> {
     if (conversationId && this.sessions.has(conversationId)) {
       const session = this.sessions.get(conversationId)!;
       session.lastActiveAt = new Date().toISOString();
@@ -148,7 +164,7 @@ export class ConversationManager {
     const inflight = this.creating.get(id);
     if (inflight) return inflight;
 
-    const promise = this.doCreate(id);
+    const promise = this.doCreate(id, options?.ephemeral ?? false);
     this.creating.set(id, promise);
     try {
       return await promise;
@@ -157,9 +173,9 @@ export class ConversationManager {
     }
   }
 
-  private async doCreate(id: string): Promise<ManagedSession> {
-    const initialMessages = await this.loadHistory?.(id);
-    if (!initialMessages && this.initTranscript) {
+  private async doCreate(id: string, ephemeral: boolean): Promise<ManagedSession> {
+    const initialMessages = ephemeral ? undefined : await this.loadHistory?.(id);
+    if (!initialMessages && !ephemeral && this.initTranscript) {
       await this.initTranscript(id);
     }
     const runtime = await this.factory.create(id, initialMessages);
@@ -175,6 +191,9 @@ export class ConversationManager {
       turnCount: initialMessages
         ? initialMessages.filter(m => m.role === "user").length
         : 0,
+      ephemeral,
+      transcriptInited: !ephemeral,
+      pendingTurns: [],
     };
 
     this.sessions.set(id, session);
@@ -251,6 +270,7 @@ export class ConversationManager {
       busy: s.busy,
       observerCount: s.observers.size,
       pendingCount: this.pendingQueues.get(id)?.length ?? 0,
+      ephemeral: s.ephemeral,
     }));
   }
 
@@ -277,6 +297,57 @@ export class ConversationManager {
     const session = this.sessions.get(conversationId);
     if (!session) return false;
     session.runtime.abort();
+    return true;
+  }
+
+  // ─── Turn 记录 + 晋升 ───
+
+  /**
+   * 记录一个完成的 turn。
+   * - persistent → 立即调用 persistTurn 回调
+   * - ephemeral → 累积到 pendingTurns，turnCount >= 2 时自动晋升
+   */
+  async recordTurn(conversationId: string, turn: Turn): Promise<void> {
+    const session = this.sessions.get(conversationId);
+    if (!session) return;
+
+    if (session.ephemeral) {
+      session.pendingTurns.push(turn);
+      session.turnCount++;
+      if (session.turnCount >= 2) {
+        await this.promote(conversationId);
+      }
+    } else {
+      if (this.persistTurn) {
+        await this.persistTurn(conversationId, turn);
+      }
+      session.turnCount++;
+    }
+  }
+
+  /**
+   * 将 ephemeral 会话晋升为 persistent。
+   * 调用 initTranscript → 逐个 flush pendingTurns → 标记 ephemeral=false。
+   */
+  async promote(conversationId: string): Promise<boolean> {
+    const session = this.sessions.get(conversationId);
+    if (!session || !session.ephemeral) return false;
+
+    if (!session.transcriptInited && this.initTranscript) {
+      await this.initTranscript(conversationId);
+      session.transcriptInited = true;
+    }
+
+    if (this.persistTurn) {
+      while (session.pendingTurns.length > 0) {
+        await this.persistTurn(conversationId, session.pendingTurns[0]!);
+        session.pendingTurns.shift();
+      }
+    } else {
+      session.pendingTurns.length = 0;
+    }
+
+    session.ephemeral = false;
     return true;
   }
 
