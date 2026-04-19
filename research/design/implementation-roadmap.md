@@ -41,8 +41,8 @@ persistent-service.md 原始路线:
 | Step | 名称 | 状态 | 设计状态 | 依赖 |
 |------|------|------|---------|------|
 | 9 | Channel 接口层 + Registry | ✅ | ✅ 设计完备 (server-gateway.md §4) | Step 8a |
-| 10 | InboundRouter + Server 集成 | 🔲 待开始 | ✅ 设计完备 (server-gateway.md §6) | Step 9 |
-| 11 | 钉钉 Adapter MVP | 🔲 待开始 | ⚠️ 需调研 | Step 10 |
+| 10 | InboundRouter + Server 集成 | ✅ | ✅ 设计完备 (server-gateway.md §6) | Step 9 |
+| 11 | 飞书 Adapter MVP | 🔲 待开始 | ✅ 设计完备 (channel-platforms.md §7.2) | Step 10 |
 
 ### 延后 / 可选
 
@@ -65,76 +65,65 @@ persistent-service.md 原始路线:
 - `ChannelContext` 省略 3 个 connection 管理方法（registerConnection / unregisterConnection / subscribe）— 钉钉 MVP 用 sessionWebhook 单次回复，不需要 connection 管理
 - `ChannelCapabilities` 声明与 Trait guard 双轨检测 — capabilities 用于信息展示，guard 用于运行时路由，后续可加 `validateCapabilities()` 校验
 
-### Step 10: InboundRouter + Server 集成
+### Step 10: InboundRouter + Server 集成 ✅
 
-**目标：** server-gateway.md §6 — 通道消息进入 Agent 处理的完整路径
+已完成。交付 `packages/server/src/channels/`（conversation-binder / inbound-router），19 项新测试 + 全部 194 项服务端测试通过。
 
-**做什么：**
-- `InboundRouter`：normalize → conversation-bind → agent turn → result routing
-- 对话归组（ChannelBindingPolicy）：DM 按用户归组，群按群归组
-- 将 Channel 注册到 ServerContext，serve 命令启动时连接已注册通道
-- 处理 P1 技术债务：Turn 增加 `source` 字段（interactive / scheduler / channel）
-- Channel EventBus 事件（channel:connected / disconnected / message-received）
+**交付内容：**
+- `ConversationBinder`：InboundMessage → conversationId 归组（DM per-user / group per-group / thread per-thread）
+- `InboundRouter`：完整管道 — 归组 → getOrCreate → enqueue → agent turn → adapter.send()
+- `TurnSource` 类型：Turn.source 字段（P1 技术债务清除）
+- `ServerContext.channels` 字段 + server.ts 关闭时 dispose 通道
 
-**不做：** 去抖（MVP 不需要）、DeliveryRouter（MVP 只做同步回复）
+**已知设计取舍：**
+- `onMessage` 回调签名为 `void`，实际传入 async 函数 — 语义正确（fire-and-forget），handleMessage 内部全路径 catch 保证不泄漏 rejection
+- `runChannelTurn` 与 session.ts `runManagedTurn` 模式相似但未共享 — I/O 路径不同（Push delta to WS vs. Collect-then-send to channel），共享会引入 flag coupling
+- DM 归组当前带 channelId 前缀（无跨通道漫游）— 漫游需要用户身份联邦，不改签名只改映射逻辑
 
-**交付：**
-```
-packages/server/src/
-  ├── channels/
-  │   ├── inbound-router.ts     # 入站路由
-  │   └── conversation-binder.ts # 对话归组
-  ├── context.ts                # ServerContext 新增 channels 字段
-  └── server.ts                 # Channel 生命周期集成
-```
+### Step 11: 飞书 Adapter MVP
 
-**验证：** Mock ChannelAdapter + 集成测试：消息 → InboundRouter → Agent → 回复到 Mock adapter
+**目标：** 首个真实社交通道。设计详情见 channel-platforms.md §7.2。
 
-### Step 11: 钉钉 Adapter MVP
-
-**目标：** server-gateway.md §8.1 — 首个真实社交通道
-
-**做什么：**
-- `DingTalkAdapter` 实现 `ChannelAdapter` 核心接口
-- `dingtalk-stream` SDK 长连接（不需要公网 IP）
-- 消息接收 → InboundRouter → Agent 处理 → sessionWebhook 回复
-- Markdown 消息格式化（agent 输出 → 钉钉 Markdown）
-- 钉钉配置项（appKey / appSecret / robotCode）加入 zhixing.config.json
+**做什么（MVP）：**
+- `FeishuAdapter` 实现 `ChannelAdapter` 核心接口
+- `@larksuiteoapi/node-sdk` WSClient 长连接（不需要公网 IP）
+- EventDispatcher 事件接收 → 消息去重 → InboundMessage 标准化 → ctx.onMessage()
+- 卡片 Markdown 消息回复（agent 输出 → 飞书卡片 Markdown）
+- 飞书配置项（appId / appSecret / domain）加入 zhixing.config.json
 
 **不做（后续增量）：**
-- ApprovableChannel（ActionCard 审批按钮）
-- StreamableChannel（流式消息更新）
-- ConfirmationRenderer（安全审批转发到钉钉）
-- 代理配置
+- StreamableChannel（流式卡片 — 增量 1）
+- ApprovableChannel（审批卡片 — 增量 2）
+- ReactableChannel（ACK 表情回执 — 增量 3）
+- 群聊策略（groupPolicy / requireMention — 增量 3）
+- Webhook 模式
 
 **交付：**
 ```
-packages/channels/dingtalk/     # 新包 @zhixing/channels-dingtalk
+packages/channels/feishu/       # 新包 @zhixing/channel-feishu
   ├── package.json
   ├── src/
-  │   ├── adapter.ts            # DingTalkAdapter
-  │   ├── format.ts             # Markdown 格式化
+  │   ├── adapter.ts            # FeishuAdapter
+  │   ├── client.ts             # SDK 封装 + 重试 + token 管理
+  │   ├── events.ts             # WSClient 事件 → InboundMessage
+  │   ├── cards.ts              # 卡片 JSON 2.0 构建
+  │   ├── format.ts             # Markdown → 飞书卡片 Markdown
+  │   ├── dedup.ts              # 消息去重（messageId TTL）
+  │   ├── config.ts             # 配置类型定义
   │   └── index.ts
 ```
 
-**验证：** 钉钉机器人收到消息 → 知行回复 Markdown 消息
-
-**前置调研（实现前完成）：**
-- `dingtalk-stream` Node.js SDK API（连接、鉴权、消息接收回调）
-- sessionWebhook 回复机制（URL 生命周期、请求格式、响应格式）
-- 钉钉机器人创建流程 + 所需配置项（appKey / appSecret / robotCode）
-- 钉钉 Markdown 消息语法限制（与标准 Markdown 的差异）
-- Hermes ��钉适配器参考实现（D:\ZhixingWorkspace\src 中已有调研材料）
+**验证：** 飞书 DM 发消息 → zhixing 回复卡片 Markdown 消息
 
 ---
 
 ## 已知技术债务
 
-### P1-计划中
+### P1-已解决
 
-| # | 问题 | 计划时机 |
+| # | 问题 | 解决时机 |
 |---|------|---------|
-| 1 | TurnSource 参数缺失（scheduler/channel/interactive 区分） | **Step 10** |
+| 1 | ~~TurnSource 参数缺失~~ | **Step 10** ✅ — Turn.source?: TurnSource 已添加 |
 
 ### P2-计划中
 
@@ -150,11 +139,13 @@ packages/channels/dingtalk/     # 新包 @zhixing/channels-dingtalk
 
 | 方向 | 规格来源 | 优先级 | 说明 |
 |------|---------|--------|------|
+| 飞书增量能力 | channel-platforms.md §7.2 | **高** | 流式卡片、审批卡片、群聊策略、ACK 回执 |
 | Delivery Pipeline | persistent-service.md §4.7 | **高** | Scheduler 任务结果 → 通道推送 |
-| 钉钉增量能力 | server-gateway.md §8.1 | **高** | ActionCard 审批、流式消息、ConfirmationRenderer |
+| 钉钉 Adapter | server-gateway.md §8.1 | **高** | P0 第二社交通道（待独立调研确认） |
 | AgentOrchestrator | persistent-service.md §3.6 | **中** | 背景 Agent、spawn/push、Monitor |
 | Daemon 后台模式 | persistent-service.md §7 | **中** | --daemon + PID + CLI 远程连接 |
-| 飞书 Adapter | server-gateway.md §8.2 | **中** | 第二个社交通道 |
+| 企业微信 Adapter | channel-platforms.md §2.3 | **中** | P1 原生流式回复，需企业认证 |
+| 微信 iLink Adapter | channel-platforms.md §3.3 | **中低** | P2 C 端覆盖大但不能主动推送，仅被动应答 |
 | OpenAI 兼容端点 | server-gateway.md §9 | **低** | /v1/chat/completions |
 | Web UI | 待设计 | **低** | 浏览器交互界面 |
 | OS 级服务安装 | persistent-service.md §7.3 | **低** | launchd / systemd |
