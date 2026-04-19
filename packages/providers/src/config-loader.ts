@@ -168,6 +168,23 @@ function deepMergeConfig(base: ZhixingConfig, override: ZhixingConfig): ZhixingC
     }
   }
 
+  // channels：与 providers 相同策略，按 key 字段级合并
+  if (override.channels) {
+    result.channels = { ...base.channels };
+    for (const [key, value] of Object.entries(override.channels)) {
+      const existing = result.channels[key];
+      if (existing) {
+        result.channels[key] = { ...existing, ...value };
+      } else {
+        result.channels[key] = value;
+      }
+    }
+  }
+
+  if (override.agent !== undefined) {
+    result.agent = { ...base.agent, ...override.agent };
+  }
+
   // workspace：目录级配置整体覆盖全局配置（不做字段级 merge，
   // 因为目录级 workspace 含义是"在此目录下工作区换成这个"）
   if (override.workspace !== undefined) {

@@ -42,7 +42,7 @@ persistent-service.md 原始路线:
 |------|------|------|---------|------|
 | 9 | Channel 接口层 + Registry | ✅ | ✅ 设计完备 (server-gateway.md §4) | Step 8a |
 | 10 | InboundRouter + Server 集成 | ✅ | ✅ 设计完备 (server-gateway.md §6) | Step 9 |
-| 11 | 飞书 Adapter MVP | 🔲 待开始 | ✅ 设计完备 (channel-platforms.md §7.2) | Step 10 |
+| 11 | 飞书 Adapter MVP | ✅ | ✅ 设计完备 (channel-platforms.md §7.2) | Step 10 |
 
 ### 延后 / 可选
 
@@ -76,20 +76,42 @@ persistent-service.md 原始路线:
 - `ServerContext.channels` 字段 + server.ts 关闭时 dispose 通道
 
 **已知设计取舍：**
-- `onMessage` 回调签名为 `void`，实际传入 async 函数 — 语义正确（fire-and-forget），handleMessage 内部全路径 catch 保证不泄漏 rejection
+- `onMessage` 回调签名为 `void`，实际传入 async 函数 — 语义为 fire-and-forget。Step 11 Phase B 在 `setupChannels` 中增加了 `.catch()` 防御性捕获
 - `runChannelTurn` 与 session.ts `runManagedTurn` 模式相似但未共享 — I/O 路径不同（Push delta to WS vs. Collect-then-send to channel），共享会引入 flag coupling
 - DM 归组当前带 channelId 前缀（无跨通道漫游）— 漫游需要用户身份联邦，不改签名只改映射逻辑
 
-### Step 11: 飞书 Adapter MVP
+### Step 11: 飞书 Adapter MVP ✅
 
-**目标：** 首个真实社交通道。设计详情见 channel-platforms.md §7.2。
+已完成。分两个阶段交付：Phase A（适配器包）+ Phase B（系统接线）。
 
-**做什么（MVP）：**
-- `FeishuAdapter` 实现 `ChannelAdapter` 核心接口
-- `@larksuiteoapi/node-sdk` WSClient 长连接（不需要公网 IP）
-- EventDispatcher 事件接收 → 消息去重 → InboundMessage 标准化 → ctx.onMessage()
-- 卡片 Markdown 消息回复（agent 输出 → 飞书卡片 Markdown）
-- 飞书配置项（appId / appSecret / domain）加入 zhixing.config.json
+**Phase A — `@zhixing/channel-feishu` 包：**
+
+交付 `packages/channels/feishu/`，7 个源文件 + 7 个测试文件，66 项单测通过。
+- `FeishuAdapter`：connect / disconnect / send，capabilities 诚实声明（streaming:false, edit:false, media:false）
+- `FeishuClient`：lark.Client REST 封装 + `FeishuApiError` code-based retryable 分类（99991429/99991500/99991504 可重试）
+- WSClient 长连接（`@larksuiteoapi/node-sdk` ≥ 1.60.0），不需要公网 IP
+- EventDispatcher 事件接收 → messageId 去重（24h TTL, LRU max 2048）→ InboundMessage 标准化 → ctx.onMessage()
+- Card JSON 2.0 卡片消息（6 种状态 + Markdown 内容）
+- `toFeishuMarkdown`：Markdown 表格 → 项目列表转换 + 代码块保护 + UTF-16 surrogate pair 安全截断
+- `resolveConfig`：完整边界验证（domain / dedupTtlMs / dedupMaxSize / botOpenId）
+- connect() 原子性：WSClient.start() 失败时清理所有内部状态
+- AbortSignal 集成：信号触发时自动关闭 WSClient
+
+**Phase B — 系统接线：**
+
+6 个文件变更，打通 `zhixing serve` → 飞书消息接收 → Agent 处理 → 卡片回复全链路。
+- `providers/src/types.ts`：新增 `ChannelConfigEntry` 类型 + `ZhixingConfig.channels` 字段
+- `providers/src/config-loader.ts`：`deepMergeConfig` 支持 channels 按 key 字段级合并
+- `cli/package.json`：添加 `@zhixing/channel-feishu` 工作区依赖
+- `cli/src/serve/channels.ts`（新文件）：适配器工厂（动态 import）+ `setupChannels()` — 创建 ChannelRegistry + InboundRouter，逐通道注册连接，失败隔离
+- `cli/src/serve/command.ts`：接线 — loadConfig → setupChannels → channels 注入 ServerContext → 启动横幅显示通道状态 → 启动失败时 dispose channels
+
+**设计决策：**
+- `ChannelConfigEntry` vs `ChannelConfig` 分离：用户级配置（可选字段多、type 可省略）vs runtime 级配置（完整字段），setupChannels 负责转换
+- 动态 import 适配器：无通道配置时零加载成本，新增通道类型只需在 `ADAPTER_FACTORIES` 添加一行
+- 通道失败隔离：单通道 connect 失败不阻塞其他通道和服务启动
+- onMessage → InboundRouter.handleMessage 的 Promise 通过 `.catch()` 防御性捕获，防止进程级 unhandled rejection
+- 启动失败路径 channels.dispose() 确保 WSClient 不泄漏
 
 **不做（后续增量）：**
 - StreamableChannel（流式卡片 — 增量 1）
@@ -97,23 +119,9 @@ persistent-service.md 原始路线:
 - ReactableChannel（ACK 表情回执 — 增量 3）
 - 群聊策略（groupPolicy / requireMention — 增量 3）
 - Webhook 模式
+- Credential `"env:"` / `"helper:"` 解析（见 P2 债务 #4）
 
-**交付：**
-```
-packages/channels/feishu/       # 新包 @zhixing/channel-feishu
-  ├── package.json
-  ├── src/
-  │   ├── adapter.ts            # FeishuAdapter
-  │   ├── client.ts             # SDK 封装 + 重试 + token 管理
-  │   ├── events.ts             # WSClient 事件 → InboundMessage
-  │   ├── cards.ts              # 卡片 JSON 2.0 构建
-  │   ├── format.ts             # Markdown → 飞书卡片 Markdown
-  │   ├── dedup.ts              # 消息去重（messageId TTL）
-  │   ├── config.ts             # 配置类型定义
-  │   └── index.ts
-```
-
-**验证：** 飞书 DM 发消息 → zhixing 回复卡片 Markdown 消息
+**验证：** 待 E2E — 飞书 DM 发消息 → zhixing 回复卡片 Markdown 消息
 
 ---
 
@@ -132,6 +140,9 @@ packages/channels/feishu/       # 新包 @zhixing/channel-feishu
 | 1 | session.abort 不中断当前 turn — 只影响下次 run() | **中** | Channel Adapter 阶段 |
 | 2 | AgentRuntime.run() 不接受 AbortSignal — 底层 HTTP 继续执行 | **低** | Provider 层支持时 |
 | 3 | promote() 并发 TOCTOU — 外部 promote 与 auto-promote 竞争 | **低** | 实现 /keep 时 |
+| 4 | Channel credentials 无 `env:` / `helper:` 解析 — 用户必须明文写凭证 | **中** | 第二通道接入前，复用 Provider 已有的凭证解析逻辑到 setupChannels |
+| 5 | loadConfig 在 serve 流程中重复加载 — command.ts 显式调用 + createProviderFromConfig 内部再调用 | **低** | RuntimeFactory 重构时 thread config 参数 |
+| 6 | 同类型多实例通道配置会硬崩溃 — adapter.id 冲突无清晰诊断 | **低** | 多实例需求出现时，引入 instanceId 机制 |
 
 ---
 

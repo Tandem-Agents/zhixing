@@ -3,10 +3,12 @@
  *
  * 流程：
  * 1. 加载/生成 token
- * 2. 创建 Scheduler（共享存储 ~/.zhixing/scheduler.json）
- * 3. 创建 RuntimeFactory（绑定 createAgentRuntime）
- * 4. 创建 ServerContext + 启动 runServer
- * 5. 等待停机（信号触发或主动 shutdown）
+ * 2. 创建 TranscriptStore
+ * 3. 创建 RuntimeFactory + ConversationManager
+ * 4. 连接社交通道（Channel Adapters — 按配置启用）
+ * 5. 创建 Scheduler
+ * 6. 创建 ServerContext + 启动 runServer
+ * 7. 等待停机（信号触发或主动 shutdown）
  */
 
 import {
@@ -15,6 +17,7 @@ import {
   createEventBus,
   type SchedulerEventMap,
   type AgentTurnResult,
+  type ChannelRegistry,
   JournalStore,
   TranscriptStore,
   getZhixingHome,
@@ -28,8 +31,10 @@ import {
   DEFAULT_SERVER_CONFIG,
   type RunningServer,
 } from "@zhixing/server";
+import { loadConfig } from "@zhixing/providers";
 import chalk from "chalk";
 import { createAgentRuntime } from "../run-agent.js";
+import { setupChannels } from "./channels.js";
 import { createCliRuntimeFactory } from "./session-adapter.js";
 import { loadOrCreateToken } from "./token.js";
 import path from "node:path";
@@ -91,7 +96,30 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
     },
   });
 
-  // 4. Scheduler
+  // 4. Channels
+  const config = loadConfig({ cwd: workspace });
+  let channels: ChannelRegistry | undefined;
+  if (config.channels && Object.keys(config.channels).length > 0) {
+    const channelLogger = {
+      debug: (msg: string, ...args: unknown[]) => console.log(chalk.dim(`[channel] ${msg}`), ...args),
+      info: (msg: string, ...args: unknown[]) => console.log(chalk.dim(`[channel] ${msg}`), ...args),
+      warn: (msg: string, ...args: unknown[]) => console.warn(chalk.yellow(`[channel] ${msg}`), ...args),
+      error: (msg: string, ...args: unknown[]) => console.error(chalk.red(`[channel] ${msg}`), ...args),
+    };
+
+    try {
+      const result = await setupChannels({
+        entries: config.channels,
+        conversations,
+        logger: channelLogger,
+      });
+      channels = result.registry;
+    } catch (err) {
+      console.warn(chalk.yellow(`[channel] Setup failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`));
+    }
+  }
+
+  // 5. Scheduler
   const schedulerEventBus = createEventBus<SchedulerEventMap>();
   const runAgentTurn = async (params: {
     prompt: string;
@@ -152,13 +180,14 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
   });
   await scheduler.start();
 
-  // 5. ServerContext + runServer
+  // 6. ServerContext + runServer
   const ctx = createServerContext({
     config: { ...DEFAULT_SERVER_CONFIG, port, host },
     version: SERVER_VERSION,
     token: tokenInfo.token,
     scheduler,
     conversations,
+    channels,
   });
 
   let runner: RunningServer;
@@ -174,6 +203,7 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
       },
     });
   } catch (err) {
+    await channels?.dispose().catch(() => {});
     await scheduler.stop().catch(() => {});
     throw err;
   }
@@ -184,6 +214,15 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
   console.log(chalk.dim(`  HTTP:      http://${runner.server.host}:${runner.server.port}`));
   console.log(chalk.dim(`  WebSocket: ws://${runner.server.host}:${runner.server.port}/ws`));
   console.log(chalk.dim(`  Token:     ${tokenInfo.path}`));
+  if (channels) {
+    const statuses = channels.listStatuses();
+    const connected = statuses.filter((s) => s.state === "connected");
+    console.log(chalk.dim(`  Channels:  ${connected.length}/${statuses.length} connected`));
+    for (const s of statuses) {
+      const icon = s.state === "connected" ? chalk.green("●") : chalk.red("●");
+      console.log(chalk.dim(`    ${icon} ${s.channelId}: ${s.state}${s.error ? ` (${s.error})` : ""}`));
+    }
+  }
   console.log(chalk.dim(`  Ctrl+C 停止`));
   console.log();
 

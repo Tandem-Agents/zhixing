@@ -15,6 +15,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@zhixing/channel-feishu": "workspace:*",
     "@zhixing/core": "workspace:*",
     "@zhixing/providers": "workspace:*",
     "@zhixing/server": "workspace:*",

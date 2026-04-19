@@ -3,6 +3,7 @@
 // 类型导出
 export type {
   AgentConfig,
+  ChannelConfigEntry,
   Protocol,
   ProviderConfig,
   ProviderPreset,

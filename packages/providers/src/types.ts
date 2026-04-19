@@ -121,6 +121,26 @@ export interface AgentConfig {
   displayName?: string;
 }
 
+// ─── 通道配置条目 ───
+
+/**
+ * 单个社交通道的配置条目（对应 zhixing.config.json 的 `channels.<id>` 字段）。
+ *
+ * 与 core 的 ChannelConfig 区分：
+ * - ChannelConfigEntry 是用户级配置（可选字段多，type 可省略靠 key 推断）
+ * - ChannelConfig 是 runtime 级配置（字段完整，由 setupChannels 转换）
+ */
+export interface ChannelConfigEntry {
+  /** 适配器类型标识。省略时使用配置 key 作为 type。 */
+  type?: string;
+  /** 是否启用此通道。默认 true。 */
+  enabled?: boolean;
+  /** 凭证（appId/appSecret 等），按适配器要求填写 */
+  credentials: Record<string, string>;
+  /** 适配器特定选项 */
+  options?: Record<string, unknown>;
+}
+
 /** 顶层配置结构（对应 zhixing.config.json） */
 export interface ZhixingConfig {
   /** 默认使用的 provider ID */
@@ -129,6 +149,8 @@ export interface ZhixingConfig {
   defaultModel?: string;
   /** Provider 配置表 */
   providers?: Record<string, ProviderConfig>;
+  /** 通道配置表（key = channelId，如 "feishu"） */
+  channels?: Record<string, ChannelConfigEntry>;
   /** 智能体身份配置（名字、人格等） */
   agent?: AgentConfig;
   /** 工作区配置（安全信任边界） */
