@@ -29,6 +29,7 @@ import type {
 import { TRANSCRIPT_FORMAT_VERSION } from "./types.js";
 
 export { getZhixingHome, getProjectId } from "../paths.js";
+import { toSafePathSegment } from "../paths.js";
 
 // ─── TranscriptStore 实现 ───
 
@@ -42,7 +43,7 @@ export class TranscriptStore implements ITranscriptStore {
   }
 
   private transcriptFile(conversationId: string): string {
-    return path.join(this.conversationsDir, conversationId, "transcript.jsonl");
+    return path.join(this.conversationsDir, toSafePathSegment(conversationId), "transcript.jsonl");
   }
 
   async init(

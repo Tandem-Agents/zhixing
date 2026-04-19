@@ -12,7 +12,7 @@
 
 import fs from "node:fs/promises";
 import path from "node:path";
-import { getZhixingHome } from "../paths.js";
+import { getZhixingHome, toSafePathSegment } from "../paths.js";
 import type {
   Conversation,
   ConversationScope,
@@ -33,7 +33,7 @@ function conversationsDir(scope: ConversationScope): string {
 }
 
 function conversationDir(scope: ConversationScope, id: string): string {
-  return path.join(conversationsDir(scope), id);
+  return path.join(conversationsDir(scope), toSafePathSegment(id));
 }
 
 function metaPath(scope: ConversationScope, id: string): string {

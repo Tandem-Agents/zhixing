@@ -21,3 +21,13 @@ export function getProjectId(absolutePath: string): string {
   const normalized = absolutePath.replace(/\\/g, "/").toLowerCase();
   return createHash("sha256").update(normalized).digest("hex").slice(0, 12);
 }
+
+/**
+ * 将逻辑标识符转为跨平台安全的目录名。
+ *
+ * 对话 ID 等逻辑标识符可能包含 `:` 等在 Windows 上非法的路径字符。
+ * 所有从逻辑 ID 到文件系统路径的映射都必须经过此函数。
+ */
+export function toSafePathSegment(id: string): string {
+  return id.replace(/:/g, "--");
+}
