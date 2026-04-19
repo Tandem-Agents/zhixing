@@ -18,3 +18,4 @@ export * from "./client/index.js";
 export * from "./types.js";
 export * from "./context.js";
 export * from "./server.js";
+export * from "./channels/index.js";

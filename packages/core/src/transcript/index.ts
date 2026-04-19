@@ -6,6 +6,7 @@ export type {
   TranscriptHeader,
   TranscriptRecord,
   Turn,
+  TurnSource,
   ToolCallRecord,
 } from "./types.js";
 export { TRANSCRIPT_FORMAT_VERSION } from "./types.js";

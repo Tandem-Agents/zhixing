@@ -153,17 +153,21 @@ export async function startServer(opts: StartServerOptions): Promise<ZhixingServ
     async close() {
       if (closed) return;
       closed = true;
-      // 0. 释放所有对话运行时（timer 清理 + 资源回收）
+      // 0. 断开所有通道适配器
+      if (ctx.channels) {
+        await ctx.channels.dispose().catch(() => {});
+      }
+      // 1. 释放所有对话运行时（timer 清理 + 资源回收）
       ctx.conversations?.disposeAll();
-      // 1. 取消事件桥接订阅（否则 scheduler 后续事件还会调 conn.notify）
+      // 2. 取消事件桥接订阅（否则 scheduler 后续事件还会调 conn.notify）
       disposeBridge();
-      // 2. 关闭所有 WebSocket（触发 ws.on("close") → 从 connections 移除）
+      // 3. 关闭所有 WebSocket（触发 ws.on("close") → 从 connections 移除）
       for (const conn of connections) {
         conn.close(1001, "Server shutting down");
       }
-      // 3. 关闭 ws server（不再接受新连接）
+      // 4. 关闭 ws server（不再接受新连接）
       wss.close();
-      // 4. 关闭 HTTP server（停止监听 + 等待现有连接结束）
+      // 5. 关闭 HTTP server（停止监听 + 等待现有连接结束）
       await new Promise<void>((resolve, reject) => {
         httpServer.close((err) => (err ? reject(err) : resolve()));
         httpServer.closeAllConnections();

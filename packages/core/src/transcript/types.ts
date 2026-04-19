@@ -27,6 +27,9 @@ export interface TranscriptHeader {
   provider: string;
 }
 
+/** 触发源标识 */
+export type TurnSource = "interactive" | "scheduler" | "channel";
+
 /** JSONL 后续行：一轮完整对话（user → assistant + tools） */
 export interface Turn {
   type: "turn";
@@ -36,6 +39,7 @@ export interface Turn {
   assistantMessage: Message;
   toolCalls?: ToolCallRecord[];
   usage?: TokenUsage;
+  source?: TurnSource;
 }
 
 /** 工具调用的持久化表示（扁平化，不含 tool_use/tool_result 的嵌套结构） */
