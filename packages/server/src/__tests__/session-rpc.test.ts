@@ -382,6 +382,72 @@ describe("session.* RPC (S2.D)", () => {
     client.close();
   });
 
+  // ─── 并发互斥 (PendingQueue) ───
+
+  it("concurrent sends to same conversation are serialized", async () => {
+    await startWithFactory(createMockFactory({ deltaCount: 1, yieldDelayMs: 50 }));
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const r1 = await client.request("session.send", { text: "first" });
+    const convId = (r1 as { result: { conversationId: string } }).result.conversationId;
+
+    const r2 = await client.request("session.send", { text: "second", conversationId: convId });
+    expect(isSuccessResponse(r2)).toBe(true);
+
+    const c1 = await client.waitNotification("session.complete");
+    const c1Result = (c1.params as { result: { reason: string } }).result;
+    expect(c1Result.reason).toBe("completed");
+
+    const c2 = await client.waitNotification("session.complete");
+    const c2Result = (c2.params as { result: { reason: string } }).result;
+    expect(c2Result.reason).toBe("completed");
+
+    const list = await client.request("session.list");
+    if (isSuccessResponse(list)) {
+      const runtimes = list.result as Array<{ messageCount: number; pendingCount: number }>;
+      expect(runtimes[0]!.messageCount).toBe(4);
+      expect(runtimes[0]!.pendingCount).toBe(0);
+    }
+
+    client.close();
+  });
+
+  it("session.send returns BUSY when queue is full", async () => {
+    const conversations = new ConversationManager(createMockFactory({ deltaCount: 1, yieldDelayMs: 200 }), {
+      graceTimeoutMs: 60_000,
+      idleTimeoutMs: 30 * 60_000,
+      idleCheckIntervalMs: 999_999,
+      maxPending: 2,
+    });
+    const ctx = createServerContext({
+      config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
+      version: TEST_VERSION,
+      token: TEST_TOKEN,
+      conversations,
+    });
+    server = await startServer({ context: ctx });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const r1 = await client.request("session.send", { text: "running" });
+    const convId = (r1 as { result: { conversationId: string } }).result.conversationId;
+
+    await client.request("session.send", { text: "queued-1", conversationId: convId });
+    await client.request("session.send", { text: "queued-2", conversationId: convId });
+
+    const r4 = await client.request("session.send", { text: "overflow", conversationId: convId });
+    expect(isErrorResponse(r4)).toBe(true);
+    if (isErrorResponse(r4)) {
+      expect(r4.error.code).toBe(RPC_ERROR_CODES.BUSY);
+    }
+
+    for (let i = 0; i < 3; i++) {
+      await client.waitNotification("session.complete", 5000);
+    }
+    client.close();
+  });
+
   // ─── 配置缺失场景 ───
 
   it("session.send returns INTERNAL_ERROR when conversations manager is missing", async () => {

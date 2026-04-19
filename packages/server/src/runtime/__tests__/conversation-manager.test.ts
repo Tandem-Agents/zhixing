@@ -79,6 +79,34 @@ describe("ConversationManager", () => {
       expect(manager.list()).toHaveLength(1);
     });
 
+    it("concurrent getOrCreate with same id creates only one runtime", async () => {
+      let createCount = 0;
+      const slowFactory: RuntimeFactory = {
+        async create(sessionId) {
+          createCount++;
+          await new Promise((r) => setTimeout(r, 10));
+          return createMockRuntime(sessionId);
+        },
+      };
+      const mgr = new ConversationManager(slowFactory, {
+        graceTimeoutMs: 60_000,
+        idleTimeoutMs: 30 * 60_000,
+        idleCheckIntervalMs: 999_999,
+      });
+
+      const p = Promise.all([
+        mgr.getOrCreate("race"),
+        mgr.getOrCreate("race"),
+      ]);
+      await vi.advanceTimersByTimeAsync(20);
+      const [s1, s2] = await p;
+
+      expect(s1).toBe(s2);
+      expect(createCount).toBe(1);
+      expect(mgr.list()).toHaveLength(1);
+      mgr.disposeAll();
+    });
+
     it("creates session with specified id when not present", async () => {
       const session = await manager.getOrCreate("my-conversation");
       expect(session.conversationId).toBe("my-conversation");
@@ -352,6 +380,173 @@ describe("ConversationManager", () => {
 
       vi.advanceTimersByTime(60_000);
       expect(manager.has("a")).toBe(true);
+    });
+  });
+
+  // ─── Pending Queue (§4.5) ───
+
+  describe("pending queue", () => {
+    it("returns 'immediate' when session is not busy", async () => {
+      await manager.getOrCreate("a");
+      const executed: string[] = [];
+      const status = manager.enqueue("a", {
+        execute: async () => { executed.push("task"); },
+        cancel: () => {},
+      });
+      expect(status).toBe("immediate");
+      expect(executed).toHaveLength(0);
+    });
+
+    it("returns 'queued' when session is busy", async () => {
+      await manager.getOrCreate("a");
+      manager.setBusy("a", true);
+      const status = manager.enqueue("a", {
+        execute: async () => {},
+        cancel: () => {},
+      });
+      expect(status).toBe("queued");
+      expect(manager.pendingCount("a")).toBe(1);
+    });
+
+    it("returns 'full' when queue reaches maxPending", async () => {
+      const mgr = new ConversationManager(createMockFactory(), {
+        maxPending: 2,
+        graceTimeoutMs: 60_000,
+        idleTimeoutMs: 30 * 60_000,
+        idleCheckIntervalMs: 999_999,
+      });
+      await mgr.getOrCreate("a");
+      mgr.setBusy("a", true);
+
+      expect(mgr.enqueue("a", { execute: async () => {}, cancel: () => {} })).toBe("queued");
+      expect(mgr.enqueue("a", { execute: async () => {}, cancel: () => {} })).toBe("queued");
+      expect(mgr.enqueue("a", { execute: async () => {}, cancel: () => {} })).toBe("full");
+      mgr.disposeAll();
+    });
+
+    it("dequeues next task when setBusy(false)", async () => {
+      await manager.getOrCreate("a");
+      manager.setBusy("a", true);
+
+      const executed: string[] = [];
+      manager.enqueue("a", {
+        execute: async () => { executed.push("task-1"); },
+        cancel: () => {},
+      });
+      manager.enqueue("a", {
+        execute: async () => { executed.push("task-2"); },
+        cancel: () => {},
+      });
+
+      expect(manager.pendingCount("a")).toBe(2);
+
+      manager.setBusy("a", false);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(executed).toEqual(["task-1"]);
+      expect(manager.pendingCount("a")).toBe(1);
+
+      manager.setBusy("a", false);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(executed).toEqual(["task-1", "task-2"]);
+      expect(manager.pendingCount("a")).toBe(0);
+    });
+
+    it("does not start grace timer while queue has pending tasks", async () => {
+      await manager.getOrCreate("a");
+      manager.setBusy("a", true);
+
+      manager.enqueue("a", {
+        execute: async () => {},
+        cancel: () => {},
+      });
+
+      manager.setBusy("a", false);
+      vi.advanceTimersByTime(60_001);
+      expect(manager.has("a")).toBe(true);
+    });
+
+    it("starts grace timer after queue drains with no observers", async () => {
+      await manager.getOrCreate("a");
+      manager.setBusy("a", true);
+
+      manager.enqueue("a", {
+        execute: async () => {},
+        cancel: () => {},
+      });
+
+      manager.setBusy("a", false);
+      await vi.advanceTimersByTimeAsync(0);
+
+      manager.setBusy("a", false);
+      vi.advanceTimersByTime(60_001);
+      expect(manager.has("a")).toBe(false);
+    });
+
+    it("cancels all pending tasks on delete", async () => {
+      await manager.getOrCreate("a");
+      manager.setBusy("a", true);
+
+      const cancelled: string[] = [];
+      manager.enqueue("a", {
+        execute: async () => {},
+        cancel: () => { cancelled.push("task-1"); },
+      });
+      manager.enqueue("a", {
+        execute: async () => {},
+        cancel: () => { cancelled.push("task-2"); },
+      });
+
+      manager.delete("a");
+      expect(cancelled).toEqual(["task-1", "task-2"]);
+      expect(manager.pendingCount("a")).toBe(0);
+    });
+
+    it("cancels all pending tasks on disposeAll", async () => {
+      await manager.getOrCreate("a");
+      manager.setBusy("a", true);
+
+      const cancelled: string[] = [];
+      manager.enqueue("a", {
+        execute: async () => {},
+        cancel: () => { cancelled.push("task-1"); },
+      });
+
+      manager.disposeAll();
+      expect(cancelled).toEqual(["task-1"]);
+    });
+
+    it("list() includes pendingCount", async () => {
+      await manager.getOrCreate("a");
+      manager.setBusy("a", true);
+      manager.enqueue("a", { execute: async () => {}, cancel: () => {} });
+
+      const list = manager.list();
+      expect(list[0]!.pendingCount).toBe(1);
+    });
+
+    it("returns 'full' for unknown conversation", async () => {
+      const status = manager.enqueue("nope", {
+        execute: async () => {},
+        cancel: () => {},
+      });
+      expect(status).toBe("full");
+    });
+
+    it("abort while busy triggers dequeue of next pending task", async () => {
+      await manager.getOrCreate("a");
+      manager.setBusy("a", true);
+
+      const executed: string[] = [];
+      manager.enqueue("a", {
+        execute: async () => { executed.push("queued-task"); },
+        cancel: () => {},
+      });
+
+      manager.abort("a");
+      manager.setBusy("a", false);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(executed).toEqual(["queued-task"]);
     });
   });
 });

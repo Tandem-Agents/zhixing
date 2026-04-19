@@ -17,7 +17,7 @@ import { RpcAppError, RpcErrors } from "../handlers.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
 import type { RpcConnection } from "../connection.js";
 import type { ServerContext } from "../../context.js";
-import type { ConversationManager, ManagedSession } from "../../runtime/conversation-manager.js";
+import type { ConversationManager, ManagedSession, PendingTask } from "../../runtime/conversation-manager.js";
 
 // ─── session.send ───
 
@@ -43,21 +43,45 @@ export function buildSessionSendMethod(): MethodEntry {
       if (typeof params.text !== "string" || params.text.length === 0) {
         throw RpcErrors.invalidParams("session.send requires non-empty 'text'");
       }
+      const text = params.text;
 
       const manager = requireConversations(ctx.server);
       const id = params.conversationId ?? params.sessionId;
 
       const managed = await manager.getOrCreate(id);
+      const conversationId = managed.conversationId;
       const connectionId = String(ctx.connection.id);
 
-      manager.addObserver(managed.conversationId, connectionId);
-      manager.setBusy(managed.conversationId, true);
+      manager.addObserver(conversationId, connectionId);
 
-      void runManagedTurn(managed, params.text, ctx.connection, manager);
+      const status = manager.enqueue(conversationId, {
+        execute: () => runManagedTurn(managed, text, ctx.connection, manager),
+        cancel: () => {
+          ctx.connection.notify("session.complete", {
+            conversationId,
+            sessionId: conversationId,
+            result: {
+              reason: "error",
+              error: { name: "Cancelled", message: "Pending turn cancelled" },
+              usage: { inputTokens: 0, outputTokens: 0 },
+            },
+          });
+        },
+      });
+
+      if (status === "full") {
+        throw new RpcAppError(RPC_ERROR_CODES.BUSY, "Too many pending messages for this conversation");
+      }
+
+      if (status === "immediate") {
+        manager.setBusy(conversationId, true);
+        void runManagedTurn(managed, text, ctx.connection, manager);
+      }
+      // status === "queued": dequeueNext will call execute() when current turn completes
 
       return {
-        conversationId: managed.conversationId,
-        sessionId: managed.conversationId,
+        conversationId,
+        sessionId: conversationId,
       };
     },
   };

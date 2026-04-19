@@ -62,6 +62,9 @@ export const RpcErrors = {
   invalidParams(message: string) {
     return new RpcAppError(RPC_ERROR_CODES.INVALID_PARAMS, message);
   },
+  busy(message: string) {
+    return new RpcAppError(RPC_ERROR_CODES.BUSY, message);
+  },
 };
 
 export class HandlerRegistry {

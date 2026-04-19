@@ -15,7 +15,9 @@
 | 5 | LayerAssembler + TurnDigest | ✅ 已完成 | Step 4 |
 | 6 | WindowManager + Pinning | ✅ 已完成 | Step 5 |
 | 7 | ConversationManager + SessionRuntime | ✅ 已完成 | Step 3, 6 |
-| 8 | Ephemeral Conversation + auto-promote | 🔲 待开始 | Step 7 |
+| 7a | PendingQueue 并发互斥 | ✅ 已完成 | Step 7 |
+| 7b | TranscriptStore 集成 + AbortSignal | 🔲 待开始 | Step 7a |
+| 8 | Ephemeral Conversation + auto-promote | 🔲 待开始 | Step 7b |
 
 ```
 Step 0 (词汇对齐)
@@ -34,6 +36,10 @@ Step 3b (Transcript 段轮转)     │      │                    │
                     ↓
             Step 7 (ConversationManager + SessionRuntime)
                     ↓
+            Step 7a (PendingQueue 并发互斥)
+                    ↓
+            Step 7b (TranscriptStore 集成 + AbortSignal)
+                    ↓
             Step 8 (Ephemeral + auto-promote + /delete)
 ```
 
@@ -45,10 +51,10 @@ Step 3b (Transcript 段轮转)     │      │                    │
 
 | 规格 | 文档 | 覆盖 Steps |
 |------|------|-----------|
-| 对话模型 | [conversation-model.md](specifications/conversation-model.md) | 0, 1, 2, 3, 7, 8 |
+| 对话模型 | [conversation-model.md](specifications/conversation-model.md) | 0, 1, 2, 3, 7, 7a, 7b, 8 |
 | 上下文架构 | [context-architecture.md](specifications/context-architecture.md) | 4, 5, 6 |
-| 智能体运行时 | [persistent-service.md](specifications/persistent-service.md) | 7, 8 |
-| Server Gateway | [server-gateway.md](specifications/server-gateway.md) | 7 |
+| 智能体运行时 | [persistent-service.md](specifications/persistent-service.md) | 7, 7b, 8 |
+| Server Gateway | [server-gateway.md](specifications/server-gateway.md) | 7, 7a |
 
 ---
 
@@ -681,6 +687,182 @@ interface ConversationManager {
 
 ---
 
+## Step 7a: PendingQueue 并发互斥
+
+**目标：** 实现 [conversation-model.md](specifications/conversation-model.md) §4.5 PendingQueue，保证同一 conversation 的 turn 串行执行
+
+**性质：** ConversationManager 补丁，修复并发安全缺陷
+
+**为什么必须在 TranscriptStore 集成之前：**
+- 当前并发 `session.send` 到同一 conversation 会同时调用 `runtime.run()`，消息历史交错污染
+- 这在纯内存模式下是"重启即清除"的临时问题
+- 一旦接入 TranscriptStore 持久化，交错的脏数据会写进 transcript.jsonl，**永久损坏对话记录**
+- `setBusy` 的互斥语义依赖单一 turn 执行——并发直接破坏这个不变量
+
+**规格引用：** conversation-model.md §4.5 (MAX_PENDING=5)
+
+### 改动文件
+
+```
+改: packages/server/src/runtime/conversation-manager.ts
+  - ManagedSession 新增 pendingQueue: PendingMessage[]
+  - MAX_PENDING = 5：队列满时拒绝新请求（RPC 返回 BUSY 错误）
+  - setBusy(false) 时自动 dequeue 下一条消息执行
+
+改: packages/server/src/rpc/methods/session.ts
+  - session.send: busy 时入队而非直接执行
+  - 新增 BUSY 错误码处理（队列满）
+
+改: packages/server/src/runtime/__tests__/conversation-manager.test.ts
+  - 新增并发互斥测试
+```
+
+### 核心逻辑
+
+```typescript
+// ManagedSession 扩展
+interface PendingMessage {
+  text: string;
+  connection: RpcConnection;
+  resolve: (result: SessionSendResult) => void;
+  reject: (error: Error) => void;
+}
+
+// 执行流程
+session.send(text):
+  if (!busy) → 直接执行 runManagedTurn
+  else if (pendingQueue.length < MAX_PENDING) → 入队，返回 conversationId
+  else → 拒绝（429 BUSY）
+
+setBusy(false):
+  if (pendingQueue.length > 0) → dequeue → runManagedTurn
+  else → 启动 grace timer（已有逻辑）
+```
+
+### 不做
+
+- 不实现优先级队列（所有请求 FIFO）
+- 不实现队列持久化（内存队列，重启清空）
+- 不改 RuntimeFactory 接口
+
+### 实现细节
+
+**ConversationManager 扩展：**
+- `PendingTask { execute, cancel }` 泛型接口——ConversationManager 不感知 RPC 层
+- `enqueue()` 返回三态 `"immediate" | "queued" | "full"`，调用方按返回值分支处理
+- `setBusy(false)` 自动 dequeue → setBusy(true) → execute()，保证串行不变量
+- `delete()` / `disposeAll()` 调用 `cancel()` 清理所有 pending
+- `maxPending` 通过 config 注入，默认 5（spec §4.5）
+- `ManagedSessionInfo` 新增 `pendingCount` 字段
+
+**session.ts 改动：**
+- `session.send` 通过 `enqueue()` 决定是直接执行还是入队
+- 队列满时抛 `RPC_ERROR_CODES.BUSY (-32003)`
+- `cancel()` 回调向连接推送 `session.complete` + error reason
+
+**新增错误码：**
+- `RPC_ERROR_CODES.BUSY = -32003`
+- `RpcErrors.busy()` 便捷构造函数
+
+### 验证
+
+- [x] 单元测试：不忙时 enqueue 返回 "immediate"（2026-04-19）
+- [x] 单元测试：忙时 enqueue 返回 "queued"（2026-04-19）
+- [x] 单元测试：队列满返回 "full"（2026-04-19）
+- [x] 单元测试：setBusy(false) 自动 dequeue 下一个任务（2026-04-19）
+- [x] 单元测试：队列有任务时不启动 grace timer（2026-04-19）
+- [x] 单元测试：队列排空后正常启动 grace timer（2026-04-19）
+- [x] 单元测试：delete 时 cancel 所有 pending（2026-04-19）
+- [x] 单元测试：disposeAll 时 cancel 所有 pending（2026-04-19）
+- [x] 单元测试：list() 包含 pendingCount（2026-04-19）
+- [x] 单元测试：未知 conversation 返回 "full"（2026-04-19）
+- [x] 单元测试：abort 后 setBusy(false) 触发 dequeue（2026-04-19）
+- [x] 集成测试：并发 send 到同一 conversation 串行执行，收到正确数量的 complete（2026-04-19）
+- [x] 集成测试：队列满时返回 BUSY 错误码（2026-04-19）
+- [x] 全量 160 测试通过（core 1284 + server 160），三个包构建零错误（2026-04-19）
+
+---
+
+## Step 7b: TranscriptStore 集成 + AbortSignal
+
+**目标：** 完成 Step 7 的持久化闭环 + 连接断开时停止 LLM 消耗
+
+**性质：** Server ↔ Core 持久层接线 + 资源回收
+
+**为什么合并 AbortSignal：**
+- TranscriptStore 集成后，废弃的 LLM turn 不仅浪费 token，还会被持久化为脏数据
+- AbortSignal 是 TranscriptStore 写入的前置保护——中止的 turn 不应写入 transcript
+- 两者改动集中在 `runManagedTurn` 同一函数，合并实现避免重复改动
+
+**规格引用：** conversation-model.md §9 (Transcript 持久化) + §4 (SessionRuntime abort)
+
+### 改动文件
+
+```
+改: packages/server/src/runtime/types.ts
+  - RuntimeFactory.create() 新增可选参数 initialMessages?: Message[]
+  - SessionRuntime.run() 新增可选参数 signal?: AbortSignal
+
+改: packages/server/src/rpc/methods/session.ts
+  - runManagedTurn: 创建 AbortController，传 signal 给 runtime.run()
+  - runManagedTurn: turn 完成后调用 TranscriptStore.appendTurn()
+  - runManagedTurn: connection.closed 时调用 abort()
+  - 中止的 turn 不持久化
+
+改: packages/server/src/runtime/conversation-manager.ts
+  - getOrCreate(): 从 TranscriptStore.load() 恢复历史消息，传给 factory.create(id, messages)
+  - 注入 TranscriptStore 依赖（构造函数或方法参数）
+
+改: packages/server/src/rpc/methods/session.ts
+  - session.list: 合并 ConversationRepository.list() 数据（活跃 + 非活跃）
+  - session.history: 非活跃 conversation 从 TranscriptStore.load() 读取
+
+改: packages/cli/src/serve/command.ts
+  - 构造 ConversationManager 时注入 TranscriptStore 实例
+
+新建: packages/server/src/runtime/__tests__/transcript-integration.test.ts
+```
+
+### 不做
+
+- 不改 TranscriptStore 接口（Step 3 已定型）
+- 不改 ConversationRepository 接口
+- 不实现 Turn 压缩/清理（TranscriptStore 已有 appendCompact，由 ContextEngine 触发）
+
+### 验证
+
+- [ ] 集成测试：session.send → transcript.jsonl 文件正确写入 Turn
+- [ ] 集成测试：server 重启 → session.send 恢复上次对话历史
+- [ ] 集成测试：session.list 返回持久化的非活跃 conversation
+- [ ] 集成测试：session.history 对非活跃 conversation 从 TranscriptStore 加载
+- [ ] 单元测试：连接断开 → runtime.run 收到 abort signal → 停止生成
+- [ ] 单元测试：abort 后 turn 不写入 transcript.jsonl
+- [ ] 单元测试：RuntimeFactory.create(id, initialMessages) 正确初始化消息历史
+
+---
+
+## 已知技术债务
+
+> 以下债务已评估复合风险，按影响程度排序。每项标注了计划处理时机。
+
+### P1-已修复（Step 7 清理轮）
+
+| 问题 | 修复 | 日期 |
+|------|------|------|
+| Idle reaper 遍历 Map 时删除（脆弱模式） | collect-then-delete | 2026-04-19 |
+| 断开连接的 observer 残留（grace 永不触发） | runManagedTurn finally 检测 connection.closed | 2026-04-19 |
+| RuntimeRegistry 死代码仍导出 | 从 index.ts 移除 re-export | 2026-04-19 |
+
+### P1-计划中（2 项）
+
+| # | 问题 | 复合风险 | 计划时机 |
+|---|------|---------|---------|
+| 1 | ~~PendingQueue 并发互斥~~ | ~~高~~ | ✅ Step 7a 已完成（2026-04-19） |
+| 2 | AbortSignal 未传播到 runtime.run()，断开后 LLM 继续消耗 token | **中** — 持久化后废弃 turn 被写入 transcript | Step 7b（与 TranscriptStore 同步） |
+| 3 | TurnSource 参数缺失（scheduler/channel/interactive 区分） | **低** — Channel Adapter 前才需要，Turn 类型扩展兼容 | Channel Adapter 阶段 |
+
+---
+
 ## Step 8: Ephemeral Conversation + auto-promote
 
 **目标：** 实现 [conversation-model.md](specifications/conversation-model.md) §6 临时对话
@@ -775,3 +957,8 @@ interface ConversationManager {
 | 2026-04-18 | ADR-CM-016：移除 `-c`/`-r` 启动参数，REPL 默认自动恢复 + `/switch`/`/new` 管理对话。更新 conversation-model.md §7.1, §12.4 |
 | 2026-04-18 | Step 4 完成：ScenarioEvaluator + ContextProfile（context-profile.ts, scenario-evaluator.ts, 40 测试） |
 | 2026-04-18 | Step 5 完成：LayerAssembler + TurnDigest（turn-digest.ts, layer-assembler.ts, engine.ts 扩展, 50 新测试） |
+| 2026-04-18 | Step 6 完成：WindowManager + TierCompressor（pin-aware 淘汰, 四级渐进压缩, 27 新测试） |
+| 2026-04-19 | Step 7 完成：ConversationManager 替代 RuntimeRegistry（observer 跟踪, grace period, idle timeout, 32 新测试） |
+| 2026-04-19 | Step 7 清理轮：修复 idle reaper 脆弱模式、dead observer 泄漏、移除 RuntimeRegistry 死代码导出 |
+| 2026-04-19 | 新增 Step 7a（PendingQueue）+ Step 7b（TranscriptStore 集成 + AbortSignal）；新增"已知技术债务"章节；重新评估 P1 债务复合风险并调整执行顺序 |
+| 2026-04-19 | Step 7a 完成：PendingQueue 并发互斥（enqueue 三态返回、自动 dequeue、BUSY 错误码、11 单元 + 2 集成测试） |

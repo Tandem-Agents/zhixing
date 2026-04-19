@@ -26,11 +26,14 @@ export interface ConversationManagerConfig {
   readonly idleTimeoutMs?: number;
   /** 空闲检查间隔（ms）。默认 60_000 */
   readonly idleCheckIntervalMs?: number;
+  /** 每个 conversation 的最大待处理消息数。默认 5（spec §4.5） */
+  readonly maxPending?: number;
 }
 
 const DEFAULT_GRACE_TIMEOUT_MS = 60_000;
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60_000;
 const DEFAULT_IDLE_CHECK_INTERVAL_MS = 60_000;
+const DEFAULT_MAX_PENDING = 5;
 
 // ─── 托管会话 ───
 
@@ -54,22 +57,33 @@ export interface ManagedSessionInfo {
   readonly messageCount: number;
   readonly busy: boolean;
   readonly observerCount: number;
+  readonly pendingCount: number;
 }
 
 // ─── 释放事件回调 ───
 
 export type OnSessionRelease = (conversationId: string, reason: "grace" | "idle") => void;
 
+// ─── 待处理任务 ───
+
+export interface PendingTask {
+  execute: () => Promise<void>;
+  cancel: () => void;
+}
+
 // ─── ConversationManager ───
 
 export class ConversationManager {
   private readonly sessions = new Map<string, ManagedSession>();
+  private readonly creating = new Map<string, Promise<ManagedSession>>();
   private readonly graceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly pendingQueues = new Map<string, PendingTask[]>();
   private idleInterval: ReturnType<typeof setInterval> | null = null;
 
   private readonly factory: RuntimeFactory;
   private readonly graceTimeoutMs: number;
   private readonly idleTimeoutMs: number;
+  private readonly maxPending: number;
   private readonly onRelease?: OnSessionRelease;
 
   constructor(
@@ -80,6 +94,7 @@ export class ConversationManager {
     this.factory = factory;
     this.graceTimeoutMs = config?.graceTimeoutMs ?? DEFAULT_GRACE_TIMEOUT_MS;
     this.idleTimeoutMs = config?.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
+    this.maxPending = config?.maxPending ?? DEFAULT_MAX_PENDING;
     this.onRelease = onRelease;
     this.startIdleReaper(config?.idleCheckIntervalMs ?? DEFAULT_IDLE_CHECK_INTERVAL_MS);
   }
@@ -100,6 +115,20 @@ export class ConversationManager {
     }
 
     const id = conversationId ?? generateConversationId();
+
+    const inflight = this.creating.get(id);
+    if (inflight) return inflight;
+
+    const promise = this.doCreate(id);
+    this.creating.set(id, promise);
+    try {
+      return await promise;
+    } finally {
+      this.creating.delete(id);
+    }
+  }
+
+  private async doCreate(id: string): Promise<ManagedSession> {
     const runtime = await this.factory.create(id);
     const now = new Date().toISOString();
 
@@ -185,6 +214,7 @@ export class ConversationManager {
       messageCount: s.runtime.getHistory().length,
       busy: s.busy,
       observerCount: s.observers.size,
+      pendingCount: this.pendingQueues.get(id)?.length ?? 0,
     }));
   }
 
@@ -197,8 +227,13 @@ export class ConversationManager {
     if (busy) {
       session.lastActiveAt = new Date().toISOString();
       this.clearGraceTimer(conversationId);
-    } else if (session.observers.size === 0) {
-      this.startGraceTimer(conversationId);
+    } else {
+      const queue = this.pendingQueues.get(conversationId);
+      if (queue && queue.length > 0) {
+        this.dequeueNext(conversationId);
+      } else if (session.observers.size === 0) {
+        this.startGraceTimer(conversationId);
+      }
     }
   }
 
@@ -209,9 +244,68 @@ export class ConversationManager {
     return true;
   }
 
+  // ─── Pending Queue ───
+
+  /**
+   * 将任务入队。如果 conversation 不忙则返回 "immediate"（调用方应直接执行）。
+   * 队列满时返回 "full"。正常入队返回 "queued"。
+   */
+  enqueue(conversationId: string, task: PendingTask): "immediate" | "queued" | "full" {
+    const session = this.sessions.get(conversationId);
+    if (!session) return "full";
+
+    if (!session.busy) {
+      return "immediate";
+    }
+
+    const queue = this.pendingQueues.get(conversationId) ?? [];
+    if (queue.length >= this.maxPending) {
+      return "full";
+    }
+
+    queue.push(task);
+    this.pendingQueues.set(conversationId, queue);
+    return "queued";
+  }
+
+  pendingCount(conversationId: string): number {
+    return this.pendingQueues.get(conversationId)?.length ?? 0;
+  }
+
+  private dequeueNext(conversationId: string): void {
+    const queue = this.pendingQueues.get(conversationId);
+    if (!queue || queue.length === 0) return;
+
+    const task = queue.shift()!;
+    if (queue.length === 0) {
+      this.pendingQueues.delete(conversationId);
+    }
+
+    const session = this.sessions.get(conversationId);
+    if (!session) {
+      task.cancel();
+      return;
+    }
+
+    session.busy = true;
+    session.lastActiveAt = new Date().toISOString();
+    this.clearGraceTimer(conversationId);
+    void task.execute();
+  }
+
+  private clearPendingQueue(conversationId: string): void {
+    const queue = this.pendingQueues.get(conversationId);
+    if (!queue) return;
+    for (const task of queue) {
+      task.cancel();
+    }
+    this.pendingQueues.delete(conversationId);
+  }
+
   delete(conversationId: string): boolean {
     const session = this.sessions.get(conversationId);
     if (!session) return false;
+    this.clearPendingQueue(conversationId);
     this.clearGraceTimer(conversationId);
     session.runtime.dispose();
     this.sessions.delete(conversationId);
@@ -220,6 +314,10 @@ export class ConversationManager {
 
   /** 释放所有运行时资源（Server 关闭时调用） */
   disposeAll(): void {
+    const queueIds = [...this.pendingQueues.keys()];
+    for (const id of queueIds) {
+      this.clearPendingQueue(id);
+    }
     for (const timer of this.graceTimers.values()) clearTimeout(timer);
     this.graceTimers.clear();
     if (this.idleInterval) {
@@ -261,6 +359,7 @@ export class ConversationManager {
     const session = this.sessions.get(conversationId);
     if (!session) return;
     if (session.observers.size > 0 || session.busy) return;
+    this.clearPendingQueue(conversationId);
     session.runtime.dispose();
     this.sessions.delete(conversationId);
     this.onRelease?.(conversationId, reason);
@@ -280,6 +379,7 @@ export class ConversationManager {
         }
       }
       for (const id of expired) {
+        this.clearPendingQueue(id);
         this.clearGraceTimer(id);
         const session = this.sessions.get(id);
         if (session) {

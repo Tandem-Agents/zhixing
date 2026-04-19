@@ -77,6 +77,8 @@ export const RPC_ERROR_CODES = {
   UNAUTHORIZED: -32001,
   /** 资源未找到（如 sessionId 不存在） */
   NOT_FOUND: -32002,
+  /** 资源繁忙（如并发 turn 队列已满） */
+  BUSY: -32003,
 } as const;
 
 // ─── 类型守卫 ───
