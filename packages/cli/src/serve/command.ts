@@ -21,7 +21,7 @@ import {
   createServerContext,
   runServer,
   buildSystemHandlers,
-  RuntimeRegistry,
+  ConversationManager,
   DEFAULT_SERVER_CONFIG,
   type RunningServer,
 } from "@zhixing/server";
@@ -50,7 +50,7 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
     console.log(chalk.dim(`Generated new token: ${tokenInfo.path}`));
   }
 
-  // 2. RuntimeFactory + RuntimeRegistry
+  // 2. RuntimeFactory + ConversationManager
   const runtimeFactory = createCliRuntimeFactory({
     createAgentRuntime: () =>
       createAgentRuntime({
@@ -59,7 +59,7 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
         workspace: opts.workspace,
       }),
   });
-  const sessions = new RuntimeRegistry(runtimeFactory);
+  const conversations = new ConversationManager(runtimeFactory);
 
   // 3. Scheduler
   const schedulerEventBus = createEventBus<SchedulerEventMap>();
@@ -68,7 +68,8 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
   }): Promise<AgentTurnResult> => {
     const startTime = Date.now();
     try {
-      const runtime = await sessions.getOrCreate();
+      const managed = await conversations.getOrCreate();
+      const runtime = managed.runtime;
       const gen = runtime.run(params.prompt);
       let lastText = "";
       while (true) {
@@ -127,7 +128,7 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
     version: SERVER_VERSION,
     token: tokenInfo.token,
     scheduler,
-    sessions,
+    conversations,
   });
 
   let runner: RunningServer;

@@ -1,15 +1,15 @@
 /**
  * session.* RPC 方法
  *
- * - session.send：发送用户消息，立即返回 sessionId，后台异步推送 delta/complete
- * - session.list：列出所有运行时元信息
+ * - session.send：发送用户消息，立即返回 conversationId，后台异步推送 delta/complete
+ * - session.list：列出所有活跃运行时元信息
  * - session.history：返回指定运行时的消息历史
  * - session.abort：中止指定运行时当前执行
  * - session.delete：删除运行时
  *
  * 推送事件：
- * - session.delta { sessionId, delta: AgentYield }
- * - session.complete { sessionId, result: AgentResult }
+ * - session.delta { conversationId, delta: AgentYield }
+ * - session.complete { conversationId, result: AgentResult }
  */
 
 import type { MethodEntry } from "../handlers.js";
@@ -17,16 +17,20 @@ import { RpcAppError, RpcErrors } from "../handlers.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
 import type { RpcConnection } from "../connection.js";
 import type { ServerContext } from "../../context.js";
-import type { SessionRuntime, RuntimeInfo } from "../../runtime/types.js";
+import type { ConversationManager, ManagedSession } from "../../runtime/conversation-manager.js";
 
 // ─── session.send ───
 
 interface SessionSendParams {
   text?: string;
+  conversationId?: string;
+  /** @deprecated 使用 conversationId */
   sessionId?: string;
 }
 
 interface SessionSendResult {
+  conversationId: string;
+  /** @deprecated 使用 conversationId */
   sessionId: string;
 }
 
@@ -40,45 +44,52 @@ export function buildSessionSendMethod(): MethodEntry {
         throw RpcErrors.invalidParams("session.send requires non-empty 'text'");
       }
 
-      const runtimes = requireRuntimes(ctx.server);
-      const runtime = await runtimes.getOrCreate(params.sessionId);
+      const manager = requireConversations(ctx.server);
+      const id = params.conversationId ?? params.sessionId;
 
-      // 标记 busy 并启动后台 runner
-      runtimes.setBusy(runtime.sessionId, true);
-      void runSessionTurn(runtime, params.text, ctx.connection, ctx.server);
+      const managed = await manager.getOrCreate(id);
+      const connectionId = String(ctx.connection.id);
 
-      return { sessionId: runtime.sessionId };
+      manager.addObserver(managed.conversationId, connectionId);
+      manager.setBusy(managed.conversationId, true);
+
+      void runManagedTurn(managed, params.text, ctx.connection, manager);
+
+      return {
+        conversationId: managed.conversationId,
+        sessionId: managed.conversationId,
+      };
     },
   };
 }
 
 /**
- * 后台 runner：消费 runtime.run 的 AsyncGenerator，推送事件到发起连接。
+ * 消费 runtime.run 的 AsyncGenerator，推送事件到发起连接。
  * 永不抛出（错误已包装为 complete 事件）。
  */
-async function runSessionTurn(
-  runtime: SessionRuntime,
+async function runManagedTurn(
+  managed: ManagedSession,
   text: string,
   connection: RpcConnection,
-  server: ServerContext,
+  manager: ConversationManager,
 ): Promise<void> {
-  const sessionId = runtime.sessionId;
-  const runtimes = server.sessions;
+  const conversationId = managed.conversationId;
 
   try {
-    const gen = runtime.run(text);
+    const gen = managed.runtime.run(text);
     while (true) {
       const { value, done } = await gen.next();
       if (done) {
-        connection.notify("session.complete", { sessionId, result: value });
+        connection.notify("session.complete", { conversationId, sessionId: conversationId, result: value });
         return;
       }
-      connection.notify("session.delta", { sessionId, delta: value });
+      connection.notify("session.delta", { conversationId, sessionId: conversationId, delta: value });
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     connection.notify("session.complete", {
-      sessionId,
+      conversationId,
+      sessionId: conversationId,
       result: {
         reason: "error",
         error: { name: "RuntimeError", message },
@@ -86,7 +97,10 @@ async function runSessionTurn(
       },
     });
   } finally {
-    runtimes?.setBusy(sessionId, false);
+    manager.setBusy(conversationId, false);
+    if (connection.closed) {
+      manager.removeObserver(conversationId, String(connection.id));
+    }
   }
 }
 
@@ -96,9 +110,9 @@ export function buildSessionListMethod(): MethodEntry {
   return {
     name: "session.list",
     requiresAuth: true,
-    handler(_params, ctx): RuntimeInfo[] {
-      const runtimes = requireRuntimes(ctx.server);
-      return runtimes.list();
+    handler(_params, ctx) {
+      const manager = requireConversations(ctx.server);
+      return manager.list();
     },
   };
 }
@@ -106,6 +120,8 @@ export function buildSessionListMethod(): MethodEntry {
 // ─── session.history ───
 
 interface SessionHistoryParams {
+  conversationId?: string;
+  /** @deprecated */
   sessionId?: string;
   limit?: number;
 }
@@ -116,13 +132,14 @@ export function buildSessionHistoryMethod(): MethodEntry {
     requiresAuth: true,
     handler(rawParams, ctx) {
       const params = (rawParams ?? {}) as SessionHistoryParams;
-      if (typeof params.sessionId !== "string") {
-        throw RpcErrors.invalidParams("session.history requires 'sessionId'");
+      const id = params.conversationId ?? params.sessionId;
+      if (typeof id !== "string") {
+        throw RpcErrors.invalidParams("session.history requires 'conversationId'");
       }
-      const runtimes = requireRuntimes(ctx.server);
-      const runtime = runtimes.get(params.sessionId);
+      const manager = requireConversations(ctx.server);
+      const runtime = manager.get(id);
       if (!runtime) {
-        throw RpcErrors.notFound(`Session not found: ${params.sessionId}`);
+        throw RpcErrors.notFound(`Session not found: ${id}`);
       }
       return runtime.getHistory(params.limit);
     },
@@ -132,6 +149,8 @@ export function buildSessionHistoryMethod(): MethodEntry {
 // ─── session.abort ───
 
 interface SessionAbortParams {
+  conversationId?: string;
+  /** @deprecated */
   sessionId?: string;
 }
 
@@ -141,12 +160,13 @@ export function buildSessionAbortMethod(): MethodEntry {
     requiresAuth: true,
     handler(rawParams, ctx): void {
       const params = (rawParams ?? {}) as SessionAbortParams;
-      if (typeof params.sessionId !== "string") {
-        throw RpcErrors.invalidParams("session.abort requires 'sessionId'");
+      const id = params.conversationId ?? params.sessionId;
+      if (typeof id !== "string") {
+        throw RpcErrors.invalidParams("session.abort requires 'conversationId'");
       }
-      const runtimes = requireRuntimes(ctx.server);
-      if (!runtimes.abort(params.sessionId)) {
-        throw RpcErrors.notFound(`Session not found: ${params.sessionId}`);
+      const manager = requireConversations(ctx.server);
+      if (!manager.abort(id)) {
+        throw RpcErrors.notFound(`Session not found: ${id}`);
       }
     },
   };
@@ -155,6 +175,8 @@ export function buildSessionAbortMethod(): MethodEntry {
 // ─── session.delete ───
 
 interface SessionDeleteParams {
+  conversationId?: string;
+  /** @deprecated */
   sessionId?: string;
 }
 
@@ -164,12 +186,13 @@ export function buildSessionDeleteMethod(): MethodEntry {
     requiresAuth: true,
     handler(rawParams, ctx): void {
       const params = (rawParams ?? {}) as SessionDeleteParams;
-      if (typeof params.sessionId !== "string") {
-        throw RpcErrors.invalidParams("session.delete requires 'sessionId'");
+      const id = params.conversationId ?? params.sessionId;
+      if (typeof id !== "string") {
+        throw RpcErrors.invalidParams("session.delete requires 'conversationId'");
       }
-      const runtimes = requireRuntimes(ctx.server);
-      if (!runtimes.delete(params.sessionId)) {
-        throw RpcErrors.notFound(`Session not found: ${params.sessionId}`);
+      const manager = requireConversations(ctx.server);
+      if (!manager.delete(id)) {
+        throw RpcErrors.notFound(`Session not found: ${id}`);
       }
     },
   };
@@ -177,12 +200,12 @@ export function buildSessionDeleteMethod(): MethodEntry {
 
 // ─── 工具 ───
 
-function requireRuntimes(server: ServerContext) {
-  if (!server.sessions) {
+function requireConversations(server: ServerContext): ConversationManager {
+  if (!server.conversations) {
     throw new RpcAppError(
       RPC_ERROR_CODES.INTERNAL_ERROR,
-      "Runtime registry not configured on server",
+      "ConversationManager not configured on server",
     );
   }
-  return server.sessions;
+  return server.conversations;
 }

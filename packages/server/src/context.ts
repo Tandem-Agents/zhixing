@@ -3,16 +3,11 @@
  *
  * 持有所有跨模块共享的状态：配置、Scheduler、auth token、启动时间等。
  * 通过显式传递（而不是单例）保持可测试性。
- *
- * 后续阶段会扩展：
- * - S2.D: sessions registry（会话注册表）
- * - S2.E: scheduler（调度器实例）
- * - S5: channels（通道注册表）
  */
 
 import type { Scheduler } from "@zhixing/core";
 import type { ServerConfig } from "./types.js";
-import type { RuntimeRegistry } from "./runtime/index.js";
+import type { ConversationManager } from "./runtime/index.js";
 
 export interface ServerContext {
   /** 配置（不可变；config.port 是请求的端口，实际端口见 listenAddr） */
@@ -23,10 +18,10 @@ export interface ServerContext {
   readonly startedAt: number;
   /** 共享 token（auth 验证用）。由 ServerOrchestrator 注入 */
   readonly token: string;
-  /** 调度器实例（S2.E 注入；S2.B/C 阶段为 undefined） */
+  /** 调度器实例（S2.E 注入） */
   scheduler?: Scheduler;
-  /** 会话注册表（S2.D 注入；不传则 session.* 方法不可用） */
-  sessions?: RuntimeRegistry;
+  /** 对话运行时管理器（不传则 session.* 方法不可用） */
+  conversations?: ConversationManager;
   /** 实际监听的地址（startServer 监听就绪后回填） */
   listenAddr?: { port: number; host: string };
 }
@@ -36,7 +31,7 @@ export interface CreateContextOptions {
   version: string;
   token: string;
   scheduler?: Scheduler;
-  sessions?: RuntimeRegistry;
+  conversations?: ConversationManager;
 }
 
 export function createServerContext(opts: CreateContextOptions): ServerContext {
@@ -46,6 +41,6 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     token: opts.token,
     startedAt: Date.now(),
     scheduler: opts.scheduler,
-    sessions: opts.sessions,
+    conversations: opts.conversations,
   };
 }

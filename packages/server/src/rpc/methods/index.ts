@@ -32,7 +32,7 @@ export interface BuiltinMethodsOptions {
  * 构建包含所有内置方法的 HandlerRegistry。
  * 调用方可继续 register 自定义方法。
  *
- * 注意：session.* 方法需要 ctx.server.sessions 被注入；scheduler.* 同理。
+ * 注意：session.* 方法需要 ctx.server.conversations 被注入；scheduler.* 同理。
  * 注册方法本身不要求依赖存在——运行时缺失依赖才报错。
  */
 export function buildBuiltinRegistry(_opts: BuiltinMethodsOptions = {}): HandlerRegistry {

@@ -9,7 +9,7 @@ import WebSocket from "ws";
 import type { AgentResult, AgentYield, Message } from "@zhixing/core";
 import { startServer, type ZhixingServerInstance } from "../server.js";
 import { createServerContext } from "../context.js";
-import { RuntimeRegistry } from "../runtime/registry.js";
+import { ConversationManager } from "../runtime/conversation-manager.js";
 import type { SessionRuntime, RuntimeFactory } from "../runtime/types.js";
 import { DEFAULT_SERVER_CONFIG } from "../types.js";
 import {
@@ -179,12 +179,16 @@ describe("session.* RPC (S2.D)", () => {
   let server: ZhixingServerInstance;
 
   async function startWithFactory(factory: RuntimeFactory): Promise<void> {
-    const sessions = new RuntimeRegistry(factory);
+    const conversations = new ConversationManager(factory, {
+      graceTimeoutMs: 60_000,
+      idleTimeoutMs: 30 * 60_000,
+      idleCheckIntervalMs: 999_999,
+    });
     const ctx = createServerContext({
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: TEST_VERSION,
       token: TEST_TOKEN,
-      sessions,
+      conversations,
     });
     server = await startServer({ context: ctx });
   }
@@ -195,7 +199,7 @@ describe("session.* RPC (S2.D)", () => {
 
   // ─── auth 报告 session capability ───
 
-  it("auth reports 'session' capability when sessions registry is present", async () => {
+  it("auth reports 'session' capability when conversations manager is present", async () => {
     await startWithFactory(createMockFactory());
     const client = await connect(server.port);
     const r = await client.request("auth", { token: TEST_TOKEN });
@@ -217,7 +221,7 @@ describe("session.* RPC (S2.D)", () => {
     const sendResp = await client.request("session.send", { text: "hi" });
     expect(isSuccessResponse(sendResp)).toBe(true);
     const sessionId = (sendResp as { result: { sessionId: string } }).result.sessionId;
-    expect(sessionId).toMatch(/^sess_/);
+    expect(sessionId).toMatch(/^conv_/);
 
     // 收 deltas + turn_complete + complete
     const deltas: unknown[] = [];
@@ -380,12 +384,12 @@ describe("session.* RPC (S2.D)", () => {
 
   // ─── 配置缺失场景 ───
 
-  it("session.send returns INTERNAL_ERROR when runtime registry is missing", async () => {
+  it("session.send returns INTERNAL_ERROR when conversations manager is missing", async () => {
     const ctx = createServerContext({
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: TEST_VERSION,
       token: TEST_TOKEN,
-      // sessions intentionally omitted
+      // conversations intentionally omitted
     });
     server = await startServer({ context: ctx });
     const client = await connect(server.port);

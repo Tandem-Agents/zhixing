@@ -73,9 +73,9 @@ function safeEqual(a: string, b: string): boolean {
   return timingSafeEqual(bufA, bufB);
 }
 
-function collectCapabilities(server: { scheduler?: unknown; sessions?: unknown }): string[] {
+function collectCapabilities(server: { scheduler?: unknown; conversations?: unknown }): string[] {
   const caps: string[] = [];
-  if (server.sessions) caps.push("session");
+  if (server.conversations) caps.push("session");
   if (server.scheduler) caps.push("schedule");
   return caps;
 }

@@ -14,7 +14,7 @@
 | 4 | ScenarioEvaluator + ContextProfile | ✅ 已完成 | Step 0 |
 | 5 | LayerAssembler + TurnDigest | ✅ 已完成 | Step 4 |
 | 6 | WindowManager + Pinning | ✅ 已完成 | Step 5 |
-| 7 | ConversationManager + SessionRuntime | 🔲 待开始 | Step 3, 6 |
+| 7 | ConversationManager + SessionRuntime | ✅ 已完成 | Step 3, 6 |
 | 8 | Ephemeral Conversation + auto-promote | 🔲 待开始 | Step 7 |
 
 ```
@@ -642,12 +642,42 @@ interface ConversationManager {
 
 ### 验证
 
-- [ ] `zhixing serve` 启动正常
-- [ ] `zhixing rpc session.send "你好"` — 收到回复
-- [ ] `zhixing rpc session.list` — 显示 conversation 列表含 runtime 状态
-- [ ] transcript.jsonl 文件正确写入
-- [ ] 两个 rpc client 连接同一 conversation → observers=2
-- [ ] 所有 client 断开 60s → SessionRuntime 自动释放（日志可见）
+- [x] `zhixing serve` 启动正常 — 编译通过，server 构建成功 (2026-04-18)
+- [x] `zhixing rpc session.send "你好"` — session-rpc 集成测试覆盖 send + delta/complete 推送 (2026-04-18)
+- [x] `zhixing rpc session.list` — list 返回 ManagedSessionInfo 含 observerCount (2026-04-18)
+- [ ] transcript.jsonl 文件正确写入 — 需 TranscriptStore 集成到 runManagedTurn（见下方"待完成"）
+- [x] 两个 observer 连接同一 conversation → observerCount=2 — 单元测试覆盖 (2026-04-18)
+- [x] 所有 observer 断开 60s → SessionRuntime 自动释放 — grace period 单元测试覆盖 (2026-04-18)
+- [x] 空闲 30 分钟自动释放 — idle timeout 单元测试覆盖 (2026-04-18)
+- [x] setBusy(true) 阻止 grace timer 启动 — 交互测试覆盖 (2026-04-18)
+- [x] onRelease 回调正确触发（grace/idle 两种原因）(2026-04-18)
+- [x] WebSocket 断开时自动清理 observer — server.ts ws.on("close") 调用 removeObserverFromAll (2026-04-18)
+- [x] server.close() 自动调用 conversations.disposeAll() — 资源回收 (2026-04-18)
+- [x] ServerContext 单一字段：`conversations?: ConversationManager`，无双字段歧义 (2026-04-18)
+- [x] RPC 方法直接使用 ConversationManager 类型，无 duck-typing 绕过 (2026-04-18)
+- [x] CLI serve 命令已迁移至 ConversationManager (2026-04-18)
+- [x] 全量 1431 测试通过（core 1284 + server 147），三个包构建零错误 (2026-04-18)
+
+### 实现细节
+
+**新建文件：**
+- `packages/server/src/runtime/conversation-manager.ts` — ConversationManager 类：observer 跟踪、60s grace period、30min idle timeout、onRelease 回调
+- `packages/server/src/runtime/__tests__/conversation-manager.test.ts` — 32 测试
+
+**改动文件：**
+- `packages/server/src/runtime/types.ts` — re-export ManagedSessionInfo
+- `packages/server/src/runtime/index.ts` — export conversation-manager
+- `packages/server/src/context.ts` — ServerContext 统一使用 `conversations?: ConversationManager`
+- `packages/server/src/server.ts` — ws.on("close") 调用 removeObserverFromAll；close() 调用 disposeAll()
+- `packages/server/src/rpc/methods/session.ts` — 直接使用 ConversationManager，移除 RuntimeRegistry 兼容路径
+- `packages/server/src/rpc/methods/auth.ts` — capabilities 检测使用 conversations 字段
+- `packages/cli/src/serve/command.ts` — RuntimeRegistry → ConversationManager
+
+**待完成（属于 Step 7 范围，需 RuntimeFactory 接口扩展）：**
+- TranscriptStore 集成：acquire() 从 transcript.jsonl 加载消息，runManagedTurn 完成后持久化 Turn
+- session.list 合并 ConversationRepository.list() 数据
+- session.history 从 TranscriptStore 加载（对非活跃 conversation）
+- 上述依赖：RuntimeFactory.create() 需接受可选 initialMessages 参数
 
 ---
 

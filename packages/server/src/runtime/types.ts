@@ -37,3 +37,6 @@ export interface RuntimeInfo {
   /** 是否正在执行 turn */
   busy: boolean;
 }
+
+/** @deprecated 使用 ManagedSessionInfo (from conversation-manager) 代替 */
+export type { ManagedSessionInfo } from "./conversation-manager.js";
