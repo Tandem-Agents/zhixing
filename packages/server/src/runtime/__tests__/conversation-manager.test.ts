@@ -107,6 +107,60 @@ describe("ConversationManager", () => {
       mgr.disposeAll();
     });
 
+    it("calls initTranscript for new conversations (no history)", async () => {
+      const inited: string[] = [];
+      const mgr = new ConversationManager(createMockFactory(), {
+        graceTimeoutMs: 60_000,
+        idleTimeoutMs: 30 * 60_000,
+        idleCheckIntervalMs: 999_999,
+      }, {
+        initTranscript: async (id) => { inited.push(id); },
+      });
+
+      await mgr.getOrCreate("new-conv");
+      expect(inited).toEqual(["new-conv"]);
+      mgr.disposeAll();
+    });
+
+    it("does NOT call initTranscript when loadHistory returns messages", async () => {
+      const inited: string[] = [];
+      const mgr = new ConversationManager(createMockFactory(), {
+        graceTimeoutMs: 60_000,
+        idleTimeoutMs: 30 * 60_000,
+        idleCheckIntervalMs: 999_999,
+      }, {
+        loadHistory: async () => [
+          { role: "user", content: [{ type: "text", text: "hi" }] },
+          { role: "assistant", content: [{ type: "text", text: "hello" }] },
+        ],
+        initTranscript: async (id) => { inited.push(id); },
+      });
+
+      const session = await mgr.getOrCreate("existing");
+      expect(inited).toEqual([]);
+      expect(session.turnCount).toBe(1);
+      mgr.disposeAll();
+    });
+
+    it("initializes turnCount from loaded history", async () => {
+      const mgr = new ConversationManager(createMockFactory(), {
+        graceTimeoutMs: 60_000,
+        idleTimeoutMs: 30 * 60_000,
+        idleCheckIntervalMs: 999_999,
+      }, {
+        loadHistory: async () => [
+          { role: "user", content: [{ type: "text", text: "q1" }] },
+          { role: "assistant", content: [{ type: "text", text: "a1" }] },
+          { role: "user", content: [{ type: "text", text: "q2" }] },
+          { role: "assistant", content: [{ type: "text", text: "a2" }] },
+        ],
+      });
+
+      const session = await mgr.getOrCreate("restored");
+      expect(session.turnCount).toBe(2);
+      mgr.disposeAll();
+    });
+
     it("creates session with specified id when not present", async () => {
       const session = await manager.getOrCreate("my-conversation");
       expect(session.conversationId).toBe("my-conversation");

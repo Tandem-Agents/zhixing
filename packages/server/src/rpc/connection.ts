@@ -39,14 +39,19 @@ export interface RpcConnection {
   close(code?: number, reason?: string): void;
   /** 是否已关闭 */
   readonly closed: boolean;
+  /** 注册关闭回调。返回取消注册的函数。 */
+  onClose(callback: () => void): () => void;
 }
 
 export function createRpcConnection(socket: WebSocket): RpcConnection {
   const id = ++nextConnectionId;
   let closed = false;
+  const closeListeners = new Set<() => void>();
 
   socket.on("close", () => {
     closed = true;
+    for (const cb of closeListeners) cb();
+    closeListeners.clear();
   });
 
   const safeSend = (text: string): void => {
@@ -81,6 +86,14 @@ export function createRpcConnection(socket: WebSocket): RpcConnection {
     },
     get closed() {
       return closed;
+    },
+    onClose(callback) {
+      if (closed) {
+        callback();
+        return () => {};
+      }
+      closeListeners.add(callback);
+      return () => { closeListeners.delete(callback); };
     },
   };
 }

@@ -15,6 +15,7 @@
  * - 可测试：grace/idle 超时可通过配置注入
  */
 
+import type { Message } from "@zhixing/core";
 import type { SessionRuntime, RuntimeFactory } from "./types.js";
 
 // ─── 配置 ───
@@ -44,6 +45,8 @@ export interface ManagedSession {
   lastActiveAt: string;
   busy: boolean;
   readonly observers: Set<string>;
+  /** 已持久化的 turn 数量（用于 turnIndex 计算） */
+  turnCount: number;
 }
 
 // ─── 列表信息 ───
@@ -63,6 +66,18 @@ export interface ManagedSessionInfo {
 // ─── 释放事件回调 ───
 
 export type OnSessionRelease = (conversationId: string, reason: "grace" | "idle") => void;
+
+/** 加载对话历史的回调。返回 undefined 表示无历史可加载。 */
+export type LoadHistory = (conversationId: string) => Promise<Message[] | undefined>;
+
+/** 新对话首次创建时的初始化回调（如写入 transcript header）。 */
+export type InitTranscript = (conversationId: string) => Promise<void>;
+
+export interface ConversationManagerCallbacks {
+  onRelease?: OnSessionRelease;
+  loadHistory?: LoadHistory;
+  initTranscript?: InitTranscript;
+}
 
 // ─── 待处理任务 ───
 
@@ -85,17 +100,31 @@ export class ConversationManager {
   private readonly idleTimeoutMs: number;
   private readonly maxPending: number;
   private readonly onRelease?: OnSessionRelease;
+  private readonly loadHistory?: LoadHistory;
+  private readonly initTranscript?: InitTranscript;
 
   constructor(
     factory: RuntimeFactory,
     config?: ConversationManagerConfig,
-    onRelease?: OnSessionRelease,
+    callbacksOrOnRelease?: ConversationManagerCallbacks | OnSessionRelease,
+    loadHistory?: LoadHistory,
   ) {
     this.factory = factory;
     this.graceTimeoutMs = config?.graceTimeoutMs ?? DEFAULT_GRACE_TIMEOUT_MS;
     this.idleTimeoutMs = config?.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
     this.maxPending = config?.maxPending ?? DEFAULT_MAX_PENDING;
-    this.onRelease = onRelease;
+
+    if (typeof callbacksOrOnRelease === "function") {
+      this.onRelease = callbacksOrOnRelease;
+      this.loadHistory = loadHistory;
+    } else if (callbacksOrOnRelease) {
+      this.onRelease = callbacksOrOnRelease.onRelease;
+      this.loadHistory = callbacksOrOnRelease.loadHistory;
+      this.initTranscript = callbacksOrOnRelease.initTranscript;
+    } else if (loadHistory) {
+      this.loadHistory = loadHistory;
+    }
+
     this.startIdleReaper(config?.idleCheckIntervalMs ?? DEFAULT_IDLE_CHECK_INTERVAL_MS);
   }
 
@@ -129,7 +158,11 @@ export class ConversationManager {
   }
 
   private async doCreate(id: string): Promise<ManagedSession> {
-    const runtime = await this.factory.create(id);
+    const initialMessages = await this.loadHistory?.(id);
+    if (!initialMessages && this.initTranscript) {
+      await this.initTranscript(id);
+    }
+    const runtime = await this.factory.create(id, initialMessages);
     const now = new Date().toISOString();
 
     const session: ManagedSession = {
@@ -139,6 +172,9 @@ export class ConversationManager {
       lastActiveAt: now,
       busy: false,
       observers: new Set(),
+      turnCount: initialMessages
+        ? initialMessages.filter(m => m.role === "user").length
+        : 0,
     };
 
     this.sessions.set(id, session);

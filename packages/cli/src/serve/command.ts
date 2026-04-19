@@ -16,6 +16,9 @@ import {
   type SchedulerEventMap,
   type AgentTurnResult,
   JournalStore,
+  TranscriptStore,
+  getZhixingHome,
+  getProjectId,
 } from "@zhixing/core";
 import {
   createServerContext,
@@ -29,6 +32,7 @@ import chalk from "chalk";
 import { createAgentRuntime } from "../run-agent.js";
 import { createCliRuntimeFactory } from "./session-adapter.js";
 import { loadOrCreateToken } from "./token.js";
+import path from "node:path";
 
 const SERVER_VERSION = "0.1.0";
 
@@ -50,7 +54,14 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
     console.log(chalk.dim(`Generated new token: ${tokenInfo.path}`));
   }
 
-  // 2. RuntimeFactory + ConversationManager
+  // 2. TranscriptStore
+  const workspace = opts.workspace ?? process.cwd();
+  const zhixingHome = getZhixingHome();
+  const projectId = getProjectId(path.resolve(workspace));
+  const conversationsDir = path.join(zhixingHome, "projects", projectId, "conversations");
+  const transcript = new TranscriptStore(conversationsDir, workspace);
+
+  // 3. RuntimeFactory + ConversationManager
   const runtimeFactory = createCliRuntimeFactory({
     createAgentRuntime: () =>
       createAgentRuntime({
@@ -59,9 +70,25 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
         workspace: opts.workspace,
       }),
   });
-  const conversations = new ConversationManager(runtimeFactory);
+  const conversations = new ConversationManager(runtimeFactory, undefined, {
+    loadHistory: async (conversationId) => {
+      try {
+        if (!(await transcript.exists(conversationId))) return undefined;
+        const loaded = await transcript.load(conversationId);
+        return loaded.messages;
+      } catch {
+        return undefined;
+      }
+    },
+    initTranscript: async (conversationId) => {
+      await transcript.init(conversationId, {
+        model: opts.model ?? "default",
+        provider: opts.provider ?? "default",
+      });
+    },
+  });
 
-  // 3. Scheduler
+  // 4. Scheduler
   const schedulerEventBus = createEventBus<SchedulerEventMap>();
   const runAgentTurn = async (params: {
     prompt: string;
@@ -122,13 +149,14 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
   });
   await scheduler.start();
 
-  // 4. ServerContext + runServer
+  // 5. ServerContext + runServer
   const ctx = createServerContext({
     config: { ...DEFAULT_SERVER_CONFIG, port, host },
     version: SERVER_VERSION,
     token: tokenInfo.token,
     scheduler,
     conversations,
+    transcript,
   });
 
   let runner: RunningServer;

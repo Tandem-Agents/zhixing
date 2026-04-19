@@ -32,20 +32,25 @@ interface QueueItem {
 export function createServerRuntimeAdapter(
   sessionId: string,
   agentRuntime: AgentRuntime,
+  initialMessages?: Message[],
 ): SessionRuntime {
-  let messages: Message[] = [];
+  let messages: Message[] = initialMessages ? [...initialMessages] : [];
   let aborted = false;
 
   return {
     sessionId,
 
-    async *run(text): AsyncGenerator<AgentYield, AgentResult> {
+    async *run(text, abortSignal?): AsyncGenerator<AgentYield, AgentResult> {
       if (aborted) {
         aborted = false;
         throw new Error("Session aborted");
       }
+      if (abortSignal?.aborted) {
+        throw new Error("Aborted");
+      }
 
       messages.push(userMessage(text));
+      let turnAborted = false;
 
       const queue: QueueItem[] = [];
       const waiters: Array<() => void> = [];
@@ -54,42 +59,59 @@ export function createServerRuntimeAdapter(
         if (w) w();
       };
 
+      const onAbort = () => {
+        turnAborted = true;
+        queue.push({ kind: "error", error: new Error("Aborted") });
+        wakeOne();
+      };
+      abortSignal?.addEventListener("abort", onAbort, { once: true });
+
       // 启动 agent 运行（callback 风格）→ 把事件灌进队列
-      const runPromise = agentRuntime
+      agentRuntime
         .run({
           messages: [...messages],
           onYield: (event) => {
+            if (turnAborted) return;
             queue.push({ kind: "yield", value: event });
             wakeOne();
           },
         })
         .then(
           (runResult) => {
-            messages.push(...runResult.newMessages);
-            queue.push({ kind: "done", result: runResult.agentResult });
-            wakeOne();
+            if (!turnAborted) {
+              messages.push(...runResult.newMessages);
+              queue.push({ kind: "done", result: runResult.agentResult });
+              wakeOne();
+            }
           },
           (err) => {
-            queue.push({ kind: "error", error: err });
-            wakeOne();
+            if (!turnAborted) {
+              queue.push({ kind: "error", error: err });
+              wakeOne();
+            }
           },
         );
 
-      // 消费循环：从队列拉事件并 yield/return/throw
-      while (true) {
-        if (queue.length === 0) {
-          await new Promise<void>((resolve) => waiters.push(resolve));
+      try {
+        // 消费循环：从队列拉事件并 yield/return/throw
+        while (true) {
+          if (queue.length === 0) {
+            await new Promise<void>((resolve) => waiters.push(resolve));
+          }
+          const item = queue.shift()!;
+          if (item.kind === "yield") {
+            yield item.value!;
+          } else if (item.kind === "done") {
+            return item.result!;
+          } else {
+            if (turnAborted) {
+              messages.pop();
+            }
+            throw item.error;
+          }
         }
-        const item = queue.shift()!;
-        if (item.kind === "yield") {
-          yield item.value!;
-        } else if (item.kind === "done") {
-          await runPromise;
-          return item.result!;
-        } else {
-          await runPromise.catch(() => {});
-          throw item.error;
-        }
+      } finally {
+        abortSignal?.removeEventListener("abort", onAbort);
       }
     },
 
@@ -120,9 +142,9 @@ export interface RuntimeFactoryOptions {
  */
 export function createCliRuntimeFactory(opts: RuntimeFactoryOptions): RuntimeFactory {
   return {
-    async create(sessionId) {
+    async create(sessionId, initialMessages) {
       const agentRuntime = await opts.createAgentRuntime();
-      return createServerRuntimeAdapter(sessionId, agentRuntime);
+      return createServerRuntimeAdapter(sessionId, agentRuntime, initialMessages);
     },
   };
 }

@@ -12,12 +12,13 @@
  * - session.complete { conversationId, result: AgentResult }
  */
 
+import { userMessage, type AgentResult, type Turn, type ITranscriptStore } from "@zhixing/core";
 import type { MethodEntry } from "../handlers.js";
 import { RpcAppError, RpcErrors } from "../handlers.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
 import type { RpcConnection } from "../connection.js";
 import type { ServerContext } from "../../context.js";
-import type { ConversationManager, ManagedSession, PendingTask } from "../../runtime/conversation-manager.js";
+import type { ConversationManager, ManagedSession } from "../../runtime/conversation-manager.js";
 
 // ─── session.send ───
 
@@ -46,6 +47,7 @@ export function buildSessionSendMethod(): MethodEntry {
       const text = params.text;
 
       const manager = requireConversations(ctx.server);
+      const transcript = ctx.server.transcript;
       const id = params.conversationId ?? params.sessionId;
 
       const managed = await manager.getOrCreate(id);
@@ -55,7 +57,7 @@ export function buildSessionSendMethod(): MethodEntry {
       manager.addObserver(conversationId, connectionId);
 
       const status = manager.enqueue(conversationId, {
-        execute: () => runManagedTurn(managed, text, ctx.connection, manager),
+        execute: () => runManagedTurn(managed, text, ctx.connection, manager, transcript),
         cancel: () => {
           ctx.connection.notify("session.complete", {
             conversationId,
@@ -75,7 +77,7 @@ export function buildSessionSendMethod(): MethodEntry {
 
       if (status === "immediate") {
         manager.setBusy(conversationId, true);
-        void runManagedTurn(managed, text, ctx.connection, manager);
+        void runManagedTurn(managed, text, ctx.connection, manager, transcript);
       }
       // status === "queued": dequeueNext will call execute() when current turn completes
 
@@ -90,26 +92,56 @@ export function buildSessionSendMethod(): MethodEntry {
 /**
  * 消费 runtime.run 的 AsyncGenerator，推送事件到发起连接。
  * 永不抛出（错误已包装为 complete 事件）。
+ *
+ * AbortSignal 生命周期：
+ * - 创建 AbortController，连接断开时自动 abort
+ * - signal 传入 runtime.run()，由 runtime 实现决定如何响应
+ * - 中止的 turn 不推送 complete（连接已断），不持久化
  */
 async function runManagedTurn(
   managed: ManagedSession,
   text: string,
   connection: RpcConnection,
   manager: ConversationManager,
+  transcript?: ITranscriptStore,
 ): Promise<void> {
   const conversationId = managed.conversationId;
+  const abortController = new AbortController();
+  const unsubClose = connection.onClose(() => abortController.abort());
+  const turnStartedAt = new Date().toISOString();
 
   try {
-    const gen = managed.runtime.run(text);
+    const gen = managed.runtime.run(text, abortController.signal);
+    let result: AgentResult | undefined;
+
     while (true) {
-      const { value, done } = await gen.next();
-      if (done) {
-        connection.notify("session.complete", { conversationId, sessionId: conversationId, result: value });
-        return;
+      const iter = await gen.next();
+      if (iter.done) {
+        result = iter.value;
+        connection.notify("session.complete", { conversationId, sessionId: conversationId, result });
+        break;
       }
-      connection.notify("session.delta", { conversationId, sessionId: conversationId, delta: value });
+      connection.notify("session.delta", { conversationId, sessionId: conversationId, delta: iter.value });
+    }
+
+    if (result && result.reason === "completed" && transcript && !abortController.signal.aborted) {
+      const turn: Turn = {
+        type: "turn",
+        turnIndex: managed.turnCount,
+        timestamp: turnStartedAt,
+        userMessage: userMessage(text),
+        assistantMessage: result.message,
+        usage: result.usage,
+      };
+      try {
+        await transcript.appendTurn(conversationId, turn);
+        managed.turnCount++;
+      } catch {
+        // persistence failure — non-fatal
+      }
     }
   } catch (err) {
+    if (abortController.signal.aborted) return;
     const message = err instanceof Error ? err.message : String(err);
     connection.notify("session.complete", {
       conversationId,
@@ -121,6 +153,7 @@ async function runManagedTurn(
       },
     });
   } finally {
+    unsubClose();
     manager.setBusy(conversationId, false);
     if (connection.closed) {
       manager.removeObserver(conversationId, String(connection.id));

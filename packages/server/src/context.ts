@@ -5,7 +5,7 @@
  * 通过显式传递（而不是单例）保持可测试性。
  */
 
-import type { Scheduler } from "@zhixing/core";
+import type { Scheduler, ITranscriptStore } from "@zhixing/core";
 import type { ServerConfig } from "./types.js";
 import type { ConversationManager } from "./runtime/index.js";
 
@@ -22,6 +22,8 @@ export interface ServerContext {
   scheduler?: Scheduler;
   /** 对话运行时管理器（不传则 session.* 方法不可用） */
   conversations?: ConversationManager;
+  /** Transcript 持久层（不传则 turn 不持久化） */
+  transcript?: ITranscriptStore;
   /** 实际监听的地址（startServer 监听就绪后回填） */
   listenAddr?: { port: number; host: string };
 }
@@ -32,6 +34,7 @@ export interface CreateContextOptions {
   token: string;
   scheduler?: Scheduler;
   conversations?: ConversationManager;
+  transcript?: ITranscriptStore;
 }
 
 export function createServerContext(opts: CreateContextOptions): ServerContext {
@@ -42,5 +45,6 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     startedAt: Date.now(),
     scheduler: opts.scheduler,
     conversations: opts.conversations,
+    transcript: opts.transcript,
   };
 }

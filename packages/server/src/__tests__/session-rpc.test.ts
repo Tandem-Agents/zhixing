@@ -6,7 +6,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import WebSocket from "ws";
-import type { AgentResult, AgentYield, Message } from "@zhixing/core";
+import type { AgentResult, AgentYield, Message, ITranscriptStore } from "@zhixing/core";
 import { startServer, type ZhixingServerInstance } from "../server.js";
 import { createServerContext } from "../context.js";
 import { ConversationManager } from "../runtime/conversation-manager.js";
@@ -35,8 +35,8 @@ interface MockOptions {
   yieldDelayMs?: number;
 }
 
-function createMockRuntime(sessionId: string, opts: MockOptions = {}): SessionRuntime {
-  const messages: Message[] = [];
+function createMockRuntime(sessionId: string, opts: MockOptions = {}, initialMessages?: Message[]): SessionRuntime {
+  const messages: Message[] = initialMessages ? [...initialMessages] : [];
   let aborted = false;
 
   return {
@@ -79,8 +79,8 @@ function createMockRuntime(sessionId: string, opts: MockOptions = {}): SessionRu
 
 function createMockFactory(opts: MockOptions = {}): RuntimeFactory {
   return {
-    async create(sessionId) {
-      return createMockRuntime(sessionId, opts);
+    async create(sessionId, initialMessages) {
+      return createMockRuntime(sessionId, opts, initialMessages);
     },
   };
 }
@@ -464,6 +464,131 @@ describe("session.* RPC (S2.D)", () => {
     expect(isErrorResponse(r)).toBe(true);
     if (isErrorResponse(r)) {
       expect(r.error.code).toBe(RPC_ERROR_CODES.INTERNAL_ERROR);
+    }
+    client.close();
+  });
+
+  // ─── TranscriptStore 集成 (Step 7b) ───
+
+  it("completed turn is persisted to transcript store", async () => {
+    const appendedTurns: Array<{ conversationId: string; turn: unknown }> = [];
+    const mockTranscript: ITranscriptStore = {
+      async init() {},
+      async appendTurn(conversationId, turn) {
+        appendedTurns.push({ conversationId, turn });
+      },
+      async appendCompact() {},
+      async load() {
+        return { header: {} as never, messages: [], turnCount: 0 };
+      },
+      async countTurns() { return 0; },
+      async exists() { return false; },
+    };
+
+    const conversations = new ConversationManager(createMockFactory({ deltaCount: 1 }), {
+      graceTimeoutMs: 60_000,
+      idleTimeoutMs: 30 * 60_000,
+      idleCheckIntervalMs: 999_999,
+    });
+    const ctx = createServerContext({
+      config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
+      version: TEST_VERSION,
+      token: TEST_TOKEN,
+      conversations,
+      transcript: mockTranscript,
+    });
+    server = await startServer({ context: ctx });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const sendResp = await client.request("session.send", { text: "persist me" });
+    const convId = (sendResp as { result: { conversationId: string } }).result.conversationId;
+    await client.waitNotification("session.complete");
+
+    await sleep(50);
+
+    expect(appendedTurns).toHaveLength(1);
+    expect(appendedTurns[0]!.conversationId).toBe(convId);
+    const turn = appendedTurns[0]!.turn as { type: string; userMessage: Message; assistantMessage: Message };
+    expect(turn.type).toBe("turn");
+    expect(turn.userMessage.role).toBe("user");
+    expect(turn.assistantMessage.role).toBe("assistant");
+
+    client.close();
+  });
+
+  it("error turn is NOT persisted to transcript store", async () => {
+    const appendedTurns: unknown[] = [];
+    const mockTranscript: ITranscriptStore = {
+      async init() {},
+      async appendTurn(_cid, turn) { appendedTurns.push(turn); },
+      async appendCompact() {},
+      async load() { return { header: {} as never, messages: [], turnCount: 0 }; },
+      async countTurns() { return 0; },
+      async exists() { return false; },
+    };
+
+    const conversations = new ConversationManager(createMockFactory({ throwError: "kaboom" }), {
+      graceTimeoutMs: 60_000,
+      idleTimeoutMs: 30 * 60_000,
+      idleCheckIntervalMs: 999_999,
+    });
+    const ctx = createServerContext({
+      config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
+      version: TEST_VERSION,
+      token: TEST_TOKEN,
+      conversations,
+      transcript: mockTranscript,
+    });
+    server = await startServer({ context: ctx });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    await client.request("session.send", { text: "will error" });
+    await client.waitNotification("session.complete");
+    await sleep(50);
+
+    expect(appendedTurns).toHaveLength(0);
+    client.close();
+  });
+
+  it("loadHistory restores messages on getOrCreate", async () => {
+    const storedMessages: Message[] = [
+      { role: "user", content: [{ type: "text", text: "previous question" }] },
+      { role: "assistant", content: [{ type: "text", text: "previous answer" }] },
+    ];
+
+    const loadHistory = async (conversationId: string) => {
+      if (conversationId === "conv_restored") return storedMessages;
+      return undefined;
+    };
+
+    const conversations = new ConversationManager(
+      createMockFactory({ deltaCount: 1 }),
+      { graceTimeoutMs: 60_000, idleTimeoutMs: 30 * 60_000, idleCheckIntervalMs: 999_999 },
+      undefined,
+      loadHistory,
+    );
+    const ctx = createServerContext({
+      config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
+      version: TEST_VERSION,
+      token: TEST_TOKEN,
+      conversations,
+    });
+    server = await startServer({ context: ctx });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const sendResp = await client.request("session.send", { text: "follow up", conversationId: "conv_restored" });
+    expect(isSuccessResponse(sendResp)).toBe(true);
+    await client.waitNotification("session.complete");
+
+    const histResp = await client.request("session.history", { conversationId: "conv_restored" });
+    if (isSuccessResponse(histResp)) {
+      const messages = histResp.result as Message[];
+      expect(messages.length).toBeGreaterThanOrEqual(4);
+      expect(messages[0]!.role).toBe("user");
+      expect((messages[0]!.content[0] as { text: string }).text).toBe("previous question");
     }
     client.close();
   });

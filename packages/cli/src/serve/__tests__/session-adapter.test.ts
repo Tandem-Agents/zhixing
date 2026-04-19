@@ -167,6 +167,47 @@ describe("createServerRuntimeAdapter", () => {
     expect(completed).toBe(true);
   });
 
+  it("abortSignal stops generator immediately and reverts user message", async () => {
+    const slowRuntime = createMockAgentRuntime();
+    const originalRun = slowRuntime.run.bind(slowRuntime);
+    slowRuntime.run = async (params: RunParams) => {
+      // Simulate slow LLM: yield one event, then wait before completing
+      params.onYield?.({ type: "text_delta", text: "partial" } as AgentYield);
+      await new Promise((r) => setTimeout(r, 500));
+      return originalRun(params);
+    };
+
+    const runtime = createServerRuntimeAdapter("test-abort-signal", slowRuntime);
+
+    const abortController = new AbortController();
+    const gen = runtime.run("should abort", abortController.signal);
+
+    // Read the first yield
+    const first = await gen.next();
+    expect(first.done).toBe(false);
+
+    // Abort mid-stream
+    abortController.abort();
+
+    // Next read should throw
+    await expect(gen.next()).rejects.toThrow(/abort/i);
+
+    // User message should be reverted — history stays empty
+    expect(runtime.getHistory()).toHaveLength(0);
+  });
+
+  it("already-aborted signal throws immediately without modifying history", async () => {
+    const runtime = createServerRuntimeAdapter("test-pre-abort", createMockAgentRuntime());
+
+    const abortController = new AbortController();
+    abortController.abort();
+
+    const gen = runtime.run("never runs", abortController.signal);
+    await expect(gen.next()).rejects.toThrow(/abort/i);
+
+    expect(runtime.getHistory()).toHaveLength(0);
+  });
+
   it("getHistory respects limit parameter", async () => {
     const runtime = createServerRuntimeAdapter("test-7", createMockAgentRuntime());
     const gen1 = runtime.run("first");

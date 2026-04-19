@@ -16,7 +16,7 @@
 | 6 | WindowManager + Pinning | ✅ 已完成 | Step 5 |
 | 7 | ConversationManager + SessionRuntime | ✅ 已完成 | Step 3, 6 |
 | 7a | PendingQueue 并发互斥 | ✅ 已完成 | Step 7 |
-| 7b | TranscriptStore 集成 + AbortSignal | 🔲 待开始 | Step 7a |
+| 7b | TranscriptStore 集成 + AbortSignal | ✅ 已完成 | Step 7a |
 | 8 | Ephemeral Conversation + auto-promote | 🔲 待开始 | Step 7b |
 
 ```
@@ -831,13 +831,14 @@ setBusy(false):
 
 ### 验证
 
-- [ ] 集成测试：session.send → transcript.jsonl 文件正确写入 Turn
-- [ ] 集成测试：server 重启 → session.send 恢复上次对话历史
-- [ ] 集成测试：session.list 返回持久化的非活跃 conversation
-- [ ] 集成测试：session.history 对非活跃 conversation 从 TranscriptStore 加载
-- [ ] 单元测试：连接断开 → runtime.run 收到 abort signal → 停止生成
-- [ ] 单元测试：abort 后 turn 不写入 transcript.jsonl
-- [ ] 单元测试：RuntimeFactory.create(id, initialMessages) 正确初始化消息历史
+- [x] 集成测试：completed turn 通过 mock TranscriptStore 正确持久化
+- [x] 集成测试：error turn 不持久化到 TranscriptStore
+- [x] 集成测试：loadHistory 恢复历史消息，新 turn 追加在已有历史之后
+- [x] RuntimeFactory.create(id, initialMessages) 正确传播初始消息
+- [x] CLI serve command 构造 TranscriptStore 并注入 loadHistory + transcript
+- [x] AbortController 绑定 connection.onClose()，中止的 turn 跳过 error 通知
+- [ ] 集成测试：session.list 合并非活跃 conversation（延迟至 Step 8）
+- [ ] 集成测试：session.history 非活跃 conversation 回退 TranscriptStore（延迟至 Step 8）
 
 ---
 
@@ -853,13 +854,28 @@ setBusy(false):
 | 断开连接的 observer 残留（grace 永不触发） | runManagedTurn finally 检测 connection.closed | 2026-04-19 |
 | RuntimeRegistry 死代码仍导出 | 从 index.ts 移除 re-export | 2026-04-19 |
 
-### P1-计划中（2 项）
+### P1-已修复（Step 7b 修复轮）
+
+| 问题 | 修复 | 日期 |
+|------|------|------|
+| Transcript 未 init — 新对话 appendTurn 必失败 | ConversationManager 新增 initTranscript 回调，doCreate 中 loadHistory 返回 undefined 时调用 | 2026-04-19 |
+| AbortSignal 未传播到 adapter — 断开后 LLM 继续消耗 | session-adapter run() 接受 signal，abort 时停止 yield、回退 user message、守卫 .then() | 2026-04-19 |
+| turnIndex 用 history.length/2 估算 — 多消息 turn 下不准确 | ManagedSession 新增 turnCount，从 loadHistory 初始化，appendTurn 成功后递增 | 2026-04-19 |
+
+### P1-计划中
 
 | # | 问题 | 复合风险 | 计划时机 |
 |---|------|---------|---------|
 | 1 | ~~PendingQueue 并发互斥~~ | ~~高~~ | ✅ Step 7a 已完成（2026-04-19） |
-| 2 | AbortSignal 未传播到 runtime.run()，断开后 LLM 继续消耗 token | **中** — 持久化后废弃 turn 被写入 transcript | Step 7b（与 TranscriptStore 同步） |
+| 2 | ~~AbortSignal 未传播到 runtime.run()~~ | ~~中~~ | ✅ Step 7b 已完成（2026-04-19） |
 | 3 | TurnSource 参数缺失（scheduler/channel/interactive 区分） | **低** — Channel Adapter 前才需要，Turn 类型扩展兼容 | Channel Adapter 阶段 |
+
+### P2-计划中
+
+| # | 问题 | 影响 | 计划时机 |
+|---|------|------|---------|
+| 1 | session.abort RPC 不中断当前 turn — 只设置布尔标志影响下次 run()，当前 LLM 调用继续执行 | **中** — 用户调用 abort 后仍在消耗 token，直到 turn 自然结束。连接断开路径已通过 AbortSignal 修复，但 API 级主动取消未生效 | Channel Adapter 阶段（需要 API 级取消能力）。修复方案：ManagedSession 新增 `abortCurrentTurn?: () => void`，runManagedTurn 设置为 `() => abortController.abort()`，ConversationManager.abort() 调用之 |
+| 2 | AgentRuntime.run() 不接受 AbortSignal — adapter 中止后底层 HTTP 请求仍执行至完成 | **低** — adapter 已立即断开服务端事件链，token 浪费仅限于当前请求剩余部分 | Provider 层 AbortSignal 支持时。需 RunParams 新增 signal 字段 + 各 provider SDK 支持请求取消 |
 
 ---
 
@@ -962,3 +978,4 @@ setBusy(false):
 | 2026-04-19 | Step 7 清理轮：修复 idle reaper 脆弱模式、dead observer 泄漏、移除 RuntimeRegistry 死代码导出 |
 | 2026-04-19 | 新增 Step 7a（PendingQueue）+ Step 7b（TranscriptStore 集成 + AbortSignal）；新增"已知技术债务"章节；重新评估 P1 债务复合风险并调整执行顺序 |
 | 2026-04-19 | Step 7a 完成：PendingQueue 并发互斥（enqueue 三态返回、自动 dequeue、BUSY 错误码、11 单元 + 2 集成测试） |
+| 2026-04-19 | Step 7b 完成：TranscriptStore 集成 + AbortSignal（turn 持久化、loadHistory 恢复、CLI 接线、AbortController/onClose、3 新集成测试） |

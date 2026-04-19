@@ -25,8 +25,8 @@ export interface SessionRuntime {
 }
 
 export interface RuntimeFactory {
-  /** 创建新运行时；sessionId 由 Registry 生成传入 */
-  create(sessionId: string): Promise<SessionRuntime>;
+  /** 创建新运行时；sessionId 由 Registry 生成传入，可选注入历史消息用于恢复对话 */
+  create(sessionId: string, initialMessages?: Message[]): Promise<SessionRuntime>;
 }
 
 export interface RuntimeInfo {
