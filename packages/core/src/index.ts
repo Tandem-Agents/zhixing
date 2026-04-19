@@ -11,3 +11,4 @@ export * from "./identity/index.js";
 export * from "./typeahead/index.js";
 export * from "./scheduler/index.js";
 export * from "./conversation/index.js";
+export * from "./channels/index.js";
