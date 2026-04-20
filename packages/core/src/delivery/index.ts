@@ -12,6 +12,13 @@ export type { DeliveryQueueOptions } from "./queue.js";
 export { DedupFilter } from "./dedup.js";
 export type { DedupFilterOptions } from "./dedup.js";
 
+export { DefaultDeliveryRouter, buildRoutingContext } from "./router.js";
+export type {
+  DeliveryRouter,
+  RouteRequest,
+  RoutingContext,
+} from "./router.js";
+
 export type {
   DeliveryEventMap,
   DeliveryFilter,

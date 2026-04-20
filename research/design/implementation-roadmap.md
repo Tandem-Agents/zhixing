@@ -10,9 +10,8 @@
     → S2 ✅ Server (HTTP/WS/RPC)
       → S2.7 ✅ 对话模型统一
         → S5 ✅ Channel Adapter (飞书 MVP，E2E 已验证)
-          → S3 ✅ Delivery Pipeline (核心 + Scheduler 集成)
-            → S3.14 🔜 DeliveryRouter       ← 当前
-              → 飞书增量 (流式卡片)
+          → S3 ✅ Delivery Pipeline (核心 + 集成 + 路由)
+            → 飞书增量 (流式卡片)              ← 下一方向
               → Daemon 后台模式
                 → S2.5 AgentOrchestrator
 
@@ -58,7 +57,7 @@
 |------|------|------|---------|------|
 | 12 | DeliveryPipeline 核心 | ✅ | ✅ 设计完备 (persistent-service.md §4.7) | Step 11 |
 | 13 | Scheduler → Delivery 集成 | ✅ | ✅ 设计完备 (persistent-service.md §4.7) | Step 12 |
-| 14 | DeliveryRouter 路由决策 | 🔜 下一步 | ✅ 设计完备 (server-gateway.md §7.2) | Step 13 |
+| 14 | DeliveryRouter 路由决策 | ✅ | ✅ 设计完备 (server-gateway.md §7.2) | Step 13 |
 
 ### 延后 / 可选
 
@@ -106,20 +105,15 @@
 - 3 个集成测试覆盖：成功投递 / 无配置跳过 / 失败跳过
 - 设计决策：enqueue 失败仅 warn 不影响任务结果（投递是 best-effort 的副作用）
 
----
+### Step 14: DeliveryRouter 路由决策 ✅
 
-## 待实施
-
-### Step 14: DeliveryRouter 路由决策
-
-**目标：** 智能选择投递通道，而非硬编码默认通道。
-
-**设计来源：** server-gateway.md §7.2
-
-**做什么：**
-- 路由决策链：显式指定 → 触发源通道 → 最近活跃通道 → 默认通道
-- `RoutingContext`：通道活跃度追踪
-- 与 ChannelRegistry 集成：只路由到 connected 状态的通道
+- 纯决策组件：`DefaultDeliveryRouter.resolve(request, context) → DeliveryTarget | null`
+- 4 级决策链：显式指定（connected）→ 触发来源通道 → 最近活跃通道 → null（入队等待）
+- `RoutingContext`：channelStatus / channelActivity / triggerChannel / defaultChannel / channelDefaults
+- `channelDefaults` 扩展 spec — 跨通道路由需要知道每个通道上的用户 ID（`to` 字段）
+- `buildRoutingContext(statuses, options)` 工具函数：从 `ChannelStatus[]` 构建上下文，不依赖 ChannelRegistry 类
+- 活跃度排序 tiebreaker：defaultChannel 优先
+- 19 个测试覆盖：每级决策 / fallthrough / 边界条件 / 完整优先级链 / buildRoutingContext
 
 ---
 
