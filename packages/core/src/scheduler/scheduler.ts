@@ -320,6 +320,7 @@ export class Scheduler {
 
   private async executeSingleTask(task: ScheduledTask): Promise<AgentTurnResult> {
     this.activeTasks.add(task.id);
+    this.logger.info(`[执行] "${task.name}" id=${task.id} kind=${task.action.kind}`);
 
     await this.eventBus.emit("scheduler:task-started", {
       taskId: task.id,
@@ -432,10 +433,12 @@ export class Scheduler {
 
     // 3. 无法解析 → 跳过
     if (!target) {
+      this.logger.info(`[投递] 跳过 "${task.name}" — 无 origin 无显式配置`);
       task.state.lastDeliveryStatus = "skipped";
       return;
     }
 
+    this.logger.info(`[投递] "${task.name}" → ${target.channelId}:${target.to} len=${output.length} text="${output}"`);
     try {
       await this.delivery.enqueue({
         target,

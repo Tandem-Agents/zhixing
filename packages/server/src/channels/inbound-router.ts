@@ -50,7 +50,7 @@ export class InboundRouter {
     }
 
     const conversationId = resolveConversationId(msg, adapter.bindingPolicy);
-    this.logger.debug(`Routing message from ${msg.from} to conversation ${conversationId}`);
+    this.logger.info(`[收到] "${msg.text}" from=${msg.from} conv=${conversationId}`);
 
     let managed: ManagedSession;
     try {
@@ -65,12 +65,14 @@ export class InboundRouter {
     const status = this.conversations.enqueue(conversationId, {
       execute: () => this.runChannelTurn(managed, msg),
       cancel: () => {
-        this.logger.debug(`Pending turn cancelled for ${conversationId}`);
+        this.logger.info(`[排队取消] conv=${conversationId}`);
       },
     });
 
+    this.logger.info(`[调度] status=${status} busy=${managed.busy} conv=${conversationId}`);
+
     if (status === "full") {
-      this.logger.warn(`Queue full for conversation ${conversationId}, dropping message`);
+      this.logger.warn(`[丢弃] 队列满 conv=${conversationId}`);
       const replyTarget = buildReplyTarget(msg);
       await adapter.send(replyTarget, {
         text: "消息队列已满，请稍后再试。",
@@ -93,6 +95,7 @@ export class InboundRouter {
     if (!adapter) return;
 
     const turnStartedAt = new Date().toISOString();
+    this.logger.info(`[开始处理] conv=${conversationId} text="${msg.text}"`);
 
     try {
       const gen = managed.runtime.run(msg.text);
@@ -105,6 +108,8 @@ export class InboundRouter {
           break;
         }
       }
+
+      this.logger.info(`[处理完成] conv=${conversationId} reason=${result?.reason ?? "no-result"}`);
 
       if (result && result.reason === "completed") {
         const turn: Turn = {
@@ -124,6 +129,7 @@ export class InboundRouter {
 
         const replyTarget = buildReplyTarget(msg);
         const content = buildOutboundContent(result);
+        this.logger.info(`[回复] conv=${conversationId} len=${content.text.length} text="${content.text}"`);
         await adapter.send(replyTarget, content).catch((e) =>
           this.logger.error(`Failed to send reply to ${msg.channelId}: ${errMsg(e)}`),
         );
@@ -135,15 +141,17 @@ export class InboundRouter {
             : result.reason === "max_turns"
               ? "达到最大轮次限制。"
               : "处理被中止。";
+        this.logger.warn(`[错误回复] conv=${conversationId} reason=${result.reason}`);
         await adapter.send(replyTarget, { text: errorText }).catch((e) =>
           this.logger.error(`Failed to send error reply: ${errMsg(e)}`),
         );
       }
     } catch (err) {
-      this.logger.error(`Channel turn error for ${conversationId}: ${errMsg(err)}`);
+      this.logger.error(`[异常] conv=${conversationId}: ${errMsg(err)}`);
       const replyTarget = buildReplyTarget(msg);
       await adapter.send(replyTarget, { text: "内部错误，请稍后重试。" }).catch(() => {});
     } finally {
+      this.logger.info(`[释放] conv=${conversationId} busy=false`);
       this.conversations.setBusy(conversationId, false);
     }
   }

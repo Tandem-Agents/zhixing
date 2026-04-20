@@ -122,6 +122,7 @@ export function createScheduleTool(
 
     async call(input): Promise<ToolResult> {
       const action = input.action as string;
+      console.log(`[tool:schedule] action=${action}${input.name ? ` name="${input.name}"` : ""}${input.schedule_kind ? ` kind=${input.schedule_kind}` : ""}`);
 
       try {
         const scheduler = getScheduler();

@@ -113,6 +113,9 @@ export async function* runAgentLoop(
 
       // ── 无工具调用 → 正常完成 ──
       const toolCalls = extractToolCalls(llmResult.message);
+      if (toolCalls.length > 0) {
+        console.log(`[llm] 工具调用: ${toolCalls.map(tc => tc.name).join(", ")}`);
+      }
       if (toolCalls.length === 0) {
         return await emitRunEnd(eventBus, startTime, {
           reason: "completed",

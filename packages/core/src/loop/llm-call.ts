@@ -52,6 +52,8 @@ export async function* streamLLMCall(
     abortSignal,
   };
 
+  console.log(`[llm] 请求 model=${model} msgs=${messages.length} tools=${toolSpecs.length > 0 ? toolSpecs.map(t => t.name).join(",") : "无"}`);
+
   await eventBus?.emit("llm:request_start", {
     model,
     messageCount: messages.length,
