@@ -193,12 +193,16 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
   const schedulerEventBus = createEventBus<SchedulerEventMap>();
   const runAgentTurn = async (params: {
     prompt: string;
+    context?: "scheduled-task";
   }): Promise<AgentTurnResult> => {
     const startTime = Date.now();
     try {
+      const taskPrompt = params.context === "scheduled-task"
+        ? `[系统] 这是一个定时任务的自动执行。请直接执行以下指令并输出结果，不要反问用户、不要引导对话。\n\n${params.prompt}`
+        : params.prompt;
       const managed = await conversations.getOrCreate();
       const runtime = managed.runtime;
-      const gen = runtime.run(params.prompt);
+      const gen = runtime.run(taskPrompt);
       let lastText = "";
       while (true) {
         const { value, done } = await gen.next();

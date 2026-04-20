@@ -57,6 +57,7 @@ export async function executeTask(
         model: task.action.model,
         tools: task.action.tools,
         abortSignal: timeoutController.signal,
+        context: "scheduled-task",
       });
     }
 

@@ -170,6 +170,7 @@ export class Scheduler {
     });
 
     this.logger.info(`Task created: ${task.name}`, { id: task.id, nextRunAt: task.state.nextRunAt });
+    this.timerLoop.rearm();
     return task;
   }
 
@@ -194,6 +195,10 @@ export class Scheduler {
       taskId: id,
       name: updated.name,
     });
+
+    if (patch.schedule || patch.enabled !== undefined) {
+      this.timerLoop.rearm();
+    }
 
     return updated;
   }

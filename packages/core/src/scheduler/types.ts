@@ -101,6 +101,7 @@ export interface AgentTurnParams {
   model?: string;
   tools?: string[];
   abortSignal?: AbortSignal;
+  context?: "scheduled-task";
 }
 
 export interface AgentTurnResult {
@@ -135,6 +136,7 @@ export interface TimerLoop {
   start(): void;
   stop(): void;
   tick(): Promise<void>;
+  rearm(): void;
 }
 
 // ─── Logger（最小接口） ───

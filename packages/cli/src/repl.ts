@@ -630,12 +630,15 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     model?: string;
     tools?: string[];
     abortSignal?: AbortSignal;
+    context?: "scheduled-task";
   }): Promise<AgentTurnResult> => {
     const startTime = Date.now();
     try {
+      const taskPrompt = params.context === "scheduled-task"
+        ? `[系统] 这是一个定时任务的自动执行。请直接执行以下指令并输出结果，不要反问用户、不要引导对话。\n\n${params.prompt}`
+        : params.prompt;
       const result = await agentRuntime.run({
-        messages: [userMessage(params.prompt)],
-        // 任务执行不渲染到前台（S1 通过 EventBus 通知）
+        messages: [userMessage(taskPrompt)],
       });
       // 提取文本输出
       const output = result.newMessages
@@ -978,6 +981,11 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   //
   // 任务结果通过 EventBus 通知 REPL，在当前 readline prompt 之上插入通知行。
   // 与已有的 retry/budget 事件渲染方式一致。
+  const restorePrompt = () => {
+    if (!state.running) {
+      process.stdout.write(chalk.green("❯ "));
+    }
+  };
   schedulerEventBus.on("scheduler:task-completed", (info) => {
     renderer.stop();
     console.log(
@@ -986,6 +994,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       (info.summary ? `\n  ${chalk.dim(info.summary.slice(0, 120))}` : "") +
       "\n",
     );
+    restorePrompt();
   });
   schedulerEventBus.on("scheduler:task-failed", (info) => {
     renderer.stop();
@@ -996,6 +1005,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       (info.nextRunAt ? chalk.dim(`\n  下次重试: ${new Date(info.nextRunAt).toLocaleTimeString()}`) : "") +
       "\n",
     );
+    restorePrompt();
   });
   schedulerEventBus.on("scheduler:task-disabled", (info) => {
     renderer.stop();
@@ -1005,6 +1015,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       (info.lastError ? chalk.dim(`\n  最后错误: ${info.lastError.slice(0, 120)}`) : "") +
       "\n",
     );
+    restorePrompt();
   });
 
   // ── 旧/新路径都要处理的"命令 fallthrough 到 legacy slashCommands"助手 ──

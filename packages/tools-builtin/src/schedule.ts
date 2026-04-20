@@ -59,7 +59,10 @@ export function createScheduleTool(schedulerOrGetter: Scheduler | (() => Schedul
         },
         prompt: {
           type: "string",
-          description: "The prompt to execute when the task fires (required for create)",
+          description:
+            "The prompt to execute when the task fires (required for create). " +
+            "Write a self-contained instruction that produces the desired output directly. " +
+            "Good: '向用户发送提醒：时间到了，该开会了！' Bad: '提醒用户开会'",
         },
         schedule_kind: {
           type: "string",

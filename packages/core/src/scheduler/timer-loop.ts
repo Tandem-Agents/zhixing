@@ -56,10 +56,28 @@ export class TimerLoop implements ITimerLoop {
     await this.doTick();
   }
 
+  /**
+   * 取消当前定时器并根据最新任务列表重新调度。
+   * 用于新任务创建或任务调度变更后立即生效。
+   */
+  rearm(): void {
+    if (!this.running) return;
+    if (this.timer !== null) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    this.arm();
+  }
+
   // ─── 内部 ───
 
   private arm(): void {
     if (!this.running) return;
+
+    if (this.timer !== null) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
 
     const delay = this.computeDelay();
     this.timer = setTimeout(() => {
