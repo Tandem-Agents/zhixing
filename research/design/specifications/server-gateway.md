@@ -556,6 +556,8 @@ ConfirmationBroker.request()
 
 ### 7.2 智能投递路由
 
+> **实现偏差：** 签名改为 `resolve(request: RouteRequest, context: RoutingContext)`——`RouteRequest` 只含 `explicit?: DeliveryTarget`（纯决策，不接触 DeliveryItem）。`RoutingContext` 扩展了 `channelDefaults: Map<string, DeliveryTarget>` 用于跨通道用户身份解析；`channelStatus` 值为 `ChannelState`（含 `"error"` 状态）。显式目标无条件返回（Pipeline 负责 channel-not-ready 重试）。`buildRoutingContext()` 工具函数从 `ChannelStatus[]` 构建上下文，不依赖 ChannelRegistry。详见 [implementation-roadmap.md Step 14](../implementation-roadmap.md)。
+
 ```typescript
 interface DeliveryRouter {
   /**

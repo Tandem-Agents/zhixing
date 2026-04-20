@@ -84,6 +84,9 @@ export async function setupChannels(
       enabled: true,
       credentials: entry.credentials,
       options: entry.options,
+      defaultTarget: entry.defaultTarget
+        ? { channelId: id, to: entry.defaultTarget.to }
+        : undefined,
     };
 
     try {

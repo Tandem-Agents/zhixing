@@ -356,6 +356,112 @@ describe("Scheduler", () => {
     await scheduler.stop();
   });
 
+  it("auto-resolves delivery target when task has no explicit delivery", async () => {
+    const enqueue = vi.fn().mockResolvedValue("dlv_auto");
+    const mockDelivery = { enqueue, flush: vi.fn(), stats: vi.fn() };
+    const resolveDeliveryTarget = vi.fn().mockReturnValue({
+      channelId: "feishu",
+      to: "auto_user",
+    });
+
+    const eventBus = createEventBus<SchedulerEventMap>();
+    const scheduler = new Scheduler({
+      store: new JsonTaskStore(join(tempDir, "tasks.json")),
+      eventBus,
+      runAgentTurn: async () => ({ status: "ok", output: "auto result", durationMs: 10 }),
+      delivery: mockDelivery,
+      resolveDeliveryTarget,
+    });
+    await scheduler.start();
+
+    await scheduler.createTask({
+      name: "no-explicit-delivery",
+      enabled: true,
+      priority: "normal",
+      schedule: { kind: "once", at: new Date(Date.now() + 999_999).toISOString() },
+      action: { kind: "agent-turn", prompt: "remind me" },
+    });
+
+    await scheduler.runTask(scheduler.listTasks()[0]!.id);
+
+    expect(resolveDeliveryTarget).toHaveBeenCalledOnce();
+    expect(enqueue).toHaveBeenCalledOnce();
+    expect(enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        target: { channelId: "feishu", to: "auto_user" },
+        content: { text: "auto result", markdown: "auto result" },
+      }),
+    );
+    await scheduler.stop();
+  });
+
+  it("skips delivery when resolver returns null", async () => {
+    const enqueue = vi.fn();
+    const mockDelivery = { enqueue, flush: vi.fn(), stats: vi.fn() };
+    const resolveDeliveryTarget = vi.fn().mockReturnValue(null);
+
+    const eventBus = createEventBus<SchedulerEventMap>();
+    const scheduler = new Scheduler({
+      store: new JsonTaskStore(join(tempDir, "tasks.json")),
+      eventBus,
+      runAgentTurn: async () => ({ status: "ok", output: "result", durationMs: 10 }),
+      delivery: mockDelivery,
+      resolveDeliveryTarget,
+    });
+    await scheduler.start();
+
+    await scheduler.createTask({
+      name: "no-route",
+      enabled: true,
+      priority: "normal",
+      schedule: { kind: "once", at: new Date(Date.now() + 999_999).toISOString() },
+      action: { kind: "agent-turn", prompt: "do something" },
+    });
+
+    await scheduler.runTask(scheduler.listTasks()[0]!.id);
+    expect(resolveDeliveryTarget).toHaveBeenCalledOnce();
+    expect(enqueue).not.toHaveBeenCalled();
+    await scheduler.stop();
+  });
+
+  it("explicit delivery takes priority over resolver", async () => {
+    const enqueue = vi.fn().mockResolvedValue("dlv_exp");
+    const mockDelivery = { enqueue, flush: vi.fn(), stats: vi.fn() };
+    const resolveDeliveryTarget = vi.fn().mockReturnValue({
+      channelId: "dingtalk",
+      to: "wrong_user",
+    });
+
+    const eventBus = createEventBus<SchedulerEventMap>();
+    const scheduler = new Scheduler({
+      store: new JsonTaskStore(join(tempDir, "tasks.json")),
+      eventBus,
+      runAgentTurn: async () => ({ status: "ok", output: "explicit result", durationMs: 10 }),
+      delivery: mockDelivery,
+      resolveDeliveryTarget,
+    });
+    await scheduler.start();
+
+    await scheduler.createTask({
+      name: "has-explicit",
+      enabled: true,
+      priority: "normal",
+      schedule: { kind: "once", at: new Date(Date.now() + 999_999).toISOString() },
+      action: { kind: "agent-turn", prompt: "check something" },
+      delivery: { kind: "channel", channel: "feishu", to: "explicit_user" },
+    });
+
+    await scheduler.runTask(scheduler.listTasks()[0]!.id);
+
+    expect(resolveDeliveryTarget).not.toHaveBeenCalled();
+    expect(enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        target: { channelId: "feishu", to: "explicit_user" },
+      }),
+    );
+    await scheduler.stop();
+  });
+
   it("persists across restart", async () => {
     const storePath = join(tempDir, "tasks.json");
 

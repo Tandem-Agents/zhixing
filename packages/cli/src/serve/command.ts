@@ -27,6 +27,9 @@ import {
   DEFAULT_DELIVERY_CONFIG,
   type DeliveryEventMap,
   type DeliverySender,
+  type DeliveryTarget,
+  DefaultDeliveryRouter,
+  buildRoutingContext,
 } from "@zhixing/core";
 import {
   createServerContext,
@@ -37,6 +40,7 @@ import {
   type RunningServer,
 } from "@zhixing/server";
 import { loadConfig } from "@zhixing/providers";
+import { createScheduleTool } from "@zhixing/tools-builtin";
 import chalk from "chalk";
 import { createAgentRuntime } from "../run-agent.js";
 import { setupChannels } from "./channels.js";
@@ -72,12 +76,21 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
   const transcript = new TranscriptStore(conversationsDir, workspace);
 
   // 3. RuntimeFactory + ConversationManager
+  // scheduleTool → Scheduler → runAgentTurn → ConversationManager → runtimeFactory → scheduleTool
+  // 用 lazy getter 打破循环依赖（标准 IoC 模式）
+  let schedulerRef: Scheduler | null = null;
+  const scheduleTool = createScheduleTool(() => {
+    if (!schedulerRef) throw new Error("Scheduler not initialized yet");
+    return schedulerRef;
+  });
+
   const runtimeFactory = createCliRuntimeFactory({
     createAgentRuntime: () =>
       createAgentRuntime({
         model: opts.model,
         provider: opts.provider,
         workspace: opts.workspace,
+        extraTools: [scheduleTool],
       }),
   });
   const conversations = new ConversationManager(runtimeFactory, undefined, {
@@ -158,6 +171,24 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
     await delivery.start();
   }
 
+  // Delivery auto-routing resolver
+  const channelDefaults = new Map<string, DeliveryTarget>();
+  if (config.channels) {
+    for (const [id, entry] of Object.entries(config.channels)) {
+      if (entry.enabled === false || !entry.defaultTarget) continue;
+      channelDefaults.set(id, { channelId: id, to: entry.defaultTarget.to });
+    }
+  }
+
+  const deliveryRouter = new DefaultDeliveryRouter();
+  const resolveDeliveryTarget = channels && channelDefaults.size > 0
+    ? () => {
+        const statuses = channels.listStatuses();
+        const context = buildRoutingContext(statuses, { channelDefaults });
+        return deliveryRouter.resolve({}, context);
+      }
+    : undefined;
+
   // 6. Scheduler
   const schedulerEventBus = createEventBus<SchedulerEventMap>();
   const runAgentTurn = async (params: {
@@ -217,7 +248,9 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
     runAgentTurn,
     systemHandlers,
     delivery,
+    resolveDeliveryTarget,
   });
+  schedulerRef = scheduler;
   await scheduler.start();
 
   // 7. ServerContext + runServer

@@ -747,6 +747,8 @@ Delivery Pipeline 层过滤:
 
 ### 4.7 Delivery Pipeline（投递管线）
 
+> **实现偏差：** 核心架构一致，接口细节有演化。`DeliverySender` 取代直接 ChannelRegistry 依赖（可插拔发送）；过滤器链为 `DeliveryFilter[]` 可注入（非硬编码）；重试语义区分 channel-not-ready（不消耗 attempts）与 send 失败（指数退避）。详见 [implementation-roadmap.md Step 12](../implementation-roadmap.md)。
+
 OpenClaw 的结果投递分散在 heartbeat-runner、server-cron、outbound 等多处。知行将其统一为独立的 Delivery Pipeline：
 
 ```
@@ -1750,6 +1752,8 @@ interface SchedulerConfig {
   activeHours: ActiveHoursConfig;
 }
 
+// 实现偏差：delivery 为可选 IDeliveryPipeline；无 eventBus（投递是任务生命周期的一部分，非事件）；
+// 新增 resolveDeliveryTarget?（Step 15 自动路由）。详见 implementation-roadmap.md Step 13/15。
 interface SchedulerDeps {
   now: () => Date;
   config: SchedulerConfig;
@@ -1805,6 +1809,9 @@ interface TimerLoop {
 }
 
 // ─── Delivery Pipeline ───
+// 实现偏差：DeliveryItem 用 DeliveryTarget（channelId + to）替代 TaskDelivery；增加 attempts/maxAttempts/
+// expiresAt/source 字段；接口简化为 IDeliveryPipeline（enqueue 接受 EnqueueParams）。
+// 详见 implementation-roadmap.md Step 12。
 
 interface DeliveryItem {
   id: string;

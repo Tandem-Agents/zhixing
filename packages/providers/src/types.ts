@@ -139,6 +139,8 @@ export interface ChannelConfigEntry {
   credentials: Record<string, string>;
   /** 适配器特定选项 */
   options?: Record<string, unknown>;
+  /** 通道 owner 的用户标识（自动投递时使用）。channelId 由配置 key 自动填充。 */
+  defaultTarget?: { to: string };
 }
 
 /** 顶层配置结构（对应 zhixing.config.json） */
