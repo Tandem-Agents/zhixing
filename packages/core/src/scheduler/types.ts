@@ -87,6 +87,8 @@ export interface ScheduledTask {
   schedule: TaskSchedule;
   action: TaskAction;
   delivery?: TaskDelivery;
+  /** 任务创建时捕获的来源上下文（channelId + userId），用于自动投递结果 */
+  origin?: { channelId: string; to: string };
 
   state: TaskState;
 

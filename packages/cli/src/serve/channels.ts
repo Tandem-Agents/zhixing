@@ -31,13 +31,14 @@ function createAdapter(type: string): Promise<ChannelAdapter> {
 
 export interface SetupChannelsOptions {
   entries: Record<string, ChannelConfigEntry>;
-  conversations: ConversationManager;
+  /** ConversationManager for inbound routing. Omit for outbound-only mode (REPL). */
+  conversations?: ConversationManager;
   logger: ChannelLogger;
 }
 
 export interface SetupChannelsResult {
   registry: ChannelRegistry;
-  router: InboundRouter;
+  router: InboundRouter | null;
 }
 
 export async function setupChannels(
@@ -47,19 +48,23 @@ export async function setupChannels(
 
   const eventBus = createEventBus<ChannelEventMap>();
 
-  let router: InboundRouter;
+  let router: InboundRouter | null = null;
 
   const registry = new ChannelRegistry({
     eventBus,
     logger,
-    onMessage: (msg: InboundMessage) => {
-      router.handleMessage(msg).catch((err) => {
-        logger.error("Unhandled error in message routing: %s", err instanceof Error ? err.message : String(err));
-      });
-    },
+    onMessage: conversations
+      ? (msg: InboundMessage) => {
+          router!.handleMessage(msg).catch((err) => {
+            logger.error("Unhandled error in message routing: %s", err instanceof Error ? err.message : String(err));
+          });
+        }
+      : undefined,
   });
 
-  router = new InboundRouter({ conversations, channels: registry, logger });
+  if (conversations) {
+    router = new InboundRouter({ conversations, channels: registry, logger });
+  }
 
   for (const [id, entry] of Object.entries(entries)) {
     if (entry.enabled === false) continue;

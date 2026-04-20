@@ -133,7 +133,7 @@ export function createServerRuntimeAdapter(
 
 export interface RuntimeFactoryOptions {
   /** 创建 AgentRuntime 的工厂方法（注入避免对 createAgentRuntime 的硬依赖） */
-  createAgentRuntime: () => Promise<AgentRuntime>;
+  createAgentRuntime: (sessionId: string) => Promise<AgentRuntime>;
 }
 
 /**
@@ -143,7 +143,7 @@ export interface RuntimeFactoryOptions {
 export function createCliRuntimeFactory(opts: RuntimeFactoryOptions): RuntimeFactory {
   return {
     async create(sessionId, initialMessages) {
-      const agentRuntime = await opts.createAgentRuntime();
+      const agentRuntime = await opts.createAgentRuntime(sessionId);
       return createServerRuntimeAdapter(sessionId, agentRuntime, initialMessages);
     },
   };

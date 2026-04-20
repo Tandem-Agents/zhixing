@@ -33,7 +33,6 @@ import type {
 } from "./types.js";
 import type { SchedulerEventMap } from "./events.js";
 import type { IDeliveryPipeline } from "../delivery/types.js";
-import type { DeliveryTarget } from "../channels/types.js";
 
 // ─── Scheduler 依赖注入 ───
 
@@ -46,7 +45,6 @@ export interface SchedulerDeps {
   eventBus: IEventBus<SchedulerEventMap>;
   logger?: SchedulerLogger;
   delivery?: IDeliveryPipeline;
-  resolveDeliveryTarget?: (task: ScheduledTask) => DeliveryTarget | null;
 }
 
 // ─── Scheduler ───
@@ -61,7 +59,6 @@ export class Scheduler {
   private readonly now: () => Date;
   private readonly timerLoop: TimerLoop;
   private readonly delivery?: IDeliveryPipeline;
-  private readonly resolveDeliveryTarget?: (task: ScheduledTask) => DeliveryTarget | null;
 
   /** 当前正在执行的任务 ID 集合 */
   private readonly activeTasks = new Set<string>();
@@ -78,7 +75,6 @@ export class Scheduler {
     this.now = deps.now ?? (() => new Date());
     this.logger = deps.logger ?? createDefaultLogger();
     this.delivery = deps.delivery;
-    this.resolveDeliveryTarget = deps.resolveDeliveryTarget;
 
     this.timerLoop = new TimerLoop({
       getEnabledTasks: () => this.getEnabledTasks(),
@@ -148,6 +144,9 @@ export class Scheduler {
   async createTask(
     params: Omit<ScheduledTask, "id" | "state" | "createdAt" | "updatedAt">,
   ): Promise<ScheduledTask> {
+    if (params.schedule.kind === "interval" && params.schedule.everyMs < 60_000) {
+      throw new Error(`Interval too short: ${params.schedule.everyMs}ms (minimum 60000ms)`);
+    }
     const now = this.now();
     const task: ScheduledTask = {
       ...params,
@@ -421,14 +420,14 @@ export class Scheduler {
     }
 
     // 1. 显式配置 → 用它
-    let target: DeliveryTarget | null = null;
+    let target: { channelId: string; to: string } | null = null;
     if (task.delivery?.kind === "channel") {
       target = { channelId: task.delivery.channel, to: task.delivery.to };
     }
 
-    // 2. 无显式配置 → 自动解析
-    if (!target && this.resolveDeliveryTarget) {
-      target = this.resolveDeliveryTarget(task);
+    // 2. 任务创建时捕获的 origin → 自动回复到来源会话
+    if (!target && task.origin) {
+      target = task.origin;
     }
 
     // 3. 无法解析 → 跳过

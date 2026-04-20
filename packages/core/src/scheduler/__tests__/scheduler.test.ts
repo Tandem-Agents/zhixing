@@ -356,49 +356,43 @@ describe("Scheduler", () => {
     await scheduler.stop();
   });
 
-  it("auto-resolves delivery target when task has no explicit delivery", async () => {
-    const enqueue = vi.fn().mockResolvedValue("dlv_auto");
+  it("delivers to task.origin when no explicit delivery", async () => {
+    const enqueue = vi.fn().mockResolvedValue("dlv_origin");
     const mockDelivery = { enqueue, flush: vi.fn(), stats: vi.fn() };
-    const resolveDeliveryTarget = vi.fn().mockReturnValue({
-      channelId: "feishu",
-      to: "auto_user",
-    });
 
     const eventBus = createEventBus<SchedulerEventMap>();
     const scheduler = new Scheduler({
       store: new JsonTaskStore(join(tempDir, "tasks.json")),
       eventBus,
-      runAgentTurn: async () => ({ status: "ok", output: "auto result", durationMs: 10 }),
+      runAgentTurn: async () => ({ status: "ok", output: "origin result", durationMs: 10 }),
       delivery: mockDelivery,
-      resolveDeliveryTarget,
     });
     await scheduler.start();
 
     await scheduler.createTask({
-      name: "no-explicit-delivery",
+      name: "with-origin",
       enabled: true,
       priority: "normal",
       schedule: { kind: "once", at: new Date(Date.now() + 999_999).toISOString() },
       action: { kind: "agent-turn", prompt: "remind me" },
+      origin: { channelId: "feishu", to: "ou_user123" },
     });
 
     await scheduler.runTask(scheduler.listTasks()[0]!.id);
 
-    expect(resolveDeliveryTarget).toHaveBeenCalledOnce();
     expect(enqueue).toHaveBeenCalledOnce();
     expect(enqueue).toHaveBeenCalledWith(
       expect.objectContaining({
-        target: { channelId: "feishu", to: "auto_user" },
-        content: { text: "auto result", markdown: "auto result" },
+        target: { channelId: "feishu", to: "ou_user123" },
+        content: { text: "origin result", markdown: "origin result" },
       }),
     );
     await scheduler.stop();
   });
 
-  it("skips delivery when resolver returns null", async () => {
+  it("skips delivery when no origin and no explicit delivery", async () => {
     const enqueue = vi.fn();
     const mockDelivery = { enqueue, flush: vi.fn(), stats: vi.fn() };
-    const resolveDeliveryTarget = vi.fn().mockReturnValue(null);
 
     const eventBus = createEventBus<SchedulerEventMap>();
     const scheduler = new Scheduler({
@@ -406,7 +400,6 @@ describe("Scheduler", () => {
       eventBus,
       runAgentTurn: async () => ({ status: "ok", output: "result", durationMs: 10 }),
       delivery: mockDelivery,
-      resolveDeliveryTarget,
     });
     await scheduler.start();
 
@@ -419,18 +412,13 @@ describe("Scheduler", () => {
     });
 
     await scheduler.runTask(scheduler.listTasks()[0]!.id);
-    expect(resolveDeliveryTarget).toHaveBeenCalledOnce();
     expect(enqueue).not.toHaveBeenCalled();
     await scheduler.stop();
   });
 
-  it("explicit delivery takes priority over resolver", async () => {
+  it("explicit delivery takes priority over origin", async () => {
     const enqueue = vi.fn().mockResolvedValue("dlv_exp");
     const mockDelivery = { enqueue, flush: vi.fn(), stats: vi.fn() };
-    const resolveDeliveryTarget = vi.fn().mockReturnValue({
-      channelId: "dingtalk",
-      to: "wrong_user",
-    });
 
     const eventBus = createEventBus<SchedulerEventMap>();
     const scheduler = new Scheduler({
@@ -438,7 +426,6 @@ describe("Scheduler", () => {
       eventBus,
       runAgentTurn: async () => ({ status: "ok", output: "explicit result", durationMs: 10 }),
       delivery: mockDelivery,
-      resolveDeliveryTarget,
     });
     await scheduler.start();
 
@@ -449,11 +436,11 @@ describe("Scheduler", () => {
       schedule: { kind: "once", at: new Date(Date.now() + 999_999).toISOString() },
       action: { kind: "agent-turn", prompt: "check something" },
       delivery: { kind: "channel", channel: "feishu", to: "explicit_user" },
+      origin: { channelId: "dingtalk", to: "wrong_user" },
     });
 
     await scheduler.runTask(scheduler.listTasks()[0]!.id);
 
-    expect(resolveDeliveryTarget).not.toHaveBeenCalled();
     expect(enqueue).toHaveBeenCalledWith(
       expect.objectContaining({
         target: { channelId: "feishu", to: "explicit_user" },

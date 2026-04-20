@@ -165,7 +165,7 @@ describe("SchedulerProvider", () => {
       ],
     }));
     const section = sp.render();
-    expect(section.title).toBe("定时任务");
+    expect(section.title).toContain("定时任务");
     expect(section.body).toContain("2 个活跃");
     expect(section.body).toContain("早报");
     expect(section.body).toContain("监控");

@@ -15,7 +15,7 @@ import type { IEventBus } from "../events/index.js";
 export interface ChannelRegistryOptions {
   eventBus: IEventBus<ChannelEventMap>;
   logger: ChannelLogger;
-  onMessage: (msg: InboundMessage) => void;
+  onMessage?: (msg: InboundMessage) => void;
   registerHttpRoute?: (path: string, handler: HttpHandler) => void;
 }
 
@@ -128,7 +128,7 @@ export class ChannelRegistry {
           lastMessageAt: new Date().toISOString(),
         });
         eventBus.emit("channel:message-received", { channelId, message: msg });
-        onMessage(msg);
+        onMessage?.(msg);
       },
       registerHttpRoute: registerHttpRoute ?? (() => {
         throw new Error("HTTP route registration not available");

@@ -146,7 +146,7 @@ export class SchedulerProvider implements TurnContextProvider {
     }
 
     return {
-      title: "定时任务",
+      title: "定时任务（仅在用户主动询问任务相关话题时提及，不要主动提起）",
       body: parts.join("\n"),
     };
   }

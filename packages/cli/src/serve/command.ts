@@ -23,13 +23,6 @@ import {
   TranscriptStore,
   getZhixingHome,
   getProjectId,
-  DeliveryPipeline,
-  DEFAULT_DELIVERY_CONFIG,
-  type DeliveryEventMap,
-  type DeliverySender,
-  type DeliveryTarget,
-  DefaultDeliveryRouter,
-  buildRoutingContext,
   SchedulerProvider,
 } from "@zhixing/core";
 import {
@@ -44,6 +37,7 @@ import { loadConfig } from "@zhixing/providers";
 import { createScheduleTool } from "@zhixing/tools-builtin";
 import chalk from "chalk";
 import { createAgentRuntime } from "../run-agent.js";
+import { setupDelivery, type DeliveryStack } from "../setup-delivery.js";
 import { setupChannels } from "./channels.js";
 import { createCliRuntimeFactory } from "./session-adapter.js";
 import { loadOrCreateToken } from "./token.js";
@@ -80,20 +74,23 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
   // scheduleTool → Scheduler → runAgentTurn → ConversationManager → runtimeFactory → scheduleTool
   // 用 lazy getter 打破循环依赖（标准 IoC 模式）
   let schedulerRef: Scheduler | null = null;
-  const scheduleTool = createScheduleTool(() => {
+  const getSchedulerRef = () => {
     if (!schedulerRef) throw new Error("Scheduler not initialized yet");
     return schedulerRef;
-  });
+  };
 
   const runtimeFactory = createCliRuntimeFactory({
-    createAgentRuntime: async () => {
+    createAgentRuntime: async (sessionId: string) => {
+      // 从 sessionId（如 dm:feishu:ou_xxx）解析 origin，用于任务创建时自动捕获投递目标
+      const origin = parseOriginFromSessionId(sessionId);
+      const scheduleTool = createScheduleTool(getSchedulerRef, () => origin);
+
       const runtime = await createAgentRuntime({
         model: opts.model,
         provider: opts.provider,
         workspace: opts.workspace,
         extraTools: [scheduleTool],
       });
-      // 注册 SchedulerProvider（lazy：scheduler 在后面创建，通过闭包引用）
       runtime.registerTurnContextProvider(
         new SchedulerProvider(() => {
           if (!schedulerRef) return { active: [], recentlyCompleted: [], recentlyFailed: [] };
@@ -147,57 +144,19 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
     }
   }
 
-  // 5. Delivery Pipeline
-  let delivery: DeliveryPipeline | undefined;
-  if (channels) {
-    const sender: DeliverySender = {
-      send: async (target, content) => {
-        const adapter = channels.get(target.channelId);
-        if (!adapter) {
-          return { success: false, error: `Channel not found: ${target.channelId}`, retryable: false };
-        }
-        return adapter.send(target, content);
-      },
-      isReady: (channelId) => {
-        const status = channels.getStatus(channelId);
-        return status?.state === "connected";
-      },
-    };
-
-    delivery = new DeliveryPipeline({
-      sender,
-      eventBus: createEventBus<DeliveryEventMap>(),
-      config: {
-        ...DEFAULT_DELIVERY_CONFIG,
-        queueFilePath: path.join(zhixingHome, "delivery-queue.json"),
-      },
+  // 5. Delivery Pipeline（共享模块，serve/repl 同一路径）
+  let deliveryStack: DeliveryStack | undefined;
+  if (channels && config.channels) {
+    deliveryStack = await setupDelivery({
+      channels,
+      zhixingHome,
       logger: {
-        debug: () => {},
-        info: (msg: string) => console.log(chalk.dim(`[delivery] ${msg}`)),
-        warn: (msg: string) => console.warn(chalk.yellow(`[delivery] ${msg}`)),
-        error: (msg: string) => console.error(chalk.red(`[delivery] ${msg}`)),
+        info: (msg) => console.log(chalk.dim(msg)),
+        warn: (msg) => console.warn(chalk.yellow(msg)),
+        error: (msg) => console.error(chalk.red(msg)),
       },
     });
-    await delivery.start();
   }
-
-  // Delivery auto-routing resolver
-  const channelDefaults = new Map<string, DeliveryTarget>();
-  if (config.channels) {
-    for (const [id, entry] of Object.entries(config.channels)) {
-      if (entry.enabled === false || !entry.defaultTarget) continue;
-      channelDefaults.set(id, { channelId: id, to: entry.defaultTarget.to });
-    }
-  }
-
-  const deliveryRouter = new DefaultDeliveryRouter();
-  const resolveDeliveryTarget = channels && channelDefaults.size > 0
-    ? () => {
-        const statuses = channels.listStatuses();
-        const context = buildRoutingContext(statuses, { channelDefaults });
-        return deliveryRouter.resolve({}, context);
-      }
-    : undefined;
 
   // 6. Scheduler
   const schedulerEventBus = createEventBus<SchedulerEventMap>();
@@ -261,8 +220,13 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
     eventBus: schedulerEventBus,
     runAgentTurn,
     systemHandlers,
-    delivery,
-    resolveDeliveryTarget,
+    delivery: deliveryStack?.delivery,
+    logger: {
+      info: (msg, data) => console.log(chalk.dim(`[scheduler] ${msg}`), data ? chalk.dim(JSON.stringify(data)) : ""),
+      warn: (msg, data) => console.warn(chalk.yellow(`[scheduler] ${msg}`), data ? chalk.dim(JSON.stringify(data)) : ""),
+      error: (msg, data) => console.error(chalk.red(`[scheduler] ${msg}`), data ? chalk.dim(JSON.stringify(data)) : ""),
+      debug: () => {},
+    },
   });
   schedulerRef = scheduler;
   await scheduler.start();
@@ -291,7 +255,7 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
     });
   } catch (err) {
     await scheduler.stop().catch(() => {});
-    await delivery?.stop().catch(() => {});
+    await deliveryStack?.stop().catch(() => {});
     await channels?.dispose().catch(() => {});
     throw err;
   }
@@ -319,6 +283,18 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
 
   // 优雅清理
   await scheduler.stop().catch(() => {});
-  await delivery?.stop().catch(() => {});
+  await deliveryStack?.stop().catch(() => {});
   await channels?.dispose().catch(() => {});
+}
+
+/**
+ * 从 sessionId（如 "dm:feishu:ou_xxx"）解析投递 origin。
+ * 非 channel 会话返回 null。
+ */
+function parseOriginFromSessionId(sessionId: string): { channelId: string; to: string } | null {
+  const parts = sessionId.split(":");
+  if (parts.length >= 3 && parts[0] === "dm") {
+    return { channelId: parts[1]!, to: parts.slice(2).join(":") };
+  }
+  return null;
 }

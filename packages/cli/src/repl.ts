@@ -51,7 +51,10 @@ import {
   type SchedulerEventMap,
   type AgentTurnResult,
 } from "@zhixing/core";
+import { loadConfig } from "@zhixing/providers";
 import { createScheduleTool } from "@zhixing/tools-builtin";
+import { setupChannels } from "./serve/channels.js";
+import { setupDelivery, type DeliveryStack } from "./setup-delivery.js";
 import { CommandDispatcher } from "./command-dispatcher.js";
 import { readInputLine, type InputLineResult } from "./typeahead-input.js";
 import { resolveFileRefs } from "./resolve-file-refs.js";
@@ -666,10 +669,46 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     }
   };
 
+  // ── Channels + Delivery（与 serve 共享同一路径） ──
+  const zhixingHome = getZhixingHome();
+  const config = loadConfig({ cwd: process.cwd() });
+  let channels: import("@zhixing/core").ChannelRegistry | undefined;
+  let deliveryStack: DeliveryStack | undefined;
+
+  if (config.channels && Object.keys(config.channels).length > 0) {
+    const channelLogger = {
+      debug: (msg: string, ...args: unknown[]) => console.log(chalk.dim(`  [channel] ${msg}`), ...args),
+      info: (msg: string, ...args: unknown[]) => console.log(chalk.dim(`  [channel] ${msg}`), ...args),
+      warn: (msg: string, ...args: unknown[]) => console.warn(chalk.yellow(`  [channel] ${msg}`), ...args),
+      error: (msg: string, ...args: unknown[]) => console.error(chalk.red(`  [channel] ${msg}`), ...args),
+    };
+
+    try {
+      const result = await setupChannels({
+        entries: config.channels,
+        logger: channelLogger,
+      });
+      channels = result.registry;
+
+      deliveryStack = await setupDelivery({
+        channels,
+        zhixingHome,
+        logger: {
+          info: (msg) => console.log(chalk.dim(`  ${msg}`)),
+          warn: (msg) => console.warn(chalk.yellow(`  ${msg}`)),
+          error: (msg) => console.error(chalk.red(`  ${msg}`)),
+        },
+      });
+    } catch (err) {
+      console.warn(chalk.yellow(`  [channel] Setup failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`));
+    }
+  }
+
   schedulerInstance = new Scheduler({
     store: new JsonTaskStore(),
     runAgentTurn,
     eventBus: schedulerEventBus,
+    delivery: deliveryStack?.delivery,
     logger: {
       info: (msg, data) => console.log(chalk.dim(`  [scheduler] ${msg}`), data ? chalk.dim(JSON.stringify(data)) : ""),
       warn: (msg, data) => console.log(chalk.yellow(`  [scheduler] ${msg}`), data ? chalk.dim(JSON.stringify(data)) : ""),
@@ -692,7 +731,6 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   const renderer = createRenderer();
   const cwd = process.cwd();
   const projectId = getProjectId(cwd);
-  const zhixingHome = getZhixingHome();
   const scope: ConversationScope = { kind: "project", projectId, projectPath: cwd };
   const convRepo = new ConversationRepository(scope);
   const convDir = path.join(zhixingHome, "projects", projectId, "conversations");
@@ -978,10 +1016,11 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   rl.on("close", async () => {
     renderer.stop();
     detachConfirmationRenderer();
-    // 优雅停止 Scheduler：等待活跃任务完成 → 保存状态
     if (schedulerInstance) {
       await schedulerInstance.stop();
     }
+    await deliveryStack?.stop().catch(() => {});
+    await channels?.dispose().catch(() => {});
     console.log(chalk.dim("\n再见 👋"));
     process.exit(0);
   });

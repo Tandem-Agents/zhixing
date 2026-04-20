@@ -27,7 +27,15 @@ import type { Scheduler, ScheduledTask, TaskSchedule, TaskPriority } from "@zhix
  * CLI 中 session/scheduler 的循环初始化依赖：
  * tool 在 session 创建时注入，scheduler 在 session 之后创建。
  */
-export function createScheduleTool(schedulerOrGetter: Scheduler | (() => Scheduler)): ToolDefinition {
+export interface ScheduleToolOrigin {
+  channelId: string;
+  to: string;
+}
+
+export function createScheduleTool(
+  schedulerOrGetter: Scheduler | (() => Scheduler),
+  getOrigin?: () => ScheduleToolOrigin | null,
+): ToolDefinition {
   const getScheduler = typeof schedulerOrGetter === "function" && !("createTask" in schedulerOrGetter)
     ? schedulerOrGetter as () => Scheduler
     : () => schedulerOrGetter as Scheduler;
@@ -67,7 +75,11 @@ export function createScheduleTool(schedulerOrGetter: Scheduler | (() => Schedul
         schedule_kind: {
           type: "string",
           enum: ["once", "interval", "cron"],
-          description: "Schedule type: once (at specific time), interval (every N ms), cron (cron expression)",
+          description:
+            "Schedule type: once (single future time, e.g. 'remind me in 5 seconds'), " +
+            "interval (repeating, minimum 60s, e.g. 'check every 30 min'), " +
+            "cron (cron expression, e.g. 'daily at 8am'). " +
+            "IMPORTANT: Use 'once' for one-time reminders/delays, NOT 'interval'.",
         },
         schedule_at: {
           type: "string",
@@ -75,7 +87,7 @@ export function createScheduleTool(schedulerOrGetter: Scheduler | (() => Schedul
         },
         schedule_every_ms: {
           type: "number",
-          description: "Interval in milliseconds for 'interval' schedule (e.g. 1800000 for 30 min)",
+          description: "Interval in milliseconds for 'interval' schedule. Minimum 60000 (60s). Example: 1800000 for 30 min",
         },
         schedule_cron: {
           type: "string",
@@ -115,7 +127,7 @@ export function createScheduleTool(schedulerOrGetter: Scheduler | (() => Schedul
         const scheduler = getScheduler();
         switch (action) {
           case "create":
-            return await handleCreate(scheduler, input);
+            return await handleCreate(scheduler, input, getOrigin);
           case "list":
             return handleList(scheduler);
           case "update":
@@ -140,6 +152,7 @@ export function createScheduleTool(schedulerOrGetter: Scheduler | (() => Schedul
 async function handleCreate(
   scheduler: Scheduler,
   input: Record<string, unknown>,
+  getOrigin?: () => ScheduleToolOrigin | null,
 ): Promise<ToolResult> {
   const name = input.name as string;
   const prompt = input.prompt as string;
@@ -154,6 +167,8 @@ async function handleCreate(
     return { content: `Invalid schedule: missing parameters for kind '${scheduleKind}'`, isError: true };
   }
 
+  const origin = getOrigin?.() ?? undefined;
+
   const task = await scheduler.createTask({
     name,
     description: (input.description as string) ?? undefined,
@@ -161,6 +176,7 @@ async function handleCreate(
     priority: (input.priority as TaskPriority) ?? "normal",
     schedule,
     action: { kind: "agent-turn", prompt },
+    origin,
   });
 
   return {
@@ -240,6 +256,7 @@ function buildSchedule(
     case "interval": {
       const everyMs = input.schedule_every_ms as number;
       if (!everyMs || everyMs <= 0) return null;
+      if (everyMs < 60_000) return null;
       return { kind: "interval", everyMs };
     }
     case "cron": {
