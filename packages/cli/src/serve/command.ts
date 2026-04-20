@@ -30,6 +30,7 @@ import {
   type DeliveryTarget,
   DefaultDeliveryRouter,
   buildRoutingContext,
+  SchedulerProvider,
 } from "@zhixing/core";
 import {
   createServerContext,
@@ -85,13 +86,22 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
   });
 
   const runtimeFactory = createCliRuntimeFactory({
-    createAgentRuntime: () =>
-      createAgentRuntime({
+    createAgentRuntime: async () => {
+      const runtime = await createAgentRuntime({
         model: opts.model,
         provider: opts.provider,
         workspace: opts.workspace,
         extraTools: [scheduleTool],
-      }),
+      });
+      // 注册 SchedulerProvider（lazy：scheduler 在后面创建，通过闭包引用）
+      runtime.registerTurnContextProvider(
+        new SchedulerProvider(() => {
+          if (!schedulerRef) return { active: [], recentlyCompleted: [], recentlyFailed: [] };
+          return schedulerRef.getStatusSummary();
+        }),
+      );
+      return runtime;
+    },
   });
   const conversations = new ConversationManager(runtimeFactory, undefined, {
     loadHistory: async (conversationId) => {

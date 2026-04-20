@@ -34,11 +34,19 @@ describe("injectContext", () => {
   const ctx: ProjectContext = {
     instructions: "Always respond in English",
     date: "2025-06-15",
+    profile: null,
+    dynamicContext: null,
+    injectedSkillIds: [],
+    reflectionHint: null,
   };
 
   const ctxNoInstructions: ProjectContext = {
     instructions: null,
     date: "2025-06-15",
+    profile: null,
+    dynamicContext: null,
+    injectedSkillIds: [],
+    reflectionHint: null,
   };
 
   it("将 <context> 注入首条 user message 前", () => {
@@ -50,7 +58,6 @@ describe("injectContext", () => {
     expect(text).toContain("<context>");
     expect(text).toContain("</context>");
     expect(text).toContain("Always respond in English");
-    expect(text).toContain("2025-06-15");
     expect(text).toContain("你好");
   });
 
@@ -95,14 +102,13 @@ describe("injectContext", () => {
     expect(result).toEqual(messages);
   });
 
-  it("无 instructions 时仍注入日期", () => {
+  it("无 instructions 且无 profile 时不注入 context", () => {
     const messages: Message[] = [userMsg("测试")];
     const result = injectContext(messages, ctxNoInstructions);
 
     const text = (result[0]!.content[0] as { type: "text"; text: string }).text;
-    expect(text).toContain("<context>");
-    expect(text).toContain("2025-06-15");
-    expect(text).not.toContain("ZHIXING.md");
+    expect(text).not.toContain("<context>");
+    expect(text).toBe("测试");
   });
 
   it("首条 user 是 tool_result 时在前面插入 text block", () => {

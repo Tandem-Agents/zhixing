@@ -236,8 +236,6 @@ function buildContextBlock(context: ProjectContext): string | null {
     sections.push(context.dynamicContext);
   }
 
-  sections.push(`# Current Date\n${context.date}`);
-
   if (sections.length === 0) return null;
 
   return `${CONTEXT_TAG}\n${sections.join("\n\n")}\n${CONTEXT_TAG_END}`;

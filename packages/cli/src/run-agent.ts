@@ -16,6 +16,7 @@ import {
   type Message,
   type ToolResultBlock,
   type IPermissionStore,
+  type TurnContextProvider,
   ConfirmationBroker,
   createEventBus,
   createContextEngine,
@@ -31,6 +32,8 @@ import {
   userMessage,
   withRetry,
   runAgentLoop,
+  TurnContextInjector,
+  TimeProvider,
 } from "@zhixing/core";
 import {
   createProviderFromConfig,
@@ -91,6 +94,8 @@ export interface AgentRuntime {
   readonly resolvedWorkspace: ResolvedWorkspace;
   /** 工作区目录状态（exists/created/skipped），供启动展示区分场景 */
   readonly workspaceDirStatus: WorkspaceDirStatus;
+  /** 注册 per-turn 上下文 provider（如 SchedulerProvider），支持后注册 */
+  registerTurnContextProvider(provider: TurnContextProvider): void;
 }
 
 export interface ForceCompactResult {
@@ -201,6 +206,12 @@ export async function createAgentRuntime(options: {
   // 确认交互 broker：会话级单例。渲染器由 REPL 在 attach 时注入。
   const confirmationBroker = new ConfirmationBroker();
 
+  // Per-turn 上下文注入器：时间 + 后续注册的 provider（如 scheduler）
+  const turnContextInjector = new TurnContextInjector();
+  turnContextInjector.register(
+    new TimeProvider(Intl.DateTimeFormat().resolvedOptions().timeZone),
+  );
+
   // 加载项目上下文（ZHIXING.md + 环境信息），注入到首条 user message
   const projectContext = await loadProjectContext(cwd);
 
@@ -238,6 +249,10 @@ export async function createAgentRuntime(options: {
     confirmationBroker,
     resolvedWorkspace: workspace,
     workspaceDirStatus,
+
+    registerTurnContextProvider(provider: TurnContextProvider): void {
+      turnContextInjector.register(provider);
+    },
 
     get calibrationFactor(): number {
       return estimator.calibrationFactor;
@@ -343,6 +358,9 @@ export async function createAgentRuntime(options: {
       // 将项目上下文 + 匹配的技能 + 反思提示注入到首条 user message
       const messagesWithContext = injectContext(params.messages, enrichedContext);
 
+      // Per-turn 动态上下文注入到最新 user message（时间、任务状态等）
+      const messagesWithTurnContext = turnContextInjector.inject(messagesWithContext);
+
       // 用 SecurityPipeline 包装工具执行——每次 run() 重新构造 wrapper。
       const secureExecuteTool = createSecureExecuteTool({
         pipeline: securityPipeline,
@@ -356,7 +374,7 @@ export async function createAgentRuntime(options: {
         provider,
         model,
         tools,
-        messages: messagesWithContext,
+        messages: messagesWithTurnContext,
         systemPrompt,
         eventBus,
         workingDirectory: process.cwd(),

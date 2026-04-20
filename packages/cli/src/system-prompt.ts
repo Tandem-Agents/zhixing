@@ -223,7 +223,7 @@ function buildEnvironment(ctx: PromptBuildContext): string {
     }
   }
 
-  lines.push(`- Current time: ${new Date().toLocaleString("zh-CN", { timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, dateStyle: "full", timeStyle: "medium" })} (${Intl.DateTimeFormat().resolvedOptions().timeZone})`);
+  // 当前时间已移至 per-turn <turn-context> 注入（TimeProvider），不再 session-level 冻结
   lines.push(`- Platform: ${os.platform()} ${os.arch()}`);
   lines.push(`- Node.js: ${process.version}`);
 

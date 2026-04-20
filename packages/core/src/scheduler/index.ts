@@ -12,6 +12,7 @@ export type {
   TaskDelivery,
   TaskPriority,
   TaskState,
+  TaskStatusSummary,
   TaskStore,
   AgentTurnParams,
   AgentTurnResult,

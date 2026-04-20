@@ -47,6 +47,7 @@ import {
   Scheduler,
   JsonTaskStore,
   createEventBus,
+  SchedulerProvider,
   type SchedulerEventMap,
   type AgentTurnResult,
 } from "@zhixing/core";
@@ -676,6 +677,14 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       debug: () => {},
     },
   });
+
+  // 注册 SchedulerProvider 到 per-turn 上下文注入
+  agentRuntime.registerTurnContextProvider(
+    new SchedulerProvider(() => {
+      if (!schedulerInstance) return { active: [], recentlyCompleted: [], recentlyFailed: [] };
+      return schedulerInstance.getStatusSummary();
+    }),
+  );
 
   // 启动 scheduler（加载任务 + 启动 timer loop）
   await schedulerInstance.start();

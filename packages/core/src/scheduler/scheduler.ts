@@ -28,6 +28,7 @@ import type {
   ScheduledTask,
   SchedulerLogger,
   SystemHandler,
+  TaskStatusSummary,
   TaskStore,
 } from "./types.js";
 import type { SchedulerEventMap } from "./events.js";
@@ -243,6 +244,57 @@ export class Scheduler {
     return this.activeTasks.size;
   }
 
+  /**
+   * 获取任务状态摘要（用于 per-turn 上下文注入）。
+   *
+   * @param recentWindowMs 最近完成/失败的时间窗口（默认 30 分钟）
+   */
+  getStatusSummary(recentWindowMs: number = 30 * 60 * 1000): TaskStatusSummary {
+    const now = this.now();
+    const cutoff = new Date(now.getTime() - recentWindowMs);
+    const tasks = this.getAllTasks();
+
+    return {
+      active: tasks
+        .filter((t) => t.enabled && t.state.nextRunAt)
+        .sort((a, b) => (a.state.nextRunAt ?? "").localeCompare(b.state.nextRunAt ?? ""))
+        .map((t) => ({
+          name: t.name,
+          schedule: formatSchedule(t.schedule),
+          nextRunAt: t.state.nextRunAt,
+        })),
+
+      recentlyCompleted: tasks
+        .filter(
+          (t) =>
+            t.state.lastRunAt &&
+            new Date(t.state.lastRunAt) >= cutoff &&
+            !t.state.lastError,
+        )
+        .sort((a, b) => (b.state.lastRunAt ?? "").localeCompare(a.state.lastRunAt ?? ""))
+        .map((t) => ({
+          name: t.name,
+          completedAt: t.state.lastRunAt!,
+          summary: t.state.lastSummary?.slice(0, 100),
+          delivered: t.state.lastDeliveryStatus === "sent",
+        })),
+
+      recentlyFailed: tasks
+        .filter(
+          (t) =>
+            t.state.lastError &&
+            t.state.lastRunAt &&
+            new Date(t.state.lastRunAt) >= cutoff,
+        )
+        .sort((a, b) => (b.state.lastRunAt ?? "").localeCompare(a.state.lastRunAt ?? ""))
+        .map((t) => ({
+          name: t.name,
+          failedAt: t.state.lastRunAt!,
+          error: t.state.lastError!,
+        })),
+    };
+  }
+
   // ─── 内部方法 ───
 
   private getEnabledTasks(): ScheduledTask[] {
@@ -250,29 +302,6 @@ export class Scheduler {
   }
 
   private getAllTasks(): ScheduledTask[] {
-    // JsonTaskStore 的内部 Map 不直接暴露，
-    // 但 load() 后可通过遍历 getTask 获取。
-    // 这里通过 store.load() 返回的快照来实现。
-    // 实际上我们需要一个 list 方法——用 save() 传空即可触发返回。
-    // 更好的方案：让 store 暴露 list 方法。
-    // 临时方案：记住上次 load 的结果。
-    // 实际 JsonTaskStore.load() 已经返回了所有任务，
-    // 且 addTask/updateTask/removeTask 也维护了内存状态。
-    // 解决：在 TaskStore 接口加 list() 或让 load() 可重复调用。
-    // 这里直接同步调用 load()—— 但 load 是 async。
-    // 最佳方案：给 TaskStore 加同步的 list() 方法。
-    // 我们先扩展调用方式。
-
-    // 实际上 JsonTaskStore 的 getTask 需要知道 ID，
-    // 但我们可以从上一次 load 获取。
-    // 更实际的做法：让 Scheduler 自己维护一份引用。
-    // 但 store 已经维护了——只是接口不暴露 list。
-    // 最简方案：在构造时 load 后缓存任务列表引用。
-
-    // 重构：直接让 Scheduler 维护 tasks 数组
-    // 但这会与 store 双重维护。
-    // 最终决策：给 store 加 list() 方法。
-    // 见 task-store.ts 的修改。
     return this.store.list();
   }
 
@@ -380,10 +409,16 @@ export class Scheduler {
     task: ScheduledTask,
     result: AgentTurnResult,
   ): Promise<void> {
-    if (!this.delivery) return;
+    if (!this.delivery) {
+      task.state.lastDeliveryStatus = "skipped";
+      return;
+    }
 
     const output = result.output ?? "";
-    if (!output) return;
+    if (!output) {
+      task.state.lastDeliveryStatus = "skipped";
+      return;
+    }
 
     // 1. 显式配置 → 用它
     let target: DeliveryTarget | null = null;
@@ -397,7 +432,10 @@ export class Scheduler {
     }
 
     // 3. 无法解析 → 跳过
-    if (!target) return;
+    if (!target) {
+      task.state.lastDeliveryStatus = "skipped";
+      return;
+    }
 
     try {
       await this.delivery.enqueue({
@@ -413,7 +451,9 @@ export class Scheduler {
         },
       });
       await this.delivery.flush();
+      task.state.lastDeliveryStatus = "sent";
     } catch (err) {
+      task.state.lastDeliveryStatus = "failed";
       this.logger.warn(`Delivery enqueue failed for task ${task.name}`, {
         error: err instanceof Error ? err.message : String(err),
       });
@@ -460,6 +500,25 @@ function generateId(): string {
   const ts = Date.now().toString(36);
   const rand = Math.random().toString(36).slice(2, 8);
   return `task_${ts}_${rand}`;
+}
+
+function formatSchedule(schedule: ScheduledTask["schedule"]): string {
+  switch (schedule.kind) {
+    case "once":
+      return "一次性";
+    case "interval": {
+      const sec = Math.round(schedule.everyMs / 1000);
+      if (sec < 60) return `每 ${sec} 秒`;
+      const min = Math.round(sec / 60);
+      if (min < 60) return `每 ${min} 分钟`;
+      const hr = Math.round(min / 60);
+      return `每 ${hr} 小时`;
+    }
+    case "cron":
+      return `cron ${schedule.expr}${schedule.tz ? ` (${schedule.tz})` : ""}`;
+    default:
+      return "未知";
+  }
 }
 
 function createDefaultLogger(): SchedulerLogger {

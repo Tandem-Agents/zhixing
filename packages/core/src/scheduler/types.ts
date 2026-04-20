@@ -69,6 +69,8 @@ export interface TaskState {
   lastError?: string;
   lastDurationMs?: number;
   lastSummary?: string;
+  /** 最近一次执行的投递状态 */
+  lastDeliveryStatus?: "sent" | "skipped" | "failed";
   consecutiveErrors: number;
   runCount: number;
 }
@@ -92,6 +94,28 @@ export interface ScheduledTask {
   updatedAt: string;
   /** 系统内置任务标记——用户不可删除 */
   system?: boolean;
+}
+
+// ─── 任务状态摘要（用于 per-turn 上下文注入） ───
+
+export interface TaskStatusSummary {
+  active: Array<{
+    name: string;
+    /** 人类可读的调度描述（如 "cron 每天 08:00"） */
+    schedule: string;
+    nextRunAt?: string;
+  }>;
+  recentlyCompleted: Array<{
+    name: string;
+    completedAt: string;
+    summary?: string;
+    delivered?: boolean;
+  }>;
+  recentlyFailed: Array<{
+    name: string;
+    failedAt: string;
+    error: string;
+  }>;
 }
 
 // ─── Agent Turn 接口（依赖注入） ───
