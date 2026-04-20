@@ -2,7 +2,7 @@ import { FEISHU_DEFAULTS } from "./config.js";
 
 export function toFeishuMarkdown(markdown: string, maxLength?: number): string {
   const limit = maxLength ?? FEISHU_DEFAULTS.maxMessageLength;
-  let result = convertTables(markdown);
+  let result = convertTables(markdown.trim());
 
   if (result.length > limit) {
     result = safeTruncate(result, limit);
@@ -50,7 +50,7 @@ function convertTables(text: string): string {
     },
   );
 
-  return converted.replace(/\x00CB(\d+)\x00/g, (_, idx) => codeBlocks[Number(idx)]);
+  return converted.replace(/\x00CB(\d+)\x00/g, (_, idx) => codeBlocks[Number(idx)] ?? "");
 }
 
 function parseCells(row: string): string[] {
