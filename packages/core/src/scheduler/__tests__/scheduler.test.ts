@@ -258,6 +258,104 @@ describe("Scheduler", () => {
     await scheduler.stop();
   });
 
+  it("enqueues delivery on task success with channel delivery", async () => {
+    const enqueue = vi.fn().mockResolvedValue("dlv_1");
+    const mockDelivery = {
+      enqueue,
+      flush: vi.fn(),
+      stats: vi.fn(),
+    };
+
+    const mockRun = vi.fn<[], Promise<AgentTurnResult>>().mockResolvedValue({
+      status: "ok",
+      output: "task result",
+      durationMs: 50,
+    });
+
+    const eventBus = createEventBus<SchedulerEventMap>();
+    const scheduler = new Scheduler({
+      store: new JsonTaskStore(join(tempDir, "tasks.json")),
+      eventBus,
+      runAgentTurn: mockRun,
+      delivery: mockDelivery,
+    });
+    await scheduler.start();
+
+    const task = await scheduler.createTask({
+      name: "notify-me",
+      enabled: true,
+      priority: "normal",
+      schedule: { kind: "once", at: new Date(Date.now() + 999_999).toISOString() },
+      action: { kind: "agent-turn", prompt: "check weather" },
+      delivery: { kind: "channel", channel: "feishu", to: "user123" },
+    });
+
+    await scheduler.runTask(task.id);
+
+    expect(enqueue).toHaveBeenCalledOnce();
+    expect(enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        target: { channelId: "feishu", to: "user123" },
+        content: { text: "task result", markdown: "task result" },
+        source: { kind: "scheduler", taskId: task.id, taskName: "notify-me" },
+      }),
+    );
+    await scheduler.stop();
+  });
+
+  it("skips delivery when task has no delivery config", async () => {
+    const enqueue = vi.fn();
+    const mockDelivery = { enqueue, flush: vi.fn(), stats: vi.fn() };
+
+    const eventBus = createEventBus<SchedulerEventMap>();
+    const scheduler = new Scheduler({
+      store: new JsonTaskStore(join(tempDir, "tasks.json")),
+      eventBus,
+      runAgentTurn: async () => ({ status: "ok", output: "done", durationMs: 10 }),
+      delivery: mockDelivery,
+    });
+    await scheduler.start();
+
+    await scheduler.createTask({
+      name: "no-delivery",
+      enabled: true,
+      priority: "normal",
+      schedule: { kind: "once", at: new Date(Date.now() + 999_999).toISOString() },
+      action: { kind: "agent-turn", prompt: "do stuff" },
+    });
+
+    await scheduler.runTask(scheduler.listTasks()[0]!.id);
+    expect(enqueue).not.toHaveBeenCalled();
+    await scheduler.stop();
+  });
+
+  it("skips delivery when task fails", async () => {
+    const enqueue = vi.fn();
+    const mockDelivery = { enqueue, flush: vi.fn(), stats: vi.fn() };
+
+    const eventBus = createEventBus<SchedulerEventMap>();
+    const scheduler = new Scheduler({
+      store: new JsonTaskStore(join(tempDir, "tasks.json")),
+      eventBus,
+      runAgentTurn: async () => ({ status: "error", error: "oops", durationMs: 10 }),
+      delivery: mockDelivery,
+    });
+    await scheduler.start();
+
+    await scheduler.createTask({
+      name: "will-fail",
+      enabled: true,
+      priority: "normal",
+      schedule: { kind: "once", at: new Date(Date.now() + 999_999).toISOString() },
+      action: { kind: "agent-turn", prompt: "fail" },
+      delivery: { kind: "channel", channel: "feishu", to: "user123" },
+    });
+
+    await scheduler.runTask(scheduler.listTasks()[0]!.id);
+    expect(enqueue).not.toHaveBeenCalled();
+    await scheduler.stop();
+  });
+
   it("persists across restart", async () => {
     const storePath = join(tempDir, "tasks.json");
 

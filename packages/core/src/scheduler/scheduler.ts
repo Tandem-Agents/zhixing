@@ -31,6 +31,7 @@ import type {
   TaskStore,
 } from "./types.js";
 import type { SchedulerEventMap } from "./events.js";
+import type { IDeliveryPipeline } from "../delivery/types.js";
 
 // ─── Scheduler 依赖注入 ───
 
@@ -42,6 +43,7 @@ export interface SchedulerDeps {
   systemHandlers?: Map<string, SystemHandler>;
   eventBus: IEventBus<SchedulerEventMap>;
   logger?: SchedulerLogger;
+  delivery?: IDeliveryPipeline;
 }
 
 // ─── Scheduler ───
@@ -55,6 +57,7 @@ export class Scheduler {
   private readonly logger: SchedulerLogger;
   private readonly now: () => Date;
   private readonly timerLoop: TimerLoop;
+  private readonly delivery?: IDeliveryPipeline;
 
   /** 当前正在执行的任务 ID 集合 */
   private readonly activeTasks = new Set<string>();
@@ -70,6 +73,7 @@ export class Scheduler {
     this.eventBus = deps.eventBus;
     this.now = deps.now ?? (() => new Date());
     this.logger = deps.logger ?? createDefaultLogger();
+    this.delivery = deps.delivery;
 
     this.timerLoop = new TimerLoop({
       getEnabledTasks: () => this.getEnabledTasks(),
@@ -312,6 +316,8 @@ export class Scheduler {
           durationMs: result.durationMs,
           summary: result.output?.slice(0, 200),
         });
+
+        await this.enqueueDelivery(task, result);
       } else {
         const errorResult = applyErrorPolicy(task, result.error ?? "Unknown error", this.config, finishTime);
 
@@ -358,6 +364,38 @@ export class Scheduler {
       return result;
     } finally {
       this.activeTasks.delete(task.id);
+    }
+  }
+
+  private async enqueueDelivery(
+    task: ScheduledTask,
+    result: AgentTurnResult,
+  ): Promise<void> {
+    if (!this.delivery || task.delivery?.kind !== "channel") return;
+
+    const output = result.output ?? "";
+    if (!output) return;
+
+    try {
+      await this.delivery.enqueue({
+        target: {
+          channelId: task.delivery.channel,
+          to: task.delivery.to,
+        },
+        content: {
+          text: output,
+          markdown: output,
+        },
+        source: {
+          kind: "scheduler",
+          taskId: task.id,
+          taskName: task.name,
+        },
+      });
+    } catch (err) {
+      this.logger.warn(`Delivery enqueue failed for task ${task.name}`, {
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 

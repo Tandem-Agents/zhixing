@@ -6,9 +6,10 @@
  * 2. 创建 TranscriptStore
  * 3. 创建 RuntimeFactory + ConversationManager
  * 4. 连接社交通道（Channel Adapters — 按配置启用）
- * 5. 创建 Scheduler
- * 6. 创建 ServerContext + 启动 runServer
- * 7. 等待停机（信号触发或主动 shutdown）
+ * 5. 创建 DeliveryPipeline（依赖通道）
+ * 6. 创建 Scheduler（注入 delivery）
+ * 7. 创建 ServerContext + 启动 runServer
+ * 8. 等待停机（信号触发或主动 shutdown）
  */
 
 import {
@@ -22,6 +23,10 @@ import {
   TranscriptStore,
   getZhixingHome,
   getProjectId,
+  DeliveryPipeline,
+  DEFAULT_DELIVERY_CONFIG,
+  type DeliveryEventMap,
+  type DeliverySender,
 } from "@zhixing/core";
 import {
   createServerContext,
@@ -119,7 +124,41 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
     }
   }
 
-  // 5. Scheduler
+  // 5. Delivery Pipeline
+  let delivery: DeliveryPipeline | undefined;
+  if (channels) {
+    const sender: DeliverySender = {
+      send: async (target, content) => {
+        const adapter = channels.get(target.channelId);
+        if (!adapter) {
+          return { success: false, error: `Channel not found: ${target.channelId}`, retryable: false };
+        }
+        return adapter.send(target, content);
+      },
+      isReady: (channelId) => {
+        const status = channels.getStatus(channelId);
+        return status?.state === "connected";
+      },
+    };
+
+    delivery = new DeliveryPipeline({
+      sender,
+      eventBus: createEventBus<DeliveryEventMap>(),
+      config: {
+        ...DEFAULT_DELIVERY_CONFIG,
+        queueFilePath: path.join(zhixingHome, "delivery-queue.json"),
+      },
+      logger: {
+        debug: () => {},
+        info: (msg: string) => console.log(chalk.dim(`[delivery] ${msg}`)),
+        warn: (msg: string) => console.warn(chalk.yellow(`[delivery] ${msg}`)),
+        error: (msg: string) => console.error(chalk.red(`[delivery] ${msg}`)),
+      },
+    });
+    await delivery.start();
+  }
+
+  // 6. Scheduler
   const schedulerEventBus = createEventBus<SchedulerEventMap>();
   const runAgentTurn = async (params: {
     prompt: string;
@@ -177,10 +216,11 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
     eventBus: schedulerEventBus,
     runAgentTurn,
     systemHandlers,
+    delivery,
   });
   await scheduler.start();
 
-  // 6. ServerContext + runServer
+  // 7. ServerContext + runServer
   const ctx = createServerContext({
     config: { ...DEFAULT_SERVER_CONFIG, port, host },
     version: SERVER_VERSION,
@@ -203,8 +243,9 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
       },
     });
   } catch (err) {
-    await channels?.dispose().catch(() => {});
     await scheduler.stop().catch(() => {});
+    await delivery?.stop().catch(() => {});
+    await channels?.dispose().catch(() => {});
     throw err;
   }
 
@@ -228,4 +269,9 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
 
   // 等待停机
   await runner.waitForShutdown();
+
+  // 优雅清理
+  await scheduler.stop().catch(() => {});
+  await delivery?.stop().catch(() => {});
+  await channels?.dispose().catch(() => {});
 }

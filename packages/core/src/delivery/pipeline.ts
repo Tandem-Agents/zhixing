@@ -98,6 +98,14 @@ export class DeliveryPipeline implements IDeliveryPipeline {
         });
       }, this.config.flushIntervalMs);
     }
+
+    if (pending > 0) {
+      this.flush().catch((err) => {
+        this.logger.error("Recovery flush error", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }
   }
 
   async stop(): Promise<void> {

@@ -53,7 +53,7 @@ export type TaskAction =
     }
   | { kind: "system"; handler: string; params?: Record<string, unknown> };
 
-// ─── 投递配置（S1 暂不实现，保留类型以兼容持久化格式） ───
+// ─── 投递配置 ───
 
 export type TaskDelivery =
   | { kind: "none" }

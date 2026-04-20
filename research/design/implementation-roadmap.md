@@ -10,8 +10,9 @@
     → S2 ✅ Server (HTTP/WS/RPC)
       → S2.7 ✅ 对话模型统一
         → S5 ✅ Channel Adapter (飞书 MVP，E2E 已验证)
-          → S3 🔜 Delivery Pipeline        ← 当前
-            → 飞书增量 (流式卡片)
+          → S3 ✅ Delivery Pipeline (核心 + Scheduler 集成)
+            → S3.14 🔜 DeliveryRouter       ← 当前
+              → 飞书增量 (流式卡片)
               → Daemon 后台模式
                 → S2.5 AgentOrchestrator
 
@@ -55,9 +56,9 @@
 
 | Step | 名称 | 状态 | 设计状态 | 依赖 |
 |------|------|------|---------|------|
-| 12 | DeliveryPipeline 核心 | 🔜 下一步 | ✅ 设计完备 (persistent-service.md §4.7) | Step 11 |
-| 13 | Scheduler → Delivery 集成 | 🔲 | ✅ 设计完备 (persistent-service.md §4.7) | Step 12 |
-| 14 | DeliveryRouter 路由决策 | 🔲 | ✅ 设计完备 (server-gateway.md §7.2) | Step 13 |
+| 12 | DeliveryPipeline 核心 | ✅ | ✅ 设计完备 (persistent-service.md §4.7) | Step 11 |
+| 13 | Scheduler → Delivery 集成 | ✅ | ✅ 设计完备 (persistent-service.md §4.7) | Step 12 |
+| 14 | DeliveryRouter 路由决策 | 🔜 下一步 | ✅ 设计完备 (server-gateway.md §7.2) | Step 13 |
 
 ### 延后 / 可选
 
@@ -86,52 +87,28 @@
 - 设计决策：动态 import 适配器、通道失败隔离、onMessage `.catch()` 防御、启动失败 `dispose()` 清理
 - 附带修复：`deepMergeConfig` agent 字段覆盖遗漏、`toSafePathSegment()` Windows 路径兼容
 
+### Step 12: DeliveryPipeline 核心 ✅
+
+- 交付 `core/src/delivery/`（types / queue / dedup / pipeline / index）+ 30 测试
+- `DeliverySender` 接口解耦 ChannelRegistry — 可插拔发送（channel / 未来 webhook）
+- `DeliveryFilter` 可插拔链 — 内置 DedupFilter，可注入自定义过滤器（Active Hours 等）
+- 持久化队列 write-rename 原子写入，crash recovery
+- 重试语义：channel-not-ready 不消耗 attempts（固定延迟推迟），send 失败才消耗（指数退避）
+- `itemTtlMs` 过期安全网（默认 1h）— 与 attempts 正交的独立关注点
+- 时间注入链路完整：pipeline `now()` → DedupFilter `nowMs()`
+
+### Step 13: Scheduler → Delivery 集成 ✅
+
+- `IDeliveryPipeline` 作为可选依赖注入 `SchedulerDeps`（非 EventBus — 投递是任务生命周期的一部分）
+- `enqueueDelivery()` 私有方法：仅在 task 成功 + 有 `delivery` 配置 + 有 output 时触发
+- `command.ts` 接线：`DeliverySender` 包装 `ChannelRegistry`（`get()` + `send()` + `getStatus()`）
+- 生命周期：pipeline 在 channels 之后创建、在 scheduler 之前启动；停机顺序 scheduler → delivery → channels
+- 3 个集成测试覆盖：成功投递 / 无配置跳过 / 失败跳过
+- 设计决策：enqueue 失败仅 warn 不影响任务结果（投递是 best-effort 的副作用）
+
 ---
 
 ## 待实施
-
-### Step 12: DeliveryPipeline 核心
-
-**目标：** 构建投递管道核心，使 Scheduler 任务结果能推送到社交通道。这是从"被动应答"到"主动助手"的临界跃迁。
-
-**设计来源：** persistent-service.md §4.7 + server-gateway.md §7.2
-
-**做什么（MVP）：**
-- `DeliveryPipeline` 核心类：`enqueue()` / `flush()` / `stats()`
-- `DeliveryItem` 类型：target channel + content + priority + retry state
-- 持久化队列（`~/.zhixing/delivery-queue.json`），crash recovery
-- 过滤链：Channel Ready 检查 + 24h 内容去重
-- 重试策略：指数退避，最多 3 次
-- EventBus 事件：`delivery:success` / `delivery:failed`
-
-**不做（后续增量）：**
-- Active Hours 免打扰过滤（增量 1 — 需要用户偏好配置）
-- Webhook 出站（增量 2 — SSRF 防护）
-- DeliveryRouter 智能路由（Step 14）
-
-**交付：**
-```
-packages/core/src/delivery/       # 或 packages/server/src/delivery/
-  ├── types.ts                    # DeliveryItem, DeliveryResult, DeliveryStats
-  ├── pipeline.ts                 # DeliveryPipeline 核心
-  ├── queue.ts                    # 持久化队列（JSON 文件）
-  ├── dedup.ts                    # 内容去重
-  └── index.ts
-```
-
-**验证：** 单测覆盖 enqueue → flush → channel.send() 全链路 + 重试 + 去重 + 持久化恢复
-
-### Step 13: Scheduler → Delivery 集成
-
-**目标：** 将 Scheduler 任务执行结果接入 Delivery Pipeline，完成"定时任务 → 通道推送"闭环。
-
-**做什么：**
-- Scheduler `runAgentTurn` 结果 → `pipeline.enqueue()`
-- `SchedulerDeps` 注入 DeliveryPipeline
-- `command.ts` 接线：创建 pipeline → 注入 scheduler → 启动 flush 循环
-- 配置项：`ZhixingConfig.delivery`（默认通道、重试策略）
-
-**验证：** 创建定时任务 → 任务触发 → Agent 执行 → 结果推送到飞书
 
 ### Step 14: DeliveryRouter 路由决策
 
