@@ -412,6 +412,7 @@ export class Scheduler {
           taskName: task.name,
         },
       });
+      await this.delivery.flush();
     } catch (err) {
       this.logger.warn(`Delivery enqueue failed for task ${task.name}`, {
         error: err instanceof Error ? err.message : String(err),

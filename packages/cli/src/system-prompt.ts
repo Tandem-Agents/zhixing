@@ -223,6 +223,7 @@ function buildEnvironment(ctx: PromptBuildContext): string {
     }
   }
 
+  lines.push(`- Current time: ${new Date().toLocaleString("zh-CN", { timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone, dateStyle: "full", timeStyle: "medium" })} (${Intl.DateTimeFormat().resolvedOptions().timeZone})`);
   lines.push(`- Platform: ${os.platform()} ${os.arch()}`);
   lines.push(`- Node.js: ${process.version}`);
 

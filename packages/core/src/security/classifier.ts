@@ -404,6 +404,11 @@ export function createDefaultClassifier(
   composite.registerContext("bash", shellClassifier);
   composite.registerContext("shell", shellClassifier);
 
+  // 内部状态管理工具——只操作进程内/本地文件状态，无外部副作用
+  const internalClassifier: OperationClassifier = { classify: () => "internal" };
+  composite.registerContext("schedule", internalClassifier);
+  composite.registerContext("memory", internalClassifier);
+
   // 其他工具走边界分类器
   const registry = options.registry ?? EMPTY_BOUNDARY_REGISTRY;
   composite.setBoundaryClassifier(new BoundaryImpactClassifier(registry));
