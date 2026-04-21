@@ -1,6 +1,6 @@
 # ADR-004: 工具系统架构
 
-> **状态**: 接受 | **日期**: 2026-04-07
+> **状态**: 接受 | **日期**: 2026-04-07 · 增补决策 7（2026-04-21）
 
 ## 背景
 
@@ -71,6 +71,51 @@ L5 remote    → 远程执行
 ### 决策 6：结果大小管理
 
 从 Phase 1 开始实施 `maxResultChars` 截断，防止单次工具调用撑爆上下文窗口。
+
+### 决策 7：User-facing 输出通道（2026-04-21 增补）
+
+工具不仅"返回结果给 LLM"，还可**直接向用户发出可视化反馈**——无需 LLM 二轮推理叙述。这是对标 Claude Code / Cursor 的 tool-authored UI 范式，也是 [ADR-007 消息 Outbox](007-message-outbox.md) 的必要条件。
+
+**ToolExecutionContext 扩展**（在 channel/serve 上下文下有值，REPL 单独命令场景为 undefined）：
+
+```typescript
+interface ToolExecutionContext {
+  readonly workingDirectory: string;
+  readonly abortSignal: AbortSignal;
+  // 2026-04-21 新增：
+  readonly turnId?: TurnId;                // 当前 turn 全局 id，用于跨组件因果引用
+  readonly emissionTarget?: DeliveryTarget; // 用户目标 (channelId, to)
+  /** 直接向用户发出 commitment 消息，经 Outbox，不与 LLM 最终回复重复 */
+  readonly commitToUser?: (content: OutboundContent) => Promise<DeliveryResult>;
+}
+```
+
+**ToolResult 扩展**：
+
+```typescript
+interface ToolResult {
+  readonly content: string;
+  readonly isError?: boolean;
+  // 2026-04-21 新增：
+  readonly committedToUser?: boolean;  // LLM 据此抑制叙述
+}
+```
+
+**为什么工具协议承担这个职责**：
+
+- 工具比 LLM 更清楚"刚刚做了什么"——让有确定知识的组件生成 commitment，而非委托给非确定的 LLM 推理
+- 消除 LLM 的冗余二轮（性能 + 体验双改善）
+- 是 Outbox 因果排序能跑通的前置条件（没有 commitment 渠道，Outbox 只能序列化 LLM 的晚到叙述）
+
+**实现阶段**：
+
+- Phase 2（随 Outbox Phase 2 一起）：引入 `commitToUser`、`committedToUser`、`emissionTarget`。schedule 工具率先适配。
+- Phase 3（随 Outbox Phase 3 一起）：引入 `turnId`。工具可将该 id 写入副作用（如任务的 `createdInTurn`）用于下游因果追溯。
+
+**约束**：
+
+- `commitToUser` 在非 channel 上下文下为 undefined——工具必须同时支持"有 commit 通道"和"无 commit 通道"两种代码路径，后者退化为原有"由 LLM 叙述"语义
+- 工具声明 `committedToUser: true` 时，应当确保 `commitToUser` 确实被调用过——否则 LLM 会抑制叙述而用户什么都看不到
 
 ## 理由
 

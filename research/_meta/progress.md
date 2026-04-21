@@ -6,7 +6,7 @@
 
 | 认知域 | 状态 | 问题数 | 已完成 | 关键阻塞 |
 |--------|------|--------|--------|----------|
-| 01-核心循环 | 🔶 进行中 | 4 | 3 | q04 已完成 |
+| 01-核心循环 | 🔶 进行中 | 4 | 3 | q04 已完成；Outbox 顺序层已设计 |
 | 02-工具系统 | ✅ 基本完成 | 1 | 1 | q05(工具安全) 已完成 |
 | 03-上下文管理 | ✅ 基本完成 | 4 | 4 | 源码分析 + 设计方案已完成 |
 | 04-提示工程 | 🔲 待开始 | 0 | 0 | — |
@@ -40,6 +40,8 @@
 | ADR-006 安全系统架构 | ✅ 已完成 | 05 |
 | 安全系统方案 | ✅ 已完成 | 05 |
 | ADR-005 CLI 架构 | ✅ 已完成 | 08 |
+| ADR-007 消息 Outbox 与因果排序 | ✅ 已完成 | 01, 07, 09 |
+| 消息 Outbox 方案 | ✅ 已完成 | 01, 07, 09 |
 | Phase 2 完整智能体方案 | ✅ 已完成 | 01, 02 |
 | 容错引擎方案 | ✅ 已完成 | 01 |
 | 上下文引擎方案 | ✅ 已完成 | 03 |
@@ -121,6 +123,8 @@
 - [x] **M23**: M7 效果反馈闭环 → 效果推断 + 检索优先级排序 + CLI stale 提醒（210 个测试通过） ✅ 2026-04-10
 - [x] **M24**: 安全系统深度调研 → 三系统（OpenClaw/Hermes/Claude Code）安全架构交叉对比 + 源码分析 ✅ 2026-04-12
 - [x] **M25**: Serve 模式健壮性 Step 16a-d + 16g-h → 飞书定时任务 E2E 打通（origin capture + 时间注入 + scheduler snapshot + 最小间隔保护 + delivery flush） ✅ 2026-04-20
+- [x] **M26**: Step 16e Ephemeral Execution → 定时任务 runAgentTurn 绕过 ConversationManager，bare runtime → run → dispose，磁盘零痕迹（飞书 E2E 验证无 conv_xxx 新增） ✅ 2026-04-21
+- [x] **M27**: 消息 Outbox 设计完成 → Step 16 E2E 暴露多生产者顺序倒转，产出规格 [message-outbox.md](../design/specifications/message-outbox.md) + [ADR-007](../design/architecture/decisions/007-message-outbox.md)；跨模块影响文档同步更新（conversation-model TurnId、ADR-004 ToolContext 扩展、persistent-service §4.7 Pipeline/Outbox 职责切分） ✅ 2026-04-21
 
 ---
 

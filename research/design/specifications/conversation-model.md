@@ -1,12 +1,13 @@
 # 对话模型 (Conversation Model)
 
-> **版本**:v2.2
-> **状态**:📐 设计稿（2026-04-18 修订）
+> **版本**:v2.3
+> **状态**:📐 设计稿（2026-04-21 修订：新增 TurnId）
 > **关联**:
 >
 > - [session-persistence.md](./session-persistence.md) — Transcript 持久化层（被本文档归并）
 > - [server-gateway.md](./server-gateway.md) — RPC 协议层（含 Channel 接入）
 > - [persistent-service.md](./persistent-service.md) — Scheduler / Background Agent 集成点
+> - [message-outbox.md](./message-outbox.md) — TurnId 的消费者（因果依赖标签）
 
 ---
 
@@ -496,6 +497,37 @@ Turn 结束 → append 到 Transcript → emit complete 事件
 - 中途崩溃 → 整个 Turn 不写入(用户视角:刚才那条没回复,重发即可),不留半成品
 
 详见 [session-persistence.md](./session-persistence.md) §5(Turn-complete 时追加策略,本文档继承不变)。
+
+### 5.3 TurnId（Outbox 因果标签载体，v2.3 新增）
+
+> 2026-04-21 引入。规格详见 [message-outbox.md](./message-outbox.md) §3.3 和 [ADR-007](../architecture/decisions/007-message-outbox.md)。
+
+`turnIndex` 是 Turn 在 Conversation 内的**相对序号**，不足以做跨模块的引用（两个 Conversation 的 turnIndex=3 是同一个吗？当然不是）。为了让 Scheduler、DeliveryPipeline、Outbox 等组件能表达"这件事发生在某个 turn 内"的因果关系，引入**全局唯一的 TurnId**：
+
+```typescript
+type TurnId = string;  // 例如 `turn_01J...`（ulid 或类似）
+
+interface Turn {
+  readonly turnIndex: number;    // 既有：Conversation 内相对序号
+  readonly turnId: TurnId;       // 新增：全局唯一标识
+  // ...既有字段
+}
+```
+
+**产生时机**：ConversationManager 在 turn 开始（`setBusy(true)` 之前）生成 turnId。该 turnId 贯穿：
+
+1. **Agent Loop**：通过 `ToolExecutionContext.turnId` 透传给所有工具调用（参见 [ADR-004 工具系统](../architecture/decisions/004-tool-system-architecture.md)）
+2. **Scheduler**：工具创建的定时任务在 `task.createdInTurn` 记录该 turnId
+3. **Outbox**：turn 开始时 `outbox.openSlot({ slotId: turnId })`；turn 完成 `fillSlot` / 异常 `abandonSlot`
+4. **Transcript**：持久化到 transcript.jsonl 的 Turn 记录中，用于事后审计跨组件因果链
+
+**为什么不复用 turnIndex**：
+
+- turnIndex 是 Conversation-local，不同 Conversation 的 turnIndex 会碰撞
+- turnIndex 基于写入顺序，需要在 transcript 落盘前确定；turnId 在 turn 开始时即可确定（供工具使用）
+- 全局 ID 更便于跨系统传递（日志、事件、遥测）
+
+**turnId 不替代 turnIndex**：两者并存——turnIndex 对用户可见（"第 3 轮"），turnId 对系统可见（跨组件引用）。
 
 ---
 
