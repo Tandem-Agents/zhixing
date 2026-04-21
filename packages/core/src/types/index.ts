@@ -27,6 +27,7 @@ export type {
   ToolExecutionContext,
   ToolResult,
   ToolSpec,
+  TurnContext,
 } from "./tools.js";
 export { toToolSpec } from "./tools.js";
 

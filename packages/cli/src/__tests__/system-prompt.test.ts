@@ -51,6 +51,14 @@ describe("buildSystemPrompt", () => {
     expect(prompt).toContain("`bash`");
   });
 
+  it("含 Commitment 信号抑制叙述原则（ADR-007 Phase 2）", async () => {
+    const { COMMITMENT_SIGNAL } = await import("@zhixing/core");
+    const prompt = buildSystemPrompt(ctx);
+    // 直接引用 core 常量——保证系统提示里的信号字面与 tool-executor 附加到 content 的逐字一致
+    expect(prompt).toContain(COMMITMENT_SIGNAL);
+    expect(prompt).toMatch(/Do NOT restate|not restate/i);
+  });
+
   it("包含风格段", () => {
     const prompt = buildSystemPrompt(ctx);
     expect(prompt).toContain("## Style");

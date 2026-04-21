@@ -6,6 +6,7 @@ import type { ToolDefinition } from "../../types/tools.js";
 import { userMessage } from "../../types/messages.js";
 import { drainAgentLoop, runAgentLoop } from "../agent-loop.js";
 import { MockLLMProvider, mockTextProvider } from "../mock-provider.js";
+import { COMMITMENT_SIGNAL } from "../tool-executor.js";
 import type { AgentLoopParams, AgentYield } from "../types.js";
 
 // ─── 测试辅助 ───
@@ -373,6 +374,67 @@ describe("Agent Loop", () => {
 
       expect(result.reason).toBe("completed");
       expect(provider.callCount).toBe(2);
+    });
+
+    // ADR-007 Phase 2：committedToUser 的信号透传验证
+    it("committedToUser=true → LLM 收到的 tool_result.content 末尾含 COMMITMENT_SIGNAL 标记", async () => {
+      const provider = new MockLLMProvider([
+        { toolCalls: [{ id: "tc1", name: "committer", input: {} }] },
+        { text: "ok" },
+      ]);
+
+      const committer = makeTool("committer", async () => ({
+        content: "Task created successfully",
+        committedToUser: true,
+      }));
+
+      const { yields, result } = await drainAgentLoop(
+        baseParams(provider, { tools: [committer] }),
+      );
+
+      expect(result.reason).toBe("completed");
+
+      // 1. tool_end yield 保留原始 ToolResult（含 committedToUser，供 REPL/渲染层使用）
+      const toolEnds = filterYields(yields, "tool_end");
+      expect(toolEnds).toHaveLength(1);
+      if (toolEnds[0].type === "tool_end") {
+        expect(toolEnds[0].result.committedToUser).toBe(true);
+      }
+
+      // 2. 传递给 LLM 的 tool_result 消息 content 末尾必须含 COMMITMENT_SIGNAL
+      //    （这是 LLM 实际"看到"的抑制信号）
+      expect(provider.callCount).toBe(2);
+      const secondCall = provider.calls[1];
+      const lastMsg = secondCall.messages[secondCall.messages.length - 1];
+      const toolResult = lastMsg.content[0];
+      expect(toolResult.type).toBe("tool_result");
+      if (toolResult.type === "tool_result") {
+        expect(toolResult.content).toContain("Task created successfully");
+        expect(toolResult.content).toContain(COMMITMENT_SIGNAL);
+      }
+    });
+
+    it("committedToUser 缺失或 false → 不附加 COMMITMENT_SIGNAL", async () => {
+      const provider = new MockLLMProvider([
+        { toolCalls: [{ id: "tc1", name: "normal", input: {} }] },
+        { text: "done" },
+      ]);
+
+      const normalTool = makeTool("normal", async () => ({
+        content: "Operation completed",
+      }));
+
+      const { result } = await drainAgentLoop(
+        baseParams(provider, { tools: [normalTool] }),
+      );
+
+      expect(result.reason).toBe("completed");
+      const secondCall = provider.calls[1];
+      const lastMsg = secondCall.messages[secondCall.messages.length - 1];
+      const toolResult = lastMsg.content[0];
+      if (toolResult.type === "tool_result") {
+        expect(toolResult.content).not.toContain(COMMITMENT_SIGNAL);
+      }
     });
   });
 

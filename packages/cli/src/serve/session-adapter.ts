@@ -17,7 +17,12 @@ import {
   type AgentResult,
   type AgentYield,
 } from "@zhixing/core";
-import type { SessionRuntime, RuntimeFactory } from "@zhixing/server";
+import type {
+  RunTurnOptions,
+  RuntimeFactory,
+  SessionRuntime,
+  TurnContext,
+} from "@zhixing/server";
 import type { AgentRuntime } from "../run-agent.js";
 
 // ─── 适配器 ───
@@ -40,7 +45,12 @@ export function createServerRuntimeAdapter(
   return {
     sessionId,
 
-    async *run(text, abortSignal?): AsyncGenerator<AgentYield, AgentResult> {
+    async *run(
+      text,
+      abortSignalOrOptions?: AbortSignal | RunTurnOptions,
+    ): AsyncGenerator<AgentYield, AgentResult> {
+      const { abortSignal, turnContext } = unpackOptions(abortSignalOrOptions);
+
       if (aborted) {
         aborted = false;
         throw new Error("Session aborted");
@@ -70,6 +80,7 @@ export function createServerRuntimeAdapter(
       agentRuntime
         .run({
           messages: [...messages],
+          turnContext,
           onYield: (event) => {
             if (turnAborted) return;
             queue.push({ kind: "yield", value: event });
@@ -127,6 +138,20 @@ export function createServerRuntimeAdapter(
       messages = [];
     },
   };
+}
+
+// ─── 工具：兼容 legacy AbortSignal 和 RunTurnOptions 两种第二参 ───
+
+function unpackOptions(
+  arg?: AbortSignal | RunTurnOptions,
+): { abortSignal?: AbortSignal; turnContext?: TurnContext } {
+  if (!arg) return {};
+  // AbortSignal 有 aborted 字段且无 turnContext/abortSignal 字段
+  if ("aborted" in arg && typeof (arg as AbortSignal).aborted === "boolean") {
+    return { abortSignal: arg as AbortSignal };
+  }
+  const opts = arg as RunTurnOptions;
+  return { abortSignal: opts.abortSignal, turnContext: opts.turnContext };
 }
 
 // ─── RuntimeFactory 实现 ───

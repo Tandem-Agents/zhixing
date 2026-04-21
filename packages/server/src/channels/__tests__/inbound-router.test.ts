@@ -254,4 +254,17 @@ describe("InboundRouter", () => {
     const [, content] = (adapter.send as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(content.text).toContain("LLM failed");
   });
+
+  // ─── Outbox 集成（ADR-007 Phase 1） ───
+
+  it("setOutboxRegistry 是 write-once，重复绑定抛异常", async () => {
+    const { OutboxRegistry } = await import("@zhixing/core");
+    const { router } = setup();
+
+    const registry1 = new OutboxRegistry(async () => ({ success: true, retryable: false }));
+    const registry2 = new OutboxRegistry(async () => ({ success: true, retryable: false }));
+
+    router.setOutboxRegistry(registry1);
+    expect(() => router.setOutboxRegistry(registry2)).toThrow(/already bound/);
+  });
 });

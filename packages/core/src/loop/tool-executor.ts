@@ -97,10 +97,17 @@ export async function* executeToolCalls(
       // 管线步骤：结果截断
       const toolResult = applyMaxResultChars(rawResult, tool.maxResultChars);
 
+      // ADR-007 Phase 2：ToolResult.committedToUser 字段无法通过 LLM 消息协议传递
+      // （ToolResultBlock 只支持 content/isError）。因此把该标记编码到 content
+      // 文本尾部，成为 LLM 可见的信号。系统提示中对应规则识别该标记以抑制叙述。
+      const contentForLLM = toolResult.committedToUser
+        ? `${toolResult.content}\n\n${COMMITMENT_SIGNAL}`
+        : toolResult.content;
+
       results.push({
         type: "tool_result",
         toolUseId: call.id,
-        content: toolResult.content,
+        content: contentForLLM,
         isError: toolResult.isError,
       });
 
@@ -152,6 +159,16 @@ export async function* executeToolCalls(
 
   return results;
 }
+
+// ─── 常量 ───
+
+/**
+ * 当 ToolResult.committedToUser=true 时，附加到 tool_result.content 尾部的 LLM 信号文本。
+ * 系统提示（buildToolUsage）识别此文本时抑制 LLM 对该工具结果的叙述。
+ * 参见 ADR-007 Phase 2 / [message-outbox.md §4.4](../../../../research/design/specifications/message-outbox.md)。
+ */
+export const COMMITMENT_SIGNAL =
+  "[Commitment already sent to user. Do not restate.]";
 
 // ─── 管线工具函数 ───
 

@@ -7,15 +7,37 @@
  * - 流式输出复用 core 的 AgentYield/AgentResult
  */
 
-import type { AgentYield, AgentResult, Message } from "@zhixing/core";
+import type {
+  AgentYield,
+  AgentResult,
+  Message,
+  TurnContext,
+} from "@zhixing/core";
+
+// TurnContext 的唯一定义在 @zhixing/core（types/tools.ts）——此处只做 re-export，
+// 方便 server 层和其下游直接从 @zhixing/server 拿到。
+export type { TurnContext };
+
+/** SessionRuntime.run 的 per-turn 选项 */
+export interface RunTurnOptions {
+  abortSignal?: AbortSignal;
+  turnContext?: TurnContext;
+}
 
 export interface SessionRuntime {
   readonly sessionId: string;
   /**
    * 执行一轮对话，AsyncGenerator 流式 yield 事件 → return 最终结果。
    * 与 core 的 runAgentLoop 同语义，但持有内部消息历史。
+   *
+   * 第二参数兼容两种形式（ADR-007 Phase 2）：
+   * - `AbortSignal`（legacy）
+   * - `RunTurnOptions`（含 abortSignal + turnContext）
    */
-  run(text: string, abortSignal?: AbortSignal): AsyncGenerator<AgentYield, AgentResult>;
+  run(
+    text: string,
+    abortSignalOrOptions?: AbortSignal | RunTurnOptions,
+  ): AsyncGenerator<AgentYield, AgentResult>;
   /** 当前消息历史（只读拷贝） */
   getHistory(limit?: number): Message[];
   /** 终止当前执行（如果有） */

@@ -16,6 +16,7 @@ import {
   type Message,
   type ToolResultBlock,
   type IPermissionStore,
+  type TurnContext,
   type TurnContextProvider,
   ConfirmationBroker,
   createEventBus,
@@ -116,6 +117,12 @@ export interface RunParams {
    * 不提供时 confirm 决策会被视为 block（适合 CI / 一次性脚本）。
    */
   securityPrompt?: PromptFn;
+  /**
+   * Turn 级上下文（ADR-007 Phase 2）。channel 会话传入含 commitToUser；
+   * REPL / 定时任务 ephemeral turn 省略。字段进入每个工具调用的
+   * ToolExecutionContext（turnId / emissionTarget / commitToUser）。
+   */
+  turnContext?: TurnContext;
 }
 
 export interface RunResult {
@@ -362,9 +369,23 @@ export async function createAgentRuntime(options: {
       const messagesWithTurnContext = turnContextInjector.inject(messagesWithContext);
 
       // 用 SecurityPipeline 包装工具执行——每次 run() 重新构造 wrapper。
+      // 把 turnContext（turnId / emissionTarget / commitToUser）合并到每次 tool.call 的 ToolExecutionContext；core loop 对此无感知。
+      //
+      // commitToUser 在这里再包装一层，自动注入当前 tool.name——工具代码无需
+      // 手动报告自己名字；EmissionSource.tool-commitment.toolName 不会出现 "unknown" 占位。
+      const turnContext = params.turnContext;
       const secureExecuteTool = createSecureExecuteTool({
         pipeline: securityPipeline,
-        originalExecute: (tool, input, context) => tool.call(input, context),
+        originalExecute: (tool, input, context) =>
+          tool.call(input, {
+            ...context,
+            turnId: turnContext?.turnId,
+            emissionTarget: turnContext?.emissionTarget,
+            commitToUser: turnContext?.commitToUser
+              ? (content) =>
+                  turnContext.commitToUser!(content, { toolName: tool.name })
+              : undefined,
+          }),
         prompt: params.securityPrompt,
         broker: confirmationBroker,
         sessionType,

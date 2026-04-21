@@ -7,6 +7,7 @@ import {
   type InboundMessage,
   type OutboundContent,
   type OutboxRegistry,
+  type TurnContext,
   extractText,
   userMessage,
   type AgentResult,
@@ -147,8 +148,32 @@ export class InboundRouter {
     const turnStartedAt = new Date().toISOString();
     this.logger.info(`[开始处理] conv=${conversationId} text="${msg.text}"`);
 
+    // 构造 turnContext，把 commitToUser 绑定到当前 user target
+    //   - turnId 用于观测（Phase 3 起接 Outbox Turn Slot）
+    //   - commitToUser 让工具（如 schedule）可直接发 commitment 消息，不依赖 LLM 叙述
+    //   - outboxRegistry 未绑定时 commitToUser 为 undefined → 工具降级为 LLM 叙述路径
+    const replyTarget = buildReplyTarget(msg);
+    const turnContext: TurnContext = {
+      turnId: generateTurnId(),
+      emissionTarget: replyTarget,
+      commitToUser: this.outboxRegistry
+        ? (content: OutboundContent, meta?: { toolName?: string }) =>
+            this.outboxRegistry!.of(replyTarget).post({
+              target: replyTarget,
+              content,
+              source: {
+                kind: "tool-commitment",
+                conversationId,
+                // AgentLoop wrapper 会在每次 tool.call 自动填入当前 tool.name；
+                // 兜底 "unknown" 仅在理论不应出现的场景触发（可用作异常监控信号）
+                toolName: meta?.toolName ?? "unknown",
+              },
+            })
+        : undefined,
+    };
+
     try {
-      const gen = managed.runtime.run(msg.text);
+      const gen = managed.runtime.run(msg.text, { turnContext });
       let result: AgentResult | undefined;
 
       while (true) {
@@ -235,4 +260,15 @@ function buildOutboundContent(result: AgentResult & { reason: "completed" }): Ou
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * 生成全局 Turn ID（ADR-007 Phase 2 / conversation-model.md §5.3）。
+ * 格式：`turn_${base36Time}_${rand}`——与 Outbox entry id 相似以便日志交叉定位。
+ * Phase 3 起此 ID 作为 Outbox Turn Slot 的 key。
+ */
+function generateTurnId(): string {
+  const ts = Date.now().toString(36);
+  const rand = Math.random().toString(36).slice(2, 8);
+  return `turn_${ts}_${rand}`;
 }

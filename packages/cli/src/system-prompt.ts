@@ -23,7 +23,7 @@
  */
 
 import * as os from "node:os";
-import type { ToolDefinition } from "@zhixing/core";
+import { COMMITMENT_SIGNAL, type ToolDefinition } from "@zhixing/core";
 
 // ─── 缓存分界标记 ───
 
@@ -139,6 +139,13 @@ function buildToolUsage(tools: ToolDefinition[]): string {
   if (tools.some((t) => t.isParallelSafe)) {
     lines.push("- When multiple independent tasks exist, use tools in parallel where safe");
   }
+
+  // Tool-authored commitment 抑制原则（ADR-007 Phase 2 / 所有工具通用）
+  // 直接 import @zhixing/core 的 COMMITMENT_SIGNAL 常量，保证系统提示里的字面串与
+  // tool-executor 附加到 content 的信号逐字一致；LLM 基于此字符串识别是否抑制叙述。
+  lines.push(
+    `- If a tool result ends with \`${COMMITMENT_SIGNAL}\`, the user has already seen the tool's confirmation directly via a commit message. Do NOT restate what the tool just did (no "已创建..." / "I've scheduled..."). If no additional insight is needed, end the turn with a brief acknowledgment or no text.`,
+  );
 
   return lines.join("\n");
 }

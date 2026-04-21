@@ -193,3 +193,38 @@ describe("OutboxRegistry 观测接口", () => {
     expect(r.keys().sort()).toEqual(["feishu:ou_a", "feishu:ou_b"]);
   });
 });
+
+// ─── Options 透传到子 Outbox ───
+
+describe("OutboxRegistry options 透传", () => {
+  it("sendTimeoutMs 传给子 Outbox：超时生效", async () => {
+    const r = new OutboxRegistry(
+      () => new Promise(() => {}),  // 永不完成
+      { sendTimeoutMs: 30 },
+    );
+    const start = Date.now();
+    await expect(
+      r.of(T_A).post({
+        target: T_A,
+        content: { text: "hi" },
+        source: llmSource(),
+      }),
+    ).rejects.toThrow(/timed out/);
+    expect(Date.now() - start).toBeLessThan(200);  // 保证确实是 30ms 超时，不是别的
+  });
+
+  it("onEvent 回调传给子 Outbox：能收到 entry:sent", async () => {
+    const events: string[] = [];
+    const r = new OutboxRegistry(mkSend(), {
+      onEvent: (e) => events.push(e.type),
+      sendTimeoutMs: 0,
+    });
+    await r.of(T_A).post({
+      target: T_A,
+      content: { text: "hi" },
+      source: llmSource(),
+    });
+    expect(events).toContain("entry:enqueued");
+    expect(events).toContain("entry:sent");
+  });
+});

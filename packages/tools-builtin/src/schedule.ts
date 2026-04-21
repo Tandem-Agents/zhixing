@@ -17,7 +17,7 @@
  * - isReadOnly: false — create/update/delete 会修改持久化状态
  */
 
-import type { ToolDefinition, ToolResult } from "@zhixing/core";
+import type { ToolDefinition, ToolExecutionContext, ToolResult } from "@zhixing/core";
 import type { Scheduler, ScheduledTask, TaskSchedule, TaskPriority } from "@zhixing/core";
 
 /**
@@ -120,7 +120,7 @@ export function createScheduleTool(
     isParallelSafe: false,
     needsPermission: false,
 
-    async call(input): Promise<ToolResult> {
+    async call(input, context): Promise<ToolResult> {
       const action = input.action as string;
       console.log(`[tool:schedule] action=${action}${input.name ? ` name="${input.name}"` : ""}${input.schedule_kind ? ` kind=${input.schedule_kind}` : ""}`);
 
@@ -128,7 +128,7 @@ export function createScheduleTool(
         const scheduler = getScheduler();
         switch (action) {
           case "create":
-            return await handleCreate(scheduler, input, getOrigin);
+            return await handleCreate(scheduler, input, getOrigin, context);
           case "list":
             return handleList(scheduler);
           case "update":
@@ -154,6 +154,7 @@ async function handleCreate(
   scheduler: Scheduler,
   input: Record<string, unknown>,
   getOrigin?: () => ScheduleToolOrigin | null,
+  context?: ToolExecutionContext,
 ): Promise<ToolResult> {
   const name = input.name as string;
   const prompt = input.prompt as string;
@@ -170,6 +171,7 @@ async function handleCreate(
 
   const origin = getOrigin?.() ?? undefined;
 
+  // 先落地 task（原子操作）——失败不 commit，避免"用户看到已创建但实际未落地"
   const task = await scheduler.createTask({
     name,
     description: (input.description as string) ?? undefined,
@@ -180,9 +182,62 @@ async function handleCreate(
     origin,
   });
 
+  // Tool-authored commitment（ADR-007 Phase 2）：
+  // - 如果上下文提供了 commitToUser（channel 场景），直接向用户发出简短 commitment
+  //   并在 ToolResult 标记 committedToUser=true，由系统提示约束 LLM 不再叙述
+  // - 无 commitToUser（REPL / 定时任务 ephemeral turn）时降级为原叙述路径
+  // - commit 失败（抛异常 或 adapter 返回 success=false）时同样降级为 LLM 叙述，
+  //   避免"LLM 不叙述 + commitment 未到达"导致用户完全感知不到任务创建
+  if (context?.commitToUser) {
+    try {
+      const res = await context.commitToUser({ text: buildCommitmentText(task) });
+      if (res.success) {
+        return {
+          content: formatTask(task, "Task created successfully"),
+          committedToUser: true,
+        };
+      }
+      console.warn(
+        `[tool:schedule] commitToUser returned success=false, fallback to LLM narration: ${
+          res.error ?? "(no error)"
+        }`,
+      );
+    } catch (err) {
+      console.warn(
+        `[tool:schedule] commitToUser threw, fallback to LLM narration: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
   return {
     content: formatTask(task, "Task created successfully"),
   };
+}
+
+/** 为 commit 消息构造简短文本——用户第一眼就能读懂"什么时候会发生什么" */
+function buildCommitmentText(task: ScheduledTask): string {
+  switch (task.schedule.kind) {
+    case "once":
+      return `⏰ 已安排「${task.name}」：${formatOnceTime(task.schedule.at)}`;
+    case "interval":
+      return `⏰ 已安排循环任务「${task.name}」：每 ${humanDuration(task.schedule.everyMs)}`;
+    case "cron":
+      return `⏰ 已安排定时任务「${task.name}」：cron "${task.schedule.expr}"${
+        task.schedule.tz ? ` (${task.schedule.tz})` : ""
+      }`;
+  }
+}
+
+/** ISO 时间格式化为"2026-04-21 09:57:27"（省略时区，用户看本地时间更自然） */
+function formatOnceTime(isoAt: string): string {
+  const d = new Date(isoAt);
+  if (isNaN(d.getTime())) return isoAt;
+  const pad = (n: number) => n.toString().padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(
+    d.getHours(),
+  )}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
 function handleList(scheduler: Scheduler): ToolResult {
