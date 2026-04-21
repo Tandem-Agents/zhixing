@@ -1,10 +1,14 @@
 /**
- * schedule 工具 — commit-on-create 行为测试（ADR-007 Phase 2）
+ * schedule 工具 — create 行为测试（ADR-007 Phase 3 之后）
  *
- * 覆盖三条路径：
- * 1. 有 commitToUser（channel 场景）→ commit 发送 + committedToUser=true
- * 2. 无 commitToUser（REPL / ephemeral）→ 原叙述路径，无 committedToUser
- * 3. commit 抛异常 → 降级为叙述路径，task 已落地不影响
+ * 架构演化：Phase 2 时 schedule 主动调 commitToUser 抑制 LLM 叙述。
+ * Phase 3 上线后，slot 结构性保证顺序，commitment 机制变为冗余——
+ * schedule 不再主动 commit，由 LLM 根据 ToolResult 自然叙述。
+ *
+ * 覆盖：
+ * 1. create 成功 → 返回 formatTask 内容，不设 committedToUser
+ * 2. 即使 ctx.commitToUser 存在也不被调用（架构决策保证，防退化）
+ * 3. P3c：ctx.turnId 捕获到 task.createdInTurn
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -17,7 +21,6 @@ import {
   Scheduler,
   type SchedulerEventMap,
   type ToolExecutionContext,
-  type OutboundContent,
 } from "@zhixing/core";
 import { createScheduleTool } from "../schedule.js";
 
@@ -68,15 +71,23 @@ function onceInput(overrides?: Record<string, unknown>) {
 
 // ─── 核心测试 ───
 
-describe("schedule tool — commit-on-create (ADR-007 Phase 2)", () => {
-  it("ctx.commitToUser 存在 → 调用 + 结果含 committedToUser=true", async () => {
+describe("schedule tool — create behavior (post ADR-007 Phase 3)", () => {
+  it("create 成功 → 返回 formatTask 内容，不设 committedToUser", async () => {
     await withScheduler(async (scheduler) => {
-      const commits: OutboundContent[] = [];
-      const commitToUser = vi.fn(async (content: OutboundContent) => {
-        commits.push(content);
-        return { success: true, retryable: false };
-      });
+      const tool = createScheduleTool(scheduler);
+      const result = await tool.call(onceInput(), baseContext());
 
+      expect(result.isError).toBeFalsy();
+      expect(result.committedToUser).toBeUndefined();
+      expect(result.content).toContain("Task created successfully");
+    });
+  });
+
+  it("架构回归：即使 ctx.commitToUser 存在，schedule 也不调用它", async () => {
+    // Phase 3 slot 已结构性保证 task fire 排在 LLM 回复之后——commitment 冗余。
+    // 本测试防止未来误加 commit 调用回归（再次引入重复消息）。
+    await withScheduler(async (scheduler) => {
+      const commitToUser = vi.fn(async () => ({ success: true, retryable: false }));
       const tool = createScheduleTool(scheduler);
       const result = await tool.call(
         onceInput({ name: "晨间会议" }),
@@ -84,150 +95,24 @@ describe("schedule tool — commit-on-create (ADR-007 Phase 2)", () => {
       );
 
       expect(result.isError).toBeFalsy();
-      expect(result.committedToUser).toBe(true);
-      expect(commits).toHaveLength(1);
-      expect(commits[0]!.text).toContain("⏰");
-      expect(commits[0]!.text).toContain("晨间会议");
-    });
-  });
-
-  it("无 ctx.commitToUser（REPL / ephemeral）→ 不触发 commit，无 committedToUser 标记", async () => {
-    await withScheduler(async (scheduler) => {
-      const tool = createScheduleTool(scheduler);
-      const result = await tool.call(onceInput(), baseContext());
-
-      expect(result.isError).toBeFalsy();
       expect(result.committedToUser).toBeUndefined();
-      // content 走原路径（formatTask 输出）
+      expect(commitToUser).not.toHaveBeenCalled();
+      // content 走正常叙述路径，LLM 据此告知用户
       expect(result.content).toContain("Task created successfully");
+      expect(result.content).toContain("晨间会议");
     });
   });
 
-  it("commitToUser 抛异常 → 降级到原叙述路径，不抛给 LLM", async () => {
+  it("create 参数不全 → 返回 isError，不创建 task", async () => {
     await withScheduler(async (scheduler) => {
-      const commitToUser = vi.fn(async () => {
-        throw new Error("outbox down");
-      });
-
-      const tool = createScheduleTool(scheduler);
-      const result = await tool.call(
-        onceInput(),
-        baseContext({ commitToUser }),
-      );
-
-      expect(result.isError).toBeFalsy();
-      expect(result.committedToUser).toBeUndefined();
-      expect(result.content).toContain("Task created successfully");
-      expect(commitToUser).toHaveBeenCalledOnce();
-    });
-  });
-
-  it("commitToUser 返回 success=false（adapter 报失败）→ 降级到叙述路径，不设 committedToUser", async () => {
-    // 回归：避免"LLM 不叙述 + commit 未到达" → 用户完全感知不到任务创建
-    await withScheduler(async (scheduler) => {
-      const commitToUser = vi.fn(async () => ({
-        success: false,
-        retryable: true,
-        error: "rate limited",
-      }));
-
-      const tool = createScheduleTool(scheduler);
-      const result = await tool.call(
-        onceInput(),
-        baseContext({ commitToUser }),
-      );
-
-      expect(result.isError).toBeFalsy();
-      expect(result.committedToUser).toBeUndefined();
-      // content 走叙述路径，LLM 有内容可以告诉用户
-      expect(result.content).toContain("Task created successfully");
-      expect(commitToUser).toHaveBeenCalledOnce();
-    });
-  });
-
-  it("commitment 文本覆盖 once / interval / cron 三种 schedule", async () => {
-    await withScheduler(async (scheduler) => {
-      const texts: string[] = [];
-      const commitToUser = async (c: OutboundContent) => {
-        texts.push(c.text);
-        return { success: true, retryable: false };
-      };
-      const tool = createScheduleTool(scheduler);
-
-      await tool.call(
-        onceInput({ name: "once-task" }),
-        baseContext({ commitToUser }),
-      );
-      await tool.call(
-        {
-          action: "create",
-          name: "interval-task",
-          prompt: "check",
-          schedule_kind: "interval",
-          schedule_every_ms: 3_600_000, // 1 小时（>= 60s 最小间隔）
-        },
-        baseContext({ commitToUser }),
-      );
-      await tool.call(
-        {
-          action: "create",
-          name: "cron-task",
-          prompt: "daily",
-          schedule_kind: "cron",
-          schedule_cron: "0 8 * * *",
-        },
-        baseContext({ commitToUser }),
-      );
-
-      expect(texts).toHaveLength(3);
-      expect(texts[0]).toMatch(/once-task/);
-      expect(texts[1]).toMatch(/interval-task.*每/);
-      expect(texts[2]).toMatch(/cron-task.*0 8 \* \* \*/);
-    });
-  });
-
-  it("create 失败时不触发 commit（用户不会收到误导）", async () => {
-    await withScheduler(async (scheduler) => {
-      const commitToUser = vi.fn(async () => ({
-        success: true,
-        retryable: false,
-      }));
-
       const tool = createScheduleTool(scheduler);
       const result = await tool.call(
         { action: "create", name: "bad" /* 缺少 prompt/schedule_kind */ },
-        baseContext({ commitToUser }),
+        baseContext(),
       );
 
       expect(result.isError).toBe(true);
-      expect(commitToUser).not.toHaveBeenCalled();
-    });
-  });
-
-  it("commitToUser 签名接受 meta 参数（AgentLoop 层通过此传 toolName）", async () => {
-    // 契约测试：工具本身不会 meta，但上游 AgentLoop wrapper 会注入 toolName。
-    // 此测试确保 TurnContext.commitToUser 的第二参数协议生效——传入时不报错、不影响工具。
-    await withScheduler(async (scheduler) => {
-      const metas: Array<{ toolName?: string } | undefined> = [];
-      const commitToUser = vi.fn(
-        async (_content, meta?: { toolName?: string }) => {
-          metas.push(meta);
-          return { success: true, retryable: false };
-        },
-      );
-
-      const tool = createScheduleTool(scheduler);
-      // 直接调用模拟已被 wrapper 包过的 commitToUser（wrapper 会在此处自动填 toolName）
-      const wrappedCommit = (content: { text: string }) =>
-        commitToUser(content, { toolName: tool.name });
-      const result = await tool.call(
-        onceInput(),
-        baseContext({ commitToUser: wrappedCommit }),
-      );
-
-      expect(result.committedToUser).toBe(true);
-      expect(metas).toHaveLength(1);
-      expect(metas[0]).toEqual({ toolName: "schedule" });
+      expect(scheduler.listTasks()).toHaveLength(0);
     });
   });
 

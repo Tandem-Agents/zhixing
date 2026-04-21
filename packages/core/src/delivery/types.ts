@@ -74,17 +74,6 @@ export interface DeliveryEventMap extends EventMap {
   };
 }
 
-// ─── 过滤器（可插拔链式过滤） ───
-
-export type FilterVerdict =
-  | { pass: true }
-  | { pass: false; reason: string };
-
-export interface DeliveryFilter {
-  readonly name: string;
-  check(item: DeliveryItem): FilterVerdict | Promise<FilterVerdict>;
-}
-
 // ─── 发送器（抽象通道发送，解耦 ChannelRegistry） ───
 
 /**

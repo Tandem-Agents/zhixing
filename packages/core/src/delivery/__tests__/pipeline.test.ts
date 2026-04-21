@@ -283,7 +283,10 @@ describe("DeliveryPipeline", () => {
       await pipeline.stop();
     });
 
-    it("deduplicates identical content", async () => {
+    it("faithful delivery: 相同 target + 相同 content 连续 enqueue 两次都送达（不 dedup）", async () => {
+      // 架构契约：Pipeline 忠实送达每一条 enqueued item，不主动做内容去重。
+      // 真实业务场景：两个独立 scheduler task 可能巧合生成相同文本——都应到达 user。
+      // 防回归测试（替代历史上的 "deduplicates identical content"）。
       const sender = createMockSender();
       const { pipeline } = createTestPipeline({
         sender,
@@ -298,12 +301,12 @@ describe("DeliveryPipeline", () => {
       await pipeline.flush();
       expect(sender.send).toHaveBeenCalledOnce();
 
-      // Enqueue same content again
       await pipeline.enqueue({ target, content });
       await pipeline.flush();
-      // Dedup should filter it out
-      expect(sender.send).toHaveBeenCalledOnce();
-      expect(pipeline.stats().delivered).toBe(1);
+
+      // 两条都要送达，不被 drop
+      expect(sender.send).toHaveBeenCalledTimes(2);
+      expect(pipeline.stats().delivered).toBe(2);
       await pipeline.stop();
     });
 
@@ -344,8 +347,179 @@ describe("DeliveryPipeline", () => {
     });
   });
 
+  describe("flush 并发语义（singleflight）", () => {
+    it("并发多次 flush 共享同一 drain——所有 caller 等同一次完成", async () => {
+      // 构造慢 send（20ms 延迟），让 drain 有明显时间窗
+      let sendCount = 0;
+      const sender = createMockSender({
+        send: vi.fn(async () => {
+          sendCount++;
+          await new Promise((r) => setTimeout(r, 20));
+          return { success: true, retryable: false };
+        }),
+      });
+
+      const { pipeline } = createTestPipeline({
+        sender,
+        queueFilePath: join(tempDir, "q.json"),
+      });
+      await pipeline.start();
+
+      await pipeline.enqueue({
+        target: { channelId: "feishu", to: "u1" },
+        content: { text: "only one" },
+      });
+
+      // 3 个并发 caller 同时 flush
+      const [r1, r2, r3] = await Promise.all([
+        pipeline.flush(),
+        pipeline.flush(),
+        pipeline.flush(),
+      ]);
+
+      // 所有 caller 都返回 void（没抛/没假值）
+      expect(r1).toBeUndefined();
+      expect(r2).toBeUndefined();
+      expect(r3).toBeUndefined();
+
+      // item 只被 send 一次（不会因三次 flush 被重复 send）
+      expect(sendCount).toBe(1);
+      expect(pipeline.stats().delivered).toBe(1);
+      await pipeline.stop();
+    });
+
+    it("R2: stop() 等 in-flight drain 完成（优雅关停，不留后台 send 泄漏）", async () => {
+      // 构造一个"慢 send"：开始 send 后延迟 40ms 才 resolve，
+      // 给 stop 介入的时间窗。
+      let sendResolveAt = 0;
+      let stopResolveAt = 0;
+      const sender = createMockSender({
+        send: vi.fn(async () => {
+          await new Promise((r) => setTimeout(r, 40));
+          sendResolveAt = Date.now();
+          return { success: true, retryable: false };
+        }),
+      });
+
+      const { pipeline } = createTestPipeline({
+        sender,
+        queueFilePath: join(tempDir, "q.json"),
+      });
+      await pipeline.start();
+      await pipeline.enqueue({
+        target: { channelId: "feishu", to: "u1" },
+        content: { text: "inflight" },
+      });
+
+      // 启动 flush 但**不 await**——让它在后台跑
+      const flushPromise = pipeline.flush();
+
+      // 短暂等待让 drain 真正进入 send
+      await new Promise((r) => setTimeout(r, 5));
+
+      // 此时 send 正在执行。stop 应等它完成
+      await pipeline.stop();
+      stopResolveAt = Date.now();
+
+      // 断言 stop 返回时 send 已完成（stop 至少等到 send resolve 后）
+      expect(sendResolveAt).toBeGreaterThan(0);
+      expect(stopResolveAt).toBeGreaterThanOrEqual(sendResolveAt);
+
+      // 之前 fire 的 flush promise 也应该正常 resolve
+      await expect(flushPromise).resolves.toBeUndefined();
+      expect(pipeline.stats().delivered).toBe(1);
+    });
+
+    it("先 flush 返回后再 flush → 启新一轮 drain", async () => {
+      const sender = createMockSender();
+      const { pipeline } = createTestPipeline({
+        sender,
+        queueFilePath: join(tempDir, "q.json"),
+      });
+      await pipeline.start();
+
+      await pipeline.enqueue({
+        target: { channelId: "feishu", to: "u1" },
+        content: { text: "a" },
+      });
+      await pipeline.flush();
+      expect(sender.send).toHaveBeenCalledTimes(1);
+
+      await pipeline.enqueue({
+        target: { channelId: "feishu", to: "u1" },
+        content: { text: "b" },
+      });
+      await pipeline.flush();
+      expect(sender.send).toHaveBeenCalledTimes(2);
+      await pipeline.stop();
+    });
+  });
+
+  describe("生命周期（lifecycle）", () => {
+    it("未 start 就 enqueue → 抛错（防止覆盖磁盘已有数据）", async () => {
+      const { pipeline } = createTestPipeline({
+        queueFilePath: join(tempDir, "q.json"),
+      });
+      // 故意不 start
+      await expect(
+        pipeline.enqueue({
+          target: { channelId: "feishu", to: "u1" },
+          content: { text: "x" },
+        }),
+      ).rejects.toThrow(/not running.*state="unstarted"/);
+    });
+
+    it("未 start 就 flush → 抛错", async () => {
+      const { pipeline } = createTestPipeline({
+        queueFilePath: join(tempDir, "q.json"),
+      });
+      await expect(pipeline.flush()).rejects.toThrow(/not running.*state="unstarted"/);
+    });
+
+    it("stopped 后 enqueue/flush → 抛错", async () => {
+      const { pipeline } = createTestPipeline({
+        queueFilePath: join(tempDir, "q.json"),
+      });
+      await pipeline.start();
+      await pipeline.stop();
+
+      await expect(
+        pipeline.enqueue({
+          target: { channelId: "feishu", to: "u1" },
+          content: { text: "x" },
+        }),
+      ).rejects.toThrow(/not running.*state="stopped"/);
+      await expect(pipeline.flush()).rejects.toThrow(/not running.*state="stopped"/);
+    });
+
+    it("重复 start → 抛错（pipeline 单次使用）", async () => {
+      const { pipeline } = createTestPipeline({
+        queueFilePath: join(tempDir, "q.json"),
+      });
+      await pipeline.start();
+      await expect(pipeline.start()).rejects.toThrow(/illegal transition.*state="running"/);
+      await pipeline.stop();
+    });
+
+    it("stopped 后再 stop → 幂等（无副作用）", async () => {
+      const { pipeline } = createTestPipeline({
+        queueFilePath: join(tempDir, "q.json"),
+      });
+      await pipeline.start();
+      await pipeline.stop();
+      await expect(pipeline.stop()).resolves.toBeUndefined();
+    });
+
+    it("unstarted 就 stop → 抛错（通常是调用方 bug）", async () => {
+      const { pipeline } = createTestPipeline({
+        queueFilePath: join(tempDir, "q.json"),
+      });
+      await expect(pipeline.stop()).rejects.toThrow(/illegal transition.*state="unstarted"/);
+    });
+  });
+
   describe("crash recovery", () => {
-    it("persists queue across restarts", async () => {
+    it("persists queue across restarts → 新 pipeline start() 即自动恢复（awaited flush）", async () => {
       const queuePath = join(tempDir, "q.json");
       const sender = createMockSender();
 
@@ -361,17 +535,81 @@ describe("DeliveryPipeline", () => {
       });
       await p1.pipeline.stop();
 
-      // Pipeline 2: load from persisted queue
+      // Pipeline 2: start() 同步 load + 恢复 flush
       const p2 = createTestPipeline({
         sender,
         queueFilePath: queuePath,
       });
       await p2.pipeline.start();
-      expect(p2.pipeline.stats().queued).toBe(1);
 
-      await p2.pipeline.flush();
+      // start() 返回时已完成恢复（awaited recovery flush）——无 race，无延迟
       expect(sender.send).toHaveBeenCalledOnce();
       expect(p2.pipeline.stats().delivered).toBe(1);
+      expect(p2.pipeline.stats().queued).toBe(0);
+      await p2.pipeline.stop();
+    });
+
+    it("R1: recovery flush 抛错时 start 不失败（软降级 + warn）", async () => {
+      const queuePath = join(tempDir, "q.json");
+
+      // p1 正常 enqueue + stop，磁盘留 1 条 pending
+      const p1 = createTestPipeline({
+        sender: createMockSender(),
+        queueFilePath: queuePath,
+      });
+      await p1.pipeline.start();
+      await p1.pipeline.enqueue({
+        target: { channelId: "feishu", to: "u1" },
+        content: { text: "x" },
+      });
+      await p1.pipeline.stop();
+
+      // p2: 构造一个让 flush 抛错的 sender（send 抛）
+      const warns: string[] = [];
+      const p2Sender = createMockSender({
+        send: vi.fn().mockRejectedValue(new Error("io boom")),
+      });
+      const p2 = createTestPipeline({
+        sender: p2Sender,
+        queueFilePath: queuePath,
+      });
+      // 用 spy 捕获 warn 日志
+      p2.pipeline["logger"] = {
+        info: () => {},
+        warn: (msg: string) => warns.push(msg),
+        error: () => {},
+        debug: () => {},
+      };
+
+      // start 不抛——即使 recovery flush 路径里 send 抛错
+      await expect(p2.pipeline.start()).resolves.toBeUndefined();
+
+      // send 被尝试调用（recovery flush 跑了），但错误被 retry 路径吸收
+      expect(p2Sender.send).toHaveBeenCalled();
+      await p2.pipeline.stop();
+    });
+
+    it("crash 恢复时 sender 未 ready → defer 而不阻塞 start", async () => {
+      const queuePath = join(tempDir, "q.json");
+
+      // p1 enqueue 后 stop
+      const p1Sender = createMockSender();
+      const p1 = createTestPipeline({ sender: p1Sender, queueFilePath: queuePath });
+      await p1.pipeline.start();
+      await p1.pipeline.enqueue({
+        target: { channelId: "feishu", to: "u1" },
+        content: { text: "deferred" },
+      });
+      await p1.pipeline.stop();
+
+      // p2 的 sender 未 ready——recovery flush 不会 send，只 defer
+      const p2Sender = createMockSender({ isReady: vi.fn().mockReturnValue(false) });
+      const p2 = createTestPipeline({ sender: p2Sender, queueFilePath: queuePath });
+      await p2.pipeline.start();
+
+      // send 没调，item 仍在 queue，nextAttemptAt 被设
+      expect(p2Sender.send).not.toHaveBeenCalled();
+      expect(p2.pipeline.stats().queued).toBe(1);
       await p2.pipeline.stop();
     });
   });

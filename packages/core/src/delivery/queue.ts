@@ -26,6 +26,15 @@ export class DeliveryQueue {
     return this.items.length;
   }
 
+  /**
+   * Persist queue to disk.
+   *
+   * 已知局限（KL-1 / KL-3，见 research/design/specifications/persistent-service.md
+   * §4.7 "Known Limitations"）：并发 save 调用会产生 tmp+rename race，
+   * 其一可能抛 ENOENT。高并发 enqueue 或 "stop 与 in-flight enqueue 并发"
+   * 场景下可能触发。修复方向：singleflight（activeSave promise）或串行 chain。
+   * 当前作为独立工单跟踪，未修。
+   */
   async save(): Promise<void> {
     if (!this.dirty) return;
     await fs.mkdir(path.dirname(this.filePath), { recursive: true });

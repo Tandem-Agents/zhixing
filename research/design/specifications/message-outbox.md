@@ -530,11 +530,12 @@ REPL 的"channel"是终端。若要把 REPL 回复也纳入 Outbox，需要：
 
 1. ✅ 扩展 ToolExecutionContext：`commitToUser` / `emissionTarget` / `turnId`
 2. ✅ 扩展 ToolResult：`committedToUser`；tool-executor 把 `COMMITMENT_SIGNAL` 文本写入 tool_result content（保证信号不因 ToolResultBlock 构造丢失）
-3. ✅ 改造 schedule 工具：create 成功 → commitToUser + committedToUser=true；commit 失败（抛异常或 success=false）降级为 LLM 叙述路径
+3. ✅ 改造 schedule 工具：create 成功 → commitToUser + committedToUser=true
 4. ✅ 更新系统提示：引用 core 导出的 `COMMITMENT_SIGNAL` 常量；committedToUser 时抑制叙述
 5. ✅ AgentLoop secureExecuteTool 包一层 commitToUser，自动注入 `toolName` 到 EmissionSource.tool-commitment
 
-**验收**：9 个 schedule 工具测试通过，含"commit 返回 success=false 降级为叙述"等边界用例。
+**后续演化（Phase 3 上线后）**：Phase 2 的 commitment 机制被降级为"可选增强"，不再是主路径——
+详见下方 [Phase 2 演化](#phase-2-演化phase-3-上线后)。
 
 ### Phase 3 — Turn Slot 因果锁 ✅ 已完成（2026-04-21）
 
@@ -560,6 +561,43 @@ REPL 的"channel"是终端。若要把 REPL 回复也纳入 Outbox，需要：
 - inbound-router.test.ts "P3d: runChannelTurn 开头 openSlot, 成功回复 fillSlot" — 生命周期接入
 
 全量回归 2204 测试通过、6 包 build success。
+
+### Phase 2 演化（Phase 3 上线后）
+
+**时间**：2026-04-21，Phase 3 上线同日的飞书手动测试后做出的架构调整。
+
+**背景**：用户场景 "5 秒后提醒我" 实测收到 3 条消息：
+1. commitment "⏰ 已安排..."（Phase 2 的工具自动 commit）
+2. LLM 叙述 "已经创建好了..."（抑制指令对小模型失效）
+3. task fire "时间到了！🎯"
+
+前两条语义重复；抑制指令依赖 LLM 合规度（小模型如 MiniMax-M2.5 常违反）。
+
+**关键观察**：Phase 2 commitment 的**核心价值**（防止 "LLM 叙述晚于 task fire" 的顺序倒转）
+**已被 Phase 3 完全接管**——slot 结构性阻塞 task fire 到 turn 完成。Phase 2 在 Phase 3
+之后的剩余价值仅剩"LLM 宕机时用户仍有反馈"，但此边缘场景被 `abandonSlot` + LLM 错误
+回复分支兜底，不再需要 commitment。
+
+**决策**：schedule 工具不再主动调 `commitToUser`。
+
+**保留**：
+- `ToolExecutionContext.commitToUser` API（public 接口稳定）
+- `ToolResult.committedToUser` 字段
+- `COMMITMENT_SIGNAL` 常量 + tool-executor 的 content 注入逻辑
+- 系统提示的 commitment 抑制段（condition-triggered，无 signal 不影响 LLM）
+- InboundRouter 的 commitToUser 闭包提供
+
+**作用**：Phase 2 机制降级为"工具作者可选的增强"。未来如果某工具（如长耗时 bash）
+确实需要主动 commit 阶段性进度，仍可调用 API。但默认路径是"工具返回 ToolResult，
+LLM 自然叙述，Phase 3 slot 保证顺序"。
+
+**用户体验收敛**：2 条消息——LLM 回复 + task fire，无冗余。
+
+**删除代码**：`buildCommitmentText`、`formatOnceTime`、schedule 工具里的
+`commitToUser` 调用块（见 schedule.ts 顶部注释）。
+
+**测试调整**：schedule.test.ts 从 9 条缩到 5 条；删掉原 commit 路径测试，
+新增"即使 ctx.commitToUser 存在也不调用"的架构回归测试，防止未来误加 commit 回来。
 
 ### Phase 4（可选 / 未来）
 

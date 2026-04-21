@@ -20,6 +20,25 @@
 import type { ToolDefinition, ToolExecutionContext, ToolResult } from "@zhixing/core";
 import type { Scheduler, ScheduledTask, TaskSchedule, TaskPriority } from "@zhixing/core";
 
+// 架构演化记：
+//   ADR-007 Phase 2 引入了 `commitToUser` API + COMMITMENT_SIGNAL，让工具在
+//   创建完 task 后主动发一条确认消息，配合系统提示抑制 LLM 叙述——用来防止
+//   "LLM 叙述晚于 task fire"的顺序倒转。
+//
+//   Phase 3 的 Outbox Turn Slot 上线后，顺序由结构性 slot 阻塞保证（task fire
+//   必等 turn 完成才发），Phase 2 的 commitment 机制失去核心价值：
+//     - 保顺序的职责已被 Phase 3 接管
+//     - 抑制 LLM 叙述依赖模型合规（小模型常失效），反而引入冗余消息
+//     - 用户 UX：commit "⏰ 已安排..." + LLM "好的，5 秒后见" + task "时间到了"
+//       三条消息里前两条语义重复
+//
+//   所以 schedule 工具在 ADR-007 完整落地后不再主动调 commitToUser——回归
+//   "工具返回 ToolResult，LLM 根据结果自然叙述，Phase 3 slot 保证 task fire
+//   排在 LLM 回复之后"的干净路径。用户收到 2 条消息：LLM 回复 + task fire。
+//
+//   `commitToUser` / `committedToUser` / `COMMITMENT_SIGNAL` 依然保留——
+//   作为可选增强预留给未来需要"工具即时确认"的场景（如耗时工具的阶段性反馈）。
+
 /**
  * 创建 schedule 工具。
  *
@@ -173,10 +192,9 @@ async function handleCreate(
 
   // 若本次工具调用发生在 channel turn 内，把 turnId 捕获到 task 上——
   // 任务 fire 后其投递 entry 会以 createdInTurn 派生 afterSlot，确保回复先于 task fire。
-  // REPL/ephemeral 上下文无 turnId，createdInTurn 保持 undefined，行为与 Phase 2 无异。
+  // REPL/ephemeral 上下文无 turnId，createdInTurn 保持 undefined。
   const createdInTurn = context?.turnId;
 
-  // 先落地 task（原子操作）——失败不 commit，避免"用户看到已创建但实际未落地"
   const task = await scheduler.createTask({
     name,
     description: (input.description as string) ?? undefined,
@@ -188,62 +206,12 @@ async function handleCreate(
     ...(createdInTurn !== undefined && { createdInTurn }),
   });
 
-  // Tool-authored commitment（ADR-007 Phase 2）：
-  // - 如果上下文提供了 commitToUser（channel 场景），直接向用户发出简短 commitment
-  //   并在 ToolResult 标记 committedToUser=true，由系统提示约束 LLM 不再叙述
-  // - 无 commitToUser（REPL / 定时任务 ephemeral turn）时降级为原叙述路径
-  // - commit 失败（抛异常 或 adapter 返回 success=false）时同样降级为 LLM 叙述，
-  //   避免"LLM 不叙述 + commitment 未到达"导致用户完全感知不到任务创建
-  if (context?.commitToUser) {
-    try {
-      const res = await context.commitToUser({ text: buildCommitmentText(task) });
-      if (res.success) {
-        return {
-          content: formatTask(task, "Task created successfully"),
-          committedToUser: true,
-        };
-      }
-      console.warn(
-        `[tool:schedule] commitToUser returned success=false, fallback to LLM narration: ${
-          res.error ?? "(no error)"
-        }`,
-      );
-    } catch (err) {
-      console.warn(
-        `[tool:schedule] commitToUser threw, fallback to LLM narration: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    }
-  }
-
+  // ADR-007 Phase 3 之后不再主动调 commitToUser——详见文件顶部的演化记。
+  // LLM 根据此 ToolResult 自然叙述"任务已创建"，Phase 3 slot 保证 task fire
+  // 排在该叙述之后送达，用户体验：LLM 回复 + task fire = 2 条语义不重复的消息。
   return {
     content: formatTask(task, "Task created successfully"),
   };
-}
-
-/** 为 commit 消息构造简短文本——用户第一眼就能读懂"什么时候会发生什么" */
-function buildCommitmentText(task: ScheduledTask): string {
-  switch (task.schedule.kind) {
-    case "once":
-      return `⏰ 已安排「${task.name}」：${formatOnceTime(task.schedule.at)}`;
-    case "interval":
-      return `⏰ 已安排循环任务「${task.name}」：每 ${humanDuration(task.schedule.everyMs)}`;
-    case "cron":
-      return `⏰ 已安排定时任务「${task.name}」：cron "${task.schedule.expr}"${
-        task.schedule.tz ? ` (${task.schedule.tz})` : ""
-      }`;
-  }
-}
-
-/** ISO 时间格式化为"2026-04-21 09:57:27"（省略时区，用户看本地时间更自然） */
-function formatOnceTime(isoAt: string): string {
-  const d = new Date(isoAt);
-  if (isNaN(d.getTime())) return isoAt;
-  const pad = (n: number) => n.toString().padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(
-    d.getHours(),
-  )}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
 function handleList(scheduler: Scheduler): ToolResult {
