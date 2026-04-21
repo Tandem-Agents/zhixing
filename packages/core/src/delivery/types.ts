@@ -77,10 +77,21 @@ export interface DeliveryFilter {
 
 // ─── 发送器（抽象通道发送，解耦 ChannelRegistry） ───
 
+/**
+ * 传递给 sender.send 的元数据（可选）。
+ * Pipeline 调用时会传入 item 的 source 和 id，供 Outbox 等上游生成更精细的事件/日志/源标签。
+ * 兼容：meta 可选，不影响不需要此信息的实现。
+ */
+export interface DeliverySendMeta {
+  readonly source?: DeliverySource;
+  readonly itemId?: string;
+}
+
 export interface DeliverySender {
   send(
     target: DeliveryTarget,
     content: OutboundContent,
+    meta?: DeliverySendMeta,
   ): Promise<DeliveryResult>;
   isReady(channelId: string): boolean;
 }

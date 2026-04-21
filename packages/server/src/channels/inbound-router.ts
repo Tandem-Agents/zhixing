@@ -1,9 +1,12 @@
 import {
   type ChannelLogger,
   type ChannelRegistry,
+  type DeliveryResult,
   type DeliveryTarget,
+  type EmissionSource,
   type InboundMessage,
   type OutboundContent,
+  type OutboxRegistry,
   extractText,
   userMessage,
   type AgentResult,
@@ -12,24 +15,67 @@ import {
 import type { ConversationManager, ManagedSession } from "../runtime/conversation-manager.js";
 import { resolveConversationId } from "./conversation-binder.js";
 
-// ─── InboundRouter 入站消息路由器 ─── 
+// ─── InboundRouter 入站消息路由器 ───
 // 将入站消息路由到对应的对话会话中，并执行 Agent 处理
 
 export interface InboundRouterOptions {
   conversations: ConversationManager;
   channels: ChannelRegistry;
   logger: ChannelLogger;
+  /**
+   * 可选 Outbox 顺序层（ADR-007）。提供时，所有发往用户的回复经 Outbox.post 串行化；
+   * 未提供时降级为直接 adapter.send（测试/尚未接入 Outbox 的场景）。
+   */
+  outboxRegistry?: OutboxRegistry;
 }
 
 export class InboundRouter {
   private readonly conversations: ConversationManager;
   private readonly channels: ChannelRegistry;
   private readonly logger: ChannelLogger;
+  private outboxRegistry?: OutboxRegistry;
 
   constructor(options: InboundRouterOptions) {
     this.conversations = options.conversations;
     this.channels = options.channels;
     this.logger = options.logger;
+    this.outboxRegistry = options.outboxRegistry;
+  }
+
+  /**
+   * Late-bind OutboxRegistry（解决 setupChannels → setupDelivery 的初始化顺序）。
+   * 应在任何 inbound 消息到达之前完成。
+   *
+   * Write-once：重复绑定抛异常——防止误配置 / 测试时静默覆盖导致的隐蔽 bug。
+   * 若确需替换（如热更新），应显式先 unset（当前不支持）。
+   */
+  setOutboxRegistry(registry: OutboxRegistry): void {
+    if (this.outboxRegistry) {
+      throw new Error(
+        "InboundRouter.setOutboxRegistry: registry already bound (write-once)",
+      );
+    }
+    this.outboxRegistry = registry;
+  }
+
+  /**
+   * 统一出口：经 Outbox（若已注入）或降级为 adapter.send。
+   * 所有 user-facing 消息走此方法，保证顺序不变量。
+   */
+  private async emit(
+    target: DeliveryTarget,
+    content: OutboundContent,
+    source: EmissionSource,
+  ): Promise<DeliveryResult | void> {
+    if (this.outboxRegistry) {
+      return this.outboxRegistry.of(target).post({ target, content, source });
+    }
+    const adapter = this.channels.get(target.channelId);
+    if (!adapter) {
+      this.logger.warn(`No adapter found for channel: ${target.channelId}`);
+      return;
+    }
+    return adapter.send(target, content);
   }
 
   /**
@@ -58,7 +104,11 @@ export class InboundRouter {
     } catch (err) {
       this.logger.error(`Failed to get/create conversation ${conversationId}: ${errMsg(err)}`);
       const replyTarget = buildReplyTarget(msg);
-      await adapter.send(replyTarget, { text: "会话创建失败，请稍后重试。" }).catch(() => {});
+      await this.emit(
+        replyTarget,
+        { text: "会话创建失败，请稍后重试。" },
+        { kind: "system", handler: "conversation-create-failed" },
+      ).catch(() => {});
       return;
     }
 
@@ -74,9 +124,11 @@ export class InboundRouter {
     if (status === "full") {
       this.logger.warn(`[丢弃] 队列满 conv=${conversationId}`);
       const replyTarget = buildReplyTarget(msg);
-      await adapter.send(replyTarget, {
-        text: "消息队列已满，请稍后再试。",
-      }).catch((e) => this.logger.error(`Failed to send busy reply: ${errMsg(e)}`));
+      await this.emit(
+        replyTarget,
+        { text: "消息队列已满，请稍后再试。" },
+        { kind: "system", handler: "conversation-queue-full" },
+      ).catch((e) => this.logger.error(`Failed to send busy reply: ${errMsg(e)}`));
       return;
     }
 
@@ -91,9 +143,7 @@ export class InboundRouter {
     msg: InboundMessage,
   ): Promise<void> {
     const conversationId = managed.conversationId;
-    const adapter = this.channels.get(msg.channelId);
-    if (!adapter) return;
-
+    // 出口统一走 this.emit（Outbox 或降级 adapter.send），adapter 直引用不再需要
     const turnStartedAt = new Date().toISOString();
     this.logger.info(`[开始处理] conv=${conversationId} text="${msg.text}"`);
 
@@ -130,7 +180,10 @@ export class InboundRouter {
         const replyTarget = buildReplyTarget(msg);
         const content = buildOutboundContent(result);
         this.logger.info(`[回复] conv=${conversationId} len=${content.text.length} text="${content.text}"`);
-        await adapter.send(replyTarget, content).catch((e) =>
+        await this.emit(replyTarget, content, {
+          kind: "llm-reply",
+          conversationId,
+        }).catch((e) =>
           this.logger.error(`Failed to send reply to ${msg.channelId}: ${errMsg(e)}`),
         );
       } else if (result) {
@@ -142,14 +195,22 @@ export class InboundRouter {
               ? "达到最大轮次限制。"
               : "处理被中止。";
         this.logger.warn(`[错误回复] conv=${conversationId} reason=${result.reason}`);
-        await adapter.send(replyTarget, { text: errorText }).catch((e) =>
+        await this.emit(
+          replyTarget,
+          { text: errorText },
+          { kind: "llm-reply", conversationId },
+        ).catch((e) =>
           this.logger.error(`Failed to send error reply: ${errMsg(e)}`),
         );
       }
     } catch (err) {
       this.logger.error(`[异常] conv=${conversationId}: ${errMsg(err)}`);
       const replyTarget = buildReplyTarget(msg);
-      await adapter.send(replyTarget, { text: "内部错误，请稍后重试。" }).catch(() => {});
+      await this.emit(
+        replyTarget,
+        { text: "内部错误，请稍后重试。" },
+        { kind: "system", handler: "inbound-router-error" },
+      ).catch(() => {});
     } finally {
       this.logger.info(`[释放] conv=${conversationId} busy=false`);
       this.conversations.setBusy(conversationId, false);

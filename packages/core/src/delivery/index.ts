@@ -31,3 +31,23 @@ export type {
   FilterVerdict,
   IDeliveryPipeline,
 } from "./types.js";
+
+// ─── Outbox（顺序层 / ADR-007） ───
+export { Outbox } from "./outbox.js";
+export { OutboxRegistry, makeKey as makeOutboxKey } from "./outbox-registry.js";
+export { createOutboxSender } from "./outbox-sender.js";
+export type { OutboxSenderOptions } from "./outbox-sender.js";
+export type { DeliverySendMeta } from "./types.js";
+export type {
+  EmissionSource,
+  OutboxDoSend,
+  OutboxEntry,
+  OutboxEvent,
+  OutboxKey,
+  OutboxLogger,
+  OutboxOptions,
+  OutboxRegistryOptions,
+  PostEntryInput,
+  TurnId,
+  TurnSlotId,
+} from "./outbox-types.js";

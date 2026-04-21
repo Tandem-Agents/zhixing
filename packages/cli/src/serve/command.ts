@@ -32,6 +32,7 @@ import {
   buildSystemHandlers,
   ConversationManager,
   DEFAULT_SERVER_CONFIG,
+  type InboundRouter,
   type RunningServer,
 } from "@zhixing/server";
 import { loadConfig } from "@zhixing/providers";
@@ -126,6 +127,7 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
   // 4. Channels
   const config = loadConfig({ cwd: workspace });
   let channels: ChannelRegistry | undefined;
+  let inboundRouter: InboundRouter | null = null;
   if (config.channels && Object.keys(config.channels).length > 0) {
     const channelLogger = {
       debug: (msg: string, ...args: unknown[]) => console.log(chalk.dim(`[channel] ${msg}`), ...args),
@@ -141,6 +143,7 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
         logger: channelLogger,
       });
       channels = result.registry;
+      inboundRouter = result.router;
     } catch (err) {
       console.warn(chalk.yellow(`[channel] Setup failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`));
     }
@@ -158,6 +161,11 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
         error: (msg) => console.error(chalk.red(msg)),
       },
     });
+
+    // 5b. Late-bind Outbox 到 InboundRouter —— LLM 回复现在也过 Outbox（ADR-007 Phase 1）
+    if (inboundRouter) {
+      inboundRouter.setOutboxRegistry(deliveryStack.outboxRegistry);
+    }
   }
 
   // 6. Ephemeral Runtime — 定时任务专用（Step 16e）

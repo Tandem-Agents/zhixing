@@ -221,7 +221,10 @@ export class DeliveryPipeline implements IDeliveryPipeline {
     this.queue.markDirty();
 
     try {
-      const result = await this.sender.send(item.target, item.content);
+      const result = await this.sender.send(item.target, item.content, {
+        source: item.source,
+        itemId: item.id,
+      });
 
       if (result.success) {
         this.queue.remove(item.id);
