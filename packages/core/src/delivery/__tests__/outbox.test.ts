@@ -327,26 +327,360 @@ describe("Outbox drain finally 间隙 race（回归）", () => {
   });
 });
 
-// ─── afterSlot 字段（Phase 1 降级行为） ───
+// ─── Turn Slot 因果依赖（ADR-007 Phase 3 / INV-3 / INV-4） ───
 
-describe("Outbox afterSlot（Phase 1）", () => {
-  it("带 afterSlot 的 entry 仍立即 drain，并产生 warn 日志", async () => {
+describe("Outbox Turn Slot", () => {
+  it("openSlot + fillSlot(无 entry)：下游 afterSlot=slot 的 entry 被阻塞到 fill 后才发", async () => {
+    const sentOrder: string[] = [];
+    const outbox = createOutbox({
+      send: async (_t, c) => {
+        sentOrder.push(c.text);
+        return okResult();
+      },
+    });
+
+    outbox.openSlot({ slotId: "turn_1" });
+
+    // 并发 post：一个 afterSlot=turn_1，一个无依赖
+    const p1 = outbox.post({ ...makePost("slot-blocked"), afterSlot: "turn_1" });
+
+    // 等一小会儿确保 drain 已挂起
+    await new Promise((r) => setTimeout(r, 10));
+    expect(sentOrder).toEqual([]);
+    expect(outbox.getSlot("turn_1")?.state).toBe("pending");
+
+    // fill slot，等待者被释放
+    await outbox.fillSlot("turn_1");
+    await p1;
+    expect(sentOrder).toEqual(["slot-blocked"]);
+    expect(outbox.getSlot("turn_1")?.state).toBe("filled");
+  });
+
+  it("fillSlot(slot, entry) 原子性：entry 先于任何 afterSlot=slot 的 entry", async () => {
+    // 这是 Phase 3 的核心保证——规格 §3.4：LLM 回复必然先于 task fire
+    const sentOrder: string[] = [];
+    const outbox = createOutbox({
+      send: async (_t, c) => {
+        sentOrder.push(c.text);
+        return okResult();
+      },
+    });
+
+    outbox.openSlot({ slotId: "turn_1" });
+
+    // 先 post task fire，等在 slot 上（模拟 LLM 慢、task 先触发）
+    const taskFirePromise = outbox.post({
+      ...makePost("task-fire"),
+      afterSlot: "turn_1",
+    });
+    await new Promise((r) => setTimeout(r, 10));
+
+    // 现在 fill slot 同时追加 LLM 回复
+    await outbox.fillSlot("turn_1", makePost("llm-reply"));
+    await taskFirePromise;
+    await outbox.waitIdle();
+
+    // LLM 回复必须在 task fire 之前
+    expect(sentOrder).toEqual(["llm-reply", "task-fire"]);
+  });
+
+  it("abandonSlot：entry 放行 + warn 日志 + slot:abandoned 事件", async () => {
     const warns: string[] = [];
+    const events: OutboxEvent[] = [];
     const outbox = new Outbox(
       "feishu:ou_abc",
       async () => okResult(),
       {
+        logger: { warn: (m) => warns.push(m) },
+        onEvent: (e) => events.push(e),
+      },
+    );
+
+    outbox.openSlot({ slotId: "turn_err" });
+    const p = outbox.post({ ...makePost(), afterSlot: "turn_err" });
+    await new Promise((r) => setTimeout(r, 10));
+
+    outbox.abandonSlot("turn_err", "LLM crashed");
+    const result = await p;
+
+    expect(result.success).toBe(true);
+    expect(warns.some((w) => w.includes("abandoned"))).toBe(true);
+    const abandoned = events.find((e) => e.type === "slot:abandoned");
+    expect(abandoned).toBeDefined();
+    if (abandoned?.type === "slot:abandoned") {
+      expect(abandoned.reason).toBe("LLM crashed");
+    }
+  });
+
+  it("TTL 超时：slot 自动置 expired，entry 放行 + warn", async () => {
+    const warns: string[] = [];
+    const outbox = new Outbox(
+      "feishu:ou_abc",
+      async () => okResult(),
+      { logger: { warn: (m) => warns.push(m) } },
+    );
+
+    outbox.openSlot({ slotId: "turn_slow", ttlMs: 30 });
+    const p = outbox.post({ ...makePost(), afterSlot: "turn_slow" });
+
+    // 等 TTL 触发
+    await new Promise((r) => setTimeout(r, 60));
+    const result = await p;
+
+    expect(result.success).toBe(true);
+    expect(outbox.getSlot("turn_slow")?.state).toBe("expired");
+    expect(warns.some((w) => w.includes("expired"))).toBe(true);
+  });
+
+  it("孤儿 slot 引用（afterSlot 指向从未 open 的 slotId）→ 放行 + warn + causal-broken 事件", async () => {
+    // 合法场景：task 创建后 Registry.reapIdle 回收对应 Outbox，之后 fire 时 orphan。
+    // 不是 error 级别的故障；causal-broken 事件让上层可订阅告警。
+    const warns: string[] = [];
+    const events: OutboxEvent[] = [];
+    const outbox = new Outbox(
+      "feishu:ou_abc",
+      async () => okResult(),
+      {
+        logger: { warn: (m) => warns.push(m) },
+        onEvent: (e) => events.push(e),
+      },
+    );
+
+    const p = outbox.post({
+      ...makePost(),
+      afterSlot: "turn_phantom_never_opened",
+    });
+    const result = await p;
+
+    expect(result.success).toBe(true);
+    expect(warns.some((w) => w.includes("orphan"))).toBe(true);
+    const causalBroken = events.find((e) => e.type === "entry:causal-broken");
+    expect(causalBroken).toBeDefined();
+    if (causalBroken?.type === "entry:causal-broken") {
+      expect(causalBroken.reason).toBe("orphan-slot");
+      expect(causalBroken.slotId).toBe("turn_phantom_never_opened");
+    }
+  });
+
+  it("abandoned/expired slot 放行时 emit causal-broken 事件携带 reason 细分", async () => {
+    const events: OutboxEvent[] = [];
+    const outbox = new Outbox(
+      "feishu:ou_abc",
+      async () => okResult(),
+      { onEvent: (e) => events.push(e) },
+    );
+
+    outbox.openSlot({ slotId: "t_ab" });
+    const p1 = outbox.post({ ...makePost(), afterSlot: "t_ab" });
+    await new Promise((r) => setTimeout(r, 5));
+    outbox.abandonSlot("t_ab", "LLM crashed");
+    await p1;
+
+    const abandonBroken = events.find(
+      (e) => e.type === "entry:causal-broken" && e.reason === "slot-abandoned",
+    );
+    expect(abandonBroken).toBeDefined();
+    if (abandonBroken?.type === "entry:causal-broken") {
+      expect(abandonBroken.slotCloseReason).toBe("LLM crashed");
+    }
+
+    // 第二轮：expired 路径
+    outbox.openSlot({ slotId: "t_exp", ttlMs: 10 });
+    const p2 = outbox.post({ ...makePost(), afterSlot: "t_exp" });
+    await new Promise((r) => setTimeout(r, 30));
+    await p2;
+
+    const expireBroken = events.find(
+      (e) => e.type === "entry:causal-broken" && e.reason === "slot-expired",
+    );
+    expect(expireBroken).toBeDefined();
+  });
+
+  it("FIFO 保序（INV-6）：head 被 slot 阻塞时，后续无依赖 entry 也被挡住", async () => {
+    const sentOrder: string[] = [];
+    const outbox = createOutbox({
+      send: async (_t, c) => {
+        sentOrder.push(c.text);
+        return okResult();
+      },
+    });
+
+    outbox.openSlot({ slotId: "turn_x" });
+    const pBlocked = outbox.post({ ...makePost("blocked"), afterSlot: "turn_x" });
+    const pFree = outbox.post(makePost("free"));  // 无 afterSlot，但仍在 blocked 后入队
+
+    await new Promise((r) => setTimeout(r, 10));
+    expect(sentOrder).toEqual([]);  // head 阻塞 → 整个队列停摆
+
+    await outbox.fillSlot("turn_x");
+    await Promise.all([pBlocked, pFree]);
+    expect(sentOrder).toEqual(["blocked", "free"]);
+  });
+
+  it("多 slot 混合：A 已 filled、B 未 filled，afterSlot=A 的出；afterSlot=B 的等", async () => {
+    const sentOrder: string[] = [];
+    const outbox = createOutbox({
+      send: async (_t, c) => {
+        sentOrder.push(c.text);
+        return okResult();
+      },
+    });
+
+    outbox.openSlot({ slotId: "A" });
+    outbox.openSlot({ slotId: "B" });
+    await outbox.fillSlot("A");  // A 提前 filled
+
+    const pa = outbox.post({ ...makePost("after-A"), afterSlot: "A" });
+    const pb = outbox.post({ ...makePost("after-B"), afterSlot: "B" });
+
+    await pa;
+    await new Promise((r) => setTimeout(r, 10));
+    expect(sentOrder).toEqual(["after-A"]);
+    expect(outbox.getSlot("B")?.state).toBe("pending");
+
+    await outbox.fillSlot("B");
+    await pb;
+    expect(sentOrder).toEqual(["after-A", "after-B"]);
+  });
+
+  it("openSlot 幂等：同 slotId 重复 open 不重置状态", () => {
+    const outbox = createOutbox({ send: async () => okResult() });
+    outbox.openSlot({ slotId: "dup", ttlMs: 30_000 });
+    const info1 = outbox.getSlot("dup");
+    outbox.openSlot({ slotId: "dup", ttlMs: 1 });  // 尝试用超短 TTL 覆盖
+    const info2 = outbox.getSlot("dup");
+    expect(info1?.openedAt).toBe(info2?.openedAt);
+  });
+
+  it("fillSlot 后再 abandonSlot：abandon 忽略（已终态）", async () => {
+    const events: OutboxEvent[] = [];
+    const outbox = new Outbox(
+      "feishu:ou_abc",
+      async () => okResult(),
+      { onEvent: (e) => events.push(e) },
+    );
+
+    outbox.openSlot({ slotId: "race" });
+    await outbox.fillSlot("race");
+    outbox.abandonSlot("race", "too late");
+
+    const abandoned = events.find((e) => e.type === "slot:abandoned");
+    expect(abandoned).toBeUndefined();  // 仅 slot:opened + slot:filled
+    expect(outbox.getSlot("race")?.state).toBe("filled");
+  });
+
+  it("fillSlot(unknown) / abandonSlot(unknown) 都是 no-op + warn", () => {
+    const warns: string[] = [];
+    const outbox = new Outbox(
+      "feishu:ou_abc",
+      async () => okResult(),
+      { logger: { warn: (m) => warns.push(m) } },
+    );
+
+    outbox.abandonSlot("nonexistent", "reason");
+    outbox.fillSlot("nonexistent");
+    expect(warns.filter((w) => w.includes("unknown")).length).toBe(2);
+  });
+
+  it("P3d 安全网：fillSlot(unknown, entry) 降级为普通 post，entry 不丢", async () => {
+    const sentOrder: string[] = [];
+    const warns: string[] = [];
+    const outbox = new Outbox(
+      "feishu:ou_abc",
+      async (_t, c) => {
+        sentOrder.push(c.text);
+        return okResult();
+      },
+      { logger: { warn: (m) => warns.push(m) } },
+    );
+
+    const result = await outbox.fillSlot("never_opened", makePost("rescued"));
+    expect((result as DeliveryResult).success).toBe(true);
+    expect(sentOrder).toEqual(["rescued"]);
+    expect(warns.some((w) => w.includes("unknown"))).toBe(true);
+  });
+
+  it("P3d 安全网：fillSlot(terminal, entry) 降级为普通 post，entry 不丢", async () => {
+    const sentOrder: string[] = [];
+    const debugs: string[] = [];
+    const outbox = new Outbox(
+      "feishu:ou_abc",
+      async (_t, c) => {
+        sentOrder.push(c.text);
+        return okResult();
+      },
+      { logger: { debug: (m) => debugs.push(m) } },
+    );
+
+    outbox.openSlot({ slotId: "raced" });
+    outbox.abandonSlot("raced", "test");  // slot 进入终态
+
+    const result = await outbox.fillSlot("raced", makePost("rescued"));
+    expect((result as DeliveryResult).success).toBe(true);
+    expect(sentOrder).toEqual(["rescued"]);
+    expect(debugs.some((m) => m.includes("terminal"))).toBe(true);
+  });
+
+  it("回归：logger 在 drain 路径抛错也不会无限 re-kick（必须走 safeLog）", async () => {
+    // 构造：logger.error 抛错 + entry 引用孤儿 slot（走 drain 的 error 日志分支）
+    // 旧实现：logger 抛 → drain 抛 → finally 看 pending 非空 → re-kick → 同路径再抛 → 无限循环
+    // 期望：safeLog 吞掉 logger 异常，entry 正常放行
+    let sendCount = 0;
+    const outbox = new Outbox(
+      "feishu:ou_abc",
+      async () => {
+        sendCount++;
+        return okResult();
+      },
+      {
         logger: {
-          warn: (msg) => warns.push(msg),
+          error: () => {
+            throw new Error("logger boom");
+          },
         },
       },
     );
 
-    const result = await outbox.post({
+    const p = outbox.post({
       ...makePost(),
-      afterSlot: "turn_phantom",
+      afterSlot: "never_opened",  // 孤儿引用 → 走 logger.error 分支
     });
-    expect(result.success).toBe(true);
-    expect(warns.some((w) => w.includes("afterSlot"))).toBe(true);
+
+    // 给足时间，如果有死循环会跑飞 CPU；safeLog 情况下应在 ~10ms 内完成
+    const result = await Promise.race([
+      p,
+      new Promise<string>((r) => setTimeout(() => r("HANG"), 500)),
+    ]);
+
+    expect(result).not.toBe("HANG");
+    expect(sendCount).toBe(1);  // 仅 send 一次，未陷入循环
+  });
+
+  it("openSlot ttlMs<=0 → slot:opened 事件的 ttlMs 为 null（禁用 TTL 的明示）", async () => {
+    const events: OutboxEvent[] = [];
+    const outbox = new Outbox(
+      "feishu:ou_abc",
+      async () => okResult(),
+      { onEvent: (e) => events.push(e) },
+    );
+    outbox.openSlot({ slotId: "no_ttl", ttlMs: 0 });
+    const opened = events.find((e) => e.type === "slot:opened");
+    expect(opened).toBeDefined();
+    if (opened?.type === "slot:opened") {
+      expect(opened.ttlMs).toBeNull();
+    }
+  });
+
+  it("drain 空闲状态下 openSlot 不触发发送", async () => {
+    const sentOrder: string[] = [];
+    const outbox = createOutbox({
+      send: async (_t, c) => {
+        sentOrder.push(c.text);
+        return okResult();
+      },
+    });
+    outbox.openSlot({ slotId: "quiet" });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(sentOrder).toEqual([]);
   });
 });

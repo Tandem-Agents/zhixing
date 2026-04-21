@@ -171,6 +171,11 @@ async function handleCreate(
 
   const origin = getOrigin?.() ?? undefined;
 
+  // 若本次工具调用发生在 channel turn 内，把 turnId 捕获到 task 上——
+  // 任务 fire 后其投递 entry 会以 createdInTurn 派生 afterSlot，确保回复先于 task fire。
+  // REPL/ephemeral 上下文无 turnId，createdInTurn 保持 undefined，行为与 Phase 2 无异。
+  const createdInTurn = context?.turnId;
+
   // 先落地 task（原子操作）——失败不 commit，避免"用户看到已创建但实际未落地"
   const task = await scheduler.createTask({
     name,
@@ -180,6 +185,7 @@ async function handleCreate(
     schedule,
     action: { kind: "agent-turn", prompt },
     origin,
+    ...(createdInTurn !== undefined && { createdInTurn }),
   });
 
   // Tool-authored commitment（ADR-007 Phase 2）：

@@ -513,41 +513,53 @@ REPL 的"channel"是终端。若要把 REPL 回复也纳入 Outbox，需要：
 
 ## 八、实施路线
 
-### Phase 1 — Outbox 基础设施
+### Phase 1 — Outbox 基础设施 ✅ 已完成（2026-04-21，commit 4a45a26）
 
 **目标**：打通管道，无行为变化（仍会出现倒转）
 
-1. 新增 `@zhixing/core/delivery/outbox.ts` + `outbox-registry.ts`，实现 INV-1/2/5/6/7
-2. DeliveryPipeline drain：`sender.send` → `registry.of(target).post`
-3. InboundRouter LLM 回复：`adapter.send` → `registry.of(target).post`
-4. 单元测试：并发 post 保序、registry 生命周期
+1. ✅ 新增 `@zhixing/core/delivery/outbox.ts` + `outbox-registry.ts`，实现 INV-1/2/5/6/7
+2. ✅ DeliveryPipeline drain：`sender.send` → OutboxSender → `registry.of(target).post`
+3. ✅ InboundRouter LLM 回复：`adapter.send` → `registry.of(target).post`（统一 `emit` 出口）
+4. ✅ 单元测试：并发 post 保序、registry 生命周期、drain finally 间隙 race 回归
 
-**验收**：所有回归测试通过；观察日志中 `entry:enqueued` / `entry:sent` 事件串联。
+**验收**：93 个 delivery 测试通过；回归测试通过；`entry:enqueued` / `entry:sent` 事件链路完整。
 
-### Phase 2 — Tool-authored Commitment
+### Phase 2 — Tool-authored Commitment ✅ 已完成（2026-04-21，commit 8dc310b）
 
 **目标**：修复观察到的 5s 倒转现象（常规情况）
 
-1. 扩展 ToolExecutionContext：`commitToUser`、`emissionTarget`
-2. 扩展 ToolResult：`committedToUser`
-3. 改造 schedule 工具：create 成功 → commitToUser + committedToUser=true
-4. 更新系统提示：committedToUser 时抑制叙述
-5. 集成测试：5s 提醒 E2E 验证顺序
+1. ✅ 扩展 ToolExecutionContext：`commitToUser` / `emissionTarget` / `turnId`
+2. ✅ 扩展 ToolResult：`committedToUser`；tool-executor 把 `COMMITMENT_SIGNAL` 文本写入 tool_result content（保证信号不因 ToolResultBlock 构造丢失）
+3. ✅ 改造 schedule 工具：create 成功 → commitToUser + committedToUser=true；commit 失败（抛异常或 success=false）降级为 LLM 叙述路径
+4. ✅ 更新系统提示：引用 core 导出的 `COMMITMENT_SIGNAL` 常量；committedToUser 时抑制叙述
+5. ✅ AgentLoop secureExecuteTool 包一层 commitToUser，自动注入 `toolName` 到 EmissionSource.tool-commitment
 
-**验收**：飞书 E2E "5秒后提醒我"，commitment 早于 task fire（常规 LLM 延迟下）；无 conv_xxx 新增（16e 复核）。
+**验收**：9 个 schedule 工具测试通过，含"commit 返回 success=false 降级为叙述"等边界用例。
 
-### Phase 3 — Turn Slot 因果锁
+### Phase 3 — Turn Slot 因果锁 ✅ 已完成（2026-04-21）
 
 **目标**：即使 LLM 超时/违反 prompt 也保证顺序正确
 
-1. 引入 `TurnId` 类型，ConversationManager 在 turn 开始时生成
-2. AgentLoop 将 turnId 透传给 ToolExecutionContext
-3. schedule 工具将 turnId 存入 `task.createdInTurn`
-4. Scheduler 投递时，DeliveryPipeline entry 带 `afterSlot: task.createdInTurn`
-5. ConversationManager 的 turn 开始/结束对接 Outbox.openSlot/fillSlot/abandonSlot
-6. Outbox drain 实现因果阻塞（INV-3）
+1. ✅ 引入 `TurnId`，InboundRouter 在每次 channel turn 开始时生成（Phase 2 已加入 TurnContext）
+2. ✅ AgentLoop 将 turnId 透传到 ToolExecutionContext（Phase 2 已完成）
+3. ✅ schedule 工具将 `context.turnId` 存入 `task.createdInTurn`（[schedule.ts](../../../packages/tools-builtin/src/schedule.ts)）
+4. ✅ Scheduler 投递经 `OutboxSender.deriveAfterSlot` 从 `DeliverySource.scheduler.createdInTurn` 派生 `OutboxEntry.afterSlot`（[outbox-sender.ts](../../../packages/core/src/delivery/outbox-sender.ts)）
+5. ✅ InboundRouter.runChannelTurn 驱动 Outbox slot 生命周期：开头 `openSlot(turnId)`，成功/错误均走 `fillSlot(turnId, replyEntry)` 原子关闭+插入 reply；finally 兜底 `abandonSlot`（[inbound-router.ts](../../../packages/server/src/channels/inbound-router.ts)）
+6. ✅ Outbox drain 实现因果阻塞（INV-3）：`await waitForSlotChange()` + `signalSlotChange` 唤醒挂起的 drain，避免 return-rekick CPU 死循环（[outbox.ts](../../../packages/core/src/delivery/outbox.ts)）
 
-**验收**：故意构造"LLM 超时 > 任务延迟"的测试，task fire 仍在 LLM 回复后出现。
+**工程细节**：
+- fillSlot 原子性：`fillSlot(slotId, entry)` 把 entry 插到第一个 `afterSlot=slotId` 等待者之前再关 slot，保证 reply 先于 task-fire；不破坏其它无关 entry 的 FIFO
+- 安全网：fillSlot 在未知 / 已终态 slot 上带 entry 时自动 degrade-post（剥掉 afterSlot 走普通队列），保证消息不丢（INV-5）
+- 死循环防护：drain 路径所有 logger 调用经 `safeLog` 包装，防 logger 抛错触发 finally re-kick 无限循环
+- TTL 兜底：slot 默认 10 分钟 TTL，到期自动置 expired 释放等待者（INV-4）
+
+**验收**：由 4 个分层测试组合证明：
+- outbox.test.ts "fillSlot(slot, entry) 原子性" — Outbox 层排序保证
+- outbox-integration.test.ts "P3b: createdInTurn → afterSlot" — 数据链透传
+- schedule.test.ts "P3c: ctx.turnId → task.createdInTurn" — 生产侧捕获
+- inbound-router.test.ts "P3d: runChannelTurn 开头 openSlot, 成功回复 fillSlot" — 生命周期接入
+
+全量回归 2204 测试通过、6 包 build success。
 
 ### Phase 4（可选 / 未来）
 

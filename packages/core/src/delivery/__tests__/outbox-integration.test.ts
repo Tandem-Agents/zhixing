@@ -129,6 +129,87 @@ describe("Pipeline → Outbox 整链", () => {
     }
   });
 
+  it("P3b: scheduler source 带 createdInTurn → entry.afterSlot + EmissionSource.createdInTurn 均透传", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "outbox-int-"));
+    try {
+      const outboxEvents: OutboxEvent[] = [];
+      const { registry, sender } = makePipelineFixture({
+        adapterSend: async () => ({ success: true, retryable: false }),
+        outboxEvents,
+      });
+      const { pipeline } = await makePipeline({ registry, sender, tempDir });
+
+      // 先开 slot（否则 drain 看到 afterSlot 指向未开的 slot 会 orphan 放行）
+      const outbox = registry.of(TARGET);
+      outbox.openSlot({ slotId: "turn_xyz" });
+      await outbox.fillSlot("turn_xyz");  // 立即 fill，保证 drain 能完成
+
+      await pipeline.enqueue({
+        target: TARGET,
+        content: { text: "scheduled-in-turn" },
+        source: {
+          kind: "scheduler",
+          taskId: "t_turn",
+          taskName: "after-llm",
+          createdInTurn: "turn_xyz",
+        },
+      });
+      await pipeline.flush();
+      await outbox.waitIdle();
+
+      const enqueued = outboxEvents.find((e) => e.type === "entry:enqueued") as
+        | Extract<OutboxEvent, { type: "entry:enqueued" }>
+        | undefined;
+      expect(enqueued).toBeDefined();
+      // afterSlot 透传到 OutboxEntry（drain 因果层用）
+      expect(enqueued?.entry.afterSlot).toBe("turn_xyz");
+      // EmissionSource 也带上 createdInTurn（审计/日志用）
+      expect(enqueued?.entry.source).toEqual({
+        kind: "scheduled-task",
+        taskId: "t_turn",
+        createdInTurn: "turn_xyz",
+      } satisfies EmissionSource);
+
+      await pipeline.stop();
+      await registry.dispose();
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("P3b: scheduler source 无 createdInTurn → 无 afterSlot，EmissionSource 不带该字段", async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), "outbox-int-"));
+    try {
+      const outboxEvents: OutboxEvent[] = [];
+      const { registry, sender } = makePipelineFixture({
+        adapterSend: async () => ({ success: true, retryable: false }),
+        outboxEvents,
+      });
+      const { pipeline } = await makePipeline({ registry, sender, tempDir });
+
+      await pipeline.enqueue({
+        target: TARGET,
+        content: { text: "scheduled-no-turn" },
+        source: { kind: "scheduler", taskId: "t_free", taskName: "no-turn" },
+      });
+      await pipeline.flush();
+
+      const enqueued = outboxEvents.find((e) => e.type === "entry:enqueued") as
+        | Extract<OutboxEvent, { type: "entry:enqueued" }>
+        | undefined;
+      expect(enqueued?.entry.afterSlot).toBeUndefined();
+      expect(enqueued?.entry.source).toEqual({
+        kind: "scheduled-task",
+        taskId: "t_free",
+      } satisfies EmissionSource);
+
+      await pipeline.stop();
+      await registry.dispose();
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("agent 类型 DeliverySource 映射为 llm-reply EmissionSource", async () => {
     const tempDir = await mkdtemp(join(tmpdir(), "outbox-int-"));
     try {

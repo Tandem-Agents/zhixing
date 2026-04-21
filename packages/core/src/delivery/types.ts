@@ -12,7 +12,17 @@ export type DeliveryPriority = "low" | "normal" | "high";
 // ─── 投递来源（溯源追踪） ───
 
 export type DeliverySource =
-  | { kind: "scheduler"; taskId: string; taskName: string }
+  | {
+      kind: "scheduler";
+      taskId: string;
+      taskName: string;
+      /**
+       * 创建此任务的 turn id（ADR-007 Phase 3）。
+       * 由 OutboxSender 映射为 OutboxEntry.afterSlot，保证 task-fire 排在
+       * 创建 turn 的 LLM 回复之后送达。未提供 = 任务创建上下文不是 turn（如 API/CLI），无需排序依赖。
+       */
+      createdInTurn?: string;
+    }
   | { kind: "agent"; conversationId: string }
   | { kind: "system"; reason: string };
 

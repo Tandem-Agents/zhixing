@@ -40,6 +40,7 @@ export type { OutboxSenderOptions } from "./outbox-sender.js";
 export type { DeliverySendMeta } from "./types.js";
 export type {
   EmissionSource,
+  OpenSlotOptions,
   OutboxDoSend,
   OutboxEntry,
   OutboxEvent,
@@ -48,6 +49,9 @@ export type {
   OutboxOptions,
   OutboxRegistryOptions,
   PostEntryInput,
+  SlotInfo,
+  SlotState,
+  SlotTerminalState,
   TurnId,
   TurnSlotId,
 } from "./outbox-types.js";

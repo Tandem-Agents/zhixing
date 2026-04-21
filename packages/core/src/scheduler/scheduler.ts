@@ -33,6 +33,7 @@ import type {
 } from "./types.js";
 import type { SchedulerEventMap } from "./events.js";
 import type { IDeliveryPipeline } from "../delivery/types.js";
+import { DEFAULT_SLOT_TTL_MS } from "../delivery/outbox-types.js";
 
 // ─── Scheduler 依赖注入 ───
 
@@ -450,6 +451,23 @@ export class Scheduler {
           kind: "scheduler",
           taskId: task.id,
           taskName: task.name,
+          // createdInTurn 只在三条件都满足时透传：
+          //
+          // 1) task.createdInTurn 存在（非 channel 创建的任务如 API/CLI 不带）
+          // 2) 是 `once` 任务——周期任务（interval/cron）每次 fire 时，
+          //    创建它的 turn 早已结束，对应 slot 必然 expired 或 orphan，
+          //    带 afterSlot 只会每次 fire 都触发 causal-broken 告警噪音
+          // 3) 创建至今 < SLOT_TTL——对于"明天 9 点"这种远期 once 任务，
+          //    fire 时对应 slot 必已 expired/reaped，透传也是噪音
+          //
+          // 典型受益场景："5 秒后提醒我"——近期创建 + once + slot pending/filled，
+          // afterSlot 真正实现 Phase 3 因果保证（回复先于 task fire）。
+          ...(task.createdInTurn !== undefined &&
+            task.schedule.kind === "once" &&
+            Date.now() - new Date(task.createdAt).getTime() <
+              DEFAULT_SLOT_TTL_MS && {
+              createdInTurn: task.createdInTurn,
+            }),
         },
       });
       await this.delivery.flush();

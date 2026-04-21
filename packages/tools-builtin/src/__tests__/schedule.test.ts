@@ -230,4 +230,37 @@ describe("schedule tool — commit-on-create (ADR-007 Phase 2)", () => {
       expect(metas[0]).toEqual({ toolName: "schedule" });
     });
   });
+
+  // ─── P3c: createdInTurn 捕获（ADR-007 Phase 3） ───
+
+  it("P3c: ctx.turnId 存在 → task.createdInTurn 被设为该值", async () => {
+    await withScheduler(async (scheduler) => {
+      const tool = createScheduleTool(scheduler);
+      const result = await tool.call(
+        onceInput({ name: "t-with-turn" }),
+        baseContext({ turnId: "turn_abc" }),
+      );
+
+      expect(result.isError).toBeFalsy();
+      const tasks = scheduler.listTasks();
+      const created = tasks.find((t) => t.name === "t-with-turn");
+      expect(created).toBeDefined();
+      expect(created?.createdInTurn).toBe("turn_abc");
+    });
+  });
+
+  it("P3c: 无 ctx.turnId（REPL/ephemeral）→ task.createdInTurn undefined", async () => {
+    await withScheduler(async (scheduler) => {
+      const tool = createScheduleTool(scheduler);
+      const result = await tool.call(
+        onceInput({ name: "t-no-turn" }),
+        baseContext(),
+      );
+
+      expect(result.isError).toBeFalsy();
+      const tasks = scheduler.listTasks();
+      const created = tasks.find((t) => t.name === "t-no-turn");
+      expect(created?.createdInTurn).toBeUndefined();
+    });
+  });
 });

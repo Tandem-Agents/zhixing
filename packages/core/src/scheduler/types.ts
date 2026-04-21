@@ -89,6 +89,12 @@ export interface ScheduledTask {
   delivery?: TaskDelivery;
   /** 任务创建时捕获的来源上下文（channelId + userId），用于自动投递结果 */
   origin?: { channelId: string; to: string };
+  /**
+   * 创建此任务的 turn id。
+   * 任务 fire 后其投递 entry 的 afterSlot 会被设为此值，
+   * 确保 task-fire 排在创建 turn 的 LLM 最终回复之后送达。
+   */
+  createdInTurn?: string;
 
   state: TaskState;
 

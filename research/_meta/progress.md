@@ -6,7 +6,7 @@
 
 | 认知域 | 状态 | 问题数 | 已完成 | 关键阻塞 |
 |--------|------|--------|--------|----------|
-| 01-核心循环 | 🔶 进行中 | 4 | 3 | q04 已完成；Outbox 顺序层已设计 |
+| 01-核心循环 | 🔶 进行中 | 4 | 3 | q04 已完成；Outbox 顺序层已实现至 Phase 3 |
 | 02-工具系统 | ✅ 基本完成 | 1 | 1 | q05(工具安全) 已完成 |
 | 03-上下文管理 | ✅ 基本完成 | 4 | 4 | 源码分析 + 设计方案已完成 |
 | 04-提示工程 | 🔲 待开始 | 0 | 0 | — |
@@ -95,6 +95,9 @@
 | 效果推断 (M7a) | `@zhixing/core` | ✅ 已完成 | 19 个测试通过（否定检测+推断+持久化） |
 | 检索优先级排序 (M7b) | `@zhixing/core` | ✅ 已完成 | 23 个测试通过（精确度×效果×新鲜度多维排序） |
 | CLI Stale 提醒 (M7c) | `@zhixing/cli` | ✅ 已完成 | 启动时 stale+needs-update 检测 |
+| Outbox Phase 1 顺序层 | `@zhixing/core` + `server` | ✅ 已完成 | 93 个 delivery 测试通过（per-target FIFO + Registry + Pipeline→Outbox→adapter 打通） |
+| Outbox Phase 2 Tool Commitment | `core` + `server` + `tools-builtin` + `cli` | ✅ 已完成 | COMMITMENT_SIGNAL 信号 + commitToUser 绑定 + schedule 工具 commit-on-create + 系统提示抑制段 |
+| Outbox Phase 3 Turn Slot 因果锁 | `core` + `server` + `tools-builtin` | ✅ 已完成 | 28 个 outbox slot 测试 + ScheduledTask.createdInTurn → OutboxEntry.afterSlot 数据链 + InboundRouter openSlot/fillSlot/abandonSlot 生命周期 |
 
 ## 里程碑
 
@@ -125,6 +128,9 @@
 - [x] **M25**: Serve 模式健壮性 Step 16a-d + 16g-h → 飞书定时任务 E2E 打通（origin capture + 时间注入 + scheduler snapshot + 最小间隔保护 + delivery flush） ✅ 2026-04-20
 - [x] **M26**: Step 16e Ephemeral Execution → 定时任务 runAgentTurn 绕过 ConversationManager，bare runtime → run → dispose，磁盘零痕迹（飞书 E2E 验证无 conv_xxx 新增） ✅ 2026-04-21
 - [x] **M27**: 消息 Outbox 设计完成 → Step 16 E2E 暴露多生产者顺序倒转，产出规格 [message-outbox.md](../design/specifications/message-outbox.md) + [ADR-007](../design/architecture/decisions/007-message-outbox.md)；跨模块影响文档同步更新（conversation-model TurnId、ADR-004 ToolContext 扩展、persistent-service §4.7 Pipeline/Outbox 职责切分） ✅ 2026-04-21
+- [x] **M28**: Outbox Phase 1 顺序层实现 → `@zhixing/core/delivery/outbox.ts` + `outbox-registry.ts`（per-target FIFO + adapter 超时兜底 + INV-1/5/6/7），DeliveryPipeline → OutboxSender → Outbox → adapter 整链打通；InboundRouter LLM 回复改走 Outbox；93 个 delivery 测试通过 ✅ 2026-04-21（commit 4a45a26）
+- [x] **M29**: Outbox Phase 2 Tool-authored Commitment → ToolExecutionContext 增 `commitToUser` / `emissionTarget` / `turnId`，ToolResult 增 `committedToUser`；COMMITMENT_SIGNAL 常量写入 tool_result content（避免 ToolResultBlock 构造时 committedToUser 字段被丢）；schedule 工具 create 成功 → commit 短文本；系统提示 commitment 抑制段；AgentLoop 自动注入 toolName；9 个 schedule 工具测试通过 ✅ 2026-04-21（commit 8dc310b）
+- [x] **M30**: Outbox Phase 3 Turn Slot 因果锁 → Outbox slot 状态机（openSlot/fillSlot/abandonSlot + TTL + drain promise/resolver 挂起避免 CPU 死循环 + logger safeLog 防 re-kick 无限循环 + fillSlot 未知/终态 slot 的 degrade-post 兜底）；ScheduledTask.createdInTurn → DeliverySource.scheduler.createdInTurn → OutboxEntry.afterSlot 数据链（outbox-sender.deriveAfterSlot 单点映射）；schedule 工具捕获 ctx.turnId；InboundRouter runChannelTurn 接入 openSlot/fillSlot/abandonSlot 生命周期；全量回归 2204 测试通过、6 包 build success ✅ 2026-04-21
 
 ---
 

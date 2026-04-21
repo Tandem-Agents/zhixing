@@ -66,6 +66,34 @@ export interface OutboxEntry {
   readonly enqueuedAt: string;
 }
 
+// ─── Slot 状态（ADR-007 Phase 3） ───
+
+/**
+ * Turn Slot 的终态——进入任何一个终态即释放等待在此 slot 上的 entry。
+ * INV-4（slot 单调性）：slot 一旦开启，必在有限时间内进入终态之一。
+ */
+export type SlotTerminalState = "filled" | "abandoned" | "expired";
+
+/** Slot 的完整状态（pending 或一种终态） */
+export type SlotState = "pending" | SlotTerminalState;
+
+/** 开启 slot 的选项 */
+export interface OpenSlotOptions {
+  /** slot 的全局 id（通常 = TurnId）；同一 id 重复 open 视为幂等（已存在直接返回） */
+  readonly slotId: TurnSlotId;
+  /** TTL 毫秒——超时后 slot 自动置 expired。默认 10 分钟 */
+  readonly ttlMs?: number;
+}
+
+/** Slot 运行时信息（观测用） */
+export interface SlotInfo {
+  readonly slotId: TurnSlotId;
+  readonly state: SlotState;
+  readonly openedAt: string;
+  readonly closedAt?: string;  // filled/abandoned/expired 时填充
+  readonly closeReason?: string; // abandon 的原因文本
+}
+
 // ─── 事件模型 ───
 
 /**
@@ -86,6 +114,48 @@ export type OutboxEvent =
       key: OutboxKey;
       entry: OutboxEntry;
       error: string;
+    }
+  | {
+      /**
+       * 因果断链——drain 放行了一个 `afterSlot` 未得到正常 `filled` 终态的 entry。
+       * 可能原因：
+       *  - `orphan-slot`: entry 引用的 slotId 在本 Outbox 从未 open（通常是对应 Outbox 已被 reapIdle 回收后的 task fire，合法但丢失因果）
+       *  - `slot-abandoned`: slot 因 turn 异常被 abandonSlot
+       *  - `slot-expired`: slot 达到 TTL 未 fill
+       * 外部监控应订阅此事件以告警"因果顺序已非严格保证"。
+       */
+      type: "entry:causal-broken";
+      key: OutboxKey;
+      entry: OutboxEntry;
+      slotId: TurnSlotId;
+      reason: "orphan-slot" | "slot-abandoned" | "slot-expired";
+      /** abandon 时的 reason 文本，或 expired 时为 undefined */
+      slotCloseReason?: string;
+    }
+  | {
+      type: "slot:opened";
+      key: OutboxKey;
+      slotId: TurnSlotId;
+      /** TTL 毫秒；`null` 表示禁用 TTL（openSlot 传入的 ttlMs <= 0） */
+      ttlMs: number | null;
+    }
+  | {
+      type: "slot:filled";
+      key: OutboxKey;
+      slotId: TurnSlotId;
+      /** 若 fillSlot 携带了 entry，这里是 entry id */
+      entryId?: string;
+    }
+  | {
+      type: "slot:abandoned";
+      key: OutboxKey;
+      slotId: TurnSlotId;
+      reason: string;
+    }
+  | {
+      type: "slot:expired";
+      key: OutboxKey;
+      slotId: TurnSlotId;
     };
 
 // ─── 日志 & 回调接口 ───
@@ -136,3 +206,5 @@ export interface PostEntryInput {
 
 export const DEFAULT_SEND_TIMEOUT_MS = 30_000;
 export const DEFAULT_REGISTRY_IDLE_MS = 10 * 60_000;
+/** Turn Slot 默认 TTL —— 10 分钟（ADR-007 Phase 3） */
+export const DEFAULT_SLOT_TTL_MS = 10 * 60_000;

@@ -60,16 +60,30 @@ export class InboundRouter {
   }
 
   /**
-   * 统一出口：经 Outbox（若已注入）或降级为 adapter.send。
-   * 所有 user-facing 消息走此方法，保证顺序不变量。
+   * 统一出口：所有 user-facing 消息走此方法，保证顺序不变量。
+   *
+   * 三种路径按签名自动选择，调用方不需要知道具体走哪一条：
+   *   1. 有 outboxRegistry + 有 turnId（turn 内回复）→
+   *      `outbox.fillSlot(turnId, entry)`：原子地发回复 + 关闭 slot，
+   *      让本 turn 内创建的 `afterSlot=turnId` entry（如 task fire）排在回复之后
+   *   2. 有 outboxRegistry + 无 turnId（pre-turn 错误、系统消息）→
+   *      `outbox.post(entry)`：普通入队，无 slot 语义
+   *   3. 无 outboxRegistry（REPL / 未接入 Outbox 的测试）→ `adapter.send`
+   *
+   * Caller 按"是否是 turn 内的主回复"决定要不要传 turnId，签名显式表达语义。
    */
-  private async emit(
+  private async emitReply(
     target: DeliveryTarget,
     content: OutboundContent,
     source: EmissionSource,
+    turnId?: string,
   ): Promise<DeliveryResult | void> {
     if (this.outboxRegistry) {
-      return this.outboxRegistry.of(target).post({ target, content, source });
+      const outbox = this.outboxRegistry.of(target);
+      if (turnId) {
+        return outbox.fillSlot(turnId, { target, content, source });
+      }
+      return outbox.post({ target, content, source });
     }
     const adapter = this.channels.get(target.channelId);
     if (!adapter) {
@@ -105,7 +119,7 @@ export class InboundRouter {
     } catch (err) {
       this.logger.error(`Failed to get/create conversation ${conversationId}: ${errMsg(err)}`);
       const replyTarget = buildReplyTarget(msg);
-      await this.emit(
+      await this.emitReply(
         replyTarget,
         { text: "会话创建失败，请稍后重试。" },
         { kind: "system", handler: "conversation-create-failed" },
@@ -125,7 +139,7 @@ export class InboundRouter {
     if (status === "full") {
       this.logger.warn(`[丢弃] 队列满 conv=${conversationId}`);
       const replyTarget = buildReplyTarget(msg);
-      await this.emit(
+      await this.emitReply(
         replyTarget,
         { text: "消息队列已满，请稍后再试。" },
         { kind: "system", handler: "conversation-queue-full" },
@@ -144,17 +158,18 @@ export class InboundRouter {
     msg: InboundMessage,
   ): Promise<void> {
     const conversationId = managed.conversationId;
-    // 出口统一走 this.emit（Outbox 或降级 adapter.send），adapter 直引用不再需要
+    // 出口统一走 this.emitReply（Outbox / fillSlot / 降级 adapter.send 按签名自动选择）
     const turnStartedAt = new Date().toISOString();
     this.logger.info(`[开始处理] conv=${conversationId} text="${msg.text}"`);
 
     // 构造 turnContext，把 commitToUser 绑定到当前 user target
-    //   - turnId 用于观测（Phase 3 起接 Outbox Turn Slot）
+    //   - turnId 用于观测 + 作为 Outbox Turn Slot 的 key（Phase 3）
     //   - commitToUser 让工具（如 schedule）可直接发 commitment 消息，不依赖 LLM 叙述
     //   - outboxRegistry 未绑定时 commitToUser 为 undefined → 工具降级为 LLM 叙述路径
     const replyTarget = buildReplyTarget(msg);
+    const turnId = generateTurnId();
     const turnContext: TurnContext = {
-      turnId: generateTurnId(),
+      turnId,
       emissionTarget: replyTarget,
       commitToUser: this.outboxRegistry
         ? (content: OutboundContent, meta?: { toolName?: string }) =>
@@ -164,6 +179,7 @@ export class InboundRouter {
               source: {
                 kind: "tool-commitment",
                 conversationId,
+                turnId,
                 // AgentLoop wrapper 会在每次 tool.call 自动填入当前 tool.name；
                 // 兜底 "unknown" 仅在理论不应出现的场景触发（可用作异常监控信号）
                 toolName: meta?.toolName ?? "unknown",
@@ -171,6 +187,12 @@ export class InboundRouter {
             })
         : undefined,
     };
+
+    // Phase 3：turn 启动即 open slot，让本 turn 内工具创建的任务（afterSlot=turnId）
+    // 被阻塞到本 turn 的最终回复之后才发出。TTL 兜底防 slot 泄漏（INV-4）。
+    if (this.outboxRegistry) {
+      this.outboxRegistry.of(replyTarget).openSlot({ slotId: turnId });
+    }
 
     try {
       const gen = managed.runtime.run(msg.text, { turnContext });
@@ -202,17 +224,33 @@ export class InboundRouter {
           // persistence failure — non-fatal
         }
 
-        const replyTarget = buildReplyTarget(msg);
         const content = buildOutboundContent(result);
-        this.logger.info(`[回复] conv=${conversationId} len=${content.text.length} text="${content.text}"`);
-        await this.emit(replyTarget, content, {
-          kind: "llm-reply",
-          conversationId,
-        }).catch((e) =>
-          this.logger.error(`Failed to send reply to ${msg.channelId}: ${errMsg(e)}`),
+        const hasContent = content.text.trim().length > 0;
+        this.logger.info(
+          `[回复] conv=${conversationId} len=${content.text.length} empty=${!hasContent} text="${content.text}"`,
         );
+        if (hasContent) {
+          await this.emitReply(
+            replyTarget,
+            content,
+            { kind: "llm-reply", conversationId, turnId },
+            turnId,
+          ).catch((e) =>
+            this.logger.error(`Failed to send reply to ${msg.channelId}: ${errMsg(e)}`),
+          );
+        } else if (this.outboxRegistry) {
+          // 协同：LLM 被 commitment 完全抑制（content 空）时，
+          // 不发空 entry（会被 adapter reject 或产生无用告警），仅关 slot
+          // 释放等待 afterSlot=turnId 的 task fire。
+          await this.outboxRegistry
+            .of(replyTarget)
+            .fillSlot(turnId)
+            .catch((e) =>
+              this.logger.error(`Failed to close slot: ${errMsg(e)}`),
+            );
+        }
+        // 无 outboxRegistry + 空内容：REPL/测试场景，静默不发（channel 路径必有 registry）
       } else if (result) {
-        const replyTarget = buildReplyTarget(msg);
         const errorText =
           result.reason === "error"
             ? `处理出错：${result.error.message}`
@@ -220,23 +258,32 @@ export class InboundRouter {
               ? "达到最大轮次限制。"
               : "处理被中止。";
         this.logger.warn(`[错误回复] conv=${conversationId} reason=${result.reason}`);
-        await this.emit(
+        await this.emitReply(
           replyTarget,
           { text: errorText },
-          { kind: "llm-reply", conversationId },
+          { kind: "llm-reply", conversationId, turnId },
+          turnId,
         ).catch((e) =>
           this.logger.error(`Failed to send error reply: ${errMsg(e)}`),
         );
       }
     } catch (err) {
       this.logger.error(`[异常] conv=${conversationId}: ${errMsg(err)}`);
-      const replyTarget = buildReplyTarget(msg);
-      await this.emit(
+      await this.emitReply(
         replyTarget,
         { text: "内部错误，请稍后重试。" },
         { kind: "system", handler: "inbound-router-error" },
+        turnId,
       ).catch(() => {});
     } finally {
+      // Phase 3 安全网：若 slot 仍 pending（理论不该发生——上面三个分支之一必填了它），
+      // abandon 以释放 afterSlot 等待者，防止因意外路径导致 task-fire 悬挂到 TTL。
+      // 对已终态 slot 的 abandon 是 no-op（outbox.ts slot 状态机保证）。
+      if (this.outboxRegistry) {
+        this.outboxRegistry
+          .of(replyTarget)
+          .abandonSlot(turnId, "turn ended without reply emission");
+      }
       this.logger.info(`[释放] conv=${conversationId} busy=false`);
       this.conversations.setBusy(conversationId, false);
     }

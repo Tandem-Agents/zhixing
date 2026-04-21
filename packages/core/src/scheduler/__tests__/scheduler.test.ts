@@ -303,6 +303,164 @@ describe("Scheduler", () => {
     await scheduler.stop();
   });
 
+  it("P3b: 任务带 createdInTurn 时，enqueue 的 source 透传该字段", async () => {
+    const enqueue = vi.fn().mockResolvedValue("dlv_turn");
+    const mockDelivery = { enqueue, flush: vi.fn(), stats: vi.fn() };
+
+    const mockRun = vi.fn<[], Promise<AgentTurnResult>>().mockResolvedValue({
+      status: "ok",
+      output: "task result",
+      durationMs: 10,
+    });
+
+    const eventBus = createEventBus<SchedulerEventMap>();
+    const scheduler = new Scheduler({
+      store: new JsonTaskStore(join(tempDir, "tasks.json")),
+      eventBus,
+      runAgentTurn: mockRun,
+      delivery: mockDelivery,
+    });
+    await scheduler.start();
+
+    const task = await scheduler.createTask({
+      name: "t-with-turn",
+      enabled: true,
+      priority: "normal",
+      schedule: { kind: "once", at: new Date(Date.now() + 999_999).toISOString() },
+      action: { kind: "agent-turn", prompt: "x" },
+      delivery: { kind: "channel", channel: "feishu", to: "u1" },
+      createdInTurn: "turn_abc",
+    });
+
+    await scheduler.runTask(task.id);
+
+    expect(enqueue).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: expect.objectContaining({
+          kind: "scheduler",
+          taskId: task.id,
+          createdInTurn: "turn_abc",
+        }),
+      }),
+    );
+    await scheduler.stop();
+  });
+
+  it("Issue B: interval 任务带 createdInTurn 时，enqueue 的 source 不透传该字段", async () => {
+    // 规则：周期任务（interval/cron）每次 fire 时创建 turn 早已结束——
+    // afterSlot 必 orphan，带出去只产生 causal-broken 告警噪音。
+    const enqueue = vi.fn().mockResolvedValue("dlv_interval");
+    const mockDelivery = { enqueue, flush: vi.fn(), stats: vi.fn() };
+    const mockRun = vi.fn<[], Promise<AgentTurnResult>>().mockResolvedValue({
+      status: "ok",
+      output: "task result",
+      durationMs: 10,
+    });
+
+    const scheduler = new Scheduler({
+      store: new JsonTaskStore(join(tempDir, "tasks.json")),
+      eventBus: createEventBus<SchedulerEventMap>(),
+      runAgentTurn: mockRun,
+      delivery: mockDelivery,
+    });
+    await scheduler.start();
+
+    const task = await scheduler.createTask({
+      name: "t-interval",
+      enabled: true,
+      priority: "normal",
+      schedule: { kind: "interval", everyMs: 60_000 },
+      action: { kind: "agent-turn", prompt: "x" },
+      delivery: { kind: "channel", channel: "feishu", to: "u1" },
+      createdInTurn: "turn_interval",
+    });
+
+    await scheduler.runTask(task.id);
+
+    const call = enqueue.mock.calls[0]![0] as { source: Record<string, unknown> };
+    expect(call.source).toEqual({
+      kind: "scheduler",
+      taskId: task.id,
+      taskName: "t-interval",
+    });
+    expect(call.source).not.toHaveProperty("createdInTurn");
+    await scheduler.stop();
+  });
+
+  it("Issue B: cron 任务带 createdInTurn 时，enqueue 的 source 不透传该字段", async () => {
+    const enqueue = vi.fn().mockResolvedValue("dlv_cron");
+    const mockDelivery = { enqueue, flush: vi.fn(), stats: vi.fn() };
+    const mockRun = vi.fn<[], Promise<AgentTurnResult>>().mockResolvedValue({
+      status: "ok",
+      output: "task result",
+      durationMs: 10,
+    });
+
+    const scheduler = new Scheduler({
+      store: new JsonTaskStore(join(tempDir, "tasks.json")),
+      eventBus: createEventBus<SchedulerEventMap>(),
+      runAgentTurn: mockRun,
+      delivery: mockDelivery,
+    });
+    await scheduler.start();
+
+    const task = await scheduler.createTask({
+      name: "t-cron",
+      enabled: true,
+      priority: "normal",
+      schedule: { kind: "cron", expr: "0 8 * * *" },
+      action: { kind: "agent-turn", prompt: "x" },
+      delivery: { kind: "channel", channel: "feishu", to: "u1" },
+      createdInTurn: "turn_cron",
+    });
+
+    await scheduler.runTask(task.id);
+
+    const call = enqueue.mock.calls[0]![0] as { source: Record<string, unknown> };
+    expect(call.source).not.toHaveProperty("createdInTurn");
+    await scheduler.stop();
+  });
+
+  it("Issue Y: once 任务创建至今超过 SLOT_TTL 时，createdInTurn 不透传（避免远期 fire 的 orphan 噪音）", async () => {
+    // 场景："明天 9 点提醒我"——创建于 turn_abc，slot TTL 10 分钟早已过，
+    // 次日 fire 时若带 afterSlot=turn_abc 必定 orphan → causal-broken 噪音。
+    const enqueue = vi.fn().mockResolvedValue("dlv_old");
+    const mockDelivery = { enqueue, flush: vi.fn(), stats: vi.fn() };
+    const mockRun = vi.fn<[], Promise<AgentTurnResult>>().mockResolvedValue({
+      status: "ok",
+      output: "task result",
+      durationMs: 10,
+    });
+
+    const scheduler = new Scheduler({
+      store: new JsonTaskStore(join(tempDir, "tasks.json")),
+      eventBus: createEventBus<SchedulerEventMap>(),
+      runAgentTurn: mockRun,
+      delivery: mockDelivery,
+    });
+    await scheduler.start();
+
+    // 构造一个 11 分钟前创建的 task（伪造 createdAt 超过 SLOT_TTL=10min）
+    const task = await scheduler.createTask({
+      name: "t-delayed-once",
+      enabled: true,
+      priority: "normal",
+      schedule: { kind: "once", at: new Date(Date.now() + 999_999).toISOString() },
+      action: { kind: "agent-turn", prompt: "x" },
+      delivery: { kind: "channel", channel: "feishu", to: "u1" },
+      createdInTurn: "turn_old",
+    });
+    // 直接改存储层 task.createdAt 回到 11 分钟前（超过 DEFAULT_SLOT_TTL_MS=10min）
+    const oldCreatedAt = new Date(Date.now() - 11 * 60_000).toISOString();
+    await scheduler["store"].updateTask(task.id, { createdAt: oldCreatedAt });
+
+    await scheduler.runTask(task.id);
+
+    const call = enqueue.mock.calls[0]![0] as { source: Record<string, unknown> };
+    expect(call.source).not.toHaveProperty("createdInTurn");
+    await scheduler.stop();
+  });
+
   it("skips delivery when task has no delivery config", async () => {
     const enqueue = vi.fn();
     const mockDelivery = { enqueue, flush: vi.fn(), stats: vi.fn() };
