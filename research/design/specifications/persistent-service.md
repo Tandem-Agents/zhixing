@@ -548,8 +548,8 @@ type TaskAction =
       prompt: string;
       model?: string;
       tools?: string[];
-      // 持续性任务可指定 sessionId，跨运行保留上下文
-      // 不指定则每次运行创建独立临时会话
+      // 持续性任务可指定 sessionId，跨运行保留上下文（走 ConversationManager，持久化 transcript）
+      // 不指定则 ephemeral 执行：创建 bare AgentRuntime → run → dispose，不持久化 transcript，磁盘零痕迹
       sessionId?: string;
     }
   | { kind: "system"; handler: string; params?: Record<string, unknown> };
@@ -595,7 +595,7 @@ interface TaskState {
 | OpenClaw (4 种 sessionTarget) | 知行 (2 种 + 可选 sessionId) |
 |------|------|
 | `"main"` — 注入事件到主会话（需 heartbeat 唤醒） | 不需要——直接执行，无主会话概念 |
-| `"isolated"` — 独立临时会话 | `agent-turn` 默认行为 |
+| `"isolated"` — 独立临时会话 | `agent-turn` 默认行为（ephemeral：bare runtime，无 transcript） |
 | `"current"` — 绑定到创建时的会话 | `agent-turn` + `sessionId: "当前会话ID"` |
 | `"session:xxx"` — 指定命名会话 | `agent-turn` + `sessionId: "xxx"` |
 
@@ -657,7 +657,8 @@ OpenClaw 的 `cron` 工具已经实现了自然语言创建定时任务，但其
 │  ┌──────▼───────┐                                              │
 │  │ TaskExecutor  │ ← 执行引擎                                   │
 │  │  run(task)    │                                              │
-│  │    ├── agent-turn → 创建独立 Agent 会话 → 执行 prompt       │
+│  │    ├── agent-turn (默认) → ephemeral runtime → prompt → dispose │
+│  │    ├── agent-turn (+sessionId) → ConversationManager → 持久会话 │
 │  │    └── system → 调用内置 handler                             │
 │  │  deliver()    │ ← 结果投递                                   │
 │  │    ├── channel → Channel Adapter                             │

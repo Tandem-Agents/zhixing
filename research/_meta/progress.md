@@ -120,6 +120,7 @@
 - [x] **M22**: /skills audit + Memory Flush (L1.5) → 治理闭环 + 压缩时自动提取记忆 ✅ 2026-04-10
 - [x] **M23**: M7 效果反馈闭环 → 效果推断 + 检索优先级排序 + CLI stale 提醒（210 个测试通过） ✅ 2026-04-10
 - [x] **M24**: 安全系统深度调研 → 三系统（OpenClaw/Hermes/Claude Code）安全架构交叉对比 + 源码分析 ✅ 2026-04-12
+- [x] **M25**: Serve 模式健壮性 Step 16a-d + 16g-h → 飞书定时任务 E2E 打通（origin capture + 时间注入 + scheduler snapshot + 最小间隔保护 + delivery flush） ✅ 2026-04-20
 
 ---
 

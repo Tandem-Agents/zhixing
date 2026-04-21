@@ -4,12 +4,13 @@
  * 流程：
  * 1. 加载/生成 token
  * 2. 创建 TranscriptStore
- * 3. 创建 RuntimeFactory + ConversationManager
+ * 3. 创建 RuntimeFactory + ConversationManager（用户/channel 会话）
  * 4. 连接社交通道（Channel Adapters — 按配置启用）
  * 5. 创建 DeliveryPipeline（依赖通道）
- * 6. 创建 Scheduler（注入 delivery）
- * 7. 创建 ServerContext + 启动 runServer
- * 8. 等待停机（信号触发或主动 shutdown）
+ * 6. 创建 Ephemeral Runtime（定时任务专用，绕过 ConversationManager）
+ * 7. 创建 Scheduler（注入 delivery + runAgentTurn→ephemeral）
+ * 8. 创建 ServerContext + 启动 runServer
+ * 9. 等待停机（信号触发或主动 shutdown）
  */
 
 import {
@@ -40,6 +41,7 @@ import { createAgentRuntime } from "../run-agent.js";
 import { setupDelivery, type DeliveryStack } from "../setup-delivery.js";
 import { setupChannels } from "./channels.js";
 import { createCliRuntimeFactory } from "./session-adapter.js";
+import { runEphemeralTurn } from "./ephemeral-executor.js";
 import { loadOrCreateToken } from "./token.js";
 import path from "node:path";
 
@@ -158,47 +160,46 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
     });
   }
 
-  // 6. Scheduler
+  // 6. Ephemeral Runtime — 定时任务专用（Step 16e）
+  //
+  // 为什么独立于 conversations：
+  // - conversations (ConversationManager) 是为持久用户会话设计，会 initTranscript → 创建
+  //   conv_xxx/ 目录、累积消息历史、依赖 idle-reaper 释放。定时任务若走此路径，每次执行
+  //   都留下磁盘痕迹（即使内存被 reaper 回收），导致 conversations/ 无限膨胀。
+  // - Ephemeral 执行对标 K8s Job / Serverless / Claude Code 子 Agent：任务独立、无身份、
+  //   不累积历史、零磁盘痕迹。与持久用户会话是两套完全独立的语义。
+  //
+  // 为什么共享单例 runtime 而非每任务新建：
+  // - createAgentRuntime 有 provider 连接、系统提示、项目上下文加载等启动成本
+  // - AgentRuntime.run() 本身对会话历史无状态（messages 每次传入），复用安全
+  // - Token estimator 校准、permission 规则跨任务共享是正收益
+  //
+  // scheduleTool 的 origin：定时任务 AI 若创建子任务，origin=null（非用户发起）。
+  // 用户发起的任务走 channel → ConversationManager 路径，在那里 origin 已从
+  // sessionId（dm:feishu:ou_xxx）解析并在 task.origin 持久化。
+  const ephemeralRuntime = await createAgentRuntime({
+    model: opts.model,
+    provider: opts.provider,
+    workspace: opts.workspace,
+    extraTools: [createScheduleTool(getSchedulerRef, () => null)],
+  });
+  ephemeralRuntime.registerTurnContextProvider(
+    new SchedulerProvider(() => {
+      if (!schedulerRef) return { active: [], recentlyCompleted: [], recentlyFailed: [] };
+      return schedulerRef.getStatusSummary();
+    }),
+  );
+
+  // 7. Scheduler
   const schedulerEventBus = createEventBus<SchedulerEventMap>();
   const runAgentTurn = async (params: {
     prompt: string;
     context?: "scheduled-task";
   }): Promise<AgentTurnResult> => {
-    const startTime = Date.now();
-    try {
-      const taskPrompt = params.context === "scheduled-task"
-        ? `[系统] 这是一个定时任务的自动执行。请直接执行以下指令并输出结果，不要反问用户、不要引导对话。\n\n${params.prompt}`
-        : params.prompt;
-      const managed = await conversations.getOrCreate();
-      const runtime = managed.runtime;
-      const gen = runtime.run(taskPrompt);
-      let lastText = "";
-      while (true) {
-        const { value, done } = await gen.next();
-        if (done) {
-          return {
-            status: value.reason === "completed" ? "ok" : "error",
-            output: lastText || undefined,
-            error:
-              value.reason === "error"
-                ? value.error.message
-                : value.reason === "max_turns"
-                  ? "Max turns reached"
-                  : undefined,
-            durationMs: Date.now() - startTime,
-          };
-        }
-        if (value.type === "text_delta") {
-          lastText += value.text;
-        }
-      }
-    } catch (err) {
-      return {
-        status: "error",
-        error: err instanceof Error ? err.message : String(err),
-        durationMs: Date.now() - startTime,
-      };
-    }
+    const taskPrompt = params.context === "scheduled-task"
+      ? `[系统] 这是一个定时任务的自动执行。请直接执行以下指令并输出结果，不要反问用户、不要引导对话。\n\n${params.prompt}`
+      : params.prompt;
+    return runEphemeralTurn({ runtime: ephemeralRuntime, prompt: taskPrompt });
   };
 
   const journalStore = new JournalStore();
@@ -231,7 +232,7 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
   schedulerRef = scheduler;
   await scheduler.start();
 
-  // 7. ServerContext + runServer
+  // 8. ServerContext + runServer
   const ctx = createServerContext({
     config: { ...DEFAULT_SERVER_CONFIG, port, host },
     version: SERVER_VERSION,
