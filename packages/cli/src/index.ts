@@ -14,6 +14,9 @@ import { runOnce } from "./run-agent.js";
 import { startRepl } from "./repl.js";
 import { createRenderer, renderSummary, renderError } from "./render.js";
 import { runServeCommand } from "./serve/command.js";
+import { runStopCommand } from "./serve/stop.js";
+import { runStatusCommand } from "./serve/status.js";
+import { runLogsCommand } from "./serve/logs.js";
 import { runRpcCommand, printRpcHelp } from "./rpc/command.js";
 
 const program = new Command();
@@ -125,7 +128,7 @@ program
   });
 
 // ─── zhixing serve（常驻服务模式） ───
-program
+const serveCmd = program
   .command("serve")
   .description("启动常驻服务（HTTP + WebSocket + 调度器）")
   .option("--port <port>", "监听端口", (v) => parseInt(v, 10))
@@ -133,12 +136,14 @@ program
   .option("-m, --model <model>", "默认模型（每个会话可覆盖）")
   .option("--provider <provider>", "Provider ID")
   .option("-w, --workspace <path>", "工作区目录")
+  .option("--daemon", "后台模式：脱离终端独立运行")
   .action(async (options: {
     port?: number;
     host?: string;
     model?: string;
     provider?: string;
     workspace?: string;
+    daemon?: boolean;
   }) => {
     try {
       await runServeCommand({
@@ -147,8 +152,65 @@ program
         model: options.model,
         provider: options.provider,
         workspace: options.workspace,
+        daemon: options.daemon,
       });
       process.exit(0);
+    } catch (err) {
+      renderError(err);
+      process.exit(1);
+    }
+  });
+
+// zhixing serve stop —— 停止后台 daemon
+serveCmd
+  .command("stop")
+  .description("停止后台运行的 server（SIGTERM，30s 超时 SIGKILL 兜底）")
+  .option("--timeout <ms>", "优雅停机超时（ms）", (v) => parseInt(v, 10))
+  .action(async (options: { timeout?: number }) => {
+    try {
+      const result = await runStopCommand({ timeoutMs: options.timeout });
+      const exitCode = result.status === "error" ? 1 : 0;
+      process.exit(exitCode);
+    } catch (err) {
+      renderError(err);
+      process.exit(1);
+    }
+  });
+
+// zhixing serve logs —— 查看日志（默认尾部 50 行；--tail 持续跟踪）
+serveCmd
+  .command("logs")
+  .description("查看后台 daemon 日志")
+  .option("--tail", "持续跟踪（类 tail -f）")
+  .option("--lines <n>", "显示行数（默认 50）", (v) => parseInt(v, 10))
+  .action(async (options: { tail?: boolean; lines?: number }) => {
+    try {
+      await runLogsCommand({ tail: options.tail, lines: options.lines });
+      process.exit(0);
+    } catch (err) {
+      renderError(err);
+      process.exit(1);
+    }
+  });
+
+// zhixing serve status —— 查询后台 daemon 状态
+serveCmd
+  .command("status")
+  .description("查询 server 运行状态（running / running-unhealthy / stopped / stale）")
+  .option("--json", "输出 JSON（便于脚本解析）")
+  .action(async (options: { json?: boolean }) => {
+    try {
+      const report = await runStatusCommand({ json: options.json });
+      // exit code: 0 running, 1 running-unhealthy, 2 stopped, 3 stale
+      const exitCode =
+        report.status === "running"
+          ? 0
+          : report.status === "running-unhealthy"
+            ? 1
+            : report.status === "stopped"
+              ? 2
+              : 3;
+      process.exit(exitCode);
     } catch (err) {
       renderError(err);
       process.exit(1);

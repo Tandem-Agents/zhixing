@@ -23,6 +23,7 @@ import {
   buildScheduleDeleteMethod,
   buildScheduleRunMethod,
 } from "./schedule.js";
+import { buildServerShutdownMethod, buildServerInfoMethod } from "./server.js";
 
 export interface BuiltinMethodsOptions {
   /** 后续阶段会注入更多依赖（scheduler 等） */
@@ -52,6 +53,9 @@ export function buildBuiltinRegistry(_opts: BuiltinMethodsOptions = {}): Handler
     buildScheduleUpdateMethod(),
     buildScheduleDeleteMethod(),
     buildScheduleRunMethod(),
+    // server.*（控制面：shutdown / info）
+    buildServerShutdownMethod(),
+    buildServerInfoMethod(),
   ]);
   return registry;
 }

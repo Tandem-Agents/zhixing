@@ -26,6 +26,12 @@ export interface ServerContext {
   channels?: ChannelRegistry;
   /** 实际监听的地址（startServer 监听就绪后回填） */
   listenAddr?: { port: number; host: string };
+  /**
+   * 优雅停机触发器（runServer 在 startServer resolve 后同一微任务绑定）。
+   * 供 `server.shutdown` RPC handler 使用——handler 不 await，立即 ack 回响应。
+   * 未绑定（start 失败）时 handler 应抛 RpcErrors.internal。
+   */
+  requestShutdown?: (reason: string) => void;
 }
 
 export interface CreateContextOptions {

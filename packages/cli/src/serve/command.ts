@@ -32,8 +32,11 @@ import {
   buildSystemHandlers,
   ConversationManager,
   DEFAULT_SERVER_CONFIG,
+  ServerStateFile,
+  CleanupRegistry,
   type InboundRouter,
   type RunningServer,
+  type ProcessLockPaths,
 } from "@zhixing/server";
 import { loadConfig } from "@zhixing/providers";
 import { createScheduleTool } from "@zhixing/tools-builtin";
@@ -44,6 +47,9 @@ import { setupChannels } from "./channels.js";
 import { createCliRuntimeFactory } from "./session-adapter.js";
 import { runEphemeralTurn } from "./ephemeral-executor.js";
 import { loadOrCreateToken } from "./token.js";
+import { isDaemonChild } from "./self-exec.js";
+import { spawnDaemon } from "./daemon.js";
+import { registerTailCleanup, registerCoreCleanup } from "./shutdown-chain.js";
 import path from "node:path";
 
 const SERVER_VERSION = "0.1.0";
@@ -54,9 +60,50 @@ export interface ServeOptions {
   model?: string;
   provider?: string;
   workspace?: string;
+  /** 后台模式：父进程 spawn 一个 detached child 并握手确认就绪 */
+  daemon?: boolean;
 }
 
+/**
+ * `zhixing serve` 入口。
+ *
+ * 三种进入方式：
+ * 1. 前台 (`zhixing serve`) → 直接跑 server 逻辑（现状）
+ * 2. 父进程 (`zhixing serve --daemon`，非 child) → spawn daemon child 后返回
+ * 3. Daemon child (env `ZHIXING_DAEMON_CHILD=1`) → 跟前台一样跑 server，但 stdio
+ *    已被父进程重定向到 log 文件
+ *
+ * 分支 1 和 3 走同一条代码路径——server 本身不感知 daemon 概念。
+ */
 export async function runServeCommand(opts: ServeOptions): Promise<void> {
+  // 分支 2：父进程需要 fork 出 detached child
+  if (opts.daemon && !isDaemonChild()) {
+    const forwardedArgs = buildForwardedArgs(opts);
+    const result = await spawnDaemon({ forwardedArgs });
+    if (!result.ok) {
+      process.exit(1);
+    }
+    return; // 父进程退出，child 继续运行
+  }
+
+  // 分支 1 + 3：实际 server 运行
+  await runServerProcess(opts);
+}
+
+/**
+ * 从 ServeOptions 重建传给 child 的 argv（不含 --daemon，child 应走分支 1）。
+ */
+function buildForwardedArgs(opts: ServeOptions): string[] {
+  const args: string[] = ["serve"];
+  if (opts.port !== undefined) args.push("--port", String(opts.port));
+  if (opts.host) args.push("--host", opts.host);
+  if (opts.model) args.push("--model", opts.model);
+  if (opts.provider) args.push("--provider", opts.provider);
+  if (opts.workspace) args.push("--workspace", opts.workspace);
+  return args;
+}
+
+async function runServerProcess(opts: ServeOptions): Promise<void> {
   const port = opts.port ?? DEFAULT_SERVER_CONFIG.port;
   const host = opts.host ?? DEFAULT_SERVER_CONFIG.host;
 
@@ -250,12 +297,37 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
     channels,
   });
 
+  // 8a. Daemon child 才启用 ServerStateFile——前台模式不写 state 文件
+  const isChild = isDaemonChild();
+  const stateFile = isChild ? new ServerStateFile() : undefined;
+  const heartbeatTimerRef: { current: NodeJS.Timeout | null } = { current: null };
+
+  // lockPaths —— 单一事实源。同时传给 runServer（acquireLock）和 registerTailCleanup（releaseLock），
+  // 保证 acquire/release 走同一路径。当前 undefined = 默认 ~/.zhixing/server.pid。
+  const lockPaths: ProcessLockPaths | undefined = undefined;
+
+  // 8b. CleanupRegistry —— 唯一清理出口。LIFO 语义 + 跨包注入。
+  //     注册序列封装在 shutdown-chain.ts，方便单测顺序正确性。
+  const registry = new CleanupRegistry({
+    logger: {
+      info: (msg) => console.log(chalk.dim(`[cleanup] ${msg}`)),
+      error: (msg, err) =>
+        console.error(chalk.red(`[cleanup] ${msg}`), err instanceof Error ? err.message : err),
+    },
+  });
+
+  // 8b.1 runServer 之前：尾部清理（LIFO 最后执行 —— releaseLock / state 文件）
+  registerTailCleanup(registry, { stateFile, heartbeatTimerRef, lockPaths });
+
+  // 8b.2 runServer —— 内部会向 registry 注册 server.close（注入模式）
   let runner: RunningServer;
   try {
     runner = await runServer({
       context: ctx,
       scheduler,
       schedulerEventBus,
+      cleanupRegistry: registry,
+      lockPaths, // 与 registerTailCleanup 使用同一引用——acquire/release 路径一致
       logger: {
         info: (msg) => console.log(chalk.dim(`[server] ${msg}`)),
         warn: (msg) => console.warn(chalk.yellow(`[server] ${msg}`)),
@@ -263,37 +335,78 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
       },
     });
   } catch (err) {
+    // runServer 抛错（startServer / acquireLock 冲突）—— server 未运行。
+    // 清理策略：先跑 registry.runAll（已注册的 tail 项对未完成 acquire 场景全 no-op 安全，
+    // 保证与正常路径的清理一致性）→ 再手动清理 registry 未感知的资源（scheduler / channels /
+    // delivery 是在 command.ts step 4-7 启动的，还没进入 registry）。
+    await registry.runAll("startup-failure").catch(() => {});
     await scheduler.stop().catch(() => {});
     await deliveryStack?.stop().catch(() => {});
     await channels?.dispose().catch(() => {});
     throw err;
   }
 
-  // 启动横幅
-  console.log();
-  console.log(chalk.green("  知行服务已启动"));
-  console.log(chalk.dim(`  HTTP:      http://${runner.server.host}:${runner.server.port}`));
-  console.log(chalk.dim(`  WebSocket: ws://${runner.server.host}:${runner.server.port}/ws`));
-  console.log(chalk.dim(`  Token:     ${tokenInfo.path}`));
-  if (channels) {
-    const statuses = channels.listStatuses();
-    const connected = statuses.filter((s) => s.state === "connected");
-    console.log(chalk.dim(`  Channels:  ${connected.length}/${statuses.length} connected`));
-    for (const s of statuses) {
-      const icon = s.state === "connected" ? chalk.green("●") : chalk.red("●");
-      console.log(chalk.dim(`    ${icon} ${s.channelId}: ${s.state}${s.error ? ` (${s.error})` : ""}`));
+  // 8b.3 runServer 之后：核心资源清理（LIFO 最先执行 —— markStopping / scheduler / channels / delivery / heartbeat）
+  registerCoreCleanup(registry, {
+    stateFile,
+    heartbeatTimerRef,
+    scheduler,
+    channels,
+    deliveryStack,
+  });
+
+  // 8c. Post-runServer 启动步骤（startup guard 包裹）
+  //     不变量：runServer 已 resolve → server listening + PID 锁持有 + registry 全注册完毕。
+  //     此后若任何步骤抛错（markReady / banner 等），必须走 runner.shutdown 让 registry 完整跑完，
+  //     否则 daemon child 会孤儿化 + PID 锁/state 文件残留 —— 下次启动被假 "already running" 误挡。
+  try {
+    // markReady + markRunning + heartbeat（仅 daemon child）
+    // 紧邻调用：running 才是稳态；ready 仅作为 .ready marker 的语义锚点
+    if (stateFile) {
+      await stateFile.markReady({
+        pid: process.pid,
+        startedAt: new Date().toISOString(),
+        port: runner.server.port,
+        host: runner.server.host,
+      });
+      await stateFile.markRunning();
+      const hbTimer = setInterval(() => {
+        void stateFile.heartbeat();
+      }, 60_000);
+      hbTimer.unref();
+      heartbeatTimerRef.current = hbTimer;
     }
+
+    // 启动横幅
+    console.log();
+    console.log(chalk.green("  知行服务已启动"));
+    console.log(chalk.dim(`  HTTP:      http://${runner.server.host}:${runner.server.port}`));
+    console.log(chalk.dim(`  WebSocket: ws://${runner.server.host}:${runner.server.port}/ws`));
+    console.log(chalk.dim(`  Token:     ${tokenInfo.path}`));
+    if (channels) {
+      const statuses = channels.listStatuses();
+      const connected = statuses.filter((s) => s.state === "connected");
+      console.log(chalk.dim(`  Channels:  ${connected.length}/${statuses.length} connected`));
+      for (const s of statuses) {
+        const icon = s.state === "connected" ? chalk.green("●") : chalk.red("●");
+        console.log(
+          chalk.dim(`    ${icon} ${s.channelId}: ${s.state}${s.error ? ` (${s.error})` : ""}`),
+        );
+      }
+    }
+    console.log(chalk.dim(`  Ctrl+C 停止`));
+    console.log();
+  } catch (err) {
+    // Post-runServer startup 失败 → runner.shutdown 让 registry 跑完（release lock / close server / stop scheduler 等）
+    // runner.shutdown 幂等 + 内部吞错，保证资源最大化回收
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(chalk.red(`Startup failed after server listening: ${msg}`));
+    await runner.shutdown("startup-error").catch(() => {});
+    throw err;
   }
-  console.log(chalk.dim(`  Ctrl+C 停止`));
-  console.log();
 
-  // 等待停机
+  // 等待停机 —— 所有清理由 lifecycle.ts 的 shutdown → registry.runAll 统一完成
   await runner.waitForShutdown();
-
-  // 优雅清理
-  await scheduler.stop().catch(() => {});
-  await deliveryStack?.stop().catch(() => {});
-  await channels?.dispose().catch(() => {});
 }
 
 /**

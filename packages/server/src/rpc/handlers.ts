@@ -65,6 +65,9 @@ export const RpcErrors = {
   busy(message: string) {
     return new RpcAppError(RPC_ERROR_CODES.BUSY, message);
   },
+  internal(message = "Internal error") {
+    return new RpcAppError(RPC_ERROR_CODES.INTERNAL_ERROR, message);
+  },
 };
 
 export class HandlerRegistry {

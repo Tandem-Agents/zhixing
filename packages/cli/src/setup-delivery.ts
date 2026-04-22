@@ -51,10 +51,14 @@ export async function setupDelivery(options: SetupDeliveryOptions): Promise<Deli
     async (target, content) => {
       const adapter = channels.get(target.channelId);
       if (!adapter) {
+        // TD#1 (M9)：从 retryable:false 改为 retryable:true。
+        // 理由：daemon 长时运行期间，channel adapter 重连过渡窗口里查不到——若不重试会
+        // 静默丢弃投递；改 true 让 Outbox 走正常重试路径，最终重连后即可送达。
+        // 重试上限由 Outbox/Pipeline 的 max attempts + 指数退避约束，不会无限膨胀。
         return {
           success: false,
           error: `Channel not found: ${target.channelId}`,
-          retryable: false,
+          retryable: true,
         };
       }
       return adapter.send(target, content);

@@ -34,7 +34,7 @@ S1-S3.6 ✅ 全部完成（Scheduler → Server → 对话模型 → Channel →
 
 ### P1：Step 17 — Daemon Level 1（always-on）
 
-**状态**：设计完成，待实现（M1-M9）
+**状态**：✅ 代码实现完成（M1-M9），待 E2E 人工验收
 **执行规格**：[daemon-level-1-execution.md](specifications/daemon-level-1-execution.md) ← 权威细节
 **顶层定位**：[persistent-service.md §7](specifications/persistent-service.md)
 **依赖**：S3.6 ✅
@@ -42,7 +42,20 @@ S1-S3.6 ✅ 全部完成（Scheduler → Server → 对话模型 → Channel →
 **范围**（概要，细节见 execution 文档）：
 - `zhixing serve --daemon`：`spawn + detached + unref`，脱离终端常驻
 - `zhixing serve stop` / `status` / `logs`：完整生命周期控制
-- 顺带修复 TD#1（channel-not-found `retryable:false`，M9）
+- 顺带修复 TD#1（channel-not-found `retryable:true`，M9）
+
+**里程碑交付**：
+- M1 SelfExec + daemon 父进程 spawn + readiness handshake
+- M2 PID 文件 schema v2 + 静默迁移 + startTime PID-reuse 检测
+- M3 ServerStateFile（starting/ready/running/stopping/stopped/unhealthy 状态机）
+- M4 CleanupRegistry 统一 shutdown 出口 + 跨包注入
+- M5 `zhixing serve stop`（POSIX SIGTERM + 超时 SIGKILL）
+- M6 `zhixing serve status`（四态 + `--json`）
+- M7 `server.shutdown` RPC + Windows 降级链（RPC → taskkill /T → /F /T）
+- M8 `zhixing serve logs`（默认尾部 N 行 + `--tail` 跨平台轮询）
+- M9 TD#1 修复 + 回归守卫测试
+
+**测试规模**：server 235 + cli 389 = 624 tests 全绿，零回归。
 
 ### P2：Step 18 — Active Hours（免打扰）
 
