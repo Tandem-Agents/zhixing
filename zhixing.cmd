@@ -1,2 +1,2 @@
 @echo off
-node --env-file="%~dp0.env" --import=tsx/esm "%~dp0packages\cli\src\index.ts" %*
+node --env-file="%~dp0.env" "%~dp0packages\cli\dist\index.js" %*
