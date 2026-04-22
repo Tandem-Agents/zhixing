@@ -1,15 +1,77 @@
 # Daemon Level 1 执行规格
 
 > **文件作用**
-> 本文档是 Step 17 (P1) Daemon Level 1 的**执行级规格**。它做两件事：
-> 1. 对 [persistent-service.md §7](./persistent-service.md) 的 Level 1 做源码级调研（OpenClaw / Hermes / Claude Code）
-> 2. 基于三方对比设计出比它们更优的方案，并拆解为独立可验证的渐进实现里程碑
+> 本文档是 Daemon Level 1（`zhixing serve --daemon`）的**权威细节规格**——从概念、架构决策、PID / 状态文件 schema、里程碑拆解到验收清单。其他文档涉及 Daemon Level 1 时统一引用本文档，避免版本漂移。Level 2（OS 服务：launchd/systemd/SCM）有独立执行规格，**不复用本文档**。
 >
-> **废弃时机**
-> Step 17 所有里程碑 (M1-M9) 完成并经 E2E 验收后，本文档归档。关键设计决策回写 persistent-service.md §7，剩余细节沉淀到代码。Level 2（OS 服务：launchd/systemd/SCM）有独立执行规格，**不复用本文档**。
+> 它做三件事：
+> 1. 对 Level 1 做源码级调研（OpenClaw / Hermes / Claude Code）并给出取舍
+> 2. 基于三方对比设计出比它们更优的方案
+> 3. 拆解为独立可验证的渐进实现里程碑（M1-M9）
 >
-> **前置**：[persistent-service.md §7](./persistent-service.md) · [implementation-roadmap.md P1](../implementation-roadmap.md)
+> **前置**：[persistent-service.md §7](./persistent-service.md)（顶层定位） · [implementation-roadmap.md P1](../implementation-roadmap.md)（进度）
 > **已建基础**：[process-lock.ts](../../../packages/server/src/process-lock.ts) · [lifecycle.ts](../../../packages/server/src/lifecycle.ts) · [discovery.ts](../../../packages/server/src/client/discovery.ts)
+
+---
+
+## 0. 概念与背景
+
+> 这一节以第一人称回答读文档时最先冒出来的 5 个基础问题。不塞进后续技术章节，以免稀释它们的聚焦度。
+
+### 0.1 Daemon 怎么理解
+
+Daemon 不是"恶魔"——是 Unix 术语"守护进程"，指**脱离终端、后台常驻**的进程。词源是古希腊的 δαίμων（守护神/背景精灵），和基督教的 demon 无关。读文档时直接把它当成"后台服务"就行。
+
+### 0.2 这个模块到底在干嘛，Server 不是已经能跑了吗
+
+现在的 `zhixing serve` 是**前台进程**——绑在启动它的那个终端上：
+
+- 关终端 / Ctrl+C / 关机 → server 立刻死，飞书消息收不到
+- 重启电脑后不会自动起来
+- 想用 CLI 对话，必须先开一个终端跑 `serve`，再开另一个终端跑客户端
+
+Daemon 模式要解决的是：**一次 `zhixing serve --daemon` 启动后脱离终端独立运行**，关闭所有终端、甚至登出会话都不受影响。这是"always-on 个人 Agent"的前提；Step 18（免打扰）和 Step 20（远程权限确认）都依赖这个常驻能力。
+
+### 0.3 对 server / cli 模块有没有影响
+
+**Server 模块**：几乎零侵入。
+- 新增一个可选的 `CleanupRegistry` 注入参数
+- 内部清理职责**收窄**（只管自己的 `server.close`，`releaseLock` 等移交 command.ts）
+- 现有 6 个 lifecycle 测试全部继续通过
+- `shutdown()` 契约不变，仍**不调** `process.exit`
+
+**CLI 模块**：主要改动集中在 [packages/cli/src/serve/](../../../packages/cli/src/serve/)：
+- 新增 `self-exec.ts`、`daemon.ts`
+- `command.ts` 加 entry 分支（parent 启动 daemon / child 跑 server）
+- 其他命令（`ask`、`repl`、`schedule` 等）完全不动
+
+### 0.4 原有 `zhixing serve` 还保留吗
+
+保留，而且是默认行为。
+
+| 命令 | 模式 |
+|------|------|
+| `zhixing serve` | 前台模式（不变，等同现状） |
+| `zhixing serve --daemon` | 新增后台模式 |
+
+两者共用同一套 server / scheduler / delivery 代码路径，区别只是**进程拓扑**（是否 detach + 是否接管 stdio）。现有使用方式完全保留。
+
+### 0.5 和现有 server 的区别 & 不可抗力断了怎么办
+
+| 维度 | 前台 `serve` | `serve --daemon` |
+|------|-------------|-----------------|
+| 进程归属 | 绑终端 | 脱离终端（`detached + unref`）|
+| 关终端后 | 进程死 | 继续运行 |
+| stdout/stderr | 打到终端 | 重定向到日志文件 |
+| 启动反馈 | 直接看日志 | 父进程轮询 PID + `.ready` + `/api/health` 握手 5s 内确认 |
+| 停止方式 | Ctrl+C | `zhixing serve stop`（discover → RPC `server.shutdown` → taskkill 降级）|
+| 状态查询 | — | `zhixing serve status`（PID 存活 + 端口健康 + heartbeat 新鲜度）|
+
+**不可抗力断了怎么办**：
+- **崩溃 / 被 kill -9** → 留下陈旧 PID 文件；下次启动自动清理（`isProcessAlive` + `startTime` 比对 + 抢锁重建，见 [§3.2](#32-pid-文件-schemav2扩展自-process-lockts)）
+- **Level 1 不做自动重启**——那是 Level 2（launchd/systemd 注册）或 Level 3（完整服务化）的能力；M9 的 TD#1 修复只解决飞书 reconnect 期间消息不丢，不是进程级重启
+- **无跨进程重连机制**——CLI 连接 daemon 时每次 `discoverServer` 都会重新读 PID 文件建立 WebSocket；daemon 挂了 CLI 会直接报连接失败，需要手动 `zhixing serve --daemon` 再起
+
+想要 auto-restart / 开机自启，等 Level 2 的 OS 服务注册。**Level 1 只解决"脱离终端常驻"这一件事**。
 
 ---
 

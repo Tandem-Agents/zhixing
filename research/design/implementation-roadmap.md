@@ -34,16 +34,15 @@ S1-S3.6 ✅ 全部完成（Scheduler → Server → 对话模型 → Channel →
 
 ### P1：Step 17 — Daemon Level 1（always-on）
 
-**状态**：已调研
-**设计**：[persistent-service.md §7](specifications/persistent-service.md)
+**状态**：设计完成，待实现（M1-M9）
+**执行规格**：[daemon-level-1-execution.md](specifications/daemon-level-1-execution.md) ← 权威细节
+**顶层定位**：[persistent-service.md §7](specifications/persistent-service.md)
 **依赖**：S3.6 ✅
 
-**范围**：
-- `zhixing serve --daemon`：fork + detach + PID 文件 + 端口文件 + 日志文件
-- `zhixing serve stop`：读 PID → SIGTERM → 优雅停机
-- `zhixing serve status`：检查进程 + 端口健康
-- CLI 自动检测：启动时检查 PID → Server 运行中则连接 WebSocket
-- 顺带修复 TD#1（channel-not-found retryable:false → Daemon 长时运行必现）
+**范围**（概要，细节见 execution 文档）：
+- `zhixing serve --daemon`：`spawn + detached + unref`，脱离终端常驻
+- `zhixing serve stop` / `status` / `logs`：完整生命周期控制
+- 顺带修复 TD#1（channel-not-found `retryable:false`，M9）
 
 ### P2：Step 18 — Active Hours（免打扰）
 
