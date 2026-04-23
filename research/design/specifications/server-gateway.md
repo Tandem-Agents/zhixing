@@ -724,9 +724,9 @@ Phase 2（可选）：高风险工具 fork worker 进程执行（参考 Claude C
 - `zhixing serve` → 启动 WebSocket server
 - `wscat` 手动连接 → 发送 auth → 发送 conversation.send → 收到流式 delta 事件 → 收到 conversation.complete
 
-### S3（Delivery Pipeline + Active Hours）
+### S3（Delivery Pipeline）+ Step 18（Active Hours）
 
-**本文档新增**：无。按原设计执行。
+**本文档新增**：无。Active Hours 独立为 Step 18，详见 [active-hours-execution.md](./active-hours-execution.md)。
 
 ### S4（Daemon 后台模式）
 

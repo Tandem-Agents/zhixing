@@ -6,9 +6,9 @@
 
 ```
 S1-S3.6 ✅ 全部完成（Scheduler → Server → 对话模型 → Channel → Delivery → Outbox）
-  → Step 17 🔜 Daemon Level 1 (always-on)              ← 当前
-    → Step 18  Active Hours (免打扰)
-      → Step 20  远程权限确认 (飞书交互卡片)
+  → Step 17 ✅ Daemon Level 1 (always-on)
+    → Step 20 🔜 远程权限确认 (飞书交互卡片)     ← 当前（阻塞 daemon 实用性）
+      → Step 18  Active Hours (免打扰·体验优化)
         → S2.5  AgentOrchestrator (背景 Agent + 协调)
 ```
 
@@ -57,31 +57,45 @@ S1-S3.6 ✅ 全部完成（Scheduler → Server → 对话模型 → Channel →
 
 **测试规模**：server 235 + cli 389 = 624 tests 全绿，零回归。
 
-### P2：Step 18 — Active Hours（免打扰）
+### P2：Step 20 — 远程权限确认
 
-**状态**：已调研（方案需适配——Pipeline filter 链已在 M32 移除）
-**设计**：[persistent-service.md §4.6](specifications/persistent-service.md)
-**依赖**：Step 17
+**状态**：待调研设计
+**设计基础**：[confirmation-ux.md](specifications/confirmation-ux.md) 有 Broker 架构（Phase 1-3 覆盖 CLI 交互），缺远程/daemon 模式实现方案
+**依赖**：Step 17 ✅ + 飞书交互卡片 API
 
-**范围**：
-- `ActiveHoursConfig`（start / end / timezone）
-- Scheduler 层判定：免打扰时段推迟非 urgent 任务到活跃时段开始
-- urgent 穿透：priority = "urgent" 无视免打扰
-- 实现方式：Scheduler 层直接判定（非 Pipeline filter——filter 链已随 Faithful Delivery 契约移除）
-
-### P3：Step 20 — 远程权限确认
-
-**状态**：待调研
-**设计**：[confirmation-ux.md](specifications/confirmation-ux.md) 有 Broker 架构，缺远程实现方案
-**依赖**：Step 17 + 飞书交互卡片 API
-
-**问题**：serve 模式无交互式渲染器，任何触发确认的工具调用（bash / write 等）被永久拒绝。schedule / memory 已标记 internal 不触发确认，但定时任务执行高风险工具时仍受限。Daemon 上线后变紧迫。
+**为什么提前**：Daemon 常驻后，serve 模式无交互式渲染器，任何触发确认的工具调用（bash / write 等）被永久拒绝。schedule / memory 已标记 internal 不触发确认，但定时任务执行高风险工具时仍受限。**这是 daemon 实用性的硬阻塞**——不解决远程确认，daemon 模式下只能跑"安全"工具，大幅削弱 Agent 能力。Active Hours 是体验优化，不阻塞使用。
 
 **调研清单**：
 1. 飞书交互卡片 API：按钮回调、卡片更新、回调路由
 2. 异步确认流：broker `waitForDecision()` 如何挂起 agent-turn 等待远程决策
 3. 超时策略：用户未响应时的降级行为
 4. 安全边界：远程确认是否需要二次验证
+
+### P3：Step 18 — Active Hours（免打扰）
+
+**状态**：设计完成（9 轮审查通过 · v5），待实现（M1-M7）
+**执行规格**：[active-hours-execution.md](specifications/active-hours-execution.md) ← 权威细节
+**顶层定位**：[persistent-service.md §4.6](specifications/persistent-service.md)
+**依赖**：Step 17 ✅
+
+**范围**（概要，细节见 execution 文档）：
+- `ActiveHoursConfig` 全局配置 + IANA 时区 + 跨午夜 + Jitter 窗口
+- Scheduler 层单点过滤：urgent 穿透 / 非 urgent 推迟到活跃时段开始
+- Jitter 错峰（借鉴 Claude Code CronJitterConfig）
+- ScheduleTool 防 AI 滥用 urgent：**create + update 双路径防护**（A16）
+- RPC 热更新 `schedule.activeHours.update` + **`~/.zhixing/config.override.json` 持久化**（A15 / A18）
+- UX：中文友好文案（"免打扰中 (将于 08:00 恢复推送)"）
+
+**里程碑**（7 个）：
+- M1 ActiveHoursEvaluator 纯函数 + Jitter（1.5h）
+- M2 ZhixingConfig 扩展 + ConfigOverrideWriter + **wiring 桥接**（1.5h）
+- M3 Scheduler 集成 + **defer 两阶段** + event-bridge 订阅（2h）
+- M4 ScheduleTool 防滥用（**单一 inputSchema 删 priority**）（0.5h）
+- M5 RPC **`schedule.activeHours.*`** + override 持久化（1.5h）
+- M6 UX 展示 + 中文文案（1h）
+- M7 E2E + 文档（1h）
+
+**预估**：~9 小时。
 
 ---
 

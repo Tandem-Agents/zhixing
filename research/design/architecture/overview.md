@@ -134,8 +134,8 @@ graph TB
 | 简化的 schedule 工具（3+1 概念） | OpenClaw cron 工具 10+ 概念；知行 Task+Schedule+Action+可选 Priority | 已确认 |
 | TaskAction 两种 + 可选 sessionId | agent-turn（默认独立 / 可选持续会话）+ system，覆盖 OpenClaw 4 种 sessionTarget | 已确认 |
 | 不需要 Heartbeat 机制 | OpenClaw 心跳是架构产物；知行直接执行 + Active Hours + Delivery Pipeline 覆盖所有真实需求 | 已确认 |
-| 独立 Delivery Pipeline | 持久化队列 + 去重 + Active Hours 过滤 + 重试；比 OpenClaw 分散投递更可靠 | 已确认 |
-| Active Hours 双层过滤 | Scheduler 层（省 LLM 调用）+ Delivery 层（不打扰用户），urgent 可穿透 | 已确认 |
+| 独立 Delivery Pipeline | 持久化队列 + 忠实送达 + 重试；比 OpenClaw 分散投递更可靠 | 已确认 |
+| Active Hours Scheduler 层单点 | Scheduler 层单点过滤（省 LLM 调用 + 不打扰用户），urgent 可穿透。详见 [active-hours-execution.md](../specifications/active-hours-execution.md) | 已确认 |
 | Channel Adapter 独立包 | 统一接口 + 插件式加载，不污染核心包 | 已确认 |
 | 常驻服务架构 | 见 [智能体运行时设计](../specifications/persistent-service.md) | 已确认 |
 | AgentOrchestrator 层管理 agent 实例生命周期 | 背景 Agent 派生/前台推后台/Monitor/TaskGraph；位于内核之上接入层之下，对已实现模块零侵入 | 已确认 |
