@@ -7,7 +7,7 @@
 ```
 S1-S3.6 ✅ 全部完成（Scheduler → Server → 对话模型 → Channel → Delivery → Outbox）
   → Step 17 ✅ Daemon Level 1 (always-on)
-    → Step 20 🔜 远程权限确认 (飞书交互卡片)     ← 当前（阻塞 daemon 实用性）
+    → Step 20 🔜 远程权限确认 (通道无关)           ← 当前（阻塞 daemon 实用性，方案已完成）
       → Step 18  Active Hours (免打扰·体验优化)
         → S2.5  AgentOrchestrator (背景 Agent + 协调)
 ```
@@ -59,17 +59,33 @@ S1-S3.6 ✅ 全部完成（Scheduler → Server → 对话模型 → Channel →
 
 ### P2：Step 20 — 远程权限确认
 
-**状态**：待调研设计
-**设计基础**：[confirmation-ux.md](specifications/confirmation-ux.md) 有 Broker 架构（Phase 1-3 覆盖 CLI 交互），缺远程/daemon 模式实现方案
-**依赖**：Step 17 ✅ + 飞书交互卡片 API
+**状态**：✅ 方案设计完成；M1-M7 待实现
+**执行规格**：[remote-confirmation-execution.md](specifications/remote-confirmation-execution.md) ← 权威细节
+**设计基础**：[confirmation-ux.md](specifications/confirmation-ux.md) Phase 1 已落地（Broker + TTY 渲染器 + 拒绝回流）
+**依赖**：Step 17 ✅ + confirmation-ux.md Phase 1 ✅（通道无关，仅依赖 `ChannelAdapter.send` + `onMessage` 核心接口）
 
 **为什么提前**：Daemon 常驻后，serve 模式无交互式渲染器，任何触发确认的工具调用（bash / write 等）被永久拒绝。schedule / memory 已标记 internal 不触发确认，但定时任务执行高风险工具时仍受限。**这是 daemon 实用性的硬阻塞**——不解决远程确认，daemon 模式下只能跑"安全"工具，大幅削弱 Agent 能力。Active Hours 是体验优化，不阻塞使用。
 
-**调研清单**：
-1. 飞书交互卡片 API：按钮回调、卡片更新、回调路由
-2. 异步确认流：broker `waitForDecision()` 如何挂起 agent-turn 等待远程决策
-3. 超时策略：用户未响应时的降级行为
-4. 安全边界：远程确认是否需要二次验证
+**核心架构**（详见执行规格）：
+- **纯文本往返协议**：Renderer 发一条文本消息到用户通道；用户回复任意文本；InboundRouter 按词集匹配（允许 / 拒绝 / 其他 = 理由）解决。**不依赖按钮 / 卡片 / 富交互**
+- **ConfirmationHub**：聚合 per-runtime broker（REPL 零改动）；统一查询 / 解决面
+- **TurnOrigin 路由**：确认请求精确路由回原始对话（3 个 turn 入口全链路注入）
+- **ConfirmationBridge**：RPC 推送单一出口，按 observer 定向过滤（多客户端隐私安全）
+- **文本词集匹配**：中英文 + 数字 + 口语 + 情绪共 40+ 条（好 / y / yes / 可以 / 干吧 / 1；不 / n / no / 拒绝 / 算了 / 2 等）；保守完全匹配，自由文本 → `deny-with-reason` 理由回流 LLM
+- **confirmationFallback 策略**：deny（默认）/ auto-approve-safe
+
+**里程碑交付**（8 个，~11h）：
+- M0 RFC 定稿（本 spec 即是，0h）
+- M1 TurnOrigin + 全链路注入（3 入口 + 2 透传 + secure-executor 承接，3.5h）
+- M2a `IConfirmationBroker.onResolved` 事件扩展（core 包独立 merge，1h）
+- M2b ConfirmationHub + ConversationManager 钩子 + `getObserverConnectionIds`（2h）
+- M3 ConfirmationBridge + 确认 RPC 方法（observer-scoped 推送，2h）
+- M4 TextConfirmationRenderer（纯文本发送，1h）
+- M5 InboundRouter pending-aware 词集匹配（1.5h）
+- M6 超时策略 + confirmationFallback（1h）
+- M7 E2E 验收 + 文档（1h）
+
+**未来扩展（不在本 P2）**：平台原生按钮 / 卡片（飞书 Interactive Card、钉钉 ActionCard 等）作为独立 `channel-{platform}-approval-enhancement.md` spec 接入；本 P2 不感知、不依赖。
 
 ### P3：Step 18 — Active Hours（免打扰）
 
