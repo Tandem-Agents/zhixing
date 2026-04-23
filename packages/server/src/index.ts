@@ -10,6 +10,11 @@ export * from "./rpc/dispatcher.js";
 export * from "./rpc/handlers.js";
 export * from "./rpc/methods/index.js";
 export * from "./rpc/event-bridge.js";
+export {
+  createConfirmationBridge,
+  type ConfirmationBridge,
+  type ConfirmationBridgeDeps,
+} from "./rpc/confirmation-bridge.js";
 export * from "./runtime/index.js";
 export * from "./system-handlers.js";
 export * from "./paths.js";
@@ -22,3 +27,4 @@ export * from "./types.js";
 export * from "./context.js";
 export * from "./server.js";
 export * from "./channels/index.js";
+export * from "./confirmation/index.js";

@@ -5,8 +5,10 @@
  * - 调度器不依赖具体的 Agent 实现——通过 SchedulerDeps.runAgentTurn 注入
  * - TaskSchedule 是可扩展的 discriminated union（S3.5 将添加 after/self-paced）
  * - TaskState 是运行时状态，与任务定义分离
- * - S1 范围：once / interval / cron 三种调度，agent-turn / system 两种动作
+ * - S1 范围：once / interval / cron 三种调度,agent-turn / system 两种动作
  */
+
+import type { DeliveryTarget } from "../channels/types.js";
 
 // ─── 任务优先级 ───
 
@@ -134,6 +136,18 @@ export interface AgentTurnParams {
   tools?: string[];
   abortSignal?: AbortSignal;
   context?: "scheduled-task";
+  /**
+   * 触发本次 turn 的任务标识。Scheduler 本身不消费此字段——仅透传给
+   * `SchedulerDeps.runAgentTurn` 实现使用（例如下游在构造 per-turn 上下文
+   * 元信息时引用）。
+   */
+  taskId?: string;
+  /**
+   * 任务配置的投递目标（从 `ScheduledTask.origin` 或 `delivery` 派生）。
+   * Scheduler 不消费此字段——仅透传给 `runAgentTurn` 实现使用（例如下游
+   * 把它作为 turn 元信息的一部分传给工具执行层）。
+   */
+  deliveryTarget?: DeliveryTarget;
 }
 
 export interface AgentTurnResult {

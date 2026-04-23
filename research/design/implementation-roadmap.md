@@ -7,8 +7,8 @@
 ```
 S1-S3.6 ✅ 全部完成（Scheduler → Server → 对话模型 → Channel → Delivery → Outbox）
   → Step 17 ✅ Daemon Level 1 (always-on)
-    → Step 20 🔜 远程权限确认 (通道无关)           ← 当前（阻塞 daemon 实用性，方案已完成）
-      → Step 18  Active Hours (免打扰·体验优化)
+    → Step 20 ✅ 远程权限确认 (通道无关，M1-M7 代码已实现)
+      → Step 18 🔜 Active Hours (免打扰·体验优化)          ← 当前
         → S2.5  AgentOrchestrator (背景 Agent + 协调)
 ```
 
@@ -59,7 +59,7 @@ S1-S3.6 ✅ 全部完成（Scheduler → Server → 对话模型 → Channel →
 
 ### P2：Step 20 — 远程权限确认
 
-**状态**：✅ 方案设计完成；M1-M7 待实现
+**状态**：✅ 代码实现完成（M0-M6），待 E2E 人工验收（M7）
 **执行规格**：[remote-confirmation-execution.md](specifications/remote-confirmation-execution.md) ← 权威细节
 **设计基础**：[confirmation-ux.md](specifications/confirmation-ux.md) Phase 1 已落地（Broker + TTY 渲染器 + 拒绝回流）
 **依赖**：Step 17 ✅ + confirmation-ux.md Phase 1 ✅（通道无关，仅依赖 `ChannelAdapter.send` + `onMessage` 核心接口）
@@ -71,19 +71,22 @@ S1-S3.6 ✅ 全部完成（Scheduler → Server → 对话模型 → Channel →
 - **ConfirmationHub**：聚合 per-runtime broker（REPL 零改动）；统一查询 / 解决面
 - **TurnOrigin 路由**：确认请求精确路由回原始对话（3 个 turn 入口全链路注入）
 - **ConfirmationBridge**：RPC 推送单一出口，按 observer 定向过滤（多客户端隐私安全）
-- **文本词集匹配**：中英文 + 数字 + 口语 + 情绪共 40+ 条（好 / y / yes / 可以 / 干吧 / 1；不 / n / no / 拒绝 / 算了 / 2 等）；保守完全匹配，自由文本 → `deny-with-reason` 理由回流 LLM
+- **文本词集匹配**：中英文 + 数字 + 口语 + 情绪共 40+ 条（好 / y / yes / 可以 / 干吧 / 1；不 / n / no / 拒绝 / 算了 / 2 等）+ NFKC 归一化（全角识别）；保守完全匹配，自由文本作为 `{ kind: "deny", reason }` 回流 LLM
 - **confirmationFallback 策略**：deny（默认）/ auto-approve-safe
 
 **里程碑交付**（8 个，~11h）：
-- M0 RFC 定稿（本 spec 即是，0h）
-- M1 TurnOrigin + 全链路注入（3 入口 + 2 透传 + secure-executor 承接，3.5h）
-- M2a `IConfirmationBroker.onResolved` 事件扩展（core 包独立 merge，1h）
-- M2b ConfirmationHub + ConversationManager 钩子 + `getObserverConnectionIds`（2h）
-- M3 ConfirmationBridge + 确认 RPC 方法（observer-scoped 推送，2h）
-- M4 TextConfirmationRenderer（纯文本发送，1h）
-- M5 InboundRouter pending-aware 词集匹配（1.5h）
-- M6 超时策略 + confirmationFallback（1h）
-- M7 E2E 验收 + 文档（1h）
+- M0 ✅ RFC 定稿（本 spec 即是）
+- M1 ✅ TurnOrigin + 全链路注入（3 入口 + 2 透传 + secure-executor 承接）
+- M2a ✅ `IConfirmationBroker.onResolved` 事件扩展（core 包 `markResolved` 单点触发）
+- M2b ✅ ConfirmationHub + ConversationManager 钩子 + `getObserverConnectionIds`
+- M3 ✅ ConfirmationBridge + 确认 RPC 方法（observer-scoped 推送）
+- M4 ✅ TextConfirmationRenderer（纯文本发送 + 埋点）
+- M5 ✅ InboundRouter pending-aware 词集匹配（40+ 词 + 标点 trim + 2000 字符截断）
+- M6 ✅ 超时策略 + confirmationFallback（deny / auto-approve-safe）
+- M7 🔜 E2E 验收 + 文档同步
+
+**测试规模**：core 1461 + server 379 + cli 416 = 2256 tests 全绿，零回归。
+- 新增测试：broker.onResolved 10 + match.ts 73 + hub.ts 23 + text-renderer 10 + inbound-router 新增 8 + bridge 7 + confirmation methods 10 + fallback 6 + request-builder 新增 3 + secure-executor 新增 2 + ephemeral-executor 新增 2 = **154 个新测试**
 
 **未来扩展（不在本 P2）**：平台原生按钮 / 卡片（飞书 Interactive Card、钉钉 ActionCard 等）作为独立 `channel-{platform}-approval-enhancement.md` spec 接入；本 P2 不感知、不依赖。
 

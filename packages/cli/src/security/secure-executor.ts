@@ -18,6 +18,7 @@ import {
   truncateOutput,
   wrapWithConstraints,
   type ConfirmationDecision,
+  type ConfirmationFallbackStrategy,
   type ExecutionConstraints,
   type IConfirmationBroker,
   type IConfirmationTracker,
@@ -29,6 +30,7 @@ import {
   type ToolDefinition,
   type ToolExecutionContext,
   type ToolResult,
+  type TurnContext,
 } from "@zhixing/core";
 import {
   renderBlockedMessage,
@@ -111,6 +113,27 @@ export interface SecureExecuteToolOptions {
    * 默认根据 stdin.isTTY 推断（ci / interactive）。
    */
   sessionType?: SessionType;
+  /**
+   * 确认请求超时后的降级策略。
+   * - `deny`（默认）：按拒绝处理
+   * - `auto-approve-safe`：observe / internal 放行，external / critical 拒绝
+   *
+   * 参见 remote-confirmation-execution.md §3.8。
+   */
+  confirmationFallback?: ConfirmationFallbackStrategy;
+  /**
+   * 当前 turn 的上下文——由调用方从 RunParams.turnContext 透传。
+   *
+   * 包装函数入口会把其中的 `turnId` / `emissionTarget` / `commitToUser` /
+   * `turnOrigin` 一次性展开到 ToolExecutionContext，保证：
+   *   1. `pipeline.evaluate` 能感知 turn 层元信息
+   *   2. `handleBrokerPath` 把 `turnOrigin` 填入 ConfirmationRequest
+   *      （远程确认的回程地址由此打通）
+   *   3. `tool.call` 也能读到这些字段（commitToUser 等）
+   *
+   * REPL / 一次性命令下为 undefined——所有字段退化为 undefined。
+   */
+  turnContext?: TurnContext;
   /** 覆盖 env（测试用） */
   env?: NodeJS.ProcessEnv;
 }
@@ -118,17 +141,38 @@ export interface SecureExecuteToolOptions {
 export function createSecureExecuteTool(
   opts: SecureExecuteToolOptions,
 ): ExecuteToolFn {
-  const { pipeline, originalExecute, prompt, broker } = opts;
+  const { pipeline, originalExecute, prompt, broker, turnContext } = opts;
   const env = opts.env ?? process.env;
   const sessionType: SessionType =
     opts.sessionType ?? (process.stdin.isTTY ? "interactive" : "ci");
+  const fallbackStrategy: ConfirmationFallbackStrategy =
+    opts.confirmationFallback ?? "deny";
   const path = pickPath(broker, prompt, env);
 
   return async (tool, input, context) => {
+    // ── 入口就把 turn-level 字段展开到 context ──
+    //
+    // 为什么在这里展开而不是在 originalExecute 里：
+    //   handleBrokerPath 在 originalExecute 之前触发；pipeline.evaluate 也早于它。
+    //   如果只在 originalExecute 里展开，`context.turnOrigin` 在 handleBrokerPath
+    //   看来是 undefined → ConfirmationRequest.turnOrigin 缺失 → TextRenderer
+    //   找不到 target → 远程确认消息不发送。
+    // 统一在入口展开后，pipeline.evaluate / handleBrokerPath / 工具调用 三者
+    // 共享同一增强 context，turnOrigin 透传路径贯通。
+    const augmentedContext: ToolExecutionContext = {
+      ...context,
+      turnId: turnContext?.turnId ?? context.turnId,
+      emissionTarget: turnContext?.emissionTarget ?? context.emissionTarget,
+      commitToUser: turnContext?.commitToUser
+        ? (content) => turnContext.commitToUser!(content, { toolName: tool.name })
+        : context.commitToUser,
+      turnOrigin: turnContext?.turnOrigin ?? context.turnOrigin,
+    };
+
     const result = await pipeline.evaluate(
       tool.name,
       input,
-      context.workingDirectory,
+      augmentedContext.workingDirectory,
     );
 
     // 1. block → 渲染并抛错
@@ -157,9 +201,10 @@ export function createSecureExecuteTool(
           pipeline,
           toolName: tool.name,
           input,
-          context,
+          context: augmentedContext,
           result,
           sessionType,
+          fallbackStrategy,
         });
       } else {
         await handleLegacyPath({
@@ -167,7 +212,7 @@ export function createSecureExecuteTool(
           pipeline,
           toolName: tool.name,
           input,
-          context,
+          context: augmentedContext,
           result,
         });
       }
@@ -177,7 +222,7 @@ export function createSecureExecuteTool(
     return runWithConstraints({
       tool,
       input,
-      context,
+      context: augmentedContext,
       constraints: result.executionConstraints,
       originalExecute,
     });
@@ -194,9 +239,18 @@ async function handleBrokerPath(params: {
   context: ToolExecutionContext;
   result: SecurityMiddlewareResult;
   sessionType: SessionType;
+  fallbackStrategy: ConfirmationFallbackStrategy;
 }): Promise<void> {
-  const { broker, pipeline, toolName, input, context, result, sessionType } =
-    params;
+  const {
+    broker,
+    pipeline,
+    toolName,
+    input,
+    context,
+    result,
+    sessionType,
+    fallbackStrategy,
+  } = params;
 
   const request = buildConfirmationRequest({
     toolName,
@@ -205,24 +259,31 @@ async function handleBrokerPath(params: {
     result,
     workspaceId: pipeline.getWorkspaceId(),
     sessionType,
+    // 远程确认回程地址透传：AgentRuntime → ToolExecutionContext.turnOrigin
+    //   → ConfirmationRequest.turnOrigin → Hub / Renderer / Bridge
+    //   （remote-confirmation-execution.md §3.3）
+    turnOrigin: context.turnOrigin,
   });
 
   const decision = await broker.requestConfirmation(request);
 
   switch (decision.kind) {
     case "deny": {
-      // 构造 model-friendly 的拒绝文本——这段会原样作为 tool_result.content
-      // 回流到 LLM，让模型理解"为什么被拒绝"并据此调整下一步动作。
-      const reasonText = decision.reason
-        ? `用户拒绝了这次工具调用。用户的反馈：${decision.reason}。请根据该反馈调整方案。`
+      // `reason` 可选：
+      //   - 有 reason → 自由文本拒绝（来自远程通道 / terminal 的"拒绝并说明原因"选项）
+      //   - 无 reason → 结构化拒绝（词集匹配到拒绝词 / 用户直接点"拒绝"）
+      // 两种都把 reason 原样作为 tool_result.content 回流到 LLM——让模型理解"为什么被拒绝"。
+      const reason = decision.reason;
+      const reasonText = reason
+        ? `用户拒绝了这次工具调用。用户的反馈：${reason}。请根据该反馈调整方案。`
         : `用户拒绝了这次工具调用。`;
       // 终端面板显示"用户拒绝"语义（不是"策略阻止"）——用 decision.reason
       // 而不是 result.reason，后者是"为什么需要审批"的触发原因，不是拒绝理由。
-      renderUserDeniedMessage(toolName, input, decision.reason);
+      renderUserDeniedMessage(toolName, input, reason);
       throw new SecurityBlockError(
         reasonText,
         toolName,
-        decision.reason ?? "user declined",
+        reason ?? "user declined",
       );
     }
 
@@ -236,6 +297,16 @@ async function handleBrokerPath(params: {
     }
 
     case "expired":
+      // 超时降级（remote-confirmation-execution.md §3.8）：
+      //   - deny（默认）：严格拒绝
+      //   - auto-approve-safe：observe / internal 放行（低风险工具）；
+      //                       external / critical 仍然拒绝
+      if (fallbackStrategy === "auto-approve-safe") {
+        const opClass = result.operationClass;
+        if (opClass === "observe" || opClass === "internal") {
+          return; // 放行，调用方继续执行工具
+        }
+      }
       throw new SecurityBlockError(
         `确认超时：${toolName}`,
         toolName,

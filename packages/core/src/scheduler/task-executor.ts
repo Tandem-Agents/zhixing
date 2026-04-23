@@ -58,6 +58,11 @@ export async function executeTask(
         tools: task.action.tools,
         abortSignal: timeoutController.signal,
         context: "scheduled-task",
+        // 为远程确认注入回程地址：task.origin（dm:channel:user 解析）→ deliveryTarget
+        taskId: task.id,
+        deliveryTarget: task.origin
+          ? { channelId: task.origin.channelId, to: task.origin.to }
+          : undefined,
       });
     }
 

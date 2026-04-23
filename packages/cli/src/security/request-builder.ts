@@ -31,6 +31,7 @@ import {
   type SecurityRequest,
   type SessionType,
   type SuggestedPattern,
+  type TurnOrigin,
 } from "@zhixing/core";
 
 // ─── 默认超时 ───
@@ -246,6 +247,13 @@ export interface BuildConfirmationRequestParams {
   now?: number;
   /** 超时毫秒数，默认 30min */
   timeoutMs?: number;
+  /**
+   * Turn 发起入口的元信息——远程确认的回程地址。
+   * 由 secure-executor 从 ToolExecutionContext.turnOrigin 透传；
+   * Renderer / Hub / Bridge 读此字段决定把确认请求推回哪个通道 / RPC 连接。
+   * 参见 remote-confirmation-execution.md §3.3。
+   */
+  turnOrigin?: TurnOrigin;
 }
 
 /**
@@ -305,6 +313,7 @@ export function buildConfirmationRequest(
     workspaceId,
     createdAt: now,
     expiresAt: now + timeoutMs,
+    turnOrigin: params.turnOrigin,
   };
 }
 

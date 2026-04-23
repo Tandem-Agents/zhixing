@@ -3,7 +3,12 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { type AgentResult, type AgentYield, type Message } from "@zhixing/core";
+import {
+  ConfirmationBroker,
+  type AgentResult,
+  type AgentYield,
+  type Message,
+} from "@zhixing/core";
 import { createServerRuntimeAdapter } from "../session-adapter.js";
 import type { AgentRuntime, RunParams, RunResult } from "../../run-agent.js";
 
@@ -20,9 +25,11 @@ interface MockBehavior {
 
 function createMockAgentRuntime(behavior: MockBehavior = {}): AgentRuntime {
   const stub = {} as AgentRuntime;
+  const broker = new ConfirmationBroker();
   return Object.assign(stub, {
     providerId: "mock",
     model: "mock-model",
+    confirmationBroker: broker,
     async run(params: RunParams): Promise<RunResult> {
       if (behavior.throwError) {
         throw new Error(behavior.throwError);
@@ -225,5 +232,15 @@ describe("createServerRuntimeAdapter", () => {
     const lastUser = last2[0] as { role: string; content: Array<{ type: string; text: string }> };
     expect(lastUser.role).toBe("user");
     expect(lastUser.content[0]!.text).toBe("second");
+  });
+
+  // ─── Fix-1：remote-confirmation 链路完整性回归守卫 ───
+
+  it("adapter 透传 AgentRuntime 的 confirmationBroker——远程确认链路依赖", () => {
+    const agent = createMockAgentRuntime();
+    const runtime = createServerRuntimeAdapter("test-broker", agent);
+
+    // broker 必须是同一个引用——adapter 不包装、不复制 broker 身份
+    expect(runtime.confirmationBroker).toBe(agent.confirmationBroker);
   });
 });

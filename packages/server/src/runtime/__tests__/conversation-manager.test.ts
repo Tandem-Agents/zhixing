@@ -1,6 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import type { AgentResult, AgentYield, Message } from "@zhixing/core";
+import {
+  ConfirmationBroker,
+  type AgentResult,
+  type AgentYield,
+  type IConfirmationBroker,
+  type Message,
+} from "@zhixing/core";
 import { ConversationManager } from "../conversation-manager.js";
+import { ConfirmationHub } from "../../confirmation/hub.js";
 import type { SessionRuntime, RuntimeFactory } from "../types.js";
 
 // ─── Mock Runtime ───
@@ -823,6 +830,128 @@ describe("ConversationManager", () => {
       expect(persisted).toEqual([0, 1]);
       expect(session.pendingTurns).toHaveLength(0);
       expect(session.ephemeral).toBe(false);
+
+      mgr.disposeAll();
+    });
+  });
+
+  // ─── ConfirmationHub 集成（PR-3 M2b + Fix-1 P0 回归守卫） ───
+  //
+  // 验证 getOrCreate 后 broker 真正挂到 Hub，四条 dispose 路径正确 detach。
+  // 这是 P0-1（session-adapter 漏 broker）只在单元测试全绿但线上失效的
+  // 直接原因——缺少"manager + hub + 真实 SessionRuntime 带 broker"的集成测试。
+
+  describe("confirmationHub integration", () => {
+    function createRuntimeWithBroker(
+      sessionId: string,
+    ): SessionRuntime & { confirmationBroker: IConfirmationBroker } {
+      const base = createMockRuntime(sessionId);
+      return Object.assign(base, {
+        confirmationBroker: new ConfirmationBroker(),
+      });
+    }
+
+    function factoryWithBroker(): RuntimeFactory {
+      return {
+        async create(sessionId) {
+          return createRuntimeWithBroker(sessionId);
+        },
+      };
+    }
+
+    it("getOrCreate 后 hub 能按 conversationId 反查到 broker", async () => {
+      const hub = new ConfirmationHub();
+      const mgr = new ConversationManager(
+        factoryWithBroker(),
+        { graceTimeoutMs: 60_000, idleTimeoutMs: 30 * 60_000, idleCheckIntervalMs: 999_999 },
+        { confirmationHub: hub },
+      );
+
+      const session = await mgr.getOrCreate("conv-A");
+      const found = hub.findBrokerByConversation("conv-A");
+      expect(found).toBe(session.runtime.confirmationBroker);
+
+      mgr.disposeAll();
+    });
+
+    it("runtime 无 confirmationBroker 时 attachToHub 是 no-op（不抛错）", async () => {
+      const hub = new ConfirmationHub();
+      // 使用默认 factory——createMockRuntime 返回的 SessionRuntime 无 broker
+      const mgr = new ConversationManager(
+        createMockFactory(),
+        { graceTimeoutMs: 60_000, idleTimeoutMs: 30 * 60_000, idleCheckIntervalMs: 999_999 },
+        { confirmationHub: hub },
+      );
+
+      await mgr.getOrCreate("conv-no-broker");
+      expect(hub.findBrokerByConversation("conv-no-broker")).toBeUndefined();
+      expect(hub.snapshot().brokers).toHaveLength(0);
+
+      mgr.disposeAll();
+    });
+
+    it("delete 触发 detach，hub 反查返 undefined", async () => {
+      const hub = new ConfirmationHub();
+      const mgr = new ConversationManager(
+        factoryWithBroker(),
+        { graceTimeoutMs: 60_000, idleTimeoutMs: 30 * 60_000, idleCheckIntervalMs: 999_999 },
+        { confirmationHub: hub },
+      );
+
+      await mgr.getOrCreate("conv-A");
+      expect(hub.findBrokerByConversation("conv-A")).toBeDefined();
+
+      mgr.delete("conv-A");
+      expect(hub.findBrokerByConversation("conv-A")).toBeUndefined();
+    });
+
+    it("grace timeout 释放会话 → detach 发生", async () => {
+      const hub = new ConfirmationHub();
+      const mgr = new ConversationManager(
+        factoryWithBroker(),
+        { graceTimeoutMs: 1_000, idleTimeoutMs: 30 * 60_000, idleCheckIntervalMs: 999_999 },
+        { confirmationHub: hub },
+      );
+
+      await mgr.getOrCreate("conv-A");
+      mgr.addObserver("conv-A", "conn-1");
+      mgr.removeObserver("conv-A", "conn-1");
+      expect(hub.findBrokerByConversation("conv-A")).toBeDefined();
+
+      await vi.advanceTimersByTimeAsync(1_001);
+      expect(hub.findBrokerByConversation("conv-A")).toBeUndefined();
+
+      mgr.disposeAll();
+    });
+
+    it("disposeAll → 所有会话的 broker 均 detach", async () => {
+      const hub = new ConfirmationHub();
+      const mgr = new ConversationManager(
+        factoryWithBroker(),
+        { graceTimeoutMs: 60_000, idleTimeoutMs: 30 * 60_000, idleCheckIntervalMs: 999_999 },
+        { confirmationHub: hub },
+      );
+
+      await mgr.getOrCreate("conv-A");
+      await mgr.getOrCreate("conv-B");
+      expect(hub.snapshot().brokers).toHaveLength(2);
+
+      mgr.disposeAll();
+      expect(hub.snapshot().brokers).toHaveLength(0);
+    });
+
+    it("重新 getOrCreate 同一 conversationId → INV-H1 不冲突", async () => {
+      const hub = new ConfirmationHub();
+      const mgr = new ConversationManager(
+        factoryWithBroker(),
+        { graceTimeoutMs: 60_000, idleTimeoutMs: 30 * 60_000, idleCheckIntervalMs: 999_999 },
+        { confirmationHub: hub },
+      );
+
+      await mgr.getOrCreate("conv-A");
+      mgr.delete("conv-A");
+      // 立即重建应无 INV-H1 冲突
+      await expect(mgr.getOrCreate("conv-A")).resolves.toBeDefined();
 
       mgr.disposeAll();
     });

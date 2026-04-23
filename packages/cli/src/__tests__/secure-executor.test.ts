@@ -824,5 +824,405 @@ describe("createSecureExecuteTool", () => {
       // legacy prompt 不应被调用
       expect(prompt).not.toHaveBeenCalled();
     });
+
+    // ─── PR-2 / remote-confirmation-execution.md §3.3：turnOrigin 透传 ───
+
+    it("broker 路径：context.turnOrigin 透传到 ConfirmationRequest.turnOrigin", async () => {
+      const pipeline = new SecurityPipeline({ workspace: "/tmp/ws" });
+      const broker = new ConfirmationBroker();
+
+      // 拦截 request，断言 turnOrigin 字段
+      let capturedRequest: ConfirmationRequest | undefined;
+      broker.onRequest((req) => {
+        capturedRequest = req;
+        queueMicrotask(() => broker.resolve(req.id, { kind: "allow-once" }));
+      });
+
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: mockExecute().fn,
+        broker,
+      });
+
+      const ctx: ToolExecutionContext = {
+        workingDirectory: "/tmp/ws",
+        turnOrigin: {
+          channel: "feishu",
+          target: { channelId: "feishu", to: "ou_abc" },
+          triggeredBy: "user_x",
+        },
+      };
+
+      await wrapped(makeTool("bash"), { command: "curl https://example.com" }, ctx);
+
+      expect(capturedRequest?.turnOrigin).toEqual({
+        channel: "feishu",
+        target: { channelId: "feishu", to: "ou_abc" },
+        triggeredBy: "user_x",
+      });
+    });
+
+    it("broker 路径：turnContext 选项（非 context 字段）也能把 turnOrigin 填入 request —— 回归守卫 P0 远程链路", async () => {
+      // 背景：run-agent.ts 通过 createSecureExecuteTool 的 turnContext 选项传递
+      // turn 元信息。secure-executor 内部应在包装函数入口展开到 context——
+      // 否则 handleBrokerPath 拿不到 turnOrigin，ConfirmationRequest.turnOrigin
+      // 缺失，TextRenderer 发 "confirmation.remote.no-target"。
+      const pipeline = new SecurityPipeline({ workspace: "/tmp/ws" });
+      const broker = new ConfirmationBroker();
+
+      let capturedRequest: ConfirmationRequest | undefined;
+      broker.onRequest((req) => {
+        capturedRequest = req;
+        queueMicrotask(() => broker.resolve(req.id, { kind: "allow-once" }));
+      });
+
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: mockExecute().fn,
+        broker,
+        turnContext: {
+          turnId: "turn_abc",
+          turnOrigin: {
+            channel: "feishu",
+            target: { channelId: "feishu", to: "ou_user_1" },
+            triggeredBy: "ou_user_1",
+          },
+        },
+      });
+
+      // 调用时不在 context 里塞 turn 字段——模拟 agent-loop 的 bare context
+      await wrapped(
+        makeTool("bash"),
+        { command: "curl https://example.com" },
+        makeContext("/tmp/ws"),
+      );
+
+      expect(capturedRequest?.turnOrigin).toEqual({
+        channel: "feishu",
+        target: { channelId: "feishu", to: "ou_user_1" },
+        triggeredBy: "ou_user_1",
+      });
+    });
+
+    it("broker 路径：context 无 turnOrigin 时 request.turnOrigin 为 undefined", async () => {
+      const pipeline = new SecurityPipeline({ workspace: "/tmp/ws" });
+      const broker = new ConfirmationBroker();
+
+      let capturedRequest: ConfirmationRequest | undefined;
+      broker.onRequest((req) => {
+        capturedRequest = req;
+        queueMicrotask(() => broker.resolve(req.id, { kind: "allow-once" }));
+      });
+
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: mockExecute().fn,
+        broker,
+      });
+
+      await wrapped(
+        makeTool("bash"),
+        { command: "curl https://example.com" },
+        makeContext("/tmp/ws"),
+      );
+
+      expect(capturedRequest?.turnOrigin).toBeUndefined();
+    });
+
+    // ─── PR-4 / remote-confirmation-execution.md §3.8：超时降级策略 ───
+
+    describe("expired 分支 + confirmationFallback", () => {
+      /** 构造一个"让 broker 立即 expire"的 scripted renderer */
+      function attachExpiringRenderer(broker: ConfirmationBroker): () => void {
+        return broker.onRequest((req) => {
+          queueMicrotask(() => {
+            // 手动构造 expired decision（绕过 broker 内部 timer，避免 fake clock 污染）
+            // 用 cancel(aborted) 不行——它返 cancelled；直接用 internal machinery 不现实。
+            // 最简单：让 broker 内部的 timer 触发——但 expiresAt 我们可控。
+            // 实际测试：构造很短的 expiresAt 并 advance timer，或直接拦截 request 后
+            // 手动调 broker.resolve 传 { kind: "expired" }——但 resolve 不接受 expired。
+            //
+            // 真正可行：让 broker 用 short expiresAt，然后 vi.useFakeTimers + advance。
+            // 见下方各测试用例。
+            void req;
+          });
+        });
+      }
+
+      it("fallbackStrategy=deny（默认）：expired → SecurityBlockError", async () => {
+        vi.useFakeTimers();
+        try {
+          const pipeline = new SecurityPipeline({ workspace: "/tmp/ws" });
+          const broker = new ConfirmationBroker();
+          broker.onRequest(() => {}); // 挂占位 renderer（不 resolve）
+
+          const wrapped = createSecureExecuteTool({
+            pipeline,
+            originalExecute: mockExecute().fn,
+            broker,
+            // fallback 默认 deny
+          });
+
+          // 立即 .catch 成 resolved 错误对象，避免 promise 在 advanceTimers 期间
+          // 触发 Node 的 unhandled rejection warning
+          const resultPromise = wrapped(
+            makeTool("bash"),
+            { command: "curl https://example.com" },
+            makeContext("/tmp/ws"),
+          ).catch((e: unknown) => e);
+
+          // request-builder 用 now() 构造 expiresAt = now + 30min，advance 让 broker expire
+          await vi.advanceTimersByTimeAsync(31 * 60 * 1000);
+          const err = await resultPromise;
+          expect(err).toBeInstanceOf(SecurityBlockError);
+          expect((err as Error).message).toMatch(/超时/);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it("fallbackStrategy=auto-approve-safe + observe 操作 → 放行", async () => {
+        vi.useFakeTimers();
+        try {
+          // observe 操作通常不触发 confirmation（policy-engine 判定），但本测试验证
+          // 如果碰巧触发 confirmation 且超时，auto-approve-safe 策略会放行 observe。
+          //
+          // 难点：SecurityPipeline.evaluate 对 observe 操作默认不要求 confirmation。
+          // 需要构造 result.requiresConfirmation=true + operationClass="observe" 的场景。
+          //
+          // 手法：mock pipeline.evaluate 返回固定的 result。
+
+          const mockPipeline = {
+            evaluate: vi.fn(async () => ({
+              allowed: true,
+              requiresConfirmation: true,
+              operationClass: "observe" as const,
+              decision: {
+                action: "confirm" as const,
+                matchedRules: [],
+                reason: "test",
+                riskLevel: "low" as const,
+              },
+              resolvedPaths: [],
+            })),
+            getWorkspaceId: () => "ws-1",
+            getPermissionStore: () => new PermissionStore({}),
+            getConfirmationTracker: () => ({ record: vi.fn(), snapshot: () => [] }),
+          } as unknown as SecurityPipeline;
+
+          const broker = new ConfirmationBroker();
+          broker.onRequest(() => {}); // 占位，让 broker 进入 showing 状态等 timer
+
+          const exec = mockExecute();
+          const wrapped = createSecureExecuteTool({
+            pipeline: mockPipeline,
+            originalExecute: exec.fn,
+            broker,
+            confirmationFallback: "auto-approve-safe",
+          });
+
+          const promise = wrapped(
+            makeTool("read"),
+            { path: "/tmp/x" },
+            makeContext("/tmp/ws"),
+          );
+
+          await vi.advanceTimersByTimeAsync(31 * 60 * 1000);
+
+          await promise; // 应成功（不抛）
+          expect(exec.callCount()).toBe(1); // 工具被执行
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it("fallbackStrategy=auto-approve-safe + internal 操作 → 放行", async () => {
+        vi.useFakeTimers();
+        try {
+          const mockPipeline = {
+            evaluate: vi.fn(async () => ({
+              allowed: true,
+              requiresConfirmation: true,
+              operationClass: "internal" as const,
+              decision: {
+                action: "confirm" as const,
+                matchedRules: [],
+                reason: "test",
+                riskLevel: "low" as const,
+              },
+              resolvedPaths: [],
+            })),
+            getWorkspaceId: () => "ws-1",
+            getPermissionStore: () => new PermissionStore({}),
+            getConfirmationTracker: () => ({ record: vi.fn(), snapshot: () => [] }),
+          } as unknown as SecurityPipeline;
+
+          const broker = new ConfirmationBroker();
+          broker.onRequest(() => {});
+
+          const exec = mockExecute();
+          const wrapped = createSecureExecuteTool({
+            pipeline: mockPipeline,
+            originalExecute: exec.fn,
+            broker,
+            confirmationFallback: "auto-approve-safe",
+          });
+
+          const promise = wrapped(
+            makeTool("write"),
+            { path: "/tmp/x", content: "hi" },
+            makeContext("/tmp/ws"),
+          );
+
+          await vi.advanceTimersByTimeAsync(31 * 60 * 1000);
+
+          await promise;
+          expect(exec.callCount()).toBe(1);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it("fallbackStrategy=auto-approve-safe + external 操作 → 仍然拒绝", async () => {
+        vi.useFakeTimers();
+        try {
+          const mockPipeline = {
+            evaluate: vi.fn(async () => ({
+              allowed: true,
+              requiresConfirmation: true,
+              operationClass: "external" as const,
+              decision: {
+                action: "confirm" as const,
+                matchedRules: [],
+                reason: "test",
+                riskLevel: "medium" as const,
+              },
+              resolvedPaths: [],
+            })),
+            getWorkspaceId: () => "ws-1",
+            getPermissionStore: () => new PermissionStore({}),
+            getConfirmationTracker: () => ({ record: vi.fn(), snapshot: () => [] }),
+          } as unknown as SecurityPipeline;
+
+          const broker = new ConfirmationBroker();
+          broker.onRequest(() => {});
+
+          const exec = mockExecute();
+          const wrapped = createSecureExecuteTool({
+            pipeline: mockPipeline,
+            originalExecute: exec.fn,
+            broker,
+            confirmationFallback: "auto-approve-safe",
+          });
+
+          const resultPromise = wrapped(
+            makeTool("bash"),
+            { command: "curl https://example.com" },
+            makeContext("/tmp/ws"),
+          ).catch((e: unknown) => e);
+
+          await vi.advanceTimersByTimeAsync(31 * 60 * 1000);
+          const err = await resultPromise;
+          expect(err).toBeInstanceOf(SecurityBlockError);
+          expect(exec.callCount()).toBe(0); // 工具未执行
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it("fallbackStrategy=auto-approve-safe + critical 操作 → 仍然拒绝", async () => {
+        vi.useFakeTimers();
+        try {
+          const mockPipeline = {
+            evaluate: vi.fn(async () => ({
+              allowed: true,
+              requiresConfirmation: true,
+              operationClass: "critical" as const,
+              decision: {
+                action: "confirm" as const,
+                matchedRules: [],
+                reason: "test",
+                riskLevel: "high" as const,
+              },
+              resolvedPaths: [],
+            })),
+            getWorkspaceId: () => "ws-1",
+            getPermissionStore: () => new PermissionStore({}),
+            getConfirmationTracker: () => ({ record: vi.fn(), snapshot: () => [] }),
+          } as unknown as SecurityPipeline;
+
+          const broker = new ConfirmationBroker();
+          broker.onRequest(() => {});
+
+          const exec = mockExecute();
+          const wrapped = createSecureExecuteTool({
+            pipeline: mockPipeline,
+            originalExecute: exec.fn,
+            broker,
+            confirmationFallback: "auto-approve-safe",
+          });
+
+          const resultPromise = wrapped(
+            makeTool("bash"),
+            { command: "rm -rf /" },
+            makeContext("/tmp/ws"),
+          ).catch((e: unknown) => e);
+
+          await vi.advanceTimersByTimeAsync(31 * 60 * 1000);
+          const err = await resultPromise;
+          expect(err).toBeInstanceOf(SecurityBlockError);
+          expect(exec.callCount()).toBe(0);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it("fallbackStrategy=auto-approve-safe + operationClass=undefined → 保守拒绝", async () => {
+        vi.useFakeTimers();
+        try {
+          const mockPipeline = {
+            evaluate: vi.fn(async () => ({
+              allowed: true,
+              requiresConfirmation: true,
+              // operationClass 未设置
+              decision: {
+                action: "confirm" as const,
+                matchedRules: [],
+                reason: "test",
+                riskLevel: "medium" as const,
+              },
+              resolvedPaths: [],
+            })),
+            getWorkspaceId: () => "ws-1",
+            getPermissionStore: () => new PermissionStore({}),
+            getConfirmationTracker: () => ({ record: vi.fn(), snapshot: () => [] }),
+          } as unknown as SecurityPipeline;
+
+          const broker = new ConfirmationBroker();
+          broker.onRequest(() => {});
+
+          const exec = mockExecute();
+          const wrapped = createSecureExecuteTool({
+            pipeline: mockPipeline,
+            originalExecute: exec.fn,
+            broker,
+            confirmationFallback: "auto-approve-safe",
+          });
+
+          const resultPromise = wrapped(
+            makeTool("unknown"),
+            {},
+            makeContext("/tmp/ws"),
+          ).catch((e: unknown) => e);
+
+          await vi.advanceTimersByTimeAsync(31 * 60 * 1000);
+          const err = await resultPromise;
+          expect(err).toBeInstanceOf(SecurityBlockError);
+          expect(exec.callCount()).toBe(0);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+    });
   });
 });

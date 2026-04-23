@@ -7,7 +7,11 @@ import {
   type ChannelLogger,
   type InboundMessage,
 } from "@zhixing/core";
-import { InboundRouter, type ConversationManager } from "@zhixing/server";
+import {
+  InboundRouter,
+  type ConversationManager,
+  type ConfirmationHub,
+} from "@zhixing/server";
 import type { ChannelConfigEntry } from "@zhixing/providers";
 
 // ─── Adapter Factory ───
@@ -34,6 +38,11 @@ export interface SetupChannelsOptions {
   /** ConversationManager for inbound routing. Omit for outbound-only mode (REPL). */
   conversations?: ConversationManager;
   logger: ChannelLogger;
+  /**
+   * 可选 ConfirmationHub。传入时 InboundRouter 会在 enqueue 之前检查
+   * pending confirmation，按词集匹配规则解决（§3.5 / §3.6）。
+   */
+  confirmationHub?: ConfirmationHub;
 }
 
 export interface SetupChannelsResult {
@@ -44,7 +53,7 @@ export interface SetupChannelsResult {
 export async function setupChannels(
   options: SetupChannelsOptions,
 ): Promise<SetupChannelsResult> {
-  const { entries, conversations, logger } = options;
+  const { entries, conversations, logger, confirmationHub } = options;
 
   const eventBus = createEventBus<ChannelEventMap>();
 
@@ -63,7 +72,12 @@ export async function setupChannels(
   });
 
   if (conversations) {
-    router = new InboundRouter({ conversations, channels: registry, logger });
+    router = new InboundRouter({
+      conversations,
+      channels: registry,
+      logger,
+      confirmationHub,
+    });
   }
 
   for (const [id, entry] of Object.entries(entries)) {

@@ -17,9 +17,12 @@ import {
   Scheduler,
   JsonTaskStore,
   createEventBus,
+  generateTurnId,
+  type AgentTurnParams,
   type SchedulerEventMap,
   type AgentTurnResult,
   type ChannelRegistry,
+  type TurnContext,
   JournalStore,
   TranscriptStore,
   getZhixingHome,
@@ -31,12 +34,16 @@ import {
   runServer,
   buildSystemHandlers,
   ConversationManager,
+  ConfirmationHub,
   DEFAULT_SERVER_CONFIG,
   ServerStateFile,
   CleanupRegistry,
+  TextConfirmationRenderer,
+  createConfirmationBridge,
   type InboundRouter,
   type RunningServer,
   type ProcessLockPaths,
+  type ConfirmationBridge,
 } from "@zhixing/server";
 import { loadConfig } from "@zhixing/providers";
 import { createScheduleTool } from "@zhixing/tools-builtin";
@@ -129,6 +136,11 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     return schedulerRef;
   };
 
+  // 3a. ConfirmationHub —— 远程权限确认聚合层（remote-confirmation-execution.md §3.2）
+  //   在 ConversationManager / setupChannels / ephemeralRuntime / ServerContext 之前创建，
+  //   以便各组件构造时能接入。未提供 hub 时 serve 模式会回退到"confirmation 永久 pending → expire"。
+  const confirmationHub = new ConfirmationHub();
+
   const runtimeFactory = createCliRuntimeFactory({
     createAgentRuntime: async (sessionId: string) => {
       // 从 sessionId（如 dm:feishu:ou_xxx）解析 origin，用于任务创建时自动捕获投递目标
@@ -169,6 +181,9 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     persistTurn: async (conversationId, turn) => {
       await transcript.appendTurn(conversationId, turn);
     },
+    // 每次 getOrCreate 后自动把 runtime.confirmationBroker attach 到 hub；
+    // 四处 dispose（delete / grace / idle / disposeAll）前自动 detach（§3.2 INV-H3）
+    confirmationHub,
   });
 
   // 4. Channels
@@ -188,6 +203,8 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
         entries: config.channels,
         conversations,
         logger: channelLogger,
+        // InboundRouter pending-aware 拦截依赖 hub（§3.5）
+        confirmationHub,
       });
       channels = result.registry;
       inboundRouter = result.router;
@@ -245,16 +262,55 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     }),
   );
 
+  // 6a. 把 ephemeralRuntime 的 broker 挂到 hub —— 定时任务的 confirmation 从这里流出。
+  //     命名空间用 "ephemeral"（与 conversation broker 的 "conv:${convId}" 命名规约区分）。
+  //     进程生命周期内不 detach——ephemeralRuntime 也不单独 dispose。
+  confirmationHub.attach("ephemeral", ephemeralRuntime.confirmationBroker);
+
+  // 6b. TextConfirmationRenderer —— 把 hub 的 request 事件翻译为通道纯文本消息。
+  //     必须在 channels 就绪后才有意义；无 channels 时本地只有 RPC 推送（未来 Bridge 接入后生效）。
+  let textRenderer: TextConfirmationRenderer | undefined;
+  if (channels) {
+    textRenderer = new TextConfirmationRenderer({
+      hub: confirmationHub,
+      channels,
+      logger: {
+        debug: (msg, ...args) => console.log(chalk.dim(`[confirm] ${msg}`), ...args),
+        info: (msg, ...args) => console.log(chalk.dim(`[confirm] ${msg}`), ...args),
+        warn: (msg, ...args) => console.warn(chalk.yellow(`[confirm] ${msg}`), ...args),
+        error: (msg, ...args) => console.error(chalk.red(`[confirm] ${msg}`), ...args),
+      },
+    });
+    textRenderer.start();
+  }
+
   // 7. Scheduler
   const schedulerEventBus = createEventBus<SchedulerEventMap>();
-  const runAgentTurn = async (params: {
-    prompt: string;
-    context?: "scheduled-task";
-  }): Promise<AgentTurnResult> => {
+  const runAgentTurn = async (
+    params: AgentTurnParams,
+  ): Promise<AgentTurnResult> => {
     const taskPrompt = params.context === "scheduled-task"
       ? `[系统] 这是一个定时任务的自动执行。请直接执行以下指令并输出结果，不要反问用户、不要引导对话。\n\n${params.prompt}`
       : params.prompt;
-    return runEphemeralTurn({ runtime: ephemeralRuntime, prompt: taskPrompt });
+
+    // 远程确认回程地址（remote-confirmation-execution.md §3.3）：
+    //   scheduler → ephemeralRuntime 路径下，任何工具触发的 confirmation
+    //   按 turnOrigin.target 路由回创建任务时的通道对话。
+    //   无 target 时（e.g. system 任务、未绑定通道的任务）降级为 defaultTarget / 仅 RPC。
+    const turnContext: TurnContext = {
+      turnId: generateTurnId(),
+      turnOrigin: {
+        channel: "scheduler",
+        target: params.deliveryTarget,
+        triggeredBy: params.taskId,
+      },
+    };
+
+    return runEphemeralTurn({
+      runtime: ephemeralRuntime,
+      prompt: taskPrompt,
+      turnContext,
+    });
   };
 
   const journalStore = new JournalStore();
@@ -295,6 +351,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     scheduler,
     conversations,
     channels,
+    confirmationHub,
   });
 
   // 8a. Daemon child 才启用 ServerStateFile——前台模式不写 state 文件
@@ -343,6 +400,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     await scheduler.stop().catch(() => {});
     await deliveryStack?.stop().catch(() => {});
     await channels?.dispose().catch(() => {});
+    textRenderer?.stop();
     throw err;
   }
 
@@ -354,6 +412,26 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     channels,
     deliveryStack,
   });
+
+  // 8b.4 ConfirmationBridge —— hub 事件 → RPC notification 单一出口。
+  //     依赖 runner.server.connections（runServer 之后才可用），放在 registerCoreCleanup 后。
+  //     LIFO：bridge.dispose 在 textRenderer.stop 之前执行（两者都在 LIFO 最先执行的位置）。
+  const confirmationBridge: ConfirmationBridge = createConfirmationBridge({
+    connections: runner.server.connections,
+    hub: confirmationHub,
+    conversations,
+  });
+  registry.register("confirmationBridge.dispose", () => {
+    confirmationBridge.dispose();
+  });
+
+  // 8b.5 最后注册 = LIFO 最先执行——停止 hub 事件订阅（防止 shutdown 期间还有
+  //     confirmation 请求被派发到即将断开的 channel adapter）。仅 textRenderer 存在时注册。
+  if (textRenderer) {
+    registry.register("confirmationRenderer.stop", () => {
+      textRenderer!.stop();
+    });
+  }
 
   // 8c. Post-runServer 启动步骤（startup guard 包裹）
   //     不变量：runServer 已 resolve → server listening + PID 锁持有 + registry 全注册完毕。

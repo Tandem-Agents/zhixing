@@ -11,6 +11,7 @@ import {
   type AgentResult,
   type AgentYield,
   type AgentEventMap,
+  type ConfirmationFallbackStrategy,
   type ContextBudget,
   type IConfirmationBroker,
   type Message,
@@ -159,6 +160,11 @@ export async function createAgentRuntime(options: {
   workspace?: string;
   /** 额外工具（如 schedule），在内置工具之后注入 */
   extraTools?: import("@zhixing/core").ToolDefinition[];
+  /**
+   * 确认超时降级策略，透传给 secure-executor。默认 "deny"。
+   * 参见 remote-confirmation-execution.md §3.8。
+   */
+  confirmationFallback?: ConfirmationFallbackStrategy;
 }): Promise<AgentRuntime> {
   const { provider, defaultModel, config } = createProviderFromConfig({
     providerId: options.provider,
@@ -373,22 +379,17 @@ export async function createAgentRuntime(options: {
       //
       // commitToUser 在这里再包装一层，自动注入当前 tool.name——工具代码无需
       // 手动报告自己名字；EmissionSource.tool-commitment.toolName 不会出现 "unknown" 占位。
-      const turnContext = params.turnContext;
+      // turnContext 作为选项直接传给 secure-executor——由其在包装函数入口
+      // 一次性展开到 ToolExecutionContext（保证 pipeline.evaluate /
+      // handleBrokerPath / 工具调用 共享同一增强 context）。
       const secureExecuteTool = createSecureExecuteTool({
         pipeline: securityPipeline,
-        originalExecute: (tool, input, context) =>
-          tool.call(input, {
-            ...context,
-            turnId: turnContext?.turnId,
-            emissionTarget: turnContext?.emissionTarget,
-            commitToUser: turnContext?.commitToUser
-              ? (content) =>
-                  turnContext.commitToUser!(content, { toolName: tool.name })
-              : undefined,
-          }),
+        originalExecute: (tool, input, context) => tool.call(input, context),
         prompt: params.securityPrompt,
         broker: confirmationBroker,
         sessionType,
+        confirmationFallback: options.confirmationFallback,
+        turnContext: params.turnContext,
       });
 
       const gen = runAgentLoop({

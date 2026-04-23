@@ -365,4 +365,59 @@ describe("buildConfirmationRequest", () => {
     expect(req.display.commandPreview).toBe("rm -rf /");
     expect(req.display.commandFull).toBe("\x1b[31mrm -rf /\x1b[0m");
   });
+
+  // ─── PR-2 / remote-confirmation-execution.md §3.3: turnOrigin 透传 ───
+
+  it("turnOrigin 字段被透传到 ConfirmationRequest", () => {
+    const req = buildConfirmationRequest({
+      toolName: "bash",
+      input: { command: "ls" },
+      workingDirectory: "/tmp",
+      result: minimalResult(),
+      workspaceId: "ws-1",
+      sessionType: "interactive",
+      turnOrigin: {
+        channel: "feishu",
+        target: { channelId: "feishu", to: "ou_xxx", threadId: "thr_1" },
+        triggeredBy: "user_a",
+      },
+    });
+    expect(req.turnOrigin).toEqual({
+      channel: "feishu",
+      target: { channelId: "feishu", to: "ou_xxx", threadId: "thr_1" },
+      triggeredBy: "user_a",
+    });
+  });
+
+  it("未传 turnOrigin 时 request.turnOrigin 为 undefined（REPL / CLI 路径）", () => {
+    const req = buildConfirmationRequest({
+      toolName: "bash",
+      input: { command: "ls" },
+      workingDirectory: "/tmp",
+      result: minimalResult(),
+      workspaceId: "ws-1",
+      sessionType: "interactive",
+    });
+    expect(req.turnOrigin).toBeUndefined();
+  });
+
+  it("scheduler 路径：只传 channel + triggeredBy（target 可选缺失）", () => {
+    const req = buildConfirmationRequest({
+      toolName: "bash",
+      input: { command: "ls" },
+      workingDirectory: "/tmp",
+      result: minimalResult(),
+      workspaceId: null,
+      sessionType: "ci",
+      turnOrigin: {
+        channel: "scheduler",
+        triggeredBy: "task-42",
+      },
+    });
+    expect(req.turnOrigin).toEqual({
+      channel: "scheduler",
+      triggeredBy: "task-42",
+    });
+    expect(req.turnOrigin?.target).toBeUndefined();
+  });
 });

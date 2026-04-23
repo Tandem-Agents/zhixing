@@ -45,6 +45,11 @@ export function createServerRuntimeAdapter(
   return {
     sessionId,
 
+    // 透传 AgentRuntime 的 broker——让 ConversationManager.attachToHub 能
+    // 把 broker 挂到 ConfirmationHub，远程确认链路才完整。broker 是
+    // per-AgentRuntime 单例；adapter 只是协议适配，不包装/不复制 broker 身份。
+    confirmationBroker: agentRuntime.confirmationBroker,
+
     async *run(
       text,
       abortSignalOrOptions?: AbortSignal | RunTurnOptions,

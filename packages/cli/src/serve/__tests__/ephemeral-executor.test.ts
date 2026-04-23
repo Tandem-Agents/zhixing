@@ -157,4 +157,69 @@ describe("runEphemeralTurn", () => {
     expect(seen).toHaveLength(1);
     expect(seen[0]).toEqual({ type: "text_delta", text: "x" });
   });
+
+  // ─── PR-2 / remote-confirmation-execution.md §3.3：turnContext 透传 ───
+
+  it("可选 turnContext 透传给 runtime.run（scheduler → ephemeral 路径）", async () => {
+    const runSpy = vi.fn(async (_params: RunParams): Promise<RunResult> => ({
+      agentResult: {
+        reason: "completed",
+        message: { role: "assistant", content: [{ type: "text", text: "ok" }] },
+        usage: { inputTokens: 1, outputTokens: 1 },
+      },
+      newMessages: [],
+      durationMs: 1,
+      toolEndCount: 0,
+      injectedSkillIds: [],
+    }));
+    const runtime = Object.assign({} as AgentRuntime, {
+      providerId: "mock",
+      model: "mock",
+      run: runSpy,
+    });
+
+    await runEphemeralTurn({
+      runtime,
+      prompt: "task prompt",
+      turnContext: {
+        turnId: "turn_abc",
+        turnOrigin: {
+          channel: "scheduler",
+          target: { channelId: "feishu", to: "ou_xyz" },
+          triggeredBy: "task-42",
+        },
+      },
+    });
+
+    const received = runSpy.mock.calls[0]![0];
+    expect(received.turnContext?.turnId).toBe("turn_abc");
+    expect(received.turnContext?.turnOrigin).toEqual({
+      channel: "scheduler",
+      target: { channelId: "feishu", to: "ou_xyz" },
+      triggeredBy: "task-42",
+    });
+  });
+
+  it("无 turnContext 时 runtime.run 的 turnContext 为 undefined", async () => {
+    const runSpy = vi.fn(async (_params: RunParams): Promise<RunResult> => ({
+      agentResult: {
+        reason: "completed",
+        message: { role: "assistant", content: [{ type: "text", text: "ok" }] },
+        usage: { inputTokens: 1, outputTokens: 1 },
+      },
+      newMessages: [],
+      durationMs: 1,
+      toolEndCount: 0,
+      injectedSkillIds: [],
+    }));
+    const runtime = Object.assign({} as AgentRuntime, {
+      providerId: "mock",
+      model: "mock",
+      run: runSpy,
+    });
+
+    await runEphemeralTurn({ runtime, prompt: "no origin" });
+
+    expect(runSpy.mock.calls[0]![0].turnContext).toBeUndefined();
+  });
 });

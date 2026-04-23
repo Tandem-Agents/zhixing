@@ -28,8 +28,9 @@ export type {
   ToolResult,
   ToolSpec,
   TurnContext,
+  TurnOrigin,
 } from "./tools.js";
-export { toToolSpec } from "./tools.js";
+export { toToolSpec, generateTurnId } from "./tools.js";
 
 // ─── LLM 类型 ───
 export type {

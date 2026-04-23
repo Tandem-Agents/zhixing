@@ -16,6 +16,7 @@
 import type { OperationClass, RiskLevel, SecurityDecision, SessionType } from "../security/types.js";
 import type { PermissionRule } from "../security/types.js";
 import type { SuggestedPattern, SuggestionStatus } from "../security/confirmation-tracker.js";
+import type { TurnOrigin } from "../types/tools.js";
 
 // ─── 请求标识 ───
 
@@ -180,6 +181,17 @@ export interface ConfirmationRequest {
   createdAt: number;
   /** 过期时间戳（ms）。超时后 broker 以 expired 自动 resolve */
   expiresAt: number;
+
+  // ── 远程确认回程地址（ADR-010 / remote-confirmation-execution.md §3.3） ──
+  /**
+   * Turn 发起入口的元信息。由 secure-executor 从 ToolExecutionContext.turnContext
+   * 透传填入。远程渲染器（TextConfirmationRenderer）读 `target` 字段决定把确认
+   * 消息发回哪个用户通道；RPC Bridge 读 `triggeredBy` 做推送过滤。
+   *
+   * REPL / 一次性命令下 turnOrigin 为 undefined——本地 TerminalRenderer 直接
+   * 走 TTY 不需要回程地址。
+   */
+  turnOrigin?: TurnOrigin;
 }
 
 // ─── 决定 ───
@@ -207,6 +219,19 @@ export type ConfirmationDecision =
   | { kind: "deny"; reason?: string }
   | { kind: "expired" }
   | { kind: "cancelled"; cause: CancelCause };
+
+/**
+ * `deny` decision 的判别辅助——自由文本拒绝（reason 非空）vs 结构化拒绝（reason 缺失）。
+ *
+ * 远程确认场景：词集匹配 allow/deny 产出结构化 decision；任意其它文本作为自由文本
+ * 理由产出 `{ kind: "deny", reason }`。本函数给下游（埋点 / Bridge 推送）提供统一的
+ * 判别入口，避免调用方各自判 `reason !== undefined`。
+ */
+export function isFreeTextDeny(
+  decision: ConfirmationDecision,
+): decision is { kind: "deny"; reason: string } {
+  return decision.kind === "deny" && typeof decision.reason === "string" && decision.reason.length > 0;
+}
 
 /**
  * 取消原因——区分不同的非用户主动拒绝场景。
@@ -266,6 +291,19 @@ export interface ConfirmationRenderer {
   detach(): void;
 }
 
+// ─── 超时降级策略（远程确认，远程路径专用） ───
+
+/**
+ * 确认请求在 broker 内部到达 `expiresAt` 而用户未响应时的降级策略。
+ *
+ * - **deny**（默认）：按普通拒绝处理，抛 SecurityBlockError。严格安全。
+ * - **auto-approve-safe**：检查 `operationClass`，observe / internal 放行；
+ *   external / critical 仍然拒绝。适合"希望定时任务超时后也能执行低风险操作"的运维。
+ *
+ * 参见 remote-confirmation-execution.md §3.8。
+ */
+export type ConfirmationFallbackStrategy = "deny" | "auto-approve-safe";
+
 // ─── 非交互策略 ───
 
 /**
@@ -315,6 +353,21 @@ export interface BrokerSnapshot {
 export type RequestListener = (request: ConfirmationRequest) => void;
 
 /**
+ * 请求被解决事件的监听器类型——聚合层（ConfirmationHub）订阅以清理索引、推送 RPC 通知。
+ *
+ * 语义：在任何路径（用户 resolve / cancel / expire / 非交互兜底 / backpressure）
+ * 上请求最终得到 decision 时同步调用一次。每个 requestId 至多触发一次。
+ *
+ * 与 `confirmation:resolved` EventBus 事件的区别：
+ *   - `confirmation:resolved` 仅针对 user-resolve 路径（见 broker 中的 resolve 实现）
+ *   - `onResolved` 覆盖全部 5 条 resolved 路径，是"请求终结"的唯一真源
+ */
+export type ResolvedListener = (
+  requestId: ConfirmationRequestId,
+  decision: ConfirmationDecision,
+) => void;
+
+/**
  * Broker 取消订阅函数。
  */
 export type BrokerUnsubscribe = () => void;
@@ -344,6 +397,21 @@ export interface IConfirmationBroker {
    * 只有 "showing" 状态的请求会触发监听器；queued 的不会。
    */
   onRequest(listener: RequestListener): BrokerUnsubscribe;
+
+  /**
+   * 订阅请求被解决通知——聚合层（如 ConfirmationHub）调用。
+   *
+   * 任何路径完成时同步触发一次：
+   *   - 用户 resolve（成功路径）
+   *   - cancel（成功路径）
+   *   - expire（超时）
+   *   - 无监听器时的非交互兜底（requestConfirmation 直接返回）
+   *   - backpressure（队列满）
+   *
+   * 触发顺序保证：listener 在请求 Promise resolve 之前触发，
+   * 以便 Hub 可在外部观察到 decision 前完成索引清理。
+   */
+  onResolved(listener: ResolvedListener): BrokerUnsubscribe;
 
   /**
    * 解决一个 pending 请求——由渲染器调用。

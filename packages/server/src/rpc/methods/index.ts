@@ -24,6 +24,10 @@ import {
   buildScheduleRunMethod,
 } from "./schedule.js";
 import { buildServerShutdownMethod, buildServerInfoMethod } from "./server.js";
+import {
+  buildConfirmationListMethod,
+  buildConfirmationResolveMethod,
+} from "./confirmation.js";
 
 export interface BuiltinMethodsOptions {
   /** 后续阶段会注入更多依赖（scheduler 等） */
@@ -56,6 +60,9 @@ export function buildBuiltinRegistry(_opts: BuiltinMethodsOptions = {}): Handler
     // server.*（控制面：shutdown / info）
     buildServerShutdownMethod(),
     buildServerInfoMethod(),
+    // confirmation.*（远程权限确认：list / resolve —— RPC 客户端用；pending/resolved 推送由 ConfirmationBridge 处理）
+    buildConfirmationListMethod(),
+    buildConfirmationResolveMethod(),
   ]);
   return registry;
 }

@@ -10,6 +10,7 @@
 import type {
   AgentYield,
   AgentResult,
+  IConfirmationBroker,
   Message,
   TurnContext,
 } from "@zhixing/core";
@@ -44,6 +45,15 @@ export interface SessionRuntime {
   abort(): void;
   /** 释放资源（Server 关闭时调用） */
   dispose(): void;
+  /**
+   * 确认交互 broker —— 可选。
+   *
+   * `@zhixing/cli` 的 `AgentRuntime` 天然实现（broker 作为 readonly public 字段暴露）；
+   * 其它 SessionRuntime 实现（如测试 stub）可以不提供，此时 ConfirmationHub 不接入。
+   *
+   * 参见 remote-confirmation-execution.md §3.2（Hub 聚合 per-runtime broker）。
+   */
+  readonly confirmationBroker?: IConfirmationBroker;
 }
 
 export interface RuntimeFactory {

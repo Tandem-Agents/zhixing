@@ -10,7 +10,12 @@
  *
  * 规格引用：persistent-service.md §4.2 TaskAction（sessionId 未提供时的 ephemeral 模式）
  */
-import { userMessage, type AgentYield, type Message } from "@zhixing/core";
+import {
+  userMessage,
+  type AgentYield,
+  type Message,
+  type TurnContext,
+} from "@zhixing/core";
 import type { AgentTurnResult } from "@zhixing/core";
 import type { AgentRuntime } from "../run-agent.js";
 
@@ -19,6 +24,13 @@ export interface EphemeralTurnOptions {
   prompt: string;
   /** 可选：流式事件回调（调试/审计用，默认不消费） */
   onYield?: (event: AgentYield) => void;
+  /**
+   * 可选 turn 级上下文。scheduler → ephemeralRuntime 路径由 serve/command.ts
+   * 填入 `{ turnId, turnOrigin: { channel: "scheduler", target?, triggeredBy: taskId } }`——
+   * 用于远程确认把请求路由回创建任务时的通道对话
+   * （remote-confirmation-execution.md §3.3）。
+   */
+  turnContext?: TurnContext;
 }
 
 /**
@@ -40,6 +52,7 @@ export async function runEphemeralTurn(
         if (event.type === "text_delta") textChunks.push(event.text);
         opts.onYield?.(event);
       },
+      turnContext: opts.turnContext,
     });
 
     const output = textChunks.join("") || undefined;

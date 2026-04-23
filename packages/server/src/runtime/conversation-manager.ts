@@ -17,6 +17,10 @@
 
 import type { Message, Turn } from "@zhixing/core";
 import type { SessionRuntime, RuntimeFactory } from "./types.js";
+import type { ConfirmationHub } from "../confirmation/hub.js";
+
+// 空 set 复用，避免每次 getObserverConnectionIds 返回新对象
+const EMPTY_OBSERVER_SET: ReadonlySet<string> = new Set();
 
 // ─── 配置 ───
 
@@ -88,6 +92,14 @@ export interface ConversationManagerCallbacks {
   loadHistory?: LoadHistory;
   initTranscript?: InitTranscript;
   persistTurn?: PersistTurn;
+  /**
+   * 可选 ConfirmationHub —— 提供时每个新建会话的 runtime.confirmationBroker 会
+   * 自动 attach；会话释放（delete / grace / idle / disposeAll）前自动 detach。
+   * 未提供时 ConversationManager 行为完全等价。
+   *
+   * 参见 remote-confirmation-execution.md §3.2。
+   */
+  confirmationHub?: ConfirmationHub;
 }
 
 // ─── 待处理任务 ───
@@ -114,6 +126,9 @@ export class ConversationManager {
   private readonly loadHistory?: LoadHistory;
   private readonly initTranscript?: InitTranscript;
   private readonly persistTurn?: PersistTurn;
+  private readonly confirmationHub?: ConfirmationHub;
+  /** conversationId 集合——已 attach 到 hub 的会话，用于 dispose 前反查 + 防重 */
+  private readonly attachedBrokers = new Set<string>();
 
   constructor(
     factory: RuntimeFactory,
@@ -134,6 +149,7 @@ export class ConversationManager {
       this.loadHistory = callbacksOrOnRelease.loadHistory;
       this.initTranscript = callbacksOrOnRelease.initTranscript;
       this.persistTurn = callbacksOrOnRelease.persistTurn;
+      this.confirmationHub = callbacksOrOnRelease.confirmationHub;
     } else if (loadHistory) {
       this.loadHistory = loadHistory;
     }
@@ -197,7 +213,38 @@ export class ConversationManager {
     };
 
     this.sessions.set(id, session);
+    this.attachToHub(id, runtime);
     return session;
+  }
+
+  // ─── ConfirmationHub 接入（remote-confirmation-execution.md §3.2） ───
+
+  /** 把会话的 broker 接到 hub（幂等）；未配置 hub 或 runtime 无 broker 时 no-op */
+  private attachToHub(conversationId: string, runtime: SessionRuntime): void {
+    if (!this.confirmationHub) return;
+    if (!runtime.confirmationBroker) return;
+    if (this.attachedBrokers.has(conversationId)) return;
+
+    this.confirmationHub.attach(
+      `conv:${conversationId}`,
+      runtime.confirmationBroker,
+      { conversationId },
+    );
+    this.attachedBrokers.add(conversationId);
+  }
+
+  /**
+   * 从 hub 解绑。必须在 session.runtime.dispose() 之前调用——否则 dispose 后
+   * broker 内存仍被 hub listener 持有，等到 hub 被释放时才 GC。
+   *
+   * INV-H3 保证：detach 内部先 cancelAll → pending 的 resolved 事件送达
+   * Renderer/Bridge → 清索引。
+   */
+  private detachFromHub(conversationId: string): void {
+    if (!this.confirmationHub) return;
+    if (!this.attachedBrokers.has(conversationId)) return;
+    this.confirmationHub.detach(`conv:${conversationId}`);
+    this.attachedBrokers.delete(conversationId);
   }
 
   // ─── Observer 管理 ───
@@ -244,6 +291,18 @@ export class ConversationManager {
   /** 查询会话的当前观察者数量 */
   getObserverCount(conversationId: string): number {
     return this.sessions.get(conversationId)?.observers.size ?? 0;
+  }
+
+  /**
+   * 查询会话的当前观察者 connectionId 集合（只读）。
+   * 返回内部 observers set 的引用（类型系统限制为 ReadonlySet）——调用方不应修改。
+   * 会话不存在时返回共享的空 set。
+   *
+   * 用途：ConfirmationBridge 按 conversation observer 定向推送 RPC 通知
+   * （remote-confirmation-execution.md §3.9）。
+   */
+  getObserverConnectionIds(conversationId: string): ReadonlySet<string> {
+    return this.sessions.get(conversationId)?.observers ?? EMPTY_OBSERVER_SET;
   }
 
   // ─── 查询 ───
@@ -414,6 +473,7 @@ export class ConversationManager {
     if (!session) return false;
     this.clearPendingQueue(conversationId);
     this.clearGraceTimer(conversationId);
+    this.detachFromHub(conversationId);
     session.runtime.dispose();
     this.sessions.delete(conversationId);
     return true;
@@ -431,14 +491,16 @@ export class ConversationManager {
       clearInterval(this.idleInterval);
       this.idleInterval = null;
     }
-    for (const session of this.sessions.values()) {
+    for (const [id, session] of this.sessions) {
       try {
+        this.detachFromHub(id);
         session.runtime.dispose();
       } catch {
         // ignore
       }
     }
     this.sessions.clear();
+    this.attachedBrokers.clear();
   }
 
   // ─── Grace Period ───
@@ -467,6 +529,7 @@ export class ConversationManager {
     if (!session) return;
     if (session.observers.size > 0 || session.busy) return;
     this.clearPendingQueue(conversationId);
+    this.detachFromHub(conversationId);
     session.runtime.dispose();
     this.sessions.delete(conversationId);
     this.onRelease?.(conversationId, reason);
@@ -490,6 +553,7 @@ export class ConversationManager {
         this.clearGraceTimer(id);
         const session = this.sessions.get(id);
         if (session) {
+          this.detachFromHub(id);
           session.runtime.dispose();
           this.sessions.delete(id);
           this.onRelease?.(id, "idle");

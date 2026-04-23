@@ -36,6 +36,7 @@ import type {
   ConfirmationRequest,
   NonInteractiveResolver,
   RequestListener,
+  ResolvedListener,
 } from "../types.js";
 
 // ─── 测试辅助 ───
@@ -634,5 +635,219 @@ describe("createConfirmationBroker + generateRequestId", () => {
 
   it("failToDenyResolver 的 name 是 fail-to-deny", () => {
     expect(failToDenyResolver.name).toBe("fail-to-deny");
+  });
+});
+
+// ─── onResolved 监听器 ───
+//
+// 远程确认聚合层（ConfirmationHub）需要一个"请求已被解决"的唯一事件源来清理
+// 索引 / 推送 RPC 通知。onResolved 覆盖全部 5 条 resolved 路径：
+//   1. user resolve
+//   2. cancel（含 cancelAll 每个条目）
+//   3. expire（超时）
+//   4. 无监听器时的非交互兜底（fail-to-deny 等）
+//   5. backpressure（队列满）
+//
+// 对比 EventBus 的 `confirmation:resolved` 事件：后者只针对 user-resolve
+// 路径，不覆盖 cancel / expire / 兜底 / backpressure。
+
+describe("ConfirmationBroker — onResolved 监听器", () => {
+  it("user resolve 路径触发 onResolved，携带正确的 requestId 和 decision", async () => {
+    const broker = new ConfirmationBroker();
+    broker.onRequest(() => {});
+    const seen: Array<{ id: string; kind: string }> = [];
+    broker.onResolved((id, decision) => {
+      seen.push({ id, kind: decision.kind });
+    });
+
+    const req = makeRequest({ id: "u1" });
+    const promise = broker.requestConfirmation(req);
+    broker.resolve(req.id, { kind: "allow-once", note: "ok" });
+    await promise;
+
+    expect(seen).toEqual([{ id: "u1", kind: "allow-once" }]);
+  });
+
+  it("cancel 路径触发 onResolved，decision 为 cancelled + cause", async () => {
+    const broker = new ConfirmationBroker();
+    broker.onRequest(() => {});
+    const seen: ConfirmationDecision[] = [];
+    broker.onResolved((_id, decision) => {
+      seen.push(decision);
+    });
+
+    const req = makeRequest({ id: "c1" });
+    const promise = broker.requestConfirmation(req);
+    broker.cancel(req.id, "user-ctrl-c");
+    await promise;
+
+    expect(seen).toEqual([{ kind: "cancelled", cause: "user-ctrl-c" }]);
+  });
+
+  it("cancelAll 为队列中每个请求触发 onResolved", async () => {
+    const broker = new ConfirmationBroker();
+    broker.onRequest(() => {});
+    const seen: string[] = [];
+    broker.onResolved((id) => seen.push(id));
+
+    const promises = ["a", "b", "c"].map((id) =>
+      broker.requestConfirmation(makeRequest({ id })),
+    );
+    broker.cancelAll("session-end");
+    await Promise.all(promises);
+
+    expect(seen).toEqual(["a", "b", "c"]);
+  });
+
+  it("expire 路径触发 onResolved，decision 为 expired", async () => {
+    vi.useFakeTimers();
+    try {
+      const broker = new ConfirmationBroker();
+      broker.onRequest(() => {});
+      const seen: ConfirmationDecision[] = [];
+      broker.onResolved((_id, decision) => {
+        seen.push(decision);
+      });
+
+      const now = Date.now();
+      const promise = broker.requestConfirmation(
+        makeRequest({ id: "e1", createdAt: now, expiresAt: now + 1000 }),
+      );
+      vi.advanceTimersByTime(1001);
+      await promise;
+
+      expect(seen).toEqual([{ kind: "expired" }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("非交互兜底路径（无 onRequest 监听器）触发 onResolved", async () => {
+    const broker = new ConfirmationBroker(); // 默认 failToDenyResolver
+    const seen: ConfirmationDecision[] = [];
+    broker.onResolved((_id, decision) => {
+      seen.push(decision);
+    });
+
+    await broker.requestConfirmation(makeRequest({ id: "n1" }));
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.kind).toBe("deny");
+  });
+
+  it("backpressure 路径触发 onResolved，decision 为 cancelled + backpressure", async () => {
+    const broker = new ConfirmationBroker({ maxQueueDepth: 1 });
+    broker.onRequest(() => {});
+    const seen: ConfirmationDecision[] = [];
+    broker.onResolved((_id, decision) => {
+      seen.push(decision);
+    });
+
+    const p1 = broker.requestConfirmation(makeRequest({ id: "bp-a" }));
+    const p2 = broker.requestConfirmation(makeRequest({ id: "bp-b" }));
+
+    const d2 = await p2;
+    expect(d2).toEqual({ kind: "cancelled", cause: "backpressure" });
+    // 第二个请求走 backpressure 路径立即触发 onResolved
+    expect(seen).toContainEqual({ kind: "cancelled", cause: "backpressure" });
+
+    broker.resolve("bp-a", { kind: "allow-once" });
+    await p1;
+    // 然后第一个请求的正常 resolve 路径也触发
+    expect(seen).toHaveLength(2);
+  });
+
+  it("onResolved 在 requestConfirmation 的 Promise resolve 之前触发", async () => {
+    const broker = new ConfirmationBroker();
+    broker.onRequest(() => {});
+    const order: string[] = [];
+    broker.onResolved(() => order.push("listener"));
+
+    const req = makeRequest({ id: "order1" });
+    const promise = broker.requestConfirmation(req).then(() => {
+      order.push("promise");
+    });
+    broker.resolve(req.id, { kind: "allow-once" });
+    await promise;
+
+    expect(order).toEqual(["listener", "promise"]);
+  });
+
+  it("取消订阅后不再触发", async () => {
+    const broker = new ConfirmationBroker();
+    broker.onRequest(() => {});
+    const listener = vi.fn();
+    const unsub = broker.onResolved(listener);
+
+    const r1 = makeRequest({ id: "s1" });
+    const p1 = broker.requestConfirmation(r1);
+    broker.resolve(r1.id, { kind: "allow-once" });
+    await p1;
+    expect(listener).toHaveBeenCalledTimes(1);
+
+    unsub();
+
+    const r2 = makeRequest({ id: "s2" });
+    const p2 = broker.requestConfirmation(r2);
+    broker.resolve(r2.id, { kind: "allow-once" });
+    await p2;
+    expect(listener).toHaveBeenCalledTimes(1);
+  });
+
+  it("监听器抛错不影响 broker 主流程和其他监听器", async () => {
+    const broker = new ConfirmationBroker();
+    broker.onRequest(() => {});
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const faulty: ResolvedListener = () => {
+      throw new Error("boom");
+    };
+    const ok = vi.fn();
+    broker.onResolved(faulty);
+    broker.onResolved(ok);
+
+    const req = makeRequest();
+    const promise = broker.requestConfirmation(req);
+    broker.resolve(req.id, { kind: "allow-once" });
+    const decision = await promise;
+
+    expect(decision.kind).toBe("allow-once");
+    expect(ok).toHaveBeenCalledTimes(1);
+
+    errorSpy.mockRestore();
+  });
+
+  it("多个监听器都会收到通知", async () => {
+    const broker = new ConfirmationBroker();
+    broker.onRequest(() => {});
+    const a = vi.fn();
+    const b = vi.fn();
+    broker.onResolved(a);
+    broker.onResolved(b);
+
+    const req = makeRequest();
+    const promise = broker.requestConfirmation(req);
+    broker.resolve(req.id, { kind: "deny" });
+    await promise;
+
+    expect(a).toHaveBeenCalledTimes(1);
+    expect(b).toHaveBeenCalledTimes(1);
+    expect(a).toHaveBeenCalledWith(req.id, { kind: "deny" });
+  });
+
+  it("每个 requestId 至多触发一次（resolve 已成功后再次 resolve 不重复触发）", async () => {
+    const broker = new ConfirmationBroker();
+    broker.onRequest(() => {});
+    const listener = vi.fn();
+    broker.onResolved(listener);
+
+    const req = makeRequest({ id: "dup1" });
+    const promise = broker.requestConfirmation(req);
+    expect(broker.resolve(req.id, { kind: "allow-once" })).toBe(true);
+    expect(broker.resolve(req.id, { kind: "deny" })).toBe(false);
+    await promise;
+
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(listener).toHaveBeenCalledWith(req.id, { kind: "allow-once" });
   });
 });

@@ -7,6 +7,7 @@ export type {
   ConfirmationDecision,
   ConfirmationDisplay,
   ConfirmationEventMap,
+  ConfirmationFallbackStrategy,
   ConfirmationOption,
   ConfirmationOptionKind,
   ConfirmationRenderer,
@@ -18,6 +19,7 @@ export type {
   PendingSnapshot,
   RendererCapabilities,
   RequestListener,
+  ResolvedListener,
 } from "./types.js";
 
 export {
@@ -26,6 +28,8 @@ export {
   generateRequestId,
 } from "./broker.js";
 export type { ConfirmationBrokerOptions } from "./broker.js";
+
+export { isFreeTextDeny } from "./types.js";
 
 export {
   failToDenyResolver,

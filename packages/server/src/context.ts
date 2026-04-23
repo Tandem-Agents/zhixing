@@ -8,6 +8,7 @@
 import type { Scheduler, ChannelRegistry } from "@zhixing/core";
 import type { ServerConfig } from "./types.js";
 import type { ConversationManager } from "./runtime/index.js";
+import type { ConfirmationHub } from "./confirmation/hub.js";
 
 export interface ServerContext {
   /** 配置（不可变；config.port 是请求的端口，实际端口见 listenAddr） */
@@ -24,6 +25,11 @@ export interface ServerContext {
   conversations?: ConversationManager;
   /** 通道注册表（不传则不启用通道功能） */
   channels?: ChannelRegistry;
+  /**
+   * 确认聚合器（不传则远程确认不启用，serve 模式回退到永久 pending → 30min expire → 拒绝）。
+   * 远程权限确认的聚合入口——参见 remote-confirmation-execution.md §3.2。
+   */
+  confirmationHub?: ConfirmationHub;
   /** 实际监听的地址（startServer 监听就绪后回填） */
   listenAddr?: { port: number; host: string };
   /**
@@ -41,6 +47,7 @@ export interface CreateContextOptions {
   scheduler?: Scheduler;
   conversations?: ConversationManager;
   channels?: ChannelRegistry;
+  confirmationHub?: ConfirmationHub;
 }
 
 export function createServerContext(opts: CreateContextOptions): ServerContext {
@@ -52,5 +59,6 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     scheduler: opts.scheduler,
     conversations: opts.conversations,
     channels: opts.channels,
+    confirmationHub: opts.confirmationHub,
   };
 }

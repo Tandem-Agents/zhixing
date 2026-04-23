@@ -19,11 +19,49 @@ import type {
 // ─── Turn 上下文（ADR-007 Phase 2） ───
 
 /**
+ * TurnOrigin —— turn 发起入口的元信息。
+ *
+ * 用途：
+ *   - 远程确认：`TextConfirmationRenderer` 读 `target` 决定把确认消息发回哪里
+ *   - 审计：`triggeredBy` 记录是谁触发了这个 turn
+ *   - RPC 推送过滤：`channel="rpc"` + `triggeredBy=connectionId` 支持定向通知
+ *
+ * 3 个 turn 入口的填充约定（remote-confirmation-execution.md §3.3）：
+ *   - 通道用户消息 → `{ channel: msg.channelId, target: replyTarget, triggeredBy: msg.from }`
+ *   - RPC `session.send`（Web UI / IDE）→ `{ channel: "rpc", triggeredBy: connectionId }`
+ *   - Scheduler → ephemeralRuntime → `{ channel: "scheduler", target?: task.deliveryTarget, triggeredBy: task.id }`
+ *
+ * REPL / 一次性 CLI 命令下 turnOrigin 为 undefined（本地 TTY 走 TerminalRenderer，不需要回程地址）。
+ */
+export interface TurnOrigin {
+  /** 入口通道标识符。已知值：feishu / dingtalk / wechat / rpc / cli / scheduler；新通道可自由扩展。 */
+  channel: string;
+  /** 投递目标——若可达则确认请求路由到这里（通道用户回复的原会话）。 */
+  target?: DeliveryTarget;
+  /** 触发者（用户 ID / connectionId / taskId）——审计 + 推送过滤。 */
+  triggeredBy?: string;
+}
+
+/**
  * 每轮对话的跨层元信息：由入口（Channel InboundRouter 等）构造，
  * 穿透 SessionRuntime → AgentRuntime → 每次 tool.call 的 ToolExecutionContext。
  *
  * REPL 等无 channel 场景下所有字段可为 undefined，工具需支持降级路径。
  */
+/**
+ * 生成一个全局 Turn ID。
+ *
+ * 格式：`turn_${base36Time}_${rand}`——与 Outbox entry id 语义相近，便于日志交叉定位。
+ *
+ * 统一实现位置：所有 turn 入口（channel InboundRouter / RPC session / scheduler）
+ * 共用此函数，保证格式一致 + 未来调整（如碰撞率升级为 UUID）只需改一处。
+ */
+export function generateTurnId(): string {
+  const ts = Date.now().toString(36);
+  const rand = Math.random().toString(36).slice(2, 8);
+  return `turn_${ts}_${rand}`;
+}
+
 export interface TurnContext {
   /** 全局唯一 turn 标识（Phase 2 用于观测；Phase 3 起接 Outbox Turn Slot） */
   turnId?: string;
@@ -39,6 +77,12 @@ export interface TurnContext {
     content: OutboundContent,
     meta?: { toolName?: string },
   ) => Promise<DeliveryResult>;
+  /**
+   * Turn 发起入口的元信息（远程确认的回程地址）。
+   * 填充入口：InboundRouter / RPC session.send / Scheduler→ephemeralRuntime。
+   * REPL / 一次性命令为 undefined。
+   */
+  turnOrigin?: TurnOrigin;
 }
 
 // ─── JSON Schema ───
@@ -115,6 +159,17 @@ export interface ToolExecutionContext {
    * 工具**无需**手动传 `{ toolName }` 参数。
    */
   commitToUser?: (content: OutboundContent) => Promise<DeliveryResult>;
+
+  /**
+   * Turn 发起入口的元信息——远程确认的回程地址。
+   * 由 AgentRuntime 从 `RunParams.turnContext.turnOrigin` 展开注入；
+   * secure-executor 透传到 ConfirmationRequest.turnOrigin 让 Renderer / Hub / Bridge
+   * 知道把确认请求推回哪个通道对话 / RPC 连接。
+   *
+   * REPL / 一次性命令下为 undefined（本地 TerminalRenderer 不需要远程路由）。
+   * 参见 remote-confirmation-execution.md §3.3。
+   */
+  turnOrigin?: TurnOrigin;
 }
 
 /**

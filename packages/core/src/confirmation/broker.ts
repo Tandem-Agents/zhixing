@@ -35,6 +35,7 @@ import type {
   NonInteractiveResolver,
   PendingSnapshot,
   RequestListener,
+  ResolvedListener,
 } from "./types.js";
 
 // ─── 常量 ───
@@ -102,6 +103,7 @@ export class ConfirmationBroker implements IConfirmationBroker {
   >();
 
   private readonly requestListeners: RequestListener[] = [];
+  private readonly resolvedListeners: ResolvedListener[] = [];
 
   private readonly eventBus?: IEventBus<ConfirmationEventMap>;
   private readonly resolver: NonInteractiveResolver;
@@ -202,6 +204,14 @@ export class ConfirmationBroker implements IConfirmationBroker {
     return () => {
       const idx = this.requestListeners.indexOf(listener);
       if (idx !== -1) this.requestListeners.splice(idx, 1);
+    };
+  }
+
+  onResolved(listener: ResolvedListener): BrokerUnsubscribe {
+    this.resolvedListeners.push(listener);
+    return () => {
+      const idx = this.resolvedListeners.indexOf(listener);
+      if (idx !== -1) this.resolvedListeners.splice(idx, 1);
     };
   }
 
@@ -359,6 +369,23 @@ export class ConfirmationBroker implements IConfirmationBroker {
   ): void {
     const resolvedAt = this.now();
     this.resolvedRecent.set(id, { id, decision, resolvedAt });
+
+    // 通知 onResolved 监听器——所有 resolved 路径的唯一出口。
+    // 用 snapshot 遍历，避免监听器在回调里 unsubscribe 导致索引错乱
+    // （与 showHead 的 requestListeners 处理一致）。
+    const snapshot = [...this.resolvedListeners];
+    for (const listener of snapshot) {
+      try {
+        listener(id, decision);
+      } catch (err) {
+        console.error(
+          "[ConfirmationBroker] resolved listener threw",
+          id,
+          err,
+        );
+      }
+    }
+
     // 安排 grace period 后清除
     const timer = setTimeout(() => {
       this.resolvedRecent.delete(id);

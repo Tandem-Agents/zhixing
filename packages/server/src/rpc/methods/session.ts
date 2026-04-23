@@ -12,7 +12,13 @@
  * - session.complete { conversationId, result: AgentResult }
  */
 
-import { userMessage, type AgentResult, type Turn } from "@zhixing/core";
+import {
+  generateTurnId,
+  userMessage,
+  type AgentResult,
+  type Turn,
+  type TurnContext,
+} from "@zhixing/core";
 import type { MethodEntry } from "../handlers.js";
 import { RpcAppError, RpcErrors } from "../handlers.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
@@ -109,7 +115,20 @@ async function runManagedTurn(
   const turnStartedAt = new Date().toISOString();
 
   try {
-    const gen = managed.runtime.run(text, abortController.signal);
+    // 远程确认回程地址（remote-confirmation-execution.md §3.3）：
+    //   RPC 入口（Web UI / IDE）触发的 turn——无通道 target，仅走 RPC Bridge 定向推送。
+    //   Bridge 用 triggeredBy=connectionId 过滤，只推给发起连接 + 同会话 observer。
+    const turnContext: TurnContext = {
+      turnId: generateTurnId(),
+      turnOrigin: {
+        channel: "rpc",
+        triggeredBy: String(connection.id),
+      },
+    };
+    const gen = managed.runtime.run(text, {
+      abortSignal: abortController.signal,
+      turnContext,
+    });
     let result: AgentResult | undefined;
 
     while (true) {
