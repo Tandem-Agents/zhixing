@@ -150,6 +150,7 @@ export async function* runAgentLoop(
         const cmResult = await params.contextManager.onTurnComplete({
           messages: newMessages,
           turnCount: newTurnCount,
+          abortSignal,   // 透传：strategy 内部的 LLM 调用受同一 abort 控制
         });
         if (cmResult.modified) {
           newMessages = cmResult.messages;

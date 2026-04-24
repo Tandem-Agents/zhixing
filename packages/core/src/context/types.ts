@@ -81,13 +81,40 @@ export const DEFAULT_THRESHOLDS: BudgetThresholds = {
  */
 export const MAX_OUTPUT_RESERVE = 20_000;
 
+// ─── LLM 调用契约 ───
+
+/**
+ * 压缩场景的 LLM 调用函数 —— 所有策略的 LLM 调用统一签名。
+ *
+ * 为什么统一：之前 FlushLLMFn / SummarizeLLMFn 在不同模块各自定义为 `(msgs) => Promise<string>`，
+ * 都没有 abortSignal 透传通道 —— session.abort 期间 compact 会继续跑完，
+ * 拖住 session 几秒（daemon 模式下更严重）。
+ *
+ * 契约：
+ *   - messages: 发送给 LLM 的消息列表（已含指令 prompt）
+ *   - opts.abortSignal: 上游传入的 abort 信号；实现必须透传给底层 provider.chat
+ *
+ * 实现方从 LLMProvider 构造，或从 CLI 的 flushCallLLM 传入。
+ */
+export type CompactLLMFn = (
+  messages: Message[],
+  opts?: { abortSignal?: AbortSignal },
+) => Promise<string>;
+
 // ─── 压缩策略 ───
 
 export interface CompactionContext {
-  messages: readonly Message[];
-  budget: ContextBudget;
+  readonly messages: readonly Message[];
+  readonly budget: ContextBudget;
   /** 当前已完成的轮次数 */
-  currentTurn: number;
+  readonly currentTurn: number;
+  /**
+   * 上游传入的 abort 信号 —— 策略的 LLM 调用必须透传。
+   *
+   * 语义：session.abort / 用户 /abort / daemon grace timer 过期 时触发。
+   * 未设置时策略按无限制运行（测试 / 手动 /compact 场景）。
+   */
+  readonly abortSignal?: AbortSignal;
 }
 
 export interface CompactionResult {
@@ -132,8 +159,13 @@ export interface ContextManagerHook {
 }
 
 export interface ContextManagerInput {
-  messages: readonly Message[];
-  turnCount: number;
+  readonly messages: readonly Message[];
+  readonly turnCount: number;
+  /**
+   * 上游传入的 abort 信号。engine 会注入到每个 strategy 的 CompactionContext，
+   * 由策略的 LLM 调用透传给 provider。未设置时策略无限制运行。
+   */
+  readonly abortSignal?: AbortSignal;
 }
 
 export interface ContextManagerOutput {

@@ -15,7 +15,11 @@
  */
 
 import type { Message } from "../../types/messages.js";
-import { userMessage as makeUserMessage } from "../../types/messages.js";
+import {
+  calculateMessageTurns,
+  splitMessagesPairAware,
+} from "../message-turns.js";
+import { buildDroppedTurnsMessage } from "../system-meta.js";
 import type { CompactionContext, CompactionResult, CompactionStrategy } from "../types.js";
 
 // ─── 配置 ───
@@ -26,10 +30,23 @@ export interface MessageDropConfig {
    * 默认 6 — 给 LLM 足够的短期记忆理解当前任务。
    */
   keepRecentTurns: number;
+  /**
+   * 预算 usage 超过此比例时停止应用（让给 LLMSummarize）。默认 0.9。
+   *
+   * 设计目的：
+   *   L2 (MessageDrop) 是"免费粗暴截断"，会物理丢失语义信息；
+   *   L3 (LLMSummarize) 是"昂贵但保留语义"的 summary。
+   *   预算越接近上限越需要 summary 保留核心信息，因此到 9x% 时应该让 L3 接手。
+   *
+   * 此值应与 `LLMSummarizeConfig.triggerRatio` 对齐（默认双方都是 0.9）
+   * 形成互斥分区 —— MessageDrop 占 (compact 阈值, 0.9)，LLMSummarize 占 [0.9, ∞)。
+   */
+  budgetCeilingRatio: number;
 }
 
 const DEFAULT_CONFIG: MessageDropConfig = {
   keepRecentTurns: 6,
+  budgetCeilingRatio: 0.9,
 };
 
 // ─── 策略实现 ───
@@ -45,7 +62,9 @@ export class MessageDropStrategy implements CompactionStrategy {
   }
 
   canApply(context: CompactionContext): boolean {
-    const { messages } = context;
+    const { messages, budget } = context;
+    // 预算前置：超过上限让给 LLMSummarize（避免丢失 9x% 场景的语义信息）
+    if (budget.usageRatio >= this.config.budgetCeilingRatio) return false;
     // 需要有足够多的消息才值得丢弃
     const keepMessages = this.config.keepRecentTurns * 2 + 1;
     return messages.length > keepMessages + 2;
@@ -55,15 +74,16 @@ export class MessageDropStrategy implements CompactionStrategy {
     const { messages } = context;
     const { keepRecentTurns } = this.config;
 
-    // 从末尾向前，保留 keepRecentTurns 轮的消息
-    // 一轮 = assistant + user(tool_result)，从末尾数 assistant 消息
-    const keepFromIndex = findKeepBoundary(
+    // 按 turn 数切分（pair-aware），tool_use/tool_result 对不会被劈开
+    const { toSummarize, toPreserve } = splitMessagesPairAware(
       messages,
       keepRecentTurns,
     );
 
-    // 至少保留第一条消息 + 占位 + 最近消息
-    if (keepFromIndex <= 1) {
+    // toSummarize.length <= 1 说明前段最多只有意图锚（turn 0 的首条 user），
+    // 压缩后 [firstMessage, placeholder(count=0), ...toPreserve] 无实际压缩
+    // 效果，等同于原逻辑的 keepFromIndex <= 1。
+    if (toSummarize.length <= 1) {
       return {
         messages: messages as Message[],
         tokensBefore: 0,
@@ -72,15 +92,18 @@ export class MessageDropStrategy implements CompactionStrategy {
       };
     }
 
-    const droppedTurns = countAssistantMessages(messages, 1, keepFromIndex);
     const firstMessage = messages[0] as Message;
-    const recentMessages = messages.slice(keepFromIndex) as Message[];
 
-    const placeholder = makeUserMessage(
-      `[前 ${droppedTurns} 轮对话已省略，保留了最近 ${keepRecentTurns} 轮]`,
-    );
+    // 丢弃的 turn 数 = toSummarize 中 distinct turn 号的最大值
+    // （turn 0 是首条 user 意图锚，turn 1..maxSummarized 是被丢弃的完整 turn）
+    const toSummarizeTurns = calculateMessageTurns(toSummarize);
+    const droppedTurnCount =
+      toSummarizeTurns[toSummarizeTurns.length - 1] ?? 0;
 
-    const newMessages = [firstMessage, placeholder, ...recentMessages];
+    // 占位符统一走 system-meta：kind="dropped-turns" count="N"
+    const placeholder = buildDroppedTurnsMessage(droppedTurnCount);
+
+    const newMessages = [firstMessage, placeholder, ...toPreserve];
 
     return {
       messages: newMessages,
@@ -89,39 +112,6 @@ export class MessageDropStrategy implements CompactionStrategy {
       compacted: true,
     };
   }
-}
-
-/**
- * 从消息末尾向前找，返回需要保留的起始索引。
- * 保留最后 keepTurns 轮的所有消息。
- */
-function findKeepBoundary(
-  messages: readonly Message[],
-  keepTurns: number,
-): number {
-  let assistantCount = 0;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i]!.role === "assistant") {
-      assistantCount++;
-      if (assistantCount >= keepTurns) {
-        return i;
-      }
-    }
-  }
-  // 不够 keepTurns 轮 — 返回 1（跳过第一条消息后开始）
-  return 1;
-}
-
-function countAssistantMessages(
-  messages: readonly Message[],
-  from: number,
-  to: number,
-): number {
-  let count = 0;
-  for (let i = from; i < to; i++) {
-    if (messages[i]!.role === "assistant") count++;
-  }
-  return count;
 }
 
 export function createMessageDropStrategy(

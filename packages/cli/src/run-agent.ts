@@ -22,6 +22,7 @@ import {
   ConfirmationBroker,
   createEventBus,
   createContextEngine,
+  createLLMSummarizeStrategy,
   createTokenEstimator,
   createToolResultTrimStrategy,
   createMessageDropStrategy,
@@ -131,6 +132,12 @@ export interface RunParams {
    * ToolExecutionContext（turnId / emissionTarget / commitToUser）。
    */
   turnContext?: TurnContext;
+  /**
+   * Abort 信号 —— 透传到 agent-loop 和 contextManager（compact 策略内的 LLM 调用）。
+   * 上游来源：SessionRuntime.abort()、用户 /abort、daemon grace timer。
+   * 未设置时所有 LLM 调用无限制运行。
+   */
+  abortSignal?: AbortSignal;
 }
 
 export interface RunResult {
@@ -254,10 +261,20 @@ export async function createAgentRuntime(options: {
   const estimator = createTokenEstimator();
   const memoryStore = new MemoryStore();
 
-  // Flush 用的 LLM 调用：消费流式响应，拼接 text_delta 为完整文本
-  const flushCallLLM = async (msgs: Message[]): Promise<string> => {
+  // Flush 用的 LLM 调用：消费流式响应，拼接 text_delta 为完整文本。
+  // 统一 CompactLLMFn 契约：opts.abortSignal 透传给 provider.chat，保证
+  // compact 期间受同一 abort 控制。
+  const flushCallLLM = async (
+    msgs: Message[],
+    opts?: { abortSignal?: AbortSignal },
+  ): Promise<string> => {
     const chunks: string[] = [];
-    for await (const event of provider.chat({ model, messages: msgs, tools: [] })) {
+    for await (const event of provider.chat({
+      model,
+      messages: msgs,
+      tools: [],
+      abortSignal: opts?.abortSignal,
+    })) {
       if (event.type === "text_delta") {
         chunks.push(event.text);
       }
@@ -265,10 +282,24 @@ export async function createAgentRuntime(options: {
     return chunks.join("") || "[]";
   };
 
+  // 策略编排（engine 按 priority asc 执行，到 normal/warning 就 break）：
+  //   priority 0   ToolResultTrim  免费 — 旧轮 tool_result 裁剪
+  //   priority 3   MemoryFlush     有 LLM 调用 — 仅 usage >= 0.75 触发
+  //   priority 5   MessageDrop     免费 — usage < 0.9 触发（超过 0.9 让给 LLMSummarize）
+  //   priority 200 LLMSummarize    昂贵 — usage >= 0.9 触发，MessageDrop 让位
+  //
+  // LLMSummarize 和 MemoryFlush 共用 flushCallLLM —— 未来可通过 ZhixingConfig
+  // 配置 compactionModels 拆分（当前共用 default model）。
   const strategies = [
     createToolResultTrimStrategy(),
     createMemoryFlushStrategy({ callLLM: flushCallLLM, store: memoryStore }),
     createMessageDropStrategy(),
+    createLLMSummarizeStrategy({
+      callLLM: flushCallLLM,
+      estimator,
+      triggerRatio: 0.9,
+      preserveRecentTurns: 2,
+    }),
   ];
 
   return {
@@ -419,6 +450,7 @@ export async function createAgentRuntime(options: {
         systemPrompt,
         eventBus,
         workingDirectory: process.cwd(),
+        abortSignal: params.abortSignal,
         deps: {
           callLLM: resilientCallLLM,
           executeTool: secureExecuteTool,

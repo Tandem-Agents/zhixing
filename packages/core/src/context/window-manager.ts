@@ -17,11 +17,11 @@
  */
 
 import type { Message } from "../types/messages.js";
-import { userMessage as makeUserMessage } from "../types/messages.js";
 import type { TierThresholds } from "./context-profile.js";
 import type { ITokenEstimator } from "./types.js";
 import { applyTierCompression, type TierStats } from "./tier-compressor.js";
 import { calculateMessageTurns } from "./message-turns.js";
+import { buildDroppedTurnsMessage } from "./system-meta.js";
 
 // ─── 常量 ───
 
@@ -193,11 +193,8 @@ function evictOldestTurns(
     const t = turns[i]!;
     if (evictedSet.has(t)) {
       if (!placeholderInserted) {
-        kept.push(
-          makeUserMessage(
-            `[前 ${evictedSet.size} 轮对话已省略，可通过 recall_history 恢复]`,
-          ),
-        );
+        // 占位符统一走 system-meta：kind="dropped-turns" count="N"
+        kept.push(buildDroppedTurnsMessage(evictedSet.size));
         placeholderInserted = true;
       }
       continue;

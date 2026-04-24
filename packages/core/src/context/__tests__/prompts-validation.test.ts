@@ -3,8 +3,6 @@ import {
   MAIN_SESSION_PROMPT,
   SUB_AGENT_PROMPT,
   MERGE_SUMMARIES_PROMPT,
-  buildContinuationMessage,
-  buildManualCompactMessage,
   buildRetryPrompt,
   getSummarizationPrompt,
   wrapCustomInstructions,
@@ -83,25 +81,10 @@ describe("getSummarizationPrompt", () => {
   });
 });
 
-// ─── 续写消息 ───
-
-describe("buildContinuationMessage", () => {
-  it("包含摘要内容和续航指令", () => {
-    const msg = buildContinuationMessage("## 核心目标\n测试摘要");
-    expect(msg).toContain("对话已压缩");
-    expect(msg).toContain("## 核心目标");
-    expect(msg).toContain("测试摘要");
-    expect(msg).toContain("继续工作");
-  });
-});
-
-describe("buildManualCompactMessage", () => {
-  it("包含摘要内容和等待指令", () => {
-    const msg = buildManualCompactMessage("## 核心目标\n测试摘要");
-    expect(msg).toContain("对话已压缩");
-    expect(msg).toContain("等待用户");
-  });
-});
+// buildContinuationMessage / buildManualCompactMessage 已删除 —— 它们是自
+// Phase 0 起从未被生产代码调用的字符串模板 dead code。Phase 2 后所有 compact
+// 占位统一由 system-meta.ts 的 buildCompactSummaryPair 构造为 Message pair。
+// 对应测试一并移除。
 
 // ─── 重试 prompt ───
 

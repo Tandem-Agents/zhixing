@@ -7,6 +7,7 @@ import {
   type SummarizeLLMFn,
 } from "../strategies/llm-summarize.js";
 import { REQUIRED_MAIN_SECTIONS } from "../validation.js";
+import { detectSystemMetaKind } from "../system-meta.js";
 
 // ─── Fixtures ───
 
@@ -133,10 +134,10 @@ describe("LLMSummarizeStrategy", () => {
       // 摘要前缀（2 条）+ 保留的最近 4 条（2 turns × 2）
       expect(result.messages.length).toBeLessThan(messages.length);
       expect(result.tokensAfter).toBeLessThan(result.tokensBefore);
-      // 第一条消息包含摘要
-      expect(result.messages[0]!.content[0]).toHaveProperty("text");
-      const firstText = (result.messages[0]!.content[0] as { text: string }).text;
-      expect(firstText).toContain("对话已压缩");
+      // 第一条消息是 system-meta compact-summary（结构化断言）
+      expect(detectSystemMetaKind(result.messages[0]!)).toBe("compact-summary");
+      // 第二条是 ack（pair 语义）
+      expect(detectSystemMetaKind(result.messages[1]!)).toBe("ack");
     });
 
     it("首次校验失败时重试一次", async () => {

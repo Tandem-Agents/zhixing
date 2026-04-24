@@ -20,6 +20,7 @@ import type { AgentEventMap } from "../types/agent-events.js";
 import type { Message } from "../types/messages.js";
 import type {
   BudgetThresholds,
+  CompactionContext,
   CompactionStrategy,
   ContextBudget,
   ContextManagerHook,
@@ -139,7 +140,7 @@ export class ContextEngine implements ContextManagerHook {
    */
   async onTurnComplete(input: ContextManagerInput): Promise<ContextManagerOutput> {
     let { messages } = input;
-    const { turnCount } = input;
+    const { turnCount, abortSignal } = input;
     let modified = false;
 
     // ── Step 1: WindowManager 级联（Tier 压缩 + 淘汰） ──
@@ -176,7 +177,12 @@ export class ContextEngine implements ContextManagerHook {
 
     // ── Step 3: 剩余策略兜底（LLM 压缩等） ──
     for (const strategy of this.strategies) {
-      const context = { messages, budget, currentTurn: turnCount };
+      const context: CompactionContext = {
+        messages,
+        budget,
+        currentTurn: turnCount,
+        abortSignal,   // 注入 abort 信号，strategy 的 LLM 调用必须透传
+      };
 
       if (!strategy.canApply(context)) continue;
 

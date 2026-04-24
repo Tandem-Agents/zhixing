@@ -103,7 +103,11 @@ describe("Layer 0 (Static)", () => {
 
   it("omits tool catalog when no tools", () => {
     const result = assembleLayers(makeInput({ tools: undefined }));
-    expect(result.layer0).toBe(IDENTITY);
+    // Layer 0 = identity + SYSTEM_META_PROMPT_SECTION（后者是永恒规则，告知 LLM
+    // `<system-meta>` 标签的含义）。没有 tools 时不含工具目录段。
+    expect(result.layer0).toContain(IDENTITY);
+    expect(result.layer0).toContain("[系统元信息标签]");
+    expect(result.layer0).not.toContain("[可用工具]");
   });
 
   it("filters tools by profile.toolCategories", () => {
@@ -293,7 +297,9 @@ describe("assembleSystemPrompt", () => {
   it("omits empty layers (no consecutive separators)", () => {
     const result = assembleSystemPrompt(makeInput());
     expect(result).not.toContain("---\n\n---");
-    expect(result).toBe(IDENTITY);
+    // 最小输入下 systemPrompt 就是 Layer 0 内容（identity + SYSTEM_META_PROMPT_SECTION）
+    expect(result).toContain(IDENTITY);
+    expect(result).toContain("[系统元信息标签]");
   });
 
   it("lookup profile: only Layer 0 + Layer 3 (no L1, no L2)", () => {

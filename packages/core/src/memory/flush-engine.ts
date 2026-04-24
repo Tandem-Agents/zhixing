@@ -18,26 +18,58 @@
 
 import type { Message } from "../types/messages.js";
 import type {
+  CompactLLMFn,
   CompactionContext,
   CompactionResult,
   CompactionStrategy,
 } from "../context/types.js";
+import {
+  calculateMessageTurns,
+  splitMessagesPairAware,
+} from "../context/message-turns.js";
 import { MemoryStore, type MemoryCategory } from "./memory-store.js";
 
 // ─── 类型 ───
 
 /**
  * Flush 用的 LLM 调用函数。
- * 接收消息列表（含提取指令），返回纯文本 JSON。
+ *
+ * @deprecated 使用 `CompactLLMFn`（等价类型，统一契约）。此别名仅为保留既有导入不破。
+ *
+ * 迁移指引：`import type { CompactLLMFn } from "@zhixing/core"` 并在构造函数参数中替换。
+ * 新签名支持透传 `opts.abortSignal` 到 provider.chat，消除 compact 期间的 abort 竞争。
  */
-export type FlushLLMFn = (messages: Message[]) => Promise<string>;
+export type FlushLLMFn = CompactLLMFn;
 
 export interface FlushEngineConfig {
-  callLLM: FlushLLMFn;
+  callLLM: CompactLLMFn;
   store: MemoryStore;
   /** 最少需要多少条消息才值得做 Flush（默认 6） */
   minMessages?: number;
+  /**
+   * 触发 Flush 的预算使用比例下限。默认 0.75（warning 线）。
+   *
+   * 设计目的：Flush 每次执行会调用一次 LLM 做提取，预算很低时无必要。
+   * 只在 context 接近预警或更高时才值得付出提取成本。
+   */
+  minBudgetRatio?: number;
 }
+
+/**
+ * buildExtractionRequest 的尾部截断 turn 数。
+ *
+ * 设计目的：Flush 在 usage 高时被触发，如果把全量 messages 塞给 LLM，
+ * 提取请求自身就可能超过 token 预算，导致静默失败。
+ * 保留首条 user（意图锚）+ 最后 N 个完整 turn + 提取指令，保证请求永远可控。
+ *
+ * 为什么按 turn 数而不是消息数：硬切消息数可能劈开 tool_use/tool_result
+ * 对 —— 那样 Anthropic API 会直接报 `tool_result without matching tool_use`，
+ * 提取请求整个失败，反而比不做截断更糟。按 turn 切（splitMessagesPairAware）
+ * 保证 tool pair 完整。
+ *
+ * 8 turn ≈ 原来的 ~20 条消息（纯对话 2 条/turn，tool 场景 3-4 条/turn 平均）。
+ */
+const EXTRACTION_TAIL_TURNS = 8;
 
 /** LLM 返回的单条提取结果 */
 export interface FlushExtraction {
@@ -95,15 +127,17 @@ export class MemoryFlushStrategy implements CompactionStrategy {
   readonly priority = 3;
   readonly requiresLLM = true;
 
-  private readonly callLLM: FlushLLMFn;
+  private readonly callLLM: CompactLLMFn;
   private readonly store: MemoryStore;
   private readonly minMessages: number;
+  private readonly minBudgetRatio: number;
   private _lastResult: FlushResult | null = null;
 
   constructor(config: FlushEngineConfig) {
     this.callLLM = config.callLLM;
     this.store = config.store;
     this.minMessages = config.minMessages ?? 6;
+    this.minBudgetRatio = config.minBudgetRatio ?? 0.75;
   }
 
   /** 最近一次 flush 的结果（用于 CLI 渲染和测试） */
@@ -112,17 +146,27 @@ export class MemoryFlushStrategy implements CompactionStrategy {
   }
 
   canApply(context: CompactionContext): boolean {
+    // 预算前置：预算未到预警线不值得花一次 LLM 提取
+    if (context.budget.usageRatio < this.minBudgetRatio) return false;
     return context.messages.length >= this.minMessages;
   }
 
   async apply(context: CompactionContext): Promise<CompactionResult> {
-    const { messages } = context;
+    const { messages, abortSignal } = context;
 
     try {
-      const result = await this.flush(messages as Message[]);
+      const result = await this.flush(messages as Message[], { abortSignal });
       this._lastResult = result;
     } catch {
-      this._lastResult = { extracted: 0, saved: 0, errors: ["flush failed"] };
+      // Abort 是用户意图（session.abort / grace timer），不是 Flush 失败。
+      // 不 rethrow（engine/agent-loop 链路没有 try-catch，rethrow 会让
+      // agent-loop 抛未捕获错误），也不污染 _lastResult 的 errors。
+      // agent-loop 下一轮主循环迭代会自行检查 abortSignal.aborted 正常停止。
+      if (abortSignal?.aborted) {
+        // 保持 _lastResult 原值（上次成功的 flush 或 null），便于后续诊断
+      } else {
+        this._lastResult = { extracted: 0, saved: 0, errors: ["flush failed"] };
+      }
     }
 
     // 不修改消息——Flush 只做副作用（持久化），让后续策略继续压缩
@@ -139,9 +183,12 @@ export class MemoryFlushStrategy implements CompactionStrategy {
   /**
    * 从消息中提取记忆并保存。
    */
-  async flush(messages: readonly Message[]): Promise<FlushResult> {
+  async flush(
+    messages: readonly Message[],
+    opts?: { abortSignal?: AbortSignal },
+  ): Promise<FlushResult> {
     const extractionMessages = buildExtractionRequest(messages);
-    const rawResponse = await this.callLLM(extractionMessages);
+    const rawResponse = await this.callLLM(extractionMessages, opts);
     const extractions = parseExtractions(rawResponse);
 
     const errors: string[] = [];
@@ -196,10 +243,33 @@ export class MemoryFlushStrategy implements CompactionStrategy {
 // ─── 辅助函数 ───
 
 /**
- * 构建提取请求：对话历史 + 提取指令作为末尾 user 消息。
+ * 构建提取请求：首条 user（意图锚）+ 最近 EXTRACTION_TAIL_TURNS 个完整 turn + 提取指令。
+ *
+ * 为什么按 turn 数 pair-aware 切分：硬切消息数会劈开 tool_use/tool_result 对，
+ * LLM provider 直接报 API 错 → 提取请求整个失败。按 turn 切保证 tool pair 完整。
+ *
+ * 只有实际 turn 数超过保留阈值时才截断；否则全量发送（小对话无需截断）。
  */
 function buildExtractionRequest(messages: readonly Message[]): Message[] {
-  const conversationMessages = messages.map((m) => ({ ...m }));
+  const conversationMessages: Message[] = [];
+
+  const turns = calculateMessageTurns(messages);
+  const maxTurn = turns[turns.length - 1] ?? 0;
+
+  if (maxTurn > EXTRACTION_TAIL_TURNS) {
+    conversationMessages.push({ ...messages[0]! });
+    const { toPreserve } = splitMessagesPairAware(
+      messages,
+      EXTRACTION_TAIL_TURNS,
+    );
+    for (const m of toPreserve) {
+      conversationMessages.push({ ...m });
+    }
+  } else {
+    for (const m of messages) {
+      conversationMessages.push({ ...m });
+    }
+  }
 
   conversationMessages.push({
     role: "user" as const,

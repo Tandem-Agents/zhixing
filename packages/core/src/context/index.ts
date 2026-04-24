@@ -6,6 +6,7 @@ export type {
   CompactionContext,
   CompactionResult,
   CompactionStrategy,
+  CompactLLMFn,
   ContextBudget,
   ContextManagerHook,
   ContextManagerInput,
@@ -49,6 +50,15 @@ export {
   splitMessagesPairAware,
 } from "./message-turns.js";
 
+export type { SystemMetaKind } from "./system-meta.js";
+export {
+  buildCompactSummaryPair,
+  buildDroppedTurnsMessage,
+  detectSystemMetaKind,
+  stripSummaryPlaceholderPair,
+  SYSTEM_META_PROMPT_SECTION,
+} from "./system-meta.js";
+
 export type { ToolResultTrimConfig } from "./strategies/tool-result-trim.js";
 export {
   ToolResultTrimStrategy,
@@ -67,6 +77,7 @@ export type {
 } from "./strategies/llm-summarize.js";
 export {
   LLMSummarizeStrategy,
+  createLLMSummarizeStrategy,
   createSummarizeFn,
 } from "./strategies/llm-summarize.js";
 
@@ -75,8 +86,6 @@ export {
   MAIN_SESSION_PROMPT,
   SUB_AGENT_PROMPT,
   MERGE_SUMMARIES_PROMPT,
-  buildContinuationMessage,
-  buildManualCompactMessage,
   buildRetryPrompt,
   getSummarizationPrompt,
   wrapCustomInstructions,

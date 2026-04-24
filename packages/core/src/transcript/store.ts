@@ -12,6 +12,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { Message } from "../types/messages.js";
+import { buildCompactSummaryPair } from "../context/system-meta.js";
 import {
   appendRecord,
   countTurns as countTurnsFromFile,
@@ -131,21 +132,10 @@ function rebuildMessages(
   const lastCompact = compacts.length > 0 ? compacts[compacts.length - 1] : null;
 
   if (lastCompact) {
-    messages.push({
-      role: "user",
-      content: [
-        {
-          type: "text",
-          text: `[对话已压缩] 以下是之前对话的摘要：\n\n${lastCompact.summary}`,
-        },
-      ],
-    });
-    messages.push({
-      role: "assistant",
-      content: [
-        { type: "text", text: "已了解之前的对话上下文，请继续。" },
-      ],
-    });
+    // 占位符统一走 system-meta：buildCompactSummaryPair 构造 compact-summary + ack pair
+    const [summaryMsg, ackMsg] = buildCompactSummaryPair(lastCompact.summary);
+    messages.push(summaryMsg);
+    messages.push(ackMsg);
 
     const compactTime = new Date(lastCompact.timestamp).getTime();
     const recentTurns = turns.filter(

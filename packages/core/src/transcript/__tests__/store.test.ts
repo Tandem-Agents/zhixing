@@ -5,6 +5,7 @@ import os from "node:os";
 import type { CompactMarker, Turn } from "../types.js";
 import { TranscriptStore } from "../store.js";
 import { getProjectId } from "../../paths.js";
+import { detectSystemMetaKind } from "../../context/system-meta.js";
 
 // ─── 测试 fixtures ───
 
@@ -159,8 +160,10 @@ describe("TranscriptStore", () => {
       const loaded = await store.load("compact-test");
       expect(loaded.messages).toHaveLength(6);
       expect(loaded.messages[0].role).toBe("user");
+      // 占位符是 system-meta compact-summary（结构化断言）
+      expect(detectSystemMetaKind(loaded.messages[0])).toBe("compact-summary");
+      // summary 内容保留（"核心目标" 来自 makeTurn 生成的 compact summary）
       const firstText = (loaded.messages[0].content[0] as { type: "text"; text: string }).text;
-      expect(firstText).toContain("对话已压缩");
       expect(firstText).toContain("核心目标");
     });
   });

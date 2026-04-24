@@ -11,6 +11,7 @@ import {
 } from "../../types/messages.js";
 import type { CompactionContext, ContextBudget } from "../types.js";
 import { createTokenEstimator } from "../token-estimator.js";
+import { detectSystemMetaKind } from "../system-meta.js";
 
 // ─── 辅助 ───
 
@@ -92,13 +93,9 @@ describe("MessageDropStrategy.apply", () => {
     expect(result.messages[0]!.role).toBe("user");
     expect(result.messages[0]).toBe(messages[0]);
 
-    // 第二条是占位消息
+    // 第二条是 dropped-turns system-meta 占位（结构化断言，不依赖文案）
     const placeholder = result.messages[1]!;
-    expect(placeholder.role).toBe("user");
-    const placeholderText = placeholder.content[0]!;
-    expect(placeholderText.type === "text" && placeholderText.text).toContain(
-      "已省略",
-    );
+    expect(detectSystemMetaKind(placeholder)).toBe("dropped-turns");
 
     // 消息数量应大幅减少
     expect(result.messages.length).toBeLessThan(messages.length);
@@ -164,14 +161,15 @@ describe("MessageDropStrategy.apply", () => {
 
     const result = await strategy.apply(ctx);
     const placeholder = result.messages[1]!;
+
+    // 占位符是 system-meta dropped-turns，且 count 属性反映正确丢弃数
+    expect(detectSystemMetaKind(placeholder)).toBe("dropped-turns");
     const text =
       placeholder.content[0]!.type === "text"
         ? placeholder.content[0]!.text
         : "";
-
-    // 10 轮 - 保留 2 轮 = 丢弃 8 轮
-    expect(text).toContain("8");
-    expect(text).toContain("2");
+    // 10 轮 - 保留 2 轮 = 丢弃 8 轮 → count="8"
+    expect(text).toContain('count="8"');
   });
 
   it("respects custom keepRecentTurns", async () => {

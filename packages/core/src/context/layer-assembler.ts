@@ -18,6 +18,7 @@
  */
 
 import type { ContextProfile, ToolCategory } from "./context-profile.js";
+import { SYSTEM_META_PROMPT_SECTION } from "./system-meta.js";
 import type { TurnDigest } from "./turn-digest.js";
 import { formatDigestTrail } from "./turn-digest.js";
 
@@ -97,7 +98,10 @@ export function assembleLayers(input: LayerAssemblerInput): LayerResult {
 // ─── Layer 0: Static (Identity + Tool Catalog) ───
 
 function buildLayer0(input: LayerAssemblerInput): string {
-  const parts: string[] = [input.identity];
+  // identity + system-meta 标签说明 + 工具目录。system-meta 说明放 Layer 0
+  // 是因为它是"永恒规则"（对话历史中会出现的格式约定），不因场景变化，
+  // 和 identity 同层最合理。
+  const parts: string[] = [input.identity, SYSTEM_META_PROMPT_SECTION];
 
   if (input.tools && input.tools.length > 0) {
     const catalog = buildToolCatalog(

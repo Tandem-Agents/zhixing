@@ -13,6 +13,7 @@ import {
   toolResultMessage,
 } from "../../types/messages.js";
 import type { TierThresholds } from "../context-profile.js";
+import { detectSystemMetaKind } from "../system-meta.js";
 
 // ─── 测试辅助 ───
 
@@ -155,17 +156,11 @@ describe("manageWindow turn eviction", () => {
 
     const result = manageWindow(messages, config);
 
-    const placeholders = result.messages.filter((m) =>
-      m.content.some(
-        (b) =>
-          b.type === "text" &&
-          (b as { text: string }).text.includes("已省略"),
-      ),
+    // 占位符统一走 system-meta dropped-turns 格式（结构化断言，不依赖文案）
+    const placeholders = result.messages.filter(
+      (m) => detectSystemMetaKind(m) === "dropped-turns",
     );
     expect(placeholders.length).toBe(1);
-    expect(
-      (placeholders[0]!.content[0] as { text: string }).text,
-    ).toContain("recall_history");
   });
 
   it("does not evict when under compact threshold", () => {
