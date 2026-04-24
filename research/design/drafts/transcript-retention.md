@@ -1,8 +1,16 @@
-# Transcript 持久化治理（临时执行文档）
+# Transcript 持久化治理（执行过程归档）
 
-> **生命周期**：临时文档，实现完成后删除，关键设计决策合并到 `conversation-model.md` / `session-persistence.md` / `context-architecture.md`。
-> **目标**：一次性修掉 transcript.jsonl 无限增长 + 多个隐蔽 Bug，统一 REPL / server 的 compact 持久化路径。
-> **关键约束**：治理依赖 compact **有真实语义**。经审计，当前 compact 链条本身就是坏的——直接把磁盘清理挂到"compact 事件"上会永久丢数据。因此有一个必须前置的 **M0 修复 compact 链条**，然后才能做 M1-M4 的持久化治理。
+> **文档定位（2026-04-24 更新）**：本文档是 Phase 5 transcript 治理的**执行过程归档**,不作为其他设计文档的引用源。
+> - **权威 spec（single source of truth）已更新,请以这些文档为准**：
+>   - [conversation-model.md §9.5 + ADR-CM-015 + ADR-CM-017](../specifications/conversation-model.md)——commitTurn 原子截断、接口契约
+>   - [session-persistence.md §2.3 + §4.5 + §5](../specifications/session-persistence.md)——文件不变量、TranscriptStore 接口、写入实现
+>   - [context-architecture.md §8.5](../specifications/context-architecture.md)——compact_end 事务化事件、turnsCompacted 精确计算
+> - **保留本文档的价值**：详细的问题审计（§0.1 完整链条审计 / §0.2 25 个 P0 问题分级）、5 阶段执行顺序、ADR-TR-1 到 TR-9 的推导过程、§4 接口变更清单的历史记录。这些属于"工程过程知识",精简合并会丢失,保留作未来重访参考。
+> - **不要双写**：新的设计决策（如 Phase 6+ 演进）应该写入权威 spec,不要再编辑本文档；本文档作为**冻结归档**保留。
+>
+> **原始目标**：一次性修掉 transcript.jsonl 无限增长 + 多个隐蔽 Bug，统一 REPL / server 的 compact 持久化路径。
+> **实施结果**：Phase 1-5 + Bug A/B 全部完成,三包 2456 tests 全绿；core + server dist 重建。权威 spec 已同步。
+> **关键约束（历史背景）**：治理依赖 compact **有真实语义**。经审计，当时 compact 链条本身就是坏的——直接把磁盘清理挂到"compact 事件"上会永久丢数据。因此前置了 **M0 修复 compact 链条**（Phase 1-4），然后才做 M1-M5 的持久化治理（Phase 5）。
 
 ---
 

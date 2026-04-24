@@ -550,9 +550,52 @@ Turn 35: 极端长对话
 
 | 事件 | 触发时机 |
 |------|---------|
-| `context:budget_check` | 每次 Turn 预算检查 |
-| `context:compact_start/end` | 策略执行前后 |
+| `context:budget_check` | 每次 Turn 预算检查（phase: pre-compact / post-compact） |
+| `context:compact_start` | compact 事务开始 |
+| `context:compact_end` | compact 事务结束（事务化 payload,见下） |
 | `context:calibrate` | 估算器校准 |
+
+#### compact_end 事务化 payload（Phase 4 治理）
+
+一次 compact 等于**一次事务**：`engine.onTurnComplete` 按 priority 依次调 strategies,收集所有 contribution,事务结束 fire **唯一一次** `compact_end`。消费者（run-agent 的 `subscribeCompactAccumulator`）拿到汇总字段：
+
+```typescript
+interface CompactEndPayload {
+  strategies: StrategyContribution[];   // 本事务内所有贡献的策略列表(name / phase / turnsCompacted? / summary?)
+  summary?: string;                      // 汇总 summary = contributions 中最后一个非空 summary
+  turnsCompacted?: number;               // 汇总替代的文件 Turn 数 = Σ(contributions.turnsCompacted)
+  tokensBefore: number;                  // 事务起点 token 数
+  tokensAfter: number;                   // 事务终点 token 数
+}
+```
+
+**turnsCompacted 精确计算**（`llm-summarize.ts` 内部）：
+
+```typescript
+const turnMessages = stripSummaryPlaceholderPair(toSummarize);  // 去掉前次 compact 的 summary pair
+const turnNumbers  = calculateMessageTurns(turnMessages);        // 按 user 边界算每条消息的 turn 号
+const turnsCompacted = turnNumbers[turnNumbers.length - 1] ?? 0; // 最大 turn 号 = 本次替代的文件 Turn 数
+```
+
+`stripSummaryPlaceholderPair` 是关键 —— 保证多次 compact 时老 summary pair 不被重复计算（否则累加会 over-truncate 磁盘 turns）。
+
+#### run-agent 的 L1 累积（compact-accumulator）
+
+一个 run 内可能有多个 compact 触发点（pre-flight / agent-loop 内 / pure-text return / critical force-apply）,每次 fire `compact_end`。`subscribeCompactAccumulator` 在 run 级 eventBus 上累积：
+
+```typescript
+// 规则
+//   - 只累积含 summary 的事件(非摘要型事务不替代文件 Turn)
+//   - turnsCompacted 累加(Σ contributions)
+//   - summary 取最新(后一次 LLM 摘要天然包含前一次,因为 toSummarize 含前次 pair)
+//   - tokensBefore 锚定首次(事务起点)
+//   - tokensAfter 取最新
+//   - timestamp 取最新
+```
+
+返回 `{getMarker(), dispose()}` —— `getMarker()` 返回 `CompactMarker | undefined`,`dispose()` 移除 bus 订阅。run-agent 从 `RunResult.compactBefore` 向外透传,最终由 `TranscriptStore.commitTurn` 写入磁盘。
+
+> **类型演进**：老 `CompactInfo` 中间类型已废弃；accumulator 直接产出 `CompactMarker`（core 的权威类型,见 [session-persistence.md §2.3](./session-persistence.md) Compact 标记行）。单一事实源（Phase 5 §0.7.1）。
 
 ---
 

@@ -339,7 +339,17 @@ interface SessionRuntime {
   observers: Set<ConnectionId>;
 
   // 方法
-  run(text: string, source: TurnSource): AsyncGenerator<AgentYield, AgentResult>;
+  /**
+   * 运行一轮 turn。AsyncGenerator 流式 yield 事件,最终 return `RunResult`
+   * (含 `turn` / `compactBefore?` / `newMessages` + 诊断字段)——调用方据此走
+   * 原子 commitTurn 落盘(见 §12.3 commitTurn 单一事实源)。
+   */
+  run(text: string, source: TurnSource): AsyncGenerator<AgentYield, RunResult>;
+  /**
+   * 用 canonical messages 覆盖内部 state。配合 TranscriptStore.commitTurn
+   * 的返回值使用,保证内存与磁盘严格一致(单向数据流,见 §12.3)。
+   */
+  updateMessages(canonical: Message[]): void;
   abort(): void;
   dispose(): void;
 }
@@ -833,14 +843,10 @@ T=3600s 钉钉来新消息
 ├─ conversations/                              ← 用户作用域(server 默认)
 │   ├─ default/
 │   │   ├─ meta.json                           ← Conversation 元数据(name, archived, ...)
-│   │   ├─ transcript.jsonl                    ← 活跃段（header + 最近 compact + 后续 turns）
-│   │   └─ archive/                            ← 归档段（不可变，段轮转产生）
-│   │       ├─ segment-1713400000.jsonl
-│   │       └─ segment-1713500000.jsonl
+│   │   └─ transcript.jsonl                    ← 内容日志（header + [compact?] + post-compact turns）
 │   └─ work/
 │       ├─ meta.json
-│       ├─ transcript.jsonl
-│       └─ archive/...
+│       └─ transcript.jsonl
 │
 ├─ projects/                                   ← 项目作用域(standalone CLI 默认)
 │   └─ <projectId-12hex>/
@@ -852,6 +858,8 @@ T=3600s 钉钉来新消息
 └─ trash/                                       ← 删除的对话(7 天后清理)
     └─ <convId>-<timestamp>/
 ```
+
+> **不变量**：transcript.jsonl 始终满足 `header + [compact?] + post-compact turns` —— 至多 1 个 compact 行紧跟 header；compact 之前的 turns 在 `commitTurn({compactBefore})` 时被原子截断（非归档）。详见 §9.5 / ADR-CM-017。
 
 ### 9.2 JSONL 行格式(继承不变)
 
@@ -896,101 +904,124 @@ Standalone CLI 默认 project 作用域,但不是所有 cwd 都适合当 "projec
 
 理由：用户在 `~` 或 `/tmp` 运行 `zhixing` 时,预期是"跟知行随便聊聊",而不是"在这个目录创建一个项目对话"。如果按 cwd 强行创建项目,同一用户从不同终端 cd 到 `~` 后各自得到不同 projectId（因为 terminal cwd 可能是 `~` 或 `/Users/sunhj`），产生意外的对话隔离。
 
-### 9.5 段轮转（Segment Rotation）
+### 9.5 Compact 原子截断（commitTurn 单一入口）
 
 #### 问题
 
-`transcript.jsonl` 是 append-only 文件，每轮 Turn 追加一行。主对话场景下（一个长期使用的对话），文件无限膨胀：
+`transcript.jsonl` 每轮 Turn 追加一行，无限膨胀场景下：
 
 - 500 轮 ≈ 5-25MB，2000 轮 ≈ 20-100MB
-- `load()` 读取并解析整个文件，但 `rebuildMessages()` 只使用最后一个 compact 标记之后的 turns
-- compact 之前的 turns 在文件中是死重——每次 load 都要读但不用
-- 核心瓶颈不是磁盘空间，而是 **load 性能**（对话恢复延迟）
+- `load()` 每次全量读取，`rebuildCanonicalMessages()` 却只使用最后一个 compact 标记之后的 turns
+- compact 之前的 turns 在文件里是**死重** —— 每次 load 都读但不用
+- 根因还包括两个隐蔽 bug：server 路径从不写 compact marker；REPL compact 的 timestamp 晚于当轮 turn 导致 normalize 丢 turn
 
-#### 设计：Compact 触发段轮转
+#### 设计：commitTurn 单一原子入口
 
-Compact 标记的语义是"这个点之前的内容已经摘要化"。利用这个天然边界做段轮转：
+用一个原子写入 API **替代** 老 `appendTurn` / `appendCompact` 的分步写入，同时根治"磁盘无限增长"+"server 不写 compact"+"timestamp 反序"三个问题。
 
-**触发时机：** `appendCompact()` 写入 compact 标记时，自动执行轮转。
-
-**轮转过程：**
-
-```
-1. mkdir archive/ (幂等)
-2. 写 transcript.jsonl.new ← header(含 archivedTurnCount) + compact 标记
-3. rename transcript.jsonl → archive/segment-{epoch}.jsonl
-4. rename transcript.jsonl.new → transcript.jsonl
-```
-
-**轮转前后对比：**
-
-```
-轮转前 transcript.jsonl:          轮转后:
-┌─────────────────────┐           transcript.jsonl (活跃段):
-│ header              │           ┌─────────────────────┐
-│ turn 0              │           │ header (archivedTurnCount=50) │
-│ turn 1              │           │ compact (summary)   │
-│ ...                 │           │ turn 50             │
-│ turn 49             │           │ turn 51             │
-│ compact (summary)   │           │ ...                 │
-│ turn 50             │           └─────────────────────┘
-│ turn 51             │
-│ ...                 │           archive/segment-1713400000.jsonl (归档段):
-└─────────────────────┘           ┌─────────────────────┐
-                                  │ header              │
-                                  │ turn 0 ... turn 49  │
-                                  │ compact (summary)   │
-                                  └─────────────────────┘
-```
-
-**效果：**
-
-| 操作 | 轮转前 | 轮转后 |
-|------|--------|--------|
-| `load()` | 读全量文件（可能 50MB） | 只读活跃段（通常 < 1MB） |
-| `countTurns()` | 解析全量文件 | `archivedTurnCount` + 活跃段 turn 数 |
-| 历史审计/导出 | 同一文件 | 遍历 archive/ 目录 |
-| 崩溃影响 | 最多丢最后一行 | 同上，归档段不可变 |
-
-#### Header 扩展
+**ITranscriptStore.commitTurn** —— 三种载荷形态：
 
 ```typescript
-interface TranscriptHeader {
-  // ... 既有字段 ...
-  /** 所有归档段的累计 turn 总数。轮转时计算：旧 archivedTurnCount + 本段 turn 数 */
-  archivedTurnCount?: number;  // 新增，v1 兼容（undefined 视为 0）
+interface ITranscriptStore {
+  /**
+   * 原子提交 turn / compact / 两者。返回 canonical messages(供 caller 回喂 SessionRuntime.updateMessages,实现单一事实源)
+   *
+   * {turn}                       → append 新 turn (fs.appendFile,文件级原子)
+   * {turn, compactBefore}        → 原子重写:按 turnsCompacted 切分现有 turns 保留末尾,
+   *                                写 [header, compactBefore, ...retained, newTurn] (writeAtomic)
+   * {compactBefore}              → 原子重写无新 turn(REPL /compact 手动命令)
+   */
+  commitTurn(
+    conversationId: string,
+    payload: { turn?: Turn; compactBefore?: CompactMarker },
+  ): Promise<Message[]>;
+
+  // 其余 init / load / countTurns / exists 不变
 }
 ```
 
-`countTurns()` 实现：`(header.archivedTurnCount ?? 0) + 活跃段 turn 行数` = 对话总轮数。  
-无需读 meta.json、无需遍历 archive/，一次读活跃段即可。
+**keepCount 切分算法**：
+
+```
+retained_count = max(0, turns.length - compactBefore.turnsCompacted)
+retained       = turns.slice(-retained_count)
+new_content    = [header, compactBefore, ...retained, newTurn?]
+```
+
+`turnsCompacted` 是 `compact_end` 事件的精确字段 —— 本次 compact 事务替代的文件 Turn 数(见 [context-architecture.md](./context-architecture.md))。
+
+**原子重写** —— `writeAtomic` 三步：
+
+```
+1. 写 tmp 文件 (<file>.{pid}-{ts}-{rand}.tmp)
+2. rename(tmp, file) (POSIX 原子覆盖) / unlink old + rename (Windows fallback)
+3. 崩溃留下 orphan tmp 由 cleanupOrphanTmp 在下次触碰文件时静默清理
+```
+
+**文件不变量**(ADR-CM-017 新版 / ADR-TR-1..TR-9)：
+
+```
+transcript.jsonl 永远满足:
+  header
+  [compact?]           ← 至多 1 个 compact 行,紧跟 header
+  turn_0, turn_1, ...  ← post-compact turns,按提交顺序
+
+compact 之前的 turns 不在文件中(被 commitTurn 的 keepCount 切分原子删除)
+```
+
+**演进对比**：
+
+| 操作 | 老方案(append + 段轮转) | 新方案(commitTurn 原子截断) |
+|------|------------------------|---------------------------|
+| 磁盘老 turn 清理 | 段轮转到 archive/ | 原子 rewrite 直接删除 |
+| 归档段 | `archive/segment-*.jsonl` | 不保留(ADR-TR-4/TR-9 archiveOnCompact=false) |
+| compact 写入 | `appendCompact` + 段轮转 | `commitTurn({compactBefore})` 一次原子重写 |
+| server 持久化 | `persistTurn(turn)` + `persistCompact` 分步 | `commitTurn({turn, compactBefore?})` 原子 |
+| 并发保护 | 无 | **per-id 串行锁**(ADR-TR-8) |
+
+**lazy normalize 老文件**(ADR-TR-5)：遇到多 compact 或 timestamp 反序的老格式文件时,首次 load 同步归一化重写为新不变量形态,归一化后返回给调用方的 `LoadedTranscript` 和磁盘一致。
+
+**单向数据流**(ADR-TR-7)：
+
+```
+run-agent 闭包订阅 compact_end → 组装 CompactMarker (accumulator L1)
+  ↓
+RunResult { turn, compactBefore? }
+  ↓
+ConversationManager.recordTurn → TranscriptStore.commitTurn
+  ↓
+canonical Message[] 返回 → session.runtime.updateMessages(canonical)
+  ↓
+adapter.messages 与磁盘严格一致
+```
+
+#### 接口影响
+
+`ITranscriptStore` 接口重塑(向后兼容保留薄别名)：
+
+- `commitTurn(id, payload)` — 新增,唯一原子写入入口
+- `appendTurn(id, turn)` — 委托给 `commitTurn({turn})`,保留作 legacy 薄别名
+- `appendCompact(id, compact)` — 委托给 `commitTurn({compactBefore})`,保留
+- `load()` / `countTurns()` / `exists()` — 不变；load 内部走 lazy normalize
+
+`SessionRuntime` 扩展：
+
+- `run()` return 类型 `AgentResult` → `RunResult` (见 §4.1)
+- 新增 `updateMessages(canonical)` — caller 拿 commitTurn 返回值回喂
+
+`ConversationManager.recordTurn(id, turn, compactBefore?)` 签名扩展：
+
+- ephemeral 分支:按 turnsCompacted 切 pendingTurns,覆盖 pendingCompact
+- persistent 分支:调 `commitTurn` 回调 → 拿 canonical → `runtime.updateMessages(canonical)`
 
 #### 崩溃安全
 
 | 崩溃时机 | 磁盘状态 | 恢复策略 |
 |---------|---------|---------|
-| 步骤 2 后、3 前 | 旧 transcript.jsonl + .new 并存 | 删 .new（轮转未开始） |
-| 步骤 3 后、4 前 | 活跃段缺失，.new 存在 | rename .new → transcript.jsonl（完成轮转） |
-| 步骤 4 后 | 正常 | 无需恢复 |
-
-`load()` 开头加恢复检查：检测 `.new` 文件是否存在，据情况完成或回滚。
-
-#### 接口不变性
-
-段轮转是 TranscriptStore 的**内部优化**，`ITranscriptStore` 接口完全不变：
-
-- `appendCompact()` — 签名不变，内部新增轮转逻辑
-- `load()` — 签名和返回类型不变，只是更快（只读活跃段）
-- `countTurns()` — 签名不变，使用 `archivedTurnCount` 加速
-- 其余方法不受影响
-
-未来按需新增 `loadFullHistory()` 用于导出/搜索（遍历 archive/ + 活跃段），当前不实现。
-
-#### 归档段性质
-
-- **不可变（immutable）**：写完即不再修改，天然无并发问题
-- **可清理**：未来可按策略清理过老的归档段（如保留最近 N 段），当前不做
-- **可压缩**：未来可对归档段做 gzip 压缩减少磁盘占用，当前不做
+| writeAtomic 写 tmp 后崩溃 | 原文件不变,tmp 留存 | 下次触碰文件时 `cleanupOrphanTmp` 静默删除 |
+| POSIX rename 期间崩溃 | 原子语义保证:旧或新,不可能半 | 无需恢复 |
+| Windows unlink → rename 之间崩溃 | 文件短暂不存在 | 重启后文件仍缺,需用户重建(罕见,概率 < 1ppm) |
+| append fs.appendFile 崩溃 | 最多丢最后一行(JSONL 行级独立) | load 跳过损坏行 |
 
 ---
 
@@ -1144,12 +1175,28 @@ interface ConversationRepository {
   touch(id: string): Promise<void>;          // 更新 lastActiveAt — Turn 完成后调用
 }
 
-/** core 包：Transcript 内容的 append-only 日志 (transcript.jsonl) */
+/** core 包：Transcript 内容的原子日志 (transcript.jsonl) */
 interface TranscriptStore {
   init(conversationId: string, opts: { model: string; provider: string }): Promise<void>;
+
+  /**
+   * 唯一原子写入入口,返回 canonical messages(供 ConversationManager 回喂 SessionRuntime.updateMessages)。
+   * - {turn}                 → append 新 turn(fs.appendFile 文件级原子)
+   * - {turn, compactBefore}  → 原子重写:按 turnsCompacted 切分保留末尾,加新 turn
+   * - {compactBefore}        → 原子重写:按 turnsCompacted 切分,不加 turn(REPL /compact)
+   * 同 conversationId 的调用 per-id 串行(ADR-TR-8)。
+   */
+  commitTurn(
+    conversationId: string,
+    payload: { turn?: Turn; compactBefore?: CompactMarker },
+  ): Promise<Message[]>;
+
+  /** legacy 薄别名:委托给 commitTurn({turn}) */
   appendTurn(conversationId: string, turn: Turn): Promise<void>;
-  appendCompact(conversationId: string, compact: CompactMarker): Promise<void>;
-  load(conversationId: string): Promise<LoadedTranscript>;
+  /** legacy 薄别名:委托给 commitTurn({compactBefore}),返回 canonical */
+  appendCompact(conversationId: string, compact: CompactMarker): Promise<Message[]>;
+
+  load(conversationId: string): Promise<LoadedTranscript>;   // 首次加载老文件时 lazy normalize(ADR-TR-5)
   countTurns(conversationId: string): Promise<number>;
   exists(conversationId: string): Promise<boolean>;
   // 注意：没有 list / rename / delete / findLatest — 这些是身份操作,属于 ConversationRepository
@@ -1509,7 +1556,7 @@ packages/cli/src/migrate/
 - 用户对话是资产,磁盘数据保真不可靠压缩改写
 - append-only 文件易于备份、易于审计、并发安全(无锁追加)
 
-**修订（2026-04-17）：** 原 ADR 中的"永不删除"含义过强——转为"append-only + 可归档/清理"（归档不删除 ≠ 永不处理）。具体归档策略见 [context-architecture.md](./context-architecture.md) §十四。段轮转机制见 §9.5 + ADR-CM-017。
+**修订（2026-04-17）：** 原 ADR 中的"永不删除"含义过强——转为"原子事务日志 + compact 触发原子截断"。具体归档策略见 [context-architecture.md](./context-architecture.md) §十四。磁盘治理机制见 §9.5 + ADR-CM-017（commitTurn 原子截断,至多 1 个 compact 行,无归档段）。
 
 ---
 
@@ -1545,18 +1592,23 @@ packages/cli/src/migrate/
 | 组件 | 包 | 职责 | 数据 |
 |------|------|------|------|
 | ConversationRepository | core | 对话身份 CRUD（list / get / create / rename / archive / delete / touch / findLatest） | meta.json |
-| TranscriptStore | core | 对话内容 append-only 日志（init / appendTurn / appendCompact / load / countTurns / exists） | transcript.jsonl |
-| ConversationManager | server | 运行时生命周期（acquire / release / observer / history） | 内存 SessionRuntime |
+| TranscriptStore | core | 对话内容原子日志（init / **commitTurn** / load / countTurns / exists；appendTurn / appendCompact 为 legacy 薄别名） | transcript.jsonl |
+| ConversationManager | server | 运行时生命周期（acquire / release / observer / **recordTurn** / promote） | 内存 SessionRuntime |
 
 **核心约束**：
 - TranscriptStore **不做身份操作**：没有 list / rename / delete / findLatest。回答"对话是什么"的问题由 Repository 负责
+- TranscriptStore **单一原子入口**：`commitTurn(id, {turn?, compactBefore?})` 是唯一写入路径,支持 append / 原子重写 / 纯 compact 三种载荷形态（见 §9.5 + ADR-CM-017）
+- TranscriptStore **per-id 串行锁**：同一 conversationId 的读/写串行执行,跨 id 并发（ADR-TR-8）
 - ConversationRepository **不读内容**：没有 history / load。回答"对话说了什么"的问题由 TranscriptStore（或 Manager 代理）负责
+- ConversationManager.recordTurn **单向数据流**：persistent 分支调 commitTurn 拿 canonical → 立即 `session.runtime.updateMessages(canonical)` 回喂,adapter 与磁盘严格一致（ADR-TR-7）
+- ConversationManager **配置守卫**：有持久化意图（loadHistory 或 initTranscript）必须提供 commitTurn 回调,否则构造时 fail-fast throw；persistent 分支运行时 assert 作 defense-in-depth
 - Repository 和 TranscriptStore 互不依赖,由调用方（CLI / Manager）协调
 
 **理由**：
 - Standalone CLI 需要持久化能力但不需要 observer 管理——如果 Repository 在 server 包里,CLI 要么依赖 server 包（依赖反转）要么复制代码（维护负担）
 - 分层后 CLI 只依赖 core,server 依赖 core + 自身,包依赖图干净
-- TranscriptStore 是 log 系统（ADR-CM-012 append-only）,不是 CRUD 系统。将查询/命名/生命周期操作混入日志系统会产生职责模糊和数据 drift（name 在 meta.json 和 JSONL 各存一份）
+- TranscriptStore 是**原子日志**系统,不是 CRUD 系统。commitTurn 单一入口消除分步写（appendTurn + appendCompact）产生的 race 和 timestamp 反序问题
+- 将查询/命名/生命周期操作混入日志系统会产生职责模糊和数据 drift（name 在 meta.json 和 JSONL 各存一份）
 - 两个 core 组件共享路径基础设施（`getZhixingHome` / `getProjectId`）但不互相依赖,支持未来独立替换存储后端
 
 ---
@@ -1572,18 +1624,30 @@ packages/cli/src/migrate/
 
 ---
 
-### ADR-CM-017：Transcript 段轮转（Compact 触发）
+### ADR-CM-017：Transcript Compact 原子截断（commitTurn 单一入口）
 
-**决策**：`appendCompact()` 写入 compact 标记时，自动将当前 `transcript.jsonl` 轮转为归档段（`archive/segment-{epoch}.jsonl`），新建活跃段仅含 header + compact 标记。
+**决策**：用 `commitTurn(id, {turn?, compactBefore?})` **原子重写** 作为 compact 触发时的磁盘操作,不保留归档段。文件不变量永远满足 `header + [compact?] + post-compact turns`（至多 1 个 compact 行紧跟 header）。
+
+**与老版本（v1：段轮转 archive/）对比**：
+
+| 维度 | v1（段轮转） | v2（原子截断） |
+|------|-------------|---------------|
+| compact 时的磁盘操作 | 写新文件 + rename 到 archive/segment-*.jsonl | `writeAtomic` 直接重写 `transcript.jsonl` |
+| compact 前 turns | 保留在归档段 | 原子删除（ADR-TR-4/TR-9 `archiveOnCompact=false`） |
+| 文件组织 | 活跃段 + `archive/` 目录 | 单个 `transcript.jsonl` |
+| 接口 | `appendCompact()` 内部轮转 | `commitTurn({turn?, compactBefore})` 一次原子写入 |
+| 跨进程并发 | 未定义 | per-id 串行锁（ADR-TR-8） |
 
 **理由**：
-- 主对话场景下 transcript.jsonl 无限膨胀，`load()` 每次全量读取是不可接受的性能退化
-- Compact 标记是天然的轮转边界——其语义就是"此前的内容已摘要化"，轮转后活跃段只保留摘要+后续 turns
-- 归档段不可变（immutable），天然安全、易备份、可压缩
-- `ITranscriptStore` 接口完全不变——轮转是纯内部优化，调用方无感知
-- `TranscriptHeader` 新增可选 `archivedTurnCount` 字段，与 v1 格式向后兼容（undefined 视为 0）
+- **v1 段轮转的坏味道**：归档段不读不写就是"数据墓地"——存储成本正比于对话年龄,永不衰减。如果用户从不导出/回看,段轮转就是把磁盘增长从单文件挪到多文件,问题未解决
+- **原子截断的干净性**：Phase 5 审计发现 compact 本身的语义就是"此前内容已被 summary 替代,不再需要"——既然如此,磁盘上保留老 turn 纯属冗余。归档需求由用户主动触发（未来 `archiveOnCompact` 可选开关,默认关闭）,不强制所有会话都付存储代价
+- **根治三个隐蔽 bug**：§1.1（磁盘无限增长）、§1.2（server 从不写 compact marker）、§1.3（REPL compact 分两步写 timestamp 反序）—— 单原子入口让三个 bug 从架构层面消失
+- **接口重塑而非内部优化**：`commitTurn` 替代 `appendTurn + appendCompact` 的分步写入,caller 代码更简洁,失败模式更可预测
+- **单向数据流契约化**：commitTurn 返回 canonical messages,配合 `SessionRuntime.updateMessages` 实现"内存 ↔ 磁盘严格一致",消灭 Phase 5 前的三方状态 drift
 
-**与 ADR-CM-012 的关系**：append-only 原则不变——活跃段仍然是追加写入。轮转不修改或删除任何已有行，而是将整个文件移入归档。ADR-CM-012 修订注记中的"可归档/清理"在此落地。
+**与 ADR-CM-012 的关系**：JSONL 日志语义不变——每次 commitTurn 是一次原子事务,中间无观察窗口；崩溃留下的 tmp 文件由 `cleanupOrphanTmp` 静默清理。append-only 演进为"原子事务 + 至多 1 次 compact 截断"（ADR-CM-012 修订注"append-only + 可归档/清理"在此落地,归档开关默认关闭）。
+
+**源设计文档**：`research/design/drafts/transcript-retention.md`（ADR-TR-1 至 TR-9 + §4 接口清单）。
 
 ---
 

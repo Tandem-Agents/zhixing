@@ -9,7 +9,9 @@
 > - 旧 `SessionHeader.sessionId` → 新 `Transcript.conversationId`
 > - 路径调整与作用域见 [conversation-model.md §6](./conversation-model.md)
 >
-> 阅读顺序：先看 [conversation-model.md](./conversation-model.md) 理解概念分层,再看本文档了解持久化细节。
+> ⚠️ **写入模型升级（Phase 5 治理）**：老 `appendTurn + appendCompact` 分步写入因多个隐蔽 bug 被 `commitTurn(id, {turn?, compactBefore?})` **原子单入口** 替代。文件新不变量 `header + [compact?] + post-compact turns`（至多 1 个 compact,紧跟 header）。详见 [conversation-model.md §9.5 + ADR-CM-017](./conversation-model.md)。本文档 §4.5 / §5 已同步更新接口签名；§2.3 行格式描述保留（Compact 行字段完全兼容）。
+>
+> 阅读顺序：先看 [conversation-model.md](./conversation-model.md) 理解概念分层 + commitTurn 原子语义,再看本文档了解持久化细节。
 
 ## 一、竞品方案对比
 
@@ -164,10 +166,32 @@ function generateSessionId(): string {
 }
 ```
 
+**字段语义**（`turnsCompacted` 的精确计算见 [context-architecture.md](./context-architecture.md) §compact_end 事件）：
+- `turnsCompacted` —— 本次 compact 事务替代的**文件 Turn 数**。`commitTurn({turn, compactBefore})` 按此值 `slice(-keepCount)` 保留末尾 turns
+- `summary` —— LLM 生成的摘要文本,含前次 summary 语义（compact 多次时新 summary 天然嵌套包含老 summary,见 Phase 4 L1 累积）
+- `tokensBefore` / `tokensAfter` —— 事务起止 token 数,用于诊断/UI 预算显示
+
 压缩后的新 turn 在 compact 标记之后继续追加。恢复时：
 1. 从后向前找最近的 `compact` 行
-2. 用 `summary` 作为上下文前缀
+2. 用 `summary` 作为上下文前缀（包装为 `<system-meta>` 占位符 pair）
 3. 加载 compact 之后的所有 turn
+
+#### 文件不变量（Phase 5 治理）
+
+`transcript.jsonl` 永远满足:
+
+```
+header                           ← 首行,创建时写入,不可变
+[compact?]                       ← 可选,至多 1 行,紧跟 header
+turn_0, turn_1, ..., turn_N      ← post-compact turns,按提交顺序
+```
+
+**性质**：
+- **至多 1 个 compact**：老版本允许多个 compact 行,现在 `commitTurn({compactBefore})` 原子重写会清掉老 compact,只留最新 summary
+- **compact 之前无 turn**：老 turn 被切分丢弃（archive 默认关闭,ADR-TR-4/TR-9）
+- **append 与 rewrite 共存**：`commitTurn({turn})` 走 `fs.appendFile` 保持高效；`commitTurn({..., compactBefore})` 走 `writeAtomic`（tmp+rename）
+- **lazy normalize**：读到老格式（多 compact / timestamp 反序）时首次 load 同步归一化重写（ADR-TR-5）
+- **per-id 串行锁**：同 conversationId 读写串行,跨 id 并发（ADR-TR-8）
 
 ### 2.4 无独立索引文件
 
@@ -313,75 +337,88 @@ interface SessionCompact {
 type SessionRecord = SessionHeader | SessionTurn | SessionCompact;
 ```
 
-### 4.5 SessionStore 接口
+### 4.5 TranscriptStore 接口
+
+> **演进**：老 `SessionStore` 合并身份 CRUD + 内容日志。Phase 5 升级后拆分为 **ConversationRepository**（身份） + **TranscriptStore**（内容日志,单一原子入口）。此处只列 TranscriptStore；身份侧 API 见 [conversation-model.md §12](./conversation-model.md)。
 
 ```typescript
-interface SessionStore {
-  /** 保存一轮对话（追加到 JSONL） */
-  appendTurn(sessionId: string, turn: SessionTurn): Promise<void>;
+interface TranscriptStore {
+  /** 初始化 transcript.jsonl（原子写入 header 首行） */
+  init(conversationId: string, opts: { model: string; provider: string }): Promise<void>;
 
-  /** 记录压缩事件 */
-  appendCompact(sessionId: string, compact: SessionCompact): Promise<void>;
+  /**
+   * 唯一原子写入入口。返回 canonical messages（供 ConversationManager 回喂
+   * SessionRuntime.updateMessages 实现单向数据流,见 ADR-TR-7）。
+   *
+   * - {turn}                 → append 新 turn(fs.appendFile 文件级原子)
+   * - {turn, compactBefore}  → 原子重写:按 turnsCompacted 切分保留末尾,加新 turn
+   * - {compactBefore}        → 原子重写:按 turnsCompacted 切分,不加 turn(REPL /compact)
+   *
+   * 同 conversationId 的调用 per-id 串行(ADR-TR-8)。
+   */
+  commitTurn(
+    conversationId: string,
+    payload: { turn?: Turn; compactBefore?: CompactMarker },
+  ): Promise<Message[]>;
 
-  /** 加载会话（从 JSONL 重建） */
-  load(sessionId: string): Promise<{
-    header: SessionHeader;
-    messages: Message[];
+  /** legacy 薄别名 —— 内部委托给 commitTurn */
+  appendTurn(conversationId: string, turn: Turn): Promise<void>;
+  appendCompact(conversationId: string, compact: CompactMarker): Promise<Message[]>;
+
+  /** 加载会话（首次加载老文件触发 lazy normalize,见 ADR-TR-5） */
+  load(conversationId: string): Promise<{
+    header: TranscriptHeader;
+    messages: Message[];          // canonical = [summaryPair?, ...post-compact turns 展开]
     turnCount: number;
   }>;
 
-  /** 列出当前项目的所有会话 */
-  list(): Promise<SessionInfo[]>;
-
-  /** 创建新会话 */
-  create(options: {
-    name?: string;
-    model: string;
-    provider: string;
-  }): Promise<SessionHeader>;
-
-  /** 更新会话名称 */
-  rename(sessionId: string, name: string): Promise<void>;
-
-  /** 删除会话 */
-  delete(sessionId: string): Promise<void>;
+  countTurns(conversationId: string): Promise<number>;   // 走 per-id 锁,反映 commitTurn 完整提交状态
+  exists(conversationId: string): Promise<boolean>;
+  // 注意：身份操作 (list / rename / delete / findLatest) 在 ConversationRepository
 }
 ```
 
 ## 五、写入策略
 
-### 5.1 Turn-complete 时追加
+### 5.1 run 结束时 commitTurn（Phase 5 单向数据流）
 
 ```typescript
-// 在 run-agent 的消费循环中
-case 'turn_complete':
-  if (sessionStore && currentTurn) {
-    await sessionStore.appendTurn(sessionId, {
-      type: 'turn',
-      turnIndex: turnCounter++,
-      timestamp: new Date().toISOString(),
-      userMessage: currentTurn.userMessage,
-      assistantMessage: currentTurn.assistantMessage,
-      toolCalls: currentTurn.toolCalls,
-      usage: currentTurn.usage,
-    });
-  }
-  break;
+// agent run 结束,RunResult 携带 turn + compactBefore(可选)
+const runResult = await agentRuntime.run({ ... });
+
+// ConversationManager.recordTurn 内部调用 TranscriptStore.commitTurn:
+//   persistent 分支:
+//     canonical = await store.commitTurn(conversationId, {
+//       turn: runResult.turn,
+//       compactBefore: runResult.compactBefore,   // 可选,pre-flight / agent-loop compact 累积
+//     });
+//     session.runtime.updateMessages(canonical);   // 回喂 adapter,内存与磁盘一致
+//   ephemeral 分支:
+//     按 turnsCompacted 切分 pendingTurns,覆盖 pendingCompact;promote 时统一 flush
 ```
+
+**Turn 构造** —— 由 core 的纯函数 `buildTurn({turnIndex, userMessage, newMessages, agentResult, timestamp?})` 组装；timestamp 通过 `resolveTurnTimestamp(compactBefore)` 协调以保证严格 `turn.timestamp > compact.timestamp + 1ms`（消灭 normalize 路径"同毫秒误判"）。
 
 ### 5.2 写入实现
 
+两条路径按 payload 形态分叉：
+
 ```typescript
-async function appendToJSONL(
-  filePath: string,
-  record: SessionRecord,
-): Promise<void> {
-  const line = JSON.stringify(record) + '\n';
-  await fs.appendFile(filePath, line, 'utf-8');
-}
+// 路径 A:{turn}  → append(90% 场景,高效)
+await fs.appendFile(file, JSON.stringify(turn) + '\n', 'utf-8');
+
+// 路径 B:{turn, compactBefore} 或 {compactBefore} → writeAtomic(原子重写)
+const retained = turns.slice(-Math.max(0, turns.length - compactBefore.turnsCompacted));
+const content  = serialize([header, compactBefore, ...retained, newTurn?]);
+await writeAtomic(file, content);  // tmp+rename(POSIX)或 unlink+rename(Windows fallback)
 ```
 
-**不做 fsync**：追加模式在正常退出时由 OS flush。异常退出最多丢失最后一轮——可接受的折中（vs 每轮 fsync 的性能开销）。
+**原子性保障**：
+- POSIX `rename(2)` 原子覆盖：读方看到的要么是旧文件要么是新文件,不可能半
+- Windows fallback：`unlink(old) → rename(tmp)`,中间窗口崩溃由 `cleanupOrphanTmp` 下次触碰时静默清理
+- append 走 `fs.appendFile`：< PIPE_BUF 时写 syscall 原子,崩溃最多丢最后一行（JSONL 行级独立）
+
+**不做 fsync**：性能折中。异常退出最多丢失最后一轮 append。compact 原子重写自带 rename 的持久化语义,不需要显式 fsync。
 
 ### 5.3 读取实现
 

@@ -147,6 +147,7 @@ S1-S3.6 ✅ 全部完成（Scheduler → Server → 对话模型 → Channel →
 
 | 名称 | 说明 |
 |------|------|
-| Transcript 段轮转 | 内部优化，文件膨胀时再做 |
 | /delete 命令 | REPL 卫生，不阻塞主线 |
 | 移除 -c/-r 启动参数 | CLI 清理，不阻塞主线 |
+
+> **已完成（Phase 5 transcript 治理）**：原"Transcript 段轮转"条目已被 `commitTurn` 原子截断方案取代并完成落地。详见 [conversation-model.md §9.5 + ADR-CM-017](./specifications/conversation-model.md)。
