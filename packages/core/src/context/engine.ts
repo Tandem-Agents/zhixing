@@ -22,6 +22,7 @@ import type {
   BudgetThresholds,
   CompactionContext,
   CompactionStrategy,
+  CompactStrategyContribution,
   ContextBudget,
   ContextManagerHook,
   ContextManagerInput,
@@ -165,6 +166,7 @@ export class ContextEngine implements ContextManagerHook {
     let budget = this.checkBudget(messages);
 
     await this.eventBus?.emit("context:budget_check", {
+      phase: "pre-compact",
       currentTokens: budget.currentTokens,
       effectiveWindow: budget.effectiveWindow,
       usageRatio: budget.usageRatio,
@@ -176,50 +178,102 @@ export class ContextEngine implements ContextManagerHook {
     }
 
     // ── Step 3: 剩余策略兜底（LLM 压缩等） ──
-    for (const strategy of this.strategies) {
-      const context: CompactionContext = {
-        messages,
-        budget,
-        currentTurn: turnCount,
-        abortSignal,   // 注入 abort 信号，strategy 的 LLM 调用必须透传
-      };
+    const contributions: CompactStrategyContribution[] = [];
+    const transactionTokensBefore = budget.currentTokens;
+    let transactionStarted = false;
+    let caughtError: unknown;
 
-      if (!strategy.canApply(context)) continue;
+    try {
+      for (const strategy of this.strategies) {
+        const context: CompactionContext = {
+          messages,
+          budget,
+          currentTurn: turnCount,
+          abortSignal,
+        };
 
-      const tokensBefore = budget.currentTokens;
+        if (!strategy.canApply(context)) continue;
 
-      await this.eventBus?.emit("context:compact_start", {
-        strategy: strategy.name,
-        tokensBefore,
-      });
+        const stratBefore = budget.currentTokens;
 
-      const result = await strategy.apply(context);
+        if (!transactionStarted) {
+          await this.eventBus?.emit("context:compact_start", {
+            tokensBefore: transactionTokensBefore,
+          });
+          transactionStarted = true;
+        }
 
-      if (result.compacted) {
-        messages = result.messages;
-        modified = true;
+        const result = await strategy.apply(context);
 
-        budget = this.checkBudget(messages);
+        if (result.compacted) {
+          messages = result.messages;
+          modified = true;
+          budget = this.checkBudget(messages);
+        }
 
-        await this.eventBus?.emit("context:compact_end", {
-          strategy: strategy.name,
-          tokensBefore,
-          tokensAfter: budget.currentTokens,
-          success: true,
+        contributions.push({
+          name: strategy.name,
+          success: result.compacted,
+          tokensBefore: stratBefore,
+          tokensAfter: result.compacted ? budget.currentTokens : stratBefore,
+          summary: result.summary,
+          turnsCompacted: result.turnsCompacted,
         });
 
-        if (budget.status === "normal" || budget.status === "warning") {
+        if (
+          result.compacted &&
+          (budget.status === "normal" || budget.status === "warning")
+        ) {
           break;
         }
-      } else {
+      }
+    } catch (e) {
+      caughtError = e;
+    } finally {
+      if (transactionStarted) {
+        const aggregateSummary = contributions
+          .map((c) => c.summary)
+          .filter((s): s is string => s !== undefined)
+          .pop();
+        const aggregateTurnsCompactedRaw = contributions.reduce(
+          (sum, c) =>
+            c.turnsCompacted !== undefined ? sum + c.turnsCompacted : sum,
+          0,
+        );
+        const aggregateTurnsCompacted =
+          aggregateTurnsCompactedRaw > 0 ? aggregateTurnsCompactedRaw : undefined;
+
+        // EventBus.emit 契约：单个 listener 抛错由 EventBus 内部 errorHandler 吞掉
+        // 并 console.error，emit 本身永远 resolve 不 reject。因此不需要外层 try-catch
+        // 去防御"emit 会抛错掩盖 caughtError"的情况 —— 那种情况不存在。
         await this.eventBus?.emit("context:compact_end", {
-          strategy: strategy.name,
-          tokensBefore,
-          tokensAfter: tokensBefore,
-          success: false,
+          strategies: contributions,
+          summary: aggregateSummary,
+          turnsCompacted: aggregateTurnsCompacted,
+          tokensBefore: transactionTokensBefore,
+          tokensAfter: budget.currentTokens,
         });
       }
     }
+
+    // ── Step 4: post-compact budget_check ──
+    //
+    // 契约：只要进入了 strategies 循环路径（即 pre-compact budget 是 compact/critical），
+    // 无论 strategies 是否抛错，post-compact 必须 fire —— 保证订阅方观测链完整：
+    //   pre-compact → compact_start/end（事务化）→ post-compact
+    //
+    // 这和 compact_start/end 的 try-finally 契约精神一致：错误路径不破坏事件契约。
+    // 注意顺序：post-compact emit 必须在 rethrow caughtError 之前，否则抛错路径会跳过。
+    // EventBus.emit 不抛错（契约见上方 compact_end 注释），无需 try-catch 包装。
+    await this.eventBus?.emit("context:budget_check", {
+      phase: "post-compact",
+      currentTokens: budget.currentTokens,
+      effectiveWindow: budget.effectiveWindow,
+      usageRatio: budget.usageRatio,
+      status: budget.status,
+    });
+
+    if (caughtError) throw caughtError;
 
     return { messages: messages as Message[], modified };
   }

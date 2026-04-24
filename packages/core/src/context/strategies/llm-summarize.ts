@@ -24,10 +24,16 @@ import type {
   CompactionStrategy,
   ITokenEstimator,
 } from "../types.js";
-import { splitMessagesPairAware } from "../message-turns.js";
+import {
+  calculateMessageTurns,
+  splitMessagesPairAware,
+} from "../message-turns.js";
 import { getSummarizationPrompt } from "../prompts.js";
 import { buildRetryPrompt } from "../prompts.js";
-import { buildCompactSummaryPair } from "../system-meta.js";
+import {
+  buildCompactSummaryPair,
+  stripSummaryPlaceholderPair,
+} from "../system-meta.js";
 import { validateSummary } from "../validation.js";
 
 // ─── 类型 ───
@@ -131,12 +137,22 @@ export class LLMSummarizeStrategy implements CompactionStrategy {
       );
       const tokensAfter = this.estimator.estimateMessages(compactedMessages);
 
+      // 精确计算 turnsCompacted —— 本次压缩替代掉的"文件 Turn"数。
+      // 算法：toSummarize 去掉前次 compact 的 pair（如果有），剩余消息的
+      // 最大 turn 号即为本次新替代的文件 Turn 数。
+      // Phase 5 commitTurn 按此值切分文件 turns 保留末尾。
+      const turnMessages = stripSummaryPlaceholderPair(toSummarize);
+      const turnNumbers = calculateMessageTurns(turnMessages);
+      const turnsCompacted = turnNumbers[turnNumbers.length - 1] ?? 0;
+
       this.breaker.recordSuccess();
       return {
         messages: compactedMessages,
         tokensBefore,
         tokensAfter,
         compacted: true,
+        summary,            // ★ 真实 LLM 摘要
+        turnsCompacted,     // ★ 精确替代 Turn 数
       };
     } catch (error) {
       // Abort 是用户意图（session.abort / /abort / grace timer），不是策略不可靠。

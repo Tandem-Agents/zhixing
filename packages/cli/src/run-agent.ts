@@ -11,6 +11,7 @@ import {
   type AgentResult,
   type AgentYield,
   type AgentEventMap,
+  type CompactMarker,
   type ConfirmationFallbackStrategy,
   type ContextBudget,
   type IConfirmationBroker,
@@ -64,6 +65,11 @@ import {
   renderCompactStart,
   renderCompactEnd,
 } from "./render.js";
+import {
+  type CompactInfo,
+  subscribeCompactAccumulator,
+  toCompactMarker,
+} from "./compact-accumulator.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { loadProjectContext, injectContext, enrichContext, type EnrichOptions } from "./project-context.js";
 import {
@@ -112,6 +118,18 @@ export interface ForceCompactResult {
   messages: Message[];
   /** 压缩后的预算快照（modelInfo 由 resolver 保证可用，必填） */
   budget: ContextBudget;
+  /**
+   * compact 事务的权威元数据（仅当事务产生了 summary 时非空）。
+   *
+   * 由 forceCompact 内部 eventBus 订阅 context:compact_end 并 L1 累积组装。
+   * 消费者：REPL /compact 直接把这个 marker 交给 store.appendCompact 持久化，
+   * 不再自己拼接 "(manual compact)" 等硬编码字符串。
+   *
+   * 为什么 optional：如果 forceCompact 只触发了非摘要型策略（ToolResultTrim /
+   * MessageDrop），没有 LLM 生成的 summary，此时不该写 compact marker（会产生
+   * 假摘要污染 transcript）。调用方应该判断此字段存在再持久化。
+   */
+  compactBefore?: CompactMarker;
 }
 
 export interface RunParams {
@@ -155,12 +173,10 @@ export interface RunResult {
   compactInfo?: CompactInfo;
 }
 
-export interface CompactInfo {
-  summary: string;
-  turnsCompacted: number;
-  tokensBefore: number;
-  tokensAfter: number;
-}
+// CompactInfo / subscribeCompactAccumulator / toCompactMarker 抽离到独立
+// 模块 compact-accumulator.ts（SRP + 可独立测试 + Phase 5 可迁移到 core）。
+// 从上方 import 使用。
+export type { CompactInfo } from "./compact-accumulator.js";
 
 // ─── 创建运行时 ───
 
@@ -329,20 +345,53 @@ export async function createAgentRuntime(options: {
     },
 
     async forceCompact(messages: Message[], turnCount: number): Promise<ForceCompactResult> {
-      const engine = createContextEngine(estimator, strategies, { modelInfo: modelBudgetInfo });
+      // 独立 eventBus —— 捕获本次 forceCompact 的 compact_end 事件；
+      // 和 run() 的外层 eventBus 隔离，不混淆 REPL 的事件流。
+      // 两次 onTurnComplete 尝试（初始 + 降阈值重试）共用同一 bus，
+      // 累积订阅保证 compactBefore 包含两次尝试的汇总。
+      const localBus = createEventBus<AgentEventMap>();
+      const getAccumulated = subscribeCompactAccumulator(localBus);
+
+      const engine = createContextEngine(
+        estimator,
+        strategies,
+        { modelInfo: modelBudgetInfo },
+        localBus,
+      );
       const result = await engine.onTurnComplete({ messages, turnCount });
+
+      let finalMessages: Message[];
+      let finalModified: boolean;
+
       if (!result.modified) {
         // 自动压缩因阈值未达而跳过，强制用较低阈值重试
-        const forceEngine = createContextEngine(estimator, strategies, {
-          modelInfo: modelBudgetInfo,
-          thresholds: { warning: 0, compact: 0, critical: 0.95 },
-        });
+        const forceEngine = createContextEngine(
+          estimator,
+          strategies,
+          {
+            modelInfo: modelBudgetInfo,
+            thresholds: { warning: 0, compact: 0, critical: 0.95 },
+          },
+          localBus,
+        );
         const forceResult = await forceEngine.onTurnComplete({ messages, turnCount });
-        const budget = engine.checkBudget(forceResult.messages);
-        return { modified: forceResult.modified, messages: forceResult.messages, budget };
+        finalMessages = forceResult.messages;
+        finalModified = forceResult.modified;
+      } else {
+        finalMessages = result.messages;
+        finalModified = result.modified;
       }
-      const budget = engine.checkBudget(result.messages);
-      return { modified: result.modified, messages: result.messages, budget };
+
+      const budget = engine.checkBudget(finalMessages);
+      const accumulated = getAccumulated();
+      const compactBefore = accumulated ? toCompactMarker(accumulated) : undefined;
+
+      return {
+        modified: finalModified,
+        messages: finalMessages,
+        budget,
+        compactBefore,
+      };
     },
 
     async run(params: RunParams): Promise<RunResult> {
@@ -353,7 +402,7 @@ export async function createAgentRuntime(options: {
       const newMessages: Message[] = [];
       let pendingToolResults: ToolResultBlock[] = [];
       let toolEndCount = 0;
-      let compactInfo: CompactInfo | undefined;
+      // compactInfo 由下面的 subscribeCompactAccumulator 累积，run 结束时从 getter 读出
 
       // 通过 deps.callLLM 注入容错能力，agent-loop.ts 零修改
       const resilientCallLLM = withRetry(
@@ -387,8 +436,11 @@ export async function createAgentRuntime(options: {
         renderRetryExhausted(info);
       });
 
-      // 订阅上下文事件 → 仅在 warning+ 时渲染（normal 由摘要行覆盖）
+      // 订阅上下文事件 → 仅在 pre-compact + warning+ 时渲染
+      //   （post-compact 重复的状态不再渲染，避免 "预警 → 压缩 → 再次预警" 的视觉抖动；
+      //    normal 仍由摘要行覆盖）
       eventBus.on("context:budget_check", (info) => {
+        if (info.phase !== "pre-compact") return;
         if (info.status === "warning" || info.status === "compact" || info.status === "critical") {
           pauseUI();
           renderBudgetStatus(info);
@@ -398,17 +450,13 @@ export async function createAgentRuntime(options: {
         pauseUI();
         renderCompactStart(info);
       });
-      eventBus.on("context:compact_end", (info) => {
+
+      // Compact 累积订阅 —— 多个触发点 fire 时累加 turnsCompacted、
+      // 取最新 summary、锚定 firstTokensBefore。run 结束时读出作为 RunResult.compactInfo。
+      // 事件本身的渲染（renderCompactEnd）在累积订阅内 onEvent 回调触发，pauseUI 同步执行。
+      const getAccumulatedCompact = subscribeCompactAccumulator(eventBus, (info) => {
         pauseUI();
         renderCompactEnd(info);
-        if (info.success) {
-          compactInfo = {
-            summary: "(auto-compacted)",
-            turnsCompacted: 0,
-            tokensBefore: info.tokensBefore,
-            tokensAfter: info.tokensAfter,
-          };
-        }
       });
 
       // 根据最后一条用户消息检索匹配的技能 + 反思提示
@@ -479,7 +527,7 @@ export async function createAgentRuntime(options: {
             budget,
             toolEndCount,
             injectedSkillIds: enrichedContext.injectedSkillIds,
-            compactInfo,
+            compactInfo: getAccumulatedCompact(),   // 从 L1 累积订阅读出
           };
         }
 

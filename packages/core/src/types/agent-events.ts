@@ -21,6 +21,7 @@
 
 import type { AgentErrorType } from "./errors.js";
 import type { StreamEvent, StopReason, TokenUsage } from "./llm.js";
+import type { CompactStrategyContribution } from "../context/types.js";
 
 /**
  * Agent Loop 终止原因。
@@ -91,23 +92,49 @@ export type AgentEventMap = {
 
   // ─── 上下文管理 ───
 
+  /**
+   * 预算检查事件 —— 在 compact 事务前后各 fire 一次。
+   *
+   * phase:
+   *   - "pre-compact": onTurnComplete 初始检查，订阅方据此判断是否需要压缩 UI 预警
+   *   - "post-compact": strategies 循环结束后的状态，订阅方可用于指标对比；
+   *     仅在实际进入 strategies 循环路径上 fire（早退的 normal/warning 场景不 fire）
+   */
   "context:budget_check": {
+    phase: "pre-compact" | "post-compact";
     currentTokens: number;
     effectiveWindow: number;
     usageRatio: number;
     status: "normal" | "warning" | "compact" | "critical";
   };
 
+  /**
+   * compact 事务开始锚点 —— 一次 compact 事务仅 fire 一次，不带 strategy 名。
+   * UI 消费它显示"压缩中"spinner；事务结束时 compact_end 关闭 spinner。
+   *
+   * 事务化规则：仅在第一个 strategy.canApply 通过时 fire；
+   * 如果所有 strategies canApply 都返回 false，compact_start 不 fire。
+   */
   "context:compact_start": {
-    strategy: string;
     tokensBefore: number;
   };
 
+  /**
+   * compact 事务结束 —— 一次 compact 事务仅 fire 一次，payload 汇总所有贡献。
+   *
+   * strategies[]: 本次事务内每个跑过的 strategy 的独立记录（按执行顺序）。
+   * 汇总字段：
+   *   summary     = strategies 中最后一个非空 summary（当前仅 LLMSummarize 产）
+   *   turnsCompacted = 所有 strategy.turnsCompacted 求和（当前仅 LLMSummarize 一个值）
+   *
+   * 幂等保证：compact_start fire 过则必然有对应的 compact_end（try-finally 保护）。
+   */
   "context:compact_end": {
-    strategy: string;
+    strategies: readonly CompactStrategyContribution[];
+    summary?: string;
+    turnsCompacted?: number;
     tokensBefore: number;
     tokensAfter: number;
-    success: boolean;
   };
 
   "context:calibrate": {

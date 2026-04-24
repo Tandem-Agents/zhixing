@@ -122,6 +122,32 @@ export interface CompactionResult {
   tokensBefore: number;
   tokensAfter: number;
   compacted: boolean;
+  /**
+   * 摘要型策略（LLMSummarize）生成的摘要文本。
+   *
+   * 语义：本次压缩替代掉的消息的 LLM 摘要；非摘要型策略（ToolResultTrim /
+   * MessageDrop / MemoryFlush）填 undefined。
+   *
+   * 消费者：engine 事务化聚合后通过 compact_end 事件暴露给 run-agent；
+   * run-agent 闭包 L1 累积后作为 CompactMarker.summary 写入 transcript。
+   */
+  summary?: string;
+  /**
+   * 本次压缩替代掉的"文件 Turn"数（仅 LLMSummarize 填）。
+   *
+   * 精确定义：compact 发生后，文件里需要丢弃的原 Turn 数。
+   * 算法（见 LLMSummarizeStrategy.apply）：
+   *   1. splitMessagesPairAware(messages, preserveRecentTurns) → toSummarize
+   *   2. stripSummaryPlaceholderPair(toSummarize) 去掉上次 compact 的 pair
+   *   3. calculateMessageTurns(剩余) 最后 turn 号即本次替代的文件 Turn 数
+   *
+   * 消费者：Phase 5 commitTurn({compactBefore}) 按此值切分文件 turns，
+   *   保留末尾 (turns.length - turnsCompacted) 个。turnsCompacted=0 意味着
+   *   "截 0 = 不截"，所以必须精确填充而非硬编码。
+   *
+   * 非摘要型策略不填（undefined）—— 它们不替代文件 Turn，只做粒度内裁剪。
+   */
+  turnsCompacted?: number;
 }
 
 /**
@@ -142,6 +168,29 @@ export interface CompactionStrategy {
   canApply(context: CompactionContext): boolean;
   /** 执行压缩 */
   apply(context: CompactionContext): Promise<CompactionResult>;
+}
+
+// ─── 事务化 Compact 事件 Payload 支撑类型 ───
+
+/**
+ * 单个 strategy 在 compact 事务内的贡献记录。
+ *
+ * 事务化 compact_end 事件的 `strategies[]` 数组元素。消费方从这个数组
+ * 可以看到每个 strategy 的独立效果，从汇总字段可以看到总效果。
+ */
+export interface CompactStrategyContribution {
+  /** strategy.name */
+  readonly name: string;
+  /** 本策略是否实际压缩（strategy.apply 返回的 compacted 值） */
+  readonly success: boolean;
+  /** 本策略跑前的 tokens */
+  readonly tokensBefore: number;
+  /** 本策略跑后的 tokens */
+  readonly tokensAfter: number;
+  /** 仅 LLMSummarize 产出；非摘要型策略为 undefined */
+  readonly summary?: string;
+  /** 仅 LLMSummarize 产出；非摘要型策略为 undefined */
+  readonly turnsCompacted?: number;
 }
 
 // ─── 上下文管理器 ───

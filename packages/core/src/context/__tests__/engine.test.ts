@@ -287,7 +287,7 @@ describe("ContextEngine events", () => {
     expect(budgetChecks[0]).toHaveProperty("usageRatio");
   });
 
-  it("emits compact_start and compact_end when compacting", async () => {
+  it("emits compact_start and compact_end when compacting (事务化后正好 2 个事件)", async () => {
     const eventBus = new EventBus<AgentEventMap>();
     const events: { type: string; data: unknown }[] = [];
     eventBus.on("context:compact_start", (data) =>
@@ -317,9 +317,463 @@ describe("ContextEngine events", () => {
     const messages = buildLargeConversation(6, 2000);
     await engine.onTurnComplete({ messages, turnCount: 6 });
 
-    expect(events.length).toBeGreaterThanOrEqual(2);
+    // 事务化：每次 compact 仅 1 start + 1 end（不再按 strategy 逐个 fire）
+    expect(events.length).toBe(2);
     expect(events[0]!.type).toBe("start");
     expect(events[1]!.type).toBe("end");
+
+    // end payload 结构：strategies[] + 汇总字段
+    const endPayload = events[1]!.data as {
+      strategies: Array<{ name: string; success: boolean }>;
+      tokensBefore: number;
+      tokensAfter: number;
+    };
+    expect(endPayload.strategies).toHaveLength(1);
+    expect(endPayload.strategies[0]!.name).toBe("tool_result_trim");
+    expect(endPayload.strategies[0]!.success).toBe(true);
+  });
+
+  it("多 strategy 跑：end.strategies 列出每个贡献，tokensBefore/After 覆盖整个事务", async () => {
+    const eventBus = new EventBus<AgentEventMap>();
+    const events: { type: string; data: unknown }[] = [];
+    eventBus.on("context:compact_start", (data) =>
+      events.push({ type: "start", data }),
+    );
+    eventBus.on("context:compact_end", (data) =>
+      events.push({ type: "end", data }),
+    );
+
+    // 两个 mock strategy：都 canApply=true，都 compacted=true 但不改 messages
+    // → budget 不变，engine 不会 break，两个都跑
+    const strategyA: CompactionStrategy = {
+      name: "strategy_a",
+      priority: 0,
+      requiresLLM: false,
+      canApply: () => true,
+      apply: async (ctx) => ({
+        messages: ctx.messages as Message[],
+        tokensBefore: ctx.budget.currentTokens,
+        tokensAfter: ctx.budget.currentTokens,
+        compacted: true,
+      }),
+    };
+    const strategyB: CompactionStrategy = {
+      name: "strategy_b",
+      priority: 1,
+      requiresLLM: false,
+      canApply: () => true,
+      apply: async (ctx) => ({
+        messages: ctx.messages as Message[],
+        tokensBefore: ctx.budget.currentTokens,
+        tokensAfter: ctx.budget.currentTokens,
+        compacted: true,
+      }),
+    };
+
+    const estimator = createTokenEstimator();
+    const engine = createContextEngine(
+      estimator,
+      [strategyA, strategyB],
+      {
+        modelInfo: SMALL_MODEL,
+        thresholds: { warning: 0.01, compact: 0.02, critical: 0.9 },
+        profile: STRATEGY_ONLY_PROFILE,
+      },
+      eventBus,
+    );
+
+    const messages = buildLargeConversation(6, 2000);
+    await engine.onTurnComplete({ messages, turnCount: 6 });
+
+    // 仍是 1 start + 1 end（事务化）
+    expect(events.length).toBe(2);
+
+    const endPayload = events[1]!.data as {
+      strategies: Array<{ name: string; success: boolean }>;
+      tokensBefore: number;
+      tokensAfter: number;
+    };
+    expect(endPayload.strategies.map((s) => s.name)).toEqual([
+      "strategy_a",
+      "strategy_b",
+    ]);
+    expect(endPayload.strategies.every((s) => s.success)).toBe(true);
+  });
+
+  it("所有 canApply 返回 false：不 fire 任何 compact 事件", async () => {
+    const eventBus = new EventBus<AgentEventMap>();
+    const events: { type: string }[] = [];
+    eventBus.on("context:compact_start", () => events.push({ type: "start" }));
+    eventBus.on("context:compact_end", () => events.push({ type: "end" }));
+
+    const skippedStrategy: CompactionStrategy = {
+      name: "skipped",
+      priority: 0,
+      requiresLLM: false,
+      canApply: () => false,
+      apply: async (ctx) => ({
+        messages: ctx.messages as Message[],
+        tokensBefore: 0,
+        tokensAfter: 0,
+        compacted: false,
+      }),
+    };
+
+    const estimator = createTokenEstimator();
+    const engine = createContextEngine(
+      estimator,
+      [skippedStrategy],
+      {
+        modelInfo: SMALL_MODEL,
+        thresholds: { warning: 0.01, compact: 0.02, critical: 0.9 },
+        profile: STRATEGY_ONLY_PROFILE,
+      },
+      eventBus,
+    );
+
+    const messages = buildLargeConversation(6, 2000);
+    await engine.onTurnComplete({ messages, turnCount: 6 });
+
+    // 没 strategy 跑 → 不 fire compact 事件（budget_check 仍 fire，但那是另一事件）
+    expect(events.length).toBe(0);
+  });
+
+  it("strategy 抛错时 try-finally 保证 compact_end 仍 fire（契约保护）", async () => {
+    const eventBus = new EventBus<AgentEventMap>();
+    const events: { type: string }[] = [];
+    eventBus.on("context:compact_start", () => events.push({ type: "start" }));
+    eventBus.on("context:compact_end", () => events.push({ type: "end" }));
+
+    const throwingStrategy: CompactionStrategy = {
+      name: "boom",
+      priority: 0,
+      requiresLLM: false,
+      canApply: () => true,
+      apply: async () => {
+        throw new Error("strategy internal error");
+      },
+    };
+
+    const estimator = createTokenEstimator();
+    const engine = createContextEngine(
+      estimator,
+      [throwingStrategy],
+      {
+        modelInfo: SMALL_MODEL,
+        thresholds: { warning: 0.01, compact: 0.02, critical: 0.9 },
+        profile: STRATEGY_ONLY_PROFILE,
+      },
+      eventBus,
+    );
+
+    const messages = buildLargeConversation(6, 2000);
+    await expect(
+      engine.onTurnComplete({ messages, turnCount: 6 }),
+    ).rejects.toThrow("strategy internal error");
+
+    // 事务契约：start fire 了，end 也必须 fire（即使中间抛错）
+    expect(events.length).toBe(2);
+    expect(events[0]!.type).toBe("start");
+    expect(events[1]!.type).toBe("end");
+  });
+
+  it("summary + turnsCompacted 聚合：单摘要型策略时汇总字段 = 该策略值", async () => {
+    const eventBus = new EventBus<AgentEventMap>();
+    let endPayload: AgentEventMap["context:compact_end"] | undefined;
+    eventBus.on("context:compact_end", (data) => {
+      endPayload = data;
+    });
+
+    // 模拟一个摘要型策略 —— 产生 summary + turnsCompacted
+    const mockSummarizer: CompactionStrategy = {
+      name: "mock_summarizer",
+      priority: 0,
+      requiresLLM: false,
+      canApply: () => true,
+      apply: async (ctx) => ({
+        messages: ctx.messages as Message[],
+        tokensBefore: ctx.budget.currentTokens,
+        tokensAfter: Math.floor(ctx.budget.currentTokens / 2),
+        compacted: true,
+        summary: "real llm summary",
+        turnsCompacted: 5,
+      }),
+    };
+
+    const estimator = createTokenEstimator();
+    const engine = createContextEngine(
+      estimator,
+      [mockSummarizer],
+      {
+        modelInfo: SMALL_MODEL,
+        thresholds: { warning: 0.01, compact: 0.02, critical: 0.9 },
+        profile: STRATEGY_ONLY_PROFILE,
+      },
+      eventBus,
+    );
+
+    const messages = buildLargeConversation(6, 2000);
+    await engine.onTurnComplete({ messages, turnCount: 6 });
+
+    expect(endPayload).toBeDefined();
+    expect(endPayload!.summary).toBe("real llm summary");
+    expect(endPayload!.turnsCompacted).toBe(5);
+    expect(endPayload!.strategies).toHaveLength(1);
+    expect(endPayload!.strategies[0]!.summary).toBe("real llm summary");
+    expect(endPayload!.strategies[0]!.turnsCompacted).toBe(5);
+  });
+
+  it("summary + turnsCompacted 聚合：双摘要型策略时 summary 取最新、turnsCompacted 求和", async () => {
+    const eventBus = new EventBus<AgentEventMap>();
+    let endPayload: AgentEventMap["context:compact_end"] | undefined;
+    eventBus.on("context:compact_end", (data) => {
+      endPayload = data;
+    });
+
+    // 两个摘要型策略 —— 都 compacted=true 但不改 messages（让两个都跑）
+    const summarizerA: CompactionStrategy = {
+      name: "summarizer_a",
+      priority: 0,
+      requiresLLM: false,
+      canApply: () => true,
+      apply: async (ctx) => ({
+        messages: ctx.messages as Message[],
+        tokensBefore: ctx.budget.currentTokens,
+        tokensAfter: ctx.budget.currentTokens,
+        compacted: true,
+        summary: "first summary",
+        turnsCompacted: 3,
+      }),
+    };
+    const summarizerB: CompactionStrategy = {
+      name: "summarizer_b",
+      priority: 1,
+      requiresLLM: false,
+      canApply: () => true,
+      apply: async (ctx) => ({
+        messages: ctx.messages as Message[],
+        tokensBefore: ctx.budget.currentTokens,
+        tokensAfter: ctx.budget.currentTokens,
+        compacted: true,
+        summary: "second summary",
+        turnsCompacted: 4,
+      }),
+    };
+
+    const estimator = createTokenEstimator();
+    const engine = createContextEngine(
+      estimator,
+      [summarizerA, summarizerB],
+      {
+        modelInfo: SMALL_MODEL,
+        thresholds: { warning: 0.01, compact: 0.02, critical: 0.9 },
+        profile: STRATEGY_ONLY_PROFILE,
+      },
+      eventBus,
+    );
+
+    const messages = buildLargeConversation(6, 2000);
+    await engine.onTurnComplete({ messages, turnCount: 6 });
+
+    // summary: 取 contributions 中最后一个非空（.pop()）→ summarizer_b
+    expect(endPayload!.summary).toBe("second summary");
+    // turnsCompacted: 所有非空求和（reduce）→ 3 + 4 = 7
+    expect(endPayload!.turnsCompacted).toBe(7);
+    // strategies 数组里两条贡献都在
+    expect(endPayload!.strategies).toHaveLength(2);
+    expect(endPayload!.strategies[0]!.summary).toBe("first summary");
+    expect(endPayload!.strategies[1]!.summary).toBe("second summary");
+  });
+
+  it("summary + turnsCompacted 聚合：混合摘要与非摘要策略时只聚合摘要", async () => {
+    const eventBus = new EventBus<AgentEventMap>();
+    let endPayload: AgentEventMap["context:compact_end"] | undefined;
+    eventBus.on("context:compact_end", (data) => {
+      endPayload = data;
+    });
+
+    const nonSummarizer: CompactionStrategy = {
+      name: "non_summarizer",
+      priority: 0,
+      requiresLLM: false,
+      canApply: () => true,
+      apply: async (ctx) => ({
+        messages: ctx.messages as Message[],
+        tokensBefore: ctx.budget.currentTokens,
+        tokensAfter: ctx.budget.currentTokens,
+        compacted: true,
+        // 无 summary / turnsCompacted —— 模拟 ToolResultTrim / MessageDrop
+      }),
+    };
+    const summarizer: CompactionStrategy = {
+      name: "summarizer",
+      priority: 1,
+      requiresLLM: false,
+      canApply: () => true,
+      apply: async (ctx) => ({
+        messages: ctx.messages as Message[],
+        tokensBefore: ctx.budget.currentTokens,
+        tokensAfter: ctx.budget.currentTokens,
+        compacted: true,
+        summary: "llm summary",
+        turnsCompacted: 2,
+      }),
+    };
+
+    const estimator = createTokenEstimator();
+    const engine = createContextEngine(
+      estimator,
+      [nonSummarizer, summarizer],
+      {
+        modelInfo: SMALL_MODEL,
+        thresholds: { warning: 0.01, compact: 0.02, critical: 0.9 },
+        profile: STRATEGY_ONLY_PROFILE,
+      },
+      eventBus,
+    );
+
+    const messages = buildLargeConversation(6, 2000);
+    await engine.onTurnComplete({ messages, turnCount: 6 });
+
+    expect(endPayload!.summary).toBe("llm summary");   // 只有摘要策略的 summary
+    expect(endPayload!.turnsCompacted).toBe(2);         // 非摘要 undefined 被 reduce 跳过
+  });
+
+  it("summary + turnsCompacted 聚合：全是非摘要策略时汇总字段 = undefined", async () => {
+    const eventBus = new EventBus<AgentEventMap>();
+    let endPayload: AgentEventMap["context:compact_end"] | undefined;
+    eventBus.on("context:compact_end", (data) => {
+      endPayload = data;
+    });
+
+    const nonSummarizer: CompactionStrategy = {
+      name: "tool_result_trim_like",
+      priority: 0,
+      requiresLLM: false,
+      canApply: () => true,
+      apply: async (ctx) => ({
+        messages: ctx.messages as Message[],
+        tokensBefore: ctx.budget.currentTokens,
+        tokensAfter: ctx.budget.currentTokens,
+        compacted: true,
+      }),
+    };
+
+    const estimator = createTokenEstimator();
+    const engine = createContextEngine(
+      estimator,
+      [nonSummarizer],
+      {
+        modelInfo: SMALL_MODEL,
+        thresholds: { warning: 0.01, compact: 0.02, critical: 0.9 },
+        profile: STRATEGY_ONLY_PROFILE,
+      },
+      eventBus,
+    );
+
+    const messages = buildLargeConversation(6, 2000);
+    await engine.onTurnComplete({ messages, turnCount: 6 });
+
+    expect(endPayload!.summary).toBeUndefined();
+    // turnsCompacted 聚合: sum=0 → undefined（engine 的 `> 0 ? raw : undefined` 分支）
+    expect(endPayload!.turnsCompacted).toBeUndefined();
+  });
+
+  it("post-compact budget_check 在 strategy 抛错时仍 fire（观测链契约）", async () => {
+    const eventBus = new EventBus<AgentEventMap>();
+    const budgetChecks: Array<{ phase: string }> = [];
+    eventBus.on("context:budget_check", (data) =>
+      budgetChecks.push({ phase: data.phase }),
+    );
+
+    const throwingStrategy: CompactionStrategy = {
+      name: "boom",
+      priority: 0,
+      requiresLLM: false,
+      canApply: () => true,
+      apply: async () => {
+        throw new Error("strategy internal error");
+      },
+    };
+
+    const estimator = createTokenEstimator();
+    const engine = createContextEngine(
+      estimator,
+      [throwingStrategy],
+      {
+        modelInfo: SMALL_MODEL,
+        thresholds: { warning: 0.01, compact: 0.02, critical: 0.9 },
+        profile: STRATEGY_ONLY_PROFILE,
+      },
+      eventBus,
+    );
+
+    const messages = buildLargeConversation(6, 2000);
+
+    // strategy 抛错会 rethrow，但 post-compact budget_check 必须已在 rethrow 前 fire
+    await expect(
+      engine.onTurnComplete({ messages, turnCount: 6 }),
+    ).rejects.toThrow("strategy internal error");
+
+    expect(budgetChecks.map((b) => b.phase)).toEqual([
+      "pre-compact",
+      "post-compact",
+    ]);
+  });
+
+  it("实际进入 strategies 循环时 fire pre-compact + post-compact 两次 budget_check", async () => {
+    const eventBus = new EventBus<AgentEventMap>();
+    const budgetChecks: Array<{ phase: string }> = [];
+    eventBus.on("context:budget_check", (data) =>
+      budgetChecks.push({ phase: data.phase }),
+    );
+
+    const estimator = createTokenEstimator();
+    const strategy = createToolResultTrimStrategy({
+      staleTurnThreshold: 2,
+      keepChars: 100,
+    });
+
+    const engine = createContextEngine(
+      estimator,
+      [strategy],
+      {
+        modelInfo: SMALL_MODEL,
+        thresholds: { warning: 0.01, compact: 0.02, critical: 0.9 },
+        profile: STRATEGY_ONLY_PROFILE,
+      },
+      eventBus,
+    );
+
+    const messages = buildLargeConversation(6, 2000);
+    await engine.onTurnComplete({ messages, turnCount: 6 });
+
+    // 进入循环路径：pre-compact + post-compact
+    expect(budgetChecks).toHaveLength(2);
+    expect(budgetChecks[0]!.phase).toBe("pre-compact");
+    expect(budgetChecks[1]!.phase).toBe("post-compact");
+  });
+
+  it("早退（normal）路径：仅 fire pre-compact 一次 budget_check", async () => {
+    const eventBus = new EventBus<AgentEventMap>();
+    const budgetChecks: Array<{ phase: string }> = [];
+    eventBus.on("context:budget_check", (data) =>
+      budgetChecks.push({ phase: data.phase }),
+    );
+
+    const estimator = createTokenEstimator();
+    const engine = createContextEngine(
+      estimator,
+      [],
+      { modelInfo: LARGE_MODEL },
+      eventBus,
+    );
+
+    const messages = [userMessage("Hello"), assistantMessage("Hi!")];
+    await engine.onTurnComplete({ messages, turnCount: 1 });
+
+    expect(budgetChecks).toHaveLength(1);
+    expect(budgetChecks[0]!.phase).toBe("pre-compact");
   });
 
   it("emits calibrate event", async () => {

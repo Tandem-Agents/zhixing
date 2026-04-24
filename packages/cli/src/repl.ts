@@ -19,7 +19,6 @@ import {
   userMessage,
   type Message,
   type Turn,
-  type CompactMarker,
   TranscriptStore,
   getProjectId,
   getZhixingHome,
@@ -59,6 +58,7 @@ import { CommandDispatcher } from "./command-dispatcher.js";
 import { readInputLine, type InputLineResult } from "./typeahead-input.js";
 import { resolveFileRefs } from "./resolve-file-refs.js";
 import { type AgentRuntime, createAgentRuntime } from "./run-agent.js";
+import { toCompactMarker } from "./compact-accumulator.js";
 import {
   createRenderer,
   renderSummary,
@@ -507,7 +507,6 @@ function buildSlashCommands(rl: readline.Interface): Record<
           console.log(chalk.dim("\n  对话历史过短，无需压缩\n"));
           return;
         }
-        const tokensBefore = state.agent.checkBudget(state.messages).currentTokens;
         console.log(chalk.yellow("\n  ⟳ 正在压缩上下文..."));
         try {
           const result = await state.agent.forceCompact(
@@ -516,20 +515,14 @@ function buildSlashCommands(rl: readline.Interface): Record<
           );
           if (result.modified) {
             state.messages = result.messages;
-            const tokensAfter = result.budget.currentTokens;
             const pct = Math.round(result.budget.usageRatio * 100);
             console.log(chalk.green(`  ✓ 压缩完成，当前上下文占用 ${pct}%\n`));
-            // 写入 compact 行到会话文件
-            if (state.conversationId) {
-              const compact: CompactMarker = {
-                type: "compact",
-                timestamp: new Date().toISOString(),
-                summary: "(manual compact)",
-                turnsCompacted: state.turnCounter,
-                tokensBefore,
-                tokensAfter,
-              };
-              state.store.appendCompact(state.conversationId, compact).catch(() => {});
+            // 写入 compact 行到会话文件 —— 仅在事务产生了真 summary 时写 marker，
+            // 避免给 transcript 注入 "(manual compact)" 等假摘要。
+            // forceCompact 已通过 L1 累积订阅组装好 CompactMarker（含 LLM 真 summary +
+            // 精确 turnsCompacted），直接交给 store 持久化。
+            if (state.conversationId && result.compactBefore) {
+              state.store.appendCompact(state.conversationId, result.compactBefore).catch(() => {});
             }
           } else {
             console.log(chalk.dim("  已无可压缩内容\n"));
@@ -1243,17 +1236,14 @@ export async function startRepl(options: ReplOptions): Promise<void> {
           runJournalLifecycle(state.agent).catch(() => {});
         }
 
-        // 自动压缩发生时，写入 compact 行用于会话恢复
+        // 自动压缩发生时，写入 compact 行用于会话恢复。
+        // compactInfo 由 run-agent 的 L1 累积订阅产出（含 LLM 真 summary + 精确
+        // turnsCompacted）；toCompactMarker 是 CompactInfo → CompactMarker 的单一
+        // 事实源，repl 和 forceCompact 共用，未来 CompactMarker 扩展字段改一处即可。
         if (compactInfo) {
-          const compact: CompactMarker = {
-            type: "compact",
-            timestamp: new Date().toISOString(),
-            summary: compactInfo.summary,
-            turnsCompacted: state.turnCounter,
-            tokensBefore: compactInfo.tokensBefore,
-            tokensAfter: compactInfo.tokensAfter,
-          };
-          state.store.appendCompact(state.conversationId, compact).catch(() => {});
+          state.store
+            .appendCompact(state.conversationId, toCompactMarker(compactInfo))
+            .catch(() => {});
         }
       }
     } catch (err) {

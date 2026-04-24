@@ -260,36 +260,54 @@ export function renderBudgetStatus(info: {
   process.stdout.write(`  ${colorFn(`[${label}]`)}\n`);
 }
 
-/** 渲染压缩开始 */
-export function renderCompactStart(info: {
-  strategy: string;
-  tokensBefore: number;
-}): void {
+/**
+ * 渲染 compact 事务开始锚点（事务级，不含 strategy 名）。
+ *
+ * Phase 3 事务化后：每次 compact 事务仅 fire 一次 compact_start，payload
+ * 不带单 strategy 名（事务里可能跑多个 strategy，名字在 compact_end 的 strategies 列出）。
+ */
+export function renderCompactStart(info: { tokensBefore: number }): void {
   const tokens = formatTokenCount(info.tokensBefore);
   process.stdout.write(
-    `  ${chalk.yellow("⟳")} ${chalk.yellow("压缩中")} ${chalk.dim(`(${info.strategy}, ${tokens} tokens)`)}\n`,
+    `  ${chalk.yellow("⟳")} ${chalk.yellow("压缩中")} ${chalk.dim(`(${tokens} tokens)`)}\n`,
   );
 }
 
-/** 渲染压缩完成 */
+/**
+ * 渲染 compact 事务结束（事务级，汇总所有 strategy 贡献）。
+ *
+ * 显示策略：
+ *   - 任一 strategy.success === true → "压缩完成 X → Y (节省 Z%) (name1 + name2)"
+ *   - 全部 success === false         → "压缩无效（所有策略跳过或失败）"
+ */
 export function renderCompactEnd(info: {
-  strategy: string;
+  strategies: readonly { name: string; success: boolean }[];
   tokensBefore: number;
   tokensAfter: number;
-  success: boolean;
 }): void {
-  if (info.success) {
+  const anySuccess = info.strategies.some((s) => s.success);
+  if (anySuccess) {
     const before = formatTokenCount(info.tokensBefore);
     const after = formatTokenCount(info.tokensAfter);
-    const savedPct = info.tokensBefore > 0
-      ? Math.round(((info.tokensBefore - info.tokensAfter) / info.tokensBefore) * 100)
-      : 0;
+    const savedPct =
+      info.tokensBefore > 0
+        ? Math.round(
+            ((info.tokensBefore - info.tokensAfter) / info.tokensBefore) * 100,
+          )
+        : 0;
+    // 列出实际产生效果的 strategy 名
+    const activeNames = info.strategies
+      .filter((s) => s.success)
+      .map((s) => s.name)
+      .join(" + ");
     process.stdout.write(
-      `  ${chalk.green("✓")} ${chalk.dim(`压缩完成: ${before} → ${after} (节省 ${savedPct}%)`)}\n`,
+      `  ${chalk.green("✓")} ${chalk.dim(`压缩完成: ${before} → ${after} (节省 ${savedPct}%) (${activeNames})`)}\n`,
     );
   } else {
+    // 所有策略都 skip 或失败（例如 abort / 熔断）
+    const attemptedNames = info.strategies.map((s) => s.name).join(", ");
     process.stdout.write(
-      `  ${chalk.red("✗")} ${chalk.dim(`压缩失败 (${info.strategy})`)}\n`,
+      `  ${chalk.red("✗")} ${chalk.dim(`压缩无效（尝试: ${attemptedNames}）`)}\n`,
     );
   }
 }
