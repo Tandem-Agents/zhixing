@@ -27,7 +27,6 @@ import type {
   ContextManagerOutput,
   ITokenEstimator,
 } from "./types.js";
-import { DEFAULT_THRESHOLDS } from "./types.js";
 import { calculateBudget, calculateEffectiveWindow, type ModelBudgetInfo } from "./budget.js";
 import { INTERACTIVE_PROFILE, type ContextProfile } from "./context-profile.js";
 import type { TurnDigest } from "./turn-digest.js";
@@ -35,13 +34,42 @@ import type { ToolDeclaration } from "./layer-assembler.js";
 import { assembleSystemPrompt } from "./layer-assembler.js";
 import { manageWindow, defaultIsPinned } from "./window-manager.js";
 
-// ─── 配置 ───
+// ─── 配置（对外） ───
 
+/**
+ * 对外配置接口：允许省略 profile / thresholds，由引擎归一化到默认值。
+ */
 export interface ContextEngineConfig {
   modelInfo: ModelBudgetInfo;
+  /** 覆盖 profile.budgetThresholds（通常不用；手动 compact 场景下用来强制低阈值） */
   thresholds?: BudgetThresholds;
-  /** 场景 Profile（决定预算阈值、系统提示组装行为）。默认 INTERACTIVE_PROFILE */
+  /** 场景 Profile（决定预算阈值、Tier 压缩、系统提示组装）。默认 INTERACTIVE_PROFILE */
   profile?: ContextProfile;
+}
+
+// ─── 配置（对内归一化） ───
+
+/**
+ * 归一化后的内部配置：所有字段必填。
+ *
+ * 这是"配置归一化边界"模式：构造器一次性完成归一化，类内部只读归一化后的值。
+ * 避免"原始 config 与默认化字段并存"的二义性（曾导致 WindowManager 成为死代码）。
+ */
+interface NormalizedContextEngineConfig {
+  readonly modelInfo: ModelBudgetInfo;
+  readonly thresholds: BudgetThresholds;
+  readonly profile: ContextProfile;
+}
+
+function normalizeConfig(
+  raw: ContextEngineConfig,
+): NormalizedContextEngineConfig {
+  const profile = raw.profile ?? INTERACTIVE_PROFILE;
+  return {
+    modelInfo: raw.modelInfo,
+    thresholds: raw.thresholds ?? profile.budgetThresholds,
+    profile,
+  };
 }
 
 // ─── 引擎 ───
@@ -60,10 +88,8 @@ export interface BuildSystemPromptOptions {
 export class ContextEngine implements ContextManagerHook {
   private readonly estimator: ITokenEstimator;
   private readonly strategies: CompactionStrategy[];
-  private readonly config: ContextEngineConfig;
-  private readonly thresholds: BudgetThresholds;
+  private readonly config: NormalizedContextEngineConfig;
   private readonly eventBus?: IEventBus<AgentEventMap>;
-  private readonly profile: ContextProfile;
   private readonly digestHistory: TurnDigest[] = [];
 
   constructor(
@@ -74,10 +100,7 @@ export class ContextEngine implements ContextManagerHook {
   ) {
     this.estimator = estimator;
     this.strategies = [...strategies].sort((a, b) => a.priority - b.priority);
-    this.config = config;
-    this.thresholds =
-      config.thresholds ?? config.profile?.budgetThresholds ?? DEFAULT_THRESHOLDS;
-    this.profile = config.profile ?? INTERACTIVE_PROFILE;
+    this.config = normalizeConfig(config);
     this.eventBus = eventBus;
   }
 
@@ -86,7 +109,11 @@ export class ContextEngine implements ContextManagerHook {
    */
   checkBudget(messages: readonly Message[]): ContextBudget {
     const currentTokens = this.estimator.estimateMessages(messages);
-    return calculateBudget(this.config.modelInfo, currentTokens, this.thresholds);
+    return calculateBudget(
+      this.config.modelInfo,
+      currentTokens,
+      this.config.thresholds,
+    );
   }
 
   /**
@@ -116,12 +143,15 @@ export class ContextEngine implements ContextManagerHook {
     let modified = false;
 
     // ── Step 1: WindowManager 级联（Tier 压缩 + 淘汰） ──
-    if (this.config.profile?.tierThresholds) {
+    if (this.config.profile.tierThresholds) {
       const windowResult = manageWindow(messages, {
         tierThresholds: this.config.profile.tierThresholds,
         estimator: this.estimator,
-        effectiveWindow: calculateEffectiveWindow(this.config.modelInfo.contextWindow, this.config.modelInfo.maxOutputTokens),
-        compactRatio: this.thresholds.compact,
+        effectiveWindow: calculateEffectiveWindow(
+          this.config.modelInfo.contextWindow,
+          this.config.modelInfo.maxOutputTokens,
+        ),
+        compactRatio: this.config.thresholds.compact,
         isPinned: defaultIsPinned,
       });
       if (windowResult.modified) {
@@ -203,9 +233,9 @@ export class ContextEngine implements ContextManagerHook {
     return this.digestHistory;
   }
 
-  /** 当前使用的 ContextProfile */
+  /** 当前使用的 ContextProfile（归一化后，永远非空） */
   getProfile(): ContextProfile {
-    return this.profile;
+    return this.config.profile;
   }
 
   /**
@@ -216,7 +246,7 @@ export class ContextEngine implements ContextManagerHook {
    */
   buildSystemPrompt(opts: BuildSystemPromptOptions): string {
     return assembleSystemPrompt({
-      profile: this.profile,
+      profile: this.config.profile,
       ...opts,
       turnDigests: this.digestHistory,
     });

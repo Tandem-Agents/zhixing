@@ -70,6 +70,17 @@ export interface ProviderPreset {
 
 // ─── 用户配置 ───
 
+/**
+ * 模型预算覆盖条目。
+ *
+ * 用户在配置中为特定 model 覆盖上下文窗口 / 最大输出 —— 当 provider 自身
+ * 声明的信息过时、不准确、或适配器硬编码值需要微调时使用。支持部分覆盖。
+ */
+export interface ModelBudgetOverride {
+  contextWindow?: number;
+  maxOutputTokens?: number;
+}
+
 /** 用户对单个 provider 的配置。与预设合并后生成 ResolvedProvider。 */
 export interface ProviderConfig {
   /** 覆盖预设的 baseUrl（用于代理/聚合平台/私有部署） */
@@ -87,6 +98,15 @@ export interface ProviderConfig {
   defaultModel?: string;
   /** 覆盖预设的 quirks */
   quirks?: Partial<ProviderQuirks>;
+  /**
+   * 模型预算覆盖表（key = modelId）。
+   *
+   * 用于上下文工程：core 的 resolveModelInfo 用此覆盖适配器中硬编码的
+   * contextWindow / maxOutputTokens。典型场景：
+   *   - DeepSeek 适配器硬编码 128K，但你用的代理上游限制到 64K
+   *   - 为新发布的模型名临时注入 budget 信息而不升级适配器
+   */
+  modelOverrides?: Record<string, ModelBudgetOverride>;
 }
 
 /**

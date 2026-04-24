@@ -21,7 +21,7 @@ import { userMessage as makeUserMessage } from "../types/messages.js";
 import type { TierThresholds } from "./context-profile.js";
 import type { ITokenEstimator } from "./types.js";
 import { applyTierCompression, type TierStats } from "./tier-compressor.js";
-import { calculateMessageTurns } from "./strategies/tool-result-trim.js";
+import { calculateMessageTurns } from "./message-turns.js";
 
 // ─── 常量 ───
 

@@ -18,6 +18,7 @@
  */
 
 import type { ContentBlock, Message, ToolResultBlock } from "../../types/messages.js";
+import { calculateMessageTurns } from "../message-turns.js";
 import type { CompactionContext, CompactionResult, CompactionStrategy } from "../types.js";
 
 // ─── 配置 ───
@@ -43,29 +44,6 @@ const DEFAULT_CONFIG: ToolResultTrimConfig = {
 
 const TRUNCATION_MARKER = "[已截断，原始 ";
 const TRUNCATION_SUFFIX = " 字符]";
-
-// ─── 轮次计算 ───
-
-/**
- * 计算每条消息所在的"轮次"。
- *
- * 一个轮次 = assistant 消息 + 后续的 tool_result user 消息（如果有）。
- * 返回的 turn number 从 0 开始，值越大越新。
- */
-export function calculateMessageTurns(messages: readonly Message[]): number[] {
-  const turns: number[] = new Array(messages.length);
-  let currentTurn = 0;
-
-  for (let i = 0; i < messages.length; i++) {
-    const msg = messages[i]!;
-    if (msg.role === "assistant") {
-      currentTurn++;
-    }
-    turns[i] = currentTurn;
-  }
-
-  return turns;
-}
 
 // ─── 截断逻辑 ───
 

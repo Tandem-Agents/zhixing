@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   ToolResultTrimStrategy,
-  calculateMessageTurns,
   createToolResultTrimStrategy,
 } from "../strategies/tool-result-trim.js";
+import { calculateMessageTurns } from "../message-turns.js";
 import type { Message } from "../../types/messages.js";
 import {
   userMessage,

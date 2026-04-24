@@ -19,7 +19,7 @@
 
 import type { ContentBlock, Message, ToolResultBlock } from "../types/messages.js";
 import type { TierThresholds } from "./context-profile.js";
-import { calculateMessageTurns } from "./strategies/tool-result-trim.js";
+import { calculateMessageTurns } from "./message-turns.js";
 
 // ─── 常量 ───
 

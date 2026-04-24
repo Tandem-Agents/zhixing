@@ -30,10 +30,28 @@ export {
   getBudgetStatus,
 } from "./budget.js";
 
+export type {
+  ResolutionSource,
+  ResolutionWarning,
+  ResolutionWarningCode,
+  ResolveModelInfoInput,
+  ResolvedModelInfo,
+} from "./model-info-resolver.js";
+export {
+  CONSERVATIVE_FALLBACK,
+  resolveModelInfo,
+} from "./model-info-resolver.js";
+
+export type { SplitResult } from "./message-turns.js";
+export {
+  assertToolPairingIntact,
+  calculateMessageTurns,
+  splitMessagesPairAware,
+} from "./message-turns.js";
+
 export type { ToolResultTrimConfig } from "./strategies/tool-result-trim.js";
 export {
   ToolResultTrimStrategy,
-  calculateMessageTurns,
   createToolResultTrimStrategy,
 } from "./strategies/tool-result-trim.js";
 

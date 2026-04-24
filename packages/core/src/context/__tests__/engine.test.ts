@@ -8,9 +8,25 @@ import {
 } from "../../types/messages.js";
 import type { Message } from "../../types/messages.js";
 import { ContextEngine, createContextEngine } from "../engine.js";
+import { INTERACTIVE_PROFILE } from "../context-profile.js";
 import { createTokenEstimator } from "../token-estimator.js";
 import { createToolResultTrimStrategy } from "../strategies/tool-result-trim.js";
 import type { CompactionStrategy, ContextManagerInput } from "../types.js";
+
+/**
+ * 构造一个禁用 Tier 压缩的 profile 克隆。
+ *
+ * 很多 strategy 层的断言（比如"strategies 执行顺序"/"发 compact_start 事件"）
+ * 需要把 context 引入 compact 阈值。但默认 profile 的 Tier 压缩会先把大部分
+ * tool_result trim 掉，反而让预算回到 normal，strategies 永远跑不到。
+ *
+ * 这些测试关心的是"strategies 层行为"，因此隔离掉 Tier 层的干扰更符合测试意图。
+ * 真实生产下 Tier 先跑是期望行为（见 context-profile.ts / window-manager.ts 的设计）。
+ */
+const STRATEGY_ONLY_PROFILE = {
+  ...INTERACTIVE_PROFILE,
+  tierThresholds: null,
+} as const;
 
 // ─── 测试辅助 ───
 
@@ -103,6 +119,7 @@ describe("ContextEngine.onTurnComplete", () => {
     const engine = createContextEngine(estimator, [strategy], {
       modelInfo: SMALL_MODEL,
       thresholds: { warning: 0.05, compact: 0.10, critical: 0.9 },
+      profile: STRATEGY_ONLY_PROFILE,
     });
 
     const messages = buildLargeConversation(10, 2000);
@@ -154,6 +171,7 @@ describe("ContextEngine.onTurnComplete", () => {
     const engine = createContextEngine(estimator, [strategy1, strategy2], {
       modelInfo: SMALL_MODEL,
       thresholds: { warning: 0.005, compact: 0.01, critical: 0.9 },
+      profile: STRATEGY_ONLY_PROFILE,
     });
 
     const messages = buildLargeConversation(3, 500);
@@ -206,6 +224,7 @@ describe("ContextEngine.onTurnComplete", () => {
       {
         modelInfo: SMALL_MODEL,
         thresholds: { warning: 0.01, compact: 0.02, critical: 0.9 },
+        profile: STRATEGY_ONLY_PROFILE,
       },
     );
 
@@ -234,6 +253,7 @@ describe("ContextEngine.onTurnComplete", () => {
     const engine = createContextEngine(estimator, [skippedStrategy], {
       modelInfo: SMALL_MODEL,
       thresholds: { warning: 0.01, compact: 0.02, critical: 0.9 },
+      profile: STRATEGY_ONLY_PROFILE,
     });
 
     const messages = buildLargeConversation(3, 500);
@@ -289,6 +309,7 @@ describe("ContextEngine events", () => {
       {
         modelInfo: SMALL_MODEL,
         thresholds: { warning: 0.01, compact: 0.02, critical: 0.9 },
+        profile: STRATEGY_ONLY_PROFILE,
       },
       eventBus,
     );

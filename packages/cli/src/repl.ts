@@ -490,10 +490,6 @@ function buildSlashCommands(rl: readline.Interface): Record<
       description: "查看 token 用量详情",
       handler: (state) => {
         const budget = state.agent.checkBudget(state.messages);
-        if (!budget) {
-          console.log(chalk.dim("\n  模型信息不可用，无法计算预算\n"));
-          return;
-        }
         renderUsageReport(budget, state.turnCounter, state.agent.calibrationFactor);
       },
     },
@@ -501,10 +497,6 @@ function buildSlashCommands(rl: readline.Interface): Record<
       description: "上下文容量可视化",
       handler: (state) => {
         const budget = state.agent.checkBudget(state.messages);
-        if (!budget) {
-          console.log(chalk.dim("\n  模型信息不可用，无法计算预算\n"));
-          return;
-        }
         renderContextVisual(budget);
       },
     },
@@ -515,7 +507,7 @@ function buildSlashCommands(rl: readline.Interface): Record<
           console.log(chalk.dim("\n  对话历史过短，无需压缩\n"));
           return;
         }
-        const tokensBefore = state.agent.checkBudget(state.messages)?.currentTokens ?? 0;
+        const tokensBefore = state.agent.checkBudget(state.messages).currentTokens;
         console.log(chalk.yellow("\n  ⟳ 正在压缩上下文..."));
         try {
           const result = await state.agent.forceCompact(
@@ -524,8 +516,8 @@ function buildSlashCommands(rl: readline.Interface): Record<
           );
           if (result.modified) {
             state.messages = result.messages;
-            const tokensAfter = result.budget?.currentTokens ?? 0;
-            const pct = result.budget ? Math.round(result.budget.usageRatio * 100) : "?";
+            const tokensAfter = result.budget.currentTokens;
+            const pct = Math.round(result.budget.usageRatio * 100);
             console.log(chalk.green(`  ✓ 压缩完成，当前上下文占用 ${pct}%\n`));
             // 写入 compact 行到会话文件
             if (state.conversationId) {

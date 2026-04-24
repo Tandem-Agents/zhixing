@@ -4,6 +4,7 @@
 export type {
   AgentConfig,
   ChannelConfigEntry,
+  ModelBudgetOverride,
   Protocol,
   ProviderConfig,
   ProviderPreset,

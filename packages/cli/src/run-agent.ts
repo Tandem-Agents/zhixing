@@ -29,6 +29,7 @@ import {
   MemoryStore,
   PermissionStore,
   resolveAgentIdentity,
+  resolveModelInfo,
   SecurityPipeline,
   setAgentIdentity,
   userMessage,
@@ -75,8 +76,13 @@ export interface AgentRuntime {
   providerId: string;
   model: string;
   run: (params: RunParams) => Promise<RunResult>;
-  /** 查询当前消息列表的上下文预算状态 */
-  checkBudget: (messages: readonly Message[]) => ContextBudget | undefined;
+  /**
+   * 查询当前消息列表的上下文预算状态。
+   *
+   * modelInfo 由 resolveModelInfo 保证永远可用（即使是保守 fallback），
+   * 因此返回非 optional —— 调用方无需处理 undefined 分支。
+   */
+  checkBudget: (messages: readonly Message[]) => ContextBudget;
   /** 手动触发上下文压缩，无论当前预算状态如何 */
   forceCompact: (messages: Message[], turnCount: number) => Promise<ForceCompactResult>;
   /** 简易 LLM 文本调用（用于 Journal condense 等辅助任务） */
@@ -103,7 +109,8 @@ export interface AgentRuntime {
 export interface ForceCompactResult {
   modified: boolean;
   messages: Message[];
-  budget?: ContextBudget;
+  /** 压缩后的预算快照（modelInfo 由 resolver 保证可用，必填） */
+  budget: ContextBudget;
 }
 
 export interface RunParams {
@@ -131,8 +138,8 @@ export interface RunResult {
   /** 本轮产生的新消息（assistant + tool_result），调用方追加到对话历史 */
   newMessages: Message[];
   durationMs: number;
-  /** 运行结束后的上下文预算快照（渐进式摘要行使用） */
-  budget?: ContextBudget;
+  /** 运行结束后的上下文预算快照（resolver 保证 modelInfo 可用，必填） */
+  budget: ContextBudget;
   /** 本轮工具调用完成次数（tool_end 事件数），用于反思触发 */
   toolEndCount: number;
   /** 本轮注入的技能 ID 列表（用于效果推断） */
@@ -228,9 +235,22 @@ export async function createAgentRuntime(options: {
   // 加载项目上下文（ZHIXING.md + 环境信息），注入到首条 user message
   const projectContext = await loadProjectContext(cwd);
 
-  // 从 provider 获取模型信息，构建上下文引擎组件
-  // estimator 跨 run() 共享以保持校准状态
-  const modelInfo = provider.models.find((m) => m.id === model) ?? provider.models[0];
+  // 解析模型预算信息 —— resolver 保证 info 永不为 undefined：
+  //   1. provider 声明且 model 匹配 → declared
+  //   2. 不匹配但 provider 有其他模型 → fallback 到第一个 + warning
+  //   3. provider 无模型或都不匹配 → CONSERVATIVE_FALLBACK + warning
+  // 用户可通过 ZhixingConfig.providers.<id>.modelOverrides 覆盖。
+  // estimator 跨 run() 共享以保持校准状态。
+  const resolvedModel = resolveModelInfo({
+    providerId: provider.id,
+    model,
+    providerModels: provider.models,
+    overrides: config.providers?.[provider.id]?.modelOverrides,
+  });
+  for (const w of resolvedModel.warnings) {
+    console.warn(`[zhixing] ${w.message}`);
+  }
+  const modelBudgetInfo = resolvedModel.info;
   const estimator = createTokenEstimator();
   const memoryStore = new MemoryStore();
 
@@ -250,9 +270,6 @@ export async function createAgentRuntime(options: {
     createMemoryFlushStrategy({ callLLM: flushCallLLM, store: memoryStore }),
     createMessageDropStrategy(),
   ];
-  const modelBudgetInfo = modelInfo
-    ? { contextWindow: modelInfo.contextWindow, maxOutputTokens: modelInfo.maxOutputTokens }
-    : undefined;
 
   return {
     providerId: config.defaultProvider ?? provider.id,
@@ -271,8 +288,7 @@ export async function createAgentRuntime(options: {
       return estimator.calibrationFactor;
     },
 
-    checkBudget(messages: readonly Message[]): ContextBudget | undefined {
-      if (!modelBudgetInfo) return undefined;
+    checkBudget(messages: readonly Message[]): ContextBudget {
       const engine = createContextEngine(estimator, strategies, { modelInfo: modelBudgetInfo });
       return engine.checkBudget(messages);
     },
@@ -282,7 +298,6 @@ export async function createAgentRuntime(options: {
     },
 
     async forceCompact(messages: Message[], turnCount: number): Promise<ForceCompactResult> {
-      if (!modelBudgetInfo) return { modified: false, messages };
       const engine = createContextEngine(estimator, strategies, { modelInfo: modelBudgetInfo });
       const result = await engine.onTurnComplete({ messages, turnCount });
       if (!result.modified) {
@@ -315,10 +330,14 @@ export async function createAgentRuntime(options: {
         { eventBus },
       );
 
-      // 每次 run 创建带 eventBus 的引擎实例（事件需绑定到当前 run 的 eventBus）
-      const contextEngine = modelBudgetInfo
-        ? createContextEngine(estimator, strategies, { modelInfo: modelBudgetInfo }, eventBus)
-        : undefined;
+      // 每次 run 创建带 eventBus 的引擎实例（事件需绑定到当前 run 的 eventBus）。
+      // modelBudgetInfo 由 resolveModelInfo 保证非空 —— compact 永远启用。
+      const contextEngine = createContextEngine(
+        estimator,
+        strategies,
+        { modelInfo: modelBudgetInfo },
+        eventBus,
+      );
 
       // 在 EventBus 渲染前暂停 spinner，避免 \r 覆盖输出
       const pauseUI = params.onBeforeEventRender ?? (() => {});
@@ -419,7 +438,7 @@ export async function createAgentRuntime(options: {
             estimator.calibrate(estimated, value.usage.inputTokens);
           }
 
-          const budget = contextEngine?.checkBudget(allMessages);
+          const budget = contextEngine.checkBudget(allMessages);
 
           return {
             agentResult: value,
