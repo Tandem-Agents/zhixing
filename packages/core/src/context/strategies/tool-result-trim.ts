@@ -93,6 +93,7 @@ function trimMessageToolResults(
 
 export class ToolResultTrimStrategy implements CompactionStrategy {
   readonly name = "tool_result_trim";
+  readonly kind = "trim" as const;
   readonly priority = 0;
   readonly requiresLLM = false;
   private config: ToolResultTrimConfig;

@@ -53,6 +53,7 @@ const DEFAULT_CONFIG: MessageDropConfig = {
 
 export class MessageDropStrategy implements CompactionStrategy {
   readonly name = "message_drop";
+  readonly kind = "drop" as const;
   readonly priority = 5;
   readonly requiresLLM = false;
   private config: MessageDropConfig;

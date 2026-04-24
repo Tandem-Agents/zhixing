@@ -11,7 +11,12 @@ import { ContextEngine, createContextEngine } from "../engine.js";
 import { INTERACTIVE_PROFILE } from "../context-profile.js";
 import { createTokenEstimator } from "../token-estimator.js";
 import { createToolResultTrimStrategy } from "../strategies/tool-result-trim.js";
-import type { CompactionStrategy, ContextManagerInput } from "../types.js";
+import type {
+  CompactStrategyContribution,
+  CompactionContext,
+  CompactionStrategy,
+  ContextManagerInput,
+} from "../types.js";
 
 /**
  * 构造一个禁用 Tier 压缩的 profile 克隆。
@@ -795,5 +800,674 @@ describe("ContextEngine events", () => {
     expect(calibrations[0]).toHaveProperty("estimated", 100);
     expect(calibrations[0]).toHaveProperty("actual", 130);
     expect(calibrations[0]).toHaveProperty("newRatio");
+  });
+});
+
+// ─── ContextEngine P0-L critical force-apply 契约（Phase 4 S3） ───
+
+describe("ContextEngine critical force-apply 契约（Phase 4 S3）", () => {
+  /**
+   * 构造一个可 mock 的 llm-summarize strategy。
+   *
+   * 用于覆盖 force-apply 路径：通过控制 canApply / apply 分别模拟：
+   *   - canApply=false：正常 strategies 循环被挡，只有 force-apply 能触达 apply
+   *   - canApply=true：循环内 apply 会跑一次，force-apply 是否触达取决于 budget 是否仍 critical
+   *   - apply 返 compacted=true/false：模拟 LLM 成功 / 失败
+   *
+   * name 必须是 "llm-summarize" —— engine 通过 name 匹配识别摘要型策略。
+   */
+  function makeMockLLMSummarize(opts: {
+    canApply: boolean;
+    apply: import("vitest").Mock;
+    name?: string;
+  }): CompactionStrategy {
+    return {
+      name: opts.name ?? "llm-summarize",
+      kind: "summarize",
+      priority: 200,
+      requiresLLM: true,
+      canApply: () => opts.canApply,
+      apply: opts.apply,
+    };
+  }
+
+  /**
+   * 强制 critical 的阈值组合。
+   * warning < compact < critical 都设得很低，保证 buildLargeConversation 直接 critical。
+   */
+  const FORCE_CRITICAL_THRESHOLDS = {
+    warning: 0.01,
+    compact: 0.02,
+    critical: 0.05,
+  };
+
+  it("critical + canApply=false → force-apply 触达 apply, contribution.phase='force-apply'", async () => {
+    const eventBus = new EventBus<AgentEventMap>();
+    const compactEndPayloads: Array<{
+      strategies: readonly CompactStrategyContribution[];
+      tokensBefore: number;
+      tokensAfter: number;
+    }> = [];
+    eventBus.on("context:compact_end", (data) =>
+      compactEndPayloads.push({
+        strategies: data.strategies,
+        tokensBefore: data.tokensBefore,
+        tokensAfter: data.tokensAfter,
+      }),
+    );
+
+    const estimator = createTokenEstimator();
+    // force-apply 模拟 LLM 调用失败（compacted=false）—— 最纯粹的 force-apply 触达验证
+    const applyFn = vi.fn(async (ctx: CompactionContext) => ({
+      messages: ctx.messages as Message[],
+      tokensBefore: ctx.budget.currentTokens,
+      tokensAfter: ctx.budget.currentTokens,
+      compacted: false,
+    }));
+    const mockStrategy = makeMockLLMSummarize({ canApply: false, apply: applyFn });
+
+    const engine = createContextEngine(
+      estimator,
+      [mockStrategy],
+      {
+        modelInfo: SMALL_MODEL,
+        thresholds: FORCE_CRITICAL_THRESHOLDS,
+        profile: STRATEGY_ONLY_PROFILE,
+      },
+      eventBus,
+    );
+
+    const messages = buildLargeConversation(6, 2000);
+    await engine.onTurnComplete({ messages, turnCount: 6 });
+
+    // canApply=false 挡了正常循环 → apply 只在 force-apply 里被调 1 次
+    expect(applyFn).toHaveBeenCalledTimes(1);
+
+    // compact_end fire 过一次, strategies[] 只有 force-apply 的贡献
+    expect(compactEndPayloads).toHaveLength(1);
+    const contributions = compactEndPayloads[0]!.strategies;
+    expect(contributions).toHaveLength(1);
+    // name 保持纯策略 ID, phase 标记阶段(P0-γ 修复: 取代 "(force-apply)" name 后缀)
+    expect(contributions[0]!.name).toBe("llm-summarize");
+    expect(contributions[0]!.phase).toBe("force-apply");
+    expect(contributions[0]!.success).toBe(false);
+  });
+
+  it("force-apply 成功压到 non-critical → ContextManagerOutput.failed 为 undefined", async () => {
+    const estimator = createTokenEstimator();
+    // apply 返回极小消息 → 下一次 checkBudget 回到 normal
+    const tinyMessages: Message[] = [userMessage("ok")];
+    const applyFn = vi.fn(async (ctx: CompactionContext) => ({
+      messages: tinyMessages,
+      tokensBefore: ctx.budget.currentTokens,
+      tokensAfter: 10,
+      compacted: true,
+      summary: "[Previous conversation summarized]",
+      turnsCompacted: 4,
+    }));
+    const mockStrategy = makeMockLLMSummarize({ canApply: false, apply: applyFn });
+
+    const engine = createContextEngine(estimator, [mockStrategy], {
+      modelInfo: SMALL_MODEL,
+      thresholds: FORCE_CRITICAL_THRESHOLDS,
+      profile: STRATEGY_ONLY_PROFILE,
+    });
+
+    const messages = buildLargeConversation(6, 2000);
+    const result = await engine.onTurnComplete({ messages, turnCount: 6 });
+
+    expect(applyFn).toHaveBeenCalledTimes(1);
+    expect(result.modified).toBe(true);
+    // 压到 normal 不触发 failed 契约
+    expect(result.failed).toBeUndefined();
+  });
+
+  it("force-apply 失败（apply 返 compacted=false 不改 messages）→ failed: true", async () => {
+    const estimator = createTokenEstimator();
+    const applyFn = vi.fn(async (ctx: CompactionContext) => ({
+      messages: ctx.messages as Message[],
+      tokensBefore: ctx.budget.currentTokens,
+      tokensAfter: ctx.budget.currentTokens,
+      compacted: false,
+    }));
+    const mockStrategy = makeMockLLMSummarize({ canApply: false, apply: applyFn });
+
+    const engine = createContextEngine(estimator, [mockStrategy], {
+      modelInfo: SMALL_MODEL,
+      thresholds: FORCE_CRITICAL_THRESHOLDS,
+      profile: STRATEGY_ONLY_PROFILE,
+    });
+
+    const messages = buildLargeConversation(6, 2000);
+    const result = await engine.onTurnComplete({ messages, turnCount: 6 });
+
+    expect(applyFn).toHaveBeenCalledTimes(1);
+    // critical → force-apply 失败 → failed 契约触发
+    expect(result.failed).toBe(true);
+  });
+
+  it("没有 llm-summarize 策略 → critical 时跳过 force-apply, failed: true", async () => {
+    const eventBus = new EventBus<AgentEventMap>();
+    const compactStartCount = { n: 0 };
+    eventBus.on("context:compact_start", () => {
+      compactStartCount.n++;
+    });
+
+    const estimator = createTokenEstimator();
+    // 用真实 ToolResultTrim（非摘要型），但低 staleTurnThreshold 让它 canApply=true
+    // 即便如此它只 trim tool_result 文本，大对话仍会留在 critical
+    const trimStrategy = createToolResultTrimStrategy({
+      staleTurnThreshold: 999,  // 大到不会 trim 任何 turn，确保 critical 保留
+      keepChars: 100,
+    });
+
+    const engine = createContextEngine(
+      estimator,
+      [trimStrategy],
+      {
+        modelInfo: SMALL_MODEL,
+        thresholds: FORCE_CRITICAL_THRESHOLDS,
+        profile: STRATEGY_ONLY_PROFILE,
+      },
+      eventBus,
+    );
+
+    const messages = buildLargeConversation(6, 2000);
+    const result = await engine.onTurnComplete({ messages, turnCount: 6 });
+
+    // 没有 llm-summarize → force-apply 不触发（strategies.find 返 undefined）
+    // 仅 strategies 循环本身可能 fire compact_start（取决于 trim canApply）
+    expect(result.failed).toBe(true);
+  });
+
+  it("策略循环内正常 compacted 成功 → 不进 force-apply 分支", async () => {
+    const eventBus = new EventBus<AgentEventMap>();
+    const compactEndPayloads: Array<{
+      strategies: readonly CompactStrategyContribution[];
+    }> = [];
+    eventBus.on("context:compact_end", (data) =>
+      compactEndPayloads.push({ strategies: data.strategies }),
+    );
+
+    const estimator = createTokenEstimator();
+    const tinyMessages: Message[] = [userMessage("ok")];
+    const applyFn = vi.fn(async (ctx: CompactionContext) => ({
+      messages: tinyMessages,
+      tokensBefore: ctx.budget.currentTokens,
+      tokensAfter: 10,
+      compacted: true,
+    }));
+    // canApply=true → 循环内被调 + 压到 normal → break 循环, 不进 force-apply
+    const mockStrategy = makeMockLLMSummarize({ canApply: true, apply: applyFn });
+
+    const engine = createContextEngine(
+      estimator,
+      [mockStrategy],
+      {
+        modelInfo: SMALL_MODEL,
+        thresholds: FORCE_CRITICAL_THRESHOLDS,
+        profile: STRATEGY_ONLY_PROFILE,
+      },
+      eventBus,
+    );
+
+    const messages = buildLargeConversation(6, 2000);
+    const result = await engine.onTurnComplete({ messages, turnCount: 6 });
+
+    // apply 只在循环内被调 1 次；未再调 force-apply
+    expect(applyFn).toHaveBeenCalledTimes(1);
+
+    // contributions 只有 1 条, phase="normal" 标记循环内正常执行
+    const contributions = compactEndPayloads[0]!.strategies;
+    expect(contributions).toHaveLength(1);
+    expect(contributions[0]!.name).toBe("llm-summarize");
+    expect(contributions[0]!.phase).toBe("normal");
+    expect(result.failed).toBeUndefined();
+  });
+
+  it("循环内 apply 失败（compacted=false）仍 critical → force-apply 再调一次", async () => {
+    const eventBus = new EventBus<AgentEventMap>();
+    const compactEndPayloads: Array<{
+      strategies: readonly CompactStrategyContribution[];
+    }> = [];
+    eventBus.on("context:compact_end", (data) =>
+      compactEndPayloads.push({ strategies: data.strategies }),
+    );
+
+    const estimator = createTokenEstimator();
+    const applyFn = vi.fn(async (ctx: CompactionContext) => ({
+      messages: ctx.messages as Message[],
+      tokensBefore: ctx.budget.currentTokens,
+      tokensAfter: ctx.budget.currentTokens,
+      compacted: false,
+    }));
+    // canApply=true → 循环内被调，但 compacted=false 没降 critical → force-apply 再调
+    const mockStrategy = makeMockLLMSummarize({ canApply: true, apply: applyFn });
+
+    const engine = createContextEngine(
+      estimator,
+      [mockStrategy],
+      {
+        modelInfo: SMALL_MODEL,
+        thresholds: FORCE_CRITICAL_THRESHOLDS,
+        profile: STRATEGY_ONLY_PROFILE,
+      },
+      eventBus,
+    );
+
+    const messages = buildLargeConversation(6, 2000);
+    const result = await engine.onTurnComplete({ messages, turnCount: 6 });
+
+    // 循环内 + force-apply 各调一次 = 2 次
+    expect(applyFn).toHaveBeenCalledTimes(2);
+
+    // contributions 2 条：都是 "llm-summarize",phase 分别为 normal / force-apply
+    const contributions = compactEndPayloads[0]!.strategies;
+    expect(contributions).toHaveLength(2);
+    expect(contributions[0]!.name).toBe("llm-summarize");
+    expect(contributions[0]!.phase).toBe("normal");
+    expect(contributions[1]!.name).toBe("llm-summarize");
+    expect(contributions[1]!.phase).toBe("force-apply");
+    // 两次都没降 critical → failed
+    expect(result.failed).toBe(true);
+  });
+
+  it("非 critical（仅 compact）时不触发 force-apply", async () => {
+    const estimator = createTokenEstimator();
+    const applyFn = vi.fn(async (ctx: CompactionContext) => ({
+      messages: ctx.messages as Message[],
+      tokensBefore: ctx.budget.currentTokens,
+      tokensAfter: ctx.budget.currentTokens,
+      compacted: false,
+    }));
+    const mockStrategy = makeMockLLMSummarize({ canApply: false, apply: applyFn });
+
+    const engine = createContextEngine(estimator, [mockStrategy], {
+      modelInfo: SMALL_MODEL,
+      // compact 触发但不到 critical：warn=0.01 / compact=0.02 / critical=0.999
+      thresholds: { warning: 0.01, compact: 0.02, critical: 0.999 },
+      profile: STRATEGY_ONLY_PROFILE,
+    });
+
+    const messages = buildLargeConversation(6, 2000);
+    const result = await engine.onTurnComplete({ messages, turnCount: 6 });
+
+    // budget 在 compact 区间不在 critical → force-apply 分支不进
+    expect(applyFn).toHaveBeenCalledTimes(0);
+    expect(result.failed).toBeUndefined();
+  });
+
+  // ─── P0-β: kind 匹配（去字符串硬编码） ───
+
+  it("force-apply 按 kind=summarize 识别而非 name 字符串（P0-β）", async () => {
+    // 策略名改成 "custom-summarizer-v2"（模拟改名 / 多摘要策略场景）,
+    // 但 kind 保持 "summarize" → engine 仍能正确识别并 force-apply。
+    // 若仍按 name === "llm-summarize" 硬匹配则会静默漏触发。
+    const estimator = createTokenEstimator();
+    const applyFn = vi.fn(async (ctx: CompactionContext) => ({
+      messages: ctx.messages as Message[],
+      tokensBefore: ctx.budget.currentTokens,
+      tokensAfter: ctx.budget.currentTokens,
+      compacted: false,
+    }));
+    const customNamedStrategy: CompactionStrategy = {
+      name: "custom-summarizer-v2",
+      kind: "summarize",
+      priority: 200,
+      requiresLLM: true,
+      canApply: () => false,
+      apply: applyFn,
+    };
+
+    const engine = createContextEngine(estimator, [customNamedStrategy], {
+      modelInfo: SMALL_MODEL,
+      thresholds: FORCE_CRITICAL_THRESHOLDS,
+      profile: STRATEGY_ONLY_PROFILE,
+    });
+
+    const messages = buildLargeConversation(6, 2000);
+    const result = await engine.onTurnComplete({ messages, turnCount: 6 });
+
+    // 即便 name 不再是 "llm-summarize",force-apply 仍触达
+    expect(applyFn).toHaveBeenCalledTimes(1);
+    expect(result.failed).toBe(true);
+  });
+
+  it("非 summarize kind 的策略（flush/trim/drop）不作 force-apply 候选（P0-β）", async () => {
+    // kind=flush 策略注册也不应被选作 force-apply 候选 ——
+    // 只有 summarize 能"替代 turn"产生 token 显著削减
+    const estimator = createTokenEstimator();
+    const applyFn = vi.fn(async (ctx: CompactionContext) => ({
+      messages: ctx.messages as Message[],
+      tokensBefore: ctx.budget.currentTokens,
+      tokensAfter: ctx.budget.currentTokens,
+      compacted: false,
+    }));
+    const flushStrategy: CompactionStrategy = {
+      name: "memory_flush",
+      kind: "flush",
+      priority: 3,
+      requiresLLM: true,
+      canApply: () => false,
+      apply: applyFn,
+    };
+
+    const engine = createContextEngine(estimator, [flushStrategy], {
+      modelInfo: SMALL_MODEL,
+      thresholds: FORCE_CRITICAL_THRESHOLDS,
+      profile: STRATEGY_ONLY_PROFILE,
+    });
+
+    const messages = buildLargeConversation(6, 2000);
+    const result = await engine.onTurnComplete({ messages, turnCount: 6 });
+
+    // flush 策略不被 force-apply
+    expect(applyFn).toHaveBeenCalledTimes(0);
+    // 无 summarize 候选 → failed
+    expect(result.failed).toBe(true);
+  });
+
+  // ─── 多 summarize 策略：force-apply 按 priority ASC 逐个尝试 ───
+
+  it("多 summarize 策略：force-apply 按优先级 ASC 逐个尝试，降到 non-critical 就 break", async () => {
+    // 场景：用户注册 fast-summarize (priority=100) + llm-summarize (priority=200)
+    // fast 在 critical 下失败（compacted=false），llm 成功 → force-apply 先调 fast 再调 llm
+    const estimator = createTokenEstimator();
+
+    const fastApply = vi.fn(async (ctx: CompactionContext) => ({
+      messages: ctx.messages as Message[],
+      tokensBefore: ctx.budget.currentTokens,
+      tokensAfter: ctx.budget.currentTokens,
+      compacted: false,
+    }));
+    const fastSummarize: CompactionStrategy = {
+      name: "fast-summarize",
+      kind: "summarize",
+      priority: 100,
+      requiresLLM: true,
+      canApply: () => false,
+      apply: fastApply,
+    };
+
+    const tinyMessages: Message[] = [userMessage("ok")];
+    const llmApply = vi.fn(async (ctx: CompactionContext) => ({
+      messages: tinyMessages,
+      tokensBefore: ctx.budget.currentTokens,
+      tokensAfter: 10,
+      compacted: true,
+      summary: "[summarized by llm]",
+      turnsCompacted: 3,
+    }));
+    const llmSummarize: CompactionStrategy = {
+      name: "llm-summarize",
+      kind: "summarize",
+      priority: 200,
+      requiresLLM: true,
+      canApply: () => false,
+      apply: llmApply,
+    };
+
+    const eventBus = new EventBus<AgentEventMap>();
+    const compactEndPayloads: Array<{
+      strategies: readonly CompactStrategyContribution[];
+    }> = [];
+    eventBus.on("context:compact_end", (data) =>
+      compactEndPayloads.push({ strategies: data.strategies }),
+    );
+
+    // 策略传入顺序故意反一下，验证 engine 构造时的 priority 排序
+    const engine = createContextEngine(
+      estimator,
+      [llmSummarize, fastSummarize],
+      {
+        modelInfo: SMALL_MODEL,
+        thresholds: FORCE_CRITICAL_THRESHOLDS,
+        profile: STRATEGY_ONLY_PROFILE,
+      },
+      eventBus,
+    );
+
+    const messages = buildLargeConversation(6, 2000);
+    const result = await engine.onTurnComplete({ messages, turnCount: 6 });
+
+    // force-apply 先调 fast (失败) 再调 llm (成功) → 各调 1 次
+    expect(fastApply).toHaveBeenCalledTimes(1);
+    expect(llmApply).toHaveBeenCalledTimes(1);
+
+    // contributions 按执行顺序：fast-summarize → llm-summarize，都 phase="force-apply"
+    const contributions = compactEndPayloads[0]!.strategies;
+    expect(contributions).toHaveLength(2);
+    expect(contributions[0]!.name).toBe("fast-summarize");
+    expect(contributions[0]!.phase).toBe("force-apply");
+    expect(contributions[0]!.success).toBe(false);
+    expect(contributions[1]!.name).toBe("llm-summarize");
+    expect(contributions[1]!.phase).toBe("force-apply");
+    expect(contributions[1]!.success).toBe(true);
+
+    // llm 成功把 budget 降回 non-critical → failed 未触发
+    expect(result.failed).toBeUndefined();
+  });
+
+  it("多 summarize 策略：第一个成功即 break，后续的不再尝试", async () => {
+    const estimator = createTokenEstimator();
+
+    const tinyMessages: Message[] = [userMessage("ok")];
+    const fastApply = vi.fn(async (ctx: CompactionContext) => ({
+      messages: tinyMessages,
+      tokensBefore: ctx.budget.currentTokens,
+      tokensAfter: 10,
+      compacted: true,
+      summary: "[summarized by fast]",
+      turnsCompacted: 3,
+    }));
+    const fastSummarize: CompactionStrategy = {
+      name: "fast-summarize",
+      kind: "summarize",
+      priority: 100,
+      requiresLLM: true,
+      canApply: () => false,
+      apply: fastApply,
+    };
+
+    const llmApply = vi.fn(async () => {
+      throw new Error("should not be called");
+    });
+    const llmSummarize: CompactionStrategy = {
+      name: "llm-summarize",
+      kind: "summarize",
+      priority: 200,
+      requiresLLM: true,
+      canApply: () => false,
+      apply: llmApply,
+    };
+
+    const engine = createContextEngine(
+      estimator,
+      [fastSummarize, llmSummarize],
+      {
+        modelInfo: SMALL_MODEL,
+        thresholds: FORCE_CRITICAL_THRESHOLDS,
+        profile: STRATEGY_ONLY_PROFILE,
+      },
+    );
+
+    const messages = buildLargeConversation(6, 2000);
+    const result = await engine.onTurnComplete({ messages, turnCount: 6 });
+
+    expect(fastApply).toHaveBeenCalledTimes(1);
+    // fast 一次成功 → budget 离开 critical → llm 不再尝试
+    expect(llmApply).toHaveBeenCalledTimes(0);
+    expect(result.failed).toBeUndefined();
+    expect(result.modified).toBe(true);
+  });
+
+  it("多 summarize 策略：全部失败 → contributions 含所有尝试记录 + failed=true", async () => {
+    const estimator = createTokenEstimator();
+
+    const makeFailingStrategy = (
+      name: string,
+      priority: number,
+    ): { strategy: CompactionStrategy; apply: import("vitest").Mock } => {
+      const apply = vi.fn(async (ctx: CompactionContext) => ({
+        messages: ctx.messages as Message[],
+        tokensBefore: ctx.budget.currentTokens,
+        tokensAfter: ctx.budget.currentTokens,
+        compacted: false,
+      }));
+      return {
+        strategy: {
+          name,
+          kind: "summarize",
+          priority,
+          requiresLLM: true,
+          canApply: () => false,
+          apply,
+        },
+        apply,
+      };
+    };
+
+    const s1 = makeFailingStrategy("summarize-a", 100);
+    const s2 = makeFailingStrategy("summarize-b", 150);
+    const s3 = makeFailingStrategy("summarize-c", 200);
+
+    const eventBus = new EventBus<AgentEventMap>();
+    const compactEndPayloads: Array<{
+      strategies: readonly CompactStrategyContribution[];
+    }> = [];
+    eventBus.on("context:compact_end", (data) =>
+      compactEndPayloads.push({ strategies: data.strategies }),
+    );
+
+    const engine = createContextEngine(
+      estimator,
+      [s1.strategy, s2.strategy, s3.strategy],
+      {
+        modelInfo: SMALL_MODEL,
+        thresholds: FORCE_CRITICAL_THRESHOLDS,
+        profile: STRATEGY_ONLY_PROFILE,
+      },
+      eventBus,
+    );
+
+    const messages = buildLargeConversation(6, 2000);
+    const result = await engine.onTurnComplete({ messages, turnCount: 6 });
+
+    expect(s1.apply).toHaveBeenCalledTimes(1);
+    expect(s2.apply).toHaveBeenCalledTimes(1);
+    expect(s3.apply).toHaveBeenCalledTimes(1);
+
+    // 三次 force-apply 贡献全部记录（诊断 / 审计完整）
+    const contributions = compactEndPayloads[0]!.strategies;
+    expect(contributions).toHaveLength(3);
+    expect(contributions.map((c) => c.name)).toEqual([
+      "summarize-a",
+      "summarize-b",
+      "summarize-c",
+    ]);
+    expect(contributions.every((c) => c.phase === "force-apply")).toBe(true);
+    expect(contributions.every((c) => c.success === false)).toBe(true);
+
+    expect(result.failed).toBe(true);
+  });
+
+  // ─── strategy.apply 抛错：贡献仍被记录 + rethrow ───
+
+  it("strategy.apply 抛错 → contribution 仍被记录（success:false）后 rethrow 到外层", async () => {
+    // 契约：strategies 内部应捕获异常并返 compacted:false；rethrow 仅在 programming bug 路径。
+    // 为保诊断/审计不丢，compact_end 事件必须包含这个失败记录。
+    const eventBus = new EventBus<AgentEventMap>();
+    const compactEndPayloads: Array<{
+      strategies: readonly CompactStrategyContribution[];
+    }> = [];
+    eventBus.on("context:compact_end", (data) =>
+      compactEndPayloads.push({ strategies: data.strategies }),
+    );
+
+    const estimator = createTokenEstimator();
+    const bugError = new Error("programming bug: strategy forgot try-catch");
+    const applyFn = vi.fn(async () => {
+      throw bugError;
+    });
+    const buggyStrategy: CompactionStrategy = {
+      name: "buggy-summarize",
+      kind: "summarize",
+      priority: 200,
+      requiresLLM: true,
+      canApply: () => true,
+      apply: applyFn,
+    };
+
+    const engine = createContextEngine(
+      estimator,
+      [buggyStrategy],
+      {
+        modelInfo: SMALL_MODEL,
+        thresholds: FORCE_CRITICAL_THRESHOLDS,
+        profile: STRATEGY_ONLY_PROFILE,
+      },
+      eventBus,
+    );
+
+    const messages = buildLargeConversation(6, 2000);
+
+    // engine onTurnComplete 应 rethrow 原错误（agent-loop / pre-flight 由
+    // resolveContextManager 把它归一化成 AgentError）
+    await expect(
+      engine.onTurnComplete({ messages, turnCount: 6 }),
+    ).rejects.toBe(bugError);
+
+    // rethrow 前必须 fire compact_end 且含贡献记录
+    expect(compactEndPayloads).toHaveLength(1);
+    const contributions = compactEndPayloads[0]!.strategies;
+    // 循环内 apply 抛 → 记录一条；force-apply 不再尝试（caughtError 已中断）
+    expect(contributions).toHaveLength(1);
+    expect(contributions[0]!.name).toBe("buggy-summarize");
+    expect(contributions[0]!.phase).toBe("normal");
+    expect(contributions[0]!.success).toBe(false);
+  });
+
+  // ─── P1-ζ: compact_start 事务幂等 ───
+
+  it("compact_start 只 fire 一次(force-apply 加入事务不重复 fire, P1-ζ)", async () => {
+    const eventBus = new EventBus<AgentEventMap>();
+    const startCount = { n: 0 };
+    const endCount = { n: 0 };
+    eventBus.on("context:compact_start", () => {
+      startCount.n++;
+    });
+    eventBus.on("context:compact_end", () => {
+      endCount.n++;
+    });
+
+    const estimator = createTokenEstimator();
+    const applyFn = vi.fn(async (ctx: CompactionContext) => ({
+      messages: ctx.messages as Message[],
+      tokensBefore: ctx.budget.currentTokens,
+      tokensAfter: ctx.budget.currentTokens,
+      compacted: false,
+    }));
+    // canApply=true + compacted=false 触发循环内 + force-apply 两次 apply
+    const mockStrategy = makeMockLLMSummarize({ canApply: true, apply: applyFn });
+
+    const engine = createContextEngine(
+      estimator,
+      [mockStrategy],
+      {
+        modelInfo: SMALL_MODEL,
+        thresholds: FORCE_CRITICAL_THRESHOLDS,
+        profile: STRATEGY_ONLY_PROFILE,
+      },
+      eventBus,
+    );
+
+    const messages = buildLargeConversation(6, 2000);
+    await engine.onTurnComplete({ messages, turnCount: 6 });
+
+    // 即便有两次 apply(loop + force-apply),事务级事件各只 fire 一次
+    expect(startCount.n).toBe(1);
+    expect(endCount.n).toBe(1);
+    // 且 apply 被调 2 次
+    expect(applyFn).toHaveBeenCalledTimes(2);
   });
 });

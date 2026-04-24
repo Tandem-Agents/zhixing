@@ -17,9 +17,10 @@
  * - error：LLM 调用出错（MVP 不做自动恢复，后续通过 guards 扩展）
  */
 
+import { resolveContextManager, type ContextTermination } from "../context/termination.js";
 import type { IEventBus } from "../events/types.js";
 import type { AgentEventMap } from "../types/agent-events.js";
-import { emptyUsage, mergeUsage } from "../types/llm.js";
+import { emptyUsage, mergeUsage, type TokenUsage } from "../types/llm.js";
 import { extractText, extractToolCalls, toolResultMessage } from "../types/messages.js";
 import { toToolSpec } from "../types/tools.js";
 import { streamLLMCall } from "./llm-call.js";
@@ -117,6 +118,32 @@ export async function* runAgentLoop(
         console.log(`[llm] 工具调用: ${toolCalls.map(tc => tc.name).join(", ")}`);
       }
       if (toolCalls.length === 0) {
+        // 纯文本 return 前触发 compact 检查（社交通道 / 纯聊天场景原本漏掉）
+        //
+        // 目的是**让 engine fire compact_end 事件**—— run-agent 的闭包累积订阅
+        // 读到真 summary + turnsCompacted，写入 RunResult.compactInfo → transcript。
+        //
+        // 设计细节：
+        //   - 本 run 已完成，compact 改的 messages 不影响返回值（无 newMessages 概念，
+        //     yield 流也已结束；调用方的 newMessages 由 yield 流追踪产生，独立）
+        //   - 传入的 messages 必须含当前 llmResult.message（最新 assistant 回复），
+        //     否则本轮对话没计入 compact 决策
+        //   - failed / abort / engine 抛错统一由 resolveContextManager 归一化
+        const termination = await resolveContextManager(
+          params.contextManager,
+          {
+            messages: [...state.messages, llmResult.message],
+            turnCount: state.turnCount + 1,
+            abortSignal,
+          },
+          abortSignal,
+          "pure-text return",
+        );
+        const terminal = toTerminalAgentResult(termination, usage);
+        if (terminal) {
+          return await emitRunEnd(eventBus, startTime, terminal);
+        }
+
         return await emitRunEnd(eventBus, startTime, {
           reason: "completed",
           message: llmResult.message,
@@ -146,15 +173,28 @@ export async function* runAgentLoop(
       ];
 
       // ── Context management: 预算检查 + 自动压缩 ──
-      if (params.contextManager) {
-        const cmResult = await params.contextManager.onTurnComplete({
+      //
+      // resolveContextManager 归一化 3 种终止场景（见 context/termination.ts）：
+      //   - engine / strategy 抛错 → ContextTermination.kind="error"
+      //   - output.failed + abortSignal.aborted → kind="aborted"（abort 优先）
+      //   - output.failed + 非 abort → kind="error"（AgentError.type=context_overflow）
+      // 正常返回 kind="ok" 供下方 modified 消费。
+      const termination = await resolveContextManager(
+        params.contextManager,
+        {
           messages: newMessages,
           turnCount: newTurnCount,
           abortSignal,   // 透传：strategy 内部的 LLM 调用受同一 abort 控制
-        });
-        if (cmResult.modified) {
-          newMessages = cmResult.messages;
-        }
+        },
+        abortSignal,
+        "tool loop",
+      );
+      const terminal = toTerminalAgentResult(termination, usage);
+      if (terminal) {
+        return await emitRunEnd(eventBus, startTime, terminal);
+      }
+      if (termination.kind === "ok" && termination.output.modified) {
+        newMessages = termination.output.messages;
       }
 
       state = {
@@ -210,6 +250,10 @@ function resolveDeps(params: AgentLoopParams): AgentLoopDeps {
 /**
  * 发射 agent:run_end 事件并返回 AgentResult。
  * 将事件发射和结果返回合并，确保一致性。
+ *
+ * errorType 从 AgentError.type 提取，供订阅方做差异化 UX（例如 context_overflow
+ * 建议用户 /clear；rate_limit 告警但不终止 session）—— 避免订阅方从 message
+ * 做 substring 匹配，后者不稳定。
  */
 async function emitRunEnd(
   eventBus: IEventBus<AgentEventMap> | undefined,
@@ -221,6 +265,36 @@ async function emitRunEnd(
     duration: Date.now() - startTime,
     usage: result.usage,
     error: result.reason === "error" ? result.error.message : undefined,
+    errorType: result.reason === "error" ? result.error.type : undefined,
   });
   return result;
+}
+
+// ─── Context termination → AgentResult 映射 ───
+
+/**
+ * 把 context/termination.ts 的判别联合映射到 agent-loop 的 AgentResult。
+ *
+ * 映射规则：
+ *   - kind="ok"      → undefined（非终止，调用方继续流程并按需消费 output.messages）
+ *   - kind="error"   → { reason: "error", error, usage }
+ *   - kind="aborted" → { reason: "aborted", usage }
+ *
+ * 为什么返回 undefined 而非省略该分支：保持 switch 的类型穷尽性
+ * （ContextTermination 加 kind 时 tsc 会报未穷尽错误），避免未来新增 kind 悄悄漏处理。
+ *
+ * usage 参数：当前 turn 的累积 usage —— 终止 AgentResult 需要带 usage 让订阅方统计消耗。
+ */
+function toTerminalAgentResult(
+  termination: ContextTermination,
+  usage: TokenUsage,
+): AgentResult | undefined {
+  switch (termination.kind) {
+    case "ok":
+      return undefined;
+    case "error":
+      return { reason: "error", error: termination.error, usage };
+    case "aborted":
+      return { reason: "aborted", usage };
+  }
 }

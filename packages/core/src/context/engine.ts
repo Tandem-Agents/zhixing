@@ -19,6 +19,7 @@ import type { IEventBus } from "../events/types.js";
 import type { AgentEventMap } from "../types/agent-events.js";
 import type { Message } from "../types/messages.js";
 import type {
+  BudgetStatus,
   BudgetThresholds,
   CompactionContext,
   CompactionStrategy,
@@ -180,57 +181,138 @@ export class ContextEngine implements ContextManagerHook {
     // ── Step 3: 剩余策略兜底（LLM 压缩等） ──
     const contributions: CompactStrategyContribution[] = [];
     const transactionTokensBefore = budget.currentTokens;
-    let transactionStarted = false;
+    // 事务幂等启动 —— 第一次 canApply 成功（或 force-apply 入场）时 fire compact_start，
+    // 重复调用只读 flag 不再 emit。抽成 closure 避免在 loop 内和 force-apply 分支各维护一份。
+    const tx = { started: false };
+    const startTransaction = async (): Promise<void> => {
+      if (tx.started) return;
+      await this.eventBus?.emit("context:compact_start", {
+        tokensBefore: transactionTokensBefore,
+      });
+      tx.started = true;
+    };
+
+    // 单个 strategy 的"执行 + 贡献记录"原子操作 —— 循环和 force-apply 共用。
+    //
+    // 职责：
+    //   1. startTransaction（事务幂等启动）
+    //   2. 构造 CompactionContext（每次用当前 messages/budget 快照，循环中它们会在上一步 mutate）
+    //   3. strategy.apply —— 若抛错记录一条 success:false 的贡献再 rethrow
+    //      （契约：strategies 内部应捕获异常并返 compacted:false；rethrow 只发生在
+    //       programming bug 路径。贡献预先记录保证 compact_end 事件包含所有尝试记录，
+    //       诊断/审计不丢）
+    //   4. 成功时更新 messages / budget / modified
+    //   5. 无论如何推一条贡献进 contributions 数组
+    //
+    // 关闭了闭包里所有 mutation：contributions / messages / modified / budget。
+    // 函数之外不再操作同名变量（单一 mutation 入口）。
+    const runStrategyAttempt = async (
+      strategy: CompactionStrategy,
+      phase: "normal" | "force-apply",
+    ): Promise<void> => {
+      const stratBefore = budget.currentTokens;
+      await startTransaction();
+
+      const context: CompactionContext = {
+        messages,
+        budget,
+        currentTurn: turnCount,
+        abortSignal,
+      };
+
+      let compacted = false;
+      let summary: string | undefined;
+      let turnsCompacted: number | undefined;
+      let threwError: unknown;
+
+      try {
+        const result = await strategy.apply(context);
+        if (result.compacted) {
+          messages = result.messages;
+          modified = true;
+          budget = this.checkBudget(messages);
+        }
+        compacted = result.compacted;
+        summary = result.summary;
+        turnsCompacted = result.turnsCompacted;
+      } catch (e) {
+        threwError = e;
+      }
+
+      contributions.push({
+        name: strategy.name,
+        phase,
+        success: compacted,
+        tokensBefore: stratBefore,
+        tokensAfter: compacted ? budget.currentTokens : stratBefore,
+        summary,
+        turnsCompacted,
+      });
+
+      if (threwError) throw threwError;
+    };
+
     let caughtError: unknown;
 
     try {
       for (const strategy of this.strategies) {
-        const context: CompactionContext = {
+        const checkContext: CompactionContext = {
           messages,
           budget,
           currentTurn: turnCount,
           abortSignal,
         };
 
-        if (!strategy.canApply(context)) continue;
+        if (!strategy.canApply(checkContext)) continue;
 
-        const stratBefore = budget.currentTokens;
+        await runStrategyAttempt(strategy, "normal");
 
-        if (!transactionStarted) {
-          await this.eventBus?.emit("context:compact_start", {
-            tokensBefore: transactionTokensBefore,
-          });
-          transactionStarted = true;
-        }
-
-        const result = await strategy.apply(context);
-
-        if (result.compacted) {
-          messages = result.messages;
-          modified = true;
-          budget = this.checkBudget(messages);
-        }
-
-        contributions.push({
-          name: strategy.name,
-          success: result.compacted,
-          tokensBefore: stratBefore,
-          tokensAfter: result.compacted ? budget.currentTokens : stratBefore,
-          summary: result.summary,
-          turnsCompacted: result.turnsCompacted,
-        });
-
-        if (
-          result.compacted &&
-          (budget.status === "normal" || budget.status === "warning")
-        ) {
+        // runStrategyAttempt 闭包里重新赋值 budget（this.checkBudget 结果）；
+        // 但 TS 的 control-flow narrowing 不跟踪 async 闭包里的 mutation —— 从 Step 2 的
+        // early return 带下来的"status 只能是 compact|critical"narrow 仍在起作用。
+        // 用 `as BudgetStatus` 显式拓宽联合，让 normal/warning 比较不被判 dead code。
+        const postStatus = budget.status as BudgetStatus;
+        if (postStatus === "normal" || postStatus === "warning") {
           break;
+        }
+      }
+
+      // ── critical 硬挡 —— strategies 循环后仍 critical，force-apply 所有摘要型策略 ──
+      //
+      // 场景：
+      //   - summarize 型 canApply 被 triggerRatio / messages.length 挡住没跑
+      //   - 或跑过但 compacted:false（LLM 调用失败 / summary 校验失败）
+      //   - 循环结束后 budget.status === "critical" —— 必须再 try，否则 agent-loop
+      //     硬送 LLM 会被 provider 报 context_length_exceeded
+      //
+      // 设计：
+      //   - force-apply 纳入当前事务（contributions 数组 + 同一 compact_end）—— 不另起事务
+      //   - 绕过 canApply 的 triggerRatio / messages.length 门槛直接调 apply
+      //   - breaker 保护：apply 内部熔断时 compacted:false 返回，不破坏事务
+      //   - 按 `kind === "summarize"` 识别 —— 分类维度一等公民；未来改名/加多摘要
+      //     策略/用户自定义策略时自动适配，无需改 engine
+      //   - 遍历**所有** summarize 策略（按 priority ASC，与循环顺序一致）—— 若用户注册
+      //     多个摘要型策略（如 fast-summarize priority=100 + llm-summarize priority=200），
+      //     force-apply 会从轻到重依次尝试，降到 non-critical 就 break。
+      //     单策略场景下行为零变化（只遍历 1 个）。
+      //   - contribution.phase = "force-apply" 标记阶段，name 保持纯策略 ID
+      //     （消费方按 name + phase 组合做分组/统计）
+      if (budget.status === "critical") {
+        const summarizeStrategies = this.strategies.filter(
+          (s) => s.kind === "summarize",
+        );
+        for (const strategy of summarizeStrategies) {
+          // 同上：async 闭包 mutation 不被 TS 追踪；显式用 `as BudgetStatus` 拓宽
+          // 防止外层 "critical" 窄化把 "!== 'critical'" 判为 dead code
+          const currentStatus = budget.status as BudgetStatus;
+          if (currentStatus !== "critical") break;
+          await runStrategyAttempt(strategy, "force-apply");
         }
       }
     } catch (e) {
       caughtError = e;
     } finally {
-      if (transactionStarted) {
+      if (tx.started) {
         const aggregateSummary = contributions
           .map((c) => c.summary)
           .filter((s): s is string => s !== undefined)
@@ -275,7 +357,12 @@ export class ContextEngine implements ContextManagerHook {
 
     if (caughtError) throw caughtError;
 
-    return { messages: messages as Message[], modified };
+    // 硬挡失败判断 —— force-apply 后仍 critical 则 failed。
+    // 消费方（agent-loop / run-agent pre-flight）收到 failed 必须终止 run，
+    // 不要硬送 LLM（会被 provider 报 context_length_exceeded）。
+    const failed = budget.status === "critical" ? true : undefined;
+
+    return { messages: messages as Message[], modified, failed };
   }
 
   /**

@@ -25,12 +25,14 @@ import {
   createContextEngine,
   createLLMSummarizeStrategy,
   createTokenEstimator,
+  emptyUsage,
   createToolResultTrimStrategy,
   createMessageDropStrategy,
   createMemoryFlushStrategy,
   MemoryStore,
   PermissionStore,
   resolveAgentIdentity,
+  resolveContextManager,
   resolveModelInfo,
   SecurityPipeline,
   setAgentIdentity,
@@ -472,6 +474,60 @@ export async function createAgentRuntime(options: {
       // Per-turn 动态上下文注入到最新 user message（时间、任务状态等）
       const messagesWithTurnContext = turnContextInjector.inject(messagesWithContext);
 
+      // pre-flight compact 检查 —— 防止上 run 尾累积到超标、下 run 入口直接送 LLM 爆 context。
+      //
+      // 关键设计（审查 V1）：必须在 messagesWithTurnContext 上跑，不能在 params.messages 上。
+      //   params.messages 到 messagesWithTurnContext 的 token 增量可能达数 K（project context +
+      //   enriched skills），在小模型（32K）上可能跨越一个预算阈值。pre-flight 必须看真实输入
+      //   才能做出正确决策。
+      //
+      // 代价：如果 LLMSummarize 在 pre-flight 触发，注入的内容会被一起 summarize。7 段 prompt
+      //   要求"标识符原样保留"，路径/文件名等保留；注入内容进入 summary 是冗余但不破坏语义。
+      //
+      // 终止归一化：复用 core 的 `resolveContextManager`，与 agent-loop 内部两条触发点
+      // 共享同一判别逻辑（throw / aborted / overflow），避免第三处复制 abort 优先规则
+      // 和 AgentError 包装 —— 新加触发点时只需做 shape 映射。
+      let loopMessages = messagesWithTurnContext;
+      const buildPreFlightError = (agentResult: AgentResult): RunResult => ({
+        agentResult,
+        newMessages: [],
+        durationMs: Date.now() - startTime,
+        // budget 快照用 messagesWithTurnContext —— 即使 engine 抛错也能给一个保守值
+        budget: contextEngine.checkBudget(messagesWithTurnContext),
+        toolEndCount: 0,
+        injectedSkillIds: enrichedContext.injectedSkillIds,
+        compactInfo: getAccumulatedCompact(),
+      });
+
+      const preFlight = await resolveContextManager(
+        contextEngine,
+        {
+          messages: messagesWithTurnContext,
+          turnCount: 0,
+          abortSignal: params.abortSignal,
+        },
+        params.abortSignal,
+        "pre-flight",
+      );
+      switch (preFlight.kind) {
+        case "error":
+          return buildPreFlightError({
+            reason: "error",
+            error: preFlight.error,
+            usage: emptyUsage(),
+          });
+        case "aborted":
+          return buildPreFlightError({
+            reason: "aborted",
+            usage: emptyUsage(),
+          });
+        case "ok":
+          if (preFlight.output.modified) {
+            loopMessages = preFlight.output.messages;
+          }
+          break;
+      }
+
       // 用 SecurityPipeline 包装工具执行——每次 run() 重新构造 wrapper。
       // 把 turnContext（turnId / emissionTarget / commitToUser）合并到每次 tool.call 的 ToolExecutionContext；core loop 对此无感知。
       //
@@ -494,7 +550,7 @@ export async function createAgentRuntime(options: {
         provider,
         model,
         tools,
-        messages: messagesWithTurnContext,
+        messages: loopMessages,
         systemPrompt,
         eventBus,
         workingDirectory: process.cwd(),

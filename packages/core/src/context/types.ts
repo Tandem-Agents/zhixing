@@ -151,15 +151,42 @@ export interface CompactionResult {
 }
 
 /**
+ * 压缩策略分类 —— 决定 force-apply 识别、诊断分组、UI 渲染。
+ *
+ * 为什么不用 name 字符串匹配：策略名是 "稳定 ID 但语义任意" 的字段，
+ * 未来加 "llm-summarize-v2" / 用户自定义 / 多摘要策略时按 name 匹配会静默错漏。
+ * kind 是 "分类维度的一等公民"，跨策略稳定。
+ *
+ * 分类语义：
+ *   - "summarize"：产 summary 替代 turn（LLM 调用）。critical force-apply 的候选。
+ *   - "trim"：粒度内裁剪（不替代 turn，如 ToolResultTrim）。免费。
+ *   - "drop"：丢弃消息（不替代 turn，如 MessageDrop）。免费。
+ *   - "flush"：外化副作用（如 MemoryFlush 写 store，不改 messages）。LLM 调用但非摘要替代。
+ *
+ * 扩展约定：新增策略类型时在此加枚举项，同步更新 engine 的 force-apply 候选逻辑。
+ */
+export type CompactionStrategyKind =
+  | "summarize"
+  | "trim"
+  | "drop"
+  | "flush";
+
+/**
  * 可插拔的压缩策略接口。
  *
  * 内置策略按优先级：
- * - P0: ToolResultTrim（免费，截断旧 tool_result）
- * - P1: MessageDrop（免费，丢弃早期消息）
- * - P2: LLMSummarize（昂贵，LLM 生成摘要）
+ * - P0: ToolResultTrim（免费，截断旧 tool_result） kind=trim
+ * - P1: MemoryFlush    （LLM，提取并持久化）       kind=flush
+ * - P1: MessageDrop    （免费，丢弃早期消息）      kind=drop
+ * - P2: LLMSummarize   （昂贵，LLM 生成摘要）     kind=summarize
  */
 export interface CompactionStrategy {
   readonly name: string;
+  /**
+   * 策略分类。engine 用此识别 force-apply 候选（kind === "summarize"），
+   * 代替了以前的 `name === "llm-summarize"` 字符串硬编码。
+   */
+  readonly kind: CompactionStrategyKind;
   /** 优先级（越小越先执行） */
   readonly priority: number;
   /** 是否需要调用 LLM（影响成本判断） */
@@ -179,17 +206,28 @@ export interface CompactionStrategy {
  * 可以看到每个 strategy 的独立效果，从汇总字段可以看到总效果。
  */
 export interface CompactStrategyContribution {
-  /** strategy.name */
+  /** strategy.name —— 永远是策略稳定 ID，不带阶段后缀 */
   readonly name: string;
+  /**
+   * 本次调用所处阶段。
+   *
+   * - undefined / "normal"：strategies 循环内的正常 apply（绝大多数场景）
+   * - "force-apply"：critical 硬挡路径，engine 绕过 canApply 直接调的最后一搏
+   *
+   * 为什么独立字段而非 name 后缀：name 是稳定分组 ID，
+   * 后缀污染会让消费方（UI 分组 / 诊断统计）无法精确区分"不同 strategy"
+   * 和"同 strategy 不同阶段"。分离后 `name + phase` 组合才是唯一键。
+   */
+  readonly phase?: "normal" | "force-apply";
   /** 本策略是否实际压缩（strategy.apply 返回的 compacted 值） */
   readonly success: boolean;
   /** 本策略跑前的 tokens */
   readonly tokensBefore: number;
   /** 本策略跑后的 tokens */
   readonly tokensAfter: number;
-  /** 仅 LLMSummarize 产出；非摘要型策略为 undefined */
+  /** 仅摘要型策略（kind="summarize"）产出；非摘要型为 undefined */
   readonly summary?: string;
-  /** 仅 LLMSummarize 产出；非摘要型策略为 undefined */
+  /** 仅摘要型策略（kind="summarize"）产出；非摘要型为 undefined */
   readonly turnsCompacted?: number;
 }
 
@@ -220,4 +258,18 @@ export interface ContextManagerInput {
 export interface ContextManagerOutput {
   messages: Message[];
   modified: boolean;
+  /**
+   * 硬挡失败标志 —— 事务化后（含 critical force-apply）仍无法压到 non-critical。
+   *
+   * 语义：context 耗尽，即使绕过 canApply 门槛 force-apply LLMSummarize 也救不了
+   * （breaker 熔断 / apply 多次失败 / 或根本没有摘要型策略注册）。
+   *
+   * 消费方契约：
+   *   - agent-loop 在 tool 循环尾 / pure-text return 收到 failed → yield error + 终止 run
+   *     （不硬送 LLM 让 provider 返回 context_length_exceeded）
+   *   - run-agent 在 pre-flight 收到 failed → 直接返回 error RunResult，不进 runAgentLoop
+   *
+   * 默认 undefined 等价于 false —— 向后兼容（现有消费者把 undefined 当正常）。
+   */
+  failed?: boolean;
 }

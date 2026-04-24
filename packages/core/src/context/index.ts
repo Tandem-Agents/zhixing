@@ -6,6 +6,8 @@ export type {
   CompactionContext,
   CompactionResult,
   CompactionStrategy,
+  CompactionStrategyKind,
+  CompactStrategyContribution,
   CompactLLMFn,
   ContextBudget,
   ContextManagerHook,
@@ -17,6 +19,9 @@ export { DEFAULT_THRESHOLDS, MAX_OUTPUT_RESERVE } from "./types.js";
 
 export type { BuildSystemPromptOptions, ContextEngineConfig } from "./engine.js";
 export { ContextEngine, createContextEngine } from "./engine.js";
+
+export type { ContextTermination } from "./termination.js";
+export { resolveContextManager } from "./termination.js";
 
 export {
   TokenEstimator,

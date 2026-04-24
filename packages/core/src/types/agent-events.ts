@@ -41,7 +41,17 @@ export type AgentEventMap = {
     reason: AgentRunEndReason;
     duration: number;
     usage: TokenUsage;
+    /** 错误消息（仅 reason="error" 时有值），用于日志展示 */
     error?: string;
+    /**
+     * 错误分类（仅 reason="error" 时有值），来自 AgentError.type。
+     * 订阅方可据此做差异化处理，例如：
+     *   - "context_overflow" → UI 建议用户 /clear
+     *   - "rate_limit" → 告警但不终止 session
+     *   - "auth" → 弹出 provider 配置向导
+     * 不要从 error 消息字符串里 substring 匹配，那不稳定。
+     */
+    errorType?: AgentErrorType;
   };
 
   // ─── LLM 调用 ───

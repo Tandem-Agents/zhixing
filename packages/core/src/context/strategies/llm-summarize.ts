@@ -77,6 +77,7 @@ export interface LLMSummarizeConfig {
 
 export class LLMSummarizeStrategy implements CompactionStrategy {
   readonly name = "llm-summarize";
+  readonly kind = "summarize" as const;
   readonly priority = 200;
   readonly requiresLLM = true;
 

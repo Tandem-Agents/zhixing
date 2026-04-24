@@ -124,6 +124,7 @@ Respond with ONLY a valid JSON array, no markdown fences, no explanation.`;
  */
 export class MemoryFlushStrategy implements CompactionStrategy {
   readonly name = "memory_flush";
+  readonly kind = "flush" as const;
   readonly priority = 3;
   readonly requiresLLM = true;
 
