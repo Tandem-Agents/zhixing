@@ -14,9 +14,7 @@
 
 import {
   generateTurnId,
-  userMessage,
-  type AgentResult,
-  type Turn,
+  type RunResult,
   type TurnContext,
 } from "@zhixing/core";
 import type { MethodEntry } from "../handlers.js";
@@ -25,6 +23,7 @@ import { RPC_ERROR_CODES } from "../protocol.js";
 import type { RpcConnection } from "../connection.js";
 import type { ServerContext } from "../../context.js";
 import type { ConversationManager, ManagedSession } from "../../runtime/conversation-manager.js";
+import { runTurnWithCommit } from "../../runtime/run-turn.js";
 
 // ─── session.send ───
 
@@ -125,37 +124,43 @@ async function runManagedTurn(
         triggeredBy: String(connection.id),
       },
     };
-    const gen = managed.runtime.run(text, {
-      abortSignal: abortController.signal,
-      turnContext,
-    });
-    let result: AgentResult | undefined;
+    // 走 runTurnWithCommit helper —— 它内部处理 run + recordTurn + 异常 rollback：
+    //   · non-completed / commitTurn throw / runtime throw 三条异常路径都保证
+    //     adapter state 回到 preRun，避免 orphan userMsg 污染下一轮 LLM 输入
+    //   · commitTurn 失败通过 onCommitFailure hook 通知（此处暂未接 logger；
+    //     未来需要 observability 时在 hook 里补 logger.warn / metrics）
+    const gen = runTurnWithCommit(
+      manager,
+      conversationId,
+      text,
+      {
+        abortSignal: abortController.signal,
+        turnContext,
+        turnIndex: managed.turnCount,
+        source: "channel",
+      },
+    );
+    let runResult: RunResult | undefined;
 
     while (true) {
       const iter = await gen.next();
       if (iter.done) {
-        result = iter.value;
-        connection.notify("session.complete", { conversationId, sessionId: conversationId, result });
+        runResult = iter.value;
+        // session.complete 事件的契约保持 AgentResult（向后兼容）—— 客户端
+        // 只关心终止原因 + usage + error，不需要 Turn/compactBefore（那是持久化事项）
+        connection.notify("session.complete", {
+          conversationId,
+          sessionId: conversationId,
+          result: runResult.agentResult,
+        });
         break;
       }
       connection.notify("session.delta", { conversationId, sessionId: conversationId, delta: iter.value });
     }
 
-    if (result && result.reason === "completed" && !abortController.signal.aborted) {
-      const turn: Turn = {
-        type: "turn",
-        turnIndex: managed.turnCount,
-        timestamp: turnStartedAt,
-        userMessage: userMessage(text),
-        assistantMessage: result.message,
-        usage: result.usage,
-      };
-      try {
-        await manager.recordTurn(conversationId, turn);
-      } catch {
-        // persistence failure — non-fatal
-      }
-    }
+    // turnStartedAt 不再用于 Turn.timestamp（buildTurn 已精确设定）—— 保留变量避免
+    // 未来诊断字段需要 turn 入口时间时重新加逻辑。
+    void turnStartedAt;
   } catch (err) {
     if (abortController.signal.aborted) return;
     const message = err instanceof Error ? err.message : String(err);

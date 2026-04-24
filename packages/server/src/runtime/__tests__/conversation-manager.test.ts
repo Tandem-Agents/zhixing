@@ -1,10 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   ConfirmationBroker,
-  type AgentResult,
   type AgentYield,
   type IConfirmationBroker,
   type Message,
+  type RunResult,
 } from "@zhixing/core";
 import { ConversationManager } from "../conversation-manager.js";
 import { ConfirmationHub } from "../../confirmation/hub.js";
@@ -13,23 +13,47 @@ import type { SessionRuntime, RuntimeFactory } from "../types.js";
 // ─── Mock Runtime ───
 
 function createMockRuntime(sessionId: string): SessionRuntime {
-  const messages: Message[] = [];
+  let messages: Message[] = [];
   let aborted = false;
 
   return {
     sessionId,
-    async *run(text): AsyncGenerator<AgentYield, AgentResult> {
-      messages.push({ role: "user", content: [{ type: "text", text }] });
-      messages.push({ role: "assistant", content: [{ type: "text", text: `echo: ${text}` }] });
+    async *run(text): AsyncGenerator<AgentYield, RunResult> {
+      const userMsg: Message = {
+        role: "user",
+        content: [{ type: "text", text: typeof text === "string" ? text : "" }],
+      };
+      const assistantMsg: Message = {
+        role: "assistant",
+        content: [{ type: "text", text: `echo: ${text}` }],
+      };
+      messages.push(userMsg, assistantMsg);
       yield { type: "text_delta", text: `echo: ${text}` };
       return {
-        reason: "completed",
-        message: messages[messages.length - 1]!,
-        usage: { inputTokens: 0, outputTokens: 0 },
+        agentResult: {
+          reason: "completed",
+          message: assistantMsg,
+          usage: { inputTokens: 0, outputTokens: 0 },
+        },
+        turn: {
+          type: "turn",
+          turnIndex: 0,
+          timestamp: new Date().toISOString(),
+          userMessage: userMsg,
+          assistantMessage: assistantMsg,
+          usage: { inputTokens: 0, outputTokens: 0 },
+        },
+        newMessages: [assistantMsg],
+        durationMs: 0,
+        toolEndCount: 0,
+        injectedSkillIds: [],
       };
     },
     getHistory(limit) {
       return limit ? messages.slice(-limit) : messages;
+    },
+    updateMessages(canonical) {
+      messages = [...canonical];
     },
     abort() {
       aborted = true;
@@ -122,6 +146,7 @@ describe("ConversationManager", () => {
         idleCheckIntervalMs: 999_999,
       }, {
         initTranscript: async (id) => { inited.push(id); },
+        commitTurn: async () => [], // 配置守卫：有持久化意图必须带 commitTurn
       });
 
       await mgr.getOrCreate("new-conv");
@@ -141,6 +166,7 @@ describe("ConversationManager", () => {
           { role: "assistant", content: [{ type: "text", text: "hello" }] },
         ],
         initTranscript: async (id) => { inited.push(id); },
+        commitTurn: async () => [], // 配置守卫：有持久化意图必须带 commitTurn
       });
 
       const session = await mgr.getOrCreate("existing");
@@ -161,6 +187,7 @@ describe("ConversationManager", () => {
           { role: "user", content: [{ type: "text", text: "q2" }] },
           { role: "assistant", content: [{ type: "text", text: "a2" }] },
         ],
+        commitTurn: async () => [], // 配置守卫：有持久化意图必须带 commitTurn
       });
 
       const session = await mgr.getOrCreate("restored");
@@ -624,6 +651,9 @@ describe("ConversationManager", () => {
       }, {
         loadHistory: async (id) => { loaded.push(id); return undefined; },
         initTranscript: async (id) => { inited.push(id); },
+        // 构造守卫要求：有持久化意图（loadHistory / initTranscript）必须配 commitTurn。
+        // 本测试只验证 ephemeral 隔离行为，commitTurn 是 no-op 占位。
+        commitTurn: async () => [],
       });
 
       const session = await mgr.getOrCreate(undefined, { ephemeral: true });
@@ -640,7 +670,10 @@ describe("ConversationManager", () => {
         idleTimeoutMs: 30 * 60_000,
         idleCheckIntervalMs: 999_999,
       }, {
-        persistTurn: async (_cid, turn) => { persisted.push(turn); },
+        commitTurn: async (_cid, payload) => {
+          if (payload.turn) persisted.push(payload.turn);
+          return [];
+        },
       });
 
       const session = await mgr.getOrCreate("eph-1", { ephemeral: true });
@@ -669,7 +702,10 @@ describe("ConversationManager", () => {
         idleTimeoutMs: 30 * 60_000,
         idleCheckIntervalMs: 999_999,
       }, {
-        persistTurn: async (cid, turn) => { persisted.push({ cid, turn }); },
+        commitTurn: async (cid, payload) => {
+          if (payload.turn) persisted.push({ cid, turn: payload.turn });
+          return [];
+        },
         initTranscript: async (id) => { inited.push(id); },
       });
 
@@ -704,7 +740,10 @@ describe("ConversationManager", () => {
         idleTimeoutMs: 30 * 60_000,
         idleCheckIntervalMs: 999_999,
       }, {
-        persistTurn: async (_cid, turn) => { persisted.push(turn); },
+        commitTurn: async (_cid, payload) => {
+          if (payload.turn) persisted.push(payload.turn);
+          return [];
+        },
         initTranscript: async (id) => { inited.push(id); },
       });
 
@@ -744,7 +783,10 @@ describe("ConversationManager", () => {
         idleTimeoutMs: 30 * 60_000,
         idleCheckIntervalMs: 999_999,
       }, {
-        persistTurn: async (cid, turn) => { persisted.push({ cid, turn }); },
+        commitTurn: async (cid, payload) => {
+          if (payload.turn) persisted.push({ cid, turn: payload.turn });
+          return [];
+        },
       });
 
       await mgr.getOrCreate("persist-1");
@@ -795,12 +837,15 @@ describe("ConversationManager", () => {
         idleCheckIntervalMs: 999_999,
       }, {
         initTranscript: async (id) => { inited.push(id); },
-        persistTurn: async (_cid, turn) => {
+        commitTurn: async (_cid, payload) => {
           persistCallCount++;
           if (persistCallCount === 2) {
             throw new Error("disk full");
           }
-          persisted.push((turn as { turnIndex: number }).turnIndex);
+          if (payload.turn) {
+            persisted.push((payload.turn as { turnIndex: number }).turnIndex);
+          }
+          return [];
         },
       });
 
@@ -830,6 +875,98 @@ describe("ConversationManager", () => {
       expect(persisted).toEqual([0, 1]);
       expect(session.pendingTurns).toHaveLength(0);
       expect(session.ephemeral).toBe(false);
+
+      mgr.disposeAll();
+    });
+  });
+
+  // ─── 配置守卫（Phase 5 Bug #1/#2 回归守卫） ───
+  //
+  // "persistent 静默丢消息 / promote 错误晋升" 两个 bug 的根源都是
+  // commitTurn 是 optional。这组测试保证：
+  //   1. 构造时部分配置（有 loadHistory/initTranscript 但无 commitTurn）→ throw
+  //   2. 运行时 persistent 分支无 cb → throw（defense-in-depth）
+  //   3. 运行时 promote 无 cb → return false 保持 ephemeral 状态
+
+  describe("configuration guards", () => {
+    it("constructor throws if loadHistory is provided without commitTurn", () => {
+      expect(
+        () =>
+          new ConversationManager(createMockFactory(), {
+            graceTimeoutMs: 60_000,
+            idleTimeoutMs: 30 * 60_000,
+            idleCheckIntervalMs: 999_999,
+          }, {
+            loadHistory: async () => undefined,
+            // commitTurn 故意缺失
+          }),
+      ).toThrow(/commitTurn.*required/i);
+    });
+
+    it("constructor throws if initTranscript is provided without commitTurn", () => {
+      expect(
+        () =>
+          new ConversationManager(createMockFactory(), {
+            graceTimeoutMs: 60_000,
+            idleTimeoutMs: 30 * 60_000,
+            idleCheckIntervalMs: 999_999,
+          }, {
+            initTranscript: async () => {},
+            // commitTurn 故意缺失
+          }),
+      ).toThrow(/commitTurn.*required/i);
+    });
+
+    it("constructor allows pure ephemeral-only manager (no persistence callbacks)", () => {
+      expect(
+        () =>
+          new ConversationManager(createMockFactory(), {
+            graceTimeoutMs: 60_000,
+            idleTimeoutMs: 30 * 60_000,
+            idleCheckIntervalMs: 999_999,
+          }),
+      ).not.toThrow();
+    });
+
+    it("constructor allows full persistent config", () => {
+      expect(
+        () =>
+          new ConversationManager(createMockFactory(), {
+            graceTimeoutMs: 60_000,
+            idleTimeoutMs: 30 * 60_000,
+            idleCheckIntervalMs: 999_999,
+          }, {
+            loadHistory: async () => undefined,
+            initTranscript: async () => {},
+            commitTurn: async () => [],
+          }),
+      ).not.toThrow();
+    });
+
+    it("promote() returns false when commitTurn is missing (preserves ephemeral state)", async () => {
+      // 纯 ephemeral-only manager —— 构造合法（三个 callback 都无）
+      const mgr = new ConversationManager(createMockFactory(), {
+        graceTimeoutMs: 60_000,
+        idleTimeoutMs: 30 * 60_000,
+        idleCheckIntervalMs: 999_999,
+      });
+
+      const session = await mgr.getOrCreate("eph-no-cb", { ephemeral: true });
+      const mockTurn = {
+        type: "turn" as const,
+        turnIndex: 0,
+        timestamp: new Date().toISOString(),
+        userMessage: { role: "user" as const, content: [{ type: "text" as const, text: "hi" }] },
+        assistantMessage: { role: "assistant" as const, content: [{ type: "text" as const, text: "hello" }] },
+        usage: { inputTokens: 1, outputTokens: 1 },
+      };
+      session.pendingTurns.push(mockTurn);
+
+      // promote 必须 return false、不变 ephemeral 标志、不丢 pendingTurns
+      const ok = await mgr.promote("eph-no-cb");
+      expect(ok).toBe(false);
+      expect(session.ephemeral).toBe(true);
+      expect(session.pendingTurns).toHaveLength(1);
 
       mgr.disposeAll();
     });

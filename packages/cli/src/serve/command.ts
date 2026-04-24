@@ -178,8 +178,10 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
         provider: opts.provider ?? "default",
       });
     },
-    persistTurn: async (conversationId, turn) => {
-      await transcript.appendTurn(conversationId, turn);
+    // commitTurn 唯一原子持久化入口，返 canonical → ConversationManager
+    // 内部走 session.runtime.updateMessages(canonical) 完成单一事实源回喂
+    commitTurn: async (conversationId, payload) => {
+      return await transcript.commitTurn(conversationId, payload);
     },
     // 每次 getOrCreate 后自动把 runtime.confirmationBroker attach 到 hub；
     // 四处 dispose（delete / grace / idle / disposeAll）前自动 detach（§3.2 INV-H3）

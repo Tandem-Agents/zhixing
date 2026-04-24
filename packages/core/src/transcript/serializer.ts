@@ -37,6 +37,105 @@ export async function writeHeader(
   await fs.writeFile(filePath, line, "utf-8");
 }
 
+// ─── 原子写入 ───
+
+/**
+ * 原子替换文件内容 —— 写 tmp + rename 的经典模式。
+ *
+ * 失败模型：
+ *   - 写 tmp 失败 → 抛错，原文件不变
+ *   - rename 失败 → 抛错，tmp 文件留存（orphan），原文件不变
+ *   - 成功 → 原文件被 tmp 完全替代
+ *
+ * 平台差异：
+ *   - POSIX (linux/darwin)：`rename(2)` 原子覆盖，一次调用搞定
+ *   - Windows：默认走 fallback —— `unlink old → rename tmp`，避免 MoveFileExW 的
+ *     边缘场景（共享驱动器、WSL、旧版 NTFS）破坏原子假设；orphan tmp 由
+ *     `cleanupOrphanTmp` 启动清理
+ *
+ * DI：`platform` 参数供测试锚定（CLAUDE.md 要求：测试分支 process.platform 必须 DI）。
+ * 不传时默认 `process.platform`。
+ */
+export interface WriteAtomicOptions {
+  /** 平台 DI，默认 `process.platform` */
+  readonly platform?: NodeJS.Platform;
+}
+
+export async function writeAtomic(
+  filePath: string,
+  content: string,
+  opts?: WriteAtomicOptions,
+): Promise<void> {
+  const platform = opts?.platform ?? process.platform;
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+
+  const tmp = tmpPathFor(filePath);
+  await fs.writeFile(tmp, content, "utf-8");
+
+  if (platform === "win32") {
+    // Windows fallback：先 unlink，再 rename
+    try {
+      await fs.unlink(filePath);
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") {
+        // unlink 失败（非"文件不存在"）→ 清理 tmp 后抛错
+        await fs.unlink(tmp).catch(() => {});
+        throw e;
+      }
+    }
+    try {
+      await fs.rename(tmp, filePath);
+    } catch (e) {
+      await fs.unlink(tmp).catch(() => {});
+      throw e;
+    }
+  } else {
+    // POSIX：rename 原子覆盖
+    try {
+      await fs.rename(tmp, filePath);
+    } catch (e) {
+      await fs.unlink(tmp).catch(() => {});
+      throw e;
+    }
+  }
+}
+
+/**
+ * 清理目录下的孤立 .tmp 文件（来自崩溃残留）。
+ *
+ * 只扫 `${basename}.*.tmp` 模式 —— 不会误删用户的其他 .tmp 文件。
+ * 失败静默（权限、目录不存在等）—— 清理是 best-effort，不阻塞主流程。
+ */
+export async function cleanupOrphanTmp(targetFilePath: string): Promise<void> {
+  const dir = path.dirname(targetFilePath);
+  const prefix = `${path.basename(targetFilePath)}.`;
+
+  let entries: string[];
+  try {
+    entries = await fs.readdir(dir);
+  } catch {
+    return;
+  }
+
+  await Promise.all(
+    entries
+      .filter((e) => e.startsWith(prefix) && e.endsWith(".tmp"))
+      .map((e) => fs.unlink(path.join(dir, e)).catch(() => {})),
+  );
+}
+
+/**
+ * 生成唯一的 tmp 文件名。格式：`{targetPath}.{pid}-{ts}-{rand}.tmp`。
+ *
+ * pid + 毫秒时间戳 + 随机后缀三重保证并发写不碰撞，即使同一进程内瞬时发起多次
+ * commitTurn（实际被锁串行，但构造 tmp 名不依赖锁）。
+ */
+function tmpPathFor(filePath: string): string {
+  const uniq = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  return `${filePath}.${uniq}.tmp`;
+}
+
 // ─── 读取 ───
 
 /** 只读取 JSONL 首行，解析为 TranscriptHeader。文件不存在或首行非 header 返回 null */

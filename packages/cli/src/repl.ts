@@ -18,7 +18,6 @@ import chalk from "chalk";
 import {
   userMessage,
   type Message,
-  type Turn,
   TranscriptStore,
   getProjectId,
   getZhixingHome,
@@ -58,7 +57,6 @@ import { CommandDispatcher } from "./command-dispatcher.js";
 import { readInputLine, type InputLineResult } from "./typeahead-input.js";
 import { resolveFileRefs } from "./resolve-file-refs.js";
 import { type AgentRuntime, createAgentRuntime } from "./run-agent.js";
-import { toCompactMarker } from "./compact-accumulator.js";
 import {
   createRenderer,
   renderSummary,
@@ -514,15 +512,30 @@ function buildSlashCommands(rl: readline.Interface): Record<
             state.turnCounter,
           );
           if (result.modified) {
-            state.messages = result.messages;
             const pct = Math.round(result.budget.usageRatio * 100);
             console.log(chalk.green(`  ✓ 压缩完成，当前上下文占用 ${pct}%\n`));
-            // 写入 compact 行到会话文件 —— 仅在事务产生了真 summary 时写 marker，
-            // 避免给 transcript 注入 "(manual compact)" 等假摘要。
-            // forceCompact 已通过 L1 累积订阅组装好 CompactMarker（含 LLM 真 summary +
-            // 精确 turnsCompacted），直接交给 store 持久化。
+            // 走 commitTurn({compactBefore}) 统一持久化入口：
+            //   - 仅在事务产生真 summary 时写 marker（避免 "(manual compact)" 假摘要）
+            //   - commitTurn 内部原子重写：header + compactBefore + retained turns
+            //   - 返回 canonical → state.messages 整体替换，内存与磁盘严格一致
+            //   - 无会话 ID 或无真 summary 时降级为纯内存更新（不持久化）
             if (state.conversationId && result.compactBefore) {
-              state.store.appendCompact(state.conversationId, result.compactBefore).catch(() => {});
+              try {
+                state.messages = await state.store.commitTurn(state.conversationId, {
+                  compactBefore: result.compactBefore,
+                });
+              } catch (err) {
+                // 持久化失败：降级用 forceCompact 返回的内存版 messages
+                state.messages = result.messages;
+                console.log(
+                  chalk.dim(
+                    `  [持久化警告] ${err instanceof Error ? err.message : String(err)}`,
+                  ),
+                );
+              }
+            } else {
+              // 无真 summary（非摘要型策略）或无会话 ID → 仅更新内存
+              state.messages = result.messages;
             }
           } else {
             console.log(chalk.dim("  已无可压缩内容\n"));
@@ -628,6 +641,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
         : params.prompt;
       const result = await agentRuntime.run({
         messages: [userMessage(taskPrompt)],
+        turnIndex: 0,   // 调度任务是一次性 ephemeral turn，不累积 counter
       });
       // 提取文本输出
       const output = result.newMessages
@@ -1155,24 +1169,24 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     renderer.startThinking();
 
     try {
-      const { agentResult, newMessages, durationMs, budget, toolEndCount, injectedSkillIds, compactInfo } =
-        await agentRuntime.run({
-          messages: [...state.messages],
-          onYield: (e) => renderer.handleEvent(e),
-          onBeforeEventRender: () => renderer.stop(),
-          enrichOptions: {
-            lastToolEndCount: state.lastToolEndCount,
-            hasProposedSkill: state.hasProposedSkill,
-          },
-          // 安全确认对话框走 readline 的 question——pause 渲染避免 spinner 覆盖
-          securityPrompt: async (text) => {
-            renderer.stop();
-            return rl.question(text);
-          },
-        });
+      const runResult = await agentRuntime.run({
+        messages: [...state.messages],
+        turnIndex: state.turnCounter,
+        onYield: (e) => renderer.handleEvent(e),
+        onBeforeEventRender: () => renderer.stop(),
+        enrichOptions: {
+          lastToolEndCount: state.lastToolEndCount,
+          hasProposedSkill: state.hasProposedSkill,
+        },
+        // 安全确认对话框走 readline 的 question——pause 渲染避免 spinner 覆盖
+        securityPrompt: async (text) => {
+          renderer.stop();
+          return rl.question(text);
+        },
+      });
+      const { agentResult, newMessages, durationMs, budget, toolEndCount, injectedSkillIds } = runResult;
 
       renderer.stop();
-      state.messages.push(...newMessages);
       state.lastToolEndCount = toolEndCount;
       renderSummary(agentResult, durationMs, budget);
 
@@ -1202,32 +1216,41 @@ export async function startRepl(options: ReplOptions): Promise<void> {
         }).catch(() => {});
       }
 
-      // 持久化本轮对话
+      // 单一事实源持久化：
+      //   commitTurn 一次原子写入 turn + compactBefore，返回 canonical messages。
+      //   state.messages = canonical 整体替换，不再分两步 "push newMessages + appendTurn"。
+      //   canonical 自带压缩效果（compactBefore 截断后的末尾 turns + summaryPair），
+      //   下次 run 直接用 state.messages 作为 LLM 输入，跨 run 状态与磁盘严格一致。
       if (state.conversationId) {
-        const assistantMsg = newMessages[0];
-        if (assistantMsg) {
-          const turn: Turn = {
-            type: "turn",
-            turnIndex: state.turnCounter,
-            timestamp: new Date().toISOString(),
-            userMessage: userMsg,
-            assistantMessage: assistantMsg,
-            usage: agentResult.usage
-              ? {
-                  inputTokens: agentResult.usage.inputTokens,
-                  outputTokens: agentResult.usage.outputTokens,
-                }
-              : undefined,
-          };
-          await state.store.appendTurn(state.conversationId, turn).catch((err) => {
-            console.log(
-              chalk.dim(
-                `  [持久化警告] ${err instanceof Error ? err.message : String(err)}`,
-              ),
-            );
+        try {
+          const canonical = await state.store.commitTurn(state.conversationId, {
+            turn: runResult.turn,
+            compactBefore: runResult.compactBefore,
           });
-          state.convRepo.touch(state.conversationId).catch(() => {});
+          state.messages = canonical;
           state.turnCounter++;
+          state.convRepo.touch(state.conversationId).catch(() => {});
+        } catch (err) {
+          // 持久化失败降级：state.messages 按未压缩形态 append newMessages
+          //
+          // 已知代价：runResult.compactBefore 若非空，此降级不应用 compact 截断 ——
+          // 内存 state.messages 会多出一些本应被截断的老 turns，与磁盘不一致。
+          //
+          // 自愈机制：下一轮 run 的 pre-flight contextManager 会重新评估并触发
+          // 新一轮 compact（因为内存超过阈值），恢复状态一致性。
+          // 若进程崩溃并重启，磁盘还是老状态（本次 commitTurn 失败 = 无写入），
+          // load → rebuildCanonicalMessages 直接从磁盘恢复，内存 drift 自然清零。
+          //
+          // 为什么不做复杂的"内存等价 rebuild"：
+          //   a. 持久化失败是罕见事件（磁盘满 / 权限 / EIO），过度设计 ROI 低
+          //   b. 简单 append 保证本轮对话对用户完整展示
+          //   c. 自愈路径已经覆盖长期状态一致性
+          state.messages.push(...newMessages);
+          console.log(
+            chalk.dim(
+              `  [持久化警告] ${err instanceof Error ? err.message : String(err)}`,
+            ),
+          );
         }
 
         // 首轮对话后异步执行 Journal 生命周期维护
@@ -1235,16 +1258,9 @@ export async function startRepl(options: ReplOptions): Promise<void> {
           state.journalCondenseDone = true;
           runJournalLifecycle(state.agent).catch(() => {});
         }
-
-        // 自动压缩发生时，写入 compact 行用于会话恢复。
-        // compactInfo 由 run-agent 的 L1 累积订阅产出（含 LLM 真 summary + 精确
-        // turnsCompacted）；toCompactMarker 是 CompactInfo → CompactMarker 的单一
-        // 事实源，repl 和 forceCompact 共用，未来 CompactMarker 扩展字段改一处即可。
-        if (compactInfo) {
-          state.store
-            .appendCompact(state.conversationId, toCompactMarker(compactInfo))
-            .catch(() => {});
-        }
+      } else {
+        // 无会话 ID（无持久化）：降级为内存 append，保持对话语义
+        state.messages.push(...newMessages);
       }
     } catch (err) {
       renderer.stop();

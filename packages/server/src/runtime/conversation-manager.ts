@@ -15,7 +15,12 @@
  * - 可测试：grace/idle 超时可通过配置注入
  */
 
-import type { Message, Turn } from "@zhixing/core";
+import {
+  rebuildCanonicalMessages,
+  type CompactMarker,
+  type Message,
+  type Turn,
+} from "@zhixing/core";
 import type { SessionRuntime, RuntimeFactory } from "./types.js";
 import type { ConfirmationHub } from "../confirmation/hub.js";
 
@@ -56,7 +61,15 @@ export interface ManagedSession {
   /** transcript 文件已初始化（防止 promote 重试时重复 init） */
   transcriptInited: boolean;
   /** ephemeral 模式下累积的待持久化 turns */
-  readonly pendingTurns: Turn[];
+  pendingTurns: Turn[];
+  /**
+   * ephemeral 模式下累积的 compact 边界。
+   *
+   * recordTurn 收到 compactBefore 时按 turnsCompacted 切分 pendingTurns 保留末尾，
+   * 然后覆盖此字段；promote 时作为第一个落盘 turn 的 compactBefore 触发原子截断。
+   * undefined 表示本段 ephemeral 期间未发生 compact。
+   */
+  pendingCompact?: CompactMarker;
 }
 
 // ─── 列表信息 ───
@@ -84,14 +97,41 @@ export type LoadHistory = (conversationId: string) => Promise<Message[] | undefi
 /** 新对话首次创建时的初始化回调（如写入 transcript header）。 */
 export type InitTranscript = (conversationId: string) => Promise<void>;
 
-/** 持久化单个 turn 的回调。由外部注入（如 TranscriptStore.appendTurn）。 */
-export type PersistTurn = (conversationId: string, turn: Turn) => Promise<void>;
+/**
+ * 原子提交 turn / compact / 两者的回调。
+ *
+ * 对应 `ITranscriptStore.commitTurn` 的签名：
+ *   - `{turn}` → append 新 turn
+ *   - `{turn, compactBefore}` → 原子重写 + 追加 turn（按 turnsCompacted 截断）
+ *   - `{compactBefore}` → 原子重写（无新 turn）
+ *
+ * 必须返回 canonical `Message[]` —— ConversationManager.recordTurn 用此回喂给
+ * `session.runtime.updateMessages(canonical)`，实现单一事实源。
+ */
+export type CommitTurn = (
+  conversationId: string,
+  payload: { turn?: Turn; compactBefore?: CompactMarker },
+) => Promise<Message[]>;
 
 export interface ConversationManagerCallbacks {
   onRelease?: OnSessionRelease;
   loadHistory?: LoadHistory;
   initTranscript?: InitTranscript;
-  persistTurn?: PersistTurn;
+  /**
+   * 原子持久化入口 —— 替代旧 `persistTurn`。
+   *
+   * recordTurn 内部调用此回调落盘并拿 canonical 回喂 SessionRuntime.updateMessages。
+   *
+   * **配置契约（构造函数守卫）**：
+   *   - 纯 ephemeral-only 场景（未提供 loadHistory / initTranscript）：可省略
+   *   - 任何持久化意图场景（提供了 loadHistory 或 initTranscript）：**必须提供**
+   *     constructor 检测到"部分配置"立即 throw —— 避免配置错误静默失败
+   *     （persistent 分支丢消息、promote 错误晋升）。
+   *
+   * 运行时契约：recordTurn 的 persistent 分支 / promote 在 `!commitTurn` 时
+   * 不再静默降级 —— 前者 throw，后者 return false 保持 ephemeral。
+   */
+  commitTurn?: CommitTurn;
   /**
    * 可选 ConfirmationHub —— 提供时每个新建会话的 runtime.confirmationBroker 会
    * 自动 attach；会话释放（delete / grace / idle / disposeAll）前自动 detach。
@@ -125,7 +165,7 @@ export class ConversationManager {
   private readonly onRelease?: OnSessionRelease;
   private readonly loadHistory?: LoadHistory;
   private readonly initTranscript?: InitTranscript;
-  private readonly persistTurn?: PersistTurn;
+  private readonly commitTurnCb?: CommitTurn;
   private readonly confirmationHub?: ConfirmationHub;
   /** conversationId 集合——已 attach 到 hub 的会话，用于 dispose 前反查 + 防重 */
   private readonly attachedBrokers = new Set<string>();
@@ -148,10 +188,21 @@ export class ConversationManager {
       this.onRelease = callbacksOrOnRelease.onRelease;
       this.loadHistory = callbacksOrOnRelease.loadHistory;
       this.initTranscript = callbacksOrOnRelease.initTranscript;
-      this.persistTurn = callbacksOrOnRelease.persistTurn;
+      this.commitTurnCb = callbacksOrOnRelease.commitTurn;
       this.confirmationHub = callbacksOrOnRelease.confirmationHub;
     } else if (loadHistory) {
       this.loadHistory = loadHistory;
+    }
+
+    // 配置守卫：部分配置即配置错误 —— 提供了持久化信号（loadHistory / initTranscript）
+    // 但没提供 commitTurn，会导致 recordTurn 的 persistent 分支静默丢消息
+    // （adapter.messages 缺本轮 assistant 回复）。fail-fast 在构造阶段暴露。
+    const hasPersistenceIntent = !!(this.loadHistory || this.initTranscript);
+    if (hasPersistenceIntent && !this.commitTurnCb) {
+      throw new Error(
+        "ConversationManager: `commitTurn` callback is required when `loadHistory` or `initTranscript` is provided. " +
+          "Ephemeral-only usage should omit all three callbacks.",
+      );
     }
 
     this.startIdleReaper(config?.idleCheckIntervalMs ?? DEFAULT_IDLE_CHECK_INTERVAL_MS);
@@ -210,6 +261,7 @@ export class ConversationManager {
       ephemeral,
       transcriptInited: !ephemeral,
       pendingTurns: [],
+      pendingCompact: undefined,
     };
 
     this.sessions.set(id, session);
@@ -359,34 +411,85 @@ export class ConversationManager {
     return true;
   }
 
-  // ─── Turn 记录 + 晋升 ───
+  // ─── Turn 记录 + 晋升（单向数据流） ───
 
   /**
-   * 记录一个完成的 turn。
-   * - persistent → 立即调用 persistTurn 回调
-   * - ephemeral → 累积到 pendingTurns，turnCount >= 2 时自动晋升
+   * 记录一个完成的 turn，并可选地应用本 run 的 compact 边界。
+   *
+   * 返回 canonical `Message[]` —— 内部同时调用 `session.runtime.updateMessages(canonical)`
+   * 回喂 adapter，保证内存与磁盘严格一致（单一事实源）。
+   *
+   * 两条路径：
+   *   - persistent → commitTurn 回调（原子落盘 + 返 canonical）→ updateMessages
+   *   - ephemeral → 按 turnsCompacted 切分 pendingTurns，累积 pendingCompact，
+   *     内存版 rebuildCanonicalMessages → updateMessages；turnCount >= 2 自动 promote
    */
-  async recordTurn(conversationId: string, turn: Turn): Promise<void> {
+  async recordTurn(
+    conversationId: string,
+    turn: Turn,
+    compactBefore?: CompactMarker,
+  ): Promise<Message[]> {
     const session = this.sessions.get(conversationId);
-    if (!session) return;
+    if (!session) return [];
 
     if (session.ephemeral) {
+      //ephemeral 分支：内存版 canonical 即时算出 + 回喂
+      if (compactBefore) {
+        // 按 turnsCompacted 切分 pendingTurns 保留末尾，pendingCompact 覆盖式记录
+        // （N11 累积已在 run-agent 闭包做过，此处只做边界 swap）
+        const keepCount = Math.max(
+          0,
+          session.pendingTurns.length - compactBefore.turnsCompacted,
+        );
+        session.pendingTurns = session.pendingTurns.slice(-keepCount);
+        session.pendingCompact = compactBefore;
+      }
       session.pendingTurns.push(turn);
       session.turnCount++;
+
+      const canonical = rebuildCanonicalMessages(
+        session.pendingTurns,
+        session.pendingCompact ? [session.pendingCompact] : [],
+      );
+      session.runtime.updateMessages(canonical);
+
       if (session.turnCount >= 2) {
         await this.promote(conversationId);
       }
-    } else {
-      if (this.persistTurn) {
-        await this.persistTurn(conversationId, turn);
-      }
-      session.turnCount++;
+      return canonical;
     }
+
+    // persistent 分支：commitTurn 落盘 + 拿 canonical + 回喂
+    //
+    // 构造函数已守卫 "有持久化意图必须有 commitTurn"；此处的 assert 是 defense-in-depth ——
+    // 防止有人构造时通过 `undefined as any` 等方式绕过类型检查后在运行时 bite。
+    // 不再静默降级（老实现 `if (cb) { ... }` 会让 adapter 丢本轮 assistant）。
+    if (!this.commitTurnCb) {
+      throw new Error(
+        `ConversationManager.recordTurn: persistent session ${conversationId} requires commitTurn callback ` +
+          "(was this manager constructed without commitTurn while the session is not ephemeral?)",
+      );
+    }
+    const canonical = await this.commitTurnCb(conversationId, {
+      turn,
+      compactBefore,
+    });
+    session.runtime.updateMessages(canonical);
+    session.turnCount++;
+    return canonical;
   }
 
   /**
    * 将 ephemeral 会话晋升为 persistent。
-   * 调用 initTranscript → 逐个 flush pendingTurns → 标记 ephemeral=false。
+   *
+   * 晋升算法：
+   *   1. 若有 pendingCompact + pendingTurns：第一个 turn 带 compactBefore 触发
+   *      原子截断（此时文件为空，keepCount=0 → 落成 header + compact + firstTurn），
+   *      后续 turns 依次 append
+   *   2. 无 pendingCompact：逐个 flush
+   *
+   * 不 updateMessages —— ephemeral 期间已通过 recordTurn 的内存版 canonical 回喂过；
+   * 晋升期间磁盘形态与内存版 canonical 保持一致（算法上等价），无需再触发同步。
    */
   async promote(conversationId: string): Promise<boolean> {
     const session = this.sessions.get(conversationId);
@@ -397,13 +500,33 @@ export class ConversationManager {
       session.transcriptInited = true;
     }
 
-    if (this.persistTurn) {
-      while (session.pendingTurns.length > 0) {
-        await this.persistTurn(conversationId, session.pendingTurns[0]!);
-        session.pendingTurns.shift();
+    // 无 commitTurn 回调：保持 ephemeral 状态，不晋升。
+    //
+    // 老实现 `else { pendingTurns = []; }` 然后落到 `ephemeral = false` 会导致：
+    //   1. 本次调用已清空 pending，数据丢失
+    //   2. 更严重：ephemeral=false 使后续 recordTurn 走 persistent 分支，
+    //      persistent 分支又 throw（见 recordTurn 的 assert）—— 彻底卡死
+    // 返 false 告知调用方"未晋升"，保留 pendingTurns 供后续真正配置了 commitTurn
+    // 的新 manager 处理（或允许会话继续作为 ephemeral 运行）。
+    if (!this.commitTurnCb) {
+      return false;
+    }
+
+    // 逐个 flush：shift 只在单次 commitTurn 成功后执行 —— 任意中间失败 rethrow
+    // 时保留未持久化的 pending（retry 安全）。头 turn 若有 pendingCompact 则
+    // 带上 compactBefore（触发原子截断）；pendingCompact 仅在首次成功后清除。
+    while (session.pendingTurns.length > 0) {
+      const first = session.pendingTurns[0]!;
+      if (session.pendingCompact) {
+        await this.commitTurnCb(conversationId, {
+          turn: first,
+          compactBefore: session.pendingCompact,
+        });
+        session.pendingCompact = undefined;
+      } else {
+        await this.commitTurnCb(conversationId, { turn: first });
       }
-    } else {
-      session.pendingTurns.length = 0;
+      session.pendingTurns.shift();
     }
 
     session.ephemeral = false;

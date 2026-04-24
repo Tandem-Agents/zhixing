@@ -9,10 +9,11 @@
 
 import type {
   AgentYield,
-  AgentResult,
   IConfirmationBroker,
   Message,
+  RunResult,
   TurnContext,
+  TurnSource,
 } from "@zhixing/core";
 
 // TurnContext 的唯一定义在 @zhixing/core（types/tools.ts）——此处只做 re-export，
@@ -23,24 +24,49 @@ export type { TurnContext };
 export interface RunTurnOptions {
   abortSignal?: AbortSignal;
   turnContext?: TurnContext;
+  /**
+   * 本 turn 序号（落盘为 Turn.turnIndex）—— 由调用方维护的 counter 提供。
+   *
+   * 对齐 server 路径由 `ManagedSession.turnCount` 提供；
+   * 可选 —— 未传时 adapter 默认 0（legacy / 测试路径）。
+   */
+  turnIndex?: number;
+  /**
+   * 触发源，落盘为 Turn.source（"interactive" / "scheduler" / "channel"）。
+   * server 入站消息路径（InboundRouter）默认为 "channel"。
+   */
+  source?: TurnSource;
 }
 
 export interface SessionRuntime {
   readonly sessionId: string;
   /**
-   * 执行一轮对话，AsyncGenerator 流式 yield 事件 → return 最终结果。
-   * 与 core 的 runAgentLoop 同语义，但持有内部消息历史。
+   * 执行一轮对话，AsyncGenerator 流式 yield 事件 → return `RunResult`。
+   *
+   * **契约变更**：return 值从 `AgentResult` 升级为 `RunResult`
+   * （含 `turn`、`compactBefore?`、`newMessages` + 诊断字段）。
+   * 调用方（InboundRouter / session.ts RPC / 测试）据此走 commitTurn 单一持久化入口。
    *
    * 第二参数兼容两种形式（ADR-007 Phase 2）：
    * - `AbortSignal`（legacy）
-   * - `RunTurnOptions`（含 abortSignal + turnContext）
+   * - `RunTurnOptions`（含 abortSignal + turnContext + turnIndex + source）
    */
   run(
     text: string,
     abortSignalOrOptions?: AbortSignal | RunTurnOptions,
-  ): AsyncGenerator<AgentYield, AgentResult>;
+  ): AsyncGenerator<AgentYield, RunResult>;
   /** 当前消息历史（只读拷贝） */
   getHistory(limit?: number): Message[];
+  /**
+   * 用 canonical messages 覆盖内部 state（单向数据流）。
+   *
+   * 调用时机：ConversationManager.recordTurn 成功后拿到 commitTurn 返回的 canonical，
+   *   通过此方法回喂到 SessionRuntime —— 内存与磁盘严格一致，下次 run 直接用最新 state。
+   *
+   * 契约：canonical 是包含 compactBefore summary pair + post-compact turns 的完整序列，
+   *   直接替换 SessionRuntime 内部 messages 即可（不是 append）。
+   */
+  updateMessages(canonical: Message[]): void;
   /** 终止当前执行（如果有） */
   abort(): void;
   /** 释放资源（Server 关闭时调用） */

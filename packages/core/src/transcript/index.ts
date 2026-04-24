@@ -13,13 +13,19 @@ export { TRANSCRIPT_FORMAT_VERSION } from "./types.js";
 
 export {
   appendRecord,
+  cleanupOrphanTmp,
   countTurns,
   loadRecords,
   parseRecords,
   readHeader,
+  writeAtomic,
   writeHeader,
 } from "./serializer.js";
+export type { WriteAtomicOptions } from "./serializer.js";
 
+export { needsNormalize, normalize, rebuildCanonicalMessages } from "./rebuild.js";
+
+export type { TranscriptStoreOptions } from "./store.js";
 export {
   TranscriptStore,
   getProjectId,

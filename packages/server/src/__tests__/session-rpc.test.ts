@@ -6,7 +6,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import WebSocket from "ws";
-import type { AgentResult, AgentYield, Message } from "@zhixing/core";
+import type { AgentResult, AgentYield, Message, RunResult } from "@zhixing/core";
 import { startServer, type ZhixingServerInstance } from "../server.js";
 import { createServerContext } from "../context.js";
 import { ConversationManager } from "../runtime/conversation-manager.js";
@@ -36,13 +36,14 @@ interface MockOptions {
 }
 
 function createMockRuntime(sessionId: string, opts: MockOptions = {}, initialMessages?: Message[]): SessionRuntime {
-  const messages: Message[] = initialMessages ? [...initialMessages] : [];
+  let messages: Message[] = initialMessages ? [...initialMessages] : [];
   let aborted = false;
 
   return {
     sessionId,
-    async *run(text): AsyncGenerator<AgentYield, AgentResult> {
-      messages.push({ role: "user", content: [{ type: "text", text }] });
+    async *run(text): AsyncGenerator<AgentYield, RunResult> {
+      const userMsg: Message = { role: "user", content: [{ type: "text", text: typeof text === "string" ? text : "" }] };
+      messages.push(userMsg);
       if (opts.throwError) {
         throw new Error(opts.throwError);
       }
@@ -62,13 +63,30 @@ function createMockRuntime(sessionId: string, opts: MockOptions = {}, initialMes
       yield { type: "turn_complete", turnCount: 1, usage: { inputTokens: 5, outputTokens: 5 } };
 
       return {
-        reason: "completed",
-        message: reply,
-        usage: { inputTokens: 5, outputTokens: 5 },
+        agentResult: {
+          reason: "completed",
+          message: reply,
+          usage: { inputTokens: 5, outputTokens: 5 },
+        },
+        turn: {
+          type: "turn",
+          turnIndex: 0,
+          timestamp: new Date().toISOString(),
+          userMessage: userMsg,
+          assistantMessage: reply,
+          usage: { inputTokens: 5, outputTokens: 5 },
+        },
+        newMessages: [reply],
+        durationMs: 0,
+        toolEndCount: 0,
+        injectedSkillIds: [],
       };
     },
     getHistory(limit) {
       return limit ? messages.slice(-limit) : [...messages];
+    },
+    updateMessages(canonical) {
+      messages = [...canonical];
     },
     abort() {
       aborted = true;
@@ -178,11 +196,29 @@ async function connect(port: number): Promise<RpcClient> {
 describe("session.* RPC (S2.D)", () => {
   let server: ZhixingServerInstance;
 
+  // 默认 commitTurn mock：模拟真实持久化语义——返回 "老 canonical + 新 turn 的 user/assistant"。
+  // 这让 runTurnWithCommit 的 completed 分支走 updateMessages(canonical)，
+  // adapter.messages 保有本轮消息，session.history RPC 能返回合理内容。
+  //
+  // 不关心持久化具体形态的测试（测 routing / abort / pending queue 等）通过此默认 cb 就够；
+  // 需要断言持久化副作用的测试仍可覆盖式传自己的 commitTurn。
+  const canonicalByConversation = new Map<string, Message[]>();
+
   async function startWithFactory(factory: RuntimeFactory): Promise<void> {
+    canonicalByConversation.clear();
     const conversations = new ConversationManager(factory, {
       graceTimeoutMs: 60_000,
       idleTimeoutMs: 30 * 60_000,
       idleCheckIntervalMs: 999_999,
+    }, {
+      commitTurn: async (conversationId, payload) => {
+        const prev = canonicalByConversation.get(conversationId) ?? [];
+        const next = payload.turn
+          ? [...prev, payload.turn.userMessage, payload.turn.assistantMessage]
+          : prev;
+        canonicalByConversation.set(conversationId, next);
+        return next;
+      },
     });
     const ctx = createServerContext({
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
@@ -478,8 +514,11 @@ describe("session.* RPC (S2.D)", () => {
       idleTimeoutMs: 30 * 60_000,
       idleCheckIntervalMs: 999_999,
     }, {
-      persistTurn: async (conversationId, turn) => {
-        appendedTurns.push({ conversationId, turn });
+      commitTurn: async (conversationId, payload) => {
+        if (payload.turn) {
+          appendedTurns.push({ conversationId, turn: payload.turn });
+        }
+        return [];
       },
     });
     const ctx = createServerContext({
@@ -516,7 +555,10 @@ describe("session.* RPC (S2.D)", () => {
       idleTimeoutMs: 30 * 60_000,
       idleCheckIntervalMs: 999_999,
     }, {
-      persistTurn: async (_cid, turn) => { appendedTurns.push(turn); },
+      commitTurn: async (_cid, payload) => {
+        if (payload.turn) appendedTurns.push(payload.turn);
+        return [];
+      },
     });
     const ctx = createServerContext({
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
@@ -547,11 +589,25 @@ describe("session.* RPC (S2.D)", () => {
       return undefined;
     };
 
+    // commitTurn 真实语义：老 canonical + 新 turn 的 user/assistant，
+    // 模拟 TranscriptStore.commitTurn 的 rebuildCanonicalMessages 语义
+    let canonical: Message[] = [...storedMessages];
     const conversations = new ConversationManager(
       createMockFactory({ deltaCount: 1 }),
       { graceTimeoutMs: 60_000, idleTimeoutMs: 30 * 60_000, idleCheckIntervalMs: 999_999 },
-      undefined,
-      loadHistory,
+      {
+        loadHistory,
+        commitTurn: async (_cid, payload) => {
+          if (payload.turn) {
+            canonical = [
+              ...canonical,
+              payload.turn.userMessage,
+              payload.turn.assistantMessage,
+            ];
+          }
+          return canonical;
+        },
+      },
     );
     const ctx = createServerContext({
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },

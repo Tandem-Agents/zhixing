@@ -14,7 +14,7 @@ import {
   ChannelRegistry,
 } from "@zhixing/core";
 import type { SessionRuntime, RuntimeFactory } from "../../runtime/types.js";
-import type { AgentResult, AgentYield, Message } from "@zhixing/core";
+import type { AgentYield, Message, RunResult } from "@zhixing/core";
 
 // ─── Mock 工厂 ───
 
@@ -22,18 +22,39 @@ function createMockRuntime(response?: { text: string }): SessionRuntime {
   const text = response?.text ?? "Hello from agent";
   return {
     sessionId: "rt-1",
-    run: vi.fn(function* (): Generator<AgentYield, AgentResult> {
+    run: vi.fn(function* (): Generator<AgentYield, RunResult> {
       yield { type: "text_delta", text };
+      const assistantMsg: Message = {
+        role: "assistant",
+        content: [{ type: "text", text }],
+      };
+      const userMsg: Message = {
+        role: "user",
+        content: [{ type: "text", text: "(mock user)" }],
+      };
       return {
-        reason: "completed" as const,
-        message: {
-          role: "assistant" as const,
-          content: [{ type: "text" as const, text }],
+        agentResult: {
+          reason: "completed" as const,
+          message: assistantMsg,
+          usage: { inputTokens: 10, outputTokens: 5 },
         },
-        usage: { inputTokens: 10, outputTokens: 5 },
+        turn: {
+          type: "turn",
+          turnIndex: 0,
+          timestamp: new Date().toISOString(),
+          userMessage: userMsg,
+          assistantMessage: assistantMsg,
+          usage: { inputTokens: 10, outputTokens: 5 },
+          source: "channel",
+        },
+        newMessages: [assistantMsg],
+        durationMs: 0,
+        toolEndCount: 0,
+        injectedSkillIds: [],
       };
     }) as unknown as SessionRuntime["run"],
     getHistory: () => [],
+    updateMessages: vi.fn(),
     abort: vi.fn(),
     dispose: vi.fn(),
   };
@@ -234,14 +255,29 @@ describe("InboundRouter", () => {
   it("handles agent error and sends error reply", async () => {
     const errorRuntime: SessionRuntime = {
       sessionId: "err",
-      run: vi.fn(function* (): Generator<AgentYield, AgentResult> {
+      run: vi.fn(function* (): Generator<AgentYield, RunResult> {
+        const errorMsg = Object.assign(new Error("LLM failed"), { name: "AgentError" });
         return {
-          reason: "error" as const,
-          error: Object.assign(new Error("LLM failed"), { name: "AgentError" }),
-          usage: { inputTokens: 0, outputTokens: 0 },
+          agentResult: {
+            reason: "error" as const,
+            error: errorMsg,
+            usage: { inputTokens: 0, outputTokens: 0 },
+          },
+          turn: {
+            type: "turn",
+            turnIndex: 0,
+            timestamp: new Date().toISOString(),
+            userMessage: { role: "user", content: [] },
+            assistantMessage: { role: "assistant", content: [] },
+          },
+          newMessages: [],
+          durationMs: 0,
+          toolEndCount: 0,
+          injectedSkillIds: [],
         };
       }) as unknown as SessionRuntime["run"],
       getHistory: () => [],
+      updateMessages: vi.fn(),
       abort: vi.fn(),
       dispose: vi.fn(),
     };
@@ -333,17 +369,32 @@ describe("InboundRouter", () => {
     // 模拟 LLM 完全抑制叙述：completed 但 message.content 是空 text block
     const emptyRuntime: SessionRuntime = {
       sessionId: "empty",
-      run: vi.fn(function* (): Generator<AgentYield, AgentResult> {
+      run: vi.fn(function* (): Generator<AgentYield, RunResult> {
+        const assistantMsg: Message = {
+          role: "assistant",
+          content: [{ type: "text", text: "" }],
+        };
         return {
-          reason: "completed" as const,
-          message: {
-            role: "assistant" as const,
-            content: [{ type: "text" as const, text: "" }],
+          agentResult: {
+            reason: "completed" as const,
+            message: assistantMsg,
+            usage: { inputTokens: 1, outputTokens: 0 },
           },
-          usage: { inputTokens: 1, outputTokens: 0 },
-        } satisfies AgentResult;
+          turn: {
+            type: "turn",
+            turnIndex: 0,
+            timestamp: new Date().toISOString(),
+            userMessage: { role: "user", content: [{ type: "text", text: "(mock)" }] },
+            assistantMessage: assistantMsg,
+          },
+          newMessages: [assistantMsg],
+          durationMs: 0,
+          toolEndCount: 0,
+          injectedSkillIds: [],
+        };
       }) as unknown as SessionRuntime["run"],
       getHistory: () => [],
+      updateMessages: vi.fn(),
       abort: vi.fn(),
       dispose: vi.fn(),
     };

@@ -16,10 +16,14 @@ import {
   type ContextBudget,
   type IConfirmationBroker,
   type Message,
+  type RunResult,
   type ToolResultBlock,
   type IPermissionStore,
   type TurnContext,
   type TurnContextProvider,
+  type TurnSource,
+  buildTurn,
+  resolveTurnTimestamp,
   ConfirmationBroker,
   createEventBus,
   createContextEngine,
@@ -67,11 +71,7 @@ import {
   renderCompactStart,
   renderCompactEnd,
 } from "./render.js";
-import {
-  type CompactInfo,
-  subscribeCompactAccumulator,
-  toCompactMarker,
-} from "./compact-accumulator.js";
+import { subscribeCompactAccumulator } from "./compact-accumulator.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { loadProjectContext, injectContext, enrichContext, type EnrichOptions } from "./project-context.js";
 import {
@@ -136,6 +136,16 @@ export interface ForceCompactResult {
 
 export interface RunParams {
   messages: Message[];
+  /**
+   * 本 turn 序号 —— 由调用方维护的 counter，落盘为 Turn.turnIndex。
+   *
+   * - REPL: `state.turnCounter`（每次 commitTurn 成功后 +1）
+   * - server: `ManagedSession.turnCount`
+   * - ephemeral / 单次运行：0
+   */
+  turnIndex: number;
+  /** 触发源，落盘为 Turn.source。不指定时字段为 undefined */
+  source?: TurnSource;
   onYield?: (event: AgentYield) => void;
   /** 在渲染 EventBus 事件（重试/预算）前调用，用于暂停 spinner 等 UI 动画 */
   onBeforeEventRender?: () => void;
@@ -160,25 +170,9 @@ export interface RunParams {
   abortSignal?: AbortSignal;
 }
 
-export interface RunResult {
-  agentResult: AgentResult;
-  /** 本轮产生的新消息（assistant + tool_result），调用方追加到对话历史 */
-  newMessages: Message[];
-  durationMs: number;
-  /** 运行结束后的上下文预算快照（resolver 保证 modelInfo 可用，必填） */
-  budget: ContextBudget;
-  /** 本轮工具调用完成次数（tool_end 事件数），用于反思触发 */
-  toolEndCount: number;
-  /** 本轮注入的技能 ID 列表（用于效果推断） */
-  injectedSkillIds: string[];
-  /** 本轮是否发生了上下文压缩（用于写入 compact 行） */
-  compactInfo?: CompactInfo;
-}
-
-// CompactInfo / subscribeCompactAccumulator / toCompactMarker 抽离到独立
-// 模块 compact-accumulator.ts（SRP + 可独立测试 + Phase 5 可迁移到 core）。
-// 从上方 import 使用。
-export type { CompactInfo } from "./compact-accumulator.js";
+// RunResult 从 @zhixing/core 统一（单一事实源）。
+// cli 的 AgentRuntime.run 和 server 的 SessionRuntime.run 共享此契约。
+export type { RunResult };
 
 // ─── 创建运行时 ───
 
@@ -352,48 +346,53 @@ export async function createAgentRuntime(options: {
       // 两次 onTurnComplete 尝试（初始 + 降阈值重试）共用同一 bus，
       // 累积订阅保证 compactBefore 包含两次尝试的汇总。
       const localBus = createEventBus<AgentEventMap>();
-      const getAccumulated = subscribeCompactAccumulator(localBus);
+      const accumulator = subscribeCompactAccumulator(localBus);
 
-      const engine = createContextEngine(
-        estimator,
-        strategies,
-        { modelInfo: modelBudgetInfo },
-        localBus,
-      );
-      const result = await engine.onTurnComplete({ messages, turnCount });
-
-      let finalMessages: Message[];
-      let finalModified: boolean;
-
-      if (!result.modified) {
-        // 自动压缩因阈值未达而跳过，强制用较低阈值重试
-        const forceEngine = createContextEngine(
+      try {
+        const engine = createContextEngine(
           estimator,
           strategies,
-          {
-            modelInfo: modelBudgetInfo,
-            thresholds: { warning: 0, compact: 0, critical: 0.95 },
-          },
+          { modelInfo: modelBudgetInfo },
           localBus,
         );
-        const forceResult = await forceEngine.onTurnComplete({ messages, turnCount });
-        finalMessages = forceResult.messages;
-        finalModified = forceResult.modified;
-      } else {
-        finalMessages = result.messages;
-        finalModified = result.modified;
+        const result = await engine.onTurnComplete({ messages, turnCount });
+
+        let finalMessages: Message[];
+        let finalModified: boolean;
+
+        if (!result.modified) {
+          // 自动压缩因阈值未达而跳过，强制用较低阈值重试
+          const forceEngine = createContextEngine(
+            estimator,
+            strategies,
+            {
+              modelInfo: modelBudgetInfo,
+              thresholds: { warning: 0, compact: 0, critical: 0.95 },
+            },
+            localBus,
+          );
+          const forceResult = await forceEngine.onTurnComplete({ messages, turnCount });
+          finalMessages = forceResult.messages;
+          finalModified = forceResult.modified;
+        } else {
+          finalMessages = result.messages;
+          finalModified = result.modified;
+        }
+
+        const budget = engine.checkBudget(finalMessages);
+        const compactBefore = accumulator.getMarker();
+
+        return {
+          modified: finalModified,
+          messages: finalMessages,
+          budget,
+          compactBefore,
+        };
+      } finally {
+        // localBus 本就随函数结束 GC，但显式 dispose 对齐契约，未来若 localBus 升级为
+        // 跨 run 共享时（非当前形态）能自动避免 listener 泄漏。
+        accumulator.dispose();
       }
-
-      const budget = engine.checkBudget(finalMessages);
-      const accumulated = getAccumulated();
-      const compactBefore = accumulated ? toCompactMarker(accumulated) : undefined;
-
-      return {
-        modified: finalModified,
-        messages: finalMessages,
-        budget,
-        compactBefore,
-      };
     },
 
     async run(params: RunParams): Promise<RunResult> {
@@ -404,7 +403,7 @@ export async function createAgentRuntime(options: {
       const newMessages: Message[] = [];
       let pendingToolResults: ToolResultBlock[] = [];
       let toolEndCount = 0;
-      // compactInfo 由下面的 subscribeCompactAccumulator 累积，run 结束时从 getter 读出
+      // compactBefore 由下面的 subscribeCompactAccumulator 累积，run 结束时从 getter 读出
 
       // 通过 deps.callLLM 注入容错能力，agent-loop.ts 零修改
       const resilientCallLLM = withRetry(
@@ -454,13 +453,17 @@ export async function createAgentRuntime(options: {
       });
 
       // Compact 累积订阅 —— 多个触发点 fire 时累加 turnsCompacted、
-      // 取最新 summary、锚定 firstTokensBefore。run 结束时读出作为 RunResult.compactInfo。
+      // 取最新 summary、锚定 firstTokensBefore。run 结束时读出作为 RunResult.compactBefore。
       // 事件本身的渲染（renderCompactEnd）在累积订阅内 onEvent 回调触发，pauseUI 同步执行。
-      const getAccumulatedCompact = subscribeCompactAccumulator(eventBus, (info) => {
+      //
+      // dispose 在外层 try/finally 里调 —— 当前 eventBus 每 run 独立 + 随 GC，
+      // dispose 非必须；但跟契约一致更安全，未来 bus 共享化也自动受保护。
+      const accumulator = subscribeCompactAccumulator(eventBus, (info) => {
         pauseUI();
         renderCompactEnd(info);
       });
 
+     try {
       // 根据最后一条用户消息检索匹配的技能 + 反思提示
       const enrichedContext = await enrichContext(
         projectContext,
@@ -488,16 +491,37 @@ export async function createAgentRuntime(options: {
       // 共享同一判别逻辑（throw / aborted / overflow），避免第三处复制 abort 优先规则
       // 和 AgentError 包装 —— 新加触发点时只需做 shape 映射。
       let loopMessages = messagesWithTurnContext;
-      const buildPreFlightError = (agentResult: AgentResult): RunResult => ({
-        agentResult,
-        newMessages: [],
-        durationMs: Date.now() - startTime,
-        // budget 快照用 messagesWithTurnContext —— 即使 engine 抛错也能给一个保守值
-        budget: contextEngine.checkBudget(messagesWithTurnContext),
-        toolEndCount: 0,
-        injectedSkillIds: enrichedContext.injectedSkillIds,
-        compactInfo: getAccumulatedCompact(),
-      });
+
+      // 原始 user 消息（params.messages 最后一条，未经 enrichContext / turnContextInjector 增强）
+      // —— buildTurn 契约要求持久化 Turn 的 userMessage 是用户真实输入，不是内部增强版
+      const originalUserMessage =
+        params.messages[params.messages.length - 1] ??
+        (userMessage("") as Message);
+
+      const buildPreFlightError = (agentResult: AgentResult): RunResult => {
+        // 时序协调：turn.timestamp 必须严格 > compactBefore.timestamp。
+        // 老文件 lazy migrate 用 `turn.ts <= compact.ts` 判丢弃，同毫秒会误伤。
+        // resolveTurnTimestamp 一行防御：max(now, compact.ts+1ms) 消除误判。
+        const compactBefore = accumulator.getMarker();
+        return {
+          agentResult,
+          turn: buildTurn({
+            turnIndex: params.turnIndex,
+            source: params.source,
+            userMessage: originalUserMessage,
+            newMessages: [],
+            agentResult,
+            timestamp: resolveTurnTimestamp(compactBefore),
+          }),
+          newMessages: [],
+          durationMs: Date.now() - startTime,
+          // budget 快照用 messagesWithTurnContext —— 即使 engine 抛错也能给一个保守值
+          budget: contextEngine.checkBudget(messagesWithTurnContext),
+          toolEndCount: 0,
+          injectedSkillIds: enrichedContext.injectedSkillIds,
+          compactBefore,
+        };
+      };
 
       const preFlight = await resolveContextManager(
         contextEngine,
@@ -576,14 +600,24 @@ export async function createAgentRuntime(options: {
 
           const budget = contextEngine.checkBudget(allMessages);
 
+          // 时序协调（见 buildPreFlightError 注释）：turn.timestamp > compactBefore.timestamp
+          const compactBefore = accumulator.getMarker();
           return {
             agentResult: value,
+            turn: buildTurn({
+              turnIndex: params.turnIndex,
+              source: params.source,
+              userMessage: originalUserMessage,
+              newMessages,
+              agentResult: value,
+              timestamp: resolveTurnTimestamp(compactBefore),
+            }),
             newMessages,
             durationMs: Date.now() - startTime,
             budget,
             toolEndCount,
             injectedSkillIds: enrichedContext.injectedSkillIds,
-            compactInfo: getAccumulatedCompact(),   // 从 L1 累积订阅读出
+            compactBefore,
           };
         }
 
@@ -594,6 +628,11 @@ export async function createAgentRuntime(options: {
         if (value.type === "tool_end") toolEndCount++;
         trackMessages(value, newMessages, pendingToolResults);
       }
+     } finally {
+       // 保证 accumulator 订阅被取消 —— 即使 preFlight throw / agent-loop throw /
+       // 调用方中断 gen（触发 finally in for-of caller），listener 都能正确摘除。
+       accumulator.dispose();
+     }
     },
   };
 }
@@ -611,6 +650,7 @@ export async function runOnce(options: {
   const runtime = await createAgentRuntime(options);
   return runtime.run({
     messages: [userMessage(options.prompt)],
+    turnIndex: 0,   // 单次运行，turn 计数从 0 开始
     onYield: options.onYield,
     onBeforeEventRender: options.onBeforeEventRender,
   });

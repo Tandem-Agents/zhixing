@@ -73,16 +73,58 @@ export interface LoadedTranscript {
 }
 
 /**
- * TranscriptStore 公共接口 — append-only 内容日志
+ * TranscriptStore 公共接口 — 原子事务内容日志
  *
  * 职责边界（ADR-CM-015）：
  * - 只负责内容的写入和读取
  * - 没有 list / rename / delete / findLatest — 这些是身份操作，属于 ConversationRepository
+ *
+ * 原子化（ADR-TR-2, ADR-TR-7）：
+ * - `commitTurn` 是**唯一主入口**，覆盖 append turn / 带 compact 截断 / 手动 /compact
+ *   三种形态；原子写保证 compact 和 turn 不再被分两次操作写入（根治 §1.3 timestamp 顺序 bug）
+ * - 返回 canonical `Message[]`，调用方一次拿到 state 权威视图，无须自行 rebuild
+ *
+ * Per-transcript 串行化（ADR-TR-8）：
+ * - 对同一 id 的所有写操作（含 load 触发的 normalize 重写）**串行化**
+ * - 跨 id 完全并发
  */
 export interface ITranscriptStore {
   init(conversationId: string, options: InitTranscriptOptions): Promise<void>;
+
+  /**
+   * 唯一原子写入入口 —— 覆盖 append / 带 compact 截断 / 手动 /compact 三种形态。
+   *
+   * 语义表（按 payload 字段）：
+   * | payload | 行为 | 文件形态变化 |
+   * |---------|------|-------------|
+   * | `{turn}` | append 新 turn | `header + [compact?] + ...turns + turn` |
+   * | `{turn, compactBefore}` | 原子重写，按 turnsCompacted 切分保留末尾 + 追加新 turn | `header + compactBefore + retainedTurns + turn` |
+   * | `{compactBefore}`（手动 /compact） | 原子重写，按 turnsCompacted 切分保留末尾 | `header + compactBefore + retainedTurns` |
+   * | `{}` | 非法 | throw `commitTurn requires at least turn or compactBefore` |
+   *
+   * 返回 canonical `Message[]`：调用方直接 `state.messages = canonical`（REPL）或
+   * `session.runtime.updateMessages(canonical)`（server）。避免调用方自己再 load + rebuild。
+   */
+  commitTurn(
+    conversationId: string,
+    payload: { turn?: Turn; compactBefore?: CompactMarker },
+  ): Promise<Message[]>;
+
+  /**
+   * Legacy 薄别名。内部委托 `commitTurn({turn})`，保留为向后兼容入口。
+   * 新代码请直接用 `commitTurn`。
+   */
   appendTurn(conversationId: string, turn: Turn): Promise<void>;
-  appendCompact(conversationId: string, compact: CompactMarker): Promise<void>;
+
+  /**
+   * Legacy 薄别名。内部委托 `commitTurn({compactBefore})`，返回 canonical。
+   * REPL 手动 /compact 使用；新代码也可直接用 `commitTurn({compactBefore})`。
+   */
+  appendCompact(
+    conversationId: string,
+    compact: CompactMarker,
+  ): Promise<Message[]>;
+
   load(conversationId: string): Promise<LoadedTranscript>;
   countTurns(conversationId: string): Promise<number>;
   exists(conversationId: string): Promise<boolean>;

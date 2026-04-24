@@ -11,11 +11,11 @@ import {
   extractText,
   generateTurnId,
   isFreeTextDeny,
-  userMessage,
   type AgentResult,
-  type Turn,
+  type RunResult,
 } from "@zhixing/core";
 import type { ConversationManager, ManagedSession } from "../runtime/conversation-manager.js";
+import { runTurnWithCommit } from "../runtime/run-turn.js";
 import type { ConfirmationHub } from "../confirmation/hub.js";
 import {
   matchTextToDecision,
@@ -343,36 +343,48 @@ export class InboundRouter {
     }
 
     try {
-      const gen = managed.runtime.run(msg.text, { turnContext });
-      let result: AgentResult | undefined;
+      // runTurnWithCommit：原子化 run + recordTurn + 异常 rollback。
+      //   · 非 completed / commitTurn throw / runtime throw 三条异常路径均保证
+      //     adapter state 回到 preRun，防止 orphan userMsg 污染下一轮 LLM 输入
+      //   · commitTurn 失败通过 onCommitFailure hook 路由到 logger（observability）
+      const gen = runTurnWithCommit(
+        this.conversations,
+        conversationId,
+        msg.text,
+        {
+          turnContext,
+          turnIndex: managed.turnCount,
+          source: "channel",
+        },
+        {
+          onCommitFailure: (err) => {
+            this.logger.warn(
+              `[持久化失败] conv=${conversationId}: ${errMsg(err)} (adapter state 已 rollback)`,
+            );
+          },
+        },
+      );
+      let runResult: RunResult | undefined;
 
       while (true) {
         const iter = await gen.next();
         if (iter.done) {
-          result = iter.value;
+          runResult = iter.value;
           break;
         }
+        // inbound-router 消费 yield 但不 forward（channel 不做 streaming；
+        // session.ts RPC 路径才用 session.delta 推送）
       }
 
-      this.logger.info(`[处理完成] conv=${conversationId} reason=${result?.reason ?? "no-result"}`);
+      const agentResult = runResult?.agentResult;
+      this.logger.info(`[处理完成] conv=${conversationId} reason=${agentResult?.reason ?? "no-result"}`);
 
-      if (result && result.reason === "completed") {
-        const turn: Turn = {
-          type: "turn",
-          turnIndex: managed.turnCount,
-          timestamp: turnStartedAt,
-          userMessage: userMessage(msg.text),
-          assistantMessage: result.message,
-          usage: result.usage,
-          source: "channel",
-        };
-        try {
-          await this.conversations.recordTurn(conversationId, turn);
-        } catch {
-          // persistence failure — non-fatal
-        }
+      if (runResult && agentResult && agentResult.reason === "completed") {
+        // turnStartedAt 不再用作 Turn.timestamp（buildTurn 在 run 结束时精确设定）——
+        // 保留变量避免未来诊断字段需要 turn 入口时间时重新加逻辑
+        void turnStartedAt;
 
-        const content = buildOutboundContent(result);
+        const content = buildOutboundContent(agentResult);
         const hasContent = content.text.trim().length > 0;
         this.logger.info(
           `[回复] conv=${conversationId} len=${content.text.length} empty=${!hasContent} text="${content.text}"`,
@@ -398,14 +410,14 @@ export class InboundRouter {
             );
         }
         // 无 outboxRegistry + 空内容：REPL/测试场景，静默不发（channel 路径必有 registry）
-      } else if (result) {
+      } else if (agentResult) {
         const errorText =
-          result.reason === "error"
-            ? `处理出错：${result.error.message}`
-            : result.reason === "max_turns"
+          agentResult.reason === "error"
+            ? `处理出错：${agentResult.error.message}`
+            : agentResult.reason === "max_turns"
               ? "达到最大轮次限制。"
               : "处理被中止。";
-        this.logger.warn(`[错误回复] conv=${conversationId} reason=${result.reason}`);
+        this.logger.warn(`[错误回复] conv=${conversationId} reason=${agentResult.reason}`);
         await this.emitReply(
           replyTarget,
           { text: errorText },

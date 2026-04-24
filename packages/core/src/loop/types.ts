@@ -14,7 +14,8 @@ import type { AgentError } from "../types/errors.js";
 import type { ChatRequest, LLMProvider, StopReason, StreamEvent, TokenUsage } from "../types/llm.js";
 import type { Message } from "../types/messages.js";
 import type { ToolDefinition, ToolExecutionContext, ToolResult } from "../types/tools.js";
-import type { ContextManagerHook } from "../context/types.js";
+import type { ContextManagerHook, ContextBudget } from "../context/types.js";
+import type { CompactMarker, Turn } from "../transcript/types.js";
 
 // ─── Agent Loop 参数 ───
 
@@ -110,4 +111,75 @@ export interface LLMCallResult {
   readonly stopReason: StopReason;
   readonly usage: TokenUsage;
   readonly error?: AgentError;
+}
+
+// ─── Runtime 层 Run 返回值 ───
+
+/**
+ * 一次 AgentRuntime / SessionRuntime run() 的完整结果 —— 跨 cli/server 统一契约。
+ *
+ * 和 AgentResult 的区别：
+ *   - AgentResult 是 agent-loop 内部的"终止原因"（completed / max_turns / aborted / error）
+ *   - RunResult 是外层 runtime 一次 run() 的整体产出，**包装** AgentResult + 持久化单元
+ *     + 本 run 压缩边界 + 诊断字段
+ *
+ * 设计（详见 research/design/drafts/transcript-retention.md §0.7.1 单向数据流）：
+ *   run-agent 闭包订阅 compact_end → 组装 CompactMarker →
+ *   RunResult { turn, compactBefore? } → 调用方 →
+ *   TranscriptStore.commitTurn → canonical 回喂 state.messages
+ *
+ * 放在 core/loop 而非 cli 的原因：
+ *   - cli 的 AgentRuntime 和 server 的 SessionRuntime 都要 return 此类型
+ *   - 跨包共享契约必须在 core，否则两端类型漂移
+ */
+export interface RunResult {
+  /** Agent loop 终止结果（原因 + usage + 可能的 error / completed message） */
+  readonly agentResult: AgentResult;
+
+  /**
+   * 持久化单元 —— 本 run 完整的 user+assistant+toolCalls 记录。
+   *
+   * 由 `buildTurn()` 在 run 结束前组装。即使 abort / error 路径也会构造（assistant
+   * 可能为空内容），保证调用方 commitTurn 的入参永远有 turn 可用。
+   */
+  readonly turn: Turn;
+
+  /**
+   * 本 run 期间累积的最后一次摘要型 compact 边界。
+   *
+   * 语义：`turnsCompacted` 是本 run 内**累积替代的文件 Turn 总数**
+   * （多触发点累加，见 L1 累积算法）。commitTurn 按此值切分磁盘 turns
+   * 保留末尾。
+   *
+   * 非摘要型压缩（ToolResultTrim / MessageDrop 等）不填此字段 ——
+   * 它们不替代文件 Turn，只是内存 tier 级裁剪，不影响持久化边界。
+   */
+  readonly compactBefore?: CompactMarker;
+
+  /**
+   * 本 run yield 流重建的原始新消息增量（与 canonical 正交）。
+   *
+   * 用途：技能提议检测（扫 assistant 文本）、技能效果推断、诊断日志、
+   * 非 REPL 单次运行的输出显示。
+   *
+   * 不用于状态同步（后者由 commitTurn 返回的 canonical 承担）。
+   */
+  readonly newMessages: Message[];
+
+  /** 诊断：本 run 耗时（ms） */
+  readonly durationMs: number;
+
+  /** 诊断：本 run 工具完成次数（tool_end 事件数），供反思触发 */
+  readonly toolEndCount: number;
+
+  /** 诊断：本 run 注入的技能 id 列表，供效果推断 */
+  readonly injectedSkillIds: string[];
+
+  /**
+   * 诊断：run 结束后的预算快照。
+   *
+   * 可选 —— 极端错误路径（如 pre-flight engine 抛错但 budget
+   * 暂未算出）允许省略；正常路径应填充以便调用方做 UI 预算显示。
+   */
+  readonly budget?: ContextBudget;
 }

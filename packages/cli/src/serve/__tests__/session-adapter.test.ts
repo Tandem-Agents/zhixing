@@ -9,8 +9,19 @@ import {
   type AgentYield,
   type Message,
 } from "@zhixing/core";
+import type { SessionRuntime } from "@zhixing/server";
 import { createServerRuntimeAdapter } from "../session-adapter.js";
 import type { AgentRuntime, RunParams, RunResult } from "../../run-agent.js";
+
+/**
+ * 单一事实源模拟辅助：模拟 ConversationManager.recordTurn 后的 updateMessages 回喂。
+ *
+ * Phase 5 §0.7.5 契约：adapter.messages 由调用方通过 updateMessages(canonical) 整体替换，
+ * adapter 内部不再自动 push newMessages。测试直接用 adapter 时需自行模拟这步。
+ */
+function commitNewMessages(runtime: SessionRuntime, newMessages: Message[]): void {
+  runtime.updateMessages([...runtime.getHistory(), ...newMessages]);
+}
 
 // ─── Mock AgentRuntime ───
 
@@ -58,13 +69,26 @@ function createMockAgentRuntime(behavior: MockBehavior = {}): AgentRuntime {
                   usage: { inputTokens: 0, outputTokens: 0 },
                 };
 
+      const assistantMsg: Message = {
+        role: "assistant",
+        content: [{ type: "text", text: "done" }],
+      };
       const newMessages: Message[] =
-        reason === "completed"
-          ? [{ role: "assistant", content: [{ type: "text", text: "done" }] }]
-          : [];
+        reason === "completed" ? [assistantMsg] : [];
 
       return {
         agentResult: result,
+        turn: {
+          type: "turn",
+          turnIndex: params.turnIndex,
+          timestamp: new Date().toISOString(),
+          userMessage:
+            params.messages[params.messages.length - 1] ??
+            ({ role: "user", content: [] } as Message),
+          assistantMessage:
+            reason === "completed" ? assistantMsg : ({ role: "assistant", content: [] } as Message),
+          usage: { inputTokens: 1, outputTokens: 1 },
+        },
         newMessages,
         durationMs: 10,
         toolEndCount: 0,
@@ -93,7 +117,8 @@ describe("createServerRuntimeAdapter", () => {
     while (true) {
       const { value, done } = await gen.next();
       if (done) {
-        expect(value.reason).toBe("completed");
+        // Phase 5: return 值是 RunResult（非 AgentResult）
+        expect(value.agentResult.reason).toBe("completed");
         break;
       }
       yields.push(value);
@@ -102,14 +127,19 @@ describe("createServerRuntimeAdapter", () => {
     expect((yields[0] as { text: string }).text).toBe("hi");
   });
 
-  it("getHistory returns all messages including new ones from run", async () => {
+  it("getHistory returns all messages including new ones from run（经 updateMessages 回喂）", async () => {
     const runtime = createServerRuntimeAdapter("test-2", createMockAgentRuntime());
     const gen = runtime.run("hello");
-    while (!(await gen.next()).done) {
-      // consume
+    let result: RunResult | undefined;
+    while (true) {
+      const { value, done } = await gen.next();
+      if (done) { result = value; break; }
     }
+    // Phase 5 契约：adapter 不再自动 push newMessages；调用方（ConversationManager）
+    // 收到 RunResult 后应走 commitTurn + updateMessages(canonical)。此处模拟之。
+    commitNewMessages(runtime, result!.newMessages);
+
     const history = runtime.getHistory();
-    // 1 user (from adapter) + 1 assistant (from mock newMessages)
     expect(history).toHaveLength(2);
     expect(history[0]!.role).toBe("user");
     expect(history[1]!.role).toBe("assistant");
@@ -125,17 +155,24 @@ describe("createServerRuntimeAdapter", () => {
     await expect(gen.next()).rejects.toThrow("boom");
   });
 
-  it("multiple sequential runs accumulate history", async () => {
+  it("multiple sequential runs accumulate history（每轮经 updateMessages 回喂）", async () => {
     const runtime = createServerRuntimeAdapter("test-4", createMockAgentRuntime());
 
     const gen1 = runtime.run("first");
-    while (!(await gen1.next()).done) {
-      /* consume */
+    let r1: RunResult | undefined;
+    while (true) {
+      const { value, done } = await gen1.next();
+      if (done) { r1 = value; break; }
     }
+    commitNewMessages(runtime, r1!.newMessages);
+
     const gen2 = runtime.run("second");
-    while (!(await gen2.next()).done) {
-      /* consume */
+    let r2: RunResult | undefined;
+    while (true) {
+      const { value, done } = await gen2.next();
+      if (done) { r2 = value; break; }
     }
+    commitNewMessages(runtime, r2!.newMessages);
 
     const history = runtime.getHistory();
     expect(history).toHaveLength(4); // 2 turns × 2 messages
@@ -144,9 +181,12 @@ describe("createServerRuntimeAdapter", () => {
   it("dispose clears history", async () => {
     const runtime = createServerRuntimeAdapter("test-5", createMockAgentRuntime());
     const gen = runtime.run("x");
-    while (!(await gen.next()).done) {
-      /* consume */
+    let result: RunResult | undefined;
+    while (true) {
+      const { value, done } = await gen.next();
+      if (done) { result = value; break; }
     }
+    commitNewMessages(runtime, result!.newMessages);
     expect(runtime.getHistory()).toHaveLength(2);
 
     runtime.dispose();
@@ -218,13 +258,20 @@ describe("createServerRuntimeAdapter", () => {
   it("getHistory respects limit parameter", async () => {
     const runtime = createServerRuntimeAdapter("test-7", createMockAgentRuntime());
     const gen1 = runtime.run("first");
-    while (!(await gen1.next()).done) {
-      /* consume */
+    let r1: RunResult | undefined;
+    while (true) {
+      const { value, done } = await gen1.next();
+      if (done) { r1 = value; break; }
     }
+    commitNewMessages(runtime, r1!.newMessages);
+
     const gen2 = runtime.run("second");
-    while (!(await gen2.next()).done) {
-      /* consume */
+    let r2: RunResult | undefined;
+    while (true) {
+      const { value, done } = await gen2.next();
+      if (done) { r2 = value; break; }
     }
+    commitNewMessages(runtime, r2!.newMessages);
 
     const last2 = runtime.getHistory(2);
     expect(last2).toHaveLength(2);
@@ -242,5 +289,105 @@ describe("createServerRuntimeAdapter", () => {
 
     // broker 必须是同一个引用——adapter 不包装、不复制 broker 身份
     expect(runtime.confirmationBroker).toBe(agent.confirmationBroker);
+  });
+
+  // ─── Phase 5 Bug A 回归守卫：non-completed 自动 pop userMsg ───
+  //
+  // agent-loop 返回 reason ∈ {error, max_turns, aborted} 时，caller 按约定不调
+  // recordTurn → updateMessages 不会执行 → adapter.messages 不应留下 orphan userMsg。
+  // adapter 内部自修：done 分支非 completed 主动 pop 入口 push 的 userMsg。
+  //
+  // 和 "abortSignal 触发 throw 路径" 的 pop 是两条独立路径 —— 这里覆盖 agent-loop
+  // 内部 return non-completed 的场景（产生 done 队列项而非 error 队列项）。
+
+  describe("non-completed 路径自修", () => {
+    it("reason=error：return runResult 前 pop userMsg，history 保持空", async () => {
+      const runtime = createServerRuntimeAdapter(
+        "test-err",
+        createMockAgentRuntime({ reason: "error" }),
+      );
+
+      const gen = runtime.run("q");
+      while (true) {
+        const { done } = await gen.next();
+        if (done) break;
+      }
+
+      // adapter 自修：messages 回到 run 前的空状态
+      expect(runtime.getHistory()).toHaveLength(0);
+    });
+
+    it("reason=max_turns：同样 pop userMsg", async () => {
+      const runtime = createServerRuntimeAdapter(
+        "test-max",
+        createMockAgentRuntime({ reason: "max_turns" }),
+      );
+
+      const gen = runtime.run("q");
+      while (true) {
+        const { done } = await gen.next();
+        if (done) break;
+      }
+
+      expect(runtime.getHistory()).toHaveLength(0);
+    });
+
+    it("reason=aborted（agent-loop 内部 abort，非 abortSignal）：同样 pop userMsg", async () => {
+      const runtime = createServerRuntimeAdapter(
+        "test-abrt",
+        createMockAgentRuntime({ reason: "aborted" }),
+      );
+
+      const gen = runtime.run("q");
+      while (true) {
+        const { done } = await gen.next();
+        if (done) break;
+      }
+
+      expect(runtime.getHistory()).toHaveLength(0);
+    });
+
+    it("reason=completed：保留 userMsg 等 caller updateMessages（回归不变）", async () => {
+      const runtime = createServerRuntimeAdapter(
+        "test-ok",
+        createMockAgentRuntime({ reason: "completed" }),
+      );
+
+      const gen = runtime.run("q");
+      while (true) {
+        const { done } = await gen.next();
+        if (done) break;
+      }
+
+      // completed 路径：userMsg 保留 —— caller 会 updateMessages(canonical) 覆盖
+      expect(runtime.getHistory()).toHaveLength(1);
+      expect(runtime.getHistory()[0]!.role).toBe("user");
+    });
+
+    it("non-completed 后再次 run 不留下 orphan user 消息（跨 run 防护）", async () => {
+      const runtime = createServerRuntimeAdapter(
+        "test-seq",
+        createMockAgentRuntime({ reason: "error" }),
+      );
+
+      // 第一轮 run 失败
+      const gen1 = runtime.run("first");
+      while (true) {
+        const { done } = await gen1.next();
+        if (done) break;
+      }
+      expect(runtime.getHistory()).toHaveLength(0);
+
+      // 第二轮 run：messages 入口 push 后只应有 1 条 user（没 orphan）
+      const gen2 = runtime.run("second");
+      const { done } = await gen2.next();
+      if (!done) {
+        // 消费完剩余 yield
+        while (!(await gen2.next()).done) {/* drain */}
+      }
+
+      // 第二轮也失败 → 又 pop → messages 回空
+      expect(runtime.getHistory()).toHaveLength(0);
+    });
   });
 });
