@@ -2,14 +2,31 @@
 
 > 连接设计规格与代码实现的执行计划。已完成阶段折叠为状态行，细节见 git history。
 
+## 原则
+
+本文档的维护规则。**原则稳定**，大多数修改只动下方"当前计划"；**内容动态**，随实现推进持续重写。
+
+- **定位**：聚焦**当前正在推进的实现计划**。已完成项折叠为单行状态；历史细节归 git history，不在本文保留。
+- **内容只写当前**：主线一次展开 1–3 个 Step 的里程碑进度。已设计但未排期的条目放到"延后方向"单行索引，不在此展开。
+- **顺序**：当前计划 → 延后方向 → 技术债务。未实现项永远排在已计划项之后。
+- **不写**（否则膨胀且易腐）：
+  - 版本演化 / 修订记录 / "20xx-xx-xx 更新" 片段 —— 原地改，不追加历史段。
+  - 已完成里程碑的 M1–Mn 全量清单 —— execution 规格 + git log 已是权威。
+  - 架构决策 / 代码结构 / 设计推演 —— 属于 `specifications/*.md` 和 ADR。
+- **条目格式**：状态 + 执行规格链接 + 一句话摘要 + 依赖。具体细节一律走规格文件。
+- **技术债务**单独简表（问题 · 影响 · 计划时机）。修完即删行，不保留已修复条目。
+
+---
+
 ## 主线脉络
 
 ```
-S1-S3.6 ✅ 全部完成（Scheduler → Server → 对话模型 → Channel → Delivery → Outbox）
-  → Step 17 ✅ Daemon Level 1 (always-on)
-    → Step 20 ✅ 远程权限确认 (通道无关，M1-M7 代码已实现)
-      → Step 18 🔜 Active Hours (免打扰·体验优化)          ← 当前
-        → S2.5  AgentOrchestrator (背景 Agent + 协调)
+WebFetch ⚡ 独立小补给（半天，建议优先 / 并行）
+S1–S3.6 ✅ + Step 17 ✅ + Step 20 ✅ + Phase 5 ✅ 全部已落地
+  → Step 21 🔜 子 agent 底座 + Task 工具                  ← 当前
+    → Step 22  BackgroundAgent（spawn + 完成通知 + Delivery）
+      → Step 23  Ctrl+B 推后台（REPL UX，adoptGenerator）
+        → S3.5   Monitor + TaskGraph
 ```
 
 **规格引用：** [persistent-service.md](specifications/persistent-service.md) · [server-gateway.md](specifications/server-gateway.md) · [confirmation-ux.md](specifications/confirmation-ux.md) · [message-outbox.md](specifications/message-outbox.md) · [conversation-model.md](specifications/conversation-model.md)
@@ -18,113 +35,102 @@ S1-S3.6 ✅ 全部完成（Scheduler → Server → 对话模型 → Channel →
 
 ## 已完成阶段
 
-| 阶段 | 包含 Step | 状态 |
-|------|---------|------|
-| S1 Scheduler | — | ✅ |
-| S2 Server 前台模式 | — | ✅ |
-| S2.7 对话模型统一 | 0-8a | ✅ |
-| S5 Channel Adapter | 9-11 | ✅ 飞书 E2E |
-| S3 Delivery Pipeline | 12-15 | ✅ 含自动路由 |
-| S3.5 Serve 健壮性 | 16a-h | ✅ |
-| S3.6 Message Outbox | 16.9 (P1-P3 + M31-M34) | ✅ 顺序 + 忠实送达 + 生命周期收敛 |
+| 阶段 | 状态 |
+|------|------|
+| S1 Scheduler | ✅ |
+| S2 Server 前台模式 | ✅ |
+| S2.7 对话模型统一 | ✅ |
+| S5 Channel Adapter（飞书 E2E） | ✅ |
+| S3 Delivery Pipeline（含自动路由） | ✅ |
+| S3.5 Serve 健壮性 | ✅ |
+| S3.6 Message Outbox（顺序 + 忠实送达 + 生命周期收敛） | ✅ |
+| Step 17 Daemon Level 1（spawn / stop / status / logs） | ✅ E2E 已验收 |
+| Step 20 远程权限确认（通道无关纯文本协议） | ✅ E2E 已验收 |
+| Phase 5 Transcript 治理（commitTurn 原子截断 + 单向数据流） | ✅ |
 
 ---
 
 ## 当前计划
 
-### P1：Step 17 — Daemon Level 1（always-on）
+### P0：WebFetch 工具（独立小补给）
 
-**状态**：✅ 代码实现完成（M1-M9），待 E2E 人工验收
-**执行规格**：[daemon-level-1-execution.md](specifications/daemon-level-1-execution.md) ← 权威细节
-**顶层定位**：[persistent-service.md §7](specifications/persistent-service.md)
-**依赖**：S3.6 ✅
+**状态**：🔜 待实现（无需 spec，单文件 + 测试）
+**预估**：~半天
+**依赖**：无（可与 Step 21 spec 阶段并行 / 前置）
 
-**范围**（概要，细节见 execution 文档）：
-- `zhixing serve --daemon`：`spawn + detached + unref`，脱离终端常驻
-- `zhixing serve stop` / `status` / `logs`：完整生命周期控制
-- 顺带修复 TD#1（channel-not-found `retryable:true`，M9）
+**为什么单列**：完全独立于子 agent 体系，主 agent 也直接受益。子 agent 没联网时 killer use case（"帮我研究 X 写报告"）跑不出来，应在 Step 21 落地前 / 并行做掉。
 
-**里程碑交付**：
-- M1 SelfExec + daemon 父进程 spawn + readiness handshake
-- M2 PID 文件 schema v2 + 静默迁移 + startTime PID-reuse 检测
-- M3 ServerStateFile（starting/ready/running/stopping/stopped/unhealthy 状态机）
-- M4 CleanupRegistry 统一 shutdown 出口 + 跨包注入
-- M5 `zhixing serve stop`（POSIX SIGTERM + 超时 SIGKILL）
-- M6 `zhixing serve status`（四态 + `--json`）
-- M7 `server.shutdown` RPC + Windows 降级链（RPC → taskkill /T → /F /T）
-- M8 `zhixing serve logs`（默认尾部 N 行 + `--tail` 跨平台轮询）
-- M9 TD#1 修复 + 回归守卫测试
+**范围**：
+- `tools-builtin/web-fetch.ts`：HTTP GET + HTML→MD（可选 turndown / readability）
+- SSRF 防护复用 Delivery 已有白名单（`127/8`、`10/8`、`172.16/12`、`192.168/16`、`169.254/16`、`::1`、`fc00::/7`）
+- 大小 / 超时上限 + 文本截断
+- `system-prompt.ts` 注入工具引导
 
-**测试规模**：server 235 + cli 389 = 624 tests 全绿，零回归。
+### P1：Step 21 — 子 agent 底座 + Task 工具
 
-### P2：Step 20 — 远程权限确认
+**状态**：🔜 待产出执行规格（`subagent-execution.md`）
+**顶层定位**：[persistent-service.md §3.6](specifications/persistent-service.md)（原 AgentOrchestrator 层的最基础原语）
+**依赖**：Phase 5 ✅ + Step 20 ✅
 
-**状态**：✅ 代码实现完成（M0-M6），待 E2E 人工验收（M7）
-**执行规格**：[remote-confirmation-execution.md](specifications/remote-confirmation-execution.md) ← 权威细节
-**设计基础**：[confirmation-ux.md](specifications/confirmation-ux.md) Phase 1 已落地（Broker + TTY 渲染器 + 拒绝回流）
-**依赖**：Step 17 ✅ + confirmation-ux.md Phase 1 ✅（通道无关，仅依赖 `ChannelAdapter.send` + `onMessage` 核心接口）
+**为什么先做**：
+- `tools-builtin/` 目前 8 个工具，缺 **Task 委托**这一基础能力。业界参考（Claude Code / OpenClaw / Cursor）均有子 agent。
+- 子 agent 是 Step 22 / 23 的**底层原语**：背景能力 = 子 agent 底座 + 异步壳 + 通知。先打底座，后续是增量。
+- CLI 模式下即可使用，不依赖 daemon。
 
-**为什么提前**：Daemon 常驻后，serve 模式无交互式渲染器，任何触发确认的工具调用（bash / write 等）被永久拒绝。schedule / memory 已标记 internal 不触发确认，但定时任务执行高风险工具时仍受限。**这是 daemon 实用性的硬阻塞**——不解决远程确认，daemon 模式下只能跑"安全"工具，大幅削弱 Agent 能力。Active Hours 是体验优化，不阻塞使用。
+**范围**（摘要，细节待 spec）：
+- **子 agent 底座**（新模块 `packages/core/src/orchestrator/`）：`createChildSession` / `runChildLoop` / `bridgeEvents`
+  - 共享：provider / security pipeline / memoryStore
+  - 独立：eventBus / context / messages
+  - 生命周期：父 AbortSignal 级联 + 资源回收
+- **`tools-builtin/task.ts`**：AI 可调用的同步委托（主 agent `tool_use` → 子 agent 运行 → 结果作为 `tool_result` 回写）
+- **子 agent 安全**：Broker 不 attach 渲染器 → 自动走 `NonInteractiveResolver`（现有能力，零改动）
 
-**核心架构**（详见执行规格）：
-- **纯文本往返协议**：Renderer 发一条文本消息到用户通道；用户回复任意文本；InboundRouter 按词集匹配（允许 / 拒绝 / 其他 = 理由）解决。**不依赖按钮 / 卡片 / 富交互**
-- **ConfirmationHub**：聚合 per-runtime broker（REPL 零改动）；统一查询 / 解决面
-- **TurnOrigin 路由**：确认请求精确路由回原始对话（3 个 turn 入口全链路注入）
-- **ConfirmationBridge**：RPC 推送单一出口，按 observer 定向过滤（多客户端隐私安全）
-- **文本词集匹配**：中英文 + 数字 + 口语 + 情绪共 40+ 条（好 / y / yes / 可以 / 干吧 / 1；不 / n / no / 拒绝 / 算了 / 2 等）+ NFKC 归一化（全角识别）；保守完全匹配，自由文本作为 `{ kind: "deny", reason }` 回流 LLM
-- **confirmationFallback 策略**：deny（默认）/ auto-approve-safe
+**spec 阶段必须锁定的关键架构决策**（防返工，详见后续 `subagent-execution.md`）：
+1. state 边界矩阵：provider / securityPipeline / memoryStore 的共享/独立切分
+2. 子 agent 的 ConfirmationBroker：继承父 broker 还是独立 broker（影响 UX + 审计语义）
+3. 工具子集契约：白名单 / 黑名单 / 默认全集
+4. 资源预算：max-turns / timeout / token budget 是独立配额还是父子共享
+5. Orchestrator 模块归属：core 还是 cli（涉及 `createAgentRuntime` 的归属重构）
+6. 流式可见性：子 agent yield 事件冒泡父 EventBus 的策略（全冒 / 过滤 / 不冒）
 
-**里程碑交付**（8 个，~11h）：
-- M0 ✅ RFC 定稿（本 spec 即是）
-- M1 ✅ TurnOrigin + 全链路注入（3 入口 + 2 透传 + secure-executor 承接）
-- M2a ✅ `IConfirmationBroker.onResolved` 事件扩展（core 包 `markResolved` 单点触发）
-- M2b ✅ ConfirmationHub + ConversationManager 钩子 + `getObserverConnectionIds`
-- M3 ✅ ConfirmationBridge + 确认 RPC 方法（observer-scoped 推送）
-- M4 ✅ TextConfirmationRenderer（纯文本发送 + 埋点）
-- M5 ✅ InboundRouter pending-aware 词集匹配（40+ 词 + 标点 trim + 2000 字符截断）
-- M6 ✅ 超时策略 + confirmationFallback（deny / auto-approve-safe）
-- M7 🔜 E2E 验收 + 文档同步
+**里程碑**：spec 定稿 + 9 轮架构审查后拆解。
 
-**测试规模**：core 1461 + server 379 + cli 416 = 2256 tests 全绿，零回归。
-- 新增测试：broker.onResolved 10 + match.ts 73 + hub.ts 23 + text-renderer 10 + inbound-router 新增 8 + bridge 7 + confirmation methods 10 + fallback 6 + request-builder 新增 3 + secure-executor 新增 2 + ephemeral-executor 新增 2 = **154 个新测试**
+### P2：Step 22 — BackgroundAgent（spawn + 完成通知）
 
-**未来扩展（不在本 P2）**：平台原生按钮 / 卡片（飞书 Interactive Card、钉钉 ActionCard 等）作为独立 `channel-{platform}-approval-enhancement.md` spec 接入；本 P2 不感知、不依赖。
+**状态**：🔜 设计待启动（Step 21 完成后）
+**顶层定位**：[persistent-service.md §3.6.2](specifications/persistent-service.md)
+**依赖**：Step 21 ✅
 
-### P3：Step 18 — Active Hours（免打扰）
+**范围**（Step 21 完成后展开细节）：
+- 在子 agent 底座上套 "fire-and-forget + 完成通知" 薄壳：`spawnBackground` / `onBackgroundComplete`
+- `tools-builtin/background.ts`（AI 可调用派生 / 列出 / 中止）
+- Delivery 挂钩：背景完成可选推通道通知（飞书 / REPL）
+- 背景 agent 的事件冒泡 / 隔离策略（继承 Step 21 的流式可见性决策）
 
-**状态**：设计完成（9 轮审查通过 · v5），待实现（M1-M7）
-**执行规格**：[active-hours-execution.md](specifications/active-hours-execution.md) ← 权威细节
-**顶层定位**：[persistent-service.md §4.6](specifications/persistent-service.md)
-**依赖**：Step 17 ✅
+### P3：Step 23 — Ctrl+B 推后台（REPL UX）
 
-**范围**（概要，细节见 execution 文档）：
-- `ActiveHoursConfig` 全局配置 + IANA 时区 + 跨午夜 + Jitter 窗口
-- Scheduler 层单点过滤：urgent 穿透 / 非 urgent 推迟到活跃时段开始
-- Jitter 错峰（借鉴 Claude Code CronJitterConfig）
-- ScheduleTool 防 AI 滥用 urgent：**create + update 双路径防护**（A16）
-- RPC 热更新 `schedule.activeHours.update` + **`~/.zhixing/config.override.json` 持久化**（A15 / A18）
-- UX：中文友好文案（"免打扰中 (将于 08:00 恢复推送)"）
+**状态**：🔜 设计待启动（Step 22 完成后，可后置）
+**顶层定位**：[persistent-service.md §3.6.2](specifications/persistent-service.md) + Phase S2.5 Ctrl+B 章节
+**依赖**：Step 22 ✅
 
-**里程碑**（7 个）：
-- M1 ActiveHoursEvaluator 纯函数 + Jitter（1.5h）
-- M2 ZhixingConfig 扩展 + ConfigOverrideWriter + **wiring 桥接**（1.5h）
-- M3 Scheduler 集成 + **defer 两阶段** + event-bridge 订阅（2h）
-- M4 ScheduleTool 防滥用（**单一 inputSchema 删 priority**）（0.5h）
-- M5 RPC **`schedule.activeHours.*`** + override 持久化（1.5h）
-- M6 UX 展示 + 中文文案（1h）
-- M7 E2E + 文档（1h）
+**为什么独立**：跟 spawnBackground 实现共享 < 20%，机制完全不同——处理"已经在跑的主 generator 转移"，涉及 stdin raw 捕获、Win/Unix 平台差异、agent phase 状态机、确认 pending / 流式中的边界。捆在 Step 22 会让 spec 设计失焦。
 
-**预估**：~9 小时。
+**范围**（Step 22 完成后展开细节）：
+- REPL stdin raw mode 捕获 `\x02`（复用现有 `stdin-ownership.ts`）
+- `adoptGenerator(gen, currentState)`：把 await 中的主 generator 挪入背景集合
+- 边界：确认 pending / 工具执行中 / streaming 流式中的 Ctrl+B 行为定义
+- 跨平台：Windows / Unix stdin 差异处理
 
 ---
 
 ## 延后方向
 
-| 方向 | 规格来源 | 设计 |
+| 方向 | 规格来源 | 状态 |
 |------|---------|------|
-| S2.5 AgentOrchestrator | persistent-service.md §3.6 | 已调研 |
+| Step 18 Active Hours（免打扰） | [active-hours-execution.md](specifications/active-hours-execution.md) | 设计完成，暂缓实现（用户行为可替代，UX 优化非硬需求） |
+| S3.5 Monitor + TaskGraph | persistent-service.md §3.6.3–4 | 已调研（依赖 Step 22 / 23 落地） |
 | 飞书流式卡片 | — | **待调研** |
-| 第二社交通道（钉钉 / 企微） | server-gateway.md §8.1 | **待调研** |
+| 第二社交通道（钉钉 / 企微） | server-gateway.md §8.1 | **待调研**（前置修 TD#4） |
 | OpenAI 兼容端点 | server-gateway.md §9 | 已调研 |
 | Web UI | — | **待设计** |
 
@@ -134,20 +140,15 @@ S1-S3.6 ✅ 全部完成（Scheduler → Server → 对话模型 → Channel →
 
 | # | 问题 | 影响 | 计划时机 |
 |---|------|------|---------|
-| 1 | `setup-delivery` channel-not-found 返回 `retryable:false`，长时运行通道重连期间投递被静默丢弃 | **中** | **Step 17 顺带修** |
-| 2 | session.abort 不中断当前 turn（AgentRuntime.run 不接受 AbortSignal） | **中** | Provider 层支持时 |
-| 3 | 长对话历史下模型跳过工具调用（context rot） | **中** | 历史剪枝 + tool-call guard |
-| 4 | Channel credentials 无 `env:` / `helper:` 解析 | **中** | 第二通道接入前 |
-| 5 | KL-1 / KL-3：并发 `queue.save()` rename race | **低** | 独立工单（queue.ts 加 singleflight） |
-| 6 | KL-2：start/stop 并发导致 flushTimer 泄漏 | **低** | 独立工单（setInterval 前 re-check state） |
+| 4 | Channel credentials 无 `env:` / `helper:` 解析（`channels.ts` 直接透传 `entry.credentials`） | **中** | 第二通道接入前 |
+| 5 | KL-1 / KL-3：并发 `queue.save()` rename race（`queue.ts` 注释标注为独立工单） | **低** | 独立工单（queue.ts 加 singleflight） |
+| 6 | KL-2：start/stop 并发导致 flushTimer 泄漏（setInterval 回调已加 state 防御；setInterval 前缺 re-check + timer 未 unref） | **低** | 独立工单 |
 | 7 | Outbox pending 无上限（坏 adapter + 高速生产者可致 OOM） | **低** | 实际出现再说 |
-| 8 | Outbox 无 cancel 语义（用户超时 / 取消后仍投递） | **低** | Step 20 远程确认超时场景 |
+| 8 | Outbox 无 cancel 语义（用户超时 / 取消后仍投递） | **低** | 出现实际问题再修 |
 
-### 延后 / 可选
+### 延后 / 可选（CLI 清理类，不阻塞主线）
 
 | 名称 | 说明 |
 |------|------|
-| /delete 命令 | REPL 卫生，不阻塞主线 |
-| 移除 -c/-r 启动参数 | CLI 清理，不阻塞主线 |
-
-> **已完成（Phase 5 transcript 治理）**：原"Transcript 段轮转"条目已被 `commitTurn` 原子截断方案取代并完成落地。详见 [conversation-model.md §9.5 + ADR-CM-017](./specifications/conversation-model.md)。
+| /delete 命令 | REPL 卫生 |
+| 移除 -c/-r 启动参数 | CLI 清理 |
