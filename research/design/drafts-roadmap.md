@@ -28,4 +28,6 @@
 
 ## 当前草稿
 
-（暂无）
+| 草稿 | 状态 | 摘要 | 目标合并到 |
+|------|------|------|-----------|
+| [WebFetch 工具（含网络出口与文本净化基础设施）](drafts/web-fetch-tool.md) | 起草中（待评审 + spike） | 复用 zhixing 已有 SecurityPipeline / PermissionRule / SessionType / Boundary；新增 `core/network/` + `core/security/text-sanitizer.ts`；ToolExecutionContext 加 cheapLLM 字段（不抽 LLMService，YAGNI）。17 项决策 / 3 milestone / ~17–22h | M1→`network-egress.md`（新建）<br>M2+M3→`tools-builtin.md`（新建） |
