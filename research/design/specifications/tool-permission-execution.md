@@ -2,7 +2,7 @@
 
 > 知行已设计但未完整 wire 起来的工具安全/权限基础设施补齐。当前 8 个 builtin 工具（read / write / edit / glob / grep / bash / schedule / memory）通过 `FileSystemClassifier` / `ShellClassifier` / `Internal` context classifier 获得正确分类——系统当下并未"破"。本规格的目的是**为未来工具（web_fetch / web_search / MCP 接入工具 / 第三方工具等无 context classifier 的新工具）补齐基础设施**：让"声明 boundary → 自动分类 → 权限规则匹配 → 用户决策沉淀"全链路真正可用，避免每个新工具都要在自己内部重新发明权限分级。
 
-**状态**：已落地（M1+M2+M3+M4+§五.7 已实施，M6 cheap LLM 经判定为伪需求已 revert）
+**状态**：已落地（M1+M2+M3+M4+§五.7 已实施）
 **前置依赖**：S3.6 ✅ + Step 17/20 ✅ + Phase 5 ✅
 **位次**：实施路线图作为 Step 21A，先于 Step 21B (WebFetch) 与 Step 21 (子 agent)
 
@@ -61,11 +61,7 @@ agent 当前确实"能用"工具——`bash / read / write / edit / glob / grep 
 
 **一句话**：用户无感知、未来工具大受益。本模块是**技术债务清理 + 基础设施加固**，不是产品功能。
 
-> **范围调整说明**：早期设计曾包含一个 M6——在 `ToolExecutionContext` 加 `llm.cheap` 字段，让工具内部可调便宜模型做 distill / classify / summarize。复盘判定为伪需求并 revert：
-> - 现有 8 工具 0 个 consumer，未来 WebFetch 也可走"返回原始 markdown + maxResultChars 截断 + 主 agent 下一轮 distill"路径（Claude Code 即此做法）
-> - 把 `llm` 设为所有 ToolExecutionContext 的必填字段是把"一个工具的依赖"漏到所有工具的契约里——抽象层级错误
-> - 真要 cheap LLM 时，应作为该工具工厂的依赖注入（`createWebFetchTool({ cheapProvider })`），不污染其他工具
-> - 决策详见 §十"未来工作"中的注释项
+> **关于 ToolExecutionContext.llm 字段**：本规格不引入 LLM capability injection——`ToolExecutionContext` 的 LLM 角色注入由独立 spec [`secondary-llm-capability.md`](secondary-llm-capability.md) 提供（Step 21B M0 实施）。本规格 scope 严格收敛在权限 / 边界 / 确认基础设施。
 
 ---
 
@@ -131,7 +127,7 @@ zhixing 安全管线（SecurityPipeline / OperationClassifier / PermissionStore 
 ## 二、设计原则
 
 1. **完成度优先，不留死代码 / 半成品**：每条新接口必须端到端 wire 通；每条已有但未连的接口要么连上要么删除
-2. **boundaries 与 context classifier 二选一**：每个工具走其中一条路径，不在工具上叠加冗余声明（修订 ADR-TPE-006）
+2. **boundaries 与 context classifier 二选一**：每个工具走其中一条路径，不在工具上叠加冗余声明（见 ADR-TPE-006）
 3. **工具自带声明 ≥ 外部配置**：boundaries / permissionArgumentKey 放 ToolDefinition（cohesion）
 4. **builtin defaults 不写用户磁盘**：系统预置规则是代码不是数据；用户磁盘只存用户决定
 5. **匹配优先级两阶段**：用户池任一命中 → 仅按用户池 resolve；用户池空 → builtin 池 resolve（user 严格优先）
@@ -494,7 +490,7 @@ match(workspaceId, request): PermissionRule | null {
 
 **未来增量（不在本 spec）**：deny 计数 UX——若产品需要"用户连续拒绝同操作 N 次后建议建一条 deny 规则"，需独立给 deny 路径补 tracker.record 调用并扩 SuggestionMiddleware 的 should-suggest 阈值规则。当前不做。
 
-<!-- §4.5 ToolExecutionContext.llm + ZhixingConfig.llm (M6) — 已移除：判定为伪需求，详见 §十"未来工作"中 cheap LLM 项与 §〇.0.3 范围调整说明 -->
+<!-- ToolExecutionContext.llm 的注入由 secondary-llm-capability.md 提供，不在本 spec scope -->
 
 ### 4.6 builtin 规则注册接口（M4 实现细节）
 
@@ -536,7 +532,7 @@ permissionStore.unregisterBuiltinRules("mcp:linear");
 
 实施工作集中在 M1–M4（共 4 个），每个独立可交付。M5 由于"Confirmation → PermissionRule 链路"在代码中已大部分实现（见 §4.4 现状盘点），不构成实施性 milestone，作为本规格的**端到端验收阶段**单列于 §五.7（位于实施 milestone 之后）。
 
-> **历史变更说明**：早期 spec 含一个 M6（ToolExecutionContext.llm + cheap Provider 注入），实施过程中复盘判定为伪需求并 revert——见 §〇.0.3 范围调整说明与 §十"未来工作"中 cheap LLM 项。M6 已不在本 spec 范围内。
+本 spec scope 严格收敛在权限 / 边界 / 确认基础设施。会话级 LLM capability 注入参见 [`secondary-llm-capability.md`](secondary-llm-capability.md)。
 
 ### M1：ToolDefinition.boundaries 字段（仅扩展 + 文档）
 
@@ -777,7 +773,7 @@ permissionStore.unregisterBuiltinRules("mcp:linear");
 
 | 下游工作 | 关系 |
 |---------|------|
-| Step 21B WebFetch | **强依赖**：boundaries 声明（network/egress） / preapproved hosts builtin 规则 / permissionArgumentKey="url" 依赖本规格。distill 走"返回原始内容 + maxResultChars 截断 + 主 agent 下一轮处理"路径，不依赖 cheap LLM |
+| Step 21B WebFetch | **强依赖**：boundaries 声明（network/egress） / preapproved hosts builtin 规则（namespace="web_fetch"，scope="builtin"） / permissionArgumentKey="url" 依赖本规格。distill 模式由独立的 [二级 LLM 能力](secondary-llm-capability.md) 提供（21B M0），通过 `ctx.llm.secondary` 暴露；graceful degrade 到 raw markdown |
 | Step 21 子 agent | 间接受益：子 agent 创建时 sessionType="ci" → SecurityPipeline 自动按 non-interactive 处理 → builtin 规则仍生效，killer use case 通 |
 | Step 22 BackgroundAgent | 间接受益：工具权限分级在 background 路径同样需要 |
 | 第二通道 / MCP HTTP（未来） | 间接受益：tool 系统更健全，新工具加入更容易 |
@@ -800,9 +796,4 @@ permissionStore.unregisterBuiltinRules("mcp:linear");
 - **deny 计数 UX**：用户连续拒绝同操作 N 次后建议加 deny 规则——需独立给 deny 路径补 tracker.record 调用，并扩 SuggestionMiddleware 阈值规则（区分 allow 累计与 deny 累计）
 - **远程通道"始终允许"语义**：扩 InboundRouter 词集匹配，识别"加规则 / 始终允许 / 不再问我"等关键词转 allow-workspace decision；属于 remote-confirmation 后续增量
 - **可观测性 / telemetry**：permission 决策路径上结构化事件输出（"工具 X 命中规则 Y / 命中 builtin namespace=Z / 触发 confirm / 用户选 W"），便于调试"为什么 X 工具被自动允许 / 为什么这次又问我"
-- **工具内部 cheap LLM 访问能力（曾经的 M6，已撤回）**：早期设计为 `ToolExecutionContext.llm.cheap` 添加全局必填字段 + `ZhixingConfig.llm` cheap model 配置 + `createProvider` 第 4 参数派生新 provider，目的让未来 WebFetch 等工具内部调便宜模型做 distill。复盘判定为伪需求并 revert，理由如下：
-  - **零 consumer**：8 个 builtin 工具全不需要；唯一假设的 consumer（WebFetch）也可走"返回原始 markdown + maxResultChars 截断 + 主 agent 下一轮 distill"路径（Claude Code 即此模式），不依赖 cheap LLM
-  - **抽象层级错误**：把"WebFetch 一个工具的依赖"漏到"所有工具的契约"——`ctx.llm` 是必填字段意味着所有工具/测试 mock 都需要伪造一个永不调用的 provider stub
-  - **配置外溢**：用户为了一个未来工具，需要理解 `cheapModel` / `cheapProviderId` / 默认值 fallback 链等与他完全无关的概念；非 Anthropic 用户更被默认值（haiku）坑
-  - **更优替代**：真要 cheap LLM 时，作为该工具工厂的依赖注入即可：`createWebFetchTool({ cheapProvider })`——其他工具完全不感知，配置只在启用该工具时才需要
-  - **何时再做**：等 Step 21B WebFetch 真正实现且实测发现 raw 返回方案不够用（产生度量证据）时，按"工具工厂参数注入"模式实现；不再回到 ToolExecutionContext 全局字段的方向
+- **二级 LLM 能力**：见 [`secondary-llm-capability.md`](secondary-llm-capability.md)（Step 21B M0 实施），与本规格的权限基础设施正交。

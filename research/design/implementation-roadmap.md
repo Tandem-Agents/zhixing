@@ -47,24 +47,26 @@ S1–S3.6 ✅ + Step 17 ✅ + Step 20 ✅ + Phase 5 ✅ + Step 21A ✅ 全部已
 | Step 17 Daemon Level 1（spawn / stop / status / logs） | ✅ E2E 已验收 |
 | Step 20 远程权限确认（通道无关纯文本协议） | ✅ E2E 已验收 |
 | Phase 5 Transcript 治理（commitTurn 原子截断 + 单向数据流） | ✅ |
-| Step 21A 工具权限/边界基础设施补齐（M1+M2+M3+M4+§五.7） | ✅（M6 cheap LLM 经判定为伪需求已 revert） |
+| Step 21A 工具权限/边界基础设施补齐（M1+M2+M3+M4+§五.7） | ✅ |
 
 ---
 
 ## 当前计划
 
-### P0：Step 21B — WebFetch 工具（含 core/network + text-sanitizer）
+### P0：Step 21B — WebFetch 工具（含 二级 LLM 能力 + `@zhixing/network` 新包）
 
-**状态**：🔜 草稿评审中（21A 已完成，可实施）
+**状态**：🔜 草稿评审完成，可实施（21A 已完成）
 **草稿**：[drafts/web-fetch-tool.md](drafts/web-fetch-tool.md)
+**关联 spec**：[secondary-llm-capability.md](specifications/secondary-llm-capability.md)（M0 主体在此）
 **依赖**：Step 21A ✅
 
-**范围**：3 个 milestone，~17–22h
-- M1 `core/network/`（url-guard + safe-fetcher）+ `core/security/text-sanitizer.ts`
-- M2 WebFetch 工具 + 默认 PermissionRule（注入 builtin scope，依赖 21A M4）
-- M3 system-prompt 注入 + 入口 wiring + 草稿决策合并到 spec
+**范围**：4 个 milestone
+- **M0** 二级 LLM 能力（按 `secondary-llm-capability.md` §七 实施）：ZhixingConfig **hard cut**（删 defaultProvider/defaultModel，新增 llm.{main,secondary}）/ LLMRoles 类型 / createProviderRoles 工厂 / ToolExecutionContext.llm 注入 / cli + serve 入口 4 处调用点更新 / **flushCallLLM 闭包同步迁移到 secondary**（清算 run-agent.ts:329 latent debt 注释）
+- **M1** `@zhixing/network` 新包（url-guard + safe-fetcher + text-sanitizer），undici 依赖隔离在此
+- **M2** WebFetch 工具：自描述 boundaries + permissionArgumentKey="url"（21A 路径） + preapproved hosts 通过 `registerBuiltinRules("web_fetch", ...)` namespace 注入（21A M4 路径） + ctx.llm.secondary distill + graceful degrade
+- **M3** system-prompt 引导 + 入口 wiring + 草稿决策合并到正式 spec（network-egress.md / tools-builtin.md 新建）
 
-**为什么独立于 21A**：21A 是基建补齐（影响所有现有工具）；21B 是新工具实现（仅 WebFetch）。两者解耦让 21A 成果可被多 consumer 复用（webhook 投递 / 第二通道 / MCP 出站等都依赖 21A 的权限分级 + 21B 的网络出口原语）。
+**为什么独立于 21A**：21A 是权限/边界基建（影响所有现有工具）；21B 是新工具实现 + 配套 capability（二级 LLM）+ 网络出口原语包。三者解耦让基建可被多 consumer 复用（webhook 投递 / 第二通道 / MCP 出站等共用 `@zhixing/network`；WebSearch / MCP digest / 子 agent 返回压缩共用 `ctx.llm.secondary`）。
 
 ### P1：Step 21 — 子 agent 底座 + Task 工具
 

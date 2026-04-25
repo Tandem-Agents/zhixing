@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pnpm --filter @zhixing/* test *)",
+      "Bash(pnpm -F @zhixing/* test *)",
+      "Bash(xxd *)",
+      "Bash(cd E:/Dev/longxia/zhixing && timeout * pnpm -C packages/* test *)",
+      "Bash(pnpm --filter @zhixing/* exec tsc *)",
+      "Bash(cd E:/Dev/longxia/zhixing && timeout * pnpm -C packages/* exec tsc *)"
+    ]
+  }
+}
