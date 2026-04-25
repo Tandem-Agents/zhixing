@@ -116,6 +116,63 @@ export interface PermissionStoreOptions {
   rootDir?: string | null;
   /** 时钟注入（便于测试） */
   now?: () => number;
+  /**
+   * 自定义参数提取器。
+   *
+   * - 未注入：使用 `defaultExtractArgument`（priority list `path / file_path /
+   *   target / destination` + bash/shell 特例 + 第一个 string 字段 fallback）
+   * - 生产入口（CLI run-agent / serve）应注入 `createToolAwareExtractor(tools)`，
+   *   读取每个工具自身的 `ToolDefinition.permissionArgumentKey` 显式声明，
+   *   避免多 string 字段工具的字段顺序歧义
+   *
+   * 见 [tool-permission-execution.md §4.2](../../../../research/design/specifications/tool-permission-execution.md)
+   * 与 ADR-TPE-007（依赖注入而非穿透 tools）。
+   */
+  extractArgument?: (request: SecurityRequest) => string;
+}
+
+/**
+ * 深拷贝 PermissionRule（pattern 是唯一嵌套可变字段，其他都是 primitive）。
+ * 用于 `registerBuiltinRules` 入栈时和 `getBuiltinRules` 出栈时的双向防御性拷贝。
+ */
+function cloneRule(rule: PermissionRule): PermissionRule {
+  return {
+    ...rule,
+    pattern: { ...rule.pattern },
+  };
+}
+
+/**
+ * 默认参数提取器——`PermissionStore` 在未注入 `extractArgument` 时的兜底实现。
+ *
+ * 顺序：
+ * 1. priority list：`path` / `file_path` / `target` / `destination` 中第一个 string 字段
+ * 2. 第一个 string 字段（顺序由 `Object.values` 决定，对多 string 字段工具不可靠）
+ *
+ * **不再含 bash/shell 特例**：M3 后 bash 工具已通过 `permissionArgumentKey: "command"`
+ * 显式声明，生产路径走 `ToolArgumentExtractor` 命中 explicit key 不会回退到此。
+ * 即使 caller 单独使用 PermissionStore 不传 extractArgument，bash 仍能命中
+ * 第一字段 fallback（command 是 bash schema 第一个 string 字段，行为兼容）。
+ *
+ * 这是脆弱的隐式约定——多 string 字段工具应通过 `ToolDefinition.permissionArgumentKey`
+ * 显式声明，并由 `ToolArgumentExtractor.fromTools(tools)` 在入口注入。
+ *
+ * **可见性**：本函数仅 `tool-aware-extractor` 内部使用做 fallback，**不**从
+ * `core/security/index.ts` 导出——避免外部 caller 误用绕过 tool-aware 路径。
+ */
+export function defaultExtractArgument(request: SecurityRequest): string {
+  const args = request.arguments;
+
+  for (const key of ["path", "file_path", "target", "destination"]) {
+    const val = args[key];
+    if (typeof val === "string") return val;
+  }
+
+  // 泛型回退：第一个字符串参数
+  for (const val of Object.values(args)) {
+    if (typeof val === "string") return val;
+  }
+  return "";
 }
 
 interface StorageFile {
@@ -132,11 +189,24 @@ export class PermissionStore implements IPermissionStore {
   private readonly sessionRules = new Map<string, PermissionRule[]>();
   private readonly workspaceRules = new Map<string, PermissionRule[]>();
   private globalRules: PermissionRule[] = [];
+  /**
+   * 系统预置规则池（in-memory，不持久化）—— 按 namespace 分组管理。
+   *
+   * 多源支持：每个 caller（cli 默认 / WebFetch / 子 agent / MCP 等）独立注入
+   * 自己的 namespace。namespace 既是去重 key 也是替换粒度——同 namespace
+   * 重复调用 `registerBuiltinRules` 替换该 namespace 的规则集；不同 namespace
+   * 之间独立累加。
+   *
+   * 匹配时遍历所有 namespace 的规则集合并参与 builtin 池兜底，但严格让位
+   * 于用户池（ADR-TPE-008）。
+   */
+  private readonly builtinRulesByNamespace = new Map<string, PermissionRule[]>();
   private readonly loadedWorkspaces = new Set<string>();
   private globalLoaded = false;
 
   private readonly rootDir: string | null;
   private readonly now: () => number;
+  private readonly extractArgumentFn: (request: SecurityRequest) => string;
 
   constructor(options: PermissionStoreOptions = {}) {
     if (options.rootDir === null) {
@@ -151,6 +221,7 @@ export class PermissionStore implements IPermissionStore {
       );
     }
     this.now = options.now ?? (() => Date.now());
+    this.extractArgumentFn = options.extractArgument ?? defaultExtractArgument;
   }
 
   // ─── 公共 API ───
@@ -160,43 +231,62 @@ export class PermissionStore implements IPermissionStore {
     request: SecurityRequest,
   ): PermissionRule | null {
     const tool = request.tool.toLowerCase();
-    const argument = this.extractArgument(request);
+    const argument = this.extractArgumentFn(request);
 
-    const candidates: PermissionRule[] = [];
+    // ─── 第一阶段：用户池（session / workspace / global）─────────────
+    // 用户池任一命中 → 完全按用户池 resolveConflict 决定结果（builtin 不参与）。
+    // 这保证用户的通配 deny（如 `pattern.argument: "*"`）不会被 builtin 高特异性
+    // allow 击败，与"用户拥有最终决定权"的产品语义一致（ADR-TPE-008）。
+    const userCandidates: PermissionRule[] = [];
 
-    // 会话规则
     const sessionList = this.sessionRules.get(this.sessionKey(workspaceId));
     if (sessionList) {
       for (const rule of sessionList) {
-        if (this.ruleMatches(rule, tool, argument)) candidates.push(rule);
+        if (this.ruleMatches(rule, tool, argument)) userCandidates.push(rule);
       }
     }
 
-    // 工作区规则
     if (workspaceId) {
       this.ensureWorkspaceLoaded(workspaceId);
       const wsList = this.workspaceRules.get(workspaceId);
       if (wsList) {
         for (const rule of wsList) {
-          if (this.ruleMatches(rule, tool, argument)) candidates.push(rule);
+          if (this.ruleMatches(rule, tool, argument)) userCandidates.push(rule);
         }
       }
     }
 
-    // 全局规则
     this.ensureGlobalLoaded();
     for (const rule of this.globalRules) {
-      if (this.ruleMatches(rule, tool, argument)) candidates.push(rule);
+      if (this.ruleMatches(rule, tool, argument)) userCandidates.push(rule);
     }
 
-    if (candidates.length === 0) return null;
+    if (userCandidates.length > 0) {
+      const chosen = this.resolveConflict(userCandidates);
+      chosen.matchCount += 1;
+      chosen.lastMatchedAt = this.now();
+      return chosen;
+    }
 
-    const chosen = this.resolveConflict(candidates);
-    // 更新匹配统计（仅内存）
-    chosen.matchCount += 1;
-    chosen.lastMatchedAt = this.now();
+    // ─── 第二阶段：builtin 池兜底 ────────────────────────────────────
+    // 仅在用户池为空时进入；遍历所有 namespace 收集 candidates，之间仍走
+    // resolveConflict（deny-wins + globSpecificity）保持冲突解决一致性。
+    // 多 namespace 间不区分优先级——产品语义上各 namespace 是平级的"系统预置"。
+    const builtinCandidates: PermissionRule[] = [];
+    for (const namespaceRules of this.builtinRulesByNamespace.values()) {
+      for (const rule of namespaceRules) {
+        if (this.ruleMatches(rule, tool, argument)) builtinCandidates.push(rule);
+      }
+    }
 
-    return chosen;
+    if (builtinCandidates.length > 0) {
+      const chosen = this.resolveConflict(builtinCandidates);
+      chosen.matchCount += 1;
+      chosen.lastMatchedAt = this.now();
+      return chosen;
+    }
+
+    return null;
   }
 
   create(workspaceId: string | null, rule: PermissionRule): void {
@@ -226,6 +316,11 @@ export class PermissionStore implements IPermissionStore {
         this.globalRules.push(rule);
         this.persistGlobal();
         return;
+      }
+      case "builtin": {
+        throw new Error(
+          "builtin 作用域的规则不能通过 create() 注入——应在启动时通过 registerBuiltinRules() 一次性注册",
+        );
       }
     }
   }
@@ -285,6 +380,10 @@ export class PermissionStore implements IPermissionStore {
   }
 
   resetAll(): void {
+    // 注意：不清 builtinRulesByNamespace —— 它们是 boot-time 系统配置，
+    // 由各模块（cli / WebFetch / 子 agent 等）在启动时通过 registerBuiltinRules
+    // 注入；runtime 的 resetAll（用户清自己规则）不该牵连系统配置。
+    // 测试套件需要"完全重置"时应创建新 PermissionStore 实例，而不是 resetAll。
     this.sessionRules.clear();
     this.workspaceRules.clear();
     this.globalRules = [];
@@ -302,6 +401,99 @@ export class PermissionStore implements IPermissionStore {
         }
       }
     }
+  }
+
+  /**
+   * 注册某个 namespace 的 builtin 默认规则（in-memory，不持久化）。
+   *
+   * **多源语义**：每个独立模块（cli 默认 / WebFetch / 子 agent / MCP / 第三方插件）
+   * 应使用唯一的 namespace 字符串注入自己的规则。同 namespace 重复调用替换该
+   * namespace 的规则集（不影响其他 namespace）；不同 namespace 之间独立累加。
+   *
+   * **严格契约**（fail-fast，不静默修正 caller bug；与 `BoundaryRegistry.register`
+   * 拒空数组对偶 / 与 `ToolArgumentExtractor.register` 拒空 key 对偶）：
+   * - `namespace` 必须是非空字符串，否则 throw
+   * - `rules` **拒绝空数组**——清除某 namespace 应显式调 `unregisterBuiltinRules(ns)`，
+   *   不混入"注册"语义
+   * - `rules` 中每条规则的 `scope` 必须为 `"builtin"`，否则 throw
+   *   （用 `PermissionStore.createRule({ ..., scope: "builtin" })` 构造）
+   *
+   * **生命周期**：builtin 规则不被 `resetAll` 清除——它们是 boot-time 系统配置，
+   * 不属于用户 runtime 操作的"清理"语义范围。
+   *
+   * 见 [tool-permission-execution.md §4.6](../../../../research/design/specifications/tool-permission-execution.md)
+   * 与 ADR-TPE-002。
+   *
+   * @example
+   * ```ts
+   * // 21B WebFetch 启用时
+   * store.registerBuiltinRules("web_fetch", [
+   *   PermissionStore.createRule({
+   *     pattern: { tool: "web_fetch", argument: "https://docs.npmjs.com/*" },
+   *     decision: "allow",
+   *     scope: "builtin",
+   *   }),
+   * ]);
+   *
+   * // 显式卸载某 namespace（如 /mcp disconnect）
+   * store.unregisterBuiltinRules("mcp:linear");
+   * ```
+   */
+  registerBuiltinRules(namespace: string, rules: PermissionRule[]): void {
+    if (typeof namespace !== "string" || namespace.length === 0) {
+      throw new Error(
+        "registerBuiltinRules: namespace 必须是非空字符串",
+      );
+    }
+    if (rules.length === 0) {
+      throw new Error(
+        `registerBuiltinRules: rules 不能为空数组——清除 namespace 应显式调 unregisterBuiltinRules(namespace) (namespace="${namespace}")`,
+      );
+    }
+    for (const rule of rules) {
+      if (rule.scope !== "builtin") {
+        throw new Error(
+          `registerBuiltinRules: 规则 scope 必须为 "builtin"，收到 "${rule.scope}" ` +
+            `(namespace="${namespace}", ruleId="${rule.id}"). ` +
+            `使用 PermissionStore.createRule({ ..., scope: "builtin" }) 构造。`,
+        );
+      }
+    }
+    // 防御性深拷贝（pattern 是嵌套可变对象）：避免 caller 后续 mutate 影响 store 内部状态
+    this.builtinRulesByNamespace.set(
+      namespace,
+      rules.map((r) => cloneRule(r)),
+    );
+  }
+
+  /**
+   * 注销某个 namespace 的所有 builtin 规则。
+   *
+   * **幂等**：未注册的 namespace 调用 noop（与 `BoundaryRegistry.unregister` 对偶
+   * 匹配"卸载"操作的容错预期）。
+   *
+   * 用于场景：MCP `/mcp disconnect xyz` 清除该 MCP 服务器引入的预置规则；
+   * 子 agent / 插件卸载时清除其 namespace。
+   */
+  unregisterBuiltinRules(namespace: string): void {
+    this.builtinRulesByNamespace.delete(namespace);
+  }
+
+  /**
+   * 列出所有 namespace（调试 / 可观测性）。
+   * 不暴露具体规则——避免 caller 绕过 namespace API 直接操作内部状态。
+   */
+  listBuiltinNamespaces(): string[] {
+    return [...this.builtinRulesByNamespace.keys()];
+  }
+
+  /**
+   * 列出指定 namespace 的 builtin 规则（调试 / `/security` 命令展示）。
+   * 返回深拷贝避免外部 mutate 内部状态。
+   */
+  getBuiltinRules(namespace: string): PermissionRule[] {
+    const rules = this.builtinRulesByNamespace.get(namespace);
+    return rules ? rules.map((r) => cloneRule(r)) : [];
   }
 
   // ─── 静态辅助 ───
@@ -378,26 +570,6 @@ export class PermissionStore implements IPermissionStore {
     return best;
   }
 
-  private extractArgument(request: SecurityRequest): string {
-    const tool = request.tool.toLowerCase();
-    const args = request.arguments;
-
-    if (tool === "bash" || tool === "shell") {
-      return typeof args["command"] === "string" ? args["command"] : "";
-    }
-
-    for (const key of ["path", "file_path", "target", "destination"]) {
-      const val = args[key];
-      if (typeof val === "string") return val;
-    }
-
-    // 泛型回退：第一个字符串参数
-    for (const val of Object.values(args)) {
-      if (typeof val === "string") return val;
-    }
-    return "";
-  }
-
   private sessionKey(workspaceId: string | null): string {
     return workspaceId ?? "";
   }
@@ -445,6 +617,13 @@ export class PermissionStore implements IPermissionStore {
   /**
    * 对从磁盘读取的规则做基本校验：过滤掉结构不对的条目，
    * 防止损坏数据传染到后续决策。
+   *
+   * **scope 处理**：
+   * - `session` / `workspace` / `global` 通过白名单
+   * - `builtin` 显式**拒绝**——builtin 规则永远不该写磁盘（仅 in-memory，由
+   *   `registerBuiltinRules` 注入）。磁盘上若出现（旧版本 bug 或人工编辑），
+   *   立即跳过避免幽灵规则进 builtin 池
+   * - 其他未知 scope（含未来扩展）一律跳过
    */
   private sanitizeRules(
     rules: unknown[],
@@ -464,6 +643,7 @@ export class PermissionStore implements IPermissionStore {
           r.scope !== "workspace" &&
           r.scope !== "global")
       ) {
+        // builtin scope 走这条 continue（不在白名单），符合"拒绝磁盘 builtin"语义
         continue;
       }
       // 磁盘上只应该有 workspace/global 作用域

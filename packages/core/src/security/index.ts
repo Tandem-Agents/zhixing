@@ -6,7 +6,9 @@ export type {
   BoundaryType,
   IPermissionStore,
   IPolicyEngine,
+  IToolArgumentExtractor,
   MatchSpec,
+  MutableToolBoundaryRegistry,
   OperationClass,
   OperationClassifier,
   PermissionDecision,
@@ -45,6 +47,9 @@ export {
 } from "./classifier.js";
 export type { CreateClassifierOptions } from "./classifier.js";
 
+// 边界注册表（从 ToolDefinition 列表构造，供入口注入分类器；支持动态 register/unregister）
+export { BoundaryRegistry } from "./boundary-registry.js";
+
 // 权限存储
 export {
   PermissionStore,
@@ -53,6 +58,11 @@ export {
   globToRegex,
 } from "./permission-store.js";
 export type { PermissionStoreOptions } from "./permission-store.js";
+// 注：`defaultExtractArgument` 不导出——仅作为 ToolArgumentExtractor 内部 fallback 使用，
+// 避免外部 caller 误用绕过 tool-aware 路径破坏 M3 的"显式声明优先"语义。
+
+// 参数提取器（从 ToolDefinition 列表构造，注入 PermissionStoreOptions.extractArgument）
+export { ToolArgumentExtractor } from "./tool-aware-extractor.js";
 
 // 权限匹配中间件
 export { PermissionMatcherMiddleware } from "./permission-matcher.js";

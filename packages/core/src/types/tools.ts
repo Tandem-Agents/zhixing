@@ -15,6 +15,7 @@ import type {
   DeliveryTarget,
   OutboundContent,
 } from "../channels/types.js";
+import type { BoundaryCrossing } from "../security/types.js";
 
 // ─── Turn 上下文（ADR-007 Phase 2） ───
 
@@ -217,6 +218,47 @@ export interface ToolDefinition {
   needsPermission?: boolean;
   /** 结果的最大字符数，超出时自动截断。不设置则不限制 */
   maxResultChars?: number;
+
+  /**
+   * 此工具跨越的安全边界（forward-looking 字段）。
+   *
+   * 用于让 `BoundaryImpactClassifier`（OperationClassifier 兜底分类器）
+   * 按工具自描述的边界判断 OperationClass，避免每个新工具都被默认归为 critical。
+   *
+   * **何时不应声明**：现有 8 个 builtin 工具（read / write / edit / glob / grep /
+   * bash / schedule / memory）均通过专属 context classifier（FileSystemClassifier /
+   * ShellClassifier / Internal）接管分类。`CompositeClassifier` 优先 contextClassifiers，
+   * 因此 boundaries 对它们是死代码——**不应**声明，否则污染心智模型。
+   *
+   * **何时必须声明**：未来无 context classifier 的新工具（如 web_fetch / web_search /
+   * MCP HTTP 工具 / 第三方插件）必须声明，否则 `BoundaryImpactClassifier` 会
+   * fail-closed 分类为 critical（每次调用触发 confirm，UX 极差）。
+   *
+   * 见 [tool-permission-execution.md](../../../../research/design/specifications/tool-permission-execution.md)
+   * §4.1 与 ADR-TPE-006。
+   */
+  boundaries?: BoundaryCrossing[];
+
+  /**
+   * 权限规则匹配时使用哪个输入字段作为 "argument"（forward-looking 字段）。
+   *
+   * `PermissionStore` 在匹配 `pattern.argument` glob 时需要从工具参数中提取一个字符串。
+   * 默认使用内置启发式（priority list `path / file_path / target / destination`，否则取
+   * 第一个 string 字段）——对单 string 字段工具够用，但对多 string 字段工具
+   * （如未来 `web_fetch { url, prompt? }`、`web_search { query, allowed_domains? }`）
+   * 不可靠，可能命中错误字段。
+   *
+   * 推荐每个 `needsPermission: true` 的工具显式声明，避免依赖隐式约定。
+   * 仅 `needsPermission: false` 的工具（glob / grep）不进权限匹配链路，无需声明。
+   *
+   * 实际生效路径：CLI / serve 入口注入 `createToolAwareExtractor(tools)` 到
+   * `PermissionStoreOptions.extractArgument`；store 在 match 时优先用此字段、
+   * 未声明则降级到内置启发式。
+   *
+   * 见 [tool-permission-execution.md](../../../../research/design/specifications/tool-permission-execution.md)
+   * §4.2 与 ADR-TPE-003。
+   */
+  permissionArgumentKey?: string;
 
   /**
    * 执行工具

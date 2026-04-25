@@ -49,6 +49,7 @@ export function createBashTool(): ToolDefinition {
     isReadOnly: false,
     isParallelSafe: false,
     needsPermission: true,
+    permissionArgumentKey: "command",
     maxResultChars: MAX_RESULT_CHARS,
 
     async call(input, context): Promise<ToolResult> {

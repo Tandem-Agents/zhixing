@@ -28,6 +28,7 @@ const SCOPE_BADGE: Record<PermissionScope, string> = {
   session: chalk.gray("session  "),
   workspace: chalk.cyan("workspace"),
   global: chalk.magenta("global   "),
+  builtin: chalk.yellow("builtin  "),
 };
 
 const SCOPE_FILTER_NAMES: Record<string, PermissionScope> = {

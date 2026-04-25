@@ -21,13 +21,12 @@
 ## 主线脉络
 
 ```
-S1–S3.6 ✅ + Step 17 ✅ + Step 20 ✅ + Phase 5 ✅ 全部已落地
-  → Step 21A 🔜 工具权限/边界 + cheap LLM 基础设施补齐    ← 当前
-    → Step 21B  WebFetch 工具（含 core/network + text-sanitizer）
-      → Step 21  子 agent 底座 + Task 工具
-        → Step 22  BackgroundAgent（spawn + 完成通知 + Delivery）
-          → Step 23  Ctrl+B 推后台（REPL UX，adoptGenerator）
-            → S3.5   Monitor + TaskGraph
+S1–S3.6 ✅ + Step 17 ✅ + Step 20 ✅ + Phase 5 ✅ + Step 21A ✅ 全部已落地
+  → Step 21B 🔜 WebFetch 工具（含 core/network + text-sanitizer）    ← 当前
+    → Step 21  子 agent 底座 + Task 工具
+      → Step 22  BackgroundAgent（spawn + 完成通知 + Delivery）
+        → Step 23  Ctrl+B 推后台（REPL UX，adoptGenerator）
+          → S3.5   Monitor + TaskGraph
 ```
 
 **规格引用：** [persistent-service.md](specifications/persistent-service.md) · [tool-permission-execution.md](specifications/tool-permission-execution.md) · [server-gateway.md](specifications/server-gateway.md) · [confirmation-ux.md](specifications/confirmation-ux.md) · [message-outbox.md](specifications/message-outbox.md) · [conversation-model.md](specifications/conversation-model.md)
@@ -48,37 +47,15 @@ S1–S3.6 ✅ + Step 17 ✅ + Step 20 ✅ + Phase 5 ✅ 全部已落地
 | Step 17 Daemon Level 1（spawn / stop / status / logs） | ✅ E2E 已验收 |
 | Step 20 远程权限确认（通道无关纯文本协议） | ✅ E2E 已验收 |
 | Phase 5 Transcript 治理（commitTurn 原子截断 + 单向数据流） | ✅ |
+| Step 21A 工具权限/边界基础设施补齐（M1+M2+M3+M4+§五.7） | ✅（M6 cheap LLM 经判定为伪需求已 revert） |
 
 ---
 
 ## 当前计划
 
-### P0：Step 21A — 工具权限/边界 + cheap LLM 基础设施补齐
+### P0：Step 21B — WebFetch 工具（含 core/network + text-sanitizer）
 
-**状态**：🔜 spec 定稿可执行
-**执行规格**：[tool-permission-execution.md](specifications/tool-permission-execution.md) ← 权威细节
-**依赖**：S3.6 ✅ + Phase 5 ✅
-
-**为什么先做**：当前 8 个 builtin 工具靠 context classifier（FS/Shell/Internal）特例接管才正常分类，**未来无 context classifier 的新工具（WebFetch / web_search / MCP HTTP / 第三方插件）会被兜底为 `critical`**——每次调用触发 confirm，UX 极差。代码现实有 5 处"接口已设计但运行时未连"的断层（spec §一）：
-- ToolBoundaryRegistry 接口存在但 CLI 入口未注入
-- PermissionStore 缺 builtin defaults 机制（系统预置规则会污染用户磁盘）
-- extractArgument 隐式优先列表 → 多 string 字段工具权限误匹配
-- ToolExecutionContext 无 cheap LLM 访问 → 工具内部摘要/分类无路径
-- Confirmation → PermissionRule 链路（已实现 95%，缺端到端验证）
-
-补齐基础设施后，未来新工具只需声明 boundary + permissionArgumentKey 即可挂入完整链路。**对现有工具行为零影响**（spec §〇.0 详述）。
-
-**范围**：5 个实施 milestone + 1 个验收阶段（详见 spec §五）
-- M1 ToolDefinition.boundaries / permissionArgumentKey 字段（forward-looking，现有工具不补）
-- M2 ToolBoundaryRegistry 工厂 + CLI/serve 入口注入
-- M3 permissionArgumentKey + tool-aware extractor 注入（write / edit / bash 补声明）
-- M4 PermissionScope "builtin" + registerBuiltinRules + 用户池兜底分支
-- M6 ToolExecutionContext.llm + ZhixingConfig.llm + cheap Provider 注入
-- §五.7 端到端验收（验证 SuggestionMiddleware → applyBrokerDecision → store.create 全链路；不写产品代码）
-
-### P1：Step 21B — WebFetch 工具（含 core/network + text-sanitizer）
-
-**状态**：🔜 草稿评审中（待 21A 完成后实施）
+**状态**：🔜 草稿评审中（21A 已完成，可实施）
 **草稿**：[drafts/web-fetch-tool.md](drafts/web-fetch-tool.md)
 **依赖**：Step 21A ✅
 
@@ -89,7 +66,7 @@ S1–S3.6 ✅ + Step 17 ✅ + Step 20 ✅ + Phase 5 ✅ 全部已落地
 
 **为什么独立于 21A**：21A 是基建补齐（影响所有现有工具）；21B 是新工具实现（仅 WebFetch）。两者解耦让 21A 成果可被多 consumer 复用（webhook 投递 / 第二通道 / MCP 出站等都依赖 21A 的权限分级 + 21B 的网络出口原语）。
 
-### P2：Step 21 — 子 agent 底座 + Task 工具
+### P1：Step 21 — 子 agent 底座 + Task 工具
 
 **状态**：🔜 待产出执行规格（`subagent-execution.md`）
 **顶层定位**：[persistent-service.md §3.6](specifications/persistent-service.md)（原 AgentOrchestrator 层的最基础原语）
@@ -118,7 +95,7 @@ S1–S3.6 ✅ + Step 17 ✅ + Step 20 ✅ + Phase 5 ✅ 全部已落地
 
 **里程碑**：spec 定稿 + 9 轮架构审查后拆解。
 
-### P3：Step 22 — BackgroundAgent（spawn + 完成通知）
+### P2：Step 22 — BackgroundAgent（spawn + 完成通知）
 
 **状态**：🔜 设计待启动（Step 21 完成后）
 **顶层定位**：[persistent-service.md §3.6.2](specifications/persistent-service.md)
@@ -130,7 +107,7 @@ S1–S3.6 ✅ + Step 17 ✅ + Step 20 ✅ + Phase 5 ✅ 全部已落地
 - Delivery 挂钩：背景完成可选推通道通知（飞书 / REPL）
 - 背景 agent 的事件冒泡 / 隔离策略（继承 Step 21 的流式可见性决策）
 
-### P4：Step 23 — Ctrl+B 推后台（REPL UX）
+### P3：Step 23 — Ctrl+B 推后台（REPL UX）
 
 **状态**：🔜 设计待启动（Step 22 完成后，可后置）
 **顶层定位**：[persistent-service.md §3.6.2](specifications/persistent-service.md) + Phase S2.5 Ctrl+B 章节

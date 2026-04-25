@@ -84,13 +84,69 @@ export interface BoundaryCrossing {
 }
 
 /**
- * 工具边界查询接口。
- * 将分类器与完整工具系统解耦——分类器只需知道某个工具声明了什么边界，
- * 不需要持有 ToolRegistry 的完整引用。Phase 2 使用轻量 lookup，
- * Phase 3 接入 ADR-004 的完整工具注册表。
+ * 工具边界查询接口（read-only）。
+ *
+ * 消费者契约：将分类器与完整工具系统解耦——`BoundaryImpactClassifier` 只需知道
+ * 某个工具声明了什么边界，不需要持有 ToolRegistry 完整引用。
+ *
+ * 注入到 `SecurityPipelineOptions.toolBoundaryRegistry` 时使用此 read-only 接口；
+ * 拥有 registry 的 caller（cli 入口 / MCP 接入处）可改持 `MutableToolBoundaryRegistry`
+ * 子接口以调用 register/unregister。LSP 安全：消费方对 mutable 能力无感知。
  */
 export interface ToolBoundaryRegistry {
   getBoundaries(toolName: string): BoundaryCrossing[] | undefined;
+}
+
+/**
+ * 工具边界注册表的可变子接口——caller 持有此类型以支持运行时注册/注销。
+ *
+ * 设计目的（ADR-TPE-009）：让 caller 依赖**接口**而非具体类，未来 swap 实现
+ * （如 immutable + observable / 远程同步等）零成本——只要新实现 implements
+ * 同接口即可。当前唯一实现是 `BoundaryRegistry`。
+ *
+ * 用法：
+ * - **静态启动**：`BoundaryRegistry.fromTools(tools)` 一次性 snapshot
+ * - **动态扩展**：`registry.register("mcp_tool", [...])` runtime 注入新工具，
+ *   无需 reconfigure SecurityPipeline——`BoundaryImpactClassifier` 实时反映
+ */
+export interface MutableToolBoundaryRegistry extends ToolBoundaryRegistry {
+  /**
+   * 注册或覆盖单工具的边界声明。
+   * - 重复注册同 toolName：覆盖旧声明
+   * - **拒绝空数组**（fail-fast）：传入 `[]` 必须 throw；清除工具应显式调
+   *   `unregister(toolName)`。与 `IToolArgumentExtractor.register` 拒空 key throw 对偶
+   * - 工具名小写归一化；内部独立深拷贝防止 caller mutate 污染
+   */
+  register(toolName: string, boundaries: readonly BoundaryCrossing[]): void;
+  /** 注销工具的边界声明（动态卸载场景，如 MCP disconnect）。幂等：未注册的 toolName 调用 noop。 */
+  unregister(toolName: string): void;
+  /** 调试 / 可观测性：列出已注册的工具名（小写）。 */
+  list(): string[];
+}
+
+/**
+ * 工具参数提取器接口——`PermissionStore.match` 通过 `extractArgument` 函数式注入消费，
+ * 但 caller 在持有 extractor 实例时使用此接口以支持运行时 register/unregister。
+ *
+ * 设计目的（ADR-TPE-009）：与 `MutableToolBoundaryRegistry` 对偶——caller 依赖接口
+ * 而非具体类，未来 swap 实现零成本。当前唯一实现是 `ToolArgumentExtractor`。
+ *
+ * 函数式契约保留在 `PermissionStoreOptions.extractArgument: (req) => string`，
+ * caller 用 `(req) => extractor.extract(req)` 桥接（store 端不感知本接口）。
+ */
+export interface IToolArgumentExtractor {
+  /**
+   * 从 SecurityRequest 提取用于权限匹配的 argument 字符串。
+   * - 显式声明命中：取 `arguments[explicitKey]`
+   * - 未命中或非 string：降级到内部 fallback（priority list + first-string）
+   */
+  extract(request: SecurityRequest): string;
+  /** 注册或覆盖单工具的 argument key。空 / 非 string key throw。 */
+  register(toolName: string, key: string): void;
+  /** 注销工具的 key 声明（动态卸载场景）。 */
+  unregister(toolName: string): void;
+  /** 调试 / 可观测性：列出已注册的工具名（小写）。 */
+  list(): string[];
 }
 
 // ─── 操作分类器接口 ───
@@ -113,11 +169,26 @@ export type PermissionDecision = "allow" | "deny";
 
 /**
  * 权限规则的作用域。
+ *
+ * 三种**用户授权**作用域：
  * - session：本次会话有效（进程重启后消失，不落盘）
  * - workspace：当前工作区内有效，落盘到 ~/.zhixing/permissions/<workspace-hash>.json
  * - global：跨所有工作区有效，落盘到 ~/.zhixing/permissions/global.json
+ *
+ * 一种**系统预置**作用域：
+ * - builtin：代码定义的默认规则（如未来 web_fetch 的 preapproved 域名 allow 列表），
+ *   仅 in-memory，启动时由 `registerBuiltinRules` 注入，不落盘。匹配时严格让位
+ *   于用户池（user 池任一命中 → 完全决定结果，builtin 池不参与；user 池空 →
+ *   builtin 池接管），保证用户拥有最终决定权。
+ *
+ * 见 [tool-permission-execution.md §4.3](../../../../research/design/specifications/tool-permission-execution.md)
+ * 与 ADR-TPE-002 / ADR-TPE-008。
  */
-export type PermissionScope = "session" | "workspace" | "global";
+export type PermissionScope =
+  | "session"
+  | "workspace"
+  | "global"
+  | "builtin";
 
 /**
  * 权限规则——用户创建的明确授权或拒绝。
@@ -180,9 +251,16 @@ export interface IPermissionStore {
   /** 清除给定工作区的所有规则（session + workspace 作用域，不影响 global） */
   reset(workspaceId: string | null): void;
 
-  /** 清除全部规则（包括 global 和所有工作区）。 */
+  /** 清除全部规则（包括 global 和所有工作区）。不影响 builtin（boot-time 系统配置）。 */
   resetAll(): void;
 }
+
+/**
+ * 注：`registerBuiltinRules(namespace, rules)` 是 `PermissionStore` 类的具体能力，
+ * 不在 `IPermissionStore` 接口上——builtin 规则池是该实现的特定职责，不属于
+ * "权限存储"通用契约（其他实现/mock 不必负担）。caller (cli run-agent) 持有
+ * `new PermissionStore(...)` 具体类，能正常调用该方法。
+ */
 
 // ─── 匹配规格（判别联合） ───
 

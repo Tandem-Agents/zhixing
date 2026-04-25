@@ -39,6 +39,7 @@ export function createWriteTool(): ToolDefinition {
     isReadOnly: false,
     isParallelSafe: false,
     needsPermission: true,
+    permissionArgumentKey: "path",
     maxResultChars: 1_000,
 
     async call(input, context): Promise<ToolResult> {

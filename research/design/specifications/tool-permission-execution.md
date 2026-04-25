@@ -1,8 +1,8 @@
 # Tool 权限与基础设施补齐 · 执行规格
 
-> 知行已设计但未完整 wire 起来的工具安全/权限基础设施补齐。当前 8 个 builtin 工具（read / write / edit / glob / grep / bash / schedule / memory）通过 `FileSystemClassifier` / `ShellClassifier` / `Internal` context classifier 获得正确分类——系统当下并未"破"。本规格的目的是**为未来工具（web_fetch / web_search / MCP 接入工具 / 第三方工具等无 context classifier 的新工具）补齐基础设施**：让"声明 boundary → 自动分类 → 权限规则匹配 → 用户决策沉淀 → 内部 LLM 调用"全链路真正可用，避免每个新工具都要在自己内部重新发明权限分级。
+> 知行已设计但未完整 wire 起来的工具安全/权限基础设施补齐。当前 8 个 builtin 工具（read / write / edit / glob / grep / bash / schedule / memory）通过 `FileSystemClassifier` / `ShellClassifier` / `Internal` context classifier 获得正确分类——系统当下并未"破"。本规格的目的是**为未来工具（web_fetch / web_search / MCP 接入工具 / 第三方工具等无 context classifier 的新工具）补齐基础设施**：让"声明 boundary → 自动分类 → 权限规则匹配 → 用户决策沉淀"全链路真正可用，避免每个新工具都要在自己内部重新发明权限分级。
 
-**状态**：v1 待 9 轮架构审查
+**状态**：已落地（M1+M2+M3+M4+§五.7 已实施，M6 cheap LLM 经判定为伪需求已 revert）
 **前置依赖**：S3.6 ✅ + Step 17/20 ✅ + Phase 5 ✅
 **位次**：实施路线图作为 Step 21A，先于 Step 21B (WebFetch) 与 Step 21 (子 agent)
 
@@ -22,7 +22,7 @@ agent 当前确实"能用"工具——`bash / read / write / edit / glob / grep 
 - 但这个分类器读的 `ToolBoundaryRegistry` 当前是**空的**（CLI 入口忘了注入）
 - 结果新工具被一律标记为 `critical` → 每次调用都触发 confirm，UX 极差
 
-类似的"接口已设计、运行时未连"的断层共有 5 处（详见 §一）。本模块**不动现有工具的行为**——只补这些断层，让"任意未来新工具：声明 boundary → 自动分类 → 权限规则匹配 → 用户决策沉淀 → 内部 LLM 调用"全链路真正可用。
+类似的"接口已设计、运行时未连"的断层共有 5 处（详见 §一）。本模块**不动现有工具的行为**——只补这些断层，让"任意未来新工具：声明 boundary → 自动分类 → 权限规则匹配 → 用户决策沉淀"全链路真正可用。
 
 **一句话**：Agent 现在能用 8 个工具是因为**特例侥幸**，不是因为系统通用——本模块把侥幸变成系统。
 
@@ -32,21 +32,20 @@ agent 当前确实"能用"工具——`bash / read / write / edit / glob / grep 
 - 它们仍走 context classifier 路径（M1 政策：**不为它们补 boundaries 字段**，避免死代码）
 - M3 给 `needsPermission=true` 的工具（write / edit / bash）补 `permissionArgumentKey` 是**显式化既有行为**——bash 的 `command` 提取在 permission-store 内置 extractArgument 中已经硬编码，新声明只是把隐式约定显式化。功能等价。
 - M4 加的 builtin scope 与现有 user 规则**两阶段独立匹配**：用户池任一命中 → 完全决定结果，builtin 不参与；用户池空才退回 builtin。已有 user 规则的解析行为完全不变。
-- M6 在 `ToolExecutionContext` 加 `llm.cheap` 字段——现有工具不读这个字段，不受影响
 
-**对 CLI / server 启动路径**：影响仅限入口代码（`run-agent.ts` + serve session 各 1 处）：
+**对 CLI / server 启动路径**：影响仅限入口代码（`run-agent.ts`）：
 - 创建 `SecurityPipeline` 时多注入两个 option（`toolBoundaryRegistry` + `extractArgument`）
-- 启动后调一次 `store.registerBuiltinRules([])`（MVP 默认空数组）
-- 创建 cheap Provider 实例并注入 `ToolExecutionContext`
+- cli 默认不调用 `registerBuiltinRules`（cli 自身无 builtin 规则）；未来 21B WebFetch /
+  子 agent / MCP 等模块各自调 `store.registerBuiltinRules("namespace", rules)`
 
-这些都是**可选 / 缺省安全**的：所有新增字段全部 optional 或带 fallback；老 `config.json` 缺 `llm` 字段直接走默认 cheap model；`ToolExecutionContext.llm` 缺省时不影响"不调 LLM 的工具"。
+这些都是**可选 / 缺省安全**的：所有新增字段全部 optional 或带 fallback；ToolDefinition 的 `boundaries` / `permissionArgumentKey` 字段未声明时降级到现有启发式行为。
 
 **测试影响**：
-- 现有 152 测试文件应**全绿**（除了 `ToolExecutionContext` mock 创建点要补 `llm` 字段，约 4 处）
+- 现有测试文件应**全绿**——M1+M2+M3+M4 都不改变 ToolExecutionContext 形状，无 mock 改动
 - §五.7 端到端验收会新增一个测试覆盖完整链路，验证现有 wiring 真正工作（confirm → tracker 计数 → suggestion → 用户选 always → store 持久化 → 下次自动 allow）
 - 老 user 规则反序列化兼容是 M4 验收必加项（验证已存在的 `~/.zhixing/permissions/global.json` 在 PermissionScope 加 "builtin" 后仍能正确加载）
 
-**不需要全量重测原工具**——只在改了 `ToolExecutionContext` / classifier / permission-store 相关测试的地方关注。
+**不需要全量重测原工具**——只在改了 classifier / permission-store 相关测试的地方关注。
 
 ### 〇.0.3 这个模块只是补基础设施，不是功能增强对吧？
 
@@ -57,10 +56,16 @@ agent 当前确实"能用"工具——`bash / read / write / edit / glob / grep 
 - 唯一一处"用户可见"的改动：用户在 confirm 弹窗选"始终允许（本工作区）"后规则会被持久化到 `~/.zhixing/permissions/<workspace>.json`，下次同操作自动允许——但这是 confirm-ux 设计文档**老早就该工作的语义**，本模块只是补完 wiring 让它真正生效（实际上 §4.4 现状盘点显示这条 wiring 大部分已在代码里，§五.7 验收阶段就是验证它整体工作）
 
 **收益面向未来新工具**：
-- WebFetch 接入时只要声明 `boundaries: [{network, egress}]` + `permissionArgumentKey: "url"`，自动获得正确分类 / preapproved 域名规则 / cheap LLM distill 能力
+- WebFetch 接入时只要声明 `boundaries: [{network, egress}]` + `permissionArgumentKey: "url"`，自动获得正确分类 / preapproved 域名规则
 - 子 agent / BackgroundAgent / 第二通道 / MCP HTTP / OpenAI 兼容端点等 follow-up 工作都复用同一套基础设施，不重复造轮子
 
 **一句话**：用户无感知、未来工具大受益。本模块是**技术债务清理 + 基础设施加固**，不是产品功能。
+
+> **范围调整说明**：早期设计曾包含一个 M6——在 `ToolExecutionContext` 加 `llm.cheap` 字段，让工具内部可调便宜模型做 distill / classify / summarize。复盘判定为伪需求并 revert：
+> - 现有 8 工具 0 个 consumer，未来 WebFetch 也可走"返回原始 markdown + maxResultChars 截断 + 主 agent 下一轮 distill"路径（Claude Code 即此做法）
+> - 把 `llm` 设为所有 ToolExecutionContext 的必填字段是把"一个工具的依赖"漏到所有工具的契约里——抽象层级错误
+> - 真要 cheap LLM 时，应作为该工具工厂的依赖注入（`createWebFetchTool({ cheapProvider })`），不污染其他工具
+> - 决策详见 §十"未来工作"中的注释项
 
 ---
 
@@ -78,7 +83,7 @@ agent 当前确实"能用"工具——`bash / read / write / edit / glob / grep 
 
 ## 一、问题陈述
 
-zhixing 安全管线（SecurityPipeline / OperationClassifier / PermissionStore / ConfirmationBroker / ConfirmationTracker）已设计完整。**当前 8 个 builtin 工具均有 context classifier 接管，分类正确**。但**面向未来工具的基础设施有 6 处"接口已定义、运行时未连"的关键断层**——必须先补齐才能引入下一批新工具，否则每个新工具都会在自己内部重做权限分级，最终碎片化。
+zhixing 安全管线（SecurityPipeline / OperationClassifier / PermissionStore / ConfirmationBroker / ConfirmationTracker）已设计完整。**当前 8 个 builtin 工具均有 context classifier 接管，分类正确**。但**面向未来工具的基础设施有 5 处"接口已定义、运行时未连"的关键断层**——必须先补齐才能引入下一批新工具，否则每个新工具都会在自己内部重做权限分级，最终碎片化。
 
 ### 缺口 1：`ToolBoundaryRegistry` 已声明但未注入
 
@@ -121,12 +126,6 @@ zhixing 安全管线（SecurityPipeline / OperationClassifier / PermissionStore 
 - 远程确认（gateway 通道）的"始终允许"语义：当前 InboundRouter 仅识别 yes/no 类词集；如要让用户在飞书等通道也能选"始终允许"，需扩 InboundRouter 词集匹配（识别"加规则 / 始终允许"等关键词→ 转 allow-workspace 等 kind）。**这是独立工作**，不在本 spec 范围内（remote-confirmation 后续增量）。
 - run-agent.ts / serve 入口可选地显式传入 `confirmationTracker` 实例（当前是 pipeline 内部默认，per-session 实例已是合理生命周期，可不改）。
 
-### 缺口 6：`ToolExecutionContext` 无 LLM 访问
-
-- 当前字段：`workingDirectory / abortSignal / turnId / emissionTarget / commitToUser / turnOrigin` —— 无 LLM
-- ZhixingConfig（`packages/providers/src/types.ts`）无 cheap model 概念
-- 任何需要工具内部调便宜模型做摘要/分类的功能（未来 WebFetch distill / search 后处理 / 长文件 summarize）当前**无路径**
-
 ---
 
 ## 二、设计原则
@@ -147,25 +146,43 @@ zhixing 安全管线（SecurityPipeline / OperationClassifier / PermissionStore 
 │  ToolDefinition                                  │
 │    + boundaries?: BoundaryCrossing[]            ← M1
 │    + permissionArgumentKey?: string             ← M3
-│  ToolExecutionContext                           │
-│    + llm: { cheap: LLMProvider }                ← M6
 └──────────────────────────────────────────────────┘
 
 ┌─ packages/core/src/security/ ────────────────────┐
 │  types.ts                                        │
 │    PermissionScope                              │
 │      + "builtin"                                ← M4
+│    IPermissionStore                             │
+│      （无新增方法——registerBuiltinRules 是      │
+│        PermissionStore 类自有能力，不污染契约）  │
+│    + MutableToolBoundaryRegistry                ← R5
+│      extends ToolBoundaryRegistry，加 register/  │
+│      unregister/list；caller 持有此接口         │
+│    + IToolArgumentExtractor                     ← R5
+│      接口定义 extract/register/unregister/list  │
 │  permission-store.ts                             │
 │    PermissionStoreOptions                       │
-│      + extractArgument?: ExtractFn              ← M3 (DI)
-│    + registerBuiltinRules(rules: PermissionRule[]) ← M4
+│      + extractArgument?: (req) => string        ← M3 (DI)
+│    PermissionStore（类自有 API）                 │
+│      + registerBuiltinRules(ns, rules)          ← M4 (拒空数组 throw)
+│      + unregisterBuiltinRules(ns)               ← M4 (幂等，显式卸载)
+│      + listBuiltinNamespaces() / getBuiltinRules(ns) ← 调试 API
 │    match(): 改为两阶段（user pool 先 / builtin 后）← M4
+│    resetAll(): 不清 builtin（boot-time 系统配置） ← M4
+│    sanitizeRules(): 拒绝磁盘上的 builtin scope   ← M4
 │  classifier.ts                                  │
 │    （无变更）                                    │
 │  + boundary-registry.ts (新文件)                 │
-│    + createBoundaryRegistry(tools)              ← M2
+│    + class BoundaryRegistry                     ← M2
+│      implements MutableToolBoundaryRegistry     │
+│      static fromTools(tools): BoundaryRegistry  │
+│      register/unregister/list/getBoundaries     │
+│      （所有数据 in/out 单元素深拷贝防 mutate 污染）│
 │  + tool-aware-extractor.ts (新文件)              │
-│    + createToolAwareExtractor(tools)            ← M3
+│    + class ToolArgumentExtractor                ← M3
+│      implements IToolArgumentExtractor          │
+│      static fromTools(tools): ToolArgumentExtractor│
+│      register/unregister/list/extract            │
 │  confirmation-tracker.ts                        │
 │    （无类型变更，被新流程读取）                   │
 └──────────────────────────────────────────────────┘
@@ -190,22 +207,28 @@ zhixing 安全管线（SecurityPipeline / OperationClassifier / PermissionStore 
 │  （**已实现** applyBrokerDecision 行 566-622：    │
 │   派生 scope + store.create；tracker.record       │
 │   行 610）                                       │
-│  M6 新增：注入 ToolExecutionContext.llm.cheap    ← M6
+│  本规格**无新增**                                │
 └──────────────────────────────────────────────────┘
 
 ┌─ packages/cli/src/run-agent.ts (CLI 入口) ────────┐
-│  + 创建 boundary registry from tools 并注入       │
-│    SecurityPipelineOptions.toolBoundaryRegistry  ← M2
-│  + 创建 tool-aware extractor from tools 注入      │
-│    PermissionStoreOptions.extractArgument        ← M3
-│  + 启动时 store.registerBuiltinRules([])        ← M4
-│  + 创建 cheap Provider 实例                     ← M6
+│  + boundaryRegistry: MutableToolBoundaryRegistry │
+│    = BoundaryRegistry.fromTools(tools)          ← M2 + R5
+│    注入 SecurityPipelineOptions.toolBoundaryRegistry│
+│  + toolArgumentExtractor: IToolArgumentExtractor │
+│    = ToolArgumentExtractor.fromTools(tools)     ← M3 + R5
+│    用 (req) => extractor.extract(req) 函数桥接    │
+│    注入 PermissionStoreOptions.extractArgument    │
+│  cli 默认不调 registerBuiltinRules——space 留给     │
+│  21B WebFetch / 子 agent / MCP 等独立模块各自注入 │
 │  （ConfirmationTracker 已由 pipeline 内部默认创建， │
 │   无需显式注入；可选项）                          │
+│  caller 持有**接口类型**（R5），未来 swap 实现     │
+│  （immutable / observable / 远程同步）零成本      │
 └──────────────────────────────────────────────────┘
 
 ┌─ packages/server/src/runtime/ (serve 入口) ──────┐
-│  同上 wiring                                    ← M2/M3/M4/M6
+│  serve 走 CLI runtime，无独立 SecurityPipeline   │
+│  创建点 —— wiring 自动透传                       │
 └──────────────────────────────────────────────────┘
 
 ┌─ packages/cli/src/security/request-builder.ts ──┐
@@ -224,11 +247,6 @@ zhixing 安全管线（SecurityPipeline / OperationClassifier / PermissionStore 
 │   词集匹配"路径，不需要 option→decision translate；  │
 │   "始终允许"远程语义属于 remote-confirmation 后续 │
 │   增量，不在本 spec）                            │
-└──────────────────────────────────────────────────┘
-
-┌─ packages/providers/src/types.ts (ZhixingConfig) ─┐
-│  + llm: { defaultModel?, cheapModel?,            │
-│           cheapProviderId? }（top-level）        ← M6
 └──────────────────────────────────────────────────┘
 
 ┌─ packages/tools-builtin/src/ ────────────────────┐
@@ -262,39 +280,44 @@ interface ToolDefinition {
 }
 ```
 
-**registry 工厂**（新建 `packages/core/src/security/boundary-registry.ts`）：
+**BoundaryRegistry 类**（新建 `packages/core/src/security/boundary-registry.ts`）：
+
+设计为**可演进的 mutable class**——既支持当前的"启动时 snapshot"模式（`fromTools`），又预留"runtime register / unregister"API 给未来 MCP / 插件 / 子 agent 等动态接入路径，避免 dynamic 工具加载时 breaking。implements `ToolBoundaryRegistry` (read-only) 接口让消费方（`BoundaryImpactClassifier`）契约不变（LSP 安全）。
 
 ```typescript
-import type { BoundaryCrossing, ToolBoundaryRegistry } from "./types.js";
-import type { ToolDefinition } from "../types/tools.js";
+export class BoundaryRegistry implements ToolBoundaryRegistry {
+  private readonly map = new Map<string, BoundaryCrossing[]>();
 
-export function createBoundaryRegistry(
-  tools: readonly ToolDefinition[],
-): ToolBoundaryRegistry {
-  const map = new Map<string, BoundaryCrossing[]>();
-  for (const tool of tools) {
-    if (tool.boundaries && tool.boundaries.length > 0) {
-      map.set(tool.name.toLowerCase(), tool.boundaries);
+  /** 启动时 snapshot：从工具列表批量构造 */
+  static fromTools(tools: readonly ToolDefinition[]): BoundaryRegistry {
+    const reg = new BoundaryRegistry();
+    for (const tool of tools) {
+      if (tool.boundaries?.length) reg.register(tool.name, tool.boundaries);
     }
+    return reg;
   }
-  return { getBoundaries: (name) => map.get(name.toLowerCase()) };
+
+  /** 注册（或覆盖）单工具的边界声明。空数组 = unregister */
+  register(toolName: string, boundaries: readonly BoundaryCrossing[]): void { ... }
+  unregister(toolName: string): void { ... }
+  getBoundaries(toolName: string): BoundaryCrossing[] | undefined { ... }
+  list(): string[] { ... }  // 调试
 }
 ```
 
-**入口注入**：CLI `run-agent.ts` 与 serve session 创建处构建 registry 实例。注意 `createDefaultClassifier` 实际选项参数名是 **`registry`**（`classifier.ts:379-390`），不是 toolBoundaryRegistry：
+**入口注入**（CLI `run-agent.ts`）：
 
 ```typescript
-const boundaryRegistry = createBoundaryRegistry(builtinTools);
+const boundaryRegistry = BoundaryRegistry.fromTools(tools);
 const securityPipeline = new SecurityPipeline({
   // ... 现有 options
-  toolBoundaryRegistry: boundaryRegistry,  // SecurityPipeline 选项名
+  toolBoundaryRegistry: boundaryRegistry,
 });
+// 未来 MCP 接入：boundaryRegistry.register("mcp_tool", [...])
 // pipeline 内部转给 createDefaultClassifier({ registry: options.toolBoundaryRegistry })
 ```
 
-MVP 阶段 registry 实际是空的（现有 8 工具不声明），但**链路已通**——下一批新工具加进 builtinTools 后立即生效。
-
-**当前状态**：`run-agent.ts:277` 中 `createDefaultClassifier({ registry: options.toolBoundaryRegistry })` **已写好** —— 真实缺失的只是 `run-agent.ts:238-243` 创建 SecurityPipeline 时**没有传 toolBoundaryRegistry option**，导致 fallback 到 EMPTY。M2 主要工作就是补这条链路。
+MVP 阶段 registry 实际是空的（现有 8 工具不声明），但**链路已通**——下一批新工具加进 tools 列表或通过 register 动态注入后立即生效。
 
 ### 4.2 permissionArgumentKey 与 tool-aware extractor（M3）
 
@@ -327,53 +350,55 @@ export interface PermissionStoreOptions {
 }
 ```
 
-**工厂**（新建 `packages/core/src/security/tool-aware-extractor.ts`）：
+**ToolArgumentExtractor 类**（新建 `packages/core/src/security/tool-aware-extractor.ts`）：
+
+设计为**可演进的 mutable class**（与 `BoundaryRegistry` 对偶）。函数式 `(req) => string` 契约保留在 `PermissionStoreOptions.extractArgument` 入口；class 仅是内部实现，由 caller 用 `(req) => extractor.extract(req)` 桥接：
 
 ```typescript
-import type { ToolDefinition } from "../types/tools.js";
-import type { SecurityRequest } from "./types.js";
+export class ToolArgumentExtractor {
+  private readonly keys = new Map<string, string>();
 
-export function createToolAwareExtractor(
-  tools: readonly ToolDefinition[],
-): (request: SecurityRequest) => string {
-  const keyByTool = new Map<string, string>();
-  for (const tool of tools) {
-    if (tool.permissionArgumentKey) {
-      keyByTool.set(tool.name.toLowerCase(), tool.permissionArgumentKey);
+  /** 启动时 snapshot：从工具列表批量构造 */
+  static fromTools(tools: readonly ToolDefinition[]): ToolArgumentExtractor {
+    const ext = new ToolArgumentExtractor();
+    for (const tool of tools) {
+      if (tool.permissionArgumentKey) ext.register(tool.name, tool.permissionArgumentKey);
     }
+    return ext;
   }
-  return (request) => {
-    const tool = request.tool.toLowerCase();
-    // 1. 工具显式声明的 key
-    const explicitKey = keyByTool.get(tool);
+
+  register(toolName: string, key: string): void { ... }   // 拒绝空 key
+  unregister(toolName: string): void { ... }
+  list(): string[] { ... }   // 调试
+
+  extract(request: SecurityRequest): string {
+    const explicitKey = this.keys.get(request.tool.toLowerCase());
     if (explicitKey) {
       const val = request.arguments[explicitKey];
       if (typeof val === "string") return val;
     }
-    // 2. 回退到内置启发式（保持向后兼容；store 内置 fallback 完成）
-    return defaultExtractArgument(request);
-  };
+    return defaultExtractArgument(request);  // 内部 fallback，不对外导出
+  }
 }
 ```
 
-**store 端**：当前 `extractArgument` 私有方法（`permission-store.ts:381-399`）改为通过 options 获取，未注入时使用现有 fallback。
+**store 端**：原私有 `extractArgument` 方法已删除，改用 `PermissionStoreOptions.extractArgument` 注入；未注入时降级到 `defaultExtractArgument`（仅同包内部可见，不从 `core/security/index.ts` 导出，避免外部 caller 误用绕过 tool-aware 路径）。
+
+**`defaultExtractArgument` 行为**（M3+D3 后无 bash 特例）：priority list `path / file_path / target / destination` → 第一个 string 字段 fallback。bash 走 fallback 时第一字段就是 `command`（schema 决定），行为兼容；M3 后 bash 显式声明 `permissionArgumentKey: "command"` 走 explicit key 路径，根本不到 fallback——避免了"两条路径输出不同"的双源 truth 风险。
 
 **各工具声明前置条件**：**仅** `needsPermission: true` 的工具才需要补 permissionArgumentKey 声明。`needsPermission: false` 的工具（glob / grep 等）不进权限匹配链路，声明会成死代码。
 
+**实施落地**（spike 后权威清单 + 后续工具规划）：
+
 | 工具 | needsPermission | permissionArgumentKey | 说明 |
 |------|----------------|----------------------|------|
-| bash | true | `"command"` | 与现有 extractArgument 内置 bash 分支一致；显式化让"哪个字段进规则匹配"在工具自身可见 |
-| write / edit | true | 待验证 | 实施时按工具实际 schema 字段名（`file_path` 或 `path`）声明；M3 实施前 grep 各工具 inputSchema 确认 |
-| read | （需确认） | 待验证 | read 当前 `needsPermission` 设置需 M3 启动前 grep 验证；若是 false，跳过 |
-| schedule / memory | （需确认） | （视权限语义） | 这两个工具当前是否需要权限匹配本身待确认；M3 实施前确认后决定是否声明 |
-| glob / grep | **false** | — | **不声明**（needsPermission=false，不进入权限匹配链路） |
-| 未来 web_fetch | true | `"url"` | |
+| bash | true | `"command"` | 已显式声明（M3）—— 解决了 fallback 中 bash 特例的双源 truth 问题，特例已删 |
+| edit | true | `"path"` | 已显式声明（M3） |
+| write | true | `"path"` | 已显式声明（M3） |
+| read / glob / grep / schedule / memory | **false** | — | 不声明（needsPermission=false，不进入权限匹配链路）|
+| 未来 web_fetch | true | `"url"` | 21B 接入时声明 |
 | 未来 web_search | true | `"query"` | |
 | 未来 http_request | true | `"url"` | |
-
-> **注**：表格中 "待验证 / 需确认" 的工具，M3 启动第一步是 grep 各工具实现的 `needsPermission` 字段与 inputSchema，得出权威清单后再批量补声明。spec 不预断未验证的属性。
->
-> **shell 工具**：permission-store 内置 extractArgument 中的 `tool === "shell"` 是预留 fallback（无对应实际工具），不属于 builtin tools 集合。M3 不为 shell 声明 permissionArgumentKey。
 
 ### 4.3 PermissionScope "builtin" + 用户池兜底分支（M4）
 
@@ -381,19 +406,31 @@ export function createToolAwareExtractor(
 // security/types.ts
 export type PermissionScope = "session" | "workspace" | "global" | "builtin";
 
-// security/permission-store.ts
-export interface IPermissionStore {
-  // ... 现有
+// IPermissionStore 接口**不**含 registerBuiltinRules——
+// builtin 规则池是 PermissionStore 类的具体能力，不属于通用"权限存储"契约。
+// caller (cli run-agent) 持有 `new PermissionStore(...)` 具体类实例直接调用。
+
+// security/permission-store.ts (PermissionStore 类自有 API)
+class PermissionStore {
   /**
-   * 注册 builtin 默认规则（in-memory，不持久化）。启动时调用一次。
-   * 每次调用会**替换**现有 builtin 规则集（不累加），便于测试 + 重启清理。
-   * 规则的 scope 字段由 store 强制改写为 "builtin"（防止误声明）。
+   * 注册某个 namespace 的 builtin 规则（in-memory，不持久化）。
+   *
+   * - 多源支持：每个独立模块（cli/web_fetch/subagent/MCP）使用唯一 namespace
+   * - 同 namespace 重复调用：替换该 namespace 的规则集（不影响其他 ns）
+   * - 不同 namespace：独立累加
+   * - 空数组：删除该 namespace
+   * - 严格契约：rules 中 scope 必须为 "builtin"，否则 throw（fail-fast 不静默修正）
+   * - 生命周期：不被 resetAll 清除（boot-time 系统配置）
    */
-  registerBuiltinRules(rules: PermissionRule[]): void;
+  registerBuiltinRules(namespace: string, rules: PermissionRule[]): void;
+
+  /** 调试 / 可观测性 */
+  listBuiltinNamespaces(): string[];
+  getBuiltinRules(namespace: string): PermissionRule[];
 }
 ```
 
-**关键认知**：现有 `match` 实现（`permission-store.ts:158-200`）已经是"收集 session + workspace + global 所有 candidates → resolveConflict"的形态；M4 **不重构** match 主体，**只在用户池空时增加 builtin 池兜底分支**。改动局部化。
+**关键认知**：现有 `match` 实现已经是"收集 session + workspace + global 所有 candidates → resolveConflict"的形态；M4 **不重构** match 主体，**只在用户池空时增加 builtin 池兜底分支**（遍历所有 namespace 收集）。改动局部化。
 
 ```typescript
 // 改动前（现有）：
@@ -457,139 +494,49 @@ match(workspaceId, request): PermissionRule | null {
 
 **未来增量（不在本 spec）**：deny 计数 UX——若产品需要"用户连续拒绝同操作 N 次后建议建一条 deny 规则"，需独立给 deny 路径补 tracker.record 调用并扩 SuggestionMiddleware 的 should-suggest 阈值规则。当前不做。
 
-### 4.5 ToolExecutionContext.llm + ZhixingConfig.llm（M6）
-
-```typescript
-// types/tools.ts
-interface ToolExecutionContext {
-  // ... 现有
-  /**
-   * 工具内部 LLM 访问能力。
-   * `cheap` 是配置的便宜模型 Provider 实例（默认 claude-haiku-4-5），
-   * 用于工具内部摘要/分类等场景。
-   *
-   * 由调用方（CLI run-agent / serve session）创建并注入。
-   */
-  llm: {
-    cheap: LLMProvider;
-  };
-}
-```
-
-**ZhixingConfig 扩展**（`packages/providers/src/types.ts`）：
-
-```typescript
-interface ZhixingConfig {
-  // ... 现有 providers / activeProviderId / log / 等
-  llm?: {
-    /**
-     * 主对话模型 ID。当前已通过 ProviderConfig.defaultModel 间接配置；
-     * 此字段为标准化命名层（向后兼容：未声明时取 activeProvider.defaultModel）。
-     */
-    defaultModel?: string;
-    /**
-     * 工具内部使用的便宜模型 ID。默认 "claude-haiku-4-5-20251001"。
-     */
-    cheapModel?: string;
-    /**
-     * cheap model 使用的 provider ID。默认与 activeProviderId 相同（共用 apiKey/baseUrl，
-     * 仅模型不同）。可独立配置以便用不同的 provider 跑 cheap model（如本地小模型）。
-     */
-    cheapProviderId?: string;
-  };
-}
-```
-
-**createProvider 必须扩展第 4 参数**（M6 关键工作之一）：
-
-`createProvider` 当前签名（`packages/providers/src/create-provider.ts:47-54`）只接 3 参数（config / providerId? / env?），**不支持运行时选择 model**。`ProviderConfig.modelOverrides` 是**预算覆盖**（上下文窗口 / 最大输出 token），与"动态选模"无关。M6 必须扩展：
-
-```typescript
-// packages/providers/src/create-provider.ts (M6 改动)
-export interface CreateProviderOptions {
-  /**
-   * 覆盖 ResolvedProvider.defaultModel 的运行时模型 ID。
-   * 用于在同一 provider（共享 apiKey/baseUrl）上创建不同 model 绑定的实例
-   * （主对话用 sonnet / 工具内部 distill 用 haiku 等场景）。
-   * 不影响 ProviderConfig.modelOverrides（那是模型预算配置）。
-   */
-  model?: string;
-}
-
-export function createProvider(
-  config: ZhixingConfig,
-  providerId?: string,
-  env?: Record<string, string | undefined>,
-  options?: CreateProviderOptions,
-): LLMProvider {
-  const resolved = resolveFromConfig(config, providerId, env);
-  // 用 spread 派生新 ResolvedProvider（保持原对象不可变）；ResolvedProvider 的 model 字段是 defaultModel
-  const effective = options?.model
-    ? { ...resolved, defaultModel: options.model }
-    : resolved;
-  return createFromResolved(effective);
-}
-```
-
-**实例创建**（CLI run-agent + serve session 各一处）：
-
-```typescript
-const cheapProviderId = config.llm?.cheapProviderId ?? config.defaultProvider;
-const cheapModel = config.llm?.cheapModel ?? "claude-haiku-4-5-20251001";
-const cheapProvider = createProvider(config, cheapProviderId, env, { model: cheapModel });
-// 注入到 ToolExecutionContext.llm.cheap
-```
-
-**命名澄清**：
-- 第 4 参数字段名是 `model`（不是 `modelOverride`），避免与 `ProviderConfig.modelOverrides`（预算覆盖）混淆
-- `ResolvedProvider.defaultModel`（`providers/types.ts:185-200`）是真实字段名，**不是** `modelId`
-- ZhixingConfig 的活动 provider 字段名是 **`defaultProvider`**（`providers/types.ts:167-180`），不是 `activeProviderId`
-- 用 spread 派生新对象不 mutate `resolved`，保持解析结果的可缓存/可复用语义
-
-**`ctx.llm.cheap.chat()` 错误契约**：
-
-工具调用 cheap Provider 时可能遇到：网络失败 / quota 耗尽 / 超时 / Provider 配置错误 / 模型不可用。约定如下：
-
-| 错误类型 | Provider 行为 | 工具应对 |
-|---------|--------------|---------|
-| 网络/超时/5xx | `provider.chat()` 抛 异常 | 工具 catch 后**降级**：返回 raw 内容（无 distill） + ToolResult 标注"cheap LLM 不可用，已返回原始内容" |
-| 4xx（quota / auth / model 不存在） | `provider.chat()` 抛异常 | 同上降级；额外 logger.warn 让用户看到配置问题 |
-| AbortSignal 触发 | `provider.chat()` 抛 AbortError | 工具透传 abort，结束执行 |
-
-**强制约定**：工具的 `ctx.llm.cheap.chat()` 调用**必须包 try/catch**，**不允许让 cheap Provider 错误穿透到 tool handler 抛出**——这会被 LLM 误解为"工具不可用"。`isError: false + content 含 fallback` 是正确的工具语义。
-
-**不做的事**：cheap LLM 调用的内置重试/缓存/速率限制不在 ToolExecutionContext.llm 层面提供。如需重试可在工具内部实现（参考 agent-loop 的 withRetry 包装），不强制。
-
-**ToolExecutionContext 创建点**（M6 必须 wire 的所有位置）：
-
-| 位置 | 改动 |
-|------|------|
-| `core/loop/tool-executor.ts:88-91` | context 字面量加 `llm`，从调用方接收 |
-| `cli/secure-executor.ts:162-170` | augmentedContext 同步加 `llm`（透传上层 ctx） |
-| `core/loop/__tests__/agent-loop.test.ts` mock context | 加 `llm: { cheap: mockProvider }` 或允许测试用 stub provider |
-| `core/memory/__tests__/...` mock context | 同上 |
-
-向后兼容：所有创建点同时改，不允许 `llm` 缺省（必填字段）。测试 mock 提供 stub。
+<!-- §4.5 ToolExecutionContext.llm + ZhixingConfig.llm (M6) — 已移除：判定为伪需求，详见 §十"未来工作"中 cheap LLM 项与 §〇.0.3 范围调整说明 -->
 
 ### 4.6 builtin 规则注册接口（M4 实现细节）
 
-CLI / serve 入口启动时调用：
+每个独立模块在自己模块的入口（或 cli 入口的统一汇总点）调用 `registerBuiltinRules`，使用唯一 namespace 标识：
 
 ```typescript
-const builtinRules: PermissionRule[] = [
-  // MVP 默认为空数组；未来 web_fetch 加入时通过此处注入：
-  // ...WEB_FETCH_DEFAULT_RULES,
-];
-permissionStore.registerBuiltinRules(builtinRules);
+// cli/run-agent.ts —— cli 默认无 builtin 规则，不调用任何 register
+
+// 21B WebFetch 接入：由 web-fetch 模块导出 WEB_FETCH_DEFAULT_RULES 常量
+// cli 入口拼接调用（仅在工具实际启用时）：
+permissionStore.registerBuiltinRules("web_fetch", WEB_FETCH_DEFAULT_RULES);
+
+// 子 agent / MCP 接入同模式：
+permissionStore.registerBuiltinRules("subagent", SUBAGENT_DEFAULT_RULES);
+permissionStore.registerBuiltinRules("mcp:linear", LINEAR_MCP_DEFAULT_RULES);
+
+// 显式卸载某 namespace（如 /mcp disconnect linear 时）
+permissionStore.unregisterBuiltinRules("mcp:linear");
 ```
 
-builtin 规则在内存中保存，进程重启重新注入，不写磁盘，用户磁盘文件 (`~/.zhixing/permissions/global.json`) 仅含用户自定。
+**严格契约**（fail-fast，与 BoundaryRegistry / ToolArgumentExtractor register API 对偶）：
+- 每条规则的 `scope` 必须为 `"builtin"`（用 `PermissionStore.createRule({ ..., scope: "builtin" })` 构造）；非 builtin scope throw
+- `register` 拒绝空数组 throw——清除应显式调 `unregisterBuiltinRules(ns)`
+- `unregisterBuiltinRules` 幂等：未注册的 ns 调用 noop
+
+**生命周期**：
+- builtin 规则在内存中保存，**不**写磁盘；用户磁盘文件仅含用户自定
+- `resetAll()` **不**清 builtin（boot-time 系统配置不该被 runtime 操作牵连）
+- `sanitizeRules` 显式拒绝磁盘上 scope==="builtin" 的规则（防御幽灵规则）
+
+**调试**：
+- `store.listBuiltinNamespaces()` 列出已注册的 namespace
+- `store.getBuiltinRules(ns)` 列出指定 namespace 的规则（深拷贝，外部 mutate 不影响内部）
+- `/security` 命令未来扩展 `--include-builtin` flag 时依赖这两个 API（详见 §十）
 
 ---
 
-## 五、Milestone 拆分（5 个实施 + 1 个验收）
+## 五、Milestone 拆分（4 个实施 + 1 个验收）
 
-实施工作集中在 M1–M4 + M6（共 5 个），每个独立可交付。M5 由于"Confirmation → PermissionRule 链路"在代码中已大部分实现（见 §4.4 现状盘点），不构成实施性 milestone，作为本规格的**端到端验收阶段**单列于 §五.7（位于实施 milestone 之后）。
+实施工作集中在 M1–M4（共 4 个），每个独立可交付。M5 由于"Confirmation → PermissionRule 链路"在代码中已大部分实现（见 §4.4 现状盘点），不构成实施性 milestone，作为本规格的**端到端验收阶段**单列于 §五.7（位于实施 milestone 之后）。
+
+> **历史变更说明**：早期 spec 含一个 M6（ToolExecutionContext.llm + cheap Provider 注入），实施过程中复盘判定为伪需求并 revert——见 §〇.0.3 范围调整说明与 §十"未来工作"中 cheap LLM 项。M6 已不在本 spec 范围内。
 
 ### M1：ToolDefinition.boundaries 字段（仅扩展 + 文档）
 
@@ -643,54 +590,27 @@ builtin 规则在内存中保存，进程重启重新注入，不写磁盘，用
 
 **范围**：
 - `security/types.ts` PermissionScope 加 `"builtin"`
-- `permission-store.ts` 加 builtinRules 字段 + registerBuiltinRules 方法（替换式，强制改写 scope 字段为 builtin）
-- match 流程**仅扩展**：现有用户池逻辑保持，仅在用户池空时增加 builtin 池兜底分支（见 §4.3 改动前/改动后对比）
-- `run-agent.ts` + serve 入口启动时调 `store.registerBuiltinRules([])`（MVP 默认空）
+- `permission-store.ts` 加 `builtinRulesByNamespace: Map<string, PermissionRule[]>` 字段 +
+  `registerBuiltinRules(ns, rules)` / `unregisterBuiltinRules(ns)` 方法（namespace 多源 +
+  fail-fast：拒空数组 throw / 严格 scope=builtin 校验 / 拒非空 namespace）
+- match 流程**仅扩展**：现有用户池逻辑保持，仅在用户池空时增加 builtin 池兜底分支
+  （遍历所有 namespace 收集 candidates；详见 §4.3）
+- cli/serve 入口默认不调 register（cli 自身无规则）；21B WebFetch / 子 agent / MCP 各自调
 
 **关于 PermissionRulePattern 类型抽出**：M5 已确认不再使用 rememberAs 字段（直接复用 ConfirmationDecision 现有 pattern 字段），因此 PermissionRulePattern 抽出**不再是 M4 必需**。store.create 调用方传 `decision.pattern.pattern` 即等于 PermissionRule.pattern 形态（结构等价）。如未来其他模块需要命名类型再抽。
 
 **验收**：
 - 单测："用户池任一命中 → builtin 不参与"：注册 builtin allow + 用户 deny 通配 → 结果为 deny
 - 单测："用户池为空 → builtin 接管"：注册 builtin allow + 无用户规则 → 结果为 allow
-- 单测：`registerBuiltinRules` 替换式（连续两次调用，第二次覆盖第一次）
+- 单测：跨 namespace deny-wins / globSpecificity（多源平级合并参与 resolveConflict）
+- 单测：`registerBuiltinRules` 同 namespace 替换 / 不同 namespace 累加 / 拒空数组 throw / 拒非 builtin scope throw
+- 单测：`unregisterBuiltinRules` 显式删除 + 幂等（未注册 ns noop）
+- 单测：`resetAll` 不清 builtin（boot-time 系统配置）
+- 单测：`sanitizeRules` 拒绝磁盘上 scope==="builtin"（防御幽灵规则）
 - 单测：scope=`"builtin"` 不写磁盘（mock 文件系统验证）
 - 现有 permission-store.test.ts 全绿（用户池逻辑无变化）
 
 **估工**：2.5h
-
-### M6：ToolExecutionContext.llm + ZhixingConfig.llm + cheap Provider 注入
-
-**前置 spike**（≤30 分钟，M6 第一步）：grep `: ToolExecutionContext = {` + `: ToolExecutionContext =` 全 packages 列权威清单 + grep `createProvider(` 全 packages 列调用点权威清单。spec 已知 4 处 context 创建点（含 2 处 mock），但产品代码中是否有更多 createProvider 调用点（server/remote-runner/集成测试等）需 spike 确认。
-
-**范围**：
-- `packages/providers/src/create-provider.ts`：扩展第 4 参数 `options?: { model?: string }`，在 resolveFromConfig 后按 options.model 覆写 effective model（见 §4.5 详细代码片段）
-- `packages/providers/src/types.ts` ZhixingConfig 加顶层 `llm` 字段（可选，含兼容缺省）
-- `core/types/tools.ts` ToolExecutionContext 加 `llm: { cheap: LLMProvider }`（必填）
-- 已知 4 处 ToolExecutionContext 创建点更新（spike 后清单可能扩展）：
-  - `core/loop/tool-executor.ts:88-91`（生产）
-  - `cli/secure-executor.ts:162-170`（生产 wrapper）
-  - `cli/__tests__/secure-executor.test.ts` mock context
-  - `tools-builtin/__tests__/memory.test.ts` mock context
-- `run-agent.ts` + serve 入口：按 `config.llm?.cheapProviderId ?? config.defaultProvider` 选 provider，按 `config.llm?.cheapModel ?? "claude-haiku-4-5-20251001"` 选 model，调 `createProvider(config, cheapProviderId, env, { model: cheapModel })`，注入 context
-- 配置兼容：`llm` 字段缺省时整体走 fallback，老 config.json 启动不报错
-
-**验收**：
-- 单测：mock cheap Provider 可通过 `ctx.llm.cheap.chat(...)` 调用
-- 单测：`createProvider(config, undefined, undefined, { model: "haiku" })` 返回的 provider 实例 effective model 为 haiku（不是 ProviderConfig.defaultModel）
-- 集成测：老用户（config.json 无 llm 字段）启动正常，cheap Provider 用 fallback 创建
-- 现有工具测试 mock context 不破坏（增加 llm 字段即可）
-
-**估工**：7.5h（含 spike 0.5h + createProvider 扩展 1.5h + ZhixingConfig schema 扩展 0.5h + 4+ 处 context 创建点 wiring 2.5h + 配置兼容 + 测试 2.5h）
-
-**实施顺序约束**（5 个实施 milestone）：
-- M1 → M2（M2 用 M1 字段，但 MVP M1 不让现有工具声明，所以 M2 测的是 forward-looking 行为）
-- M3 独立
-- M4 独立（registerBuiltinRules 在 CLI 入口启动时调，不依赖其他 M）
-- M6 独立
-
-→ **可并行**：M1+M2 一组、M3 一组、M4 一组、M6 一组；§五.7 端到端验收在 M2+M3+M4 完成后进行
-
-**实施总工**：~14.5h（M1 0.5h + M2 1.5h + M3 2.5h + M4 2.5h + M6 7.5h）；端到端验收阶段额外 1h。
 
 ### 五.7 端到端验收阶段（Confirmation → PermissionRule 链路）
 
@@ -708,7 +628,7 @@ builtin 规则在内存中保存，进程重启重新注入，不写磁盘，用
 - 端到端集成测覆盖 §4.4 现状盘点描述的完整链路
 - 现有 secure-executor / SuggestionMiddleware / TerminalRenderer / applyBrokerDecision 单测保持全绿（不破坏现状）
 
-**进入条件**：M2 + M3 + M4 全部完成（M3 让 allow-workspace 落库的 PermissionRule 能在下次匹配时命中正确字段；M4 让 builtin 规则与 user 规则交互逻辑正确）。M1 / M6 不阻塞。
+**进入条件**：M2 + M3 + M4 全部完成（M3 让 allow-workspace 落库的 PermissionRule 能在下次匹配时命中正确字段；M4 让 builtin 规则与 user 规则交互逻辑正确）。M1 不阻塞。
 
 ---
 
@@ -720,12 +640,30 @@ builtin 规则在内存中保存，进程重启重新注入，不写磁盘，用
 **理由**：cohesion——工具的安全特征属于工具自身定义；外部配置易腐化（工具改动时漏改）。
 **反对**：略增 ToolDefinition 复杂度；可选字段 + 政策（context classifier 工具不应声明）缓解。
 
-### ADR-TPE-002：builtin scope 不持久化
+### ADR-TPE-002：builtin scope 不持久化 + namespace 多源注入
 
-**决策**：PermissionScope 加 "builtin"，规则仅 in-memory，启动时由代码注入。
-**理由**：系统预置规则是代码不是数据；用户磁盘只存用户决定；删除/升级时无需迁移文件。
-**反对**：略增 match 复杂度（两阶段匹配）。
-**未来扩展约束**：当前 `registerBuiltinRules` 是**替换式单源**调用，假设单一启动入口（CLI/serve）一次注入完整集合。**未来若有多源 builtin 规则注入需求**（例如插件 / MCP server / 第三方扩展也想注入 preapproved 规则），需将 API 升级为追加式 + 命名空间（`registerBuiltinRulesNamespace(ns, rules)`），并明示冲突解决策略。当前不预先做。
+**决策**：
+1. PermissionScope 加 "builtin"，规则仅 in-memory，启动时由代码注入
+2. `registerBuiltinRules(namespace, rules)` + `unregisterBuiltinRules(namespace)` 按 namespace 多源 API：
+   - 同 namespace 重复 register = 替换该 namespace 内规则
+   - 不同 namespace 独立累加
+   - **register 拒空数组 throw**（fail-fast，与 `BoundaryRegistry.register` /
+     `ToolArgumentExtractor.register` 拒空对偶）；清除某 namespace 应显式调
+     `unregisterBuiltinRules(ns)`，**不混入"注册"语义**
+   - `unregisterBuiltinRules` 幂等（未注册的 ns 调用 noop）
+   - 严格 scope 校验（非 "builtin" 直接 throw，不静默改写）
+3. `resetAll()` 不清 builtin（boot-time 系统配置不被 runtime 操作牵连）
+4. `sanitizeRules` 显式拒绝磁盘上 scope==="builtin" 规则（防御幽灵规则）
+
+**理由**：
+- 系统预置规则是代码不是数据；用户磁盘只存用户决定；删除/升级时无需迁移文件
+- namespace 让多 caller（cli / web_fetch / subagent / MCP）独立注入互不干扰——21B WebFetch 接入即是首个外部 caller
+- 严格 scope + 不被 resetAll 牵连区分了"用户 runtime 操作"与"系统 boot-time 配置"两个生命周期范畴
+- register 拒空 + 显式 unregister 让"注册"与"注销"两个意图互不相覆盖，三套 register API（builtin rules / boundary / argument key）契约对偶统一
+
+**反对**：略增 match 复杂度（两阶段匹配 + 遍历 namespace）；增加 Map<string, PermissionRule[]> 一层数据结构。
+
+**为什么不在 IPermissionStore 接口上**：builtin 规则池是 PermissionStore 类的具体职责，不属于"权限存储"通用契约。其他实现 / mock 不必负担——caller (cli) 持有具体类直接调用即可（参见 ADR-TPE-009）。
 
 ### ADR-TPE-003：permissionArgumentKey 显式 vs 隐式优先列表
 
@@ -737,12 +675,6 @@ builtin 规则在内存中保存，进程重启重新注入，不写磁盘，用
 **性质**：本条**追认现有代码的架构选择**，不是新决策——`secure-executor.applyBrokerDecision`（行 566-622）已经在生产代码中协调 store.create + tracker.record。spec 把它列为 ADR 是为了给后续维护者一份"为什么是这种结构"的说明，而非要求 M5 实施重新设计。
 **决策**：suggestion 由 SecurityPipeline.SuggestionMiddleware 注入；用户选择翻译由 Renderer 完成；最终 store.create + tracker.record 调用归 secure-executor。
 **理由**：broker 是纯交互协议层；renderer 只渲染；secure-executor 是中间层协调点（持有 pipeline 引用 + 工具调用编排），是落库与计数累计的天然位置。
-
-### ADR-TPE-005：ToolExecutionContext.llm 字段而非抽象 LLMService
-
-**决策**：ToolExecutionContext 直接持 LLMProvider 实例（命名空间化在 `llm.cheap`）；不抽 LLMService 中间层。
-**理由**：当前唯一 consumer 是未来 WebFetch；Provider 已是统一抽象；多一层包装无收益（YAGNI）。`llm: {cheap}` 的对象 shape 留有未来加 `main / custom` 字段空间。
-**使用约束**：`ctx.llm.cheap` **仅供工具内部 distill / classify / summarize 等明确的"LLM 辅助处理"场景**使用——不是通用"调任意模型"的便捷入口。工具的核心职责仍应是单一明确的事（read 就读文件 / bash 就执行命令）；当核心动作产出超大上下文需要压缩时才触发 cheap LLM。代码 review 把关：避免每个工具都开始"顺便调一下 LLM 做点什么"导致工具职责泛滥。
 
 ### ADR-TPE-006：boundaries 与 context classifier 二选一（不叠加）
 
@@ -758,10 +690,49 @@ builtin 规则在内存中保存，进程重启重新注入，不写磁盘，用
 
 ### ADR-TPE-008：用户 vs builtin 优先级 = 两阶段匹配（user 严格优先）
 
-**决策**：match 流程为两阶段：用户池（session+workspace+global）任一命中 → 仅按用户池 resolve；用户池空 → builtin 池接管。
+**决策**：match 流程为两阶段：用户池（session+workspace+global）任一命中 → 仅按用户池 resolve；用户池空 → builtin 池接管。builtin 池内部遍历所有 namespace 收集 candidates，namespace 间平级（不分优先级），仍走 deny-wins + globSpecificity。
 **备选**：把 builtin 池与 global 池合并，按 specificity + deny-wins 统一 resolve。
 **理由**：合并方案下，用户的通配 deny（如 `pattern: "*"`）会被 builtin 高特异性 allow 击败，与"用户拥有最终决定权"的产品语义矛盾；两阶段保证用户在自己写过任何相关规则时不被 builtin 干扰。
-**反对**：实现略复杂；但语义清晰是 worth。
+
+### ADR-TPE-009：dynamic 工具加载基础设施（接口抽象 + 深拷贝防御 + e2e 守卫）
+
+**决策**：从 tools 列表派生 security 基础设施的两套机制（boundary 注册表 / argument extractor）按以下契约设计：
+
+1. **接口分层**（R5）：
+   - `ToolBoundaryRegistry`（read-only）：消费方契约，`BoundaryImpactClassifier` 只看 `getBoundaries`
+   - `MutableToolBoundaryRegistry extends ToolBoundaryRegistry`：caller 契约，加 `register / unregister / list`
+   - `IToolArgumentExtractor`：caller 契约，含 `extract / register / unregister / list`
+   - 具体类 `BoundaryRegistry` / `ToolArgumentExtractor` 实现对应接口；caller (`run-agent.ts`) 类型注解持有**接口而非具体类**——未来 swap 实现（immutable / observable / 远程同步）零成本
+
+2. **静态 + 动态双模式**：
+   - **静态启动（当前主用法）**：`BoundaryRegistry.fromTools(tools)` 一次性 snapshot
+   - **动态扩展（未来 MCP / 插件 / 子 agent）**：runtime 调 `registry.register(toolName, ...)` 注册新工具——不需要 reconfigure 整个 SecurityPipeline
+
+3. **深拷贝双向防御**（R2）：`BoundaryRegistry` 在 `register` 入站和 `getBoundaries` 出站都对每个 `BoundaryCrossing` 做单元素深拷贝（`{ ...c }`），防止 caller 通过 `boundaries[0].access = "MUTATED"` 等单字段修改污染 registry 内部状态
+
+4. **e2e 测试守卫**（R3）：`boundary-registry.test.ts` 含一组测试从 `SecurityPipeline.evaluate` 顶层观察 `register` / `unregister` 即时反映——守卫"不缓存"承诺。未来若 `BoundaryImpactClassifier` 加缓存优化破坏 dynamic 路径，立即被发现
+
+5. **Fail-fast 严格性 + 注册/注销分离**（Q15 + Q16）：三套 register API 契约对偶：
+   - `BoundaryRegistry.register(toolName, [])` → throw；显式 `unregister(toolName)` 幂等
+   - `ToolArgumentExtractor.register(toolName, "")` → throw；显式 `unregister(toolName)` 幂等
+   - `PermissionStore.registerBuiltinRules(ns, [])` → throw；显式 `unregisterBuiltinRules(ns)` 幂等
+   - 让"注册"语义保持纯粹——不混入"注销"等其他操作的 silent transformation
+   - "注销"语义对偶幂等（未注册调用 noop），匹配卸载操作的容错预期
+
+**理由**：
+- 当前 cli 单一 snapshot 是 MVP，未来 `/mcp connect xyz` / 插件 / 子 agent 注入子工具几乎必然
+- 纯函数式 snapshot 工厂在动态化时是 breaking change（消费方契约或注入逻辑必须重写）
+- mutable class + 接口抽象在当前不引入复杂度（fromTools 仍是主调用），但保留 register/unregister + 接口替换让未来无缝扩展
+- 两套基础设施对偶设计（register/unregister/list 同 vocabulary）统一心智模型
+
+**备选 / 反对**：
+- 纯函数式 + 未来需要时再重构：违反"可演进性优先"原则，破坏现有 caller
+- callback-based（让 SecurityPipeline 持有 `() => readonly Tool[]` 而非 snapshot）：每次 evaluate 都遍历 tools 计算 → 性能下降；且 caller 反向依赖 pipeline，耦合更紧
+- 不暴露接口（caller 直接持类）：未来 swap 实现强制 caller 改导入，违反 OCP
+
+**未来约束**：
+- 若需要"读 boundaries 时实时反映 ToolDefinition 变化"（不是注册新工具，而是工具自身 boundaries 字段变了），当前 register/unregister 模型仍需 caller 主动调用——不自动跟踪 ToolDefinition 引用。trade-off：保持 registry 内部状态可控（不被外部 mutate 污染），代价是 caller 责任
+- 性能：builtin 池 match 时遍历所有 namespace（O(N\*M)）；当前 N < 5，M < 10，每 tool call 一次开销可忽略。若未来 namespace 极多需要索引化（按 tool name 二级索引）
 
 ---
 
@@ -772,22 +743,18 @@ builtin 规则在内存中保存，进程重启重新注入，不写磁盘，用
 | M | 单元测试 | 集成测试 | 回归保护 |
 |---|---------|---------|---------|
 | M1 | ToolDefinition 字段类型 | — | classifier.test.ts 不变 |
-| M2 | createBoundaryRegistry 各分支 | CLI 启动后 SecurityPipeline 持有 non-empty registry（mock tool） | classifier.test.ts EMPTY_BOUNDARY_REGISTRY 路径不变 |
-| M3 | createToolAwareExtractor 命中/不命中/fallback | 端到端 CLI → secure-executor → store.match 用真实 extractor 路径 | permission-store.test.ts 默认 fallback 路径全绿 |
-| M4 | 两阶段匹配各 case（user only / builtin only / 冲突）/ registerBuiltinRules 替换式 | 启动注入空 builtin 数组后 store 行为不变 | 现有 permission-store.test.ts（无 builtin 用例）全绿 |
-| M5 | tracker.record / shouldSuggest 单元测 / Renderer 渲染 suggestion / store.create 调用条件 | 端到端 4 次 confirm 触发规则创建场景 | 现有 confirmation 测试（无 suggestion 字段消费）全绿 |
-| M6 | mock cheap Provider 调用 / 配置兼容（缺省字段） | 老 config.json 启动 / cheap Provider 实际可调 | 现有工具测试 mock context 增加 llm 字段后全绿 |
+| M2 | BoundaryRegistry.fromTools 各分支 + 动态 register/unregister + 单 BoundaryCrossing in/out 深拷贝防 mutate | SecurityPipeline 顶层守卫 register 即时生效（ADR-TPE-009 e2e）| classifier.test.ts EMPTY_BOUNDARY_REGISTRY 路径不变 |
+| M3 | ToolArgumentExtractor.fromTools 命中/不命中/fallback + 动态 register/unregister | 端到端 CLI → secure-executor → store.match 用真实 extractor 路径 | permission-store.test.ts 默认 fallback 路径全绿 |
+| M4 | 两阶段匹配各 case；registerBuiltinRules namespace 多源 / 严格 scope throw / 空数组删 ns / resetAll 不清 builtin / sanitizeRules 拒绝磁盘 builtin / **跨 namespace deny-wins + globSpecificity** | 启动注入空 builtin 后 store 行为不变 | 现有 permission-store.test.ts（无 builtin 用例）全绿 |
+| §五.7 | — | tool-permission-e2e.test.ts 覆盖 confirm→tracker→suggestion→store→自动 allow 完整链路 | 现有 confirmation 测试（无 suggestion 字段消费）全绿 |
 
 **新增集成测试入口**：`packages/cli/src/__tests__/tool-permission-e2e.test.ts`（新建），覆盖 boundary registry → classifier → permission-matcher → confirmation → store.create 完整链路。
 
-**测试基建变更**：所有 ToolExecutionContext mock helper（如有 testing-utils 共享）增加 `llm: { cheap: stubProvider }` 字段，避免每个测试单独 mock。
+**测试基建**：M1–M4 不改变 ToolExecutionContext 形状，无 mock helper 变更。
 
-**M4 builtin 规则的测试隔离**：`registerBuiltinRules` 是替换式调用——但单元测试套件中可能多个 test case 顺序运行同一个 PermissionStore 实例，前一个 test 注入的 builtin 规则会被后一个看到，导致测试间污染。**约定**：
-- 每个涉及 builtin 规则的测试在 `beforeEach` 显式调 `store.registerBuiltinRules([])` 重置（替换式语义自然支持）
-- 集成测中 PermissionStore 一律 per-test 实例化，不复用
-- M4 在新增 registerBuiltinRules 单测时必须包含"重置后旧规则不再命中"用例
+**测试隔离推荐**：所有 builtin 规则相关单元测试 **per-test 实例化 PermissionStore**，不复用全局实例。`resetAll()` 不清 builtin（ADR-TPE-002），不能用作"完全重置"——每 test 创建新 store 是唯一可靠隔离方式。
 
-**老 user 规则的兼容性**：M4 给 PermissionScope 加 "builtin" 值后，反序列化 `~/.zhixing/permissions/global.json` 的旧 PermissionRule（scope ∈ session/workspace/global）必须保持完整兼容。loadGlobalRules / sanitizeRules 不能因 union 多了 "builtin" 值而拒绝旧文件。M4 验收单测必须包含"老 schema 反序列化"场景。
+**老 user 规则的兼容性**：M4 给 PermissionScope 加 "builtin" 值后，反序列化 `~/.zhixing/permissions/global.json` 的旧 PermissionRule（scope ∈ session/workspace/global）必须保持完整兼容。`sanitizeRules` 白名单仅保留旧 3 态，`builtin` scope 在磁盘上**显式拒绝**（防御幽灵规则，不报错只 skip）。M4 验收单测包含"老 schema 反序列化"+"磁盘上 builtin scope 被拒绝"两个场景。
 
 ---
 
@@ -796,16 +763,11 @@ builtin 规则在内存中保存，进程重启重新注入，不写磁盘，用
 | 风险 | 影响 | 缓解 |
 |------|------|------|
 | M2 注入 toolBoundaryRegistry 后，若误为某些已有 context classifier 的工具补 boundaries，则形成死代码污染 | 低 | M1 政策文档明示"现有 8 工具不补 boundaries"；review 把关 |
-| 老 config.json 缺 llm 字段启动失败 | 高 | 字段全部可选，缺省都有 fallback（cheapModel → "claude-haiku-4-5-20251001"，cheapProviderId → defaultProvider）；启动时不强校验 |
-| ToolExecutionContext 加必填 llm 字段，遗漏某个测试 mock 创建点 | 中 | M6 启动前 spike grep 全 packages 列权威清单（已纳入 M6 范围）|
-| createProvider 调用点不只 run-agent.ts（server / remote-runner / 集成测试可能有更多）| 中 | M6 启动前 spike grep `createProvider(` 全 packages 列调用点权威清单（已纳入 M6 范围）|
 | M3 各工具 needsPermission 与 schema 字段名 spec 未预断 | 低 | M3 启动前 spike grep 各工具实现（已纳入 M3 范围）|
-| M5 端到端测试覆盖不足（confirm 链路是已实现但未端到端测过的代码） | 中 | M5 工作就是补这条端到端集成测，不写产品代码；保护现有单测全绿 |
-| createProvider 第 4 参数扩展可能影响现有 Provider 类型签名一致性 | 中 | options 字段全部可选；扩展遵循"只加，不改" |
+| §五.7 端到端测试覆盖不足（confirm 链路是已实现但未端到端测过的代码） | 中 | §五.7 工作就是补这条端到端集成测，不写产品代码；保护现有单测全绿 |
 | deny 路径不计入 tracker.record——未来若需"用户连续拒绝建议加 deny 规则"会再补 | 低 | 当前 spec 明示该 UX 为未来增量，不在范围；deny 不沉淀符合"被拒不累计"产品语义 |
 | PermissionStore.create 并发安全（多个 confirm 几乎同时 resolve 时） | 中 | 当前 PermissionStore 实现是同步 in-memory 写 + 异步落盘；JS 单线程下两次 create 不会真并发，但 await 落盘期间 in-memory 已可见——多次调用结果是 N 条规则共存，不会丢；幂等性由 globSpecificity 在 match 阶段裁决。M4 验收单测包含"快速连续 create 同 pattern" 场景 |
 | 老 config.json 含 PermissionRule.scope 旧 union 值反序列化失败 | 中 | M4 sanitizeRules 必须在加 "builtin" 值后保持旧 3 态向后兼容；测试覆盖（见 §七 测试策略）|
-| `ctx.llm.cheap.chat()` 错误未被工具 catch 直接抛出 | 中 | §4.5 错误契约明示"工具必须 try/catch + 降级"；review 把关；可考虑 lint rule 强制 |
 
 **每个 M 独立可回滚**：所有新增字段 optional 或带 fallback；新方法/新模块独立；删除即恢复旧行为。
 
@@ -815,9 +777,9 @@ builtin 规则在内存中保存，进程重启重新注入，不写磁盘，用
 
 | 下游工作 | 关系 |
 |---------|------|
-| Step 21B WebFetch | **强依赖**：boundaries 声明（network/egress） / preapproved hosts builtin 规则 / cheapLLM distill / permissionArgumentKey="url" 全部依赖本规格 |
+| Step 21B WebFetch | **强依赖**：boundaries 声明（network/egress） / preapproved hosts builtin 规则 / permissionArgumentKey="url" 依赖本规格。distill 走"返回原始内容 + maxResultChars 截断 + 主 agent 下一轮处理"路径，不依赖 cheap LLM |
 | Step 21 子 agent | 间接受益：子 agent 创建时 sessionType="ci" → SecurityPipeline 自动按 non-interactive 处理 → builtin 规则仍生效，killer use case 通 |
-| Step 22 BackgroundAgent | 间接受益：cheap LLM 注入 + 工具权限分级在 background 路径同样需要 |
+| Step 22 BackgroundAgent | 间接受益：工具权限分级在 background 路径同样需要 |
 | 第二通道 / MCP HTTP（未来） | 间接受益：tool 系统更健全，新工具加入更容易 |
 
 实施完成后，**zhixing 工具/权限系统首次进入设计意图的完整工作状态**：
@@ -825,18 +787,22 @@ builtin 规则在内存中保存，进程重启重新注入，不写磁盘，用
 - 多 string 字段工具的权限规则匹配命中正确字段
 - 系统预置规则与用户自定规则清晰分层、用户拥有最终决定权
 - 用户能平滑沉淀"始终允许"决策为持久规则
-- 工具有访问内部便宜模型的能力
 
 ---
 
 ## 十、未来工作（不在本规格）
 
-- **WebFetch 工具实现** + `core/network/` + `text-sanitizer`（[`drafts/web-fetch-tool.md`](../drafts/web-fetch-tool.md) 后续）
-- **`zhixing permissions list` CLI 命令**展示当前生效规则——展示策略需明确：user 规则与 builtin 规则**应分组展示**（避免用户混淆"为什么我没创建过的规则在这"）；默认列出 user 规则，加 `--include-builtin` flag 列出全部
-- **BoundaryClassifier 的 dynamic 分支**与 ShellClassifier 协同（已有 ShellClassifier 实现，未来与 BoundaryImpactClassifier 协同）
+- **WebFetch 工具实现** + `core/network/` + `text-sanitizer`（[`drafts/web-fetch-tool.md`](../drafts/web-fetch-tool.md) 后续；首个 builtin 规则 namespace caller："web_fetch"）
+- **`/security` 或 `zhixing permissions list` CLI 命令**展示当前生效规则——user 规则与 builtin 规则**应分组展示**（避免用户混淆"为什么我没创建过的规则在这"）；默认列出 user 规则，加 `--include-builtin` flag 列出全部，调用 `store.listBuiltinNamespaces()` + `store.getBuiltinRules(ns)` 实现
+- **MCP 动态工具加载入口**：`/mcp connect` 命令调用 `boundaryRegistry.register(toolName, boundaries)` + `extractor.register(toolName, key)` 把 MCP 暴露的工具接入分类器与权限链路；`/mcp disconnect` 反向调 unregister
+- **BoundaryClassifier 的 dynamic 分支**与 ShellClassifier 协同（已有 ShellClassifier 实现，未来与 BoundaryImpactClassifier 协同处理"动态边界"如 bash 命令的 network 调用判断）
 - **ToolPermissionRegistry 抽象**（如果未来出现"权限相关元数据"远不止 permissionArgumentKey 一个字段时再抽）
 - **deny 计数 UX**：用户连续拒绝同操作 N 次后建议加 deny 规则——需独立给 deny 路径补 tracker.record 调用，并扩 SuggestionMiddleware 阈值规则（区分 allow 累计与 deny 累计）
 - **远程通道"始终允许"语义**：扩 InboundRouter 词集匹配，识别"加规则 / 始终允许 / 不再问我"等关键词转 allow-workspace decision；属于 remote-confirmation 后续增量
-- **多源 builtin 规则注入**：`registerBuiltinRules` 升级为追加式 + 命名空间，支持插件 / MCP / 第三方扩展（详见 ADR-TPE-002 反对/约束段）
-- **可观测性 / telemetry**：permission 决策路径上结构化事件输出（"工具 X 命中规则 Y / 命中 builtin / 触发 confirm / 用户选 Z"），便于调试"为什么 X 工具被自动允许 / 为什么这次又问我"
-- **cheap LLM 内置重试 / 缓存 / quota 控制**：当前 `ctx.llm.cheap.chat()` 是裸 Provider，未做内置重试或速率限制。若多个工具频繁调用 cheap 模型（quota 触顶或网络抖动），可能需在 ToolExecutionContext.llm 层加包装层（届时再考虑是否升级为 LLMService 抽象，见 ADR-TPE-005）
+- **可观测性 / telemetry**：permission 决策路径上结构化事件输出（"工具 X 命中规则 Y / 命中 builtin namespace=Z / 触发 confirm / 用户选 W"），便于调试"为什么 X 工具被自动允许 / 为什么这次又问我"
+- **工具内部 cheap LLM 访问能力（曾经的 M6，已撤回）**：早期设计为 `ToolExecutionContext.llm.cheap` 添加全局必填字段 + `ZhixingConfig.llm` cheap model 配置 + `createProvider` 第 4 参数派生新 provider，目的让未来 WebFetch 等工具内部调便宜模型做 distill。复盘判定为伪需求并 revert，理由如下：
+  - **零 consumer**：8 个 builtin 工具全不需要；唯一假设的 consumer（WebFetch）也可走"返回原始 markdown + maxResultChars 截断 + 主 agent 下一轮 distill"路径（Claude Code 即此模式），不依赖 cheap LLM
+  - **抽象层级错误**：把"WebFetch 一个工具的依赖"漏到"所有工具的契约"——`ctx.llm` 是必填字段意味着所有工具/测试 mock 都需要伪造一个永不调用的 provider stub
+  - **配置外溢**：用户为了一个未来工具，需要理解 `cheapModel` / `cheapProviderId` / 默认值 fallback 链等与他完全无关的概念；非 Anthropic 用户更被默认值（haiku）坑
+  - **更优替代**：真要 cheap LLM 时，作为该工具工厂的依赖注入即可：`createWebFetchTool({ cheapProvider })`——其他工具完全不感知，配置只在启用该工具时才需要
+  - **何时再做**：等 Step 21B WebFetch 真正实现且实测发现 raw 返回方案不够用（产生度量证据）时，按"工具工厂参数注入"模式实现；不再回到 ToolExecutionContext 全局字段的方向

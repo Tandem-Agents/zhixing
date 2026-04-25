@@ -61,6 +61,7 @@ export function createEditTool(): ToolDefinition {
     isReadOnly: false,
     isParallelSafe: false,
     needsPermission: true,
+    permissionArgumentKey: "path",
     maxResultChars: MAX_RESULT_CHARS,
 
     async call(input, context): Promise<ToolResult> {

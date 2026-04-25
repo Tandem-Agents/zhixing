@@ -19,16 +19,20 @@ import {
   type RunResult,
   type ToolResultBlock,
   type IPermissionStore,
+  type IToolArgumentExtractor,
+  type MutableToolBoundaryRegistry,
   type TurnContext,
   type TurnContextProvider,
   type TurnSource,
   buildTurn,
   resolveTurnTimestamp,
+  BoundaryRegistry,
   ConfirmationBroker,
   createEventBus,
   createContextEngine,
   createLLMSummarizeStrategy,
   createTokenEstimator,
+  ToolArgumentExtractor,
   emptyUsage,
   createToolResultTrimStrategy,
   createMessageDropStrategy,
@@ -235,11 +239,33 @@ export async function createAgentRuntime(options: {
   });
 
   // 安全管线：会话级单例，跨多次 run() 共享权限规则、确认追踪、频率限制状态。
-  const persistentStore = new PermissionStore({});
+  //
+  // BoundaryRegistry / ToolArgumentExtractor 当前均走"启动时 snapshot"路径
+  // (`fromTools(tools)`)，把 boundaries / permissionArgumentKey 声明从工具
+  // 自描述映射到 security 基础设施。两者都暴露 `register/unregister` API，
+  // 未来 MCP / 插件动态接入工具时无需 reconfigure 整个 SecurityPipeline。
+  //
+  // 现有 8 个 builtin 工具均不声明 boundaries（context classifier 接管），
+  // boundary registry 实际为空但链路已通；未来无 context classifier 的新工具
+  // （web_fetch / web_search 等）声明后立即生效。tool-aware extractor 让
+  // PermissionStore.match 按工具自身声明的 permissionArgumentKey 提取参数，
+  // 避免多 string 字段工具的字段顺序歧义。
+  const toolArgumentExtractor: IToolArgumentExtractor =
+    ToolArgumentExtractor.fromTools(tools);
+  const persistentStore = new PermissionStore({
+    extractArgument: (req) => toolArgumentExtractor.extract(req),
+  });
+  const boundaryRegistry: MutableToolBoundaryRegistry =
+    BoundaryRegistry.fromTools(tools);
+  // 注：cli 默认不注入 builtin 规则——`registerBuiltinRules(ns, [])` 在新 namespace API 下
+  // 等价于 delete ns（no-op）。未来 21B WebFetch / 子 agent / MCP 等模块各自调用
+  // `persistentStore.registerBuiltinRules("web_fetch" / "subagent" / "mcp:xyz", rules)`
+  // 注入自己 namespace；用户池任一命中将完全决定结果（builtin 不参与），保证用户最终决定权。
   const securityPipeline = new SecurityPipeline({
     workspace: workspace.path,
     sessionType,
     permissionStore: persistentStore,
+    toolBoundaryRegistry: boundaryRegistry,
   });
 
   // 确认交互 broker：会话级单例。渲染器由 REPL 在 attach 时注入。
