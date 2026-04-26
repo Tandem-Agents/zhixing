@@ -66,6 +66,8 @@ import {
   createGrepTool,
   createBashTool,
   createMemoryTool,
+  createWebFetchTool,
+  WEB_FETCH_DEFAULT_RULES,
 } from "@zhixing/tools-builtin";
 import {
   renderRetryAttempt,
@@ -229,6 +231,7 @@ export async function createAgentRuntime(options: {
     createGrepTool(),
     createBashTool(),
     createMemoryTool(),
+    createWebFetchTool(),
     ...(options.extraTools ?? []),
   ];
   const systemPrompt = buildSystemPrompt({
@@ -258,10 +261,10 @@ export async function createAgentRuntime(options: {
   });
   const boundaryRegistry: MutableToolBoundaryRegistry =
     BoundaryRegistry.fromTools(tools);
-  // 注：cli 默认不注入 builtin 规则——`registerBuiltinRules(ns, [])` 在新 namespace API 下
-  // 等价于 delete ns（no-op）。未来 21B WebFetch / 子 agent / MCP 等模块各自调用
-  // `persistentStore.registerBuiltinRules("web_fetch" / "subagent" / "mcp:xyz", rules)`
-  // 注入自己 namespace；用户池任一命中将完全决定结果（builtin 不参与），保证用户最终决定权。
+  // builtin 规则注入：每个工具 namespace 自管,用户池任一命中将完全决定结果
+  // (builtin 不参与),保证用户最终决定权(ADR-TPE-008)。
+  // 未来子 agent / MCP 等模块以同样模式注入: `registerBuiltinRules(ns, rules)`
+  persistentStore.registerBuiltinRules("web_fetch", [...WEB_FETCH_DEFAULT_RULES]);
   const securityPipeline = new SecurityPipeline({
     workspace: workspace.path,
     sessionType,
