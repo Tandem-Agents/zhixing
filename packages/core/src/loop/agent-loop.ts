@@ -159,6 +159,7 @@ export async function* runAgentLoop(
         workingDirectory,
         abortSignal,
         eventBus,
+        llmRoles: params.llmRoles,
       });
 
       // ── Yield turn boundary ──

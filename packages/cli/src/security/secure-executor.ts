@@ -159,6 +159,11 @@ export function createSecureExecuteTool(
     //   找不到 target → 远程确认消息不发送。
     // 统一在入口展开后，pipeline.evaluate / handleBrokerPath / 工具调用 三者
     // 共享同一增强 context，turnOrigin 透传路径贯通。
+    //
+    // 设计意图（forward-compat）：`...context` spread 是有意的"包装器透传"——
+    // 把所有上游字段（含未来可能新增的 ctx.llm / ctx.tools 等）原样保留下去，
+    // 仅显式覆盖 turn-level 字段。如果改成显式列字段，每加一个新 ToolExecutionContext
+    // 字段都需要在此处补一行透传，极易遗漏导致工具收到的 ctx 字段悄悄丢失。
     const augmentedContext: ToolExecutionContext = {
       ...context,
       turnId: turnContext?.turnId ?? context.turnId,

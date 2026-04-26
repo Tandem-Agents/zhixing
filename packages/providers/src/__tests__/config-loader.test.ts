@@ -68,14 +68,15 @@ describe("loadConfig", () => {
     expect(config).toEqual({});
   });
 
-  it("应正确读取全局配置", () => {
+  it("应正确读取全局配置（llm.main + providers）", () => {
     const globalDir = path.join(tempHome, ".zhixing");
     fs.mkdirSync(globalDir, { recursive: true });
     fs.writeFileSync(
       path.join(globalDir, "config.json"),
       JSON.stringify({
-        defaultProvider: "deepseek",
-        defaultModel: "deepseek-chat",
+        llm: {
+          main: { provider: "deepseek", model: "deepseek-chat" },
+        },
         providers: {
           deepseek: { apiKey: "sk-global" },
         },
@@ -88,21 +89,23 @@ describe("loadConfig", () => {
       noAutoCreate: true,
     });
 
-    expect(config.defaultProvider).toBe("deepseek");
-    expect(config.defaultModel).toBe("deepseek-chat");
+    expect(config.llm?.main).toEqual({ provider: "deepseek", model: "deepseek-chat" });
     expect(config.providers?.deepseek?.apiKey).toBe("sk-global");
   });
 
-  it("项目配置应覆盖全局配置的顶层字段", () => {
+  it("项目配置的 llm 应覆盖全局配置（main 整体替换、secondary 字段级）", () => {
     const globalDir = path.join(tempHome, ".zhixing");
     fs.mkdirSync(globalDir, { recursive: true });
     fs.writeFileSync(
       path.join(globalDir, "config.json"),
       JSON.stringify({
-        defaultProvider: "deepseek",
-        defaultModel: "deepseek-chat",
+        llm: {
+          main: { provider: "deepseek", model: "deepseek-chat" },
+          secondary: { provider: "anthropic", model: "claude-haiku-4-5-20251001" },
+        },
         providers: {
           deepseek: { apiKey: "sk-global" },
+          anthropic: { apiKey: "sk-ant" },
         },
       }),
     );
@@ -110,7 +113,9 @@ describe("loadConfig", () => {
     fs.writeFileSync(
       path.join(tempProject, "zhixing.config.json"),
       JSON.stringify({
-        defaultModel: "deepseek-reasoner",
+        llm: {
+          main: { provider: "deepseek", model: "deepseek-reasoner" },
+        },
       }),
     );
 
@@ -120,8 +125,12 @@ describe("loadConfig", () => {
       noAutoCreate: true,
     });
 
-    expect(config.defaultProvider).toBe("deepseek");
-    expect(config.defaultModel).toBe("deepseek-reasoner");
+    expect(config.llm?.main).toEqual({ provider: "deepseek", model: "deepseek-reasoner" });
+    // 项目级仅覆盖 main，secondary 从全局保留
+    expect(config.llm?.secondary).toEqual({
+      provider: "anthropic",
+      model: "claude-haiku-4-5-20251001",
+    });
     expect(config.providers?.deepseek?.apiKey).toBe("sk-global");
   });
 
@@ -163,7 +172,7 @@ describe("loadConfig", () => {
     expect(config.providers?.openai?.apiKey).toBe("sk-oai");
   });
 
-  it("自动创建全局配置模板", () => {
+  it("自动创建全局配置模板（含 llm.main 嵌套）", () => {
     const configPath = path.join(tempHome, ".zhixing", "config.json");
 
     loadConfig({
@@ -173,7 +182,8 @@ describe("loadConfig", () => {
 
     expect(fs.existsSync(configPath)).toBe(true);
     const content = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-    expect(content.defaultProvider).toBe("siliconflow");
+    expect(content.llm?.main?.provider).toBe("siliconflow");
+    expect(content.llm?.main?.model).toBe("Pro/MiniMaxAI/MiniMax-M2.5");
     expect(content.providers?.siliconflow).toBeDefined();
   });
 
@@ -183,7 +193,9 @@ describe("loadConfig", () => {
     fs.mkdirSync(configDir, { recursive: true });
     fs.writeFileSync(
       configPath,
-      JSON.stringify({ defaultProvider: "my-custom" }),
+      JSON.stringify({
+        llm: { main: { provider: "my-custom", model: "my-model" } },
+      }),
     );
 
     loadConfig({
@@ -192,7 +204,7 @@ describe("loadConfig", () => {
     });
 
     const content = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-    expect(content.defaultProvider).toBe("my-custom");
+    expect(content.llm?.main?.provider).toBe("my-custom");
   });
 
   it("JSON 语法错误的配置文件应被跳过（不报错）", () => {

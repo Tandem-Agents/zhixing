@@ -2,19 +2,23 @@
  * 一站式 Provider 创建工厂
  *
  * 将配置解析 + 协议适配器选择合二为一。
- * 用户只需传入配置，即可获得 LLMProvider 实例。
  *
- * 三种创建方式（从简到完整）：
- * - createProviderFromConfig() — 自动从配置文件加载，零参数
- * - createProvider()           — 传入显式 config 对象
- * - createProviderDirect()     — 指定 provider ID + 配置
+ * 三种创建方式：
+ * - createProviderRoles() — 双角色解析（main + secondary），CLI/serve 入口
+ * - createProvider()      — 传入显式 ZhixingConfig，单角色 LLMProvider
+ * - createProviderDirect()— 指定 provider ID + ProviderConfig，单角色 LLMProvider
  */
 
-import type { LLMProvider } from "@zhixing/core";
+import type { ChatRequest, LLMProvider, LLMRole, LLMRoles } from "@zhixing/core";
 import { createAnthropicProvider } from "./adapters/anthropic-messages.js";
 import { createOpenAICompatibleProvider } from "./adapters/openai-compatible.js";
 import { loadConfig } from "./config-loader.js";
-import { resolveFromConfig, resolveProvider } from "./resolve.js";
+import {
+  resolveFromConfig,
+  resolveLLMRoles,
+  resolveProvider,
+  type LLMRolesResolveOptions,
+} from "./resolve.js";
 import type { ProviderConfig, ResolvedProvider, ZhixingConfig } from "./types.js";
 
 /**
@@ -32,17 +36,28 @@ function createFromResolved(resolved: ResolvedProvider): LLMProvider {
 }
 
 /**
- * 从完整配置创建 LLMProvider。
+ * 把 LLMProvider + model 绑定成 LLMRole——consumer 调 chat() 不需重复传 model。
  *
- * @example
- * ```ts
- * const provider = createProvider({
- *   defaultProvider: "deepseek",
- *   providers: {
- *     deepseek: { apiKey: "env:DEEPSEEK_API_KEY" }
- *   }
- * });
- * ```
+ * @internal 仅供测试与同包高级用例；外部 consumer 用 createProviderRoles
+ * 一站式构造，不应该自己 bind（绕过 same-id 复用 / 缺省兜底等工厂逻辑）。
+ */
+export function bindRole(provider: LLMProvider, model: string): LLMRole {
+  const role: LLMRole = {
+    provider,
+    model,
+    chat: (request: Omit<ChatRequest, "model">) =>
+      provider.chat({ ...request, model }),
+  };
+
+  if (provider.countTokens) {
+    role.countTokens = (messages) => provider.countTokens!(messages, model);
+  }
+
+  return role;
+}
+
+/**
+ * 从完整配置创建 LLMProvider（单角色，main role）。
  */
 export function createProvider(
   config: ZhixingConfig,
@@ -55,13 +70,6 @@ export function createProvider(
 
 /**
  * 快捷方式：直接指定 provider ID + 配置创建 LLMProvider。
- *
- * @example
- * ```ts
- * const provider = createProviderDirect("deepseek", {
- *   apiKey: "sk-xxx"
- * });
- * ```
  */
 export function createProviderDirect(
   providerId: string,
@@ -72,31 +80,52 @@ export function createProviderDirect(
   return createFromResolved(resolved);
 }
 
-/**
- * 从配置文件自动加载 Provider。零参数即可工作。
- *
- * 加载顺序：全局配置 → 项目配置 → 环境变量
- * 返回同时包含 provider 实例和解析后的 defaultModel。
- *
- * @example
- * ```ts
- * const { provider, defaultModel } = createProviderFromConfig();
- * for await (const event of provider.chat({
- *   model: defaultModel,
- *   messages: [userMessage("你好")],
- * })) { ... }
- * ```
- */
-export function createProviderFromConfig(options: {
-  providerId?: string;
+// ─── 双角色工厂（main + secondary） ───
+
+export interface ProviderRolesOptions extends LLMRolesResolveOptions {
   cwd?: string;
   env?: Record<string, string | undefined>;
-} = {}): { provider: LLMProvider; defaultModel: string; config: ZhixingConfig } {
+}
+
+/**
+ * 一站式创建会话级 LLMRoles：从配置文件加载 → 双角色配置解析 →
+ * 实例化 LLMProvider（同 provider id 共享实例）→ 绑定 model 成 LLMRole。
+ *
+ * CLI override（providerOverride / modelOverride）直接在工厂内吸收，让
+ * roles.main.{provider, model} 始终反映会话实际使用的 effective state。
+ *
+ * 用户没显式配 llm.secondary 时，secondary 自动用 main 实例 + main.model 兜底
+ * （仍保留调用上下文隔离价值，仅放弃任务专门化/cost 优化）。这是正常状态，
+ * 不打印任何提示——/status 命令未来可主动展示当前角色配置供用户决策是否专门化。
+ */
+export function createProviderRoles(
+  options: ProviderRolesOptions = {},
+): { roles: LLMRoles; config: ZhixingConfig } {
   const env = options.env ?? process.env;
   const config = loadConfig({ cwd: options.cwd, env });
-  const resolved = resolveFromConfig(config, options.providerId, env);
-  const provider = createFromResolved(resolved);
-  const defaultModel = resolved.defaultModel ?? config.defaultModel ?? "unknown";
+  const resolved = resolveLLMRoles(
+    config,
+    {
+      providerOverride: options.providerOverride,
+      modelOverride: options.modelOverride,
+    },
+    env,
+  );
 
-  return { provider, defaultModel, config };
+  const mainProvider = createFromResolved(resolved.main.resolved);
+
+  // 同 provider id 复用 LLMProvider 实例：连接池/限速/cache 共用。
+  // 兜底路径下 secondary.resolved 与 main.resolved 是同一对象，必然命中。
+  const secondaryProvider =
+    resolved.secondary.resolved.id === resolved.main.resolved.id
+      ? mainProvider
+      : createFromResolved(resolved.secondary.resolved);
+
+  return {
+    config,
+    roles: {
+      main: bindRole(mainProvider, resolved.main.model),
+      secondary: bindRole(secondaryProvider, resolved.secondary.model),
+    },
+  };
 }

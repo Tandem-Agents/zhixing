@@ -163,12 +163,34 @@ export interface ChannelConfigEntry {
   defaultTarget?: { to: string };
 }
 
+/**
+ * 单个 LLM 角色的 provider+model 选择。
+ *
+ * - provider：必须是 ZhixingConfig.providers 表中的 key（或内置预设 ID）
+ * - model：该 provider 可识别的模型 ID
+ */
+export interface LLMRoleConfig {
+  provider: string;
+  model: string;
+}
+
 /** 顶层配置结构（对应 zhixing.config.json） */
 export interface ZhixingConfig {
-  /** 默认使用的 provider ID */
-  defaultProvider?: string;
-  /** 默认使用的模型 ID */
-  defaultModel?: string;
+  /**
+   * LLM 角色配置：
+   * - main 必填——主对话循环、用户面对的最终输出
+   * - secondary 可缺省——I/O 边界净化（上下文压缩、WebFetch distill、工具结果摘要等）
+   *   缺省时直接用 main 实例 + main.model 兜底（隔离价值仍保留，仅放弃任务专门化）。
+   *   不预设任何 vendor 默认（provider 选择是用户主权范畴）。
+   *
+   * 类型为 optional 是为了反映 loadConfig 的真实输出形状——文件可能缺这一段。
+   * 真正的 fail-fast 校验在 resolveLLMRoles / resolveFromConfig 入口集中处理；
+   * 不消费 LLM 的纯 workspace / channels 路径不会被这里的缺失误伤。
+   */
+  llm?: {
+    main: LLMRoleConfig;
+    secondary?: LLMRoleConfig;
+  };
   /** Provider 配置表 */
   providers?: Record<string, ProviderConfig>;
   /** 通道配置表（key = channelId，如 "feishu"） */

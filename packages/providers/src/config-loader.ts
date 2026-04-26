@@ -98,8 +98,12 @@ export function getDefaultWorkspacePath(): string {
 }
 
 const CONFIG_TEMPLATE = `{
-  "defaultProvider": "siliconflow",
-  "defaultModel": "Pro/MiniMaxAI/MiniMax-M2.5",
+  "llm": {
+    "main": {
+      "provider": "siliconflow",
+      "model": "Pro/MiniMaxAI/MiniMax-M2.5"
+    }
+  },
   "providers": {
     "siliconflow": {
       "apiKey": "env:SILICONFLOW_API_KEY"
@@ -145,15 +149,23 @@ function readJsonSafe(filePath: string): ZhixingConfig | undefined {
 /**
  * 字段级 deep merge。
  * providers 按 key 合并（项目级覆盖全局级的同名 provider 字段）。
+ *
+ * `base` / `override` 是文件 JSON（readJsonSafe），用户实际可能漏配 `llm.main`；
+ * 这里保持原样合并，把 fail-fast 校验留给 resolveLLMRoles，避免在加载层吞掉
+ * 用户错误。返回值类型仍 ZhixingConfig —— 下游 resolve 时若 llm.main 缺失会
+ * 抛带迁移提示的 ProviderConfigError。
  */
-function deepMergeConfig(base: ZhixingConfig, override: ZhixingConfig): ZhixingConfig {
-  const result: ZhixingConfig = { ...base };
+function deepMergeConfig(
+  base: Partial<ZhixingConfig>,
+  override: Partial<ZhixingConfig>,
+): ZhixingConfig {
+  const result = { ...base } as ZhixingConfig;
 
-  if (override.defaultProvider !== undefined) {
-    result.defaultProvider = override.defaultProvider;
-  }
-  if (override.defaultModel !== undefined) {
-    result.defaultModel = override.defaultModel;
+  if (override.llm) {
+    result.llm = {
+      main: override.llm.main ?? base.llm?.main!,
+      secondary: override.llm.secondary ?? base.llm?.secondary,
+    };
   }
 
   if (override.providers) {

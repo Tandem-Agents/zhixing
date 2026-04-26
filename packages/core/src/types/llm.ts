@@ -192,3 +192,45 @@ export interface LLMProvider {
    */
   countTokens?(messages: Message[], model: string): Promise<number>;
 }
+
+// ─── LLM 角色（会话级 capability） ───
+
+/**
+ * 单个 LLM 角色实例：Provider 实例 + 绑定的 model + 便捷调用方法。
+ *
+ * 角色绑定使 consumer 不必重复传 model；caller 也可绕过 chat() 直接调
+ * provider.chat({ ..., model })，但推荐通过 LLMRole 减少跨 consumer 的
+ * "忘传 model"错误。
+ */
+export interface LLMRole {
+  readonly provider: LLMProvider;
+  readonly model: string;
+  chat(
+    request: Omit<ChatRequest, "model">,
+  ): AsyncGenerator<StreamEvent, void, undefined>;
+  countTokens?(messages: Message[]): Promise<number>;
+}
+
+/**
+ * 会话级可用的 LLM 角色集合。
+ *
+ * 不变量：
+ * 1. LLMRoles 一旦构造，main 与 secondary 都必定可调用——用户没显式配
+ *    llm.secondary 时，secondary 自动用 main 实例 + main.model 兜底（隔离价值
+ *    仍保留，仅放弃任务专门化/cost 优化）。这不是降级，是合理的未配置默认；
+ *    工厂层不预设任何 vendor 默认（见 providers/create-provider.ts 与
+ *    secondary-llm-capability.md ADR-SLLM-004）。
+ * 2. roles.main.{provider,model} 反映会话**实际使用的** effective state——含
+ *    任何 CLI override（如 --provider / --model）。consumer 读到的就是
+ *    runtime 实际跑的 provider+model。
+ * 3. ToolExecutionContext.llm 字段是 optional——入口正常注入，单测/自动化
+ *    路径可能不注入。consumer 必须显式分支处理 !ctx.llm。
+ *
+ * Provider 实例复用：当 secondary 与 main 用同一 provider id 时共享 LLMProvider
+ * 实例（连接池/限速/cache 共用）。这是优化不是契约——consumer 不应用 ===
+ * 比较 provider 实例。
+ */
+export interface LLMRoles {
+  main: LLMRole;
+  secondary: LLMRole;
+}

@@ -245,10 +245,10 @@ describe("resolveProvider", () => {
 });
 
 describe("resolveFromConfig", () => {
-  it("应使用 config.defaultProvider 作为默认", () => {
+  it("应使用 config.llm.main.provider 作为默认", () => {
     const resolved = resolveFromConfig(
       {
-        defaultProvider: "deepseek",
+        llm: { main: { provider: "deepseek", model: "deepseek-chat" } },
         providers: {
           deepseek: { apiKey: "sk-test" },
         },
@@ -260,10 +260,10 @@ describe("resolveFromConfig", () => {
     expect(resolved.id).toBe("deepseek");
   });
 
-  it("显式指定 providerId 应覆盖 defaultProvider", () => {
+  it("显式指定 providerId 应覆盖 llm.main.provider", () => {
     const resolved = resolveFromConfig(
       {
-        defaultProvider: "deepseek",
+        llm: { main: { provider: "deepseek", model: "deepseek-chat" } },
         providers: {
           deepseek: { apiKey: "sk-ds" },
           openai: { apiKey: "sk-oai" },
@@ -277,48 +277,18 @@ describe("resolveFromConfig", () => {
     expect(resolved.apiKey).toBe("sk-oai");
   });
 
-  it("config.defaultModel 应作为 fallback", () => {
-    const resolved = resolveFromConfig(
-      {
-        defaultProvider: "siliconflow",
-        defaultModel: "Pro/MiniMaxAI/MiniMax-M2.5",
-        providers: {
-          siliconflow: { apiKey: "sk-test" },
-        },
-      },
-      undefined,
-      mockEnv(),
-    );
-
-    expect(resolved.defaultModel).toBe("Pro/MiniMaxAI/MiniMax-M2.5");
-  });
-
-  it("provider 自己的 defaultModel 应优先于 config.defaultModel", () => {
-    const resolved = resolveFromConfig(
-      {
-        defaultProvider: "deepseek",
-        defaultModel: "global-model",
-        providers: {
-          deepseek: { apiKey: "sk-test" },
-        },
-      },
-      undefined,
-      mockEnv(),
-    );
-
-    // deepseek 预设有 defaultModel: "deepseek-chat"，应优先
-    expect(resolved.defaultModel).toBe("deepseek-chat");
-  });
-
-  it("未指定 provider 且无 defaultProvider 时应报错", () => {
+  it("无 llm.main 时应报错并提示迁移路径", () => {
     expect(() => {
-      resolveFromConfig({}, undefined, mockEnv());
+      resolveFromConfig({} as never, undefined, mockEnv());
     }).toThrow(ProviderConfigError);
+    expect(() => {
+      resolveFromConfig({} as never, undefined, mockEnv());
+    }).toThrow(/llm\.main is required/);
   });
 
   it("provider 未在 config.providers 中配置时应尝试纯预设解析", () => {
     const resolved = resolveFromConfig(
-      { defaultProvider: "deepseek" },
+      { llm: { main: { provider: "deepseek", model: "deepseek-chat" } } },
       undefined,
       mockEnv({ DEEPSEEK_API_KEY: "sk-env" }),
     );

@@ -47,8 +47,7 @@ describeWithKey("integration: 硅基流动 真实 LLM 调用", () => {
 
   it("createProvider（从 config 创建） → chat 应正常工作", async () => {
     const provider = createProvider({
-      defaultProvider: "siliconflow",
-      defaultModel: TEST_MODEL,
+      llm: { main: { provider: "siliconflow", model: TEST_MODEL } },
       providers: {
         siliconflow: { apiKey: SF_KEY! },
       },

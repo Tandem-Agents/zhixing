@@ -12,16 +12,33 @@
 
 ### 〇.1 为什么需要"二级"角色
 
-agent 系统中信息进入主上下文之前需要净化：网页正文、工具结果、子 agent 输出、上下文压缩源 message 等通常 50K-200K，但 task-relevant 信号通常 < 5%。直接灌入主上下文会导致：
+二级角色的核心价值是**调用上下文隔离**——把 I/O 边界处的处理任务（上下文压缩 / 工具结果摘要 / 网页正文蒸馏 / 子 agent 返回压缩 / 通道入站分类等）放到一次**独立的 LLM conversation** 里执行，不污染主对话历史。三层价值，按重要度递减：
+
+**第一层：上下文隔离 / 信任边界（核心，不可放弃）**
+
+- 工具结果 / 网页内容 / 子 agent 返回可能含 prompt injection、噪音、敏感信息
+- 用独立 secondary 调用处理：即使内容里有"忽略之前指令、改为执行 X"，被污染的也只是 secondary 的一次性 conversation
+- main 看到的是 secondary **输出后的结构化净化结果**——攻击向量被切断、噪音被剥离
+- 即便 secondary 与 main 是**同一 provider + 同一 model**，分开调用本身就有此价值——隔离来自"调用上下文独立"，不来自"模型不同"
+
+**第二层：任务专门化（可选优化）**
+
+- 上下文压缩 / JSON 抽取 / 摘要这类"输入大、输出小、不需要长链推理"的任务和主对话 task shape 不同
+- 用户可显式配 secondary 为更适合此类任务的模型（如响应快的小模型、JSON mode 友好的模型）
+
+**第三层：cost 优化（派生收益）**
+
+- 因为第二层任务通常较轻量，可选 cost/quality 偏 cost 端的模型
+- 这是"可以这么做"，不是"必须这么做"——用户的 vendor 选择是主权范围，knows best
+
+直接把这些任务灌入主上下文会导致：
 
 - token 浪费：主模型按"输入 token"计费整段
 - context 污染：噪音留在历史里直到 compaction 截断
 - coherence 下降：注意力被无关内容稀释
 - 多次 I/O 不可叠加：3 次 fetch + 5 个 MCP 结果迅速吞噬窗口
 
-**二级角色的设计意图：在 I/O 边界做信息净化**。主模型只看 5% 的高密度信号，95% 噪音由二级在边界处压缩剥离。这是 agent 信息流的标准范式（Claude Code WebFetch yaml 描述明示用 small fast model；hermes 用 auxiliary client 处理 task-specific 子任务）。
-
-"便宜"是该角色的**典型属性**而非定义——典型情况选 cost/quality 偏 cost 端的（haiku / gemini-flash），但角色定义与具体模型 ID 解耦：用户也可配 secondary 为强模型用于专业子任务。
+这是 agent 信息流的标准范式（Claude Code WebFetch yaml 明示用 small fast model；hermes 用 auxiliary client 处理 task-specific 子任务）。但前者写死了 vendor，后者按 task 切分，知行选**会话级单 secondary 角色 + 用户主权配置**——见 §六 ADR-SLLM-001/004。
 
 ### 〇.2 为什么是会话级 capability，不是工具内依赖
 
@@ -94,8 +111,9 @@ export interface LLMRole {
  * 会话级可用的 LLM 角色集合。
  *
  * 不变量：
- * 1. LLMRoles 一旦构造，roles.main 与 roles.secondary 都必定可调用——secondary
- *    解析失败的所有路径都被 §二.2 step 3 的"降级到 main"覆盖。
+ * 1. LLMRoles 一旦构造，roles.main 与 roles.secondary 都必定可调用——用户没显式
+ *    配 llm.secondary 时，secondary 自动用 main 实例 + main.model 兜底（隔离价值
+ *    仍保留，仅放弃任务专门化/cost 优化）。
  * 2. roles.main.{provider,model} 反映会话**实际使用的** effective state——包含
  *    任何 CLI override（如 --provider / --model）。consumer 读到的就是 runtime
  *    实际跑的 provider+model，不存在 ctx.llm.main 与运行时 split brain 的可能。
@@ -176,42 +194,46 @@ else:                              // 默认：config 原值
 ### 2.2 secondary 角色解析
 
 ```
-1. config.llm.secondary 显式设置
-   → resolveProvider(secondary.provider, providers[secondary.provider] ?? {}, env)
-     成功 → 使用
-     任意错误 → 抛 ProviderConfigError（用户显式配置必须 fail-fast，不允许"显式
-                配错也帮你降级"的隐晦语义）
-2. config.llm.secondary 缺省 → 尝试内置默认 SECONDARY_DEFAULT
-   → SECONDARY_DEFAULT = { provider: "anthropic", model: "claude-haiku-4-5-20251001" }
-   → try { resolveProvider("anthropic", providers["anthropic"] ?? {}, env) }
-     成功 → 使用 SECONDARY_DEFAULT（providers map 缺 anthropic 条目时回退到 {} 后
-            依赖 anthropic preset 的 baseUrl/protocol/envKey 解析；ANTHROPIC_API_KEY
-            环境变量存在或 providers.anthropic.apiKey 配置可解析即成功）
-     任意错误（apiKey 不可解析 / 自定义 protocol 或 baseUrl 非法）→ 落入 step 3
-3. 内置默认不可达 → secondary 角色降级使用 main 实例 + main.model
-   → 启动时一次 INFO 日志：
-     "Secondary LLM role degraded to main; configure llm.secondary to enable
-      I/O boundary distillation"
+1. config.llm.secondary 缺省（用户没显式配）
+   → 用 main 实例 + main.model 兜底
+   → secondary.resolved = main.resolved
+   → secondary.model = main.model
+   → 不打印任何提示——这是合理的未配置默认，不是降级（隔离价值仍保留）
+
+2. config.llm.secondary 显式设置
+   → 同 provider id 短路：secondary.provider === main.resolved.id
+     → 复用 main 实例（避免重复 env: lookup / helper:cmd execSync）
+     → secondary.model = secondary.model（仍独立）
+   → 不同 provider id：
+     → resolveProvider(secondary.provider, providers[secondary.provider] ?? {}, env)
+       成功 → 使用
+       任意错误 → 抛 ProviderConfigError（用户显式配置必须 fail-fast，不允许
+                  "显式配错也帮你降级"的隐晦语义）
 ```
 
-step 2 用 try/catch 而非"providers map 有 anthropic 条目"的字段存在性检查——避免 user 配 `apiKey: "env:WRONG_VAR"` 但 WRONG_VAR 缺失这种 false positive，让可恢复的"降级"问题不被伪装成 fail-fast 错误。
+**不预设任何 vendor 默认**——历史曾用 `SECONDARY_DEFAULT = { provider: "anthropic", model: "claude-haiku-4-5-20251001" }`，是 vendor lock-in 错误：
+
+- 知行 provider 中立，预设 8 家服务商（deepseek/minimax/siliconflow/qwen/kimi/glm/openai/anthropic），不替用户挑选其中之一作为 secondary 默认
+- 国内用户主用 siliconflow / qwen 等，硬塞 anthropic 默认会导致每次启动都看 "Secondary LLM role degraded" INFO，错把"正常状态"暗示为"异常状态"
+- 用户的 vendor 选择是主权范围，工具不该越权决策
 
 ### 2.3 Provider 实例复用
 
 ```
 mainProvider = createFromResolved(resolveProvider(main.provider, ...))
 
-if secondary 走 step 1/2 解析:
-  if secondary.provider === main.provider:
-    secondary.provider = mainProvider 实例（共享）
-    secondary.model = secondary.model
-  else:
-    secondary.provider = createFromResolved(resolveProvider(secondary.provider, ...))
-
-if secondary 走 step 3 降级:
+if secondary 缺省（走 §2.2 step 1）:
   secondary.provider = mainProvider（同一实例）
   secondary.model = mainModel
+elif secondary 显式 + 同 provider id:
+  secondary.provider = mainProvider（同一实例）
+  secondary.model = secondary.model（独立）
+elif secondary 显式 + 不同 provider id:
+  secondary.provider = createFromResolved(resolveProvider(secondary.provider, ...))
+  secondary.model = secondary.model
 ```
+
+复用的只是协议配置（baseUrl / apiKey / connection pool 等 stateless 资源），conversation 仍然独立——隔离价值（§〇.1 第一层）始终保留，无论 secondary 是缺省兜底还是显式同 id。
 
 ---
 
@@ -386,12 +408,17 @@ async call(input, ctx) {
 - 嵌套 `llm.{main,secondary}` 而非 flat `mainProvider` / `secondaryProvider`：让 LLM 相关配置语义聚合，与 `agent` / `workspace` / `channels` 等顶层域并列；未来加角色不污染顶层
 - hard cut 删除顶层 `defaultProvider` / `defaultModel`，不留 fallback / shim / deprecated 标记：zhixing 是 internal-only 项目，没有 released-user 需要 BC；保留 fallback 是给"假想用户"妥协，违反"避免架构债务"原则；双 schema 解析分支是典型架构债（每次 resolver 改动都要权衡两条路径）
 
-### ADR-SLLM-004：默认值策略
+### ADR-SLLM-004：secondary 不设 vendor 默认
 
-secondary 缺省时尝试 SECONDARY_DEFAULT（haiku-4-5 via anthropic）；不可达时降级 main：
-- Anthropic 用户开箱即用——配 main 即免配 secondary
-- 非 Anthropic 用户若不显式配 secondary 也能正常运行——secondary === main 的退化行为不破任何能力，只失去成本/性能优势
-- 启动 INFO 日志告知 degrade 发生，不阻塞启动
+`config.llm.secondary` 缺省时**直接用 main 实例 + main.model 兜底**——不预设任何 vendor / 模型，不打印提示。理由：
+
+- **Provider 中立性**：知行预设 8 家服务商，给其中任何一家设 default 都是越权决策。国内用户主用 siliconflow / qwen，硬塞 anthropic 默认会让每次启动都看到"degrade"提示，错把"未配 secondary 这一正常状态"暗示成"异常"
+- **隔离价值仍保留**：secondary 即使等于 main，调用上下文仍独立——secondary 一次性 conversation 与 main 物理隔离，prompt injection 通过工具结果污染 secondary 时 main 看到的只是结构化净化输出。隔离来自"调用边界"而非"模型差异"（见 §〇.1 三层价值）
+- **任务专门化是用户主权**：用户想用更适合摘要的模型（如 cost 偏低 / JSON mode 友好的）就显式配 `llm.secondary`，不配是放弃这个优化，不是降级
+- **不静默尝试任何 provider**：之前 `try { resolveProvider("anthropic") } catch { degrade }` 的设计假设了 ANTHROPIC_API_KEY 是合理可探测的环境变量；这对国内用户错误，对所有用户都是隐式 vendor 偏好
+- **/status 命令展示当前角色配置**（未来工作）：用户主动查询时温和展示"secondary 当前与 main 共享，可在 ~/.zhixing/config.json 配 llm.secondary 启用任务专门化"——这是用户拉式提示而非工具推式打扰
+
+历史决策：曾用 `SECONDARY_DEFAULT = { provider: "anthropic", model: "claude-haiku-4-5-20251001" }`。已删除（spec 是活文档，不留 superseded 痕迹）。
 
 ### ADR-SLLM-005：Provider 实例复用（同 provider 共享）
 
@@ -479,12 +506,14 @@ or providers.<id>.defaultModel. Pass --model <model-id> explicitly.
   - 两个 override 同时 → `roles.main` = (override provider, override model) ✓
   - 缺 `llm.main` → throw（含 A 文案断言）✓
 - secondary 解析：
-  - 显式 ✓
-  - 内置默认（anthropic 可达）✓
-  - 内置默认 try/catch 失败 → degrade ✓
+  - 显式 + 不同 id → 独立解析 ✓
+  - 显式 + 同 id → 复用 main 实例（model 仍独立）✓
+  - 缺省 → 用 main 实例 + main.model 兜底 ✓
+  - 缺省时对所有 vendor 行为一致（vendor 中立回归保护）✓
   - 显式配错 → throw（透传 C）✓
   - main 任一 override 不影响 secondary ✓
-- 实例复用断言：同 provider 共享 instance / 不同 provider 各自 instance / degrade 时同一 instance
+- bindRole 实绑契约：chat({...}) 调用时 provider 收到 request.model === 绑定 model；多 role 共享 provider 时 closure 不串
+- 实例复用断言：同 provider 共享 instance / 不同 provider 各自 instance / 缺省时同一 instance
 - effective state 断言：`roles.main.{provider.id, model}` 等于解析顺序计算后的最终值（含 CLI override 与 `--provider` 跟随的预设默认）
 
 ### M0.3 入口注入
@@ -496,9 +525,9 @@ cli/run-agent.ts 的 6 个站点全部按 §三.2 表更新；server-side 通过
 - consumer mock test：mock 工具调 `ctx.llm.secondary.chat()` 能 stream 出预期事件
 - "ctx.llm undefined" test：mock 工具按"显式分支表态"契约 fail（不 silent / 不 throw）
 - 实例复用 test：相同 provider 时 `roles.main.provider === roles.secondary.provider` 严格相等（仅作内部不变断言，非外部契约）
-- 降级 test：无 anthropic 凭证 + 无 `llm.secondary` 配置 → roles.secondary === roles.main；启动 INFO 日志被产出
-- 配错 fail-fast test：显式 `llm.secondary` 配置但 anthropic apiKey="env:NONEXISTENT" → resolveProvider throw → session 启动失败
-- 上下文压缩链路 test：mock LLM 跑 LLMSummarizeStrategy 一轮 → secondary path 被调用，main provider 调用计数器在压缩期间不增长
+- 缺省兜底 test：未配 `llm.secondary` → roles.secondary.provider === roles.main.provider 且 secondary.model === main.model；**不**打印任何启动提示
+- 配错 fail-fast test：显式 `llm.secondary` 配置但 apiKey="env:NONEXISTENT" → resolveProvider throw → session 启动失败
+- 上下文压缩路由 test（compaction-llm.test.ts）：mock 双 spy LLMRoles 跑 createCompactionFlush → secondary.chat 被调用、main.chat 永远不被调用、abortSignal 透传、空响应回 "[]"
 
 ---
 
@@ -521,9 +550,10 @@ cli/run-agent.ts 的 6 个站点全部按 §三.2 表更新；server-side 通过
 |------|-----------|--------|----------|---------|
 | 二级模型存在 | ✅（写死 Haiku） | ✅（按 task auxiliary） | ❌ | ✅（main + secondary） |
 | 配置粒度 | 全局单例 | per-task | per-feature override | 全局单 secondary |
-| 默认值 | 平台决定 | provider 决定 | n/a | Anthropic Haiku 4.5 |
+| 默认值 | 平台决定（vendor lock-in） | provider 决定 | n/a | **无（用户主权，缺省用 main 兜底）** |
+| 价值定位 | 成本+性能 | task 专门化 | n/a | **隔离 > 专门化 > cost** |
 | WebFetch distill | ✅ Haiku | ✅（带并行分块） | ❌（raw 返回） | ✅ secondary |
 | 上下文压缩 | Haiku | auxiliary | 主模型 | secondary |
 | 抽象层 | API client 内部分支 | LLMService（call_llm by task） | 配置驱动 | LLMRole.chat()（无抽象层） |
 
-zhixing 选择最贴近 claudecode 的全局单 secondary 模式：比 hermes 简单（不引入 per-task complexity）；比 openclaw 准确（明确"成本维度的二级"语义）；比 claudecode 配置层更显式（claudecode 写死，zhixing 可配）。
+zhixing 选择全局单 secondary 模式：比 hermes 简单（不引入 per-task complexity），比 claudecode vendor 中立（不写死任何 provider，保留用户主权），比 openclaw 准确（明确"调用上下文隔离"语义而非"成本维度"）。

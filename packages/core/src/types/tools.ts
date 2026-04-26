@@ -15,6 +15,7 @@ import type {
   DeliveryTarget,
   OutboundContent,
 } from "../channels/types.js";
+import type { LLMRoles } from "./llm.js";
 import type { BoundaryCrossing } from "../security/types.js";
 
 // ─── Turn 上下文（ADR-007 Phase 2） ───
@@ -171,6 +172,19 @@ export interface ToolExecutionContext {
    * 参见 remote-confirmation-execution.md §3.3。
    */
   turnOrigin?: TurnOrigin;
+
+  /**
+   * 当前会话可用的 LLM 角色实例（main + secondary）。
+   *
+   * 入口（cli/run-agent → core agent-loop → tool-executor）创建 ctx 时一次性注入；
+   * 工具消费 `ctx.llm.secondary` 在 I/O 边界做信息净化，避免噪音灌入主上下文。
+   *
+   * Optional 的语义：单测 / 极简自动化路径可能不注入。consumer 必须显式分支处理
+   * `ctx.llm === undefined`（推荐 graceful degrade，如 WebFetch 退到 raw markdown；
+   * 强依赖 LLM 的工具应在 ToolDefinition.description 标注并返回明确 isError）。
+   * 禁止 silent return / 抛 throw 给 secure-executor 通用 catch。
+   */
+  llm?: LLMRoles;
 }
 
 /**

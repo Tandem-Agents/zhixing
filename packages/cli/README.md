@@ -350,7 +350,7 @@ rm ~/.zhixing/server.token
 
 ### REPL 启动时找不到模型
 
-检查 `.env` 是否含 API key，配置文件 `defaultProvider` 是否正确：
+检查 `.env` 是否含 API key，配置文件 `llm.main.provider` 是否正确：
 
 ```bash
 cat ~/.zhixing/config.json

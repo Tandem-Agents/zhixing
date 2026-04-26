@@ -51,7 +51,7 @@ import {
   TimeProvider,
 } from "@zhixing/core";
 import {
-  createProviderFromConfig,
+  createProviderRoles,
   ensureWorkspaceDir,
   getGlobalConfigPath,
   resolveWorkspace,
@@ -76,6 +76,7 @@ import {
   renderCompactEnd,
 } from "./render.js";
 import { subscribeCompactAccumulator } from "./compact-accumulator.js";
+import { createCompactionFlush } from "./compaction-llm.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import { loadProjectContext, injectContext, enrichContext, type EnrichOptions } from "./project-context.js";
 import {
@@ -196,8 +197,9 @@ export async function createAgentRuntime(options: {
    */
   confirmationFallback?: ConfirmationFallbackStrategy;
 }): Promise<AgentRuntime> {
-  const { provider, defaultModel, config } = createProviderFromConfig({
-    providerId: options.provider,
+  const { roles, config } = createProviderRoles({
+    providerOverride: options.provider,
+    modelOverride: options.model,
   });
 
   // 应用级身份单例：启动时设一次，后续所有 user-facing 字符串通过
@@ -205,7 +207,6 @@ export async function createAgentRuntime(options: {
   // 的 agent.displayName 覆盖。
   setAgentIdentity(resolveAgentIdentity(config.agent));
 
-  const model = options.model ?? defaultModel;
   const cwd = process.cwd();
 
   // 工作区解析：按优先级链 CLI > 目录级配置 > 全局配置 > cwd 兜底
@@ -287,10 +288,10 @@ export async function createAgentRuntime(options: {
   // 用户可通过 ZhixingConfig.providers.<id>.modelOverrides 覆盖。
   // estimator 跨 run() 共享以保持校准状态。
   const resolvedModel = resolveModelInfo({
-    providerId: provider.id,
-    model,
-    providerModels: provider.models,
-    overrides: config.providers?.[provider.id]?.modelOverrides,
+    providerId: roles.main.provider.id,
+    model: roles.main.model,
+    providerModels: roles.main.provider.models,
+    overrides: config.providers?.[roles.main.provider.id]?.modelOverrides,
   });
   for (const w of resolvedModel.warnings) {
     console.warn(`[zhixing] ${w.message}`);
@@ -299,35 +300,15 @@ export async function createAgentRuntime(options: {
   const estimator = createTokenEstimator();
   const memoryStore = new MemoryStore();
 
-  // Flush 用的 LLM 调用：消费流式响应，拼接 text_delta 为完整文本。
-  // 统一 CompactLLMFn 契约：opts.abortSignal 透传给 provider.chat，保证
-  // compact 期间受同一 abort 控制。
-  const flushCallLLM = async (
-    msgs: Message[],
-    opts?: { abortSignal?: AbortSignal },
-  ): Promise<string> => {
-    const chunks: string[] = [];
-    for await (const event of provider.chat({
-      model,
-      messages: msgs,
-      tools: [],
-      abortSignal: opts?.abortSignal,
-    })) {
-      if (event.type === "text_delta") {
-        chunks.push(event.text);
-      }
-    }
-    return chunks.join("") || "[]";
-  };
+  // Flush 用的 LLM 调用——绑定 secondary 角色。详见 compaction-llm.ts 的
+  // 设计注释（路由契约 + 单测覆盖）。
+  const flushCallLLM = createCompactionFlush(roles);
 
   // 策略编排（engine 按 priority asc 执行，到 normal/warning 就 break）：
   //   priority 0   ToolResultTrim  免费 — 旧轮 tool_result 裁剪
   //   priority 3   MemoryFlush     有 LLM 调用 — 仅 usage >= 0.75 触发
   //   priority 5   MessageDrop     免费 — usage < 0.9 触发（超过 0.9 让给 LLMSummarize）
   //   priority 200 LLMSummarize    昂贵 — usage >= 0.9 触发，MessageDrop 让位
-  //
-  // LLMSummarize 和 MemoryFlush 共用 flushCallLLM —— 未来可通过 ZhixingConfig
-  // 配置 compactionModels 拆分（当前共用 default model）。
   const strategies = [
     createToolResultTrimStrategy(),
     createMemoryFlushStrategy({ callLLM: flushCallLLM, store: memoryStore }),
@@ -341,8 +322,8 @@ export async function createAgentRuntime(options: {
   ];
 
   return {
-    providerId: config.defaultProvider ?? provider.id,
-    model,
+    providerId: roles.main.provider.id,
+    model: roles.main.model,
     securityPipeline,
     permissionStore: persistentStore,
     confirmationBroker,
@@ -433,7 +414,7 @@ export async function createAgentRuntime(options: {
 
       // 通过 deps.callLLM 注入容错能力，agent-loop.ts 零修改
       const resilientCallLLM = withRetry(
-        (request) => provider.chat(request),
+        (request) => roles.main.provider.chat(request),
         { eventBus },
       );
 
@@ -597,8 +578,8 @@ export async function createAgentRuntime(options: {
       });
 
       const gen = runAgentLoop({
-        provider,
-        model,
+        provider: roles.main.provider,
+        model: roles.main.model,
         tools,
         messages: loopMessages,
         systemPrompt,
@@ -610,6 +591,7 @@ export async function createAgentRuntime(options: {
           executeTool: secureExecuteTool,
         },
         contextManager: contextEngine,
+        llmRoles: roles,
       });
 
       while (true) {

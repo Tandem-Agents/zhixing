@@ -19,6 +19,7 @@
 import type { IEventBus } from "../events/types.js";
 import type { AgentEventMap } from "../types/agent-events.js";
 import { isUserFacingError } from "../types/errors.js";
+import type { LLMRoles } from "../types/llm.js";
 import type { ToolResultBlock, ToolUseBlock } from "../types/messages.js";
 import type { ToolDefinition, ToolExecutionContext } from "../types/tools.js";
 import type { AgentLoopDeps, AgentYield } from "./types.js";
@@ -30,6 +31,11 @@ interface ExecuteToolCallsParams {
   workingDirectory: string;
   abortSignal?: AbortSignal;
   eventBus?: IEventBus<AgentEventMap>;
+  /**
+   * 会话级 LLM 角色集合，注入到每次 tool.call 的 ctx.llm。可选——单测路径
+   * 可不传，consumer 必须显式分支处理 !ctx.llm（见 ToolExecutionContext.llm 注释）。
+   */
+  llmRoles?: LLMRoles;
 }
 
 /**
@@ -41,7 +47,15 @@ interface ExecuteToolCallsParams {
 export async function* executeToolCalls(
   params: ExecuteToolCallsParams,
 ): AsyncGenerator<AgentYield, ToolResultBlock[]> {
-  const { toolCalls, tools, deps, workingDirectory, abortSignal, eventBus } = params;
+  const {
+    toolCalls,
+    tools,
+    deps,
+    workingDirectory,
+    abortSignal,
+    eventBus,
+    llmRoles,
+  } = params;
 
   const toolMap = new Map(tools.map((t) => [t.name, t]));
   const results: ToolResultBlock[] = [];
@@ -88,6 +102,7 @@ export async function* executeToolCalls(
     const context: ToolExecutionContext = {
       workingDirectory,
       abortSignal,
+      llm: llmRoles,
     };
 
     try {

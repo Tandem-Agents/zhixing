@@ -15,6 +15,7 @@ import { execSync } from "node:child_process";
 import { getPreset } from "./presets.js";
 import {
   DEFAULT_QUIRKS,
+  type LLMRoleConfig,
   type ProviderConfig,
   type ProviderQuirks,
   type ResolvedProvider,
@@ -82,29 +83,161 @@ export function resolveProvider(
 }
 
 /**
- * 从顶层配置中解析指定 provider（或默认 provider）。
+ * 从顶层配置中解析指定 provider（或 main 角色 provider）。
+ *
+ * 用于"只要一个 ResolvedProvider"的场景（如 createProvider）。需要双角色解析时
+ * 用 resolveLLMRoles。
  */
 export function resolveFromConfig(
   config: ZhixingConfig,
   providerId?: string,
   env: Record<string, string | undefined> = process.env,
 ): ResolvedProvider {
-  const id = providerId ?? config.defaultProvider;
+  const id = providerId ?? config.llm?.main?.provider;
   if (!id) {
     throw new ProviderConfigError(
-      "未指定 provider，且配置中没有 defaultProvider",
+      buildMissingMainConfigMessage(),
       "<unknown>",
     );
   }
 
   const userConfig = config.providers?.[id] ?? {};
-  const resolved = resolveProvider(id, userConfig, env);
+  return resolveProvider(id, userConfig, env);
+}
 
-  if (!resolved.defaultModel && config.defaultModel) {
-    return { ...resolved, defaultModel: config.defaultModel };
+// ─── LLM 双角色解析（配置层） ───
+
+/** 单个角色解析结果——配置层产物，不含 LLMProvider 实例。 */
+export interface ResolvedLLMRole {
+  resolved: ResolvedProvider;
+  model: string;
+}
+
+/** 双角色解析结果。 */
+export interface ResolvedLLMRoles {
+  main: ResolvedLLMRole;
+  secondary: ResolvedLLMRole;
+}
+
+/** CLI override 入口——main 角色受影响，secondary 不受影响。 */
+export interface LLMRolesResolveOptions {
+  /** CLI `--provider`：替换 main role 的 provider；model 跟随新 provider 的预设默认（除非也提供 modelOverride）。 */
+  providerOverride?: string;
+  /** CLI `--model`：替换 main role 的 model（最高优先级）。 */
+  modelOverride?: string;
+}
+
+/**
+ * 配置层双角色解析——纯 ResolvedProvider 计算，**不**实例化 LLMProvider。
+ *
+ * 实例化与共享判断由 create-provider.ts 的 createProviderRoles 完成，保持
+ * resolve.ts ↔ 配置层、create-provider.ts ↔ 实例层的单向依赖。
+ */
+export function resolveLLMRoles(
+  config: ZhixingConfig,
+  options: LLMRolesResolveOptions = {},
+  env: Record<string, string | undefined> = process.env,
+): ResolvedLLMRoles {
+  // 单一 fail-fast 边界——把 ZhixingConfig.llm? 的 optional 在此处一次性 narrow，
+  // 让下游 helpers 接收已确定形状的字段（避免 TS 跨函数 narrow 失败 / non-null 断言）。
+  if (!config.llm?.main) {
+    throw new ProviderConfigError(
+      buildMissingMainConfigMessage(),
+      "<unknown>",
+    );
   }
 
-  return resolved;
+  const providersConfig = config.providers;
+  const main = resolveMainRole(config.llm.main, providersConfig, options, env);
+  const secondary = resolveSecondaryRole(
+    config.llm.secondary,
+    providersConfig,
+    env,
+    main,
+  );
+
+  return { main, secondary };
+}
+
+function resolveMainRole(
+  mainConfig: LLMRoleConfig,
+  providersConfig: Record<string, ProviderConfig> | undefined,
+  options: LLMRolesResolveOptions,
+  env: Record<string, string | undefined>,
+): ResolvedLLMRole {
+  const finalProvider = options.providerOverride ?? mainConfig.provider;
+  const userConfig = providersConfig?.[finalProvider] ?? {};
+  const resolved = resolveProvider(finalProvider, userConfig, env);
+
+  let finalModel: string;
+  if (options.modelOverride) {
+    finalModel = options.modelOverride;
+  } else if (options.providerOverride) {
+    if (!resolved.defaultModel) {
+      throw new ProviderConfigError(
+        `--provider "${finalProvider}" requires --model: provider has no ` +
+          `default model in preset or providers.${finalProvider}.defaultModel. ` +
+          `Pass --model <model-id> explicitly.`,
+        finalProvider,
+      );
+    }
+    finalModel = resolved.defaultModel;
+  } else {
+    finalModel = mainConfig.model;
+  }
+
+  return { resolved, model: finalModel };
+}
+
+function resolveSecondaryRole(
+  explicit: LLMRoleConfig | undefined,
+  providersConfig: Record<string, ProviderConfig> | undefined,
+  env: Record<string, string | undefined>,
+  main: ResolvedLLMRole,
+): ResolvedLLMRole {
+  // 没显式配置 → 用 main 实例 + main.model 兜底。
+  //
+  // 这不是"降级"，是合理的未配置默认：
+  //   - 隔离价值（第一层）：调用上下文独立，secondary 一次性 conversation 与 main
+  //     conversation 物理隔离；prompt injection 通过工具结果污染 secondary 时，
+  //     main 看到的只是结构化净化输出，攻击向量被切断
+  //   - 任务专门化（第二层）：放弃——main 通常是为主对话挑的较强模型，跑摘要/抽取
+  //     等轻量任务略大材小用
+  //   - cost 优化（第三层）：放弃
+  //
+  // **不**预设任何 vendor 默认（曾经的 SECONDARY_DEFAULT=anthropic 是 vendor lock-in
+  // 错误）—— 知行 provider 中立，预设 8 家服务商，不替用户挑选其中之一作为
+  // secondary 默认。用户想专门化就显式配 llm.secondary；不配就用 main 兜底。
+  if (!explicit) {
+    return { resolved: main.resolved, model: main.model };
+  }
+
+  // 显式 secondary：用户的明确意图。
+  //
+  // 同 provider id 时复用 main.resolved 实例——避免重复 env: lookup /
+  // helper:cmd execSync。复用的只是协议配置（baseUrl/apiKey/connection pool 等
+  // stateless 资源），conversation 仍然独立，隔离性不破坏。
+  if (explicit.provider === main.resolved.id) {
+    return { resolved: main.resolved, model: explicit.model };
+  }
+
+  // 不同 provider id：独立解析，失败 fail-fast（不静默降级到 main，避免把
+  // "用户期望的双 provider 架构"伪装成单 provider 在跑）。
+  const userConfig = providersConfig?.[explicit.provider] ?? {};
+  const resolved = resolveProvider(explicit.provider, userConfig, env);
+  return { resolved, model: explicit.model };
+}
+
+function buildMissingMainConfigMessage(): string {
+  return (
+    `ZhixingConfig.llm.main is required.\n\n` +
+    `If migrating from older config that uses top-level defaultProvider/defaultModel,\n` +
+    `replace:\n` +
+    `  { "defaultProvider": "<id>", "defaultModel": "<model-id>", "providers": {...} }\n` +
+    `with:\n` +
+    `  { "llm": { "main": { "provider": "<id>", "model": "<model-id>" } }, "providers": {...} }\n\n` +
+    `See research/design/specifications/secondary-llm-capability.md §一.1.`
+  );
 }
 
 // ─── API Key 解析 ───

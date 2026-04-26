@@ -11,7 +11,14 @@
 import type { IEventBus } from "../events/types.js";
 import type { AgentEventMap } from "../types/agent-events.js";
 import type { AgentError } from "../types/errors.js";
-import type { ChatRequest, LLMProvider, StopReason, StreamEvent, TokenUsage } from "../types/llm.js";
+import type {
+  ChatRequest,
+  LLMProvider,
+  LLMRoles,
+  StopReason,
+  StreamEvent,
+  TokenUsage,
+} from "../types/llm.js";
 import type { Message } from "../types/messages.js";
 import type { ToolDefinition, ToolExecutionContext, ToolResult } from "../types/tools.js";
 import type { ContextManagerHook, ContextBudget } from "../context/types.js";
@@ -46,6 +53,14 @@ export interface AgentLoopParams {
    * 检查预算并执行压缩。可选 — 不传则不做上下文管理。
    */
   contextManager?: ContextManagerHook;
+  /**
+   * 会话级 LLM 角色集合。注入到每个工具调用的 ToolExecutionContext.llm，
+   * 供工具在 I/O 边界使用 secondary 角色做信息净化（如 WebFetch distill）。
+   *
+   * 可选——单测 / 极简自动化路径可不传，consumer 必须显式分支处理 !ctx.llm。
+   * 见 research/design/specifications/secondary-llm-capability.md §三。
+   */
+  llmRoles?: LLMRoles;
 }
 
 // ─── 依赖注入 ───

@@ -4,6 +4,7 @@
 export type {
   AgentConfig,
   ChannelConfigEntry,
+  LLMRoleConfig,
   ModelBudgetOverride,
   Protocol,
   ProviderConfig,
@@ -19,7 +20,17 @@ export { DEFAULT_QUIRKS } from "./types.js";
 export { getPreset, getPresetIds, PROVIDER_PRESETS } from "./presets.js";
 
 // 配置解析
-export { ProviderConfigError, resolveFromConfig, resolveProvider } from "./resolve.js";
+export {
+  ProviderConfigError,
+  resolveFromConfig,
+  resolveLLMRoles,
+  resolveProvider,
+} from "./resolve.js";
+export type {
+  LLMRolesResolveOptions,
+  ResolvedLLMRole,
+  ResolvedLLMRoles,
+} from "./resolve.js";
 
 // 协议适配器
 export { createOpenAICompatibleProvider } from "./adapters/openai-compatible.js";
@@ -40,5 +51,6 @@ export type { ResolvedWorkspace, WorkspaceDirStatus, WorkspaceSource } from "./c
 export {
   createProvider,
   createProviderDirect,
-  createProviderFromConfig,
+  createProviderRoles,
 } from "./create-provider.js";
+export type { ProviderRolesOptions } from "./create-provider.js";

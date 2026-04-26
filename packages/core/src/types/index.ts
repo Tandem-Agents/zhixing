@@ -36,6 +36,8 @@ export { toToolSpec, generateTurnId } from "./tools.js";
 export type {
   ChatRequest,
   LLMProvider,
+  LLMRole,
+  LLMRoles,
   ModelInfo,
   StopReason,
   StreamError,
