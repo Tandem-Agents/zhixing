@@ -375,10 +375,10 @@ WebFetch 作为消费者按 `ctx.llm?.secondary.chat()` + graceful degrade patte
 
 ### M1：`@zhixing/network` 包（safe-fetcher + text-sanitizer）
 
-**新建 packages/network 包**：4 个文件（见 §2.2 / §2.3）+ package.json + tsconfig.json + index.ts。
+**新建 packages/network 包**：4 个 src 文件（url-guard / safe-fetcher / text-sanitizer / types，见 §2.2 / §2.3）+ index.ts 公共出口 + package.json + tsconfig.json + tsup.config.ts。
 
 **关键工作**：
-- 新包 boilerplate（package.json 加 undici 依赖；workspace 配置加入 `pnpm-workspace.yaml`）
+- 新包 boilerplate（package.json 加 undici 依赖；pnpm-workspace.yaml 当前是 `packages/*` 通配，新建子目录自动识别，无需改 workspace 配置）
 - `validateUrl` / `classifyIp` 含 IPv4 + IPv6 + 子网匹配（CIDR）
 - `safeFetch` 用 undici.fetch + undici.Agent 实现 DNS pinning（**spike 已完成**，详见 §七）
 - 重定向逐跳重做完整 URL 校验 + DNS + IP 分类
