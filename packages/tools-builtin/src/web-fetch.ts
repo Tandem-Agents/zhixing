@@ -235,6 +235,9 @@ function errorResult(message: string): { error: ToolResult } {
   return { error: { content: `web_fetch: ${message}`, isError: true } };
 }
 
+/** 命中此范围时附加代理 fake-IP 的诊断提示 */
+const FAKE_IP_RANGE = "198.18.0.0/15";
+
 function formatFetchError(url: string, err: FetchError): ToolResult {
   let detail: string;
   switch (err.kind) {
@@ -243,6 +246,10 @@ function formatFetchError(url: string, err: FetchError): ToolResult {
       break;
     case "ssrf-blocked":
       detail = `Blocked: target IP ${err.ip} is in restricted network ${err.range}`;
+      if (err.range === FAKE_IP_RANGE) {
+        detail +=
+          " (this range is commonly used by proxy software fake-IP modes; your system proxy may be intercepting DNS without forwarding traffic — check proxy configuration or try a direct connection)";
+      }
       break;
     case "redirect-blocked":
       detail = `Redirect blocked (${err.reason}): ${err.from} → ${err.to}`;
@@ -254,7 +261,10 @@ function formatFetchError(url: string, err: FetchError): ToolResult {
       detail = `Request timed out after ${err.ms}ms`;
       break;
     case "dns":
-      detail = `DNS error for ${err.host}: ${err.cause}`;
+      detail = `DNS resolution failed for ${err.host}: ${err.cause}`;
+      break;
+    case "connect-failed":
+      detail = `Connection failed for ${err.host}: ${err.cause}`;
       break;
     case "http-error":
       detail = `HTTP ${err.status}${err.bodySnippet ? ` — ${err.bodySnippet.slice(0, 200)}` : ""}`;

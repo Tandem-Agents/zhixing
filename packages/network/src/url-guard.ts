@@ -24,7 +24,7 @@ import type { FetchError, IpRange, NetworkPolicy } from "./types.js";
  * consumer 传 [] 也无法关闭——blockedNetworks 字段语义是"追加"。
  */
 export const DEFAULT_BLOCKED_NETWORKS: readonly IpRange[] = [
-  // IPv4
+  // IPv4 私网/系统保留
   "127.0.0.0/8", // loopback
   "10.0.0.0/8", // private
   "172.16.0.0/12", // private
@@ -34,6 +34,12 @@ export const DEFAULT_BLOCKED_NETWORKS: readonly IpRange[] = [
   "224.0.0.0/4", // multicast
   "240.0.0.0/4", // reserved
   "0.0.0.0/8", // current network / unspecified
+  // IPv4 IANA 测试与基准保留段(RFC 5737 / RFC 2544)
+  // 不应出现在生产业务,出现通常意味着代理 fake-IP 模式或配置错误
+  "192.0.2.0/24", // TEST-NET-1 (RFC 5737)
+  "198.51.100.0/24", // TEST-NET-2 (RFC 5737)
+  "203.0.113.0/24", // TEST-NET-3 (RFC 5737)
+  "198.18.0.0/15", // RFC 2544 benchmark — Clash/V2Ray 等代理 fake-IP 模式默认范围
   // IPv6
   "::1/128", // loopback
   "fc00::/7", // ULA

@@ -60,6 +60,13 @@ export interface FetchResult {
  *   - "ssrf":        跳转目标解析到内置/追加的 blocked 网段
  *   - "loop":        跳转链中出现重复 URL
  *   - "too-many":    跳转次数超过 maxRedirects
+ *
+ * dns vs connect-failed 区分：
+ *   - dns:            明确的 DNS 解析失败(ENOTFOUND / EAI_AGAIN / EAI_NODATA / EAI_SERVICE)
+ *   - connect-failed: 连接级失败(ECONNREFUSED / ECONNRESET / ETIMEDOUT /
+ *                     EHOSTUNREACH / ENETUNREACH / EPIPE 等),也是未识别错误的兜底归类
+ *                     (兜底偏向 connect-failed 而非 dns —— DNS 错误有明确 code,
+ *                     未知错误更可能是连接/socket/proxy 问题)
  */
 export type FetchError =
   | { kind: "url-invalid"; reason: "protocol" | "userinfo" | "too-long" | "malformed" }
@@ -73,6 +80,7 @@ export type FetchError =
   | { kind: "too-large"; bytes: number; limit: number }
   | { kind: "timeout"; ms: number }
   | { kind: "dns"; host: string; cause: string }
+  | { kind: "connect-failed"; host: string; cause: string }
   | { kind: "http-error"; status: number; bodySnippet?: string };
 
 // ─── 文本净化 ───

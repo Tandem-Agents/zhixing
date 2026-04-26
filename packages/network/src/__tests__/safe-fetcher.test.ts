@@ -312,8 +312,77 @@ describe("safeFetch - AbortSignal", () => {
     const result = await safeFetch("http://example.com/", undefined, {
       abortSignal: controller.signal,
     });
-    // abort 会触发 fetch reject,被 classifyFetchError 归为 dns/timeout 之一
+    // abort 会触发 fetch reject,被归为 FetchError
     // 关键不是分类精确,而是不 hang —— result 必须返回
     expect("kind" in result).toBe(true);
+  });
+});
+
+// ─── 错误归类: dns vs connect-failed ───
+
+describe("safeFetch - 错误归类", () => {
+  it("ENOTFOUND code → kind: dns", async () => {
+    const dnsErr: NodeJS.ErrnoException = new Error("getaddrinfo ENOTFOUND nonexistent.invalid");
+    dnsErr.code = "ENOTFOUND";
+    mockAgent
+      .get("http://nonexistent.invalid")
+      .intercept({ path: "/", method: "GET" })
+      .replyWithError(dnsErr);
+
+    const result = await safeFetch("http://nonexistent.invalid/");
+    expect(result).toMatchObject({ kind: "dns", host: "nonexistent.invalid" });
+    if ("kind" in result && result.kind === "dns") {
+      expect(result.cause).toContain("ENOTFOUND");
+    }
+  });
+
+  it("ECONNREFUSED code → kind: connect-failed", async () => {
+    const connErr: NodeJS.ErrnoException = new Error("connect ECONNREFUSED 8.8.8.8:80");
+    connErr.code = "ECONNREFUSED";
+    mockAgent
+      .get("http://refused.example")
+      .intercept({ path: "/", method: "GET" })
+      .replyWithError(connErr);
+
+    const result = await safeFetch("http://refused.example/");
+    expect(result).toMatchObject({ kind: "connect-failed", host: "refused.example" });
+    if ("kind" in result && result.kind === "connect-failed") {
+      expect(result.cause).toContain("ECONNREFUSED");
+    }
+  });
+
+  it("EHOSTUNREACH code → kind: connect-failed", async () => {
+    const connErr: NodeJS.ErrnoException = new Error("connect EHOSTUNREACH");
+    connErr.code = "EHOSTUNREACH";
+    mockAgent
+      .get("http://unreachable.example")
+      .intercept({ path: "/", method: "GET" })
+      .replyWithError(connErr);
+
+    const result = await safeFetch("http://unreachable.example/");
+    expect(result).toMatchObject({ kind: "connect-failed", host: "unreachable.example" });
+  });
+
+  it("ETIMEDOUT code → kind: connect-failed(连接级超时,非整体 timeout)", async () => {
+    const connErr: NodeJS.ErrnoException = new Error("connect ETIMEDOUT");
+    connErr.code = "ETIMEDOUT";
+    mockAgent
+      .get("http://slow.example")
+      .intercept({ path: "/", method: "GET" })
+      .replyWithError(connErr);
+
+    const result = await safeFetch("http://slow.example/");
+    expect(result).toMatchObject({ kind: "connect-failed", host: "slow.example" });
+  });
+
+  it("未识别 code 兜底 → kind: connect-failed(假设是连接问题,非 DNS)", async () => {
+    const unknownErr = new Error("some weird internal error");
+    mockAgent
+      .get("http://weird.example")
+      .intercept({ path: "/", method: "GET" })
+      .replyWithError(unknownErr);
+
+    const result = await safeFetch("http://weird.example/");
+    expect(result).toMatchObject({ kind: "connect-failed", host: "weird.example" });
   });
 });

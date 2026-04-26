@@ -57,7 +57,9 @@ function safeFetch(
 ### 默认值导出
 
 - `DEFAULT_NETWORK_POLICY`：完整 NetworkPolicy 对象
-- `DEFAULT_BLOCKED_NETWORKS`：`readonly IpRange[]`，covering IPv4 + IPv6 私网/回环/链路本地/CGNAT/multicast/保留段共 14 条 CIDR
+- `DEFAULT_BLOCKED_NETWORKS`：`readonly IpRange[]`，覆盖 IPv4 + IPv6:
+  - 私网/回环/链路本地/CGNAT/multicast/保留段（127/8 / 10/8 / 172.16/12 / 192.168/16 / 169.254/16 / 100.64/10 / 224/4 / 240/4 / 0/8 / ::1/128 / fc00::/7 / fe80::/10 / ff00::/8 / ::/128）
+  - IANA 测试与基准保留段（192.0.2.0/24 / 198.51.100.0/24 / 203.0.113.0/24 — RFC 5737；198.18.0.0/15 — RFC 2544 benchmark，**Clash/V2Ray 等代理 fake-IP 模式默认范围**）
 
 ## 四、NetworkPolicy
 
@@ -116,10 +118,16 @@ type FetchError =
   | { kind: "too-large"; bytes: number; limit: number }
   | { kind: "timeout"; ms: number }
   | { kind: "dns"; host: string; cause: string }
+  | { kind: "connect-failed"; host: string; cause: string }
   | { kind: "http-error"; status: number; bodySnippet?: string };
 ```
 
 discriminated union 的 `kind` 字段保证 consumer 可穷尽匹配；增加新 `kind` 不破坏现有 consumer（默认未处理时编译器会提醒）。
+
+**`dns` vs `connect-failed` 区分**（避免误导性归类）：
+- `dns`：明确的 DNS 解析失败 code（ENOTFOUND / EAI_AGAIN / EAI_NODATA / EAI_SERVICE / EAI_FAIL）
+- `connect-failed`：连接级失败 code（ECONNREFUSED / ECONNRESET / ECONNABORTED / ETIMEDOUT / EHOSTUNREACH / ENETUNREACH / ENETDOWN / EPIPE / EHOSTDOWN）
+- **未识别错误兜底归 `connect-failed`**——DNS 错误一般有明确 libuv code，未知错误更可能是 socket/TLS/proxy 问题
 
 ## 七、HopLifecycle（资源管理）
 

@@ -255,11 +255,39 @@ export async function safeFetch(
 
 // ─── 错误归类 ───
 
+/** 明确的 DNS 解析失败 code(libuv getaddrinfo 错误) */
+const DNS_ERROR_CODES = new Set([
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "EAI_NODATA",
+  "EAI_SERVICE",
+  "EAI_FAIL",
+]);
+
+/** 连接级失败 code(socket 层错误) */
+const CONNECT_ERROR_CODES = new Set([
+  "ECONNREFUSED",
+  "ECONNRESET",
+  "ECONNABORTED",
+  "ETIMEDOUT",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ENETDOWN",
+  "EPIPE",
+  "EHOSTDOWN",
+]);
+
 /**
  * 把 undici/fetch 抛出的异常归类为 FetchError。
  *
  * undici 把 lookup hook 错误包装成 cause chain,沿 cause 走找 SsrfError
  * (用 isSsrfError 类型守卫识别),提取结构化 ssrf 字段还原为 ssrf-blocked。
+ *
+ * 归类优先级:
+ *   1. SsrfError(任意 cause 层级) → ssrf-blocked
+ *   2. 明确 DNS code → dns
+ *   3. 明确 connect code → connect-failed
+ *   4. 兜底未识别 → connect-failed(假设连接级问题,因为 DNS 错误一般有明确 code)
  */
 function classifyFetchError(err: unknown, hostname: string): FetchError {
   let current: unknown = err;
@@ -269,14 +297,19 @@ function classifyFetchError(err: unknown, hostname: string): FetchError {
     }
     if (current instanceof Error) {
       const code = (current as NodeJS.ErrnoException).code;
-      if (code === "ENOTFOUND" || code === "EAI_AGAIN" || code === "EAI_NODATA") {
-        return { kind: "dns", host: hostname, cause: current.message };
+      if (code) {
+        if (DNS_ERROR_CODES.has(code)) {
+          return { kind: "dns", host: hostname, cause: `${code}: ${current.message}` };
+        }
+        if (CONNECT_ERROR_CODES.has(code)) {
+          return { kind: "connect-failed", host: hostname, cause: `${code}: ${current.message}` };
+        }
       }
     }
     current = (current as { cause?: unknown }).cause;
   }
   const message = err instanceof Error ? err.message : String(err);
-  return { kind: "dns", host: hostname, cause: message };
+  return { kind: "connect-failed", host: hostname, cause: message };
 }
 
 // ─── body 读取 ───

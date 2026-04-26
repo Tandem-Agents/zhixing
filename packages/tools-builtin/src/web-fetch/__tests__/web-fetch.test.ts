@@ -266,8 +266,45 @@ describe("FetchError 转 ToolResult", () => {
     safeFetchMock.mockResolvedValue({ kind: "dns", host: "missing.invalid", cause: "ENOTFOUND" });
     const r = await tool.call({ url: "https://missing.invalid/" }, makeContext());
     expect(r.isError).toBe(true);
-    expect(r.content).toContain("DNS error");
+    expect(r.content).toContain("DNS resolution failed");
     expect(r.content).toContain("missing.invalid");
+  });
+
+  it("connect-failed 友好 message", async () => {
+    safeFetchMock.mockResolvedValue({
+      kind: "connect-failed",
+      host: "refused.example",
+      cause: "ECONNREFUSED: connect ECONNREFUSED 1.2.3.4:80",
+    });
+    const r = await tool.call({ url: "https://refused.example/" }, makeContext());
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("Connection failed");
+    expect(r.content).toContain("refused.example");
+    expect(r.content).toContain("ECONNREFUSED");
+  });
+
+  it("ssrf-blocked 命中 198.18.0.0/15 时附代理 fake-IP 提示", async () => {
+    safeFetchMock.mockResolvedValue({
+      kind: "ssrf-blocked",
+      ip: "198.18.1.44",
+      range: "198.18.0.0/15",
+    });
+    const r = await tool.call({ url: "https://docs.python.org/3/" }, makeContext());
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("198.18.1.44");
+    expect(r.content).toContain("fake-IP");
+    expect(r.content).toContain("proxy");
+  });
+
+  it("ssrf-blocked 命中其他 range 不附 fake-IP 提示", async () => {
+    safeFetchMock.mockResolvedValue({
+      kind: "ssrf-blocked",
+      ip: "127.0.0.1",
+      range: "127.0.0.0/8",
+    });
+    const r = await tool.call({ url: "http://localhost/" }, makeContext());
+    expect(r.isError).toBe(true);
+    expect(r.content).not.toContain("fake-IP");
   });
 
   it("http-error 友好 message 含 bodySnippet", async () => {
