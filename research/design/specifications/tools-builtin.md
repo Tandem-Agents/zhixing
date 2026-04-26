@@ -179,19 +179,39 @@ permissionArgumentKey: "url",
 
 ### 5.10 错误转换
 
-`safeFetch` 返回的 7 种 `FetchError` kind 全部转为友好的 `ToolResult.isError = true` 消息：
+`safeFetch` 返回的 8 种 `FetchError` kind 全部转为友好的 `ToolResult.isError = true` 消息：
 
 | FetchError.kind | ToolResult.content 模板 |
 |---|---|
 | `url-invalid` | `Failed to fetch X: Invalid URL ({reason})` |
-| `ssrf-blocked` | `Failed to fetch X: Blocked: target IP {ip} is in restricted network {range}` |
+| `ssrf-blocked` | `Failed to fetch X: Blocked: target IP {ip} is in restricted network {range}`（命中 `198.18.0.0/15` 时附 fake-IP 提示） |
 | `redirect-blocked` | `Failed to fetch X: Redirect blocked ({reason}): {from} → {to}` |
 | `too-large` | `Failed to fetch X: Response too large ({bytes} > {limit})` |
 | `timeout` | `Failed to fetch X: Request timed out after {ms}ms` |
-| `dns` | `Failed to fetch X: DNS error for {host}: {cause}` |
+| `dns` | `Failed to fetch X: DNS resolution failed for {host}: {cause}` |
+| `connect-failed` | `Failed to fetch X: Connection failed for {host}: {cause}`（cause 含 `(via proxy ...)` 标注时 LLM 自动诊断为代理问题） |
 | `http-error` | `Failed to fetch X: HTTP {status} — {bodySnippet}` |
 
 LLM 看到的是 actionable 信息，不是栈追踪。
+
+### 5.11 代理支持（透传 `safeFetch` 的 NetworkPolicy.proxy）
+
+`createWebFetchTool` 工厂接受可选 `opts.proxy` 参数，透传给 `safeFetch` 的 NetworkPolicy：
+
+```typescript
+createWebFetchTool({ proxy: config.network?.proxy })
+```
+
+- 默认 `undefined` → safeFetch 默认 `"auto"` 行为（从 env 读 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`）
+- `"off"` → 显式禁用
+- `"http://host:port"` → 显式代理 URL
+
+代理详细机制见 [`network-egress.md` §十三](network-egress.md#十三代理支持httphttps-proxy)——**对用户无感**：99% 中国用户已被代理软件（Clash/V2Ray）自动设了 env，zhixing 默认 follow，零配置。
+
+**cli 装配链**：
+- `cli/run-agent.ts` 读 `ZhixingConfig.network?.proxy` 注入到 `createWebFetchTool({ proxy })`
+- `cli/repl.ts` 的 `/status` 命令展示 `state.networkProxy`（启动时调 `describeProxy(config.network?.proxy)` 计算 `ProxyDescription` 三元组——区分 off / auto+null / auto+url / explicit 四态，display 字段永远脱敏避免凭证泄露）
+- 失败诊断由 safeFetch 在 cause 自动注入 `(via proxy ...)` 标注——已脱敏 + scheme-aware（每跳按目标 URL scheme 选 env，与 EnvHttpProxyAgent 对齐），LLM 看到能直接识别"是代理问题还是目标问题"
 
 ## 六、System prompt 引导
 

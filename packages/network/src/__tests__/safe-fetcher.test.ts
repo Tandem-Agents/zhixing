@@ -1,15 +1,22 @@
 import { MockAgent } from "undici";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { createPinnedAgentMock } = vi.hoisted(() => ({
-  createPinnedAgentMock: vi.fn(),
+const { createDispatcherMock, resolveProxyMock } = vi.hoisted(() => ({
+  createDispatcherMock: vi.fn(),
+  resolveProxyMock: vi.fn<(proxy: unknown, env?: NodeJS.ProcessEnv) => string | null>(),
 }));
 
-vi.mock("../safe-fetcher-internal.js", () => ({
-  createPinnedAgent: createPinnedAgentMock,
-  // mock 路径下永远不触发 lookup hook,所以恒为 false 即可
-  isSsrfError: () => false,
-}));
+vi.mock("../safe-fetcher-internal.js", async (importActual) => {
+  const actual = await importActual<typeof import("../safe-fetcher-internal.js")>();
+  return {
+    createDispatcher: createDispatcherMock,
+    resolveProxy: resolveProxyMock,
+    // mock 路径下永远不触发 lookup hook,所以恒为 false 即可
+    isSsrfError: () => false,
+    // redactProxyUrl 走真实实现 —— 测试要验证脱敏链路真的生效
+    redactProxyUrl: actual.redactProxyUrl,
+  };
+});
 
 import { safeFetch } from "../safe-fetcher.js";
 
@@ -18,7 +25,9 @@ let mockAgent: MockAgent;
 beforeEach(() => {
   mockAgent = new MockAgent();
   mockAgent.disableNetConnect();
-  createPinnedAgentMock.mockReturnValue(mockAgent);
+  createDispatcherMock.mockReturnValue(mockAgent);
+  // 默认 mock: resolveProxy 返回 null(直连模式),测试代理路径时单测内 override
+  resolveProxyMock.mockReturnValue(null);
 });
 
 afterEach(async () => {
@@ -384,5 +393,143 @@ describe("safeFetch - 错误归类", () => {
 
     const result = await safeFetch("http://weird.example/");
     expect(result).toMatchObject({ kind: "connect-failed", host: "weird.example" });
+  });
+});
+
+// ─── 代理上下文标注 (via proxy ...) ───
+
+describe("safeFetch - 代理上下文标注", () => {
+  it("resolveProxy 返回 null(直连)时不注入标注", async () => {
+    resolveProxyMock.mockReturnValue(null);
+    const connErr: NodeJS.ErrnoException = new Error("connect ECONNREFUSED 1.2.3.4:80");
+    connErr.code = "ECONNREFUSED";
+    mockAgent
+      .get("http://target.example")
+      .intercept({ path: "/", method: "GET" })
+      .replyWithError(connErr);
+
+    const result = await safeFetch("http://target.example/");
+    if (!("kind" in result) || result.kind !== "connect-failed") throw new Error("expected connect-failed");
+    expect(result.cause).not.toContain("via proxy");
+    expect(result.cause).not.toContain("ProxyConnectFailed");
+  });
+
+  it("代理 host 不可达(cause 含代理 hostname:port)→ 加 ProxyConnectFailed: 前缀 + (via proxy)", async () => {
+    resolveProxyMock.mockReturnValue("http://127.0.0.1:7890");
+    const connErr: NodeJS.ErrnoException = new Error("connect ECONNREFUSED 127.0.0.1:7890");
+    connErr.code = "ECONNREFUSED";
+    mockAgent
+      .get("http://docs.python.org")
+      .intercept({ path: "/", method: "GET" })
+      .replyWithError(connErr);
+
+    const result = await safeFetch("http://docs.python.org/");
+    if (!("kind" in result) || result.kind !== "connect-failed") throw new Error("expected connect-failed");
+    expect(result.cause).toContain("ProxyConnectFailed:");
+    expect(result.cause).toContain("(via proxy http://127.0.0.1:7890)");
+  });
+
+  it("代理可达但目标不可达(cause 不含代理 host)→ 仅加 (via proxy),不加 ProxyConnectFailed", async () => {
+    resolveProxyMock.mockReturnValue("http://127.0.0.1:7890");
+    const connErr: NodeJS.ErrnoException = new Error("connect ECONNREFUSED 1.2.3.4:443");
+    connErr.code = "ECONNREFUSED";
+    mockAgent
+      .get("http://target.example")
+      .intercept({ path: "/", method: "GET" })
+      .replyWithError(connErr);
+
+    const result = await safeFetch("http://target.example/");
+    if (!("kind" in result) || result.kind !== "connect-failed") throw new Error("expected connect-failed");
+    expect(result.cause).toContain("(via proxy http://127.0.0.1:7890)");
+    expect(result.cause).not.toContain("ProxyConnectFailed");
+  });
+
+  it("dns kind 不注入标注(代理跟 DNS 失败无关)", async () => {
+    resolveProxyMock.mockReturnValue("http://127.0.0.1:7890");
+    const dnsErr: NodeJS.ErrnoException = new Error("getaddrinfo ENOTFOUND nonexistent.invalid");
+    dnsErr.code = "ENOTFOUND";
+    mockAgent
+      .get("http://nonexistent.invalid")
+      .intercept({ path: "/", method: "GET" })
+      .replyWithError(dnsErr);
+
+    const result = await safeFetch("http://nonexistent.invalid/");
+    if (!("kind" in result) || result.kind !== "dns") throw new Error("expected dns");
+    expect(result.cause).not.toContain("via proxy");
+  });
+
+  it("ssrf-blocked 不注入标注(同步拦截,跟代理无关)", async () => {
+    resolveProxyMock.mockReturnValue("http://127.0.0.1:7890");
+    const result = await safeFetch("http://10.0.0.1/");
+    if (!("kind" in result) || result.kind !== "ssrf-blocked") throw new Error("expected ssrf-blocked");
+    // ssrf-blocked 没有 cause 字段,直接断言 kind 即可
+  });
+
+  it("http-error 不注入标注(代理可达 + 目标返回 4xx,跟代理无关)", async () => {
+    resolveProxyMock.mockReturnValue("http://127.0.0.1:7890");
+    mockAgent
+      .get("http://target.example")
+      .intercept({ path: "/missing", method: "GET" })
+      .reply(404, "Not Found");
+
+    const result = await safeFetch("http://target.example/missing");
+    if (!("kind" in result) || result.kind !== "http-error") throw new Error("expected http-error");
+    // http-error 没有 cause 字段,无 (via proxy) 注入
+  });
+
+  it("HTTPS 显式代理 URL 也正确标注", async () => {
+    resolveProxyMock.mockReturnValue("https://corp-proxy.example:443");
+    const connErr: NodeJS.ErrnoException = new Error(
+      "connect ECONNREFUSED corp-proxy.example:443",
+    );
+    connErr.code = "ECONNREFUSED";
+    mockAgent
+      .get("http://target.example")
+      .intercept({ path: "/", method: "GET" })
+      .replyWithError(connErr);
+
+    const result = await safeFetch("http://target.example/");
+    if (!("kind" in result) || result.kind !== "connect-failed") throw new Error("expected connect-failed");
+    expect(result.cause).toContain("ProxyConnectFailed:");
+    expect(result.cause).toContain("(via proxy https://corp-proxy.example:443)");
+  });
+
+  it("凭证脱敏: proxy URL 含 user:password 时 cause 不泄露明文(P1 防泄露)", async () => {
+    resolveProxyMock.mockReturnValue("http://admin:secret@proxy.example:8443");
+    const connErr: NodeJS.ErrnoException = new Error(
+      "connect ECONNREFUSED proxy.example:8443",
+    );
+    connErr.code = "ECONNREFUSED";
+    mockAgent
+      .get("http://docs.python.org")
+      .intercept({ path: "/", method: "GET" })
+      .replyWithError(connErr);
+
+    const result = await safeFetch("http://docs.python.org/");
+    if (!("kind" in result) || result.kind !== "connect-failed") throw new Error("expected connect-failed");
+    expect(result.cause).toContain("(via proxy");
+    expect(result.cause).toContain("***");
+    // 关键: 明文凭证不能进 cause(避免泄露到 LLM 上下文 / transcript JSONL)
+    expect(result.cause).not.toContain("secret");
+    expect(result.cause).not.toContain("admin:");
+    // ProxyConnectFailed 前缀仍要正确判别(用原始 effectiveProxy host:port 匹配 cause)
+    expect(result.cause).toContain("ProxyConnectFailed:");
+  });
+
+  it("scheme-aware: enrichWithProxyContext 把 currentUrl 作为 targetUrl 传给 resolveProxy(P2 修复)", async () => {
+    resolveProxyMock.mockReturnValue("http://127.0.0.1:7890");
+    const connErr: NodeJS.ErrnoException = new Error("connect ECONNREFUSED 1.2.3.4:443");
+    connErr.code = "ECONNREFUSED";
+    mockAgent
+      .get("http://target.example")
+      .intercept({ path: "/", method: "GET" })
+      .replyWithError(connErr);
+
+    await safeFetch("http://target.example/");
+    // resolveProxy 至少被调用一次，最后一次调用应该带上 targetUrl(第三个参数)
+    // 验证 enrich 调用点而非 safeFetch 顶部调用——第三个参数必须是当前请求 URL
+    const lastCall = resolveProxyMock.mock.calls.at(-1);
+    expect(lastCall).toBeDefined();
+    expect(lastCall?.[2]).toBe("http://target.example/");
   });
 });

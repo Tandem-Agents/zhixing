@@ -37,3 +37,4 @@
 | 原草稿 | 目标 spec |
 |------|-----------|
 | WebFetch 工具（含网络出口与文本净化基础设施） | [specifications/network-egress.md](specifications/network-egress.md) + [specifications/tools-builtin.md](specifications/tools-builtin.md) |
+| 网络代理支持（@zhixing/network proxy） | [specifications/network-egress.md §十三](specifications/network-egress.md) |

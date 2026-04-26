@@ -83,6 +83,42 @@ describe("createWebFetchTool definition", () => {
   });
 });
 
+// ─── proxy 透传 ───
+
+describe("createWebFetchTool proxy 透传", () => {
+  it("不传 opts → safeFetch policy 的 proxy 是 undefined(走 safeFetch 默认 auto)", async () => {
+    const t = createWebFetchTool();
+    safeFetchMock.mockResolvedValue(makeFetchResult("<p>ok</p>"));
+    await t.call({ url: "https://x.com/" }, makeContext());
+    const policyArg = safeFetchMock.mock.calls[0]?.[1] as { proxy?: unknown };
+    expect(policyArg?.proxy).toBeUndefined();
+  });
+
+  it('opts.proxy="off" → safeFetch policy 收到 "off"', async () => {
+    const t = createWebFetchTool({ proxy: "off" });
+    safeFetchMock.mockResolvedValue(makeFetchResult("<p>ok</p>"));
+    await t.call({ url: "https://x.com/" }, makeContext());
+    const policyArg = safeFetchMock.mock.calls[0]?.[1] as { proxy?: unknown };
+    expect(policyArg?.proxy).toBe("off");
+  });
+
+  it('opts.proxy="auto" → safeFetch policy 收到 "auto"', async () => {
+    const t = createWebFetchTool({ proxy: "auto" });
+    safeFetchMock.mockResolvedValue(makeFetchResult("<p>ok</p>"));
+    await t.call({ url: "https://x.com/" }, makeContext());
+    const policyArg = safeFetchMock.mock.calls[0]?.[1] as { proxy?: unknown };
+    expect(policyArg?.proxy).toBe("auto");
+  });
+
+  it("opts.proxy=显式 URL → safeFetch policy 透传 URL", async () => {
+    const t = createWebFetchTool({ proxy: "http://127.0.0.1:7890" });
+    safeFetchMock.mockResolvedValue(makeFetchResult("<p>ok</p>"));
+    await t.call({ url: "https://x.com/" }, makeContext());
+    const policyArg = safeFetchMock.mock.calls[0]?.[1] as { proxy?: unknown };
+    expect(policyArg?.proxy).toBe("http://127.0.0.1:7890");
+  });
+});
+
 // ─── input 校验 ───
 
 describe("input validation", () => {

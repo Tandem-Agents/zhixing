@@ -6,6 +6,7 @@ export type {
   ChannelConfigEntry,
   LLMRoleConfig,
   ModelBudgetOverride,
+  NetworkConfig,
   Protocol,
   ProviderConfig,
   ProviderPreset,

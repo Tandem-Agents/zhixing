@@ -13,7 +13,12 @@
 
 import { isIPv4, isIPv6 } from "node:net";
 import { fetch as undiciFetch } from "undici";
-import { createPinnedAgent, isSsrfError } from "./safe-fetcher-internal.js";
+import {
+  createDispatcher,
+  isSsrfError,
+  redactProxyUrl,
+  resolveProxy,
+} from "./safe-fetcher-internal.js";
 import type { FetchError, FetchResult, NetworkPolicy } from "./types.js";
 import {
   DEFAULT_BLOCKED_NETWORKS,
@@ -30,6 +35,7 @@ export const DEFAULT_NETWORK_POLICY: NetworkPolicy = {
   maxRedirects: 5,
   redirectPolicy: "same-host-only",
   blockedNetworks: DEFAULT_BLOCKED_NETWORKS,
+  proxy: "auto",
 };
 
 const HTTP_ERROR_BODY_SNIPPET_BYTES = 4096;
@@ -126,7 +132,7 @@ async function performHop(
   let response: Response;
   try {
     response = (await undiciFetch(url, {
-      dispatcher: createPinnedAgent(policy.blockedNetworks),
+      dispatcher: createDispatcher(policy.blockedNetworks, policy.proxy),
       redirect: "manual",
       signal: lifecycle.signal,
     })) as unknown as Response;
@@ -245,12 +251,64 @@ export async function safeFetch(
         redirectChain,
       };
     }
-    return outcome;
+    // outcome 是 FetchError —— 注入代理上下文标注（每跳用本跳 currentUrl
+    // scheme-aware 计算 effectiveProxy；重定向中 cross-scheme 也得到精确标注）
+    return enrichWithProxyContext(outcome, policy.proxy, currentUrl);
   }
 
   // 超过 maxRedirects(循环退出未 return)
   const from = redirectChain[redirectChain.length - 2] ?? url;
   return { kind: "redirect-blocked", from, to: currentUrl, reason: "too-many" };
+}
+
+// ─── 代理上下文标注 ───
+
+/**
+ * 在 connect-failed 错误的 cause 中注入 "(via proxy ...)" 标注。
+ *
+ * 设计意图（单一职责）：
+ * - classifyFetchError 保持纯归类，不知道是否走代理
+ * - safeFetch 主循环唯一持有 policy + currentUrl，在 catch 后调用本函数注入上下文
+ * - 仅 connect-failed 需要（其他 kind 跟代理无关）
+ *
+ * 关键：effectiveProxy 在本调用点用 `currentUrl` scheme-aware 解析（与
+ * EnvHttpProxyAgent 实际选择对齐），避免 HTTP_PROXY/HTTPS_PROXY 不一致时
+ * 标注误指；嵌入 cause 的 URL 走 `redactProxyUrl` 脱敏，避免明文凭证进
+ * LLM 上下文 / transcript JSONL。
+ *
+ * 是否加 "ProxyConnectFailed:" 前缀：用**原始**（未脱敏）effectiveProxy 的
+ * host:port 在 cause 字符串里查找——cause 来自 undici 实际报错，含的是真实
+ * 通路的 host:port；命中即认为是代理 host 不可达（本地代理软件没运行的典型场景），
+ * 给前缀帮助 LLM 直接诊断。
+ */
+function enrichWithProxyContext(
+  error: FetchError,
+  proxy: NetworkPolicy["proxy"],
+  targetUrl: string,
+): FetchError {
+  if (error.kind !== "connect-failed") return error;
+  const effectiveProxy = resolveProxy(proxy, undefined, targetUrl);
+  if (!effectiveProxy) return error;
+
+  const isProxyHostFailure = causeIncludesProxyHost(error.cause, effectiveProxy);
+  const prefix = isProxyHostFailure ? "ProxyConnectFailed: " : "";
+  const display = redactProxyUrl(effectiveProxy);
+  return {
+    ...error,
+    cause: `${prefix}${error.cause} (via proxy ${display})`,
+  };
+}
+
+/** 检查 cause 字符串是否含代理 hostname:port,用于识别"代理 host 不可达"场景 */
+function causeIncludesProxyHost(cause: string, proxyUrl: string): boolean {
+  try {
+    const u = new URL(proxyUrl);
+    const port = u.port || (u.protocol === "https:" ? "443" : "80");
+    const hostname = u.hostname.replace(/^\[|\]$/g, ""); // 去 IPv6 brackets
+    return cause.includes(`${hostname}:${port}`);
+  } catch {
+    return false;
+  }
 }
 
 // ─── 错误归类 ───

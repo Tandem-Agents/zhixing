@@ -231,7 +231,7 @@ export async function createAgentRuntime(options: {
     createGrepTool(),
     createBashTool(),
     createMemoryTool(),
-    createWebFetchTool(),
+    createWebFetchTool({ proxy: config.network?.proxy }),
     ...(options.extraTools ?? []),
   ];
   const systemPrompt = buildSystemPrompt({

@@ -199,6 +199,27 @@ export interface ZhixingConfig {
   agent?: AgentConfig;
   /** 工作区配置（安全信任边界） */
   workspace?: WorkspaceConfig;
+  /** 网络出口配置（@zhixing/network 共享底座） */
+  network?: NetworkConfig;
+}
+
+/**
+ * 网络出口配置——对应 `zhixing.config.json` 的 `network` 字段。
+ *
+ * 影响所有出站 HTTP（当前消费者：web_fetch；未来：webhook 投递 / MCP HTTP / 第二通道出站）。
+ * 详见 [network-egress.md §十三](../../../research/design/specifications/network-egress.md)。
+ */
+export interface NetworkConfig {
+  /**
+   * 代理配置（默认 "auto"）：
+   *   - undefined / "auto"：从环境变量读 HTTP_PROXY/HTTPS_PROXY/NO_PROXY（Unix 惯例）
+   *   - "off"：显式禁用,即使环境变量有也不用代理
+   *   - "http://host:port" / "https://host:port"：显式代理 URL（覆盖环境变量）
+   *
+   * 中国用户 99% 已被代理软件（Clash/V2Ray）自动设了 HTTP_PROXY，无需手动配置。
+   * 仅当代理软件没设环境变量、或想 zhixing 走与系统不同的代理时，才需要在此显式配置。
+   */
+  proxy?: "auto" | "off" | string;
 }
 
 // ─── 解析后的 Provider ───

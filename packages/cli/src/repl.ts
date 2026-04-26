@@ -49,6 +49,7 @@ import {
   type SchedulerEventMap,
   type AgentTurnResult,
 } from "@zhixing/core";
+import { describeProxy, type ProxyDescription } from "@zhixing/network";
 import { loadConfig } from "@zhixing/providers";
 import { createScheduleTool } from "@zhixing/tools-builtin";
 import { setupChannels } from "./serve/channels.js";
@@ -90,6 +91,12 @@ interface ReplState {
   journalCondenseDone: boolean;
   /** Scheduler 实例（S1: CLI 进程内运行） */
   scheduler: Scheduler | null;
+  /**
+   * 启动时计算的代理诊断（mode + resolved + display 三元组）。用于 /status
+   * 展示——区分 off / auto+null / auto+url / explicit 四态，display 字段
+   * 永远脱敏（凭证不会泄露到终端 / 日志录屏）。
+   */
+  networkProxy: ProxyDescription;
 }
 
 // ─── 会话恢复选项 ───
@@ -153,11 +160,19 @@ function buildSlashCommands(rl: readline.Interface): Record<
         const assistantMsgs = state.messages.filter(
           (m) => m.role === "assistant",
         ).length;
+        // ProxyDescription.display 已脱敏（含凭证 URL 安全显示）+ 区分四态
+        // off / auto+null / auto+url / explicit—— mode=auto+null 时 dim 灰色
+        // 提示直连，其他状态正常色
+        const proxyText =
+          state.networkProxy.resolved === null && state.networkProxy.mode === "auto"
+            ? chalk.dim(state.networkProxy.display)
+            : state.networkProxy.display;
         console.log(
           `\n  ${chalk.dim("Session:")} ${state.conversationId ?? "(未保存)"}` +
             `\n  ${chalk.dim("Messages:")} ${state.messages.length} (${userMsgs} user, ${assistantMsgs} assistant)` +
             `\n  ${chalk.dim("Model:")} ${chalk.cyan(state.agent.model)}` +
-            `\n  ${chalk.dim("Provider:")} ${state.agent.providerId}\n`,
+            `\n  ${chalk.dim("Provider:")} ${state.agent.providerId}` +
+            `\n  ${chalk.dim("Network proxy:")} ${proxyText}\n`,
         );
       },
     },
@@ -860,6 +875,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     hasProposedSkill: false,
     journalCondenseDone: false,
     scheduler: schedulerInstance,
+    networkProxy: describeProxy(config.network?.proxy),
   };
 
   const slashCommands = buildSlashCommands(rl);

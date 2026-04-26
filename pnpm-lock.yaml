@@ -42,6 +42,9 @@ importers:
       '@zhixing/core':
         specifier: workspace:*
         version: link:../core
+      '@zhixing/network':
+        specifier: workspace:*
+        version: link:../network
       '@zhixing/providers':
         specifier: workspace:*
         version: link:../providers

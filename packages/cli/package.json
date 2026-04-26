@@ -17,6 +17,7 @@
   "dependencies": {
     "@zhixing/channel-feishu": "workspace:*",
     "@zhixing/core": "workspace:*",
+    "@zhixing/network": "workspace:*",
     "@zhixing/providers": "workspace:*",
     "@zhixing/server": "workspace:*",
     "@zhixing/tools-builtin": "workspace:*",

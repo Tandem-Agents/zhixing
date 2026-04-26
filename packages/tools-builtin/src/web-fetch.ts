@@ -15,7 +15,7 @@ import {
   type ToolResult,
   userMessage,
 } from "@zhixing/core";
-import type { FetchError } from "@zhixing/network";
+import type { FetchError, NetworkPolicy } from "@zhixing/network";
 import { safeFetch, sanitizeUntrustedText } from "@zhixing/network";
 import { WEB_FETCH_PREAPPROVED_HOSTS } from "./web-fetch-rules.js";
 import {
@@ -49,7 +49,20 @@ const WEB_FETCH_SYSTEM_PROMPT_HINTS: readonly string[] = [
   "- If the user asks a question without a URL, do not call `web_fetch` with a guessed URL — ask for the URL or suggest a search engine",
 ];
 
-export function createWebFetchTool(): ToolDefinition {
+export interface WebFetchToolOptions {
+  /**
+   * 网络代理配置（透传给 safeFetch）。
+   *   - undefined / "auto"：从环境变量读 HTTP_PROXY/HTTPS_PROXY/NO_PROXY
+   *   - "off"：显式禁用代理
+   *   - "http://host:port"：显式代理 URL
+   *
+   * 默认 undefined → safeFetch 默认 "auto" 行为。
+   * 详见 [network-egress.md §十三](../../../research/design/specifications/network-egress.md)。
+   */
+  proxy?: NetworkPolicy["proxy"];
+}
+
+export function createWebFetchTool(opts: WebFetchToolOptions = {}): ToolDefinition {
   return {
     name: "web_fetch",
     description:
@@ -95,7 +108,7 @@ export function createWebFetchTool(): ToolDefinition {
       const parsed = parseInput(input);
       if ("error" in parsed) return parsed.error;
 
-      const fetched = await fetchAndProcess(parsed, context.abortSignal);
+      const fetched = await fetchAndProcess(parsed, context.abortSignal, opts.proxy);
       if ("error" in fetched) return fetched.error;
 
       // graceful degrade: 无 secondary 注入 / 无 prompt → 返回 raw
@@ -166,6 +179,7 @@ function parseInput(input: Record<string, unknown>): ParsedInput | { error: Tool
 async function fetchAndProcess(
   parsed: ParsedInput,
   abortSignal: AbortSignal | undefined,
+  proxy: NetworkPolicy["proxy"],
 ): Promise<{ text: string } | { error: ToolResult }> {
   const key = cacheKey(parsed.url, parsed.format);
   const cached = contentCache.get(key);
@@ -173,7 +187,11 @@ async function fetchAndProcess(
     return { text: cached };
   }
 
-  const result = await safeFetch(parsed.url, defaultWebFetchPolicy, { abortSignal });
+  const result = await safeFetch(
+    parsed.url,
+    { ...defaultWebFetchPolicy, proxy },
+    { abortSignal },
+  );
   if ("kind" in result) {
     return { error: formatFetchError(parsed.url, result) };
   }
