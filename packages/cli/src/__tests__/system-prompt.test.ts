@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { buildSystemPrompt, CACHE_BOUNDARY } from "../system-prompt.js";
 import type { ToolDefinition } from "@zhixing/core";
+import { createWebFetchTool } from "@zhixing/tools-builtin";
 
 // ─── 工具工厂 ───
 
@@ -131,6 +132,46 @@ describe("buildSystemPrompt", () => {
       const tools = [stubTool("read", { isParallelSafe: true })];
       const prompt = buildSystemPrompt({ ...ctx, tools });
       expect(prompt).toContain("parallel");
+    });
+
+    it("含 web_fetch(真实工具)时输出 distill / preapproved hosts / not-search 引导", () => {
+      const prompt = buildSystemPrompt({
+        ...ctx,
+        tools: [createWebFetchTool()],
+      });
+      expect(prompt).toContain("`web_fetch`");
+      expect(prompt).toMatch(/does not search the web/i);
+      expect(prompt).toMatch(/with `prompt`/i);
+      expect(prompt).toMatch(/without `prompt`/i);
+      expect(prompt).toContain("github.com");
+      expect(prompt).toContain("docs.anthropic.com");
+      expect(prompt).toMatch(/Do not invent URLs/i);
+    });
+
+    it("不含 web_fetch 时无 web_fetch 引导段", () => {
+      const prompt = buildSystemPrompt({ ...ctx, tools: [stubTool("read")] });
+      expect(prompt).not.toContain("`web_fetch`");
+      expect(prompt).not.toContain("Pre-approved hosts");
+    });
+
+    it("自描述 systemPromptHints 通用透传(任意工具自带 hints 都生效)", () => {
+      const customHints = [
+        "- Use `custom_tool` for X",
+        "- Custom hint line 2",
+      ];
+      const tool = stubTool("custom_tool", { systemPromptHints: customHints });
+      const prompt = buildSystemPrompt({ ...ctx, tools: [tool] });
+      expect(prompt).toContain("Use `custom_tool` for X");
+      expect(prompt).toContain("Custom hint line 2");
+    });
+
+    it("无 systemPromptHints 字段的工具不影响其他工具的 hints", () => {
+      const toolWithHints = stubTool("custom_a", {
+        systemPromptHints: ["- Hint A"],
+      });
+      const toolWithout = stubTool("custom_b");
+      const prompt = buildSystemPrompt({ ...ctx, tools: [toolWithHints, toolWithout] });
+      expect(prompt).toContain("Hint A");
     });
   });
 

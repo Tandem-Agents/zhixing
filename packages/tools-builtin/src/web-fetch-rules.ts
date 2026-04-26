@@ -14,7 +14,14 @@
 
 import { PermissionStore, type PermissionRule } from "@zhixing/core";
 
-const PREAPPROVED_HOSTS: readonly string[] = [
+/**
+ * preapproved hosts 单源——同时供 WEB_FETCH_DEFAULT_RULES 与 web-fetch.ts
+ * 的 systemPromptHints 使用,避免列表在多处字面值重复。
+ *
+ * 选取标准: 公开技术文档/学习站点,被 LLM 引用频次最高,SSRF 风险低,
+ * 内容稳定不易承载诱导内容。新增 host 应满足同样标准。
+ */
+export const WEB_FETCH_PREAPPROVED_HOSTS: readonly string[] = [
   "developer.mozilla.org",
   "react.dev",
   "docs.python.org",
@@ -34,11 +41,11 @@ const PREAPPROVED_HOSTS: readonly string[] = [
  * 每条规则匹配 `https://${host}/**`(含子路径任意层级)。
  * 注册时 PermissionStore.registerBuiltinRules 会深拷贝,后续 mutate 不影响 store。
  */
-export const WEB_FETCH_DEFAULT_RULES: readonly PermissionRule[] = PREAPPROVED_HOSTS.map(
-  (host) =>
+export const WEB_FETCH_DEFAULT_RULES: readonly PermissionRule[] =
+  WEB_FETCH_PREAPPROVED_HOSTS.map((host) =>
     PermissionStore.createRule({
       pattern: { tool: "web_fetch", argument: `https://${host}/**` },
       decision: "allow",
       scope: "builtin",
     }),
-);
+  );

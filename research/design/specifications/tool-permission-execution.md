@@ -67,7 +67,7 @@ agent 当前确实"能用"工具——`bash / read / write / edit / glob / grep 
 
 ## 〇、触发与驱动
 
-本规格的**直接驱动**是 [Step 21B WebFetch 工具](../drafts/web-fetch-tool.md)。WebFetch 是首个无 context classifier 的新工具（network/egress 边界），暴露了 zhixing 安全管线"接口已定义但运行时未连"的全部 5 处真实缺口（详见 §一）。
+本规格的**直接驱动**是 Step 21B WebFetch 工具（见 [tools-builtin.md](tools-builtin.md)）。WebFetch 是首个无 context classifier 的新工具（network/egress 边界），暴露了 zhixing 安全管线"接口已定义但运行时未连"的全部 5 处真实缺口（详见 §一）。
 
 **成本/收益判断**：
 - 若 WebFetch / 后续无 context classifier 的新工具（web_search / MCP HTTP / 第三方工具）**确认要做** → 本规格是必经之路（每个新工具自己重做权限分级 = 碎片化债务，单方案补齐 = 一次到位）
@@ -788,7 +788,6 @@ permissionStore.unregisterBuiltinRules("mcp:linear");
 
 ## 十、未来工作（不在本规格）
 
-- **WebFetch 工具实现** + `core/network/` + `text-sanitizer`（[`drafts/web-fetch-tool.md`](../drafts/web-fetch-tool.md) 后续；首个 builtin 规则 namespace caller："web_fetch"）
 - **`/security` 或 `zhixing permissions list` CLI 命令**展示当前生效规则——user 规则与 builtin 规则**应分组展示**（避免用户混淆"为什么我没创建过的规则在这"）；默认列出 user 规则，加 `--include-builtin` flag 列出全部，调用 `store.listBuiltinNamespaces()` + `store.getBuiltinRules(ns)` 实现
 - **MCP 动态工具加载入口**：`/mcp connect` 命令调用 `boundaryRegistry.register(toolName, boundaries)` + `extractor.register(toolName, key)` 把 MCP 暴露的工具接入分类器与权限链路；`/mcp disconnect` 反向调 unregister
 - **BoundaryClassifier 的 dynamic 分支**与 ShellClassifier 协同（已有 ShellClassifier 实现，未来与 BoundaryImpactClassifier 协同处理"动态边界"如 bash 命令的 network 调用判断）

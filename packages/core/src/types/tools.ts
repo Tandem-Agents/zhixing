@@ -254,6 +254,25 @@ export interface ToolDefinition {
   boundaries?: BoundaryCrossing[];
 
   /**
+   * 工具自描述的 system-prompt 引导行（forward-looking 字段）。
+   *
+   * 由 cli/system-prompt 的 `buildToolUsage` 自动追加到 ## Tool Usage 段——
+   * 工具自描述,无需在 cli 包 hardcode 每个工具的提示模板。与 `boundaries` /
+   * `permissionArgumentKey` 同属"工具自描述"哲学(21A 既定模式)。
+   *
+   * 典型用途:
+   *   - web_fetch: preapproved hosts 列表(避免与 PermissionRule 字面值重复)
+   *   - mcp 工具: 按服务器特性提示参数约定
+   *   - 工具特定的"何时用 / 不该用"边界声明
+   *
+   * 写作约定:
+   *   - 每条以 `- ` 开头(融入 markdown bullet 列表)
+   *   - 英文(与现有 system prompt 一致风格)
+   *   - 简洁,聚焦 LLM 决策时需要知道的信息(don't restate description)
+   */
+  systemPromptHints?: readonly string[];
+
+  /**
    * 权限规则匹配时使用哪个输入字段作为 "argument"（forward-looking 字段）。
    *
    * `PermissionStore` 在匹配 `pattern.argument` glob 时需要从工具参数中提取一个字符串。

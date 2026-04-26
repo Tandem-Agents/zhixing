@@ -21,12 +21,11 @@
 ## 主线脉络
 
 ```
-S1–S3.6 ✅ + Step 17 ✅ + Step 20 ✅ + Phase 5 ✅ + Step 21A ✅ 全部已落地
-  → Step 21B 🔜 WebFetch 工具（含 core/network + text-sanitizer）    ← 当前
-    → Step 21  子 agent 底座 + Task 工具
-      → Step 22  BackgroundAgent（spawn + 完成通知 + Delivery）
-        → Step 23  Ctrl+B 推后台（REPL UX，adoptGenerator）
-          → S3.5   Monitor + TaskGraph
+S1–S3.6 ✅ + Step 17 ✅ + Step 20 ✅ + Phase 5 ✅ + Step 21A ✅ + Step 21B ✅ 全部已落地
+  → Step 21  子 agent 底座 + Task 工具    ← 当前
+    → Step 22  BackgroundAgent（spawn + 完成通知 + Delivery）
+      → Step 23  Ctrl+B 推后台（REPL UX，adoptGenerator）
+        → S3.5   Monitor + TaskGraph
 ```
 
 **规格引用：** [persistent-service.md](specifications/persistent-service.md) · [tool-permission-execution.md](specifications/tool-permission-execution.md) · [server-gateway.md](specifications/server-gateway.md) · [confirmation-ux.md](specifications/confirmation-ux.md) · [message-outbox.md](specifications/message-outbox.md) · [conversation-model.md](specifications/conversation-model.md)
@@ -48,27 +47,13 @@ S1–S3.6 ✅ + Step 17 ✅ + Step 20 ✅ + Phase 5 ✅ + Step 21A ✅ 全部已
 | Step 20 远程权限确认（通道无关纯文本协议） | ✅ E2E 已验收 |
 | Phase 5 Transcript 治理（commitTurn 原子截断 + 单向数据流） | ✅ |
 | Step 21A 工具权限/边界基础设施补齐（M1+M2+M3+M4+§五.7） | ✅ |
+| Step 21B WebFetch 工具（M0 二级 LLM 能力 + M1 @zhixing/network + M2 web_fetch + M3 spec 提升） | ✅ |
 
 ---
 
 ## 当前计划
 
-### P0：Step 21B — WebFetch 工具（含 二级 LLM 能力 + `@zhixing/network` 新包）
-
-**状态**：🔜 草稿评审完成，可实施（21A 已完成）
-**草稿**：[drafts/web-fetch-tool.md](drafts/web-fetch-tool.md)
-**关联 spec**：[secondary-llm-capability.md](specifications/secondary-llm-capability.md)（M0 主体在此）
-**依赖**：Step 21A ✅
-
-**范围**：4 个 milestone
-- **M0** 二级 LLM 能力（按 `secondary-llm-capability.md` §七 实施）：ZhixingConfig **hard cut**（删 defaultProvider/defaultModel，新增 llm.{main,secondary}）/ LLMRoles 类型 / createProviderRoles 工厂 / ToolExecutionContext.llm 注入 / cli + serve 入口 4 处调用点更新 / **flushCallLLM 闭包同步迁移到 secondary**（清算 run-agent.ts:329 latent debt 注释）
-- **M1** `@zhixing/network` 新包（url-guard + safe-fetcher + text-sanitizer），undici 依赖隔离在此
-- **M2** WebFetch 工具：自描述 boundaries + permissionArgumentKey="url"（21A 路径） + preapproved hosts 通过 `registerBuiltinRules("web_fetch", ...)` namespace 注入（21A M4 路径） + ctx.llm.secondary distill + graceful degrade
-- **M3** system-prompt 引导 + 入口 wiring + 草稿决策合并到正式 spec（network-egress.md / tools-builtin.md 新建）
-
-**为什么独立于 21A**：21A 是权限/边界基建（影响所有现有工具）；21B 是新工具实现 + 配套 capability（二级 LLM）+ 网络出口原语包。三者解耦让基建可被多 consumer 复用（webhook 投递 / 第二通道 / MCP 出站等共用 `@zhixing/network`；WebSearch / MCP digest / 子 agent 返回压缩共用 `ctx.llm.secondary`）。
-
-### P1：Step 21 — 子 agent 底座 + Task 工具
+### P0：Step 21 — 子 agent 底座 + Task 工具
 
 **状态**：🔜 待产出执行规格（`subagent-execution.md`）
 **顶层定位**：[persistent-service.md §3.6](specifications/persistent-service.md)（原 AgentOrchestrator 层的最基础原语）
@@ -97,7 +82,7 @@ S1–S3.6 ✅ + Step 17 ✅ + Step 20 ✅ + Phase 5 ✅ + Step 21A ✅ 全部已
 
 **里程碑**：spec 定稿 + 9 轮架构审查后拆解。
 
-### P2：Step 22 — BackgroundAgent（spawn + 完成通知）
+### P1：Step 22 — BackgroundAgent（spawn + 完成通知）
 
 **状态**：🔜 设计待启动（Step 21 完成后）
 **顶层定位**：[persistent-service.md §3.6.2](specifications/persistent-service.md)
@@ -109,7 +94,7 @@ S1–S3.6 ✅ + Step 17 ✅ + Step 20 ✅ + Phase 5 ✅ + Step 21A ✅ 全部已
 - Delivery 挂钩：背景完成可选推通道通知（飞书 / REPL）
 - 背景 agent 的事件冒泡 / 隔离策略（继承 Step 21 的流式可见性决策）
 
-### P3：Step 23 — Ctrl+B 推后台（REPL UX）
+### P2：Step 23 — Ctrl+B 推后台（REPL UX）
 
 **状态**：🔜 设计待启动（Step 22 完成后，可后置）
 **顶层定位**：[persistent-service.md §3.6.2](specifications/persistent-service.md) + Phase S2.5 Ctrl+B 章节

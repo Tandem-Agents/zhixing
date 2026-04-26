@@ -17,6 +17,7 @@ import {
 } from "@zhixing/core";
 import type { FetchError } from "@zhixing/network";
 import { safeFetch, sanitizeUntrustedText } from "@zhixing/network";
+import { WEB_FETCH_PREAPPROVED_HOSTS } from "./web-fetch-rules.js";
 import {
   DISTILL_SYSTEM_PROMPT,
   buildDistillPrompt,
@@ -35,6 +36,18 @@ const DEFAULT_MAX_CHARS = 100_000;
 const MIN_USER_MAX_CHARS = 1000;
 const MAX_USER_MAX_CHARS = 200_000;
 const MAX_PROMPT_LENGTH = 1000;
+
+/**
+ * 自描述 system-prompt 提示——cli 的 buildToolUsage 自动追加到 ## Tool Usage 段。
+ * preapproved hosts 直接拼自 WEB_FETCH_PREAPPROVED_HOSTS,与 builtin rule 同源。
+ */
+const WEB_FETCH_SYSTEM_PROMPT_HINTS: readonly string[] = [
+  "- Use `web_fetch` to read content from a URL the user provided or that you already know — this tool fetches a URL, it does not search the web",
+  "- Two modes: with `prompt`, a secondary LLM extracts only the requested information (preferred for large pages); without `prompt`, raw Markdown is returned (use for short or specific pages)",
+  `- Pre-approved hosts (no user confirmation needed): ${WEB_FETCH_PREAPPROVED_HOSTS.join(", ")}`,
+  "- Do not invent URLs — only fetch what the user gave you or what appeared in prior tool results",
+  "- If the user asks a question without a URL, do not call `web_fetch` with a guessed URL — ask for the URL or suggest a search engine",
+];
 
 export function createWebFetchTool(): ToolDefinition {
   return {
@@ -75,6 +88,7 @@ export function createWebFetchTool(): ToolDefinition {
     needsPermission: true,
     boundaries: [{ boundaryType: "network", access: "egress", dynamic: false }],
     permissionArgumentKey: "url",
+    systemPromptHints: WEB_FETCH_SYSTEM_PROMPT_HINTS,
     maxResultChars: MAX_RAW_CHARS,
 
     async call(input, context): Promise<ToolResult> {

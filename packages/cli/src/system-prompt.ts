@@ -134,6 +134,14 @@ function buildToolUsage(tools: ToolDefinition[]): string {
     lines.push("- For cron expressions, default timezone to Asia/Shanghai unless the user specifies otherwise");
     lines.push("- Always confirm the schedule with the user before creating (e.g. \"I'll set up a task to run daily at 8:00 AM\")");
   }
+  // 工具自描述提示——任何工具声明 systemPromptHints 都自动追加在此。
+  // 与 boundaries / permissionArgumentKey 同属"工具自描述"模式,新工具按此路径
+  // 自助接入 system-prompt 引导,无需修改本文件。
+  for (const tool of tools) {
+    if (tool.systemPromptHints) {
+      lines.push(...tool.systemPromptHints);
+    }
+  }
 
   // 通用原则（不依赖具体工具名）
   if (tools.some((t) => t.isParallelSafe)) {

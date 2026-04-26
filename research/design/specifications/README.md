@@ -18,6 +18,8 @@
 | 008 | Server Gateway | [server-gateway.md](server-gateway.md) | 待审阅 |
 | 009 | 对话模型（Conversation / SessionRuntime / Transcript） | [conversation-model.md](conversation-model.md) | 设计中 |
 | 010 | 上下文架构（场景参数化 + 多级压缩 + LLM 兜底 + Turn Digest） | [context-architecture.md](context-architecture.md) | 设计中 |
+| 011 | 网络出口原语（@zhixing/network） | [network-egress.md](network-egress.md) | 已实施 |
+| 012 | 内置工具集（@zhixing/tools-builtin） | [tools-builtin.md](tools-builtin.md) | 已实施 |
 
 ## 编写规范
 
