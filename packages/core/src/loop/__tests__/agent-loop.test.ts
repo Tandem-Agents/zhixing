@@ -1617,4 +1617,93 @@ describe("Agent Loop", () => {
       expect(firedIdx).toBeLessThan(runEndIdx);
     });
   });
+
+  // ──────────────────────────────────────
+  // 父子 abort 传播
+  // ──────────────────────────────────────
+
+  describe("父子 abort 传播", () => {
+    it("parentSignal 已 aborted → 立即退出 with abortReason.kind='parent-abort' + parentReason 链", async () => {
+      // 子 agent 启动时父已 aborted: controller 同步进入 aborted with parent-abort,
+      // 顶部 abort guard 不消耗任何 LLM call
+      const provider = mockTextProvider("never reached");
+      const parent = new AbortController();
+      parent.abort({ kind: "user-cancel", source: "esc", pressedAt: 100 });
+
+      const { result } = await drainAgentLoop(
+        baseParams(provider, { parentSignal: parent.signal }),
+      );
+
+      expect(result.reason).toBe("aborted");
+      if (result.reason === "aborted") {
+        expect(result.abortReason?.kind).toBe("parent-abort");
+        if (result.abortReason?.kind === "parent-abort") {
+          // parent reason 链路: 子能看到父的 user-cancel 原因
+          expect(result.abortReason.parentReason?.kind).toBe("user-cancel");
+        }
+      }
+      expect(provider.callCount).toBe(0);
+    });
+
+    it("parentSignal 中途触发 → 子 agent 终止 with parent-abort, 父 reason 透传", async () => {
+      // 第一轮工具调用中触发 parent abort, 验证 abort 在 stream 间隙被检测到
+      const parent = new AbortController();
+      const provider = new MockLLMProvider([
+        { toolCalls: [{ id: "tc1", name: "t", input: {} }] },
+        { text: "should never reach" },
+      ]);
+      const tool = makeTool("t", async () => {
+        // 工具内部触发 parent abort 模拟"父 agent 决定取消所有子"
+        parent.abort({ kind: "user-cancel", source: "ctrl-c", pressedAt: 200 });
+        return { content: "tool done" };
+      });
+
+      const { result } = await drainAgentLoop(
+        baseParams(provider, { tools: [tool], parentSignal: parent.signal }),
+      );
+
+      expect(result.reason).toBe("aborted");
+      if (result.reason === "aborted") {
+        expect(result.abortReason?.kind).toBe("parent-abort");
+        if (result.abortReason?.kind === "parent-abort") {
+          expect(result.abortReason.parentReason?.kind).toBe("user-cancel");
+        }
+      }
+    });
+
+    it("parentSignal + abortSignal 同时传, parentSignal 先触发 → kind='parent-abort' (first-wins)", async () => {
+      // 两类来源同时存在时, abort 来源 reason 由 first-wins 决定 (abortWithReason 幂等)
+      const provider = mockTextProvider("never reached");
+      const parent = new AbortController();
+      const ext = new AbortController();
+      parent.abort({ kind: "user-cancel", source: "esc", pressedAt: 50 });
+
+      const { result } = await drainAgentLoop(
+        baseParams(provider, { parentSignal: parent.signal, abortSignal: ext.signal }),
+      );
+
+      expect(result.reason).toBe("aborted");
+      if (result.reason === "aborted") {
+        // parent 已 aborted → controller 创建时同步进入 parent-abort, ext 后续 abort 不覆盖
+        expect(result.abortReason?.kind).toBe("parent-abort");
+      }
+    });
+
+    it("parentSignal + abortSignal 同时传, abortSignal 先触发 → kind='external' (first-wins)", async () => {
+      // 反向 first-wins: ext 先 abort → external reason 胜出, 之后 parent abort 不覆盖
+      const provider = mockTextProvider("never reached");
+      const parent = new AbortController();
+      const ext = new AbortController();
+      ext.abort();
+
+      const { result } = await drainAgentLoop(
+        baseParams(provider, { parentSignal: parent.signal, abortSignal: ext.signal }),
+      );
+
+      expect(result.reason).toBe("aborted");
+      if (result.reason === "aborted") {
+        expect(result.abortReason?.kind).toBe("external");
+      }
+    });
+  });
 });

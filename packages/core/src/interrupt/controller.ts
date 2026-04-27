@@ -24,16 +24,21 @@ import type { AbortReason } from "./types.js";
 const DEFAULT_MAX_LISTENERS = 50;
 
 /**
- * 创建 `AbortController`,自动:
- * - `setMaxListeners(50)` 绕开 EventEmitter 默认 10 listener 警告
- * - 合并多个外部 `AbortSignal`:任一 aborted → controller aborted with
- *   `{ kind: "external" }`
+ * 创建 `AbortController`,可选三类输入:
+ * - `parent`:父 signal,父 abort → 当前 controller 自动 abort with
+ *   `{ kind: "parent-abort" }`(子 agent 路径用)
+ * - `externalSignals`:外部多源 signal,任一 aborted → controller aborted with
+ *   `{ kind: "external" }`(scheduler timeout / 外部 SDK 等)
+ * - `maxListeners`:override `setMaxListeners` 默认值 50
+ *
+ * 三类输入可同时传入(子 agent 同时受父和外部 scheduler 限时)——任一触发都
+ * 让 controller abort,abortWithReason 幂等保证 first-wins 不覆盖原 reason。
  *
  * 返回原生 `AbortController`,对外接口零侵入。
  *
- * 已 aborted 的 ext signal 在构造时立即触发自身 abort——`addEventListener`
- * 在已 aborted signal 上不会被调用(EventTarget 标准),不同步处理会让
- * 后续依赖 abortFiredAt 的逻辑永远拿不到时间戳。
+ * 已 aborted 的 parent / ext signal 在构造时立即触发自身 abort——
+ * `addEventListener` 在已 aborted signal 上不会被调用(EventTarget 标准),
+ * 不同步处理会让后续依赖 abortFiredAt 的逻辑永远拿不到时间戳。
  *
  * 已知边界(暂不处理):`externalSignals` 上挂的 listener 用 `{ once: true }`,
  * 只在 `ext.abort()` 触发时自动 remove。若 ext signal 永不 abort 且生命周期长
@@ -44,17 +49,29 @@ const DEFAULT_MAX_LISTENERS = 50;
  * 独立设计 dispose / WeakRef 方案。
  */
 export function createInterruptController(opts?: {
+  readonly parent?: AbortSignal;
   readonly externalSignals?: readonly AbortSignal[];
   readonly maxListeners?: number;
 }): AbortController {
-  const controller = new AbortController();
-  setMaxListeners(opts?.maxListeners ?? DEFAULT_MAX_LISTENERS, controller.signal);
+  // parent 路径委托给 forkController(它内部也调本函数无 parent 创建子,然后
+  // 挂 onParentAbort listener,自带 setMaxListeners)。非 parent 路径走标准
+  // AbortController + setMaxListeners。
+  const controller = opts?.parent
+    ? forkController(opts.parent)
+    : new AbortController();
+
+  if (!opts?.parent) {
+    setMaxListeners(opts?.maxListeners ?? DEFAULT_MAX_LISTENERS, controller.signal);
+  } else if (opts.maxListeners !== undefined) {
+    // fork 路径已默认 setMaxListeners(50);仅当 caller 显式 override 才再设
+    setMaxListeners(opts.maxListeners, controller.signal);
+  }
 
   for (const ext of opts?.externalSignals ?? []) {
-    // 一旦 controller 已 aborted(被本轮或上一轮迭代触发),后续 ext 上不再挂
-    // listener:挂上去就是 dead listener——controller 已 aborted,onExtAbort 触发
-    // 只会走 abortWithReason 的 no-op 分支;但 closure 引用 controller 让它无法
-    // 被 GC,直到 ext signal 自己 abort(once:true 才移除)。
+    // 一旦 controller 已 aborted(被本轮或上一轮迭代触发,或 parent 已 aborted),
+    // 后续 ext 上不再挂 listener:挂上去就是 dead listener——controller 已 aborted,
+    // onExtAbort 触发只会走 abortWithReason 的 no-op 分支;但 closure 引用
+    // controller 让它无法被 GC,直到 ext signal 自己 abort(once:true 才移除)。
     if (controller.signal.aborted) break;
 
     if (ext.aborted) {

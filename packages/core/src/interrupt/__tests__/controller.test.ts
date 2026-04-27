@@ -75,6 +75,67 @@ describe("createInterruptController", () => {
     expect(getEventListeners(live3.signal, "abort").length).toBe(before3);
   });
 
+  it("parent signal abort → 创建的 controller 自动 abort with kind=parent-abort", () => {
+    const parent = createInterruptController();
+    const c = createInterruptController({ parent: parent.signal });
+    expect(c.signal.aborted).toBe(false);
+
+    abortWithReason(parent, { kind: "user-cancel", source: "esc", pressedAt: 100 });
+    expect(c.signal.aborted).toBe(true);
+
+    const r = getAbortReason(c.signal);
+    expect(r?.kind).toBe("parent-abort");
+    if (r?.kind === "parent-abort") {
+      expect(r.parentReason?.kind).toBe("user-cancel");
+    }
+  });
+
+  it("parent 已 aborted → 创建时立即 aborted", () => {
+    const parent = createInterruptController();
+    abortWithReason(parent, { kind: "external", origin: "scheduler" });
+
+    const c = createInterruptController({ parent: parent.signal });
+    expect(c.signal.aborted).toBe(true);
+    expect(getAbortReason(c.signal)?.kind).toBe("parent-abort");
+  });
+
+  it("parent + externalSignals 同时传:任一触发都让子 abort", () => {
+    const parent = createInterruptController();
+    const ext = new AbortController();
+    const c = createInterruptController({
+      parent: parent.signal,
+      externalSignals: [ext.signal],
+    });
+    expect(c.signal.aborted).toBe(false);
+
+    // ext 先触发 → external reason 胜出 (first-wins, abortWithReason 幂等)
+    ext.abort();
+    expect(c.signal.aborted).toBe(true);
+    expect(getAbortReason(c.signal)?.kind).toBe("external");
+
+    // 后续 parent 触发不覆盖原 reason
+    abortWithReason(parent, { kind: "user-cancel", source: "esc", pressedAt: 200 });
+    expect(getAbortReason(c.signal)?.kind).toBe("external");
+  });
+
+  it("parent 已 aborted + externalSignals 后续 → 不挂 dead listener", () => {
+    const parent = createInterruptController();
+    abortWithReason(parent, { kind: "external", origin: "scheduler" });
+
+    const live = new AbortController();
+    const before = getEventListeners(live.signal, "abort").length;
+
+    const c = createInterruptController({
+      parent: parent.signal,
+      externalSignals: [live.signal],
+    });
+
+    // parent 已 aborted → c 同步 aborted with parent-abort;后续 ext 不挂 listener
+    expect(c.signal.aborted).toBe(true);
+    expect(getAbortReason(c.signal)?.kind).toBe("parent-abort");
+    expect(getEventListeners(live.signal, "abort").length).toBe(before);
+  });
+
   it("setMaxListeners(50) 默认生效——挂 11 个 listener 不报警", () => {
     // 默认 EventEmitter 是 10,超过会触发 MaxListenersExceededWarning。
     // 这里通过捕获 process warning 间接验证;重点是不抛错。

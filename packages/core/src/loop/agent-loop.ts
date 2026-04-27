@@ -89,9 +89,14 @@ export async function* runAgentLoop(
   const startTime = Date.now();
 
   // 把外部 abortSignal 当作"一个可能的 abort 源"汇入 controller，loop 内部一律走
-  // controller.signal：统一抽象出 abort 写权限（后续里程碑的看门狗需要 controller.abort()）
+  // controller.signal：统一抽象出 abort 写权限（看门狗 / 子 agent fork 都通过 controller 触发）
   // 与读路径（下游 Provider / 工具 / contextManager 接收 controller.signal，完全透明）。
+  //
+  // parentSignal: 子 agent 路径用,父 abort → 子 controller 自动 abort with parent-abort kind。
+  // abortSignal: 外部多源 signal (scheduler / 外部 SDK), 走 external kind。
+  // 两者同时传入合理 (子 agent 同时受父和外部 scheduler 限时), 任一触发让 controller abort。
   const controller = createInterruptController({
+    parent: params.parentSignal,
     externalSignals: params.abortSignal ? [params.abortSignal] : [],
   });
 

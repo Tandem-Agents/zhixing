@@ -44,6 +44,21 @@ export interface AgentLoopParams {
   workingDirectory?: string;
   /** 中止信号 */
   abortSignal?: AbortSignal;
+  /**
+   * 父 agent 的 abort signal —— 子 agent 路径用,父 abort → 子 agent loop 的 controller
+   * 自动 abort with `{ kind: "parent-abort" }` (含 parentReason 链路),子 abort 不影响父。
+   *
+   * 接 AbortSignal 而非 AbortController:
+   * - 与"signal 跨边界传递、controller 仅在创建/触发处持有"命名约定一致
+   * - 避免给子 agent 调用方"主动 abort 父"的越权能力(子需要 abort 自己时用自己的 controller)
+   *
+   * 与 abortSignal 的区别:abortSignal 是外部多源 signal (scheduler timeout / 外部 SDK 等),
+   * 触发时走 external reason;parentSignal 触发时走 parent-abort reason,诊断时可区分中断来源。
+   * 两者可同时传入 (子 agent 同时受父和外部 scheduler 限时,任一触发都让子 abort)。
+   *
+   * 缺省时(REPL / 顶层 agent / 单次 runOnce 等无父场景)创建独立 controller。
+   */
+  parentSignal?: AbortSignal;
   /** 事件总线（可观测性） */
   eventBus?: IEventBus<AgentEventMap>;
   /** 覆盖默认依赖（用于测试） */
