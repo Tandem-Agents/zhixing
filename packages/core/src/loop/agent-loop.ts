@@ -237,6 +237,7 @@ export async function* runAgentLoop(
       if (state.turnCount >= maxTurns) {
         return await finalizeRun({
           reason: "max_turns",
+          maxTurns,
           usage: state.totalUsage,
         });
       }

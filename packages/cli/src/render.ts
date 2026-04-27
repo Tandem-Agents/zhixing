@@ -14,9 +14,12 @@
 
 import chalk from "chalk";
 import {
+  type AbortReason,
+  type AgentEventMap,
   type AgentResult,
   type AgentYield,
   type ContextBudget,
+  type IEventBus,
   getAgentIdentity,
 } from "@zhixing/core";
 
@@ -24,9 +27,13 @@ import {
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const SPINNER_INTERVAL_MS = 80;
+// 主文本 + esc 中断提示: 让用户在 agent 跑时看到中断键位 (替代独立状态条,
+// 避免与 typeahead-input 在 idle 时的输入区冲突)
 const SPINNER_TEXT = "思考中...";
-// 清除宽度足够覆盖 spinner 行（CJK 字符占 2 列，需要比 .length 更大的值）
-const SPINNER_CLEAR_WIDTH = 30;
+const SPINNER_HINT = "esc 中断";
+// 清除宽度足够覆盖 spinner 行 + 提示 (CJK 字符占 2 列, 需要比 .length 更大的值);
+// "思考中... · esc 中断" 约 22 列, 留余量到 50
+const SPINNER_CLEAR_WIDTH = 50;
 
 // ─── 有状态渲染器 ───
 
@@ -53,7 +60,7 @@ export function createRenderer(): Renderer {
     timer = setInterval(() => {
       const char = SPINNER_FRAMES[frame++ % SPINNER_FRAMES.length]!;
       process.stdout.write(
-        `\r  ${chalk.cyan(char)} ${chalk.dim(SPINNER_TEXT)}`,
+        `\r  ${chalk.cyan(char)} ${chalk.dim(SPINNER_TEXT)} ${chalk.dim("·")} ${chalk.dim(SPINNER_HINT)}`,
       );
     }, SPINNER_INTERVAL_MS);
   }
@@ -140,23 +147,96 @@ export function createRenderer(): Renderer {
   };
 }
 
+// ─── 中断诊断文本 ───
+
+/**
+ * 把 AbortReason 渲染为一行用户可读的诊断文本。
+ *
+ * 用于:
+ * - renderSummary 在 abort 路径显示差异化文本(reason 来自 AgentResult.abortReason)
+ * - setupInterruptRendering 在 interrupt:fired 事件触发时显示中断原因
+ *
+ * `null` / `undefined` 路径对应"外部 signal 直接 abort 但无类型化 reason"
+ * (裸 AbortController.abort() / 非本模块识别的 reason),返回兜底文本"interrupted"
+ * 让用户知道发生了中断,不暴露内部 null。
+ */
+export function formatAbortReasonSummary(
+  reason: AbortReason | null | undefined,
+): string {
+  if (!reason) return "interrupted";
+  switch (reason.kind) {
+    case "user-cancel": {
+      // ctrl-c 是 source 字段值, 显示用 "ctrl+c" 符合用户终端键位惯例
+      const label = reason.source === "ctrl-c" ? "ctrl+c" : reason.source;
+      return `interrupted by user (${label})`;
+    }
+    case "idle-timeout": {
+      const seconds = Math.floor(reason.timeoutMs / 1000);
+      return `interrupted: stream idle for ${seconds}s (${reason.chunksReceived} chunks received)`;
+    }
+    case "parent-abort": {
+      // 子 agent 收到父 abort: 透传父 reason kind 让用户追溯到根因 (esc / scheduler / ...)
+      const parent = reason.parentReason?.kind ?? "unknown";
+      return `interrupted by parent (${parent})`;
+    }
+    case "external": {
+      // origin 由调用方在创建 ext signal 时标注 (如 "scheduler-task-timeout"),
+      // 缺省时仅显示通用 "external signal"
+      return `interrupted by external signal${reason.origin ? ` (${reason.origin})` : ""}`;
+    }
+  }
+}
+
 // ─── 运行结果摘要 ───
 
 /**
  * 渐进式每轮摘要行。
  *
- * 信息密度随上下文使用率递增：
- *   < 50%  安静期：只显示耗时
- *   50~75% 感知期：耗时 + 上下文百分比（dim）
- *   75~85% 警示期：耗时 + 黄色警告百分比
- *   > 85%  紧急期：耗时 + 红色警告百分比
+ * 终止类型差异化:
+ *   - completed:    时间 + 上下文(渐进密度)
+ *   - aborted:      "interrupted by ..."(reason 差异化文本) + 时间
+ *   - max_turns:    "max turns reached (N)"(不读 abortReason —— 与 abort 体系平行)
+ *   - error:        "error: <type> - <message>" + 时间
+ *
+ * 上下文信息密度随使用率递增(仅 completed 路径):
+ *   < 50%  安静期: 只显示耗时
+ *   50~75% 感知期: 耗时 + 上下文百分比(dim)
+ *   75~85% 警示期: 耗时 + 黄色警告百分比
+ *   > 85%  紧急期: 耗时 + 红色警告百分比
  */
 export function renderSummary(
-  _result: AgentResult,
+  result: AgentResult,
   durationMs: number,
   budget?: ContextBudget,
 ): void {
   const duration = (durationMs / 1000).toFixed(1);
+
+  // abort 路径: reason 差异化文本(yellow), 不混入 budget 显示
+  if (result.reason === "aborted") {
+    const summary = formatAbortReasonSummary(result.abortReason);
+    console.log(`\n${chalk.dim("─")} ${chalk.yellow(summary)} ${chalk.dim(`· ${duration}s`)}`);
+    return;
+  }
+
+  // max_turns 路径: 显示上限值 (来自 result 自描述, 单一事实源)
+  // 与 abort 体系平行 —— "达到上限" vs "被中断" 语义独立, 不读 abortReason
+  if (result.reason === "max_turns") {
+    console.log(
+      `\n${chalk.dim("─")} ${chalk.yellow(`max turns reached (${result.maxTurns})`)} ${chalk.dim(`· ${duration}s`)}`,
+    );
+    return;
+  }
+
+  // error 路径: 错误类型 + 消息
+  if (result.reason === "error") {
+    const errType = result.error.type ?? "unknown";
+    console.log(
+      `\n${chalk.dim("─")} ${chalk.red(`error: ${errType}`)} ${chalk.dim(`· ${duration}s`)}`,
+    );
+    return;
+  }
+
+  // completed 路径: 渐进式信息密度
   const parts: string[] = [chalk.dim(`${duration}s`)];
 
   if (budget) {
@@ -182,6 +262,102 @@ export function renderSummary(
   }
 
   console.log(`\n${chalk.dim("─")} ${parts.join(chalk.dim(" · "))}`);
+}
+
+// ─── 中断 EventBus 渲染编排 ───
+
+/**
+ * 中断渲染装载句柄。run 结束时调 dispose 卸载 listener,避免跨 run 累积。
+ */
+export interface InterruptRenderingHandle {
+  dispose(): void;
+}
+
+/**
+ * 装载 EventBus 中断事件 → 终端可视反馈:
+ *
+ * - `interrupt:warn` → 启动每秒倒计时 ticker, 输出 "stream slow, will auto-cancel in Ns..."。
+ *   倒计时来源:`Date.now() + (timeoutMs - elapsedMs)` 锚定 watchdog 的 abort 截止时间;
+ *   用 console.warn 单行输出(每秒一行),非 \r 原地刷新——跨平台稳定 + 与 watchdog 自身日志
+ *   风格一致, 用户能在终端 grep/scroll 历史警告记录。
+ *
+ * - `llm:stream_event` → 清理 ticker (chunk 到达 = stream 恢复活跃, watchdog 已 reset 内部
+ *   timer, 屏幕侧也应隐藏倒计时避免误导)。
+ *
+ * - `interrupt:fired` → 清理 ticker + 输出 dim `[interrupted]` 标记 + reason summary。
+ *   `[interrupted]` 走 stdout (接在 LLM 文本之后形成视觉连续);summary 走 console.warn
+ *   (与 watchdog 警告同 stream 便于诊断)。
+ *
+ * - `agent:run_end` → 兜底清理 ticker (即使 fired 在 abort 路径外不发,run_end 一定发)。
+ *
+ * 返回 dispose 函数, 调用方在 run() 结束 finally 调一次, 确保 listener 不跨 run 累积。
+ */
+export function setupInterruptRendering(
+  eventBus: IEventBus<AgentEventMap>,
+  pauseUI: () => void,
+): InterruptRenderingHandle {
+  let warnTicker: ReturnType<typeof setInterval> | null = null;
+  let warnDeadline: number | null = null;
+
+  const clearWarnTicker = (): void => {
+    if (warnTicker !== null) {
+      clearInterval(warnTicker);
+      warnTicker = null;
+      warnDeadline = null;
+    }
+  };
+
+  const onWarn = (e: AgentEventMap["interrupt:warn"]) => {
+    clearWarnTicker();
+    // deadline 锚定 watchdog 的 abort 触发时刻: e.timeoutMs - e.elapsedMs 是距离 abort
+    // 还剩多久 (Date.now 在 fake timer 测试中也被 vitest mock, 行为可预测)
+    warnDeadline = Date.now() + (e.timeoutMs - e.elapsedMs);
+    const tick = () => {
+      if (warnDeadline === null) return;
+      const remaining = Math.max(0, Math.ceil((warnDeadline - Date.now()) / 1000));
+      pauseUI();
+      console.warn(
+        chalk.yellow(`  ⚠ stream slow, will auto-cancel in ${remaining}s...`),
+      );
+      if (remaining <= 0) clearWarnTicker();
+    };
+    tick(); // 立即输出第一行, 不等 1s
+    warnTicker = setInterval(tick, 1000);
+  };
+
+  const onStreamEvent = () => {
+    // chunk 到达 = stream 恢复活跃: watchdog 内部已 reset timer, 屏幕也应隐藏倒计时
+    clearWarnTicker();
+  };
+
+  const onFired = (e: AgentEventMap["interrupt:fired"]) => {
+    clearWarnTicker();
+    pauseUI();
+    // dim [interrupted] 接在 LLM 文本之后, 形成视觉连续: 用户看到 LLM 输出戛然而止 + dim 标记
+    // 标识 partial 状态。stdout 走 (与 LLM text_delta 同 stream), 不混入 stderr 警告
+    process.stdout.write(chalk.dim("\n[interrupted]\n"));
+    const summary = formatAbortReasonSummary(e.reason);
+    console.warn(chalk.yellow(`  ⚠ ${summary}`));
+  };
+
+  const onRunEnd = () => {
+    clearWarnTicker();
+  };
+
+  eventBus.on("interrupt:warn", onWarn);
+  eventBus.on("llm:stream_event", onStreamEvent);
+  eventBus.on("interrupt:fired", onFired);
+  eventBus.on("agent:run_end", onRunEnd);
+
+  return {
+    dispose() {
+      clearWarnTicker();
+      eventBus.off("interrupt:warn", onWarn);
+      eventBus.off("llm:stream_event", onStreamEvent);
+      eventBus.off("interrupt:fired", onFired);
+      eventBus.off("agent:run_end", onRunEnd);
+    },
+  };
 }
 
 // ─── 重试事件渲染 ───

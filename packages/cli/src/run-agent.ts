@@ -79,6 +79,7 @@ import {
   renderBudgetStatus,
   renderCompactStart,
   renderCompactEnd,
+  setupInterruptRendering,
 } from "./render.js";
 import { subscribeCompactAccumulator } from "./compact-accumulator.js";
 import { createCompactionFlush } from "./compaction-llm.js";
@@ -487,6 +488,10 @@ export async function createAgentRuntime(options: {
         renderCompactEnd(info);
       });
 
+      // 中断 EventBus 渲染 — 装载 warn / fired / run_end 订阅, run 结束 finally dispose
+      // 避免 listener 跨 run 累积。与 accumulator 同模式 (per-run 装载 + 自动卸载)。
+      const interruptRendering = setupInterruptRendering(eventBus, pauseUI);
+
      try {
       // 根据最后一条用户消息检索匹配的技能 + 反思提示
       const enrichedContext = await enrichContext(
@@ -668,6 +673,9 @@ export async function createAgentRuntime(options: {
        // 保证 accumulator 订阅被取消 —— 即使 preFlight throw / agent-loop throw /
        // 调用方中断 gen（触发 finally in for-of caller），listener 都能正确摘除。
        accumulator.dispose();
+       // 中断渲染同样要 dispose: 取消 warn ticker + 移除 4 个事件 listener,
+       // 防止 listener 跨 run 累积导致内存泄漏 / 重复渲染
+       interruptRendering.dispose();
      }
     },
   };

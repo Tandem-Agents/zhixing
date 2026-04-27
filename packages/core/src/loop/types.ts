@@ -123,7 +123,16 @@ export interface LoopState {
 
 export type AgentResult =
   | { readonly reason: "completed"; readonly message: Message; readonly usage: TokenUsage }
-  | { readonly reason: "max_turns"; readonly usage: TokenUsage }
+  | {
+      readonly reason: "max_turns";
+      /**
+       * 触发上限的具体 turn 数 (来自 AgentLoopParams.maxTurns 或默认 100)。
+       * 让 result 自描述, 调用方 (REPL renderSummary 等) 显示 "max turns reached (N)"
+       * 时直接读, 无需重复传 maxTurns 参数 / 维持单一事实源。
+       */
+      readonly maxTurns: number;
+      readonly usage: TokenUsage;
+    }
   | {
       readonly reason: "aborted";
       readonly usage: TokenUsage;
