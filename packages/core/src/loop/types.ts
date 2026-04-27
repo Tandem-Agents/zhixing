@@ -23,6 +23,7 @@ import type { Message } from "../types/messages.js";
 import type { ToolDefinition, ToolExecutionContext, ToolResult } from "../types/tools.js";
 import type { ContextManagerHook, ContextBudget } from "../context/types.js";
 import type { CompactMarker, Turn } from "../transcript/types.js";
+import type { AbortReason } from "../interrupt/types.js";
 
 // ─── Agent Loop 参数 ───
 
@@ -96,7 +97,24 @@ export interface LoopState {
 export type AgentResult =
   | { readonly reason: "completed"; readonly message: Message; readonly usage: TokenUsage }
   | { readonly reason: "max_turns"; readonly usage: TokenUsage }
-  | { readonly reason: "aborted"; readonly usage: TokenUsage }
+  | {
+      readonly reason: "aborted";
+      readonly usage: TokenUsage;
+      /**
+       * 类型化中断原因。外部裸 abort()(无 reason 或非本模块识别的 reason)留 undefined,
+       * 下游做"未知中断源"分支处理(REPL renderSummary 兜底文案)。
+       * 仅出现在 reason="aborted" 分支——max_turns / completed / error 不携带,避免
+       * 调用方误以为它们也能读 abortReason。
+       */
+      readonly abortReason?: AbortReason;
+      /**
+       * abort 触发到 emit run_end 之间的延迟(ms)。abort listener 注册前已 aborted 的
+       * 防御分支未生效时为 undefined。订阅方做 P95 SLO 监控应使用
+       * `loopFrameworkDelay = exitDelayMs - toolGraceMs`(后者来自 InterruptFiredEvent)
+       * 隔离工具自身 abort 等待消耗。
+       */
+      readonly exitDelayMs?: number;
+    }
   | { readonly reason: "error"; readonly error: AgentError; readonly usage: TokenUsage };
 
 // ─── 继续原因 ───

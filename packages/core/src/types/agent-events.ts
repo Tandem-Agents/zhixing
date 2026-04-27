@@ -22,6 +22,7 @@
 import type { AgentErrorType } from "./errors.js";
 import type { StreamEvent, StopReason, TokenUsage } from "./llm.js";
 import type { CompactStrategyContribution } from "../context/types.js";
+import type { AbortReason } from "../interrupt/types.js";
 
 /**
  * Agent Loop 终止原因。
@@ -29,6 +30,63 @@ import type { CompactStrategyContribution } from "../context/types.js";
  * AgentRunEndReason 是整个循环的终止原因。
  */
 export type AgentRunEndReason = "completed" | "max_turns" | "aborted" | "error";
+
+/**
+ * 看门狗预警事件 —— stream chunk 间隔超过 `warnThresholdRatio * idleTimeoutMs`
+ * 时由看门狗内部 emit。kind 用 "idle-timeout-warn" 而非 "idle-timeout",和
+ * abort 触发后的 IdleTimeoutReason.kind 区分,避免订阅方误以为已经 abort。
+ *
+ * 仅本规格的看门狗(后续里程碑)产出;早期里程碑里类型已定义但 emit 路径暂缺。
+ */
+export interface InterruptWarnEvent {
+  readonly kind: "idle-timeout-warn";
+  /** 距上次 chunk 经过时间(ms) */
+  readonly elapsedMs: number;
+  /** 即将触发的 idle timeout 阈值(ms) */
+  readonly timeoutMs: number;
+  /** 触发预警时已收到的 chunk 数 */
+  readonly chunksReceived: number;
+}
+
+/**
+ * 中断触发事件 —— 由 emitRunEnd 在 abort 路径上唯一调一次,严格在 agent:run_end 之前发出。
+ *
+ * 设计要点:
+ * - 单点发射:所有 abort 退出分支只调 emitRunEnd,fired 收敛于此,顺序自动正确、新增分支零负担
+ * - exitDelayMs 直接从 AgentResult.exitDelayMs 透传,订阅方零依赖 RunResult 即可监控延迟
+ * - reason 可为 null 表示外部裸 abort()(无类型化 reason),不强行编造默认 kind
+ * - interruptedTurnIndex 与 turn_complete.turnCount 严格区分:前者是"被中断 turn 0-indexed",
+ *   后者是"已完成 turn 数 1-indexed"
+ */
+export interface InterruptFiredEvent {
+  /**
+   * 类型化中断原因。外部裸 abort() / 非本模块识别的 reason 为 null,
+   * 下游做"未知中断源"分支处理。
+   */
+  readonly reason: AbortReason | null;
+  /**
+   * 被中断的 turn 序号(0-indexed),等于 abort 触发瞬间的 state.turnCount。
+   * 与 turn_complete.turnCount(已完成 turn 数,1-indexed)语义不同。
+   */
+  readonly interruptedTurnIndex: number;
+  /**
+   * abort 触发到 emit run_end 之间的总延迟(ms)。本字段是"总延迟",**包含工具自身 abort 等待消耗**。
+   * 监控 P95 ≤ 200ms 的 loop 框架 SLO 时,应使用 `loopFrameworkDelay = exitDelayMs - toolGraceMs`,
+   * 隔离 grace 类工具(如 Bash 1s SIGTERM grace)的合规等待,避免误判 SLO 违反。
+   *
+   * 未记录 abortFiredAt 时(防御分支未生效)为 undefined;正常路径恒有值。
+   */
+  readonly exitDelayMs?: number;
+  /**
+   * abort 触发瞬间正在执行的工具的 abort 等待消耗(ms)。
+   * - abort 发生在工具 await 期间(响应抛 AbortError 或正常 return partial)→ > 0
+   * - abort 发生在工具间隙、LLM 阶段、turn 边界、contextManager 阶段 → 0
+   *
+   * 用途:订阅方做 P95 SLO 监控用 `exitDelayMs - toolGraceMs` 隔离 loop 框架延迟与
+   * 工具自身延迟,避免合规等待被误统计为框架性能问题。
+   */
+  readonly toolGraceMs: number;
+}
 
 export type AgentEventMap = {
   // ─── Agent 生命周期 ───
@@ -152,6 +210,19 @@ export type AgentEventMap = {
     actual: number;
     newRatio: number;
   };
+
+  // ─── 中断 ───
+  //
+  // emit 协议:
+  // - interrupt:warn 由看门狗内部 emit(后续里程碑接入)
+  // - interrupt:fired 由 emitRunEnd 在 abort 退出路径上唯一调一次,严格在 agent:run_end 之前
+  // - abort listener 内只做同步操作(记 abortFiredAt),不调用 emit——避免 fire-and-forget 时序错乱
+  // - 任何调用 abortWithReason 的方(看门狗 / KeyboardSource / SignalSource / 父 agent fork)都不自行 emit fired
+  // - agent-loop 启动前的 abort(pre-flight 路径)不 emit 任何 interrupt / run_end 事件——
+  //   pre-flight 失败语义是"本次 run 未真启动",订阅方观察到的事件流应保持完整缺失
+
+  "interrupt:warn": InterruptWarnEvent;
+  "interrupt:fired": InterruptFiredEvent;
 
   // ─── 容错 / 重试 ───
 

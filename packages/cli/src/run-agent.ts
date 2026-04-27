@@ -49,6 +49,7 @@ import {
   runAgentLoop,
   TurnContextInjector,
   TimeProvider,
+  getAbortReason,
 } from "@zhixing/core";
 import {
   createProviderRoles,
@@ -551,9 +552,17 @@ export async function createAgentRuntime(options: {
             usage: emptyUsage(),
           });
         case "aborted":
+          // pre-flight 阶段 agent-loop 未启动 —— 不 emit 任何 EventBus 事件
+          // (订阅方观察的事件流应是"本次 run 未真启动":无 run_start / fired / run_end);
+          // emit fired 但缺 run_end 会成为孤儿事件破坏中断事件单向蕴含语义。
+          // 仅在 RunResult.agentResult 上同步携带 abortReason,让 REPL renderSummary 能按
+          // 错误码分支显示差异化文本(裸 abort 无类型化 reason 时 fallback 到 { kind: "external" })。
+          // exitDelayMs 不填——pre-flight 阶段无 abort listener 无法测量。
           return buildPreFlightError({
             reason: "aborted",
             usage: emptyUsage(),
+            abortReason: (params.abortSignal && getAbortReason(params.abortSignal))
+              ?? { kind: "external" },
           });
         case "ok":
           if (preFlight.output.modified) {

@@ -1109,4 +1109,321 @@ describe("Agent Loop", () => {
       expect(yields.some((y) => y.type === "assistant_message")).toBe(true);
     });
   });
+
+  // ──────────────────────────────────────
+  // 中断 (abortReason / exitDelayMs / emit fired)
+  // ──────────────────────────────────────
+
+  describe("中断", () => {
+    it("ext signal 已 aborted (defense) → AgentResult.aborted 携带 abortReason.kind='external' + exitDelayMs ≥ 0", async () => {
+      // 验证两件事：
+      // 1. abortReason.kind="external" —— createInterruptController 把外部 abort 映射为 external
+      // 2. exitDelayMs ≥ 0 —— 已 aborted ext signal 场景下 abortFiredAt 仍正确记录
+      //    (防御 EventTarget 标准:已 aborted signal 上 addEventListener 不触发)
+      const provider = mockTextProvider("never reached");
+      const ctrl = new AbortController();
+      ctrl.abort();
+
+      const { result } = await drainAgentLoop(
+        baseParams(provider, { abortSignal: ctrl.signal }),
+      );
+
+      expect(result.reason).toBe("aborted");
+      if (result.reason === "aborted") {
+        expect(result.abortReason?.kind).toBe("external");
+        expect(typeof result.exitDelayMs).toBe("number");
+        expect(result.exitDelayMs).toBeGreaterThanOrEqual(0);
+      }
+      expect(provider.callCount).toBe(0);
+    });
+
+    it("emit 顺序: agent:run_start → interrupt:fired → agent:run_end, fired 单次", async () => {
+      // emit fired 收敛在 emitRunEnd 单点;严格在 run_end 之前(单向蕴含,非数量对等)
+      const provider = mockTextProvider("ignored");
+      const ctrl = new AbortController();
+      ctrl.abort();
+
+      const eventBus = new EventBus<AgentEventMap>();
+      const order: string[] = [];
+      eventBus.on("agent:run_start", () => { order.push("run_start"); });
+      eventBus.on("interrupt:fired", () => { order.push("interrupt:fired"); });
+      eventBus.on("agent:run_end", () => { order.push("run_end"); });
+
+      await drainAgentLoop(
+        baseParams(provider, { abortSignal: ctrl.signal, eventBus }),
+      );
+
+      expect(order).toEqual(["run_start", "interrupt:fired", "run_end"]);
+    });
+
+    it("interrupt:fired payload: reason 类型化, exitDelayMs 与 AgentResult 一致, toolGraceMs=0, interruptedTurnIndex=0", async () => {
+      // payload 字段一致性:exitDelayMs 由同一 const 派生 → AgentResult 与 EventBus 完全相同;
+      // 订阅方不依赖 RunResult 也能拿到精准延迟;P95 SLO 监控用 exitDelayMs - toolGraceMs 隔离 loop 框架延迟
+      const provider = mockTextProvider("ignored");
+      const ctrl = new AbortController();
+      ctrl.abort();
+
+      const eventBus = new EventBus<AgentEventMap>();
+      let fired: AgentEventMap["interrupt:fired"] | undefined;
+      eventBus.on("interrupt:fired", (e) => { fired = e; });
+
+      const { result } = await drainAgentLoop(
+        baseParams(provider, { abortSignal: ctrl.signal, eventBus }),
+      );
+
+      expect(result.reason).toBe("aborted");
+      expect(fired).toBeDefined();
+      if (result.reason === "aborted" && fired) {
+        expect(fired.reason?.kind).toBe("external");
+        expect(fired.exitDelayMs).toBe(result.exitDelayMs);
+        expect(typeof fired.exitDelayMs).toBe("number");
+        expect(fired.exitDelayMs).toBeGreaterThanOrEqual(0);
+        expect(fired.toolGraceMs).toBe(0);
+        // abort 在 turn 0 之前触发 → interruptedTurnIndex = 0
+        expect(fired.interruptedTurnIndex).toBe(0);
+      }
+    });
+
+    it("ext signal 中途 abort → interruptedTurnIndex 等于已完成 turn 数 (state.turnCount)", async () => {
+      // turn 1 中 tool 触发 abort, 后续 turn 1 走完 contextManager(无 contextManager → ok),
+      // state 推进到 turnCount=1, 下次迭代顶 abort guard 触发 → interruptedTurnIndex=1
+      // 验证 interruptedTurnIndex 取 state.turnCount(0-indexed)而不是 newTurnCount(1-indexed 已完成数)
+      const ctrl = new AbortController();
+      const provider = new MockLLMProvider([
+        { toolCalls: [{ id: "tc1", name: "t", input: {} }] },
+        { text: "should never reach" },
+      ]);
+      const tool = makeTool("t", async () => {
+        ctrl.abort();
+        return { content: "ok" };
+      });
+
+      const eventBus = new EventBus<AgentEventMap>();
+      let fired: AgentEventMap["interrupt:fired"] | undefined;
+      eventBus.on("interrupt:fired", (e) => { fired = e; });
+
+      const { result } = await drainAgentLoop(
+        baseParams(provider, {
+          tools: [tool],
+          abortSignal: ctrl.signal,
+          eventBus,
+        }),
+      );
+
+      expect(result.reason).toBe("aborted");
+      expect(fired?.interruptedTurnIndex).toBe(1);
+    });
+
+    it("max_turns 路径不 emit fired (与 abort 体系平行)", async () => {
+      // max_turns 是"达到上限"的内部限制,不携带 abortReason、不 emit interrupt:fired;
+      // 与 abort 严格分体系,REPL 渲染走"max turns reached"而非"interrupted"
+      const provider = new MockLLMProvider([
+        { toolCalls: [{ id: "tc1", name: "t", input: {} }] },
+        { toolCalls: [{ id: "tc2", name: "t", input: {} }] },
+        { text: "should never reach" },
+      ]);
+
+      const eventBus = new EventBus<AgentEventMap>();
+      let firedCount = 0;
+      eventBus.on("interrupt:fired", () => { firedCount++; });
+
+      const { result } = await drainAgentLoop(
+        baseParams(provider, {
+          tools: [makeTool("t")],
+          maxTurns: 2,
+          eventBus,
+        }),
+      );
+
+      expect(result.reason).toBe("max_turns");
+      expect(firedCount).toBe(0);
+    });
+
+    it("abort 与 max_turns 同时满足 → abort 优先 (guard 顺序)", async () => {
+      // turn 1 中 tool 触发 abort, 完成后 state.turnCount=1=maxTurns;
+      // 下次迭代顶 abort guard 优先于 max_turns guard 命中 → reason="aborted"
+      // 验证 guard 顺序调换:abort 体现用户/外部明确意图,max_turns 是内部限制,
+      // 同时满足时 abort 胜出(与 termination.ts "abort 优先于 context_overflow" 哲学对称)
+      const ctrl = new AbortController();
+      const provider = new MockLLMProvider([
+        { toolCalls: [{ id: "tc1", name: "t", input: {} }] },
+        { text: "should never reach" },
+      ]);
+      const tool = makeTool("t", async () => {
+        ctrl.abort();
+        return { content: "ok" };
+      });
+
+      const { result } = await drainAgentLoop(
+        baseParams(provider, {
+          tools: [tool],
+          maxTurns: 1,
+          abortSignal: ctrl.signal,
+        }),
+      );
+
+      expect(result.reason).toBe("aborted");
+      expect(provider.callCount).toBe(1);
+    });
+
+    it("contextManager 触发的 abort → AgentResult.abortReason 类型化 (非 undefined)", async () => {
+      // 同 P0-α 的 abort+failed 场景, 但额外验证新行为:abortReason 必须类型化,
+      // 否则 REPL renderSummary 走"未知中断"兜底文案、破坏差异化 UX
+      const ctrl = new AbortController();
+      const provider = new MockLLMProvider([
+        { toolCalls: [{ id: "tc1", name: "t", input: {} }] },
+        { text: "never" },
+      ]);
+      const onTurnComplete = vi.fn<
+        [import("../../context/types.js").ContextManagerInput],
+        Promise<{ messages: import("../../types/messages.js").Message[]; modified: boolean; failed?: boolean }>
+      >(async (input) => {
+        ctrl.abort();
+        return { messages: [...input.messages], modified: false, failed: true };
+      });
+
+      const eventBus = new EventBus<AgentEventMap>();
+      let fired: AgentEventMap["interrupt:fired"] | undefined;
+      eventBus.on("interrupt:fired", (e) => { fired = e; });
+
+      const { result } = await drainAgentLoop(
+        baseParams(provider, {
+          tools: [makeTool("t")],
+          contextManager: { onTurnComplete },
+          abortSignal: ctrl.signal,
+          eventBus,
+        }),
+      );
+
+      expect(result.reason).toBe("aborted");
+      if (result.reason === "aborted") {
+        expect(result.abortReason).toBeDefined();
+        expect(result.abortReason?.kind).toBe("external");
+        expect(typeof result.exitDelayMs).toBe("number");
+        expect(result.exitDelayMs).toBeGreaterThanOrEqual(0);
+      }
+      // emit fired 也走 contextManager abort 路径(收敛在 finalizeRun)
+      expect(fired).toBeDefined();
+      expect(fired?.reason?.kind).toBe("external");
+    });
+
+    // ─── finalizeRun 单点 abort 优先转换 ───
+
+    it("LLM error 路径 + abort 同时满足 → finalizeRun 自动覆盖为 aborted (abort 优先于 error)", async () => {
+      // 实际场景:用户按 Esc 时 LLM SDK 抛 AbortError → llm-call 包成 llmResult.error。
+      // 用户体验上"按了 Esc 看到出错反馈"是错的——finalizeRun 单点检查 controller.signal.aborted
+      // 自动把 error 覆盖为 aborted,与 termination.ts "abort 优先于 context_overflow" 哲学对称。
+      const ctrl = new AbortController();
+      const provider = new MockLLMProvider([{ text: "ignored" }]);
+
+      const eventBus = new EventBus<AgentEventMap>();
+      let fired: AgentEventMap["interrupt:fired"] | undefined;
+      eventBus.on("interrupt:fired", (e) => { fired = e; });
+
+      // 自定义 callLLM 模拟"chat in flight 时被 abort,然后 stream 抛 error"
+      const { result } = await drainAgentLoop(
+        baseParams(provider, {
+          abortSignal: ctrl.signal,
+          eventBus,
+          deps: {
+            callLLM: async function* () {
+              yield { type: "message_start" };
+              ctrl.abort();   // abort 触发(模拟 SDK 检测到 abort 即将抛错)
+              yield { type: "error", error: new Error("provider error after abort") };
+            },
+          },
+        }),
+      );
+
+      // abort 优先 —— result 是 aborted 而非 error,用户看到"已中断"
+      expect(result.reason).toBe("aborted");
+      if (result.reason === "aborted") {
+        expect(result.abortReason?.kind).toBe("external");
+        expect(typeof result.exitDelayMs).toBe("number");
+      }
+      // emit fired 走 abort 路径(单点统一)
+      expect(fired).toBeDefined();
+      expect(fired?.reason?.kind).toBe("external");
+    });
+
+    it("pre-text-return completed 路径 + abort 同时 → finalizeRun 覆盖为 aborted (race window 防御)", async () => {
+      // 场景:LLM 返回 pure text,contextManager 内部触发 abort 但返回 ok-ish output
+      // (strategy 不感知 abort,output.failed=false)。resolveContextManager 返回 kind="ok",
+      // toTerminalAgentResult 返 undefined,主路径走 return completed。
+      // 但 controller.signal 已 aborted —— finalizeRun 自动覆盖,避免 abort 被静默丢失。
+      const ctrl = new AbortController();
+      const provider = mockTextProvider("hello");
+      const onTurnComplete = vi.fn<
+        [import("../../context/types.js").ContextManagerInput],
+        Promise<{ messages: import("../../types/messages.js").Message[]; modified: boolean; failed?: boolean }>
+      >(async (input) => {
+        // 模拟 strategy 不感知 abort,返回正常 output
+        ctrl.abort();
+        return { messages: [...input.messages], modified: false, failed: false };
+      });
+
+      const eventBus = new EventBus<AgentEventMap>();
+      let fired: AgentEventMap["interrupt:fired"] | undefined;
+      eventBus.on("interrupt:fired", (e) => { fired = e; });
+
+      const { result } = await drainAgentLoop(
+        baseParams(provider, {
+          contextManager: { onTurnComplete },
+          abortSignal: ctrl.signal,
+          eventBus,
+        }),
+      );
+
+      // completed 被 finalizeRun 自动覆盖为 aborted
+      expect(result.reason).toBe("aborted");
+      if (result.reason === "aborted") {
+        expect(result.abortReason?.kind).toBe("external");
+      }
+      // emit fired 也触发(单点收敛)
+      expect(fired).toBeDefined();
+    });
+
+    it("消费者 generator.return() 中途打断 → finally 兜底补发 aborted (origin='consumer-return')", async () => {
+      // 场景:消费者用 for-await-of 循环中 break,或显式 gen.return() 提前退出。
+      // 主路径未走到 finalizeRun → finally 兜底补发,防止订阅方 spinner 永不结束。
+      // abortReason.origin="consumer-return" 让订阅方区分"用户按键中断"vs"消费者主动 cancel"。
+      const provider = new MockLLMProvider([
+        { text: "long response that consumer interrupts" },
+      ]);
+
+      const eventBus = new EventBus<AgentEventMap>();
+      const events: { name: string; data: unknown }[] = [];
+      eventBus.on("agent:run_start", (data) => { events.push({ name: "run_start", data }); });
+      eventBus.on("interrupt:fired", (data) => { events.push({ name: "fired", data }); });
+      eventBus.on("agent:run_end", (data) => { events.push({ name: "run_end", data }); });
+
+      const gen = runAgentLoop(baseParams(provider, { eventBus }));
+
+      // 消费 1 个 yield 让 generator 进入 yield 暂停态
+      await gen.next();
+      // gen.return() 注入 abrupt return,触发 finally
+      const { done } = await gen.return(undefined as never);
+
+      expect(done).toBe(true);
+
+      // finally 补发了 fired 和 run_end
+      const firedEvent = events.find((e) => e.name === "fired");
+      const runEndEvent = events.find((e) => e.name === "run_end");
+      expect(firedEvent).toBeDefined();
+      expect(runEndEvent).toBeDefined();
+
+      // fired 的 reason 标记 origin="consumer-return"(区分用户中断)
+      const firedData = firedEvent?.data as AgentEventMap["interrupt:fired"];
+      expect(firedData.reason).toEqual({ kind: "external", origin: "consumer-return" });
+
+      // run_end 的 reason 是 "aborted"(消费者 cancel 也属于 abort 体系)
+      const runEndData = runEndEvent?.data as AgentEventMap["agent:run_end"];
+      expect(runEndData.reason).toBe("aborted");
+
+      // 顺序:fired 必然在 run_end 之前
+      const firedIdx = events.findIndex((e) => e.name === "fired");
+      const runEndIdx = events.findIndex((e) => e.name === "run_end");
+      expect(firedIdx).toBeLessThan(runEndIdx);
+    });
+  });
 });
