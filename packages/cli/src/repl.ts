@@ -71,6 +71,7 @@ import {
   handleSecurityCommand,
   TerminalConfirmationRenderer,
 } from "./security/index.js";
+import { createReplInterruptRuntime } from "./interrupt/repl-runtime.js";
 
 // ─── REPL 状态 ───
 
@@ -1184,20 +1185,50 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     state.running = true;
     renderer.startThinking();
 
+    // Per-turn 装载中断协调:KeyboardSource 拦截 Esc/Ctrl+C(raw mode) +
+    // SignalSource 兜底 SIGINT/SIGTERM(cooked mode / non-TTY)。
+    // controller.signal 透传给 agentRuntime.run 让用户中断真正生效。
+    // 每个 turn 独立 controller 实例,turn 结束 detach 释放 stdin 与 listener。
+    //
+    // exitRequested flag 协调双击退出:
+    //   - 第一次 Ctrl+C 由 KeyboardSource 触发 abort, agent-loop 进入 unwinding
+    //   - 第二次 Ctrl+C (800ms 内) 触发 onDoublePress, **只设 flag 不立即 close**
+    //   - finally 块 detach 后判 flag 调 rl.close —— 此时 agent-loop 已因第一次 abort
+    //     unwind 完成 (finalizeRun 完整 emit fired+run_end + tool 进程 cleanup +
+    //     transcript commit),rl.close 触发现有 close handler 走 scheduler.stop /
+    //     channels.dispose / process.exit 完整退出路径
+    // 直接在 onDoublePress 内 rl.close 会让 process.exit(0) 杀掉 in-flight agent run,
+    // 跳过 finalizeRun 的 emit + 资源清理 → 违反"已 emit 的 fired 必有对应 run_end"。
+    let exitRequested = false;
+    const interruptRuntime = createReplInterruptRuntime({
+      onDoublePress: () => {
+        exitRequested = true;
+      },
+    });
+
     try {
       const runResult = await agentRuntime.run({
         messages: [...state.messages],
         turnIndex: state.turnCounter,
+        abortSignal: interruptRuntime.controller.signal,
         onYield: (e) => renderer.handleEvent(e),
         onBeforeEventRender: () => renderer.stop(),
         enrichOptions: {
           lastToolEndCount: state.lastToolEndCount,
           hasProposedSkill: state.hasProposedSkill,
         },
-        // 安全确认对话框走 readline 的 question——pause 渲染避免 spinner 覆盖
+        // 安全确认对话框走 readline 的 question——pause KeyboardSource 让出 stdin
+        // (退出 raw mode 让 readline 行编辑 / Enter 正常工作);SignalSource 在 pause 期间
+        // 仍工作,Ctrl+C 走 OS SIGINT 仍可触发 abort 作为兜底中断通道。
+        // finally resume 恢复 raw mode + keypress 拦截。
         securityPrompt: async (text) => {
           renderer.stop();
-          return rl.question(text);
+          interruptRuntime.pause();
+          try {
+            return await rl.question(text);
+          } finally {
+            interruptRuntime.resume();
+          }
         },
       });
       const { agentResult, newMessages, durationMs, budget, toolEndCount, injectedSkillIds } = runResult;
@@ -1283,7 +1314,17 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       renderError(err);
       state.messages.pop();
     } finally {
+      // 释放 stdin keypress ownership + 卸 SIGINT/SIGTERM listener;
+      // 恢复 attach 前的 raw mode 状态,让下一轮 typeahead-input / readline 正常工作。
+      interruptRuntime.detach();
       state.running = false;
+      // 双击 Ctrl+C 退出: 此时 agent-loop 已因第一次 abort unwind 完成
+      // (run() 已 resolve / reject),安全调 rl.close 触发现有 cleanup 路径
+      // (scheduler.stop / channels.dispose / process.exit)。
+      // detach 之后 close 让 stdin 状态先归还再关闭 readline。
+      if (exitRequested) {
+        rl.close();
+      }
     }
   }
 
