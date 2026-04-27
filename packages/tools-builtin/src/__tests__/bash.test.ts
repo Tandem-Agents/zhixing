@@ -1,3 +1,4 @@
+import { getEventListeners } from "node:events";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -111,4 +112,95 @@ describe("Bash Tool", () => {
     expect(tool.isParallelSafe).toBe(false);
     expect(tool.needsPermission).toBe(true);
   });
+
+  it("声明 interruptBehavior=grace (持有外部子进程, 需 SIGTERM→SIGKILL 升级链)", () => {
+    expect(tool.interruptBehavior).toBe("grace");
+  });
+
+  // ─── abort 路径 + listener 资源回收 ───
+
+  it("abort 信号触发 → 工具立即返回 ABORT 错误 (不等 grace 期完成)", async () => {
+    const isWindows = process.platform === "win32";
+    const command = isWindows ? "ping -n 100 127.0.0.1" : "sleep 100";
+    const controller = new AbortController();
+
+    const callPromise = tool.call(
+      { command },
+      { ...ctx(), abortSignal: controller.signal },
+    );
+
+    // 100ms 后触发 abort, 上层应在毫秒级响应 (P95 SLO 监控 loop 框架延迟,
+    // 子进程后台 gracefulKill 不阻塞 promise reject)
+    setTimeout(() => controller.abort(), 100);
+
+    const t0 = Date.now();
+    const result = await callPromise;
+    const elapsed = Date.now() - t0;
+
+    expect(result.isError).toBe(true);
+    expect(result.content.toLowerCase()).toContain("abort");
+    // 上限放宽到 1500ms 含 abort 触发延迟 + 测试调度抖动
+    expect(elapsed).toBeLessThan(1500);
+  }, 5_000);
+
+  it("已 aborted signal → 工具立即返回 ABORT 错误", async () => {
+    const isWindows = process.platform === "win32";
+    const command = isWindows ? "ping -n 100 127.0.0.1" : "sleep 100";
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await tool.call(
+      { command },
+      { ...ctx(), abortSignal: controller.signal },
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content.toLowerCase()).toContain("abort");
+  }, 3_000);
+
+  it("命令正常完成 → abort listener 被清理 (不残留)", async () => {
+    const controller = new AbortController();
+    const before = getEventListeners(controller.signal, "abort").length;
+
+    const result = await tool.call(
+      { command: "echo done" },
+      { ...ctx(), abortSignal: controller.signal },
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(getEventListeners(controller.signal, "abort").length).toBe(before);
+  });
+
+  it("命令超时 → abort listener 被清理 (不残留)", async () => {
+    const isWindows = process.platform === "win32";
+    const command = isWindows ? "ping -n 100 127.0.0.1" : "sleep 100";
+    const controller = new AbortController();
+    const before = getEventListeners(controller.signal, "abort").length;
+
+    const result = await tool.call(
+      { command, timeout: 500 },
+      { ...ctx(), abortSignal: controller.signal },
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content.toLowerCase()).toContain("timed out");
+    expect(getEventListeners(controller.signal, "abort").length).toBe(before);
+  }, 10_000);
+
+  it("abort 触发 → abort listener 被清理 (不残留)", async () => {
+    const isWindows = process.platform === "win32";
+    const command = isWindows ? "ping -n 100 127.0.0.1" : "sleep 100";
+    const controller = new AbortController();
+    const before = getEventListeners(controller.signal, "abort").length;
+
+    const callPromise = tool.call(
+      { command },
+      { ...ctx(), abortSignal: controller.signal },
+    );
+    setTimeout(() => controller.abort(), 100);
+
+    await callPromise;
+
+    expect(getEventListeners(controller.signal, "abort").length).toBe(before);
+  }, 5_000);
 });

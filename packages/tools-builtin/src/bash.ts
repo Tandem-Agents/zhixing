@@ -10,6 +10,10 @@
  * - needsPermission: true — 命令执行默认需要确认
  * - 输出大小限制：防止 cat 大文件撑爆上下文
  *
+ * 中断行为：interruptBehavior="grace" — abort 触发时调 gracefulKill 异步执行
+ * SIGTERM → 1s grace → SIGKILL 升级链 (Windows 直接 kill);上层 promise 立即 reject
+ * "ABORT" 让主流程快速响应,子进程清理后台进行不阻塞 abort 传播延迟。
+ *
  * Phase 2+ 安全增强点（当前不实现）：
  * - 危险命令黑名单
  * - 命令 AST 分析
@@ -17,7 +21,7 @@
  */
 
 import { exec } from "node:child_process";
-import type { ToolDefinition, ToolResult } from "@zhixing/core";
+import { gracefulKill, type ToolDefinition, type ToolResult } from "@zhixing/core";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_RESULT_CHARS = 30_000;
@@ -49,6 +53,7 @@ export function createBashTool(): ToolDefinition {
     isReadOnly: false,
     isParallelSafe: false,
     needsPermission: true,
+    interruptBehavior: "grace",
     permissionArgumentKey: "command",
     maxResultChars: MAX_RESULT_CHARS,
 
@@ -115,6 +120,20 @@ interface ExecResult {
 
 function execCommand(command: string, options: ExecOptions): Promise<ExecResult> {
   return new Promise((resolve, reject) => {
+    // abortTriggered 区分 exec callback 内 error.killed 的两个来源:
+    //   - false: child 因 exec 内置 timeout 被杀 → 报 TIMEOUT
+    //   - true:  child 因 abort 被 gracefulKill 升级杀 → no-op (promise 已被 onAbort reject)
+    let abortTriggered = false;
+    let onAbort: (() => void) | null = null;
+
+    // 单一清理点: 任何 settle 路径(正常完成 / timeout / abort)都过此处, 防 listener 残留
+    const cleanupAbortListener = (): void => {
+      if (onAbort && options.signal) {
+        options.signal.removeEventListener("abort", onAbort);
+        onAbort = null;
+      }
+    };
+
     const child = exec(
       command,
       {
@@ -124,6 +143,14 @@ function execCommand(command: string, options: ExecOptions): Promise<ExecResult>
         windowsHide: true,
       },
       (error, stdout, stderr) => {
+        cleanupAbortListener();
+
+        if (abortTriggered) {
+          // abort 路径已在 onAbort 内 reject; exec callback 是 SIGTERM/SIGKILL 后回调,
+          // 此处 no-op 避免二次 settle (Promise 协议下二次 reject/resolve 是静默忽略)
+          return;
+        }
+
         if (error && error.killed) {
           reject(new Error(`TIMEOUT: Command killed after ${options.timeout}ms`));
           return;
@@ -138,15 +165,18 @@ function execCommand(command: string, options: ExecOptions): Promise<ExecResult>
     );
 
     if (options.signal) {
-      const onAbort = () => {
-        child.kill();
+      onAbort = () => {
+        abortTriggered = true;
+        cleanupAbortListener();
+        // 后台 SIGTERM → grace → SIGKILL, 不 await: 上层需要快速响应 abort
+        // (P95 SLO ≤ 200ms), 子进程清理异步进行不阻塞 promise reject
+        void gracefulKill(child);
         reject(new Error("ABORT: Command was aborted"));
       };
       if (options.signal.aborted) {
-        child.kill();
-        reject(new Error("ABORT: Command was aborted"));
+        onAbort();
       } else {
-        options.signal.addEventListener("abort", onAbort, { once: true });
+        options.signal.addEventListener("abort", onAbort);
       }
     }
   });

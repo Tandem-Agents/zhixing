@@ -203,6 +203,33 @@ export interface ToolResult {
   committedToUser?: boolean;
 }
 
+// ─── 工具中断策略 ───
+
+/**
+ * 工具被 abort 时的预期行为。每个值表达工具如何响应 ctx.abortSignal。
+ *
+ * 协议字段是工具自描述的一部分 —— tool-executor 不读取此字段(中断响应是工具
+ * 自身职责),仅作为契约文档让审计者 / 维护者 / 未来 background 调度器知道每个
+ * 工具的中断语义。新增 background 等高阶行为时,tool-executor 才需要消费。
+ */
+export type ToolInterruptBehavior =
+  /**
+   * 立即中止 —— tool.call 内部应在 ctx.abortSignal.aborted 时尽快 reject AbortError 或
+   * return partial result。纯 JS 工具(read / edit / grep / web_fetch / memory 等)适用。
+   */
+  | "cancel"
+  /**
+   * 优雅停止 —— 工具持有外部子进程或长跑资源,abort 时实现 SIGTERM → grace 期 → SIGKILL
+   * 升级链。推荐 import 模块层提供的 gracefulKill helper, 不允许自写 SIGTERM/SIGKILL
+   * 防止跨平台行为分歧。Bash / 长跑外部程序工具适用。
+   */
+  | "grace"
+  /**
+   * 不中止 —— 工具应 yield 一个 background 引用,主 loop 不等待。供未来子 agent 抽象
+   * 使用,本里程碑无消费方。
+   */
+  | "background";
+
 // ─── 工具定义 ───
 
 /**
@@ -292,6 +319,16 @@ export interface ToolDefinition {
    * §4.2 与 ADR-TPE-003。
    */
   permissionArgumentKey?: string;
+
+  /**
+   * 工具被 abort 时的预期行为。默认 "cancel" —— 纯 JS 工具(read/edit/grep 等)
+   * 立即中止;持有外部子进程的工具(bash)应声明 "grace" 并 import gracefulKill helper
+   * 实现 SIGTERM → grace 期 → SIGKILL 升级链。
+   *
+   * 协议字段是工具自描述的一部分 —— tool-executor 不读取此字段, 工具自身负责按
+   * 声明实现中断响应。详见 ToolInterruptBehavior 各 variant 的注释。
+   */
+  interruptBehavior?: ToolInterruptBehavior;
 
   /**
    * 执行工具
