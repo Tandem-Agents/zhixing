@@ -24,6 +24,7 @@ import {
   type TurnContext,
   type TurnContextProvider,
   type TurnSource,
+  type WatchdogPolicy,
   buildTurn,
   resolveTurnTimestamp,
   BoundaryRegistry,
@@ -37,6 +38,7 @@ import {
   createToolResultTrimStrategy,
   createMessageDropStrategy,
   createMemoryFlushStrategy,
+  DEFAULT_WATCHDOG_POLICY,
   MemoryStore,
   PermissionStore,
   resolveAgentIdentity,
@@ -176,6 +178,17 @@ export interface RunParams {
    * 未设置时所有 LLM 调用无限制运行。
    */
   abortSignal?: AbortSignal;
+  /**
+   * stream 看门狗策略 —— 控制 LLM 流 chunk 间隔的 idle-timer 行为。
+   *
+   * 缺省时本层注入 `DEFAULT_WATCHDOG_POLICY`(60s idle, 50% warn)。这是 spec 规定的
+   * **唯一** fallback 注入点 —— agent-loop 内部不再二次 fallback。
+   *
+   * 调用方显式传入(包括 `createWatchdogPolicy({ idleTimeoutMs: 0 })` 禁用 idle-timer)
+   * 时一路透传到看门狗,不被默认值覆盖。配置错误的 policy(如 warnThresholdRatio 超出
+   * 开区间)应通过 createWatchdogPolicy 工厂构造,在创建期 throw 而非运行期失败。
+   */
+  watchdog?: WatchdogPolicy;
 }
 
 // RunResult 从 @zhixing/core 统一（单一事实源）。
@@ -598,6 +611,9 @@ export async function createAgentRuntime(options: {
         eventBus,
         workingDirectory: process.cwd(),
         abortSignal: params.abortSignal,
+        // watchdog fallback 单点: spec 规定调用边界注入默认值, agent-loop 内部不二次 fallback
+        // 保证调用方显式传入的 policy(含禁用 idle-timer 的 `{ idleTimeoutMs: 0 }`)一路透传
+        watchdog: params.watchdog ?? DEFAULT_WATCHDOG_POLICY,
         deps: {
           callLLM: resilientCallLLM,
           executeTool: secureExecuteTool,

@@ -23,7 +23,7 @@ import type { Message, ToolResultBlock, ToolUseBlock } from "../types/messages.j
 import type { ToolDefinition, ToolExecutionContext, ToolResult } from "../types/tools.js";
 import type { ContextManagerHook, ContextBudget } from "../context/types.js";
 import type { CompactMarker, Turn } from "../transcript/types.js";
-import type { AbortReason } from "../interrupt/types.js";
+import type { AbortReason, WatchdogPolicy } from "../interrupt/types.js";
 
 // ─── Agent Loop 参数 ───
 
@@ -62,6 +62,18 @@ export interface AgentLoopParams {
    * 见 research/design/specifications/secondary-llm-capability.md §三。
    */
   llmRoles?: LLMRoles;
+  /**
+   * stream 看门狗策略 —— 控制 LLM 流 chunk 间隔的 idle-timer 行为。
+   *
+   * 缺省 (`undefined`) 时本层**不** fallback 到默认值 —— 默认 fallback 由调用边界
+   * (cli/src/run-agent.ts) 单点注入,保证用户通过 RunParams 显式传入的 policy
+   * (包括 `createWatchdogPolicy({ idleTimeoutMs: 0 })` 显式禁用 idle-timer) 一路透传
+   * 到看门狗, 不被 agent-loop 二次默认覆盖。
+   *
+   * 缺省时下游 wrapStreamWithWatchdog 用模块层默认值 DEFAULT_WATCHDOG_POLICY
+   * (60s idle, 50% warn) —— 单测路径可省略, 生产路径由 run-agent.ts 显式注入。
+   */
+  watchdog?: WatchdogPolicy;
 }
 
 // ─── 依赖注入 ───

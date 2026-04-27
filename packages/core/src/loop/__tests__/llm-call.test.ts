@@ -6,8 +6,8 @@
  *   - aborted: true  （stream 消费循环被 abort 中断 → 返 partial 数据）
  *
  * 测试用 inline async generator 模拟 callLLM stream，避免依赖真 LLM provider。
- * abort 通过 controller.abort() 在 yield 之间触发，wrapStreamWithAbortRace 保证 abort
- * 后 stream 立即退出。
+ * abort 通过 controller.abort() 在 yield 之间触发，底层 stream 包装层保证 abort
+ * 后 iterator 立即返回 done，stream 消费循环退出。
  */
 
 import { describe, expect, it } from "vitest";
@@ -34,7 +34,7 @@ async function drain(
 // ─── abort 路径 ───
 
 describe("streamLLMCall · abort 路径", () => {
-  it("已 aborted controller:wrapStreamWithAbortRace 立即退出 → partial 全空,返 aborted variant", async () => {
+  it("已 aborted controller:底层包装立即退出 → partial 全空,返 aborted variant", async () => {
     const ctrl = new AbortController();
     ctrl.abort();
 
@@ -62,7 +62,7 @@ describe("streamLLMCall · abort 路径", () => {
       expect(result.partial.thinking).toBe("");
     }
     expect(yields.filter((y) => y.type === "assistant_message")).toHaveLength(0);
-    // race 立即退出,mock 不 chunkCount++ (yield 都没机会触发)
+    // 底层包装立即退出,mock 不 chunkCount++ (yield 都没机会触发)
     expect(chunkCount).toBe(0);
   });
 
@@ -75,7 +75,7 @@ describe("streamLLMCall · abort 路径", () => {
       yield { type: "text_delta", text: "Hello " };
       yield { type: "text_delta", text: "world" };
       // 在 yield "world" 被 streamLLMCall 处理后 (累积进 pendingText) 触发 abort,
-      // wrapStreamWithAbortRace 让下次 next() 立即返 done
+      // 底层 stream 包装让下次 next() 立即返 done
       ctrl.abort();
       yield { type: "text_delta", text: "should not be in partial" };
     };

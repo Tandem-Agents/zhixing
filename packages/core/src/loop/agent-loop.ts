@@ -237,9 +237,10 @@ export async function* runAgentLoop(
       }
 
       // ── Step 1: Call LLM ──
-      // 接 controller (非 signal):后续里程碑的看门狗需要 controller.abort() 写权限触发
-      // idle-timeout abort,这一签名提前到位避免后续再做 breaking change;下游 ChatRequest
-      // 仍接 controller.signal,Provider 抽象不变。
+      // 接 controller (非 signal):看门狗触发 idle-timeout 时需要 controller.abort() 写权限,
+      // controller 由 agent-loop 持有, signal 全程透传 Provider/工具/contextManager。
+      // watchdog 不在本层 fallback 默认值: spec 规定默认 fallback 单点存在于 cli/run-agent.ts
+      // 注入边界, 保证用户显式禁用 idle-timer (`{ idleTimeoutMs: 0 }`) 不被 agent-loop 二次覆盖。
       const llmResult = yield* streamLLMCall({
         deps,
         messages: state.messages,
@@ -247,6 +248,7 @@ export async function* runAgentLoop(
         systemPrompt,
         toolSpecs,
         controller,
+        watchdog: params.watchdog,
         eventBus,
       });
 

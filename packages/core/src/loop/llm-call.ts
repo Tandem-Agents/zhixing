@@ -14,9 +14,10 @@
  * - **接 controller 而非 abortSignal**：后续里程碑的看门狗需要 controller.abort() 写权限
  *   触发 idle-timeout abort；agent-loop 是 controller 的所有者，下游全程透传 signal。
  *
- * - **wrapStreamWithAbortRace 包装 stream**：保证 iterator.next() 在 controller aborted 后
- *   ≤10ms 返回 done，无论底层 SDK / mock stream 是否响应 abortSignal。这是中断响应延迟的
- *   下限保证；后续里程碑加 idle-timer 时只需把这一处 swap 成 wrapStreamWithWatchdog。
+ * - **wrapStreamWithWatchdog 包装 stream**：facade 组合 race 基础层 + 可选 idle-timer
+ *   叠加层。race 永远生效，保证 iterator.next() 在 controller aborted 后短时间内返回 done，
+ *   无论底层 SDK / mock stream 是否响应 abortSignal —— 这是中断响应延迟的下限保证。
+ *   idle-timer 在 watchdog policy idleTimeoutMs > 0 时叠加，处理"LLM 流静默挂死"场景。
  *
  * - **先处理后 check 模式**：for-await 内先累积 pendingText/Thinking 再 check abort。
  *   保证 abort 瞬间收到的最后一个 chunk 已进 partial.text，partial 内容完整。
@@ -34,7 +35,8 @@
 
 import { assembleSafeMessage } from "../interrupt/assemble.js";
 import type { IEventBus } from "../events/types.js";
-import { wrapStreamWithAbortRace } from "../interrupt/stream-race.js";
+import { wrapStreamWithWatchdog } from "../interrupt/watchdog.js";
+import type { WatchdogPolicy } from "../interrupt/types.js";
 import type { AgentEventMap } from "../types/agent-events.js";
 import { AgentError } from "../types/errors.js";
 import type { ChatRequest, StopReason, TokenUsage } from "../types/llm.js";
@@ -54,6 +56,15 @@ interface StreamLLMCallParams {
    * 下游 ChatRequest 仍接 controller.signal，Provider 抽象不变。
    */
   controller: AbortController;
+  /**
+   * stream 看门狗策略。缺省 (`undefined`) 时 wrapStreamWithWatchdog 用模块层
+   * 默认 DEFAULT_WATCHDOG_POLICY (60s idle, 50% warn)。
+   *
+   * 透传链:agent-loop 把 params.watchdog 不做 fallback 直接转到这里,默认值
+   * 由调用边界 (cli/src/run-agent.ts) 单点注入,本层不二次 fallback 保证
+   * 用户显式禁用 idle-timer (`{ idleTimeoutMs: 0 }`) 不被覆盖。
+   */
+  watchdog?: WatchdogPolicy;
   eventBus?: IEventBus<AgentEventMap>;
 }
 
@@ -66,7 +77,7 @@ interface StreamLLMCallParams {
 export async function* streamLLMCall(
   params: StreamLLMCallParams,
 ): AsyncGenerator<AgentYield, LLMCallResult> {
-  const { deps, messages, model, systemPrompt, toolSpecs, controller, eventBus } = params;
+  const { deps, messages, model, systemPrompt, toolSpecs, controller, watchdog, eventBus } = params;
 
   const request: ChatRequest = {
     model,
@@ -101,8 +112,10 @@ export async function* streamLLMCall(
 
   try {
     const rawStream = deps.callLLM(request);
-    // wrap race: 即使底层 SDK 不响应 abortSignal，iterator.next() 在 abort 后 ≤10ms 返回 done
-    const stream = wrapStreamWithAbortRace(rawStream, controller);
+    // wrap watchdog: race 基础层永远生效 (即使底层 SDK 不响应 abortSignal,iterator.next()
+    // 在 abort 后短时间内返回 done) + 可选 idle-timer 叠加层 (chunk-arrival idle 触发 abort,
+    // 由 watchdog policy idleTimeoutMs 控制阈值, <= 0 时仅启用 race)。
+    const stream = wrapStreamWithWatchdog(rawStream, controller, watchdog, eventBus);
 
     for await (const event of stream) {
       // 透传原始流事件到 EventBus（供 UI 层消费）
