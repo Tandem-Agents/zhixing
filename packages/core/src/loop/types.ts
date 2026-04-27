@@ -19,7 +19,7 @@ import type {
   StreamEvent,
   TokenUsage,
 } from "../types/llm.js";
-import type { Message } from "../types/messages.js";
+import type { Message, ToolResultBlock, ToolUseBlock } from "../types/messages.js";
 import type { ToolDefinition, ToolExecutionContext, ToolResult } from "../types/tools.js";
 import type { ContextManagerHook, ContextBudget } from "../context/types.js";
 import type { CompactMarker, Turn } from "../transcript/types.js";
@@ -139,11 +139,73 @@ export type AgentYield =
 
 // ─── 内部类型：LLM 调用结果 ───
 
-export interface LLMCallResult {
+/**
+ * LLM 调用结果 —— 判别联合区分"正常完成"与"被 abort 中断"两种语义。
+ *
+ * - aborted=false: 正常路径 (含 provider error)，携带完整 message + stopReason；error 字段
+ *   仅在 SDK 抛错或 provider error event 时填充，与 abort 严格分离
+ * - aborted=true: 被中断路径，**只**携带 partial (text + thinking)，不含 message / stopReason /
+ *   error。partial 必须由 cleanup 模块用 assemblePartialMessage 处理后再 yield assistant_message
+ *   (含 [interrupted] 标记)，确保 transcript 协议合规
+ *
+ * 调用方 (agent-loop) 必须先 narrow `result.aborted` 再访问字段。
+ */
+export type LLMCallResult = LLMCallSuccess | LLMCallAborted;
+
+export interface LLMCallSuccess {
+  readonly aborted: false;
   readonly message: Message;
   readonly stopReason: StopReason;
   readonly usage: TokenUsage;
+  /**
+   * 流出错 (provider error event / SDK 抛非 abort 错误)。abort 路径不进此 variant，
+   * 不会与 abort 语义混淆。
+   */
   readonly error?: AgentError;
+}
+
+export interface LLMCallAborted {
+  readonly aborted: true;
+  /**
+   * abort 触发瞬间已累积的部分内容。仅承载 text + thinking，**不含** pendingToolCalls
+   * (未完成的 tool_use 不能放进 message —— 协议要求每个 tool_use 必有配对 tool_result，
+   * partial 中残缺的 tool_use 会让下一轮 LLM 调用报 400)。
+   */
+  readonly partial: { readonly text: string; readonly thinking: string };
+  /**
+   * abort 触发瞬间的 token 用量 —— LLM 实际处理的 tokens (可能为 emptyUsage 如果 abort
+   * 在 message_end 事件之前触发)。usage 必须如实返回供订阅方统计消耗。
+   */
+  readonly usage: TokenUsage;
+}
+
+// ─── 工具执行结果 ───
+
+/**
+ * 工具批量执行结果 —— 判别"完整执行"与"被 abort 部分执行"两种状态。
+ *
+ * abort 在 tool 循环触发时:
+ *   - 已完成的 tool_results 进 completedResults (LLM 在下一轮看到这些工具已执行,
+ *     不重发 tool_use 避免幂等性破坏)
+ *   - 未执行的 tool_use 进 unexecutedToolUses (按原顺序,完整对象含 id/name/input),
+ *     由 cleanup 模块注入合成 tool_result placeholder 保证 messages 协议合规
+ *   - abortedDuringToolAt 反映"abort 发生在工具 await 期间"的退出时刻,供 agent-loop
+ *     计算 toolGraceMs (workSelectivity SLO 监控隔离 loop 框架延迟与工具自身延迟)
+ */
+export interface ExecuteToolCallsResult {
+  readonly completedResults: readonly ToolResultBlock[];
+  /**
+   * abort 时未执行的 tool_use (按 LLM 输入顺序保留)。空数组表示所有工具完整执行。
+   * 由 cleanup 模块注入合成 placeholder, tool-executor 不自己合成 (单一事实源)。
+   */
+  readonly unexecutedToolUses: readonly ToolUseBlock[];
+  /**
+   * abort 触发瞬间正在执行的工具的退出时刻 (`performance.now()` 值)。
+   * - abort 发生在工具 await 期间 (无论工具响应 abort 抛 AbortError 还是正常 return) → 有值
+   * - abort 发生在工具间隙 (循环顶 guard 触发) → undefined
+   * - 非 abort 退出 → undefined
+   */
+  readonly abortedDuringToolAt?: number;
 }
 
 // ─── Runtime 层 Run 返回值 ───

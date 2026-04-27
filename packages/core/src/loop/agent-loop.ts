@@ -44,6 +44,7 @@
  */
 
 import { resolveContextManager, type ContextTermination } from "../context/termination.js";
+import { buildCleanup } from "../interrupt/cleanup.js";
 import { createInterruptController, getAbortReason } from "../interrupt/controller.js";
 import { toAgentError } from "../types/errors.js";
 import { emptyUsage, mergeUsage, type TokenUsage } from "../types/llm.js";
@@ -151,10 +152,15 @@ export async function* runAgentLoop(
    * interruptedTurnIndex 直接读 state.turnCount（closure 捕获最新值，与"被中断 turn 0-indexed"
    * 语义对应，不取 newTurnCount 即"已完成 turn 数 1-indexed"）。
    *
-   * toolGraceMs 当前一律 0（abort 不在工具 await 期间）—— 后续接入 tool-executor 的
-   * abortedDuringToolAt 跟踪能力时改造为参数由调用点计算后传入。
+   * toolGraceMs 默认 0：abort 不在工具 await 期间 (turn 边界 / LLM 阶段 / contextManager 阶段
+   * 等) 时调用方省略；abort 发生在工具 await 期间时调用方按
+   * `max(0, abortedDuringToolAt - abortFiredAt)` 计算后传入，反映"工具自身 abort 等待消耗"
+   * 让 SLO 监控隔离 loop 框架延迟与工具自身延迟。
    */
-  const finalizeRun = async (result: AgentResult): Promise<AgentResult> => {
+  const finalizeRun = async (
+    result: AgentResult,
+    toolGraceMs = 0,
+  ): Promise<AgentResult> => {
     runEndEmitted = true;
 
     let finalResult: AgentResult = result;
@@ -183,7 +189,7 @@ export async function* runAgentLoop(
         reason: finalResult.abortReason ?? null,
         interruptedTurnIndex: state.turnCount,
         exitDelayMs,
-        toolGraceMs: 0,
+        toolGraceMs,
       });
     }
 
@@ -231,23 +237,53 @@ export async function* runAgentLoop(
       }
 
       // ── Step 1: Call LLM ──
+      // 接 controller (非 signal):后续里程碑的看门狗需要 controller.abort() 写权限触发
+      // idle-timeout abort,这一签名提前到位避免后续再做 breaking change;下游 ChatRequest
+      // 仍接 controller.signal,Provider 抽象不变。
       const llmResult = yield* streamLLMCall({
         deps,
         messages: state.messages,
         model,
         systemPrompt,
         toolSpecs,
-        abortSignal: controller.signal,
+        controller,
         eventBus,
       });
 
       const usage = mergeUsage(state.totalUsage, llmResult.usage);
 
+      // ── LLM 阶段 abort → 调 cleanup 出 partial assistant + 退出 ──
+      // abort 在 stream 消费循环触发 → llm-call 返回 aborted variant + partial 数据。
+      // 调 buildCleanup 用 assemblePartialMessage 注入 [interrupted] 标记构造 partial assistant,
+      // yield 给消费者让 trackMessages 拼出协议合规的 newMessages
+      // (partial 不含 tool_use, 无需配对 tool_result, 协议自然合规)。
+      // unexecutedToolUses=[]: LLM 阶段还没到 tool 执行,没有未完成的 tool_use 需要 placeholder。
+      // toolGraceMs=0: abort 不在工具 await 期间,工具自身延迟为 0。
+      if (llmResult.aborted) {
+        const reason = getAbortReason(controller.signal) ?? null;
+        const outcome = buildCleanup({
+          partial: llmResult.partial,
+          unexecutedToolUses: [],
+          reason,
+        });
+        if (outcome.kind === "data" && outcome.partialAssistant) {
+          yield { type: "assistant_message", message: outcome.partialAssistant };
+        }
+        return await finalizeRun(
+          {
+            reason: "aborted",
+            abortReason: reason ?? undefined,
+            usage,
+          },
+          0,
+        );
+      }
+
       // ── LLM 错误 → 终止 ──
-      // abort 在 LLM 调用期间触发的常见路径：SDK 抛 AbortError → llm-call.ts 包成
-      // llmResult.error。直接 return error 会让用户看到"出错"反馈而不是"已中断"——
-      // finalizeRun 内部检查 controller.signal.aborted 自动把 error 覆盖为 aborted，
-      // 用户体验与"显式 abort"完全一致。
+      // 非 abort 的真实 provider 错误 (SDK 抛错 / provider error event)。
+      // abort 已在上方分流走 aborted variant,不会进此分支被掩盖为"出错"。
+      // finalizeRun 内部仍有 abort 优先转换兜底 (例如 contextManager 异步触发 abort 的 race
+      // window),双重保护。
       if (llmResult.error) {
         return await finalizeRun({
           reason: "error",
@@ -301,7 +337,7 @@ export async function* runAgentLoop(
       }
 
       // ── Step 2: Execute tools ──
-      const toolResults = yield* executeToolCalls({
+      const toolExecutorResult = yield* executeToolCalls({
         toolCalls,
         tools,
         deps,
@@ -311,6 +347,53 @@ export async function* runAgentLoop(
         llmRoles: params.llmRoles,
       });
 
+      // ── Tool 阶段 abort → 调 cleanup 注入 placeholder + 退出 ──
+      // 已完成的 tool_results 已 yield 过 tool_end (run-agent trackMessages 已收集),
+      // 未执行的 tool_use 由 cleanup 注入 isError placeholder 保证每个 tool_use 配对 tool_result
+      // (协议合规,下一轮 LLM 调用不会因残缺 tool_use 报 400)。
+      // turn_complete 在此 yield (with llmResult.usage 反映 LLM 实际处理 tokens),让 trackMessages
+      // flush pendingToolResults 进 user message。
+      // toolGraceMs: abort 发生在工具 await 期间则计算工具退出延迟 (供 SLO 监控)。
+      if (toolExecutorResult.unexecutedToolUses.length > 0) {
+        const reason = getAbortReason(controller.signal) ?? null;
+        const outcome = buildCleanup({
+          partial: undefined,
+          unexecutedToolUses: toolExecutorResult.unexecutedToolUses,
+          reason,
+        });
+        if (outcome.kind === "data" && outcome.placeholderToolResults.length > 0) {
+          const toolNameById = new Map(
+            toolExecutorResult.unexecutedToolUses.map((t) => [t.id, t.name]),
+          );
+          for (const r of outcome.placeholderToolResults) {
+            yield {
+              type: "tool_end",
+              id: r.toolUseId,
+              name: toolNameById.get(r.toolUseId) ?? "unknown",
+              result: { content: r.content, isError: true },
+              duration: 0,
+            };
+          }
+          yield {
+            type: "turn_complete",
+            turnCount: state.turnCount + 1,
+            usage: llmResult.usage,
+          };
+        }
+        const toolGraceMs =
+          toolExecutorResult.abortedDuringToolAt != null && abortFiredAt != null
+            ? Math.max(0, toolExecutorResult.abortedDuringToolAt - abortFiredAt)
+            : 0;
+        return await finalizeRun(
+          {
+            reason: "aborted",
+            abortReason: reason ?? undefined,
+            usage,
+          },
+          toolGraceMs,
+        );
+      }
+
       // ── Yield turn boundary ──
       const newTurnCount = state.turnCount + 1;
       yield { type: "turn_complete", turnCount: newTurnCount, usage: llmResult.usage };
@@ -319,7 +402,9 @@ export async function* runAgentLoop(
       let newMessages = [
         ...state.messages,
         llmResult.message,
-        toolResultMessage(toolResults),
+        // spread readonly → mutable 浅拷贝,匹配 toolResultMessage 签名;
+        // 内部不会 mutate 数组,完整 turn 路径仅消费完整结果
+        toolResultMessage([...toolExecutorResult.completedResults]),
       ];
 
       // ── Context management: 预算检查 + 自动压缩 ──

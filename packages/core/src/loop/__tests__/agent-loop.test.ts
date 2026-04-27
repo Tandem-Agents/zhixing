@@ -1383,6 +1383,197 @@ describe("Agent Loop", () => {
       expect(fired).toBeDefined();
     });
 
+    // ─── 端到端 abort 路径:cleanup 注入 partial/placeholder 让 messages 协议合规 ───
+
+    it("Tool 阶段 abort:newMessages 协议合规 (每个 tool_use 配对 tool_result)", async () => {
+      // 验证 cleanup 注入 placeholder 让 messages 协议合规 ——
+      // 否则下一轮 LLM 调用会因残缺 tool_use 报 400。
+      const ctrl = new AbortController();
+      let toolCount = 0;
+      const provider = new MockLLMProvider([
+        {
+          toolCalls: [
+            { id: "tc1", name: "t", input: {} },
+            { id: "tc2", name: "t", input: {} },
+            { id: "tc3", name: "t", input: {} },
+          ],
+        },
+        { text: "should never reach" },
+      ]);
+
+      const tool = makeTool("t", async () => {
+        toolCount++;
+        if (toolCount === 2) {
+          ctrl.abort();
+        }
+        return { content: `done-${toolCount}` };
+      });
+
+      const yields: AgentYield[] = [];
+      const gen = runAgentLoop(
+        baseParams(provider, {
+          tools: [tool],
+          abortSignal: ctrl.signal,
+        }),
+      );
+
+      let result: import("../types.js").AgentResult | undefined;
+      while (true) {
+        const { value, done } = await gen.next();
+        if (done) {
+          result = value;
+          break;
+        }
+        yields.push(value);
+      }
+
+      expect(result?.reason).toBe("aborted");
+
+      // turn_complete yield 过 (with llmResult.usage,反映 LLM 实际 tokens)
+      const turnCompletes = filterYields(yields, "turn_complete");
+      expect(turnCompletes).toHaveLength(1);
+      if (turnCompletes[0]?.type === "turn_complete") {
+        expect(turnCompletes[0].usage.outputTokens).toBeGreaterThan(0);
+      }
+
+      // tool_end yield: tc1 + tc2 完成 + tc3 placeholder
+      const toolEnds = filterYields(yields, "tool_end");
+      expect(toolEnds.length).toBeGreaterThanOrEqual(3);
+      // 检查 tc3 是 placeholder (isError=true,content 含 "cancelled")
+      const tc3End = toolEnds.find(
+        (e) => e.type === "tool_end" && e.id === "tc3",
+      );
+      expect(tc3End).toBeDefined();
+      if (tc3End?.type === "tool_end") {
+        expect(tc3End.result.isError).toBe(true);
+        expect(tc3End.result.content.toLowerCase()).toContain("cancel");
+      }
+    });
+
+    it("Tool catch 块 abort 抛 AbortError:newMessages 协议合规 (每个 tool_use 配且仅配一个 tool_result)", async () => {
+      // 修复回归:tool-executor catch 块 abort 路径之前 yield tool_end + cleanup placeholder
+      // 重复合成 → 同一 tool_use 收两个 tool_end → trackMessages push 两个 tool_result
+      // → user message 含同 toolUseId 的两个 tool_result → Anthropic API 报 400。
+      // 修复后 catch 块只 break,cleanup 注入唯一 placeholder,1:1 对应。
+      const ctrl = new AbortController();
+      let attemptCount = 0;
+      const provider = new MockLLMProvider([
+        {
+          toolCalls: [
+            { id: "tc1", name: "t", input: {} },
+            { id: "tc2", name: "t", input: {} },
+            { id: "tc3", name: "t", input: {} },
+          ],
+        },
+        { text: "should never reach" },
+      ]);
+
+      const tool = makeTool("t", async () => {
+        attemptCount++;
+        if (attemptCount === 1) {
+          return { content: "done-1" };
+        }
+        // 第 2 个工具 await 期间响应 abort 抛 AbortError
+        ctrl.abort();
+        throw new Error("AbortError: aborted by signal");
+      });
+
+      const yields: AgentYield[] = [];
+      const gen = runAgentLoop(
+        baseParams(provider, {
+          tools: [tool],
+          abortSignal: ctrl.signal,
+        }),
+      );
+
+      let result: import("../types.js").AgentResult | undefined;
+      while (true) {
+        const { value, done } = await gen.next();
+        if (done) {
+          result = value;
+          break;
+        }
+        yields.push(value);
+      }
+
+      expect(result?.reason).toBe("aborted");
+
+      // 收集 LLM 实际 yield 的 tool_use ids (通过 assistant_message 反推)
+      const assistantMessages = filterYields(yields, "assistant_message");
+      const toolUseIds = new Set<string>();
+      for (const am of assistantMessages) {
+        if (am.type !== "assistant_message") continue;
+        for (const block of am.message.content) {
+          if (block.type === "tool_use") {
+            toolUseIds.add(block.id);
+          }
+        }
+      }
+      expect(toolUseIds).toEqual(new Set(["tc1", "tc2", "tc3"]));
+
+      // tool_end yields:每个 tool_use id 必须出现且仅出现一次 (1:1 对应)
+      const toolEnds = filterYields(yields, "tool_end");
+      const toolEndIdCounts = new Map<string, number>();
+      for (const te of toolEnds) {
+        if (te.type !== "tool_end") continue;
+        toolEndIdCounts.set(te.id, (toolEndIdCounts.get(te.id) ?? 0) + 1);
+      }
+
+      // 验证 1:1 对应 + 无重复
+      expect(toolEndIdCounts.get("tc1")).toBe(1); // 完成的工具
+      expect(toolEndIdCounts.get("tc2")).toBe(1); // 修复前会是 2 (catch + placeholder), 修复后只有 placeholder
+      expect(toolEndIdCounts.get("tc3")).toBe(1); // 未执行的 placeholder
+      expect(toolEndIdCounts.size).toBe(3); // 没有意外的 toolUseId
+    });
+
+    it("LLM 阶段 abort:yield assistant_message with [interrupted] 标记", async () => {
+      // 验证 cleanup 用 assemblePartialMessage 注入 [interrupted] 标记的 partialAssistant 被 yield。
+      const ctrl = new AbortController();
+      const provider = new MockLLMProvider([{ text: "ignored" }]);
+
+      const callLLM: import("../types.js").AgentLoopDeps["callLLM"] =
+        async function* () {
+          yield { type: "message_start" };
+          yield { type: "text_delta", text: "Partial response" };
+          ctrl.abort();
+        };
+
+      const yields: AgentYield[] = [];
+      const gen = runAgentLoop(
+        baseParams(provider, {
+          abortSignal: ctrl.signal,
+          deps: { callLLM },
+        }),
+      );
+
+      let result: import("../types.js").AgentResult | undefined;
+      while (true) {
+        const { value, done } = await gen.next();
+        if (done) {
+          result = value;
+          break;
+        }
+        yields.push(value);
+      }
+
+      expect(result?.reason).toBe("aborted");
+
+      // 应有一个 assistant_message yield 含 [interrupted] 标记 (cleanup 注入)
+      const assistantMessages = filterYields(yields, "assistant_message");
+      expect(assistantMessages.length).toBeGreaterThan(0);
+      if (assistantMessages[0]?.type === "assistant_message") {
+        const textBlock = assistantMessages[0].message.content.find(
+          (b) => b.type === "text",
+        );
+        expect(textBlock).toBeDefined();
+        if (textBlock?.type === "text") {
+          expect(textBlock.text).toContain("[interrupted]");
+          // 原 partial text 也保留
+          expect(textBlock.text).toContain("Partial response");
+        }
+      }
+    });
+
     it("消费者 generator.return() 中途打断 → finally 兜底补发 aborted (origin='consumer-return')", async () => {
       // 场景:消费者用 for-await-of 循环中 break,或显式 gen.return() 提前退出。
       // 主路径未走到 finalizeRun → finally 兜底补发,防止订阅方 spinner 永不结束。

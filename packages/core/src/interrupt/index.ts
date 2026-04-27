@@ -26,7 +26,7 @@ export {
 
 export { wrapStreamWithAbortRace } from "./stream-race.js";
 
-export { assemblePartialMessage } from "./assemble.js";
+export { assemblePartialMessage, assembleSafeMessage } from "./assemble.js";
 
 export {
   buildCleanup,

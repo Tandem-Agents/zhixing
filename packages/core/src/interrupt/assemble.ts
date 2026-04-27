@@ -40,3 +40,30 @@ export function assemblePartialMessage(
   }
   return { role: "assistant", content: blocks };
 }
+
+/**
+ * 安全 assistant message 构造器 —— 仅 text + thinking,跳过任何 tool_use blocks。
+ *
+ * 与 `assemblePartialMessage` 共享"跳过残缺 tool_use 防协议违规"的核心保证 ——
+ * 残缺 tool_use 进入 next-turn LLM 调用会因缺配对 tool_result 报 400。
+ *
+ * 区别于 assemblePartialMessage:**不加 [interrupted] 标记**,适用于非用户中断场景:
+ *   - provider error (LLM SDK / API 错误中断 stream)
+ *   - 其他非 abort 触发的不完整 stream 场景
+ * 加 [interrupted] 会误导用户以为是主动中断,语义不符。
+ *
+ * 调用方:llm-call.ts 的 provider error 出口;abort 路径走 assemblePartialMessage (经 cleanup)。
+ *
+ * 返回 null 当 text 与 thinking 都为空(无内容可 yield)。
+ */
+export function assembleSafeMessage(
+  text: string,
+  thinking: string,
+): Message | null {
+  if (!text && !thinking) return null;
+
+  const blocks: ContentBlock[] = [];
+  if (thinking) blocks.push({ type: "thinking", thinking });
+  if (text) blocks.push({ type: "text", text });
+  return { role: "assistant", content: blocks };
+}

@@ -164,3 +164,219 @@ describe("executeToolCalls · ctx.llm 注入契约", () => {
     expect(captured2.ctx!.llm).toBe(roles);
   });
 });
+
+// ─── abort 路径测试 ───
+
+import type { ExecuteToolCallsResult } from "../types.js";
+
+async function drainResult(
+  gen: AsyncGenerator<AgentYield, ExecuteToolCallsResult>,
+): Promise<ExecuteToolCallsResult> {
+  while (true) {
+    const { value, done } = await gen.next();
+    if (done) return value;
+  }
+}
+
+function makeBatchTool(
+  name: string,
+  handler: () => Promise<{ content: string; isError?: boolean }> | { content: string; isError?: boolean },
+): ToolDefinition {
+  return {
+    name,
+    description: `Test tool: ${name}`,
+    inputSchema: { type: "object" as const },
+    isReadOnly: true,
+    isParallelSafe: true,
+    needsPermission: false,
+    call: async () => handler(),
+  };
+}
+
+describe("executeToolCalls · abort 路径", () => {
+  const calls3: ToolUseBlock[] = [
+    { type: "tool_use", id: "1", name: "t", input: {} },
+    { type: "tool_use", id: "2", name: "t", input: {} },
+    { type: "tool_use", id: "3", name: "t", input: {} },
+  ];
+
+  it("循环顶 abort guard:已 aborted signal → 立即退出,所有 tool_use 进 unexecutedToolUses", async () => {
+    const ctrl = new AbortController();
+    ctrl.abort();
+    const tool = makeBatchTool("t", () => ({ content: "ok" }));
+
+    const result = await drainResult(
+      executeToolCalls({
+        toolCalls: calls3,
+        tools: [tool],
+        deps: passthroughDeps,
+        workingDirectory: "/tmp",
+        abortSignal: ctrl.signal,
+      }),
+    );
+
+    expect(result.completedResults).toHaveLength(0);
+    expect(result.unexecutedToolUses).toHaveLength(3);
+    expect(result.unexecutedToolUses.map((t) => t.id)).toEqual(["1", "2", "3"]);
+    // 工具间隙 abort,非工具内 → undefined
+    expect(result.abortedDuringToolAt).toBeUndefined();
+  });
+
+  it("第 N 工具完成后 abort:completedResults 含已完成的合规 result,unexecutedToolUses 含未执行的", async () => {
+    const ctrl = new AbortController();
+    let executedCount = 0;
+    const tool = makeBatchTool("t", () => {
+      executedCount++;
+      if (executedCount === 2) {
+        // 第 2 个工具完成 (返回前) 触发 abort,第 3 个工具进 unexecutedToolUses
+        // 当前工具的合规 result 必须 push (在 abort check 之前) —— 否则 abort 时丢 result
+        // 会让 LLM 在下一轮看不到该工具已执行,可能重发同 tool_use 引发幂等性破坏
+        ctrl.abort();
+      }
+      return { content: `done-${executedCount}` };
+    });
+
+    const result = await drainResult(
+      executeToolCalls({
+        toolCalls: calls3,
+        tools: [tool],
+        deps: passthroughDeps,
+        workingDirectory: "/tmp",
+        abortSignal: ctrl.signal,
+      }),
+    );
+
+    expect(result.completedResults).toHaveLength(2);
+    expect(result.completedResults[0]?.toolUseId).toBe("1");
+    expect(result.completedResults[1]?.toolUseId).toBe("2");
+    expect(result.unexecutedToolUses).toHaveLength(1);
+    expect(result.unexecutedToolUses[0]?.id).toBe("3");
+    // abort 在工具完成 (await 期间) 触发,记录退出时刻供 toolGraceMs 计算
+    expect(typeof result.abortedDuringToolAt).toBe("number");
+  });
+
+  it("工具 await 期间 abort 抛 AbortError:当前工具不进 completedResults,从当前进 unexecutedToolUses", async () => {
+    const ctrl = new AbortController();
+    let attemptCount = 0;
+    const tool = makeBatchTool("t", () => {
+      attemptCount++;
+      if (attemptCount === 1) {
+        return { content: "done-1" };
+      }
+      // 第 2 个工具 await 期间 abort,模拟工具响应 abort 抛 AbortError
+      ctrl.abort();
+      throw new Error("AbortError: aborted by signal");
+    });
+
+    const result = await drainResult(
+      executeToolCalls({
+        toolCalls: calls3,
+        tools: [tool],
+        deps: passthroughDeps,
+        workingDirectory: "/tmp",
+        abortSignal: ctrl.signal,
+      }),
+    );
+
+    // 第 1 个完成,第 2 个 abort 抛错不进 completedResults
+    expect(result.completedResults).toHaveLength(1);
+    expect(result.completedResults[0]?.toolUseId).toBe("1");
+    // 第 2 个 + 第 3 个进 unexecutedToolUses (cleanup 注入 placeholder)
+    expect(result.unexecutedToolUses).toHaveLength(2);
+    expect(result.unexecutedToolUses.map((t) => t.id)).toEqual(["2", "3"]);
+    expect(typeof result.abortedDuringToolAt).toBe("number");
+  });
+
+  it("非 abort 路径:completedResults 含全部,unexecutedToolUses 空,abortedDuringToolAt undefined", async () => {
+    const tool = makeBatchTool("t", () => ({ content: "ok" }));
+
+    const result = await drainResult(
+      executeToolCalls({
+        toolCalls: calls3,
+        tools: [tool],
+        deps: passthroughDeps,
+        workingDirectory: "/tmp",
+      }),
+    );
+
+    expect(result.completedResults).toHaveLength(3);
+    expect(result.unexecutedToolUses).toEqual([]);
+    expect(result.abortedDuringToolAt).toBeUndefined();
+  });
+
+  it("catch 块 abort 抛 AbortError:yield 序列只含 tool_start,不 yield tool_end (cleanup 注入唯一 placeholder)", async () => {
+    // 修复回归:之前 catch 块 abort 路径 yield/emit tool_end 与 cleanup placeholder 重复,
+    // 同一 tool_use 收两个 tool_result 进 user message → Anthropic API 报 400。
+    // 修复后 catch 块只 break,cleanup 在 agent-loop 那一层为 unexecutedToolUses (含本工具)
+    // 注入唯一 placeholder。
+    const ctrl = new AbortController();
+    let attemptCount = 0;
+    const tool = makeBatchTool("t", () => {
+      attemptCount++;
+      if (attemptCount === 1) {
+        return { content: "done-1" };
+      }
+      ctrl.abort();
+      throw new Error("AbortError: aborted by signal");
+    });
+
+    const yields: AgentYield[] = [];
+    const gen = executeToolCalls({
+      toolCalls: calls3,
+      tools: [tool],
+      deps: passthroughDeps,
+      workingDirectory: "/tmp",
+      abortSignal: ctrl.signal,
+    });
+
+    let result: ExecuteToolCallsResult | undefined;
+    while (true) {
+      const { value, done } = await gen.next();
+      if (done) {
+        result = value;
+        break;
+      }
+      yields.push(value);
+    }
+
+    // tool_start: tc1 + tc2 (tc3 因循环顶 abort guard 不进)
+    const toolStarts = yields.filter((y) => y.type === "tool_start");
+    expect(toolStarts).toHaveLength(2);
+    expect(toolStarts.map((y) => (y.type === "tool_start" ? y.id : ""))).toEqual([
+      "1",
+      "2",
+    ]);
+
+    // tool_end: 只 tc1 (完成的);tc2 因 catch 块 abort 不 yield (避免与 cleanup placeholder 重复)
+    const toolEnds = yields.filter((y) => y.type === "tool_end");
+    expect(toolEnds).toHaveLength(1);
+    expect(toolEnds[0]?.type === "tool_end" && toolEnds[0].id).toBe("1");
+
+    // 返回值:tc1 进 completedResults,tc2+tc3 进 unexecutedToolUses
+    expect(result?.completedResults).toHaveLength(1);
+    expect(result?.unexecutedToolUses).toHaveLength(2);
+  });
+
+  it("工具未找到分支保持 isError 路径:不进 unexecutedToolUses,继续后续 tool", async () => {
+    const tool = makeBatchTool("t", () => ({ content: "ok" }));
+    const callsWithMissing: ToolUseBlock[] = [
+      { type: "tool_use", id: "1", name: "t", input: {} },
+      { type: "tool_use", id: "2", name: "missing-tool", input: {} },
+      { type: "tool_use", id: "3", name: "t", input: {} },
+    ];
+
+    const result = await drainResult(
+      executeToolCalls({
+        toolCalls: callsWithMissing,
+        tools: [tool],
+        deps: passthroughDeps,
+        workingDirectory: "/tmp",
+      }),
+    );
+
+    // 全部 3 个进 completedResults (含 missing 的 isError tool_result)
+    expect(result.completedResults).toHaveLength(3);
+    expect(result.completedResults[1]?.isError).toBe(true);
+    expect(result.unexecutedToolUses).toEqual([]);
+  });
+});
