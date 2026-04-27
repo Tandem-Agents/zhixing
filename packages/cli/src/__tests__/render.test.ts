@@ -228,29 +228,44 @@ describe("renderSummary: 终止类型差异化", () => {
 describe("setupInterruptRendering: 倒计时 ticker + 事件协调", () => {
   let warnSpy: ReturnType<typeof vi.spyOn>;
   let stdoutSpy: ReturnType<typeof vi.spyOn>;
+  let stderrSpy: ReturnType<typeof vi.spyOn>;
+  let originalIsTTY: boolean | undefined;
   const pauseUI = vi.fn();
 
   beforeEach(() => {
     vi.useFakeTimers();
     warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    // 锚定 TTY 模式让测试覆盖 \r 单行刷新路径 (vitest 默认非 TTY 走的是 console.warn 一次性输出)
+    originalIsTTY = process.stderr.isTTY;
+    Object.defineProperty(process.stderr, "isTTY", { configurable: true, value: true });
     pauseUI.mockClear();
   });
   afterEach(() => {
     vi.clearAllTimers();
     vi.useRealTimers();
     vi.restoreAllMocks();
+    // 恢复 isTTY 原值 (vi.restoreAllMocks 不处理 defineProperty)
+    if (originalIsTTY === undefined) {
+      delete (process.stderr as unknown as { isTTY?: boolean }).isTTY;
+    } else {
+      Object.defineProperty(process.stderr, "isTTY", {
+        configurable: true,
+        value: originalIsTTY,
+      });
+    }
   });
 
-  const findWarnContaining = (substr: string): string | undefined => {
-    for (const call of warnSpy.mock.calls) {
+  const findStderrContaining = (substr: string): string | undefined => {
+    for (const call of stderrSpy.mock.calls) {
       const text = stripAnsi(String(call[0] ?? ""));
       if (text.includes(substr)) return text;
     }
     return undefined;
   };
 
-  it("warn 触发 → 立即输出第一行 + 启动每秒 ticker", async () => {
+  it("TTY 模式: warn 触发 → \\r 单行刷新, 立即输出 + 每秒更新", async () => {
     const bus = createEventBus<AgentEventMap>();
     const handle = setupInterruptRendering(bus, pauseUI);
 
@@ -262,17 +277,22 @@ describe("setupInterruptRendering: 倒计时 ticker + 事件协调", () => {
     });
 
     // 立即输出: deadline = now + (60000 - 30000) = now + 30s → 显示 "30s"
-    expect(findWarnContaining("auto-cancel in 30s")).toBeDefined();
+    expect(findStderrContaining("auto-cancel in 30s")).toBeDefined();
     expect(pauseUI).toHaveBeenCalled();
+
+    // 输出走 \r 前缀 (单行原地刷新, 非新行)
+    const writes = stderrSpy.mock.calls.map((c) => String(c[0]));
+    const tickWrites = writes.filter((s) => stripAnsi(s).includes("auto-cancel"));
+    expect(tickWrites.every((s) => s.startsWith("\r"))).toBe(true);
 
     // 1s 后 ticker 触发, 显示 "29s"
     await vi.advanceTimersByTimeAsync(1000);
-    expect(findWarnContaining("auto-cancel in 29s")).toBeDefined();
+    expect(findStderrContaining("auto-cancel in 29s")).toBeDefined();
 
     handle.dispose();
   });
 
-  it("stream_event 到达 → ticker 清理, 不再每秒输出", async () => {
+  it("TTY 模式: 第一次 tick 前先打 \\n (隔开 watchdog 自身日志/spinner 残留, 避免同行混杂)", async () => {
     const bus = createEventBus<AgentEventMap>();
     const handle = setupInterruptRendering(bus, pauseUI);
 
@@ -282,14 +302,64 @@ describe("setupInterruptRendering: 倒计时 ticker + 事件协调", () => {
       timeoutMs: 60_000,
       chunksReceived: 0,
     });
+
+    // stderr 第一次写入应是单独的 "\n" (在倒计时之前), 后续才是 \r 倒计时
+    const writes = stderrSpy.mock.calls.map((c) => String(c[0]));
+    const newlineIdx = writes.findIndex((s) => s === "\n");
+    const tickIdx = writes.findIndex((s) => stripAnsi(s).includes("auto-cancel"));
+    expect(newlineIdx).toBeGreaterThanOrEqual(0);
+    expect(tickIdx).toBeGreaterThan(newlineIdx);
+    handle.dispose();
+  });
+
+  it("非 TTY 模式: 仅 console.warn 一次, 不启动 ticker (避免 CI / pipe 日志爆炸)", async () => {
+    Object.defineProperty(process.stderr, "isTTY", { configurable: true, value: false });
+    const bus = createEventBus<AgentEventMap>();
+    const handle = setupInterruptRendering(bus, pauseUI);
+
+    await bus.emit("interrupt:warn", {
+      kind: "idle-timeout-warn",
+      elapsedMs: 30_000,
+      timeoutMs: 60_000,
+      chunksReceived: 0,
+    });
+
+    // 非 TTY 走 console.warn 一次, 不调 process.stderr.write
+    const found = warnSpy.mock.calls.find((c) => stripAnsi(String(c[0])).includes("auto-cancel"));
+    expect(found).toBeDefined();
+
+    // 推 5s 不应有新 ticker 输出 (非 TTY 不启动 setInterval)
     const callsBefore = warnSpy.mock.calls.length;
-
-    // chunk 到达 (任意 stream event), ticker 应停
-    await bus.emit("llm:stream_event", { type: "text_delta", text: "chunk" });
     await vi.advanceTimersByTimeAsync(5000);
-
-    // ticker 停 → 5 秒推进无新输出
     expect(warnSpy.mock.calls.length).toBe(callsBefore);
+    handle.dispose();
+  });
+
+  it("stream_event 到达 → ticker 清理 + 倒计时残留行被擦除", async () => {
+    const bus = createEventBus<AgentEventMap>();
+    const handle = setupInterruptRendering(bus, pauseUI);
+
+    await bus.emit("interrupt:warn", {
+      kind: "idle-timeout-warn",
+      elapsedMs: 30_000,
+      timeoutMs: 60_000,
+      chunksReceived: 0,
+    });
+    stderrSpy.mockClear();
+
+    await bus.emit("llm:stream_event", { type: "text_delta", text: "chunk" });
+
+    // 清行: 写入 \r + 空格 + \r 把光标拉回干净行首
+    const cleared = stderrSpy.mock.calls.find((c) => /^\r {3,}\r$/.test(String(c[0])));
+    expect(cleared).toBeDefined();
+
+    // 推 5 秒无新 ticker 输出
+    stderrSpy.mockClear();
+    await vi.advanceTimersByTimeAsync(5000);
+    const newTicks = stderrSpy.mock.calls.filter((c) =>
+      stripAnsi(String(c[0])).includes("auto-cancel"),
+    );
+    expect(newTicks).toEqual([]);
     handle.dispose();
   });
 
@@ -304,21 +374,21 @@ describe("setupInterruptRendering: 倒计时 ticker + 事件协调", () => {
       chunksReceived: 0,
     });
     await bus.emit("llm:stream_event", { type: "text_delta", text: "chunk" });
-    warnSpy.mockClear();
+    stderrSpy.mockClear();
 
     // chunk 后 watchdog 重新 arm, 30s 后再次 warn
     await bus.emit("interrupt:warn", {
       kind: "idle-timeout-warn",
       elapsedMs: 30_000,
       timeoutMs: 60_000,
-      chunksReceived: 5, // reset 后已收到 5 chunks
+      chunksReceived: 5,
     });
 
-    expect(findWarnContaining("auto-cancel in 30s")).toBeDefined();
+    expect(findStderrContaining("auto-cancel in 30s")).toBeDefined();
     handle.dispose();
   });
 
-  it("fired 触发 → 输出 [interrupted] + reason summary + 清理 ticker", async () => {
+  it("fired 触发 → 仅 dim [interrupted] 视觉标记 + 清理 ticker + 擦倒计时残留", async () => {
     const bus = createEventBus<AgentEventMap>();
     const handle = setupInterruptRendering(bus, pauseUI);
 
@@ -330,6 +400,7 @@ describe("setupInterruptRendering: 倒计时 ticker + 事件协调", () => {
     });
     warnSpy.mockClear();
     stdoutSpy.mockClear();
+    stderrSpy.mockClear();
 
     await bus.emit("interrupt:fired", {
       reason: { kind: "user-cancel", source: "esc", pressedAt: 1 },
@@ -338,20 +409,35 @@ describe("setupInterruptRendering: 倒计时 ticker + 事件协调", () => {
       toolGraceMs: 0,
     });
 
-    // [interrupted] 标记走 stdout (与 LLM 文本同 stream)
+    // [interrupted] 走 stdout (与 LLM 文本同 stream, 形成视觉连续)
     const stdoutCalls = stdoutSpy.mock.calls.map((c) => stripAnsi(String(c[0])));
     expect(stdoutCalls.some((s) => s.includes("[interrupted]"))).toBe(true);
-    // summary 走 stderr
-    expect(findWarnContaining("interrupted by user (esc)")).toBeDefined();
 
-    // ticker 应被清理: 推 5s 无新输出 (除上面 fired 自身的)
-    const callsAfterFired = warnSpy.mock.calls.length;
+    // 倒计时残留行被擦除 (\r + 空格 + \r)
+    const cleared = stderrSpy.mock.calls.find((c) => /^\r {3,}\r$/.test(String(c[0])));
+    expect(cleared).toBeDefined();
+
+    // reason 文本不重复输出 (由摘要行展示)
+    const reasonInWarn = warnSpy.mock.calls.find((c) =>
+      stripAnsi(String(c[0])).includes("interrupted by user"),
+    );
+    const reasonInStderr = stderrSpy.mock.calls.find((c) =>
+      stripAnsi(String(c[0])).includes("interrupted by user"),
+    );
+    expect(reasonInWarn).toBeUndefined();
+    expect(reasonInStderr).toBeUndefined();
+
+    // ticker 清理: 推 5s 无新 ticker 输出
+    stderrSpy.mockClear();
     await vi.advanceTimersByTimeAsync(5000);
-    expect(warnSpy.mock.calls.length).toBe(callsAfterFired);
+    const newTicks = stderrSpy.mock.calls.filter((c) =>
+      stripAnsi(String(c[0])).includes("auto-cancel"),
+    );
+    expect(newTicks).toEqual([]);
     handle.dispose();
   });
 
-  it("run_end 兜底清理 ticker (没 fired 也清理)", async () => {
+  it("run_end 兜底清理 ticker (没 fired 也清理 + 擦残留)", async () => {
     const bus = createEventBus<AgentEventMap>();
     const handle = setupInterruptRendering(bus, pauseUI);
 
@@ -361,7 +447,7 @@ describe("setupInterruptRendering: 倒计时 ticker + 事件协调", () => {
       timeoutMs: 60_000,
       chunksReceived: 0,
     });
-    warnSpy.mockClear();
+    stderrSpy.mockClear();
 
     await bus.emit("agent:run_end", {
       reason: "completed",
@@ -369,8 +455,17 @@ describe("setupInterruptRendering: 倒计时 ticker + 事件协调", () => {
       usage: usageZero,
     });
 
+    // 倒计时残留被擦除
+    const cleared = stderrSpy.mock.calls.find((c) => /^\r {3,}\r$/.test(String(c[0])));
+    expect(cleared).toBeDefined();
+
+    // 推 5s 无新 ticker 输出
+    stderrSpy.mockClear();
     await vi.advanceTimersByTimeAsync(5000);
-    expect(warnSpy.mock.calls.length).toBe(0);
+    const newTicks = stderrSpy.mock.calls.filter((c) =>
+      stripAnsi(String(c[0])).includes("auto-cancel"),
+    );
+    expect(newTicks).toEqual([]);
     handle.dispose();
   });
 
@@ -386,6 +481,10 @@ describe("setupInterruptRendering: 倒计时 ticker + 事件协调", () => {
       chunksReceived: 0,
     });
 
+    const ticks = stderrSpy.mock.calls.filter((c) =>
+      stripAnsi(String(c[0])).includes("auto-cancel"),
+    );
+    expect(ticks).toEqual([]);
     expect(warnSpy.mock.calls.length).toBe(0);
   });
 });

@@ -29,7 +29,7 @@ describe("createInterruptController", () => {
     expect(getAbortReason(c.signal)?.kind).toBe("external");
   });
 
-  it("外部 signal 后续 abort → controller 异步 abort with kind=external", async () => {
+  it("外部 signal 后续裸 abort → controller fallback kind=external (无 typed reason)", async () => {
     const ext = new AbortController();
     const c = createInterruptController({ externalSignals: [ext.signal] });
     expect(c.signal.aborted).toBe(false);
@@ -37,6 +37,36 @@ describe("createInterruptController", () => {
     ext.abort();
     expect(c.signal.aborted).toBe(true);
     expect(getAbortReason(c.signal)?.kind).toBe("external");
+  });
+
+  it("外部 signal 已用 abortWithReason 触发 typed reason → controller 透传 reason 不覆盖", () => {
+    // cli KeyboardSource 按 Esc 触发 user-cancel,signal 通过 RunParams.abortSignal
+    // 跨层传到 agent-loop;agent-loop 内 createInterruptController 应透传原 typed reason,
+    // 让下游 (REPL renderSummary 等) 能展示差异化中断原因 ("interrupted by user (esc)" 等),
+    // 而不是被笼统覆盖为 "external signal"。
+    const ext = new AbortController();
+    abortWithReason(ext, { kind: "user-cancel", source: "esc", pressedAt: 100 });
+
+    const c = createInterruptController({ externalSignals: [ext.signal] });
+    expect(c.signal.aborted).toBe(true);
+    const r = getAbortReason(c.signal);
+    expect(r?.kind).toBe("user-cancel");
+    if (r?.kind === "user-cancel") {
+      expect(r.source).toBe("esc");
+    }
+  });
+
+  it("外部 signal 后续用 abortWithReason 触发 typed reason → controller 异步透传", () => {
+    const ext = new AbortController();
+    const c = createInterruptController({ externalSignals: [ext.signal] });
+
+    abortWithReason(ext, { kind: "user-cancel", source: "ctrl-c", pressedAt: 200 });
+    expect(c.signal.aborted).toBe(true);
+    const r = getAbortReason(c.signal);
+    expect(r?.kind).toBe("user-cancel");
+    if (r?.kind === "user-cancel") {
+      expect(r.source).toBe("ctrl-c");
+    }
   });
 
   it("多个外部 signal 任一 abort → controller abort", () => {

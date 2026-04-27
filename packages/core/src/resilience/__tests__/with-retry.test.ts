@@ -579,4 +579,93 @@ describe("withRetry", () => {
       );
     });
   });
+
+  // ─── abort fast-path: 协议层不变量 (abort = 主动终止意图, 永不重试) ───
+
+  describe("abort 路径 fast-path: 永不重试", () => {
+    it("循环顶 check: signal 已 aborted (defense pre-flight) → silent return 不 emit retry", async () => {
+      vi.useRealTimers();
+      const callLLM = vi.fn(makeSuccessStream("ignored"));
+      const ctrl = new AbortController();
+      ctrl.abort();
+
+      const eventBus = createEventBus<AgentEventMap>();
+      const retryAttempts: AgentEventMap["retry:attempt"][] = [];
+      eventBus.on("retry:attempt", (e) => retryAttempts.push(e));
+
+      const wrapped = withRetry(callLLM, { eventBus });
+      const events = await collectEvents(
+        wrapped({ ...DUMMY_REQUEST, abortSignal: ctrl.signal }),
+      );
+
+      // signal pre-aborted → 循环顶 fast-path return, 不调用 callLLM, 不 yield 任何事件
+      expect(callLLM).not.toHaveBeenCalled();
+      expect(events).toEqual([]);
+      expect(retryAttempts).toEqual([]);
+    });
+
+    it("catch 后 check: SDK 抛非标准 AbortError 但 signal aborted → silent return 不重试", async () => {
+      vi.useRealTimers();
+      // 模拟 SDK 在 abort 时抛 generic Error (不是 DOMException AbortError),
+      // 经典案例: fetch 抛 "fetch failed" / 自定义 wrapper "ABORT: ..." / undici 抛 UND_ERR_ABORTED
+      const ctrl = new AbortController();
+      const callLLM = vi.fn(async function* (): AsyncGenerator<StreamEvent, void, undefined> {
+        yield { type: "message_start" };
+        // 模拟 SDK 在 abort 触发后立即同步标记 signal aborted, 然后抛非标准 error
+        ctrl.abort();
+        throw new Error("fetch failed");
+      });
+
+      const eventBus = createEventBus<AgentEventMap>();
+      const retryAttempts: AgentEventMap["retry:attempt"][] = [];
+      eventBus.on("retry:attempt", (e) => retryAttempts.push(e));
+
+      const wrapped = withRetry(callLLM, { eventBus });
+      const events = await collectEvents(
+        wrapped({ ...DUMMY_REQUEST, abortSignal: ctrl.signal }),
+      );
+
+      // SDK 已被调用一次, signal 同步 aborted, catch 后 fast-path return
+      expect(callLLM).toHaveBeenCalledTimes(1);
+      // 不 yield error event (silent return), 不 emit retry
+      expect(events.find((e) => e.type === "error")).toBeUndefined();
+      expect(retryAttempts).toEqual([]);
+    });
+
+    it("AbortError (标准 DOMException) → classifyProviderError 已识别为 'aborted', 不在 retryableTypes → 不重试", async () => {
+      vi.useRealTimers();
+      const callLLM = vi.fn(
+        makeThrowingStream(new DOMException("Aborted", "AbortError")),
+      );
+
+      const eventBus = createEventBus<AgentEventMap>();
+      const retryAttempts: AgentEventMap["retry:attempt"][] = [];
+      eventBus.on("retry:attempt", (e) => retryAttempts.push(e));
+
+      const wrapped = withRetry(callLLM, { eventBus });
+      const events = await collectEvents(wrapped(DUMMY_REQUEST));
+
+      // AbortError 被分类为 "aborted", 不在 retryableTypes → yield error event, 不 retry
+      expect(callLLM).toHaveBeenCalledTimes(1);
+      expect(retryAttempts).toEqual([]);
+      const errorEvent = events.find((e) => e.type === "error");
+      expect(errorEvent).toBeDefined();
+    });
+
+    it("classifyByMessage 启发式: 含 'abort' 关键字的非标准错误也归类为 aborted (兜底)", async () => {
+      vi.useRealTimers();
+      const callLLM = vi.fn(makeThrowingStream(new Error("ABORT: Command was aborted")));
+
+      const eventBus = createEventBus<AgentEventMap>();
+      const retryAttempts: AgentEventMap["retry:attempt"][] = [];
+      eventBus.on("retry:attempt", (e) => retryAttempts.push(e));
+
+      const wrapped = withRetry(callLLM, { eventBus });
+      await collectEvents(wrapped(DUMMY_REQUEST));
+
+      // 即使 signal 没 aborted (无 abortSignal 参数), message 启发式也能识别 → 不重试
+      expect(callLLM).toHaveBeenCalledTimes(1);
+      expect(retryAttempts).toEqual([]);
+    });
+  });
 });

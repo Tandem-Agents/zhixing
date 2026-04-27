@@ -91,6 +91,11 @@ async function* retryableStream(
   let lastError: unknown;
 
   for (let attempt = 0; attempt <= config.maxRetries; attempt++) {
+    // ── abort fast-path (循环顶) ──
+    // abort 是协议层"用户/系统主动终止"信号, 永不重试。signal aborted → silent return,
+    // 不 emit retry, 不 yield error —— 让上游 streamLLMCall 走正常 abort 路径。
+    if (request.abortSignal?.aborted) return;
+
     // ── 熔断器检查 ──
     if (!breaker.isAllowed) {
       await emitRetryExhausted(eventBus, lastError, attempt);
@@ -154,6 +159,13 @@ async function* retryableStream(
     } catch (err) {
       streamError = err;
     }
+
+    // ── abort fast-path (catch 后) ──
+    // SDK 在 abort 时抛的可能是非标准 AbortError (如 "fetch failed" / "Request aborted"),
+    // 不依赖错误分类, 直接看 signal 状态。aborted → silent return 让 abort 路径快速退出,
+    // 避免误触发 retry 让用户看到"未知错误, 第 1/3 次重试..."的误导性 UX。
+    // 此处 check 是协议层不变量: abort 是主动终止意图, 任何 error 在 abort context 下都不重试。
+    if (request.abortSignal?.aborted) return;
 
     // ── 错误处理 ──
     lastError = streamError;

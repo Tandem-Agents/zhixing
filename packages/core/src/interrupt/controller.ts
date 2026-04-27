@@ -74,11 +74,21 @@ export function createInterruptController(opts?: {
     // controller 让它无法被 GC,直到 ext signal 自己 abort(once:true 才移除)。
     if (controller.signal.aborted) break;
 
+    // 透传 ext signal 的类型化 reason —— `external` 是 fallback 而非强制覆盖。
+    // ext 来源若是本模块的 abortWithReason 触发(典型: cli KeyboardSource 按 Esc 触发
+    // user-cancel reason 后, signal 通过 RunParams.abortSignal 跨层传到 agent-loop),
+    // 应保留原 typed reason 让下游 (REPL renderSummary 等) 能展示差异化中断原因
+    // ("interrupted by user (esc)" 等), 而不是被笼统覆盖为 "external signal"。
+    // 仅当上游裸 abort()/无 typed reason(如 SDK 内部 AbortController)时才 fallback external。
     if (ext.aborted) {
-      abortWithReason(controller, { kind: "external" });
+      const upstream = getAbortReason(ext);
+      abortWithReason(controller, upstream ?? { kind: "external" });
       continue;
     }
-    const onExtAbort = () => abortWithReason(controller, { kind: "external" });
+    const onExtAbort = () => {
+      const upstream = getAbortReason(ext);
+      abortWithReason(controller, upstream ?? { kind: "external" });
+    };
     ext.addEventListener("abort", onExtAbort, { once: true });
   }
 

@@ -124,6 +124,13 @@ const NETWORK_ERROR_CODES = new Set([
 function classifyByMessage(message: string): AgentErrorType {
   const lower = message.toLowerCase();
 
+  // abort 启发式: SDK 在 controller.abort 时可能抛非标准 AbortError (如 fetch 内部
+  // "Request aborted" 或自定义 wrapper "ABORT: ..."), 通过 message 兜底识别。
+  // retryableStream 的 abort fast-path 是协议层主防线, 此处分类是辅助稳健性。
+  if (lower.includes("abort")) {
+    return "aborted";
+  }
+
   if (lower.includes("rate limit") || lower.includes("too many requests")) {
     return "rate_limit";
   }

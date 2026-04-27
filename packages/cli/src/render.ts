@@ -273,22 +273,25 @@ export interface InterruptRenderingHandle {
   dispose(): void;
 }
 
+/** stderr 倒计时行清空宽度 (覆盖最长 "  ⚠ stream slow, will auto-cancel in 30s..." 含 chalk 控制字符余量) */
+const WARN_LINE_CLEAR_WIDTH = 60;
+
 /**
  * 装载 EventBus 中断事件 → 终端可视反馈:
  *
- * - `interrupt:warn` → 启动每秒倒计时 ticker, 输出 "stream slow, will auto-cancel in Ns..."。
- *   倒计时来源:`Date.now() + (timeoutMs - elapsedMs)` 锚定 watchdog 的 abort 截止时间;
- *   用 console.warn 单行输出(每秒一行),非 \r 原地刷新——跨平台稳定 + 与 watchdog 自身日志
- *   风格一致, 用户能在终端 grep/scroll 历史警告记录。
+ * - `interrupt:warn` → 启动每秒倒计时, 输出 "stream slow, will auto-cancel in Ns..."。
+ *   - **TTY 模式**: \r 原地刷新单行 (避免每秒多输出一行刷屏)
+ *   - **非 TTY 模式**: 仅输出一次警告, 不 ticker (CI / 日志重定向场景日志不爆炸)
+ *   - 首次 tick 前先打 \n: 隔开 watchdog 自身的 stderr 日志或 spinner 残留, 避免同行混杂
  *
- * - `llm:stream_event` → 清理 ticker (chunk 到达 = stream 恢复活跃, watchdog 已 reset 内部
- *   timer, 屏幕侧也应隐藏倒计时避免误导)。
+ * - `llm:stream_event` → 清理 ticker + 擦倒计时残留 (chunk 到达 = stream 恢复活跃)。
  *
- * - `interrupt:fired` → 清理 ticker + 输出 dim `[interrupted]` 标记 + reason summary。
- *   `[interrupted]` 走 stdout (接在 LLM 文本之后形成视觉连续);summary 走 console.warn
- *   (与 watchdog 警告同 stream 便于诊断)。
+ * - `interrupt:fired` → 清理 ticker + 擦倒计时残留 + 输出 dim `[interrupted]` 视觉标记。
+ *   走 stdout 接在 LLM 文本之后形成视觉连续。reason 文本由 renderSummary 在
+ *   终止摘要行展示, 此处不重复输出避免冗余 (终端 UX 关注点分离: fired 标记
+ *   abort 瞬间, summary 展示终止原因)。
  *
- * - `agent:run_end` → 兜底清理 ticker (即使 fired 在 abort 路径外不发,run_end 一定发)。
+ * - `agent:run_end` → 兜底清理 ticker (即使 fired 在 abort 路径外不发, run_end 一定发)。
  *
  * 返回 dispose 函数, 调用方在 run() 结束 finally 调一次, 确保 listener 不跨 run 累积。
  */
@@ -298,6 +301,15 @@ export function setupInterruptRendering(
 ): InterruptRenderingHandle {
   let warnTicker: ReturnType<typeof setInterval> | null = null;
   let warnDeadline: number | null = null;
+  let warnLinePrinted = false; // 是否已用 \r 在 stderr 写入倒计时行 (TTY 模式), 决定是否需要清行
+
+  const clearWarnLine = (): void => {
+    // 仅 TTY 模式下需要清: 非 TTY 走的是 console.warn 一次性输出, 没有 \r 残留行
+    if (warnLinePrinted && process.stderr.isTTY) {
+      process.stderr.write(`\r${" ".repeat(WARN_LINE_CLEAR_WIDTH)}\r`);
+    }
+    warnLinePrinted = false;
+  };
 
   const clearWarnTicker = (): void => {
     if (warnTicker !== null) {
@@ -309,17 +321,41 @@ export function setupInterruptRendering(
 
   const onWarn = (e: AgentEventMap["interrupt:warn"]) => {
     clearWarnTicker();
+    clearWarnLine();
     // deadline 锚定 watchdog 的 abort 触发时刻: e.timeoutMs - e.elapsedMs 是距离 abort
     // 还剩多久 (Date.now 在 fake timer 测试中也被 vitest mock, 行为可预测)
     warnDeadline = Date.now() + (e.timeoutMs - e.elapsedMs);
+
+    // 非 TTY (CI / pipe / 重定向): 只输出一次警告, 不 ticker 避免日志爆炸
+    if (!process.stderr.isTTY) {
+      pauseUI();
+      const remaining = Math.max(0, Math.ceil((warnDeadline - Date.now()) / 1000));
+      console.warn(
+        chalk.yellow(`  ⚠ stream slow, will auto-cancel in ${remaining}s if no response`),
+      );
+      return;
+    }
+
+    // TTY: \r 原地刷新单行倒计时 (单行更新避免刷屏)
+    let firstTick = true;
     const tick = () => {
       if (warnDeadline === null) return;
       const remaining = Math.max(0, Math.ceil((warnDeadline - Date.now()) / 1000));
       pauseUI();
-      console.warn(
-        chalk.yellow(`  ⚠ stream slow, will auto-cancel in ${remaining}s...`),
+      if (firstTick) {
+        // 第一次 tick 前换行: 隔开 watchdog 自身的 stderr 日志(`[watchdog] stream idle...`)
+        // 或残留 spinner, 避免倒计时附在前一行末尾形成视觉混杂
+        process.stderr.write("\n");
+        firstTick = false;
+      }
+      process.stderr.write(
+        `\r${chalk.yellow(`  ⚠ stream slow, will auto-cancel in ${remaining}s...`)}`,
       );
-      if (remaining <= 0) clearWarnTicker();
+      warnLinePrinted = true;
+      if (remaining <= 0) {
+        clearWarnLine();
+        clearWarnTicker();
+      }
     };
     tick(); // 立即输出第一行, 不等 1s
     warnTicker = setInterval(tick, 1000);
@@ -328,20 +364,22 @@ export function setupInterruptRendering(
   const onStreamEvent = () => {
     // chunk 到达 = stream 恢复活跃: watchdog 内部已 reset timer, 屏幕也应隐藏倒计时
     clearWarnTicker();
+    clearWarnLine();
   };
 
-  const onFired = (e: AgentEventMap["interrupt:fired"]) => {
+  const onFired = (_e: AgentEventMap["interrupt:fired"]) => {
     clearWarnTicker();
+    clearWarnLine();
     pauseUI();
     // dim [interrupted] 接在 LLM 文本之后, 形成视觉连续: 用户看到 LLM 输出戛然而止 + dim 标记
-    // 标识 partial 状态。stdout 走 (与 LLM text_delta 同 stream), 不混入 stderr 警告
+    // 标识 partial 状态。stdout 走 (与 LLM text_delta 同 stream), 与 stderr 警告分离。
+    // reason 文本由 renderSummary 摘要行展示, 此处不重复输出避免冗余。
     process.stdout.write(chalk.dim("\n[interrupted]\n"));
-    const summary = formatAbortReasonSummary(e.reason);
-    console.warn(chalk.yellow(`  ⚠ ${summary}`));
   };
 
   const onRunEnd = () => {
     clearWarnTicker();
+    clearWarnLine();
   };
 
   eventBus.on("interrupt:warn", onWarn);
@@ -352,6 +390,7 @@ export function setupInterruptRendering(
   return {
     dispose() {
       clearWarnTicker();
+      clearWarnLine();
       eventBus.off("interrupt:warn", onWarn);
       eventBus.off("llm:stream_event", onStreamEvent);
       eventBus.off("interrupt:fired", onFired);
