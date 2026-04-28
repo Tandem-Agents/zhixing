@@ -439,12 +439,30 @@ abort(conversationId: string, reason?: AbortReason): AbortResult {
   return { abortedInFlight, cancelledPending }
 }
 
-// abortAll —— 关停链路用,只关心 in-flight 维度(pending queue 在 disposeAll 中清);
-// 返回 in-flight aborted count,与 abortAllAndWait 配合实现 INV-R7
+// abortAll —— 关停链路用,与 abort 单 session 行为对称:
+//   - 同步 fire 各 session in-flight controller(in-flight 维度)
+//   - 同步清各 session pending queue 并触发各 task.cancel(pending 维度)
+//
+// 不依赖 conversations.disposeAll() 注册到关停链 —— grep 验证生产代码无人调
+// disposeAll(只在 test afterEach 用),若把"清 pending"假设给 disposeAll 等于
+// 假设了一个未建立的事实;且关停场景下 pending 与 in-flight 是同一组取消语义
+// (用户/scheduler 让全停),拆开成两个方法处理是非对称破口。
+//
+// 返回 in-flight aborted count(pending 计数关停场景不暴露 — 调用方是
+// CleanupRegistry callback,只关心 drain 完成性不关心 UX 计数);
+// 与 abortAllAndWait 配合实现 INV-R7 (后者 await 所有 in-flight 走完 cleanup)
 abortAll(reason: AbortReason): number {
   let aborted = 0
-  for (const [, session] of this.sessions) {
+  for (const [id, session] of this.sessions) {
     if (session.runtime.abort(reason)) aborted++
+    // 对称 abort 单 session:同时清 pending queue + 触发各 cancel hook
+    const queue = this.pendingQueues.get(id)
+    if (queue) {
+      for (const task of queue) {
+        try { task.cancel() } catch { /* swallow,逐个独立 */ }
+      }
+      this.pendingQueues.delete(id)
+    }
   }
   return aborted
 }
@@ -933,6 +951,48 @@ registry.register("inboundRouter.refuseNew", () => {
 // (主模块 INV-5)和取消反馈消息全部丢失。
 ```
 
+**`refuseNewMessages` 行为契约**(LIFO 第 1 步触发后,关停窗口内新到消息的处理):
+
+`InboundRouter` 持有 `private acceptingNew: boolean = true`,`refuseNewMessages()` 方法将其置 `false`。`handleMessage` 入口最先检查该 flag——已拒新时**对每条新到消息直接 `adapter.send` 统一文案 + log + 立即 return**,不进 IntentClassifier / confirmation / agent 任何路径:
+
+```typescript
+// inbound-router.ts handleMessage 入口最前(在 IntentClassifier 之前)
+if (!this.acceptingNew) {
+  this.logger.info(`refused new message during shutdown: ${msg.channelId}/${msg.messageId}`)
+  const replyTarget = buildReplyTarget(msg)
+  const adapter = this.channels.get(replyTarget.channelId)
+  if (adapter) {
+    adapter.send(replyTarget, { text: SHUTDOWN_REFUSAL_NOTICE_ZH })
+           .catch((e) => this.logger.error(`refusal notice send failed: ${errMsg(e)}`))
+  }
+  return
+}
+
+// SHUTDOWN_REFUSAL_NOTICE_ZH = "服务暂时不可用,请稍后重新发送。"
+//   定义在 inbound-router.ts 模块作用域常量 —— 固定文案,不依赖 reason kind,
+//   与 formatAbortReasonZh 的 abort 反馈语义独立(那是 in-flight turn 被打断的
+//   反馈,这是关停期间新到孤立消息的反馈),不进 abort formatter
+```
+
+**为何反馈而非 silent log**(此处的设计决策):
+
+| 维度 | 反馈方案(本规格选择) | silent log 方案(被否决) |
+|------|--------------------|------------------------|
+| **窗口内 channel 状态** | LIFO 顺序 `channels.dispose` 在第 5 步(最后),`refuseNew`(第 1)到 `server.close`(第 4)之间 ≤30s,channel 完全活着;in-flight cleanup 反馈本就走同一 adapter | 假设 channel 即将关闭,但实际还活着 |
+| **飞书 webhook 模型下用户感知** | 用户立即收到"服务暂时不可用"——清晰知道是服务侧问题,可主动重试 | webhook POST 仍成功,server 静默丢;**用户那边消息显示"已送达"但 bot 不回**——会以为 bot 卡住 |
+| **覆盖面** | 触达"关停期间新发消息但当前没在跑 turn 的用户" | in-flight cleanup 反馈只触达"正在跑 turn 的用户";新发消息用户成为信息真空区 |
+| **关停链鲁棒性** | `adapter.send` 失败 try-catch 仅 log,不 block / 不抛 | 等同 |
+| **INV-R7 精神一致性** | 与 INV-R7"关停期间反馈不丢"对齐 | 与 INV-R7 精神矛盾(同样是关停反馈,in-flight 不丢但新到丢) |
+
+**实施要点**:
+
+- **仅拦 inbound,不影响 outbound** —— `acceptingNew = false` 只在 `handleMessage` 入口拦截入站消息;in-flight cleanup 路径继续走 `adapter.send` 抛 partial / abort 反馈不受影响(那条路径不经 `handleMessage`)
+- **绕过 Outbox** —— refusal 反馈直接 `adapter.send`,与 `handleControlIntent` 反馈同源策略;关停期间 Outbox 也在 drain,经 Outbox 会让反馈卡住
+- **send 失败仅 log** —— 关停链不能因反馈失败 hang(channel 异常 / 网络断 / 超时等),`.catch(log)` 兜底
+- **不依赖 reason kind** —— refusal 是固定文案的"服务可用性反馈",与 `AbortReason` 无关,不进 `formatAbortReasonZh` 避免污染 abort 渲染层
+- **窗口边界一致性** —— 反馈成功的前提是 `channels.dispose` 还没执行;LIFO 顺序天然保证(第 5 步),无需额外协调
+- **多 channel 通用性** —— 通过 `adapter.send` 抽象触达飞书 / Slack / RPC 等所有已注册 channel,与本模块"平台无关"原则一致
+
 **RPC 暴露**:
 
 ```typescript
@@ -1065,7 +1125,7 @@ async function runManagedTurn(
 
 `AbortReason` 上**无需为按钮预留新字面量**——按钮触发与文本"取消"在协议层都是 `user-cancel { source: "rpc" }`(§2.4 决策);若产品上需要在飞书侧区分文案("您点击了取消按钮" vs "您发送了取消消息"),由飞书 channel formatter 在 reason 之外通过另一个上下文字段携带,不污染协议层。
 
-**实施清单**(留作 RM6,本规格不展开细节):
+**实施清单**(留作 §8 后续工作锚点,本规格不展开细节):
 - 飞书卡片 SDK 接入、`agent:run_start` 事件触发卡片发送
 - 卡片 action callback handler:解析为 `ControlIntent.cancel { matchedKeyword: "<button:cancel>" }`
 - 走 §2.3 `handleControlIntent` 已有路径
@@ -1108,7 +1168,7 @@ async function runManagedTurn(
 
 ### 3.4 为何关键词优先于按钮(实施顺序)
 
-**结论**:RM3 先做关键词,RM6 后做卡片按钮。
+**结论**:本规格 P0 只做关键词(RM3);卡片按钮留作 §8 后续工作锚点。
 
 **理由**:
 - **关键词工作量小**:IntentClassifier + DEFAULT_CANCEL_KEYWORDS + ConversationManager.abort 三处改动
@@ -1216,8 +1276,8 @@ async function runManagedTurn(
 |------|---------|
 | `packages/cli/src/serve/session-adapter.ts` | `run()` 入口创建 `InterruptController({ parent: opts.abortSignal })`,**把 controller.signal 作为 abortSignal 透传给 `agentRuntime.run`**(修 §0.2 D);`abort(reason?)` 立即 fire(从 set flag 改造);删除 `aborted` flag + turn-入口 polling + `turnAborted` flag + `abortSignal.addEventListener` listener(后两者会与主模块 cleanup 路径竞速,导致 partial 与 abortReason 丢失);**保留** messages.push/pop 防孤儿机制 |
 | `packages/server/src/runtime/types.ts` | `SessionRuntime.abort(reason?: AbortReason): boolean` —— additive 扩展接口签名;**新增** `AbortResult` 类型导出(`{ abortedInFlight: boolean, cancelledPending: number }`)供 ConversationManager.abort 使用 |
-| `packages/server/src/runtime/conversation-manager.ts` | `abort(id, reason?): AbortResult` 加 reason 参数 + 返回类型扩为 `AbortResult` 双维度(in-flight + pending queue);abort 同时清理该 session 的 pending queue 并触发各 `PendingTask.cancel`(避免取消语义对 pending 失效);**新增** `abortAll(reason): number`(同步 fire,只关心 in-flight 维度,关停场景下 pending 由 disposeAll 清);**新增** `abortAllAndWait(reason, timeoutMs?): Promise<number>` event-driven 实现(`drainResolver` + `setBusy(false)` 触发 + `Promise.race(drained, timeout)`)|
-| `packages/server/src/channels/inbound-router.ts` | `InboundRouterOptions` 扩可选字段 `intentClassifier?: IntentClassifier`(constructor 缺省 `createDefaultIntentClassifier()`,持有为 `private readonly intentClassifier`);`handleMessage` 在 `tryHandleAsConfirmationReply` **之前**前置 `intentClassifier.classify(msg)`;新增 `handleControlIntent`(按 `AbortResult` 三分支反馈);line 419 调用 `formatAbortReasonZh`;新增 `refuseNewMessages()` 方法 + `private acceptingNew = true` 字段——`handleMessage` 入口在 `acceptingNew === false` 时**直接 log 一行并 return,不向用户 emit 反馈**(channel 即将随 LIFO 链关闭,弱实时反馈不如 log 一致;用户重试时自然得到 channel 不可达的系统反馈);**`PendingTask.cancel` hook 语义不变**(仍是 log,UX 反馈由 ConversationManager.abort 直接返 `cancelledPending` 让 caller 决定 emit 不依赖 hook) |
+| `packages/server/src/runtime/conversation-manager.ts` | `abort(id, reason?): AbortResult` 加 reason 参数 + 返回类型扩为 `AbortResult` 双维度(in-flight + pending queue);abort 同时清理该 session 的 pending queue 并触发各 `PendingTask.cancel`(避免取消语义对 pending 失效);**新增** `abortAll(reason): number`(与 abort 单 session 行为**对称** — 同步 fire 各 session in-flight + 清各 pending queue 触发各 cancel hook;返回 in-flight aborted count,pending 计数关停场景不暴露;**不依赖** `disposeAll()` 注册到关停链 — grep 验证生产代码无人调 `disposeAll`,假设它清 pending 等于假设了未建立的事实);**新增** `abortAllAndWait(reason, timeoutMs?): Promise<number>` event-driven 实现(`drainResolver` + `setBusy(false)` 触发 + `Promise.race(drained, timeout)`)|
+| `packages/server/src/channels/inbound-router.ts` | `InboundRouterOptions` 扩可选字段 `intentClassifier?: IntentClassifier`(constructor 缺省 `createDefaultIntentClassifier()`,持有为 `private readonly intentClassifier`);`handleMessage` 在 `tryHandleAsConfirmationReply` **之前**前置 `intentClassifier.classify(msg)`;新增 `handleControlIntent`(按 `AbortResult` 三分支反馈);line 419 调用 `formatAbortReasonZh`;新增 `refuseNewMessages()` 方法 + `private acceptingNew = true` 字段——`handleMessage` 入口在 `acceptingNew === false` 时**直接 `adapter.send` 统一文案 `SHUTDOWN_REFUSAL_NOTICE_ZH`("服务暂时不可用,请稍后重新发送。")+ log + return**,不进 IntentClassifier / confirmation / agent 任何路径;反馈走 `adapter.send` 绕过 Outbox(与 `handleControlIntent` 反馈同源策略,关停期间 Outbox 也在 drain);send 失败 try-catch 仅 log,不影响关停链(详见 §2.6 `refuseNewMessages` 行为契约);**`PendingTask.cancel` hook 语义不变**(仍是 log,UX 反馈由 ConversationManager.abort 直接返 `cancelledPending` 让 caller 决定 emit 不依赖 hook) |
 | `packages/cli/src/serve/ephemeral-executor.ts` | `EphemeralTurnOptions` 加 `abortSignal?: AbortSignal`,透传给 `runtime.run`;line 74-77 调用 `serializeAbortReason` |
 | `packages/cli/src/serve/command.ts` | 实例化 `RunRegistry`;`runAgentTurn` 用 `params.taskId` 注册/反注册 + 注入 `abortSignal`;`createServerContext({ ..., runRegistry })` 注入到 ServerContext;**追加注册** `inboundRouter.refuseNew` / `runRegistry.abortAllAndWait` / `conversationManager.abortAllAndWait` 到 `CleanupRegistry`(LIFO 顺序见 INV-R7);注册 `schedule.abortRun` RPC 方法 |
 | `packages/server/src/context.ts` | `ServerContext` 加可选字段 `runRegistry?: RunRegistry`(类型从 **`@zhixing/core`** 引入,与 `Scheduler` / `ChannelRegistry` 同源,server 包已依赖 core 无新增依赖);`createServerContext` 接受同名参数 |
@@ -1299,6 +1359,7 @@ async function runManagedTurn(
   - pending only(无 in-flight)→ `{ abortedInFlight: false, cancelledPending: N }`
   - session 不存在 → `{ abortedInFlight: false, cancelledPending: 0 }`,不抛异常
 - 同 turn 内调多次 abort → 仅第一次 `abortedInFlight: true`,后续 `false`(幂等)
+- **`abortAll` 与 `abort` 单 session 对称性**:对持有 N 个 session(其中 K 个 in-flight + L 个 idle 但有 pending)的 manager 调 `abortAll`,验 K 个 in-flight controller 全 fire + L 个 idle 的 pending queue 全清且各 task.cancel 被调一次 + L 个 idle session 的 in-flight 维度未误报(返回 K 而非 N)——确保关停链不依赖 `disposeAll` 也能彻底清掉 pending(避免 cancel hook 漏触发)
 - 主模块 M7 parent 测试在 server 路径同样通过(回归测试)
 - 旧 polling check 测试零保留(全部迁移到 in-flight 测试)
 - grep 确认 `session-adapter.ts` 中无 `addEventListener("abort"` / `turnAborted` 残留
@@ -1358,35 +1419,16 @@ async function runManagedTurn(
   - 注册 `inboundRouter.refuseNew` + 单一 `execution.abortAllAndWait` callback(内部 `Promise.all([conversations.abortAllAndWait, runRegistry.abortAllAndWait])` 并行 drain,详见 §2.6 LIFO 顺序图)到 `CleanupRegistry`,**abortAllAndWait 不是 abortAll** — 后者 fire-and-forget 会让下一步 server.close 抢断 partial 流
 - 修改 `packages/server/src/context.ts`:`ServerContext` 加可选字段 `runRegistry?: RunRegistry`(类型从 `@zhixing/core` 引入)+ `createServerContext` 接受同名参数
 - **追加** `buildScheduleAbortRunMethod` 到已存在的 `packages/server/src/rpc/methods/schedule.ts`(handler 通过 `ctx.server.runRegistry` 取 registry);同步在 RPC method registry 注册
+- **`InboundRouter.refuseNewMessages()` 实现**:加 `private acceptingNew = true` 字段 + `refuseNewMessages()` 方法置 false;`handleMessage` 入口在 `acceptingNew === false` 时直接 `adapter.send(SHUTDOWN_REFUSAL_NOTICE_ZH)` + log + return,**不进 IntentClassifier / confirmation / agent 任何路径**;反馈绕过 Outbox(关停期间 Outbox 也在 drain),send 失败 try-catch 仅 log——避免关停链因反馈失败 hang(详见 §2.6 行为契约)
 
 **验收**:
 - service 接到 SIGTERM 后,所有 in-flight cron task 在 30s 内 cleanly 退出;bash 子进程不孤儿
 - 手动调 `schedule.abortRun(runId)` 立即中断对应 cron task
 - 关停链 LIFO 顺序通过 shutdown-chain 测试覆盖(参考 [shutdown-chain.test.ts](../../../packages/cli/src/serve/__tests__/shutdown-chain.test.ts) 既有测试模式)
 - **drain 完成性**:在关停链中插入"abort fire 后产出 partial event"的 mock,验证 server.close 在 partial 送达 client 之后才执行(否则 RM5 没真正完成 INV-R7 的核心保证)
+- **关停期反馈**:SIGTERM 触发后,`refuseNewMessages` 已生效但 `server.close` 未到的窗口里(0~30s),向 InboundRouter 投递新消息 → 用户收到统一文案"服务暂时不可用,请稍后重新发送。"且**不进 IntentClassifier / confirmation / agent**(避免在已 drain 的 ConversationManager 上启动新 turn)
 
-**不做**:不做飞书卡片按钮
-
-### RM6 — 飞书 InteractiveCard 按钮(P2)
-
-**目标**:agent run 期间发送"正在处理...[取消]"卡片,用户点击 → abort。
-
-**范围**(本规格不展开,留作独立 spec 子节):
-- 飞书卡片 SDK 接入 + 模板设计
-- `agent:run_start` 事件订阅 → 发送卡片
-- 卡片 action callback handler → 解析为 `ControlIntent.cancel { matchedKeyword: "<button:cancel>" }` → 走 RM3 路径
-- 渲染层无需新增分支(卡片按钮与文本取消在协议层都是 `user-cancel { source: "rpc" }`)
-
-**验收**:飞书 channel 可见显式取消按钮,点击体验等价关键词
-
-### RM7 — graceful shutdown 完善 + 灾难恢复
-
-**目标**:覆盖 server 异常退出场景(panic / OOM / 网络故障)的 abort 链路。
-
-**范围**(本规格不展开,留作独立 spec):
-- `process.on("uncaughtException")` 路由到 `CleanupRegistry.runAll("uncaught")` 触发 abort 链
-- 异常退出后重启时的 session 状态恢复(依赖 conversation-model 持久化 spec)
-- 各 channel(飞书 / RPC)上对"服务异常"的统一 fallback 文案
+**不做**:不做飞书卡片按钮(留作 §8 后续工作锚点)
 
 ---
 
@@ -1417,6 +1459,7 @@ async function runManagedTurn(
 | **abort 后 RunResult.agentResult.abortReason 被 channel formatter 消费** | mock abort + 验 inbound-router 发出文案不是兜底"已停止处理。" |
 | CleanupRegistry SIGTERM 触发 abort 链 LIFO 顺序 | 复用 `shutdown-chain.test.ts` 模式 |
 | **关停链 abortAllAndWait drain 完成性** | mock in-flight session 的 cleanup 路径耗时 100ms,验 server.close 在 cleanup 完成后执行 |
+| **`refuseNewMessages` 模式下新消息收到反馈** | 触发 `inboundRouter.refuseNewMessages()` → 投递新 inbound message → 验 adapter.send 收到 `SHUTDOWN_REFUSAL_NOTICE_ZH` 文案 + IntentClassifier/confirmation/agent 三条路径**均未触发**(spy mock 计调用次数 0)+ adapter.send 抛错时关停链不被 block(注入 reject Promise → 验 handleMessage return 不抛) |
 | cron timeout → abort | mock 时钟 + RunRegistry |
 | idle-timeout abort + 飞书渲染 | mock LLM idle stream + inbound-router 渲染检查 |
 
@@ -1435,7 +1478,7 @@ async function runManagedTurn(
 - [ ] RM2:RPC `session.abort` 后 in-flight turn 立即停(不等下一个 send),LLM call 真的停止(不是只丢弃结果)
 - [ ] RM3:飞书发"取消"立即停 + 收到"已停止处理。"
 - [ ] RM4:CI/IDE client `session.abort` 行为等价 RM3;断开连接时 reason 携带 `origin: "rpc-connection-close"`
-- [ ] RM5:`kill -TERM <server-pid>` 后 in-flight cron 走 cleanup,bash 子进程不留;CleanupRegistry 注册顺序通过 LIFO 测试
+- [ ] RM5:`kill -TERM <server-pid>` 后 in-flight cron 走 cleanup,bash 子进程不留;CleanupRegistry 注册顺序通过 LIFO 测试;**关停链触发后 30s 窗口内对 inbound endpoint 投递新消息(飞书 sandbox / RPC test client),验收到"服务暂时不可用,请稍后重新发送。"反馈而非石沉大海**
 
 ---
 
@@ -1463,6 +1506,7 @@ async function runManagedTurn(
 - [ ] 飞书"取消"消息**同时清空 pending queue** —— 用户连发多条后取消,排队的消息不会继续跑(问题 1 完整覆盖)
 - [ ] RPC `session.abort` 真的中断 in-flight turn 且 LLM call 真停止(问题 2 解决,A + D 双层债同时修复)
 - [ ] 飞书侧呈现差异化中断原因(问题 3 解决,**channel formatter unwrapParentAbort 后按根因 kind 分发**,server 路径所有 abort 不会退化到 parent-abort 兜底)
+- [ ] **关停期间新到消息不静默丢弃** —— SIGTERM 触发 `refuseNewMessages` 后 ≤30s 窗口内,任意 channel 新到消息收到统一文案"服务暂时不可用,请稍后重新发送。",不进 IntentClassifier/confirmation/agent 路径(避免对已 drain 的 ConversationManager 启动新 turn);触达"关停期间新发消息但当前没在跑 turn 的用户"——补 INV-R7 反馈触达盲区
 
 **架构债清算**:
 - [ ] `session-adapter.ts` 中 `aborted` flag 字段已删除
@@ -1479,12 +1523,12 @@ async function runManagedTurn(
 
 本规格**不做**但**留好接口/语义**的能力:
 
-- **InteractiveCard 按钮**(RM6):`ControlIntent` 判别联合 + `matchedKeyword` 自由字段已预留;实施时新增飞书卡片 SDK 接入即可
+- **InteractiveCard 按钮**:`ControlIntent` 判别联合 + `matchedKeyword` 自由字段已预留;实施时新增飞书卡片 SDK 接入 + `agent:run_start` 事件触发卡片发送 + action callback handler 解析为 `ControlIntent.cancel { matchedKeyword: "<button:cancel>" }` → 走 §2.3 `handleControlIntent` 已有路径,渲染层无需新增分支(协议层都是 `user-cancel { source: "rpc" }`)
 - **多 ControlIntent kind**:`ControlIntent` 判别联合扩 `help` / `status` / `clear` / `pause`(后两者需另立 spec 设计 pause-resume 协议)
 - **多语言关键词**:`createDefaultIntentClassifier({ locale })` 已留 locale 参数;后续按需扩 locale 词集
 - **ephemeral run 维度的 abort**:`RunRegistry.abortRun(runId)` 已暴露;后续若飞书要支持"取消我刚才发的定时任务",可在 IntentClassifier 加 `ControlIntent.cancelRun { runId }` kind,路由到 `runRegistry.abortRun`
 - **abort 进度推流**:RPC client 当前通过 `session.send` yield 流自然观察 abort cleanup 事件;若需要专用 progress channel(显示"正在停止 bash 子进程...")可独立设计
-- **panic / 异常退出恢复**:RM7 范围,需要 conversation-model 持久化 spec 配套
+- **panic / 异常退出恢复**:`process.on("uncaughtException")` 路由到 `CleanupRegistry.runAll("uncaught")` 触发 abort 链 + 异常退出后重启时的 session 状态恢复 + 各 channel 上"服务异常"统一 fallback 文案;需要 conversation-model 持久化 spec 配套
 - **多 channel formatter 共享 origin/source 文案表**:三个 channel formatter 当前各自独立 switch,未来若 origin / source 取值大量增长,可抽出"语义键 → 文案"的 Record 表,让每个 channel 维护自己的文案 record,switch 收敛到"reason → 语义键"一处。当前规模(P0 不到 10 个分支)三处独立可读性更好,不强制抽象
 - **AbortReason 协议层扩字面量**:若产品上确实需要在协议层区分"飞书用户" / "IDE 用户" / "卡片按钮"等多个客户端类型(如审计/计费场景),应回到主模块 [interruptible-agent-loop-execution.md](./interruptible-agent-loop-execution.md) 立项扩 `user-cancel.source` 字面量并同步所有 exhaustive switch consumer,不在本规格私自扩
 - **sender-aware cancel**(任务型 bot 适配):若产品定位从对话型转向任务型(每用户独立任务并存于群聊),需扩 `PendingTask` 加 `sender?: string` 字段(由 inbound-router enqueue 时填入)+ `ConversationManager.abort(id, reason?, senderFilter?)` 加可选 sender 过滤参数 + 同时让 `SessionRuntime.abort` 通过 `turnContext.turnOrigin.triggeredBy` 比对在 in-flight 维度也只针对 sender 自己的 turn。本模块 P0 接受不区分 sender 的简化(§0.4)
