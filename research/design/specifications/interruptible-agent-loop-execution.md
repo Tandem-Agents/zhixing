@@ -17,6 +17,8 @@
 > - [types/agent-events.ts](../../../packages/core/src/types/agent-events.ts)(`AgentRunEndReason` 已含 "aborted")
 >
 > **三方调研原文**:[openclaw](../../source-analysis/openclaw/interruption-and-abort.md) · [hermes-agent](../../source-analysis/hermes-agent/interruption-and-abort.md) · [claude-code](../../source-analysis/claude-code/interruption-and-abort.md)
+>
+> **下游延伸规格**:[remote-interruption-execution.md](./remote-interruption-execution.md) — server / RPC / scheduler / 飞书等非 CLI 直连入口的中断接入设计(本模块协议层的应用层扩展,继承本文全部 INV)
 
 ---
 
