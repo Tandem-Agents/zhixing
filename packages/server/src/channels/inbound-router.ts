@@ -34,6 +34,17 @@ import {
 // ─── InboundRouter 入站消息路由器 ───
 // 将入站消息路由到对应的对话会话中，并执行 Agent 处理
 
+/**
+ * graceful shutdown 期间对新到入站消息的统一文案。
+ *
+ * 关停链 LIFO 第 1 步触发 `refuseNewMessages()` 后,handleMessage 入口直接 emit
+ * 这个文案 + log + return,不进 IntentClassifier / confirmation / agent。
+ *
+ * 设计:固定文案,与 abort 渲染层独立(那是 in-flight turn 被打断的反馈,这是
+ * 关停期间新到孤立消息的反馈)—— 不进 abort formatter,不依赖 reason kind。
+ */
+const SHUTDOWN_REFUSAL_NOTICE_ZH = "服务暂时不可用,请稍后重新发送。";
+
 export interface InboundRouterOptions {
   conversations: ConversationManager;
   channels: ChannelRegistry;
@@ -73,6 +84,8 @@ export class InboundRouter {
   private outboxRegistry?: OutboxRegistry;
   private readonly confirmationHub?: ConfirmationHub;
   private readonly intentClassifier: IntentClassifier;
+  /** graceful shutdown 期间拒新标记 —— `refuseNewMessages()` 置 false */
+  private acceptingNew = true;
 
   constructor(options: InboundRouterOptions) {
     this.conversations = options.conversations;
@@ -150,10 +163,39 @@ export class InboundRouter {
    * 4. Agent 执行 → 结果
    * 5. adapter.send() → 回复到触发通道
    */
+  /**
+   * graceful shutdown 期间拒收新入站消息 —— 关停链 LIFO 第 1 步触发(最先执行)。
+   *
+   * 调用后,后续 `handleMessage` 直接对每条消息回固定文案 + log + return,
+   * 不进 IntentClassifier / confirmation / agent 任何路径(避免在已 drain 的
+   * ConversationManager 上启动新 turn)。反馈走 `adapter.send` 绕过 Outbox
+   * (与 `handleControlIntent` 同源 —— 关停期间 Outbox 也在 drain),send 失败
+   * try-catch 仅 log,不影响关停链。
+   *
+   * 幂等:重复调用 no-op。
+   */
+  refuseNewMessages(): void {
+    this.acceptingNew = false;
+  }
+
   async handleMessage(msg: InboundMessage): Promise<void> {
     const adapter = this.channels.get(msg.channelId);
     if (!adapter) {
       this.logger.warn(`No adapter found for channel: ${msg.channelId}`);
+      return;
+    }
+
+    // 关停期间拒新 —— LIFO 关停顺序保证 channels.dispose 在第 5 步,acceptingNew=false
+    // 到 server.close 之间(0~30s)channel 完全活着,反馈能送达;不进 IntentClassifier
+    // / confirmation / agent 任何路径。
+    if (!this.acceptingNew) {
+      this.logger.info(
+        `[拒新] conv shutdown channel=${msg.channelId} from=${msg.from}`,
+      );
+      const replyTarget = buildReplyTarget(msg);
+      await adapter
+        .send(replyTarget, { text: SHUTDOWN_REFUSAL_NOTICE_ZH })
+        .catch((e) => this.logger.error(`refusal notice send failed: ${errMsg(e)}`));
       return;
     }
 

@@ -32,6 +32,15 @@ export interface EphemeralTurnOptions {
    * （remote-confirmation-execution.md §3.3）。
    */
   turnContext?: TurnContext;
+  /**
+   * 可选 abortSignal。由 scheduler 入口的 `RunRegistry.registerRun` 提供 —— 触发
+   * 后,agent-loop / LLM call / 工具执行通过 signal 链路自然完成 cleanup,
+   * AgentResult.aborted.abortReason 携带类型化中断源,经 `serializeAbortReason`
+   * 序列化到 `AgentTurnResult.detail`。
+   *
+   * 不传时所有 LLM 调用无外部限制(REPL / 单元测试 / 手工触发场景)。
+   */
+  abortSignal?: AbortSignal;
 }
 
 /**
@@ -55,6 +64,7 @@ export async function runEphemeralTurn(
         opts.onYield?.(event);
       },
       turnContext: opts.turnContext,
+      abortSignal: opts.abortSignal,
     });
 
     const output = textChunks.join("") || undefined;

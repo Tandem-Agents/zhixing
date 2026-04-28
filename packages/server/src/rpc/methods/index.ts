@@ -22,6 +22,7 @@ import {
   buildScheduleUpdateMethod,
   buildScheduleDeleteMethod,
   buildScheduleRunMethod,
+  buildScheduleAbortRunMethod,
 } from "./schedule.js";
 import { buildServerShutdownMethod, buildServerInfoMethod } from "./server.js";
 import {
@@ -57,6 +58,7 @@ export function buildBuiltinRegistry(_opts: BuiltinMethodsOptions = {}): Handler
     buildScheduleUpdateMethod(),
     buildScheduleDeleteMethod(),
     buildScheduleRunMethod(),
+    buildScheduleAbortRunMethod(),
     // server.*（控制面：shutdown / info）
     buildServerShutdownMethod(),
     buildServerInfoMethod(),

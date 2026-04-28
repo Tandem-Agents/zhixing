@@ -10,6 +10,7 @@ import WebSocket from "ws";
 import {
   Scheduler,
   JsonTaskStore,
+  RunRegistry,
   createEventBus,
   type SchedulerEventMap,
   type AgentTurnResult,
@@ -367,5 +368,95 @@ describe("schedule.* RPC + event bridge (S2.E)", () => {
       expect(result.output).toContain("not configured");
     }
     client.close();
+  });
+
+  // ─── schedule.abortRun (RM5 — RunRegistry RPC 暴露) ───
+
+  describe("schedule.abortRun", () => {
+    it("未注入 runRegistry → INTERNAL_ERROR", async () => {
+      const client = await connect(server.port);
+      await client.request("auth", { token: TEST_TOKEN });
+      const r = await client.request("schedule.abortRun", { runId: "any" });
+      expect(isErrorResponse(r)).toBe(true);
+      if (isErrorResponse(r)) {
+        expect(r.error.code).toBe(RPC_ERROR_CODES.INTERNAL_ERROR);
+        expect(r.error.message).toContain("RunRegistry");
+      }
+      client.close();
+    });
+  });
+
+  describe("schedule.abortRun (with RunRegistry)", () => {
+    let serverWithReg: ZhixingServerInstance;
+    let schedulerWithReg: Scheduler;
+    let runRegistry: RunRegistry;
+    let tempDir2: string;
+
+    beforeEach(async () => {
+      tempDir2 = await mkdtemp(join(tmpdir(), "zhixing-schedrun-"));
+      const eventBus = createEventBus<SchedulerEventMap>();
+      schedulerWithReg = new Scheduler({
+        store: new JsonTaskStore(join(tempDir2, "tasks.json")),
+        eventBus,
+        runAgentTurn: mockRunAgentTurn(),
+        systemHandlers: buildSystemHandlers(),
+        config: { minTickIntervalMs: 100, maxTickIntervalMs: 500 },
+      });
+      await schedulerWithReg.start();
+      runRegistry = new RunRegistry();
+
+      const ctx = createServerContext({
+        config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
+        version: TEST_VERSION,
+        token: TEST_TOKEN,
+        scheduler: schedulerWithReg,
+        runRegistry,
+      });
+      serverWithReg = await startServer({ context: ctx, schedulerEventBus: eventBus });
+    });
+
+    afterEach(async () => {
+      await serverWithReg.close();
+      await schedulerWithReg.stop();
+      await rm(tempDir2, { recursive: true, force: true });
+    });
+
+    it("缺 runId → INVALID_PARAMS", async () => {
+      const client = await connect(serverWithReg.port);
+      await client.request("auth", { token: TEST_TOKEN });
+      const r = await client.request("schedule.abortRun", {});
+      expect(isErrorResponse(r)).toBe(true);
+      if (isErrorResponse(r)) {
+        expect(r.error.code).toBe(RPC_ERROR_CODES.INVALID_PARAMS);
+      }
+      client.close();
+    });
+
+    it("不存在的 runId → { aborted: false }(幂等,不抛)", async () => {
+      const client = await connect(serverWithReg.port);
+      await client.request("auth", { token: TEST_TOKEN });
+      const r = await client.request("schedule.abortRun", { runId: "ghost" });
+      expect(isSuccessResponse(r)).toBe(true);
+      if (isSuccessResponse(r)) {
+        expect(r.result).toEqual({ aborted: false });
+      }
+      client.close();
+    });
+
+    it("存在的 runId → { aborted: true } + signal aborted with user-cancel reason", async () => {
+      const client = await connect(serverWithReg.port);
+      await client.request("auth", { token: TEST_TOKEN });
+
+      const signal = runRegistry.registerRun("task-42");
+
+      const r = await client.request("schedule.abortRun", { runId: "task-42" });
+      expect(isSuccessResponse(r)).toBe(true);
+      if (isSuccessResponse(r)) {
+        expect(r.result).toEqual({ aborted: true });
+      }
+      expect(signal.aborted).toBe(true);
+
+      client.close();
+    });
   });
 });

@@ -1077,6 +1077,89 @@ describe("InboundRouter", () => {
     });
   });
 
+  // ─── refuseNewMessages (RM5 — graceful shutdown 关停期反馈) ───
+  describe("refuseNewMessages", () => {
+    it("调用前 handleMessage 正常路由到 agent", async () => {
+      const { adapter, router } = setup();
+      await router.handleMessage(dmMessage("test-ch", "user-1", "你好"));
+
+      await vi.waitFor(() => {
+        expect(adapter.send).toHaveBeenCalled();
+      });
+      const reply = (adapter.send as ReturnType<typeof vi.fn>).mock.calls[0]![1] as {
+        text: string;
+      };
+      expect(reply.text).toBe("Hello from agent");
+    });
+
+    it("调用后 → 直接 adapter.send 固定文案 + log + return,不进 agent / confirmation / IntentClassifier", async () => {
+      const { adapter, conversations, router } = setup();
+      const abortSpy = vi.spyOn(conversations, "abort");
+      const getOrCreateSpy = vi.spyOn(conversations, "getOrCreate");
+
+      router.refuseNewMessages();
+
+      await router.handleMessage(dmMessage("test-ch", "user-1", "你好"));
+
+      // adapter.send 收到关停文案
+      expect(adapter.send).toHaveBeenCalledTimes(1);
+      const [, content] = (adapter.send as ReturnType<typeof vi.fn>).mock.calls[0]!;
+      expect((content as { text: string }).text).toBe(
+        "服务暂时不可用,请稍后重新发送。",
+      );
+
+      // 三个下游路径全未触发
+      expect(abortSpy).not.toHaveBeenCalled();
+      expect(getOrCreateSpy).not.toHaveBeenCalled();
+    });
+
+    it("拒新期间 cancel 关键词也走拒新分支(不进 IntentClassifier abort 路径)", async () => {
+      const { adapter, conversations, router } = setup();
+      const abortSpy = vi.spyOn(conversations, "abort");
+
+      router.refuseNewMessages();
+
+      await router.handleMessage(dmMessage("test-ch", "user-1", "/cancel"));
+
+      // 不调 abort —— 拒新分支在 IntentClassifier 之前
+      expect(abortSpy).not.toHaveBeenCalled();
+      // 收到的是关停文案,不是"当前没有正在处理的任务"
+      const [, content] = (adapter.send as ReturnType<typeof vi.fn>).mock.calls[0]!;
+      expect((content as { text: string }).text).toBe(
+        "服务暂时不可用,请稍后重新发送。",
+      );
+    });
+
+    it("adapter.send 抛错时拒新分支吞错不抛,关停链不被 block", async () => {
+      const adapter = createMockAdapter();
+      (adapter.send as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new Error("network down during shutdown"),
+      );
+      const { router } = setup({ adapter });
+
+      router.refuseNewMessages();
+
+      // 不抛 —— 关停链能继续走
+      await expect(
+        router.handleMessage(dmMessage("test-ch", "user-1", "你好")),
+      ).resolves.toBeUndefined();
+    });
+
+    it("幂等:重复调用不抛,后续 handleMessage 仍走拒新分支", async () => {
+      const { adapter, router } = setup();
+      router.refuseNewMessages();
+      router.refuseNewMessages();
+      router.refuseNewMessages();
+
+      await router.handleMessage(dmMessage("test-ch", "user-1", "你好"));
+
+      const [, content] = (adapter.send as ReturnType<typeof vi.fn>).mock.calls[0]!;
+      expect((content as { text: string }).text).toBe(
+        "服务暂时不可用,请稍后重新发送。",
+      );
+    });
+  });
+
   // 注：ADR-007 Phase 3 的"task-fire 排在 LLM 回复之后"核心保证已由两层测试组合证明：
   //
   //   1. outbox.test.ts "fillSlot(slot, entry) 原子性"：

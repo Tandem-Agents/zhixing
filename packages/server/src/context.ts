@@ -5,7 +5,7 @@
  * 通过显式传递（而不是单例）保持可测试性。
  */
 
-import type { Scheduler, ChannelRegistry } from "@zhixing/core";
+import type { Scheduler, ChannelRegistry, RunRegistry } from "@zhixing/core";
 import type { ServerConfig } from "./types.js";
 import type { ConversationManager } from "./runtime/index.js";
 import type { ConfirmationHub } from "./confirmation/hub.js";
@@ -30,6 +30,12 @@ export interface ServerContext {
    * 远程权限确认的聚合入口——参见 remote-confirmation-execution.md §3.2。
    */
   confirmationHub?: ConfirmationHub;
+  /**
+   * Scheduler ephemeral run 的中断注册表。不传则 `schedule.abortRun` RPC 不可用,
+   * scheduler 关停链 abort 也降级 no-op。serve 模式应注入 —— 由 command.ts
+   * 与 scheduler 一起初始化。
+   */
+  runRegistry?: RunRegistry;
   /** 实际监听的地址（startServer 监听就绪后回填） */
   listenAddr?: { port: number; host: string };
   /**
@@ -48,6 +54,7 @@ export interface CreateContextOptions {
   conversations?: ConversationManager;
   channels?: ChannelRegistry;
   confirmationHub?: ConfirmationHub;
+  runRegistry?: RunRegistry;
 }
 
 export function createServerContext(opts: CreateContextOptions): ServerContext {
@@ -60,5 +67,6 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     conversations: opts.conversations,
     channels: opts.channels,
     confirmationHub: opts.confirmationHub,
+    runRegistry: opts.runRegistry,
   };
 }

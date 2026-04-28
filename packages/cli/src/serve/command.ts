@@ -16,6 +16,7 @@
 import {
   Scheduler,
   JsonTaskStore,
+  RunRegistry,
   createEventBus,
   generateTurnId,
   type AgentTurnParams,
@@ -288,6 +289,14 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
 
   // 7. Scheduler
   const schedulerEventBus = createEventBus<SchedulerEventMap>();
+
+  // RunRegistry —— 每个 ephemeral run 注册一个 AbortController,允许:
+  //   - schedule.abortRun(runId) RPC 主动中断
+  //   - graceful shutdown 通过 abortAllAndWait 让所有 in-flight 走完 cleanup
+  // Scheduler 本身对同 task 不允许并发(scheduler.ts 互斥锁保证),params.taskId
+  // 与 in-flight run 一一对应,作为 RunRegistry key 安全。
+  const runRegistry = new RunRegistry();
+
   const runAgentTurn = async (
     params: AgentTurnParams,
   ): Promise<AgentTurnResult> => {
@@ -308,11 +317,18 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
       },
     };
 
-    return runEphemeralTurn({
-      runtime: ephemeralRuntime,
-      prompt: taskPrompt,
-      turnContext,
-    });
+    const runKey = params.taskId ?? "anon";
+    const abortSignal = runRegistry.registerRun(runKey);
+    try {
+      return await runEphemeralTurn({
+        runtime: ephemeralRuntime,
+        prompt: taskPrompt,
+        turnContext,
+        abortSignal,
+      });
+    } finally {
+      runRegistry.unregisterRun(runKey);
+    }
   };
 
   const journalStore = new JournalStore();
@@ -354,6 +370,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     conversations,
     channels,
     confirmationHub,
+    runRegistry,
   });
 
   // 8a. Daemon child 才启用 ServerStateFile——前台模式不写 state 文件
@@ -432,6 +449,35 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   if (textRenderer) {
     registry.register("confirmationRenderer.stop", () => {
       textRenderer!.stop();
+    });
+  }
+
+  // 8b.6 远程中断模块的关停链 —— LIFO 最先执行(在 channels.dispose / scheduler.stop /
+  //     server.close 之前)。两条新增项的 LIFO 执行序:
+  //       1. inboundRouter.refuseNew         (LIFO 1) 拒新入站,避免下游 drain 期间又来新消息
+  //       2. execution.abortAllAndWait       (LIFO 2) Promise.all([conv, run]) 并行 fire abort
+  //                                                   + 等所有 in-flight 走完主模块 cleanup
+  //                                                   (partial yields + RunResult + 取消反馈)
+  //
+  //     必须 await drain —— 没有它 server.close / channels.dispose 抢断 partial 流和取消反馈,
+  //     违反 INV-R7 关停期反馈不丢。30s 总超时兜底由 abortAllAndWait 自身实现,超时不抛
+  //     直接进下一步,避免 grace 类工具 hang 整条关停链。
+  registry.register("execution.abortAllAndWait", async () => {
+    await Promise.all([
+      conversations.abortAllAndWait(
+        { kind: "external", origin: "scheduler-shutdown" },
+        30_000,
+      ),
+      runRegistry.abortAllAndWait(
+        { kind: "external", origin: "scheduler-shutdown" },
+        30_000,
+      ),
+    ]);
+  });
+
+  if (inboundRouter) {
+    registry.register("inboundRouter.refuseNew", () => {
+      inboundRouter!.refuseNewMessages();
     });
   }
 

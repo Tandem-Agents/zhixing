@@ -166,6 +166,38 @@ export function buildScheduleRunMethod(): MethodEntry {
   };
 }
 
+// ─── schedule.abortRun ───
+
+interface ScheduleAbortRunParams {
+  runId?: string;
+}
+
+export function buildScheduleAbortRunMethod(): MethodEntry {
+  return {
+    name: "schedule.abortRun",
+    requiresAuth: true,
+    handler(rawParams, ctx): { aborted: boolean } {
+      const runRegistry = ctx.server.runRegistry;
+      if (!runRegistry) {
+        throw new RpcAppError(
+          RPC_ERROR_CODES.INTERNAL_ERROR,
+          "RunRegistry not configured on server",
+        );
+      }
+      const params = (rawParams ?? {}) as ScheduleAbortRunParams;
+      if (typeof params.runId !== "string") {
+        throw RpcErrors.invalidParams("schedule.abortRun requires 'runId'");
+      }
+      const aborted = runRegistry.abortRun(params.runId, {
+        kind: "user-cancel",
+        source: "rpc",
+        pressedAt: Date.now(),
+      });
+      return { aborted };
+    },
+  };
+}
+
 // ─── 工具 ───
 
 function requireScheduler(server: ServerContext) {
