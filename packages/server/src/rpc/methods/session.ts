@@ -243,8 +243,17 @@ export function buildSessionAbortMethod(): MethodEntry {
         throw RpcErrors.invalidParams("session.abort requires 'conversationId'");
       }
       const manager = requireConversations(ctx.server);
-      if (!manager.abort(id)) {
-        throw RpcErrors.notFound(`Session not found: ${id}`);
+      const result = manager.abort(id, {
+        kind: "external",
+        origin: "session-runtime-abort",
+      });
+      // RPC client 视角:in-flight 和 pending 都没动 = 没有可取消的对象 → notFound。
+      // 任一维度动了 = 取消生效;细分计数 client 当前不消费(IDE 同步场景 pending 通常为 0),
+      // 不暴露在 RPC schema 中,留作后续若需要时扩。
+      if (!result.abortedInFlight && result.cancelledPending === 0) {
+        throw RpcErrors.notFound(
+          `Session not found or no in-flight turn / pending message: ${id}`,
+        );
       }
     },
   };

@@ -151,7 +151,7 @@ function createMockRuntime(
     updateMessages(canonical) {
       messages = [...canonical];
     },
-    abort() {},
+    abort(): boolean { return false; },
     dispose() {
       messages = [];
     },

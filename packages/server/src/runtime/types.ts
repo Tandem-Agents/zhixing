@@ -8,6 +8,7 @@
  */
 
 import type {
+  AbortReason,
   AgentYield,
   IConfirmationBroker,
   Message,
@@ -67,8 +68,20 @@ export interface SessionRuntime {
    *   直接替换 SessionRuntime 内部 messages 即可（不是 append）。
    */
   updateMessages(canonical: Message[]): void;
-  /** 终止当前执行（如果有） */
-  abort(): void;
+  /**
+   * 终止当前 in-flight turn(若有)。
+   *
+   * 返回 true 表示真的打断了一个正在跑的 turn,false 表示 idle/已 abort 等无操作场景。
+   * 调用方据此判断要不要在自己这边 emit 反馈——in-flight 路径下反馈走主模块 cleanup
+   * 单源,不在 caller 处再 emit。
+   *
+   * `reason` 携带类型化中断原因,沿 `controller.signal` 透传到 agent-loop / LLM /
+   * 工具 / channel 渲染层。缺省时填 `external{ origin: "session-runtime-abort" }`,
+   * 渲染层走通用兜底文案。
+   *
+   * 幂等:重复调用 / 已 aborted 时立即返 false,不覆盖原 reason(first-wins)。
+   */
+  abort(reason?: AbortReason): boolean;
   /** 释放资源（Server 关闭时调用） */
   dispose(): void;
   /**
@@ -98,3 +111,23 @@ export interface RuntimeInfo {
 
 /** @deprecated 使用 ManagedSessionInfo (from conversation-manager) 代替 */
 export type { ManagedSessionInfo } from "./conversation-manager.js";
+
+/**
+ * `ConversationManager.abort` 的双维度返回值。
+ *
+ * - `abortedInFlight`:是否真的打断了一个正在跑的 turn。in-flight 维度,接
+ *   `SessionRuntime.abort` 的结果。
+ * - `cancelledPending`:从该 session 的 pending queue 清掉的任务数,且各 task.cancel
+ *   hook 已被调一次。
+ *
+ * 用户视角"正在处理"包含两类(已发未跑的 pending 也是用户期待 abort 的目标),单
+ * boolean 无法区分"取消了什么"会让 UX 反馈含糊。两个维度组合让调用方决定反馈:
+ *   - `abortedInFlight === true`: 不在 cancel ack 处反馈(让 cleanup 路径产出唯一反馈,
+ *     反馈单源原则)
+ *   - `abortedInFlight === false && cancelledPending > 0`: 反馈"已取消队列中 N 条"
+ *   - 两者都假: 反馈"当前没有正在处理的任务"
+ */
+export interface AbortResult {
+  readonly abortedInFlight: boolean;
+  readonly cancelledPending: number;
+}

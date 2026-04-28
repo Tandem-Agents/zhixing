@@ -55,8 +55,9 @@ function createMockRuntime(sessionId: string): SessionRuntime {
     updateMessages(canonical) {
       messages = [...canonical];
     },
-    abort() {
+    abort(): boolean {
       aborted = true;
+      return true;
     },
     dispose() {
       messages.length = 0;
@@ -244,14 +245,18 @@ describe("ConversationManager", () => {
       expect(manager.has("a")).toBe(true);
     });
 
-    it("abort() invokes runtime.abort()", async () => {
+    it("abort() invokes runtime.abort() 并返双维度 AbortResult", async () => {
       const session = await manager.getOrCreate("a");
-      expect(manager.abort("a")).toBe(true);
+      const result = manager.abort("a");
+      expect(result).toEqual({ abortedInFlight: true, cancelledPending: 0 });
       expect((session.runtime as SessionRuntime & { _aborted: boolean })._aborted).toBe(true);
     });
 
-    it("abort() returns false for unknown id", () => {
-      expect(manager.abort("nope")).toBe(false);
+    it("abort() 不存在的 conversation → 双零(不抛)", () => {
+      expect(manager.abort("nope")).toEqual({
+        abortedInFlight: false,
+        cancelledPending: 0,
+      });
     });
 
     it("delete() removes session and disposes runtime", async () => {
@@ -620,21 +625,176 @@ describe("ConversationManager", () => {
       expect(status).toBe("full");
     });
 
-    it("abort while busy triggers dequeue of next pending task", async () => {
+    it("abort 期间的 pending 被清空 + 各 cancel hook 被调,后续 setBusy(false) 不再 dequeue", async () => {
+      // 反映 spec:abort = 用户说"停",pending(已发未跑)也是用户期待 abort 的目标。
+      // 旧实现"abort 不清 pending,后续仍 dequeue 跑"违背语义,新实现纠正。
       await manager.getOrCreate("a");
       manager.setBusy("a", true);
 
       const executed: string[] = [];
+      const cancelled: string[] = [];
       manager.enqueue("a", {
         execute: async () => { executed.push("queued-task"); },
-        cancel: () => {},
+        cancel: () => { cancelled.push("queued-task"); },
       });
 
-      manager.abort("a");
+      const result = manager.abort("a");
       manager.setBusy("a", false);
       await vi.advanceTimersByTimeAsync(0);
 
-      expect(executed).toEqual(["queued-task"]);
+      expect(result.abortedInFlight).toBe(true);
+      expect(result.cancelledPending).toBe(1);
+      expect(cancelled).toEqual(["queued-task"]);
+      expect(executed).toEqual([]);
+      expect(manager.pendingCount("a")).toBe(0);
+    });
+  });
+
+  // ─── AbortResult 双维度 + abortAll/abortAllAndWait ───
+
+  describe("abort 双维度 + abortAll", () => {
+    it("纯 idle session(无 in-flight 无 pending)→ 双零", async () => {
+      await manager.getOrCreate("a");
+      // session 创建后 busy=false,无 pending → abort 应该是 nooop 维度
+      // mock runtime.abort() 永返 true,但实际应:in-flight 维度仅在 in-flight 时返 true
+      // 真实 SessionRuntime 在 idle 时返 false;此 mock 简化,本测试覆盖 ConversationManager
+      // 自身的 pending 维度
+      const result = manager.abort("a");
+      expect(result.cancelledPending).toBe(0);
+    });
+
+    it("pending only(无 in-flight,有 pending)→ pending 全清 + cancel hook 全调", async () => {
+      await manager.getOrCreate("a");
+      manager.setBusy("a", true);
+      const cancelled: number[] = [];
+      manager.enqueue("a", { execute: async () => {}, cancel: () => cancelled.push(1) });
+      manager.enqueue("a", { execute: async () => {}, cancel: () => cancelled.push(2) });
+      manager.enqueue("a", { execute: async () => {}, cancel: () => cancelled.push(3) });
+
+      const result = manager.abort("a");
+      expect(result.cancelledPending).toBe(3);
+      expect(cancelled).toEqual([1, 2, 3]);
+      expect(manager.pendingCount("a")).toBe(0);
+    });
+
+    it("一个 task.cancel hook 抛错不影响其它 task 被 cancel", async () => {
+      await manager.getOrCreate("a");
+      manager.setBusy("a", true);
+      const cancelled: number[] = [];
+      manager.enqueue("a", { execute: async () => {}, cancel: () => cancelled.push(1) });
+      manager.enqueue("a", {
+        execute: async () => {},
+        cancel: () => { throw new Error("hook failure"); },
+      });
+      manager.enqueue("a", { execute: async () => {}, cancel: () => cancelled.push(3) });
+
+      const result = manager.abort("a");
+      expect(result.cancelledPending).toBe(3);
+      expect(cancelled).toEqual([1, 3]);
+    });
+
+    it("session 不存在 → 双零,不抛", () => {
+      const result = manager.abort("ghost");
+      expect(result).toEqual({ abortedInFlight: false, cancelledPending: 0 });
+    });
+
+    it("abortAll 与单 session abort 行为对称:in-flight 全 fire + 各 pending 全清", async () => {
+      await manager.getOrCreate("a");
+      await manager.getOrCreate("b");
+      await manager.getOrCreate("c");
+
+      manager.setBusy("a", true);
+      manager.setBusy("c", true);
+      const cancelledA: string[] = [];
+      const cancelledC: string[] = [];
+      manager.enqueue("a", { execute: async () => {}, cancel: () => cancelledA.push("a1") });
+      manager.enqueue("c", { execute: async () => {}, cancel: () => cancelledC.push("c1") });
+      manager.enqueue("c", { execute: async () => {}, cancel: () => cancelledC.push("c2") });
+
+      const aborted = manager.abortAll({ kind: "external", origin: "scheduler-shutdown" });
+
+      // mock runtime.abort 永返 true → 3 个 session 都被算作 in-flight aborted
+      expect(aborted).toBe(3);
+      expect(cancelledA).toEqual(["a1"]);
+      expect(cancelledC).toEqual(["c1", "c2"]);
+      expect(manager.pendingCount("a")).toBe(0);
+      expect(manager.pendingCount("c")).toBe(0);
+    });
+  });
+
+  describe("abortAllAndWait — event-driven drain", () => {
+    it("全 idle 时立即返回(走 fast path)", async () => {
+      await manager.getOrCreate("a");
+      const aborted = await manager.abortAllAndWait({
+        kind: "external",
+        origin: "scheduler-shutdown",
+      });
+      expect(aborted).toBeGreaterThanOrEqual(0);
+    });
+
+    it("有 busy session → setBusy(false) 触发 drain resolve(无需轮询)", async () => {
+      vi.useRealTimers();
+      try {
+        const mgr = new ConversationManager(createMockFactory(), {
+          graceTimeoutMs: 60_000,
+          idleTimeoutMs: 30 * 60_000,
+          idleCheckIntervalMs: 60_000,
+        });
+        try {
+          await mgr.getOrCreate("a");
+          mgr.setBusy("a", true);
+
+          const drainPromise = mgr.abortAllAndWait(
+            { kind: "external", origin: "scheduler-shutdown" },
+            5_000,
+          );
+
+          // 等待短暂时间确认 drain 还没 resolve
+          await new Promise((r) => setTimeout(r, 30));
+          let drained = false;
+          drainPromise.then(() => { drained = true; });
+          await new Promise((r) => setTimeout(r, 10));
+          expect(drained).toBe(false);
+
+          // 触发 setBusy(false) → drainResolver 应被调
+          mgr.setBusy("a", false);
+
+          const aborted = await drainPromise;
+          expect(aborted).toBe(1);
+        } finally {
+          mgr.disposeAll();
+        }
+      } finally {
+        vi.useFakeTimers();
+      }
+    });
+
+    it("超时直接返回不抛(避免 grace 类工具 hang 关停链)", async () => {
+      vi.useRealTimers();
+      try {
+        const mgr = new ConversationManager(createMockFactory(), {
+          graceTimeoutMs: 60_000,
+          idleTimeoutMs: 30 * 60_000,
+          idleCheckIntervalMs: 60_000,
+        });
+        try {
+          await mgr.getOrCreate("a");
+          mgr.setBusy("a", true);
+
+          const aborted = await mgr.abortAllAndWait(
+            { kind: "external", origin: "scheduler-shutdown" },
+            50, // 50ms 超时
+          );
+
+          expect(aborted).toBe(1);
+          // session 仍 busy,但 abortAllAndWait 不抛
+          expect(mgr.list()[0]!.busy).toBe(true);
+        } finally {
+          mgr.disposeAll();
+        }
+      } finally {
+        vi.useFakeTimers();
+      }
     });
   });
 

@@ -88,8 +88,9 @@ function createMockRuntime(sessionId: string, opts: MockOptions = {}, initialMes
     updateMessages(canonical) {
       messages = [...canonical];
     },
-    abort() {
+    abort(): boolean {
       aborted = true;
+      return true;
     },
     dispose() {},
   };

@@ -55,7 +55,7 @@ function createMockRuntime(response?: { text: string }): SessionRuntime {
     }) as unknown as SessionRuntime["run"],
     getHistory: () => [],
     updateMessages: vi.fn(),
-    abort: vi.fn(),
+    abort: vi.fn(() => false),
     dispose: vi.fn(),
   };
 }

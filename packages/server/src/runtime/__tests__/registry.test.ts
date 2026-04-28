@@ -28,8 +28,9 @@ function createMockRuntime(sessionId: string): SessionRuntime {
     getHistory(limit) {
       return limit ? messages.slice(-limit) : messages;
     },
-    abort() {
+    abort(): boolean {
       aborted = true;
+      return true;
     },
     dispose() {
       messages.length = 0;

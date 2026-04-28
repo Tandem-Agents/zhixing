@@ -17,11 +17,12 @@
 
 import {
   rebuildCanonicalMessages,
+  type AbortReason,
   type CompactMarker,
   type Message,
   type Turn,
 } from "@zhixing/core";
-import type { SessionRuntime, RuntimeFactory } from "./types.js";
+import type { AbortResult, SessionRuntime, RuntimeFactory } from "./types.js";
 import type { ConfirmationHub } from "../confirmation/hub.js";
 
 // 空 set 复用，避免每次 getObserverConnectionIds 返回新对象
@@ -169,6 +170,12 @@ export class ConversationManager {
   private readonly confirmationHub?: ConfirmationHub;
   /** conversationId 集合——已 attach 到 hub 的会话，用于 dispose 前反查 + 防重 */
   private readonly attachedBrokers = new Set<string>();
+  /**
+   * `abortAllAndWait` 的 drain resolver:event-driven 等所有 in-flight 走完 cleanup
+   * (`setBusy(id, false)` 末端检测全 idle 时 resolve)。null 表示当前无 abortAllAndWait
+   * 在等待 —— `setBusy(false)` 路径不会误触发。
+   */
+  private drainResolver: (() => void) | null = null;
 
   constructor(
     factory: RuntimeFactory,
@@ -401,13 +408,114 @@ export class ConversationManager {
       } else if (session.observers.size === 0) {
         this.startGraceTimer(conversationId);
       }
+      // event-driven drain:从 busy 到 idle 的下降沿,若 abortAllAndWait 在等且
+      // 全部 session idle 则 resolve(关停期间 dequeueNext 不会再 setBusy(true) ——
+      // pending queue 已被 abortAll 清空)。
+      if (this.drainResolver && this.sessionsAllIdle()) {
+        const resolve = this.drainResolver;
+        this.drainResolver = null;
+        resolve();
+      }
     }
   }
 
-  abort(conversationId: string): boolean {
+  /**
+   * 取消该 conversation 的 in-flight turn 与 pending queue,返回双维度结果。
+   *
+   * 用户视角"正在处理"包含两类:已发未跑的 pending 也是用户期待 abort 的目标。
+   * 单 boolean 无法区分"取消了什么";`AbortResult` 让 caller 按 channel 上下文
+   * 决定 UX 反馈(参见 `AbortResult` doc)。
+   *
+   * 不抛异常 —— session 不存在 / idle / 重复调用都是飞书等异步通道的正常状态。
+   */
+  abort(conversationId: string, reason?: AbortReason): AbortResult {
     const session = this.sessions.get(conversationId);
-    if (!session) return false;
-    session.runtime.abort();
+    if (!session) return { abortedInFlight: false, cancelledPending: 0 };
+
+    const abortedInFlight = session.runtime.abort(reason);
+
+    // pending task 在用户主动 cancel 场景下应该被清理 —— 否则用户发"取消"后,
+    // 后续 dequeue 仍会跑这些 pending,与"我让 agent 停"语义违背。
+    const queue = this.pendingQueues.get(conversationId);
+    let cancelledPending = 0;
+    if (queue) {
+      for (const task of queue) {
+        try {
+          task.cancel();
+        } catch {
+          // 逐个独立 swallow:某条 task 的 cancel hook 抛错不影响其它 task
+        }
+        cancelledPending++;
+      }
+      this.pendingQueues.delete(conversationId);
+    }
+
+    return { abortedInFlight, cancelledPending };
+  }
+
+  /**
+   * 关停链路用,与单 session `abort` 行为对称:同步 fire 各 session in-flight +
+   * 同步清各 pending queue 触发各 cancel hook。
+   *
+   * 不依赖 `disposeAll()` 注册到关停链 —— 把"清 pending"假设给 disposeAll 等于
+   * 假设了一个未建立的事实(disposeAll 当前仅 test afterEach 用),且关停场景下
+   * pending 与 in-flight 是同一组取消语义,拆开两个方法是非对称破口。
+   *
+   * 返回 in-flight aborted count(关停场景调用方是 CleanupRegistry callback,
+   * 只关心 drain 完成性,pending 计数不暴露)。与 `abortAllAndWait` 配合实现
+   * 关停期间所有 in-flight 走完 cleanup。
+   */
+  abortAll(reason: AbortReason): number {
+    let aborted = 0;
+    for (const [id, session] of this.sessions) {
+      if (session.runtime.abort(reason)) aborted++;
+      const queue = this.pendingQueues.get(id);
+      if (queue) {
+        for (const task of queue) {
+          try {
+            task.cancel();
+          } catch {
+            // swallow
+          }
+        }
+        this.pendingQueues.delete(id);
+      }
+    }
+    return aborted;
+  }
+
+  /**
+   * 触发 `abortAll` 后 await 所有 in-flight session 走完 cleanup —— event-driven
+   * `setBusy(false)` 检测全 idle 时 resolve drain Promise,不轮询。
+   *
+   * `timeoutMs` 兜底:超时不抛,直接返回 —— 避免 grace 类工具 hang 整条关停链;
+   * graceful shutdown 必须有上限,接受"30s 之后强行进下一步"的工程妥协。
+   */
+  async abortAllAndWait(reason: AbortReason, timeoutMs = 30_000): Promise<number> {
+    const aborted = this.abortAll(reason);
+    if (this.sessionsAllIdle()) return aborted;
+
+    const drained = new Promise<void>((resolve) => {
+      this.drainResolver = resolve;
+    });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, timeoutMs);
+    });
+    try {
+      await Promise.race([drained, timeout]);
+    } finally {
+      if (timer) clearTimeout(timer);
+      // 超时路径主动清掉 resolver,避免后续 setBusy(false) 误调一个无效 resolve
+      this.drainResolver = null;
+    }
+    return aborted;
+  }
+
+  private sessionsAllIdle(): boolean {
+    for (const session of this.sessions.values()) {
+      if (session.busy) return false;
+    }
     return true;
   }
 
