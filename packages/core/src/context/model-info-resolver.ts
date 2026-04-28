@@ -1,21 +1,20 @@
 /**
- * ModelBudgetInfo Resolver — 从 provider.models / 配置 overrides / 保守默认
- * 中解析出上下文预算所需的模型信息。
+ * ModelBudgetInfo Resolver — 把多源 budget 数据合成 ContextEngine 需要的
+ * `{ contextWindow, maxOutputTokens }`，并显式暴露解析来源。
  *
- * 职责归属：
- *   "provider + model → ModelBudgetInfo" 这个解析行为原来散落在 run-agent.ts
- *   的两行业务代码中（`provider.models.find(...) ?? provider.models[0]`），
- *   异常路径藏在 optional 链里 —— 找不到模型时 modelBudgetInfo=undefined，
- *   ContextEngine 静默不启用，无任何日志。
+ * 数据源四层（从高到低）：
+ *   1. overrides[model]            — 用户在配置中精确覆盖（最高优先级）
+ *   2. providerModels.find(id===)  — Provider declared catalog 命中
+ *   3. protocolDefaults            — 协议族级默认（如 OpenAI 兼容 128K/4K）
+ *   4. CONSERVATIVE_FALLBACK       — core 层 defensive 兜底（生产路径不应触达，
+ *                                     仅在调用方未注入 protocolDefaults 时启用）
  *
- *   本模块把解析职责抽成独立函数，通过 `source` + `warnings` 字段把异常态
- *   强制暴露到类型系统上。调用方必须显式处理 fallback 场景。
- *
- * 为什么放在 core 而不是 cli：
- *   server 路径（daemon）未来接入时也会面对同样的解析，core 是更通用的家。
- *   这里不直接 import @zhixing/providers 的 ZhixingConfig，而是接收 pure
- *   Record<string, Partial<ModelBudgetInfo>> 作为 overrides —— 调用方
- *   从自己的配置结构提取，保持 core 不反向依赖 providers。
+ * 设计要点：
+ *   - LLMProvider.models 是 declared catalog，可以为空数组——网关型 provider
+ *     一个实例承载海量 model，无法预先列举。catalog 之外的 model 走第 3 层。
+ *   - core 不知道 protocol 字符串（"openai-compatible" 等），调用方
+ *     （cli/server）从 ResolvedProvider.protocol 查 PROTOCOL_BUDGET_DEFAULTS 后
+ *     以 ModelBudgetInfo 形状注入。保持 core ← providers 单向依赖。
  */
 
 import type { ModelInfo } from "../types/llm.js";
@@ -25,18 +24,20 @@ import type { ModelBudgetInfo } from "./budget.js";
 
 /**
  * 解析来源：
- *   - override: 用户在配置中为此 model 显式覆盖了字段
- *   - declared: provider 声明列表中有此 model（原路径）
- *   - fallback: 全部失败，启用保守默认值（确保 compact 仍工作）
+ *   - override         : 用户在配置中为此 model 显式覆盖
+ *   - declared         : provider catalog 命中
+ *   - protocol-default : 协议族级默认（catalog 未命中且调用方提供了 protocolDefaults）
+ *   - fallback         : 调用方未提供 protocolDefaults 时的 defensive 兜底
  */
-export type ResolutionSource = "override" | "declared" | "fallback";
+export type ResolutionSource =
+  | "override"
+  | "declared"
+  | "protocol-default"
+  | "fallback";
 
 // ─── 警告 ───
 
-export type ResolutionWarningCode =
-  | "MODEL_NOT_FOUND"
-  | "NO_DECLARED_MODELS"
-  | "USING_FALLBACK";
+export type ResolutionWarningCode = "USING_FALLBACK";
 
 export interface ResolutionWarning {
   readonly code: ResolutionWarningCode;
@@ -50,7 +51,7 @@ export interface ResolvedModelInfo {
   readonly info: ModelBudgetInfo;
   /** 解析来源，调用方可据此决定日志级别 */
   readonly source: ResolutionSource;
-  /** 解析过程中的警告（MODEL_NOT_FOUND / USING_FALLBACK 等） */
+  /** 解析过程中的警告（仅在 fallback 路径产生） */
   readonly warnings: readonly ResolutionWarning[];
 }
 
@@ -59,12 +60,9 @@ export interface ResolvedModelInfo {
 /**
  * 保守默认值：32K 上下文 + 4K 输出预留。
  *
- * 选定原则：
- *   - 32K 是 2024-2025 大多数主流模型的最低上下文水位
- *   - 4K 输出充足覆盖普通对话
- *   - 宁可高估输出预留（多保留 token 空间），不低估
- *
- * 当所有查找途径都失败时启用，确保 ContextEngine 永不 undefined。
+ * 这是 core 层 defensive 兜底——仅当调用方未注入 protocolDefaults 时启用，
+ * 正常生产路径（CLI/server）不应触达。设计目的是确保 `info` 永不为 undefined，
+ * ContextEngine 永远可启用，避免静默禁用 compact 这类隐蔽故障。
  */
 export const CONSERVATIVE_FALLBACK: ModelBudgetInfo = {
   contextWindow: 32_000,
@@ -78,7 +76,12 @@ export interface ResolveModelInfoInput {
   readonly providerId: string;
   /** 当前请求的模型 ID */
   readonly model: string;
-  /** Provider 声明的模型列表 */
+  /**
+   * Provider declared catalog（已知模型元信息）。
+   *
+   * 网关型 provider 通常传空数组——catalog 之外的 model 由
+   * protocolDefaults 兜底，不再走"列表第一个当 fallback"那种伪占位路径。
+   */
   readonly providerModels: readonly ModelInfo[];
   /**
    * 用户覆盖表：key = modelId，value = 部分 ModelBudgetInfo 字段。
@@ -88,100 +91,78 @@ export interface ResolveModelInfoInput {
    * 调用方（cli/server）负责提取。
    */
   readonly overrides?: Record<string, Partial<ModelBudgetInfo>>;
+  /**
+   * 协议族级 budget 默认。
+   *
+   * catalog 未命中且无 override 时使用——比如 OpenAI 兼容协议下，任意未声明的
+   * model id 默认按 128K/4K 处理。这是网关型 provider 的合理工程兜底，
+   * 用户想精调走 modelOverrides。
+   *
+   * 调用方（cli/server）从 PROTOCOL_BUDGET_DEFAULTS[provider.protocol] 读取
+   * 后注入。core 层不感知 protocol 字符串。
+   */
+  readonly protocolDefaults?: ModelBudgetInfo;
 }
 
 // ─── 核心解析 ───
 
 /**
- * 解析模型预算信息。
- *
- * 优先级（高到低）：
- *   1. overrides[model] 存在 → 与 declared model（若找到）合并或基于 fallback
- *      合并 → source = "override"
- *   2. providerModels 中 id === model → source = "declared"
- *   3. providerModels 非空但无匹配 → 用 providerModels[0]
- *      + warn(MODEL_NOT_FOUND) → source = "declared"
- *   4. providerModels 为空 → CONSERVATIVE_FALLBACK
- *      + warn(NO_DECLARED_MODELS) + warn(USING_FALLBACK) → source = "fallback"
+ * 解析模型预算信息。详见模块顶部"数据源四层"。
  */
 export function resolveModelInfo(
   input: ResolveModelInfoInput,
 ): ResolvedModelInfo {
-  const { providerId, model, providerModels, overrides } = input;
-  const warnings: ResolutionWarning[] = [];
+  const { providerId, model, providerModels, overrides, protocolDefaults } =
+    input;
 
-  // 先定位 declared 模型（如果有）
   const declaredMatch = providerModels.find((m) => m.id === model);
-  const declaredFallback = declaredMatch ?? providerModels[0];
 
-  // override 路径 —— 按 base 的三种来源分支，类型系统显式收窄
+  // 1) override 路径——按 base 来源分支，类型系统显式收窄
   const override = overrides?.[model];
   if (override) {
-    // 1) 精确匹配 declared：override 直接叠加
-    if (declaredMatch) {
-      return {
-        info: mergeBudget(toBudget(declaredMatch), override),
-        source: "override",
-        warnings,
-      };
-    }
-
-    // 2) providerModels 非空但 model 名不匹配：用第一个作 base，带 warning
-    if (declaredFallback !== undefined) {
-      warnings.push({
-        code: "MODEL_NOT_FOUND",
-        message: `Model "${model}" not found in provider "${providerId}"; override applied on top of declared fallback "${declaredFallback.id}".`,
-      });
-      return {
-        info: mergeBudget(toBudget(declaredFallback), override),
-        source: "override",
-        warnings,
-      };
-    }
-
-    // 3) providerModels 完全为空：基于保守默认合并 override
+    const base =
+      (declaredMatch ? toBudget(declaredMatch) : undefined) ??
+      protocolDefaults ??
+      CONSERVATIVE_FALLBACK;
     return {
-      info: mergeBudget(CONSERVATIVE_FALLBACK, override),
+      info: mergeBudget(base, override),
       source: "override",
-      warnings,
+      warnings: [],
     };
   }
 
-  // declared 精确匹配
+  // 2) declared 命中
   if (declaredMatch) {
     return {
       info: toBudget(declaredMatch),
       source: "declared",
-      warnings,
+      warnings: [],
     };
   }
 
-  // declared 有但模型名不匹配
-  if (declaredFallback) {
-    warnings.push({
-      code: "MODEL_NOT_FOUND",
-      message: `Model "${model}" not found in provider "${providerId}"; using first declared model "${declaredFallback.id}" as fallback.`,
-    });
+  // 3) protocol 默认（调用方注入）
+  if (protocolDefaults) {
     return {
-      info: toBudget(declaredFallback),
-      source: "declared",
-      warnings,
+      info: { ...protocolDefaults },
+      source: "protocol-default",
+      warnings: [],
     };
   }
 
-  // 完全 fallback
-  warnings.push({
-    code: "NO_DECLARED_MODELS",
-    message: `Provider "${providerId}" declares no models.`,
-  });
-  warnings.push({
-    code: "USING_FALLBACK",
-    message: `Using conservative fallback {contextWindow: ${CONSERVATIVE_FALLBACK.contextWindow}, maxOutputTokens: ${CONSERVATIVE_FALLBACK.maxOutputTokens}} — context management is active but may be suboptimal. Consider adding "modelOverrides" to provider config.`,
-  });
+  // 4) defensive 兜底——生产路径不应触达
   return {
     info: { ...CONSERVATIVE_FALLBACK },
     source: "fallback",
-    warnings,
+    warnings: [
+      {
+        code: "USING_FALLBACK",
+        message:
+          `Provider "${providerId}" model "${model}" 无法解析 budget: ` +
+          `catalog 未声明且调用方未注入 protocolDefaults。` +
+          `使用保守默认 {${CONSERVATIVE_FALLBACK.contextWindow}/${CONSERVATIVE_FALLBACK.maxOutputTokens}}。` +
+          `如属生产路径，检查调用方是否传入 protocolDefaults；想精调请配 modelOverrides。`,
+      },
+    ],
   };
 }
 

@@ -16,7 +16,6 @@ import OpenAI from "openai";
 import type {
   ChatRequest,
   LLMProvider,
-  ModelInfo,
   StopReason,
   StreamEvent,
   TokenUsage,
@@ -28,6 +27,10 @@ import type { ResolvedProvider } from "../types.js";
 
 /**
  * 根据 ResolvedProvider 创建 LLMProvider 实例。
+ *
+ * `LLMProvider.models[]` 直接复用 `provider.declaredModels`——catalog 数据本身就是
+ * `ModelInfo` 形态，无需转换。网关型 provider 一般 declaredModels=[]；catalog 之外
+ * 的 model 由 core/resolveModelInfo 走协议族默认（PROTOCOL_BUDGET_DEFAULTS["openai-compatible"]）兜底。
  */
 export function createOpenAICompatibleProvider(provider: ResolvedProvider): LLMProvider {
   const client = new OpenAI({
@@ -35,20 +38,9 @@ export function createOpenAICompatibleProvider(provider: ResolvedProvider): LLMP
     apiKey: provider.apiKey,
   });
 
-  const modelInfo: ModelInfo = {
-    id: provider.defaultModel ?? "unknown",
-    name: provider.defaultModel ?? "unknown",
-    provider: provider.id,
-    contextWindow: 128_000,
-    maxOutputTokens: 4096,
-    supportsThinking: provider.quirks.supportsThinking,
-    supportsTools: provider.quirks.supportsTools,
-    supportsImages: false,
-  };
-
   return {
     id: provider.id,
-    models: [modelInfo],
+    models: provider.declaredModels,
 
     async *chat(request: ChatRequest): AsyncGenerator<StreamEvent, void, undefined> {
       const openaiMessages = convertMessages(request.messages);

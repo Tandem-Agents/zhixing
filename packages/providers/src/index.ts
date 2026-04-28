@@ -17,6 +17,9 @@ export type {
 } from "./types.js";
 export { DEFAULT_QUIRKS } from "./types.js";
 
+// 协议族默认 budget（cli/server 在调用 core.resolveModelInfo 时注入）
+export { PROTOCOL_BUDGET_DEFAULTS } from "./protocol-defaults.js";
+
 // 预设
 export { getPreset, getPresetIds, PROVIDER_PRESETS } from "./presets.js";
 
@@ -54,4 +57,7 @@ export {
   createProviderDirect,
   createProviderRoles,
 } from "./create-provider.js";
-export type { ProviderRolesOptions } from "./create-provider.js";
+export type {
+  ProviderRolesOptions,
+  ProviderRolesResult,
+} from "./create-provider.js";

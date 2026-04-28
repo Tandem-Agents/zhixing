@@ -36,7 +36,6 @@ const DEFAULT_USAGE: TokenUsage = { inputTokens: 100, outputTokens: 50 };
 const MOCK_MODEL: ModelInfo = {
   id: "mock-model",
   name: "Mock Model",
-  provider: "mock",
   contextWindow: 128_000,
   maxOutputTokens: 4096,
   supportsThinking: true,

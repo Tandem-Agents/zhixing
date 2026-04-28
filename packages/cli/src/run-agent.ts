@@ -57,6 +57,7 @@ import {
   createProviderRoles,
   ensureWorkspaceDir,
   getGlobalConfigPath,
+  PROTOCOL_BUDGET_DEFAULTS,
   resolveWorkspace,
   type ResolvedWorkspace,
   type WorkspaceDirStatus,
@@ -214,7 +215,7 @@ export async function createAgentRuntime(options: {
    */
   confirmationFallback?: ConfirmationFallbackStrategy;
 }): Promise<AgentRuntime> {
-  const { roles, config } = createProviderRoles({
+  const { roles, config, resolvedRoles } = createProviderRoles({
     providerOverride: options.provider,
     modelOverride: options.model,
   });
@@ -299,17 +300,20 @@ export async function createAgentRuntime(options: {
   // 加载项目上下文（ZHIXING.md + 环境信息），注入到首条 user message
   const projectContext = await loadProjectContext(cwd);
 
-  // 解析模型预算信息 —— resolver 保证 info 永不为 undefined：
-  //   1. provider 声明且 model 匹配 → declared
-  //   2. 不匹配但 provider 有其他模型 → fallback 到第一个 + warning
-  //   3. provider 无模型或都不匹配 → CONSERVATIVE_FALLBACK + warning
-  // 用户可通过 ZhixingConfig.providers.<id>.modelOverrides 覆盖。
+  // 解析模型预算信息 —— resolver 保证 info 永不为 undefined。
+  // 数据源四层（高 → 低）：
+  //   1. modelOverrides[model]                — 用户精调
+  //   2. provider.models.find(id===model)     — declared catalog 命中
+  //   3. PROTOCOL_BUDGET_DEFAULTS[protocol]   — 协议族默认（网关型 provider 兜底）
+  //   4. CONSERVATIVE_FALLBACK                — defensive 兜底（生产路径不应触达）
   // estimator 跨 run() 共享以保持校准状态。
   const resolvedModel = resolveModelInfo({
     providerId: roles.main.provider.id,
     model: roles.main.model,
     providerModels: roles.main.provider.models,
     overrides: config.providers?.[roles.main.provider.id]?.modelOverrides,
+    protocolDefaults:
+      PROTOCOL_BUDGET_DEFAULTS[resolvedRoles.main.resolved.protocol],
   });
   for (const w of resolvedModel.warnings) {
     console.warn(`[zhixing] ${w.message}`);

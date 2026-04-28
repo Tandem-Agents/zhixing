@@ -60,13 +60,22 @@ export function mergeUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
 
 // ─── 模型信息 ───
 
+/**
+ * Model 自身的元信息——budget 信息 + 能力声明。
+ *
+ * 不含 provider id：ModelInfo 总是嵌套在 LLMProvider.models[] 内，provider 归属
+ * 由结构隐含；在 ModelInfo 里再带一份是反范式冗余。consumer 需要 provider id
+ * 时通过 LLMProvider.id 获取。
+ *
+ * supports* 字段是 model-level capability 声明（与 ProviderQuirks 的 provider-level
+ * 行为差异不同维度）。当前生产路径暂未消费，保留为未来 model picker / capability
+ * 路由的扩展点；可选字段，不强制声明。
+ */
 export interface ModelInfo {
   /** 模型标识符，如 'claude-sonnet-4-20250514' */
   id: string;
   /** 显示名称 */
   name: string;
-  /** 提供商标识，如 'anthropic'、'openai' */
-  provider: string;
   /** 上下文窗口大小（token 数） */
   contextWindow: number;
   /** 最大输出 token 数 */
@@ -171,7 +180,21 @@ export interface LLMProvider {
   /** 提供商标识符，如 'anthropic'、'openai' */
   readonly id: string;
 
-  /** 此 Provider 支持的模型列表 */
+  /**
+   * Provider 实例上 declared 的 model catalog（已知模型元信息列表）。
+   *
+   * 语义：catalog 是"这个实例上元信息已知的 model"，不是"实例只能跑这些 model"——
+   * `chat({ model })` 接受任何字符串，catalog 之外的 model 也能正常请求 LLM。
+   * catalog 的唯一用途是给上下文工程的 budget 解析（resolveModelInfo）提供数据。
+   *
+   * 不同 provider 类型的典型形态：
+   *   - 绑定型 provider（如 anthropic）：catalog 列出已知 claude-* 模型
+   *   - 网关型 provider（如 OpenAI 兼容、聚合站、私有部署）：通常返回 []，
+   *     一个实例承载海量 model，无法预先列举
+   *
+   * 不变量：catalog 不得包含占位条目（id="unknown" 等）；缺失就返回 []。
+   * Budget 兜底由 resolveModelInfo 的 protocolDefaults / CONSERVATIVE_FALLBACK 承担。
+   */
   readonly models: readonly ModelInfo[];
 
   /**

@@ -134,6 +134,7 @@ function makeProvider(overrides?: Partial<ResolvedProvider>): ResolvedProvider {
       supportsThinking: true,
       supportsStreamUsage: true,
     },
+    declaredModels: [],
     ...overrides,
   };
 }
@@ -144,12 +145,29 @@ describe("createAnthropicProvider", () => {
     MockAnthropic.mockClear();
   });
 
-  it("应正确创建 provider 实例", () => {
+  it("应正确创建 provider 实例（默认 declaredModels=[]，不造伪占位）", () => {
     const provider = createAnthropicProvider(makeProvider());
 
     expect(provider.id).toBe("anthropic");
-    expect(provider.models).toHaveLength(1);
-    expect(provider.models[0]?.id).toBe("claude-sonnet-4-20250514");
+    expect(provider.models).toEqual([]);
+  });
+
+  it("显式传入 declaredModels 时 → models 直接复用 catalog（零 mapping）", () => {
+    const declared = [
+      {
+        id: "claude-test",
+        name: "Claude Test",
+        contextWindow: 200_000,
+        maxOutputTokens: 8_192,
+        supportsThinking: true,
+        supportsTools: true,
+        supportsImages: true,
+      },
+    ];
+    const provider = createAnthropicProvider(
+      makeProvider({ declaredModels: declared }),
+    );
+    expect(provider.models).toBe(declared);
   });
 
   // ─── 纯文本响应 ───

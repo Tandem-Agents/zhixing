@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ModelInfo } from "../../types/llm.js";
+import type { ModelBudgetInfo } from "../budget.js";
 import {
   CONSERVATIVE_FALLBACK,
   resolveModelInfo,
@@ -10,7 +11,6 @@ import {
 const DEEPSEEK_CHAT: ModelInfo = {
   id: "deepseek-chat",
   name: "DeepSeek Chat",
-  provider: "deepseek",
   contextWindow: 128_000,
   maxOutputTokens: 8_192,
 };
@@ -18,7 +18,11 @@ const DEEPSEEK_CHAT: ModelInfo = {
 const DEEPSEEK_CODER: ModelInfo = {
   id: "deepseek-coder",
   name: "DeepSeek Coder",
-  provider: "deepseek",
+  contextWindow: 128_000,
+  maxOutputTokens: 4_096,
+};
+
+const OPENAI_COMPATIBLE_PROTOCOL_DEFAULTS: ModelBudgetInfo = {
   contextWindow: 128_000,
   maxOutputTokens: 4_096,
 };
@@ -26,7 +30,7 @@ const DEEPSEEK_CODER: ModelInfo = {
 // ─── declared 分支 ───
 
 describe("resolveModelInfo · declared 精确匹配", () => {
-  it("精确匹配时返回 declared 的 budget", () => {
+  it("精确匹配时返回 declared 的 budget，无 warning", () => {
     const result = resolveModelInfo({
       providerId: "deepseek",
       model: "deepseek-chat",
@@ -39,28 +43,51 @@ describe("resolveModelInfo · declared 精确匹配", () => {
     });
     expect(result.warnings).toEqual([]);
   });
+});
 
-  it("未匹配但有第一个模型时使用 fallback declared + 产生 warning", () => {
+// ─── protocol-default 分支（取代旧的 providerModels[0] 兜底） ───
+
+describe("resolveModelInfo · protocol-default", () => {
+  it("declared 未匹配 + 提供 protocolDefaults → 使用 protocol 默认，无 warning", () => {
+    const result = resolveModelInfo({
+      providerId: "siliconflow",
+      model: "Pro/MiniMaxAI/MiniMax-M2.5",
+      providerModels: [],
+      protocolDefaults: OPENAI_COMPATIBLE_PROTOCOL_DEFAULTS,
+    });
+    expect(result.source).toBe("protocol-default");
+    expect(result.info).toEqual(OPENAI_COMPATIBLE_PROTOCOL_DEFAULTS);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("catalog 有其他 model 但请求 model 未匹配 → 走 protocol-default，不再用 catalog[0] 当伪占位", () => {
     const result = resolveModelInfo({
       providerId: "deepseek",
       model: "typo-model-name",
       providerModels: [DEEPSEEK_CHAT, DEEPSEEK_CODER],
+      protocolDefaults: OPENAI_COMPATIBLE_PROTOCOL_DEFAULTS,
     });
-    expect(result.source).toBe("declared");
-    expect(result.info).toEqual({
-      contextWindow: 128_000,
-      maxOutputTokens: 8_192,
+    expect(result.source).toBe("protocol-default");
+    expect(result.info).toEqual(OPENAI_COMPATIBLE_PROTOCOL_DEFAULTS);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it("返回 protocolDefaults 副本（防止共享引用被改）", () => {
+    const result = resolveModelInfo({
+      providerId: "x",
+      model: "y",
+      providerModels: [],
+      protocolDefaults: OPENAI_COMPATIBLE_PROTOCOL_DEFAULTS,
     });
-    expect(result.warnings).toHaveLength(1);
-    expect(result.warnings[0]!.code).toBe("MODEL_NOT_FOUND");
-    expect(result.warnings[0]!.message).toContain("deepseek-chat");
+    expect(result.info).not.toBe(OPENAI_COMPATIBLE_PROTOCOL_DEFAULTS);
+    expect(result.info).toEqual(OPENAI_COMPATIBLE_PROTOCOL_DEFAULTS);
   });
 });
 
 // ─── override 分支 ───
 
 describe("resolveModelInfo · override", () => {
-  it("完整 override 覆盖 declared 值", () => {
+  it("override + declared 命中 → 在 declared 上叠加", () => {
     const result = resolveModelInfo({
       providerId: "deepseek",
       model: "deepseek-chat",
@@ -77,7 +104,7 @@ describe("resolveModelInfo · override", () => {
     expect(result.warnings).toEqual([]);
   });
 
-  it("部分 override 保留 declared 其他字段", () => {
+  it("部分 override + declared 命中 → 缺失字段继承 declared", () => {
     const result = resolveModelInfo({
       providerId: "deepseek",
       model: "deepseek-chat",
@@ -89,29 +116,29 @@ describe("resolveModelInfo · override", () => {
     expect(result.source).toBe("override");
     expect(result.info).toEqual({
       contextWindow: 64_000,
-      maxOutputTokens: 8_192, // 继承自 declared
+      maxOutputTokens: 8_192,
     });
   });
 
-  it("override 命中 + declared 未匹配 → 用 providerModels[0] 作 base 并带 warning", () => {
+  it("override 命中 + declared 未命中 + 有 protocolDefaults → 在 protocolDefaults 上叠加", () => {
     const result = resolveModelInfo({
-      providerId: "deepseek",
-      model: "typo-name",
-      providerModels: [DEEPSEEK_CHAT],
+      providerId: "siliconflow",
+      model: "custom-model",
+      providerModels: [],
+      protocolDefaults: OPENAI_COMPATIBLE_PROTOCOL_DEFAULTS,
       overrides: {
-        "typo-name": { contextWindow: 16_000 },
+        "custom-model": { contextWindow: 256_000 },
       },
     });
     expect(result.source).toBe("override");
     expect(result.info).toEqual({
-      contextWindow: 16_000,
-      maxOutputTokens: 8_192, // 继承自 declaredFallback
+      contextWindow: 256_000,
+      maxOutputTokens: 4_096,
     });
-    expect(result.warnings).toHaveLength(1);
-    expect(result.warnings[0]!.code).toBe("MODEL_NOT_FOUND");
+    expect(result.warnings).toEqual([]);
   });
 
-  it("override 命中 + providerModels 为空 → 基于 CONSERVATIVE_FALLBACK 合并", () => {
+  it("override 命中 + 无 declared 无 protocolDefaults → 在 CONSERVATIVE_FALLBACK 上叠加", () => {
     const result = resolveModelInfo({
       providerId: "unknown",
       model: "mystery-model",
@@ -128,10 +155,10 @@ describe("resolveModelInfo · override", () => {
   });
 });
 
-// ─── fallback 分支 ───
+// ─── fallback 分支（defensive，生产路径不应触达） ───
 
-describe("resolveModelInfo · fallback", () => {
-  it("providerModels 为空 + 无 override → CONSERVATIVE_FALLBACK + 2 个 warning", () => {
+describe("resolveModelInfo · fallback (defensive)", () => {
+  it("无 override + catalog 未命中 + 无 protocolDefaults → CONSERVATIVE_FALLBACK + USING_FALLBACK warning", () => {
     const result = resolveModelInfo({
       providerId: "unknown-provider",
       model: "unknown-model",
@@ -139,14 +166,12 @@ describe("resolveModelInfo · fallback", () => {
     });
     expect(result.source).toBe("fallback");
     expect(result.info).toEqual(CONSERVATIVE_FALLBACK);
-    expect(result.warnings).toHaveLength(2);
-    expect(result.warnings.map((w) => w.code)).toEqual([
-      "NO_DECLARED_MODELS",
-      "USING_FALLBACK",
-    ]);
+    expect(result.warnings).toHaveLength(1);
+    expect(result.warnings[0]!.code).toBe("USING_FALLBACK");
+    expect(result.warnings[0]!.message).toContain("protocolDefaults");
   });
 
-  it("fallback 返回新对象副本（防止共享引用导致 CONSERVATIVE_FALLBACK 被改）", () => {
+  it("fallback 返回新对象副本（防止共享引用）", () => {
     const result = resolveModelInfo({
       providerId: "x",
       model: "y",
@@ -169,6 +194,12 @@ describe("resolveModelInfo · 调用方契约", () => {
         model: "x",
         providerModels: [],
         overrides: { x: { contextWindow: 1 } },
+      },
+      {
+        providerId: "a",
+        model: "x",
+        providerModels: [],
+        protocolDefaults: OPENAI_COMPATIBLE_PROTOCOL_DEFAULTS,
       },
     ];
     for (const input of cases) {

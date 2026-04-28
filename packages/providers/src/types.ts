@@ -12,6 +12,8 @@
  * - API Key 支持三种格式统一解析
  */
 
+import type { ModelInfo } from "@zhixing/core";
+
 // ─── 协议类型 ───
 
 /**
@@ -66,6 +68,15 @@ export interface ProviderPreset {
   defaultModel?: string;
   /** 该服务商的 quirks（未指定的字段使用 DEFAULT_QUIRKS） */
   quirks?: Partial<ProviderQuirks>;
+  /**
+   * 已知 model catalog（可选）。
+   *
+   * 当前所有 preset 都不内嵌——budget 跟 PROTOCOL_BUDGET_DEFAULTS 一致时，内嵌
+   * 是负维护无价值（详见 research/design/drafts/model-budget-resolution.md §4.3）。
+   * 字段保留作扩展点：未来真有 model 的 budget 跟协议族默认显著不同
+   * （如 1M context 变体），届时按需补充。
+   */
+  knownModels?: readonly ModelInfo[];
 }
 
 // ─── 用户配置 ───
@@ -240,4 +251,11 @@ export interface ResolvedProvider {
   defaultModel?: string;
   /** 行为差异配置 */
   quirks: ProviderQuirks;
+  /**
+   * 已知 model catalog（来自 preset.knownModels）。
+   *
+   * adapter 会原样写入 LLMProvider.models[]，供 ContextEngine 的 budget 解析使用。
+   * 不变量：不得包含占位条目（id="unknown" 等）；缺失就返回空数组。
+   */
+  declaredModels: readonly ModelInfo[];
 }

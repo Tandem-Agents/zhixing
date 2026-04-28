@@ -113,6 +113,7 @@ function makeProvider(overrides?: Partial<ResolvedProvider>): ResolvedProvider {
     protocol: "openai-compatible",
     defaultModel: "test-model",
     quirks: { ...DEFAULT_QUIRKS },
+    declaredModels: [],
     ...overrides,
   };
 }
@@ -123,12 +124,28 @@ describe("createOpenAICompatibleProvider", () => {
     MockOpenAI.mockClear();
   });
 
-  it("应正确创建 provider 实例", () => {
+  it("应正确创建 provider 实例（网关型默认 declaredModels=[]，不再造伪条目）", () => {
     const provider = createOpenAICompatibleProvider(makeProvider());
 
     expect(provider.id).toBe("test-provider");
-    expect(provider.models).toHaveLength(1);
-    expect(provider.models[0]?.id).toBe("test-model");
+    expect(provider.models).toEqual([]);
+  });
+
+  it("declaredModels 非空时 → models 直接复用 catalog（零 mapping）", () => {
+    const declared = [
+      {
+        id: "Pro/MiniMaxAI/MiniMax-M2.5",
+        name: "MiniMax-M2.5",
+        contextWindow: 245_760,
+        maxOutputTokens: 8_192,
+        supportsTools: true,
+      },
+    ];
+    const provider = createOpenAICompatibleProvider(
+      makeProvider({ declaredModels: declared }),
+    );
+
+    expect(provider.models).toBe(declared);
   });
 
   it("应正确处理纯文本流式响应", async () => {

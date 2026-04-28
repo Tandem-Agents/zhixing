@@ -18,6 +18,7 @@ import {
   resolveLLMRoles,
   resolveProvider,
   type LLMRolesResolveOptions,
+  type ResolvedLLMRoles,
 } from "./resolve.js";
 import type { ProviderConfig, ResolvedProvider, ZhixingConfig } from "./types.js";
 
@@ -88,6 +89,19 @@ export interface ProviderRolesOptions extends LLMRolesResolveOptions {
 }
 
 /**
+ * `createProviderRoles` 返回结果。
+ *
+ * `resolvedRoles` 暴露配置层中间产物（含 protocol/baseUrl/quirks/declaredModels
+ * 等元信息），消费者据此完成 budget 解析等需要 protocol-aware 的工作——
+ * 这些信息原本被埋在 LLMProvider 实例里不可见。
+ */
+export interface ProviderRolesResult {
+  roles: LLMRoles;
+  config: ZhixingConfig;
+  resolvedRoles: ResolvedLLMRoles;
+}
+
+/**
  * 一站式创建会话级 LLMRoles：从配置文件加载 → 双角色配置解析 →
  * 实例化 LLMProvider（同 provider id 共享实例）→ 绑定 model 成 LLMRole。
  *
@@ -100,7 +114,7 @@ export interface ProviderRolesOptions extends LLMRolesResolveOptions {
  */
 export function createProviderRoles(
   options: ProviderRolesOptions = {},
-): { roles: LLMRoles; config: ZhixingConfig } {
+): ProviderRolesResult {
   const env = options.env ?? process.env;
   const config = loadConfig({ cwd: options.cwd, env });
   const resolved = resolveLLMRoles(
@@ -123,6 +137,7 @@ export function createProviderRoles(
 
   return {
     config,
+    resolvedRoles: resolved,
     roles: {
       main: bindRole(mainProvider, resolved.main.model),
       secondary: bindRole(secondaryProvider, resolved.secondary.model),

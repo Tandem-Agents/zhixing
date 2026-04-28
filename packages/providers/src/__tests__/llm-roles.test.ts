@@ -408,4 +408,38 @@ describe("createProviderRoles · 实例化与角色装配", () => {
     expect(roles.main.provider.id).toBe("openai");
     expect(roles.main.model).toBe("gpt-4o-mini");
   });
+
+  it("resolvedRoles 暴露 protocol 等中间产物（CLI 用于 budget 解析）", () => {
+    writeFixture({
+      llm: { main: { provider: "anthropic", model: "claude-sonnet-4-20250514" } },
+      providers: { anthropic: { apiKey: "sk-ant" } },
+    });
+    const { resolvedRoles } = createProviderRoles({
+      env: env({ ZHIXING_CONFIG_PATH: configPath }),
+    });
+
+    expect(resolvedRoles.main.resolved.protocol).toBe("anthropic-messages");
+    expect(resolvedRoles.main.model).toBe("claude-sonnet-4-20250514");
+    // 当前 preset 不内嵌 catalog——budget 兜底交给 protocol-default
+    expect(resolvedRoles.main.resolved.declaredModels).toEqual([]);
+  });
+
+  it("网关型 provider（无 preset）走空 declaredModels —— catalog 兜底交给 protocol-default", () => {
+    writeFixture({
+      llm: {
+        main: {
+          provider: "siliconflow",
+          model: "Pro/MiniMaxAI/MiniMax-M2.5",
+        },
+      },
+      providers: { siliconflow: { apiKey: "sk-sf" } },
+    });
+    const { roles, resolvedRoles } = createProviderRoles({
+      env: env({ ZHIXING_CONFIG_PATH: configPath }),
+    });
+
+    expect(resolvedRoles.main.resolved.protocol).toBe("openai-compatible");
+    expect(resolvedRoles.main.resolved.declaredModels).toEqual([]);
+    expect(roles.main.provider.models).toEqual([]);
+  });
 });

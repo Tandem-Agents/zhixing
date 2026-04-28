@@ -54,7 +54,6 @@ interface StressResponse {
 const STRESS_MODEL: ModelInfo = {
   id: "stress-mock",
   name: "Stress Mock",
-  provider: "stress",
   contextWindow: 128_000,
   maxOutputTokens: 4096,
   supportsThinking: false,

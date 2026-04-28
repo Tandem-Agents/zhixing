@@ -14,7 +14,6 @@ import Anthropic from "@anthropic-ai/sdk";
 import type {
   ChatRequest,
   LLMProvider,
-  ModelInfo,
   StopReason,
   StreamEvent,
   TokenUsage,
@@ -37,22 +36,13 @@ export function createAnthropicProvider(resolved: ResolvedProvider): LLMProvider
     baseURL: resolved.baseUrl || undefined,
   });
 
-  const defaultModel = resolved.defaultModel ?? "claude-sonnet-4-20250514";
-
-  const modelInfo: ModelInfo = {
-    id: defaultModel,
-    name: defaultModel,
-    provider: resolved.id,
-    contextWindow: 200_000,
-    maxOutputTokens: 8192,
-    supportsThinking: resolved.quirks.supportsThinking,
-    supportsTools: resolved.quirks.supportsTools,
-    supportsImages: true,
-  };
+  // `LLMProvider.models[]` 直接复用 `resolved.declaredModels`——catalog 数据本身就是
+  // `ModelInfo` 形态，无需转换。catalog 之外的 model（如新发布尚未补 preset 的版本）走
+  // core/resolveModelInfo 的协议族默认（PROTOCOL_BUDGET_DEFAULTS["anthropic-messages"]）兜底。
 
   return {
     id: resolved.id,
-    models: [modelInfo],
+    models: resolved.declaredModels,
 
     async *chat(request: ChatRequest): AsyncGenerator<StreamEvent, void, undefined> {
       const messages = convertMessages(request.messages);

@@ -79,6 +79,7 @@ export function resolveProvider(
     protocol,
     defaultModel: userConfig.defaultModel ?? preset?.defaultModel,
     quirks,
+    declaredModels: preset?.knownModels ?? [],
   };
 }
 
