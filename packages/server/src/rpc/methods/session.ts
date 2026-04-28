@@ -13,6 +13,7 @@
  */
 
 import {
+  abortWithReason,
   generateTurnId,
   type RunResult,
   type TurnContext,
@@ -110,7 +111,14 @@ async function runManagedTurn(
 ): Promise<void> {
   const conversationId = managed.conversationId;
   const abortController = new AbortController();
-  const unsubClose = connection.onClose(() => abortController.abort());
+  // typed reason 让 channel 渲染层能识别"是连接断了"(详见 abort-formatter-zh /
+  // abort-serializer 对 external{ origin: rpc-connection-close } 的处理)
+  const unsubClose = connection.onClose(() =>
+    abortWithReason(abortController, {
+      kind: "external",
+      origin: "rpc-connection-close",
+    }),
+  );
   const turnStartedAt = new Date().toISOString();
 
   try {
@@ -244,8 +252,9 @@ export function buildSessionAbortMethod(): MethodEntry {
       }
       const manager = requireConversations(ctx.server);
       const result = manager.abort(id, {
-        kind: "external",
-        origin: "session-runtime-abort",
+        kind: "user-cancel",
+        source: "rpc",
+        pressedAt: Date.now(),
       });
       // RPC client 视角:in-flight 和 pending 都没动 = 没有可取消的对象 → notFound。
       // 任一维度动了 = 取消生效;细分计数 client 当前不消费(IDE 同步场景 pending 通常为 0),
