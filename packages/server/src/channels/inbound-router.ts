@@ -18,11 +18,18 @@ import type { ConversationManager, ManagedSession } from "../runtime/conversatio
 import { runTurnWithCommit } from "../runtime/run-turn.js";
 import type { ConfirmationHub } from "../confirmation/hub.js";
 import {
+  APPROVE_KEYWORDS,
+  DENY_KEYWORDS,
   matchTextToDecision,
   formatResolutionReceipt,
 } from "../confirmation/match.js";
 import { resolveConversationId } from "./conversation-binder.js";
 import { formatAbortReasonZh } from "./abort-formatter-zh.js";
+import {
+  createDefaultIntentClassifier,
+  type ControlIntent,
+  type IntentClassifier,
+} from "../intent/index.js";
 
 // ─── InboundRouter 入站消息路由器 ───
 // 将入站消息路由到对应的对话会话中，并执行 Agent 处理
@@ -46,6 +53,17 @@ export interface InboundRouterOptions {
    * 参见 remote-confirmation-execution.md §3.5。
    */
   confirmationHub?: ConfirmationHub;
+  /**
+   * 可选 IntentClassifier —— 在 confirmation 拦截**之前**做 control intent 识别。
+   * 用户发"中止"/"/cancel"等关键词时优先 abort in-flight + 清 pending,而不是
+   * 走 confirmation 或 agent 路径。
+   *
+   * 未提供时使用 `createDefaultIntentClassifier()` 兜底,保证 server 默认带 cancel
+   * 能力(无声地接受 cancel 关键词,避免"飞书用户发取消但 agent 不停"的体验断崖)。
+   * 显式传 classifier 可注入自定义 keyword 集合 / 关闭 cancel 能力(传一个永远返
+   * non-control 的 stub)。
+   */
+  intentClassifier?: IntentClassifier;
 }
 
 export class InboundRouter {
@@ -54,6 +72,7 @@ export class InboundRouter {
   private readonly logger: ChannelLogger;
   private outboxRegistry?: OutboxRegistry;
   private readonly confirmationHub?: ConfirmationHub;
+  private readonly intentClassifier: IntentClassifier;
 
   constructor(options: InboundRouterOptions) {
     this.conversations = options.conversations;
@@ -61,6 +80,14 @@ export class InboundRouter {
     this.logger = options.logger;
     this.outboxRegistry = options.outboxRegistry;
     this.confirmationHub = options.confirmationHub;
+    // 默认 classifier 注入 confirmation 词集让启动期 INV-R2 互斥校验实际生效;
+    // 显式注入的 classifier 自负其责(测试场景 / 关闭 cancel 能力等)。
+    this.intentClassifier =
+      options.intentClassifier ??
+      createDefaultIntentClassifier({
+        confirmationApproveKeywords: APPROVE_KEYWORDS,
+        confirmationDenyKeywords: DENY_KEYWORDS,
+      });
   }
 
   /**
@@ -133,6 +160,15 @@ export class InboundRouter {
     const conversationId = resolveConversationId(msg, adapter.bindingPolicy);
     this.logger.info(`[收到] "${msg.text}" from=${msg.from} conv=${conversationId}`);
 
+    // ── 控制意图前置识别(优先于一切其它路径) ──
+    // 词集互斥(INV-R2)由 IntentClassifier 启动期校验,不会与下方 confirmation
+    // 词集冲突;识别为 non-control 时让原 confirmation / agent 路径接管。
+    const intent = this.intentClassifier.classify(msg);
+    if (intent.kind === "control") {
+      await this.handleControlIntent(intent.control, conversationId, msg);
+      return;
+    }
+
     // ── pending-aware 拦截（remote-confirmation-execution.md §3.5） ──
     // 必须在 conversations.getOrCreate / enqueue **之前**：
     //   · 不占队列位（用户回复不是对 agent 的提问）
@@ -181,6 +217,61 @@ export class InboundRouter {
       this.conversations.setBusy(conversationId, true);
       void this.runChannelTurn(managed, msg);
     }
+  }
+
+  /**
+   * 处理控制意图(当前仅 cancel)。按 `AbortResult` 双维度做反馈三分支:
+   *
+   *   - `abortedInFlight === true`: **不在此处反馈** —— in-flight turn 走主模块
+   *     cleanup 路径(≤200ms)产出 RunResult.aborted,由 `runChannelTurn` 走
+   *     `formatAbortReasonZh` 产生唯一一条反馈。在这里再 emit 会让用户收到两条
+   *     重复消息(反馈单源原则)
+   *   - `cancelledPending > 0`: 无 in-flight 但 pending queue 有任务被清,直接
+   *     反馈"已取消队列中的 N 条待处理消息"
+   *   - 都假: 既无 in-flight 也无 pending,反馈"当前没有正在处理的任务"
+   *
+   * 反馈直接 `adapter.send` 绕过 Outbox(与 confirmation 回执 §3.7 同源策略) ——
+   * Outbox 排队会让控制响应被业务消息延迟,违反"控制响应即时反馈"原则。
+   */
+  private async handleControlIntent(
+    control: ControlIntent,
+    conversationId: string,
+    msg: InboundMessage,
+  ): Promise<void> {
+    if (control.kind !== "cancel") return;
+
+    this.logger.info(
+      `[控制] cancel keyword="${control.matchedKeyword}" conv=${conversationId} from=${msg.from}`,
+    );
+
+    const result = this.conversations.abort(conversationId, {
+      kind: "user-cancel",
+      source: "rpc",
+      pressedAt: Date.now(),
+    });
+
+    if (result.abortedInFlight) {
+      // 反馈单源:让 cleanup 路径产出
+      return;
+    }
+
+    const replyTarget = buildReplyTarget(msg);
+    const adapter = this.channels.get(replyTarget.channelId);
+    if (!adapter) {
+      this.logger.warn(
+        `cancel ack: adapter not found for channel ${replyTarget.channelId}`,
+      );
+      return;
+    }
+
+    const text =
+      result.cancelledPending > 0
+        ? `已取消队列中的 ${result.cancelledPending} 条待处理消息。`
+        : "当前没有正在处理的任务。";
+
+    await adapter
+      .send(replyTarget, { text })
+      .catch((e) => this.logger.error(`cancel ack send failed: ${errMsg(e)}`));
   }
 
   /**

@@ -19,9 +19,14 @@ import type {
 } from "@zhixing/core";
 
 // ─── 词集定义 ───
+//
+// 导出 list 形式 + 内部 Set 形式:
+//   - list 形式给跨模块互斥校验(IntentClassifier 启动期 INV-R2 disjoint 检查)用,
+//     不强迫 caller 知道 Set/Array 转换
+//   - Set 是本模块快查,classify O(1) 路径
 
 /** 允许本次——覆盖常见肯定表达（中英文 + 数字 + 口语 + 情绪） */
-const APPROVE_SET = new Set<string>([
+export const APPROVE_KEYWORDS: ReadonlyArray<string> = [
   // 英文
   "y", "yes", "yep", "yeah", "yup", "ok", "okay", "sure", "approve",
   // 数字
@@ -31,10 +36,10 @@ const APPROVE_SET = new Set<string>([
   "批准", "通过", "执行", "继续", "没问题","开始",
   // 口语 / 情绪
   "干吧", "去吧", "做吧", "来", "来吧", "嗯", "嗯嗯",
-]);
+];
 
 /** 拒绝——覆盖常见否定表达（中英文 + 数字 + 口语 + 情绪） */
-const DENY_SET = new Set<string>([
+export const DENY_KEYWORDS: ReadonlyArray<string> = [
   // 英文
   "n", "no", "nope", "cancel", "stop", "deny", "reject",
   // 数字
@@ -44,7 +49,10 @@ const DENY_SET = new Set<string>([
   "不同意", "不可以", "不批准", "不通过","不允许",
   // 口语 / 情绪
   "算了", "别", "停", "取消", "不了",
-]);
+];
+
+const APPROVE_SET = new Set<string>(APPROVE_KEYWORDS);
+const DENY_SET = new Set<string>(DENY_KEYWORDS);
 
 /**
  * 拒绝理由最大长度——超过截断，防止膨胀 LLM 上下文与 token 成本。

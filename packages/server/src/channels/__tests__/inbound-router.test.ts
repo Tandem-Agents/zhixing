@@ -935,6 +935,148 @@ describe("InboundRouter", () => {
     });
   });
 
+  // ─── Cancel intent (RM3) ───
+  describe("control intent: cancel keyword", () => {
+    it("/cancel 关键词 → conversations.abort 调用,reason 是 user-cancel{rpc}", async () => {
+      const { adapter, conversations, router } = setup();
+      // 先建一个 conversation 让 abort 有目标
+      await conversations.getOrCreate("dm:test-ch:user-1");
+
+      const abortSpy = vi.spyOn(conversations, "abort");
+
+      await router.handleMessage(dmMessage("test-ch", "user-1", "/cancel"));
+
+      expect(abortSpy).toHaveBeenCalledTimes(1);
+      const [convId, reason] = abortSpy.mock.calls[0]!;
+      expect(convId).toBe("dm:test-ch:user-1");
+      expect(reason?.kind).toBe("user-cancel");
+      const r = reason as { kind: "user-cancel"; source: string; pressedAt: number };
+      expect(r.source).toBe("rpc");
+      expect(typeof r.pressedAt).toBe("number");
+
+      // 不进 agent — runtime.run 不应被触发
+      const adapterSendCalls = (adapter.send as ReturnType<typeof vi.fn>).mock.calls.filter(
+        (c) => (c[1] as { text: string }).text === "Hello from agent",
+      );
+      expect(adapterSendCalls).toHaveLength(0);
+    });
+
+    it("中文 cancel 关键词同样触发", async () => {
+      const { conversations, router } = setup();
+      await conversations.getOrCreate("dm:test-ch:user-1");
+      const abortSpy = vi.spyOn(conversations, "abort");
+
+      await router.handleMessage(dmMessage("test-ch", "user-1", "中止"));
+
+      expect(abortSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it("无 in-flight 无 pending → 反馈'当前没有正在处理的任务',绕过 Outbox", async () => {
+      const { adapter, router } = setup();
+
+      await router.handleMessage(dmMessage("test-ch", "user-1", "/cancel"));
+
+      // 直接 adapter.send,不走 emitReply / outbox
+      await vi.waitFor(() => {
+        expect(adapter.send).toHaveBeenCalled();
+      });
+      const lastCall = (adapter.send as ReturnType<typeof vi.fn>).mock.calls.at(-1)!;
+      expect((lastCall[1] as { text: string }).text).toBe(
+        "当前没有正在处理的任务。",
+      );
+    });
+
+    it("有 pending 但无 in-flight → 反馈'已取消队列中的 N 条'", async () => {
+      const { adapter, conversations, router } = setup();
+      await conversations.getOrCreate("dm:test-ch:user-1");
+      conversations.setBusy("dm:test-ch:user-1", true);
+      conversations.enqueue("dm:test-ch:user-1", {
+        execute: async () => {},
+        cancel: () => {},
+      });
+      conversations.enqueue("dm:test-ch:user-1", {
+        execute: async () => {},
+        cancel: () => {},
+      });
+
+      // mock runtime.abort 默认返 false → in-flight 维度无打断,只清 pending
+      await router.handleMessage(dmMessage("test-ch", "user-1", "/cancel"));
+
+      await vi.waitFor(() => {
+        const lastCall = (adapter.send as ReturnType<typeof vi.fn>).mock.calls.at(-1);
+        return lastCall && (lastCall[1] as { text: string }).text.includes("已取消");
+      });
+      const lastCall = (adapter.send as ReturnType<typeof vi.fn>).mock.calls.at(-1)!;
+      expect((lastCall[1] as { text: string }).text).toBe(
+        "已取消队列中的 2 条待处理消息。",
+      );
+    });
+
+    it("有 in-flight → 不在 handleControlIntent 处反馈(让 cleanup 路径产出唯一反馈)", async () => {
+      const { adapter, conversations, router } = setup({
+        runtime: {
+          ...createMockRuntime(),
+          abort: vi.fn(() => true), // mock in-flight 存在,abort 返 true
+        },
+      });
+      await conversations.getOrCreate("dm:test-ch:user-1");
+
+      await router.handleMessage(dmMessage("test-ch", "user-1", "/cancel"));
+
+      // adapter.send 不应在 handleControlIntent 内被调
+      // (cleanup 路径反馈是 runChannelTurn 内,本测试无 in-flight runChannelTurn 在跑)
+      // 只验证:与"无 in-flight"分支不同,本路径不发"当前没有正在处理的任务"
+      const sentTexts = (adapter.send as ReturnType<typeof vi.fn>).mock.calls.map(
+        (c) => (c[1] as { text: string }).text,
+      );
+      expect(sentTexts).not.toContain("当前没有正在处理的任务。");
+      expect(sentTexts.find((t) => t.startsWith("已取消队列"))).toBeUndefined();
+    });
+
+    it("非 cancel 文本 → 走原 confirmation/agent 路径,不调 abort", async () => {
+      const { adapter, conversations, router } = setup();
+      const abortSpy = vi.spyOn(conversations, "abort");
+
+      await router.handleMessage(dmMessage("test-ch", "user-1", "你好"));
+
+      await vi.waitFor(() => {
+        expect(adapter.send).toHaveBeenCalled();
+      });
+      // agent 路径:回 "Hello from agent"
+      const reply = (adapter.send as ReturnType<typeof vi.fn>).mock.calls[0]![1] as {
+        text: string;
+      };
+      expect(reply.text).toBe("Hello from agent");
+      expect(abortSpy).not.toHaveBeenCalled();
+    });
+
+    it("空消息不触发 cancel(避免空字符串误命中)", async () => {
+      const { conversations, router } = setup();
+      const abortSpy = vi.spyOn(conversations, "abort");
+
+      await router.handleMessage(dmMessage("test-ch", "user-1", ""));
+
+      expect(abortSpy).not.toHaveBeenCalled();
+    });
+
+    it("session 不存在 → abort 仍调用(返双零),反馈'当前没有正在处理的任务'", async () => {
+      const { adapter, conversations, router } = setup();
+      const abortSpy = vi.spyOn(conversations, "abort");
+
+      // 不预创建 session
+      await router.handleMessage(dmMessage("test-ch", "user-ghost", "/cancel"));
+
+      expect(abortSpy).toHaveBeenCalled();
+      await vi.waitFor(() => {
+        expect(adapter.send).toHaveBeenCalled();
+      });
+      const lastCall = (adapter.send as ReturnType<typeof vi.fn>).mock.calls.at(-1)!;
+      expect((lastCall[1] as { text: string }).text).toBe(
+        "当前没有正在处理的任务。",
+      );
+    });
+  });
+
   // 注：ADR-007 Phase 3 的"task-fire 排在 LLM 回复之后"核心保证已由两层测试组合证明：
   //
   //   1. outbox.test.ts "fillSlot(slot, entry) 原子性"：
