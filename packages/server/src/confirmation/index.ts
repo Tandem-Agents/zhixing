@@ -14,6 +14,8 @@ export { TextConfirmationRenderer, formatConfirmationMessage } from "./text-rend
 export type { TextRendererOptions } from "./text-renderer.js";
 
 export {
+  APPROVE_KEYWORDS,
+  DENY_KEYWORDS,
   MAX_REASON_LENGTH,
   matchTextToDecision,
   formatResolutionReceipt,

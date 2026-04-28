@@ -45,9 +45,36 @@ describe("createDefaultIntentClassifier", () => {
       expect(intent.kind).toBe("control");
     });
 
+    it.each(["停止", "停下", "中止", "中断", "终止", "停", "取消", "打住"])(
+      "中文控制命令型词 '%s' 命中 cancel",
+      (kw) => {
+        const intent = classifier.classify(buildMsg(kw));
+        expect(intent.kind).toBe("control");
+        if (intent.kind === "control") {
+          expect(intent.control.kind).toBe("cancel");
+        }
+      },
+    );
+
+    it.each(["stop", "cancel", "/cancel", "/stop", "/abort"])(
+      "英文/控制命令 '%s' 命中 cancel",
+      (kw) => {
+        const intent = classifier.classify(buildMsg(kw));
+        expect(intent.kind).toBe("control");
+        if (intent.kind === "control") {
+          expect(intent.control.kind).toBe("cancel");
+        }
+      },
+    );
+
+    it("'停止' 末尾标点 trim 后命中(IM 习惯)", () => {
+      expect(classifier.classify(buildMsg("停止。")).kind).toBe("control");
+      expect(classifier.classify(buildMsg("停下!")).kind).toBe("control");
+    });
+
     it("大小写无关", () => {
       expect(classifier.classify(buildMsg("/CANCEL")).kind).toBe("control");
-      expect(classifier.classify(buildMsg("ABORT")).kind).toBe("control");
+      expect(classifier.classify(buildMsg("/STOP")).kind).toBe("control");
     });
 
     it("末尾标点/空白 trim(IM 习惯,与 confirmation/match 同源)", () => {
@@ -69,10 +96,11 @@ describe("createDefaultIntentClassifier", () => {
     });
 
     it("matchedKeyword 字段返回原始字面值(诊断用)", () => {
-      const intent = classifier.classify(buildMsg("ABORT"));
+      const intent = classifier.classify(buildMsg("/CANCEL"));
+      expect(intent.kind).toBe("control");
       if (intent.kind === "control") {
-        // 原始 cancel-keywords 列表里是 "abort"(小写),命中后返回该字面
-        expect(intent.control.matchedKeyword).toBe("abort");
+        // 原始 cancel-keywords 列表里是 "/cancel"(小写),命中后返回该字面
+        expect(intent.control.matchedKeyword).toBe("/cancel");
       }
     });
   });
@@ -95,7 +123,7 @@ describe("createDefaultIntentClassifier", () => {
     });
   });
 
-  describe("启动期 INV-R2 互斥校验", () => {
+  describe("启动期互斥校验", () => {
     it("默认 cancel 词集 ∩ confirmation APPROVE/DENY = ∅,通过校验不抛", () => {
       expect(() =>
         createDefaultIntentClassifier({
@@ -118,7 +146,7 @@ describe("createDefaultIntentClassifier", () => {
     it("cancel 词与 deny 冲突 → throw,fail-fast", () => {
       expect(() =>
         createDefaultIntentClassifier({
-          cancelKeywords: ["取消"],
+          cancelKeywords: ["算了"],
           confirmationApproveKeywords: APPROVE_KEYWORDS,
           confirmationDenyKeywords: DENY_KEYWORDS,
         }),
@@ -128,14 +156,14 @@ describe("createDefaultIntentClassifier", () => {
     it("错误信息列出冲突词与冲突所在集", () => {
       try {
         createDefaultIntentClassifier({
-          cancelKeywords: ["取消", "yes"],
+          cancelKeywords: ["算了", "yes"],
           confirmationApproveKeywords: APPROVE_KEYWORDS,
           confirmationDenyKeywords: DENY_KEYWORDS,
         });
         expect.fail("expected throw");
       } catch (e) {
         const msg = (e as Error).message;
-        expect(msg).toContain("取消");
+        expect(msg).toContain("算了");
         expect(msg).toContain("yes");
         expect(msg).toContain("approve");
         expect(msg).toContain("deny");
@@ -145,12 +173,11 @@ describe("createDefaultIntentClassifier", () => {
     it("不传 confirmation 词集 → 跳过校验(测试 / 单独使用场景)", () => {
       // 显式传冲突词,但不传 confirmation 词集 → 不校验,不抛
       expect(() =>
-        createDefaultIntentClassifier({ cancelKeywords: ["取消"] }),
+        createDefaultIntentClassifier({ cancelKeywords: ["算了"] }),
       ).not.toThrow();
     });
 
     it("校验是规范化后的(全角/大小写/标点都参与对比)", () => {
-      // confirmation deny 含 "yes"(其实在 approve)和 "取消"
       expect(() =>
         createDefaultIntentClassifier({
           cancelKeywords: ["YES"],
@@ -163,7 +190,7 @@ describe("createDefaultIntentClassifier", () => {
 });
 
 describe("DEFAULT_CANCEL_KEYWORDS", () => {
-  it("与 confirmation APPROVE/DENY 必须完全不相交(INV-R2 不变量)", () => {
+  it("与 confirmation APPROVE/DENY 必须完全不相交(硬不变量)", () => {
     const approveSet = new Set(APPROVE_KEYWORDS.map((s) => s.toLowerCase()));
     const denySet = new Set(DENY_KEYWORDS.map((s) => s.toLowerCase()));
     const conflicts: string[] = [];

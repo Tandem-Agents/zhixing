@@ -78,20 +78,32 @@ describe("matchTextToDecision — APPROVE_SET", () => {
 
 describe("matchTextToDecision — DENY_SET", () => {
   const deny = [
-    // 英文
-    "n", "no", "nope", "cancel", "stop", "deny", "reject",
+    // 英文（纯否定型；"cancel"/"stop" 是控制命令归 CANCEL）
+    "n", "no", "nope", "deny", "reject",
     // 数字
     "2",
-    // 中文短词
+    // 中文短词（纯否定型；"取消"/"停" 是控制命令归 CANCEL）
     "不", "不行", "不要", "不用", "拒绝", "否",
     "不同意", "不可以", "不批准", "不通过",
     // 口语 / 情绪
-    "算了", "别", "停", "取消", "不了",
+    "算了", "别", "不了",
   ];
 
   for (const word of deny) {
     it(`"${word}" → deny`, () => {
       expect(matchTextToDecision(word)).toEqual({ kind: "deny" });
+    });
+  }
+});
+
+// 边界：控制命令型词("stop"/"cancel"/"停"/"取消")已迁出 DENY，归 CANCEL（intent 模块）。
+// confirmation 单独跑时（未经 IntentClassifier 前置拦截）这些词会走自由文本 deny 路径
+// 带 reason，而不是结构化 deny。生产路径下它们在 InboundRouter 被 IntentClassifier
+// 优先拦截 → cancel turn，不会走到本路径。
+describe("matchTextToDecision — 控制命令型词不再走结构化 DENY", () => {
+  for (const word of ["stop", "cancel", "停", "取消"]) {
+    it(`"${word}" → 自由文本 deny（带 reason）`, () => {
+      expect(matchTextToDecision(word)).toEqual({ kind: "deny", reason: word });
     });
   }
 });

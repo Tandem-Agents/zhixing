@@ -172,6 +172,53 @@ describe("loadConfig", () => {
     expect(config.providers?.openai?.apiKey).toBe("sk-oai");
   });
 
+  it("intent.cancelKeywords 是 append 合并：全局 + 项目都生效", () => {
+    const globalDir = path.join(tempHome, ".zhixing");
+    fs.mkdirSync(globalDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(globalDir, "config.json"),
+      JSON.stringify({
+        intent: { cancelKeywords: ["全局词1", "全局词2"] },
+      }),
+    );
+
+    fs.writeFileSync(
+      path.join(tempProject, "zhixing.config.json"),
+      JSON.stringify({
+        intent: { cancelKeywords: ["项目词"] },
+      }),
+    );
+
+    const config = loadConfig({
+      cwd: tempProject,
+      env: { ZHIXING_CONFIG_PATH: path.join(globalDir, "config.json") },
+      noAutoCreate: true,
+    });
+
+    expect(config.intent?.cancelKeywords).toEqual([
+      "全局词1",
+      "全局词2",
+      "项目词",
+    ]);
+  });
+
+  it("intent 仅全局配置 → 透传", () => {
+    const globalDir = path.join(tempHome, ".zhixing");
+    fs.mkdirSync(globalDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(globalDir, "config.json"),
+      JSON.stringify({ intent: { cancelKeywords: ["仅全局"] } }),
+    );
+
+    const config = loadConfig({
+      cwd: tempProject,
+      env: { ZHIXING_CONFIG_PATH: path.join(globalDir, "config.json") },
+      noAutoCreate: true,
+    });
+
+    expect(config.intent?.cancelKeywords).toEqual(["仅全局"]);
+  });
+
   it("自动创建全局配置模板（含 llm.main 嵌套）", () => {
     const configPath = path.join(tempHome, ".zhixing", "config.json");
 

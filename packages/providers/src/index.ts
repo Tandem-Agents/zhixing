@@ -4,6 +4,7 @@
 export type {
   AgentConfig,
   ChannelConfigEntry,
+  IntentConfig,
   LLMRoleConfig,
   ModelBudgetOverride,
   NetworkConfig,

@@ -69,7 +69,7 @@ describe("formatAbortReasonZh", () => {
         formatAbortReasonZh({ kind: "external", origin: "session-runtime-abort" }),
       ).toBe("已停止处理。");
     });
-    it("未知 origin → 默认兜底,不抛异常(INV-R3)", () => {
+    it("未知 origin → 默认兜底,不抛异常(渲染层 totality)", () => {
       expect(
         formatAbortReasonZh({ kind: "external", origin: "future-unknown-origin" }),
       ).toBe("已停止处理。");
@@ -79,7 +79,7 @@ describe("formatAbortReasonZh", () => {
     });
   });
 
-  describe("parent-abort 链路必须 unwrap 到根因(INV-R4 渲染层落地)", () => {
+  describe("parent-abort 链路必须 unwrap 到根因", () => {
     it("0 层 wrap:idle-timeout 直接渲染(unwrap 是 no-op)", () => {
       expect(
         formatAbortReasonZh({

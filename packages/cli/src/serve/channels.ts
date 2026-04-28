@@ -8,7 +8,11 @@ import {
   type InboundMessage,
 } from "@zhixing/core";
 import {
+  APPROVE_KEYWORDS,
+  DENY_KEYWORDS,
+  DEFAULT_CANCEL_KEYWORDS,
   InboundRouter,
+  createDefaultIntentClassifier,
   type ConversationManager,
   type ConfirmationHub,
 } from "@zhixing/server";
@@ -40,9 +44,15 @@ export interface SetupChannelsOptions {
   logger: ChannelLogger;
   /**
    * 可选 ConfirmationHub。传入时 InboundRouter 会在 enqueue 之前检查
-   * pending confirmation，按词集匹配规则解决（§3.5 / §3.6）。
+   * pending confirmation，按词集匹配规则解决。
    */
   confirmationHub?: ConfirmationHub;
+  /**
+   * 用户配置的 cancel 关键词扩展（来自 `ZhixingConfig.intent.cancelKeywords`）。
+   * 与 `DEFAULT_CANCEL_KEYWORDS` append 合并后注入 IntentClassifier；启动期
+   * 静态互斥校验生效——配错关键词跟 confirmation 集合冲突会立即 throw。
+   */
+  cancelKeywords?: readonly string[];
 }
 
 export interface SetupChannelsResult {
@@ -53,7 +63,8 @@ export interface SetupChannelsResult {
 export async function setupChannels(
   options: SetupChannelsOptions,
 ): Promise<SetupChannelsResult> {
-  const { entries, conversations, logger, confirmationHub } = options;
+  const { entries, conversations, logger, confirmationHub, cancelKeywords } =
+    options;
 
   const eventBus = createEventBus<ChannelEventMap>();
 
@@ -72,11 +83,24 @@ export async function setupChannels(
   });
 
   if (conversations) {
+    // 显式构造 IntentClassifier 注入——把 default 关键词与用户配置 append 合并，
+    // 启动期 disjoint 校验生效（与 confirmation 词集冲突 fail-fast）。
+    const mergedCancelKeywords =
+      cancelKeywords && cancelKeywords.length > 0
+        ? [...DEFAULT_CANCEL_KEYWORDS, ...cancelKeywords]
+        : DEFAULT_CANCEL_KEYWORDS;
+    const intentClassifier = createDefaultIntentClassifier({
+      cancelKeywords: mergedCancelKeywords,
+      confirmationApproveKeywords: APPROVE_KEYWORDS,
+      confirmationDenyKeywords: DENY_KEYWORDS,
+    });
+
     router = new InboundRouter({
       conversations,
       channels: registry,
       logger,
       confirmationHub,
+      intentClassifier,
     });
   }
 

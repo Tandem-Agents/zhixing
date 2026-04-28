@@ -6,9 +6,9 @@
  *   - cron / scheduler 自身按 task 配置(deadline / 超时)主动中断
  *   - graceful shutdown 通过 `abortAllAndWait` 让所有 in-flight run 走完 cleanup
  *
- * 设计:与 `ConversationManager` 平行(都是 INV-R5 的"执行单元独占 controller"
- * 实现),server / cli 都从 `@zhixing/core` 引用,无反向依赖。首次引入 scheduler
- * → interrupt 的模块内依赖,合法且无循环(interrupt 不反向引用 scheduler)。
+ * 设计:与 `ConversationManager` 平行(都是"执行单元独占 controller"的实现),
+ * server / cli 都从 `@zhixing/core` 引用,无反向依赖。首次引入 scheduler →
+ * interrupt 的模块内依赖,合法且无循环(interrupt 不反向引用 scheduler)。
  */
 
 import { abortWithReason } from "../interrupt/index.js";

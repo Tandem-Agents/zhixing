@@ -93,7 +93,7 @@ export class InboundRouter {
     this.logger = options.logger;
     this.outboxRegistry = options.outboxRegistry;
     this.confirmationHub = options.confirmationHub;
-    // 默认 classifier 注入 confirmation 词集让启动期 INV-R2 互斥校验实际生效;
+    // 默认 classifier 注入 confirmation 词集让启动期互斥校验实际生效;
     // 显式注入的 classifier 自负其责(测试场景 / 关闭 cancel 能力等)。
     this.intentClassifier =
       options.intentClassifier ??
@@ -203,8 +203,8 @@ export class InboundRouter {
     this.logger.info(`[收到] "${msg.text}" from=${msg.from} conv=${conversationId}`);
 
     // ── 控制意图前置识别(优先于一切其它路径) ──
-    // 词集互斥(INV-R2)由 IntentClassifier 启动期校验,不会与下方 confirmation
-    // 词集冲突;识别为 non-control 时让原 confirmation / agent 路径接管。
+    // 词集互斥由 IntentClassifier 启动期校验,不会与下方 confirmation 词集冲突;
+    // 识别为 non-control 时让原 confirmation / agent 路径接管。
     const intent = this.intentClassifier.classify(msg);
     if (intent.kind === "control") {
       await this.handleControlIntent(intent.control, conversationId, msg);

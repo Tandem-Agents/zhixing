@@ -206,8 +206,10 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
         entries: config.channels,
         conversations,
         logger: channelLogger,
-        // InboundRouter pending-aware 拦截依赖 hub（§3.5）
+        // InboundRouter pending-aware 拦截依赖 hub
         confirmationHub,
+        // 用户配置的 cancel 关键词扩展（与 DEFAULT_CANCEL_KEYWORDS append 合并）
+        cancelKeywords: config.intent?.cancelKeywords,
       });
       channels = result.registry;
       inboundRouter = result.router;
@@ -460,7 +462,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   //                                                   (partial yields + RunResult + 取消反馈)
   //
   //     必须 await drain —— 没有它 server.close / channels.dispose 抢断 partial 流和取消反馈,
-  //     违反 INV-R7 关停期反馈不丢。30s 总超时兜底由 abortAllAndWait 自身实现,超时不抛
+  //     违反"关停期反馈不丢"。30s 总超时兜底由 abortAllAndWait 自身实现,超时不抛
   //     直接进下一步,避免 grace 类工具 hang 整条关停链。
   registry.register("execution.abortAllAndWait", async () => {
     await Promise.all([

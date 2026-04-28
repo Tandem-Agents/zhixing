@@ -197,6 +197,18 @@ function deepMergeConfig(
     result.agent = { ...base.agent, ...override.agent };
   }
 
+  // intent：cancelKeywords 是 append 列表（项目级追加全局级，让两层都生效）
+  if (override.intent !== undefined || base.intent !== undefined) {
+    const baseKw = base.intent?.cancelKeywords ?? [];
+    const overrideKw = override.intent?.cancelKeywords ?? [];
+    const merged = [...baseKw, ...overrideKw];
+    result.intent = {
+      ...base.intent,
+      ...override.intent,
+      ...(merged.length > 0 ? { cancelKeywords: merged } : {}),
+    };
+  }
+
   // workspace：目录级配置整体覆盖全局配置（不做字段级 merge，
   // 因为目录级 workspace 含义是"在此目录下工作区换成这个"）
   if (override.workspace !== undefined) {

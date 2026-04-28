@@ -21,7 +21,7 @@ import type {
 // ─── 词集定义 ───
 //
 // 导出 list 形式 + 内部 Set 形式:
-//   - list 形式给跨模块互斥校验(IntentClassifier 启动期 INV-R2 disjoint 检查)用,
+//   - list 形式给跨模块互斥校验(IntentClassifier 启动期 disjoint 检查)用,
 //     不强迫 caller 知道 Set/Array 转换
 //   - Set 是本模块快查,classify O(1) 路径
 
@@ -38,17 +38,28 @@ export const APPROVE_KEYWORDS: ReadonlyArray<string> = [
   "干吧", "去吧", "做吧", "来", "来吧", "嗯", "嗯嗯",
 ];
 
-/** 拒绝——覆盖常见否定表达（中英文 + 数字 + 口语 + 情绪） */
+/**
+ * 拒绝——"否定表态型"词集，针对当前 confirmation 说"不"。
+ *
+ * 语义边界：本词集只收录纯**否定表态**词（"不"/"拒绝"/"算了"等），不含
+ * **控制命令型**词（"stop"/"cancel"/"停"/"取消"）。
+ *
+ * 这是 cancel intent 与 confirmation deny 的产品语义二分：
+ *   - 字面是控制命令的词 → 用户意图是叫停整个 turn → 归 CANCEL（intent 模块）
+ *   - 字面是否定表态的词 → 用户意图是拒绝当前工具调用 → 归 DENY（本词集）
+ *
+ * 互斥由 IntentClassifier 启动期 assertDisjoint 强制保证。新增词时遵循上述边界。
+ */
 export const DENY_KEYWORDS: ReadonlyArray<string> = [
-  // 英文
-  "n", "no", "nope", "cancel", "stop", "deny", "reject",
+  // 英文（纯否定型；"cancel"/"stop" 是控制命令归 CANCEL）
+  "n", "no", "nope", "deny", "reject",
   // 数字
   "2",
-  // 中文短词
+  // 中文短词（纯否定型；"取消"/"停" 是控制命令归 CANCEL）
   "不", "不行", "不要", "不用", "拒绝", "否",
-  "不同意", "不可以", "不批准", "不通过","不允许",
+  "不同意", "不可以", "不批准", "不通过", "不允许",
   // 口语 / 情绪
-  "算了", "别", "停", "取消", "不了",
+  "算了", "别", "不了",
 ];
 
 const APPROVE_SET = new Set<string>(APPROVE_KEYWORDS);

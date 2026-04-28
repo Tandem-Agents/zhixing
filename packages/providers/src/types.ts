@@ -152,6 +152,25 @@ export interface AgentConfig {
   displayName?: string;
 }
 
+/**
+ * 控制意图配置——对应 `zhixing.config.json` 的 `intent` 字段。
+ *
+ * 用于让用户/团队在不改源码的前提下扩展 cancel 关键词集。启动时
+ * 与 server 的 `DEFAULT_CANCEL_KEYWORDS` 合并(append 而非 replace,避免误删默认),
+ * 并通过 `IntentClassifier` 的 disjoint 静态校验——配错关键词跟
+ * confirmation APPROVE/DENY 集合冲突时启动失败 fail-fast,优于在生产产生歧义。
+ */
+export interface IntentConfig {
+  /**
+   * 用户追加的 cancel 关键词。
+   *
+   * 例:某团队习惯用"打断"作为中止指令——可在配置加 `["打断"]`,启动时
+   * 与默认集合并。**配错示例**:加"取消"会因与 confirmation DENY_SET 冲突
+   * 而启动失败,此时应选其他不冲突的词。
+   */
+  cancelKeywords?: string[];
+}
+
 // ─── 通道配置条目 ───
 
 /**
@@ -208,6 +227,8 @@ export interface ZhixingConfig {
   channels?: Record<string, ChannelConfigEntry>;
   /** 智能体身份配置（名字、人格等） */
   agent?: AgentConfig;
+  /** 控制意图配置（cancel 关键词扩展等） */
+  intent?: IntentConfig;
   /** 工作区配置（安全信任边界） */
   workspace?: WorkspaceConfig;
   /** 网络出口配置（@zhixing/network 共享底座） */

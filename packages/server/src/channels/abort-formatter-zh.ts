@@ -34,7 +34,7 @@ function unwrapParentAbort(reason: AbortReason): AbortReason {
  *
  * `null` / `undefined` 入参对应"reason 字段缺失"或"裸 abort 无 typed reason"的兜底。
  *
- * 未知 kind / 未知 origin 必须落到默认兜底文案,不允许抛异常——这是 INV-R3 的渲染层落地。
+ * 未知 kind / 未知 origin 必须落到默认兜底文案,不允许抛异常——渲染层契约:totality。
  */
 export function formatAbortReasonZh(reason: AbortReason | null | undefined): string {
   if (!reason) return "已停止处理。";
