@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import type { AgentResult, AgentYield, Message } from "@zhixing/core";
+import type { AbortReason, AgentResult, AgentYield, Message } from "@zhixing/core";
 import type { AgentRuntime, RunParams, RunResult } from "../../run-agent.js";
 import { runEphemeralTurn } from "../ephemeral-executor.js";
 
@@ -12,6 +12,7 @@ interface MockBehavior {
   reason?: AgentResult["reason"];
   throwError?: string;
   errorMessage?: string;
+  abortReason?: AbortReason;
 }
 
 function createMockAgentRuntime(behavior: MockBehavior = {}): AgentRuntime {
@@ -35,9 +36,13 @@ function createMockAgentRuntime(behavior: MockBehavior = {}): AgentRuntime {
         reason === "completed"
           ? completedResult
           : reason === "max_turns"
-            ? { reason: "max_turns", usage: { inputTokens: 1, outputTokens: 1 } }
+            ? { reason: "max_turns", maxTurns: 100, usage: { inputTokens: 1, outputTokens: 1 } }
             : reason === "aborted"
-              ? { reason: "aborted", usage: { inputTokens: 0, outputTokens: 0 } }
+              ? {
+                  reason: "aborted",
+                  abortReason: behavior.abortReason,
+                  usage: { inputTokens: 0, outputTokens: 0 },
+                }
               : {
                   reason: "error",
                   error: Object.assign(new Error(behavior.errorMessage ?? "boom"), {
@@ -92,11 +97,27 @@ describe("runEphemeralTurn", () => {
     expect(result.error).toBe("Max turns reached");
   });
 
-  it("aborted 映射为 error + 'Aborted'", async () => {
+  it("aborted 无 abortReason → error + 通用 'Aborted.' 兜底", async () => {
     const runtime = createMockAgentRuntime({ reason: "aborted" });
     const result = await runEphemeralTurn({ runtime, prompt: "stop" });
     expect(result.status).toBe("error");
-    expect(result.error).toBe("Aborted");
+    expect(result.error).toBe("Aborted.");
+    expect(result.detail).toBeUndefined();
+  });
+
+  it("aborted 携带 abortReason → error + 类型化 message + detail 完整保留 fork 链", async () => {
+    const wrapped: AbortReason = {
+      kind: "parent-abort",
+      parentReason: { kind: "external", origin: "scheduler-shutdown" },
+    };
+    const runtime = createMockAgentRuntime({
+      reason: "aborted",
+      abortReason: wrapped,
+    });
+    const result = await runEphemeralTurn({ runtime, prompt: "stop" });
+    expect(result.status).toBe("error");
+    expect(result.error).toBe("Aborted: scheduler-shutdown.");
+    expect(result.detail).toEqual(wrapped);
   });
 
   it("reason=error 映射 agentError.message", async () => {

@@ -18,6 +18,7 @@ import {
 } from "@zhixing/core";
 import type { AgentTurnResult } from "@zhixing/core";
 import type { AgentRuntime } from "../run-agent.js";
+import { serializeAbortReason } from "./abort-serializer.js";
 
 export interface EphemeralTurnOptions {
   runtime: AgentRuntime;
@@ -70,10 +71,12 @@ export async function runEphemeralTurn(
       };
     }
     if (r.reason === "aborted") {
+      const serialized = serializeAbortReason(r.abortReason);
       return {
         status: "error",
         output,
-        error: "Aborted",
+        error: serialized.message,
+        detail: serialized.detail ?? undefined,
         durationMs: Date.now() - startTime,
       };
     }

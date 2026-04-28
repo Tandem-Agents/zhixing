@@ -9,6 +9,7 @@
  */
 
 import type { DeliveryTarget } from "../channels/types.js";
+import type { AbortReason } from "../interrupt/types.js";
 
 // ─── 任务优先级 ───
 
@@ -154,6 +155,12 @@ export interface AgentTurnResult {
   status: "ok" | "error";
   output?: string;
   error?: string;
+  /**
+   * 可选的中断原因结构化详情。仅在 `status === "error"` 且来自 abort 路径时填充,
+   * 完整保留 fork wrap 链(详见 `serializeAbortReason`)。client 可按
+   * `detail.kind === "user-cancel"` 等做差异化 UX,不做时按 `error` 字符串展示即可。
+   */
+  detail?: AbortReason;
   durationMs: number;
 }
 

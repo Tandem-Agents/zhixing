@@ -22,6 +22,7 @@ import {
   formatResolutionReceipt,
 } from "../confirmation/match.js";
 import { resolveConversationId } from "./conversation-binder.js";
+import { formatAbortReasonZh } from "./abort-formatter-zh.js";
 
 // ─── InboundRouter 入站消息路由器 ───
 // 将入站消息路由到对应的对话会话中，并执行 Agent 处理
@@ -411,12 +412,19 @@ export class InboundRouter {
         }
         // 无 outboxRegistry + 空内容：REPL/测试场景，静默不发（channel 路径必有 registry）
       } else if (agentResult) {
-        const errorText =
-          agentResult.reason === "error"
-            ? `处理出错：${agentResult.error.message}`
-            : agentResult.reason === "max_turns"
-              ? "达到最大轮次限制。"
-              : "处理被中止。";
+        // 显式 if 分支而非三元链:三元链下 TS 没法把 reason narrow 排除 "completed"
+        // (跨分支 narrowing 失效),会让 abortReason 字段访问报 TS2339
+        let errorText: string;
+        if (agentResult.reason === "error") {
+          errorText = `处理出错：${agentResult.error.message}`;
+        } else if (agentResult.reason === "max_turns") {
+          errorText = "达到最大轮次限制。";
+        } else if (agentResult.reason === "aborted") {
+          errorText = formatAbortReasonZh(agentResult.abortReason);
+        } else {
+          // reason === "completed" 已被外层 if 分支处理,这里不可达
+          errorText = "处理已完成。";
+        }
         this.logger.warn(`[错误回复] conv=${conversationId} reason=${agentResult.reason}`);
         await this.emitReply(
           replyTarget,
