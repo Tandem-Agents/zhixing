@@ -21,14 +21,14 @@
 ## 主线脉络
 
 ```
-S1–S3.6 ✅ + Step 17 ✅ + Step 20 ✅ + Phase 5 ✅ + Step 21A ✅ + Step 21B ✅ 全部已落地
+S1–S3.6 ✅ + Step 17 ✅ + Step 20 ✅ + Phase 5 ✅ + Step 21A ✅ + Step 21B ✅ + 远程打断 ✅ 全部已落地
   → Step 21  子 agent 底座 + Task 工具    ← 当前
     → Step 22  BackgroundAgent（spawn + 完成通知 + Delivery）
       → Step 23  Ctrl+B 推后台（REPL UX，adoptGenerator）
         → S3.5   Monitor + TaskGraph
 ```
 
-**规格引用：** [persistent-service.md](specifications/persistent-service.md) · [tool-permission-execution.md](specifications/tool-permission-execution.md) · [server-gateway.md](specifications/server-gateway.md) · [confirmation-ux.md](specifications/confirmation-ux.md) · [message-outbox.md](specifications/message-outbox.md) · [conversation-model.md](specifications/conversation-model.md)
+**规格引用：** [persistent-service.md](specifications/persistent-service.md) · [tool-permission-execution.md](specifications/tool-permission-execution.md) · [server-gateway.md](specifications/server-gateway.md) · [confirmation-ux.md](specifications/confirmation-ux.md) · [message-outbox.md](specifications/message-outbox.md) · [conversation-model.md](specifications/conversation-model.md) · [subagent-execution.md](specifications/subagent-execution.md)
 
 ---
 
@@ -48,6 +48,7 @@ S1–S3.6 ✅ + Step 17 ✅ + Step 20 ✅ + Phase 5 ✅ + Step 21A ✅ + Step 21
 | Phase 5 Transcript 治理（commitTurn 原子截断 + 单向数据流） | ✅ |
 | Step 21A 工具权限/边界基础设施补齐（M1+M2+M3+M4+§五.7） | ✅ |
 | Step 21B WebFetch 工具（M0 二级 LLM 能力 + M1 @zhixing/network + M2 web_fetch + M3 spec 提升） | ✅ |
+| 远程打断 + Cancel Intent（[remote-interruption-execution](specifications/remote-interruption-execution.md)：RPC abort / scheduler shutdown / IntentClassifier 语义二分 / 飞书 cancel 入口） | ✅ E2E 已验收 |
 
 ---
 
@@ -55,32 +56,60 @@ S1–S3.6 ✅ + Step 17 ✅ + Step 20 ✅ + Phase 5 ✅ + Step 21A ✅ + Step 21
 
 ### P0：Step 21 — 子 agent 底座 + Task 工具
 
-**状态**：🔜 待产出执行规格（`subagent-execution.md`）
-**顶层定位**：[persistent-service.md §3.6](specifications/persistent-service.md)（原 AgentOrchestrator 层的最基础原语）
-**依赖**：Step 21A ✅ + Step 21B ✅（子 agent 用 WebFetch 验证 NonInteractive 路径正确）
+**状态**：🔜 spec 已落地（[subagent-execution.md](specifications/subagent-execution.md)），12 项架构决定锁定，M0 收尾中
+**顶层定位**：[persistent-service.md §3.6](specifications/persistent-service.md)（AgentOrchestrator 层最基础原语）
+**依赖**：Step 21A ✅ + Step 21B ✅ + 远程打断 ✅（子 agent 复用 abort 级联机制）
+
+**产品本质**：Task 的核心价值是"上下文隔离的研究型子任务"——调研中间产物的 token 不污染主对话上下文，而非"并发"。所有内部决策应优先保护这一价值。
 
 **为什么先做**：
-- `tools-builtin/` 目前 8 个工具，缺 **Task 委托**这一基础能力。业界参考（Claude Code / OpenClaw / Cursor）均有子 agent。
-- 子 agent 是 Step 22 / 23 的**底层原语**：背景能力 = 子 agent 底座 + 异步壳 + 通知。先打底座，后续是增量。
+- `tools-builtin/` 现有 9 个工具，缺 **Task 委托**这一基础能力。业界参考（Claude Code / OpenClaw / Cursor）均有子 agent。
+- 子 agent 是 Step 22 / 23 的**底层原语**:背景能力 = 子 agent 底座 + 异步壳 + 通知。先打底座，后续是增量。
 - CLI 模式下即可使用，不依赖 daemon。
 
-**范围**（摘要，细节待 spec）：
-- **子 agent 底座**（新模块 `packages/core/src/orchestrator/`）：`createChildSession` / `runChildLoop` / `bridgeEvents`
-  - 共享：provider / security pipeline / memoryStore
-  - 独立：eventBus / context / messages
-  - 生命周期：父 AbortSignal 级联 + 资源回收
-- **`tools-builtin/task.ts`**：AI 可调用的同步委托（主 agent `tool_use` → 子 agent 运行 → 结果作为 `tool_result` 回写）
-- **子 agent 安全**：Broker 不 attach 渲染器 → 自动走 `NonInteractiveResolver`（现有能力，零改动）
+**为什么内部拆 M0/M1/M2**：单 Step 同时背基础设施重构（`createAgentRuntime` 当前在 cli，跨包搬家）+ 新模块（orchestrator）+ AI-facing 业务（Task 工具）+ 12 个决策——回归面积过大。拆分让重构、底座、业务可独立 commit / 独立审查。
 
-**spec 阶段必须锁定的关键架构决策**（防返工，详见后续 `subagent-execution.md`）：
-1. state 边界矩阵：provider / securityPipeline / memoryStore 的共享/独立切分
-2. 子 agent 的 ConfirmationBroker：继承父 broker 还是独立 broker（影响 UX + 审计语义）
-3. 工具子集契约：白名单 / 黑名单 / 默认全集
-4. 资源预算：max-turns / timeout / token budget 是独立配额还是父子共享
-5. Orchestrator 模块归属：core 还是 cli（涉及 `createAgentRuntime` 的归属重构）
-6. 流式可见性：子 agent yield 事件冒泡父 EventBus 的策略（全冒 / 过滤 / 不冒）
+#### M0 — 调研 + spec + 重构准备（不写业务代码）
 
-**里程碑**：spec 定稿 + 9 轮架构审查后拆解。
+- 产出 `research/design/drafts/subagent-research.md`：业界（claudecode / openclaw / hermes 的 Task 工具源码级要点）+ 本仓 hooks 盘点（`createAgentRuntime` / `ConfirmationBroker` / EventBus / interrupt 现状）
+- 产出 `research/design/specifications/subagent-execution.md` 草稿：12 个关键决策的初步答案
+- 锁定决策 5（Orchestrator 模块归属：core / 独立 `@zhixing/orchestrator` 包），给出 `createAgentRuntime` 跨包重构方案
+- 审查锚点：1–2 轮架构审查聚焦决策合理性
+
+#### M1 — 基础设施重构（不写子 agent 业务）
+
+- 把 `createAgentRuntime` 从 `packages/cli/src/run-agent.ts:206` 搬到 M0 决策的目标位置
+- 让 cli / server / 未来 orchestrator 共用同一 runtime 入口
+- 现有功能零回归（cli / serve / RPC 测试全绿）
+- 独立可 commit，与子 agent 业务解耦——失败可单独回滚不带走子 agent 工作
+- 审查锚点：1 轮，焦点"现有功能不破"
+
+#### M2 — 子 agent 底座 + Task 工具（业务交付）
+
+- M2.1 Orchestrator 骨架：`createChildSession` / `runChildLoop` / `bridgeEvents` / abort 级联（先单测，不接 Task 工具）
+- M2.2 ConfirmationBroker 对接：`NonInteractiveResolver` 复用 + `DelegatingRenderer` 决策落地
+- M2.3 Task 工具：`tools-builtin/task.ts`（AI 可调用同步委托，主 agent `tool_use` → 子 agent 运行 → 结果作为 `tool_result` 回写）
+- M2.4 流式可见性 + UX：CLI / 飞书 / RPC 三方呈现策略
+- M2.5 错误 / abort / 资源限制 / token 归属落地
+- M2.6 测试策略：单元 + 集成 + E2E + 平台
+- 审查锚点：每子里程碑 1 轮小审查 + 终审 1 轮 = 7 轮（与 M0 / M1 累计 9–10 轮）
+
+#### spec 阶段必须锁定的关键架构决策（防返工，详见 `subagent-execution.md`）
+
+| # | 决策 | 影响维度 |
+|---|------|---------|
+| 1 | state 边界矩阵：provider / securityPipeline / memoryStore 共享 / 独立切分 | 内部架构 |
+| 2 | 子 agent 的 ConfirmationBroker：继承父 broker / 独立 broker | UX + 审计 |
+| 3 | 工具子集契约：白名单 / 黑名单 / 默认全集 | 安全 |
+| 4 | 资源预算：max-turns / timeout / token budget 独立 / 共享 | 成本 + 失控防御 |
+| 5 | Orchestrator 模块归属：core / 独立 `@zhixing/orchestrator` 包 | 跨包重构 |
+| 6 | 流式可见性：子 agent yield 事件冒泡父 EventBus（全冒 / 过滤 / 不冒） | 内部架构 |
+| 7 | 错误传播语义：tool_result error / 抛异常给主 / 透明降级 | UX + 智能体行为 |
+| 8 | 递归层级限制：子 agent 能否再起子 agent，深度上限 | 失控防御 |
+| 9 | 审计与 transcript：子 transcript 是否持久化、主会话是否含子步骤、daemon 重启恢复 | UX + 持久化 |
+| 10 | abort 双向传播：父 → 子立即 / graceful；子 fail → 是否反向 abort 主 | 中断协议 |
+| 11 | token / 成本归属：归主会话 / 独立计、CLI / 飞书呈现 | 计费透明 |
+| 12 | CLI / 飞书 / RPC 三方 UX 差异：流式 / 折叠 / 静默 / 浮标 | 产品 UX |
 
 ### P1：Step 22 — BackgroundAgent（spawn + 完成通知）
 
