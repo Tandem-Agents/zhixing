@@ -1217,19 +1217,6 @@ export async function startRepl(options: ReplOptions): Promise<void> {
           lastToolEndCount: state.lastToolEndCount,
           hasProposedSkill: state.hasProposedSkill,
         },
-        // 安全确认对话框走 readline 的 question——pause KeyboardSource 让出 stdin
-        // (退出 raw mode 让 readline 行编辑 / Enter 正常工作);SignalSource 在 pause 期间
-        // 仍工作,Ctrl+C 走 OS SIGINT 仍可触发 abort 作为兜底中断通道。
-        // finally resume 恢复 raw mode + keypress 拦截。
-        securityPrompt: async (text) => {
-          renderer.stop();
-          interruptRuntime.pause();
-          try {
-            return await rl.question(text);
-          } finally {
-            interruptRuntime.resume();
-          }
-        },
       });
       const { agentResult, newMessages, durationMs, budget, toolEndCount, injectedSkillIds } = runResult;
 

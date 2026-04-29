@@ -147,7 +147,7 @@ describe("subscribeCompactAccumulator · 基础累积规则", () => {
   });
 });
 
-// ─── dispose 语义（Phase 5 债务 #5 回归守卫） ───
+// ─── dispose 语义 ───
 
 describe("subscribeCompactAccumulator · dispose 语义", () => {
   it("dispose 后再 fire 不会改变已累积值", async () => {

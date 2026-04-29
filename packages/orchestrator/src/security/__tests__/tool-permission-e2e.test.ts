@@ -1,15 +1,15 @@
 /**
- * 端到端验收测试 (§五.7) —— Confirmation → PermissionRule 链路
+ * 端到端验收测试 —— Confirmation → PermissionRule 链路
  *
- * 验收目标：在 M2/M3/M4 落地后，验证整条链路在新基础设施下端到端工作：
- *   1. 连续多次 confirm 同操作（用户选 allow-once）→ ConfirmationTracker 累积计数
- *   2. 触达风险等级阈值后，下次 confirm 时 ConfirmationRequest.suggestion.suggest === true
- *      （SuggestionMiddleware 把建议透传到 SecurityMiddlewareResult.suggestion，
- *       request-builder 再透传到 ConfirmationRequest.suggestion）
+ * 验收目标:验证整条链路端到端工作:
+ *   1. 连续多次 confirm 同操作(用户选 allow-once)→ ConfirmationTracker 累积计数
+ *   2. 触达风险等级阈值后,下次 confirm 时 ConfirmationRequest.suggestion.suggest === true
+ *      (SuggestionMiddleware 把建议透传到 SecurityMiddlewareResult.suggestion,
+ *       request-builder 再透传到 ConfirmationRequest.suggestion)
  *   3. 用户选 allow-workspace 应用建议 → applyBrokerDecision 调 store.create 创建规则
- *   4. 同操作再次执行 → pipeline.evaluate 匹配规则 → 直接 allow（不触发 confirm）
+ *   4. 同操作再次执行 → pipeline.evaluate 匹配规则 → 直接 allow(不触发 confirm)
  *
- * 不修改任何已就绪组件——本测试纯端到端验证现有 wiring。
+ * 纯端到端验证 wiring。
  */
 
 import { describe, expect, it, vi } from "vitest";
@@ -22,7 +22,7 @@ import {
   type ToolExecutionContext,
   type ToolResult,
 } from "@zhixing/core";
-import { createSecureExecuteTool } from "../security/index.js";
+import { createSecureExecuteTool } from "../secure-executor.js";
 
 // ─── 测试辅助 ───
 
@@ -60,7 +60,7 @@ function mockExecuteFactory() {
 
 // ─── 测试 ───
 
-describe("§五.7 Confirmation → PermissionRule 端到端链路", () => {
+describe("Confirmation → PermissionRule 端到端链路", () => {
   it("连续 5 次 allow-once → 第 6 次 suggestion.suggest=true → allow-workspace 创建规则 → 第 7 次直接 allow", async () => {
     // ─── 装配 ───
     // 真实 PermissionStore（in-memory）+ 真实 SecurityPipeline + 真实 broker。
@@ -114,7 +114,7 @@ describe("§五.7 Confirmation → PermissionRule 端到端链路", () => {
       // bash patterns 对该命令产出：[精确, "curl *"]（looksLikeSubcommand 不匹配 https://...）
       const command = "curl https://example.com/foo";
 
-      // ─── Phase 1: 前 5 次 allow-once，tracker 累计到阈值边缘 ───
+      // ─── 累计阶段:前 5 次 allow-once,tracker 累计到阈值边缘 ───
       for (let i = 0; i < 5; i++) {
         await wrapped(bashTool, { command }, makeContext());
       }
@@ -130,7 +130,7 @@ describe("§五.7 Confirmation → PermissionRule 端到端链路", () => {
         expect(req.suggestion?.suggest ?? false).toBe(false);
       }
 
-      // ─── Phase 2: 第 6 次时 suggestion.suggest=true，用户选 allow-workspace ───
+      // ─── 触发建议阶段:第 6 次 suggestion.suggest=true,用户选 allow-workspace ───
       nextDecisionKind = "allow-workspace";
       await wrapped(bashTool, { command }, makeContext());
 
@@ -156,7 +156,7 @@ describe("§五.7 Confirmation → PermissionRule 端到端链路", () => {
       // 规则 argument 来自 SuggestedPattern（精确命令）
       expect(wsRules[0]!.pattern.argument).toBe(command);
 
-      // ─── Phase 3: 第 7 次同操作：pipeline 匹配新规则，直接 allow（不触发 confirm）───
+      // ─── 规则生效阶段:第 7 次同操作 pipeline 匹配新规则,直接 allow(不触发 confirm)───
       await wrapped(bashTool, { command }, makeContext());
 
       expect(exec.callCount()).toBe(7);

@@ -45,6 +45,9 @@ importers:
       '@zhixing/network':
         specifier: workspace:*
         version: link:../network
+      '@zhixing/orchestrator':
+        specifier: workspace:*
+        version: link:../orchestrator
       '@zhixing/providers':
         specifier: workspace:*
         version: link:../providers

@@ -82,14 +82,12 @@ import {
   renderCompactEnd,
   setupInterruptRendering,
 } from "./render.js";
-import { subscribeCompactAccumulator } from "./compact-accumulator.js";
-import { createCompactionFlush } from "./compaction-llm.js";
+import { subscribeCompactAccumulator } from "@zhixing/orchestrator/runtime";
+import { createCompactionFlush } from "@zhixing/orchestrator/runtime";
 import { buildSystemPrompt } from "./system-prompt.js";
-import { loadProjectContext, injectContext, enrichContext, type EnrichOptions } from "./project-context.js";
-import {
-  createSecureExecuteTool,
-  type PromptFn,
-} from "./security/index.js";
+import { loadProjectContext, injectContext, enrichContext, type EnrichOptions } from "@zhixing/orchestrator/runtime";
+import { renderBlockedMessage, renderUserDeniedMessage } from "./security/index.js";
+import { createSecureExecuteTool } from "@zhixing/orchestrator/security";
 
 // ─── 类型 ───
 
@@ -163,11 +161,6 @@ export interface RunParams {
   onBeforeEventRender?: () => void;
   /** 反思相关选项（上一轮工具调用数、是否已提议过） */
   enrichOptions?: EnrichOptions;
-  /**
-   * 安全确认对话框的提示器。REPL 注入 rl.question；
-   * 不提供时 confirm 决策会被视为 block（适合 CI / 一次性脚本）。
-   */
-  securityPrompt?: PromptFn;
   /**
    * Turn 级上下文（ADR-007 Phase 2）。channel 会话传入含 commitToUser；
    * REPL / 定时任务 ephemeral turn 省略。字段进入每个工具调用的
@@ -604,11 +597,12 @@ export async function createAgentRuntime(options: {
       const secureExecuteTool = createSecureExecuteTool({
         pipeline: securityPipeline,
         originalExecute: (tool, input, context) => tool.call(input, context),
-        prompt: params.securityPrompt,
         broker: confirmationBroker,
         sessionType,
         confirmationFallback: options.confirmationFallback,
         turnContext: params.turnContext,
+        onBlocked: renderBlockedMessage,
+        onUserDenied: renderUserDeniedMessage,
       });
 
       const gen = runAgentLoop({

@@ -1,23 +1,15 @@
 /**
- * CLI 安全子系统入口
+ * CLI 安全子系统 barrel —— 仅导出 cli 内部模块。
  *
- * 组装 core 的 SecurityPipeline 与 CLI 特定的 UI 层。
+ * runtime 关注点(SecurityPipeline / SecureExecutor / request-builder /
+ * SecurityBlockError 等)位于 @zhixing/core 与 @zhixing/orchestrator/security,
+ * 消费者从源包直接 import,不通过本 barrel 跨包 re-export。
  */
 
 export {
-  showConfirmationDialog,
   renderBlockedMessage,
   renderUserDeniedMessage,
-  type ConfirmationChoice,
-  type PromptFn,
-  type ShowConfirmationOptions,
-} from "./confirmation-ui.js";
-
-export {
-  createSecureExecuteTool,
-  SecurityBlockError,
-  type SecureExecuteToolOptions,
-} from "./secure-executor.js";
+} from "./security-event-renderer.js";
 
 export {
   handleTrustCommand,
@@ -32,12 +24,3 @@ export {
   translate,
 } from "./terminal-renderer.js";
 export type { TerminalConfirmationRendererOptions } from "./terminal-renderer.js";
-
-export {
-  buildConfirmationRequest,
-  buildConfirmationOptions,
-  buildDisplayBody,
-  buildPanelTitle,
-  sanitizeCommandPreview,
-} from "./request-builder.js";
-export type { BuildConfirmationRequestParams } from "./request-builder.js";

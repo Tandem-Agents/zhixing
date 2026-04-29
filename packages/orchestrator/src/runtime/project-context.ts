@@ -1,15 +1,15 @@
 /**
  * 项目上下文加载与注入
  *
- * 从 ZHIXING.md 加载项目指令，通过 <context> 标签注入到 user messages 中。
+ * 从 ZHIXING.md 加载项目指令,通过 <context> 标签注入到 user messages 中。
  *
- * 设计决策（详见 ADR-006）：
- * - ZHIXING.md 不进 system prompt，保护缓存前缀
+ * 设计决策:
+ * - ZHIXING.md 不进 system prompt,保护缓存前缀
  * - 通过 <context> 标签注入到首条 user message
- * - 三层加载（用户级 → 项目级），项目级覆盖用户级
+ * - 三层加载(用户级 → 项目级),项目级覆盖用户级
  *
- * 加载路径：
- *   1. ~/.zhixing/ZHIXING.md          — 用户级（所有项目通用偏好）
+ * 加载路径:
+ *   1. ~/.zhixing/ZHIXING.md          — 用户级(所有项目通用偏好)
  *   2. ./ZHIXING.md 或 ./.zhixing/ZHIXING.md — 项目级
  */
 
@@ -21,17 +21,17 @@ import { loadProfile, formatProfileForContext, MemoryRetriever } from "@zhixing/
 // ─── 类型 ───
 
 export interface ProjectContext {
-  /** ZHIXING.md 内容（合并后），null 表示无项目指令 */
+  /** ZHIXING.md 内容(合并后),null 表示无项目指令 */
   instructions: string | null;
-  /** 当前日期（YYYY-MM-DD） */
+  /** 当前日期(YYYY-MM-DD) */
   date: string;
-  /** 用户身份画像（~/.zhixing/me/profile.md），null 表示未配置 */
+  /** 用户身份画像(~/.zhixing/me/profile.md),null 表示未配置 */
   profile: ProfileData | null;
-  /** 动态注入的额外上下文（如匹配的技能），每次对话设置 */
+  /** 动态注入的额外上下文(如匹配的技能),每次对话设置 */
   dynamicContext: string | null;
-  /** 本轮注入的技能 ID 列表（用于更新提议） */
+  /** 本轮注入的技能 ID 列表(用于更新提议) */
   injectedSkillIds: string[];
-  /** 反思提示（当上一轮 toolEndCount >= threshold 时注入） */
+  /** 反思提示(当上一轮 toolEndCount >= threshold 时注入) */
   reflectionHint: string | null;
 }
 
@@ -40,7 +40,7 @@ export interface ProjectContext {
 /**
  * 加载项目上下文。
  *
- * 优先级：项目级 > 用户级。如果项目级存在则忽略用户级（覆盖而非合并）。
+ * 优先级:项目级 > 用户级。如果项目级存在则忽略用户级(覆盖而非合并)。
  * 两级都不存在时 instructions 为 null。
  */
 export async function loadProjectContext(cwd: string): Promise<ProjectContext> {
@@ -53,18 +53,18 @@ export async function loadProjectContext(cwd: string): Promise<ProjectContext> {
   return { instructions, date, profile, dynamicContext: null, injectedSkillIds: [], reflectionHint: null };
 }
 
-/** 反思触发阈值：toolEndCount >= 此值时注入反思提示 */
+/** 反思触发阈值:toolEndCount >= 此值时注入反思提示 */
 export const REFLECTION_THRESHOLD = 8;
 
 export interface EnrichOptions {
-  /** 上一轮的 toolEndCount（用于判断是否触发反思） */
+  /** 上一轮的 toolEndCount(用于判断是否触发反思) */
   lastToolEndCount?: number;
-  /** 本会话是否已经提议过技能（每会话最多 1 次） */
+  /** 本会话是否已经提议过技能(每会话最多 1 次) */
   hasProposedSkill?: boolean;
 }
 
 /**
- * 根据最后一条用户消息检索匹配的技能，
+ * 根据最后一条用户消息检索匹配的技能,
  * 并在合适时机注入反思提示到 dynamicContext。
  * 每次 run() 前调用。
  */
@@ -95,7 +95,7 @@ export async function enrichContext(
     injectedSkillIds.push(...result.skills.map((s) => s.skill.id));
   }
 
-  // 反思提示：上一轮复杂任务后，且本会话未提议过
+  // 反思提示:上一轮复杂任务后,且本会话未提议过
   const reflectionHint = buildReflectionHint(options, injectedSkillIds);
   if (reflectionHint) {
     dynamicParts.push(reflectionHint);
@@ -110,7 +110,7 @@ export async function enrichContext(
 }
 
 /**
- * 向后兼容：enrichContextWithSkills 代理到 enrichContext。
+ * 向后兼容:enrichContextWithSkills 代理到 enrichContext。
  * @deprecated 使用 enrichContext 代替
  */
 export async function enrichContextWithSkills(
@@ -188,11 +188,11 @@ const CONTEXT_TAG_END = "</context>";
 /**
  * 将项目上下文注入到首条 user message 中。
  *
- * 规则：
+ * 规则:
  * - 仅注入到消息列表中的 **第一条 user message**
- * - 如果该消息已包含 <context> 标签，不重复注入
- * - 无内容可注入时（instructions 为 null 且无额外信息），返回原始消息
- * - 不修改原始数组，返回新数组
+ * - 如果该消息已包含 <context> 标签,不重复注入
+ * - 无内容可注入时(instructions 为 null 且无额外信息),返回原始消息
+ * - 不修改原始数组,返回新数组
  */
 export function injectContext(
   messages: Message[],
@@ -252,7 +252,7 @@ function extractUserText(message: Message): string {
 
 /**
  * 替换消息中第一个 TextBlock 的文本。
- * 若不存在 TextBlock，则在 content 最前面插入一个。
+ * 若不存在 TextBlock,则在 content 最前面插入一个。
  */
 function replaceUserText(message: Message, newText: string): Message {
   const hasText = message.content.some((b) => b.type === "text");

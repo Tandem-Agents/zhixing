@@ -36,3 +36,12 @@ export {
   failToExpiredResolver,
   getBuiltinNonInteractiveResolver,
 } from "./non-interactive.js";
+
+export {
+  buildConfirmationRequest,
+  buildConfirmationOptions,
+  buildDisplayBody,
+  buildPanelTitle,
+  sanitizeCommandPreview,
+} from "./request-builder.js";
+export type { BuildConfirmationRequestParams } from "./request-builder.js";

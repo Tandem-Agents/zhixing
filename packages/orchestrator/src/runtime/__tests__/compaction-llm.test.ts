@@ -1,8 +1,8 @@
 /**
  * compaction-llm 路由契约测试
  *
- * spec 承诺：上下文压缩 / I/O 边界净化的 LLM 调用走 secondary 角色，不消耗主对话
- * 成本（secondary-llm-capability.md §二.2）。本文件用 spy LLMRoles 反向验证：
+ * spec 承诺:上下文压缩 / I/O 边界净化的 LLM 调用走 secondary 角色,不消耗主对话
+ * 成本(secondary-llm-capability.md)。本文件用 spy LLMRoles 反向验证:
  *   - secondary.chat 被调用一次
  *   - main.chat 永远不被调用
  *   - text_delta 拼接正确
@@ -30,7 +30,7 @@ interface SpyRole {
 
 /**
  * 构造一个返回固定 text_delta 序列的 spy role。
- * chat fn 是 vi.fn，可断言调用次数 / 参数。
+ * chat fn 是 vi.fn,可断言调用次数 / 参数。
  */
 function makeSpyRole(textChunks: string[]): SpyRole {
   const stubProvider = { id: "stub", models: [] } as unknown as LLMProvider;

@@ -1,11 +1,11 @@
 /**
- * Step 4 端到端集成测试——"拒绝理由回流到模型" 的完整闭环验证
+ * 端到端集成测试 —— "拒绝理由回流到模型" 的完整闭环验证
  *
- * 这是 Phase 1 差异化的核心护栏：用户按下 "拒绝并说明原因" + 输入原因后，
- * 该原因必须**原样**作为下一轮 LLM 调用的 tool_result 文本传回，让模型看得
- * 到"用户为什么不同意"并据此调整方案。
+ * 核心护栏:用户按下 "拒绝并说明原因" + 输入原因后,该原因必须**原样**作为
+ * 下一轮 LLM 调用的 tool_result 文本传回,让模型看得到"用户为什么不同意"
+ * 并据此调整方案。
  *
- * 流程：
+ * 流程:
  *
  *   Round 1:
  *     MockLLMProvider → tool_use { bash: "rm -rf node_modules" }
@@ -20,19 +20,19 @@
  *     ↓
  *     secure-executor throws SecurityBlockError({
  *       userFacing: true,
- *       message: "用户拒绝了这次工具调用。用户的反馈：改用 rm -i。请根据该反馈调整方案。"
+ *       message: "用户拒绝了这次工具调用。用户的反馈:改用 rm -i。请根据该反馈调整方案。"
  *     })
  *     ↓
  *     tool-executor catch → isUserFacingError → 原样作为 tool_result.content
  *
  *   Round 2:
- *     MockLLMProvider 收到 messages（含 Round 1 的 tool_result）
+ *     MockLLMProvider 收到 messages(含 Round 1 的 tool_result)
  *     ↓
- *     断言：tool_result.content 里包含用户反馈原文 "改用 rm -i"
+ *     断言:tool_result.content 里包含用户反馈原文 "改用 rm -i"
  *     ↓
- *     断言：**不含** "Tool execution failed" 前缀
+ *     断言:**不含** "Tool execution failed" 前缀
  *
- * 如果该测试挂了，说明"拒绝即纠错"回路断了——Phase 1 差异化失效。
+ * 如果该测试挂了,说明"拒绝即纠错"回路断了。
  */
 
 import { describe, expect, it } from "vitest";
@@ -47,7 +47,7 @@ import {
   type Message,
   type ToolDefinition,
 } from "@zhixing/core";
-import { createSecureExecuteTool } from "../security/index.js";
+import { createSecureExecuteTool } from "../secure-executor.js";
 
 // ─── 测试辅助 ───
 
@@ -81,7 +81,7 @@ function silentConsoleLog<T>(fn: () => Promise<T>): Promise<T> {
 
 // ─── 测试 ───
 
-describe("Step 4 端到端：拒绝理由回流到模型", () => {
+describe("端到端：拒绝理由回流到模型", () => {
   it("Round 1 deny + reason → Round 2 tool_result 含原文 + 无 'Tool execution failed' 前缀", async () => {
     // 1. MockLLMProvider 按脚本：两轮
     const provider = new MockLLMProvider([
