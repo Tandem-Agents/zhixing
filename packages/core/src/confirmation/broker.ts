@@ -85,6 +85,22 @@ export interface ConfirmationBrokerOptions {
   maxQueueDepth?: number;
   /** 当前时间源——便于测试注入 fake clock */
   now?: () => number;
+  /**
+   * broker 实例 id —— 缺省走 randomUUID()。仅在测试需要稳定 id 时显式传入。
+   * 实例 id 通过 IConfirmationBroker.id 暴露,审计 / Snapshot / 事件 payload 引用此 id。
+   */
+  id?: string;
+  /**
+   * 父 broker id(审计血缘) —— 子 agent dispatch 派生 broker 时由 orchestrator
+   * 透传(取自 parentBroker.id);主 broker 不传。本字段不影响 broker 任何行为,
+   * 仅在 emit 事件 / snapshot() 时透传给下游审计层。
+   */
+  parentBrokerId?: string;
+  /**
+   * 派生此 broker 的 sub-agent 实例 id(审计追溯) —— 与 ChildAgentResult.subAgentId
+   * 一致。同 parentBrokerId,纯审计透传字段,不影响 broker 行为。
+   */
+  sourceAgentId?: string;
 }
 
 // ─── Broker ───
@@ -111,12 +127,20 @@ export class ConfirmationBroker implements IConfirmationBroker {
   private readonly maxQueueDepth: number;
   private readonly now: () => number;
 
+  // 审计血缘字段 —— 构造时一次性赋值后只读
+  readonly id: string;
+  private readonly parentBrokerId?: string;
+  private readonly sourceAgentId?: string;
+
   constructor(options: ConfirmationBrokerOptions = {}) {
     this.eventBus = options.eventBus;
     this.resolver = options.nonInteractiveResolver ?? failToDenyResolver;
     this.resolvedGraceMs = options.resolvedGraceMs ?? DEFAULT_RESOLVED_GRACE_MS;
     this.maxQueueDepth = options.maxQueueDepth ?? DEFAULT_MAX_QUEUE_DEPTH;
     this.now = options.now ?? (() => Date.now());
+    this.id = options.id ?? randomUUID();
+    this.parentBrokerId = options.parentBrokerId;
+    this.sourceAgentId = options.sourceAgentId;
   }
 
   // ─── 公共 API ───
@@ -288,6 +312,13 @@ export class ConfirmationBroker implements IConfirmationBroker {
 
   snapshot(): BrokerSnapshot {
     return {
+      id: this.id,
+      ...(this.parentBrokerId !== undefined && {
+        parentBrokerId: this.parentBrokerId,
+      }),
+      ...(this.sourceAgentId !== undefined && {
+        sourceAgentId: this.sourceAgentId,
+      }),
       pending: this.listPending(),
       resolvedRecently: Array.from(this.resolvedRecent.values()).map((e) => ({
         id: e.id,
@@ -407,13 +438,30 @@ export class ConfirmationBroker implements IConfirmationBroker {
     if (idx !== -1) this.queue.splice(idx, 1);
   }
 
+  /**
+   * 自动注入审计血缘字段 —— 调用方只构造业务字段,broker 统一补 brokerId /
+   * parentBrokerId / sourceAgentId,避免每个 emit 站点重复透传。
+   */
   private emitEvent<K extends keyof ConfirmationEventMap>(
     event: K,
-    payload: ConfirmationEventMap[K],
+    payload: Omit<
+      ConfirmationEventMap[K],
+      "brokerId" | "parentBrokerId" | "sourceAgentId"
+    >,
   ): void {
     if (!this.eventBus) return;
-    // 用 emitSync 避免在 broker 内部 await——事件是通知，不是阻塞点
-    this.eventBus.emitSync(event, payload);
+    const enriched = {
+      ...payload,
+      brokerId: this.id,
+      ...(this.parentBrokerId !== undefined && {
+        parentBrokerId: this.parentBrokerId,
+      }),
+      ...(this.sourceAgentId !== undefined && {
+        sourceAgentId: this.sourceAgentId,
+      }),
+    } as ConfirmationEventMap[K];
+    // 用 emitSync 避免在 broker 内部 await —— 事件是通知，不是阻塞点
+    this.eventBus.emitSync(event, enriched);
   }
 }
 

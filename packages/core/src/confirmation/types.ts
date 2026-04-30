@@ -337,6 +337,18 @@ export interface PendingSnapshot {
  * Broker 状态快照——供 /security 等调试命令使用。
  */
 export interface BrokerSnapshot {
+  /** broker 实例 id —— 与 IConfirmationBroker.id 一致,审计血缘追溯起点 */
+  id: string;
+  /**
+   * 父 broker id(可选) —— 仅在子 agent 派生 broker 时被透传,主 broker 无此字段。
+   * 审计场景按此字段重建父子关系链。
+   */
+  parentBrokerId?: string;
+  /**
+   * 派生此 broker 的 sub-agent 实例 id(可选) —— 与 ChildAgentResult.subAgentId
+   * 一致,审计时可关联 broker 活动到具体的 sub-agent dispatch 记录。
+   */
+  sourceAgentId?: string;
   pending: PendingSnapshot[];
   resolvedRecently: Array<{
     id: ConfirmationRequestId;
@@ -376,6 +388,17 @@ export type BrokerUnsubscribe = () => void;
  * Broker 接口——确认交互系统的核心调度器。
  */
 export interface IConfirmationBroker {
+  /**
+   * broker 实例 id —— 用于审计血缘追溯。
+   *
+   * 子 agent 派生 broker 时,会把父 broker.id 透传成子 broker.parentBrokerId,
+   * 由审计层依据 parent/child id 关系重建调用链路。
+   *
+   * 缺省由 broker 构造时 randomUUID() 生成;测试场景可通过 ConfirmationBrokerOptions.id
+   * 显式注入稳定值。
+   */
+  readonly id: string;
+
   /**
    * 注册一个确认请求。
    * 返回的 Promise 在用户做出决定、请求超时、或请求被取消时 resolve。
@@ -446,6 +469,14 @@ export interface IConfirmationBroker {
 /**
  * Broker 通过 EventBus 发射的事件类型。
  * 用于审计、可观测性，以及 /security 仪表盘展示。
+ *
+ * 所有事件 payload 含可选的 audit 元信息(`brokerId` / `parentBrokerId` /
+ * `sourceAgentId`)。broker 在 emit 时自动注入这些字段,订阅方据此重建
+ * "本次活动来自哪个 broker、其父 broker 是谁、对应哪个 sub-agent dispatch"
+ * 的完整血缘链路,便于跨 agent 审计与故障定位。
+ *
+ * 主 broker(无父)发的事件 `parentBrokerId` / `sourceAgentId` 缺省;
+ * 子 broker 必有这两字段。
  */
 export type ConfirmationEventMap = {
   "confirmation:requested": {
@@ -455,12 +486,18 @@ export type ConfirmationEventMap = {
     riskLevel?: RiskLevel;
     queueDepth: number;
     timestamp: number;
+    brokerId: string;
+    parentBrokerId?: string;
+    sourceAgentId?: string;
   };
   "confirmation:shown": {
     requestId: ConfirmationRequestId;
     tool: string;
     queueDepth: number;
     timestamp: number;
+    brokerId: string;
+    parentBrokerId?: string;
+    sourceAgentId?: string;
   };
   "confirmation:resolved": {
     requestId: ConfirmationRequestId;
@@ -468,18 +505,27 @@ export type ConfirmationEventMap = {
     decision: ConfirmationDecision;
     durationMs: number;
     timestamp: number;
+    brokerId: string;
+    parentBrokerId?: string;
+    sourceAgentId?: string;
   };
   "confirmation:cancelled": {
     requestId: ConfirmationRequestId;
     tool: string;
     cause: CancelCause;
     timestamp: number;
+    brokerId: string;
+    parentBrokerId?: string;
+    sourceAgentId?: string;
   };
   "confirmation:expired": {
     requestId: ConfirmationRequestId;
     tool: string;
     durationMs: number;
     timestamp: number;
+    brokerId: string;
+    parentBrokerId?: string;
+    sourceAgentId?: string;
   };
   "confirmation:auto-resolved": {
     requestId: ConfirmationRequestId;
@@ -487,5 +533,8 @@ export type ConfirmationEventMap = {
     resolverName: string;
     decision: ConfirmationDecision;
     timestamp: number;
+    brokerId: string;
+    parentBrokerId?: string;
+    sourceAgentId?: string;
   };
 };

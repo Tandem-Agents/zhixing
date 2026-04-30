@@ -169,7 +169,7 @@
 **INV-S7. Confirmation 共享 PermissionStore + 子 broker auto-deny(决定 #5)**:子 agent 调用工具时,`SecurityPipeline.evaluate` 走**父子共享的** `PermissionStore`,父已 `allow-session/workspace/global` 的规则自动命中(子无需弹)。
 - 仅当 `PermissionStore.match()` 不命中且 `SecurityPipeline` 判 `requiresConfirmation: true` 时,才走子 broker
 - 子 broker 默认 `nonInteractiveResolver: failToDenyResolver` —— 无 UI listener → 自动拒绝(已是 broker 的 default 行为,**无需新逻辑**)
-- 配置 `intent.subagent.confirmationPolicy = "auto-approve"` 时,子 broker 注入 `failToAllowResolver`(测试用,生产严禁)
+- `SubAgentConfirmationPolicy` 类型仅含生产安全字面值(`inherit-or-deny` / `auto-deny`,均映射到 `failToDenyResolver`);测试 / 开发需要 auto-approve 行为时**直接构造 broker 注入 `failToAllowResolver`**,不通过 policy 字符串路径(详见 §8.2.2)
 
 **INV-S8. 子 turn 不污染主 LLM history**:由 INV-S1 自动保证 —— 子不写 Turn,主 agent 下次 LLM 调用时拿到的 messages 自然不含子的中间消息。无需 `commitTurn` 视图过滤、无需 UI 过滤、无需任何"保护"机制。
 
@@ -262,7 +262,7 @@ packages/orchestrator/
 │   │   ├── task.ts                     // (M2.3) Task 工具 — closure 注入父 env,调 runChildAgent
 │   │   └── format-result.ts            // formatChildResultAsToolResult(三态文本协议)
 │   ├── confirmation/
-│   │   └── child-broker.ts             // (M2.2) ChildBroker 工厂(vanilla broker + sourceAgentId 元信息)
+│   │   └── child-broker.ts             // (M2.2) resolveSubAgentResolver 策略路由(子 broker 装配 helper)
 │   └── __tests__/                      // 单元 + 集成测试
 └── tsconfig.json
 ```
@@ -1064,10 +1064,15 @@ async function runChildAgent(opts: RunChildAgentOptions): Promise<ChildAgentResu
     lineage: childLineage,
   });
 
+  // budget 必须先经 resolveSubAgentBudget 投影成 ResolvedSubAgentBudget,
+  // 再读 budget.confirmationPolicy(全字段完备,缺省自动 fallback DEFAULT_SUB_CONFIRMATION_POLICY)
+  // —— 不要直接读 opts.budget?.confirmationPolicy,后者绕过单一真相源,默认值同步将断裂
+  const budget = resolveSubAgentBudget(opts.budget);
+
   const childBroker = new ConfirmationBroker({
     eventBus: childBus,
-    nonInteractiveResolver: resolveSubAgentResolver(opts.budget?.confirmationPolicy),
-    parentBrokerId: getBrokerId(opts.parentBroker),    // 审计血缘元信息
+    nonInteractiveResolver: resolveSubAgentResolver(budget.confirmationPolicy),
+    parentBrokerId: opts.parentBroker.id,    // 审计血缘元信息
     sourceAgentId: subAgentId,
   });
   // 默认 policy "inherit-or-deny" → failToDenyResolver(broker 已默认行为);
@@ -1103,7 +1108,7 @@ async function runChildAgent(opts: RunChildAgentOptions): Promise<ChildAgentResu
   try {
     runResult = await runContextStorage.run(
       { eventBus: childBus, lineage: childLineage },
-      async () => runSubAgentLoop({
+      async () =>       runSubAgentLoop({
         profile,
         systemPrompt,
         messages: [initialUserMessage],
@@ -1117,13 +1122,14 @@ async function runChildAgent(opts: RunChildAgentOptions): Promise<ChildAgentResu
         // per-spawn
         eventBus: childBus,
         parentSignal: opts.parentSignal,         // ← 直接透传给 runAgentLoop;loop 内部 fork
-        // budget
-        maxTurns: opts.budget?.maxTurns ?? DEFAULT_SUB_MAX_TURNS,
-        maxTokens: opts.budget?.maxTokens ?? DEFAULT_SUB_MAX_TOKENS,
+        // budget —— 全字段读 resolveSubAgentBudget 投影后的对象,不要再写
+        // `opts.budget?.X ?? DEFAULT_X` 散落 fallback,后者绕过单一真相源
+        maxTurns: budget.maxTurns,
+        maxTokens: budget.maxTokens,
         watchdog: createWatchdogPolicy({
-          idleTimeoutMs: opts.budget?.llmIdleTimeoutMs ?? DEFAULT_SUB_IDLE_TIMEOUT,
+          idleTimeoutMs: budget.llmIdleTimeoutMs,
         }),
-        wallClockTimeoutMs: opts.budget?.wallClockTimeoutMs ?? DEFAULT_SUB_WALL_CLOCK,
+        wallClockTimeoutMs: budget.wallClockTimeoutMs,
       }),
     );
   } catch (err) {
@@ -1434,7 +1440,7 @@ export interface SubAgentBudget {
   llmIdleTimeoutMs?: number;
   /** 子 agent 总 wall-clock 超时(ms)。默认 600_000(10 分钟) */
   wallClockTimeoutMs?: number;
-  /** confirmation 策略。默认 "inherit-or-deny";v1 集 = inherit-or-deny / auto-deny / auto-approve */
+  /** confirmation 策略。默认 "inherit-or-deny";v1 生产集 = inherit-or-deny / auto-deny(全部 fail-deny);测试 escape hatch 走 broker 直接构造 failToAllowResolver,不在本枚举,详见 §8.2 */
   confirmationPolicy?: SubAgentConfirmationPolicy;
 }
 ```
@@ -1451,7 +1457,7 @@ export interface SubAgentBudget {
 | `wallClockTimeoutMs` | 600_000 | `wallClockTimeoutMs` | 10 分钟,长任务上限 |
 | `maxConcurrent`(同 turn 并发数) | 3 | `maxConcurrent` | 决定 #1;dispatcher 层校验 |
 | `maxDepth` | 1 | `maxDepth` | 决定 #3;capability-tag 实现 |
-| `confirmationPolicy` | `"inherit-or-deny"` | `confirmationPolicy` | v1 集 = `inherit-or-deny` / `auto-deny` / `auto-approve`(`inherit-or-prompt` 见 §16);§8 |
+| `confirmationPolicy` | `"inherit-or-deny"` | `confirmationPolicy` | v1 生产集 = `inherit-or-deny` / `auto-deny`(全部 fail-deny);测试 auto-approve 走 broker 直接构造,不在本枚举(`inherit-or-prompt` v2+ 见 §16);§8 |
 
 ### 7.3 软上限触发协议
 
@@ -1482,46 +1488,100 @@ export interface SubAgentBudget {
 
 **子 broker 的角色**就是处理那些**没匹配 PermissionStore 规则**的 confirmation 请求。它是一个 vanilla `ConfirmationBroker`,不挂 UI listener(子无 UI),自然走 `nonInteractiveResolver`。**不需要新设计 ChildBroker 类**。
 
-### 8.2 v1 三种策略
+### 8.2 v1 生产策略 + 测试 escape hatch
+
+#### 8.2.1 生产策略集合
+
+`SubAgentConfirmationPolicy` 联合类型仅含**生产安全**字面值 —— 配置文件 / API caller
+无论传哪个值都不会绕过审批流程:
 
 ```typescript
 export type SubAgentConfirmationPolicy =
   | "inherit-or-deny"     // 默认,实际行为 = 共享 PermissionStore + child broker failToDenyResolver
-  | "auto-deny"            // 同上(语义上等价,显式名称)
-  | "auto-approve";        // 测试用 — child broker 注入 failToAllowResolver,生产严禁
+  | "auto-deny";           // 同上(语义上等价,显式名称)
 // inherit-or-prompt 见 §16,v2+ 引入(需 hub 双向 UI 路由)
 ```
 
-实现:`runChildAgent` 内部根据 policy 选 resolver:
+实现:`runChildAgent` 内部根据 policy 选 resolver(签名 policy 参数**必填,无字面默认**——
+单一真相源 `DEFAULT_SUB_CONFIRMATION_POLICY` 收敛在 [subagent/budget.ts](../../../packages/orchestrator/src/subagent/budget.ts)):
 ```typescript
 function resolveSubAgentResolver(
-  policy: SubAgentConfirmationPolicy = "inherit-or-deny",
+  policy: SubAgentConfirmationPolicy,
 ): NonInteractiveResolver {
   switch (policy) {
     case "inherit-or-deny":
     case "auto-deny":
       return failToDenyResolver;       // broker 默认行为
-    case "auto-approve":
-      return failToAllowResolver;       // 测试 helper
   }
 }
 ```
 
+#### 8.2.2 测试 escape hatch(`failToAllowResolver`)
+
+测试 / 开发场景需要"auto-approve all"行为时,**不通过 `SubAgentConfirmationPolicy` 字符串**,
+而是直接构造 broker 注入 `failToAllowResolver`:
+
+```typescript
+import { ConfirmationBroker, failToAllowResolver } from "@zhixing/core";
+const testBroker = new ConfirmationBroker({ nonInteractiveResolver: failToAllowResolver });
+```
+
+**架构契约**:该设计让"生产策略"与"测试 escape hatch"在**类型层面**完全分离 ——
+配置文件 / API caller 不可能通过 `SubAgentConfirmationPolicy` 字符串误传 auto-approve,
+**杜绝因 misuse 造成的安全事故**。"刻意显式构造 broker"动作即是最好的防御:
+- ✅ zhixing.config.json schema 校验只能传 `inherit-or-deny` / `auto-deny`,自然拒绝 auto-approve
+- ✅ `runChildAgent` 调用方编译期保护:`budget.confirmationPolicy` 只能赋两值之一
+- ✅ 测试 escape hatch 走 broker 直接构造,审查时一眼可见,可追责
+
+v2+ 若引入"测试自定义 resolver"等高阶场景(预审批 resolver、chat-bot 介入等),
+可在 `RunChildAgentOptions` 加显式字段(如 `_unsafeNonInteractiveResolver?`),
+保持本约束:任何"绕过 fail-deny 默认姿态"的 API 都必须语义层面"危险"显式化。
+
 ### 8.3 子 broker 的 audit 元信息
 
-**位置**:[core/confirmation/types.ts](../../../packages/core/src/confirmation/types.ts) `ConfirmationBrokerOptions` 加字段(M2.2):
+**位置**:[core/confirmation/types.ts](../../../packages/core/src/confirmation/types.ts) + [core/confirmation/broker.ts](../../../packages/core/src/confirmation/broker.ts) ✅ M2.2 已落地:
 
 ```typescript
 export interface ConfirmationBrokerOptions {
   // 既有字段:eventBus, nonInteractiveResolver, resolvedGraceMs, maxQueueDepth, now
-  /** 父 broker 的 id(string,审计血缘用,不影响逻辑) */
+  /** broker 实例 id —— 缺省 randomUUID(),仅测试需稳定 id 时显式传 */
+  id?: string;
+  /** 父 broker 的 id(审计血缘,不影响 broker 行为) */
   parentBrokerId?: string;
-  /** 子 agent 实例 UUID(审计追踪) */
+  /** 派生此 broker 的 sub-agent 实例 UUID(审计追溯) */
   sourceAgentId?: string;
+}
+
+export interface IConfirmationBroker {
+  /** broker 实例 id —— 审计血缘真相源 */
+  readonly id: string;
+  // ... 既有方法
+}
+
+export interface BrokerSnapshot {
+  /** 与 IConfirmationBroker.id 一致 */
+  id: string;
+  /** 子 broker 才有此字段;主 broker 缺省 */
+  parentBrokerId?: string;
+  /** 子 broker 才有此字段;主 broker 缺省 */
+  sourceAgentId?: string;
+  // ... 既有字段
 }
 ```
 
-`ConfirmationBroker` 在 emit 事件时把这两字段加进 payload(`confirmation:auto-resolved` 等),便于审计链路追溯(谁的子 agent 什么时候因为什么策略被拒)。**不影响 broker 任何逻辑**。
+`ConfirmationBroker` 内部 `emitEvent` 自动把 `brokerId` / `parentBrokerId?` / `sourceAgentId?` 注入所有 6 个事件 payload(主 broker 仅含 `brokerId`,子 broker 必有全三字段)。`snapshot()` 接口同样透传,审计层 / 测试可据此重建"哪个 sub-agent dispatch 派生了哪个 broker、其父是谁"的完整血缘链。**不影响 broker 任何业务逻辑**。
+
+`runChildAgent` 装配 child broker:
+```typescript
+const budget = resolveSubAgentBudget(opts.budget);   // 全字段完备的 ResolvedSubAgentBudget
+childBroker = new ConfirmationBroker({
+  parentBrokerId: opts.parentBroker.id,              // RunChildAgentOptions.parentBroker 必填字段
+  sourceAgentId: subAgentId,                          // randomUUID() 派生的子 agent UUID
+  nonInteractiveResolver: resolveSubAgentResolver(budget.confirmationPolicy),
+  // budget.confirmationPolicy 已 fallback DEFAULT_SUB_CONFIRMATION_POLICY,resolveSubAgentResolver
+  // 不再持有字面默认值 —— 单一真相源严格收敛在 subagent/budget.ts
+});
+```
 
 ### 8.4 v1 不挂 ConfirmationHub
 
@@ -1887,18 +1947,31 @@ text 解析是 best-effort(不是协议层 truth),但对人类可读已足够。
 
 **独立性**:M2.1 输出是 orchestrator 内部 API,无 LLM-facing 暴露;Task 工具(M2.3)接入后即变 LLM-facing
 
-**与 §6.1 理想态的差异(YAGNI 渐进上线,避免接口债务)**:M2.1 交付的 `RunChildAgentOptions` **不含** §6.1 列出的 `parentBroker` 与 `description` 两个字段(本阶段无任何消费方);它们分别由 M2.2 / M2.3 显式破坏性变更引入,调用方升级时通过 TypeScript 类型错误自动发现。同样,§6.1 中的 `runSubAgentLoop` 在 M2.1 不作为 `@zhixing/orchestrator/subagent` 公共 API 导出(仅同包 internal 消费);未来如有 background agent 等场景需要细粒度控制,在 `subagent/index.ts` 显式追加导出 + 补完使用文档
+**与 §6.1 理想态的差异(YAGNI 渐进上线,避免接口债务)**:M2.1 交付的 `RunChildAgentOptions` **不含** §6.1 列出的 `parentBroker` 与 `description` 两个字段(本阶段无任何消费方);M2.2 加回 `parentBroker` 字段(必填,作为 audit 血缘真相源),`description` 字段由 M2.3 引入(Task 工具元信息),调用方升级时通过 TypeScript 类型错误自动发现。同样,§6.1 中的 `runSubAgentLoop` 在 M2.1 不作为 `@zhixing/orchestrator/subagent` 公共 API 导出(仅同包 internal 消费);未来如有 background agent 等场景需要细粒度控制,在 `subagent/index.ts` 显式追加导出 + 补完使用文档
 
-#### M2.2 — Confirmation 子 broker 元信息 + audit
+#### M2.2 — Confirmation 子 broker 元信息 + audit ✅ 已完成
 
-- `ConfirmationBrokerOptions.{ parentBrokerId, sourceAgentId }` 字段
-- `runChildAgent` 内 `new ConfirmationBroker({ parentBrokerId, sourceAgentId, eventBus, nonInteractiveResolver })` 装配
-- `resolveSubAgentResolver(policy)` 三策略
-- 集成测:父 alwaysAllow 命中(PermissionStore 共享自动)、未匹配规则 → child broker auto-deny
+- ✅ `IConfirmationBroker.id` 字段(broker 实例审计血缘起点);`ConfirmationBrokerOptions.{ id?, parentBrokerId?, sourceAgentId? }` 字段
+- ✅ `BrokerSnapshot.{ id, parentBrokerId?, sourceAgentId? }` 字段透传(测试与审计场景的稳定接口)
+- ✅ `ConfirmationEventMap` 6 个事件 payload 加可选 `brokerId` / `parentBrokerId?` / `sourceAgentId?`,broker 内部 `emitEvent` 自动注入(主 broker 仅含 `brokerId`,子 broker 必有全三字段)
+- ✅ `failToAllowResolver`(name="fail-to-allow")新增,`getBuiltinNonInteractiveResolver` 加分支;**生产严禁注入**,**唯一启用路径**是测试代码直接构造 broker(`new ConfirmationBroker({ nonInteractiveResolver: failToAllowResolver })`),**不再通过 sub-agent confirmationPolicy 字符串暴露** —— 类型层面杜绝 misuse(详见 §8.2.2)
+- ✅ `SubAgentConfirmationPolicy` 联合类型仅含生产安全字面值(`inherit-or-deny` / `auto-deny`),配置文件 / API caller 不可能通过字符串误传 auto-approve
+- ✅ `packages/orchestrator/src/confirmation/child-broker.ts` 实现 `resolveSubAgentResolver(policy)`:
+  - 签名 `policy: SubAgentConfirmationPolicy` **必填,无字面默认值** —— 单一真相源 `DEFAULT_SUB_CONFIRMATION_POLICY` 严格收敛在 `subagent/budget.ts`,避免本函数与 budget.ts 各自维护字面 default 导致 silent 行为不一致
+  - `inherit-or-deny` / `auto-deny` → `failToDenyResolver`
+- ✅ `packages/orchestrator/src/confirmation/index.ts` 公共 API barrel + 顶级 `index.ts` re-export + `package.json` `./confirmation` sub-path + `tsup.config.ts` entry
+- ✅ `runChildAgent` `RunChildAgentOptions` 加回 `parentBroker: IConfirmationBroker` 字段(必填,M2.1 临时移除现按 spec 显式破坏性变更引入);装配 child broker 透传 `parentBrokerId: parentBroker.id` / `sourceAgentId: subAgentId` / `nonInteractiveResolver: resolveSubAgentResolver(budget.confirmationPolicy)` —— 用 `resolveSubAgentBudget` 投影后的 ResolvedBudget 字段,**不直接读 `opts.budget?.confirmationPolicy`** 以避免绕过单一真相源
+- ✅ 单测 / 集成测覆盖:
+  - `core/confirmation/__tests__/broker.test.ts` 加 7 用例(自动 UUID id / 显式 id 注入 / snapshot audit 透传 / 6 事件 payload 含 audit 字段 / 主 broker 不污染父字段 / `failToAllowResolver` 行为)
+  - `orchestrator/confirmation/__tests__/child-broker.test.ts`(策略路径 + 必填参数防御 + 安全姿态契约 + broker 集成路径,共 7 用例)
+  - `orchestrator/subagent/__tests__/factory.test.ts` 加 4 用例(audit 字段透传 / 缺省 policy → fail-to-deny / `auto-deny` → fail-to-deny)+ 1 个端到端集成用例(子调未注册边界工具 → SecurityPipeline 升级 critical → child broker fail-deny → tool_result.isError → 子 LLM 看到后 reply)
+- ✅ child broker 不注入 `eventBus`(与主 broker 装配模式一致);audit 字段验证走 `vi.spyOn(ConfirmationBroker.prototype, 'cancelAll')` 拦截 cleanup 时点的 broker 实例 + `instance.snapshot()`,无需引入"为测试而设的 API 字段"
 
-**验证**:audit 日志可读 parentBrokerId / sourceAgentId;策略 policy 测试通过
+**验证**:`core` 全套 1883 用例全绿(+7);`orchestrator` 全套 159 用例全绿(+10);cli + server 跨包 typecheck + 全套 491 用例 server vitest 全绿;build 产出 `dist/confirmation/index.d.ts` 完整
 
-**独立性**:M2.2 不依赖 Task 工具,可独立验证(用 M2.1 的 runChildAgent 直接驱动)
+**独立性**:M2.2 不依赖 Task 工具,通过 M2.1 的 `runChildAgent` + spy 拦截直接验证装配契约;父子共享 PermissionStore 命中规则的"父 alwaysAllow"集成场景不重复测(M1 已通过 SecurityPipeline 共享单元测试覆盖,子 agent 复用同一 pipeline 实例自动命中)
+
+**audit 字段的当前消费方与未来路径**:M2.2 阶段 child broker 不接 eventBus,audit 字段通过 `snapshot()` 接口暴露,供未来审计工具消费(eventBus 路径 + 自动注入逻辑已就位,后续接入零额外改造)
 
 #### M2.3 — Task 工具实现
 
@@ -2007,8 +2080,9 @@ text 解析是 best-effort(不是协议层 truth),但对人类可读已足够。
 | `runtime/index.ts` 公共 API 收紧 + `safeDispose(label, fn)` 模块辅助 + `create-agent-runtime.test.ts` 生命周期契约测试 | `packages/orchestrator/src/runtime/index.ts`(barrel 9 项 internal 收紧) + `packages/orchestrator/src/runtime/create-agent-runtime.ts`(safeDispose) + `packages/orchestrator/src/runtime/__tests__/create-agent-runtime.test.ts`(新建) | M1.7 |
 | `runChildAgent` + `runSubAgentLoop`(internal) + `lineage` + `abort-format` + `result-classifier`(internal) + `budget` + `subagent/index.ts` barrel(仅导出 `runChildAgent` / `deriveChildLineage` / `formatAbortReasonForLLM` / `SubAgentBudget` 等真公共契约;`runSubAgentLoop` / `result-classifier` / `resolveSubAgentBudget` 同包 internal) + 顶级 barrel + `package.json ./subagent` sub-path + `factory.test.ts` 三态/cleanup/INV 集成测试(共 47 个 subagent 用例) | `packages/orchestrator/src/subagent/` + `packages/orchestrator/src/index.ts` + `packages/orchestrator/package.json` + `packages/orchestrator/tsup.config.ts` | M2.1 |
 | `runContextStorage = AsyncLocalStorage<RunContext>` per-run/per-spawn 上下文(M2.1 已落地,M2.3 主路径消费) | `packages/orchestrator/src/runtime/run-context.ts` | M2.1 |
-| `ConfirmationBrokerOptions.{ parentBrokerId, sourceAgentId }` | [packages/core/src/confirmation/types.ts](../../../packages/core/src/confirmation/types.ts) | M2.2 |
-| `resolveSubAgentResolver(policy)` | `packages/orchestrator/src/confirmation/child-broker.ts` | M2.2 |
+| `IConfirmationBroker.id` + `BrokerSnapshot.{ id, parentBrokerId?, sourceAgentId? }` + `ConfirmationBrokerOptions.{ id?, parentBrokerId?, sourceAgentId? }` + `ConfirmationEventMap` 6 事件 payload audit 字段(broker `emitEvent` 自动注入) + `failToAllowResolver` 测试用 | [packages/core/src/confirmation/types.ts](../../../packages/core/src/confirmation/types.ts) + [packages/core/src/confirmation/broker.ts](../../../packages/core/src/confirmation/broker.ts) + [packages/core/src/confirmation/non-interactive.ts](../../../packages/core/src/confirmation/non-interactive.ts) | M2.2 |
+| `resolveSubAgentResolver(policy)` + `confirmation/index.ts` barrel + 顶级 barrel + `package.json ./confirmation` sub-path + `tsup.config.ts` entry + `child-broker.test.ts`(三策略路径) | `packages/orchestrator/src/confirmation/child-broker.ts` + `packages/orchestrator/src/confirmation/index.ts` + `packages/orchestrator/src/index.ts` + `packages/orchestrator/package.json` + `packages/orchestrator/tsup.config.ts` | M2.2 |
+| `RunChildAgentOptions.parentBroker: IConfirmationBroker` 必填 + `runChildAgent` 装配 child broker 透传 `parentBrokerId` / `sourceAgentId` / 由 `resolveSubAgentResolver(budget.confirmationPolicy)` 决定 resolver(`budget` 为 `resolveSubAgentBudget(opts.budget)` 投影后的 ResolvedBudget,严格走单一真相源) + `factory.test.ts` 加 audit 验证 + 端到端 `tool:call_end.success=false` 不变量验证(audit 1 + 缺省 1 + auto-deny 1 + e2e 1 共 4 个新用例) | `packages/orchestrator/src/subagent/factory.ts` + `packages/orchestrator/src/subagent/__tests__/factory.test.ts` | M2.2 |
 | `createTaskTool(env)` Task 工具工厂 | `packages/orchestrator/src/tools/task.ts`(新建) | M2.3 |
 | `runtime.run()` 入口包裹 `runContextStorage.run({ bus: eventBus, lineage: "main" }, ...)` | `packages/orchestrator/src/runtime/create-agent-runtime.ts` | M2.3 |
 | 主 profile `instructions` + Sub-Agent Delegation 段 | `packages/orchestrator/src/profile/default-profiles.ts` | M2.3 |

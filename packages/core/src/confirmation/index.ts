@@ -32,6 +32,7 @@ export type { ConfirmationBrokerOptions } from "./broker.js";
 export { isFreeTextDeny } from "./types.js";
 
 export {
+  failToAllowResolver,
   failToDenyResolver,
   failToExpiredResolver,
   getBuiltinNonInteractiveResolver,

@@ -14,11 +14,27 @@
  *   - 调优:运行一段时间后调整默认,不需要触碰业务代码
  */
 
-/** confirmation 子策略 —— v1 集合 (v2+ 会扩展 inherit-or-prompt 等) */
-export type SubAgentConfirmationPolicy =
-  | "inherit-or-deny"
-  | "auto-deny"
-  | "auto-approve";
+/**
+ * confirmation 子策略 —— v1 生产集合
+ *
+ * 设计契约:本类型枚举值**全部生产安全**,可被 zhixing.config.json 等外部
+ * 配置自由透传,任何字面值都不会绕过审批流程。
+ *
+ * **测试 escape hatch 不在本类型**:测试 / 开发想要 "auto-approve all"
+ * 行为时,直接构造 broker 注入 `failToAllowResolver`:
+ * ```typescript
+ * import { ConfirmationBroker, failToAllowResolver } from "@zhixing/core";
+ * const testBroker = new ConfirmationBroker({ nonInteractiveResolver: failToAllowResolver });
+ * ```
+ * 该设计让"生产策略"与"测试 escape hatch"在**类型层面**完全分离 ——
+ * 配置文件 / API caller 不可能通过本类型字符串误传 auto-approve,
+ * 杜绝因 misuse 造成的安全事故。
+ *
+ * v2+ 扩展(在本 union 加新值即可,resolveSubAgentResolver 通过 TS exhaustive
+ * check 强制覆盖):
+ *   - `inherit-or-prompt`: 把子 confirmation 弹回父用户(需 hub 双向 UI 路由)
+ */
+export type SubAgentConfirmationPolicy = "inherit-or-deny" | "auto-deny";
 
 export interface SubAgentBudget {
   /** 子 agent loop 最大交互轮次,达到后终止 (透传 runAgentLoop.maxTurns) */

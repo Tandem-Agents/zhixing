@@ -73,6 +73,7 @@ function makeBaseOpts(
     workspaceSource: "cwd-fallback",
     parentBus,
     parentLineage: "main",
+    parentBroker: new ConfirmationBroker({ id: "parent-broker-test" }),
     parentTools: [makeReadOnlyTool("read", true)],
     parentSignal: new AbortController().signal,
     task: "test task description",
@@ -266,5 +267,175 @@ describe("runChildAgent · INV 永不抛", () => {
     const provider = new MockLLMProvider([{ text: "fast" }]);
     const result = await runChildAgent(makeBaseOpts(provider));
     expect(result.durationMs).toBeGreaterThanOrEqual(0);
+  });
+});
+
+// ─── audit 血缘元信息 ───
+//
+// 验证策略:
+//   factory 内部 `new ConfirmationBroker({ parentBrokerId, sourceAgentId, ... })`
+//   产出的 child broker 不直接暴露给调用方。通过 `vi.spyOn(ConfirmationBroker.prototype, 'cancelAll')`
+//   拦截 cleanup 时点的 broker 实例(spy.mock.instances 含每次调用的 this),
+//   再调 instance.snapshot() 验证 audit 字段透传与 resolver 选择正确。
+//
+// 该方式覆盖 spec audit 元信息透传契约的所有要点(parentBrokerId / sourceAgentId
+// 一致 + confirmationPolicy → resolver 路由),且不需引入额外公共 API 字段(YAGNI)。
+
+/**
+ * 找到本次 cleanup 中的 child broker 实例。spyOn(cancelAll).mock.instances
+ * 含父 + 子 broker(若父也调过 cancelAll)。父 id 已在 makeBaseOpts 固定,
+ * 据此过滤出 child broker 实例。
+ */
+function findChildBroker(
+  cancelSpy: ReturnType<typeof vi.spyOn>,
+  parentBrokerId: string,
+): ConfirmationBroker | undefined {
+  const instances = cancelSpy.mock.instances as readonly unknown[];
+  return instances.find(
+    (b): b is ConfirmationBroker =>
+      b instanceof ConfirmationBroker && b.id !== parentBrokerId,
+  );
+}
+
+describe("runChildAgent · audit 血缘 (parentBrokerId / sourceAgentId)", () => {
+  it("child broker.snapshot() 含 parentBrokerId === parentBroker.id, sourceAgentId === subAgentId", async () => {
+    const provider = new MockLLMProvider([{ text: "ok" }]);
+    const parentBroker = new ConfirmationBroker({ id: "audit-parent-001" });
+    const cancelSpy = vi.spyOn(ConfirmationBroker.prototype, "cancelAll");
+
+    try {
+      const result = await runChildAgent(
+        makeBaseOpts(provider, { parentBroker }),
+      );
+
+      expect(result.status).toBe("completed");
+      const childBroker = findChildBroker(cancelSpy, parentBroker.id);
+      expect(childBroker).toBeDefined();
+
+      const snap = childBroker!.snapshot();
+      expect(snap.id).toBe(childBroker!.id);
+      expect(snap.parentBrokerId).toBe("audit-parent-001");
+      expect(snap.sourceAgentId).toBe(result.subAgentId);
+      // child broker.id 一定与父不同(自动 randomUUID 与父固定 id 不冲突)
+      expect(childBroker!.id).not.toBe(parentBroker.id);
+    } finally {
+      cancelSpy.mockRestore();
+    }
+  });
+
+  it("缺省 budget.confirmationPolicy → child broker resolver = fail-to-deny (默认安全姿态)", async () => {
+    const provider = new MockLLMProvider([{ text: "ok" }]);
+    const cancelSpy = vi.spyOn(ConfirmationBroker.prototype, "cancelAll");
+
+    try {
+      await runChildAgent(makeBaseOpts(provider));
+      const childBroker = findChildBroker(cancelSpy, "parent-broker-test");
+      expect(childBroker?.snapshot().nonInteractiveResolver).toBe(
+        "fail-to-deny",
+      );
+    } finally {
+      cancelSpy.mockRestore();
+    }
+  });
+
+  it("budget.confirmationPolicy='auto-deny' → child broker resolver = fail-to-deny (与缺省语义等价显式化)", async () => {
+    const provider = new MockLLMProvider([{ text: "ok" }]);
+    const cancelSpy = vi.spyOn(ConfirmationBroker.prototype, "cancelAll");
+
+    try {
+      await runChildAgent(
+        makeBaseOpts(provider, { budget: { confirmationPolicy: "auto-deny" } }),
+      );
+      const childBroker = findChildBroker(cancelSpy, "parent-broker-test");
+      expect(childBroker?.snapshot().nonInteractiveResolver).toBe(
+        "fail-to-deny",
+      );
+    } finally {
+      cancelSpy.mockRestore();
+    }
+  });
+});
+
+// ─── e2e:子调未注册工具 → SecurityPipeline 升级 critical → child broker fail-deny ───
+//
+// 验证 spec §8.1 / §8.4 核心承诺的端到端链路:
+//   runChildAgent → runSubAgentLoop → createSecureExecuteTool →
+//   SecurityPipeline.evaluate (未注册工具 → critical → requiresConfirmation=true) →
+//   handleBrokerPath → child broker.requestConfirmation →
+//   无 listener → resolveSubAgentResolver("inherit-or-deny") = failToDenyResolver →
+//   decision.kind="deny" → SecurityBlockError → tool_result.isError=true →
+//   子 LLM 看到 isError 后正常 reply
+//
+// 该测试是"audit 字段透传契约"之外,M2.2 阶段对 spec §8.1/§8.4 的唯一端到端覆盖。
+// 利用 SecurityPipeline 对未注册工具默认走 critical → requiresConfirmation 的行为
+// (已在 core/security/__tests__/security-pipeline.test.ts 验证),无需额外 mock。
+
+describe("runChildAgent · 端到端 child broker fail-deny", () => {
+  it("子调未注册边界工具 → SecurityPipeline 升级 critical → child broker fail-deny → tool_result.isError → 子 LLM 看到后 reply", async () => {
+    const callSpy = vi.fn(async () => ({
+      content: "should not be called",
+      isError: false,
+    }));
+
+    // 工具名以 "mcp_" 前缀+未注册到 boundary registry,被 BoundaryImpactClassifier
+    // 分类为 critical → OperationClassifierMiddleware 升级 confirm → requiresConfirmation = true。
+    //
+    // 注意:`needsPermission` 字段决定 PermissionStore.match 路径(给 extractArgument 提示),
+    // **与 SecurityPipeline 的 critical 升级无关** —— 路径决定者是 boundary registry 分类。
+    // 此处声明 true 与 ToolDefinition fail-closed 默认对齐,避免读者误以为"声明无需权限怎么还走 broker"
+    const unknownTool: ToolDefinition = {
+      name: "mcp_unregistered_audit_test",
+      description: "未注册到 boundary registry,触发 SecurityPipeline critical 分类 → broker 路径",
+      inputSchema: { type: "object" } as never,
+      subAgentSafe: true,
+      needsPermission: true,
+      call: callSpy,
+    };
+
+    // 监听 parentBus 的 `tool:call_end` 事件 —— 子 bus emit 自动冒泡到父 bus,
+    // 收集后直接断言 success=false 这个核心不变量。
+    // (tool-executor 把 SecurityBlockError catch 后产出 tool_result.isError=true,
+    //  对应 tool:call_end.success=false —— 见 packages/core/src/loop/tool-executor.ts)
+    const observedToolEnds: Array<{ name: string; success: boolean }> = [];
+    const parentBus = createEventBus<AgentEventMap>({ lineage: "main" });
+    parentBus.on("tool:call_end", (payload) => {
+      observedToolEnds.push({
+        name: payload.name,
+        success: payload.success,
+      });
+    });
+
+    // MockLLMProvider 双轮:
+    //   round 1: 调 unknownTool → secure-executor 抛 SecurityBlockError → tool_result.isError
+    //   round 2: 子 LLM 看到 isError 后 reply 总结
+    const provider = new MockLLMProvider([
+      { toolCalls: [{ id: "u1", name: unknownTool.name, input: {} }] },
+      { text: "tool was denied by security policy; reporting to user" },
+    ]);
+
+    const result = await runChildAgent(
+      makeBaseOpts(provider, {
+        parentTools: [unknownTool],
+        parentBus,
+      }),
+    );
+
+    // 子 agent 正常 completed(子 LLM 处理了 isError 并完成对话,而非抛 unhandled exception)
+    expect(result.status).toBe("completed");
+
+    // 关键不变量 1:工具的 call 函数从未被执行
+    // (SecurityBlockError 在 secure-executor 阶段抛出,根本不到 originalExecute)
+    expect(callSpy).not.toHaveBeenCalled();
+
+    // 关键不变量 2:tool:call_end 事件 emit 时 success=false —— 直接断言 secure-executor
+    // 抛出的 SecurityBlockError 被 tool-executor catch 转换成失败 tool_result 的不变量
+    const unknownToolEnd = observedToolEnds.find(
+      (e) => e.name === unknownTool.name,
+    );
+    expect(unknownToolEnd).toBeDefined();
+    expect(unknownToolEnd?.success).toBe(false);
+
+    // 关键不变量 3:toolUses 计数为 1(尝试调用算 1 次,即使被 deny;统计 LLM 决策数)
+    expect(result.toolUses).toBe(1);
   });
 });

@@ -43,16 +43,46 @@ export const failToExpiredResolver: NonInteractiveResolver = {
 };
 
 /**
+ * **DANGER —— 仅供测试 / 开发场景使用,严禁生产环境注入**
+ *
+ * 把任意 confirmation 请求 auto-approve 为 `allow-once`,绕过所有审批流程。
+ * 价值场景:
+ *   - 子 agent 集成测希望快速跑过权限检查,不构造完整 PermissionStore alwaysAllow 规则
+ *   - 渲染器 / hub 单测里隔离 broker 行为验证
+ *
+ * 生产环境严禁注入 —— 等价于完全关闭安全管道,违反知行 fail-to-deny 默认安全姿态。
+ *
+ * **唯一启用路径(仅测试)**:测试代码必须**直接构造 broker 注入**:
+ * ```typescript
+ * import { ConfirmationBroker, failToAllowResolver } from "@zhixing/core";
+ * const testBroker = new ConfirmationBroker({ nonInteractiveResolver: failToAllowResolver });
+ * ```
+ *
+ * **任何高层 API 都不暴露本 resolver 的字符串路径** —— sub-agent 的
+ * `SubAgentConfirmationPolicy` 字面量类型仅含生产安全策略(`inherit-or-deny` /
+ * `auto-deny`),配置文件 / API caller 不可能通过字符串误传到本 resolver。
+ * 该设计让"显式构造 broker"成为唯一启用路径,刻意的动作即是最好的 misuse 防御。
+ */
+export const failToAllowResolver: NonInteractiveResolver = {
+  name: "fail-to-allow",
+  resolve(): ConfirmationDecision {
+    return { kind: "allow-once" };
+  },
+};
+
+/**
  * 工具函数：按名字获取内置解析器。
  * Phase 2 接预审批 API 时新增的 delegate-to-preapproval 也会在这里注册。
  */
 export function getBuiltinNonInteractiveResolver(
-  name: "fail-to-deny" | "fail-to-expired",
+  name: "fail-to-deny" | "fail-to-expired" | "fail-to-allow",
 ): NonInteractiveResolver {
   switch (name) {
     case "fail-to-deny":
       return failToDenyResolver;
     case "fail-to-expired":
       return failToExpiredResolver;
+    case "fail-to-allow":
+      return failToAllowResolver;
   }
 }

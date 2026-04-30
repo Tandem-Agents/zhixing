@@ -27,6 +27,7 @@ import {
   generateRequestId,
 } from "../broker.js";
 import {
+  failToAllowResolver,
   failToDenyResolver,
   failToExpiredResolver,
 } from "../non-interactive.js";
@@ -636,6 +637,16 @@ describe("createConfirmationBroker + generateRequestId", () => {
   it("failToDenyResolver 的 name 是 fail-to-deny", () => {
     expect(failToDenyResolver.name).toBe("fail-to-deny");
   });
+
+  it("failToAllowResolver 注入后,无监听器路径 → auto-resolve 为 allow-once (测试用,生产严禁)", async () => {
+    expect(failToAllowResolver.name).toBe("fail-to-allow");
+
+    const broker = new ConfirmationBroker({
+      nonInteractiveResolver: failToAllowResolver,
+    });
+    const decision = await broker.requestConfirmation(makeRequest());
+    expect(decision).toEqual({ kind: "allow-once" });
+  });
 });
 
 // ─── onResolved 监听器 ───
@@ -849,5 +860,126 @@ describe("ConfirmationBroker — onResolved 监听器", () => {
 
     expect(listener).toHaveBeenCalledTimes(1);
     expect(listener).toHaveBeenCalledWith(req.id, { kind: "allow-once" });
+  });
+});
+
+// ─── 审计血缘元信息 ───
+
+describe("ConfirmationBroker — 审计血缘 (id / parentBrokerId / sourceAgentId)", () => {
+  it("不传 options.id → 自动生成 UUID v4 形态的稳定 id", () => {
+    const a = new ConfirmationBroker();
+    const b = new ConfirmationBroker();
+    expect(a.id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(b.id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(a.id).not.toBe(b.id);
+  });
+
+  it("显式 options.id → 实例 id 使用注入值,跨调用稳定 (测试场景刚需)", () => {
+    const broker = new ConfirmationBroker({ id: "fixed-id-001" });
+    expect(broker.id).toBe("fixed-id-001");
+    expect(broker.snapshot().id).toBe("fixed-id-001");
+  });
+
+  it("snapshot 透传 parentBrokerId / sourceAgentId 字段", () => {
+    const broker = new ConfirmationBroker({
+      id: "child-1",
+      parentBrokerId: "parent-1",
+      sourceAgentId: "sub-agent-uuid-xyz",
+    });
+    const snap = broker.snapshot();
+    expect(snap.id).toBe("child-1");
+    expect(snap.parentBrokerId).toBe("parent-1");
+    expect(snap.sourceAgentId).toBe("sub-agent-uuid-xyz");
+  });
+
+  it("无 parentBrokerId / sourceAgentId 注入 → snapshot 字段为 undefined (主 broker 形态)", () => {
+    const broker = new ConfirmationBroker({ id: "main-1" });
+    const snap = broker.snapshot();
+    expect(snap.id).toBe("main-1");
+    expect(snap.parentBrokerId).toBeUndefined();
+    expect(snap.sourceAgentId).toBeUndefined();
+  });
+
+  it("eventBus 注入后,所有事件 payload 自动含 brokerId / parentBrokerId / sourceAgentId", async () => {
+    const eventBus = new EventBus<ConfirmationEventMap>();
+    const captured: Array<{
+      event: string;
+      brokerId: string;
+      parentBrokerId?: string;
+      sourceAgentId?: string;
+    }> = [];
+
+    // 订阅所有 6 个事件,聚合校验 audit 字段
+    const events: Array<keyof ConfirmationEventMap> = [
+      "confirmation:requested",
+      "confirmation:shown",
+      "confirmation:resolved",
+      "confirmation:cancelled",
+      "confirmation:expired",
+      "confirmation:auto-resolved",
+    ];
+    for (const evt of events) {
+      eventBus.on(evt, (payload) => {
+        captured.push({
+          event: evt,
+          brokerId: payload.brokerId,
+          parentBrokerId: payload.parentBrokerId,
+          sourceAgentId: payload.sourceAgentId,
+        });
+      });
+    }
+
+    const broker = new ConfirmationBroker({
+      eventBus,
+      id: "child-with-bus",
+      parentBrokerId: "parent-bus-123",
+      sourceAgentId: "sub-agent-abc",
+    });
+
+    // 触发 auto-resolved (无 listener → 走 resolver) → 一个事件
+    await broker.requestConfirmation(makeRequest({ id: "auto-1" }));
+
+    // 触发 requested + shown + resolved (有 listener 路径)
+    broker.onRequest(() => {});
+    const p = broker.requestConfirmation(makeRequest({ id: "active-1" }));
+    broker.resolve("active-1", { kind: "allow-once" });
+    await p;
+
+    // 触发 cancelled
+    const p2 = broker.requestConfirmation(makeRequest({ id: "cancel-1" }));
+    broker.cancel("cancel-1", "user-ctrl-c");
+    await p2;
+
+    expect(captured.length).toBeGreaterThan(0);
+    for (const c of captured) {
+      expect(c.brokerId).toBe("child-with-bus");
+      expect(c.parentBrokerId).toBe("parent-bus-123");
+      expect(c.sourceAgentId).toBe("sub-agent-abc");
+    }
+  });
+
+  it("主 broker 形态 (无 parent / sourceAgent) → 事件 payload 仅含 brokerId,不污染父字段", async () => {
+    const eventBus = new EventBus<ConfirmationEventMap>();
+    const captured: Array<{
+      brokerId: string;
+      parentBrokerId?: string;
+      sourceAgentId?: string;
+    }> = [];
+
+    eventBus.on("confirmation:auto-resolved", (payload) => {
+      captured.push({
+        brokerId: payload.brokerId,
+        parentBrokerId: payload.parentBrokerId,
+        sourceAgentId: payload.sourceAgentId,
+      });
+    });
+
+    const broker = new ConfirmationBroker({ eventBus, id: "main-only" });
+    await broker.requestConfirmation(makeRequest({ id: "main-auto" }));
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.brokerId).toBe("main-only");
+    expect(captured[0]!.parentBrokerId).toBeUndefined();
+    expect(captured[0]!.sourceAgentId).toBeUndefined();
   });
 });

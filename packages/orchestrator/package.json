@@ -24,6 +24,10 @@
     "./subagent": {
       "types": "./dist/subagent/index.d.ts",
       "import": "./dist/subagent/index.js"
+    },
+    "./confirmation": {
+      "types": "./dist/confirmation/index.d.ts",
+      "import": "./dist/confirmation/index.js"
     }
   },
   "files": [

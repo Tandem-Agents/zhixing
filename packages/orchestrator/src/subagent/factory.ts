@@ -27,6 +27,7 @@ import {
   type AbortReason,
   type AgentEventMap,
   type EventBus,
+  type IConfirmationBroker,
   type LLMProvider,
   type LLMRoles,
   type Message,
@@ -37,6 +38,7 @@ import {
 import { buildSystemPrompt, SUB_AGENT_SEGMENTS } from "../runtime/system-prompt.js";
 import { runContextStorage } from "../runtime/run-context.js";
 import { subAgentProfile } from "../profile/default-profiles.js";
+import { resolveSubAgentResolver } from "../confirmation/child-broker.js";
 import { deriveChildLineage } from "./lineage.js";
 import { resolveSubAgentBudget, type SubAgentBudget } from "./budget.js";
 import {
@@ -72,6 +74,14 @@ export interface RunChildAgentOptions {
   parentBus: EventBus<AgentEventMap>;
   /** 父级 lineage 路径(主 root 为 "main"),子 lineage 在此基础上 derive */
   parentLineage: string;
+  /**
+   * 父级 ConfirmationBroker —— 用于审计血缘(透传 parentBroker.id 给 child broker
+   * 作为 parentBrokerId 元信息),让审计层按 parent/child id 重建调用链。
+   *
+   * 子 broker 不读父 broker 的实际状态(无 listener 透传 / 无 pending 共享),
+   * 只引用其 id 字段。父 broker 装配方式(eventBus / resolver 等)对子 broker 行为零影响。
+   */
+  parentBroker: IConfirmationBroker;
   /** 父级工具集 —— 子工具按 subAgentSafe 过滤后从此派生 */
   parentTools: readonly ToolDefinition[];
   /**
@@ -148,11 +158,20 @@ async function runChildAgentInner(
       parent: opts.parentBus,
       lineage: childLineage,
     });
-    // 子 broker 默认 fail-deny resolver(broker 内部 default behavior);
-    // M2.1 不接 parentBrokerId / sourceAgentId / nonInteractiveResolver 等
-    // 元信息字段(归 M2.2);共享父 PermissionStore 走 SecurityPipeline 而非 broker,
-    // 父 alwaysAllow 规则自动命中,根本不进 broker
-    childBroker = new ConfirmationBroker();
+    // 子 broker 装配:
+    //   - parentBrokerId / sourceAgentId 是审计血缘元信息,broker 在 emit 事件 /
+    //     snapshot() 时透传,不影响 broker 任何行为
+    //   - nonInteractiveResolver 由 budget.confirmationPolicy 决定(从 resolved
+    //     budget 取,而非 opts.budget?.confirmationPolicy —— 后者绕过单一真相源,
+    //     默认值同步将断裂):
+    //       inherit-or-deny / auto-deny → fail-to-deny(默认安全姿态)
+    //   - 共享父 PermissionStore 走 SecurityPipeline 而非 broker,
+    //     父 alwaysAllow 规则自动命中,根本不进 broker
+    childBroker = new ConfirmationBroker({
+      parentBrokerId: opts.parentBroker.id,
+      sourceAgentId: subAgentId,
+      nonInteractiveResolver: resolveSubAgentResolver(budget.confirmationPolicy),
+    });
 
     // 子工具集:fail-closed 过滤 —— 仅 subAgentSafe===true 的工具进入子集
     childTools = opts.parentTools.filter((t) => t.subAgentSafe === true);
