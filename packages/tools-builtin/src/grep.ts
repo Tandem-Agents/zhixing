@@ -76,6 +76,7 @@ export function createGrepTool(): ToolDefinition {
     isReadOnly: true,
     isParallelSafe: true,
     needsPermission: false,
+    subAgentSafe: true,
     maxResultChars: MAX_RESULT_CHARS,
 
     async call(input, context): Promise<ToolResult> {

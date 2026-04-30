@@ -457,6 +457,133 @@ describe("EventBus", () => {
       expect(bus.eventNames()).toEqual([]);
     });
   });
+
+  // ─── 层级化:parent 冒泡 + lineage + meta 侧通道 ───
+
+  describe("hierarchical (parent / lineage / meta)", () => {
+    it("无 lineage 的 root bus emit:listener 单参数(meta 不构造,二进制兼容)", async () => {
+      const bus = createEventBus<TestEvents>();
+      const handler = vi.fn();
+      bus.on("simple", handler);
+      await bus.emit("simple", "x");
+      // 仍是 1 参调用 —— meta 不附加,严格保持历史 API
+      expect(handler).toHaveBeenCalledWith("x");
+    });
+
+    it("root bus 暴露 lineage 字段(未设则 undefined)", () => {
+      const a = createEventBus<TestEvents>();
+      const b = createEventBus<TestEvents>({ lineage: "main" });
+      expect(a.lineage).toBeUndefined();
+      expect(b.lineage).toBe("main");
+    });
+
+    it("有 lineage 的 bus emit:listener 收到 (payload, meta) 两参,meta.lineage 为本 bus", async () => {
+      const bus = createEventBus<TestEvents>({ lineage: "main" });
+      const handler = vi.fn();
+      bus.on("simple", handler);
+      await bus.emit("simple", "x");
+      expect(handler).toHaveBeenCalledWith(
+        "x",
+        expect.objectContaining({ lineage: "main" }),
+      );
+    });
+
+    it("子 bus emit:本地 listener 先,父 listener 后(深度优先到根)", async () => {
+      const parent = createEventBus<TestEvents>({ lineage: "main" });
+      const child = createEventBus<TestEvents>({ parent, lineage: "main/sub-1" });
+      const order: string[] = [];
+
+      parent.on("simple", () => { order.push("parent"); });
+      child.on("simple", () => { order.push("child"); });
+
+      await child.emit("simple", "x");
+      expect(order).toEqual(["child", "parent"]);
+    });
+
+    it("冒泡时 meta 不重建:父收到的 meta.lineage = 最初 emit 的子 bus 的 lineage(嵌套两层亦然)", async () => {
+      const main = createEventBus<TestEvents>({ lineage: "main" });
+      const sub = createEventBus<TestEvents>({ parent: main, lineage: "main/sub-a" });
+      const grand = createEventBus<TestEvents>({ parent: sub, lineage: "main/sub-a/sub-b" });
+
+      const mainMeta = vi.fn();
+      const subMeta = vi.fn();
+      main.on("simple", (_p, m) => mainMeta(m?.lineage));
+      sub.on("simple", (_p, m) => subMeta(m?.lineage));
+
+      await grand.emit("simple", "x");
+
+      expect(subMeta).toHaveBeenCalledWith("main/sub-a/sub-b");
+      expect(mainMeta).toHaveBeenCalledWith("main/sub-a/sub-b");
+    });
+
+    it("emitSync 也按 [子→父] 顺序冒泡,meta 透传", () => {
+      const parent = createEventBus<TestEvents>({ lineage: "main" });
+      const child = createEventBus<TestEvents>({ parent, lineage: "main/sub-c" });
+      const order: Array<{ where: string; lineage: string | undefined }> = [];
+
+      parent.on("simple", (_p, m) => order.push({ where: "parent", lineage: m?.lineage }));
+      child.on("simple", (_p, m) => order.push({ where: "child", lineage: m?.lineage }));
+
+      child.emitSync("simple", "x");
+      expect(order).toEqual([
+        { where: "child", lineage: "main/sub-c" },
+        { where: "parent", lineage: "main/sub-c" },
+      ]);
+    });
+
+    it("通配符 listener 也接收 meta 第二参", async () => {
+      const bus = createEventBus<TestEvents>({ lineage: "main" });
+      const wildcard = vi.fn();
+      bus.onAny(wildcard);
+      await bus.emit("simple", "y");
+      expect(wildcard).toHaveBeenCalledWith(
+        "simple",
+        "y",
+        expect.objectContaining({ lineage: "main" }),
+      );
+    });
+
+    it("不变量:子 lineage 不以 parent.lineage + '/' 开头时构造 throw", () => {
+      const parent = createEventBus<TestEvents>({ lineage: "main" });
+      expect(() =>
+        createEventBus<TestEvents>({ parent, lineage: "other-root/sub" }),
+      ).toThrow(/must start with parent lineage/);
+    });
+
+    it("父无 lineage 时,子可以自由设 lineage(无前缀约束)", () => {
+      const parent = createEventBus<TestEvents>();
+      expect(() =>
+        createEventBus<TestEvents>({ parent, lineage: "main/sub-x" }),
+      ).not.toThrow();
+    });
+
+    it("父有 lineage、子无 lineage 时不强制(子 emit 不带 meta,父收 1 参)", async () => {
+      const parent = createEventBus<TestEvents>({ lineage: "main" });
+      const child = createEventBus<TestEvents>({ parent });
+      const onParent = vi.fn();
+      parent.on("simple", onParent);
+      await child.emit("simple", "x");
+      expect(onParent).toHaveBeenCalledWith("x");
+    });
+
+    it("子 listener 抛错被本地 errorHandler 捕获后,父冒泡不中断", async () => {
+      const childErrors: string[] = [];
+      const parent = createEventBus<TestEvents>({ lineage: "main" });
+      const child = createEventBus<TestEvents>({
+        parent,
+        lineage: "main/sub",
+        onError: (err) => childErrors.push(String(err)),
+      });
+      const onParent = vi.fn();
+      child.on("simple", () => { throw new Error("child boom"); });
+      parent.on("simple", onParent);
+
+      await child.emit("simple", "x");
+
+      expect(childErrors).toContain("Error: child boom");
+      expect(onParent).toHaveBeenCalled();
+    });
+  });
 });
 
 function delay(ms: number): Promise<void> {

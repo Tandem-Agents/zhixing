@@ -1,6 +1,7 @@
 import type {
   EventBusOptions,
   EventMap,
+  EventMeta,
   IEventBus,
   Listener,
   Unsubscribe,
@@ -17,6 +18,9 @@ const DEFAULT_MAX_LISTENERS = 50;
  * - 错误隔离：单个监听器的异常不影响其他监听器执行
  * - 支持 on/once/onAny 三种订阅模式
  * - emit 异步等待所有监听器，emitSync 立即返回
+ * - 层级化:子 bus emit 后本地 listeners 先跑,事件再向父 bus 冒泡(深度优先到根)。
+ *   meta(lineage / emittedAt)走侧通道,父接收时透传同一份 meta —— 始终标识
+ *   "最初 emit 的子 bus",无论冒泡多少层
  *
  * 对比 OpenClaw/Claude Code：它们没有独立的事件系统，
  * 可观测性靠硬编码日志。我们的事件总线是一等公民，
@@ -28,14 +32,34 @@ export class EventBus<TMap extends EventMap> implements IEventBus<TMap> {
   private readonly onceWrappersToOriginal = new WeakMap<Listener<never>, Listener<never>>();
   private readonly maxListeners: number;
   private readonly errorHandler: (error: unknown, eventName: string) => void;
+  private readonly parent?: EventBus<TMap>;
+  readonly lineage: string | undefined;
 
-  constructor(options: EventBusOptions = {}) {
+  constructor(options: EventBusOptions<TMap> = {}) {
     this.maxListeners = options.maxListeners ?? DEFAULT_MAX_LISTENERS;
     this.errorHandler =
       options.onError ??
       ((error, eventName) => {
         console.error(`[EventBus] Error in listener for "${eventName}":`, error);
       });
+
+    // parent 类型在 EventBusOptions 中已收紧为 EventBus<TMap>(不接受任意
+    // IEventBus 实现),因此此处直接赋值无需 cast —— 由 TypeScript 在
+    // 编译期阻止"传 mock IEventBus 导致 emit 时找不到内部 dispatch"的问题。
+    this.parent = options.parent;
+    this.lineage = options.lineage;
+
+    // 不变量:子 lineage 必须以 parent.lineage + "/" 开头(若父子都设了 lineage)
+    if (
+      this.parent?.lineage !== undefined &&
+      this.lineage !== undefined &&
+      !this.lineage.startsWith(`${this.parent.lineage}/`)
+    ) {
+      throw new Error(
+        `EventBus lineage "${this.lineage}" must start with parent lineage + "/" ` +
+          `("${this.parent.lineage}/")`,
+      );
+    }
   }
 
   on<K extends keyof TMap & string>(event: K, listener: Listener<TMap[K]>): Unsubscribe {
@@ -92,12 +116,42 @@ export class EventBus<TMap extends EventMap> implements IEventBus<TMap> {
   }
 
   async emit<K extends keyof TMap & string>(event: K, payload: TMap[K]): Promise<void> {
+    await this.dispatch(event, payload, this.makeMeta());
+  }
+
+  emitSync<K extends keyof TMap & string>(event: K, payload: TMap[K]): void {
+    this.dispatchSync(event, payload, this.makeMeta());
+  }
+
+  /**
+   * 仅当 bus 设了 lineage 才构造 meta —— 无 lineage 的根 bus 保持"emit 时不附 meta"
+   * 的旧契约,listener 调用时只传 payload,严格保持二进制 API 兼容。
+   */
+  private makeMeta(): EventMeta | undefined {
+    return this.lineage !== undefined
+      ? { lineage: this.lineage, emittedAt: Date.now() }
+      : undefined;
+  }
+
+  /**
+   * 内部派发:本地 listeners → wildcards → 父冒泡。
+   *
+   * meta 由顶层 emit 一次构造,递归向上透传时不重建 —— 保证 meta.lineage
+   * 始终是"最初 emit 的子 bus"的 lineage,无论冒泡多少层。meta 为 undefined 时
+   * listener 调用形如 `listener(payload)`,与历史行为字节级一致。
+   */
+  private async dispatch<K extends keyof TMap & string>(
+    event: K,
+    payload: TMap[K],
+    meta: EventMeta | undefined,
+  ): Promise<void> {
     const listeners = this.getListenersSnapshot(event);
     const wildcards = [...this.wildcardListeners];
 
     for (const listener of listeners) {
       try {
-        await (listener as Listener<TMap[K]>)(payload);
+        const typed = listener as Listener<TMap[K]>;
+        await (meta !== undefined ? typed(payload, meta) : typed(payload));
       } catch (error) {
         this.errorHandler(error, event);
       }
@@ -105,20 +159,29 @@ export class EventBus<TMap extends EventMap> implements IEventBus<TMap> {
 
     for (const wildcard of wildcards) {
       try {
-        await wildcard(event, payload);
+        await (meta !== undefined ? wildcard(event, payload, meta) : wildcard(event, payload));
       } catch (error) {
         this.errorHandler(error, event);
       }
     }
+
+    if (this.parent) {
+      await this.parent.dispatch(event, payload, meta);
+    }
   }
 
-  emitSync<K extends keyof TMap & string>(event: K, payload: TMap[K]): void {
+  private dispatchSync<K extends keyof TMap & string>(
+    event: K,
+    payload: TMap[K],
+    meta: EventMeta | undefined,
+  ): void {
     const listeners = this.getListenersSnapshot(event);
     const wildcards = [...this.wildcardListeners];
 
     for (const listener of listeners) {
       try {
-        const result = (listener as Listener<TMap[K]>)(payload);
+        const typed = listener as Listener<TMap[K]>;
+        const result = meta !== undefined ? typed(payload, meta) : typed(payload);
         // 异步返回值的错误仍需捕获，避免 unhandled rejection
         if (result && typeof (result as Promise<void>).catch === "function") {
           (result as Promise<void>).catch((error) => this.errorHandler(error, event));
@@ -130,13 +193,18 @@ export class EventBus<TMap extends EventMap> implements IEventBus<TMap> {
 
     for (const wildcard of wildcards) {
       try {
-        const result = wildcard(event, payload);
+        const result =
+          meta !== undefined ? wildcard(event, payload, meta) : wildcard(event, payload);
         if (result && typeof (result as Promise<void>).catch === "function") {
           (result as Promise<void>).catch((error) => this.errorHandler(error, event));
         }
       } catch (error) {
         this.errorHandler(error, event);
       }
+    }
+
+    if (this.parent) {
+      this.parent.dispatchSync(event, payload, meta);
     }
   }
 
@@ -185,10 +253,14 @@ export class EventBus<TMap extends EventMap> implements IEventBus<TMap> {
 }
 
 /**
- * 创建类型安全事件总线的工厂函数
+ * 创建类型安全事件总线的工厂函数。
+ *
+ * 返回 `EventBus<TMap>`(类)而非 `IEventBus<TMap>`(接口) —— 让消费者直接把
+ * 返回值传入子 bus 的 `parent` 字段时类型自然匹配,无需手动 cast。需要消费者
+ * 契约视角时仍可显式标注 `: IEventBus<TMap>`,EventBus 结构性满足该接口。
  */
 export function createEventBus<TMap extends EventMap>(
-  options?: EventBusOptions,
-): IEventBus<TMap> {
+  options?: EventBusOptions<TMap>,
+): EventBus<TMap> {
   return new EventBus<TMap>(options);
 }

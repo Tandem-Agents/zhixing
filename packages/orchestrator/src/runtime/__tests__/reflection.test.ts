@@ -70,7 +70,7 @@ describe("buildSystemPrompt — Skill Evolution segment", () => {
 // 使用 enrichContext 的导入需要 mock 文件系统，这里测试 buildReflectionHint 的逻辑
 // 通过 enrichContext 的公开行为间接验证
 
-import { enrichContext, REFLECTION_THRESHOLD, loadProjectContext } from "@zhixing/orchestrator/runtime";
+import { enrichContext, REFLECTION_THRESHOLD, loadProjectContext } from "../project-context.js";
 import type { Message } from "@zhixing/core";
 
 function userMsg(text: string): Message {

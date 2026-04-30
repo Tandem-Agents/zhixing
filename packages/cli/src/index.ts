@@ -12,7 +12,7 @@
 import { Command } from "commander";
 import { runOnce } from "./run-agent.js";
 import { startRepl } from "./repl.js";
-import { createRenderer, renderSummary, renderError } from "./render.js";
+import { renderSummary, renderError } from "./render.js";
 import { runServeCommand } from "./serve/command.js";
 import { runStopCommand } from "./serve/stop.js";
 import { runStatusCommand } from "./serve/status.js";
@@ -43,18 +43,13 @@ program
   }) => {
     try {
       if (options.print) {
-        const renderer = createRenderer();
-        renderer.startThinking();
-
+        // runOnce 内部自管 renderer / spinner / 渲染装饰,调用方仅传入业务参数。
         const { agentResult, durationMs } = await runOnce({
           prompt: options.print,
           model: options.model,
           provider: options.provider,
           workspace: options.workspace,
-          onYield: (e) => renderer.handleEvent(e),
         });
-
-        renderer.stop();
         renderSummary(agentResult, durationMs);
         process.exit(0);
       }

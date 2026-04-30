@@ -22,6 +22,7 @@ import {
   type IEventBus,
   getAgentIdentity,
 } from "@zhixing/core";
+import type { DecorateRunBusFn } from "@zhixing/orchestrator/runtime";
 
 // ─── Spinner 常量 ───
 
@@ -735,4 +736,72 @@ function getToolSummary(name: string, input: Record<string, unknown>): string {
     default:
       return "";
   }
+}
+
+// ─── 集中渲染订阅装载点 ───
+
+/**
+ * 工厂:绑定一个可选的 Renderer 实例,返回符合 DecorateRunBusFn 契约的装饰器。
+ *
+ * 设计要点:
+ *   1. 通过 closure 捕获 renderer —— UI 依赖在工厂层显式注入,而非通过 RunBusContext
+ *      字段从 runtime 反向传递,保持 runtime API 与展示层解耦。
+ *   2. renderer 缺省时 pauseUI 退化为 no-op:适配 serve / 无 spinner 路径(retry/compact
+ *      事件仍然渲染,只是不再驱动 spinner 暂停)。
+ *   3. 返回的装饰器在 run 结束 finally 调一次,杜绝 listener 跨 run 累积。
+ *
+ * 涵盖:
+ *   - retry:* (attempt / success / exhausted)
+ *   - context:budget_check (仅 pre-compact + warning+ 渲染)
+ *   - context:compact_start / context:compact_end
+ *   - interrupt:* + llm:stream_event + agent:run_end (经 setupInterruptRendering)
+ *
+ * 不涵盖(职责正交):
+ *   - 数据收集类订阅(如 subscribeCompactAccumulator),归 runtime 主流程
+ */
+export function createRenderSubscribers(renderer?: Renderer): DecorateRunBusFn {
+  // pauseUI 单点派生:有 renderer 即包装 stop(),否则 no-op。
+  // 保持下方各订阅回调的形状统一,避免"是否暂停"逻辑下沉到每个 case。
+  const pauseUI: () => void = renderer ? () => renderer.stop() : () => {};
+
+  return (ctx) => {
+    const { bus } = ctx;
+    const unsubs: Array<() => void> = [];
+
+    unsubs.push(bus.on("retry:attempt", (info) => {
+      pauseUI();
+      renderRetryAttempt(info);
+    }));
+    unsubs.push(bus.on("retry:success", (info) => {
+      pauseUI();
+      renderRetrySuccess(info);
+    }));
+    unsubs.push(bus.on("retry:exhausted", (info) => {
+      pauseUI();
+      renderRetryExhausted(info);
+    }));
+
+    unsubs.push(bus.on("context:budget_check", (info) => {
+      if (info.phase !== "pre-compact") return;
+      if (info.status === "warning" || info.status === "compact" || info.status === "critical") {
+        pauseUI();
+        renderBudgetStatus(info);
+      }
+    }));
+    unsubs.push(bus.on("context:compact_start", (info) => {
+      pauseUI();
+      renderCompactStart(info);
+    }));
+    unsubs.push(bus.on("context:compact_end", (info) => {
+      pauseUI();
+      renderCompactEnd(info);
+    }));
+
+    const interruptHandle = setupInterruptRendering(bus, pauseUI);
+
+    return () => {
+      for (const u of unsubs) u();
+      interruptHandle.dispose();
+    };
+  };
 }

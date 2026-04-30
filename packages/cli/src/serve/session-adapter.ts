@@ -31,7 +31,7 @@ import type {
   SessionRuntime,
   TurnContext,
 } from "@zhixing/server";
-import type { AgentRuntime } from "../run-agent.js";
+import type { AgentRuntime } from "@zhixing/orchestrator/runtime";
 
 // ─── 适配器 ───
 

@@ -73,6 +73,8 @@ export function createMemoryTool(): ToolDefinition {
     isReadOnly: false,
     isParallelSafe: false,
     needsPermission: false,
+    // 子 agent 不应污染主用户持久记忆 —— 主 agent 才是用户记忆的合法管理者
+    subAgentSafe: false,
 
     async call(input): Promise<ToolResult> {
       const action = input.action as string;

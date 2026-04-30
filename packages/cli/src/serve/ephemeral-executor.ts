@@ -17,7 +17,7 @@ import {
   type TurnContext,
 } from "@zhixing/core";
 import type { AgentTurnResult } from "@zhixing/core";
-import type { AgentRuntime } from "../run-agent.js";
+import type { AgentRuntime } from "@zhixing/orchestrator/runtime";
 import { serializeAbortReason } from "./abort-serializer.js";
 
 export interface EphemeralTurnOptions {

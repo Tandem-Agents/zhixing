@@ -49,7 +49,12 @@ import {
 import { loadConfig } from "@zhixing/providers";
 import { createScheduleTool } from "@zhixing/tools-builtin";
 import chalk from "chalk";
-import { createAgentRuntime } from "../run-agent.js";
+import { createAgentRuntime } from "@zhixing/orchestrator/runtime";
+import { createRenderSubscribers } from "../render.js";
+import {
+  renderBlockedMessage,
+  renderUserDeniedMessage,
+} from "../security/index.js";
 import { setupDelivery, type DeliveryStack } from "../setup-delivery.js";
 import { setupChannels } from "./channels.js";
 import { createCliRuntimeFactory } from "./session-adapter.js";
@@ -137,6 +142,11 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     return schedulerRef;
   };
 
+  // serve 模式无 spinner —— 不传 renderer,pauseUI 退化为 no-op。
+  // 工厂结果在多个 runtime 之间共享:每次 runtime.run() 各自装配独立 listener,
+  // 工厂自身无跨 run 状态,共享安全且节省一次函数创建开销。
+  const renderDecorator = createRenderSubscribers();
+
   // 3a. ConfirmationHub —— 远程权限确认聚合层（remote-confirmation-execution.md §3.2）
   //   在 ConversationManager / setupChannels / ephemeralRuntime / ServerContext 之前创建，
   //   以便各组件构造时能接入。未提供 hub 时 serve 模式会回退到"confirmation 永久 pending → expire"。
@@ -153,6 +163,9 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
         provider: opts.provider,
         workspace: opts.workspace,
         extraTools: [scheduleTool],
+        decorateRunBus: renderDecorator,
+        onSecurityBlocked: renderBlockedMessage,
+        onUserDenied: renderUserDeniedMessage,
       });
       runtime.registerTurnContextProvider(
         new SchedulerProvider(() => {
@@ -259,6 +272,9 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     provider: opts.provider,
     workspace: opts.workspace,
     extraTools: [createScheduleTool(getSchedulerRef, () => null)],
+    decorateRunBus: renderDecorator,
+    onSecurityBlocked: renderBlockedMessage,
+    onUserDenied: renderUserDeniedMessage,
   });
   ephemeralRuntime.registerTurnContextProvider(
     new SchedulerProvider(() => {

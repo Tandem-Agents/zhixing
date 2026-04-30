@@ -1,0 +1,453 @@
+import { describe, it, expect } from "vitest";
+import {
+  buildSystemPrompt,
+  CACHE_BOUNDARY,
+  SUB_AGENT_SEGMENTS,
+} from "../system-prompt.js";
+import { subAgentProfile } from "../../profile/default-profiles.js";
+import type { ToolDefinition } from "@zhixing/core";
+import { createWebFetchTool } from "@zhixing/tools-builtin";
+
+// ─── 工具工厂 ───
+
+function stubTool(name: string, overrides?: Partial<ToolDefinition>): ToolDefinition {
+  return {
+    name,
+    description: `stub ${name}`,
+    inputSchema: { type: "object" },
+    call: async () => ({ content: "" }),
+    ...overrides,
+  };
+}
+
+const defaultTools = [
+  stubTool("read"),
+  stubTool("write"),
+  stubTool("edit"),
+  stubTool("glob"),
+  stubTool("grep"),
+  stubTool("bash"),
+];
+
+// ─── 测试 ───
+
+describe("buildSystemPrompt", () => {
+  const ctx = { tools: defaultTools, cwd: "/test/project" };
+
+  it("包含身份定义", () => {
+    const prompt = buildSystemPrompt(ctx);
+    expect(prompt).toContain("Zhixing");
+    expect(prompt).toContain("知行");
+  });
+
+  it("包含工作原则", () => {
+    const prompt = buildSystemPrompt(ctx);
+    expect(prompt).toContain("## Principles");
+    expect(prompt).toContain("Read before edit");
+  });
+
+  it("包含动态生成的工具使用段", () => {
+    const prompt = buildSystemPrompt(ctx);
+    expect(prompt).toContain("## Tool Usage");
+    expect(prompt).toContain("`read`");
+    expect(prompt).toContain("`grep`");
+    expect(prompt).toContain("`glob`");
+    expect(prompt).toContain("`edit`");
+    expect(prompt).toContain("`write`");
+    expect(prompt).toContain("`bash`");
+  });
+
+  it("含 Commitment 信号抑制叙述原则", async () => {
+    const { COMMITMENT_SIGNAL } = await import("@zhixing/core");
+    const prompt = buildSystemPrompt(ctx);
+    // 直接引用 core 常量——保证系统提示里的信号字面与 tool-executor 附加到 content 的逐字一致
+    expect(prompt).toContain(COMMITMENT_SIGNAL);
+    expect(prompt).toMatch(/Do NOT restate|not restate/i);
+  });
+
+  it("包含风格段", () => {
+    const prompt = buildSystemPrompt(ctx);
+    expect(prompt).toContain("## Style");
+    expect(prompt).toContain("concise");
+  });
+
+  it("包含安全段", () => {
+    const prompt = buildSystemPrompt(ctx);
+    expect(prompt).toContain("## Safety");
+    expect(prompt).toContain("destructive");
+  });
+
+  it("包含缓存分界标记", () => {
+    const prompt = buildSystemPrompt(ctx);
+    expect(prompt).toContain("__ZHIXING_CACHE_BOUNDARY__");
+  });
+
+  it("分界标记将静态区和动态区分隔", () => {
+    const prompt = buildSystemPrompt(ctx);
+    const [before, after] = prompt.split(CACHE_BOUNDARY);
+
+    // 静态区包含身份和原则
+    expect(before).toContain("Zhixing");
+    expect(before).toContain("## Principles");
+
+    // 动态区包含环境信息
+    expect(after).toContain("## Environment");
+    expect(after).toContain("/test/project");
+  });
+
+  it("包含环境信息", () => {
+    const prompt = buildSystemPrompt(ctx);
+    expect(prompt).toContain("## Environment");
+    expect(prompt).toContain("Working directory: /test/project");
+    expect(prompt).toContain("Platform:");
+    expect(prompt).toContain("Node.js:");
+  });
+
+  it("shell 参数会出现在环境段", () => {
+    const prompt = buildSystemPrompt({ ...ctx, shell: "zsh" });
+    expect(prompt).toContain("Shell: zsh");
+  });
+
+  it("不传 shell 时环境段不含 Shell 行", () => {
+    const prompt = buildSystemPrompt(ctx);
+    expect(prompt).not.toContain("Shell:");
+  });
+
+  describe("工具段动态适应", () => {
+    it("仅有 read 工具时，工具段只包含 read", () => {
+      const prompt = buildSystemPrompt({ ...ctx, tools: [stubTool("read")] });
+      expect(prompt).toContain("`read`");
+      expect(prompt).not.toContain("`grep`");
+      expect(prompt).not.toContain("`bash`");
+    });
+
+    it("无工具时，工具段只有标题", () => {
+      const prompt = buildSystemPrompt({ ...ctx, tools: [] });
+      expect(prompt).toContain("## Tool Usage");
+      expect(prompt).not.toContain("`read`");
+    });
+
+    it("添加自定义工具时不影响已有段落", () => {
+      const tools = [...defaultTools, stubTool("custom_tool")];
+      const prompt = buildSystemPrompt({ ...ctx, tools });
+      expect(prompt).toContain("`read`");
+    });
+
+    it("包含 parallelSafe 工具时提示并行", () => {
+      const tools = [stubTool("read", { isParallelSafe: true })];
+      const prompt = buildSystemPrompt({ ...ctx, tools });
+      expect(prompt).toContain("parallel");
+    });
+
+    it("含 web_fetch(真实工具)时输出 distill / preapproved hosts / not-search 引导", () => {
+      const prompt = buildSystemPrompt({
+        ...ctx,
+        tools: [createWebFetchTool()],
+      });
+      expect(prompt).toContain("`web_fetch`");
+      expect(prompt).toMatch(/does not search the web/i);
+      expect(prompt).toMatch(/with `prompt`/i);
+      expect(prompt).toMatch(/without `prompt`/i);
+      expect(prompt).toContain("github.com");
+      expect(prompt).toContain("docs.anthropic.com");
+      expect(prompt).toMatch(/Do not invent URLs/i);
+    });
+
+    it("不含 web_fetch 时无 web_fetch 引导段", () => {
+      const prompt = buildSystemPrompt({ ...ctx, tools: [stubTool("read")] });
+      expect(prompt).not.toContain("`web_fetch`");
+      expect(prompt).not.toContain("Pre-approved hosts");
+    });
+
+    it("自描述 systemPromptHints 通用透传(任意工具自带 hints 都生效)", () => {
+      const customHints = [
+        "- Use `custom_tool` for X",
+        "- Custom hint line 2",
+      ];
+      const tool = stubTool("custom_tool", { systemPromptHints: customHints });
+      const prompt = buildSystemPrompt({ ...ctx, tools: [tool] });
+      expect(prompt).toContain("Use `custom_tool` for X");
+      expect(prompt).toContain("Custom hint line 2");
+    });
+
+    it("无 systemPromptHints 字段的工具不影响其他工具的 hints", () => {
+      const toolWithHints = stubTool("custom_a", {
+        systemPromptHints: ["- Hint A"],
+      });
+      const toolWithout = stubTool("custom_b");
+      const prompt = buildSystemPrompt({ ...ctx, tools: [toolWithHints, toolWithout] });
+      expect(prompt).toContain("Hint A");
+    });
+  });
+
+  it("静态区在不同 cwd 间保持一致", () => {
+    const prompt1 = buildSystemPrompt({ ...ctx, cwd: "/project/a" });
+    const prompt2 = buildSystemPrompt({ ...ctx, cwd: "/project/b" });
+
+    const static1 = prompt1.split(CACHE_BOUNDARY)[0];
+    const static2 = prompt2.split(CACHE_BOUNDARY)[0];
+
+    expect(static1).toBe(static2);
+  });
+
+  // ─── byte-equal 锚点 ───
+  //
+  // 主路径 prompt 是产品契约 —— 任何无意改动(段顺序、文案、缓存分界标记格式)
+  // 都会让此快照失守,强制开发者主动审视改动。环境段含 platform / Node 版本等
+  // 动态字段,此处仅锚定缓存分界之前的静态区。
+  it("主路径静态区(默认 profile + 默认 segments,无 memory 工具)byte-equal 锚点", () => {
+    const prompt = buildSystemPrompt(ctx);
+    const staticPart = prompt.split(CACHE_BOUNDARY)[0];
+    expect(staticPart).toMatchInlineSnapshot(`
+      "You are Zhixing (知行), a personal intelligent assistant.
+      Your name means "unity of knowledge and action" — you understand problems and take action to solve them.
+
+      ## Principles
+      - Respond in the same language the user uses
+      - When a task requires action, use tools immediately without asking for permission
+      - Read before edit: always read a file before modifying it to ensure exact text match
+      - Edit over write: prefer targeted replacement over full overwrite when modifying existing files
+      - Search before act: use glob/grep to discover relevant files before reading or editing
+      - If a command fails, analyze the error and try an alternative approach
+      - Show your reasoning when making non-obvious decisions
+
+      ## Tool Usage
+      - Use \`read\` to view file contents, not bash cat/head/tail
+      - Use \`grep\` to search file contents by regex, not bash grep/rg
+      - Use \`glob\` to find files by name pattern, not bash find
+      - Use \`edit\` for targeted text replacements, not bash sed/awk
+      - Use \`write\` to create files or overwrite entire content
+      - Use \`bash\` for system commands, package management, git operations, and tasks not covered by other tools
+      - If a tool result ends with \`[Commitment already sent to user. Do not restate.]\`, the user has already seen the tool's confirmation directly via a commit message. Do NOT restate what the tool just did (no "已创建..." / "I've scheduled..."). If no additional insight is needed, end the turn with a brief acknowledgment or no text.
+
+      ## Style
+      - Be warm, concise, and natural in conversation
+      - Do not use emojis unless the user does
+      - Use markdown for code blocks and structured output
+      - Keep responses focused — answer what was asked
+      - When introducing yourself, speak conversationally — never list capabilities
+
+      ## Safety
+      - Never execute destructive commands (rm -rf /, DROP DATABASE, etc.) without explicit user request
+      - Do not access files outside the workspace unless the user's intent is clear
+      - Refuse requests that could compromise system security"
+    `);
+  });
+
+  // 含 memory 工具时主 agent 完整 6 段(skill-evolution 段被激活)的 byte-equal 锚点。
+  // 与上一条无 memory 锚点互补:任何 skill-evolution 段文案改动 / Tool Usage 的 memory
+  // 提示行改动 / 段顺序变化都会被此快照拦截。两个快照共同覆盖主 agent 段集全态。
+  it("主路径静态区(默认 profile + 含 memory 工具)完整 6 段 byte-equal 锚点", () => {
+    const prompt = buildSystemPrompt({
+      ...ctx,
+      tools: [...defaultTools, stubTool("memory")],
+    });
+    const staticPart = prompt.split(CACHE_BOUNDARY)[0];
+    expect(staticPart).toMatchInlineSnapshot(`
+      "You are Zhixing (知行), a personal intelligent assistant.
+      Your name means "unity of knowledge and action" — you understand problems and take action to solve them.
+
+      ## Principles
+      - Respond in the same language the user uses
+      - When a task requires action, use tools immediately without asking for permission
+      - Read before edit: always read a file before modifying it to ensure exact text match
+      - Edit over write: prefer targeted replacement over full overwrite when modifying existing files
+      - Search before act: use glob/grep to discover relevant files before reading or editing
+      - If a command fails, analyze the error and try an alternative approach
+      - Show your reasoning when making non-obvious decisions
+
+      ## Tool Usage
+      - Use \`read\` to view file contents, not bash cat/head/tail
+      - Use \`grep\` to search file contents by regex, not bash grep/rg
+      - Use \`glob\` to find files by name pattern, not bash find
+      - Use \`edit\` for targeted text replacements, not bash sed/awk
+      - Use \`write\` to create files or overwrite entire content
+      - Use \`bash\` for system commands, package management, git operations, and tasks not covered by other tools
+      - Use \`memory\` to save, search, and manage the user's persistent memories (identity, relationships, skills)
+      - When the user says "remember this" or shares personal info, save it with \`memory\`
+      - Always confirm before saving new memories, unless the user explicitly asked you to remember
+      - If a tool result ends with \`[Commitment already sent to user. Do not restate.]\`, the user has already seen the tool's confirmation directly via a commit message. Do NOT restate what the tool just did (no "已创建..." / "I've scheduled..."). If no additional insight is needed, end the turn with a brief acknowledgment or no text.
+
+      ## Skill Evolution
+      After completing a complex task (one that required multiple tool calls, trial-and-error, or iterative problem-solving), reflect on whether the approach contains a reusable methodology.
+
+      Ask yourself:
+      - Did I discover a non-obvious approach through trial and error?
+      - Did the user correct my initial approach, revealing a better method?
+      - Does a similar skill already exist that should be updated with new learnings?
+
+      If the approach is worth saving, propose it naturally at the end of your response:
+
+        "💡 这个过程中我总结了一套方法,要存为技能吗?
+         名称:[skill name]
+         适用场景:[when this would be useful]
+         核心要点:[brief summary]"
+
+      If you used an existing skill but found improvements, propose an update:
+
+        "💡 我发现之前的技能「[name]」可以改进,要更新吗?
+         改进点:[what changed]"
+
+      Rules:
+      - Never silently create or update skills — always propose and wait for confirmation
+      - At most one skill proposal per conversation
+      - Only propose after complex tasks, not simple Q&A
+      - When the user confirms, use the \`memory\` tool with action "save" and category "skill"
+
+      ## Style
+      - Be warm, concise, and natural in conversation
+      - Do not use emojis unless the user does
+      - Use markdown for code blocks and structured output
+      - Keep responses focused — answer what was asked
+      - When introducing yourself, speak conversationally — never list capabilities
+
+      ## Safety
+      - Never execute destructive commands (rm -rf /, DROP DATABASE, etc.) without explicit user request
+      - Do not access files outside the workspace unless the user's intent is clear
+      - Refuse requests that could compromise system security"
+    `);
+  });
+
+  // 子 agent 装配链路的 byte-equal 锚点 —— 锁定 SUB_AGENT_SEGMENTS 的 4 段输出。
+  //
+  // 任何下列改动都会被此快照拦截:
+  //   - SUB_AGENT_SEGMENTS 段集合 / 段顺序变更
+  //   - subAgentProfile() 身份段 / Constraints 文案变更
+  //   - principles / tool-usage / safety 段文案变更对子的影响
+  //   - 子 agent 渗透 skill-evolution / style 段(应被严格排除)
+  //
+  // 与主 agent 双锚点互补 —— 共同保证主子两条 system prompt 路径都被 byte-equal 锁定。
+  it("子 agent SUB_AGENT_SEGMENTS 4 段(无 memory / 无 style / 无 skill-evolution)byte-equal 锚点", () => {
+    // 固定 subAgentId 让 displayName 可锚定;真实 spawn 时 id 由 dispatcher 生成
+    const profile = subAgentProfile({
+      subAgentId: "abc123def",
+      task: "Read src/foo.ts and summarize its public API.",
+    });
+    const prompt = buildSystemPrompt({
+      ...ctx,
+      profile,
+      segments: SUB_AGENT_SEGMENTS,
+    });
+    const staticPart = prompt.split(CACHE_BOUNDARY)[0];
+    expect(staticPart).toMatchInlineSnapshot(`
+      "# Your Role
+      You are a sub-agent dispatched by the main agent to perform the following task:
+
+      \`\`\`
+      Read src/foo.ts and summarize its public API.
+      \`\`\`
+
+      # Constraints
+      - Your output is read by the main agent only — the user does not see it. Make your output self-contained; do not reference 'just now' or other context the user might assume.
+      - Use as few tool calls as possible. When you have enough to answer, finalize.
+      - You do not have access to the Task tool — you cannot dispatch further sub-agents.
+      - Stay focused on the assigned task. Do not initiate user conversation, do not send external messages.
+
+      ## Principles
+      - Respond in the same language the user uses
+      - When a task requires action, use tools immediately without asking for permission
+      - Read before edit: always read a file before modifying it to ensure exact text match
+      - Edit over write: prefer targeted replacement over full overwrite when modifying existing files
+      - Search before act: use glob/grep to discover relevant files before reading or editing
+      - If a command fails, analyze the error and try an alternative approach
+      - Show your reasoning when making non-obvious decisions
+
+      ## Tool Usage
+      - Use \`read\` to view file contents, not bash cat/head/tail
+      - Use \`grep\` to search file contents by regex, not bash grep/rg
+      - Use \`glob\` to find files by name pattern, not bash find
+      - Use \`edit\` for targeted text replacements, not bash sed/awk
+      - Use \`write\` to create files or overwrite entire content
+      - Use \`bash\` for system commands, package management, git operations, and tasks not covered by other tools
+      - If a tool result ends with \`[Commitment already sent to user. Do not restate.]\`, the user has already seen the tool's confirmation directly via a commit message. Do NOT restate what the tool just did (no "已创建..." / "I've scheduled..."). If no additional insight is needed, end the turn with a brief acknowledgment or no text.
+
+      ## Safety
+      - Never execute destructive commands (rm -rf /, DROP DATABASE, etc.) without explicit user request
+      - Do not access files outside the workspace unless the user's intent is clear
+      - Refuse requests that could compromise system security"
+    `);
+  });
+});
+
+// ─── profile / segments 扩展点 ───
+
+describe("buildSystemPrompt · profile + segments 扩展点", () => {
+  const ctx = { tools: defaultTools, cwd: "/test/project" };
+
+  it("默认 profile / 默认 segments 等价于不传(主路径 byte-equal)", () => {
+    const baseline = buildSystemPrompt(ctx);
+    const explicit = buildSystemPrompt({
+      ...ctx,
+      // 不传 profile / segments,显式与默认值等价
+    });
+    expect(explicit).toBe(baseline);
+  });
+
+  it("自定义 segments 子集只输出指定段", () => {
+    const prompt = buildSystemPrompt({
+      ...ctx,
+      segments: ["identity", "tool-usage"],
+    });
+    expect(prompt).toContain("Zhixing");
+    expect(prompt).toContain("## Tool Usage");
+    expect(prompt).not.toContain("## Principles");
+    expect(prompt).not.toContain("## Skill Evolution");
+    expect(prompt).not.toContain("## Style");
+    expect(prompt).not.toContain("## Safety");
+  });
+
+  it("空 segments 数组只剩缓存分界 + 环境段", () => {
+    const prompt = buildSystemPrompt({ ...ctx, segments: [] });
+    expect(prompt.startsWith(CACHE_BOUNDARY.replace(/^\n|\n$/g, ""))).toBe(false);
+    expect(prompt).toContain("## Environment");
+    expect(prompt).not.toContain("Zhixing");
+  });
+
+  it("自定义 profile.instructions 替换身份段文本", () => {
+    const customProfile = {
+      name: "TestBot",
+      role: "main",
+      instructions: "I am TestBot — a custom assistant.",
+      constraints: [] as readonly string[],
+    };
+    const prompt = buildSystemPrompt({ ...ctx, profile: customProfile });
+    expect(prompt).toContain("I am TestBot");
+    expect(prompt).not.toContain("You are Zhixing");
+  });
+
+  it("profile.constraints 非空时追加 Constraints 段", () => {
+    const profile = {
+      name: "Bot",
+      role: "sub",
+      instructions: "I am a sub-agent.",
+      constraints: ["Do not access external resources.", "Be terse."],
+    };
+    const prompt = buildSystemPrompt({
+      ...ctx,
+      profile,
+      segments: ["identity"],
+    });
+    expect(prompt).toContain("# Constraints");
+    expect(prompt).toContain("- Do not access external resources.");
+    expect(prompt).toContain("- Be terse.");
+  });
+
+  it("profile.tone 存在时前置 Tone 段", () => {
+    const profile = {
+      name: "Bot",
+      role: "main",
+      instructions: "I am Bot.",
+      tone: "Be encouraging.",
+      constraints: [] as readonly string[],
+    };
+    const prompt = buildSystemPrompt({
+      ...ctx,
+      profile,
+      segments: ["identity"],
+    });
+    expect(prompt).toContain("# Tone");
+    expect(prompt).toContain("Be encouraging.");
+    // Tone 在 instructions 之前
+    expect(prompt.indexOf("# Tone")).toBeLessThan(prompt.indexOf("I am Bot."));
+  });
+});

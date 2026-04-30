@@ -124,13 +124,6 @@ export function readInputLine(
 
     const buffer = new InputBuffer();
     let lastSessionState: TypeaheadSessionState | null = null;
-    /**
-     * 上一帧渲染了多少行（prompt 行 1 + panel N）。**本模块自己维护**这个
-     * 计数，不依赖 PanelRenderer —— 因为 PanelRenderer 的光标契约是"调用 clear
-     * 时光标在 (startRow + lastHeight, col 0)"，但本组件的光标在 rerender 入口
-     * 是 (promptRow, someCol)，两个契约不兼容。所以这里手动管理一整帧。
-     */
-    let lastFrameHeight = 0;
 
     // ── Broker 会话 ──
     const sessionHandle = options.broker.beginSession(
@@ -224,9 +217,6 @@ export function readInputLine(
         // 此刻光标在 (promptRow + 1 + panelLines.length, col 0)
         // 上移 panelLines.length + 1 行回到 prompt 行 col 0
         stdout.write(ANSI.moveUp(panelLines.length + 1));
-        lastFrameHeight = 1 + panelLines.length;
-      } else {
-        lastFrameHeight = 1;
       }
 
       // Step 5：无条件 `\r` 回 prompt 行 col 0，再按 cursor 对应的**显示列**
@@ -261,7 +251,6 @@ export function readInputLine(
         stdout.write(finalEcho);
       }
       stdout.write("\r\n");
-      lastFrameHeight = 0;
     };
 
     // ── 触发一次 broker updateInput ──

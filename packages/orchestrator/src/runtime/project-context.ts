@@ -110,17 +110,6 @@ export async function enrichContext(
 }
 
 /**
- * 向后兼容:enrichContextWithSkills 代理到 enrichContext。
- * @deprecated 使用 enrichContext 代替
- */
-export async function enrichContextWithSkills(
-  context: ProjectContext,
-  messages: readonly Message[],
-): Promise<ProjectContext> {
-  return enrichContext(context, messages);
-}
-
-/**
  * 构建反思提示。
  * 仅在上一轮 toolEndCount >= threshold 且本会话未提议过时返回。
  */

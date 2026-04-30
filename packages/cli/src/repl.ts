@@ -57,9 +57,13 @@ import { setupDelivery, type DeliveryStack } from "./setup-delivery.js";
 import { CommandDispatcher } from "./command-dispatcher.js";
 import { readInputLine, type InputLineResult } from "./typeahead-input.js";
 import { resolveFileRefs } from "./resolve-file-refs.js";
-import { type AgentRuntime, createAgentRuntime } from "./run-agent.js";
+import {
+  type AgentRuntime,
+  createAgentRuntime,
+} from "@zhixing/orchestrator/runtime";
 import {
   createRenderer,
+  createRenderSubscribers,
   renderSummary,
   renderError,
   renderWelcome,
@@ -69,6 +73,8 @@ import {
 import {
   handleTrustCommand,
   handleSecurityCommand,
+  renderBlockedMessage,
+  renderUserDeniedMessage,
   TerminalConfirmationRenderer,
 } from "./security/index.js";
 import { createReplInterruptRuntime } from "./interrupt/repl-runtime.js";
@@ -635,11 +641,18 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     return schedulerInstance;
   });
 
+  // renderer 提前创建:作为 createRenderSubscribers 工厂的依赖通过 closure 注入,
+  // 让 retry/compact/interrupt 渲染前能驱动 spinner.stop(),避免动画覆盖事件输出。
+  const renderer = createRenderer();
+
   const agentRuntime = await createAgentRuntime({
     model: options.model,
     provider: options.provider,
     workspace: options.workspace,
     extraTools: [scheduleTool],
+    decorateRunBus: createRenderSubscribers(renderer),
+    onSecurityBlocked: renderBlockedMessage,
+    onUserDenied: renderUserDeniedMessage,
   });
 
   // 构造 runAgentTurn：将 Scheduler 的任务执行桥接到 session.run
@@ -743,7 +756,6 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   // 启动 scheduler（加载任务 + 启动 timer loop）
   await schedulerInstance.start();
 
-  const renderer = createRenderer();
   const cwd = process.cwd();
   const projectId = getProjectId(cwd);
   const scope: ConversationScope = { kind: "project", projectId, projectPath: cwd };
@@ -1212,7 +1224,6 @@ export async function startRepl(options: ReplOptions): Promise<void> {
         turnIndex: state.turnCounter,
         abortSignal: interruptRuntime.controller.signal,
         onYield: (e) => renderer.handleEvent(e),
-        onBeforeEventRender: () => renderer.stop(),
         enrichOptions: {
           lastToolEndCount: state.lastToolEndCount,
           hasProposedSkill: state.hasProposedSkill,

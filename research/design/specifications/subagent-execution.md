@@ -119,7 +119,7 @@
 | `createAgentRuntime` | [cli/run-agent.ts:206](../../../packages/cli/src/run-agent.ts#L206) `(options): Promise<AgentRuntime>` | M1.2 整体搬到 `@zhixing/orchestrator`;入参加 `enableTaskTool?: boolean`(默认 false,主路径 cli 入口传 true) |
 | `AgentRuntime` 接口 | [cli/run-agent.ts:96-128](../../../packages/cli/src/run-agent.ts#L96-L128) | **零字段变更**(provider / llmRoles 等"子 agent 复用"需求由 Task closure 在 `createAgentRuntime` 内 capture 局部变量满足,不通过 AgentRuntime 接口暴露,避免 leaky abstraction) |
 | **cli/runtime 模块下层化**(M1.2 关键前置) | `cli/src/security/{secure-executor,request-builder}.ts` / `cli/src/{compact-accumulator,compaction-llm,project-context,system-prompt}.ts` 当前都被 createAgentRuntime 直接 import | 它们都是**runtime 装配**关注点(非 CLI UI),M1.2 同步搬到 `orchestrator` 内 —— 否则 createAgentRuntime 搬到 orchestrator 后会立刻产生 `orchestrator → cli` 反向依赖编译错(详见 §2.4 / §15 M1.2) |
-| **render 订阅解耦**(M1.2 关键前置) | [cli/run-agent.ts:455-498](../../../packages/cli/src/run-agent.ts#L455-L498) `run()` 内 `eventBus.on("retry:*", ...)` 等 7 处 cli 渲染订阅嵌在 runtime 主流程 | 改为 orchestrator 暴露 `decorateRunBus?: (bus) => () => void` 钩子;cli 入口注入渲染订阅 callback;orchestrator runtime 与 UI 严格分层 |
+| **render 订阅解耦**(M1.2 关键前置) | [cli/run-agent.ts:455-498](../../../packages/cli/src/run-agent.ts#L455-L498) `run()` 内 `eventBus.on("retry:*", ...)` 等 7 处 cli 渲染订阅嵌在 runtime 主流程 | 改为 orchestrator 暴露 `decorateRunBus?: (ctx: { bus }) => () => void` 钩子;cli 入口通过 `createRenderSubscribers(renderer)` 工厂闭包持有 renderer 后注入装饰器;runtime 与 UI 严格分层(UI 概念不进 runtime API) |
 | `RunParams` / `RunResult` | [cli/run-agent.ts:149-198](../../../packages/cli/src/run-agent.ts#L149-L198) + [core/loop/types.ts:266-316](../../../packages/core/src/loop/types.ts#L266-L316) | **零字段变更**(主 turn 不感知 sub) |
 | `Turn` schema | [core/transcript/types.ts:34-43](../../../packages/core/src/transcript/types.ts#L34-L43) | **零字段变更**(子不写独立 Turn) |
 | `TranscriptStore.commitTurn` | [core/transcript/store.ts:155-204](../../../packages/core/src/transcript/store.ts#L155-L204) | **零签名变更** |
@@ -317,6 +317,20 @@ packages/orchestrator/
 
 `createAgentRuntime` 入参加可选钩子:
 ```typescript
+/**
+ * 装饰器入参 —— 仅暴露当前 run 的 EventBus。
+ *
+ * 严格约束:任何 UI 概念(spinner 暂停 / 终端清屏 / 状态消息编辑等)
+ * 都不应作为字段进入此接口。装饰器自身的 UI 依赖(如 renderer 实例、
+ * channel adapter 句柄)应通过工厂层 closure 捕获,在创建时注入,
+ * 保持 runtime API 与展示层零耦合。
+ */
+export interface RunBusContext {
+  bus: IEventBus<AgentEventMap>;
+}
+
+export type DecorateRunBusFn = (ctx: RunBusContext) => () => void;
+
 export interface CreateAgentRuntimeOptions {
   // ... 既有字段
   /**
@@ -324,18 +338,22 @@ export interface CreateAgentRuntimeOptions {
    * runtime.run() 创建 per-run eventBus 后调用,让调用方挂载渲染 / 监听器,
    * 返回 dispose 函数,run() 结束的 finally 调用。
    *
-   * - cli REPL 入口:传入订阅 cli/render.ts 终端渲染器的 callback
-   * - server 入口:不传(channel adapter 自管)或传 RPC bridge 注入
+   * 设计为 ctx 形态而非 (bus) 直传:扩展性更优(未来加 run 元信息字段不破坏
+   * 调用方签名),但严禁向 ctx 添加 UI 概念字段 —— UI 通过 closure 注入。
+   *
+   * - cli REPL 入口:工厂 `createRenderSubscribers(renderer)` 闭包持有 renderer
+   * - server 入口:不传(channel adapter 自管)或工厂闭包持有 RPC bridge
    * - 子 agent 路径(runChildAgent → runSubAgentLoop):不传,子 bus 由 orchestrator 自管
    */
-  decorateRunBus?: (bus: IEventBus<AgentEventMap>) => () => void;
+  decorateRunBus?: DecorateRunBusFn;
 }
 ```
 
 `runtime.run()` 内部:
 ```typescript
 const eventBus = createEventBus<AgentEventMap>({ lineage: "main" });
-const disposeRender = options.decorateRunBus?.(eventBus);
+// ctx 仅含 bus —— UI 依赖由工厂层 closure 提供,runtime 主流程零 UI 概念。
+const disposeRender = options.decorateRunBus?.({ bus: eventBus });
 try {
   return await runContextStorage.run({ eventBus, lineage: "main" }, async () => {
     // ... agent loop
@@ -345,26 +363,32 @@ try {
 }
 ```
 
-cli 入口薄壳(`cli/src/run-agent.ts` 现有文件改造,不再持 createAgentRuntime 主体):
+cli 入口(`cli/src/run-agent.ts` runOnce + `cli/src/repl.ts` startRepl)用工厂模式注入装饰器:
 ```typescript
-import { createAgentRuntime as createBase } from "@zhixing/orchestrator";
-import { setupRenderSubscribers } from "./render.js";
+import { createAgentRuntime } from "@zhixing/orchestrator/runtime";
+import { createRenderer, createRenderSubscribers } from "./render.js";
 
-export async function createAgentRuntime(opts) {
-  return createBase({
-    ...opts,
-    decorateRunBus: (bus) => setupRenderSubscribers(bus, opts.onBeforeEventRender),
-  });
-}
+// REPL 路径:renderer 由工厂 closure 捕获,装饰器内部派生 pauseUI = renderer.stop()
+const renderer = createRenderer();
+const runtime = await createAgentRuntime({
+  ...opts,
+  decorateRunBus: createRenderSubscribers(renderer),
+});
 ```
 
-`cli/src/render.ts` 暴露 `setupRenderSubscribers(bus, pauseUI?)`,内部 `bus.on("retry:*", ...)` / `bus.on("context:budget_check", ...)` / `setupInterruptRendering(bus, pauseUI)`,返 dispose 函数。
+`cli/src/render.ts` 暴露 `createRenderSubscribers(renderer?: Renderer): DecorateRunBusFn` 工厂:
+- renderer 在工厂层通过参数注入,工厂返回的装饰器函数闭包持有它
+- 装饰器内部用 `bus.on("retry:*", ...)` 订阅事件,渲染前调 `renderer.stop()` 暂停 spinner
+- 同时调 `setupInterruptRendering(bus, pauseUI)` 装载中断事件渲染
+- renderer 缺省(serve 模式无 spinner)时 pauseUI 退化为 no-op,事件仍渲染但不驱动 spinner
 
-**M1.2 完成后**:`orchestrator → cli` 零反向依赖;cli/render 是 UI subscribers,通过钩子注入,不嵌入 runtime 主流程。
+**M1.2 完成后**:`orchestrator → cli` 零反向依赖;cli/render 是 UI subscribers,通过工厂注入,不嵌入 runtime 主流程,UI 概念也不出现在 runtime API 中。
 
-**M1.3 — server 直接 import orchestrator**
-- `cli/serve/session-adapter.ts` 把 `import { createAgentRuntime } from "../run-agent"` 换成 `import { createAgentRuntime } from "@zhixing/orchestrator"`
-- 反向依赖断开
+**M1.3 — cli/serve adapter 直接 import orchestrator**
+- `cli/serve/session-adapter.ts` 把 `import { createAgentRuntime } from "../run-agent"` 换成 `import { createAgentRuntime } from "@zhixing/orchestrator/runtime"`
+- 包依赖图断开 cli ← server 反向依赖(`@zhixing/server` 自身不依赖 orchestrator,
+  通过 `RuntimeFactory` 抽象解耦;cli/serve 作为 server 的具体宿主,把
+  orchestrator 与 server 的 RuntimeFactory 在此层组合)
 
 **M1.4 — `EventBus` 扩 hierarchical(meta 侧通道)**
 - `core/events/event-bus.ts` + `core/events/types.ts` 扩:
@@ -461,46 +485,73 @@ export function subAgentProfile(opts: {
 **位置**:`packages/orchestrator/src/runtime/system-prompt.ts`(M1.6 从 [cli/system-prompt.ts](../../../packages/cli/src/system-prompt.ts) 搬来重构)
 
 ```typescript
-export interface BuildSystemPromptOptions {
-  profile: AgentRoleProfile;
-  /** 启用哪些段(主用全集,子用子集) */
-  segments: SystemPromptSegment[];
-  tools: readonly ToolDefinition[];        // 工具描述段输入(已按 capability 过滤过)
+export interface PromptBuildContext {
+  /** profile 决定身份段;不传退化为 mainProfile() */
+  profile?: AgentRoleProfile;
+  /** 启用哪些段;不传退化为 MAIN_AGENT_SEGMENTS */
+  segments?: readonly SystemPromptSegment[];
+  /** 工具描述段输入(已按 subAgentSafe 过滤);驱动 tool-usage / skill-evolution 段 */
+  tools: ToolDefinition[];
+  /** 必填动态字段,出现在缓存分界后的环境段 */
   cwd: string;
-  workspace: string;
-  workspaceSource: WorkspaceSource;
-  globalConfigPath: string;
-  projectContext?: ProjectContext;          // 子可选不传(子也共享)
+  workspace?: string | null;
+  workspaceSource?: string;
+  globalConfigPath?: string;
+  shell?: string;
 }
 
+/**
+ * 段语义:6 个静态段(主) / 4 个静态段(子)+ 1 个动态环境段(总在 CACHE_BOUNDARY 之后)
+ * 段落选择按"代码行为驱动"而非"用户上下文驱动" —— 与历史 cli/system-prompt.ts 等价重构。
+ */
 export type SystemPromptSegment =
-  | "identity"          // renderIdentity(profile)
-  | "scope"             // 用户 scope(e.g. workspace 路径介绍)— 主用,子不用
-  | "project"           // ZHIXING.md 项目上下文 — 主子共用
-  | "tools"             // 工具描述段 — 主子共用(子的 tools 已 capability filter)
-  | "memory"            // 用户记忆段 — 主子共用(子是只读)
-  | "examples";         // few-shot — 主用,子不用(避免子模仿主语气)
+  | "identity"           // renderIdentity(profile) - 身份/Tone/Constraints
+  | "principles"         // 工作原则 - "Read before edit" 等硬约束
+  | "tool-usage"         // 工具使用偏好 - 按 ctx.tools 列表动态生成 + systemPromptHints 透传
+  | "skill-evolution"    // 技能进化引导 - 仅当 tools 含 memory 工具时生效(返回 null 跳过)
+  | "style"              // 输出风格 - 主对话风格(简洁/不用 emoji 等)
+  | "safety";            // 安全边界 - destructive 命令防护
 
-export const MAIN_AGENT_SEGMENTS: SystemPromptSegment[] =
-  ["identity", "scope", "project", "tools", "memory", "examples"];
+/** 主 agent 默认全集,顺序与历史 cli prompt 一致(byte-equal 锚点) */
+export const MAIN_AGENT_SEGMENTS: readonly SystemPromptSegment[] =
+  ["identity", "principles", "tool-usage", "skill-evolution", "style", "safety"];
 
-export const SUB_AGENT_SEGMENTS: SystemPromptSegment[] =
-  ["identity", "project", "tools"];           // 子任务专注:不含 user scope / memory / examples
+/** 子 agent 默认段集 —— 任务专注、prompt cache 友好(同角色子 agent 跨 spawn 静态前缀 byte-identical) */
+export const SUB_AGENT_SEGMENTS: readonly SystemPromptSegment[] =
+  ["identity", "principles", "tool-usage", "safety"];
 
-export function buildSystemPrompt(opts: BuildSystemPromptOptions): string;
+export function buildSystemPrompt(ctx: PromptBuildContext): string;
 ```
 
-**为什么参数化 segments 而非硬编码主 / 子两条路径**:
-- 未来 RoleTask 各角色可自选段组合(researcher 可能要 examples,critic 可能不要)
-- 主 / 子是 segment 集合的两个特例,不是平行实现
+**子 agent 段集合的设计取舍**(每段保留/排除的理由):
 
-**`renderIdentity(profile)`**:
+| 段 | 主 | 子 | 理由 |
+|---|---|---|---|
+| identity | ✓ | ✓ | 角色身份 / Constraints 是 system prompt 起点 |
+| principles | ✓ | ✓ | "Read before edit" 等硬约束子 agent 同样适用 |
+| tool-usage | ✓ | ✓ | 工具描述按子 agent 装配的 childTools 动态生成 |
+| skill-evolution | ✓ | ✗ | Memory 工具 `subAgentSafe:false` 已硬隔离写入,提示反思保存技能对子是无效噪声 |
+| style | ✓ | ✗ | 子输出回写父 tool_result,不直接对话用户;风格指引("be concise"等)会让子误解为对话场景 |
+| safety | ✓ | ✓ | destructive 命令防护是绝对底线,子 agent 不可豁免 |
+
+**子 agent 不继承的内容**(与主 agent 行为差异):
+
+- **项目上下文(ZHIXING.md / enriched skills)** —— 由主 agent 在 Task prompt 中显式提炼
+  相关部分传给子,避免子 system prompt 膨胀。代价是主 agent 需要"挑出相关上下文"的判断力,
+  收益是同角色子 agent 跨 spawn 的**静态前缀 byte-identical**(prompt cache 命中)。
+- **用户记忆段** —— 同上,且 `memory` 工具不在子 agent 工具集里,即使带也用不上。
+
+**为什么参数化 `segments` 而非硬编码主 / 子两条路径**:
+- 未来 RoleTask 各角色可自选段组合(researcher 可能复用 skill-evolution,critic 可能去掉 style)
+- 主 / 子是 segment 集合的两个特例,不是平行实现 —— `buildSystemPrompt` 单一调用点支持所有形态
+
+**`renderIdentity(profile)`** —— 实际实现(身份段头由 `profile.instructions` 自身拥有):
+
 ```typescript
 export function renderIdentity(profile: AgentRoleProfile): string {
   const parts: string[] = [];
-  parts.push(`# Identity\nYou are ${profile.name}.`);
   if (profile.tone) parts.push(`# Tone\n${profile.tone}`);
-  parts.push(profile.instructions);
+  parts.push(profile.instructions);              // profile 自带 markdown 头(主默认无头/子带 "# Your Role")
   if (profile.constraints.length > 0) {
     parts.push(`# Constraints\n` + profile.constraints.map(c => `- ${c}`).join("\n"));
   }
@@ -508,7 +559,14 @@ export function renderIdentity(profile: AgentRoleProfile): string {
 }
 ```
 
-主 agent 路径的输出 = `buildSystemPrompt({ profile: mainProfile(), segments: MAIN_AGENT_SEGMENTS, ... })`,**byte-equal** 现有 `buildSystemPrompt`(M1.6 snapshot test 保证)。
+主 agent 路径的输出 = `buildSystemPrompt({ profile: mainProfile(), segments: MAIN_AGENT_SEGMENTS, ... })`,
+**byte-equal** 历史 `cli/system-prompt.ts` 输出(M1.6 双 snapshot 锚点保证):
+- `主路径静态区(默认 profile + 默认 segments,无 memory 工具)` —— 5 段
+- `主路径静态区(默认 profile + 含 memory 工具)完整 6 段` —— 6 段(skill-evolution 激活)
+
+子 agent 路径的输出 = `buildSystemPrompt({ profile: subAgentProfile({ subAgentId, task }), segments: SUB_AGENT_SEGMENTS, tools: childTools, ... })`,
+**byte-equal** 锁定(M1.6 第三 snapshot):
+- `子 agent SUB_AGENT_SEGMENTS 4 段(无 memory / 无 style / 无 skill-evolution)` —— 4 段
 
 ### 3.4 Hierarchical EventBus
 
@@ -518,8 +576,14 @@ export function renderIdentity(profile: AgentRoleProfile): string {
 // 新增 EventBusOptions 字段
 export interface EventBusOptions {
   // 既有字段...
-  /** 父 bus —— emit 自动冒泡到父(及递归向上),meta 透传 */
-  parent?: IEventBus<EventMap>;
+  /**
+   * 父 bus —— emit 自动冒泡到父(及递归向上),meta 透传。
+   *
+   * 类型为具体类 EventBus 而非 IEventBus 接口:实现层依赖类内部
+   * `emitFromChild` 私有方法转发,接口无法承载该契约;子 spawn 把
+   * ALS 中的父 bus(就是 EventBus 实例)直接透传到这里,类型链一致。
+   */
+  parent?: EventBus<EventMap>;
   /** 当前 bus 的 lineage 路径。e.g. "main", "main/sub-a3f" */
   lineage?: string;
 }
@@ -799,7 +863,9 @@ export async function createAgentRuntime(options: {
 import { AsyncLocalStorage } from "node:async_hooks";
 
 export interface RunContext {
-  eventBus: IEventBus<AgentEventMap>;
+  // 用具体类 EventBus(不是 IEventBus 接口):Task 工具拿这个 bus 透传到
+  // runChildAgent 作 parentBus,createEventBus 的 parent 字段要求 EventBus 类。
+  eventBus: EventBus<AgentEventMap>;
   lineage: string;     // 主 = "main";嵌套层级时 "main/sub-.../sub-..."
 }
 
@@ -941,7 +1007,11 @@ export interface RunChildAgentOptions {
   securityPipeline: SecurityPipeline;
   resolvedWorkspace: ResolvedWorkspace;
   // 父级 spawn 上下文
-  parentBus: IEventBus<AgentEventMap>;
+  // parentBus 必须是具体类 EventBus(不是 IEventBus 接口):createEventBus 的
+  // EventBusOptions.parent 字段在实现层依赖类内部的 emitFromChild 私有方法,
+  // 接口类型无法承载该契约;Task 工具拿 ALS 中的 runCtx.eventBus(就是 EventBus 实例)
+  // 透传到这里,类型链一致。
+  parentBus: EventBus<AgentEventMap>;
   parentLineage: string;
   parentBroker: IConfirmationBroker;
   parentTools: readonly ToolDefinition[];
@@ -1007,6 +1077,8 @@ async function runChildAgent(opts: RunChildAgentOptions): Promise<ChildAgentResu
   const childTools = opts.parentTools.filter(t => t.subAgentSafe === true);
 
   // 3. 装配子 system prompt
+  //    注意:不传 project context / 用户记忆 / 父反思 —— 子 agent 任务专注,
+  //    跨 spawn 的静态前缀 byte-identical 利于 prompt cache(详见 §3.3 / §6.3)
   const systemPrompt = buildSystemPrompt({
     profile,
     segments: SUB_AGENT_SEGMENTS,
@@ -1116,7 +1188,9 @@ export async function runSubAgentLoop(opts: {
   llmRoles: LLMRoles;
   securityPipeline: SecurityPipeline;
   confirmationBroker: IConfirmationBroker;
-  eventBus: IEventBus<AgentEventMap>;
+  // 与 runChildAgent.parentBus / RunContext.eventBus 同型(EventBus 类),
+  // 子 loop 内若再 spawn 孙子 agent 时把此 bus 当作 parentBus 透传,类型链一致。
+  eventBus: EventBus<AgentEventMap>;
   parentSignal: AbortSignal;                 // ← runAgentLoop 内部 fork
   maxTurns: number;
   maxTokens: number;
@@ -1270,6 +1344,18 @@ Begin. Your task is in the system prompt under "Your Role". Depth: 1/1.
 - task 文本只在 system prompt(`profile.instructions`)出现一次。重复在 user message = input token 翻倍 + prompt cache miss(OpenClaw issue #72019 已论证)
 - "Depth: N/M" 让子自知深度,与决定 #3 配合
 - v1 默认 `1/1`;maxDepth > 1 时动态填充
+
+**不含的内容**(子 agent 不继承父上下文):
+
+- ❌ 项目上下文(ZHIXING.md / enriched skills) —— 主 agent 已在 `task` 中显式提炼相关部分
+- ❌ 父对话历史 —— 子 agent 任务专注,不需要主 agent 与用户的来回上下文
+- ❌ 用户身份段(memory:identity) —— 子不直接对话用户,身份信息无意义
+- ❌ 反思 / 技能注入 —— `memory` 工具不在子 agent 工具集(subAgentSafe:false)
+
+设计目的(详见 §3.3 子 agent 段集合的设计取舍):
+1. **prompt cache 友好** —— 同角色子 agent 跨 spawn 静态前缀 byte-identical
+2. **任务专注** —— 子 agent 输出不被无关上下文干扰
+3. **职责分明** —— 主 agent 负责"挑出相关上下文",子 agent 负责"执行任务",不混淆
 
 ### 6.4 主 agent system prompt 增强
 
@@ -1764,11 +1850,12 @@ text 解析是 best-effort(不是协议层 truth),但对人类可读已足够。
 | M1.1 | 建 `packages/orchestrator/` 包骨架 | `pnpm build` 通过;空 export |
 | **M1.2a** | runtime 级模块从 cli 下沉:`secure-executor`(**先删 legacy prompt path** 再搬,详见 §2.4)/ `compact-accumulator` / `compaction-llm` / `project-context` / `system-prompt`(雏形)→ orchestrator;`request-builder` → core/confirmation。cli 现有 import 改路径 | 每模块独立 commit;secure-executor 删 legacy 后无 cli UI 依赖;cli + server + RPC e2e 全绿 |
 | **M1.2b** | `createAgentRuntime` 主体 + `AgentRuntime` 接口从 cli 搬到 orchestrator;cli/run-agent.ts 改 re-export 主流程 | cli + server e2e 全绿;包依赖图 `orchestrator → cli` 仍有(render 订阅尚未解耦,M1.2c 处理) |
-| **M1.2c** | `decorateRunBus?: (bus) => () => void` 钩子加入 `CreateAgentRuntimeOptions`;`runtime.run()` 内调用钩子 + finally dispose;cli 入口薄壳注入 `setupRenderSubscribers`(从 cli/render.ts 提供);run-agent.ts run() 内的 7 处直接 `eventBus.on` 订阅全部移出 | 包依赖图 acyclic(`orchestrator → cli` 反向依赖归零) |
-| M1.3 | server 改 `import "@zhixing/orchestrator"` 替代 `import "../run-agent"`,断 `cli ← server` 反向依赖 | 包依赖图严格 acyclic |
+| **M1.2c** | `decorateRunBus?: (ctx: RunBusContext) => () => void` 钩子加入 `CreateAgentRuntimeOptions`(`RunBusContext = { bus }`,UI 概念严禁入字段);`runtime.run()` 内调用钩子 + finally dispose;cli 入口通过 `createRenderSubscribers(renderer)` 工厂闭包持有 renderer 后注入;run-agent.ts run() 内的 7 处直接 `eventBus.on` 订阅全部移出 | 包依赖图 acyclic(`orchestrator → cli` 反向依赖归零) |
+| M1.3 | `cli/serve/session-adapter.ts` 改 `import "@zhixing/orchestrator/runtime"` 替代 `import "../run-agent"`,断 `cli ← server` 反向依赖(`@zhixing/server` 自身仅依赖 `@zhixing/core`,通过 `RuntimeFactory` 抽象解耦) | 包依赖图严格 acyclic |
 | M1.4 | `EventBus` 扩 hierarchical(`parent` + `lineage`)+ listener `meta` 第二参 | 既有 callsite 零改动(snapshot test);INV-S5 校验 |
 | M1.5 | `ToolDefinition.subAgentSafe` 字段 + 8 个 builtin 声明 | 过滤函数测试 |
-| M1.6 | `AgentRoleProfile` + `mainProfile()` + `subAgentProfile()` + `renderIdentity` + `buildSystemPrompt` 多段重构(基于 M1.2a 的 system-prompt 雏形);抽出 `trackMessages` helper 到 orchestrator/runtime/track-messages.ts | 主 agent system prompt byte-equal 旧实现(snapshot test) |
+| M1.6 | `AgentRoleProfile` + `mainProfile()` + `subAgentProfile()` + `renderIdentity` + `buildSystemPrompt` 多段重构(基于 M1.2a 的 system-prompt 雏形);抽出 `trackMessages` helper 到 orchestrator/runtime/track-messages.ts(internal,见 M1.7) | 主 agent system prompt byte-equal 旧实现(snapshot test) |
+| **M1.7** | API 治理收尾:`runtime/index.ts` barrel 仅暴露真公共 API(`createAgentRuntime` + 7 类型 / `buildSystemPrompt` 系列 / `EnrichOptions`),8 个 internal helper(`subscribeCompactAccumulator` / `trackMessages` / `createCompactionFlush` / `loadProjectContext` / `enrichContext` / `injectContext` / `REFLECTION_THRESHOLD` / `ProjectContext`)从 barrel 移除;同包测试用 `import "../X.js"` 直访 sub-module。死代码清退:`enrichContextWithSkills` 等 deprecated stub 一并移除,`@deprecated` 不留长期未清退残留。**生命周期契约测试**入位:`create-agent-runtime.test.ts` 覆盖 lineage="main" / decorateRunBus 1:1 / safeDispose 故障隔离 / per-run 隔离。**`safeDispose(label, fn)` 模块级辅助**抽出,`run()` 与 `forceCompact()` 共用同一防御契约 | 新测试全绿(10+ 用例);顶级 barrel d.ts 表面缩减(衡量公共 API 收紧) |
 
 **M1 完成后**:零业务功能变化,所有现有 e2e 全绿。
 
@@ -1896,13 +1983,14 @@ text 解析是 best-effort(不是协议层 truth),但对人类可读已足够。
 | `project-context` 下沉 | [cli/src/project-context.ts](../../../packages/cli/src/project-context.ts) → `packages/orchestrator/src/runtime/project-context.ts` | M1.2a |
 | `system-prompt` 下沉(雏形) | [cli/src/system-prompt.ts](../../../packages/cli/src/system-prompt.ts) → `packages/orchestrator/src/runtime/system-prompt.ts` | M1.2a |
 | `createAgentRuntime` 主体搬家 + `AgentRuntime` 接口 | [packages/cli/src/run-agent.ts:206](../../../packages/cli/src/run-agent.ts#L206) → `packages/orchestrator/src/runtime/create-agent-runtime.ts` | M1.2b |
-| `decorateRunBus?: (bus) => () => void` 钩子 + cli `setupRenderSubscribers` 注入 | `packages/orchestrator/src/runtime/create-agent-runtime.ts` 入参;cli 入口薄壳;`cli/src/render.ts` 暴露 `setupRenderSubscribers` | M1.2c |
+| `decorateRunBus?: (ctx: RunBusContext) => () => void` 钩子 + cli `createRenderSubscribers(renderer)` 工厂注入 | `packages/orchestrator/src/runtime/create-agent-runtime.ts` 入参(`RunBusContext = { bus }`,UI 字段严禁加入);`cli/src/render.ts` 暴露 `createRenderSubscribers(renderer?)` 高阶工厂;cli REPL / runOnce / serve 三处入口分别用工厂闭包持有自己的 renderer(serve 缺省 = no-op pauseUI) | M1.2c |
 | `EventBus` 扩 hierarchical(`parent` + `lineage`)+ listener `meta` 第二参 | [packages/core/src/events/event-bus.ts](../../../packages/core/src/events/event-bus.ts) + types.ts | M1.4 |
 | `ToolDefinition.subAgentSafe` 字段 | [packages/core/src/types/tools.ts:246-342](../../../packages/core/src/types/tools.ts#L246-L342) | M1.5 |
 | 8 个 builtin 工具 `subAgentSafe` + `isParallelSafe` 声明 | [packages/tools-builtin/src/](../../../packages/tools-builtin/src/) | M1.5 |
 | `AgentRoleProfile` + `mainProfile/subAgentProfile` + `renderIdentity` | `packages/orchestrator/src/profile/` | M1.6 |
 | `buildSystemPrompt(opts)` 多段重构(基于 M1.2a 雏形) | `packages/orchestrator/src/runtime/system-prompt.ts` | M1.6 |
-| `trackMessages` helper 抽出复用 | `packages/orchestrator/src/runtime/track-messages.ts`(从 [cli/run-agent.ts:638](../../../packages/cli/src/run-agent.ts#L638) 抽) | M1.6 |
+| `trackMessages` helper 抽出复用(**internal**,不进 barrel) | `packages/orchestrator/src/runtime/track-messages.ts`(从 [cli/run-agent.ts:638](../../../packages/cli/src/run-agent.ts#L638) 抽);M2 子 agent 实现需要时直接 `import "../runtime/track-messages.js"` | M1.6 |
+| `runtime/index.ts` 公共 API 收紧 + `safeDispose(label, fn)` 模块辅助 + `create-agent-runtime.test.ts` 生命周期契约测试 | `packages/orchestrator/src/runtime/index.ts`(barrel 9 项 internal 收紧) + `packages/orchestrator/src/runtime/create-agent-runtime.ts`(safeDispose) + `packages/orchestrator/src/runtime/__tests__/create-agent-runtime.test.ts`(新建) | M1.7 |
 | `runChildAgent` + `runSubAgentLoop` + `result-classifier` + `abort-format` | `packages/orchestrator/src/subagent/` | M2.1 |
 | `ConfirmationBrokerOptions.{ parentBrokerId, sourceAgentId }` | [packages/core/src/confirmation/types.ts](../../../packages/core/src/confirmation/types.ts) | M2.2 |
 | `resolveSubAgentResolver(policy)` | `packages/orchestrator/src/confirmation/child-broker.ts` | M2.2 |
