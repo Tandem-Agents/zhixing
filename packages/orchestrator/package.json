@@ -20,6 +20,10 @@
     "./profile": {
       "types": "./dist/profile/index.d.ts",
       "import": "./dist/profile/index.js"
+    },
+    "./subagent": {
+      "types": "./dist/subagent/index.d.ts",
+      "import": "./dist/subagent/index.js"
     }
   },
   "files": [

@@ -237,9 +237,9 @@ packages/orchestrator/
 ├── src/
 │   ├── index.ts                        // public API barrel
 │   ├── runtime/
-│   │   ├── create-agent-runtime.ts     // (M1.2b) 从 cli/run-agent.ts 搬主体;M2.3 加 enableTaskTool 选项 + ALS 包裹 + decorateRunBus 钩子
+│   │   ├── create-agent-runtime.ts     // (M1.2b) 从 cli/run-agent.ts 搬主体;M2.3 加 enableTaskTool 选项 + ALS 主路径包裹 + Task closure 注入
 │   │   ├── system-prompt.ts            // (M1.6) buildSystemPrompt 多段可参数化(从 cli/system-prompt.ts 搬来重构)
-│   │   ├── run-context.ts              // (M2.3) runContextStorage = AsyncLocalStorage<RunContext>
+│   │   ├── run-context.ts              // (M2.1) runContextStorage = AsyncLocalStorage<RunContext>;M2.3 主路径 run() 入口包裹
 │   │   ├── track-messages.ts           // (M1.6) 从 cli/run-agent.ts:638 抽出,主 / 子共用 yields → messages 累积
 │   │   ├── compact-accumulator.ts      // (M1.2a) 从 cli/compact-accumulator.ts 搬来 — runtime 数据收集
 │   │   ├── compaction-llm.ts           // (M1.2a) 从 cli/compaction-llm.ts 搬来 — runtime 用 flush callLLM 构造
@@ -1863,17 +1863,31 @@ text 解析是 best-effort(不是协议层 truth),但对人类可读已足够。
 
 **目标**:Task 工具上线,子 agent 同步并行委托可用,产品兑现"3 并发"。
 
-#### M2.1 — `runChildAgent` 骨架(无 Task 工具接入)
+#### M2.1 — `runChildAgent` 骨架(无 Task 工具接入) ✅ 已完成
 
-- `packages/orchestrator/src/subagent/factory.ts` 实现 `runChildAgent`
-- `subAgentProfile()` 默认值落地(4 句话原文敲定)
-- `deriveChildLineage` / `extractFinalAssistantText` / `extractPartialText` / `classifyResult` / `formatAbortReasonForLLM` 工具函数
-- `runSubAgentLoop` 薄封装(直接调 core agent-loop,不走 createAgentRuntime 重型封装)
-- 单测:happy / failure / abort 路径 + cleanup discipline
+- ✅ `packages/orchestrator/src/subagent/factory.ts` 实现 `runChildAgent`(顶层 try/catch 兜底 + 阶段化 try/catch + cleanup discipline)
+- ✅ `subAgentProfile()` 默认值早在 M1 阶段已落地
+- ✅ 工具函数全部到位:
+  - `packages/orchestrator/src/subagent/lineage.ts` — `deriveChildLineage`
+  - `packages/orchestrator/src/subagent/abort-format.ts` — `formatAbortReasonForLLM`
+  - `packages/orchestrator/src/subagent/result-classifier.ts` — `extractFinalAssistantText` / `extractPartialText` / `classifyResult`
+  - `packages/orchestrator/src/subagent/budget.ts` — `SubAgentBudget` 接口 + 默认常量 + `resolveSubAgentBudget`
+- ✅ `packages/orchestrator/src/subagent/loop-runner.ts` 薄封装 `runSubAgentLoop`(直接调 `drainAgentLoop`,不走 `createAgentRuntime` 重型封装),处理 wall-clock 超时与子 broker 装配
+- ✅ `packages/orchestrator/src/runtime/run-context.ts` 提前落地 `runContextStorage = new AsyncLocalStorage<RunContext>()`(让 factory 代码与 spec 完美对齐,M2.3 加 Task closure 时无需改动 factory)
+- ✅ `packages/orchestrator/src/subagent/index.ts` 公共 API barrel + 顶级 `index.ts` re-export + `package.json` `./subagent` sub-path + `tsup.config.ts` entry
+- ✅ 单测覆盖:
+  - `subagent/__tests__/lineage.test.ts`(派生路径 + 嵌套 + 短 ID)
+  - `subagent/__tests__/abort-format.test.ts`(全 `AbortReason.kind` 变体)
+  - `subagent/__tests__/result-classifier.test.ts`(空消息 / 多 assistant / 全状态分类矩阵)
+  - `subagent/__tests__/budget.test.ts`(默认值 sentinel + 部分覆盖 + 显式 0)
+  - `subagent/__tests__/loop-runner.test.ts`(happy / max_turns / provider error / parent abort / wall-clock 超时 fake timers / cleanup 监控 setTimeout/clearTimeout)
+  - `subagent/__tests__/factory.test.ts`(三态 + lineage 派生 / `subAgentSafe` 过滤 / cleanup discipline / INV-S6 永不抛兜底验证)
 
-**验证**:`runChildAgent` 单测 100% 覆盖三态,cleanup 在 finally 总是执行
+**验证**:`subagent` 模块共 47 个用例全绿;orchestrator 全套 149 个用例全绿;cli + server 跨包 typecheck 全绿;build 产出 `dist/subagent/index.d.ts` 类型声明完整
 
-**独立性**:M2.1 输出是 orchestrator 内部 API,无 LLM-facing 暴露
+**独立性**:M2.1 输出是 orchestrator 内部 API,无 LLM-facing 暴露;Task 工具(M2.3)接入后即变 LLM-facing
+
+**与 §6.1 理想态的差异(YAGNI 渐进上线,避免接口债务)**:M2.1 交付的 `RunChildAgentOptions` **不含** §6.1 列出的 `parentBroker` 与 `description` 两个字段(本阶段无任何消费方);它们分别由 M2.2 / M2.3 显式破坏性变更引入,调用方升级时通过 TypeScript 类型错误自动发现。同样,§6.1 中的 `runSubAgentLoop` 在 M2.1 不作为 `@zhixing/orchestrator/subagent` 公共 API 导出(仅同包 internal 消费);未来如有 background agent 等场景需要细粒度控制,在 `subagent/index.ts` 显式追加导出 + 补完使用文档
 
 #### M2.2 — Confirmation 子 broker 元信息 + audit
 
@@ -1888,8 +1902,8 @@ text 解析是 best-effort(不是协议层 truth),但对人类可读已足够。
 
 #### M2.3 — Task 工具实现
 
-- `packages/orchestrator/src/runtime/run-context.ts` 落地:`runContextStorage = new AsyncLocalStorage<RunContext>()`(M2.3 新增)
-- `runtime.run()` 入口创建 `eventBus = createEventBus({ lineage: "main" })`(显式 lineage,INV-S5 兼容子嵌套);用 `runContextStorage.run({ eventBus, lineage: "main" }, async () => ...)` 包裹整个 agent loop 主体
+- `packages/orchestrator/src/runtime/run-context.ts`(M2.1 已落地;M2.3 加主路径消费)
+- `runtime.run()` 入口创建 `eventBus = createEventBus({ lineage: "main" })`(显式 lineage,INV-S5 兼容子嵌套,**M1 已实现**);M2.3 在此处用 `runContextStorage.run({ bus: eventBus, lineage: "main" }, async () => ...)` 包裹整个 agent loop 主体,让 Task closure 在 `call()` 时能取到 per-run bus/lineage
 - `packages/orchestrator/src/tools/task.ts` 落地(`createTaskTool(env)` 工厂);env 持 createAgentRuntime 内部局部变量 capture(`provider / model / llmRoles / securityPipeline / resolvedWorkspace / parentBroker / parentTools`),避免 AgentRuntime forward reference;per-run `eventBus / lineage` 通过 `runContextStorage.getStore()` 取
 - `createAgentRuntime` 加 `enableTaskTool?: boolean` 选项,主路径 cli/server 入口传 true,sub 路径不传(子工具集自然不含 Task)
 - `formatChildResultAsToolResult` 三态文本协议(snapshot test)
@@ -1991,12 +2005,12 @@ text 解析是 best-effort(不是协议层 truth),但对人类可读已足够。
 | `buildSystemPrompt(opts)` 多段重构(基于 M1.2a 雏形) | `packages/orchestrator/src/runtime/system-prompt.ts` | M1.6 |
 | `trackMessages` helper 抽出复用(**internal**,不进 barrel) | `packages/orchestrator/src/runtime/track-messages.ts`(从 [cli/run-agent.ts:638](../../../packages/cli/src/run-agent.ts#L638) 抽);M2 子 agent 实现需要时直接 `import "../runtime/track-messages.js"` | M1.6 |
 | `runtime/index.ts` 公共 API 收紧 + `safeDispose(label, fn)` 模块辅助 + `create-agent-runtime.test.ts` 生命周期契约测试 | `packages/orchestrator/src/runtime/index.ts`(barrel 9 项 internal 收紧) + `packages/orchestrator/src/runtime/create-agent-runtime.ts`(safeDispose) + `packages/orchestrator/src/runtime/__tests__/create-agent-runtime.test.ts`(新建) | M1.7 |
-| `runChildAgent` + `runSubAgentLoop` + `result-classifier` + `abort-format` | `packages/orchestrator/src/subagent/` | M2.1 |
+| `runChildAgent` + `runSubAgentLoop`(internal) + `lineage` + `abort-format` + `result-classifier`(internal) + `budget` + `subagent/index.ts` barrel(仅导出 `runChildAgent` / `deriveChildLineage` / `formatAbortReasonForLLM` / `SubAgentBudget` 等真公共契约;`runSubAgentLoop` / `result-classifier` / `resolveSubAgentBudget` 同包 internal) + 顶级 barrel + `package.json ./subagent` sub-path + `factory.test.ts` 三态/cleanup/INV 集成测试(共 47 个 subagent 用例) | `packages/orchestrator/src/subagent/` + `packages/orchestrator/src/index.ts` + `packages/orchestrator/package.json` + `packages/orchestrator/tsup.config.ts` | M2.1 |
+| `runContextStorage = AsyncLocalStorage<RunContext>` per-run/per-spawn 上下文(M2.1 已落地,M2.3 主路径消费) | `packages/orchestrator/src/runtime/run-context.ts` | M2.1 |
 | `ConfirmationBrokerOptions.{ parentBrokerId, sourceAgentId }` | [packages/core/src/confirmation/types.ts](../../../packages/core/src/confirmation/types.ts) | M2.2 |
 | `resolveSubAgentResolver(policy)` | `packages/orchestrator/src/confirmation/child-broker.ts` | M2.2 |
 | `createTaskTool(env)` Task 工具工厂 | `packages/orchestrator/src/tools/task.ts`(新建) | M2.3 |
-| `runContextStorage = AsyncLocalStorage<RunContext>` per-run/per-spawn 上下文 | `packages/orchestrator/src/runtime/run-context.ts`(新建) | M2.3 |
-| `runtime.run()` 入口包裹 `runContextStorage.run({ eventBus, lineage: "main" }, ...)` | `packages/orchestrator/src/runtime/create-agent-runtime.ts` | M2.3 |
+| `runtime.run()` 入口包裹 `runContextStorage.run({ bus: eventBus, lineage: "main" }, ...)` | `packages/orchestrator/src/runtime/create-agent-runtime.ts` | M2.3 |
 | 主 profile `instructions` + Sub-Agent Delegation 段 | `packages/orchestrator/src/profile/default-profiles.ts` | M2.3 |
 | CLI 状态条 lineage filter(meta 第二参) | [packages/cli/src/render.ts](../../../packages/cli/src/render.ts) | M2.4 |
 | tool-executor 并发改造(`isParallelSafe` + `Promise.allSettled`) | [packages/core/src/loop/tool-executor.ts](../../../packages/core/src/loop/tool-executor.ts) | M2.5 |

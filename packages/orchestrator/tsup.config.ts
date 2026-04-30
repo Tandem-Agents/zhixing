@@ -6,6 +6,7 @@ export default defineConfig({
     "src/runtime/index.ts",
     "src/security/index.ts",
     "src/profile/index.ts",
+    "src/subagent/index.ts",
   ],
   format: ["esm"],
   dts: true,

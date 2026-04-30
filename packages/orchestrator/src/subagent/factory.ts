@@ -1,0 +1,369 @@
+/**
+ * runChildAgent —— 子 agent dispatch 主入口
+ *
+ * 单一不变量:无论装配 / 运行 / 分类哪一阶段出问题,本函数**绝不抛异常**,
+ * 始终返回 ChildAgentResult 三态之一(completed / failed / aborted)。
+ * Task 工具据此把结果转成 ToolResult,主 LLM 永远看到结构化 tool_result
+ * 而非 unhandled exception。
+ *
+ * 阶段化执行(每阶段独立 try/catch):
+ *   1. 装配子原语:lineage 派生 / EventBus 派生 / Broker 创建 /
+ *      tools 过滤 / system prompt 装配
+ *   2. 跑子 loop:用 ALS 注入 child run context,再调 runSubAgentLoop
+ *   3. cleanup discipline:无论 happy / failed,finally 块清理 bus listener
+ *      与 broker pending(防 listener 跨 dispatch 累积 / pending 永远悬挂)
+ *   4. 折叠 ChildAgentResult:把 SubAgentLoopResult / caughtError 用
+ *      classifyResult / extractFinalAssistantText 折成三态
+ *
+ * 顶层兜底 try/catch:任何阶段意外漏掉的 throw,最外层捕获转 failed —
+ * defense-in-depth,理论上不触发,但保证 INV 在编译期可被静态推理。
+ */
+
+import { randomUUID } from "node:crypto";
+import {
+  ConfirmationBroker,
+  createEventBus,
+  emptyUsage,
+  type AbortReason,
+  type AgentEventMap,
+  type EventBus,
+  type LLMProvider,
+  type LLMRoles,
+  type Message,
+  type SecurityPipeline,
+  type TokenUsage,
+  type ToolDefinition,
+} from "@zhixing/core";
+import { buildSystemPrompt, SUB_AGENT_SEGMENTS } from "../runtime/system-prompt.js";
+import { runContextStorage } from "../runtime/run-context.js";
+import { subAgentProfile } from "../profile/default-profiles.js";
+import { deriveChildLineage } from "./lineage.js";
+import { resolveSubAgentBudget, type SubAgentBudget } from "./budget.js";
+import {
+  classifyResult,
+  extractFinalAssistantText,
+  extractPartialText,
+} from "./result-classifier.js";
+import { runSubAgentLoop, type SubAgentLoopResult } from "./loop-runner.js";
+
+// ─── 公共类型 ───
+
+export interface RunChildAgentOptions {
+  /** 共享父 LLMProvider 实例(连接池 / 限速 / 缓存共用,避免每次重建) */
+  provider: LLMProvider;
+  /** 共享父 model id —— 子复用父模型,不支持单独 override */
+  model: string;
+  /** 共享父 LLMRoles —— 工具调 secondary 角色时透传 */
+  llmRoles: LLMRoles;
+  /** 共享父 SecurityPipeline 实例 —— 权限规则 / boundary registry 跨 agent 共用 */
+  securityPipeline: SecurityPipeline;
+  /** 工作区路径(透传 buildSystemPrompt;null 表示无工作区) */
+  workspace: string | null;
+  /** 工作区来源标识(cli / directory-config / global-config / cwd-fallback) */
+  workspaceSource?: string;
+  /** 全局配置文件路径(可选,用于 environment 段渲染) */
+  globalConfigPath?: string;
+  /**
+   * 父级 EventBus —— 子 bus 通过 createEventBus({ parent, lineage }) 派生,
+   * 父订阅者按 meta.lineage 过滤可看到全部子事件。EventBus 类(不是
+   * IEventBus 接口):createEventBus 的 parent 字段在实现层依赖类内部
+   * emitFromChild 私有通道,接口类型无法承载该契约。
+   */
+  parentBus: EventBus<AgentEventMap>;
+  /** 父级 lineage 路径(主 root 为 "main"),子 lineage 在此基础上 derive */
+  parentLineage: string;
+  /** 父级工具集 —— 子工具按 subAgentSafe 过滤后从此派生 */
+  parentTools: readonly ToolDefinition[];
+  /**
+   * 父级 abort signal —— 父打断时 runAgentLoop 内部 createInterruptController
+   * 派生 child controller 自动注入 parent-abort kind,无需本函数手工 fork
+   */
+  parentSignal: AbortSignal;
+  /** 任务文本(进 system prompt 的 "Your Role" 段,不进 user message) */
+  task: string;
+  /** 资源预算(可选,缺省走 resolveSubAgentBudget 默认值) */
+  budget?: SubAgentBudget;
+}
+
+export interface ChildAgentResult {
+  status: "completed" | "failed" | "aborted";
+  subAgentId: string;
+  /** 子 agent 最后 assistant 文本(空字符串若没有) */
+  finalAssistantText: string;
+  /** 子 LLM 累计用量 */
+  usage: TokenUsage;
+  /** 子工具调用次数 */
+  toolUses: number;
+  /** 子 dispatch 总耗时(ms) */
+  durationMs: number;
+  /** status="aborted" 才有 */
+  abortReason?: AbortReason;
+  /** status="failed" 才有 */
+  error?: { message: string; type: string };
+  /** failed/aborted 时尝试抓取 partial 输出(主 LLM 仍可据此判断) */
+  partial?: string;
+}
+
+// ─── 实现 ───
+
+export async function runChildAgent(
+  opts: RunChildAgentOptions,
+): Promise<ChildAgentResult> {
+  const subAgentId = randomUUID();
+  const startTime = Date.now();
+
+  // 顶层兜底 —— 任何意外 throw 转 failed,保证函数永不抛
+  try {
+    return await runChildAgentInner(opts, subAgentId, startTime);
+  } catch (unexpectedError) {
+    return buildFailedResult({
+      subAgentId,
+      startTime,
+      error: unexpectedError,
+      errorType: "unexpected_error",
+    });
+  }
+}
+
+// ─── 内部实现:阶段化,每阶段失败均落入对应分支 ───
+
+async function runChildAgentInner(
+  opts: RunChildAgentOptions,
+  subAgentId: string,
+  startTime: number,
+): Promise<ChildAgentResult> {
+  const budget = resolveSubAgentBudget(opts.budget);
+
+  // 阶段 1:装配子原语 —— 失败 → 直接 failed (childBus / childBroker 未完整,无 cleanup)
+  let childBus: EventBus<AgentEventMap>;
+  let childBroker: ConfirmationBroker;
+  let childLineage: string;
+  let childTools: ToolDefinition[];
+  let systemPrompt: string;
+  let initialMessages: Message[];
+
+  try {
+    childLineage = deriveChildLineage(opts.parentLineage, subAgentId);
+    childBus = createEventBus<AgentEventMap>({
+      parent: opts.parentBus,
+      lineage: childLineage,
+    });
+    // 子 broker 默认 fail-deny resolver(broker 内部 default behavior);
+    // M2.1 不接 parentBrokerId / sourceAgentId / nonInteractiveResolver 等
+    // 元信息字段(归 M2.2);共享父 PermissionStore 走 SecurityPipeline 而非 broker,
+    // 父 alwaysAllow 规则自动命中,根本不进 broker
+    childBroker = new ConfirmationBroker();
+
+    // 子工具集:fail-closed 过滤 —— 仅 subAgentSafe===true 的工具进入子集
+    childTools = opts.parentTools.filter((t) => t.subAgentSafe === true);
+
+    const profile = subAgentProfile({ subAgentId, task: opts.task });
+
+    // 子 system prompt:注意不传 project context / 用户记忆 / 父反思 —— 子任务专注,
+    // 跨 spawn 的静态前缀 byte-identical 利于 prompt cache
+    systemPrompt = buildSystemPrompt({
+      profile,
+      segments: SUB_AGENT_SEGMENTS,
+      tools: childTools,
+      cwd: process.cwd(),
+      workspace: opts.workspace,
+      workspaceSource: opts.workspaceSource,
+      globalConfigPath: opts.globalConfigPath,
+    });
+
+    // 极短初始 user message —— 任务全文已在 system prompt 的 "Your Role" 段;
+    // 主 LLM "Begin." 充当唤醒信号,告知子 loop 可以开始
+    initialMessages = [
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: 'Begin. Your task is in the system prompt under "Your Role".',
+          },
+        ],
+      },
+    ];
+  } catch (assemblyError) {
+    return buildFailedResult({
+      subAgentId,
+      startTime,
+      error: assemblyError,
+      errorType: "assembly_error",
+    });
+  }
+
+  // 阶段 2 + 3:跑 loop + cleanup discipline
+  let runResult: SubAgentLoopResult | null = null;
+  let caughtError: unknown = null;
+
+  try {
+    runResult = await runContextStorage.run(
+      { bus: childBus, lineage: childLineage },
+      () =>
+        runSubAgentLoop({
+          systemPrompt,
+          messages: initialMessages,
+          tools: childTools,
+          provider: opts.provider,
+          model: opts.model,
+          llmRoles: opts.llmRoles,
+          securityPipeline: opts.securityPipeline,
+          confirmationBroker: childBroker,
+          eventBus: childBus,
+          parentSignal: opts.parentSignal,
+          maxTurns: budget.maxTurns,
+          watchdog: { idleTimeoutMs: budget.llmIdleTimeoutMs, warnThresholdRatio: 0.5 },
+          wallClockTimeoutMs: budget.wallClockTimeoutMs,
+        }),
+    );
+  } catch (loopError) {
+    // 仅 runSubAgentLoop 基础设施崩才到这里(LLM/tool 异常已被 loop 内部 catch 转 reason="error")
+    caughtError = loopError;
+  } finally {
+    // cleanup discipline —— 永远执行,与 happy/failed/abort 路径无关:
+    //   - childBus.removeAllListeners 防止子 bus 的 listener 跨 dispatch 累积
+    //   - childBroker.cancelAll 把任何还在排队的 confirmation request 干净地拒绝,
+    //     避免主 agent 拿到 partial result 后子里仍有悬挂 promise
+    safeCleanup(childBus, childBroker);
+  }
+
+  // 阶段 4:折叠 ChildAgentResult
+  return foldResult({
+    subAgentId,
+    startTime,
+    runResult,
+    caughtError,
+  });
+}
+
+// ─── 折叠辅助 ───
+
+interface FoldArgs {
+  subAgentId: string;
+  startTime: number;
+  runResult: SubAgentLoopResult | null;
+  caughtError: unknown;
+}
+
+function foldResult(args: FoldArgs): ChildAgentResult {
+  const { subAgentId, startTime, runResult, caughtError } = args;
+  const kind = classifyResult(runResult, caughtError);
+  const messages = runResult?.messages ?? [];
+  const finalAssistantText = extractFinalAssistantText(messages);
+  const durationMs = Date.now() - startTime;
+  const usage = runResult?.usage ?? emptyUsage();
+  const toolUses = runResult?.toolUseCount ?? 0;
+
+  if (kind === "completed") {
+    return {
+      status: "completed",
+      subAgentId,
+      finalAssistantText,
+      usage,
+      toolUses,
+      durationMs,
+    };
+  }
+
+  // failed / aborted 共享 partial 抓取 —— 优先取最后 assistant 文本,
+  // 没有则拼所有历史 assistant text 块,仍空则保留 undefined
+  const partial = finalAssistantText || extractPartialText(messages) || undefined;
+
+  if (kind === "aborted") {
+    return {
+      status: "aborted",
+      subAgentId,
+      finalAssistantText,
+      usage,
+      toolUses,
+      durationMs,
+      abortReason: runResult?.abortReason,
+      partial,
+    };
+  }
+
+  // failed —— error 字段优先级:caughtError > loopResult.reason 衍生
+  return {
+    status: "failed",
+    subAgentId,
+    finalAssistantText,
+    usage,
+    toolUses,
+    durationMs,
+    error: deriveErrorMeta(runResult, caughtError),
+    partial,
+  };
+}
+
+function deriveErrorMeta(
+  runResult: SubAgentLoopResult | null,
+  caughtError: unknown,
+): { message: string; type: string } {
+  if (caughtError !== null && caughtError !== undefined) {
+    return {
+      message: errorMessage(caughtError),
+      type: "loop_error",
+    };
+  }
+  if (runResult?.reason === "max_turns") {
+    return {
+      message: "sub-agent reached max turns budget",
+      type: "max_turns_exceeded",
+    };
+  }
+  // reason="error" 兜底 —— runSubAgentLoop 透传 AgentResult.error 在 result 上未直接暴露,
+  // 给主 LLM 一个稳定可读的占位说明;详细 error 走 EventBus 历史/日志
+  return {
+    message: "sub-agent loop terminated with error",
+    type: "agent_error",
+  };
+}
+
+interface FailedArgs {
+  subAgentId: string;
+  startTime: number;
+  error: unknown;
+  errorType: string;
+}
+
+function buildFailedResult(args: FailedArgs): ChildAgentResult {
+  return {
+    status: "failed",
+    subAgentId: args.subAgentId,
+    finalAssistantText: "",
+    usage: emptyUsage(),
+    toolUses: 0,
+    durationMs: Date.now() - args.startTime,
+    error: { message: errorMessage(args.error), type: args.errorType },
+  };
+}
+
+function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "string") return err;
+  return String(err);
+}
+
+// ─── cleanup discipline ───
+
+/**
+ * cleanup 必须保证两个 dispose 都尝试执行 —— 任一抛错不能阻断对方,
+ * 否则部分清理 + 部分残留比"完全不清"更难诊断。日志记录失败但不再 throw,
+ * 与 runtime safeDispose 防御契约对齐。
+ */
+function safeCleanup(
+  bus: EventBus<AgentEventMap>,
+  broker: ConfirmationBroker,
+): void {
+  try {
+    bus.removeAllListeners();
+  } catch (error) {
+    console.error("[orchestrator.runChildAgent.bus.cleanup] failed:", error);
+  }
+  try {
+    broker.cancelAll("session-end");
+  } catch (error) {
+    console.error("[orchestrator.runChildAgent.broker.cleanup] failed:", error);
+  }
+}
