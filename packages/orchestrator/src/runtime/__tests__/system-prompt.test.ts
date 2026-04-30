@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import {
   buildSystemPrompt,
   CACHE_BOUNDARY,
+  MAIN_AGENT_SEGMENTS,
+  SUB_AGENT_DELEGATION_TEXT,
   SUB_AGENT_SEGMENTS,
 } from "../system-prompt.js";
 import { subAgentProfile } from "../../profile/default-profiles.js";
@@ -360,6 +362,116 @@ describe("buildSystemPrompt", () => {
       - Use \`write\` to create files or overwrite entire content
       - Use \`bash\` for system commands, package management, git operations, and tasks not covered by other tools
       - If a tool result ends with \`[Commitment already sent to user. Do not restate.]\`, the user has already seen the tool's confirmation directly via a commit message. Do NOT restate what the tool just did (no "已创建..." / "I've scheduled..."). If no additional insight is needed, end the turn with a brief acknowledgment or no text.
+
+      ## Safety
+      - Never execute destructive commands (rm -rf /, DROP DATABASE, etc.) without explicit user request
+      - Do not access files outside the workspace unless the user's intent is clear
+      - Refuse requests that could compromise system security"
+    `);
+  });
+});
+
+// ─── Segment: Sub-Agent Delegation 条件性渲染契约 ───
+
+describe("buildSystemPrompt · sub-agent-delegation 段条件性渲染", () => {
+  const ctx = { tools: defaultTools, cwd: "/test/project" };
+
+  it("MAIN_AGENT_SEGMENTS 含 'sub-agent-delegation'(主 agent 启用此段)", () => {
+    expect(MAIN_AGENT_SEGMENTS).toContain("sub-agent-delegation");
+  });
+
+  it("SUB_AGENT_SEGMENTS 不含 'sub-agent-delegation'(子 agent 工具集无 Task,delegation 无意义)", () => {
+    expect(SUB_AGENT_SEGMENTS).not.toContain("sub-agent-delegation");
+  });
+
+  it("tools 不含 Task 时不渲染 delegation 段(byte-equal 历史输出,无回归)", () => {
+    const prompt = buildSystemPrompt(ctx);
+    expect(prompt).not.toContain("## Sub-Agent Delegation");
+    expect(prompt).not.toContain("Task tool");
+  });
+
+  it("tools 含 Task 时渲染 delegation 段,内容 byte-equal SUB_AGENT_DELEGATION_TEXT", () => {
+    const tools = [...defaultTools, stubTool("Task")];
+    const prompt = buildSystemPrompt({ ...ctx, tools });
+    expect(prompt).toContain(SUB_AGENT_DELEGATION_TEXT);
+    expect(prompt).toContain("## Sub-Agent Delegation (Task tool)");
+  });
+
+  it("delegation 段含关键决策语义:When to use / parallel / failure 暴露契约", () => {
+    const tools = [...defaultTools, stubTool("Task")];
+    const prompt = buildSystemPrompt({ ...ctx, tools });
+    expect(prompt).toContain("When to use Task:");
+    expect(prompt).toContain("up to 3 Tasks in a single turn");
+    expect(prompt).toContain("MUST surface the failure");
+  });
+
+  it("delegation 段紧跟 tool-usage 段(段顺序不变)", () => {
+    const tools = [...defaultTools, stubTool("Task")];
+    const prompt = buildSystemPrompt({ ...ctx, tools });
+    const toolUsageIdx = prompt.indexOf("## Tool Usage");
+    const delegationIdx = prompt.indexOf("## Sub-Agent Delegation");
+    expect(toolUsageIdx).toBeGreaterThan(0);
+    expect(delegationIdx).toBeGreaterThan(toolUsageIdx);
+  });
+
+  it("子 agent 装配(SUB_AGENT_SEGMENTS)即使 tools 含 Task 也不渲染 delegation(段未启用)", () => {
+    // 极端测试:子 agent 工具集出错地含 Task 时,segment 未启用是最后一道防线
+    const profile = subAgentProfile({ subAgentId: "x", task: "t" });
+    const tools = [...defaultTools, stubTool("Task")];
+    const prompt = buildSystemPrompt({
+      ...ctx,
+      profile,
+      segments: SUB_AGENT_SEGMENTS,
+      tools,
+    });
+    expect(prompt).not.toContain("## Sub-Agent Delegation");
+  });
+
+  it("含 Task 工具完整 byte-equal 锚点(主路径开 Task 后的全段输出)", () => {
+    const tools = [...defaultTools, stubTool("Task")];
+    const prompt = buildSystemPrompt({ ...ctx, tools });
+    const staticPart = prompt.split(CACHE_BOUNDARY)[0];
+    expect(staticPart).toMatchInlineSnapshot(`
+      "You are Zhixing (知行), a personal intelligent assistant.
+      Your name means "unity of knowledge and action" — you understand problems and take action to solve them.
+
+      ## Principles
+      - Respond in the same language the user uses
+      - When a task requires action, use tools immediately without asking for permission
+      - Read before edit: always read a file before modifying it to ensure exact text match
+      - Edit over write: prefer targeted replacement over full overwrite when modifying existing files
+      - Search before act: use glob/grep to discover relevant files before reading or editing
+      - If a command fails, analyze the error and try an alternative approach
+      - Show your reasoning when making non-obvious decisions
+
+      ## Tool Usage
+      - Use \`read\` to view file contents, not bash cat/head/tail
+      - Use \`grep\` to search file contents by regex, not bash grep/rg
+      - Use \`glob\` to find files by name pattern, not bash find
+      - Use \`edit\` for targeted text replacements, not bash sed/awk
+      - Use \`write\` to create files or overwrite entire content
+      - Use \`bash\` for system commands, package management, git operations, and tasks not covered by other tools
+      - If a tool result ends with \`[Commitment already sent to user. Do not restate.]\`, the user has already seen the tool's confirmation directly via a commit message. Do NOT restate what the tool just did (no "已创建..." / "I've scheduled..."). If no additional insight is needed, end the turn with a brief acknowledgment or no text.
+
+      ## Sub-Agent Delegation (Task tool)
+
+      You have access to a \`Task\` tool that lets you launch sub-agents for research-style sub-tasks with isolated context.
+
+      When to use Task:
+      - Research tasks needing multiple Read/Grep/WebFetch rounds (sub-agent's intermediate results don't pollute your context window)
+      - Comparison/contrast tasks (dispatch parallel Tasks, e.g. "compare A vs B vs C" → 3 Tasks)
+      - Multi-perspective analysis (e.g. security review + performance review + readability review)
+
+      You may launch up to 3 Tasks in a single turn. They run in parallel.
+
+      When a Task fails, you MUST surface the failure in your final response — do not silently continue or pretend it succeeded.
+
+      ## Style
+      - Be warm, concise, and natural in conversation
+      - Do not use emojis unless the user does
+      - Use markdown for code blocks and structured output
+      - Keep responses focused — answer what was asked
+      - When introducing yourself, speak conversationally — never list capabilities
 
       ## Safety
       - Never execute destructive commands (rm -rf /, DROP DATABASE, etc.) without explicit user request

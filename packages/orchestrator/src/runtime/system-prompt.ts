@@ -1,23 +1,28 @@
 /**
  * 系统提示词组装
  *
- * 六段式结构 + 缓存分界标记:
+ * 段集架构 + 缓存分界标记。"始终段"必出,"条件段"按 ctx.tools 是否含触发工具决定:
  *
- * ┌─ 静态区(Stable Prefix,可跨会话缓存)─────────┐
- * │ 1. Identity         — 身份定义(2 句话)      │
- * │ 2. Principles       — 工作原则               │
- * │ 3. Tool Usage       — 从工具列表动态生成      │
- * │ 4. Skill Evolution  — 技能进化指导            │
- * │ 5. Style            — 输出风格               │
- * │ 6. Safety           — 安全边界               │
- * ├─ __ZHIXING_CACHE_BOUNDARY__ ────────────────┤
- * │ 7. Environment      — 工作目录、平台(每会话)│
- * └──────────────────────────────────────────────┘
+ * ┌─ 静态区(Stable Prefix,可跨会话缓存)──────────────┐
+ * │ Identity              始终  身份定义(profile.instructions) │
+ * │ Principles            始终  工作原则                          │
+ * │ Tool Usage            始终  从工具列表动态生成                 │
+ * │ Sub-Agent Delegation  条件  ctx.tools 含 Task 才渲染          │
+ * │ Skill Evolution       条件  ctx.tools 含 memory 才渲染        │
+ * │ Style                 始终  输出风格                          │
+ * │ Safety                始终  安全边界                          │
+ * ├─ __ZHIXING_CACHE_BOUNDARY__ ─────────────────────────────────┤
+ * │ Environment           始终  工作目录、平台(每会话不同)       │
+ * └──────────────────────────────────────────────────────────────┘
  *
- * 设计决策(详见 research/design/specifications/prompt-system.md):
+ * 段顺序与 MAIN_AGENT_SEGMENTS 定义一致;调用方通过 ctx.segments 传入子集
+ * (如 SUB_AGENT_SEGMENTS)切换为子 agent 等其他角色配置。
+ *
+ * 设计决策:
  * - 缓存分界借鉴 Claude Code / OpenClaw,静态区不含任何会话特有信息
  * - 工具使用段从注册的工具列表动态生成,添加/移除工具时自动适应
- * - 技能进化指导引导 Agent 在复杂任务后反思并提议保存/更新技能
+ * - 条件段返回 null 时被 buildSystemPrompt 跳过,不留空白(无空段噪声)
+ *   —— 让 ctx.tools 不含 memory / Task 时输出 byte-equal 历史,守住既有锚点
  * - 环境信息放在分界后(每个项目不同),保护静态区缓存前缀
  * - ZHIXING.md 等项目上下文不进 system prompt,通过 <context> 注入 user messages
  */
@@ -36,20 +41,33 @@ export const CACHE_BOUNDARY = "\n__ZHIXING_CACHE_BOUNDARY__\n";
 /**
  * 静态段标识 —— 调用方按列表顺序选择启用哪些段(主 agent 用全集,子 agent 通常子集)。
  * Environment 不在此列举(始终在缓存分界之后,作为独立动态段)。
+ *
+ * 各段适配策略(条件性 vs 始终):
+ *   identity / principles / tool-usage / style / safety  始终输出
+ *   skill-evolution        条件:tools 含 memory 才渲染(避免让 LLM 看到无 memory 工具的 reflect 提示)
+ *   sub-agent-delegation   条件:tools 含 Task 才渲染(避免让 LLM 看到不存在的 Task 工具说明)
  */
 export type SystemPromptSegment =
   | "identity"
   | "principles"
   | "tool-usage"
   | "skill-evolution"
+  | "sub-agent-delegation"
   | "style"
   | "safety";
 
-/** 主 agent 默认启用的全段集合,顺序与历史输出一致(byte-equal 保证) */
+/**
+ * 主 agent 默认启用的全段集合,顺序与历史输出一致(byte-equal 保证)。
+ *
+ * sub-agent-delegation 紧跟 tool-usage:概念上 delegation 是 Task 工具使用的
+ * 延伸说明,放工具段后是自然语义流;条件性渲染保证 tools 不含 Task 时
+ * 输出仍 byte-equal 历史(段返 null 被 buildSystemPrompt 跳过,不留空白)。
+ */
 export const MAIN_AGENT_SEGMENTS: readonly SystemPromptSegment[] = [
   "identity",
   "principles",
   "tool-usage",
+  "sub-agent-delegation",
   "skill-evolution",
   "style",
   "safety",
@@ -63,8 +81,8 @@ export const MAIN_AGENT_SEGMENTS: readonly SystemPromptSegment[] = [
  *   principles  ✓ "Read before edit" 等硬约束子 agent 同样适用
  *   tool-usage  ✓ 工具描述按子 agent 装配的 childTools 动态生成
  *   safety      ✓ destructive 命令防护是绝对底线,子 agent 不可豁免
- *   skill-evolution ✗ Memory 工具 subAgentSafe:false 已硬隔离写入,
- *                     提示反思保存技能对子 agent 是无效噪声
+ *   skill-evolution      ✗ Memory 工具 subAgentSafe:false 已硬隔离写入,提示反思保存技能对子 agent 是无效噪声
+ *   sub-agent-delegation ✗ Task 工具 subAgentSafe:false 防递归,子 agent 工具集不含 Task,delegation 段无意义
  *   style       ✗ 子 agent 输出回写父 tool_result,不直接对话用户,
  *                 风格指引("be concise"等)会让子误解为对话场景
  *
@@ -116,10 +134,19 @@ export interface PromptBuildContext {
 /**
  * 构建系统提示词。
  *
- * 默认配置(主 agent):Identity → Principles → Tool Usage → Skill Evolution
- *   → Style → Safety + 缓存分界 + 动态段(Environment)
+ * 默认主 agent 段顺序(MAIN_AGENT_SEGMENTS):
+ *   Identity → Principles → Tool Usage
+ *     → Sub-Agent Delegation (条件:tools 含 Task)
+ *     → Skill Evolution     (条件:tools 含 memory)
+ *     → Style → Safety
+ *   + 缓存分界 + Environment(动态段,始终)
  *
- * 调用方传 profile / segments 切换为其他角色配置(如子 agent 精简集)。
+ * 条件段返回 null 时跳过(不留空白),保证 tools 不含触发工具时输出 byte-equal
+ * 历史,既有锚点测试自动守住无回归。
+ *
+ * 调用方传 profile / segments 切换为其他角色配置(如 SUB_AGENT_SEGMENTS 子 agent
+ * 精简集——仅 identity / principles / tool-usage / safety 四段,其余由子任务
+ * 专注 / 输出回写父 / prompt cache 友好等理由排除)。
  */
 export function buildSystemPrompt(ctx: PromptBuildContext): string {
   const profile = ctx.profile ?? mainProfile();
@@ -162,6 +189,8 @@ function renderSegment(
       return buildToolUsage(ctx.tools);
     case "skill-evolution":
       return buildSkillEvolution(ctx.tools);
+    case "sub-agent-delegation":
+      return buildSubAgentDelegation(ctx.tools);
     case "style":
       return buildStyle();
     case "safety":
@@ -318,6 +347,50 @@ Rules:
 - At most one skill proposal per conversation
 - Only propose after complex tasks, not simple Q&A
 - When the user confirms, use the \`memory\` tool with action "save" and category "skill"`;
+}
+
+// ─── Segment: Sub-Agent Delegation(仅当 Task 工具注册时生效) ───
+
+/**
+ * Sub-Agent Delegation 段的文本内容(byte-equal 锚点导出,供测试断言)。
+ *
+ * 引导主 agent 何时合理使用 Task 工具派生子 agent 完成研究型子任务,
+ * 与 Task 工具自身的 description(给 LLM 看的工具描述)互补:
+ *   - Task.description 偏"工具 API 文档"(参数 / 输出 / 失败处理)
+ *   - 本段偏"产品哲学"(何时 worth dispatching / 失败时的责任契约)
+ *
+ * 关键约束:Task 失败时,主 agent **必须**在 final response 中暴露失败,
+ * 不可静默吞掉 —— 这是产品级语义契约,与 Task.description 中的同条规则
+ * 形成双重提醒。
+ */
+export const SUB_AGENT_DELEGATION_TEXT = `## Sub-Agent Delegation (Task tool)
+
+You have access to a \`Task\` tool that lets you launch sub-agents for research-style sub-tasks with isolated context.
+
+When to use Task:
+- Research tasks needing multiple Read/Grep/WebFetch rounds (sub-agent's intermediate results don't pollute your context window)
+- Comparison/contrast tasks (dispatch parallel Tasks, e.g. "compare A vs B vs C" → 3 Tasks)
+- Multi-perspective analysis (e.g. security review + performance review + readability review)
+
+You may launch up to 3 Tasks in a single turn. They run in parallel.
+
+When a Task fails, you MUST surface the failure in your final response — do not silently continue or pretend it succeeded.`;
+
+/**
+ * Sub-Agent Delegation 段渲染。
+ *
+ * 返回类型 `string | null`:
+ *   - `null`:tools 不含 Task 工具时此段不适用,buildSystemPrompt 自动跳过
+ *   - `string`:含 Task 时输出完整段(SUB_AGENT_DELEGATION_TEXT)
+ *
+ * 工具名 "Task" 大小写敏感比对 —— 与 createTaskTool 装配的 name 字段一致;
+ * 若未来 Task 工具改名,本段自动跟随(段内文本仍引用 "Task" 字面值,需同步,
+ * 这是有意的 prompt-text 显式契约,避免动态拼接让段文本不可静态审查)。
+ */
+function buildSubAgentDelegation(tools: ToolDefinition[]): string | null {
+  const hasTask = tools.some((t) => t.name === "Task");
+  if (!hasTask) return null;
+  return SUB_AGENT_DELEGATION_TEXT;
 }
 
 // ─── Segment 5: Style ───

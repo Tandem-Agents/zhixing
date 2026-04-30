@@ -28,6 +28,10 @@
     "./confirmation": {
       "types": "./dist/confirmation/index.d.ts",
       "import": "./dist/confirmation/index.js"
+    },
+    "./tools": {
+      "types": "./dist/tools/index.d.ts",
+      "import": "./dist/tools/index.js"
     }
   },
   "files": [

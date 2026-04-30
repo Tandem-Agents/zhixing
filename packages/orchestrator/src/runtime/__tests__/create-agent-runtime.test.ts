@@ -35,6 +35,7 @@ import {
   type LLMRole,
   type LLMRoles,
   type AgentEventMap,
+  type ToolDefinition,
 } from "@zhixing/core";
 
 // ─── hoisted ref:让 vi.mock 工厂在 import 之前能引用 ───
@@ -312,5 +313,221 @@ describe("createAgentRuntime · forceCompact safeDispose 对称防御", () => {
     await expect(
       runtime.forceCompact([userMessage("test")], 0),
     ).resolves.toBeDefined();
+  });
+});
+
+// ─── 契约 6: ALS 包裹 —— 工具 call 内可取 RunContext ───
+
+describe("createAgentRuntime · ALS RunContext 透传契约", () => {
+  it("工具 call 内 runContextStorage.getStore() 非空,bus===run 的 eventBus,lineage='main'", async () => {
+    // probe 工具:在 call() 内捕获 ALS 状态供测试断言。
+    // 这是验证"runtime.run() 入口的 runContextStorage.run 包裹真的覆盖到工具调用层"
+    // 的最直接方式 —— 只要工具能拿到与 decorateRunBus 同实例的 bus,
+    // 就证明 ALS 链路在嵌套 async 边界(while gen.next → tool.call)上不断裂
+    const { runContextStorage } = await import("../run-context.js");
+    let alsState: { bus: unknown; lineage: string } | undefined;
+    const probeTool: ToolDefinition = {
+      name: "probe",
+      description: "probe ALS state",
+      inputSchema: { type: "object", properties: {} },
+      needsPermission: false,
+      // 声明 read access 让 BoundaryImpactClassifier 分类为 observe(放行,
+      // 不触发 SecurityPipeline 升级到 confirm → 否则 broker 走 fail-to-deny 拒了)
+      boundaries: [{ boundaryType: "process", access: "read", dynamic: false }],
+      call: async () => {
+        const store = runContextStorage.getStore();
+        alsState = store
+          ? { bus: store.bus, lineage: store.lineage }
+          : undefined;
+        return { content: "captured", isError: false };
+      },
+    };
+    providerRef.current = new MockLLMProvider([
+      { toolCalls: [{ id: "p1", name: "probe", input: {} }] },
+      { text: "done" },
+    ]);
+
+    let capturedBus: IEventBus<AgentEventMap> | null = null;
+    const runtime = await createAgentRuntime({
+      extraTools: [probeTool],
+      decorateRunBus: ({ bus }) => {
+        capturedBus = bus;
+        return () => {};
+      },
+    });
+    await runtime.run({ messages: [userMessage("hi")], turnIndex: 0 });
+
+    expect(alsState).toBeDefined();
+    expect(alsState!.bus).toBe(capturedBus);
+    expect(alsState!.lineage).toBe("main");
+  });
+
+  it("不传 enableTaskTool / 无 Task 工具:run() 仍正常完成(向后兼容,默认 false)", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "no task here" }]);
+    // 默认装配路径:不开 Task,沿用既有 cli/server 调用方约定
+    const runtime = await createAgentRuntime({});
+    const result = await runtime.run({
+      messages: [userMessage("hi")],
+      turnIndex: 0,
+    });
+    expect(result.agentResult.reason).toBe("completed");
+  });
+
+  // 并发隔离契约 —— ALS 模型的核心承诺:每次 runtime.run() 走独立 store,
+  // 不同 run 的工具 call 取到各自 run 的 bus / lineage,绝不串扰。
+  // 这是产品级承诺:未来若服务端单实例多并发 conversation,无需重构 —— 由 Node.js
+  // async_hooks 的 store 隔离保证。spec §15 M2.3 验证清单显式要求此场景覆盖。
+  it("两个并发 run()(独立 runtime)各自 ALS 上下文不串扰,probeTool 取到自己 run 的 bus", async () => {
+    const { runContextStorage } = await import("../run-context.js");
+    const captures: Array<{
+      runId: string;
+      bus: unknown;
+      lineage: string;
+    }> = [];
+    function makeProbe(runId: string): ToolDefinition {
+      return {
+        name: "probe",
+        description: `probe ${runId}`,
+        inputSchema: { type: "object", properties: {} },
+        needsPermission: false,
+        boundaries: [{ boundaryType: "process", access: "read", dynamic: false }],
+        call: async () => {
+          // 引入微小延时,让两个并发 run 的 probe.call 真在不同时间窗口落入 ALS 链路
+          // —— 顺序串行不能证明 ALS 隔离(任何 mutable cell 都过),并发交错才检验
+          await new Promise((r) => setTimeout(r, 10));
+          const store = runContextStorage.getStore();
+          captures.push({
+            runId,
+            bus: store?.bus,
+            lineage: store?.lineage ?? "missing",
+          });
+          return { content: `${runId} captured`, isError: false };
+        },
+      };
+    }
+
+    // runtime1 装配:provider 闭包捕获,后续 providerRef.current 改动不影响 runtime1
+    providerRef.current = new MockLLMProvider([
+      { toolCalls: [{ id: "p1", name: "probe", input: {} }] },
+      { text: "done 1" },
+    ]);
+    let bus1: IEventBus<AgentEventMap> | null = null;
+    const runtime1 = await createAgentRuntime({
+      extraTools: [makeProbe("R1")],
+      decorateRunBus: ({ bus }) => {
+        bus1 = bus;
+        return () => {};
+      },
+    });
+
+    // runtime2 装配:独立 provider 序列
+    providerRef.current = new MockLLMProvider([
+      { toolCalls: [{ id: "p2", name: "probe", input: {} }] },
+      { text: "done 2" },
+    ]);
+    let bus2: IEventBus<AgentEventMap> | null = null;
+    const runtime2 = await createAgentRuntime({
+      extraTools: [makeProbe("R2")],
+      decorateRunBus: ({ bus }) => {
+        bus2 = bus;
+        return () => {};
+      },
+    });
+
+    // 关键:Promise.all 真并发,两个 runtime.run() 的 ALS root 独立创建
+    const [r1, r2] = await Promise.all([
+      runtime1.run({ messages: [userMessage("first")], turnIndex: 0 }),
+      runtime2.run({ messages: [userMessage("second")], turnIndex: 0 }),
+    ]);
+
+    expect(r1.agentResult.reason).toBe("completed");
+    expect(r2.agentResult.reason).toBe("completed");
+    expect(captures).toHaveLength(2);
+
+    // 关键断言:两次 capture 的 bus 各自属于对应 run 的 bus —— 不串扰
+    const cap1 = captures.find((c) => c.runId === "R1");
+    const cap2 = captures.find((c) => c.runId === "R2");
+    expect(cap1).toBeDefined();
+    expect(cap2).toBeDefined();
+    expect(cap1!.bus).toBe(bus1);
+    expect(cap2!.bus).toBe(bus2);
+    // 两个 bus 必须是不同实例(per-run 各自创建)
+    expect(bus1).not.toBe(bus2);
+    expect(bus1).not.toBeNull();
+    expect(bus2).not.toBeNull();
+    // lineage 都是 "main"(每次 run 入口 lineage 固定 "main")
+    expect(cap1!.lineage).toBe("main");
+    expect(cap2!.lineage).toBe("main");
+  });
+});
+
+// ─── 契约 7: enableTaskTool 装配 —— Task 可被 LLM 派调,完成端到端委派 ───
+
+describe("createAgentRuntime · enableTaskTool 装配契约", () => {
+  it("enableTaskTool=true:LLM 调 Task → 子 agent 跑完 → 主收到 tool_result 综合输出", async () => {
+    // 主 + 子共用同一 MockLLMProvider 序列(provider 实例共享),按 chat 调用顺序消费:
+    //   1. 主 LLM:派 Task tool_use
+    //   2. 子 LLM:产 final assistant text
+    //   3. 主 LLM:看 tool_result + 综合输出
+    providerRef.current = new MockLLMProvider([
+      {
+        toolCalls: [
+          { id: "tk1", name: "Task", input: { description: "deep dive", prompt: "research X" } },
+        ],
+      },
+      { text: "child sub-agent final answer about X" },
+      { text: "synthesized response based on sub-agent output" },
+    ]);
+
+    const runtime = await createAgentRuntime({ enableTaskTool: true });
+    const result = await runtime.run({
+      messages: [userMessage("research X please")],
+      turnIndex: 0,
+    });
+
+    expect(result.agentResult.reason).toBe("completed");
+    // 序列消费断言:主 LLM 第 1 次(派 Task)+ 子 LLM 第 1 次(产 final)+ 主 LLM 第 2 次(综合)= 3 次
+    expect(providerRef.current!.callCount).toBe(3);
+    // 主回收的最后 assistant 文本来自第 3 次 chat 的综合输出
+    expect(result.newMessages.length).toBeGreaterThan(0);
+    const lastAssistant = result.newMessages.findLast((m) => m.role === "assistant");
+    expect(lastAssistant).toBeDefined();
+    const lastText = lastAssistant!.content
+      .filter((b) => b.type === "text")
+      .map((b) => (b as { text: string }).text)
+      .join("");
+    expect(lastText).toContain("synthesized response");
+  });
+
+  it("enableTaskTool=true:Task 工具 subAgentSafe 仍为 false(防递归不变量)", async () => {
+    // 不直接观察 tools 数组(runtime 不暴露),通过派 Task 让子尝试再派 Task 触发 unknown tool 路径
+    // —— 子工具集应只含 subAgentSafe===true 的工具,Task 自身不在内
+    providerRef.current = new MockLLMProvider([
+      {
+        toolCalls: [
+          { id: "tk1", name: "Task", input: { description: "outer", prompt: "p" } },
+        ],
+      },
+      // 子 LLM:尝试再派 Task(应失败,因为子工具集不含 Task)
+      {
+        toolCalls: [
+          { id: "tk2", name: "Task", input: { description: "inner", prompt: "p2" } },
+        ],
+      },
+      // 子 LLM 收到错误后产 final text
+      { text: "child cannot dispatch further sub-agents" },
+      // 主 LLM 综合
+      { text: "main saw sub failure" },
+    ]);
+
+    const runtime = await createAgentRuntime({ enableTaskTool: true });
+    const result = await runtime.run({
+      messages: [userMessage("test recursion guard")],
+      turnIndex: 0,
+    });
+
+    // 主 run 应正常完成 —— 子的"递归 Task"被工具集过滤拒绝,
+    // 子最终产出文本被主 LLM 综合,主返 completed
+    expect(result.agentResult.reason).toBe("completed");
   });
 });

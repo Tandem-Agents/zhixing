@@ -91,6 +91,8 @@ import {
   type OnUserDeniedFn,
 } from "../security/secure-executor.js";
 import { trackMessages } from "./track-messages.js";
+import { runContextStorage } from "./run-context.js";
+import { createTaskTool } from "../tools/task.js";
 
 // ─── 内部辅助 ───
 
@@ -261,6 +263,22 @@ export interface CreateAgentRuntimeOptions {
    * cli 路径注入终端渲染;服务端 / 子 agent 路径不传。
    */
   onUserDenied?: OnUserDeniedFn;
+  /**
+   * 是否启用 Task 工具(主 agent 可派生子 agent 的入口)。**默认 false**。
+   *
+   * 装配语义:工具集尾部追加 `createTaskTool(env)`,Task closure capture
+   * 装配期已知的服务(provider / pipeline / broker / 当前工具集 snapshot 等),
+   * **不**通过 attachTool 后置注入,避免 forward reference 与依赖完整性破坏。
+   *
+   * Per-run 上下文(eventBus / lineage)通过 `runContextStorage` (AsyncLocalStorage)
+   * 传递到 Task closure 的 call() 内部 —— 由 runtime.run() 入口 `runContextStorage.run`
+   * 包裹建立。这两点(closure capture 装配期服务 + ALS 传递 per-run 上下文)
+   * 共同实现"Task 工具实例稳定可复用,EventBus 严格 per-run 隔离"。
+   *
+   * 子 agent 工具集自动按 `subAgentSafe===true` 过滤;Task 自身 `subAgentSafe: false`,
+   * 实现"子 agent 不能再派子 agent"的递归深度上限。
+   */
+  enableTaskTool?: boolean;
 }
 
 // ─── 创建运行时 ───
@@ -296,7 +314,11 @@ export async function createAgentRuntime(
   // 确保工作区目录存在（首次启动自动创建，目录被删除则重建）
   const workspaceDirStatus = ensureWorkspaceDir(workspace);
 
-  const tools = [
+  // baseTools = builtin + extra,**不含 Task** —— Task 装配依赖
+  // securityPipeline / confirmationBroker(都在下方装配),需要后置追加。
+  // baseTools 是 SecurityPipeline / BoundaryRegistry / ToolArgumentExtractor
+  // 的注册输入(Task 工具 needsPermission: false 且无 boundaries,不参与这些链路)。
+  const baseTools: ToolDefinition[] = [
     createReadTool(),
     createWriteTool(),
     createEditTool(),
@@ -307,13 +329,6 @@ export async function createAgentRuntime(
     createWebFetchTool({ proxy: config.network?.proxy }),
     ...(options.extraTools ?? []),
   ];
-  const systemPrompt = buildSystemPrompt({
-    tools,
-    cwd,
-    workspace: workspace.path,
-    workspaceSource: workspace.source,
-    globalConfigPath: getGlobalConfigPath(),
-  });
 
   // 安全管线：会话级单例，跨多次 run() 共享权限规则、确认追踪、频率限制状态。
   //
@@ -328,12 +343,12 @@ export async function createAgentRuntime(
   // PermissionStore.match 按工具自身声明的 permissionArgumentKey 提取参数，
   // 避免多 string 字段工具的字段顺序歧义。
   const toolArgumentExtractor: IToolArgumentExtractor =
-    ToolArgumentExtractor.fromTools(tools);
+    ToolArgumentExtractor.fromTools(baseTools);
   const persistentStore = new PermissionStore({
     extractArgument: (req) => toolArgumentExtractor.extract(req),
   });
   const boundaryRegistry: MutableToolBoundaryRegistry =
-    BoundaryRegistry.fromTools(tools);
+    BoundaryRegistry.fromTools(baseTools);
   // builtin 规则注入：每个工具 namespace 自管,用户池任一命中将完全决定结果
   // (builtin 不参与),保证用户最终决定权。
   // 未来子 agent / MCP 等模块以同样模式注入: `registerBuiltinRules(ns, rules)`
@@ -347,6 +362,46 @@ export async function createAgentRuntime(
 
   // 确认交互 broker：会话级单例。渲染器由 REPL 在 attach 时注入。
   const confirmationBroker = new ConfirmationBroker();
+
+  // tools = baseTools + (可选 Task 工具)。Task 装配时 capture 装配期已知的
+  // 共享服务 + 当前 baseTools snapshot 作为子工具池来源(子按 subAgentSafe
+  // 过滤后派生)。Task 自身 subAgentSafe: false,不会出现在子工具集中(防递归)。
+  //
+  // per-run 的 eventBus / lineage 由 runtime.run() 入口的 runContextStorage.run
+  // 包裹建立,Task closure call() 时取用 —— 与本装配期解耦,无 mutable runtime 字段。
+  //
+  // boundary 后注册:Task 装配晚于 BoundaryRegistry.fromTools(baseTools),其
+  // boundaries 必须显式 register 进 mutable registry,否则 BoundaryImpactClassifier
+  // 找不到 → fail-closed → critical → 在 ci 模式下被 PermissionMatcher block。
+  // 这同时是 MCP / 动态插件接入路径的统一模式,不是 Task 专用 hack。
+  let tools: ToolDefinition[] = baseTools;
+  if (options.enableTaskTool) {
+    const taskTool = createTaskTool({
+      provider: roles.main.provider,
+      model: roles.main.model,
+      llmRoles: roles,
+      securityPipeline,
+      workspace: workspace.path,
+      workspaceSource: workspace.source,
+      globalConfigPath: getGlobalConfigPath(),
+      parentBroker: confirmationBroker,
+      parentTools: baseTools,
+    });
+    tools = [...baseTools, taskTool];
+    if (taskTool.boundaries && taskTool.boundaries.length > 0) {
+      boundaryRegistry.register(taskTool.name, taskTool.boundaries);
+    }
+  }
+
+  // systemPrompt 后置到 tools 装配完成之后 —— Task 工具的描述文本需进入
+  // ## Tool Usage 段,LLM 才能学习"何时派 Task / 何时直接调单工具"的决策。
+  const systemPrompt = buildSystemPrompt({
+    tools,
+    cwd,
+    workspace: workspace.path,
+    workspaceSource: workspace.source,
+    globalConfigPath: getGlobalConfigPath(),
+  });
 
   // Per-turn 上下文注入器：时间 + 后续注册的 provider（如 scheduler）
   const turnContextInjector = new TurnContextInjector();
@@ -532,7 +587,29 @@ export async function createAgentRuntime(
         safeDispose("run.decorate", () => disposeRender?.());
       };
 
+      // ALS 包裹整个 run loop 主体 —— 让 Task 工具(及未来任何 closure 工具)
+      // 在 call() 内部通过 runContextStorage.getStore() 拿到当前 run 的
+      // bus 与 lineage,无需把这两字段塞进 ToolExecutionContext 接口(只对
+      // Task 一个工具有意义,污染所有工具的 ctx 不合理)。
+      //
+      // ALS 自动按异步上下文隔离:同一 runtime 并发跑多个 run() 时各自的
+      // RunContext 不串扰;子 agent 嵌套(runChildAgent 内部再 run ALS)
+      // 自动覆盖为 child bus / child lineage,孙子 Task 自动取 sub 当前的上下文。
+      //
+      // disposeAll 留在 finally(ALS 包裹外):dispose 不依赖 RunContext,
+      // 且 finally 的语义是"无论 ALS 内 throw 与否都执行清理",位置正确。
       try {
+        return await runContextStorage.run(
+          { bus: eventBus, lineage: "main" },
+          async (): Promise<RunResult> => {
+            return await runMainLoop();
+          },
+        );
+      } finally {
+        disposeAll();
+      }
+
+      async function runMainLoop(): Promise<RunResult> {
         // 根据最后一条用户消息检索匹配的技能 + 反思提示
         const enrichedContext = await enrichContext(
           projectContext,
@@ -710,8 +787,6 @@ export async function createAgentRuntime(
           if (value.type === "tool_end") toolEndCount++;
           trackMessages(value, newMessages, pendingToolResults);
         }
-      } finally {
-        disposeAll();
       }
     },
   };

@@ -56,7 +56,7 @@ S1–S3.6 ✅ + Step 17 ✅ + Step 20 ✅ + Phase 5 ✅ + Step 21A ✅ + Step 21
 
 ### P0：Step 21 — 子 agent 底座 + Task 工具
 
-**状态**：🔜 spec 已落地（[subagent-execution.md](specifications/subagent-execution.md)），12 项架构决定锁定，M0 收尾中
+**状态**：🔄 M0 ✅ + M1 ✅ + M2.1 ✅ + M2.2 ✅ + M2.3 ✅ 已完成；M2.4 CLI 状态条 当前焦点（详见 [subagent-execution.md §15](specifications/subagent-execution.md) 子里程碑表）
 **顶层定位**：[persistent-service.md §3.6](specifications/persistent-service.md)（AgentOrchestrator 层最基础原语）
 **依赖**：Step 21A ✅ + Step 21B ✅ + 远程打断 ✅（子 agent 复用 abort 级联机制）
 
@@ -86,13 +86,9 @@ S1–S3.6 ✅ + Step 17 ✅ + Step 20 ✅ + Phase 5 ✅ + Step 21A ✅ + Step 21
 
 #### M2 — 子 agent 底座 + Task 工具（业务交付）
 
-- M2.1 Orchestrator 骨架：`createChildSession` / `runChildLoop` / `bridgeEvents` / abort 级联（先单测，不接 Task 工具）
-- M2.2 ConfirmationBroker 对接：`NonInteractiveResolver` 复用 + `DelegatingRenderer` 决策落地
-- M2.3 Task 工具：`tools-builtin/task.ts`（AI 可调用同步委托，主 agent `tool_use` → 子 agent 运行 → 结果作为 `tool_result` 回写）
-- M2.4 流式可见性 + UX：CLI / 飞书 / RPC 三方呈现策略
-- M2.5 错误 / abort / 资源限制 / token 归属落地
-- M2.6 测试策略：单元 + 集成 + E2E + 平台
-- 审查锚点：每子里程碑 1 轮小审查 + 终审 1 轮 = 7 轮（与 M0 / M1 累计 9–10 轮）
+子里程碑 M2.1–M2.7 拆解与已完成情况详见 [subagent-execution.md §15 M2](specifications/subagent-execution.md)（spec 是真相源）。当前已完成 M2.1 ✅ runChildAgent 骨架 + M2.2 ✅ child broker audit + M2.3 ✅ Task 工具 / 主路径 ALS / sub-agent-delegation segment；M2.4 CLI 状态条为当前焦点。
+
+审查锚点：每子里程碑 1 轮小审查 + 终审 1 轮 = 7 轮（与 M0 / M1 累计 9–10 轮）。
 
 #### spec 阶段必须锁定的关键架构决策（防返工，详见 `subagent-execution.md`）
 

@@ -8,6 +8,7 @@ export default defineConfig({
     "src/profile/index.ts",
     "src/subagent/index.ts",
     "src/confirmation/index.ts",
+    "src/tools/index.ts",
   ],
   format: ["esm"],
   dts: true,

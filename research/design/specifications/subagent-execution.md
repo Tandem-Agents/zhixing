@@ -355,7 +355,9 @@ const eventBus = createEventBus<AgentEventMap>({ lineage: "main" });
 // ctx 仅含 bus —— UI 依赖由工厂层 closure 提供,runtime 主流程零 UI 概念。
 const disposeRender = options.decorateRunBus?.({ bus: eventBus });
 try {
-  return await runContextStorage.run({ eventBus, lineage: "main" }, async () => {
+  // RunContext 字段名为 bus(对齐 packages/orchestrator/src/runtime/run-context.ts);
+  // ALS 透传层不重命名,Task closure 拿到的就是 createEventBus 返的实例
+  return await runContextStorage.run({ bus: eventBus, lineage: "main" }, async () => {
     // ... agent loop
   });
 } finally {
@@ -684,6 +686,11 @@ import { runContextStorage } from "../runtime/run-context.js";
 /**
  * Task closure 持有的"父级共享服务" —— 不包 AgentRuntime 整体引用,
  * 直接 capture createAgentRuntime 内部局部变量,避免 forward reference 问题。
+ *
+ * 字段对齐 RunChildAgentOptions 的"shared 子集"(剔除 task / parentBus /
+ * parentLineage / parentSignal —— 这些走 ALS / ToolExecutionContext);
+ * 工作区相关字段平铺(workspace / workspaceSource / globalConfigPath),
+ * 与 PromptBuildContext / RunChildAgentOptions 字段形态一致,装配时无需解构。
  */
 export interface TaskToolEnv {
   // 共享服务(子复用)
@@ -691,12 +698,19 @@ export interface TaskToolEnv {
   model: string;
   llmRoles: LLMRoles;
   securityPipeline: SecurityPipeline;
-  resolvedWorkspace: ResolvedWorkspace;
+  workspace: string | null;
+  workspaceSource?: string;
+  globalConfigPath?: string;
   // 父独占
   parentBroker: IConfirmationBroker;
   /** 父运行时的工具列表(子 capability filter 输入) */
   parentTools: readonly ToolDefinition[];
 }
+
+/** Task 工具自身的边界声明 —— 详见本节末"Boundaries 声明"段。 */
+export const TASK_TOOL_BOUNDARIES: readonly BoundaryCrossing[] = [
+  { boundaryType: "process", access: "exec", dynamic: false },
+];
 
 export function createTaskTool(env: TaskToolEnv): ToolDefinition {
   return {
@@ -708,25 +722,36 @@ export function createTaskTool(env: TaskToolEnv): ToolDefinition {
     needsPermission: false,                     // 不弹用户(子内部决策)
     subAgentSafe: false,                        // 决定 #10:防递归
     interruptBehavior: "cancel",                // ctx.abortSignal 抛 AbortError 即停
-    call: async (input, ctx) => {
+    boundaries: [...TASK_TOOL_BOUNDARIES],      // SecurityPipeline 分类锚点,见末段"Boundaries 声明"
+    call: async (input, ctx): Promise<ToolResult> => {
+      // 前置契约校验集中在工具入口 —— fail-fast 而非 fallback,避免主 LLM
+      // 用残缺输入派出"无任务"子 agent 浪费 token / 产出垃圾 tool_result
       const runCtx = runContextStorage.getStore();
       if (!runCtx) throw new Error("Task tool called outside agent run context");
-      const description = (input.description as string | undefined) ?? "(unnamed task)";
-      const prompt = (input.prompt as string | undefined) ?? "";
+      if (!ctx.abortSignal) throw new Error("Task tool requires ctx.abortSignal");
+      const description = String(input["description"] ?? "").trim();
+      const prompt = String(input["prompt"] ?? "").trim();
+      if (!description) throw new Error("Task tool requires non-empty 'description'");
+      if (!prompt) throw new Error("Task tool requires non-empty 'prompt'");
+
       const result = await runChildAgent({
         provider: env.provider,
         model: env.model,
         llmRoles: env.llmRoles,
         securityPipeline: env.securityPipeline,
-        resolvedWorkspace: env.resolvedWorkspace,
-        parentBus: runCtx.eventBus,             // ALS 取当前 run 的 bus
+        workspace: env.workspace,
+        workspaceSource: env.workspaceSource,
+        globalConfigPath: env.globalConfigPath,
+        parentBus: runCtx.bus,                   // ALS 取当前 run 的 bus
         parentLineage: runCtx.lineage,           // ALS 取当前 run 的 lineage
         parentBroker: env.parentBroker,
         parentTools: env.parentTools,
-        parentSignal: ctx.abortSignal!,
+        parentSignal: ctx.abortSignal,
         task: prompt,
-        description,
       });
+      // description 仅 Task closure 自持(用于 ToolResult 错误标签 / CLI 状态条),
+      // 不传 runChildAgent —— 子 agent 任务全文已在 system prompt "Your Role" 段,
+      // description 是父侧呈现层概念,不是子业务层概念,YAGNI 单一职责
       return formatChildResultAsToolResult(result, description);
     },
   };
@@ -735,9 +760,22 @@ export function createTaskTool(env: TaskToolEnv): ToolDefinition {
 
 **`ToolExecutionContext` 接口零变动** —— Task 通过 `env` closure 持具体服务引用,通过 `runContextStorage`(AsyncLocalStorage)取 per-run bus/lineage;ctx 不污染。
 
-**为什么 env 不持 `parentRuntime: AgentRuntime`**:在 `createAgentRuntime` 函数内 `createTaskTool` 调用时,AgentRuntime return 对象**尚未构造**(返回语句还没执行)。直接 capture 局部变量(`provider / model / llmRoles / securityPipeline / confirmationBroker / workspace / tools`)避免 forward reference / 循环引用,且更精确表达"Task 需要哪些服务"。
+**为什么 env 不持 `parentRuntime: AgentRuntime`**:在 `createAgentRuntime` 函数内 `createTaskTool` 调用时,AgentRuntime return 对象**尚未构造**(返回语句还没执行)。直接 capture 装配期局部变量(`provider / model / llmRoles / securityPipeline / workspace / workspaceSource / globalConfigPath / parentBroker / parentTools` —— 字段集与 `TaskToolEnv` 接口严格一致,见上方 L695-708)避免 forward reference / 循环引用,且更精确表达"Task 需要哪些服务"。
 
 **AgentRuntime 接口零字段变更** —— 不暴露 `provider` / `llmRoles` 等内部实例(避免 leaky abstraction 让外部代码 bypass runtime 装配链直接 `.chat()`)。runChildAgent 的测试由调用方构造 mock services,不通过 AgentRuntime 提取。
+
+**Boundaries 声明(SecurityPipeline 分类锚点)**:Task 工具显式声明 `boundaries: [{ boundaryType: "process", access: "exec", dynamic: false }]`(本文件 export `TASK_TOOL_BOUNDARIES`,作为常量被 `createTaskTool` 与装配方共享)。
+
+为什么必须声明,**不能省**:
+- `BoundaryImpactClassifier` 在 SecurityPipeline 的 middleware 链中按 boundaryRegistry 查工具语义;**未注册**的工具走 fail-closed 默认 → 升级为 `critical` 操作类。
+- 在非交互模式(CI / `--noninteractive` / serve no-broker)下,`PermissionMatcherMiddleware` 对 `critical`(经 `OperationClassifierMiddleware` 升级为 `confirm`)的操作默认拒绝,因为没有 UI 让用户确认。
+- 结果:Task 工具被静默阻止,主 agent 收到 `tool_result.isError=true` "操作被阻止",子 agent 永远跑不起来。
+
+`process/exec` 的语义:Task 工具的副作用是"派生子 agent loop 运行"——子 loop 内部有自己的 SecurityPipeline 评估真实工具,Task 自身不直接动文件 / 网络 / shell;最贴近的边界是"派生子进程式的执行单元",分类器据此把 Task 归为 `internal`(无需用户确认,直接放行)。
+
+`dynamic: false`:运行时不变 —— 静态可知 Task 一定是 `process/exec`,无运行时分支(对比 bash 工具 `dynamic: true`,需要解析具体 cmd 才能判断 readonly vs 写文件)。
+
+**注册时机**:`createTaskTool` 仅返回带 `boundaries` 的 `ToolDefinition`;**装配方负责把 `boundaries` 注入到 mutable `boundaryRegistry`** —— 详见 §4.4 装配代码示例。这是 `boundaries` 自描述模式的核心契约:工具方声明语义,装配方负责注入安全管道(避免每个工具自己 import 全局 registry)。
 
 ### 4.2 `inputSchema`
 
@@ -821,39 +859,67 @@ function formatChildResultAsToolResult(
 `createTaskTool` 由 orchestrator 在装配主 runtime 时调用,**不**通过 `attachTool` 后置注入。`createAgentRuntime` 接受 `enableTaskTool?: boolean`(默认 false):
 
 ```typescript
-// packages/orchestrator/src/runtime/create-agent-runtime.ts (M1.2 搬家时调整)
+// packages/orchestrator/src/runtime/create-agent-runtime.ts
 
 export async function createAgentRuntime(options: {
   // ... 既有字段
-  enableTaskTool?: boolean;        // 主路径 cli/server 入口传 true
+  enableTaskTool?: boolean;        // 默认 false;主路径 cli/server 入口何时传 true 见 §15 M2.4
 }): Promise<AgentRuntime> {
-  // ... 装配 securityPipeline / broker / eventBus 等
+  // ... 装配 securityPipeline / broker / boundaryRegistry / workspace 等
+  // workspace: ResolvedWorkspace = resolveWorkspace(config, ...) —— 装配期非空(类型契约保证)
 
-  const builtinTools = [createReadTool(), createWriteTool(), /* ... */];
+  // baseTools 是不含 Task 的"基础工具集",作为 Task 的 parentTools 传入(子按
+  // subAgentSafe 过滤后从中派生);双引用风格(baseTools / tools)清晰区分两个语义,
+  // 比 mutable push 更安全(避免后续装配步误改原集合污染子工具池)
+  const baseTools: ToolDefinition[] = [
+    createReadTool(), createWriteTool(), /* ... */
+    ...(options.extraTools ?? []),
+  ];
 
-  let allTools = [...builtinTools, ...(options.extraTools ?? [])];
+  let tools: ToolDefinition[] = baseTools;
 
   if (options.enableTaskTool) {
-    // Task closure capture 局部变量(避免 forward ref AgentRuntime);
+    // Task closure capture 装配期已知的服务(避免 forward ref AgentRuntime);
     // per-run 的 eventBus / lineage 走 runContextStorage(ALS),见 §4.1
-    allTools.push(createTaskTool({
+    //
+    // 双层契约:
+    //   - `workspace` 对象本身:resolveWorkspace 类型签名返 ResolvedWorkspace 非
+    //     undefined,装配期保证可解引用 .path / .source 不抛
+    //   - `workspace.path` 字段:ResolvedWorkspace.path 类型 `string | null`,
+    //     在 ci 模式且无 cli/config workspace 配置时为 null(`source: "none"`);
+    //     交互模式 cwd 兜底时非 null
+    //   - 直接透传到 TaskToolEnv.workspace(类型签名 `string | null` 兼容此情况);
+    //     buildSystemPrompt 在 workspace=null 时跳过工作区路径段渲染,无运行期错
+    const taskTool = createTaskTool({
       provider: roles.main.provider,
       model: roles.main.model,
       llmRoles: roles,
       securityPipeline,
-      resolvedWorkspace: workspace,
+      workspace: workspace.path,
+      workspaceSource: workspace.source,
+      globalConfigPath: getGlobalConfigPath(),
       parentBroker: confirmationBroker,
-      parentTools: [...allTools],   // 当前已装配的工具集(不含 Task 自己)— 子工具池来源
-    }));
+      parentTools: baseTools,        // 直接传 ref(不 spread),子工具池来源不变
+    });
+    tools = [...baseTools, taskTool];
+
+    // 把 Task 的 boundaries 注入 mutable boundaryRegistry —— SecurityPipeline
+    // 分类必须的一步,见 §4.1 末"Boundaries 声明"。省略则 Task 在非交互模式
+    // 被 fail-closed 阻止
+    if (taskTool.boundaries && taskTool.boundaries.length > 0) {
+      boundaryRegistry.register(taskTool.name, taskTool.boundaries);
+    }
   }
 
-  // ... 装配 systemPrompt / 返 runtime
+  // ... 用 tools(含或不含 Task)装配 systemPrompt / 返 runtime
 }
 ```
 
+**为什么 Task 是少数走"装配方注册 boundaries"路径的工具**:绝大多数 builtin 工具(read / write / bash / ...)由 `boundaryRegistry` 在初始化阶段从静态 `BUILTIN_TOOL_BOUNDARIES` 表预注册;Task 工具是**条件性装配**(`enableTaskTool` 控制),且属于 orchestrator 包(builtin 表在 core 包,跨包加 Task 会破坏依赖方向)—— 因此走"工具自带 boundaries 字段 + 装配方动态注册"路径,是 capability-tag 自描述模式的扩展。
+
 **关键细节 — EventBus 是 per-run,通过 `AsyncLocalStorage` 传递到 Task closure**:
 
-[run-agent.ts:428](../../../packages/cli/src/run-agent.ts#L428) `const eventBus = createEventBus<AgentEventMap>()` 在 `runtime.run()` 入口创建,run 结束 GC。Task 工具实例在 `createAgentRuntime` 时构造(此时尚无 eventBus),必须有机制让 Task closure 在 `call()` 执行时读到当前 run 的 bus。
+[create-agent-runtime.ts:546](../../../packages/orchestrator/src/runtime/create-agent-runtime.ts#L546) `const eventBus = createEventBus<AgentEventMap>({ lineage: "main" })` 在 `runtime.run()` 入口创建,run 结束 GC。Task 工具实例在 `createAgentRuntime` 时构造(此时尚无 eventBus),必须有机制让 Task closure 在 `call()` 执行时读到当前 run 的 bus。
 
 **正解:Node.js `AsyncLocalStorage`**(`node:async_hooks`)—— 自动按异步上下文隔离 per-run 状态,无 mutable runtime 字段,天然支持未来并发 run。
 
@@ -865,7 +931,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 export interface RunContext {
   // 用具体类 EventBus(不是 IEventBus 接口):Task 工具拿这个 bus 透传到
   // runChildAgent 作 parentBus,createEventBus 的 parent 字段要求 EventBus 类。
-  eventBus: EventBus<AgentEventMap>;
+  bus: EventBus<AgentEventMap>;
   lineage: string;     // 主 = "main";嵌套层级时 "main/sub-.../sub-..."
 }
 
@@ -879,7 +945,7 @@ async run(params: RunParams): Promise<RunResult> {
   const eventBus = createEventBus<AgentEventMap>({ lineage: "main" });   // 显式 lineage
   // ... 既有装配
   return await runContextStorage.run(
-    { eventBus, lineage: "main" },
+    { bus: eventBus, lineage: "main" },
     async () => {
       // 既有 agent loop 主流程,在此 ALS 上下文内执行
       return await runAgentLoopAndAssemble({...});
@@ -900,7 +966,7 @@ export function createTaskTool(env: TaskToolEnv): ToolDefinition {
       if (!runCtx) throw new Error("Task tool called outside agent run");
       return await runChildAgent({
         ...env,                              // 共享服务 + parentBroker + parentTools
-        parentBus: runCtx.eventBus,         // ← ALS 取
+        parentBus: runCtx.bus,              // ← ALS 取
         parentLineage: runCtx.lineage,      // ← ALS 取
         parentSignal: ctx.abortSignal!,
         task: input.prompt as string,
@@ -916,7 +982,7 @@ export function createTaskTool(env: TaskToolEnv): ToolDefinition {
 - 无 stateful runtime 字段,符合 "AgentRuntime 纯计算"分层
 - Node 14+ 标准 API,无依赖
 
-**子 agent 嵌套**(maxDepth > 1):`runChildAgent` 内部也调 `runContextStorage.run({ eventBus: childBus, lineage: childLineage }, async () => runAgentLoop(...))`,孙子 Task closure 自动取到 sub 当前的 bus 和 lineage,无需手工传递。
+**子 agent 嵌套**(maxDepth > 1):`runChildAgent` 内部也调 `runContextStorage.run({ bus: childBus, lineage: childLineage }, async () => runAgentLoop(...))`,孙子 Task closure 自动取到 sub 当前的 bus 和 lineage,无需手工传递。
 
 ### 4.5 Task 工具 prompt(给 LLM 的描述)
 
@@ -1005,11 +1071,18 @@ export interface RunChildAgentOptions {
   model: string;
   llmRoles: LLMRoles;
   securityPipeline: SecurityPipeline;
-  resolvedWorkspace: ResolvedWorkspace;
+  // 工作区相关字段平铺(对齐 buildSystemPrompt PromptBuildContext 的字段形态,
+  // 子 system prompt 装配时直接透传 opts.* 即可,无中间结构):
+  //   - workspace            工作区路径(null 表示无工作区)
+  //   - workspaceSource      工作区来源标识(cli / directory-config / global-config / cwd-fallback)
+  //   - globalConfigPath     全局配置路径(独立概念,与 workspace 来源不同)
+  workspace: string | null;
+  workspaceSource?: string;
+  globalConfigPath?: string;
   // 父级 spawn 上下文
   // parentBus 必须是具体类 EventBus(不是 IEventBus 接口):createEventBus 的
   // EventBusOptions.parent 字段在实现层依赖类内部的 emitFromChild 私有方法,
-  // 接口类型无法承载该契约;Task 工具拿 ALS 中的 runCtx.eventBus(就是 EventBus 实例)
+  // 接口类型无法承载该契约;Task 工具拿 ALS 中的 runCtx.bus(就是 EventBus 实例)
   // 透传到这里,类型链一致。
   parentBus: EventBus<AgentEventMap>;
   parentLineage: string;
@@ -1017,10 +1090,8 @@ export interface RunChildAgentOptions {
   parentTools: readonly ToolDefinition[];
   parentSignal: AbortSignal;
 
-  /** 任务文本(进 system prompt,不进 user message) */
+  /** 任务文本(进 system prompt 的 "Your Role" 段,不进 user message) */
   task: string;
-  /** Task 工具 description(短摘要) */
-  description: string;
   /** 资源预算(可选,默认见 §7) */
   budget?: SubAgentBudget;
 }
@@ -1069,11 +1140,14 @@ async function runChildAgent(opts: RunChildAgentOptions): Promise<ChildAgentResu
   // —— 不要直接读 opts.budget?.confirmationPolicy,后者绕过单一真相源,默认值同步将断裂
   const budget = resolveSubAgentBudget(opts.budget);
 
+  // child broker 不注入 eventBus —— 与主 broker 装配模式一致(broker 内部 emit
+  // 事件不依赖 bus 路径,审计字段通过 snapshot() 接口暴露,EventBus 路径预留未来接入);
+  // 字段顺序与 ConfirmationBrokerOptions 结构一致,parentBrokerId / sourceAgentId
+  // 是审计血缘元信息,broker emit 事件 / snapshot() 时透传
   const childBroker = new ConfirmationBroker({
-    eventBus: childBus,
-    nonInteractiveResolver: resolveSubAgentResolver(budget.confirmationPolicy),
-    parentBrokerId: opts.parentBroker.id,    // 审计血缘元信息
+    parentBrokerId: opts.parentBroker.id,
     sourceAgentId: subAgentId,
+    nonInteractiveResolver: resolveSubAgentResolver(budget.confirmationPolicy),
   });
   // 默认 policy "inherit-or-deny" → failToDenyResolver(broker 已默认行为);
   // 父 alwaysAllow 通过共享 PermissionStore 自动命中,根本不进 broker
@@ -1084,14 +1158,14 @@ async function runChildAgent(opts: RunChildAgentOptions): Promise<ChildAgentResu
   // 3. 装配子 system prompt
   //    注意:不传 project context / 用户记忆 / 父反思 —— 子 agent 任务专注,
   //    跨 spawn 的静态前缀 byte-identical 利于 prompt cache(详见 §3.3 / §6.3)
-  const systemPrompt = buildSystemPrompt({
+  const   systemPrompt = buildSystemPrompt({
     profile,
     segments: SUB_AGENT_SEGMENTS,
     tools: childTools,
     cwd: process.cwd(),
-    workspace: opts.resolvedWorkspace.path,
-    workspaceSource: opts.resolvedWorkspace.source,
-    globalConfigPath: getGlobalConfigPath(),
+    workspace: opts.workspace,
+    workspaceSource: opts.workspaceSource,
+    globalConfigPath: opts.globalConfigPath,
   });
 
   // 4. 注入极短 user message(决定 #11)
@@ -1107,7 +1181,7 @@ async function runChildAgent(opts: RunChildAgentOptions): Promise<ChildAgentResu
 
   try {
     runResult = await runContextStorage.run(
-      { eventBus: childBus, lineage: childLineage },
+      { bus: childBus, lineage: childLineage },
       async () =>       runSubAgentLoop({
         profile,
         systemPrompt,
@@ -1279,7 +1353,8 @@ async function runSubAgentLoop(opts) {
 父 turn N (main):
   ├─ runtime.run():
   │    1. 创建 per-run eventBus({ lineage: "main" })
-  │    2. runContextStorage.run({ eventBus, lineage: "main" }, async () => {...agent loop...})
+  │    2. runContextStorage.run({ bus: eventBus, lineage: "main" }, async () => {...agent loop...})
+  │       —— RunContext 字段名为 bus(对齐 run-context.ts);ALS 透传不重命名
   ├─ user msg
   ├─ assistant tool_use(Task, { description, prompt })   ← 父 LLM 决定派 Task
   │
@@ -1287,14 +1362,15 @@ async function runSubAgentLoop(opts) {
         │
         ▼
      Task.call (closure 持具体共享服务;ALS 取 per-run state):
-       1. runCtx = runContextStorage.getStore() → { eventBus, lineage: "main" }
+       1. runCtx = runContextStorage.getStore() → { bus, lineage: "main" }
        2. ctx.abortSignal → parentSignal(父 controller.signal)
        3. 调 runChildAgent({
-            provider, model, llmRoles, securityPipeline, resolvedWorkspace,    ← closure 持
-            parentBus: runCtx.eventBus, parentLineage: runCtx.lineage,            ← ALS 取
+            provider, model, llmRoles, securityPipeline,                           ← closure 持
+            workspace, workspaceSource, globalConfigPath,                          ← closure 持(平铺)
+            parentBus: runCtx.bus, parentLineage: runCtx.lineage,                  ← ALS 取
             parentBroker, parentTools,                                             ← closure 持
             parentSignal: ctx.abortSignal,                                         ← ctx
-            task, description,                                                     ← input
+            task: prompt,                                                          ← input(description 不下传)
           })
             │
             ▼
@@ -1303,10 +1379,10 @@ async function runSubAgentLoop(opts) {
           2. profile = subAgentProfile({ subAgentId, task })
           3. childLineage = "main/sub-<subAgentId.slice(0,8)>"
           4. childBus = createEventBus({ parent: parentBus, lineage: childLineage })
-          5. childBroker = new ConfirmationBroker({ eventBus: childBus, parentBrokerId, sourceAgentId })
+          5. childBroker = new ConfirmationBroker({ parentBrokerId, sourceAgentId, nonInteractiveResolver })
           6. childTools = parentTools.filter(t => t.subAgentSafe === true)
           7. systemPrompt = buildSystemPrompt({ profile, segments: SUB_AGENT_SEGMENTS, ... })
-          8. await runContextStorage.run({ eventBus: childBus, lineage: childLineage }, async () =>
+          8. await runContextStorage.run({ bus: childBus, lineage: childLineage }, async () =>
                runSubAgentLoop({
                  ..., parentSignal: opts.parentSignal,           // ← runAgentLoop 内部派生 child controller
                                                                   // 自动注入 parent-abort kind
@@ -1320,6 +1396,7 @@ async function runSubAgentLoop(opts) {
             │
             ▼
        4. formatChildResultAsToolResult(result, description) → ToolResult { content, isError }
+          —— description 仅 Task closure 自持(错误标签 / 状态条),不传 runChildAgent
        5. return ToolResult
 
 父 turn N (continued):
@@ -1365,10 +1442,12 @@ Begin. Your task is in the system prompt under "Your Role". Depth: 1/1.
 
 ### 6.4 主 agent system prompt 增强
 
-`mainProfile().instructions` 文本中加一段(M2.3 实现时定稿):
+实现位置:`packages/orchestrator/src/runtime/system-prompt.ts` —— 作为**条件性 segment**(`sub-agent-delegation`),**不**写入 `mainProfile().instructions`。
+
+段文本(导出常量 `SUB_AGENT_DELEGATION_TEXT`,作为 byte-equal 锚点供测试断言):
 
 ```markdown
-# Sub-Agent Delegation (Task tool)
+## Sub-Agent Delegation (Task tool)
 
 You have access to a `Task` tool that lets you launch sub-agents for research-style sub-tasks with isolated context.
 
@@ -1381,6 +1460,19 @@ You may launch up to 3 Tasks in a single turn. They run in parallel.
 
 When a Task fails, you MUST surface the failure in your final response — do not silently continue or pretend it succeeded.
 ```
+
+**条件渲染契约**(`buildSubAgentDelegation(tools)` in `system-prompt.ts`):
+- `tools` 含 name === "Task" 工具 → 返回 `SUB_AGENT_DELEGATION_TEXT`
+- 不含 → 返回 `null`,被 `buildSystemPrompt` 跳过(无空白噪声)
+
+**段位置**:`MAIN_AGENT_SEGMENTS` 中紧跟 `tool-usage` —— delegation 在概念上是 Task 工具使用的延伸说明,放工具段后是自然语义流。
+
+**为什么是 segment 而非 `mainProfile().instructions`**:
+- **条件性渲染**:`tools` 不含 Task 时 byte-equal 历史输出(从未启用过 Task 的 server / 测试场景无回归)。若硬编码到 instructions,无 Task 工具时 LLM 会看到不存在的 Task 引用,误导决策。
+- **架构对称**:`skill-evolution` 段已经走"tools 含 memory 才渲染"的相同模式,delegation 跟随 → 段集驱动设计统一,非主路径下 `mainProfile()` 文本恒定 byte-equal。
+- **测试锁定**:`SUB_AGENT_DELEGATION_TEXT` 作为常量导出后,byte-equal 锚点测试直接断言 `prompt.contains(SUB_AGENT_DELEGATION_TEXT)`,文案改动一目了然。
+
+**`SUB_AGENT_SEGMENTS` 不含 `sub-agent-delegation`** —— 子 agent 工具集自然不含 Task(`subAgentSafe: false` 防递归),delegation 段对子无意义;即便子工具集出错地含 Task,segment 未启用是最后一道防线。
 
 ### 6.5 完成 / 失败 / 中止三态
 
@@ -1947,7 +2039,7 @@ text 解析是 best-effort(不是协议层 truth),但对人类可读已足够。
 
 **独立性**:M2.1 输出是 orchestrator 内部 API,无 LLM-facing 暴露;Task 工具(M2.3)接入后即变 LLM-facing
 
-**与 §6.1 理想态的差异(YAGNI 渐进上线,避免接口债务)**:M2.1 交付的 `RunChildAgentOptions` **不含** §6.1 列出的 `parentBroker` 与 `description` 两个字段(本阶段无任何消费方);M2.2 加回 `parentBroker` 字段(必填,作为 audit 血缘真相源),`description` 字段由 M2.3 引入(Task 工具元信息),调用方升级时通过 TypeScript 类型错误自动发现。同样,§6.1 中的 `runSubAgentLoop` 在 M2.1 不作为 `@zhixing/orchestrator/subagent` 公共 API 导出(仅同包 internal 消费);未来如有 background agent 等场景需要细粒度控制,在 `subagent/index.ts` 显式追加导出 + 补完使用文档
+**与 §6.1 理想态的差异(YAGNI 渐进上线,避免接口债务)**:M2.1 交付的 `RunChildAgentOptions` 不含 `parentBroker` 字段(本阶段无消费方);M2.2 加回 `parentBroker`(必填,作为 audit 血缘真相源),调用方升级时通过 TypeScript 类型错误自动发现。`runSubAgentLoop` 在 M2.1 不作为 `@zhixing/orchestrator/subagent` 公共 API 导出(仅同包 internal 消费);未来如有 background agent 等场景需要细粒度控制,在 `subagent/index.ts` 显式追加导出 + 补完使用文档。`description` 字段不进 `RunChildAgentOptions` —— Task 工具呈现层概念(标签 / 错误格式化),由 Task closure 自持,与子 agent 业务层(任务全文走 `task` 字段进 system prompt)严格解耦,符合单一职责
 
 #### M2.2 — Confirmation 子 broker 元信息 + audit ✅ 已完成
 
@@ -1973,33 +2065,40 @@ text 解析是 best-effort(不是协议层 truth),但对人类可读已足够。
 
 **audit 字段的当前消费方与未来路径**:M2.2 阶段 child broker 不接 eventBus,audit 字段通过 `snapshot()` 接口暴露,供未来审计工具消费(eventBus 路径 + 自动注入逻辑已就位,后续接入零额外改造)
 
-#### M2.3 — Task 工具实现
+#### M2.3 — Task 工具实现 ✅ 已完成
 
-- `packages/orchestrator/src/runtime/run-context.ts`(M2.1 已落地;M2.3 加主路径消费)
-- `runtime.run()` 入口创建 `eventBus = createEventBus({ lineage: "main" })`(显式 lineage,INV-S5 兼容子嵌套,**M1 已实现**);M2.3 在此处用 `runContextStorage.run({ bus: eventBus, lineage: "main" }, async () => ...)` 包裹整个 agent loop 主体,让 Task closure 在 `call()` 时能取到 per-run bus/lineage
-- `packages/orchestrator/src/tools/task.ts` 落地(`createTaskTool(env)` 工厂);env 持 createAgentRuntime 内部局部变量 capture(`provider / model / llmRoles / securityPipeline / resolvedWorkspace / parentBroker / parentTools`),避免 AgentRuntime forward reference;per-run `eventBus / lineage` 通过 `runContextStorage.getStore()` 取
-- `createAgentRuntime` 加 `enableTaskTool?: boolean` 选项,主路径 cli/server 入口传 true,sub 路径不传(子工具集自然不含 Task)
-- `formatChildResultAsToolResult` 三态文本协议(snapshot test)
-- Task 工具 prompt 写入(§4.5 原文)
-- 主 profile `instructions` 加 Sub-Agent Delegation 段(§6.4)
+- ✅ `packages/orchestrator/src/tools/task.ts` 落地:`createTaskTool(env)` 工厂 + `TaskToolEnv` 接口 + `TASK_INPUT_SCHEMA` + `TASK_TOOL_PROMPT` + `TASK_TOOL_BOUNDARIES`(`process/exec` 静态边界声明,SecurityPipeline 分类锚点)+ `formatChildResultAsToolResult` 三态文本协议(`<usage>` 尾巴 byte-equal)
+- ✅ env 持 createAgentRuntime 内部局部变量 capture(`provider / model / llmRoles / securityPipeline / workspace / workspaceSource / globalConfigPath / parentBroker / parentTools`),避免 AgentRuntime forward reference;per-run `bus / lineage` 通过 `runContextStorage.getStore()` 取
+- ✅ `runtime.run()` 入口用 `runContextStorage.run({ bus: eventBus, lineage: "main" }, async () => runMainLoop())` 包裹整个 agent loop 主体,让 Task closure 在 `call()` 时能取到 per-run bus / lineage(`disposeAll()` 留在外层 finally 保证清理)
+- ✅ `createAgentRuntime` 加 `enableTaskTool?: boolean` 选项(默认 false);开启时:
+  - `createTaskTool` 在 `baseTools` 与 `securityPipeline / boundaryRegistry` 装配后调用,产出的 `taskTool` 追加进 `tools` 数组
+  - `taskTool.boundaries` 显式注册到 mutable `boundaryRegistry` —— **这一步关键**,省略则 Task 在 fail-closed 默认下被 `BoundaryImpactClassifier` 升级为 `critical`,在非交互模式下被 `PermissionMatcherMiddleware` 默认拒绝
+  - `systemPrompt` 用最终 `tools`(含 Task)构建,`buildSubAgentDelegation` 检测到 Task 工具自动渲染 delegation 段
+- ✅ 主 agent system prompt 加 `sub-agent-delegation` segment(§6.4):**条件性 segment**(tools 含 Task 才渲染,常量 `SUB_AGENT_DELEGATION_TEXT` byte-equal 导出),不写入 `mainProfile().instructions` —— mainProfile 不变保证无 Task 场景 byte-equal 历史输出
+- ✅ `package.json` 加 `./tools` 子路径 + `tsup.config.ts` 加 `src/tools/index.ts` entry + `packages/orchestrator/src/tools/index.ts` barrel + 顶级 `index.ts` re-export
+- ✅ 单测覆盖:
+  - `tools/__tests__/task.test.ts`(32 用例:`formatChildResultAsToolResult` 三态 + `<usage>` 尾巴 + sub_id 截断 + cache tokens 不暴露(回归保护)+ `TASK_INPUT_SCHEMA` 结构契约 + `TASK_TOOL_PROMPT` 关键句 + `createTaskTool` 元信息 + 契约前置校验集中(ALS 缺失 / `ctx.abortSignal` 缺失 / `description` 空 / `prompt` 空 / `trim()` 接受) + happy path 集成)
+  - `runtime/__tests__/system-prompt.test.ts` 加 8 用例(MAIN/SUB segments 集成 + 条件渲染 + byte-equal 锚点 + 段顺序 + 子 agent 安全门)
+  - `runtime/__tests__/create-agent-runtime.test.ts` 加 5 用例(ALS 透传契约 + 两个并发 run() 各自 ALS 不串扰 + `enableTaskTool=true` happy path 三轮 LLM 调用 + `enableTaskTool=true` 时 Task `subAgentSafe===false` 防递归不变量 + `enableTaskTool` 默认 false 向后兼容)
 
-**验证**:
-- e2e:用户输 "用 Task 工具帮我读 README" → 主派 Task → 子读 → tool_result 回 → 主综合输出
-- ALS 测试:Task closure 在 `call()` 时能取到 per-run bus/lineage;并发模拟两个 run 互不串扰
-- INV-S5 测试:子 lineage(`"main/sub-..."`)以父 lineage(`"main"`)+ "/" 开头校验通过
+**验证**:`orchestrator` 全套 204 用例全绿(M2.2 后 +45);typecheck 全绿;build 产出 `dist/tools/index.d.ts` 完整
 
-**独立性**:M2.3 完成后 Task 可用,但 dispatch 仍串行(M2.5 之前并发不真),"3 并发"产品语义未完全兑现
+**独立性**:M2.3 完成后 Task 工具技术能力 + 装配契约就绪,但**生产入口(cli REPL / cli runOnce / serve 持久会话 / serve ephemeral 共四处)默认 `enableTaskTool: false`** —— 状态条未上线前打开 Task 等于让用户看子 agent 黑盒,UX 不可接受,故工具能力 / 用户可见性 / 生产开关三件作为整体在 M2.4 一次性配套上线(见下条);此外 dispatch 仍串行(M2.5 之前并发不真),"3 并发"产品语义未完全兑现 —— prompt 已引导 LLM "up to 3 Tasks per turn",并发实际兑现等 M2.5 tool-executor 改造
 
-#### M2.4 — CLI 状态条(子可见性)
+#### M2.4 — CLI 状态条(子可见性) + 生产入口启用 Task
 
 - 渲染层订阅 EventBus,按 `meta.lineage` 过滤子事件
 - 状态条显示 `[Task#N: <desc>] <最近工具>`
 - 失败 / 中止图标
 - Esc 已具备(主中断协议),无新代码
+- **生产入口启用 Task 工具** —— 在 cli REPL(`cli/src/repl.ts`)/ cli runOnce(`cli/src/run-agent.ts`)/ serve 持久会话路径(`cli/src/serve/command.ts` `createAgentRuntime` 回调工厂)/ serve ephemeral 路径(`cli/src/serve/command.ts` `ephemeralRuntime`)四处 `createAgentRuntime({ ..., enableTaskTool: true })` 显式开启。M2.3 完成时仅实现"装配选项 + 测试覆盖",**生产路径默认 false** 是有意为之:状态条未就绪前打开 Task,用户看子 agent 是黑盒(无可见性 = 不可接受 UX)。状态条上线即同步打开,M2.4 一次性收口"工具能力 + 用户可见性 + 生产开关"三件配套上线
 
-**验证**:CLI 跑并发 Task 时状态条实时更新;失败标记正确
+**验证**:
+- CLI 跑并发 Task 时状态条实时更新;失败 / 中止图标正确显示
+- 端到端集成测试覆盖"生产入口启用 Task + 渲染层订阅"连通性:四处入口(cli REPL / cli runOnce / serve 持久会话 / serve ephemeral)装配后,启动一次 run,通过 `decorateRunBus` 钩子拿到 per-run bus,断言事件流出现 `tool:call_start { name: "Task" }` 与子 agent 冒泡事件(meta.lineage 以 "main/sub-" 开头)
+- system prompt 含 Task 工具 / `Sub-Agent Delegation` 段的 byte-equal 锚点已由 `system-prompt.test.ts` 8 用例覆盖,本里程碑无需重复
 
-**独立性**:仅 CLI 渲染,不影响业务逻辑
+**独立性**:渲染改造与生产开关绑定一起上线 —— 两者解耦无意义(打开开关无渲染 = 黑盒 / 渲染就绪不开开关 = 无内容)
 
 #### M2.5 — Tool dispatcher 并发改造(决定 #9 兑现)
 
@@ -2083,10 +2182,11 @@ text 解析是 best-effort(不是协议层 truth),但对人类可读已足够。
 | `IConfirmationBroker.id` + `BrokerSnapshot.{ id, parentBrokerId?, sourceAgentId? }` + `ConfirmationBrokerOptions.{ id?, parentBrokerId?, sourceAgentId? }` + `ConfirmationEventMap` 6 事件 payload audit 字段(broker `emitEvent` 自动注入) + `failToAllowResolver` 测试用 | [packages/core/src/confirmation/types.ts](../../../packages/core/src/confirmation/types.ts) + [packages/core/src/confirmation/broker.ts](../../../packages/core/src/confirmation/broker.ts) + [packages/core/src/confirmation/non-interactive.ts](../../../packages/core/src/confirmation/non-interactive.ts) | M2.2 |
 | `resolveSubAgentResolver(policy)` + `confirmation/index.ts` barrel + 顶级 barrel + `package.json ./confirmation` sub-path + `tsup.config.ts` entry + `child-broker.test.ts`(三策略路径) | `packages/orchestrator/src/confirmation/child-broker.ts` + `packages/orchestrator/src/confirmation/index.ts` + `packages/orchestrator/src/index.ts` + `packages/orchestrator/package.json` + `packages/orchestrator/tsup.config.ts` | M2.2 |
 | `RunChildAgentOptions.parentBroker: IConfirmationBroker` 必填 + `runChildAgent` 装配 child broker 透传 `parentBrokerId` / `sourceAgentId` / 由 `resolveSubAgentResolver(budget.confirmationPolicy)` 决定 resolver(`budget` 为 `resolveSubAgentBudget(opts.budget)` 投影后的 ResolvedBudget,严格走单一真相源) + `factory.test.ts` 加 audit 验证 + 端到端 `tool:call_end.success=false` 不变量验证(audit 1 + 缺省 1 + auto-deny 1 + e2e 1 共 4 个新用例) | `packages/orchestrator/src/subagent/factory.ts` + `packages/orchestrator/src/subagent/__tests__/factory.test.ts` | M2.2 |
-| `createTaskTool(env)` Task 工具工厂 | `packages/orchestrator/src/tools/task.ts`(新建) | M2.3 |
-| `runtime.run()` 入口包裹 `runContextStorage.run({ bus: eventBus, lineage: "main" }, ...)` | `packages/orchestrator/src/runtime/create-agent-runtime.ts` | M2.3 |
-| 主 profile `instructions` + Sub-Agent Delegation 段 | `packages/orchestrator/src/profile/default-profiles.ts` | M2.3 |
+| `createTaskTool(env)` Task 工具工厂 + `TaskToolEnv` 接口(`workspace`/`workspaceSource`/`globalConfigPath` 平铺三字段,对齐 `PromptBuildContext`) + `TASK_INPUT_SCHEMA` + `TASK_TOOL_PROMPT` + `TASK_TOOL_BOUNDARIES`(`process/exec` 静态边界声明)+ `assertCallContract` helper(集中 fail-fast 校验:ALS / `ctx.abortSignal` / `description` / `prompt`)+ `formatChildResultAsToolResult` 三态格式化 + `formatUsageTag`(`tokens = input + output`,cache tokens 有意不暴露,详见函数注释)+ `tools/index.ts` barrel + `package.json ./tools` sub-path + `tsup.config.ts` entry + 顶级 barrel re-export + `tools/__tests__/task.test.ts`(32 用例:三态文本 / schema / prompt / 元信息 / 契约前置校验集中 / cache tokens 不暴露回归保护 / happy path) | `packages/orchestrator/src/tools/task.ts` + `packages/orchestrator/src/tools/index.ts` + `packages/orchestrator/src/index.ts` + `packages/orchestrator/package.json` + `packages/orchestrator/tsup.config.ts` + `packages/orchestrator/src/tools/__tests__/task.test.ts` | M2.3 |
+| `createAgentRuntime` 加 `enableTaskTool?: boolean` 选项 + `runtime.run()` 入口包裹 `runContextStorage.run({ bus: eventBus, lineage: "main" }, ...)` 整个 agent loop 主体 + 装配阶段把 `taskTool.boundaries` 注册到 mutable `boundaryRegistry`(SecurityPipeline 分类必需,详见 §4.1 末"Boundaries 声明")+ `create-agent-runtime.test.ts` 加 5 个用例(ALS 透传 / 两个并发 run() ALS 不串扰 / `enableTaskTool=true` happy path / Task `subAgentSafe===false` 防递归不变量 / 默认 false 向后兼容) | `packages/orchestrator/src/runtime/create-agent-runtime.ts` + `packages/orchestrator/src/runtime/__tests__/create-agent-runtime.test.ts` | M2.3 |
+| `sub-agent-delegation` 条件性 segment(`SUB_AGENT_DELEGATION_TEXT` 常量 byte-equal 导出 + `buildSubAgentDelegation(tools)` 检测 Task 工具决定渲染)+ `MAIN_AGENT_SEGMENTS` 加 `sub-agent-delegation`(紧跟 tool-usage)+ `SUB_AGENT_SEGMENTS` 显式不含(防递归子 agent)+ `system-prompt.test.ts` 加 8 用例(MAIN/SUB segments 集成 / 条件渲染 / byte-equal 锚点 / 段顺序 / 子 agent 安全门) | `packages/orchestrator/src/runtime/system-prompt.ts` + `packages/orchestrator/src/runtime/__tests__/system-prompt.test.ts` | M2.3 |
 | CLI 状态条 lineage filter(meta 第二参) | [packages/cli/src/render.ts](../../../packages/cli/src/render.ts) | M2.4 |
+| 生产入口启用 Task 工具 —— 四处装配 `createAgentRuntime({ ..., enableTaskTool: true })`,与状态条同步上线(详见 §15 M2.4 独立性段) | [packages/cli/src/repl.ts:648](../../../packages/cli/src/repl.ts#L648)(REPL)+ [packages/cli/src/run-agent.ts:48](../../../packages/cli/src/run-agent.ts#L48)(runOnce)+ [packages/cli/src/serve/command.ts:161](../../../packages/cli/src/serve/command.ts#L161)(serve 持久会话)+ [packages/cli/src/serve/command.ts:270](../../../packages/cli/src/serve/command.ts#L270)(serve ephemeral) | M2.4 |
 | tool-executor 并发改造(`isParallelSafe` + `Promise.allSettled`) | [packages/core/src/loop/tool-executor.ts](../../../packages/core/src/loop/tool-executor.ts) | M2.5 |
 | `/usage` 命令解析 toolCalls Task `<usage>` text | [packages/cli/src/](../../../packages/cli/src/) | M2.6 |
 
