@@ -23,6 +23,8 @@ import {
   getAgentIdentity,
 } from "@zhixing/core";
 import type { DecorateRunBusFn } from "@zhixing/orchestrator/runtime";
+import { setupSubAgentStatus } from "./sub-agent-status.js";
+import { getToolRenderStrategy } from "./tool-render-strategy.js";
 
 // ─── Spinner 常量 ───
 
@@ -96,6 +98,9 @@ export function createRenderer(): Renderer {
         break;
 
       case "tool_start":
+        // 部分工具(策略表标记非 default 者)由专用订阅器接管渲染 ——
+        // 主路径若仍输出 ⟡ 卡片会与状态条形成双重渲染视觉混乱,统一查策略表跳过
+        if (getToolRenderStrategy(event.name) !== "default") break;
         if (!atLineStart) process.stdout.write("\n");
         process.stdout.write(
           `  ${chalk.cyan("⟡")} ${chalk.cyan(event.name)} ${chalk.dim(getToolSummary(event.name, event.input))} `,
@@ -104,6 +109,7 @@ export function createRenderer(): Renderer {
         break;
 
       case "tool_end": {
+        if (getToolRenderStrategy(event.name) !== "default") break;
         const status = event.result.isError
           ? chalk.red("✗")
           : chalk.green("✓");
@@ -755,6 +761,8 @@ function getToolSummary(name: string, input: Record<string, unknown>): string {
  *   - context:budget_check (仅 pre-compact + warning+ 渲染)
  *   - context:compact_start / context:compact_end
  *   - interrupt:* + llm:stream_event + agent:run_end (经 setupInterruptRendering)
+ *   - 子 agent 状态条:tool:call_start/end (经 setupSubAgentStatus,按 meta.lineage
+ *     过滤主 Task 调用与子 agent 工具事件,实时显示 [Task#N: <desc>] <最近工具>)
  *
  * 不涵盖(职责正交):
  *   - 数据收集类订阅(如 subscribeCompactAccumulator),归 runtime 主流程
@@ -798,10 +806,12 @@ export function createRenderSubscribers(renderer?: Renderer): DecorateRunBusFn {
     }));
 
     const interruptHandle = setupInterruptRendering(bus, pauseUI);
+    const subAgentStatusHandle = setupSubAgentStatus(bus, pauseUI);
 
     return () => {
       for (const u of unsubs) u();
       interruptHandle.dispose();
+      subAgentStatusHandle.dispose();
     };
   };
 }

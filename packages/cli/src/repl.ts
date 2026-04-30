@@ -653,6 +653,10 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     decorateRunBus: createRenderSubscribers(renderer),
     onSecurityBlocked: renderBlockedMessage,
     onUserDenied: renderUserDeniedMessage,
+    // 主路径开启 Task 工具:让主 LLM 可派发子 agent 处理隔离任务。
+    // 子 agent 进度通过 EventBus 冒泡 → 状态条实时显示(createRenderSubscribers
+    // 已集成 setupSubAgentStatus,按 meta.lineage 过滤渲染)。
+    enableTaskTool: true,
   });
 
   // 构造 runAgentTurn：将 Scheduler 的任务执行桥接到 session.run

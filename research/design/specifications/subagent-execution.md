@@ -382,6 +382,7 @@ const runtime = await createAgentRuntime({
 - renderer 在工厂层通过参数注入,工厂返回的装饰器函数闭包持有它
 - 装饰器内部用 `bus.on("retry:*", ...)` 订阅事件,渲染前调 `renderer.stop()` 暂停 spinner
 - 同时调 `setupInterruptRendering(bus, pauseUI)` 装载中断事件渲染
+- M2.4 起并列扩充 `setupSubAgentStatus(bus, pauseUI)` 装载子 agent 状态条(详见 §11.2 / §15 M2.4),与 `setupInterruptRendering` 共享 `pauseUI` 钩子与 dispose 路径
 - renderer 缺省(serve 模式无 spinner)时 pauseUI 退化为 no-op,事件仍渲染但不驱动 spinner
 
 **M1.2 完成后**:`orchestrator → cli` 零反向依赖;cli/render 是 UI subscribers,通过工厂注入,不嵌入 runtime 主流程,UI 概念也不出现在 runtime API 中。
@@ -1804,30 +1805,43 @@ INV-S4 已写明:子 abort / fail / 超时 **不**反向 abort 父。父 LLM 看
 
 ### 11.2 CLI 状态条(v1 必做)
 
-**位置**:[packages/cli/src/render.ts](../../../packages/cli/src/render.ts)(M2.4 扩展)
+**位置**:核心订阅器 [packages/cli/src/sub-agent-status.ts](../../../packages/cli/src/sub-agent-status.ts);装载入口 [packages/cli/src/render.ts](../../../packages/cli/src/render.ts) 的 `createRenderSubscribers`;主 / 状态条两路渲染策略表 [packages/cli/src/tool-render-strategy.ts](../../../packages/cli/src/tool-render-strategy.ts)。详见 §15 M2.4 已落地清单与 §17 anchor table。
 
-订阅事件(listener 第二参 `meta` 携带 lineage):
+订阅入口(`createRenderSubscribers` 内并列装载,与 `setupInterruptRendering` 形状对齐):
+
 ```typescript
-eventBus.on("tool:call_start", (payload, meta) => {
-  if (meta?.lineage?.includes("/sub-")) addStatusBarEntry(payload, meta.lineage);
-});
+import { setupSubAgentStatus } from "./sub-agent-status.js";
+
+// 在 createRenderSubscribers(renderer) 装饰器内:
+const handle = setupSubAgentStatus(bus, pauseUI);
+// handle.dispose() 在 run 结束 finally 释放 listener,避免跨 run 累积
 ```
 
-显示格式:
+订阅器内部按 listener 第二参 `meta.lineage` 区分:
+- `meta.lineage === "main"` + 工具名命中策略表 `sub-agent-status` → 起一个新 Task 状态条
+- `meta.lineage` 以 `"main/sub-"` 开头 → 关联到当前 Task,刷新最近子工具进度
+- `agent:run_end` 兜底重置(异常退出 / Task 未自然收尾)
+
+显示格式(TTY 模式 `\r` 单行原地刷新,只显示**最近一个**子工具,避免视觉堆叠):
+
 ```
-[Task#1: 调研竞品功能...]  Read foo.md ✓ → Grep "feature" → 进行中
-[Task#2: 查 X 库的 API...]  WebFetch ✓ → 进行中
-[Task#3: 总结 Y 的优劣...]  开始
+  ⌬ [Task#1: 调研竞品功能] 启动子 agent...           ← Task 起始整行(\n)
+  ⌬ [Task#1: 调研竞品功能] read foo.md ...           ← 子工具 in-flight,\r 刷新
+  ⌬ [Task#1: 调研竞品功能] read foo.md ✓ 12ms       ← 子工具完成,\r 刷新行尾追加状态 + 耗时
+  ⌬ [Task#1: 调研竞品功能] grep "feature" ...        ← 下一个子工具,\r 覆盖上一行
+  ⌬ [Task#1: 调研竞品功能] ✓ 5.2s                    ← Task 收尾整行(\n),收尾 = ✓/✗ + 总耗时
 ```
 
-- "Task#N: <description>" — N 是父 turn 内子顺序号,description 是 Task 工具 input.description
-- 后跟工具进度,只显示**最近一个**工具状态(避免堆叠)
-- 子完成时整行变 `[Task#1 ✓ <description>]`(成功)/ `[Task#1 ✗ <description>: <error type>]`(失败)
-- `Esc` 杀整 turn(主中断协议已具备)→ 所有子级联停 → 状态条消失
+- "Task#N: <description>" — N 是本 run 内累积顺序号(跨 turn 持续),description 是 Task 工具 `input.description`(超 30 字符截断带 …);description 缺失兜底 `(unnamed task)`
+- 子工具中间帧 `\r` 单行刷新最近工具:`<name> [path/cmd/pattern]` + `... → ✓/✗ <duration>ms`
+- Task 收尾帧 `\n` 整行输出:`✓ <total>s`(成功)/ `✗ <total>s`(失败);失败的 `<error type>` 不进状态条(信息走 EventBus / Task 工具 `tool_result.content` 的 `<usage>` trailer,避免单行视觉爆炸)
+- `Esc` 杀整 turn(主中断协议已具备)→ 所有子级联停 → `agent:run_end` 兜底重置状态条
+
+**非 TTY 模式(CI / pipe / 重定向 / serve daemon 日志)**:Task 起止帧仍各打整行,中间子工具事件 stdout 静默(可观测性走 EventBus 直采,避免日志爆炸)
 
 **默认不显示**:
 - 子内部 LLM 流式 token(避免视觉混乱)
-- 子工具的详细 input(只显示工具名)
+- 子工具的详细 input 全文(`read/write/bash/grep/glob` 显示截断的关键参数,其他工具只显示名)
 
 ### 11.3 RPC stream-json(v1 必做,自动)
 
@@ -2085,20 +2099,26 @@ text 解析是 best-effort(不是协议层 truth),但对人类可读已足够。
 
 **独立性**:M2.3 完成后 Task 工具技术能力 + 装配契约就绪,但**生产入口(cli REPL / cli runOnce / serve 持久会话 / serve ephemeral 共四处)默认 `enableTaskTool: false`** —— 状态条未上线前打开 Task 等于让用户看子 agent 黑盒,UX 不可接受,故工具能力 / 用户可见性 / 生产开关三件作为整体在 M2.4 一次性配套上线(见下条);此外 dispatch 仍串行(M2.5 之前并发不真),"3 并发"产品语义未完全兑现 —— prompt 已引导 LLM "up to 3 Tasks per turn",并发实际兑现等 M2.5 tool-executor 改造
 
-#### M2.4 — CLI 状态条(子可见性) + 生产入口启用 Task
+#### M2.4 — CLI 状态条(子可见性) + 生产入口启用 Task ✅ 已完成
 
-- 渲染层订阅 EventBus,按 `meta.lineage` 过滤子事件
-- 状态条显示 `[Task#N: <desc>] <最近工具>`
-- 失败 / 中止图标
-- Esc 已具备(主中断协议),无新代码
-- **生产入口启用 Task 工具** —— 在 cli REPL(`cli/src/repl.ts`)/ cli runOnce(`cli/src/run-agent.ts`)/ serve 持久会话路径(`cli/src/serve/command.ts` `createAgentRuntime` 回调工厂)/ serve ephemeral 路径(`cli/src/serve/command.ts` `ephemeralRuntime`)四处 `createAgentRuntime({ ..., enableTaskTool: true })` 显式开启。M2.3 完成时仅实现"装配选项 + 测试覆盖",**生产路径默认 false** 是有意为之:状态条未就绪前打开 Task,用户看子 agent 是黑盒(无可见性 = 不可接受 UX)。状态条上线即同步打开,M2.4 一次性收口"工具能力 + 用户可见性 + 生产开关"三件配套上线
+- ✅ `packages/cli/src/sub-agent-status.ts` 落地:`setupSubAgentStatus(bus, pauseUI)` EventBus 订阅器,按 `meta.lineage` 把"派发型工具"主调用与子 agent 冒泡事件关联,显示 `[Task#N: <desc>] <最近工具>` 单行状态;Task 起止帧(`writeFrameLine` 整行 + `\n`)与子工具中间帧(`writeStreamLine` `\r` 单行刷新)分通道写 stdout;`pauseUI` 钩子在状态条输出前停 spinner 避免动画覆盖
+- ✅ `packages/cli/src/tool-render-strategy.ts` 落地(单一事实源策略表):`ToolRenderStrategy = "default" | "sub-agent-status"` 联合类型 + `TOOL_RENDER_STRATEGY` Readonly 映射(当前 `Task → "sub-agent-status"`)+ `getToolRenderStrategy(name)` 唯一查询入口(未注册兜底 `"default"`)。**关键架构选择**:`tool-executor` 同时产出 `yield tool_start/tool_end`(主路径 `renderer.handleEvent`)与 `emit tool:call_start/end`(EventBus listener),若 Task 工具两路同时渲染则形成 ⟡ 卡片 + 状态条双重视觉混乱;策略表让 `renderer.handleEvent` 与 `setupSubAgentStatus` 共享同一查询入口,任何加表 / 改表两侧自动一致,杜绝两侧硬编码漂移
+- ✅ `packages/cli/src/render.ts` 改造:`renderEvent` 在 `tool_start` / `tool_end` 分支查策略表,`getToolRenderStrategy(event.name) !== "default"` 时直接 `break`(不渲染 ⟡ 卡片),让位给专用订阅器;`createRenderSubscribers` 内装载 `setupSubAgentStatus(bus, pauseUI)` 与既有 `setupInterruptRendering` 并列,共享 `pauseUI` 钩子与 `dispose` 路径
+- ✅ TTY / 非 TTY 行为差异:TTY 模式 `\r` 单行刷新最近工具进度(spec 要求"只显示最近一个,避免堆叠");非 TTY 模式仅 Task 起止打整行,中间子工具事件 stdout 静默(可观测性走 EventBus 直采,避免 CI / pipe 日志爆炸)。状态机内部仍维护 `currentTask` / `currentSubLineage`(逻辑层不分支,仅输出层 TTY/非 TTY 二选一),保证 Task 收尾路径在两种模式下一致
+- ✅ 顺序匹配的 M2.5 演进锚点:当前 dispatch 串行,"首个未关联的 sub-X lineage" 即视为"当前正在跑的 Task#N";真并发改造后顺序匹配会退化失效,需在 Task 工具 / `runChildAgent` 路径 emit 显式关联事件(如 `task:dispatch_start` payload 含 `sub_agent_id`)精确归属。当前模块 JSDoc 显式标注此演进路径
+- ✅ **生产入口启用 Task 工具** —— 四处 `createAgentRuntime({ ..., enableTaskTool: true })` 显式开启:[cli REPL](../../../packages/cli/src/repl.ts#L659) / [cli runOnce](../../../packages/cli/src/run-agent.ts#L56) / [serve 持久会话](../../../packages/cli/src/serve/command.ts#L172) / [serve ephemeral](../../../packages/cli/src/serve/command.ts#L284)。M2.3 完成时仅实现"装配选项 + 测试覆盖",**生产路径默认 false** 是有意为之:状态条未就绪前打开 Task = 用户看子 agent 黑盒(不可接受 UX)。M2.4 一次性收口"工具能力 + 用户可见性 + 生产开关"三件配套上线
+- ✅ 单测覆盖(共 +28 用例):
+  - `cli/__tests__/sub-agent-status.test.ts`(16 用例:TTY 模式 13 个 `[Task#1: desc]` 起始 / 子工具 \r 刷新 / ✓✗ 状态 / Task 收尾 \n / 跨 Task N 累积 / 顺序匹配 / `agent:run_end` 兜底 / dispose / description 缺失兜底 / 超长截断 / 非 Task 工具不响应;非 TTY 模式 3 个 整行起止 / 中间帧 stdout 零写入 / 收尾不受影响)
+  - `cli/__tests__/tool-render-strategy.test.ts`(5 用例:`Task → "sub-agent-status"` / 未注册工具兜底 default / 空串与未来未知工具防御 / `TOOL_RENDER_STRATEGY` byte-equal 锚点 / Readonly 类型契约)
+  - `cli/__tests__/render.test.ts` 加 7 用例(`Renderer.handleEvent · 派发型工具不渲染 ⟡ 卡片` 5 个:default `read` 正常 ⟡ / Task `tool_start` stdout 零写入 / Task `tool_end` stdout 零写入 / default 工具 ✓ + 耗时 / 混合序列 read+Task+write 仅 read/write 渲染;`createRenderSubscribers · SubAgentStatus 集成` 2 个:装载后主 Task 事件 stdout 出现 `[Task#1: ...]` / dispose 全清覆盖 SubAgentStatus + InterruptRendering + retry/context 订阅)
 
 **验证**:
-- CLI 跑并发 Task 时状态条实时更新;失败 / 中止图标正确显示
-- 端到端集成测试覆盖"生产入口启用 Task + 渲染层订阅"连通性:四处入口(cli REPL / cli runOnce / serve 持久会话 / serve ephemeral)装配后,启动一次 run,通过 `decorateRunBus` 钩子拿到 per-run bus,断言事件流出现 `tool:call_start { name: "Task" }` 与子 agent 冒泡事件(meta.lineage 以 "main/sub-" 开头)
+- `cli` 全套 437 用例全绿(M2.3 后 +28);`orchestrator` 全套 204 用例全绿(M2.4 不改 orchestrator);`server` 全套 491 用例全绿;cli typecheck 全绿
+- 双重渲染回归保护:`render.test.ts · 派发型工具不渲染 ⟡ 卡片` 5 用例锁定"主路径 handleEvent 对 Task 工具完全静默",任何回退到硬编码或漏查策略表的改动都会被这 5 个测试拦截
+- 集成连通性:`createRenderSubscribers · SubAgentStatus 集成` 直接验证装载链路,通过 `decorateRunBus` 钩子拿到 per-run bus,断言事件流出现 `tool:call_start { name: "Task" }` 后状态条 stdout 出现 `[Task#1: ...]` 输出
 - system prompt 含 Task 工具 / `Sub-Agent Delegation` 段的 byte-equal 锚点已由 `system-prompt.test.ts` 8 用例覆盖,本里程碑无需重复
 
-**独立性**:渲染改造与生产开关绑定一起上线 —— 两者解耦无意义(打开开关无渲染 = 黑盒 / 渲染就绪不开开关 = 无内容)
+**独立性**:渲染改造与生产开关绑定一起上线 —— 两者解耦无意义(打开开关无渲染 = 黑盒 / 渲染就绪不开开关 = 无内容);策略表设计让未来加新派发型工具(如 BackgroundTask)只需在 `TOOL_RENDER_STRATEGY` 注册 + 写新订阅器接管,`renderer.handleEvent` 主路径零改动
 
 #### M2.5 — Tool dispatcher 并发改造(决定 #9 兑现)
 
@@ -2185,8 +2205,10 @@ text 解析是 best-effort(不是协议层 truth),但对人类可读已足够。
 | `createTaskTool(env)` Task 工具工厂 + `TaskToolEnv` 接口(`workspace`/`workspaceSource`/`globalConfigPath` 平铺三字段,对齐 `PromptBuildContext`) + `TASK_INPUT_SCHEMA` + `TASK_TOOL_PROMPT` + `TASK_TOOL_BOUNDARIES`(`process/exec` 静态边界声明)+ `assertCallContract` helper(集中 fail-fast 校验:ALS / `ctx.abortSignal` / `description` / `prompt`)+ `formatChildResultAsToolResult` 三态格式化 + `formatUsageTag`(`tokens = input + output`,cache tokens 有意不暴露,详见函数注释)+ `tools/index.ts` barrel + `package.json ./tools` sub-path + `tsup.config.ts` entry + 顶级 barrel re-export + `tools/__tests__/task.test.ts`(32 用例:三态文本 / schema / prompt / 元信息 / 契约前置校验集中 / cache tokens 不暴露回归保护 / happy path) | `packages/orchestrator/src/tools/task.ts` + `packages/orchestrator/src/tools/index.ts` + `packages/orchestrator/src/index.ts` + `packages/orchestrator/package.json` + `packages/orchestrator/tsup.config.ts` + `packages/orchestrator/src/tools/__tests__/task.test.ts` | M2.3 |
 | `createAgentRuntime` 加 `enableTaskTool?: boolean` 选项 + `runtime.run()` 入口包裹 `runContextStorage.run({ bus: eventBus, lineage: "main" }, ...)` 整个 agent loop 主体 + 装配阶段把 `taskTool.boundaries` 注册到 mutable `boundaryRegistry`(SecurityPipeline 分类必需,详见 §4.1 末"Boundaries 声明")+ `create-agent-runtime.test.ts` 加 5 个用例(ALS 透传 / 两个并发 run() ALS 不串扰 / `enableTaskTool=true` happy path / Task `subAgentSafe===false` 防递归不变量 / 默认 false 向后兼容) | `packages/orchestrator/src/runtime/create-agent-runtime.ts` + `packages/orchestrator/src/runtime/__tests__/create-agent-runtime.test.ts` | M2.3 |
 | `sub-agent-delegation` 条件性 segment(`SUB_AGENT_DELEGATION_TEXT` 常量 byte-equal 导出 + `buildSubAgentDelegation(tools)` 检测 Task 工具决定渲染)+ `MAIN_AGENT_SEGMENTS` 加 `sub-agent-delegation`(紧跟 tool-usage)+ `SUB_AGENT_SEGMENTS` 显式不含(防递归子 agent)+ `system-prompt.test.ts` 加 8 用例(MAIN/SUB segments 集成 / 条件渲染 / byte-equal 锚点 / 段顺序 / 子 agent 安全门) | `packages/orchestrator/src/runtime/system-prompt.ts` + `packages/orchestrator/src/runtime/__tests__/system-prompt.test.ts` | M2.3 |
-| CLI 状态条 lineage filter(meta 第二参) | [packages/cli/src/render.ts](../../../packages/cli/src/render.ts) | M2.4 |
-| 生产入口启用 Task 工具 —— 四处装配 `createAgentRuntime({ ..., enableTaskTool: true })`,与状态条同步上线(详见 §15 M2.4 独立性段) | [packages/cli/src/repl.ts:648](../../../packages/cli/src/repl.ts#L648)(REPL)+ [packages/cli/src/run-agent.ts:48](../../../packages/cli/src/run-agent.ts#L48)(runOnce)+ [packages/cli/src/serve/command.ts:161](../../../packages/cli/src/serve/command.ts#L161)(serve 持久会话)+ [packages/cli/src/serve/command.ts:270](../../../packages/cli/src/serve/command.ts#L270)(serve ephemeral) | M2.4 |
+| CLI 子 agent 状态条订阅器 `setupSubAgentStatus(bus, pauseUI)` —— 按 `meta.lineage` 关联派发型工具主调用与子 agent 冒泡事件 + TTY/非 TTY 行为差异 + 顺序匹配演进锚点(M2.5) + 16 用例覆盖 | [packages/cli/src/sub-agent-status.ts](../../../packages/cli/src/sub-agent-status.ts) + [packages/cli/src/__tests__/sub-agent-status.test.ts](../../../packages/cli/src/__tests__/sub-agent-status.test.ts) | M2.4 |
+| 工具渲染策略表(单一事实源) `ToolRenderStrategy` + `TOOL_RENDER_STRATEGY` 映射 + `getToolRenderStrategy(name)` 唯一查询入口 —— 让 `renderer.handleEvent` 与 `setupSubAgentStatus` 共享同一查询入口避免双重渲染 + 5 用例覆盖 | [packages/cli/src/tool-render-strategy.ts](../../../packages/cli/src/tool-render-strategy.ts) + [packages/cli/src/__tests__/tool-render-strategy.test.ts](../../../packages/cli/src/__tests__/tool-render-strategy.test.ts) | M2.4 |
+| `render.ts` 集成:`renderEvent` 在 `tool_start` / `tool_end` 查策略表跳过非 default 工具(让位状态条)+ `createRenderSubscribers` 装载 `setupSubAgentStatus` 与 `setupInterruptRendering` 并列共享 `pauseUI` / `dispose` + 集成测试 7 用例(派发型工具不渲染 ⟡ 卡片 5 + SubAgentStatus 集成 2) | [packages/cli/src/render.ts](../../../packages/cli/src/render.ts) + [packages/cli/src/__tests__/render.test.ts](../../../packages/cli/src/__tests__/render.test.ts) | M2.4 |
+| 生产入口启用 Task 工具 —— 四处装配 `createAgentRuntime({ ..., enableTaskTool: true })`,与状态条同步上线(详见 §15 M2.4 独立性段) | [packages/cli/src/repl.ts:659](../../../packages/cli/src/repl.ts#L659)(REPL)+ [packages/cli/src/run-agent.ts:56](../../../packages/cli/src/run-agent.ts#L56)(runOnce)+ [packages/cli/src/serve/command.ts:172](../../../packages/cli/src/serve/command.ts#L172)(serve 持久会话)+ [packages/cli/src/serve/command.ts:284](../../../packages/cli/src/serve/command.ts#L284)(serve ephemeral) | M2.4 |
 | tool-executor 并发改造(`isParallelSafe` + `Promise.allSettled`) | [packages/core/src/loop/tool-executor.ts](../../../packages/core/src/loop/tool-executor.ts) | M2.5 |
 | `/usage` 命令解析 toolCalls Task `<usage>` text | [packages/cli/src/](../../../packages/cli/src/) | M2.6 |
 

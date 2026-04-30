@@ -8,6 +8,8 @@ import type {
 } from "@zhixing/core";
 import { createEventBus } from "@zhixing/core";
 import {
+  createRenderSubscribers,
+  createRenderer,
   formatAbortReasonSummary,
   renderSummary,
   setupInterruptRendering,
@@ -105,7 +107,9 @@ const stripAnsi = (s: string): string =>
   // eslint-disable-next-line no-control-regex
   s.replace(/\[[0-9;]*m/g, "");
 
-const usageZero = { inputTokens: 0, outputTokens: 0, cachedReadTokens: 0, cachedWriteTokens: 0 };
+// TokenUsage 零值 helper:仅 inputTokens / outputTokens 必填,cacheReadTokens /
+// cacheWriteTokens 是 optional 维度,本套测试不验缓存语义,故省略保持最小契约
+const usageZero = { inputTokens: 0, outputTokens: 0 };
 
 describe("renderSummary: 终止类型差异化", () => {
   let logSpy: ReturnType<typeof vi.spyOn>;
@@ -486,5 +490,214 @@ describe("setupInterruptRendering: 倒计时 ticker + 事件协调", () => {
     );
     expect(ticks).toEqual([]);
     expect(warnSpy.mock.calls.length).toBe(0);
+  });
+});
+
+// ─── createRenderSubscribers · 集成 SubAgentStatus ───
+//
+// 验证 createRenderSubscribers 装载了 setupSubAgentStatus,确保子 agent 状态条
+// 订阅与既有 retry / interrupt / context 订阅并列且共享 dispose 路径。
+// 不重复 sub-agent-status.test.ts 的细节断言,只锚定"集成已发生 + dispose 全清"。
+describe("createRenderSubscribers · SubAgentStatus 集成", () => {
+  let stdoutSpy: ReturnType<typeof vi.spyOn>;
+  let originalIsTTY: boolean | undefined;
+
+  beforeEach(() => {
+    originalIsTTY = process.stdout.isTTY;
+    Object.defineProperty(process.stdout, "isTTY", {
+      configurable: true,
+      value: true,
+    });
+    stdoutSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation(() => true);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (originalIsTTY === undefined) {
+      delete (process.stdout as unknown as { isTTY?: boolean }).isTTY;
+    } else {
+      Object.defineProperty(process.stdout, "isTTY", {
+        configurable: true,
+        value: originalIsTTY,
+      });
+    }
+  });
+
+  it("装载后 emit 主 Task 事件 → stdout 出现 [Task#1: ...] 状态条输出", async () => {
+    const bus = createEventBus<AgentEventMap>({ lineage: "main" });
+    const decorator = createRenderSubscribers(); // 无 renderer 时 pauseUI no-op
+    const dispose = decorator({ bus });
+
+    await bus.emit("tool:call_start", {
+      id: "tc1",
+      name: "Task",
+      input: { description: "测试集成", prompt: "..." },
+    });
+
+    const out = stdoutSpy.mock.calls
+      .map((c) => stripAnsi(String(c[0] ?? "")))
+      .join("");
+    expect(out).toContain("[Task#1: 测试集成]");
+
+    dispose();
+  });
+
+  it("dispose 全清:释放 SubAgentStatus + InterruptRendering + retry/context 订阅", async () => {
+    const bus = createEventBus<AgentEventMap>({ lineage: "main" });
+    const decorator = createRenderSubscribers();
+    const dispose = decorator({ bus });
+    dispose();
+
+    stdoutSpy.mockClear();
+
+    // 释放后所有事件都不应触发任何渲染器输出
+    await bus.emit("tool:call_start", {
+      id: "tc1",
+      name: "Task",
+      input: { description: "x", prompt: "..." },
+    });
+    await bus.emit("retry:attempt", {
+      errorType: "timeout",
+      attempt: 1,
+      maxRetries: 3,
+      delayMs: 1000,
+    });
+
+    expect(stdoutSpy).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Renderer.handleEvent · 派发型工具不渲染 ⟡ 卡片(P0 防回归) ───
+//
+// 主路径 onYield 的 tool_start/tool_end 与 EventBus 的 tool:call_start/end 同步发生,
+// 若 renderer.handleEvent 仍渲染派发型工具(如 Task)的 ⟡ 卡片,会与
+// setupSubAgentStatus 的状态条形成双重渲染视觉混乱。本测试套锁定:
+//   - 默认工具(read/write/bash 等)正常渲染 ⟡ 卡片
+//   - 策略表标记非 default 的工具(Task)主路径完全静默,交由专用订阅器接管
+//
+// 与 sub-agent-status.test.ts 互补 —— 那边测"状态条接管路径",这边测"主路径让位"。
+describe("Renderer.handleEvent · 派发型工具不渲染 ⟡ 卡片", () => {
+  let stdoutSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    stdoutSpy = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation(() => true);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("default 工具(read)正常渲染 ⟡ 卡片", () => {
+    const renderer = createRenderer();
+    renderer.handleEvent({
+      type: "tool_start",
+      id: "tc1",
+      name: "read",
+      input: { path: "a.ts" },
+    });
+    const out = stdoutSpy.mock.calls
+      .map((c) => stripAnsi(String(c[0] ?? "")))
+      .join("");
+    expect(out).toContain("⟡");
+    expect(out).toContain("read");
+    expect(out).toContain("a.ts");
+  });
+
+  it("Task 工具 tool_start → 主路径完全静默(无 ⟡, 无 stdout 写入)", () => {
+    const renderer = createRenderer();
+    renderer.handleEvent({
+      type: "tool_start",
+      id: "tc1",
+      name: "Task",
+      input: { description: "x", prompt: "..." },
+    });
+    // 主路径不写任何 stdout —— ⟡ 卡片由策略表跳过,完全交给 setupSubAgentStatus
+    expect(stdoutSpy).not.toHaveBeenCalled();
+  });
+
+  it("Task 工具 tool_end → 主路径完全静默(无 ✓/✗ duration, 无 stdout 写入)", () => {
+    const renderer = createRenderer();
+    renderer.handleEvent({
+      type: "tool_end",
+      id: "tc1",
+      name: "Task",
+      result: { content: "ok", isError: false },
+      duration: 100,
+    });
+    expect(stdoutSpy).not.toHaveBeenCalled();
+  });
+
+  it("default 工具 tool_end 正常渲染 ✓ + 耗时", () => {
+    const renderer = createRenderer();
+    // 先模拟 tool_start 进入"非行首"状态(handleEvent 内部 atLineStart 状态机)
+    renderer.handleEvent({
+      type: "tool_start",
+      id: "tc1",
+      name: "read",
+      input: { path: "a.ts" },
+    });
+    stdoutSpy.mockClear();
+    renderer.handleEvent({
+      type: "tool_end",
+      id: "tc1",
+      name: "read",
+      result: { content: "ok", isError: false },
+      duration: 50,
+    });
+    const out = stdoutSpy.mock.calls
+      .map((c) => stripAnsi(String(c[0] ?? "")))
+      .join("");
+    expect(out).toContain("✓");
+    expect(out).toContain("50ms");
+  });
+
+  it("混合序列:read + Task + write → 仅 read/write 渲染 ⟡, Task 静默", () => {
+    const renderer = createRenderer();
+    renderer.handleEvent({
+      type: "tool_start",
+      id: "t1",
+      name: "read",
+      input: { path: "a.ts" },
+    });
+    renderer.handleEvent({
+      type: "tool_end",
+      id: "t1",
+      name: "read",
+      result: { content: "ok", isError: false },
+      duration: 10,
+    });
+    renderer.handleEvent({
+      type: "tool_start",
+      id: "t2",
+      name: "Task",
+      input: { description: "x", prompt: "..." },
+    });
+    renderer.handleEvent({
+      type: "tool_end",
+      id: "t2",
+      name: "Task",
+      result: { content: "ok", isError: false },
+      duration: 1000,
+    });
+    renderer.handleEvent({
+      type: "tool_start",
+      id: "t3",
+      name: "write",
+      input: { path: "b.ts" },
+    });
+
+    const out = stdoutSpy.mock.calls
+      .map((c) => stripAnsi(String(c[0] ?? "")))
+      .join("");
+    expect(out).toContain("read");
+    expect(out).toContain("write");
+    // Task 名字不应出现在主路径 stdout 中(状态条单独渲染走 EventBus 通道)
+    expect(out).not.toContain("Task");
+    // 1000ms 是 Task 的耗时,不应出现在主路径(主路径跳过了 Task tool_end)
+    expect(out).not.toContain("1000ms");
   });
 });

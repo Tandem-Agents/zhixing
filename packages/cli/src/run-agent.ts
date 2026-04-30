@@ -52,6 +52,8 @@ export async function runOnce(options: RunOnceOptions): Promise<RunResult> {
       decorateRunBus: createRenderSubscribers(renderer),
       onSecurityBlocked: renderBlockedMessage,
       onUserDenied: renderUserDeniedMessage,
+      // 单次执行(prompt → 一次完整 run)同样开启 Task,与 REPL 路径行为对齐。
+      enableTaskTool: true,
     });
     return await runtime.run({
       messages: [userMessage(options.prompt)],
