@@ -12,8 +12,11 @@ import {
   createRenderer,
   formatAbortReasonSummary,
   renderSummary,
+  renderUsageReport,
   setupInterruptRendering,
 } from "../render.js";
+import type { SubAgentUsageEntry } from "../parse-task-usage.js";
+import type { ContextBudget } from "@zhixing/core";
 
 describe("formatAbortReasonSummary", () => {
   it("undefined → 兜底 'interrupted' (外部裸 abort 无类型化 reason)", () => {
@@ -224,6 +227,181 @@ describe("renderSummary: 终止类型差异化", () => {
     const out = lastLogLine();
     expect(out).toContain("0.5s");
     expect(out).not.toContain("上下文");
+  });
+});
+
+// ─── renderUsageReport: 子 agent 拆分段 ───
+
+describe("renderUsageReport: 子 agent Task 拆分段", () => {
+  let logSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const allOutput = (): string =>
+    stripAnsi(logSpy.mock.calls.map((c) => String(c[0] ?? "")).join("\n"));
+
+  const baseBudget: ContextBudget = {
+    currentTokens: 5_100,
+    effectiveWindow: 130_000,
+    contextWindow: 200_000,
+    usageRatio: 0.04,
+    status: "normal",
+  };
+
+  it("subUsages 不传 → 仅渲染主 agent 用量段(向后兼容,无子段标题)", () => {
+    renderUsageReport(baseBudget, 3);
+    const out = allOutput();
+    expect(out).toContain("Token 用量");
+    expect(out).toContain("上下文容量");
+    expect(out).not.toContain("子 agent 拆分");
+    expect(out).not.toContain("Sum");
+  });
+
+  it("subUsages 空数组 → 与不传等价(子段不出现)", () => {
+    renderUsageReport(baseBudget, 3, undefined, []);
+    const out = allOutput();
+    expect(out).not.toContain("子 agent 拆分");
+    expect(out).not.toContain("Sum");
+  });
+
+  it("succeeded entry → 显示 ✓ + tokensFmt + tool_uses + duration(秒制)", () => {
+    const entries: SubAgentUsageEntry[] = [
+      {
+        index: 1,
+        description: "调研模块结构",
+        tokens: 35_400,
+        toolUses: 5,
+        durationMs: 8000,
+        subId: "ab12cd",
+        status: "succeeded",
+      },
+    ];
+    renderUsageReport(baseBudget, 3, undefined, entries);
+    const out = allOutput();
+    expect(out).toContain("子 agent 拆分");
+    expect(out).toContain("Task#1");
+    expect(out).toContain("调研模块结构");
+    expect(out).toContain("✓");
+    expect(out).toContain("35.4K");
+    expect(out).toContain("5 tool_uses");
+    expect(out).toContain("8.00s");
+  });
+
+  it("toolUses=1 → 单数 'tool_use'(不带 s)", () => {
+    const entries: SubAgentUsageEntry[] = [
+      {
+        index: 1,
+        description: "single",
+        tokens: 100,
+        toolUses: 1,
+        durationMs: 500,
+        subId: "111111",
+        status: "succeeded",
+      },
+    ];
+    renderUsageReport(baseBudget, 3, undefined, entries);
+    const out = allOutput();
+    expect(out).toContain("1 tool_use");
+    expect(out).not.toContain("1 tool_uses");
+  });
+
+  it("failed entry → 显示 ⚠ + tokensFmt + (failed) 标识,无 tool_uses 字段", () => {
+    const entries: SubAgentUsageEntry[] = [
+      {
+        index: 2,
+        description: "查 API",
+        tokens: 12_300,
+        durationMs: 3000,
+        subId: "fa11ed",
+        status: "failed",
+      },
+    ];
+    renderUsageReport(baseBudget, 3, undefined, entries);
+    const out = allOutput();
+    expect(out).toContain("Task#2");
+    expect(out).toContain("⚠");
+    expect(out).toContain("12.3K");
+    expect(out).toContain("(failed)");
+    expect(out).not.toContain("tool_use");
+  });
+
+  it("aborted entry → 显示 ⏵ + (aborted) 标识", () => {
+    const entries: SubAgentUsageEntry[] = [
+      {
+        index: 3,
+        description: "总结",
+        tokens: 2_000,
+        durationMs: 1500,
+        subId: "abc123",
+        status: "aborted",
+      },
+    ];
+    renderUsageReport(baseBudget, 3, undefined, entries);
+    const out = allOutput();
+    expect(out).toContain("Task#3");
+    expect(out).toContain("⏵");
+    expect(out).toContain("(aborted)");
+  });
+
+  it("多 entry → 求和行 Sum 等于各 entry tokens 之和", () => {
+    const entries: SubAgentUsageEntry[] = [
+      {
+        index: 1,
+        description: "a",
+        tokens: 35_400,
+        toolUses: 5,
+        durationMs: 1000,
+        subId: "111111",
+        status: "succeeded",
+      },
+      {
+        index: 2,
+        description: "b",
+        tokens: 12_300,
+        durationMs: 1000,
+        subId: "222222",
+        status: "failed",
+      },
+      {
+        index: 3,
+        description: "c",
+        tokens: 7_400,
+        toolUses: 1,
+        durationMs: 1000,
+        subId: "333333",
+        status: "succeeded",
+      },
+    ];
+    renderUsageReport(baseBudget, 3, undefined, entries);
+    const out = allOutput();
+    // Sum = 55,100 → 55.1K
+    expect(out).toContain("Sum");
+    expect(out).toContain("55.1K");
+    expect(out).toContain("3 个 Task");
+  });
+
+  it("description 超过 28 字符 → 截断 + 省略号 …,不破坏单行布局", () => {
+    const longDesc = "a".repeat(50);
+    const entries: SubAgentUsageEntry[] = [
+      {
+        index: 1,
+        description: longDesc,
+        tokens: 100,
+        toolUses: 1,
+        durationMs: 100,
+        subId: "111111",
+        status: "succeeded",
+      },
+    ];
+    renderUsageReport(baseBudget, 3, undefined, entries);
+    const out = allOutput();
+    expect(out).toContain("…");
+    // 截断后不应保留全部 50 个 a
+    expect(out).not.toContain("a".repeat(50));
   });
 });
 

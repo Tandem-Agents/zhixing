@@ -1249,8 +1249,8 @@ export interface SubAgentLoopResult {
   messages: Message[];
   /** 累计 token usage(来自 AgentResult.usage) */
   usage: TokenUsage;
-  /** budget exceeded(maxTokens / wallClockTimeout 触发) */
-  budgetExceeded?: boolean;
+  /** budget 软上限触发种类(max_turns / max_tokens / wall_clock 统一建模);未触发时 undefined */
+  budgetExceededKind?: BudgetExceededKind;
   /** tool 调用次数(由 yields 中 tool_end 计数) */
   toolUseCount: number;
   /** AgentResult 终止原因 — completed/max_turns/aborted/error */
@@ -1890,20 +1890,27 @@ sub agent finalize
   → LLM 看见;同时主 turn.toolCalls[].result 包含此文本(随 transcript 持久化)
 ```
 
-**`/usage` 命令**(`packages/cli/src/`):
-- v1 显示主 Turn.usage(已有)
-- 可选增强:解析当前 turn 的 toolCalls 中 Task 调用的 `<usage>` text,展开拆分显示
+**`/usage` 命令**(`packages/cli/src/` —— ✅ 已落地):
+- 主 Turn.usage 段保持既有(`renderUsageReport` 主体)
+- 子 Task 拆分段([packages/cli/src/parse-task-usage.ts](../../../packages/cli/src/parse-task-usage.ts)):`parseTaskUsageFromMessages(messages)` 纯函数扫 transcript 配对 Task tool_use ↔ tool_result,正则提取 `<usage>` trailer + 推断 succeeded/failed/aborted 状态;[packages/cli/src/render.ts](../../../packages/cli/src/render.ts) 的 `renderSubAgentUsageSection` 在主段后追加渲染(无 Task 调用时跳过,向后兼容)
+- 解析层 best-effort(format 不匹配的 entry 跳过不抛),trailer 协议契约由 [orchestrator/src/tools/task.ts](../../../packages/orchestrator/src/tools/task.ts) 的 `formatUsageTag` 单测守护(单一真相源)
+
+实际呈现示例(主 5.1K + 3 个 Task 子调研):
 
 ```
-Total: 5.1K (main agent)
-  + Task#1 (调研 ...): 35.4K (from tool_result)
-  + Task#2 (查 API):  12.3K
-  + Task#3 (总结 ...):  7.4K
-  ─────────────────────
-  Sum: 60.2K (estimated)
+  Token 用量
+  ─────────────────────────────
+  上下文容量     4%  (5.1K / 130K)
+  上下文窗口     200K
+  会话轮次       3 轮
+  ─────────────────────────────
+  子 agent 拆分 (3 个 Task)
+  + Task#1 (调研模块结构)            ✓ 35.4K  (5 tool_uses, 8.00s)
+  + Task#2 (查 API)                  ⚠ 12.3K  (failed)
+  + Task#3 (总结实现要点)            ✓ 7.4K   (1 tool_use, 2.10s)
+  ─────────────────────────────
+  Sum            55.1K (子总计,best-effort 解析)
 ```
-
-text 解析是 best-effort(不是协议层 truth),但对人类可读已足够。
 
 ### 12.3 v2+ 演进
 
@@ -2146,16 +2153,35 @@ text 解析是 best-effort(不是协议层 truth),但对人类可读已足够。
 
 **已知 trade-off(随后续工单升级,不阻塞 M2.5)**:CLI 状态条 [packages/cli/src/sub-agent-status.ts](../../../packages/cli/src/sub-agent-status.ts) 当前用"首个未关联的 sub-X lineage 即当前 Task" 顺序匹配建立 sub_agent_id ↔ Task#N 关联,在并发派多 Task(N≥2)场景下会因 N 个 sub agent 几乎同时启动而 lineage 串扰,导致状态条 UX 退化(单 Task / N=1 完全不变)。**精确归属升级**横跨 4 包:`ToolExecutionContext.toolCallId`(core)+ Task 工具 emit 关联事件(orchestrator)+ `runChildAgent` reserve subAgentId(orchestrator)+ 状态机重写 `currentTask` 为 `Map<toolCallId, TaskState>`(cli),与 dispatch 改造无强耦合,作为独立工单跟进,sub-agent-status.ts JSDoc 已显式标注此演进路径
 
-#### M2.6 — token / budget 软上限
+#### M2.6 — token / budget 软上限 ✅ 已完成
 
-- `maxTokens` 软上限触发协议(§7.3)
-- `wallClockTimeoutMs` setTimeout 集成
-- `/usage` 命令解析当前 turn 的 toolCalls Task `<usage>` text 拆分呈现(§12.2)
-- 集成测:子跑超 budget,partial 返回 tool_result;主 LLM 看到 is_error
+- ✅ `BudgetExceededKind = "max_turns" | "max_tokens" | "wall_clock"` 统一建模三类软上限触发([packages/orchestrator/src/subagent/budget.ts](../../../packages/orchestrator/src/subagent/budget.ts)),classifier 看 kind 优先于 reason 折成 status="failed",deriveErrorMeta 一处映射 error.type,新增 budget kind 时只改一处 —— 替代 v1 的 `budgetExceeded?: boolean` 二元字段(无法区分种类)
+- ✅ `maxTokens` 软上限触发([packages/orchestrator/src/subagent/loop-runner.ts](../../../packages/orchestrator/src/subagent/loop-runner.ts)):loop-runner 监听子 EventBus 的 `llm:request_end`,每次累加 `inputTokens + outputTokens`(cache 字段不计 —— budget 监控的是实际消耗,prompt cache 命中不算钱),累计超 `maxTokens` 时 `abortWithReason(maxTokensController, { kind:"external", origin:"subagent-max-tokens-exceeded" })`(graceful,不 mid-call kill);用 `AbortSignal.any([wallClock, maxTokens])` 合成单一 signal 透传给 `runAgentLoop` 的 `abortSignal` 入参(Node ≥22 稳定 API,本仓库 `engines.node:">=22.0.0"` 已锁);单一 first-wins 槽位 `abortBudgetKind` 在 trigger 现场记录"哪个 budget kind 先抢占"(`if (slot === null) slot = kind`),drain 后 `deriveBudgetExceededKind()` 直接给出结构化 kind —— 不依赖 `abortReason.origin` 字符串解析,跨模块边界结构化更鲁棒
+- ✅ `wallClockTimeoutMs` 折叠对齐 spec §7.3 软上限协议(同款 budget kind 通道):wallClock setTimeout 触发后 first-wins 入槽 `abortBudgetKind="wall_clock"` + abort,drain 后由 `deriveBudgetExceededKind` 直接给出 kind → status="failed" + error.type="wall_clock_timeout";v1 实现折成 aborted 是 spec/code 不一致,本里程碑一并消除该架构债务,与 maxTokens 同款语义("软上限触发 = failed")
+- ✅ `first-wins 槽位语义`([packages/orchestrator/src/subagent/loop-runner.ts](../../../packages/orchestrator/src/subagent/loop-runner.ts)):wallClock / maxTokens 两路 abort 通道触发用单一 `abortBudgetKind: "max_tokens" | "wall_clock" | null` 槽位,在 trigger 现场 `if (abortBudgetKind === null) abortBudgetKind = kind` 表达"先到先得",与 AbortController first-wins 完全对齐 —— 替代 v1 的"两个独立 boolean flag + 后置静态优先级判断"(后者在罕见 race 场景中,wallClock 先抢占 abort signal 但 token 后到的 listener 会让 budgetExceededKind 错误返回 max_tokens,与 abortReason.origin 不一致);槽位 first-wins 让 abort signal 与 budgetExceededKind 同源同向,跨模块边界无双通道歧义;`deriveBudgetExceededKind(reason, abortBudgetKind)` 简化为线性折叠规则(reason="max_turns" → "max_turns";reason="aborted" + 槽位非空 → 槽位值;其他 → undefined),无优先级判断,@internal export 给纯函数 unit test 锁真值表
+- ✅ `usageListener` 类型契约绑定 ← 用 `AgentEventMap["llm:request_end"]` 直接 deref EventMap 而非手写 inline type duplicate —— EventBus 契约演进(新增 usage 子字段等)由 TypeScript 强制可见,消除 listener 类型与 EventMap 脱钩的代码债务
+- ✅ `classifyResult` ([packages/orchestrator/src/subagent/result-classifier.ts](../../../packages/orchestrator/src/subagent/result-classifier.ts)) 加 `budgetExceededKind` 优先分支 —— 存在即 failed,与 reason 字段无关(max_tokens / wall_clock 走 abort 通道但语义 failed);真正的 abort(parent-abort / idle-timeout / user-cancel)走 reason="aborted" 通道折成 aborted,kind/reason 双通道清晰区分"资源耗尽"与"被中断"
+- ✅ `deriveErrorMeta` ([packages/orchestrator/src/subagent/factory.ts](../../../packages/orchestrator/src/subagent/factory.ts)) 加三种 budget kind 映射:`max_turns_exceeded` / `max_tokens_exceeded` / `wall_clock_timeout`,主 LLM 看到 `tool_result.is_error: true` + 文本含 `[Task "..." failed: <message>]` + partial(若有)+ `<usage>` trailer,据此决策(重试 / 改方案 / 报错)
+- ✅ `cleanup discipline` 加 `eventBus.off("llm:request_end", usageListener)` —— 与 `clearTimeout(wallClockTimer)` 同款 finally 硬约束,任一漏清理都会跨 dispatch 累积资源(listener 泄漏会让旧 dispatch 的 `cumulativeTokens` 状态污染下次 dispatch 的 budget 判断)
+- ✅ `/usage` CLI 命令拆分呈现 sub Task 用量(§12.2):
+  - 解析层:[packages/cli/src/parse-task-usage.ts](../../../packages/cli/src/parse-task-usage.ts) `parseTaskUsageFromMessages(messages)` 纯函数,扫 transcript 配对 Task tool_use ↔ tool_result,正则提取 `<usage>tokens: N[, tool_uses: M], duration_ms: D, sub_id: XYZABC</usage>` trailer + 推断 `succeeded` / `failed` / `aborted` 状态(由 tool_result content 前缀 `[Task "..." failed:` / `[Task "..." aborted:` 区分);best-effort 解析,格式不匹配的 entry 跳过(不抛异常,不污染上层)
+  - 渲染层:[packages/cli/src/render.ts](../../../packages/cli/src/render.ts) `renderUsageReport` 加可选 `subUsages` 参数(向后兼容 — 不传/空数组时输出与既有 byte-equal),有子 usage 时在主用量段后追加"子 agent 拆分"段(`Task#N (description) ✓/⚠/⏵ tokensFmt (N tool_uses, Ds)`)+ 求和行
+  - 入口注入:[packages/cli/src/repl.ts:509](../../../packages/cli/src/repl.ts#L509) `/usage` handler 调 `parseTaskUsageFromMessages(state.messages)` 透传给 `renderUsageReport`
+- ✅ 单测覆盖(共 +45 用例,其中 1 个 既有 parent-abort 测试加 budgetExceededKind=undefined 断言加强):
+  - `subagent/__tests__/loop-runner.test.ts` (+18):
+    - max_tokens 触发 (+4):单次超阈 / 多次累加 / cache 字段不计入 / 极大值 happy
+    - listener cleanup (+3):happy / max_tokens / error 三路径 finally 解绑
+    - wallClock 真触发 (+1):慢 chat + setTimeout race → kind="wall_clock"
+    - first-wins 真值表(纯函数 unit test,+9):覆盖 9 种 reason × abortBudgetKind 组合,锁住 reason="max_turns" 优先于槽位 + reason="aborted" + 槽位非空直给槽位值
+    - first-wins 端到端 (+1):token 先 fire(同 LLM call 即超阈)+ 短 wallClockTimeoutMs 来不及 → kind="max_tokens" + abortReason.origin 同源,验证 abort signal 与 budgetExceededKind 双通道一致
+  - `subagent/__tests__/factory.test.ts` (+2):max_tokens 端到端折成 failed + max_tokens_exceeded + partial 抓 + provider.callCount=1 / wall_clock 端到端折成 failed + wall_clock_timeout
+  - `subagent/__tests__/result-classifier.test.ts` (+4):budgetExceededKind 三种(max_turns / max_tokens / wall_clock)优先 reason 折 failed / caughtError 仍优先于 budgetExceededKind
+  - `cli/__tests__/parse-task-usage.test.ts` (+13,新建):空 / 无 Task / 单 succeeded / 单 failed / 单 aborted / 多 entry 顺序 / tool_result 乱序按 id 配对 / 非 Task 工具不收录 / usage 标签缺失/损坏跳过 / 孤儿 tool_result 忽略 / description 缺失空串 / tokens=0 边界
+  - `cli/__tests__/render.test.ts` (+8):subUsages 不传/空向后兼容 / succeeded 显示 ✓ + tool_uses + duration / toolUses=1 单数语法 / failed 显示 ⚠ + (failed) / aborted 显示 ⏵ / 多 entry 求和 / description 截断 …
 
-**验证**:`/usage` 拆分正确;budget 软上限测试通过
+**验证**:`orchestrator` 全套 228 用例全绿(M2.5 后 +24);`cli` 458 用例全绿(M2.5 后 +21,含 parse-task-usage 13 + render 子段 8);`core` 不改;`/usage` 拆分对真实多 Task 场景正确呈现 + 解析失败容错不崩
 
-**独立性**:budget 软上限对未触发的子无影响
+**独立性**:budget 软上限对未触发的子无影响 —— 默认 `maxTokens=50_000` / `wallClockTimeoutMs=600_000` 极宽松,常规调研型子任务不会触及;失败时 partial 仍可抓取保护用户已生成的中间产物
 
 #### M2.7 — 测试套完整 + 灰度验证
 
@@ -2223,7 +2249,11 @@ text 解析是 best-effort(不是协议层 truth),但对人类可读已足够。
 | `render.ts` 集成:`renderEvent` 在 `tool_start` / `tool_end` 查策略表跳过非 default 工具(让位状态条)+ `createRenderSubscribers` 装载 `setupSubAgentStatus` 与 `setupInterruptRendering` 并列共享 `pauseUI` / `dispose` + 集成测试 7 用例(派发型工具不渲染 ⟡ 卡片 5 + SubAgentStatus 集成 2) | [packages/cli/src/render.ts](../../../packages/cli/src/render.ts) + [packages/cli/src/__tests__/render.test.ts](../../../packages/cli/src/__tests__/render.test.ts) | M2.4 |
 | 生产入口启用 Task 工具 —— 四处装配 `createAgentRuntime({ ..., enableTaskTool: true })`,与状态条同步上线(详见 §15 M2.4 独立性段) | [packages/cli/src/repl.ts:659](../../../packages/cli/src/repl.ts#L659)(REPL)+ [packages/cli/src/run-agent.ts:56](../../../packages/cli/src/run-agent.ts#L56)(runOnce)+ [packages/cli/src/serve/command.ts:172](../../../packages/cli/src/serve/command.ts#L172)(serve 持久会话)+ [packages/cli/src/serve/command.ts:284](../../../packages/cli/src/serve/command.ts#L284)(serve ephemeral) | M2.4 |
 | tool-executor 并发改造(`canRunParallel` 分组 + `Promise.allSettled` 真并发):抽出 `runSerialBatch` / `runParallelBatch` 私有 generator + 主函数仅做委托;并发分支 `tool_start` 同步全发 + allSettled 等齐 + 按输入顺序 yield `tool_end` + 入口 abort guard + reject 路径分流(abortSignal.aborted → unexecutedToolUses,否则 isError tool_result);+ 9 个并发用例(8 段并发 + 1 现有改 isParallelSafe=false 锁串行)+ agent-loop.test.ts 1 个串行 abort 测试同款 isParallelSafe=false 显式锁定 | [packages/core/src/loop/tool-executor.ts](../../../packages/core/src/loop/tool-executor.ts) + [packages/core/src/loop/__tests__/tool-executor.test.ts](../../../packages/core/src/loop/__tests__/tool-executor.test.ts) + [packages/core/src/loop/__tests__/agent-loop.test.ts](../../../packages/core/src/loop/__tests__/agent-loop.test.ts) | M2.5 |
-| `/usage` 命令解析 toolCalls Task `<usage>` text | [packages/cli/src/](../../../packages/cli/src/) | M2.6 |
+| `BudgetExceededKind` 类型(max_turns / max_tokens / wall_clock 三类软上限触发统一建模)+ `SubAgentLoopResult.budgetExceededKind?` 字段(替代 boolean budgetExceeded)+ `resolveSubAgentBudget` 返回 `Required<>` 投影(`maxTokens` / `wallClockTimeoutMs` 默认值收敛单一真相源) | [packages/orchestrator/src/subagent/budget.ts](../../../packages/orchestrator/src/subagent/budget.ts) + [packages/orchestrator/src/subagent/loop-runner.ts](../../../packages/orchestrator/src/subagent/loop-runner.ts) | M2.6 |
+| `runSubAgentLoop` 加 `maxTokens` 必填 + 监听 `llm:request_end` listener 累加 input+output(cache 字段不计) + `maxTokensController` abort with `origin="subagent-max-tokens-exceeded"` + `AbortSignal.any([wallClock, maxTokens])` 合并 + finally 双清理(timer + listener)+ 单一 first-wins 槽位 `abortBudgetKind`(在 trigger 现场 `if (slot === null) slot = kind` 表达"先到先得",与 AbortController first-wins 同源)+ `deriveBudgetExceededKind()` 简化为线性折叠规则(reason / 槽位二选一,无静态优先级歧义,@internal export 给纯函数 unit test 锁真值表)+ usageListener 用 `AgentEventMap["llm:request_end"]` 类型契约绑定 | [packages/orchestrator/src/subagent/loop-runner.ts](../../../packages/orchestrator/src/subagent/loop-runner.ts) + [packages/orchestrator/src/subagent/__tests__/loop-runner.test.ts](../../../packages/orchestrator/src/subagent/__tests__/loop-runner.test.ts) | M2.6 |
+| `classifyResult` 加 `budgetExceededKind` 优先分支(存在即 failed,与 reason 字段无关)+ `ClassifiableLoopResult` 接口加 `budgetExceededKind?` 字段 + `deriveErrorMeta` 三种 budget kind 映射 `max_turns_exceeded` / `max_tokens_exceeded` / `wall_clock_timeout` + factory 透传 budget.maxTokens 给 loop | [packages/orchestrator/src/subagent/result-classifier.ts](../../../packages/orchestrator/src/subagent/result-classifier.ts) + [packages/orchestrator/src/subagent/factory.ts](../../../packages/orchestrator/src/subagent/factory.ts) + [packages/orchestrator/src/subagent/__tests__/result-classifier.test.ts](../../../packages/orchestrator/src/subagent/__tests__/result-classifier.test.ts) + [packages/orchestrator/src/subagent/__tests__/factory.test.ts](../../../packages/orchestrator/src/subagent/__tests__/factory.test.ts) | M2.6 |
+| `parseTaskUsageFromMessages(messages)` 纯函数 —— 扫 transcript 配对 Task tool_use ↔ tool_result,正则提取 `<usage>` trailer + 推断状态;best-effort 解析,格式不匹配的 entry 跳过 | [packages/cli/src/parse-task-usage.ts](../../../packages/cli/src/parse-task-usage.ts) + [packages/cli/src/__tests__/parse-task-usage.test.ts](../../../packages/cli/src/__tests__/parse-task-usage.test.ts) | M2.6 |
+| `renderUsageReport` 加可选 `subUsages` 参数(向后兼容)+ `renderSubAgentUsageSection` 子段(succeeded ✓ + tool_uses/duration / failed ⚠ / aborted ⏵ / 求和)+ `/usage` REPL handler 调 `parseTaskUsageFromMessages(state.messages)` 注入 | [packages/cli/src/render.ts](../../../packages/cli/src/render.ts) + [packages/cli/src/repl.ts](../../../packages/cli/src/repl.ts) + [packages/cli/src/__tests__/render.test.ts](../../../packages/cli/src/__tests__/render.test.ts) | M2.6 |
 
 ---
 

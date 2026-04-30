@@ -23,6 +23,7 @@ import {
   getAgentIdentity,
 } from "@zhixing/core";
 import type { DecorateRunBusFn } from "@zhixing/orchestrator/runtime";
+import type { SubAgentUsageEntry } from "./parse-task-usage.js";
 import { setupSubAgentStatus } from "./sub-agent-status.js";
 import { getToolRenderStrategy } from "./tool-render-strategy.js";
 
@@ -542,7 +543,21 @@ function formatTokenCount(n: number): string {
 
 // ─── /usage 命令渲染 ───
 
-export function renderUsageReport(budget: ContextBudget, turnCount: number, calibrationFactor?: number): void {
+/**
+ * /usage 命令的可视化输出 —— 主 agent 用量 + 可选的子 agent Task 拆分。
+ *
+ * 子 usage 的设计原则:
+ *   - 向后兼容:不传 subUsages / 空数组时输出与既有完全一致(布局/换行)
+ *   - 视觉分隔:用与主段一致的虚线分隔,避免紧贴产生信息密度过高
+ *   - 状态可视化:✓ 成功(绿)/ ⚠ 失败(黄)/ ⏵ 中止(灰),与全局状态色一致
+ *   - 求和兜底:子 token 之和在末尾呈现,让用户一眼看出"调研型子任务总成本"
+ */
+export function renderUsageReport(
+  budget: ContextBudget,
+  turnCount: number,
+  calibrationFactor?: number,
+  subUsages?: readonly SubAgentUsageEntry[],
+): void {
   const pct = Math.round(budget.usageRatio * 100);
   const current = formatTokenCount(budget.currentTokens);
   const effective = formatTokenCount(budget.effectiveWindow);
@@ -557,7 +572,68 @@ export function renderUsageReport(budget: ContextBudget, turnCount: number, cali
     const label = calibrationFactor === 1.0 ? "未校准" : "已校准";
     console.log(`  ${chalk.dim("估算校准")}       ${calStr} ${chalk.dim(`(${label})`)}`);
   }
+
+  if (subUsages && subUsages.length > 0) {
+    renderSubAgentUsageSection(subUsages);
+  } else {
+    console.log();
+  }
+}
+
+/**
+ * 把 SubAgentUsageEntry 数组渲染成 /usage 的"子 agent 拆分"段。
+ *
+ * 排版决策:
+ *   - description 截断到 28 字符避免单行过长(中文 / emoji 计算用字符数,v1 简化)
+ *   - 状态字段(toolUses / durationMs)仅 succeeded 显示;failed / aborted 显示 status 文字
+ *   - durationMs → 秒(2 位小数),用户感知尺度优于毫秒原值
+ */
+function renderSubAgentUsageSection(entries: readonly SubAgentUsageEntry[]): void {
+  console.log(chalk.dim("  ─────────────────────────────"));
+  console.log(
+    `  ${chalk.bold("子 agent 拆分")} ${chalk.dim(`(${entries.length} 个 Task)`)}`,
+  );
+
+  for (const entry of entries) {
+    const desc = truncateForDisplay(entry.description, 28);
+    const tokensFmt = formatTokenCount(entry.tokens);
+    const icon =
+      entry.status === "succeeded"
+        ? chalk.green("✓")
+        : entry.status === "failed"
+          ? chalk.yellow("⚠")
+          : chalk.dim("⏵");
+
+    let extra = "";
+    if (entry.status === "succeeded") {
+      const parts: string[] = [];
+      if (entry.toolUses !== undefined) {
+        parts.push(`${entry.toolUses} tool_use${entry.toolUses === 1 ? "" : "s"}`);
+      }
+      if (entry.durationMs !== undefined) {
+        parts.push(`${(entry.durationMs / 1000).toFixed(2)}s`);
+      }
+      extra = parts.length > 0 ? chalk.dim(`  (${parts.join(", ")})`) : "";
+    } else {
+      extra = chalk.dim(`  (${entry.status})`);
+    }
+
+    console.log(
+      `  ${chalk.cyan("+")} Task#${entry.index} ${chalk.dim(`(${desc})`)}  ${icon} ${tokensFmt}${extra}`,
+    );
+  }
+
+  const sum = entries.reduce((acc, e) => acc + e.tokens, 0);
+  console.log(chalk.dim("  ─────────────────────────────"));
+  console.log(
+    `  ${chalk.dim("Sum")}            ${formatTokenCount(sum)} ${chalk.dim("(子总计,best-effort 解析)")}`,
+  );
   console.log();
+}
+
+function truncateForDisplay(text: string, maxLen: number): string {
+  if (text.length <= maxLen) return text;
+  return `${text.slice(0, maxLen - 1)}…`;
 }
 
 // ─── /context 命令渲染 ───

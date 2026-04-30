@@ -2,12 +2,15 @@
  * runSubAgentLoop 契约级单测
  *
  * 覆盖矩阵:
- *   - happy:文本回复 → reason=completed,messages 累积正确
- *   - max_turns:连续 tool_use 触发 → reason=max_turns + budgetExceeded=true
+ *   - happy:文本回复 → reason=completed,budgetExceededKind=undefined
+ *   - max_turns:连续 tool_use 触发 → reason=max_turns + budgetExceededKind="max_turns"
+ *   - max_tokens:LLM 返回 usage 超阈 → reason=aborted + budgetExceededKind="max_tokens"
+ *     + abortReason.origin="subagent-max-tokens-exceeded"
  *   - error:provider chat 抛 → reason=error,函数本身不 throw
  *   - parent abort:parentSignal pre-aborted → reason=aborted + abortReason.kind=parent-abort
- *   - wall-clock:fake timers 超时 → reason=aborted + origin=subagent-wall-clock-timeout
- *   - cleanup:setTimeout 在 finally 被 clear (不在测试结束后泄漏)
+ *     + budgetExceededKind=undefined(parent abort 不是软上限)
+ *   - wall-clock:fake timers 超时 → reason=aborted + budgetExceededKind="wall_clock"
+ *   - cleanup:setTimeout 在 finally 被 clear + usageListener 被 off (不泄漏)
  *
  * 用真实 SecurityPipeline + ConfirmationBroker 实例(纯类无副作用),
  * MockLLMProvider 提供确定性响应。子 broker 默认无 listener → 工具调用走
@@ -39,7 +42,7 @@ import {
 import {
   createWatchdogPolicy,
 } from "@zhixing/core";
-import { runSubAgentLoop } from "../loop-runner.js";
+import { deriveBudgetExceededKind, runSubAgentLoop } from "../loop-runner.js";
 
 // ─── 测试辅助 ───
 
@@ -92,6 +95,9 @@ function makeBaseOpts(provider: MockLLMProvider, tools: ToolDefinition[] = []) {
     eventBus: createEventBus<AgentEventMap>({ lineage: "main/sub-test" }),
     parentSignal: new AbortController().signal,
     maxTurns: 5,
+    // 故意拉到极大值,避免常规测试路径意外触发 token 软上限;maxTokens 专属
+    // describe 段会显式覆盖
+    maxTokens: 10_000_000,
     watchdog: createWatchdogPolicy({ idleTimeoutMs: 0 }),
     wallClockTimeoutMs: 60_000,
   };
@@ -106,7 +112,7 @@ describe("runSubAgentLoop · happy path", () => {
 
     expect(result.reason).toBe("completed");
     expect(result.toolUseCount).toBe(0);
-    expect(result.budgetExceeded).toBe(false);
+    expect(result.budgetExceededKind).toBeUndefined();
     expect(result.abortReason).toBeUndefined();
     expect(result.messages).toHaveLength(2);
     expect(result.messages[0]?.role).toBe("user");
@@ -134,7 +140,7 @@ describe("runSubAgentLoop · happy path", () => {
 // ─── max_turns ───
 
 describe("runSubAgentLoop · max_turns budget", () => {
-  it("反复 tool_use 触发 maxTurns → reason=max_turns + budgetExceeded=true", async () => {
+  it('反复 tool_use 触发 maxTurns → reason=max_turns + budgetExceededKind="max_turns"', async () => {
     const responses = Array.from({ length: 10 }, (_, i) => ({
       toolCalls: [{ id: `t${i}`, name: "read", input: {} }],
     }));
@@ -144,7 +150,7 @@ describe("runSubAgentLoop · max_turns budget", () => {
     const result = await runSubAgentLoop(opts);
 
     expect(result.reason).toBe("max_turns");
-    expect(result.budgetExceeded).toBe(true);
+    expect(result.budgetExceededKind).toBe("max_turns");
     expect(result.toolUseCount).toBeGreaterThanOrEqual(3);
   });
 });
@@ -160,7 +166,7 @@ describe("runSubAgentLoop · error path", () => {
     const result = await runSubAgentLoop(makeBaseOpts(provider));
 
     expect(result.reason).toBe("error");
-    expect(result.budgetExceeded).toBe(false);
+    expect(result.budgetExceededKind).toBeUndefined();
     expect(result.abortReason).toBeUndefined();
   });
 });
@@ -168,7 +174,7 @@ describe("runSubAgentLoop · error path", () => {
 // ─── parent abort ───
 
 describe("runSubAgentLoop · parent abort cascade", () => {
-  it("parentSignal pre-aborted → reason=aborted + abortReason.kind=parent-abort", async () => {
+  it("parentSignal pre-aborted → reason=aborted + abortReason.kind=parent-abort + budgetExceededKind=undefined", async () => {
     const provider = new MockLLMProvider([{ text: "should not reach" }]);
     const parentController = new AbortController();
     parentController.abort();
@@ -180,6 +186,163 @@ describe("runSubAgentLoop · parent abort cascade", () => {
 
     expect(result.reason).toBe("aborted");
     expect(result.abortReason?.kind).toBe("parent-abort");
+    // parent abort 不是软上限触发,kind 必须 undefined,classifier 才会折成 "aborted"
+    // 而非 "failed"(否则就把"用户主动取消"误判为"资源耗尽",语义错位)
+    expect(result.budgetExceededKind).toBeUndefined();
+  });
+});
+
+// ─── max_tokens 软上限触发 ───
+
+describe("runSubAgentLoop · max_tokens budget", () => {
+  it('单次 LLM call 即超阈 → reason=aborted + budgetExceededKind="max_tokens" + abortReason.origin', async () => {
+    // 第一次返回 usage 250 tokens > maxTokens=200 → listener 立即 abort
+    // 第二次响应不应被消耗(loop 在下一轮顶 abort guard 停)
+    const provider = new MockLLMProvider([
+      {
+        text: "first response",
+        usage: { inputTokens: 150, outputTokens: 100 },
+      },
+      { text: "should not be consumed" },
+    ]);
+
+    const result = await runSubAgentLoop({
+      ...makeBaseOpts(provider),
+      maxTokens: 200,
+    });
+
+    expect(result.reason).toBe("aborted");
+    expect(result.budgetExceededKind).toBe("max_tokens");
+    expect(result.abortReason?.kind).toBe("external");
+    if (result.abortReason?.kind === "external") {
+      expect(result.abortReason.origin).toBe("subagent-max-tokens-exceeded");
+    }
+    // 关键:graceful 不 mid-call kill,第一次响应已完整 finalize,第二次未发起
+    expect(provider.callCount).toBe(1);
+  });
+
+  it("多次 LLM call 累加才超阈 → 在累计超阈那一轮后停,partial 文本可抓", async () => {
+    // 三次 turn,每次 100 tokens → 第三次后累计 300 > maxTokens=250
+    const provider = new MockLLMProvider([
+      {
+        toolCalls: [{ id: "t1", name: "read", input: {} }],
+        usage: { inputTokens: 60, outputTokens: 40 },
+      },
+      {
+        toolCalls: [{ id: "t2", name: "read", input: {} }],
+        usage: { inputTokens: 60, outputTokens: 40 },
+      },
+      {
+        text: "partial assistant text",
+        usage: { inputTokens: 60, outputTokens: 40 },
+      },
+      { text: "should not be consumed" },
+    ]);
+
+    const result = await runSubAgentLoop({
+      ...makeBaseOpts(provider, [makeReadOnlyTool("read")]),
+      maxTokens: 250,
+    });
+
+    expect(result.reason).toBe("aborted");
+    expect(result.budgetExceededKind).toBe("max_tokens");
+    expect(provider.callCount).toBe(3);
+    // 累计 usage 应反映已发出的 3 次 call(loop 透传 AgentResult.usage)
+    expect(result.usage.inputTokens + result.usage.outputTokens).toBeGreaterThanOrEqual(300);
+    // partial assistant 文本已 finalize 进 messages —— 上层 extractFinalAssistantText 可抓
+    const lastAssistant = result.messages
+      .filter((m) => m.role === "assistant")
+      .pop();
+    expect(lastAssistant).toBeDefined();
+  });
+
+  it("usage 内 cacheRead/Write 不计入 budget —— 实际消耗 token 才算钱", async () => {
+    // 即使 cache tokens 巨大,只要 input+output 不超阈,就不应触发
+    const provider = new MockLLMProvider([
+      {
+        text: "cache hit cheap call",
+        usage: {
+          inputTokens: 50,
+          outputTokens: 30,
+          cacheReadTokens: 100_000,
+          cacheWriteTokens: 50_000,
+        },
+      },
+    ]);
+
+    const result = await runSubAgentLoop({
+      ...makeBaseOpts(provider),
+      maxTokens: 200,
+    });
+
+    // input+output=80 < 200,不应触发,正常 completed
+    expect(result.reason).toBe("completed");
+    expect(result.budgetExceededKind).toBeUndefined();
+  });
+
+  it("maxTokens 设极大值 → 正常 completed 路径 budgetExceededKind=undefined", async () => {
+    const provider = new MockLLMProvider([
+      {
+        text: "small reply",
+        usage: { inputTokens: 50, outputTokens: 30 },
+      },
+    ]);
+
+    const result = await runSubAgentLoop({
+      ...makeBaseOpts(provider),
+      maxTokens: 1_000_000,
+    });
+
+    expect(result.reason).toBe("completed");
+    expect(result.budgetExceededKind).toBeUndefined();
+    expect(result.abortReason).toBeUndefined();
+  });
+});
+
+// ─── listener cleanup discipline ───
+
+describe("runSubAgentLoop · listener cleanup", () => {
+  it("happy path 完成后 eventBus 上 llm:request_end listener 被解绑", async () => {
+    const provider = new MockLLMProvider([{ text: "ok" }]);
+    const opts = makeBaseOpts(provider);
+
+    const before = opts.eventBus.listenerCount("llm:request_end");
+    await runSubAgentLoop(opts);
+    const after = opts.eventBus.listenerCount("llm:request_end");
+
+    // before/after 必须严格相等 —— loop-runner 自己的 listener 来去对称,
+    // 不增不减,否则跨 dispatch 累积会让旧 dispatch 的 cumulativeTokens
+    // 状态污染下次 dispatch 的 budget 判断
+    expect(after).toBe(before);
+  });
+
+  it("max_tokens 触发后 listener 同样被解绑(异常路径不漏清理)", async () => {
+    const provider = new MockLLMProvider([
+      {
+        text: "first",
+        usage: { inputTokens: 150, outputTokens: 100 },
+      },
+    ]);
+    const opts = { ...makeBaseOpts(provider), maxTokens: 200 };
+
+    const before = opts.eventBus.listenerCount("llm:request_end");
+    await runSubAgentLoop(opts);
+    const after = opts.eventBus.listenerCount("llm:request_end");
+
+    expect(after).toBe(before);
+  });
+
+  it("error path(provider 抛错)后 listener 同样被解绑", async () => {
+    const provider = new MockLLMProvider([
+      { error: new Error("provider down") },
+    ]);
+    const opts = makeBaseOpts(provider);
+
+    const before = opts.eventBus.listenerCount("llm:request_end");
+    await runSubAgentLoop(opts);
+    const after = opts.eventBus.listenerCount("llm:request_end");
+
+    expect(after).toBe(before);
   });
 });
 
@@ -226,5 +389,120 @@ describe("runSubAgentLoop · wall-clock & cleanup", () => {
     expect(wallClockSet).toBeDefined();
     // clearTimeout 必须调,否则定时器跨 dispatch 累积
     expect(clearTimeoutSpy).toHaveBeenCalled();
+  });
+});
+
+// ─── wallClock 真触发(契约:折成 failed 而非 aborted) ───
+
+describe("runSubAgentLoop · wall-clock 真触发折叠", () => {
+  it('慢 LLM + wallClock 提前触发 → reason=aborted + budgetExceededKind="wall_clock" + abortReason.origin', async () => {
+    // 慢 chat:第一次 LLM 内 await 100ms,wallClockTimeoutMs=20ms 在 sleep 中触发
+    // wrapStreamWithAbortRace 会 race 到 abort,LLM call 立即退出 → reason=aborted
+    // 这是 wallClock contract 的端到端验证 —— 上层 classifier 据此折成 failed
+    const slowProvider = Object.assign(new MockLLMProvider([]), {
+      chat: async function* () {
+        await new Promise<void>((r) => setTimeout(r, 100));
+        yield { type: "message_start" as const };
+        yield {
+          type: "message_end" as const,
+          stopReason: "end_turn" as const,
+          usage: { inputTokens: 50, outputTokens: 30 },
+        };
+      },
+    });
+
+    const result = await runSubAgentLoop({
+      ...makeBaseOpts(slowProvider as unknown as MockLLMProvider),
+      wallClockTimeoutMs: 20,
+    });
+
+    expect(result.reason).toBe("aborted");
+    expect(result.budgetExceededKind).toBe("wall_clock");
+    expect(result.abortReason?.kind).toBe("external");
+    if (result.abortReason?.kind === "external") {
+      expect(result.abortReason.origin).toBe("subagent-wall-clock-timeout");
+    }
+  }, 5000);
+});
+
+// ─── first-wins 真值表(白盒纯函数测试) ───
+//
+// 集成场景下 wallClock fire 与 listener emit usage 同时发生的物理 race 极罕见
+// (stream race abort 让 emit usage 接近 0,timing 窗口窄到 ms 内),用纯函数真值表
+// 锁住"槽位 first-wins + reason="max_turns" 优先于槽位"两条契约,比集成测试更可靠。
+
+describe("deriveBudgetExceededKind · 真值表(纯函数 first-wins 折叠契约)", () => {
+  it('reason="completed" + 槽位 null → undefined(正常 happy 路径)', () => {
+    expect(deriveBudgetExceededKind("completed", null)).toBeUndefined();
+  });
+
+  it('reason="error" + 槽位 null → undefined(LLM/tool 异常路径)', () => {
+    expect(deriveBudgetExceededKind("error", null)).toBeUndefined();
+  });
+
+  it('reason="aborted" + 槽位 null → undefined(parent-abort / idle-timeout 真正的中断)', () => {
+    expect(deriveBudgetExceededKind("aborted", null)).toBeUndefined();
+  });
+
+  it('reason="max_turns" + 槽位 null → "max_turns"(loop 内置 reason 直给)', () => {
+    expect(deriveBudgetExceededKind("max_turns", null)).toBe("max_turns");
+  });
+
+  it('reason="aborted" + 槽位="max_tokens" → "max_tokens"(token 抢占)', () => {
+    expect(deriveBudgetExceededKind("aborted", "max_tokens")).toBe("max_tokens");
+  });
+
+  it('reason="aborted" + 槽位="wall_clock" → "wall_clock"(wallClock 抢占)', () => {
+    expect(deriveBudgetExceededKind("aborted", "wall_clock")).toBe("wall_clock");
+  });
+
+  it('reason="max_turns" + 槽位="max_tokens" → "max_turns"(reason 优先于槽位 —— max_turns 不走 abort 通道,语义上 loop 内置 reason 是最权威的触发源)', () => {
+    expect(deriveBudgetExceededKind("max_turns", "max_tokens")).toBe("max_turns");
+  });
+
+  it('reason="max_turns" + 槽位="wall_clock" → "max_turns"(同上,reason 优先)', () => {
+    expect(deriveBudgetExceededKind("max_turns", "wall_clock")).toBe("max_turns");
+  });
+
+  it('reason="completed" + 槽位 非 null → undefined(异常组合,理论上 abort 一旦触发 reason 不可能 completed,但纯函数对此鲁棒返回 undefined)', () => {
+    // 防御性测试:即使输入组合在生产中不可能,函数行为也确定 —— 不返回 budget kind
+    // (因 reason 不是 aborted/max_turns,折叠规则不命中槽位通道)
+    expect(deriveBudgetExceededKind("completed", "max_tokens")).toBeUndefined();
+    expect(deriveBudgetExceededKind("completed", "wall_clock")).toBeUndefined();
+  });
+});
+
+// ─── first-wins 端到端验证(真集成,非纯函数白盒) ───
+//
+// 锁住"短 wallClockTimeoutMs + token 先 fire → 槽位 first-wins kind=max_tokens"场景
+// (旧静态优先级实现也碰巧返回 max_tokens,但这里多一层 abortReason.origin 锁,
+// 验证 abort signal first-wins 与 budgetExceededKind first-wins 同源)。
+
+describe("runSubAgentLoop · first-wins 端到端", () => {
+  it('token 先 fire(同 LLM call 即超阈)+ wallClockTimeoutMs 极短(20ms 也来不及)→ kind="max_tokens" + abortReason.origin="subagent-max-tokens-exceeded"', async () => {
+    // LLM 同步完成 stream(无 sleep),emit "llm:request_end" 时 listener 即触发 abort,
+    // wallClock 20ms setTimeout 还没轮到 fire(整个 LLM call < 几 ms)。
+    // 验证 token 与 wallClock 两路独立 controller 共存,抢占顺序由 first-wins 决定。
+    const provider = new MockLLMProvider([
+      {
+        text: "completed in one shot",
+        usage: { inputTokens: 150, outputTokens: 100 },
+      },
+    ]);
+
+    const result = await runSubAgentLoop({
+      ...makeBaseOpts(provider),
+      maxTokens: 100,
+      wallClockTimeoutMs: 20,
+    });
+
+    expect(result.reason).toBe("aborted");
+    expect(result.budgetExceededKind).toBe("max_tokens");
+    expect(result.abortReason?.kind).toBe("external");
+    if (result.abortReason?.kind === "external") {
+      // abort signal first-wins 与 budgetExceededKind first-wins 同源同向 ——
+      // 两路语义对齐(单一 first-wins 槽位的核心收益)
+      expect(result.abortReason.origin).toBe("subagent-max-tokens-exceeded");
+    }
   });
 });

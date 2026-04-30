@@ -138,9 +138,58 @@ describe("runChildAgent · failed paths", () => {
 
     expect(result.status).toBe("failed");
     expect(result.error?.type).toBe("max_turns_exceeded");
-    // 第一轮 assistant 有 "thinking..." 文本 → partial 应捕获
     expect(result.partial).toContain("thinking");
   });
+
+  it("max_tokens 触发 → status=failed + error.type=max_tokens_exceeded + partial 抓 + 主 LLM 看见 is_error", async () => {
+    // 第一次 LLM 返回 partial 文本 + usage 250 > maxTokens=200 → 软上限触发
+    // 第二次响应不应被消耗(graceful 在下次 call 前停)
+    const provider = new MockLLMProvider([
+      {
+        text: "I started analyzing the codebase and found...",
+        usage: { inputTokens: 150, outputTokens: 100 },
+      },
+      { text: "should not be consumed" },
+    ]);
+
+    const result = await runChildAgent(
+      makeBaseOpts(provider, { budget: { maxTokens: 200 } }),
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.error?.type).toBe("max_tokens_exceeded");
+    expect(result.error?.message).toBe("sub-agent reached max tokens budget");
+    // partial 抓:第一轮已生成的 assistant 文本应能被主 LLM 看到 —— 子中止时 partial 复用契约
+    expect(result.partial).toContain("started analyzing");
+    // graceful 验证:provider 只被调一次,不 mid-call kill
+    expect(provider.callCount).toBe(1);
+  });
+
+  it("wall_clock 触发 → status=failed + error.type=wall_clock_timeout (与 max_tokens 同款 budget 折叠语义)", async () => {
+    // 慢 chat:第一次 LLM 内 await 100ms,wallClockTimeoutMs=20ms 在 sleep 中触发
+    // 验证 spec 软上限触发协议:wallClock 与 max_tokens 同走 failed 折叠 + 对应 error.type
+    const slowProvider = Object.assign(new MockLLMProvider([]), {
+      chat: async function* () {
+        await new Promise<void>((r) => setTimeout(r, 100));
+        yield { type: "message_start" as const };
+        yield {
+          type: "message_end" as const,
+          stopReason: "end_turn" as const,
+          usage: { inputTokens: 50, outputTokens: 30 },
+        };
+      },
+    });
+
+    const result = await runChildAgent(
+      makeBaseOpts(slowProvider as unknown as MockLLMProvider, {
+        budget: { wallClockTimeoutMs: 20 },
+      }),
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.error?.type).toBe("wall_clock_timeout");
+    expect(result.error?.message).toBe("sub-agent wall-clock timeout");
+  }, 5000);
 });
 
 // ─── aborted ───

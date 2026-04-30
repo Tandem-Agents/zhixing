@@ -70,6 +70,7 @@ import {
   renderUsageReport,
   renderContextVisual,
 } from "./render.js";
+import { parseTaskUsageFromMessages } from "./parse-task-usage.js";
 import {
   handleTrustCommand,
   handleSecurityCommand,
@@ -510,7 +511,15 @@ function buildSlashCommands(rl: readline.Interface): Record<
       description: "查看 token 用量详情",
       handler: (state) => {
         const budget = state.agent.checkBudget(state.messages);
-        renderUsageReport(budget, state.turnCounter, state.agent.calibrationFactor);
+        // 解析 transcript 中所有 Task 工具的 <usage> trailer —— 没有 Task 调用时
+        // parseTaskUsageFromMessages 返回空数组,renderUsageReport 自动跳过子段
+        const subUsages = parseTaskUsageFromMessages(state.messages);
+        renderUsageReport(
+          budget,
+          state.turnCounter,
+          state.agent.calibrationFactor,
+          subUsages,
+        );
       },
     },
     "/context": {

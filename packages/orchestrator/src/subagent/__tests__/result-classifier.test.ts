@@ -106,7 +106,7 @@ describe("classifyResult", () => {
     expect(classifyResult({ reason: "completed" }, null)).toBe("completed");
   });
 
-  it("reason='aborted' → aborted (parent abort / wallclock / idle 都走 loop 内部 reason)", () => {
+  it("reason='aborted' 且 budgetExceededKind=undefined → aborted (parent abort / idle-timeout 真中断)", () => {
     expect(classifyResult({ reason: "aborted" }, null)).toBe("aborted");
   });
 
@@ -116,5 +116,34 @@ describe("classifyResult", () => {
 
   it("reason='max_turns' → failed", () => {
     expect(classifyResult({ reason: "max_turns" }, null)).toBe("failed");
+  });
+
+  // ─── budgetExceededKind 优先级 ───
+
+  it('budgetExceededKind="max_turns" → failed (与 reason 字段同向,优先分支命中)', () => {
+    expect(
+      classifyResult({ reason: "max_turns", budgetExceededKind: "max_turns" }, null),
+    ).toBe("failed");
+  });
+
+  it('budgetExceededKind="max_tokens" 优先于 reason="aborted" → failed (软上限实现走 abort 通道,语义仍 failed)', () => {
+    expect(
+      classifyResult({ reason: "aborted", budgetExceededKind: "max_tokens" }, null),
+    ).toBe("failed");
+  });
+
+  it('budgetExceededKind="wall_clock" 优先于 reason="aborted" → failed (同上,wallClock 走 abort 通道但语义 failed)', () => {
+    expect(
+      classifyResult({ reason: "aborted", budgetExceededKind: "wall_clock" }, null),
+    ).toBe("failed");
+  });
+
+  it("caughtError 仍优先于 budgetExceededKind → failed (基础设施崩 > 任何 reason)", () => {
+    expect(
+      classifyResult(
+        { reason: "aborted", budgetExceededKind: "max_tokens" },
+        new Error("infra crash"),
+      ),
+    ).toBe("failed");
   });
 });

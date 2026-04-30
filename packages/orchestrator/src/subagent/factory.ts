@@ -232,6 +232,7 @@ async function runChildAgentInner(
           eventBus: childBus,
           parentSignal: opts.parentSignal,
           maxTurns: budget.maxTurns,
+          maxTokens: budget.maxTokens,
           watchdog: { idleTimeoutMs: budget.llmIdleTimeoutMs, warnThresholdRatio: 0.5 },
           wallClockTimeoutMs: budget.wallClockTimeoutMs,
         }),
@@ -325,11 +326,26 @@ function deriveErrorMeta(
       type: "loop_error",
     };
   }
-  if (runResult?.reason === "max_turns") {
-    return {
-      message: "sub-agent reached max turns budget",
-      type: "max_turns_exceeded",
-    };
+  // 三类软上限触发 —— 用 budgetExceededKind 结构化字段映射,避免散落 reason 判断
+  // 与 abortReason.origin 字符串解析(loop-runner 已把"abort 来源"折进 kind)
+  if (runResult?.budgetExceededKind) {
+    switch (runResult.budgetExceededKind) {
+      case "max_turns":
+        return {
+          message: "sub-agent reached max turns budget",
+          type: "max_turns_exceeded",
+        };
+      case "max_tokens":
+        return {
+          message: "sub-agent reached max tokens budget",
+          type: "max_tokens_exceeded",
+        };
+      case "wall_clock":
+        return {
+          message: "sub-agent wall-clock timeout",
+          type: "wall_clock_timeout",
+        };
+    }
   }
   // reason="error" 兜底 —— runSubAgentLoop 透传 AgentResult.error 在 result 上未直接暴露,
   // 给主 LLM 一个稳定可读的占位说明;详细 error 走 EventBus 历史/日志

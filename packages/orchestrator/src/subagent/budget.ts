@@ -36,6 +36,22 @@
  */
 export type SubAgentConfirmationPolicy = "inherit-or-deny" | "auto-deny";
 
+/**
+ * 子 agent 软上限触发种类 —— 三类 budget 触发统一建模
+ *
+ * 三类触发的共同语义:graceful 在下次 LLM call 前停,partial 文本仍可抓取,
+ * runChildAgent 折成 status="failed" + 对应 error.type:
+ *   - max_turns:loop 内置 maxTurns 计数到达,reason="max_turns"
+ *   - max_tokens:每次 llm:request_end 累加 usage 超阈,触发 abort with origin
+ *   - wall_clock:setTimeout 触发,abort with origin
+ *
+ * 三类共用一个枚举的好处:
+ *   - classifier 单一分支判断("有 kind 即 failed"),不解析 abortReason.origin 字符串
+ *   - deriveErrorMeta 一处映射 error.type,新增 budget kind 时只改一处
+ *   - 与 idle-timeout / parent-abort 等真正的中断语义清晰区分(后者 status="aborted")
+ */
+export type BudgetExceededKind = "max_turns" | "max_tokens" | "wall_clock";
+
 export interface SubAgentBudget {
   /** 子 agent loop 最大交互轮次,达到后终止 (透传 runAgentLoop.maxTurns) */
   maxTurns?: number;
