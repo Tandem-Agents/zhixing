@@ -181,13 +181,17 @@ async function drainResult(
 function makeBatchTool(
   name: string,
   handler: () => Promise<{ content: string; isError?: boolean }> | { content: string; isError?: boolean },
+  opts: { isParallelSafe?: boolean } = {},
 ): ToolDefinition {
   return {
     name,
     description: `Test tool: ${name}`,
     inputSchema: { type: "object" as const },
     isReadOnly: true,
-    isParallelSafe: true,
+    // 串行 abort 边界(前 K 完成 + 后 N-K 未启动)只在串行分支存在;并发分支
+    // 入口已启动全 N 个 promise,无"未启动"边界。abort 契约用 unsafe 工具锚定
+    // 串行路径,并发路径在专属 describe 段独立验证。默认 true 保持现有覆盖。
+    isParallelSafe: opts.isParallelSafe ?? true,
     needsPermission: false,
     call: async () => handler(),
   };
@@ -225,6 +229,8 @@ describe("executeToolCalls · abort 路径", () => {
   it("第 N 工具完成后 abort:completedResults 含已完成的合规 result,unexecutedToolUses 含未执行的", async () => {
     const ctrl = new AbortController();
     let executedCount = 0;
+    // 串行 abort 边界(完成 K 个 + 后 N-K 个未启动)是串行分支特有契约;
+    // 显式 isParallelSafe=false 让本测试稳定锚定串行路径
     const tool = makeBatchTool("t", () => {
       executedCount++;
       if (executedCount === 2) {
@@ -234,7 +240,7 @@ describe("executeToolCalls · abort 路径", () => {
         ctrl.abort();
       }
       return { content: `done-${executedCount}` };
-    });
+    }, { isParallelSafe: false });
 
     const result = await drainResult(
       executeToolCalls({
@@ -258,6 +264,8 @@ describe("executeToolCalls · abort 路径", () => {
   it("工具 await 期间 abort 抛 AbortError:当前工具不进 completedResults,从当前进 unexecutedToolUses", async () => {
     const ctrl = new AbortController();
     let attemptCount = 0;
+    // 串行路径下"前 K 完成 + 第 K+1 抛 AbortError + 后 N-K-1 未启动"分布是串行特有形态;
+    // 显式 isParallelSafe=false 锁定串行路径
     const tool = makeBatchTool("t", () => {
       attemptCount++;
       if (attemptCount === 1) {
@@ -266,7 +274,7 @@ describe("executeToolCalls · abort 路径", () => {
       // 第 2 个工具 await 期间 abort,模拟工具响应 abort 抛 AbortError
       ctrl.abort();
       throw new Error("AbortError: aborted by signal");
-    });
+    }, { isParallelSafe: false });
 
     const result = await drainResult(
       executeToolCalls({
@@ -309,6 +317,9 @@ describe("executeToolCalls · abort 路径", () => {
     // 同一 tool_use 收两个 tool_result 进 user message → Anthropic API 报 400。
     // 修复后 catch 块只 break,cleanup 在 agent-loop 那一层为 unexecutedToolUses (含本工具)
     // 注入唯一 placeholder。
+    //
+    // 串行循环顶 abort guard 让 tc3 不发 tool_start 是串行分支特性;并发分支
+    // 入口已发完 N 个 tool_start 才启动 promise,本测试用 isParallelSafe=false 锚定串行路径
     const ctrl = new AbortController();
     let attemptCount = 0;
     const tool = makeBatchTool("t", () => {
@@ -318,7 +329,7 @@ describe("executeToolCalls · abort 路径", () => {
       }
       ctrl.abort();
       throw new Error("AbortError: aborted by signal");
-    });
+    }, { isParallelSafe: false });
 
     const yields: AgentYield[] = [];
     const gen = executeToolCalls({
@@ -378,5 +389,357 @@ describe("executeToolCalls · abort 路径", () => {
     expect(result.completedResults).toHaveLength(3);
     expect(result.completedResults[1]?.isError).toBe(true);
     expect(result.unexecutedToolUses).toEqual([]);
+  });
+});
+
+// ─── 并发模式测试 ───
+//
+// 进入条件:N≥2 且 toolCalls 全部 isParallelSafe===true 且工具均已注册。
+// 串行行为契约由上面的 describe 段覆盖,本段聚焦并发分支特有形态:
+//   - tool_start 同步全发(批次启动可见性)
+//   - tool_end 严格按输入顺序 yield(主 LLM 看到的 tool_result 顺序契约)
+//   - allSettled rejected + abortSignal.aborted → 不 yield tool_end,进 unexecutedToolUses
+//   - 入口 abort guard:已 aborted 时不发 tool_start
+//   - 回退路径:含 unsafe / N=1 / 含未注册工具 → 走串行(行为零差异)
+
+describe("executeToolCalls · 并发模式", () => {
+  const calls3: ToolUseBlock[] = [
+    { type: "tool_use", id: "1", name: "t", input: {} },
+    { type: "tool_use", id: "2", name: "t", input: {} },
+    { type: "tool_use", id: "3", name: "t", input: {} },
+  ];
+
+  it("happy path:全 safe N=3 → tool_start 同步全发,tool_end 按输入顺序,results 完整", async () => {
+    let invokedCount = 0;
+    const tool = makeBatchTool("t", () => {
+      invokedCount += 1;
+      return { content: `done-${invokedCount}` };
+    });
+
+    const yields: AgentYield[] = [];
+    const gen = executeToolCalls({
+      toolCalls: calls3,
+      tools: [tool],
+      deps: passthroughDeps,
+      workingDirectory: "/tmp",
+    });
+    let result: ExecuteToolCallsResult | undefined;
+    while (true) {
+      const { value, done } = await gen.next();
+      if (done) {
+        result = value;
+        break;
+      }
+      yields.push(value);
+    }
+
+    // tool_start 同步全发(顺序 = 输入顺序),且全部出现在第一个 tool_end 之前
+    const toolStarts = yields.filter((y) => y.type === "tool_start");
+    const toolEnds = yields.filter((y) => y.type === "tool_end");
+    expect(toolStarts).toHaveLength(3);
+    expect(toolEnds).toHaveLength(3);
+    expect(toolStarts.map((y) => (y.type === "tool_start" ? y.id : ""))).toEqual([
+      "1",
+      "2",
+      "3",
+    ]);
+
+    // 关键不变量:批次启动可见性 —— 所有 tool_start 必在所有 tool_end 之前
+    const lastStartIdx = yields.findIndex(
+      (y) => y.type === "tool_start" && y.id === "3",
+    );
+    const firstEndIdx = yields.findIndex((y) => y.type === "tool_end");
+    expect(lastStartIdx).toBeLessThan(firstEndIdx);
+
+    // tool_end 严格按输入顺序(主 LLM 看到的 tool_result 顺序契约)
+    expect(toolEnds.map((y) => (y.type === "tool_end" ? y.id : ""))).toEqual([
+      "1",
+      "2",
+      "3",
+    ]);
+
+    // results 全部进 completedResults,顺序与 toolCalls 一致
+    expect(result?.completedResults).toHaveLength(3);
+    expect(result?.completedResults.map((r) => r.toolUseId)).toEqual([
+      "1",
+      "2",
+      "3",
+    ]);
+    expect(result?.unexecutedToolUses).toEqual([]);
+    expect(result?.abortedDuringToolAt).toBeUndefined();
+  });
+
+  it("isError 隔离:3 工具 1 throw 非 abort,其他 2 仍各自完成 + isError tool_result", async () => {
+    let invokeCount = 0;
+    const tool = makeBatchTool("t", () => {
+      invokeCount += 1;
+      if (invokeCount === 2) {
+        throw new Error("boom from tool 2");
+      }
+      return { content: `done-${invokeCount}` };
+    });
+
+    const result = await drainResult(
+      executeToolCalls({
+        toolCalls: calls3,
+        tools: [tool],
+        deps: passthroughDeps,
+        workingDirectory: "/tmp",
+      }),
+    );
+
+    // 3 个 result 全部到位(主 LLM 看到完整 tool_result 集),其中 tc2 是 isError
+    expect(result.completedResults).toHaveLength(3);
+    expect(result.completedResults[0]?.isError).toBeFalsy();
+    expect(result.completedResults[1]?.isError).toBe(true);
+    expect(
+      typeof result.completedResults[1]?.content === "string" &&
+        result.completedResults[1].content.includes("boom from tool 2"),
+    ).toBe(true);
+    expect(result.completedResults[2]?.isError).toBeFalsy();
+    expect(result.unexecutedToolUses).toEqual([]);
+    // 非 abort 异常,abortedDuringToolAt 不应被设
+    expect(result.abortedDuringToolAt).toBeUndefined();
+  });
+
+  it("入口 abort guard:已 aborted signal → 不发 tool_start,全部进 unexecutedToolUses", async () => {
+    const ctrl = new AbortController();
+    ctrl.abort();
+    const tool = makeBatchTool("t", () => ({ content: "ok" }));
+
+    const yields: AgentYield[] = [];
+    const gen = executeToolCalls({
+      toolCalls: calls3,
+      tools: [tool],
+      deps: passthroughDeps,
+      workingDirectory: "/tmp",
+      abortSignal: ctrl.signal,
+    });
+    let result: ExecuteToolCallsResult | undefined;
+    while (true) {
+      const { value, done } = await gen.next();
+      if (done) {
+        result = value;
+        break;
+      }
+      yields.push(value);
+    }
+
+    // 入口已 aborted → 没有任何 yield(无 tool_start / tool_end)
+    expect(yields).toHaveLength(0);
+    expect(result?.completedResults).toHaveLength(0);
+    expect(result?.unexecutedToolUses).toHaveLength(3);
+    expect(result?.unexecutedToolUses.map((t) => t.id)).toEqual(["1", "2", "3"]);
+    // 工具间隙 abort,非工具内 → undefined(与串行入口 guard 行为对齐)
+    expect(result?.abortedDuringToolAt).toBeUndefined();
+  });
+
+  it("批次进行中 abort:fulfilled 进 completedResults,reject 进 unexecutedToolUses,abortedDuringToolAt 有值", async () => {
+    const ctrl = new AbortController();
+    let invokeCount = 0;
+    // 模拟"工具响应 abort 抛 AbortError":第 1 个正常完成,第 2/3 个并发 await 时
+    // ctrl.abort() 被外部触发后抛错。并发分支 allSettled 等齐后,signal.aborted=true
+    // 的 reject 走 unexecutedToolUses 路径(与串行 catch 块 abort 同语义,不 yield tool_end)
+    const tool = makeBatchTool("t", async () => {
+      invokeCount += 1;
+      if (invokeCount === 1) {
+        return { content: "done-1" };
+      }
+      ctrl.abort();
+      throw new Error("AbortError: aborted by signal");
+    });
+
+    const yields: AgentYield[] = [];
+    const gen = executeToolCalls({
+      toolCalls: calls3,
+      tools: [tool],
+      deps: passthroughDeps,
+      workingDirectory: "/tmp",
+      abortSignal: ctrl.signal,
+    });
+    let result: ExecuteToolCallsResult | undefined;
+    while (true) {
+      const { value, done } = await gen.next();
+      if (done) {
+        result = value;
+        break;
+      }
+      yields.push(value);
+    }
+
+    // tool_start 全 3 个发(批次启动)
+    const toolStarts = yields.filter((y) => y.type === "tool_start");
+    expect(toolStarts).toHaveLength(3);
+
+    // tool_end 只 1 个(tc1 fulfilled);tc2/tc3 abort reject 不 yield(等 cleanup 注 placeholder)
+    const toolEnds = yields.filter((y) => y.type === "tool_end");
+    expect(toolEnds).toHaveLength(1);
+    expect(toolEnds[0]?.type === "tool_end" && toolEnds[0].id).toBe("1");
+
+    // completedResults: 仅 tc1
+    expect(result?.completedResults).toHaveLength(1);
+    expect(result?.completedResults[0]?.toolUseId).toBe("1");
+    // unexecutedToolUses: tc2 + tc3(由 cleanup 在 agent-loop 那一层注 placeholder)
+    expect(result?.unexecutedToolUses).toHaveLength(2);
+    expect(result?.unexecutedToolUses.map((t) => t.id)).toEqual(["2", "3"]);
+    // 整批退出时刻代理:allSettled 等齐时刻
+    expect(typeof result?.abortedDuringToolAt).toBe("number");
+  });
+
+  it("回退串行:含 unsafe 工具 → 走串行路径(任一 unsafe 整批回退)", async () => {
+    // 回退判定:任一 toolCall 命中的工具 isParallelSafe!==true 则 canRunParallel 返回 false
+    const safeTool = makeBatchTool("safe", () => ({ content: "safe-ok" }));
+    const unsafeTool = makeBatchTool(
+      "unsafe",
+      () => ({ content: "unsafe-ok" }),
+      { isParallelSafe: false },
+    );
+
+    // 验证策略:让 unsafe 工具同步累加调用顺序 + 断言 [safe, unsafe, safe] 严格串行触发
+    const startOrder: string[] = [];
+    const safeWithOrder: ToolDefinition = {
+      ...safeTool,
+      call: async () => {
+        startOrder.push("safe");
+        return { content: "safe-ok" };
+      },
+    };
+    const unsafeWithOrder: ToolDefinition = {
+      ...unsafeTool,
+      call: async () => {
+        startOrder.push("unsafe");
+        return { content: "unsafe-ok" };
+      },
+    };
+
+    const result = await drainResult(
+      executeToolCalls({
+        toolCalls: [
+          { type: "tool_use", id: "1", name: "safe", input: {} },
+          { type: "tool_use", id: "2", name: "unsafe", input: {} },
+          { type: "tool_use", id: "3", name: "safe", input: {} },
+        ],
+        tools: [safeWithOrder, unsafeWithOrder],
+        deps: passthroughDeps,
+        workingDirectory: "/tmp",
+      }),
+    );
+
+    // 串行路径下 push 顺序严格对应输入(并发可能乱序)
+    expect(startOrder).toEqual(["safe", "unsafe", "safe"]);
+    expect(result.completedResults).toHaveLength(3);
+    expect(result.completedResults.map((r) => r.toolUseId)).toEqual([
+      "1",
+      "2",
+      "3",
+    ]);
+  });
+
+  it("回退串行:N=1 单工具不进并发(避免 Promise.allSettled 开销)", async () => {
+    const tool = makeBatchTool("t", () => ({ content: "single" }));
+
+    const result = await drainResult(
+      executeToolCalls({
+        toolCalls: [{ type: "tool_use", id: "only", name: "t", input: {} }],
+        tools: [tool],
+        deps: passthroughDeps,
+        workingDirectory: "/tmp",
+      }),
+    );
+
+    // 单工具走串行,行为完整一致(N=1 在并发模式无收益)
+    expect(result.completedResults).toHaveLength(1);
+    expect(result.completedResults[0]?.toolUseId).toBe("only");
+    expect(result.completedResults[0]?.content).toBe("single");
+  });
+
+  it("回退串行:含未注册工具 → 走串行让 isError 分支合成 tool_result", async () => {
+    // canRunParallel 内部 toolMap.get(name)?.isParallelSafe === true,未注册 → undefined → false
+    // 走串行路径让"工具未找到 isError"分支处理(避免在并发分支重复实现错误路径)
+    const tool = makeBatchTool("t", () => ({ content: "ok" }));
+    const result = await drainResult(
+      executeToolCalls({
+        toolCalls: [
+          { type: "tool_use", id: "1", name: "t", input: {} },
+          { type: "tool_use", id: "2", name: "missing-tool", input: {} },
+        ],
+        tools: [tool],
+        deps: passthroughDeps,
+        workingDirectory: "/tmp",
+      }),
+    );
+
+    expect(result.completedResults).toHaveLength(2);
+    expect(result.completedResults[0]?.isError).toBeFalsy();
+    expect(result.completedResults[1]?.isError).toBe(true);
+    expect(
+      typeof result.completedResults[1]?.content === "string" &&
+        result.completedResults[1].content.includes("not found"),
+    ).toBe(true);
+  });
+
+  it("并发实证:3 个 50ms 工具 → 总耗时 ≈ max(单个) 而非 sum,实测远低于 150ms", async () => {
+    // 并发收益核心:I/O 重叠让总时间 ≈ max(单个),而非 sum;
+    // 阈值放松到 120ms 容忍 vitest 调度抖动 + Promise.allSettled overhead
+    const sleepMs = 50;
+    const tool = makeBatchTool("t", async () => {
+      await new Promise<void>((resolve) => setTimeout(resolve, sleepMs));
+      return { content: "ok" };
+    });
+
+    const start = Date.now();
+    const result = await drainResult(
+      executeToolCalls({
+        toolCalls: calls3,
+        tools: [tool],
+        deps: passthroughDeps,
+        workingDirectory: "/tmp",
+      }),
+    );
+    const elapsed = Date.now() - start;
+
+    expect(result.completedResults).toHaveLength(3);
+    // 串行 50ms × 3 = 150ms;并发 ≈ 50-80ms。120ms 阈值锚定"显著并行"
+    expect(elapsed).toBeLessThan(120);
+    // 同时验证下界(防 setTimeout 提前触发 vitest fake timers 误判):至少有一个 sleep 周期
+    expect(elapsed).toBeGreaterThanOrEqual(sleepMs - 10);
+  });
+
+  it("ctx 透传契约:并发模式 N 工具均收到正确 workingDirectory / abortSignal / llm 同源引用", async () => {
+    const captured: Array<ToolExecutionContext | undefined> = [];
+    const roles = makeStubRoles();
+    const ac = new AbortController();
+    const tool: ToolDefinition = {
+      name: "t",
+      description: "ctx capture spy",
+      inputSchema: { type: "object" as const },
+      isReadOnly: true,
+      isParallelSafe: true,
+      needsPermission: false,
+      call: async (_input, ctx) => {
+        captured.push(ctx);
+        return { content: "ok" };
+      },
+    };
+
+    await drain(
+      executeToolCalls({
+        toolCalls: calls3,
+        tools: [tool],
+        deps: passthroughDeps,
+        workingDirectory: "/concurrent/wd",
+        abortSignal: ac.signal,
+        llmRoles: roles,
+      }),
+    );
+
+    expect(captured).toHaveLength(3);
+    for (const ctx of captured) {
+      expect(ctx).toBeDefined();
+      // 三字段全部同源引用(并发模式共享同一 ctx 对象,串行 per-call 新建但内容相同)
+      expect(ctx!.workingDirectory).toBe("/concurrent/wd");
+      expect(ctx!.abortSignal).toBe(ac.signal);
+      expect(ctx!.llm).toBe(roles);
+    }
   });
 });

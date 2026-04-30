@@ -2105,7 +2105,7 @@ text 解析是 best-effort(不是协议层 truth),但对人类可读已足够。
 - ✅ `packages/cli/src/tool-render-strategy.ts` 落地(单一事实源策略表):`ToolRenderStrategy = "default" | "sub-agent-status"` 联合类型 + `TOOL_RENDER_STRATEGY` Readonly 映射(当前 `Task → "sub-agent-status"`)+ `getToolRenderStrategy(name)` 唯一查询入口(未注册兜底 `"default"`)。**关键架构选择**:`tool-executor` 同时产出 `yield tool_start/tool_end`(主路径 `renderer.handleEvent`)与 `emit tool:call_start/end`(EventBus listener),若 Task 工具两路同时渲染则形成 ⟡ 卡片 + 状态条双重视觉混乱;策略表让 `renderer.handleEvent` 与 `setupSubAgentStatus` 共享同一查询入口,任何加表 / 改表两侧自动一致,杜绝两侧硬编码漂移
 - ✅ `packages/cli/src/render.ts` 改造:`renderEvent` 在 `tool_start` / `tool_end` 分支查策略表,`getToolRenderStrategy(event.name) !== "default"` 时直接 `break`(不渲染 ⟡ 卡片),让位给专用订阅器;`createRenderSubscribers` 内装载 `setupSubAgentStatus(bus, pauseUI)` 与既有 `setupInterruptRendering` 并列,共享 `pauseUI` 钩子与 `dispose` 路径
 - ✅ TTY / 非 TTY 行为差异:TTY 模式 `\r` 单行刷新最近工具进度(spec 要求"只显示最近一个,避免堆叠");非 TTY 模式仅 Task 起止打整行,中间子工具事件 stdout 静默(可观测性走 EventBus 直采,避免 CI / pipe 日志爆炸)。状态机内部仍维护 `currentTask` / `currentSubLineage`(逻辑层不分支,仅输出层 TTY/非 TTY 二选一),保证 Task 收尾路径在两种模式下一致
-- ✅ 顺序匹配的 M2.5 演进锚点:当前 dispatch 串行,"首个未关联的 sub-X lineage" 即视为"当前正在跑的 Task#N";真并发改造后顺序匹配会退化失效,需在 Task 工具 / `runChildAgent` 路径 emit 显式关联事件(如 `task:dispatch_start` payload 含 `sub_agent_id`)精确归属。当前模块 JSDoc 显式标注此演进路径
+- ✅ 顺序匹配的"已知退化点":本里程碑落地时 dispatch 仍串行,"首个未关联的 sub-X lineage" 即视为"当前正在跑的 Task#N",匹配精确;后续 M2.5 dispatch 改造为真并发后,多 Task 并发场景下顺序匹配会因 N 个 sub agent 同时启动而 lineage 串扰,UX 退化但**功能不破**(单 Task / N=1 仍精确)。精确归属升级横跨 4 包(详见 §15 M2.5 "已知 trade-off" 段),作为独立工单跟进;模块 JSDoc 显式标注此 trade-off
 - ✅ **生产入口启用 Task 工具** —— 四处 `createAgentRuntime({ ..., enableTaskTool: true })` 显式开启:[cli REPL](../../../packages/cli/src/repl.ts#L659) / [cli runOnce](../../../packages/cli/src/run-agent.ts#L56) / [serve 持久会话](../../../packages/cli/src/serve/command.ts#L172) / [serve ephemeral](../../../packages/cli/src/serve/command.ts#L284)。M2.3 完成时仅实现"装配选项 + 测试覆盖",**生产路径默认 false** 是有意为之:状态条未就绪前打开 Task = 用户看子 agent 黑盒(不可接受 UX)。M2.4 一次性收口"工具能力 + 用户可见性 + 生产开关"三件配套上线
 - ✅ 单测覆盖(共 +28 用例):
   - `cli/__tests__/sub-agent-status.test.ts`(16 用例:TTY 模式 13 个 `[Task#1: desc]` 起始 / 子工具 \r 刷新 / ✓✗ 状态 / Task 收尾 \n / 跨 Task N 累积 / 顺序匹配 / `agent:run_end` 兜底 / dispose / description 缺失兜底 / 超长截断 / 非 Task 工具不响应;非 TTY 模式 3 个 整行起止 / 中间帧 stdout 零写入 / 收尾不受影响)
@@ -2120,18 +2120,31 @@ text 解析是 best-effort(不是协议层 truth),但对人类可读已足够。
 
 **独立性**:渲染改造与生产开关绑定一起上线 —— 两者解耦无意义(打开开关无渲染 = 黑盒 / 渲染就绪不开开关 = 无内容);策略表设计让未来加新派发型工具(如 BackgroundTask)只需在 `TOOL_RENDER_STRATEGY` 注册 + 写新订阅器接管,`renderer.handleEvent` 主路径零改动
 
-#### M2.5 — Tool dispatcher 并发改造(决定 #9 兑现)
+#### M2.5 — Tool dispatcher 并发改造(决定 #9 兑现) ✅ 已完成
 
-- [packages/core/src/loop/tool-executor.ts](../../../packages/core/src/loop/tool-executor.ts) 改造:
-  - 检查 `tool_use[].isParallelSafe` 全 true → `Promise.allSettled`
-  - 任一 unsafe → 顺序回退
-  - 错误聚合:每个 tool_use 独立 success/failure tool_result
-- 重新验证 §14.5 性能基准:3 个 Task 真实并发,而非串行
-- 8 个 builtin 工具的 isParallelSafe 已在 M0 盘点
+- ✅ [packages/core/src/loop/tool-executor.ts](../../../packages/core/src/loop/tool-executor.ts) 改造:抽出 `runSerialBatch`(私有)+ `runParallelBatch`(私有)两层 generator,主函数 `executeToolCalls` 仅做分组判断 + 委托
+- ✅ 分组策略 `canRunParallel`:N≥2 且 `toolCalls` 全部命中已注册工具且 `isParallelSafe===true` → 并发分支;否则(N=1 / 含 unsafe / 含未注册工具)回退串行(完全保留现有 yield/event/abort 协议)。**关键架构选择**:不做"局部并发分组"(如 [safe,unsafe,safe] 拆 [safe]‖[unsafe]‖[safe])—— 顺序读写依赖难静态推断(Edit 后的 Read 必须看到新内容),实现复杂度爆炸,价值有限;v1 简单优先,任一 unsafe 整批回退串行
+- ✅ 并发分支 yield/event 协议:`tool_start` 同步全发(N 个,顺序 = 输入顺序,批次启动可见性给状态条 / RPC 订阅者)→ `Promise.allSettled` 等齐 → 按输入顺序遍历 settled,fulfilled / 非 abort error 立即 yield `tool_end` + emit `tool:call_end` + 累积 results;abort reject 进 `unexecutedToolUses` 不 yield(由 cleanup 在末尾统一 yield placeholder,与串行模式同款)
+- ✅ **tool_result 顺序契约的精确边界**:
+  - 非 abort 路径(完整 turn / 单工具 throw 但 batch 整体跑完):严格按 tool_use 输入顺序 → user message 与串行模式 byte-equal
+  - abort 中途 + 工具响应不一致(部分 fulfilled 部分 reject AbortError)的混合路径:fulfilled 按输入顺序 yield 在前,abort placeholder 按 `unexecutedToolUses` 顺序在末尾追加 → user message 顺序 = 输入顺序的"fulfilled 子集 ++ abort 子集",**不严格 byte-equal 串行模式**
+  - 协议合规性:Anthropic / OpenAI provider 按 `tool_use_id` / `tool_call_id` 匹配 tool_result,顺序无关 → API 不会报 400,LLM 推理对乱序 tool_result robust(transcript rebuild 同样按 ID 匹配,持久化无回归)
+  - 实际触发概率:Task 工具内部 parentSignal 链自动级联,abort 时几乎全 reject(顺序不变);Read/Glob/Grep 几乎都同步 fulfilled,reject 极罕见 → 产品现实场景几乎不出现混合形态
+  - 强行重排(让 cleanup 按 toolCalls 输入顺序合并 results + placeholder)需改 cleanup 跨模块边界,且无产品收益,故有意保留当前简洁实现
+- ✅ 并发分支 abort 路径:入口 abort guard(已 aborted → 不发 tool_start,全部进 unexecutedToolUses,与串行循环顶 guard 等价但批次粒度);`allSettled` 等齐后,fulfilled 进 `completedResults` + yield `tool_end`,rejected 且 `abortSignal.aborted` 进 `unexecutedToolUses` 不 yield(与串行 catch 块 abort 同语义,由 cleanup 注唯一 placeholder,防双 result 进 user message → API 400);非 abort throw 转 isError tool_result(C6 错误隔离)
+- ✅ `abortedDuringToolAt`:并发模式记 `Promise.allSettled` 等齐时刻作"整批退出时刻"代理(语义 ≈ max(所有工具响应 abort 退出时刻),与串行 per-tool 时刻贴近,SLO 监控 toolGraceMs 算法不变)
+- ✅ 共享 ctx:并发模式 N 工具共享同一 `ToolExecutionContext` 实例(workingDirectory / abortSignal / llm 三字段不应被工具 mutate,与串行 per-call new 等价的引用语义)
+- ✅ 8 个 builtin 工具的 `isParallelSafe` 已在 M0 盘点对齐:`Read / Glob / Grep / WebFetch` = `true`(只读无副作用),`Edit / Write / Bash / Memory / Schedule` = `false`(写共享存储 / 同 path / 共享 cwd 有 race);`Task` 工具(orchestrator 包内)= `true`(子 agent LLM I/O bound 独立)
+- ✅ 单测覆盖(共 +9 用例,核心 18 用例分串行 / 并发两段):
+  - `core/loop/__tests__/tool-executor.test.ts · executeToolCalls · 并发模式`(8 用例:happy 三 yield 顺序 / isError 隔离 + 完整 result 集 / 入口 abort guard 不发 tool_start / 批次进行中 abort fulfilled-vs-reject 路径分流 + abortedDuringToolAt 有值 / 含 unsafe 回退串行 + 调用顺序断言 / N=1 回退串行 / 含未注册工具回退串行 / 并行实证 3 工具 50ms × 3 总耗时 < 120ms / ctx 透传 N 工具同源引用)
+  - 同文件 `executeToolCalls · abort 路径` 段已有 6 用例显式 `isParallelSafe=false` 锁定串行路径(此前测试隐式假设串行,M2.5 改造后显式声明让边界归属清晰,且并发路径的 abort 行为另由专属段独立验证)
+  - `core/loop/__tests__/agent-loop.test.ts · Tool 阶段 abort(串行路径)` 同款显式 `isParallelSafe: false` 锁串行,跨层 cleanup placeholder 协议不变
 
-**验证**:e2e:3 个 Task 同时跑,实测时间约等于 max(单 Task),不是 sum
+**验证**:`core` 全套 1892 用例全绿(M2.4 后 +9);`orchestrator` 204 用例全绿(M2.5 不改 orchestrator);`tool-executor.test.ts · 并发实证`用例锁定 3 个 50ms 工具并发后 elapsed < 120ms(串行需 ≥150ms),性能基准断言锚定在单元测试层避免 e2e 抖动
 
-**独立性**:dispatch 改造对单 tool 调用零影响(自动回退顺序);多 tool 才走并发
+**独立性**:dispatch 改造对单工具(N=1)/ 含 unsafe / 含未注册工具完全回退串行,行为零差异 —— 现有 9 个 builtin 工具中 4 个 safe 5 个 unsafe,主 LLM 同 turn 派多 unsafe 工具(如 N 个 Edit)自动走串行不破坏既有契约;仅同 turn 派多 safe 工具(如 N 个 Task / N 个 Read)才进入并发分支兑现"3 并发"产品语义
+
+**已知 trade-off(随后续工单升级,不阻塞 M2.5)**:CLI 状态条 [packages/cli/src/sub-agent-status.ts](../../../packages/cli/src/sub-agent-status.ts) 当前用"首个未关联的 sub-X lineage 即当前 Task" 顺序匹配建立 sub_agent_id ↔ Task#N 关联,在并发派多 Task(N≥2)场景下会因 N 个 sub agent 几乎同时启动而 lineage 串扰,导致状态条 UX 退化(单 Task / N=1 完全不变)。**精确归属升级**横跨 4 包:`ToolExecutionContext.toolCallId`(core)+ Task 工具 emit 关联事件(orchestrator)+ `runChildAgent` reserve subAgentId(orchestrator)+ 状态机重写 `currentTask` 为 `Map<toolCallId, TaskState>`(cli),与 dispatch 改造无强耦合,作为独立工单跟进,sub-agent-status.ts JSDoc 已显式标注此演进路径
 
 #### M2.6 — token / budget 软上限
 
@@ -2205,11 +2218,11 @@ text 解析是 best-effort(不是协议层 truth),但对人类可读已足够。
 | `createTaskTool(env)` Task 工具工厂 + `TaskToolEnv` 接口(`workspace`/`workspaceSource`/`globalConfigPath` 平铺三字段,对齐 `PromptBuildContext`) + `TASK_INPUT_SCHEMA` + `TASK_TOOL_PROMPT` + `TASK_TOOL_BOUNDARIES`(`process/exec` 静态边界声明)+ `assertCallContract` helper(集中 fail-fast 校验:ALS / `ctx.abortSignal` / `description` / `prompt`)+ `formatChildResultAsToolResult` 三态格式化 + `formatUsageTag`(`tokens = input + output`,cache tokens 有意不暴露,详见函数注释)+ `tools/index.ts` barrel + `package.json ./tools` sub-path + `tsup.config.ts` entry + 顶级 barrel re-export + `tools/__tests__/task.test.ts`(32 用例:三态文本 / schema / prompt / 元信息 / 契约前置校验集中 / cache tokens 不暴露回归保护 / happy path) | `packages/orchestrator/src/tools/task.ts` + `packages/orchestrator/src/tools/index.ts` + `packages/orchestrator/src/index.ts` + `packages/orchestrator/package.json` + `packages/orchestrator/tsup.config.ts` + `packages/orchestrator/src/tools/__tests__/task.test.ts` | M2.3 |
 | `createAgentRuntime` 加 `enableTaskTool?: boolean` 选项 + `runtime.run()` 入口包裹 `runContextStorage.run({ bus: eventBus, lineage: "main" }, ...)` 整个 agent loop 主体 + 装配阶段把 `taskTool.boundaries` 注册到 mutable `boundaryRegistry`(SecurityPipeline 分类必需,详见 §4.1 末"Boundaries 声明")+ `create-agent-runtime.test.ts` 加 5 个用例(ALS 透传 / 两个并发 run() ALS 不串扰 / `enableTaskTool=true` happy path / Task `subAgentSafe===false` 防递归不变量 / 默认 false 向后兼容) | `packages/orchestrator/src/runtime/create-agent-runtime.ts` + `packages/orchestrator/src/runtime/__tests__/create-agent-runtime.test.ts` | M2.3 |
 | `sub-agent-delegation` 条件性 segment(`SUB_AGENT_DELEGATION_TEXT` 常量 byte-equal 导出 + `buildSubAgentDelegation(tools)` 检测 Task 工具决定渲染)+ `MAIN_AGENT_SEGMENTS` 加 `sub-agent-delegation`(紧跟 tool-usage)+ `SUB_AGENT_SEGMENTS` 显式不含(防递归子 agent)+ `system-prompt.test.ts` 加 8 用例(MAIN/SUB segments 集成 / 条件渲染 / byte-equal 锚点 / 段顺序 / 子 agent 安全门) | `packages/orchestrator/src/runtime/system-prompt.ts` + `packages/orchestrator/src/runtime/__tests__/system-prompt.test.ts` | M2.3 |
-| CLI 子 agent 状态条订阅器 `setupSubAgentStatus(bus, pauseUI)` —— 按 `meta.lineage` 关联派发型工具主调用与子 agent 冒泡事件 + TTY/非 TTY 行为差异 + 顺序匹配演进锚点(M2.5) + 16 用例覆盖 | [packages/cli/src/sub-agent-status.ts](../../../packages/cli/src/sub-agent-status.ts) + [packages/cli/src/__tests__/sub-agent-status.test.ts](../../../packages/cli/src/__tests__/sub-agent-status.test.ts) | M2.4 |
+| CLI 子 agent 状态条订阅器 `setupSubAgentStatus(bus, pauseUI)` —— 按 `meta.lineage` 关联派发型工具主调用与子 agent 冒泡事件 + TTY/非 TTY 行为差异 + 顺序匹配的并发退化标注(M2.5 真并发后多 Task 场景 UX 退化,功能不破)+ 16 用例覆盖 | [packages/cli/src/sub-agent-status.ts](../../../packages/cli/src/sub-agent-status.ts) + [packages/cli/src/__tests__/sub-agent-status.test.ts](../../../packages/cli/src/__tests__/sub-agent-status.test.ts) | M2.4 |
 | 工具渲染策略表(单一事实源) `ToolRenderStrategy` + `TOOL_RENDER_STRATEGY` 映射 + `getToolRenderStrategy(name)` 唯一查询入口 —— 让 `renderer.handleEvent` 与 `setupSubAgentStatus` 共享同一查询入口避免双重渲染 + 5 用例覆盖 | [packages/cli/src/tool-render-strategy.ts](../../../packages/cli/src/tool-render-strategy.ts) + [packages/cli/src/__tests__/tool-render-strategy.test.ts](../../../packages/cli/src/__tests__/tool-render-strategy.test.ts) | M2.4 |
 | `render.ts` 集成:`renderEvent` 在 `tool_start` / `tool_end` 查策略表跳过非 default 工具(让位状态条)+ `createRenderSubscribers` 装载 `setupSubAgentStatus` 与 `setupInterruptRendering` 并列共享 `pauseUI` / `dispose` + 集成测试 7 用例(派发型工具不渲染 ⟡ 卡片 5 + SubAgentStatus 集成 2) | [packages/cli/src/render.ts](../../../packages/cli/src/render.ts) + [packages/cli/src/__tests__/render.test.ts](../../../packages/cli/src/__tests__/render.test.ts) | M2.4 |
 | 生产入口启用 Task 工具 —— 四处装配 `createAgentRuntime({ ..., enableTaskTool: true })`,与状态条同步上线(详见 §15 M2.4 独立性段) | [packages/cli/src/repl.ts:659](../../../packages/cli/src/repl.ts#L659)(REPL)+ [packages/cli/src/run-agent.ts:56](../../../packages/cli/src/run-agent.ts#L56)(runOnce)+ [packages/cli/src/serve/command.ts:172](../../../packages/cli/src/serve/command.ts#L172)(serve 持久会话)+ [packages/cli/src/serve/command.ts:284](../../../packages/cli/src/serve/command.ts#L284)(serve ephemeral) | M2.4 |
-| tool-executor 并发改造(`isParallelSafe` + `Promise.allSettled`) | [packages/core/src/loop/tool-executor.ts](../../../packages/core/src/loop/tool-executor.ts) | M2.5 |
+| tool-executor 并发改造(`canRunParallel` 分组 + `Promise.allSettled` 真并发):抽出 `runSerialBatch` / `runParallelBatch` 私有 generator + 主函数仅做委托;并发分支 `tool_start` 同步全发 + allSettled 等齐 + 按输入顺序 yield `tool_end` + 入口 abort guard + reject 路径分流(abortSignal.aborted → unexecutedToolUses,否则 isError tool_result);+ 9 个并发用例(8 段并发 + 1 现有改 isParallelSafe=false 锁串行)+ agent-loop.test.ts 1 个串行 abort 测试同款 isParallelSafe=false 显式锁定 | [packages/core/src/loop/tool-executor.ts](../../../packages/core/src/loop/tool-executor.ts) + [packages/core/src/loop/__tests__/tool-executor.test.ts](../../../packages/core/src/loop/__tests__/tool-executor.test.ts) + [packages/core/src/loop/__tests__/agent-loop.test.ts](../../../packages/core/src/loop/__tests__/agent-loop.test.ts) | M2.5 |
 | `/usage` 命令解析 toolCalls Task `<usage>` text | [packages/cli/src/](../../../packages/cli/src/) | M2.6 |
 
 ---

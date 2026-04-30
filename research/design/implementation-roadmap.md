@@ -56,7 +56,7 @@ S1–S3.6 ✅ + Step 17 ✅ + Step 20 ✅ + Phase 5 ✅ + Step 21A ✅ + Step 21
 
 ### P0：Step 21 — 子 agent 底座 + Task 工具
 
-**状态**：🔄 M0 ✅ + M1 ✅ + M2.1 ✅ + M2.2 ✅ + M2.3 ✅ + M2.4 ✅ 已完成；M2.5 tool-executor 并发改造 当前焦点（详见 [subagent-execution.md §15](specifications/subagent-execution.md) 子里程碑表）
+**状态**：🔄 M0 ✅ + M1 ✅ + M2.1 ✅ + M2.2 ✅ + M2.3 ✅ + M2.4 ✅ + M2.5 ✅ 已完成；M2.6 token / budget 软上限 当前焦点（详见 [subagent-execution.md §15](specifications/subagent-execution.md) 子里程碑表）
 **顶层定位**：[persistent-service.md §3.6](specifications/persistent-service.md)（AgentOrchestrator 层最基础原语）
 **依赖**：Step 21A ✅ + Step 21B ✅ + 远程打断 ✅（子 agent 复用 abort 级联机制）
 
@@ -86,7 +86,7 @@ S1–S3.6 ✅ + Step 17 ✅ + Step 20 ✅ + Phase 5 ✅ + Step 21A ✅ + Step 21
 
 #### M2 — 子 agent 底座 + Task 工具（业务交付）
 
-子里程碑 M2.1–M2.7 拆解与已完成情况详见 [subagent-execution.md §15 M2](specifications/subagent-execution.md)（spec 是真相源）。当前已完成 M2.1 ✅ runChildAgent 骨架 + M2.2 ✅ child broker audit + M2.3 ✅ Task 工具 / 主路径 ALS / sub-agent-delegation segment + M2.4 ✅ CLI 状态条 + 单一事实源策略表 + 四处生产入口启用 Task；M2.5 tool-executor 并发改造为当前焦点。
+子里程碑 M2.1–M2.7 拆解与已完成情况详见 [subagent-execution.md §15 M2](specifications/subagent-execution.md)（spec 是真相源）。当前已完成 M2.1 ✅ runChildAgent 骨架 + M2.2 ✅ child broker audit + M2.3 ✅ Task 工具 / 主路径 ALS / sub-agent-delegation segment + M2.4 ✅ CLI 状态条 + 单一事实源策略表 + 四处生产入口启用 Task + M2.5 ✅ tool-executor 并发改造（Promise.allSettled 真并发，N≥2 全 isParallelSafe → 并发，否则回退串行；3 Task 总耗时 ≈ max 而非 sum）；M2.6 token / budget 软上限为当前焦点。
 
 审查锚点：每子里程碑 1 轮小审查 + 终审 1 轮 = 7 轮（与 M0 / M1 累计 9–10 轮）。
 

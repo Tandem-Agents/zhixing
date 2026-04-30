@@ -1385,9 +1385,13 @@ describe("Agent Loop", () => {
 
     // ─── 端到端 abort 路径:cleanup 注入 partial/placeholder 让 messages 协议合规 ───
 
-    it("Tool 阶段 abort:newMessages 协议合规 (每个 tool_use 配对 tool_result)", async () => {
+    it("Tool 阶段 abort(串行路径):newMessages 协议合规 (每个 tool_use 配对 tool_result)", async () => {
       // 验证 cleanup 注入 placeholder 让 messages 协议合规 ——
       // 否则下一轮 LLM 调用会因残缺 tool_use 报 400。
+      //
+      // "前 K 完成 + 后 N-K 未启动" 边界是串行分支特有形态(并发分支入口已启动全 N 个);
+      // 显式 isParallelSafe=false 锁定串行路径。并发路径的协议合规另有专属覆盖
+      // (tool-executor.test.ts · 并发模式 abort 段)。
       const ctrl = new AbortController();
       let toolCount = 0;
       const provider = new MockLLMProvider([
@@ -1401,13 +1405,16 @@ describe("Agent Loop", () => {
         { text: "should never reach" },
       ]);
 
-      const tool = makeTool("t", async () => {
-        toolCount++;
-        if (toolCount === 2) {
-          ctrl.abort();
-        }
-        return { content: `done-${toolCount}` };
-      });
+      const tool: ToolDefinition = {
+        ...makeTool("t", async () => {
+          toolCount++;
+          if (toolCount === 2) {
+            ctrl.abort();
+          }
+          return { content: `done-${toolCount}` };
+        }),
+        isParallelSafe: false,
+      };
 
       const yields: AgentYield[] = [];
       const gen = runAgentLoop(

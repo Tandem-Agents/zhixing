@@ -28,12 +28,17 @@
  *   - 与主路径"哪些工具不渲染 ⟡ 卡片"共享 tool-render-strategy 表 —— 任何加表/
  *     改表两侧自动一致,不存在策略漂移。
  *
- * 顺序匹配的简化前提:
- *   当前 dispatch 串行 —— 主 LLM 即便单 turn 出 3 个 Task tool_use,实际仍顺序执行,
- *   "第一个未关联的 sub-X lineage" 即对应"当前正在跑的 Task#N"。真并发改造后,
- *   需要在 Task 工具/runChildAgent 路径 emit 显式关联事件 (e.g. task:dispatch_start
- *   payload 含 sub_agent_id) 才能精确多 Task 并发归属,本模块顺序匹配会退化失效,
- *   届时同步升级。
+ * 顺序匹配的简化前提与已知 trade-off:
+ *   - 单 Task / N=1 场景:tool-executor 自动回退串行(canRunParallel 要求 N≥2),
+ *     "首个未关联的 sub-X lineage 即当前 Task" 顺序匹配仍精确,本模块行为零变化
+ *   - 多 Task 并发场景(主 LLM 同 turn 派 N≥2 Task):tool-executor 走并发分支
+ *     (Promise.allSettled 真并行),N 个 sub agent 几乎同时 agent:run_start /
+ *     tool:call_start,顺序匹配会因 lineage 串扰而 UX 退化(子工具事件可能错关联到
+ *     另一个 Task#N 的状态条);**功能不破**,只是单行刷新内容混乱
+ *   - 精确归属升级(sub_agent_id ↔ Task#N):横跨 4 包(ToolExecutionContext 加
+ *     toolCallId / Task 工具 emit 关联事件 / runChildAgent reserve subAgentId /
+ *     本模块状态机改 Map<toolCallId, TaskState>),作为独立工单跟进,与并发分支
+ *     无强耦合,不阻塞已落地的并发能力
  *
  * TTY 行为:
  *   - TTY:\r 单行刷新(spec 要求"只显示最近一个工具,避免堆叠")
@@ -169,11 +174,12 @@ export function setupSubAgentStatus(
     // 子 bus 冒泡的工具事件 = 当前 Task 内部进度
     if (isSubLineage(meta) && currentTask !== null) {
       // 顺序匹配:首个 sub-X lineage 视为当前 Task 关联子 agent
-      // (M2.5 真并发后此处需改为 sub_agent_id 精确归属)
+      // (单 Task / N=1 时 tool-executor 自动回退串行,匹配精确;
+      // 多 Task 并发时此匹配会 UX 退化,见模块顶部 JSDoc trade-off 段)
       if (currentSubLineage === null) {
         currentSubLineage = meta!.lineage!;
       }
-      // 仅显示自己关联的 sub-X 事件(防 M2.5 之后多 sub 串扰本行)
+      // 仅显示自己关联的 sub-X 事件(避免并发场景下其他 sub 事件串扰本行)
       if (meta!.lineage !== currentSubLineage) return;
 
       currentToolLabel = formatToolLabel(payload.name, payload.input);
