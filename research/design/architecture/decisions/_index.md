@@ -13,6 +13,7 @@
 | 005 | [CLI 架构](005-cli-architecture.md) | 接受 | 2026-04-07 | OpenClaw + Claude Code CLI 架构深度对比 |
 | 006 | [安全系统架构](006-security-system-architecture.md) | 接受 | 2026-04-12 | OpenClaw + Hermes + Claude Code 安全系统三方深度对比 |
 | 007 | [消息 Outbox 与因果排序](007-message-outbox.md) | 接受 | 2026-04-21 | Slack / Claude Code / Temporal / Akka 多生产者顺序治理对照 |
+| 008 | [用户凭证存储与首次引导](008-identity-bootstrap-layer.md) | 接受 | 2026-05-01 | 凭证与公开配置物理分离 + 复用 bypassImmune 与 builtin 规则隔离 + 必要字段判定的程序级引导 |
 
 ## 使用说明
 
