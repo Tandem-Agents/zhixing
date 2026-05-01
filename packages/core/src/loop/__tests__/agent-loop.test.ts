@@ -1712,5 +1712,38 @@ describe("Agent Loop", () => {
         expect(result.abortReason?.kind).toBe("external");
       }
     });
+
+    it("loop 内部 abort 不波及父 signal(对称契约:abort 仅父→子,反向不向上)", async () => {
+      // 子内部 abort(abortSignal 工具内触发)→ loop aborted with kind="external",
+      // 父 controller 的 signal 不应被反向波及。这是 forkController 设计契约 ——
+      // child.abort 不向上冒泡 —— 在 agent-loop 集成层面的锁。
+      // 没有这条断言,未来若有人误把"子 abort 反向触发父"的捷径加进来,
+      // 父 turn 会被无辜杀掉,产品级承诺崩塌
+      const parent = new AbortController();
+      const ext = new AbortController();
+      const provider = new MockLLMProvider([
+        { toolCalls: [{ id: "tc1", name: "t", input: {} }] },
+        { text: "should never reach" },
+      ]);
+      const tool = makeTool("t", async () => {
+        ext.abort();
+        return { content: "tool done" };
+      });
+
+      const { result } = await drainAgentLoop(
+        baseParams(provider, {
+          tools: [tool],
+          parentSignal: parent.signal,
+          abortSignal: ext.signal,
+        }),
+      );
+
+      expect(result.reason).toBe("aborted");
+      if (result.reason === "aborted") {
+        expect(result.abortReason?.kind).toBe("external");
+      }
+      // 关键不变量:子 abort 不反向波及父 —— 父 signal 仍 pristine
+      expect(parent.signal.aborted).toBe(false);
+    });
   });
 });

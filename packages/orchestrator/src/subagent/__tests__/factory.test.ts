@@ -28,7 +28,7 @@ import {
   type ToolDefinition,
 } from "@zhixing/core";
 import { runChildAgent, type RunChildAgentOptions } from "../factory.js";
-import { runContextStorage } from "../../runtime/run-context.js";
+import { runContextStorage, type RunContext } from "../../runtime/run-context.js";
 
 // ConfirmationBroker.prototype.cancelAll 的 spy 验证仍依赖该类作为
 // 子 broker 实例化目标(factory 内部 new ConfirmationBroker())
@@ -486,5 +486,67 @@ describe("runChildAgent · 端到端 child broker fail-deny", () => {
 
     // 关键不变量 3:toolUses 计数为 1(尝试调用算 1 次,即使被 deny;统计 LLM 决策数)
     expect(result.toolUses).toBe(1);
+  });
+});
+
+// ─── ALS 嵌套隔离 ───
+//
+// 验证 spec §14.1 字面要求:"嵌套 sub agent ALS 自动隔离"。
+//
+// runChildAgent 内部包了一层 `runContextStorage.run({ bus: childBus, lineage })`,
+// AsyncLocalStorage.run 的栈式语义保证内层退出后外层 store 恢复。这是 Node.js
+// stdlib 自身契约,但产品级承诺仍需在 agent 边界显式锁住 —— 防止未来某次
+// 重构误把 runChildAgent 的内层 run 改成 enterWith(永久替换 store)等错误用法,
+// 让父 turn 后续工具调用拿到子 lineage,事件冒泡链路彻底错乱。
+
+describe("runChildAgent · ALS 嵌套隔离", () => {
+  it("外层主 store 在 runChildAgent 调用前后保持引用相同(内层 ALS 不污染外层)", async () => {
+    const provider = new MockLLMProvider([{ text: "child done" }]);
+    const parentBus = createEventBus<AgentEventMap>({ lineage: "main" });
+    const mainContext: RunContext = { bus: parentBus, lineage: "main" };
+
+    let beforeStore: RunContext | undefined;
+    let afterStore: RunContext | undefined;
+
+    await runContextStorage.run(mainContext, async () => {
+      beforeStore = runContextStorage.getStore();
+      // runChildAgent 内部 `runContextStorage.run({ bus: childBus, lineage: 'main/sub-...' })`
+      // 临时替换 store,async callback 退出后栈自动恢复 mainContext
+      await runChildAgent(makeBaseOpts(provider, { parentBus }));
+      afterStore = runContextStorage.getStore();
+    });
+
+    // 外层 store 引用同一对象(嵌套 run 退出后栈恢复,非新建)
+    expect(beforeStore).toBe(mainContext);
+    expect(afterStore).toBe(mainContext);
+    // lineage 仍是主路径,未被子的 main/sub-... 覆盖
+    expect(beforeStore?.lineage).toBe("main");
+    expect(afterStore?.lineage).toBe("main");
+  });
+
+  it("调 runChildAgent 多次,外层主 store 保持稳定(顺序调用栈对称)", async () => {
+    const mainContext: RunContext = {
+      bus: createEventBus<AgentEventMap>({ lineage: "main" }),
+      lineage: "main",
+    };
+
+    const captured: Array<RunContext | undefined> = [];
+
+    await runContextStorage.run(mainContext, async () => {
+      for (let i = 0; i < 3; i++) {
+        captured.push(runContextStorage.getStore());
+        await runChildAgent(
+          makeBaseOpts(new MockLLMProvider([{ text: `child ${i}` }]), {
+            parentBus: mainContext.bus,
+          }),
+        );
+        captured.push(runContextStorage.getStore());
+      }
+    });
+
+    // 6 次取样全是同一外层 store 引用(任意一次失守即 ALS 嵌套机制崩坏)
+    for (const store of captured) {
+      expect(store).toBe(mainContext);
+    }
   });
 });
