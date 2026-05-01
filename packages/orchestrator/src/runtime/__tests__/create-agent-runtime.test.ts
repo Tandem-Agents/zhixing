@@ -531,3 +531,206 @@ describe("createAgentRuntime · enableTaskTool 装配契约", () => {
     expect(result.agentResult.reason).toBe("completed");
   });
 });
+
+// ─── Task 端到端集成 ───
+//
+// 子 agent 各路径状态机已被单测覆盖;集成层在 createAgentRuntime + enableTaskTool
+// 装配下走真实主→子→主链路,锁住主子隔离 / 并发 / 子 fail 不波及父 / lineage 冒泡
+// 这几个产品级承诺。
+//
+// 不在此覆盖:
+//   - 父 abort 多 Task 同时级联 —— tool-executor 的 cancel placeholder 行为与
+//     sub-agent loop 的 abort path 在并发下时序难以稳定锁住,留 e2e 阶段做。
+//     单 sub 的 parent-abort 路径已被 factory.test.ts 与 agent-loop.test.ts 充分覆盖
+//   - confirmation 父子规则交互 —— 由 PermissionStore + child broker 各自单测
+//     等价覆盖,集成层不重复测同一路径
+
+describe("Task 端到端集成 · 主子隔离 / 并发 / 子 fail / lineage 冒泡", () => {
+  /** 抽出主 turn assistantMessage 的纯文本(便于断言主综合输出) */
+  function getAssistantText(turn: { assistantMessage: { content: readonly unknown[] } }): string {
+    return turn.assistantMessage.content
+      .filter((b): b is { type: "text"; text: string } =>
+        typeof b === "object" && b !== null && (b as { type: string }).type === "text",
+      )
+      .map((b) => b.text)
+      .join("");
+  }
+
+  it("单 Task 端到端:主 turn 只含主 user/主 assistant/Task toolCall 记录(子内部 messages 不冒入主 turn)", async () => {
+    // 主 turn 是 assertable 单元(turn.userMessage / assistantMessage / toolCalls);
+    // 子 agent 的内部 user/assistant messages 不应冒泡到主 turn —— 子 final
+    // 仅以 tool_result 字符串形式出现在 toolCalls[i].result。
+    providerRef.current = new MockLLMProvider([
+      {
+        toolCalls: [
+          { id: "tk1", name: "Task", input: { description: "research", prompt: "do X" } },
+        ],
+      },
+      { text: "[child-only marker] internal final answer" },
+      { text: "[main-only marker] synthesized output" },
+    ]);
+
+    const runtime = await createAgentRuntime({ enableTaskTool: true });
+    const result = await runtime.run({
+      messages: [userMessage("user question")],
+      turnIndex: 0,
+    });
+
+    expect(result.agentResult.reason).toBe("completed");
+
+    // 主 turn.userMessage 是用户原始消息(非子的"Begin"伪 user message)
+    const userText = (
+      result.turn.userMessage.content[0] as { text: string }
+    ).text;
+    expect(userText).toBe("user question");
+
+    // 主 turn.assistantMessage 是主综合 —— 不含子 final 文本(子文本是 tool_result.content,不是独立 assistant)
+    const assistantText = getAssistantText(result.turn);
+    expect(assistantText).toContain("[main-only marker]");
+    expect(assistantText).not.toContain("[child-only marker]");
+
+    // 主 turn.toolCalls 含 Task 一条记录,result 字段(扁平化字符串)含子 final
+    expect(result.turn.toolCalls).toHaveLength(1);
+    const taskCall = result.turn.toolCalls![0]!;
+    expect(taskCall.name).toBe("Task");
+    expect(taskCall.input).toMatchObject({ description: "research", prompt: "do X" });
+    expect(taskCall.result).toContain("[child-only marker]");
+    expect(taskCall.isError).toBeFalsy();
+
+    // 主 newMessages 中独立 assistant message 全集不含子 final 文本
+    // (子内部 message 流不冒泡到主 yield 层 —— "上下文不被子串扰"的核心承诺)
+    const standaloneAssistantTexts = result.newMessages
+      .filter((m) => m.role === "assistant")
+      .flatMap((m) => m.content)
+      .filter((b): b is { type: "text"; text: string } => b.type === "text")
+      .map((b) => b.text);
+    expect(standaloneAssistantTexts.some((t) => t.includes("[main-only marker]"))).toBe(true);
+    for (const t of standaloneAssistantTexts) {
+      expect(t).not.toContain("[child-only marker]");
+    }
+  });
+
+  it("并发 3 个 Task:all settled,主 turn 一次成型含 3 条 toolCalls", async () => {
+    // 产品核心承诺"3 并发"的端到端锁。
+    // tool-executor 在 N≥2 全 isParallelSafe 时走 Promise.allSettled 真并发,
+    // Task subAgentSafe=false 但本身 isParallelSafe=true,主同 turn 派 3 个可并发。
+    // (单测层面 callIndex 顺序消费,真并发的耗时基准归性能测试;本测只验证完成性)
+    providerRef.current = new MockLLMProvider([
+      {
+        toolCalls: [
+          { id: "tk1", name: "Task", input: { description: "A", prompt: "task A" } },
+          { id: "tk2", name: "Task", input: { description: "B", prompt: "task B" } },
+          { id: "tk3", name: "Task", input: { description: "C", prompt: "task C" } },
+        ],
+      },
+      { text: "child-final-α" },
+      { text: "child-final-β" },
+      { text: "child-final-γ" },
+      { text: "synthesized A+B+C" },
+    ]);
+
+    const runtime = await createAgentRuntime({ enableTaskTool: true });
+    const result = await runtime.run({
+      messages: [userMessage("compare A vs B vs C")],
+      turnIndex: 0,
+    });
+
+    expect(result.agentResult.reason).toBe("completed");
+    // 5 次 chat: 1 主分发 + 3 子终结 + 1 主综合
+    expect(providerRef.current!.callCount).toBe(5);
+
+    // 主 turn 含 3 条 toolCalls,各自 success
+    expect(result.turn.toolCalls).toHaveLength(3);
+    for (const tc of result.turn.toolCalls!) {
+      expect(tc.name).toBe("Task");
+      expect(tc.isError).toBeFalsy();
+    }
+    // 3 条 result 字符串覆盖 3 个子 final(顺序未定 —— callIndex sync 但完成顺序与
+    // 子 finalize 顺序耦合,我们只需断言三者全部出现)
+    const allResults = result.turn.toolCalls!.map((tc) => tc.result).join("\n");
+    expect(allResults).toContain("child-final-α");
+    expect(allResults).toContain("child-final-β");
+    expect(allResults).toContain("child-final-γ");
+
+    // 主综合输出
+    expect(getAssistantText(result.turn)).toContain("synthesized A+B+C");
+  });
+
+  it("子 LLM error → tool_result is_error=true,主 agent 继续完成 turn(子 fail 不波及父)", async () => {
+    // 核心不变量 —— 子失败 ≠ 主死。
+    // 子 LLM stream error → runChildAgent 折成 status="failed" → formatChildResultAsToolResult
+    // 给 isError=true → tool-executor catch 后产出 tool_result is_error=true →
+    // 主 LLM 看到 isError 后继续完成 turn(三态折叠契约)
+    providerRef.current = new MockLLMProvider([
+      {
+        toolCalls: [{ id: "tk1", name: "Task", input: { description: "fetch", prompt: "x" } }],
+      },
+      { error: new Error("upstream rejected") },
+      { text: "acknowledged Task#fetch failed; proceeding without it" },
+    ]);
+
+    const runtime = await createAgentRuntime({ enableTaskTool: true });
+    const result = await runtime.run({
+      messages: [userMessage("research X")],
+      turnIndex: 0,
+    });
+
+    // 主 turn 完成 —— 不被子 fail 反向 abort
+    expect(result.agentResult.reason).toBe("completed");
+
+    // toolCalls 含 Task 记录,isError=true
+    expect(result.turn.toolCalls).toHaveLength(1);
+    const taskCall = result.turn.toolCalls![0]!;
+    expect(taskCall.name).toBe("Task");
+    expect(taskCall.isError).toBe(true);
+    expect(taskCall.result).toMatch(/^\[Task "fetch" failed:/);
+
+    // 主 LLM 看到 is_error 后继续输出(spec 强制要求 LLM 在 final response 中暴露 Task 失败)
+    expect(getAssistantText(result.turn)).toContain("acknowledged");
+  });
+
+  it("父 listener 收到所有子事件,meta.lineage 各异且严格以 'main/sub-' 开头", async () => {
+    // hierarchical EventBus 的产品级承诺 ——
+    // 父订阅可见所有子事件,通过 meta.lineage 区分子身份;payload 类型不被冒泡污染
+    providerRef.current = new MockLLMProvider([
+      {
+        toolCalls: [
+          { id: "tk1", name: "Task", input: { description: "A", prompt: "task A" } },
+          { id: "tk2", name: "Task", input: { description: "B", prompt: "task B" } },
+          { id: "tk3", name: "Task", input: { description: "C", prompt: "task C" } },
+        ],
+      },
+      { text: "child-α" },
+      { text: "child-β" },
+      { text: "child-γ" },
+      { text: "main synthesis" },
+    ]);
+
+    const observedSubLineages = new Set<string>();
+    const runtime = await createAgentRuntime({
+      enableTaskTool: true,
+      decorateRunBus: ({ bus }) => {
+        // onAny 不区分事件类型,只观察 meta.lineage —— 任何子事件冒泡到父都计入
+        bus.onAny((_evtName, _payload, meta) => {
+          if (meta?.lineage && meta.lineage.startsWith("main/sub-")) {
+            observedSubLineages.add(meta.lineage);
+          }
+        });
+        return () => {};
+      },
+    });
+
+    const result = await runtime.run({
+      messages: [userMessage("compare A B C")],
+      turnIndex: 0,
+    });
+
+    expect(result.agentResult.reason).toBe("completed");
+    // 3 个子各有唯一 lineage,且全部冒泡可见
+    expect(observedSubLineages.size).toBe(3);
+    for (const lineage of observedSubLineages) {
+      expect(lineage).toMatch(/^main\/sub-[0-9a-f]+$/);
+    }
+  });
+
+});

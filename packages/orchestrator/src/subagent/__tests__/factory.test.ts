@@ -491,8 +491,6 @@ describe("runChildAgent · 端到端 child broker fail-deny", () => {
 
 // ─── ALS 嵌套隔离 ───
 //
-// 验证 spec §14.1 字面要求:"嵌套 sub agent ALS 自动隔离"。
-//
 // runChildAgent 内部包了一层 `runContextStorage.run({ bus: childBus, lineage })`,
 // AsyncLocalStorage.run 的栈式语义保证内层退出后外层 store 恢复。这是 Node.js
 // stdlib 自身契约,但产品级承诺仍需在 agent 边界显式锁住 —— 防止未来某次

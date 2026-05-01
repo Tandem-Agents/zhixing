@@ -1957,7 +1957,7 @@ sub agent finalize
 | `runChildAgent` cleanup discipline | finally 块即使 happy path 也执行 childBus.removeAllListeners / childBroker.cancelAll |
 | `formatChildResultAsToolResult` | 三态文本格式精确(snapshot test) |
 | `extractFinalAssistantText` / `extractPartialText` | 多种 messages 形态(只 user / 只 tool / 混合 / 中途 abort)按 §6.5 规则抽取 |
-| `resolveSubAgentResolver` | 三种 policy 路径正确返回 resolver |
+| `resolveSubAgentResolver` | `SubAgentConfirmationPolicy` 全集字面值都映射到对应 resolver(`exhaustivePolicyList` 编译期 exhaustive 锁强制新增 policy 时同步更新) |
 
 ### 14.2 集成测试
 
