@@ -20,11 +20,13 @@ import type {
 } from "@zhixing/core";
 import { ProviderConfigError, resolveLLMRoles } from "../resolve.js";
 import { bindRole, createProviderRoles } from "../create-provider.js";
-import type { ZhixingConfig } from "../types.js";
+import type { ZhixingConfig, ZhixingCredentials } from "../types.js";
 
 const env = (overrides: Record<string, string> = {}): Record<string, string | undefined> => ({
   ...overrides,
 });
+
+const noCreds = (): ZhixingCredentials => ({ version: 1 });
 
 const baseConfig = (overrides: Partial<ZhixingConfig> = {}): ZhixingConfig => ({
   llm: { main: { provider: "deepseek", model: "deepseek-chat" } },
@@ -34,7 +36,7 @@ const baseConfig = (overrides: Partial<ZhixingConfig> = {}): ZhixingConfig => ({
 
 describe("resolveLLMRoles · main 三段优先级", () => {
   it("无 override → 使用 config.llm.main", () => {
-    const result = resolveLLMRoles(baseConfig(), {}, env());
+    const result = resolveLLMRoles(baseConfig(), noCreds(), {}, env());
     expect(result.main.resolved.id).toBe("deepseek");
     expect(result.main.model).toBe("deepseek-chat");
   });
@@ -42,6 +44,7 @@ describe("resolveLLMRoles · main 三段优先级", () => {
   it("modelOverride 单独 → provider 不变，model 替换", () => {
     const result = resolveLLMRoles(
       baseConfig(),
+      noCreds(),
       { modelOverride: "deepseek-reasoner" },
       env(),
     );
@@ -57,6 +60,7 @@ describe("resolveLLMRoles · main 三段优先级", () => {
           openai: { apiKey: "sk-oai" },
         },
       }),
+      noCreds(),
       { providerOverride: "openai" },
       env(),
     );
@@ -78,6 +82,7 @@ describe("resolveLLMRoles · main 三段优先级", () => {
             },
           },
         }),
+        noCreds(),
         { providerOverride: "my-local" },
         env(),
       );
@@ -92,6 +97,7 @@ describe("resolveLLMRoles · main 三段优先级", () => {
           openai: { apiKey: "sk-oai" },
         },
       }),
+      noCreds(),
       { providerOverride: "openai", modelOverride: "gpt-4o-mini" },
       env(),
     );
@@ -101,13 +107,13 @@ describe("resolveLLMRoles · main 三段优先级", () => {
 
   it("缺 llm.main → throw 含迁移提示", () => {
     expect(() => {
-      resolveLLMRoles({} as ZhixingConfig, {}, env());
+      resolveLLMRoles({} as ZhixingConfig, noCreds(), {}, env());
     }).toThrow(ProviderConfigError);
     expect(() => {
-      resolveLLMRoles({} as ZhixingConfig, {}, env());
+      resolveLLMRoles({} as ZhixingConfig, noCreds(), {}, env());
     }).toThrow(/llm\.main is required/);
     expect(() => {
-      resolveLLMRoles({} as ZhixingConfig, {}, env());
+      resolveLLMRoles({} as ZhixingConfig, noCreds(), {}, env());
     }).toThrow(/secondary-llm-capability/);
   });
 });
@@ -130,6 +136,7 @@ describe("resolveLLMRoles · secondary 解析链（2 段）", () => {
           openai: { apiKey: "sk-oai" },
         },
       }),
+      noCreds(),
       {},
       env(),
     );
@@ -138,7 +145,7 @@ describe("resolveLLMRoles · secondary 解析链（2 段）", () => {
   });
 
   it("缺省 secondary → 直接用 main 实例 + main.model 兜底", () => {
-    const result = resolveLLMRoles(baseConfig(), {}, env());
+    const result = resolveLLMRoles(baseConfig(), noCreds(), {}, env());
     // 用 main 兜底——secondary === main 在配置层
     expect(result.secondary.resolved).toBe(result.main.resolved);
     expect(result.secondary.model).toBe(result.main.model);
@@ -160,6 +167,7 @@ describe("resolveLLMRoles · secondary 解析链（2 段）", () => {
           llm: { main: { provider: providerId, model } },
           providers: { [providerId]: { apiKey } },
         },
+        noCreds(),
         {},
         env(),
       );
@@ -183,6 +191,7 @@ describe("resolveLLMRoles · secondary 解析链（2 段）", () => {
             openai: { apiKey: "env:NONEXISTENT_VAR" },
           },
         }),
+        noCreds(),
         {},
         env(),
       );
@@ -201,6 +210,7 @@ describe("resolveLLMRoles · secondary 解析链（2 段）", () => {
           openai: { apiKey: "sk-oai" },
         },
       }),
+      noCreds(),
       { providerOverride: "openai", modelOverride: "gpt-4o" },
       env(),
     );
@@ -227,6 +237,7 @@ describe("resolveLLMRoles · 同 provider id 复用（避免重复 resolveProvid
         },
         providers: { deepseek: { apiKey: "sk-ds" } },
       }),
+      noCreds(),
       {},
       env(),
     );
@@ -248,6 +259,7 @@ describe("resolveLLMRoles · 同 provider id 复用（避免重复 resolveProvid
           openai: { apiKey: "sk-oai" },
         },
       }),
+      noCreds(),
       {},
       env(),
     );

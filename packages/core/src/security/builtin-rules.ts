@@ -72,6 +72,24 @@ export const BUILTIN_RULES: SecurityRule[] = [
     message: "此操作将修改知行配置文件",
     suggestion: "确认修改内容后允许；工作区变更需重启会话生效",
   },
+  {
+    id: "bi-zhixing-credentials-block",
+    name: "知行凭证文件隔离",
+    description:
+      "AI 不可读、不可写 ~/.zhixing/credentials.json——含 provider apiKey、channel secret 等敏感字段",
+    enabled: true,
+    match: { type: "path", paths: [".zhixing/credentials.json"], access: "any" },
+    action: "block",
+    bypassImmune: true,
+    severity: "critical",
+    category: "data_exfiltration",
+    source: "builtin",
+    message: "知行凭证文件 ~/.zhixing/credentials.json 不允许 AI 读写——含敏感凭证",
+    suggestion:
+      "若用户需要修改凭证，请告知用户：(1) 文件位置 ~/.zhixing/credentials.json " +
+      "(2) schema：providers.<id>.apiKey 与 channels.<id>.<field> " +
+      "(3) 让用户自己编辑该文件，AI 不参与读写",
+  },
 
   // ═══ 需确认：默认拦截但用户可批准 ═══
 

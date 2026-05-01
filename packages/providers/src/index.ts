@@ -15,6 +15,7 @@ export type {
   ResolvedProvider,
   WorkspaceConfig,
   ZhixingConfig,
+  ZhixingCredentials,
 } from "./types.js";
 export { DEFAULT_QUIRKS } from "./types.js";
 
@@ -42,6 +43,8 @@ export { createOpenAICompatibleProvider } from "./adapters/openai-compatible.js"
 
 // 配置加载
 export {
+  applyConfigPatch,
+  ConfigSchemaError,
   ensureWorkspaceDir,
   getDefaultWorkspacePath,
   getGlobalConfigDir,
@@ -49,8 +52,22 @@ export {
   getProjectConfigPath,
   loadConfig,
   resolveWorkspace,
+  writeConfig,
 } from "./config-loader.js";
 export type { ResolvedWorkspace, WorkspaceDirStatus, WorkspaceSource } from "./config-loader.js";
+
+// 凭证加载
+export {
+  applyCredentialsPatch,
+  CredentialsSchemaError,
+  getCredentialsPath,
+  loadCredentials,
+  writeCredentials,
+} from "./credentials-loader.js";
+
+// 首次启动必要字段检测
+export { checkBootstrap } from "./bootstrap-check.js";
+export type { MissingField } from "./bootstrap-check.js";
 
 // 一站式工厂
 export {

@@ -9,10 +9,12 @@
  * - createProviderDirect()— 指定 provider ID + ProviderConfig，单角色 LLMProvider
  */
 
+import path from "node:path";
 import type { ChatRequest, LLMProvider, LLMRole, LLMRoles } from "@zhixing/core";
 import { createAnthropicProvider } from "./adapters/anthropic-messages.js";
 import { createOpenAICompatibleProvider } from "./adapters/openai-compatible.js";
-import { loadConfig } from "./config-loader.js";
+import { getGlobalConfigPath, loadConfig } from "./config-loader.js";
+import { loadCredentials } from "./credentials-loader.js";
 import {
   resolveFromConfig,
   resolveLLMRoles,
@@ -21,6 +23,17 @@ import {
   type ResolvedLLMRoles,
 } from "./resolve.js";
 import type { ProviderConfig, ResolvedProvider, ZhixingConfig } from "./types.js";
+
+/**
+ * 工厂层共用：从 config 路径推断 ~/.zhixing/ 目录后加载凭证。
+ *
+ * 让 ZHIXING_CONFIG_PATH 测试覆盖与 credentials 文件保持同目录——
+ * 测试用临时目录跑全链路时，credentials 自动从同 tmpdir 取，不污染开发者机器。
+ */
+function loadCredentialsFromEnv(env: Record<string, string | undefined>) {
+  const homeDir = path.dirname(getGlobalConfigPath(env));
+  return loadCredentials({ homeDir });
+}
 
 /**
  * 根据协议类型选择适配器，创建 LLMProvider。
@@ -59,25 +72,33 @@ export function bindRole(provider: LLMProvider, model: string): LLMRole {
 
 /**
  * 从完整配置创建 LLMProvider（单角色，main role）。
+ *
+ * 内部加载凭证文件：credentials.json 主路径 → config.apiKey fallback → 缺失抛错。
  */
 export function createProvider(
   config: ZhixingConfig,
   providerId?: string,
   env?: Record<string, string | undefined>,
 ): LLMProvider {
-  const resolved = resolveFromConfig(config, providerId, env);
+  const e = env ?? process.env;
+  const credentials = loadCredentialsFromEnv(e);
+  const resolved = resolveFromConfig(config, credentials, providerId, e);
   return createFromResolved(resolved);
 }
 
 /**
  * 快捷方式：直接指定 provider ID + 配置创建 LLMProvider。
+ *
+ * 内部加载凭证文件：credentials.json 主路径 → 传入的 config.apiKey fallback → 缺失抛错。
  */
 export function createProviderDirect(
   providerId: string,
   config?: ProviderConfig,
   env?: Record<string, string | undefined>,
 ): LLMProvider {
-  const resolved = resolveProvider(providerId, config, env);
+  const e = env ?? process.env;
+  const credentials = loadCredentialsFromEnv(e);
+  const resolved = resolveProvider(providerId, config ?? {}, credentials, e);
   return createFromResolved(resolved);
 }
 
@@ -117,8 +138,10 @@ export function createProviderRoles(
 ): ProviderRolesResult {
   const env = options.env ?? process.env;
   const config = loadConfig({ cwd: options.cwd, env });
+  const credentials = loadCredentialsFromEnv(env);
   const resolved = resolveLLMRoles(
     config,
+    credentials,
     {
       providerOverride: options.providerOverride,
       modelOverride: options.modelOverride,

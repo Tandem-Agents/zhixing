@@ -254,6 +254,26 @@ export interface NetworkConfig {
   proxy?: "auto" | "off" | string;
 }
 
+// ─── 用户级凭证文件 ───
+
+/**
+ * 用户凭证文件结构（对应 ~/.zhixing/credentials.json）。
+ *
+ * 与 ZhixingConfig 物理隔离：AI 工具体系完全不可读 / 不可写
+ * （由 builtin 安全规则强制隔离，规则文档在 security 包中）。
+ *
+ * 关联机制：与 config.providers.<id> / config.channels.<id> 通过 id 关联。
+ * 不参与项目级配置级联——凭证是用户级单一来源，避免项目级配置泄漏到 git。
+ */
+export interface ZhixingCredentials {
+  /** schema 版本，用于未来迁移；当前固定为 1 */
+  version: 1;
+  /** Provider 凭证：按 provider id 索引 */
+  providers?: Record<string, { apiKey: string }>;
+  /** Channel 凭证：按 channel id 索引；字段由具体 channel 适配器决定 */
+  channels?: Record<string, Record<string, string>>;
+}
+
 // ─── 解析后的 Provider ───
 
 /** 合并预设 + 用户配置后的完整 Provider，可直接传给协议适配器 */

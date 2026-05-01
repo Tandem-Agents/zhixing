@@ -16,7 +16,26 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { mergeIdMap, writeJsonAtomic } from "./internal/io.js";
 import type { ZhixingConfig } from "./types.js";
+
+// ─── 错误类型 ───
+
+/**
+ * 配置文件读取或解析失败错误。
+ *
+ * 与 CredentialsSchemaError 对偶；message 仅引文件路径与底层错误描述。
+ * 仅用于 writer 路径——loader 当前保留 silent fallback 行为以兼容历史测试。
+ */
+export class ConfigSchemaError extends Error {
+  constructor(
+    message: string,
+    public readonly filePath: string,
+  ) {
+    super(message);
+    this.name = "ConfigSchemaError";
+  }
+}
 
 // ─── 路径解析 ───
 
@@ -83,6 +102,95 @@ export function loadConfig(options: {
   return deepMergeConfig(globalConfig ?? {}, projectConfig ?? {});
 }
 
+// ─── 配置写入 ───
+
+/**
+ * 写全局配置文件。原子写 + reader/writer 对偶合并。
+ *
+ * 合并行为见 applyConfigPatch 文档。
+ *
+ * 路径解析：传 homeDir → `<homeDir>/config.json`（测试用）；
+ * 否则走 `getGlobalConfigPath` 同款解析（含 `ZHIXING_CONFIG_PATH` 环境覆盖）。
+ *
+ * 错误：current 文件存在但读 / 解析失败 → throw ConfigSchemaError（不静默吞）。
+ * 不经任何 AI 工具体系——是程序级 file IO，wizard 与未来 update_config 流程直接调。
+ */
+export async function writeConfig(
+  patch: Partial<ZhixingConfig>,
+  options: {
+    homeDir?: string;
+    env?: Record<string, string | undefined>;
+  } = {},
+): Promise<void> {
+  const filePath = options.homeDir
+    ? path.join(options.homeDir, GLOBAL_CONFIG_FILENAME)
+    : getGlobalConfigPath(options.env ?? process.env);
+
+  let current: Partial<ZhixingConfig> = {};
+  if (fs.existsSync(filePath)) {
+    let content: string;
+    try {
+      content = fs.readFileSync(filePath, "utf-8");
+    } catch (err) {
+      throw new ConfigSchemaError(
+        `读取配置文件失败：${filePath}（${err instanceof Error ? err.message : String(err)}）`,
+        filePath,
+      );
+    }
+    try {
+      current = JSON.parse(content) as ZhixingConfig;
+    } catch (err) {
+      throw new ConfigSchemaError(
+        `配置文件 ${filePath} JSON 解析失败：${err instanceof Error ? err.message : String(err)}`,
+        filePath,
+      );
+    }
+  }
+
+  const merged = applyConfigPatch(current, patch);
+  await writeJsonAtomic(filePath, merged);
+}
+
+/**
+ * 合并 ZhixingConfig 现状与 patch。
+ *
+ * 合并语义（与 reader 端 deepMergeConfig 对偶）：
+ *   - 标量 / 简单字段（llm / agent / intent / workspace / network）：
+ *     patch 显式提供则**整体替换**——caller 显式意图明确
+ *   - id-based 子表（providers / channels）：**id 级 + 字段级合并**——
+ *     修改单 id 不清空其它 id；修改单 id 内单字段不丢其它字段
+ *   - patch 未提到的顶层字段：保留 current
+ *
+ * 这与 reader 在 providers / channels 上的 id 级合并行为对偶——writer 视角下
+ * "current 文件 + patch" 等同于 reader 视角下 "全局 + 项目" 的 id 级合并。
+ *
+ * 显式删除单字段不在此函数语义内（patch 不包含 = 保留 current）；
+ * 显式删除由未来的 removeXxx API 承载。
+ *
+ * 导出供测试与未来 update_config 流程复用。
+ */
+export function applyConfigPatch(
+  current: Partial<ZhixingConfig>,
+  patch: Partial<ZhixingConfig>,
+): ZhixingConfig {
+  const result: Partial<ZhixingConfig> = { ...current };
+
+  if (patch.llm !== undefined) result.llm = patch.llm;
+  if (patch.agent !== undefined) result.agent = patch.agent;
+  if (patch.intent !== undefined) result.intent = patch.intent;
+  if (patch.workspace !== undefined) result.workspace = patch.workspace;
+  if (patch.network !== undefined) result.network = patch.network;
+
+  if (patch.providers !== undefined) {
+    result.providers = mergeIdMap(current.providers, patch.providers);
+  }
+  if (patch.channels !== undefined) {
+    result.channels = mergeIdMap(current.channels, patch.channels);
+  }
+
+  return result as ZhixingConfig;
+}
+
 // ─── 自动生成全局配置模板 ───
 
 /** 获取平台默认工作区路径。Windows 优先使用 D: 盘（避免 C 盘空间不足）。 */
@@ -104,11 +212,7 @@ const CONFIG_TEMPLATE = `{
       "model": "Pro/MiniMaxAI/MiniMax-M2.5"
     }
   },
-  "providers": {
-    "siliconflow": {
-      "apiKey": "env:SILICONFLOW_API_KEY"
-    }
-  },
+  "providers": {},
   "workspace": {
     "root": "${getDefaultWorkspacePath().replace(/\\/g, "\\\\")}"
   }

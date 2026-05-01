@@ -20,6 +20,7 @@ import {
   type ProviderQuirks,
   type ResolvedProvider,
   type ZhixingConfig,
+  type ZhixingCredentials,
 } from "./types.js";
 
 // ─── 错误类型 ───
@@ -39,13 +40,22 @@ export class ProviderConfigError extends Error {
 /**
  * 解析单个 provider 的配置，合并预设和用户配置，返回 ResolvedProvider。
  *
+ * apiKey 解析优先级：credentials.providers.<id>.apiKey 主路径 →
+ * config.providers.<id>.apiKey fallback（支持 env: / helper: / plaintext） →
+ * 缺失抛错并提示首次引导。
+ *
+ * userConfig 与 credentials 都是必需参数——避免 caller 重构时漏传 credentials
+ * 而 silent 退化为 fallback-only 路径，错过用户的 credentials.json 主路径。
+ *
  * @param providerId - Provider 标识符（如 "deepseek"、"my-custom-gateway"）
- * @param userConfig - 用户配置（可为空对象，表示全部使用预设默认值）
+ * @param userConfig - 用户配置（无配置时显式传 `{}`，表示全部使用预设默认值）
+ * @param credentials - 凭证文件内容（无凭证时显式传 `{ version: 1 }`）
  * @param env - 环境变量源（默认 process.env，测试时可替换）
  */
 export function resolveProvider(
   providerId: string,
-  userConfig: ProviderConfig = {},
+  userConfig: ProviderConfig,
+  credentials: ZhixingCredentials,
   env: Record<string, string | undefined> = process.env,
 ): ResolvedProvider {
   const preset = getPreset(providerId);
@@ -67,7 +77,7 @@ export function resolveProvider(
     );
   }
 
-  const apiKey = resolveApiKey(providerId, userConfig.apiKey, preset?.envKey, env);
+  const apiKey = resolveApiKey(providerId, userConfig.apiKey, credentials, env);
 
   const quirks = mergeQuirks(preset?.quirks, userConfig.quirks);
 
@@ -91,6 +101,7 @@ export function resolveProvider(
  */
 export function resolveFromConfig(
   config: ZhixingConfig,
+  credentials: ZhixingCredentials,
   providerId?: string,
   env: Record<string, string | undefined> = process.env,
 ): ResolvedProvider {
@@ -103,7 +114,7 @@ export function resolveFromConfig(
   }
 
   const userConfig = config.providers?.[id] ?? {};
-  return resolveProvider(id, userConfig, env);
+  return resolveProvider(id, userConfig, credentials, env);
 }
 
 // ─── LLM 双角色解析（配置层） ───
@@ -136,6 +147,7 @@ export interface LLMRolesResolveOptions {
  */
 export function resolveLLMRoles(
   config: ZhixingConfig,
+  credentials: ZhixingCredentials,
   options: LLMRolesResolveOptions = {},
   env: Record<string, string | undefined> = process.env,
 ): ResolvedLLMRoles {
@@ -149,10 +161,11 @@ export function resolveLLMRoles(
   }
 
   const providersConfig = config.providers;
-  const main = resolveMainRole(config.llm.main, providersConfig, options, env);
+  const main = resolveMainRole(config.llm.main, providersConfig, credentials, options, env);
   const secondary = resolveSecondaryRole(
     config.llm.secondary,
     providersConfig,
+    credentials,
     env,
     main,
   );
@@ -163,12 +176,13 @@ export function resolveLLMRoles(
 function resolveMainRole(
   mainConfig: LLMRoleConfig,
   providersConfig: Record<string, ProviderConfig> | undefined,
+  credentials: ZhixingCredentials,
   options: LLMRolesResolveOptions,
   env: Record<string, string | undefined>,
 ): ResolvedLLMRole {
   const finalProvider = options.providerOverride ?? mainConfig.provider;
   const userConfig = providersConfig?.[finalProvider] ?? {};
-  const resolved = resolveProvider(finalProvider, userConfig, env);
+  const resolved = resolveProvider(finalProvider, userConfig, credentials, env);
 
   let finalModel: string;
   if (options.modelOverride) {
@@ -193,6 +207,7 @@ function resolveMainRole(
 function resolveSecondaryRole(
   explicit: LLMRoleConfig | undefined,
   providersConfig: Record<string, ProviderConfig> | undefined,
+  credentials: ZhixingCredentials,
   env: Record<string, string | undefined>,
   main: ResolvedLLMRole,
 ): ResolvedLLMRole {
@@ -225,7 +240,7 @@ function resolveSecondaryRole(
   // 不同 provider id：独立解析，失败 fail-fast（不静默降级到 main，避免把
   // "用户期望的双 provider 架构"伪装成单 provider 在跑）。
   const userConfig = providersConfig?.[explicit.provider] ?? {};
-  const resolved = resolveProvider(explicit.provider, userConfig, env);
+  const resolved = resolveProvider(explicit.provider, userConfig, credentials, env);
   return { resolved, model: explicit.model };
 }
 
@@ -244,38 +259,38 @@ function buildMissingMainConfigMessage(): string {
 // ─── API Key 解析 ───
 
 /**
- * 解析 API Key，支持三种格式：
- * 1. "env:VAR_NAME" → 从环境变量读取
- * 2. "helper:command" → 执行命令获取
- * 3. 直接字符串 → 原样使用
+ * 解析 API Key。
  *
- * 如果用户未配置 apiKey，尝试从预设的 envKey 对应的环境变量自动解析。
+ * 顺序：
+ *   1. credentials.providers.<id>.apiKey —— 主路径（向导写、用户编辑）
+ *   2. config.providers.<id>.apiKey —— fallback，承载三种格式：
+ *        "env:VAR_NAME"   → 从环境变量读取（CI / enterprise vault 用）
+ *        "helper:command" → 执行命令获取（vault helper 用）
+ *        明文            → 原样使用
+ *   3. 都缺失 → 抛 ProviderConfigError，引导用户跑 `zhixing` 触发首次引导
  */
 function resolveApiKey(
   providerId: string,
   userApiKey: string | undefined,
-  presetEnvKey: string | undefined,
+  credentials: ZhixingCredentials,
   env: Record<string, string | undefined>,
 ): string {
-  // 用户显式配置了 apiKey
+  const credApiKey = credentials.providers?.[providerId]?.apiKey;
+  if (credApiKey) {
+    return credApiKey;
+  }
+
   if (userApiKey) {
     return parseApiKeyValue(providerId, userApiKey, env);
   }
 
-  // 尝试预设的环境变量
-  if (presetEnvKey) {
-    const value = env[presetEnvKey];
-    if (value) {
-      return value;
-    }
-  }
-
   throw new ProviderConfigError(
-    `Provider "${providerId}" 缺少 API Key。请通过以下方式之一配置：\n` +
-      (presetEnvKey
-        ? `  1. 设置环境变量 ${presetEnvKey}\n`
-        : `  1. 设置环境变量（自定义 provider 需在 apiKey 中用 "env:VAR_NAME" 格式指定）\n`) +
-      `  2. 在配置文件中设置 providers.${providerId}.apiKey`,
+    `Provider "${providerId}" 缺少 API Key。\n` +
+      `请按以下任一方式配置：\n` +
+      `  1. （推荐）在 ~/.zhixing/credentials.json 的 providers.${providerId}.apiKey 字段填入凭证；\n` +
+      `     首次使用建议在 TTY 终端跑 \`zhixing\` 触发引导自动写入。\n` +
+      `  2. （fallback，CI / vault 用）在 ~/.zhixing/config.json 的 providers.${providerId}.apiKey\n` +
+      `     字段写 "env:VAR_NAME" / "helper:command" / 明文之一。`,
     providerId,
   );
 }
