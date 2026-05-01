@@ -264,21 +264,28 @@ describe("loadConfig", () => {
     expect(content.llm?.main?.provider).toBe("my-custom");
   });
 
-  it("JSON 语法错误的配置文件应被跳过（不报错）", () => {
+  it("JSON 语法错误的配置文件应抛 ConfigSchemaError（fail-fast）", () => {
     const configDir = path.join(tempHome, ".zhixing");
     fs.mkdirSync(configDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(configDir, "config.json"),
-      "{ invalid json",
-    );
+    const filePath = path.join(configDir, "config.json");
+    fs.writeFileSync(filePath, "{ invalid json");
 
-    const config = loadConfig({
-      cwd: tempProject,
-      env: { ZHIXING_CONFIG_PATH: path.join(configDir, "config.json") },
-      noAutoCreate: true,
-    });
+    let caught: unknown;
+    try {
+      loadConfig({
+        cwd: tempProject,
+        env: { ZHIXING_CONFIG_PATH: filePath },
+        noAutoCreate: true,
+      });
+    } catch (err) {
+      caught = err;
+    }
 
-    expect(config).toEqual({});
+    expect(caught).toBeInstanceOf(ConfigSchemaError);
+    if (caught instanceof ConfigSchemaError) {
+      expect(caught.filePath).toBe(filePath);
+      expect(caught.message).toContain(filePath);
+    }
   });
 });
 

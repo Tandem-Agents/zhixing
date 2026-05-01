@@ -9,11 +9,10 @@
  * - createProviderDirect()— 指定 provider ID + ProviderConfig，单角色 LLMProvider
  */
 
-import path from "node:path";
 import type { ChatRequest, LLMProvider, LLMRole, LLMRoles } from "@zhixing/core";
 import { createAnthropicProvider } from "./adapters/anthropic-messages.js";
 import { createOpenAICompatibleProvider } from "./adapters/openai-compatible.js";
-import { getGlobalConfigPath, loadConfig } from "./config-loader.js";
+import { loadConfig, resolveHomeDir } from "./config-loader.js";
 import { loadCredentials } from "./credentials-loader.js";
 import {
   resolveFromConfig,
@@ -25,14 +24,13 @@ import {
 import type { ProviderConfig, ResolvedProvider, ZhixingConfig } from "./types.js";
 
 /**
- * 工厂层共用：从 config 路径推断 ~/.zhixing/ 目录后加载凭证。
+ * 工厂层共用：按 env 推断 ~/.zhixing/ 目录后加载凭证。
  *
  * 让 ZHIXING_CONFIG_PATH 测试覆盖与 credentials 文件保持同目录——
  * 测试用临时目录跑全链路时，credentials 自动从同 tmpdir 取，不污染开发者机器。
  */
 function loadCredentialsFromEnv(env: Record<string, string | undefined>) {
-  const homeDir = path.dirname(getGlobalConfigPath(env));
-  return loadCredentials({ homeDir });
+  return loadCredentials({ homeDir: resolveHomeDir(env) });
 }
 
 /**

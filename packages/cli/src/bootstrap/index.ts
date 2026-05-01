@@ -15,6 +15,12 @@ export type {
 
 export { TerminalBootstrapInteraction } from "./terminal-interaction.js";
 
+export { ensureBootstrap } from "./entry.js";
+export type {
+  BootstrapEntryResult,
+  EnsureBootstrapOptions,
+} from "./entry.js";
+
 export type {
   BootstrapAskAnswer,
   BootstrapAskRequest,

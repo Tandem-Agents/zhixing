@@ -50,7 +50,7 @@ import {
   type AgentTurnResult,
 } from "@zhixing/core";
 import { describeProxy, type ProxyDescription } from "@zhixing/network";
-import { loadConfig } from "@zhixing/providers";
+import { loadConfig, loadCredentials, resolveHomeDir } from "@zhixing/providers";
 import { createScheduleTool } from "@zhixing/tools-builtin";
 import { setupChannels } from "./serve/channels.js";
 import { setupDelivery, type DeliveryStack } from "./setup-delivery.js";
@@ -712,7 +712,10 @@ export async function startRepl(options: ReplOptions): Promise<void> {
 
   // ── Channels + Delivery（与 serve 共享同一路径） ──
   const zhixingHome = getZhixingHome();
+  // loadConfig 自身处理 ZHIXING_CONFIG_PATH override；
+  // loadCredentials 没有 env 概念，显式按 resolveHomeDir 推断与 config 同目录
   const config = loadConfig({ cwd: process.cwd() });
+  const credentials = loadCredentials({ homeDir: resolveHomeDir() });
   let channels: import("@zhixing/core").ChannelRegistry | undefined;
   let deliveryStack: DeliveryStack | undefined;
 
@@ -727,6 +730,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     try {
       const result = await setupChannels({
         entries: config.channels,
+        credentials,
         logger: channelLogger,
       });
       channels = result.registry;

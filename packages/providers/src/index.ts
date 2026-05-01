@@ -51,6 +51,7 @@ export {
   getGlobalConfigPath,
   getProjectConfigPath,
   loadConfig,
+  resolveHomeDir,
   resolveWorkspace,
   writeConfig,
 } from "./config-loader.js";

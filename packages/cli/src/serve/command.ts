@@ -46,7 +46,16 @@ import {
   type ProcessLockPaths,
   type ConfirmationBridge,
 } from "@zhixing/server";
-import { loadConfig } from "@zhixing/providers";
+import {
+  checkBootstrap,
+  ConfigSchemaError,
+  CredentialsSchemaError,
+  loadConfig,
+  loadCredentials,
+  resolveHomeDir,
+  type ZhixingConfig,
+  type ZhixingCredentials,
+} from "@zhixing/providers";
 import { createScheduleTool } from "@zhixing/tools-builtin";
 import chalk from "chalk";
 import { createAgentRuntime } from "@zhixing/orchestrator/runtime";
@@ -119,6 +128,40 @@ function buildForwardedArgs(opts: ServeOptions): string[] {
 async function runServerProcess(opts: ServeOptions): Promise<void> {
   const port = opts.port ?? DEFAULT_SERVER_CONFIG.port;
   const host = opts.host ?? DEFAULT_SERVER_CONFIG.host;
+  const workspace = opts.workspace ?? process.cwd();
+
+  // 启动期必要字段检查——server 模式无 TTY 假设，缺字段直接拒绝启动，
+  // 让用户先在交互终端跑 `zhixing` 完成首次配置。
+  // loadConfig 自身处理 ZHIXING_CONFIG_PATH override；loadCredentials 显式
+  // 按 resolveHomeDir 推断与 config 同目录（loadCredentials 没有 env 概念）
+  let config: ZhixingConfig;
+  let credentials: ZhixingCredentials;
+  try {
+    config = loadConfig({ cwd: workspace });
+    credentials = loadCredentials({ homeDir: resolveHomeDir() });
+  } catch (err) {
+    if (
+      err instanceof ConfigSchemaError
+      || err instanceof CredentialsSchemaError
+    ) {
+      console.error(chalk.red(`[配置错误] ${err.message}`));
+      console.error(chalk.dim(`请修复或删除文件后重试：${err.filePath}`));
+      process.exit(2);
+    }
+    throw err;
+  }
+
+  const missing = checkBootstrap(config, credentials);
+  if (missing.length > 0) {
+    console.error(chalk.red("首次配置未完成，server 无法启动。"));
+    console.error(
+      chalk.dim("请先在交互终端运行 `zhixing` 完成首次配置。缺失字段："),
+    );
+    for (const field of missing) {
+      console.error(chalk.dim(`  - ${field.humanLabel}`));
+    }
+    process.exit(2);
+  }
 
   // 1. token
   const tokenInfo = await loadOrCreateToken();
@@ -127,7 +170,6 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   }
 
   // 2. TranscriptStore
-  const workspace = opts.workspace ?? process.cwd();
   const zhixingHome = getZhixingHome();
   const projectId = getProjectId(path.resolve(workspace));
   const conversationsDir = path.join(zhixingHome, "projects", projectId, "conversations");
@@ -206,8 +248,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     confirmationHub,
   });
 
-  // 4. Channels
-  const config = loadConfig({ cwd: workspace });
+  // 4. Channels（config + credentials 已在启动期顶部 load 完成）
   let channels: ChannelRegistry | undefined;
   let inboundRouter: InboundRouter | null = null;
   if (config.channels && Object.keys(config.channels).length > 0) {
@@ -221,6 +262,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     try {
       const result = await setupChannels({
         entries: config.channels,
+        credentials,
         conversations,
         logger: channelLogger,
         // InboundRouter pending-aware 拦截依赖 hub

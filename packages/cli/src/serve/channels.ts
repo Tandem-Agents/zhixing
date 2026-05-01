@@ -16,7 +16,10 @@ import {
   type ConversationManager,
   type ConfirmationHub,
 } from "@zhixing/server";
-import type { ChannelConfigEntry } from "@zhixing/providers";
+import type {
+  ChannelConfigEntry,
+  ZhixingCredentials,
+} from "@zhixing/providers";
 
 // ─── Adapter Factory ───
 
@@ -39,6 +42,15 @@ function createAdapter(type: string): Promise<ChannelAdapter> {
 
 export interface SetupChannelsOptions {
   entries: Record<string, ChannelConfigEntry>;
+  /**
+   * 用户级凭证文件——含 channel 密字段（appSecret 等）。
+   *
+   * setupChannels 内部把 `entries[id].credentials`（非密字段如 appId）与
+   * `credentials.channels[id]`（密字段）合并后传给 ChannelAdapter.connect；
+   * channel adapter 收到的 ChannelConfig.credentials 形态完全不变（Record<string, string>），
+   * 不需要 adapter 改动即可获得密字段隔离。
+   */
+  credentials: ZhixingCredentials;
   /** ConversationManager for inbound routing. Omit for outbound-only mode (REPL). */
   conversations?: ConversationManager;
   logger: ChannelLogger;
@@ -63,8 +75,14 @@ export interface SetupChannelsResult {
 export async function setupChannels(
   options: SetupChannelsOptions,
 ): Promise<SetupChannelsResult> {
-  const { entries, conversations, logger, confirmationHub, cancelKeywords } =
-    options;
+  const {
+    entries,
+    credentials,
+    conversations,
+    logger,
+    confirmationHub,
+    cancelKeywords,
+  } = options;
 
   const eventBus = createEventBus<ChannelEventMap>();
 
@@ -122,10 +140,18 @@ export async function setupChannels(
 
     registry.register(adapter);
 
+    // 合并非密字段（entry.credentials, 含 appId 等）与密字段
+    // （credentials.channels.<id>, 含 appSecret 等）。adapter 收到 Record<string, string>
+    // 形态不变；同 key 时密字段（来自 credentials.json）优先，避免 config.json 误覆盖密字段
+    const mergedCredentials = {
+      ...entry.credentials,
+      ...(credentials.channels?.[id] ?? {}),
+    };
+
     const channelConfig: ChannelConfig = {
       type,
       enabled: true,
-      credentials: entry.credentials,
+      credentials: mergedCredentials,
       options: entry.options,
       defaultTarget: entry.defaultTarget
         ? { channelId: id, to: entry.defaultTarget.to }

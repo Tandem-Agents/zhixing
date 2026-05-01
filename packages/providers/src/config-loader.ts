@@ -67,6 +67,27 @@ export function getProjectConfigPath(cwd: string = process.cwd()): string {
   return path.join(cwd, PROJECT_CONFIG_FILENAME);
 }
 
+/**
+ * 推断 ~/.zhixing 目录。
+ *
+ * 优先级：
+ *   1. env.ZHIXING_CONFIG_PATH 设置 → 取该路径的 dirname（让 config 与 credentials
+ *      跟随同一目录，避免两份文件分裂在不同位置）
+ *   2. 默认 → os.homedir()/.zhixing
+ *
+ * 仅 caller 需要"基于此目录加载多份 zhixing 文件"时使用——例如 cli/serve 入口
+ * 同时 load config + credentials 必须保证两者目录一致。
+ *
+ * 与 getGlobalConfigDir 的差异：
+ *   - getGlobalConfigDir() 永远返回 ~/.zhixing，不看 env
+ *   - resolveHomeDir(env) 优先按 env.ZHIXING_CONFIG_PATH 推断
+ */
+export function resolveHomeDir(
+  env: Record<string, string | undefined> = process.env,
+): string {
+  return path.dirname(getGlobalConfigPath(env));
+}
+
 // ─── 配置加载 ───
 
 /**
@@ -77,6 +98,8 @@ export function getProjectConfigPath(cwd: string = process.cwd()): string {
  */
 export function loadConfig(options: {
   cwd?: string;
+  /** ~/.zhixing/ 目录覆盖；优先于 env.ZHIXING_CONFIG_PATH 与默认路径 */
+  homeDir?: string;
   env?: Record<string, string | undefined>;
   /** 禁止自动创建全局配置（测试用） */
   noAutoCreate?: boolean;
@@ -84,8 +107,10 @@ export function loadConfig(options: {
   const cwd = options.cwd ?? process.cwd();
   const env = options.env ?? process.env;
 
-  // 全局配置
-  const globalPath = getGlobalConfigPath(env);
+  // 全局配置路径：homeDir 显式 → env.ZHIXING_CONFIG_PATH → 默认 ~/.zhixing/config.json
+  const globalPath = options.homeDir
+    ? path.join(options.homeDir, GLOBAL_CONFIG_FILENAME)
+    : getGlobalConfigPath(env);
   let globalConfig = readJsonSafe(globalPath);
 
   // 全局配置不存在且允许自动创建 → 生成模板
@@ -239,14 +264,34 @@ function ensureGlobalConfigTemplate(configPath: string): void {
 
 // ─── 辅助函数 ───
 
-/** 安全读取 JSON 文件，不存在或解析失败返回 undefined */
+/**
+ * 读取 JSON 配置文件。
+ *   - 文件不存在：返回 undefined（loadConfig 据此触发模板创建或 fallback）
+ *   - 读 / 解析失败：抛 ConfigSchemaError 让启动期 fail-fast
+ *
+ * 与 silent fallback 不同——配置损坏时让用户立即看到错误并修复，
+ * 比默默当成空配置后下游 LLM 解析报"缺 key"更容易定位问题。
+ */
 function readJsonSafe(filePath: string): ZhixingConfig | undefined {
+  if (!fs.existsSync(filePath)) return undefined;
+
+  let content: string;
   try {
-    if (!fs.existsSync(filePath)) return undefined;
-    const content = fs.readFileSync(filePath, "utf-8");
+    content = fs.readFileSync(filePath, "utf-8");
+  } catch (err) {
+    throw new ConfigSchemaError(
+      `读取配置文件失败：${filePath}（${err instanceof Error ? err.message : String(err)}）`,
+      filePath,
+    );
+  }
+
+  try {
     return JSON.parse(content) as ZhixingConfig;
-  } catch {
-    return undefined;
+  } catch (err) {
+    throw new ConfigSchemaError(
+      `配置文件 ${filePath} JSON 解析失败：${err instanceof Error ? err.message : String(err)}`,
+      filePath,
+    );
   }
 }
 

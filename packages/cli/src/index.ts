@@ -9,7 +9,12 @@
  * - 环境变量 → 项目 zhixing.config.json → 全局 ~/.zhixing/config.json
  */
 
+import chalk from "chalk";
 import { Command } from "commander";
+import {
+  ensureBootstrap,
+  type BootstrapEntryResult,
+} from "./bootstrap/index.js";
 import { runOnce } from "./run-agent.js";
 import { startRepl } from "./repl.js";
 import { renderSummary, renderError } from "./render.js";
@@ -18,6 +23,34 @@ import { runStopCommand } from "./serve/stop.js";
 import { runStatusCommand } from "./serve/status.js";
 import { runLogsCommand } from "./serve/logs.js";
 import { runRpcCommand, printRpcHelp } from "./rpc/command.js";
+
+/**
+ * 处理 ensureBootstrap 非 ready 状态：报错退出或 cancel 退出。
+ * ready / completed 状态下返回，让 caller 继续主流程。
+ */
+function handleBootstrapResult(result: BootstrapEntryResult): void {
+  if (result.kind === "ready" || result.kind === "completed") return;
+
+  if (result.kind === "schema-error") {
+    console.error(chalk.red(`[配置错误] ${result.message}`));
+    console.error(chalk.dim(`请修复或删除文件后重试：${result.filePath}`));
+    process.exit(2);
+  }
+  if (result.kind === "non-tty") {
+    console.error(chalk.red("首次配置未完成，且当前环境非交互终端。"));
+    console.error(
+      chalk.dim("请在 TTY 终端中运行 `zhixing` 完成首次配置。缺失字段："),
+    );
+    for (const field of result.missing) {
+      console.error(chalk.dim(`  - ${field.humanLabel}`));
+    }
+    process.exit(2);
+  }
+  if (result.kind === "cancelled") {
+    console.log(chalk.dim("已取消首次配置。"));
+    process.exit(0);
+  }
+}
 
 const program = new Command();
 
@@ -42,6 +75,10 @@ program
     name?: string;
   }) => {
     try {
+      // 启动期 wizard 适配——任何模式（-p / REPL）下都先确保必要字段就绪
+      const bootstrapResult = await ensureBootstrap({ cwd: process.cwd() });
+      handleBootstrapResult(bootstrapResult);
+
       if (options.print) {
         // runOnce 内部自管 renderer / spinner / 渲染装饰,调用方仅传入业务参数。
         const { agentResult, durationMs } = await runOnce({
