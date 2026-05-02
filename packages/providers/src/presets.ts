@@ -12,7 +12,6 @@ export const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
     name: "DeepSeek",
     baseUrl: "https://api.deepseek.com",
     protocol: "openai-compatible",
-    envKey: "DEEPSEEK_API_KEY",
     defaultModel: "deepseek-chat",
     quirks: {
       supportsTools: true,
@@ -24,7 +23,6 @@ export const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
     name: "MiniMax",
     baseUrl: "https://api.minimax.chat/v1",
     protocol: "openai-compatible",
-    envKey: "MINIMAX_API_KEY",
     quirks: {
       supportsTools: true,
     },
@@ -34,7 +32,6 @@ export const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
     name: "硅基流动",
     baseUrl: "https://api.siliconflow.cn/v1",
     protocol: "openai-compatible",
-    envKey: "SILICONFLOW_API_KEY",
     quirks: {
       supportsTools: true,
       supportsStreamUsage: true,
@@ -45,7 +42,6 @@ export const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
     name: "通义千问",
     baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
     protocol: "openai-compatible",
-    envKey: "DASHSCOPE_API_KEY",
     defaultModel: "qwen-plus",
     quirks: {
       supportsTools: true,
@@ -57,7 +53,6 @@ export const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
     name: "Kimi",
     baseUrl: "https://api.moonshot.cn/v1",
     protocol: "openai-compatible",
-    envKey: "MOONSHOT_API_KEY",
     defaultModel: "moonshot-v1-auto",
     quirks: {
       supportsTools: true,
@@ -68,7 +63,6 @@ export const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
     name: "智谱 GLM",
     baseUrl: "https://open.bigmodel.cn/api/paas/v4",
     protocol: "openai-compatible",
-    envKey: "GLM_API_KEY",
     defaultModel: "glm-4-plus",
     quirks: {
       supportsTools: true,
@@ -79,7 +73,6 @@ export const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
     name: "OpenAI",
     baseUrl: "https://api.openai.com/v1",
     protocol: "openai-compatible",
-    envKey: "OPENAI_API_KEY",
     defaultModel: "gpt-4o",
     quirks: {
       maxTokensField: "max_completion_tokens",
@@ -92,7 +85,6 @@ export const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
     name: "Anthropic",
     baseUrl: "https://api.anthropic.com",
     protocol: "anthropic-messages",
-    envKey: "ANTHROPIC_API_KEY",
     defaultModel: "claude-sonnet-4-20250514",
     quirks: {
       supportsThinking: true,

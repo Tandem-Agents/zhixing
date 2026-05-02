@@ -24,25 +24,35 @@ REPL / 单次模式独立运行。服务 / RPC 模式配对使用：服务跑常
 ```bash
 pnpm install                   # 安装依赖
 pnpm build                     # 构建所有包
-pnpm cli                       # 启动 REPL（带 --env-file=.env）
+pnpm cli                       # 启动 REPL（dev 模式，跑 src/）
 pnpm serve                     # 启动常驻服务
 pnpm test                      # 运行测试
 ```
 
-构建后可用以下方式运行：
+构建后直接运行：
 
 ```bash
-node packages/cli/dist/index.js [...]   # 直接走 dist
-node --env-file=.env --import=tsx/esm packages/cli/src/index.ts [...]   # 走源码（开发）
+node packages/cli/dist/index.js [...]
 ```
 
-### 配置加载顺序
+首次运行会自动检测必要字段；缺字段时在交互终端启动**首次配置向导**逐字段询问后写入 `~/.zhixing/credentials.json`。
 
-由 `@zhixing/providers` 处理，按优先级：
+### 配置文件
 
-1. 环境变量（`SILICONFLOW_API_KEY` 等）
-2. 项目配置 `./zhixing.config.json`
-3. 全局配置 `~/.zhixing/config.json`
+知行用户级配置分两份文件：
+
+| 文件 | 内容 | 安全语义 |
+|---|---|---|
+| `~/.zhixing/config.json` | 公开元数据：`llm.main`、模型 ID、workspace、`channels.<id>.credentials` 非密字段（appId 等）、UI 偏好 | AI 可读；写需用户确认 |
+| `~/.zhixing/credentials.json` | 敏感字段：provider apiKey、channel 密 secret（appSecret 等）| AI 不可读、不可写 |
+
+### apiKey 解析顺序
+
+1. **`credentials.json` 主路径**：`providers.<id>.apiKey`（首次配置向导写入；用户也可手动编辑）
+2. **`config.json` fallback**：`providers.<id>.apiKey` 字段写 `"env:VAR_NAME"` / `"helper:cmd"` / 明文之一（CI / vault 高级用户用）
+3. 都缺失 → 启动期抛错并指引跑 `zhixing` 触发首次配置
+
+项目级 `./zhixing.config.json` 以字段级 deep merge 覆盖全局 `config.json`（公开配置维度），凭证不参与项目级级联（用户级单一来源，避免泄漏）。
 
 ---
 
@@ -329,11 +339,10 @@ zhixing serve --port 19000
 
 ### `Provider 的 apiKey 引用了环境变量 X，但该变量未设置`
 
-服务进程没加载 `.env`。用 `pnpm serve`（已配置 `--env-file=.env`），或：
+`config.json` 写了 `apiKey: "env:VAR"` 的 fallback 路径但 env 未设置。两条修复路径：
 
-```bash
-node --env-file=.env packages/cli/dist/index.js serve
-```
+- **推荐**：删除 `config.providers.<id>.apiKey`，在交互终端跑 `zhixing` 让向导写入 `~/.zhixing/credentials.json`
+- **CI / vault 用户**：保留 `env:VAR` 形态，确保 env 在进程启动时已设置（如 `pnpm serve` 走 `--env-file=.env` 注入；其它部署方式自行注入）
 
 ### `Method not found` (RPC error -32601)
 
@@ -348,13 +357,17 @@ rm ~/.zhixing/server.token
 # 重启 server，会自动重新生成
 ```
 
-### REPL 启动时找不到模型
+### REPL 启动时报 `首次配置未完成`
 
-检查 `.env` 是否含 API key，配置文件 `llm.main.provider` 是否正确：
+启动期 wizard 检测到必要字段缺失：
+- 在交互终端（cmd / PowerShell / bash）直接跑 `zhixing` —— 向导逐字段询问后自动写盘
+- 非交互场景（CI / pipe）会 fail-fast 退出码 2，必须先在 TTY 终端完成首次配置
+
+检查现有配置：
 
 ```bash
 cat ~/.zhixing/config.json
-cat ./zhixing.config.json
+cat ~/.zhixing/credentials.json   # AI 不可读；用户可自己 cat
 ```
 
 ---

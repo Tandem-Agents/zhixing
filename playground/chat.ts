@@ -2,16 +2,15 @@
  * 知行 Playground — 快速验证 LLM + 工具端到端连通性
  *
  * 使用方式：
- *   1. 复制 .env.example 为 .env 并填入 API Key
+ *   1. 首次：在交互终端跑 `pnpm cli` 让向导写入 ~/.zhixing/credentials.json
  *   2. pnpm playground
  *
- * 配置来源（无需手动传参）：
- *   - ~/.zhixing/config.json（全局默认，首次自动创建模板）
+ * 配置来源（与 CLI 一致，零参数）：
+ *   - ~/.zhixing/config.json（公开元数据；首次自动创建模板）
+ *   - ~/.zhixing/credentials.json（apiKey；向导写入或用户编辑）
  *   - ./zhixing.config.json（项目级覆盖，可选）
- *   - 环境变量（API Key 等）
  *
- * 也可通过环境变量覆盖：
- *   ZHIXING_PROVIDER  — provider ID
+ * 也可通过环境变量覆盖（运行时 toggle，与凭证无关）：
  *   ZHIXING_MODEL     — 模型名称
  *   ZHIXING_PROMPT    — 用户输入
  */
@@ -22,7 +21,7 @@ import { drainAgentLoop } from "../packages/core/src/loop/index.js";
 import { createReadTool, createWriteTool, createBashTool } from "../packages/tools-builtin/src/index.js";
 
 // 从配置文件自动加载 provider，零参数
-const { provider, defaultModel, config } = createProviderFromConfig();
+const { provider, defaultModel } = createProviderFromConfig();
 
 // 环境变量可覆盖
 const model = process.env["ZHIXING_MODEL"] ?? defaultModel;
@@ -32,7 +31,6 @@ console.log("─".repeat(50));
 console.log("  知行 Playground");
 console.log(`  Provider: ${provider.id}`);
 console.log(`  Model:    ${model}`);
-console.log(`  Config:   defaultProvider=${config.defaultProvider ?? "(未设置)"}`);
 console.log(`  Prompt:   ${prompt}`);
 console.log("─".repeat(50));
 console.log();

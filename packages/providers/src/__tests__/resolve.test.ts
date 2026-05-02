@@ -215,19 +215,6 @@ describe("resolveProvider", () => {
       }).toThrow(/缺少 API Key/);
     });
 
-    it("envKey 默认路径已移除：仅 env 设置不再自动 fallback", () => {
-      // 旧行为：envKey="DEEPSEEK_API_KEY" 自动从 env 读取；新行为：移除该自动 fallback。
-      // 用户必须显式写 apiKey: "env:DEEPSEEK_API_KEY" 或填 credentials.json 才生效。
-      expect(() => {
-        resolveProvider(
-          "deepseek",
-          {},
-          noCreds(),
-          mockEnv({ DEEPSEEK_API_KEY: "sk-from-env" }),
-        );
-      }).toThrow(ProviderConfigError);
-    });
-
     it("自定义 provider 无 key 时应报错", () => {
       expect(() => {
         resolveProvider(

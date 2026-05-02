@@ -8,10 +8,10 @@ build/
 out/
 *.tsbuildinfo
 
-# Environment & secrets
+# Environment & secrets — 凭证不再走项目根 .env，全部经 ~/.zhixing/credentials.json
+# 这里保留 .env / .env.* 的忽略，防御开发者出于习惯创建 .env 后被误提交
 .env
 .env.*
-!.env.example
 
 # OS files
 .DS_Store

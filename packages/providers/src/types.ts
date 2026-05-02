@@ -62,8 +62,6 @@ export interface ProviderPreset {
   baseUrl: string;
   /** 使用的协议 */
   protocol: Protocol;
-  /** 默认的环境变量名（用于自动解析 API Key） */
-  envKey?: string;
   /** 默认模型 ID */
   defaultModel?: string;
   /** 该服务商的 quirks（未指定的字段使用 DEFAULT_QUIRKS） */
