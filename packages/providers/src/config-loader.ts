@@ -1,14 +1,18 @@
 /**
  * 配置文件加载与合并
  *
- * 三层配置级联（优先级从高到低）：
- * 1. 环境变量（API Keys 等，由 resolveProvider 内部处理）
- * 2. 项目级  <cwd>/zhixing.config.json
- * 3. 用户全局 ~/.zhixing/config.json
+ * 两层配置级联（优先级从高到低）：
+ * 1. 项目级  <cwd>/zhixing.config.json
+ * 2. 用户全局 ~/.zhixing/config.json
  *
- * 设计决策（ADR-003）：
+ * 配置文件格式：JSONC（JSON with Comments）—— 支持 `//` 和 `/* *​/` 注释，
+ * 让用户编辑时直接看到字段说明。读取用 jsonc-parser；写入仍用标准 JSON.stringify
+ * （写入会丢注释，所以 wizard 当前流程仅写 credentials.json，不动 config.json
+ * 的注释；未来需要改 config.json 时用 surgical edit 保留注释）。
+ *
+ * 设计决策：
  * - 缺失文件 = 跳过，不报错
- * - 字段级 deep merge，providers 按 key 合并
+ * - 字段级 deep merge，messaging 按 key 合并
  * - 首次运行自动创建全局配置模板
  * - ZHIXING_CONFIG_PATH 可覆盖全局配置路径
  */
@@ -16,6 +20,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import {
+  parse as parseJsonc,
+  printParseErrorCode,
+  type ParseError,
+} from "jsonc-parser";
 import { mergeIdMap, writeJsonAtomic } from "./internal/io.js";
 import type { ZhixingConfig } from "./types.js";
 
@@ -162,14 +171,17 @@ export async function writeConfig(
         filePath,
       );
     }
-    try {
-      current = JSON.parse(content) as ZhixingConfig;
-    } catch (err) {
+    const errors: ParseError[] = [];
+    const parsed = parseJsonc(content, errors, { allowTrailingComma: true });
+    if (errors.length > 0) {
+      const first = errors[0]!;
+      const code = printParseErrorCode(first.error);
       throw new ConfigSchemaError(
-        `配置文件 ${filePath} JSON 解析失败：${err instanceof Error ? err.message : String(err)}`,
+        `配置文件 ${filePath} JSONC 解析失败：${code}（位置 ${first.offset}）`,
         filePath,
       );
     }
+    current = (parsed ?? {}) as Partial<ZhixingConfig>;
   }
 
   const merged = applyConfigPatch(current, patch);
@@ -182,11 +194,11 @@ export async function writeConfig(
  * 合并语义（与 reader 端 deepMergeConfig 对偶）：
  *   - 标量 / 简单字段（llm / agent / intent / workspace / network）：
  *     patch 显式提供则**整体替换**——caller 显式意图明确
- *   - id-based 子表（providers / channels）：**id 级 + 字段级合并**——
+ *   - id-based 子表（messaging）：**id 级 + 字段级合并**——
  *     修改单 id 不清空其它 id；修改单 id 内单字段不丢其它字段
  *   - patch 未提到的顶层字段：保留 current
  *
- * 这与 reader 在 providers / channels 上的 id 级合并行为对偶——writer 视角下
+ * 这与 reader 在 messaging 上的 id 级合并行为对偶——writer 视角下
  * "current 文件 + patch" 等同于 reader 视角下 "全局 + 项目" 的 id 级合并。
  *
  * 显式删除单字段不在此函数语义内（patch 不包含 = 保留 current）；
@@ -206,11 +218,8 @@ export function applyConfigPatch(
   if (patch.workspace !== undefined) result.workspace = patch.workspace;
   if (patch.network !== undefined) result.network = patch.network;
 
-  if (patch.providers !== undefined) {
-    result.providers = mergeIdMap(current.providers, patch.providers);
-  }
-  if (patch.channels !== undefined) {
-    result.channels = mergeIdMap(current.channels, patch.channels);
+  if (patch.messaging !== undefined) {
+    result.messaging = mergeIdMap(current.messaging, patch.messaging);
   }
 
   return result as ZhixingConfig;
@@ -230,23 +239,69 @@ export function getDefaultWorkspacePath(): string {
   return path.join(os.homedir(), WORKSPACE_DIR_NAME);
 }
 
-const CONFIG_TEMPLATE = `{
+/**
+ * 准备 workspace 目录：计算默认路径 → mkdir → 返回实际路径。
+ *
+ * mkdir 失败时（权限问题等）返回路径但目录可能不存在；下游 ensureWorkspaceDir
+ * 会再次尝试，最终交给运行期防御。
+ */
+function prepareWorkspaceRoot(): string {
+  const root = getDefaultWorkspacePath();
+  try {
+    if (!fs.existsSync(root)) {
+      fs.mkdirSync(root, { recursive: true });
+    }
+  } catch {
+    // 静默失败——不阻止程序启动
+  }
+  return root;
+}
+
+/**
+ * 构造 JSONC 配置模板。
+ *
+ * 含字段说明注释：用户首次启动后用编辑器打开 config.json，直接看到必填 / 选填 /
+ * 各字段语义。注释由 jsonc-parser 容忍解析；写入仍走 JSON.stringify（写时丢注释，
+ * 但 wizard 当前流程不写 config.json，注释保留）。
+ */
+function buildConfigTemplate(workspaceRoot: string): string {
+  // Windows 路径反斜杠在 JSON 字符串中需 escape
+  const escapedRoot = workspaceRoot.replace(/\\/g, "\\\\");
+  return `{
+  // ─── LLM 角色 ───
   "llm": {
+    // main（必填）：主对话模型，所有用户面对的输出由它产生
     "main": {
       "provider": "siliconflow",
       "model": "Pro/MiniMaxAI/MiniMax-M2.5"
     }
+
+    // secondary（选填，建议配置）：用于上下文净化任务——压缩历史 / WebFetch 蒸馏 /
+    // 工具结果摘要 / 子 agent 返回压缩 / 通讯通道入站分类等。
+    // 缺省时用 main 兜底，仍保留调用上下文隔离价值（防 prompt injection 污染主对话），
+    // 但放弃任务专门化和 cost 优化。建议配一个轻量、便宜的模型。
+    // 取消下面这行注释并填入 provider/model 启用（provider 需在 credentials.providers 中存在）：
+    // ,"secondary": { "provider": "siliconflow", "model": "deepseek-ai/DeepSeek-V3.1" }
   },
-  "providers": {},
-  "workspace": {
-    "root": "${getDefaultWorkspacePath().replace(/\\/g, "\\\\")}"
-  }
+
+  // ─── 工作目录 ───
+  // agent 自由读写的范围（安全信任边界）；目录已由首次启动自动创建。
+  "workspace": { "root": "${escapedRoot}" },
+
+  // ─── 启用的消息通道 ───
+  // 列出要启用的 channel id；每个 channel 的具体字段（appId / appSecret 等）
+  // 在 ~/.zhixing/credentials.json 的 channels.<id> 段。
+  // 例：启用飞书 → "messaging": { "feishu": {} }
+  "messaging": {}
 }
 `;
+}
 
 /**
  * 首次运行时自动创建全局配置模板。
- * 只在文件不存在时创建，不会覆盖已有配置。
+ *
+ * 流程：先准备 workspace 目录（mkdir），再用实际创建的路径写入模板的
+ * workspace.root 字段。文件已存在时不覆盖。
  */
 function ensureGlobalConfigTemplate(configPath: string): void {
   try {
@@ -255,7 +310,8 @@ function ensureGlobalConfigTemplate(configPath: string): void {
       fs.mkdirSync(dir, { recursive: true });
     }
     if (!fs.existsSync(configPath)) {
-      fs.writeFileSync(configPath, CONFIG_TEMPLATE, "utf-8");
+      const workspaceRoot = prepareWorkspaceRoot();
+      fs.writeFileSync(configPath, buildConfigTemplate(workspaceRoot), "utf-8");
     }
   } catch {
     // 静默失败——可能是权限问题，不应阻止程序运行
@@ -285,19 +341,23 @@ function readJsonSafe(filePath: string): ZhixingConfig | undefined {
     );
   }
 
-  try {
-    return JSON.parse(content) as ZhixingConfig;
-  } catch (err) {
+  // 用 jsonc-parser 容忍注释（JSONC 格式）；纯 JSON 文件也能正常解析
+  const errors: ParseError[] = [];
+  const parsed = parseJsonc(content, errors, { allowTrailingComma: true });
+  if (errors.length > 0) {
+    const first = errors[0]!;
+    const code = printParseErrorCode(first.error);
     throw new ConfigSchemaError(
-      `配置文件 ${filePath} JSON 解析失败：${err instanceof Error ? err.message : String(err)}`,
+      `配置文件 ${filePath} JSONC 解析失败：${code}（位置 ${first.offset}）`,
       filePath,
     );
   }
+  return parsed as ZhixingConfig;
 }
 
 /**
  * 字段级 deep merge。
- * providers 按 key 合并（项目级覆盖全局级的同名 provider 字段）。
+ * messaging 按 key 合并（项目级覆盖全局级的同名 channel 字段）。
  *
  * `base` / `override` 是文件 JSON（readJsonSafe），用户实际可能漏配 `llm.main`；
  * 这里保持原样合并，把 fail-fast 校验留给 resolveLLMRoles，避免在加载层吞掉
@@ -317,27 +377,15 @@ function deepMergeConfig(
     };
   }
 
-  if (override.providers) {
-    result.providers = { ...base.providers };
-    for (const [key, value] of Object.entries(override.providers)) {
-      const existing = result.providers[key];
+  // messaging：按 key 字段级合并
+  if (override.messaging) {
+    result.messaging = { ...base.messaging };
+    for (const [key, value] of Object.entries(override.messaging)) {
+      const existing = result.messaging[key];
       if (existing) {
-        result.providers[key] = { ...existing, ...value };
+        result.messaging[key] = { ...existing, ...value };
       } else {
-        result.providers[key] = value;
-      }
-    }
-  }
-
-  // channels：与 providers 相同策略，按 key 字段级合并
-  if (override.channels) {
-    result.channels = { ...base.channels };
-    for (const [key, value] of Object.entries(override.channels)) {
-      const existing = result.channels[key];
-      if (existing) {
-        result.channels[key] = { ...existing, ...value };
-      } else {
-        result.channels[key] = value;
+        result.messaging[key] = value;
       }
     }
   }

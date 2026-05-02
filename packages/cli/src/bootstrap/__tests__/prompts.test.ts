@@ -92,14 +92,34 @@ describe("buildIntroLines", () => {
     expect(joined).toContain(FAKE_PATHS.credentialsPath);
   });
 
-  it("提示用户公私文件的隔离语义", () => {
+  it("提示用户用知行 + 取消方式（不暴露内部架构语）", () => {
     const lines = buildIntroLines(FAKE_PATHS);
     const joined = lines.join("\n");
 
-    // 公开配置必须明确"AI 可读"语义
-    expect(joined).toContain("AI 可读");
-    // 凭证文件必须明确"AI 不可读"语义
-    expect(joined).toMatch(/AI 不可读|不可读、不可写|不可读 ?、不可写/);
+    // 简洁告知用户在做什么
+    expect(joined).toContain("知行");
+    // 不应包含内部架构语（AI 访问规则等是给开发者看的，不该暴露给最终用户）
+    expect(joined).not.toContain("AI 可读");
+    expect(joined).not.toContain("AI 不可读");
+    expect(joined).not.toContain("写需用户确认");
+  });
+
+  it("workspaceRoot 提供时展示已创建路径", () => {
+    const lines = buildIntroLines({
+      ...FAKE_PATHS,
+      workspaceRoot: "D:\\ZhixingWorkspace",
+    });
+    const joined = lines.join("\n");
+
+    expect(joined).toContain("D:\\ZhixingWorkspace");
+    expect(joined).toContain("已创建");
+  });
+
+  it("workspaceRoot 缺失时不展示工作目录行", () => {
+    const lines = buildIntroLines(FAKE_PATHS);
+    const joined = lines.join("\n");
+
+    expect(joined).not.toContain("工作目录");
   });
 
   it("提供取消方式（Ctrl+C 或空输入）", () => {

@@ -719,7 +719,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   let channels: import("@zhixing/core").ChannelRegistry | undefined;
   let deliveryStack: DeliveryStack | undefined;
 
-  if (config.channels && Object.keys(config.channels).length > 0) {
+  if (config.messaging && Object.keys(config.messaging).length > 0) {
     const channelLogger = {
       debug: (msg: string, ...args: unknown[]) => console.log(chalk.dim(`  [channel] ${msg}`), ...args),
       info: (msg: string, ...args: unknown[]) => console.log(chalk.dim(`  [channel] ${msg}`), ...args),
@@ -729,7 +729,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
 
     try {
       const result = await setupChannels({
-        entries: config.channels,
+        entries: config.messaging,
         credentials,
         logger: channelLogger,
       });

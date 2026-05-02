@@ -2,11 +2,12 @@
  * 配置语义校验测试。
  *
  * 关键不变量：
- *   - 凭证字段（任何形态）出现在 config.providers.<id>.apiKey → 违反
- *   - 密字段（含 secret/token/password/apiKey 命名）出现在 config.channels.<id>.credentials → 违反
- *   - 非密字段（appId / clientId / accountId / botId / agentId / userId 等）通过
+ *   - config.providers 字段（任何形态）→ 整个字段都不允许，违反
+ *   - config.channels 字段（旧名）→ 视为旧 schema 残留，违反并引导迁移
+ *   - config.messaging.<id>.credentials 字段 → 违反，凭证字段必须在 credentials.json
+ *   - 干净 config（仅含 llm / messaging / workspace 等功能层字段）→ 通过
  *   - 多个 issue 一次扫出
- *   - issue 三段式（field / reason / fix），fix 含具体 schema 示例
+ *   - issue 三段式（field / reason / fix）
  *   - 可插拔：自定义 validator 替换或扩展内置
  *   - 纯函数：不抛错 / 不读 fs
  */
@@ -32,236 +33,144 @@ describe("validateConfigSemantics · 干净 config", () => {
     expect(validateConfigSemantics(config)).toEqual([]);
   });
 
-  it("providers 含非 apiKey 字段（baseUrl/protocol/quirks）→ 无 issue", () => {
+  it("messaging 含启用列表（仅功能选项）→ 无 issue", () => {
     const config: ZhixingConfig = {
-      providers: {
-        "my-gateway": {
-          baseUrl: "http://localhost:8080",
-          protocol: "openai-compatible",
-          quirks: { supportsTools: true },
-        },
+      messaging: {
+        feishu: { type: "feishu", options: { logLevel: "info" } },
       },
     };
     expect(validateConfigSemantics(config)).toEqual([]);
   });
 
-  it("channels 仅含非密字段（appId / clientId / accountId 等）→ 无 issue", () => {
+  it("messaging 多 channel 都仅功能层字段 → 无 issue", () => {
     const config: ZhixingConfig = {
-      channels: {
-        feishu: {
-          credentials: { appId: "cli_xxxxx" },
-        },
-        wecom: {
-          credentials: { clientId: "ww_xxxxx", accountId: "acc_xxxxx" },
-        },
-        slack: {
-          credentials: { botId: "B12345", agentId: "A12345", userId: "U12345" },
-        },
+      messaging: {
+        feishu: {},
+        slack: { defaultTarget: { to: "C12345" } },
+        wecom: { type: "wecom" },
       },
     };
     expect(validateConfigSemantics(config)).toEqual([]);
   });
 });
 
-describe("validateNoApiKeyInConfig · providers.<id>.apiKey 字段废弃", () => {
-  it("config.providers.<id>.apiKey 明文 → 命中", () => {
+describe("validateNoConfigProviders · config.providers 整个字段废弃", () => {
+  it("config.providers 任何形态出现 → 整个字段 issue", () => {
     const config = {
-      providers: { siliconflow: { apiKey: "sk-plaintext" } },
+      providers: { siliconflow: { baseUrl: "https://x" } },
     } as unknown as ZhixingConfig;
 
     const issues = validateConfigSemantics(config);
     expect(issues).toHaveLength(1);
-    expect(issues[0]?.field).toBe("providers.siliconflow.apiKey");
+    expect(issues[0]?.field).toBe("providers");
   });
 
-  it("env:VAR 形态也命中（不再保留 fallback 语法）", () => {
-    const config = {
-      providers: { siliconflow: { apiKey: "env:SILICONFLOW_API_KEY" } },
-    } as unknown as ZhixingConfig;
-
-    const issues = validateConfigSemantics(config);
-    expect(issues).toHaveLength(1);
-    expect(issues[0]?.field).toBe("providers.siliconflow.apiKey");
-  });
-
-  it("helper:cmd 形态也命中", () => {
-    const config = {
-      providers: { siliconflow: { apiKey: "helper:vault read /zhixing/sf-key" } },
-    } as unknown as ZhixingConfig;
-
+  it("即使 providers 是空对象也违反（schema 字段已删除）", () => {
+    const config = { providers: {} } as unknown as ZhixingConfig;
     expect(validateConfigSemantics(config)).toHaveLength(1);
   });
 
-  it("多个 provider 各自命中 → 多 issue", () => {
+  it("多 provider 不影响——issue 数仍是 1（整个字段被拒绝）", () => {
     const config = {
       providers: {
         siliconflow: { apiKey: "sk-sf" },
-        openai: { apiKey: "sk-oai" },
-        anthropic: { apiKey: "sk-ant" },
+        openai: { apiKey: "sk-oai", baseUrl: "https://x" },
       },
     } as unknown as ZhixingConfig;
 
     const issues = validateConfigSemantics(config);
-    expect(issues).toHaveLength(3);
-    const fields = issues.map((i) => i.field);
-    expect(fields).toContain("providers.siliconflow.apiKey");
-    expect(fields).toContain("providers.openai.apiKey");
-    expect(fields).toContain("providers.anthropic.apiKey");
+    expect(issues).toHaveLength(1);
+    expect(issues[0]?.field).toBe("providers");
   });
 
-  it("issue.fix 含 credentials.json schema 示例", () => {
-    const config = {
-      providers: { siliconflow: { apiKey: "sk-sf" } },
-    } as unknown as ZhixingConfig;
-
+  it("issue.fix 引导迁移到 credentials.providers", () => {
+    const config = { providers: {} } as unknown as ZhixingConfig;
     const issue = validateConfigSemantics(config)[0]!;
     expect(issue.fix).toContain("credentials.json");
-    expect(issue.fix).toContain("apiKey");
-    expect(issue.fix).toContain("siliconflow");
-    expect(issue.fix).toContain("zhixing"); // wizard 引导
+    expect(issue.fix).toContain("providers");
+    expect(issue.fix).toContain("llm.main.provider");
   });
 
-  it("issue.reason 引用凭证唯一入口", () => {
-    const config = {
-      providers: { siliconflow: { apiKey: "sk-sf" } },
-    } as unknown as ZhixingConfig;
-
+  it("issue.reason 引用 credentials.providers 内容层位置", () => {
+    const config = { providers: {} } as unknown as ZhixingConfig;
     const issue = validateConfigSemantics(config)[0]!;
-    expect(issue.reason).toContain("credentials.json");
+    expect(issue.reason).toContain("credentials.providers");
   });
 });
 
-describe("validateNoChannelSecrets · channel credentials 密字段拒绝", () => {
-  it("appSecret 命中（典型飞书 / 企微 / 钉钉密字段）", () => {
-    const config: ZhixingConfig = {
-      channels: {
-        feishu: {
-          credentials: { appId: "cli_xxx", appSecret: "secret_xxx" },
-        },
-      },
-    };
+describe("validateNoConfigChannels · 旧 channels 字段引导迁移", () => {
+  it("config.channels 出现 → 整个字段违反", () => {
+    const config = {
+      channels: { feishu: { credentials: { appId: "x" } } },
+    } as unknown as ZhixingConfig;
+
     const issues = validateConfigSemantics(config);
     expect(issues).toHaveLength(1);
-    expect(issues[0]?.field).toBe("channels.feishu.credentials.appSecret");
+    expect(issues[0]?.field).toBe("channels");
   });
 
-  it("botToken 命中（含 token 子串）", () => {
-    const config: ZhixingConfig = {
-      channels: {
-        slack: {
-          credentials: { botToken: "xoxb-xxx" },
-        },
-      },
-    };
+  it("即使空对象也违反", () => {
+    const config = { channels: {} } as unknown as ZhixingConfig;
     expect(validateConfigSemantics(config)).toHaveLength(1);
   });
 
-  it("password 命中", () => {
-    const config: ZhixingConfig = {
-      channels: {
-        smtp: {
-          credentials: { username: "user", password: "p@ss" },
-        },
+  it("issue.fix 引导改名 messaging + 凭证迁移", () => {
+    const config = { channels: {} } as unknown as ZhixingConfig;
+    const issue = validateConfigSemantics(config)[0]!;
+    expect(issue.fix).toContain("messaging");
+    expect(issue.fix).toContain("credentials.json");
+    expect(issue.fix).toContain("channels");
+  });
+});
+
+describe("validateNoMessagingCredentials · messaging 条目不允许 credentials 字段", () => {
+  it("messaging.<id>.credentials 出现 → 命中", () => {
+    const config = {
+      messaging: {
+        feishu: { credentials: { appId: "x", appSecret: "y" } },
       },
-    };
+    } as unknown as ZhixingConfig;
+
     const issues = validateConfigSemantics(config);
     expect(issues).toHaveLength(1);
-    expect(issues[0]?.field).toBe("channels.smtp.credentials.password");
+    expect(issues[0]?.field).toBe("messaging.feishu.credentials");
   });
 
-  it("apiKey 命中（含 apikey 子串，大小写不敏感）", () => {
-    const config: ZhixingConfig = {
-      channels: {
-        webhook: {
-          credentials: { apiKey: "wh-xxx" },
-        },
+  it("多 channel 各自含 credentials → 多 issue", () => {
+    const config = {
+      messaging: {
+        feishu: { credentials: { appSecret: "x" } },
+        wecom: { credentials: { agentSecret: "y" } },
       },
-    };
-    expect(validateConfigSemantics(config)).toHaveLength(1);
-  });
+    } as unknown as ZhixingConfig;
 
-  it("大写命名同样命中（SECRET / Token / Password）", () => {
-    const config: ZhixingConfig = {
-      channels: {
-        custom: {
-          credentials: {
-            CLIENT_SECRET: "x",
-            AccessToken: "y",
-            UserPassword: "z",
-          },
-        },
-      },
-    };
-    expect(validateConfigSemantics(config)).toHaveLength(3);
-  });
-
-  it("多 channel 多字段一次报全", () => {
-    const config: ZhixingConfig = {
-      channels: {
-        feishu: {
-          credentials: { appId: "cli_xxx", appSecret: "fs_secret" },
-        },
-        wecom: {
-          credentials: { agentId: "ag_xxx", agentSecret: "ww_secret" },
-        },
-        slack: {
-          credentials: { botId: "B1", botToken: "tok" },
-        },
-      },
-    };
     const issues = validateConfigSemantics(config);
-    expect(issues).toHaveLength(3);
-    const fields = issues.map((i) => i.field).sort();
-    expect(fields).toEqual([
-      "channels.feishu.credentials.appSecret",
-      "channels.slack.credentials.botToken",
-      "channels.wecom.credentials.agentSecret",
-    ]);
+    expect(issues).toHaveLength(2);
   });
 
-  it("issue.fix 含 credentials.json schema 与 channelId / fieldName", () => {
-    const config: ZhixingConfig = {
-      channels: {
-        feishu: {
-          credentials: { appSecret: "secret_xxx" },
-        },
-      },
-    };
+  it("issue.fix 引导迁移到 credentials.channels.<id>", () => {
+    const config = {
+      messaging: { feishu: { credentials: { appId: "x" } } },
+    } as unknown as ZhixingConfig;
+
     const issue = validateConfigSemantics(config)[0]!;
     expect(issue.fix).toContain("credentials.json");
     expect(issue.fix).toContain("feishu");
-    expect(issue.fix).toContain("appSecret");
-  });
-
-  it("issue.fix 提示非密字段保留在 config.json", () => {
-    const config: ZhixingConfig = {
-      channels: {
-        feishu: {
-          credentials: { appSecret: "secret_xxx" },
-        },
-      },
-    };
-    const issue = validateConfigSemantics(config)[0]!;
-    expect(issue.fix).toContain("appId");
   });
 });
 
 describe("validateConfigSemantics · 多类违反一次报全", () => {
-  it("provider apiKey + channel secret 同时违反 → 累计 issue", () => {
+  it("providers + channels + messaging.<id>.credentials 同时违反 → 累计 issue", () => {
     const config = {
-      providers: {
-        siliconflow: { apiKey: "sk-sf" },
-        openai: { apiKey: "sk-oai" },
-      },
-      channels: {
-        feishu: {
-          credentials: { appId: "cli_xxx", appSecret: "fs_secret" },
-        },
-      },
+      providers: { siliconflow: { apiKey: "sk-sf" } },
+      channels: { feishu: {} },
+      messaging: { wecom: { credentials: { agentSecret: "y" } } },
     } as unknown as ZhixingConfig;
 
     const issues = validateConfigSemantics(config);
     expect(issues).toHaveLength(3);
+    const fields = issues.map((i) => i.field).sort();
+    expect(fields).toEqual(["channels", "messaging.wecom.credentials", "providers"]);
   });
 });
 
@@ -308,7 +217,7 @@ describe("ConfigValidator · 可插拔", () => {
       ...BUILTIN_VALIDATORS,
       customValidator,
     ]);
-    expect(issues).toHaveLength(2); // apiKey 1 + custom 1
+    expect(issues).toHaveLength(2); // providers 1 + custom 1
   });
 });
 
@@ -329,7 +238,7 @@ describe("纯函数性质", () => {
   it("相同输入多次调用结果一致", () => {
     const config = {
       providers: { siliconflow: { apiKey: "sk-sf" } },
-      channels: { feishu: { credentials: { appSecret: "x" } } },
+      messaging: { feishu: { credentials: { appSecret: "x" } } },
     } as unknown as ZhixingConfig;
 
     const a = validateConfigSemantics(config);

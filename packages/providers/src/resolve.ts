@@ -15,7 +15,7 @@ import { getPreset } from "./presets.js";
 import {
   DEFAULT_QUIRKS,
   type LLMRoleConfig,
-  type ProviderConfig,
+  type ProviderCredentialEntry,
   type ProviderQuirks,
   type ResolvedProvider,
   type ZhixingConfig,
@@ -37,45 +37,43 @@ export class ProviderConfigError extends Error {
 // ─── 主入口 ───
 
 /**
- * 解析单个 provider 的配置，合并预设和用户配置，返回 ResolvedProvider。
+ * 解析单个 provider，合并预设和用户凭证条目，返回 ResolvedProvider。
  *
- * apiKey 来源：credentials.providers.<id>.apiKey（凭证唯一入口）。
- * 缺失时抛 ProviderConfigError，引向首次配置向导。
+ * 完整字段（apiKey + 技术配置）来自 credentials.providers.<id>——这是
+ * provider 资源的唯一定义来源。预设仅作为内置 provider 的字段兜底。
  *
- * userConfig 与 credentials 都是必需参数——caller 必须显式加载两份文件，
- * 避免 silent 退化为缺失。
+ * 缺 apiKey → 抛 ProviderConfigError 引向首次配置向导。
  *
  * @param providerId - Provider 标识符（如 "deepseek"、"my-custom-gateway"）
- * @param userConfig - 用户配置（无配置时显式传 `{}`，表示全部使用预设默认值）
- * @param credentials - 凭证文件内容（无凭证时显式传 `{ version: 1 }`）
+ * @param credentials - 凭证文件内容
  */
 export function resolveProvider(
   providerId: string,
-  userConfig: ProviderConfig,
   credentials: ZhixingCredentials,
 ): ResolvedProvider {
   const preset = getPreset(providerId);
+  const entry = credentials.providers?.[providerId];
 
-  const baseUrl = userConfig.baseUrl ?? preset?.baseUrl;
+  const baseUrl = entry?.baseUrl ?? preset?.baseUrl;
   if (!baseUrl) {
     throw new ProviderConfigError(
-      `Provider "${providerId}" 需要配置 baseUrl（不在内置预设列表中）`,
+      `Provider "${providerId}" 需要配置 baseUrl（不在内置预设列表中，需在 credentials.json 中提供）`,
       providerId,
     );
   }
 
-  const protocol = userConfig.protocol ?? preset?.protocol;
+  const protocol = entry?.protocol ?? preset?.protocol;
   if (!protocol) {
     throw new ProviderConfigError(
-      `Provider "${providerId}" 需要配置 protocol（不在内置预设列表中）。` +
+      `Provider "${providerId}" 需要配置 protocol（不在内置预设列表中，需在 credentials.json 中提供）。` +
         `可选值: "openai-compatible" | "anthropic-messages"`,
       providerId,
     );
   }
 
-  const apiKey = resolveApiKey(providerId, credentials);
+  const apiKey = resolveApiKey(providerId, entry);
 
-  const quirks = mergeQuirks(preset?.quirks, userConfig.quirks);
+  const quirks = mergeQuirks(preset?.quirks, entry?.quirks);
 
   return {
     id: providerId,
@@ -83,9 +81,10 @@ export function resolveProvider(
     baseUrl: normalizeBaseUrl(baseUrl),
     apiKey,
     protocol,
-    defaultModel: userConfig.defaultModel ?? preset?.defaultModel,
+    defaultModel: entry?.defaultModel ?? preset?.defaultModel,
     quirks,
     declaredModels: preset?.knownModels ?? [],
+    modelOverrides: entry?.modelOverrides,
   };
 }
 
@@ -108,8 +107,7 @@ export function resolveFromConfig(
     );
   }
 
-  const userConfig = config.providers?.[id] ?? {};
-  return resolveProvider(id, userConfig, credentials);
+  return resolveProvider(id, credentials);
 }
 
 // ─── LLM 双角色解析（配置层） ───
@@ -154,27 +152,19 @@ export function resolveLLMRoles(
     );
   }
 
-  const providersConfig = config.providers;
-  const main = resolveMainRole(config.llm.main, providersConfig, credentials, options);
-  const secondary = resolveSecondaryRole(
-    config.llm.secondary,
-    providersConfig,
-    credentials,
-    main,
-  );
+  const main = resolveMainRole(config.llm.main, credentials, options);
+  const secondary = resolveSecondaryRole(config.llm.secondary, credentials, main);
 
   return { main, secondary };
 }
 
 function resolveMainRole(
   mainConfig: LLMRoleConfig,
-  providersConfig: Record<string, ProviderConfig> | undefined,
   credentials: ZhixingCredentials,
   options: LLMRolesResolveOptions,
 ): ResolvedLLMRole {
   const finalProvider = options.providerOverride ?? mainConfig.provider;
-  const userConfig = providersConfig?.[finalProvider] ?? {};
-  const resolved = resolveProvider(finalProvider, userConfig, credentials);
+  const resolved = resolveProvider(finalProvider, credentials);
 
   let finalModel: string;
   if (options.modelOverride) {
@@ -183,7 +173,7 @@ function resolveMainRole(
     if (!resolved.defaultModel) {
       throw new ProviderConfigError(
         `--provider "${finalProvider}" requires --model: provider has no ` +
-          `default model in preset or providers.${finalProvider}.defaultModel. ` +
+          `default model in preset or credentials.providers.${finalProvider}.defaultModel. ` +
           `Pass --model <model-id> explicitly.`,
         finalProvider,
       );
@@ -198,7 +188,6 @@ function resolveMainRole(
 
 function resolveSecondaryRole(
   explicit: LLMRoleConfig | undefined,
-  providersConfig: Record<string, ProviderConfig> | undefined,
   credentials: ZhixingCredentials,
   main: ResolvedLLMRole,
 ): ResolvedLLMRole {
@@ -230,8 +219,7 @@ function resolveSecondaryRole(
 
   // 不同 provider id：独立解析，失败 fail-fast（不静默降级到 main，避免把
   // "用户期望的双 provider 架构"伪装成单 provider 在跑）。
-  const userConfig = providersConfig?.[explicit.provider] ?? {};
-  const resolved = resolveProvider(explicit.provider, userConfig, credentials);
+  const resolved = resolveProvider(explicit.provider, credentials);
   return { resolved, model: explicit.model };
 }
 
@@ -249,23 +237,22 @@ function buildMissingMainConfigMessage(): string {
 // ─── API Key 解析 ───
 
 /**
- * 从凭证文件读取 API Key。
+ * 从凭证条目取 API Key。
  *
  * 凭证唯一入口 = `~/.zhixing/credentials.json` 的 providers.<id>.apiKey。
  * 缺失时抛 ProviderConfigError，引向首次配置向导（不接受任何形态的 fallback）。
  */
 function resolveApiKey(
   providerId: string,
-  credentials: ZhixingCredentials,
+  entry: ProviderCredentialEntry | undefined,
 ): string {
-  const credApiKey = credentials.providers?.[providerId]?.apiKey;
-  if (credApiKey) return credApiKey;
+  if (entry?.apiKey) return entry.apiKey;
 
   throw new ProviderConfigError(
     `Provider "${providerId}" 缺少 API Key。\n` +
       `凭证唯一入口是 ~/.zhixing/credentials.json 的 providers.${providerId}.apiKey 字段。\n` +
       `首次使用建议在 TTY 终端跑 \`zhixing\` 触发引导自动写入；用户也可手动编辑该文件。\n` +
-      `Schema: { "version": 1, "providers": { "${providerId}": { "apiKey": "..." } } }`,
+      `Schema: { "providers": { "${providerId}": { "apiKey": "..." } } }`,
     providerId,
   );
 }

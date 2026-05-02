@@ -270,7 +270,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   // 4. Channels（config + credentials 已在启动期顶部 load 完成）
   let channels: ChannelRegistry | undefined;
   let inboundRouter: InboundRouter | null = null;
-  if (config.channels && Object.keys(config.channels).length > 0) {
+  if (config.messaging && Object.keys(config.messaging).length > 0) {
     const channelLogger = {
       debug: (msg: string, ...args: unknown[]) => console.log(chalk.dim(`[channel] ${msg}`), ...args),
       info: (msg: string, ...args: unknown[]) => console.log(chalk.dim(`[channel] ${msg}`), ...args),
@@ -280,7 +280,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
 
     try {
       const result = await setupChannels({
-        entries: config.channels,
+        entries: config.messaging,
         credentials,
         conversations,
         logger: channelLogger,
@@ -298,7 +298,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
 
   // 5. Delivery Pipeline（共享模块，serve/repl 同一路径）
   let deliveryStack: DeliveryStack | undefined;
-  if (channels && config.channels) {
+  if (channels && config.messaging) {
     deliveryStack = await setupDelivery({
       channels,
       zhixingHome,

@@ -1,5 +1,5 @@
 /**
- * 二级 LLM 能力（secondary-llm-capability.md）解析与工厂行为
+ * 二级 LLM 能力解析与工厂行为
  *
  * 覆盖：
  * - main 三段优先级（modelOverride > providerOverride+defaultModel > config 原值）
@@ -20,15 +20,24 @@ import type {
 } from "@zhixing/core";
 import { ProviderConfigError, resolveLLMRoles } from "../resolve.js";
 import { bindRole, createProviderRoles } from "../create-provider.js";
-import type { ZhixingConfig, ZhixingCredentials } from "../types.js";
+import type {
+  ProviderCredentialEntry,
+  ZhixingConfig,
+  ZhixingCredentials,
+} from "../types.js";
 
-const noCreds = (): ZhixingCredentials => ({ version: 1 });
+const noCreds = (): ZhixingCredentials => ({});
 
 const credsFor = (entries: Record<string, string>): ZhixingCredentials => ({
-  version: 1,
   providers: Object.fromEntries(
     Object.entries(entries).map(([id, apiKey]) => [id, { apiKey }]),
   ),
+});
+
+const credsWith = (
+  entries: Record<string, ProviderCredentialEntry>,
+): ZhixingCredentials => ({
+  providers: { ...entries },
 });
 
 const baseConfig = (overrides: Partial<ZhixingConfig> = {}): ZhixingConfig => ({
@@ -66,18 +75,18 @@ describe("resolveLLMRoles · main 三段优先级", () => {
     expect(result.main.model).toBe("gpt-4o");
   });
 
-  it("providerOverride + 新 provider 无预设默认 → throw", () => {
+  it("providerOverride + 新自定义 provider 无 defaultModel → throw", () => {
     expect(() => {
       resolveLLMRoles(
-        baseConfig({
-          providers: {
-            "my-local": {
-              baseUrl: "http://localhost:8080",
-              protocol: "openai-compatible",
-            },
+        baseConfig(),
+        credsWith({
+          deepseek: { apiKey: "sk-ds" },
+          "my-local": {
+            apiKey: "sk-local",
+            baseUrl: "http://localhost:8080",
+            protocol: "openai-compatible",
           },
         }),
-        credsFor({ deepseek: "sk-ds", "my-local": "sk-local" }),
         { providerOverride: "my-local" },
       );
     }).toThrow(/--provider "my-local" requires --model/);
@@ -190,10 +199,6 @@ describe("resolveLLMRoles · secondary 解析链（2 段）", () => {
 });
 
 describe("resolveLLMRoles · 同 provider id 复用（避免重复 resolveProvider）", () => {
-  // 验证"目标 provider id === main.id 时直接复用 main.resolved 实例"的短路。
-  // 用 toBe（引用相等）而非 toEqual（结构相等）做断言：第二次 resolveProvider
-  // 即使返回字段相同的 ResolvedProvider，对象引用也不同；toBe 能 catch 到真复用。
-
   it("显式 secondary 同 id 时复用 main.resolved（不重 resolveProvider）", () => {
     const result = resolveLLMRoles(
       baseConfig({
@@ -227,13 +232,6 @@ describe("resolveLLMRoles · 同 provider id 复用（避免重复 resolveProvid
     expect(result.secondary.resolved.id).toBe("openai");
   });
 });
-
-// ─── bindRole：model 实绑契约 ───
-//
-// bindRole 是 createProviderRoles 内部把 (LLMProvider, model) 缝合成 LLMRole
-// 的封装。consumer 调 role.chat({...}) 不传 model，需要 bindRole 在 closure
-// 里把绑定的 model 注入到下层 provider.chat 请求。这层契约破裂的话，整个
-// secondary 路由都会跑错 model 而不易察觉，因此用 spy provider 端到端验证。
 
 describe("bindRole · chat 调用时 model 字段实绑契约", () => {
   function makeSpyProvider(): { provider: LLMProvider; calls: ChatRequest[] } {
@@ -293,8 +291,6 @@ describe("bindRole · chat 调用时 model 字段实绑契约", () => {
     expect(role.model).toBe("static-model");
   });
 });
-
-// ─── createProviderRoles：依赖 fs，用 tmpdir fixture 隔离 ───
 
 describe("createProviderRoles · 实例化与角色装配", () => {
   let tmpDir: string;
@@ -388,6 +384,25 @@ describe("createProviderRoles · 实例化与角色装配", () => {
     expect(resolvedRoles.main.model).toBe("claude-sonnet-4-20250514");
     // 当前 preset 不内嵌 catalog——budget 兜底交给 protocol-default
     expect(resolvedRoles.main.resolved.declaredModels).toEqual([]);
+  });
+
+  it("modelOverrides 从 credentials 透传到 ResolvedProvider", () => {
+    writeFixture(
+      { llm: { main: { provider: "deepseek", model: "deepseek-chat" } } },
+      credsWith({
+        deepseek: {
+          apiKey: "sk-ds",
+          modelOverrides: {
+            "deepseek-chat": { contextWindow: 64000 },
+          },
+        },
+      }),
+    );
+    const { resolvedRoles } = createProviderRoles({ env: envFor() });
+
+    expect(resolvedRoles.main.resolved.modelOverrides).toEqual({
+      "deepseek-chat": { contextWindow: 64000 },
+    });
   });
 
   it("网关型 provider（无 preset）走空 declaredModels —— catalog 兜底交给 protocol-default", () => {

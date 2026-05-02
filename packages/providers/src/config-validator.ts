@@ -1,7 +1,7 @@
 /**
  * 配置语义校验层
  *
- * 在 JSON 解析之上的语义层校验：检测违反"凭证唯一入口"原则的字段。
+ * 在 JSON 解析之上的语义层校验：检测违反"功能层 vs 内容层分层"原则的字段。
  * loadConfig 仅做 JSON 语法校验；本层做"哪些字段允许出现在 config.json"的语义校验。
  *
  * 校验由 caller（ensureBootstrap / setupChannels）显式调用——保持加载层纯净，
@@ -19,7 +19,7 @@ import type { ZhixingConfig } from "./types.js";
  * 单条配置语义违反描述。
  *
  * 三段式信息让用户能直接修复：
- *   - field：违反的字段路径（如 "providers.siliconflow.apiKey"）
+ *   - field：违反的字段路径（如 "providers" / "channels" / "messaging.feishu.credentials.appSecret"）
  *   - reason：为什么不允许
  *   - fix：精确的修复步骤（含 schema 示例）
  */
@@ -54,68 +54,81 @@ export type ConfigValidator = (config: ZhixingConfig) => ConfigSemanticIssue[];
 // ─── 内置校验器 ───
 
 /**
- * 校验：config.providers.<id>.apiKey 字段不允许存在。
+ * 校验：config.providers 字段不允许存在。
  *
- * 凭证唯一入口是 ~/.zhixing/credentials.json。任何形态的 apiKey
- * （明文 / env:VAR / helper:CMD）出现在 config.json 都是架构违反。
+ * provider 资源（apiKey + baseUrl + protocol + quirks 等所有字段）属于内容层，
+ * 集中在 credentials.providers.<id>。config.json 只引用 provider id（如
+ * llm.main.provider），不存放 provider 具体定义。
  */
-const validateNoApiKeyInConfig: ConfigValidator = (config) => {
-  const issues: ConfigSemanticIssue[] = [];
-  const providers = config.providers ?? {};
+const validateNoConfigProviders: ConfigValidator = (config) => {
+  const providers = (config as Record<string, unknown>)["providers"];
+  if (providers === undefined) return [];
 
-  for (const [id, providerConfig] of Object.entries(providers)) {
-    // 用 runtime 检查访问字段——type 已删除 apiKey，但用户旧文件 JSON.parse 后仍可能有
-    const apiKey = (providerConfig as Record<string, unknown>)["apiKey"];
-    if (apiKey !== undefined) {
-      issues.push({
-        field: `providers.${id}.apiKey`,
-        reason:
-          "凭证字段不允许出现在 config.json —— 凭证唯一入口是 ~/.zhixing/credentials.json，" +
-          "config.json 是 AI 可读的公开配置文件",
-        fix:
-          `在 config.json 中删除 providers.${id}.apiKey 字段；` +
-          `在 ~/.zhixing/credentials.json 中写入凭证：` +
-          `{ "version": 1, "providers": { "${id}": { "apiKey": "<your-key>" } } }；` +
-          `首次配置可在 TTY 终端跑 \`zhixing\` 让向导自动写入凭证文件`,
-      });
-    }
-  }
-
-  return issues;
+  return [
+    {
+      field: "providers",
+      reason:
+        "Provider 资源定义不允许出现在 config.json —— provider 的 apiKey 与技术配置都属于" +
+        "内容层，集中在 credentials.providers.<id>",
+      fix:
+        "在 config.json 中删除整个 providers 字段；" +
+        "把每个 provider 的字段（apiKey + baseUrl + protocol + 等）合并到 " +
+        "~/.zhixing/credentials.json 的 providers.<id> 段；" +
+        "config.json 只通过 llm.main.provider 引用 provider id",
+    },
+  ];
 };
 
 /**
- * 校验：config.channels.<id>.credentials.<name> 不允许含敏感字段名。
+ * 校验：config.channels 字段不允许存在（旧字段名，已重命名为 messaging）。
  *
- * 命名约定（lowercase 子串匹配）：secret / token / password / apikey
- * 命中即视为密字段——必须迁出到 credentials.channels.<id>。
+ * 旧 schema 用 channels 兼指"启用列表 + 凭证字段"。功能/内容分层后：
+ *   - 启用列表 + 功能选项 → config.messaging.<id>
+ *   - 凭证 + 链接字段 → credentials.channels.<id>
  *
- * 命名规则不是 over-engineering 的 allow-list——非密字段（appId / clientId 等）
- * 不会触发匹配，只有真正的密字段名会命中。未来 channel adapter 想精确声明
- * 字段语义，注册自定义校验器即可。
+ * config.channels 出现一律视为旧 schema 残留，引导用户迁移。
  */
-const SECRET_NAME_PATTERN = /secret|token|password|apikey/i;
+const validateNoConfigChannels: ConfigValidator = (config) => {
+  const channels = (config as Record<string, unknown>)["channels"];
+  if (channels === undefined) return [];
 
-const validateNoChannelSecrets: ConfigValidator = (config) => {
+  return [
+    {
+      field: "channels",
+      reason:
+        "config.json 不再使用 channels 字段（已重命名为 messaging 并简化）—— " +
+        "channels 的具体凭证与链接字段属于内容层，集中在 credentials.channels.<id>",
+      fix:
+        "在 config.json 中：把 channels 改名为 messaging；" +
+        "每个 channel 条目只保留 type / options / defaultTarget 等功能选项，" +
+        "把 credentials 字段（appId / appSecret / 等）整体搬到 " +
+        "~/.zhixing/credentials.json 的 channels.<id> 段",
+    },
+  ];
+};
+
+/**
+ * 校验：config.messaging.<id> 中不允许出现 credentials 字段。
+ *
+ * messaging 是功能层（启用列表 + 功能选项）；channel 的具体字段（appId / appSecret）
+ * 是内容层，必须在 credentials.channels.<id>。
+ */
+const validateNoMessagingCredentials: ConfigValidator = (config) => {
   const issues: ConfigSemanticIssue[] = [];
-  const channels = config.channels ?? {};
+  const messaging = config.messaging ?? {};
 
-  for (const [channelId, entry] of Object.entries(channels)) {
-    const credentials = entry.credentials ?? {};
-    for (const fieldName of Object.keys(credentials)) {
-      if (SECRET_NAME_PATTERN.test(fieldName)) {
-        issues.push({
-          field: `channels.${channelId}.credentials.${fieldName}`,
-          reason:
-            `敏感字段不允许出现在 config.json —— AI 可读 config.json，` +
-            `密字段（含 secret/token/password/apiKey 等命名）必须放在 ~/.zhixing/credentials.json 才能受 AI 隔离规则保护`,
-          fix:
-            `在 config.json 中删除 channels.${channelId}.credentials.${fieldName} 字段；` +
-            `在 ~/.zhixing/credentials.json 中写入：` +
-            `{ "version": 1, "channels": { "${channelId}": { "${fieldName}": "<your-secret>" } } }；` +
-            `非密字段（如 appId / clientId）保留在 config.json 即可`,
-        });
-      }
+  for (const [channelId, entry] of Object.entries(messaging)) {
+    const credentials = (entry as Record<string, unknown>)["credentials"];
+    if (credentials !== undefined) {
+      issues.push({
+        field: `messaging.${channelId}.credentials`,
+        reason:
+          `Channel 的凭证与链接字段（appId / appSecret 等）属于内容层，` +
+          `不允许出现在 config.json 的 messaging 条目中`,
+        fix:
+          `在 config.json 中删除 messaging.${channelId}.credentials；` +
+          `把这些字段整体搬到 ~/.zhixing/credentials.json 的 channels.${channelId} 段`,
+      });
     }
   }
 
@@ -128,8 +141,9 @@ const validateNoChannelSecrets: ConfigValidator = (config) => {
  * 顺序无意义——每个校验器独立产出 issue，flatMap 合并；caller 看到所有违反。
  */
 export const BUILTIN_VALIDATORS: readonly ConfigValidator[] = [
-  validateNoApiKeyInConfig,
-  validateNoChannelSecrets,
+  validateNoConfigProviders,
+  validateNoConfigChannels,
+  validateNoMessagingCredentials,
 ];
 
 // ─── 主入口 ───

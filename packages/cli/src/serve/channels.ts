@@ -17,7 +17,7 @@ import {
   type ConfirmationHub,
 } from "@zhixing/server";
 import type {
-  ChannelConfigEntry,
+  MessagingChannelEntry,
   ZhixingCredentials,
 } from "@zhixing/providers";
 
@@ -41,14 +41,19 @@ function createAdapter(type: string): Promise<ChannelAdapter> {
 // ─── Channel Setup ───
 
 export interface SetupChannelsOptions {
-  entries: Record<string, ChannelConfigEntry>;
   /**
-   * 用户级凭证文件——含 channel 密字段（appSecret 等）。
+   * 启用的 channel 列表（来自 config.messaging）。
    *
-   * setupChannels 内部把 `entries[id].credentials`（非密字段如 appId）与
-   * `credentials.channels[id]`（密字段）合并后传给 ChannelAdapter.connect；
-   * channel adapter 收到的 ChannelConfig.credentials 形态完全不变（Record<string, string>），
-   * 不需要 adapter 改动即可获得密字段隔离。
+   * 出现在 entries 的 channel 视为启用；entries[id] 是 MessagingChannelEntry，
+   * 仅含功能选项（type / options / defaultTarget），不含凭证。
+   */
+  entries: Record<string, MessagingChannelEntry>;
+  /**
+   * 用户级凭证文件——含 channel 完整字段（appId / appSecret 等所有字段）。
+   *
+   * setupChannels 内部把 `credentials.channels[id]` 整体作为 ChannelConfig.credentials
+   * 传给 ChannelAdapter.connect；channel adapter 收到 Record<string, string>
+   * 形态不变。channel 资源完整定义集中在凭证文件，AI 不可读。
    */
   credentials: ZhixingCredentials;
   /** ConversationManager for inbound routing. Omit for outbound-only mode (REPL). */
@@ -123,8 +128,6 @@ export async function setupChannels(
   }
 
   for (const [id, entry] of Object.entries(entries)) {
-    if (entry.enabled === false) continue;
-
     const type = entry.type ?? id;
     let adapter: ChannelAdapter;
     try {
@@ -140,18 +143,14 @@ export async function setupChannels(
 
     registry.register(adapter);
 
-    // 合并非密字段（entry.credentials, 含 appId 等）与密字段
-    // （credentials.channels.<id>, 含 appSecret 等）。adapter 收到 Record<string, string>
-    // 形态不变；同 key 时密字段（来自 credentials.json）优先，避免 config.json 误覆盖密字段
-    const mergedCredentials = {
-      ...entry.credentials,
-      ...(credentials.channels?.[id] ?? {}),
-    };
+    // channel 完整字段（含 appId / appSecret 等）从 credentials.channels.<id> 取——
+    // channel 资源定义集中在凭证文件，config.json 只记录"启用列表 + 功能选项"。
+    const channelCredentials = credentials.channels?.[id] ?? {};
 
     const channelConfig: ChannelConfig = {
       type,
       enabled: true,
-      credentials: mergedCredentials,
+      credentials: channelCredentials,
       options: entry.options,
       defaultTarget: entry.defaultTarget
         ? { channelId: id, to: entry.defaultTarget.to }

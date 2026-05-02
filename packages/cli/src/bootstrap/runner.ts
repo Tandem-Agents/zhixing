@@ -52,6 +52,8 @@ export interface RunBootstrapArgs {
   configPath: string;
   /** credentials.json 绝对路径，仅用于向用户展示 */
   credentialsPath: string;
+  /** workspace 已创建路径，仅用于向用户展示（intro 中显示"已创建"状态） */
+  workspaceRoot?: string;
   interaction: BootstrapInteraction;
   writers: BootstrapWriters;
 }
@@ -71,6 +73,7 @@ export async function runBootstrap(
     await args.interaction.printIntro({
       configPath: args.configPath,
       credentialsPath: args.credentialsPath,
+      workspaceRoot: args.workspaceRoot,
       missing: initialMissing,
     });
 

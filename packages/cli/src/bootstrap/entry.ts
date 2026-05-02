@@ -153,6 +153,7 @@ export async function ensureBootstrap(
       initialCredentials: credentials,
       configPath,
       credentialsPath,
+      workspaceRoot: config.workspace?.root,
       interaction,
       writers,
     });

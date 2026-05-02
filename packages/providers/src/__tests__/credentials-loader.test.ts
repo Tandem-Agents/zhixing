@@ -2,9 +2,12 @@
  * 凭证 loader / writer 测试
  *
  * 关键不变量：
- *   - version 字段原样保留（reserved-for-future-migration，不篡改）
+ *   - 文件不存在 + 默认 → 创建模板骨架（含 providers / channels 字段占位）
+ *   - 文件不存在 + noAutoCreate → 返回空对象（caller 不创建文件）
  *   - JSON 损坏 → throw CredentialsSchemaError（fail-fast，不 silent）
+ *   - 错误消息不泄漏密值（fuzz 含 sk-* 前缀的损坏文件）
  *   - writeCredentials 子表合并是 id 级 + 字段级（不丢任何已有字段）
+ *   - version 字段不主动写入；用户已写时原样保留
  */
 
 import fs from "node:fs";
@@ -35,29 +38,37 @@ afterEach(() => {
 });
 
 describe("loadCredentials", () => {
-  it("文件不存在 + 默认 → 自动创建空骨架", () => {
+  it("文件不存在 + 默认 → 自动创建模板骨架（含字段占位）", () => {
     const result = loadCredentials({ homeDir: tmpDir });
-    expect(result).toEqual({ version: 1 });
 
+    // 内存返回值与磁盘内容相同：含 providers + channels 字段结构占位
+    expect(result.providers).toBeDefined();
+    expect(result.providers?.siliconflow).toBeDefined();
+    expect(result.providers?.siliconflow?.apiKey).toBe("");
+    expect(result.channels).toBeDefined();
+    expect(result.channels?.feishu).toBeDefined();
+    expect(result.channels?.feishu?.appId).toBe("");
+    expect(result.channels?.feishu?.appSecret).toBe("");
+
+    // 磁盘文件已创建
     const created = fs.readFileSync(getCredentialsPath(tmpDir), "utf-8");
-    expect(JSON.parse(created)).toEqual({ version: 1 });
+    expect(JSON.parse(created)).toEqual(result);
   });
 
-  it("文件不存在 + noAutoCreate → 不创建文件，返回空骨架副本", () => {
+  it("文件不存在 + noAutoCreate → 不创建文件，返回空对象", () => {
     const result = loadCredentials({ homeDir: tmpDir, noAutoCreate: true });
-    expect(result).toEqual({ version: 1 });
+    expect(result).toEqual({});
     expect(fs.existsSync(getCredentialsPath(tmpDir))).toBe(false);
   });
 
-  it("文件合法 → 返回 parsed，providers/channels 完整", () => {
+  it("文件合法 → 返回 parsed，providers/channels 完整保留", () => {
     const filePath = getCredentialsPath(tmpDir);
     const fixture: ZhixingCredentials = {
-      version: 1,
       providers: {
         siliconflow: { apiKey: "sk-sf" },
-        openai: { apiKey: "sk-oai" },
+        openai: { apiKey: "sk-oai", baseUrl: "https://my-proxy.com" },
       },
-      channels: { feishu: { appSecret: "sec-1" } },
+      channels: { feishu: { appId: "cli_xxx", appSecret: "sec-1" } },
     };
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, JSON.stringify(fixture), "utf-8");
@@ -65,8 +76,7 @@ describe("loadCredentials", () => {
     expect(loadCredentials({ homeDir: tmpDir })).toEqual(fixture);
   });
 
-  it("version 字段原样保留（reserved，不被 loader 篡改）", () => {
-    // 模拟未来 v2 文件（用 cast 绕过 literal type）
+  it("用户文件含 version 字段 → 原样保留（loader 不篡改）", () => {
     const filePath = getCredentialsPath(tmpDir);
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(
@@ -75,16 +85,14 @@ describe("loadCredentials", () => {
       "utf-8",
     );
 
-    const result = loadCredentials({ homeDir: tmpDir }) as ZhixingCredentials & {
-      version: number;
-    };
+    const result = loadCredentials({ homeDir: tmpDir });
     expect(result.version).toBe(2);
   });
 
   it("JSON 损坏 → throw CredentialsSchemaError，message 含路径不含密值", () => {
     const filePath = getCredentialsPath(tmpDir);
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, '{"version": 1, "providers": {bad json}', "utf-8");
+    fs.writeFileSync(filePath, '{"providers": {bad json}', "utf-8");
 
     let caught: unknown;
     try {
@@ -97,19 +105,18 @@ describe("loadCredentials", () => {
     const err = caught as CredentialsSchemaError;
     expect(err.filePath).toBe(filePath);
     expect(err.message).toContain(filePath);
-    // sanity check：错误消息不应"巧合"包含明显凭证 prefix（这里没有真凭证可泄漏）
     expect(err.message).not.toMatch(/sk-[A-Za-z0-9]/);
   });
 
   it("JSON 损坏 fuzz：文件半截凭证 sk-* → 错误消息不泄漏密值原文", () => {
     // 模拟用户编辑文件中途断电 / 误删括号，残留 sk- 前缀的部分凭证。
-    // schema error 路径应只引文件位置 + JSON 解析底层描述，不把损坏内容回灌到消息里。
+    // schema error 路径应只引文件位置 + 解析底层描述，不把损坏内容回灌到消息里。
     const filePath = getCredentialsPath(tmpDir);
     const FAKE_SECRET = "sk-fuzz0123456789ABCDEFGHIJKLMNOPqrst";
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(
       filePath,
-      `{"version":1,"providers":{"siliconflow":{"apiKey":"${FAKE_SECRET}`,
+      `{"providers":{"siliconflow":{"apiKey":"${FAKE_SECRET}`,
       "utf-8",
     );
 
@@ -126,36 +133,36 @@ describe("loadCredentials", () => {
     expect(err.message).not.toMatch(/sk-[A-Za-z0-9]+/);
   });
 
-  it("空 JSON 对象 → 返回 {} 形态（version 缺失，不补默认到 parsed）", () => {
+  it("空 JSON 对象 → 返回 {} 形态", () => {
     const filePath = getCredentialsPath(tmpDir);
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(filePath, "{}", "utf-8");
 
     const result = loadCredentials({ homeDir: tmpDir });
-    // 用户文件原样返回——loader 不补 version；下游 applyCredentialsPatch / 测试
-    // 视需要兜底
     expect(result).toEqual({});
   });
 });
 
 describe("applyCredentialsPatch · 合并语义", () => {
-  it("空 current + 空 patch → version 兜底为 1", () => {
-    expect(applyCredentialsPatch({} as ZhixingCredentials, {})).toEqual({
-      version: 1,
-    });
+  it("空 current + 空 patch → 返回空对象（不主动写 version）", () => {
+    expect(applyCredentialsPatch({}, {})).toEqual({});
   });
 
-  it("patch 显式 version 优先于 current", () => {
+  it("patch 显式 version → 保留", () => {
     const result = applyCredentialsPatch(
-      { version: 1 },
-      { version: 1 } as Partial<ZhixingCredentials>,
+      {},
+      { version: 2 } as Partial<ZhixingCredentials>,
     );
-    expect(result.version).toBe(1);
+    expect(result.version).toBe(2);
+  });
+
+  it("current 已有 version → patch 未覆盖时保留", () => {
+    const result = applyCredentialsPatch({ version: 2 }, {});
+    expect(result.version).toBe(2);
   });
 
   it("追加单 provider 不清除其它 provider", () => {
     const current: ZhixingCredentials = {
-      version: 1,
       providers: {
         siliconflow: { apiKey: "sk-sf" },
         openai: { apiKey: "sk-oai" },
@@ -173,29 +180,26 @@ describe("applyCredentialsPatch · 合并语义", () => {
   });
 
   it("修改同 provider id → 字段级合并（不丢未在 patch 提及的字段）", () => {
-    // 模拟未来 ProviderCredentials 多字段场景：cast 注入额外字段
-    const current = {
-      version: 1,
+    const current: ZhixingCredentials = {
       providers: {
-        custom: { apiKey: "old", refreshToken: "rt-1", expiresAt: 1000 },
+        custom: {
+          apiKey: "old",
+          baseUrl: "https://x",
+          defaultModel: "model-1",
+        },
       },
-    } as unknown as ZhixingCredentials;
+    };
     const result = applyCredentialsPatch(current, {
       providers: { custom: { apiKey: "new" } },
-    }) as unknown as {
-      providers: {
-        custom: { apiKey: string; refreshToken: string; expiresAt: number };
-      };
-    };
+    });
 
-    expect(result.providers.custom.apiKey).toBe("new");
-    expect(result.providers.custom.refreshToken).toBe("rt-1");
-    expect(result.providers.custom.expiresAt).toBe(1000);
+    expect(result.providers?.custom?.apiKey).toBe("new");
+    expect(result.providers?.custom?.baseUrl).toBe("https://x");
+    expect(result.providers?.custom?.defaultModel).toBe("model-1");
   });
 
   it("channels 同样 id 级 + 字段级合并", () => {
     const current: ZhixingCredentials = {
-      version: 1,
       channels: {
         feishu: { appSecret: "old", botToken: "bt-1" },
         wecom: { secret: "ws-1" },
@@ -213,7 +217,6 @@ describe("applyCredentialsPatch · 合并语义", () => {
 
   it("patch 未提到的子表保留 current", () => {
     const current: ZhixingCredentials = {
-      version: 1,
       providers: { siliconflow: { apiKey: "sk-sf" } },
       channels: { feishu: { appSecret: "sec-1" } },
     };
@@ -232,7 +235,6 @@ describe("writeCredentials · 端到端持久化", () => {
     fs.writeFileSync(
       filePath,
       JSON.stringify({
-        version: 1,
         providers: { siliconflow: { apiKey: "sk-sf" } },
       }),
       "utf-8",
@@ -250,7 +252,7 @@ describe("writeCredentials · 端到端持久化", () => {
     });
   });
 
-  it("文件不存在时 writeCredentials 创建文件", async () => {
+  it("文件不存在时 writeCredentials 创建文件（仅含 patch 内容，不主动加 version）", async () => {
     await writeCredentials(
       { providers: { siliconflow: { apiKey: "sk-sf" } } },
       { homeDir: tmpDir },
@@ -260,9 +262,9 @@ describe("writeCredentials · 端到端持久化", () => {
     expect(fs.existsSync(filePath)).toBe(true);
     const persisted = JSON.parse(fs.readFileSync(filePath, "utf-8"));
     expect(persisted).toEqual({
-      version: 1,
       providers: { siliconflow: { apiKey: "sk-sf" } },
     });
+    expect(persisted.version).toBeUndefined();
   });
 
   it("写时不留临时文件", async () => {

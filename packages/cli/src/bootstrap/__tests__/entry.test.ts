@@ -280,13 +280,12 @@ describe("ensureBootstrap · non-tty 分支", () => {
 });
 
 describe("ensureBootstrap · config-semantic-error 分支", () => {
-  it("config.providers.<id>.apiKey 字段存在 → config-semantic-error", async () => {
-    // 老用户 config.json 残留 apiKey 字段（开发阶段或旧模板）→ 必须 fail-fast 引导手工修复
+  it("config.providers 字段存在 → config-semantic-error（整个字段废弃）", async () => {
     writeConfigFile({
       llm: { main: { provider: "siliconflow", model: "Pro/MiniMaxAI/MiniMax-M2.5" } },
-      providers: { siliconflow: { apiKey: "env:SILICONFLOW_API_KEY" } },
+      providers: { siliconflow: { apiKey: "sk-sf" } },
     });
-    writeCredentialsFile({ version: 1 });
+    writeCredentialsFile({});
 
     const result = await ensureBootstrap({ homeDir: tmpDir, isTTY: true });
 
@@ -294,11 +293,11 @@ describe("ensureBootstrap · config-semantic-error 分支", () => {
     if (result.kind === "config-semantic-error") {
       expect(result.filePath).toBe(path.join(tmpDir, "config.json"));
       expect(result.issues).toHaveLength(1);
-      expect(result.issues[0]?.field).toBe("providers.siliconflow.apiKey");
+      expect(result.issues[0]?.field).toBe("providers");
     }
   });
 
-  it("config.channels.<id>.credentials 含密字段 → config-semantic-error", async () => {
+  it("config.channels 字段存在（旧名）→ config-semantic-error", async () => {
     writeConfigFile({
       llm: { main: { provider: "siliconflow", model: "Pro/MiniMaxAI/MiniMax-M2.5" } },
       channels: {
@@ -308,7 +307,6 @@ describe("ensureBootstrap · config-semantic-error 分支", () => {
       },
     });
     writeCredentialsFile({
-      version: 1,
       providers: { siliconflow: { apiKey: "sk-sf" } },
     });
 
@@ -317,29 +315,46 @@ describe("ensureBootstrap · config-semantic-error 分支", () => {
     expect(result.kind).toBe("config-semantic-error");
     if (result.kind === "config-semantic-error") {
       expect(result.issues).toHaveLength(1);
-      expect(result.issues[0]?.field).toBe(
-        "channels.feishu.credentials.appSecret",
-      );
+      expect(result.issues[0]?.field).toBe("channels");
     }
   });
 
-  it("多类违反一次报全（apiKey + channel secret 累计）", async () => {
+  it("config.messaging.<id>.credentials 含字段 → config-semantic-error", async () => {
     writeConfigFile({
       llm: { main: { provider: "siliconflow", model: "Pro/MiniMaxAI/MiniMax-M2.5" } },
-      providers: { siliconflow: { apiKey: "sk-sf" } },
-      channels: {
+      messaging: {
         feishu: {
           credentials: { appId: "cli_xxx", appSecret: "fs_secret" },
         },
-      },
+      } as never,
     });
-    writeCredentialsFile({ version: 1 });
+    writeCredentialsFile({
+      providers: { siliconflow: { apiKey: "sk-sf" } },
+    });
 
     const result = await ensureBootstrap({ homeDir: tmpDir, isTTY: true });
 
     expect(result.kind).toBe("config-semantic-error");
     if (result.kind === "config-semantic-error") {
-      expect(result.issues).toHaveLength(2);
+      expect(result.issues).toHaveLength(1);
+      expect(result.issues[0]?.field).toBe("messaging.feishu.credentials");
+    }
+  });
+
+  it("多类违反一次报全（providers + channels + messaging.<id>.credentials 累计）", async () => {
+    writeConfigFile({
+      llm: { main: { provider: "siliconflow", model: "Pro/MiniMaxAI/MiniMax-M2.5" } },
+      providers: { siliconflow: { apiKey: "sk-sf" } },
+      channels: { feishu: {} },
+      messaging: { wecom: { credentials: { agentSecret: "x" } } } as never,
+    });
+    writeCredentialsFile({});
+
+    const result = await ensureBootstrap({ homeDir: tmpDir, isTTY: true });
+
+    expect(result.kind).toBe("config-semantic-error");
+    if (result.kind === "config-semantic-error") {
+      expect(result.issues).toHaveLength(3);
     }
   });
 
@@ -348,7 +363,7 @@ describe("ensureBootstrap · config-semantic-error 分支", () => {
       llm: { main: { provider: "siliconflow", model: "Pro/MiniMaxAI/MiniMax-M2.5" } },
       providers: { siliconflow: { apiKey: "sk-leaked" } },
     });
-    writeCredentialsFile({ version: 1 });
+    writeCredentialsFile({});
 
     const result = await ensureBootstrap({ homeDir: tmpDir, isTTY: false });
 
@@ -362,7 +377,7 @@ describe("ensureBootstrap · config-semantic-error 分支", () => {
         siliconflow: { apiKey: "sk-fuzzleak0123456789ABCDEF" },
       },
     });
-    writeCredentialsFile({ version: 1 });
+    writeCredentialsFile({});
 
     const result = await ensureBootstrap({ homeDir: tmpDir, isTTY: false });
 

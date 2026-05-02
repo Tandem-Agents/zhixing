@@ -76,7 +76,7 @@ describe("loadConfig", () => {
     expect(config).toEqual({});
   });
 
-  it("应正确读取全局配置（llm.main + providers）", () => {
+  it("应正确读取全局配置（llm.main + workspace + messaging）", () => {
     const globalDir = path.join(tempHome, ".zhixing");
     fs.mkdirSync(globalDir, { recursive: true });
     fs.writeFileSync(
@@ -85,9 +85,7 @@ describe("loadConfig", () => {
         llm: {
           main: { provider: "deepseek", model: "deepseek-chat" },
         },
-        providers: {
-          deepseek: { apiKey: "sk-global" },
-        },
+        workspace: { root: "/some/workspace" },
       }),
     );
 
@@ -98,7 +96,7 @@ describe("loadConfig", () => {
     });
 
     expect(config.llm?.main).toEqual({ provider: "deepseek", model: "deepseek-chat" });
-    expect(config.providers?.deepseek?.apiKey).toBe("sk-global");
+    expect(config.workspace?.root).toBe("/some/workspace");
   });
 
   it("项目配置的 llm 应覆盖全局配置（main 整体替换、secondary 字段级）", () => {
@@ -110,10 +108,6 @@ describe("loadConfig", () => {
         llm: {
           main: { provider: "deepseek", model: "deepseek-chat" },
           secondary: { provider: "anthropic", model: "claude-haiku-4-5-20251001" },
-        },
-        providers: {
-          deepseek: { apiKey: "sk-global" },
-          anthropic: { apiKey: "sk-ant" },
         },
       }),
     );
@@ -139,18 +133,17 @@ describe("loadConfig", () => {
       provider: "anthropic",
       model: "claude-haiku-4-5-20251001",
     });
-    expect(config.providers?.deepseek?.apiKey).toBe("sk-global");
   });
 
-  it("项目配置的 providers 应按 key 合并（不是替换）", () => {
+  it("项目配置的 messaging 应按 key 合并（不是替换）", () => {
     const globalDir = path.join(tempHome, ".zhixing");
     fs.mkdirSync(globalDir, { recursive: true });
     fs.writeFileSync(
       path.join(globalDir, "config.json"),
       JSON.stringify({
-        providers: {
-          deepseek: { apiKey: "sk-ds" },
-          siliconflow: { apiKey: "sk-sf" },
+        messaging: {
+          feishu: { type: "feishu", options: { logLevel: "info" } },
+          slack: {},
         },
       }),
     );
@@ -158,9 +151,9 @@ describe("loadConfig", () => {
     fs.writeFileSync(
       path.join(tempProject, "zhixing.config.json"),
       JSON.stringify({
-        providers: {
-          deepseek: { defaultModel: "deepseek-reasoner" },
-          openai: { apiKey: "sk-oai", baseUrl: "https://api.openai.com/v1", protocol: "openai-compatible" },
+        messaging: {
+          feishu: { defaultTarget: { to: "C12345" } },
+          wecom: {},
         },
       }),
     );
@@ -171,13 +164,16 @@ describe("loadConfig", () => {
       noAutoCreate: true,
     });
 
-    // deepseek: 全局 apiKey 保留，项目 defaultModel 合入
-    expect(config.providers?.deepseek?.apiKey).toBe("sk-ds");
-    expect(config.providers?.deepseek?.defaultModel).toBe("deepseek-reasoner");
-    // siliconflow: 全局保留
-    expect(config.providers?.siliconflow?.apiKey).toBe("sk-sf");
-    // openai: 项目新增
-    expect(config.providers?.openai?.apiKey).toBe("sk-oai");
+    // feishu: 全局 type/options 保留，项目 defaultTarget 合入
+    expect(config.messaging?.feishu).toEqual({
+      type: "feishu",
+      options: { logLevel: "info" },
+      defaultTarget: { to: "C12345" },
+    });
+    // slack: 全局保留
+    expect(config.messaging?.slack).toEqual({});
+    // wecom: 项目新增
+    expect(config.messaging?.wecom).toEqual({});
   });
 
   it("intent.cancelKeywords 是 append 合并：全局 + 项目都生效", () => {
@@ -227,7 +223,26 @@ describe("loadConfig", () => {
     expect(config.intent?.cancelKeywords).toEqual(["仅全局"]);
   });
 
-  it("自动创建全局配置模板（含 llm.main 嵌套，providers 留空骨架）", () => {
+  it("自动创建全局配置模板：含 llm.main 默认 + workspace 实际路径 + messaging 空对象", () => {
+    const configPath = path.join(tempHome, ".zhixing", "config.json");
+
+    const config = loadConfig({
+      cwd: tempProject,
+      env: { ZHIXING_CONFIG_PATH: configPath },
+    });
+
+    expect(fs.existsSync(configPath)).toBe(true);
+    expect(config.llm?.main?.provider).toBe("siliconflow");
+    expect(config.llm?.main?.model).toBe("Pro/MiniMaxAI/MiniMax-M2.5");
+    // 模板不含 providers 字段（已删除——provider 资源在 credentials.json）
+    expect((config as Record<string, unknown>).providers).toBeUndefined();
+    // messaging 空对象（启用列表，用户用时手添）
+    expect(config.messaging).toEqual({});
+    // workspace.root 已写入实际路径
+    expect(config.workspace?.root).toBeTruthy();
+  });
+
+  it("模板含 JSONC 注释——loader 容忍解析", () => {
     const configPath = path.join(tempHome, ".zhixing", "config.json");
 
     loadConfig({
@@ -235,13 +250,12 @@ describe("loadConfig", () => {
       env: { ZHIXING_CONFIG_PATH: configPath },
     });
 
-    expect(fs.existsSync(configPath)).toBe(true);
-    const content = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-    expect(content.llm?.main?.provider).toBe("siliconflow");
-    expect(content.llm?.main?.model).toBe("Pro/MiniMaxAI/MiniMax-M2.5");
-    // 模板不再预填 apiKey: "env:..." 占位——凭证经 ~/.zhixing/credentials.json
-    // 加载，CI / vault 用户可显式在 providers.<id>.apiKey 写 env:/helper:/明文
-    expect(content.providers).toEqual({});
+    const rawContent = fs.readFileSync(configPath, "utf-8");
+    expect(rawContent).toContain("//");
+    expect(rawContent).toContain("main（必填）");
+    expect(rawContent).toContain("secondary");
+    expect(rawContent).toContain("workspace");
+    expect(rawContent).toContain("messaging");
   });
 
   it("自动创建不应覆盖已有配置", () => {
@@ -262,6 +276,29 @@ describe("loadConfig", () => {
 
     const content = JSON.parse(fs.readFileSync(configPath, "utf-8"));
     expect(content.llm?.main?.provider).toBe("my-custom");
+  });
+
+  it("含注释的合法 JSONC 配置 → 正常解析", () => {
+    const globalDir = path.join(tempHome, ".zhixing");
+    fs.mkdirSync(globalDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(globalDir, "config.json"),
+      `{
+  // 这是一行注释
+  "llm": {
+    /* 块注释 */
+    "main": { "provider": "openai", "model": "gpt-4o" }
+  }
+}`,
+    );
+
+    const config = loadConfig({
+      cwd: tempProject,
+      env: { ZHIXING_CONFIG_PATH: path.join(globalDir, "config.json") },
+      noAutoCreate: true,
+    });
+
+    expect(config.llm?.main).toEqual({ provider: "openai", model: "gpt-4o" });
   });
 
   it("JSON 语法错误的配置文件应抛 ConfigSchemaError（fail-fast）", () => {
@@ -307,69 +344,44 @@ describe("applyConfigPatch · 合并语义", () => {
     expect(result.workspace).toEqual({ root: "/old" });
   });
 
-  it("providers 子表 → id 级 + 字段级合并（不丢其它 id 与同 id 其它字段）", () => {
+  it("messaging 子表 → id 级 + 字段级合并（不丢其它 id 与同 id 其它字段）", () => {
     const current: Partial<ZhixingConfig> = {
-      providers: {
-        siliconflow: {
-          apiKey: "env:SF_KEY",
-          baseUrl: "https://siliconflow.example.com",
-        },
-        openai: { apiKey: "env:OAI_KEY" },
+      messaging: {
+        feishu: { type: "feishu", options: { logLevel: "info" } },
+        slack: { type: "slack" },
       },
     };
     const result = applyConfigPatch(current, {
-      providers: {
-        siliconflow: { defaultModel: "Pro/MiniMax/M2.5" },
-        anthropic: { apiKey: "env:ANT_KEY" },
+      messaging: {
+        feishu: { defaultTarget: { to: "U123" } },
+        wecom: {},
       },
     });
 
-    expect(result.providers).toEqual({
-      siliconflow: {
-        apiKey: "env:SF_KEY",
-        baseUrl: "https://siliconflow.example.com",
-        defaultModel: "Pro/MiniMax/M2.5",
+    expect(result.messaging).toEqual({
+      feishu: {
+        type: "feishu",
+        options: { logLevel: "info" },
+        defaultTarget: { to: "U123" },
       },
-      openai: { apiKey: "env:OAI_KEY" },
-      anthropic: { apiKey: "env:ANT_KEY" },
+      slack: { type: "slack" },
+      wecom: {},
     });
-  });
-
-  it("channels 子表同样 id 级 + 字段级合并", () => {
-    const current: Partial<ZhixingConfig> = {
-      channels: {
-        feishu: {
-          credentials: { appId: "old-app" },
-          options: { receiveMode: "long-poll" },
-        },
-      },
-    };
-    const result = applyConfigPatch(current, {
-      channels: {
-        feishu: { credentials: { appId: "new-app" } },
-      },
-    });
-
-    expect(result.channels?.feishu.credentials).toEqual({ appId: "new-app" });
-    expect(result.channels?.feishu.options).toEqual({ receiveMode: "long-poll" });
   });
 
   it("patch 未提到的字段保留 current", () => {
     const current: Partial<ZhixingConfig> = {
       llm: { main: { provider: "x", model: "y" } },
-      providers: { x: { apiKey: "k" } },
+      messaging: { feishu: {} },
       workspace: { root: "/w" },
     };
     const result = applyConfigPatch(current, {
-      providers: { z: { apiKey: "kz" } },
+      messaging: { wecom: {} },
     });
 
     expect(result.llm).toEqual(current.llm);
     expect(result.workspace).toEqual(current.workspace);
-    expect(result.providers).toEqual({
-      x: { apiKey: "k" },
-      z: { apiKey: "kz" },
-    });
+    expect(result.messaging).toEqual({ feishu: {}, wecom: {} });
   });
 });
 
@@ -382,26 +394,26 @@ describe("writeConfig · 端到端持久化", () => {
 
   afterEach(() => cleanDir(tempHome));
 
-  it("追加新 provider 后磁盘文件包含所有原 provider", async () => {
+  it("追加新 messaging 后磁盘文件包含所有原 messaging", async () => {
     const filePath = path.join(tempHome, "config.json");
     fs.writeFileSync(
       filePath,
       JSON.stringify({
         llm: { main: { provider: "deepseek", model: "deepseek-chat" } },
-        providers: { deepseek: { apiKey: "env:DS" } },
+        messaging: { feishu: { type: "feishu" } },
       }),
       "utf-8",
     );
 
     await writeConfig(
-      { providers: { openai: { apiKey: "env:OAI" } } },
+      { messaging: { wecom: {} } },
       { homeDir: tempHome },
     );
 
     const persisted = JSON.parse(fs.readFileSync(filePath, "utf-8"));
-    expect(persisted.providers).toEqual({
-      deepseek: { apiKey: "env:DS" },
-      openai: { apiKey: "env:OAI" },
+    expect(persisted.messaging).toEqual({
+      feishu: { type: "feishu" },
+      wecom: {},
     });
     // 顶层 llm 字段应保留
     expect(persisted.llm).toEqual({

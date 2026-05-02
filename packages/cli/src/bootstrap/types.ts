@@ -34,6 +34,8 @@ export interface BootstrapInteraction {
   printIntro(args: {
     configPath: string;
     credentialsPath: string;
+    /** workspace 已创建路径（已 mkdir 完成）；不传则不展示该行 */
+    workspaceRoot?: string;
     missing: MissingField[];
   }): Promise<void>;
 

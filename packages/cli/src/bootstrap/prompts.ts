@@ -28,27 +28,31 @@ export function isSensitiveField(field: MissingField): boolean {
 /**
  * 引导开始时打印的多行欢迎语。
  *
- * 显式打印两份文件的**绝对路径**——用户后续手动编辑时不用猜路径。
+ * 显式打印两份文件的**绝对路径** + workspace 状态——用户后续手动编辑时不用猜路径。
+ * 文案聚焦"用户当前需要做什么"，不暴露内部架构细节（AI 访问策略 / 字段分层等）。
  */
 export function buildIntroLines(args: {
   configPath: string;
   credentialsPath: string;
+  workspaceRoot?: string;
 }): string[] {
-  return [
+  const lines = [
     "──────────────────────────────────────────────",
     "  欢迎使用知行（zhixing）",
     "──────────────────────────────────────────────",
     "",
-    "首次启动需要配置必要字段，将分别写入两份文件：",
-    "",
-    `  公开配置：${args.configPath}`,
-    `              （主对话 LLM 与模型 ID 等；AI 可读，写需用户确认）`,
-    `  凭证文件：${args.credentialsPath}`,
-    `              （API Key 等；AI 不可读、不可写）`,
-    "",
-    "提示：随时按 Ctrl+C 或在任一字段直接回车（空输入）即可取消首次配置。",
+    "已为你准备好配置文件：",
+    `  ${args.configPath}`,
+    `  ${args.credentialsPath}`,
     "",
   ];
+  if (args.workspaceRoot) {
+    lines.push(`工作目录：${args.workspaceRoot}（已创建）`);
+    lines.push("");
+  }
+  lines.push("按 Ctrl+C 或空输入随时取消。");
+  lines.push("");
+  return lines;
 }
 
 /** 引导成功完成后给出的下一步建议 */

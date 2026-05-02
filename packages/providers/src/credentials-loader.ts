@@ -30,7 +30,24 @@ export function getCredentialsPath(homeDir?: string): string {
   return path.join(homeDir ?? defaultHomeDir(), CREDENTIALS_FILENAME);
 }
 
-const EMPTY_CREDENTIALS: ZhixingCredentials = { version: 1 };
+const EMPTY_CREDENTIALS: ZhixingCredentials = {};
+
+/**
+ * 凭证文件骨架模板——包含当前阶段支持的资源占位字段（apiKey 与 channel 凭证）。
+ *
+ * 字段结构系统给好，用户**只需填值**——不研究 schema、不操心字段名拼写。
+ *
+ * 渐进式扩展：未来支持新 provider / channel 时，把对应占位字段加到这里即可；
+ * 用户拉新版 zhixing 后第一次启动会看到新字段（已存在的字段保留原值）。
+ */
+const TEMPLATE_CREDENTIALS: ZhixingCredentials = {
+  providers: {
+    siliconflow: { apiKey: "" },
+  },
+  channels: {
+    feishu: { appId: "", appSecret: "" },
+  },
+};
 
 /**
  * 凭证文件读取或解析失败错误。
@@ -54,13 +71,15 @@ export class CredentialsSchemaError extends Error {
  * 行为表：
  *   | 文件状态 | noAutoCreate=true | noAutoCreate=false |
  *   |----------|-------------------|--------------------|
- *   | 不存在   | 返回空骨架副本    | 创建空骨架 + 返回   |
+ *   | 不存在   | 返回空骨架副本    | 创建模板骨架 + 返回 |
  *   | 读失败   | throw             | throw              |
  *   | 解析失败 | throw             | throw              |
  *   | 合法     | 返回 parsed       | 返回 parsed        |
  *
- * 注意：parsed 的 `version` 字段原样保留——`version` 是 reserved-for-future-migration
- * 字段，loader 不篡改其取值。未来 schema 升级时由显式 migration 流程处理。
+ * 自动创建时写入 TEMPLATE_CREDENTIALS（含所有支持的 provider / channel 字段
+ * 占位空字符串）；用户填值即可，不需要研究 schema 字段名。
+ *
+ * version 字段当前不主动写入——schema 演进时按"无字段=v1，version=2=v2"探测。
  */
 export function loadCredentials(
   options: { homeDir?: string; noAutoCreate?: boolean } = {},
@@ -72,7 +91,7 @@ export function loadCredentials(
       return { ...EMPTY_CREDENTIALS };
     }
     ensureSkeleton(filePath);
-    return { ...EMPTY_CREDENTIALS };
+    return structuredClone(TEMPLATE_CREDENTIALS);
   }
 
   let content: string;
@@ -105,7 +124,7 @@ function ensureSkeleton(filePath: string): void {
     if (!fs.existsSync(filePath)) {
       fs.writeFileSync(
         filePath,
-        JSON.stringify(EMPTY_CREDENTIALS, null, 2) + "\n",
+        JSON.stringify(TEMPLATE_CREDENTIALS, null, 2) + "\n",
         "utf-8",
       );
     }
@@ -144,8 +163,8 @@ export async function writeCredentials(
  *   - id-based 子表（providers / channels）：**id 级 + 字段级合并**——
  *     修改单 id 不清空其它 id；修改单 id 内单字段不丢其它字段
  *   - patch 未提到的子表：保留 current
- *   - version：patch → current → 1 兜底；不在此处做 schema 迁移
- *     （reserved-for-future-migration）
+ *   - version：patch 显式提供则保留，否则不主动写入（schema 演进时按
+ *     "无字段=v1" 探测）
  *
  * 导出供测试与未来 update_credentials 流程复用。
  */
@@ -153,10 +172,8 @@ export function applyCredentialsPatch(
   current: ZhixingCredentials,
   patch: Partial<ZhixingCredentials>,
 ): ZhixingCredentials {
-  const result: ZhixingCredentials = {
-    ...current,
-    version: patch.version ?? current.version ?? 1,
-  };
+  const result: ZhixingCredentials = { ...current };
+  if (patch.version !== undefined) result.version = patch.version;
 
   if (patch.providers !== undefined) {
     result.providers = mergeIdMap(current.providers, patch.providers);

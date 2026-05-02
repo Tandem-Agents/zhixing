@@ -195,11 +195,13 @@ export class TerminalBootstrapInteraction implements BootstrapInteraction {
   async printIntro(args: {
     configPath: string;
     credentialsPath: string;
+    workspaceRoot?: string;
     missing: MissingField[];
   }): Promise<void> {
     const lines = buildIntroLines({
       configPath: args.configPath,
       credentialsPath: args.credentialsPath,
+      workspaceRoot: args.workspaceRoot,
     });
     for (const line of lines) {
       this.stdout.write(line + "\n");

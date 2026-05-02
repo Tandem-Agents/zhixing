@@ -6,7 +6,7 @@
  * 三种创建方式：
  * - createProviderRoles() — 双角色解析（main + secondary），CLI/serve 入口
  * - createProvider()      — 传入显式 ZhixingConfig，单角色 LLMProvider
- * - createProviderDirect()— 指定 provider ID + ProviderConfig，单角色 LLMProvider
+ * - createProviderDirect()— 指定 provider ID + 可选 ProviderCredentialEntry 覆盖，单角色 LLMProvider
  */
 
 import type { ChatRequest, LLMProvider, LLMRole, LLMRoles } from "@zhixing/core";
@@ -21,7 +21,12 @@ import {
   type LLMRolesResolveOptions,
   type ResolvedLLMRoles,
 } from "./resolve.js";
-import type { ProviderConfig, ResolvedProvider, ZhixingConfig } from "./types.js";
+import type {
+  ProviderCredentialEntry,
+  ResolvedProvider,
+  ZhixingConfig,
+  ZhixingCredentials,
+} from "./types.js";
 
 /**
  * 工厂层共用：按 env 推断 ~/.zhixing/ 目录后加载凭证。
@@ -83,16 +88,22 @@ export function createProvider(
 }
 
 /**
- * 快捷方式：直接指定 provider ID + 配置创建 LLMProvider。
+ * 快捷方式：直接指定 provider ID 创建 LLMProvider。
  *
- * 内部从 ~/.zhixing/credentials.json 加载 apiKey；缺失抛错引向首次配置向导。
+ * 两种模式：
+ *   - 不传 override：从 ~/.zhixing/credentials.json 加载凭证条目；缺失抛错
+ *     引向首次配置向导
+ *   - 传 override：完全独立模式——不读文件、不创建模板，仅用 override 字段
+ *     构造 ResolvedProvider。测试与 integration 用此模式避免污染开发者机器
  */
 export function createProviderDirect(
   providerId: string,
-  config?: ProviderConfig,
+  override?: ProviderCredentialEntry,
 ): LLMProvider {
-  const credentials = loadCredentialsFromEnv(process.env);
-  const resolved = resolveProvider(providerId, config ?? {}, credentials);
+  const credentials: ZhixingCredentials = override
+    ? { providers: { [providerId]: override } }
+    : loadCredentialsFromEnv(process.env);
+  const resolved = resolveProvider(providerId, credentials);
   return createFromResolved(resolved);
 }
 

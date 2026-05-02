@@ -423,7 +423,7 @@ export async function createAgentRuntime(
     providerId: roles.main.provider.id,
     model: roles.main.model,
     providerModels: roles.main.provider.models,
-    overrides: config.providers?.[roles.main.provider.id]?.modelOverrides,
+    overrides: resolvedRoles.main.resolved.modelOverrides,
     protocolDefaults:
       PROTOCOL_BUDGET_DEFAULTS[resolvedRoles.main.resolved.protocol],
   });

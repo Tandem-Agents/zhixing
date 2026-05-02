@@ -91,13 +91,21 @@ export interface ModelBudgetOverride {
 }
 
 /**
- * 用户对单个 provider 的配置。与预设合并后生成 ResolvedProvider。
+ * 凭证文件中单个 provider 的完整定义条目（对应 ~/.zhixing/credentials.json 的
+ * `providers.<id>` 字段）。
  *
- * 注意：apiKey 字段不在此处——凭证唯一入口在 ~/.zhixing/credentials.json，
- * 由 ZhixingCredentials.providers.<id>.apiKey 承载。config.json 中出现 apiKey
- * 字段会被启动期 schema 校验拒绝。
+ * 凭证 + 技术配置都在这里——provider 资源属于"内容层"，集中存放：
+ *   - 内置预设 provider（如 siliconflow / openai）：用户只需填 apiKey，其它字段
+ *     由内置预设兜底
+ *   - 自定义 provider（私有部署 / 代理）：用户在 credentials.json 写完整字段
+ *     （apiKey + baseUrl + protocol + 等），不预设
+ *
+ * 与 ZhixingConfig 的关系：config.llm.main.provider 引用本表的 key；本表是
+ * provider 资源池。
  */
-export interface ProviderConfig {
+export interface ProviderCredentialEntry {
+  /** API Key（必填） */
+  apiKey: string;
   /** 覆盖预设的 baseUrl（用于代理/聚合平台/私有部署） */
   baseUrl?: string;
   /** 覆盖预设的协议（自定义 provider 必填） */
@@ -168,23 +176,26 @@ export interface IntentConfig {
   cancelKeywords?: string[];
 }
 
-// ─── 通道配置条目 ───
+// ─── 消息通道启用条目 ───
 
 /**
- * 单个社交通道的配置条目（对应 zhixing.config.json 的 `channels.<id>` 字段）。
+ * 单个消息通道的启用条目（对应 zhixing.config.json 的 `messaging.<id>` 字段）。
+ *
+ * config.json 是决策层：本条目仅记录"启用 channel <id> 时的功能选项"——
+ * type / options / defaultTarget 等。**不含**任何凭证或链接字段（appId / appSecret 等）——
+ * 那些属于内容层，集中在 credentials.channels.<id>。
+ *
+ * 一个 channel 出现在 config.messaging 即视为启用；setupChannels 取
+ * Object.keys(messaging) 作启用列表，从 credentials.channels.<id> 取完整字段。
  *
  * 与 core 的 ChannelConfig 区分：
- * - ChannelConfigEntry 是用户级配置（可选字段多，type 可省略靠 key 推断）
- * - ChannelConfig 是 runtime 级配置（字段完整，由 setupChannels 转换）
+ * - MessagingChannelEntry 是 config 层的启用条目（无凭证字段）
+ * - ChannelConfig 是 runtime 级配置（字段完整，由 setupChannels 合并产出）
  */
-export interface ChannelConfigEntry {
+export interface MessagingChannelEntry {
   /** 适配器类型标识。省略时使用配置 key 作为 type。 */
   type?: string;
-  /** 是否启用此通道。默认 true。 */
-  enabled?: boolean;
-  /** 凭证（appId/appSecret 等），按适配器要求填写 */
-  credentials: Record<string, string>;
-  /** 适配器特定选项 */
+  /** 适配器特定选项（功能层配置，非凭证） */
   options?: Record<string, unknown>;
   /** 通道 owner 的用户标识（自动投递时使用）。channelId 由配置 key 自动填充。 */
   defaultTarget?: { to: string };
@@ -193,7 +204,7 @@ export interface ChannelConfigEntry {
 /**
  * 单个 LLM 角色的 provider+model 选择。
  *
- * - provider：必须是 ZhixingConfig.providers 表中的 key（或内置预设 ID）
+ * - provider：必须是内置预设 ID 或 credentials.providers 表中的 key
  * - model：该 provider 可识别的模型 ID
  */
 export interface LLMRoleConfig {
@@ -201,7 +212,17 @@ export interface LLMRoleConfig {
   model: string;
 }
 
-/** 顶层配置结构（对应 zhixing.config.json） */
+/**
+ * 顶层配置结构（对应 ~/.zhixing/config.json）。
+ *
+ * config.json 是**决策层**——只记录"启用什么、用哪个"等上层选择。
+ * 资源完整定义（provider 凭证 + 技术配置 / channel 凭证 + 链接信息）属于
+ * **内容层**，集中在 ZhixingCredentials。
+ *
+ * 通过 id 关联两层：
+ *   config.llm.main.provider   ──refs──>  credentials.providers.<id>
+ *   config.messaging.<id>      ──refs──>  credentials.channels.<id>
+ */
 export interface ZhixingConfig {
   /**
    * LLM 角色配置：
@@ -212,16 +233,19 @@ export interface ZhixingConfig {
    *
    * 类型为 optional 是为了反映 loadConfig 的真实输出形状——文件可能缺这一段。
    * 真正的 fail-fast 校验在 resolveLLMRoles / resolveFromConfig 入口集中处理；
-   * 不消费 LLM 的纯 workspace / channels 路径不会被这里的缺失误伤。
+   * 不消费 LLM 的纯 workspace / messaging 路径不会被这里的缺失误伤。
    */
   llm?: {
     main: LLMRoleConfig;
     secondary?: LLMRoleConfig;
   };
-  /** Provider 配置表 */
-  providers?: Record<string, ProviderConfig>;
-  /** 通道配置表（key = channelId，如 "feishu"） */
-  channels?: Record<string, ChannelConfigEntry>;
+  /**
+   * 启用的消息通道表（key = channelId，如 "feishu"）。
+   *
+   * 出现在本表的 channel 视为启用；具体凭证与链接字段（appId / appSecret 等）
+   * 在 credentials.channels.<id>。本表只放功能选项（type / options / defaultTarget）。
+   */
+  messaging?: Record<string, MessagingChannelEntry>;
   /** 智能体身份配置（名字、人格等） */
   agent?: AgentConfig;
   /** 控制意图配置（cancel 关键词扩展等） */
@@ -256,24 +280,40 @@ export interface NetworkConfig {
 /**
  * 用户凭证文件结构（对应 ~/.zhixing/credentials.json）。
  *
- * 与 ZhixingConfig 物理隔离：AI 工具体系完全不可读 / 不可写
- * （由 builtin 安全规则强制隔离，规则文档在 security 包中）。
+ * **内容层**——provider 与 channel 资源的完整定义集中在此。与 ZhixingConfig
+ * 物理隔离：AI 工具体系完全不可读 / 不可写（由 builtin 安全规则强制隔离）。
  *
- * 关联机制：与 config.providers.<id> / config.channels.<id> 通过 id 关联。
+ * 关联机制：通过 id 与 ZhixingConfig 关联——
+ *   credentials.providers.<id> ←──refs──── config.llm.main.provider
+ *   credentials.channels.<id>  ←──refs──── config.messaging.<id>
+ *
  * 不参与项目级配置级联——凭证是用户级单一来源，避免项目级配置泄漏到 git。
  */
 export interface ZhixingCredentials {
-  /** schema 版本，用于未来迁移；当前固定为 1 */
-  version: 1;
-  /** Provider 凭证：按 provider id 索引 */
-  providers?: Record<string, { apiKey: string }>;
-  /** Channel 凭证：按 channel id 索引；字段由具体 channel 适配器决定 */
+  /**
+   * Schema 版本——可选字段，预留未来 schema 升级时探测使用。
+   *
+   * 当前唯一 schema 不写此字段；未来引入新 schema 时按"无字段=v1，version=2=v2"
+   * 探测策略升级，不需要现在主动写入。
+   */
+  version?: number;
+  /**
+   * Provider 资源池：按 provider id 索引。
+   *
+   * 内置预设 provider（siliconflow / openai 等）：用户只填 apiKey；
+   * 自定义 provider：用户填完整字段（apiKey + baseUrl + protocol + ...）。
+   */
+  providers?: Record<string, ProviderCredentialEntry>;
+  /**
+   * Channel 资源池：按 channel id 索引；含该 channel 的所有字段（含 appId
+   * 等链接信息与 appSecret 等密字段）。具体字段由 channel 适配器约定。
+   */
   channels?: Record<string, Record<string, string>>;
 }
 
 // ─── 解析后的 Provider ───
 
-/** 合并预设 + 用户配置后的完整 Provider，可直接传给协议适配器 */
+/** 合并预设 + 用户凭证条目后的完整 Provider，可直接传给协议适配器 */
 export interface ResolvedProvider {
   /** Provider 标识符 */
   id: string;
@@ -296,4 +336,12 @@ export interface ResolvedProvider {
    * 不变量：不得包含占位条目（id="unknown" 等）；缺失就返回空数组。
    */
   declaredModels: readonly ModelInfo[];
+  /**
+   * 模型预算覆盖表（来自 credentials.providers.<id>.modelOverrides）。
+   *
+   * Consumer（orchestrator）调 resolveModelInfo 时传入；不在 ResolvedProvider 上
+   * 时下游 caller 需自己回查 credentials，破坏配置层封装——故让 ResolvedProvider
+   * 携带，避免下游再触达原始 credentials。
+   */
+  modelOverrides?: Record<string, ModelBudgetOverride>;
 }

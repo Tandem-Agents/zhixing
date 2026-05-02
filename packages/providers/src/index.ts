@@ -3,13 +3,13 @@
 // 类型导出
 export type {
   AgentConfig,
-  ChannelConfigEntry,
   IntentConfig,
   LLMRoleConfig,
+  MessagingChannelEntry,
   ModelBudgetOverride,
   NetworkConfig,
   Protocol,
-  ProviderConfig,
+  ProviderCredentialEntry,
   ProviderPreset,
   ProviderQuirks,
   ResolvedProvider,
