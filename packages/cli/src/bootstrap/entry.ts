@@ -19,8 +19,10 @@ import {
   loadConfig,
   loadCredentials,
   resolveHomeDir,
+  validateConfigSemantics,
   writeConfig,
   writeCredentials,
+  type ConfigSemanticIssue,
   type MissingField,
   type ZhixingConfig,
   type ZhixingCredentials,
@@ -37,13 +39,20 @@ import type { BootstrapInteraction } from "./types.js";
  * - cancelled：用户在 wizard 中取消，caller 应正常退出（退出码 0）
  * - non-tty：缺字段且非交互终端，caller 应报错并指引用户去 TTY（退出码 2）
  * - schema-error：现有文件 JSON 损坏，caller 应报错并指引用户修复（退出码 2）
+ * - config-semantic-error：config.json 含废弃字段（凭证 / channel 密字段），
+ *   caller 应打印 issue 三段式（field/reason/fix）并指引用户手工修复（退出码 2）
  */
 export type BootstrapEntryResult =
   | { kind: "ready"; config: ZhixingConfig; credentials: ZhixingCredentials }
   | { kind: "completed"; config: ZhixingConfig; credentials: ZhixingCredentials }
   | { kind: "cancelled" }
   | { kind: "non-tty"; missing: MissingField[] }
-  | { kind: "schema-error"; filePath: string; message: string };
+  | { kind: "schema-error"; filePath: string; message: string }
+  | {
+      kind: "config-semantic-error";
+      filePath: string;
+      issues: ConfigSemanticIssue[];
+    };
 
 export interface EnsureBootstrapOptions {
   /** 项目级配置查找目录，默认 process.cwd() */
@@ -103,6 +112,18 @@ export async function ensureBootstrap(
     const schemaResult = toSchemaErrorResult(err);
     if (schemaResult) return schemaResult;
     throw err;
+  }
+
+  // 语义校验 fail-fast：JSON 解析通过不代表 schema 合法。废弃字段（旧 apiKey
+  // fallback / channel 密字段）出现在 config.json 时立即引导用户修复，不让后续
+  // wizard 或运行期被错误的"已配置"假象骗过。
+  const semanticIssues = validateConfigSemantics(config);
+  if (semanticIssues.length > 0) {
+    return {
+      kind: "config-semantic-error",
+      filePath: configPath,
+      issues: semanticIssues,
+    };
   }
 
   const missing = checkBootstrap(config, credentials);

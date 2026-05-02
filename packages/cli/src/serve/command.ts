@@ -53,6 +53,7 @@ import {
   loadConfig,
   loadCredentials,
   resolveHomeDir,
+  validateConfigSemantics,
   type ZhixingConfig,
   type ZhixingCredentials,
 } from "@zhixing/providers";
@@ -149,6 +150,24 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
       process.exit(2);
     }
     throw err;
+  }
+
+  // 语义校验 fail-fast：废弃字段（旧 apiKey fallback / channel 密字段）出现时
+  // 立即拒绝启动，引导用户手工修复后重启。
+  const semanticIssues = validateConfigSemantics(config);
+  if (semanticIssues.length > 0) {
+    console.error(
+      chalk.red(`[配置错误] config.json 含 ${semanticIssues.length} 处废弃字段：`),
+    );
+    console.error("");
+    for (const [index, issue] of semanticIssues.entries()) {
+      console.error(chalk.yellow(`${index + 1}. 字段：${issue.field}`));
+      console.error(chalk.dim(`   原因：${issue.reason}`));
+      console.error(chalk.dim(`   修复：${issue.fix}`));
+      console.error("");
+    }
+    console.error(chalk.dim("修复后重启 server。"));
+    process.exit(2);
   }
 
   const missing = checkBootstrap(config, credentials);

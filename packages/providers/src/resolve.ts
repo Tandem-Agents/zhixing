@@ -6,12 +6,11 @@
  * 解析流程：
  * 1. 查找预设（如果是已知 provider）
  * 2. 合并用户配置覆盖预设
- * 3. 解析 API Key（env:VAR / helper:cmd / 明文）
+ * 3. 从 credentials.json 取 API Key（凭证唯一入口）
  * 4. 验证必填字段
  * 5. 返回 ResolvedProvider
  */
 
-import { execSync } from "node:child_process";
 import { getPreset } from "./presets.js";
 import {
   DEFAULT_QUIRKS,
@@ -40,23 +39,20 @@ export class ProviderConfigError extends Error {
 /**
  * 解析单个 provider 的配置，合并预设和用户配置，返回 ResolvedProvider。
  *
- * apiKey 解析优先级：credentials.providers.<id>.apiKey 主路径 →
- * config.providers.<id>.apiKey fallback（支持 env: / helper: / plaintext） →
- * 缺失抛错并提示首次引导。
+ * apiKey 来源：credentials.providers.<id>.apiKey（凭证唯一入口）。
+ * 缺失时抛 ProviderConfigError，引向首次配置向导。
  *
- * userConfig 与 credentials 都是必需参数——避免 caller 重构时漏传 credentials
- * 而 silent 退化为 fallback-only 路径，错过用户的 credentials.json 主路径。
+ * userConfig 与 credentials 都是必需参数——caller 必须显式加载两份文件，
+ * 避免 silent 退化为缺失。
  *
  * @param providerId - Provider 标识符（如 "deepseek"、"my-custom-gateway"）
  * @param userConfig - 用户配置（无配置时显式传 `{}`，表示全部使用预设默认值）
  * @param credentials - 凭证文件内容（无凭证时显式传 `{ version: 1 }`）
- * @param env - 环境变量源（默认 process.env，测试时可替换）
  */
 export function resolveProvider(
   providerId: string,
   userConfig: ProviderConfig,
   credentials: ZhixingCredentials,
-  env: Record<string, string | undefined> = process.env,
 ): ResolvedProvider {
   const preset = getPreset(providerId);
 
@@ -77,7 +73,7 @@ export function resolveProvider(
     );
   }
 
-  const apiKey = resolveApiKey(providerId, userConfig.apiKey, credentials, env);
+  const apiKey = resolveApiKey(providerId, credentials);
 
   const quirks = mergeQuirks(preset?.quirks, userConfig.quirks);
 
@@ -103,7 +99,6 @@ export function resolveFromConfig(
   config: ZhixingConfig,
   credentials: ZhixingCredentials,
   providerId?: string,
-  env: Record<string, string | undefined> = process.env,
 ): ResolvedProvider {
   const id = providerId ?? config.llm?.main?.provider;
   if (!id) {
@@ -114,7 +109,7 @@ export function resolveFromConfig(
   }
 
   const userConfig = config.providers?.[id] ?? {};
-  return resolveProvider(id, userConfig, credentials, env);
+  return resolveProvider(id, userConfig, credentials);
 }
 
 // ─── LLM 双角色解析（配置层） ───
@@ -149,7 +144,6 @@ export function resolveLLMRoles(
   config: ZhixingConfig,
   credentials: ZhixingCredentials,
   options: LLMRolesResolveOptions = {},
-  env: Record<string, string | undefined> = process.env,
 ): ResolvedLLMRoles {
   // 单一 fail-fast 边界——把 ZhixingConfig.llm? 的 optional 在此处一次性 narrow，
   // 让下游 helpers 接收已确定形状的字段（避免 TS 跨函数 narrow 失败 / non-null 断言）。
@@ -161,12 +155,11 @@ export function resolveLLMRoles(
   }
 
   const providersConfig = config.providers;
-  const main = resolveMainRole(config.llm.main, providersConfig, credentials, options, env);
+  const main = resolveMainRole(config.llm.main, providersConfig, credentials, options);
   const secondary = resolveSecondaryRole(
     config.llm.secondary,
     providersConfig,
     credentials,
-    env,
     main,
   );
 
@@ -178,11 +171,10 @@ function resolveMainRole(
   providersConfig: Record<string, ProviderConfig> | undefined,
   credentials: ZhixingCredentials,
   options: LLMRolesResolveOptions,
-  env: Record<string, string | undefined>,
 ): ResolvedLLMRole {
   const finalProvider = options.providerOverride ?? mainConfig.provider;
   const userConfig = providersConfig?.[finalProvider] ?? {};
-  const resolved = resolveProvider(finalProvider, userConfig, credentials, env);
+  const resolved = resolveProvider(finalProvider, userConfig, credentials);
 
   let finalModel: string;
   if (options.modelOverride) {
@@ -208,7 +200,6 @@ function resolveSecondaryRole(
   explicit: LLMRoleConfig | undefined,
   providersConfig: Record<string, ProviderConfig> | undefined,
   credentials: ZhixingCredentials,
-  env: Record<string, string | undefined>,
   main: ResolvedLLMRole,
 ): ResolvedLLMRole {
   // 没显式配置 → 用 main 实例 + main.model 兜底。
@@ -230,9 +221,9 @@ function resolveSecondaryRole(
 
   // 显式 secondary：用户的明确意图。
   //
-  // 同 provider id 时复用 main.resolved 实例——避免重复 env: lookup /
-  // helper:cmd execSync。复用的只是协议配置（baseUrl/apiKey/connection pool 等
-  // stateless 资源），conversation 仍然独立，隔离性不破坏。
+  // 同 provider id 时复用 main.resolved 实例——避免重复 credentials 查询。
+  // 复用的只是协议配置（baseUrl/apiKey/connection pool 等 stateless 资源），
+  // conversation 仍然独立，隔离性不破坏。
   if (explicit.provider === main.resolved.id) {
     return { resolved: main.resolved, model: explicit.model };
   }
@@ -240,7 +231,7 @@ function resolveSecondaryRole(
   // 不同 provider id：独立解析，失败 fail-fast（不静默降级到 main，避免把
   // "用户期望的双 provider 架构"伪装成单 provider 在跑）。
   const userConfig = providersConfig?.[explicit.provider] ?? {};
-  const resolved = resolveProvider(explicit.provider, userConfig, credentials, env);
+  const resolved = resolveProvider(explicit.provider, userConfig, credentials);
   return { resolved, model: explicit.model };
 }
 
@@ -251,95 +242,32 @@ function buildMissingMainConfigMessage(): string {
     `replace:\n` +
     `  { "defaultProvider": "<id>", "defaultModel": "<model-id>", "providers": {...} }\n` +
     `with:\n` +
-    `  { "llm": { "main": { "provider": "<id>", "model": "<model-id>" } }, "providers": {...} }\n\n` +
-    `See research/design/specifications/secondary-llm-capability.md §一.1.`
+    `  { "llm": { "main": { "provider": "<id>", "model": "<model-id>" } }, "providers": {...} }`
   );
 }
 
 // ─── API Key 解析 ───
 
 /**
- * 解析 API Key。
+ * 从凭证文件读取 API Key。
  *
- * 顺序：
- *   1. credentials.providers.<id>.apiKey —— 主路径（向导写、用户编辑）
- *   2. config.providers.<id>.apiKey —— fallback，承载三种格式：
- *        "env:VAR_NAME"   → 从环境变量读取（CI / enterprise vault 用）
- *        "helper:command" → 执行命令获取（vault helper 用）
- *        明文            → 原样使用
- *   3. 都缺失 → 抛 ProviderConfigError，引导用户跑 `zhixing` 触发首次引导
+ * 凭证唯一入口 = `~/.zhixing/credentials.json` 的 providers.<id>.apiKey。
+ * 缺失时抛 ProviderConfigError，引向首次配置向导（不接受任何形态的 fallback）。
  */
 function resolveApiKey(
   providerId: string,
-  userApiKey: string | undefined,
   credentials: ZhixingCredentials,
-  env: Record<string, string | undefined>,
 ): string {
   const credApiKey = credentials.providers?.[providerId]?.apiKey;
-  if (credApiKey) {
-    return credApiKey;
-  }
-
-  if (userApiKey) {
-    return parseApiKeyValue(providerId, userApiKey, env);
-  }
+  if (credApiKey) return credApiKey;
 
   throw new ProviderConfigError(
     `Provider "${providerId}" 缺少 API Key。\n` +
-      `请按以下任一方式配置：\n` +
-      `  1. （推荐）在 ~/.zhixing/credentials.json 的 providers.${providerId}.apiKey 字段填入凭证；\n` +
-      `     首次使用建议在 TTY 终端跑 \`zhixing\` 触发引导自动写入。\n` +
-      `  2. （fallback，CI / vault 用）在 ~/.zhixing/config.json 的 providers.${providerId}.apiKey\n` +
-      `     字段写 "env:VAR_NAME" / "helper:command" / 明文之一。`,
+      `凭证唯一入口是 ~/.zhixing/credentials.json 的 providers.${providerId}.apiKey 字段。\n` +
+      `首次使用建议在 TTY 终端跑 \`zhixing\` 触发引导自动写入；用户也可手动编辑该文件。\n` +
+      `Schema: { "version": 1, "providers": { "${providerId}": { "apiKey": "..." } } }`,
     providerId,
   );
-}
-
-function parseApiKeyValue(
-  providerId: string,
-  value: string,
-  env: Record<string, string | undefined>,
-): string {
-  // env:VAR_NAME
-  if (value.startsWith("env:")) {
-    const varName = value.slice(4);
-    const resolved = env[varName];
-    if (!resolved) {
-      throw new ProviderConfigError(
-        `Provider "${providerId}" 的 apiKey 引用了环境变量 ${varName}，但该变量未设置`,
-        providerId,
-      );
-    }
-    return resolved;
-  }
-
-  // helper:command
-  if (value.startsWith("helper:")) {
-    const command = value.slice(7);
-    try {
-      const result = execSync(command, {
-        encoding: "utf-8",
-        timeout: 10_000,
-        stdio: ["pipe", "pipe", "pipe"],
-      }).trim();
-      if (!result) {
-        throw new ProviderConfigError(
-          `Provider "${providerId}" 的 apiKey helper 命令 "${command}" 返回了空值`,
-          providerId,
-        );
-      }
-      return result;
-    } catch (err) {
-      if (err instanceof ProviderConfigError) throw err;
-      throw new ProviderConfigError(
-        `Provider "${providerId}" 的 apiKey helper 命令 "${command}" 执行失败: ${err instanceof Error ? err.message : String(err)}`,
-        providerId,
-      );
-    }
-  }
-
-  // 明文
-  return value;
 }
 
 // ─── 辅助函数 ───

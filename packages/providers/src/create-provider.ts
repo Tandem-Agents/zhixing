@@ -71,32 +71,28 @@ export function bindRole(provider: LLMProvider, model: string): LLMRole {
 /**
  * 从完整配置创建 LLMProvider（单角色，main role）。
  *
- * 内部加载凭证文件：credentials.json 主路径 → config.apiKey fallback → 缺失抛错。
+ * 内部从 ~/.zhixing/credentials.json 加载 apiKey；缺失抛错引向首次配置向导。
  */
 export function createProvider(
   config: ZhixingConfig,
   providerId?: string,
-  env?: Record<string, string | undefined>,
 ): LLMProvider {
-  const e = env ?? process.env;
-  const credentials = loadCredentialsFromEnv(e);
-  const resolved = resolveFromConfig(config, credentials, providerId, e);
+  const credentials = loadCredentialsFromEnv(process.env);
+  const resolved = resolveFromConfig(config, credentials, providerId);
   return createFromResolved(resolved);
 }
 
 /**
  * 快捷方式：直接指定 provider ID + 配置创建 LLMProvider。
  *
- * 内部加载凭证文件：credentials.json 主路径 → 传入的 config.apiKey fallback → 缺失抛错。
+ * 内部从 ~/.zhixing/credentials.json 加载 apiKey；缺失抛错引向首次配置向导。
  */
 export function createProviderDirect(
   providerId: string,
   config?: ProviderConfig,
-  env?: Record<string, string | undefined>,
 ): LLMProvider {
-  const e = env ?? process.env;
-  const credentials = loadCredentialsFromEnv(e);
-  const resolved = resolveProvider(providerId, config ?? {}, credentials, e);
+  const credentials = loadCredentialsFromEnv(process.env);
+  const resolved = resolveProvider(providerId, config ?? {}, credentials);
   return createFromResolved(resolved);
 }
 
@@ -130,6 +126,9 @@ export interface ProviderRolesResult {
  * 用户没显式配 llm.secondary 时，secondary 自动用 main 实例 + main.model 兜底
  * （仍保留调用上下文隔离价值，仅放弃任务专门化/cost 优化）。这是正常状态，
  * 不打印任何提示——/status 命令未来可主动展示当前角色配置供用户决策是否专门化。
+ *
+ * options.env 仍保留——loadConfig / loadCredentials 需要它推断 ~/.zhixing 目录
+ * （ZHIXING_CONFIG_PATH 测试覆盖入口）。env 不再透传给凭证解析器。
  */
 export function createProviderRoles(
   options: ProviderRolesOptions = {},
@@ -137,15 +136,10 @@ export function createProviderRoles(
   const env = options.env ?? process.env;
   const config = loadConfig({ cwd: options.cwd, env });
   const credentials = loadCredentialsFromEnv(env);
-  const resolved = resolveLLMRoles(
-    config,
-    credentials,
-    {
-      providerOverride: options.providerOverride,
-      modelOverride: options.modelOverride,
-    },
-    env,
-  );
+  const resolved = resolveLLMRoles(config, credentials, {
+    providerOverride: options.providerOverride,
+    modelOverride: options.modelOverride,
+  });
 
   const mainProvider = createFromResolved(resolved.main.resolved);
 

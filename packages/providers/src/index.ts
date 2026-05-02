@@ -70,6 +70,14 @@ export {
 export { checkBootstrap } from "./bootstrap-check.js";
 export type { MissingField } from "./bootstrap-check.js";
 
+// 配置语义校验（凭证字段 / 密字段拒绝）
+export {
+  BUILTIN_VALIDATORS,
+  ConfigSemanticError,
+  validateConfigSemantics,
+} from "./config-validator.js";
+export type { ConfigSemanticIssue, ConfigValidator } from "./config-validator.js";
+
 // 一站式工厂
 export {
   createProvider,

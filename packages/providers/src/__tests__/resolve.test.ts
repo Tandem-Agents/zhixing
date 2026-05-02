@@ -3,10 +3,6 @@ import { PROVIDER_PRESETS } from "../presets.js";
 import { ProviderConfigError, resolveFromConfig, resolveProvider } from "../resolve.js";
 import { DEFAULT_QUIRKS, type ZhixingCredentials } from "../types.js";
 
-const mockEnv = (overrides: Record<string, string> = {}): Record<string, string | undefined> => ({
-  ...overrides,
-});
-
 const noCreds = (): ZhixingCredentials => ({ version: 1 });
 
 const credsFor = (entries: Record<string, string>): ZhixingCredentials => ({
@@ -20,12 +16,11 @@ describe("resolveProvider", () => {
   // ─── 内置预设场景 ───
 
   describe("内置预设 provider", () => {
-    it("只提供 apiKey 时应使用预设的所有默认值", () => {
+    it("只填 credentials 即用预设的所有默认值", () => {
       const resolved = resolveProvider(
         "deepseek",
-        { apiKey: "sk-test-key" },
-        noCreds(),
-        mockEnv(),
+        {},
+        credsFor({ deepseek: "sk-test-key" }),
       );
 
       expect(resolved.id).toBe("deepseek");
@@ -36,66 +31,32 @@ describe("resolveProvider", () => {
       expect(resolved.defaultModel).toBe("deepseek-chat");
     });
 
-    it("credentials.providers.<id>.apiKey 是主路径，无 config.apiKey 也命中", () => {
+    it("用户配置覆盖预设的 baseUrl", () => {
       const resolved = resolveProvider(
         "deepseek",
-        {},
-        credsFor({ deepseek: "sk-from-credentials" }),
-        mockEnv(),
-      );
-
-      expect(resolved.apiKey).toBe("sk-from-credentials");
-    });
-
-    it("credentials 与 config.apiKey 同时存在时 credentials 优先", () => {
-      const resolved = resolveProvider(
-        "deepseek",
-        { apiKey: "sk-config-fallback" },
-        credsFor({ deepseek: "sk-credentials-primary" }),
-        mockEnv(),
-      );
-
-      expect(resolved.apiKey).toBe("sk-credentials-primary");
-    });
-
-    it("用户配置应覆盖预设的 baseUrl", () => {
-      const resolved = resolveProvider(
-        "deepseek",
-        {
-          baseUrl: "https://my-proxy.com/v1",
-          apiKey: "sk-proxy-key",
-        },
-        noCreds(),
-        mockEnv(),
+        { baseUrl: "https://my-proxy.com/v1" },
+        credsFor({ deepseek: "sk-proxy-key" }),
       );
 
       expect(resolved.baseUrl).toBe("https://my-proxy.com/v1");
       expect(resolved.protocol).toBe("openai-compatible");
     });
 
-    it("用户配置应覆盖预设的 defaultModel", () => {
+    it("用户配置覆盖预设的 defaultModel", () => {
       const resolved = resolveProvider(
         "deepseek",
-        {
-          apiKey: "sk-test",
-          defaultModel: "deepseek-reasoner",
-        },
-        noCreds(),
-        mockEnv(),
+        { defaultModel: "deepseek-reasoner" },
+        credsFor({ deepseek: "sk-test" }),
       );
 
       expect(resolved.defaultModel).toBe("deepseek-reasoner");
     });
 
-    it("用户 quirks 应与预设 quirks 合并（用户优先）", () => {
+    it("用户 quirks 与预设 quirks 合并（用户优先）", () => {
       const resolved = resolveProvider(
         "openai",
-        {
-          apiKey: "sk-test",
-          quirks: { supportsThinking: true },
-        },
-        noCreds(),
-        mockEnv(),
+        { quirks: { supportsThinking: true } },
+        credsFor({ openai: "sk-test" }),
       );
 
       expect(resolved.quirks.supportsThinking).toBe(true);
@@ -104,53 +65,17 @@ describe("resolveProvider", () => {
     });
   });
 
-  // ─── config.apiKey fallback 三种格式 ───
-
-  describe("config.apiKey fallback：env: 格式", () => {
-    it("应从指定环境变量读取 apiKey", () => {
-      const resolved = resolveProvider(
-        "deepseek",
-        { apiKey: "env:MY_CUSTOM_KEY" },
-        noCreds(),
-        mockEnv({ MY_CUSTOM_KEY: "sk-custom" }),
-      );
-
-      expect(resolved.apiKey).toBe("sk-custom");
-    });
-
-    it("环境变量不存在时应报错", () => {
-      expect(() => {
-        resolveProvider(
-          "deepseek",
-          { apiKey: "env:NONEXISTENT_KEY" },
-          noCreds(),
-          mockEnv(),
-        );
-      }).toThrow(ProviderConfigError);
-      expect(() => {
-        resolveProvider(
-          "deepseek",
-          { apiKey: "env:NONEXISTENT_KEY" },
-          noCreds(),
-          mockEnv(),
-        );
-      }).toThrow("NONEXISTENT_KEY");
-    });
-  });
-
   // ─── 自定义 provider ───
 
   describe("自定义 provider（不在预设列表）", () => {
-    it("提供完整配置时应正常解析", () => {
+    it("提供完整配置 + credentials 时应正常解析", () => {
       const resolved = resolveProvider(
         "my-local-llm",
         {
           baseUrl: "http://localhost:11434/v1",
           protocol: "openai-compatible",
-          apiKey: "not-needed",
         },
-        noCreds(),
-        mockEnv(),
+        credsFor({ "my-local-llm": "not-needed" }),
       );
 
       expect(resolved.id).toBe("my-local-llm");
@@ -165,17 +90,15 @@ describe("resolveProvider", () => {
       expect(() => {
         resolveProvider(
           "unknown-provider",
-          { apiKey: "sk-test" },
-          noCreds(),
-          mockEnv(),
+          {},
+          credsFor({ "unknown-provider": "sk-test" }),
         );
       }).toThrow(ProviderConfigError);
       expect(() => {
         resolveProvider(
           "unknown-provider",
-          { apiKey: "sk-test" },
-          noCreds(),
-          mockEnv(),
+          {},
+          credsFor({ "unknown-provider": "sk-test" }),
         );
       }).toThrow("baseUrl");
     });
@@ -184,46 +107,69 @@ describe("resolveProvider", () => {
       expect(() => {
         resolveProvider(
           "unknown-provider",
-          { baseUrl: "http://localhost:8080", apiKey: "sk-test" },
-          noCreds(),
-          mockEnv(),
+          { baseUrl: "http://localhost:8080" },
+          credsFor({ "unknown-provider": "sk-test" }),
         );
       }).toThrow(ProviderConfigError);
       expect(() => {
         resolveProvider(
           "unknown-provider",
-          { baseUrl: "http://localhost:8080", apiKey: "sk-test" },
-          noCreds(),
-          mockEnv(),
+          { baseUrl: "http://localhost:8080" },
+          credsFor({ "unknown-provider": "sk-test" }),
         );
       }).toThrow("protocol");
     });
   });
 
-  // ─── API Key 缺失 ───
+  // ─── API Key 缺失（凭证唯一入口） ───
 
   describe("API Key 缺失", () => {
-    it("credentials 与 config.apiKey 都没填时应抛错并引导首次配置", () => {
+    it("credentials 没填时抛错并引向 credentials.json", () => {
       expect(() => {
-        resolveProvider("deepseek", {}, noCreds(), mockEnv());
+        resolveProvider("deepseek", {}, noCreds());
       }).toThrow(ProviderConfigError);
       expect(() => {
-        resolveProvider("deepseek", {}, noCreds(), mockEnv());
+        resolveProvider("deepseek", {}, noCreds());
       }).toThrow(/credentials\.json/);
       expect(() => {
-        resolveProvider("deepseek", {}, noCreds(), mockEnv());
+        resolveProvider("deepseek", {}, noCreds());
       }).toThrow(/缺少 API Key/);
     });
 
-    it("自定义 provider 无 key 时应报错", () => {
+    it("错误消息含 schema 示例引导用户编辑", () => {
+      try {
+        resolveProvider("deepseek", {}, noCreds());
+        expect.fail("应抛 ProviderConfigError");
+      } catch (err) {
+        const message = (err as Error).message;
+        expect(message).toContain("providers");
+        expect(message).toContain("apiKey");
+        expect(message).toContain("zhixing");
+      }
+    });
+
+    it("自定义 provider 无 key 时报错", () => {
       expect(() => {
         resolveProvider(
           "custom",
           { baseUrl: "http://x", protocol: "openai-compatible" },
           noCreds(),
-          mockEnv(),
         );
       }).toThrow(ProviderConfigError);
+    });
+
+    it("错误消息不再提及废弃的 fallback 语法（契约：单档 credentials.json）", () => {
+      // 回归保护：未来谁把 env:VAR / helper:cmd 引导加回错误消息时触发——凭证唯一入口
+      // 必须是 credentials.json，错误消息不应推荐任何替代路径。
+      try {
+        resolveProvider("deepseek", {}, noCreds());
+        expect.fail("应抛 ProviderConfigError");
+      } catch (err) {
+        const message = (err as Error).message;
+        expect(message).not.toMatch(/env:VAR/i);
+        expect(message).not.toMatch(/helper:/i);
+        expect(message).not.toMatch(/fallback/i);
+      }
     });
   });
 
@@ -233,9 +179,8 @@ describe("resolveProvider", () => {
     it("应移除末尾斜杠", () => {
       const resolved = resolveProvider(
         "deepseek",
-        { baseUrl: "https://api.deepseek.com/v1/", apiKey: "sk-test" },
-        noCreds(),
-        mockEnv(),
+        { baseUrl: "https://api.deepseek.com/v1/" },
+        credsFor({ deepseek: "sk-test" }),
       );
 
       expect(resolved.baseUrl).toBe("https://api.deepseek.com/v1");
@@ -244,9 +189,8 @@ describe("resolveProvider", () => {
     it("应移除多个末尾斜杠", () => {
       const resolved = resolveProvider(
         "deepseek",
-        { baseUrl: "https://example.com///", apiKey: "sk-test" },
-        noCreds(),
-        mockEnv(),
+        { baseUrl: "https://example.com///" },
+        credsFor({ deepseek: "sk-test" }),
       );
 
       expect(resolved.baseUrl).toBe("https://example.com");
@@ -270,9 +214,9 @@ describe("resolveProvider", () => {
       });
     }
 
-    it("每个预设在提供 apiKey 后应能成功解析", () => {
+    it("每个预设在 credentials 提供 apiKey 后能成功解析", () => {
       for (const id of requiredPresets) {
-        const resolved = resolveProvider(id, { apiKey: "sk-test" }, noCreds(), mockEnv());
+        const resolved = resolveProvider(id, {}, credsFor({ [id]: "sk-test" }));
         expect(resolved.id).toBe(id);
         expect(resolved.baseUrl).toBeTruthy();
         expect(resolved.protocol).toBeTruthy();
@@ -285,15 +229,8 @@ describe("resolveProvider", () => {
 describe("resolveFromConfig", () => {
   it("应使用 config.llm.main.provider 作为默认", () => {
     const resolved = resolveFromConfig(
-      {
-        llm: { main: { provider: "deepseek", model: "deepseek-chat" } },
-        providers: {
-          deepseek: { apiKey: "sk-test" },
-        },
-      },
-      noCreds(),
-      undefined,
-      mockEnv(),
+      { llm: { main: { provider: "deepseek", model: "deepseek-chat" } } },
+      credsFor({ deepseek: "sk-test" }),
     );
 
     expect(resolved.id).toBe("deepseek");
@@ -301,16 +238,9 @@ describe("resolveFromConfig", () => {
 
   it("显式指定 providerId 应覆盖 llm.main.provider", () => {
     const resolved = resolveFromConfig(
-      {
-        llm: { main: { provider: "deepseek", model: "deepseek-chat" } },
-        providers: {
-          deepseek: { apiKey: "sk-ds" },
-          openai: { apiKey: "sk-oai" },
-        },
-      },
-      noCreds(),
+      { llm: { main: { provider: "deepseek", model: "deepseek-chat" } } },
+      credsFor({ deepseek: "sk-ds", openai: "sk-oai" }),
       "openai",
-      mockEnv(),
     );
 
     expect(resolved.id).toBe("openai");
@@ -319,19 +249,17 @@ describe("resolveFromConfig", () => {
 
   it("无 llm.main 时应报错并提示迁移路径", () => {
     expect(() => {
-      resolveFromConfig({} as never, noCreds(), undefined, mockEnv());
+      resolveFromConfig({} as never, noCreds());
     }).toThrow(ProviderConfigError);
     expect(() => {
-      resolveFromConfig({} as never, noCreds(), undefined, mockEnv());
+      resolveFromConfig({} as never, noCreds());
     }).toThrow(/llm\.main is required/);
   });
 
-  it("provider 未在 config.providers 中时凭证仍命中（credentials.json 主路径）", () => {
+  it("provider 未在 config.providers 中时凭证仍命中", () => {
     const resolved = resolveFromConfig(
       { llm: { main: { provider: "deepseek", model: "deepseek-chat" } } },
       credsFor({ deepseek: "sk-from-credentials" }),
-      undefined,
-      mockEnv(),
     );
 
     expect(resolved.apiKey).toBe("sk-from-credentials");

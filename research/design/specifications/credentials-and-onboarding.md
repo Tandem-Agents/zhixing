@@ -5,14 +5,14 @@
 ## 一、设计原则
 
 - **物理隔离即权限隔离**：`config.json` 与 `credentials.json` 分文件存放、走不同的安全规则。AI 对单一文件无法做"部分字段不可读"——所以"AI 不可读"的字段必须独立成文件。
-- **凭证只走单路径作默认**：`credentials.json` 是凭证的**主**来源。`config.providers.<id>.apiKey` 字段保留为**fallback** 入口，承载 `env:VAR_NAME` / `helper:command` / plaintext 三种语义（CI / enterprise vault / 高级 dev 用）；仅当 `credentials.json` 此 provider 没填时启用，不写则不参与解析。
+- **凭证唯一入口**：`credentials.json` plaintext 是凭证唯一来源。`config.json` 不接受任何形态的凭证字段（明文 / `env:VAR` / `helper:CMD` 三种历史前缀**全部删除**），由启动期 schema 校验拒绝。CI / Vault 用户的"凭证从外部源注入"是启动脚本的责任（生成 credentials.json），不在知行接口表面——不留两条路并行的脏代码。
 - **扩展点全部在现有包内**：credentials loader 在 `@zhixing/providers`、新规则在 `@zhixing/core/security/builtin-rules`、wizard 在 `@zhixing/cli`。**不新建包**。
 - **首次引导不依赖 LLM**：第一次没凭证 = 没 LLM 可调，引导必须是程序级。
 - **解耦**：检测（纯函数）/ 引导逻辑（面向接口）/ 文件操作（私有 API）三层独立。
 
 ## 二、文件契约
 
-### 2.1 `~/.zhixing/config.json`（沿用现状，仅删除凭证字段）
+### 2.1 `~/.zhixing/config.json`（无凭证字段）
 
 类型在 `packages/providers/src/types.ts` 已定义。本规格仅约束语义：
 
@@ -28,12 +28,13 @@ interface ZhixingConfig {
 }
 ```
 
-约束变更：
+约束：
 
-- **`ProviderConfig.apiKey` 字段保留**——但语义改为 **fallback**：仅当 `credentials.json` 此 provider 没填、且用户在 `config.json` 显式写了此字段时才被解析（`env:` / `helper:` / plaintext 三种格式由 `parseApiKeyValue` 处理）；默认不写
-- **`ChannelConfigEntry` 接口不变**，但 `credentials` 字段语义收紧：
-  - `credentials` 字段（沿用现状的 `Record<string, string>` 形态）只放**非密**字段（`appId` 等）
-  - 密字段（`appSecret` 等）迁出到 `~/.zhixing/credentials.json` 的 `channels.<id>` 段
+- **`ProviderConfig.apiKey` 字段从 schema 删除**——`ProviderConfig` 仅保留 provider 技术配置（`baseUrl` / `protocol` / `defaultModel` / `quirks` / `modelOverrides`）。任何形态的 apiKey（明文 / `env:VAR` / `helper:CMD`）出现在 `config.providers.<id>` 都被启动期 `validateConfigSemantics` 拒绝
+- **`ChannelConfigEntry` 接口不变**，但 `credentials` 字段语义严格化：
+  - `credentials` 字段（`Record<string, string>` 形态）只放**非密**字段（`appId` / `clientId` / `accountId` 等）
+  - 密字段（`appSecret` / `botToken` / `password` 等含 `/secret|token|password|apikey/i` 命名的字段）迁出到 `~/.zhixing/credentials.json` 的 `channels.<id>` 段
+  - 启动期 `validateConfigSemantics` 内置校验器 `validateNoChannelSecrets` 拒绝 config.json 中残留的密字段
   - `setupChannels` 内部合并两份来源；channel adapter（如 `FeishuAdapter`）通过 `ChannelAdapter.connect` 收到的 `ChannelConfig.credentials` 形态完全不变（`Record<string, string>`），无任何 adapter 接口改动
 
 ### 2.2 `~/.zhixing/credentials.json`（新增）
@@ -128,70 +129,70 @@ function writeCredentials(
 
 ### 3.2 apiKey 解析链与 API 形态
 
-#### 3.2.1 解析顺序
+#### 3.2.1 解析顺序（单档）
 
-`resolveApiKey`（[`resolve.ts:254`](../../../packages/providers/src/resolve.ts)）内部按以下顺序，**`credentials.json` 是主路径**：
+`resolveApiKey`（[`resolve.ts`](../../../packages/providers/src/resolve.ts)）凭证唯一入口：
 
-1. **`credentials.providers.<id>.apiKey`** —— 主来源（向导写、用户编辑）
-2. **`config.providers.<id>.apiKey`** —— fallback，承载 `env:` / `helper:` / plaintext 三种格式（既有 `parseApiKeyValue` 逻辑保留）；仅当 1 缺失时启用
-3. 都缺失 → 抛 `ProviderConfigError`，消息引 `~/.zhixing/credentials.json` 的位置与 schema，建议用户跑 `zhixing` 触发首次引导
+1. **`credentials.providers.<id>.apiKey`** —— 唯一来源（向导写、用户编辑）
+2. 缺失 → 抛 `ProviderConfigError`，消息引 `~/.zhixing/credentials.json` 的位置与 schema，建议用户跑 `zhixing` 触发首次引导
 
-**为什么 credentials.json 优先**：旧版用户的 `~/.zhixing/config.json` 可能有 `"apiKey": "env:SILICONFLOW_API_KEY"` 死引用——把 credentials.json 放主路径，向导写完即生效，**无需迁移用户的 config.json**。CI / 高级用户依赖 `apiKey: "env:VAR"` 时不写 credentials.json 即可，fallback 自然命中。
+**不接受任何形态的 fallback**——`config.providers.<id>.apiKey`（明文 / `env:VAR` / `helper:CMD`）从 schema 与解析链中**完全删除**：
 
-**移除**：`presets[id].envKey` 字段及其相关代码全部删除——既不参与默认解析，也不作为元数据保留。`presets[id]` 仅保留 `name` / `baseUrl` / `protocol` / `defaultModel` / `quirks` 等服务商技术配置；用户在 `apiKey: "env:VAR_NAME"` 中使用什么 env 名由用户自己决定，知行不预设特定 env 命名约定。
+- `ProviderConfig.apiKey` 字段从 type 删除
+- `parseApiKeyValue` 三合一函数删除（含 `env:` / `helper:` / plaintext 三种解析分支）
+- `presets[id].envKey` 元数据字段删除（知行不预设特定 env 命名约定）
+- 启动期 `validateConfigSemantics`（[`config-validator.ts`](../../../packages/providers/src/config-validator.ts)）拒绝 config.json 中残留的 `providers.<id>.apiKey` 字段（任何形态），引向手工修复
+
+**为什么单档**：开发期与生产路径一致——开发者首次跑 `pnpm cli` 与最终用户一样走向导。CI / Vault 用户的"凭证从外部源注入"是启动脚本的责任（生成 credentials.json），不在知行接口表面。这是关注点分离：知行只读 plaintext credentials.json；如何生成它由用户/运维侧负责。
 
 #### 3.2.2 Resolve 内部链签名
 
-resolve 内部链在原 `env` 之外**显式增加 `credentials` 参数**——避免内部懒加载文件、避免 thread 不到的 implicit 状态：
+resolve 内部链显式接收 `credentials` 参数——避免内部懒加载文件、避免 thread 不到的 implicit 状态。env 参数不再需要（凭证不再依赖环境变量解析）：
 
 ```typescript
 function resolveLLMRoles(
   config: ZhixingConfig,
   credentials: ZhixingCredentials,
   options?: LLMRolesResolveOptions,
-  env?: Record<string, string | undefined>,
 ): ResolvedLLMRoles;
 
 function resolveFromConfig(
   config: ZhixingConfig,
   credentials: ZhixingCredentials,
   providerId?: string,
-  env?: Record<string, string | undefined>,
 ): ResolvedProvider;
 
 function resolveProvider(
   providerId: string,
   userConfig: ProviderConfig,
   credentials: ZhixingCredentials,
-  env: Record<string, string | undefined>,
 ): ResolvedProvider;
 ```
 
 #### 3.2.3 Factory 层签名（外层公共 API）
 
-`packages/providers/src/create-provider.ts` 的三个公共工厂——`createProvider` / `createProviderDirect` / `createProviderRoles` ——**对外签名完全不变**，内部增加 `loadCredentials()` 调用，与现有 `loadConfig()` 同步：
+`packages/providers/src/create-provider.ts` 的三个公共工厂内部加载 credentials 文件：
 
 ```typescript
-// 签名不变
 function createProviderRoles(options?: ProviderRolesOptions): ProviderRolesResult;
 // 内部：loadConfig() + loadCredentials() → resolveLLMRoles(config, credentials, ...)
 
 function createProvider(
   config: ZhixingConfig,
   providerId?: string,
-  env?: Record<string, string | undefined>,
 ): LLMProvider;
-// 内部：loadCredentials() → resolveFromConfig(config, credentials, providerId, env)
+// 内部：loadCredentials() → resolveFromConfig(config, credentials, providerId)
 
 function createProviderDirect(
   providerId: string,
   config?: ProviderConfig,
-  env?: Record<string, string | undefined>,
 ): LLMProvider;
-// 内部：loadCredentials() → resolveProvider(providerId, config, credentials, env)
+// 内部：loadCredentials() → resolveProvider(providerId, config, credentials)
 ```
 
-**约束**：所有 factory consumer（`@zhixing/orchestrator/runtime/create-agent-runtime.ts:293` 调 `createProviderRoles`、测试调 `createProvider*`）零改动。Factory 是黑盒——内部 load 凭证；resolve 是 transparent 函数——接收已加载状态。这两层职责分离。
+`createProviderRoles.options.env` 仍保留——`loadConfig` / `loadCredentials` 需要 env 推断 `~/.zhixing` 目录（`ZHIXING_CONFIG_PATH` 测试覆盖入口）；env 不再透传给凭证解析器。
+
+**约束**：Factory 是黑盒——内部 load 凭证；resolve 是 transparent 函数——接收已加载状态。这两层职责分离。
 
 ### 3.3 channel secret 解析
 
@@ -214,10 +215,9 @@ export interface SetupChannelsOptions {
 - 密字段（`appSecret` 等）从 `options.credentials.channels.<id>` 取
 - 合并后传给 `ChannelAdapter.connect`，channel adapter（如 `FeishuAdapter`）通过 `ChannelConfig.credentials` 收到的形态完全不变（`Record<string, string>`）；**`ChannelConfigEntry` 接口与 adapter 接口都不动**
 
-**Caller 改动点**（已知两处，发布前 grep 全仓核对）：
+**严格化保证**：到达 `setupChannels` 时，`config.channels.<id>.credentials` 中**已不可能含有密字段**——启动期 `validateConfigSemantics` 的内置校验器 `validateNoChannelSecrets` 在 ensureBootstrap / serve 入口就拒绝任何含 secret-like 命名的字段（`/secret|token|password|apikey/i` 子串匹配），fail-fast 引导用户迁移到 credentials.json。setupChannels 因此可以信任输入：合并逻辑直接执行，不再做防御性校验。
 
-- [`cli/repl.ts:715-731`](../../../packages/cli/src/repl.ts)：`loadConfig` 之外加 `loadCredentials`，把 credentials 传入 `setupChannels`
-- [`cli/serve/command.ts:210-230`](../../../packages/cli/src/serve/command.ts)：同上
+**密字段命名约定**：`secret` / `token` / `password` / `apikey`（大小写不敏感子串匹配）。命名规则不是 over-engineering 的 allow-list——非密字段（`appId` / `clientId` / `accountId` / `botId` / `agentId` / `userId` 等）不会触发匹配，只有真正的密字段名会命中。未来 channel adapter 想精确声明字段语义，注册自定义 `ConfigValidator` 即可（见 §3.2.1 引用）。
 
 ## 四、AI 访问控制
 
@@ -364,16 +364,20 @@ export async function runBootstrap(
 | 项目根 `.env` / `.env.example` 文件 | 删除 |
 | `package.json` dev script 中的 `--env-file=.env` 注入 | 删除 |
 | `ensureGlobalConfigTemplate` 模板中的 `"apiKey": "env:SILICONFLOW_API_KEY"` 占位 | 删除 |
-| `~/.zhixing/config.json` 中已有的 `providers.<id>.apiKey: "env:..."`（用户机器上） | **不需要迁移**——§3.2.1 解析顺序中 credentials.json 是主路径，向导写完即生效；旧 config.apiKey 字段被自然忽略（仍可作为 CI / 高级用户的 fallback） |
+| `parseApiKeyValue` 三合一函数（`env:` / `helper:` / plaintext 解析） | 全部删除 |
+| `ProviderConfig.apiKey` schema 字段 | 从 type 删除 |
+| `~/.zhixing/config.json` 中残留的 `providers.<id>.apiKey`（任何形态） | 启动期 `validateConfigSemantics` 校验拒绝，三段式（field/reason/fix）引导用户手工迁移到 credentials.json |
+| `~/.zhixing/config.json` 中残留的 `channels.<id>.credentials` 含密字段（含 `secret/token/password/apikey` 子串命名） | 同上，校验拒绝并引导手工迁移到 `credentials.channels.<id>` |
 
-**开发期路径**：项目根不存在 `.env` 文件，`pnpm cli` 等 dev script 不再 `--env-file=.env`。开发者首次跑 `pnpm cli` 与最终用户一样——走首次引导写入 `~/.zhixing/credentials.json`，此后无差别。如开发者偏好用 env 注入（与 CI / vault 用户路径一致），自行在 shell 中 `export VAR=...` 后跑，并在 `~/.zhixing/config.json` 显式写 `apiKey: "env:VAR"` 走 fallback（§3.2.1 第 2 步），与主路径不冲突。
+**开发期路径**：项目根不存在 `.env` 文件，`pnpm cli` 等 dev script 不再 `--env-file=.env`。开发者首次跑 `pnpm cli` 与最终用户**完全一样**——走首次引导写入 `~/.zhixing/credentials.json`，此后无差别。CI / Vault 用户的"凭证从外部源注入"是启动脚本的责任（生成 credentials.json），不在知行接口表面。
 
 ## 七、错误契约
 
 | 场景 | 行为 |
 |---|---|
-| `config.json` schema 不合法 | 启动期抛 `ConfigSchemaError`，附字段路径与具体错误；建议跑 `zhixing` 触发引导重新初始化 |
-| `credentials.json` schema 不合法 | 同上抛 `CredentialsSchemaError`——错误消息**不含密值**，仅引字段路径 |
+| `config.json` JSON 解析失败 | 启动期抛 `ConfigSchemaError`，附字段路径与具体错误；建议跑 `zhixing` 触发引导重新初始化 |
+| `credentials.json` JSON 解析失败 | 同上抛 `CredentialsSchemaError`——错误消息**不含密值**，仅引字段路径 |
+| `config.json` 含废弃字段（旧 `apiKey` / channel 密字段） | 启动期 `validateConfigSemantics` 抛 `ConfigSemanticError`，封装一组 `ConfigSemanticIssue` 三段式（`field` / `reason` / `fix`）；CLI / serve 入口逐项打印引导用户手工修复 |
 | 必要字段缺失 + TTY | 不抛错——`checkBootstrap` 返回 missing 列表 → 触发向导 |
 | 必要字段缺失 + 非 TTY | 启动失败，退出码 2，错误消息引文件路径与必要字段列表 |
 | AI 工具触达 `credentials.json` | `bi-zhixing-credentials-block` 命中 → block，message + suggestion 返回给 AI |
@@ -385,10 +389,10 @@ export async function runBootstrap(
 
 | 类型 | 覆盖 |
 |---|---|
-| 单元 | `loadCredentials` schema 校验各 case；`checkBootstrap` 必要字段缺失各组合；`resolveApiKey` 解析顺序（credentials.json 主路径 / config.apiKey fallback / 缺失抛错）；`bi-zhixing-credentials-block` 规则匹配 fixture（read / write / glob 各种工具调用） |
-| 集成 | 临时 HOME 跑全链路：空 → CLI 启动期向导 → 写两份文件 → 重新加载 → providers / cli / channel 各自取凭证；`channel.feishu` setup 从 `credentials.channels.feishu` 取 `appSecret` |
-| 安全 | 错误消息中**不含**任何 apiKey / secret 值（fuzz 含 `sk-` 前缀的输入，检查所有日志/错误路径输出）；`bi-zhixing-credentials-block` 经 `policy-engine` 与 `bi-zhixing-config-write` 共同命中时 block 优先 |
-| E2E | CLI 在 cmd / PowerShell / Git Bash / WSL / macOS-Linux 各 shell 下从空状态跑通首次引导（CI 矩阵） |
+| 单元 | `loadCredentials` schema 校验各 case；`checkBootstrap` 必要字段缺失各组合；`resolveApiKey` 单档解析（credentials.json 命中 / 缺失抛错）；`validateConfigSemantics` 各内置校验器（apiKey 字段拒绝 / channel 密字段命名规则 / 多 issue 累计 / 可插拔 validator）；`bi-zhixing-credentials-block` 与 `bi-zhixing-config-write` 规则匹配 fixture（read / write / edit 各种工具调用 + 优先级排序） |
+| 集成 | 临时 HOME 跑全链路：空 → CLI 启动期向导 → 写两份文件 → 重新加载 → providers / cli / channel 各自取凭证（由 `entry.test.ts` 各分支 + `llm-roles.test.ts` `createProviderRoles · 实例化` + `channel-feishu` 包独立测试覆盖）；`config-semantic-error` 各分支（残留 apiKey / 残留 channel 密字段 / 多类违反） |
+| 安全 | 错误消息中**不含**任何 apiKey / secret 值（fuzz 含 `sk-` 前缀的输入，检查 `CredentialsSchemaError` / `ConfigSemanticError` 等错误路径输出）；`bi-zhixing-credentials-block` 经 `policy-engine` 与 `bi-zhixing-config-write` 共同命中时 block 优先 |
+| E2E | CLI 在 cmd / PowerShell / Git Bash / WSL / macOS-Linux 各 shell 下从空状态跑通首次引导（手动验证；未来加 GitHub Actions matrix） |
 
 ## 九、不在范围内（Out of Scope）
 

@@ -3,8 +3,8 @@
  *
  * 关键不变量：
  *   - 必要字段缺失检测：main provider / model / apiKey + 异 provider secondary apiKey
- *   - fallback 路径认作合法填充：用户在 config.providers.<id>.apiKey 写
- *     env: / helper: / 明文 → checkBootstrap 视为已填，wizard 不重复询问
+ *   - apiKey 唯一来源：credentials.providers.<id>.apiKey；
+ *     config.json 不参与凭证判定（任何 apiKey 字段在 config 都会被 schema 校验拒绝）
  *   - main provider 不存在时不"假装"查 apiKey（避免无意义的 missing 项）
  *   - secondary 同 main provider 时不重复加 secondary apiKey（复用 main）
  *   - humanLabel 对预设 provider 用 preset.name；非预设兜底用 providerId
@@ -46,41 +46,7 @@ describe("checkBootstrap · 必要字段判定", () => {
     expect(missing).toEqual([]);
   });
 
-  it("完整 main + config.apiKey fallback (env:VAR) → [] —— fallback 认作合法填充", () => {
-    // 关键回归保护：CI / vault 高级用户走 fallback 路径，wizard 不应误触发
-    const missing = checkBootstrap(
-      {
-        llm: { main: { provider: "siliconflow", model: "Pro/MiniMaxAI/MiniMax-M2.5" } },
-        providers: { siliconflow: { apiKey: "env:SILICONFLOW_API_KEY" } },
-      },
-      noCreds(),
-    );
-    expect(missing).toEqual([]);
-  });
-
-  it("完整 main + config.apiKey fallback (helper:cmd) → [] —— vault helper 路径", () => {
-    const missing = checkBootstrap(
-      {
-        llm: { main: { provider: "deepseek", model: "deepseek-chat" } },
-        providers: { deepseek: { apiKey: "helper:vault read /zhixing/deepseek-key" } },
-      },
-      noCreds(),
-    );
-    expect(missing).toEqual([]);
-  });
-
-  it("完整 main + config.apiKey 明文 → []", () => {
-    const missing = checkBootstrap(
-      {
-        llm: { main: { provider: "deepseek", model: "deepseek-chat" } },
-        providers: { deepseek: { apiKey: "sk-plaintext" } },
-      },
-      noCreds(),
-    );
-    expect(missing).toEqual([]);
-  });
-
-  it("完整 main + 缺 apiKey → 报 credentials.providers.<main>.apiKey 缺失", () => {
+  it("完整 main + 缺 credentials apiKey → 报 credentials.providers.<main>.apiKey 缺失", () => {
     const missing = checkBootstrap(
       {
         llm: { main: { provider: "siliconflow", model: "Pro/MiniMaxAI/MiniMax-M2.5" } },
@@ -144,24 +110,6 @@ describe("checkBootstrap · 必要字段判定", () => {
     expect(missing).toEqual([]);
   });
 
-  it("secondary 不同 provider 走 fallback (env:) → [] —— secondary 也认 fallback", () => {
-    // secondary 解析链与 main 共用 resolveApiKey；fallback 等价对待
-    const missing = checkBootstrap(
-      {
-        llm: {
-          main: { provider: "deepseek", model: "deepseek-chat" },
-          secondary: { provider: "anthropic", model: "claude-sonnet-4-20250514" },
-        },
-        providers: {
-          deepseek: { apiKey: "sk-ds" },
-          anthropic: { apiKey: "env:ANTHROPIC_API_KEY" },
-        },
-      },
-      noCreds(),
-    );
-    expect(missing).toEqual([]);
-  });
-
   it("humanLabel 对预设 provider 包含 preset.name", () => {
     const missing = checkBootstrap(
       {
@@ -196,10 +144,7 @@ describe("checkBootstrap · 必要字段判定", () => {
 
   it("空字符串 apiKey 算缺失（与 undefined 同样视作未填）", () => {
     const missing = checkBootstrap(
-      {
-        llm: { main: { provider: "deepseek", model: "deepseek-chat" } },
-        providers: { deepseek: { apiKey: "" } },
-      },
+      { llm: { main: { provider: "deepseek", model: "deepseek-chat" } } },
       { version: 1, providers: { deepseek: { apiKey: "" } } },
     );
 

@@ -279,6 +279,105 @@ describe("ensureBootstrap · non-tty 分支", () => {
   });
 });
 
+describe("ensureBootstrap · config-semantic-error 分支", () => {
+  it("config.providers.<id>.apiKey 字段存在 → config-semantic-error", async () => {
+    // 老用户 config.json 残留 apiKey 字段（开发阶段或旧模板）→ 必须 fail-fast 引导手工修复
+    writeConfigFile({
+      llm: { main: { provider: "siliconflow", model: "Pro/MiniMaxAI/MiniMax-M2.5" } },
+      providers: { siliconflow: { apiKey: "env:SILICONFLOW_API_KEY" } },
+    });
+    writeCredentialsFile({ version: 1 });
+
+    const result = await ensureBootstrap({ homeDir: tmpDir, isTTY: true });
+
+    expect(result.kind).toBe("config-semantic-error");
+    if (result.kind === "config-semantic-error") {
+      expect(result.filePath).toBe(path.join(tmpDir, "config.json"));
+      expect(result.issues).toHaveLength(1);
+      expect(result.issues[0]?.field).toBe("providers.siliconflow.apiKey");
+    }
+  });
+
+  it("config.channels.<id>.credentials 含密字段 → config-semantic-error", async () => {
+    writeConfigFile({
+      llm: { main: { provider: "siliconflow", model: "Pro/MiniMaxAI/MiniMax-M2.5" } },
+      channels: {
+        feishu: {
+          credentials: { appId: "cli_xxx", appSecret: "fs_secret" },
+        },
+      },
+    });
+    writeCredentialsFile({
+      version: 1,
+      providers: { siliconflow: { apiKey: "sk-sf" } },
+    });
+
+    const result = await ensureBootstrap({ homeDir: tmpDir, isTTY: true });
+
+    expect(result.kind).toBe("config-semantic-error");
+    if (result.kind === "config-semantic-error") {
+      expect(result.issues).toHaveLength(1);
+      expect(result.issues[0]?.field).toBe(
+        "channels.feishu.credentials.appSecret",
+      );
+    }
+  });
+
+  it("多类违反一次报全（apiKey + channel secret 累计）", async () => {
+    writeConfigFile({
+      llm: { main: { provider: "siliconflow", model: "Pro/MiniMaxAI/MiniMax-M2.5" } },
+      providers: { siliconflow: { apiKey: "sk-sf" } },
+      channels: {
+        feishu: {
+          credentials: { appId: "cli_xxx", appSecret: "fs_secret" },
+        },
+      },
+    });
+    writeCredentialsFile({ version: 1 });
+
+    const result = await ensureBootstrap({ homeDir: tmpDir, isTTY: true });
+
+    expect(result.kind).toBe("config-semantic-error");
+    if (result.kind === "config-semantic-error") {
+      expect(result.issues).toHaveLength(2);
+    }
+  });
+
+  it("非 TTY 也走 config-semantic-error（schema 违反不分会话类型）", async () => {
+    writeConfigFile({
+      llm: { main: { provider: "siliconflow", model: "Pro/MiniMaxAI/MiniMax-M2.5" } },
+      providers: { siliconflow: { apiKey: "sk-leaked" } },
+    });
+    writeCredentialsFile({ version: 1 });
+
+    const result = await ensureBootstrap({ homeDir: tmpDir, isTTY: false });
+
+    expect(result.kind).toBe("config-semantic-error");
+  });
+
+  it("issues fix 字段不泄漏 sk-* 密值（错误消息脱敏 fuzz）", async () => {
+    writeConfigFile({
+      llm: { main: { provider: "siliconflow", model: "Pro/MiniMaxAI/MiniMax-M2.5" } },
+      providers: {
+        siliconflow: { apiKey: "sk-fuzzleak0123456789ABCDEF" },
+      },
+    });
+    writeCredentialsFile({ version: 1 });
+
+    const result = await ensureBootstrap({ homeDir: tmpDir, isTTY: false });
+
+    expect(result.kind).toBe("config-semantic-error");
+    if (result.kind === "config-semantic-error") {
+      // issue 三段式（field/reason/fix）都不应回显具体凭证值
+      for (const issue of result.issues) {
+        expect(issue.field).not.toContain("sk-fuzzleak");
+        expect(issue.reason).not.toContain("sk-fuzzleak");
+        expect(issue.fix).not.toContain("sk-fuzzleak");
+      }
+    }
+  });
+});
+
 describe("ensureBootstrap · schema-error 分支", () => {
   it("config.json JSON 损坏 → schema-error 状态", async () => {
     fs.writeFileSync(path.join(tmpDir, "config.json"), "{ not json", "utf-8");

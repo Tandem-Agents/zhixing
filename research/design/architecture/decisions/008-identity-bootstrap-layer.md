@@ -49,7 +49,7 @@ policy-engine 的 action 严格度排序（`block: 3 > confirm: 2 > audit: 1 > a
 
 - **产品方向**：13 条 Phase 1+2 已对齐结果，详见 [`research/design/problems/identity-bootstrap-layer.md`](../../problems/identity-bootstrap-layer.md)
 - **现有架构对齐**：
-  - [ADR-002 Provider 架构](002-provider-architecture.md)：apiKey 解析的 `env:` / `helper:` / plaintext 三种格式作为 **fallback** 保留（CI/enterprise/高级 dev 用，仅当 credentials.json 此 provider 没填时启用），不再作为默认路径
+  - [ADR-002 Provider 架构](002-provider-architecture.md)：apiKey 解析的 `env:` / `helper:` / plaintext 三种凭证前缀**全部删除**——凭证唯一入口是 `~/.zhixing/credentials.json` plaintext。配置文件不暴露任何"存储后端"语法（贯彻 problems Phase 1 第 5 条"不留两条路并行的脏代码"）
   - [ADR-003 配置系统](003-config-system.md)：3 层配置级联在公开配置维度沿用；私密配置**不参与级联**（用户级单一来源，避免项目级泄漏到 git）
   - [ADR-006 安全系统架构](006-security-system-architecture.md)：复用 `bypassImmune` 与 builtin 规则机制
   - [`secondary-llm-capability.md`](../../specifications/secondary-llm-capability.md)：LLM 双层抽象（Layer 1 库 + Layer 2 角色）已实现，本 ADR 仅引用
@@ -95,15 +95,16 @@ policy-engine 的 action 严格度排序（`block: 3 > confirm: 2 > audit: 1 > a
 - 新增 `~/.zhixing/credentials.json` 一份文件 + 一份 schema + 一份 loader
 - 新增 `bi-zhixing-credentials-block` 一条 builtin rule
 - 新增 `checkBootstrap` 一段纯函数 + CLI 启动期向导
-- 移除项目根 `zhixing.cmd` / `zhixing` shim 与 dev 团队习惯调整（dev 通过 `pnpm cli` 启动，凭证写入 `~/.zhixing/credentials.json` 与生产路径一致；fallback 路径（如 `apiKey: "env:VAR"`）继续可用）
+- 移除项目根 `zhixing.cmd` / `zhixing` shim 与 dev 团队习惯调整（dev 通过 `pnpm cli` 启动，凭证写入 `~/.zhixing/credentials.json` 与生产路径完全一致；CI / Vault 用户的凭证注入是启动脚本责任，由用户自己生成 credentials.json，不在知行接口表面）
 - 改 `~/.zhixing/config.json` 模板：移除 `apiKey: "env:..."` 占位
 - 移除 `presets[id].envKey` 字段及其相关代码——不保留为元数据。预设仅含服务商技术配置（`baseUrl` / `protocol` / `defaultModel` / `quirks`）；`apiKey: "env:VAR"` 中的 env 名由用户自己决定，知行不预设特定 env 命名约定
 
 ### 约束
 
 - 任何代码路径**不允许**直接读 `~/.zhixing/credentials.json`——必须经 `@zhixing/providers` 暴露的 credentials 加载接口
-- 任何敏感字段（apiKey / appSecret / token / password 等）**不允许**进 `config.json` schema——若新 channel/集成有秘密字段，写到 `credentials.json`
-- 项目根**不存在** `.env` 文件；`dist/` 与 dev script（如 `pnpm cli` / `pnpm serve`）都**不依赖** `--env-file` 或 `.env` 注入。任何 env-based 凭证（CI / vault 用户）经进程启动期外部注入（CI secrets / 容器 env / shell `export` 等），不依赖项目根文件
+- 任何敏感字段（apiKey / appSecret / token / password 等）**不允许**进 `config.json` schema——由启动期 `validateConfigSemantics`（可插拔 `ConfigValidator` 层）fail-fast 拒绝；若新 channel / 集成有秘密字段，写到 `credentials.json` 的对应段
+- `ProviderConfig.apiKey` 字段从 schema 删除；`parseApiKeyValue` 三合一函数删除——`config.json` 不接受任何形态的凭证（明文 / `env:VAR` / `helper:CMD`）
+- 项目根**不存在** `.env` 文件；`dist/` 与 dev script（如 `pnpm cli` / `pnpm serve`）都**不依赖** `--env-file` 或 `.env` 注入。CI / Vault 用户的凭证注入由启动脚本（用户/运维侧）生成 `credentials.json`，知行只读 plaintext
 
 ## 相关决策
 

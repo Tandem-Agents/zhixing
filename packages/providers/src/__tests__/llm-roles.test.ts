@@ -5,7 +5,7 @@
  * - main 三段优先级（modelOverride > providerOverride+defaultModel > config 原值）
  * - secondary 解析链（显式 / 用 main 兜底）—— 不预设任何 vendor 默认
  * - Provider 实例复用（同 provider 共享）
- * - 错误文案（缺 llm.main / providerOverride 无默认 / 显式 secondary 配错）
+ * - 错误文案（缺 llm.main / providerOverride 无默认 / 显式 secondary 缺凭证）
  * - bindRole 的 model 实绑契约
  */
 
@@ -22,21 +22,25 @@ import { ProviderConfigError, resolveLLMRoles } from "../resolve.js";
 import { bindRole, createProviderRoles } from "../create-provider.js";
 import type { ZhixingConfig, ZhixingCredentials } from "../types.js";
 
-const env = (overrides: Record<string, string> = {}): Record<string, string | undefined> => ({
-  ...overrides,
-});
-
 const noCreds = (): ZhixingCredentials => ({ version: 1 });
+
+const credsFor = (entries: Record<string, string>): ZhixingCredentials => ({
+  version: 1,
+  providers: Object.fromEntries(
+    Object.entries(entries).map(([id, apiKey]) => [id, { apiKey }]),
+  ),
+});
 
 const baseConfig = (overrides: Partial<ZhixingConfig> = {}): ZhixingConfig => ({
   llm: { main: { provider: "deepseek", model: "deepseek-chat" } },
-  providers: { deepseek: { apiKey: "sk-ds" } },
   ...overrides,
 });
 
+const baseCreds = (): ZhixingCredentials => credsFor({ deepseek: "sk-ds" });
+
 describe("resolveLLMRoles · main 三段优先级", () => {
   it("无 override → 使用 config.llm.main", () => {
-    const result = resolveLLMRoles(baseConfig(), noCreds(), {}, env());
+    const result = resolveLLMRoles(baseConfig(), baseCreds(), {});
     expect(result.main.resolved.id).toBe("deepseek");
     expect(result.main.model).toBe("deepseek-chat");
   });
@@ -44,9 +48,8 @@ describe("resolveLLMRoles · main 三段优先级", () => {
   it("modelOverride 单独 → provider 不变，model 替换", () => {
     const result = resolveLLMRoles(
       baseConfig(),
-      noCreds(),
+      baseCreds(),
       { modelOverride: "deepseek-reasoner" },
-      env(),
     );
     expect(result.main.resolved.id).toBe("deepseek");
     expect(result.main.model).toBe("deepseek-reasoner");
@@ -54,15 +57,9 @@ describe("resolveLLMRoles · main 三段优先级", () => {
 
   it("providerOverride 单独 → 切换 provider，model 跟随新 provider 预设默认", () => {
     const result = resolveLLMRoles(
-      baseConfig({
-        providers: {
-          deepseek: { apiKey: "sk-ds" },
-          openai: { apiKey: "sk-oai" },
-        },
-      }),
-      noCreds(),
+      baseConfig(),
+      credsFor({ deepseek: "sk-ds", openai: "sk-oai" }),
       { providerOverride: "openai" },
-      env(),
     );
     expect(result.main.resolved.id).toBe("openai");
     // openai preset 默认 model
@@ -74,32 +71,23 @@ describe("resolveLLMRoles · main 三段优先级", () => {
       resolveLLMRoles(
         baseConfig({
           providers: {
-            deepseek: { apiKey: "sk-ds" },
             "my-local": {
               baseUrl: "http://localhost:8080",
               protocol: "openai-compatible",
-              apiKey: "sk-local",
             },
           },
         }),
-        noCreds(),
+        credsFor({ deepseek: "sk-ds", "my-local": "sk-local" }),
         { providerOverride: "my-local" },
-        env(),
       );
     }).toThrow(/--provider "my-local" requires --model/);
   });
 
   it("providerOverride + modelOverride → 完全自定义组合", () => {
     const result = resolveLLMRoles(
-      baseConfig({
-        providers: {
-          deepseek: { apiKey: "sk-ds" },
-          openai: { apiKey: "sk-oai" },
-        },
-      }),
-      noCreds(),
+      baseConfig(),
+      credsFor({ deepseek: "sk-ds", openai: "sk-oai" }),
       { providerOverride: "openai", modelOverride: "gpt-4o-mini" },
-      env(),
     );
     expect(result.main.resolved.id).toBe("openai");
     expect(result.main.model).toBe("gpt-4o-mini");
@@ -107,14 +95,11 @@ describe("resolveLLMRoles · main 三段优先级", () => {
 
   it("缺 llm.main → throw 含迁移提示", () => {
     expect(() => {
-      resolveLLMRoles({} as ZhixingConfig, noCreds(), {}, env());
+      resolveLLMRoles({} as ZhixingConfig, noCreds(), {});
     }).toThrow(ProviderConfigError);
     expect(() => {
-      resolveLLMRoles({} as ZhixingConfig, noCreds(), {}, env());
+      resolveLLMRoles({} as ZhixingConfig, noCreds(), {});
     }).toThrow(/llm\.main is required/);
-    expect(() => {
-      resolveLLMRoles({} as ZhixingConfig, noCreds(), {}, env());
-    }).toThrow(/secondary-llm-capability/);
   });
 });
 
@@ -131,21 +116,16 @@ describe("resolveLLMRoles · secondary 解析链（2 段）", () => {
           main: { provider: "deepseek", model: "deepseek-chat" },
           secondary: { provider: "openai", model: "gpt-4o-mini" },
         },
-        providers: {
-          deepseek: { apiKey: "sk-ds" },
-          openai: { apiKey: "sk-oai" },
-        },
       }),
-      noCreds(),
+      credsFor({ deepseek: "sk-ds", openai: "sk-oai" }),
       {},
-      env(),
     );
     expect(result.secondary.resolved.id).toBe("openai");
     expect(result.secondary.model).toBe("gpt-4o-mini");
   });
 
   it("缺省 secondary → 直接用 main 实例 + main.model 兜底", () => {
-    const result = resolveLLMRoles(baseConfig(), noCreds(), {}, env());
+    const result = resolveLLMRoles(baseConfig(), baseCreds(), {});
     // 用 main 兜底——secondary === main 在配置层
     expect(result.secondary.resolved).toBe(result.main.resolved);
     expect(result.secondary.model).toBe(result.main.model);
@@ -163,20 +143,16 @@ describe("resolveLLMRoles · secondary 解析链（2 段）", () => {
       ["qwen", "qwen3-coder-plus", "sk-qwen"],
     ] as const) {
       const result = resolveLLMRoles(
-        {
-          llm: { main: { provider: providerId, model } },
-          providers: { [providerId]: { apiKey } },
-        },
-        noCreds(),
+        { llm: { main: { provider: providerId, model } } },
+        credsFor({ [providerId]: apiKey }),
         {},
-        env(),
       );
       expect(result.secondary.resolved).toBe(result.main.resolved);
       expect(result.secondary.model).toBe(model);
     }
   });
 
-  it("显式 secondary 配错（apiKey 不可解析）→ fail-fast 不静默兜底", () => {
+  it("显式 secondary 缺凭证 → fail-fast 不静默兜底", () => {
     // 显式配置代表用户意图，必须 fail-fast——不能静默把"用户期望的双 provider
     // 架构"伪装成单 provider 在跑。
     expect(() => {
@@ -186,14 +162,9 @@ describe("resolveLLMRoles · secondary 解析链（2 段）", () => {
             main: { provider: "deepseek", model: "deepseek-chat" },
             secondary: { provider: "openai", model: "gpt-4o-mini" },
           },
-          providers: {
-            deepseek: { apiKey: "sk-ds" },
-            openai: { apiKey: "env:NONEXISTENT_VAR" },
-          },
         }),
-        noCreds(),
+        credsFor({ deepseek: "sk-ds" }), // openai 凭证缺失
         {},
-        env(),
       );
     }).toThrow(ProviderConfigError);
   });
@@ -205,14 +176,9 @@ describe("resolveLLMRoles · secondary 解析链（2 段）", () => {
           main: { provider: "deepseek", model: "deepseek-chat" },
           secondary: { provider: "openai", model: "gpt-4o-mini" },
         },
-        providers: {
-          deepseek: { apiKey: "sk-ds" },
-          openai: { apiKey: "sk-oai" },
-        },
       }),
-      noCreds(),
+      credsFor({ deepseek: "sk-ds", openai: "sk-oai" }),
       { providerOverride: "openai", modelOverride: "gpt-4o" },
-      env(),
     );
     expect(result.main.resolved.id).toBe("openai");
     expect(result.main.model).toBe("gpt-4o");
@@ -235,11 +201,9 @@ describe("resolveLLMRoles · 同 provider id 复用（避免重复 resolveProvid
           main: { provider: "deepseek", model: "deepseek-reasoner" },
           secondary: { provider: "deepseek", model: "deepseek-chat" },
         },
-        providers: { deepseek: { apiKey: "sk-ds" } },
       }),
-      noCreds(),
+      baseCreds(),
       {},
-      env(),
     );
     expect(result.main.resolved.id).toBe("deepseek");
     expect(result.secondary.resolved).toBe(result.main.resolved); // 复用引用
@@ -254,14 +218,9 @@ describe("resolveLLMRoles · 同 provider id 复用（避免重复 resolveProvid
           main: { provider: "deepseek", model: "deepseek-chat" },
           secondary: { provider: "openai", model: "gpt-4o-mini" },
         },
-        providers: {
-          deepseek: { apiKey: "sk-ds" },
-          openai: { apiKey: "sk-oai" },
-        },
       }),
-      noCreds(),
+      credsFor({ deepseek: "sk-ds", openai: "sk-oai" }),
       {},
-      env(),
     );
     expect(result.secondary.resolved).not.toBe(result.main.resolved);
     expect(result.main.resolved.id).toBe("deepseek");
@@ -340,10 +299,12 @@ describe("bindRole · chat 调用时 model 字段实绑契约", () => {
 describe("createProviderRoles · 实例化与角色装配", () => {
   let tmpDir: string;
   let configPath: string;
+  let credentialsPath: string;
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "zhixing-llm-roles-"));
     configPath = path.join(tmpDir, "config.json");
+    credentialsPath = path.join(tmpDir, "credentials.json");
   });
 
   afterEach(() => {
@@ -354,34 +315,34 @@ describe("createProviderRoles · 实例化与角色装配", () => {
     }
   });
 
-  function writeFixture(config: ZhixingConfig): void {
+  function writeFixture(config: ZhixingConfig, creds: ZhixingCredentials): void {
     fs.writeFileSync(configPath, JSON.stringify(config), "utf-8");
+    fs.writeFileSync(credentialsPath, JSON.stringify(creds), "utf-8");
+  }
+
+  function envFor(): Record<string, string | undefined> {
+    return { ZHIXING_CONFIG_PATH: configPath };
   }
 
   it("缺省 secondary → main/secondary 共享同一 LLMProvider 实例", () => {
-    writeFixture(baseConfig());
-    const { roles } = createProviderRoles({
-      env: env({ ZHIXING_CONFIG_PATH: configPath }),
-    });
+    writeFixture(baseConfig(), baseCreds());
+    const { roles } = createProviderRoles({ env: envFor() });
 
     expect(roles.main.provider).toBe(roles.secondary.provider);
     expect(roles.main.model).toBe(roles.secondary.model);
   });
 
   it("不同 provider id → 各自独立 LLMProvider 实例", () => {
-    writeFixture({
-      llm: {
-        main: { provider: "deepseek", model: "deepseek-chat" },
-        secondary: { provider: "openai", model: "gpt-4o-mini" },
+    writeFixture(
+      {
+        llm: {
+          main: { provider: "deepseek", model: "deepseek-chat" },
+          secondary: { provider: "openai", model: "gpt-4o-mini" },
+        },
       },
-      providers: {
-        deepseek: { apiKey: "sk-ds" },
-        openai: { apiKey: "sk-oai" },
-      },
-    });
-    const { roles } = createProviderRoles({
-      env: env({ ZHIXING_CONFIG_PATH: configPath }),
-    });
+      credsFor({ deepseek: "sk-ds", openai: "sk-oai" }),
+    );
+    const { roles } = createProviderRoles({ env: envFor() });
 
     expect(roles.main.provider).not.toBe(roles.secondary.provider);
     expect(roles.main.provider.id).toBe("deepseek");
@@ -389,13 +350,11 @@ describe("createProviderRoles · 实例化与角色装配", () => {
   });
 
   it("LLMRole.chat 调用透传 model（caller 不传 model）", async () => {
-    writeFixture({
-      llm: { main: { provider: "deepseek", model: "deepseek-reasoner" } },
-      providers: { deepseek: { apiKey: "sk-ds" } },
-    });
-    const { roles } = createProviderRoles({
-      env: env({ ZHIXING_CONFIG_PATH: configPath }),
-    });
+    writeFixture(
+      { llm: { main: { provider: "deepseek", model: "deepseek-reasoner" } } },
+      baseCreds(),
+    );
+    const { roles } = createProviderRoles({ env: envFor() });
 
     expect(roles.main.model).toBe("deepseek-reasoner");
     // chat() 是绑定方法——签名不再需要 model 字段
@@ -404,15 +363,12 @@ describe("createProviderRoles · 实例化与角色装配", () => {
   });
 
   it("CLI override 同时透传到 effective state（roles.main.{provider.id, model}）", () => {
-    writeFixture({
-      llm: { main: { provider: "deepseek", model: "deepseek-chat" } },
-      providers: {
-        deepseek: { apiKey: "sk-ds" },
-        openai: { apiKey: "sk-oai" },
-      },
-    });
+    writeFixture(
+      baseConfig(),
+      credsFor({ deepseek: "sk-ds", openai: "sk-oai" }),
+    );
     const { roles } = createProviderRoles({
-      env: env({ ZHIXING_CONFIG_PATH: configPath }),
+      env: envFor(),
       providerOverride: "openai",
       modelOverride: "gpt-4o-mini",
     });
@@ -422,13 +378,11 @@ describe("createProviderRoles · 实例化与角色装配", () => {
   });
 
   it("resolvedRoles 暴露 protocol 等中间产物（CLI 用于 budget 解析）", () => {
-    writeFixture({
-      llm: { main: { provider: "anthropic", model: "claude-sonnet-4-20250514" } },
-      providers: { anthropic: { apiKey: "sk-ant" } },
-    });
-    const { resolvedRoles } = createProviderRoles({
-      env: env({ ZHIXING_CONFIG_PATH: configPath }),
-    });
+    writeFixture(
+      { llm: { main: { provider: "anthropic", model: "claude-sonnet-4-20250514" } } },
+      credsFor({ anthropic: "sk-ant" }),
+    );
+    const { resolvedRoles } = createProviderRoles({ env: envFor() });
 
     expect(resolvedRoles.main.resolved.protocol).toBe("anthropic-messages");
     expect(resolvedRoles.main.model).toBe("claude-sonnet-4-20250514");
@@ -437,18 +391,11 @@ describe("createProviderRoles · 实例化与角色装配", () => {
   });
 
   it("网关型 provider（无 preset）走空 declaredModels —— catalog 兜底交给 protocol-default", () => {
-    writeFixture({
-      llm: {
-        main: {
-          provider: "siliconflow",
-          model: "Pro/MiniMaxAI/MiniMax-M2.5",
-        },
-      },
-      providers: { siliconflow: { apiKey: "sk-sf" } },
-    });
-    const { roles, resolvedRoles } = createProviderRoles({
-      env: env({ ZHIXING_CONFIG_PATH: configPath }),
-    });
+    writeFixture(
+      { llm: { main: { provider: "siliconflow", model: "Pro/MiniMaxAI/MiniMax-M2.5" } } },
+      credsFor({ siliconflow: "sk-sf" }),
+    );
+    const { roles, resolvedRoles } = createProviderRoles({ env: envFor() });
 
     expect(resolvedRoles.main.resolved.protocol).toBe("openai-compatible");
     expect(resolvedRoles.main.resolved.declaredModels).toEqual([]);

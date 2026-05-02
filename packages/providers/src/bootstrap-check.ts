@@ -3,7 +3,7 @@
  *
  * 「必要字段」= 没有它就无法进入正常使用的字段：
  *   - config.llm.main.provider / config.llm.main.model
- *   - main provider 的 apiKey（credentials.json 主路径或 config.apiKey fallback 任一即可）
+ *   - main provider 的 apiKey（credentials.json 唯一入口）
  *   - 显式 secondary 且 secondary.provider !== main.provider 时，secondary provider 的 apiKey
  *
  * 设计：
@@ -56,7 +56,7 @@ export function checkBootstrap(
   }
 
   // provider 缺失的话讨论 apiKey 缺失没意义——下一步用户先选 provider
-  if (mainProvider && !hasApiKey(mainProvider, config, credentials)) {
+  if (mainProvider && !hasApiKey(mainProvider, credentials)) {
     missing.push({
       path: `credentials.providers.${mainProvider}.apiKey`,
       humanLabel: `${describeProvider(mainProvider)}的 API Key（主对话 LLM）`,
@@ -71,7 +71,7 @@ export function checkBootstrap(
     secondary
     && mainProvider
     && secondary.provider !== mainProvider
-    && !hasApiKey(secondary.provider, config, credentials)
+    && !hasApiKey(secondary.provider, credentials)
   ) {
     missing.push({
       path: `credentials.providers.${secondary.provider}.apiKey`,
@@ -83,15 +83,12 @@ export function checkBootstrap(
   return missing;
 }
 
-/** 与 resolveApiKey 的解析顺序对齐：credentials 主 → config.apiKey fallback */
+/** 凭证唯一入口：credentials.providers.<id>.apiKey 存在即已填，否则视为缺失。 */
 function hasApiKey(
   providerId: string,
-  config: ZhixingConfig,
   credentials: ZhixingCredentials,
 ): boolean {
-  if (credentials.providers?.[providerId]?.apiKey) return true;
-  if (config.providers?.[providerId]?.apiKey) return true;
-  return false;
+  return Boolean(credentials.providers?.[providerId]?.apiKey);
 }
 
 /** 用 PROVIDER_PRESETS 注册名美化 humanLabel；未知 provider 用 id 兜底 */

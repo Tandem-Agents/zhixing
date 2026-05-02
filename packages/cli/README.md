@@ -46,11 +46,14 @@ node packages/cli/dist/index.js [...]
 | `~/.zhixing/config.json` | 公开元数据：`llm.main`、模型 ID、workspace、`channels.<id>.credentials` 非密字段（appId 等）、UI 偏好 | AI 可读；写需用户确认 |
 | `~/.zhixing/credentials.json` | 敏感字段：provider apiKey、channel 密 secret（appSecret 等）| AI 不可读、不可写 |
 
-### apiKey 解析顺序
+### apiKey 来源（凭证唯一入口）
 
-1. **`credentials.json` 主路径**：`providers.<id>.apiKey`（首次配置向导写入；用户也可手动编辑）
-2. **`config.json` fallback**：`providers.<id>.apiKey` 字段写 `"env:VAR_NAME"` / `"helper:cmd"` / 明文之一（CI / vault 高级用户用）
-3. 都缺失 → 启动期抛错并指引跑 `zhixing` 触发首次配置
+1. **`credentials.json`**：`providers.<id>.apiKey`（首次配置向导写入；用户也可手动编辑）
+2. 缺失 → 启动期抛错并指引跑 `zhixing` 触发首次配置向导
+
+`config.json` **不接受**任何形态的 apiKey 字段——启动期 schema 校验会拒绝 `providers.<id>.apiKey` 与 channel 密字段，三段式（违反字段 / 原因 / 修复步骤）引导用户手工修复。
+
+CI / Vault 等需要从外部源注入凭证的场景，由启动脚本（用户 / 运维侧）生成 `~/.zhixing/credentials.json`，知行只读 plaintext。
 
 项目级 `./zhixing.config.json` 以字段级 deep merge 覆盖全局 `config.json`（公开配置维度），凭证不参与项目级级联（用户级单一来源，避免泄漏）。
 
@@ -337,12 +340,16 @@ pnpm serve
 zhixing serve --port 19000
 ```
 
-### `Provider 的 apiKey 引用了环境变量 X，但该变量未设置`
+### `config.json 含 N 处废弃字段` / `Provider 缺少 API Key`
 
-`config.json` 写了 `apiKey: "env:VAR"` 的 fallback 路径但 env 未设置。两条修复路径：
+`config.json` 含旧版凭证字段（如 `providers.<id>.apiKey: "env:VAR"`）或 channel 密字段（如 `channels.<id>.credentials.appSecret`），启动期 schema 校验会逐项打印违反字段、原因与精确修复步骤。
 
-- **推荐**：删除 `config.providers.<id>.apiKey`，在交互终端跑 `zhixing` 让向导写入 `~/.zhixing/credentials.json`
-- **CI / vault 用户**：保留 `env:VAR` 形态，确保 env 在进程启动时已设置（CI secrets / 容器 env / Vault sidecar / systemd `Environment=` 等任选；shell 内手动 `export` 也可）
+修复路径：
+
+- 按错误消息提示在 `~/.zhixing/config.json` 中删除违反字段
+- 在交互终端跑 `zhixing` 让向导写入 `~/.zhixing/credentials.json`，或手动编辑该文件
+- channel 密字段（appSecret 等）迁移到 `credentials.json` 的 `channels.<id>` 段；非密字段（appId 等）保留在 config.json
+- CI / Vault 用户：由启动脚本生成 `credentials.json`（凭证 plaintext），知行不接受 env 注入语法
 
 ### `Method not found` (RPC error -32601)
 

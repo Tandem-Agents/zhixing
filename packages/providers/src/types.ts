@@ -90,17 +90,16 @@ export interface ModelBudgetOverride {
   maxOutputTokens?: number;
 }
 
-/** 用户对单个 provider 的配置。与预设合并后生成 ResolvedProvider。 */
+/**
+ * 用户对单个 provider 的配置。与预设合并后生成 ResolvedProvider。
+ *
+ * 注意：apiKey 字段不在此处——凭证唯一入口在 ~/.zhixing/credentials.json，
+ * 由 ZhixingCredentials.providers.<id>.apiKey 承载。config.json 中出现 apiKey
+ * 字段会被启动期 schema 校验拒绝。
+ */
 export interface ProviderConfig {
   /** 覆盖预设的 baseUrl（用于代理/聚合平台/私有部署） */
   baseUrl?: string;
-  /**
-   * API Key，支持三种格式：
-   * - "env:VAR_NAME"  — 从环境变量读取
-   * - "helper:command" — 执行命令获取（适配 Vault 等）
-   * - 直接字符串 — 明文
-   */
-  apiKey?: string;
   /** 覆盖预设的协议（自定义 provider 必填） */
   protocol?: Protocol;
   /** 覆盖预设的默认模型 */

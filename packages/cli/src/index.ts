@@ -36,6 +36,22 @@ function handleBootstrapResult(result: BootstrapEntryResult): void {
     console.error(chalk.dim(`请修复或删除文件后重试：${result.filePath}`));
     process.exit(2);
   }
+  if (result.kind === "config-semantic-error") {
+    console.error(
+      chalk.red(`[配置错误] ${result.filePath} 含 ${result.issues.length} 处废弃字段：`),
+    );
+    console.error("");
+    for (const [index, issue] of result.issues.entries()) {
+      console.error(chalk.yellow(`${index + 1}. 字段：${issue.field}`));
+      console.error(chalk.dim(`   原因：${issue.reason}`));
+      console.error(chalk.dim(`   修复：${issue.fix}`));
+      console.error("");
+    }
+    console.error(
+      chalk.dim("修复后重新运行 `zhixing` 验证；首次配置可让向导自动写入凭证文件。"),
+    );
+    process.exit(2);
+  }
   if (result.kind === "non-tty") {
     console.error(chalk.red("首次配置未完成，且当前环境非交互终端。"));
     console.error(
