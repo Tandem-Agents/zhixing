@@ -44,6 +44,46 @@ describe("decodeChar · 单字符解码", () => {
     ]);
   });
 
+  it("\\r\\n 序列只产出一个 enter（CRLF 行尾归一）", () => {
+    // 关键回归保护：粘贴场景。Windows 剪贴板 / CRLF 文本文件粘贴 API Key 时
+    // chunk 含 \r\n；不归一会让 `sk-xxx\r\n` 触发双 enter，第二个跳错面板层级
+    const result = decodeChunk("\r\n", createKeyDecoderState());
+    expect(result.events).toEqual([{ type: "enter" }]);
+  });
+
+  it("\\r 后接非 \\n 字符 → \\r 单独 enter + 后字符正常处理", () => {
+    const result = decodeChunk("\ra", createKeyDecoderState());
+    expect(result.events).toEqual([
+      { type: "enter" },
+      { type: "char", ch: "a" },
+    ]);
+  });
+
+  it("\\n 单独 → enter（非 CRLF 序列）", () => {
+    expect(decodeChunk("\n", createKeyDecoderState()).events).toEqual([
+      { type: "enter" },
+    ]);
+  });
+
+  it("连续 \\r\\r\\n → 两个 enter（第一个 \\r 后立刻 \\r，第二个 \\r 后接 \\n 吞）", () => {
+    const result = decodeChunk("\r\r\n", createKeyDecoderState());
+    expect(result.events).toEqual([{ type: "enter" }, { type: "enter" }]);
+  });
+
+  it("\\r\\n\\r\\n（用户连按两次 Enter）→ 两个 enter", () => {
+    const result = decodeChunk("\r\n\r\n", createKeyDecoderState());
+    expect(result.events).toEqual([{ type: "enter" }, { type: "enter" }]);
+  });
+
+  it("跨 chunk 的 \\r\\n：第一 chunk 含 \\r，第二 chunk 含 \\n", () => {
+    let state = createKeyDecoderState();
+    let r = decodeChunk("\r", state);
+    expect(r.events).toEqual([{ type: "enter" }]);
+    state = r.newState;
+    r = decodeChunk("\n", state);
+    expect(r.events).toEqual([]);
+  });
+
   it("Ctrl+C (0x03) 触发 ctrl-c", () => {
     expect(decodeChar("\x03", createKeyDecoderState()).events).toEqual([
       { type: "ctrl-c" },

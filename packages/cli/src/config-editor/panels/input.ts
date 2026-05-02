@@ -27,7 +27,7 @@ import {
   writeModelRole,
   readModelRole,
 } from "../state.js";
-import { maskForInput } from "../ui/mask.js";
+import { maskForDisplay, maskForInput } from "../ui/mask.js";
 import { SUPPORTED_PROVIDERS } from "../providers-registry.js";
 import { SUPPORTED_CHANNELS } from "../channels-registry.js";
 
@@ -121,12 +121,30 @@ export function renderInputPanel(
   renderer.writeLine(`  ${renderer.dim(`示例：${meta.example}`)}`);
   renderer.writeLine("");
 
-  // 输入行：buffer 渲染（敏感字段显示 *，非敏感明文）
-  const display = meta.sensitive ? maskForInput(state.inputBuffer) : state.inputBuffer;
-  renderer.writeLine(`  > ${display}`);
+  // 已有值提示：buffer 空 + 字段已暂存值时显示，让用户知道有值且能直接 Enter 保留
+  const existingValue = meta.currentValue(state);
+  const hasExisting = Boolean(existingValue);
+  const isFreshInput = state.inputBuffer === "";
 
+  if (hasExisting && isFreshInput) {
+    const masked = meta.sensitive ? maskForDisplay(existingValue!) : existingValue;
+    renderer.writeLine(
+      `  ${renderer.dim(`当前已暂存：${masked}（直接 Enter 保留 / 输入新值替换）`)}`,
+    );
+    renderer.writeLine("");
+    renderer.writeLine(
+      renderer.dim("  Enter 保存    Esc 取消    Ctrl+C 退出向导"),
+    );
+  } else {
+    renderer.writeLine(
+      renderer.dim("  Enter 保存    Esc 取消    Ctrl+C 退出向导"),
+    );
+  }
   renderer.writeLine("");
-  renderer.writeLine(renderer.dim("  Enter 保存    Esc 取消    Ctrl+C 退出向导"));
+
+  // 输入行写在最后且不带 \n——让终端光标自然停在 buffer 之后
+  const display = meta.sensitive ? maskForInput(state.inputBuffer) : state.inputBuffer;
+  renderer.writeRaw(`  > ${display}`);
 }
 
 export function handleInputPanelKey(
@@ -147,7 +165,8 @@ export function handleInputPanelKey(
     case "enter": {
       const value = state.inputBuffer.trim();
       if (!value) {
-        // 空提交：当作取消
+        // 空 buffer + 已有值 → 保留原值不动；空 buffer + 无已有值 → 取消（无写入）
+        // 两种 case 都是 pop + 清 buffer，state.credentials 未改动即保留原值
         return { type: "pop", state: setInputBuffer(state, "") };
       }
       const newState = setInputBuffer(meta.apply(state, value), "");
@@ -184,9 +203,11 @@ export function renderAddModelPanel(
   renderer.writeLine("");
   renderer.writeLine(`  输入要添加的 model id（按 ${provider?.label ?? "服务商"} 文档命名）`);
   renderer.writeLine("");
-  renderer.writeLine(`  > ${state.inputBuffer}`);
-  renderer.writeLine("");
   renderer.writeLine(renderer.dim("  Enter 添加    Esc 取消    Ctrl+C 退出向导"));
+  renderer.writeLine("");
+
+  // 输入行写在最后且不带 \n——让终端光标自然停在 buffer 之后
+  renderer.writeRaw(`  > ${state.inputBuffer}`);
 }
 
 export function handleAddModelPanelKey(

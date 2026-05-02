@@ -78,12 +78,27 @@ describe("handleInputPanelKey · provider-apikey 字段路由", () => {
     }
   });
 
-  it("空 Enter 视为取消（不写盘 + pop）", () => {
+  it("空 Enter + 字段无已有值 → pop（无写入）", () => {
     const state = createInitialState({}, {});
     const action = handleInputPanelKey(state, descriptor, { type: "enter" });
     expect(action.type).toBe("pop");
     if (action.type === "pop") {
       expect(action.state.credentials.providers).toBeUndefined();
+    }
+  });
+
+  it("空 Enter + 字段已有值 → pop 且保留原值（不覆盖）", () => {
+    // 关键回归保护：进入编辑面板看到"已暂存"提示后直接 Enter 应保留原值，不变成空
+    const state = createInitialState(
+      {},
+      { providers: { siliconflow: { apiKey: "sk-existing" } } },
+    );
+    const action = handleInputPanelKey(state, descriptor, { type: "enter" });
+    expect(action.type).toBe("pop");
+    if (action.type === "pop") {
+      expect(action.state.credentials.providers?.siliconflow?.apiKey).toBe(
+        "sk-existing",
+      );
     }
   });
 

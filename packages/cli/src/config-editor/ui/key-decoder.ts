@@ -22,10 +22,19 @@ export interface KeyDecoderState {
   ansi: "none" | "esc" | "csi";
   /** CSI 内部累积的参数字符（终结后用于识别具体按键） */
   csiBuffer: string;
+  /**
+   * 上一字符是 CR（\r）——下一字符若是 LF（\n）则吞掉，做 CRLF 行尾归一。
+   *
+   * 不是为 raw mode Enter 服务（各平台 Enter 都是单个 \r）；而是为**粘贴**：
+   * 用户从 Windows 记事本 / CRLF 文本文件粘贴 API Key 时，剪贴板内容含 \r\n
+   * 行尾。不归一会让 `sk-xxx\r\n` 产出两个 enter 事件——第一个提交 input 面板，
+   * 第二个落到 list 面板触发"进入"，跳错层级。
+   */
+  lastWasCR: boolean;
 }
 
 export function createKeyDecoderState(): KeyDecoderState {
-  return { ansi: "none", csiBuffer: "" };
+  return { ansi: "none", csiBuffer: "", lastWasCR: false };
 }
 
 export interface DecodeResult {
@@ -50,29 +59,36 @@ export function decodeChar(
     if (code >= 0x40 && code <= 0x7e) {
       const event = identifyCsi(state.csiBuffer + ch);
       return {
-        newState: { ansi: "none", csiBuffer: "" },
+        newState: { ansi: "none", csiBuffer: "", lastWasCR: false },
         events: event ? [event] : [],
       };
     }
     // 合法参数 / 中间字符 0x20-0x3F：累积
     if (code >= 0x20 && code <= 0x3f) {
       return {
-        newState: { ansi: "csi", csiBuffer: state.csiBuffer + ch },
+        newState: { ansi: "csi", csiBuffer: state.csiBuffer + ch, lastWasCR: false },
         events: [],
       };
     }
     // 异常字符：序列损坏 abort，让字符 pass-through 给后续处理
-    const aborted = decodeChar(ch, { ansi: "none", csiBuffer: "" });
+    const aborted = decodeChar(ch, {
+      ansi: "none",
+      csiBuffer: "",
+      lastWasCR: false,
+    });
     return aborted;
   }
 
   // ─── ESC 之后等待 [ ───
   if (state.ansi === "esc") {
     if (ch === "[") {
-      return { newState: { ansi: "csi", csiBuffer: "" }, events: [] };
+      return {
+        newState: { ansi: "csi", csiBuffer: "", lastWasCR: false },
+        events: [],
+      };
     }
     // 孤立 ESC：触发 escape 事件 + 当前字符正常处理（递归用 ansi=none）
-    const next = decodeChar(ch, { ansi: "none", csiBuffer: "" });
+    const next = decodeChar(ch, { ansi: "none", csiBuffer: "", lastWasCR: false });
     return {
       newState: next.newState,
       events: [{ type: "escape" }, ...next.events],
@@ -81,33 +97,53 @@ export function decodeChar(
 
   // ─── 顶层（ansi === "none"）───
 
-  // ESC：进入序列等待
+  // ESC：进入序列等待（保留 lastWasCR 不重置——CR 后立刻按 ESC 不影响 CRLF 标准化）
   if (code === 0x1b) {
-    return { newState: { ansi: "esc", csiBuffer: "" }, events: [] };
+    return {
+      newState: { ansi: "esc", csiBuffer: "", lastWasCR: false },
+      events: [],
+    };
   }
 
   // Ctrl+C
   if (code === 0x03) {
-    return { newState: state, events: [{ type: "ctrl-c" }] };
+    return { newState: { ...state, lastWasCR: false }, events: [{ type: "ctrl-c" }] };
   }
 
-  // Enter (\r 或 \n)
-  if (ch === "\r" || ch === "\n") {
-    return { newState: state, events: [{ type: "enter" }] };
+  // Enter (\r) —— 标记 lastWasCR，让紧随的 \n 被吞
+  if (ch === "\r") {
+    return {
+      newState: { ...state, lastWasCR: true },
+      events: [{ type: "enter" }],
+    };
+  }
+
+  // \n —— 若紧跟 CR 则吞（CRLF 标准化）；否则当独立 Enter
+  if (ch === "\n") {
+    if (state.lastWasCR) {
+      return { newState: { ...state, lastWasCR: false }, events: [] };
+    }
+    return { newState: { ...state, lastWasCR: false }, events: [{ type: "enter" }] };
   }
 
   // Backspace（DEL 0x7F 或 BS 0x08）
   if (code === 0x7f || code === 0x08) {
-    return { newState: state, events: [{ type: "backspace" }] };
+    return {
+      newState: { ...state, lastWasCR: false },
+      events: [{ type: "backspace" }],
+    };
   }
 
   // 其它控制字符（< 0x20）：忽略
   if (code < 0x20) {
-    return { newState: state, events: [] };
+    return { newState: { ...state, lastWasCR: false }, events: [] };
   }
 
   // 普通字符
-  return { newState: state, events: [{ type: "char", ch }] };
+  return {
+    newState: { ...state, lastWasCR: false },
+    events: [{ type: "char", ch }],
+  };
 }
 
 /**

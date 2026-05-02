@@ -62,6 +62,11 @@ export class Renderer {
     }
   }
 
+  /** 写入文本但不换行——用于让光标停在文本末尾（如输入面板的 `> _`） */
+  writeRaw(text: string): void {
+    this.stdout.write(text);
+  }
+
   /** 写入分隔线 */
   separator(): void {
     this.writeLine("─".repeat(60));
