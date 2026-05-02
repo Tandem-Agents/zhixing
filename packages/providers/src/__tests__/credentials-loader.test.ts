@@ -101,6 +101,31 @@ describe("loadCredentials", () => {
     expect(err.message).not.toMatch(/sk-[A-Za-z0-9]/);
   });
 
+  it("JSON 损坏 fuzz：文件半截凭证 sk-* → 错误消息不泄漏密值原文", () => {
+    // 模拟用户编辑文件中途断电 / 误删括号，残留 sk- 前缀的部分凭证。
+    // schema error 路径应只引文件位置 + JSON 解析底层描述，不把损坏内容回灌到消息里。
+    const filePath = getCredentialsPath(tmpDir);
+    const FAKE_SECRET = "sk-fuzz0123456789ABCDEFGHIJKLMNOPqrst";
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(
+      filePath,
+      `{"version":1,"providers":{"siliconflow":{"apiKey":"${FAKE_SECRET}`,
+      "utf-8",
+    );
+
+    let caught: unknown;
+    try {
+      loadCredentials({ homeDir: tmpDir });
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(CredentialsSchemaError);
+    const err = caught as CredentialsSchemaError;
+    expect(err.message).not.toContain(FAKE_SECRET);
+    expect(err.message).not.toMatch(/sk-[A-Za-z0-9]+/);
+  });
+
   it("空 JSON 对象 → 返回 {} 形态（version 缺失，不补默认到 parsed）", () => {
     const filePath = getCredentialsPath(tmpDir);
     fs.mkdirSync(path.dirname(filePath), { recursive: true });

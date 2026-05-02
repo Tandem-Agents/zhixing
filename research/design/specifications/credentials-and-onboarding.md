@@ -138,7 +138,7 @@ function writeCredentials(
 
 **为什么 credentials.json 优先**：旧版用户的 `~/.zhixing/config.json` 可能有 `"apiKey": "env:SILICONFLOW_API_KEY"` 死引用——把 credentials.json 放主路径，向导写完即生效，**无需迁移用户的 config.json**。CI / 高级用户依赖 `apiKey: "env:VAR"` 时不写 credentials.json 即可，fallback 自然命中。
 
-**移除**：`presets[id].envKey` 作为**默认**自动 fallback 的代码路径（`resolve.ts:266-271` 当前的 `if (presetEnvKey) { value = env[presetEnvKey]; ... }` 段）。`envKey` 字段在 `presets.ts` 中保留作元数据，不再参与默认解析。
+**移除**：`presets[id].envKey` 字段及其相关代码全部删除——既不参与默认解析，也不作为元数据保留。`presets[id]` 仅保留 `name` / `baseUrl` / `protocol` / `defaultModel` / `quirks` 等服务商技术配置；用户在 `apiKey: "env:VAR_NAME"` 中使用什么 env 名由用户自己决定，知行不预设特定 env 命名约定。
 
 #### 3.2.2 Resolve 内部链签名
 
@@ -360,11 +360,13 @@ export async function runBootstrap(
 |---|---|
 | 项目根 `zhixing.cmd` / `zhixing` shim（`node --env-file=.env ...`） | 删除 |
 | `dist/` 包内任何对项目根 `.env` 的依赖 | 不存在则保持，存在则删除 |
-| `presets[id].envKey` 作为 `resolveApiKey` **默认**回退的代码路径 | 删除（字段保留为元数据） |
+| `presets[id].envKey` 字段及其在 `resolveApiKey` 中的引用 | 全部删除（字段不再保留为元数据） |
+| 项目根 `.env` / `.env.example` 文件 | 删除 |
+| `package.json` dev script 中的 `--env-file=.env` 注入 | 删除 |
 | `ensureGlobalConfigTemplate` 模板中的 `"apiKey": "env:SILICONFLOW_API_KEY"` 占位 | 删除 |
 | `~/.zhixing/config.json` 中已有的 `providers.<id>.apiKey: "env:..."`（用户机器上） | **不需要迁移**——§3.2.1 解析顺序中 credentials.json 是主路径，向导写完即生效；旧 config.apiKey 字段被自然忽略（仍可作为 CI / 高级用户的 fallback） |
 
-**开发期路径**：`pnpm cli` 等 dev script 沿用 `node --env-file=.env --import=tsx/esm packages/cli/src/index.ts`——但 `.env` 仅作开发期工具开关（如 `DEBUG=...`、`NODE_ENV=...`）。**凭证从 `~/.zhixing/credentials.json` 读**（开发者本机也走与生产一致的路径）。如开发者偏好用 env 注入，可在 `~/.zhixing/config.json` 显式写 `apiKey: "env:SILICONFLOW_API_KEY"` 且不在 credentials.json 写此 provider——此时走 fallback 路径（§3.2.1 第 2 步），与主路径不冲突。
+**开发期路径**：项目根不存在 `.env` 文件，`pnpm cli` 等 dev script 不再 `--env-file=.env`。开发者首次跑 `pnpm cli` 与最终用户一样——走首次引导写入 `~/.zhixing/credentials.json`，此后无差别。如开发者偏好用 env 注入（与 CI / vault 用户路径一致），自行在 shell 中 `export VAR=...` 后跑，并在 `~/.zhixing/config.json` 显式写 `apiKey: "env:VAR"` 走 fallback（§3.2.1 第 2 步），与主路径不冲突。
 
 ## 七、错误契约
 

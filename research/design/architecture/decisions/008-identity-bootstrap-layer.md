@@ -97,13 +97,13 @@ policy-engine 的 action 严格度排序（`block: 3 > confirm: 2 > audit: 1 > a
 - 新增 `checkBootstrap` 一段纯函数 + CLI 启动期向导
 - 移除项目根 `zhixing.cmd` / `zhixing` shim 与 dev 团队习惯调整（dev 通过 `pnpm cli` 启动，凭证写入 `~/.zhixing/credentials.json` 与生产路径一致；fallback 路径（如 `apiKey: "env:VAR"`）继续可用）
 - 改 `~/.zhixing/config.json` 模板：移除 `apiKey: "env:..."` 占位
-- 移除 `presets[id].envKey` 在 `resolveApiKey` 中作为**默认**回退（保留为预设元数据，仅当用户显式写 `apiKey: "env:VAR"` 时使用）
+- 移除 `presets[id].envKey` 字段及其相关代码——不保留为元数据。预设仅含服务商技术配置（`baseUrl` / `protocol` / `defaultModel` / `quirks`）；`apiKey: "env:VAR"` 中的 env 名由用户自己决定，知行不预设特定 env 命名约定
 
 ### 约束
 
 - 任何代码路径**不允许**直接读 `~/.zhixing/credentials.json`——必须经 `@zhixing/providers` 暴露的 credentials 加载接口
 - 任何敏感字段（apiKey / appSecret / token / password 等）**不允许**进 `config.json` schema——若新 channel/集成有秘密字段，写到 `credentials.json`
-- `dist/` 编译产物**不允许**任何 `--env-file` 调用与 `.env` 依赖；项目根 `.env` 仅供 dev script 内的开发期工具开关使用，不再承担凭证注入
+- 项目根**不存在** `.env` 文件；`dist/` 与 dev script（如 `pnpm cli` / `pnpm serve`）都**不依赖** `--env-file` 或 `.env` 注入。任何 env-based 凭证（CI / vault 用户）经进程启动期外部注入（CI secrets / 容器 env / shell `export` 等），不依赖项目根文件
 
 ## 相关决策
 

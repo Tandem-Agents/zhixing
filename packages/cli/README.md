@@ -342,7 +342,7 @@ zhixing serve --port 19000
 `config.json` 写了 `apiKey: "env:VAR"` 的 fallback 路径但 env 未设置。两条修复路径：
 
 - **推荐**：删除 `config.providers.<id>.apiKey`，在交互终端跑 `zhixing` 让向导写入 `~/.zhixing/credentials.json`
-- **CI / vault 用户**：保留 `env:VAR` 形态，确保 env 在进程启动时已设置（如 `pnpm serve` 走 `--env-file=.env` 注入；其它部署方式自行注入）
+- **CI / vault 用户**：保留 `env:VAR` 形态，确保 env 在进程启动时已设置（CI secrets / 容器 env / Vault sidecar / systemd `Environment=` 等任选；shell 内手动 `export` 也可）
 
 ### `Method not found` (RPC error -32601)
 
