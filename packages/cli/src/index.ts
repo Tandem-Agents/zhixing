@@ -4,17 +4,11 @@
  * 两种运行模式：
  * - 单次模式：zhixing -p "prompt" → 流式输出 → 退出
  * - 交互模式：zhixing → REPL 多轮对话
- *
- * 配置加载顺序（由 @zhixing/providers 处理）：
- * - 环境变量 → 项目 zhixing.config.json → 全局 ~/.zhixing/config.json
  */
 
 import chalk from "chalk";
 import { Command } from "commander";
-import {
-  ensureBootstrap,
-  type BootstrapEntryResult,
-} from "./bootstrap/index.js";
+import { runStartupCheck, type StartupCheckResult } from "./startup.js";
 import { runOnce } from "./run-agent.js";
 import { startRepl } from "./repl.js";
 import { renderSummary, renderError } from "./render.js";
@@ -28,15 +22,15 @@ import { runRpcCommand, printRpcHelp } from "./rpc/command.js";
  * 处理 ensureBootstrap 非 ready 状态：报错退出或 cancel 退出。
  * ready / completed 状态下返回，让 caller 继续主流程。
  */
-function handleBootstrapResult(result: BootstrapEntryResult): void {
-  if (result.kind === "ready" || result.kind === "completed") return;
+function handleStartupResult(result: StartupCheckResult): void {
+  if (result.kind === "ready") return;
 
   if (result.kind === "schema-error") {
     console.error(chalk.red(`[配置错误] ${result.message}`));
     console.error(chalk.dim(`请修复或删除文件后重试：${result.filePath}`));
     process.exit(2);
   }
-  if (result.kind === "config-semantic-error") {
+  if (result.kind === "semantic-error") {
     console.error(
       chalk.red(`[配置错误] ${result.filePath} 含 ${result.issues.length} 处废弃字段：`),
     );
@@ -47,23 +41,19 @@ function handleBootstrapResult(result: BootstrapEntryResult): void {
       console.error(chalk.dim(`   修复：${issue.fix}`));
       console.error("");
     }
-    console.error(
-      chalk.dim("修复后重新运行 `zhixing` 验证；首次配置可让向导自动写入凭证文件。"),
-    );
+    console.error(chalk.dim("修复后重新运行 `zhixing` 验证。"));
     process.exit(2);
   }
   if (result.kind === "non-tty") {
-    console.error(chalk.red("首次配置未完成，且当前环境非交互终端。"));
-    console.error(
-      chalk.dim("请在 TTY 终端中运行 `zhixing` 完成首次配置。缺失字段："),
-    );
-    for (const field of result.missing) {
-      console.error(chalk.dim(`  - ${field.humanLabel}`));
+    console.error(chalk.red("缺少必要配置，且当前环境非交互终端。"));
+    console.error(chalk.dim("请在 TTY 终端中运行 `zhixing` 完成配置。缺失项："));
+    for (const label of result.missingLabels) {
+      console.error(chalk.dim(`  - ${label}`));
     }
     process.exit(2);
   }
   if (result.kind === "cancelled") {
-    console.log(chalk.dim("已取消首次配置。"));
+    console.log(chalk.dim("已取消配置。"));
     process.exit(0);
   }
 }
@@ -91,9 +81,12 @@ program
     name?: string;
   }) => {
     try {
-      // 启动期 wizard 适配——任何模式（-p / REPL）下都先确保必要字段就绪
-      const bootstrapResult = await ensureBootstrap({ cwd: process.cwd() });
-      handleBootstrapResult(bootstrapResult);
+      // 启动期检查——任何模式（-p / REPL）下都先确保必要字段就绪
+      const startupResult = await runStartupCheck({
+        cwd: process.cwd(),
+        mode: "repl",
+      });
+      handleStartupResult(startupResult);
 
       if (options.print) {
         // runOnce 内部自管 renderer / spinner / 渲染装饰,调用方仅传入业务参数。

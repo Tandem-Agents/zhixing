@@ -66,10 +66,6 @@ export {
   writeCredentials,
 } from "./credentials-loader.js";
 
-// 首次启动必要字段检测
-export { checkBootstrap } from "./bootstrap-check.js";
-export type { MissingField } from "./bootstrap-check.js";
-
 // 配置语义校验（凭证字段 / 密字段拒绝）
 export {
   BUILTIN_VALIDATORS,

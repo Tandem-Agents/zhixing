@@ -46,17 +46,11 @@ import {
   type ProcessLockPaths,
   type ConfirmationBridge,
 } from "@zhixing/server";
-import {
-  checkBootstrap,
-  ConfigSchemaError,
-  CredentialsSchemaError,
-  loadConfig,
-  loadCredentials,
-  resolveHomeDir,
-  validateConfigSemantics,
-  type ZhixingConfig,
-  type ZhixingCredentials,
+import type {
+  ZhixingConfig,
+  ZhixingCredentials,
 } from "@zhixing/providers";
+import { runStartupCheck } from "../startup.js";
 import { createScheduleTool } from "@zhixing/tools-builtin";
 import chalk from "chalk";
 import { createAgentRuntime } from "@zhixing/orchestrator/runtime";
@@ -131,56 +125,48 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   const host = opts.host ?? DEFAULT_SERVER_CONFIG.host;
   const workspace = opts.workspace ?? process.cwd();
 
-  // 启动期必要字段检查——server 模式无 TTY 假设，缺字段直接拒绝启动，
-  // 让用户先在交互终端跑 `zhixing` 完成首次配置。
-  // loadConfig 自身处理 ZHIXING_CONFIG_PATH override；loadCredentials 显式
-  // 按 resolveHomeDir 推断与 config 同目录（loadCredentials 没有 env 概念）
-  let config: ZhixingConfig;
-  let credentials: ZhixingCredentials;
-  try {
-    config = loadConfig({ cwd: workspace });
-    credentials = loadCredentials({ homeDir: resolveHomeDir() });
-  } catch (err) {
-    if (
-      err instanceof ConfigSchemaError
-      || err instanceof CredentialsSchemaError
-    ) {
-      console.error(chalk.red(`[配置错误] ${err.message}`));
-      console.error(chalk.dim(`请修复或删除文件后重试：${err.filePath}`));
-      process.exit(2);
-    }
-    throw err;
-  }
+  // 启动期检查——加载 config + credentials，校验 schema，按 server 模式
+  // 检查 model + messaging 必要字段；缺字段且 TTY 触发配置编辑器，否则 fail-fast。
+  const startupResult = await runStartupCheck({
+    cwd: workspace,
+    mode: "server",
+  });
 
-  // 语义校验 fail-fast：废弃字段（旧 apiKey fallback / channel 密字段）出现时
-  // 立即拒绝启动，引导用户手工修复后重启。
-  const semanticIssues = validateConfigSemantics(config);
-  if (semanticIssues.length > 0) {
-    console.error(
-      chalk.red(`[配置错误] config.json 含 ${semanticIssues.length} 处废弃字段：`),
-    );
-    console.error("");
-    for (const [index, issue] of semanticIssues.entries()) {
-      console.error(chalk.yellow(`${index + 1}. 字段：${issue.field}`));
-      console.error(chalk.dim(`   原因：${issue.reason}`));
-      console.error(chalk.dim(`   修复：${issue.fix}`));
+  if (startupResult.kind !== "ready") {
+    if (startupResult.kind === "schema-error") {
+      console.error(chalk.red(`[配置错误] ${startupResult.message}`));
+      console.error(chalk.dim(`请修复或删除文件后重试：${startupResult.filePath}`));
+    } else if (startupResult.kind === "semantic-error") {
+      console.error(
+        chalk.red(
+          `[配置错误] ${startupResult.filePath} 含 ${startupResult.issues.length} 处废弃字段：`,
+        ),
+      );
       console.error("");
+      for (const [index, issue] of startupResult.issues.entries()) {
+        console.error(chalk.yellow(`${index + 1}. 字段：${issue.field}`));
+        console.error(chalk.dim(`   原因：${issue.reason}`));
+        console.error(chalk.dim(`   修复：${issue.fix}`));
+        console.error("");
+      }
+      console.error(chalk.dim("修复后重启 server。"));
+    } else if (startupResult.kind === "non-tty") {
+      console.error(chalk.red("Server 缺少必要配置，且当前环境非交互终端。"));
+      console.error(
+        chalk.dim("请先在交互终端运行 `zhixing` 完成基础配置。缺失项："),
+      );
+      for (const label of startupResult.missingLabels) {
+        console.error(chalk.dim(`  - ${label}`));
+      }
+    } else if (startupResult.kind === "cancelled") {
+      console.log(chalk.dim("已取消配置。"));
+      process.exit(0);
     }
-    console.error(chalk.dim("修复后重启 server。"));
     process.exit(2);
   }
 
-  const missing = checkBootstrap(config, credentials);
-  if (missing.length > 0) {
-    console.error(chalk.red("首次配置未完成，server 无法启动。"));
-    console.error(
-      chalk.dim("请先在交互终端运行 `zhixing` 完成首次配置。缺失字段："),
-    );
-    for (const field of missing) {
-      console.error(chalk.dim(`  - ${field.humanLabel}`));
-    }
-    process.exit(2);
-  }
+  const config: ZhixingConfig = startupResult.config;
+  const credentials: ZhixingCredentials = startupResult.credentials;
 
   // 1. token
   const tokenInfo = await loadOrCreateToken();

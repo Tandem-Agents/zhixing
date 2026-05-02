@@ -49,8 +49,8 @@ export class ConfigSchemaError extends Error {
 // ─── 路径解析 ───
 
 const CONFIG_DIR_NAME = ".zhixing";
-const GLOBAL_CONFIG_FILENAME = "config.json";
-const PROJECT_CONFIG_FILENAME = "zhixing.config.json";
+const GLOBAL_CONFIG_FILENAME = "config.jsonc";
+const PROJECT_CONFIG_FILENAME = "zhixing.config.jsonc";
 
 /** 全局配置目录：~/.zhixing/ */
 export function getGlobalConfigDir(): string {

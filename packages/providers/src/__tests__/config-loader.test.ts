@@ -24,17 +24,17 @@ function cleanDir(dir: string): void {
 }
 
 describe("getGlobalConfigPath", () => {
-  it("默认应返回 ~/.zhixing/config.json", () => {
+  it("默认应返回 ~/.zhixing/config.jsonc", () => {
     const result = getGlobalConfigPath({});
     expect(result).toContain(".zhixing");
-    expect(result).toContain("config.json");
+    expect(result).toContain("config.jsonc");
   });
 
   it("ZHIXING_CONFIG_PATH 应覆盖默认路径", () => {
     const result = getGlobalConfigPath({
-      ZHIXING_CONFIG_PATH: "/custom/path/config.json",
+      ZHIXING_CONFIG_PATH: "/custom/path/config.jsonc",
     });
-    expect(result).toBe("/custom/path/config.json");
+    expect(result).toBe("/custom/path/config.jsonc");
   });
 
   it("ZHIXING_CONFIG_PATH 中的 ~ 应展开为 homedir", () => {
@@ -46,9 +46,9 @@ describe("getGlobalConfigPath", () => {
 });
 
 describe("getProjectConfigPath", () => {
-  it("应返回 cwd 下的 zhixing.config.json", () => {
+  it("应返回 cwd 下的 zhixing.config.jsonc", () => {
     const result = getProjectConfigPath("/some/project");
-    expect(result).toBe(path.join("/some/project", "zhixing.config.json"));
+    expect(result).toBe(path.join("/some/project", "zhixing.config.jsonc"));
   });
 });
 
@@ -80,7 +80,7 @@ describe("loadConfig", () => {
     const globalDir = path.join(tempHome, ".zhixing");
     fs.mkdirSync(globalDir, { recursive: true });
     fs.writeFileSync(
-      path.join(globalDir, "config.json"),
+      path.join(globalDir, "config.jsonc"),
       JSON.stringify({
         llm: {
           main: { provider: "deepseek", model: "deepseek-chat" },
@@ -91,7 +91,7 @@ describe("loadConfig", () => {
 
     const config = loadConfig({
       cwd: tempProject,
-      env: { ZHIXING_CONFIG_PATH: path.join(globalDir, "config.json") },
+      env: { ZHIXING_CONFIG_PATH: path.join(globalDir, "config.jsonc") },
       noAutoCreate: true,
     });
 
@@ -103,7 +103,7 @@ describe("loadConfig", () => {
     const globalDir = path.join(tempHome, ".zhixing");
     fs.mkdirSync(globalDir, { recursive: true });
     fs.writeFileSync(
-      path.join(globalDir, "config.json"),
+      path.join(globalDir, "config.jsonc"),
       JSON.stringify({
         llm: {
           main: { provider: "deepseek", model: "deepseek-chat" },
@@ -113,7 +113,7 @@ describe("loadConfig", () => {
     );
 
     fs.writeFileSync(
-      path.join(tempProject, "zhixing.config.json"),
+      path.join(tempProject, "zhixing.config.jsonc"),
       JSON.stringify({
         llm: {
           main: { provider: "deepseek", model: "deepseek-reasoner" },
@@ -123,7 +123,7 @@ describe("loadConfig", () => {
 
     const config = loadConfig({
       cwd: tempProject,
-      env: { ZHIXING_CONFIG_PATH: path.join(globalDir, "config.json") },
+      env: { ZHIXING_CONFIG_PATH: path.join(globalDir, "config.jsonc") },
       noAutoCreate: true,
     });
 
@@ -139,7 +139,7 @@ describe("loadConfig", () => {
     const globalDir = path.join(tempHome, ".zhixing");
     fs.mkdirSync(globalDir, { recursive: true });
     fs.writeFileSync(
-      path.join(globalDir, "config.json"),
+      path.join(globalDir, "config.jsonc"),
       JSON.stringify({
         messaging: {
           feishu: { type: "feishu", options: { logLevel: "info" } },
@@ -149,7 +149,7 @@ describe("loadConfig", () => {
     );
 
     fs.writeFileSync(
-      path.join(tempProject, "zhixing.config.json"),
+      path.join(tempProject, "zhixing.config.jsonc"),
       JSON.stringify({
         messaging: {
           feishu: { defaultTarget: { to: "C12345" } },
@@ -160,7 +160,7 @@ describe("loadConfig", () => {
 
     const config = loadConfig({
       cwd: tempProject,
-      env: { ZHIXING_CONFIG_PATH: path.join(globalDir, "config.json") },
+      env: { ZHIXING_CONFIG_PATH: path.join(globalDir, "config.jsonc") },
       noAutoCreate: true,
     });
 
@@ -180,14 +180,14 @@ describe("loadConfig", () => {
     const globalDir = path.join(tempHome, ".zhixing");
     fs.mkdirSync(globalDir, { recursive: true });
     fs.writeFileSync(
-      path.join(globalDir, "config.json"),
+      path.join(globalDir, "config.jsonc"),
       JSON.stringify({
         intent: { cancelKeywords: ["全局词1", "全局词2"] },
       }),
     );
 
     fs.writeFileSync(
-      path.join(tempProject, "zhixing.config.json"),
+      path.join(tempProject, "zhixing.config.jsonc"),
       JSON.stringify({
         intent: { cancelKeywords: ["项目词"] },
       }),
@@ -195,7 +195,7 @@ describe("loadConfig", () => {
 
     const config = loadConfig({
       cwd: tempProject,
-      env: { ZHIXING_CONFIG_PATH: path.join(globalDir, "config.json") },
+      env: { ZHIXING_CONFIG_PATH: path.join(globalDir, "config.jsonc") },
       noAutoCreate: true,
     });
 
@@ -210,13 +210,13 @@ describe("loadConfig", () => {
     const globalDir = path.join(tempHome, ".zhixing");
     fs.mkdirSync(globalDir, { recursive: true });
     fs.writeFileSync(
-      path.join(globalDir, "config.json"),
+      path.join(globalDir, "config.jsonc"),
       JSON.stringify({ intent: { cancelKeywords: ["仅全局"] } }),
     );
 
     const config = loadConfig({
       cwd: tempProject,
-      env: { ZHIXING_CONFIG_PATH: path.join(globalDir, "config.json") },
+      env: { ZHIXING_CONFIG_PATH: path.join(globalDir, "config.jsonc") },
       noAutoCreate: true,
     });
 
@@ -224,7 +224,7 @@ describe("loadConfig", () => {
   });
 
   it("自动创建全局配置模板：含 llm.main 默认 + workspace 实际路径 + messaging 空对象", () => {
-    const configPath = path.join(tempHome, ".zhixing", "config.json");
+    const configPath = path.join(tempHome, ".zhixing", "config.jsonc");
 
     const config = loadConfig({
       cwd: tempProject,
@@ -243,7 +243,7 @@ describe("loadConfig", () => {
   });
 
   it("模板含 JSONC 注释——loader 容忍解析", () => {
-    const configPath = path.join(tempHome, ".zhixing", "config.json");
+    const configPath = path.join(tempHome, ".zhixing", "config.jsonc");
 
     loadConfig({
       cwd: tempProject,
@@ -260,7 +260,7 @@ describe("loadConfig", () => {
 
   it("自动创建不应覆盖已有配置", () => {
     const configDir = path.join(tempHome, ".zhixing");
-    const configPath = path.join(configDir, "config.json");
+    const configPath = path.join(configDir, "config.jsonc");
     fs.mkdirSync(configDir, { recursive: true });
     fs.writeFileSync(
       configPath,
@@ -282,7 +282,7 @@ describe("loadConfig", () => {
     const globalDir = path.join(tempHome, ".zhixing");
     fs.mkdirSync(globalDir, { recursive: true });
     fs.writeFileSync(
-      path.join(globalDir, "config.json"),
+      path.join(globalDir, "config.jsonc"),
       `{
   // 这是一行注释
   "llm": {
@@ -294,7 +294,7 @@ describe("loadConfig", () => {
 
     const config = loadConfig({
       cwd: tempProject,
-      env: { ZHIXING_CONFIG_PATH: path.join(globalDir, "config.json") },
+      env: { ZHIXING_CONFIG_PATH: path.join(globalDir, "config.jsonc") },
       noAutoCreate: true,
     });
 
@@ -304,7 +304,7 @@ describe("loadConfig", () => {
   it("JSON 语法错误的配置文件应抛 ConfigSchemaError（fail-fast）", () => {
     const configDir = path.join(tempHome, ".zhixing");
     fs.mkdirSync(configDir, { recursive: true });
-    const filePath = path.join(configDir, "config.json");
+    const filePath = path.join(configDir, "config.jsonc");
     fs.writeFileSync(filePath, "{ invalid json");
 
     let caught: unknown;
@@ -395,7 +395,7 @@ describe("writeConfig · 端到端持久化", () => {
   afterEach(() => cleanDir(tempHome));
 
   it("追加新 messaging 后磁盘文件包含所有原 messaging", async () => {
-    const filePath = path.join(tempHome, "config.json");
+    const filePath = path.join(tempHome, "config.jsonc");
     fs.writeFileSync(
       filePath,
       JSON.stringify({
@@ -431,8 +431,8 @@ describe("writeConfig · 端到端持久化", () => {
     expect(entries.filter((n) => n.endsWith(".tmp"))).toEqual([]);
   });
 
-  it("config.json JSON 损坏 → throw ConfigSchemaError，message 含路径", async () => {
-    const filePath = path.join(tempHome, "config.json");
+  it("config.jsonc JSON 损坏 → throw ConfigSchemaError，message 含路径", async () => {
+    const filePath = path.join(tempHome, "config.jsonc");
     fs.writeFileSync(filePath, "{ not json", "utf-8");
 
     let caught: unknown;

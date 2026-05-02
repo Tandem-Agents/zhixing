@@ -299,7 +299,7 @@ describe("createProviderRoles · 实例化与角色装配", () => {
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "zhixing-llm-roles-"));
-    configPath = path.join(tmpDir, "config.json");
+    configPath = path.join(tmpDir, "config.jsonc");
     credentialsPath = path.join(tmpDir, "credentials.json");
   });
 
