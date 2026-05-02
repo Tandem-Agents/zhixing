@@ -70,10 +70,20 @@ export async function runEventLoop(
   let main: MainFrame = { cursor: initialMainCursor(ctx, state) };
   const stack: PanelFrame[] = [];
 
+  // 三层退出防御：finally（正常 / throw）+ process.exit 兜底（process.exit 调用 / 异常未捕获），
+  // 防止 alternate screen buffer 切了但没切回导致用户终端"坏掉"。
+  // SIGKILL / OOM 不在覆盖范围（任何方案都救不回）。
+  const onProcessExit = (): void => {
+    ctx.stdout.write("\x1b[?1049l\x1b[?25h");
+  };
+  process.once("exit", onProcessExit);
+
   stream.start();
+  renderer.enterAlternateScreen();
+  renderer.hideCursor();
+
   try {
     while (true) {
-      // 渲染当前面板
       if (stack.length === 0) {
         renderMainPanel(ctx, state, main.cursor, renderer, main.errorMessage);
       } else {
@@ -82,8 +92,6 @@ export async function runEventLoop(
       }
 
       const key = await stream.next();
-
-      // 派发到当前 panel 的 handler
       const action = dispatchKey(ctx, state, main, stack, key);
 
       if (action.type === "exit") {
@@ -100,12 +108,12 @@ export async function runEventLoop(
       } else if (action.type === "pop") {
         stack.pop();
       }
-      // stay：状态已更新，下轮重渲染
     }
   } finally {
     stream.stop();
     renderer.showCursor();
-    renderer.clear();
+    renderer.exitAlternateScreen();
+    process.off("exit", onProcessExit);
   }
 }
 

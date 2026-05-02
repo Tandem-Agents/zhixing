@@ -6,10 +6,15 @@
  */
 
 const ANSI = {
-  CLEAR_SCREEN: "\x1b[2J",
+  /** 光标到 (1,1) 后清光标至屏幕末尾——不滚动到 scrollback（vs `\x1b[2J` 在 Windows Terminal 会滚动） */
+  CURSOR_HOME_ERASE: "\x1b[H\x1b[J",
   CURSOR_HOME: "\x1b[H",
   CURSOR_HIDE: "\x1b[?25l",
   CURSOR_SHOW: "\x1b[?25h",
+  /** 切换到 alternate screen buffer——main buffer（含 scrollback）冻结，TUI 渲染独立画布 */
+  ENTER_ALT_SCREEN: "\x1b[?1049h",
+  /** 切回 main screen buffer——alternate buffer 内容消失，用户原终端状态完整恢复 */
+  EXIT_ALT_SCREEN: "\x1b[?1049l",
   RESET: "\x1b[0m",
   BOLD: "\x1b[1m",
   DIM: "\x1b[2m",
@@ -24,7 +29,17 @@ export class Renderer {
 
   /** 清屏 + 光标到 (1,1)——每次重绘前调用 */
   clear(): void {
-    this.stdout.write(ANSI.CLEAR_SCREEN + ANSI.CURSOR_HOME);
+    this.stdout.write(ANSI.CURSOR_HOME_ERASE);
+  }
+
+  /** 进入 alternate screen buffer——TUI 行业标准，避免污染用户原终端 scrollback */
+  enterAlternateScreen(): void {
+    this.stdout.write(ANSI.ENTER_ALT_SCREEN);
+  }
+
+  /** 退出 alternate screen buffer——用户原终端状态完整恢复 */
+  exitAlternateScreen(): void {
+    this.stdout.write(ANSI.EXIT_ALT_SCREEN);
   }
 
   /** 隐藏光标——进入面板时调用，避免列表导航时光标随机跳 */
