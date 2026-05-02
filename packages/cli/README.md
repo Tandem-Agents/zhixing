@@ -35,27 +35,36 @@ pnpm test                      # 运行测试
 node packages/cli/dist/index.js [...]
 ```
 
-首次运行会自动检测必要字段；缺字段时在交互终端启动**首次配置向导**逐字段询问后写入 `~/.zhixing/credentials.json`。
+首次运行检测必要字段缺失时，在交互终端启动**基础配置编辑器**——五级面板（↑↓ Enter Esc Ctrl+C 导航），完成后事务性写入两份文件。
 
 ### 配置文件
 
-知行用户级配置分两份文件：
+知行用户级配置分两份文件——按"功能 vs 内容"分层：
 
-| 文件 | 内容 | 安全语义 |
+| 文件 | 内容 | 性质 |
 |---|---|---|
-| `~/.zhixing/config.json` | 公开元数据：`llm.main`、模型 ID、workspace、`channels.<id>.credentials` 非密字段（appId 等）、UI 偏好 | AI 可读；写需用户确认 |
-| `~/.zhixing/credentials.json` | 敏感字段：provider apiKey、channel 密 secret（appSecret 等）| AI 不可读、不可写 |
+| `~/.zhixing/config.jsonc` | 决策层：`llm.main` / `llm.secondary` 角色选择、`messaging` 启用列表、`workspace`、`agent` / `intent` / `network` 等使用偏好。**支持 JSONC 注释**——VSCode 等编辑器原生识别 | AI 可读；写需用户确认 |
+| `~/.zhixing/credentials.json` | 内容层：provider 完整字段（apiKey + baseUrl + protocol + 自定义 model 列表等）、channel 完整字段（appId + appSecret 等所有字段） | AI 不可读、不可写 |
+
+### 字段对称性
+
+```
+config.llm.main.provider="siliconflow"  ─refs─>  credentials.providers.siliconflow
+config.messaging.feishu={...options}    ─refs─>  credentials.channels.feishu
+```
+
+config 是"启用什么 / 用哪个"的引用；credentials 是资源完整定义。
 
 ### apiKey 来源（凭证唯一入口）
 
-1. **`credentials.json`**：`providers.<id>.apiKey`（首次配置向导写入；用户也可手动编辑）
-2. 缺失 → 启动期抛错并指引跑 `zhixing` 触发首次配置向导
+1. **`credentials.json`**：`providers.<id>.apiKey`（配置编辑器写入；用户也可手动编辑）
+2. 缺失 → 启动期触发配置编辑器（TTY）或 fail-fast（非 TTY）
 
-`config.json` **不接受**任何形态的 apiKey 字段——启动期 schema 校验会拒绝 `providers.<id>.apiKey` 与 channel 密字段，三段式（违反字段 / 原因 / 修复步骤）引导用户手工修复。
+`config.jsonc` **不接受**任何形态的凭证字段——启动期 schema 校验会拒绝 `providers` 字段、`channels` 旧名字段、`messaging.<id>.credentials` 嵌入凭证，三段式（违反字段 / 原因 / 修复步骤）引导用户手工修复。
 
-CI / Vault 等需要从外部源注入凭证的场景，由启动脚本（用户 / 运维侧）生成 `~/.zhixing/credentials.json`，知行只读 plaintext。
+CI / Vault 等场景由启动脚本（用户 / 运维侧）生成 `~/.zhixing/credentials.json`，知行只读 plaintext。
 
-项目级 `./zhixing.config.json` 以字段级 deep merge 覆盖全局 `config.json`（公开配置维度），凭证不参与项目级级联（用户级单一来源，避免泄漏）。
+项目级 `./zhixing.config.jsonc` 以字段级 deep merge 覆盖全局 `config.jsonc`（决策层），凭证不参与项目级级联（用户级单一来源，避免泄漏到 git）。
 
 ---
 

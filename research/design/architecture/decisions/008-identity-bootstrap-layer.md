@@ -37,13 +37,21 @@
 
 policy-engine 的 action 严格度排序（`block: 3 > confirm: 2 > audit: 1 > allow: 0`，[`policy-engine.ts:28-33`](../../../../packages/core/src/security/policy-engine.ts)）保证：当请求同时命中 `bi-zhixing-credentials-block` 和 `bi-zhixing-config-write`，block 优先，credentials.json 永不被 AI 触达。
 
-### 决策 3：首次启动判定 = 必要字段是否齐全；缺失则程序级向导
+### 决策 3：基础配置编辑器（程序级，可复用）
 
-- **判定**：纯函数 `checkBootstrap(config, credentials) → MissingField[]`，输入两份文件的当前状态，输出缺失字段列表。"必要字段"指**没有它就无法进入正常使用**的字段——主 LLM 的 provider/model（在 `config.llm.main` 里）+ 该 provider 的 apiKey（在 `credentials.providers[id].apiKey` 里）。可选字段（secondary 角色、workspace 自定义、channel 等）缺失不触发引导。
-- **判定时机**：CLI / server / channel 各自启动时，在初始化 LLM provider 之前。
-- **引导**：缺失 + stdin 是 TTY → CLI 启动期同步运行**程序级向导**（不依赖任何 LLM——首次使用时连 LLM 都还没起来，引导路径不能依赖 AI）；缺失 + 非 TTY → fail-fast 报错，引用文件位置和 schema 让用户在交互终端跑 `zhixing` 完成首次配置。
-- **server / channel 入口**：检测到必要字段缺失时**拒绝启动**，错误信息要求用户先在 CLI 完成首次引导。引导本身不内联——daemon / 远程消息流没 TTY。
-- **解耦**：检测层是纯函数（`@zhixing/providers`）；引导逻辑层是流程编排，依赖一个抽象的 `BootstrapInteraction` 接口；交互实现是 CLI 的 readline 适配。三层独立，方便未来替换或加新入口。
+- **判定**（按 section 拆分）：两个独立纯函数 `checkBootModel` + `checkBootMessaging`——caller 按入口模式组合调用。"必要字段"指**没有它就无法进入正常使用**的字段：
+  - model section：主 LLM 的 provider / model + 该 provider 的 apiKey；secondary 异 provider 时该 provider 的 apiKey
+  - messaging section（仅 server 模式）：已启用 channel 的必填凭证字段（如 feishu 的 appId / appSecret）
+  其他字段（workspace 自定义、agent / intent / network 偏好等）不触发编辑器。
+- **判定时机**：CLI / server 启动时，在初始化 LLM provider / channel adapter 之前。
+- **配置编辑器**（独立模块 `@zhixing/cli/src/config-editor/`）：
+  - 不绑定首次配置场景——任何调用方传 `sections` + `title` 即可触发
+  - 三种入口共享：首次配置（CLI 启动）、服务模式初始化（serve 启动）、未来 REPL `/config` slash 命令
+  - 五级面板架构（main / list / entity / input / model-list / add-model），↑↓ Enter Esc Ctrl+C 导航
+  - 事务性写盘：所有改动暂存内存，仅 [完成] 触发 `writeConfig + writeCredentials`，保证两文件不会半致状态
+- **触发条件**：缺失 + stdin 是 TTY → 启动期同步进编辑器（不依赖任何 LLM——首次使用时连 LLM 都还没起来，引导路径不能依赖 AI）；缺失 + 非 TTY → fail-fast 退出码 2，引导用户在 TTY 终端跑 `zhixing`。
+- **server 入口**：检测缺失时同样可触发编辑器（如果是 TTY）；非 TTY 时拒绝启动并引导用户先在 CLI 完成基础配置。
+- **解耦**：检测层是纯函数（`config-editor/checks/`）；编辑器是独立模块（`config-editor/`），仅依赖 stdin/stdout/writers 接口；CLI / serve 入口通过 `runStartupCheck` facade 调用。三层独立，方便未来替换或加新入口。
 
 ## 依据
 
