@@ -67,7 +67,7 @@ export async function runEventLoop(
   const stream: KeyEventStream = createKeyEventStream(ctx.stdin);
 
   let state: WorkingState = createInitialState(ctx.initialConfig, ctx.initialCredentials);
-  let main: MainFrame = { cursor: initialMainCursor(ctx, state) };
+  let main: MainFrame = { cursor: initialMainCursor() };
   const stack: PanelFrame[] = [];
 
   // 三层退出防御：finally（正常 / throw）+ process.exit 兜底（process.exit 调用 / 异常未捕获），
@@ -88,7 +88,7 @@ export async function runEventLoop(
         renderMainPanel(ctx, state, main.cursor, renderer, main.errorMessage);
       } else {
         const top = stack[stack.length - 1]!;
-        renderTopPanel(ctx, state, top, renderer);
+        renderTopPanel(state, top, renderer);
       }
 
       const key = await stream.next();
@@ -118,7 +118,6 @@ export async function runEventLoop(
 }
 
 function renderTopPanel(
-  ctx: ConfigEditorContext,
   state: WorkingState,
   frame: PanelFrame,
   renderer: Renderer,

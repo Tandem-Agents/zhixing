@@ -123,6 +123,18 @@ export interface ProviderCredentialEntry {
    *   - 为新发布的模型名临时注入 budget 信息而不升级适配器
    */
   modelOverrides?: Record<string, ModelBudgetOverride>;
+
+  /**
+   * 用户在配置编辑器中追加的自定义模型 ID 列表（去重保序）。
+   *
+   * 仅供 UI 展示——配置编辑器把"preset 默认 + 用户自定义"合并展示在模型选择面板，
+   * 让用户可挑选适配器 catalog 之外的模型 ID。
+   *
+   * **不影响运行时 declaredModels 解析**：`resolveProvider.declaredModels` 仅来自
+   * `preset.knownModels`（带 budget 信息的 catalog）；用户自定义模型 ID 通过
+   * `modelOverrides[modelId]` 显式注入 budget，或由 `protocol-defaults` 兜底。
+   */
+  models?: string[];
 }
 
 /**

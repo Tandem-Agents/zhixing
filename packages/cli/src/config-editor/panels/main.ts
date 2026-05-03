@@ -11,7 +11,6 @@
 
 import type {
   ConfigEditorContext,
-  ConfigEditorResult,
   KeyEvent,
   PanelAction,
   Section,
@@ -210,13 +209,11 @@ function collectValidationErrors(
 }
 
 /**
- * 计算初始光标位置——指向第一个未配置的 entry，没有则指向第一项。
+ * 计算初始光标位置——目前固定指向第一项。
  *
- * 用户首次进入面板时，光标自然落在最需要操作的字段上。
+ * 未来可基于 ctx + state 计算"第一个未配置的 entry"以引导用户，但当前没有
+ * 强需求；保持简单，不引入未用参数。
  */
-export function initialMainCursor(
-  ctx: ConfigEditorContext,
-  state: WorkingState,
-): MainPanelCursor {
+export function initialMainCursor(): MainPanelCursor {
   return { index: 0 };
 }

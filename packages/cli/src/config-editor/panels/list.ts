@@ -41,7 +41,7 @@ interface ListPanelMeta {
 // ─── 三种 list 的 items 构造 ───
 
 function buildProviderListMeta(
-  state: WorkingState,
+  _state: WorkingState,
   descriptor: Extract<PanelDescriptor, { kind: "provider-list" }>,
 ): ListPanelMeta {
   return {
