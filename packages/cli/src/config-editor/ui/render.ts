@@ -10,6 +10,8 @@
  * 让支持的终端缓存 BSU..ESU 之间的输出一次性 render，零闪烁。
  */
 
+import type { Status, StatusLevel } from "../types.js";
+
 const ANSI = {
   /** 光标到 (1,1) 后清光标至屏幕末尾——不滚动到 scrollback（vs `\x1b[2J` 在 Windows Terminal 会滚动） */
   CURSOR_HOME_ERASE: "\x1b[H\x1b[J",
@@ -124,13 +126,49 @@ export class Renderer {
     return `${ANSI.RED}${text}${ANSI.RESET}`;
   }
 
-  /** 列表项行：> 高亮 / 空格占位 + 标签 + 右侧状态 */
-  listItem(selected: boolean, label: string, status?: string): string {
+  /**
+   * 把文本包装成可点击超链接（OSC 8 协议）。支持的终端（iTerm2 / Windows Terminal /
+   * kitty / mintty 等）会渲染成可点击；不支持的终端忽略转义、只看到原文，行为安全。
+   */
+  hyperlink(url: string, text?: string): string {
+    return `\x1b]8;;${url}\x1b\\${text ?? url}\x1b]8;;\x1b\\`;
+  }
+
+  /**
+   * 列表项行：▸ 高亮 / 空格占位 + 标签 + 右侧副文本。
+   *
+   * `secondary` 副文本两种用法（无 info-level 概念，靠类型区分）：
+   *   - Status 对象：业务状态——按 level 染色（ready=绿/pending=黄/disabled=灰）
+   *   - 纯字符串：辅助描述（如选项的 description）——dim 灰显，无业务状态
+   *
+   * 不传 = 纯标签项（如按钮）。
+   */
+  listItem(
+    selected: boolean,
+    label: string,
+    secondary?: Status | string,
+  ): string {
     const cursor = selected ? this.cyan("▸") : " ";
     const labelText = selected ? this.bold(label) : label;
-    if (status) {
-      return `  ${cursor} ${labelText}${" ".repeat(Math.max(2, 40 - label.length))}${this.dim(status)}`;
+    if (secondary !== undefined) {
+      const text = typeof secondary === "string" ? secondary : secondary.text;
+      const colored =
+        typeof secondary === "string"
+          ? this.dim(text)
+          : this.colorByLevel(text, secondary.level);
+      return `  ${cursor} ${labelText}${" ".repeat(Math.max(2, 40 - label.length))}${colored}`;
     }
     return `  ${cursor} ${labelText}`;
+  }
+
+  private colorByLevel(text: string, level: StatusLevel): string {
+    switch (level) {
+      case "ready":
+        return this.green(text);
+      case "pending":
+        return this.yellow(text);
+      case "disabled":
+        return this.dim(text);
+    }
   }
 }

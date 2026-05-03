@@ -13,9 +13,12 @@ import type {
   ConfigEditorContext,
   KeyEvent,
   PanelAction,
+  PanelDescriptor,
   Section,
+  Status,
   WorkingState,
 } from "../types.js";
+import { deriveEntryIssues, deriveEntryStatus } from "../entry.js";
 import { Renderer } from "../ui/render.js";
 import { getSections } from "../sections/index.js";
 
@@ -28,9 +31,12 @@ interface MainPanelItem {
   kind: "section-entry";
   sectionId: string;
   entryIndex: number;
-  enterTarget?: import("../types.js").PanelDescriptor;
+  enterTarget?: PanelDescriptor;
   label: string;
-  status: string;
+  /** 派生自 entry 的 statusText + issues + disabled——caller 不直接声明 */
+  status: Status;
+  /** 阻塞 issues——空数组 = 此 entry 完整 */
+  issues: readonly string[];
 }
 interface MainPanelButton {
   kind: "button";
@@ -52,7 +58,9 @@ function buildOptions(
       entryIndex: idx,
       enterTarget: entry.enterTarget,
       label: entry.label,
-      status: entry.status,
+      // Status / issues 由派生 helper 从 EntryState 派生——确保两者从同源出
+      status: deriveEntryStatus(entry),
+      issues: deriveEntryIssues(entry),
     }));
     return { section, entries };
   });
@@ -65,6 +73,16 @@ function buildOptions(
   options.push({ kind: "button", label: "取消并退出", action: "cancel" });
 
   return { sections, options };
+}
+
+/**
+ * 收集所有 entries 的 issues——progress 计数 + 完成校验的**单一数据源**。
+ * 保证"待补充 N 项"与点击完成后的错误数永远一致。
+ */
+function collectAllIssues(
+  sections: Array<{ section: Section; entries: MainPanelItem[] }>,
+): string[] {
+  return sections.flatMap(({ entries }) => entries.flatMap((e) => e.issues));
 }
 
 export function renderMainPanel(
@@ -84,14 +102,18 @@ export function renderMainPanel(
 
   if (ctx.header) {
     if (ctx.header.workspaceRoot) {
-      renderer.writeLine(`  工作目录：${ctx.header.workspaceRoot}（已创建）`);
+      renderer.writeLine(`  工作目录：${ctx.header.workspaceRoot}`);
     }
-    renderer.writeLine(renderer.dim(`  配置文件：${ctx.header.configPath}`));
-    renderer.writeLine(renderer.dim(`  凭证文件：${ctx.header.credentialsPath}`));
+    renderer.writeLine(
+      renderer.dim(
+        `  配置：${ctx.header.configPath} · 凭证：${ctx.header.credentialsPath}`,
+      ),
+    );
     renderer.writeLine("");
   }
 
   const { sections, options } = buildOptions(ctx, state);
+  const pending = collectAllIssues(sections).length;
 
   let runningIndex = 0;
   for (const { section, entries } of sections) {
@@ -105,12 +127,20 @@ export function renderMainPanel(
     renderer.writeLine("");
   }
 
-  renderer.writeLine(`  ${renderer.bold("操作")}`);
+  const progressLabel =
+    pending === 0
+      ? renderer.green("全部就绪")
+      : renderer.yellow(`待补充 ${pending} 项`);
+  renderer.writeLine(`  ${renderer.bold("操作")}    ${progressLabel}`);
   renderer.writeLine("");
   for (const option of options) {
     if (option.kind !== "button") continue;
     const selected = runningIndex === cursor.index;
-    renderer.writeLine(renderer.listItem(selected, `[ ${option.label} ]`));
+    const label =
+      option.action === "complete" && pending > 0
+        ? "完成（请先补全必填项）"
+        : option.label;
+    renderer.writeLine(renderer.listItem(selected, `[ ${label} ]`));
     runningIndex++;
   }
 
@@ -140,7 +170,7 @@ export function handleMainPanelKey(
   cursor: MainPanelCursor,
   key: KeyEvent,
 ): MainPanelKeyResult {
-  const { options } = buildOptions(ctx, state);
+  const { sections, options } = buildOptions(ctx, state);
   const max = options.length - 1;
 
   switch (key.type) {
@@ -166,8 +196,8 @@ export function handleMainPanelKey(
         if (selected.action === "cancel") {
           return { action: { type: "exit", result: { kind: "cancelled" } }, cursor };
         }
-        // complete：校验所有 sections
-        const errors = collectValidationErrors(ctx, state);
+        // complete：校验所有 entries 的 issues（与进度计数同源）
+        const errors = collectAllIssues(sections);
         if (errors.length > 0) {
           return {
             action: { type: "stay", state },
@@ -195,17 +225,6 @@ export function handleMainPanelKey(
     default:
       return { action: { type: "stay", state }, cursor };
   }
-}
-
-function collectValidationErrors(
-  ctx: ConfigEditorContext,
-  state: WorkingState,
-): string[] {
-  const errors: string[] = [];
-  for (const section of getSections(ctx.sections)) {
-    errors.push(...section.validate(state));
-  }
-  return errors;
 }
 
 /**

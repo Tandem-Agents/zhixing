@@ -1,9 +1,8 @@
 /**
  * L2 / L4b 列表面板：通用"选一项"交互。
  *
- * 三种 list 共用同一渲染 + 导航逻辑，items 由 descriptor.kind 决定来源：
+ * 两种 list 共用同一渲染 + 导航逻辑，items 由 descriptor.kind 决定来源：
  *   - provider-list：SUPPORTED_PROVIDERS（model role 选服务商）
- *   - channel-list：SUPPORTED_CHANNELS（messaging 选 channel）
  *   - model-list：preset.defaultModel + credentials.providers.<id>.models + [+ 添加自定义]
  *
  * 导航：↑↓ 选 / Enter 进入 / Esc pop / Ctrl+C 退出
@@ -23,12 +22,15 @@ import {
   writeModelRole,
 } from "../state.js";
 import { SUPPORTED_PROVIDERS } from "../providers-registry.js";
-import { SUPPORTED_CHANNELS } from "../channels-registry.js";
 
 interface ListItem {
   label: string;
-  /** 右侧描述（如 provider id / 状态） */
-  status?: string;
+  /**
+   * 右侧辅助描述——纯展示文本（如 provider description / "预设默认"），
+   * dim 渲染。**不是业务状态**——list 项无 ready/pending/disabled 概念。
+   * 与 entity panel 的 row.status 区分：那是带 level 的业务状态。
+   */
+  description?: string;
   /** Enter 时执行的动作 */
   onEnter: (state: WorkingState) => PanelAction;
 }
@@ -48,28 +50,11 @@ function buildProviderListMeta(
     title: `${descriptor.role === "main" ? "主模型" : "辅助模型"} · 选择服务商`,
     items: SUPPORTED_PROVIDERS.map((p) => ({
       label: p.label,
-      status: p.description,
+      description: p.description,
       onEnter: (s) => ({
         type: "navigate",
         state: s,
         panel: { kind: "provider-config", role: descriptor.role, providerId: p.id },
-      }),
-    })),
-  };
-}
-
-function buildChannelListMeta(
-  _state: WorkingState,
-): ListPanelMeta {
-  return {
-    title: "消息通道 · 选择通道",
-    items: SUPPORTED_CHANNELS.map((c) => ({
-      label: c.label,
-      status: c.id,
-      onEnter: (s) => ({
-        type: "navigate",
-        state: s,
-        panel: { kind: "channel-config", channelId: c.id },
       }),
     })),
   };
@@ -100,7 +85,7 @@ function buildModelListMeta(
   const currentRole = readModelRole(state, descriptor.role);
   const items: ListItem[] = allModels.map((modelId) => ({
     label: modelId,
-    status: modelId === preset?.defaultModel ? "预设默认" : undefined,
+    description: modelId === preset?.defaultModel ? "预设默认" : undefined,
     onEnter: (s) => {
       const next = writeModelRole(
         s,
@@ -139,8 +124,6 @@ function resolveListMeta(
   switch (descriptor.kind) {
     case "provider-list":
       return buildProviderListMeta(state, descriptor);
-    case "channel-list":
-      return buildChannelListMeta(state);
     case "model-list":
       return buildModelListMeta(state, descriptor);
     default:
@@ -170,7 +153,9 @@ export function renderListPanel(
   for (let i = 0; i < meta.items.length; i++) {
     const item = meta.items[i]!;
     const selected = i === cursor.index;
-    renderer.writeLine(renderer.listItem(selected, item.label, item.status));
+    renderer.writeLine(
+      renderer.listItem(selected, item.label, item.description),
+    );
   }
 
   renderer.writeLine("");

@@ -48,6 +48,8 @@ import {
 interface PanelFrame {
   descriptor: PanelDescriptor;
   cursor: { index: number };
+  /** 当前面板的错误消息——entity 面板按钮校验失败时设置，下次 render 显示 */
+  errorMessage?: string;
 }
 
 interface MainFrame {
@@ -132,13 +134,12 @@ function renderTopPanel(
       // main 不在 stack 中
       return;
     case "provider-list":
-    case "channel-list":
     case "model-list":
       renderListPanel(state, d, frame.cursor, renderer);
       return;
     case "provider-config":
     case "channel-config":
-      renderEntityPanel(state, d, frame.cursor, renderer);
+      renderEntityPanel(state, d, frame.cursor, renderer, frame.errorMessage);
       return;
     case "input":
       renderInputPanel(state, d, renderer);
@@ -169,7 +170,6 @@ function dispatchKey(
 
   switch (d.kind) {
     case "provider-list":
-    case "channel-list":
     case "model-list": {
       const result = handleListPanelKey(state, d, top.cursor, key);
       top.cursor = result.cursor;
@@ -179,6 +179,7 @@ function dispatchKey(
     case "channel-config": {
       const result = handleEntityPanelKey(state, d, top.cursor, key);
       top.cursor = result.cursor;
+      top.errorMessage = result.errorMessage;
       return result.action;
     }
     case "input":

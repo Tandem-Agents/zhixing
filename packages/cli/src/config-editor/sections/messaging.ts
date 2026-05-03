@@ -3,30 +3,29 @@
  *
  * L1 主面板的"消息通道"分组——列出当前阶段支持的 channel 类型，每项显示启用状态。
  * 进入后导航到 channel-config 配置该 channel。
+ *
+ * 字段级 issues 直接复用 `checkMessaging`——**单一规则源**。
+ * EntryState 三态：未启用 → disabled；已启用 + 字段齐 → ready；已启用 + 缺字段 → blocked。
  */
 
-import type { Section, SectionEntry, WorkingState } from "../types.js";
-import { isMessagingEnabled, readChannelEntry } from "../state.js";
+import type {
+  EntryState,
+  Section,
+  SectionEntry,
+  WorkingState,
+} from "../types.js";
+import { isMessagingEnabled } from "../state.js";
 import { SUPPORTED_CHANNELS } from "../channels-registry.js";
+import { checkMessaging, type MessagingIssue } from "../checks/messaging.js";
 
 export const messagingSection: Section = {
   id: "messaging",
-  title: "消息通道（启用以接收外部消息）",
-  entries: (state) => SUPPORTED_CHANNELS.map((channel) => buildEntry(state, channel.id, channel.label)),
-  validate: (state) => {
-    const issues: string[] = [];
-    const messaging = state.config.messaging ?? {};
-    for (const channelId of Object.keys(messaging)) {
-      const channelDef = SUPPORTED_CHANNELS.find((c) => c.id === channelId);
-      if (!channelDef) continue;
-      const creds = readChannelEntry(state, channelId) ?? {};
-      for (const field of channelDef.requiredFields) {
-        if (!creds[field.id]) {
-          issues.push(`${channelDef.label} - ${field.label} 未填`);
-        }
-      }
-    }
-    return issues;
+  title: "消息通道",
+  entries: (state) => {
+    const allIssues = checkMessaging(state.config, state.credentials);
+    return SUPPORTED_CHANNELS.map((channel) =>
+      buildEntry(state, channel.id, channel.label, allIssues),
+    );
   },
 };
 
@@ -34,20 +33,37 @@ function buildEntry(
   state: WorkingState,
   channelId: string,
   label: string,
+  allIssues: MessagingIssue[],
 ): SectionEntry {
   const enabled = isMessagingEnabled(state, channelId);
-  const creds = readChannelEntry(state, channelId);
-  let status: string;
-  if (!enabled) {
-    status = "未启用";
-  } else {
-    const channelDef = SUPPORTED_CHANNELS.find((c) => c.id === channelId);
-    const allFilled = channelDef?.requiredFields.every((f) => creds?.[f.id]) ?? false;
-    status = allFilled ? "已启用" : "已启用（缺凭证字段）";
-  }
+  const myIssues = allIssues.filter((i) => i.channelId === channelId);
+
   return {
     label,
-    status,
+    state: buildEntryState(enabled, myIssues),
     enterTarget: { kind: "channel-config", channelId },
+  };
+}
+
+/**
+ * 把 (enabled, issues) 折叠成 EntryState 三态。
+ *
+ * 命名约定 + 为何"故意不抽公共"详见 entry.ts 顶部文档。
+ */
+function buildEntryState(
+  enabled: boolean,
+  myIssues: MessagingIssue[],
+): EntryState {
+  // 未启用——disabled；issues 必为空（checkMessaging 只查已启用 channel）
+  if (!enabled) {
+    return { kind: "disabled", statusText: "未启用" };
+  }
+  if (myIssues.length === 0) {
+    return { kind: "ready", statusText: "已启用" };
+  }
+  return {
+    kind: "blocked",
+    statusText: "已启用（待补充凭证字段）",
+    issues: myIssues.map((i) => i.label),
   };
 }

@@ -7,7 +7,7 @@
  * 流程：
  *   1. loadConfig + loadCredentials —— schema 损坏 → schema-error
  *   2. validateConfigSemantics —— 含废弃字段 → semantic-error
- *   3. checkBootModel + checkBootMessaging（按 mode）—— 缺失则触发编辑器
+ *   3. checkModel + checkMessaging（按 mode）—— 缺失则触发编辑器
  *   4. 编辑器完成 → reload 后返回 ready
  *   5. 全部齐全 → 直接 ready
  *
@@ -34,8 +34,8 @@ import {
   type ZhixingCredentials,
 } from "@zhixing/providers";
 import {
-  checkBootMessaging,
-  checkBootModel,
+  checkMessaging,
+  checkModel,
   runConfigEditor,
   type SectionId,
 } from "./config-editor/index.js";
@@ -111,17 +111,17 @@ export async function runStartupCheck(
   const missingSections: SectionId[] = [];
   const missingLabels: string[] = [];
 
-  const modelMissing = checkBootModel(config, credentials);
-  if (modelMissing.length > 0) {
+  const modelIssues = checkModel(config, credentials);
+  if (modelIssues.length > 0) {
     missingSections.push("model");
-    missingLabels.push(...modelMissing.map((m) => m.label));
+    missingLabels.push(...modelIssues.map((i) => i.label));
   }
 
   if (options.mode === "server") {
-    const messagingMissing = checkBootMessaging(config, credentials);
-    if (messagingMissing.length > 0) {
+    const messagingIssues = checkMessaging(config, credentials);
+    if (messagingIssues.length > 0) {
       missingSections.push("messaging");
-      missingLabels.push(...messagingMissing.map((m) => m.label));
+      missingLabels.push(...messagingIssues.map((i) => i.label));
     }
   }
 

@@ -44,6 +44,8 @@ interface InputFieldMeta {
   hint: string;
   example: string;
   sensitive: boolean;
+  /** 文档链接——单独渲染为可点击行（OSC 8）；可选 */
+  docUrl?: string;
   /** 已存值——进入编辑面板时显示（敏感字段会 mask）；用户开始输入即覆盖 */
   currentValue: (state: WorkingState) => string | undefined;
   /** 提交时把 buffer 写入 state */
@@ -63,6 +65,7 @@ function resolveInputField(
       hint: provider.apiKeyHint,
       example: provider.apiKeyExample,
       sensitive: true,
+      docUrl: provider.docUrl,
       currentValue: (state) => state.credentials.providers?.[providerId!]?.apiKey,
       apply: (state, value) =>
         patchProviderEntry(state, providerId!, { apiKey: value }),
@@ -81,6 +84,7 @@ function resolveInputField(
       hint: field.hint,
       example: field.example,
       sensitive: field.sensitive,
+      docUrl: field.docUrl,
       currentValue: (state) => state.credentials.channels?.[channelId!]?.[channelFieldId!],
       apply: (state, value) =>
         patchChannelEntry(state, channelId!, { [channelFieldId!]: value }),
@@ -116,6 +120,12 @@ export function renderInputPanel(
   for (const line of meta.hint.split("\n")) {
     renderer.writeLine(`  ${line}`);
   }
+  if (meta.docUrl) {
+    // 单独的文档行——OSC 8 hyperlink；不支持的终端忽略转义只看到原文，行为安全。
+    renderer.writeLine(
+      `  ${renderer.dim("文档：")}${renderer.hyperlink(meta.docUrl)}`,
+    );
+  }
   renderer.writeLine("");
   renderer.writeLine(`  ${renderer.dim(`示例：${meta.example}`)}`);
   renderer.writeLine("");
@@ -128,17 +138,13 @@ export function renderInputPanel(
   if (hasExisting && isFreshInput) {
     const masked = meta.sensitive ? maskForDisplay(existingValue!) : existingValue;
     renderer.writeLine(
-      `  ${renderer.dim(`当前已暂存：${masked}（直接 Enter 保留 / 输入新值替换）`)}`,
+      `  ${renderer.dim(`当前：${masked}（Enter 保留 / 输入新值覆盖）`)}`,
     );
     renderer.writeLine("");
-    renderer.writeLine(
-      renderer.dim("  Enter 保存    Esc 取消    Ctrl+C 退出向导"),
-    );
-  } else {
-    renderer.writeLine(
-      renderer.dim("  Enter 保存    Esc 取消    Ctrl+C 退出向导"),
-    );
   }
+  renderer.writeLine(
+    renderer.dim("  Enter 保存    Esc 取消    Ctrl+C 退出"),
+  );
   renderer.writeLine("");
 
   // 输入行写在最后且不带 \n——让终端光标自然停在 buffer 之后
@@ -202,7 +208,7 @@ export function renderAddModelPanel(
   renderer.writeLine("");
   renderer.writeLine(`  输入要添加的 model id（按 ${provider?.label ?? "服务商"} 文档命名）`);
   renderer.writeLine("");
-  renderer.writeLine(renderer.dim("  Enter 添加    Esc 取消    Ctrl+C 退出向导"));
+  renderer.writeLine(renderer.dim("  Enter 添加    Esc 取消    Ctrl+C 退出"));
   renderer.writeLine("");
 
   // 输入行写在最后且不带 \n——让终端光标自然停在 buffer 之后

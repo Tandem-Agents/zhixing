@@ -31,17 +31,24 @@ export type {
   ConfigEditorContext,
   ConfigEditorResult,
   ConfigEditorWriters,
+  EntryState,
   KeyEvent,
+  ModelRole,
   PanelDescriptor,
   Section,
   SectionEntry,
   SectionId,
+  Status,
+  StatusLevel,
   WorkingState,
 } from "./types.js";
 
-// ─── 检测函数再导出（caller 用来决定 sections） ───
-export { checkBootModel, type BootModelMissing } from "./checks/model.js";
-export { checkBootMessaging, type BootMessagingMissing } from "./checks/messaging.js";
+// ─── 派生器再导出（外部如需复用派生逻辑） ───
+export { deriveEntryIssues, deriveEntryStatus } from "./entry.js";
+
+// ─── 检测函数再导出——单一规则源，sections + startup 共用 ───
+export { checkModel, type ModelIssue } from "./checks/model.js";
+export { checkMessaging, type MessagingIssue } from "./checks/messaging.js";
 
 // ─── Section 注册再导出（caller 用来"打开全部 sections"等场景） ───
 export { ALL_SECTION_IDS } from "./sections/index.js";

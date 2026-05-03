@@ -37,8 +37,6 @@ export type PanelDescriptor =
   | { kind: "model-list"; role: ModelRole; providerId: string }
   /** L5：添加自定义模型（输入 model id） */
   | { kind: "add-model"; role: ModelRole; providerId: string }
-  /** L2 (messaging)：选 channel */
-  | { kind: "channel-list" }
   /** L3 (messaging)：channel 配置（appId + appSecret + 启用按钮） */
   | { kind: "channel-config"; channelId: string };
 
@@ -113,9 +111,11 @@ export interface FieldSpec {
  * 一个 Section 是用户视角的配置块（"主/辅模型" / "消息通道"）。
  *
  * Section 提供：
- *   - 在 L1 主面板显示的入口项 + 已配状态
+ *   - 在 L1 主面板显示的入口项 + 已配状态 + 阻塞 issues
  *   - 进入后的导航树（panel 跳转目标）
- *   - 完成时的校验逻辑
+ *
+ * 校验逻辑不再在 Section 上——每个 entry 自带 `issues`，作为 progress 计数与
+ * 完成校验的单一数据源（避免"按 entry 数 vs 按字段数"的粒度错配）。
  */
 export interface Section {
   id: SectionId;
@@ -123,18 +123,48 @@ export interface Section {
   title: string;
   /** L1 主面板显示的入口项列表（每项一行） */
   entries: (state: WorkingState) => SectionEntry[];
-  /**
-   * 必填项是否齐全——L1 完成按钮触发时校验。
-   * 返回缺失字段的人类可读描述列表（空数组表示通过）。
-   */
-  validate: (state: WorkingState) => string[];
 }
 
+/**
+ * 配置项的就绪级别——驱动 UI 状态的视觉染色（绿/黄/灰）：
+ *   - ready：已配齐，可用（绿）
+ *   - pending：必填但未完成，需用户操作（黄）
+ *   - disabled：当前不需要（如未启用的 channel、有 fallback 的可选项），灰显
+ */
+export type StatusLevel = "ready" | "pending" | "disabled";
+
+/**
+ * 状态二元组——文本 + 等级一体。供已派生场景（entity row / 派生后 entry）使用。
+ *
+ * `SectionEntry` 不直接 carry Status，而是声明底层事实（discriminated `EntryState`），
+ * 由 `deriveEntryStatus`（位于 entry.ts）派生 Status。
+ */
+export interface Status {
+  level: StatusLevel;
+  /** 当前状态的人类可读描述（如 "硅基流动 · GPT-4" / "待填"） */
+  text: string;
+}
+
+/**
+ * Entry 的状态——discriminated union 强制三态互斥：
+ *
+ *   - `ready`：已配齐
+ *   - `disabled`：未启用 / 有 fallback 的可选项（不阻塞完成；不可有 issues）
+ *   - `blocked`：必填未完成（必须有 issues；不可同时声明 disabled）
+ *
+ * 这层 union 让 caller **类型层面无法**写出"ready 但有 issues"或"disabled 同时
+ * 有 issues"的矛盾——把 `ready/disabled/blocked` 与 `issues` 的耦合关系编译期固化。
+ */
+export type EntryState =
+  | { kind: "ready"; statusText: string }
+  | { kind: "disabled"; statusText: string }
+  | { kind: "blocked"; statusText: string; issues: readonly string[] };
+
 export interface SectionEntry {
-  /** 显示标签（含 "（必选）" / "（建议配置...）" 等说明） */
+  /** 显示标签（保持简洁，不塞括号说明；解释挪到 statusText 或独立 hint） */
   label: string;
-  /** 当前状态的右侧描述（如 "未配置" / "硅基流动 · Pro/MiniMaxAI/MiniMax-M2.5"） */
-  status: string;
+  /** 状态——三态 discriminated union；issues 仅 blocked 态可声明 */
+  state: EntryState;
   /** Enter 时跳转的目标 panel；未提供 = 该项不可进入 */
   enterTarget?: PanelDescriptor;
 }
