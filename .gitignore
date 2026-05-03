@@ -22,7 +22,8 @@ Desktop.ini
 .claude/settings.local.json
 
 # Editor / IDE
-.vscode/
+# 用 .vscode/* 而不是 .vscode/——后者整目录排除时下面的 !negation 无效（git 规则）
+.vscode/*
 !.vscode/settings.json
 !.vscode/extensions.json
 .idea/

@@ -1,0 +1,6 @@
+{
+  // 新 key（vscode 1.95+ 推荐）—— 覆盖 JS / TS 两种语言
+  "js/ts.tsdk.path": "packages/cli/node_modules/typescript/lib",
+  // 旧 key（cursor 等较老 vscode fork 仍依赖）—— 双写最大兼容
+  "typescript.tsdk": "packages/cli/node_modules/typescript/lib"
+}
