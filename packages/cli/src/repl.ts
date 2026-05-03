@@ -62,8 +62,10 @@ import {
   renderWelcome,
   renderUsageReport,
   renderContextVisual,
+  type Renderer,
 } from "./render.js";
 import { RuntimeSession } from "./runtime/session.js";
+import { handleConfigCommand } from "./runtime/config-command.js";
 import { parseTaskUsageFromMessages } from "./parse-task-usage.js";
 import {
   handleTrustCommand,
@@ -122,7 +124,11 @@ export interface ReplOptions {
 
 // ─── 斜杠命令 ───
 
-function buildSlashCommands(rl: readline.Interface): Record<
+function buildSlashCommands(
+  rl: readline.Interface,
+  session: RuntimeSession,
+  renderer: Renderer,
+): Record<
   string,
   {
     description: string;
@@ -133,7 +139,7 @@ function buildSlashCommands(rl: readline.Interface): Record<
     "/help": {
       description: "显示帮助信息",
       handler: (_state) => {
-        const commands = buildSlashCommands(rl);
+        const commands = buildSlashCommands(rl, session, renderer);
         console.log(`\n${chalk.bold("可用命令：")}`);
         for (const [cmd, { description }] of Object.entries(commands)) {
           console.log(
@@ -632,6 +638,12 @@ function buildSlashCommands(rl: readline.Interface): Record<
         rl.close();
       },
     },
+    "/config": {
+      description: "修改基础配置（服务商 / 模型 / API Key / 消息通道等）",
+      handler: async (state) => {
+        await handleConfigCommand({ rl, state, session, renderer });
+      },
+    },
   };
 }
 
@@ -799,7 +811,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     activeTurnPromise: null,
   };
 
-  const slashCommands = buildSlashCommands(rl);
+  const slashCommands = buildSlashCommands(rl, session, renderer);
 
   // ── Typeahead 路径接入（Phase 1 Step 5） ──
   //
@@ -912,6 +924,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       { name: "compact", description: "手动触发上下文压缩", category: "tools", legacyKey: "/compact" },
       { name: "tasks", description: "查看定时任务", category: "tools", legacyKey: "/tasks" },
       // ─ config ─
+      { name: "config", description: "修改基础配置（服务商 / 模型 / API Key / 消息通道等）", category: "config", legacyKey: "/config" },
       { name: "trust", description: "权限规则管理", category: "config", legacyKey: "/trust" },
       { name: "security", description: "安全状态概览", category: "config", legacyKey: "/security" },
     ];

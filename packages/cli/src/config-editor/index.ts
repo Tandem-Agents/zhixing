@@ -42,3 +42,6 @@ export type {
 // ─── 检测函数再导出（caller 用来决定 sections） ───
 export { checkBootModel, type BootModelMissing } from "./checks/model.js";
 export { checkBootMessaging, type BootMessagingMissing } from "./checks/messaging.js";
+
+// ─── Section 注册再导出（caller 用来"打开全部 sections"等场景） ───
+export { ALL_SECTION_IDS } from "./sections/index.js";

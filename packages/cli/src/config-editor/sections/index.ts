@@ -13,6 +13,16 @@ const REGISTRY: Record<SectionId, Section> = {
   messaging: messagingSection,
 };
 
+/**
+ * 全部已注册 section id——单一事实源派生自 REGISTRY，加新 section 时只在 REGISTRY 改一处。
+ *
+ * 用于 caller 想"打开全部 sections"的场景（如 REPL `/config` 让用户改任何字段）；
+ * bootstrap 等"按缺失字段决定 sections"的场景仍然显式传子集。
+ */
+export const ALL_SECTION_IDS: readonly SectionId[] = Object.keys(
+  REGISTRY,
+) as readonly SectionId[];
+
 export function getSection(id: SectionId): Section {
   return REGISTRY[id];
 }
