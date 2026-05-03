@@ -43,33 +43,24 @@ import {
   type ArgChoice,
   type ArgSchema,
   Scheduler,
-  JsonTaskStore,
   createEventBus,
-  SchedulerProvider,
   type SchedulerEventMap,
-  type AgentTurnResult,
 } from "@zhixing/core";
 import { describeProxy, type ProxyDescription } from "@zhixing/network";
 import { loadConfig, loadCredentials, resolveHomeDir } from "@zhixing/providers";
-import { createScheduleTool } from "@zhixing/tools-builtin";
-import { setupChannels } from "./serve/channels.js";
-import { setupDelivery, type DeliveryStack } from "./setup-delivery.js";
 import { CommandDispatcher } from "./command-dispatcher.js";
 import { readInputLine, type InputLineResult } from "./typeahead-input.js";
 import { resolveFileRefs } from "./resolve-file-refs.js";
-import {
-  type AgentRuntime,
-  createAgentRuntime,
-} from "@zhixing/orchestrator/runtime";
+import { type AgentRuntime } from "@zhixing/orchestrator/runtime";
 import {
   createRenderer,
-  createRenderSubscribers,
   renderSummary,
   renderError,
   renderWelcome,
   renderUsageReport,
   renderContextVisual,
 } from "./render.js";
+import { RuntimeSession } from "./runtime/session.js";
 import { parseTaskUsageFromMessages } from "./parse-task-usage.js";
 import {
   handleTrustCommand,
@@ -224,6 +215,7 @@ function buildSlashCommands(rl: readline.Interface): Record<
           state.conversationId = conversation.id;
           state.turnCounter = 0;
           state.lastToolEndCount = 0;
+          state.convRepo.touch(state.conversationId).catch(() => {});
           console.log(
             chalk.dim(`\n  已创建新对话 ${chalk.cyan(conversation.name)}\n`),
           );
@@ -319,6 +311,7 @@ function buildSlashCommands(rl: readline.Interface): Record<
           state.conversationId = target.id;
           state.turnCounter = loaded.turnCount;
           state.lastToolEndCount = 0;
+          state.convRepo.touch(state.conversationId).catch(() => {});
           console.log(
             chalk.dim(
               `\n  已切换到 ${chalk.cyan(target.name)}（${loaded.turnCount} 轮对话）\n`,
@@ -622,12 +615,10 @@ function buildSlashCommands(rl: readline.Interface): Record<
     },
     "/exit": {
       description: "退出",
-      handler: async (state) => {
-        if (state.scheduler) {
-          await state.scheduler.stop();
-        }
-        console.log(chalk.dim("再见 👋"));
-        process.exit(0);
+      handler: async () => {
+        // 走 rl.close() 让 close 监听器统一执行完整 cleanup
+        // (scheduler / deliveryStack / channels / renderer / confirmation)
+        rl.close();
       },
     },
   };
@@ -636,142 +627,31 @@ function buildSlashCommands(rl: readline.Interface): Record<
 // ─── 启动 REPL ───
 
 export async function startRepl(options: ReplOptions): Promise<void> {
-  // ── Scheduler 初始化（S1: CLI 进程内运行） ──
-  //
-  // 初始化顺序解决循环依赖：
-  // 1. 创建 schedule 工具（捕获 scheduler getter）
-  // 2. 创建 session（包含 schedule 工具）
-  // 3. 创建 scheduler（注入 session.run 作为 runAgentTurn）
-  // 4. 启动 scheduler
-  let schedulerInstance: Scheduler | null = null;
-  const schedulerEventBus = createEventBus<SchedulerEventMap>();
-  const scheduleTool = createScheduleTool(() => {
-    if (!schedulerInstance) throw new Error("Scheduler not initialized yet");
-    return schedulerInstance;
-  });
-
-  // renderer 提前创建:作为 createRenderSubscribers 工厂的依赖通过 closure 注入,
-  // 让 retry/compact/interrupt 渲染前能驱动 spinner.stop(),避免动画覆盖事件输出。
+  // renderer 借给 RuntimeSession——session 内部装配 agent 时通过 closure 注入，
+  // 让 retry / compact / interrupt 渲染前能驱动 spinner.stop() 避免动画覆盖事件
   const renderer = createRenderer();
 
-  const agentRuntime = await createAgentRuntime({
-    model: options.model,
-    provider: options.provider,
-    workspace: options.workspace,
-    extraTools: [scheduleTool],
-    decorateRunBus: createRenderSubscribers(renderer),
-    onSecurityBlocked: renderBlockedMessage,
-    onUserDenied: renderUserDeniedMessage,
-    // 主路径开启 Task 工具:让主 LLM 可派发子 agent 处理隔离任务。
-    // 子 agent 进度通过 EventBus 冒泡 → 状态条实时显示(createRenderSubscribers
-    // 已集成 setupSubAgentStatus,按 meta.lineage 过滤渲染)。
-    enableTaskTool: true,
-  });
+  // schedulerEventBus 由调用方持有——稳定的"事件集线器"，跨 reload 持久。
+  // REPL 在后续订阅 task-completed 等事件；session 内部即使重建 scheduler，
+  // 新 scheduler 仍发送到同一 eventBus，外部 listener 不丢
+  const schedulerEventBus = createEventBus<SchedulerEventMap>();
 
-  // 构造 runAgentTurn：将 Scheduler 的任务执行桥接到 session.run
-  const runAgentTurn = async (params: {
-    prompt: string;
-    model?: string;
-    tools?: string[];
-    abortSignal?: AbortSignal;
-    context?: "scheduled-task";
-  }): Promise<AgentTurnResult> => {
-    const startTime = Date.now();
-    try {
-      const taskPrompt = params.context === "scheduled-task"
-        ? `[系统] 这是一个定时任务的自动执行。请直接执行以下指令并输出结果，不要反问用户、不要引导对话。\n\n${params.prompt}`
-        : params.prompt;
-      const result = await agentRuntime.run({
-        messages: [userMessage(taskPrompt)],
-        turnIndex: 0,   // 调度任务是一次性 ephemeral turn，不累积 counter
-      });
-      // 提取文本输出
-      const output = result.newMessages
-        .filter((m) => m.role === "assistant")
-        .flatMap((m) => m.content)
-        .filter((b): b is { type: "text"; text: string } => b.type === "text")
-        .map((b) => b.text)
-        .join("\n");
-
-      return {
-        status: result.agentResult.reason === "completed" ? "ok" : "error",
-        output: output || undefined,
-        error: result.agentResult.reason === "error"
-          ? result.agentResult.error.message
-          : undefined,
-        durationMs: result.durationMs,
-      };
-    } catch (err: unknown) {
-      return {
-        status: "error",
-        error: err instanceof Error ? err.message : String(err),
-        durationMs: Date.now() - startTime,
-      };
-    }
-  };
-
-  // ── Channels + Delivery（与 serve 共享同一路径） ──
   const zhixingHome = getZhixingHome();
-  // loadConfig 自身处理 ZHIXING_CONFIG_PATH override；
-  // loadCredentials 没有 env 概念，显式按 resolveHomeDir 推断与 config 同目录
   const config = loadConfig({ cwd: process.cwd() });
   const credentials = loadCredentials({ homeDir: resolveHomeDir() });
-  let channels: import("@zhixing/core").ChannelRegistry | undefined;
-  let deliveryStack: DeliveryStack | undefined;
 
-  if (config.messaging && Object.keys(config.messaging).length > 0) {
-    const channelLogger = {
-      debug: (msg: string, ...args: unknown[]) => console.log(chalk.dim(`  [channel] ${msg}`), ...args),
-      info: (msg: string, ...args: unknown[]) => console.log(chalk.dim(`  [channel] ${msg}`), ...args),
-      warn: (msg: string, ...args: unknown[]) => console.warn(chalk.yellow(`  [channel] ${msg}`), ...args),
-      error: (msg: string, ...args: unknown[]) => console.error(chalk.red(`  [channel] ${msg}`), ...args),
-    };
-
-    try {
-      const result = await setupChannels({
-        entries: config.messaging,
-        credentials,
-        logger: channelLogger,
-      });
-      channels = result.registry;
-
-      deliveryStack = await setupDelivery({
-        channels,
-        zhixingHome,
-        logger: {
-          info: (msg) => console.log(chalk.dim(`  ${msg}`)),
-          warn: (msg) => console.warn(chalk.yellow(`  ${msg}`)),
-          error: (msg) => console.error(chalk.red(`  ${msg}`)),
-        },
-      });
-    } catch (err) {
-      console.warn(chalk.yellow(`  [channel] Setup failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`));
-    }
-  }
-
-  schedulerInstance = new Scheduler({
-    store: new JsonTaskStore(),
-    runAgentTurn,
-    eventBus: schedulerEventBus,
-    delivery: deliveryStack?.delivery,
-    logger: {
-      info: (msg, data) => console.log(chalk.dim(`  [scheduler] ${msg}`), data ? chalk.dim(JSON.stringify(data)) : ""),
-      warn: (msg, data) => console.log(chalk.yellow(`  [scheduler] ${msg}`), data ? chalk.dim(JSON.stringify(data)) : ""),
-      error: (msg, data) => console.log(chalk.red(`  [scheduler] ${msg}`), data ? chalk.dim(JSON.stringify(data)) : ""),
-      debug: () => {},
-    },
+  const session = await RuntimeSession.create({
+    config,
+    credentials,
+    cliWorkspace: options.workspace,
+    cliModel: options.model,
+    cliProvider: options.provider,
+    renderer,
+    zhixingHome,
+    schedulerEventBus,
+    onSecurityBlocked: renderBlockedMessage,
+    onUserDenied: renderUserDeniedMessage,
   });
-
-  // 注册 SchedulerProvider 到 per-turn 上下文注入
-  agentRuntime.registerTurnContextProvider(
-    new SchedulerProvider(() => {
-      if (!schedulerInstance) return { active: [], recentlyCompleted: [], recentlyFailed: [] };
-      return schedulerInstance.getStatusSummary();
-    }),
-  );
-
-  // 启动 scheduler（加载任务 + 启动 timer loop）
-  await schedulerInstance.start();
 
   const cwd = process.cwd();
   const projectId = getProjectId(cwd);
@@ -848,20 +728,20 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   if (!conversationId) {
     const conversation = await convRepo.create({
       name: options.name,
-      preferredModel: agentRuntime.model,
-      preferredProvider: agentRuntime.providerId,
+      preferredModel: session.runtime.model,
+      preferredProvider: session.runtime.providerId,
     });
     await store.init(conversation.id, {
-      model: agentRuntime.model,
-      provider: agentRuntime.providerId,
+      model: session.runtime.model,
+      provider: session.runtime.providerId,
     });
     conversationId = conversation.id;
   }
 
   await renderWelcome({
-    model: agentRuntime.model,
-    workspace: agentRuntime.resolvedWorkspace,
-    workspaceDirStatus: agentRuntime.workspaceDirStatus,
+    model: session.runtime.model,
+    workspace: session.runtime.resolvedWorkspace,
+    workspaceDirStatus: session.runtime.workspaceDirStatus,
   });
 
   // 启动时检测 stale 技能，温和提醒
@@ -889,13 +769,12 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       rl.resume();
     },
   });
-  const detachConfirmationRenderer = confirmationRenderer.attach(
-    agentRuntime.confirmationBroker,
-  );
+  // session 持有 renderer 与 broker 的绑定，dispose 时自动 detach
+  session.attachConfirmationRenderer(confirmationRenderer);
 
   const state: ReplState = {
     messages,
-    agent: agentRuntime,
+    agent: session.runtime,
     running: false,
     store,
     convRepo,
@@ -904,7 +783,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     lastToolEndCount: 0,
     hasProposedSkill: false,
     journalCondenseDone: false,
-    scheduler: schedulerInstance,
+    scheduler: session.scheduler,
     networkProxy: describeProxy(config.network?.proxy),
   };
 
@@ -943,7 +822,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     );
     typeaheadBroker.register(
       new FileProvider({
-        root: agentRuntime.resolvedWorkspace.path ?? process.cwd(),
+        root: session.runtime.resolvedWorkspace.path ?? process.cwd(),
       }),
     );
     typeaheadDispatcher = new CommandDispatcher({ registry: tRegistry });
@@ -1051,7 +930,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
 
   const getRuntime = (): RuntimeContext => ({
     sessionBusy: state.running,
-    workspaceId: agentRuntime.resolvedWorkspace.path,
+    workspaceId: session.runtime.resolvedWorkspace.path,
     cwd: process.cwd(),
     target: "cli",
     features: {},
@@ -1060,12 +939,10 @@ export async function startRepl(options: ReplOptions): Promise<void> {
 
   rl.on("close", async () => {
     renderer.stop();
-    detachConfirmationRenderer();
-    if (schedulerInstance) {
-      await schedulerInstance.stop();
-    }
-    await deliveryStack?.stop().catch(() => {});
-    await channels?.dispose().catch(() => {});
+    // session.dispose 内部 detach renderer + stop scheduler/delivery + dispose channels
+    await session.dispose().catch((err) =>
+      console.error("[session.dispose]", err),
+    );
     console.log(chalk.dim("\n再见 👋"));
     process.exit(0);
   });
@@ -1198,7 +1075,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     let resolvedInput = input.trim();
     if (resolvedInput.includes("@file:")) {
       const refResult = await resolveFileRefs(resolvedInput, {
-        workspaceRoot: agentRuntime.resolvedWorkspace.path ?? process.cwd(),
+        workspaceRoot: session.runtime.resolvedWorkspace.path ?? process.cwd(),
       });
       resolvedInput = refResult.text;
       if (refResult.errors.length > 0) {
@@ -1216,7 +1093,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
 
     // Per-turn 装载中断协调:KeyboardSource 拦截 Esc/Ctrl+C(raw mode) +
     // SignalSource 兜底 SIGINT/SIGTERM(cooked mode / non-TTY)。
-    // controller.signal 透传给 agentRuntime.run 让用户中断真正生效。
+    // controller.signal 透传给 session.runtime.run 让用户中断真正生效。
     // 每个 turn 独立 controller 实例,turn 结束 detach 释放 stdin 与 listener。
     //
     // exitRequested flag 协调双击退出:
@@ -1236,7 +1113,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     });
 
     try {
-      const runResult = await agentRuntime.run({
+      const runResult = await session.runtime.run({
         messages: [...state.messages],
         turnIndex: state.turnCounter,
         abortSignal: interruptRuntime.controller.signal,
