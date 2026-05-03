@@ -55,6 +55,12 @@ export function createPanelRenderer(
     render(lines: readonly string[]): void {
       // 前置条件：cursor 在 (startRow + lastHeight, col 0)
       // 或首次渲染时 cursor 在任意"startRow"位置（调用方决定）
+
+      // 整帧包裹同步输出 ANSI——避免 TTY 分段刷新让 cursor 在 moveUp / clearLine
+      // 之间短暂出现在中间状态，造成视觉闪烁（select-with-input / 任何用 PanelRenderer
+      // 的 TUI 组件按键 rerender 时受益）
+      stdout.write(ANSI.syncBegin);
+
       if (lastHeight > 0) {
         // 关键：一次性上移 lastHeight 行（不是 lastHeight - 1，见陷阱 2）
         stdout.write(ANSI.moveUp(lastHeight));
@@ -69,6 +75,7 @@ export function createPanelRenderer(
       }
 
       lastHeight = lines.length;
+      stdout.write(ANSI.syncEnd);
       // 后置条件：cursor 回到 (startRow + lastHeight, col 0) ✓
     },
 
@@ -78,9 +85,11 @@ export function createPanelRenderer(
       // 前置条件：cursor 在 (startRow + lastHeight, col 0)
       // 策略：上移到 startRow，然后用 \x1b[J 清除到屏幕末尾。
       // 这比"逐行 clearLine + moveDown + 再 moveUp N-1"简单、不容易写错。
+      stdout.write(ANSI.syncBegin);
       stdout.write(ANSI.moveUp(lastHeight));
       stdout.write(ANSI.col0);
       stdout.write(ANSI.clearBelow); // 清光标到屏幕末尾的所有内容
+      stdout.write(ANSI.syncEnd);
 
       lastHeight = 0;
       // 后置条件：cursor 在 (startRow, col 0)，下方屏幕区域已清空 ✓

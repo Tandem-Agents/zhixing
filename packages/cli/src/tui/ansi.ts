@@ -37,6 +37,16 @@ export const ANSI = {
     return n > 0 ? `\x1b[${n}B` : "";
   },
 
+  // ── 同步输出（Synchronized Output mode） ──
+  /**
+   * 告诉终端在 BSU..ESU 之间累积所有输出后一次性 render，避免分段刷新带来的
+   * 视觉抖动（光标短暂跳到 col 0 / 旧帧 / 新帧的中间状态）。不支持的终端忽略
+   * 此序列等同无优化。行业标准：iTerm2 / kitty / Windows Terminal / mintty 等
+   * 现代终端均支持。
+   */
+  syncBegin: "\x1b[?2026h",
+  syncEnd: "\x1b[?2026l",
+
   // ── 样式 ──
   reset: "\x1b[0m",
   bold: "\x1b[1m",

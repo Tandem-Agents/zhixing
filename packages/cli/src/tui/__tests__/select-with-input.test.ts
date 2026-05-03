@@ -421,9 +421,12 @@ describe("selectWithInput — 渲染护栏 (spec §6.4)", () => {
     // 最后一帧后面可能跟着 finish 写入的 showCursor+\n——比较前要剥掉
     expect(parts.length).toBeGreaterThanOrEqual(5);
 
-    // 剥掉帧末尾的 finish 清理序列（showCursor + 任意换行）
+    // 剥掉帧末尾的"下一帧 BSU 起始"+ finish 清理序列（showCursor+\n）。
+    // BSU 是同步输出包头，每帧 panel.render 写在最前——split 保留在前一 part 末尾。
     const stripCleanup = (frame: string): string =>
-      frame.replace(/\x1b\[\?25h\n*$/, "");
+      frame
+        .replace(/\x1b\[\?2026h$/, "")
+        .replace(/\x1b\[\?25h\n*$/, "");
 
     const frame1 = stripCleanup(parts[1]!);
     const frame2 = stripCleanup(parts[2]!);

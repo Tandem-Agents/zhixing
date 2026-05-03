@@ -559,8 +559,9 @@ describe("readInputLine — §6.4 光标回归护栏", () => {
     // 那是旧 panel.clear() 的签名字节流
     const moveUpBeforeClearBelow = /\x1b\[\d+A[\x1b\r][^\x1b]*\x1b\[J/;
     expect(frame).not.toMatch(moveUpBeforeClearBelow);
-    // 而应该以 `\r` + `\x1b[J`（clearBelow）开头
-    expect(frame.startsWith("\r")).toBe(true);
+    // 而应该以同步输出 BSU 包裹起头，紧接 `\r`（col0）—— 同步输出包整帧
+    // 防止 TTY 分段刷新让 cursor 在 col 0 闪烁；包裹内仍是 `\r` + `\x1b[J` 起步
+    expect(frame.startsWith("\x1b[?2026h\r")).toBe(true);
 
     await sendSyntheticKey(stdin, {
       name: "c",

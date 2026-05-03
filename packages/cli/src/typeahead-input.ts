@@ -185,6 +185,10 @@ export function readInputLine(
      * 往上走 N 行把欢迎语一并擦掉（曾经的真实 bug）。
      */
     const rerender = (): void => {
+      // 整个 frame 包裹同步输出 ANSI——避免 TTY sync write 分段 flush 让 cursor 在
+      // step 5 的 `\r` 与 `\x1b[{offset}C` 之间短暂出现在 col 0 闪烁
+      stdout.write(ANSI.syncBegin);
+
       // Step 1-2：回 prompt 行 col 0 并清 prompt 行 + 下方
       stdout.write(ANSI.col0);
       stdout.write(ANSI.clearBelow);
@@ -234,6 +238,9 @@ export function readInputLine(
       if (offset > 0) {
         stdout.write(`\x1b[${offset}C`);
       }
+
+      // 整帧渲染完一次性提交给终端 render
+      stdout.write(ANSI.syncEnd);
     };
 
     /**

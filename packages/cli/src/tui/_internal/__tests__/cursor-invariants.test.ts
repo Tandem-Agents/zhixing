@@ -66,9 +66,9 @@ describe("createPanelRenderer — render 语义", () => {
 
     panel.render(["e", "f", "g", "d"]);
     const captured = getCaptured();
-    // 必须是 \x1b[4A，不是 \x1b[3A（§6.4 陷阱 2）
-    expect(captured).toMatch(/^\x1b\[4A/);
-    expect(captured).not.toMatch(/^\x1b\[3A/);
+    // 整帧由同步输出 BSU 包头，紧接 moveUp(lastHeight)；必须是 \x1b[4A 不是 \x1b[3A
+    expect(captured).toMatch(/^\x1b\[\?2026h\x1b\[4A/);
+    expect(captured).not.toMatch(/^\x1b\[\?2026h\x1b\[3A/);
   });
 
   it("lastRenderHeight 在 render 后正确更新", () => {
@@ -142,17 +142,18 @@ describe("createPanelRenderer — 护栏断言", () => {
     // 第二次渲染：先 moveUp(3) 再覆盖，去掉 moveUp 前缀后应等于首次 render 的内容
     panel.render(lines);
     const frame2 = getCaptured();
-    // 剥掉开头的 moveUp + col0 序列
-    const frame2Stripped = frame2.replace(/^\x1b\[\d+A\r/, "");
+    // 剥掉开头的 BSU + moveUp + col0 序列；BSU 是同步输出包头
+    const frame2Stripped = frame2.replace(/^\x1b\[\?2026h\x1b\[\d+A\r/, "");
 
-    // 把 frame2Stripped 应等于一次 render 的输出
+    // 把 frame2Stripped 应等于一次 render 输出剥掉 BSU 包头后的内容
     // 构造对照：独立 panel 做一次首渲染
     const { stdout: refStdout, getCaptured: refGet } = makeStdout();
     const refPanel = createPanelRenderer(refStdout);
     refPanel.render(lines);
     const frame1 = refGet();
+    const frame1Stripped = frame1.replace(/^\x1b\[\?2026h/, "");
 
-    expect(frame2Stripped).toBe(frame1);
+    expect(frame2Stripped).toBe(frame1Stripped);
   });
 });
 

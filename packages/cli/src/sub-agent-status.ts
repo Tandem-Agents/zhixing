@@ -106,29 +106,35 @@ export function setupSubAgentStatus(
   const isSubLineage = (meta?: EventMeta): boolean =>
     typeof meta?.lineage === "string" && meta.lineage.startsWith("main/sub-");
 
-  const clearLine = (): void => {
-    // 非 TTY 不写控制符,避免 CI / pipe 累积乱码
-    if (!process.stdout.isTTY || currentLineLength === 0) return;
+  // 构造清行 ANSI 前缀（仅供 caller 与新内容拼接为单次 write，避免分段刷新闪烁）。
+  // 非 TTY / 当前无内容时返回空串——caller 正常拼接后行为等同"无 prefix"。
+  const buildClearPrefix = (): string => {
+    if (!process.stdout.isTTY || currentLineLength === 0) return "";
     const width = Math.max(currentLineLength, MIN_CLEAR_WIDTH);
-    process.stdout.write(`\r${" ".repeat(width)}\r`);
+    return `\r${" ".repeat(width)}\r`;
+  };
+
+  const clearLine = (): void => {
+    const prefix = buildClearPrefix();
+    if (!prefix) return;
+    process.stdout.write(prefix);
     currentLineLength = 0;
   };
 
-  // \r 单行刷新(子工具中间帧专用):TTY 模式正常刷,非 TTY 静默 —— 中间帧
-  // 在 CI / pipe 下每个工具 2 次的输出会形成日志爆炸,可观测性走 EventBus 直采。
+  // \r 单行刷新（子工具中间帧专用）：TTY 模式正常刷，非 TTY 静默——中间帧在
+  // CI / pipe 下每个工具 2 次的输出会形成日志爆炸，可观测性走 EventBus 直采。
+  // 清行 + 新内容合并为单次 stdout.write 避免 TTY 分段刷新视觉抖动。
   const writeStreamLine = (line: string): void => {
     if (!process.stdout.isTTY) return;
-    clearLine();
-    process.stdout.write(`\r${line}`);
-    // 记录可视长度(含 ANSI 时偏大无害,仅用于清行宽度)
+    process.stdout.write(`${buildClearPrefix()}\r${line}`);
     currentLineLength = line.length;
   };
 
-  // 整行输出(Task 起止帧专用):两种模式都打整行,但 TTY 模式下先清掉
-  // 残留状态条再打,避免上一行尾巴混入。收尾换 \n 让下一行回到正常输出流。
+  // 整行输出（Task 起止帧专用）：两种模式都打整行，但 TTY 模式下先清掉残留
+  // 状态条再打，避免上一行尾巴混入。收尾换 \n 让下一行回到正常输出流。
+  // 清行 + 新内容合并为单次 stdout.write。
   const writeFrameLine = (line: string): void => {
-    clearLine();
-    process.stdout.write(`${line}\n`);
+    process.stdout.write(`${buildClearPrefix()}${line}\n`);
     currentLineLength = 0;
   };
 
