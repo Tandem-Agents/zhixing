@@ -51,7 +51,10 @@ import { loadConfig, loadCredentials, resolveHomeDir } from "@zhixing/providers"
 import { CommandDispatcher } from "./command-dispatcher.js";
 import { readInputLine, type InputLineResult } from "./typeahead-input.js";
 import { resolveFileRefs } from "./resolve-file-refs.js";
-import { type AgentRuntime } from "@zhixing/orchestrator/runtime";
+import {
+  type AgentRuntime,
+  type RunResult,
+} from "@zhixing/orchestrator/runtime";
 import {
   createRenderer,
   renderSummary,
@@ -96,6 +99,14 @@ interface ReplState {
    * 永远脱敏（凭证不会泄露到终端 / 日志录屏）。
    */
   networkProxy: ProxyDescription;
+  /**
+   * 当前 in-flight turn promise——turn idle 时为 null。
+   *
+   * RuntimeSession.reload 流程在 swap 之前必须 await 此 promise，避免在 turn
+   * 跑中替换 agentRuntime 导致状态错乱。turn 启动时设置、完成（resolve / reject）
+   * 时由 finally 块清空。
+   */
+  activeTurnPromise: Promise<RunResult> | null;
 }
 
 // ─── 会话恢复选项 ───
@@ -785,6 +796,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     journalCondenseDone: false,
     scheduler: session.scheduler,
     networkProxy: describeProxy(config.network?.proxy),
+    activeTurnPromise: null,
   };
 
   const slashCommands = buildSlashCommands(rl);
@@ -1113,7 +1125,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     });
 
     try {
-      const runResult = await session.runtime.run({
+      const runPromise = session.runtime.run({
         messages: [...state.messages],
         turnIndex: state.turnCounter,
         abortSignal: interruptRuntime.controller.signal,
@@ -1123,6 +1135,9 @@ export async function startRepl(options: ReplOptions): Promise<void> {
           hasProposedSkill: state.hasProposedSkill,
         },
       });
+      // 暴露给 RuntimeSession.reload 流程——reload 在 swap 之前 await 此 promise
+      state.activeTurnPromise = runPromise;
+      const runResult = await runPromise;
       const { agentResult, newMessages, durationMs, budget, toolEndCount, injectedSkillIds } = runResult;
 
       renderer.stop();
@@ -1210,6 +1225,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       // 恢复 attach 前的 raw mode 状态,让下一轮 typeahead-input / readline 正常工作。
       interruptRuntime.detach();
       state.running = false;
+      state.activeTurnPromise = null;
       // 双击 Ctrl+C 退出: 此时 agent-loop 已因第一次 abort unwind 完成
       // (run() 已 resolve / reject),安全调 rl.close 触发现有 cleanup 路径
       // (scheduler.stop / channels.dispose / process.exit)。
