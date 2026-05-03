@@ -18,6 +18,14 @@ import {
   decodeChunk,
   type KeyDecoderState,
 } from "./key-decoder.js";
+import {
+  rawModeController,
+  type RawModeLease,
+} from "../../tui/_internal/raw-mode.js";
+import {
+  acquireStdinOwnership,
+  type StdinOwnershipHandle,
+} from "../../tui/_internal/stdin-ownership.js";
 import type { KeyEvent } from "../types.js";
 
 const ESCAPE_TIMEOUT_MS = 50;
@@ -50,7 +58,8 @@ export function createKeyEventStream(stdin: NodeJS.ReadStream): KeyEventStream {
   const queue: KeyEvent[] = [];
   const waiters: Array<(event: KeyEvent) => void> = [];
   let started = false;
-  let originalRawMode: boolean | null = null;
+  let rawModeLease: RawModeLease | null = null;
+  let stdinOwnership: StdinOwnershipHandle | null = null;
   let escapeTimer: ReturnType<typeof setTimeout> | null = null;
 
   function emit(event: KeyEvent): void {
@@ -98,10 +107,13 @@ export function createKeyEventStream(stdin: NodeJS.ReadStream): KeyEventStream {
     start(): void {
       if (started) return;
       started = true;
-      if (typeof stdin.setRawMode === "function") {
-        originalRawMode = stdin.isRaw ?? false;
-        stdin.setRawMode(true);
-      }
+      // 与 keyboard-source / typeahead-input / terminal-renderer 同协议：
+      // 1) acquireStdinOwnership 摘除 readline 等预挂的 'keypress' listener——
+      //    防 raw mode 下 readline 检测 Ctrl+C 转 SIGINT 退出整个进程
+      // 2) rawModeController.acquire 走引用计数 lease，多个 modal 并存安全；
+      //    末次 release 才恢复 stdin.isRaw 到首次 acquire 前的真实状态
+      stdinOwnership = acquireStdinOwnership(stdin);
+      rawModeLease = rawModeController.acquire(stdin);
       stdin.resume();
       stdin.setEncoding("utf-8");
       stdin.on("data", onData);
@@ -111,11 +123,12 @@ export function createKeyEventStream(stdin: NodeJS.ReadStream): KeyEventStream {
       started = false;
       clearEscapeTimer();
       stdin.off("data", onData);
-      if (originalRawMode !== null && typeof stdin.setRawMode === "function") {
-        stdin.setRawMode(originalRawMode);
-        originalRawMode = null;
-      }
-      stdin.pause();
+      // release 顺序：先 lease 退 raw mode，再 ownership 复原 keypress listener——
+      // 让 readline 在 cooked mode 下重新接管 keypress（与 attach 顺序对偶）
+      rawModeLease?.release();
+      rawModeLease = null;
+      stdinOwnership?.release();
+      stdinOwnership = null;
       // 唤醒所有等待者并发出"流已停止"信号——避免悬挂 Promise
       while (waiters.length > 0) {
         waiters.shift()!({ type: "ctrl-c" });

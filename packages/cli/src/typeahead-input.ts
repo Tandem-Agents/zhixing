@@ -262,10 +262,17 @@ export function readInputLine(
     };
 
     // ── 清理 ──
+    //
+    // 拆成 cleanup（detach listener + release stdin/raw-mode lock）与 finish（resolve
+    // promise）两步，让 dispatch slash command 路径可在 dispatch 之前提前释放 stdin——
+    // 否则 dispatch handler 想接管 stdin（如 /config 弹编辑器）会与本模块的 onKeypress
+    // listener 双重处理按键，导致 stray prompt 渲染、Ctrl+C 误命中 cancel 路径、嵌套
+    // dispatch 时旧 lock 残留。
+    let cleaned = false;
     let finished = false;
-    const finish = (result: InputLineResult): void => {
-      if (finished) return;
-      finished = true;
+    const cleanup = (): void => {
+      if (cleaned) return;
+      cleaned = true;
 
       stdin.off("keypress", onKeypress);
       unsubscribe();
@@ -277,7 +284,11 @@ export function readInputLine(
 
       rawModeLease.release();
       stdinOwnership.release();
-
+    };
+    const finish = (result: InputLineResult): void => {
+      if (finished) return;
+      finished = true;
+      cleanup();
       resolve(result);
     };
 
@@ -318,25 +329,28 @@ export function readInputLine(
       }
 
       if (text.startsWith("/")) {
-        // 命令分派
+        // dispatch 之前提前释放 stdin/raw-mode——让 handler 可独占 stdin（如 /config
+        // 弹编辑器）；本模块的 onKeypress listener 已 detach，不会与 handler 双重处理按键
+        cleanup();
+
+        let dispatchResult: DispatchResult;
         try {
-          const dispatchResult = await options.dispatcher.dispatch(
+          dispatchResult = await options.dispatcher.dispatch(
             text,
             options.getRuntime(),
           );
-          finish({ kind: "command-dispatched", text, dispatchResult });
         } catch (err) {
           const error = err instanceof Error ? err : new Error(String(err));
-          finish({
-            kind: "command-dispatched",
-            text,
-            dispatchResult: {
-              kind: "error",
-              error,
-              commandId: "<unknown>",
-            },
-          });
+          dispatchResult = {
+            kind: "error",
+            error,
+            commandId: "<unknown>",
+          };
         }
+
+        if (finished) return;
+        finished = true;
+        resolve({ kind: "command-dispatched", text, dispatchResult });
         return;
       }
 

@@ -81,6 +81,7 @@ export async function runEventLoop(
   stream.start();
   renderer.enterAlternateScreen();
   renderer.hideCursor();
+  renderer.flush();
 
   try {
     while (true) {
@@ -90,6 +91,8 @@ export async function runEventLoop(
         const top = stack[stack.length - 1]!;
         renderTopPanel(state, top, renderer);
       }
+      // 每帧渲染完一次性 write 到 stdout——双缓冲减少分段闪烁
+      renderer.flush();
 
       const key = await stream.next();
       const action = dispatchKey(ctx, state, main, stack, key);
@@ -113,6 +116,7 @@ export async function runEventLoop(
     stream.stop();
     renderer.showCursor();
     renderer.exitAlternateScreen();
+    renderer.flush();
     process.off("exit", onProcessExit);
   }
 }
