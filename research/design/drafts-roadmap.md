@@ -30,7 +30,7 @@
 
 | 草稿 | 状态 | 摘要 | 目标合并到 |
 |------|------|------|-----------|
-| _当前无草稿_ | — | — | — |
+| [首次配置·连接测试（被动）](drafts/onboarding-connection-test.md) | 待起草 | 配置编辑器提供用户主动触发的 API Key 连接测试，避免首次错误推迟到 REPL | [specifications/credentials-and-onboarding.md](specifications/credentials-and-onboarding.md) |
 
 ## 已升级到正式 spec
 
