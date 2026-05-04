@@ -31,6 +31,8 @@ interface ListItem {
    * 与 entity panel 的 row.status 区分：那是带 level 的业务状态。
    */
   description?: string;
+  /** 是否是用户当前已选项（model-list 等场景用）——渲染时左侧加绿色 ● 标记 */
+  current?: boolean;
   /** Enter 时执行的动作 */
   onEnter: (state: WorkingState) => PanelAction;
 }
@@ -83,9 +85,16 @@ function buildModelListMeta(
   }
 
   const currentRole = readModelRole(state, descriptor.role);
+  // 仅当 currentRole 与本 panel 的 provider 匹配时，currentRole.model 才是"用户对本
+  // provider 主动选过的模型"——否则（未配 / 选了别的 provider）不算 current
+  const userSelectedModel =
+    currentRole?.provider === descriptor.providerId
+      ? currentRole?.model
+      : undefined;
   const items: ListItem[] = allModels.map((modelId) => ({
     label: modelId,
     description: modelId === preset?.defaultModel ? "预设默认" : undefined,
+    current: modelId === userSelectedModel,
     onEnter: (s) => {
       const next = writeModelRole(
         s,
@@ -154,7 +163,10 @@ export function renderListPanel(
     const item = meta.items[i]!;
     const selected = i === cursor.index;
     renderer.writeLine(
-      renderer.listItem(selected, item.label, item.description),
+      renderer.listOption(selected, item.label, {
+        description: item.description,
+        current: item.current,
+      }),
     );
   }
 

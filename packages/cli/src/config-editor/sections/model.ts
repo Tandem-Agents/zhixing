@@ -24,6 +24,7 @@ import { checkModel, type ModelIssue } from "../checks/model.js";
 export const modelSection: Section = {
   id: "model",
   title: "对话模型",
+  description: "主模型必填，辅助模型可选——预留给后续轻量子任务用，未配则沿用主模型",
   entries: (state) => {
     // 一次 audit，按 role 分发——避免 buildEntry 内重复遍历
     const allIssues = checkModel(state.config, state.credentials);

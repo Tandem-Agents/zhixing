@@ -21,6 +21,7 @@ import { checkMessaging, type MessagingIssue } from "../checks/messaging.js";
 export const messagingSection: Section = {
   id: "messaging",
   title: "消息通道",
+  description: "用于接收外部消息触发 agent（如飞书）",
   entries: (state) => {
     const allIssues = checkMessaging(state.config, state.credentials);
     return SUPPORTED_CHANNELS.map((channel) =>

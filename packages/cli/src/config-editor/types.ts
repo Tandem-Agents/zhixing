@@ -121,6 +121,13 @@ export interface Section {
   id: SectionId;
   /** L1 主面板显示的标题 */
   title: string;
+  /**
+   * 标题下方的副标题（可选）——一句话说明此 section 的作用。
+   *
+   * 给首次接触的用户解释"这一组配置是干嘛的"。比如"消息通道"对开发者一目了然，
+   * 但产品用户不知与对话模型并列的意义；副标题"用于接收外部消息触发 agent"消除歧义。
+   */
+  description?: string;
   /** L1 主面板显示的入口项列表（每项一行） */
   entries: (state: WorkingState) => SectionEntry[];
 }
@@ -198,6 +205,12 @@ export interface ConfigEditorContext {
   sections: SectionId[];
   /** UI 顶部标题（如 "首次配置" / "服务模式初始化" / "基础配置"） */
   title: string;
+  /**
+   * 欢迎/导引文本（可选）——首次配置场景显示在 header 上方降低用户冷启动成本。
+   *
+   * `/config` 等复编场景不传——避免老用户每次打开都看一遍欢迎语。
+   */
+  welcomeText?: string;
   /** 头部展示信息（如 workspace 路径） */
   header?: { workspaceRoot?: string; configPath: string; credentialsPath: string };
   /** I/O 注入点 */

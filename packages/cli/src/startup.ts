@@ -136,6 +136,7 @@ export async function runStartupCheck(
 
   // 5. 缺失 + TTY → 跑编辑器
   const title = pickEditorTitle(options.mode, missingSections);
+  const welcomeText = pickWelcomeText(options.mode);
   const editorResult = await runConfigEditor({
     initialConfig: config,
     initialCredentials: credentials,
@@ -146,6 +147,7 @@ export async function runStartupCheck(
     },
     sections: missingSections,
     title,
+    welcomeText,
     header: {
       workspaceRoot: config.workspace?.root,
       configPath,
@@ -179,4 +181,15 @@ function pickEditorTitle(mode: StartupMode, sections: SectionId[]): string {
   if (mode === "repl") return "首次配置";
   if (sections.length === 1 && sections[0] === "messaging") return "配置消息通道";
   return "服务模式初始化";
+}
+
+/**
+ * 首次配置场景的欢迎语——降低用户冷启动认知成本。`/config` 等复编场景不传此字段，
+ * 编辑器据此跳过欢迎区，避免老用户每次打开都重读一遍。
+ */
+function pickWelcomeText(mode: StartupMode): string {
+  if (mode === "repl") {
+    return "欢迎使用知行。下面填好 API 凭证就能开始使用。";
+  }
+  return "欢迎使用知行服务模式。先完成 API 凭证 + 消息通道，启动后即可接入。";
 }

@@ -135,29 +135,61 @@ export class Renderer {
   }
 
   /**
-   * 列表项行：▸ 高亮 / 空格占位 + 标签 + 右侧副文本。
+   * Entry 行：cursor (▸/空) + label + 右侧 status（按 level 染色）。
    *
-   * `secondary` 副文本两种用法（无 info-level 概念，靠类型区分）：
-   *   - Status 对象：业务状态——按 level 染色（ready=绿/pending=黄/disabled=灰）
-   *   - 纯字符串：辅助描述（如选项的 description）——dim 灰显，无业务状态
-   *
-   * 不传 = 纯标签项（如按钮）。
+   * 用于 main panel section entries 和 entity panel rows——两者共用"label + 业务
+   * 状态"的形态。Status 必传（caller 必须明确状态级别），不接受 fallback 到无状态。
    */
-  listItem(
-    selected: boolean,
-    label: string,
-    secondary?: Status | string,
-  ): string {
+  entryRow(selected: boolean, label: string, status: Status): string {
     const cursor = selected ? this.cyan("▸") : " ";
     const labelText = selected ? this.bold(label) : label;
-    if (secondary !== undefined) {
-      const text = typeof secondary === "string" ? secondary : secondary.text;
-      const colored =
-        typeof secondary === "string"
-          ? this.dim(text)
-          : this.colorByLevel(text, secondary.level);
-      return `  ${cursor} ${labelText}${" ".repeat(Math.max(2, 40 - label.length))}${colored}`;
+    const colored = this.colorByLevel(status.text, status.level);
+    const padding = " ".repeat(Math.max(2, 40 - label.length));
+    return `  ${cursor} ${labelText}${padding}${colored}`;
+  }
+
+  /**
+   * 列表选项：cursor (▸/空) + 可选 current 标记 (●) + label + 右侧 description (dim)。
+   *
+   * 用于 list panel（provider/model 选择）。与 entryRow 区分：
+   *   - description 是辅助说明（无 level 概念），永远 dim 灰显
+   *   - current 标记表达"用户当前已选"（绿色 ● 前缀，与 cursor ▸ 两个 axis 不冲突）
+   *
+   * marker 与 padding 计算在内部完成——避免外部拼 ANSI 后破坏对齐。
+   */
+  listOption(
+    selected: boolean,
+    label: string,
+    opts?: { description?: string; current?: boolean },
+  ): string {
+    const cursor = selected ? this.cyan("▸") : " ";
+    const marker = opts?.current ? `${this.green("●")} ` : "";
+    const markerVisibleWidth = opts?.current ? 2 : 0;
+    const labelText = selected ? this.bold(label) : label;
+    if (opts?.description !== undefined) {
+      const padding = " ".repeat(
+        Math.max(2, 40 - label.length - markerVisibleWidth),
+      );
+      return `  ${cursor} ${marker}${labelText}${padding}${this.dim(opts.description)}`;
     }
+    return `  ${cursor} ${marker}${labelText}`;
+  }
+
+  /**
+   * 操作按钮：`[ label ]` 包装；primary=true 时染绿（与"全部就绪"形成视觉路径）。
+   *
+   * `[ ]` 包装在内部完成——caller 只传 label 文本。primary 默认 false，
+   * 适合次级按钮（取消/返回等）。
+   */
+  actionButton(
+    selected: boolean,
+    label: string,
+    opts?: { primary?: boolean },
+  ): string {
+    const cursor = selected ? this.cyan("▸") : " ";
+    const wrapped = `[ ${label} ]`;
+    let labelText = opts?.primary ? this.green(wrapped) : wrapped;
+    if (selected) labelText = this.bold(labelText);
     return `  ${cursor} ${labelText}`;
   }
 

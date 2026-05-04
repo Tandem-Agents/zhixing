@@ -94,10 +94,14 @@ function buildProviderConfigMeta(
   const apiKey = readProviderEntry(state, descriptor.providerId)?.apiKey;
   const currentRole = readModelRole(state, descriptor.role);
   const preset = getPreset(descriptor.providerId);
-  const currentModel =
+  // 区分"用户主动选过"与"系统兜底默认"：currentRole.provider 与本 panel 一致 = 主动选；
+  // 否则 fallback 到 preset.defaultModel = 兜底（视觉应弱化，避免误以为"已选"）
+  const userSelectedModel =
     currentRole?.provider === descriptor.providerId
       ? currentRole?.model
-      : preset?.defaultModel;
+      : undefined;
+  const fallbackModel = preset?.defaultModel;
+  const displayModel = userSelectedModel ?? fallbackModel;
 
   const rows: EntityRow[] = [
     {
@@ -113,9 +117,11 @@ function buildProviderConfigMeta(
     },
     {
       label: "使用模型",
-      status: currentModel
-        ? { level: "ready", text: currentModel }
-        : { level: "pending", text: "待选" },
+      status: !displayModel
+        ? { level: "pending", text: "待选" }
+        : userSelectedModel
+          ? { level: "ready", text: userSelectedModel }
+          : { level: "disabled", text: `(默认) ${fallbackModel}` },
       onEnter: (s) =>
         nav(s, {
           kind: "model-list",
@@ -265,13 +271,13 @@ export function renderEntityPanel(
   let index = 0;
   for (const row of meta.rows) {
     const selected = index === cursor.index;
-    renderer.writeLine(renderer.listItem(selected, row.label, row.status));
+    renderer.writeLine(renderer.entryRow(selected, row.label, row.status));
     index++;
   }
   renderer.writeLine("");
   for (const btn of meta.buttons) {
     const selected = index === cursor.index;
-    renderer.writeLine(renderer.listItem(selected, `[ ${btn.label} ]`));
+    renderer.writeLine(renderer.actionButton(selected, btn.label));
     index++;
   }
   renderer.writeLine("");

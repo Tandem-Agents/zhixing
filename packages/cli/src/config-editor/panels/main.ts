@@ -100,6 +100,11 @@ export function renderMainPanel(
   renderer.separator();
   renderer.writeLine("");
 
+  if (ctx.welcomeText) {
+    renderer.writeLine(`  ${ctx.welcomeText}`);
+    renderer.writeLine("");
+  }
+
   if (ctx.header) {
     if (ctx.header.workspaceRoot) {
       renderer.writeLine(`  工作目录：${ctx.header.workspaceRoot}`);
@@ -118,10 +123,13 @@ export function renderMainPanel(
   let runningIndex = 0;
   for (const { section, entries } of sections) {
     renderer.writeLine(`  ${renderer.bold(section.title)}`);
+    if (section.description) {
+      renderer.writeLine(`  ${renderer.dim(section.description)}`);
+    }
     renderer.writeLine("");
     for (const entry of entries) {
       const selected = runningIndex === cursor.index;
-      renderer.writeLine(renderer.listItem(selected, entry.label, entry.status));
+      renderer.writeLine(renderer.entryRow(selected, entry.label, entry.status));
       runningIndex++;
     }
     renderer.writeLine("");
@@ -140,7 +148,9 @@ export function renderMainPanel(
       option.action === "complete" && pending > 0
         ? "完成（请先补全必填项）"
         : option.label;
-    renderer.writeLine(renderer.listItem(selected, `[ ${label} ]`));
+    // 全部就绪时完成按钮 primary（绿），与上方"全部就绪"形成视觉路径
+    const primary = option.action === "complete" && pending === 0;
+    renderer.writeLine(renderer.actionButton(selected, label, { primary }));
     runningIndex++;
   }
 

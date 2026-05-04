@@ -44,7 +44,7 @@ export const SUPPORTED_CHANNELS: SupportedChannel[] = [
         hint: "飞书开放平台应用的 App ID（公开标识）。",
         example: "cli_xxxxxxxxxxxx",
         sensitive: false,
-        docUrl: "https://open.feishu.cn",
+        docUrl: "https://open.feishu.cn/app",
       },
       {
         id: "appSecret",
@@ -52,7 +52,7 @@ export const SUPPORTED_CHANNELS: SupportedChannel[] = [
         hint: "飞书开放平台应用的 App Secret（私密凭证）。",
         example: "xxxxxxxxxxxxxxxxxxxxxxxx",
         sensitive: true,
-        docUrl: "https://open.feishu.cn",
+        docUrl: "https://open.feishu.cn/app",
       },
     ],
   },

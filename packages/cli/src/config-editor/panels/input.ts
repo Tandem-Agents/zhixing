@@ -198,16 +198,26 @@ export function renderAddModelPanel(
   renderer: Renderer,
 ): void {
   const provider = SUPPORTED_PROVIDERS.find((p) => p.id === descriptor.providerId);
+  const providerLabel = provider?.label ?? "服务商";
 
   renderer.clear();
   renderer.showCursor();
 
   renderer.separator();
-  renderer.writeLine(`  ${renderer.bold(`${provider?.label ?? descriptor.providerId} · 添加模型`)}`);
+  renderer.writeLine(`  ${renderer.bold(`${providerLabel} · 添加模型`)}`);
   renderer.separator();
   renderer.writeLine("");
-  renderer.writeLine(`  输入要添加的 model id（按 ${provider?.label ?? "服务商"} 文档命名）`);
+  renderer.writeLine(`  输入 model id（按${providerLabel}文档命名）`);
+  if (provider?.modelListDocUrl) {
+    renderer.writeLine(
+      `  ${renderer.dim("文档：")}${renderer.hyperlink(provider.modelListDocUrl)}`,
+    );
+  }
   renderer.writeLine("");
+  if (provider?.modelExample) {
+    renderer.writeLine(renderer.dim(`  示例：${provider.modelExample}`));
+    renderer.writeLine("");
+  }
   renderer.writeLine(renderer.dim("  Enter 添加    Esc 取消    Ctrl+C 退出"));
   renderer.writeLine("");
 
