@@ -178,7 +178,7 @@ export async function runStartupCheck(
 }
 
 function pickEditorTitle(mode: StartupMode, sections: SectionId[]): string {
-  if (mode === "repl") return "首次配置";
+  if (mode === "repl") return "初始配置";
   if (sections.length === 1 && sections[0] === "messaging") return "配置消息通道";
   return "服务模式初始化";
 }

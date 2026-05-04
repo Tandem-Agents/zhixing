@@ -58,11 +58,12 @@ function writeInputThenFooterAndRestoreCursor(
   renderer: Renderer,
   inputLineContent: string,
   footerHints: readonly string[],
-  width: number,
 ): void {
   renderer.writeLine(inputLineContent);
   renderer.writeLine("");
-  renderer.writeLines(renderFooter({ width, hints: footerHints }));
+  renderer.writeLines(
+    renderFooter({ width: renderer.terminalWidth(), hints: footerHints }),
+  );
   // INPUT 之后 3 次 writeLine（empty + footer separator + footer hint）
   // → cursor 现在位于 INPUT 下方 4 行处，回跳 4 行落到 INPUT 行
   renderer.moveCursorUp(4);
@@ -193,7 +194,6 @@ export function renderInputPanel(
     renderer,
     `${CONTENT_INDENT}> ${display}`,
     INPUT_FOOTER_HINTS,
-    width,
   );
 }
 
@@ -277,7 +277,6 @@ export function renderAddModelPanel(
     renderer,
     `${CONTENT_INDENT}> ${state.inputBuffer}`,
     ADD_MODEL_FOOTER_HINTS,
-    width,
   );
 }
 

@@ -202,7 +202,9 @@ export function renderListPanel(
   }
 
   renderer.writeLine("");
-  renderer.writeLines(renderFooter({ width, hints: FOOTER_HINTS }));
+  renderer.writeLines(
+    renderFooter({ width, hints: FOOTER_HINTS }),
+  );
 }
 
 export interface ListPanelKeyResult {

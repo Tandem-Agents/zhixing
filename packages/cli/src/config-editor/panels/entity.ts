@@ -354,7 +354,7 @@ export function renderEntityPanel(
     if (btn.hint) {
       lines[1] = lines[1] + BUTTON_HINT_GAP + tone.dim(`(${btn.hint})`);
     }
-    const cursorMark = selected ? tone.brand(icon.cursor) : " ";
+    const cursorMark = selected ? tone.brand.bold(icon.cursor) : " ";
     renderer.writeLine(CONTENT_INDENT + lines[0]!);
     renderer.writeLine(cursorMark + " " + lines[1]!);
     renderer.writeLine(CONTENT_INDENT + lines[2]!);
@@ -366,7 +366,9 @@ export function renderEntityPanel(
     renderer.writeLine(tone.error("  " + errorMessage));
     renderer.writeLine("");
   }
-  renderer.writeLines(renderFooter({ width, hints: FOOTER_HINTS }));
+  renderer.writeLines(
+    renderFooter({ width, hints: FOOTER_HINTS }),
+  );
 }
 
 export interface EntityPanelKeyResult {

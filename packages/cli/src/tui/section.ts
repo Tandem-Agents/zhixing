@@ -77,7 +77,7 @@ export interface EntryRowOptions {
 export function renderEntryRow(opts: EntryRowOptions): string[] {
   const indent = opts.indent ?? ENTRY_INDENT;
   const cursor = opts.selected
-    ? tone.brand(ic.cursor)
+    ? tone.brand.bold(ic.cursor)
     : tone.dim(ic.selectable);
   const labelText = opts.selected ? tone.bold(opts.label) : opts.label;
   const left = " ".repeat(indent) + cursor + " " + labelText;
@@ -119,7 +119,7 @@ export interface ListRowOptions {
 export function renderListRow(opts: ListRowOptions): string[] {
   const indent = opts.indent ?? ENTRY_INDENT;
   const cursor = opts.selected
-    ? tone.brand(ic.cursor)
+    ? tone.brand.bold(ic.cursor)
     : tone.dim(ic.selectable);
   const labelText = opts.selected ? tone.bold(opts.label) : opts.label;
 

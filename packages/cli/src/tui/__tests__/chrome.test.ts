@@ -96,6 +96,44 @@ describe("renderChrome", () => {
     expect(stripAnsi(top!)).toBe("╭" + "─".repeat(6) + "╮");
   });
 
+  it("BrandAnchor 对象形式：anchor body 紧贴顶边，分层空行后才是用户 body", () => {
+    const lines = renderChrome({
+      brandAnchor: {
+        topEdge: "*",
+        bodyLines: [" ▄▄▄", "▌●●▐", " ▀▀"],
+      },
+      body: ["body content"],
+      width: 30,
+    });
+    // 顶边含 topEdge 字符
+    expect(stripAnsi(lines[0]!)).toContain("*");
+    // 锚 body 紧接顶边——不再在前面塞 padding 空行
+    expect(stripAnsi(lines[1]!)).toContain("▄▄▄");
+    expect(stripAnsi(lines[2]!)).toContain("▌●●▐");
+    expect(stripAnsi(lines[3]!)).toContain("▀▀");
+    // 锚与用户内容之间留 1 空行做分层
+    expect(stripAnsi(lines[4]!)).toMatch(/^│\s+│$/);
+    expect(stripAnsi(lines[5]!)).toContain("body content");
+  });
+
+  it("BrandAnchor 列对齐：topEdge 关键字符与 bodyLines 字符列对齐", () => {
+    const lines = renderChrome({
+      brandAnchor: {
+        topEdge: "╲",
+        bodyLines: [" ▄▄▄"],
+      },
+      body: [],
+      width: 30,
+    });
+    // 顶边 ╲ 落在 chrome col 6（0-based）：╭(0) + 4 dashes + 1 space + ╲(6)
+    const top = stripAnsi(lines[0]!);
+    expect(top.indexOf("╲")).toBe(6);
+    // 锚 body 紧贴顶边——lines[1] 即 " ▄▄▄"
+    // 渲染为 │(0) + 3 spaces + " ▄▄▄"——▄ visible col = 1 + 3 + 1 = 5（即 ╲ 左 1 列）
+    const body = stripAnsi(lines[1]!);
+    expect(body.indexOf("▄")).toBe(5);
+  });
+
   it("CJK body 行右边框对齐（不偏移）", () => {
     const lines = renderChrome({ body: ["中文内容测试"], width: 30 });
     const body = lines[2]!; // [0]=top [1]=topBlank [2]=content

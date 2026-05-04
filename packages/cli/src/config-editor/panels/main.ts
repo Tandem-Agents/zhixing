@@ -21,8 +21,8 @@ import type {
 import { deriveEntryIssues, deriveEntryStatus } from "../entry.js";
 import { Renderer } from "../ui/render.js";
 import { getSections } from "../sections/index.js";
-import { tone, getTerminalWidth, layout, icon } from "../../tui/style.js";
-import { renderChrome } from "../../tui/chrome.js";
+import { tone, layout, icon } from "../../tui/style.js";
+import { renderChrome, type BrandAnchor } from "../../tui/chrome.js";
 import { renderSectionHead, renderEntryRow } from "../../tui/section.js";
 import { renderButton } from "../../tui/button.js";
 import { renderFooter } from "../../tui/footer.js";
@@ -30,6 +30,20 @@ import { renderFooter } from "../../tui/footer.js";
 const CONTENT_INDENT = " ".repeat(layout.contentIndent);
 const FOOTER_HINTS = ["↑↓ 选择", "Enter 进入/确认", "Ctrl+C 退出"] as const;
 const BUTTON_HINT_GAP = "   "; // 按钮与右侧 hint 之间的间隔
+
+/**
+ * 品牌锚"浮灵 / Drift"的固定形态：
+ *   - 顶边：倾斜符 ╲（生灵从顶边斜倾下落的天线）
+ *   - 锚 body 三行：` ▄▄▄` / `▌●●▐` / ` ▀▀`（身体）
+ *
+ * Body 文本（知行 / 副标题 / 欢迎语）拼到锚 body 右侧 inline——节省 3 行高度，
+ * 同时为 welcome 内"右半"动态内容（版本变更等）预留视觉位置。完整 anchor 在
+ * `buildBrandAnchor` 中按 ctx 拼装。
+ */
+const ANCHOR_GLYPH_ROW1 = " ▄▄▄";
+const ANCHOR_GLYPH_ROW2 = "▌●●▐";
+const ANCHOR_GLYPH_ROW3 = " ▀▀ "; // 末尾补 1 空格使三行视宽一致（4 col），便于 inline 文字对齐
+const ANCHOR_INLINE_GAP = "    "; // 锚右侧到 inline 文字之间的 4 空格留白
 
 /** UI 主面板的当前光标位置——平铺所有可选项（sections + 按钮） */
 export interface MainPanelCursor {
@@ -106,29 +120,42 @@ function pickButtonHint(action: "complete" | "cancel", pending: number): string 
 }
 
 /**
- * 拼装 Welcome chrome 的 body：名字 + 上下文 + 可选 welcomeText + 工作目录 + 路径。
+ * 拼装 BrandAnchor：锚 body 三行各自携带 inline 文字（知行 / 副标题 / 欢迎语）。
  *
- * 品牌锚（✦）由 chrome 顶边居中承载——此函数只构造 body 内容。
- * 名字与 subtitle 在最顶部紧贴（同一品牌块），随后用空行与正文分隔。
+ * 列形：
+ *   ╲                                        （顶边）
+ *    ▄▄▄    知行
+ *   ▌●●▐    初始配置
+ *    ▀▀     欢迎语…
  *
- * 路径用 dim 弱化——它们是技术细节；工作目录保留正常色（用户日常会关心
- * "agent 在哪儿读写文件"）。
+ * 把品牌信息嵌入锚 body 是为了：
+ *   - 节省 3 行高度（不再让"知行"/"副标题"各占独立 body 行）
+ *   - 锚右侧形成自然的"左半屏文字区"，与 welcome 右半的预留区分层
+ */
+function buildBrandAnchor(ctx: ConfigEditorContext): BrandAnchor {
+  const row1 = `${tone.brand.bold(ANCHOR_GLYPH_ROW1)}${ANCHOR_INLINE_GAP}${tone.brand.bold("知行")}`;
+  const row2 = `${tone.brand.bold(ANCHOR_GLYPH_ROW2)}${ANCHOR_INLINE_GAP}${tone.dim(ctx.title)}`;
+  const row3 = ctx.welcomeText
+    ? `${tone.brand.bold(ANCHOR_GLYPH_ROW3)}${ANCHOR_INLINE_GAP}${ctx.welcomeText}`
+    : tone.brand.bold(ANCHOR_GLYPH_ROW3);
+  return {
+    topEdge: "╲",
+    bodyLines: [row1, row2, row3],
+  };
+}
+
+/**
+ * 拼装 Welcome chrome 的 body：仅 3 个路径行（工作目录 / 配置 / 凭证）。
+ *
+ * 品牌名 / 副标题 / 欢迎语已 inline 进 brandAnchor body——此函数只剩"读出来的
+ * 技术信息"层，三行统一 dim 弱化（读得到、不抢戏）。
  */
 function buildHeaderBody(ctx: ConfigEditorContext): string[] {
   const rows: string[] = [];
-
-  rows.push(tone.brand.bold("知行"));
-  rows.push(tone.dim(ctx.title));
-
-  if (ctx.welcomeText) {
-    rows.push("");
-    rows.push(ctx.welcomeText);
+  if (ctx.header?.workspaceRoot) {
+    rows.push(tone.dim(`工作目录    ${ctx.header.workspaceRoot}`));
   }
   if (ctx.header) {
-    rows.push("");
-    if (ctx.header.workspaceRoot) {
-      rows.push(`工作目录    ${ctx.header.workspaceRoot}`);
-    }
     rows.push(tone.dim(`配置        ${ctx.header.configPath}`));
     rows.push(tone.dim(`凭证        ${ctx.header.credentialsPath}`));
   }
@@ -145,13 +172,14 @@ export function renderMainPanel(
   renderer.clear();
   renderer.hideCursor();
 
-  const width = getTerminalWidth(ctx.stdout);
+  const width = renderer.terminalWidth();
 
-  // Welcome chrome：顶边嵌入品牌锚（占位 ✦——将来由独立设计的图腾替换），
-  // body 内承载名字 + 上下文 + welcome 内容
+  // Welcome chrome：品牌锚"浮灵"——倾斜符 ╲ 嵌顶边，身体三行落 body 顶部并 inline
+  // 携带"知行 / 副标题 / 欢迎语"。锚右侧的剩余空间是 welcome 内"右半区"，
+  // 留给未来动态内容（版本变更、近期更新等）
   renderer.writeLines(
     renderChrome({
-      brandAnchor: icon.brand,
+      brandAnchor: buildBrandAnchor(ctx),
       body: buildHeaderBody(ctx),
       width,
     }),
@@ -216,7 +244,7 @@ export function renderMainPanel(
     // 三行布局：top / middle / bottom——cursor 仅放 middle 行外左侧，其他两行
     // 用空格补齐对齐位（cursor 占 1 列 + space 1 列 = 与 CONTENT_INDENT 同宽）
     // 按钮间无 inter-button 空行——按钮自身 3 行已自带视觉重量
-    const cursorMark = selected ? tone.brand(icon.cursor) : " ";
+    const cursorMark = selected ? tone.brand.bold(icon.cursor) : " ";
     renderer.writeLine(CONTENT_INDENT + lines[0]!);
     renderer.writeLine(cursorMark + " " + lines[1]!);
     renderer.writeLine(CONTENT_INDENT + lines[2]!);
@@ -230,7 +258,9 @@ export function renderMainPanel(
     renderer.writeLine("");
   }
 
-  renderer.writeLines(renderFooter({ width, hints: FOOTER_HINTS }));
+  renderer.writeLines(
+    renderFooter({ width, hints: FOOTER_HINTS }),
+  );
 }
 
 /**

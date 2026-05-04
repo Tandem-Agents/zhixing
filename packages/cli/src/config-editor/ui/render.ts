@@ -75,7 +75,7 @@ export class Renderer {
     this.buffer.push(text);
   }
 
-  /** 终端列数——给 panel 计算 chrome / entry 双区等的可用宽度 */
+  /** 终端列数——所有 chrome / 列表 / 按钮 / footer 都按整宽渲染 */
   terminalWidth(): number {
     return getTerminalWidth(this.stdout);
   }
