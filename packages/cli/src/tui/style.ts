@@ -28,6 +28,24 @@ export const tone = {
   dim: chalk.dim,
   bold: chalk.bold,
   inverse: chalk.inverse,
+  /**
+   * 选中态高亮（主操作）——整块绿底黑字 + 粗体。
+   * 用 bgColor 而非 inverse：inverse 在 padding 空格上某些终端不渲染背景；
+   * bgColor 显式画 bg 块，所有终端一致。
+   */
+  highlightPrimary: chalk.bgGreen.black.bold,
+  /** 选中态高亮（通用）——整块青底黑字 + 粗体 */
+  highlightBrand: chalk.bgCyan.black.bold,
+} as const;
+
+// ── 布局常量 ──────────────────────────────────────────────
+
+/**
+ * 主面板共享 indent——章节头 / 入口行 / 按钮等"外部内容"的左边距。
+ * chrome 内部 indent 与此独立（chrome 自有内边距体系）。
+ */
+export const layout = {
+  contentIndent: 2,
 } as const;
 
 // ── 图标 ──────────────────────────────────────────────────
@@ -39,12 +57,14 @@ export const icon = {
   pending: "⚠",
   /** 状态：未启用 / 不需要 */
   disabled: "·",
-  /** 光标 / 选中标记 */
+  /** 光标 / 选中标记——选中行的"我在这里" */
   cursor: "▸",
+  /** 默认可选标记——未选中行的"此行可被选中"提示，dim 渲染、不抢戏 */
+  selectable: "›",
   /** 品牌标识 */
   brand: "✦",
-  /** 章节头 */
-  section: "◆",
+  /** 章节头——竖条 accent，做"section 标记"而非装饰星形 */
+  section: "▎",
 } as const;
 
 // ── Box drawing 字符 ──────────────────────────────────────

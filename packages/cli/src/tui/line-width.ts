@@ -36,11 +36,17 @@ const DOUBLE_WIDTH_RANGES: ReadonlyArray<readonly [number, number]> = [
   [0x30000, 0x3fffd], // CJK Extension G
 ];
 
-// 常见 emoji 范围——当 2 宽处理
+// 现代 emoji 块——确定 2 列。
+//
+// 故意**不**包括 0x2600-0x27BF（Misc Symbols + Dingbats）：
+// 这一段里的 ✓ ✦ ⚠ ⚡ 等符号在 Unicode East Asian Width 标准中是 "Neutral"（1 列），
+// 多数终端按文本呈现（1 列）而非 emoji 呈现（2 列）。把整段当 2 列会让我们的
+// 宽度计算与终端实际渲染脱节，chrome 边框、entry pill 都会因此错位。
+//
+// 若要让某符号显式按 2 列渲染（emoji 呈现），需在符号后加 VS16（U+FE0F）选择子；
+// 我们当前代码无此场景。
 const EMOJI_RANGES: ReadonlyArray<readonly [number, number]> = [
   [0x1f300, 0x1faff], // Misc symbols + pictographs + emoticons + transport...
-  [0x2600, 0x26ff], // Misc symbols
-  [0x2700, 0x27bf], // Dingbats
 ];
 
 function inRanges(
@@ -86,6 +92,37 @@ export function stringWidth(s: string): number {
 }
 
 /**
+ * 按显示宽度软换行——不在词边界换，按 code point 粒度切。
+ *
+ * CJK 字符按 2 列、emoji 按 2 列、控制符按 0 列计算。空文本返回 [""]——
+ * 让 caller 能用 wrapped[0] 不会拿到 undefined。
+ *
+ * 不识别 ANSI 转义码——caller 应在 wrap 之前剥色（或对 raw text 调用），
+ * 否则 ANSI 序列会被切碎。颜色应在 wrap 之后整段套上。
+ */
+export function wrapToWidth(text: string, maxWidth: number): string[] {
+  if (maxWidth <= 0) return [text];
+  const lines: string[] = [];
+  let current = "";
+  let currentWidth = 0;
+  for (const ch of text) {
+    const cp = ch.codePointAt(0);
+    if (cp === undefined) continue;
+    const w = charWidth(cp);
+    if (currentWidth + w > maxWidth) {
+      lines.push(current);
+      current = ch;
+      currentWidth = w;
+    } else {
+      current += ch;
+      currentWidth += w;
+    }
+  }
+  if (current.length > 0 || lines.length === 0) lines.push(current);
+  return lines;
+}
+
+/**
  * 把一行（可能含 ANSI 转义 + 全角字符）截断到最多 `maxVisibleWidth` 个显示列。
  *
  * - 保留 ANSI 转义序列（它们占 0 宽）
@@ -104,10 +141,18 @@ export function clampLine(s: string, maxVisibleWidth: number): string {
   let visibleWidth = 0;
   let i = 0;
   while (i < s.length) {
-    // 识别 ANSI CSI 序列（0 宽，原样拷贝）
-    if (s[i] === "\x1b" && s[i + 1] === "[") {
+    // 识别 ANSI 转义（0 宽，原样拷贝）——CSI 与 OSC 都要处理
+    if (s[i] === "\x1b") {
       const rest = s.slice(i);
-      const m = rest.match(/^\x1b\[[0-9;]*[A-Za-z]/);
+      // CSI: ESC[ ... <terminator>
+      let m = rest.match(/^\x1b\[[0-9;?=<>]*[A-Za-z]/);
+      if (m) {
+        out += m[0];
+        i += m[0].length;
+        continue;
+      }
+      // OSC: ESC] ... ST（超链接等）
+      m = rest.match(/^\x1b\][^\x1b\x07]*(?:\x1b\\|\x07)/);
       if (m) {
         out += m[0];
         i += m[0].length;

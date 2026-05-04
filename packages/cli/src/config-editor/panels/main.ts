@@ -21,6 +21,15 @@ import type {
 import { deriveEntryIssues, deriveEntryStatus } from "../entry.js";
 import { Renderer } from "../ui/render.js";
 import { getSections } from "../sections/index.js";
+import { tone, getTerminalWidth, layout, icon } from "../../tui/style.js";
+import { renderChrome } from "../../tui/chrome.js";
+import { renderSectionHead, renderEntryRow } from "../../tui/section.js";
+import { renderButton } from "../../tui/button.js";
+import { renderFooter } from "../../tui/footer.js";
+
+const CONTENT_INDENT = " ".repeat(layout.contentIndent);
+const FOOTER_HINTS = ["↑↓ 选择", "Enter 进入/确认", "Ctrl+C 退出"] as const;
+const BUTTON_HINT_GAP = "   "; // 按钮与右侧 hint 之间的间隔
 
 /** UI 主面板的当前光标位置——平铺所有可选项（sections + 按钮） */
 export interface MainPanelCursor {
@@ -85,6 +94,47 @@ function collectAllIssues(
   return sections.flatMap(({ entries }) => entries.flatMap((e) => e.issues));
 }
 
+/**
+ * 按钮右侧的 hint 文本——纯描述，不影响按下逻辑。
+ *   完成 + 缺字段 → 提示"先补全"
+ *   完成 + 就绪    → 提示"保存并启动"
+ *   取消           → 提示"退出"
+ */
+function pickButtonHint(action: "complete" | "cancel", pending: number): string {
+  if (action === "cancel") return "退出";
+  return pending > 0 ? "请先补全必填项" : "保存并启动";
+}
+
+/**
+ * 拼装 Welcome chrome 的 body：名字 + 上下文 + 可选 welcomeText + 工作目录 + 路径。
+ *
+ * 品牌锚（✦）由 chrome 顶边居中承载——此函数只构造 body 内容。
+ * 名字与 subtitle 在最顶部紧贴（同一品牌块），随后用空行与正文分隔。
+ *
+ * 路径用 dim 弱化——它们是技术细节；工作目录保留正常色（用户日常会关心
+ * "agent 在哪儿读写文件"）。
+ */
+function buildHeaderBody(ctx: ConfigEditorContext): string[] {
+  const rows: string[] = [];
+
+  rows.push(tone.brand.bold("知行"));
+  rows.push(tone.dim(ctx.title));
+
+  if (ctx.welcomeText) {
+    rows.push("");
+    rows.push(ctx.welcomeText);
+  }
+  if (ctx.header) {
+    rows.push("");
+    if (ctx.header.workspaceRoot) {
+      rows.push(`工作目录    ${ctx.header.workspaceRoot}`);
+    }
+    rows.push(tone.dim(`配置        ${ctx.header.configPath}`));
+    rows.push(tone.dim(`凭证        ${ctx.header.credentialsPath}`));
+  }
+  return rows;
+}
+
 export function renderMainPanel(
   ctx: ConfigEditorContext,
   state: WorkingState,
@@ -95,71 +145,92 @@ export function renderMainPanel(
   renderer.clear();
   renderer.hideCursor();
 
-  renderer.separator();
-  renderer.writeLine(`  ${renderer.bold("知行 · " + ctx.title)}`);
-  renderer.separator();
+  const width = getTerminalWidth(ctx.stdout);
+
+  // Welcome chrome：顶边嵌入品牌锚（占位 ✦——将来由独立设计的图腾替换），
+  // body 内承载名字 + 上下文 + welcome 内容
+  renderer.writeLines(
+    renderChrome({
+      brandAnchor: icon.brand,
+      body: buildHeaderBody(ctx),
+      width,
+    }),
+  );
   renderer.writeLine("");
-
-  if (ctx.welcomeText) {
-    renderer.writeLine(`  ${ctx.welcomeText}`);
-    renderer.writeLine("");
-  }
-
-  if (ctx.header) {
-    if (ctx.header.workspaceRoot) {
-      renderer.writeLine(`  工作目录：${ctx.header.workspaceRoot}`);
-    }
-    renderer.writeLine(
-      renderer.dim(
-        `  配置：${ctx.header.configPath} · 凭证：${ctx.header.credentialsPath}`,
-      ),
-    );
-    renderer.writeLine("");
-  }
 
   const { sections, options } = buildOptions(ctx, state);
   const pending = collectAllIssues(sections).length;
 
   let runningIndex = 0;
   for (const { section, entries } of sections) {
-    renderer.writeLine(`  ${renderer.bold(section.title)}`);
-    if (section.description) {
-      renderer.writeLine(`  ${renderer.dim(section.description)}`);
-    }
+    renderer.writeLines(
+      renderSectionHead({
+        title: section.title,
+        description: section.description,
+      }),
+    );
     renderer.writeLine("");
+    // 列表项紧贴——entry 自身已是双区布局有视觉重量，不再加 inter-entry 空行
     for (const entry of entries) {
       const selected = runningIndex === cursor.index;
-      renderer.writeLine(renderer.entryRow(selected, entry.label, entry.status));
+      renderer.writeLines(
+        renderEntryRow({
+          label: entry.label,
+          status: { kind: entry.status.level, text: entry.status.text },
+          selected,
+          width,
+        }),
+      );
       runningIndex++;
     }
     renderer.writeLine("");
   }
 
-  const progressLabel =
+  // "操作"是 section 形态——头部带进度 pill，紧挨标题（非右对齐）
+  const opStatus =
     pending === 0
-      ? renderer.green("全部就绪")
-      : renderer.yellow(`待补充 ${pending} 项`);
-  renderer.writeLine(`  ${renderer.bold("操作")}    ${progressLabel}`);
+      ? ({ kind: "ready", text: "全部就绪" } as const)
+      : ({ kind: "pending", text: `待补充 ${pending} 项` } as const);
+  renderer.writeLines(
+    renderSectionHead({
+      title: "操作",
+      status: opStatus,
+    }),
+  );
   renderer.writeLine("");
-  for (const option of options) {
-    if (option.kind !== "button") continue;
+
+  // 按钮：label 只放短动作名（完成 / 取消），说明性 hint 拼到按钮右侧 dim
+  // 选中态用外置 cursor `▸` 在按钮左侧——避免 bg 染色在跨终端的不稳定渲染
+  const buttonOptions = options.filter(
+    (o): o is Extract<MainPanelOption, { kind: "button" }> => o.kind === "button",
+  );
+  for (const option of buttonOptions) {
     const selected = runningIndex === cursor.index;
-    const label =
-      option.action === "complete" && pending > 0
-        ? "完成（请先补全必填项）"
-        : option.label;
-    // 全部就绪时完成按钮 primary（绿），与上方"全部就绪"形成视觉路径
+    const label = option.action === "complete" ? "完成" : "取消";
+    const hint = pickButtonHint(option.action, pending);
     const primary = option.action === "complete" && pending === 0;
-    renderer.writeLine(renderer.actionButton(selected, label, { primary }));
+    const lines = renderButton({ label, selected, primary });
+    if (hint) {
+      lines[1] = lines[1] + BUTTON_HINT_GAP + tone.dim(`(${hint})`);
+    }
+    // 三行布局：top / middle / bottom——cursor 仅放 middle 行外左侧，其他两行
+    // 用空格补齐对齐位（cursor 占 1 列 + space 1 列 = 与 CONTENT_INDENT 同宽）
+    // 按钮间无 inter-button 空行——按钮自身 3 行已自带视觉重量
+    const cursorMark = selected ? tone.brand(icon.cursor) : " ";
+    renderer.writeLine(CONTENT_INDENT + lines[0]!);
+    renderer.writeLine(cursorMark + " " + lines[1]!);
+    renderer.writeLine(CONTENT_INDENT + lines[2]!);
     runningIndex++;
   }
 
   renderer.writeLine("");
+
   if (errorMessage) {
-    renderer.writeLine(renderer.red("  " + errorMessage));
+    renderer.writeLine(tone.error("  " + errorMessage));
     renderer.writeLine("");
   }
-  renderer.writeLine(renderer.dim("  ↑↓ 选择    Enter 进入/确认    Ctrl+C 退出"));
+
+  renderer.writeLines(renderFooter({ width, hints: FOOTER_HINTS }));
 }
 
 /**

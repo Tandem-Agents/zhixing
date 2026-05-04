@@ -36,6 +36,20 @@ import { SUPPORTED_CHANNELS } from "../channels-registry.js";
 import { maskForDisplay } from "../ui/mask.js";
 import { checkModel } from "../checks/model.js";
 import { checkMessaging } from "../checks/messaging.js";
+import { tone, layout, icon } from "../../tui/style.js";
+import { renderChrome } from "../../tui/chrome.js";
+import { renderEntryRow } from "../../tui/section.js";
+import { renderButton } from "../../tui/button.js";
+import { renderFooter } from "../../tui/footer.js";
+
+const CONTENT_INDENT = " ".repeat(layout.contentIndent);
+const FOOTER_HINTS = [
+  "↑↓ 选择",
+  "Enter 进入/确认",
+  "Esc 返回",
+  "Ctrl+C 退出",
+] as const;
+const BUTTON_HINT_GAP = "   ";
 
 /**
  * 行/按钮 onEnter 的统一返回类型。
@@ -72,11 +86,17 @@ interface EntityRow {
 
 interface EntityButton {
   label: string;
+  /** 按钮右侧的 dim 说明文本（不含括号——渲染时自动加） */
+  hint?: string;
+  /** 主按钮：success 色边框 + label，视觉作为"建议动作"突出 */
+  primary?: boolean;
   onEnter: (state: WorkingState) => OnEnterResult;
 }
 
 interface EntityMeta {
   title: string;
+  /** chrome body 内的简短描述——给用户当前实体的上下文 */
+  description: string;
   rows: EntityRow[];
   buttons: EntityButton[];
 }
@@ -131,44 +151,60 @@ function buildProviderConfigMeta(
     },
   ];
 
+  // Preview 校验：虚拟写入候选 provider/model 后跑 checkModel，决定按钮的 primary
+  // 与 hint。复用单一规则源（vs 旧版 inline 校验与 checks 双源漂移）。
+  // 渲染态与点击态共用同一 state → 视觉提示与点击响应永远一致，不会"看着可以但点了不行"。
+  const previewModel =
+    userSelectedModel ?? fallbackModel ?? "";
+  const previewState = writeModelRole(
+    state,
+    descriptor.role,
+    descriptor.providerId,
+    previewModel,
+  );
+  const myIssues = checkModel(
+    previewState.config,
+    previewState.credentials,
+  ).filter((i) => i.role === descriptor.role);
+  const canProceed = myIssues.length === 0;
+
   const buttons: EntityButton[] = [
     {
-      label: "完成此服务商配置",
+      label: "完成",
+      hint: canProceed ? "保存此服务商配置" : "请先补全必填项",
+      primary: canProceed,
       onEnter: (s) => {
-        // Preview pattern：虚拟写入候选 provider/model 后跑 checkModel——
-        // 复用单一规则源（vs 旧版 inline 校验与 checks 双源漂移）。
-        // model 取 currentRole（同 provider）或 preset 兜底；为空时写空串触发
-        // checkModel "模型缺失" issue。
+        // 点击态再算一次 preview——defensive：跳到 input 编辑后回来 state 已变
         const currentRole = readModelRole(s, descriptor.role);
         const model =
           currentRole?.provider === descriptor.providerId
             ? currentRole?.model
             : preset?.defaultModel;
-        const previewState = writeModelRole(
+        const next = writeModelRole(
           s,
           descriptor.role,
           descriptor.providerId,
           model ?? "",
         );
-        const myIssues = checkModel(
-          previewState.config,
-          previewState.credentials,
-        ).filter((i) => i.role === descriptor.role);
-        if (myIssues.length > 0) {
+        const issues = checkModel(next.config, next.credentials).filter(
+          (i) => i.role === descriptor.role,
+        );
+        if (issues.length > 0) {
           // 短消息：用 fieldLabel（"API Key" / "模型"）；entity panel 已在
           // 标题携带服务商上下文，无需重复 "主模型 - X" 前缀。
           return stay(
             s,
-            `请先填${myIssues.map((i) => i.fieldLabel).join(" 和 ")}`,
+            `请先填${issues.map((i) => i.fieldLabel).join(" 和 ")}`,
           );
         }
-        return pop(previewState);
+        return pop(next);
       },
     },
   ];
 
   return {
     title: `${roleLabel} · ${providerLabel}`,
+    description: `配置 ${providerLabel} 的 API Key 与使用的模型`,
     rows,
     buttons,
   };
@@ -202,33 +238,51 @@ function buildChannelConfigMeta(
       };
     }) ?? [];
 
+  // Preview 校验：未启用态——虚拟启用后跑 checkMessaging，决定 primary 与 hint
+  // 已启用态：禁用是破坏性动作，永不 primary
+  let canEnable = false;
+  if (!enabled) {
+    const previewState = enableMessaging(state, descriptor.channelId);
+    const myIssues = checkMessaging(
+      previewState.config,
+      previewState.credentials,
+    ).filter((i) => i.channelId === descriptor.channelId);
+    canEnable = myIssues.length === 0;
+  }
+
   const buttons: EntityButton[] = [
     {
-      label: enabled ? "禁用此通道" : "启用此通道",
+      label: enabled ? "禁用" : "启用",
+      hint: enabled
+        ? "停止接收外部消息"
+        : canEnable
+          ? "开始接收外部消息"
+          : "请先补全必填项",
+      // 启用按钮：仅凭证齐全时 primary（建议动作）；禁用按钮：始终非 primary（破坏性）
+      primary: !enabled && canEnable,
       onEnter: (s) => {
         if (enabled) {
           return pop(disableMessaging(s, descriptor.channelId));
         }
-        // Preview pattern：虚拟启用后跑 checkMessaging——复用单一规则源。
-        // 启用后凭证字段缺失会被 check 捕获，stay 旧 state 不真启用。
-        const previewState = enableMessaging(s, descriptor.channelId);
-        const myIssues = checkMessaging(
-          previewState.config,
-          previewState.credentials,
-        ).filter((i) => i.channelId === descriptor.channelId);
-        if (myIssues.length > 0) {
+        // 点击态再算一次 preview——defensive
+        const next = enableMessaging(s, descriptor.channelId);
+        const issues = checkMessaging(next.config, next.credentials).filter(
+          (i) => i.channelId === descriptor.channelId,
+        );
+        if (issues.length > 0) {
           return stay(
             s,
-            `请先填${myIssues.map((i) => i.fieldLabel).join(" 和 ")}`,
+            `请先填${issues.map((i) => i.fieldLabel).join(" 和 ")}`,
           );
         }
-        return pop(previewState);
+        return pop(next);
       },
     },
   ];
 
   return {
     title: `消息通道 · ${channelLabel}`,
+    description: `配置 ${channelLabel} 的连接凭证`,
     rows,
     buttons,
   };
@@ -263,29 +317,56 @@ export function renderEntityPanel(
   renderer.clear();
   renderer.hideCursor();
 
-  renderer.separator();
-  renderer.writeLine(`  ${renderer.bold(meta.title)}`);
-  renderer.separator();
+  const width = renderer.terminalWidth();
+
+  renderer.writeLines(
+    renderChrome({
+      title: meta.title,
+      body: [meta.description],
+      width,
+    }),
+  );
   renderer.writeLine("");
 
   let index = 0;
   for (const row of meta.rows) {
     const selected = index === cursor.index;
-    renderer.writeLine(renderer.entryRow(selected, row.label, row.status));
+    renderer.writeLines(
+      renderEntryRow({
+        label: row.label,
+        status: { kind: row.status.level, text: row.status.text },
+        selected,
+        width,
+      }),
+    );
     index++;
   }
   renderer.writeLine("");
+
+  // 按钮：cursor 外置在 middle 行左侧，与 main 面板同款
   for (const btn of meta.buttons) {
     const selected = index === cursor.index;
-    renderer.writeLine(renderer.actionButton(selected, btn.label));
+    const lines = renderButton({
+      label: btn.label,
+      selected,
+      primary: btn.primary,
+    });
+    if (btn.hint) {
+      lines[1] = lines[1] + BUTTON_HINT_GAP + tone.dim(`(${btn.hint})`);
+    }
+    const cursorMark = selected ? tone.brand(icon.cursor) : " ";
+    renderer.writeLine(CONTENT_INDENT + lines[0]!);
+    renderer.writeLine(cursorMark + " " + lines[1]!);
+    renderer.writeLine(CONTENT_INDENT + lines[2]!);
     index++;
   }
+
   renderer.writeLine("");
   if (errorMessage) {
-    renderer.writeLine(renderer.red("  " + errorMessage));
+    renderer.writeLine(tone.error("  " + errorMessage));
     renderer.writeLine("");
   }
-  renderer.writeLine(renderer.dim("  ↑↓ 选择    Enter 进入/确认    Esc 返回    Ctrl+C 退出"));
+  renderer.writeLines(renderFooter({ width, hints: FOOTER_HINTS }));
 }
 
 export interface EntityPanelKeyResult {

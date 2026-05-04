@@ -22,6 +22,16 @@ import {
   writeModelRole,
 } from "../state.js";
 import { SUPPORTED_PROVIDERS } from "../providers-registry.js";
+import { renderChrome } from "../../tui/chrome.js";
+import { renderListRow } from "../../tui/section.js";
+import { renderFooter } from "../../tui/footer.js";
+
+const FOOTER_HINTS = [
+  "↑↓ 选择",
+  "Enter 进入",
+  "Esc 返回",
+  "Ctrl+C 退出",
+] as const;
 
 interface ListItem {
   label: string;
@@ -39,6 +49,10 @@ interface ListItem {
 
 interface ListPanelMeta {
   title: string;
+  /** 列表整体说明——chrome body 单行，给用户当前选择场景的上下文 */
+  description: string;
+  /** 列表是否有 current 概念——影响 marker 槽位是否保留 */
+  hasCurrentConcept: boolean;
   items: ListItem[];
 }
 
@@ -48,8 +62,11 @@ function buildProviderListMeta(
   _state: WorkingState,
   descriptor: Extract<PanelDescriptor, { kind: "provider-list" }>,
 ): ListPanelMeta {
+  const roleLabel = descriptor.role === "main" ? "主模型" : "辅助模型";
   return {
-    title: `${descriptor.role === "main" ? "主模型" : "辅助模型"} · 选择服务商`,
+    title: `${roleLabel} · 选择服务商`,
+    description: `选择 API 服务商作为${roleLabel}来源`,
+    hasCurrentConcept: false,
     items: SUPPORTED_PROVIDERS.map((p) => ({
       label: p.label,
       description: p.description,
@@ -122,6 +139,8 @@ function buildModelListMeta(
 
   return {
     title: `${provider?.label ?? descriptor.providerId} · 选择模型`,
+    description: "选择具体使用的 model id；带 ● 的是当前已选",
+    hasCurrentConcept: true,
     items,
   };
 }
@@ -154,24 +173,36 @@ export function renderListPanel(
   renderer.clear();
   renderer.hideCursor();
 
-  renderer.separator();
-  renderer.writeLine(`  ${renderer.bold(meta.title)}`);
-  renderer.separator();
+  const width = renderer.terminalWidth();
+
+  renderer.writeLines(
+    renderChrome({
+      title: meta.title,
+      body: [meta.description],
+      width,
+    }),
+  );
   renderer.writeLine("");
 
+  // 列表项紧贴排列——chrome 自带顶/底 padding 已提供呼吸；
+  // current 概念由整个 list 决定（model-list 有、provider-list 没有），
+  // 让所有行共享 marker 槽位以保证 label 起始列对齐
   for (let i = 0; i < meta.items.length; i++) {
     const item = meta.items[i]!;
     const selected = i === cursor.index;
-    renderer.writeLine(
-      renderer.listOption(selected, item.label, {
+    renderer.writeLines(
+      renderListRow({
+        label: item.label,
         description: item.description,
-        current: item.current,
+        current: meta.hasCurrentConcept ? Boolean(item.current) : undefined,
+        selected,
+        width,
       }),
     );
   }
 
   renderer.writeLine("");
-  renderer.writeLine(renderer.dim("  ↑↓ 选择    Enter 进入    Esc 返回    Ctrl+C 退出"));
+  renderer.writeLines(renderFooter({ width, hints: FOOTER_HINTS }));
 }
 
 export interface ListPanelKeyResult {

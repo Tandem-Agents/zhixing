@@ -13,7 +13,7 @@
  */
 
 import { glyph, tone } from "./style.js";
-import { stringWidth, charWidth } from "./line-width.js";
+import { stringWidth, wrapToWidth } from "./line-width.js";
 
 export interface InputFrameOptions {
   /** 提示符，如 "> "；缺省 "" */
@@ -60,30 +60,3 @@ export function renderInputFrame(opts: InputFrameOptions): string[] {
   return [top, ...middle, bottom];
 }
 
-/**
- * 按显示宽度软换行。
- *
- * 不在词边界换——终端输入场景里"半个 URL"可读性不会因换行下降，
- * 而强行词边界会导致很多输入文本断层。CJK 字符按 2 列计算。
- */
-function wrapToWidth(text: string, maxWidth: number): string[] {
-  if (maxWidth <= 0) return [""];
-  const lines: string[] = [];
-  let current = "";
-  let currentWidth = 0;
-  for (const ch of text) {
-    const cp = ch.codePointAt(0);
-    if (cp === undefined) continue;
-    const w = charWidth(cp);
-    if (currentWidth + w > maxWidth) {
-      lines.push(current);
-      current = ch;
-      currentWidth = w;
-    } else {
-      current += ch;
-      currentWidth += w;
-    }
-  }
-  if (current.length > 0 || lines.length === 0) lines.push(current);
-  return lines;
-}

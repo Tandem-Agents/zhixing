@@ -38,11 +38,38 @@ describe("renderButton", () => {
     expect(primary.map(stripAnsi)).toEqual(secondary.map(stripAnsi));
   });
 
-  it("selected 在中间行注入反白 ANSI", () => {
+  it("selected 注入 bold ANSI——视觉重量加强（不依赖 bg 染色）", () => {
     const [, plain] = renderButton({ label: "完成" });
     const [, selected] = renderButton({ label: "完成", selected: true });
-    // 反白码 \x1b[7m 出现在 selected
-    expect(selected).toContain("\x1b[7m");
-    expect(plain).not.toContain("\x1b[7m");
+    expect(selected).toContain("\x1b[1m");
+    expect(plain).not.toContain("\x1b[1m");
+  });
+
+  it("primary 用 success(green) 色——非选中也含 fg color", () => {
+    const [, primary] = renderButton({ label: "完成", primary: true });
+    expect(primary).toContain("\x1b[32m");
+  });
+
+  it("非 primary 非选中 用 dim 色", () => {
+    const [, plain] = renderButton({ label: "取消" });
+    expect(plain).toContain("\x1b[2m");
+  });
+
+  it("不使用 bg 染色——避免跨终端 bg 渲染溢出", () => {
+    const [, selected] = renderButton({ label: "完成", selected: true });
+    const [, primarySelected] = renderButton({
+      label: "完成",
+      selected: true,
+      primary: true,
+    });
+    expect(selected).not.toMatch(/\x1b\[4[2-7]m/);
+    expect(primarySelected).not.toMatch(/\x1b\[4[2-7]m/);
+  });
+
+  it("stripAnsi 后形态稳定——3 行皆为 box 字符", () => {
+    const [top, middle, bottom] = renderButton({ label: "完成" });
+    expect(stripAnsi(top!)).toBe("┌────────┐");
+    expect(stripAnsi(middle!)).toBe("│  完成  │");
+    expect(stripAnsi(bottom!)).toBe("└────────┘");
   });
 });

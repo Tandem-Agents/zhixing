@@ -64,23 +64,30 @@ export const ANSI = {
 } as const;
 
 /**
- * 匹配任意 ANSI CSI 转义序列的正则。
- * - `\x1b\[` = CSI 起始
- * - `[0-9;?=<>]*` = 参数字节（数字 / 分号 + 私有模式标记 `?`、`=`、`<`、`>`）
- * - `[A-Za-z]` = 终止字符
+ * ANSI 转义序列正则——同时覆盖 CSI 与 OSC 两族。
  *
- * 覆盖色彩、游标、擦除 **以及 `\x1b[?25l`/`\x1b[?25h`（显隐光标）等私有模式序列**。
- * 不覆盖 OSC (`\x1b]...`) 等其它族。
+ * CSI: `\x1b[<参数><终结>`——色彩、游标、擦除、私有模式（`\x1b[?25l` 等）
+ * OSC: `\x1b]<参数><ST>`——超链接（OSC 8 `\x1b]8;;URL\x1b\\TEXT\x1b]8;;\x1b\\`）、
+ *      标题设置等。ST 终结符可以是 `\x1b\\` 或 `\x07`（BEL）——两者都识别。
  *
- * 注意：原始版本漏掉 `?` 会把 `\x1b[?25l` 当成 5 个可见字符计入 stringWidth，
- * 导致 clampLine 低估行宽，最终让窄终端里的面板行实际溢出。
+ * 不识别会导致 stringWidth 把转义码当可见字符计入——chrome body 含超链接时
+ * 右边框对不齐，clampLine 截断时切碎序列。
  */
-const ANSI_CSI_RE = /\x1b\[[0-9;?=<>]*[A-Za-z]/g;
+const ANSI_RE =
+  /\x1b\[[0-9;?=<>]*[A-Za-z]|\x1b\][^\x1b\x07]*(?:\x1b\\|\x07)/g;
 
 /**
- * 从字符串中剥离所有 ANSI CSI 转义序列。
- * 用于可视宽度计算——颜色和游标不占显示列。
+ * 从字符串中剥离所有 ANSI 转义序列（CSI + OSC）。
+ * 用于可视宽度计算——颜色、游标、超链接转义码不占显示列。
  */
 export function stripAnsi(s: string): string {
-  return s.replace(ANSI_CSI_RE, "");
+  return s.replace(ANSI_RE, "");
+}
+
+/**
+ * 构造 OSC 8 超链接转义字符串——支持的终端渲染为可点击链接，不支持的终端
+ * 显示原文（fallback 安全）。`text` 缺省 = 显示 URL 本身。
+ */
+export function osc8Hyperlink(url: string, text?: string): string {
+  return `\x1b]8;;${url}\x1b\\${text ?? url}\x1b]8;;\x1b\\`;
 }

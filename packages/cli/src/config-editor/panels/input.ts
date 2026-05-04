@@ -29,6 +29,46 @@ import {
 import { maskForDisplay, maskForInput } from "../ui/mask.js";
 import { SUPPORTED_PROVIDERS } from "../providers-registry.js";
 import { SUPPORTED_CHANNELS } from "../channels-registry.js";
+import { tone, layout } from "../../tui/style.js";
+import { renderChrome } from "../../tui/chrome.js";
+import { renderFooter } from "../../tui/footer.js";
+import { osc8Hyperlink } from "../../tui/ansi.js";
+import { stringWidth } from "../../tui/line-width.js";
+
+const CONTENT_INDENT = " ".repeat(layout.contentIndent);
+const INPUT_FOOTER_HINTS = [
+  "Enter 保存",
+  "Esc 取消",
+  "Ctrl+C 退出",
+] as const;
+const ADD_MODEL_FOOTER_HINTS = [
+  "Enter 添加",
+  "Esc 取消",
+  "Ctrl+C 退出",
+] as const;
+
+/**
+ * 输入行写在 footer 上面（form 惯例：input → 提示），写完后回跳 cursor 到 buffer
+ * 末尾——这样用户既能看到 footer 提示，又能看到光标停在自己输入位置。
+ *
+ * 回跳距离 = INPUT 之后的 writeLine 数 + 1（因为最后一次 writeLine 后 cursor
+ * 自动下移到 footer 之下的"未写区"，多 1 行）。
+ */
+function writeInputThenFooterAndRestoreCursor(
+  renderer: Renderer,
+  inputLineContent: string,
+  footerHints: readonly string[],
+  width: number,
+): void {
+  renderer.writeLine(inputLineContent);
+  renderer.writeLine("");
+  renderer.writeLines(renderFooter({ width, hints: footerHints }));
+  // INPUT 之后 3 次 writeLine（empty + footer separator + footer hint）
+  // → cursor 现在位于 INPUT 下方 4 行处，回跳 4 行落到 INPUT 行
+  renderer.moveCursorUp(4);
+  // 列定位到 buffer 末尾的下一列（1-based）
+  renderer.setCursorColumn(stringWidth(inputLineContent) + 1);
+}
 
 // ─── input 字段路由 ───
 
@@ -105,29 +145,29 @@ export function renderInputPanel(
   if (!meta) {
     // 未识别的 fieldId——defensive 渲染
     renderer.clear();
-    renderer.writeLine(renderer.red(`未知字段：${descriptor.fieldId}`));
+    renderer.writeLine(tone.error(`未知字段：${descriptor.fieldId}`));
     return;
   }
 
   renderer.clear();
   renderer.showCursor();
 
-  renderer.separator();
-  renderer.writeLine(`  ${renderer.bold(meta.title)}`);
-  renderer.separator();
-  renderer.writeLine("");
+  const width = renderer.terminalWidth();
 
+  // Chrome body：hint 多行 + 可选 docUrl 链接 + example
+  const bodyLines: string[] = [];
   for (const line of meta.hint.split("\n")) {
-    renderer.writeLine(`  ${line}`);
+    bodyLines.push(line);
   }
   if (meta.docUrl) {
-    // 单独的文档行——OSC 8 hyperlink；不支持的终端忽略转义只看到原文，行为安全。
-    renderer.writeLine(
-      `  ${renderer.dim("文档：")}${renderer.hyperlink(meta.docUrl)}`,
-    );
+    bodyLines.push(`${tone.dim("文档：")}${osc8Hyperlink(meta.docUrl)}`);
   }
-  renderer.writeLine("");
-  renderer.writeLine(`  ${renderer.dim(`示例：${meta.example}`)}`);
+  bodyLines.push("");
+  bodyLines.push(tone.dim(`示例：${meta.example}`));
+
+  renderer.writeLines(
+    renderChrome({ title: meta.title, body: bodyLines, width }),
+  );
   renderer.writeLine("");
 
   // 已有值提示：buffer 空 + 字段已暂存值时显示，让用户知道有值且能直接 Enter 保留
@@ -136,20 +176,25 @@ export function renderInputPanel(
   const isFreshInput = state.inputBuffer === "";
 
   if (hasExisting && isFreshInput) {
-    const masked = meta.sensitive ? maskForDisplay(existingValue!) : existingValue;
+    const masked = meta.sensitive
+      ? maskForDisplay(existingValue!)
+      : existingValue;
     renderer.writeLine(
-      `  ${renderer.dim(`当前：${masked}（Enter 保留 / 输入新值覆盖）`)}`,
+      `${CONTENT_INDENT}${tone.dim(`当前：${masked}（Enter 保留 / 输入新值覆盖）`)}`,
     );
     renderer.writeLine("");
   }
-  renderer.writeLine(
-    renderer.dim("  Enter 保存    Esc 取消    Ctrl+C 退出"),
-  );
-  renderer.writeLine("");
 
-  // 输入行写在最后且不带 \n——让终端光标自然停在 buffer 之后
-  const display = meta.sensitive ? maskForInput(state.inputBuffer) : state.inputBuffer;
-  renderer.writeRaw(`  > ${display}`);
+  // input 行写在 footer 上面（form 惯例），写完后回跳 cursor 到 buffer 末尾
+  const display = meta.sensitive
+    ? maskForInput(state.inputBuffer)
+    : state.inputBuffer;
+  writeInputThenFooterAndRestoreCursor(
+    renderer,
+    `${CONTENT_INDENT}> ${display}`,
+    INPUT_FOOTER_HINTS,
+    width,
+  );
 }
 
 export function handleInputPanelKey(
@@ -197,32 +242,43 @@ export function renderAddModelPanel(
   descriptor: Extract<PanelDescriptor, { kind: "add-model" }>,
   renderer: Renderer,
 ): void {
-  const provider = SUPPORTED_PROVIDERS.find((p) => p.id === descriptor.providerId);
+  const provider = SUPPORTED_PROVIDERS.find(
+    (p) => p.id === descriptor.providerId,
+  );
   const providerLabel = provider?.label ?? "服务商";
 
   renderer.clear();
   renderer.showCursor();
 
-  renderer.separator();
-  renderer.writeLine(`  ${renderer.bold(`${providerLabel} · 添加模型`)}`);
-  renderer.separator();
-  renderer.writeLine("");
-  renderer.writeLine(`  输入 model id（按${providerLabel}文档命名）`);
+  const width = renderer.terminalWidth();
+
+  // Chrome body：使用说明 + 可选文档链接 + 可选示例
+  const bodyLines: string[] = [`输入 model id（按${providerLabel}文档命名）`];
   if (provider?.modelListDocUrl) {
-    renderer.writeLine(
-      `  ${renderer.dim("文档：")}${renderer.hyperlink(provider.modelListDocUrl)}`,
+    bodyLines.push(
+      `${tone.dim("文档：")}${osc8Hyperlink(provider.modelListDocUrl)}`,
     );
   }
-  renderer.writeLine("");
   if (provider?.modelExample) {
-    renderer.writeLine(renderer.dim(`  示例：${provider.modelExample}`));
-    renderer.writeLine("");
+    bodyLines.push("");
+    bodyLines.push(tone.dim(`示例：${provider.modelExample}`));
   }
-  renderer.writeLine(renderer.dim("  Enter 添加    Esc 取消    Ctrl+C 退出"));
+
+  renderer.writeLines(
+    renderChrome({
+      title: `${providerLabel} · 添加模型`,
+      body: bodyLines,
+      width,
+    }),
+  );
   renderer.writeLine("");
 
-  // 输入行写在最后且不带 \n——让终端光标自然停在 buffer 之后
-  renderer.writeRaw(`  > ${state.inputBuffer}`);
+  writeInputThenFooterAndRestoreCursor(
+    renderer,
+    `${CONTENT_INDENT}> ${state.inputBuffer}`,
+    ADD_MODEL_FOOTER_HINTS,
+    width,
+  );
 }
 
 export function handleAddModelPanelKey(

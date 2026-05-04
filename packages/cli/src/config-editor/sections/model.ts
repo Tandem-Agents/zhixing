@@ -2,7 +2,7 @@
  * 主模型 / 辅助模型 section 定义。
  *
  * L1 主面板的"对话模型"分组——含两个入口项（主必选 / 辅建议）。
- * 进入后由 pickModelEnterTarget 决定走 provider-list 还是直进 provider-config。
+ * 进入后统一走 provider-list 让用户选服务商——保留"选服务商"上下文。
  *
  * 字段级 issues 直接复用 `checkModel`——**单一规则源**。
  * EntryState 用 discriminated union 三态（ready/disabled/blocked）— issues 仅
@@ -12,13 +12,11 @@
 import type {
   EntryState,
   ModelRole,
-  PanelDescriptor,
   Section,
   SectionEntry,
   WorkingState,
 } from "../types.js";
 import { readModelRole } from "../state.js";
-import { SUPPORTED_PROVIDERS } from "../providers-registry.js";
 import { checkModel, type ModelIssue } from "../checks/model.js";
 
 export const modelSection: Section = {
@@ -56,7 +54,9 @@ function buildEntry(
   return {
     label: display.label,
     state: buildEntryState(config, isConfigured, myIssues, display),
-    enterTarget: pickModelEnterTarget(role),
+    // 始终走 provider-list——即使当前只有一家 provider，也保留"选服务商"上下文。
+    // 一致的导航路径 > 节省 1 次按键；多 provider 阶段无需重新设计跳转逻辑。
+    enterTarget: { kind: "provider-list", role },
   };
 }
 
@@ -103,19 +103,3 @@ function buildEntryState(
   };
 }
 
-/**
- * 决定从 main 进入"主/辅模型"时的目标 panel。
- *
- * 单一 supported provider 时跳过 provider-list 一层——减少多余按键。
- * 多 provider 时进 list 让用户选；list 内若选定后再进入 provider-config 是正常路径。
- *
- * 故意**不**根据 "已配置过 provider" 直跳——多 provider 阶段那会让用户失去切换入口
- * （entity panel 没有"换 provider"按钮，Esc 只能 pop 回 main）。等真到多 provider
- * 时另外加切换按钮，而不是在这里埋逻辑分支。
- */
-function pickModelEnterTarget(role: ModelRole): PanelDescriptor {
-  if (SUPPORTED_PROVIDERS.length === 1) {
-    return { kind: "provider-config", role, providerId: SUPPORTED_PROVIDERS[0]!.id };
-  }
-  return { kind: "provider-list", role };
-}
