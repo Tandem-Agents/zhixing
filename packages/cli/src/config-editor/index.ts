@@ -1,7 +1,7 @@
 /**
  * 基础配置编辑器主入口。
  *
- * 与首次配置 / 服务模式启动 / 未来 REPL slash 命令解耦——caller 按需求传 sections + title。
+ * 与初始配置 / 服务模式启动 / REPL `/config` 命令解耦——caller 按需求传 sections + title。
  *
  * 完成时执行事务性写盘（writeConfig + writeCredentials），保证两文件不会半致状态。
  * 取消 / Ctrl+C 时不写盘，所有改动丢弃。

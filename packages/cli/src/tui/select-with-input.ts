@@ -27,6 +27,7 @@ import {
 import { rawModeController } from "./_internal/raw-mode.js";
 import { acquireStdinOwnership } from "./_internal/stdin-ownership.js";
 import { clampLine, stringWidth } from "./line-width.js";
+import { tone, icon } from "./style.js";
 
 // ─── 类型 ───
 
@@ -85,19 +86,29 @@ export interface Theme {
   keyHintBar: (s: string) => string;
 }
 
+/**
+ * Default theme 走 design token——视觉决策跟随 `tui/style.ts` 的 tone / icon。
+ *
+ * 关键 token 映射：
+ *   border        → tone.warn   （黄色边框 = "等待用户决定"语义；confirmation/select 专属）
+ *   selectedLabel → tone.brand  （选中态 = 品牌色）
+ *   inputBuffer   → tone.brand  （正在输入的内容显眼）
+ *   selectedArrow → icon.cursor （与其他面板共享 ▸ 选中标记）
+ *   inputCursor   保留 ▎       （字符内光标，不是行选中标记，独立语义）
+ */
 export const defaultTheme: Theme = {
-  border: (s) => `${ANSI.yellow}${s}${ANSI.reset}`,
-  title: (s) => `${ANSI.bold}${s}${ANSI.reset}`,
+  border: (s) => tone.warn(s),
+  title: (s) => tone.bold(s),
   bodyText: (s) => s,
-  selectedArrow: "❯ ",
-  selectedLabel: (s) => `${ANSI.bold}${ANSI.cyan}${s}${ANSI.reset}`,
+  selectedArrow: `${icon.cursor} `,
+  selectedLabel: (s) => tone.brand.bold(s),
   unselectedArrow: "  ",
   unselectedLabel: (s) => s,
-  placeholder: (s) => `${ANSI.dim}${s}${ANSI.reset}`,
-  inputBuffer: (s) => `${ANSI.cyan}${s}${ANSI.reset}`,
+  placeholder: (s) => tone.dim(s),
+  inputBuffer: (s) => tone.brand(s),
   inputCursor: "▎",
-  hotkey: (s) => `${ANSI.dim}${s}${ANSI.reset}`,
-  keyHintBar: (s) => `${ANSI.dim}${s}${ANSI.reset}`,
+  hotkey: (s) => tone.dim(s),
+  keyHintBar: (s) => tone.dim(s),
 };
 
 // ─── 选项 ───

@@ -24,16 +24,17 @@ import {
   patchProviderEntry,
   setInputBuffer,
   writeModelRole,
-  readModelRole,
 } from "../state.js";
 import { maskForDisplay, maskForInput } from "../ui/mask.js";
-import { SUPPORTED_PROVIDERS } from "../providers-registry.js";
-import { SUPPORTED_CHANNELS } from "../channels-registry.js";
-import { tone, layout } from "../../tui/style.js";
-import { renderChrome } from "../../tui/chrome.js";
-import { renderFooter } from "../../tui/footer.js";
-import { osc8Hyperlink } from "../../tui/ansi.js";
-import { stringWidth } from "../../tui/line-width.js";
+import { SUPPORTED_PROVIDERS, SUPPORTED_CHANNELS } from "../../registries/index.js";
+import {
+  tone,
+  layout,
+  renderChrome,
+  renderFooter,
+  osc8Hyperlink,
+  stringWidth,
+} from "../../tui/index.js";
 
 const CONTENT_INDENT = " ".repeat(layout.contentIndent);
 const INPUT_FOOTER_HINTS = [
@@ -295,15 +296,15 @@ export function handleAddModelPanelKey(
       if (!value) {
         return { type: "pop", state: setInputBuffer(state, "") };
       }
-      // 加入用户自定义模型列表 + 自动选定为当前角色的 model
+      // 加入用户自定义模型列表 + 自动选定为当前角色的 model。
+      //
+      // provider 必须用 descriptor.providerId（不是 currentRole.provider）：
+      // add-model 面板的语义是"在此 provider 下添加新模型"，descriptor 是当前
+      // 面板的明确语境。沿用 currentRole.provider 会造成跨 provider 引用——
+      // 用户在 B 的 add-model 输入 model 时，若 currentRole 仍指向之前选过的 C，
+      // 会错误写入 (role, C, B 的新模型) → 启动校验时挂在"C 没有此模型"。
       let next = addProviderModel(state, descriptor.providerId, value);
-      const currentRole = readModelRole(next, descriptor.role);
-      next = writeModelRole(
-        next,
-        descriptor.role,
-        currentRole?.provider ?? descriptor.providerId,
-        value,
-      );
+      next = writeModelRole(next, descriptor.role, descriptor.providerId, value);
       next = setInputBuffer(next, "");
       return { type: "pop", state: next };
     }

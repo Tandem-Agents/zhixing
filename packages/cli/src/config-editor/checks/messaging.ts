@@ -2,8 +2,8 @@
  * 消息通道基础配置缺失检测——纯函数。**单一规则源**。
  *
  * 「必要字段」= 启用某 channel 时（出现在 config.messaging）该 channel 的所有
- * 必填凭证字段非空。字段定义读取自 SUPPORTED_CHANNELS——避免与 channels-registry
- * 双源漂移（之前 checks 自带 REQUIRED_FIELDS_BY_CHANNEL 表与 registry 重复）。
+ * 必填凭证字段非空。字段定义读取自 SUPPORTED_CHANNELS——避免与 registries
+ * 层双源漂移（之前 checks 自带 REQUIRED_FIELDS_BY_CHANNEL 表与 registry 重复）。
  *
  * 未启用任何 channel 时（messaging 空）→ 不视为缺失（用户不需要 channel 也能跑 server，
  * 虽然 server 没 channel 实用价值有限，但不强制）。
@@ -12,7 +12,7 @@
  */
 
 import type { ZhixingConfig, ZhixingCredentials } from "@zhixing/providers";
-import { SUPPORTED_CHANNELS } from "../channels-registry.js";
+import { SUPPORTED_CHANNELS } from "../../registries/index.js";
 
 export interface MessagingIssue {
   channelId: string;

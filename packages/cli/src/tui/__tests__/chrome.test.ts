@@ -11,12 +11,12 @@ describe("renderChrome", () => {
 
   it("有标题时标题嵌入顶边（前置单空格无 dash）", () => {
     const [top] = renderChrome({
-      title: "知行 · 首次配置",
+      title: "面板标题",
       body: ["x"],
       width: 60,
     });
     const visible = stripAnsi(top!);
-    expect(visible).toMatch(/^╭ 知行 · 首次配置 ─+╮$/);
+    expect(visible).toMatch(/^╭ 面板标题 ─+╮$/);
   });
 
   it("body 上下各加 1 空行 padding（呼吸）", () => {

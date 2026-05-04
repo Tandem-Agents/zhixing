@@ -15,7 +15,7 @@ import type {
   WorkingState,
 } from "../types.js";
 import { isMessagingEnabled } from "../state.js";
-import { SUPPORTED_CHANNELS } from "../channels-registry.js";
+import { SUPPORTED_CHANNELS } from "../../registries/index.js";
 import { checkMessaging, type MessagingIssue } from "../checks/messaging.js";
 
 export const messagingSection: Section = {

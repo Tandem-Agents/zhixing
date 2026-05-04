@@ -184,7 +184,7 @@ function pickEditorTitle(mode: StartupMode, sections: SectionId[]): string {
 }
 
 /**
- * 首次配置场景的欢迎语——降低用户冷启动认知成本。`/config` 等复编场景不传此字段，
+ * 初始配置场景的欢迎语——降低用户冷启动认知成本。`/config` 等复编场景不传此字段，
  * 编辑器据此跳过欢迎区，避免老用户每次打开都重读一遍。
  */
 function pickWelcomeText(mode: StartupMode): string {

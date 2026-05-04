@@ -43,7 +43,13 @@ import type {
 } from "@zhixing/core";
 import chalk from "chalk";
 
-import { ANSI } from "./tui/ansi.js";
+import {
+  ANSI,
+  stringWidth,
+  renderSessionLines,
+  defaultTypeaheadTheme,
+  type RenderOptions,
+} from "./tui/index.js";
 import {
   rawModeController,
   type RawModeLease,
@@ -52,12 +58,6 @@ import {
   acquireStdinOwnership,
   type StdinOwnershipHandle,
 } from "./tui/_internal/stdin-ownership.js";
-import { stringWidth } from "./tui/line-width.js";
-import {
-  renderSessionLines,
-  defaultTypeaheadTheme,
-  type RenderOptions,
-} from "./tui/typeahead-panel.js";
 import { InputBuffer } from "./input-buffer.js";
 import {
   CommandDispatcher,

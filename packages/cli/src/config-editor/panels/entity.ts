@@ -31,25 +31,24 @@ import {
   readProviderEntry,
   writeModelRole,
 } from "../state.js";
-import { SUPPORTED_PROVIDERS } from "../providers-registry.js";
-import { SUPPORTED_CHANNELS } from "../channels-registry.js";
+import { SUPPORTED_PROVIDERS, SUPPORTED_CHANNELS } from "../../registries/index.js";
 import { maskForDisplay } from "../ui/mask.js";
 import { checkModel } from "../checks/model.js";
 import { checkMessaging } from "../checks/messaging.js";
-import { tone, layout, icon } from "../../tui/style.js";
-import { renderChrome } from "../../tui/chrome.js";
-import { renderEntryRow } from "../../tui/section.js";
-import { renderButton } from "../../tui/button.js";
-import { renderFooter } from "../../tui/footer.js";
+import {
+  tone,
+  renderChrome,
+  renderEntryRow,
+  renderButtonRow,
+  renderFooter,
+} from "../../tui/index.js";
 
-const CONTENT_INDENT = " ".repeat(layout.contentIndent);
 const FOOTER_HINTS = [
   "↑↓ 选择",
   "Enter 进入/确认",
   "Esc 返回",
   "Ctrl+C 退出",
 ] as const;
-const BUTTON_HINT_GAP = "   ";
 
 /**
  * 行/按钮 onEnter 的统一返回类型。
@@ -343,21 +342,17 @@ export function renderEntityPanel(
   }
   renderer.writeLine("");
 
-  // 按钮：cursor 外置在 middle 行左侧，与 main 面板同款
+  // 按钮：cursor 外置在 middle 行左侧 + 右侧 hint，与 main 面板同款
   for (const btn of meta.buttons) {
     const selected = index === cursor.index;
-    const lines = renderButton({
-      label: btn.label,
-      selected,
-      primary: btn.primary,
-    });
-    if (btn.hint) {
-      lines[1] = lines[1] + BUTTON_HINT_GAP + tone.dim(`(${btn.hint})`);
-    }
-    const cursorMark = selected ? tone.brand.bold(icon.cursor) : " ";
-    renderer.writeLine(CONTENT_INDENT + lines[0]!);
-    renderer.writeLine(cursorMark + " " + lines[1]!);
-    renderer.writeLine(CONTENT_INDENT + lines[2]!);
+    renderer.writeLines(
+      renderButtonRow({
+        label: btn.label,
+        hint: btn.hint,
+        primary: btn.primary,
+        selected,
+      }),
+    );
     index++;
   }
 

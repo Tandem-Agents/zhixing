@@ -5,12 +5,11 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { SUPPORTED_PROVIDERS } from "../providers-registry.js";
-import { SUPPORTED_CHANNELS } from "../channels-registry.js";
+import { SUPPORTED_PROVIDERS, SUPPORTED_CHANNELS } from "../index.js";
 
 const URL_PATTERN = /https?:\/\//i;
 
-describe("providers-registry 一致性", () => {
+describe("providers registry 一致性", () => {
   it("apiKeyHint 不得内嵌 URL（URL 走 docUrl 字段，单独渲染为可点击行）", () => {
     for (const p of SUPPORTED_PROVIDERS) {
       expect(p.apiKeyHint, `provider ${p.id} apiKeyHint 含 URL`).not.toMatch(
@@ -35,7 +34,7 @@ describe("providers-registry 一致性", () => {
   });
 });
 
-describe("channels-registry 一致性", () => {
+describe("channels registry 一致性", () => {
   it("field.hint 不得内嵌 URL（URL 走 field.docUrl 字段）", () => {
     for (const c of SUPPORTED_CHANNELS) {
       for (const f of c.requiredFields) {

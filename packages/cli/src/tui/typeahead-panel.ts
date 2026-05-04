@@ -47,7 +47,6 @@ import type {
   TypeaheadSessionState,
 } from "@zhixing/core";
 
-import { ANSI } from "./ansi.js";
 import {
   createPanelRenderer,
   type PanelRenderer,
@@ -58,6 +57,7 @@ import {
   type StdinOwnershipHandle,
 } from "./_internal/stdin-ownership.js";
 import { clampLine, stringWidth } from "./line-width.js";
+import { tone, icon } from "./style.js";
 
 // ─── 主题 ───
 
@@ -76,19 +76,30 @@ export interface TypeaheadTheme {
   readonly emptyHint: (s: string) => string;
 }
 
+/**
+ * Default theme 走 design token——视觉决策跟随 `tui/style.ts` 的 tone / icon。
+ * Caller 仍可通过 `theme` 选项部分覆盖。
+ *
+ * 关键 token 映射：
+ *   border        → tone.dim     （非主体内容、可被忽略）
+ *   selected*     → tone.brand   （选中态 = 品牌色）
+ *   loading       → tone.warn    （等待中）
+ *   error         → tone.error
+ *   selectedArrow → icon.cursor  （与其他面板共享 ▸ 选中标记）
+ */
 export const defaultTypeaheadTheme: TypeaheadTheme = {
-  border: (s) => `${ANSI.gray}${s}${ANSI.reset}`,
-  title: (s) => `${ANSI.bold}${s}${ANSI.reset}`,
-  selectedArrow: "❯ ",
+  border: (s) => tone.dim(s),
+  title: (s) => tone.bold(s),
+  selectedArrow: `${icon.cursor} `,
   unselectedArrow: "  ",
-  selectedName: (s) => `${ANSI.bold}${ANSI.cyan}${s}${ANSI.reset}`,
+  selectedName: (s) => tone.brand.bold(s),
   unselectedName: (s) => s,
-  description: (s) => `${ANSI.dim}${s}${ANSI.reset}`,
-  selectedDescription: (s) => `${ANSI.cyan}${s}${ANSI.reset}`,
-  hint: (s) => `${ANSI.dim}${s}${ANSI.reset}`,
-  loading: (s) => `${ANSI.yellow}${s}${ANSI.reset}`,
-  error: (s) => `${ANSI.red}${s}${ANSI.reset}`,
-  emptyHint: (s) => `${ANSI.dim}${s}${ANSI.reset}`,
+  description: (s) => tone.dim(s),
+  selectedDescription: (s) => tone.brand(s),
+  hint: (s) => tone.dim(s),
+  loading: (s) => tone.warn(s),
+  error: (s) => tone.error(s),
+  emptyHint: (s) => tone.dim(s),
 };
 
 // ─── Panel 选项 ───
@@ -226,7 +237,7 @@ export interface RenderOptions {
  * 结构（active 时）：
  *   ╭─ Commands · 6 matches ──────
  *   │  ↑ more...                     ← 有 topScroll 时
- *   │  ❯ /new     Start a new session
+ *   │  ▸ /new     Start a new session
  *   │    /reset   Alias of /new
  *   │  ...
  *   │  ↓ more...                     ← 有 bottomScroll 时

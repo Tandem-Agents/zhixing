@@ -13,10 +13,13 @@
  *   selected：在原色基础上加 bold——视觉重量加强；
  *            选中标记 ▸ 由 caller 放在按钮左侧外部（跨行不打扰 box 形态）
  *
- * 三行输出——caller 决定 cursor 位置 / 整体缩进。
+ * 两层 API：
+ *   - `renderButton`：纯 box 三行（caller 自管 cursor / hint / indent）
+ *   - `renderButtonRow`：完整按钮行——box + 外置 cursor + 右侧 hint + indent，
+ *     caller 一次 `writeLines` 即可。多数 panel 用这层。
  */
 
-import { glyph, tone } from "./style.js";
+import { glyph, icon, layout, tone } from "./style.js";
 import { stringWidth } from "./line-width.js";
 
 export interface ButtonOptions {
@@ -27,6 +30,7 @@ export interface ButtonOptions {
 }
 
 const HORIZONTAL_PAD = 2;
+const BUTTON_HINT_GAP = "   "; // 按钮与右侧 hint 间的视觉间距（3 空格）
 
 export function renderButton(opts: ButtonOptions): string[] {
   const labelWidth = stringWidth(opts.label);
@@ -58,4 +62,50 @@ function pickWholeStyle(opts: ButtonOptions): (s: string) => string {
   if (opts.selected) return tone.bold;
   if (opts.primary) return tone.success;
   return tone.dim;
+}
+
+// ─── 完整按钮行（含外置 cursor + hint + indent） ───
+
+export interface ButtonRowOptions {
+  label: string;
+  /** 按钮右侧 dim 提示文本（不含括号——渲染时自动包） */
+  hint?: string;
+  /** 主按钮（绿色）——通常是"建议动作" */
+  primary?: boolean;
+  /** 是否选中——选中时左侧外置 cursor + 整体加粗 */
+  selected?: boolean;
+  /** 左侧缩进字符数；缺省 `layout.contentIndent` */
+  indent?: number;
+}
+
+/**
+ * 完整按钮行——三行布局含 box + 外置 cursor + 右侧 hint。
+ *
+ *   ┌──────┐
+ * ▸ │  完成  │   (保存并启动)
+ *   └──────┘
+ *
+ * cursor 仅放 middle 行外左侧，top/bottom 用 indent 空格补齐对齐位
+ * （cursor 占 1 列 + space 1 列 = 与默认 indent 同宽）。
+ *
+ * 与 `renderButton` 区分：
+ *   - `renderButton`：底层 box 原语（不含 cursor / hint / indent，给定制场景用）
+ *   - `renderButtonRow`：完整可写入的"一组行"——caller 直接 `writeLines`
+ */
+export function renderButtonRow(opts: ButtonRowOptions): string[] {
+  const indentStr = " ".repeat(opts.indent ?? layout.contentIndent);
+  const [top, middle, bottom] = renderButton({
+    label: opts.label,
+    selected: opts.selected,
+    primary: opts.primary,
+  });
+  const middleWithHint = opts.hint
+    ? middle + BUTTON_HINT_GAP + tone.dim(`(${opts.hint})`)
+    : middle!;
+  const cursorMark = opts.selected ? tone.brand.bold(icon.cursor) : " ";
+  return [
+    indentStr + top!,
+    cursorMark + " " + middleWithHint,
+    indentStr + bottom!,
+  ];
 }

@@ -21,10 +21,12 @@ import {
   readProviderEntry,
   writeModelRole,
 } from "../state.js";
-import { SUPPORTED_PROVIDERS } from "../providers-registry.js";
-import { renderChrome } from "../../tui/chrome.js";
-import { renderListRow } from "../../tui/section.js";
-import { renderFooter } from "../../tui/footer.js";
+import { SUPPORTED_PROVIDERS } from "../../registries/index.js";
+import {
+  renderChrome,
+  renderListRow,
+  renderFooter,
+} from "../../tui/index.js";
 
 const FOOTER_HINTS = [
   "↑↓ 选择",

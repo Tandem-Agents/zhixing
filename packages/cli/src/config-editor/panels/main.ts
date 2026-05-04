@@ -21,15 +21,17 @@ import type {
 import { deriveEntryIssues, deriveEntryStatus } from "../entry.js";
 import { Renderer } from "../ui/render.js";
 import { getSections } from "../sections/index.js";
-import { tone, layout, icon } from "../../tui/style.js";
-import { renderChrome, type BrandAnchor } from "../../tui/chrome.js";
-import { renderSectionHead, renderEntryRow } from "../../tui/section.js";
-import { renderButton } from "../../tui/button.js";
-import { renderFooter } from "../../tui/footer.js";
+import {
+  tone,
+  renderChrome,
+  type BrandAnchor,
+  renderSectionHead,
+  renderEntryRow,
+  renderButtonRow,
+  renderFooter,
+} from "../../tui/index.js";
 
-const CONTENT_INDENT = " ".repeat(layout.contentIndent);
 const FOOTER_HINTS = ["↑↓ 选择", "Enter 进入/确认", "Ctrl+C 退出"] as const;
-const BUTTON_HINT_GAP = "   "; // 按钮与右侧 hint 之间的间隔
 
 /**
  * 品牌锚"浮灵 / Drift"的固定形态：
@@ -227,27 +229,22 @@ export function renderMainPanel(
   );
   renderer.writeLine("");
 
-  // 按钮：label 只放短动作名（完成 / 取消），说明性 hint 拼到按钮右侧 dim
-  // 选中态用外置 cursor `▸` 在按钮左侧——避免 bg 染色在跨终端的不稳定渲染
+  // 按钮：label 只放短动作名（完成 / 取消），说明性 hint 拼到按钮右侧 dim。
+  // renderButtonRow 内部统一处理外置 cursor + indent + hint 拼接，按钮间不留
+  // inter-button 空行——按钮自身 3 行已自带视觉重量。
   const buttonOptions = options.filter(
     (o): o is Extract<MainPanelOption, { kind: "button" }> => o.kind === "button",
   );
   for (const option of buttonOptions) {
     const selected = runningIndex === cursor.index;
-    const label = option.action === "complete" ? "完成" : "取消";
-    const hint = pickButtonHint(option.action, pending);
-    const primary = option.action === "complete" && pending === 0;
-    const lines = renderButton({ label, selected, primary });
-    if (hint) {
-      lines[1] = lines[1] + BUTTON_HINT_GAP + tone.dim(`(${hint})`);
-    }
-    // 三行布局：top / middle / bottom——cursor 仅放 middle 行外左侧，其他两行
-    // 用空格补齐对齐位（cursor 占 1 列 + space 1 列 = 与 CONTENT_INDENT 同宽）
-    // 按钮间无 inter-button 空行——按钮自身 3 行已自带视觉重量
-    const cursorMark = selected ? tone.brand.bold(icon.cursor) : " ";
-    renderer.writeLine(CONTENT_INDENT + lines[0]!);
-    renderer.writeLine(cursorMark + " " + lines[1]!);
-    renderer.writeLine(CONTENT_INDENT + lines[2]!);
+    renderer.writeLines(
+      renderButtonRow({
+        label: option.action === "complete" ? "完成" : "取消",
+        hint: pickButtonHint(option.action, pending),
+        primary: option.action === "complete" && pending === 0,
+        selected,
+      }),
+    );
     runningIndex++;
   }
 

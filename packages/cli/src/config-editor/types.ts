@@ -6,7 +6,7 @@
  *   - Section：用户视角的配置块（"model" / "messaging"），由 caller 选择启用
  *   - Panel：UI 面板（main / list / entity / input），由状态机栈管理
  *
- * 入口无关：caller（首次配置 / serve 启动 / 未来 slash 命令）按需求传 sections + title，
+ * 入口无关：caller（初始配置 / serve 启动 / `/config` 等）按需求传 sections + title，
  * 编辑器自身不感知调用上下文。
  */
 
@@ -203,10 +203,10 @@ export interface ConfigEditorContext {
   writers: ConfigEditorWriters;
   /** 启用哪些 sections——caller 按入口需求决定 */
   sections: SectionId[];
-  /** UI 顶部标题（如 "首次配置" / "服务模式初始化" / "基础配置"） */
+  /** UI 顶部标题（如 "初始配置" / "服务模式初始化" / "基础配置"） */
   title: string;
   /**
-   * 欢迎/导引文本（可选）——首次配置场景显示在 header 上方降低用户冷启动成本。
+   * 欢迎/导引文本（可选）——初始配置场景显示在 header 上方降低用户冷启动成本。
    *
    * `/config` 等复编场景不传——避免老用户每次打开都看一遍欢迎语。
    */

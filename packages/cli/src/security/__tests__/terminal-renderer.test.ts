@@ -27,7 +27,7 @@ import {
   buildSelectOptions,
   translate,
 } from "../terminal-renderer.js";
-import { _resetRawModeRefcountForTests } from "../../tui/select-with-input.js";
+import { _resetRawModeRefcountForTests } from "../../tui/index.js";
 
 // ─── 测试辅助 ───
 

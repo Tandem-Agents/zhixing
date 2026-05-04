@@ -28,7 +28,7 @@ import { CommandDispatcher } from "../command-dispatcher.js";
 import {
   _getRawModeRefcount,
   _resetRawModeRefcountForTests,
-} from "../tui/select-with-input.js";
+} from "../tui/index.js";
 import { readInputLine, type InputLineResult } from "../typeahead-input.js";
 
 // ─── 测试辅助 ───

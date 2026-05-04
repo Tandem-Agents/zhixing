@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import chalk from "chalk";
-import { renderButton } from "../button.js";
+import { renderButton, renderButtonRow } from "../button.js";
 import { stripAnsi } from "../ansi.js";
 import { stringWidth } from "../line-width.js";
+import { layout } from "../style.js";
 
 // vitest stdout 非 TTY，chalk 默认不染色——强开以验证选中态等颜色相关结构
 chalk.level = 3;
@@ -71,5 +72,60 @@ describe("renderButton", () => {
     expect(stripAnsi(top!)).toBe("┌────────┐");
     expect(stripAnsi(middle!)).toBe("│  完成  │");
     expect(stripAnsi(bottom!)).toBe("└────────┘");
+  });
+});
+
+describe("renderButtonRow", () => {
+  const indentStr = " ".repeat(layout.contentIndent);
+
+  it("返回三行：顶 / 中 / 底", () => {
+    const lines = renderButtonRow({ label: "完成" });
+    expect(lines).toHaveLength(3);
+  });
+
+  it("默认 indent = layout.contentIndent，top/bottom 用空格补齐对齐位", () => {
+    const [top, , bottom] = renderButtonRow({ label: "完成" });
+    expect(stripAnsi(top!).startsWith(indentStr)).toBe(true);
+    expect(stripAnsi(bottom!).startsWith(indentStr)).toBe(true);
+  });
+
+  it("自定义 indent 生效", () => {
+    const [top] = renderButtonRow({ label: "完成", indent: 6 });
+    expect(stripAnsi(top!).startsWith("      ")).toBe(true);
+  });
+
+  it("未选中：middle 行左侧是空格不是 cursor", () => {
+    const [, middle] = renderButtonRow({ label: "完成" });
+    // cursor 占位是空格 + 空格 = 2 列，等同 indent 默认
+    expect(stripAnsi(middle!).startsWith("  ")).toBe(true);
+    expect(stripAnsi(middle!)).not.toContain("▸");
+  });
+
+  it("选中：middle 行左侧出现 ▸ cursor 标记", () => {
+    const [, middle] = renderButtonRow({ label: "完成", selected: true });
+    expect(stripAnsi(middle!).startsWith("▸ ")).toBe(true);
+  });
+
+  it("hint 拼到 middle 行右侧 dim 括号内", () => {
+    const [, middle] = renderButtonRow({
+      label: "完成",
+      hint: "保存并启动",
+    });
+    expect(stripAnsi(middle!)).toContain("(保存并启动)");
+  });
+
+  it("无 hint 时 middle 行不含括号文本", () => {
+    const [, middle] = renderButtonRow({ label: "完成" });
+    expect(stripAnsi(middle!)).not.toContain("(");
+  });
+
+  it("primary 选中态：success 色 + bold（颜色由 renderButton 决定）", () => {
+    const [, middle] = renderButtonRow({
+      label: "完成",
+      primary: true,
+      selected: true,
+    });
+    expect(middle).toContain("\x1b[32m"); // success/green
+    expect(middle).toContain("\x1b[1m"); // bold
   });
 });

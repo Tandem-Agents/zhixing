@@ -9,7 +9,7 @@
  * 输出 ANSI 序列让支持的终端缓存 BSU..ESU 之间的输出一次性 render，零闪烁。
  */
 
-import { getTerminalWidth } from "../../tui/style.js";
+import { getTerminalWidth } from "../../tui/index.js";
 
 const ANSI = {
   /** 光标到 (1,1) 后清光标至屏幕末尾——不滚动到 scrollback（vs `\x1b[2J` 在 Windows Terminal 会滚动） */

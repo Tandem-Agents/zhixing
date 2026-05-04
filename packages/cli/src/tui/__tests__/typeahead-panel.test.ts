@@ -361,7 +361,7 @@ describe("renderSessionLines", () => {
     expect(joined).not.toContain("1 matches");
   });
 
-  it("选中项用 selectedArrow ❯", () => {
+  it("选中项用 selectedArrow ▸（design token icon.cursor）", () => {
     const state = makeState({
       suggestions: [
         makeSuggestion("a:b", "/a"),
@@ -371,11 +371,11 @@ describe("renderSessionLines", () => {
     });
     const lines = renderSessionLines(state, defaultRenderOpts);
     const stripped = lines.map(stripAnsi);
-    // 第一个候选行用 unselectedArrow "  "，第二个用 "❯ "
+    // 第一个候选行用 unselectedArrow "  "，第二个用 "▸ "（与 config-editor 等其他面板共享）
     const bLine = stripped.find((l) => l.includes("/b"))!;
-    expect(bLine).toContain("❯");
+    expect(bLine).toContain("▸");
     const aLine = stripped.find((l) => l.includes("/a"))!;
-    expect(aLine).not.toContain("❯");
+    expect(aLine).not.toContain("▸");
   });
 
   it("底部有快捷键提示条", () => {
