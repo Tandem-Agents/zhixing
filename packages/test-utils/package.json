@@ -1,0 +1,31 @@
+{
+  "name": "@zhixing/test-utils",
+  "version": "0.1.0",
+  "private": true,
+  "description": "知行 monorepo 内部测试基础设施 —— fail-safe 临时目录管理等共享 primitives",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest watch",
+    "clean": "rm -rf dist"
+  },
+  "peerDependencies": {
+    "vitest": "^3.1.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.2",
+    "tsup": "^8.4.0",
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.1"
+  }
+}

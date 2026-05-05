@@ -1,7 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import fs from "node:fs/promises";
-import path from "node:path";
-import os from "node:os";
+import { createTempDir } from "@zhixing/test-utils";
 import {
   MemoryFlushStrategy,
   parseExtractions,
@@ -30,9 +28,8 @@ function makeLLMFn(response: FlushExtraction[]): FlushLLMFn {
   return async () => JSON.stringify(response);
 }
 
-async function createTempStore(): Promise<{ store: MemoryStore; dir: string }> {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "flush-test-"));
-  return { store: new MemoryStore(dir), dir };
+async function createTempStore(): Promise<{ store: MemoryStore }> {
+  return { store: new MemoryStore(await createTempDir("flush")) };
 }
 
 // ─── parseExtractions ───
@@ -89,12 +86,10 @@ describe("parseExtractions", () => {
 
 describe("MemoryFlushStrategy", () => {
   let store: MemoryStore;
-  let tmpDir: string;
 
   beforeEach(async () => {
     const result = await createTempStore();
     store = result.store;
-    tmpDir = result.dir;
   });
 
   it("从消息中提取信息并保存到记忆", async () => {

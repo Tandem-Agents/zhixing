@@ -1,7 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import fs from "node:fs/promises";
-import path from "node:path";
-import os from "node:os";
+import { createTempDir } from "@zhixing/test-utils";
 
 import { SkillsStore, type SkillMeta } from "../skills-store.js";
 import {
@@ -14,7 +12,6 @@ import type { Message } from "../../types/messages.js";
 
 // ─── 测试辅助 ───
 
-let tmpDir: string;
 let store: SkillsStore;
 
 function userMsg(text: string): Message {
@@ -43,7 +40,7 @@ function makeSkillMeta(overrides: Partial<SkillMeta> = {}): SkillMeta {
 }
 
 beforeEach(async () => {
-  tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-effect-"));
+  const tmpDir = await createTempDir("effect");
   store = new SkillsStore(tmpDir);
 });
 
