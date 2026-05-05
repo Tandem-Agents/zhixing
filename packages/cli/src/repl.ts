@@ -22,6 +22,7 @@ import {
   getProjectId,
   getZhixingHome,
   ConversationRepository,
+  type Conversation,
   type ConversationScope,
   loadProfile,
   getMemoryDir,
@@ -59,11 +60,11 @@ import {
   createRenderer,
   renderSummary,
   renderError,
-  renderWelcome,
   renderUsageReport,
   renderContextVisual,
   type Renderer,
 } from "./render.js";
+import { renderHomeWelcome, renderStartupAdvisories } from "./workbench/index.js";
 import { RuntimeSession } from "./runtime/session.js";
 import { handleConfigCommand } from "./runtime/config-command.js";
 import { parseTaskUsageFromMessages } from "./parse-task-usage.js";
@@ -686,9 +687,12 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   let messages: Message[] = [];
   let conversationId: string | null = null;
   let turnCounter = 0;
+  // 当前 REPL 接续的对话名称——三个恢复入口（显式 ID / interactive picker /
+  // 默认最近）共同写入此变量，最终喂给 welcome chrome 内的锚 row2 inline 渲染，
+  // 替代分散在三处的 console.log("已恢复对话...") 噪音。新会话保持 null →
+  // 锚 row2 退化为仅 glyph。
+  let resumedConversationName: string | null = null;
 
-  // ADR-CM-016: 默认自动恢复最近对话
-  // -r (显式指定 ID 恢复) 保留到 Step 8 清除；-c 已被默认行为取代
   if (options.resume !== undefined) {
     if (typeof options.resume === "string") {
       const conv = await convRepo.get(options.resume);
@@ -701,11 +705,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
         messages = loaded.messages;
         conversationId = options.resume;
         turnCounter = loaded.turnCount;
-        console.log(
-          chalk.dim(
-            `\n  已恢复对话 ${chalk.cyan(conv.name)}（${loaded.turnCount} 轮）\n`,
-          ),
-        );
+        resumedConversationName = conv.name;
       } catch (err) {
         console.log(
           chalk.red(
@@ -715,16 +715,13 @@ export async function startRepl(options: ReplOptions): Promise<void> {
         return;
       }
     } else {
-      conversationId = await interactiveConversationPicker(convRepo);
-      if (conversationId) {
-        const loaded = await store.load(conversationId);
+      const picked = await interactiveConversationPicker(convRepo);
+      if (picked) {
+        conversationId = picked.id;
+        const loaded = await store.load(picked.id);
         messages = loaded.messages;
         turnCounter = loaded.turnCount;
-        console.log(
-          chalk.dim(
-            `\n  已恢复对话 ${chalk.cyan(conversationId)}（${loaded.turnCount} 轮）\n`,
-          ),
-        );
+        resumedConversationName = picked.name;
       }
     }
   } else {
@@ -736,11 +733,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
         conversationId = latest;
         turnCounter = loaded.turnCount;
         const conv = await convRepo.get(latest);
-        console.log(
-          chalk.dim(
-            `\n  已恢复对话 ${chalk.cyan(conv?.name ?? latest)}（${loaded.turnCount} 轮）\n`,
-          ),
-        );
+        resumedConversationName = conv?.name ?? latest;
       } catch {
         // transcript 加载失败 → 降级到创建新对话
       }
@@ -761,11 +754,25 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     conversationId = conversation.id;
   }
 
-  await renderWelcome({
-    model: session.runtime.model,
-    workspace: session.runtime.resolvedWorkspace,
+  // 启动告警先于 chrome——异常状态需立即吸引注意；无告警时返回空数组，
+  // 视觉序列退化为"shell prompt → chrome"无空行干扰
+  const advisoryLines = renderStartupAdvisories({
     workspaceDirStatus: session.runtime.workspaceDirStatus,
+    workspacePath: session.runtime.resolvedWorkspace.path,
+    workspaceSource: session.runtime.resolvedWorkspace.source,
   });
+  for (const line of advisoryLines) console.log(line);
+  if (advisoryLines.length > 0) console.log();
+
+  for (const line of renderHomeWelcome({
+    providerId: session.runtime.providerId,
+    model: session.runtime.model,
+    workspaceRoot: session.runtime.resolvedWorkspace.path ?? undefined,
+    resumedConversationName: resumedConversationName ?? undefined,
+  })) {
+    console.log(line);
+  }
+  console.log();
 
   // 启动时检测 stale 技能，温和提醒
   await checkStaleSkills();
@@ -1043,6 +1050,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
           broker: typeaheadBroker,
           dispatcher: typeaheadDispatcher,
           getRuntime,
+          placeholder: "输入消息或 / 查看命令",
         });
       } finally {
         rl.resume();
@@ -1263,9 +1271,16 @@ export async function startRepl(options: ReplOptions): Promise<void> {
 
 // ─── 交互式会话选择器 ───
 
+/**
+ * 交互式会话选择器——展示最近 10 个对话让用户选号恢复。
+ *
+ * 返回完整 Conversation 而非 id：picker 内部 list() 已持有完整对象，
+ * 让 caller 直接拿 name / lastActiveAt 等字段，避免被迫二次 convRepo.get(id)
+ * 重读磁盘（ConversationRepository 无缓存层）。
+ */
 async function interactiveConversationPicker(
   convRepo: ConversationRepository,
-): Promise<string | null> {
+): Promise<Conversation | null> {
   const conversations = await convRepo.list();
   if (conversations.length === 0) {
     return null;
@@ -1295,7 +1310,7 @@ async function interactiveConversationPicker(
 
     const num = parseInt(answer.trim(), 10);
     if (num > 0 && num <= displayed.length) {
-      return displayed[num - 1]!.id;
+      return displayed[num - 1]!;
     }
     return null;
   } catch {

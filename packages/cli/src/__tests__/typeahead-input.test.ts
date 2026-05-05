@@ -750,3 +750,111 @@ describe("readInputLine — §6.4 光标回归护栏", () => {
     await p;
   });
 });
+
+// ─── Placeholder ───
+//
+// Placeholder = prompt 行的 0 状态视觉装饰。空 buffer 时显示 dim 文案，输入即消失，
+// 删回空重新出现，不参与 submit（仅渲染层）。与 ghost text 共用 dim 通道但语义互斥
+// （buffer 空时 broker 自然无 trigger 也无 ghost）。
+describe("readInputLine — placeholder", () => {
+  it("空 buffer 首帧 stdout 包含 dim placeholder 文案", async () => {
+    const { stdin, stdout, getCaptured } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+
+    const p = readInputLine({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      stdin,
+      stdout,
+      columns: 80,
+      placeholder: "PLACEHOLDER_SENTINEL",
+    });
+
+    // 让首次同步渲染的写入冲到 captured
+    await new Promise((r) => setImmediate(r));
+
+    const captured = getCaptured();
+    expect(captured).toContain("PLACEHOLDER_SENTINEL");
+    // dim ANSI 序列紧邻 placeholder——确认走 dim 通道
+    expect(captured).toMatch(/\x1b\[2m[^\x1b]*PLACEHOLDER_SENTINEL/);
+
+    // 收尾：ctrl-c 让 promise resolve，避免 promise 悬挂
+    await sendSyntheticKey(stdin, { name: "c", ctrl: true });
+    await p;
+  });
+
+  it("输入第一个字符后 placeholder 在新帧中消失；删回空重新出现", async () => {
+    const { stdin, stdout, getCaptured, clearCaptured } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+
+    const p = readInputLine({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      stdin,
+      stdout,
+      columns: 80,
+      placeholder: "PLACEHOLDER_SENTINEL",
+    });
+
+    await new Promise((r) => setImmediate(r));
+    expect(getCaptured()).toContain("PLACEHOLDER_SENTINEL");
+
+    // 输入字符后看新帧——placeholder 应消失
+    clearCaptured();
+    await typeChars(stdin, "h");
+    expect(getCaptured()).not.toContain("PLACEHOLDER_SENTINEL");
+
+    // 删回空——placeholder 应重新出现
+    clearCaptured();
+    await sendSyntheticKey(stdin, { name: "backspace", sequence: "\x7f" });
+    expect(getCaptured()).toContain("PLACEHOLDER_SENTINEL");
+
+    await sendSyntheticKey(stdin, { name: "c", ctrl: true });
+    await p;
+  });
+
+  it("placeholder 不参与 submit——空回车提交空字符串而非 placeholder 文本", async () => {
+    const { stdin, stdout } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+
+    const p = readInputLine({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      stdin,
+      stdout,
+      columns: 80,
+      placeholder: "PLACEHOLDER_SENTINEL",
+    });
+
+    await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+    const result = await p;
+    expect(result).toEqual({ kind: "text", text: "" });
+  });
+
+  it("不传 placeholder 时空 buffer 首帧不渲染任何 placeholder 内容", async () => {
+    const { stdin, stdout, getCaptured } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+
+    const p = readInputLine({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      stdin,
+      stdout,
+      columns: 80,
+      // placeholder 故意不传——验证向后兼容
+    });
+
+    await new Promise((r) => setImmediate(r));
+    const captured = getCaptured();
+    // 首帧应该只有 prompt prefix（"❯ "），无任何额外 dim 文本块紧邻其后
+    expect(captured).toContain("❯");
+    expect(captured).not.toMatch(/\x1b\[2m[^\x1b]+\x1b\[/); // 无连续的 dim 内容块
+
+    await sendSyntheticKey(stdin, { name: "c", ctrl: true });
+    await p;
+  });
+});

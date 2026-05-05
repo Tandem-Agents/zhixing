@@ -20,7 +20,6 @@ import {
   type AgentYield,
   type ContextBudget,
   type IEventBus,
-  getAgentIdentity,
 } from "@zhixing/core";
 import type { DecorateRunBusFn } from "@zhixing/orchestrator/runtime";
 import type { SubAgentUsageEntry } from "./parse-task-usage.js";
@@ -693,114 +692,6 @@ export function renderError(error: unknown): void {
 
   const message = error instanceof Error ? error.message : String(error);
   console.error(`\n${chalk.red("✗")} ${message}`);
-}
-
-// ─── 欢迎动画 ───
-
-/**
- * 欢迎页面：打字动画 + 极简信息。
- *
- * 视觉序列（TTY 模式，~400ms）：
- *   1. "✦" 出现（80ms 预等待）
- *   2. 显示名逐字打出（每字 70ms）
- *   3. 模型名淡入
- *   4. 短暂停顿后进入 prompt
- *
- * 非 TTY 环境（管道/CI）降级为静态单行输出。
- *
- * 显示名来自 getAgentIdentity()，默认 "知行"，可被 config 覆盖。
- */
-export async function renderWelcome(options: {
-  model: string;
-  workspace?: { path: string | null; source: string };
-  workspaceDirStatus?: string;
-}): Promise<void> {
-  const { model, workspace, workspaceDirStatus } = options;
-  const { displayName } = getAgentIdentity();
-
-  if (!process.stdout.isTTY) {
-    const wsInfo = workspace?.path ? ` · ${workspace.path}` : "";
-    console.log(`${displayName} · ${model}${wsInfo}`);
-    return;
-  }
-
-  console.log();
-
-  // Phase 1: 标志出现
-  process.stdout.write("  ");
-  await sleep(80);
-  process.stdout.write(chalk.cyan.bold("✦"));
-  await sleep(120);
-
-  // Phase 2: 名称逐字打出
-  process.stdout.write(" ");
-  for (const char of displayName) {
-    process.stdout.write(chalk.bold(char));
-    await sleep(70);
-  }
-  console.log();
-
-  // Phase 3: 模型名静默出现
-  await sleep(60);
-  console.log(`    ${chalk.dim(model)}`);
-
-  // Phase 4: 工作区信息（按场景区分）
-  if (workspace?.path) {
-    renderWorkspaceStatus(workspace.path, workspace.source, workspaceDirStatus);
-  }
-  console.log();
-}
-
-/**
- * 按启动场景渲染工作区状态：
- * - created：首次启动，工作区刚创建
- * - exists：正常启动，一行简要
- * - skipped（有路径）：目录创建失败，警告
- * - cwd-fallback：无配置，使用当前目录
- */
-function renderWorkspaceStatus(
-  wsPath: string,
-  source: string,
-  dirStatus?: string,
-): void {
-  if (dirStatus === "created") {
-    // 首次创建
-    console.log(`    ${chalk.green(`workspace: ${wsPath}`)}`);
-    console.log(`    ${chalk.dim("工作区已创建。常规文件读写在此目录内无需逐次确认。")}`);
-    console.log(`    ${chalk.dim('如需修改，告诉我「把工作区改到 xxx」即可。')}`);
-    return;
-  }
-
-  if (dirStatus === "skipped" && source !== "cwd-fallback" && source !== "none") {
-    // 配置了路径但创建失败
-    console.log(`    ${chalk.yellow(`⚠ workspace: ${wsPath}`)}`);
-    console.log(`    ${chalk.yellow("工作区目录不存在且无法创建，请检查路径或权限。")}`);
-    return;
-  }
-
-  // 正常启动 / cwd-fallback
-  const sourceLabel = formatWorkspaceSource(source);
-  console.log(`    ${chalk.dim(`workspace: ${wsPath}`)}${sourceLabel}`);
-}
-
-/** 将工作区来源转为简短的中文标注 */
-function formatWorkspaceSource(source: string): string {
-  switch (source) {
-    case "cli":
-      return chalk.dim(" (--workspace)");
-    case "directory-config":
-      return chalk.dim(" (目录配置)");
-    case "global-config":
-      return "";  // 全局配置是默认来源，不额外标注
-    case "cwd-fallback":
-      return chalk.dim(" (当前目录)");
-    default:
-      return "";
-  }
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 // ─── 内部辅助 ───

@@ -216,6 +216,17 @@ export class RuntimeSession {
    * 装配 scheduler——runAgentTurn 通过 this.agentRuntime closure 自动响应 swap。
    * delivery 是 value capture（Scheduler 公共 API 无 setDelivery），所以 channels 域
    * 重建时必须重建 scheduler 拿新 delivery ref。
+   *
+   * Logger 注入策略：
+   *
+   *   info 静默——启动 chrome 之前不应被日志污染；任务执行进度由 spinner 渲染，
+   *   完成事件由 schedulerEventBus 的 task-completed 推送给 REPL 渲染。logger.info
+   *   是子系统内部诊断输出，不属于"用户该看到的东西"。
+   *
+   *   warn / error 保留 console 兜底——当前 schedulerEventBus 事件不覆盖
+   *   delivery-enqueue-failed / invalid-cron-expression / shutdown-timeout 等
+   *   子告警，全 no-op 会让用户错过"任务执行成功但消息没投到"这类静默失败。
+   *   这两类告警升级为 EventBus 专属事件后 logger 才能完全 no-op。
    */
   private createScheduler(
     delivery: DeliveryStack["delivery"] | undefined,
@@ -226,11 +237,7 @@ export class RuntimeSession {
       eventBus: this.opts.schedulerEventBus,
       delivery,
       logger: {
-        info: (msg, data) =>
-          console.log(
-            chalk.dim(`  [scheduler] ${msg}`),
-            data ? chalk.dim(JSON.stringify(data)) : "",
-          ),
+        info: () => {},
         warn: (msg, data) =>
           console.log(
             chalk.yellow(`  [scheduler] ${msg}`),

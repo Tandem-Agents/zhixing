@@ -97,6 +97,13 @@ export interface TypeaheadInputOptions {
 
   /** 最大可见候选数（默认 8） */
   readonly maxVisibleItems?: number;
+
+  /**
+   * Buffer 为空时显示的 dim 提示文字（如 "输入消息或 / 查看命令"）。
+   * 输入第一个字符消失，删回空状态重新出现。
+   * 不参与 buffer.draft，不会被 commit——仅是 prompt 行的 0 状态视觉装饰。
+   */
+  readonly placeholder?: string;
 }
 
 // ─── 主入口 ───
@@ -197,11 +204,18 @@ export function readInputLine(
       stdout.write(promptPrefix);
       stdout.write(buffer.draft);
 
-      // Step 3.5：Ghost text —— 光标在 draft 末尾且有 ghost 时，追加 dim 后缀。
-      // 光标不在末尾时不显示 —— 避免 mid-cursor 布局复杂化。
+      // Step 3.5：dim 提示渲染——placeholder 与 ghost text 共用此通道但语义互斥。
+      //   buffer 空 → placeholder（caller 注入的 0 状态文案，如 "输入消息或 / 查看命令"）
+      //   buffer 非空 + cursor 在末尾 + broker 有 ghost suffix → ghost text（命令补全建议）
+      // 互斥自然成立：buffer 空时 broker 无 trigger 自然无 ghost；显式 if/else 分支
+      // 让阅读者一眼看清两者关系。光标不在末尾时 ghost 不显示（避免 mid-cursor 布局复杂化）。
       const cursorAtEnd =
         buffer.cursor === Array.from(buffer.draft).length;
-      if (cursorAtEnd && lastSessionState?.ghostText?.suffix) {
+      if (buffer.isEmpty && options.placeholder) {
+        stdout.write(
+          `${ANSI.dim}${options.placeholder}${ANSI.reset}`,
+        );
+      } else if (cursorAtEnd && lastSessionState?.ghostText?.suffix) {
         stdout.write(
           `${ANSI.dim}${lastSessionState.ghostText.suffix}${ANSI.reset}`,
         );
