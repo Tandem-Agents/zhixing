@@ -969,6 +969,20 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     now: Date.now(),
   });
 
+  // close 监听器 + 主循环的协作信号：
+  //
+  // 异步 cleanup 监听器（下方）会跑 dispose / "再见 👋" / process.exit，含 await
+  // 可能挂起多个 tick；期间 /exit 等命令的 handler 已 resolve，主循环若 continue
+  // 进入下一轮 readInputLine 会渲染新 box，与"再见 👋"输出视觉重叠。
+  //
+  // 同步监听器立即设 flag，主循环顶部检查 flag 直接 break——不渲染新 box；
+  // 异步 cleanup 沿原 timeline 跑完，最终 process.exit。两个监听器按注册顺序
+  // 同步触发（同步部分），共同表达"REPL 正在关闭"的协作语义。
+  let replShuttingDown = false;
+  rl.on("close", () => {
+    replShuttingDown = true;
+  });
+
   rl.on("close", async () => {
     renderer.stop();
     // session.dispose 内部 detach renderer + stop scheduler/delivery + dispose channels
@@ -1039,6 +1053,11 @@ export async function startRepl(options: ReplOptions): Promise<void> {
 
   // REPL 主循环
   while (true) {
+    // 检查 close 监听器的同步协作信号——/exit / 双击 Ctrl+C / 终端关闭等任何
+    // 退出路径触发 rl.close() 后立即设此 flag，主循环 break 不再进入下一轮
+    // readInputLine，避免在 cleanup 异步流程跑完前渲染新 box 与"再见 👋"重叠
+    if (replShuttingDown) break;
+
     let input: string;
 
     if (useTypeahead && typeaheadBroker && typeaheadDispatcher) {

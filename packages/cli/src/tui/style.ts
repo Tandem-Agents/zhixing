@@ -36,6 +36,20 @@ export const tone = {
   highlightPrimary: chalk.bgGreen.black.bold,
   /** 选中态高亮（通用）——整块青底黑字 + 粗体 */
   highlightBrand: chalk.bgCyan.black.bold,
+  /**
+   * 历史用户消息回显的整行 bg——提交后留在 scrollback 的消息行，
+   * 用 bg dim 灰让用户消息在长会话里有持续视觉锚，与 agent 输出（无 bg）形成对比。
+   *
+   * bgAnsi256(236) ≈ #303030 中深灰：
+   *   深色终端：略亮于终端 bg，明显但不刺眼
+   *   浅色终端：深灰底 + 黑字对比偏低但仍可读
+   * 优先深色终端体验（目标用户主流深色 dev 终端）。
+   *
+   * 使用约定：caller 必须 padding 到终端宽度让 bg 延伸到行末——否则 bg 只在
+   * 文字下方染色，视觉锚断裂。chalk wrapper 内嵌的 fg/bold reset 不重置 bg，
+   * 内层 brand bold 文字可透传染色不破坏。
+   */
+  historyEcho: chalk.bgAnsi256(236),
 } as const;
 
 // ── 布局常量 ──────────────────────────────────────────────

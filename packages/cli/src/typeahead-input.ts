@@ -41,12 +41,14 @@ import type {
   SuggestionItem,
   TypeaheadSessionState,
 } from "@zhixing/core";
-import chalk from "chalk";
 
 import {
   ANSI,
   stringWidth,
+  stripAnsi,
+  tone,
   renderSessionLines,
+  renderChrome,
   defaultTypeaheadTheme,
   type RenderOptions,
 } from "./tui/index.js";
@@ -86,7 +88,7 @@ export interface TypeaheadInputOptions {
   readonly stdin?: NodeJS.ReadStream;
   readonly stdout?: NodeJS.WriteStream;
 
-  /** prompt 前缀（chalk 色） */
+  /** prompt 前缀（caller 自带 ANSI 样式）；缺省 brand bold ❯ */
   readonly promptPrefix?: string;
 
   /** AbortSignal —— 外部提前取消 */
@@ -119,7 +121,7 @@ export function readInputLine(
 ): Promise<InputLineResult> {
   const stdin = options.stdin ?? process.stdin;
   const stdout = options.stdout ?? process.stdout;
-  const promptPrefix = options.promptPrefix ?? chalk.green("❯ ");
+  const promptPrefix = options.promptPrefix ?? tone.brand.bold("❯ ");
   // 默认 12：刚好装下所有 10 条可见 builtin + 插件余量，普通终端 ≥20 行舒服容纳
   const maxVisibleItems = options.maxVisibleItems ?? 12;
 
@@ -152,6 +154,12 @@ export function readInputLine(
     const stdinOwnership: StdinOwnershipHandle = acquireStdinOwnership(stdin);
     const rawModeLease: RawModeLease = rawModeController.acquire(stdin);
 
+    // ── 帧状态 ──
+    // firstRender: 首次渲染时光标在 prompt 行（不是 box body 行），rerender 入口
+    // 跳过 moveUp(1) 一次，让顶边直接覆盖当前空行；后续渲染光标都在 body 行，需
+    // moveUp(1) 回顶边再重绘整帧
+    let firstRender = true;
+
     // ── 绘图 ──
     const getColumns = (): number => {
       if (typeof options.columns === "number") return options.columns;
@@ -171,105 +179,124 @@ export function readInputLine(
     };
 
     /**
-     * 一帧 = prompt 行 + （可选）typeahead 面板行。
+     * 一帧 = box（顶 + body + 底，3 行）+ panel N 行。
      *
-     * 不变量（rerender 入口与出口都成立）：
-     *   **光标停在 prompt 行的 `(buffer.cursor 对应的显示列)` 位置**。
+     * 入口/出口光标契约：
+     *   非首次渲染入口 = 上次出口 = box body 行 cursor 列
+     *   首次渲染入口 = caller 调用前的当前行 col 任意（视作 box 顶边的占位）
+     *   每次出口 = box body 行 cursor 列
      *
-     * 渲染流程：
-     *   1. `\r` 回到 prompt 行 col 0（不 moveUp —— 相信入口不变量）
-     *   2. `\x1b[J` (clearBelow) 清 prompt 行光标右侧 + 下方所有面板行。
-     *      **关键**：这个 clear 不往上走，所以永远不会擦 prompt 行之上的
-     *      欢迎语 / 历史输出。
-     *   3. 写 promptPrefix + draft
-     *   4. 如果有面板：写 `\r\n` + 每行 + `\r\n`，然后 `moveUp(panelLines+1)`
-     *      + `col0` 回到 prompt 行列 0
-     *   5. 按 `draft[0:cursor]` 的**显示宽度**（CJK=2）右移到 cursor 列
+     * 渲染流程（每帧自洽，与上次帧的 panel 行数无关——clearBelow 一次性清掉）：
+     *   1. moveUp(1) 回 box 顶边行（首次跳过——光标本就在该行的位置）
+     *   2. col0 + clearBelow 清光标右 + 下方所有内容（含旧 box 中下半 + 旧 panel）
+     *   3. 写 box 三行（每行 + \r\n）—— 光标到底边之下
+     *   4. 写 panel N 行（每行 + \r\n）—— 光标到 panel 之下
+     *   5. moveUp(panelLines.length + 2) 回 box body 行 col 0
+     *      （panel 行数 + 底边 1 行 + body 之下到 panel 顶 1 行 = N + 2，无 panel 时 = 2）
+     *   6. forward(2 + promptPrefix宽 + draftBeforeCursor宽) 移到 cursor 列
+     *      （2 = 左 │ 1 列 + indent 1 列；indent=1 是 input box 紧凑型决策）
      *
-     * 绝不使用 `PanelRenderer.clear()/render()` —— 那套 API 的光标契约是
-     * `(startRow + lastHeight, col 0)`，而我们这里的入口契约是 "prompt 行
-     * 的 cursor 位置"，两者不兼容；在 clear 路径上 moveUp 会从 prompt 行
-     * 往上走 N 行把欢迎语一并擦掉（曾经的真实 bug）。
+     * 整帧用 syncBegin / syncEnd 包裹，避免 TTY 分段 flush 让光标可见闪烁。
+     *
+     * clearBelow 的边界：moveUp(1) 后光标在 box 顶边行——clearBelow 只清这一行
+     * 光标右侧 + 下方，不会越过 box 顶边往上擦欢迎语 / 历史输出。
      */
     const rerender = (): void => {
-      // 整个 frame 包裹同步输出 ANSI——避免 TTY sync write 分段 flush 让 cursor 在
-      // step 5 的 `\r` 与 `\x1b[{offset}C` 之间短暂出现在 col 0 闪烁
       stdout.write(ANSI.syncBegin);
 
-      // Step 1-2：回 prompt 行 col 0 并清 prompt 行 + 下方
+      // Step 1：回 box 顶边行（首次渲染时光标已在该行的占位位置——caller 调用前的换行）
+      if (!firstRender) {
+        stdout.write(ANSI.moveUp(1));
+      }
+      firstRender = false;
+
+      // Step 2：col0 + clearBelow 清整个 box + panel 残留
       stdout.write(ANSI.col0);
       stdout.write(ANSI.clearBelow);
 
-      // Step 3：prompt 行内容
-      stdout.write(promptPrefix);
-      stdout.write(buffer.draft);
-
-      // Step 3.5：dim 提示渲染——placeholder 与 ghost text 共用此通道但语义互斥。
-      //   buffer 空 → placeholder（caller 注入的 0 状态文案，如 "输入消息或 / 查看命令"）
+      // 计算 body 内容（promptPrefix + draft + dim 提示）
+      // dim 提示分两类，语义互斥：
+      //   buffer 空 → placeholder（caller 注入的 0 状态文案）
       //   buffer 非空 + cursor 在末尾 + broker 有 ghost suffix → ghost text（命令补全建议）
-      // 互斥自然成立：buffer 空时 broker 无 trigger 自然无 ghost；显式 if/else 分支
-      // 让阅读者一眼看清两者关系。光标不在末尾时 ghost 不显示（避免 mid-cursor 布局复杂化）。
+      // buffer 空时 broker 自然无 trigger 也无 ghost，互斥自然成立；显式 if/else
+      // 让阅读者一眼看清两者关系。光标不在末尾时 ghost 不显示——避免 mid-cursor 布局复杂化。
       const cursorAtEnd =
         buffer.cursor === Array.from(buffer.draft).length;
+      let bodyContent = `${promptPrefix}${buffer.draft}`;
       if (buffer.isEmpty && options.placeholder) {
-        stdout.write(
-          `${ANSI.dim}${options.placeholder}${ANSI.reset}`,
-        );
+        bodyContent += `${ANSI.dim}${options.placeholder}${ANSI.reset}`;
       } else if (cursorAtEnd && lastSessionState?.ghostText?.suffix) {
-        stdout.write(
-          `${ANSI.dim}${lastSessionState.ghostText.suffix}${ANSI.reset}`,
-        );
+        bodyContent += `${ANSI.dim}${lastSessionState.ghostText.suffix}${ANSI.reset}`;
       }
 
-      // Step 4：计算面板行
+      // Step 3：渲染 box——复用 renderChrome 原语（紧凑形态：bodyPadding=false + indent=1）
+      const boxLines = renderChrome({
+        body: [bodyContent],
+        width: getColumns(),
+        bodyPadding: false,
+        indent: 1,
+      });
+      for (const line of boxLines) {
+        stdout.write(line);
+        stdout.write("\r\n");
+      }
+
+      // Step 4：渲染 panel（紧贴 box 底边之下，作为第二个独立 chrome）
       const panelLines = lastSessionState
         ? renderSessionLines(lastSessionState, computeRenderOptions())
         : [];
-
-      if (panelLines.length > 0) {
+      for (const line of panelLines) {
+        stdout.write(line);
         stdout.write("\r\n");
-        for (const line of panelLines) {
-          stdout.write(line);
-          stdout.write("\r\n");
-        }
-        // 此刻光标在 (promptRow + 1 + panelLines.length, col 0)
-        // 上移 panelLines.length + 1 行回到 prompt 行 col 0
-        stdout.write(ANSI.moveUp(panelLines.length + 1));
       }
 
-      // Step 5：无条件 `\r` 回 prompt 行 col 0，再按 cursor 对应的**显示列**
-      // 右移。`\x1b[{N}C` 是相对位移（cursor forward），必须从 col 0 起算
-      // 否则 no-panel 分支里光标停在 draft 末尾再向右 N 列会多偏 N 列。
-      //
-      // 前车之鉴：初版 no-panel 分支漏掉这个 `\r`，真实 TTY 里打 `@ss`（`@`
-      // 无 provider）光标和 draft 末尾之间出现 5 列空隙。
-      stdout.write(ANSI.col0);
+      // Step 5：回 box body 行 col 0
+      // 此刻光标在所有内容之下 col 0；body 行是从底向上数的第 (panelLines.length + 2) 行
+      // （panel N 行 + 底边 1 行 + body 之下空格 1 行 = N + 2；无 panel 时 = 2）
+      stdout.write(ANSI.moveUp(panelLines.length + 2));
+
+      // Step 6：从 col 0 forward 到 cursor 列
+      // offset = 1（左 │）+ 1（indent=1）+ promptPrefix 可见宽 + draft 光标前部宽
       const draftBeforeCursor = Array.from(buffer.draft)
         .slice(0, buffer.cursor)
         .join("");
       const offset =
-        visibleLength(promptPrefix) + stringWidth(draftBeforeCursor);
+        2 + visibleLength(promptPrefix) + stringWidth(draftBeforeCursor);
       if (offset > 0) {
         stdout.write(`\x1b[${offset}C`);
       }
 
-      // 整帧渲染完一次性提交给终端 render
       stdout.write(ANSI.syncEnd);
     };
 
     /**
-     * 销毁当前帧并在原 prompt 行留下最终回显（或只留空行）。
+     * 销毁当前 box + panel 帧，把"刚提交的输入"降级为单行 `❯ <text>` 回显进入
+     * scrollback——历史不累积 box 视觉重量（设计语言 P1 安静原则）。
      *
-     * - `finalEcho=text`：Submit 路径 —— 清整帧 + 重写 `prompt + text` + `\r\n`，
-     *   让"刚提交的那一行"进入 scrollback 历史，下一行空出来给后续输出。
-     * - `finalEcho=null`：Cancel 路径 —— 同样清整帧 + `\r\n`，不回显。
+     * - `finalEcho=text`：Submit 路径 —— 清整帧 + 重写 `prompt + text` + `\r\n`
+     * - `finalEcho=null`：Cancel 路径 —— 同样清整帧 + `\r\n`，不回显
+     *
+     * 入口光标契约与 rerender 出口一致：在 box body 行 cursor 位置（首次例外）。
+     * moveUp(1) 回顶边行 + clearBelow 清整个 box + panel；首次渲染前调 teardown
+     * 不会发生（teardown 只在 submit / cancel 路径触发，rerender 至少跑过一次）。
      */
     const teardownVisuals = (finalEcho: string | null): void => {
+      if (!firstRender) {
+        stdout.write(ANSI.moveUp(1));
+      }
       stdout.write(ANSI.col0);
       stdout.write(ANSI.clearBelow);
       if (finalEcho !== null) {
-        stdout.write(promptPrefix);
-        stdout.write(finalEcho);
+        // 历史回显纯 bg 染色：bg 灰底已充分标识"用户消息"——不再带 ❯ prompt 字符
+        // 避免与 active box 的"现在输入"语义重复（光标在历史里早不在了，❯ 是错位
+        // 信号），也让用户复制历史消息时不带 prompt 前缀。前导 2 空格让文字不贴
+        // bg 边缘视觉舒展；padding 到终端宽度让 bg 延伸到行末避免视觉锚断裂。
+        const innerText = `  ${finalEcho}`;
+        const visibleWidth = stringWidth(stripAnsi(innerText));
+        const padding = " ".repeat(
+          Math.max(0, getColumns() - visibleWidth),
+        );
+        stdout.write(tone.historyEcho(innerText + padding));
       }
       stdout.write("\r\n");
     };

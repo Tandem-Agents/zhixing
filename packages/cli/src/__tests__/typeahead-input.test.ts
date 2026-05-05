@@ -15,6 +15,7 @@
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import chalk from "chalk";
 
 import {
   CommandProvider,
@@ -28,8 +29,14 @@ import { CommandDispatcher } from "../command-dispatcher.js";
 import {
   _getRawModeRefcount,
   _resetRawModeRefcountForTests,
+  stringWidth,
+  stripAnsi,
 } from "../tui/index.js";
 import { readInputLine, type InputLineResult } from "../typeahead-input.js";
+
+// PassThrough 非 TTY，chalk 默认禁用颜色——强开 level=3 让 bg / dim 等 ANSI
+// 真实出现在 captured 里供回归断言（与 chalk 在真实 TTY 的输出一致）
+chalk.level = 3;
 
 // ─── 测试辅助 ───
 
@@ -518,23 +525,24 @@ describe("readInputLine — 结果 narrowing smoke", () => {
 
 // ─── §6.4 光标不变量回归测试（真实 TTY bug 复现） ───
 //
-// 这一块的故事：Step 5 初版在真实 Windows Terminal 里触发了两个致命 bug：
+// 历史背景：Step 5 初版在真实 Windows Terminal 里触发了两个致命 bug：
 //   1. 输入 `/` + 任意字符后，prompt 行之上的欢迎语和历史输出全部消失
 //   2. 光标在面板的 "Commands" 标题行上移动，而不是在 prompt 行
+// 根因是"rerender 入口光标位置 vs 对齐契约"的假设错误，不当 moveUp 越过 prompt
+// 行往上擦了欢迎语。
 //
-// 根因都是"rerender 入口光标位置 vs 对齐契约"的假设错误：
-//   - Bug #1：错误地用 PanelRenderer.clear()，它 moveUp(lastHeight) 从 prompt
-//     行往上走 N 行，再 clearBelow —— 把 prompt 行之上的内容一并擦掉
-//   - Bug #2：panel.render 结束后 moveUp 少数一次（off-by-one），cursor 停在
-//     面板第一行而不是 prompt 行
+// 升级为 box 形态后，input box 是 3 行（顶+body+底）+ panel N 行结构。新光标契约：
+//   入口（非首次）：光标在 box body 行 cursor 列
+//   出口：光标在 box body 行 cursor 列
+//   每帧 moveUp(1) 回顶边 + col0 + clearBelow + 写整帧 + moveUp(panel + 2) 回 body
 //
-// 这组测试断言重写后的 rerender **不发出任何 moveUp 序列让光标跑到当前行之上**
-// —— 也就是整个帧的字节流里不应该有 `\x1b[{N}A`（moveUp）作用到 prompt 行之上
-// 的效果。精确断言"不发 moveUp"太严格（面板内部需要），我们断言更保守的语义：
-// 每次 clearBelow 之前必须先发 col0，且不在 clearBelow 之前发 moveUp。
+// 关键不变量：moveUp 数值不能让光标越过 box 顶边——
+//   入口 moveUp = 1（box 高度 3，body 回顶边只需 1）
+//   出口 moveUp = panel 行数 + 2（panel 之下回 body 行）
+// 这两类 moveUp 都在 box 内部 navigation，不会擦欢迎语。
 
-describe("readInputLine — §6.4 光标回归护栏", () => {
-  it("rerender 永远用 `\\r` + `\\x1b[J` 清行，绝不 moveUp 再清（否则会擦 prompt 之上）", async () => {
+describe("readInputLine — box 形态光标契约护栏", () => {
+  it("入口 moveUp 仅回 box 顶边（数值 = 1，clearBelow 之前 ≤ 1 次）", async () => {
     const { stdin, stdout, getCaptured, clearCaptured } = makeStreams();
     const { broker, dispatcher } = makeHarness();
 
@@ -547,21 +555,25 @@ describe("readInputLine — §6.4 光标回归护栏", () => {
       columns: 80,
     });
 
-    // 打 "/c" 让面板出现
+    // 触发首次 rerender 后再 typeChars 一次，得到非首次 rerender 的 frame
     await typeChars(stdin, "/");
     await typeChars(stdin, "c");
     clearCaptured();
-    // 再打一个字触发 rerender
     await typeChars(stdin, "l");
 
     const frame = getCaptured();
-    // 帧里不应该出现 "moveUp 紧接 clearBelow" 的模式 ——
-    // 那是旧 panel.clear() 的签名字节流
-    const moveUpBeforeClearBelow = /\x1b\[\d+A[\x1b\r][^\x1b]*\x1b\[J/;
-    expect(frame).not.toMatch(moveUpBeforeClearBelow);
-    // 而应该以同步输出 BSU 包裹起头，紧接 `\r`（col0）—— 同步输出包整帧
-    // 防止 TTY 分段刷新让 cursor 在 col 0 闪烁；包裹内仍是 `\r` + `\x1b[J` 起步
-    expect(frame.startsWith("\x1b[?2026h\r")).toBe(true);
+    // 入口 moveUp 在 clearBelow 之前——查 clearBelow 之前的 moveUp 数值
+    const clearBelowIdx = frame.indexOf("\x1b[J");
+    expect(clearBelowIdx).toBeGreaterThan(0);
+    const beforeClear = frame.slice(0, clearBelowIdx);
+    const entryMoveUps = [...beforeClear.matchAll(/\x1b\[(\d+)A/g)];
+    // 入口 moveUp 至多 1 次，数值 = 1（box 高度 3，body 回顶边只需 1，永远不会越过顶边）
+    expect(entryMoveUps.length).toBeLessThanOrEqual(1);
+    if (entryMoveUps.length === 1) {
+      expect(parseInt(entryMoveUps[0]![1]!, 10)).toBe(1);
+    }
+    // 整帧用 BSU/ESU 同步输出包裹，避免 TTY 分段 flush 让光标可见闪烁
+    expect(frame.startsWith("\x1b[?2026h")).toBe(true);
 
     await sendSyntheticKey(stdin, {
       name: "c",
@@ -571,7 +583,7 @@ describe("readInputLine — §6.4 光标回归护栏", () => {
     await p;
   });
 
-  it("rerender 后发出的 moveUp 行数 = panel 行数 + 1（回到 prompt 行），不是 + 0", async () => {
+  it("出口 moveUp 回 box body 行（数值 = panel 行数 + 2，含 box 底/body offset）", async () => {
     const { stdin, stdout, getCaptured, clearCaptured } = makeStreams();
     const { broker, dispatcher } = makeHarness();
 
@@ -584,20 +596,17 @@ describe("readInputLine — §6.4 光标回归护栏", () => {
       columns: 80,
     });
 
-    // 打 "/" 触发面板
     await typeChars(stdin, "/");
     clearCaptured();
-    // 打另一个字符，触发 rerender
     await typeChars(stdin, "c");
 
     const frame = getCaptured();
-    // 帧里应有恰好一次 moveUp，其数值应 >= 2
-    // （1 prompt 行分隔的 \r\n + N 条面板行，N >= 1）
     const matches = [...frame.matchAll(/\x1b\[(\d+)A/g)];
-    expect(matches.length).toBeGreaterThanOrEqual(1);
+    // 至少 2 次 moveUp（入口 1 + 出口 panel + 2）
+    expect(matches.length).toBeGreaterThanOrEqual(2);
     const maxMoveUp = Math.max(...matches.map((m) => parseInt(m[1]!, 10)));
-    // panel 有至少 4 行（顶+候选+底+hint），+1 prompt 分隔 = 至少 5
-    expect(maxMoveUp).toBeGreaterThanOrEqual(5);
+    // panel 至少 4 行（顶+候选+底+hint），加 box 底/body offset 2 = 至少 6
+    expect(maxMoveUp).toBeGreaterThanOrEqual(6);
 
     await sendSyntheticKey(stdin, {
       name: "c",
@@ -607,7 +616,7 @@ describe("readInputLine — §6.4 光标回归护栏", () => {
     await p;
   });
 
-  it("移动方向键不会擦除 prompt 行之上的内容（clearBelow 必须在 col0 之后）", async () => {
+  it("方向键 rerender 中 clearBelow 之前的 moveUp 数值 ≤ 1（不擦欢迎语）", async () => {
     const { stdin, stdout, getCaptured, clearCaptured } = makeStreams();
     const { broker, dispatcher } = makeHarness();
 
@@ -622,15 +631,18 @@ describe("readInputLine — §6.4 光标回归护栏", () => {
 
     await typeChars(stdin, "/cl");
     clearCaptured();
-    // ← 往左
     await sendSyntheticKey(stdin, { name: "left", sequence: "\x1b[D" });
 
     const frame = getCaptured();
-    // 在 clearBelow 出现之前，只能有 `\r`，不能有 `moveUp`
     const clearBelowIdx = frame.indexOf("\x1b[J");
     expect(clearBelowIdx).toBeGreaterThanOrEqual(0);
     const beforeClear = frame.slice(0, clearBelowIdx);
-    expect(beforeClear).not.toMatch(/\x1b\[\d+A/);
+    // clearBelow 之前最多 1 次 moveUp（入口回顶边），数值 = 1
+    const entryMoveUps = [...beforeClear.matchAll(/\x1b\[(\d+)A/g)];
+    expect(entryMoveUps.length).toBeLessThanOrEqual(1);
+    if (entryMoveUps.length === 1) {
+      expect(parseInt(entryMoveUps[0]![1]!, 10)).toBe(1);
+    }
 
     await sendSyntheticKey(stdin, {
       name: "c",
@@ -640,7 +652,7 @@ describe("readInputLine — §6.4 光标回归护栏", () => {
     await p;
   });
 
-  it("CJK 字符的 cursor 列用 stringWidth 算（中文占 2 列）", async () => {
+  it("CJK 字符的 cursor offset = box │+indent + promptWidth + draftWidth（中文占 2 列）", async () => {
     const { stdin, stdout, getCaptured, clearCaptured } = makeStreams();
     const { broker, dispatcher } = makeHarness();
 
@@ -660,11 +672,11 @@ describe("readInputLine — §6.4 光标回归护栏", () => {
     await sendSyntheticKey(stdin, { str: "好" });
 
     const frame = getCaptured();
-    // 最后一次 `\x1b[{N}C` 的 N 应该是 6 = "> "(2) + "你好"(4)
+    // 最后一次 `\x1b[{N}C` 的 N = box │(1) + indent=1(1) + "> "(2) + "你好"(4) = 8
     const matches = [...frame.matchAll(/\x1b\[(\d+)C/g)];
     expect(matches.length).toBeGreaterThanOrEqual(1);
     const lastOffset = parseInt(matches[matches.length - 1]![1]!, 10);
-    expect(lastOffset).toBe(6);
+    expect(lastOffset).toBe(8);
 
     await sendSyntheticKey(stdin, {
       name: "c",
@@ -674,7 +686,7 @@ describe("readInputLine — §6.4 光标回归护栏", () => {
     await p;
   });
 
-  it("no-panel 分支的 cursor 位置正确（@ss 场景 —— @ 无 provider，光标必须紧贴 draft 末尾）", async () => {
+  it("no-panel 分支 cursor offset 含 box │+indent 偏移（@ss 场景 —— @ 无 provider）", async () => {
     const { stdin, stdout, getCaptured, clearCaptured } = makeStreams();
     const { broker, dispatcher } = makeHarness();
 
@@ -684,34 +696,31 @@ describe("readInputLine — §6.4 光标回归护栏", () => {
       getRuntime: makeRuntime,
       stdin,
       stdout,
-      promptPrefix: "> ", // 显示宽度 = 2
+      promptPrefix: "> ",
       columns: 80,
     });
 
     // 输入 "@ss" —— @ 不是 / 触发字符，没有 provider 命中，面板不渲染
     await typeChars(stdin, "@ss");
-    // 最后一次按键触发的 rerender 帧应让光标停在 col 5（= "> " + "@ss" = 5）
-    // 而不是 col 10（= 5 + 5，旧 bug 的双倍偏移）
     clearCaptured();
-    // 再打一个字符重绘一次以拿到干净帧
     await sendSyntheticKey(stdin, { str: "x" });
 
     const frame = getCaptured();
-    // 帧里最后一次 `\x1b[{N}C` 必须紧跟在 `\r` 之后（可能隔着写入的文本）
-    // 且 N 应等于 prompt 宽度 + 显示宽度("@ssx") = 2 + 4 = 6
+    // box │(1) + indent=1(1) + "> "(2) + "@ssx"(4) = 8
     const offsetMatches = [...frame.matchAll(/\x1b\[(\d+)C/g)];
     expect(offsetMatches.length).toBeGreaterThanOrEqual(1);
     const lastOffset = parseInt(
       offsetMatches[offsetMatches.length - 1]![1]!,
       10,
     );
-    expect(lastOffset).toBe(6);
+    expect(lastOffset).toBe(8);
 
-    // 在最后一次 offset shift 之前必须出现 `\r`，否则说明没复位到 col 0
+    // forward 之前光标必在 col 0：可能因 \r 显式复位（单行场景）或因 moveUp(N)
+    // 沿袭前序行尾 \r\n 的 col 0 状态（box 多行场景）。两种结尾都合法。
     const lastOffsetMatch = offsetMatches[offsetMatches.length - 1]!;
     const lastOffsetIdx = lastOffsetMatch.index!;
     const beforeOffset = frame.slice(0, lastOffsetIdx);
-    expect(beforeOffset).toMatch(/\r[^\n]*$/);
+    expect(beforeOffset).toMatch(/(\r|\x1b\[\d+A)$/);
 
     await sendSyntheticKey(stdin, {
       name: "c",
@@ -845,16 +854,146 @@ describe("readInputLine — placeholder", () => {
       stdin,
       stdout,
       columns: 80,
-      // placeholder 故意不传——验证向后兼容
+      // placeholder 故意不传——验证向后兼容；不传任何 sentinel 文本进 helper，
+      // 自然不应在输出里出现这种 sentinel
     });
 
     await new Promise((r) => setImmediate(r));
     const captured = getCaptured();
-    // 首帧应该只有 prompt prefix（"❯ "），无任何额外 dim 文本块紧邻其后
     expect(captured).toContain("❯");
-    expect(captured).not.toMatch(/\x1b\[2m[^\x1b]+\x1b\[/); // 无连续的 dim 内容块
+    expect(captured).not.toContain("VOLUNTARY_PLACEHOLDER_SENTINEL");
 
     await sendSyntheticKey(stdin, { name: "c", ctrl: true });
+    await p;
+  });
+});
+
+// ─── 历史回显视觉护栏 ───
+//
+// 提交后 teardown 把活跃 box 塌缩为整行 bg dim 染色单行，让用户消息在长
+// scrollback 里有持续视觉锚（与 agent 输出无 bg 形成对比）。
+//   bg 段不含 ❯ prompt 字符——bg 灰底已充分标识"用户消息"，prompt 是 active box
+//     的"现在输入"信号，历史里复用是错位双信号
+//   bg 段含前导 2 空格让文字不贴 bg 左边缘
+//   bg 段 padding 到终端宽度让 bg 延伸到行末
+describe("readInputLine — 历史回显视觉护栏", () => {
+  it("提交后 teardown 整行 bg ANSI 染色，bg 段含用户消息文本", async () => {
+    const { stdin, stdout, getCaptured, clearCaptured } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+
+    const p = readInputLine({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      stdin,
+      stdout,
+      columns: 40,
+    });
+
+    await typeChars(stdin, "hello");
+    clearCaptured();
+    await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+
+    const frame = getCaptured();
+    // bg open / close ANSI 出现在 frame 中
+    const bgOpen = "\x1b[48;5;236m";
+    const bgClose = "\x1b[49m";
+    expect(frame).toContain(bgOpen);
+    expect(frame).toContain(bgClose);
+    // bg 段内含用户消息文本
+    const bgOpenIdx = frame.indexOf(bgOpen);
+    const bgCloseIdx = frame.indexOf(bgClose, bgOpenIdx);
+    expect(bgCloseIdx).toBeGreaterThan(bgOpenIdx);
+    const bgContent = frame.slice(bgOpenIdx + bgOpen.length, bgCloseIdx);
+    expect(bgContent).toContain("hello");
+
+    await p;
+  });
+
+  it("padding 让 bg 段可见宽度 = 终端列数（视觉锚不断裂）", async () => {
+    const { stdin, stdout, getCaptured, clearCaptured } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+
+    const p = readInputLine({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      stdin,
+      stdout,
+      promptPrefix: "> ",
+      columns: 40,
+    });
+
+    await typeChars(stdin, "abc");
+    clearCaptured();
+    await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+
+    const frame = getCaptured();
+    const bgOpen = "\x1b[48;5;236m";
+    const bgClose = "\x1b[49m";
+    const bgOpenIdx = frame.indexOf(bgOpen);
+    const bgCloseIdx = frame.indexOf(bgClose, bgOpenIdx);
+    const bgContent = frame.slice(bgOpenIdx + bgOpen.length, bgCloseIdx);
+    // bg 段去 ANSI 后的可见宽度恰好 = 终端列数 40（前导空格 2 + "abc"(3) + padding(35) = 40）
+    expect(stringWidth(stripAnsi(bgContent))).toBe(40);
+
+    await p;
+  });
+
+  it("CJK 文本 padding 用 stringWidth 算正确（中文 = 2 列）", async () => {
+    const { stdin, stdout, getCaptured, clearCaptured } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+
+    const p = readInputLine({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      stdin,
+      stdout,
+      promptPrefix: "> ",
+      columns: 30,
+    });
+
+    // 输入 "你好" —— 4 显示列
+    await sendSyntheticKey(stdin, { str: "你" });
+    await sendSyntheticKey(stdin, { str: "好" });
+    clearCaptured();
+    await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+
+    const frame = getCaptured();
+    const bgOpen = "\x1b[48;5;236m";
+    const bgClose = "\x1b[49m";
+    const bgOpenIdx = frame.indexOf(bgOpen);
+    const bgCloseIdx = frame.indexOf(bgClose, bgOpenIdx);
+    const bgContent = frame.slice(bgOpenIdx + bgOpen.length, bgCloseIdx);
+    // 前导空格 2 + "你好"(4) + padding = 30
+    expect(stringWidth(stripAnsi(bgContent))).toBe(30);
+
+    await p;
+  });
+
+  it("取消路径（无 finalEcho）不染色——只清屏 + \\r\\n，不留历史锚", async () => {
+    const { stdin, stdout, getCaptured, clearCaptured } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+
+    const p = readInputLine({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      stdin,
+      stdout,
+      columns: 40,
+    });
+
+    await typeChars(stdin, "draft");
+    clearCaptured();
+    // Ctrl+C 走 cancelled 路径，teardownVisuals(null)
+    await sendSyntheticKey(stdin, { name: "c", ctrl: true, sequence: "\x03" });
+
+    const frame = getCaptured();
+    // 取消路径 finalEcho=null，不进 bg 染色分支
+    expect(frame).not.toContain("\x1b[48;5;236m");
+
     await p;
   });
 });

@@ -70,6 +70,7 @@
 - 框宽度跟随终端列数，绝不写死；框内**输入光标位置稳定**（不被状态文本挤动）
 - **超长输入框内自动换行**——绝不横向滚动；框高度按内容按需扩展，保留全部输入可见
 - 适用面：config-editor 的 input/add-model 面板，REPL 的 prompt 行
+- 具体形态规范（chrome 字符 / 多行扩展 / 提交回显降级 / typeahead 选中行点阵纹理同源）见 [input-zone-visual.md](./input-zone-visual.md)
 
 ## 四、视觉元素规范
 

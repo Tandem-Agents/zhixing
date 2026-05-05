@@ -28,6 +28,36 @@ describe("renderChrome", () => {
     expect(stripAnsi(lines[3]!)).toMatch(/^│\s+│$/);
   });
 
+  it("bodyPadding=false 紧凑形态：顶/底 padding 空行被省略，box 高度 3 行", () => {
+    const lines = renderChrome({
+      body: ["内容"],
+      width: 30,
+      bodyPadding: false,
+    });
+    // top + content + bottom = 3 行
+    expect(lines).toHaveLength(3);
+    expect(stripAnsi(lines[0]!).startsWith("╭")).toBe(true);
+    expect(stripAnsi(lines[1]!)).toContain("内容");
+    expect(stripAnsi(lines[2]!).startsWith("╰")).toBe(true);
+  });
+
+  it("bodyPadding=false 不影响锚 body 与用户 body 之间的分层空行", () => {
+    const lines = renderChrome({
+      brandAnchor: { topEdge: "*", bodyLines: ["▌●●▐"] },
+      body: ["内容"],
+      width: 30,
+      bodyPadding: false,
+    });
+    // top + anchor body + 分层 blank + user body + bottom = 5 行
+    // 不再有顶部 padding（紧贴顶边）和底部 padding（紧贴底边）
+    expect(lines).toHaveLength(5);
+    expect(stripAnsi(lines[0]!)).toContain("*");
+    expect(stripAnsi(lines[1]!)).toContain("●●");
+    expect(stripAnsi(lines[2]!)).toMatch(/^│\s+│$/); // 分层 blank
+    expect(stripAnsi(lines[3]!)).toContain("内容");
+    expect(stripAnsi(lines[4]!).startsWith("╰")).toBe(true);
+  });
+
   it("所有行可见宽度等于 width", () => {
     const lines = renderChrome({
       title: "测试",
