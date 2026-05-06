@@ -444,6 +444,15 @@ export interface TriggerContext {
   readonly cursor: number;
   readonly mode: TypeaheadMode;
   readonly runtime: RuntimeContext;
+  /**
+   * 额外的 word 终止符 pattern——这些 pattern match 范围内的字符视作 word 边界，
+   * 与空白同等地位。caller（如 cli）通过 broker options 注入；broker 在调
+   * provider.matchTrigger 前包装到此字段。Provider 自行将其传递给 findTriggerToken。
+   *
+   * 用例：粘贴占位符 token（cli 注入 PASTE_TOKEN_PATTERN），让 trigger 反向扫不
+   * 跨过占位符（避免 `/file [Pasted #1 ...]` 整段被当 trigger query）。
+   */
+  readonly wordTerminators?: readonly RegExp[];
 }
 
 /**

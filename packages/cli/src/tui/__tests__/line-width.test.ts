@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { charWidth, clampLine, stringWidth } from "../line-width.js";
+import { charWidth, clampLine, stringWidth, wrapToWidth } from "../line-width.js";
+
+const ATOM = /\[ATOM\]/g; // 6 chars 模拟不可切碎的原子单元
 
 describe("charWidth", () => {
   it("ASCII letters are width 1", () => {
@@ -121,5 +123,68 @@ describe("clampLine", () => {
     // Must not break a surrogate pair mid-codepoint
     expect(result).not.toContain("\uD83D"); // lone high surrogate
     expect(result).not.toContain("\uDE00"); // lone low surrogate
+  });
+});
+
+describe("wrapToWidth — 默认模式（不传 atomicRegions，向后兼容）", () => {
+  it("空字符串返回 [\"\"]", () => {
+    expect(wrapToWidth("", 10)).toEqual([""]);
+  });
+
+  it("不超宽的单行原样返回", () => {
+    expect(wrapToWidth("hello", 10)).toEqual(["hello"]);
+  });
+
+  it("超宽按字符级 wrap", () => {
+    expect(wrapToWidth("abcdefghij", 4)).toEqual(["abcd", "efgh", "ij"]);
+  });
+
+  it("CJK 按 2 列计算", () => {
+    expect(wrapToWidth("中文换行", 4)).toEqual(["中文", "换行"]);
+  });
+
+  it("含 \\n 时旧行为：当 0 宽控制符不换行（向后兼容）", () => {
+    // 旧行为：\n charWidth=0，与其他 0 宽字符一同累积进 current
+    const lines = wrapToWidth("abc\ndef", 80);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toBe("abc\ndef");
+  });
+});
+
+describe("wrapToWidth — 启用 atomicRegions（atomic + \\n 硬换行）", () => {
+  it("atomic 整体放不下当前行时整体换行", () => {
+    expect(wrapToWidth("abcd[ATOM]", 8, ATOM)).toEqual(["abcd", "[ATOM]"]);
+  });
+
+  it("atomic 完整放当前行时不换行", () => {
+    expect(wrapToWidth("ab[ATOM]", 8, ATOM)).toEqual(["ab[ATOM]"]);
+  });
+
+  it("\\n 硬换行：text 含 \\n 时按段独立 wrap", () => {
+    expect(wrapToWidth("abc\ndef", 80, ATOM)).toEqual(["abc", "def"]);
+  });
+
+  it("混合：\\n 段内含 atomic", () => {
+    expect(wrapToWidth("a\n[ATOM]", 8, ATOM)).toEqual(["a", "[ATOM]"]);
+  });
+
+  it("段内 atomic 跨行边界整体换行", () => {
+    // 段 = "abc[ATOM]def"，atomic 6 chars，lineWidth=8
+    // 'a','b','c'(3) + atomic 6 = 9 > 8 → atomic 整体换行
+    // 行 1 起：atomic 6 + "de" 2 = 8 刚满；"f" 软 wrap 到行 2
+    expect(wrapToWidth("abc[ATOM]def", 8, ATOM)).toEqual(["abc", "[ATOM]de", "f"]);
+  });
+
+  it("末尾 \\n 产生空段（末段 [\"\"]）", () => {
+    expect(wrapToWidth("a\n", 80, ATOM)).toEqual(["a", ""]);
+  });
+
+  it("不带 g flag 的 regex 也能工作（内部强制 g）", () => {
+    const noG = /\[ATOM\]/;
+    expect(wrapToWidth("[ATOM][ATOM]", 8, noG)).toEqual(["[ATOM]", "[ATOM]"]);
+  });
+
+  it("多个 atomic 区域分别整体处理", () => {
+    expect(wrapToWidth("[ATOM][ATOM]", 8, ATOM)).toEqual(["[ATOM]", "[ATOM]"]);
   });
 });

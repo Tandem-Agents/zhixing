@@ -99,9 +99,31 @@ export function stringWidth(s: string): number {
  *
  * 不识别 ANSI 转义码——caller 应在 wrap 之前剥色（或对 raw text 调用），
  * 否则 ANSI 序列会被切碎。颜色应在 wrap 之后整段套上。
+ *
+ * 可选 `atomicRegions`：识别为不可切碎的整体单元（如粘贴占位符 token）。一旦传入
+ * 启用增强算法：按 `\n` 先 split 成段独立 wrap（硬换行）；atomic 区域整体测量
+ * 宽度，放不下当前行整体换到下行不被切碎中间字符。不传时保持原算法（含 `\n` 时
+ * 按 0 宽控制符处理），与现有 caller 兼容。
  */
-export function wrapToWidth(text: string, maxWidth: number): string[] {
+export function wrapToWidth(
+  text: string,
+  maxWidth: number,
+  atomicRegions?: RegExp,
+): string[] {
   if (maxWidth <= 0) return [text];
+  if (!atomicRegions) {
+    return wrapPlain(text, maxWidth);
+  }
+  const segments = text.split("\n");
+  const result: string[] = [];
+  for (const segment of segments) {
+    result.push(...wrapWithAtomic(segment, maxWidth, atomicRegions));
+  }
+  return result;
+}
+
+/** 原算法——按 code point 粒度 char-by-char，不识别 atomic 也不硬换行 `\n`。 */
+function wrapPlain(text: string, maxWidth: number): string[] {
   const lines: string[] = [];
   let current = "";
   let currentWidth = 0;
@@ -118,6 +140,76 @@ export function wrapToWidth(text: string, maxWidth: number): string[] {
       currentWidth += w;
     }
   }
+  if (current.length > 0 || lines.length === 0) lines.push(current);
+  return lines;
+}
+
+/**
+ * 单段（不含 `\n`）+ atomic-aware wrap。atomic 区域整体测量宽度——
+ * 放不下当前行整体换到下行，不被 char-by-char 算法切碎中间字符。
+ */
+function wrapWithAtomic(
+  segment: string,
+  maxWidth: number,
+  atomicRegions: RegExp,
+): string[] {
+  if (segment.length === 0) return [""];
+
+  // 收集 atomic 区域（matchAll 顺序即 start 升序）；caller 传的 regex 可能不带
+  // `g` flag，强制添加避免 matchAll 抛错
+  const re = atomicRegions.global
+    ? atomicRegions
+    : new RegExp(atomicRegions.source, atomicRegions.flags + "g");
+  const atomics: Array<{ start: number; end: number; content: string; width: number }> = [];
+  for (const m of segment.matchAll(re)) {
+    atomics.push({
+      start: m.index!,
+      end: m.index! + m[0].length,
+      content: m[0],
+      width: stringWidth(m[0]),
+    });
+  }
+
+  const lines: string[] = [];
+  let current = "";
+  let currentWidth = 0;
+  let pos = 0;
+  let atomIdx = 0;
+
+  while (pos < segment.length) {
+    // atomic 起点：整体测量 + 必要时整体换行
+    if (atomIdx < atomics.length && atomics[atomIdx]!.start === pos) {
+      const atom = atomics[atomIdx]!;
+      if (currentWidth > 0 && currentWidth + atom.width > maxWidth) {
+        lines.push(current);
+        current = "";
+        currentWidth = 0;
+      }
+      current += atom.content;
+      currentWidth += atom.width;
+      pos = atom.end;
+      atomIdx++;
+      continue;
+    }
+
+    // 普通 code point
+    const cp = segment.codePointAt(pos);
+    if (cp === undefined) {
+      pos++;
+      continue;
+    }
+    const ch = String.fromCodePoint(cp);
+    const w = charWidth(cp);
+    if (currentWidth + w > maxWidth && currentWidth > 0) {
+      lines.push(current);
+      current = "";
+      currentWidth = 0;
+    }
+    current += ch;
+    currentWidth += w;
+    pos += ch.length;
+  }
+
   if (current.length > 0 || lines.length === 0) lines.push(current);
   return lines;
 }

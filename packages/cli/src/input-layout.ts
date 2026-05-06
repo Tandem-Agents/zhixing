@@ -11,12 +11,15 @@
  *
  * 设计取舍：
  *   - hanging indent：续行缩进 promptVisibleWidth 个空格，让 draft 视觉左缘对齐
- *     第一行的 ❯ 之后，多行被锚定为"同一个输入"
+ *     第一行的 ❯ 之后，多行被锚定为"同一个输入"——无论分行来源是软 wrap 还是
+ *     用户粘贴的硬换行 `\n`，续行 prefix 一致
  *   - suffix 单行：placeholder / ghost text 通常很短，不参与 wrap；超出由 chrome
  *     的 clampLine 兜底（追加 …）。极端长 suffix 不展开是已知小坑、不阻塞
  *   - cursor 跨行边界归属：cursor === N 且第 N-1 个字符让行刚好满时，cursor 落在
  *     上一行末（col = lineWidth）；下一次按字符自然 wrap 到新行。匹配 readline
  *     在大多数终端上的行为
+ *   - atomicRegions（可选）：识别为不可切碎的整体单元（如粘贴占位符 token）。
+ *     atomic 区域整体测量宽度——放不下当前行就整体换到下行，保证占位符渲染完整
  *
  * 纯函数：无 I/O、无 ANSI 解析；ANSI 颜色码全部在调用方包装好后传入（promptPrefix
  * 与 suffix 自带 ANSI），算法只 wrap 裸 draft。返回的 bodyLines 直接喂给
@@ -39,11 +42,12 @@ export interface InputLayoutResult {
 
 /**
  * @param promptPrefix - 第一行前缀（含 ANSI 颜色，如 brand bold ❯ + space）
- * @param draft - 用户输入的裸文本（无 ANSI）
+ * @param draft - 用户输入的裸文本（无 ANSI；可含 `\n` 硬换行）
  * @param cursorChars - cursor 在 draft 中的字符 offset（不是 UTF-16 unit），
  *   等于 `Array.from(draft).slice(0, cursorChars).length`
  * @param suffix - 最后一行末尾追加的提示文本（已含 ANSI dim 包装），不参与 wrap
  * @param contentBudget - chrome body 行的可见内容宽度（chrome 紧凑形态下 = frameWidth - 4）
+ * @param atomicRegions - 可选 regex，识别为不可切碎的整体单元；不传时按字符级 wrap
  */
 export function layoutInputBuffer(
   promptPrefix: string,
@@ -51,6 +55,7 @@ export function layoutInputBuffer(
   cursorChars: number,
   suffix: string,
   contentBudget: number,
+  atomicRegions?: RegExp,
 ): InputLayoutResult {
   const promptVisibleWidth = stringWidth(stripAnsi(promptPrefix));
   // 续行 hanging indent —— 与 prompt 等宽的空格，让 draft 左缘多行对齐
@@ -59,18 +64,91 @@ export function layoutInputBuffer(
   const lineWidth = Math.max(1, contentBudget - promptVisibleWidth);
 
   const draftChars = Array.from(draft);
+  const atomics = atomicRegions
+    ? findAtomicCharRanges(draft, draftChars, atomicRegions)
+    : [];
+
   const lines: string[][] = [[]];
   let curWidth = 0;
   let cursorRow = -1;
   let cursorDraftCol = -1;
+  let i = 0;
+  let atomIdx = 0;
 
-  for (let i = 0; i < draftChars.length; i++) {
+  while (i < draftChars.length) {
+    // atomic 区域起点
+    if (atomIdx < atomics.length && atomics[atomIdx]!.startChar === i) {
+      const atom = atomics[atomIdx]!;
+
+      // cursor 在 atomic 起始（cursorChars === atom.startChar）—— 落到当前行 col=curWidth
+      if (cursorRow === -1 && cursorChars === atom.startChar) {
+        cursorRow = lines.length - 1;
+        cursorDraftCol = curWidth;
+      }
+
+      // 整体测量：放不下整体换行
+      if (curWidth > 0 && curWidth + atom.width > lineWidth) {
+        lines.push([]);
+        curWidth = 0;
+        // wrap 后再判一次 cursor 边界（cursor 紧跟 atomic 起始时落新行 col=0）
+        if (cursorRow === -1 && cursorChars === atom.startChar) {
+          cursorRow = lines.length - 1;
+          cursorDraftCol = 0;
+        }
+      }
+
+      // cursor 在 atomic 内部（startChar < cursor < endChar）—— 简化版落 atomic 末尾
+      // 占位符是整体显示单元，cursor 在中间无法精确定位；用户编辑会破坏 token
+      // 触发 orphan 回收，与简化版"占位符破坏后 GC"语义一致
+      if (
+        cursorRow === -1 &&
+        cursorChars > atom.startChar &&
+        cursorChars < atom.endChar
+      ) {
+        cursorRow = lines.length - 1;
+        cursorDraftCol = curWidth + atom.width;
+      }
+
+      // 整体推 atomic 字符
+      for (let k = atom.startChar; k < atom.endChar; k++) {
+        lines[lines.length - 1]!.push(draftChars[k]!);
+      }
+      curWidth += atom.width;
+
+      // cursor === atom.endChar 由下次循环顶端处理
+      i = atom.endChar;
+      atomIdx++;
+      continue;
+    }
+
     const ch = draftChars[i]!;
+
+    // `\n` 硬换行
+    if (ch === "\n") {
+      // cursor 在 `\n` 之前 —— 落上一行末
+      if (cursorRow === -1 && cursorChars === i) {
+        cursorRow = lines.length - 1;
+        cursorDraftCol = curWidth;
+      }
+      lines.push([]);
+      curWidth = 0;
+      // cursor 在 `\n` 之后 —— 落新行 col=0
+      if (cursorRow === -1 && cursorChars === i + 1) {
+        cursorRow = lines.length - 1;
+        cursorDraftCol = 0;
+      }
+      i++;
+      continue;
+    }
+
     const cp = ch.codePointAt(0);
-    if (cp === undefined) continue;
+    if (cp === undefined) {
+      i++;
+      continue;
+    }
     const w = charWidth(cp);
 
-    // 即将 wrap：先建新行，再处理 cursor 边界
+    // 软 wrap：当前字符放不下当前行
     if (curWidth + w > lineWidth && curWidth > 0) {
       lines.push([]);
       curWidth = 0;
@@ -90,6 +168,7 @@ export function layoutInputBuffer(
       cursorRow = lines.length - 1;
       cursorDraftCol = curWidth;
     }
+    i++;
   }
 
   // cursor 仍未放置——empty draft + cursor=0，或 cursor 越界——落到末行末
@@ -98,12 +177,12 @@ export function layoutInputBuffer(
     cursorDraftCol = curWidth;
   }
 
-  // 拼装 bodyLines：首行带 promptPrefix，续行 hanging indent；suffix 拼到末行末
+  // 拼装 bodyLines：首行带 promptPrefix，续行 hangingIndent；suffix 拼到末行末
   const lastIdx = lines.length - 1;
-  const bodyLines = lines.map((chars, i) => {
+  const bodyLines = lines.map((chars, idx) => {
     const text = chars.join("");
-    const prefix = i === 0 ? promptPrefix : hangingIndent;
-    const tail = i === lastIdx ? suffix : "";
+    const prefix = idx === 0 ? promptPrefix : hangingIndent;
+    const tail = idx === lastIdx ? suffix : "";
     return prefix + text + tail;
   });
 
@@ -112,4 +191,44 @@ export function layoutInputBuffer(
     cursorRow,
     cursorCol: promptVisibleWidth + cursorDraftCol,
   };
+}
+
+/**
+ * 把 atomicRegions 在 draft 中的 string offset match 转换为 char offset 区间，
+ * 供主循环按 char 索引推进。matchAll 顺序天然按 start 升序。
+ */
+function findAtomicCharRanges(
+  draft: string,
+  draftChars: string[],
+  atomicRegions: RegExp,
+): Array<{ startChar: number; endChar: number; width: number }> {
+  const re = atomicRegions.global
+    ? atomicRegions
+    : new RegExp(atomicRegions.source, atomicRegions.flags + "g");
+
+  // 构建 string offset → char index 映射（包含末位）
+  const offToChar = new Map<number, number>();
+  let strOff = 0;
+  let charIdx = 0;
+  for (const c of draftChars) {
+    offToChar.set(strOff, charIdx);
+    strOff += c.length;
+    charIdx++;
+  }
+  offToChar.set(strOff, charIdx);
+
+  const ranges: Array<{ startChar: number; endChar: number; width: number }> = [];
+  for (const m of draft.matchAll(re)) {
+    const startStr = m.index!;
+    const endStr = startStr + m[0].length;
+    const startChar = offToChar.get(startStr);
+    const endChar = offToChar.get(endStr);
+    if (startChar === undefined || endChar === undefined) continue;
+    ranges.push({
+      startChar,
+      endChar,
+      width: stringWidth(m[0]),
+    });
+  }
+  return ranges;
 }

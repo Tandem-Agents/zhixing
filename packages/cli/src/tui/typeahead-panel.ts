@@ -59,6 +59,7 @@ import {
 import { renderChrome, type BodyLine } from "./chrome.js";
 import { clampLine, stringWidth } from "./line-width.js";
 import { tone, icon } from "./style.js";
+import { wrapKeypressHandler } from "../paste-detector.js";
 
 // ─── 主题 ───
 
@@ -490,6 +491,7 @@ export function createTypeaheadPanel(
   let rawModeLease: RawModeLease | null = null;
   let stdinOwnership: StdinOwnershipHandle | null = null;
   let lastState: TypeaheadSessionState | null = null;
+  let pasteBatcher: ReturnType<typeof wrapKeypressHandler> | null = null;
 
   const getColumns = (): number => {
     if (typeof options.columns === "number") return options.columns;
@@ -520,6 +522,8 @@ export function createTypeaheadPanel(
   };
 
   // ── 按键处理 ──
+  // 单 keypress 走原逻辑；同步多次 keypress（粘贴）默认丢弃——typeahead panel 不
+  // 接受 paste 内容，避免 paste 字符流误触发 accept / 进 query 等
   const handleKeypress = (_str: string, key: readline.Key | undefined): void => {
     if (!key) return;
     const state = lastState;
@@ -579,7 +583,13 @@ export function createTypeaheadPanel(
       // 挂 keypress listener（在 stdin-ownership snapshot 之后 —— 这样 release
       // 时我们自己的 listener 已经由本文件的 detach() 主动摘除，不会和恢复的
       // saved listeners 并存）
-      stdin.on("keypress", handleKeypress);
+      // wrapKeypressHandler 区分单 keypress 与同步多 keypress（粘贴）：panel 不
+      // 接受 paste 内容，paste 路径默认丢弃避免误触发 accept / 进 query
+      pasteBatcher = wrapKeypressHandler({
+        onSingle: handleKeypress,
+        onPaste: () => {},
+      });
+      stdin.on("keypress", pasteBatcher.handler);
 
       // 订阅 broker session state 变更
       unsubscribe = options.broker.onSessionChange(
@@ -611,7 +621,11 @@ export function createTypeaheadPanel(
       }
 
       // 摘自己挂的 listener —— 必须在 stdinOwnership.release 之前
-      stdin.off("keypress", handleKeypress);
+      if (pasteBatcher) {
+        stdin.off("keypress", pasteBatcher.handler);
+        pasteBatcher.release();
+        pasteBatcher = null;
+      }
 
       // 擦除面板（防止残留行）
       panel.clear();

@@ -141,6 +141,10 @@ export class InputBuffer {
   moveCursorEnd(): void {
     this.cursorPos = this.chars.length;
   }
+  /** 直接设置 cursor 到指定字符位置（clamped）。供原子操作跨整段移动使用。 */
+  setCursor(position: number): void {
+    this.cursorPos = clampCursor(position, this.chars.length);
+  }
 
   // ─── 历史 ───
 

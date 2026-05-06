@@ -92,7 +92,8 @@ export class FileProvider implements SuggestionProvider {
     const token = findTriggerToken(ctx.draft, ctx.cursor, {
       triggerChar: "@",
       tokenCharClass: FILE_TOKEN_CHAR_CLASS,
-      requireBoundary: true, // Phase 2：严格 —— mid-input 留给 Phase 3 Step 9
+      requireBoundary: true,
+      wordTerminators: ctx.wordTerminators,
     });
     if (!token) return null;
 

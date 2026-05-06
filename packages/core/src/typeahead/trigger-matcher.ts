@@ -43,6 +43,13 @@ export interface FindTriggerTokenOptions {
    * - false：允许 mid-input 触发（对写长文时中间插 `@file` 有用）
    */
   readonly requireBoundary: boolean;
+  /**
+   * 额外的"原子单元" pattern 列表——这些 pattern match 范围内的字符视作 word
+   * 终止符，与空白同等地位作 trigger 边界（caller 注入，如粘贴占位符 token）。
+   * trigger 反向扫描遇到 terminator 范围立即停止，避免 query 跨过原子单元。
+   * 不传时仅有空白字符起 word 边界作用。
+   */
+  readonly wordTerminators?: readonly RegExp[];
 }
 
 const DEFAULT_TOKEN_CLASS = "\\p{L}\\p{N}_\\-:";
@@ -64,12 +71,20 @@ export function findTriggerToken(
   cursor: number,
   options: FindTriggerTokenOptions,
 ): TriggerTokenMatch | null {
-  const { triggerChar, tokenCharClass = DEFAULT_TOKEN_CLASS, requireBoundary } =
-    options;
+  const {
+    triggerChar,
+    tokenCharClass = DEFAULT_TOKEN_CLASS,
+    requireBoundary,
+    wordTerminators,
+  } = options;
 
   // 按 code point 拆分 —— 这样 cursor 和 position 都以字符计数
   const chars = Array.from(draft);
   const clampedCursor = Math.max(0, Math.min(cursor, chars.length));
+
+  // 计算 wordTerminator 在 char index 上的覆盖范围（可选）
+  // 范围内字符视作 word 边界，与空白同等地位
+  const terminatorRanges = computeTerminatorRanges(draft, chars, wordTerminators);
 
   // 从 cursor-1 往前扫，找最近的 triggerChar
   // 扫描时必须保持"扫描范围内的字符都是合法 token 字符"的不变量，
@@ -82,6 +97,10 @@ export function findTriggerToken(
 
   let triggerPos = -1;
   for (let i = clampedCursor - 1; i >= 0; i--) {
+    // wordTerminator 范围内字符视作 word 边界 —— 反向扫遇到立即停止
+    if (isInTerminatorRange(i, terminatorRanges)) {
+      return null;
+    }
     const ch = chars[i]!;
     if (ch === triggerChar) {
       triggerPos = i;
@@ -95,10 +114,13 @@ export function findTriggerToken(
   }
   if (triggerPos === -1) return null;
 
-  // 边界检查：requireBoundary=true 时 trigger 前必须是空白或开头
+  // 边界检查：requireBoundary=true 时 trigger 前必须是空白、字符串开头、
+  // 或紧贴 wordTerminator 末尾（占位符之后立即跟 `/cmd` 等场景）
   if (requireBoundary && triggerPos > 0) {
     const prev = chars[triggerPos - 1]!;
-    if (!/^\s$/u.test(prev)) {
+    const isWhitespace = /^\s$/u.test(prev);
+    const isTerminatorBoundary = isInTerminatorRange(triggerPos - 1, terminatorRanges);
+    if (!isWhitespace && !isTerminatorBoundary) {
       return null;
     }
   }
@@ -123,4 +145,55 @@ export function findTriggerToken(
     token,
     query,
   };
+}
+
+/**
+ * 计算 wordTerminator 在 char index 上的覆盖范围（升序）。
+ *
+ * regex match 给的是 string offset；这里转成 char index 范围便于反向扫匹配。
+ * caller 传的 regex 不带 `g` flag 也能工作——内部强制添加避免 matchAll 抛错。
+ */
+function computeTerminatorRanges(
+  draft: string,
+  chars: string[],
+  wordTerminators: readonly RegExp[] | undefined,
+): Array<readonly [number, number]> {
+  if (!wordTerminators || wordTerminators.length === 0) return [];
+
+  // 构建 string offset → char index 映射（含末位）
+  const offToChar = new Map<number, number>();
+  let strOff = 0;
+  let charIdx = 0;
+  for (const c of chars) {
+    offToChar.set(strOff, charIdx);
+    strOff += c.length;
+    charIdx++;
+  }
+  offToChar.set(strOff, charIdx);
+
+  const ranges: Array<readonly [number, number]> = [];
+  for (const terminator of wordTerminators) {
+    const re = terminator.global
+      ? terminator
+      : new RegExp(terminator.source, terminator.flags + "g");
+    for (const m of draft.matchAll(re)) {
+      const startStr = m.index!;
+      const endStr = startStr + m[0].length;
+      const startChar = offToChar.get(startStr);
+      const endChar = offToChar.get(endStr);
+      if (startChar === undefined || endChar === undefined) continue;
+      ranges.push([startChar, endChar]);
+    }
+  }
+  return ranges;
+}
+
+function isInTerminatorRange(
+  charIdx: number,
+  ranges: ReadonlyArray<readonly [number, number]>,
+): boolean {
+  for (const [start, end] of ranges) {
+    if (charIdx >= start && charIdx < end) return true;
+  }
+  return false;
 }

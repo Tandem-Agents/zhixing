@@ -28,6 +28,7 @@ import { rawModeController } from "./_internal/raw-mode.js";
 import { acquireStdinOwnership } from "./_internal/stdin-ownership.js";
 import { clampLine, stringWidth } from "./line-width.js";
 import { tone, icon } from "./style.js";
+import { wrapKeypressHandler } from "../paste-detector.js";
 
 // ─── 类型 ───
 
@@ -321,6 +322,8 @@ export function selectWithInput(
     };
 
     // ── 键盘处理 ──
+    // 单 keypress（敲键）走原逻辑；同步多次 keypress（粘贴）默认丢弃——select
+    // 控件不接受文本粘贴，避免 paste 字符流污染选择字段或误触发 return key
     const handleKeypress = (str: string, key: readline.Key): void => {
       if (!key) return;
 
@@ -474,7 +477,8 @@ export function selectWithInput(
       if (finished) return;
       finished = true;
 
-      stdin.off("keypress", handleKeypress);
+      stdin.off("keypress", batcher.handler);
+      batcher.release();
       if (typeof stdout.off === "function") {
         stdout.off("resize", handleResize);
       }
@@ -497,7 +501,15 @@ export function selectWithInput(
     // ── 初始化 ──
     stdout.write(ANSI.hideCursor);
 
-    stdin.on("keypress", handleKeypress);
+    const batcher = wrapKeypressHandler({
+      onSingle: (str, key) => {
+        if (key) handleKeypress(str, key);
+      },
+      onPaste: () => {
+        // select 控件不支持 paste：字符流默认丢弃，避免污染选择字段或误触发选择
+      },
+    });
+    stdin.on("keypress", batcher.handler);
     if (typeof stdout.on === "function") {
       stdout.on("resize", handleResize);
     }

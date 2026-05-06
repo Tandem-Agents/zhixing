@@ -52,6 +52,13 @@ export interface TypeaheadBrokerOptions {
   readonly queryTimeoutMs?: number;
   /** Provider 失败的额外日志 hook（事件 sink 之外） */
   readonly onProviderError?: (providerId: string, error: Error) => void;
+  /**
+   * 额外的 word 终止符 pattern——broker 在调 provider.matchTrigger 之前注入到
+   * TriggerContext.wordTerminators。语义见 `TriggerContext.wordTerminators` 注释。
+   * caller（如 cli）创建 broker 时注入（如 cli 注入粘贴占位符 pattern）；
+   * core 不知具体语义，只透传给 trigger matcher 当 word 边界使用。
+   */
+  readonly wordTerminators?: readonly RegExp[];
 }
 
 const DEFAULT_QUERY_TIMEOUT_MS = 3000;
@@ -82,12 +89,14 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
   private readonly now: () => number;
   private readonly queryTimeoutMs: number;
   private readonly onProviderError: (providerId: string, error: Error) => void;
+  private readonly wordTerminators: readonly RegExp[] | undefined;
 
   constructor(options: TypeaheadBrokerOptions = {}) {
     this.eventSink = options.eventSink ?? noopEventSink;
     this.now = options.now ?? (() => Date.now());
     this.queryTimeoutMs = options.queryTimeoutMs ?? DEFAULT_QUERY_TIMEOUT_MS;
     this.onProviderError = options.onProviderError ?? (() => {});
+    this.wordTerminators = options.wordTerminators;
   }
 
   // ─── Provider 注册 ───
@@ -193,9 +202,15 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
   private findFirstMatch(
     ctx: TriggerContext,
   ): { provider: SuggestionProvider; match: TriggerMatch } | null {
+    // 注入 broker-level wordTerminators 让所有 provider 共享同一 word 边界规则；
+    // caller 已在 ctx 上传过则保留 caller 的（caller 优先）
+    const enrichedCtx: TriggerContext =
+      this.wordTerminators && !ctx.wordTerminators
+        ? { ...ctx, wordTerminators: this.wordTerminators }
+        : ctx;
     for (const provider of this.providers) {
       try {
-        const match = provider.matchTrigger(ctx);
+        const match = provider.matchTrigger(enrichedCtx);
         if (match) return { provider, match };
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));

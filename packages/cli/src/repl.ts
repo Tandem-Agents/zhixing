@@ -51,6 +51,7 @@ import { describeProxy, type ProxyDescription } from "@zhixing/network";
 import { loadConfig, loadCredentials, resolveHomeDir } from "@zhixing/providers";
 import { CommandDispatcher } from "./command-dispatcher.js";
 import { readInputLine, type InputLineResult } from "./typeahead-input.js";
+import { PASTE_TOKEN_PATTERN, PasteRegistry } from "./paste-registry.js";
 import { resolveFileRefs } from "./resolve-file-refs.js";
 import {
   type AgentRuntime,
@@ -648,9 +649,44 @@ function buildSlashCommands(
   };
 }
 
+// ─── bracketed paste mode 设置 ───
+
+/**
+ * 全局启用 bracketed paste mode：进入 REPL 前一次性启用，process exit 时 reset。
+ *
+ * Paste 检测不依赖 bracketed paste mode markers——typeahead-input / select-with-input /
+ * typeahead-panel 各自用 keypress batcher（time-window）识别"同步多次 keypress = 粘贴"，
+ * 跨终端兼容性好。本函数只发送 `\x1b[?2004h` 抑制 Windows Terminal 等的"多行粘贴
+ * 警告"弹窗——是用户体验改进，与 paste 检测算法解耦。
+ *
+ * `process.on("exit")` 是同步钩子，stdout.write 同步刷出；正常 exit / 信号触发的
+ * exit 都会调用，保证 bracketed paste mode 不残留到 shell。
+ */
+function setupBracketedPasteMode(): void {
+  // 启用 bracketed paste mode 主要是抑制 Windows Terminal 等终端默认的"多行粘贴
+  // 警告"弹窗——paste 检测本身用 keypress batcher（不依赖 markers）。退出时 reset。
+  process.stdout.write("\x1b[?2004h");
+  process.on("exit", () => {
+    process.stdout.write("\x1b[?2004l");
+  });
+}
+
 // ─── 启动 REPL ───
 
 export async function startRepl(options: ReplOptions): Promise<void> {
+  // 启用 bracketed paste mode + 初始化 paste detector：
+  //   detector 注册 stdin "data" listener 必须早于 readline 启用 keypress——同步广
+  //   播按 listener 注册顺序执行，detector 先 setInPasteMode，下游 onKeypress 才能
+  //   短路 ignore
+  //   退出时通过 process.on("exit") reset，否则用户回 shell 后粘贴看到 ESC[200~
+  //   等原始字节
+  setupBracketedPasteMode();
+
+  // 粘贴附件 registry——REPL session 级，多轮 readInputLine 共享。
+  // commit 后 buffer.draft 含占位符进 history ring buffer；用户按 ↑ 浏览历史时
+  // 占位符仍可 expand。session 退出时随 startRepl scope 自然 GC，无需显式 clearAll。
+  const pasteRegistry = new PasteRegistry();
+
   // renderer 借给 RuntimeSession——session 内部装配 agent 时通过 closure 注入，
   // 让 retry / compact / interrupt 渲染前能驱动 spinner.stop() 避免动画覆盖事件
   const renderer = createRenderer();
@@ -844,6 +880,9 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     const usageTracker = new UsageTracker({ rootDir: null });
     typeaheadBroker = new DefaultTypeaheadBroker({
       now: () => Date.now(),
+      // 粘贴占位符 token 作 word 边界——trigger 反向扫不跨过占位符；用户在 `/file `
+      // 后粘贴长文件路径时，占位符整段不进 trigger query，typeahead 自然退出
+      wordTerminators: [PASTE_TOKEN_PATTERN],
     });
     typeaheadBroker.register(
       new CommandProvider({ registry: tRegistry, usageTracker }),
@@ -1070,6 +1109,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
           dispatcher: typeaheadDispatcher,
           getRuntime,
           placeholder: "输入消息或 / 查看命令",
+          registry: pasteRegistry,
         });
       } finally {
         rl.resume();

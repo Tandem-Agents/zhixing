@@ -180,3 +180,140 @@ describe("layoutInputBuffer — 极端边界", () => {
     expect(r.cursorRow).toBe(1);
   });
 });
+
+describe("layoutInputBuffer — atomicRegions 不切碎", () => {
+  const ATOM = /\[ATOM\]/g; // 6 chars
+
+  it("atomic 整体放不下当前行时整体换行", () => {
+    // contentBudget=10, prompt 2 → lineWidth=8
+    // 'a','b','c','d'(4) + atomic 6 = 10 > 8 → atomic 整体换行
+    const r = layoutInputBuffer(PROMPT, "abcd[ATOM]", 0, "", 10, ATOM);
+    expect(r.bodyLines).toHaveLength(2);
+    expect(r.bodyLines[0]).toBe(`${PROMPT}abcd`);
+    expect(r.bodyLines[1]).toBe("  [ATOM]");
+  });
+
+  it("atomic 完整放当前行时不换行", () => {
+    const r = layoutInputBuffer(PROMPT, "ab[ATOM]", 0, "", 10, ATOM);
+    // 2+6=8 = lineWidth 刚好放下
+    expect(r.bodyLines).toHaveLength(1);
+    expect(r.bodyLines[0]).toBe(`${PROMPT}ab[ATOM]`);
+  });
+
+  it("不传 atomicRegions 时 atomic 被字符级 wrap 切碎（向后兼容）", () => {
+    const r = layoutInputBuffer(PROMPT, "abcd[ATOM]", 0, "", 10);
+    expect(r.bodyLines).toHaveLength(2);
+    expect(r.bodyLines[0]).toBe(`${PROMPT}abcd[ATO`);
+    expect(r.bodyLines[1]).toBe("  M]");
+  });
+
+  it("atomic 之前的内容仍可被字符级 wrap", () => {
+    // lineWidth=8, draft = "abcdefghi[ATOM]"
+    // 'a'..'h'(8) → wrap → 'i' new line, +atomic 1+6=7 ≤ 8 ok
+    const r = layoutInputBuffer(PROMPT, "abcdefghi[ATOM]", 0, "", 10, ATOM);
+    expect(r.bodyLines).toHaveLength(2);
+    expect(r.bodyLines[0]).toBe(`${PROMPT}abcdefgh`);
+    expect(r.bodyLines[1]).toBe("  i[ATOM]");
+  });
+
+  it("多个 atomic 区域分别整体处理", () => {
+    // lineWidth=8, [ATOM][ATOM] = 12 chars → 第二个 atomic 整体换行
+    const r = layoutInputBuffer(PROMPT, "[ATOM][ATOM]", 0, "", 10, ATOM);
+    expect(r.bodyLines).toHaveLength(2);
+    expect(r.bodyLines[0]).toBe(`${PROMPT}[ATOM]`);
+    expect(r.bodyLines[1]).toBe("  [ATOM]");
+  });
+});
+
+describe("layoutInputBuffer — \\n 硬换行", () => {
+  it("\\n 触发硬换行，续行用 hangingIndent", () => {
+    const r = layoutInputBuffer(PROMPT, "line1\nline2", 0, "", 80);
+    expect(r.bodyLines).toHaveLength(2);
+    expect(r.bodyLines[0]).toBe(`${PROMPT}line1`);
+    expect(r.bodyLines[1]).toBe("  line2");
+  });
+
+  it("多个 \\n 多次硬换行", () => {
+    const r = layoutInputBuffer(PROMPT, "a\nb\nc", 0, "", 80);
+    expect(r.bodyLines).toHaveLength(3);
+    expect(r.bodyLines[0]).toBe(`${PROMPT}a`);
+    expect(r.bodyLines[1]).toBe("  b");
+    expect(r.bodyLines[2]).toBe("  c");
+  });
+
+  it("末尾 \\n 产生空续行（hangingIndent 之后无内容）", () => {
+    const r = layoutInputBuffer(PROMPT, "a\n", 0, "", 80);
+    expect(r.bodyLines).toHaveLength(2);
+    expect(r.bodyLines[0]).toBe(`${PROMPT}a`);
+    expect(r.bodyLines[1]).toBe("  ");
+  });
+
+  it("cursor 在 \\n 之前落上一行末", () => {
+    // draft="a\nb" cursor=1 在 \n 之前 = 'a' 之后
+    const r = layoutInputBuffer(PROMPT, "a\nb", 1, "", 80);
+    expect(r.cursorRow).toBe(0);
+    expect(r.cursorCol).toBe(2 + 1);
+  });
+
+  it("cursor 在 \\n 之后落新行 col=0（hangingIndent 之后）", () => {
+    // draft="a\nb" cursor=2 在 \n 之后 = 'b' 之前
+    const r = layoutInputBuffer(PROMPT, "a\nb", 2, "", 80);
+    expect(r.cursorRow).toBe(1);
+    expect(r.cursorCol).toBe(2);
+  });
+
+  it("cursor 在末行的字符之后", () => {
+    const r = layoutInputBuffer(PROMPT, "ab\ncd", 5, "", 80);
+    expect(r.cursorRow).toBe(1);
+    expect(r.cursorCol).toBe(2 + 2);
+  });
+
+  it("\\n 段间续行也应用软 wrap", () => {
+    // lineWidth=4, draft = "ab\ncdef"
+    // 行0: "ab"
+    // 行1: "cdef" (4 chars, 刚满 lineWidth=4)
+    const r = layoutInputBuffer(PROMPT, "ab\ncdef", 0, "", 6);
+    expect(r.bodyLines).toHaveLength(2);
+    expect(r.bodyLines[0]).toBe(`${PROMPT}ab`);
+    expect(r.bodyLines[1]).toBe("  cdef");
+  });
+});
+
+describe("layoutInputBuffer — atomic + \\n 混合", () => {
+  const ATOM = /\[ATOM\]/g;
+
+  it("\\n 段间 atomic 整体处理", () => {
+    const r = layoutInputBuffer(PROMPT, "x\n[ATOM]y", 0, "", 80, ATOM);
+    expect(r.bodyLines).toHaveLength(2);
+    expect(r.bodyLines[0]).toBe(`${PROMPT}x`);
+    expect(r.bodyLines[1]).toBe("  [ATOM]y");
+  });
+
+  it("atomic 之后的 \\n 继续硬换行", () => {
+    const r = layoutInputBuffer(PROMPT, "[ATOM]\nx", 0, "", 80, ATOM);
+    expect(r.bodyLines).toHaveLength(2);
+    expect(r.bodyLines[0]).toBe(`${PROMPT}[ATOM]`);
+    expect(r.bodyLines[1]).toBe("  x");
+  });
+
+  it("cursor 在 atomic 起始落 atomic 之前", () => {
+    // draft="a[ATOM]b" cursor=1 在 '[' 之前
+    const r = layoutInputBuffer(PROMPT, "a[ATOM]b", 1, "", 80, ATOM);
+    expect(r.cursorRow).toBe(0);
+    expect(r.cursorCol).toBe(2 + 1); // prompt + 'a'
+  });
+
+  it("cursor 在 atomic 内部落 atomic 末尾（简化版语义）", () => {
+    // draft="a[ATOM]b" cursor=3 (在 'A' 之后，atomic 内部)
+    const r = layoutInputBuffer(PROMPT, "a[ATOM]b", 3, "", 80, ATOM);
+    expect(r.cursorRow).toBe(0);
+    expect(r.cursorCol).toBe(2 + 1 + 6); // prompt + 'a' + [ATOM]
+  });
+
+  it("cursor 在 atomic 末尾", () => {
+    // draft="a[ATOM]b" cursor=7 在 ']' 之后
+    const r = layoutInputBuffer(PROMPT, "a[ATOM]b", 7, "", 80, ATOM);
+    expect(r.cursorRow).toBe(0);
+    expect(r.cursorCol).toBe(2 + 1 + 6); // prompt + 'a' + [ATOM]
+  });
+});

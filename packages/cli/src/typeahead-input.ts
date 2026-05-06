@@ -54,6 +54,35 @@ import {
   type RenderOptions,
 } from "./tui/index.js";
 import { layoutInputBuffer } from "./input-layout.js";
+import { wrapKeypressHandler } from "./paste-detector.js";
+import {
+  PASTE_TOKEN_PATTERN,
+  type PasteRegistry,
+} from "./paste-registry.js";
+import { expandPastes, extractAliveIds } from "./paste-expand.js";
+import {
+  removeAllPasteTokens,
+  tryAtomicEdit,
+  type AtomicEditKind,
+} from "./paste-atomic.js";
+
+/**
+ * 粘贴折叠阈值——超过任一阈值则注册到 registry + 用占位符 token，否则直接 insertText
+ * 短粘贴铺开。阈值数值见架构方案"折叠阈值"段说明。
+ */
+const PASTE_FOLD_LINES = 4;
+const PASTE_FOLD_BYTES = 200;
+
+/**
+ * 折叠决策：内容达任一阈值即折叠。短内容（< 4 行 < 200 字节）直接铺开符合用户
+ * "看到自己粘的小段代码"的视觉直觉；长内容折叠避免输入框被淹没。
+ */
+function shouldFoldPaste(content: string): boolean {
+  if (Buffer.byteLength(content, "utf8") >= PASTE_FOLD_BYTES) return true;
+  const trimmed = content.replace(/\n+$/, "");
+  if (trimmed.length === 0) return false;
+  return trimmed.split("\n").length >= PASTE_FOLD_LINES;
+}
 import {
   rawModeController,
   type RawModeLease,
@@ -108,6 +137,16 @@ export interface TypeaheadInputOptions {
    * 不参与 buffer.draft，不会被 commit——仅是 prompt 行的 0 状态视觉装饰。
    */
   readonly placeholder?: string;
+
+  /**
+   * 粘贴附件 registry（REPL session 级共享，caller 注入）。
+   * 注入后启用 paste 折叠：
+   *   - 长内容（≥ 4 行 OR ≥ 200 字符）→ 注册到 registry，buffer.draft 里放占位符 token
+   *   - 短内容 → 直接 buffer.insertText
+   *   - 提交时占位符 expand 还原原文给上层；echo 保留占位符形态
+   * 不传时退化为普通输入（paste 走 detector 默认丢弃路径）。
+   */
+  readonly registry?: PasteRegistry;
 }
 
 // ─── 主入口 ───
@@ -245,6 +284,9 @@ export function readInputLine(
         buffer.cursor,
         suffix,
         contentBudget,
+        // 占位符作 atomic 单元——wrap 时整体不切碎；同时启用 `\n` 硬换行（短粘贴
+        // 含 \n 走 buffer.insertText 后由此承接）
+        PASTE_TOKEN_PATTERN,
       );
       lastCursorRow = layout.cursorRow;
 
@@ -319,7 +361,9 @@ export function readInputLine(
         // 与第一行视觉对齐。
         const columns = getColumns();
         const echoBudget = Math.max(1, columns - 2);
-        const chunks = wrapToWidth(finalEcho, echoBudget);
+        // 启用 atomic + `\n` 硬换行：echo 的 rawDraft 含占位符 token（不可切碎）
+        // 与短粘贴 `\n`（必须按段独立 wrap），否则 bg 染色断裂或 token 中间被切
+        const chunks = wrapToWidth(finalEcho, echoBudget, PASTE_TOKEN_PATTERN);
         for (const chunk of chunks) {
           const innerText = `  ${chunk}`;
           const visibleWidth = stringWidth(stripAnsi(innerText));
@@ -336,10 +380,71 @@ export function readInputLine(
 
     // ── 触发一次 broker updateInput ──
     const syncBroker = (): void => {
+      // Orphan 回收：buffer.draft 改动后扫描 alive 占位符 id 集合，registry 中
+      // 不在集合的 id 视为 orphan 删除。任何让占位符 regex 不再匹配的编辑（删占
+      // 位符 / 中间打字破坏字符串）都自动触发回收，无需 InputBuffer 感知 registry
+      if (options.registry) {
+        options.registry.cleanup(extractAliveIds(buffer.draft));
+      }
       options.broker.updateInput(
         sessionHandle.id,
         buffer.toTriggerContext(options.getRuntime()),
       );
+    };
+
+    /**
+     * Paste detector 完成时调用。
+     *
+     * 单一不变量：**buffer 与占位符互斥**——buffer 同时只允许至多一个粘贴占位符，
+     * 且占位符出现时 buffer 没有其他粘贴衍生的散落字符。规则：
+     *
+     *   1. 不论长短粘贴，先删除 buffer 中现存占位符（替换语义；用户每次粘贴都重新
+     *      决定附件内容，旧附件被覆盖；用户手输的非粘贴文本原样保留）
+     *   2. 长粘贴 + buffer 原本干净 → register 新 paste + 占位符 token（首次折叠）
+     *   3. 短粘贴 / 长粘贴 + buffer 原本含占位符 → 直接铺开内容
+     *
+     * 旧 registry entry 在 syncBroker 触发的 cleanup 中自然 GC。
+     * syncBroker 之后由 broker emit state change 自动触发 rerender。
+     */
+    const finalizePaste = (content: string): void => {
+      // Step 1：先清理 buffer 中现有占位符（不论新内容长短）
+      let bufferWasClean = true;
+      if (options.registry) {
+        const removed = removeAllPasteTokens(buffer.draft, buffer.cursor);
+        if (removed) {
+          buffer.setDraft(removed.draft, removed.cursor);
+          bufferWasClean = false;
+        }
+      }
+
+      // Step 2：决定折叠（首次长粘贴）还是铺开
+      const shouldFold =
+        !!options.registry && shouldFoldPaste(content) && bufferWasClean;
+      if (shouldFold) {
+        const id = options.registry!.register(content);
+        buffer.insertText(options.registry!.format(id));
+      } else {
+        buffer.insertText(content);
+      }
+      syncBroker();
+    };
+
+    /**
+     * 占位符原子编辑——backspace / delete / left / right 命中占位符边界时把整段
+     * 当单一原子单元处理。命中走 setDraft；不命中返回 false，caller fallback 走
+     * buffer 原方法（普通字符级编辑）。
+     */
+    const tryAtomicKeypress = (kind: AtomicEditKind): boolean => {
+      if (!options.registry) return false;
+      const result = tryAtomicEdit(buffer.draft, buffer.cursor, kind);
+      if (!result) return false;
+      if (kind === "left" || kind === "right") {
+        // cursor 移动：draft 不变，只调 cursor
+        buffer.setCursor(result.cursor);
+      } else {
+        buffer.setDraft(result.draft, result.cursor);
+      }
+      return true;
     };
 
     // ── 清理 ──
@@ -355,7 +460,8 @@ export function readInputLine(
       if (cleaned) return;
       cleaned = true;
 
-      stdin.off("keypress", onKeypress);
+      stdin.off("keypress", batcher.handler);
+      batcher.release();
       unsubscribe();
       options.broker.cancelSession(sessionHandle.id);
 
@@ -397,10 +503,13 @@ export function readInputLine(
 
     // ── 提交当前 draft ──
     const submit = async (): Promise<void> => {
-      // 捕获"原始 draft"（未 trim）用于 teardown 时的回显 —— 视觉上让用户
-      // 看到他真正按下 Enter 那一刻的 prompt 行内容。
+      // 捕获"原始 draft"（未 trim、含占位符）用于 teardown echo 保留占位符形态
+      // 与折叠 UI 视觉一致；expanded 仅在送给 dispatcher / agent 的 text 路径上还原原文
       const rawDraft = buffer.draft;
-      const text = rawDraft.trim();
+      const expanded = options.registry
+        ? expandPastes(rawDraft, options.registry)
+        : rawDraft;
+      const text = expanded.trim();
       teardownVisuals(rawDraft);
       buffer.commit();
       if (!text) {
@@ -455,7 +564,9 @@ export function readInputLine(
           finish({ kind: "cancelled", cause: "ctrl-d" });
           return;
         }
-        buffer.deleteForward();
+        if (!tryAtomicKeypress("delete")) {
+          buffer.deleteForward();
+        }
         syncBroker();
         return;
       }
@@ -538,18 +649,24 @@ export function readInputLine(
       }
 
       if (key.name === "backspace") {
-        buffer.deleteBackward();
+        if (!tryAtomicKeypress("backspace")) {
+          buffer.deleteBackward();
+        }
         syncBroker();
         return;
       }
 
       if (key.name === "left") {
-        buffer.moveCursorLeft();
+        if (!tryAtomicKeypress("left")) {
+          buffer.moveCursorLeft();
+        }
         rerender();
         return;
       }
       if (key.name === "right") {
-        buffer.moveCursorRight();
+        if (!tryAtomicKeypress("right")) {
+          buffer.moveCursorRight();
+        }
         rerender();
         return;
       }
@@ -574,7 +691,14 @@ export function readInputLine(
     };
 
     // ── 初始化 ──
-    stdin.on("keypress", onKeypress);
+    // wrapKeypressHandler 自动按 10ms 时间窗 batch keypress：同步多次 emit 的
+    // keypress（粘贴）走 onPaste → finalizePaste；单个 keypress（敲键）走原 onKeypress。
+    // 不依赖 bracketed paste markers / stdin chunk 大小——跨终端兼容。
+    const batcher = wrapKeypressHandler({
+      onSingle: onKeypress,
+      onPaste: finalizePaste,
+    });
+    stdin.on("keypress", batcher.handler);
     if (typeof stdin.resume === "function") {
       stdin.resume();
     }
