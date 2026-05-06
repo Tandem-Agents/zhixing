@@ -11,7 +11,8 @@
 
 import { type AgentYield, type RunResult, userMessage } from "@zhixing/core";
 import { createAgentRuntime } from "@zhixing/orchestrator/runtime";
-import { createRenderSubscribers, createRenderer } from "./render.js";
+import { createRenderSubscribers } from "./render.js";
+import { createOutputRenderer } from "./output/index.js";
 import {
   renderBlockedMessage,
   renderUserDeniedMessage,
@@ -41,7 +42,7 @@ export interface RunOnceOptions {
 export async function runOnce(options: RunOnceOptions): Promise<RunResult> {
   // 内部独立 renderer:不与 REPL 共享,生命周期与 runOnce 调用对齐。
   // 启动 spinner —— 用户回车到首个 chunk 之间显示"思考中..."。
-  const renderer = createRenderer();
+  const renderer = createOutputRenderer();
   renderer.startThinking();
 
   try {

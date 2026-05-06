@@ -58,13 +58,15 @@ import {
   type RunResult,
 } from "@zhixing/orchestrator/runtime";
 import {
-  createRenderer,
   renderSummary,
   renderError,
   renderUsageReport,
   renderContextVisual,
-  type Renderer,
 } from "./render.js";
+import {
+  createOutputRenderer,
+  type OutputRenderer,
+} from "./output/index.js";
 import { renderHomeWelcome, renderStartupAdvisories } from "./workbench/index.js";
 import { RuntimeSession } from "./runtime/session.js";
 import { handleConfigCommand } from "./runtime/config-command.js";
@@ -129,7 +131,7 @@ export interface ReplOptions {
 function buildSlashCommands(
   rl: readline.Interface,
   session: RuntimeSession,
-  renderer: Renderer,
+  renderer: OutputRenderer,
 ): Record<
   string,
   {
@@ -689,7 +691,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
 
   // renderer 借给 RuntimeSession——session 内部装配 agent 时通过 closure 注入，
   // 让 retry / compact / interrupt 渲染前能驱动 spinner.stop() 避免动画覆盖事件
-  const renderer = createRenderer();
+  const renderer = createOutputRenderer();
 
   // schedulerEventBus 由调用方持有——稳定的"事件集线器"，跨 reload 持久。
   // REPL 在后续订阅 task-completed 等事件；session 内部即使重建 scheduler，

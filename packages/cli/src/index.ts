@@ -8,6 +8,7 @@
 
 import chalk from "chalk";
 import { Command } from "commander";
+import { setDiagnosticLogger } from "@zhixing/core";
 import { runStartupCheck, type StartupCheckResult } from "./startup.js";
 import { runOnce } from "./run-agent.js";
 import { startRepl } from "./repl.js";
@@ -81,6 +82,10 @@ program
     name?: string;
   }) => {
     try {
+      // cli 交互模式（REPL / -p）静默 core 诊断 log（[llm] 请求 / 工具调用等），
+      // 避免污染对话 UI；serve / rpc / serve sub-commands 各自独立 action 不受影响，
+      // 保持默认 console.log 输出供运维与调试观察
+      setDiagnosticLogger(() => {});
       // 启动期检查——任何模式（-p / REPL）下都先确保必要字段就绪
       const startupResult = await runStartupCheck({
         cwd: process.cwd(),

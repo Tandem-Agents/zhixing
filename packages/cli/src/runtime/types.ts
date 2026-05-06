@@ -11,7 +11,7 @@
 import type { CreateAgentRuntimeOptions } from "@zhixing/orchestrator/runtime";
 import type { ZhixingConfig, ZhixingCredentials } from "@zhixing/providers";
 import type { IEventBus, SchedulerEventMap } from "@zhixing/core";
-import type { Renderer } from "../render.js";
+import type { OutputRenderer } from "../output/index.js";
 
 /** 从 createAgentRuntime 公共契约推导 callback 类型——避免依赖 orchestrator 内部路径 */
 type OnSecurityBlockedFn = NonNullable<CreateAgentRuntimeOptions["onSecurityBlocked"]>;
@@ -28,7 +28,7 @@ export interface RuntimeSessionOptions {
   cliProvider?: string;
 
   /** 顶层资源——session 借用，不在 dispose 中关闭 */
-  renderer: Renderer;
+  renderer: OutputRenderer;
   zhixingHome: string;
   /**
    * Scheduler 事件总线——稳定的"事件集线器"，跨 reload 持久。

@@ -1,15 +1,16 @@
 /**
- * 终端渲染模块
+ * 终端渲染模块——AI 输出区主流程之外的辅助渲染。
  *
- * 职责：将 AgentYield 事件转为终端可视输出。
- * MVP 方案：chalk 直接着色 + process.stdout.write 流式输出。
- * 不引入 Ink/React/ora 等终端 UI 框架。
+ * 主流程的 AgentYield 流（text / thinking / tool / turn_complete）由 output/ 子模块
+ * 的 createOutputRenderer 接管；本文件保留剩余的"非流式"渲染：
+ *   - renderSummary：每轮结束摘要行（耗时 / 上下文 / 中断 / 错误 / max_turns 差异化）
+ *   - renderError：异常错误渲染
+ *   - renderUsageReport / renderContextVisual：/usage 与 /context 命令的可视化
+ *   - renderRetry* / renderBudgetStatus / renderCompact*：EventBus 订阅型事件渲染
+ *   - setupInterruptRendering：中断 EventBus 订阅渲染
+ *   - createRenderSubscribers：装载 EventBus 渲染订阅的工厂
  *
- * Spinner 实现：自研 Braille dots 动画，零依赖。
- * 时序规则：
- *   start  → 用户回车后立即启动
- *   stop   → 收到首个 text_delta / thinking_delta / tool_start 时自动停止
- *   resume → turn_complete 后自动恢复（等待下一轮 LLM 响应）
+ * 这些函数与 createOutputRenderer 互不耦合，由 repl / run-agent 各自调用。
  */
 
 import chalk from "chalk";
@@ -17,142 +18,13 @@ import {
   type AbortReason,
   type AgentEventMap,
   type AgentResult,
-  type AgentYield,
   type ContextBudget,
   type IEventBus,
 } from "@zhixing/core";
 import type { DecorateRunBusFn } from "@zhixing/orchestrator/runtime";
 import type { SubAgentUsageEntry } from "./parse-task-usage.js";
 import { setupSubAgentStatus } from "./sub-agent-status.js";
-import { getToolRenderStrategy } from "./tool-render-strategy.js";
-
-// ─── Spinner 常量 ───
-
-const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const SPINNER_INTERVAL_MS = 80;
-// 主文本 + esc 中断提示: 让用户在 agent 跑时看到中断键位 (替代独立状态条,
-// 避免与 typeahead-input 在 idle 时的输入区冲突)
-const SPINNER_TEXT = "思考中...";
-const SPINNER_HINT = "esc 中断";
-// 清除宽度足够覆盖 spinner 行 + 提示 (CJK 字符占 2 列, 需要比 .length 更大的值);
-// "思考中... · esc 中断" 约 22 列, 留余量到 50
-const SPINNER_CLEAR_WIDTH = 50;
-
-// ─── 有状态渲染器 ───
-
-export interface Renderer {
-  /** 启动思考动画（用户输入后立即调用） */
-  startThinking: () => void;
-  /** 处理 AgentYield 事件（自动管理 spinner 生命周期） */
-  handleEvent: (event: AgentYield) => void;
-  /** 强制停止 spinner（异常路径兜底） */
-  stop: () => void;
-}
-
-export function createRenderer(): Renderer {
-  let frame = 0;
-  let timer: ReturnType<typeof setInterval> | null = null;
-  // 追踪光标是否在行首，避免 tool_start 产生多余空行
-  let atLineStart = true;
-  // 追踪本轮是否已输出可见内容，过滤 LLM 在工具调用前输出的前导空白
-  let hasVisibleContent = false;
-
-  function startSpinner(): void {
-    stopSpinner();
-    frame = 0;
-    timer = setInterval(() => {
-      const char = SPINNER_FRAMES[frame++ % SPINNER_FRAMES.length]!;
-      process.stdout.write(
-        `\r  ${chalk.cyan(char)} ${chalk.dim(SPINNER_TEXT)} ${chalk.dim("·")} ${chalk.dim(SPINNER_HINT)}`,
-      );
-    }, SPINNER_INTERVAL_MS);
-  }
-
-  function stopSpinner(): void {
-    if (timer !== null) {
-      clearInterval(timer);
-      timer = null;
-      process.stdout.write(`\r${" ".repeat(SPINNER_CLEAR_WIDTH)}\r`);
-    }
-  }
-
-  function renderEvent(event: AgentYield): void {
-    switch (event.type) {
-      case "text_delta":
-        // 过滤每轮开头的纯空白（LLM 在工具调用前常输出多余换行）
-        if (!hasVisibleContent) {
-          if (event.text.trim() === "") break;
-          hasVisibleContent = true;
-        }
-        process.stdout.write(event.text);
-        atLineStart = event.text.endsWith("\n");
-        break;
-
-      case "thinking_delta":
-        hasVisibleContent = true;
-        process.stdout.write(chalk.dim(event.thinking));
-        atLineStart = event.thinking.endsWith("\n");
-        break;
-
-      case "assistant_message":
-        break;
-
-      case "tool_start":
-        // 部分工具(策略表标记非 default 者)由专用订阅器接管渲染 ——
-        // 主路径若仍输出 ⟡ 卡片会与状态条形成双重渲染视觉混乱,统一查策略表跳过
-        if (getToolRenderStrategy(event.name) !== "default") break;
-        if (!atLineStart) process.stdout.write("\n");
-        process.stdout.write(
-          `  ${chalk.cyan("⟡")} ${chalk.cyan(event.name)} ${chalk.dim(getToolSummary(event.name, event.input))} `,
-        );
-        atLineStart = false;
-        break;
-
-      case "tool_end": {
-        if (getToolRenderStrategy(event.name) !== "default") break;
-        const status = event.result.isError
-          ? chalk.red("✗")
-          : chalk.green("✓");
-        process.stdout.write(`${status} ${chalk.dim(`${event.duration}ms`)}\n`);
-        atLineStart = true;
-        break;
-      }
-
-      case "turn_complete":
-        break;
-    }
-  }
-
-  return {
-    startThinking() {
-      atLineStart = true;
-      hasVisibleContent = false;
-      startSpinner();
-    },
-
-    handleEvent(event: AgentYield) {
-      if (
-        timer !== null &&
-        (event.type === "text_delta" ||
-          event.type === "thinking_delta" ||
-          event.type === "tool_start")
-      ) {
-        stopSpinner();
-      }
-
-      if (event.type === "turn_complete") {
-        hasVisibleContent = false;
-        startSpinner();
-      }
-
-      renderEvent(event);
-    },
-
-    stop() {
-      stopSpinner();
-    },
-  };
-}
+import type { OutputRenderer } from "./output/index.js";
 
 // ─── 中断诊断文本 ───
 
@@ -694,27 +566,10 @@ export function renderError(error: unknown): void {
   console.error(`\n${chalk.red("✗")} ${message}`);
 }
 
-// ─── 内部辅助 ───
-
-function getToolSummary(name: string, input: Record<string, unknown>): string {
-  switch (name) {
-    case "read":
-    case "write":
-      return typeof input["path"] === "string" ? input["path"] : "";
-    case "bash": {
-      const cmd =
-        typeof input["command"] === "string" ? input["command"] : "";
-      return cmd.length > 60 ? cmd.slice(0, 57) + "..." : cmd;
-    }
-    default:
-      return "";
-  }
-}
-
 // ─── 集中渲染订阅装载点 ───
 
 /**
- * 工厂:绑定一个可选的 Renderer 实例,返回符合 DecorateRunBusFn 契约的装饰器。
+ * 工厂:绑定一个可选的 OutputRenderer 实例,返回符合 DecorateRunBusFn 契约的装饰器。
  *
  * 设计要点:
  *   1. 通过 closure 捕获 renderer —— UI 依赖在工厂层显式注入,而非通过 RunBusContext
@@ -734,7 +589,7 @@ function getToolSummary(name: string, input: Record<string, unknown>): string {
  * 不涵盖(职责正交):
  *   - 数据收集类订阅(如 subscribeCompactAccumulator),归 runtime 主流程
  */
-export function createRenderSubscribers(renderer?: Renderer): DecorateRunBusFn {
+export function createRenderSubscribers(renderer?: OutputRenderer): DecorateRunBusFn {
   // pauseUI 单点派生:有 renderer 即包装 stop(),否则 no-op。
   // 保持下方各订阅回调的形状统一,避免"是否暂停"逻辑下沉到每个 case。
   const pauseUI: () => void = renderer ? () => renderer.stop() : () => {};

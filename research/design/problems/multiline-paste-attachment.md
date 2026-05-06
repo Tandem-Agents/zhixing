@@ -70,21 +70,26 @@
 └─────────────────────────────────────────────────────────┘
                            ↑
 ┌─────────────────────────────────────────────────────────┐
-│  Paste Detector  ←──── stdin "data" 字节级状态机           │
-│  双层协作：data listener 维护 inPasteMode；所有 raw mode    │
-│  组件的 onKeypress 顶层 inPasteMode 时短路 ignore           │
-│  （typeahead-input / select-with-input / typeahead-panel    │
-│   等所有 keypress 消费者，全局约定）                        │
-│  ESC[200~ → 进 paste 模式 + 累积 pasteBuffer               │
-│  ESC[201~ → 调 activePasteHandler；无 handler 默认丢弃     │
-│  保护：buffer > 10MB / 静默 > 500ms 强制结束 + 提示         │
+│  Paste Detector  ←──── keypress 层 microtask batcher       │
+│  paste = "同步连续多个 keypress"（readline 同步循环 emit）  │
+│  vs 敲键 = "异步单 keypress"（手指间隔 ≥ 50ms）            │
+│  实现：batch + queueMicrotask(flush)                       │
+│    - 同 macrotask 内多次 keypress → batch ≥ 2 → onPaste   │
+│    - 异步单 keypress → batch = 1 → onSingle               │
+│  return / enter keypress 的 str 字段为空 →                │
+│    eventToContent 按 key.name 显式还原 \n                  │
+│  每个消费者用 wrapKeypressHandler 包自己的原 onKeypress：    │
+│    typeahead-input   → onPaste = finalizePaste             │
+│    select-with-input → onPaste = 丢弃                      │
+│    typeahead-panel   → onPaste = 丢弃                      │
 └─────────────────────────────────────────────────────────┘
                            ↑
 ┌─────────────────────────────────────────────────────────┐
-│  Terminal Setup  ←──── CLI 启动入口启用 bracketed paste    │
-│  process 启动：stdout.write("\x1b[?2004h")               │
+│  Terminal Setup  ←──── REPL 启动一次启用 bracketed paste   │
+│  process 启动：stdout.write("\x1b[?2004h")                │
 │  process 退出：stdout.write("\x1b[?2004l")  必须 reset    │
-│  全局一次启用，不耦合 raw mode lease                       │
+│  目的仅是抑制终端"多行粘贴警告"弹窗——paste 检测不依赖     │
+│  markers（依赖 keypress 同步 emit），跨终端兼容             │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -97,27 +102,49 @@
 - **session 退出时 `clearAll()`**：用户 /exit 或 Ctrl+C 退 REPL 时一次性清空
 - **同 hash 复用 id**（hermes 做法）：用户重复粘贴同段内容时 registry 不爆，长 session 内存可控
 
-#### bracketed paste mode 启用位置 = CLI 程序启动入口
+#### bracketed paste mode 启用位置 = REPL 启动入口（仅抑制终端警告）
 
+- **目的**：抑制 Windows Terminal 等终端默认的"多行粘贴警告"弹窗，**不参与 paste 检测**——检测靠 Paste Detector 层的 keypress microtask batcher
 - 不放 `raw-mode.ts`：raw-mode 被 `select-with-input` / `typeahead-panel` / `config-editor` 共用，paste 启用全局即可，不依赖 lease 引用计数
-- 放 `packages/cli/src/index.ts`（或 REPL 入口）：进入 REPL 前 `stdout.write("\x1b[?2004h")`，注册 process exit handler / SIGINT reset
-- 安全性：未识别 paste markers 的组件天然忽略 ESC 开头 sequence（参考 typeahead-input.ts 已有 `!str.startsWith("\x1b")` 守卫）
+- 放 `packages/cli/src/repl.ts` 的 `setupBracketedPasteMode()`：进 REPL 前 `process.stdout.write("\x1b[?2004h")`，注册 `process.on("exit")` reset
+- 安全性：检测不依赖 markers，老终端不响应 `\x1b[?2004h` 也不影响 paste 识别；含 `\x1b` 字符的粘贴内容被 readline 解析为 ESC sequence keypress 进入 batch，依然走 batch ≥ 2 → onPaste 路径
 
 #### finalizePaste 在 typeahead-input.ts 完成（不污染 InputBuffer）
 
-InputBuffer 当前注释明确 "本类只持有 in-memory ring buffer"——保持纯粹。Registry 处理放在 typeahead-input.ts 层：
+InputBuffer 当前注释明确 "本类只持有 in-memory ring buffer"——保持纯粹。Registry 处理放在 typeahead-input.ts 层。
+
+**核心不变量**："buffer 与占位符互斥"——buffer 中至多只有一个占位符；新粘贴**替换**已有占位符（无论新内容长短）。
 
 ```
 finalizePaste(content):
-  if shouldFold(content):     # ≥ 4 行 OR ≥ 200 字符
+  # Step 1：先清理 buffer 中现有占位符（不论新内容长短）
+  bufferWasClean = true
+  if registry:
+    removed = removeAllPasteTokens(buffer.draft, buffer.cursor)
+    if removed:
+      buffer.setDraft(removed.draft, removed.cursor)
+      bufferWasClean = false
+
+  # Step 2：决策 fold 或 spread
+  shouldFold = registry && shouldFoldPaste(content) && bufferWasClean
+  if shouldFold:                    # ≥ 4 行 OR ≥ 200 字节 + buffer 干净
     id = registry.register(content)
     buffer.insertText(registry.format(id))
-  else:
+  else:                             # 短内容 / 已有占位符被清理后的混合状态 → 铺开
     buffer.insertText(content)
+
   syncBroker()
 ```
 
-InputBuffer 完全不变。
+InputBuffer `chars: string[]` 内部模型不动，仅新增中性 `setCursor(position)` 方法（不耦合 paste / registry / history），供上层 atomic 操作精确控制 cursor。
+
+#### 占位符 atomic 操作（cursor / backspace / delete / left / right）
+
+占位符在交互层视为单一原子单元——cursor 移动整段跨过、backspace / delete 整段删除：
+
+- `paste-atomic.ts` 提供纯函数 `findTokenCharRanges(draft)` / `tryAtomicEdit(draft, cursor, kind)` / `removeAllPasteTokens(draft, cursor)`，char-level offset 操作（不撕裂 surrogate pair / CJK）
+- typeahead-input.ts 的 keypress 处理在 `backspace` / `delete` / `left` / `right` 各分支内先 try atomic（`tryAtomicKeypress(kind)`），命中 → 直接 `setDraft` / `setCursor`；不命中 → fallback 调原 buffer 方法字符级编辑
+- atomic 在 keypress 层拦截，buffer 始终是字符序列；不依赖 InputBuffer 内部模型改造
 
 #### layoutInputBuffer / wrapToWidth 扩展 — 原子区域 + 硬换行
 
@@ -209,9 +236,13 @@ InputBuffer 不抛事件、不知道 registry——保持其纯粹性。
 
 #### 不做字符阈值 fallback
 
-设计上**只支持现代终端**（Windows Terminal / iTerm2 / VS Code Terminal / WSL / kitty / Alacritty 等支持 bracketed paste 的终端）。老旧终端（Windows ConHost）不响应 ESC[?2004h → 多行粘贴按 \n 拆成多次 keypress 提交，行为与当前一致（即抢跑 bug 仍在）—— 由用户切换到现代终端解决，不为兜底引入计时器状态。
+paste 检测靠 keypress 同步 emit（readline 在 raw mode 下统一行为），不依赖 bracketed paste markers。常见终端（Windows Terminal / iTerm2 / VS Code Terminal / WSL / kitty / Alacritty / Windows ConHost 等）的 readline 行为一致——粘贴一次性进 stdin → readline 同步循环 emit N 个 keypress → batcher 识别 batch ≥ 2 → onPaste。边界明确，跨终端覆盖好。
 
-边界明确，简单清晰。
+老终端兼容性问题落在两处：
+- terminal 默认显示"多行粘贴警告"弹窗（Windows Terminal 等）：靠 `\x1b[?2004h` 抑制；不响应该序列的终端弹窗依旧出现，用户确认后内容仍走标准 keypress 路径，不影响检测
+- bracketed paste markers `\x1b[200~` / `\x1b[201~` 在响应的终端会作为额外 keypress 进 batcher，str 字段为空但因 batch ≥ 2 不影响 paste 识别
+
+不引入计时器 / 字符阈值兜底——keypress 同步信号已足够。
 
 #### 格式契约 — 单一真相源
 
@@ -247,27 +278,35 @@ InputBuffer 不抛事件、不知道 registry——保持其纯粹性。
 - `packages/cli/src/tui/line-width.ts` 的 `wrapToWidth` 同等扩展（atomic + `\n`），供 teardownVisuals 的 historyEcho 染色路径使用
 - 单测覆盖：atomic region 跨行整体换行、`\n` 硬换行边界、混合（含 `\n` + 含 atomic）、向后兼容
 
-### Step 3：bracketed paste mode 启用 + 字节级 paste detector
-- `packages/cli/src/index.ts` 进 REPL 前启用 `\x1b[?2004h`，注册 process exit handler / SIGINT reset
-- 新建 `packages/cli/src/paste-detector.ts` 全局单例（CLI 启动时初始化一次）：
-  - 注册 `stdin.on("data", ...)` listener（**注册时机早于 readline 启用 keypress**，保证同步广播时本 listener 先于 readline 的 data 处理执行）
-  - 跨 chunk 维护字节级状态机：扫描 `\x1b[200~` → 进入 paste 模式 + 累积 `pasteBuffer`；扫描 `\x1b[201~` → 离开 paste 模式 + 调 `activePasteHandler(pasteBuffer)`
-  - 暴露 `setActivePasteHandler(handler | null)` API：活跃组件 setup 时注册自己的 finalizePaste，cleanup 时清空；ESC[201~ 时若 handler 为 null（如 select-with-input / config-editor 期间）默认**丢弃 pasteBuffer + 状态重置**
-  - 暴露 `inPasteMode` 只读属性供消费方查询
-- 双层协作（不是字节截断 stream）—— **全局 raw mode 约定**：所有 keypress 消费者的 `onKeypress` 顶层都加 `if (pasteDetector.inPasteMode) return` 短路。paste 期间 readline 仍同步 emit keypress（含 paste 内容里的 `\n` → return key、`\x1b` → 误解析 escape sequence、字符 → 各 keypress），全部被消费方忽略，避免 paste 字符流污染选择 / 选项 / 字段。改动入口：`typeahead-input.ts` / `tui/select-with-input.ts` / `tui/typeahead-panel.ts`；未来新增 raw mode 组件遵循此约定
-- 状态机保护：`pasteBuffer.length > 10MB` 或 paste 模式下 500ms 静默 → 强制 finalize + 控制台 dim 提示（防终端异常导致 hang）
-- 验证：手测 Windows Terminal / VS Code Terminal / iTerm2 三档；含 `\x1b` 字符的粘贴内容（如 ANSI 着色文本）原始字节正确保留；select-with-input / config-editor 期间 paste 自然丢弃不卡死
+### Step 3：bracketed paste mode 启用 + keypress microtask batcher
+- `packages/cli/src/repl.ts` 的 `setupBracketedPasteMode()`：进 REPL 前 `process.stdout.write("\x1b[?2004h")`，注册 `process.on("exit")` reset。**仅抑制 Windows Terminal 等终端的"多行粘贴警告"弹窗**，paste 检测不依赖 markers
+- 新建 `packages/cli/src/paste-detector.ts`：导出 `wrapKeypressHandler({onSingle, onPaste})`——keypress 层 microtask batcher
+  - 任何 keypress 进 batch + `queueMicrotask(flush)`（已 scheduled 跳过）
+  - 同 macrotask 内多次 keypress 累积；microtask drain → flush
+  - flush 时 batch ≥ 2（粘贴：readline 同步循环 emit）→ `onPaste(content)`；batch = 1（敲键：异步单 keypress）→ `onSingle(str, key)`
+  - 暴露 `release()` 终态清理：单 keypress 残余 flush 走 onSingle（避免末尾按键丢失）；多 keypress 残骸丢弃；之后 handler 调用 ignore（cleanup 终态）
+- **paste content 拼接细节**：readline 把 `\r` / `\n` / `\r\n` 解析为 `return` / `enter` keypress，**str 字段为空字符串**——直接拼接会丢失换行符；`eventToContent` 检查 `key.name === "return" / "enter"` 显式还原 `\n`
+- 每个 raw mode 消费者用 `wrapKeypressHandler` 包自己的原 onKeypress（注册到 `stdin.on("keypress", batcher.handler)`），按场景定义 `onPaste`：
+  - `typeahead-input.ts` → `onPaste = finalizePaste`
+  - `tui/select-with-input.ts` → `onPaste = () => {}`（select 不支持 paste，丢弃）
+  - `tui/typeahead-panel.ts` → `onPaste = () => {}`（panel 不输入文本，丢弃）
+  - 未来新增 raw mode 组件按此模式接入
+- **为什么不用 stdin "data" 字节级 detector**：raw mode 下 stdin chunk 大小不可控（部分平台字节级流），bracketed paste markers 跨终端不可靠（Windows ConPTY / 部分老终端不响应 `\x1b[?2004h`）。readline 同步 emit keypress 是更稳定的粘贴信号
+- 验证：Windows Terminal / VS Code Terminal / iTerm2 三档；含 `\x1b` 字符的粘贴内容透传；select-with-input / config-editor 期间 paste 自然丢弃不污染选择字段
 
-### Step 4：finalizePaste + submit expand + historyEcho 保持占位符
+### Step 4：finalizePaste + atomic placeholder + submit expand + historyEcho 保持占位符
+- 新建 `packages/cli/src/paste-atomic.ts`：纯函数模块——`findTokenCharRanges(draft)` / `tryAtomicEdit(draft, cursor, kind)` / `removeAllPasteTokens(draft, cursor)`。char-level offset 操作（不撕裂 surrogate pair / CJK）
+- `packages/cli/src/input-buffer.ts` 加中性方法 `setCursor(position)`——供上层 atomic 操作精确控制 cursor，不耦合 paste / registry / history
 - `typeahead-input.ts` 接 `registry: PasteRegistry` 作 `TypeaheadInputOptions` 字段（caller 注入）
-- 实现 `finalizePaste(content)` 在 typeahead-input 内部：阈值判断 + register + buffer.insertText(token)；短粘贴含 `\n` 由 Step 2 扩展的 layoutInputBuffer 自然处理硬换行
+- 实现 `finalizePaste(content)`：先 `removeAllPasteTokens` 清理已有占位符（不变量"buffer 与占位符互斥"），再决策 fold（buffer 干净 + 达阈值）/ spread。短粘贴含 `\n` 由 Step 2 扩展的 layoutInputBuffer 自然处理硬换行
+- 实现 `tryAtomicKeypress(kind)`：在 `backspace` / `delete` / `left` / `right` 各分支内先 try atomic，命中走 `setDraft` / `setCursor`；不命中 fallback 调原 buffer 方法
 - typeahead trigger matcher 加占位符 pattern 作 word 终止符：broker query 段不含占位符字面值（详见架构方案"paste 与 typeahead 交互边界"段）
 - 修改 `submit`：
   - `rawDraft = buffer.draft`
   - `text = expandPastes(rawDraft, registry).trim()`
   - `teardownVisuals(rawDraft)` ← 保留占位符形态做 echo（wrapToWidth 已 Step 2 扩展支持 `\n` + atomic）
   - `finish({ kind: "text", text })` ← expanded 给上层
-- 手测：粘贴 30 行 → 占位符显示 → 提交看到 expanded 传给 caller、scrollback 看到占位符形态 echo；短粘贴 3 行 → bodyLines 自然多行铺开，box 不断裂
+- 手测：粘贴 30 行 → 占位符显示 → 提交看到 expanded 传给 caller、scrollback 看到占位符形态 echo；短粘贴 3 行 → bodyLines 自然多行铺开，box 不断裂；backspace 紧贴占位符 → 整段删；left / right 跨过占位符
 
 ### Step 5：orphan 回收
 - `typeahead-input.ts` 的 `syncBroker` 顶部加 `registry.cleanup(extractAliveIds(buffer.draft))`
@@ -289,22 +328,48 @@ InputBuffer 不抛事件、不知道 registry——保持其纯粹性。
 ## 不在本方案
 
 - **后端落盘** (`~/.zhixing/pastes/`) — hermes 落盘是为多 session/重启找回；知行 in-memory + REPL session 级 registry 简单足够，未来需求出现再加
-- **atomic placeholder 在 cursor / backspace 层强制原子**（占位符在 cursor 移动 / backspace 时作单字符）— 需要把 `chars: string[]` 改成 `segments: Segment[]`，InputBuffer 内部模型改写复杂度过高；当前简化版（破坏后 orphan 回收）满足 95% 场景。**注意**：占位符 wrap 不被切碎是必须保证的（Step 2 解决），但 cursor / backspace 的字符级行为是用户主动编辑——用户对自己的破坏行为有感知，结果可解释
 - **hover 预览**（光标停在占位符上自动展开 panel）— 增加状态复杂度且占视觉空间；用按需展开命令替代
 - **粘贴图片/二进制附件** — 知行当前定位 text-based agent，图片粘贴是独立的多模态特性，不耦合到本方案
 - **超大粘贴主动截断** — Claude 200K context ≈ 600KB 文本，常规粘贴远低于此；layoutInputBuffer 处理 ≤ 1MB 字符串 microsecond 级不卡 UI；不主动截断、不为 token 节省做手脚，让 LLM 自己处理超长输入
-- **老旧终端字符阈值 fallback** — 设计明确只支持现代终端；Windows ConHost 等不响应 ESC[?2004h 的终端体验降级为当前行为（按 \n 拆 submit），由用户切换到现代终端解决
 - **粘贴内容 syntax highlighting / 代码块识别** — 占位符是纯展示标记，不做语义识别；agent 拿到 expanded text 自行处理
 
 ---
 
 ## 设计落地引用
 
-- 现有渲染：[`packages/cli/src/typeahead-input.ts`](../../../packages/cli/src/typeahead-input.ts)
-- 现有 buffer：[`packages/cli/src/input-buffer.ts`](../../../packages/cli/src/input-buffer.ts)
-- 现有行布局（多行 wrap）：[`packages/cli/src/input-layout.ts`](../../../packages/cli/src/input-layout.ts)（Step 2 扩展点）
-- 现有行宽 / wrap 工具：[`packages/cli/src/tui/line-width.ts`](../../../packages/cli/src/tui/line-width.ts)（Step 2 同步扩展点）
-- 现有 raw mode 管理：[`packages/cli/src/tui/_internal/raw-mode.ts`](../../../packages/cli/src/tui/_internal/raw-mode.ts)（不动）
-- CLI 启动入口：[`packages/cli/src/index.ts`](../../../packages/cli/src/index.ts)（Step 3 启用 bracketed paste）
-- 现有 chrome 紧凑形态：[`packages/cli/src/tui/chrome.ts`](../../../packages/cli/src/tui/chrome.ts)
-- 同类参考：Claude Code `usePasteHandler.ts` / hermes `useComposerState.ts` + `text.ts` / openclaw `tui-submit.ts:75`
+落地后的模块清单：
+
+- 集成层（光标 / wrap / paste 接入）：[`packages/cli/src/typeahead-input.ts`](../../../packages/cli/src/typeahead-input.ts)
+- 输入 buffer（仅加中性 `setCursor`）：[`packages/cli/src/input-buffer.ts`](../../../packages/cli/src/input-buffer.ts)
+- 多行行布局（atomic + `\n` 扩展）：[`packages/cli/src/input-layout.ts`](../../../packages/cli/src/input-layout.ts)
+- 行宽 / wrap 工具（atomic + `\n` 扩展）：[`packages/cli/src/tui/line-width.ts`](../../../packages/cli/src/tui/line-width.ts)
+- raw mode 管理（不动）：[`packages/cli/src/tui/_internal/raw-mode.ts`](../../../packages/cli/src/tui/_internal/raw-mode.ts)
+- REPL 启动入口（启用 bracketed paste、注入 PasteRegistry、注入 wordTerminators）：[`packages/cli/src/repl.ts`](../../../packages/cli/src/repl.ts)
+- chrome 紧凑形态：[`packages/cli/src/tui/chrome.ts`](../../../packages/cli/src/tui/chrome.ts)
+
+本方案新增模块：
+
+- 附件存储 + 格式契约（`PASTE_TOKEN_PATTERN` 单一真相源）：[`packages/cli/src/paste-registry.ts`](../../../packages/cli/src/paste-registry.ts)
+- submit expand + alive id 抽取：[`packages/cli/src/paste-expand.ts`](../../../packages/cli/src/paste-expand.ts)
+- 占位符 atomic 操作（cursor / edit / remove）：[`packages/cli/src/paste-atomic.ts`](../../../packages/cli/src/paste-atomic.ts)
+- keypress microtask batcher：[`packages/cli/src/paste-detector.ts`](../../../packages/cli/src/paste-detector.ts)
+
+跨包扩展（cli 注入，core 不知占位符语义）：
+
+- `wordTerminators` typeahead 扩展点：[`packages/core/src/typeahead/types.ts`](../../../packages/core/src/typeahead/types.ts) / [`broker.ts`](../../../packages/core/src/typeahead/broker.ts) / [`trigger-matcher.ts`](../../../packages/core/src/typeahead/trigger-matcher.ts)（cli 通过 `wordTerminators: [PASTE_TOKEN_PATTERN]` 注入）
+
+同类参考：Claude Code `usePasteHandler.ts` / hermes `useComposerState.ts` + `text.ts` / openclaw `tui-submit.ts:75`
+
+---
+
+## 实施小记（设计期 → 落地的关键调整）
+
+设计期方案与最终落地有四处实质性差异，记录于此供未来读者理解决策演化：
+
+1. **Paste Detector 从字节级状态机改为 keypress microtask batcher**：原方案靠 bracketed paste markers (`\x1b[200~` / `\x1b[201~`) + `stdin.on("data")` 字节流 + 全局 `inPasteMode` 短路。落地中发现 Windows ConPTY 下 stdin chunk 大小不可控（部分场景按字节流），markers 跨终端响应不一致；改为 keypress 层 microtask batcher——把"同步多次 keypress"作为粘贴信号，跨终端稳定。bracketed paste mode 仍启用但只是抑制终端"多行粘贴警告"弹窗。
+
+2. **buffer 与占位符互斥不变量**：原 `finalizePaste` 仅有 fold/spread 二选一，未考虑 buffer 已有占位符的二次粘贴。落地中发现两次粘贴会出现"占位符 + 新内容并存"或"内容重复"，确立"buffer 至多一个占位符"作核心不变量——`finalizePaste` 先无条件清理已有占位符，再决策 fold / spread；fold 仅当 buffer 干净时才走。
+
+3. **占位符 cursor / backspace atomic 从"不在本方案"改为已实施**：原方案以"InputBuffer chars[] 改 segments[] 复杂度过高"为由不做。落地中独立模块 `paste-atomic.ts`（纯函数）在 keypress 层拦截 backspace / delete / left / right，buffer 内部模型不动；新增中性 `InputBuffer.setCursor` 工具支撑。
+
+4. **paste content 内换行符还原**：原方案未明确 readline 把 `\r` / `\n` / `\r\n` 解析为 `return` / `enter` keypress 时 str 字段为空字符串，直接拼接会丢失换行符。`eventToContent` 检查 `key.name === "return" / "enter"` 显式还原 `\n`——这是粘贴多行内容能正确呈现的关键。

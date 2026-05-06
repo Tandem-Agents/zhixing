@@ -52,6 +52,7 @@ import { extractText, extractToolCalls, toolResultMessage } from "../types/messa
 import { toToolSpec } from "../types/tools.js";
 import { streamLLMCall } from "./llm-call.js";
 import { executeToolCalls } from "./tool-executor.js";
+import { logDiagnostic } from "../diagnostics.js";
 import type {
   AgentLoopDeps,
   AgentLoopParams,
@@ -303,7 +304,9 @@ export async function* runAgentLoop(
       // ── 无工具调用 → 正常完成 ──
       const toolCalls = extractToolCalls(llmResult.message);
       if (toolCalls.length > 0) {
-        console.log(`[llm] 工具调用: ${toolCalls.map(tc => tc.name).join(", ")}`);
+        logDiagnostic(
+          `[llm] 工具调用: ${toolCalls.map((tc) => tc.name).join(", ")}`,
+        );
       }
       if (toolCalls.length === 0) {
         // 纯文本 return 前触发 compact 检查（社交通道 / 纯聊天场景原本漏掉）
