@@ -49,9 +49,11 @@ import {
   tone,
   renderSessionLines,
   renderChrome,
+  wrapToWidth,
   defaultTypeaheadTheme,
   type RenderOptions,
 } from "./tui/index.js";
+import { layoutInputBuffer } from "./input-layout.js";
 import {
   rawModeController,
   type RawModeLease,
@@ -156,9 +158,12 @@ export function readInputLine(
 
     // ── 帧状态 ──
     // firstRender: 首次渲染时光标在 prompt 行（不是 box body 行），rerender 入口
-    // 跳过 moveUp(1) 一次，让顶边直接覆盖当前空行；后续渲染光标都在 body 行，需
-    // moveUp(1) 回顶边再重绘整帧
+    // 跳过 moveUp 一次，让顶边直接覆盖当前空行；后续渲染光标都在 box body 的
+    // cursorRow 行，需 moveUp(cursorRow + 1) 回顶边再重绘整帧。
     let firstRender = true;
+    // box body 可能跨多行（draft wrap），cursor 在其中第几行——teardown 入口
+    // 与 rerender 出口契约共用此值，避免 teardown 再走一遍 layout
+    let lastCursorRow = 0;
 
     // ── 绘图 ──
     const getColumns = (): number => {
@@ -168,7 +173,8 @@ export function readInputLine(
 
     const computeRenderOptions = (): RenderOptions => {
       const columns = getColumns();
-      const frameWidth = Math.min(80, Math.max(40, Math.min(columns - 2, 80)));
+      // panel 与终端同宽，与上方输入框 box 完全对齐；minWidth=40 仅极窄终端兜底
+      const frameWidth = Math.max(40, columns);
       const innerWidth = Math.max(10, frameWidth - 2);
       return {
         theme: defaultTypeaheadTheme,
@@ -179,26 +185,27 @@ export function readInputLine(
     };
 
     /**
-     * 一帧 = box（顶 + body + 底，3 行）+ panel N 行。
+     * 一帧 = box（顶 + body 多行 + 底）+ panel N 行。
      *
      * 入口/出口光标契约：
-     *   非首次渲染入口 = 上次出口 = box body 行 cursor 列
+     *   非首次渲染入口 = 上次出口 = box body 第 lastCursorRow 行 cursor 列
      *   首次渲染入口 = caller 调用前的当前行 col 任意（视作 box 顶边的占位）
-     *   每次出口 = box body 行 cursor 列
+     *   每次出口 = box body 第 cursorRow 行 cursor 列
      *
-     * 渲染流程（每帧自洽，与上次帧的 panel 行数无关——clearBelow 一次性清掉）：
-     *   1. moveUp(1) 回 box 顶边行（首次跳过——光标本就在该行的位置）
+     * 渲染流程（每帧自洽，与上次帧的 box 高度 / panel 行数无关——clearBelow 一次清完）：
+     *   1. moveUp(lastCursorRow + 1) 回 box 顶边行（首次跳过——光标本就在该行的位置）
      *   2. col0 + clearBelow 清光标右 + 下方所有内容（含旧 box 中下半 + 旧 panel）
-     *   3. 写 box 三行（每行 + \r\n）—— 光标到底边之下
-     *   4. 写 panel N 行（每行 + \r\n）—— 光标到 panel 之下
-     *   5. moveUp(panelLines.length + 2) 回 box body 行 col 0
-     *      （panel 行数 + 底边 1 行 + body 之下到 panel 顶 1 行 = N + 2，无 panel 时 = 2）
-     *   6. forward(2 + promptPrefix宽 + draftBeforeCursor宽) 移到 cursor 列
-     *      （2 = 左 │ 1 列 + indent 1 列；indent=1 是 input box 紧凑型决策）
+     *   3. layoutInputBuffer 把 draft + suffix 按 contentBudget wrap 成多行
+     *   4. 写 box（顶 + body 多行 + 底；每行 + \r\n）—— 光标到底边之下
+     *   5. 写 panel N 行（每行 + \r\n）—— 光标到 panel 之下
+     *   6. moveUp(bodyLines.length - cursorRow + N + 1) 回 box body 第 cursorRow 行 col 0
+     *   7. forward(2 + cursorCol) 移到 cursor 列
+     *      （2 = 左 │ 1 列 + indent 1 列；indent=1 是 input box 紧凑形态决策；
+     *        cursorCol 已含 prompt/hanging 偏移）
      *
      * 整帧用 syncBegin / syncEnd 包裹，避免 TTY 分段 flush 让光标可见闪烁。
      *
-     * clearBelow 的边界：moveUp(1) 后光标在 box 顶边行——clearBelow 只清这一行
+     * clearBelow 的边界：moveUp 后光标在 box 顶边行——clearBelow 只清这一行
      * 光标右侧 + 下方，不会越过 box 顶边往上擦欢迎语 / 历史输出。
      */
     const rerender = (): void => {
@@ -206,7 +213,7 @@ export function readInputLine(
 
       // Step 1：回 box 顶边行（首次渲染时光标已在该行的占位位置——caller 调用前的换行）
       if (!firstRender) {
-        stdout.write(ANSI.moveUp(1));
+        stdout.write(ANSI.moveUp(lastCursorRow + 1));
       }
       firstRender = false;
 
@@ -214,25 +221,37 @@ export function readInputLine(
       stdout.write(ANSI.col0);
       stdout.write(ANSI.clearBelow);
 
-      // 计算 body 内容（promptPrefix + draft + dim 提示）
-      // dim 提示分两类，语义互斥：
+      // Step 3：构造 suffix + layout
+      // suffix 语义互斥：
       //   buffer 空 → placeholder（caller 注入的 0 状态文案）
       //   buffer 非空 + cursor 在末尾 + broker 有 ghost suffix → ghost text（命令补全建议）
       // buffer 空时 broker 自然无 trigger 也无 ghost，互斥自然成立；显式 if/else
       // 让阅读者一眼看清两者关系。光标不在末尾时 ghost 不显示——避免 mid-cursor 布局复杂化。
       const cursorAtEnd =
         buffer.cursor === Array.from(buffer.draft).length;
-      let bodyContent = `${promptPrefix}${buffer.draft}`;
+      let suffix = "";
       if (buffer.isEmpty && options.placeholder) {
-        bodyContent += `${ANSI.dim}${options.placeholder}${ANSI.reset}`;
+        suffix = `${ANSI.dim}${options.placeholder}${ANSI.reset}`;
       } else if (cursorAtEnd && lastSessionState?.ghostText?.suffix) {
-        bodyContent += `${ANSI.dim}${lastSessionState.ghostText.suffix}${ANSI.reset}`;
+        suffix = `${ANSI.dim}${lastSessionState.ghostText.suffix}${ANSI.reset}`;
       }
 
-      // Step 3：渲染 box——复用 renderChrome 原语（紧凑形态：bodyPadding=false + indent=1）
+      const frameWidth = Math.max(40, getColumns());
+      // 紧凑 chrome contentBudget = frameWidth - (左 │ + indent + 右内边距 + 右 │) = frameWidth - 4
+      const contentBudget = Math.max(1, frameWidth - 4);
+      const layout = layoutInputBuffer(
+        promptPrefix,
+        buffer.draft,
+        buffer.cursor,
+        suffix,
+        contentBudget,
+      );
+      lastCursorRow = layout.cursorRow;
+
+      // Step 4：渲染 box——复用 renderChrome 原语（紧凑形态：bodyPadding=false + indent=1）
       const boxLines = renderChrome({
-        body: [bodyContent],
-        width: getColumns(),
+        body: layout.bodyLines,
+        width: frameWidth,
         bodyPadding: false,
         indent: 1,
       });
@@ -241,7 +260,7 @@ export function readInputLine(
         stdout.write("\r\n");
       }
 
-      // Step 4：渲染 panel（紧贴 box 底边之下，作为第二个独立 chrome）
+      // Step 5：渲染 panel（紧贴 box 底边之下，作为第二个独立 chrome）
       const panelLines = lastSessionState
         ? renderSessionLines(lastSessionState, computeRenderOptions())
         : [];
@@ -250,18 +269,20 @@ export function readInputLine(
         stdout.write("\r\n");
       }
 
-      // Step 5：回 box body 行 col 0
-      // 此刻光标在所有内容之下 col 0；body 行是从底向上数的第 (panelLines.length + 2) 行
-      // （panel N 行 + 底边 1 行 + body 之下空格 1 行 = N + 2；无 panel 时 = 2）
-      stdout.write(ANSI.moveUp(panelLines.length + 2));
+      // Step 6：回 box body 第 cursorRow 行 col 0
+      // 光标在所有内容之下 col 0；从 box body[cursorRow] 起向下数：
+      //   (bodyLines.length - cursorRow - 1) 行 box body 之下
+      //   + 1 行 bottom 边
+      //   + N 行 panel
+      //   + 1 行 panel 之下空行（\r\n 后光标停在末行之下）
+      // = bodyLines.length - cursorRow + N + 1
+      const upwardOffset =
+        layout.bodyLines.length - layout.cursorRow + panelLines.length + 1;
+      stdout.write(ANSI.moveUp(upwardOffset));
 
-      // Step 6：从 col 0 forward 到 cursor 列
-      // offset = 1（左 │）+ 1（indent=1）+ promptPrefix 可见宽 + draft 光标前部宽
-      const draftBeforeCursor = Array.from(buffer.draft)
-        .slice(0, buffer.cursor)
-        .join("");
-      const offset =
-        2 + visibleLength(promptPrefix) + stringWidth(draftBeforeCursor);
+      // Step 7：从 col 0 forward 到 cursor 列
+      // visible col = 1（左 │）+ 1（indent=1）+ cursorCol（含 prompt/hanging 偏移）
+      const offset = 2 + layout.cursorCol;
       if (offset > 0) {
         stdout.write(`\x1b[${offset}C`);
       }
@@ -270,19 +291,20 @@ export function readInputLine(
     };
 
     /**
-     * 销毁当前 box + panel 帧，把"刚提交的输入"降级为单行 `❯ <text>` 回显进入
+     * 销毁当前 box + panel 帧，把"刚提交的输入"降级为多行 historyEcho 进入
      * scrollback——历史不累积 box 视觉重量（设计语言 P1 安静原则）。
      *
-     * - `finalEcho=text`：Submit 路径 —— 清整帧 + 重写 `prompt + text` + `\r\n`
+     * - `finalEcho=text`：Submit 路径 —— 清整帧 + 多行 historyEcho（draft wrap 后逐行染色）
      * - `finalEcho=null`：Cancel 路径 —— 同样清整帧 + `\r\n`，不回显
      *
-     * 入口光标契约与 rerender 出口一致：在 box body 行 cursor 位置（首次例外）。
-     * moveUp(1) 回顶边行 + clearBelow 清整个 box + panel；首次渲染前调 teardown
-     * 不会发生（teardown 只在 submit / cancel 路径触发，rerender 至少跑过一次）。
+     * 入口光标契约与 rerender 出口一致：在 box body 第 lastCursorRow 行 cursor 位置
+     * （首次例外）。moveUp(lastCursorRow + 1) 回顶边行 + clearBelow 清整个 box + panel；
+     * 首次渲染前调 teardown 不会发生（teardown 只在 submit / cancel 路径触发，rerender
+     * 至少跑过一次）。
      */
     const teardownVisuals = (finalEcho: string | null): void => {
       if (!firstRender) {
-        stdout.write(ANSI.moveUp(1));
+        stdout.write(ANSI.moveUp(lastCursorRow + 1));
       }
       stdout.write(ANSI.col0);
       stdout.write(ANSI.clearBelow);
@@ -291,14 +313,25 @@ export function readInputLine(
         // 避免与 active box 的"现在输入"语义重复（光标在历史里早不在了，❯ 是错位
         // 信号），也让用户复制历史消息时不带 prompt 前缀。前导 2 空格让文字不贴
         // bg 边缘视觉舒展；padding 到终端宽度让 bg 延伸到行末避免视觉锚断裂。
-        const innerText = `  ${finalEcho}`;
-        const visibleWidth = stringWidth(stripAnsi(innerText));
-        const padding = " ".repeat(
-          Math.max(0, getColumns() - visibleWidth),
-        );
-        stdout.write(tone.historyEcho(innerText + padding));
+        //
+        // 多行展开：超过终端宽度的 draft 按可见列 wrap，每段单独染色一行；续行不
+        // 加 hanging（历史无"输入中"语义，无需 prompt 锚），仍统一前导 2 空格保持
+        // 与第一行视觉对齐。
+        const columns = getColumns();
+        const echoBudget = Math.max(1, columns - 2);
+        const chunks = wrapToWidth(finalEcho, echoBudget);
+        for (const chunk of chunks) {
+          const innerText = `  ${chunk}`;
+          const visibleWidth = stringWidth(stripAnsi(innerText));
+          const padding = " ".repeat(
+            Math.max(0, columns - visibleWidth),
+          );
+          stdout.write(tone.historyEcho(innerText + padding));
+          stdout.write("\r\n");
+        }
+      } else {
+        stdout.write("\r\n");
       }
-      stdout.write("\r\n");
     };
 
     // ── 触发一次 broker updateInput ──
@@ -550,12 +583,3 @@ export function readInputLine(
   });
 }
 
-/**
- * 估算字符串的可见长度（去掉 ANSI，不考虑 CJK 双宽）。
- * prompt prefix 里一般只有 "❯ " 和 ANSI 颜色码，这个粗算够用。
- */
-function visibleLength(s: string): number {
-  // 去掉 ANSI CSI 序列
-  const stripped = s.replace(/\x1b\[[0-9;?=<>]*[A-Za-z]/g, "");
-  return Array.from(stripped).length;
-}

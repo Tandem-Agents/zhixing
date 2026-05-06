@@ -30,6 +30,17 @@
 
 import { glyph, tone } from "./style.js";
 import { stringWidth, clampLine } from "./line-width.js";
+import { highlightSelectedRow } from "./highlight.js";
+
+/**
+ * Body 行 —— 普通字符串 = chrome 自动 indent + 右内边距空格；
+ * `{ highlight: "dotted-row" }` = 整行点阵纹理覆盖（含 indent 与右内边距），用于
+ * 候选列表等"选中行"语义。chrome 只识别 highlight 字面标记、不参与"为何高亮"的
+ * 业务判断——保留纯渲染原语属性。
+ */
+export type BodyLine =
+  | string
+  | { readonly content: string; readonly highlight: "dotted-row" };
 
 /**
  * 多行品牌锚——顶边一个字符 + body 顶部多行，用于"门面"面板的身份签名。
@@ -54,8 +65,11 @@ export interface ChromeOptions {
   brandAnchor?: string | BrandAnchor;
   /** 顶边左对齐嵌入的标题；缺省 = 纯横线顶边 */
   title?: string;
-  /** 内容行——每行已是完整字符串（含 ANSI 颜色） */
-  body: readonly string[];
+  /**
+   * 内容行——string 是普通行（已含 ANSI 颜色），`{ highlight }` 对象触发选中
+   * 态点阵纹理覆盖（chrome 内 indent 与右内边距全部参与点阵化）。
+   */
+  body: readonly BodyLine[];
   /** 容器宽度（含左右边框） */
   width: number;
   /** body 内容相对左边框的缩进；缺省 3 */
@@ -207,16 +221,29 @@ function renderTitleTopEdge(
   );
 }
 
-function renderBodyLine(line: string, innerWidth: number, indent: number): string {
-  const contentBudget = innerWidth - indent - RIGHT_INNER_PAD;
-  const clamped = clampLine(line, contentBudget);
-  const padWidth = Math.max(0, contentBudget - stringWidth(clamped));
-  return (
-    tone.dim(glyph.vertical) +
+function renderBodyLine(line: BodyLine, innerWidth: number, indent: number): string {
+  if (typeof line === "string") {
+    const contentBudget = innerWidth - indent - RIGHT_INNER_PAD;
+    const clamped = clampLine(line, contentBudget);
+    const padWidth = Math.max(0, contentBudget - stringWidth(clamped));
+    return (
+      tone.dim(glyph.vertical) +
+      " ".repeat(indent) +
+      clamped +
+      " ".repeat(padWidth) +
+      " ".repeat(RIGHT_INNER_PAD) +
+      tone.dim(glyph.vertical)
+    );
+  }
+  // 点阵高亮行：│ 与 │ 之间整体送 highlightSelectedRow——indent / 内容 / 尾部
+  // padding 全部参与替换。单空格保留规则让 indent=1 紧凑形态左侧自然留 1 单元
+  // 呼吸；indent>=2 时左侧也参与点阵覆盖（与无框 entry row 行为一致）。
+  const contentBudget = innerWidth - indent;
+  const clamped = clampLine(line.content, contentBudget);
+  const innerRow =
     " ".repeat(indent) +
     clamped +
-    " ".repeat(padWidth) +
-    " ".repeat(RIGHT_INNER_PAD) +
-    tone.dim(glyph.vertical)
-  );
+    " ".repeat(Math.max(0, contentBudget - stringWidth(clamped)));
+  const dotted = highlightSelectedRow(innerRow, innerWidth);
+  return tone.dim(glyph.vertical) + dotted + tone.dim(glyph.vertical);
 }

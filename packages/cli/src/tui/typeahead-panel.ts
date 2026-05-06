@@ -56,6 +56,7 @@ import {
   acquireStdinOwnership,
   type StdinOwnershipHandle,
 } from "./_internal/stdin-ownership.js";
+import { renderChrome, type BodyLine } from "./chrome.js";
 import { clampLine, stringWidth } from "./line-width.js";
 import { tone, icon } from "./style.js";
 
@@ -80,22 +81,27 @@ export interface TypeaheadTheme {
  * Default theme 走 design token——视觉决策跟随 `tui/style.ts` 的 tone / icon。
  * Caller 仍可通过 `theme` 选项部分覆盖。
  *
+ * 选中态语义：cursor 是 focus 锚点（保留品牌色），name / description 不上 brand
+ * 色——选中信号由 chrome 的点阵纹理唯一承担，文字色双重叠加会让 description 比
+ * label 抢眼，破坏视觉层级。与 config-editor entry row 的选中态规则一致。
+ *
  * 关键 token 映射：
- *   border        → tone.dim     （非主体内容、可被忽略）
- *   selected*     → tone.brand   （选中态 = 品牌色）
- *   loading       → tone.warn    （等待中）
- *   error         → tone.error
- *   selectedArrow → icon.cursor  （与其他面板共享 ▸ 选中标记）
+ *   border               → tone.dim
+ *   selectedArrow        → tone.brand.bold(icon.cursor)  （focus 锚点保留品牌色）
+ *   selectedName         → tone.bold                       （加粗、不变色）
+ *   selectedDescription  → tone.dim                        （与未选中同色）
+ *   loading              → tone.warn
+ *   error                → tone.error
  */
 export const defaultTypeaheadTheme: TypeaheadTheme = {
   border: (s) => tone.dim(s),
   title: (s) => tone.bold(s),
-  selectedArrow: `${icon.cursor} `,
+  selectedArrow: `${tone.brand.bold(icon.cursor)} `,
   unselectedArrow: "  ",
-  selectedName: (s) => tone.brand.bold(s),
+  selectedName: (s) => tone.bold(s),
   unselectedName: (s) => s,
   description: (s) => tone.dim(s),
-  selectedDescription: (s) => tone.brand(s),
+  selectedDescription: (s) => tone.dim(s),
   hint: (s) => tone.dim(s),
   loading: (s) => tone.warn(s),
   error: (s) => tone.error(s),
@@ -119,10 +125,8 @@ export interface TypeaheadPanelOptions {
 
   /** 面板最多可见条目数；多余走窗口滚动。默认 8 */
   readonly maxVisibleItems?: number;
-  /** 面板最小宽度；默认 40 */
+  /** 面板最小宽度（极窄终端兜底）；默认 40。常态下 panel 与终端同宽。 */
   readonly minWidth?: number;
-  /** 面板最大宽度；默认 80 */
-  readonly maxWidth?: number;
   /** 强制面板宽度探测（测试用） */
   readonly columns?: number;
 }
@@ -234,14 +238,17 @@ export interface RenderOptions {
  * 纯函数 —— 无副作用，可直接断言输出。传入的 state 要遵守零键执行不变量
  * （suggestions 非空 → selectedIndex ∈ [0, len)）。
  *
- * 结构（active 时）：
- *   ╭─ Commands · 6 matches ──────
- *   │  ↑ more...                     ← 有 topScroll 时
- *   │  ▸ /new     Start a new session
- *   │    /reset   Alias of /new
- *   │  ...
- *   │  ↓ more...                     ← 有 bottomScroll 时
- *   ╰─
+ * 视觉结构 = 完整 chrome（与输入框 box / config-editor 共用同一 renderChrome 原语）+
+ * chrome 之后的 meta 行（argumentHint / 快捷键提示）。chrome 紧凑形态
+ * （bodyPadding=false, indent=1）与输入框 box 同款气质，显得是输入区的"延续姊妹"。
+ *
+ *   ╭ Commands · 6 matches ─────────────────────────╮
+ *   │  ↑ 上方还有 N 条                               │
+ *   │  ▸ /new                Start a new session    │  ← 选中行整行点阵纹理
+ *   │    /reset              Alias of /new          │
+ *   │  ↓ 下方还有 N 条                               │
+ *   ╰────────────────────────────────────────────────╯
+ *     ↑↓ 选择 · Enter 接受 · Tab 接受 · Esc 清空
  *
  * inactive 时返回空数组 —— 调用方直接 `panel.render([])` 擦除之前的渲染。
  */
@@ -249,103 +256,119 @@ export function renderSessionLines(
   state: TypeaheadSessionState,
   opts: RenderOptions,
 ): string[] {
-  const { theme, frameWidth, innerWidth, maxVisibleItems } = opts;
+  const { theme, frameWidth, maxVisibleItems } = opts;
 
-  // ── Inactive 态：无 trigger 且无 loading → 不占行 ──
   if (!state.trigger || !state.activeProvider) return [];
 
   const providerLabel = titleOfProvider(state.activeProvider.id);
   const count = state.suggestions.length;
+  const title = buildTitle(providerLabel, count, state, theme);
 
-  // 标题段
-  let titleSegment: string;
-  if (state.loading) {
-    titleSegment = ` ${providerLabel} · ${theme.loading("loading…")} `;
-  } else if (count === 0) {
-    titleSegment = ` ${providerLabel} · no matches `;
-  } else {
-    titleSegment = ` ${providerLabel} · ${count} ${count === 1 ? "match" : "matches"} `;
-  }
+  // 紧凑 chrome 内容可见宽度 = frameWidth - 4
+  // (左 │ + indent 1 + 右内边距 1 + 右 │)
+  const contentBudget = Math.max(1, frameWidth - 4);
 
-  const lines: string[] = [];
-
-  // ── 顶部边框 ──
-  const titleVisible = stringWidth(titleSegment);
-  const dashes = Math.max(0, frameWidth - 2 - titleVisible);
-  lines.push(
-    theme.border(`╭─${theme.title(titleSegment)}${"─".repeat(dashes)}`),
-  );
-
-  // ── 空结果 / loading 占位 ──
   if (count === 0) {
-    // 有 argumentHint 但无 dropdown 候选（text/path/number 类型）→ 只显示 hint
-    if (state.argumentHint && !state.loading) {
-      lines.push(theme.border(`╰${"─".repeat(frameWidth - 1)}`));
-      lines.push(
-        `  ${theme.hint(clampLine(state.argumentHint.renderedHint, frameWidth - 2))}`,
-      );
-      return lines;
-    }
-    const emptyText = state.loading ? "正在加载候选…" : "未找到匹配项";
-    lines.push(
-      `${theme.border("│")}  ${clampLine(theme.emptyHint(emptyText), innerWidth - 2)}`,
-    );
-    lines.push(theme.border(`╰${"─".repeat(frameWidth - 1)}`));
-    lines.push(
-      `  ${theme.hint(clampLine("Esc 清空", frameWidth - 2))}`,
-    );
-    return lines;
+    return renderEmptyChrome(state, title, frameWidth, contentBudget, theme);
   }
 
-  // ── 窗口计算 ──
+  return renderActiveChrome(
+    state,
+    title,
+    frameWidth,
+    contentBudget,
+    maxVisibleItems,
+    theme,
+  );
+}
+
+/** 标题段 —— `Commands · 6 matches` / `Commands · no matches` / `Commands · loading…`。 */
+function buildTitle(
+  providerLabel: string,
+  count: number,
+  state: TypeaheadSessionState,
+  theme: TypeaheadTheme,
+): string {
+  if (state.loading) {
+    return `${providerLabel} · ${theme.loading("loading…")}`;
+  }
+  if (count === 0) {
+    return `${providerLabel} · no matches`;
+  }
+  const noun = count === 1 ? "match" : "matches";
+  return `${providerLabel} · ${count} ${noun}`;
+}
+
+/** 空态 chrome —— body 单行（argumentHint / loading / "未找到匹配项"）+ 可选 Esc 提示。 */
+function renderEmptyChrome(
+  state: TypeaheadSessionState,
+  title: string,
+  frameWidth: number,
+  contentBudget: number,
+  theme: TypeaheadTheme,
+): string[] {
+  const body: BodyLine[] = [];
+  const meta: string[] = [];
+
+  if (state.argumentHint && !state.loading) {
+    body.push(
+      theme.hint(clampLine(state.argumentHint.renderedHint, contentBudget)),
+    );
+  } else if (state.loading) {
+    body.push(theme.loading(clampLine("正在加载候选…", contentBudget)));
+  } else {
+    body.push(theme.emptyHint(clampLine("未找到匹配项", contentBudget)));
+    meta.push(`  ${theme.hint(clampLine("Esc 清空", frameWidth - 2))}`);
+  }
+
+  return [
+    ...renderChrome({
+      title,
+      body,
+      width: frameWidth,
+      bodyPadding: false,
+      indent: 1,
+    }),
+    ...meta,
+  ];
+}
+
+/** 活跃 chrome —— 滚动 slot + 候选行（选中行点阵高亮）+ 滚动 slot；meta 行在 chrome 外。 */
+function renderActiveChrome(
+  state: TypeaheadSessionState,
+  title: string,
+  frameWidth: number,
+  contentBudget: number,
+  maxVisibleItems: number,
+  theme: TypeaheadTheme,
+): string[] {
+  const count = state.suggestions.length;
   const win = computeWindow(count, state.selectedIndex, maxVisibleItems);
+  const body: BodyLine[] = [];
 
   // 滚动指示行：scrollable 时**恒定预留 2 个 slot**（顶+底），内容随窗口位置
   // 变化但行数不变，消除面板高度抖动。文案策略：
-  //
   //   - 可滚动：`↑ 上方还有 N 条` / `↓ 下方还有 N 条`（量化剩余数量）
   //   - 到边了：`──── 顶部 ────` / `──── 到底啦 ────`（明确的中文边界提示）
-  //
   // 非 scrollable（total ≤ maxVisible）时完全不预留 slot —— 不浪费行。
   if (win.isScrollable) {
     const aboveCount = win.start;
     const topContent =
       aboveCount > 0
         ? `↑ 上方还有 ${aboveCount} 条`
-        : buildEdgeMarker("顶部", innerWidth - 4);
-    lines.push(
-      `${theme.border("│")}  ${theme.hint(clampLine(topContent, innerWidth - 2))}`,
-    );
+        : buildEdgeMarker("顶部", contentBudget);
+    body.push(theme.hint(clampLine(topContent, contentBudget)));
   }
 
-  // ── 候选项 ──
   for (let i = win.start; i < win.end; i++) {
     const item = state.suggestions[i]!;
     const isSelected = i === state.selectedIndex;
-    const arrow = isSelected ? theme.selectedArrow : theme.unselectedArrow;
-
-    // 名字列：用 displayText（provider 决定是否带 `/` 前缀）
-    const namePart = isSelected
-      ? theme.selectedName(item.displayText)
-      : theme.unselectedName(item.displayText);
-
-    // 描述列：可选
-    let linePayload: string;
-    if (item.description) {
-      // 两列布局：name 左对齐至 24 列，description 填剩余
-      const nameVisible = stringWidth(item.displayText);
-      const padCount = Math.max(1, 24 - nameVisible);
-      const pad = " ".repeat(padCount);
-      const desc = isSelected
-        ? theme.selectedDescription(item.description)
-        : theme.description(item.description);
-      linePayload = `${namePart}${pad}${desc}`;
-    } else {
-      linePayload = namePart;
-    }
-
-    const line = `${theme.border("│")} ${arrow}${linePayload}`;
-    lines.push(clampLine(line, frameWidth));
+    const payload = buildCandidatePayload(item, isSelected, theme);
+    body.push(
+      isSelected
+        ? { content: payload, highlight: "dotted-row" }
+        : payload,
+    );
   }
 
   if (win.isScrollable) {
@@ -353,27 +376,55 @@ export function renderSessionLines(
     const bottomContent =
       belowCount > 0
         ? `↓ 下方还有 ${belowCount} 条`
-        : buildEdgeMarker("到底啦", innerWidth - 4);
-    lines.push(
-      `${theme.border("│")}  ${theme.hint(clampLine(bottomContent, innerWidth - 2))}`,
-    );
+        : buildEdgeMarker("到底啦", contentBudget);
+    body.push(theme.hint(clampLine(bottomContent, contentBudget)));
   }
 
-  // ── 底部边框 ──
-  lines.push(theme.border(`╰${"─".repeat(frameWidth - 1)}`));
-
-  // ── 参数提示（argumentHint）──
+  // chrome 之后的 meta 行：argumentHint（如有）+ 快捷键提示
+  const meta: string[] = [];
   if (state.argumentHint) {
-    lines.push(
+    meta.push(
       `  ${theme.hint(clampLine(state.argumentHint.renderedHint, frameWidth - 2))}`,
     );
   }
+  meta.push(
+    `  ${theme.hint(clampLine("↑↓ 选择 · Enter 接受 · Tab 接受 · Esc 清空", frameWidth - 2))}`,
+  );
 
-  // ── 快捷键提示 ──
-  const hint = "↑↓ 选择 · Enter 接受 · Tab 接受 · Esc 清空";
-  lines.push(`  ${theme.hint(clampLine(hint, frameWidth - 2))}`);
+  return [
+    ...renderChrome({
+      title,
+      body,
+      width: frameWidth,
+      bodyPadding: false,
+      indent: 1,
+    }),
+    ...meta,
+  ];
+}
 
-  return lines;
+/** 候选行 payload —— `{arrow}{name}{pad}{desc?}`，pad 让 desc 起始于 col 24（按可见宽度对齐）。 */
+function buildCandidatePayload(
+  item: SuggestionItem,
+  isSelected: boolean,
+  theme: TypeaheadTheme,
+): string {
+  const arrow = isSelected ? theme.selectedArrow : theme.unselectedArrow;
+  const namePart = isSelected
+    ? theme.selectedName(item.displayText)
+    : theme.unselectedName(item.displayText);
+
+  if (!item.description) {
+    return `${arrow}${namePart}`;
+  }
+
+  const nameVisible = stringWidth(item.displayText);
+  const padCount = Math.max(1, 24 - nameVisible);
+  const pad = " ".repeat(padCount);
+  const desc = isSelected
+    ? theme.selectedDescription(item.description)
+    : theme.description(item.description);
+  return `${arrow}${namePart}${pad}${desc}`;
 }
 
 /**
@@ -431,7 +482,6 @@ export function createTypeaheadPanel(
   };
   const maxVisibleItems = options.maxVisibleItems ?? 12;
   const minWidth = options.minWidth ?? 40;
-  const maxWidth = options.maxWidth ?? 80;
 
   const panel: PanelRenderer = createPanelRenderer(stdout);
 
@@ -448,10 +498,8 @@ export function createTypeaheadPanel(
 
   const computeRenderOptions = (): RenderOptions => {
     const columns = getColumns();
-    const frameWidth = Math.min(
-      maxWidth,
-      Math.max(minWidth, Math.min(columns - 2, maxWidth)),
-    );
+    // 与终端同宽，与输入框 box 对齐；minWidth 仅对极窄终端兜底
+    const frameWidth = Math.max(minWidth, columns);
     const innerWidth = Math.max(10, frameWidth - 2);
     return { theme, frameWidth, innerWidth, maxVisibleItems };
   };

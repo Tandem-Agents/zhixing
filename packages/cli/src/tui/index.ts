@@ -48,6 +48,7 @@ export {
 
 export {
   renderChrome,
+  type BodyLine,
   type BrandAnchor,
   type ChromeOptions,
 } from "./chrome.js";
@@ -74,6 +75,7 @@ export {
   renderFooter,
   type FooterOptions,
 } from "./footer.js";
+export { highlightSelectedRow } from "./highlight.js";
 
 // ─── 3. TUI 应用组件 ─────────────────────────────────────
 

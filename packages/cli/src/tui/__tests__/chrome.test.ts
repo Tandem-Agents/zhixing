@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
+import chalk from "chalk";
 import { renderChrome } from "../chrome.js";
 import { stripAnsi } from "../ansi.js";
 import { stringWidth } from "../line-width.js";
+
+chalk.level = 3;
 
 describe("renderChrome", () => {
   it("无标题时顶边是 ╭─...─╮ 纯横线", () => {
@@ -177,5 +180,132 @@ describe("renderChrome", () => {
     const body = lines[2]!;
     expect(stripAnsi(body)).toContain("…");
     expect(stringWidth(body)).toBe(20);
+  });
+
+  describe("highlight: dotted-row 选中行", () => {
+    it("行宽与普通行一致 = width", () => {
+      const lines = renderChrome({
+        body: [{ content: "▸ /new", highlight: "dotted-row" }],
+        width: 30,
+        bodyPadding: false,
+        indent: 1,
+      });
+      // 紧凑模式 + 单 body：lines = [top, body, bottom]
+      expect(lines).toHaveLength(3);
+      expect(stringWidth(lines[1]!)).toBe(30);
+    });
+
+    it("行内尾部 padding 被替换为 ░ 点阵纹理", () => {
+      const lines = renderChrome({
+        body: [{ content: "▸ /new", highlight: "dotted-row" }],
+        width: 30,
+        bodyPadding: false,
+        indent: 1,
+      });
+      const visible = stripAnsi(lines[1]!);
+      expect(visible).toContain("░");
+      // 左 │ + 1 空格(indent=1 单空格保留) + ▸ /new + 尾部点阵 + 右 │
+      expect(visible).toMatch(/^│ ▸ \/new░+│$/);
+    });
+
+    it("紧凑模式 indent=1：左侧单空格呼吸保留（不点阵化）", () => {
+      const lines = renderChrome({
+        body: [{ content: "▸ x", highlight: "dotted-row" }],
+        width: 20,
+        bodyPadding: false,
+        indent: 1,
+      });
+      const visible = stripAnsi(lines[1]!);
+      // 第 2 列是 indent 单空格，第 3 列起是 content
+      expect(visible[0]).toBe("│");
+      expect(visible[1]).toBe(" ");
+      expect(visible[2]).toBe("▸");
+    });
+
+    it("默认 indent=3：左侧 3 个空格被点阵化（连续空格规则）", () => {
+      const lines = renderChrome({
+        body: [{ content: "x", highlight: "dotted-row" }],
+        width: 20,
+        bodyPadding: false,
+        // indent 缺省 = 3
+      });
+      const visible = stripAnsi(lines[1]!);
+      // │ + ░░░（indent=3 三个连续空格被点阵化）+ x + 点阵 + │
+      expect(visible.startsWith("│░░░x")).toBe(true);
+    });
+
+    it("content 内单空格保留（cursor 与 label 之间不点阵化）", () => {
+      const lines = renderChrome({
+        body: [{ content: "▸ /new", highlight: "dotted-row" }],
+        width: 30,
+        bodyPadding: false,
+        indent: 1,
+      });
+      const visible = stripAnsi(lines[1]!);
+      // ▸ 与 /new 之间的单空格保留
+      expect(visible).toContain("▸ /new");
+    });
+
+    it("content 内连续多空格被点阵化（双区布局的 pad 段）", () => {
+      const lines = renderChrome({
+        body: [{ content: "▸ /new     desc", highlight: "dotted-row" }],
+        width: 40,
+        bodyPadding: false,
+        indent: 1,
+      });
+      const visible = stripAnsi(lines[1]!);
+      // /new 与 desc 之间的 5 连续空格被替换为 ░░░░░
+      expect(visible).toContain("/new░░░░░desc");
+    });
+
+    it("highlight 行与普通 string 行混合，分别使用各自渲染规则", () => {
+      const lines = renderChrome({
+        body: [
+          "first",
+          { content: "▸ second", highlight: "dotted-row" },
+          "third",
+        ],
+        width: 30,
+        bodyPadding: false,
+        indent: 1,
+      });
+      // top + 3 body + bottom = 5 行
+      expect(lines).toHaveLength(5);
+      // 普通行不含 ░
+      expect(stripAnsi(lines[1]!)).not.toContain("░");
+      // highlight 行含 ░
+      expect(stripAnsi(lines[2]!)).toContain("░");
+      // 普通行不含 ░
+      expect(stripAnsi(lines[3]!)).not.toContain("░");
+      // 三行宽度相同
+      expect(stringWidth(lines[1]!)).toBe(30);
+      expect(stringWidth(lines[2]!)).toBe(30);
+      expect(stringWidth(lines[3]!)).toBe(30);
+    });
+
+    it("content 超宽时先被 clampLine 截断（追加 …）然后参与点阵", () => {
+      const lines = renderChrome({
+        body: [{ content: "a".repeat(100), highlight: "dotted-row" }],
+        width: 20,
+        bodyPadding: false,
+        indent: 1,
+      });
+      const visible = stripAnsi(lines[1]!);
+      expect(visible).toContain("…");
+      expect(stringWidth(lines[1]!)).toBe(20);
+    });
+
+    it("body padding=true 模式下 highlight 行依然正确（顶/底 blank 不受影响）", () => {
+      const lines = renderChrome({
+        body: [{ content: "▸ x", highlight: "dotted-row" }],
+        width: 20,
+      });
+      // top + topBlank + body + bottomBlank + bottom = 5
+      expect(lines).toHaveLength(5);
+      // body 行（lines[2]）含 ░；padding 行（lines[1] / lines[3]）是空格
+      expect(stripAnsi(lines[2]!)).toContain("░");
+      expect(stripAnsi(lines[1]!)).toMatch(/^│\s+│$/);
+      expect(stripAnsi(lines[3]!)).toMatch(/^│\s+│$/);
+    });
   });
 });

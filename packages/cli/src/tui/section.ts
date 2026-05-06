@@ -17,6 +17,7 @@
 
 import { tone, icon as ic, layout } from "./style.js";
 import { stringWidth, wrapToWidth } from "./line-width.js";
+import { highlightSelectedRow } from "./highlight.js";
 import {
   renderStatusPill,
   renderStatusPillWrapped,
@@ -92,7 +93,7 @@ export function renderEntryRow(opts: EntryRowOptions): string[] {
   );
 
   const rows = layoutTwoColumn(left, pillLines, leftZoneWidth);
-  return opts.selected ? rows.map((row) => highlightDottedRow(row, opts.width)) : rows;
+  return opts.selected ? rows.map((row) => highlightSelectedRow(row, opts.width)) : rows;
 }
 
 export interface ListRowOptions {
@@ -144,7 +145,7 @@ export function renderListRow(opts: ListRowOptions): string[] {
     rows = layoutTwoColumn(left, colored, leftZoneWidth);
   }
 
-  return opts.selected ? rows.map((row) => highlightDottedRow(row, opts.width)) : rows;
+  return opts.selected ? rows.map((row) => highlightSelectedRow(row, opts.width)) : rows;
 }
 
 /**
@@ -168,20 +169,3 @@ function layoutTwoColumn(
   );
 }
 
-/**
- * 选中行点阵纹理高亮——把行内 padding 空白替换为 dim ░ 字符 + 尾部 pad 到 totalWidth。
- *
- * 替换策略：
- *   - 2+ 连续空格（左右区之间的 padding 等"空白带"）→ 同长度 dim ░
- *   - 单空格（cursor 与 label 之间等内容分隔）保留——避免视觉粘连
- *   - 尾部补齐 totalWidth 也用 dim ░
- *
- * 不依赖 bg ANSI 颜色码——纯字符纹理。视觉是"印刷品/点阵屏"质感，与现代 SaaS
- * 的 bg color 路线明显区分。
- */
-function highlightDottedRow(row: string, totalWidth: number): string {
-  const dotted = row.replace(/ {2,}/g, (m) => tone.dim("░".repeat(m.length)));
-  const visibleWidth = stringWidth(dotted);
-  const padCount = Math.max(0, totalWidth - visibleWidth);
-  return padCount > 0 ? dotted + tone.dim("░".repeat(padCount)) : dotted;
-}
