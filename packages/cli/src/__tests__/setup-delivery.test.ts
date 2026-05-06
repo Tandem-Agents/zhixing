@@ -10,11 +10,11 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm, readFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { readFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ChannelRegistry } from "@zhixing/core";
+import { createTempDir } from "@zhixing/test-utils";
 import { setupDelivery, type DeliveryStack } from "../setup-delivery.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -32,7 +32,7 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
   let stack: DeliveryStack | null = null;
 
   beforeEach(async () => {
-    home = await mkdtemp(join(tmpdir(), "zhixing-delivery-"));
+    home = await createTempDir("delivery");
   });
 
   afterEach(async () => {
@@ -40,7 +40,6 @@ describe("setupDelivery — TD#1 channel-not-found retryable", () => {
       await stack.stop().catch(() => {});
       stack = null;
     }
-    await rm(home, { recursive: true, force: true });
   });
 
   it("source code: channel-not-found path uses retryable:true (TD#1 regression guard)", async () => {

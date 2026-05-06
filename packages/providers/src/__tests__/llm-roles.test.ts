@@ -10,9 +10,9 @@
  */
 
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
+import { createTempDir } from "@zhixing/test-utils";
 import type {
   ChatRequest,
   LLMProvider,
@@ -297,18 +297,10 @@ describe("createProviderRoles · 实例化与角色装配", () => {
   let configPath: string;
   let credentialsPath: string;
 
-  beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "zhixing-llm-roles-"));
+  beforeEach(async () => {
+    tmpDir = await createTempDir("llm-roles");
     configPath = path.join(tmpDir, "config.jsonc");
     credentialsPath = path.join(tmpDir, "credentials.json");
-  });
-
-  afterEach(() => {
-    try {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
-    } catch {
-      /* ignore */
-    }
   });
 
   function writeFixture(config: ZhixingConfig, creds: ZhixingCredentials): void {

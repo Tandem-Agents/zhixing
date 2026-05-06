@@ -12,9 +12,9 @@
  */
 
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 
+import { expandUserHome } from "../paths.js";
 import type {
   SecurityMiddleware,
   SecurityMiddlewareContext,
@@ -75,7 +75,7 @@ export class PathGuard implements SecurityMiddleware {
    * 路径不存在时回退到逻辑路径解析（新建文件场景）。
    */
   static resolve(targetPath: string, cwd: string): string {
-    const expanded = PathGuard.expandHome(targetPath);
+    const expanded = expandUserHome(targetPath);
     const absolute = path.resolve(cwd, expanded);
 
     try {
@@ -115,11 +115,9 @@ export class PathGuard implements SecurityMiddleware {
    */
   static isSystemProtected(targetPath: string, cwd: string): boolean {
     const resolved = PathGuard.resolve(targetPath, cwd);
-    const home = os.homedir();
 
     for (const protectedPath of SYSTEM_PROTECTED_PATHS) {
-      const expanded = protectedPath.replace("~", home);
-      const normalizedProtected = path.normalize(expanded);
+      const normalizedProtected = path.normalize(expandUserHome(protectedPath));
 
       if (
         resolved.startsWith(normalizedProtected + path.sep) ||
@@ -138,17 +136,6 @@ export class PathGuard implements SecurityMiddleware {
    */
   static hasTraversalSequence(targetPath: string): boolean {
     return /\.\.[/\\]/.test(targetPath) || targetPath === "..";
-  }
-
-  /** 展开路径中的 ~ 为用户主目录 */
-  static expandHome(targetPath: string): string {
-    if (targetPath === "~" || targetPath.startsWith("~/")) {
-      return path.join(os.homedir(), targetPath.slice(1));
-    }
-    if (targetPath.startsWith("~\\")) {
-      return path.join(os.homedir(), targetPath.slice(2));
-    }
-    return targetPath;
   }
 
   /** 从中间件上下文中提取文件路径 */

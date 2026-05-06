@@ -21,7 +21,8 @@ import type {
 } from "./types.js";
 
 import * as path from "node:path";
-import * as os from "node:os";
+
+import { expandUserHome } from "../paths.js";
 
 // ─── 动作严格度排序 ───
 
@@ -173,13 +174,13 @@ export class PolicyEngine implements IPolicyEngine {
     }
 
     return paths.some((p) => {
-      const expandedInput = this.expandPath(p);
+      const expandedInput = expandUserHome(p);
       const resolvedInput = path.resolve(request.context.cwd, expandedInput);
       // 统一为正斜杠，避免 Windows 反斜杠导致的匹配失败
       const normalizedInput = resolvedInput.replace(/\\/g, "/");
 
       return spec.paths.some((specPath) => {
-        const expandedSpec = this.expandPath(specPath);
+        const expandedSpec = expandUserHome(specPath);
 
         // 规则路径是绝对路径（如 /etc/）：直接做绝对路径前缀匹配
         if (path.isAbsolute(expandedSpec)) {
@@ -404,14 +405,6 @@ export class PolicyEngine implements IPolicyEngine {
     if (file) paths.push(file);
 
     return paths;
-  }
-
-  /** 展开路径中的 ~ 为用户主目录 */
-  private expandPath(p: string): string {
-    if (p.startsWith("~/") || p === "~") {
-      return path.join(os.homedir(), p.slice(1));
-    }
-    return p;
   }
 
   private escapeRegex(str: string): string {

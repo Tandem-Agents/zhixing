@@ -1,7 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import fs from "node:fs/promises";
+import { describe, it, expect, beforeEach } from "vitest";
 import path from "node:path";
-import os from "node:os";
+import { createTempDir } from "@zhixing/test-utils";
 import { SkillsStore, type SkillMeta } from "../skills-store.js";
 
 function makeMeta(overrides?: Partial<SkillMeta>): SkillMeta {
@@ -23,12 +22,8 @@ describe("SkillsStore", () => {
   let store: SkillsStore;
 
   beforeEach(async () => {
-    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-skills-test-"));
+    tmpDir = await createTempDir("skills");
     store = new SkillsStore(tmpDir);
-  });
-
-  afterEach(async () => {
-    await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
   // ─── save / load ───

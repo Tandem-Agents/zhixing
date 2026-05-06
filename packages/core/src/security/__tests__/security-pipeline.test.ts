@@ -223,25 +223,20 @@ describe("SecurityPipeline", () => {
     });
 
     it("internal 操作不需要确认（工作区内写入）", async () => {
-      const os = await import("node:os");
-      const fs = await import("node:fs");
       const path = await import("node:path");
+      const { createTempDir } = await import("@zhixing/test-utils");
 
-      const ws = fs.mkdtempSync(path.join(os.tmpdir(), "zx-pipe-internal-"));
-      try {
-        const pipeline = new SecurityPipeline({ workspace: ws });
-        const result = await pipeline.evaluate(
-          "write",
-          { path: path.join(ws, "foo.ts") },
-          ws,
-        );
+      const ws = await createTempDir("pipe-internal");
+      const pipeline = new SecurityPipeline({ workspace: ws });
+      const result = await pipeline.evaluate(
+        "write",
+        { path: path.join(ws, "foo.ts") },
+        ws,
+      );
 
-        expect(result.allowed).toBe(true);
-        expect(result.requiresConfirmation).toBeFalsy();
-        expect(result.operationClass).toBe("internal");
-      } finally {
-        fs.rmSync(ws, { recursive: true, force: true });
-      }
+      expect(result.allowed).toBe(true);
+      expect(result.requiresConfirmation).toBeFalsy();
+      expect(result.operationClass).toBe("internal");
     });
 
     it("external 操作升级为 requiresConfirmation（即使无策略规则匹配）", async () => {

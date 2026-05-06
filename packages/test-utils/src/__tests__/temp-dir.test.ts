@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, beforeAll } from "vitest";
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
-import { createTempDir } from "../temp-dir.js";
+import { createTempDir, createDescribeTempDir } from "../temp-dir.js";
 
 describe("createTempDir — 基本契约", () => {
   it("创建的目录真实存在且 prefix 匹配 zhixing-test-{label}-", async () => {
@@ -111,6 +111,81 @@ describe("createTempDir — 自动清理", () => {
     expect(leakedDirFromPriorTest).not.toBeNull();
     const exists = await fs
       .stat(leakedDirFromPriorTest!)
+      .then(() => true)
+      .catch(() => false);
+    expect(exists).toBe(false);
+  });
+});
+
+describe("createDescribeTempDir — 基本契约", () => {
+  const helper = createDescribeTempDir("describe-basic");
+
+  it("创建的目录真实存在且 prefix 匹配 zhixing-test-{label}-", async () => {
+    const dir = helper.getDir();
+    const stat = await fs.stat(dir);
+    expect(stat.isDirectory()).toBe(true);
+    expect(path.basename(dir).startsWith("zhixing-test-describe-basic-")).toBe(
+      true,
+    );
+    expect(path.dirname(dir)).toBe(os.tmpdir());
+  });
+
+  it("跨多个 it 共享同一目录路径", () => {
+    const dir1 = helper.getDir();
+    const dir2 = helper.getDir();
+    expect(dir1).toBe(dir2);
+  });
+});
+
+describe("createDescribeTempDir — 跨 test 写读可见性", () => {
+  // describe-scope 的核心价值：跨 test 共享文件状态。前一 test 写入的内容
+  // 后一 test 仍然可见——这是与 createTempDir 的语义差异（后者每 test 独立 dir）。
+  const helper = createDescribeTempDir("shared-state");
+
+  it("test 1：写入 marker 文件", async () => {
+    const dir = helper.getDir();
+    await fs.writeFile(path.join(dir, "marker"), "shared-ok");
+  });
+
+  it("test 2：读到 test 1 写入的 marker", async () => {
+    const dir = helper.getDir();
+    const content = await fs.readFile(path.join(dir, "marker"), "utf-8");
+    expect(content).toBe("shared-ok");
+  });
+});
+
+describe("createDescribeTempDir — label 格式校验", () => {
+  it("空字符串抛错", () => {
+    expect(() => createDescribeTempDir("")).toThrow(/必须是小写 kebab/);
+  });
+
+  it("含大写字母抛错", () => {
+    expect(() => createDescribeTempDir("Foo")).toThrow(/必须是小写 kebab/);
+  });
+
+  it("含下划线抛错", () => {
+    expect(() => createDescribeTempDir("a_b")).toThrow(/必须是小写 kebab/);
+  });
+});
+
+// describe-scope 自动清理验证：内层 describe 跑完 afterAll 后，dir 应被删除。
+// vitest 按声明顺序执行 describe，外层这个 describe 在内层之后跑，所以 it 跑
+// 时内层 afterAll 已经触发——可观察到清理结果。
+let leakedSharedDir: string | null = null;
+
+describe("createDescribeTempDir — inner（捕获 dir 路径）", () => {
+  const helper = createDescribeTempDir("cleanup-describe");
+  it("把 dir 路径保存到外部变量", () => {
+    leakedSharedDir = helper.getDir();
+    expect(leakedSharedDir).toBeTruthy();
+  });
+});
+
+describe("createDescribeTempDir — 自动清理验证", () => {
+  it("inner describe 的 dir 已被 afterAll 清理", async () => {
+    expect(leakedSharedDir).not.toBeNull();
+    const exists = await fs
+      .stat(leakedSharedDir!)
       .then(() => true)
       .catch(() => false);
     expect(exists).toBe(false);

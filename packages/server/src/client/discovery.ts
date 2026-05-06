@@ -11,11 +11,9 @@
  */
 
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
-import { homedir } from "node:os";
-import { readLock, isProcessAlive, type PidFileContents } from "../process-lock.js";
 
-const DEFAULT_TOKEN_PATH = join(homedir(), ".zhixing", "server.token");
+import { getDefaultTokenPath } from "../paths.js";
+import { readLock, isProcessAlive, type PidFileContents } from "../process-lock.js";
 
 export class ServerNotRunningError extends Error {
   constructor(message: string, public readonly hint?: string) {
@@ -81,7 +79,7 @@ export async function discoverServer(opts: DiscoverOptions = {}): Promise<Server
   if (!token) {
     throw new ServerNotRunningError(
       "Server token file missing or empty",
-      `Expected at: ${opts.tokenPath ?? DEFAULT_TOKEN_PATH}`,
+      `Expected at: ${opts.tokenPath ?? getDefaultTokenPath()}`,
     );
   }
 
@@ -101,7 +99,7 @@ export async function discoverServer(opts: DiscoverOptions = {}): Promise<Server
  * 用于不需要连接的场景（如显示 token 路径）。
  */
 export async function readToken(tokenPath?: string): Promise<string | null> {
-  const path = tokenPath ?? DEFAULT_TOKEN_PATH;
+  const path = tokenPath ?? getDefaultTokenPath();
   try {
     const content = (await readFile(path, "utf-8")).trim();
     return content.length > 0 ? content : null;

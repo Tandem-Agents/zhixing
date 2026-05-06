@@ -16,10 +16,10 @@
  */
 
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
+import { createTempDir } from "@zhixing/test-utils";
 import { PermissionStore } from "../permission-store.js";
 import type { PermissionRule, SecurityRequest } from "../types.js";
 
@@ -502,14 +502,8 @@ describe("PermissionStore builtin scope", () => {
   describe("磁盘反序列化（M4 新 union + S4 严格性）", () => {
     let tmpDir: string;
 
-    beforeEach(() => {
-      tmpDir = fs.mkdtempSync(
-        path.join(os.tmpdir(), "zhixing-permstore-builtin-test-"),
-      );
-    });
-
-    afterEach(() => {
-      fs.rmSync(tmpDir, { recursive: true, force: true });
+    beforeEach(async () => {
+      tmpDir = await createTempDir("permstore-builtin");
     });
 
     it("旧 global.json（仅含 session/workspace/global scope）能正常加载", () => {

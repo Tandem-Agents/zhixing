@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import fs from "node:fs/promises";
 import path from "node:path";
-import os from "node:os";
+import { createTempDir } from "@zhixing/test-utils";
 import { ConversationRepository } from "../repository.js";
 import {
   DEFAULT_CONVERSATION_ID,
@@ -15,7 +15,7 @@ let tmpDir: string;
 let originalHome: string | undefined;
 
 beforeEach(async () => {
-  tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-conv-test-"));
+  tmpDir = await createTempDir("conv");
   originalHome = process.env.ZHIXING_HOME;
   process.env.ZHIXING_HOME = tmpDir;
 });
@@ -26,7 +26,6 @@ afterEach(async () => {
   } else {
     process.env.ZHIXING_HOME = originalHome;
   }
-  await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
 // ─── Helpers ───

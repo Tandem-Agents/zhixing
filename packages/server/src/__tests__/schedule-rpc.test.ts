@@ -3,8 +3,6 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import WebSocket from "ws";
 import {
@@ -16,6 +14,7 @@ import {
   type AgentTurnResult,
   type ScheduledTask,
 } from "@zhixing/core";
+import { createTempDir } from "@zhixing/test-utils";
 import { startServer, type ZhixingServerInstance } from "../server.js";
 import { createServerContext } from "../context.js";
 import { DEFAULT_SERVER_CONFIG } from "../types.js";
@@ -130,7 +129,7 @@ describe("schedule.* RPC + event bridge (S2.E)", () => {
   let tempDir: string;
 
   beforeEach(async () => {
-    tempDir = await mkdtemp(join(tmpdir(), "zhixing-schedrpc-"));
+    tempDir = await createTempDir("schedrpc");
     const eventBus = createEventBus<SchedulerEventMap>();
     scheduler = new Scheduler({
       store: new JsonTaskStore(join(tempDir, "tasks.json")),
@@ -153,7 +152,6 @@ describe("schedule.* RPC + event bridge (S2.E)", () => {
   afterEach(async () => {
     await server.close();
     await scheduler.stop();
-    await rm(tempDir, { recursive: true, force: true });
   });
 
   // ─── auth ───
@@ -393,7 +391,7 @@ describe("schedule.* RPC + event bridge (S2.E)", () => {
     let tempDir2: string;
 
     beforeEach(async () => {
-      tempDir2 = await mkdtemp(join(tmpdir(), "zhixing-schedrun-"));
+      tempDir2 = await createTempDir("schedrun");
       const eventBus = createEventBus<SchedulerEventMap>();
       schedulerWithReg = new Scheduler({
         store: new JsonTaskStore(join(tempDir2, "tasks.json")),
@@ -418,7 +416,6 @@ describe("schedule.* RPC + event bridge (S2.E)", () => {
     afterEach(async () => {
       await serverWithReg.close();
       await schedulerWithReg.stop();
-      await rm(tempDir2, { recursive: true, force: true });
     });
 
     it("缺 runId → INVALID_PARAMS", async () => {

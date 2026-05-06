@@ -11,9 +11,9 @@
  */
 
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
+import { createTempDir } from "@zhixing/test-utils";
 import {
   applyCredentialsPatch,
   CredentialsSchemaError,
@@ -25,16 +25,8 @@ import type { ZhixingCredentials } from "../types.js";
 
 let tmpDir: string;
 
-beforeEach(() => {
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "zhixing-creds-"));
-});
-
-afterEach(() => {
-  try {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  } catch {
-    /* ignore */
-  }
+beforeEach(async () => {
+  tmpDir = await createTempDir("creds");
 });
 
 describe("loadCredentials", () => {

@@ -26,8 +26,4 @@ export type { WriteAtomicOptions } from "./serializer.js";
 export { needsNormalize, normalize, rebuildCanonicalMessages } from "./rebuild.js";
 
 export type { TranscriptStoreOptions } from "./store.js";
-export {
-  TranscriptStore,
-  getProjectId,
-  getZhixingHome,
-} from "./store.js";
+export { TranscriptStore } from "./store.js";

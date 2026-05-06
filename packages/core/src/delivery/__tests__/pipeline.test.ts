@@ -1,7 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { join } from "node:path";
+import { createTempDir } from "@zhixing/test-utils";
 import { DeliveryPipeline } from "../pipeline.js";
 import type { DeliveryPipelineConfig, DeliveryPipelineDeps } from "../pipeline.js";
 import { createEventBus } from "../../events/event-bus.js";
@@ -15,28 +14,28 @@ function createMockSender(overrides?: Partial<DeliverySender>): DeliverySender {
   };
 }
 
-function createTestPipeline(options?: {
+function createTestPipeline(options: {
+  queueFilePath: string;
   sender?: DeliverySender;
-  queueFilePath?: string;
   config?: Partial<DeliveryPipelineConfig>;
   now?: () => Date;
 }) {
   const eventBus = createEventBus<DeliveryEventMap>();
-  const sender = options?.sender ?? createMockSender();
+  const sender = options.sender ?? createMockSender();
   const config: DeliveryPipelineConfig = {
     maxAttempts: 3,
     baseRetryDelayMs: 1000,
     flushIntervalMs: 0,
     itemTtlMs: 60 * 60 * 1000,
-    queueFilePath: options?.queueFilePath ?? join(tmpdir(), `zhixing-dlv-${Date.now()}.json`),
-    ...options?.config,
+    queueFilePath: options.queueFilePath,
+    ...options.config,
   };
 
   const pipeline = new DeliveryPipeline({
     sender,
     eventBus,
     config,
-    now: options?.now,
+    now: options.now,
   });
 
   return { pipeline, eventBus, sender, config };
@@ -46,11 +45,7 @@ describe("DeliveryPipeline", () => {
   let tempDir: string;
 
   beforeEach(async () => {
-    tempDir = await mkdtemp(join(tmpdir(), "zhixing-dlv-"));
-  });
-
-  afterEach(async () => {
-    await rm(tempDir, { recursive: true, force: true });
+    tempDir = await createTempDir("dlv");
   });
 
   describe("enqueue", () => {

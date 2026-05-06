@@ -13,7 +13,8 @@
 
 import { readFile, writeFile, rename, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { homedir } from "node:os";
+
+import { getZhixingHome } from "../paths.js";
 import type { TaskStore, ScheduledTask } from "./types.js";
 
 interface StoreFile {
@@ -21,14 +22,20 @@ interface StoreFile {
   tasks: ScheduledTask[];
 }
 
-const DEFAULT_PATH = join(homedir(), ".zhixing", "scheduler.json");
+/**
+ * 默认任务存储路径——惰性求值，每次调用走 getZhixingHome 让 ZHIXING_HOME
+ * 环境变量在测试 / 部署期能切换 home 目录而不需要重启进程。
+ */
+export function getSchedulerStorePath(): string {
+  return join(getZhixingHome(), "scheduler.json");
+}
 
 export class JsonTaskStore implements TaskStore {
   private tasks: Map<string, ScheduledTask> = new Map();
   private readonly filePath: string;
 
   constructor(filePath?: string) {
-    this.filePath = filePath ?? DEFAULT_PATH;
+    this.filePath = filePath ?? getSchedulerStorePath();
   }
 
   async load(): Promise<ScheduledTask[]> {

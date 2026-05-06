@@ -1,7 +1,8 @@
-import { describe, expect, it, beforeEach, afterEach } from "vitest";
+import { describe, expect, it, beforeEach } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { createTempDir } from "@zhixing/test-utils";
 import {
   applyConfigPatch,
   ConfigSchemaError,
@@ -11,17 +12,6 @@ import {
   writeConfig,
 } from "../config-loader.js";
 import type { ZhixingConfig } from "../types.js";
-
-// 使用临时目录避免污染真实文件系统
-function createTempDir(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), "zhixing-test-"));
-}
-
-function cleanDir(dir: string): void {
-  try {
-    fs.rmSync(dir, { recursive: true, force: true });
-  } catch { /* ignore */ }
-}
 
 describe("getGlobalConfigPath", () => {
   it("默认应返回 ~/.zhixing/config.jsonc", () => {
@@ -56,14 +46,9 @@ describe("loadConfig", () => {
   let tempHome: string;
   let tempProject: string;
 
-  beforeEach(() => {
-    tempHome = createTempDir();
-    tempProject = createTempDir();
-  });
-
-  afterEach(() => {
-    cleanDir(tempHome);
-    cleanDir(tempProject);
+  beforeEach(async () => {
+    tempHome = await createTempDir("config-home");
+    tempProject = await createTempDir("config-project");
   });
 
   it("全局和项目配置都不存在时应返回空对象（noAutoCreate）", () => {
@@ -388,11 +373,9 @@ describe("applyConfigPatch · 合并语义", () => {
 describe("writeConfig · 端到端持久化", () => {
   let tempHome: string;
 
-  beforeEach(() => {
-    tempHome = createTempDir();
+  beforeEach(async () => {
+    tempHome = await createTempDir("write-config");
   });
-
-  afterEach(() => cleanDir(tempHome));
 
   it("追加新 messaging 后磁盘文件包含所有原 messaging", async () => {
     const filePath = path.join(tempHome, "config.jsonc");

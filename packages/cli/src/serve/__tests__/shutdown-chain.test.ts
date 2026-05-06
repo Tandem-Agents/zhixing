@@ -6,11 +6,11 @@
  * 不能回归。
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm, writeFile, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { writeFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { CleanupRegistry } from "@zhixing/server";
+import { createTempDir } from "@zhixing/test-utils";
 import {
   registerTailCleanup,
   registerCoreCleanup,
@@ -188,13 +188,9 @@ describe("releaseLock closure (Issue θ regression guard)", () => {
   let portPath: string;
 
   beforeEach(async () => {
-    tempDir = await mkdtemp(join(tmpdir(), "zhixing-lockguard-"));
+    tempDir = await createTempDir("lockguard");
     pidPath = join(tempDir, "server.pid");
     portPath = join(tempDir, "server.port");
-  });
-
-  afterEach(async () => {
-    await rm(tempDir, { recursive: true, force: true });
   });
 
   it("releaseLock闭包在 PID 文件属于别的进程时 no-op (concurrent-start 保护)", async () => {

@@ -14,15 +14,15 @@
  */
 
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
+import { createDescribeTempDir } from "@zhixing/test-utils";
 import { FileProvider } from "../providers/file-provider.js";
 import type { RuntimeContext, TriggerContext, TriggerMatch } from "../types.js";
 
 // ─── 临时目录结构 ───
 
-let tmpRoot: string;
+const tmpRootDir = createDescribeTempDir("file-provider");
 let provider: FileProvider;
 
 /**
@@ -41,7 +41,7 @@ let provider: FileProvider;
  *     tsconfig.json (空文件)
  */
 beforeAll(async () => {
-  tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), "fp-test-"));
+  const tmpRoot = tmpRootDir.getDir();
 
   // 创建目录
   await fs.mkdir(path.join(tmpRoot, "src", "utils"), { recursive: true });
@@ -63,10 +63,6 @@ beforeAll(async () => {
   }
 
   provider = new FileProvider({ root: tmpRoot });
-});
-
-afterAll(async () => {
-  await fs.rm(tmpRoot, { recursive: true, force: true });
 });
 
 // ─── 辅助 ───
@@ -337,7 +333,7 @@ describe("FileProvider 边界情况", () => {
 
 describe("FileProvider maxResults", () => {
   it("超过 maxResults 的条目被截断", async () => {
-    const smallProvider = new FileProvider({ root: tmpRoot, maxResults: 2 });
+    const smallProvider = new FileProvider({ root: tmpRootDir.getDir(), maxResults: 2 });
     const match = smallProvider.matchTrigger(makeCtx("@file:"))!;
     const items = await smallProvider.query(match, noAbort());
 

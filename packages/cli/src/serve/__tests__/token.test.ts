@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { describe, it, expect, beforeEach } from "vitest";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { createTempDir } from "@zhixing/test-utils";
 import { loadOrCreateToken } from "../token.js";
 
 describe("loadOrCreateToken", () => {
@@ -9,12 +9,8 @@ describe("loadOrCreateToken", () => {
   let tokenPath: string;
 
   beforeEach(async () => {
-    tempDir = await mkdtemp(join(tmpdir(), "zhixing-token-"));
+    tempDir = await createTempDir("token");
     tokenPath = join(tempDir, "server.token");
-  });
-
-  afterEach(async () => {
-    await rm(tempDir, { recursive: true, force: true });
   });
 
   it("generates a new token when file does not exist", async () => {

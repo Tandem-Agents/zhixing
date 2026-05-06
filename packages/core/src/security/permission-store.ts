@@ -19,9 +19,9 @@
 
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 
+import { getZhixingHome } from "../paths.js";
 import type {
   IPermissionStore,
   PermissionRule,
@@ -103,9 +103,17 @@ export function globSpecificity(pattern: string): number {
 // ─── 存储配置 ───
 
 const STORAGE_VERSION = 1;
-const DEFAULT_SUBDIR = ".zhixing";
 const PERMISSIONS_SUBDIR = "permissions";
 const GLOBAL_FILE = "global.json";
+
+/**
+ * 默认权限存储根目录——~/.zhixing/permissions/（含 ZHIXING_HOME 覆盖）。
+ *
+ * 惰性求值，每次调用走 getZhixingHome 让 env 切换在测试 / 部署期能即时生效。
+ */
+export function getPermissionsDir(): string {
+  return path.join(getZhixingHome(), PERMISSIONS_SUBDIR);
+}
 
 export interface PermissionStoreOptions {
   /**
@@ -214,11 +222,7 @@ export class PermissionStore implements IPermissionStore {
     } else if (options.rootDir !== undefined) {
       this.rootDir = options.rootDir;
     } else {
-      this.rootDir = path.join(
-        os.homedir(),
-        DEFAULT_SUBDIR,
-        PERMISSIONS_SUBDIR,
-      );
+      this.rootDir = getPermissionsDir();
     }
     this.now = options.now ?? (() => Date.now());
     this.extractArgumentFn = options.extractArgument ?? defaultExtractArgument;

@@ -7,10 +7,10 @@
  */
 
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
+import { createDescribeTempDir } from "@zhixing/test-utils";
 import {
   BoundaryImpactClassifier,
   CompositeClassifier,
@@ -59,18 +59,8 @@ describe("FileSystemClassifier", () => {
   const classifier = new FileSystemClassifier();
 
   // 使用真实的临时目录，便于 realpath 解析
-  let workspace: string;
-  let outsideDir: string;
-
-  beforeAll(() => {
-    workspace = fs.mkdtempSync(path.join(os.tmpdir(), "zx-classifier-ws-"));
-    outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "zx-classifier-out-"));
-  });
-
-  afterAll(() => {
-    fs.rmSync(workspace, { recursive: true, force: true });
-    fs.rmSync(outsideDir, { recursive: true, force: true });
-  });
+  const workspaceDir = createDescribeTempDir("classifier-ws");
+  const outsideDirHandle = createDescribeTempDir("classifier-out");
 
   it("read 工具始终分类为 observe", () => {
     const req = makeRequest({
@@ -90,6 +80,7 @@ describe("FileSystemClassifier", () => {
   });
 
   it("写入工作区内路径 → internal", () => {
+    const workspace = workspaceDir.getDir();
     const target = path.join(workspace, "src", "foo.ts");
     const req = makeRequest({
       tool: "write",
@@ -100,6 +91,8 @@ describe("FileSystemClassifier", () => {
   });
 
   it("写入工作区外路径 → external", () => {
+    const workspace = workspaceDir.getDir();
+    const outsideDir = outsideDirHandle.getDir();
     const req = makeRequest({
       tool: "write",
       arguments: { path: path.join(outsideDir, "leak.txt") },
@@ -109,6 +102,7 @@ describe("FileSystemClassifier", () => {
   });
 
   it("无工作区上下文时所有写操作都是 external", () => {
+    const workspace = workspaceDir.getDir();
     const req = makeRequest({
       tool: "write",
       arguments: { path: path.join(workspace, "foo.ts") },
@@ -118,6 +112,7 @@ describe("FileSystemClassifier", () => {
   });
 
   it("无任何路径参数时 → external（保守默认）", () => {
+    const workspace = workspaceDir.getDir();
     const req = makeRequest({
       tool: "write",
       arguments: {},
@@ -127,6 +122,8 @@ describe("FileSystemClassifier", () => {
   });
 
   it("符号链接指向工作区外 → external（防符号链接逃逸）", () => {
+    const workspace = workspaceDir.getDir();
+    const outsideDir = outsideDirHandle.getDir();
     const linkPath = path.join(workspace, "secret-link");
     // Windows 创建 symlink 可能需要管理员权限——失败则跳过
     try {
@@ -143,6 +140,8 @@ describe("FileSystemClassifier", () => {
   });
 
   it("多个目标路径中任一逃出工作区 → external", () => {
+    const workspace = workspaceDir.getDir();
+    const outsideDir = outsideDirHandle.getDir();
     const req = makeRequest({
       tool: "write",
       arguments: {
@@ -155,6 +154,7 @@ describe("FileSystemClassifier", () => {
   });
 
   it("使用 resolvedAccess.paths 代替 arguments 提取路径", () => {
+    const workspace = workspaceDir.getDir();
     const req = makeRequest({
       tool: "write",
       arguments: {},

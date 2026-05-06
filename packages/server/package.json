@@ -26,6 +26,7 @@
   "devDependencies": {
     "@types/node": "^22.14.1",
     "@types/ws": "^8.5.13",
+    "@zhixing/test-utils": "workspace:*",
     "tsup": "^8.4.0",
     "typescript": "^5.8.3",
     "vitest": "^3.1.1"

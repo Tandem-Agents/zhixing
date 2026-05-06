@@ -1,7 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import fs from "node:fs/promises";
+import { beforeEach, describe, expect, it } from "vitest";
 import path from "node:path";
-import os from "node:os";
+import { createTempDir } from "@zhixing/test-utils";
 import { TranscriptStore } from "../store.js";
 import { loadRecords } from "../serializer.js";
 import type { CompactMarker, Turn } from "../types.js";
@@ -44,15 +43,11 @@ let store: TranscriptStore;
 let convDir: string;
 
 beforeEach(async () => {
-  tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-commitTurn-test-"));
+  tmpDir = await createTempDir("commit-turn");
   convDir = path.join(tmpDir, "conversations");
   // 显式锚定 platform 为 linux（测试默认走 POSIX 原子 rename）。
   // Windows fallback 路径在独立测试里用 platform: "win32" 锚定。
   store = new TranscriptStore(convDir, "/test/project", { platform: "linux" });
-});
-
-afterEach(async () => {
-  await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
 // ─── commitTurn 三形态 ───

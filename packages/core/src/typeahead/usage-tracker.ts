@@ -25,9 +25,9 @@
  */
 
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 
+import { getZhixingHome } from "../paths.js";
 import type { IUsageTracker, UsageEntry } from "./types.js";
 
 // ─── 常量 ───
@@ -50,8 +50,16 @@ const DECAY_COEFF = Math.LN2 / HALF_LIFE_HOURS;
 /** 默认 debounced flush 间隔 */
 const DEFAULT_DEBOUNCE_MS = 5000;
 
-const DEFAULT_SUBDIR = ".zhixing";
 const DEFAULT_FILE_NAME = "usage.json";
+
+/**
+ * 默认 usage tracker 文件路径——~/.zhixing/usage.json（含 ZHIXING_HOME 覆盖）。
+ *
+ * 惰性求值，每次调用走 getZhixingHome 让 env 切换在测试 / 部署期能即时生效。
+ */
+export function getUsageTrackerPath(): string {
+  return path.join(getZhixingHome(), DEFAULT_FILE_NAME);
+}
 const FILE_VERSION = 2;
 
 // ─── 选项 ───
@@ -149,12 +157,10 @@ export class UsageTracker implements IUsageTracker {
       this.filePath = null;
     } else if (rootDir !== undefined) {
       this.filePath = path.join(rootDir, fileName ?? DEFAULT_FILE_NAME);
+    } else if (fileName !== undefined) {
+      this.filePath = path.join(getZhixingHome(), fileName);
     } else {
-      this.filePath = path.join(
-        os.homedir(),
-        DEFAULT_SUBDIR,
-        fileName ?? DEFAULT_FILE_NAME,
-      );
+      this.filePath = getUsageTrackerPath();
     }
 
     this.now = now ?? (() => Date.now());

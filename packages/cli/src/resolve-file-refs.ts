@@ -16,8 +16,9 @@
  */
 
 import * as fs from "node:fs/promises";
-import { homedir } from "node:os";
 import * as path from "node:path";
+
+import { expandUserHome } from "@zhixing/core";
 
 // ─── @file:path 匹配正则 ───
 
@@ -112,13 +113,9 @@ export async function resolveFileRefs(
 // ─── 内部辅助 ───
 
 function resolveToAbsolute(filePath: string, root: string): string {
-  if (filePath.startsWith("~/") || filePath === "~") {
-    return filePath === "~"
-      ? homedir()
-      : path.resolve(homedir(), filePath.slice(2));
+  const expanded = expandUserHome(filePath);
+  if (path.isAbsolute(expanded)) {
+    return path.resolve(expanded);
   }
-  if (path.isAbsolute(filePath)) {
-    return path.resolve(filePath);
-  }
-  return path.resolve(root, filePath);
+  return path.resolve(root, expanded);
 }

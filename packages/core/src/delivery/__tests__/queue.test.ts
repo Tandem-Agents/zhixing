@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm, readFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { describe, it, expect, beforeEach } from "vitest";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { createTempDir } from "@zhixing/test-utils";
 import { DeliveryQueue } from "../queue.js";
 import type { DeliveryItem } from "../types.js";
 
@@ -23,12 +23,8 @@ describe("DeliveryQueue", () => {
   let filePath: string;
 
   beforeEach(async () => {
-    tempDir = await mkdtemp(join(tmpdir(), "zhixing-dq-"));
+    tempDir = await createTempDir("dq");
     filePath = join(tempDir, "queue.json");
-  });
-
-  afterEach(async () => {
-    await rm(tempDir, { recursive: true, force: true });
   });
 
   it("starts empty when file does not exist", async () => {

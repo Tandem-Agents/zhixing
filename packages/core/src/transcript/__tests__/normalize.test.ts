@@ -1,7 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import fs from "node:fs/promises";
 import path from "node:path";
-import os from "node:os";
+import { createTempDir } from "@zhixing/test-utils";
 import { TranscriptStore } from "../store.js";
 import { loadRecords, writeHeader, appendRecord } from "../serializer.js";
 import type { CompactMarker, Turn } from "../types.js";
@@ -43,13 +43,9 @@ let convDir: string;
 let store: TranscriptStore;
 
 beforeEach(async () => {
-  tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-normalize-test-"));
+  tmpDir = await createTempDir("normalize");
   convDir = path.join(tmpDir, "conversations");
   store = new TranscriptStore(convDir, "/test/project", { platform: "linux" });
-});
-
-afterEach(async () => {
-  await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
 // ─── Lazy normalize ───

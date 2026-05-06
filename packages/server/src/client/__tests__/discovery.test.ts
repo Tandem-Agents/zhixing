@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { describe, it, expect, beforeEach } from "vitest";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { createTempDir } from "@zhixing/test-utils";
 import { discoverServer, readToken, ServerNotRunningError } from "../discovery.js";
 
 describe("discovery", () => {
@@ -11,14 +11,10 @@ describe("discovery", () => {
   let tokenPath: string;
 
   beforeEach(async () => {
-    tempDir = await mkdtemp(join(tmpdir(), "zhixing-disc-"));
+    tempDir = await createTempDir("disc");
     pidPath = join(tempDir, "server.pid");
     portPath = join(tempDir, "server.port");
     tokenPath = join(tempDir, "server.token");
-  });
-
-  afterEach(async () => {
-    await rm(tempDir, { recursive: true, force: true });
   });
 
   // ─── readToken ───

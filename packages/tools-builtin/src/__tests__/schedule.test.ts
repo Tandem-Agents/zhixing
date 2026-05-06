@@ -12,9 +12,7 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { mkdtemp, rm } from "node:fs/promises";
 import {
   createEventBus,
   JsonTaskStore,
@@ -22,6 +20,7 @@ import {
   type SchedulerEventMap,
   type ToolExecutionContext,
 } from "@zhixing/core";
+import { createTempDir } from "@zhixing/test-utils";
 import { createScheduleTool } from "../schedule.js";
 
 // ─── 测试工具 ───
@@ -29,7 +28,7 @@ import { createScheduleTool } from "../schedule.js";
 async function withScheduler<T>(
   fn: (scheduler: Scheduler, dir: string) => Promise<T>,
 ): Promise<T> {
-  const dir = await mkdtemp(join(tmpdir(), "sched-test-"));
+  const dir = await createTempDir("sched");
   const scheduler = new Scheduler({
     store: new JsonTaskStore(join(dir, "tasks.json")),
     eventBus: createEventBus<SchedulerEventMap>(),
@@ -47,7 +46,6 @@ async function withScheduler<T>(
     return await fn(scheduler, dir);
   } finally {
     await scheduler.stop();
-    await rm(dir, { recursive: true, force: true });
   }
 }
 

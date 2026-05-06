@@ -1,26 +1,25 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { join } from "node:path";
+import { createTempDir } from "@zhixing/test-utils";
 import { Scheduler } from "../scheduler.js";
 import { JsonTaskStore } from "../task-store.js";
 import { createEventBus } from "../../events/event-bus.js";
 import type { SchedulerEventMap } from "../events.js";
 import type { AgentTurnResult } from "../types.js";
 
-function createTestScheduler(options?: {
-  storePath?: string;
+function createTestScheduler(options: {
+  storePath: string;
   runAgentTurn?: () => Promise<AgentTurnResult>;
   now?: () => Date;
 }) {
   const eventBus = createEventBus<SchedulerEventMap>();
-  const store = new JsonTaskStore(options?.storePath ?? join(tmpdir(), `zhixing-test-${Date.now()}.json`));
+  const store = new JsonTaskStore(options.storePath);
 
   const scheduler = new Scheduler({
     store,
     eventBus,
-    now: options?.now,
-    runAgentTurn: options?.runAgentTurn ?? (async () => ({
+    now: options.now,
+    runAgentTurn: options.runAgentTurn ?? (async () => ({
       status: "ok" as const,
       output: "done",
       durationMs: 100,
@@ -41,11 +40,7 @@ describe("Scheduler", () => {
   let tempDir: string;
 
   beforeEach(async () => {
-    tempDir = await mkdtemp(join(tmpdir(), "zhixing-sched-"));
-  });
-
-  afterEach(async () => {
-    await rm(tempDir, { recursive: true, force: true });
+    tempDir = await createTempDir("sched");
   });
 
   it("creates, lists, and deletes tasks", async () => {

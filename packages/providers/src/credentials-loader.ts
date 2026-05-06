@@ -15,20 +15,11 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import { mergeIdMap, writeJsonAtomic } from "./internal/io.js";
+import { getCredentialsPath } from "./paths.js";
 import type { ZhixingCredentials } from "./types.js";
 
-const CONFIG_DIR_NAME = ".zhixing";
-const CREDENTIALS_FILENAME = "credentials.json";
-
-function defaultHomeDir(): string {
-  return path.join(os.homedir(), CONFIG_DIR_NAME);
-}
-
-export function getCredentialsPath(homeDir?: string): string {
-  return path.join(homeDir ?? defaultHomeDir(), CREDENTIALS_FILENAME);
-}
+export { getCredentialsPath };
 
 const EMPTY_CREDENTIALS: ZhixingCredentials = {};
 

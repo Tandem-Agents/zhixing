@@ -1,8 +1,8 @@
 import { getEventListeners } from "node:events";
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
+import { createTempDir } from "@zhixing/test-utils";
 import { createBashTool } from "../bash.js";
 
 describe("Bash Tool", () => {
@@ -10,19 +10,7 @@ describe("Bash Tool", () => {
   let tmpDir: string;
 
   beforeEach(async () => {
-    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-bash-test-"));
-  });
-
-  afterEach(async () => {
-    // Windows 下被 kill 的子进程可能短暂锁住 tmpDir，重试清理
-    for (let i = 0; i < 3; i++) {
-      try {
-        await fs.rm(tmpDir, { recursive: true, force: true });
-        return;
-      } catch {
-        await new Promise((r) => setTimeout(r, 200));
-      }
-    }
+    tmpDir = await createTempDir("bash");
   });
 
   const ctx = () => ({ workingDirectory: tmpDir });

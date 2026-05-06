@@ -1,0 +1,60 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.4.14/schema.json",
+  "files": {
+    "includes": [
+      "packages/**/*.ts",
+      "playground/**/*.ts",
+      "!**/node_modules/**",
+      "!**/dist/**"
+    ],
+    "ignoreUnknown": true
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": false,
+      "style": {
+        "noRestrictedImports": {
+          "level": "error",
+          "options": {
+            "paths": {
+              "node:os": {
+                "importNames": ["homedir", "tmpdir"],
+                "message": "禁止直拼路径——~/.zhixing 目录走 @zhixing/core 的 getZhixingHome（含 ZHIXING_HOME 解析），~ 展开走 expandUserHome；测试期临时目录走 @zhixing/test-utils 的 createTempDir / createDescribeTempDir。"
+              },
+              "node:fs/promises": {
+                "importNames": ["mkdtemp"],
+                "message": "测试期临时目录走 @zhixing/test-utils 的 createTempDir / createDescribeTempDir，创建即注册自动清理。"
+              },
+              "node:fs": {
+                "importNames": ["mkdtempSync"],
+                "message": "测试期临时目录走 @zhixing/test-utils 的 createTempDir / createDescribeTempDir，创建即注册自动清理。"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "overrides": [
+    {
+      "includes": [
+        "packages/core/src/paths.ts",
+        "packages/test-utils/src/temp-dir.ts"
+      ],
+      "linter": {
+        "rules": {
+          "style": {
+            "noRestrictedImports": "off"
+          }
+        }
+      }
+    }
+  ],
+  "formatter": {
+    "enabled": false
+  },
+  "assist": {
+    "enabled": false
+  }
+}

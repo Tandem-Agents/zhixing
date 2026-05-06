@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import fs from "node:fs/promises";
 import path from "node:path";
-import os from "node:os";
+import { createTempDir } from "@zhixing/test-utils";
 import { JournalStore, type CondenseLLM } from "../journal-store.js";
 
 function daysAgo(n: number): string {
@@ -19,12 +19,8 @@ describe("JournalStore", () => {
   let store: JournalStore;
 
   beforeEach(async () => {
-    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-journal-test-"));
+    tmpDir = await createTempDir("journal");
     store = new JournalStore(tmpDir);
-  });
-
-  afterEach(async () => {
-    await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
   // ─── append + load ───

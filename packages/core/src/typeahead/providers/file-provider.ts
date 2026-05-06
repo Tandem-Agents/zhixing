@@ -13,8 +13,9 @@
  */
 
 import * as fs from "node:fs/promises";
-import { homedir } from "node:os";
 import * as path from "node:path";
+
+import { expandUserHome } from "../../paths.js";
 
 import { findTriggerToken } from "../trigger-matcher.js";
 import type {
@@ -271,15 +272,11 @@ export class FileProvider implements SuggestionProvider {
    * 把路径片段解析成绝对目录路径。
    */
   private resolveToAbsolute(segment: string): string {
-    if (segment === "~" || segment.startsWith("~/")) {
-      return segment === "~"
-        ? homedir()
-        : path.resolve(homedir(), segment.slice(2));
+    const expanded = expandUserHome(segment);
+    if (path.isAbsolute(expanded)) {
+      return path.resolve(expanded);
     }
-    if (path.isAbsolute(segment)) {
-      return path.resolve(segment);
-    }
-    return path.resolve(this.root, segment);
+    return path.resolve(this.root, expanded);
   }
 
   /**

@@ -10,17 +10,16 @@
 
 import { randomBytes } from "node:crypto";
 import { readFile, writeFile, chmod, mkdir } from "node:fs/promises";
-import { dirname, join } from "node:path";
-import { homedir } from "node:os";
+import { dirname } from "node:path";
 
-const DEFAULT_TOKEN_PATH = join(homedir(), ".zhixing", "server.token");
+import { getDefaultTokenPath } from "@zhixing/server";
 
 export async function loadOrCreateToken(tokenPath?: string): Promise<{
   token: string;
   path: string;
   generated: boolean;
 }> {
-  const path = tokenPath ?? DEFAULT_TOKEN_PATH;
+  const path = tokenPath ?? getDefaultTokenPath();
 
   try {
     const existing = (await readFile(path, "utf-8")).trim();

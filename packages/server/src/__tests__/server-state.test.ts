@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm, readFile, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { describe, it, expect, beforeEach } from "vitest";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { createTempDir } from "@zhixing/test-utils";
 import {
   ServerStateFile,
   InvalidPhaseTransitionError,
@@ -14,13 +14,9 @@ describe("ServerStateFile", () => {
   let readyPath: string;
 
   beforeEach(async () => {
-    tempDir = await mkdtemp(join(tmpdir(), "zhixing-state-"));
+    tempDir = await createTempDir("server-state");
     statePath = join(tempDir, "server.state");
     readyPath = join(tempDir, "server.ready");
-  });
-
-  afterEach(async () => {
-    await rm(tempDir, { recursive: true, force: true });
   });
 
   function newFile() {

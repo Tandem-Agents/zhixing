@@ -1,7 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import fs from "node:fs/promises";
+import { beforeEach, describe, expect, it } from "vitest";
 import path from "node:path";
-import os from "node:os";
+import { createTempDir } from "@zhixing/test-utils";
 import { TranscriptStore } from "../store.js";
 import { loadRecords } from "../serializer.js";
 import type { Turn } from "../types.js";
@@ -28,13 +27,9 @@ let convDir: string;
 let store: TranscriptStore;
 
 beforeEach(async () => {
-  tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-lock-test-"));
+  tmpDir = await createTempDir("lock");
   convDir = path.join(tmpDir, "conversations");
   store = new TranscriptStore(convDir, "/test/project", { platform: "linux" });
-});
-
-afterEach(async () => {
-  await fs.rm(tmpDir, { recursive: true, force: true });
 });
 
 // ─── Per-id 锁 ───

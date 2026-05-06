@@ -5,8 +5,6 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   Scheduler,
@@ -15,6 +13,7 @@ import {
   type SchedulerEventMap,
   type AgentTurnResult,
 } from "@zhixing/core";
+import { createTempDir } from "@zhixing/test-utils";
 import { runServer, type RunningServer } from "../lifecycle.js";
 import { createServerContext } from "../context.js";
 import { DEFAULT_SERVER_CONFIG } from "../types.js";
@@ -31,7 +30,7 @@ describe("runServer lifecycle (S2.F)", () => {
   let runner: RunningServer | null = null;
 
   beforeEach(async () => {
-    tempDir = await mkdtemp(join(tmpdir(), "zhixing-lc-"));
+    tempDir = await createTempDir("lc");
     pidPath = join(tempDir, "server.pid");
     portPath = join(tempDir, "server.port");
 
@@ -61,7 +60,6 @@ describe("runServer lifecycle (S2.F)", () => {
     // 注入模式下 runner.shutdown 不停 scheduler（调用方负责注册）——测试必须自己 stop，
     // 否则 scheduler 的 setInterval 定时器会跨 test 累积。
     await scheduler.stop().catch(() => {});
-    await rm(tempDir, { recursive: true, force: true });
   });
 
   async function startTestServer(): Promise<RunningServer> {

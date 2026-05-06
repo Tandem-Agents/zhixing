@@ -1,8 +1,8 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { Message } from "@zhixing/core";
 import fs from "node:fs/promises";
 import path from "node:path";
-import os from "node:os";
+import { createTempDir } from "@zhixing/test-utils";
 
 // Mock @zhixing/core 的 loadProfile，避免测试依赖真实文件系统的 ~/.zhixing/me/
 vi.mock("@zhixing/core", async (importOriginal) => {
@@ -127,11 +127,7 @@ describe("loadProjectContext", () => {
   let tmpDir: string;
 
   beforeEach(async () => {
-    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-test-"));
-  });
-
-  afterEach(async () => {
-    await fs.rm(tmpDir, { recursive: true, force: true });
+    tmpDir = await createTempDir("project-ctx");
   });
 
   it("无 ZHIXING.md 时 instructions 为 null", async () => {

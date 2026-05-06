@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
+import { createTempDir } from "@zhixing/test-utils";
 import { createWriteTool } from "../write.js";
 
 describe("Write Tool", () => {
@@ -9,11 +9,7 @@ describe("Write Tool", () => {
   let tmpDir: string;
 
   beforeEach(async () => {
-    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-write-test-"));
-  });
-
-  afterEach(async () => {
-    await fs.rm(tmpDir, { recursive: true, force: true });
+    tmpDir = await createTempDir("write");
   });
 
   const ctx = () => ({ workingDirectory: tmpDir });

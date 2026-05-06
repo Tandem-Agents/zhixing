@@ -25,6 +25,7 @@
     "serve": "node --import=tsx/esm packages/cli/src/index.ts serve"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.4.14",
     "tsx": "^4.21.0"
   }
 }

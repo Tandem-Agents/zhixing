@@ -26,7 +26,21 @@ import {
   type ParseError,
 } from "jsonc-parser";
 import { mergeIdMap, writeJsonAtomic } from "./internal/io.js";
+import {
+  GLOBAL_CONFIG_FILENAME,
+  getGlobalConfigDir,
+  getGlobalConfigPath,
+  getProjectConfigPath,
+  resolveHomeDir,
+} from "./paths.js";
 import type { ZhixingConfig } from "./types.js";
+
+export {
+  getGlobalConfigDir,
+  getGlobalConfigPath,
+  getProjectConfigPath,
+  resolveHomeDir,
+};
 
 // ─── 错误类型 ───
 
@@ -44,57 +58,6 @@ export class ConfigSchemaError extends Error {
     super(message);
     this.name = "ConfigSchemaError";
   }
-}
-
-// ─── 路径解析 ───
-
-const CONFIG_DIR_NAME = ".zhixing";
-const GLOBAL_CONFIG_FILENAME = "config.jsonc";
-const PROJECT_CONFIG_FILENAME = "zhixing.config.jsonc";
-
-/** 全局配置目录：~/.zhixing/ */
-export function getGlobalConfigDir(): string {
-  // os.homedir() 获取用户主目录，如 C:\Users\lenovo
-  return path.join(os.homedir(), CONFIG_DIR_NAME);
-}
-
-/** 全局配置文件路径，可被 ZHIXING_CONFIG_PATH 覆盖 */
-export function getGlobalConfigPath(
-  env: Record<string, string | undefined> = process.env,
-): string {
-  const override = env["ZHIXING_CONFIG_PATH"]?.trim();
-  if (override) {
-    return override.startsWith("~")
-      ? path.join(os.homedir(), override.slice(1))
-      : override;
-  }
-  return path.join(getGlobalConfigDir(), GLOBAL_CONFIG_FILENAME);
-}
-
-/** 项目配置文件路径 */
-export function getProjectConfigPath(cwd: string = process.cwd()): string {
-  return path.join(cwd, PROJECT_CONFIG_FILENAME);
-}
-
-/**
- * 推断 ~/.zhixing 目录。
- *
- * 优先级：
- *   1. env.ZHIXING_CONFIG_PATH 设置 → 取该路径的 dirname（让 config 与 credentials
- *      跟随同一目录，避免两份文件分裂在不同位置）
- *   2. 默认 → os.homedir()/.zhixing
- *
- * 仅 caller 需要"基于此目录加载多份 zhixing 文件"时使用——例如 cli/serve 入口
- * 同时 load config + credentials 必须保证两者目录一致。
- *
- * 与 getGlobalConfigDir 的差异：
- *   - getGlobalConfigDir() 永远返回 ~/.zhixing，不看 env
- *   - resolveHomeDir(env) 优先按 env.ZHIXING_CONFIG_PATH 推断
- */
-export function resolveHomeDir(
-  env: Record<string, string | undefined> = process.env,
-): string {
-  return path.dirname(getGlobalConfigPath(env));
 }
 
 // ─── 配置加载 ───

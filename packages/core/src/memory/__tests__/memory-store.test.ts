@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import fs from "node:fs/promises";
 import path from "node:path";
-import os from "node:os";
+import { createTempDir } from "@zhixing/test-utils";
 import { MemoryStore } from "../memory-store.js";
 
 describe("MemoryStore", () => {
@@ -9,12 +9,8 @@ describe("MemoryStore", () => {
   let store: MemoryStore;
 
   beforeEach(async () => {
-    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-memory-test-"));
+    tmpDir = await createTempDir("memory");
     store = new MemoryStore(tmpDir);
-  });
-
-  afterEach(async () => {
-    await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
   // ─── save ───

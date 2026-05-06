@@ -13,9 +13,9 @@
  */
 
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { createTempDir } from "@zhixing/test-utils";
 import {
   currentScoreOf,
   decayAndIncrement,
@@ -31,24 +31,9 @@ const HOUR_MS = 3_600_000;
 const DAY_MS = 86_400_000;
 
 /** 构造一个临时目录（自动清理） */
-function makeTempDir(): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "zhixing-usage-test-"));
-  tempDirs.push(dir);
-  return dir;
+function makeTempDir(): Promise<string> {
+  return createTempDir("usage");
 }
-
-const tempDirs: string[] = [];
-
-afterEach(() => {
-  while (tempDirs.length > 0) {
-    const dir = tempDirs.pop()!;
-    try {
-      fs.rmSync(dir, { recursive: true, force: true });
-    } catch {
-      // ignore
-    }
-  }
-});
 
 // ─── 纯函数测试 ───
 
@@ -244,7 +229,7 @@ describe("UsageTracker — 内存模式（rootDir=null）", () => {
 
 describe("UsageTracker — 持久化", () => {
   it("debounceMs=0：recordUsage 立即 flush", async () => {
-    const dir = makeTempDir();
+    const dir = await makeTempDir();
     const tracker = new UsageTracker({
       rootDir: dir,
       now: () => 1_000_000_000,
@@ -265,7 +250,7 @@ describe("UsageTracker — 持久化", () => {
   });
 
   it("flush() 显式调用写盘", async () => {
-    const dir = makeTempDir();
+    const dir = await makeTempDir();
     const tracker = new UsageTracker({
       rootDir: dir,
       now: () => 1000,
@@ -278,8 +263,8 @@ describe("UsageTracker — 持久化", () => {
     expect(fs.existsSync(filePath)).toBe(true);
   });
 
-  it("load 现有 v2 文件", () => {
-    const dir = makeTempDir();
+  it("load 现有 v2 文件", async () => {
+    const dir = await makeTempDir();
     const filePath = path.join(dir, "usage.json");
     fs.writeFileSync(
       filePath,
@@ -299,8 +284,8 @@ describe("UsageTracker — 持久化", () => {
     expect(tracker.getScore("model")).toBeLessThan(8.2); // 被衰减
   });
 
-  it("v1 → v2 迁移：count 截断到 MAX_SCORE 作为初始 score", () => {
-    const dir = makeTempDir();
+  it("v1 → v2 迁移：count 截断到 MAX_SCORE 作为初始 score", async () => {
+    const dir = await makeTempDir();
     const filePath = path.join(dir, "usage.json");
     fs.writeFileSync(
       filePath,
@@ -320,8 +305,8 @@ describe("UsageTracker — 持久化", () => {
     expect(tracker.getScore("modest")).toBe(5);
   });
 
-  it("损坏文件：load 时捕获错误，tracker 仍可用（空状态）", () => {
-    const dir = makeTempDir();
+  it("损坏文件：load 时捕获错误，tracker 仍可用（空状态）", async () => {
+    const dir = await makeTempDir();
     const filePath = path.join(dir, "usage.json");
     fs.writeFileSync(filePath, "{ not valid json }");
     const onError = vi.fn();
@@ -338,7 +323,7 @@ describe("UsageTracker — 持久化", () => {
   });
 
   it("原子写：flush 过程使用 .tmp 文件", async () => {
-    const dir = makeTempDir();
+    const dir = await makeTempDir();
     const tracker = new UsageTracker({
       rootDir: dir,
       now: () => 1000,
@@ -352,8 +337,8 @@ describe("UsageTracker — 持久化", () => {
     expect(fs.existsSync(path.join(dir, "usage.json"))).toBe(true);
   });
 
-  it("文件不存在时 load 返回空状态不报错", () => {
-    const dir = makeTempDir();
+  it("文件不存在时 load 返回空状态不报错", async () => {
+    const dir = await makeTempDir();
     // 不预先创建文件
     const tracker = new UsageTracker({
       rootDir: dir,
@@ -363,7 +348,7 @@ describe("UsageTracker — 持久化", () => {
   });
 
   it("rootDir 目录不存在时 flush 自动 mkdir", async () => {
-    const parent = makeTempDir();
+    const parent = await makeTempDir();
     const nested = path.join(parent, "nested", "deeper");
     // nested 此时不存在
     const tracker = new UsageTracker({
@@ -377,7 +362,7 @@ describe("UsageTracker — 持久化", () => {
   });
 
   it("rootDir=null：完全不写盘", async () => {
-    const dir = makeTempDir();
+    const dir = await makeTempDir();
     const tracker = new UsageTracker({
       rootDir: null,
       now: () => 1000,
@@ -389,7 +374,7 @@ describe("UsageTracker — 持久化", () => {
   });
 
   it("重新构造的 tracker 能读到上次 recordUsage 的数据（端到端持久化）", async () => {
-    const dir = makeTempDir();
+    const dir = await makeTempDir();
 
     const tracker1 = new UsageTracker({
       rootDir: dir,

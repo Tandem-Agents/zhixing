@@ -31,28 +31,6 @@ describe("PathGuard", () => {
     });
   });
 
-  describe("expandHome", () => {
-    it("展开 ~ 前缀", () => {
-      const expanded = PathGuard.expandHome("~/test");
-      expect(expanded.startsWith(home)).toBe(true);
-    });
-
-    it("展开单独的 ~", () => {
-      const expanded = PathGuard.expandHome("~");
-      expect(expanded).toBe(home);
-    });
-
-    it("不展开非 ~ 开头的路径", () => {
-      const input = "/usr/local/bin";
-      expect(PathGuard.expandHome(input)).toBe(input);
-    });
-
-    it("不展开 ~user 形式", () => {
-      const input = "~otheruser/file";
-      expect(PathGuard.expandHome(input)).toBe(input);
-    });
-  });
-
   describe("isWithinWorkspace", () => {
     it("工作区内的文件返回 true", () => {
       expect(

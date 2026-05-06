@@ -1,9 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import fs from "node:fs/promises";
-import path from "node:path";
-import os from "node:os";
+import { describe, it, expect, beforeEach } from "vitest";
 import type { ToolDefinition, ToolExecutionContext } from "@zhixing/core";
 import { MemoryStore } from "@zhixing/core";
+import { createTempDir } from "@zhixing/test-utils";
 
 /**
  * Memory 工具集成测试
@@ -18,12 +16,8 @@ describe("Memory Tool (integration via MemoryStore)", () => {
   const ctx: ToolExecutionContext = { workingDirectory: "/tmp" };
 
   beforeEach(async () => {
-    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-memory-tool-"));
+    tmpDir = await createTempDir("memory-tool");
     store = new MemoryStore(tmpDir);
-  });
-
-  afterEach(async () => {
-    await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
   it("save → load roundtrip", async () => {

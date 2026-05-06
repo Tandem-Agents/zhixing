@@ -13,10 +13,10 @@
  */
 
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 
+import { createTempDir } from "@zhixing/test-utils";
 import {
   PermissionStore,
   globMatches,
@@ -477,12 +477,8 @@ describe("PermissionStore (in-memory)", () => {
 describe("PermissionStore (disk persistence)", () => {
   let rootDir: string;
 
-  beforeEach(() => {
-    rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "zx-perm-"));
-  });
-
-  afterEach(() => {
-    fs.rmSync(rootDir, { recursive: true, force: true });
+  beforeEach(async () => {
+    rootDir = await createTempDir("perm");
   });
 
   it("创建 workspace 规则 → 文件被创建 → 新实例可加载", () => {
@@ -678,12 +674,8 @@ describe("PermissionStore.workspaceIdFromPath", () => {
 describe("PermissionStore 跨作用域组合", () => {
   let rootDir: string;
 
-  beforeEach(() => {
-    rootDir = fs.mkdtempSync(path.join(os.tmpdir(), "zx-perm-cross-"));
-  });
-
-  afterEach(() => {
-    fs.rmSync(rootDir, { recursive: true, force: true });
+  beforeEach(async () => {
+    rootDir = await createTempDir("perm-cross");
   });
 
   it("list 返回 session + workspace + global 的并集", () => {

@@ -1,7 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { describe, it, expect, beforeEach } from "vitest";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { createTempDir } from "@zhixing/test-utils";
 import {
   acquireLock,
   releaseLock,
@@ -17,13 +17,9 @@ describe("ProcessLock", () => {
   let portPath: string;
 
   beforeEach(async () => {
-    tempDir = await mkdtemp(join(tmpdir(), "zhixing-lock-"));
+    tempDir = await createTempDir("server-lock");
     pidPath = join(tempDir, "server.pid");
     portPath = join(tempDir, "server.port");
-  });
-
-  afterEach(async () => {
-    await rm(tempDir, { recursive: true, force: true });
   });
 
   it("acquires lock and writes pid + port files", async () => {

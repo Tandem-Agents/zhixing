@@ -1,7 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import fs from "node:fs/promises";
-import path from "node:path";
-import os from "node:os";
+import { describe, it, expect, beforeEach } from "vitest";
+import { createTempDir } from "@zhixing/test-utils";
 import { SkillsStore, type SkillMeta } from "../skills-store.js";
 import { MemoryRetriever } from "../retriever.js";
 
@@ -25,13 +23,9 @@ describe("MemoryRetriever", () => {
   let retriever: MemoryRetriever;
 
   beforeEach(async () => {
-    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-retriever-test-"));
+    tmpDir = await createTempDir("retriever");
     skillsStore = new SkillsStore(tmpDir);
     retriever = new MemoryRetriever(skillsStore);
-  });
-
-  afterEach(async () => {
-    await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
   it("匹配技能并返回格式化文本", async () => {

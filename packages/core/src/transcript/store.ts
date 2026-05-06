@@ -36,7 +36,6 @@ import type {
 } from "./types.js";
 import { TRANSCRIPT_FORMAT_VERSION } from "./types.js";
 
-export { getZhixingHome, getProjectId } from "../paths.js";
 import { toSafePathSegment } from "../paths.js";
 
 // ─── 配置 ───

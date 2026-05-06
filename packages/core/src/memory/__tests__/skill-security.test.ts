@@ -1,7 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import fs from "node:fs/promises";
-import path from "node:path";
-import os from "node:os";
+import { describe, it, expect, beforeEach } from "vitest";
+import { createTempDir } from "@zhixing/test-utils";
 import {
   scanSkillContent,
   hasBlockingThreats,
@@ -181,12 +179,8 @@ describe("SkillsStore security integration", () => {
   };
 
   beforeEach(async () => {
-    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-security-test-"));
+    tmpDir = await createTempDir("security");
     store = new SkillsStore(tmpDir);
-  });
-
-  afterEach(async () => {
-    await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
   it("正常内容可以保存", async () => {

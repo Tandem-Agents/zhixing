@@ -1,7 +1,6 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { describe, it, expect, beforeEach } from "vitest";
 import { join } from "node:path";
+import { createTempDir } from "@zhixing/test-utils";
 import { JsonTaskStore } from "../task-store.js";
 import type { ScheduledTask } from "../types.js";
 
@@ -25,12 +24,8 @@ describe("JsonTaskStore", () => {
   let storePath: string;
 
   beforeEach(async () => {
-    tempDir = await mkdtemp(join(tmpdir(), "zhixing-store-"));
+    tempDir = await createTempDir("store");
     storePath = join(tempDir, "scheduler.json");
-  });
-
-  afterEach(async () => {
-    await rm(tempDir, { recursive: true, force: true });
   });
 
   it("loads empty when file does not exist", async () => {

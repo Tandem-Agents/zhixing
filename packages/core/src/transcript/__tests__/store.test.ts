@@ -1,7 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import fs from "node:fs/promises";
 import path from "node:path";
-import os from "node:os";
+import { createTempDir } from "@zhixing/test-utils";
 import type { CompactMarker, Turn } from "../types.js";
 import { TranscriptStore } from "../store.js";
 import { getProjectId } from "../../paths.js";
@@ -31,11 +31,7 @@ function makeTurn(index: number, timestamp?: string): Turn {
 let tmpDir: string;
 
 beforeEach(async () => {
-  tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-store-test-"));
-});
-
-afterEach(async () => {
-  await fs.rm(tmpDir, { recursive: true, force: true });
+  tmpDir = await createTempDir("transcript-store");
 });
 
 // ─── getProjectId（共享路径工具） ───

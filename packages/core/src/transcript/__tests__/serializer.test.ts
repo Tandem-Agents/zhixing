@@ -1,7 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import fs from "node:fs/promises";
 import path from "node:path";
-import os from "node:os";
+import { createTempDir } from "@zhixing/test-utils";
 import type { Message } from "../../types/messages.js";
 import type { CompactMarker, TranscriptHeader, Turn } from "../types.js";
 import {
@@ -70,11 +70,7 @@ const COMPACT: CompactMarker = {
 let tmpDir: string;
 
 beforeEach(async () => {
-  tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-transcript-test-"));
-});
-
-afterEach(async () => {
-  await fs.rm(tmpDir, { recursive: true, force: true });
+  tmpDir = await createTempDir("transcript");
 });
 
 function tmpFile(name: string): string {
