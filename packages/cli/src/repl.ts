@@ -50,7 +50,6 @@ import {
 import { describeProxy, type ProxyDescription } from "@zhixing/network";
 import { loadConfig, loadCredentials, resolveHomeDir } from "@zhixing/providers";
 import { CommandDispatcher } from "./command-dispatcher.js";
-import { readInputLine, type InputLineResult } from "./typeahead-input.js";
 import { PASTE_TOKEN_PATTERN, PasteRegistry } from "./paste-registry.js";
 import { resolveFileRefs } from "./resolve-file-refs.js";
 import {
@@ -67,6 +66,8 @@ import {
   createOutputRenderer,
   type OutputRenderer,
 } from "./output/index.js";
+import { createScreenController } from "./screen/index.js";
+import { InputController } from "./typeahead-input.js";
 import { renderHomeWelcome, renderStartupAdvisories } from "./workbench/index.js";
 import { RuntimeSession } from "./runtime/session.js";
 import { handleConfigCommand } from "./runtime/config-command.js";
@@ -1010,6 +1011,25 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     now: Date.now(),
   });
 
+  // 持久输入区基础设施：
+  //   screen 协调 stdout 写入位置，让输入区 chrome 永驻屏幕底部，AI 输出向上累积
+  //   inputController 长生命周期持有 buffer / chrome / panel / paste，turn 间不 cleanup
+  //   主循环每轮 await inputController.waitOnce() 拿下次用户输入（一次性 promise 风格）
+  let screen: ReturnType<typeof createScreenController> | null = null;
+  let inputController: InputController | null = null;
+  if (useTypeahead && typeaheadBroker && typeaheadDispatcher) {
+    screen = createScreenController();
+    inputController = new InputController({
+      broker: typeaheadBroker,
+      dispatcher: typeaheadDispatcher,
+      getRuntime,
+      screen,
+      placeholder: "输入消息或 / 查看命令",
+      registry: pasteRegistry,
+    });
+    inputController.start();
+  }
+
   // close 监听器 + 主循环的协作信号：
   //
   // 异步 cleanup 监听器（下方）会跑 dispose / "再见 👋" / process.exit，含 await
@@ -1101,21 +1121,11 @@ export async function startRepl(options: ReplOptions): Promise<void> {
 
     let input: string;
 
-    if (useTypeahead && typeaheadBroker && typeaheadDispatcher) {
-      // ── Typeahead 路径 ──
-      rl.pause(); // 让出 stdin 所有权给 readInputLine
-      let result: InputLineResult;
-      try {
-        result = await readInputLine({
-          broker: typeaheadBroker,
-          dispatcher: typeaheadDispatcher,
-          getRuntime,
-          placeholder: "输入消息或 / 查看命令",
-          registry: pasteRegistry,
-        });
-      } finally {
-        rl.resume();
-      }
+    if (useTypeahead && inputController) {
+      // ── Typeahead 路径（持久输入区） ──
+      // inputController 在 startRepl 顶层一次性创建并 start()，turn 间持续 active；
+      // 这里仅 await 下次 submit / cancel——chrome / paste / panel 等内部状态跨 turn 持久。
+      const result = await inputController.waitOnce();
 
       if (result.kind === "cancelled") {
         if (result.cause === "ctrl-c" || result.cause === "ctrl-d") break;
@@ -1318,15 +1328,18 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     }
   }
 
-  // 循环退出（Ctrl+C / Ctrl+D / readline 异常）→ 关闭 readline 触发 exit。
-  //
-  // 为什么需要：typeahead 路径的 Ctrl+C 由 readInputLine 捕获并 resolve，
-  // 不经过 readline 内部的 close 流程。break 跳出循环后如果不显式 rl.close()，
-  // readline 还持有 stdin → event loop 不空 → 进程不退出 → 用户陷入无 prompt
-  // 的"僵尸态"。rl.close() 触发 rl.on("close") → process.exit(0)。
-  //
-  // Legacy 路径不受影响：readline 内部 Ctrl+C 已经 close 了，这里的 rl.close()
-  // 是幂等的 no-op。
+  // 循环退出后释放持久输入区资源——typeahead path 的 Ctrl+C 由 input.waitOnce()
+  // 捕获并 resolve cancelled，break 跳出循环后此处真正释放 input + screen。
+  // Legacy path 这两个变量为 null，操作幂等。
+  if (inputController) {
+    inputController.stop();
+  }
+  if (screen) {
+    screen.dispose();
+  }
+
+  // 关闭 readline——typeahead 路径下 break 跳出循环后必须显式 close，否则 readline 持
+  // stdin 让事件循环不空，进程不退出。Legacy 路径下 readline 已 close，幂等 no-op。
   rl.close();
 }
 
