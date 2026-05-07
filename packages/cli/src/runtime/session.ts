@@ -204,7 +204,11 @@ export class RuntimeSession {
       provider: this.opts.cliProvider,
       workspace: this.opts.cliWorkspace,
       extraTools: [scheduleTool],
-      decorateRunBus: createRenderSubscribers(this.opts.renderer),
+      decorateRunBus: createRenderSubscribers({
+        renderer: this.opts.renderer,
+        writer: this.opts.writer,
+        screen: this.opts.screen,
+      }),
       onSecurityBlocked: this.opts.onSecurityBlocked,
       onUserDenied: this.opts.onUserDenied,
       enableTaskTool: true,
@@ -231,6 +235,7 @@ export class RuntimeSession {
   private createScheduler(
     delivery: DeliveryStack["delivery"] | undefined,
   ): Scheduler {
+    const writer = this.opts.writer;
     return new Scheduler({
       store: new JsonTaskStore(),
       runAgentTurn: this.makeRunAgentTurn(),
@@ -239,14 +244,12 @@ export class RuntimeSession {
       logger: {
         info: () => {},
         warn: (msg, data) =>
-          console.log(
-            chalk.yellow(`  [scheduler] ${msg}`),
-            data ? chalk.dim(JSON.stringify(data)) : "",
+          writer.notify(
+            `${chalk.yellow(`  [scheduler] ${msg}`)} ${data ? chalk.dim(JSON.stringify(data)) : ""}`,
           ),
         error: (msg, data) =>
-          console.log(
-            chalk.red(`  [scheduler] ${msg}`),
-            data ? chalk.dim(JSON.stringify(data)) : "",
+          writer.notify(
+            `${chalk.red(`  [scheduler] ${msg}`)} ${data ? chalk.dim(JSON.stringify(data)) : ""}`,
           ),
         debug: () => {},
       },

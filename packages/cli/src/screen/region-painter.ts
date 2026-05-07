@@ -8,7 +8,11 @@
  */
 
 const ANSI_ERASE_DOWN = "\x1b[J";
+/** 清整行（不依赖光标列）——差分 repaint 用于"行内原地覆盖"避免 \x1b[J 整片清屏闪烁 */
+const ANSI_ERASE_LINE = "\x1b[2K";
 const ANSI_CARRIAGE_RETURN = "\r";
+
+export { ANSI_ERASE_DOWN, ANSI_ERASE_LINE, ANSI_CARRIAGE_RETURN };
 
 /** 上移 n 行的 ANSI 序列。n ≤ 0 时返回空字符串（不发送序列）。 */
 export function ansiCursorUp(n: number): string {

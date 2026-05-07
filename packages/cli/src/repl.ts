@@ -57,7 +57,6 @@ import {
   type RunResult,
 } from "@zhixing/orchestrator/runtime";
 import {
-  renderSummary,
   renderError,
   renderUsageReport,
   renderContextVisual,
@@ -66,7 +65,11 @@ import {
   createOutputRenderer,
   type OutputRenderer,
 } from "./output/index.js";
-import { createScreenController } from "./screen/index.js";
+import {
+  createScreenController,
+  createScreenWriter,
+  type CliWriter,
+} from "./screen/index.js";
 import { InputController } from "./typeahead-input.js";
 import { renderHomeWelcome, renderStartupAdvisories } from "./workbench/index.js";
 import { RuntimeSession } from "./runtime/session.js";
@@ -75,8 +78,8 @@ import { parseTaskUsageFromMessages } from "./parse-task-usage.js";
 import {
   handleTrustCommand,
   handleSecurityCommand,
-  renderBlockedMessage,
-  renderUserDeniedMessage,
+  createBlockedRenderer,
+  createUserDeniedRenderer,
   TerminalConfirmationRenderer,
 } from "./security/index.js";
 import { createReplInterruptRuntime } from "./interrupt/repl-runtime.js";
@@ -133,6 +136,7 @@ function buildSlashCommands(
   rl: readline.Interface,
   session: RuntimeSession,
   renderer: OutputRenderer,
+  cliWriter: CliWriter,
 ): Record<
   string,
   {
@@ -144,14 +148,14 @@ function buildSlashCommands(
     "/help": {
       description: "显示帮助信息",
       handler: (_state) => {
-        const commands = buildSlashCommands(rl, session, renderer);
-        console.log(`\n${chalk.bold("可用命令：")}`);
+        const commands = buildSlashCommands(rl, session, renderer, cliWriter);
+        cliWriter.line(`\n${chalk.bold("可用命令：")}`);
         for (const [cmd, { description }] of Object.entries(commands)) {
-          console.log(
+          cliWriter.line(
             `  ${chalk.cyan(cmd.padEnd(14))} ${chalk.dim(description)}`,
           );
         }
-        console.log();
+        cliWriter.line("");
       },
     },
     "/clear": {
@@ -159,13 +163,13 @@ function buildSlashCommands(
       handler: (state) => {
         state.messages = [];
         state.turnCounter = 0;
-        console.log(chalk.dim("对话历史已清空\n"));
+        cliWriter.line(chalk.dim("对话历史已清空\n"));
       },
     },
     "/model": {
       description: "显示当前模型信息",
       handler: (state) => {
-        console.log(
+        cliWriter.line(
           `\n  ${chalk.dim("Model:")} ${chalk.cyan(state.agent.model)}` +
             `\n  ${chalk.dim("Provider:")} ${state.agent.providerId}` +
             `\n  ${chalk.dim("Turns:")} ${state.turnCounter}\n`,
@@ -188,7 +192,7 @@ function buildSlashCommands(
           state.networkProxy.resolved === null && state.networkProxy.mode === "auto"
             ? chalk.dim(state.networkProxy.display)
             : state.networkProxy.display;
-        console.log(
+        cliWriter.line(
           `\n  ${chalk.dim("Session:")} ${state.conversationId ?? "(未保存)"}` +
             `\n  ${chalk.dim("Messages:")} ${state.messages.length} (${userMsgs} user, ${assistantMsgs} assistant)` +
             `\n  ${chalk.dim("Model:")} ${chalk.cyan(state.agent.model)}` +
@@ -202,21 +206,21 @@ function buildSlashCommands(
       handler: async (state) => {
         const conversations = await state.convRepo.list();
         if (conversations.length === 0) {
-          console.log(chalk.dim("\n  没有保存的对话\n"));
+          cliWriter.line(chalk.dim("\n  没有保存的对话\n"));
           return;
         }
-        console.log(`\n${chalk.bold("  保存的对话：")}`);
+        cliWriter.line(`\n${chalk.bold("  保存的对话：")}`);
         for (const c of conversations.slice(0, 15)) {
           const label = c.name ? chalk.white(c.name) : chalk.dim("(未命名)");
           const time = formatRelativeTime(new Date(c.lastActiveAt));
           const turnCount = await state.store.countTurns(c.id);
           const current =
             c.id === state.conversationId ? chalk.green(" ← 当前") : "";
-          console.log(
+          cliWriter.line(
             `  ${chalk.cyan(c.id)} ${label} ${chalk.dim(`(${time}, ${turnCount} 轮)`)}${current}`,
           );
         }
-        console.log();
+        cliWriter.line("");
       },
     },
     "/new": {
@@ -238,11 +242,11 @@ function buildSlashCommands(
           state.turnCounter = 0;
           state.lastToolEndCount = 0;
           state.convRepo.touch(state.conversationId).catch(() => {});
-          console.log(
+          cliWriter.line(
             chalk.dim(`\n  已创建新对话 ${chalk.cyan(conversation.name)}\n`),
           );
         } catch (err) {
-          console.log(
+          cliWriter.line(
             chalk.red(
               `\n  创建对话失败: ${err instanceof Error ? err.message : String(err)}\n`,
             ),
@@ -257,10 +261,10 @@ function buildSlashCommands(
         if (!input) {
           const conversations = await state.convRepo.list();
           if (conversations.length === 0) {
-            console.log(chalk.dim("\n  没有可切换的对话\n"));
+            cliWriter.line(chalk.dim("\n  没有可切换的对话\n"));
             return;
           }
-          console.log(`\n${chalk.bold("  可用对话：")}`);
+          cliWriter.line(`\n${chalk.bold("  可用对话：")}`);
           for (let i = 0; i < Math.min(conversations.length, 15); i++) {
             const c = conversations[i]!;
             const label = c.name ? chalk.white(c.name) : chalk.dim("(未命名)");
@@ -268,15 +272,15 @@ function buildSlashCommands(
             const turnCount = await state.store.countTurns(c.id);
             const current =
               c.id === state.conversationId ? chalk.green(" ← 当前") : "";
-            console.log(
+            cliWriter.line(
               `  ${chalk.yellow(`[${i + 1}]`)} ${label} ${chalk.dim(`(${time}, ${turnCount} 轮)`)}${current}`,
             );
           }
-          console.log(chalk.dim(`\n  使用 /switch <序号> 或 /switch <名称> 切换\n`));
+          cliWriter.line(chalk.dim(`\n  使用 /switch <序号> 或 /switch <名称> 切换\n`));
           return;
         }
         if (input === state.conversationId) {
-          console.log(chalk.dim("\n  已在当前对话中\n"));
+          cliWriter.line(chalk.dim("\n  已在当前对话中\n"));
           return;
         }
 
@@ -305,25 +309,25 @@ function buildSlashCommands(
           if (matches.length === 1) {
             target = { id: matches[0]!.id, name: matches[0]!.name };
           } else if (matches.length > 1) {
-            console.log(`\n${chalk.bold("  多个匹配：")}`);
+            cliWriter.line(`\n${chalk.bold("  多个匹配：")}`);
             for (let i = 0; i < Math.min(matches.length, 10); i++) {
               const c = matches[i]!;
               const time = formatRelativeTime(new Date(c.lastActiveAt));
-              console.log(
+              cliWriter.line(
                 `  ${chalk.yellow(`[${i + 1}]`)} ${chalk.white(c.name)} ${chalk.dim(`(${time})`)}`,
               );
             }
-            console.log(chalk.dim(`\n  请使用更精确的名称或 /switch <序号>\n`));
+            cliWriter.line(chalk.dim(`\n  请使用更精确的名称或 /switch <序号>\n`));
             return;
           }
         }
 
         if (!target) {
-          console.log(chalk.red(`\n  对话 "${input}" 不存在\n`));
+          cliWriter.line(chalk.red(`\n  对话 "${input}" 不存在\n`));
           return;
         }
         if (target.id === state.conversationId) {
-          console.log(chalk.dim("\n  已在当前对话中\n"));
+          cliWriter.line(chalk.dim("\n  已在当前对话中\n"));
           return;
         }
 
@@ -334,13 +338,13 @@ function buildSlashCommands(
           state.turnCounter = loaded.turnCount;
           state.lastToolEndCount = 0;
           state.convRepo.touch(state.conversationId).catch(() => {});
-          console.log(
+          cliWriter.line(
             chalk.dim(
               `\n  已切换到 ${chalk.cyan(target.name)}（${loaded.turnCount} 轮对话）\n`,
             ),
           );
         } catch (err) {
-          console.log(
+          cliWriter.line(
             chalk.red(
               `\n  加载对话失败: ${err instanceof Error ? err.message : String(err)}\n`,
             ),
@@ -352,15 +356,15 @@ function buildSlashCommands(
       description: "为当前会话命名",
       handler: async (state, args) => {
         if (!args.trim()) {
-          console.log(chalk.yellow("用法: /name <名称>\n"));
+          cliWriter.line(chalk.yellow("用法: /name <名称>\n"));
           return;
         }
         if (!state.conversationId) {
-          console.log(chalk.yellow("当前会话尚未保存\n"));
+          cliWriter.line(chalk.yellow("当前会话尚未保存\n"));
           return;
         }
         await state.convRepo.rename(state.conversationId, args.trim());
-        console.log(chalk.dim(`会话已命名为: ${args.trim()}\n`));
+        cliWriter.line(chalk.dim(`会话已命名为: ${args.trim()}\n`));
       },
     },
     "/me": {
@@ -369,7 +373,7 @@ function buildSlashCommands(
         const profile = await loadProfile();
         if (!profile) {
           const memDir = getMemoryDir();
-          console.log(
+          cliWriter.line(
             `\n${chalk.dim("  未找到身份画像。")}` +
               `\n${chalk.dim(`  创建 ${memDir}/profile.md 来设置你的身份信息。`)}` +
               `\n\n${chalk.dim("  示例内容：")}` +
@@ -382,21 +386,21 @@ function buildSlashCommands(
           );
           return;
         }
-        console.log(`\n${chalk.bold("  身份画像")}`);
-        console.log(`  ${chalk.dim("Name:")} ${chalk.cyan(profile.meta.name)}`);
+        cliWriter.line(`\n${chalk.bold("  身份画像")}`);
+        cliWriter.line(`  ${chalk.dim("Name:")} ${chalk.cyan(profile.meta.name)}`);
         if (profile.meta.language) {
-          console.log(`  ${chalk.dim("Language:")} ${profile.meta.language}`);
+          cliWriter.line(`  ${chalk.dim("Language:")} ${profile.meta.language}`);
         }
         if (profile.meta.timezone) {
-          console.log(`  ${chalk.dim("Timezone:")} ${profile.meta.timezone}`);
+          cliWriter.line(`  ${chalk.dim("Timezone:")} ${profile.meta.timezone}`);
         }
         if (profile.content) {
-          console.log();
+          cliWriter.line("");
           for (const line of profile.content.split("\n")) {
-            console.log(`  ${line}`);
+            cliWriter.line(`  ${line}`);
           }
         }
-        console.log();
+        cliWriter.line("");
       },
     },
     "/skills": {
@@ -407,13 +411,13 @@ function buildSlashCommands(
         const subArgs = args.trim().split(/\s+/).slice(1).join(" ");
 
         if (subcommand === "audit") {
-          await renderSkillsAudit(store);
+          await renderSkillsAudit(store, cliWriter);
           return;
         }
 
         if (subcommand === "archive" && subArgs) {
           const ok = await store.archive(subArgs);
-          console.log(ok
+          cliWriter.line(ok
             ? chalk.green(`\n  ✓ 已归档: ${subArgs}\n`)
             : chalk.red(`\n  ✗ 未找到: ${subArgs}\n`));
           return;
@@ -421,7 +425,7 @@ function buildSlashCommands(
 
         if (subcommand === "restore" && subArgs) {
           const ok = await store.restore(subArgs);
-          console.log(ok
+          cliWriter.line(ok
             ? chalk.green(`\n  ✓ 已恢复: ${subArgs}\n`)
             : chalk.red(`\n  ✗ 未找到归档: ${subArgs}\n`));
           return;
@@ -429,7 +433,7 @@ function buildSlashCommands(
 
         if (subcommand === "delete" && subArgs) {
           const ok = await store.delete(subArgs);
-          console.log(ok
+          cliWriter.line(ok
             ? chalk.green(`\n  ✓ 已删除: ${subArgs}\n`)
             : chalk.red(`\n  ✗ 未找到: ${subArgs}\n`));
           return;
@@ -439,14 +443,14 @@ function buildSlashCommands(
         const skills = await store.listAll();
 
         if (skills.length === 0) {
-          console.log(
+          cliWriter.line(
             `\n${chalk.dim("  技能库为空。")}` +
               `\n${chalk.dim('  对话中说"存为技能"可以保存方法论。\n')}`,
           );
           return;
         }
 
-        console.log(`\n${chalk.bold("  技能库")} ${chalk.dim(`(${skills.length} 个)`)}`);
+        cliWriter.line(`\n${chalk.bold("  技能库")} ${chalk.dim(`(${skills.length} 个)`)}`);
         for (const skill of skills) {
           const status = store.getStatus(skill);
           const statusBadge = status === "active"
@@ -458,11 +462,11 @@ function buildSlashCommands(
             ? chalk.dim(` [${skill.meta.tags.join(", ")}]`)
             : "";
           const usage = chalk.dim(` (v${skill.meta.version} · ${skill.meta.useCount}次)`);
-          console.log(
+          cliWriter.line(
             `  ${statusBadge} ${skill.meta.title}${tags}${usage}`,
           );
         }
-        console.log(chalk.dim("\n  提示: /skills audit 查看健康报告\n"));
+        cliWriter.line(chalk.dim("\n  提示: /skills audit 查看健康报告\n"));
       },
     },
     "/journal": {
@@ -473,28 +477,28 @@ function buildSlashCommands(
         const { stats, condensePlan, expiredFiles } = plan;
 
         if (stats.totalFiles === 0) {
-          console.log(
+          cliWriter.line(
             `\n${chalk.dim("  日志为空。对话中的信息将自动记录到日志中。\n")}`,
           );
           return;
         }
 
-        console.log(`\n${chalk.bold("  日志状态")} ${chalk.dim(`(${stats.totalFiles} 文件)`)}`);
-        console.log(`  ${chalk.green("●")} 热 (≤30天): ${stats.hotCount}`);
-        console.log(`  ${chalk.yellow("●")} 温 (>30天): ${stats.warmCount}`);
-        console.log(`  ${chalk.blue("●")} 凝练: ${stats.condensedCount}`);
+        cliWriter.line(`\n${chalk.bold("  日志状态")} ${chalk.dim(`(${stats.totalFiles} 文件)`)}`);
+        cliWriter.line(`  ${chalk.green("●")} 热 (≤30天): ${stats.hotCount}`);
+        cliWriter.line(`  ${chalk.yellow("●")} 温 (>30天): ${stats.warmCount}`);
+        cliWriter.line(`  ${chalk.blue("●")} 凝练: ${stats.condensedCount}`);
 
         if (expiredFiles.length > 0) {
-          console.log(`  ${chalk.red("●")} 过期待删除: ${expiredFiles.length}`);
+          cliWriter.line(`  ${chalk.red("●")} 过期待删除: ${expiredFiles.length}`);
         }
         if (condensePlan) {
           const monthCount = condensePlan.months.length;
           const fileCount = condensePlan.months.reduce((sum: number, m: { files: string[] }) => sum + m.files.length, 0);
-          console.log(
+          cliWriter.line(
             chalk.dim(`\n  💡 ${fileCount} 条日志（${monthCount} 个月）待凝练，首轮对话后自动执行`),
           );
         }
-        console.log();
+        cliWriter.line("");
       },
     },
     "/people": {
@@ -504,22 +508,22 @@ function buildSlashCommands(
         const people = await store.listAll();
 
         if (people.length === 0) {
-          console.log(
+          cliWriter.line(
             `\n${chalk.dim("  关系网络为空。")}` +
               `\n${chalk.dim('  对话中说"记住小丽是我女朋友"可以添加关系人。\n')}`,
           );
           return;
         }
 
-        console.log(`\n${chalk.bold("  关系网络")} ${chalk.dim(`(${people.length} 人)`)}`);
+        cliWriter.line(`\n${chalk.bold("  关系网络")} ${chalk.dim(`(${people.length} 人)`)}`);
         for (const person of people) {
           const relation = chalk.dim(` (${person.meta.relation})`);
           const birthday = person.meta.birthday ? chalk.dim(` 🎂 ${person.meta.birthday}`) : "";
-          console.log(
+          cliWriter.line(
             `  ${chalk.cyan("•")} ${person.meta.name}${relation}${birthday}`,
           );
         }
-        console.log();
+        cliWriter.line("");
       },
     },
     "/usage": {
@@ -534,6 +538,7 @@ function buildSlashCommands(
           state.turnCounter,
           state.agent.calibrationFactor,
           subUsages,
+          cliWriter,
         );
       },
     },
@@ -541,17 +546,17 @@ function buildSlashCommands(
       description: "上下文容量可视化",
       handler: (state) => {
         const budget = state.agent.checkBudget(state.messages);
-        renderContextVisual(budget);
+        renderContextVisual(budget, cliWriter);
       },
     },
     "/compact": {
       description: "手动触发上下文压缩",
       handler: async (state) => {
         if (state.messages.length < 4) {
-          console.log(chalk.dim("\n  对话历史过短，无需压缩\n"));
+          cliWriter.line(chalk.dim("\n  对话历史过短，无需压缩\n"));
           return;
         }
-        console.log(chalk.yellow("\n  ⟳ 正在压缩上下文..."));
+        cliWriter.line(chalk.yellow("\n  ⟳ 正在压缩上下文..."));
         try {
           const result = await state.agent.forceCompact(
             [...state.messages],
@@ -559,7 +564,7 @@ function buildSlashCommands(
           );
           if (result.modified) {
             const pct = Math.round(result.budget.usageRatio * 100);
-            console.log(chalk.green(`  ✓ 压缩完成，当前上下文占用 ${pct}%\n`));
+            cliWriter.line(chalk.green(`  ✓ 压缩完成，当前上下文占用 ${pct}%\n`));
             // 走 commitTurn({compactBefore}) 统一持久化入口：
             //   - 仅在事务产生真 summary 时写 marker（避免 "(manual compact)" 假摘要）
             //   - commitTurn 内部原子重写：header + compactBefore + retained turns
@@ -573,7 +578,7 @@ function buildSlashCommands(
               } catch (err) {
                 // 持久化失败：降级用 forceCompact 返回的内存版 messages
                 state.messages = result.messages;
-                console.log(
+                cliWriter.line(
                   chalk.dim(
                     `  [持久化警告] ${err instanceof Error ? err.message : String(err)}`,
                   ),
@@ -584,11 +589,11 @@ function buildSlashCommands(
               state.messages = result.messages;
             }
           } else {
-            console.log(chalk.dim("  已无可压缩内容\n"));
+            cliWriter.line(chalk.dim("  已无可压缩内容\n"));
           }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          console.log(chalk.red(`  ✗ 压缩失败: ${msg}\n`));
+          cliWriter.line(chalk.red(`  ✗ 压缩失败: ${msg}\n`));
         }
       },
     },
@@ -598,28 +603,32 @@ function buildSlashCommands(
         await handleTrustCommand(args, {
           pipeline: state.agent.securityPipeline,
           rl,
+          writer: cliWriter,
         });
       },
     },
     "/security": {
       description: "安全状态概览 (rules: 列出策略规则)",
       handler: (state, args) => {
-        handleSecurityCommand(args, state.agent.securityPipeline);
+        handleSecurityCommand(args, {
+          pipeline: state.agent.securityPipeline,
+          writer: cliWriter,
+        });
       },
     },
     "/tasks": {
       description: "查看定时任务",
       handler: (state) => {
         if (!state.scheduler) {
-          console.log(chalk.dim("\n  调度器未初始化\n"));
+          cliWriter.line(chalk.dim("\n  调度器未初始化\n"));
           return;
         }
         const tasks = state.scheduler.listTasks();
         if (tasks.length === 0) {
-          console.log(chalk.dim("\n  没有定时任务。对话中说\"每天早上8点提醒我...\"可以创建任务。\n"));
+          cliWriter.line(chalk.dim("\n  没有定时任务。对话中说\"每天早上8点提醒我...\"可以创建任务。\n"));
           return;
         }
-        console.log(`\n${chalk.bold("  定时任务")} ${chalk.dim(`(${tasks.length} 个, ${state.scheduler.activeTaskCount} 个执行中)`)}`);
+        cliWriter.line(`\n${chalk.bold("  定时任务")} ${chalk.dim(`(${tasks.length} 个, ${state.scheduler.activeTaskCount} 个执行中)`)}`);
         for (const task of tasks) {
           const status = task.enabled ? chalk.green("●") : chalk.dim("○");
           const schedule = formatTaskSchedule(task.schedule);
@@ -629,10 +638,10 @@ function buildSlashCommands(
           const next = task.state.nextRunAt
             ? chalk.dim(` · 下次: ${new Date(task.state.nextRunAt).toLocaleString()}`)
             : "";
-          console.log(`  ${status} ${task.name} ${chalk.dim(`(${task.id})`)}`);
-          console.log(`    ${schedule}${lastInfo}${next}`);
+          cliWriter.line(`  ${status} ${task.name} ${chalk.dim(`(${task.id})`)}`);
+          cliWriter.line(`    ${schedule}${lastInfo}${next}`);
         }
-        console.log();
+        cliWriter.line("");
       },
     },
     "/exit": {
@@ -646,7 +655,7 @@ function buildSlashCommands(
     "/config": {
       description: "修改基础配置（服务商 / 模型 / API Key / 消息通道等）",
       handler: async (state) => {
-        await handleConfigCommand({ rl, state, session, renderer });
+        await handleConfigCommand({ rl, state, session, renderer, writer: cliWriter });
       },
     },
   };
@@ -668,8 +677,10 @@ function buildSlashCommands(
 function setupBracketedPasteMode(): void {
   // 启用 bracketed paste mode 主要是抑制 Windows Terminal 等终端默认的"多行粘贴
   // 警告"弹窗——paste 检测本身用 keypress batcher（不依赖 markers）。退出时 reset。
+  // allow-direct-stdout: 终端模式控制 ANSI 序列，非文字输出，不经 chrome 协调
   process.stdout.write("\x1b[?2004h");
   process.on("exit", () => {
+    // allow-direct-stdout: process.exit 同步钩子，chrome 已 dispose
     process.stdout.write("\x1b[?2004l");
   });
 }
@@ -690,9 +701,20 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   // 占位符仍可 expand。session 退出时随 startRepl scope 自然 GC，无需显式 clearAll。
   const pasteRegistry = new PasteRegistry();
 
-  // renderer 借给 RuntimeSession——session 内部装配 agent 时通过 closure 注入，
-  // 让 retry / compact / interrupt 渲染前能驱动 spinner.stop() 避免动画覆盖事件
-  const renderer = createOutputRenderer();
+  // 屏幕协调器——cli REPL session 级，所有写入屏幕的逻辑（AI 输出 / status-bar / scheduler
+  // 通知 / retry-compact-interrupt 等）必须经此协调，让输入区 chrome 永驻屏底不被推走。
+  // 在 typeahead 模式下绑定 input controller；其他模式下仅协调 status / scroll。
+  const renderScreen = createScreenController();
+
+  // CliWriter ——所有写屏路径（renderer / RuntimeSession / slash 命令 / scheduler 通知）
+  // 必须经此统一接口，禁止直接 console.log / process.stdout.write。
+  // ScreenWriter 封装 ScreenController frame buffer：line 独立段（自动补 \n），
+  // appendInline 流式接续（不补 \n），notify 异步通知语义（同 line）。
+  const cliWriter: CliWriter = createScreenWriter({ screen: renderScreen });
+
+  // renderer 借给 RuntimeSession——session 内部装配 agent 时通过 closure 注入。
+  // renderer 接收 cliWriter，所有 AI 输出（text/thinking/tool 卡片）经 writer 协调。
+  const renderer = createOutputRenderer({ writer: cliWriter });
 
   // schedulerEventBus 由调用方持有——稳定的"事件集线器"，跨 reload 持久。
   // REPL 在后续订阅 task-completed 等事件；session 内部即使重建 scheduler，
@@ -710,10 +732,12 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     cliModel: options.model,
     cliProvider: options.provider,
     renderer,
+    writer: cliWriter,
+    screen: renderScreen,
     zhixingHome,
     schedulerEventBus,
-    onSecurityBlocked: renderBlockedMessage,
-    onUserDenied: renderUserDeniedMessage,
+    onSecurityBlocked: createBlockedRenderer(cliWriter),
+    onUserDenied: createUserDeniedRenderer(cliWriter),
   });
 
   const cwd = process.cwd();
@@ -728,7 +752,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   let turnCounter = 0;
   // 当前 REPL 接续的对话名称——三个恢复入口（显式 ID / interactive picker /
   // 默认最近）共同写入此变量，最终喂给 welcome chrome 内的锚 row2 inline 渲染，
-  // 替代分散在三处的 console.log("已恢复对话...") 噪音。新会话保持 null →
+  // 替代分散在三处的 cliWriter.line("已恢复对话...") 噪音。新会话保持 null →
   // 锚 row2 退化为仅 glyph。
   let resumedConversationName: string | null = null;
 
@@ -736,7 +760,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     if (typeof options.resume === "string") {
       const conv = await convRepo.get(options.resume);
       if (!conv) {
-        console.log(chalk.red(`\n  对话 "${options.resume}" 不存在\n`));
+        cliWriter.line(chalk.red(`\n  对话 "${options.resume}" 不存在\n`));
         return;
       }
       try {
@@ -746,7 +770,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
         turnCounter = loaded.turnCount;
         resumedConversationName = conv.name;
       } catch (err) {
-        console.log(
+        cliWriter.line(
           chalk.red(
             `\n  无法恢复对话 ${options.resume}: ${err instanceof Error ? err.message : String(err)}\n`,
           ),
@@ -754,7 +778,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
         return;
       }
     } else {
-      const picked = await interactiveConversationPicker(convRepo);
+      const picked = await interactiveConversationPicker(convRepo, cliWriter);
       if (picked) {
         conversationId = picked.id;
         const loaded = await store.load(picked.id);
@@ -800,8 +824,8 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     workspacePath: session.runtime.resolvedWorkspace.path,
     workspaceSource: session.runtime.resolvedWorkspace.source,
   });
-  for (const line of advisoryLines) console.log(line);
-  if (advisoryLines.length > 0) console.log();
+  for (const line of advisoryLines) cliWriter.line(line);
+  if (advisoryLines.length > 0) cliWriter.line("");
 
   for (const line of renderHomeWelcome({
     providerId: session.runtime.providerId,
@@ -809,12 +833,12 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     workspaceRoot: session.runtime.resolvedWorkspace.path ?? undefined,
     resumedConversationName: resumedConversationName ?? undefined,
   })) {
-    console.log(line);
+    cliWriter.line(line);
   }
-  console.log();
+  cliWriter.line("");
 
   // 启动时检测 stale 技能，温和提醒
-  await checkStaleSkills();
+  await checkStaleSkills(cliWriter);
 
   const rl = readline.createInterface({
     input: process.stdin,
@@ -857,7 +881,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     activeTurnPromise: null,
   };
 
-  const slashCommands = buildSlashCommands(rl, session, renderer);
+  const slashCommands = buildSlashCommands(rl, session, renderer, cliWriter);
 
   // ── Typeahead 路径接入（Phase 1 Step 5） ──
   //
@@ -1011,19 +1035,16 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     now: Date.now(),
   });
 
-  // 持久输入区基础设施：
-  //   screen 协调 stdout 写入位置，让输入区 chrome 永驻屏幕底部，AI 输出向上累积
-  //   inputController 长生命周期持有 buffer / chrome / panel / paste，turn 间不 cleanup
-  //   主循环每轮 await inputController.waitOnce() 拿下次用户输入（一次性 promise 风格）
-  let screen: ReturnType<typeof createScreenController> | null = null;
+  // 持久输入区——typeahead 模式下绑定 renderScreen（与 renderer / EventBus 渲染共用同一
+  // 屏幕协调器），inputController 长生命周期持有 buffer / chrome / panel / paste，turn 间不
+  // cleanup；主循环每轮 await inputController.waitOnce() 拿下次用户输入。
   let inputController: InputController | null = null;
   if (useTypeahead && typeaheadBroker && typeaheadDispatcher) {
-    screen = createScreenController();
     inputController = new InputController({
       broker: typeaheadBroker,
       dispatcher: typeaheadDispatcher,
       getRuntime,
-      screen,
+      screen: renderScreen,
       placeholder: "输入消息或 / 查看命令",
       registry: pasteRegistry,
     });
@@ -1048,51 +1069,41 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     renderer.stop();
     // session.dispose 内部 detach renderer + stop scheduler/delivery + dispose channels
     await session.dispose().catch((err) =>
-      console.error("[session.dispose]", err),
+      cliWriter.line(`[session.dispose] ${err instanceof Error ? err.message : String(err)}`),
     );
-    console.log(chalk.dim("\n再见 👋"));
+    cliWriter.line(chalk.dim("\n再见 👋"));
     process.exit(0);
   });
 
   // ── Scheduler 事件 → 终端渲染 ──
   //
   // 任务结果通过 EventBus 通知 REPL，在当前 readline prompt 之上插入通知行。
-  // 与已有的 retry/budget 事件渲染方式一致。
-  const restorePrompt = () => {
-    if (!state.running) {
-      process.stdout.write(chalk.green("❯ "));
-    }
+  // scheduler 通知任意时刻可能触发（含 LLM 流式输出中），走 cliWriter.notify
+  // 表达"异步通知"语义——底层经 frame buffer 协调，chrome 不被推走。
+  const writeScheduledNotice = (text: string): void => {
+    cliWriter.notify(text);
   };
   schedulerEventBus.on("scheduler:task-completed", (info) => {
-    renderer.stop();
-    console.log(
-      chalk.green(`\n  ✓ 任务完成: ${info.name}`) +
+    writeScheduledNotice(
+      chalk.green(`  ✓ 任务完成: ${info.name}`) +
       chalk.dim(` (${Math.round(info.durationMs / 1000)}s)`) +
-      (info.summary ? `\n  ${chalk.dim(info.summary.slice(0, 120))}` : "") +
-      "\n",
+      (info.summary ? `\n  ${chalk.dim(info.summary.slice(0, 120))}` : ""),
     );
-    restorePrompt();
   });
   schedulerEventBus.on("scheduler:task-failed", (info) => {
-    renderer.stop();
-    console.log(
-      chalk.red(`\n  ✗ 任务失败: ${info.name}`) +
+    writeScheduledNotice(
+      chalk.red(`  ✗ 任务失败: ${info.name}`) +
       chalk.dim(` (连续 ${info.consecutiveErrors} 次)`) +
       `\n  ${chalk.dim(info.error.slice(0, 120))}` +
-      (info.nextRunAt ? chalk.dim(`\n  下次重试: ${new Date(info.nextRunAt).toLocaleTimeString()}`) : "") +
-      "\n",
+      (info.nextRunAt ? chalk.dim(`\n  下次重试: ${new Date(info.nextRunAt).toLocaleTimeString()}`) : ""),
     );
-    restorePrompt();
   });
   schedulerEventBus.on("scheduler:task-disabled", (info) => {
-    renderer.stop();
-    console.log(
-      chalk.red(`\n  ⊘ 任务已自动停用: ${info.name}`) +
+    writeScheduledNotice(
+      chalk.red(`  ⊘ 任务已自动停用: ${info.name}`) +
       chalk.dim(`\n  原因: ${info.reason}`) +
-      (info.lastError ? chalk.dim(`\n  最后错误: ${info.lastError.slice(0, 120)}`) : "") +
-      "\n",
+      (info.lastError ? chalk.dim(`\n  最后错误: ${info.lastError.slice(0, 120)}`) : ""),
     );
-    restorePrompt();
   });
 
   // ── 旧/新路径都要处理的"命令 fallthrough 到 legacy slashCommands"助手 ──
@@ -1102,7 +1113,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     const [cmd, ...rest] = trimmed.split(/\s+/);
     const legacy = slashCommands[cmd!];
     if (!legacy) {
-      console.log(
+      cliWriter.line(
         chalk.yellow(`未知命令: ${cmd}`) +
           chalk.dim("  输入 /help 查看帮助\n"),
       );
@@ -1143,7 +1154,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
           continue;
         }
         if (d.kind === "error") {
-          console.log(chalk.red(`命令执行失败: ${d.error.message}\n`));
+          cliWriter.line(chalk.red(`命令执行失败: ${d.error.message}\n`));
           continue;
         }
         if (d.kind === "hybrid") {
@@ -1184,7 +1195,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       resolvedInput = refResult.text;
       if (refResult.errors.length > 0) {
         for (const err of refResult.errors) {
-          console.log(chalk.yellow(`  ⚠ ${err}`));
+          cliWriter.line(chalk.yellow(`  ⚠ ${err}`));
         }
       }
     }
@@ -1230,11 +1241,13 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       // 暴露给 RuntimeSession.reload 流程——reload 在 swap 之前 await 此 promise
       state.activeTurnPromise = runPromise;
       const runResult = await runPromise;
-      const { agentResult, newMessages, durationMs, budget, toolEndCount, injectedSkillIds } = runResult;
+      const { newMessages, toolEndCount, injectedSkillIds } = runResult;
 
       renderer.stop();
       state.lastToolEndCount = toolEndCount;
-      renderSummary(agentResult, durationMs, budget);
+      // turn 终止反馈（耗时 / token / abort 原因 / error 类型 / max_turns）由 status-bar
+      // 单点接管——renderSummary 已移除，避免每条 AI 消息底下重复的 "─ 1.6s" 视觉噪音。
+      // 状态条 done 永驻显示直到下一次 agent:run_start，新 turn 起始覆盖回 thinking。
 
       // 检测 Agent 是否在本轮回复中提议了技能保存/更新
       if (!state.hasProposedSkill) {
@@ -1292,7 +1305,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
           //   b. 简单 append 保证本轮对话对用户完整展示
           //   c. 自愈路径已经覆盖长期状态一致性
           state.messages.push(...newMessages);
-          console.log(
+          cliWriter.line(
             chalk.dim(
               `  [持久化警告] ${err instanceof Error ? err.message : String(err)}`,
             ),
@@ -1310,7 +1323,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       }
     } catch (err) {
       renderer.stop();
-      renderError(err);
+      renderError(err, cliWriter);
       state.messages.pop();
     } finally {
       // 释放 stdin keypress ownership + 卸 SIGINT/SIGTERM listener;
@@ -1328,15 +1341,12 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     }
   }
 
-  // 循环退出后释放持久输入区资源——typeahead path 的 Ctrl+C 由 input.waitOnce()
+  // 循环退出后释放屏幕协调资源——typeahead path 的 Ctrl+C 由 input.waitOnce()
   // 捕获并 resolve cancelled，break 跳出循环后此处真正释放 input + screen。
-  // Legacy path 这两个变量为 null，操作幂等。
   if (inputController) {
     inputController.stop();
   }
-  if (screen) {
-    screen.dispose();
-  }
+  renderScreen.dispose();
 
   // 关闭 readline——typeahead 路径下 break 跳出循环后必须显式 close，否则 readline 持
   // stdin 让事件循环不空，进程不退出。Legacy 路径下 readline 已 close，幂等 no-op。
@@ -1354,6 +1364,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
  */
 async function interactiveConversationPicker(
   convRepo: ConversationRepository,
+  cliWriter: CliWriter,
 ): Promise<Conversation | null> {
   const conversations = await convRepo.list();
   if (conversations.length === 0) {
@@ -1366,17 +1377,17 @@ async function interactiveConversationPicker(
     terminal: true,
   });
 
-  console.log(`\n${chalk.bold("选择要恢复的会话：")}`);
+  cliWriter.line(`\n${chalk.bold("选择要恢复的会话：")}`);
   const displayed = conversations.slice(0, 10);
   for (let i = 0; i < displayed.length; i++) {
     const c = displayed[i]!;
     const label = c.name ? chalk.white(c.name) : chalk.dim("(未命名)");
     const time = formatRelativeTime(new Date(c.lastActiveAt));
-    console.log(
+    cliWriter.line(
       `  ${chalk.cyan(String(i + 1).padStart(2))}. [${c.id}] ${label} ${chalk.dim(`(${time})`)}`,
     );
   }
-  console.log(`  ${chalk.dim(" 0. 新建会话")}`);
+  cliWriter.line(`  ${chalk.dim(" 0. 新建会话")}`);
 
   try {
     const answer = await rl.question(chalk.green("\n选择 (1-10, 0=新建): "));
@@ -1395,14 +1406,17 @@ async function interactiveConversationPicker(
 
 // ─── /skills audit ───
 
-async function renderSkillsAudit(store: SkillsStore): Promise<void> {
+async function renderSkillsAudit(
+  store: SkillsStore,
+  cliWriter: CliWriter,
+): Promise<void> {
   const [active, archived] = await Promise.all([
     store.listAll(),
     store.listArchived(),
   ]);
 
   if (active.length === 0 && archived.length === 0) {
-    console.log(chalk.dim("\n  技能库为空，无需审查。\n"));
+    cliWriter.line(chalk.dim("\n  技能库为空，无需审查。\n"));
     return;
   }
 
@@ -1410,64 +1424,64 @@ async function renderSkillsAudit(store: SkillsStore): Promise<void> {
   const staleList = active.filter((s) => store.getStatus(s) === "stale");
   const needsUpdate = active.filter((s) => s.meta.effectiveness === "needs-update");
 
-  console.log(`\n${chalk.bold("  📊 技能库健康报告")}\n`);
-  console.log(`  ${chalk.green("●")} 活跃 (Active):  ${activeList.length} 个`);
-  console.log(`  ${chalk.yellow("○")} 沉寂 (Stale):   ${staleList.length} 个`);
-  console.log(`  ${chalk.dim("◌")} 归档 (Archived): ${archived.length} 个`);
+  cliWriter.line(`\n${chalk.bold("  📊 技能库健康报告")}\n`);
+  cliWriter.line(`  ${chalk.green("●")} 活跃 (Active):  ${activeList.length} 个`);
+  cliWriter.line(`  ${chalk.yellow("○")} 沉寂 (Stale):   ${staleList.length} 个`);
+  cliWriter.line(`  ${chalk.dim("◌")} 归档 (Archived): ${archived.length} 个`);
 
   if (needsUpdate.length > 0) {
-    console.log(`  ${chalk.red("!")} 待更新:          ${needsUpdate.length} 个`);
+    cliWriter.line(`  ${chalk.red("!")} 待更新:          ${needsUpdate.length} 个`);
   }
 
   if (staleList.length > 0) {
-    console.log(chalk.yellow(`\n  沉寂技能（超过 90 天未使用）：`));
+    cliWriter.line(chalk.yellow(`\n  沉寂技能（超过 90 天未使用）：`));
     for (const skill of staleList) {
       const lastUsed = skill.meta.lastUsedAt ?? skill.meta.created;
       const daysSince = Math.floor(
         (Date.now() - new Date(lastUsed).getTime()) / 86400000,
       );
-      console.log(
+      cliWriter.line(
         `  ${chalk.yellow("○")} ${skill.meta.title}` +
           chalk.dim(` (${skill.id})`) +
           chalk.dim(` · 使用 ${skill.meta.useCount} 次 · ${daysSince} 天前`),
       );
     }
-    console.log(chalk.dim(`\n  操作: /skills archive <id>  归档`));
-    console.log(chalk.dim(`        /skills delete <id>   删除`));
+    cliWriter.line(chalk.dim(`\n  操作: /skills archive <id>  归档`));
+    cliWriter.line(chalk.dim(`        /skills delete <id>   删除`));
   }
 
   if (needsUpdate.length > 0) {
-    console.log(chalk.red(`\n  效果存疑（用户反馈过时或有误）：`));
+    cliWriter.line(chalk.red(`\n  效果存疑（用户反馈过时或有误）：`));
     for (const skill of needsUpdate) {
-      console.log(
+      cliWriter.line(
         `  ${chalk.red("!")} ${skill.meta.title}` +
           chalk.dim(` (${skill.id})`) +
           chalk.dim(` · v${skill.meta.version} · 使用 ${skill.meta.useCount} 次`),
       );
     }
-    console.log(chalk.dim(`\n  提示: 对话中提到该技能场景，AI 会自动提议更新`));
+    cliWriter.line(chalk.dim(`\n  提示: 对话中提到该技能场景，AI 会自动提议更新`));
   }
 
   if (archived.length > 0) {
-    console.log(chalk.dim(`\n  归档技能：`));
+    cliWriter.line(chalk.dim(`\n  归档技能：`));
     for (const skill of archived) {
-      console.log(
+      cliWriter.line(
         chalk.dim(`  ◌ ${skill.meta.title} (${skill.id})`),
       );
     }
-    console.log(chalk.dim(`\n  操作: /skills restore <id>  恢复`));
+    cliWriter.line(chalk.dim(`\n  操作: /skills restore <id>  恢复`));
   }
 
   if (staleList.length === 0 && needsUpdate.length === 0) {
-    console.log(chalk.green(`\n  ✓ 所有技能状态健康`));
+    cliWriter.line(chalk.green(`\n  ✓ 所有技能状态健康`));
   }
 
-  console.log();
+  cliWriter.line("");
 }
 
 // ─── 工具函数 ───
 
-async function checkStaleSkills(): Promise<void> {
+async function checkStaleSkills(cliWriter: CliWriter): Promise<void> {
   try {
     const skillsStore = new SkillsStore();
     const all = await skillsStore.listAll();
@@ -1485,7 +1499,7 @@ async function checkStaleSkills(): Promise<void> {
     }
 
     if (issues.length > 0) {
-      console.log(
+      cliWriter.line(
         chalk.dim(`  💡 ${issues.join("，")}。输入 /skills audit 查看详情\n`),
       );
     }

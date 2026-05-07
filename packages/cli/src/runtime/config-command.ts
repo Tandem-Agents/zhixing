@@ -27,6 +27,7 @@ import {
   writeCredentials,
 } from "@zhixing/providers";
 import { ALL_SECTION_IDS, runConfigEditor } from "../config-editor/index.js";
+import type { CliWriter } from "../screen/index.js";
 import type { RuntimeSession } from "./session.js";
 import type { ReloadResult } from "./types.js";
 
@@ -40,12 +41,14 @@ export interface ConfigCommandDeps {
   session: RuntimeSession;
   /** 仅 stop 接口——结构子类型，与 cli/render 的 Renderer 实现兼容 */
   renderer: { stop: () => void };
+  /** 写屏 sink——所有反馈（成功 / 失败 / 防御性提示）经此协调，避免推走 chrome */
+  writer: CliWriter;
 }
 
 export async function handleConfigCommand(
   deps: ConfigCommandDeps,
 ): Promise<void> {
-  const { rl, state, session, renderer } = deps;
+  const { rl, state, session, renderer, writer } = deps;
 
   // 让出 stdin 给编辑器：先停 spinner（避免动画覆盖编辑器面板），再 pause readline
   renderer.stop();
@@ -96,14 +99,12 @@ export async function handleConfigCommand(
         break;
       case "non-tty":
         // REPL 必为 TTY，正常路径不会到达；防御性提示
-        console.log(
-          chalk.yellow("当前终端非 TTY，无法启动配置编辑器"),
-        );
+        writer.line(chalk.yellow("当前终端非 TTY，无法启动配置编辑器"));
         break;
     }
   } catch (err) {
     // /config 处理本身异常（罕见——alt screen 切换 / TTY 异常）
-    console.log(
+    writer.line(
       chalk.red(
         `⚠ 配置编辑器异常：${err instanceof Error ? err.message : String(err)}`,
       ),
@@ -111,29 +112,26 @@ export async function handleConfigCommand(
   } finally {
     rl.resume();
   }
-}
 
-/** 透明性反馈——三种 ReloadResult 各有专属文案，让用户清晰感知"改了什么 / 何时生效" */
-function renderReloadFeedback(result: ReloadResult): void {
-  switch (result.kind) {
-    case "no-change":
-      console.log(chalk.dim("(无变更)"));
-      break;
-    case "applied": {
-      const domains = result.changedDomains.join(" + ");
-      console.log(
-        chalk.green(
-          `✓ 配置已保存。下条消息使用新配置（${domains}）。`,
-        ),
-      );
-      break;
+  function renderReloadFeedback(result: ReloadResult): void {
+    switch (result.kind) {
+      case "no-change":
+        writer.line(chalk.dim("(无变更)"));
+        break;
+      case "applied": {
+        const domains = result.changedDomains.join(" + ");
+        writer.line(
+          chalk.green(`✓ 配置已保存。下条消息使用新配置（${domains}）。`),
+        );
+        break;
+      }
+      case "failed":
+        writer.line(
+          chalk.yellow(
+            `⚠ 配置已保存但应用失败：${result.error.message}。下次启动生效。`,
+          ),
+        );
+        break;
     }
-    case "failed":
-      console.log(
-        chalk.yellow(
-          `⚠ 配置已保存但应用失败：${result.error.message}。下次启动生效。`,
-        ),
-      );
-      break;
   }
 }

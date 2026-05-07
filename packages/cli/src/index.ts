@@ -12,12 +12,19 @@ import { setDiagnosticLogger } from "@zhixing/core";
 import { runStartupCheck, type StartupCheckResult } from "./startup.js";
 import { runOnce } from "./run-agent.js";
 import { startRepl } from "./repl.js";
-import { renderSummary, renderError } from "./render.js";
+import { renderError } from "./render.js";
+import { createStdoutWriter } from "./screen/index.js";
 import { runServeCommand } from "./serve/command.js";
 import { runStopCommand } from "./serve/stop.js";
 import { runStatusCommand } from "./serve/status.js";
 import { runLogsCommand } from "./serve/logs.js";
 import { runRpcCommand, printRpcHelp } from "./rpc/command.js";
+
+/**
+ * 顶层 stdout writer——cli 入口的错误路径 / 启动期渲染没有 ScreenController（chrome
+ * 未创建），用 stdout writer 直写。各子命令进入交互模式时各自创建 ScreenWriter。
+ */
+const stdoutWriter = createStdoutWriter();
 
 /**
  * 处理 ensureBootstrap 非 ready 状态：报错退出或 cancel 退出。
@@ -94,14 +101,15 @@ program
       handleStartupResult(startupResult);
 
       if (options.print) {
-        // runOnce 内部自管 renderer / spinner / 渲染装饰,调用方仅传入业务参数。
-        const { agentResult, durationMs } = await runOnce({
+        // runOnce 内部自管 renderer / 渲染装饰,调用方仅传入业务参数。
+        // turn 终止反馈由 status-bar 单点接管（runOnce 无 status-bar——用户看到 stdout
+        // 流式输出 + shell prompt 即知 turn 结束，无需额外摘要行）。
+        await runOnce({
           prompt: options.print,
           model: options.model,
           provider: options.provider,
           workspace: options.workspace,
         });
-        renderSummary(agentResult, durationMs);
         process.exit(0);
       }
 
@@ -114,7 +122,7 @@ program
         name: options.name,
       });
     } catch (err) {
-      renderError(err);
+      renderError(err, stdoutWriter);
       process.exit(1);
     }
   });
@@ -168,7 +176,7 @@ program
       });
       process.exit(exitCode);
     } catch (err) {
-      renderError(err);
+      renderError(err, stdoutWriter);
       process.exit(2);
     }
   });
@@ -202,7 +210,7 @@ const serveCmd = program
       });
       process.exit(0);
     } catch (err) {
-      renderError(err);
+      renderError(err, stdoutWriter);
       process.exit(1);
     }
   });
@@ -218,7 +226,7 @@ serveCmd
       const exitCode = result.status === "error" ? 1 : 0;
       process.exit(exitCode);
     } catch (err) {
-      renderError(err);
+      renderError(err, stdoutWriter);
       process.exit(1);
     }
   });
@@ -234,7 +242,7 @@ serveCmd
       await runLogsCommand({ tail: options.tail, lines: options.lines });
       process.exit(0);
     } catch (err) {
-      renderError(err);
+      renderError(err, stdoutWriter);
       process.exit(1);
     }
   });
@@ -258,7 +266,7 @@ serveCmd
               : 3;
       process.exit(exitCode);
     } catch (err) {
-      renderError(err);
+      renderError(err, stdoutWriter);
       process.exit(1);
     }
   });
@@ -272,6 +280,6 @@ if (dashIdx !== -1) {
 }
 
 program.parseAsync(argv).catch((err: unknown) => {
-  renderError(err);
+  renderError(err, stdoutWriter);
   process.exit(1);
 });

@@ -12,6 +12,7 @@ import type { CreateAgentRuntimeOptions } from "@zhixing/orchestrator/runtime";
 import type { ZhixingConfig, ZhixingCredentials } from "@zhixing/providers";
 import type { IEventBus, SchedulerEventMap } from "@zhixing/core";
 import type { OutputRenderer } from "../output/index.js";
+import type { CliWriter, ScreenController } from "../screen/index.js";
 
 /** 从 createAgentRuntime 公共契约推导 callback 类型——避免依赖 orchestrator 内部路径 */
 type OnSecurityBlockedFn = NonNullable<CreateAgentRuntimeOptions["onSecurityBlocked"]>;
@@ -29,6 +30,16 @@ export interface RuntimeSessionOptions {
 
   /** 顶层资源——session 借用，不在 dispose 中关闭 */
   renderer: OutputRenderer;
+  /**
+   * 写屏统一接口——所有 EventBus 事件渲染（retry / compact / interrupt 等）经此协调。
+   * REPL 模式注入 ScreenWriter（chrome 协调），runOnce 注入 StdoutWriter（直写）。
+   */
+  writer: CliWriter;
+  /**
+   * 屏幕协调器——cli REPL 模式下注入，启用 status-bar 动态状态展示；
+   * 非 REPL 模式（runOnce）可省略，status-bar 不启用，事件渲染仍经 writer 正常工作。
+   */
+  screen?: ScreenController;
   zhixingHome: string;
   /**
    * Scheduler 事件总线——稳定的"事件集线器"，跨 reload 持久。

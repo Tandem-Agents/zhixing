@@ -55,9 +55,10 @@ import { createScheduleTool } from "@zhixing/tools-builtin";
 import chalk from "chalk";
 import { createAgentRuntime } from "@zhixing/orchestrator/runtime";
 import { createRenderSubscribers } from "../render.js";
+import { createStdoutWriter } from "../screen/index.js";
 import {
-  renderBlockedMessage,
-  renderUserDeniedMessage,
+  createBlockedRenderer,
+  createUserDeniedRenderer,
 } from "../security/index.js";
 import { setupDelivery, type DeliveryStack } from "../setup-delivery.js";
 import { setupChannels } from "./channels.js";
@@ -190,9 +191,11 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   };
 
   // serve 模式无 spinner —— 不传 renderer,pauseUI 退化为 no-op。
-  // 工厂结果在多个 runtime 之间共享:每次 runtime.run() 各自装配独立 listener,
-  // 工厂自身无跨 run 状态,共享安全且节省一次函数创建开销。
-  const renderDecorator = createRenderSubscribers();
+  // 写屏走 stdout writer（serve 是后台 daemon 无 chrome），retry/compact 等事件
+  // 直接打到 stdout 日志。工厂结果在多个 runtime 之间共享:每次 runtime.run() 各自
+  // 装配独立 listener,工厂自身无跨 run 状态,共享安全且节省一次函数创建开销。
+  const serveWriter = createStdoutWriter();
+  const renderDecorator = createRenderSubscribers({ writer: serveWriter });
 
   // 3a. ConfirmationHub —— 远程权限确认聚合层（remote-confirmation-execution.md §3.2）
   //   在 ConversationManager / setupChannels / ephemeralRuntime / ServerContext 之前创建，
@@ -211,8 +214,8 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
         workspace: opts.workspace,
         extraTools: [scheduleTool],
         decorateRunBus: renderDecorator,
-        onSecurityBlocked: renderBlockedMessage,
-        onUserDenied: renderUserDeniedMessage,
+        onSecurityBlocked: createBlockedRenderer(serveWriter),
+        onUserDenied: createUserDeniedRenderer(serveWriter),
         // 持久会话路径同样开启 Task:渠道下游(飞书/RPC)可看到子 agent
         // 冒泡事件,renderDecorator 在非 TTY 模式下退化为只输出 Task 起止帧
         // (子工具中间事件静默,避免日志爆炸)。
@@ -324,8 +327,8 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     workspace: opts.workspace,
     extraTools: [createScheduleTool(getSchedulerRef, () => null)],
     decorateRunBus: renderDecorator,
-    onSecurityBlocked: renderBlockedMessage,
-    onUserDenied: renderUserDeniedMessage,
+    onSecurityBlocked: createBlockedRenderer(serveWriter),
+    onUserDenied: createUserDeniedRenderer(serveWriter),
     // 定时任务的 ephemeral 执行路径同样开启 Task:让自动化任务也能派发子 agent
     // 隔离子任务(并发探查 / 大文档检索 / 复杂工具链),与持久会话能力对齐。
     enableTaskTool: true,

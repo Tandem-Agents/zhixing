@@ -24,7 +24,9 @@
  */
 
 import type {
+  AbortReason,
   AgentEventMap,
+  AgentErrorType,
   EventMeta,
   IEventBus,
 } from "@zhixing/core";
@@ -34,6 +36,7 @@ import {
   COMPLETED_GLYPH,
   formatDuration,
   formatTokens,
+  formatAbortReasonShort,
   VERBS,
 } from "./verbs.js";
 import { tone } from "../tui/style.js";
@@ -41,9 +44,6 @@ import { getToolRenderStrategy } from "../tool-render-strategy.js";
 
 /** 状态条节流频率——动画帧 + 计时秒进位都靠这个 tick 推动 */
 const TICK_INTERVAL_MS = 250;
-
-/** 完成态显示后停留多久才隐藏（让用户看清最终时长 / token） */
-const DONE_LINGER_MS = 1500;
 
 interface RunningState {
   startTime: number;
@@ -70,12 +70,35 @@ interface RetryingState extends RunningState {
   errorType: string;
 }
 
-interface DoneState {
+interface InterruptingState extends RunningState {
+  /** watchdog 自动中断的截止时刻（epoch ms）——用于显示倒计时秒数 */
+  deadline: number;
+}
+
+interface DoneStateBase {
   durationMs: number;
   inputTokens: number;
   outputTokens: number;
-  shownAt: number;
 }
+
+/**
+ * Done 状态变体——按 AgentRunEndReason 差异化展示，让 status-bar 单点接管所有 turn
+ * 终止反馈（取代 renderSummary 在每条 AI 消息底下重复打印）。永驻显示直到下一次
+ * agent:run_start 切换到 thinking。
+ */
+type DoneState =
+  | (DoneStateBase & { reason: "completed" })
+  | (DoneStateBase & {
+      reason: "aborted";
+      /** abort 原因——从 interrupt:fired 事件捕获，外部裸 abort 时为 null */
+      abortReason: AbortReason | null;
+    })
+  | (DoneStateBase & {
+      reason: "error";
+      errorType: AgentErrorType | null;
+      errorMessage: string | null;
+    })
+  | (DoneStateBase & { reason: "max_turns" });
 
 type Phase =
   | { kind: "idle" }
@@ -85,6 +108,7 @@ type Phase =
   | ({ kind: "task" } & TaskState)
   | ({ kind: "compacting" } & CompactingState)
   | ({ kind: "retrying" } & RetryingState)
+  | ({ kind: "interrupting" } & InterruptingState)
   | ({ kind: "done" } & DoneState);
 
 export interface StatusBarHandle {
@@ -101,7 +125,11 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
   let phase: Phase = { kind: "idle" };
   let taskCounter = 0;
   let ticker: ReturnType<typeof setInterval> | null = null;
-  let doneTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * 最近一次 interrupt:fired 捕获的 abort 原因——abort 路径上 fired 严格在 run_end
+   * 之前发出，run_end 时读取此字段构造 done(aborted) 状态；非 abort 路径不会被读取。
+   */
+  let lastAbortReason: AbortReason | null = null;
 
   const isMainLineage = (meta?: EventMeta): boolean =>
     meta?.lineage === "main";
@@ -120,20 +148,11 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
     }
   };
 
-  const clearDoneTimer = (): void => {
-    if (doneTimer !== null) {
-      clearTimeout(doneTimer);
-      doneTimer = null;
-    }
-  };
-
   const repaint = (): void => {
     const lines = renderPhase(phase);
     screen.setStatusBar(lines);
-    if (
-      phase.kind === "idle" ||
-      (phase.kind === "done" && doneTimer === null)
-    ) {
+    // ticker 仅在"running"状态需要驱动 spinner / 时间累计；idle / done 是静态文本，停 ticker
+    if (phase.kind === "idle" || phase.kind === "done") {
       stopTicker();
     }
   };
@@ -141,8 +160,8 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
   // ─── EventBus 订阅 ───
 
   const offRunStart = eventBus.on("agent:run_start", () => {
-    clearDoneTimer();
     taskCounter = 0;
+    lastAbortReason = null;
     phase = makeRunning("thinking", Date.now());
     ensureTicker();
     repaint();
@@ -305,24 +324,66 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
     }
   });
 
-  const offRunEnd = eventBus.on("agent:run_end", (payload) => {
-    const rs = isPhaseRunning(phase) ? currentRunning(phase) : null;
+  const offInterruptWarn = eventBus.on("interrupt:warn", (payload) => {
+    if (!isPhaseRunning(phase)) return;
+    const rs = currentRunning(phase);
     phase = {
-      kind: "done",
-      durationMs: payload.duration,
-      inputTokens:
-        payload.usage.inputTokens ?? rs?.inputTokens ?? 0,
-      outputTokens:
-        payload.usage.outputTokens ?? rs?.outputTokens ?? 0,
-      shownAt: Date.now(),
+      kind: "interrupting",
+      startTime: rs.startTime,
+      outputTokens: rs.outputTokens,
+      inputTokens: rs.inputTokens,
+      deadline: Date.now() + (payload.timeoutMs - payload.elapsedMs),
     };
     repaint();
-    clearDoneTimer();
-    doneTimer = setTimeout(() => {
-      doneTimer = null;
-      phase = { kind: "idle" };
+  });
+
+  // abort 路径上 interrupt:fired 严格在 agent:run_end 之前发出——捕获 reason 用于
+  // 构造 done(aborted) 状态。非 abort 路径此事件不会触发，lastAbortReason 保持 null。
+  const offInterruptFired = eventBus.on("interrupt:fired", (payload) => {
+    lastAbortReason = payload.reason;
+  });
+
+  const offStreamEventForRecovery = eventBus.on("llm:stream_event", () => {
+    // 流恢复活跃 → 退出 interrupting 回到 streaming
+    if (phase.kind === "interrupting") {
+      phase = transitionTo(phase, "streaming");
       repaint();
-    }, DONE_LINGER_MS);
+    }
+  });
+
+  const offRunEnd = eventBus.on("agent:run_end", (payload) => {
+    const rs = isPhaseRunning(phase) ? currentRunning(phase) : null;
+    const base: DoneStateBase = {
+      durationMs: payload.duration,
+      inputTokens: payload.usage.inputTokens ?? rs?.inputTokens ?? 0,
+      outputTokens: payload.usage.outputTokens ?? rs?.outputTokens ?? 0,
+    };
+    let doneState: DoneState;
+    switch (payload.reason) {
+      case "completed":
+        doneState = { ...base, reason: "completed" };
+        break;
+      case "aborted":
+        doneState = { ...base, reason: "aborted", abortReason: lastAbortReason };
+        break;
+      case "error":
+        doneState = {
+          ...base,
+          reason: "error",
+          errorType: payload.errorType ?? null,
+          errorMessage: payload.error ?? null,
+        };
+        break;
+      case "max_turns":
+        doneState = { ...base, reason: "max_turns" };
+        break;
+    }
+    phase = { kind: "done", ...doneState };
+    lastAbortReason = null;
+    repaint();
+    // done 永驻显示——直到下一次 agent:run_start 切换到 thinking。
+    // 不再 1.5s linger 后隐藏；status-bar 单点接管所有 turn 终止反馈，让 chrome
+    // 永远展示最新 turn 状态（启动后第一次 run 之前 phase=idle，setStatusBar(null)）。
   });
 
   return {
@@ -336,10 +397,17 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
       offCompactEnd();
       offRetryAttempt();
       offRetrySuccess();
+      offInterruptWarn();
+      offInterruptFired();
+      offStreamEventForRecovery();
       offRunEnd();
       stopTicker();
-      clearDoneTimer();
-      screen.setStatusBar(null);
+      // done 状态保留显示——status-bar 是终止反馈的单一事实源，dispose 不该清掉它。
+      // 下一次 createRenderSubscribers 装载新 status-bar 后，其 agent:run_start handler
+      // 会用 thinking 状态自然覆盖。非 done 状态（如异常退出在 thinking）清空避免假状态留屏。
+      if (phase.kind !== "done") {
+        screen.setStatusBar(null);
+      }
     },
   };
 }
@@ -351,9 +419,7 @@ function renderPhase(phase: Phase): readonly string[] | null {
   const now = Date.now();
 
   if (phase.kind === "done") {
-    const head = `${tone.brand(COMPLETED_GLYPH)} ${VERBS.done(phase.durationMs)}`;
-    const tail = renderTokens(phase.inputTokens, phase.outputTokens);
-    return [tail.length > 0 ? `${head} ${tone.dim(`(${tail})`)}` : head];
+    return [renderDonePhase(phase)];
   }
 
   const spinner = tone.brand(spinnerFrame(now));
@@ -398,6 +464,14 @@ function renderPhase(phase: Phase): readonly string[] | null {
       outputTokens = phase.outputTokens;
       extra = `第 ${phase.attempt}/${phase.maxRetries} 次`;
       break;
+    case "interrupting": {
+      mainText = VERBS.interrupting;
+      inputTokens = phase.inputTokens;
+      outputTokens = phase.outputTokens;
+      const remainSec = Math.max(0, Math.ceil((phase.deadline - now) / 1000));
+      extra = `${remainSec}s 后自动取消`;
+      break;
+    }
   }
 
   const parts: string[] = [elapsed];
@@ -414,6 +488,41 @@ function renderTokens(inputTokens: number, outputTokens: number): string {
   if (inputTokens > 0) segs.push(`↑ ${formatTokens(inputTokens)}`);
   if (outputTokens > 0) segs.push(`↓ ${formatTokens(outputTokens)}`);
   return segs.join(" ");
+}
+
+/**
+ * Done 状态行渲染——按 AgentRunEndReason 差异化 glyph + 文案，单一事实源接管
+ * 所有 turn 终止反馈（completed / aborted / error / max_turns）。
+ *
+ *   completed  → ✻ 用时 1.6s (↑ 12k ↓ 3k)
+ *   aborted    → ⏵ 已中断 (esc) · 1.6s (↑ 12k ↓ 3k)
+ *   error      → ✗ 错误 (rate_limit) · 1.6s
+ *   max_turns  → ⚠ 达到 turn 上限 · 1.6s (↑ 12k ↓ 3k)
+ */
+function renderDonePhase(phase: Phase & { kind: "done" }): string {
+  const tail = renderTokens(phase.inputTokens, phase.outputTokens);
+  const tailSuffix = tail.length > 0 ? ` ${tone.dim(`(${tail})`)}` : "";
+
+  switch (phase.reason) {
+    case "completed": {
+      const head = `${tone.brand(COMPLETED_GLYPH)} ${VERBS.done(phase.durationMs)}`;
+      return `${head}${tailSuffix}`;
+    }
+    case "aborted": {
+      const reasonText = formatAbortReasonShort(phase.abortReason);
+      const head = `${tone.dim("⏵")} ${tone.dim(`已中断 (${reasonText}) · ${formatDuration(phase.durationMs)}`)}`;
+      return `${head}${tailSuffix}`;
+    }
+    case "error": {
+      const errLabel = phase.errorType ?? "unknown";
+      const head = `✗ ${tone.dim(`错误 (${errLabel}) · ${formatDuration(phase.durationMs)}`)}`;
+      return head;
+    }
+    case "max_turns": {
+      const head = `⚠ ${tone.dim(`达到 turn 上限 · ${formatDuration(phase.durationMs)}`)}`;
+      return `${head}${tailSuffix}`;
+    }
+  }
 }
 
 // ─── 状态机 helpers ───

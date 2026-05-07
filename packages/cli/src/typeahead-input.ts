@@ -686,11 +686,14 @@ export class InputController implements InputRegion {
 
   private echoSubmittedDraft(rawDraft: string): void {
     const echoLines = this.buildHistoryEchoLines(rawDraft);
+    if (echoLines.length === 0) return;
     this.screen.withScrollWrite((write) => {
       for (const line of echoLines) {
         write(line);
         write("\n");
       }
+      // 段间空行——用户消息和后续 AI 回复 / 反馈之间留 1 行视觉间距
+      write("\n");
     });
   }
 

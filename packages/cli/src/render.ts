@@ -3,37 +3,44 @@
  *
  * 主流程的 AgentYield 流（text / thinking / tool / turn_complete）由 output/ 子模块
  * 的 createOutputRenderer 接管；本文件保留剩余的"非流式"渲染：
- *   - renderSummary：每轮结束摘要行（耗时 / 上下文 / 中断 / 错误 / max_turns 差异化）
- *   - renderError：异常错误渲染
+ *   - renderError：catch 路径 unexpected 异常的兜底
  *   - renderUsageReport / renderContextVisual：/usage 与 /context 命令的可视化
  *   - renderRetry* / renderBudgetStatus / renderCompact*：EventBus 订阅型事件渲染
- *   - setupInterruptRendering：中断 EventBus 订阅渲染
+ *   - setupInterruptRendering：中断 EventBus 订阅渲染（warn 单次提示 / fired [interrupted] 标记）
  *   - createRenderSubscribers：装载 EventBus 渲染订阅的工厂
+ *   - formatAbortReasonSummary：abort 原因诊断文本（供 status-bar / log 共用）
  *
- * 这些函数与 createOutputRenderer 互不耦合，由 repl / run-agent 各自调用。
+ * 注：turn 终止反馈（completed / aborted / error / max_turns 摘要）由 status-bar 单点
+ * 接管——renderSummary 已移除。status-bar done 状态永驻显示直到下一次 run_start。
+ *
+ * 写屏统一经 CliWriter——caller 注入 ScreenWriter（cli REPL 模式协调 chrome）或
+ * StdoutWriter（runOnce / 非交互），渲染函数本身不关心后端。这是 chrome 持久不变量的
+ * 类型层强制：函数签名要求 writer 参数，禁止内部直接 console.log / process.stdout.write。
  */
 
 import chalk from "chalk";
 import {
   type AbortReason,
   type AgentEventMap,
-  type AgentResult,
   type ContextBudget,
   type IEventBus,
 } from "@zhixing/core";
 import type { DecorateRunBusFn } from "@zhixing/orchestrator/runtime";
 import type { SubAgentUsageEntry } from "./parse-task-usage.js";
-import { setupSubAgentStatus } from "./sub-agent-status.js";
 import type { OutputRenderer } from "./output/index.js";
+import type { CliWriter, ScreenController } from "./screen/index.js";
+import {
+  createStatusBar,
+  type StatusBarHandle,
+} from "./status-bar/index.js";
 
 // ─── 中断诊断文本 ───
 
 /**
- * 把 AbortReason 渲染为一行用户可读的诊断文本。
+ * 把 AbortReason 渲染为一行用户可读的诊断文本——完整版（用于日志 / 终端摘要）。
  *
- * 用于:
- * - renderSummary 在 abort 路径显示差异化文本(reason 来自 AgentResult.abortReason)
- * - setupInterruptRendering 在 interrupt:fired 事件触发时显示中断原因
+ * status-bar 用 verbs.formatAbortReasonShort 取简短标签（空间有限）；本函数返回
+ * 完整诊断文本（如 "interrupted by user (esc)"），供 server 日志 / serve 通知 / 测试断言。
  *
  * `null` / `undefined` 路径对应"外部 signal 直接 abort 但无类型化 reason"
  * (裸 AbortController.abort() / 非本模块识别的 reason),返回兜底文本"interrupted"
@@ -66,83 +73,6 @@ export function formatAbortReasonSummary(
   }
 }
 
-// ─── 运行结果摘要 ───
-
-/**
- * 渐进式每轮摘要行。
- *
- * 终止类型差异化:
- *   - completed:    时间 + 上下文(渐进密度)
- *   - aborted:      "interrupted by ..."(reason 差异化文本) + 时间
- *   - max_turns:    "max turns reached (N)"(不读 abortReason —— 与 abort 体系平行)
- *   - error:        "error: <type> - <message>" + 时间
- *
- * 上下文信息密度随使用率递增(仅 completed 路径):
- *   < 50%  安静期: 只显示耗时
- *   50~75% 感知期: 耗时 + 上下文百分比(dim)
- *   75~85% 警示期: 耗时 + 黄色警告百分比
- *   > 85%  紧急期: 耗时 + 红色警告百分比
- */
-export function renderSummary(
-  result: AgentResult,
-  durationMs: number,
-  budget?: ContextBudget,
-): void {
-  const duration = (durationMs / 1000).toFixed(1);
-
-  // abort 路径: reason 差异化文本(yellow), 不混入 budget 显示
-  if (result.reason === "aborted") {
-    const summary = formatAbortReasonSummary(result.abortReason);
-    console.log(`\n${chalk.dim("─")} ${chalk.yellow(summary)} ${chalk.dim(`· ${duration}s`)}`);
-    return;
-  }
-
-  // max_turns 路径: 显示上限值 (来自 result 自描述, 单一事实源)
-  // 与 abort 体系平行 —— "达到上限" vs "被中断" 语义独立, 不读 abortReason
-  if (result.reason === "max_turns") {
-    console.log(
-      `\n${chalk.dim("─")} ${chalk.yellow(`max turns reached (${result.maxTurns})`)} ${chalk.dim(`· ${duration}s`)}`,
-    );
-    return;
-  }
-
-  // error 路径: 错误类型 + 消息
-  if (result.reason === "error") {
-    const errType = result.error.type ?? "unknown";
-    console.log(
-      `\n${chalk.dim("─")} ${chalk.red(`error: ${errType}`)} ${chalk.dim(`· ${duration}s`)}`,
-    );
-    return;
-  }
-
-  // completed 路径: 渐进式信息密度
-  const parts: string[] = [chalk.dim(`${duration}s`)];
-
-  if (budget) {
-    const pct = Math.round(budget.usageRatio * 100);
-    const contextLabel = `上下文 ${pct}%`;
-
-    switch (budget.status) {
-      case "critical":
-        parts.push(chalk.red(`🔴 ${contextLabel}`));
-        break;
-      case "compact":
-        parts.push(chalk.yellow(`⚠ ${contextLabel}`));
-        break;
-      case "warning":
-        parts.push(chalk.yellow(`⚠ ${contextLabel}`));
-        break;
-      case "normal":
-        if (budget.usageRatio >= 0.5) {
-          parts.push(chalk.dim(contextLabel));
-        }
-        break;
-    }
-  }
-
-  console.log(`\n${chalk.dim("─")} ${parts.join(chalk.dim(" · "))}`);
-}
-
 // ─── 中断 EventBus 渲染编排 ───
 
 /**
@@ -152,128 +82,47 @@ export interface InterruptRenderingHandle {
   dispose(): void;
 }
 
-/** stderr 倒计时行清空宽度 (覆盖最长 "  ⚠ stream slow, will auto-cancel in 30s..." 含 chalk 控制字符余量) */
-const WARN_LINE_CLEAR_WIDTH = 60;
-
 /**
- * 装载 EventBus 中断事件 → 终端可视反馈:
+ * 装载 EventBus 中断事件 → 终端可视反馈：
  *
- * - `interrupt:warn` → 启动每秒倒计时, 输出 "stream slow, will auto-cancel in Ns..."。
- *   - **TTY 模式**: \r 原地刷新单行 (避免每秒多输出一行刷屏)
- *   - **非 TTY 模式**: 仅输出一次警告, 不 ticker (CI / 日志重定向场景日志不爆炸)
- *   - 首次 tick 前先打 \n: 隔开 watchdog 自身的 stderr 日志或 spinner 残留, 避免同行混杂
+ * - `interrupt:warn` → 单次写一行警告 "stream slow, will auto-cancel in Ns..."。
+ *   实时倒计时由 status-bar 接管（订阅 interrupt:warn 在状态条按 250ms tick 刷新
+ *   remainSec）；此处只做"突起的一次性提示行"让用户在 status-bar 之外也注意到。
  *
- * - `llm:stream_event` → 清理 ticker + 擦倒计时残留 (chunk 到达 = stream 恢复活跃)。
+ * - `interrupt:fired` → 写 dim `[interrupted]` 视觉标记。reason 文本由 status-bar
+ *   在 done 状态展示（关注点分离：fired 是 abort 瞬间的视觉锚点，done 状态展示完整原因）。
  *
- * - `interrupt:fired` → 清理 ticker + 擦倒计时残留 + 输出 dim `[interrupted]` 视觉标记。
- *   走 stdout 接在 LLM 文本之后形成视觉连续。reason 文本由 renderSummary 在
- *   终止摘要行展示, 此处不重复输出避免冗余 (终端 UX 关注点分离: fired 标记
- *   abort 瞬间, summary 展示终止原因)。
- *
- * - `agent:run_end` → 兜底清理 ticker (即使 fired 在 abort 路径外不发, run_end 一定发)。
- *
- * 返回 dispose 函数, 调用方在 run() 结束 finally 调一次, 确保 listener 不跨 run 累积。
+ * 返回 dispose 函数，调用方在 run() 结束 finally 调一次。
  */
 export function setupInterruptRendering(
   eventBus: IEventBus<AgentEventMap>,
   pauseUI: () => void,
+  writer: CliWriter,
 ): InterruptRenderingHandle {
-  let warnTicker: ReturnType<typeof setInterval> | null = null;
-  let warnDeadline: number | null = null;
-  let warnLinePrinted = false; // 是否已用 \r 在 stderr 写入倒计时行 (TTY 模式), 决定是否需要清行
-
-  const clearWarnLine = (): void => {
-    // 仅 TTY 模式下需要清: 非 TTY 走的是 console.warn 一次性输出, 没有 \r 残留行
-    if (warnLinePrinted && process.stderr.isTTY) {
-      process.stderr.write(`\r${" ".repeat(WARN_LINE_CLEAR_WIDTH)}\r`);
-    }
-    warnLinePrinted = false;
-  };
-
-  const clearWarnTicker = (): void => {
-    if (warnTicker !== null) {
-      clearInterval(warnTicker);
-      warnTicker = null;
-      warnDeadline = null;
-    }
-  };
-
   const onWarn = (e: AgentEventMap["interrupt:warn"]) => {
-    clearWarnTicker();
-    clearWarnLine();
-    // deadline 锚定 watchdog 的 abort 触发时刻: e.timeoutMs - e.elapsedMs 是距离 abort
-    // 还剩多久 (Date.now 在 fake timer 测试中也被 vitest mock, 行为可预测)
-    warnDeadline = Date.now() + (e.timeoutMs - e.elapsedMs);
-
-    // 非 TTY (CI / pipe / 重定向): 只输出一次警告, 不 ticker 避免日志爆炸
-    if (!process.stderr.isTTY) {
-      pauseUI();
-      const remaining = Math.max(0, Math.ceil((warnDeadline - Date.now()) / 1000));
-      console.warn(
-        chalk.yellow(`  ⚠ stream slow, will auto-cancel in ${remaining}s if no response`),
-      );
-      return;
-    }
-
-    // TTY: \r 原地刷新单行倒计时 (单行更新避免刷屏)
-    let firstTick = true;
-    const tick = () => {
-      if (warnDeadline === null) return;
-      const remaining = Math.max(0, Math.ceil((warnDeadline - Date.now()) / 1000));
-      pauseUI();
-      if (firstTick) {
-        // 第一次 tick 前换行: 隔开 watchdog 自身的 stderr 日志(`[watchdog] stream idle...`)
-        // 或残留 spinner, 避免倒计时附在前一行末尾形成视觉混杂
-        process.stderr.write("\n");
-        firstTick = false;
-      }
-      process.stderr.write(
-        `\r${chalk.yellow(`  ⚠ stream slow, will auto-cancel in ${remaining}s...`)}`,
-      );
-      warnLinePrinted = true;
-      if (remaining <= 0) {
-        clearWarnLine();
-        clearWarnTicker();
-      }
-    };
-    tick(); // 立即输出第一行, 不等 1s
-    warnTicker = setInterval(tick, 1000);
-  };
-
-  const onStreamEvent = () => {
-    // chunk 到达 = stream 恢复活跃: watchdog 内部已 reset timer, 屏幕也应隐藏倒计时
-    clearWarnTicker();
-    clearWarnLine();
+    pauseUI();
+    const remaining = Math.max(0, Math.ceil((e.timeoutMs - e.elapsedMs) / 1000));
+    // 用 notify：表达"任意时刻可能触发"的语义，与同步段落 line 区分
+    writer.notify(
+      chalk.yellow(
+        `  ⚠ stream slow, will auto-cancel in ${remaining}s if no response`,
+      ),
+    );
   };
 
   const onFired = (_e: AgentEventMap["interrupt:fired"]) => {
-    clearWarnTicker();
-    clearWarnLine();
     pauseUI();
-    // dim [interrupted] 接在 LLM 文本之后, 形成视觉连续: 用户看到 LLM 输出戛然而止 + dim 标记
-    // 标识 partial 状态。stdout 走 (与 LLM text_delta 同 stream), 与 stderr 警告分离。
-    // reason 文本由 renderSummary 摘要行展示, 此处不重复输出避免冗余。
-    process.stdout.write(chalk.dim("\n[interrupted]\n"));
-  };
-
-  const onRunEnd = () => {
-    clearWarnTicker();
-    clearWarnLine();
+    // dim [interrupted] 接在 LLM 文本之后形成视觉连续
+    writer.line(chalk.dim("[interrupted]"));
   };
 
   eventBus.on("interrupt:warn", onWarn);
-  eventBus.on("llm:stream_event", onStreamEvent);
   eventBus.on("interrupt:fired", onFired);
-  eventBus.on("agent:run_end", onRunEnd);
 
   return {
     dispose() {
-      clearWarnTicker();
-      clearWarnLine();
       eventBus.off("interrupt:warn", onWarn);
-      eventBus.off("llm:stream_event", onStreamEvent);
       eventBus.off("interrupt:fired", onFired);
-      eventBus.off("agent:run_end", onRunEnd);
     },
   };
 }
@@ -281,33 +130,42 @@ export function setupInterruptRendering(
 // ─── 重试事件渲染 ───
 
 /** 渲染重试尝试提示（黄色警告） */
-export function renderRetryAttempt(info: {
-  errorType: string;
-  attempt: number;
-  maxRetries: number;
-  delayMs: number;
-}): void {
+export function renderRetryAttempt(
+  info: {
+    errorType: string;
+    attempt: number;
+    maxRetries: number;
+    delayMs: number;
+  },
+  writer: CliWriter,
+): void {
   const delayStr = (info.delayMs / 1000).toFixed(1);
-  process.stdout.write(
+  writer.line(
     `\n  ${chalk.yellow("⚠")} ${chalk.yellow(formatErrorType(info.errorType))}` +
-    `${chalk.dim(`, 第 ${info.attempt}/${info.maxRetries} 次重试，等待 ${delayStr}s...`)}`,
+      `${chalk.dim(`, 第 ${info.attempt}/${info.maxRetries} 次重试，等待 ${delayStr}s...`)}`,
   );
 }
 
 /** 渲染重试成功提示（绿色） */
-export function renderRetrySuccess(info: { attemptsTaken: number }): void {
-  process.stdout.write(
-    `\n  ${chalk.green("✓")} ${chalk.dim(`重试成功（第 ${info.attemptsTaken} 次）`)}\n`,
+export function renderRetrySuccess(
+  info: { attemptsTaken: number },
+  writer: CliWriter,
+): void {
+  writer.line(
+    `\n  ${chalk.green("✓")} ${chalk.dim(`重试成功（第 ${info.attemptsTaken} 次）`)}`,
   );
 }
 
 /** 渲染重试耗尽提示（红色） */
-export function renderRetryExhausted(info: {
-  totalAttempts: number;
-  lastError: string;
-}): void {
-  process.stdout.write(
-    `\n  ${chalk.red("✗")} ${chalk.red(`重试耗尽（共 ${info.totalAttempts} 次）`)}: ${chalk.dim(info.lastError)}\n`,
+export function renderRetryExhausted(
+  info: {
+    totalAttempts: number;
+    lastError: string;
+  },
+  writer: CliWriter,
+): void {
+  writer.line(
+    `\n  ${chalk.red("✗")} ${chalk.red(`重试耗尽（共 ${info.totalAttempts} 次）`)}: ${chalk.dim(info.lastError)}`,
   );
 }
 
@@ -325,12 +183,15 @@ function formatErrorType(errorType: string): string {
 // ─── 上下文预算渲染 ───
 
 /** 渲染上下文预算状态（每轮结束后显示） */
-export function renderBudgetStatus(info: {
-  currentTokens: number;
-  effectiveWindow: number;
-  usageRatio: number;
-  status: string;
-}): void {
+export function renderBudgetStatus(
+  info: {
+    currentTokens: number;
+    effectiveWindow: number;
+    usageRatio: number;
+    status: string;
+  },
+  writer: CliWriter,
+): void {
   const pct = Math.round(info.usageRatio * 100);
   const current = formatTokenCount(info.currentTokens);
   const total = formatTokenCount(info.effectiveWindow);
@@ -351,7 +212,7 @@ export function renderBudgetStatus(info: {
       colorFn = chalk.dim;
   }
 
-  process.stdout.write(`  ${colorFn(`[${label}]`)}\n`);
+  writer.line(`  ${colorFn(`[${label}]`)}`);
 }
 
 /**
@@ -360,10 +221,13 @@ export function renderBudgetStatus(info: {
  * Phase 3 事务化后：每次 compact 事务仅 fire 一次 compact_start，payload
  * 不带单 strategy 名（事务里可能跑多个 strategy，名字在 compact_end 的 strategies 列出）。
  */
-export function renderCompactStart(info: { tokensBefore: number }): void {
+export function renderCompactStart(
+  info: { tokensBefore: number },
+  writer: CliWriter,
+): void {
   const tokens = formatTokenCount(info.tokensBefore);
-  process.stdout.write(
-    `  ${chalk.yellow("⟳")} ${chalk.yellow("压缩中")} ${chalk.dim(`(${tokens} tokens)`)}\n`,
+  writer.line(
+    `  ${chalk.yellow("⟳")} ${chalk.yellow("压缩中")} ${chalk.dim(`(${tokens} tokens)`)}`,
   );
 }
 
@@ -374,11 +238,14 @@ export function renderCompactStart(info: { tokensBefore: number }): void {
  *   - 任一 strategy.success === true → "压缩完成 X → Y (节省 Z%) (name1 + name2)"
  *   - 全部 success === false         → "压缩无效（所有策略跳过或失败）"
  */
-export function renderCompactEnd(info: {
-  strategies: readonly { name: string; success: boolean }[];
-  tokensBefore: number;
-  tokensAfter: number;
-}): void {
+export function renderCompactEnd(
+  info: {
+    strategies: readonly { name: string; success: boolean }[];
+    tokensBefore: number;
+    tokensAfter: number;
+  },
+  writer: CliWriter,
+): void {
   const anySuccess = info.strategies.some((s) => s.success);
   if (anySuccess) {
     const before = formatTokenCount(info.tokensBefore);
@@ -389,19 +256,17 @@ export function renderCompactEnd(info: {
             ((info.tokensBefore - info.tokensAfter) / info.tokensBefore) * 100,
           )
         : 0;
-    // 列出实际产生效果的 strategy 名
     const activeNames = info.strategies
       .filter((s) => s.success)
       .map((s) => s.name)
       .join(" + ");
-    process.stdout.write(
-      `  ${chalk.green("✓")} ${chalk.dim(`压缩完成: ${before} → ${after} (节省 ${savedPct}%) (${activeNames})`)}\n`,
+    writer.line(
+      `  ${chalk.green("✓")} ${chalk.dim(`压缩完成: ${before} → ${after} (节省 ${savedPct}%) (${activeNames})`)}`,
     );
   } else {
-    // 所有策略都 skip 或失败（例如 abort / 熔断）
     const attemptedNames = info.strategies.map((s) => s.name).join(", ");
-    process.stdout.write(
-      `  ${chalk.red("✗")} ${chalk.dim(`压缩无效（尝试: ${attemptedNames}）`)}\n`,
+    writer.line(
+      `  ${chalk.red("✗")} ${chalk.dim(`压缩无效（尝试: ${attemptedNames}）`)}`,
     );
   }
 }
@@ -426,28 +291,35 @@ function formatTokenCount(n: number): string {
 export function renderUsageReport(
   budget: ContextBudget,
   turnCount: number,
-  calibrationFactor?: number,
-  subUsages?: readonly SubAgentUsageEntry[],
+  calibrationFactor: number | undefined,
+  subUsages: readonly SubAgentUsageEntry[] | undefined,
+  writer: CliWriter,
 ): void {
   const pct = Math.round(budget.usageRatio * 100);
   const current = formatTokenCount(budget.currentTokens);
   const effective = formatTokenCount(budget.effectiveWindow);
 
-  console.log(`\n  ${chalk.bold("Token 用量")}`);
-  console.log(chalk.dim("  ─────────────────────────────"));
-  console.log(`  ${chalk.dim("上下文容量")}     ${formatStatusColor(pct, budget.status)}  ${chalk.dim(`(${current} / ${effective})`)}`);
-  console.log(`  ${chalk.dim("上下文窗口")}     ${formatTokenCount(budget.contextWindow)}`);
-  console.log(`  ${chalk.dim("会话轮次")}       ${turnCount} 轮`);
+  writer.line(`\n  ${chalk.bold("Token 用量")}`);
+  writer.line(chalk.dim("  ─────────────────────────────"));
+  writer.line(
+    `  ${chalk.dim("上下文容量")}     ${formatStatusColor(pct, budget.status)}  ${chalk.dim(`(${current} / ${effective})`)}`,
+  );
+  writer.line(
+    `  ${chalk.dim("上下文窗口")}     ${formatTokenCount(budget.contextWindow)}`,
+  );
+  writer.line(`  ${chalk.dim("会话轮次")}       ${turnCount} 轮`);
   if (calibrationFactor !== undefined) {
     const calStr = calibrationFactor.toFixed(3);
     const label = calibrationFactor === 1.0 ? "未校准" : "已校准";
-    console.log(`  ${chalk.dim("估算校准")}       ${calStr} ${chalk.dim(`(${label})`)}`);
+    writer.line(
+      `  ${chalk.dim("估算校准")}       ${calStr} ${chalk.dim(`(${label})`)}`,
+    );
   }
 
   if (subUsages && subUsages.length > 0) {
-    renderSubAgentUsageSection(subUsages);
+    renderSubAgentUsageSection(subUsages, writer);
   } else {
-    console.log();
+    writer.line("");
   }
 }
 
@@ -459,9 +331,12 @@ export function renderUsageReport(
  *   - 状态字段(toolUses / durationMs)仅 succeeded 显示;failed / aborted 显示 status 文字
  *   - durationMs → 秒(2 位小数),用户感知尺度优于毫秒原值
  */
-function renderSubAgentUsageSection(entries: readonly SubAgentUsageEntry[]): void {
-  console.log(chalk.dim("  ─────────────────────────────"));
-  console.log(
+function renderSubAgentUsageSection(
+  entries: readonly SubAgentUsageEntry[],
+  writer: CliWriter,
+): void {
+  writer.line(chalk.dim("  ─────────────────────────────"));
+  writer.line(
     `  ${chalk.bold("子 agent 拆分")} ${chalk.dim(`(${entries.length} 个 Task)`)}`,
   );
 
@@ -479,7 +354,9 @@ function renderSubAgentUsageSection(entries: readonly SubAgentUsageEntry[]): voi
     if (entry.status === "succeeded") {
       const parts: string[] = [];
       if (entry.toolUses !== undefined) {
-        parts.push(`${entry.toolUses} tool_use${entry.toolUses === 1 ? "" : "s"}`);
+        parts.push(
+          `${entry.toolUses} tool_use${entry.toolUses === 1 ? "" : "s"}`,
+        );
       }
       if (entry.durationMs !== undefined) {
         parts.push(`${(entry.durationMs / 1000).toFixed(2)}s`);
@@ -489,17 +366,17 @@ function renderSubAgentUsageSection(entries: readonly SubAgentUsageEntry[]): voi
       extra = chalk.dim(`  (${entry.status})`);
     }
 
-    console.log(
+    writer.line(
       `  ${chalk.cyan("+")} Task#${entry.index} ${chalk.dim(`(${desc})`)}  ${icon} ${tokensFmt}${extra}`,
     );
   }
 
   const sum = entries.reduce((acc, e) => acc + e.tokens, 0);
-  console.log(chalk.dim("  ─────────────────────────────"));
-  console.log(
+  writer.line(chalk.dim("  ─────────────────────────────"));
+  writer.line(
     `  ${chalk.dim("Sum")}            ${formatTokenCount(sum)} ${chalk.dim("(子总计,best-effort 解析)")}`,
   );
-  console.log();
+  writer.line("");
 }
 
 function truncateForDisplay(text: string, maxLen: number): string {
@@ -509,34 +386,54 @@ function truncateForDisplay(text: string, maxLen: number): string {
 
 // ─── /context 命令渲染 ───
 
-export function renderContextVisual(budget: ContextBudget): void {
+export function renderContextVisual(
+  budget: ContextBudget,
+  writer: CliWriter,
+): void {
   const pct = Math.round(budget.usageRatio * 100);
   const effective = formatTokenCount(budget.effectiveWindow);
   const barWidth = 40;
-  const filled = Math.min(barWidth, Math.round((budget.usageRatio) * barWidth));
+  const filled = Math.min(barWidth, Math.round(budget.usageRatio * barWidth));
   const empty = barWidth - filled;
 
-  const filledChar = budget.status === "critical" ? chalk.red("█")
-    : budget.status === "compact" || budget.status === "warning" ? chalk.yellow("█")
-    : chalk.green("█");
+  const filledChar =
+    budget.status === "critical"
+      ? chalk.red("█")
+      : budget.status === "compact" || budget.status === "warning"
+        ? chalk.yellow("█")
+        : chalk.green("█");
   const bar = filledChar.repeat(filled) + chalk.dim("░").repeat(empty);
 
-  console.log(`\n  ${chalk.bold("上下文窗口")} ${chalk.dim(`(${effective} tokens)`)}`);
-  console.log(chalk.dim("  ──────────────────────────────────────────────"));
-  console.log(`  [${bar}] ${formatStatusColor(pct, budget.status)}`);
+  writer.line(
+    `\n  ${chalk.bold("上下文窗口")} ${chalk.dim(`(${effective} tokens)`)}`,
+  );
+  writer.line(chalk.dim("  ──────────────────────────────────────────────"));
+  writer.line(`  [${bar}] ${formatStatusColor(pct, budget.status)}`);
 
   // 阈值标尺
-  console.log();
-  console.log(`  ${chalk.dim("阈值:")}`);
-  console.log(`    ${chalk.dim("──")} 预警 (75%) ${chalk.dim("─────────")} ${formatTokenCount(Math.round(budget.effectiveWindow * 0.75))}`);
-  console.log(`    ${chalk.dim("──")} 压缩 (85%) ${chalk.dim("─────────")} ${formatTokenCount(Math.round(budget.effectiveWindow * 0.85))}`);
-  console.log(`    ${chalk.dim("──")} 上限 (95%) ${chalk.dim("─────────")} ${formatTokenCount(Math.round(budget.effectiveWindow * 0.95))}`);
+  writer.line("");
+  writer.line(`  ${chalk.dim("阈值:")}`);
+  writer.line(
+    `    ${chalk.dim("──")} 预警 (75%) ${chalk.dim("─────────")} ${formatTokenCount(Math.round(budget.effectiveWindow * 0.75))}`,
+  );
+  writer.line(
+    `    ${chalk.dim("──")} 压缩 (85%) ${chalk.dim("─────────")} ${formatTokenCount(Math.round(budget.effectiveWindow * 0.85))}`,
+  );
+  writer.line(
+    `    ${chalk.dim("──")} 上限 (95%) ${chalk.dim("─────────")} ${formatTokenCount(Math.round(budget.effectiveWindow * 0.95))}`,
+  );
 
-  if (budget.status === "warning" || budget.status === "compact" || budget.status === "critical") {
-    console.log();
-    console.log(`  ${chalk.yellow("提示:")} 使用 ${chalk.cyan("/compact")} 手动触发压缩`);
+  if (
+    budget.status === "warning" ||
+    budget.status === "compact" ||
+    budget.status === "critical"
+  ) {
+    writer.line("");
+    writer.line(
+      `  ${chalk.yellow("提示:")} 使用 ${chalk.cyan("/compact")} 手动触发压缩`,
+    );
   }
-  console.log();
+  writer.line("");
 }
 
 function formatStatusColor(pct: number, status: string): string {
@@ -551,89 +448,113 @@ function formatStatusColor(pct: number, status: string): string {
 
 // ─── 错误渲染 ───
 
-export function renderError(error: unknown): void {
+export function renderError(error: unknown, writer: CliWriter): void {
   if (error instanceof Error && error.name === "ProviderConfigError") {
     const home = process.env.HOME ?? process.env.USERPROFILE ?? "~";
     const configPath = `${home}/.zhixing/config.json`;
-    console.error(
+    writer.line(
       `\n${chalk.red("✗")} ${chalk.red.bold("配置错误")}: ${error.message}`,
     );
-    console.error(chalk.dim(`\n  请检查配置文件: ${configPath}\n`));
+    writer.line(chalk.dim(`\n  请检查配置文件: ${configPath}`));
     return;
   }
 
   const message = error instanceof Error ? error.message : String(error);
-  console.error(`\n${chalk.red("✗")} ${message}`);
+  writer.line(`\n${chalk.red("✗")} ${message}`);
 }
 
 // ─── 集中渲染订阅装载点 ───
 
+export interface CreateRenderSubscribersOptions {
+  /** 可选 renderer——存在时 pauseUI 包装 renderer.stop()；否则退化为 no-op */
+  readonly renderer?: OutputRenderer;
+  /** CliWriter——所有事件渲染必须经此写屏，禁止直接 console.log */
+  readonly writer: CliWriter;
+  /** 可选 screen——存在时启用 status-bar；status-bar 直接调 setStatusBar，不经 writer */
+  readonly screen?: ScreenController;
+}
+
 /**
- * 工厂:绑定一个可选的 OutputRenderer 实例,返回符合 DecorateRunBusFn 契约的装饰器。
+ * 工厂——返回符合 DecorateRunBusFn 契约的装饰器，装载所有 EventBus 订阅型渲染。
  *
  * 设计要点:
- *   1. 通过 closure 捕获 renderer —— UI 依赖在工厂层显式注入,而非通过 RunBusContext
- *      字段从 runtime 反向传递,保持 runtime API 与展示层解耦。
- *   2. renderer 缺省时 pauseUI 退化为 no-op:适配 serve / 无 spinner 路径(retry/compact
- *      事件仍然渲染,只是不再驱动 spinner 暂停)。
- *   3. 返回的装饰器在 run 结束 finally 调一次,杜绝 listener 跨 run 累积。
- *
- * 涵盖:
- *   - retry:* (attempt / success / exhausted)
- *   - context:budget_check (仅 pre-compact + warning+ 渲染)
- *   - context:compact_start / context:compact_end
- *   - interrupt:* + llm:stream_event + agent:run_end (经 setupInterruptRendering)
- *   - 子 agent 状态条:tool:call_start/end (经 setupSubAgentStatus,按 meta.lineage
- *     过滤主 Task 调用与子 agent 工具事件,实时显示 [Task#N: <desc>] <最近工具>)
- *
- * 不涵盖(职责正交):
- *   - 数据收集类订阅(如 subscribeCompactAccumulator),归 runtime 主流程
+ *   1. UI 依赖在工厂层显式注入（writer / renderer / screen），而非通过 RunBusContext
+ *      反向传递，保持 runtime API 与展示层解耦。
+ *   2. writer 是必选——所有渲染必须经 CliWriter 协调，避免直接 console.log 推走 chrome。
+ *   3. renderer 缺省时 pauseUI 退化为 no-op：适配 serve / runOnce 路径（retry / compact
+ *      事件仍然渲染，只是不再驱动 OutputRenderer 暂停）。
+ *   4. screen 缺省时 status-bar 不启用——runOnce / 非交互路径的事件渲染仍然有效，
+ *      只是不显示动态状态条。
+ *   5. 返回的装饰器在 run 结束 finally 调一次，杜绝 listener 跨 run 累积。
  */
-export function createRenderSubscribers(renderer?: OutputRenderer): DecorateRunBusFn {
-  // pauseUI 单点派生:有 renderer 即包装 stop(),否则 no-op。
-  // 保持下方各订阅回调的形状统一,避免"是否暂停"逻辑下沉到每个 case。
+export function createRenderSubscribers(
+  options: CreateRenderSubscribersOptions,
+): DecorateRunBusFn {
+  const { renderer, writer, screen } = options;
+  // pauseUI 单点派生：有 renderer 即包装 stop()，否则 no-op
   const pauseUI: () => void = renderer ? () => renderer.stop() : () => {};
 
   return (ctx) => {
     const { bus } = ctx;
     const unsubs: Array<() => void> = [];
 
-    unsubs.push(bus.on("retry:attempt", (info) => {
-      pauseUI();
-      renderRetryAttempt(info);
-    }));
-    unsubs.push(bus.on("retry:success", (info) => {
-      pauseUI();
-      renderRetrySuccess(info);
-    }));
-    unsubs.push(bus.on("retry:exhausted", (info) => {
-      pauseUI();
-      renderRetryExhausted(info);
-    }));
-
-    unsubs.push(bus.on("context:budget_check", (info) => {
-      if (info.phase !== "pre-compact") return;
-      if (info.status === "warning" || info.status === "compact" || info.status === "critical") {
+    unsubs.push(
+      bus.on("retry:attempt", (info) => {
         pauseUI();
-        renderBudgetStatus(info);
-      }
-    }));
-    unsubs.push(bus.on("context:compact_start", (info) => {
-      pauseUI();
-      renderCompactStart(info);
-    }));
-    unsubs.push(bus.on("context:compact_end", (info) => {
-      pauseUI();
-      renderCompactEnd(info);
-    }));
+        renderRetryAttempt(info, writer);
+      }),
+    );
+    unsubs.push(
+      bus.on("retry:success", (info) => {
+        pauseUI();
+        renderRetrySuccess(info, writer);
+      }),
+    );
+    unsubs.push(
+      bus.on("retry:exhausted", (info) => {
+        pauseUI();
+        renderRetryExhausted(info, writer);
+      }),
+    );
 
-    const interruptHandle = setupInterruptRendering(bus, pauseUI);
-    const subAgentStatusHandle = setupSubAgentStatus(bus, pauseUI);
+    unsubs.push(
+      bus.on("context:budget_check", (info) => {
+        if (info.phase !== "pre-compact") return;
+        if (
+          info.status === "warning" ||
+          info.status === "compact" ||
+          info.status === "critical"
+        ) {
+          pauseUI();
+          renderBudgetStatus(info, writer);
+        }
+      }),
+    );
+    unsubs.push(
+      bus.on("context:compact_start", (info) => {
+        pauseUI();
+        renderCompactStart(info, writer);
+      }),
+    );
+    unsubs.push(
+      bus.on("context:compact_end", (info) => {
+        pauseUI();
+        renderCompactEnd(info, writer);
+      }),
+    );
+
+    const interruptHandle = setupInterruptRendering(bus, pauseUI, writer);
+
+    // 注入 screen 时启用 status-bar——接管 spinner / sub-agent 嵌套等动态状态展示
+    let statusBar: StatusBarHandle | null = null;
+    if (screen) {
+      statusBar = createStatusBar({ screen, eventBus: bus });
+    }
 
     return () => {
       for (const u of unsubs) u();
       interruptHandle.dispose();
-      subAgentStatusHandle.dispose();
+      statusBar?.dispose();
     };
   };
 }

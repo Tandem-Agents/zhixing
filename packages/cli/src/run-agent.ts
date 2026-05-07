@@ -13,9 +13,10 @@ import { type AgentYield, type RunResult, userMessage } from "@zhixing/core";
 import { createAgentRuntime } from "@zhixing/orchestrator/runtime";
 import { createRenderSubscribers } from "./render.js";
 import { createOutputRenderer } from "./output/index.js";
+import { createStdoutWriter } from "./screen/index.js";
 import {
-  renderBlockedMessage,
-  renderUserDeniedMessage,
+  createBlockedRenderer,
+  createUserDeniedRenderer,
 } from "./security/index.js";
 
 /**
@@ -40,9 +41,10 @@ export interface RunOnceOptions {
 }
 
 export async function runOnce(options: RunOnceOptions): Promise<RunResult> {
-  // 内部独立 renderer:不与 REPL 共享,生命周期与 runOnce 调用对齐。
-  // 启动 spinner —— 用户回车到首个 chunk 之间显示"思考中..."。
-  const renderer = createOutputRenderer();
+  // 内部独立 writer + renderer:不与 REPL 共享,生命周期与 runOnce 调用对齐。
+  // runOnce 是单次模式无 ScreenController——所有渲染走 stdout writer 直写。
+  const writer = createStdoutWriter();
+  const renderer = createOutputRenderer({ writer });
   renderer.startThinking();
 
   try {
@@ -50,9 +52,9 @@ export async function runOnce(options: RunOnceOptions): Promise<RunResult> {
       model: options.model,
       provider: options.provider,
       workspace: options.workspace,
-      decorateRunBus: createRenderSubscribers(renderer),
-      onSecurityBlocked: renderBlockedMessage,
-      onUserDenied: renderUserDeniedMessage,
+      decorateRunBus: createRenderSubscribers({ renderer, writer }),
+      onSecurityBlocked: createBlockedRenderer(writer),
+      onUserDenied: createUserDeniedRenderer(writer),
       // 单次执行(prompt → 一次完整 run)同样开启 Task,与 REPL 路径行为对齐。
       enableTaskTool: true,
     });

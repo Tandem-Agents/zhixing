@@ -127,7 +127,7 @@ describe("StatusBar 状态切换", () => {
     bar.dispose();
   });
 
-  it("agent:run_end 切到 done 然后 1.5s 后 idle", async () => {
+  it("agent:run_end completed → done 永驻显示（不再 1.5s 自动消失）", async () => {
     const { screen, mainBus, bar } = setup();
     await mainBus.emit("agent:run_start", { prompt: "hi" });
     await mainBus.emit("agent:run_end", {
@@ -135,10 +135,72 @@ describe("StatusBar 状态切换", () => {
       duration: 7300,
       usage: { inputTokens: 1200, outputTokens: 14300 } as never,
     });
-    expect(screen.statusLines!.join("")).toContain("完成于");
+    expect(screen.statusLines!.join("")).toContain("用时");
     expect(screen.statusLines!.join("")).toContain("7.3s");
-    vi.advanceTimersByTime(1600);
-    expect(screen.statusLines).toBeNull();
+    // done 永驻——renderSummary 移除后 status-bar 是终止反馈的单一事实源
+    vi.advanceTimersByTime(60_000);
+    expect(screen.statusLines).not.toBeNull();
+    expect(screen.statusLines!.join("")).toContain("用时");
+    bar.dispose();
+  });
+
+  it("done 被下一次 run_start 覆盖回 thinking", async () => {
+    const { screen, mainBus, bar } = setup();
+    await mainBus.emit("agent:run_start", { prompt: "hi" });
+    await mainBus.emit("agent:run_end", {
+      reason: "completed",
+      duration: 1000,
+      usage: { inputTokens: 100, outputTokens: 200 } as never,
+    });
+    expect(screen.statusLines!.join("")).toContain("用时");
+    await mainBus.emit("agent:run_start", { prompt: "next" });
+    expect(screen.statusLines!.join("")).toContain("思考中");
+    expect(screen.statusLines!.join("")).not.toContain("用时");
+    bar.dispose();
+  });
+
+  it("agent:run_end aborted + interrupt:fired esc → done(aborted, esc)", async () => {
+    const { screen, mainBus, bar } = setup();
+    await mainBus.emit("agent:run_start", { prompt: "hi" });
+    await mainBus.emit("interrupt:fired", {
+      reason: { kind: "user-cancel", source: "esc", pressedAt: Date.now() },
+      interruptedTurnIndex: 0,
+      toolGraceMs: 0,
+    } as never);
+    await mainBus.emit("agent:run_end", {
+      reason: "aborted",
+      duration: 1500,
+      usage: { inputTokens: 100, outputTokens: 200 } as never,
+    });
+    expect(screen.statusLines!.join("")).toContain("已中断");
+    expect(screen.statusLines!.join("")).toContain("esc");
+    bar.dispose();
+  });
+
+  it("agent:run_end error → done(error) 显示 errorType", async () => {
+    const { screen, mainBus, bar } = setup();
+    await mainBus.emit("agent:run_start", { prompt: "hi" });
+    await mainBus.emit("agent:run_end", {
+      reason: "error",
+      duration: 500,
+      usage: { inputTokens: 0, outputTokens: 0 } as never,
+      errorType: "rate_limit",
+      error: "quota exceeded",
+    } as never);
+    expect(screen.statusLines!.join("")).toContain("错误");
+    expect(screen.statusLines!.join("")).toContain("rate_limit");
+    bar.dispose();
+  });
+
+  it("agent:run_end max_turns → done(max_turns) 显示达到上限", async () => {
+    const { screen, mainBus, bar } = setup();
+    await mainBus.emit("agent:run_start", { prompt: "hi" });
+    await mainBus.emit("agent:run_end", {
+      reason: "max_turns",
+      duration: 5000,
+      usage: { inputTokens: 100, outputTokens: 200 } as never,
+    } as never);
+    expect(screen.statusLines!.join("")).toContain("达到 turn 上限");
     bar.dispose();
   });
 

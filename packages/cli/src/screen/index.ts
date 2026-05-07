@@ -11,3 +11,9 @@ export {
   type ScreenController,
   type InputRegion,
 } from "./screen-controller.js";
+
+export {
+  createScreenWriter,
+  createStdoutWriter,
+  type CliWriter,
+} from "./cli-writer.js";

@@ -6,7 +6,7 @@
  *   - 视觉一致：复用初始配置的浮灵品牌锚 + chrome 容器，让"知行"在两个场景下
  *     有同一身份签名
  *   - 静态瞬时：不做打字动画——每次启动累积的视觉干扰在长期使用里很快变烦
- *   - 行式输出：纯函数返回 string[]，caller 用 console.log 顺序写出，不进
+ *   - 行式输出：纯函数返回 string[]，caller 用 cliWriter.line 逐行写出，不进
  *     alt-screen（与 config-editor 的 Renderer 全屏模式区分）
  *
  * 锚 body 三行的语义（每一行都有清晰角色：天线 / 心脏 / 脚）：
@@ -79,7 +79,7 @@ function buildHomeBrandAnchor(info: WorkbenchHomeInfo): BrandAnchor {
 /**
  * 渲染工作台启动 welcome 的整段行。
  *
- * caller 用 `for (const line of result) console.log(line)` 写出。
+ * caller 用 `for (const line of result) cliWriter.line(line)` 写出。
  * chrome 之后的空行 / 其他启动告知由 caller 自己决定。
  */
 export function renderHomeWelcome(info: WorkbenchHomeInfo): string[] {

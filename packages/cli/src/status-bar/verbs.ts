@@ -7,6 +7,8 @@
  *   括号  `(<时间> · <↑↓ token> · <可选状态描述>)`
  */
 
+import type { AbortReason } from "@zhixing/core";
+
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /** 旋转 spinner 字符——按时间戳推算帧（80ms / frame） */
@@ -44,14 +46,46 @@ export function truncate(s: string, maxLen: number): string {
   return `${s.slice(0, maxLen - 1)}…`;
 }
 
+/**
+ * 把 AbortReason 渲染为状态条括号内的简短标签——空间有限，不展开完整诊断。
+ *
+ * 完整诊断由 render.ts 的 formatAbortReasonSummary 在终端摘要行展示（如 server / 日志
+ * 路径）。此处仅给状态条的"已中断 (X)"括号内用，X 是最关键的来源标识。
+ *
+ *   user-cancel (esc)       → "esc"
+ *   user-cancel (ctrl-c)    → "ctrl+c"
+ *   user-cancel (sigint)    → "sigint"
+ *   user-cancel (rpc)       → "rpc"
+ *   idle-timeout            → "超时"
+ *   parent-abort            → "上层中断"
+ *   external (origin?)      → origin or "外部"
+ *   null / undefined        → "未知"
+ */
+export function formatAbortReasonShort(
+  reason: AbortReason | null | undefined,
+): string {
+  if (!reason) return "未知";
+  switch (reason.kind) {
+    case "user-cancel":
+      return reason.source === "ctrl-c" ? "ctrl+c" : reason.source;
+    case "idle-timeout":
+      return "超时";
+    case "parent-abort":
+      return "上层中断";
+    case "external":
+      return reason.origin ?? "外部";
+  }
+}
+
 /** 状态动词词库——单一中文短语，不带括号 / 标点。 */
 export const VERBS = {
   thinking: "思考中",
   streaming: "回复中",
   compacting: "整理上下文",
   retrying: "重试中",
+  interrupting: "流式静默",
   toolCalling: (name: string): string => `调用 ${name}`,
   task: (n: number, desc: string): string =>
     `子任务 #${n}: ${truncate(desc, 20)}`,
-  done: (ms: number): string => `完成于 ${formatDuration(ms)}`,
+  done: (ms: number): string => `用时 ${formatDuration(ms)}`,
 } as const;

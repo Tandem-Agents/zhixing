@@ -7,8 +7,8 @@
  */
 
 export {
-  renderBlockedMessage,
-  renderUserDeniedMessage,
+  createBlockedRenderer,
+  createUserDeniedRenderer,
 } from "./security-event-renderer.js";
 
 export {

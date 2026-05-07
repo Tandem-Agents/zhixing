@@ -58,7 +58,7 @@ describe("VERBS", () => {
     expect(VERBS.task(2, "审查")).toBe("子任务 #2: 审查");
   });
   it("done 含时长", () => {
-    expect(VERBS.done(7300)).toBe("完成于 7.3s");
+    expect(VERBS.done(7300)).toBe("用时 7.3s");
   });
 });
 

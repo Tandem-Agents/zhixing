@@ -7,12 +7,19 @@
  *   - user-denied 横幅:用户在 confirmation 面板选"拒绝并说明原因"
  *     (用户对 agent 说"不做",含 reason 反馈)
  *
+ * 写屏经 CliWriter 协调——blocked / userDenied 触发时 chrome 在屏幕（turn 进行中），
+ * 直接 console.log 会推走 chrome；走 writer.line 让屏幕协调器擦+写+重画。
+ *
+ * createXxxRenderer factory 模式：caller 在初始化时绑 cliWriter，返回符合
+ * createAgentRuntime 公共回调签名的函数，无侵入注入到 onSecurityBlocked / onUserDenied。
+ *
  * 交互式确认对话框(broker.attach)归 terminal-renderer.ts;
  * 子 agent 路径不传这两个回调 → 自动静默,失败信息由 tool_result 回流给父 LLM。
  */
 
 import chalk from "chalk";
 import type { SecurityMiddlewareResult } from "@zhixing/core";
+import type { CliWriter } from "../screen/index.js";
 
 /**
  * 把"工具 + 入参"渲染为人类可读的一行,bash / 文件路径 / 通用 JSON 三种形态。
@@ -38,55 +45,61 @@ function formatOperation(
   return `${chalk.gray(toolName)} ${chalk.dim(brief)}`;
 }
 
-/** 渲染"被策略 / 权限规则阻止"的拒绝消息 —— 无需用户交互 */
-export function renderBlockedMessage(
-  toolName: string,
-  toolInput: Record<string, unknown>,
-  result: SecurityMiddlewareResult,
-): void {
-  console.log();
-  console.log(chalk.red("╭─ 操作被阻止 ────────────────────────"));
-  console.log(`${chalk.red("│")} ${formatOperation(toolName, toolInput)}`);
-  console.log(chalk.red("│"));
-  console.log(
-    `${chalk.red("│")} ${chalk.dim("原因:")} ${result.reason ?? "未知"}`,
-  );
-  const rules = result.decision?.matchedRules ?? [];
-  if (rules.length > 0) {
-    console.log(
-      `${chalk.red("│")} ${chalk.dim("匹配规则:")} ${rules
-        .map((r) => r.id)
-        .join(", ")}`,
+/**
+ * 创建 onSecurityBlocked 渲染器——绑定 cliWriter，返回符合 createAgentRuntime 回调
+ * 签名的函数。caller 在 cli 入口创建一次，传给 createAgentRuntime.onSecurityBlocked。
+ */
+export function createBlockedRenderer(writer: CliWriter) {
+  return (
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    result: SecurityMiddlewareResult,
+  ): void => {
+    writer.line("");
+    writer.line(chalk.red("╭─ 操作被阻止 ────────────────────────"));
+    writer.line(`${chalk.red("│")} ${formatOperation(toolName, toolInput)}`);
+    writer.line(chalk.red("│"));
+    writer.line(
+      `${chalk.red("│")} ${chalk.dim("原因:")} ${result.reason ?? "未知"}`,
     );
-  }
-  console.log(chalk.red("╰────────────────────────────────────────"));
+    const rules = result.decision?.matchedRules ?? [];
+    if (rules.length > 0) {
+      writer.line(
+        `${chalk.red("│")} ${chalk.dim("匹配规则:")} ${rules
+          .map((r) => r.id)
+          .join(", ")}`,
+      );
+    }
+    writer.line(chalk.red("╰────────────────────────────────────────"));
+  };
 }
 
 /**
- * 渲染"用户主动拒绝"的消息 —— 与策略阻止语义不同。
+ * 创建 onUserDenied 渲染器——同 createBlockedRenderer 模式。
  *
  * 策略阻止是 pipeline 对 agent 说"不行"(规则拦截);
  * 用户拒绝是用户对 agent 说"不做"(意志表达)。
- * 两者应有不同的视觉和文案,否则会显示成"原因: 无匹配规则,默认放行"这种
- * 把审批触发原因当作拒绝原因的滑稽输出。
+ * 两者应有不同的视觉和文案。
  */
-export function renderUserDeniedMessage(
-  toolName: string,
-  toolInput: Record<string, unknown>,
-  userReason?: string,
-): void {
-  console.log();
-  console.log(chalk.yellow("╭─ 已拒绝 ────────────────────────────"));
-  console.log(`${chalk.yellow("│")} ${formatOperation(toolName, toolInput)}`);
-  console.log(chalk.yellow("│"));
-  if (userReason && userReason.trim()) {
-    console.log(
-      `${chalk.yellow("│")} ${chalk.dim("用户反馈:")} ${userReason}`,
-    );
-  } else {
-    console.log(
-      `${chalk.yellow("│")} ${chalk.dim("用户未提供具体原因")}`,
-    );
-  }
-  console.log(chalk.yellow("╰────────────────────────────────────────"));
+export function createUserDeniedRenderer(writer: CliWriter) {
+  return (
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    userReason?: string,
+  ): void => {
+    writer.line("");
+    writer.line(chalk.yellow("╭─ 已拒绝 ────────────────────────────"));
+    writer.line(`${chalk.yellow("│")} ${formatOperation(toolName, toolInput)}`);
+    writer.line(chalk.yellow("│"));
+    if (userReason && userReason.trim()) {
+      writer.line(
+        `${chalk.yellow("│")} ${chalk.dim("用户反馈:")} ${userReason}`,
+      );
+    } else {
+      writer.line(
+        `${chalk.yellow("│")} ${chalk.dim("用户未提供具体原因")}`,
+      );
+    }
+    writer.line(chalk.yellow("╰────────────────────────────────────────"));
+  };
 }

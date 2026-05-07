@@ -3,23 +3,17 @@ import { TextStream } from "../text-stream.js";
 import { ANCHOR_AI_DONE } from "../speaker-state.js";
 import { stripAnsi } from "../../tui/ansi.js";
 
-class FakeStdout {
-  buffer = "";
-  isTTY = true;
-  columns: number;
-  constructor(cols: number) {
-    this.columns = cols;
-  }
-  write(s: string): boolean {
-    this.buffer += s;
-    return true;
-  }
+interface Capture {
+  buffer: string;
 }
 
-function makeStream(cols = 80): { stream: TextStream; out: FakeStdout } {
-  const out = new FakeStdout(cols);
+function makeStream(cols = 80): { stream: TextStream; out: Capture } {
+  const out: Capture = { buffer: "" };
   const stream = new TextStream({
-    stdout: out as unknown as NodeJS.WriteStream,
+    write: (chunk) => {
+      out.buffer += chunk;
+    },
+    columns: cols,
   });
   return { stream, out };
 }
@@ -69,6 +63,79 @@ describe("TextStream 硬换行", () => {
     stream.feed("a\n");
     stream.feed("b");
     expect(stripAnsi(out.buffer)).toBe(`  ${ANCHOR_AI_DONE} a\n    b`);
+  });
+
+  it("\\n\\n 双换行 = 段落分隔——中间是真空行（无 hanging 4 空格）", () => {
+    const { stream, out } = makeStream();
+    stream.feed("段一\n\n段二");
+    expect(stripAnsi(out.buffer)).toBe(
+      `  ${ANCHOR_AI_DONE} 段一\n\n    段二`,
+    );
+  });
+
+  it("\\n\\n 跨 feed 段落分隔仍正确（不补 hanging 到空段）", () => {
+    const { stream, out } = makeStream();
+    stream.feed("段一\n");
+    stream.feed("\n段二");
+    expect(stripAnsi(out.buffer)).toBe(
+      `  ${ANCHOR_AI_DONE} 段一\n\n    段二`,
+    );
+  });
+
+  it("末尾 \\n 后下次 feed 起首补 hanging（同段续行）", () => {
+    const { stream, out } = makeStream();
+    stream.feed("段一\n");
+    stream.feed("续行");
+    expect(stripAnsi(out.buffer)).toBe(`  ${ANCHOR_AI_DONE} 段一\n    续行`);
+  });
+
+  it("第一次 feed 起首是 \\n 时 trim 掉——◆ 锚紧跟实际内容（不分行）", () => {
+    const { stream, out } = makeStream();
+    stream.feed("\n你好");
+    expect(stripAnsi(out.buffer)).toBe(`  ${ANCHOR_AI_DONE} 你好`);
+  });
+
+  it("第一次 feed 起首多个 \\n + 空格都 trim 掉", () => {
+    const { stream, out } = makeStream();
+    stream.feed("\n\n  你好");
+    expect(stripAnsi(out.buffer)).toBe(`  ${ANCHOR_AI_DONE} 你好`);
+  });
+
+  it("第一次 feed 全空白等下次有实际内容再起首", () => {
+    const { stream, out } = makeStream();
+    stream.feed("\n");
+    // 全空白没有实际内容——不写起首锚，等下次
+    expect(out.buffer).toBe("");
+    stream.feed("你好");
+    expect(stripAnsi(out.buffer)).toBe(`  ${ANCHOR_AI_DONE} 你好`);
+  });
+
+  it("起首之后再 feed 含 \\n 不 trim——保留段内换行结构", () => {
+    const { stream, out } = makeStream();
+    stream.feed("第一行");
+    stream.feed("\n第二行");
+    expect(stripAnsi(out.buffer)).toBe(
+      `  ${ANCHOR_AI_DONE} 第一行\n    第二行`,
+    );
+  });
+
+  it("起首零宽度字符（U+200B / BOM）也被 trim——避免 ◆ 锚后跟不可见字符让 ◆ 行视觉空", () => {
+    const { stream, out } = makeStream();
+    // U+200B (zero-width space) + \n\n + 实际内容——LLM 偶尔输出此模式
+    stream.feed("​\n\n你好");
+    expect(stripAnsi(out.buffer)).toBe(`  ${ANCHOR_AI_DONE} 你好`);
+  });
+
+  it("起首 BOM (U+FEFF) 被 trim", () => {
+    const { stream, out } = makeStream();
+    stream.feed("﻿你好");
+    expect(stripAnsi(out.buffer)).toBe(`  ${ANCHOR_AI_DONE} 你好`);
+  });
+
+  it("起首 zero-width joiner 也被 trim", () => {
+    const { stream, out } = makeStream();
+    stream.feed("‍你好");
+    expect(stripAnsi(out.buffer)).toBe(`  ${ANCHOR_AI_DONE} 你好`);
   });
 });
 
