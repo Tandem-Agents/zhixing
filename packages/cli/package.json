@@ -23,7 +23,8 @@
     "@zhixing/server": "workspace:*",
     "@zhixing/tools-builtin": "workspace:*",
     "chalk": "^5.4.0",
-    "commander": "^14.0.0"
+    "commander": "^14.0.0",
+    "marked": "^18.0.3"
   },
   "devDependencies": {
     "@types/node": "^22.15.2",

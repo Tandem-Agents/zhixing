@@ -17,6 +17,20 @@ describe("charWidth", () => {
     expect(charWidth(0x7f)).toBe(0);
   });
 
+  it("Unicode 格式控制字符 (\\p{Cf}) are width 0—— BOM / 零宽 / bidi / soft hyphen 等不可见字符", () => {
+    expect(charWidth(0x00ad)).toBe(0); // soft hyphen
+    expect(charWidth(0x200b)).toBe(0); // zero-width space
+    expect(charWidth(0x200c)).toBe(0); // zero-width non-joiner
+    expect(charWidth(0x200d)).toBe(0); // zero-width joiner
+    expect(charWidth(0x200e)).toBe(0); // LRM (left-to-right mark)
+    expect(charWidth(0x200f)).toBe(0); // RLM (right-to-left mark)
+    expect(charWidth(0x202a)).toBe(0); // LRE
+    expect(charWidth(0x202c)).toBe(0); // PDF
+    expect(charWidth(0x202e)).toBe(0); // RLO
+    expect(charWidth(0x2060)).toBe(0); // word joiner
+    expect(charWidth(0xfeff)).toBe(0); // BOM
+  });
+
   it("CJK ideographs are width 2", () => {
     expect(charWidth("中".codePointAt(0)!)).toBe(2);
     expect(charWidth("日".codePointAt(0)!)).toBe(2);

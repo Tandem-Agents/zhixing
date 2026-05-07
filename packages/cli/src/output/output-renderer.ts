@@ -28,7 +28,8 @@ import {
 } from "../tool-card-format.js";
 import type { CliWriter } from "../screen/index.js";
 import { layout } from "../tui/style.js";
-import { TextStream } from "./text-stream.js";
+import { MarkdownStream, type MarkdownMode } from "./markdown/index.js";
+import { getLlmChunkDump } from "./llm-chunk-dump.js";
 
 export interface OutputRenderer {
   startThinking: () => void;
@@ -45,10 +46,15 @@ export interface CreateOutputRendererOptions {
    */
   readonly writer: CliWriter;
   /**
-   * 终端列宽——TextStream 用于 wrap hanging 续行计算。默认从 process.stdout.columns
-   * 读取，无 TTY 时回退到 80。
+   * 终端列宽——MarkdownStream / TextStream 用于 wrap hanging 续行计算。默认从
+   * process.stdout.columns 读取，无 TTY 时回退到 80。
    */
   readonly columns?: number;
+  /**
+   * Markdown 渲染模式——render（默认 TTY 完整渲染）/ strip（CI / pipe / 日志，
+   * 仅缩进结构，不染色）/ raw（调试，输出原始 markdown 字符）。
+   */
+  readonly markdownMode?: MarkdownMode;
 }
 
 export function createOutputRenderer(
@@ -57,7 +63,8 @@ export function createOutputRenderer(
   const { writer } = options;
   const getColumns = (): number =>
     options.columns ?? process.stdout.columns ?? 80;
-  let textStream: TextStream | null = null;
+  const markdownMode: MarkdownMode = options.markdownMode ?? "render";
+  let mdStream: MarkdownStream | null = null;
 
   /**
    * 已开始但未完成的工具调用 input 缓存——AgentYield.tool_end 不携带 input，
@@ -67,30 +74,39 @@ export function createOutputRenderer(
   const pendingToolInputs = new Map<string, Record<string, unknown>>();
 
   const flushTextStream = (): void => {
-    if (textStream) {
-      textStream.end();
-      textStream = null;
+    if (mdStream) {
+      mdStream.end();
+      mdStream = null;
     }
   };
+
+  // 诊断旁路——ZHIXING_RAW_DUMP=1 启用时把 LLM 每个 text/thinking chunk 写到独立日志文件;
+  // 默认全 noop, 不影响渲染路径; 用于排查"屏幕显示与 LLM 实际输出不符"类视觉 bug
+  const chunkDump = getLlmChunkDump();
 
   const renderEvent = (event: AgentYield): void => {
     switch (event.type) {
       case "text_delta": {
+        chunkDump.recordChunk("text_delta", event.text);
         // 过滤 LLM 在工具调用前的纯空白前导——避免起手就写一个 ◆ 锚但什么都没说
-        if (!textStream && event.text.trim() === "") break;
-        if (!textStream) {
-          // 流式 text chunk 用 appendInline——不补 \n，多次调用在 frame buffer
-          // tailBuffer 末尾行内接续；text-stream end 时写一个 \n 让 chunk 段独立落地
-          textStream = new TextStream({
-            write: (chunk) => writer.appendInline(chunk),
+        if (!mdStream && event.text.trim() === "") break;
+        if (!mdStream) {
+          // MarkdownStream 协调 paragraph 字符流式（appendInline）+ 闭合 block 独立段
+          // （line）；inline 元素（粗体/斜体/链接）当前 fallback 字面输出，由 Step 2.B
+          // 的 inline-renderer 接管
+          mdStream = new MarkdownStream({
+            appendInline: (chunk) => writer.appendInline(chunk),
+            line: (text) => writer.line(text),
             columns: getColumns(),
+            mode: markdownMode,
           });
         }
-        textStream.feed(event.text);
+        mdStream.feed(event.text);
         break;
       }
 
       case "thinking_delta": {
+        chunkDump.recordChunk("thinking_delta", event.thinking);
         // thinking 流式 chunk 同样用 appendInline 接续——避免每个 chunk 独占一行
         if (event.thinking.length === 0) break;
         writer.appendInline(chalk.dim(event.thinking));
@@ -135,6 +151,7 @@ export function createOutputRenderer(
 
       case "turn_complete":
         flushTextStream();
+        chunkDump.recordTurnBoundary();
         // turn 结束兜底清理——正常路径每个 tool_start 都配对 tool_end，
         // 此处仅防御异常断开（如流被中断时未匹配的 tool_start）
         pendingToolInputs.clear();

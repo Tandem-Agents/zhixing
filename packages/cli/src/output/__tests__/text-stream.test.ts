@@ -89,28 +89,27 @@ describe("TextStream 硬换行", () => {
     expect(stripAnsi(out.buffer)).toBe(`  ${ANCHOR_AI_DONE} 段一\n    续行`);
   });
 
-  it("第一次 feed 起首是 \\n 时 trim 掉——◆ 锚紧跟实际内容（不分行）", () => {
+  it("起首 \\n 不创建空 ◆ 行——跳过到第一个可见字符位置写锚", () => {
     const { stream, out } = makeStream();
     stream.feed("\n你好");
     expect(stripAnsi(out.buffer)).toBe(`  ${ANCHOR_AI_DONE} 你好`);
   });
 
-  it("第一次 feed 起首多个 \\n + 空格都 trim 掉", () => {
+  it("起首多个 \\n + 空格全部跳过——锚紧跟第一个可见字符", () => {
     const { stream, out } = makeStream();
     stream.feed("\n\n  你好");
     expect(stripAnsi(out.buffer)).toBe(`  ${ANCHOR_AI_DONE} 你好`);
   });
 
-  it("第一次 feed 全空白等下次有实际内容再起首", () => {
+  it("第一次 feed 全是 0 宽字符不输出——等下次 feed 有可见字符再起手", () => {
     const { stream, out } = makeStream();
     stream.feed("\n");
-    // 全空白没有实际内容——不写起首锚，等下次
     expect(out.buffer).toBe("");
     stream.feed("你好");
     expect(stripAnsi(out.buffer)).toBe(`  ${ANCHOR_AI_DONE} 你好`);
   });
 
-  it("起首之后再 feed 含 \\n 不 trim——保留段内换行结构", () => {
+  it("起首之后再 feed 含 \\n 不跳过——保留段内换行结构", () => {
     const { stream, out } = makeStream();
     stream.feed("第一行");
     stream.feed("\n第二行");
@@ -119,23 +118,51 @@ describe("TextStream 硬换行", () => {
     );
   });
 
-  it("起首零宽度字符（U+200B / BOM）也被 trim——避免 ◆ 锚后跟不可见字符让 ◆ 行视觉空", () => {
+  // 起首跳过覆盖所有不可见字符 + 空白：\s + \p{Cc}（C0/C1 含 DEL）+ \p{Cf}（格式控制）。
+  // 参数化覆盖各类代表性字符——证明 LLM 输出任何不可见起首都不让 ◆ 行视觉空。
+  // 实证：MiniMax 等模型偶尔以 DEL 起首；其它模型可能用 BOM/ZWJ/LRM 等。
+  it.each([
+    // \p{Cc} 控制字符
+    { name: "DEL (U+007F) —— 实证 LLM 偶发起首字符", char: "" },
+    { name: "BS (U+0008) C0 控制", char: "" },
+    { name: "C1 控制 (U+0085) NEL", char: "" },
+    // \p{Cf} 格式控制字符
+    { name: "ZWS (U+200B)", char: "​" },
+    { name: "ZWNJ (U+200C)", char: "‌" },
+    { name: "ZWJ (U+200D)", char: "‍" },
+    { name: "LRM (U+200E)", char: "‎" },
+    { name: "RLM (U+200F)", char: "‏" },
+    { name: "PDF (U+202C) bidi 终止", char: "‬" },
+    { name: "word joiner (U+2060)", char: "⁠" },
+    { name: "BOM (U+FEFF)", char: "﻿" },
+    { name: "soft hyphen (U+00AD)", char: "­" },
+  ])("起首 $name 跳过——锚紧跟第一个可见字符", ({ char }) => {
     const { stream, out } = makeStream();
-    // U+200B (zero-width space) + \n\n + 实际内容——LLM 偶尔输出此模式
-    stream.feed("​\n\n你好");
+    stream.feed(`${char}你好`);
     expect(stripAnsi(out.buffer)).toBe(`  ${ANCHOR_AI_DONE} 你好`);
   });
 
-  it("起首 BOM (U+FEFF) 被 trim", () => {
+  it("起首 DEL chunk 单独发送 + 后续 \\n\\n + 实质 chunk —— 实证还原 LLM 多 chunk 序列", () => {
+    // 日志实证场景：LLM 三个 chunk 依次发送
+    //   chunk 1: "" (DEL 单独)
+    //   chunk 2: "\n\n"
+    //   chunk 3: "你好"
+    // 期望 ◆ 行紧跟"你好"，不应空。多 chunk 之间 hasStarted 仍 false 直到首个
+    // 可见字符到达——LEADING_INVISIBLE trim 在每次 not hasStarted 的 feed 都重新执行。
     const { stream, out } = makeStream();
-    stream.feed("﻿你好");
+    stream.feed("");
+    expect(out.buffer).toBe(""); // 全 trim 不输出
+    stream.feed("\n\n");
+    expect(out.buffer).toBe(""); // 仍全 trim
+    stream.feed("你好");
     expect(stripAnsi(out.buffer)).toBe(`  ${ANCHOR_AI_DONE} 你好`);
   });
 
-  it("起首 zero-width joiner 也被 trim", () => {
+  it("起首多种 Cf 类 + \\n 混合——全部跳过，◆ 锚紧跟可见字符", () => {
     const { stream, out } = makeStream();
-    stream.feed("‍你好");
-    expect(stripAnsi(out.buffer)).toBe(`  ${ANCHOR_AI_DONE} 你好`);
+    // BOM + LRM + ZWJ + \n\n —— 各种 Unicode 不可见字符 + 换行混合
+    stream.feed("﻿‎‍\n\n我是知行");
+    expect(stripAnsi(out.buffer)).toBe(`  ${ANCHOR_AI_DONE} 我是知行`);
   });
 });
 

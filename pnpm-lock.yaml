@@ -66,6 +66,9 @@ importers:
       commander:
         specifier: ^14.0.0
         version: 14.0.3
+      marked:
+        specifier: ^18.0.3
+        version: 18.0.3
     devDependencies:
       '@types/node':
         specifier: ^22.15.2
@@ -318,6 +321,13 @@ packages:
     cpu: [x64]
     os: [linux]
     libc: [musl]
+
+  '@biomejs/cli-linux-x64@2.4.14':
+    resolution: {integrity: sha512-zHrlQZDBDUz4OLAraYpWKcnLS6HOewBFWYOzY91d1ZjdqZwibOyb6BEu6WuWLugyo0P3riCmsbV9UqV1cSXwQg==}
+    engines: {node: '>=14.21.3'}
+    cpu: [x64]
+    os: [linux]
+    libc: [glibc]
 
   '@biomejs/cli-win32-arm64@2.4.14':
     resolution: {integrity: sha512-M3EH5hqOI/F/FUA2u4xcLoUgmxd218mvuj/6JL7Hv2toQvr2/AdOvKSpGkoRuWFCtQPVa+ZqkEV3Q5xBA9+XSA==}
@@ -978,6 +988,11 @@ packages:
   magic-string@0.30.21:
     resolution: {integrity: sha512-vd2F4YUyEXKGcLHoq+TEyCjxueSeHnFxyyjNp80yg0XV4vUhnDer/lvvlqM/arB5bXQN5K2/3oinyCRyx8T2CQ==}
 
+  marked@18.0.3:
+    resolution: {integrity: sha512-7VT90JOkDeaRWpfjOReRGPEKn0ecdARBkDGL+tT1wZY0efPPqkUxLUSmzy/C7TIylQYJC9STISEsCHrqb/7VIA==}
+    engines: {node: '>= 20'}
+    hasBin: true
+
   math-intrinsics@1.1.0:
     resolution: {integrity: sha512-/IXtbwEk5HTPyEwyKX6hGkYXxM9nbj64B+ilVJnC/R6B0pH5G4V3b0pVbL7DBj4tkhBAppbQUlf6F6Xl9LHu1g==}
     engines: {node: '>= 0.4'}
@@ -1336,6 +1351,7 @@ snapshots:
       '@biomejs/cli-darwin-x64': 2.4.14
       '@biomejs/cli-linux-arm64': 2.4.14
       '@biomejs/cli-linux-arm64-musl': 2.4.14
+      '@biomejs/cli-linux-x64': 2.4.14
       '@biomejs/cli-linux-x64-musl': 2.4.14
       '@biomejs/cli-win32-arm64': 2.4.14
       '@biomejs/cli-win32-x64': 2.4.14
@@ -1353,6 +1369,9 @@ snapshots:
     optional: true
 
   '@biomejs/cli-linux-x64-musl@2.4.14':
+    optional: true
+
+  '@biomejs/cli-linux-x64@2.4.14':
     optional: true
 
   '@biomejs/cli-win32-arm64@2.4.14':
@@ -1878,6 +1897,8 @@ snapshots:
   magic-string@0.30.21:
     dependencies:
       '@jridgewell/sourcemap-codec': 1.5.5
+
+  marked@18.0.3: {}
 
   math-intrinsics@1.1.0: {}
 

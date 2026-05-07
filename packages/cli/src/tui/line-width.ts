@@ -62,8 +62,19 @@ function inRanges(
 }
 
 /**
- * 单个 Unicode code point 的显示宽度。
+ * Unicode 格式控制字符（General Category `Cf`）—— 不可见但占字符位的字符：
+ * BOM (U+FEFF) / ZWS (U+200B) / ZWNJ (U+200C) / ZWJ (U+200D) / LRM (U+200E) /
+ * RLM (U+200F) / bidi 控制 (U+202A-202E) / word joiner (U+2060) /
+ * soft hyphen (U+00AD) 等。Unicode 标准持续扩展此类，用 `\p{Cf}` 一次覆盖
+ * 当前及未来所有 Cf 字符，无须维护字符列表。
+ */
+const FORMAT_CONTROL = /\p{Cf}/u;
+
+/**
+ * 单个 Unicode code point 的显示宽度——cli 终端宽度判断的单一事实源。
+ *
  * - 控制字符（C0/C1）→ 0
+ * - 格式控制字符（Cf）→ 0 —— 包括 BOM / 零宽空格 / ZWJ / bidi 控制 / soft hyphen 等
  * - CJK / 全角 / emoji → 2
  * - 其它 → 1
  */
@@ -71,6 +82,7 @@ export function charWidth(cp: number): number {
   if (cp === 0) return 0;
   if (cp < 0x20) return 0; // C0 控制符
   if (cp >= 0x7f && cp < 0xa0) return 0; // DEL + C1
+  if (FORMAT_CONTROL.test(String.fromCodePoint(cp))) return 0;
   if (inRanges(cp, DOUBLE_WIDTH_RANGES)) return 2;
   if (inRanges(cp, EMOJI_RANGES)) return 2;
   return 1;

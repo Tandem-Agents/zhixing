@@ -27,22 +27,25 @@ const FIRST_LINE_PREFIX = layout.contentPrefix;
 const HANGING_PREFIX = " ".repeat(HANGING_INDENT);
 
 /**
- * 起首 trim 范围——空白 + 零宽度不可见字符。
+ * 起首视觉规范化——第一次 feed 时跳过 chunk 前导的三类字符：
+ *   - `\s` 空白字符（空格 / \n / \r / \t / 全角空格 U+3000 等）：起首空格让
+ *     `◆ ` 后出现多余 padding 破坏锚紧凑感；起首 \n 让 ◆ 行视觉空
+ *   - `\p{Cc}` C0/C1 控制字符（含 DEL U+007F）：不可见但占字符位
+ *   - `\p{Cf}` Unicode 格式控制字符（BOM / 零宽 / ZWJ / LRM / RLM / word
+ *     joiner / soft hyphen 等）：不可见但占字符位
  *
- * 仅 \s（标准空白：\n / \r / space / tab / U+00A0 等）不够——LLM 流式偶尔输出
- * 零宽度控制字符（BOM / zero-width space / zero-width joiner）作为 token boundary
- * 标记，\s 不匹配它们。如果不 trim，◆ 锚后跟一个不可见字符 + 段落分隔（\n\n）
- * 会让 ◆ 行视觉上看起来"空"——下一行才是 hanging 续行的实际内容。
+ * 三类语义不同（空白可视；Cc/Cf 不可视），起首处理一致——都该跳过让 ◆ 锚
+ * 紧跟第一个"实质字符"。覆盖范围与 `charWidth = 0`（不可见字符）+ 空白对齐：
+ * 任何不会让 ◆ 后出现可见字符的字符都被 trim。这是**视觉规范化契约**，
+ * 独立于 charWidth 显示宽度判断（charWidth(空格) = 1，空格算可视；但起首
+ * 仍应 trim 防 padding）。
  *
- * 范围：
- *   \s              ECMAScript 标准空白
- *   ​-‍   Zero-width space / non-joiner / joiner
- *   ﻿          Byte order mark / zero-width no-break space
- *
- * 不包含可见字符（emoji / punctuation / markdown 标记）—— 那是 LLM 的格式表达，
- * 应忠实保留。
+ * Unicode 通用类别 `\p{Cc}` 与 `\p{Cf}` 一次覆盖所有控制字符与格式字符
+ * （包括未来 Unicode 标准新增的此两类字符），无须维护字符黑名单。实证：LLM
+ * 模型偶尔输出 DEL 起首 chunk（如 MiniMax 把 `:` token 错误编码为 DEL），
+ * 不 trim 会让 ◆ 行视觉空。
  */
-const LEADING_INVISIBLE = /^[\s​-‍﻿]+/;
+const LEADING_INVISIBLE = /^[\s\p{Cc}\p{Cf}]+/u;
 
 export interface TextStreamOptions {
   readonly write: (chunk: string) => void;
@@ -77,10 +80,9 @@ export class TextStream {
   feed(chunk: string): void {
     if (!chunk) return;
 
-    // 第一次起首时 trim chunk 前导不可见字符（空白 + 零宽度控制字符）——LLM 流式
-    // 偶尔以 \n / U+200B / BOM 起首，若不 trim 会让 ◆ 锚后跟不可见字符 + 段落分隔，
-    // 视觉上 ◆ 行显示为空白行。trim 让锚紧跟第一个可见字符。trim 全空时本次 feed
-    // 不输出，等下次有实际内容再起首。
+    // 起首时按 LEADING_INVISIBLE 视觉规范化跳过 chunk 前导的空白与 Cf 类不可见
+    // 字符，让 ◆ 锚紧跟第一个实质字符；规范化后全空时本次 feed 不输出，等下次
+    // 有实质字符再起首。规范化范围与设计原因见 LEADING_INVISIBLE 注释。
     const activeChunk = this.hasStarted
       ? chunk
       : chunk.replace(LEADING_INVISIBLE, "");
@@ -152,3 +154,4 @@ export class TextStream {
     return out;
   }
 }
+
