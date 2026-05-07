@@ -21,6 +21,7 @@ import chalk from "chalk";
 import type { AgentYield } from "@zhixing/core";
 import { getToolRenderStrategy } from "../tool-render-strategy.js";
 import type { CliWriter } from "../screen/index.js";
+import { layout } from "../tui/style.js";
 import { TextStream } from "./text-stream.js";
 
 export interface OutputRenderer {
@@ -89,9 +90,10 @@ export function createOutputRenderer(
       case "tool_start": {
         flushTextStream();
         if (getToolRenderStrategy(event.name) !== "default") break;
-        // 工具卡片头部独占一段——尾部 ✓/✗ 由 tool_end 单独写入对齐缩进的下一行
+        // 工具卡片头部独占一段——尾部 ✓/✗ 由 tool_end 单独写入对齐缩进的下一行；
+        // 起首 contentPrefix 与 AI 行 / 状态条等其它内容对齐到统一列
         writer.line(
-          `  ${chalk.cyan("⟡")} ${chalk.cyan(event.name)} ${chalk.dim(getToolSummary(event.name, event.input))}`,
+          `${layout.contentPrefix}${chalk.cyan("⟡")} ${chalk.cyan(event.name)} ${chalk.dim(getToolSummary(event.name, event.input))}`,
         );
         break;
       }
@@ -99,8 +101,8 @@ export function createOutputRenderer(
       case "tool_end": {
         if (getToolRenderStrategy(event.name) !== "default") break;
         const status = event.result.isError ? chalk.red("✗") : chalk.green("✓");
-        // 缩进对齐到 ⟡ 列（列 2）——视觉上 ✓ 与 ⟡ 同列形成"工具调用 → 完成"对应
-        writer.line(`  ${status} ${chalk.dim(`${event.duration}ms`)}`);
+        // 缩进对齐到 ⟡ 列——视觉上 ✓ 与 ⟡ 同列形成"工具调用 → 完成"对应
+        writer.line(`${layout.contentPrefix}${status} ${chalk.dim(`${event.duration}ms`)}`);
         break;
       }
 

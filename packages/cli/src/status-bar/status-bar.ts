@@ -39,16 +39,39 @@ import {
   formatAbortReasonShort,
   VERBS,
 } from "./verbs.js";
-import { tone } from "../tui/style.js";
+import { tone, layout } from "../tui/style.js";
 import { getToolRenderStrategy } from "../tool-render-strategy.js";
 
 /** 状态条节流频率——动画帧 + 计时秒进位都靠这个 tick 推动 */
 const TICK_INTERVAL_MS = 250;
 
+/**
+ * 单轮（agent run）累加的 token 状态——单一 user prompt → agent 终止之间。
+ *
+ * **语义切片（committed vs streaming）**：
+ *   - `committedInput` / `committedOutput` —— 已完成 LLM 请求的累加值，每次
+ *     `llm:request_end` 时把该次 usage 累加进来；request 内的流式估算不进 committed
+ *   - `streamingOutput` —— 当前进行中 LLM request 的流式 chunk 字符估算，
+ *     `request_end` 触发时清零（真值已 committed）
+ *
+ * **两段切分的根因**：LLM provider 的 stream chunk 没有 token 真值，仅在 request_end
+ *   时给出 cumulative usage。流式期间用字符估算填补"思考中→请求未完"的过程感，
+ *   request_end 时换成真值——直接覆盖会丢失"前几次 LLM 请求的累加"，先 commit 后清零
+ *   保证跨多 LLM 请求的累加正确。
+ *
+ * **显示规则**：
+ *   - input  = `committedInput`                          （流式期间没有 input 增量）
+ *   - output = `committedOutput + streamingOutput`        （流式段叠加在已完成段上）
+ *
+ * **跨轮重置**：每次 `agent:run_start` 通过 `makeRunning` 重置全部为 0；status-bar
+ *   实例本身也由 orchestrator 在每次 run() 开始通过 decorateRunBus 重建，
+ *   双重保证不会跨用户输入轮次累加。
+ */
 interface RunningState {
   startTime: number;
-  outputTokens: number;
-  inputTokens: number;
+  committedInput: number;
+  committedOutput: number;
+  streamingOutput: number;
 }
 
 interface TaskState extends RunningState {
@@ -75,10 +98,12 @@ interface InterruptingState extends RunningState {
   deadline: number;
 }
 
+/**
+ * Done 状态——只保留时长。token 信息不在结束态展示（用户视角"任务已结束、
+ * 过程数据无意义"），过程中的累加 token 已在 running 阶段持续展示。
+ */
 interface DoneStateBase {
   durationMs: number;
-  inputTokens: number;
-  outputTokens: number;
 }
 
 /**
@@ -171,26 +196,34 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
     if (!isPhaseRunning(phase)) return;
     const charCount = extractStreamChars(event);
     if (charCount > 0) {
+      // 流式估算累加进 streamingOutput——request_end 时会清零并 commit 真值
       const updated = withRunning(phase, (rs) => ({
         ...rs,
-        outputTokens: rs.outputTokens + estimateTokens(charCount),
+        streamingOutput: rs.streamingOutput + estimateTokens(charCount),
       }));
       phase = updated;
       // streaming 状态从 thinking 切换：第一个 stream chunk 到达
       if (phase.kind === "thinking") {
         phase = transitionTo(phase, "streaming");
       }
+      // 立即 repaint——LLM stream chunk 高频但每次 setStatusBar < 1ms，立即可见胜过
+      // 等 250ms ticker（用户体感：短 turn 内根本来不及看到 token 累加）。
+      repaint();
     }
   });
 
   const offRequestEnd = eventBus.on("llm:request_end", (event) => {
     if (!isPhaseRunning(phase)) return;
-    // 用真实 usage 校准 token 估算
+    // 一次 LLM 请求结束：把本次 usage 累加进 committed，清零流式估算（真值已 commit）。
+    // 累加（不是覆盖）保证一轮内多次 LLM 请求（含工具调用循环）的 token 不丢失。
     phase = withRunning(phase, (rs) => ({
       ...rs,
-      outputTokens: event.usage.outputTokens ?? rs.outputTokens,
-      inputTokens: event.usage.inputTokens ?? rs.inputTokens,
+      committedInput: rs.committedInput + (event.usage.inputTokens ?? 0),
+      committedOutput: rs.committedOutput + (event.usage.outputTokens ?? 0),
+      streamingOutput: 0,
     }));
+    // 立即 repaint——真值落地是 token 显示的关键节点（input 第一次出现 / 多请求累加）
+    repaint();
   });
 
   const offToolStart = eventBus.on(
@@ -207,9 +240,7 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
         const rs = currentRunning(phase);
         phase = {
           kind: "task",
-          startTime: rs.startTime,
-          outputTokens: rs.outputTokens,
-          inputTokens: rs.inputTokens,
+          ...rs,
           taskN: taskCounter,
           taskDesc: desc,
           subLineage: null,
@@ -224,9 +255,7 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
         const rs = currentRunning(phase);
         phase = {
           kind: "tool",
-          startTime: rs.startTime,
-          outputTokens: rs.outputTokens,
-          inputTokens: rs.inputTokens,
+          ...rs,
           toolName: payload.name,
         };
         repaint();
@@ -283,9 +312,7 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
       const rs = currentRunning(phase);
       phase = {
         kind: "compacting",
-        startTime: rs.startTime,
-        outputTokens: rs.outputTokens,
-        inputTokens: rs.inputTokens,
+        ...rs,
         tokensBefore: payload.tokensBefore,
       };
       repaint();
@@ -306,9 +333,7 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
       const rs = currentRunning(phase);
       phase = {
         kind: "retrying",
-        startTime: rs.startTime,
-        outputTokens: rs.outputTokens,
-        inputTokens: rs.inputTokens,
+        ...rs,
         attempt: payload.attempt,
         maxRetries: payload.maxRetries,
         errorType: payload.errorType,
@@ -329,9 +354,7 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
     const rs = currentRunning(phase);
     phase = {
       kind: "interrupting",
-      startTime: rs.startTime,
-      outputTokens: rs.outputTokens,
-      inputTokens: rs.inputTokens,
+      ...rs,
       deadline: Date.now() + (payload.timeoutMs - payload.elapsedMs),
     };
     repaint();
@@ -352,11 +375,8 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
   });
 
   const offRunEnd = eventBus.on("agent:run_end", (payload) => {
-    const rs = isPhaseRunning(phase) ? currentRunning(phase) : null;
     const base: DoneStateBase = {
       durationMs: payload.duration,
-      inputTokens: payload.usage.inputTokens ?? rs?.inputTokens ?? 0,
-      outputTokens: payload.usage.outputTokens ?? rs?.outputTokens ?? 0,
     };
     let doneState: DoneState;
     switch (payload.reason) {
@@ -414,7 +434,21 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
 
 // ─── 渲染 ───
 
+/**
+ * 渲染状态条行——单一注入点：raw 业务逻辑算出无 indent 的行，本函数统一加
+ * `layout.contentPrefix` 起首前缀。
+ *
+ * 视觉契约：状态条行与 AI 行 (`  ◆ ...`) 等其它内容左边距对齐到统一列；chrome
+ * 盒子内的内容由 chrome 自管 padding，与此无关。指引在 `tui/style.ts:layout`。
+ */
 function renderPhase(phase: Phase): readonly string[] | null {
+  const rawLines = renderPhaseRaw(phase);
+  if (rawLines === null) return null;
+  return rawLines.map((line) => `${layout.contentPrefix}${line}`);
+}
+
+/** 渲染状态条 raw 行——不含 indent 前缀，由 renderPhase 装饰注入。 */
+function renderPhaseRaw(phase: Phase): readonly string[] | null {
   if (phase.kind === "idle") return null;
   const now = Date.now();
 
@@ -427,52 +461,42 @@ function renderPhase(phase: Phase): readonly string[] | null {
 
   let mainText: string;
   let extra: string | null = null;
-  let inputTokens = 0;
-  let outputTokens = 0;
 
   switch (phase.kind) {
     case "thinking":
       mainText = VERBS.thinking;
-      inputTokens = phase.inputTokens;
-      outputTokens = phase.outputTokens;
       break;
     case "streaming":
       mainText = VERBS.streaming;
-      inputTokens = phase.inputTokens;
-      outputTokens = phase.outputTokens;
       break;
     case "tool":
       mainText = VERBS.toolCalling(phase.toolName);
-      inputTokens = phase.inputTokens;
-      outputTokens = phase.outputTokens;
       extra = "等待结果";
       break;
     case "task":
       mainText = VERBS.task(phase.taskN, phase.taskDesc);
-      inputTokens = phase.inputTokens;
-      outputTokens = phase.outputTokens;
       if (phase.subToolName) extra = VERBS.toolCalling(phase.subToolName);
       break;
     case "compacting":
       mainText = VERBS.compacting;
-      inputTokens = phase.inputTokens;
-      outputTokens = phase.outputTokens;
       break;
     case "retrying":
       mainText = VERBS.retrying;
-      inputTokens = phase.inputTokens;
-      outputTokens = phase.outputTokens;
       extra = `第 ${phase.attempt}/${phase.maxRetries} 次`;
       break;
     case "interrupting": {
       mainText = VERBS.interrupting;
-      inputTokens = phase.inputTokens;
-      outputTokens = phase.outputTokens;
       const remainSec = Math.max(0, Math.ceil((phase.deadline - now) / 1000));
       extra = `${remainSec}s 后自动取消`;
       break;
     }
   }
+
+  // 显示 token：input = committedInput；output = committedOutput + streamingOutput。
+  // 流式段叠加在已 commit 段上——保证从 stream chunk 到 request_end 的过渡视觉
+  // 单调递增，没有"骤减"或"覆盖"。
+  const inputTokens = phase.committedInput;
+  const outputTokens = phase.committedOutput + phase.streamingOutput;
 
   const parts: string[] = [elapsed];
   const tokenPart = renderTokens(inputTokens, outputTokens);
@@ -494,34 +518,31 @@ function renderTokens(inputTokens: number, outputTokens: number): string {
  * Done 状态行渲染——按 AgentRunEndReason 差异化 glyph + 文案，单一事实源接管
  * 所有 turn 终止反馈（completed / aborted / error / max_turns）。
  *
- *   completed  → ✻ 用时 1.6s (↑ 12k ↓ 3k)
- *   aborted    → ⏵ 已中断 (esc) · 1.6s (↑ 12k ↓ 3k)
- *   error      → ✗ 错误 (rate_limit) · 1.6s
- *   max_turns  → ⚠ 达到 turn 上限 · 1.6s (↑ 12k ↓ 3k)
+ *   completed  → ◆ 用时 1s         (◆ + 全行 dim 弱化色)
+ *   aborted    → ⏵ 已中断 (esc) · 1s
+ *   error      → ✗ 错误 (rate_limit) · 1s
+ *   max_turns  → ⚠ 达到 turn 上限 · 1s
+ *
+ * **不显示 token**：过程中括号已实时累加显示一轮的 input / output token；任务结束
+ * 后这些过程数据不再有意义，仅保留时长作为"耗时反馈"。
+ *
+ * completed 路径用 dim 颜色——表达"已完成、不再活跃"的静默感；与流转中 brand 亮色
+ * spinner 形成"动→静且强→弱"的双轴过渡。◆ 字符在 spinner 帧 3 出现，形态守恒。
  */
 function renderDonePhase(phase: Phase & { kind: "done" }): string {
-  const tail = renderTokens(phase.inputTokens, phase.outputTokens);
-  const tailSuffix = tail.length > 0 ? ` ${tone.dim(`(${tail})`)}` : "";
-
   switch (phase.reason) {
-    case "completed": {
-      const head = `${tone.brand(COMPLETED_GLYPH)} ${VERBS.done(phase.durationMs)}`;
-      return `${head}${tailSuffix}`;
-    }
+    case "completed":
+      return `${tone.dim(COMPLETED_GLYPH)} ${tone.dim(VERBS.done(phase.durationMs))}`;
     case "aborted": {
       const reasonText = formatAbortReasonShort(phase.abortReason);
-      const head = `${tone.dim("⏵")} ${tone.dim(`已中断 (${reasonText}) · ${formatDuration(phase.durationMs)}`)}`;
-      return `${head}${tailSuffix}`;
+      return `${tone.dim("⏵")} ${tone.dim(`已中断 (${reasonText}) · ${formatDuration(phase.durationMs)}`)}`;
     }
     case "error": {
       const errLabel = phase.errorType ?? "unknown";
-      const head = `✗ ${tone.dim(`错误 (${errLabel}) · ${formatDuration(phase.durationMs)}`)}`;
-      return head;
+      return `✗ ${tone.dim(`错误 (${errLabel}) · ${formatDuration(phase.durationMs)}`)}`;
     }
-    case "max_turns": {
-      const head = `⚠ ${tone.dim(`达到 turn 上限 · ${formatDuration(phase.durationMs)}`)}`;
-      return `${head}${tailSuffix}`;
-    }
+    case "max_turns":
+      return `⚠ ${tone.dim(`达到 turn 上限 · ${formatDuration(phase.durationMs)}`)}`;
   }
 }
 
@@ -534,8 +555,9 @@ function makeRunning(
   return {
     kind,
     startTime,
-    outputTokens: 0,
-    inputTokens: 0,
+    committedInput: 0,
+    committedOutput: 0,
+    streamingOutput: 0,
   };
 }
 
@@ -550,8 +572,9 @@ function currentRunning(
 ): RunningState {
   return {
     startTime: phase.startTime,
-    outputTokens: phase.outputTokens,
-    inputTokens: phase.inputTokens,
+    committedInput: phase.committedInput,
+    committedOutput: phase.committedOutput,
+    streamingOutput: phase.streamingOutput,
   };
 }
 

@@ -5,6 +5,7 @@ import {
   type IEventBus,
 } from "@zhixing/core";
 import { createStatusBar } from "../status-bar.js";
+import { layout } from "../../tui/style.js";
 import type { ScreenController, InputRegion } from "../../screen/index.js";
 
 class FakeScreen implements ScreenController {
@@ -136,7 +137,7 @@ describe("StatusBar 状态切换", () => {
       usage: { inputTokens: 1200, outputTokens: 14300 } as never,
     });
     expect(screen.statusLines!.join("")).toContain("用时");
-    expect(screen.statusLines!.join("")).toContain("7.3s");
+    expect(screen.statusLines!.join("")).toContain("7s");
     // done 永驻——renderSummary 移除后 status-bar 是终止反馈的单一事实源
     vi.advanceTimersByTime(60_000);
     expect(screen.statusLines).not.toBeNull();
@@ -227,6 +228,125 @@ describe("StatusBar 状态切换", () => {
     expect(text).toContain("重试中");
     expect(text).toContain("第 2/3 次");
     bar.dispose();
+  });
+
+  // 内容左边距 invariant——所有状态条行必须以 layout.contentPrefix 起首，与 AI 行
+  // (`  ◆ ...`) / 工具卡片等其它内容对齐。这是跨场景的视觉契约，由 renderPhase 单一
+  // 注入点保证；任何分支（thinking / streaming / tool / done / aborted / error /
+  // max_turns / compacting / retrying / interrupting）的输出都该满足。
+  describe("内容左边距 invariant", () => {
+    it("running 阶段所有状态条行起首是 contentPrefix", async () => {
+      const { screen, mainBus, bar } = setup();
+      await mainBus.emit("agent:run_start", { prompt: "hi" });
+      for (const line of screen.statusLines ?? []) {
+        expect(line.startsWith(layout.contentPrefix)).toBe(true);
+      }
+      bar.dispose();
+    });
+
+    it("done 阶段（completed）状态条行起首是 contentPrefix", async () => {
+      const { screen, mainBus, bar } = setup();
+      await mainBus.emit("agent:run_start", { prompt: "hi" });
+      await mainBus.emit("agent:run_end", {
+        reason: "completed",
+        durationMs: 7300,
+      } as never);
+      for (const line of screen.statusLines ?? []) {
+        expect(line.startsWith(layout.contentPrefix)).toBe(true);
+      }
+    });
+
+    it("done 阶段（completed）不显示 token 数据——仅显示时长", async () => {
+      const { screen, mainBus, bar } = setup();
+      await mainBus.emit("agent:run_start", { prompt: "hi" });
+      await mainBus.emit("agent:run_end", {
+        reason: "completed",
+        duration: 1900,
+        usage: { inputTokens: 8100, outputTokens: 95 } as never,
+      });
+      const text = screen.statusLines!.join("");
+      // 任务结束后 token 信息不再有意义——仅保留时长反馈
+      expect(text).not.toContain("↑");
+      expect(text).not.toContain("↓");
+      expect(text).not.toContain("8.1k");
+      expect(text).toContain("用时");
+      bar.dispose();
+    });
+
+    it("一轮内 token 跨多次 LLM 请求累加——不被覆盖", async () => {
+      // 模拟一轮 user prompt 内的两次 LLM 请求（含工具调用循环）：
+      //   request 1 结束 → committed = 12000 / 100
+      //   request 2 结束 → committed = 12000+12500 / 100+80 = 24500 / 180
+      // 测试的核心：第二次 request 不能覆盖第一次的累加值。
+      const { screen, mainBus, bar } = setup();
+      await mainBus.emit("agent:run_start", { prompt: "hi" });
+      await mainBus.emit("llm:request_end", {
+        usage: { inputTokens: 12000, outputTokens: 100 },
+      } as never);
+      await mainBus.emit("llm:request_end", {
+        usage: { inputTokens: 12500, outputTokens: 80 },
+      } as never);
+      // request_end 内部立即 repaint——token 变化立即反映，无需等 ticker
+      const text = screen.statusLines!.join("");
+      // 24500 → "24.5k"；180 → "180"
+      expect(text).toContain("24.5k");
+      expect(text).toContain("180");
+      bar.dispose();
+    });
+
+    it("流式估算与 committed 叠加——request_end 时不双倍计算", async () => {
+      // stream chunk 期间 streamingOutput 累加（估算），request_end 时清零并 commit 真值。
+      // 这是修复"流式估算 + LLM 真值"双计 bug 的核心 invariant。
+      const { screen, mainBus, bar } = setup();
+      await mainBus.emit("agent:run_start", { prompt: "hi" });
+      // 流式 100 字符 → estimateTokens(100) ≈ 40
+      await mainBus.emit("llm:stream_event", {
+        type: "text_delta",
+        text: "a".repeat(100),
+      } as never);
+      // request_end 给真值 output=200，预期：streamingOutput 清零，committedOutput=200
+      // 总显示 output = committedOutput(200) + streamingOutput(0) = 200，**不是** 240
+      await mainBus.emit("llm:request_end", {
+        usage: { inputTokens: 5000, outputTokens: 200 },
+      } as never);
+      const text = screen.statusLines!.join("");
+      expect(text).toContain("200");
+      expect(text).not.toContain("240"); // 防双计回归
+      bar.dispose();
+    });
+
+    it("流式 chunk 触发立即 repaint——token 累加在过程中实时可见", async () => {
+      // 修复"过程中看不到 token"的核心 invariant：stream_event 累加后立即 repaint，
+      // 不等 250ms ticker。短 turn (< 250ms) 也能让用户看到 token 增长。
+      const { screen, mainBus, bar } = setup();
+      await mainBus.emit("agent:run_start", { prompt: "hi" });
+      const linesBeforeChunk = screen.statusLines!.join("");
+      // 起手 thinking 阶段还没 chunk —— 不应有 ↓ 标记
+      expect(linesBeforeChunk).not.toContain("↓");
+
+      await mainBus.emit("llm:stream_event", {
+        type: "text_delta",
+        text: "a".repeat(50),
+      } as never);
+      // 不 advance time —— 立即 repaint 应已触发
+      const linesAfterChunk = screen.statusLines!.join("");
+      expect(linesAfterChunk).toContain("↓"); // streamingOutput > 0 → ↓ 段出现
+      expect(linesAfterChunk).toContain("回复中"); // thinking → streaming 转换
+      bar.dispose();
+    });
+
+    it("done 阶段（aborted）状态条行起首是 contentPrefix", async () => {
+      const { screen, mainBus, bar } = setup();
+      await mainBus.emit("agent:run_start", { prompt: "hi" });
+      await mainBus.emit("agent:run_end", {
+        reason: "aborted",
+        durationMs: 1500,
+        abortReason: { kind: "user-cancel", source: "esc" },
+      } as never);
+      for (const line of screen.statusLines ?? []) {
+        expect(line.startsWith(layout.contentPrefix)).toBe(true);
+      }
+    });
   });
 
   it("dispose 清空状态条 + 取消订阅", async () => {

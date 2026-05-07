@@ -54,12 +54,26 @@ export const tone = {
 
 // ── 布局常量 ──────────────────────────────────────────────
 
+const _CONTENT_INDENT = 2;
+
 /**
- * 主面板共享 indent——章节头 / 入口行 / 按钮等"外部内容"的左边距。
- * chrome 内部 indent 与此独立（chrome 自有内边距体系）。
+ * 内容左边距 token——单一来源。
+ *
+ * **视觉契约**：所有非 chrome 盒子边框的内容行（status-bar 状态行 / AI 文字段 /
+ * 工具卡片 / retry / compact / error / slash 命令输出等）都应以 `contentPrefix`
+ * 起首，视觉上对齐到统一列。chrome 盒子内的内容由 chrome 自管 padding，与此 token
+ * 独立——chrome 的边框定义视觉边界，内部 indent 是自己的体系。
+ *
+ * **使用方式**：caller 在拼接行字符串时显式起首加 `${layout.contentPrefix}`。
+ * 不在 cliWriter / ScreenController 内部强制注入——caller 灵活性 > 强制性，
+ * 但单一来源（改 indent 只改这一处）+ token 命名让"是否带前缀"成为代码 review
+ * 阶段的明确约束。
+ *
+ * **派生关系**：`contentPrefix === " ".repeat(contentIndent)` 由 ts 编译期保证。
  */
 export const layout = {
-  contentIndent: 2,
+  contentIndent: _CONTENT_INDENT,
+  contentPrefix: " ".repeat(_CONTENT_INDENT),
 } as const;
 
 // ── 图标 ──────────────────────────────────────────────────

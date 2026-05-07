@@ -16,14 +16,14 @@
 
 import { aiTextAnchor } from "./speaker-state.js";
 import { charWidth } from "../tui/line-width.js";
+import { layout } from "../tui/style.js";
 
-const CONTENT_INDENT = 2;
-/** 锚字符 1 列 + 空格 1 列 = 续行缩进比 CONTENT_INDENT 多 2 列 */
-const HANGING_INDENT = CONTENT_INDENT + 2;
+/** 锚字符 1 列 + 空格 1 列 = 续行缩进比 contentIndent 多 2 列 */
+const HANGING_INDENT = layout.contentIndent + 2;
 /** 极窄终端的下界——避免 maxLineWidth 跌至 0 导致 wrap 死循环 */
 const MIN_USABLE_WIDTH = 20;
 
-const FIRST_LINE_PREFIX = " ".repeat(CONTENT_INDENT);
+const FIRST_LINE_PREFIX = layout.contentPrefix;
 const HANGING_PREFIX = " ".repeat(HANGING_INDENT);
 
 /**
