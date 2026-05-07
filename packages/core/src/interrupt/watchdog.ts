@@ -29,6 +29,17 @@
  * - watchdog **不** 做 abort 优先转换 —— 那是 `finalizeRun` 的职责
  * - watchdog **不** 知道 turn 边界、tool 状态 —— 它只盯 stream chunk 间隔
  *
+ * **诊断通道契约 (架构原则: core 不假设运行环境)**:
+ * - 触发信号**仅通过 EventBus** 发出 (`interrupt:warn` / abort 路径的
+ *   `interrupt:fired` 由 emitRunEnd 单点收敛), 由 caller 决定终点：
+ *     · cli REPL → setupInterruptRendering → cliWriter (chrome scrollback)
+ *     · serve daemon → 同一 cli render 路径 → stdout (重定向到 daemon log)
+ *     · runOnce → StdoutWriter → stdout
+ *     · 测试 → mock 订阅
+ * - 历史曾在此路径直接 console.warn 兼任"操作员日志"，违反 core 不假设环境
+ *   原则 (chrome 模式下的 stderr 写入会破坏 frame model)。当前架构所有 caller
+ *   都已订阅 EventBus，console 路径冗余且有害——已移除。
+ *
  * 后续扩展槽位 (本里程碑不实现): 若需新 watchdog 维度 (wall-clock total /
  * bytes-received / 等), 在 facade 内组合即可, 不破坏对外接口。
  */
@@ -95,19 +106,14 @@ function wrapWithIdleTimer<T>(
         const warnMs = policy.idleTimeoutMs * policy.warnThresholdRatio;
 
         warnTimer = setTimeout(() => {
-          // 日志: REPL / CI 用户能直接看到"流即将超时"警告, 不依赖 EventBus 订阅。
-          // 与 EventBus 事件并行 (前者面向人类操作员, 后者面向程序订阅), 不重复职责。
-          const elapsedMs = Date.now() - lastChunkAt;
-          console.warn(
-            `[watchdog] stream idle ${Math.floor(elapsedMs / 1000)}s/` +
-              `${Math.floor(policy.idleTimeoutMs / 1000)}s, ${chunksReceived} chunks`,
-          );
+          // 仅 emit EventBus——core 不假设运行环境，由 caller 决定终点
+          // (cli REPL → cliWriter / serve daemon → stdout 日志 / 测试 → mock)。
           // emit fire-and-forget: 订阅方异常不能影响 stream 消费;
           // EventBus 自身的 listener 隔离已做 try/catch, 此处 .catch 是双重防御
           eventBus
             ?.emit("interrupt:warn", {
               kind: "idle-timeout-warn",
-              elapsedMs,
+              elapsedMs: Date.now() - lastChunkAt,
               timeoutMs: policy.idleTimeoutMs,
               chunksReceived,
             })
@@ -115,11 +121,11 @@ function wrapWithIdleTimer<T>(
         }, warnMs);
 
         abortTimer = setTimeout(() => {
-          // 日志在 abort 之前打: 即使 abort 后 stream 立即退出, 用户仍能看到"是看门狗
-          // 触发的中断"。INFO/WARN 选 WARN 因为这是非预期超时(预期内 LLM 应稳定出 chunk)。
-          console.warn("[watchdog] stream idle timeout, aborting");
           // 不抛错, 只触发 abort: race 层立即让下一次 iterator.next() 返回 done,
           // for-await 退出, 进入 finally → clearTimers。两个职责清晰分离。
+          // abort 触发后的可见性由 emitRunEnd → interrupt:fired → caller 渲染层负责
+          // (cli REPL writer.line "[interrupted]" / serve 同写 stdout 日志)，
+          // watchdog 不直接 console（避免假设运行环境，避免破坏 chrome 模式 frame）。
           abortWithReason(controller, {
             kind: "idle-timeout",
             timeoutMs: policy.idleTimeoutMs,
