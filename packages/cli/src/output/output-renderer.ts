@@ -12,14 +12,20 @@
  * 工具卡片 / 错误消息等用 writer.line（独立段，自动补 \n）。这是 frame buffer 模式
  * 下的接续合约——line 强制补 \n 会让 chunk 间被分行（视觉退化）。
  *
- * 当前覆盖：text_delta（◆ 锚 + 列 2 + hanging 4）/ thinking_delta dim / 工具卡片
- * `⟡ name args ✓ Xms`——后续模块（markdown / 代码块 / 工具行 / 闪烁）以同一文件
- * 为接入点逐步替换。
+ * 工具调用职责切分：
+ *   - 状态条（动态区）显示 "调用 Read (3s · 等待结果)" 进行中视觉，由 spinner 驱动
+ *   - scrollback（永久区）仅在 tool_end 写完成卡片 `◆ Read(target) / ⎿ result`，
+ *     成败编码于 ◆ 颜色（绿 / 红）
+ *   - tool_start 不直接写 scrollback——避免与状态条职责重叠造成双重显示
  */
 
 import chalk from "chalk";
 import type { AgentYield } from "@zhixing/core";
 import { getToolRenderStrategy } from "../tool-render-strategy.js";
+import {
+  formatToolHeader,
+  formatToolResult,
+} from "../tool-card-format.js";
 import type { CliWriter } from "../screen/index.js";
 import { layout } from "../tui/style.js";
 import { TextStream } from "./text-stream.js";
@@ -52,6 +58,13 @@ export function createOutputRenderer(
   const getColumns = (): number =>
     options.columns ?? process.stdout.columns ?? 80;
   let textStream: TextStream | null = null;
+
+  /**
+   * 已开始但未完成的工具调用 input 缓存——AgentYield.tool_end 不携带 input，
+   * 卡片 header 需要 tool_start 时的 input 重建。turn 内 tool 调用配对严格
+   * （每个 tool_start 都有对应 tool_end），end 时取出并清理，结束 turn 自然清空。
+   */
+  const pendingToolInputs = new Map<string, Record<string, unknown>>();
 
   const flushTextStream = (): void => {
     if (textStream) {
@@ -90,24 +103,41 @@ export function createOutputRenderer(
       case "tool_start": {
         flushTextStream();
         if (getToolRenderStrategy(event.name) !== "default") break;
-        // 工具卡片头部独占一段——尾部 ✓/✗ 由 tool_end 单独写入对齐缩进的下一行；
-        // 起首 contentPrefix 与 AI 行 / 状态条等其它内容对齐到统一列
-        writer.line(
-          `${layout.contentPrefix}${chalk.cyan("⟡")} ${chalk.cyan(event.name)} ${chalk.dim(getToolSummary(event.name, event.input))}`,
-        );
+        // 仅缓存 input 给 tool_end 用——进行中视觉由状态条接管，scrollback 在
+        // 完成时一次性写卡片（避免双区双显）
+        pendingToolInputs.set(event.id, event.input);
         break;
       }
 
       case "tool_end": {
         if (getToolRenderStrategy(event.name) !== "default") break;
-        const status = event.result.isError ? chalk.red("✗") : chalk.green("✓");
-        // 缩进对齐到 ⟡ 列——视觉上 ✓ 与 ⟡ 同列形成"工具调用 → 完成"对应
-        writer.line(`${layout.contentPrefix}${status} ${chalk.dim(`${event.duration}ms`)}`);
+        const input = pendingToolInputs.get(event.id) ?? {};
+        pendingToolInputs.delete(event.id);
+
+        const isError = event.result.isError ?? false;
+        const colorAnchor = isError ? chalk.red : chalk.green;
+
+        const header = formatToolHeader(event.name, input);
+        const result = formatToolResult(
+          event.name,
+          event.result,
+          event.duration,
+        );
+
+        // 卡片首行：`◆ Action(target)` 起首与 AI 行同列（layout.contentPrefix）
+        writer.line(`${layout.contentPrefix}${colorAnchor("◆")} ${header}`);
+        // 续行 ⎿ result：列 2 + 2 = 列 4，与 AI 文字续行 hanging 同基线
+        writer.line(
+          `${layout.contentPrefix}  ${chalk.dim(`⎿ ${result}`)}`,
+        );
         break;
       }
 
       case "turn_complete":
         flushTextStream();
+        // turn 结束兜底清理——正常路径每个 tool_start 都配对 tool_end，
+        // 此处仅防御异常断开（如流被中断时未匹配的 tool_start）
+        pendingToolInputs.clear();
         break;
     }
   };
@@ -126,20 +156,7 @@ export function createOutputRenderer(
 
     stop() {
       flushTextStream();
+      pendingToolInputs.clear();
     },
   };
-}
-
-function getToolSummary(name: string, input: Record<string, unknown>): string {
-  switch (name) {
-    case "read":
-    case "write":
-      return typeof input["path"] === "string" ? input["path"] : "";
-    case "bash": {
-      const cmd = typeof input["command"] === "string" ? input["command"] : "";
-      return cmd.length > 60 ? cmd.slice(0, 57) + "..." : cmd;
-    }
-    default:
-      return "";
-  }
 }

@@ -18,6 +18,7 @@ class FakeScreen implements ScreenController {
     this.setStatusBarCalls.push(lines);
   }
   withScrollWrite(_fn: (write: (chunk: string) => void) => void): void {}
+  writeScrollLine(_text: string): void {}
   requestInputRepaint(): void {}
   dispose(): void {}
 }

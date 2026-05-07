@@ -8,9 +8,27 @@ class FakeStdout {
   buffer = "";
   isTTY = true;
   columns = 80;
+  rows = 30;
+  private listeners = new Map<string, Set<() => void>>();
   write(s: string): boolean {
     this.buffer += s;
     return true;
+  }
+  on(event: string, listener: () => void): void {
+    let set = this.listeners.get(event);
+    if (!set) {
+      set = new Set();
+      this.listeners.set(event, set);
+    }
+    set.add(listener);
+  }
+  off(event: string, listener: () => void): void {
+    this.listeners.get(event)?.delete(listener);
+  }
+  emit(event: string): void {
+    const set = this.listeners.get(event);
+    if (!set) return;
+    for (const fn of set) fn();
   }
 }
 
@@ -341,16 +359,48 @@ describe("ScreenController · Frame Buffer（chunk 接续 + chrome 永驻）", (
     expect(out.buffer).toContain("AI 回复");
   });
 
-  it("notifyDeferred 等同 withScrollWrite（frame buffer 模式下不再有独占排队语义）", () => {
+  it("writeScrollLine 写入独立段——内容落地 + 状态条/输入区仍保留", () => {
     const out = new FakeStdout();
     const sc = createScreenController({
       stdout: out as unknown as NodeJS.WriteStream,
     });
     sc.attachInput(makeRegion(["INPUT"]));
     out.buffer = "";
-    sc.notifyDeferred("scheduler done");
+    sc.writeScrollLine("scheduler done");
     expect(out.buffer).toContain("scheduler done");
     expect(out.buffer).toContain("INPUT");
+  });
+
+  it("writeScrollLine 在 appendInline 流式中——保证起新行，不与 chunk 粘连", () => {
+    const out = new FakeStdout();
+    const sc = createScreenController({
+      stdout: out as unknown as NodeJS.WriteStream,
+    });
+    sc.attachInput(makeRegion(["INPUT"]));
+    // 模拟 LLM 流式 chunk 累积——末尾不带 \n
+    sc.withScrollWrite((write) => write("LLM partial chunk..."));
+    out.buffer = "";
+    // 异步通知插入——必须独立成行，不能粘到 chunk 末尾
+    sc.writeScrollLine("⚠ scheduler warn");
+    // 物理 buffer 中通知与 chunk 不在同一行（断言关键：通知前应有 \n 切行）
+    const chunkIdx = out.buffer.indexOf("LLM partial chunk...");
+    const warnIdx = out.buffer.indexOf("⚠ scheduler warn");
+    if (chunkIdx >= 0 && warnIdx >= 0) {
+      const between = out.buffer.slice(chunkIdx, warnIdx);
+      expect(between).toContain("\n");
+    }
+  });
+
+  it("writeScrollLine 在已 \\n 结尾的内容之后——不补多余空行", () => {
+    const out = new FakeStdout();
+    const sc = createScreenController({
+      stdout: out as unknown as NodeJS.WriteStream,
+    });
+    sc.attachInput(makeRegion(["INPUT"]));
+    sc.writeScrollLine("first");
+    sc.writeScrollLine("second");
+    // 两段独立行，中间无多余空行
+    expect(out.buffer).not.toMatch(/first\s*\n\s*\n\s*second/);
   });
 
   it("paintFrame atomic—— 整次更新拼接到单次 stdout.write", () => {
@@ -388,24 +438,25 @@ describe("ScreenController · Frame Buffer（chunk 接续 + chrome 永驻）", (
     expect(out.buffer).toBe("");
   });
 
-  it("空 notifyDeferred 不触发 paint", () => {
+  it("空字符串 writeScrollLine 写一空行——空字符串语义是空行（与 cliWriter.line('') 对齐）", () => {
     const out = new FakeStdout();
     const sc = createScreenController({
       stdout: out as unknown as NodeJS.WriteStream,
     });
     sc.attachInput(makeRegion(["INPUT"]));
     out.buffer = "";
-    sc.notifyDeferred("");
-    expect(out.buffer).toBe("");
+    sc.writeScrollLine("");
+    // 写了空行——paint 触发，buffer 内必有 \n（空行落地的标志）
+    expect(out.buffer.length).toBeGreaterThan(0);
   });
 
-  it("tailBuffer 累积超阈值时固化前面行——renderedRows / cursorRow 同步减少", () => {
+  it("tailBuffer 超出 viewport 时固化前行——chrome 仍能正常重画", () => {
     const out = new FakeStdout();
     const sc = createScreenController({
       stdout: out as unknown as NodeJS.WriteStream,
     });
     sc.attachInput(makeRegion(["INPUT"]));
-    // 累积大量行触发固化（MAX_TAIL_LINES=50）
+    // 累积大量行触发 viewport-aware freeze（rows=30）
     for (let i = 0; i < 60; i++) {
       sc.withScrollWrite((write) => write(`line ${i}\n`));
     }
@@ -414,5 +465,92 @@ describe("ScreenController · Frame Buffer（chunk 接续 + chrome 永驻）", (
     sc.setStatusBar(["STATUS"]);
     expect(out.buffer).toContain("STATUS");
     expect(out.buffer).toContain("INPUT");
+  });
+
+  it("frame 不会超出 viewport——cursor up 序列永远 ≤ viewport-1，避免跨视口截断引发 scrollback 重复", () => {
+    const out = new FakeStdout();
+    out.rows = 20;
+    const sc = createScreenController({
+      stdout: out as unknown as NodeJS.WriteStream,
+    });
+    sc.attachInput(makeRegion(["INPUT"]));
+
+    // 写入远超 viewport 的内容——若不 freeze，frame 高度会增长到 50+ 行远超 viewport
+    for (let i = 0; i < 50; i++) {
+      sc.withScrollWrite((write) => write(`line ${i}\n`));
+    }
+
+    // 内容存在（早期固化到 scrollback、末尾在 frame 内）
+    expect(out.buffer).toContain("line 0");
+    expect(out.buffer).toContain("line 49");
+    expect(out.buffer).toContain("INPUT");
+
+    // 关键 invariant：所有 cursor up 序列的 N 不超过 viewport-1。
+    // 终端 cursor up 不能跨视口顶部——若 N > viewport，cursor 会被截断到屏幕第 0 行，
+    // 后续 paint 在错误位置写入 + 末尾 \n 触发滚动，导致内容反复推入 scrollback 形成重复。
+    const cursorUps = [...out.buffer.matchAll(/\x1b\[(\d+)A/g)];
+    const maxUp = cursorUps.length === 0
+      ? 0
+      : Math.max(...cursorUps.map((m) => parseInt(m[1]!, 10)));
+    expect(maxUp).toBeLessThanOrEqual(out.rows - 1);
+  });
+
+  it("terminal resize 后旧 cursor 状态被重置——后续 paint 不再因新 viewport 下 cursor up 截断而触发重复", () => {
+    const out = new FakeStdout();
+    out.rows = 30;
+    const sc = createScreenController({
+      stdout: out as unknown as NodeJS.WriteStream,
+    });
+    sc.attachInput(makeRegion(["INPUT"]));
+
+    // 累积内容让 frame 在大 viewport 下接近上限
+    for (let i = 0; i < 25; i++) {
+      sc.withScrollWrite((write) => write(`line ${i}\n`));
+    }
+
+    // 模拟用户调小终端
+    out.rows = 12;
+    out.buffer = ""; // 清空已有 buffer，只观察 resize 后的 ANSI
+    out.emit("resize");
+
+    // resize 后再写——cursor up 应永远 ≤ 新 viewport - 1，否则跨视口截断回归
+    sc.withScrollWrite((write) => write("after-resize\n"));
+    const cursorUps = [...out.buffer.matchAll(/\x1b\[(\d+)A/g)];
+    const maxUp =
+      cursorUps.length === 0
+        ? 0
+        : Math.max(...cursorUps.map((m) => parseInt(m[1]!, 10)));
+    expect(maxUp).toBeLessThanOrEqual(out.rows - 1);
+  });
+
+  it("dispose 解绑 resize listener——不再响应 emit", () => {
+    const out = new FakeStdout();
+    const sc = createScreenController({
+      stdout: out as unknown as NodeJS.WriteStream,
+    });
+    sc.attachInput(makeRegion(["INPUT"]));
+    sc.dispose();
+    out.buffer = "";
+    // dispose 后 resize 事件不应触发 paint（监听已解绑）
+    out.emit("resize");
+    expect(out.buffer).toBe("");
+  });
+
+  it("status / input 占用过大时仍能写入——不会无限固化崩溃", () => {
+    const out = new FakeStdout();
+    out.rows = 12; // 极小 viewport
+    const sc = createScreenController({
+      stdout: out as unknown as NodeJS.WriteStream,
+    });
+    sc.attachInput(makeRegion(["I1", "I2", "I3"]));
+    sc.setStatusBar(["S1", "S2"]);
+    // tailBuffer 一次写入大量行
+    for (let i = 0; i < 30; i++) {
+      sc.withScrollWrite((write) => write(`row ${i}\n`));
+    }
+    // 不崩溃 + 早期内容已落地永久 + 末尾在 frame 内
+    expect(out.buffer).toContain("row 0");
+    expect(out.buffer).toContain("row 29");
+    expect(out.buffer).toContain("I1");
   });
 });

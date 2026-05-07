@@ -31,42 +31,42 @@ function makeFakeScreen(): ScreenController & {
       fn((c) => (collected += c));
       events.push({ kind: "withScrollWrite", text: collected });
     },
-    notifyDeferred(text) {
-      events.push({ kind: "notifyDeferred", text });
+    writeScrollLine(text) {
+      events.push({ kind: "writeScrollLine", text });
     },
     dispose: () => {},
   };
 }
 
 describe("ScreenWriter · 走 ScreenController 协调", () => {
-  it("line 自动补 \\n（独立段语义）", () => {
+  it("line 走 writeScrollLine（独立段语义，由 ScreenController 内部保证起新行 + 末尾 \\n）", () => {
     const screen = makeFakeScreen();
     const w = createScreenWriter({ screen });
     w.line("hello");
     expect(screen.events).toEqual([
-      { kind: "withScrollWrite", text: "hello\n" },
+      { kind: "writeScrollLine", text: "hello" },
     ]);
   });
 
-  it("line 末尾已是 \\n 不重复补", () => {
+  it("line 透传文本——不在 cliWriter 层加工，让 ScreenController 单一处理", () => {
     const screen = makeFakeScreen();
     const w = createScreenWriter({ screen });
     w.line("hello\n");
     expect(screen.events).toEqual([
-      { kind: "withScrollWrite", text: "hello\n" },
+      { kind: "writeScrollLine", text: "hello\n" },
     ]);
   });
 
-  it("空 line 写一个 \\n（空行语义，让 frame buffer 加空行）", () => {
+  it("空 line 走 writeScrollLine 空字符串（空行语义由 ScreenController 内部处理）", () => {
     const screen = makeFakeScreen();
     const w = createScreenWriter({ screen });
     w.line("");
     expect(screen.events).toEqual([
-      { kind: "withScrollWrite", text: "\n" },
+      { kind: "writeScrollLine", text: "" },
     ]);
   });
 
-  it("appendInline 不补 \\n（流式接续）", () => {
+  it("appendInline 走 withScrollWrite（流式接续）", () => {
     const screen = makeFakeScreen();
     const w = createScreenWriter({ screen });
     w.appendInline("hello");
@@ -87,19 +87,27 @@ describe("ScreenWriter · 走 ScreenController 协调", () => {
     const w = createScreenWriter({ screen });
     w.appendInline("你好");
     w.appendInline("世界");
-    // 两次 withScrollWrite，每次内容不补 \n —— frame buffer 端拼接到末尾行
     expect(screen.events).toEqual([
       { kind: "withScrollWrite", text: "你好" },
       { kind: "withScrollWrite", text: "世界" },
     ]);
   });
 
-  it("notify 走 notifyDeferred + 自动补 \\n（独立段语义，与 line 对称）", () => {
+  it("notify 走 writeScrollLine（与 line 同语义，独立段保证不与流式 chunk 粘连）", () => {
     const screen = makeFakeScreen();
     const w = createScreenWriter({ screen });
     w.notify("scheduler done");
     expect(screen.events).toEqual([
-      { kind: "notifyDeferred", text: "scheduler done\n" },
+      { kind: "writeScrollLine", text: "scheduler done" },
+    ]);
+  });
+
+  it("空 notify 走 writeScrollLine 空字符串（与 line('') / StdoutWriter.notify('') 行为对称）", () => {
+    const screen = makeFakeScreen();
+    const w = createScreenWriter({ screen });
+    w.notify("");
+    expect(screen.events).toEqual([
+      { kind: "writeScrollLine", text: "" },
     ]);
   });
 });

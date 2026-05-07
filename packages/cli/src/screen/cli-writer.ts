@@ -64,32 +64,23 @@ interface ScreenWriterOptions {
 /**
  * 经 ScreenController 协调的 CliWriter——cli REPL 持久 chrome 模式。
  *
- * line / notify：底层补 \n（独立段语义），让 frame buffer tailBuffer 自然换行
- * appendInline：不补 \n（流式接续语义），多次调用在 tailBuffer 末尾行追加
+ * line / notify 都走 screen.writeScrollLine（独立段语义，保证起新行避免与流式 chunk 粘连）；
+ * appendInline 走 screen.withScrollWrite（流式接续语义，多次调用在 tailBuffer 末尾行追加）。
  */
 export function createScreenWriter(options: ScreenWriterOptions): CliWriter {
   const { screen } = options;
-  /** 独立段写入——确保末尾 \n 让 frame buffer 知道该段已结束 */
-  const writeLine = (text: string): void => {
-    if (text.length === 0) {
-      // "" 表示空行——补 \n 让 tailBuffer 加一空行
-      screen.withScrollWrite((write) => write("\n"));
-      return;
-    }
-    const finalText = text.endsWith("\n") ? text : text + "\n";
-    screen.withScrollWrite((write) => write(finalText));
-  };
   return {
-    line: writeLine,
+    line(text) {
+      screen.writeScrollLine(text);
+    },
     appendInline(text) {
       if (text.length === 0) return;
-      // 不补 \n——chunk 接续语义；多次调用在 tailBuffer 末尾行内追加
       screen.withScrollWrite((write) => write(text));
     },
+    // notify 与 line 语义等同（双 writer 实现皆然）——空字符串都是"空行"
+    // 而非 no-op，避免互换 writer 实现时行为漂移
     notify(text) {
-      if (text.length === 0) return;
-      const finalText = text.endsWith("\n") ? text : text + "\n";
-      screen.notifyDeferred(finalText);
+      screen.writeScrollLine(text);
     },
   };
 }

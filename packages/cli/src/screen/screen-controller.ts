@@ -21,19 +21,23 @@
  *   消失（用户期望 chrome 永驻）。新设计让 chunk 在 tailBuffer 末尾行内累积，chrome
  *   每次 paint 重画在 tailBuffer 之后——视觉上 chrome 始终跟随 scroll 末尾，永驻。
  *
- * **行固化（freeze）**：
- *   tailBuffer 累积超过 MAX_TAIL_LINES 时，前 N 行固化（移到 scrollback 历史不再重画）。
- *   固化逻辑：tailBuffer.splice(0, N) + cursorRow / renderedRows 各减 N + frame 起点
- *   在物理屏幕上向下移 N 行（已写入的固化行保持不变）。
+ * **行固化（freeze）—— viewport 硬约束**：
+ *   frame buffer 总行数永远 ≤ 终端 viewport 行数 - 安全 margin。append / status / input
+ *   变化后立即检查，超出立即固化最早的 tailBuffer 行（cursor up + write + \n 主动推入
+ *   永久 scrollback），保证 paintFrame 的 cursor up 永远在 viewport 内，不触发滚动。
+ *
+ *   反例（fix 前）：MAX_TAIL_LINES = 50 是绝对值，超大多数终端可视行数（24-40），frame
+ *   超 viewport 时 cursor up 被截断 + paint 末尾 \n 触发滚动 → 上一帧内容部分推入
+ *   scrollback → 下一帧重复 → scrollback 累积重复副本。
  *
  * **使用约定**：
  *   - cli REPL 模式启动一个 ScreenController，持续到 REPL 结束
- *   - 写到 stdout 的所有 caller 必须经 withScrollWrite / notifyDeferred，禁止直接
- *     process.stdout.write
+ *   - 写到 stdout 的所有 caller 必须经此协调，禁止直接 process.stdout.write
  *   - 输入区状态变化通过 requestInputRepaint 触发重画
  *   - 状态条更新通过 setStatusBar
- *   - 流式 LLM chunk caller 直接调 withScrollWrite——chunk 在 tailBuffer 末尾行内
- *     接续，无需 begin/end 协议（旧 exclusive 模式已移除）
+ *   - 接口语义：
+ *     - withScrollWrite —— 流式接续（如 LLM chunk），直接追加到 tailBuffer 末尾行
+ *     - writeScrollLine —— 独立段（如完成态卡片 / 异步通知），保证起新行避免与流式段粘连
  */
 
 import {
@@ -75,14 +79,19 @@ export interface ScreenController {
    * 写入接续到末尾行；带 \n 时末尾换行后下次写入新起一行。
    */
   withScrollWrite(fn: (write: (chunk: string) => void) => void): void;
+  /**
+   * 写入一段独立内容——保证起新行起手。
+   *
+   * 与 withScrollWrite 区别：后者是流式接续语义（chunk 直接追加到 tailBuffer 末尾行），
+   * 本方法是独立段语义——若 tailBuffer 当前在行接续中（最后一行未以 \n 结尾），
+   * 先补 \n 切到新行再写 text，确保异步段（slash 命令输出 / 完成态卡片 / scheduler
+   * 通知 / retry 警告等）不会与正在进行的流式 chunk 粘连成同一行。
+   *
+   * text 自动确保末尾 \n 落地；空字符串等价"写一空行"。
+   */
+  writeScrollLine(text: string): void;
   /** 触发输入区重画——用于按键后 buffer / panel 变化通知屏幕刷新。 */
   requestInputRepaint(): void;
-  /**
-   * 异步通知——语义同 withScrollWrite，保留独立方法名让 caller 表达"任意时刻可能
-   * 触发的事件"（scheduler 任务完成、watchdog 警告等）。frame buffer 模式下不再有
-   * "独占期排队"概念，与 withScrollWrite 行为一致。
-   */
-  notifyDeferred(text: string): void;
   /** 释放：擦除状态条 + 输入区，detach 输入区，停止接受新写入。 */
   dispose(): void;
 }
@@ -96,13 +105,17 @@ interface QueueTask {
 }
 
 /**
- * tailBuffer 累积超过此行数时触发固化——前一半行移到 scrollback 历史不再重画，
- * 控制每次 paint 的工作量。值过小会频繁固化（影响光标行号管理），过大会让每次
- * paint 重画大量行。50 是平衡值——LLM 长段输出 ~10 屏内容时固化数次。
+ * 终端 viewport 兜底——读取 stdout.rows 失败时（CI / pipe / 异常 TTY）的最小可用行数。
+ * 24 是经典 VT100 行高，几乎所有现代终端都不低于此值。
  */
-const MAX_TAIL_LINES = 50;
-/** 固化时保留的尾部行数——前 (MAX - KEEP) 行移到历史 */
-const KEEP_TAIL_LINES = 25;
+const FALLBACK_VIEWPORT_ROWS = 24;
+/**
+ * frame 高度上限相对 viewport 的安全余量——避免 paint 末尾 \n 在屏幕最后一行触发滚动。
+ * viewport 必须 ≥ FRAME_MIN_ROWS 才能正常工作（status + input 自身可能占多行）。
+ */
+const FRAME_SAFETY_MARGIN = 1;
+/** frame 高度下限——viewport 极小时也保留这么多行可用（极端窄终端 fallback） */
+const FRAME_MIN_ROWS = 8;
 
 class ScreenControllerImpl implements ScreenController {
   private readonly stdout: NodeJS.WriteStream;
@@ -117,9 +130,37 @@ class ScreenControllerImpl implements ScreenController {
   private readonly queue: QueueTask[] = [];
   private flushing = false;
   private disposed = false;
+  /** 解绑 stdout resize listener 的 closure，dispose 时调用清理 */
+  private detachResize: (() => void) | null = null;
 
   constructor(options: ScreenControllerOptions = {}) {
     this.stdout = options.stdout ?? process.stdout;
+    this.attachResizeListener();
+  }
+
+  /**
+   * 监听终端 resize——viewport 变化后旧 cursorRow / renderedRows 不再可靠
+   * （cursor up 在新 viewport 下可能被截断），重置 frame 状态让下次 paint 走"首次
+   * paint"分支重新画完整 frame。残留旧内容由新 paint 覆盖或滚出，避免重复推送 bug。
+   */
+  private attachResizeListener(): void {
+    const stream = this.stdout as unknown as {
+      on?: (event: string, listener: () => void) => void;
+      off?: (event: string, listener: () => void) => void;
+    };
+    if (typeof stream.on !== "function") return;
+    const listener = (): void => {
+      if (this.disposed) return;
+      this.enqueue(() => {
+        this.cursorRow = 0;
+        this.renderedRows = 0;
+        this.paintFrame();
+      });
+    };
+    stream.on("resize", listener);
+    this.detachResize = () => {
+      stream.off?.("resize", listener);
+    };
   }
 
   attachInput(region: InputRegion): void {
@@ -159,7 +200,26 @@ class ScreenControllerImpl implements ScreenController {
       if (collected.length === 0) return;
       this.appendToTail(collected);
       this.paintFrame();
-      this.freezeIfTooLong();
+    });
+  }
+
+  writeScrollLine(text: string): void {
+    this.enqueue(() => {
+      if (text.length === 0) {
+        // 空字符串语义：写一空行
+        this.appendToTail("\n");
+      } else {
+        // 独立段保证：若 tailBuffer 末尾在行接续中（非空字符串），先补 \n 切到新行——
+        // 避免与流式 chunk 粘连（典型场景：LLM appendInline 期间 retry warn / scheduler
+        // 通知插入 writeScrollLine，没有此保证会让通知拼到 chunk 末尾形成 "chunk text⚠ warn" 同行）
+        const lastIndex = this.tailBuffer.length - 1;
+        const inMidLine =
+          lastIndex >= 0 && this.tailBuffer[lastIndex]!.length > 0;
+        if (inMidLine) this.appendToTail("\n");
+        const finalText = text.endsWith("\n") ? text : text + "\n";
+        this.appendToTail(finalText);
+      }
+      this.paintFrame();
     });
   }
 
@@ -169,17 +229,10 @@ class ScreenControllerImpl implements ScreenController {
     });
   }
 
-  notifyDeferred(text: string): void {
-    this.enqueue(() => {
-      if (text.length === 0) return;
-      this.appendToTail(text);
-      this.paintFrame();
-      this.freezeIfTooLong();
-    });
-  }
-
   dispose(): void {
     if (this.disposed) return;
+    this.detachResize?.();
+    this.detachResize = null;
     this.queue.push({
       run: () => {
         if (this.renderedRows > 0) {
@@ -243,35 +296,81 @@ class ScreenControllerImpl implements ScreenController {
   }
 
   /**
-   * tailBuffer 累积过长时固化前 N 行——它们已经被 paintFrame 写到物理屏幕，固化后
-   * 不再被后续 paint 覆盖（移到 scrollback 历史）。
+   * 当前终端 viewport 内允许的 frame 最大高度——硬约束。
    *
-   * 固化操作：tailBuffer.splice(0, N) + cursorRow / renderedRows 各减 N。物理屏幕
-   * 上"固化的 N 行"位置不变，但 frame 起点（cursor up 上限）下移 N 行。下次 paintFrame
-   * cursor up cursorRow（已减少 N）正好上移到新 frame 起点，从那里开始覆盖。
+   * 读 stdout.rows，留 safety margin 避免末尾 \n 触发滚动；不可读时 fallback 到
+   * VT100 经典 24 行；极小终端走 FRAME_MIN_ROWS 兜底。
    */
-  private freezeIfTooLong(): void {
-    if (this.tailBuffer.length <= MAX_TAIL_LINES) return;
-    const freezeCount = this.tailBuffer.length - KEEP_TAIL_LINES;
+  private getMaxFrameRows(): number {
+    const rows = (this.stdout as NodeJS.WriteStream).rows;
+    const usable =
+      typeof rows === "number" && rows > 0 ? rows : FALLBACK_VIEWPORT_ROWS;
+    return Math.max(FRAME_MIN_ROWS, usable - FRAME_SAFETY_MARGIN);
+  }
+
+  /**
+   * 检查 tailBuffer + statusLines + input 总行数是否超出 viewport 上限——超出则
+   * 把最早的若干 tailBuffer 行主动推入永久 scrollback（cursor up + write + \n），
+   * 让 frame 永远在 viewport 内可被 paintFrame 安全 cursor up 覆盖。
+   *
+   * 返回 ANSI prefix string 由 caller 合并到下一次 paintFrame 的 buf，单次 stdout.write
+   * 完成 freeze + paint，不在 TTY 间隙暴露中间状态。
+   *
+   * 物理屏幕语义：
+   *   - 旧 frame_start 物理位置：cursor 当前位置 - cursorRow
+   *   - cursor up cursorRow → cursor 在旧 frame_start
+   *   - write freezeCount 行 + \n —— 这些行原本在同位置（上次 paint 已写过），现在
+   *     被同内容覆盖（视觉无变化），但语义上"frame 起点"下移 freezeCount 行
+   *   - cursor 现在在第 freezeCount 行 = 新 frame_start
+   *   - cursorRow = 0（cursor 已在新 frame 起点）
+   *   - renderedRows -= freezeCount（frame 高度缩短）
+   *
+   * 数据结构：tailBuffer.splice(0, freezeCount) 把固化行移出，下次 paint 不再重画。
+   */
+  private freezeOverflowToScrollback(): string {
+    const inputLines = this.input ? this.input.renderLines().length : 0;
+    const totalRows =
+      this.tailBuffer.length + this.statusLines.length + inputLines;
+    const maxRows = this.getMaxFrameRows();
+    if (totalRows <= maxRows) return "";
+
+    const overflow = totalRows - maxRows;
+    // 只能固化 tailBuffer 行——status / input 是 frame 永驻区，不固化
+    const freezeCount = Math.min(overflow, this.tailBuffer.length);
+    if (freezeCount === 0) return "";
+
+    let buf = "";
+    if (this.cursorRow > 0) {
+      buf += ansiCursorUp(this.cursorRow);
+      buf += ANSI_CARRIAGE_RETURN;
+    }
+    for (let i = 0; i < freezeCount; i++) {
+      buf += ANSI_ERASE_LINE + this.tailBuffer[i]! + "\n";
+    }
+
     this.tailBuffer.splice(0, freezeCount);
-    this.cursorRow = Math.max(0, this.cursorRow - freezeCount);
+    this.cursorRow = 0;
     this.renderedRows = Math.max(0, this.renderedRows - freezeCount);
+    return buf;
   }
 
   /**
    * 全帧差分 paint——单次 stdout.write 覆盖整个 frame（tailBuffer + chrome）。
    *
    * 流程：
-   *   1. cursor up cursorRow → frame 起点
-   *   2. \r → 行首
-   *   3. 逐行 \x1b[2K（清整行）+ 内容；行间 \n。保留 max(oldRows, newRows) 占用避免
+   *   1. 先 freezeOverflowToScrollback：保证 frame ≤ viewport，超出部分主动推入 scrollback
+   *   2. cursor up cursorRow → frame 起点（保证在 viewport 内不被截断）
+   *   3. \r → 行首
+   *   4. 逐行 \x1b[2K（清整行）+ 内容；行间 \n。保留 max(oldRows, newRows) 占用避免
    *      行数收缩闪烁，多余旧行用 \x1b[2K 清空
-   *   4. 移光标到 input cursor 位置
+   *   5. 移光标到 input cursor 位置
    *
    * 单次 stdout.write 让 TTY 在一帧内处理完整 ANSI 序列——不会被分帧 render 出"擦后写"
    * 的过渡空白。
    */
   private paintFrame(): void {
+    const freezePrefix = this.freezeOverflowToScrollback();
+
     const allLines: string[] = [];
     for (const line of this.tailBuffer) allLines.push(line);
     for (const line of this.statusLines) allLines.push(line);
@@ -285,10 +384,11 @@ class ScreenControllerImpl implements ScreenController {
 
     if (oldRows === 0 && newRows === 0) {
       this.cursorRow = 0;
+      if (freezePrefix.length > 0) this.stdout.write(freezePrefix);
       return;
     }
 
-    let buf = "";
+    let buf = freezePrefix;
     let writtenRows: number;
 
     if (oldRows === 0) {
