@@ -554,3 +554,162 @@ describe("ScreenController · Frame Buffer（chunk 接续 + chrome 永驻）", (
     expect(out.buffer).toContain("I1");
   });
 });
+
+describe("ScreenController · suspend / resume（alt UI 嵌入协议）", () => {
+  it("suspend 同步擦 chrome 末尾 + 设状态——不入队，立即生效", () => {
+    const out = new FakeStdout();
+    const sc = createScreenController({
+      stdout: out as unknown as NodeJS.WriteStream,
+    });
+    sc.attachInput(makeRegion(["INPUT"]));
+    sc.setStatusBar(["STATUS"]);
+    out.buffer = "";
+    sc.suspend();
+    // 同步 ANSI 序列已写出（不需要 await flush）：cursor up 到 frame 起点 +
+    // cursor down tailLines 跨过 tailBuffer + erase to end 擦 chrome 末尾
+    expect(out.buffer).toContain("\x1b[J"); // erase to end
+  });
+
+  it("suspend 保留 tailBuffer 视觉——cursor down 跨过 tailBuffer 才擦", () => {
+    const out = new FakeStdout();
+    const sc = createScreenController({
+      stdout: out as unknown as NodeJS.WriteStream,
+    });
+    sc.attachInput(makeRegion(["INPUT"]));
+    sc.setStatusBar(["STATUS"]);
+    // 让 tailBuffer 有内容（多行 AI 回复历史）
+    sc.withScrollWrite((write) => write("AI line 1\n"));
+    sc.withScrollWrite((write) => write("AI line 2\n"));
+    sc.withScrollWrite((write) => write("AI line 3\n"));
+    out.buffer = "";
+    sc.suspend();
+    // ANSI 序列应同时含 cursor up（到 frame 起点）+ cursor down（到 status 起点跨过
+    // tailBuffer）+ erase to end。tailBuffer 视觉部分不被擦
+    expect(out.buffer).toMatch(/\x1b\[\d+A/); // cursor up N
+    expect(out.buffer).toMatch(/\x1b\[\d+B/); // cursor down N
+    expect(out.buffer).toContain("\x1b[J"); // erase to end
+  });
+
+  it("suspend 后 tailBuffer 内部状态清空——避免 resume 时重画屏幕已显示内容", () => {
+    const out = new FakeStdout();
+    const sc = createScreenController({
+      stdout: out as unknown as NodeJS.WriteStream,
+    });
+    sc.attachInput(makeRegion(["INPUT"]));
+    sc.withScrollWrite((write) => write("AI history\n"));
+    sc.suspend();
+    out.buffer = "";
+    sc.resume();
+    // resume 后 paint 不应输出之前的 tailBuffer 内容（已在屏幕上方显示，不重画）
+    expect(out.buffer).not.toContain("AI history");
+  });
+
+  it("suspended 期间 enqueue 任务不立即 paint——任务暂存等 resume", () => {
+    const out = new FakeStdout();
+    const sc = createScreenController({
+      stdout: out as unknown as NodeJS.WriteStream,
+    });
+    sc.attachInput(makeRegion(["INPUT"]));
+    sc.suspend();
+    out.buffer = "";
+    // suspended 期间 setStatusBar / withScrollWrite 进队列暂存
+    sc.setStatusBar(["NEW STATUS"]);
+    sc.withScrollWrite((write) => write("scroll content\n"));
+    // 不应有 paint 写出（暂存中）
+    expect(out.buffer).toBe("");
+  });
+
+  it("resume 后 flush 暂存任务 + 重画 chrome", () => {
+    const out = new FakeStdout();
+    const sc = createScreenController({
+      stdout: out as unknown as NodeJS.WriteStream,
+    });
+    sc.attachInput(makeRegion(["INPUT"]));
+    sc.suspend();
+    sc.setStatusBar(["NEW STATUS"]);
+    sc.withScrollWrite((write) => write("scroll content\n"));
+    out.buffer = "";
+    sc.resume();
+    // resume 后所有暂存任务的 paint 应已写出
+    expect(out.buffer).toContain("NEW STATUS");
+    expect(out.buffer).toContain("scroll content");
+    expect(out.buffer).toContain("INPUT");
+  });
+
+  it("suspend 重入抛错——不可嵌套（alt UI 不嵌套约束）", () => {
+    const out = new FakeStdout();
+    const sc = createScreenController({
+      stdout: out as unknown as NodeJS.WriteStream,
+    });
+    sc.attachInput(makeRegion(["INPUT"]));
+    sc.suspend();
+    expect(() => sc.suspend()).toThrow(/already suspended/);
+  });
+
+  it("resume 未 suspend 时抛错——必须 suspend / resume 成对", () => {
+    const out = new FakeStdout();
+    const sc = createScreenController({
+      stdout: out as unknown as NodeJS.WriteStream,
+    });
+    expect(() => sc.resume()).toThrow(/without prior suspend/);
+  });
+
+  it("dispose 时 suspended → cleanup 仍执行（dispose 是特权清理）", () => {
+    const out = new FakeStdout();
+    const sc = createScreenController({
+      stdout: out as unknown as NodeJS.WriteStream,
+    });
+    sc.attachInput(makeRegion(["INPUT"]));
+    sc.suspend();
+    out.buffer = "";
+    sc.dispose();
+    // dispose 强制清 suspended 让 flush 消费 cleanup → 不应抛错或卡住
+    // dispose 后再次操作应被 enqueue 入口拒绝（不抛错，无副作用）
+    expect(() => sc.setStatusBar(["X"])).not.toThrow();
+  });
+
+  it("onSuspendChange 状态翻转时触发——订阅时不立即触发", () => {
+    const out = new FakeStdout();
+    const sc = createScreenController({
+      stdout: out as unknown as NodeJS.WriteStream,
+    });
+    const calls: boolean[] = [];
+    const unsub = sc.onSuspendChange((suspended) => calls.push(suspended));
+    // 订阅时不应立即触发——calls 仍空
+    expect(calls).toEqual([]);
+    sc.suspend();
+    expect(calls).toEqual([true]);
+    sc.resume();
+    expect(calls).toEqual([true, false]);
+    unsub();
+    sc.suspend();
+    sc.resume();
+    // unsub 后不再触发
+    expect(calls).toEqual([true, false]);
+  });
+
+  it("onSuspendChange 监听器异常不影响其它监听器与 ScreenController", () => {
+    const out = new FakeStdout();
+    const sc = createScreenController({
+      stdout: out as unknown as NodeJS.WriteStream,
+    });
+    const calls: string[] = [];
+    sc.onSuspendChange(() => {
+      throw new Error("listener boom");
+    });
+    sc.onSuspendChange((s) => calls.push(s ? "on" : "off"));
+    sc.suspend();
+    sc.resume();
+    expect(calls).toEqual(["on", "off"]);
+  });
+
+  it("dispose 后 suspend / resume 抛错——不允许 disposed 状态下调用", () => {
+    const out = new FakeStdout();
+    const sc = createScreenController({
+      stdout: out as unknown as NodeJS.WriteStream,
+    });
+    sc.dispose();
+    expect(() => sc.suspend()).toThrow(/after dispose/);
+    expect(() => sc.resume()).toThrow(/after dispose/);
+  });
+});

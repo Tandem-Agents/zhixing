@@ -38,11 +38,42 @@
  *   - 接口语义：
  *     - withScrollWrite —— 流式接续（如 LLM chunk），直接追加到 tailBuffer 末尾行
  *     - writeScrollLine —— 独立段（如完成态卡片 / 异步通知），保证起新行避免与流式段粘连
+ *
+ * **Alt UI 嵌入协议（chrome 末尾让位）**：
+ *   confirmation panel 等短小 modal alt UI 需要独占 stdout 实时响应键盘
+ *   （selectWithInput 直写 stdout + raw mode keypress 设计），与 ScreenController
+ *   的 chrome paint 共享 stdout 会互相覆盖。
+ *
+ *   嵌入协议：alt UI 进入前 caller 调 `screen.suspend()` 让位 chrome 末尾区域（同步
+ *   擦 status + input + 清 tailBuffer 内部状态 + 暂存后续 paint 任务 + 通知订阅者
+ *   暂停周期行为），alt UI 退出后调 `screen.resume()` 恢复（flush 暂存任务 + 在
+ *   alt UI 之后重画 status + input）。
+ *
+ *   关键视觉契约：suspend 是 **chrome 末尾让位**，不是全屏接管——tailBuffer 视觉
+ *   （welcome / 用户消息 / AI 回复历史）保留在 alt UI 上方屏幕；alt UI 在原
+ *   status + input 位置 inline 起手；alt UI 关闭后 chrome 重画在 alt UI 之后。
+ *   长对话时新 chrome 触底 cursor `\n` 自然滚动早期内容到 scrollback——与 Claude
+ *   Code 等成熟 cli modal 行为一致。
+ *
+ *   suspend / resume 必须成对，不可重入（alt UI 不嵌套）。disposed 后调用抛错。
+ *   onSuspendChange 让 status-bar 等订阅者协同暂停/恢复 ticker。
+ *
+ *   suspend 与 detachInput 语义区分：
+ *     - suspend：chrome 末尾让位（tailBuffer 状态清空保视觉不重画，statusLines /
+ *       input 引用保留供 resume 重画）
+ *     - detachInput：彻底离开（清所有状态 + 擦整 frame，对应 input controller
+ *       dispose 路径）
+ *
+ *   已知 alt UI 接入：confirmation panel（cli REPL 工具调用确认）。
+ *   全屏 alt UI（config-editor）走 alt-screen ANSI 模式自治，与 suspend 协议正交
+ *   ——可叠加 suspend 让 ScreenController 在 alt-screen 期间不 paint chrome。
  */
 
 import {
   ANSI_CARRIAGE_RETURN,
+  ANSI_ERASE_DOWN,
   ANSI_ERASE_LINE,
+  ansiCursorDown,
   ansiCursorUp,
   eraseRegion,
   moveCursorWithinRegion,
@@ -92,6 +123,62 @@ export interface ScreenController {
   writeScrollLine(text: string): void;
   /** 触发输入区重画——用于按键后 buffer / panel 变化通知屏幕刷新。 */
   requestInputRepaint(): void;
+
+  /**
+   * 暂停 chrome 协调——confirmation panel 等 modal alt UI 进入前调用，让位 chrome
+   * 末尾区域（status + input）让 alt UI 在原 status + input 位置 inline 起手，
+   * tailBuffer 视觉（welcome / 用户消息 / AI 回复历史）保留在 alt UI 上方屏幕。
+   *
+   * 行为：
+   *   1. 同步写出 ANSI 序列：cursor up 到 frame 起点 → cursor down 跨过 tailBuffer
+   *      → erase 到屏幕底——仅擦 chrome 末尾（status + input），tailBuffer 物理
+   *      显示保留
+   *   2. 清空 tailBuffer 内部状态（屏幕已显示，resume 时不重画避免重复）；
+   *      statusLines / input 引用保留供 resume 重画
+   *   3. 设 suspended 标志，所有后续 enqueue 任务暂存在队列（flush 不消费），
+   *      状态字段通过 enqueue 任务依次修改但不触发 paintFrame
+   *   4. 广播 suspended=true 让 onSuspendChange 订阅者（如 status-bar）暂停自身
+   *      周期行为（避免无效 setStatusBar 累积）
+   *
+   * 视觉契约：长对话时 alt UI + 新 chrome 触底由 cursor `\n` 自然滚动早期 tailBuffer
+   * 内容到 scrollback——与 Claude Code 等成熟 cli modal 行为一致。
+   *
+   * 必须与 resume() 成对调用。重复 suspend 抛错（不可重入——alt UI 不嵌套）。
+   * disposed 后调用抛错。
+   *
+   * 仅 cli REPL chrome 模式需要——serve daemon / runOnce 等无 chrome 场景不需要
+   * alt UI 嵌入协议；全屏 alt UI（config-editor）走 alt-screen ANSI 模式自治，与
+   * 本协议正交（可叠加 suspend 让 chrome 在 alt-screen 期间不 paint）。
+   */
+  suspend(): void;
+
+  /**
+   * 恢复 chrome 协调——alt UI 退出后调用，让 chrome 在 alt UI 之后重画。
+   *
+   * 行为：
+   *   1. 清 suspended 标志并广播 suspended=false 让订阅者恢复
+   *   2. enqueue 一次 paintFrame 兜底——同时触发 flush 消费暂存队列；期间累积的
+   *      setStatusBar / withScrollWrite / writeScrollLine 任务依次执行（每个内部
+   *      paintFrame），最后兜底 paintFrame 确保 chrome 状态正确显示
+   *
+   * 视觉效果：cursor 在 alt UI 关闭后的新行起手 paint——chrome 重画在 alt UI 之后；
+   * tailBuffer 状态在 suspend 时已清空，resume 不重画屏幕上方已显示的历史内容。
+   *
+   * 必须 suspend 之后调用——未 suspend 调 resume 抛错。disposed 后调用抛错。
+   */
+  resume(): void;
+
+  /**
+   * 订阅 suspended 状态变化——返回 unsubscribe。
+   *
+   * 仅在状态实际翻转时触发回调（false→true 或 true→false）；订阅时不立即触发，
+   * 订阅者自行处理初始状态（默认 suspended=false）。
+   *
+   * 用例：status-bar / 任何持有周期写屏行为的模块订阅此信号，suspended 期间停止
+   * 周期任务避免无效计算 + 队列累积。
+   */
+  onSuspendChange(listener: (suspended: boolean) => void): () => void;
+
   /** 释放：擦除状态条 + 输入区，detach 输入区，停止接受新写入。 */
   dispose(): void;
 }
@@ -130,6 +217,13 @@ class ScreenControllerImpl implements ScreenController {
   private readonly queue: QueueTask[] = [];
   private flushing = false;
   private disposed = false;
+  /**
+   * 暂停 chrome 协调状态——alt UI 嵌入期间为 true，flush 不消费队列让任务暂存。
+   * suspend()/resume() 显式切换；不可重入，dispose 强制清。
+   */
+  private suspended = false;
+  /** suspended 状态变化订阅者集合——状态翻转时同步通知 */
+  private readonly suspendListeners = new Set<(suspended: boolean) => void>();
   /** 解绑 stdout resize listener 的 closure，dispose 时调用清理 */
   private detachResize: (() => void) | null = null;
 
@@ -229,6 +323,76 @@ class ScreenControllerImpl implements ScreenController {
     });
   }
 
+  suspend(): void {
+    if (this.disposed) {
+      throw new Error("ScreenController.suspend called after dispose");
+    }
+    if (this.suspended) {
+      throw new Error(
+        "ScreenController.suspend called while already suspended (alt UI 不嵌套)",
+      );
+    }
+    // 让位策略：保留 tailBuffer 视觉（welcome / 用户消息 / AI 回复历史在屏幕上方
+    // 保持显示），仅擦 chrome 末尾（status + input 区）腾出空间让 alt UI 在原 status
+    // + input 位置 inline 起手——与 Claude Code 等成熟 cli modal 行为一致。
+    //
+    // 同时清 tailBuffer 内部状态：屏幕上方已物理显示这些内容，resume 时不再 paint
+    // 重画（避免重复显示）。statusLines / input 引用保留供 resume 重画。
+    //
+    // ANSI 序列：cursor up cursorRow 到 frame 起点 → cursor down tailLines 到 status
+    // 起点（frame 内部 tailBuffer 之后的位置）→ 行首 + erase 到屏幕底。
+    if (this.renderedRows > 0) {
+      const tailLines = this.tailBuffer.length;
+      let buf = ansiCursorUp(this.cursorRow);
+      if (tailLines > 0) buf += ansiCursorDown(tailLines);
+      buf += ANSI_CARRIAGE_RETURN;
+      buf += ANSI_ERASE_DOWN;
+      this.stdout.write(buf);
+    }
+    this.tailBuffer = [];
+    this.cursorRow = 0;
+    this.renderedRows = 0;
+    this.suspended = true;
+    this.notifySuspendChange(true);
+  }
+
+  resume(): void {
+    if (this.disposed) {
+      throw new Error("ScreenController.resume called after dispose");
+    }
+    if (!this.suspended) {
+      throw new Error(
+        "ScreenController.resume called without prior suspend",
+      );
+    }
+    this.suspended = false;
+    this.notifySuspendChange(false);
+    // 让 chrome 回归——同时触发 flush 消费暂存队列任务。期间累积的 setStatusBar /
+    // withScrollWrite / writeScrollLine 依次执行（每个 task 内 paintFrame），最终
+    // 的 paintFrame 兜底无副作用（idempotent，基于当前状态画）
+    this.enqueue(() => {
+      this.paintFrame();
+    });
+  }
+
+  onSuspendChange(listener: (suspended: boolean) => void): () => void {
+    this.suspendListeners.add(listener);
+    return () => {
+      this.suspendListeners.delete(listener);
+    };
+  }
+
+  /** 同步通知所有 suspend 订阅者状态翻转——监听器异常 swallow 不传播 */
+  private notifySuspendChange(suspended: boolean): void {
+    for (const listener of this.suspendListeners) {
+      try {
+        listener(suspended);
+      } catch {
+        // 监听器异常不影响其它监听器与 ScreenController 自身
+      }
+    }
+  }
+
   dispose(): void {
     if (this.disposed) return;
     this.detachResize?.();
@@ -246,7 +410,11 @@ class ScreenControllerImpl implements ScreenController {
       },
     });
     this.disposed = true;
+    // dispose 是特权清理——若处于 suspended 强制清掉让 flush 能消费 cleanup 任务。
+    // 暂存队列中的非 cleanup 任务会一并执行（屏幕马上 erase，多 paint 几次无影响）
+    this.suspended = false;
     this.flush();
+    this.suspendListeners.clear();
   }
 
   private enqueue(task: () => void): void {
@@ -260,6 +428,8 @@ class ScreenControllerImpl implements ScreenController {
     this.flushing = true;
     try {
       while (this.queue.length > 0) {
+        // suspended 期间任务暂存不消费——等 resume 时再 flush
+        if (this.suspended) break;
         const task = this.queue.shift();
         if (!task) break;
         try {

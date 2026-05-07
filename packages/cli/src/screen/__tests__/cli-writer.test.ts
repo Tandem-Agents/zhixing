@@ -34,6 +34,9 @@ function makeFakeScreen(): ScreenController & {
     writeScrollLine(text) {
       events.push({ kind: "writeScrollLine", text });
     },
+    suspend: () => {},
+    resume: () => {},
+    onSuspendChange: () => () => {},
     dispose: () => {},
   };
 }

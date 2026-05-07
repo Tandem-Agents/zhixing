@@ -856,18 +856,25 @@ export async function startRepl(options: ReplOptions): Promise<void> {
 
   // 挂载终端确认渲染器到会话 broker。
   //
-  // 共存 rl：selectWithInput 会进入 stdin raw mode 并独占 keypress 事件，
-  // 与 readline 的行缓冲冲突。通过 beforeShow/afterShow 两个 hook，渲染器
-  // 在显示面板前 pause rl（停止消费 stdin），结束后 resume rl（恢复主循环）。
+  // 共存协议（chrome 模式 alt UI 嵌入）：
+  //   - rl 共存：selectWithInput 会进入 stdin raw mode 并独占 keypress 事件，
+  //     与 readline 的行缓冲冲突。beforeShow 调 rl.pause 让 readline 不消费 stdin；
+  //     afterShow 调 rl.resume 恢复主循环
+  //   - chrome 让位：confirmation panel 由 selectWithInput 直写 stdout（独占
+  //     stdin raw mode 实时响应按键的设计要求），与 ScreenController 的 chrome
+  //     paint 共享 stdout 会互相覆盖。beforeShow 调 screen.suspend 让 chrome 让
+  //     位（擦屏 + 暂存后续 paint 任务 + 通知 status-bar 暂停 ticker）；afterShow
+  //     调 screen.resume 恢复 chrome（flush 暂存任务 + 重画 frame）
   //
   // 渲染器生命周期绑到 REPL 退出：rl.on("close") 里 detach。
   const confirmationRenderer = new TerminalConfirmationRenderer({
     beforeShow: () => {
-      renderer.stop(); // 暂停 spinner，避免动画覆盖面板
+      renderScreen.suspend();
       rl.pause();
     },
     afterShow: () => {
       rl.resume();
+      renderScreen.resume();
     },
   });
   // session 持有 renderer 与 broker 的绑定，dispose 时自动 detach

@@ -173,7 +173,15 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
     }
   };
 
+  /**
+   * 标记 ScreenController 是否处于 suspended（alt UI 嵌入期间）——为 true 时
+   * status-bar 暂停 ticker 并跳过 setStatusBar 调用，避免 alt UI 期间状态条
+   * paint 任务在 ScreenController 暂存队列累积 + 资源浪费（chrome 已让位看不到）。
+   */
+  let chromeSuspended = false;
+
   const repaint = (): void => {
+    if (chromeSuspended) return;
     const lines = renderPhase(phase);
     screen.setStatusBar(lines);
     // ticker 仅在"running"状态需要驱动 spinner / 时间累计；idle / done 是静态文本，停 ticker
@@ -181,6 +189,24 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
       stopTicker();
     }
   };
+
+  /**
+   * 订阅 ScreenController suspend 状态变化——alt UI 进入时停 ticker，离开时按
+   * 当前 phase 决定是否恢复 ticker。
+   *
+   * 状态字段（phase / lastAbortReason 等）在 alt UI 期间继续被 EventBus 事件
+   * 驱动更新——只是不写屏。alt UI 退出 resume 后下一次 ensureTicker / repaint
+   * 用最新 phase 自然显示当前态。
+   */
+  const offSuspendChange = screen.onSuspendChange((suspended) => {
+    chromeSuspended = suspended;
+    if (suspended) {
+      stopTicker();
+    } else if (isPhaseRunning(phase)) {
+      ensureTicker();
+      repaint();
+    }
+  });
 
   // ─── EventBus 订阅 ───
 
@@ -421,6 +447,7 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
       offInterruptFired();
       offStreamEventForRecovery();
       offRunEnd();
+      offSuspendChange();
       stopTicker();
       // done 状态保留显示——status-bar 是终止反馈的单一事实源，dispose 不该清掉它。
       // 下一次 createRenderSubscribers 装载新 status-bar 后，其 agent:run_start handler

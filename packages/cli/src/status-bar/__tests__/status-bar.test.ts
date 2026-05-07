@@ -11,6 +11,7 @@ import type { ScreenController, InputRegion } from "../../screen/index.js";
 class FakeScreen implements ScreenController {
   statusLines: readonly string[] | null = null;
   setStatusBarCalls: Array<readonly string[] | null> = [];
+  private suspendListeners = new Set<(suspended: boolean) => void>();
   attachInput(_region: InputRegion): void {}
   detachInput(): void {}
   setStatusBar(lines: readonly string[] | null): void {
@@ -20,6 +21,18 @@ class FakeScreen implements ScreenController {
   withScrollWrite(_fn: (write: (chunk: string) => void) => void): void {}
   writeScrollLine(_text: string): void {}
   requestInputRepaint(): void {}
+  suspend(): void {
+    for (const l of this.suspendListeners) l(true);
+  }
+  resume(): void {
+    for (const l of this.suspendListeners) l(false);
+  }
+  onSuspendChange(listener: (suspended: boolean) => void): () => void {
+    this.suspendListeners.add(listener);
+    return () => {
+      this.suspendListeners.delete(listener);
+    };
+  }
   dispose(): void {}
 }
 
@@ -358,5 +371,61 @@ describe("StatusBar 状态切换", () => {
     screen.statusLines = ["残留"];
     await mainBus.emit("agent:run_start", { prompt: "again" });
     expect(screen.statusLines).toEqual(["残留"]);
+  });
+});
+
+describe("StatusBar · alt UI 嵌入协议（ScreenController suspend/resume）", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("ScreenController suspended 时 status-bar 跳过 setStatusBar——避免 alt UI 期间 paint 任务累积", async () => {
+    const { screen, mainBus, bar } = setup();
+    await mainBus.emit("agent:run_start", { prompt: "hi" });
+    expect(screen.statusLines).not.toBeNull();
+    // 模拟 alt UI 进入——FakeScreen 的 suspend 触发 onSuspendChange(true)
+    screen.suspend();
+    screen.statusLines = null; // 重置观察基线
+    screen.setStatusBarCalls.length = 0;
+    // suspended 期间任何事件触发 repaint 都应跳过 setStatusBar
+    await mainBus.emit("llm:stream_event", {
+      type: "text_delta",
+      text: "ai 回复内容",
+    });
+    expect(screen.setStatusBarCalls).toEqual([]);
+    bar.dispose();
+  });
+
+  it("ScreenController resume 后状态条恢复——按当前 phase 重画", async () => {
+    const { screen, mainBus, bar } = setup();
+    await mainBus.emit("agent:run_start", { prompt: "hi" });
+    screen.suspend();
+    screen.setStatusBarCalls.length = 0;
+    // alt UI 期间状态字段被事件更新，但 setStatusBar 跳过
+    await mainBus.emit("llm:stream_event", {
+      type: "text_delta",
+      text: "ai 回复",
+    });
+    expect(screen.setStatusBarCalls).toEqual([]);
+    // resume 后恢复 ticker + 重画
+    screen.resume();
+    expect(screen.setStatusBarCalls.length).toBeGreaterThan(0);
+    expect(screen.statusLines).not.toBeNull();
+    bar.dispose();
+  });
+
+  it("dispose 取消 onSuspendChange 订阅——dispose 后 screen.suspend 不再触发 status-bar 行为", () => {
+    const { screen, bar } = setup();
+    bar.dispose();
+    // dispose 后 screen.suspend 应不再让 status-bar 调 stopTicker / 状态字段——
+    // 不应抛错
+    expect(() => screen.suspend()).not.toThrow();
+    expect(() => screen.resume()).not.toThrow();
   });
 });
