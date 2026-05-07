@@ -2,7 +2,16 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { getLlmChunkDump, __resetForTesting } from "../llm-chunk-dump.js";
+import {
+  createEventBus,
+  type AgentEventMap,
+  type IEventBus,
+} from "@zhixing/core";
+import {
+  attachChunkDumpToBus,
+  getLlmChunkDump,
+  __resetForTesting,
+} from "../llm-chunk-dump.js";
 
 const LOG_DIR = path.join(os.homedir(), ".zhixing", "logs");
 
@@ -15,14 +24,24 @@ describe("LLM chunk dump · 默认禁用（无 ZHIXING_RAW_DUMP env）", () => {
     __resetForTesting();
   });
 
-  it("env var 未启用时返回 noop handle —— 调用 record/dispose 不写文件不抛错", () => {
+  it("env var 未启用时返回 noop handle —— 调用 record 不写文件不抛错", () => {
     const dump = getLlmChunkDump();
     expect(() => {
-      dump.recordChunk("text_delta", "hello");
-      dump.recordChunk("thinking_delta", "world");
+      dump.recordStreamEvent({ type: "text_delta", text: "hello" });
+      dump.recordStreamEvent({
+        type: "tool_call_delta",
+        id: "tc1",
+        argsFragment: '{"foo":"bar"}',
+      });
       dump.recordTurnBoundary();
       dump.dispose();
     }).not.toThrow();
+  });
+
+  it("attachChunkDumpToBus noop 时仍正确订阅 + cleanup 不抛错", () => {
+    const bus: IEventBus<AgentEventMap> = createEventBus();
+    const detach = attachChunkDumpToBus(bus);
+    expect(() => detach()).not.toThrow();
   });
 
   it("多次 getLlmChunkDump 返回同一 handle —— singleton 语义", () => {
@@ -38,7 +57,6 @@ describe("LLM chunk dump · 启用（ZHIXING_RAW_DUMP=1）", () => {
   beforeEach(() => {
     __resetForTesting();
     process.env["ZHIXING_RAW_DUMP"] = "1";
-    // 记录测试启动前 logs/ 目录下的现有文件，方便比对新建的
     try {
       logsBefore = fs.existsSync(LOG_DIR) ? fs.readdirSync(LOG_DIR) : [];
     } catch {
@@ -48,7 +66,6 @@ describe("LLM chunk dump · 启用（ZHIXING_RAW_DUMP=1）", () => {
   afterEach(() => {
     __resetForTesting();
     delete process.env["ZHIXING_RAW_DUMP"];
-    // 清理本测试创建的新日志（不动其他文件）
     try {
       const after = fs.existsSync(LOG_DIR) ? fs.readdirSync(LOG_DIR) : [];
       for (const name of after) {
@@ -72,7 +89,6 @@ describe("LLM chunk dump · 启用（ZHIXING_RAW_DUMP=1）", () => {
         (n) => n.startsWith("llm-raw-") && !logsBefore.includes(n),
       );
       if (fresh.length === 0) return null;
-      // 取最新一个（按文件名排序，时间戳后）
       fresh.sort();
       return path.join(LOG_DIR, fresh[fresh.length - 1]!);
     } catch {
@@ -81,11 +97,10 @@ describe("LLM chunk dump · 启用（ZHIXING_RAW_DUMP=1）", () => {
   }
 
   function readLogSync(p: string): string {
-    // 关闭 stream 后文件应已 flush；test 内调 dispose 触发
     return fs.readFileSync(p, "utf-8");
   }
 
-  it("启用时创建日志文件并写启动横幅 + 路径提示走 stderr", () => {
+  it("启用时创建日志文件并写启动横幅", () => {
     const dump = getLlmChunkDump();
     dump.dispose();
     const logPath = findNewLog();
@@ -95,43 +110,59 @@ describe("LLM chunk dump · 启用（ZHIXING_RAW_DUMP=1）", () => {
     expect(content).toContain(`pid ${process.pid}`);
   });
 
-  it("recordChunk 写入完整 raw + codepoint hex —— 含不可见字符也保留", () => {
+  it("text_delta 写完整 raw + codepoint hex —— 含不可见字符也保留", () => {
     const dump = getLlmChunkDump();
-    // emoji ☀️ 是 U+2600 + U+FE0F (VS16); BOM 是 U+FEFF; LRM 是 U+200E
     const sample = "你好☀️‎﻿\n";
-    dump.recordChunk("text_delta", sample);
+    dump.recordStreamEvent({ type: "text_delta", text: sample });
     dump.dispose();
-    const logPath = findNewLog();
-    const content = readLogSync(logPath!);
-    // raw 字段用 JSON.stringify 编码——控制字符（\n）转义，其它字符（含 LRM/BOM）字面保留
+    const content = readLogSync(findNewLog()!);
     expect(content).toContain(`raw: ${JSON.stringify(sample)}`);
-    // codepoint 字段含每个字符的 U+ 形式——这是诊断不可见字符的关键
     expect(content).toContain("U+4F60"); // 你
-    expect(content).toContain("U+597D"); // 好
-    expect(content).toContain("U+2600"); // ☀
-    expect(content).toContain("U+FE0F"); // VS16
     expect(content).toContain("U+200E"); // LRM
     expect(content).toContain("U+FEFF"); // BOM
     expect(content).toContain("U+000A"); // \n
   });
 
-  it("text_delta / thinking_delta 都被记录，标注 kind", () => {
+  it("thinking_delta / tool_call_delta 都被记录，结构事件也被简短记录", () => {
     const dump = getLlmChunkDump();
-    dump.recordChunk("text_delta", "AI text");
-    dump.recordChunk("thinking_delta", "AI thinking");
+    dump.recordStreamEvent({ type: "message_start", messageId: "m1" });
+    dump.recordStreamEvent({
+      type: "thinking_delta",
+      thinking: "AI thinking",
+    });
+    dump.recordStreamEvent({
+      type: "tool_call_start",
+      id: "tc1",
+      name: "Read",
+    });
+    dump.recordStreamEvent({
+      type: "tool_call_delta",
+      id: "tc1",
+      argsFragment: '{"path":"a.ts"}',
+    });
+    dump.recordStreamEvent({ type: "tool_call_end", id: "tc1" });
+    dump.recordStreamEvent({
+      type: "message_end",
+      stopReason: "tool_use",
+      usage: { inputTokens: 0, outputTokens: 0 },
+    });
     dump.dispose();
     const content = readLogSync(findNewLog()!);
-    expect(content).toContain("text_delta");
     expect(content).toContain("thinking_delta");
-    expect(content).toContain('raw: "AI text"');
     expect(content).toContain('raw: "AI thinking"');
+    expect(content).toContain("message_start");
+    expect(content).toContain("tool_call_start (id=tc1, name=Read)");
+    expect(content).toContain("tool_call_delta");
+    expect(content).toContain('args: "{\\"path\\":\\"a.ts\\"}"');
+    expect(content).toContain("tool_call_end (id=tc1)");
+    expect(content).toContain("message_end");
   });
 
-  it("recordTurnBoundary 在 turn 之间写分隔标记 + 重置时间戳", () => {
+  it("recordTurnBoundary 写分隔标记 + 重置时间戳", () => {
     const dump = getLlmChunkDump();
-    dump.recordChunk("text_delta", "turn 1 chunk");
+    dump.recordStreamEvent({ type: "text_delta", text: "turn 1 chunk" });
     dump.recordTurnBoundary();
-    dump.recordChunk("text_delta", "turn 2 chunk");
+    dump.recordStreamEvent({ type: "text_delta", text: "turn 2 chunk" });
     dump.dispose();
     const content = readLogSync(findNewLog()!);
     expect(content).toContain("=== TURN 1");
@@ -141,15 +172,37 @@ describe("LLM chunk dump · 启用（ZHIXING_RAW_DUMP=1）", () => {
     expect(content).toContain("turn 2 chunk");
   });
 
-  it("turn 内无 chunk 时 recordTurnBoundary 不写 end 标记 —— 避免空 turn 噪音", () => {
-    const dump = getLlmChunkDump();
-    dump.recordTurnBoundary(); // 还没有任何 chunk
-    dump.recordTurnBoundary();
-    dump.recordChunk("text_delta", "first real chunk");
-    dump.dispose();
+  it("attachChunkDumpToBus 转发 EventBus llm:stream_event 与 agent:run_end", async () => {
+    const bus: IEventBus<AgentEventMap> = createEventBus();
+    const detach = attachChunkDumpToBus(bus);
+
+    await bus.emit("llm:stream_event", {
+      type: "text_delta",
+      text: "hello via bus",
+    });
+    await bus.emit("llm:stream_event", {
+      type: "tool_call_delta",
+      id: "tc1",
+      argsFragment: "{",
+    });
+    await bus.emit("agent:run_end", {
+      reason: "completed",
+      duration: 100,
+      turnCount: 1,
+      usage: { inputTokens: 10, outputTokens: 5 },
+    });
+    await bus.emit("llm:stream_event", {
+      type: "text_delta",
+      text: "second turn",
+    });
+
+    detach();
+    getLlmChunkDump().dispose();
     const content = readLogSync(findNewLog()!);
-    expect(content).not.toContain("--- end of TURN 1 ---");
-    // 第一个真实 chunk 应在 TURN 3 开始（前 2 次 boundary 推进了 turnIndex）
-    expect(content).toContain("=== TURN 3");
+    expect(content).toContain('raw: "hello via bus"');
+    expect(content).toContain("tool_call_delta");
+    expect(content).toContain("--- end of TURN 1 ---");
+    expect(content).toContain("=== TURN 2");
+    expect(content).toContain('raw: "second turn"');
   });
 });

@@ -63,6 +63,7 @@ import {
 } from "./render.js";
 import {
   createOutputRenderer,
+  getLlmChunkDump,
   type OutputRenderer,
 } from "./output/index.js";
 import {
@@ -688,6 +689,13 @@ function setupBracketedPasteMode(): void {
 // ─── 启动 REPL ───
 
 export async function startRepl(options: ReplOptions): Promise<void> {
+  // 在 ScreenController 接管 stdout 之前预热 chunk-dump singleton——若 ZHIXING_RAW_DUMP=1
+  // 启用，dump 创建时会经 stderr 写一行启用提示（"[zhixing] LLM raw chunk dump enabled →
+  // <path>"）。chrome 接管后 stderr 写入会破坏 frame；提前到 chrome 启动前让提示落在
+  // 终端的启动期 banner 阶段，与 shell prompt 自然衔接。后续 attachChunkDumpToBus 内的
+  // getLlmChunkDump() 复用 cached handle，不再触发 stderr。
+  getLlmChunkDump();
+
   // 启用 bracketed paste mode + 初始化 paste detector：
   //   detector 注册 stdin "data" listener 必须早于 readline 启用 keypress——同步广
   //   播按 listener 注册顺序执行，detector 先 setInPasteMode，下游 onKeypress 才能

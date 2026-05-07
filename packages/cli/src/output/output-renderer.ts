@@ -29,7 +29,6 @@ import {
 import type { CliWriter } from "../screen/index.js";
 import { layout } from "../tui/style.js";
 import { MarkdownStream, type MarkdownMode } from "./markdown/index.js";
-import { getLlmChunkDump } from "./llm-chunk-dump.js";
 
 export interface OutputRenderer {
   startThinking: () => void;
@@ -80,14 +79,9 @@ export function createOutputRenderer(
     }
   };
 
-  // 诊断旁路——ZHIXING_RAW_DUMP=1 启用时把 LLM 每个 text/thinking chunk 写到独立日志文件;
-  // 默认全 noop, 不影响渲染路径; 用于排查"屏幕显示与 LLM 实际输出不符"类视觉 bug
-  const chunkDump = getLlmChunkDump();
-
   const renderEvent = (event: AgentYield): void => {
     switch (event.type) {
       case "text_delta": {
-        chunkDump.recordChunk("text_delta", event.text);
         // 过滤 LLM 在工具调用前的纯空白前导——避免起手就写一个 ◆ 锚但什么都没说
         if (!mdStream && event.text.trim() === "") break;
         if (!mdStream) {
@@ -106,7 +100,6 @@ export function createOutputRenderer(
       }
 
       case "thinking_delta": {
-        chunkDump.recordChunk("thinking_delta", event.thinking);
         // thinking 流式 chunk 同样用 appendInline 接续——避免每个 chunk 独占一行
         if (event.thinking.length === 0) break;
         writer.appendInline(chalk.dim(event.thinking));
@@ -151,7 +144,6 @@ export function createOutputRenderer(
 
       case "turn_complete":
         flushTextStream();
-        chunkDump.recordTurnBoundary();
         // turn 结束兜底清理——正常路径每个 tool_start 都配对 tool_end，
         // 此处仅防御异常断开（如流被中断时未匹配的 tool_start）
         pendingToolInputs.clear();

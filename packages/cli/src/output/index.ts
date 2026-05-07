@@ -21,3 +21,9 @@ export {
 } from "./speaker-state.js";
 
 export { TextStream } from "./text-stream.js";
+
+export {
+  getLlmChunkDump,
+  attachChunkDumpToBus,
+  type LlmChunkDump,
+} from "./llm-chunk-dump.js";
