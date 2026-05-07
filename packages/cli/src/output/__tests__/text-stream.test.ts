@@ -210,3 +210,126 @@ describe("TextStream end", () => {
     expect(anchorMatches.length).toBe(2);
   });
 });
+
+describe("TextStream ANSI-aware wrap（不被 ANSI 序列撑爆 wrap 边界）", () => {
+  it("CSI 染色序列整段透传不计 wrap 宽度——粗体短文字不在锚后立刻 wrap", () => {
+    const { stream, out } = makeStream(40);
+    // chalk.bold("X") = "\x1b[1mX\x1b[22m"——3+1+4 = 8 字符，可见仅 1 列
+    stream.feed("\x1b[1mhello\x1b[22m world");
+    // 整段可见宽度 = "hello world" = 11 列，远小于 maxLineWidth - HANGING = 36
+    // 不应 wrap；如果把 ANSI 当字符计入会让 wrap 提前断行
+    expect(out.buffer).not.toContain("\n    "); // 没 hanging 续行（无 wrap）
+    // ANSI 序列保留完整，没被 wrap 切断
+    expect(out.buffer).toContain("\x1b[1mhello\x1b[22m");
+  });
+
+  it("OSC 8 超链接序列整段透传——url 字符不计 wrap 宽度", () => {
+    const { stream, out } = makeStream(30);
+    // OSC 8 链接：\x1b]8;;URL\x1b\\TEXT\x1b]8;;\x1b\\
+    // url 30+ 字符是不可见的——可见仅 "click" 5 列
+    stream.feed(
+      "\x1b]8;;https://very-long-url.example.com/path\x1b\\click\x1b]8;;\x1b\\",
+    );
+    // 不应被 wrap（可见 click 短）；url 也不应让 wrap 提前断行切碎序列
+    expect(out.buffer).not.toContain("\n    ");
+    // OSC 序列完整保留
+    expect(out.buffer).toContain("\x1b]8;;https://very-long-url.example.com/path\x1b\\");
+    expect(out.buffer).toContain("\x1b]8;;\x1b\\");
+  });
+
+  it("可见字符到 wrap 边界正常 wrap，ANSI 序列不影响 wrap 决策", () => {
+    const { stream, out } = makeStream(20);
+    // maxLineWidth = max(20-4, 20) = 20，可见字符 25 列必 wrap
+    stream.feed("\x1b[1maaaaaaaaaaaaaaaaaaaaaa\x1b[22mbbb");
+    // 应 wrap：可见 22 a + 3 b = 25 列 > 20
+    expect(out.buffer).toContain("\n    "); // hanging 续行
+    // 但 ANSI 染色不被 wrap 切碎
+    expect(out.buffer).toContain("\x1b[1m");
+    expect(out.buffer).toContain("\x1b[22m");
+  });
+});
+
+describe("TextStream SGR 跨 wrap 状态保持（hanging prefix 不继承 bg/fg 染色）", () => {
+  it("bg 色（codespan）跨 wrap 边界——\\n 前 emit SGR reset、hanging 4 空格不带 bg、续行 re-apply SGR", () => {
+    const { stream, out } = makeStream(20);
+    // 模拟 codespan：bg + cyan 包 22 字符长 inline code 触 wrap
+    // chalk.bgAnsi256(245).cyan 输出形如 \x1b[48;5;245m\x1b[36mTEXT\x1b[39m\x1b[49m
+    // 这里直接构造 ANSI：bg 起开 + cyan 起开 + 22 个 'a' + 续 'b' 触 wrap
+    stream.feed("\x1b[48;5;245m\x1b[36maaaaaaaaaaaaaaaaaaaaaab\x1b[39m\x1b[49m");
+    // 必 wrap（22 a + 1 b = 23 > 20）
+    expect(out.buffer).toContain("\n    ");
+    // 关键：wrap 处必有 SGR reset \x1b[0m 让 hanging 不继承 bg
+    expect(out.buffer).toContain("\x1b[0m\n    ");
+    // 续行（hanging 后）必 re-apply 累积的 SGR（bg + cyan）让可见字符仍染色
+    expect(out.buffer).toContain("\x1b[0m\n    \x1b[48;5;245m\x1b[36m");
+  });
+
+  it("纯文本 wrap 不带 SGR 时不输出无谓的 reset 序列", () => {
+    const { stream, out } = makeStream(20);
+    stream.feed("a".repeat(50));
+    // hanging 续行存在
+    expect(out.buffer).toContain("\n    ");
+    // 没 SGR 时 wrap 不应 emit reset（避免无意义 ANSI 噪声）
+    expect(out.buffer).not.toContain("\x1b[0m");
+  });
+
+  it("SGR full reset \\x1b[0m 清空累积——之后 wrap 不 re-apply 已 reset 的 SGR", () => {
+    const { stream, out } = makeStream(20);
+    // 先开 bg + cyan，闭合 reset，然后写 22 a 触 wrap
+    stream.feed("\x1b[48;5;245m\x1b[36mhi\x1b[0m" + "a".repeat(22));
+    // wrap 处不应 re-apply 已 reset 的 SGR
+    const wrapMarkerIdx = out.buffer.indexOf("\n    ");
+    expect(wrapMarkerIdx).toBeGreaterThan(-1);
+    const afterHanging = out.buffer.slice(wrapMarkerIdx + 5); // skip "\n    "
+    // hanging 之后不应紧跟 bg/cyan 序列
+    expect(afterHanging.startsWith("\x1b[48;5;245m")).toBe(false);
+    expect(afterHanging.startsWith("\x1b[36m")).toBe(false);
+  });
+
+  it("end() 重置 activeSgr——下次 feed 不残留旧 SGR 累积", () => {
+    const { stream, out } = makeStream(20);
+    // 第一个 turn：开 bg 不 reset，end()
+    stream.feed("\x1b[48;5;245maa");
+    stream.end();
+    out.buffer = ""; // 清 capture 看下次 feed
+    // 第二个 turn：纯文本 wrap，不应 re-apply 上 turn 的 bg
+    stream.feed("a".repeat(50));
+    expect(out.buffer).not.toContain("\x1b[48;5;245m");
+  });
+
+  it("feed 主循环硬换行 + activeSgr 非空——hanging 也走 SGR reset + re-apply（与 wrap 对称）", () => {
+    const { stream, out } = makeStream(80);
+    // 单 chunk 含硬换行 + bg 起手未在换行前 reset：模拟"未平衡 SGR 输入"防御场景
+    stream.feed("\x1b[48;5;245mline1\nline2\x1b[49m");
+    // 硬换行处必有 SGR reset 让 hanging 不继承 bg
+    expect(out.buffer).toContain("\x1b[0m\n    ");
+    // hanging 4 空格之后 re-apply bg
+    expect(out.buffer).toContain("\x1b[0m\n    \x1b[48;5;245m");
+  });
+
+  it("feed 主循环段落分隔（连续 \\n）—— 真空行不带 hanging 也不 emit 无谓 SGR reset", () => {
+    const { stream, out } = makeStream(80);
+    stream.feed("段一\n\n段二");
+    // 段落分隔的真空行：hanging 不应出现在 \n\n 之间（按段落分隔语义保持原契约）
+    expect(out.buffer).toContain("\n\n    段二");
+    // 段落分隔不需要 SGR reset 噪声（无 active SGR）
+    expect(out.buffer).not.toContain("\x1b[0m");
+  });
+
+  it("跨 feed needsHangingPrefix 路径 + activeSgr 非空——hanging 走 reset + re-apply", () => {
+    const { stream, out } = makeStream(80);
+    // 第一次 feed：末尾 \n + 留 activeSgr 含 bg
+    stream.feed("\x1b[48;5;245mline1\n");
+    out.buffer = "";
+    // 第二次 feed：起首走 needsHangingPrefix 路径
+    stream.feed("line2");
+    // 第二次 feed 输出应含 SGR reset + hanging + re-apply bg
+    expect(out.buffer).toContain("\x1b[0m");
+    expect(out.buffer).toContain("    ");
+    expect(out.buffer).toContain("\x1b[48;5;245m");
+    // 顺序：reset 在 hanging 之前
+    const resetIdx = out.buffer.indexOf("\x1b[0m");
+    const hangingIdx = out.buffer.indexOf("    ");
+    expect(resetIdx).toBeLessThan(hangingIdx);
+  });
+});

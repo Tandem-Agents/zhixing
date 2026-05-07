@@ -1,36 +1,46 @@
 /**
  * Markdown 流式渲染主入口——LLM chunk → ANSI 输出协调器。
  *
- * **流式策略**：
+ * **按 block 类型分路**：
  *   - chunk 累积到 buffer，每 chunk 重新 marked.lexer(buffer) 得到当前 tokens
- *   - 末尾 token 是 code block → 严格 hold 等 ``` 闭合（代码完整性优先；通常 LLM 输出
- *     代码块速度快、长度有限，hold 时间用户可接受）
- *   - 末尾 token 是其他类型（paragraph / list / blockquote / heading / hr / space）→
- *     **按字面字符 forward 给 paragraph 流**，不 hold——避免 LLM 输出长 list / 引用 /
- *     setext heading underline 等结构时用户看不到任何 streaming 输出
- *   - 闭合 block emit 时检查"该 block 在 buffer 中的位置是否已字面 forward 过"，
- *     已 forward 跳过避免重复显示；仅 code block 走 hold 后 ANSI emit 路径
+ *   - **code block**：严格 hold 等 ``` 闭合，闭合后走 `renderBlock` 独立段 ANSI emit
+ *     （dim 文字 + 列 2 + 起首空行）。代码完整性优先；典型 LLM 输出代码块速度快、长度
+ *     有限，hold 时间用户可接受
+ *   - **paragraph**：走 `emitInlineTokens` inline 增量 ANSI emit。闭合 paragraph emit
+ *     全部 inline tokens 的 ANSI 渲染；末尾未闭合 paragraph emit 已闭合的前 N-1 个
+ *     inline，**最后一个 inline 一律 hold**（含 text）——marked 把未闭合的 markdown
+ *     起首标记当 text 解析（如 `**bo` 是 text("**bo")），若字面 forward 则后续 chunk
+ *     让 marked 重解析为 strong 时已 forward 字符无法被 ANSI 替换。换"末尾未闭合段
+ *     不流式（典型 1~2s 等待）"代价得到"闭合后 inline 元素 ANSI 渲染正确"视觉
+ *   - **heading / list / blockquote / hr**：字面字符 forward（含 `# 标题` / `- item` /
+ *     `> quote` / `---` 字面 markdown 标记），不 hold——避免 LLM 输出长 list / 引用 /
+ *     setext heading underline 等结构时用户看不到任何 streaming 输出。这些 block 的
+ *     ANSI 视觉留给后续 step（需"行级流式"策略：单 list item / 单 heading 闭合即 emit
+ *     ANSI，复用 inline-renderer 模式）
+ *   - **space**：仅当 paragraph 流活跃时 forward `\n\n` 触发段落分隔
+ *   - 已 emit 的 block 通过 `paragraphForwardedTo` 单调推进的不变量跳过避免重复
  *
- * **视觉 trade-off（本 step 范围）**：
- *   - paragraph：◆ 锚 + 字面字符 + wrap hanging 4（含 inline markdown 标记字面）
- *   - code block：dim 文字 + 列 2 + 起首空行（闭合后 ANSI 渲染）
- *   - heading / list / blockquote / hr：**字面字符流式**（视觉退化为 `# 标题` / `- item` /
- *     `> quote` / `---` 字面 markdown 标记）。这些 block 的 ANSI 视觉留给后续 step——
- *     需要用 list item 行级流式 / 单行 token 增量渲染才能既不卡又有视觉
+ * **视觉契约**：
+ *   - paragraph：◆ 锚 + inline ANSI（**bold** / _italic_ / `code` 中灰底 / 链接 OSC 8 +
+ *     虚线下划线 / ~~del~~）+ wrap hanging 4 续行
+ *   - code block：dim 文字 + 列 2 + 起首/末尾空行
+ *   - heading / list / blockquote / hr：字面字符流式（待 ANSI 化）
  *
  * **三档 mode**：
  *   - render：完整 markdown 渲染（默认 cli REPL TTY）
- *   - strip：不染色 / 不锚（CI / pipe / 日志），paragraph 字面 forward 不经 TextStream
- *   - raw：直接原文 forward，不解析（调试）
+ *   - strip：inline-renderer strip 模式输出纯文本（link 退化 `text (url)`）+ 不经 TextStream
+ *     的 ◆ 锚（CI / pipe / 日志，paragraph 直接 appendInline 字面字符）
+ *   - raw：直接原文 forward 不解析（调试用）
  */
 
 import { marked, type Tokens } from "marked";
 import { TextStream } from "../text-stream.js";
 import { renderBlock } from "./block-renderer.js";
+import { renderInline } from "./inline-renderer.js";
 import type { MarkdownMode } from "./types.js";
 
 export interface MarkdownStreamOptions {
-  /** 流式段（paragraph 字面）走 appendInline；闭合 code block 走 line。两路径都注入。 */
+  /** 流式 paragraph 内容走 appendInline；闭合 code block 走 line。两路径都注入。 */
   readonly appendInline: (chunk: string) => void;
   readonly line: (text: string) => void;
   /** 终端列宽——TextStream wrap 计算用 */
@@ -46,11 +56,12 @@ interface TokenRange {
 export class MarkdownStream {
   private buffer = "";
   /**
-   * buffer 中已字面 forward 给 paragraph 流的字符末位 offset。
+   * buffer 中已 emit 处理的字符末位 offset（含 paragraph inline ANSI emit 与
+   * heading/list/blockquote/hr 字面 forward 两条路径）。
    *
-   * 关键不变量：buffer[0, paragraphForwardedTo) 已经经 paragraph 流（render 模式走
-   * TextStream）/ appendInline（strip 模式）输出到 stdout。emit 闭合 block 时如果
-   * block 完全落在 [0, paragraphForwardedTo) 内，跳过 ANSI emit 避免重复显示。
+   * 关键不变量：buffer[0, paragraphForwardedTo) 已经经过 emit 路径（render 模式
+   * 走 TextStream / strip 模式走 appendInline）输出到 stdout。emit 闭合 block 时
+   * 如果 block 完全落在 [0, paragraphForwardedTo) 内，跳过避免重复显示。
    */
   private paragraphForwardedTo = 0;
   /** 已 emit 的闭合 block 数（buffer 中前 N 个 token 已处理）。 */
@@ -136,11 +147,15 @@ export class MarkdownStream {
   /**
    * 闭合 block emit：
    *   - 已被字面 forward（block 完全落在 paragraphForwardedTo 之前）→ 跳过避免重复
-   *   - code block → ANSI 渲染独立段 emit（唯一走 ANSI 路径的类型）
+   *   - code block → ANSI 渲染独立段 emit（独立 line 路径）
+   *   - paragraph → 走 inline 增量 ANSI 路径（emitInlineTokens 闭合 emit 全部 inline
+   *     tokens 的 ANSI 渲染；递增推进 paragraphForwardedTo 到 range.end 让 paragraph
+   *     末尾换行等残余字符不重复 forward）
    *   - space → 仅当 paragraph 流活跃时 forward `\n\n` 触发段落分隔；流已关闭时（如刚
    *     emit code block 后）跳过，仅推进 forwarded 边界（避免给新 paragraph 流喂 `\n\n`
    *     创建空 ◆ 段）
-   *   - paragraph / heading / list / blockquote / hr → 字面 forward 给 paragraph 流
+   *   - heading / list / blockquote / hr → 字面 forward 给 paragraph 流（其 ANSI
+   *     行级渲染留待后续 step）
    */
   private emitClosedBlock(token: Tokens.Generic, range: TokenRange): void {
     if (range.end <= this.paragraphForwardedTo) return;
@@ -149,6 +164,14 @@ export class MarkdownStream {
       this.closeParagraphStream();
       const ansi = renderBlock(token, this.mode);
       if (ansi.length > 0) this.line(ansi);
+      this.paragraphForwardedTo = range.end;
+      return;
+    }
+
+    if (token.type === "paragraph") {
+      this.emitInlineTokens(token as Tokens.Paragraph, range.start, false);
+      // paragraph.raw 末尾的换行 / 残余字符不在 inline tokens 累计长度内——直接推到
+      // range.end 让后续 space 字符 forward 不重复历经这段空 delta
       this.paragraphForwardedTo = range.end;
       return;
     }
@@ -162,16 +185,24 @@ export class MarkdownStream {
       return;
     }
 
-    // paragraph / heading / list / blockquote / hr —— 字面 forward
+    // heading / list / blockquote / hr —— 字面 forward
     this.forwardBufferRange(range.end);
   }
 
   /**
    * 末尾 hold 候选 block 的处理：
    *   - code block：严格 hold 等 ``` 闭合（保代码完整性 + 通常输出快），关闭 paragraph 流
+   *   - paragraph：emitInlineTokens 增量 emit 已闭合的 inline tokens（前面 N-1 个全部
+   *     ANSI emit），末尾未闭合的 inline token 全部 hold（含 text）。原因：marked 把
+   *     未闭合的 markdown 标记当 text 处理（如 `**bo` 整段是 text），如果按 raw 字面
+   *     forward 出去，后续 chunk 来让 marked 把它识别为 strong 起手时——已 forward
+   *     的 `**` 字面字符无法用 ANSI bold 替换（stdout 写出去无法撤回）。换"末尾段需
+   *     等闭合（如 \n\n）才显示" 的代价（typical LLM 段长几句话，等待 1~2s 可接受）
+   *     得到"闭合后 inline 元素 ANSI 渲染正确"的视觉
    *   - space：不 forward（避免给空 buffer 末位创建空 ◆ 段；等下次实质内容 chunk 来再起手）
-   *   - 其他类型（paragraph / list / blockquote / heading / hr）：字面 forward 让用户看到
-   *     streaming 输出，不卡 LLM 写长 list / 引用 / setext heading underline 等场景
+   *   - heading / list / blockquote / hr：字面 forward 让用户看到 streaming 输出，不卡
+   *     LLM 写长 list / 引用 / setext heading underline 等场景（这些 block 的 ANSI
+   *     行级渲染留待后续 step）
    */
   private handleOpenBlock(token: Tokens.Generic, range: TokenRange): void {
     if (token.type === "code") {
@@ -181,24 +212,68 @@ export class MarkdownStream {
     if (token.type === "space") {
       return;
     }
+    if (token.type === "paragraph") {
+      this.emitInlineTokens(token as Tokens.Paragraph, range.start, true);
+      return;
+    }
     this.forwardBufferRange(range.end);
   }
 
   /**
-   * 把 buffer [paragraphForwardedTo, toOffset) 的字符 forward 给 paragraph 流。
+   * 增量 emit paragraph 内的 inline tokens（render 模式走 ANSI；strip 模式纯文本；
+   * raw 模式不会进入此函数 — feed() 早返回）。
    *
-   * render 模式走 TextStream（◆ 锚 + 列 2 + hanging 4 + ANSI 染色 + \n\n 段落分隔
-   * 自动 hanging 续行无新锚）；strip 模式直接 appendInline 字面字符。
+   * 按 inline token 在 buffer 中的累计 [pos, pos+raw.length) 与 paragraphForwardedTo
+   * 比较：itEnd <= forwardedTo 视为已 emit 跳过（避免同段已 emit 的闭合 inline 重复
+   * forward）；其余 inline 走 `renderInline(it)` 整体 ANSI emit。
    *
-   * 同 chunk 内多次调用通过 paragraphForwardedTo 单调递增保证不重复 forward。
+   * **末尾未闭合 inline 一律 hold**（含 text）。marked 把未闭合的 markdown 起首标记
+   * 当 text 解析（如 `**bo` 是 text("**bo")），后续 chunk 让 marked 重解析为 strong
+   * 时——已字面 forward 的 `**` 字符无法被 ANSI bold 替换（stdout 不可撤回）。统一
+   * hold 让闭合后 ANSI 渲染正确，代价是末尾未闭合段不流式（典型 LLM 段长几句话，
+   * 可接受 1~2s 等待换 inline 元素 ANSI 视觉正确）
    */
-  private forwardBufferRange(toOffset: number): void {
-    if (toOffset <= this.paragraphForwardedTo) return;
-    const delta = this.buffer.slice(this.paragraphForwardedTo, toOffset);
-    this.paragraphForwardedTo = toOffset;
+  private emitInlineTokens(
+    paragraph: Tokens.Paragraph,
+    paragraphStart: number,
+    isOpen: boolean,
+  ): void {
+    const inlineTokens = paragraph.tokens ?? [];
+    let pos = paragraphStart;
+    for (let i = 0; i < inlineTokens.length; i++) {
+      const it = inlineTokens[i]!;
+      const itEnd = pos + (it.raw?.length ?? 0);
+      pos = itEnd;
+
+      if (itEnd <= this.paragraphForwardedTo) continue;
+
+      const isLastInline = i === inlineTokens.length - 1;
+      if (isOpen && isLastInline) {
+        // 末尾未闭合 inline → hold 等闭合再 emit
+        break;
+      }
+
+      // 闭合 inline——整体 ANSI 渲染整体 forward
+      this.forwardToParagraphStream(renderInline(it, this.mode));
+      this.paragraphForwardedTo = itEnd;
+    }
+  }
+
+  /**
+   * 把任意字符串 forward 给 paragraph 流。
+   *
+   * render 模式走 TextStream（◆ 锚 + 列 2 + hanging 4 + ANSI-aware wrap + \n\n 段落
+   * 分隔自动 hanging 续行无新锚）；strip 模式直接 appendInline 字面字符。
+   *
+   * 流式段（paragraph inline）与字面段（heading/list/blockquote/hr）共享同一 paragraph
+   * 流实例——切换到 hold（末尾 code block）时 closeParagraphStream 关闭，之后非 code
+   * 末尾会重新 lazy 创建。
+   */
+  private forwardToParagraphStream(text: string): void {
+    if (text.length === 0) return;
 
     if (this.mode === "strip") {
-      this.appendInline(delta);
+      this.appendInline(text);
       return;
     }
 
@@ -208,7 +283,22 @@ export class MarkdownStream {
         columns: this.columns,
       });
     }
-    this.paragraphStream.feed(delta);
+    this.paragraphStream.feed(text);
+  }
+
+  /**
+   * 把 buffer [paragraphForwardedTo, toOffset) 的字符 forward 给 paragraph 流。
+   *
+   * 用于字面 forward 路径（heading / list / blockquote / hr / space 段落分隔）。
+   * paragraph 走 emitInlineTokens 不经此路径——避免 inline 标记字符与 ANSI 重复 emit。
+   *
+   * 同 chunk 内多次调用通过 paragraphForwardedTo 单调递增保证不重复 forward。
+   */
+  private forwardBufferRange(toOffset: number): void {
+    if (toOffset <= this.paragraphForwardedTo) return;
+    const delta = this.buffer.slice(this.paragraphForwardedTo, toOffset);
+    this.paragraphForwardedTo = toOffset;
+    this.forwardToParagraphStream(delta);
   }
 
   private closeParagraphStream(): void {
@@ -219,7 +309,7 @@ export class MarkdownStream {
     }
     if (this.mode === "strip" && this.paragraphForwardedTo > 0) {
       // strip 模式没有 TextStream 协调末尾 \n，markdown-stream 自补让段独立落地
-      // 仅当本流已字面 forward 过内容时才补 \n（避免空 buffer 写多余空行）
+      // 仅当本流已 emit 过内容时才补 \n（避免空 buffer 写多余空行）
       this.appendInline("\n");
     }
   }

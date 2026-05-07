@@ -66,7 +66,11 @@ export const ANSI = {
 /**
  * ANSI 转义序列正则——同时覆盖 CSI 与 OSC 两族。
  *
- * CSI: `\x1b[<参数><终结>`——色彩、游标、擦除、私有模式（`\x1b[?25l` 等）
+ * CSI: `\x1b[<参数><终结>`——色彩、游标、擦除、私有模式（`\x1b[?25l` 等）。
+ *   参数字节范围按 ECMA-48 标准为 `0x30-0x3F`（数字 + `:` + `;` + `<` + `=` + `>`
+ *   + `?`）；`:` 是子参数分隔符，用于扩展 SGR 如 dotted underline `\x1b[4:4m` /
+ *   RGB 颜色 `\x1b[38:2:R:G:Bm`——必须识别避免 stripAnsi 漏掉这类序列让 `4:4m`
+ *   字面字符暴露在视觉文本里。
  * OSC: `\x1b]<参数><ST>`——超链接（OSC 8 `\x1b]8;;URL\x1b\\TEXT\x1b]8;;\x1b\\`）、
  *      标题设置等。ST 终结符可以是 `\x1b\\` 或 `\x07`（BEL）——两者都识别。
  *
@@ -74,7 +78,7 @@ export const ANSI = {
  * 右边框对不齐，clampLine 截断时切碎序列。
  */
 const ANSI_RE =
-  /\x1b\[[0-9;?=<>]*[A-Za-z]|\x1b\][^\x1b\x07]*(?:\x1b\\|\x07)/g;
+  /\x1b\[[0-9;:?=<>]*[A-Za-z]|\x1b\][^\x1b\x07]*(?:\x1b\\|\x07)/g;
 
 /**
  * 从字符串中剥离所有 ANSI 转义序列（CSI + OSC）。
@@ -85,9 +89,47 @@ export function stripAnsi(s: string): string {
 }
 
 /**
+ * 同 ANSI_RE，但用 sticky flag 让 exec 严格从 lastIndex 起匹配——避免按字符
+ * 遍历字符串时每次调 stripAnsi / s.slice 触发整串扫描。
+ */
+const ANSI_AT_RE =
+  /\x1b\[[0-9;:?=<>]*[A-Za-z]|\x1b\][^\x1b\x07]*(?:\x1b\\|\x07)/y;
+
+/**
+ * 检查字符串第 `i` 位是否为 ANSI 转义序列（CSI 或 OSC）起首。
+ *
+ * 是——返回该序列字符长度（caller 可整段跳过）；否——返回 0。
+ *
+ * 用例：按 code point 遍历字符串做 wrap / 宽度计算时，遇到 ANSI 起首字符
+ * (`\x1b`) 整段 skip 序列长度，避免序列内字符（如 `[1m` 三个字符）被当
+ * 可见字符计入列宽，破坏 wrap 边界。
+ */
+export function ansiEscapeLengthAt(s: string, i: number): number {
+  if (s.charCodeAt(i) !== 0x1b) return 0;
+  ANSI_AT_RE.lastIndex = i;
+  const m = ANSI_AT_RE.exec(s);
+  return m ? m[0].length : 0;
+}
+
+/**
  * 构造 OSC 8 超链接转义字符串——支持的终端渲染为可点击链接，不支持的终端
  * 显示原文（fallback 安全）。`text` 缺省 = 显示 URL 本身。
  */
 export function osc8Hyperlink(url: string, text?: string): string {
   return `\x1b]8;;${url}\x1b\\${text ?? url}\x1b]8;;\x1b\\`;
+}
+
+/**
+ * 虚线下划线（dotted）—— SGR 扩展子参数 `4:4`，与 chalk 的单实线 `4` 区分。
+ *
+ * `\x1b[4:4m` 起开 dotted underline，`\x1b[24m` 关闭所有下划线状态。SGR 扩展
+ * 子参数（"4:N"）是 ECMA-48 标准的子参数语法，在现代终端（Windows Terminal
+ * 1.16+ / iTerm2 / Kitty / WezTerm / Alacritty）支持；不支持的旧终端忽略 `:4`
+ * 参数 fallback 为单实线下划线（最差是不显示下划线，文字仍可读）。
+ *
+ * 用途：markdown 链接装饰——cyan 文字 + 虚线下划线让链接在文本中明显可见，
+ * 与 inline `code`（bg 块）/ `**bold**`（字体粗）形成层次区分。
+ */
+export function dottedUnderline(text: string): string {
+  return `\x1b[4:4m${text}\x1b[24m`;
 }
