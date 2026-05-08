@@ -93,6 +93,43 @@ export interface InputRegion {
   cursorPosition(): { row: number; col: number };
 }
 
+/**
+ * 可替换尾段——begin 后流式期反复 replace 整段、commit 时一次替换 + 关闭。
+ *
+ * 用例：LLM 流式 code block 的双态渲染——流式期 dim 字面占位、闭合时整段
+ * 替换为语法高亮版。begin 必与 commit/close 配对调用，单一活跃 segment（不
+ * 可嵌套）。
+ *
+ * 长 block 视觉契约：流式期 segment 行数 + status + input 超 viewport 时由
+ * ScreenController 自动从 segment 头部固化推 scrollback——已固化的部分保留
+ * 流式期 dim 字面（不再受 replace/commit 影响）；commit/replace 仅替换 segment
+ * 当前持有的尾部行。已知行为：极长 block 在用户回滚 scrollback 时呈"上 dim
+ * 字面 + 下高亮"撕裂——viewport 内体验最优、frame 健康优先于回滚视觉一致。
+ */
+export interface ReplaceableSegmentHandle {
+  /**
+   * 替换 segment 当前持有的内容为 newText——流式期反复调用，不关闭 segment。
+   *
+   * 行为：newText 按 \n 切；segment 已被固化推 scrollback 的起首行不动
+   * （segmentFrozenLineCount 记录已固化数）；tailBuffer 中 segment 持有的范围
+   * 替换为 newText 切行去掉起首已固化数的剩余部分。close/commit 后调用 no-op。
+   */
+  replace(newText: string): void;
+
+  /**
+   * 用 newText 替换当前内容并关闭 segment——闭合一次性切换（流式期 dim →
+   * 闭合期 highlight 即此调用）。等同 replace(newText) + close()。关闭后
+   * handle 失效，后续 replace/commit/close 都 no-op。
+   */
+  commit(newText: string): void;
+
+  /**
+   * 关闭 segment 不替换内容——保留当前内容转 immutable。退化路径（如不触发
+   * 流式渲染时直接关闭，留下 segment 期间已 append 的内容作历史）。
+   */
+  close(): void;
+}
+
 export interface ScreenController {
   /** 注册唯一活跃输入区。重复 attach 会替换旧的并立刻重画。 */
   attachInput(region: InputRegion): void;
@@ -123,6 +160,19 @@ export interface ScreenController {
   writeScrollLine(text: string): void;
   /** 触发输入区重画——用于按键后 buffer / panel 变化通知屏幕刷新。 */
   requestInputRepaint(): void;
+
+  /**
+   * 开启可替换尾段——流式期反复 replace、闭合时 commit。
+   *
+   * 同步返回 handle；内部 begin task enqueue 到队列，按 cli writer 现有的
+   * 异步任务序列与 replace/commit/close 顺序执行。单一活跃 segment 约束：
+   * 当前已有活跃 segment 时再 begin 抛错（caller bug，不可嵌套）。
+   *
+   * disposed 状态调用抛错；suspended 期间也允许 begin（task 暂存到 resume
+   * 后执行），但实际 LLM 流式与 alt UI 不并发——约定 segment 仅在 LLM 流式
+   * 期间存活，suspend 期间不会有活跃 segment。
+   */
+  beginReplaceableSegment(): ReplaceableSegmentHandle;
 
   /**
    * 暂停 chrome 协调——confirmation panel 等 modal alt UI 进入前调用，让位 chrome
@@ -227,6 +277,22 @@ class ScreenControllerImpl implements ScreenController {
   /** 解绑 stdout resize listener 的 closure，dispose 时调用清理 */
   private detachResize: (() => void) | null = null;
 
+  /**
+   * 当前活跃 segment 在 tailBuffer 中的起首行索引——null 表示无活跃 segment。
+   * 流式期 segment 的行范围 = tailBuffer[segmentStartRow..]。
+   */
+  private segmentStartRow: number | null = null;
+  /**
+   * 当前 segment 已被 freezeOverflowToScrollback 推 scrollback 的起首行数——
+   * replace/commit 时按此数量从 newText 切行结果起首跳过，避免重复显示。
+   */
+  private segmentFrozenLineCount = 0;
+  /**
+   * 同步标志：begin 立刻 set true 让重叠 begin 抛错；handle.close/commit 同步
+   * set false 让下次 begin 可立即开启（队列中的 close task 会先执行清状态）。
+   */
+  private hasActiveSegment = false;
+
   constructor(options: ScreenControllerOptions = {}) {
     this.stdout = options.stdout ?? process.stdout;
     this.attachResizeListener();
@@ -275,6 +341,9 @@ class ScreenControllerImpl implements ScreenController {
       this.tailBuffer = [];
       this.renderedRows = 0;
       this.cursorRow = 0;
+      this.segmentStartRow = null;
+      this.segmentFrozenLineCount = 0;
+      this.hasActiveSegment = false;
     });
   }
 
@@ -323,6 +392,84 @@ class ScreenControllerImpl implements ScreenController {
     });
   }
 
+  beginReplaceableSegment(): ReplaceableSegmentHandle {
+    if (this.disposed) {
+      throw new Error(
+        "ScreenController.beginReplaceableSegment called after dispose",
+      );
+    }
+    if (this.hasActiveSegment) {
+      throw new Error(
+        "ScreenController has an active segment (single-segment only)",
+      );
+    }
+    this.hasActiveSegment = true;
+    this.enqueue(() => {
+      // segment 起首必在新行起手——若 tailBuffer 末行非空（接续中）先补 \n 切到新行
+      const lastIndex = this.tailBuffer.length - 1;
+      const inMidLine =
+        lastIndex >= 0 && this.tailBuffer[lastIndex]!.length > 0;
+      if (inMidLine) this.appendToTail("\n");
+      this.segmentStartRow = this.tailBuffer.length;
+      this.segmentFrozenLineCount = 0;
+    });
+    return this.makeSegmentHandle();
+  }
+
+  /**
+   * Handle 工厂——闭包 closed 标志让 close/commit 后调用 no-op；同步翻转
+   * hasActiveSegment 让重叠 begin 检查在调用 commit/close 后立即放行。
+   */
+  private makeSegmentHandle(): ReplaceableSegmentHandle {
+    let closed = false;
+    return {
+      replace: (newText: string): void => {
+        if (closed) return;
+        this.enqueue(() => {
+          this.applySegmentContent(newText);
+          this.paintFrame();
+        });
+      },
+      commit: (newText: string): void => {
+        if (closed) return;
+        closed = true;
+        this.hasActiveSegment = false;
+        this.enqueue(() => {
+          this.applySegmentContent(newText);
+          this.segmentStartRow = null;
+          this.segmentFrozenLineCount = 0;
+          this.paintFrame();
+        });
+      },
+      close: (): void => {
+        if (closed) return;
+        closed = true;
+        this.hasActiveSegment = false;
+        this.enqueue(() => {
+          this.segmentStartRow = null;
+          this.segmentFrozenLineCount = 0;
+        });
+      },
+    };
+  }
+
+  /**
+   * 把 newText 应用到当前活跃 segment 持有的范围——按 \n 切 newText、跳过
+   * 起首已 freeze 推走的行数（segmentFrozenLineCount）、剩余行替换 tailBuffer
+   * 中 segment 当前持有的范围。无活跃 segment 时 no-op（防御已 close 后被 enqueue）。
+   */
+  private applySegmentContent(newText: string): void {
+    if (this.segmentStartRow === null) return;
+    const segStart = this.segmentStartRow;
+    const newLines = newText.split("\n");
+    const replaceLines =
+      this.segmentFrozenLineCount > 0
+        ? newLines.slice(this.segmentFrozenLineCount)
+        : newLines;
+    this.tailBuffer.length = segStart;
+    for (const line of replaceLines) this.tailBuffer.push(line);
+  }
+
   suspend(): void {
     if (this.disposed) {
       throw new Error("ScreenController.suspend called after dispose");
@@ -352,6 +499,9 @@ class ScreenControllerImpl implements ScreenController {
     this.tailBuffer = [];
     this.cursorRow = 0;
     this.renderedRows = 0;
+    this.segmentStartRow = null;
+    this.segmentFrozenLineCount = 0;
+    this.hasActiveSegment = false;
     this.suspended = true;
     this.notifySuspendChange(true);
   }
@@ -407,6 +557,9 @@ class ScreenControllerImpl implements ScreenController {
         this.tailBuffer = [];
         this.renderedRows = 0;
         this.cursorRow = 0;
+        this.segmentStartRow = null;
+        this.segmentFrozenLineCount = 0;
+        this.hasActiveSegment = false;
       },
     });
     this.disposed = true;
@@ -508,6 +661,16 @@ class ScreenControllerImpl implements ScreenController {
     // 只能固化 tailBuffer 行——status / input 是 frame 永驻区，不固化
     const freezeCount = Math.min(overflow, this.tailBuffer.length);
     if (freezeCount === 0) return "";
+
+    // segment 协调：若 freeze 切到 segment 头部行，更新 segment 状态——
+    // 切走的 segment 头部行视为永久固化（流式期 dim 字面保留），后续
+    // replace/commit 跳过这些起首行不重新渲染
+    if (this.segmentStartRow !== null) {
+      const freezeBeforeSegment = Math.min(freezeCount, this.segmentStartRow);
+      const freezeFromSegmentHead = freezeCount - freezeBeforeSegment;
+      this.segmentFrozenLineCount += freezeFromSegmentHead;
+      this.segmentStartRow = Math.max(0, this.segmentStartRow - freezeCount);
+    }
 
     let buf = "";
     if (this.cursorRow > 0) {

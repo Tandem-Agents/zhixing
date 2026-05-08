@@ -415,3 +415,208 @@ describe("MarkdownStream · paragraph inline ANSI 渲染", () => {
     expect(out.combined).not.toContain("\x1b");
   });
 });
+
+interface SegmentEvent {
+  readonly kind: "begin" | "replace" | "commit" | "close";
+  readonly text?: string;
+}
+
+function makeStreamWithSegment(opts?: {
+  columns?: number;
+  mode?: "render" | "strip" | "raw";
+}) {
+  const out: Capture = { appendInline: [], line: [], combined: "" };
+  const segments: SegmentEvent[][] = [];
+  const stream = new MarkdownStream({
+    appendInline: (chunk) => {
+      out.appendInline.push(chunk);
+      out.combined += chunk;
+    },
+    line: (text) => {
+      out.line.push(text);
+      out.combined += text;
+    },
+    columns: opts?.columns ?? 80,
+    mode: opts?.mode ?? "render",
+    beginReplaceableSegment: () => {
+      const events: SegmentEvent[] = [{ kind: "begin" }];
+      segments.push(events);
+      return {
+        replace: (text) => events.push({ kind: "replace", text }),
+        commit: (text) => events.push({ kind: "commit", text }),
+        close: () => events.push({ kind: "close" }),
+      };
+    },
+  });
+  return { stream, out, segments };
+}
+
+describe("MarkdownStream · code block 双态渲染", () => {
+  it("fenced + lang：流式期 segment.replace 用 dim 占位、闭合时 commit 切 highlight", () => {
+    const { stream, segments, out } = makeStreamWithSegment();
+    stream.feed("```typescript\nconst x =");
+    stream.feed(" 1\nconst y = 2\n```\n\n");
+    stream.end();
+
+    expect(segments).toHaveLength(1);
+    const events = segments[0]!;
+    // 必含 begin → ≥1 次 replace（流式）→ commit
+    expect(events[0]!.kind).toBe("begin");
+    const replaceCount = events.filter((e) => e.kind === "replace").length;
+    const commitCount = events.filter((e) => e.kind === "commit").length;
+    expect(replaceCount).toBeGreaterThanOrEqual(1);
+    expect(commitCount).toBe(1);
+    // 流式期 replace 的内容是 dim（无 highlight 颜色），最后 commit 内容含
+    // typescript 关键字色（cli-highlight + 自定义 theme）
+    const lastReplace = events.filter((e) => e.kind === "replace").at(-1)!;
+    expect(lastReplace.text).toContain("\x1b[2m"); // dim
+    const commit = events.find((e) => e.kind === "commit")!;
+    expect(commit.text).toContain("const"); // 内容
+    expect(commit.text).toMatch(/\x1b\[\d+m/); // 含 SGR
+    // commit 不仅是 dim——含其他颜色 SGR
+    const commitAnsi = (commit.text!.match(/\x1b\[\d+m/g) ?? []);
+    const uniqueParams = new Set(commitAnsi);
+    expect(uniqueParams.size).toBeGreaterThan(1);
+    // 双态期 line 路径不被调用（segment 替代 line emit）
+    expect(out.line.filter((t) => t.includes("const")).length).toBe(0);
+  });
+
+  it("indented code（无 lang）退化 hold——不开 segment、走 line 路径", () => {
+    const { stream, segments, out } = makeStreamWithSegment();
+    // 4 空格缩进的 indented code
+    stream.feed("paragraph above\n\n    indented code line 1\n    indented code line 2\n\nparagraph below\n\n");
+    stream.end();
+    // 不应开 segment——marked 把 indented 识别为 code 但 lang 是 undefined
+    expect(segments).toHaveLength(0);
+    // 走 line 路径
+    expect(out.line.some((t) => t.includes("indented code"))).toBe(true);
+  });
+
+  it("无 lang 的 fenced code 退化 hold——避免无差异语法着色", () => {
+    const { stream, segments, out } = makeStreamWithSegment();
+    stream.feed("```\nplain code\n```\n\n");
+    stream.end();
+    // marked 把 ``` 后无 lang 的 fenced 仍标记为 code，lang 为空字符串而非
+    // undefined——双态启用条件需 lang !== undefined，空字符串属 undefined 之外
+    // （实测：marked 给 lang=""）。所以双态应启用——这测试是给 caller 说明
+    // 边界：fenced 不带 lang 时 cli-highlight 退化 dim，但仍走双态流式渲染
+    if (segments.length > 0) {
+      const events = segments[0]!;
+      const commit = events.find((e) => e.kind === "commit");
+      // commit 内容应含 dim（无 lang fallback）
+      expect(commit?.text).toContain("\x1b[2m");
+    } else {
+      // 若 marked 给的是 lang=undefined（不太可能），走 hold 路径——也接受
+      expect(out.line.some((t) => t.includes("plain code"))).toBe(true);
+    }
+  });
+
+  it("StdoutWriter 场景：未注入 beginReplaceableSegment → 退化 hold", () => {
+    // 不传 beginReplaceableSegment 字段，等同 StdoutWriter 模式
+    const out: Capture = { appendInline: [], line: [], combined: "" };
+    const stream = new MarkdownStream({
+      appendInline: (chunk) => {
+        out.appendInline.push(chunk);
+        out.combined += chunk;
+      },
+      line: (text) => {
+        out.line.push(text);
+        out.combined += text;
+      },
+      columns: 80,
+      mode: "render",
+      // beginReplaceableSegment 未注入
+    });
+    stream.feed("```typescript\nconst x = 1\n```\n\n");
+    stream.end();
+    // 应走 hold 路径——line 被调用 + line 内容含 highlight
+    expect(out.line.some((t) => t.includes("const"))).toBe(true);
+  });
+
+  it("strip 模式不启用双态——code 走 hold + line（即使 fenced + lang）", () => {
+    const { stream, segments, out } = makeStreamWithSegment({ mode: "strip" });
+    stream.feed("```typescript\nconst x = 1\n```\n\n");
+    stream.end();
+    expect(segments).toHaveLength(0);
+    // strip 路径走 line/appendInline——code 内容应到达 caller
+    expect(stripAnsi(out.combined)).toContain("const x = 1");
+  });
+
+  it("raw 模式不启用双态——原文 forward 不解析", () => {
+    const { stream, segments, out } = makeStreamWithSegment({ mode: "raw" });
+    stream.feed("```typescript\nconst x = 1\n```\n\n");
+    stream.end();
+    expect(segments).toHaveLength(0);
+    expect(out.combined).toContain("```typescript");
+    expect(out.combined).toContain("const x = 1");
+  });
+
+  it("EOF 时未闭合的 fenced code 仍触发 commit（marked 在 EOF 视作闭合）", () => {
+    const { stream, segments } = makeStreamWithSegment();
+    // 不闭合 ``` —— end() 触发 EOF
+    stream.feed("```typescript\nconst x = ");
+    stream.feed("1\n");
+    stream.end();
+    expect(segments).toHaveLength(1);
+    const events = segments[0]!;
+    expect(events.some((e) => e.kind === "commit")).toBe(true);
+  });
+
+  it("多个连续 fenced code block 各自 begin + commit（跨 chunk 流式）", () => {
+    const { stream, segments } = makeStreamWithSegment();
+    // 拆 chunk 让 fenced 跨 chunk—— segment 仅在流式中间态时有意义
+    stream.feed("```typescript\n");
+    stream.feed("const x = 1\n");
+    stream.feed("```\n\n```python\n");
+    stream.feed("print('y')\n");
+    stream.feed("```\n\n");
+    stream.end();
+    expect(segments).toHaveLength(2);
+    expect(segments[0]!.some((e) => e.kind === "commit")).toBe(true);
+    expect(segments[1]!.some((e) => e.kind === "commit")).toBe(true);
+  });
+
+  it("paragraph → fenced code → paragraph：paragraph 流先关 + segment begin 顺序对", () => {
+    const { stream, segments, out } = makeStreamWithSegment();
+    stream.feed("hello\n\n");
+    stream.feed("```typescript\n");
+    stream.feed("const x = 1\n");
+    stream.feed("```\n\n");
+    stream.feed("world\n\n");
+    stream.end();
+    expect(segments).toHaveLength(1);
+    expect(stripAnsi(out.combined)).toContain("hello");
+    expect(stripAnsi(out.combined)).toContain("world");
+    // commit 内容含代码
+    const commit = segments[0]!.find((e) => e.kind === "commit");
+    expect(stripAnsi(commit?.text ?? "")).toContain("const x = 1");
+  });
+
+  it("单 chunk 完整闭合的 fenced code 走 hold（无中间态可流式）→ line 路径", () => {
+    const { stream, segments, out } = makeStreamWithSegment();
+    // 整 chunk 含 ``` 闭合——marked 一次 lex 给 closed code token，
+    // 不进入 handleOpenBlock（末尾是 space），走 emitClosedBlock 的 line 路径
+    stream.feed("```typescript\nconst x = 1\n```\n\n");
+    stream.end();
+    expect(segments).toHaveLength(0);
+    expect(out.line.some((t) => t.includes("const"))).toBe(true);
+  });
+
+  it("流式期多次 replace 反映代码累积——每次 chunk 一次 replace", () => {
+    const { stream, segments } = makeStreamWithSegment();
+    stream.feed("```typescript\n");
+    stream.feed("const x = 1\n");
+    stream.feed("const y = 2\n");
+    stream.feed("```\n\n");
+    stream.end();
+    const events = segments[0]!;
+    const replaceTexts = events
+      .filter((e) => e.kind === "replace")
+      .map((e) => stripAnsi(e.text ?? ""));
+    // 多次 replace 内容单调累积（后一次 replace 含前一次的内容）
+    expect(replaceTexts.length).toBeGreaterThanOrEqual(2);
+    // 最后一次 replace 含两行；中间某次至少含 const x = 1
+    expect(replaceTexts.at(-1)!).toContain("const x = 1");
+    expect(replaceTexts.at(-1)!).toContain("const y = 2");
+  });
+});

@@ -3,9 +3,12 @@
  *
  * **按 block 类型分路**：
  *   - chunk 累积到 buffer，每 chunk 重新 marked.lexer(buffer) 得到当前 tokens
- *   - **code block**：严格 hold 等 ``` 闭合，闭合后走 `renderBlock` 独立段 ANSI emit
- *     （dim 文字 + 列 2 + 起首空行）。代码完整性优先；典型 LLM 输出代码块速度快、长度
- *     有限，hold 时间用户可接受
+ *   - **fenced code block**（含 lang）+ 注入 beginReplaceableSegment 时走双态：
+ *     流式期 segment.replace(formatStreamingCode) 用 dim 字面占位，闭合时
+ *     segment.commit(renderBlock) 切换为 cli-highlight 语法高亮——用户能即时看到
+ *     代码字符流入，闭合那一刻整段切色。
+ *   - **indented code / 无 lang fenced / 未注入 segment factory（StdoutWriter）**：
+ *     退化为严格 hold——等 ``` 闭合后走 `renderBlock` 独立段 ANSI emit。
  *   - **paragraph**：走 `emitInlineTokens` inline 增量 ANSI emit。闭合 paragraph emit
  *     全部 inline tokens 的 ANSI 渲染；末尾未闭合 paragraph emit 已闭合的前 N-1 个
  *     inline，**最后一个 inline 一律 hold**（含 text）——marked 把未闭合的 markdown
@@ -23,19 +26,23 @@
  * **视觉契约**：
  *   - paragraph：◆ 锚 + inline ANSI（**bold** / _italic_ / `code` 中灰底 / 链接 OSC 8 +
  *     虚线下划线 / ~~del~~）+ wrap hanging 4 续行
- *   - code block：dim 文字 + 列 2 + 起首/末尾空行
+ *   - code block：流式期 dim 字面 + 列 2 + 起首/末尾空行；闭合后 cli-highlight 语法
+ *     高亮（fenced + 受支持 lang）或保持 dim（其他情况）
  *   - heading / list / blockquote / hr：字面字符流式（待 ANSI 化）
  *
  * **三档 mode**：
- *   - render：完整 markdown 渲染（默认 cli REPL TTY）
+ *   - render：完整 markdown 渲染（默认 cli REPL TTY）；fenced + 受支持 lang code
+ *     block 走双态（前提：caller 注入 beginReplaceableSegment）
  *   - strip：inline-renderer strip 模式输出纯文本（link 退化 `text (url)`）+ 不经 TextStream
- *     的 ◆ 锚（CI / pipe / 日志，paragraph 直接 appendInline 字面字符）
+ *     的 ◆ 锚（CI / pipe / 日志，paragraph 直接 appendInline 字面字符）；code block
+ *     不走双态（hold 等闭合再 line）
  *   - raw：直接原文 forward 不解析（调试用）
  */
 
 import { marked, type Tokens } from "marked";
+import type { ReplaceableSegmentHandle } from "../../screen/screen-controller.js";
 import { TextStream } from "../text-stream.js";
-import { renderBlock } from "./block-renderer.js";
+import { formatStreamingCode, renderBlock } from "./block-renderer.js";
 import { renderInline } from "./inline-renderer.js";
 import type { MarkdownMode } from "./types.js";
 
@@ -46,6 +53,19 @@ export interface MarkdownStreamOptions {
   /** 终端列宽——TextStream wrap 计算用 */
   readonly columns: number;
   readonly mode?: MarkdownMode;
+  /**
+   * 可选——开启 code block 双态渲染（流式期 dim 字面占位、闭合时 cli-highlight
+   * 语法高亮替换）。
+   *
+   * 注入时机：仅 cli REPL chrome 模式有意义（ScreenWriter 转发 ScreenController.
+   * beginReplaceableSegment）。StdoutWriter / runOnce / 测试场景不注入——code
+   * block 退化为现行 hold 路径，行为不变。
+   *
+   * 启用条件还需：mode === "render" + token 是 fenced（lang !== undefined）。
+   * indented code / 无 lang fenced 仍走 hold 路径（避免误把段首带空格的 paragraph
+   * 当 indented code 起首 segment）。
+   */
+  readonly beginReplaceableSegment?: () => ReplaceableSegmentHandle;
 }
 
 interface TokenRange {
@@ -73,16 +93,26 @@ export class MarkdownStream {
    * 语义实现，无需重新起 ◆ 锚）。
    */
   private paragraphStream: TextStream | null = null;
+  /**
+   * 当前活跃的 fenced code block 的 ReplaceableSegment——双态渲染流式期持有，
+   * 闭合时 commit 切换到 highlight 后置 null。仅 render 模式 + caller 注入了
+   * beginReplaceableSegment + token 是 fenced (lang !== undefined) 时存在。
+   */
+  private codeSegment: ReplaceableSegmentHandle | null = null;
   private readonly mode: MarkdownMode;
   private readonly appendInline: (chunk: string) => void;
   private readonly line: (text: string) => void;
   private readonly columns: number;
+  private readonly beginReplaceableSegment:
+    | (() => ReplaceableSegmentHandle)
+    | null;
 
   constructor(options: MarkdownStreamOptions) {
     this.appendInline = options.appendInline;
     this.line = options.line;
     this.columns = options.columns;
     this.mode = options.mode ?? "render";
+    this.beginReplaceableSegment = options.beginReplaceableSegment ?? null;
   }
 
   feed(chunk: string): void {
@@ -142,12 +172,19 @@ export class MarkdownStream {
     this.emittedBlockCount = 0;
     this.paragraphForwardedTo = 0;
     this.paragraphStream = null;
+    // 防御：流式期 segment 应已在 emitClosedBlock(code) 时 commit 关闭；若仍活跃
+    // （如解析途中异常 / caller 错误），强制 close 避免残留 hasActiveSegment 状态
+    if (this.codeSegment !== null) {
+      this.codeSegment.close();
+      this.codeSegment = null;
+    }
   }
 
   /**
    * 闭合 block emit：
    *   - 已被字面 forward（block 完全落在 paragraphForwardedTo 之前）→ 跳过避免重复
-   *   - code block → ANSI 渲染独立段 emit（独立 line 路径）
+   *   - code block → 双态：若有活跃 segment，commit 切换到 highlight；否则走现行
+   *     line 独立段 emit
    *   - paragraph → 走 inline 增量 ANSI 路径（emitInlineTokens 闭合 emit 全部 inline
    *     tokens 的 ANSI 渲染；递增推进 paragraphForwardedTo 到 range.end 让 paragraph
    *     末尾换行等残余字符不重复 forward）
@@ -161,9 +198,7 @@ export class MarkdownStream {
     if (range.end <= this.paragraphForwardedTo) return;
 
     if (token.type === "code") {
-      this.closeParagraphStream();
-      const ansi = renderBlock(token, this.mode);
-      if (ansi.length > 0) this.line(ansi);
+      this.emitClosedCode(token as Tokens.Code);
       this.paragraphForwardedTo = range.end;
       return;
     }
@@ -191,7 +226,8 @@ export class MarkdownStream {
 
   /**
    * 末尾 hold 候选 block 的处理：
-   *   - code block：严格 hold 等 ``` 闭合（保代码完整性 + 通常输出快），关闭 paragraph 流
+   *   - code block：双态（render 模式 + fenced lang + 注入 segment factory）走流式
+   *     replace dim 字面占位；其他情况严格 hold 等 ``` 闭合
    *   - paragraph：emitInlineTokens 增量 emit 已闭合的 inline tokens（前面 N-1 个全部
    *     ANSI emit），末尾未闭合的 inline token 全部 hold（含 text）。原因：marked 把
    *     未闭合的 markdown 标记当 text 处理（如 `**bo` 整段是 text），如果按 raw 字面
@@ -206,7 +242,7 @@ export class MarkdownStream {
    */
   private handleOpenBlock(token: Tokens.Generic, range: TokenRange): void {
     if (token.type === "code") {
-      this.closeParagraphStream();
+      this.handleOpenCode(token as Tokens.Code);
       return;
     }
     if (token.type === "space") {
@@ -217,6 +253,52 @@ export class MarkdownStream {
       return;
     }
     this.forwardBufferRange(range.end);
+  }
+
+  /**
+   * 开启 / 推进 code block 流式期。
+   *
+   * 双态启用条件：mode === render + token 是 fenced（lang !== undefined）+ caller
+   * 注入了 beginReplaceableSegment。任一不满足走 hold 路径（与历史行为一致）。
+   *
+   * 启用时：首次 begin segment、关 paragraph 流（独立段语义）；每次 chunk 把
+   * 当前 token.text（marked 给出的代码累积内容）格式化为 dim 占位整段、调
+   * segment.replace 替换 segment 持有内容。
+   */
+  private handleOpenCode(token: Tokens.Code): void {
+    const enableTwoPhase =
+      this.mode === "render" &&
+      token.lang !== undefined &&
+      this.beginReplaceableSegment !== null;
+
+    if (!enableTwoPhase) {
+      // 退化 hold：关闭 paragraph 流让 code 起首为独立段；闭合时由 emitClosedCode
+      // 走 line 路径——与历史行为完全一致
+      this.closeParagraphStream();
+      return;
+    }
+
+    if (this.codeSegment === null) {
+      this.closeParagraphStream();
+      this.codeSegment = this.beginReplaceableSegment!();
+    }
+    this.codeSegment.replace(formatStreamingCode(token.text));
+  }
+
+  /**
+   * 闭合 code block emit。双态活跃时 commit 切换 dim → highlight；否则走 hold 路径
+   * 的 line emit。两路径都已自带前后空行（renderBlock 起首 \n + 末尾 \n）。
+   */
+  private emitClosedCode(token: Tokens.Code): void {
+    if (this.codeSegment !== null) {
+      const ansi = renderBlock(token, this.mode);
+      this.codeSegment.commit(ansi);
+      this.codeSegment = null;
+      return;
+    }
+    this.closeParagraphStream();
+    const ansi = renderBlock(token, this.mode);
+    if (ansi.length > 0) this.line(ansi);
   }
 
   /**

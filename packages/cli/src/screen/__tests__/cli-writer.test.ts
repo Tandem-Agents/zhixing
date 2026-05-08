@@ -4,7 +4,10 @@ import {
   createStdoutWriter,
   type CliWriter,
 } from "../cli-writer.js";
-import type { ScreenController } from "../screen-controller.js";
+import type {
+  ReplaceableSegmentHandle,
+  ScreenController,
+} from "../screen-controller.js";
 
 class FakeStdout {
   buffer = "";
@@ -18,10 +21,13 @@ class FakeStdout {
 
 function makeFakeScreen(): ScreenController & {
   events: Array<{ kind: string; text?: string }>;
+  segments: ReplaceableSegmentHandle[];
 } {
   const events: Array<{ kind: string; text?: string }> = [];
+  const segments: ReplaceableSegmentHandle[] = [];
   return {
     events,
+    segments,
     attachInput: () => {},
     detachInput: () => {},
     setStatusBar: () => {},
@@ -33,6 +39,16 @@ function makeFakeScreen(): ScreenController & {
     },
     writeScrollLine(text) {
       events.push({ kind: "writeScrollLine", text });
+    },
+    beginReplaceableSegment() {
+      const handle: ReplaceableSegmentHandle = {
+        replace: (text) => events.push({ kind: "seg.replace", text }),
+        commit: (text) => events.push({ kind: "seg.commit", text }),
+        close: () => events.push({ kind: "seg.close" }),
+      };
+      segments.push(handle);
+      events.push({ kind: "beginReplaceableSegment" });
+      return handle;
     },
     suspend: () => {},
     resume: () => {},
@@ -183,6 +199,36 @@ describe("CliWriter · 接口契约对称性", () => {
       expect(typeof w.appendInline).toBe("function");
       expect(typeof w.notify).toBe("function");
     }
+  });
+});
+
+describe("CliWriter · ReplaceableSegment optional 接口", () => {
+  it("ScreenWriter.beginReplaceableSegment 转发到 ScreenController", () => {
+    const screen = makeFakeScreen();
+    const w = createScreenWriter({ screen });
+    const handle = w.beginReplaceableSegment!();
+    handle.replace("dim text");
+    handle.commit("highlight text");
+    expect(screen.events).toEqual([
+      { kind: "beginReplaceableSegment" },
+      { kind: "seg.replace", text: "dim text" },
+      { kind: "seg.commit", text: "highlight text" },
+    ]);
+  });
+
+  it("StdoutWriter 不实现 beginReplaceableSegment（caller 走 fallback hold）", () => {
+    const stw = createStdoutWriter();
+    expect(stw.beginReplaceableSegment).toBeUndefined();
+  });
+
+  it("caller optional chaining：ScreenWriter 返回 handle，StdoutWriter 返回 undefined", () => {
+    const screen = makeFakeScreen();
+    const sw = createScreenWriter({ screen });
+    const stw = createStdoutWriter();
+    const swHandle = sw.beginReplaceableSegment?.();
+    const stwHandle = stw.beginReplaceableSegment?.();
+    expect(swHandle).toBeDefined();
+    expect(stwHandle).toBeUndefined();
   });
 });
 

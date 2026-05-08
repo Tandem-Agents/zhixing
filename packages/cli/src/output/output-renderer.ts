@@ -86,13 +86,17 @@ export function createOutputRenderer(
         if (!mdStream && event.text.trim() === "") break;
         if (!mdStream) {
           // MarkdownStream 协调 paragraph 字符流式（appendInline）+ 闭合 block 独立段
-          // （line）；inline 元素（粗体/斜体/链接）当前 fallback 字面输出，由 Step 2.B
-          // 的 inline-renderer 接管
+          // （line）+ fenced code block 双态渲染（流式期 dim 占位、闭合时 highlight 替换，
+          // 仅 ScreenWriter 提供 segment factory 时启用；StdoutWriter 自动退化为 hold）
+          const segFactory = writer.beginReplaceableSegment;
           mdStream = new MarkdownStream({
             appendInline: (chunk) => writer.appendInline(chunk),
             line: (text) => writer.line(text),
             columns: getColumns(),
             mode: markdownMode,
+            beginReplaceableSegment: segFactory
+              ? () => segFactory.call(writer)
+              : undefined,
           });
         }
         mdStream.feed(event.text);

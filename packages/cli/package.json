@@ -23,6 +23,7 @@
     "@zhixing/server": "workspace:*",
     "@zhixing/tools-builtin": "workspace:*",
     "chalk": "^5.4.0",
+    "cli-highlight": "^2.1.11",
     "commander": "^14.0.0",
     "marked": "^18.0.3"
   },

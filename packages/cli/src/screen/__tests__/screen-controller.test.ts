@@ -713,3 +713,188 @@ describe("ScreenController · suspend / resume（alt UI 嵌入协议）", () => 
     expect(() => sc.resume()).toThrow(/after dispose/);
   });
 });
+
+describe("ScreenController · ReplaceableSegment（双态渲染）", () => {
+  it("begin → replace 后内容显示在 tailBuffer", () => {
+    const out = new FakeStdout();
+    const sc = createScreenController({
+      stdout: out as unknown as NodeJS.WriteStream,
+    });
+    sc.attachInput(makeRegion(["INPUT"]));
+    out.buffer = "";
+    const h = sc.beginReplaceableSegment();
+    h.replace("seg-A\nseg-B");
+    expect(out.buffer).toContain("seg-A");
+    expect(out.buffer).toContain("seg-B");
+    expect(out.buffer.indexOf("seg-A")).toBeLessThan(
+      out.buffer.indexOf("INPUT"),
+    );
+  });
+
+  it("commit 替换内容并关闭——后续 replace 都 no-op", () => {
+    const out = new FakeStdout();
+    const sc = createScreenController({
+      stdout: out as unknown as NodeJS.WriteStream,
+    });
+    sc.attachInput(makeRegion(["INPUT"]));
+    const h = sc.beginReplaceableSegment();
+    h.replace("dim-text");
+    h.commit("hl-text");
+    out.buffer = "";
+    h.replace("after-commit");
+    h.commit("again");
+    h.close();
+    sc.setStatusBar(["TICK"]); // 触发 paint
+    expect(out.buffer).not.toContain("after-commit");
+    expect(out.buffer).not.toContain("again");
+  });
+
+  it("close 不替换——保留当前内容、关闭", () => {
+    const out = new FakeStdout();
+    const sc = createScreenController({
+      stdout: out as unknown as NodeJS.WriteStream,
+    });
+    sc.attachInput(makeRegion(["INPUT"]));
+    const h = sc.beginReplaceableSegment();
+    h.replace("kept");
+    h.close();
+    h.replace("after-close");
+    out.buffer = "";
+    sc.setStatusBar(["TICK"]);
+    expect(out.buffer).toContain("kept");
+    expect(out.buffer).not.toContain("after-close");
+  });
+
+  it("多次 replace 用最新内容覆盖", () => {
+    const out = new FakeStdout();
+    const sc = createScreenController({
+      stdout: out as unknown as NodeJS.WriteStream,
+    });
+    sc.attachInput(makeRegion(["INPUT"]));
+    const h = sc.beginReplaceableSegment();
+    h.replace("first-only");
+    h.replace("second-only");
+    h.replace("third-final");
+    out.buffer = "";
+    sc.setStatusBar(["TICK"]);
+    expect(out.buffer).toContain("third-final");
+    expect(out.buffer).not.toContain("first-only");
+    expect(out.buffer).not.toContain("second-only");
+  });
+
+  it("活跃 segment 时再 begin 抛错——单一约束", () => {
+    const out = new FakeStdout();
+    const sc = createScreenController({
+      stdout: out as unknown as NodeJS.WriteStream,
+    });
+    sc.beginReplaceableSegment();
+    expect(() => sc.beginReplaceableSegment()).toThrow(/active segment/);
+  });
+
+  it("commit 后可立即再次 begin（同步翻转 hasActiveSegment）", () => {
+    const out = new FakeStdout();
+    const sc = createScreenController({
+      stdout: out as unknown as NodeJS.WriteStream,
+    });
+    const h1 = sc.beginReplaceableSegment();
+    h1.commit("x");
+    expect(() => sc.beginReplaceableSegment()).not.toThrow();
+  });
+
+  it("close 后可立即再次 begin", () => {
+    const out = new FakeStdout();
+    const sc = createScreenController({
+      stdout: out as unknown as NodeJS.WriteStream,
+    });
+    const h1 = sc.beginReplaceableSegment();
+    h1.close();
+    expect(() => sc.beginReplaceableSegment()).not.toThrow();
+  });
+
+  it("disposed 状态 begin 抛错", () => {
+    const out = new FakeStdout();
+    const sc = createScreenController({
+      stdout: out as unknown as NodeJS.WriteStream,
+    });
+    sc.dispose();
+    expect(() => sc.beginReplaceableSegment()).toThrow(/after dispose/);
+  });
+
+  it("detachInput 清 segment 状态——后续 begin 不抛错", () => {
+    const out = new FakeStdout();
+    const sc = createScreenController({
+      stdout: out as unknown as NodeJS.WriteStream,
+    });
+    sc.attachInput(makeRegion(["I1"]));
+    sc.beginReplaceableSegment();
+    sc.detachInput();
+    sc.attachInput(makeRegion(["I2"]));
+    expect(() => sc.beginReplaceableSegment()).not.toThrow();
+  });
+
+  it("suspend 清 segment 状态——resume 后可再 begin", () => {
+    const out = new FakeStdout();
+    const sc = createScreenController({
+      stdout: out as unknown as NodeJS.WriteStream,
+    });
+    sc.attachInput(makeRegion(["I"]));
+    sc.beginReplaceableSegment();
+    sc.suspend();
+    sc.resume();
+    expect(() => sc.beginReplaceableSegment()).not.toThrow();
+  });
+
+  it("begin 时 tailBuffer 末行非空——自动切到新行", () => {
+    const out = new FakeStdout();
+    const sc = createScreenController({
+      stdout: out as unknown as NodeJS.WriteStream,
+    });
+    sc.attachInput(makeRegion(["INPUT"]));
+    sc.withScrollWrite((write) => write("inline-text")); // 末行接续中
+    out.buffer = "";
+    sc.beginReplaceableSegment().replace("seg-content");
+    // segment 内容在新行——"inline-text" 与 "seg-content" 之间应有 \n
+    const inlineIdx = out.buffer.lastIndexOf("inline-text");
+    const segIdx = out.buffer.lastIndexOf("seg-content");
+    expect(inlineIdx).toBeGreaterThanOrEqual(0);
+    expect(segIdx).toBeGreaterThan(inlineIdx);
+    expect(out.buffer.slice(inlineIdx, segIdx)).toContain("\n");
+  });
+
+  it("freeze 切走 segment 头部行——commit 跳过起首已固化部分", () => {
+    const out = new FakeStdout();
+    out.rows = 10; // 小 viewport 触发 freeze
+    const sc = createScreenController({
+      stdout: out as unknown as NodeJS.WriteStream,
+    });
+    sc.attachInput(makeRegion(["I"]));
+    const h = sc.beginReplaceableSegment();
+    // 流式期填超 viewport——freezeOverflowToScrollback 推 segment 头部行
+    let body = "";
+    for (let i = 0; i < 20; i++) body += `dimL${i}\n`;
+    h.replace(body);
+    out.buffer = "";
+    let hl = "";
+    for (let i = 0; i < 20; i++) hl += `hL${i}\n`;
+    h.commit(hl);
+    // commit 后 paint 仅 emit segment 当前持有的尾部 HL 行；起首行已被 slice 跳过
+    const hlMatches = new Set((out.buffer.match(/hL\d+/g) ?? []));
+    expect(hlMatches.size).toBeLessThan(20);
+    expect(hlMatches.size).toBeGreaterThan(0);
+  });
+
+  it("commit 行数少于 segment 持有——segment 收缩", () => {
+    const out = new FakeStdout();
+    const sc = createScreenController({
+      stdout: out as unknown as NodeJS.WriteStream,
+    });
+    sc.attachInput(makeRegion(["INPUT"]));
+    const h = sc.beginReplaceableSegment();
+    h.replace("a\nb\nc\nd");
+    h.commit("X"); // 单行替换 4 行
+    out.buffer = "";
+    sc.setStatusBar(["TICK"]); // 触发 paint
+    expect(out.buffer).toContain("X");
+    expect(out.buffer).not.toContain("a\nb"); // 旧 4 行应被替换
+  });
+});

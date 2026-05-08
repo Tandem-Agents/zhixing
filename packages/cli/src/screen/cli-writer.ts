@@ -20,7 +20,10 @@
  *     不重复构建
  */
 
-import type { ScreenController } from "./screen-controller.js";
+import type {
+  ReplaceableSegmentHandle,
+  ScreenController,
+} from "./screen-controller.js";
 
 export interface CliWriter {
   /**
@@ -55,6 +58,19 @@ export interface CliWriter {
    * 与同步路径的 line 区分开。
    */
   notify(text: string): void;
+
+  /**
+   * 可选——开启可替换尾段（流式期 replace、闭合时 commit、退化 close）。
+   *
+   * 仅 cli REPL 持久 chrome 模式（ScreenWriter）实现：转发 ScreenController 的
+   * beginReplaceableSegment，让 caller 实现"流式期占位 + 闭合时整段切换"语义
+   * （markdown code block 双态：流式 dim 字面 → 闭合 syntax highlight）。
+   *
+   * StdoutWriter 不实现此方法（直写无 chrome、无替换语义）——caller 通过
+   * `writer.beginReplaceableSegment?.()` 检测：返回 undefined 时退化为 hold 路径
+   * （等闭合再一次性 line 写出整段）。
+   */
+  beginReplaceableSegment?(): ReplaceableSegmentHandle;
 }
 
 interface ScreenWriterOptions {
@@ -65,7 +81,8 @@ interface ScreenWriterOptions {
  * 经 ScreenController 协调的 CliWriter——cli REPL 持久 chrome 模式。
  *
  * line / notify 都走 screen.writeScrollLine（独立段语义，保证起新行避免与流式 chunk 粘连）；
- * appendInline 走 screen.withScrollWrite（流式接续语义，多次调用在 tailBuffer 末尾行追加）。
+ * appendInline 走 screen.withScrollWrite（流式接续语义，多次调用在 tailBuffer 末尾行追加）；
+ * beginReplaceableSegment 转发到 ScreenController 的可替换尾段能力（双态渲染）。
  */
 export function createScreenWriter(options: ScreenWriterOptions): CliWriter {
   const { screen } = options;
@@ -81,6 +98,9 @@ export function createScreenWriter(options: ScreenWriterOptions): CliWriter {
     // 而非 no-op，避免互换 writer 实现时行为漂移
     notify(text) {
       screen.writeScrollLine(text);
+    },
+    beginReplaceableSegment() {
+      return screen.beginReplaceableSegment();
     },
   };
 }
