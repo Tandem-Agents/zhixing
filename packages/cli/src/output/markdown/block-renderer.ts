@@ -1,32 +1,30 @@
 /**
  * 闭合 block 的 ANSI 渲染——纯函数：单 block token → ANSI 字符串。
  *
- * **当前实际启用范围（重要）**：
- *   markdown-stream 当前只在 code block 闭合时调用 `renderBlock` 走 ANSI emit；
- *   heading / list / blockquote / hr 走"字面字符 forward"路径（避免末尾 hold 卡住
- *   stream），不调用本模块的 ANSI 渲染。这意味着 `renderHeading` / `renderList` /
- *   `renderBlockquote` / `renderHr` **目前是预留接口**——保留它们是为后续接入"行级
- *   流式"策略时可直接复用单 item 渲染（届时 markdown-stream 改为单 item 闭合即
- *   emit ANSI，避免整 block hold；renderer 函数无需重写）。
+ * 完备覆盖：heading / paragraph / code / list / blockquote / hr / space。renderBlock
+ * 接受任意 marked block token + 嵌套层级 indentLevel，递归处理子 block（list_item
+ * 嵌套 list / blockquote.tokens 子段落 list 等）让任意嵌套结构正确渲染。
  *
- *   `markdown-stream.ts` 顶部注释有完整 trade-off 说明。
- *
- * 视觉契约（仅 code block 当前生效；其他渲染函数为预留契约）：
- *   - 列 2 起（layout.contentPrefix），与 AI 文字 `◆ <text>` 同基线
+ * 视觉契约：
+ *   - 列起 = 列 2 (PREFIX) + indentLevel * 2（嵌套每层多 2 列）
  *   - heading：粗体 + 起首空行；一级标题 brand cyan，二级及以下默认色
  *   - code block：fenced 带受支持 lang 走 cli-highlight 语法高亮；无 lang / 不支持
- *     lang / strip 模式走 dim 退化——起首空行 + 列 2 缩进 + 无装饰字符（便于复制）。
+ *     lang / strip 模式走 dim 退化——起首空行 + 列对齐 + 无装饰字符（便于复制）。
  *     跨行 SGR token（如 Python `"""docstring"""` 多行字符串）经 splitAnsiLines
- *     处理让每行 SGR 自平衡，避免续行 PREFIX 被染色或 SGR 泄露后续段
- *   - list：无序用 `·` 中点（CJK 友好，比 `•` 克制）；有序保留数字
- *   - blockquote：dim 文字
+ *     处理让每行 SGR 自平衡，避免续行被染色或 SGR 泄露后续段
+ *   - paragraph：起首空行 + 列对齐 + inline ANSI（**bold** / `code` / [link] 等）
+ *   - list：无序用 `·` 中点（CJK 友好，比 `•` 克制）；有序保留数字。list_item
+ *     首行 `{indent}{dim marker} {inline ANSI}`；嵌套 list / 续段缩进 +2 列
+ *   - blockquote：递归渲染子 block 后整段 dim
  *   - hr：dim 横线 `─` + 起首空行
  *
  * 输出契约：
- *   返回字符串末尾保证以 \n 结尾（独立段语义）。"前后空行"中的"前空行"由起首
- *   的 `\n` 提供——caller 经 cliWriter.line 写入时与 ScreenController 的 inMidLine
- *   补 \n 协同形成视觉空行；"后空行"由下一段的起首 `\n` 提供。不重复加末尾 \n\n——
- *   ScreenController 的 tailBuffer 模型对每个 \n 会增加一行。
+ *   返回字符串以 `\n` 起首 + `\n` 结尾（独立段语义）。caller 经 cliWriter.line
+ *   写入时与 ScreenController 的 inMidLine 协同形成视觉空行。空字符串表示该
+ *   block 不渲染（如 mode 降级 / 内容为空）。
+ *
+ *   嵌套调用时（list_item / blockquote 内部递归 renderBlock）caller 通过
+ *   stripBlockBoundaryNewlines 剥两端 \n 后 join，避免重复空行。
  */
 
 import chalk from "chalk";
@@ -34,9 +32,11 @@ import { highlight, supportsLanguage, type Theme } from "cli-highlight";
 import type { Tokens } from "marked";
 import { splitAnsiLines } from "../../tui/ansi.js";
 import { layout, tone } from "../../tui/style.js";
+import { renderInlines } from "./inline-renderer.js";
 import type { MarkdownMode } from "./types.js";
 
 const PREFIX = layout.contentPrefix;
+const INDENT_UNIT = "  ";
 
 /**
  * 代码块语法高亮 theme——把 cli-highlight 的 token 映射到本项目 chalk 5 实例的
@@ -75,30 +75,41 @@ const CODE_THEME: Theme = {
 };
 
 /**
- * 渲染单个闭合 block → 多行 ANSI 字符串（含末尾 \n 让段独立落地）。
+ * 渲染单个闭合 block → 多行 ANSI 字符串（含起首 / 末尾 \n 让段独立落地）。
  *
- * 返回空字符串表示该 block 不渲染（如 strip 模式下的某些元素降级）。
+ * indentLevel：嵌套层级（默认 0 = 顶层）。每层多 2 列起首缩进 (INDENT_UNIT)，
+ * 复合 PREFIX 让嵌套 list / blockquote 等子结构视觉对齐。
+ *
+ * 返回空字符串表示该 block 不渲染（space token / 内容为空）。
  */
-export function renderBlock(token: Tokens.Generic, mode: MarkdownMode): string {
+export function renderBlock(
+  token: Tokens.Generic,
+  mode: MarkdownMode,
+  indentLevel = 0,
+): string {
   if (mode === "raw") return token.raw ?? "";
 
   switch (token.type) {
     case "heading":
-      return renderHeading(token as Tokens.Heading, mode);
+      return renderHeading(token as Tokens.Heading, mode, indentLevel);
     case "code":
-      return renderCode(token as Tokens.Code, mode);
+      return renderCode(token as Tokens.Code, mode, indentLevel);
     case "list":
-      return renderList(token as Tokens.List, mode);
+      return renderList(token as Tokens.List, mode, indentLevel);
     case "blockquote":
-      return renderBlockquote(token as Tokens.Blockquote, mode);
+      return renderBlockquote(token as Tokens.Blockquote, mode, indentLevel);
     case "hr":
-      return renderHr(mode);
+      return renderHr(mode, indentLevel);
+    case "paragraph":
+      return renderParagraph(token as Tokens.Paragraph, mode, indentLevel);
     case "space":
       // 段落分隔由 caller 控制，此处不重复 emit
       return "";
     default:
       // 未知 block 类型 fallback 到 raw 文本（含末尾换行让段独立）
-      return ensureTrailingNewline(`${PREFIX}${token.raw ?? ""}`);
+      return ensureTrailingNewline(
+        `${lineIndent(indentLevel)}${token.raw ?? ""}`,
+      );
   }
 }
 
@@ -107,7 +118,8 @@ export function renderBlock(token: Tokens.Generic, mode: MarkdownMode): string {
  * PREFIX + 起首 \n + 末尾 \n（与 renderCode 闭合 highlight 输出格式对齐，commit
  * 切换时行数 / 列对齐稳定）。
  *
- * 仅 render 模式调用——strip / raw 模式走 hold 路径不进入双态。
+ * 仅 render 模式调用——strip / raw 模式走 hold 路径不进入双态。仅顶层 code 流式
+ * 调用（嵌套 code 在 list/blockquote 内由 renderBlock 闭合渲染）。
  */
 export function formatStreamingCode(codeText: string): string {
   if (codeText === "") return "";
@@ -116,17 +128,37 @@ export function formatStreamingCode(codeText: string): string {
   return `\n${lines.map((l) => `${PREFIX}${l}`).join("\n")}\n`;
 }
 
-function renderHeading(t: Tokens.Heading, mode: MarkdownMode): string {
-  const text = t.text;
-  if (mode === "strip") return `\n${PREFIX}${text}\n`;
-  const styled = t.depth === 1 ? tone.brand.bold(text) : chalk.bold(text);
-  return `\n${PREFIX}${styled}\n`;
+/** 行起首 indent: PREFIX (列 2) + 嵌套层数 * INDENT_UNIT */
+function lineIndent(indentLevel: number): string {
+  return PREFIX + INDENT_UNIT.repeat(indentLevel);
 }
 
-function renderCode(t: Tokens.Code, mode: MarkdownMode): string {
+/** 剥嵌套 renderBlock 输出两端 \n——caller 用于 join 控制 \n 不重复 */
+function stripBlockBoundaryNewlines(s: string): string {
+  return s.replace(/^\n+/, "").replace(/\n+$/, "");
+}
+
+function renderHeading(
+  t: Tokens.Heading,
+  mode: MarkdownMode,
+  indentLevel: number,
+): string {
+  const indent = lineIndent(indentLevel);
+  const text = t.text;
+  if (mode === "strip") return `\n${indent}${text}\n`;
+  const styled = t.depth === 1 ? tone.brand.bold(text) : chalk.bold(text);
+  return `\n${indent}${styled}\n`;
+}
+
+function renderCode(
+  t: Tokens.Code,
+  mode: MarkdownMode,
+  indentLevel: number,
+): string {
+  const indent = lineIndent(indentLevel);
   if (mode === "strip") {
     const lines = t.text.split("\n");
-    return `\n${lines.map((l) => `${PREFIX}${l}`).join("\n")}\n`;
+    return `\n${lines.map((l) => `${indent}${l}`).join("\n")}\n`;
   }
 
   // 已知且受支持的 lang 走 cli-highlight；否则退化 dim（无 lang / 未识别 lang
@@ -146,37 +178,163 @@ function renderCode(t: Tokens.Code, mode: MarkdownMode): string {
       : tone.dim(t.text);
 
   // 跨行 SGR（多行字符串 / 块注释等）需 splitAnsiLines 让每行 SGR 自平衡——
-  // 否则续行 PREFIX 会继承上行未关闭 SGR + 下一段被染色泄露
+  // 否则续行 indent 会继承上行未关闭 SGR + 下一段被染色泄露
   const lines = splitAnsiLines(styled);
-  return `\n${lines.map((l) => `${PREFIX}${l}`).join("\n")}\n`;
+  return `\n${lines.map((l) => `${indent}${l}`).join("\n")}\n`;
 }
 
-function renderList(t: Tokens.List, mode: MarkdownMode): string {
-  const out: string[] = [];
-  for (let i = 0; i < t.items.length; i++) {
-    const item = t.items[i]!;
+function renderParagraph(
+  t: Tokens.Paragraph,
+  mode: MarkdownMode,
+  indentLevel: number,
+): string {
+  const indent = lineIndent(indentLevel);
+  const inline = renderInlines(t.tokens ?? [], mode);
+  if (inline === "") return "";
+  // inline 可能含 softbreak \n —— splitAnsiLines 让每行 SGR 自平衡 + 给每行加 indent
+  const lines = splitAnsiLines(inline);
+  return `\n${lines.map((l) => `${indent}${l}`).join("\n")}\n`;
+}
+
+function renderList(
+  t: Tokens.List,
+  mode: MarkdownMode,
+  indentLevel: number,
+): string {
+  const items = t.items ?? [];
+  if (items.length === 0) return "";
+  const lines: string[] = [];
+  for (let i = 0; i < items.length; i++) {
     const marker = t.ordered ? `${(t.start || 1) + i}.` : "·";
-    const styledMarker = mode === "strip" ? marker : tone.dim(marker);
-    // list_item.text 已是去掉 marker 的纯文本
-    out.push(`${PREFIX}${styledMarker} ${item.text}`);
+    lines.push(renderListItem(items[i]!, marker, mode, indentLevel));
   }
-  return ensureTrailingNewline(out.join("\n"));
+  return `\n${lines.join("\n")}\n`;
 }
 
-function renderBlockquote(t: Tokens.Blockquote, mode: MarkdownMode): string {
-  // blockquote.text 是去掉 `> ` 前缀的内容；多行用 dim 文字呈现
-  const lines = t.text.split("\n");
-  const styledLines = lines.map((line) => {
-    const indented = `${PREFIX}${line}`;
-    return mode === "strip" ? indented : tone.dim(indented);
-  });
-  return ensureTrailingNewline(styledLines.join("\n"));
+/**
+ * 单个 list_item → ANSI 多行字符串（不含两端 \n，由 caller join）。
+ *
+ * 结构：
+ *   - 首行：`{indent}{dim marker} {inline ANSI}` —— marker 与 inline 同一行
+ *   - inline 跨行（含 softbreak）→ 续行 indent + 2 列（与 marker 后字符对齐）
+ *   - 嵌套子 block（list / blockquote / paragraph 等）：递归 renderBlock + 1 层
+ *     indentLevel；递归输出两端 \n 由 stripBlockBoundaryNewlines 剥除
+ */
+function renderListItem(
+  item: Tokens.ListItem,
+  marker: string,
+  mode: MarkdownMode,
+  indentLevel: number,
+): string {
+  const indent = lineIndent(indentLevel);
+  // marker 后单空格 + 续行对齐：marker 占 1+ 字符 + 1 空格——简化为 INDENT_UNIT (2 列)
+  const continuationIndent = indent + INDENT_UNIT;
+  const styledMarker = mode === "strip" ? marker : tone.dim(marker);
+  const { inlineTokens, blockTokens } = splitListItemTokens(item);
+
+  const out: string[] = [];
+
+  if (inlineTokens.length > 0) {
+    const inlineAnsi = renderInlines(inlineTokens, mode);
+    const inlineLines = splitAnsiLines(inlineAnsi);
+    if (inlineLines.length > 0) {
+      out.push(`${indent}${styledMarker} ${inlineLines[0]!}`);
+      for (let i = 1; i < inlineLines.length; i++) {
+        out.push(`${continuationIndent}${inlineLines[i]!}`);
+      }
+    } else {
+      out.push(`${indent}${styledMarker}`);
+    }
+  } else {
+    out.push(`${indent}${styledMarker}`);
+  }
+
+  for (const block of blockTokens) {
+    const sub = renderBlock(block, mode, indentLevel + 1);
+    const trimmed = stripBlockBoundaryNewlines(sub);
+    if (trimmed.length > 0) out.push(trimmed);
+  }
+
+  return out.join("\n");
 }
 
-function renderHr(mode: MarkdownMode): string {
+interface SplitListItemTokens {
+  inlineTokens: Tokens.Generic[];
+  blockTokens: Tokens.Generic[];
+}
+
+const BLOCK_TOKEN_TYPES = new Set<string>([
+  "heading",
+  "code",
+  "list",
+  "blockquote",
+  "hr",
+  "paragraph",
+  "space",
+]);
+
+/**
+ * list_item.tokens 切成 inline 起首部分 + 嵌套子 block 部分。
+ *
+ * marked 给 list_item.tokens 因 tight/loose + 内容而异：
+ *   - tight + 单行：[text, strong, ...]（直接是 inline）
+ *   - loose 或多段：[paragraph(.tokens=[inline...]), ...]
+ *   - 含嵌套：[paragraph 或 inline 起首, list/blockquote/...]
+ *
+ * 统一为 { inlineTokens, blockTokens }——首段 inline（text 或 paragraph 内 inline）
+ * 视为 inlineTokens；其后所有 token 视为 blockTokens（递归 renderBlock 处理）。
+ */
+function splitListItemTokens(item: Tokens.ListItem): SplitListItemTokens {
+  const tokens = item.tokens ?? [];
+  if (tokens.length === 0) return { inlineTokens: [], blockTokens: [] };
+
+  const first = tokens[0]!;
+  if (first.type === "paragraph") {
+    const inlineTokens = (first as Tokens.Paragraph).tokens ?? [];
+    const blockTokens = tokens.slice(1);
+    return { inlineTokens: [...inlineTokens], blockTokens };
+  }
+
+  const blockStart = tokens.findIndex((t) => BLOCK_TOKEN_TYPES.has(t.type));
+  if (blockStart === -1) {
+    return { inlineTokens: [...tokens], blockTokens: [] };
+  }
+  return {
+    inlineTokens: tokens.slice(0, blockStart),
+    blockTokens: tokens.slice(blockStart),
+  };
+}
+
+function renderBlockquote(
+  t: Tokens.Blockquote,
+  mode: MarkdownMode,
+  indentLevel: number,
+): string {
+  const subTokens = t.tokens ?? [];
+  if (subTokens.length === 0) return "";
+
+  const subBlocks: string[] = [];
+  for (const sub of subTokens) {
+    const rendered = renderBlock(sub, mode, indentLevel);
+    const trimmed = stripBlockBoundaryNewlines(rendered);
+    if (trimmed.length > 0) subBlocks.push(trimmed);
+  }
+  if (subBlocks.length === 0) return "";
+
+  const fullText = subBlocks.join("\n");
+  if (mode === "strip") return `\n${fullText}\n`;
+
+  // 整段 dim：每行加 dim 包裹，splitAnsiLines 让 SGR 自平衡（不破坏内部 inline ANSI）
+  const lines = splitAnsiLines(fullText);
+  const styled = lines.map((l) => (l === "" ? l : tone.dim(l))).join("\n");
+  return `\n${styled}\n`;
+}
+
+function renderHr(mode: MarkdownMode, indentLevel: number): string {
+  const indent = lineIndent(indentLevel);
   const rule = "─".repeat(40);
   const styled = mode === "strip" ? rule : tone.dim(rule);
-  return `\n${PREFIX}${styled}\n`;
+  return `\n${indent}${styled}\n`;
 }
 
 function ensureTrailingNewline(s: string): string {

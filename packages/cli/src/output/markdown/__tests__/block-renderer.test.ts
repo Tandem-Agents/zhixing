@@ -1,9 +1,14 @@
 import chalk from "chalk";
 import { describe, expect, it } from "vitest";
-import type { Tokens } from "marked";
+import { marked, type Tokens } from "marked";
 import { renderBlock } from "../block-renderer.js";
 import { stripAnsi } from "../../../tui/ansi.js";
 import { layout } from "../../../tui/style.js";
+
+/** 用真实 marked.lexer 解析 markdown 取首 token——比手工构造 mock 更稳 */
+function lexFirst<T extends Tokens.Generic>(md: string): T {
+  return marked.lexer(md)[0] as T;
+}
 
 // 强制启用 ANSI 染色——vitest non-TTY 环境下 chalk 默认降级，让 chalk.cyan(x) 输出
 // 真实 ANSI 序列才能验证 render vs strip 模式的差异
@@ -122,26 +127,9 @@ describe("renderBlock · code", () => {
 });
 
 describe("renderBlock · list", () => {
-  function makeList(items: string[], ordered = false): Tokens.List {
-    return {
-      type: "list",
-      ordered,
-      start: ordered ? 1 : "",
-      loose: false,
-      raw: items.join("\n"),
-      items: items.map((t) => ({
-        type: "list_item",
-        text: t,
-        raw: `- ${t}`,
-        task: false,
-        loose: false,
-        tokens: [],
-      })) as Tokens.ListItem[],
-    } as Tokens.List;
-  }
-
   it("无序列表 render 模式用 · 中点 marker（非 - / •）", () => {
-    const out = renderBlock(makeList(["item1", "item2"]), "render");
+    const list = lexFirst<Tokens.List>("- item1\n- item2\n");
+    const out = renderBlock(list, "render");
     const stripped = stripAnsi(out);
     expect(stripped).toContain("· item1");
     expect(stripped).toContain("· item2");
@@ -150,24 +138,102 @@ describe("renderBlock · list", () => {
   });
 
   it("有序列表保留数字 marker", () => {
-    const out = renderBlock(makeList(["a", "b"], true), "render");
+    const list = lexFirst<Tokens.List>("1. a\n2. b\n");
+    const out = renderBlock(list, "render");
     const stripped = stripAnsi(out);
     expect(stripped).toContain("1. a");
     expect(stripped).toContain("2. b");
   });
 
-  it("strip 模式 marker 不染色", () => {
-    const out = renderBlock(makeList(["x"]), "strip");
-    expect(out).toBe(`${PREFIX}· x\n`);
+  it("strip 模式 marker 不染色 + 列对齐", () => {
+    const list = lexFirst<Tokens.List>("- x\n");
+    const out = renderBlock(list, "strip");
+    expect(out).toBe(`\n${PREFIX}· x\n`);
+  });
+
+  it("起首 / 末尾 \\n 自带（独立段语义）", () => {
+    const list = lexFirst<Tokens.List>("- a\n- b\n");
+    const out = renderBlock(list, "render");
+    expect(out.startsWith("\n")).toBe(true);
+    expect(out.endsWith("\n")).toBe(true);
+  });
+
+  it("list_item 含 inline ANSI（**bold** / `code`）→ inline-renderer 处理", () => {
+    const list = lexFirst<Tokens.List>("- **bold** text\n- with `code`\n");
+    const out = renderBlock(list, "render");
+    const stripped = stripAnsi(out);
+    expect(stripped).toContain("· bold text");
+    expect(stripped).toContain("· with code");
+    // bold 文字含 ANSI（chalk.bold 序列）
+    expect(out).toContain("\x1b[1m");
+  });
+
+  it("嵌套 list 每层多 2 列起首", () => {
+    const list = lexFirst<Tokens.List>("- outer\n  - inner\n");
+    const out = renderBlock(list, "render");
+    const stripped = stripAnsi(out);
+    // 外层 outer 在 PREFIX 列；内层 inner 在 PREFIX + 2 空格列
+    expect(stripped).toContain(`${PREFIX}· outer`);
+    expect(stripped).toContain(`${PREFIX}${"  "}· inner`);
+  });
+
+  it("嵌套 list 三层视觉对齐", () => {
+    const list = lexFirst<Tokens.List>("- a\n  - b\n    - c\n");
+    const out = renderBlock(list, "render");
+    const stripped = stripAnsi(out);
+    expect(stripped).toContain(`${PREFIX}· a`);
+    expect(stripped).toContain(`${PREFIX}${"  "}· b`);
+    expect(stripped).toContain(`${PREFIX}${"    "}· c`);
+  });
+});
+
+describe("renderBlock · paragraph", () => {
+  it("render 模式 inline ANSI + 列 2 + 起首末尾 \\n", () => {
+    const para = lexFirst<Tokens.Paragraph>("normal **bold** text\n\n");
+    const out = renderBlock(para, "render");
+    expect(stripAnsi(out)).toBe(`\n${PREFIX}normal bold text\n`);
+    expect(out).toContain("\x1b[1m"); // bold
+  });
+
+  it("strip 模式 inline 退化为纯文本", () => {
+    const para = lexFirst<Tokens.Paragraph>("**bold** + `code`\n\n");
+    const out = renderBlock(para, "strip");
+    expect(out).toBe(`\n${PREFIX}bold + code\n`);
+    expect(out).not.toContain("\x1b[");
   });
 });
 
 describe("renderBlock · blockquote", () => {
   it("render 模式 dim 文字 + 列 2 起", () => {
-    const t = { type: "blockquote", text: "quoted", raw: "> quoted" } as Tokens.Blockquote;
-    const out = renderBlock(t, "render");
-    expect(stripAnsi(out)).toBe(`${PREFIX}quoted\n`);
-    expect(out).toContain(chalk.dim(`${PREFIX}quoted`));
+    const bq = lexFirst<Tokens.Blockquote>("> quoted\n\n");
+    const out = renderBlock(bq, "render");
+    expect(stripAnsi(out)).toBe(`\n${PREFIX}quoted\n`);
+    expect(out).toContain("\x1b[2m"); // dim
+  });
+
+  it("blockquote 嵌套 list：递归渲染", () => {
+    const bq = lexFirst<Tokens.Blockquote>("> - item1\n> - item2\n\n");
+    const out = renderBlock(bq, "render");
+    const stripped = stripAnsi(out);
+    expect(stripped).toContain("· item1");
+    expect(stripped).toContain("· item2");
+    // 整段 dim
+    expect(out).toContain("\x1b[2m");
+  });
+
+  it("blockquote 多段 paragraph：递归处理 inline", () => {
+    const bq = lexFirst<Tokens.Blockquote>("> first paragraph\n>\n> second **bold**\n\n");
+    const out = renderBlock(bq, "render");
+    const stripped = stripAnsi(out);
+    expect(stripped).toContain("first paragraph");
+    expect(stripped).toContain("second bold");
+  });
+
+  it("strip 模式不染色", () => {
+    const bq = lexFirst<Tokens.Blockquote>("> quoted\n\n");
+    const out = renderBlock(bq, "strip");
+    expect(out).not.toContain("\x1b[");
+    expect(stripAnsi(out)).toBe(`\n${PREFIX}quoted\n`);
   });
 });
 

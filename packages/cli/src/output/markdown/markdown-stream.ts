@@ -15,11 +15,12 @@
  *     起首标记当 text 解析（如 `**bo` 是 text("**bo")），若字面 forward 则后续 chunk
  *     让 marked 重解析为 strong 时已 forward 字符无法被 ANSI 替换。换"末尾未闭合段
  *     不流式（典型 1~2s 等待）"代价得到"闭合后 inline 元素 ANSI 渲染正确"视觉
- *   - **heading / list / blockquote / hr**：字面字符 forward（含 `# 标题` / `- item` /
- *     `> quote` / `---` 字面 markdown 标记），不 hold——避免 LLM 输出长 list / 引用 /
- *     setext heading underline 等结构时用户看不到任何 streaming 输出。这些 block 的
- *     ANSI 视觉留给后续 step（需"行级流式"策略：单 list item / 单 heading 闭合即 emit
- *     ANSI，复用 inline-renderer 模式）
+ *   - **heading / blockquote / hr**：hold 等闭合；闭合后 `renderBlock + line` 整段
+ *     ANSI emit。字面 markdown 标记（# / > / ---）不再泄露给用户。多数场景闭合快——
+ *     heading / hr 单 \n 即可、blockquote 等待数 chunk 可接受
+ *   - **list**：默认 hold；render 模式 + 注入 beginReplaceableSegment 时走 Replaceable
+ *     Segment 渐进 replace 整段（与 code block 双态同模式）——长 list 用户能即时看到
+ *     items 累积
  *   - **space**：仅当 paragraph 流活跃时 forward `\n\n` 触发段落分隔
  *   - 已 emit 的 block 通过 `paragraphForwardedTo` 单调推进的不变量跳过避免重复
  *
@@ -28,7 +29,10 @@
  *     虚线下划线 / ~~del~~）+ wrap hanging 4 续行
  *   - code block：流式期 dim 字面 + 列 2 + 起首/末尾空行；闭合后 cli-highlight 语法
  *     高亮（fenced + 受支持 lang）或保持 dim（其他情况）
- *   - heading / list / blockquote / hr：字面字符流式（待 ANSI 化）
+ *   - heading：列 2 + bold（depth=1 brand cyan）；起首 / 末尾空行
+ *   - list：列 2 + dim marker + inline ANSI 文字；嵌套每层多 2 列；起首 / 末尾空行
+ *   - blockquote：列 2 + 整段 dim（递归处理子 block）；起首 / 末尾空行
+ *   - hr：列 2 + dim 横线 ─ × 40；起首 / 末尾空行
  *
  * **三档 mode**：
  *   - render：完整 markdown 渲染（默认 cli REPL TTY）；fenced + 受支持 lang code
@@ -99,6 +103,12 @@ export class MarkdownStream {
    * beginReplaceableSegment + token 是 fenced (lang !== undefined) 时存在。
    */
   private codeSegment: ReplaceableSegmentHandle | null = null;
+  /**
+   * 当前活跃的 list ReplaceableSegment——长 list 跨 chunk 时持有，闭合时 commit
+   * 整段。仅 render 模式 + caller 注入 beginReplaceableSegment 时存在。与 code
+   * segment 互斥（marked 末尾 token 一次只有一个 block）。
+   */
+  private listSegment: ReplaceableSegmentHandle | null = null;
   private readonly mode: MarkdownMode;
   private readonly appendInline: (chunk: string) => void;
   private readonly line: (text: string) => void;
@@ -172,11 +182,15 @@ export class MarkdownStream {
     this.emittedBlockCount = 0;
     this.paragraphForwardedTo = 0;
     this.paragraphStream = null;
-    // 防御：流式期 segment 应已在 emitClosedBlock(code) 时 commit 关闭；若仍活跃
-    // （如解析途中异常 / caller 错误），强制 close 避免残留 hasActiveSegment 状态
+    // 防御：流式期 segment 应已在 emitClosedBlock 时 commit 关闭；若仍活跃
+    // （解析途中异常 / caller 错误），强制 close 避免残留 hasActiveSegment 状态
     if (this.codeSegment !== null) {
       this.codeSegment.close();
       this.codeSegment = null;
+    }
+    if (this.listSegment !== null) {
+      this.listSegment.close();
+      this.listSegment = null;
     }
   }
 
@@ -203,6 +217,12 @@ export class MarkdownStream {
       return;
     }
 
+    if (token.type === "list") {
+      this.emitClosedList(token as Tokens.List);
+      this.paragraphForwardedTo = range.end;
+      return;
+    }
+
     if (token.type === "paragraph") {
       this.emitInlineTokens(token as Tokens.Paragraph, range.start, false);
       // paragraph.raw 末尾的换行 / 残余字符不在 inline tokens 累计长度内——直接推到
@@ -220,8 +240,13 @@ export class MarkdownStream {
       return;
     }
 
-    // heading / list / blockquote / hr —— 字面 forward
-    this.forwardBufferRange(range.end);
+    // heading / list / blockquote / hr —— 闭合时 renderBlock 整段 ANSI emit（独立段
+    // 经 line 路径写入 ScreenController）。hold 期间字面字符已由 handleOpenBlock 不
+    // 再 forward 给 paragraph 流——用户不会看到 `#` / `-` / `>` / `---` 字面 markdown
+    // 标记暴露
+    this.closeParagraphStream();
+    const ansi = renderBlock(token, this.mode);
+    if (ansi.length > 0) this.line(ansi);
   }
 
   /**
@@ -236,13 +261,20 @@ export class MarkdownStream {
    *     等闭合（如 \n\n）才显示" 的代价（typical LLM 段长几句话，等待 1~2s 可接受）
    *     得到"闭合后 inline 元素 ANSI 渲染正确"的视觉
    *   - space：不 forward（避免给空 buffer 末位创建空 ◆ 段；等下次实质内容 chunk 来再起手）
-   *   - heading / list / blockquote / hr：字面 forward 让用户看到 streaming 输出，不卡
-   *     LLM 写长 list / 引用 / setext heading underline 等场景（这些 block 的 ANSI
-   *     行级渲染留待后续 step）
+   *   - heading / blockquote / hr：hold 等闭合（不 forward 字面字符）。理由同 paragraph
+   *     末尾 hold——已 forward 的 markdown 标记字符（# / > / ---）无法被闭合时 ANSI
+   *     替换。多数场景闭合快（heading / hr 单 \n 即可），blockquote 等待可接受
+   *   - list：hold 路径（无 segment factory 时）；render 模式 + 注入 segment factory
+   *     时走 handleOpenList 用 ReplaceableSegment 渐进 replace 整段渲染——长 list
+   *     用户能即时看到 items 累积（与 code block 双态同模式）
    */
   private handleOpenBlock(token: Tokens.Generic, range: TokenRange): void {
     if (token.type === "code") {
       this.handleOpenCode(token as Tokens.Code);
+      return;
+    }
+    if (token.type === "list") {
+      this.handleOpenList(token as Tokens.List);
       return;
     }
     if (token.type === "space") {
@@ -252,7 +284,8 @@ export class MarkdownStream {
       this.emitInlineTokens(token as Tokens.Paragraph, range.start, true);
       return;
     }
-    this.forwardBufferRange(range.end);
+    // heading / blockquote / hr —— hold（不 emit 字面字符），等闭合由
+    // emitClosedBlock 整段 ANSI emit
   }
 
   /**
@@ -298,6 +331,40 @@ export class MarkdownStream {
     }
     this.closeParagraphStream();
     const ansi = renderBlock(token, this.mode);
+    if (ansi.length > 0) this.line(ansi);
+  }
+
+  /**
+   * 开启 / 推进 list 流式期。
+   *
+   * 启用条件：mode === render + caller 注入 beginReplaceableSegment。任一不满足走
+   * hold 路径（不 emit）。启用时：首次 begin segment、关 paragraph 流（独立段语义）；
+   * 每次 chunk 把当前 list 整段 renderBlock 后 segment.replace —— marked 已识别的
+   * items（含末尾 item 当前累积内容）即时可见，长 list 不再卡 streaming。
+   */
+  private handleOpenList(list: Tokens.List): void {
+    if (this.mode !== "render" || this.beginReplaceableSegment === null) {
+      return;
+    }
+    if (this.listSegment === null) {
+      this.closeParagraphStream();
+      this.listSegment = this.beginReplaceableSegment();
+    }
+    this.listSegment.replace(renderBlock(list, this.mode));
+  }
+
+  /**
+   * 闭合 list emit。双态活跃时 commit 整段；否则走 hold 路径的 line emit。
+   */
+  private emitClosedList(list: Tokens.List): void {
+    if (this.listSegment !== null) {
+      const ansi = renderBlock(list, this.mode);
+      this.listSegment.commit(ansi);
+      this.listSegment = null;
+      return;
+    }
+    this.closeParagraphStream();
+    const ansi = renderBlock(list, this.mode);
     if (ansi.length > 0) this.line(ansi);
   }
 

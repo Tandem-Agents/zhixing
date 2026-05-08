@@ -70,10 +70,17 @@ export function renderInline(token: InlineToken, mode: MarkdownMode): string {
   if (mode === "raw") return token.raw ?? "";
 
   switch (token.type) {
-    case "text":
-      // text token 是字面文字（GFM 扩展的 autolink 走 link token 而非 text；text
-      // 仅承载非结构标记的字面字符）
-      return (token as Tokens.Text).text;
+    case "text": {
+      // text token 是字面文字（GFM 扩展的 autolink 走 link token 而非 text）。
+      // 但 marked 在 list_item.tokens 等位置会把 inline 标记嵌在 text.tokens 子
+      // 属性里（如 list 内 `**bold**` → text(tokens=[strong, text])）——存在
+      // tokens 子属性时递归渲染解锁内层 inline ANSI；否则用 .text 字面字符。
+      const textToken = token as Tokens.Text;
+      if (textToken.tokens && textToken.tokens.length > 0) {
+        return renderInlines(textToken.tokens, mode);
+      }
+      return textToken.text;
+    }
 
     case "strong": {
       const inner = renderInlines(

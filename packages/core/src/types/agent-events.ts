@@ -21,6 +21,8 @@
 
 import type { AgentErrorType } from "./errors.js";
 import type { StreamEvent, StopReason, TokenUsage } from "./llm.js";
+import type { Message } from "./messages.js";
+import type { ToolSpec } from "./tools.js";
 import type { CompactStrategyContribution } from "../context/types.js";
 import type { AbortReason } from "../interrupt/types.js";
 
@@ -118,6 +120,21 @@ export type AgentEventMap = {
     model: string;
     messageCount: number;
     hasTools: boolean;
+    /**
+     * 提交给 LLM 的完整 system prompt——可观测性诊断用。订阅者可据此 dump
+     * 真实送出的 system 内容，便于排查"提示词与预期不符"类问题。摘要字段
+     * （model / messageCount / hasTools）保留供 status-bar 等订阅者读取。
+     */
+    systemPrompt?: string;
+    /**
+     * 提交给 LLM 的完整 messages 历史（含 user / assistant / tool 全部 ContentBlock）。
+     * 引用传递无序列化开销；订阅者按需序列化（如 dump 在 ZHIXING_RAW_DUMP=1 时）。
+     */
+    messages: readonly Message[];
+    /**
+     * 提交给 LLM 的完整 tool specs（含 name / description / input_schema）。空数组表示无工具。
+     */
+    tools: readonly ToolSpec[];
   };
 
   /** 流式事件透传，供 UI 层消费实现实时输出 */

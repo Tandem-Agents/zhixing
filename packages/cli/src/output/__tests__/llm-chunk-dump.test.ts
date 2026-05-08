@@ -106,7 +106,7 @@ describe("LLM chunk dump · 启用（ZHIXING_RAW_DUMP=1）", () => {
     const logPath = findNewLog();
     expect(logPath).not.toBeNull();
     const content = readLogSync(logPath!);
-    expect(content).toContain("# LLM raw chunk dump");
+    expect(content).toContain("# LLM raw dump");
     expect(content).toContain(`pid ${process.pid}`);
   });
 
@@ -204,5 +204,73 @@ describe("LLM chunk dump · 启用（ZHIXING_RAW_DUMP=1）", () => {
     expect(content).toContain("--- end of TURN 1 ---");
     expect(content).toContain("=== TURN 2");
     expect(content).toContain('raw: "second turn"');
+  });
+
+  it("recordRequestPayload 写完整入参——含 system / messages 摘要 + 完整 JSON", () => {
+    const dump = getLlmChunkDump();
+    dump.recordRequestPayload({
+      model: "test/m1",
+      systemPrompt: "you are an assistant",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hello" }] },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "hi" },
+            {
+              type: "tool_use",
+              id: "tc1",
+              name: "Read",
+              input: { path: "a.ts" },
+            },
+          ],
+        },
+      ],
+      tools: [
+        {
+          name: "Read",
+          description: "read a file",
+          inputSchema: { type: "object" },
+        } as never,
+      ],
+    });
+    dump.dispose();
+    const content = readLogSync(findNewLog()!);
+    // 顶部摘要
+    expect(content).toContain(">>> LLM REQUEST PAYLOAD <<<");
+    expect(content).toContain("model:    test/m1");
+    expect(content).toContain("system:   20 chars");
+    expect(content).toContain("messages: 2 entries");
+    expect(content).toContain("user");
+    expect(content).toContain("assistant");
+    expect(content).toContain("text(5c)"); // hello
+    expect(content).toContain("tool_use(Read#tc1)");
+    expect(content).toContain("tools:    1 (Read)");
+    // 完整 JSON 块
+    expect(content).toContain("--- full payload (JSON) ---");
+    expect(content).toContain('"model": "test/m1"');
+    expect(content).toContain('"systemPrompt": "you are an assistant"');
+    expect(content).toContain("--- end payload ---");
+  });
+
+  it("attachChunkDumpToBus 订阅 llm:request_start 并转发到 recordRequestPayload", async () => {
+    const bus: IEventBus<AgentEventMap> = createEventBus();
+    const detach = attachChunkDumpToBus(bus);
+
+    await bus.emit("llm:request_start", {
+      model: "test/m1",
+      messageCount: 1,
+      hasTools: false,
+      systemPrompt: "sys",
+      messages: [{ role: "user", content: [{ type: "text", text: "q" }] }],
+      tools: [],
+    });
+
+    detach();
+    getLlmChunkDump().dispose();
+    const content = readLogSync(findNewLog()!);
+    expect(content).toContain(">>> LLM REQUEST PAYLOAD <<<");
+    expect(content).toContain("model:    test/m1");
+    expect(content).toContain("system:   3 chars");
   });
 });

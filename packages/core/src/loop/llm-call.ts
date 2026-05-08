@@ -96,6 +96,9 @@ export async function* streamLLMCall(
     model,
     messageCount: messages.length,
     hasTools: toolSpecs.length > 0,
+    systemPrompt,
+    messages,
+    tools: toolSpecs,
   });
 
   const startTime = Date.now();

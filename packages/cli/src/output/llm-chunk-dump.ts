@@ -42,13 +42,30 @@ import path from "node:path";
 import os from "node:os";
 import type {
   AgentEventMap,
+  ContentBlock,
   IEventBus,
+  Message,
   StreamEvent,
+  ToolSpec,
 } from "@zhixing/core";
 
 const ENABLE_ENV = "ZHIXING_RAW_DUMP";
 
+/** 一次 LLM 请求的完整入参——dump 用于人类阅读 + 可机器还原 */
+export interface LlmRequestPayload {
+  readonly model: string;
+  readonly systemPrompt?: string;
+  readonly messages: readonly Message[];
+  readonly tools: readonly ToolSpec[];
+}
+
 export interface LlmChunkDump {
+  /**
+   * 记录一次 LLM 请求的完整入参——LLM 调用前记录,可对照后续接收的 stream event
+   * 排查"输入端是否符合预期"类 bug（如 system prompt 与配置不符 / 历史 message
+   * 漏 / tools schema 错乱等）
+   */
+  recordRequestPayload(payload: LlmRequestPayload): void;
   /** 记录 stream event —— 按 type 分发 (delta 类输出 raw + codepoint, 结构事件简短描述) */
   recordStreamEvent(event: StreamEvent): void;
   /** 标记 turn 边界 —— 在日志中插入分隔符 + 重置 turn 起点时间 */
@@ -99,6 +116,16 @@ export function attachChunkDumpToBus(
   const dump = getLlmChunkDump();
   const unsubs: Array<() => void> = [];
   unsubs.push(
+    bus.on("llm:request_start", (event) => {
+      dump.recordRequestPayload({
+        model: event.model,
+        systemPrompt: event.systemPrompt,
+        messages: event.messages,
+        tools: event.tools,
+      });
+    }),
+  );
+  unsubs.push(
     bus.on("llm:stream_event", (event) => {
       dump.recordStreamEvent(event);
     }),
@@ -131,12 +158,13 @@ function createDump(): LlmChunkDump {
 
   // 启动横幅 + 路径提示到 stderr——cli REPL chrome 接管 stdout 之前 stderr 仍可见
   const banner =
-    `# LLM raw chunk dump (pid ${process.pid})\n` +
+    `# LLM raw dump (pid ${process.pid})\n` +
     `# Started at ${new Date().toISOString()}\n` +
-    `# Records all StreamEvent types: delta events (text/thinking/tool_call_delta)\n` +
-    `# show raw + codepoint hex; structural events (message/tool_call start/end)\n` +
-    `# show one-line summary. Use this to diagnose UI vs LLM mismatches and\n` +
-    `# "token climbing but screen frozen" cases.\n\n`;
+    `# Records both LLM REQUEST PAYLOAD (system + messages + tools) and stream\n` +
+    `# events (text/thinking/tool_call_delta with codepoint hex; structural\n` +
+    `# message/tool_call start/end summaries). Use this to diagnose UI vs LLM\n` +
+    `# mismatches, "token climbing but screen frozen" cases, and "system prompt\n` +
+    `# / context not as expected" cases.\n\n`;
   writeSync(fd, banner);
   // allow-direct-stdout
   process.stderr.write(`[zhixing] LLM raw chunk dump enabled → ${logPath}\n`);
@@ -168,6 +196,12 @@ function createDump(): LlmChunkDump {
   };
 
   return {
+    recordRequestPayload(payload) {
+      if (fd === null) return;
+      ensureTurnHeader();
+      const elapsed = Date.now() - turnStart;
+      writeSync(fd, formatRequestPayload(payload, elapsed));
+    },
     recordStreamEvent(event) {
       if (fd === null) return;
       ensureTurnHeader();
@@ -203,10 +237,94 @@ function createDump(): LlmChunkDump {
 }
 
 const NOOP: LlmChunkDump = {
+  recordRequestPayload: () => {},
   recordStreamEvent: () => {},
   recordTurnBoundary: () => {},
   dispose: () => {},
 };
+
+/**
+ * 格式化一次 LLM 请求的完整入参——人类可读摘要 + 完整 JSON 还原。
+ *
+ * 摘要部分让快速跳读时能看到 system 长度 / messages 角色与 ContentBlock 类型 /
+ * tools 名单；完整 JSON 在分隔符块内便于人类折叠 + 机器还原（粘到 LLM 调试工具
+ * 即可重放该请求）。
+ */
+function formatRequestPayload(
+  payload: LlmRequestPayload,
+  elapsedMs: number,
+): string {
+  const head = `[+${elapsedMs}ms]`;
+  const lines: string[] = [];
+  lines.push(`${head} >>> LLM REQUEST PAYLOAD <<<`);
+  lines.push(`  model:    ${payload.model}`);
+  const sysLen = payload.systemPrompt?.length ?? 0;
+  lines.push(`  system:   ${sysLen} chars`);
+  lines.push(`  messages: ${payload.messages.length} entries`);
+  for (let i = 0; i < payload.messages.length; i++) {
+    lines.push(`    [${i}] ${formatMessageSummary(payload.messages[i]!)}`);
+  }
+  const toolNames = payload.tools.map((t) => t.name).join(", ");
+  lines.push(
+    `  tools:    ${payload.tools.length}${
+      payload.tools.length > 0 ? ` (${toolNames})` : ""
+    }`,
+  );
+
+  // 完整 JSON 还原——messages 内 ToolResultBlock.content 可能含图像 base64 / 大字
+  // 段，dump 不裁剪让排查时拥有完整信息（用户主动启用诊断、本机文件无外泄风险）
+  const fullJson = JSON.stringify(
+    {
+      model: payload.model,
+      systemPrompt: payload.systemPrompt,
+      messages: payload.messages,
+      tools: payload.tools,
+    },
+    null,
+    2,
+  );
+
+  lines.push("--- full payload (JSON) ---");
+  lines.push(fullJson);
+  lines.push("--- end payload ---");
+  lines.push("");
+  return lines.join("\n");
+}
+
+/** 单条 message 的人类可读摘要：role + ContentBlock kind + 大致长度 */
+function formatMessageSummary(msg: Message): string {
+  const blocks = msg.content.map(formatBlockSummary).join(" ");
+  return `${msg.role.padEnd(9)} ${blocks}`;
+}
+
+function formatBlockSummary(block: ContentBlock): string {
+  switch (block.type) {
+    case "text":
+      return `text(${block.text.length}c)`;
+    case "thinking":
+      return `thinking(${block.thinking.length}c)`;
+    case "tool_use":
+      return `tool_use(${block.name}#${block.id})`;
+    case "tool_result": {
+      // ToolResultBlock.content 可能是 string 或 ContentBlock[]
+      const content = block.content;
+      if (typeof content === "string") return `tool_result(${content.length}c)`;
+      const inner = (content as readonly ContentBlock[])
+        .map(formatBlockSummary)
+        .join(",");
+      return `tool_result[${inner}]`;
+    }
+    case "image":
+      return `image(${
+        block.source.type === "base64" ? block.source.mediaType : "url"
+      })`;
+    default: {
+      const exhaustive: never = block;
+      void exhaustive;
+      return "unknown_block";
+    }
+  }
+}
 
 /**
  * 把 StreamEvent 格式化为日志条目——delta 类输出 raw + codepoint，结构事件单行
