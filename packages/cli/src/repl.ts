@@ -161,9 +161,31 @@ function buildSlashCommands(
     },
     "/clear": {
       description: "清空对话历史",
-      handler: (state) => {
-        state.messages = [];
+      handler: async (state) => {
+        // 走 store.compactAll 写一条 compact marker 原子重写 transcript——内存与
+        // 磁盘必须同时压缩才能让"清空"语义稳定（仅清内存会被下次 commitTurn 内
+        // loadNormalized 把磁盘老 turns 重新拼回 canonical 让历史回流）。
+        if (state.conversationId) {
+          try {
+            state.messages = await state.store.compactAll(
+              state.conversationId,
+              "(用户已清空对话历史)",
+            );
+          } catch (err) {
+            cliWriter.line(
+              chalk.red(
+                `\n  清空失败: ${err instanceof Error ? err.message : String(err)}\n`,
+              ),
+            );
+            return;
+          }
+        } else {
+          // 无 conversationId 路径（极少见，正常 cli 流程总有 conversation）——
+          // 仅清内存即可，无磁盘可清
+          state.messages = [];
+        }
         state.turnCounter = 0;
+        state.lastToolEndCount = 0;
         cliWriter.line(chalk.dim("对话历史已清空\n"));
       },
     },

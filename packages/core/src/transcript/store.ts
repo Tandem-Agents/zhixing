@@ -169,23 +169,13 @@ export class TranscriptStore implements ITranscriptStore {
       const file = this.transcriptFile(conversationId);
 
       if (payload.compactBefore) {
-        // 原子重写路径：截断 + (可选)新 turn
-        //
-        // keepCount 算法（§4.1）：文件现有 turns 长度减去 compactBefore.turnsCompacted（累积替代数），
-        // 下限 0。slice(-keepCount) 保留末尾 keepCount 个。keepCount=0 时 slice(-0) 返回 []。
-        const keepCount = Math.max(
-          0,
-          turns.length - payload.compactBefore.turnsCompacted,
+        return await this.applyCompactBeforeInLock(
+          file,
+          header,
+          turns,
+          payload.compactBefore,
+          payload.turn,
         );
-        const retainedTurns = keepCount > 0 ? turns.slice(-keepCount) : [];
-        const newTurns = payload.turn
-          ? [...retainedTurns, payload.turn]
-          : retainedTurns;
-
-        const content = serializeFile(header, [payload.compactBefore], newTurns);
-        await writeAtomic(file, content, { platform: this.platform });
-
-        return rebuildCanonicalMessages(newTurns, [payload.compactBefore]);
       }
 
       // append 路径（仅 turn，无 compact）：现有文件不改，追加新 turn
@@ -194,11 +184,74 @@ export class TranscriptStore implements ITranscriptStore {
       //（单次 write syscall < PIPE_BUF 时），崩溃最多丢失这一行，不会破坏前置内容。
       // 省掉 rewrite 的 O(文件大小) 开销，符合 90% 场景（普通 append）。
       //
-      // "不存在" 异常由 loadNormalizedInLock 统一抛出（line 275-278），此处无需再校验。
+      // "不存在" 异常由 loadNormalizedInLock 统一抛出，此处无需再校验。
       await appendRecord(file, payload.turn!);
 
       const nextTurns = [...turns, payload.turn!];
       return rebuildCanonicalMessages(nextTurns, compacts);
+    });
+  }
+
+  /**
+   * 把 compact marker（可选附加新 turn）原子写入 transcript —— 是 commitTurn 的
+   * compactBefore 路径与 compactAll 共享的写入实现。
+   *
+   * 算法：keepCount = max(0, existingTurns.length - marker.turnsCompacted)；
+   * retainedTurns = existingTurns 末尾 keepCount 个（keepCount=0 时为 []）；
+   * newTurns = retainedTurns + appendTurn?。整文件原子重写为
+   * `header + [marker] + newTurns`，返回 rebuildCanonicalMessages 的 canonical。
+   *
+   * 必须由 caller 在 withLock 内调用——本函数不再加锁。
+   */
+  private async applyCompactBeforeInLock(
+    file: string,
+    header: TranscriptHeader,
+    existingTurns: readonly Turn[],
+    marker: CompactMarker,
+    appendTurn?: Turn,
+  ): Promise<Message[]> {
+    const keepCount = Math.max(
+      0,
+      existingTurns.length - marker.turnsCompacted,
+    );
+    const retainedTurns =
+      keepCount > 0 ? existingTurns.slice(-keepCount) : [];
+    const newTurns = appendTurn
+      ? [...retainedTurns, appendTurn]
+      : retainedTurns;
+
+    const content = serializeFile(header, [marker], newTurns);
+    await writeAtomic(file, content, { platform: this.platform });
+
+    return rebuildCanonicalMessages(newTurns, [marker]);
+  }
+
+  async compactAll(
+    conversationId: string,
+    summary: string,
+  ): Promise<Message[]> {
+    return await this.withLock(conversationId, async () => {
+      await this.cleanupOnce(conversationId);
+      const { header, turns } = await this.loadNormalizedInLock(
+        conversationId,
+      );
+      // tokensBefore / tokensAfter 在 LLM 压缩场景代表"压缩前后的 token 数"，
+      // 用户主动清空（/clear）路径无 LLM 估算，填 0 表示"用户场景，token 数据不适用"。
+      // 字段保持必填——自动 compact caller 必须填实际值。
+      const marker: CompactMarker = {
+        type: "compact",
+        timestamp: new Date().toISOString(),
+        summary,
+        turnsCompacted: turns.length,
+        tokensBefore: 0,
+        tokensAfter: 0,
+      };
+      return await this.applyCompactBeforeInLock(
+        this.transcriptFile(conversationId),
+        header,
+        turns,
+        marker,
+      );
     });
   }
 

@@ -125,6 +125,26 @@ export interface ITranscriptStore {
     compact: CompactMarker,
   ): Promise<Message[]>;
 
+  /**
+   * 全量压缩当前对话——折叠所有 turns 为一条 compact marker，原子重写 transcript。
+   *
+   * 与 `commitTurn({ compactBefore })` 共享底层写入路径，差异在 `turnsCompacted` 由
+   * store 在 lock 内计算 = 当前磁盘 turns 数（race-free），caller 不需先 load 再算。
+   *
+   * 用途：用户主动"清空对话历史"语义（cli `/clear`）。压缩后 canonical =
+   * `[summaryMsg, ackMsg]` 两条 system-meta，LLM 视角"对话已清空"——下次 LLM
+   * 调用不会重新看到任何老 turn。磁盘文件原子重写为 `header + [marker]`，老 turns
+   * 不再可恢复（与自动 compact 路径行为一致）。
+   *
+   * `summary` 由 caller 提供——会经 `buildCompactSummaryPair` 包成 LLM 可见的
+   * summaryPair 起首。"用户主动"场景传简短 placeholder（如"(用户已清空对话历史)"）即可，
+   * 不需要 LLM 总结。
+   */
+  compactAll(
+    conversationId: string,
+    summary: string,
+  ): Promise<Message[]>;
+
   load(conversationId: string): Promise<LoadedTranscript>;
   countTurns(conversationId: string): Promise<number>;
   exists(conversationId: string): Promise<boolean>;
