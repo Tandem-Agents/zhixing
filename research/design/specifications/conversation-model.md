@@ -1106,12 +1106,12 @@ interface BackgroundSpawnOptions {
 | 命令                     | 用途              | 备注                                              |
 | ---------------------- | --------------- | ----------------------------------------------- |
 | `/switch <id-or-name>` | 列出对话 + 切换到已有对话  | CLI 统一入口: typeahead async-enum 参数补全展示对话列表; 无参时显示编号列表; 支持 ID 精确匹配和名称模糊匹配 |
-| `/new <name>`          | 创建新对话并切换        | **当前 `/new` 是 `/clear` 别名,需要重新分配语义**            |
+| `/new <name>`          | 创建新对话并切换        | 创建新 conversation（新 ID + 新 meta + 新 transcript），不影响原对话      |
 | `/rename <new-name>`   | 重命名当前对话         |                                                 |
 | `/archive [id]`        | 归档(默认归档当前)      |                                                 |
 | `/delete <id>`         | 删除(不可删 default) | 移入回收站                                           |
 | `/history [n]`         | 查看当前对话最近 n 轮    |                                                 |
-| `/clear`               | 清空当前对话内存历史      | 写入 compact 行,旧消息仍在文件                            |
+| `/clear`               | 清空当前对话历史         | `compactAll` 原子重写 transcript：保留 conversationId + meta + 写一条 compact marker（placeholder summary），老 turns 不可恢复。与自动 compact / `/compact` 共享 `commitTurn(compactBefore)` 路径。需保留原对话历史用 `/new` 创建新对话 |
 | `/list`                | `/switch` 无参别名   | hidden; alias: `/conversations`,`/sessions`(deprecated) |
 
 **CLI UX 合并决策（S3.C 实施）：**
@@ -1139,11 +1139,11 @@ interface BackgroundSpawnOptions {
 - 实现方式：删除整个 `conversations/{id}/` 目录（meta.json + transcript.jsonl）
 - 未来可考虑软删除（移入回收站目录，TTL 后真删），但 MVP 先做硬删除 + 确认
 
-`**/new` 语义迁移**(S2.7 实施):
+**`/new` vs `/clear` 语义边界**:
 
-- 旧 `/new` = `/clear` 别名(清当前历史)
-- 新 `/new <name>` = 创建新对话
-- 不带参数的 `/new` 仍等同于 `/clear`(向后兼容);带参数则是新功能
+- `/new <name>` = 创建新 conversation（新 ID + 新 meta + 新 transcript），原对话保留在磁盘
+- `/clear` = 当前 conversation 内压缩（同 ID + 同 meta），通过 compactAll 原子重写 transcript 为 `header + [marker]`，老 turns 不可恢复
+- 选择依据：要保留原对话历史用 `/new`；要在当前对话内"清空重来"用 `/clear`
 
 ### 11.3 跨设备一致性
 
@@ -1519,9 +1519,11 @@ packages/cli/src/migrate/
 
 ### ADR-CM-009:`/new` 命令语义迁移
 
-**决策**:S2.7 阶段把 `/new` 的语义从"清空当前历史(等同 /clear)"改为"创建新对话";不带参数的 `/new` 仍保留旧行为(向后兼容)。
+**决策**:`/new` 语义从早期"清空当前历史(等同 /clear)"重新分配为"创建新 conversation"——与 `/clear` 完全分离。
 
-**理由**:`/new` 字面含义最匹配"创建新对话";旧的"清空"语义由 `/clear` 完整承担;无参数兼容路径避免破坏老用户肌肉记忆。
+**理由**:`/new` 字面含义最匹配"创建新对话";"清空当前对话"语义由 `/clear` 通过 `compactAll`（原子重写当前 transcript）完整承担。两命令职责互补:
+- `/new`:换一个新 conversation（新 ID + 新文件），原对话留在磁盘
+- `/clear`:在当前 conversation 内压缩（同 ID + 重写 transcript），老 turns 不可恢复
 
 ---
 
