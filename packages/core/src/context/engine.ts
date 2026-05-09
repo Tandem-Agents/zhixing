@@ -27,6 +27,7 @@ import type {
   ContextManagerInput,
   ContextManagerOutput,
   ITokenEstimator,
+  PinPredicate,
   TierThresholds,
 } from "./types.js";
 import { calculateBudget, calculateEffectiveWindow, type ModelBudgetInfo } from "./budget.js";
@@ -154,6 +155,10 @@ export class ContextEngine implements ContextManagerHook {
   async onTurnComplete(input: ContextManagerInput): Promise<ContextManagerOutput> {
     let { messages } = input;
     const { turnCount, abortSignal } = input;
+    // Pin 谓词由调用方注入；未传时 engine 用内部默认（保第一条 user message）。
+    // 同一谓词同时驱动 manageWindow.evictOldestTurns 与每个 strategy 的 context，
+    // 保证 Pin 在数据层的"驱逐 / 删除 / 摘要"三个动作上语义一致。
+    const isPinned: PinPredicate = input.isPinned ?? defaultIsPinned;
     let modified = false;
 
     // ── Step 1: WindowManager 级联（Tier 压缩 + 淘汰） ──
@@ -166,7 +171,7 @@ export class ContextEngine implements ContextManagerHook {
           this.config.modelInfo.maxOutputTokens,
         ),
         compactRatio: this.config.thresholds.compact,
-        isPinned: defaultIsPinned,
+        isPinned,
       });
       if (windowResult.modified) {
         messages = windowResult.messages;
@@ -229,6 +234,7 @@ export class ContextEngine implements ContextManagerHook {
         budget,
         currentTurn: turnCount,
         abortSignal,
+        isPinned,
       };
 
       let compacted = false;
@@ -272,6 +278,7 @@ export class ContextEngine implements ContextManagerHook {
           budget,
           currentTurn: turnCount,
           abortSignal,
+          isPinned,
         };
 
         if (!strategy.canApply(checkContext)) continue;

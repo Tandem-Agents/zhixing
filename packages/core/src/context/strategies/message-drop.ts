@@ -1,17 +1,16 @@
 /**
- * L2 压缩策略：早期消息丢弃
+ * 消息丢弃策略：物理删早期消息
  *
- * 优先级 P1，零成本 — 不需要 LLM 调用。
+ * 零成本 — 不需要 LLM 调用。
  *
  * 策略：
- * - 保留第一条 user 消息（原始意图，不可丢弃）
+ * - 通过 isPinned 谓词判定保护的 message 索引（默认保留 messages[0] 即首条意图锚）
  * - 保留最近 keepRecentTurns 轮完整对话
  * - 中间的消息全部丢弃
  * - 插入一条占位消息 "[前 X 轮对话已省略]"
  *
  * 对比 Claude Code：它有 microcompact + context collapse 两个层级。
  * 我们用单一策略实现，更简洁。
- * 如果 L1 (ToolResult 截断) 不够，L2 直接丢弃。
  */
 
 import type { Message } from "../../types/messages.js";
@@ -72,7 +71,7 @@ export class MessageDropStrategy implements CompactionStrategy {
   }
 
   async apply(context: CompactionContext): Promise<CompactionResult> {
-    const { messages } = context;
+    const { messages, isPinned } = context;
     const { keepRecentTurns } = this.config;
 
     // 按 turn 数切分（pair-aware），tool_use/tool_result 对不会被劈开
@@ -83,7 +82,7 @@ export class MessageDropStrategy implements CompactionStrategy {
 
     // toSummarize.length <= 1 说明前段最多只有意图锚（turn 0 的首条 user），
     // 压缩后 [firstMessage, placeholder(count=0), ...toPreserve] 无实际压缩
-    // 效果，等同于原逻辑的 keepFromIndex <= 1。
+    // 效果。
     if (toSummarize.length <= 1) {
       return {
         messages: messages as Message[],
@@ -93,7 +92,12 @@ export class MessageDropStrategy implements CompactionStrategy {
       };
     }
 
-    const firstMessage = messages[0] as Message;
+    // 是否保留首条意图锚 —— 由 Pin 谓词决定。
+    // 谓词未传时默认保留（与历史行为一致：messages[0] 是用户原始意图）。
+    // 任务系统接通后，Pin 谓词由 in_progress 任务的 turn 范围驱动，可能保留
+    // toSummarize 区间内的多个 turn —— 那种多 Pin 区间识别 + 保留的算法
+    // 与 task brief 同设计实现，本策略当前仅按"首条"轴消费谓词。
+    const pinFirst = isPinned?.(0) ?? true;
 
     // 丢弃的 turn 数 = toSummarize 中 distinct turn 号的最大值
     // （turn 0 是首条 user 意图锚，turn 1..maxSummarized 是被丢弃的完整 turn）
@@ -104,7 +108,9 @@ export class MessageDropStrategy implements CompactionStrategy {
     // 占位符统一走 system-meta：kind="dropped-turns" count="N"
     const placeholder = buildDroppedTurnsMessage(droppedTurnCount);
 
-    const newMessages = [firstMessage, placeholder, ...toPreserve];
+    const newMessages = pinFirst
+      ? [messages[0] as Message, placeholder, ...toPreserve]
+      : [placeholder, ...toPreserve];
 
     return {
       messages: newMessages,

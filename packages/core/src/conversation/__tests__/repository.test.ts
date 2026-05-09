@@ -295,3 +295,69 @@ describe("touch", () => {
     );
   });
 });
+
+// ─── 原子写 + per-id 锁 ───
+
+describe("writeMeta atomic + per-id lock", () => {
+  it("同 id 多次并发 writeMeta 串行化（最后一次写为最终结果）", async () => {
+    const repo = createRepo();
+    const conv = await repo.create({ name: "lock-test" });
+
+    // 并发触发多次 touch（每次改 lastActiveAt 后 writeMeta），期望全部完成且无 race
+    const ops = Array.from({ length: 20 }, () => repo.touch(conv.id));
+    await Promise.all(ops);
+
+    // 文件存在且 JSON 完整可解析（atomic write 保证）
+    const after = await repo.get(conv.id);
+    expect(after).not.toBeNull();
+    expect(after!.id).toBe(conv.id);
+    expect(after!.name).toBe("lock-test");
+  });
+
+  it("不同 id 并发 writeMeta 不互斥", async () => {
+    const repo = createRepo();
+    const a = await repo.create({ name: "alpha" });
+    const b = await repo.create({ name: "beta" });
+
+    // 跨 id 并发 touch，应能完成
+    await Promise.all([repo.touch(a.id), repo.touch(b.id), repo.touch(a.id)]);
+
+    expect((await repo.get(a.id))?.name).toBe("alpha");
+    expect((await repo.get(b.id))?.name).toBe("beta");
+  });
+
+  it("写入过程中无残留 .tmp 文件（atomic write 完成后 tmp 被 rename）", async () => {
+    const repo = createRepo();
+    const conv = await repo.create({ name: "atomic-test" });
+    await repo.touch(conv.id);
+
+    const dir = path.join(tmpDir, "conversations", conv.id);
+    const entries = await fs.readdir(dir);
+    expect(entries).toContain("meta.json");
+    // 仅有 meta.json，无 .tmp 残留
+    expect(entries.filter((e) => e.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("crash 模拟：手动留下 .tmp 后再写不影响最终结果", async () => {
+    const repo = createRepo();
+    const conv = await repo.create({ name: "crash-sim" });
+
+    const dir = path.join(tmpDir, "conversations", conv.id);
+    // 手动放一个孤立 .tmp（模拟上次 crash 留下的）
+    const orphanTmp = path.join(dir, "meta.json.orphan.tmp");
+    await fs.writeFile(orphanTmp, "stale", "utf-8");
+
+    // 后续写入正常完成
+    await repo.touch(conv.id);
+
+    const got = await repo.get(conv.id);
+    expect(got).not.toBeNull();
+    expect(got!.name).toBe("crash-sim");
+    // meta.json 是有效 JSON
+    const content = await fs.readFile(
+      path.join(dir, "meta.json"),
+      "utf-8",
+    );
+    expect(() => JSON.parse(content)).not.toThrow();
+  });
+});

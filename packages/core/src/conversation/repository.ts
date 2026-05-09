@@ -13,6 +13,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { getZhixingHome, toSafePathSegment } from "../paths.js";
+import { writeAtomic } from "../transcript/serializer.js";
 import type {
   Conversation,
   ConversationScope,
@@ -67,6 +68,13 @@ function isReservedId(id: string): boolean {
 
 export class ConversationRepository implements IConversationRepository {
   private readonly scope: ConversationScope;
+  /**
+   * Per-id meta 写入锁。同 id 的所有 writeMeta FIFO 串行；跨 id 不互斥。
+   *
+   * 锁尾链 + GC：每次把"当前任务完成后"作为新尾部，settle 后清理过期引用，
+   * 防止长寿进程的锁表单调增长。
+   */
+  private readonly metaLocks = new Map<string, Promise<unknown>>();
 
   constructor(scope: ConversationScope) {
     this.scope = scope;
@@ -196,14 +204,42 @@ export class ConversationRepository implements IConversationRepository {
     }
   }
 
+  /**
+   * 原子写 + per-id 锁串行化。
+   *
+   * 原子性：通过 writeAtomic（tmp + rename，含 Windows fallback）保单文件写入完整，
+   * 进程崩溃中点不会留下 corrupted JSON。
+   *
+   * 串行化：同 id 的多次 writeMeta（rename / archive / touch / 未来的 view-layer
+   * state 回写）通过锁尾链 FIFO 排队，保后写覆盖前写而非交叉。跨 id 并发不阻塞。
+   */
   private async writeMeta(conversation: Conversation): Promise<void> {
-    const dir = conversationDir(this.scope, conversation.id);
-    await fs.mkdir(dir, { recursive: true });
-    await fs.writeFile(
-      metaPath(this.scope, conversation.id),
-      JSON.stringify(conversation, null, 2),
-      "utf-8",
+    return this.withMetaLock(conversation.id, async () => {
+      await writeAtomic(
+        metaPath(this.scope, conversation.id),
+        JSON.stringify(conversation, null, 2),
+      );
+    });
+  }
+
+  private async withMetaLock<T>(
+    id: string,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const prev = this.metaLocks.get(id) ?? Promise.resolve();
+    const result = prev.then(fn);
+    const tail = result.then(
+      () => {},
+      () => {},
     );
+    this.metaLocks.set(id, tail);
+    // 过期锁 GC —— 只在当前 tail 仍是末尾时才清
+    tail.then(() => {
+      if (this.metaLocks.get(id) === tail) {
+        this.metaLocks.delete(id);
+      }
+    });
+    return result;
   }
 
   private async requireConversation(id: string): Promise<Conversation> {

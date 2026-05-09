@@ -117,6 +117,20 @@ export type CompactLLMFn = (
   opts?: { abortSignal?: AbortSignal },
 ) => Promise<string>;
 
+// ─── Pin 谓词（窗口管理 + 策略共用） ───
+
+/**
+ * 判断给定 message 索引是否被 Pin 保护。
+ *
+ * Pin 来源由调用方注入：
+ * - 数据层 manageWindow 内置默认：保第一条 user message（idx === 0）
+ * - 任务系统驱动（未来扩展）：in_progress 任务关联的 turn 范围对应的 message indices
+ *
+ * Pin 内 message 不被 manageWindow eviction 物理驱逐 / MessageDrop 物理删除 /
+ * LLMSummarize 摘要替代。
+ */
+export type PinPredicate = (messageIndex: number) => boolean;
+
 // ─── 压缩策略 ───
 
 export interface CompactionContext {
@@ -131,6 +145,14 @@ export interface CompactionContext {
    * 未设置时策略按无限制运行（测试 / 手动 /compact 场景）。
    */
   readonly abortSignal?: AbortSignal;
+  /**
+   * Pin 谓词 —— 判断 message 索引是否受保护。
+   *
+   * 由 engine 注入：caller 通过 ContextManagerInput.isPinned 提供，
+   * 否则 engine 用内部默认（保第一条）。策略据此跳过 Pin 内 message
+   * 的修改/删除/摘要。
+   */
+  readonly isPinned?: PinPredicate;
 }
 
 export interface CompactionResult {
@@ -269,6 +291,14 @@ export interface ContextManagerInput {
    * 由策略的 LLM 调用透传给 provider。未设置时策略无限制运行。
    */
   readonly abortSignal?: AbortSignal;
+  /**
+   * Pin 谓词 —— 调用方决定哪些 message 索引受保护，不被 eviction/删/摘要。
+   *
+   * 未传则 engine 用内部默认（保第一条 user message，与 v1.2 行为一致）。
+   * 任务系统接通后（in_progress 任务驱动 Pin），调用方传入 in_progress
+   * turn 范围映射到 message indices 的谓词。
+   */
+  readonly isPinned?: PinPredicate;
 }
 
 export interface ContextManagerOutput {

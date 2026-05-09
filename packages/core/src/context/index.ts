@@ -14,6 +14,7 @@ export type {
   ContextManagerInput,
   ContextManagerOutput,
   ITokenEstimator,
+  PinPredicate,
   TierThresholds,
 } from "./types.js";
 export { DEFAULT_THRESHOLDS, MAX_OUTPUT_RESERVE } from "./types.js";
