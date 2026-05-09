@@ -36,7 +36,7 @@ describe("resolveProvider", () => {
       expect(resolved.baseUrl).toBe("https://api.deepseek.com");
       expect(resolved.protocol).toBe("openai-compatible");
       expect(resolved.apiKey).toBe("sk-test-key");
-      expect(resolved.defaultModel).toBe("deepseek-chat");
+      expect(resolved.defaultModel).toBe("deepseek-v4-flash");
     });
 
     it("用户在 credentials 覆盖预设的 baseUrl", () => {

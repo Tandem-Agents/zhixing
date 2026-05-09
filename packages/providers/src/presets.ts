@@ -12,7 +12,27 @@ export const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
     name: "DeepSeek",
     baseUrl: "https://api.deepseek.com",
     protocol: "openai-compatible",
-    defaultModel: "deepseek-chat",
+    defaultModel: "deepseek-v4-flash",
+    knownModels: [
+      // 推荐默认 —— 工具调用 / agent 任务，性价比高（输入 1元/M、输出 2元/M）。
+      {
+        id: "deepseek-v4-flash",
+        name: "DeepSeek V4 Flash",
+        contextWindow: 1_000_000,
+        maxOutputTokens: 384_000,
+        supportsTools: true,
+      },
+      // 进阶版 —— 支持思考模式（默认开），适合复杂推理 / 编码 / 多步规划；
+      // 输入 3元/M、输出 6元/M，约 v4-flash 的 3 倍。
+      {
+        id: "deepseek-v4-pro",
+        name: "DeepSeek V4 Pro",
+        contextWindow: 1_000_000,
+        maxOutputTokens: 384_000,
+        supportsTools: true,
+        supportsThinking: true,
+      },
+    ],
     quirks: {
       supportsTools: true,
       supportsStreamUsage: true,
@@ -38,15 +58,15 @@ export const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
       {
         id: "deepseek-ai/DeepSeek-V4-Flash",
         name: "DeepSeek V4 Flash",
-        contextWindow: 64_000,
-        maxOutputTokens: 8_192,
+        contextWindow: 1_000_000,
+        maxOutputTokens: 384_000,
         supportsTools: true,
       },
       {
         id: "Pro/MiniMaxAI/MiniMax-M2.5",
         name: "MiniMax M2.5 Pro",
-        contextWindow: 64_000,
-        maxOutputTokens: 8_192,
+        contextWindow: 1_000_000,
+        maxOutputTokens: 384_000,
         supportsTools: true,
       },
     ],

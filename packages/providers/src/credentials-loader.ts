@@ -34,6 +34,7 @@ const EMPTY_CREDENTIALS: ZhixingCredentials = {};
 const TEMPLATE_CREDENTIALS: ZhixingCredentials = {
   providers: {
     siliconflow: { apiKey: "" },
+    deepseek: { apiKey: "" },
   },
   channels: {
     feishu: { appId: "", appSecret: "" },

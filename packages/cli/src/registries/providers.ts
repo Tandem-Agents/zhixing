@@ -5,7 +5,7 @@
  *   - PROVIDER_PRESETS：协议层全集。所有可解析的 provider（含未来未上线的）。
  *   - 此 registry：UI 层白名单。当前曝光给用户选择的子集。
  *
- * 当前仅曝光硅基流动——其它已 preset 但暂不 UI 化的 provider 不在此处。
+ * 当前曝光：硅基流动 / DeepSeek 官方——其它已 preset 但暂不 UI 化的 provider 不在此处。
  *
  * 增加 provider 流程：
  *   1. 这里加一项（label + id + 描述 + 文档链接）
@@ -45,6 +45,16 @@ export const SUPPORTED_PROVIDERS: SupportedProvider[] = [
     apiKeyExample: "sk-xxxxxxxxxxxxxxxx",
     docUrl: "https://cloud.siliconflow.cn/account/ak",
     modelListDocUrl: "https://cloud.siliconflow.cn/models",
-    modelExample: "deepseek-ai/DeepSeek-V3",
+    modelExample: "deepseek-ai/DeepSeek-V4-Flash",
+  },
+  {
+    id: "deepseek",
+    label: "DeepSeek 官方",
+    description: "OpenAI 兼容协议 · 官方直连",
+    apiKeyHint: "用于调用 DeepSeek 官方 API。",
+    apiKeyExample: "sk-xxxxxxxxxxxxxxxx",
+    docUrl: "https://platform.deepseek.com/api_keys",
+    modelListDocUrl: "https://api-docs.deepseek.com/zh-cn/quick_start/pricing",
+    modelExample: "deepseek-v4-flash",
   },
 ];
