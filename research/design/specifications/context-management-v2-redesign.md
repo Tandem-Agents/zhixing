@@ -170,11 +170,11 @@ v2 后**只剩单一权威路径 A**（不动），加上现有 `TurnContextInje
 | Discoverable | **不暴露** | 永远列出完整 hints（含 systemPromptHints） | profile 内但 7 轮内未活跃 |
 | Cold | **不暴露** | 不出现 | profile 排除 / sub-agent 隔离配置 |
 
-**关键不变量**：`tool-usage` 段文本在 conversation 期间 byte-equal——profile 决定的非 Cold 工具集合是固定的；该段输出**所有非 Cold 工具的完整 hints**（含 `systemPromptHints` 详细使用引导，如 `read 后总应检查关键区域` 等），但**不含 schema**（schema 只在 API `tools[]` 数组）。capabilityState 演化只影响 API `tools[]` 数组动态。LLM 视角：通过 system prompt 知道工具存在 + 详细用法概念；通过 API `tools[]` 知道当前哪些工具能直接调（含完整 schema）；调 Discoverable 工具时无 schema，需猜参数 → 触发自动升级 → 升为 Hot 后重发 LLM call。LLM 视角的 system prompt cache 完全不受 capabilityState 演化影响。
+**关键不变量**：`tool-usage` 段文本在 conversation 期间 byte-equal——profile 决定的非 Cold 工具集合是固定的；该段输出**所有非 Cold 工具的完整 hints**（含 `systemPromptHints` 详细使用引导，如 `read 后总应检查关键区域` 等），但**不含 schema**（schema 只在 API `tools[]` 数组）。capabilityState 演化只影响 API `tools[]` 数组动态。LLM 视角：通过 system prompt 知道工具存在 + 详细用法概念；通过 API `tools[]` 知道当前哪些工具能直接调（含完整 schema）；调 Discoverable 工具时 cli 静默升级到 Hot 并**直接执行**（参数从 hints 语义推断），LLM 看到的就是普通 tool_result —— 若参数猜错，LLM 在下一轮（此时 tools[] 已含完整 schema）凭 error tool_result 自修正再调一次，与"调用-报错-修正"的常规循环同形态。LLM 视角的 system prompt cache 完全不受 capabilityState 演化影响。
 
 ### 4.2 LLM ↔ 程序双向契约
 
-- LLM 直接调用 Discoverable 工具（API `tools[]` 中没有，但 system prompt 提示存在）→ cli 拦截 → 静默升级 Discoverable → Hot → 重发 LLM call（含完整 schema）→ 透明转发结果
+- LLM 直接调用 Discoverable 工具（API `tools[]` 中没有，但 system prompt 提示存在）→ cli 拦截 → 静默升级 Discoverable → Hot → **直接用 LLM 提交参数执行** → 返回 tool_result（参数错时 LLM 下一轮凭完整 schema 自修正再调）→ 0 轮额外延迟、无双倍计费
 - LLM 用 `request_capabilities` 元工具批量预热（声明"我接下来要用 X / Y / Z 工具"）→ cli 升级到 Hot
 - LLM 视角永远只有一个简单契约："system prompt 列出的工具都能直接调"
 
@@ -623,14 +623,14 @@ LLM 通过 transplanted `SYSTEM_META_PROMPT_SECTION`（always-on 静态 segment 
 | `ToolResultAnchorStage` | Stage 1（视图层语义锚化；运行在数据层 tier-compressor 输出之上） |
 | `MessageWindowStage`（Q3） | Stage 2：滑窗截取 + 任务纪要触发（同步阻塞调用 TaskBriefSummarizer） |
 | `ToolSchemaCompilerStage` | Stage 3：编排 API `tools[]` 数组（capabilityState 驱动），不动 system prompt 文本 |
-| `capabilityState` 状态机（Always / Hot / Discoverable / Cold + 7 轮 LRU） | 状态：每轮更新；持久化到 conversation meta |
+| `capabilityState` 状态机（Always / Hot / Discoverable / Cold + 7 轮 LRU） | 状态：每轮更新；session-scoped 不持久化（重启 / 切换 conversation 走 rebuildCapabilityFromHistory，从 transcript 历史现学现用，避免 snapshot 与 transcript 双源不一致） |
 | `taskBriefState`（Q3） | 状态机：21 cap，超出直接丢弃；持久化到 conversation meta |
 | `migrationSummaryState`（Q3） | 状态：摘要 + 时间戳 + 已运行轮次计数；持久化到 conversation meta |
 | `taskListState` Pin 来源同步 | orchestrator 持有；记录 in_progress 任务的 turn 范围；构造 `isPinned: (messageIndex) => boolean` callback 注入数据层与视图层 |
 | **`ActiveTaskListProvider`** (Q2) | TurnContextProvider 实现：读 `taskListState`，注入"当前任务列表"；与 `TimeProvider` / `SchedulerProvider` 同模式注册到 `TurnContextInjector` |
 | **`TaskBriefsProvider`** (Q3) | TurnContextProvider 实现：读 `taskBriefState`，注入"已完成任务纪要（最近 21 个）"；同上注册 |
 | **`MigrationSummaryProvider`** (Q3) | TurnContextProvider 实现：读 `migrationSummaryState`，K 轮内 `shouldInject()` 返回 true 时注入"历史对话摘要"；同上注册 |
-| 自动升级中间件（Discoverable → Hot 静默升级 + 重发 LLM call） | 工具调用拦截 |
+| 自动升级中间件（Discoverable → Hot 静默升级 + 直接执行） | 工具调用拦截 |
 | `request_capabilities` 元工具 | Always 层；LLM 批量预热 |
 | 事实锚生成器（per tool: read / bash / grep / glob / edit / write / web_fetch） | Stage 1 内部 |
 | **`TaskBriefSummarizer` 独立 strategy 类**（Q3） | 新 strategy class（非 `LLMSummarizeStrategy` 复用）；独立 prompt（一行 ledger 格式）+ 独立 validator；只复用 `createCompactionFlush` LLM call helper 与 `splitMessagesPairAware` split helper；Stage 2 内部同步调用；失败重试 3 次（指数退避），仍失败则 emit 事件 + 跳过纪要生成 |
@@ -720,11 +720,11 @@ LLM 通过 transplanted `SYSTEM_META_PROMPT_SECTION`（always-on 静态 segment 
 - 新建 `capabilityState` 模块（Always / Hot / Discoverable / Cold + 7 轮 LRU）
 - 实现 `ToolSchemaCompilerStage`，接入 ContextCompiler（位置 3）：编排 API `tools[]` 数组（Always + Hot 完整 schema；Discoverable / Cold 不暴露），**不动 system prompt 文本**
 - `system-prompt.ts:buildToolUsage` 段保持 byte-equal——永远输出 profile 内所有非 Cold 工具的**完整 hints**（含 `systemPromptHints` 详细使用引导，约 200-300 行，参考 `system-prompt.ts:247-303` 当前实现）；profile 决定的稳态集合，capabilityState 演化不影响该段文本
-- 实现自动升级中间件：拦截 LLM 调用 Discoverable 工具 → 静默升级到 Hot → 重发 LLM call（含完整 schema） → 透明返回结果
+- 实现自动升级中间件：拦截 LLM 调用 Discoverable 工具 → 静默升级到 Hot → **用 LLM 提交参数直接执行** → 透明返回结果（参数错时由 LLM 在下一轮凭完整 schema 自修正，与常规 error→fix 循环同形态，无额外延迟、无双倍 input 计费）
 - 实现 LRU 降级（onTurnComplete hook）
 - 实现 `request_capabilities` 元工具（Always 层）
-- 已恢复对话的 capabilityState 初始化策略（从历史 tool_use 重建 Hot 集，最近 7 轮内）
-- capabilityState 持久化到 conversation meta
+- 启动 / 切换 conversation / 重启 cli 时由 `rebuildCapabilityFromHistory` 从 transcript 历史 tool_use 重建 Hot 集（最近 7 个含 tool_use 的 assistant message 内的工具升级到 hot）
+- capability state **不持久化**（与 innovation 重置规则中"cli session 重启 → 新 process 全新开始"对齐）—— tool_use 历史的权威源是 transcript，capability 是其衍生视图，单源避免双源不一致；rebuild 的 hot 集合等价于持久化 snapshot 的信息含量，但跨 process 不携带 session 状态。/clear / /switch / 重启走 reset + rebuild 同一路径
 
 **风险**: 中（LLM 对 system prompt tool-usage 文本中"工具存在"提示的识别准确度需实测；自动升级 +1 轮延迟；冷启动后已恢复对话的 Hot 集重建准确度）。
 **收益**: API `tools[]` 短对话场景 96% schema 节省；任务稳态后 Hot 集稳定 tools cache 仍可命中；system prompt cache 完全不受影响。
@@ -788,7 +788,7 @@ LLM 通过 transplanted `SYSTEM_META_PROMPT_SECTION`（always-on 静态 segment 
 | LLM 不写 task_list | 中 | 数据层保留 user/assistant reasoning；用户 `/task` 命令；任务边界 ② ③ 兜底 |
 | Discoverable 工具 LLM 调用准确度 | 中 | system prompt tool-usage 段保留所有非 Cold 工具完整 hints（byte-equal）→ LLM 知工具用法概念但无 schema → 调用时参数靠猜 → 自动升级中间件兜底（详见 §4.2）；Phase 1 实测调用准确度 |
 | 事实锚信息丢失（grep multi-target） | 中 | recall_history（受 compact frontier 约束）+ 锚格式预留路径列表 |
-| Capability 自动升级 +1 轮延迟 + 2× input billing | 中 | 重发 LLM call 等同 2× input billing（system prompt cache 仍命中但 tools[] cache 因变更失效）；Phase 1 实测；可预热（`request_capabilities`）减少首次延迟；**max-replay cap = 1**（每 turn 最多 1 次重发，超过返回 unknown tool error 让 LLM 自然演进，避免理论无限升级循环） |
+| Discoverable 工具首调用参数猜错率 | 低-中 | hints 段提供语义引导（hint 中含参数名 / 用例）；强模型几乎不错；弱模型错时按常规 error→fix 循环（下一轮 tools[] 已含完整 schema，LLM 凭 error tool_result + schema 自修正再调）；token 成本 ≤ 重发 LLM call 路径，且语义统一为"调用-报错-修正"，无 replay 例外路径 |
 | 已恢复对话 capabilityState 重建 | 中 | 从历史 tool_use 重建（最近 7 轮内） |
 | Phase 0 清理 + 改造 + Q1.B 范围大 | 中-高 | 死代码 grep 已确认；分多 PR 落地；先 transplant SYSTEM_META 后删 LayerAssembler；calibration / writeMeta / Q1.B 测试覆盖 |
 | Q1.B Anchor 在 tier-compressor T2/T3 范围内 metadata 提取受限 | 低-中 | tier-compressor T1（distance ≤ 2）范围内 Q1.B 能提取精确 metadata；T2 范围（distance 3-8，2000 chars）能提取部分；T3+（500 chars / skeleton）退化为透传或弱 anchor。Phase 0 实测后评估是否调 T1 阈值匹配 Q3 滑窗 N=12 以扩大 Q1.B 高质量范围 |
@@ -831,13 +831,15 @@ LLM 通过 transplanted `SYSTEM_META_PROMPT_SECTION`（always-on 静态 segment 
 16. **`ConversationRepository.writeMeta` 高频写入是否需要 batch / debounce**：capability LRU 每轮更新一次时间戳是否值得每轮 writeMeta；spec 阶段评估
 17. **TaskBriefSummarizer 多任务一轮 close 时的调度策略**：单次 `task_list.set([...])` 把多项 in_progress→completed 时，并发上限默认 3（避免 secondary role 雪崩）；spec 阶段定具体上限与 batch 一次 LLM 摘多任务的可行性
 18. **`/clear` 与 in-flight LLM call 的 ordering 语义**：用户 `/clear` 时若有 streamLLMCall 未完成或 StateDelta 未应用——abort 当前 / 等其完成 / 强制取消；推荐 abort + 丢弃未应用 StateDelta，spec 阶段定
-19. **Capability 自动升级的 max-replay cap 行为细节**：默认 1（每 turn 最多 1 次重发）；spec 阶段定细节——重发时机（用户感知的 cli 流式输出如何处理被 abort 的第一次部分输出）/ 重发后的 capabilityState 提交时机（升级提交前 abort 是否回滚）
+19. ~~Capability 自动升级的 max-replay cap 行为细节~~ —— 决议：自动升级走"静默升级 + 直接执行"（与 innovation §4.8 / §4.10 原文对齐），不引入 replay 概念。Discoverable 工具首调用参数猜错由常规 error→fix 循环消化（下一轮 LLM 凭完整 schema 自修正），与"调用-报错-修正"同形态。无 replay-cap、无双倍 input billing、无 +1 轮延迟。
 20. **`isPinned` callback 在 `splitMessagesPairAware` 中的实现**：Pin 内 turn 不进 summarize 范围意味着 split 算法需要识别"非连续 turn 段"——具体算法 Phase 2 与 task brief 同设计实现
 21. **TaskBriefSummarizer 重试策略的具体参数**：3 次重试的具体退避时长；失败后是否记录到磁盘以便后续 manual recovery
 22. **Q3 关键事实保存到 `memory` 工具的 category 选择**：现有 categories（`profile` / `person` / `skill`）；任务关键事实存哪类？由 LLM 基于 memory tool description 自主决定 vs spec 阶段明示规则。注意 memory 工具 `subAgentSafe: false`——sub-agent 无法调，关键事实保存只在 main agent context 发生
 23. **estimator calibration baseline 切换的初始系数与平滑策略**：从 v1.2 校准结果迁移；rendered 与 state.messages 估算差异大时如何避免 calibration 系数震荡
 24. **`TurnContextInjector` 历史 user message 中残留 `<turn-context>` 块的处理**：当前 `inject()` 仅 strip 最新 user message 的旧 turn-context；历史 user messages 中残留的 turn-context 是否需要 view-layer 主动清理（vs 接受作为对话痕迹）；spec 阶段确认
 25. **tier-compressor 阈值与 Q1.B 协作的最优配置**：当前 T1=2 / T2=8 / T3=30 / T4>30 默认。Q1.B Anchor 在 T1 范围内能提取精确 metadata（filename / line count / exit code），T2/T3 范围内只能提取部分。是否调高 T1（如匹配 Q3 滑窗 N=12）扩大 Q1.B 高质量范围；权衡 state.messages 体积增长与 Q1.B 视图质量；Phase 0/2 实测后定
+26. **internal-state BoundaryType 自描述化改造（独立项）**：当前内部工具（memory / schedule / recall_history / request_capabilities）通过 `core/security/classifier.ts:createDefaultClassifier` 硬编码 `composite.registerContext(name, internalClassifier)` 接入安全分类；每加一个内部工具都要回头改 core，违反"工具自描述边界"模式（read / write 等通过 `boundaries: [{ boundaryType, access }]` 自描述）。改造方案：扩 `BoundaryType` 加 `"internal-state"`，让 `BoundaryImpactClassifier` 把该 boundaryType 直接映射为 `internal` 操作类；4 个工具改用 `boundaries: [{ boundaryType: "internal-state", access: "read"/"write", dynamic: false }]` 自描述，删除 classifier.ts 硬编码。改造后未来内部工具零改 core。**作为独立评估项**（不绑特定 Phase，不属 Q1.A/Q2/Q3 范围）—— 与 Q1.A capability 工具引入的 request_capabilities 漏注册 bug 同根，但全面架构改造影响 4 个工具 + classifier + 测试，独立任务推进。
+27. **`capabilityState.advanceTurn` 调用归属重构（独立项）**：当前 advanceTurn 由 orchestrator runtime 在 agent-loop generator done 分支调一次，pre-flight error 路径走 `buildPreFlightError` 快速 return 不进 done 分支 → advanceTurn 不被调，与 cli `state.turnCounter++` 不同步（cli 端无条件 ++）。影响：context overflow 异常路径下 capability LRU 偶尔少推进 1 轮，对降级行为影响微小但语义上"每次 user 发消息 = 1 turn"被打破。改造方案：把 advanceTurn 调用 ownership 移到 cli 端 commitTurn 之后（与 turnCounter 同位置），runtime 暴露 `agent.advanceCapabilityTurn()` 方法供 cli 显式调用。所有 turn 边界（成功 / max_turns / aborted / error / pre-flight error）由 cli 单点驱动，与 turnCounter 严格对齐。
 
 ---
 

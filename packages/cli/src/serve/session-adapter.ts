@@ -18,6 +18,7 @@
 import {
   abortWithReason,
   createInterruptController,
+  rebuildCapabilityFromHistory,
   userMessage,
   type AbortReason,
   type Message,
@@ -218,6 +219,15 @@ export function createCliRuntimeFactory(opts: RuntimeFactoryOptions): RuntimeFac
   return {
     async create(sessionId, initialMessages) {
       const agentRuntime = await opts.createAgentRuntime(sessionId);
+      // 工具能力分层接续 —— 与 cli/repl 启动路径同语义。
+      // capability 是 session-scoped 不持久化，重启 / 接续 conversation 时
+      // 从 transcript 历史 rebuild：让用户上次用过的工具继续以完整 schema 暴露，
+      // 避免冷启动 schema 全空导致弱模型首次工具调猜错参数。
+      // initialMessages 缺省（极简启动 / 单测）→ rebuild 调用是 no-op。
+      rebuildCapabilityFromHistory(
+        agentRuntime.capabilityState,
+        initialMessages ?? [],
+      );
       return createServerRuntimeAdapter(sessionId, agentRuntime, initialMessages);
     },
   };

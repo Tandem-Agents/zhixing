@@ -45,6 +45,7 @@ import {
   type ArgSchema,
   Scheduler,
   createEventBus,
+  rebuildCapabilityFromHistory,
   type SchedulerEventMap,
 } from "@zhixing/core";
 import { describeProxy, type ProxyDescription } from "@zhixing/network";
@@ -374,6 +375,14 @@ function buildSlashCommands(
           state.turnCounter = loaded.turnCount;
           state.lastToolEndCount = 0;
           state.convRepo.touch(state.conversationId).catch(() => {});
+          // 切换 conversation 时接续工具能力分层 —— 与启动时同路径：
+          // reset 清掉旧 conversation 的 hot 集（runtime.capabilityState 是 cli
+          // session 单例，引用稳定），从新 conversation 的 transcript 历史 rebuild。
+          state.agent.capabilityState.reset();
+          rebuildCapabilityFromHistory(
+            state.agent.capabilityState,
+            loaded.messages,
+          );
           cliWriter.line(
             chalk.dim(
               `\n  已切换到 ${chalk.cyan(target.name)}（${loaded.turnCount} 轮对话）\n`,
@@ -862,6 +871,18 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     });
     conversationId = conversation.id;
   }
+
+  // 工具能力分层接续 —— 重启 cli 后让上次 session 用过的 hot 工具继续以完整
+  // schema 暴露，避免冷启动 schema 全空。
+  //
+  // 信息源单一：transcript 历史。capability 是 session-scoped 运行时状态，**不**
+  // 持久化跨 process（设计哲学：避免 snapshot 与 transcript 双源不一致）。
+  // 重启 / 切换 conversation / /clear 全部走 rebuild 同一路径：
+  //   - 扫最近若干个含 tool_use 的 assistant，把那些工具升级到 hot
+  //   - 新建 conversation 下 messages 为空 → no-op，不破坏默认行为
+  //   - 长 compact 后 frontier 之前的 tool_use 信息被压缩，rebuild 自然遗忘，
+  //     与对话历史的认知遗忘对齐（一致性优于持久化连续性）
+  rebuildCapabilityFromHistory(session.runtime.capabilityState, messages);
 
   // 启动告警先于 chrome——异常状态需立即吸引注意；无告警时返回空数组，
   // 视觉序列退化为"shell prompt → chrome"无空行干扰

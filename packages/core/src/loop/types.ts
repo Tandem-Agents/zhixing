@@ -26,6 +26,7 @@ import type {
   ContextManagerHook,
   ITokenEstimator,
 } from "../context/types.js";
+import type { CapabilityState } from "../context/capability/index.js";
 import type { ContextCompiler } from "../context/compiler/index.js";
 import type { TurnContextInjector } from "../context/turn-context.js";
 import type { CompactMarker, Turn } from "../transcript/types.js";
@@ -113,6 +114,15 @@ export interface AgentLoopParams {
    * 编排后的 messages 注入到正确位置。
    */
   turnContextInjector?: TurnContextInjector;
+  /**
+   * 工具能力分层状态 —— 接通后 agent-loop 在每次 tool_use 命中时调
+   * recordToolUse(name)，让 discoverable 工具静默升级到 hot；本字段缺省时
+   * 不做任何能力推进（向后兼容，行为同 v1）。
+   *
+   * 与 contextCompiler 中的 ToolSchemaCompilerStage 配合使用：stage 按 layerOf
+   * 过滤 tools[]；recordToolUse 推进 layer；两者共享同一 CapabilityState 实例。
+   */
+  capabilityState?: CapabilityState;
   /**
    * Token 估算器 —— 仅用于 per-LLM-call 校准。
    *

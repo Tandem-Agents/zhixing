@@ -32,6 +32,24 @@ export const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
     name: "硅基流动",
     baseUrl: "https://api.siliconflow.cn/v1",
     protocol: "openai-compatible",
+    defaultModel: "deepseek-ai/DeepSeek-V4-Flash",
+    knownModels: [
+      // 推荐默认 —— 工具调用 / agent 任务实测协议遵循度好。
+      {
+        id: "deepseek-ai/DeepSeek-V4-Flash",
+        name: "DeepSeek V4 Flash",
+        contextWindow: 64_000,
+        maxOutputTokens: 8_192,
+        supportsTools: true,
+      },
+      {
+        id: "Pro/MiniMaxAI/MiniMax-M2.5",
+        name: "MiniMax M2.5 Pro",
+        contextWindow: 64_000,
+        maxOutputTokens: 8_192,
+        supportsTools: true,
+      },
+    ],
     quirks: {
       supportsTools: true,
       supportsStreamUsage: true,

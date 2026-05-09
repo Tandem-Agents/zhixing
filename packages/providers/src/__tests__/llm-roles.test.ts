@@ -397,10 +397,12 @@ describe("createProviderRoles · 实例化与角色装配", () => {
     });
   });
 
-  it("网关型 provider（无 preset）走空 declaredModels —— catalog 兜底交给 protocol-default", () => {
+  it("网关型 provider（preset 无 knownModels）走空 declaredModels —— catalog 兜底交给 protocol-default", () => {
+    // minimax preset 当前未声明 knownModels（preset 仅含 baseUrl/protocol/quirks），
+    // 适合验证"preset 存在但无 catalog 时 declaredModels 为空"的兜底路径。
     writeFixture(
-      { llm: { main: { provider: "siliconflow", model: "Pro/MiniMaxAI/MiniMax-M2.5" } } },
-      credsFor({ siliconflow: "sk-sf" }),
+      { llm: { main: { provider: "minimax", model: "MiniMax-Text-01" } } },
+      credsFor({ minimax: "sk-mm" }),
     );
     const { roles, resolvedRoles } = createProviderRoles({ env: envFor() });
 

@@ -218,7 +218,7 @@ describe("loadConfig", () => {
 
     expect(fs.existsSync(configPath)).toBe(true);
     expect(config.llm?.main?.provider).toBe("siliconflow");
-    expect(config.llm?.main?.model).toBe("Pro/MiniMaxAI/MiniMax-M2.5");
+    expect(config.llm?.main?.model).toBe("deepseek-ai/DeepSeek-V4-Flash");
     // 模板不含 providers 字段（已删除——provider 资源在 credentials.json）
     expect((config as Record<string, unknown>).providers).toBeUndefined();
     // messaging 空对象（启用列表，用户用时手添）

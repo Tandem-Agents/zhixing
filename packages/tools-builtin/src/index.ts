@@ -12,4 +12,9 @@ export {
   createRecallHistoryTool,
   type RecallHistoryDeps,
 } from "./recall-history.js";
+export {
+  createRequestCapabilitiesTool,
+  type RequestCapabilitiesDeps,
+  type RequestCapabilitiesPromoteResult,
+} from "./request-capabilities.js";
 export { truncateResult, addLineNumbers, resolveToolPath } from "./utils.js";

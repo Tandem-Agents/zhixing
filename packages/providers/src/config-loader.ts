@@ -236,7 +236,7 @@ function buildConfigTemplate(workspaceRoot: string): string {
     // main（必填）：主对话模型，所有用户面对的输出由它产生
     "main": {
       "provider": "siliconflow",
-      "model": "Pro/MiniMaxAI/MiniMax-M2.5"
+      "model": "deepseek-ai/DeepSeek-V4-Flash"
     }
 
     // secondary（选填，建议配置）：用于上下文净化任务——压缩历史 / WebFetch 蒸馏 /
@@ -244,7 +244,7 @@ function buildConfigTemplate(workspaceRoot: string): string {
     // 缺省时用 main 兜底，仍保留调用上下文隔离价值（防 prompt injection 污染主对话），
     // 但放弃任务专门化和 cost 优化。建议配一个轻量、便宜的模型。
     // 取消下面这行注释并填入 provider/model 启用（provider 需在 credentials.providers 中存在）：
-    // ,"secondary": { "provider": "siliconflow", "model": "deepseek-ai/DeepSeek-V3.1" }
+    // ,"secondary": { "provider": "siliconflow", "model": "deepseek-ai/DeepSeek-V4-Flash" }
   },
 
   // ─── 工作目录 ───

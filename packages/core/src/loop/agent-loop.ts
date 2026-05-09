@@ -397,6 +397,17 @@ export async function* runAgentLoop(
         });
       }
 
+      // ── 工具能力激活（自动升级路径） ──
+      // 在执行前对每个 tool_use 调 recordToolUse —— discoverable 工具会被静默升级到
+      // hot（下一次 LLM call 暴露完整 schema）；always / hot 仅刷新 lastUseTurn 续期；
+      // cold / 未注册自动 no-op 由 executeToolCalls 现有 toolMap 路径处理。
+      // 不引入额外 LLM round，与 spec "直接执行 + 错误自修正循环" 路径对齐。
+      if (params.capabilityState) {
+        for (const call of toolCalls) {
+          params.capabilityState.recordToolUse(call.name);
+        }
+      }
+
       // ── Step 2: Execute tools ──
       const toolExecutorResult = yield* executeToolCalls({
         toolCalls,

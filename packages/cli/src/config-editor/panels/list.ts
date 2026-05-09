@@ -3,7 +3,7 @@
  *
  * 两种 list 共用同一渲染 + 导航逻辑，items 由 descriptor.kind 决定来源：
  *   - provider-list：SUPPORTED_PROVIDERS（model role 选服务商）
- *   - model-list：preset.defaultModel + credentials.providers.<id>.models + [+ 添加自定义]
+ *   - model-list：preset.defaultModel + preset.knownModels[].id + credentials.providers.<id>.models + [+ 添加自定义]
  *
  * 导航：↑↓ 选 / Enter 进入 / Esc pop / Ctrl+C 退出
  */
@@ -89,12 +89,22 @@ function buildModelListMeta(
   const preset = getPreset(descriptor.providerId);
   const userModels = readProviderEntry(state, descriptor.providerId)?.models ?? [];
 
-  // 合并：preset 默认 + 用户自定义；去重保序
+  // 合并：preset 默认 + preset.knownModels + 用户自定义；去重保序
+  // 顺序：defaultModel 居首（标"预设默认"）→ 其它 preset.knownModels（标"推荐"）→ 用户自定义
   const seen = new Set<string>();
+  const knownIds = new Set<string>();
   const allModels: string[] = [];
   if (preset?.defaultModel) {
     allModels.push(preset.defaultModel);
     seen.add(preset.defaultModel);
+    knownIds.add(preset.defaultModel);
+  }
+  for (const m of preset?.knownModels ?? []) {
+    knownIds.add(m.id);
+    if (!seen.has(m.id)) {
+      allModels.push(m.id);
+      seen.add(m.id);
+    }
   }
   for (const m of userModels) {
     if (!seen.has(m)) {
@@ -110,20 +120,25 @@ function buildModelListMeta(
     currentRole?.provider === descriptor.providerId
       ? currentRole?.model
       : undefined;
-  const items: ListItem[] = allModels.map((modelId) => ({
-    label: modelId,
-    description: modelId === preset?.defaultModel ? "预设默认" : undefined,
-    current: modelId === userSelectedModel,
-    onEnter: (s) => {
-      const next = writeModelRole(
-        s,
-        descriptor.role,
-        currentRole?.provider ?? descriptor.providerId,
-        modelId,
-      );
-      return { type: "pop", state: next };
-    },
-  }));
+  const items: ListItem[] = allModels.map((modelId) => {
+    let description: string | undefined;
+    if (modelId === preset?.defaultModel) description = "预设默认";
+    else if (knownIds.has(modelId)) description = "预设可选";
+    return {
+      label: modelId,
+      description,
+      current: modelId === userSelectedModel,
+      onEnter: (s) => {
+        const next = writeModelRole(
+          s,
+          descriptor.role,
+          currentRole?.provider ?? descriptor.providerId,
+          modelId,
+        );
+        return { type: "pop", state: next };
+      },
+    };
+  });
 
   // 末尾追加 "+ 添加自定义模型"
   items.push({

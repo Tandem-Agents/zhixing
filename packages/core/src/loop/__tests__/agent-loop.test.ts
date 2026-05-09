@@ -1824,4 +1824,110 @@ describe("Agent Loop", () => {
       expect(calls).toHaveLength(0);
     });
   });
+
+  // ──────────────────────────────────────
+  // capabilityState 自动升级（直接执行路径）
+  // ──────────────────────────────────────
+  //
+  // 工具调用命中时 agent-loop 调 recordToolUse 推进 layer，与 streamLLMCall
+  // / executeToolCalls 解耦，不引入额外 LLM round。
+
+  describe("capabilityState 自动升级", () => {
+    it("不传 capabilityState → 不抛错（向后兼容）", async () => {
+      const provider = new MockLLMProvider([
+        { toolCalls: [{ id: "t1", name: "t", input: {} }] },
+        { text: "done" },
+      ]);
+      const { result } = await drainAgentLoop(
+        baseParams(provider, { tools: [makeTool("t")] }),
+      );
+      expect(result.reason).toBe("completed");
+    });
+
+    it("tool_use(read) + read 在 discoverable → 升级到 hot", async () => {
+      const { CapabilityState } = await import(
+        "../../context/capability/index.js"
+      );
+      const capabilityState = new CapabilityState();
+      capabilityState.initialize("t", "discoverable");
+      const provider = new MockLLMProvider([
+        { toolCalls: [{ id: "t1", name: "t", input: {} }] },
+        { text: "done" },
+      ]);
+      await drainAgentLoop(
+        baseParams(provider, {
+          tools: [makeTool("t")],
+          capabilityState,
+        }),
+      );
+      expect(capabilityState.layerOf("t")).toBe("hot");
+    });
+
+    it("parallel tool_use 整批升级", async () => {
+      const { CapabilityState } = await import(
+        "../../context/capability/index.js"
+      );
+      const capabilityState = new CapabilityState();
+      capabilityState.initialize("a", "discoverable");
+      capabilityState.initialize("b", "discoverable");
+      capabilityState.initialize("c", "discoverable");
+      const provider = new MockLLMProvider([
+        {
+          toolCalls: [
+            { id: "t1", name: "a", input: {} },
+            { id: "t2", name: "b", input: {} },
+            { id: "t3", name: "c", input: {} },
+          ],
+        },
+        { text: "done" },
+      ]);
+      await drainAgentLoop(
+        baseParams(provider, {
+          tools: [makeTool("a"), makeTool("b"), makeTool("c")],
+          capabilityState,
+        }),
+      );
+      expect(capabilityState.layerOf("a")).toBe("hot");
+      expect(capabilityState.layerOf("b")).toBe("hot");
+      expect(capabilityState.layerOf("c")).toBe("hot");
+    });
+
+    it("always 工具调用 → 仍 always（不被降级，但 lastUseTurn 刷新）", async () => {
+      const { CapabilityState } = await import(
+        "../../context/capability/index.js"
+      );
+      const capabilityState = new CapabilityState();
+      capabilityState.initialize("memory", "always");
+      const provider = new MockLLMProvider([
+        { toolCalls: [{ id: "t1", name: "memory", input: {} }] },
+        { text: "done" },
+      ]);
+      await drainAgentLoop(
+        baseParams(provider, {
+          tools: [makeTool("memory")],
+          capabilityState,
+        }),
+      );
+      expect(capabilityState.layerOf("memory")).toBe("always");
+    });
+
+    it("未注册工具调用 → 自动 no-op（layerOf 仍 undefined，executeToolCalls 路径决定行为）", async () => {
+      const { CapabilityState } = await import(
+        "../../context/capability/index.js"
+      );
+      const capabilityState = new CapabilityState();
+      // stranger 没注册到 capability state 但在 tools 全集中
+      const provider = new MockLLMProvider([
+        { toolCalls: [{ id: "t1", name: "stranger", input: {} }] },
+        { text: "done" },
+      ]);
+      await drainAgentLoop(
+        baseParams(provider, {
+          tools: [makeTool("stranger")],
+          capabilityState,
+        }),
+      );
+      expect(capabilityState.layerOf("stranger")).toBeUndefined();
+    });
+  });
 });
