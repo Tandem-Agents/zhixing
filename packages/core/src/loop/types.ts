@@ -21,7 +21,11 @@ import type {
 } from "../types/llm.js";
 import type { Message, ToolResultBlock, ToolUseBlock } from "../types/messages.js";
 import type { ToolDefinition, ToolExecutionContext, ToolResult } from "../types/tools.js";
-import type { ContextManagerHook, ContextBudget } from "../context/types.js";
+import type {
+  ContextBudget,
+  ContextManagerHook,
+  ITokenEstimator,
+} from "../context/types.js";
 import type { ContextCompiler } from "../context/compiler/index.js";
 import type { TurnContextInjector } from "../context/turn-context.js";
 import type { CompactMarker, Turn } from "../transcript/types.js";
@@ -109,6 +113,17 @@ export interface AgentLoopParams {
    * 编排后的 messages 注入到正确位置。
    */
   turnContextInjector?: TurnContextInjector;
+  /**
+   * Token 估算器 —— 仅用于 per-LLM-call 校准。
+   *
+   * 缺省时不做任何校准（向后兼容）。注册时 agent-loop 在每次成功的 LLM call 后用
+   * `estimateMessages(messagesForLLM)` ↔ `llmResult.usage.inputTokens` 校准，让系数
+   * 与 LLM 实际处理的 size（compile + inject 后的 rendered messages）对账，而不是
+   * 与数据层 state.messages 对账（后者会因视图层锚化、turn-context 注入产生系统性偏差）。
+   *
+   * 校准发生在 abort / error 路径之前的成功分支，inputTokens > 0 时才生效。
+   */
+  tokenEstimator?: ITokenEstimator;
 }
 
 // ─── 依赖注入 ───

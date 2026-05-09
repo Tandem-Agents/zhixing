@@ -290,6 +290,27 @@ export async function* runAgentLoop(
 
       const usage = mergeUsage(state.totalUsage, llmResult.usage);
 
+      // ── 估算器校准（仅成功无错路径） ──
+      // 用 API 返回的真实 inputTokens 对账本次"实际送入 LLM 的 messages"
+      // （即 messagesForLLM —— ContextCompiler 编排 + TurnContextInjector 注入后），
+      // 让 calibration 系数与 LLM 实际处理的 size 对账，而非与数据层 state.messages 对账：
+      // 后者会因视图层锚化（tool_result 缩短）、turn-context 注入产生系统性偏差，
+      // 让 calibration 系数无法收敛。
+      // abort / provider-error / inputTokens=0 路径全部跳过 —— 这些样本不可靠，
+      // 注入会污染滑动平均。
+      if (
+        params.tokenEstimator &&
+        !llmResult.aborted &&
+        !llmResult.error &&
+        llmResult.usage.inputTokens > 0
+      ) {
+        const estimated = params.tokenEstimator.estimateMessages(messagesForLLM);
+        params.tokenEstimator.calibrate(
+          estimated,
+          llmResult.usage.inputTokens,
+        );
+      }
+
       // ── LLM 阶段 abort → 调 cleanup 出 partial assistant + 退出 ──
       // abort 在 stream 消费循环触发 → llm-call 返回 aborted variant + partial 数据。
       // 调 buildCleanup 用 assemblePartialMessage 注入 [interrupted] 标记构造 partial assistant,

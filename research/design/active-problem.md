@@ -163,4 +163,5 @@
 
 - [ ] Phase 2 实施细节对齐（spec v0.8 §十二 未决问题清单）
 - [ ] 进入实施 Phase 0（底层基建审计），按 [`specifications/context-management-v2-redesign.md`](specifications/context-management-v2-redesign.md) §十 路线推进
+- [ ] **独立评估项（不绑特定 Phase）**：sub-agent 路径是否启用 ToolResultAnchorStage（Phase 0 现状不接，详见 spec §十二 #8）—— 长子 task 链对上下文控制有真实需求，但需与 byte-equal-across-spawns 缓存优化协调
 - [ ] 全部 Phase 完成后归档 `problems/context-management-redesign.md`

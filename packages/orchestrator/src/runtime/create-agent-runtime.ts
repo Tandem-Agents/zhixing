@@ -54,6 +54,10 @@ import {
   TurnContextInjector,
   TimeProvider,
   getAbortReason,
+  ContextCompiler,
+  ToolResultAnchorStage,
+  createDefaultAnchorRegistry,
+  type AnchorGenerator,
 } from "@zhixing/core";
 import {
   createProviderRoles,
@@ -174,6 +178,15 @@ export interface AgentRuntime {
   readonly workspaceDirStatus: WorkspaceDirStatus;
   /** 注册 per-turn 上下文 provider（如 SchedulerProvider），支持后注册 */
   registerTurnContextProvider(provider: TurnContextProvider): void;
+  /**
+   * 注册 tool_result 事实锚 generator，支持后注册。
+   *
+   * 与 registerTurnContextProvider 对称——MCP / 插件 / extraTools 接入新工具时
+   * 通过此入口注册自定义 AnchorGenerator，让该工具的历史 result 锚化成
+   * 结构化事实（路径 / 行数 / 命令等）而非通用 fallback `[<name>, ok, N chars]`。
+   * 同名 register 覆盖前者，方便扩展点替换默认实现。
+   */
+  registerAnchorGenerator(generator: AnchorGenerator): void;
 }
 
 export interface ForceCompactResult {
@@ -426,6 +439,20 @@ export async function createAgentRuntime(
     new TimeProvider(Intl.DateTimeFormat().resolvedOptions().timeZone),
   );
 
+  // 视图层 ContextCompiler —— 每次 LLM call 之前对 messages 做语义编排。
+  //
+  // Stage 链：
+  //   1. ToolResultAnchorStage：把历史 tool_result（非 Focus）替换为简短结构化锚，
+  //      与数据层 manageWindow.applyTierCompression 各司其职（数据层管 state.messages
+  //      体积；视图层管 LLM 视图认知质量）。
+  //
+  // 工具自助接入：anchorRegistry 通过 createDefaultAnchorRegistry() 预注册内置工具
+  // generator，新工具按 AnchorGenerator 接口实现后 register 即生效，不改 stage。
+  const anchorRegistry = createDefaultAnchorRegistry();
+  const contextCompiler = new ContextCompiler([
+    new ToolResultAnchorStage(anchorRegistry),
+  ]);
+
   // 加载项目上下文（ZHIXING.md + 环境信息），注入到首条 user message
   const projectContext = await loadProjectContext(cwd);
 
@@ -484,6 +511,10 @@ export async function createAgentRuntime(
 
     registerTurnContextProvider(provider: TurnContextProvider): void {
       turnContextInjector.register(provider);
+    },
+
+    registerAnchorGenerator(generator: AnchorGenerator): void {
+      anchorRegistry.register(generator);
     },
 
     get calibrationFactor(): number {
@@ -763,6 +794,12 @@ export async function createAgentRuntime(
           // 视图层 turn-context 注入由 agent-loop 在每次 LLM call 之前调用，
           // 让任务状态 / 定时任务 / 时间等动态信息在多 LLM call 之间实时刷新
           turnContextInjector,
+          // 视图层 ContextCompiler：在 turn-context 注入之前对历史 tool_result
+          // 锚化，与数据层 tier-compressor 各司其职
+          contextCompiler,
+          // 估算器 per-LLM-call 校准：agent-loop 在每次成功 LLM call 后用本次实际
+          // 送入的 messagesForLLM 对账 inputTokens，让系数与 LLM 实际处理的 size 对账
+          tokenEstimator: estimator,
         });
 
         while (true) {
@@ -771,11 +808,8 @@ export async function createAgentRuntime(
           if (done) {
             const allMessages = [...params.messages, ...newMessages];
 
-            // Token 校准：用 API 返回的真实 token 数校正估算器
-            if (value.usage.inputTokens > 0) {
-              const estimated = estimator.estimateMessages(allMessages);
-              estimator.calibrate(estimated, value.usage.inputTokens);
-            }
+            // 校准已下沉到 agent-loop per-LLM-call —— 这里仅 budget 评估用 state.messages
+            // 维度（保 budget 与状态体积同源，与 calibration baseline 双 baseline 设计）。
 
             const budget = contextEngine.checkBudget(allMessages);
 

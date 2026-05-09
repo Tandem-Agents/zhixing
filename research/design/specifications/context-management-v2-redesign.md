@@ -820,7 +820,7 @@ LLM 通过 transplanted `SYSTEM_META_PROMPT_SECTION`（always-on 静态 segment 
 5. **`task_list` 持久化 schema**：与 conversation meta 关系；`in_progress` 任务的 turn 范围记录方式（用于 Pin 来源）
 6. **`TurnContextProvider` 渲染顺序与 LLM 解读**：注册顺序决定 `<turn-context>` 内段落顺序；spec 阶段确认默认顺序与产品体感
 7. **Pin 概念在 v2 中的处理**：是否引入用户显式 Pin 命令；`isPinned` callback 签名为 `(messageIndex) => boolean`（保 v1.2 兼容；orchestrator 把 turn 范围映射为 message range）
-8. **sub-agent 路径**：sub-agent 走同一 ContextCompiler 实例还是独立；subAgentProfile 配置 Cold 工具集；sub-agent capabilityState 是否独立 vs 共享父 agent；sub-agent 是否注册自己的 TurnContextProvider 集（推荐：sub-agent 不注册 task-list / task-briefs / migration-summary，因为 sub-agent 是短任务）
+8. **sub-agent 路径**：sub-agent 走同一 ContextCompiler 实例还是独立；subAgentProfile 配置 Cold 工具集；sub-agent capabilityState 是否独立 vs 共享父 agent；sub-agent 是否注册自己的 TurnContextProvider 集（推荐：sub-agent 不注册 task-list / task-briefs / migration-summary，因为 sub-agent 是短任务）。**Phase 0 现状（已记录待评估）**：sub-agent 路径（`subagent/loop-runner.ts:drainAgentLoop`）当前**不接** ContextCompiler / TurnContextInjector / tokenEstimator —— turnContextInjector / tokenEstimator 不接合理（sub-agent 短命、保 byte-equal-across-spawns 缓存优化、不污染主 estimator 系数），但 ToolResultAnchorStage 不接对长子 task（grep + read + edit 链）的上下文体积控制是显著缺口；作为**独立评估项**（不绑特定 Phase，不属 Q1.A/Q2/Q3 范围）实测决议（启用 / 不启用 / 仅启用 ToolResultAnchorStage 而保留其他 Stage 主路径独占）。
 9. **`TurnContextInjector` 注入与 `ContextCompiler` 输出的 ordering**：当前 v1.2 在 enrichContext 之后 inject；v2 是否在 ContextCompiler Stage 1+2 输出后 inject（让 view-layer 处理 raw messages，再追加 `<turn-context>`）
 10. **Q3 滑窗默认 N 值实测调**：N=12 是产品方向对齐结果，spec 阶段需根据弱模型实测确定；是否按 main / sub agent 区分
 11. **Q3 任务边界来源 ③（长闲置）阈值与组合规则**：默认 30 min；有 in_progress 任务时是否放宽；与用户主动恢复对话场景区分

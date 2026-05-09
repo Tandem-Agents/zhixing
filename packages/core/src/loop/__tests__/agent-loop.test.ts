@@ -1746,4 +1746,82 @@ describe("Agent Loop", () => {
       expect(parent.signal.aborted).toBe(false);
     });
   });
+
+  // ──────────────────────────────────────
+  // tokenEstimator per-LLM-call 校准
+  // ──────────────────────────────────────
+  //
+  // 校准 baseline 从 caller 侧（state.messages + 最终 cumulative usage）下沉到
+  // agent-loop per-call（messagesForLLM ↔ 单次 inputTokens），让系数与 LLM 实际
+  // 处理的 size 对账，与视图层 ContextCompiler / TurnContextInjector 共生。
+
+  describe("tokenEstimator per-LLM-call 校准", () => {
+    function makeMockEstimator() {
+      const calls: { estimated: number; actual: number }[] = [];
+      const messagesEstimateCalls: number[] = [];
+      return {
+        estimator: {
+          estimateMessage: () => 0,
+          estimateMessages: (msgs: readonly import("../../types/messages.js").Message[]) => {
+            messagesEstimateCalls.push(msgs.length);
+            return msgs.length * 10;
+          },
+          estimateText: () => 0,
+          calibrate: (estimated: number, actual: number) => {
+            calls.push({ estimated, actual });
+          },
+          calibrationFactor: 1.0,
+        },
+        calls,
+        messagesEstimateCalls,
+      };
+    }
+
+    it("注册 estimator → 每次成功 LLM call 都调一次 calibrate", async () => {
+      const provider = new MockLLMProvider([
+        { toolCalls: [{ id: "tc1", name: "t", input: {} }], usage: { inputTokens: 200, outputTokens: 30 } },
+        { text: "done", usage: { inputTokens: 220, outputTokens: 25 } },
+      ]);
+      const { estimator, calls } = makeMockEstimator();
+
+      await drainAgentLoop(
+        baseParams(provider, { tools: [makeTool("t")], tokenEstimator: estimator }),
+      );
+
+      expect(calls).toHaveLength(2);
+      expect(calls[0]!.actual).toBe(200);
+      expect(calls[1]!.actual).toBe(220);
+      // 第二次 call 之前 messages 多了 assistant + tool_result 两条 → estimated 单调增
+      expect(calls[1]!.estimated).toBeGreaterThan(calls[0]!.estimated);
+    });
+
+    it("不注册 estimator → agent-loop 不抛错也不 calibrate", async () => {
+      const provider = mockTextProvider("hello");
+      const { yields, result } = await drainAgentLoop(baseParams(provider));
+      expect(result.reason).toBe("completed");
+      expect(filterYields(yields, "assistant_message")).toHaveLength(1);
+    });
+
+    it("inputTokens=0 → 跳过 calibrate（防御 abort/未送达样本）", async () => {
+      const provider = new MockLLMProvider([
+        { text: "ok", usage: { inputTokens: 0, outputTokens: 10 } },
+      ]);
+      const { estimator, calls } = makeMockEstimator();
+
+      await drainAgentLoop(baseParams(provider, { tokenEstimator: estimator }));
+
+      expect(calls).toHaveLength(0);
+    });
+
+    it("error 路径不 calibrate（provider error event）", async () => {
+      const provider = new MockLLMProvider([{ error: new Error("provider boom") }]);
+      const { estimator, calls } = makeMockEstimator();
+
+      const { result } = await drainAgentLoop(
+        baseParams(provider, { tokenEstimator: estimator }),
+      );
+      expect(result.reason).toBe("error");
+      expect(calls).toHaveLength(0);
+    });
+  });
 });

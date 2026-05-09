@@ -126,6 +126,7 @@ export {
 } from "./turn-context.js";
 
 export type {
+  AnchorGenerator,
   CompileInput,
   CompileOutput,
   RenderContext,
@@ -134,4 +135,17 @@ export type {
   StageOutput,
   StateDelta,
 } from "./compiler/index.js";
-export { ContextCompiler } from "./compiler/index.js";
+export {
+  AnchorRegistry,
+  ContextCompiler,
+  ToolResultAnchorStage,
+  bashAnchor,
+  createDefaultAnchorRegistry,
+  editAnchor,
+  fallbackAnchor,
+  globAnchor,
+  grepAnchor,
+  readAnchor,
+  webFetchAnchor,
+  writeAnchor,
+} from "./compiler/index.js";
