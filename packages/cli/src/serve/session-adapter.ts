@@ -97,6 +97,10 @@ export function createServerRuntimeAdapter(
           turnIndex: turnIndex ?? 0,
           source,
           turnContext,
+          // sessionId 即 conversationId（ConversationManager 中是同一标识，
+          // RuntimeInfo.sessionId 是 conversationId 的向后兼容别名），透传到
+          // RunContext 让 recall_history 等需要 conversationId 的工具可用。
+          conversationId: sessionId,
           abortSignal: controller.signal,
           onYield: (event) => {
             queue.push({ kind: "yield", value: event });

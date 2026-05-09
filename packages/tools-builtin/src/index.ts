@@ -8,4 +8,8 @@ export { createMemoryTool } from "./memory.js";
 export { createScheduleTool, type ScheduleToolOrigin } from "./schedule.js";
 export { createWebFetchTool } from "./web-fetch.js";
 export { WEB_FETCH_DEFAULT_RULES } from "./web-fetch-rules.js";
+export {
+  createRecallHistoryTool,
+  type RecallHistoryDeps,
+} from "./recall-history.js";
 export { truncateResult, addLineNumbers, resolveToolPath } from "./utils.js";

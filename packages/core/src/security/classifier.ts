@@ -408,6 +408,10 @@ export function createDefaultClassifier(
   const internalClassifier: OperationClassifier = { classify: () => "internal" };
   composite.registerContext("schedule", internalClassifier);
   composite.registerContext("memory", internalClassifier);
+  // recall_history 仅读自身 transcript（zhixing home 内 conversation 文件），
+  // 与 memory / schedule 同质：内部状态查询，无外部副作用，不应被 fallback
+  // BoundaryImpactClassifier 因无 boundaries 声明而误判为 critical。
+  composite.registerContext("recall_history", internalClassifier);
 
   // 其他工具走边界分类器
   const registry = options.registry ?? EMPTY_BOUNDARY_REGISTRY;

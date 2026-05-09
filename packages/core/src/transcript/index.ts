@@ -2,6 +2,7 @@ export type {
   InitTranscriptOptions,
   ITranscriptStore,
   LoadedTranscript,
+  RawTranscript,
   CompactMarker,
   TranscriptHeader,
   TranscriptRecord,

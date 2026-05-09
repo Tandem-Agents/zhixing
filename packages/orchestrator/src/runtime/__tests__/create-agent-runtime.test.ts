@@ -734,3 +734,178 @@ describe("Task 端到端集成 · 主子隔离 / 并发 / 子 fail / lineage 冒
   });
 
 });
+
+// ─── 契约: resetConversationState ───
+
+describe("createAgentRuntime · resetConversationState", () => {
+  it("无 Resettable 注册 → 调用即 resolve（空操作）", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
+    const runtime = await createAgentRuntime({});
+    await expect(runtime.resetConversationState()).resolves.toBeUndefined();
+  });
+
+  it("LIFO 串行：后注册先 reset", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
+    const runtime = await createAgentRuntime({});
+    const order: string[] = [];
+    runtime.registerConversationStateReset({
+      id: "first",
+      reset: () => {
+        order.push("first");
+      },
+    });
+    runtime.registerConversationStateReset({
+      id: "second",
+      reset: () => {
+        order.push("second");
+      },
+    });
+    runtime.registerConversationStateReset({
+      id: "third",
+      reset: () => {
+        order.push("third");
+      },
+    });
+
+    await runtime.resetConversationState();
+    expect(order).toEqual(["third", "second", "first"]);
+  });
+
+  it("await async reset 完成才往下走", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
+    const runtime = await createAgentRuntime({});
+    let resolved = false;
+    runtime.registerConversationStateReset({
+      id: "slow",
+      reset: async () => {
+        await new Promise((r) => setTimeout(r, 5));
+        resolved = true;
+      },
+    });
+    await runtime.resetConversationState();
+    expect(resolved).toBe(true);
+  });
+
+  it("单个抛错不阻断其它 reset；全跑完后聚合抛 ResetConversationStateError", async () => {
+    const { ResetConversationStateError } = await import(
+      "../create-agent-runtime.js"
+    );
+    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
+    const runtime = await createAgentRuntime({});
+    const ran: string[] = [];
+    runtime.registerConversationStateReset({
+      id: "ok-1",
+      reset: () => {
+        ran.push("ok-1");
+      },
+    });
+    runtime.registerConversationStateReset({
+      id: "boom",
+      reset: () => {
+        throw new Error("inner failure");
+      },
+    });
+    runtime.registerConversationStateReset({
+      id: "ok-2",
+      reset: () => {
+        ran.push("ok-2");
+      },
+    });
+
+    let caught: unknown;
+    try {
+      await runtime.resetConversationState();
+    } catch (err) {
+      caught = err;
+    }
+
+    // 全部 reset 都被尝试（顺序 ok-2 → boom → ok-1）
+    expect(ran).toContain("ok-1");
+    expect(ran).toContain("ok-2");
+    expect(caught).toBeInstanceOf(ResetConversationStateError);
+    if (caught instanceof ResetConversationStateError) {
+      expect(caught.failures).toHaveLength(1);
+      expect(caught.failures[0]!.id).toBe("boom");
+    }
+  });
+});
+
+// ─── 契约: RunContext.conversationId 透传到 ALS ───
+
+describe("createAgentRuntime · run() conversationId 透传", () => {
+  it("RunParams.conversationId → runContextStorage.getStore()?.conversationId", async () => {
+    // 用 extraTool 在工具调用时探查 ALS，验证 conversationId 透传到位。
+    // mock provider 必须发 tool_use 让 secure-executor 真正调到 probe.call。
+    providerRef.current = new MockLLMProvider([
+      {
+        toolCalls: [{ id: "u1", name: "ctx_probe", input: {} }],
+      },
+      { text: "done" },
+    ]);
+
+    const { runContextStorage } = await import("../run-context.js");
+    let observedConvId: string | undefined | null = null;
+    const probe: ToolDefinition = {
+      name: "ctx_probe",
+      description: "Capture conversationId from RunContext for assertion.",
+      inputSchema: { type: "object" },
+      isReadOnly: true,
+      isParallelSafe: true,
+      needsPermission: false,
+      subAgentSafe: true,
+      // 声明 read access 让 SecurityPipeline 分类为 observe 放行（与 ALS 测试对齐）
+      boundaries: [{ boundaryType: "process", access: "read", dynamic: false }],
+      call: async () => {
+        observedConvId =
+          runContextStorage.getStore()?.conversationId ?? null;
+        return { content: "captured" };
+      },
+    };
+
+    const runtime = await createAgentRuntime({ extraTools: [probe] });
+    await runtime.run({
+      messages: [userMessage("trigger probe")],
+      turnIndex: 0,
+      conversationId: "conv-xyz-123",
+    });
+
+    expect(observedConvId).toBe("conv-xyz-123");
+  });
+
+  it("RunParams 不传 conversationId → ALS 中为 undefined", async () => {
+    providerRef.current = new MockLLMProvider([
+      {
+        toolCalls: [{ id: "u1", name: "ctx_probe2", input: {} }],
+      },
+      { text: "done" },
+    ]);
+
+    const { runContextStorage } = await import("../run-context.js");
+    let observedConvId: string | undefined | null = "<unset>";
+    const probe: ToolDefinition = {
+      name: "ctx_probe2",
+      description: "Capture conversationId for ephemeral run assertion.",
+      inputSchema: { type: "object" },
+      isReadOnly: true,
+      isParallelSafe: true,
+      needsPermission: false,
+      subAgentSafe: true,
+      // 声明 read access 让 SecurityPipeline 分类为 observe 放行（与 ALS 测试对齐）
+      boundaries: [{ boundaryType: "process", access: "read", dynamic: false }],
+      call: async () => {
+        observedConvId =
+          runContextStorage.getStore()?.conversationId ?? null;
+        return { content: "captured" };
+      },
+    };
+
+    const runtime = await createAgentRuntime({ extraTools: [probe] });
+    await runtime.run({
+      messages: [userMessage("trigger probe")],
+      turnIndex: 0,
+      // 不传 conversationId
+    });
+
+    expect(observedConvId).toBeNull();
+  });
+});

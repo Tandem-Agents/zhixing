@@ -184,6 +184,19 @@ function buildSlashCommands(
           // 仅清内存即可，无磁盘可清
           state.messages = [];
         }
+        // 视图层组件（视图层 stage / capabilityState / taskListState 等）
+        // 通过 Resettable 注册到 runtime；这里一并清空它们的对话级状态。
+        // 顺序：先磁盘清，后视图层 reset —— 失败时内存 messages 仍是 canonical
+        // 安全态，下一次 LLM call 不会因半态而异常。
+        try {
+          await state.agent.resetConversationState();
+        } catch (err) {
+          cliWriter.line(
+            chalk.yellow(
+              `\n  视图层部分组件 reset 失败（不影响对话清空）: ${err instanceof Error ? err.message : String(err)}\n`,
+            ),
+          );
+        }
         state.turnCounter = 0;
         state.lastToolEndCount = 0;
         cliWriter.line(chalk.dim("对话历史已清空\n"));
@@ -755,6 +768,15 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   const config = loadConfig({ cwd: process.cwd() });
   const credentials = loadCredentials({ homeDir: resolveHomeDir() });
 
+  // Transcript store 要先于 RuntimeSession.create 构造 —— session 内部 createRuntime
+  // 装配 recall_history 时需要复用同一 store 实例（让工具看到 commitTurn 写入的最新磁盘状态）。
+  const cwd = process.cwd();
+  const projectId = getProjectId(cwd);
+  const scope: ConversationScope = { kind: "project", projectId, projectPath: cwd };
+  const convRepo = new ConversationRepository(scope);
+  const convDir = path.join(zhixingHome, "projects", projectId, "conversations");
+  const store = new TranscriptStore(convDir, cwd);
+
   const session = await RuntimeSession.create({
     config,
     credentials,
@@ -768,14 +790,8 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     schedulerEventBus,
     onSecurityBlocked: createBlockedRenderer(cliWriter),
     onUserDenied: createUserDeniedRenderer(cliWriter),
+    transcriptStore: store,
   });
-
-  const cwd = process.cwd();
-  const projectId = getProjectId(cwd);
-  const scope: ConversationScope = { kind: "project", projectId, projectPath: cwd };
-  const convRepo = new ConversationRepository(scope);
-  const convDir = path.join(zhixingHome, "projects", projectId, "conversations");
-  const store = new TranscriptStore(convDir, cwd);
 
   let messages: Message[] = [];
   let conversationId: string | null = null;
@@ -1268,6 +1284,10 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       const runPromise = session.runtime.run({
         messages: [...state.messages],
         turnIndex: state.turnCounter,
+        // 透传当前 conversationId 进 RunContext —— 让 recall_history 等需要
+        // 取磁盘 transcript 的工具能拿到 id；ephemeral 路径（无 conversation）
+        // 自然为 undefined，工具自行 graceful degrade。
+        conversationId: state.conversationId ?? undefined,
         abortSignal: interruptRuntime.controller.signal,
         onYield: (e) => renderer.handleEvent(e),
         enrichOptions: {

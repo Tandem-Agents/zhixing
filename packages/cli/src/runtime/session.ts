@@ -213,6 +213,7 @@ export class RuntimeSession {
       onUserDenied: this.opts.onUserDenied,
       enableTaskTool: true,
       permissionStore: existingPermissionStore,
+      transcriptStore: this.opts.transcriptStore,
     });
   }
 

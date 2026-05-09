@@ -58,6 +58,8 @@ import {
   ToolResultAnchorStage,
   createDefaultAnchorRegistry,
   type AnchorGenerator,
+  type ITranscriptStore,
+  type Resettable,
 } from "@zhixing/core";
 import {
   createProviderRoles,
@@ -76,6 +78,7 @@ import {
   createGrepTool,
   createBashTool,
   createMemoryTool,
+  createRecallHistoryTool,
   createWebFetchTool,
   WEB_FETCH_DEFAULT_RULES,
 } from "@zhixing/tools-builtin";
@@ -187,6 +190,29 @@ export interface AgentRuntime {
    * 同名 register 覆盖前者，方便扩展点替换默认实现。
    */
   registerAnchorGenerator(generator: AnchorGenerator): void;
+  /**
+   * 注册"对话级"可重置组件 —— `/clear` 时一并清空。
+   *
+   * 视图层 stage（如未来的 capabilityState / taskListState / migrationSummaryState 等）
+   * 实现 Resettable 后在 runtime 装配时注册一次，无需 cli 在 /clear handler 里硬编码
+   * 各 state 的 reset 调用。Phase 0 视图层无状态化 stage，注册列表默认为空。
+   *
+   * 多次注册按注册顺序累积；reset 按 LIFO 串行执行（让后注册组件先 reset，给"被
+   * 后注册组件依赖"的前注册组件留下还能被读取的窗口）。
+   */
+  registerConversationStateReset(target: Resettable): void;
+  /**
+   * 触发所有已注册组件 reset 自身对话级状态。
+   *
+   * 调用时机：cli `/clear` 在 `store.compactAll` 之后调一次；
+   * server 在 conversation 切换 / 重置场景按需调。
+   *
+   * 失败语义：单个 Resettable 抛错 → 收集到聚合错误数组继续后续 reset，
+   * 全部跑完后再统一抛 ResetConversationStateError（含失败的 ids）。
+   * 调用方决定是否阻塞 /clear 完成 —— 多数情况吞错继续即可（state 已部分清，
+   * 内存语义已是"清空"，下次 LLM call 仍会按新视图编排）。
+   */
+  resetConversationState(): Promise<void>;
 }
 
 export interface ForceCompactResult {
@@ -218,6 +244,14 @@ export interface RunParams {
    * - ephemeral / 单次运行：0
    */
   turnIndex: number;
+  /**
+   * 当前 conversation id —— 透传到 runContextStorage，工具按需取（如
+   * recall_history 读磁盘 transcript）。
+   *
+   * 可选：ephemeral 路径（一次性 --print / 定时任务 / 单测 fixture）省略；
+   * 工具收到 undefined 时显式分支处理（拒绝执行 / graceful degrade）。
+   */
+  conversationId?: string;
   /** 触发源，落盘为 Turn.source。不指定时字段为 undefined */
   source?: TurnSource;
   onYield?: (event: AgentYield) => void;
@@ -251,6 +285,21 @@ export interface RunParams {
 // RunResult 从 @zhixing/core 统一（单一事实源）。
 // cli 的 AgentRuntime.run 和 server 的 SessionRuntime.run 共享此契约。
 export type { RunResult };
+
+/**
+ * resetConversationState 失败聚合异常 —— 单个 Resettable 抛错不阻断其它 reset，
+ * 全跑完再抛此聚合异常让调用方决定吞错 / 升级 / UI 提示。
+ */
+export class ResetConversationStateError extends Error {
+  readonly failures: ReadonlyArray<{ id: string; error: unknown }>;
+
+  constructor(failures: ReadonlyArray<{ id: string; error: unknown }>) {
+    const ids = failures.map((f) => f.id).join(", ");
+    super(`resetConversationState 失败：${ids}`);
+    this.name = "ResetConversationStateError";
+    this.failures = failures;
+  }
+}
 
 export interface CreateAgentRuntimeOptions {
   model?: string;
@@ -301,6 +350,14 @@ export interface CreateAgentRuntimeOptions {
    * 注册），同一注入 store 被多次 register 不会累积重复规则。
    */
   permissionStore?: IPermissionStore;
+  /**
+   * Transcript 仓库 —— 装配 recall_history 工具时通过 loadRaw 取磁盘原始结构。
+   *
+   * 不传时 recall_history 工具不接入（runtime 仍可正常 run，但 LLM 调
+   * recall_history 会得到 unknown tool 错误）。cli REPL / server 路径都已持有
+   * 一个共享 TranscriptStore 实例，传入即可。
+   */
+  transcriptStore?: ITranscriptStore;
 }
 
 // ─── 创建运行时 ───
@@ -349,6 +406,18 @@ export async function createAgentRuntime(
     createBashTool(),
     createMemoryTool(),
     createWebFetchTool({ proxy: config.network?.proxy }),
+    ...(options.transcriptStore
+      ? [
+          // recall_history 兜底锚化 / tier-compressor 截断后历史无法 re-read 的场景：
+          // 通过磁盘 transcript 取回原始 turn / tool_use 内容。store 由 caller 注入，
+          // 工具运行时通过 runContextStorage 取当前 conversationId。
+          createRecallHistoryTool({
+            loadRaw: (id) => options.transcriptStore!.loadRaw(id),
+            getConversationId: () =>
+              runContextStorage.getStore()?.conversationId,
+          }),
+        ]
+      : []),
     ...(options.extraTools ?? []),
   ];
 
@@ -478,6 +547,10 @@ export async function createAgentRuntime(
   const estimator = createTokenEstimator();
   const memoryStore = new MemoryStore();
 
+  // 对话级 Resettable 注册表 —— 视图层 stage 实现 Resettable 后在装配期注册，
+  // /clear 一并清空。Phase 0 视图层无状态化 stage，列表默认为空。
+  const resettables: Resettable[] = [];
+
   // Flush 用的 LLM 调用——绑定 secondary 角色。详见 compaction-llm.ts 的
   // 设计注释（路由契约 + 单测覆盖）。
   const flushCallLLM = createCompactionFlush(roles);
@@ -515,6 +588,27 @@ export async function createAgentRuntime(
 
     registerAnchorGenerator(generator: AnchorGenerator): void {
       anchorRegistry.register(generator);
+    },
+
+    registerConversationStateReset(target: Resettable): void {
+      resettables.push(target);
+    },
+
+    async resetConversationState(): Promise<void> {
+      // LIFO 串行：后注册先 reset。失败聚合：单个抛错不阻断后续 reset，
+      // 全跑完再统一抛 ResetConversationStateError 让调用方决定吞 / 升级。
+      const failures: { id: string; error: unknown }[] = [];
+      for (let i = resettables.length - 1; i >= 0; i--) {
+        const target = resettables[i]!;
+        try {
+          await target.reset();
+        } catch (err) {
+          failures.push({ id: target.id, error: err });
+        }
+      }
+      if (failures.length > 0) {
+        throw new ResetConversationStateError(failures);
+      }
     },
 
     get calibrationFactor(): number {
@@ -649,7 +743,11 @@ export async function createAgentRuntime(
       // 且 finally 的语义是"无论 ALS 内 throw 与否都执行清理",位置正确。
       try {
         return await runContextStorage.run(
-          { bus: eventBus, lineage: "main" },
+          {
+            bus: eventBus,
+            lineage: "main",
+            conversationId: params.conversationId,
+          },
           async (): Promise<RunResult> => {
             return await runMainLoop();
           },

@@ -35,6 +35,14 @@ import type { AgentEventMap, EventBus } from "@zhixing/core";
 export interface RunContext {
   bus: EventBus<AgentEventMap>;
   lineage: string;
+  /**
+   * 当前 conversation id —— 工具按需取（如 recall_history 读磁盘 transcript）。
+   *
+   * 可选：ephemeral / 一次性 run（定时任务 / --print 单次命令 / 单测 fixture）
+   * 没有 conversation 上下文，工具应在 undefined 时显式分支处理（拒绝执行 /
+   * graceful degrade），不要兜底编造。
+   */
+  conversationId?: string;
 }
 
 export const runContextStorage = new AsyncLocalStorage<RunContext>();

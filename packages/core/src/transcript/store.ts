@@ -30,6 +30,7 @@ import type {
   InitTranscriptOptions,
   ITranscriptStore,
   LoadedTranscript,
+  RawTranscript,
   CompactMarker,
   TranscriptHeader,
   Turn,
@@ -280,6 +281,28 @@ export class TranscriptStore implements ITranscriptStore {
         header,
         messages: rebuildCanonicalMessages(turns, compacts),
         turnCount: turns.length,
+      };
+    });
+  }
+
+  // ─── loadRaw ───
+  //
+  // 与 load 平行的"原始结构"读取入口 —— 不调 rebuildCanonicalMessages，
+  // 直接暴露磁盘上的 turns 和 compact frontier。recall_history 工具消费此 API
+  // 按 turnRange / toolUseId 精确取回原始片段。
+  async loadRaw(conversationId: string): Promise<RawTranscript> {
+    return await this.withLock(conversationId, async () => {
+      await this.cleanupOnce(conversationId);
+      const { header, turns, compacts } = await this.loadNormalizedInLock(
+        conversationId,
+      );
+      // normalize 之后 compacts 至多 1 条（CompactMarker frontier 单一性约束），
+      // 这里只取首条；无则返 null。LoadedTranscript 的 canonical messages
+      // 也是基于此约束构造，不变量与 load() 共享。
+      return {
+        header,
+        turns,
+        compactBefore: compacts[0] ?? null,
       };
     });
   }

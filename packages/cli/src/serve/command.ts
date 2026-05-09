@@ -220,6 +220,10 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
         // 冒泡事件,renderDecorator 在非 TTY 模式下退化为只输出 Task 起止帧
         // (子工具中间事件静默,避免日志爆炸)。
         enableTaskTool: true,
+        // 持久会话有真实 conversationId 上下文，注入 transcriptStore 让
+        // recall_history 装配（与 cli REPL 路径行为对齐）。ephemeralRuntime
+        // 不传——定时任务无 conversation 绑定，工具自动 graceful degrade。
+        transcriptStore: transcript,
       });
       runtime.registerTurnContextProvider(
         new SchedulerProvider(() => {

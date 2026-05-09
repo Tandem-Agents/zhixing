@@ -121,9 +121,11 @@ describe("buildTurn — tool-loop turn（含工具调用）", () => {
     // 而不是第一条（发 tool_use 的中间态）—— 这是 REPL 旧 bug(newMessages[0]) 的修复
     expect(turn.assistantMessage).toBe(finalAssistant);
 
-    // toolCalls 扁平化持久化：1 条记录
+    // toolCalls 扁平化持久化：1 条记录；id 直接来自协议层 tool_use.id，
+    // 让 recall_history 等按 toolUseId 反查的消费方有可靠数据来源
     expect(turn.toolCalls).toHaveLength(1);
     expect(turn.toolCalls![0]).toEqual({
+      id: "tc_1",
       name: "read",
       input: { path: "README.md" },
       result: "# Zhixing\n\n...",
@@ -159,6 +161,9 @@ describe("buildTurn — tool-loop turn（含工具调用）", () => {
     expect(turn.toolCalls![0]!.result).toBe("match1\nmatch2");
     expect(turn.toolCalls![1]!.name).toBe("read");
     expect(turn.toolCalls![1]!.result).toBe("file content");
+    // tool_use id 持久化到 record.id —— recall_history 等按 id 反查的消费方依赖
+    expect(turn.toolCalls![0]!.id).toBe("a");
+    expect(turn.toolCalls![1]!.id).toBe("b");
   });
 
   it("isError=true 的 tool_result 原样透传到 ToolCallRecord.isError", () => {

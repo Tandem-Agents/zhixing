@@ -206,6 +206,7 @@ function buildRecord(
   result: ToolResultBlock | undefined,
 ): ToolCallRecord {
   return {
+    id: use.id,
     name: use.name,
     input: use.input,
     result: result?.content ?? "",

@@ -51,6 +51,12 @@ export interface RuntimeSessionOptions {
   /** 安全管线 UI 回调——透传给 createAgentRuntime */
   onSecurityBlocked: OnSecurityBlockedFn;
   onUserDenied: OnUserDeniedFn;
+  /**
+   * Transcript 仓库 —— 透传给 createAgentRuntime 以装配 recall_history 工具。
+   * REPL 路径在启动时已 new TranscriptStore，注入此处让 runtime 共享同一实例
+   * （recall_history 与 commitTurn 看到相同的磁盘状态）。
+   */
+  transcriptStore?: import("@zhixing/core").ITranscriptStore;
 }
 
 /**

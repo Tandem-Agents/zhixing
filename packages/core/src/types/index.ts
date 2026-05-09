@@ -64,3 +64,6 @@ export {
   isUserFacingError,
   toAgentError,
 } from "./errors.js";
+
+// ─── 可重置组件 ───
+export type { Resettable } from "./resettable.js";
