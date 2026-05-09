@@ -6,6 +6,7 @@
  * ┌─ 静态区(Stable Prefix,可跨会话缓存)──────────────┐
  * │ Identity              始终  身份定义(profile.instructions) │
  * │ Principles            始终  工作原则                          │
+ * │ Meta Protocol         始终  消息流元信息标签解释              │
  * │ Tool Usage            始终  从工具列表动态生成                 │
  * │ Sub-Agent Delegation  条件  ctx.tools 含 Task 才渲染          │
  * │ Skill Evolution       条件  ctx.tools 含 memory 才渲染        │
@@ -23,12 +24,18 @@
  * - 工具使用段从注册的工具列表动态生成,添加/移除工具时自动适应
  * - 条件段返回 null 时被 buildSystemPrompt 跳过,不留空白(无空段噪声)
  *   —— 让 ctx.tools 不含 memory / Task 时输出 byte-equal 历史,守住既有锚点
+ * - 元协议段在工具段之前:LLM 解析 messages 的基础协议(<system-meta> 标签等)
+ *   是看懂工具调用的前置知识,语义上先于工具使用引导
  * - 环境信息放在分界后(每个项目不同),保护静态区缓存前缀
  * - ZHIXING.md 等项目上下文不进 system prompt,通过 <context> 注入 user messages
  */
 
 import * as os from "node:os";
-import { COMMITMENT_SIGNAL, type ToolDefinition } from "@zhixing/core";
+import {
+  COMMITMENT_SIGNAL,
+  SYSTEM_META_PROMPT_SECTION,
+  type ToolDefinition,
+} from "@zhixing/core";
 import type { AgentRoleProfile } from "../profile/agent-role-profile.js";
 import { mainProfile } from "../profile/default-profiles.js";
 
@@ -43,13 +50,17 @@ export const CACHE_BOUNDARY = "\n__ZHIXING_CACHE_BOUNDARY__\n";
  * Environment 不在此列举(始终在缓存分界之后,作为独立动态段)。
  *
  * 各段适配策略(条件性 vs 始终):
- *   identity / principles / tool-usage / style / safety  始终输出
+ *   identity / principles / meta-protocol / tool-usage / style / safety  始终输出
  *   skill-evolution        条件:tools 含 memory 才渲染(避免让 LLM 看到无 memory 工具的 reflect 提示)
  *   sub-agent-delegation   条件:tools 含 Task 才渲染(避免让 LLM 看到不存在的 Task 工具说明)
+ *
+ * meta-protocol 段说明:LLM 在 messages 历史中可能遇到 `<system-meta kind="...">`
+ * 标签(由 compact / drop 等机制层插入),本段告知 LLM 如何识别并不当作用户原话回应。
  */
 export type SystemPromptSegment =
   | "identity"
   | "principles"
+  | "meta-protocol"
   | "tool-usage"
   | "skill-evolution"
   | "sub-agent-delegation"
@@ -66,6 +77,7 @@ export type SystemPromptSegment =
 export const MAIN_AGENT_SEGMENTS: readonly SystemPromptSegment[] = [
   "identity",
   "principles",
+  "meta-protocol",
   "tool-usage",
   "sub-agent-delegation",
   "skill-evolution",
@@ -99,6 +111,7 @@ export const MAIN_AGENT_SEGMENTS: readonly SystemPromptSegment[] = [
 export const SUB_AGENT_SEGMENTS: readonly SystemPromptSegment[] = [
   "identity",
   "principles",
+  "meta-protocol",
   "tool-usage",
   "safety",
 ];
@@ -185,6 +198,8 @@ function renderSegment(
       return renderIdentity(profile);
     case "principles":
       return buildPrinciples();
+    case "meta-protocol":
+      return buildMetaProtocol();
     case "tool-usage":
       return buildToolUsage(ctx.tools);
     case "skill-evolution":
@@ -238,7 +253,20 @@ function buildPrinciples(): string {
 - Show your reasoning when making non-obvious decisions`;
 }
 
-// ─── Segment 3: Tool Usage(动态生成) ───
+// ─── Segment: Meta Protocol(消息流元信息标签解释) ───
+
+/**
+ * 告知 LLM 对话历史中可能出现的 `<system-meta kind="...">` 标签格式与处理规则。
+ *
+ * 这些标签由上下文管理机制(compact / drop 等)插入,不是用户原话。
+ * 文本内容由 `@zhixing/core` 的 `SYSTEM_META_PROMPT_SECTION` 常量提供 ——
+ * 与产生标签的 `system-meta` 模块同源,改一处自动同步。
+ */
+function buildMetaProtocol(): string {
+  return SYSTEM_META_PROMPT_SECTION;
+}
+
+// ─── Segment: Tool Usage(动态生成) ───
 
 /**
  * 从注册的工具列表动态生成工具使用偏好。

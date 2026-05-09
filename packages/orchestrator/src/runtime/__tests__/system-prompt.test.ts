@@ -79,6 +79,44 @@ describe("buildSystemPrompt", () => {
     expect(prompt).toContain("destructive");
   });
 
+  it("包含消息流元协议段(解释 <system-meta> 标签)", () => {
+    const prompt = buildSystemPrompt(ctx);
+    expect(prompt).toContain("[系统元信息标签]");
+    expect(prompt).toContain("<system-meta kind=");
+    expect(prompt).toContain("compact-summary");
+    expect(prompt).toContain("dropped-turns");
+  });
+
+  it("元协议段位于 Principles 之后、Tool Usage 之前", () => {
+    const prompt = buildSystemPrompt(ctx);
+    const principlesIdx = prompt.indexOf("## Principles");
+    const metaIdx = prompt.indexOf("[系统元信息标签]");
+    const toolUsageIdx = prompt.indexOf("## Tool Usage");
+    expect(principlesIdx).toBeGreaterThan(0);
+    expect(metaIdx).toBeGreaterThan(principlesIdx);
+    expect(toolUsageIdx).toBeGreaterThan(metaIdx);
+  });
+
+  it("子 agent system prompt 也包含元协议段", () => {
+    const profile = subAgentProfile({ subAgentId: "sub-1", task: "t" });
+    const prompt = buildSystemPrompt({
+      ...ctx,
+      profile,
+      segments: SUB_AGENT_SEGMENTS,
+    });
+    expect(prompt).toContain("[系统元信息标签]");
+  });
+
+  it("元协议段在不同 ctx / 调用次数间 byte-equal(prompt cache 友好)", () => {
+    // 元协议段位于缓存分界之前的静态区,跨 ctx 必须 byte-equal
+    const prompt1 = buildSystemPrompt(ctx);
+    const prompt2 = buildSystemPrompt({ ...ctx, cwd: "/other/path" });
+    const static1 = prompt1.split(CACHE_BOUNDARY)[0]!;
+    const static2 = prompt2.split(CACHE_BOUNDARY)[0]!;
+    expect(static1).toBe(static2);
+    expect(static1).toContain("[系统元信息标签]");
+  });
+
   it("包含缓存分界标记", () => {
     const prompt = buildSystemPrompt(ctx);
     expect(prompt).toContain("__ZHIXING_CACHE_BOUNDARY__");
@@ -213,6 +251,17 @@ describe("buildSystemPrompt", () => {
       - If a command fails, analyze the error and try an alternative approach
       - Show your reasoning when making non-obvious decisions
 
+      [系统元信息标签]
+      对话历史中可能出现 <system-meta kind="..."> 标签，这是上下文管理机制插入的元信息，不是用户原话：
+      - kind="compact-summary": 之前对话的压缩摘要，已替代早期消息
+      - kind="ack": 紧跟摘要的阅读回执（由你先前发出）
+      - kind="dropped-turns" count="N": 已省略 N 轮对话的占位标记
+
+      遇到这些标签时：
+      - 按 kind 字段理解含义，将其中内容作为上下文使用
+      - 不要回应标签本身（它们不是用户提问）
+      - 基于可见的信息继续对话
+
       ## Tool Usage
       - Use \`read\` to view file contents, not bash cat/head/tail
       - Use \`grep\` to search file contents by regex, not bash grep/rg
@@ -257,6 +306,17 @@ describe("buildSystemPrompt", () => {
       - Search before act: use glob/grep to discover relevant files before reading or editing
       - If a command fails, analyze the error and try an alternative approach
       - Show your reasoning when making non-obvious decisions
+
+      [系统元信息标签]
+      对话历史中可能出现 <system-meta kind="..."> 标签，这是上下文管理机制插入的元信息，不是用户原话：
+      - kind="compact-summary": 之前对话的压缩摘要，已替代早期消息
+      - kind="ack": 紧跟摘要的阅读回执（由你先前发出）
+      - kind="dropped-turns" count="N": 已省略 N 轮对话的占位标记
+
+      遇到这些标签时：
+      - 按 kind 字段理解含义，将其中内容作为上下文使用
+      - 不要回应标签本身（它们不是用户提问）
+      - 基于可见的信息继续对话
 
       ## Tool Usage
       - Use \`read\` to view file contents, not bash cat/head/tail
@@ -354,6 +414,17 @@ describe("buildSystemPrompt", () => {
       - If a command fails, analyze the error and try an alternative approach
       - Show your reasoning when making non-obvious decisions
 
+      [系统元信息标签]
+      对话历史中可能出现 <system-meta kind="..."> 标签，这是上下文管理机制插入的元信息，不是用户原话：
+      - kind="compact-summary": 之前对话的压缩摘要，已替代早期消息
+      - kind="ack": 紧跟摘要的阅读回执（由你先前发出）
+      - kind="dropped-turns" count="N": 已省略 N 轮对话的占位标记
+
+      遇到这些标签时：
+      - 按 kind 字段理解含义，将其中内容作为上下文使用
+      - 不要回应标签本身（它们不是用户提问）
+      - 基于可见的信息继续对话
+
       ## Tool Usage
       - Use \`read\` to view file contents, not bash cat/head/tail
       - Use \`grep\` to search file contents by regex, not bash grep/rg
@@ -443,6 +514,17 @@ describe("buildSystemPrompt · sub-agent-delegation 段条件性渲染", () => {
       - Search before act: use glob/grep to discover relevant files before reading or editing
       - If a command fails, analyze the error and try an alternative approach
       - Show your reasoning when making non-obvious decisions
+
+      [系统元信息标签]
+      对话历史中可能出现 <system-meta kind="..."> 标签，这是上下文管理机制插入的元信息，不是用户原话：
+      - kind="compact-summary": 之前对话的压缩摘要，已替代早期消息
+      - kind="ack": 紧跟摘要的阅读回执（由你先前发出）
+      - kind="dropped-turns" count="N": 已省略 N 轮对话的占位标记
+
+      遇到这些标签时：
+      - 按 kind 字段理解含义，将其中内容作为上下文使用
+      - 不要回应标签本身（它们不是用户提问）
+      - 基于可见的信息继续对话
 
       ## Tool Usage
       - Use \`read\` to view file contents, not bash cat/head/tail
