@@ -638,23 +638,21 @@ export async function createAgentRuntime(
         // 将项目上下文 + 匹配的技能 + 反思提示注入到首条 user message
         const messagesWithContext = injectContext(params.messages, enrichedContext);
 
-        // Per-turn 动态上下文注入到最新 user message（时间、任务状态等）
-        const messagesWithTurnContext = turnContextInjector.inject(messagesWithContext);
-
         // pre-flight compact 检查 —— 防止上 run 尾累积到超标、下 run 入口直接送 LLM 爆 context。
         //
-        // 关键设计：必须在 messagesWithTurnContext 上跑，不能在 params.messages 上。
-        //   params.messages 到 messagesWithTurnContext 的 token 增量可能达数 K（project context +
+        // 关键设计：跑在 messagesWithContext（含项目上下文与技能注入）上，不在 params.messages。
+        //   params.messages 到 messagesWithContext 的 token 增量可能达数 K（project context +
         //   enriched skills），在小模型（32K）上可能跨越一个预算阈值。pre-flight 必须看真实输入
         //   才能做出正确决策。
         //
-        // 代价：如果 LLMSummarize 在 pre-flight 触发，注入的内容会被一起 summarize。系统提示
-        //   要求"标识符原样保留"，路径/文件名等保留；注入内容进入 summary 是冗余但不破坏语义。
+        // turn-context 块（时间、任务状态等）由 agent-loop 在每次 LLM call 之前 per-call inject，
+        // pre-flight 这里不预 inject——避免 inject 与 pre-flight 触发的 LLMSummarize 双重处理；
+        // turn-context 体积较小（百级 tokens），pre-flight 评估的 under-estimate 不会跨预算阈值。
         //
         // 终止归一化：复用 core 的 `resolveContextManager`，与 agent-loop 内部两条触发点
         // 共享同一判别逻辑（throw / aborted / overflow），避免第三处复制 abort 优先规则
         // 和 AgentError 包装 —— 新加触发点时只需做 shape 映射。
-        let loopMessages = messagesWithTurnContext;
+        let loopMessages = messagesWithContext;
 
         // 原始 user 消息（params.messages 最后一条，未经 enrichContext / turnContextInjector 增强）
         // —— buildTurn 契约要求持久化 Turn 的 userMessage 是用户真实输入，不是内部增强版
@@ -679,8 +677,9 @@ export async function createAgentRuntime(
             }),
             newMessages: [],
             durationMs: Date.now() - startTime,
-            // budget 快照用 messagesWithTurnContext —— 即使 engine 抛错也能给一个保守值
-            budget: contextEngine.checkBudget(messagesWithTurnContext),
+            // budget 快照用 messagesWithContext —— 即使 engine 抛错也能给一个保守值；
+            // turn-context 块由 agent-loop per-LLM-call 注入，不在此 budget 估算里
+            budget: contextEngine.checkBudget(messagesWithContext),
             toolEndCount: 0,
             injectedSkillIds: enrichedContext.injectedSkillIds,
             compactBefore,
@@ -690,7 +689,7 @@ export async function createAgentRuntime(
         const preFlight = await resolveContextManager(
           contextEngine,
           {
-            messages: messagesWithTurnContext,
+            messages: messagesWithContext,
             turnCount: 0,
             abortSignal: params.abortSignal,
           },
@@ -761,6 +760,9 @@ export async function createAgentRuntime(
           },
           contextManager: contextEngine,
           llmRoles: roles,
+          // 视图层 turn-context 注入由 agent-loop 在每次 LLM call 之前调用，
+          // 让任务状态 / 定时任务 / 时间等动态信息在多 LLM call 之间实时刷新
+          turnContextInjector,
         });
 
         while (true) {

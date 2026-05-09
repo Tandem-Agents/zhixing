@@ -196,12 +196,17 @@ export class ConversationRepository implements IConversationRepository {
   // ─── 内部方法 ───
 
   private async readMeta(id: string): Promise<Conversation | null> {
-    try {
-      const content = await fs.readFile(metaPath(this.scope, id), "utf-8");
-      return JSON.parse(content) as Conversation;
-    } catch {
-      return null;
-    }
+    // Per-id 锁保护读路径：Windows 原子写在 unlink + rename 之间有瞬态文件不存在窗口，
+    // 并发的 readFile 撞上会 ENOENT。读路径走同一把锁，让读看到完整 meta.json，
+    // 不会与 writeMeta 的中段步骤竞态。跨 id 读不互斥。
+    return this.withMetaLock(id, async () => {
+      try {
+        const content = await fs.readFile(metaPath(this.scope, id), "utf-8");
+        return JSON.parse(content) as Conversation;
+      } catch {
+        return null;
+      }
+    });
   }
 
   /**

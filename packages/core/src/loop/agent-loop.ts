@@ -49,7 +49,9 @@ import { createInterruptController, getAbortReason } from "../interrupt/controll
 import { toAgentError } from "../types/errors.js";
 import { emptyUsage, mergeUsage, type TokenUsage } from "../types/llm.js";
 import { extractText, extractToolCalls, toolResultMessage } from "../types/messages.js";
+import type { Message } from "../types/messages.js";
 import { toToolSpec } from "../types/tools.js";
+import type { ToolDefinition } from "../types/tools.js";
 import { streamLLMCall } from "./llm-call.js";
 import { executeToolCalls } from "./tool-executor.js";
 import { logDiagnostic } from "../diagnostics.js";
@@ -243,17 +245,44 @@ export async function* runAgentLoop(
         });
       }
 
-      // ── Step 1: Call LLM ──
+      // ── Step 1: 视图层编排（每次 LLM call 之前重做） ──
+      //
+      // 顺序：state.messages → contextCompiler.compile → turnContextInjector.inject →
+      // streamLLMCall。两者均为可选注入；缺省时 messages / tools 直接透传，行为与历史一致。
+      //
+      // 为什么是 per-LLM-call：同一 run() 内 LLM 多次 call 之间 turn-context 状态可能演化
+      // （任务列表、定时任务等），单 run 入口注入一次会让后续 call 看到陈旧内容；
+      // 每次 LLM call 之前重 inject 让最新状态实时可见，inject 内部自动 strip 旧块防累积。
+      let messagesForLLM: readonly Message[] = state.messages;
+      let toolsForLLM = tools;
+      if (params.contextCompiler) {
+        const compiled = await params.contextCompiler.compile({
+          messages: state.messages,
+          tools,
+          state: {},
+        });
+        messagesForLLM = compiled.messages;
+        toolsForLLM = compiled.tools as ToolDefinition[];
+        // stateDelta 当前为空 type；后续阶段引入 capabilityState / 任务系统状态时
+        // 由 caller 在 LLM call 完成后应用——目前空 type 无字段需应用。
+      }
+      if (params.turnContextInjector) {
+        messagesForLLM = params.turnContextInjector.inject(messagesForLLM);
+      }
+      const callToolSpecs =
+        toolsForLLM === tools ? toolSpecs : toolsForLLM.map(toToolSpec);
+
+      // ── Step 2: Call LLM ──
       // 接 controller (非 signal):看门狗触发 idle-timeout 时需要 controller.abort() 写权限,
       // controller 由 agent-loop 持有, signal 全程透传 Provider/工具/contextManager。
       // watchdog 不在本层 fallback 默认值: spec 规定默认 fallback 单点存在于 cli/run-agent.ts
       // 注入边界, 保证用户显式禁用 idle-timer (`{ idleTimeoutMs: 0 }`) 不被 agent-loop 二次覆盖。
       const llmResult = yield* streamLLMCall({
         deps,
-        messages: state.messages,
+        messages: messagesForLLM as Message[],
         model,
         systemPrompt,
-        toolSpecs,
+        toolSpecs: callToolSpecs,
         controller,
         watchdog: params.watchdog,
         eventBus,

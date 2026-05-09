@@ -22,6 +22,8 @@ import type {
 import type { Message, ToolResultBlock, ToolUseBlock } from "../types/messages.js";
 import type { ToolDefinition, ToolExecutionContext, ToolResult } from "../types/tools.js";
 import type { ContextManagerHook, ContextBudget } from "../context/types.js";
+import type { ContextCompiler } from "../context/compiler/index.js";
+import type { TurnContextInjector } from "../context/turn-context.js";
 import type { CompactMarker, Turn } from "../transcript/types.js";
 import type { AbortReason, WatchdogPolicy } from "../interrupt/types.js";
 
@@ -89,6 +91,24 @@ export interface AgentLoopParams {
    * (60s idle, 50% warn) —— 单测路径可省略, 生产路径由 run-agent.ts 显式注入。
    */
   watchdog?: WatchdogPolicy;
+  /**
+   * 视图层渲染器 —— 每次 LLM call 之前对 messages / tools 做语义编排。
+   *
+   * 缺省时不做任何编排，messages / tools 直接送 LLM（向后兼容）。
+   * 注册了 stage 时按 stage 链顺序串行渲染，输出送给 streamLLMCall。
+   */
+  contextCompiler?: ContextCompiler;
+  /**
+   * Per-turn 动态上下文注入器 —— 每次 LLM call 之前把 `<turn-context>` 块
+   * 注入到最新 user message。
+   *
+   * 缺省时不注入。注册时由 caller 在外部完成 provider 注册（如 TimeProvider /
+   * SchedulerProvider 等），agent-loop 仅按调用约定每次 LLM call 之前调一次 inject。
+   *
+   * 与 contextCompiler 顺序：先 compile，再 inject——保证 turn-context 块基于
+   * 编排后的 messages 注入到正确位置。
+   */
+  turnContextInjector?: TurnContextInjector;
 }
 
 // ─── 依赖注入 ───

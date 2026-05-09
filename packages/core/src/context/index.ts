@@ -124,3 +124,14 @@ export {
   SchedulerProvider,
   TurnContextInjector,
 } from "./turn-context.js";
+
+export type {
+  CompileInput,
+  CompileOutput,
+  RenderContext,
+  RenderState,
+  Stage,
+  StageOutput,
+  StateDelta,
+} from "./compiler/index.js";
+export { ContextCompiler } from "./compiler/index.js";
