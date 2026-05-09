@@ -1,7 +1,7 @@
 /**
  * Message Turns — "turn 在消息数组中的视图" 抽象层
  *
- * 这个模块是多个策略（ToolResultTrim / MessageDrop / LLMSummarize /
+ * 这个模块是多个策略与窗口管理（MessageDrop / LLMSummarize /
  * WindowManager / TierCompressor）共享的 turn 视图单一事实源。
  *
  * 概念：

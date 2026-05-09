@@ -282,8 +282,8 @@ export interface RunResult {
    * （多触发点累加，见 L1 累积算法）。commitTurn 按此值切分磁盘 turns
    * 保留末尾。
    *
-   * 非摘要型压缩（ToolResultTrim / MessageDrop 等）不填此字段 ——
-   * 它们不替代文件 Turn，只是内存 tier 级裁剪，不影响持久化边界。
+   * 非摘要型压缩（MessageDrop 等）不填此字段 ——
+   * 它们不替代文件 Turn，只做内存级裁剪，不影响持久化边界。
    */
   readonly compactBefore?: CompactMarker;
 

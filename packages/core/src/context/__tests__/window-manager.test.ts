@@ -12,7 +12,7 @@ import {
   assistantMessage,
   toolResultMessage,
 } from "../../types/messages.js";
-import type { TierThresholds } from "../context-profile.js";
+import type { TierThresholds } from "../types.js";
 import { detectSystemMetaKind } from "../system-meta.js";
 
 // ─── 测试辅助 ───

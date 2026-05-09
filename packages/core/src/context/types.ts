@@ -81,6 +81,22 @@ export const DEFAULT_THRESHOLDS: BudgetThresholds = {
  */
 export const MAX_OUTPUT_RESERVE = 20_000;
 
+// ─── Tier 压缩阈值 ───
+
+/**
+ * Tier 压缩阈值：tool_result 按轮距四级压缩。
+ *
+ * - Tier 1（轮距 ≤ T1）：完整保留
+ * - Tier 2（T1 < 轮距 ≤ T2）：trim 到 2000 字符
+ * - Tier 3（T2 < 轮距 ≤ T3）：trim 到 500 字符 + 结构标记
+ * - Tier 4（轮距 > T3）：替换为 `[tool=X bytes=N, recallable]` 骨架
+ */
+export interface TierThresholds {
+  readonly T1: number;
+  readonly T2: number;
+  readonly T3: number;
+}
+
 // ─── LLM 调用契约 ───
 
 /**
@@ -125,8 +141,8 @@ export interface CompactionResult {
   /**
    * 摘要型策略（LLMSummarize）生成的摘要文本。
    *
-   * 语义：本次压缩替代掉的消息的 LLM 摘要；非摘要型策略（ToolResultTrim /
-   * MessageDrop / MemoryFlush）填 undefined。
+   * 语义：本次压缩替代掉的消息的 LLM 摘要；非摘要型策略（MessageDrop /
+   * MemoryFlush）填 undefined。
    *
    * 消费者：engine 事务化聚合后通过 compact_end 事件暴露给 run-agent；
    * run-agent 闭包 L1 累积后作为 CompactMarker.summary 写入 transcript。
@@ -159,7 +175,7 @@ export interface CompactionResult {
  *
  * 分类语义：
  *   - "summarize"：产 summary 替代 turn（LLM 调用）。critical force-apply 的候选。
- *   - "trim"：粒度内裁剪（不替代 turn，如 ToolResultTrim）。免费。
+ *   - "trim"：粒度内裁剪（不替代 turn）。免费。
  *   - "drop"：丢弃消息（不替代 turn，如 MessageDrop）。免费。
  *   - "flush"：外化副作用（如 MemoryFlush 写 store，不改 messages）。LLM 调用但非摘要替代。
  *
@@ -174,11 +190,11 @@ export type CompactionStrategyKind =
 /**
  * 可插拔的压缩策略接口。
  *
- * 内置策略按优先级：
- * - P0: ToolResultTrim（免费，截断旧 tool_result） kind=trim
- * - P1: MemoryFlush    （LLM，提取并持久化）       kind=flush
- * - P1: MessageDrop    （免费，丢弃早期消息）      kind=drop
- * - P2: LLMSummarize   （昂贵，LLM 生成摘要）     kind=summarize
+ * 内置策略按优先级（数据层 tool_result 体积管理由 manageWindow.applyTierCompression 处理，
+ * 不在 strategies 链路内）：
+ * - MemoryFlush  （LLM，提取并持久化）       kind=flush
+ * - MessageDrop  （免费，丢弃早期消息）      kind=drop
+ * - LLMSummarize （昂贵，LLM 生成摘要）     kind=summarize
  */
 export interface CompactionStrategy {
   readonly name: string;

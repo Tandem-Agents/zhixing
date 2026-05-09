@@ -243,8 +243,8 @@ export class LLMSummarizeStrategy implements CompactionStrategy {
 }
 
 /**
- * 工厂函数 —— 与其他策略（createToolResultTrimStrategy / createMessageDropStrategy /
- * createMemoryFlushStrategy）命名一致，方便在 strategies 数组中统一风格注册。
+ * 工厂函数 —— 与其他策略（createMessageDropStrategy / createMemoryFlushStrategy）
+ * 命名一致，方便在 strategies 数组中统一风格注册。
  */
 export function createLLMSummarizeStrategy(
   config: LLMSummarizeConfig,

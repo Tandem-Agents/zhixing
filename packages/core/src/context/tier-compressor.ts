@@ -1,11 +1,9 @@
 /**
  * TierCompressor（分级压缩器） — 四级 tool_result 渐进压缩
  *
- * 规格引用：context-architecture.md §3.4 / §7
- *
  * 设计原则：
  * - 按 turn distance 分级：近期完整保留，远期渐进压缩
- * - Profile 参数化：T1/T2/T3 阈值由 ContextProfile.tierThresholds 决定
+ * - 阈值参数化：T1/T2/T3 由调用方注入的 TierThresholds 决定
  * - 每轮预防性运行：不等预算超标，始终保持 tool_result 在合适 tier
  * - 幂等：重复运行不会重复截断
  * - Tier 4 保留骨架：tool_use 结构不变，结果可通过 recall_history 恢复
@@ -18,7 +16,7 @@
  */
 
 import type { ContentBlock, Message, ToolResultBlock } from "../types/messages.js";
-import type { TierThresholds } from "./context-profile.js";
+import type { TierThresholds } from "./types.js";
 import { calculateMessageTurns } from "./message-turns.js";
 
 // ─── 常量 ───

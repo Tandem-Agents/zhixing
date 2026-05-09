@@ -38,7 +38,6 @@ import {
   createTokenEstimator,
   ToolArgumentExtractor,
   emptyUsage,
-  createToolResultTrimStrategy,
   createMessageDropStrategy,
   createMemoryFlushStrategy,
   DEFAULT_WATCHDOG_POLICY,
@@ -189,8 +188,8 @@ export interface ForceCompactResult {
    * 消费者：REPL /compact 直接把这个 marker 交给 store.appendCompact 持久化，
    * 不再自己拼接 "(manual compact)" 等硬编码字符串。
    *
-   * 为什么 optional：如果 forceCompact 只触发了非摘要型策略（ToolResultTrim /
-   * MessageDrop），没有 LLM 生成的 summary，此时不该写 compact marker（会产生
+   * 为什么 optional：如果 forceCompact 只触发了非摘要型策略（如 MessageDrop /
+   * MemoryFlush），没有 LLM 生成的 summary，此时不该写 compact marker（会产生
    * 假摘要污染 transcript）。调用方应该判断此字段存在再持久化。
    */
   compactBefore?: CompactMarker;
@@ -457,12 +456,13 @@ export async function createAgentRuntime(
   const flushCallLLM = createCompactionFlush(roles);
 
   // 策略编排（engine 按 priority asc 执行，到 normal/warning 就 break）：
-  //   priority 0   ToolResultTrim  免费 — 旧轮 tool_result 裁剪
   //   priority 3   MemoryFlush     有 LLM 调用 — 仅 usage >= 0.75 触发
   //   priority 5   MessageDrop     免费 — usage < 0.9 触发（超过 0.9 让给 LLMSummarize）
   //   priority 200 LLMSummarize    昂贵 — usage >= 0.9 触发，MessageDrop 让位
+  //
+  // tool_result 体积管理由数据层 manageWindow.applyTierCompression 统一负责（每轮无条件运行），
+  // 不在 strategies 链路内重复处理。
   const strategies = [
-    createToolResultTrimStrategy(),
     createMemoryFlushStrategy({ callLLM: flushCallLLM, store: memoryStore }),
     createMessageDropStrategy(),
     createLLMSummarizeStrategy({

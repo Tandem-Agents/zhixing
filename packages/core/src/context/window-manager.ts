@@ -1,8 +1,6 @@
 /**
  * WindowManager — 消息窗口管理 + Pinning + 级联淘汰
  *
- * 规格引用：context-architecture.md §3.3 (WindowManager) + §6 (Eviction)
- *
  * 设计原则：
  * - 纯函数：无状态，输入 → 输出
  * - Pin 保护：pinned 消息永远不被淘汰
@@ -17,8 +15,7 @@
  */
 
 import type { Message } from "../types/messages.js";
-import type { TierThresholds } from "./context-profile.js";
-import type { ITokenEstimator } from "./types.js";
+import type { ITokenEstimator, TierThresholds } from "./types.js";
 import { applyTierCompression, type TierStats } from "./tier-compressor.js";
 import { calculateMessageTurns } from "./message-turns.js";
 import { buildDroppedTurnsMessage } from "./system-meta.js";

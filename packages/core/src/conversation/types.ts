@@ -1,11 +1,9 @@
 /**
  * Conversation 持久层类型定义
  *
- * 对应 conversation-model.md §3.1 — Conversation 是用户视角的对话身份，
- * 持久化在磁盘，与 SessionRuntime（内存运行态）和 Turn（单次执行）分层。
+ * Conversation 是用户视角的对话身份，持久化在磁盘的 meta.json，
+ * 与 SessionRuntime（内存运行态）和 Turn（单次执行）分层。
  */
-
-import type { ScenarioHint } from "../context/context-profile.js";
 
 // ─── 核心类型 ───
 
@@ -28,8 +26,6 @@ export interface Conversation {
   preferredProvider?: string;
   /** 隔离作用域 */
   scope: ConversationScope;
-  /** 场景 hint：Turn 1 分类后 Sticky 持久，单调升级 */
-  currentHint?: ScenarioHint;
 }
 
 /** 对话的隔离作用域 */

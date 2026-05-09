@@ -253,15 +253,7 @@ describe("abort 契约 · ContextEngine.onTurnComplete", () => {
       modelInfo: MODEL_INFO,
       thresholds: { warning: 0.1, compact: 0.5, critical: 0.9 },
       // 不激活 Tier 层，隔离测试 strategies
-      profile: {
-        name: "interactive",
-        includeProfile: true,
-        layer2Mode: "basic",
-        toolCategories: [],
-        budgetThresholds: { warning: 0.1, compact: 0.5, critical: 0.9 },
-        tierThresholds: null,
-        onExhausted: "yield-error-to-user",
-      },
+      tierThresholds: null,
     });
 
     const messages = makeMessages(10);

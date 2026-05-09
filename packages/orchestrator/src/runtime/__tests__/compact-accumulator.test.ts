@@ -87,9 +87,9 @@ describe("subscribeCompactAccumulator · 基础累积规则", () => {
     const bus = makeBus();
     const acc = subscribeCompactAccumulator(bus);
 
-    // 非摘要型事务（ToolResultTrim / MessageDrop 等）—— summary 缺失
+    // 非摘要型事务（如 MessageDrop）—— summary 缺失
     await bus.emit("context:compact_end", makeEvent({
-      strategies: [{ name: "tool_result_trim", success: true, tokensBefore: 2000, tokensAfter: 1500 }],
+      strategies: [{ name: "trim_legacy", success: true, tokensBefore: 2000, tokensAfter: 1500 }],
       tokensBefore: 2000,
       tokensAfter: 1500,
       // 无 summary

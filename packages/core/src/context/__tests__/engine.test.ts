@@ -8,9 +8,7 @@ import {
 } from "../../types/messages.js";
 import type { Message } from "../../types/messages.js";
 import { ContextEngine, createContextEngine } from "../engine.js";
-import { INTERACTIVE_PROFILE } from "../context-profile.js";
 import { createTokenEstimator } from "../token-estimator.js";
-import { createToolResultTrimStrategy } from "../strategies/tool-result-trim.js";
 import type {
   CompactStrategyContribution,
   CompactionContext,
@@ -19,19 +17,51 @@ import type {
 } from "../types.js";
 
 /**
- * 构造一个禁用 Tier 压缩的 profile 克隆。
+ * 测试专用 trim 策略 —— 模拟数据层 trim 型策略的最小行为，
+ * 用于驱动 engine 的策略编排路径（priority、事件、force-apply 等）。
  *
- * 很多 strategy 层的断言（比如"strategies 执行顺序"/"发 compact_start 事件"）
- * 需要把 context 引入 compact 阈值。但默认 profile 的 Tier 压缩会先把大部分
- * tool_result trim 掉，反而让预算回到 normal，strategies 永远跑不到。
- *
- * 这些测试关心的是"strategies 层行为"，因此隔离掉 Tier 层的干扰更符合测试意图。
- * 真实生产下 Tier 先跑是期望行为（见 context-profile.ts / window-manager.ts 的设计）。
+ * 行为：当 currentTurn 跨过 staleTurnThreshold 时 canApply=true，
+ * apply 时把"距离当前 turn ≥ staleTurnThreshold"的 tool_result 截到 keepChars。
+ * staleTurnThreshold 设极大值可模拟"无可压缩内容"的场景（force-apply 测试用）。
  */
-const STRATEGY_ONLY_PROFILE = {
-  ...INTERACTIVE_PROFILE,
-  tierThresholds: null,
-} as const;
+function createTrimMock(
+  opts: { staleTurnThreshold?: number; keepChars?: number } = {},
+): CompactionStrategy {
+  const staleTurnThreshold = opts.staleTurnThreshold ?? 4;
+  const keepChars = opts.keepChars ?? 200;
+  return {
+    name: "trim_mock",
+    priority: 0,
+    kind: "trim",
+    requiresLLM: false,
+    canApply: (ctx) => ctx.currentTurn >= staleTurnThreshold,
+    apply: async (ctx) => {
+      const cutoffTurn = ctx.currentTurn - staleTurnThreshold + 1;
+      let modified = false;
+      let assistantSeen = 0;
+      const newMessages = ctx.messages.map((msg) => {
+        if (msg.role === "assistant") assistantSeen++;
+        if (msg.role !== "user") return msg;
+        if (assistantSeen >= cutoffTurn) return msg;
+        const newContent = msg.content.map((block) => {
+          if (block.type !== "tool_result") return block;
+          const text =
+            typeof block.content === "string"
+              ? block.content
+              : "";
+          if (text.length <= keepChars) return block;
+          modified = true;
+          return {
+            ...block,
+            content: text.slice(0, keepChars) + "...[trimmed]",
+          };
+        });
+        return { ...msg, content: newContent };
+      });
+      return { compacted: modified, messages: newMessages };
+    },
+  };
+}
 
 // ─── 测试辅助 ───
 
@@ -101,7 +131,7 @@ describe("ContextEngine.checkBudget", () => {
 describe("ContextEngine.onTurnComplete", () => {
   it("does not modify messages when budget is normal", async () => {
     const estimator = createTokenEstimator();
-    const strategy = createToolResultTrimStrategy();
+    const strategy = createTrimMock();
     const engine = createContextEngine(estimator, [strategy], {
       modelInfo: LARGE_MODEL,
     });
@@ -115,7 +145,7 @@ describe("ContextEngine.onTurnComplete", () => {
 
   it("triggers compaction when budget exceeds compact threshold", async () => {
     const estimator = createTokenEstimator();
-    const strategy = createToolResultTrimStrategy({
+    const strategy = createTrimMock({
       staleTurnThreshold: 2,
       keepChars: 100,
     });
@@ -124,7 +154,7 @@ describe("ContextEngine.onTurnComplete", () => {
     const engine = createContextEngine(estimator, [strategy], {
       modelInfo: SMALL_MODEL,
       thresholds: { warning: 0.05, compact: 0.10, critical: 0.9 },
-      profile: STRATEGY_ONLY_PROFILE,
+      tierThresholds: null,
     });
 
     const messages = buildLargeConversation(10, 2000);
@@ -176,7 +206,7 @@ describe("ContextEngine.onTurnComplete", () => {
     const engine = createContextEngine(estimator, [strategy1, strategy2], {
       modelInfo: SMALL_MODEL,
       thresholds: { warning: 0.005, compact: 0.01, critical: 0.9 },
-      profile: STRATEGY_ONLY_PROFILE,
+      tierThresholds: null,
     });
 
     const messages = buildLargeConversation(3, 500);
@@ -229,7 +259,7 @@ describe("ContextEngine.onTurnComplete", () => {
       {
         modelInfo: SMALL_MODEL,
         thresholds: { warning: 0.01, compact: 0.02, critical: 0.9 },
-        profile: STRATEGY_ONLY_PROFILE,
+        tierThresholds: null,
       },
     );
 
@@ -258,7 +288,7 @@ describe("ContextEngine.onTurnComplete", () => {
     const engine = createContextEngine(estimator, [skippedStrategy], {
       modelInfo: SMALL_MODEL,
       thresholds: { warning: 0.01, compact: 0.02, critical: 0.9 },
-      profile: STRATEGY_ONLY_PROFILE,
+      tierThresholds: null,
     });
 
     const messages = buildLargeConversation(3, 500);
@@ -303,7 +333,7 @@ describe("ContextEngine events", () => {
     );
 
     const estimator = createTokenEstimator();
-    const strategy = createToolResultTrimStrategy({
+    const strategy = createTrimMock({
       staleTurnThreshold: 2,
       keepChars: 100,
     });
@@ -314,7 +344,7 @@ describe("ContextEngine events", () => {
       {
         modelInfo: SMALL_MODEL,
         thresholds: { warning: 0.01, compact: 0.02, critical: 0.9 },
-        profile: STRATEGY_ONLY_PROFILE,
+        tierThresholds: null,
       },
       eventBus,
     );
@@ -334,7 +364,7 @@ describe("ContextEngine events", () => {
       tokensAfter: number;
     };
     expect(endPayload.strategies).toHaveLength(1);
-    expect(endPayload.strategies[0]!.name).toBe("tool_result_trim");
+    expect(endPayload.strategies[0]!.name).toBe("trim_mock");
     expect(endPayload.strategies[0]!.success).toBe(true);
   });
 
@@ -382,7 +412,7 @@ describe("ContextEngine events", () => {
       {
         modelInfo: SMALL_MODEL,
         thresholds: { warning: 0.01, compact: 0.02, critical: 0.9 },
-        profile: STRATEGY_ONLY_PROFILE,
+        tierThresholds: null,
       },
       eventBus,
     );
@@ -431,7 +461,7 @@ describe("ContextEngine events", () => {
       {
         modelInfo: SMALL_MODEL,
         thresholds: { warning: 0.01, compact: 0.02, critical: 0.9 },
-        profile: STRATEGY_ONLY_PROFILE,
+        tierThresholds: null,
       },
       eventBus,
     );
@@ -466,7 +496,7 @@ describe("ContextEngine events", () => {
       {
         modelInfo: SMALL_MODEL,
         thresholds: { warning: 0.01, compact: 0.02, critical: 0.9 },
-        profile: STRATEGY_ONLY_PROFILE,
+        tierThresholds: null,
       },
       eventBus,
     );
@@ -512,7 +542,7 @@ describe("ContextEngine events", () => {
       {
         modelInfo: SMALL_MODEL,
         thresholds: { warning: 0.01, compact: 0.02, critical: 0.9 },
-        profile: STRATEGY_ONLY_PROFILE,
+        tierThresholds: null,
       },
       eventBus,
     );
@@ -572,7 +602,7 @@ describe("ContextEngine events", () => {
       {
         modelInfo: SMALL_MODEL,
         thresholds: { warning: 0.01, compact: 0.02, critical: 0.9 },
-        profile: STRATEGY_ONLY_PROFILE,
+        tierThresholds: null,
       },
       eventBus,
     );
@@ -607,7 +637,7 @@ describe("ContextEngine events", () => {
         tokensBefore: ctx.budget.currentTokens,
         tokensAfter: ctx.budget.currentTokens,
         compacted: true,
-        // 无 summary / turnsCompacted —— 模拟 ToolResultTrim / MessageDrop
+        // 无 summary / turnsCompacted —— 模拟非摘要型策略（如 MessageDrop）
       }),
     };
     const summarizer: CompactionStrategy = {
@@ -632,7 +662,7 @@ describe("ContextEngine events", () => {
       {
         modelInfo: SMALL_MODEL,
         thresholds: { warning: 0.01, compact: 0.02, critical: 0.9 },
-        profile: STRATEGY_ONLY_PROFILE,
+        tierThresholds: null,
       },
       eventBus,
     );
@@ -671,7 +701,7 @@ describe("ContextEngine events", () => {
       {
         modelInfo: SMALL_MODEL,
         thresholds: { warning: 0.01, compact: 0.02, critical: 0.9 },
-        profile: STRATEGY_ONLY_PROFILE,
+        tierThresholds: null,
       },
       eventBus,
     );
@@ -708,7 +738,7 @@ describe("ContextEngine events", () => {
       {
         modelInfo: SMALL_MODEL,
         thresholds: { warning: 0.01, compact: 0.02, critical: 0.9 },
-        profile: STRATEGY_ONLY_PROFILE,
+        tierThresholds: null,
       },
       eventBus,
     );
@@ -734,7 +764,7 @@ describe("ContextEngine events", () => {
     );
 
     const estimator = createTokenEstimator();
-    const strategy = createToolResultTrimStrategy({
+    const strategy = createTrimMock({
       staleTurnThreshold: 2,
       keepChars: 100,
     });
@@ -745,7 +775,7 @@ describe("ContextEngine events", () => {
       {
         modelInfo: SMALL_MODEL,
         thresholds: { warning: 0.01, compact: 0.02, critical: 0.9 },
-        profile: STRATEGY_ONLY_PROFILE,
+        tierThresholds: null,
       },
       eventBus,
     );
@@ -872,7 +902,7 @@ describe("ContextEngine critical force-apply 契约（Phase 4 S3）", () => {
       {
         modelInfo: SMALL_MODEL,
         thresholds: FORCE_CRITICAL_THRESHOLDS,
-        profile: STRATEGY_ONLY_PROFILE,
+        tierThresholds: null,
       },
       eventBus,
     );
@@ -910,7 +940,7 @@ describe("ContextEngine critical force-apply 契约（Phase 4 S3）", () => {
     const engine = createContextEngine(estimator, [mockStrategy], {
       modelInfo: SMALL_MODEL,
       thresholds: FORCE_CRITICAL_THRESHOLDS,
-      profile: STRATEGY_ONLY_PROFILE,
+      tierThresholds: null,
     });
 
     const messages = buildLargeConversation(6, 2000);
@@ -935,7 +965,7 @@ describe("ContextEngine critical force-apply 契约（Phase 4 S3）", () => {
     const engine = createContextEngine(estimator, [mockStrategy], {
       modelInfo: SMALL_MODEL,
       thresholds: FORCE_CRITICAL_THRESHOLDS,
-      profile: STRATEGY_ONLY_PROFILE,
+      tierThresholds: null,
     });
 
     const messages = buildLargeConversation(6, 2000);
@@ -954,10 +984,10 @@ describe("ContextEngine critical force-apply 契约（Phase 4 S3）", () => {
     });
 
     const estimator = createTokenEstimator();
-    // 用真实 ToolResultTrim（非摘要型），但低 staleTurnThreshold 让它 canApply=true
-    // 即便如此它只 trim tool_result 文本，大对话仍会留在 critical
-    const trimStrategy = createToolResultTrimStrategy({
-      staleTurnThreshold: 999,  // 大到不会 trim 任何 turn，确保 critical 保留
+    // 非摘要型 trim 策略：staleTurnThreshold 设极大值，使 canApply=false → 完全不动 messages，
+    // 大对话仍留在 critical，验证 force-apply 在没有 summarize 候选时 failed=true
+    const trimStrategy = createTrimMock({
+      staleTurnThreshold: 999,
       keepChars: 100,
     });
 
@@ -967,7 +997,7 @@ describe("ContextEngine critical force-apply 契约（Phase 4 S3）", () => {
       {
         modelInfo: SMALL_MODEL,
         thresholds: FORCE_CRITICAL_THRESHOLDS,
-        profile: STRATEGY_ONLY_PROFILE,
+        tierThresholds: null,
       },
       eventBus,
     );
@@ -1006,7 +1036,7 @@ describe("ContextEngine critical force-apply 契约（Phase 4 S3）", () => {
       {
         modelInfo: SMALL_MODEL,
         thresholds: FORCE_CRITICAL_THRESHOLDS,
-        profile: STRATEGY_ONLY_PROFILE,
+        tierThresholds: null,
       },
       eventBus,
     );
@@ -1050,7 +1080,7 @@ describe("ContextEngine critical force-apply 契约（Phase 4 S3）", () => {
       {
         modelInfo: SMALL_MODEL,
         thresholds: FORCE_CRITICAL_THRESHOLDS,
-        profile: STRATEGY_ONLY_PROFILE,
+        tierThresholds: null,
       },
       eventBus,
     );
@@ -1086,7 +1116,7 @@ describe("ContextEngine critical force-apply 契约（Phase 4 S3）", () => {
       modelInfo: SMALL_MODEL,
       // compact 触发但不到 critical：warn=0.01 / compact=0.02 / critical=0.999
       thresholds: { warning: 0.01, compact: 0.02, critical: 0.999 },
-      profile: STRATEGY_ONLY_PROFILE,
+      tierThresholds: null,
     });
 
     const messages = buildLargeConversation(6, 2000);
@@ -1122,7 +1152,7 @@ describe("ContextEngine critical force-apply 契约（Phase 4 S3）", () => {
     const engine = createContextEngine(estimator, [customNamedStrategy], {
       modelInfo: SMALL_MODEL,
       thresholds: FORCE_CRITICAL_THRESHOLDS,
-      profile: STRATEGY_ONLY_PROFILE,
+      tierThresholds: null,
     });
 
     const messages = buildLargeConversation(6, 2000);
@@ -1155,7 +1185,7 @@ describe("ContextEngine critical force-apply 契约（Phase 4 S3）", () => {
     const engine = createContextEngine(estimator, [flushStrategy], {
       modelInfo: SMALL_MODEL,
       thresholds: FORCE_CRITICAL_THRESHOLDS,
-      profile: STRATEGY_ONLY_PROFILE,
+      tierThresholds: null,
     });
 
     const messages = buildLargeConversation(6, 2000);
@@ -1222,7 +1252,7 @@ describe("ContextEngine critical force-apply 契约（Phase 4 S3）", () => {
       {
         modelInfo: SMALL_MODEL,
         thresholds: FORCE_CRITICAL_THRESHOLDS,
-        profile: STRATEGY_ONLY_PROFILE,
+        tierThresholds: null,
       },
       eventBus,
     );
@@ -1287,7 +1317,7 @@ describe("ContextEngine critical force-apply 契约（Phase 4 S3）", () => {
       {
         modelInfo: SMALL_MODEL,
         thresholds: FORCE_CRITICAL_THRESHOLDS,
-        profile: STRATEGY_ONLY_PROFILE,
+        tierThresholds: null,
       },
     );
 
@@ -1345,7 +1375,7 @@ describe("ContextEngine critical force-apply 契约（Phase 4 S3）", () => {
       {
         modelInfo: SMALL_MODEL,
         thresholds: FORCE_CRITICAL_THRESHOLDS,
-        profile: STRATEGY_ONLY_PROFILE,
+        tierThresholds: null,
       },
       eventBus,
     );
@@ -1404,7 +1434,7 @@ describe("ContextEngine critical force-apply 契约（Phase 4 S3）", () => {
       {
         modelInfo: SMALL_MODEL,
         thresholds: FORCE_CRITICAL_THRESHOLDS,
-        profile: STRATEGY_ONLY_PROFILE,
+        tierThresholds: null,
       },
       eventBus,
     );
@@ -1456,7 +1486,7 @@ describe("ContextEngine critical force-apply 契约（Phase 4 S3）", () => {
       {
         modelInfo: SMALL_MODEL,
         thresholds: FORCE_CRITICAL_THRESHOLDS,
-        profile: STRATEGY_ONLY_PROFILE,
+        tierThresholds: null,
       },
       eventBus,
     );

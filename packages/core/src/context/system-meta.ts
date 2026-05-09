@@ -154,8 +154,9 @@ export function stripSummaryPlaceholderPair(
 /**
  * 系统提示中告知 LLM 对话历史中会出现的 system-meta 标签格式。
  *
- * 由 layer-assembler 注入到 Layer 0（identity 之后），确保 LLM 始终知道
- * `<system-meta>` 是机制层占位，不是用户原话、无需回应本身。
+ * 由 system-prompt 组装方注入到静态前缀（identity 之后），
+ * 确保 LLM 始终知道 `<system-meta>` 是机制层占位，
+ * 不是用户原话、无需回应本身。
  */
 export const SYSTEM_META_PROMPT_SECTION = `[系统元信息标签]
 对话历史中可能出现 <system-meta kind="..."> 标签，这是上下文管理机制插入的元信息，不是用户原话：

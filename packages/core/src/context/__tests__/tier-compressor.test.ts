@@ -5,7 +5,7 @@ import {
   applyTierCompression,
   determineTier,
 } from "../tier-compressor.js";
-import type { TierThresholds } from "../context-profile.js";
+import type { TierThresholds } from "../types.js";
 import type { Message } from "../../types/messages.js";
 import {
   userMessage,

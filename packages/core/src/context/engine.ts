@@ -1,13 +1,11 @@
 /**
- * 上下文引擎 — 窗口管理 + 策略编排 + 系统提示组装
+ * 上下文引擎 — 窗口管理 + 策略编排
  *
- * 将 WindowManager、CompactionStrategy、LayerAssembler 整合为统一的 ContextManager。
+ * 将 WindowManager 与 CompactionStrategy 整合为统一的 ContextManager。
  *
  * 职责：
  * 1. 窗口管理：Tier 压缩 → 预算检查 → Pin-aware 淘汰（manageWindow）
  * 2. 策略兜底：窗口管理后仍超标时，按优先级执行 LLM 压缩等策略
- * 3. 系统提示组装：通过 LayerAssembler 按 ContextProfile 参数组装四层 system prompt
- * 4. Turn 轨迹：存储 TurnDigest，在 Layer 3 中注入面包屑轨迹
  *
  * onTurnComplete 流程：
  * 1. manageWindow：Tier 压缩（预防性，每轮运行）→ 预算检查 → 淘汰
@@ -29,25 +27,48 @@ import type {
   ContextManagerInput,
   ContextManagerOutput,
   ITokenEstimator,
+  TierThresholds,
 } from "./types.js";
 import { calculateBudget, calculateEffectiveWindow, type ModelBudgetInfo } from "./budget.js";
-import { INTERACTIVE_PROFILE, type ContextProfile } from "./context-profile.js";
-import type { TurnDigest } from "./turn-digest.js";
-import type { ToolDeclaration } from "./layer-assembler.js";
-import { assembleSystemPrompt } from "./layer-assembler.js";
 import { manageWindow, defaultIsPinned } from "./window-manager.js";
+
+// ─── 引擎内部默认值 ───
+
+/**
+ * 引擎默认 budget 阈值。
+ *
+ * 这套默认（0.65/0.80/0.90）比 budget 模块的 DEFAULT_THRESHOLDS（0.75/0.85/0.95）更激进，
+ * 是 agent loop 长程运行场景下经过实践校准的设定：早预警、早压缩、临界稍宽。
+ * 调用方有特殊场景需求时通过 `config.thresholds` 直接覆盖。
+ */
+const ENGINE_DEFAULT_BUDGET_THRESHOLDS: BudgetThresholds = {
+  warning: 0.65,
+  compact: 0.8,
+  critical: 0.9,
+};
+
+/**
+ * 引擎默认 tier 压缩阈值。tool_result 按轮距分级压缩到 manageWindow 中。
+ */
+const ENGINE_DEFAULT_TIER_THRESHOLDS: TierThresholds = {
+  T1: 2,
+  T2: 8,
+  T3: 30,
+};
 
 // ─── 配置（对外） ───
 
 /**
- * 对外配置接口：允许省略 profile / thresholds，由引擎归一化到默认值。
+ * 对外配置接口：thresholds / tierThresholds 可省略，由引擎归一化到内部默认值。
+ *
+ * tierThresholds 显式传 `null` 表示禁用 tier 压缩；省略（undefined）表示使用引擎默认。
  */
 export interface ContextEngineConfig {
   modelInfo: ModelBudgetInfo;
-  /** 覆盖 profile.budgetThresholds（通常不用；手动 compact 场景下用来强制低阈值） */
+  /** 覆盖 budget 阈值（手动 compact 场景下用来强制低阈值） */
   thresholds?: BudgetThresholds;
-  /** 场景 Profile（决定预算阈值、Tier 压缩、系统提示组装）。默认 INTERACTIVE_PROFILE */
-  profile?: ContextProfile;
+  /** 覆盖 tier 压缩阈值；显式 `null` 表示禁用 tier 压缩 */
+  tierThresholds?: TierThresholds | null;
 }
 
 // ─── 配置（对内归一化） ───
@@ -56,44 +77,34 @@ export interface ContextEngineConfig {
  * 归一化后的内部配置：所有字段必填。
  *
  * 这是"配置归一化边界"模式：构造器一次性完成归一化，类内部只读归一化后的值。
- * 避免"原始 config 与默认化字段并存"的二义性（曾导致 WindowManager 成为死代码）。
+ * 避免"原始 config 与默认化字段并存"的二义性。
  */
 interface NormalizedContextEngineConfig {
   readonly modelInfo: ModelBudgetInfo;
   readonly thresholds: BudgetThresholds;
-  readonly profile: ContextProfile;
+  readonly tierThresholds: TierThresholds | null;
 }
 
 function normalizeConfig(
   raw: ContextEngineConfig,
 ): NormalizedContextEngineConfig {
-  const profile = raw.profile ?? INTERACTIVE_PROFILE;
   return {
     modelInfo: raw.modelInfo,
-    thresholds: raw.thresholds ?? profile.budgetThresholds,
-    profile,
+    thresholds: raw.thresholds ?? ENGINE_DEFAULT_BUDGET_THRESHOLDS,
+    tierThresholds:
+      raw.tierThresholds !== undefined
+        ? raw.tierThresholds
+        : ENGINE_DEFAULT_TIER_THRESHOLDS,
   };
 }
 
 // ─── 引擎 ───
-
-/** system prompt 组装所需的可选参数 */
-export interface BuildSystemPromptOptions {
-  readonly identity: string;
-  readonly tools?: readonly ToolDeclaration[];
-  readonly userProfile?: string;
-  readonly sceneContent?: string;
-  readonly workspaceContext?: string;
-  readonly currentTime?: string;
-  readonly activeTaskHint?: string;
-}
 
 export class ContextEngine implements ContextManagerHook {
   private readonly estimator: ITokenEstimator;
   private readonly strategies: CompactionStrategy[];
   private readonly config: NormalizedContextEngineConfig;
   private readonly eventBus?: IEventBus<AgentEventMap>;
-  private readonly digestHistory: TurnDigest[] = [];
 
   constructor(
     estimator: ITokenEstimator,
@@ -146,9 +157,9 @@ export class ContextEngine implements ContextManagerHook {
     let modified = false;
 
     // ── Step 1: WindowManager 级联（Tier 压缩 + 淘汰） ──
-    if (this.config.profile.tierThresholds) {
+    if (this.config.tierThresholds) {
       const windowResult = manageWindow(messages, {
-        tierThresholds: this.config.profile.tierThresholds,
+        tierThresholds: this.config.tierThresholds,
         estimator: this.estimator,
         effectiveWindow: calculateEffectiveWindow(
           this.config.modelInfo.contextWindow,
@@ -363,40 +374,6 @@ export class ContextEngine implements ContextManagerHook {
     const failed = budget.status === "critical" ? true : undefined;
 
     return { messages: messages as Message[], modified, failed };
-  }
-
-  /**
-   * 记录一个 Turn 的轨迹摘要。
-   *
-   * 由 Agent Loop 或运行时在每轮完成后调用。
-   * 存储的 digest 会在 buildSystemPrompt() 中自动注入 Layer 3。
-   */
-  addTurnDigest(digest: TurnDigest): void {
-    this.digestHistory.push(digest);
-  }
-
-  /** 获取所有已记录的 Turn 轨迹摘要 */
-  getTurnDigests(): readonly TurnDigest[] {
-    return this.digestHistory;
-  }
-
-  /** 当前使用的 ContextProfile（归一化后，永远非空） */
-  getProfile(): ContextProfile {
-    return this.config.profile;
-  }
-
-  /**
-   * 组装 system prompt（四层结构）。
-   *
-   * 委托 LayerAssembler，自动注入 Profile 和已存储的 TurnDigest。
-   * 调用方负责预取 userProfile / sceneContent 等数据。
-   */
-  buildSystemPrompt(opts: BuildSystemPromptOptions): string {
-    return assembleSystemPrompt({
-      profile: this.config.profile,
-      ...opts,
-      turnDigests: this.digestHistory,
-    });
   }
 }
 
