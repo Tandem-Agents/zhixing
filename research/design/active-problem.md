@@ -116,17 +116,37 @@
 
 **Q2 · 对话历史管理机制 → 三层记忆架构**（2026-05-08 敲定）
 
-第一性原理识别业界共有盲点（"messages 历史 = LLM 的记忆"假设错位）：LLM 是 stateless 函数，messages 是喂给它的认知输入流而非内置记忆，真正需求是"让 LLM 看到对当前认知决策最有用的内容"。**本方案延续业界主流"分层记忆 + 滑动窗口 + agent 自维护"思路（参考 ReAct / MemGPT 范式），属常规优良设计而非颠覆突破**。
+第一性原理识别业界共有盲点（"messages 历史 = LLM 的记忆"假设错位）：LLM 是 stateless 函数，messages 是喂给它的认知输入流而非内置记忆，真正需求是"让 LLM 看到对当前认知决策最有用的内容"。本方案延续业界主流"分层记忆 + AI 主动维护任务列表"思路（参考 Claude Code TodoWrite 范式），属常规优良设计而非颠覆突破。
 
-- **三层结构**：Working Memory（最近 N 轮完整 turn）/ Task Log（LLM 自维护任务进展，新工具）/ Persistent Knowledge（跨会话事实，复用现有 `memory`）
-- **用户屏幕 ↔ LLM 视图解耦**：屏幕保留完整 transcript，LLM 看 cli 编排的精简视图（与 Q1.A/B 同哲学）
-- **task_log 工具最小动作集**：`update(state)` / `note(content)` / `archive(summary, persistent_facts?)`，content 全部自由文本
-- **任务边界识别**：LLM 自主判断 + 用户 `/task new` 显式覆盖（cli 启发式不可靠）
-- **与 LLMSummarizeStrategy 协同**：主动 task_log 为常态，被动摘要作兜底（task_log 缺失且接近窗口限制时触发）
-- **N = 7 轮**与 Q1.A LRU 同节拍，硬编码不可配；滑出 turn 用 marker 占位（`--- 此前对话已归档 ---`，不引入摘要避免幻觉）
-- **用户透明性**：`/tasklog` 命令可查看当前任务日志（v1 只读；v1.1 可能补 `/pin` 编辑）
+- **核心定位**：v2 做三件事——(1) **保留 v1.2 真实生效部分**：数据层（onTurnComplete + 5 压缩策略 + manageWindow + TierCompressor）+ 业务真路径（system-prompt.ts + AgentRoleProfile）；(2) **加视图层**：在 streamLLMCall 之前加 ContextCompiler 处理 v1.2 没设计的事（Q1.A schema 编排 / Q1.B 老 result 锚化 / Active Task List 注入）；(3) **清理 v1.2 死代码**（含与业务路径不兼容/价值不足的设计稿）
+- **不按模型能力区分**：所有 Stage 默认全启用；模型能力会变（产品长期跑），任何"区分模型/profile"的设计在场景切换时会成阻碍
+- **三层注入**：Working Memory（v1.2 数据层实现，v2 不动）/ Active Task List（system-prompt.ts 新增 segment + SystemPromptStage 注入）/ Persistent Knowledge（system-prompt.ts 新增 segment + SystemPromptStage 检索 memory 注入）
+- **task_list 工具单一动作**：`set(items)`，每项含 status: pending / in_progress / completed
+- **system prompt 单一权威路径**：业务调 `orchestrator/system-prompt.ts:buildSystemPrompt`；CACHE_BOUNDARY 之前永远 byte-equal 保 cache 命中；CACHE_BOUNDARY 之后由 SystemPromptStage 每轮注入动态段
+- **graceful degradation**：单 Stage 抛错跳过 / 全 Stage 失败退化为透明层（messages 原样发，等同 v1.2）；任何情况下最坏退到 v1.2 行为
+- **invariant**：磁盘 transcript 永远完整（recall_history 真可恢复）；state.messages 是工作集（v1.2 数据层可压缩，合法）；ContextCompiler 是纯函数不修改输入
+- **recall_history 工具从零实现**：v1.2 是幽灵工具（仅在 tier-compressor 截断提示文本中字符串提及，工具不存在；LLM 调用得 unknown tool 错误）→ Phase 0 真实实现，兑现铁律 3"信息可恢复"承诺
+- **死代码砍除**：TurnDigest 模块（意图被 task_list 替代）+ **场景化整套**（LayerAssembler / ScenarioEvaluator / ContextProfile）—— LayerAssembler 4 层语义与业务真路径 segment 体系不兼容；ScenarioEvaluator 关键词正则分类对中文+复杂语义不可靠（LLM 已能理解场景，程序硬分类反而阻碍）；ContextProfile 失去 ScenarioEvaluator 驱动后无独立价值。前置：把 `TierThresholds` 类型从 context-profile.ts 搬到 context/types.ts 或 window-manager.ts（v1.2 数据层 manageWindow 仍依赖此类型）
+- **用户可见**：cli 实时渲染任务列表 + `/tasklist` / `/task` / `/task new` / `/task done` 命令
 
-完整设计待沉淀至 [`specifications/conversation-memory.md`](specifications/)（普通设计区——本方案延续主流范式，不进 [`innovations/`](../innovations/)）。
+完整设计已沉淀至 [`specifications/context-management-v2-redesign.md`](specifications/context-management-v2-redesign.md)，含三大新设计 + 加视图层 + 死代码清理 + 与 v1.2 真实状态关系（含完整 grep 审计）+ 实施路线（Phase 0-3：清理债务 + 建框架 + recall_history → Q1.B Anchor → Q1.A Capability → Q2 SystemPrompt + Task List + system-prompt.ts 改造）。
+
+---
+
+**Q3 · 滑窗 + 任务纪要生成 → MessageWindowStage**（2026-05-08 敲定）
+
+第一性原理拆解 Q2 现方案盲点（"加段做 attention 锚 ≠ 减噪音"）：弱模型 attention 滤波能力不足时，光加结构化信号盖不过 raw history 噪音，必须在 user/assistant text 那一层做主动选取。Q2 现方案"messages 历史无主动管理"留白由本 Stage 补齐。
+
+- **核心机制**：每次 LLM call 之前，`MessageWindowStage` 把 raw `state.messages` 编排为"滑窗最近 N 轮 + 任务纪要段 + 一次性历史摘要段"
+- **滑窗单位与默认窗口**：单位"轮"（user+assistant 配对）；默认 **N=12 轮**；**例外** — 当前 `in_progress` 任务的全部 raw turns 不参与驱逐（沿用 v1.2 manageWindow 的 Pin 概念，语义改为"in_progress 任务驱动"），等任务标 done 后一次性收编为任务纪要
+- **任务边界来源**（多源并存）：① LLM 通过 `task_list` 工具标 done ② 用户 `/task done` 命令 ③ 长闲置自动触发（>30 min 无消息）；不引入 LLM 自然语言声明（太软，判断成本高且不稳）
+- **闲聊滑窗外消息处理**：drop 出 LLM 视图（不可见）；磁盘 transcript 由 v1.2 持久化层独立管理（**非永久**，受其阈值压缩约束 — LLMSummarize 触发时旧 turns 被 CompactMarker 替代，v2 不改此机制）；`recall_history` 按当前磁盘状态取回；印象层由 Persistent Knowledge（Q2 已敲定）支撑——契合"AI 助手只记印象不记每句话"
+- **已恢复对话（v1.2 era）历史前缀**：一次性 LLMSummarize 基于当前磁盘内容生成 1 条摘要纪要，惰性触发（首次需要时跑 + 缓存到 conversation meta），摘要寿命**时限失效** — v2 运行 K 轮（如 K=50）后自动 drop（K 具体值留 spec 阶段）
+- **任务纪要容量管理**：硬上限 **N_briefs = 21**，超出**直接丢弃**（不落 conversation meta，不留二级账本）；任务纪要是给 LLM 看的内部工件，**不暴露用户命令**；重要事实由 LLM 主动调 `memory.save` 长期保留兜底（**v2 不做 Persistent Knowledge 自动注入**，LLM 后续需要时主动 `memory.search`；自动相关性检索注入留 v3）
+- **graceful degradation**：Stage 失败 → 跳过本 Stage 不影响其他 Stage；messages 原样发；v1.2 数据层兜底独立运行
+- **invariant**：磁盘 transcript 由 v1.2 持久化层管理（非永久，受 compact 阈值约束）；Pin（in_progress 任务期间）LLM 视图无信息缺失；ContextCompiler 输入分两类——state.messages + raw tools 只读，辅助状态（taskBriefState / capabilityState / migrationSummaryState）通过 StateDelta 输出由 caller 应用
+
+完整设计已沉淀至 [`specifications/context-management-v2-redesign.md`](specifications/context-management-v2-redesign.md) v1.0（经架构审查发现 5 个真问题已全部修正：① tool_result 单一 owner — 砍 applyTierCompression + tier-compressor.ts + ToolResultTrim 策略，view-layer Q1.B 唯一处理；② system prompt builder 化提升为 Phase 0 关键改造；③ Persistent Knowledge 自动注入 v2 不做，留 v3；④ Phase 0 transplant SYSTEM_META_PROMPT_SECTION 到 live system-prompt；⑤ invariant 3 措辞精确化区分只读输入 vs 可演化辅助状态）。
 
 ---
 
@@ -134,10 +154,13 @@
 
 - ✓ **Q1.A 已敲定**（Capability Compiler；沉淀至 [`innovations/capability-compiler.md`](../innovations/capability-compiler.md)）
 - ✓ **Q1.B 已敲定**（Tool Result Anchor；沉淀至 [`innovations/tool-result-anchor.md`](../innovations/tool-result-anchor.md)）
-- ✓ **Q2 已敲定**（三层记忆架构；待沉淀至 [`specifications/conversation-memory.md`](specifications/)，普通设计区）
-- ⏸ Phase 2+ 在 Phase 1 全部拍板后展开（具体阈值数字 / 实施路线）
+- ✓ **Q2 已敲定 + 已沉淀**（三层记忆架构 v3；[`specifications/context-management-v2-redesign.md`](specifications/context-management-v2-redesign.md)）
+- ✓ **Q3 已敲定 + 已沉淀**（MessageWindowStage；[`specifications/context-management-v2-redesign.md`](specifications/context-management-v2-redesign.md) v0.8）
+- ✓ **Phase 1 产品方向全部敲定**（Q1.A/B + Q2 + Q3）
+- ⏭ 下一步：Phase 2 实施细节（具体阈值数字 / Stage 接口签名 / Phase 路线安排 / 一次性历史摘要 K 值），spec v0.8 §十二 已列未决问题
 
 ### 待办
 
-- [ ] Q2 沉淀至 [`specifications/conversation-memory.md`](specifications/)（普通设计区——延续主流范式，不进 innovations）
-- [ ] Phase 1 全部完成后归档 `problems/context-management-redesign.md`
+- [ ] Phase 2 实施细节对齐（spec v0.8 §十二 未决问题清单）
+- [ ] 进入实施 Phase 0（底层基建审计），按 [`specifications/context-management-v2-redesign.md`](specifications/context-management-v2-redesign.md) §十 路线推进
+- [ ] 全部 Phase 完成后归档 `problems/context-management-redesign.md`
