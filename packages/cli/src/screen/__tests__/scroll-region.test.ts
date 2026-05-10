@@ -866,7 +866,7 @@ describe("ScrollRegion · suspend / resume", () => {
 });
 
 describe("ScrollRegion · handleResize", () => {
-  it("更新 viewport 尺寸 + 重设 DECSTBM + 清 segment 字段（保留 committed）", () => {
+  it("chromeHeight 不变——更新 viewport 尺寸 + 重设 DECSTBM + 清 segment 字段（保留 committed）", () => {
     const { region, buffer } = makeRegion({ rows: 24, cols: 80 });
     region.attachInput(3, "");
     const seg = region.beginReplaceableSegment();
@@ -874,14 +874,15 @@ describe("ScrollRegion · handleResize", () => {
     expect(region.state.segmentTopRow).toBe(1);
 
     buffer.value = "";
-    region.handleResize(30, 100, "<chrome>");
-    // viewport 30, chromeHeight 还是 3, scrollBottom = 27
+    region.handleResize(30, 100, 3, "<chrome>");
+    // viewport 30, chromeHeight 仍 3, scrollBottom = 27
     expect(buffer.value).toBe(
       "\x1b[1;27r" + "<chrome>" + "\x1b[1;1H",
     );
     const s = region.state;
     expect(s.viewportRows).toBe(30);
     expect(s.viewportCols).toBe(100);
+    expect(s.chromeHeight).toBe(3);
     expect(s.scrollBottom).toBe(27);
     expect(s.regionTailRow).toBe(1);
     expect(s.regionFilledRows).toBe(0);
@@ -891,12 +892,45 @@ describe("ScrollRegion · handleResize", () => {
     expect(s.segmentRemainingRows).toBeNull();
   });
 
+  it("chromeHeight 变化（input reflow 因 columns 变窄触发）→ DECSTBM 用新 chromeHeight 算 scrollBottom", () => {
+    const { region, buffer } = makeRegion({ rows: 10, cols: 80 });
+    region.attachInput(2, ""); // 旧 chromeHeight=2, scrollBottom=8
+
+    buffer.value = "";
+    // 模拟 columns 80→40 导致 input box 行数 1→2，新 chromeHeight=3
+    region.handleResize(20, 40, 3, "<new-chrome>");
+
+    // 关键不变量：DECSTBM bottom 必须等于 viewportRows - newChromeHeight = 20 - 3 = 17
+    // 而非 viewportRows - oldChromeHeight = 20 - 2 = 18（旧 bug 表现）
+    expect(buffer.value).toContain("\x1b[1;17r");
+    expect(buffer.value).not.toContain("\x1b[1;18r");
+    expect(buffer.value).toContain("<new-chrome>");
+
+    const s = region.state;
+    expect(s.viewportRows).toBe(20);
+    expect(s.viewportCols).toBe(40);
+    expect(s.chromeHeight).toBe(3);
+    expect(s.scrollBottom).toBe(17);
+  });
+
+  it("chromeHeight 变小（用户拉宽窗口让 input 单行）→ DECSTBM 用新 chromeHeight", () => {
+    const { region, buffer } = makeRegion({ rows: 10, cols: 40 });
+    region.attachInput(3, ""); // 旧 chromeHeight=3, scrollBottom=7
+
+    buffer.value = "";
+    region.handleResize(30, 120, 1, "<chrome>");
+    // 新 chromeHeight=1, scrollBottom=29
+    expect(buffer.value).toContain("\x1b[1;29r");
+    expect(region.state.chromeHeight).toBe(1);
+    expect(region.state.scrollBottom).toBe(29);
+  });
+
   it("resize 不强制 commit handle — caller 下次 replace 走首次路径", () => {
     const { region } = makeRegion({ rows: 24 });
     region.attachInput(0, "");
     const seg = region.beginReplaceableSegment();
     seg.replace("a");
-    region.handleResize(30, 100, "");
+    region.handleResize(30, 100, 0, "");
     // handle 仍活跃；下次 replace 不抛错
     expect(() => seg.replace("b\nc")).not.toThrow();
     // 走首次路径（无旧 segmentTopRow）→ writeStartRow = regionTailRow = 1
@@ -905,15 +939,19 @@ describe("ScrollRegion · handleResize", () => {
 
   it("resize 后新 chromeHeight 超 viewportRows 抛错", () => {
     const { region } = makeRegion({ rows: 24 });
-    region.attachInput(20, ""); // chromeHeight=20, scrollBottom=4
-    expect(() => region.handleResize(15, 80, "")).toThrow(
-      /no room/,
-    );
+    region.attachInput(2, "");
+    expect(() => region.handleResize(15, 80, 20, "")).toThrow(/no room/);
+  });
+
+  it("resize 接受 chromeHeight 负值抛错", () => {
+    const { region } = makeRegion({ rows: 24 });
+    region.attachInput(2, "");
+    expect(() => region.handleResize(30, 100, -1, "")).toThrow(/must be ≥ 0/);
   });
 
   it("未 attached 时 resize 抛错", () => {
     const { region } = makeRegion();
-    expect(() => region.handleResize(30, 100, "")).toThrow(/not attached/);
+    expect(() => region.handleResize(30, 100, 0, "")).toThrow(/not attached/);
   });
 });
 

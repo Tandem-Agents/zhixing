@@ -722,11 +722,19 @@ export class ScrollRegion {
   }
 
   /**
-   * 终端 viewport resize 处理。
+   * 终端 viewport resize 处理——viewport 尺寸 + chrome 高度同步变化的统一入口。
    *
-   * 协议：
-   *   - 重读 viewportRows / viewportCols
-   *   - 重设 DECSTBM 与 scrollBottom
+   * 协议参数（与 attachInput / setChromeHeight / resume 协议族对称——chromeHeight
+   * 始终是 caller 显式输入而非内部假设不变）：
+   *   - viewportRows / viewportCols：新 viewport 几何
+   *   - newChromeHeight：新 chrome 高度——caller 在 resize 触发时重算（input.renderLines()
+   *     可能因 columns 变化触发 reflow 而行数变化）；ScrollRegion 由此推导 scrollBottom
+   *     = viewportRows - newChromeHeight，与 caller 拼 chromeBytes 时用的 scrollBottom
+   *     完全一致，避免 DECSTBM 边界与 chrome 起手行错位
+   *   - chromeBytes：caller 用上述 scrollBottom 拼好的 chrome 字节序列
+   *
+   * 行为：
+   *   - 重设 DECSTBM 与 scrollBottom（基于 newChromeHeight）
    *   - 重画 chrome
    *   - 保留 active handle 活性（不强制 commit——caller 持有的 handle 在下一次
    *     replace 时按"首次"路径在新 (regionTailRow, regionTailCol) 重起，避免本
@@ -738,20 +746,27 @@ export class ScrollRegion {
   handleResize(
     viewportRows: number,
     viewportCols: number,
+    newChromeHeight: number,
     chromeBytes: string,
   ): void {
     if (!this.attached) {
       throw new Error("ScrollRegion: cannot resize when not attached");
     }
-    if (this.chromeHeight >= viewportRows) {
+    if (newChromeHeight < 0) {
       throw new Error(
-        `ScrollRegion: existing chromeHeight ${this.chromeHeight} leaves no room in new viewport ${viewportRows}`,
+        `ScrollRegion: chromeHeight must be ≥ 0, got ${newChromeHeight}`,
+      );
+    }
+    if (newChromeHeight >= viewportRows) {
+      throw new Error(
+        `ScrollRegion: chromeHeight ${newChromeHeight} leaves no room for region in viewport ${viewportRows}`,
       );
     }
 
     this.viewportRows = viewportRows;
     this.viewportCols = viewportCols;
-    this.scrollBottom = viewportRows - this.chromeHeight;
+    this.chromeHeight = newChromeHeight;
+    this.scrollBottom = viewportRows - newChromeHeight;
     // committedLogicalRows 是 resize 期间唯一保留字段——已固化部分仍已固化、
     // segment.replace 用 slice 跳过；其它 region / segment / handle 状态因终端
     // reflow 后 viewport 位置不可控而失效
@@ -760,7 +775,7 @@ export class ScrollRegion {
     this.committedLogicalRows = savedCommitted;
 
     let out = this.decstbmSeq(1, this.scrollBottom);
-    if (this.chromeHeight > 0 && chromeBytes.length > 0) {
+    if (newChromeHeight > 0 && chromeBytes.length > 0) {
       out += chromeBytes;
     }
     out += this.cursorToSeq(1, 1);
@@ -768,10 +783,14 @@ export class ScrollRegion {
   }
 
   /**
-   * 异常退出清理——`process.on('exit') / SIGINT / SIGTERM` 调用。
+   * 异常退出清理——caller 应用层挂 `process.on('exit')` / SIGINT / SIGTERM hook
+   * 调用（直接调本方法，或经 ScreenController.dispose 间接触发）。
    *
    * 撤 DECSTBM + cursor 跳 viewport 底，确保 zhixing 退出后 shell 的 \n 行为恢复
    * 正常（不再受 region 限制）。idempotent：重复调用 no-op。
+   *
+   * 设计取舍：ScrollRegion 是可复用的协议层，不耦合全局 process——caller（应用
+   * 启动期）负责把"退出钩子 → shutdown"串起来，让 library 自身保持纯净。
    */
   shutdown(): void {
     if (!this.attached) return;

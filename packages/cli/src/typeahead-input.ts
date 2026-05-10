@@ -64,6 +64,7 @@ import {
   type ScreenController,
   type InputRegion,
 } from "./screen/index.js";
+import { detectTerminalCapability } from "./screen/terminal-capability.js";
 
 const PASTE_FOLD_LINES = 4;
 const PASTE_FOLD_BYTES = 200;
@@ -180,8 +181,30 @@ export class InputController implements InputRegion {
       this.screen = options.screen;
       this.ownsScreen = false;
     } else {
-      // 兼容模式：内部建一个 screen 走相同协议（per-turn 风格场景仍可工作）
-      this.screen = createScreenController({ stdout: this.stdout });
+      // 兼容模式：内部建一个 screen 走相同协议（per-turn 风格场景 + 单元测试
+      // 用 PassThrough 模拟终端时仍可工作）。
+      //
+      // 探测失败时退化到合成 capability—— PassThrough mock 等非 TTY 环境下
+      // ScreenController 仍能构造，写出的 ANSI 字节由 caller 自行处理（生产
+      // caller 应优先注入 screen 显式控制 fallback；测试环境下捕获到 buffer
+      // 验证字节流即可）
+      const detection = detectTerminalCapability({ stdout: this.stdout });
+      const capability = detection.ok
+        ? detection.capability
+        : {
+            viewport: {
+              rows:
+                (this.stdout as NodeJS.WriteStream).rows ?? 24,
+              cols:
+                (this.stdout as NodeJS.WriteStream).columns ?? 80,
+            },
+            platform: process.platform,
+            tmux: false,
+          };
+      this.screen = createScreenController({
+        capability,
+        stdout: this.stdout,
+      });
       this.ownsScreen = true;
     }
   }

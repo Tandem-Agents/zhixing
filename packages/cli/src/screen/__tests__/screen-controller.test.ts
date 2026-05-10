@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   createScreenController,
   type InputRegion,
+  type ScreenController,
 } from "../screen-controller.js";
+import type { TerminalCapability } from "../terminal-capability.js";
 
 class FakeStdout {
   buffer = "";
@@ -32,6 +34,17 @@ class FakeStdout {
   }
 }
 
+function makeCapability(
+  rows = 30,
+  cols = 80,
+): TerminalCapability {
+  return {
+    viewport: { rows, cols },
+    platform: "linux",
+    tmux: false,
+  };
+}
+
 function makeRegion(
   lines: readonly string[],
   cursorRow = 0,
@@ -43,858 +56,594 @@ function makeRegion(
   };
 }
 
-describe("ScreenController · attach + 重画", () => {
-  it("attachInput 写入区在屏底", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["line1", "line2"], 1, 3));
-    expect(out.buffer).toContain("line1");
-    expect(out.buffer).toContain("line2");
+interface TestHarness {
+  out: FakeStdout;
+  sc: ScreenController;
+}
+
+function makeHarness(opts: { rows?: number; cols?: number } = {}): TestHarness {
+  const out = new FakeStdout();
+  out.rows = opts.rows ?? 30;
+  out.columns = opts.cols ?? 80;
+  const sc = createScreenController({
+    capability: makeCapability(out.rows, out.columns),
+    stdout: out as unknown as NodeJS.WriteStream,
+  });
+  return { out, sc };
+}
+
+describe("ScreenController · 构造 + capability 注入", () => {
+  it("构造期不写任何字节（ScrollRegion 未启动）", () => {
+    const { out } = makeHarness();
+    expect(out.buffer).toBe("");
   });
 
-  it("setStatusBar 加在输入区上方", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["input"], 0, 0));
-    out.buffer = "";
-    sc.setStatusBar(["status"]);
-    expect(out.buffer.indexOf("status")).toBeLessThan(out.buffer.indexOf("input"));
-  });
-
-  it("setStatusBar(null) 清除状态条但保留输入区", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["input"]));
-    sc.setStatusBar(["s"]);
-    out.buffer = "";
-    sc.setStatusBar(null);
-    expect(out.buffer).toContain("input");
-    expect(out.buffer).not.toContain("status");
+  it("构造接受 capability + stdout 注入——后续操作走该 stdout", () => {
+    const { out, sc } = makeHarness();
+    sc.writeScrollLine("hello");
+    // pre-attach 缓冲：writeScrollLine 不直写
+    expect(out.buffer).toBe("");
   });
 });
 
-describe("ScreenController · withScrollWrite", () => {
-  it("写入内容追加到滚动区，状态条 / 输入区在下方", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT"]));
-    sc.setStatusBar(["STATUS"]);
-    out.buffer = "";
-    sc.withScrollWrite((write) => write("AI text\n"));
-    const idxText = out.buffer.indexOf("AI text");
-    const idxStatus = out.buffer.indexOf("STATUS");
-    const idxInput = out.buffer.indexOf("INPUT");
-    expect(idxText).toBeLessThan(idxStatus);
-    expect(idxStatus).toBeLessThan(idxInput);
+describe("ScreenController · pre-attach 缓冲（启动期 cliWriter 调用）", () => {
+  it("attach 之前 writeScrollLine 内容被缓冲不直写 stdout", () => {
+    const { out, sc } = makeHarness();
+    sc.writeScrollLine("welcome line 1");
+    sc.writeScrollLine("welcome line 2");
+    expect(out.buffer).toBe("");
   });
 
-  it("写入末尾无 \\n 自动补一个", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT"]));
-    sc.withScrollWrite((write) => write("hello"));
+  it("attach 之前 withScrollWrite 内容被缓冲", () => {
+    const { out, sc } = makeHarness();
+    sc.withScrollWrite((write) => write("partial"));
+    expect(out.buffer).toBe("");
+  });
+
+  it("attach 之前 setStatusBar 仅记录引用、不写字节", () => {
+    const { out, sc } = makeHarness();
+    sc.setStatusBar(["status line"]);
+    expect(out.buffer).toBe("");
+  });
+
+  it("首次 attachInput 时清屏 + DECSTBM + flush 缓冲内容", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.writeScrollLine("welcome");
+    sc.attachInput(makeRegion(["> input"]));
+    // 期待字节序列：清屏 + DECSTBM + cursor (1,1) + chrome 字节 + cursor (1,1) +
+    // appendInline("welcome\n") + repaintInputCursor
+    expect(out.buffer).toContain("\x1b[2J\x1b[1;1H"); // 清屏
+    expect(out.buffer).toContain("\x1b[1;9r"); // DECSTBM 1..(rows-chromeHeight) = 1..9
+    expect(out.buffer).toContain("welcome\n"); // flush 缓冲内容
+    expect(out.buffer).toContain("> input"); // chrome 输入行
+  });
+});
+
+describe("ScreenController · attachInput", () => {
+  it("无缓冲时 attach 仅清屏 + DECSTBM + chrome", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    expect(out.buffer).toContain("\x1b[2J\x1b[1;1H");
+    expect(out.buffer).toContain("\x1b[1;9r"); // chromeHeight=1, scrollBottom=9
+    expect(out.buffer).toContain("> input");
+  });
+
+  it("重复 attachInput（替换 input）触发 chrome 高度协议", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> a"]));
+    out.buffer = "";
+    sc.attachInput(makeRegion(["> b1", "> b2"])); // 高度从 1 → 2
+    // 不再清屏（首次 attach 已完成）
+    expect(out.buffer).not.toContain("\x1b[2J");
+    // 但应该 setChromeHeight 重设 DECSTBM
+    expect(out.buffer).toContain("\x1b[1;8r"); // chromeHeight=2, scrollBottom=8
+    expect(out.buffer).toContain("> b1");
+    expect(out.buffer).toContain("> b2");
+  });
+
+  it("attach 后 input cursor 由 ScreenController 显式 emit", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"], 0, 2));
+    // input cursor 在 row scrollBottom+1+0=10, col 1+2=3
+    expect(out.buffer).toContain("\x1b[10;3H");
+  });
+});
+
+describe("ScreenController · setStatusBar", () => {
+  it("attach 之前 setStatusBar 只记录引用，attach 时被读到", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.setStatusBar(["S1", "S2"]);
+    sc.attachInput(makeRegion(["> input"]));
+    // chromeHeight = 2 status + 1 input = 3, scrollBottom = 7
+    expect(out.buffer).toContain("\x1b[1;7r");
+    expect(out.buffer).toContain("S1");
+    expect(out.buffer).toContain("S2");
+  });
+
+  it("attach 后 setStatusBar 触发 chrome 高度协议", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    out.buffer = "";
+    sc.setStatusBar(["status"]);
+    // chrome 从 1 → 2, scrollBottom 9 → 8
+    expect(out.buffer).toContain("\x1b[1;8r");
+    expect(out.buffer).toContain("status");
+  });
+
+  it("setStatusBar(null) 清空状态条", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    sc.setStatusBar(["status"]);
+    out.buffer = "";
+    sc.setStatusBar(null);
+    // chrome 从 2 → 1
+    expect(out.buffer).toContain("\x1b[1;9r");
+  });
+});
+
+describe("ScreenController · writeScrollLine（attach 后）", () => {
+  it("写入直接转发 ScrollRegion.writeScrollLine 字节流", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    out.buffer = "";
+    sc.writeScrollLine("hello");
     expect(out.buffer).toContain("hello\n");
   });
 
-  it("空写入不产生 \\n 噪声", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT"]));
-    out.buffer = "";
-    sc.withScrollWrite(() => {});
-    // 仅触发重画 INPUT，不应有空 \n 流
-    expect(out.buffer.match(/\n\n/)).toBeNull();
-  });
-});
-
-describe("ScreenController · 串行化", () => {
-  it("嵌套 enqueue（写入回调内再调 setStatusBar）按 FIFO 顺序执行", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    const events: string[] = [];
-    sc.attachInput({
-      renderLines: () => {
-        events.push("render");
-        return ["INPUT"];
-      },
-      cursorPosition: () => ({ row: 0, col: 0 }),
-    });
-    out.buffer = "";
-    sc.withScrollWrite((write) => {
-      events.push("scroll-fn");
-      write("x");
-      sc.setStatusBar(["new"]);
-      events.push("scroll-fn-end");
-    });
-    // setStatusBar 在嵌套 enqueue 后执行，不会与 withScrollWrite 中段穿插
-    const lastFn = events.lastIndexOf("scroll-fn-end");
-    expect(lastFn).toBeGreaterThanOrEqual(0);
-  });
-
-  it("dispose 后再 attachInput 不再产生输出", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.dispose();
-    out.buffer = "";
-    sc.attachInput(makeRegion(["LATE"]));
-    expect(out.buffer).toBe("");
-  });
-
-  it("dispose 擦除已渲染的 status + input 屏幕痕迹", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT"]));
-    sc.setStatusBar(["STATUS"]);
-    out.buffer = "";
-    sc.dispose();
-    // dispose 应触发 ANSI 擦除序列（清屏到末尾）
-    expect(out.buffer).toContain("\x1b[J");
-  });
-});
-
-describe("ScreenController · 输入区光标定位", () => {
-  it("光标 row/col 信息会触发对应 ANSI 移动", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["AAA", "BBB", "CCC"], 0, 1));
-    expect(out.buffer).toMatch(/\x1b\[2A/);
-    expect(out.buffer).toMatch(/\x1b\[1C/);
-  });
-});
-
-describe("ScreenController · 差分 repaint（无闪烁契约）", () => {
-  it("attach 之后 setStatusBar 不发出 \\x1b[J（差分覆盖，避免整片清屏闪烁）", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT"]));
-    out.buffer = "";
-    sc.setStatusBar(["STATUS"]);
-    expect(out.buffer).not.toContain("\x1b[J");
-    expect(out.buffer).toContain("\x1b[2K"); // 用清行而非清屏
-    expect(out.buffer).toContain("STATUS");
-  });
-
-  it("setStatusBar 多次更新都不闪烁（每次都走 \\x1b[2K 行内覆盖）", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT"]));
-    sc.setStatusBar(["STATUS-1"]);
-    out.buffer = "";
-    // spinner tick 等价场景：连续多次 setStatusBar
-    sc.setStatusBar(["STATUS-2"]);
-    sc.setStatusBar(["STATUS-3"]);
-    sc.setStatusBar(["STATUS-4"]);
-    expect(out.buffer).not.toContain("\x1b[J");
-    // 每次都用清行
-    const lineErases = (out.buffer.match(/\x1b\[2K/g) ?? []).length;
-    expect(lineErases).toBeGreaterThan(0);
-  });
-
-  it("paintChrome atomic—— 整次更新拼接到单次 stdout.write", () => {
-    let writeCount = 0;
-    const fakeStdout = {
-      buffer: "",
-      isTTY: true,
-      columns: 80,
-      write(s: string): boolean {
-        this.buffer += s;
-        writeCount += 1;
-        return true;
-      },
-    };
-    const sc = createScreenController({
-      stdout: fakeStdout as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT"]));
-    writeCount = 0;
-    sc.setStatusBar(["STATUS"]);
-    // 单次 paintChrome 应该是 1 次 stdout.write（整个 ANSI + 内容序列）
-    expect(writeCount).toBe(1);
-  });
-
-  it("withScrollWrite 协调路径 atomic—— 单次 stdout.write 包含 erase + scroll + chrome", () => {
-    let writeCount = 0;
-    const fakeStdout = {
-      buffer: "",
-      isTTY: true,
-      columns: 80,
-      write(s: string): boolean {
-        this.buffer += s;
-        writeCount += 1;
-        return true;
-      },
-    };
-    const sc = createScreenController({
-      stdout: fakeStdout as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT"]));
-    sc.setStatusBar(["STATUS"]);
-    writeCount = 0;
-    sc.withScrollWrite((write) => write("AI text"));
-    // 协调模式下应该 1 次 stdout.write（atomic）
-    expect(writeCount).toBe(1);
-    // 单次写入包含 erase + scroll + chrome
-    expect(fakeStdout.buffer).toContain("AI text");
-    expect(fakeStdout.buffer).toContain("STATUS");
-    expect(fakeStdout.buffer).toContain("INPUT");
-  });
-
-  it("行数减少时保留 max 占用——多余行 \\x1b[2K 清空，不收缩 chrome 区", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    // 初始 chrome 5 行：1 status + 4 input
-    sc.attachInput(makeRegion(["I1", "I2", "I3", "I4"]));
-    sc.setStatusBar(["S1"]);
-    out.buffer = "";
-    // 收缩到 1 status + 1 input = 2 行
-    sc.attachInput(makeRegion(["I-only"]));
-    expect(out.buffer).not.toContain("\x1b[J"); // 不彻底擦
-    // 多余行被清行清空
-    expect(out.buffer.match(/\x1b\[2K/g)?.length ?? 0).toBeGreaterThanOrEqual(5);
-    expect(out.buffer).toContain("I-only");
-    expect(out.buffer).toContain("S1");
-  });
-
-  it("detachInput 触发完整擦除（chrome 消失语义）", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT"]));
-    sc.setStatusBar(["STATUS"]);
-    out.buffer = "";
-    sc.detachInput();
-    // detach 是完全消失——必须 \x1b[J
-    expect(out.buffer).toContain("\x1b[J");
-  });
-});
-
-describe("ScreenController · Frame Buffer（chunk 接续 + chrome 永驻）", () => {
-  it("withScrollWrite 后 chrome 仍在屏幕——不再 erase chrome（流式期间 chrome 永驻语义）", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT"]));
-    sc.setStatusBar(["STATUS"]);
-    out.buffer = "";
-    sc.withScrollWrite((write) => write("hello"));
-    // chrome 仍显示，scroll 内容也在
-    expect(out.buffer).toContain("hello");
-    expect(out.buffer).toContain("STATUS");
-    expect(out.buffer).toContain("INPUT");
-    // 不用 \x1b[J 整片清屏
-    expect(out.buffer).not.toContain("\x1b[J");
-  });
-
-  it("多次 withScrollWrite 在 tailBuffer 末尾行接续（chunk 同行拼接）", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT"]));
-    out.buffer = "";
-    sc.withScrollWrite((write) => write("你好"));
-    sc.withScrollWrite((write) => write("世界"));
-    // chunk 接续：tailBuffer 末尾行 = "你好世界"，paint 时该行包含完整内容
-    expect(out.buffer).toContain("你好世界");
-  });
-
-  it("withScrollWrite 含 \\n 时 tailBuffer 新增一行——下次 chunk 在新行起首", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT"]));
-    out.buffer = "";
-    sc.withScrollWrite((write) => write("第一段\n"));
-    sc.withScrollWrite((write) => write("第二段"));
-    // 第二段在新行——视觉上两行
-    expect(out.buffer).toContain("第一段");
-    expect(out.buffer).toContain("第二段");
-  });
-
-  it("流式 chunk 期间 chrome 始终在屏幕（input + status 都显示）", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT_CHROME"]));
-    sc.setStatusBar(["STATUS_BAR"]);
-    out.buffer = "";
-    // 模拟 LLM 流式：多个 chunk 写入
-    sc.withScrollWrite((write) => write("AI"));
-    sc.withScrollWrite((write) => write(" 回"));
-    sc.withScrollWrite((write) => write("复"));
-    // 每次写入后 chrome 都重画 —— 屏幕上 chrome 始终显示
-    expect(out.buffer).toContain("STATUS_BAR");
-    expect(out.buffer).toContain("INPUT_CHROME");
-    // chunk 接续：tailBuffer 末尾行 = "AI 回复"
-    expect(out.buffer).toContain("AI 回复");
-  });
-
-  it("writeScrollLine 写入独立段——内容落地 + 状态条/输入区仍保留", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT"]));
-    out.buffer = "";
-    sc.writeScrollLine("scheduler done");
-    expect(out.buffer).toContain("scheduler done");
-    expect(out.buffer).toContain("INPUT");
-  });
-
-  it("writeScrollLine 在 appendInline 流式中——保证起新行，不与 chunk 粘连", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT"]));
-    // 模拟 LLM 流式 chunk 累积——末尾不带 \n
-    sc.withScrollWrite((write) => write("LLM partial chunk..."));
-    out.buffer = "";
-    // 异步通知插入——必须独立成行，不能粘到 chunk 末尾
-    sc.writeScrollLine("⚠ scheduler warn");
-    // 物理 buffer 中通知与 chunk 不在同一行（断言关键：通知前应有 \n 切行）
-    const chunkIdx = out.buffer.indexOf("LLM partial chunk...");
-    const warnIdx = out.buffer.indexOf("⚠ scheduler warn");
-    if (chunkIdx >= 0 && warnIdx >= 0) {
-      const between = out.buffer.slice(chunkIdx, warnIdx);
-      expect(between).toContain("\n");
-    }
-  });
-
-  it("writeScrollLine 在已 \\n 结尾的内容之后——不补多余空行", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT"]));
-    sc.writeScrollLine("first");
-    sc.writeScrollLine("second");
-    // 两段独立行，中间无多余空行
-    expect(out.buffer).not.toMatch(/first\s*\n\s*\n\s*second/);
-  });
-
-  it("paintFrame atomic—— 整次更新拼接到单次 stdout.write", () => {
-    let writeCount = 0;
-    const fakeStdout = {
-      buffer: "",
-      isTTY: true,
-      columns: 80,
-      write(s: string): boolean {
-        this.buffer += s;
-        writeCount += 1;
-        return true;
-      },
-    };
-    const sc = createScreenController({
-      stdout: fakeStdout as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT"]));
-    sc.setStatusBar(["STATUS"]);
-    writeCount = 0;
-    sc.withScrollWrite((write) => write("AI text"));
-    // 单次 paintFrame = 单次 stdout.write
-    expect(writeCount).toBe(1);
-  });
-
-  it("空 chunk 不触发 paint（避免空写抖动）", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT"]));
-    out.buffer = "";
-    sc.withScrollWrite(() => {}); // 不写
-    // 不应有任何输出
-    expect(out.buffer).toBe("");
-  });
-
-  it("空字符串 writeScrollLine 写一空行——空字符串语义是空行（与 cliWriter.line('') 对齐）", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT"]));
+  it("空字符串 writeScrollLine 写一空行", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
     out.buffer = "";
     sc.writeScrollLine("");
-    // 写了空行——paint 触发，buffer 内必有 \n（空行落地的标志）
-    expect(out.buffer.length).toBeGreaterThan(0);
+    expect(out.buffer).toMatch(/\n/);
   });
 
-  it("tailBuffer 超出 viewport 时固化前行——chrome 仍能正常重画", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT"]));
-    // 累积大量行触发 viewport-aware freeze（rows=30）
-    for (let i = 0; i < 60; i++) {
-      sc.withScrollWrite((write) => write(`line ${i}\n`));
-    }
-    // 固化后 chrome 仍能正常重画（不会因 cursorRow 错乱崩溃）
+  it("writeScrollLine 后 cursor 跳回 input 位置", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"], 0, 0));
     out.buffer = "";
-    sc.setStatusBar(["STATUS"]);
-    expect(out.buffer).toContain("STATUS");
-    expect(out.buffer).toContain("INPUT");
-  });
-
-  it("frame 不会超出 viewport——cursor up 序列永远 ≤ viewport-1，避免跨视口截断引发 scrollback 重复", () => {
-    const out = new FakeStdout();
-    out.rows = 20;
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT"]));
-
-    // 写入远超 viewport 的内容——若不 freeze，frame 高度会增长到 50+ 行远超 viewport
-    for (let i = 0; i < 50; i++) {
-      sc.withScrollWrite((write) => write(`line ${i}\n`));
-    }
-
-    // 内容存在（早期固化到 scrollback、末尾在 frame 内）
-    expect(out.buffer).toContain("line 0");
-    expect(out.buffer).toContain("line 49");
-    expect(out.buffer).toContain("INPUT");
-
-    // 关键 invariant：所有 cursor up 序列的 N 不超过 viewport-1。
-    // 终端 cursor up 不能跨视口顶部——若 N > viewport，cursor 会被截断到屏幕第 0 行，
-    // 后续 paint 在错误位置写入 + 末尾 \n 触发滚动，导致内容反复推入 scrollback 形成重复。
-    const cursorUps = [...out.buffer.matchAll(/\x1b\[(\d+)A/g)];
-    const maxUp = cursorUps.length === 0
-      ? 0
-      : Math.max(...cursorUps.map((m) => parseInt(m[1]!, 10)));
-    expect(maxUp).toBeLessThanOrEqual(out.rows - 1);
-  });
-
-  it("terminal resize 后旧 cursor 状态被重置——后续 paint 不再因新 viewport 下 cursor up 截断而触发重复", () => {
-    const out = new FakeStdout();
-    out.rows = 30;
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT"]));
-
-    // 累积内容让 frame 在大 viewport 下接近上限
-    for (let i = 0; i < 25; i++) {
-      sc.withScrollWrite((write) => write(`line ${i}\n`));
-    }
-
-    // 模拟用户调小终端
-    out.rows = 12;
-    out.buffer = ""; // 清空已有 buffer，只观察 resize 后的 ANSI
-    out.emit("resize");
-
-    // resize 后再写——cursor up 应永远 ≤ 新 viewport - 1，否则跨视口截断回归
-    sc.withScrollWrite((write) => write("after-resize\n"));
-    const cursorUps = [...out.buffer.matchAll(/\x1b\[(\d+)A/g)];
-    const maxUp =
-      cursorUps.length === 0
-        ? 0
-        : Math.max(...cursorUps.map((m) => parseInt(m[1]!, 10)));
-    expect(maxUp).toBeLessThanOrEqual(out.rows - 1);
-  });
-
-  it("dispose 解绑 resize listener——不再响应 emit", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT"]));
-    sc.dispose();
-    out.buffer = "";
-    // dispose 后 resize 事件不应触发 paint（监听已解绑）
-    out.emit("resize");
-    expect(out.buffer).toBe("");
-  });
-
-  it("status / input 占用过大时仍能写入——不会无限固化崩溃", () => {
-    const out = new FakeStdout();
-    out.rows = 12; // 极小 viewport
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["I1", "I2", "I3"]));
-    sc.setStatusBar(["S1", "S2"]);
-    // tailBuffer 一次写入大量行
-    for (let i = 0; i < 30; i++) {
-      sc.withScrollWrite((write) => write(`row ${i}\n`));
-    }
-    // 不崩溃 + 早期内容已落地永久 + 末尾在 frame 内
-    expect(out.buffer).toContain("row 0");
-    expect(out.buffer).toContain("row 29");
-    expect(out.buffer).toContain("I1");
+    sc.writeScrollLine("hi");
+    // 期待末尾有 cursor positioning 到 input cursor (row 10 col 1)
+    expect(out.buffer).toContain("\x1b[10;1H");
   });
 });
 
-describe("ScreenController · suspend / resume（alt UI 嵌入协议）", () => {
-  it("suspend 同步擦 chrome 末尾 + 设状态——不入队，立即生效", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT"]));
-    sc.setStatusBar(["STATUS"]);
+describe("ScreenController · withScrollWrite（attach 后）", () => {
+  it("流式 chunk 直接转发 ScrollRegion.appendInline", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
     out.buffer = "";
-    sc.suspend();
-    // 同步 ANSI 序列已写出（不需要 await flush）：cursor up 到 frame 起点 +
-    // cursor down tailLines 跨过 tailBuffer + erase to end 擦 chrome 末尾
-    expect(out.buffer).toContain("\x1b[J"); // erase to end
+    sc.withScrollWrite((write) => write("chunk"));
+    expect(out.buffer).toContain("chunk");
   });
 
-  it("suspend 保留 tailBuffer 视觉——cursor down 跨过 tailBuffer 才擦", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT"]));
-    sc.setStatusBar(["STATUS"]);
-    // 让 tailBuffer 有内容（多行 AI 回复历史）
-    sc.withScrollWrite((write) => write("AI line 1\n"));
-    sc.withScrollWrite((write) => write("AI line 2\n"));
-    sc.withScrollWrite((write) => write("AI line 3\n"));
+  it("空 chunk 不触发任何写入", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
     out.buffer = "";
-    sc.suspend();
-    // ANSI 序列应同时含 cursor up（到 frame 起点）+ cursor down（到 status 起点跨过
-    // tailBuffer）+ erase to end。tailBuffer 视觉部分不被擦
-    expect(out.buffer).toMatch(/\x1b\[\d+A/); // cursor up N
-    expect(out.buffer).toMatch(/\x1b\[\d+B/); // cursor down N
-    expect(out.buffer).toContain("\x1b[J"); // erase to end
-  });
-
-  it("suspend 后 tailBuffer 内部状态清空——避免 resume 时重画屏幕已显示内容", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT"]));
-    sc.withScrollWrite((write) => write("AI history\n"));
-    sc.suspend();
-    out.buffer = "";
-    sc.resume();
-    // resume 后 paint 不应输出之前的 tailBuffer 内容（已在屏幕上方显示，不重画）
-    expect(out.buffer).not.toContain("AI history");
-  });
-
-  it("suspended 期间 enqueue 任务不立即 paint——任务暂存等 resume", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT"]));
-    sc.suspend();
-    out.buffer = "";
-    // suspended 期间 setStatusBar / withScrollWrite 进队列暂存
-    sc.setStatusBar(["NEW STATUS"]);
-    sc.withScrollWrite((write) => write("scroll content\n"));
-    // 不应有 paint 写出（暂存中）
+    sc.withScrollWrite(() => {});
     expect(out.buffer).toBe("");
   });
 
-  it("resume 后 flush 暂存任务 + 重画 chrome", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT"]));
-    sc.suspend();
-    sc.setStatusBar(["NEW STATUS"]);
-    sc.withScrollWrite((write) => write("scroll content\n"));
+  it("多次 withScrollWrite 依次累积到 region 末尾", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
     out.buffer = "";
-    sc.resume();
-    // resume 后所有暂存任务的 paint 应已写出
-    expect(out.buffer).toContain("NEW STATUS");
-    expect(out.buffer).toContain("scroll content");
-    expect(out.buffer).toContain("INPUT");
+    sc.withScrollWrite((write) => write("a"));
+    sc.withScrollWrite((write) => write("b"));
+    expect(out.buffer.indexOf("a")).toBeLessThan(out.buffer.indexOf("b"));
   });
+});
 
-  it("suspend 重入抛错——不可嵌套（alt UI 不嵌套约束）", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT"]));
-    sc.suspend();
-    expect(() => sc.suspend()).toThrow(/already suspended/);
-  });
-
-  it("resume 未 suspend 时抛错——必须 suspend / resume 成对", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    expect(() => sc.resume()).toThrow(/without prior suspend/);
-  });
-
-  it("dispose 时 suspended → cleanup 仍执行（dispose 是特权清理）", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT"]));
-    sc.suspend();
+describe("ScreenController · requestInputRepaint", () => {
+  it("attach 后调用触发 chrome 协议", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
     out.buffer = "";
-    sc.dispose();
-    // dispose 强制清 suspended 让 flush 消费 cleanup → 不应抛错或卡住
-    // dispose 后再次操作应被 enqueue 入口拒绝（不抛错，无副作用）
-    expect(() => sc.setStatusBar(["X"])).not.toThrow();
+    sc.requestInputRepaint();
+    // setChromeHeight 同高度路径 emit chromeBytes + cursor 回 region
+    expect(out.buffer).toContain("> input");
   });
 
-  it("onSuspendChange 状态翻转时触发——订阅时不立即触发", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    const calls: boolean[] = [];
-    const unsub = sc.onSuspendChange((suspended) => calls.push(suspended));
-    // 订阅时不应立即触发——calls 仍空
-    expect(calls).toEqual([]);
-    sc.suspend();
-    expect(calls).toEqual([true]);
-    sc.resume();
-    expect(calls).toEqual([true, false]);
-    unsub();
-    sc.suspend();
-    sc.resume();
-    // unsub 后不再触发
-    expect(calls).toEqual([true, false]);
+  it("pre-attach 期间 requestInputRepaint 是 no-op", () => {
+    const { out, sc } = makeHarness();
+    sc.requestInputRepaint();
+    expect(out.buffer).toBe("");
+  });
+});
+
+describe("ScreenController · detachInput", () => {
+  it("attach 后 detach 撤 DECSTBM + 擦 chrome", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    out.buffer = "";
+    sc.detachInput();
+    expect(out.buffer).toContain("\x1b[r"); // 撤 DECSTBM
   });
 
-  it("onSuspendChange 监听器异常不影响其它监听器与 ScreenController", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    const calls: string[] = [];
-    sc.onSuspendChange(() => {
-      throw new Error("listener boom");
-    });
-    sc.onSuspendChange((s) => calls.push(s ? "on" : "off"));
-    sc.suspend();
-    sc.resume();
-    expect(calls).toEqual(["on", "off"]);
+  it("pre-attach 时 detachInput 是 no-op", () => {
+    const { out, sc } = makeHarness();
+    sc.detachInput();
+    expect(out.buffer).toBe("");
   });
 
-  it("dispose 后 suspend / resume 抛错——不允许 disposed 状态下调用", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.dispose();
-    expect(() => sc.suspend()).toThrow(/after dispose/);
-    expect(() => sc.resume()).toThrow(/after dispose/);
+  it("detach → 重新 attach 走完整启动流程", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> a"]));
+    sc.detachInput();
+    out.buffer = "";
+    sc.attachInput(makeRegion(["> b"]));
+    // 重新 attach 不再清屏（已 attached 过）；走 setChromeHeight 路径...
+    // 实际：detach 让 ScrollRegion.attached=false，下次 attachInput 仍走 firstAttach
+    expect(out.buffer).toContain("\x1b[2J");
+    expect(out.buffer).toContain("> b");
   });
 });
 
 describe("ScreenController · ReplaceableSegment（双态渲染）", () => {
-  it("begin → replace 后内容显示在 tailBuffer", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT"]));
+  it("begin 同步返回 handle、replace 后内容写入 region", () => {
+    const { out, sc } = makeHarness({ rows: 20 });
+    sc.attachInput(makeRegion(["> input"]));
     out.buffer = "";
     const h = sc.beginReplaceableSegment();
-    h.replace("seg-A\nseg-B");
-    expect(out.buffer).toContain("seg-A");
-    expect(out.buffer).toContain("seg-B");
-    expect(out.buffer.indexOf("seg-A")).toBeLessThan(
-      out.buffer.indexOf("INPUT"),
-    );
+    h.replace("seg-text");
+    expect(out.buffer).toContain("seg-text");
   });
 
-  it("commit 替换内容并关闭——后续 replace 都 no-op", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT"]));
+  it("commit 替换内容并关闭——后续 replace no-op", () => {
+    const { out, sc } = makeHarness({ rows: 20 });
+    sc.attachInput(makeRegion(["> input"]));
     const h = sc.beginReplaceableSegment();
-    h.replace("dim-text");
-    h.commit("hl-text");
+    h.commit("final");
     out.buffer = "";
-    h.replace("after-commit");
-    h.commit("again");
+    h.replace("ignored");
+    expect(out.buffer).toBe("");
+  });
+
+  it("close 不替换、关闭 handle", () => {
+    const { out, sc } = makeHarness({ rows: 20 });
+    sc.attachInput(makeRegion(["> input"]));
+    const h = sc.beginReplaceableSegment();
     h.close();
-    sc.setStatusBar(["TICK"]); // 触发 paint
-    expect(out.buffer).not.toContain("after-commit");
-    expect(out.buffer).not.toContain("again");
-  });
-
-  it("close 不替换——保留当前内容、关闭", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT"]));
-    const h = sc.beginReplaceableSegment();
-    h.replace("kept");
-    h.close();
-    h.replace("after-close");
     out.buffer = "";
-    sc.setStatusBar(["TICK"]);
-    expect(out.buffer).toContain("kept");
-    expect(out.buffer).not.toContain("after-close");
+    h.replace("ignored");
+    expect(out.buffer).toBe("");
   });
 
-  it("多次 replace 用最新内容覆盖", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT"]));
-    const h = sc.beginReplaceableSegment();
-    h.replace("first-only");
-    h.replace("second-only");
-    h.replace("third-final");
-    out.buffer = "";
-    sc.setStatusBar(["TICK"]);
-    expect(out.buffer).toContain("third-final");
-    expect(out.buffer).not.toContain("first-only");
-    expect(out.buffer).not.toContain("second-only");
-  });
-
-  it("活跃 segment 时再 begin 抛错——单一约束", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
+  it("活跃 segment 时再 begin 抛错（单一约束）", () => {
+    const { sc } = makeHarness({ rows: 20 });
+    sc.attachInput(makeRegion(["> input"]));
     sc.beginReplaceableSegment();
     expect(() => sc.beginReplaceableSegment()).toThrow(/active segment/);
   });
 
   it("commit 后可立即再次 begin（同步翻转 hasActiveSegment）", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
+    const { sc } = makeHarness({ rows: 20 });
+    sc.attachInput(makeRegion(["> input"]));
     const h1 = sc.beginReplaceableSegment();
     h1.commit("x");
     expect(() => sc.beginReplaceableSegment()).not.toThrow();
   });
 
   it("close 后可立即再次 begin", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
+    const { sc } = makeHarness({ rows: 20 });
+    sc.attachInput(makeRegion(["> input"]));
     const h1 = sc.beginReplaceableSegment();
     h1.close();
     expect(() => sc.beginReplaceableSegment()).not.toThrow();
   });
 
   it("disposed 状态 begin 抛错", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
+    const { sc } = makeHarness({ rows: 20 });
     sc.dispose();
-    expect(() => sc.beginReplaceableSegment()).toThrow(/after dispose/);
+    expect(() => sc.beginReplaceableSegment()).toThrow(/dispose/);
   });
 
-  it("detachInput 清 segment 状态——后续 begin 不抛错", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["I1"]));
-    sc.beginReplaceableSegment();
-    sc.detachInput();
-    sc.attachInput(makeRegion(["I2"]));
-    expect(() => sc.beginReplaceableSegment()).not.toThrow();
+  it("pre-attach 期间 begin 抛错（fail-fast：caller 必须先 attachInput）", () => {
+    const { sc } = makeHarness({ rows: 20 });
+    expect(() => sc.beginReplaceableSegment()).toThrow(
+      /attachInput first/,
+    );
   });
 
-  it("suspend 清 segment 状态——resume 后可再 begin", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["I"]));
-    sc.beginReplaceableSegment();
+  it("suspended 期间 begin 抛错（避免与 alt UI 并发）", () => {
+    const { sc } = makeHarness({ rows: 20 });
+    sc.attachInput(makeRegion(["> input"]));
     sc.suspend();
+    expect(() => sc.beginReplaceableSegment()).toThrow(/suspended/);
+  });
+
+  it("detach 后 begin 抛错（attached=false 触发 fail-fast）", () => {
+    const { sc } = makeHarness({ rows: 20 });
+    sc.attachInput(makeRegion(["> input"]));
+    sc.detachInput();
+    expect(() => sc.beginReplaceableSegment()).toThrow(
+      /attachInput first/,
+    );
+  });
+
+  it("多次 replace 用最新内容覆盖", () => {
+    const { out, sc } = makeHarness({ rows: 20 });
+    sc.attachInput(makeRegion(["> input"]));
+    const h = sc.beginReplaceableSegment();
+    h.replace("v1");
+    h.replace("v2");
+    h.replace("v3");
+    expect(out.buffer).toContain("v3");
+  });
+});
+
+describe("ScreenController · suspend / resume", () => {
+  it("suspend 同步擦 chrome + 设状态——不入队", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    out.buffer = "";
+    sc.suspend();
+    expect(out.buffer).toContain("\x1b[r"); // 撤 DECSTBM
+  });
+
+  it("suspend 期间 enqueue 任务不立即生效——等 resume 才 flush", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    sc.suspend();
+    out.buffer = "";
+    sc.writeScrollLine("queued");
+    // suspended 期任务暂存
+    expect(out.buffer).toBe("");
     sc.resume();
-    expect(() => sc.beginReplaceableSegment()).not.toThrow();
+    // resume 后 flush——但 ScrollRegion 也走 resume 路径重设 DECSTBM
+    expect(out.buffer).toContain("\x1b[1;9r");
+    // 暂存的写入实际写到 region——不能因 ScrollRegion 仍 suspended 导致
+    // requireWritable 抛错被静默吞掉（状态机镜像对必须同步翻转的契约）
+    expect(out.buffer).toContain("queued");
   });
 
-  it("begin 时 tailBuffer 末行非空——自动切到新行", () => {
-    const out = new FakeStdout();
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["INPUT"]));
-    sc.withScrollWrite((write) => write("inline-text")); // 末行接续中
+  it("suspend 期间 enqueue setStatusBar 在 resume 后实际生效", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    sc.suspend();
     out.buffer = "";
-    sc.beginReplaceableSegment().replace("seg-content");
-    // segment 内容在新行——"inline-text" 与 "seg-content" 之间应有 \n
-    const inlineIdx = out.buffer.lastIndexOf("inline-text");
-    const segIdx = out.buffer.lastIndexOf("seg-content");
-    expect(inlineIdx).toBeGreaterThanOrEqual(0);
-    expect(segIdx).toBeGreaterThan(inlineIdx);
-    expect(out.buffer.slice(inlineIdx, segIdx)).toContain("\n");
+    sc.setStatusBar(["S"]);
+    expect(out.buffer).toBe(""); // 暂存
+    sc.resume();
+    expect(out.buffer).toContain("S"); // status 内容真实落到 chrome 区
   });
 
-  it("freeze 切走 segment 头部行——commit 跳过起首已固化部分", () => {
-    const out = new FakeStdout();
-    out.rows = 10; // 小 viewport 触发 freeze
-    const sc = createScreenController({
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(makeRegion(["I"]));
-    const h = sc.beginReplaceableSegment();
-    // 流式期填超 viewport——freezeOverflowToScrollback 推 segment 头部行
-    let body = "";
-    for (let i = 0; i < 20; i++) body += `dimL${i}\n`;
-    h.replace(body);
+  it("suspend 期 begin 抛错——而暂存写入在 resume 后正确消费（验证状态机对称性）", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    sc.suspend();
     out.buffer = "";
-    let hl = "";
-    for (let i = 0; i < 20; i++) hl += `hL${i}\n`;
-    h.commit(hl);
-    // commit 后 paint 仅 emit segment 当前持有的尾部 HL 行；起首行已被 slice 跳过
-    const hlMatches = new Set((out.buffer.match(/hL\d+/g) ?? []));
-    expect(hlMatches.size).toBeLessThan(20);
-    expect(hlMatches.size).toBeGreaterThan(0);
+    // 多个暂存任务按 FIFO 在 resume 后依次消费
+    sc.writeScrollLine("a");
+    sc.writeScrollLine("b");
+    sc.writeScrollLine("c");
+    sc.resume();
+    const aIdx = out.buffer.indexOf("a");
+    const bIdx = out.buffer.indexOf("b");
+    const cIdx = out.buffer.indexOf("c");
+    expect(aIdx).toBeGreaterThan(-1);
+    expect(bIdx).toBeGreaterThan(aIdx);
+    expect(cIdx).toBeGreaterThan(bIdx);
   });
 
-  it("commit 行数少于 segment 持有——segment 收缩", () => {
+  it("suspend 重入抛错——不可嵌套", () => {
+    const { sc } = makeHarness();
+    sc.attachInput(makeRegion(["> input"]));
+    sc.suspend();
+    expect(() => sc.suspend()).toThrow(/already suspended/);
+  });
+
+  it("resume 未 suspend 时抛错——必须 suspend / resume 成对", () => {
+    const { sc } = makeHarness();
+    expect(() => sc.resume()).toThrow(/without prior suspend/);
+  });
+
+  it("dispose 后 suspend / resume 抛错", () => {
+    const { sc } = makeHarness();
+    sc.dispose();
+    expect(() => sc.suspend()).toThrow(/dispose/);
+    expect(() => sc.resume()).toThrow(/dispose/);
+  });
+
+  it("dispose 时 suspended → cleanup 仍执行（dispose 是特权清理）", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    sc.suspend();
+    out.buffer = "";
+    sc.dispose();
+    // dispose 强制清 suspended，flush 消费 cleanup（撤 DECSTBM）
+    expect(out.buffer).toContain("\x1b[r");
+  });
+});
+
+describe("ScreenController · onSuspendChange", () => {
+  it("订阅时不立即触发——仅状态翻转时通知", () => {
+    const { sc } = makeHarness();
+    sc.attachInput(makeRegion(["> input"]));
+    const events: boolean[] = [];
+    sc.onSuspendChange((s) => events.push(s));
+    expect(events).toEqual([]);
+    sc.suspend();
+    expect(events).toEqual([true]);
+    sc.resume();
+    expect(events).toEqual([true, false]);
+  });
+
+  it("unsubscribe 后不再接收通知", () => {
+    const { sc } = makeHarness();
+    sc.attachInput(makeRegion(["> input"]));
+    const events: boolean[] = [];
+    const off = sc.onSuspendChange((s) => events.push(s));
+    off();
+    sc.suspend();
+    expect(events).toEqual([]);
+  });
+
+  it("监听器异常不影响其它监听器与 ScreenController", () => {
+    const { sc } = makeHarness();
+    sc.attachInput(makeRegion(["> input"]));
+    const events: boolean[] = [];
+    sc.onSuspendChange(() => {
+      throw new Error("boom");
+    });
+    sc.onSuspendChange((s) => events.push(s));
+    expect(() => sc.suspend()).not.toThrow();
+    expect(events).toEqual([true]);
+  });
+});
+
+describe("ScreenController · resize 监听", () => {
+  it("emit resize 触发 ScrollRegion.handleResize", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    out.buffer = "";
+    out.rows = 20;
+    out.columns = 100;
+    out.emit("resize");
+    // handleResize 重设 DECSTBM 1..(rows-chromeHeight) = 1..19
+    expect(out.buffer).toContain("\x1b[1;19r");
+  });
+
+  it("resize 后 chrome 字节用新 scrollBottom 定位 cursor positioning（避免写错位置）", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    // 初始 chrome 在 row 10（scrollBottom=9, chrome 起手 row 10）
+    out.buffer = "";
+    out.rows = 30;
+    out.columns = 100;
+    out.emit("resize");
+    // 新 scrollBottom = 30 - 1 = 29，chrome 起手 row 30
+    // chromeBytes 内 cursor positioning 应该是 \x1b[30;1H 而非旧的 \x1b[10;1H
+    expect(out.buffer).toContain("\x1b[30;1H");
+    expect(out.buffer).not.toContain("\x1b[10;1H\x1b[2K> input");
+  });
+
+  it("resize 后 setStatusBar 用新 viewport 算 scrollBottom（chrome 协议持续正确）", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    out.rows = 30;
+    out.emit("resize");
+    out.buffer = "";
+    sc.setStatusBar(["S"]);
+    // 新 chrome = 1 status + 1 input = 2，新 scrollBottom = 30-2 = 28
+    // setChromeHeight 重设 DECSTBM 1..28
+    expect(out.buffer).toContain("\x1b[1;28r");
+    // chrome 起手 row 29
+    expect(out.buffer).toContain("\x1b[29;1H");
+  });
+
+  it("resize 时 input.renderLines() 因 columns 变化触发 reflow 行数变化——DECSTBM 与 chrome 起手行同步对齐", () => {
+    // Finding 1 端到端回归覆盖：caller 端 chromeHeight 与 ScrollRegion 内部
+    // chromeHeight 必须用同一值推导 scrollBottom，否则 chrome 第一行落到 region
+    // 末，下次写 region 推走 chrome（chrome 永驻协议失守）。
     const out = new FakeStdout();
+    out.rows = 20;
+    out.columns = 80;
+    let dynamicLines: readonly string[] = ["> input"];
+    const region: InputRegion = {
+      renderLines: () => dynamicLines,
+      cursorPosition: () => ({ row: 0, col: 0 }),
+    };
     const sc = createScreenController({
+      capability: makeCapability(20, 80),
       stdout: out as unknown as NodeJS.WriteStream,
     });
-    sc.attachInput(makeRegion(["INPUT"]));
-    const h = sc.beginReplaceableSegment();
-    h.replace("a\nb\nc\nd");
-    h.commit("X"); // 单行替换 4 行
+    sc.attachInput(region);
+    // 初始 chromeHeight=1, scrollBottom=19
+
+    // 模拟 columns 80→40 导致 input box reflow 多 1 行
+    out.rows = 20;
+    out.columns = 40;
+    dynamicLines = ["> input head", "  cont"];
     out.buffer = "";
-    sc.setStatusBar(["TICK"]); // 触发 paint
-    expect(out.buffer).toContain("X");
-    expect(out.buffer).not.toContain("a\nb"); // 旧 4 行应被替换
+    out.emit("resize");
+
+    // 新 chromeHeight=2, 新 scrollBottom = 20 - 2 = 18
+    expect(out.buffer).toContain("\x1b[1;18r"); // DECSTBM 用新 chromeHeight
+    expect(out.buffer).toContain("\x1b[19;1H"); // chrome 起手 row = scrollBottom + 1 = 19
+    // 关键反向断言：旧 chromeHeight=1 算的 DECSTBM 必须不出现
+    expect(out.buffer).not.toContain("\x1b[1;19r");
+    // chrome 内容真实写出
+    expect(out.buffer).toContain("> input head");
+    expect(out.buffer).toContain("  cont");
+  });
+
+  it("dispose 解绑 resize listener——不再响应 emit", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    sc.dispose();
+    out.buffer = "";
+    out.emit("resize");
+    expect(out.buffer).toBe("");
+  });
+
+  it("pre-attach 期间 resize 是 no-op", () => {
+    const { out } = makeHarness();
+    // 不 attach
+    out.emit("resize");
+    expect(out.buffer).toBe("");
+  });
+});
+
+describe("ScreenController · dispose", () => {
+  it("dispose 后撤 DECSTBM + 清状态", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    out.buffer = "";
+    sc.dispose();
+    expect(out.buffer).toContain("\x1b[r");
+  });
+
+  it("dispose 后 attach 不再产生输出", () => {
+    const { out, sc } = makeHarness();
+    sc.dispose();
+    out.buffer = "";
+    sc.attachInput(makeRegion(["> input"]));
+    expect(out.buffer).toBe("");
+  });
+
+  it("重复 dispose 是 no-op", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    sc.dispose();
+    out.buffer = "";
+    sc.dispose();
+    expect(out.buffer).toBe("");
+  });
+
+  it("pre-attach dispose 不写字节", () => {
+    const { out, sc } = makeHarness();
+    sc.dispose();
+    expect(out.buffer).toBe("");
+  });
+});
+
+describe("ScreenController · 串行化", () => {
+  it("嵌套 enqueue（写入回调内调 setStatusBar）按 FIFO 顺序执行", () => {
+    const { out, sc } = makeHarness({ rows: 20 });
+    sc.attachInput(makeRegion(["> input"]));
+    out.buffer = "";
+    sc.withScrollWrite((write) => {
+      write("a");
+      sc.setStatusBar(["S"]);
+    });
+    // a 写在前 + status 在后；当前 task 完成后才执行 setStatusBar task
+    const aIdx = out.buffer.indexOf("a");
+    const sIdx = out.buffer.indexOf("S");
+    expect(aIdx).toBeGreaterThan(-1);
+    expect(sIdx).toBeGreaterThan(-1);
+    expect(aIdx).toBeLessThan(sIdx);
+  });
+
+  it("attach 之前 + 之后写入顺序保持", () => {
+    const { out, sc } = makeHarness({ rows: 20 });
+    sc.writeScrollLine("pre1");
+    sc.writeScrollLine("pre2");
+    sc.attachInput(makeRegion(["> input"]));
+    sc.writeScrollLine("post1");
+    // pre 走缓冲 → flush 时一次写出；post1 在 attach 之后实时写
+    expect(out.buffer.indexOf("pre1")).toBeLessThan(out.buffer.indexOf("pre2"));
+    expect(out.buffer.indexOf("pre2")).toBeLessThan(out.buffer.indexOf("post1"));
   });
 });

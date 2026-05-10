@@ -70,8 +70,11 @@ import {
 import {
   createScreenController,
   createScreenWriter,
+  createStdoutWriter,
   type CliWriter,
+  type ScreenController,
 } from "./screen/index.js";
+import { detectTerminalCapability } from "./screen/terminal-capability.js";
 import { InputController } from "./typeahead-input.js";
 import { renderHomeWelcome, renderStartupAdvisories } from "./workbench/index.js";
 import { RuntimeSession } from "./runtime/session.js";
@@ -753,16 +756,42 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   // 占位符仍可 expand。session 退出时随 startRepl scope 自然 GC，无需显式 clearAll。
   const pasteRegistry = new PasteRegistry();
 
-  // 屏幕协调器——cli REPL session 级，所有写入屏幕的逻辑（AI 输出 / status-bar / scheduler
-  // 通知 / retry-compact-interrupt 等）必须经此协调，让输入区 chrome 永驻屏底不被推走。
-  // 在 typeahead 模式下绑定 input controller；其他模式下仅协调 status / scroll。
-  const renderScreen = createScreenController();
+  // 终端能力探测——DECSTBM 三区模型要求 TTY 直连 + 现代终端基线。检测失败时
+  // fail-fast 降级到 stdout 直写模式（无 chrome），保留基础对话能力
+  const capability = detectTerminalCapability();
+  let renderScreen: ScreenController | null = null;
+  let cliWriter: CliWriter;
+  if (capability.ok) {
+    // 屏幕协调器——cli REPL session 级，所有写入屏幕的逻辑（AI 输出 / status-bar /
+    // scheduler 通知 / retry-compact-interrupt 等）必须经此协调，让输入区 chrome
+    // 永驻屏底不被推走。在 typeahead 模式下绑定 input controller；其他模式下
+    // 仅协调 status / scroll。
+    renderScreen = createScreenController({ capability: capability.capability });
+    cliWriter = createScreenWriter({ screen: renderScreen });
 
-  // CliWriter ——所有写屏路径（renderer / RuntimeSession / slash 命令 / scheduler 通知）
-  // 必须经此统一接口，禁止直接 console.log / process.stdout.write。
-  // ScreenWriter 封装 ScreenController frame buffer：line 独立段（自动补 \n），
-  // appendInline 流式接续（不补 \n），notify 异步通知语义（同 line）。
-  const cliWriter: CliWriter = createScreenWriter({ screen: renderScreen });
+    // 异常退出兜底：SIGTERM / 父进程 kill / 未捕获异常等不走 main loop 的退出
+    // 路径，正常 dispose 不被调用 → DECSTBM 残留 → shell 接管后 \n 行为受 region
+    // 限制。process.on("exit") 是同步钩子，dispose 内 ScrollRegion.shutdown 同步
+    // 调 stdout.write("\x1b[r" + cursor) 能在退出前刷出。
+    //
+    // 与正常路径幂等：main loop break 后 renderScreen.dispose() 已撤 DECSTBM；
+    // 此处 listener 触发时 disposed=true，dispose 提前 return（library 层幂等保证）。
+    //
+    // 与 setupBracketedPasteMode 内的 process.on("exit") 形成"终端模式 reset 钩子族"
+    // 语义对称：bracketed paste / DECSTBM 都是终端模式残留物，统一在退出钩子卸载。
+    process.on("exit", () => {
+      renderScreen?.dispose();
+    });
+  } else {
+    // 终端不支持 region 模式（管道 / 重定向 / dumb / 旧 Windows 等）——直写
+    // stdout 退化模式。无 chrome、无 input box、无 segment 双态渲染；仅基础
+    // 对话输出可用。caller 通过 typeaheadMode = "legacy" 自动适配为 rl.question 路径。
+    // allow-direct-stdout: chrome 未建立、cliWriter 还未创建、必须直写 stderr 通知用户
+    process.stderr.write(
+      `\x1b[33mzhixing: 终端能力探测降级 (${capability.reason})——使用基础对话模式\x1b[0m\n`,
+    );
+    cliWriter = createStdoutWriter();
+  }
 
   // renderer 借给 RuntimeSession——session 内部装配 agent 时通过 closure 注入。
   // renderer 接收 cliWriter，所有 AI 输出（text/thinking/tool 卡片）经 writer 协调。
@@ -794,7 +823,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     cliProvider: options.provider,
     renderer,
     writer: cliWriter,
-    screen: renderScreen,
+    screen: renderScreen ?? undefined,
     zhixingHome,
     schedulerEventBus,
     onSecurityBlocked: createBlockedRenderer(cliWriter),
@@ -928,12 +957,12 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   // 渲染器生命周期绑到 REPL 退出：rl.on("close") 里 detach。
   const confirmationRenderer = new TerminalConfirmationRenderer({
     beforeShow: () => {
-      renderScreen.suspend();
+      renderScreen?.suspend();
       rl.pause();
     },
     afterShow: () => {
       rl.resume();
-      renderScreen.resume();
+      renderScreen?.resume();
     },
   });
   // session 持有 renderer 与 broker 的绑定，dispose 时自动 detach
@@ -972,7 +1001,14 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   //   2. 不产生多余的 agent turn 和 token 消耗
   //   3. `/new` 清历史后 agent 自然从空白开始，不需要 system message 提醒
   const typeaheadMode = (process.env.ZHIXING_INPUT_TYPEAHEAD ?? "on").toLowerCase();
-  const useTypeahead = typeaheadMode !== "legacy" && typeaheadMode !== "off";
+  // capability 探测失败时强制走 legacy `rl.question` 路径——typeahead 持久输入区
+  // 依赖 ScreenController 的 chrome 模式，无 chrome 终端（管道 / 重定向 / dumb）下
+  // typeahead 视觉环境缺失，启用会让 InputController 内部 fallback 创建 silent
+  // ScreenController 写 raw ANSI 到不支持的下游
+  const useTypeahead =
+    typeaheadMode !== "legacy" &&
+    typeaheadMode !== "off" &&
+    capability.ok;
 
   let typeaheadBroker: DefaultTypeaheadBroker | null = null;
   let typeaheadDispatcher: CommandDispatcher | null = null;
@@ -1118,7 +1154,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       broker: typeaheadBroker,
       dispatcher: typeaheadDispatcher,
       getRuntime,
-      screen: renderScreen,
+      screen: renderScreen ?? undefined,
       placeholder: "输入消息或 / 查看命令",
       registry: pasteRegistry,
     });
@@ -1424,7 +1460,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   if (inputController) {
     inputController.stop();
   }
-  renderScreen.dispose();
+  renderScreen?.dispose();
 
   // 关闭 readline——typeahead 路径下 break 跳出循环后必须显式 close，否则 readline 持
   // stdin 让事件循环不空，进程不退出。Legacy 路径下 readline 已 close，幂等 no-op。
