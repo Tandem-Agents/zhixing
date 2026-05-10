@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { charWidth, clampLine, stringWidth, wrapToWidth } from "../line-width.js";
+import {
+  charWidth,
+  clampLine,
+  stringWidth,
+  wrapAnsiLine,
+  wrapToWidth,
+} from "../line-width.js";
 
 const ATOM = /\[ATOM\]/g; // 6 chars 模拟不可切碎的原子单元
 
@@ -200,5 +206,170 @@ describe("wrapToWidth — 启用 atomicRegions（atomic + \\n 硬换行）", () 
 
   it("多个 atomic 区域分别整体处理", () => {
     expect(wrapToWidth("[ATOM][ATOM]", 8, ATOM)).toEqual(["[ATOM]", "[ATOM]"]);
+  });
+});
+
+describe("wrapAnsiLine — ANSI-aware 软折行", () => {
+  it("空字符串原样返回，状态保留", () => {
+    const r = wrapAnsiLine("", 10);
+    expect(r.output).toBe("");
+    expect(r.endColumnWidth).toBe(0);
+    expect(r.endActiveSgr).toBe("");
+  });
+
+  it("maxVisibleWidth ≤ 0 返回原文不折行", () => {
+    const r = wrapAnsiLine("hello", 0);
+    expect(r.output).toBe("hello");
+  });
+
+  it("不超宽的单行原样返回", () => {
+    const r = wrapAnsiLine("hello", 10);
+    expect(r.output).toBe("hello");
+    expect(r.endColumnWidth).toBe(5);
+  });
+
+  it("超宽按 code point 软折行", () => {
+    const r = wrapAnsiLine("abcdefgh", 3);
+    expect(r.output).toBe("abc\ndef\ngh");
+    expect(r.endColumnWidth).toBe(2);
+  });
+
+  it("续行加 continuationPrefix（其内宽度不计入 maxVisibleWidth）", () => {
+    const r = wrapAnsiLine("abcdefgh", 3, { continuationPrefix: "  " });
+    // 续行起首 \n + "  "；宽度计数从 0 重新累计——续行可填满 3 字符
+    expect(r.output).toBe("abc\n  def\n  gh");
+  });
+
+  it("CJK 全角字符按 2 列计宽", () => {
+    const r = wrapAnsiLine("中文你好", 2);
+    expect(r.output).toBe("中\n文\n你\n好");
+    expect(r.endColumnWidth).toBe(2);
+  });
+
+  it("CJK 与 ASCII 混排在 wrap 边界", () => {
+    // budget = 4：a(1)+b(1)+中(2)=4 刚好；下一字 文(2) 触发 wrap
+    const r = wrapAnsiLine("ab中文", 4);
+    expect(r.output).toBe("ab中\n文");
+  });
+
+  it("ANSI CSI 序列原样透传，宽度 0 不参与折行", () => {
+    // \x1b[31m 是 5 字节 SGR 但显示宽度 0
+    const r = wrapAnsiLine("\x1b[31mhello\x1b[0m", 10);
+    expect(r.output).toBe("\x1b[31mhello\x1b[0m");
+    expect(r.endColumnWidth).toBe(5);
+  });
+
+  it("OSC 8 超链接原样透传不切碎", () => {
+    const link = "\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\";
+    const r = wrapAnsiLine(link, 10);
+    expect(r.output).toBe(link);
+    // 可见宽度 = "link" = 4
+    expect(r.endColumnWidth).toBe(4);
+  });
+
+  it("跨 wrap 边界保 SGR 自平衡：续行起首 reset + re-emit active SGR", () => {
+    // \x1b[31m red 起手 → 'a','b' 写完后 wrap → 续行 emit reset + \n + active(\x1b[31m)
+    const r = wrapAnsiLine("\x1b[31mabcd", 2);
+    expect(r.output).toBe("\x1b[31mab\x1b[0m\n\x1b[31mcd");
+    expect(r.endActiveSgr).toBe("\x1b[31m");
+  });
+
+  it("续行 prefix 不被 active SGR 染色（reset 在 prefix 之前）", () => {
+    const r = wrapAnsiLine("\x1b[41mhello world", 5, {
+      continuationPrefix: "  ",
+    });
+    // 'hello'(5) 占满 budget=5；' '触发 wrap 1
+    // 续行 ' worl'(5) 占满；'d' 触发 wrap 2 → 共 3 行
+    // wrap 序列 = SGR_RESET \n "  " activeSgr = "\x1b[0m\n  \x1b[41m"
+    expect(r.output).toBe(
+      "\x1b[41mhello\x1b[0m\n  \x1b[41m worl\x1b[0m\n  \x1b[41md",
+    );
+  });
+
+  it("active SGR 空时不 emit 多余 reset", () => {
+    const r = wrapAnsiLine("abcdef", 3);
+    // 无 SGR 时 wrap 序列 = "\n"，无 \x1b[0m
+    expect(r.output).toBe("abc\ndef");
+    expect(r.output).not.toContain("\x1b[0m");
+  });
+
+  it("SGR full reset (\\x1b[0m) 清空 active 累积", () => {
+    // 起手 red → 'a' → reset → 'b','c'(超 budget,但 active 已空)
+    const r = wrapAnsiLine("\x1b[31ma\x1b[0mbc", 1);
+    // \x1b[31m a \x1b[0m wrap(无 SGR re-emit)\n b wrap\n c
+    expect(r.output).toBe("\x1b[31ma\x1b[0m\nb\nc");
+    expect(r.endActiveSgr).toBe("");
+  });
+
+  it("非 reset 的 SGR (如 \\x1b[39m 仅关 fg) 累积到 active 不清空", () => {
+    // \x1b[31m 起手、\x1b[39m 关 fg — active 仍含两段 SGR（不区分语义，简单累加）
+    const r = wrapAnsiLine("\x1b[31ma\x1b[39mbcdef", 2);
+    // 第二段 wrap 时 active = "\x1b[31m\x1b[39m"，emit reset + 续行 + active
+    expect(r.endActiveSgr).toBe("\x1b[31m\x1b[39m");
+  });
+
+  it("startColumnWidth > 0 模拟续接已写部分内容", () => {
+    // 起手 columnWidth=8、budget=10——只能再容 2 字符就 wrap
+    const r = wrapAnsiLine("abcd", 10, { startColumnWidth: 8 });
+    // 'a' col 9, 'b' col 10, 'c' wrap → "ab\ncd"
+    expect(r.output).toBe("ab\ncd");
+    expect(r.endColumnWidth).toBe(2);
+  });
+
+  it("startActiveSgr 影响 wrap 时的 reset / re-emit 行为", () => {
+    // 起手已 active red SGR（caller 之前 emit 过），text 内无新 SGR
+    const r = wrapAnsiLine("abcd", 2, { startActiveSgr: "\x1b[31m" });
+    // wrap 时 emit reset + \n + active red
+    expect(r.output).toBe("ab\x1b[0m\n\x1b[31mcd");
+    expect(r.endActiveSgr).toBe("\x1b[31m");
+  });
+
+  it("单字符宽度大于 budget 时整段 emit 不死循环", () => {
+    // CJK 2 列、budget 1——单字超 budget
+    const r = wrapAnsiLine("中文", 1);
+    // 第 1 字符 '中'：lineHasVisibleContent=false, 不 wrap, emit '中', columnWidth=2
+    // 第 2 字符 '文'：lineHasVisibleContent=true, 2+2>1 → wrap, emit \n, '文'
+    expect(r.output).toBe("中\n文");
+    // 不死循环（最关键）
+    expect(r.output.length).toBeLessThan(20);
+  });
+
+  it("纯 ANSI 序列（无可见字符）不触发 wrap", () => {
+    const r = wrapAnsiLine("\x1b[31m\x1b[1m\x1b[0m", 1);
+    expect(r.output).toBe("\x1b[31m\x1b[1m\x1b[0m");
+    expect(r.endColumnWidth).toBe(0);
+  });
+
+  it("ANSI 序列在 wrap 边界处不被切碎", () => {
+    // 'a','b' 占满 budget=2；接 \x1b[31m（0 宽）原样透传，activeSgr 累积
+    // 'c' 触发 wrap：emit reset + \n + active("\x1b[31m") → 续行 'cd' 同行
+    // 注意：wrap 后 active 会被再次 emit 一遍，与 passthrough 时已 emit 的不去重——
+    // 这是 cumulative SGR 简单语义（与 text-stream.ts 行为一致）
+    const r = wrapAnsiLine("ab\x1b[31mcd", 2);
+    expect(r.output).toBe("ab\x1b[31m\x1b[0m\n\x1b[31mcd");
+  });
+
+  it("代理对（surrogate pair）整段处理不切半", () => {
+    // 😀 (U+1F600) emoji 2 列；budget 2 应整字 emit
+    const r = wrapAnsiLine("😀😀", 2);
+    expect(r.output).toBe("😀\n😀");
+    // 两个完整 emoji（非 4 个 surrogate 半字符）
+    expect([...r.output].length).toBe(3); // 2 emojis + 1 \n
+  });
+
+  it("startActiveSgr + 自身 SGR 累积叠加", () => {
+    // 起手 active = red、text 内 emit bold → active = red+bold
+    const r = wrapAnsiLine("\x1b[1mabcd", 2, { startActiveSgr: "\x1b[31m" });
+    // wrap 时 emit reset + \n + (red+bold)
+    expect(r.output).toBe("\x1b[1mab\x1b[0m\n\x1b[31m\x1b[1mcd");
+    expect(r.endActiveSgr).toBe("\x1b[31m\x1b[1m");
+  });
+
+  it("连续多次 wrap 持续维护 active SGR", () => {
+    const r = wrapAnsiLine("\x1b[31mabcdefghi", 2);
+    expect(r.output).toBe(
+      "\x1b[31mab\x1b[0m\n\x1b[31mcd\x1b[0m\n\x1b[31mef\x1b[0m\n\x1b[31mgh\x1b[0m\n\x1b[31mi",
+    );
+    expect(r.endActiveSgr).toBe("\x1b[31m");
   });
 });

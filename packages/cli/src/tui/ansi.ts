@@ -134,16 +134,30 @@ export function dottedUnderline(text: string): string {
   return `\x1b[4:4m${text}\x1b[24m`;
 }
 
-const SGR_RESET = "\x1b[0m";
+/** SGR full reset 字面常量——续行 / 行末关染色用 */
+export const SGR_RESET = "\x1b[0m";
 
 /** CSI ... m 形式的 SGR 序列识别 */
-function isSgrSeq(seq: string): boolean {
+export function isSgrSeq(seq: string): boolean {
   return (
     seq.length >= 3 &&
     seq.charCodeAt(0) === 0x1b &&
     seq.charCodeAt(1) === 0x5b /* '[' */ &&
     seq.charCodeAt(seq.length - 1) === 0x6d /* 'm' */
   );
+}
+
+/**
+ * SGR full reset 检测：参数为空 / 全 0 视为 full reset。
+ *
+ * 例：`\x1b[m` `\x1b[0m` `\x1b[0;0m` 都 reset；`\x1b[39m` 仅关 fg 不算
+ * full reset（其他 active 属性如 bold / bg 仍保留）。
+ */
+export function isFullSgrReset(seq: string): boolean {
+  if (!isSgrSeq(seq)) return false;
+  const params = seq.slice(2, -1);
+  if (params.length === 0) return true;
+  return params.split(/[;:]/).every((p) => p === "" || p === "0");
 }
 
 /** 从 SGR 序列取首参数数字（剥 :sub-param）。空参数视为 0（reset）。 */

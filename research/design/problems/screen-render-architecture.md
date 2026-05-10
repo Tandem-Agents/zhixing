@@ -679,20 +679,20 @@ process.on('exit') / SIGINT / SIGTERM:
 
 **最低终端要求**（与 zhixing 当前 ANSI 颜色 / cursor 控制依赖范围一致）：
 - Windows Terminal（Win11 默认）
-- conhost.exe（Windows 10 1709+，cmd.exe / PowerShell 默认宿主，自动开 VT 处理）
+- conhost.exe（Windows 10 build 17134 / 1803+，cmd.exe / PowerShell 默认宿主，ConPTY 稳定基线）
 - macOS Terminal.app / iTerm2
 - Linux 主流终端（GNOME / Konsole / xterm / alacritty）
 - VS Code / Cursor 集成终端（xterm.js）
 - 主流 ssh 客户端
 
 **不支持**：
-- Windows 10 1709 之前的 conhost.exe（已停止支持）
+- Windows 10 1803 之前的 conhost.exe（ConPTY 在 1709 起支持但 1803 才稳定，早期版本部分 ANSI 序列被当字面字符显示）
 - PowerShell ISE（已停更）
 - 极端嵌入式终端
 
 **启动期检测**（一次性，fail-fast）：
 - `process.stdout.isTTY` 必须为 true
-- 平台 + 版本检测（Windows 版本 ≥ 10 1709、`TERM` env 非 dumb）
+- 平台 + 版本检测（Windows kernel build ≥ 17134（10 1803，ConPTY 稳定基线）、`TERM` env 非 dumb）
 - **cooked TTY 模式校验**：所有 region 写入路径用 `\n` 而非 `\r\n`，依赖终端 ONLCR 把 `\n` 翻为 `\r\n`（cooked TTY 默认行为）。stdin 可走 raw mode（readline 输入处理需要），但 stdout 必须保持 cooked。检测方式：`process.stdout` 不应被 caller 调用 `setRawMode(true)`；项目内部全局约束
 - 可选：发一次 `\x1b[6n` cursor query + 同步 stdin 等待 reply（超时 200ms）→ 验证终端响应能力
 

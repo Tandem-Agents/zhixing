@@ -15,7 +15,13 @@
  * 但 clampLine 会从后面补 reset，不会让 cursor 数学崩掉。
  */
 
-import { stripAnsi } from "./ansi.js";
+import {
+  ansiEscapeLengthAt,
+  isFullSgrReset,
+  isSgrSeq,
+  SGR_RESET,
+  stripAnsi,
+} from "./ansi.js";
 
 // ── CJK + 全角字符范围 ──
 // 来源：Unicode East_Asian_Width=F/W + 常用 CJK blocks。
@@ -278,4 +284,120 @@ export function clampLine(s: string, maxVisibleWidth: number): string {
   }
 
   return `${out}${ellipsis}\x1b[0m`;
+}
+
+/** wrapAnsiLine 的可选参数——支持增量调用维护续状态 */
+export interface WrapAnsiLineOptions {
+  /**
+   * 续行（wrap 后的非首行）起首注入的视觉缩进字串。**其内宽度不计入
+   * `maxVisibleWidth`**——caller 自行确保 prefix 显示宽度 + 续行内容宽度
+   * ≤ 终端列宽，避免续行触发终端自动换行。空字串表示续行无缩进。
+   */
+  readonly continuationPrefix?: string;
+  /**
+   * 起手 cursor 已占用的列宽——caller 用来支持"已写部分内容、本次接续"语义。
+   * 默认 0 = 起手在新行行首；> 0 = 已在行内位 N 列处续写。
+   */
+  readonly startColumnWidth?: number;
+  /**
+   * 起手时已 active 的 SGR 序列累积——caller 跨调用维持染色状态用。
+   * wrap 续行时会 emit `SGR_RESET` 关掉染色让 prefix 不继承，再 emit
+   * `activeSgr` 让续行可见字符恢复染色。
+   */
+  readonly startActiveSgr?: string;
+}
+
+/** wrapAnsiLine 的返回值——含输出 + 末态供 caller 续接维护 */
+export interface WrapAnsiLineResult {
+  /** wrap 后的字符串，行间用 `\n` 分隔；含原 ANSI 序列原样透传 + 续行 prefix */
+  readonly output: string;
+  /** 输出末尾 cursor 的列宽（视觉宽度）——caller 续接时作下次 startColumnWidth */
+  readonly endColumnWidth: number;
+  /** 输出末尾 active 的 SGR 序列累积——caller 续接时作下次 startActiveSgr */
+  readonly endActiveSgr: string;
+}
+
+/**
+ * ANSI-aware 软折行——把含 ANSI 染色的单逻辑行按显示宽度拆成多段，
+ * 行间用 `\n` 连接，跨 wrap 边界的 SGR 染色状态自动平衡（不会让 hanging
+ * prefix 继承上行 bg 染色、不会让续行内容失色）。
+ *
+ * 行为契约：
+ *   - 逐 code point 扫描，用 `charWidth` 累计可见宽度（CJK 2 列、ASCII 1 列、
+ *     控制符 0 列、Cf 类格式控制 0 列）
+ *   - ANSI CSI / OSC 序列原样透传、宽度 0、不参与折行决策
+ *   - SGR 序列累积到 active SGR 状态；full reset (`\x1b[0m` / `\x1b[m` /
+ *     `\x1b[0;0m`) 清空 active；其它 SGR (`\x1b[31m` / `\x1b[1m` 等) append
+ *   - 累计宽度 + 当前字符 > `maxVisibleWidth` 时插 wrap：
+ *     active 非空 → emit `SGR_RESET + \n + continuationPrefix + activeSgr`
+ *     active 空 → emit `\n + continuationPrefix`
+ *   - wrap 后 columnWidth 重置为 0（即 `maxVisibleWidth` 是续行**内容**预算，
+ *     不含 continuationPrefix——caller 自负 prefix 宽度）
+ *   - "至少一个可见字符" 才允许 wrap——单字符宽度大于 maxVisibleWidth 时整段
+ *     原位 emit，避免死循环
+ *   - input 不应含 `\n`（caller 应先按 `\n` 切段、对每段独立调本函数）；含 `\n`
+ *     时按 0 宽控制符透传，不做特殊换行处理
+ *
+ * 用例：
+ *   - block-renderer 一次性调用：`const { output } = wrapAnsiLine(line, columns - 1, { continuationPrefix: indent });`
+ *   - text-stream 增量调用：传入 startColumnWidth / startActiveSgr 维护跨 chunk
+ *     状态、用 endColumnWidth / endActiveSgr 更新自身 state
+ */
+export function wrapAnsiLine(
+  text: string,
+  maxVisibleWidth: number,
+  options: WrapAnsiLineOptions = {},
+): WrapAnsiLineResult {
+  const continuationPrefix = options.continuationPrefix ?? "";
+  let columnWidth = options.startColumnWidth ?? 0;
+  let activeSgr = options.startActiveSgr ?? "";
+
+  if (maxVisibleWidth <= 0 || text.length === 0) {
+    return { output: text, endColumnWidth: columnWidth, endActiveSgr: activeSgr };
+  }
+
+  let out = "";
+  let lineHasVisibleContent = columnWidth > 0;
+  let i = 0;
+
+  while (i < text.length) {
+    const ansiLen = ansiEscapeLengthAt(text, i);
+    if (ansiLen > 0) {
+      const seq = text.slice(i, i + ansiLen);
+      out += seq;
+      if (isSgrSeq(seq)) {
+        if (isFullSgrReset(seq)) {
+          activeSgr = "";
+        } else {
+          activeSgr += seq;
+        }
+      }
+      i += ansiLen;
+      continue;
+    }
+
+    const cp = text.codePointAt(i);
+    if (cp === undefined) {
+      i++;
+      continue;
+    }
+    const charStr = String.fromCodePoint(cp);
+    const w = charWidth(cp);
+
+    if (lineHasVisibleContent && columnWidth + w > maxVisibleWidth) {
+      out +=
+        activeSgr.length > 0
+          ? `${SGR_RESET}\n${continuationPrefix}${activeSgr}`
+          : `\n${continuationPrefix}`;
+      columnWidth = 0;
+      lineHasVisibleContent = false;
+    }
+
+    out += charStr;
+    columnWidth += w;
+    if (w > 0) lineHasVisibleContent = true;
+    i += charStr.length;
+  }
+
+  return { output: out, endColumnWidth: columnWidth, endActiveSgr: activeSgr };
 }
