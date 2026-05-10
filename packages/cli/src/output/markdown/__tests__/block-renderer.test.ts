@@ -1,13 +1,31 @@
 import chalk from "chalk";
 import { describe, expect, it } from "vitest";
 import { marked, type Tokens } from "marked";
-import { renderBlock } from "../block-renderer.js";
+import {
+  formatStreamingCode,
+  renderBlock as renderBlockRaw,
+} from "../block-renderer.js";
+import type { MarkdownMode } from "../types.js";
 import { stripAnsi } from "../../../tui/ansi.js";
+import { stringWidth } from "../../../tui/line-width.js";
 import { layout } from "../../../tui/style.js";
 
 /** 用真实 marked.lexer 解析 markdown 取首 token——比手工构造 mock 更稳 */
 function lexFirst<T extends Tokens.Generic>(md: string): T {
   return marked.lexer(md)[0] as T;
+}
+
+/** 测试用 wrapper——把 mode 简写注入 RenderContext，columns 默认 80 够覆盖现有窄行用例 */
+function renderBlock(
+  token: Tokens.Generic,
+  mode: MarkdownMode,
+  options: { indentLevel?: number; columns?: number } = {},
+): string {
+  return renderBlockRaw(token, {
+    mode,
+    indentLevel: options.indentLevel ?? 0,
+    columns: options.columns ?? 80,
+  });
 }
 
 // 强制启用 ANSI 染色——vitest non-TTY 环境下 chalk 默认降级，让 chalk.cyan(x) 输出
@@ -256,5 +274,150 @@ describe("renderBlock · space token", () => {
   it("space token 返回空字符串（段落分隔不重复 emit）", () => {
     const t = { type: "space", raw: "\n\n" } as Tokens.Space;
     expect(renderBlock(t, "render")).toBe("");
+  });
+});
+
+/**
+ * Region 写入合约断言：output 按 `\n` 切分后每段显示宽度 ≤ columns - 1。
+ * caller 输出违反该约束 → 终端隐式 wrap → 物理行数 > 逻辑行数 → segment 滚动数失算。
+ */
+function expectAllLinesWithinBudget(output: string, columns: number): void {
+  const lines = output.split("\n");
+  for (const line of lines) {
+    const visible = stringWidth(stripAnsi(line));
+    expect(visible).toBeLessThanOrEqual(columns - 1);
+  }
+}
+
+describe("renderBlock · 行宽合约（wrap 落地）", () => {
+  it("长 paragraph 被软折——每段 ≤ columns - 1", () => {
+    // 100 字符 paragraph + columns=30 → 多行 wrap
+    const para = lexFirst<Tokens.Paragraph>("a".repeat(100) + "\n\n");
+    const out = renderBlock(para, "render", { columns: 30 });
+    expectAllLinesWithinBudget(out, 30);
+    // 至少出现一次 wrap（长行无法落入单一窄列）
+    expect(out.split("\n").length).toBeGreaterThan(3);
+  });
+
+  it("长 list_item 被软折，续行用 INDENT_UNIT（2 列）对齐", () => {
+    const list = lexFirst<Tokens.List>(`- ${"x".repeat(80)}\n`);
+    const out = renderBlock(list, "render", { columns: 30 });
+    expectAllLinesWithinBudget(out, 30);
+    const stripped = stripAnsi(out);
+    // 续行起手为 PREFIX + INDENT_UNIT = "  " + "  " = 4 空格
+    const lines = stripped.split("\n").filter((l) => l.length > 0);
+    const continuationLines = lines.slice(1);
+    for (const cl of continuationLines) {
+      expect(cl.startsWith("    ")).toBe(true);
+    }
+  });
+
+  it("长有序列表 marker '10.' 偏移由 startColumnWidth 表达——首行更早 wrap", () => {
+    const list = lexFirst<Tokens.List>(
+      `10. ${"a".repeat(40)}\n11. ${"b".repeat(40)}\n`,
+    );
+    const out = renderBlock(list, "render", { columns: 30 });
+    expectAllLinesWithinBudget(out, 30);
+  });
+
+  it("长 code block 行被软折，SGR 跨 wrap 自平衡", () => {
+    const t = {
+      type: "code",
+      lang: "typescript",
+      text: "const " + "longIdentifierName".repeat(5) + " = 1;",
+      raw: "",
+    } as Tokens.Code;
+    const out = renderBlock(t, "render", { columns: 30 });
+    expectAllLinesWithinBudget(out, 30);
+  });
+
+  it("长 heading 被软折——一级 / 二级都遵守合约", () => {
+    const t1 = {
+      type: "heading",
+      depth: 1,
+      text: "Title " + "x".repeat(60),
+      raw: "",
+    } as Tokens.Heading;
+    const out1 = renderBlock(t1, "render", { columns: 30 });
+    expectAllLinesWithinBudget(out1, 30);
+
+    const t2 = {
+      type: "heading",
+      depth: 2,
+      text: "Sub " + "y".repeat(60),
+      raw: "",
+    } as Tokens.Heading;
+    const out2 = renderBlock(t2, "render", { columns: 30 });
+    expectAllLinesWithinBudget(out2, 30);
+  });
+
+  it("renderHr clamp rule 长度到 columns - 1 - indent，避免触发隐式 wrap", () => {
+    const t = { type: "hr", raw: "---" } as Tokens.Hr;
+    const out = renderBlock(t, "render", { columns: 20 });
+    expectAllLinesWithinBudget(out, 20);
+    const stripped = stripAnsi(out);
+    // PREFIX (2) + rule_length ≤ 19 → rule_length ≤ 17
+    const ruleLine = stripped.split("\n").find((l) => l.includes("─"))!;
+    expect(stringWidth(ruleLine)).toBeLessThanOrEqual(19);
+  });
+
+  it("blockquote 子 paragraph 长行经子 renderer wrap 后整段 dim 包裹仍合规", () => {
+    const bq = lexFirst<Tokens.Blockquote>(`> ${"a".repeat(80)}\n\n`);
+    const out = renderBlock(bq, "render", { columns: 30 });
+    expectAllLinesWithinBudget(out, 30);
+    expect(out).toContain("\x1b[2m"); // dim
+  });
+
+  it("CJK 内容按 2 列宽 wrap——窄终端不溢出", () => {
+    const para = lexFirst<Tokens.Paragraph>("中".repeat(40) + "\n\n");
+    const out = renderBlock(para, "render", { columns: 30 });
+    expectAllLinesWithinBudget(out, 30);
+  });
+
+  it("极窄列宽 columns=10 不死循环、所有行都合规", () => {
+    const list = lexFirst<Tokens.List>(`- ${"x".repeat(50)}\n`);
+    const out = renderBlock(list, "render", { columns: 10 });
+    expectAllLinesWithinBudget(out, 10);
+  });
+
+  it("nested list 子层合约递归生效", () => {
+    const list = lexFirst<Tokens.List>(
+      `- outer ${"x".repeat(40)}\n  - inner ${"y".repeat(40)}\n`,
+    );
+    const out = renderBlock(list, "render", { columns: 30 });
+    expectAllLinesWithinBudget(out, 30);
+  });
+
+  it("strip 模式同样满足行宽合约", () => {
+    const para = lexFirst<Tokens.Paragraph>("a".repeat(100) + "\n\n");
+    const out = renderBlock(para, "strip", { columns: 30 });
+    expectAllLinesWithinBudget(out, 30);
+  });
+});
+
+describe("formatStreamingCode · 行宽合约", () => {
+  it("长 code 行被软折——每段 ≤ columns - 1", () => {
+    const out = formatStreamingCode("x".repeat(100), 30);
+    const lines = out.split("\n");
+    for (const line of lines) {
+      const visible = stringWidth(stripAnsi(line));
+      expect(visible).toBeLessThanOrEqual(29);
+    }
+    // 整段 dim
+    expect(out).toContain("\x1b[2m");
+  });
+
+  it("空 code 返回空字符串", () => {
+    expect(formatStreamingCode("", 30)).toBe("");
+  });
+
+  it("多行 code 各行独立 wrap", () => {
+    const code = "short\n" + "x".repeat(80) + "\nshort2";
+    const out = formatStreamingCode(code, 30);
+    const lines = out.split("\n");
+    for (const line of lines) {
+      const visible = stringWidth(stripAnsi(line));
+      expect(visible).toBeLessThanOrEqual(29);
+    }
   });
 });

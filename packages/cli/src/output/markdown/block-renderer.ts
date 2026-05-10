@@ -31,12 +31,54 @@ import chalk from "chalk";
 import { highlight, supportsLanguage, type Theme } from "cli-highlight";
 import type { Tokens } from "marked";
 import { splitAnsiLines } from "../../tui/ansi.js";
+import { stringWidth, wrapAnsiLine } from "../../tui/line-width.js";
 import { layout, tone } from "../../tui/style.js";
 import { renderInlines } from "./inline-renderer.js";
 import type { MarkdownMode } from "./types.js";
 
 const PREFIX = layout.contentPrefix;
 const INDENT_UNIT = "  ";
+
+/**
+ * block 渲染上下文——所有 renderXxx 函数共享的环境参数。
+ *
+ * - `mode`：MarkdownMode（render / strip / raw）
+ * - `indentLevel`：嵌套层级（0 = 顶层；list_item / blockquote 子块 +1）
+ * - `columns`：终端列宽——区域写入合约要求每段 \n 切分后 ≤ columns - 1，
+ *   每个 renderer 据此 wrap 长行
+ */
+export interface RenderContext {
+  readonly mode: MarkdownMode;
+  readonly indentLevel: number;
+  readonly columns: number;
+}
+
+/** 嵌套递归的 ctx 派生——indentLevel +1，其余继承 */
+function withDeeperIndent(ctx: RenderContext): RenderContext {
+  return { ...ctx, indentLevel: ctx.indentLevel + 1 };
+}
+
+/**
+ * 给单行 ANSI 染色内容加 indent 前缀 + 软折行到 columns - 1，续行用同 indent 对齐。
+ *
+ * 适用 indent === continuationIndent 的渲染场景（heading / code / paragraph /
+ * formatStreamingCode / 默认 block fallback）。list_item 的 marker 偏移走另一条
+ * stateful API 路径，不用此 helper。
+ *
+ * 行宽合约：返回字符串按 `\n` 切分后每段 ≤ columns - 1。预留 1 列防御边界 case。
+ */
+function indentAndWrapLine(
+  line: string,
+  indent: string,
+  columns: number,
+): string {
+  const indentWidth = stringWidth(indent);
+  const budget = Math.max(1, columns - 1 - indentWidth);
+  const { output } = wrapAnsiLine(line, budget, {
+    continuationPrefix: indent,
+  });
+  return `${indent}${output}`;
+}
 
 /**
  * 代码块语法高亮 theme——把 cli-highlight 的 token 映射到本项目 chalk 5 实例的
@@ -77,38 +119,41 @@ const CODE_THEME: Theme = {
 /**
  * 渲染单个闭合 block → 多行 ANSI 字符串（含起首 / 末尾 \n 让段独立落地）。
  *
- * indentLevel：嵌套层级（默认 0 = 顶层）。每层多 2 列起首缩进 (INDENT_UNIT)，
- * 复合 PREFIX 让嵌套 list / blockquote 等子结构视觉对齐。
+ * 通过 RenderContext 注入 mode / indentLevel / columns。每层嵌套多 2 列起首
+ * 缩进 (INDENT_UNIT)，复合 PREFIX 让嵌套 list / blockquote 等子结构视觉对齐。
  *
  * 返回空字符串表示该 block 不渲染（space token / 内容为空）。
  */
 export function renderBlock(
   token: Tokens.Generic,
-  mode: MarkdownMode,
-  indentLevel = 0,
+  ctx: RenderContext,
 ): string {
-  if (mode === "raw") return token.raw ?? "";
+  if (ctx.mode === "raw") return token.raw ?? "";
 
   switch (token.type) {
     case "heading":
-      return renderHeading(token as Tokens.Heading, mode, indentLevel);
+      return renderHeading(token as Tokens.Heading, ctx);
     case "code":
-      return renderCode(token as Tokens.Code, mode, indentLevel);
+      return renderCode(token as Tokens.Code, ctx);
     case "list":
-      return renderList(token as Tokens.List, mode, indentLevel);
+      return renderList(token as Tokens.List, ctx);
     case "blockquote":
-      return renderBlockquote(token as Tokens.Blockquote, mode, indentLevel);
+      return renderBlockquote(token as Tokens.Blockquote, ctx);
     case "hr":
-      return renderHr(mode, indentLevel);
+      return renderHr(ctx);
     case "paragraph":
-      return renderParagraph(token as Tokens.Paragraph, mode, indentLevel);
+      return renderParagraph(token as Tokens.Paragraph, ctx);
     case "space":
       // 段落分隔由 caller 控制，此处不重复 emit
       return "";
     default:
       // 未知 block 类型 fallback 到 raw 文本（含末尾换行让段独立）
       return ensureTrailingNewline(
-        `${lineIndent(indentLevel)}${token.raw ?? ""}`,
+        indentAndWrapLine(
+          token.raw ?? "",
+          lineIndent(ctx.indentLevel),
+          ctx.columns,
+        ),
       );
   }
 }
@@ -120,12 +165,16 @@ export function renderBlock(
  *
  * 仅 render 模式调用——strip / raw 模式走 hold 路径不进入双态。仅顶层 code 流式
  * 调用（嵌套 code 在 list/blockquote 内由 renderBlock 闭合渲染）。
+ *
+ * columns：终端列宽，用于把超宽行软折到 columns - 1（与 renderCode 闭合渲染同
+ * 合约）。否则流式期 dim 占位的物理行数与闭合 highlight 后行数会不一致，segment
+ * commit 切换时屏幕跳动。
  */
-export function formatStreamingCode(codeText: string): string {
+export function formatStreamingCode(codeText: string, columns: number): string {
   if (codeText === "") return "";
   const styled = tone.dim(codeText);
   const lines = splitAnsiLines(styled);
-  return `\n${lines.map((l) => `${PREFIX}${l}`).join("\n")}\n`;
+  return `\n${lines.map((l) => indentAndWrapLine(l, PREFIX, columns)).join("\n")}\n`;
 }
 
 /** 行起首 indent: PREFIX (列 2) + 嵌套层数 * INDENT_UNIT */
@@ -138,27 +187,23 @@ function stripBlockBoundaryNewlines(s: string): string {
   return s.replace(/^\n+/, "").replace(/\n+$/, "");
 }
 
-function renderHeading(
-  t: Tokens.Heading,
-  mode: MarkdownMode,
-  indentLevel: number,
-): string {
-  const indent = lineIndent(indentLevel);
+function renderHeading(t: Tokens.Heading, ctx: RenderContext): string {
+  const indent = lineIndent(ctx.indentLevel);
   const text = t.text;
-  if (mode === "strip") return `\n${indent}${text}\n`;
-  const styled = t.depth === 1 ? tone.brand.bold(text) : chalk.bold(text);
-  return `\n${indent}${styled}\n`;
+  const content =
+    ctx.mode === "strip"
+      ? text
+      : t.depth === 1
+      ? tone.brand.bold(text)
+      : chalk.bold(text);
+  return `\n${indentAndWrapLine(content, indent, ctx.columns)}\n`;
 }
 
-function renderCode(
-  t: Tokens.Code,
-  mode: MarkdownMode,
-  indentLevel: number,
-): string {
-  const indent = lineIndent(indentLevel);
-  if (mode === "strip") {
+function renderCode(t: Tokens.Code, ctx: RenderContext): string {
+  const indent = lineIndent(ctx.indentLevel);
+  if (ctx.mode === "strip") {
     const lines = t.text.split("\n");
-    return `\n${lines.map((l) => `${indent}${l}`).join("\n")}\n`;
+    return `\n${lines.map((l) => indentAndWrapLine(l, indent, ctx.columns)).join("\n")}\n`;
   }
 
   // 已知且受支持的 lang 走 cli-highlight；否则退化 dim（无 lang / 未识别 lang
@@ -180,33 +225,26 @@ function renderCode(
   // 跨行 SGR（多行字符串 / 块注释等）需 splitAnsiLines 让每行 SGR 自平衡——
   // 否则续行 indent 会继承上行未关闭 SGR + 下一段被染色泄露
   const lines = splitAnsiLines(styled);
-  return `\n${lines.map((l) => `${indent}${l}`).join("\n")}\n`;
+  return `\n${lines.map((l) => indentAndWrapLine(l, indent, ctx.columns)).join("\n")}\n`;
 }
 
-function renderParagraph(
-  t: Tokens.Paragraph,
-  mode: MarkdownMode,
-  indentLevel: number,
-): string {
-  const indent = lineIndent(indentLevel);
-  const inline = renderInlines(t.tokens ?? [], mode);
+function renderParagraph(t: Tokens.Paragraph, ctx: RenderContext): string {
+  const indent = lineIndent(ctx.indentLevel);
+  const inline = renderInlines(t.tokens ?? [], ctx.mode);
   if (inline === "") return "";
-  // inline 可能含 softbreak \n —— splitAnsiLines 让每行 SGR 自平衡 + 给每行加 indent
+  // inline 可能含 softbreak \n —— splitAnsiLines 让每行 SGR 自平衡，再逐行
+  // indent + wrap 让长 inline 行（含 ANSI 染色）软折到 columns - 1
   const lines = splitAnsiLines(inline);
-  return `\n${lines.map((l) => `${indent}${l}`).join("\n")}\n`;
+  return `\n${lines.map((l) => indentAndWrapLine(l, indent, ctx.columns)).join("\n")}\n`;
 }
 
-function renderList(
-  t: Tokens.List,
-  mode: MarkdownMode,
-  indentLevel: number,
-): string {
+function renderList(t: Tokens.List, ctx: RenderContext): string {
   const items = t.items ?? [];
   if (items.length === 0) return "";
   const lines: string[] = [];
   for (let i = 0; i < items.length; i++) {
     const marker = t.ordered ? `${(t.start || 1) + i}.` : "·";
-    lines.push(renderListItem(items[i]!, marker, mode, indentLevel));
+    lines.push(renderListItem(items[i]!, marker, ctx));
   }
   return `\n${lines.join("\n")}\n`;
 }
@@ -223,24 +261,40 @@ function renderList(
 function renderListItem(
   item: Tokens.ListItem,
   marker: string,
-  mode: MarkdownMode,
-  indentLevel: number,
+  ctx: RenderContext,
 ): string {
-  const indent = lineIndent(indentLevel);
+  const indent = lineIndent(ctx.indentLevel);
   // marker 后单空格 + 续行对齐：marker 占 1+ 字符 + 1 空格——简化为 INDENT_UNIT (2 列)
   const continuationIndent = indent + INDENT_UNIT;
-  const styledMarker = mode === "strip" ? marker : tone.dim(marker);
+  const styledMarker = ctx.mode === "strip" ? marker : tone.dim(marker);
   const { inlineTokens, blockTokens } = splitListItemTokens(item);
 
   const out: string[] = [];
 
+  // 首行起手 cursor 在 indent + marker + 空格之后；续行起手在 continuationIndent。
+  // wrap budget 按续行基准（最严格）；首行的额外起手偏移用 startColumnWidth 表达
+  // —— marker 较短（"·"）时偏移为 0，长 marker（"10."）时偏移为正让首行更早 wrap。
+  const continuationWidth = stringWidth(continuationIndent);
+  const wrapBudget = Math.max(1, ctx.columns - 1 - continuationWidth);
+  const firstLineCursorOffset = Math.max(
+    0,
+    stringWidth(indent) + stringWidth(marker) + 1 - continuationWidth,
+  );
+
   if (inlineTokens.length > 0) {
-    const inlineAnsi = renderInlines(inlineTokens, mode);
+    const inlineAnsi = renderInlines(inlineTokens, ctx.mode);
     const inlineLines = splitAnsiLines(inlineAnsi);
     if (inlineLines.length > 0) {
-      out.push(`${indent}${styledMarker} ${inlineLines[0]!}`);
+      const first = wrapAnsiLine(inlineLines[0]!, wrapBudget, {
+        startColumnWidth: firstLineCursorOffset,
+        continuationPrefix: continuationIndent,
+      });
+      out.push(`${indent}${styledMarker} ${first.output}`);
       for (let i = 1; i < inlineLines.length; i++) {
-        out.push(`${continuationIndent}${inlineLines[i]!}`);
+        const cont = wrapAnsiLine(inlineLines[i]!, wrapBudget, {
+          continuationPrefix: continuationIndent,
+        });
+        out.push(`${continuationIndent}${cont.output}`);
       }
     } else {
       out.push(`${indent}${styledMarker}`);
@@ -249,8 +303,9 @@ function renderListItem(
     out.push(`${indent}${styledMarker}`);
   }
 
+  const childCtx = withDeeperIndent(ctx);
   for (const block of blockTokens) {
-    const sub = renderBlock(block, mode, indentLevel + 1);
+    const sub = renderBlock(block, childCtx);
     const trimmed = stripBlockBoundaryNewlines(sub);
     if (trimmed.length > 0) out.push(trimmed);
   }
@@ -305,24 +360,20 @@ function splitListItemTokens(item: Tokens.ListItem): SplitListItemTokens {
   };
 }
 
-function renderBlockquote(
-  t: Tokens.Blockquote,
-  mode: MarkdownMode,
-  indentLevel: number,
-): string {
+function renderBlockquote(t: Tokens.Blockquote, ctx: RenderContext): string {
   const subTokens = t.tokens ?? [];
   if (subTokens.length === 0) return "";
 
   const subBlocks: string[] = [];
   for (const sub of subTokens) {
-    const rendered = renderBlock(sub, mode, indentLevel);
+    const rendered = renderBlock(sub, ctx);
     const trimmed = stripBlockBoundaryNewlines(rendered);
     if (trimmed.length > 0) subBlocks.push(trimmed);
   }
   if (subBlocks.length === 0) return "";
 
   const fullText = subBlocks.join("\n");
-  if (mode === "strip") return `\n${fullText}\n`;
+  if (ctx.mode === "strip") return `\n${fullText}\n`;
 
   // 整段 dim：每行加 dim 包裹，splitAnsiLines 让 SGR 自平衡（不破坏内部 inline ANSI）
   const lines = splitAnsiLines(fullText);
@@ -330,10 +381,13 @@ function renderBlockquote(
   return `\n${styled}\n`;
 }
 
-function renderHr(mode: MarkdownMode, indentLevel: number): string {
-  const indent = lineIndent(indentLevel);
-  const rule = "─".repeat(40);
-  const styled = mode === "strip" ? rule : tone.dim(rule);
+function renderHr(ctx: RenderContext): string {
+  const indent = lineIndent(ctx.indentLevel);
+  // 极窄终端把 40 字符 rule clamp 到 columns - 1 - indent，避免触发隐式 wrap
+  const indentWidth = stringWidth(indent);
+  const ruleLength = Math.max(1, Math.min(40, ctx.columns - 1 - indentWidth));
+  const rule = "─".repeat(ruleLength);
+  const styled = ctx.mode === "strip" ? rule : tone.dim(rule);
   return `\n${indent}${styled}\n`;
 }
 

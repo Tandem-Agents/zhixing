@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Markdown 流式渲染主入口——LLM chunk → ANSI 输出协调器。
  *
  * **按 block 类型分路**：
@@ -46,7 +46,11 @@
 import { marked, type Tokens } from "marked";
 import type { ReplaceableSegmentHandle } from "../../screen/screen-controller.js";
 import { TextStream } from "../text-stream.js";
-import { formatStreamingCode, renderBlock } from "./block-renderer.js";
+import {
+  formatStreamingCode,
+  renderBlock,
+  type RenderContext,
+} from "./block-renderer.js";
 import { renderInline } from "./inline-renderer.js";
 import type { MarkdownMode } from "./types.js";
 
@@ -116,6 +120,8 @@ export class MarkdownStream {
   private readonly beginReplaceableSegment:
     | (() => ReplaceableSegmentHandle)
     | null;
+  /** 闭合 block 渲染共享的 RenderContext——构造期固定后不再变 */
+  private readonly blockCtx: RenderContext;
 
   constructor(options: MarkdownStreamOptions) {
     this.appendInline = options.appendInline;
@@ -123,6 +129,11 @@ export class MarkdownStream {
     this.columns = options.columns;
     this.mode = options.mode ?? "render";
     this.beginReplaceableSegment = options.beginReplaceableSegment ?? null;
+    this.blockCtx = {
+      mode: this.mode,
+      indentLevel: 0,
+      columns: this.columns,
+    };
   }
 
   feed(chunk: string): void {
@@ -245,7 +256,7 @@ export class MarkdownStream {
     // 再 forward 给 paragraph 流——用户不会看到 `#` / `-` / `>` / `---` 字面 markdown
     // 标记暴露
     this.closeParagraphStream();
-    const ansi = renderBlock(token, this.mode);
+    const ansi = renderBlock(token, this.blockCtx);
     if (ansi.length > 0) this.line(ansi);
   }
 
@@ -315,7 +326,7 @@ export class MarkdownStream {
       this.closeParagraphStream();
       this.codeSegment = this.beginReplaceableSegment!();
     }
-    this.codeSegment.replace(formatStreamingCode(token.text));
+    this.codeSegment.replace(formatStreamingCode(token.text, this.columns));
   }
 
   /**
@@ -324,13 +335,13 @@ export class MarkdownStream {
    */
   private emitClosedCode(token: Tokens.Code): void {
     if (this.codeSegment !== null) {
-      const ansi = renderBlock(token, this.mode);
+      const ansi = renderBlock(token, this.blockCtx);
       this.codeSegment.commit(ansi);
       this.codeSegment = null;
       return;
     }
     this.closeParagraphStream();
-    const ansi = renderBlock(token, this.mode);
+    const ansi = renderBlock(token, this.blockCtx);
     if (ansi.length > 0) this.line(ansi);
   }
 
@@ -350,7 +361,7 @@ export class MarkdownStream {
       this.closeParagraphStream();
       this.listSegment = this.beginReplaceableSegment();
     }
-    this.listSegment.replace(renderBlock(list, this.mode));
+    this.listSegment.replace(renderBlock(list, this.blockCtx));
   }
 
   /**
@@ -358,13 +369,13 @@ export class MarkdownStream {
    */
   private emitClosedList(list: Tokens.List): void {
     if (this.listSegment !== null) {
-      const ansi = renderBlock(list, this.mode);
+      const ansi = renderBlock(list, this.blockCtx);
       this.listSegment.commit(ansi);
       this.listSegment = null;
       return;
     }
     this.closeParagraphStream();
-    const ansi = renderBlock(list, this.mode);
+    const ansi = renderBlock(list, this.blockCtx);
     if (ansi.length > 0) this.line(ansi);
   }
 
