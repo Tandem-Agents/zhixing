@@ -27,8 +27,41 @@ export type Protocol = "openai-compatible" | "anthropic-messages";
 // ─── Provider Quirks ───
 
 /**
+ * OpenAI 兼容协议下 usage 字段的方言标识。
+ *
+ * "OpenAI 兼容"是协议层概念，但各 vendor 在 usage 的 cache 字段上存在方言分裂：
+ *   - "openai-standard": usage.prompt_tokens_details.cached_tokens
+ *                        覆盖 OpenAI / MiniMax / Kimi / 智谱 / 通义 等大多数兼容服务
+ *   - "deepseek":        usage.prompt_cache_hit_tokens + prompt_cache_miss_tokens
+ *                        DeepSeek 自有方言
+ *   - "auto":            按嗅探链派发，未显式声明的 vendor 默认值（DeepSeek-aware
+ *                        优先，OpenAI 标准兜底；嗅探失败回落 base 仅 prompt/completion）
+ *
+ * 扩展点：新 vendor 出现非标方言时，在 openai-usage.ts 加一个 parser 函数 +
+ * PARSERS 注册表新增条目，再扩展本类型字面量即可，主适配器无需改动。
+ *
+ * 仅对 protocol="openai-compatible" 生效；anthropic-messages 协议有自己的 cache
+ * 字段（cache_read_input_tokens 等），由 anthropic 适配器内联处理。
+ */
+export type UsageDialect = "auto" | "openai-standard" | "deepseek";
+
+/**
  * 同协议下不同服务商的行为差异。
  * 预设中包含默认 quirks，自定义 provider 使用最保守的默认值。
+ *
+ * ─── 架构注记: 协议特定字段的混合 ───
+ *
+ * 当前 quirks 接口混合了两类字段:
+ *   - 协议无关: supportsTools / supportsThinking / supportsStreamUsage
+ *   - 协议特定(仅 openai-compatible 消费): maxTokensField / usageDialect
+ *
+ * 这是延续的工程惯例 —— 协议特定字段对其他协议路径无害(由各协议适配器选择性
+ * 消费,anthropic-messages 不读这些字段)。优势是 ResolvedProvider.quirks 单
+ * 接口、合并逻辑 mergeQuirks 单点、字面量构造统一 spread DEFAULT_QUIRKS。
+ *
+ * 升级触发线: 协议特定字段超过 3 个 / 或出现"两协议特定字段语义冲突"时,应重构
+ * 为按 protocol 判别的联合类型(OpenAICompatibleQuirks | AnthropicMessagesQuirks)。
+ * 当前 2 个字段尚未触线,保持现状。
  */
 export interface ProviderQuirks {
   /**
@@ -42,6 +75,12 @@ export interface ProviderQuirks {
   supportsThinking: boolean;
   /** 是否支持 function/tool calling */
   supportsTools: boolean;
+  /**
+   * Usage 字段方言标识（仅 openai-compatible 协议消费）。
+   * 默认 "auto" —— 适配器按嗅探链派发，已知 vendor 应在 preset 显式声明
+   * 以获得最短解析路径与可预测性。详见 UsageDialect。
+   */
+  usageDialect: UsageDialect;
 }
 
 /** 最保守的 quirks 默认值，用于未知自定义 provider */
@@ -50,6 +89,7 @@ export const DEFAULT_QUIRKS: ProviderQuirks = {
   supportsStreamUsage: false,
   supportsThinking: false,
   supportsTools: true,
+  usageDialect: "auto",
 };
 
 // ─── Provider 预设 ───

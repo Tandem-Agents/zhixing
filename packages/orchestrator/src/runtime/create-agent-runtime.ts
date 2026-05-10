@@ -548,6 +548,13 @@ export async function createAgentRuntime(
 
   // systemPrompt 后置到 tools 装配完成之后 —— Task 工具的描述文本需进入
   // ## Tool Usage 段,LLM 才能学习"何时派 Task / 何时直接调单工具"的决策。
+  //
+  // ⚠ Prompt cache 死线:此处是 main agent systemPrompt 的**唯一构造点**,
+  // 整个 runtime 生命周期内 byte-equal 不变。每轮 run() 在 line ~944 把同一
+  // 字符串引用透传给 runAgentLoop —— 不得在 run() / loop / LLM call 路径里
+  // 重建 systemPrompt,不得追加 per-turn 信息(时间走 turn-context 注入,
+  // tools[] 演化走 ToolSchemaCompilerStage)。详见 buildSystemPrompt 的
+  // "调用契约"注释。
   const systemPrompt = buildSystemPrompt({
     tools,
     cwd,

@@ -78,7 +78,10 @@ function toolCallDeltaChunk(argsFragment: string) {
   };
 }
 
-function finishChunk(reason: string, usage?: { prompt_tokens: number; completion_tokens: number }) {
+// usage 形态宽松到 Record —— 支持基础字段 + vendor 方言 cache 字段
+// (prompt_tokens_details.cached_tokens / prompt_cache_hit_tokens 等)。
+// 现有 { prompt_tokens, completion_tokens } 字面量调用站点仍然类型兼容。
+function finishChunk(reason: string, usage?: Record<string, unknown>) {
   return {
     choices: [
       {
@@ -90,7 +93,7 @@ function finishChunk(reason: string, usage?: { prompt_tokens: number; completion
   };
 }
 
-function usageOnlyChunk(usage: { prompt_tokens: number; completion_tokens: number }) {
+function usageOnlyChunk(usage: Record<string, unknown>) {
   return {
     choices: [],
     usage,
@@ -256,6 +259,88 @@ describe("createOpenAICompatibleProvider", () => {
     if (endEvent?.type === "message_end") {
       expect(endEvent.usage.inputTokens).toBe(42);
       expect(endEvent.usage.outputTokens).toBe(10);
+    }
+  });
+
+  // ─── Wire-up 集成契约: usage 方言归一是否真接到 message_end 事件 ───
+  //
+  // 单元测试(openai-usage.test.ts)守"parser 算法正确",本组测试守"wire-up 正确"——
+  // chunk.usage → parseOpenAICompatibleUsage(provider.quirks.usageDialect) → message_end
+  // 这条端到端通路里任意一环错位(传错字段 / 传错 quirks / 漏调 parser)都会被捕获。
+
+  it("Wire-up: OpenAI 标准方言 quirks=auto → cacheReadTokens 流到 message_end", async () => {
+    // MiniMax / OpenAI / Kimi 等大多数兼容 vendor 走此路径(preset 不显式声明,默认 auto)。
+    mockCreate.mockResolvedValue(
+      mockStream([
+        textChunk("Hi"),
+        finishChunk("stop"),
+        usageOnlyChunk({
+          prompt_tokens: 1200,
+          completion_tokens: 300,
+          total_tokens: 1500,
+          prompt_tokens_details: { cached_tokens: 800 },
+        }),
+      ]),
+    );
+
+    const provider = createOpenAICompatibleProvider(
+      makeProvider({
+        quirks: { ...DEFAULT_QUIRKS, supportsStreamUsage: true },
+        // 不显式声明 usageDialect → 走 auto 嗅探链(默认 DEFAULT_QUIRKS.usageDialect)
+      }),
+    );
+
+    const events = await collectEvents(
+      provider.chat({ model: "test-model", messages: [userMessage("Hi")] }),
+    );
+
+    const endEvent = events.find((e) => e.type === "message_end");
+    expect(endEvent).toBeDefined();
+    if (endEvent?.type === "message_end") {
+      expect(endEvent.usage.inputTokens).toBe(1200);
+      expect(endEvent.usage.outputTokens).toBe(300);
+      expect(endEvent.usage.cacheReadTokens).toBe(800);
+      // OpenAI 兼容协议下无 cache_write 维度
+      expect(endEvent.usage.cacheWriteTokens).toBeUndefined();
+    }
+  });
+
+  it("Wire-up: DeepSeek 方言 quirks.usageDialect=deepseek → cacheReadTokens 流到 message_end", async () => {
+    // DeepSeek preset 显式声明 usageDialect=deepseek,走最短解析路径。
+    // 验证 quirks.usageDialect 字段是否真的被 wire 到 parseOpenAICompatibleUsage 调用。
+    mockCreate.mockResolvedValue(
+      mockStream([
+        textChunk("Hi"),
+        finishChunk("stop"),
+        usageOnlyChunk({
+          prompt_tokens: 1500,
+          completion_tokens: 200,
+          prompt_cache_hit_tokens: 1200,
+          prompt_cache_miss_tokens: 300,
+        }),
+      ]),
+    );
+
+    const provider = createOpenAICompatibleProvider(
+      makeProvider({
+        quirks: {
+          ...DEFAULT_QUIRKS,
+          supportsStreamUsage: true,
+          usageDialect: "deepseek",
+        },
+      }),
+    );
+
+    const events = await collectEvents(
+      provider.chat({ model: "test-model", messages: [userMessage("Hi")] }),
+    );
+
+    const endEvent = events.find((e) => e.type === "message_end");
+    expect(endEvent).toBeDefined();
+    if (endEvent?.type === "message_end") {
+      expect(endEvent.usage.inputTokens).toBe(1500);
+      expect(endEvent.usage.outputTokens).toBe(200);
+      expect(endEvent.usage.cacheReadTokens).toBe(1200);
     }
   });
 

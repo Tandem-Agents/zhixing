@@ -36,6 +36,9 @@ export const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
     quirks: {
       supportsTools: true,
       supportsStreamUsage: true,
+      // DeepSeek 用自有 usage 方言 prompt_cache_hit_tokens / prompt_cache_miss_tokens
+      // (非 OpenAI 标准 prompt_tokens_details.cached_tokens),显式声明走最短解析路径
+      usageDialect: "deepseek",
     },
   },
 

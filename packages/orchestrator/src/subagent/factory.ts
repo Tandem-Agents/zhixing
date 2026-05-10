@@ -180,6 +180,12 @@ async function runChildAgentInner(
 
     // 子 system prompt:注意不传 project context / 用户记忆 / 父反思 —— 子任务专注,
     // 跨 spawn 的静态前缀 byte-identical 利于 prompt cache
+    //
+    // ⚠ Prompt cache 死线:此处是 sub-agent systemPrompt 的**唯一构造点**,
+    // 子 agent 生命周期内 byte-equal 不变。loop-runner 透传后 agent-loop 不得
+    // 重建。同一 (profile, childTools, workspace) 跨 spawn 应得到字面一致的
+    // systemPrompt —— 这是同角色子 agent 跨 spawn 命中 prompt cache 的前提。
+    // 详见 buildSystemPrompt 的"调用契约"注释。
     systemPrompt = buildSystemPrompt({
       profile,
       segments: SUB_AGENT_SEGMENTS,

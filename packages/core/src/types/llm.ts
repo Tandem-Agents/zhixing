@@ -31,9 +31,22 @@ export type StopReason =
 export interface TokenUsage {
   inputTokens: number;
   outputTokens: number;
-  /** Anthropic prompt caching：缓存命中的输入 token 数 */
+  /**
+   * Prompt cache 命中的输入 token 数（被缓存复用、计费打折的那部分）。
+   *
+   * Provider 方言归一字段：
+   *   - Anthropic: cache_read_input_tokens
+   *   - OpenAI / MiniMax / 大多数 OpenAI 兼容: prompt_tokens_details.cached_tokens
+   *   - DeepSeek: prompt_cache_hit_tokens
+   * 字段缺失或值为 0 时不填（undefined），与 mergeUsage 的 truthy 合并语义一致。
+   */
   cacheReadTokens?: number;
-  /** Anthropic prompt caching：写入缓存的输入 token 数 */
+  /**
+   * 本次请求新写入缓存的输入 token 数（计费按 cache write 倍率）。
+   *
+   * 仅 Anthropic 显式 cache_control 协议返回此维度（cache_creation_input_tokens）。
+   * OpenAI 兼容协议下 vendor 多为服务端自动缓存，无显式 write 维度，留 undefined。
+   */
   cacheWriteTokens?: number;
 }
 

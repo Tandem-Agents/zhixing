@@ -161,6 +161,21 @@ export interface PromptBuildContext {
  * 调用方传 profile / segments 切换为其他角色配置(如 SUB_AGENT_SEGMENTS 子 agent
  * 精简集——仅 identity / principles / tool-usage / safety 四段,其余由子任务
  * 专注 / 输出回写父 / prompt cache 友好等理由排除)。
+ *
+ * ─── 调用契约: SystemPrompt 一旦构造,生命周期内 byte-equal 不变 ───
+ * 这是 prompt cache 的死线 —— 系统提示词作为缓存前缀的最前段,任何变化
+ * (插入时间戳 / 重排段顺序 / 让 ctx.tools 在装配后变化等)都会破坏前缀缓存,
+ * 让此后所有消息都得重新计费。所以本函数必须由调用方在 runtime 装配阶段
+ * 调用一次,把返回字符串绑定到长生命周期上下文(主 agent 走
+ * create-agent-runtime,子 agent 走 subagent/factory),后续每轮 run() / LLM
+ * call 一律透传该字符串,不得重建、不得在末尾追加 per-turn 信息。
+ *
+ * Per-turn 动态信息(当前时间 / 任务状态 / 工作目录变更等)通过 turn-context
+ * 注入到末尾 user message,**不**进入 systemPrompt(参见 TimeProvider /
+ * TurnContextInjector 注释)。tools[] 的 capability LRU 演化通过
+ * ToolSchemaCompilerStage 在 LLM call 时调整 API tools[] 字段,**不**重建
+ * systemPrompt —— 故 prompt 内 tool-usage 段描述的是"装配时的工具全集",
+ * 与实际 tools[] 字段是 two views of the same set,这是有意设计的不对称。
  */
 export function buildSystemPrompt(ctx: PromptBuildContext): string {
   const profile = ctx.profile ?? mainProfile();

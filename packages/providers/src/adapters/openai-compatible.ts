@@ -10,6 +10,12 @@
  * - ChatRequest → OpenAI SDK 请求格式
  * - OpenAI SDK 流式响应 → StreamEvent
  * - 通过 quirks 处理服务商差异
+ *
+ * 不做的事(分层关注点)：
+ * - Usage 字段方言归一(prompt cache 命中字段在 vendor 间分裂为
+ *   `prompt_tokens_details.cached_tokens` vs `prompt_cache_hit_tokens` 等)
+ *   委托给 ./openai-usage.ts;主适配器对方言无感知。
+ *   新 vendor 方言扩展见 openai-usage.ts 顶部"扩展点"注释。
  */
 
 import OpenAI from "openai";
@@ -22,6 +28,7 @@ import type {
 } from "@zhixing/core";
 import type { Message, ContentBlock, ToolSpec } from "@zhixing/core";
 import type { ResolvedProvider } from "../types.js";
+import { parseOpenAICompatibleUsage } from "./openai-usage.js";
 
 // ─── 工厂函数 ───
 
@@ -90,10 +97,13 @@ export function createOpenAICompatibleProvider(provider: ResolvedProvider): LLMP
           const choice = chunk.choices?.[0];
 
           if (chunk.usage) {
-            usage = {
-              inputTokens: chunk.usage.prompt_tokens ?? 0,
-              outputTokens: chunk.usage.completion_tokens ?? 0,
-            };
+            // Vendor 方言归一(DeepSeek / OpenAI 标准 / MiniMax / Kimi 等)由
+            // openai-usage.ts 统一处理;主适配器对方言分裂无感知。
+            // preset 显式声明 quirks.usageDialect 走最短解析路径;否则 auto 嗅探。
+            usage = parseOpenAICompatibleUsage(
+              chunk.usage,
+              provider.quirks.usageDialect,
+            );
           }
 
           if (!choice) continue;

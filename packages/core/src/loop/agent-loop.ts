@@ -82,6 +82,10 @@ import type {
 export async function* runAgentLoop(
   params: AgentLoopParams,
 ): AsyncGenerator<AgentYield, AgentResult> {
+  // ⚠ systemPrompt 是 prompt cache 前缀死线:由 runtime 装配阶段构造一次,
+  // 这里仅解构透传,**不得**在 loop 内拼接 / 追加 / 重建。per-turn 动态信息
+  // 走 turnContextInjector(注入到末尾 user message),不进 systemPrompt。
+  // 详见 buildSystemPrompt 的"调用契约"注释。
   const { model, systemPrompt, eventBus } = params;
   const tools = params.tools ?? [];
   const maxTurns = params.maxTurns ?? 100;
