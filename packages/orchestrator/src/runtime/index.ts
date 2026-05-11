@@ -49,3 +49,4 @@ export {
   type RunResult,
 } from "./create-agent-runtime.js";
 export type { EnrichOptions } from "./project-context.js";
+export { runContextStorage, type RunContext } from "./run-context.js";

@@ -110,6 +110,16 @@ export interface IConversationRepository {
    * 保留——`/clear` 是"重置对话内容到新起点"，不是删除对话身份。
    */
   clearViewLayerState(id: string): Promise<void>;
+  /**
+   * 更新 task_list 持久化状态 —— `task_list.set` 工具调用路径。
+   *
+   * 走与 writeMeta 同款的 atomic write + per-id lock；conversation 不存在时
+   * no-op（不抛错——ephemeral 路径会传不存在的 id，工具调用应优雅退化）。
+   *
+   * `state = undefined` 时删除字段（语义对齐 `clearViewLayerState` 的子集，
+   * 但不触动 segmentMetadata）。
+   */
+  updateTaskListState(id: string, state: TaskListState | undefined): Promise<void>;
 }
 
 export interface CreateConversationOptions {

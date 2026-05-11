@@ -19,6 +19,7 @@ import type {
   ConversationScope,
   CreateConversationOptions,
   IConversationRepository,
+  TaskListState,
 } from "./types.js";
 import {
   DEFAULT_CONVERSATION_ID,
@@ -191,6 +192,35 @@ export class ConversationRepository implements IConversationRepository {
   async findLatest(): Promise<string | null> {
     const conversations = await this.list();
     return conversations.length > 0 ? conversations[0]!.id : null;
+  }
+
+  /**
+   * 更新 task_list 持久化状态 —— `task_list.set` 工具落盘路径。
+   *
+   * 在同一把 per-id 锁内做"读-改字段-写"原子操作；conversation 不存在时
+   * no-op（不抛错），与 clearViewLayerState 保持一致。`state=undefined` 时
+   * 删除字段，让"清空"语义自然走同一入口。
+   */
+  async updateTaskListState(
+    id: string,
+    state: TaskListState | undefined,
+  ): Promise<void> {
+    return this.withMetaLock(id, async () => {
+      const content = await fs
+        .readFile(metaPath(this.scope, id), "utf-8")
+        .catch(() => null);
+      if (content === null) return;
+      const parsed = JSON.parse(content) as Record<string, unknown>;
+      if (state === undefined) {
+        delete parsed.taskListState;
+      } else {
+        parsed.taskListState = state;
+      }
+      await writeAtomic(
+        metaPath(this.scope, id),
+        JSON.stringify(parsed, null, 2),
+      );
+    });
   }
 
   /**

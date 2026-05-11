@@ -49,6 +49,9 @@ import {
 } from "@zhixing/core";
 import { describeProxy, type ProxyDescription } from "@zhixing/network";
 import { loadConfig, loadCredentials, resolveHomeDir } from "@zhixing/providers";
+import type { TaskListService } from "@zhixing/tools-builtin";
+import { createBuiltinExtraToolsAssembly } from "./runtime/builtin-extra-tools.js";
+import { ConversationRepoTaskListStore } from "./runtime/task-list-stores.js";
 import { CommandDispatcher } from "./command-dispatcher.js";
 import { PASTE_TOKEN_PATTERN, PasteRegistry } from "./paste-registry.js";
 import { resolveFileRefs } from "./resolve-file-refs.js";
@@ -97,6 +100,11 @@ interface ReplState {
   /** 持久化 */
   store: TranscriptStore;
   convRepo: ConversationRepository;
+  /**
+   * task_list 服务 —— cli 主线程在 conversation 切换 / `/clear` 时显式调
+   * prime / clear 维护 cache。service 是 process-wide 单例，跨 reload 持续。
+   */
+  taskListService: TaskListService;
   conversationId: string | null;
   turnCounter: number;
   /** 上一轮的工具调用完成数（用于反思触发） */
@@ -212,6 +220,10 @@ function buildSlashCommands(
               ),
             );
           }
+          // task_list service cache 同步清空 —— 磁盘端已由 clearViewLayerState 处理。
+          // service 不实现 Resettable（process-wide 跨 conversation，不绑定 runtime
+          // 生命周期），由本路径显式调 clear(convId) 维护一致性。
+          state.taskListService.clear(state.conversationId);
         }
         state.turnCounter = 0;
         state.lastToolEndCount = 0;
@@ -293,6 +305,8 @@ function buildSlashCommands(
           state.conversationId = conversation.id;
           state.turnCounter = 0;
           state.lastToolEndCount = 0;
+          // 新建对话无持久化 task_list 状态，prime 后 cache 项为空 items 列表
+          await state.taskListService.prime(conversation.id);
           state.convRepo.touch(state.conversationId).catch(() => {});
           cliWriter.line(
             chalk.dim(`\n  已创建新对话 ${chalk.cyan(conversation.name)}\n`),
@@ -389,6 +403,8 @@ function buildSlashCommands(
           state.conversationId = target.id;
           state.turnCounter = loaded.turnCount;
           state.lastToolEndCount = 0;
+          // 加载目标对话的 task_list 持久化状态到 service cache
+          await state.taskListService.prime(target.id);
           state.convRepo.touch(state.conversationId).catch(() => {});
           cliWriter.line(
             chalk.dim(
@@ -817,6 +833,15 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   const convDir = path.join(zhixingHome, "projects", projectId, "conversations");
   const store = new TranscriptStore(convDir, cwd);
 
+  // builtin extra tools assembly —— task_list 持久化走 ConversationRepository。
+  //
+  // assembly 持有 TaskListService 单例，跨 reload 复用（service.cache 与持久化连续
+  // 性由此保障）。session 内部每次 createAgent 都调 assembly.assembleTools() 拿
+  // 新的 ToolDefinition 实例，工具内部都闭包引用同一 service —— 行为一致。
+  const builtinExtraTools = createBuiltinExtraToolsAssembly(
+    new ConversationRepoTaskListStore(convRepo),
+  );
+
   const session = await RuntimeSession.create({
     config,
     credentials,
@@ -830,6 +855,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     schedulerEventBus,
     onSecurityBlocked: createBlockedRenderer(cliWriter),
     onUserDenied: createUserDeniedRenderer(cliWriter),
+    builtinExtraTools,
   });
 
   let messages: Message[] = [];
@@ -902,6 +928,10 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     conversationId = conversation.id;
   }
 
+  // 加载 task_list 持久化状态到 service cache —— 新建 conversation 时为空，
+  // 恢复时拉取 meta.taskListState。conversation 切换走 /new / /switch 处的 prime 调用。
+  await session.taskListService.prime(conversationId);
+
   // 启动告警先于 chrome——异常状态需立即吸引注意；无告警时返回空数组，
   // 视觉序列退化为"shell prompt → chrome"无空行干扰
   const advisoryLines = renderStartupAdvisories({
@@ -963,6 +993,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     running: false,
     store,
     convRepo,
+    taskListService: session.taskListService,
     conversationId,
     turnCounter,
     lastToolEndCount: 0,

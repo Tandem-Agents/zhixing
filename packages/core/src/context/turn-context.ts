@@ -12,6 +12,7 @@
 
 import type { Message, TextBlock } from "../types/messages.js";
 import type { TaskStatusSummary } from "../scheduler/types.js";
+import type { TaskItem } from "../conversation/types.js";
 
 // ─── Provider 接口 ───
 
@@ -152,6 +153,55 @@ export class SchedulerProvider implements TurnContextProvider {
   }
 }
 
+// ─── TaskListProvider ───
+
+/**
+ * task_list 当前状态注入 —— 让 LLM 在每个 turn 都能看到当前的"已规划任务列表"。
+ *
+ * 为什么需要 turn-context 而不是其他方案：
+ *   - LLM 通过 task_list.set 工具维护列表；set 调用记录在 transcript 中
+ *   - 段切换会压缩老 turns —— 老的 set 调用从 LLM 视野中消失
+ *   - 没有 turn-context 注入时，LLM 在新段开始时**不知道** task_list state 存在，
+ *     可能调 set 用新列表完全覆盖（擦写已有任务）
+ *   - turn-context 每个 turn 重新注入当前 state，让 LLM 始终能"读到"
+ *   - 段切换 cache-safe 路径走 `skipTurnContext: true` 跳过整个 inject，本 provider
+ *     自然不会被调用 —— 不影响段切换的 byte-equal 不变量
+ *
+ * 依赖反转：构造时只接受 `() => readonly TaskItem[]` 闭包，不耦合任何具体上下文
+ * 获取方式（ALS / 显式参数 / cache 等）。装配方（cli session）决定如何取数据。
+ *
+ * 空列表行为：getItems 返回空数组时 `shouldInject` 返回 false，整段跳过 ——
+ * **没有任务不污染 turn-context**（与 SchedulerProvider 同协议）。
+ * 这也是 ephemeral 路径（无 conversation 绑定）的自然降级：装配方在 ALS
+ * 无 conversationId 时让 getItems 返回 []，整段消失。
+ */
+export class TaskListProvider implements TurnContextProvider {
+  readonly id = "task-list";
+
+  constructor(private readonly getItems: () => readonly TaskItem[]) {}
+
+  shouldInject(): boolean {
+    return this.getItems().length > 0;
+  }
+
+  render(): TurnContextSection {
+    const items = this.getItems();
+    const lines = items.map((t, i) => {
+      const mark =
+        t.status === "completed"
+          ? "[x]"
+          : t.status === "in_progress"
+            ? "[~]"
+            : "[ ]";
+      return `${i + 1}. ${mark} ${t.content}`;
+    });
+    return {
+      title: "当前任务列表（你已通过 task_list 工具维护的计划，set 时请保留历史项）",
+      body: lines.join("\n"),
+    };
+  }
+}
+
 function formatTime(isoString: string): string {
   try {
     const d = new Date(isoString);
@@ -195,8 +245,18 @@ export class TurnContextInjector {
    * 将 turn context 注入到消息列表的最新 user message 前。
    * 不修改原数组，返回浅拷贝。
    * 已包含 <turn-context> 的消息会被替换（防止重复注入）。
+   *
+   * `opts.skipTurnContext=true` 短路返回原 messages 的浅拷贝：用于"缓存安全
+   * 分叉"格式的特殊请求路径（段切换压缩请求等）—— 这些路径要求 messages 与
+   * 上一轮 byte-equal（不剥离旧 turn-context 块、不注入新块），保 prefix cache
+   * 在两轮请求间继续命中。
    */
-  inject(messages: readonly Message[]): Message[] {
+  inject(
+    messages: readonly Message[],
+    opts?: { skipTurnContext?: boolean },
+  ): Message[] {
+    if (opts?.skipTurnContext) return [...messages];
+
     const block = this.build();
     if (!block) return [...messages];
 

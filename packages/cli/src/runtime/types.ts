@@ -13,6 +13,7 @@ import type { ZhixingConfig, ZhixingCredentials } from "@zhixing/providers";
 import type { IEventBus, SchedulerEventMap } from "@zhixing/core";
 import type { OutputRenderer } from "../output/index.js";
 import type { CliWriter, ScreenController } from "../screen/index.js";
+import type { BuiltinExtraToolsAssembly } from "./builtin-extra-tools.js";
 
 /** 从 createAgentRuntime 公共契约推导 callback 类型——避免依赖 orchestrator 内部路径 */
 type OnSecurityBlockedFn = NonNullable<CreateAgentRuntimeOptions["onSecurityBlocked"]>;
@@ -51,6 +52,20 @@ export interface RuntimeSessionOptions {
   /** 安全管线 UI 回调——透传给 createAgentRuntime */
   onSecurityBlocked: OnSecurityBlockedFn;
   onUserDenied: OnUserDeniedFn;
+
+  /**
+   * builtin extra tools 装配实例 —— cli 顶层创建（注入 task_list 持久化 store），
+   * session 在每次 createAgent 时调 `assembly.assembleTools()` 拿新 ToolDefinition
+   * 数组并入 createAgentRuntime.extraTools。
+   *
+   * 设计要点：
+   *   - assembly 跨 reload 持久（store + service 单例不重建），保 task_list cache
+   *     与持久化连续性
+   *   - 工具实例每次 createAgent 新建 —— 工具是 ToolDefinition 对象包装，实例不同
+   *     但闭包共享同一 service，行为一致
+   *   - REPL 与 serve 模式都用同一个 assembly 抽象，装配逻辑统一
+   */
+  builtinExtraTools: BuiltinExtraToolsAssembly;
 }
 
 /**

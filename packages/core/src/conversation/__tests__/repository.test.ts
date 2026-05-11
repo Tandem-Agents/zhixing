@@ -484,4 +484,106 @@ describe("视图层状态字段（taskListState / segmentMetadata）", () => {
     expect(raw.capabilityState).toBeUndefined();
     expect(raw.taskListState).toBeUndefined();
   });
+
+  // ─── updateTaskListState ───
+
+  it("updateTaskListState 写入新 state → 后续 get 拉到", async () => {
+    const repo = createRepo();
+    const conv = await repo.create({ name: "update-test" });
+
+    await repo.updateTaskListState(conv.id, {
+      items: [
+        { id: "t1", content: "新任务", status: "in_progress" },
+      ],
+    });
+
+    const reloaded = await repo.get(conv.id);
+    expect(reloaded?.taskListState?.items).toHaveLength(1);
+    expect(reloaded?.taskListState?.items[0]?.id).toBe("t1");
+    expect(reloaded?.taskListState?.items[0]?.status).toBe("in_progress");
+  });
+
+  it("updateTaskListState 二次写入覆盖前次（替换语义）", async () => {
+    const repo = createRepo();
+    const conv = await repo.create({ name: "overwrite-test" });
+
+    await repo.updateTaskListState(conv.id, {
+      items: [{ id: "a", content: "first", status: "pending" }],
+    });
+    await repo.updateTaskListState(conv.id, {
+      items: [{ id: "b", content: "second", status: "completed" }],
+    });
+
+    const reloaded = await repo.get(conv.id);
+    expect(reloaded?.taskListState?.items).toHaveLength(1);
+    expect(reloaded?.taskListState?.items[0]?.id).toBe("b");
+  });
+
+  it("updateTaskListState 身份字段保留（id / name / preferredModel 等）", async () => {
+    const repo = createRepo();
+    const conv = await repo.create({
+      name: "identity-test",
+      preferredModel: "deepseek-v4-pro",
+    });
+
+    await repo.updateTaskListState(conv.id, {
+      items: [{ id: "x", content: "y", status: "pending" }],
+    });
+
+    const reloaded = await repo.get(conv.id);
+    expect(reloaded?.id).toBe(conv.id);
+    expect(reloaded?.name).toBe("identity-test");
+    expect(reloaded?.preferredModel).toBe("deepseek-v4-pro");
+  });
+
+  it("updateTaskListState(id, undefined) 删除字段", async () => {
+    const repo = createRepo();
+    const conv = await repo.create({ name: "remove-test" });
+
+    await repo.updateTaskListState(conv.id, {
+      items: [{ id: "z", content: "tmp", status: "pending" }],
+    });
+    await repo.updateTaskListState(conv.id, undefined);
+
+    const dir = path.join(tmpDir, "conversations", conv.id);
+    const content = await fs.readFile(path.join(dir, "meta.json"), "utf-8");
+    const raw = JSON.parse(content) as Record<string, unknown>;
+    expect(raw.taskListState).toBeUndefined();
+  });
+
+  it("updateTaskListState 对不存在的 conversation 是 no-op（不抛错）", async () => {
+    const repo = createRepo();
+    await expect(
+      repo.updateTaskListState("never-existed", {
+        items: [{ id: "x", content: "y", status: "pending" }],
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("updateTaskListState 不影响 segmentMetadata 字段", async () => {
+    const repo = createRepo();
+    const conv = await repo.create({ name: "isolation-test" });
+
+    await writeRawMeta(repo, conv.id, {
+      segmentMetadata: {
+        currentSegmentId: "seg-A",
+        segments: [
+          {
+            segmentId: "seg-A",
+            timestamp: "2026-05-11T10:00:00Z",
+            tokensBefore: 1000,
+            tokensAfter: 500,
+          },
+        ],
+      },
+    });
+
+    await repo.updateTaskListState(conv.id, {
+      items: [{ id: "t", content: "x", status: "pending" }],
+    });
+
+    const reloaded = await repo.get(conv.id);
+    expect(reloaded?.taskListState?.items).toHaveLength(1);
+    expect(reloaded?.segmentMetadata?.currentSegmentId).toBe("seg-A");
+  });
 });

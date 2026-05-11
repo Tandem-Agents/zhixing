@@ -19,7 +19,6 @@ import chalk from "chalk";
 import {
   Scheduler,
   JsonTaskStore,
-  SchedulerProvider,
   userMessage,
   type ChannelRegistry,
   type AgentTurnResult,
@@ -29,7 +28,8 @@ import {
   createAgentRuntime,
   type AgentRuntime,
 } from "@zhixing/orchestrator/runtime";
-import { createScheduleTool } from "@zhixing/tools-builtin";
+import type { TaskListService } from "@zhixing/tools-builtin";
+import { registerCliTurnContextProviders } from "./turn-context-providers.js";
 import {
   loadConfig,
   loadCredentials,
@@ -123,11 +123,14 @@ export class RuntimeSession {
       this.deliveryStackInstance?.delivery,
     );
 
-    // SchedulerProvider 通过 () => this.schedulerInstance 读最新 scheduler ref——
-    // 即便 scheduler 重建（channels 域），provider 内部 closure 自动指向新 instance
-    this.agentRuntime.registerTurnContextProvider(
-      new SchedulerProvider(() => this.schedulerInstance.getStatusSummary()),
-    );
+    // builtin TurnContextProvider 装配（SchedulerProvider + TaskListProvider）走 helper，
+    // 与 serve 模式两处装配同源 —— closure 内部读 this.schedulerInstance 让 scheduler
+    // 重建（channels 域）后 provider 自动指向新 instance；task_list 通过 ALS 取
+    // conversationId + service.cache 同步读，ephemeral 路径自然降级（空列表 → 整段跳过）。
+    registerCliTurnContextProviders(this.agentRuntime, {
+      getSchedulerStatus: () => this.schedulerInstance.getStatusSummary(),
+      taskListService: this.opts.builtinExtraTools.taskListService,
+    });
 
     await this.schedulerInstance.start();
   }
@@ -191,19 +194,22 @@ export class RuntimeSession {
   private async createAgent(
     existingPermissionStore?: IPermissionStore,
   ): Promise<AgentRuntime> {
-    // scheduleTool 通过 closure getter 读 this.schedulerInstance——swap 后自动响应
-    const scheduleTool = createScheduleTool(() => {
-      if (!this.schedulerInstance) {
-        throw new Error("Scheduler not initialized yet");
-      }
-      return this.schedulerInstance;
+    // extra tools 装配走 assembly —— scheduler getter 用 closure 读 this.schedulerInstance，
+    // swap 后自动响应；task_list 工具内部通过 ALS 拿 conversationId（assembly 已封装）。
+    const extraTools = this.opts.builtinExtraTools.assembleTools({
+      scheduler: () => {
+        if (!this.schedulerInstance) {
+          throw new Error("Scheduler not initialized yet");
+        }
+        return this.schedulerInstance;
+      },
     });
 
     return await createAgentRuntime({
       model: this.opts.cliModel,
       provider: this.opts.cliProvider,
       workspace: this.opts.cliWorkspace,
-      extraTools: [scheduleTool],
+      extraTools,
       decorateRunBus: createRenderSubscribers({
         renderer: this.opts.renderer,
         writer: this.opts.writer,
@@ -313,6 +319,15 @@ export class RuntimeSession {
   /** 当前 scheduler 实例——swap 后自动指向新值 */
   get scheduler(): Scheduler {
     return this.schedulerInstance;
+  }
+
+  /**
+   * task_list 服务实例 —— 跨 reload 单例，cli 主线程在 conversation 切换 /
+   * `/clear` 时直接调 prime() / clear() 维护 cache。assembly 持有 store，service
+   * 跨 swap 持续。
+   */
+  get taskListService(): TaskListService {
+    return this.opts.builtinExtraTools.taskListService;
   }
 
   /**
@@ -473,12 +488,12 @@ export class RuntimeSession {
           this.agentRuntime.permissionStore,
         );
 
-        // 注册 SchedulerProvider 到新 agent；closure 读 this.schedulerInstance 自动响应
-        newAgentRuntime.registerTurnContextProvider(
-          new SchedulerProvider(() =>
-            this.schedulerInstance.getStatusSummary(),
-          ),
-        );
+        // 注册 builtin TurnContextProvider 到新 agent —— 与 bootstrap 同源走 helper，
+        // 装配契约不分叉
+        registerCliTurnContextProviders(newAgentRuntime, {
+          getSchedulerStatus: () => this.schedulerInstance.getStatusSummary(),
+          taskListService: this.opts.builtinExtraTools.taskListService,
+        });
       }
 
       return {

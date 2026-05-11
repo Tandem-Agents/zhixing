@@ -28,7 +28,6 @@ import {
   TranscriptStore,
   getZhixingHome,
   getProjectId,
-  SchedulerProvider,
 } from "@zhixing/core";
 import {
   createServerContext,
@@ -51,7 +50,6 @@ import type {
   ZhixingCredentials,
 } from "@zhixing/providers";
 import { runStartupCheck } from "../startup.js";
-import { createScheduleTool } from "@zhixing/tools-builtin";
 import chalk from "chalk";
 import { createAgentRuntime } from "@zhixing/orchestrator/runtime";
 import { createRenderSubscribers } from "../render.js";
@@ -61,6 +59,12 @@ import {
   createUserDeniedRenderer,
 } from "../security/index.js";
 import { setupDelivery, type DeliveryStack } from "../setup-delivery.js";
+import { createBuiltinExtraToolsAssembly } from "../runtime/builtin-extra-tools.js";
+import { InMemoryTaskListStore } from "../runtime/task-list-stores.js";
+import {
+  EMPTY_TASK_STATUS_SUMMARY,
+  registerCliTurnContextProviders,
+} from "../runtime/turn-context-providers.js";
 import { setupChannels } from "./channels.js";
 import { createCliRuntimeFactory } from "./session-adapter.js";
 import { runEphemeralTurn } from "./ephemeral-executor.js";
@@ -202,17 +206,31 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   //   以便各组件构造时能接入。未提供 hub 时 serve 模式会回退到"confirmation 永久 pending → expire"。
   const confirmationHub = new ConfirmationHub();
 
+  // 3b. Builtin extra tools assembly —— task_list / schedule 工具的装配点，所有
+  //   per-session runtime 共享同一 service 单例（cache by sessionId/conversationId）。
+  //
+  // serve 模式当前用 InMemoryTaskListStore 作过渡 —— serve 不接入
+  // ConversationRepository，没有 meta.json 持久化路径。后续独立 PR 让 serve 接入
+  // conversation meta 后，把此处切换为 ConversationRepoTaskListStore（其余装配
+  // 代码不动，演化路径线性）。
+  const builtinExtraTools = createBuiltinExtraToolsAssembly(
+    new InMemoryTaskListStore(),
+  );
+
   const runtimeFactory = createCliRuntimeFactory({
     createAgentRuntime: async (sessionId: string) => {
       // 从 sessionId（如 dm:feishu:ou_xxx）解析 origin，用于任务创建时自动捕获投递目标
       const origin = parseOriginFromSessionId(sessionId);
-      const scheduleTool = createScheduleTool(getSchedulerRef, () => origin);
+      const extraTools = builtinExtraTools.assembleTools({
+        scheduler: getSchedulerRef,
+        scheduleOrigin: () => origin,
+      });
 
       const runtime = await createAgentRuntime({
         model: opts.model,
         provider: opts.provider,
         workspace: opts.workspace,
-        extraTools: [scheduleTool],
+        extraTools,
         decorateRunBus: renderDecorator,
         onSecurityBlocked: createBlockedRenderer(serveWriter),
         onUserDenied: createUserDeniedRenderer(serveWriter),
@@ -221,12 +239,15 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
         // 非 TTY 模式下退化为只输出 Task 起止帧(子工具中间事件静默,
         // 避免日志爆炸)。
       });
-      runtime.registerTurnContextProvider(
-        new SchedulerProvider(() => {
-          if (!schedulerRef) return { active: [], recentlyCompleted: [], recentlyFailed: [] };
-          return schedulerRef.getStatusSummary();
-        }),
-      );
+      // 注册 cli builtin TurnContextProvider（SchedulerProvider + TaskListProvider）
+      // 走统一 helper —— 与 REPL 模式同源装配，杜绝两入口不对齐回归。
+      // scheduler 是 lazy ref（顶层 let schedulerRef），LLM 调用时刻 ref 已就绪；
+      // 未就绪时 fallback 空状态保鲁棒性。
+      registerCliTurnContextProviders(runtime, {
+        getSchedulerStatus: () =>
+          schedulerRef?.getStatusSummary() ?? EMPTY_TASK_STATUS_SUMMARY,
+        taskListService: builtinExtraTools.taskListService,
+      });
       return runtime;
     },
   });
@@ -321,11 +342,19 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   // scheduleTool 的 origin：定时任务 AI 若创建子任务，origin=null（非用户发起）。
   // 用户发起的任务走 channel → ConversationManager 路径，在那里 origin 已从
   // sessionId（dm:feishu:ou_xxx）解析并在 task.origin 持久化。
+  // ephemeral 定时任务 runtime 用同一个 assembly 装配 extra tools —— 与持久会话
+  // runtime 共享同一 TaskListService。定时任务不传 conversationId 到 runtime.run，
+  // task_list 工具内部 ALS 取不到 conversationId 直接 isError 拒绝调用（不污染
+  // 任何 conversation 的 cache）—— 装配一致性 + 行为隔离两全。
   const ephemeralRuntime = await createAgentRuntime({
     model: opts.model,
     provider: opts.provider,
     workspace: opts.workspace,
-    extraTools: [createScheduleTool(getSchedulerRef, () => null)],
+    extraTools: builtinExtraTools.assembleTools({
+      scheduler: getSchedulerRef,
+      // 定时任务自创建子任务 origin=null（非用户发起，渠道无投递目标）
+      scheduleOrigin: () => null,
+    }),
     decorateRunBus: renderDecorator,
     onSecurityBlocked: createBlockedRenderer(serveWriter),
     onUserDenied: createUserDeniedRenderer(serveWriter),
@@ -333,12 +362,14 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     // 的 ephemeral 执行路径同样可派发子 agent 隔离子任务（并发探查 / 大文档
     // 检索 / 复杂工具链），与持久会话能力对齐。
   });
-  ephemeralRuntime.registerTurnContextProvider(
-    new SchedulerProvider(() => {
-      if (!schedulerRef) return { active: [], recentlyCompleted: [], recentlyFailed: [] };
-      return schedulerRef.getStatusSummary();
-    }),
-  );
+  // ephemeral 定时任务 runtime 也走同一 helper —— 装配契约与 main session runtime
+  // 完全对称。定时任务路径 runtime.run 不传 conversationId，TaskListProvider 闭包
+  // 内 ALS 取不到 → getItems 返 [] → 整段跳过，不污染 turn-context。
+  registerCliTurnContextProviders(ephemeralRuntime, {
+    getSchedulerStatus: () =>
+      schedulerRef?.getStatusSummary() ?? EMPTY_TASK_STATUS_SUMMARY,
+    taskListService: builtinExtraTools.taskListService,
+  });
 
   // 6a. 把 ephemeralRuntime 的 broker 挂到 hub —— 定时任务的 confirmation 从这里流出。
   //     命名空间用 "ephemeral"（与 conversation broker 的 "conv:${convId}" 命名规约区分）。

@@ -105,6 +105,7 @@ export type {
 export {
   TimeProvider,
   SchedulerProvider,
+  TaskListProvider,
   TurnContextInjector,
 } from "./turn-context.js";
 

@@ -3,6 +3,10 @@ export type {
   ConversationScope,
   CreateConversationOptions,
   IConversationRepository,
+  TaskItem,
+  TaskListState,
+  SegmentMeta,
+  SegmentMetadata,
 } from "./types.js";
 export {
   DEFAULT_CONVERSATION_ID,

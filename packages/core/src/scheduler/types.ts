@@ -109,24 +109,37 @@ export interface ScheduledTask {
 
 // ─── 任务状态摘要（用于 per-turn 上下文注入） ───
 
+/**
+ * Scheduler 状态查询返回值 —— 供 per-turn 上下文注入与 UI 渲染消费。
+ *
+ * **只读契约**：所有字段为 `readonly` 数组，消费方仅查询不修改。
+ *
+ *   - 接口层强制只读：编译期阻止 `summary.active.push(...)` 等误用，避免污染
+ *     scheduler 内部状态推导出的快照
+ *   - 实现侧自然兼容：scheduler.getStatusSummary 内部用 `.filter().map()` 产新
+ *     mutable Array，赋给 readonly 字段时 TypeScript 自动 widening 接受
+ *   - fallback 单例兼容：`EMPTY_TASK_STATUS_SUMMARY`（cli 装配层 fallback 常量）
+ *     可天然类型化为 readonly TaskStatusSummary，配合 `Object.freeze` 形成"编译期
+ *     + 运行时"双重不变性保障，无需类型谎言（`as unknown` cast）
+ */
 export interface TaskStatusSummary {
-  active: Array<{
+  readonly active: readonly {
     name: string;
     /** 人类可读的调度描述（如 "cron 每天 08:00"） */
     schedule: string;
     nextRunAt?: string;
-  }>;
-  recentlyCompleted: Array<{
+  }[];
+  readonly recentlyCompleted: readonly {
     name: string;
     completedAt: string;
     summary?: string;
     delivered?: boolean;
-  }>;
-  recentlyFailed: Array<{
+  }[];
+  readonly recentlyFailed: readonly {
     name: string;
     failedAt: string;
     error: string;
-  }>;
+  }[];
 }
 
 // ─── Agent Turn 接口（依赖注入） ───
