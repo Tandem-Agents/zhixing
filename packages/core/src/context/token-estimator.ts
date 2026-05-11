@@ -12,6 +12,7 @@
  */
 
 import type { ContentBlock, Message } from "../types/messages.js";
+import type { ToolSpec } from "../types/tools.js";
 import type { ITokenEstimator } from "./types.js";
 
 // ─── 估算常量 ───
@@ -48,6 +49,13 @@ const BLOCK_OVERHEAD = 3;
  * 经验值：JSON.stringify 的结构字符约占 15-25%。
  */
 const JSON_STRUCTURE_RATIO = 0.2;
+
+/**
+ * 每个 ToolSpec 的协议层固定开销（name 字段标签、type 包装、必填 schema
+ * 框架字段等）—— LLM provider 把 ToolSpec 转 wire 格式（OpenAI tools / Anthropic
+ * tools）时这些是无论工具内容多简单都存在的字节。
+ */
+const TOOL_SPEC_OVERHEAD = 8;
 
 /**
  * 校准的滑动平均权重。
@@ -161,6 +169,22 @@ function estimateBlockTokensRaw(block: ContentBlock): number {
 }
 
 /**
+ * 估算单个 ToolSpec 的 token 数（不含校准因子）。
+ *
+ * Provider 把 ToolSpec 转 wire 格式（OpenAI tools / Anthropic tools）后送 LLM ——
+ * 估算把 ToolSpec 整体 JSON.stringify 作为 proxy，再加协议层固定 overhead：
+ *   - JSON 串本体的字符按 CJK / Latin / Emoji 分类加权
+ *   - JSON 结构开销（大括号、引号、冒号占比）
+ *   - ToolSpec 在 wire 格式中的固定包装字节
+ */
+function estimateToolSpecTokensRaw(tool: ToolSpec): number {
+  const serialized = JSON.stringify(tool);
+  const textTokens = estimateTextTokensRaw(serialized);
+  const structureOverhead = Math.ceil(textTokens * JSON_STRUCTURE_RATIO);
+  return TOOL_SPEC_OVERHEAD + textTokens + structureOverhead;
+}
+
+/**
  * 估算单条消息的 token 数（不含校准因子）。
  */
 function estimateMessageTokensRaw(message: Message): number {
@@ -196,6 +220,15 @@ export class TokenEstimator implements ITokenEstimator {
     let total = 0;
     for (const msg of messages) {
       total += estimateMessageTokensRaw(msg);
+    }
+    return Math.ceil(total * this._calibrationFactor);
+  }
+
+  estimateTools(tools: readonly ToolSpec[]): number {
+    if (tools.length === 0) return 0;
+    let total = 0;
+    for (const tool of tools) {
+      total += estimateToolSpecTokensRaw(tool);
     }
     return Math.ceil(total * this._calibrationFactor);
   }

@@ -11,6 +11,7 @@
  */
 
 import type { Message } from "../types/messages.js";
+import type { ToolSpec } from "../types/tools.js";
 
 // ─── Token 估算 ───
 
@@ -30,6 +31,14 @@ export interface ITokenEstimator {
 
   /** 估算一段文本的 token 数 */
   estimateText(text: string): number;
+
+  /**
+   * 估算工具集 token 数 —— LLM API 请求 `tools[]` 字段所占的 token。
+   *
+   * Provider 把 ToolSpec 转 wire 格式（OpenAI tools / Anthropic tools）后送 LLM；
+   * 估算复用文本估算 + JSON 结构开销 + 协议层固定包装字节。
+   */
+  estimateTools(tools: readonly ToolSpec[]): number;
 
   /**
    * 用 API 返回的真实 token 数校准估算比率。

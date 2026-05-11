@@ -412,3 +412,97 @@ export async function* runAgentLoop(
     expect(tokens).toBeLessThan(50);
   });
 });
+
+// ─── estimateTools ───
+
+describe("estimateTools", () => {
+  const estimator = new TokenEstimator();
+
+  const simpleTool = {
+    name: "read",
+    description: "Read file contents",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        path: { type: "string", description: "File path to read" },
+      },
+      required: ["path"],
+    },
+  };
+
+  const complexTool = {
+    name: "bash",
+    description:
+      "Execute a shell command. Output is captured and returned. Long-running commands should be avoided.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        command: { type: "string", description: "Shell command to execute" },
+        timeout: {
+          type: "number",
+          description: "Maximum execution time in milliseconds",
+        },
+        description: {
+          type: "string",
+          description: "Short summary of what the command does",
+        },
+      },
+      required: ["command"],
+    },
+  };
+
+  it("empty tools array returns 0", () => {
+    expect(estimator.estimateTools([])).toBe(0);
+  });
+
+  it("single simple tool produces non-trivial estimate", () => {
+    const tokens = estimator.estimateTools([simpleTool]);
+    expect(tokens).toBeGreaterThan(20);
+    expect(tokens).toBeLessThan(200);
+  });
+
+  it("multiple tools aggregate (each contributes own tokens + overhead)", () => {
+    const single = estimator.estimateTools([simpleTool]);
+    const multi = estimator.estimateTools([simpleTool, simpleTool, simpleTool]);
+    expect(multi).toBeGreaterThan(single * 2.5);
+    expect(multi).toBeLessThanOrEqual(single * 3 + 5);
+  });
+
+  it("complex tool with rich description costs more than simple one", () => {
+    expect(estimator.estimateTools([complexTool])).toBeGreaterThan(
+      estimator.estimateTools([simpleTool]),
+    );
+  });
+
+  it("calibration factor applies to estimateTools", () => {
+    const e = new TokenEstimator();
+    const before = e.estimateTools([simpleTool]);
+    // Push calibration above 1.0 via calibrate (observe actual > estimated)
+    e.calibrate(100, 200);
+    const after = e.estimateTools([simpleTool]);
+    expect(after).toBeGreaterThan(before);
+  });
+
+  it("CJK-heavy tool description weighs more than equivalent ASCII", () => {
+    const cjkTool = {
+      name: "search",
+      description:
+        "搜索文件内容，支持正则表达式与通配符匹配，结果按相关性排序返回",
+      inputSchema: {
+        type: "object" as const,
+        properties: { pattern: { type: "string" } },
+      },
+    };
+    const asciiTool = {
+      name: "search",
+      description: "Search file contents.",
+      inputSchema: {
+        type: "object" as const,
+        properties: { pattern: { type: "string" } },
+      },
+    };
+    expect(estimator.estimateTools([cjkTool])).toBeGreaterThan(
+      estimator.estimateTools([asciiTool]),
+    );
+  });
+});

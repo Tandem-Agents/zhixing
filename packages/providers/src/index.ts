@@ -25,6 +25,17 @@ export { PROTOCOL_BUDGET_DEFAULTS } from "./protocol-defaults.js";
 // 预设
 export { getPreset, getPresetIds, PROVIDER_PRESETS } from "./presets.js";
 
+// 模型注意力阈值（领域知识，随知行版本演进；用户可通过 functional 配置覆盖）
+export {
+  MODEL_CAPABILITIES,
+  UNKNOWN_MODEL_CAPABILITY,
+  resolveModelCapability,
+} from "./model-capability.js";
+export type {
+  ModelCapability,
+  ModelCapabilityOverride,
+} from "./model-capability.js";
+
 // 配置解析
 export {
   ProviderConfigError,
