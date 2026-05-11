@@ -55,8 +55,7 @@ export async function runOnce(options: RunOnceOptions): Promise<RunResult> {
       decorateRunBus: createRenderSubscribers({ renderer, writer }),
       onSecurityBlocked: createBlockedRenderer(writer),
       onUserDenied: createUserDeniedRenderer(writer),
-      // 单次执行(prompt → 一次完整 run)同样开启 Task,与 REPL 路径行为对齐。
-      enableTaskTool: true,
+      // Task 工具由默认 mainProfile().enabledTools 含 "Task" 自动装配。
     });
     return await runtime.run({
       messages: [userMessage(options.prompt)],

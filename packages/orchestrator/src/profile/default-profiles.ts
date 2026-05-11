@@ -21,6 +21,36 @@ export const MAIN_IDENTITY_INSTRUCTIONS = [
 ].join("\n");
 
 /**
+ * 主 agent 启用的工具集 —— builtin 与 Task 的权威源。
+ *
+ * 包含：
+ *   - 8 个内置工具（由 BUILTIN_TOOL_FACTORIES 提供实例）
+ *   - Task（启用子 agent 派发；create-agent-runtime 后置装配）
+ *
+ * **不含外部依赖型工具**（如 schedule 需要 scheduler ref，由 cli 通过
+ * `options.extraTools` 注入；profile 声明 builtin / Task，extraTools 补充
+ * 实例，二者协同装配最终 tools[]）。
+ */
+const MAIN_ENABLED_TOOLS = [
+  "read",
+  "write",
+  "edit",
+  "glob",
+  "grep",
+  "bash",
+  "memory",
+  "web_fetch",
+  "Task",
+] as const;
+
+/**
+ * 子 agent 启用的工具集 —— 任务专注，不可派生子 agent（无 Task）。
+ *
+ * 当前限定为只读探索类工具：read / glob / grep。
+ */
+const SUB_AGENT_ENABLED_TOOLS = ["read", "glob", "grep"] as const;
+
+/**
  * 主 agent profile。name 来自全局 setAgentIdentity 单例,可由 zhixing.config.json
  * 的 agent.displayName 覆盖。
  */
@@ -30,6 +60,7 @@ export function mainProfile(): AgentRoleProfile {
     role: "main",
     instructions: MAIN_IDENTITY_INSTRUCTIONS,
     constraints: [],
+    enabledTools: MAIN_ENABLED_TOOLS,
     capabilities: { canSpawnSubAgents: true, userFacing: true },
   };
 }
@@ -64,6 +95,7 @@ export function subAgentProfile(opts: SubAgentProfileOptions): AgentRoleProfile 
       "You do not have access to the Task tool — you cannot dispatch further sub-agents.",
       "Stay focused on the assigned task. Do not initiate user conversation, do not send external messages.",
     ],
+    enabledTools: SUB_AGENT_ENABLED_TOOLS,
     capabilities: { canSpawnSubAgents: false, userFacing: false },
   };
 }

@@ -92,6 +92,7 @@ vi.mock("@zhixing/providers", async (importOriginal) => {
 
 // 必须在 vi.mock 之后 import,确保 createAgentRuntime 拿到的是 mock 后的 providers
 const { createAgentRuntime } = await import("../create-agent-runtime.js");
+const { mainProfile } = await import("../../profile/default-profiles.js");
 
 // ─── 测试辅助 ───
 
@@ -362,10 +363,14 @@ describe("createAgentRuntime · ALS RunContext 透传契约", () => {
     expect(alsState!.lineage).toBe("main");
   });
 
-  it("不传 enableTaskTool / 无 Task 工具:run() 仍正常完成(向后兼容,默认 false)", async () => {
+  it("自定义 profile.enabledTools 不含 Task → 无 Task 工具装配，run() 正常完成", async () => {
     providerRef.current = new MockLLMProvider([{ text: "no task here" }]);
-    // 默认装配路径:不开 Task,沿用既有 cli/server 调用方约定
-    const runtime = await createAgentRuntime({});
+    // 自定义 profile 排除 Task：装配后 tools[] 无 Task 工具
+    const noTaskProfile = {
+      ...mainProfile(),
+      enabledTools: mainProfile().enabledTools.filter((n) => n !== "Task"),
+    };
+    const runtime = await createAgentRuntime({ profile: noTaskProfile });
     const result = await runtime.run({
       messages: [userMessage("hi")],
       turnIndex: 0,
@@ -461,10 +466,10 @@ describe("createAgentRuntime · ALS RunContext 透传契约", () => {
   });
 });
 
-// ─── 契约 7: enableTaskTool 装配 —— Task 可被 LLM 派调,完成端到端委派 ───
+// ─── 契约 7: profile 含 Task 时装配 —— Task 可被 LLM 派调,完成端到端委派 ───
 
-describe("createAgentRuntime · enableTaskTool 装配契约", () => {
-  it("enableTaskTool=true:LLM 调 Task → 子 agent 跑完 → 主收到 tool_result 综合输出", async () => {
+describe("createAgentRuntime · Task 装配契约（profile.enabledTools 驱动）", () => {
+  it("profile 含 Task:LLM 调 Task → 子 agent 跑完 → 主收到 tool_result 综合输出", async () => {
     // 主 + 子共用同一 MockLLMProvider 序列(provider 实例共享),按 chat 调用顺序消费:
     //   1. 主 LLM:派 Task tool_use
     //   2. 子 LLM:产 final assistant text
@@ -479,7 +484,7 @@ describe("createAgentRuntime · enableTaskTool 装配契约", () => {
       { text: "synthesized response based on sub-agent output" },
     ]);
 
-    const runtime = await createAgentRuntime({ enableTaskTool: true });
+    const runtime = await createAgentRuntime({ profile: mainProfile() });
     const result = await runtime.run({
       messages: [userMessage("research X please")],
       turnIndex: 0,
@@ -499,9 +504,9 @@ describe("createAgentRuntime · enableTaskTool 装配契约", () => {
     expect(lastText).toContain("synthesized response");
   });
 
-  it("enableTaskTool=true:Task 工具 subAgentSafe 仍为 false(防递归不变量)", async () => {
+  it("profile 含 Task:Task 不进入子 agent 工具集(防递归不变量)", async () => {
     // 不直接观察 tools 数组(runtime 不暴露),通过派 Task 让子尝试再派 Task 触发 unknown tool 路径
-    // —— 子工具集应只含 subAgentSafe===true 的工具,Task 自身不在内
+    // —— 子工具集由 sub-agent profile.enabledTools 决定,不含 Task
     providerRef.current = new MockLLMProvider([
       {
         toolCalls: [
@@ -520,7 +525,7 @@ describe("createAgentRuntime · enableTaskTool 装配契约", () => {
       { text: "main saw sub failure" },
     ]);
 
-    const runtime = await createAgentRuntime({ enableTaskTool: true });
+    const runtime = await createAgentRuntime({ profile: mainProfile() });
     const result = await runtime.run({
       messages: [userMessage("test recursion guard")],
       turnIndex: 0,
@@ -534,7 +539,7 @@ describe("createAgentRuntime · enableTaskTool 装配契约", () => {
 
 // ─── Task 端到端集成 ───
 //
-// 子 agent 各路径状态机已被单测覆盖;集成层在 createAgentRuntime + enableTaskTool
+// 子 agent 各路径状态机已被单测覆盖;集成层在 createAgentRuntime + profile 含 Task
 // 装配下走真实主→子→主链路,锁住主子隔离 / 并发 / 子 fail 不波及父 / lineage 冒泡
 // 这几个产品级承诺。
 //
@@ -570,7 +575,7 @@ describe("Task 端到端集成 · 主子隔离 / 并发 / 子 fail / lineage 冒
       { text: "[main-only marker] synthesized output" },
     ]);
 
-    const runtime = await createAgentRuntime({ enableTaskTool: true });
+    const runtime = await createAgentRuntime({ profile: mainProfile() });
     const result = await runtime.run({
       messages: [userMessage("user question")],
       turnIndex: 0,
@@ -613,7 +618,8 @@ describe("Task 端到端集成 · 主子隔离 / 并发 / 子 fail / lineage 冒
   it("并发 3 个 Task:all settled,主 turn 一次成型含 3 条 toolCalls", async () => {
     // 产品核心承诺"3 并发"的端到端锁。
     // tool-executor 在 N≥2 全 isParallelSafe 时走 Promise.allSettled 真并发,
-    // Task subAgentSafe=false 但本身 isParallelSafe=true,主同 turn 派 3 个可并发。
+    // Task isParallelSafe=true,主同 turn 派 3 个可并发(不进子工具集由 sub-agent
+    // profile.enabledTools 不含 Task 保证)。
     // (单测层面 callIndex 顺序消费,真并发的耗时基准归性能测试;本测只验证完成性)
     providerRef.current = new MockLLMProvider([
       {
@@ -629,7 +635,7 @@ describe("Task 端到端集成 · 主子隔离 / 并发 / 子 fail / lineage 冒
       { text: "synthesized A+B+C" },
     ]);
 
-    const runtime = await createAgentRuntime({ enableTaskTool: true });
+    const runtime = await createAgentRuntime({ profile: mainProfile() });
     const result = await runtime.run({
       messages: [userMessage("compare A vs B vs C")],
       turnIndex: 0,
@@ -669,7 +675,7 @@ describe("Task 端到端集成 · 主子隔离 / 并发 / 子 fail / lineage 冒
       { text: "acknowledged Task#fetch failed; proceeding without it" },
     ]);
 
-    const runtime = await createAgentRuntime({ enableTaskTool: true });
+    const runtime = await createAgentRuntime({ profile: mainProfile() });
     const result = await runtime.run({
       messages: [userMessage("research X")],
       turnIndex: 0,
@@ -708,7 +714,7 @@ describe("Task 端到端集成 · 主子隔离 / 并发 / 子 fail / lineage 冒
 
     const observedSubLineages = new Set<string>();
     const runtime = await createAgentRuntime({
-      enableTaskTool: true,
+      profile: mainProfile(),
       decorateRunBus: ({ bus }) => {
         // onAny 不区分事件类型,只观察 meta.lineage —— 任何子事件冒泡到父都计入
         bus.onAny((_evtName, _payload, meta) => {
@@ -852,7 +858,6 @@ describe("createAgentRuntime · run() conversationId 透传", () => {
       isReadOnly: true,
       isParallelSafe: true,
       needsPermission: false,
-      subAgentSafe: true,
       // 声明 read access 让 SecurityPipeline 分类为 observe 放行（与 ALS 测试对齐）
       boundaries: [{ boundaryType: "process", access: "read", dynamic: false }],
       call: async () => {
@@ -889,7 +894,6 @@ describe("createAgentRuntime · run() conversationId 透传", () => {
       isReadOnly: true,
       isParallelSafe: true,
       needsPermission: false,
-      subAgentSafe: true,
       // 声明 read access 让 SecurityPipeline 分类为 observe 放行（与 ALS 测试对齐）
       boundaries: [{ boundaryType: "process", access: "read", dynamic: false }],
       call: async () => {

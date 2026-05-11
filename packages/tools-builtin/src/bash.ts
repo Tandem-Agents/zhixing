@@ -53,7 +53,6 @@ export function createBashTool(): ToolDefinition {
     isReadOnly: false,
     isParallelSafe: false,
     needsPermission: true,
-    subAgentSafe: true,
     interruptBehavior: "grace",
     permissionArgumentKey: "command",
     maxResultChars: MAX_RESULT_CHARS,

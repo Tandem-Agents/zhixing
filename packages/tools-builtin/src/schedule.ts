@@ -138,8 +138,6 @@ export function createScheduleTool(
     isReadOnly: false,
     isParallelSafe: false,
     needsPermission: false,
-    // 定时任务由主 agent 与用户协同管理,子 agent 不持有此能力
-    subAgentSafe: false,
 
     async call(input, context): Promise<ToolResult> {
       const action = input.action as string;

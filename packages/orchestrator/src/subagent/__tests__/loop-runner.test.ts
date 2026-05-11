@@ -51,7 +51,6 @@ function makeReadOnlyTool(name: string): ToolDefinition {
     name,
     description: `${name} test tool`,
     inputSchema: { type: "object" } as never,
-    subAgentSafe: true,
     needsPermission: false,
     call: async () => ({ content: `${name}-ok`, isError: false }),
   };

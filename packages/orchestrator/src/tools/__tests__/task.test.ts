@@ -57,12 +57,11 @@ function makeRoles(provider: MockLLMProvider): LLMRoles {
   return { main: role, secondary: role };
 }
 
-function makeReadOnlyTool(name: string, subAgentSafe: boolean): ToolDefinition {
+function makeReadOnlyTool(name: string): ToolDefinition {
   return {
     name,
     description: `${name} test tool`,
     inputSchema: { type: "object" } as never,
-    subAgentSafe,
     needsPermission: false,
     call: async () => ({ content: `${name}-ok`, isError: false }),
   };
@@ -81,7 +80,7 @@ function makeEnv(provider: MockLLMProvider): TaskToolEnv {
     workspace: process.cwd(),
     workspaceSource: "cwd-fallback",
     parentBroker: new ConfirmationBroker({ id: "parent-broker-test" }),
-    parentTools: [makeReadOnlyTool("read", true)],
+    parentTools: [makeReadOnlyTool("read")],
   };
 }
 
@@ -318,12 +317,6 @@ describe("createTaskTool · 工具元信息(fail-closed 契约)", () => {
     expect(tool.name).toBe("Task");
     expect(tool.description).toBe(TASK_TOOL_PROMPT);
     expect(tool.inputSchema).toBe(TASK_INPUT_SCHEMA);
-  });
-
-  it("subAgentSafe === false(防递归:子不能再派子)", () => {
-    const provider = new MockLLMProvider([{ text: "ok" }]);
-    const tool = createTaskTool(makeEnv(provider));
-    expect(tool.subAgentSafe).toBe(false);
   });
 
   it("isParallelSafe === true(LLM I/O bound,主可并发派多个 Task)", () => {

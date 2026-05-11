@@ -10,7 +10,8 @@
  * 架构契约:
  *   - 工具放 orchestrator(本包)而非 tools-builtin —— 依赖 runChildAgent,反向不行,
  *     依赖图严格 acyclic
- *   - `subAgentSafe: false` 实现"子 agent 不能再派子 agent"的递归深度上限
+ *   - 防递归"子 agent 不能再派子 agent" —— 由 sub-agent profile.enabledTools
+ *     不含 "Task" 保证
  *   - `interruptBehavior: "cancel"` —— ctx.abortSignal 抛 AbortError,父 abort 自动级联
  *     给子(runChildAgent 内部 createInterruptController 派生 child controller)
  *   - `isParallelSafe: true` —— LLM I/O bound,主 agent 单 turn 可并发派多个 Task
@@ -75,7 +76,7 @@ export interface TaskToolEnv {
    * 子 broker 不读父实际状态(无 listener 透传 / 无 pending 共享),仅引用其 id。
    */
   parentBroker: IConfirmationBroker;
-  /** 父工具集 —— 子工具按 subAgentSafe 过滤后从此派生 */
+  /** 父工具集 —— 子工具按 sub-agent profile.enabledTools 过滤后从此派生 */
   parentTools: readonly ToolDefinition[];
 }
 
@@ -328,7 +329,6 @@ export function createTaskTool(env: TaskToolEnv): ToolDefinition {
     isReadOnly: false,
     isParallelSafe: true,
     needsPermission: false,
-    subAgentSafe: false,
     interruptBehavior: "cancel",
     boundaries: [...TASK_TOOL_BOUNDARIES],
     call: async (input, ctx): Promise<ToolResult> => {

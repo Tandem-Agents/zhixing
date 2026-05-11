@@ -1,0 +1,58 @@
+/**
+ * Builtin 工具工厂注册表 —— 按工具名映射到工厂函数
+ *
+ * 集中点：所有内置工具的构造在此一处声明。runtime 装配时根据
+ * AgentRoleProfile.enabledTools 按名查工厂创建实例 —— profile 是
+ * 工具装配的唯一权威源，工厂表是实现来源。
+ *
+ * 新增内置工具的接入：
+ *   1. 实现工厂函数 createXxxTool()，从 ./xxx.ts 导出
+ *   2. 在 BUILTIN_TOOL_FACTORIES 加一条 `<name>: (ctx) => createXxxTool(...)`
+ *   3. 在需要启用该工具的 AgentRoleProfile.enabledTools 中加工具名
+ */
+
+import type { ToolDefinition } from "@zhixing/core";
+import { createBashTool } from "./bash.js";
+import { createEditTool } from "./edit.js";
+import { createGlobTool } from "./glob.js";
+import { createGrepTool } from "./grep.js";
+import { createMemoryTool } from "./memory.js";
+import { createReadTool } from "./read.js";
+import { createWebFetchTool } from "./web-fetch.js";
+import { createWriteTool } from "./write.js";
+
+/**
+ * 工厂构造上下文 —— 工具实例化时可能需要的环境参数。
+ *
+ * 当前仅 web_fetch 需要 proxy（其他工具无参）。未来工具如需更多上下文（如
+ * memoryStore / configContext 等）在此扩展即可，所有工厂签名保持一致。
+ */
+export interface BuiltinToolContext {
+  /** HTTP 代理地址，web_fetch 透传给底层 fetch 客户端 */
+  readonly proxy?: string;
+}
+
+export type BuiltinToolFactory = (ctx: BuiltinToolContext) => ToolDefinition;
+
+/**
+ * 工具名 → 工厂的映射。**单一权威源**，所有 builtin 工具在此声明。
+ *
+ * 命名约定：工具名等于 ToolDefinition.name（小写下划线 / 简单标识符）。
+ */
+export const BUILTIN_TOOL_FACTORIES: Readonly<
+  Record<string, BuiltinToolFactory>
+> = {
+  read: () => createReadTool(),
+  write: () => createWriteTool(),
+  edit: () => createEditTool(),
+  glob: () => createGlobTool(),
+  grep: () => createGrepTool(),
+  bash: () => createBashTool(),
+  memory: () => createMemoryTool(),
+  web_fetch: (ctx) => createWebFetchTool({ proxy: ctx.proxy }),
+};
+
+/** 内置工具名集合 —— 用于装配时判断 "name 是否属于 builtin" */
+export const BUILTIN_TOOL_NAMES: ReadonlySet<string> = new Set(
+  Object.keys(BUILTIN_TOOL_FACTORIES),
+);

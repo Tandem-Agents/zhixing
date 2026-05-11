@@ -211,7 +211,6 @@ export class RuntimeSession {
       }),
       onSecurityBlocked: this.opts.onSecurityBlocked,
       onUserDenied: this.opts.onUserDenied,
-      enableTaskTool: true,
       permissionStore: existingPermissionStore,
     });
   }

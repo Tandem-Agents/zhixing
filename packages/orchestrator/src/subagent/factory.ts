@@ -82,7 +82,7 @@ export interface RunChildAgentOptions {
    * 只引用其 id 字段。父 broker 装配方式(eventBus / resolver 等)对子 broker 行为零影响。
    */
   parentBroker: IConfirmationBroker;
-  /** 父级工具集 —— 子工具按 subAgentSafe 过滤后从此派生 */
+  /** 父级工具集 —— 子工具按 sub-agent profile.enabledTools 过滤后从此派生 */
   parentTools: readonly ToolDefinition[];
   /**
    * 父级 abort signal —— 父打断时 runAgentLoop 内部 createInterruptController
@@ -173,10 +173,13 @@ async function runChildAgentInner(
       nonInteractiveResolver: resolveSubAgentResolver(budget.confirmationPolicy),
     });
 
-    // 子工具集:fail-closed 过滤 —— 仅 subAgentSafe===true 的工具进入子集
-    childTools = opts.parentTools.filter((t) => t.subAgentSafe === true);
-
     const profile = subAgentProfile({ subAgentId, task: opts.task });
+
+    // 子工具集：按 profile.enabledTools 过滤 parent tools —— profile 是工具
+    // 装配的唯一权威源（与主 agent 装配同机制）。声明在 enabledTools 但 parent
+    // 未提供的工具自然不进子集；声明在 parent 但不在 enabledTools 的工具被排除。
+    const enabledSet = new Set(profile.enabledTools);
+    childTools = opts.parentTools.filter((t) => enabledSet.has(t.name));
 
     // 子 system prompt:注意不传 project context / 用户记忆 / 父反思 —— 子任务专注,
     // 跨 spawn 的静态前缀 byte-identical 利于 prompt cache

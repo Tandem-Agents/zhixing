@@ -93,8 +93,8 @@ export const MAIN_AGENT_SEGMENTS: readonly SystemPromptSegment[] = [
  *   principles  ✓ "Read before edit" 等硬约束子 agent 同样适用
  *   tool-usage  ✓ 工具描述按子 agent 装配的 childTools 动态生成
  *   safety      ✓ destructive 命令防护是绝对底线,子 agent 不可豁免
- *   skill-evolution      ✗ Memory 工具 subAgentSafe:false 已硬隔离写入,提示反思保存技能对子 agent 是无效噪声
- *   sub-agent-delegation ✗ Task 工具 subAgentSafe:false 防递归,子 agent 工具集不含 Task,delegation 段无意义
+ *   skill-evolution      ✗ Memory 工具不在 sub-agent profile.enabledTools 中,子 agent 不持有 memory,提示反思保存技能对子 agent 是无效噪声
+ *   sub-agent-delegation ✗ sub-agent profile.enabledTools 不含 Task 防递归,子 agent 工具集不含 Task,delegation 段无意义
  *   style       ✗ 子 agent 输出回写父 tool_result,不直接对话用户,
  *                 风格指引("be concise"等)会让子误解为对话场景
  *

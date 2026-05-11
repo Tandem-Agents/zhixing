@@ -66,16 +66,12 @@ import {
   type WorkspaceDirStatus,
 } from "@zhixing/providers";
 import {
-  createReadTool,
-  createWriteTool,
-  createEditTool,
-  createGlobTool,
-  createGrepTool,
-  createBashTool,
-  createMemoryTool,
-  createWebFetchTool,
+  BUILTIN_TOOL_FACTORIES,
+  BUILTIN_TOOL_NAMES,
   WEB_FETCH_DEFAULT_RULES,
 } from "@zhixing/tools-builtin";
+import { mainProfile } from "../profile/default-profiles.js";
+import type { AgentRoleProfile } from "../profile/agent-role-profile.js";
 import { subscribeCompactAccumulator } from "./compact-accumulator.js";
 import { createCompactionFlush } from "./compaction-llm.js";
 import { buildSystemPrompt } from "./system-prompt.js";
@@ -309,21 +305,16 @@ export interface CreateAgentRuntimeOptions {
    */
   onUserDenied?: OnUserDeniedFn;
   /**
-   * 是否启用 Task 工具(主 agent 可派生子 agent 的入口)。**默认 false**。
+   * 角色 profile —— 决定 system prompt 身份段 + 工具集装配。
    *
-   * 装配语义:工具集尾部追加 `createTaskTool(env)`,Task closure capture
-   * 装配期已知的服务(provider / pipeline / broker / 当前工具集 snapshot 等),
-   * **不**通过 attachTool 后置注入,避免 forward reference 与依赖完整性破坏。
+   * 默认 mainProfile()。可传入预定义 profile（mainProfile / subAgentProfile）
+   * 或自定义 profile；profile.enabledTools 是工具装配的唯一权威源。
    *
-   * Per-run 上下文(eventBus / lineage)通过 `runContextStorage` (AsyncLocalStorage)
-   * 传递到 Task closure 的 call() 内部 —— 由 runtime.run() 入口 `runContextStorage.run`
-   * 包裹建立。这两点(closure capture 装配期服务 + ALS 传递 per-run 上下文)
-   * 共同实现"Task 工具实例稳定可复用,EventBus 严格 per-run 隔离"。
-   *
-   * 子 agent 工具集自动按 `subAgentSafe===true` 过滤;Task 自身 `subAgentSafe: false`,
-   * 实现"子 agent 不能再派子 agent"的递归深度上限。
+   * Task 工具的装配条件：profile.enabledTools 含 "Task"。Task 工具 closure capture
+   * 装配期已知的服务（provider / pipeline / broker / 当前工具集 snapshot 等），
+   * per-run 上下文通过 runContextStorage 传递。
    */
-  enableTaskTool?: boolean;
+  profile?: AgentRoleProfile;
   /**
    * 可选：注入会话级 PermissionStore——跨 hot reload 复用 session scope 授权
    * （用户的"本次会话允许"不丢）。
@@ -369,21 +360,36 @@ export async function createAgentRuntime(
   // 确保工作区目录存在（首次启动自动创建，目录被删除则重建）
   const workspaceDirStatus = ensureWorkspaceDir(workspace);
 
-  // baseTools = builtin + extra,**不含 Task** —— Task 装配依赖
-  // securityPipeline / confirmationBroker(都在下方装配),需要后置追加。
+  // 角色 profile —— 决定工具集与身份段。enabledTools 是装配的唯一权威源。
+  const profile = options.profile ?? mainProfile();
+
+  // baseTools = profile.enabledTools 中的 builtin + options.extraTools，
+  // **不含 Task** —— Task 装配依赖 securityPipeline / confirmationBroker
+  // （都在下方装配），需要后置追加。
+  //
+  // 装配两步走：
+  //   1. profile.enabledTools 中的 builtin 工具名 → BUILTIN_TOOL_FACTORIES 实例化
+  //      （含 "Task" 则跳过本步骤，由后续装配块处理；含未注册 builtin 名 fail-fast）
+  //   2. options.extraTools 全部追加（cli 注入的外部依赖工具如 schedule，
+  //      由 cli 持有所需 ref 在外部实例化后传入）
+  //
   // baseTools 是 SecurityPipeline / BoundaryRegistry / ToolArgumentExtractor
-  // 的注册输入(Task 工具 needsPermission: false 且无 boundaries,不参与这些链路)。
-  const baseTools: ToolDefinition[] = [
-    createReadTool(),
-    createWriteTool(),
-    createEditTool(),
-    createGlobTool(),
-    createGrepTool(),
-    createBashTool(),
-    createMemoryTool(),
-    createWebFetchTool({ proxy: config.network?.proxy }),
-    ...(options.extraTools ?? []),
-  ];
+  // 的注册输入（Task 工具 needsPermission: false 且无 boundaries，不参与
+  // 这些链路）。
+  const builtinCtx = { proxy: config.network?.proxy };
+  const baseTools: ToolDefinition[] = [];
+  for (const name of profile.enabledTools) {
+    if (name === "Task") continue; // 后置装配
+    if (!BUILTIN_TOOL_NAMES.has(name)) {
+      throw new Error(
+        `AgentRoleProfile "${profile.role}" 声明的工具 "${name}" 不在 BUILTIN_TOOL_FACTORIES。` +
+          `profile.enabledTools 仅可声明内置工具名 + "Task"；外部依赖工具（如 schedule）` +
+          `通过 options.extraTools 注入。`,
+      );
+    }
+    baseTools.push(BUILTIN_TOOL_FACTORIES[name]!(builtinCtx));
+  }
+  baseTools.push(...(options.extraTools ?? []));
 
   // 安全管线：会话级单例，跨多次 run() 共享权限规则、确认追踪、频率限制状态。
   //
@@ -427,8 +433,9 @@ export async function createAgentRuntime(
   const confirmationBroker = new ConfirmationBroker();
 
   // tools = baseTools + (可选 Task 工具)。Task 装配时 capture 装配期已知的
-  // 共享服务 + 当前 baseTools snapshot 作为子工具池来源(子按 subAgentSafe
-  // 过滤后派生)。Task 自身 subAgentSafe: false,不会出现在子工具集中(防递归)。
+  // 共享服务 + 当前 baseTools snapshot 作为子工具池来源(子按 sub-agent
+  // profile.enabledTools 过滤后派生)。防递归: sub-agent profile 不含 "Task",
+  // 子 agent 装配时 Task 自然不在 childTools 中。
   //
   // per-run 的 eventBus / lineage 由 runtime.run() 入口的 runContextStorage.run
   // 包裹建立,Task closure call() 时取用 —— 与本装配期解耦,无 mutable runtime 字段。
@@ -438,7 +445,7 @@ export async function createAgentRuntime(
   // 找不到 → fail-closed → critical → 在 ci 模式下被 PermissionMatcher block。
   // 这同时是 MCP / 动态插件接入路径的统一模式,不是 Task 专用 hack。
   let tools: ToolDefinition[] = baseTools;
-  if (options.enableTaskTool) {
+  if (profile.enabledTools.includes("Task")) {
     const taskTool = createTaskTool({
       provider: roles.main.provider,
       model: roles.main.model,
@@ -465,6 +472,7 @@ export async function createAgentRuntime(
   // 重建 systemPrompt,不得追加 per-turn 信息(时间走 turn-context 注入,
   // tools[] 装配一次 freeze 不变)。详见 buildSystemPrompt 的"调用契约"注释。
   const systemPrompt = buildSystemPrompt({
+    profile,
     tools,
     cwd,
     workspace: workspace.path,

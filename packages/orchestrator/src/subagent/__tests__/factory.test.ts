@@ -7,7 +7,7 @@
  *   - failed (max_turns):reason=max_turns → status=failed + error.type=max_turns_exceeded + partial 抓
  *   - aborted (parent abort):parentSignal aborted → status=aborted + abortReason.kind=parent-abort
  *   - 子 lineage 派生:childBus.lineage 严格以 parentLineage 为前缀(EventBus 不变量)
- *   - 子工具过滤:subAgentSafe===true 才进 childTools
+ *   - 子工具过滤:sub-agent profile.enabledTools 包含的工具名才进 childTools
  *   - cleanup discipline:happy 与 error 路径 finally 都触发 bus.removeAllListeners + broker.cancelAll
  *   - INV-S6 永不抛:即使 SecurityPipeline / parentBus 等关键依赖 throw,函数仍返回 failed 而非抛出
  *
@@ -35,12 +35,11 @@ import { runContextStorage, type RunContext } from "../../runtime/run-context.js
 
 // ─── 测试辅助 ───
 
-function makeReadOnlyTool(name: string, subAgentSafe: boolean): ToolDefinition {
+function makeReadOnlyTool(name: string): ToolDefinition {
   return {
     name,
     description: `${name} test tool`,
     inputSchema: { type: "object" } as never,
-    subAgentSafe,
     needsPermission: false,
     call: async () => ({ content: `${name}-ok`, isError: false }),
   };
@@ -74,7 +73,7 @@ function makeBaseOpts(
     parentBus,
     parentLineage: "main",
     parentBroker: new ConfirmationBroker({ id: "parent-broker-test" }),
-    parentTools: [makeReadOnlyTool("read", true)],
+    parentTools: [makeReadOnlyTool("read")],
     parentSignal: new AbortController().signal,
     task: "test task description",
     ...overrides,
@@ -235,22 +234,23 @@ describe("runChildAgent · lineage 派生", () => {
 
 // ─── 子工具过滤 ───
 
-describe("runChildAgent · subAgentSafe 过滤", () => {
-  it("subAgentSafe=false 的工具不进入子 system prompt (子 LLM 看不到该工具)", async () => {
-    // 让子里调一次工具,验证子能调 safe tool 但不能调 unsafe tool
+describe("runChildAgent · sub-agent profile.enabledTools 过滤", () => {
+  it("不在 sub-agent profile.enabledTools 中的工具不进入子 system prompt", async () => {
+    // 让子里调一次工具,验证子能调 enabled tool 但不能调未 enabled 的工具
     const provider = new MockLLMProvider([
       { toolCalls: [{ id: "t1", name: "read", input: {} }] },
       { text: "done" },
     ]);
-    const safeTool = makeReadOnlyTool("read", true);
-    const unsafeTool = makeReadOnlyTool("memory", false);
+    // sub-agent profile.enabledTools 含 read 不含 memory
+    const enabledTool = makeReadOnlyTool("read");
+    const disabledTool = makeReadOnlyTool("memory");
 
     const result = await runChildAgent(
-      makeBaseOpts(provider, { parentTools: [safeTool, unsafeTool] }),
+      makeBaseOpts(provider, { parentTools: [enabledTool, disabledTool] }),
     );
 
     expect(result.status).toBe("completed");
-    // 子收到的请求 tools 列表只包含 safeTool —— provider.calls 记录每次 chat 的 tools
+    // 子收到的请求 tools 列表只包含 enabled tool —— provider.calls 记录每次 chat 的 tools
     const lastCall = provider.calls.at(-1);
     expect(lastCall?.tools?.map((t) => t.name)).toEqual(["read"]);
     expect(lastCall?.tools?.map((t) => t.name)).not.toContain("memory");
@@ -402,90 +402,6 @@ describe("runChildAgent · audit 血缘 (parentBrokerId / sourceAgentId)", () =>
     } finally {
       cancelSpy.mockRestore();
     }
-  });
-});
-
-// ─── e2e:子调未注册工具 → SecurityPipeline 升级 critical → child broker fail-deny ───
-//
-// 验证 spec §8.1 / §8.4 核心承诺的端到端链路:
-//   runChildAgent → runSubAgentLoop → createSecureExecuteTool →
-//   SecurityPipeline.evaluate (未注册工具 → critical → requiresConfirmation=true) →
-//   handleBrokerPath → child broker.requestConfirmation →
-//   无 listener → resolveSubAgentResolver("inherit-or-deny") = failToDenyResolver →
-//   decision.kind="deny" → SecurityBlockError → tool_result.isError=true →
-//   子 LLM 看到 isError 后正常 reply
-//
-// 该测试是"audit 字段透传契约"之外,M2.2 阶段对 spec §8.1/§8.4 的唯一端到端覆盖。
-// 利用 SecurityPipeline 对未注册工具默认走 critical → requiresConfirmation 的行为
-// (已在 core/security/__tests__/security-pipeline.test.ts 验证),无需额外 mock。
-
-describe("runChildAgent · 端到端 child broker fail-deny", () => {
-  it("子调未注册边界工具 → SecurityPipeline 升级 critical → child broker fail-deny → tool_result.isError → 子 LLM 看到后 reply", async () => {
-    const callSpy = vi.fn(async () => ({
-      content: "should not be called",
-      isError: false,
-    }));
-
-    // 工具名以 "mcp_" 前缀+未注册到 boundary registry,被 BoundaryImpactClassifier
-    // 分类为 critical → OperationClassifierMiddleware 升级 confirm → requiresConfirmation = true。
-    //
-    // 注意:`needsPermission` 字段决定 PermissionStore.match 路径(给 extractArgument 提示),
-    // **与 SecurityPipeline 的 critical 升级无关** —— 路径决定者是 boundary registry 分类。
-    // 此处声明 true 与 ToolDefinition fail-closed 默认对齐,避免读者误以为"声明无需权限怎么还走 broker"
-    const unknownTool: ToolDefinition = {
-      name: "mcp_unregistered_audit_test",
-      description: "未注册到 boundary registry,触发 SecurityPipeline critical 分类 → broker 路径",
-      inputSchema: { type: "object" } as never,
-      subAgentSafe: true,
-      needsPermission: true,
-      call: callSpy,
-    };
-
-    // 监听 parentBus 的 `tool:call_end` 事件 —— 子 bus emit 自动冒泡到父 bus,
-    // 收集后直接断言 success=false 这个核心不变量。
-    // (tool-executor 把 SecurityBlockError catch 后产出 tool_result.isError=true,
-    //  对应 tool:call_end.success=false —— 见 packages/core/src/loop/tool-executor.ts)
-    const observedToolEnds: Array<{ name: string; success: boolean }> = [];
-    const parentBus = createEventBus<AgentEventMap>({ lineage: "main" });
-    parentBus.on("tool:call_end", (payload) => {
-      observedToolEnds.push({
-        name: payload.name,
-        success: payload.success,
-      });
-    });
-
-    // MockLLMProvider 双轮:
-    //   round 1: 调 unknownTool → secure-executor 抛 SecurityBlockError → tool_result.isError
-    //   round 2: 子 LLM 看到 isError 后 reply 总结
-    const provider = new MockLLMProvider([
-      { toolCalls: [{ id: "u1", name: unknownTool.name, input: {} }] },
-      { text: "tool was denied by security policy; reporting to user" },
-    ]);
-
-    const result = await runChildAgent(
-      makeBaseOpts(provider, {
-        parentTools: [unknownTool],
-        parentBus,
-      }),
-    );
-
-    // 子 agent 正常 completed(子 LLM 处理了 isError 并完成对话,而非抛 unhandled exception)
-    expect(result.status).toBe("completed");
-
-    // 关键不变量 1:工具的 call 函数从未被执行
-    // (SecurityBlockError 在 secure-executor 阶段抛出,根本不到 originalExecute)
-    expect(callSpy).not.toHaveBeenCalled();
-
-    // 关键不变量 2:tool:call_end 事件 emit 时 success=false —— 直接断言 secure-executor
-    // 抛出的 SecurityBlockError 被 tool-executor catch 转换成失败 tool_result 的不变量
-    const unknownToolEnd = observedToolEnds.find(
-      (e) => e.name === unknownTool.name,
-    );
-    expect(unknownToolEnd).toBeDefined();
-    expect(unknownToolEnd?.success).toBe(false);
-
-    // 关键不变量 3:toolUses 计数为 1(尝试调用算 1 次,即使被 deny;统计 LLM 决策数)
-    expect(result.toolUses).toBe(1);
   });
 });
 

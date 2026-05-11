@@ -103,7 +103,7 @@ export interface RunSubAgentLoopOptions {
    * 该数组**不被本函数修改**,新累积的消息走返回值 messages
    */
   messages: Message[];
-  /** 已按 subAgentSafe 过滤后的子工具列表 */
+  /** 已按 sub-agent profile.enabledTools 过滤后的子工具列表 */
   tools: readonly ToolDefinition[];
   /** 共享父 LLMProvider 实例(连接池 / 限速 / 缓存共用) */
   provider: LLMProvider;

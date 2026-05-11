@@ -239,10 +239,13 @@ export type ToolInterruptBehavior =
  * - isReadOnly 默认 false → 假设有副作用
  * - isParallelSafe 默认 false → 假设不能并发
  * - needsPermission 默认 true → 假设需要用户确认
- * - subAgentSafe 默认 false → 假设不暴露给子 agent
  *
  * 这意味着新工具如果忘了声明这些属性，系统会采取最保守的策略，
  * 而不是意外地允许危险操作。
+ *
+ * 子 agent 工具集由 `AgentRoleProfile.enabledTools` 显式声明驱动 —— profile
+ * 是工具装配的唯一权威源。防递归（子不能再派子）由 sub-agent profile.enabledTools
+ * 不含 "Task" 保证。
  */
 export interface ToolDefinition {
   /** 工具名称，全局唯一标识符 */
@@ -258,20 +261,6 @@ export interface ToolDefinition {
   isParallelSafe?: boolean;
   /** 此工具是否需要用户权限确认。默认 true */
   needsPermission?: boolean;
-
-  /**
-   * 是否安全暴露给子 agent。**默认 false**(fail-closed,与 isParallelSafe /
-   * needsPermission 保持一致的保守哲学)。
-   *
-   * 设为 false 的工具不会出现在子 agent 装配的工具列表中,实现:
-   *  - 防递归(子 agent dispatcher 工具自身)
-   *  - 防权限提升(写主用户记忆等)
-   *  - 限制能力面(某些只主 agent 应该用的工具)
-   *
-   * 子 agent 装配过滤(由调用方决定何时启用):
-   *   `tools.filter(t => t.subAgentSafe === true)`
-   */
-  subAgentSafe?: boolean;
 
   /** 结果的最大字符数，超出时自动截断。不设置则不限制 */
   maxResultChars?: number;

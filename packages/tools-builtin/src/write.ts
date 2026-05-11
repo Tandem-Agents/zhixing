@@ -39,7 +39,6 @@ export function createWriteTool(): ToolDefinition {
     isReadOnly: false,
     isParallelSafe: false,
     needsPermission: true,
-    subAgentSafe: true,
     permissionArgumentKey: "path",
     maxResultChars: 1_000,
 

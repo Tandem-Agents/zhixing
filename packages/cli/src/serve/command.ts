@@ -216,10 +216,10 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
         decorateRunBus: renderDecorator,
         onSecurityBlocked: createBlockedRenderer(serveWriter),
         onUserDenied: createUserDeniedRenderer(serveWriter),
-        // 持久会话路径同样开启 Task:渠道下游(飞书/RPC)可看到子 agent
-        // 冒泡事件,renderDecorator 在非 TTY 模式下退化为只输出 Task 起止帧
-        // (子工具中间事件静默,避免日志爆炸)。
-        enableTaskTool: true,
+        // Task 工具由默认 mainProfile().enabledTools 含 "Task" 自动装配；
+        // 渠道下游(飞书/RPC)可看到子 agent 冒泡事件,renderDecorator 在
+        // 非 TTY 模式下退化为只输出 Task 起止帧(子工具中间事件静默,
+        // 避免日志爆炸)。
       });
       runtime.registerTurnContextProvider(
         new SchedulerProvider(() => {
@@ -329,9 +329,9 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     decorateRunBus: renderDecorator,
     onSecurityBlocked: createBlockedRenderer(serveWriter),
     onUserDenied: createUserDeniedRenderer(serveWriter),
-    // 定时任务的 ephemeral 执行路径同样开启 Task:让自动化任务也能派发子 agent
-    // 隔离子任务(并发探查 / 大文档检索 / 复杂工具链),与持久会话能力对齐。
-    enableTaskTool: true,
+    // Task 工具由默认 mainProfile().enabledTools 含 "Task" 自动装配；定时任务
+    // 的 ephemeral 执行路径同样可派发子 agent 隔离子任务（并发探查 / 大文档
+    // 检索 / 复杂工具链），与持久会话能力对齐。
   });
   ephemeralRuntime.registerTurnContextProvider(
     new SchedulerProvider(() => {

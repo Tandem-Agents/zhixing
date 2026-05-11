@@ -99,7 +99,6 @@ export function createWebFetchTool(opts: WebFetchToolOptions = {}): ToolDefiniti
     isReadOnly: true,
     isParallelSafe: true,
     needsPermission: true,
-    subAgentSafe: true,
     boundaries: [{ boundaryType: "network", access: "egress", dynamic: false }],
     permissionArgumentKey: "url",
     systemPromptHints: WEB_FETCH_SYSTEM_PROMPT_HINTS,
