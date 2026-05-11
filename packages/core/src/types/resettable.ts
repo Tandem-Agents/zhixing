@@ -4,8 +4,7 @@
  * 用途：
  * - cli `/clear` 在清磁盘 transcript 后调一次 runtime.resetConversationState()，
  *   让所有注册的 Resettable 自描述地清掉对话级状态
- * - 视图层 stage（如未来的 capabilityState / taskListState / taskBriefState 等）
- *   实现此接口，在 runtime 装配时注册一次，跟随 /clear 自动清空
+ * - 视图层 stage 实现此接口，在 runtime 装配时注册一次，跟随 /clear 自动清空
  *
  * 边界：
  * - 仅清"对话级"状态（与当前 conversation 绑定的工作集），不清"工具级"状态

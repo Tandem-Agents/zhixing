@@ -52,7 +52,7 @@ export class ContextCompiler {
         tools = output.tools;
         if (output.stateDelta) {
           // StateDelta 当前为占位 type；浅 spread 即可。
-          // 扩展具体字段时（如 capabilityState / taskBriefState 等）按字段类型决定 merge 策略。
+          // 扩展具体字段时按字段类型决定 merge 策略。
           Object.assign(aggregatedDelta, output.stateDelta);
         }
       } catch {

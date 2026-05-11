@@ -38,7 +38,6 @@ import {
 } from "@zhixing/core";
 import type { AgentRoleProfile } from "../profile/agent-role-profile.js";
 import { mainProfile } from "../profile/default-profiles.js";
-import { ALWAYS_TOOL_PROMPT_DESCRIPTIONS } from "./capability-config.js";
 
 // ─── 缓存分界标记 ───
 
@@ -172,10 +171,8 @@ export interface PromptBuildContext {
  *
  * Per-turn 动态信息(当前时间 / 任务状态 / 工作目录变更等)通过 turn-context
  * 注入到末尾 user message,**不**进入 systemPrompt(参见 TimeProvider /
- * TurnContextInjector 注释)。tools[] 的 capability LRU 演化通过
- * ToolSchemaCompilerStage 在 LLM call 时调整 API tools[] 字段,**不**重建
- * systemPrompt —— 故 prompt 内 tool-usage 段描述的是"装配时的工具全集",
- * 与实际 tools[] 字段是 two views of the same set,这是有意设计的不对称。
+ * TurnContextInjector 注释)。tools[] 在 session 创建后冻结不变,prompt 内
+ * tool-usage 段与 API tools[] 字段同源稳定。
  */
 export function buildSystemPrompt(ctx: PromptBuildContext): string {
   const profile = ctx.profile ?? mainProfile();
@@ -288,122 +285,14 @@ function buildMetaProtocol(): string {
  * 从注册的工具列表动态生成工具使用偏好。
  * 添加/移除工具时,此段落自动适应。
  *
- * 装配 request_capabilities 元工具时走 capability 分组结构（明确"当前 tools[]
- * 含 3 个" vs "需激活的工具"，并禁止 LLM 输出 XML 文本格式调工具）；
- * 否则走传统 hint-list 结构（向后兼容老装配 / 单元测试）。
+ * Tools[] 在 session 创建后冻结不变；本函数输出的文本也随之 byte-equal 稳定。
  */
 function buildToolUsage(tools: ToolDefinition[]): string {
   const names = new Set(tools.map((t) => t.name));
-  if (names.has("request_capabilities")) {
-    return buildCapabilityToolUsage(tools, names);
-  }
-  return buildLegacyToolUsage(tools, names);
+  return buildToolUsageLines(tools, names);
 }
 
-/**
- * Capability 模式 —— 显式分组让 LLM 区分"始终可调"vs"可能需激活"两组工具，
- * 并显式禁止 XML 文本格式调用（弱模型在 schema 不可见时常退化为 XML）。
- *
- * 描述用"语义归属"而非"当前状态"：prompt 是 byte-equal 不变的（cache_boundary
- * 之前），不能体现 capability state 的演化（每次 LLM call 实际 tools[] 字段
- * 由协议层传给 LLM，state 信息由 tools[] 实际内容传达，prompt 仅描述规则）。
- */
-function buildCapabilityToolUsage(
-  tools: ToolDefinition[],
-  names: Set<string>,
-): string {
-  // always 段从 capability-config 单一事实源派生 —— 与 create-agent-runtime
-  // 装配的 ALWAYS_TOOL_NAMES 共享同一 Map，编译期保证两处一致。
-  // 仅输出**当前装配确实含有**的 always 工具（守卫极简化装配 / 单测场景）。
-  const alwaysLines: string[] = [];
-  for (const [name, description] of Object.entries(
-    ALWAYS_TOOL_PROMPT_DESCRIPTIONS,
-  )) {
-    if (names.has(name)) {
-      alwaysLines.push(`- \`${name}\` — ${description}`);
-    }
-  }
-
-  const lines: string[] = [
-    "## Tool Usage",
-    "",
-    "**Tools always in your tools[]** (invoke directly via standard tool_use / function-calling protocol):",
-    ...alwaysLines,
-    "",
-    "**For tools NOT in your current tools[]**, you MUST first call `request_capabilities({ tools: [<names>] })`. After this call, those tools' schemas appear in tools[] on your next turn — only THEN can you invoke them with standard tool_use protocol.",
-    "",
-    "**CRITICAL — DO NOT** output tool calls as XML text like `<invoke name=\"bash\">...</invoke>`. Always use the standard tool_use / function-calling protocol. If you find yourself about to write XML, stop and call `request_capabilities` instead.",
-    "",
-    "Tools that may need activation (check your current tools[] before invoking):",
-  ];
-
-  if (names.has("read")) {
-    lines.push("- `read` — view file contents (use this, not bash cat/head/tail)");
-  }
-  if (names.has("grep")) {
-    lines.push("- `grep` — search file contents by regex (use this, not bash grep/rg)");
-  }
-  if (names.has("glob")) {
-    lines.push("- `glob` — find files by name pattern (use this, not bash find)");
-  }
-  if (names.has("edit")) {
-    lines.push("- `edit` — targeted text replacement (use this, not bash sed/awk)");
-  }
-  if (names.has("write")) {
-    lines.push("- `write` — create files or overwrite entire content");
-  }
-  if (names.has("bash")) {
-    lines.push(
-      "- `bash` — system commands, package management, git operations, and tasks not covered by other tools",
-    );
-  }
-  if (names.has("schedule")) {
-    lines.push(
-      "- `schedule` — create / list / update / delete / run scheduled tasks",
-    );
-    lines.push(
-      "  - When the user wants recurring actions (reminders, periodic checks, timed notifications), create a scheduled task",
-    );
-    lines.push(
-      '  - Convert natural language time to schedule: "每天早上8点" → cron "0 8 * * *", "每30分钟" → interval 1800000, "明天下午3点" → once with ISO datetime',
-    );
-    lines.push(
-      "  - For cron expressions, default timezone to Asia/Shanghai unless the user specifies otherwise",
-    );
-    lines.push(
-      "  - Always confirm the schedule with the user before creating",
-    );
-  }
-
-  // 工具自描述提示 —— 任何工具声明 systemPromptHints 都自动追加；
-  // 与 boundaries / permissionArgumentKey 同属"工具自描述"模式，新工具
-  // 按此路径自助接入 system-prompt 引导，无需修改本文件。
-  for (const tool of tools) {
-    if (tool.systemPromptHints) {
-      lines.push(...tool.systemPromptHints);
-    }
-  }
-
-  // 通用原则
-  if (tools.some((t) => t.isParallelSafe)) {
-    lines.push(
-      "- When multiple independent tasks exist, use tools in parallel where safe",
-    );
-  }
-
-  // Tool-authored commitment 抑制原则（COMMITMENT_SIGNAL 常量与 tool-executor
-  // 附加到 content 的字面串逐字一致）
-  lines.push(
-    `- If a tool result ends with \`${COMMITMENT_SIGNAL}\`, the user has already seen the tool's confirmation directly via a commit message. Do NOT restate what the tool just did (no "已创建..." / "I've scheduled..."). If no additional insight is needed, end the turn with a brief acknowledgment or no text.`,
-  );
-
-  return lines.join("\n");
-}
-
-/**
- * 传统 hint-list 模式 —— request_capabilities 未装配时使用，向后兼容。
- */
-function buildLegacyToolUsage(
+function buildToolUsageLines(
   tools: ToolDefinition[],
   names: Set<string>,
 ): string {

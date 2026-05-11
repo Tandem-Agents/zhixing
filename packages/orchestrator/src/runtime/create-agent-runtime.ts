@@ -54,10 +54,8 @@ import {
   TurnContextInjector,
   TimeProvider,
   getAbortReason,
-  CapabilityState,
   ContextCompiler,
   ToolResultAnchorStage,
-  ToolSchemaCompilerStage,
   createDefaultAnchorRegistry,
   type AnchorGenerator,
   type Resettable,
@@ -79,12 +77,9 @@ import {
   createGrepTool,
   createBashTool,
   createMemoryTool,
-  createRequestCapabilitiesTool,
   createWebFetchTool,
   WEB_FETCH_DEFAULT_RULES,
-  type RequestCapabilitiesPromoteResult,
 } from "@zhixing/tools-builtin";
-import { ALWAYS_TOOL_NAMES } from "./capability-config.js";
 import { subscribeCompactAccumulator } from "./compact-accumulator.js";
 import { createCompactionFlush } from "./compaction-llm.js";
 import { buildSystemPrompt } from "./system-prompt.js";
@@ -196,7 +191,7 @@ export interface AgentRuntime {
   /**
    * 注册"对话级"可重置组件 —— `/clear` 时一并清空。
    *
-   * 视图层 stage（如未来的 capabilityState / taskListState / migrationSummaryState 等）
+   * 视图层 stage（含未来扩展的 state-bearing stage）
    * 实现 Resettable 后在 runtime 装配时注册一次，无需 cli 在 /clear handler 里硬编码
    * 各 state 的 reset 调用。Phase 0 视图层无状态化 stage，注册列表默认为空。
    *
@@ -216,12 +211,6 @@ export interface AgentRuntime {
    * 内存语义已是"清空"，下次 LLM call 仍会按新视图编排）。
    */
   resetConversationState(): Promise<void>;
-  /**
-   * 工具能力分层状态 —— session-scoped 不持久化。cli 在加载 / 切换 conversation
-   * 时通过 reset + rebuildCapabilityFromHistory 从 transcript 历史现学现用接续；
-   * stage 与 agent-loop 共享同一引用，保证装配后状态变更对所有持有方实时生效。
-   */
-  readonly capabilityState: CapabilityState;
 }
 
 export interface ForceCompactResult {
@@ -394,29 +383,6 @@ export async function createAgentRuntime(
   // 确保工作区目录存在（首次启动自动创建，目录被删除则重建）
   const workspaceDirStatus = ensureWorkspaceDir(workspace);
 
-  // 工具能力分层状态 —— cli session 单例，session-scoped 不持久化。
-  // 装配期 initialize 工具到默认 layer；cli 在加载 / 切换 conversation 时通过
-  // reset + rebuildCapabilityFromHistory 从 transcript 历史现学现用接续；
-  // /clear 通过 Resettable 接口重置回 discoverable；run() 完成时 advanceTurn
-  // 推进 LRU。所有持有方（agent-loop / ToolSchemaCompilerStage / request_capabilities
-  // 闭包）共享同一引用。
-  const capabilityState = new CapabilityState();
-
-  // request_capabilities 元工具 —— promote 闭包桥接 capabilityState.promoteToHot
-  // 到工具的统一报告契约（unknown / cold / activated / already-active）。
-  const promote = (toolName: string): RequestCapabilitiesPromoteResult => {
-    const layerBefore = capabilityState.layerOf(toolName);
-    if (layerBefore === undefined) return { layer: "unknown", promoted: false };
-    if (layerBefore === "cold") return { layer: "cold", promoted: false };
-    const promoted = capabilityState.promoteToHot(toolName);
-    const layerAfter = capabilityState.layerOf(toolName);
-    return {
-      layer: (layerAfter ?? "unknown") as RequestCapabilitiesPromoteResult["layer"],
-      promoted,
-    };
-  };
-  const requestCapabilitiesTool = createRequestCapabilitiesTool({ promote });
-
   // baseTools = builtin + extra,**不含 Task** —— Task 装配依赖
   // securityPipeline / confirmationBroker(都在下方装配),需要后置追加。
   // baseTools 是 SecurityPipeline / BoundaryRegistry / ToolArgumentExtractor
@@ -430,7 +396,6 @@ export async function createAgentRuntime(
     createBashTool(),
     createMemoryTool(),
     createWebFetchTool({ proxy: config.network?.proxy }),
-    requestCapabilitiesTool,
     ...(options.extraTools ?? []),
   ];
 
@@ -505,25 +470,6 @@ export async function createAgentRuntime(
     }
   }
 
-  // 工具能力分层 —— 装配期 initialize 所有工具到默认 layer：
-  //   - Always 集合：会话级常用元能力（任何对话状态下都该立即可调）；
-  //     名称与 prompt 描述同源在 capability-config.ts 的 ALWAYS_TOOL_PROMPT_DESCRIPTIONS，
-  //     与 system-prompt 的 always 段编译期保证同步（加 / 减时只改一处 Map）
-  //   - 其余工具：discoverable（system prompt 已含 hints；调用时由自动升级路径
-  //     升级到 hot，下一次 LLM call 暴露完整 schema）
-  // 装配漏 initialize 的工具会被 ToolSchemaCompilerStage 视为 cold（严格策略，
-  // 让 bug 立即暴露），但本循环遍历 tools 全集已覆盖所有装配产物。
-  for (const tool of tools) {
-    capabilityState.initialize(
-      tool.name,
-      ALWAYS_TOOL_NAMES.has(tool.name) ? "always" : "discoverable",
-    );
-  }
-  // capabilityState 实现 Resettable 接入 /clear ——
-  // /clear handler 调 runtime.resetConversationState() 时此组件回退所有 hot 到 discoverable。
-  // 装配期注册一次（与现有 turnContextInjector 装配同模式）。
-  // resettables 数组下方初始化，此处先记一个引用，等数组创建后注册。
-
   // systemPrompt 后置到 tools 装配完成之后 —— Task 工具的描述文本需进入
   // ## Tool Usage 段,LLM 才能学习"何时派 Task / 何时直接调单工具"的决策。
   //
@@ -531,8 +477,7 @@ export async function createAgentRuntime(
   // 整个 runtime 生命周期内 byte-equal 不变。每轮 run() 在 line ~944 把同一
   // 字符串引用透传给 runAgentLoop —— 不得在 run() / loop / LLM call 路径里
   // 重建 systemPrompt,不得追加 per-turn 信息(时间走 turn-context 注入,
-  // tools[] 演化走 ToolSchemaCompilerStage)。详见 buildSystemPrompt 的
-  // "调用契约"注释。
+  // tools[] 装配一次 freeze 不变)。详见 buildSystemPrompt 的"调用契约"注释。
   const systemPrompt = buildSystemPrompt({
     tools,
     cwd,
@@ -548,22 +493,11 @@ export async function createAgentRuntime(
   );
 
   // 视图层 ContextCompiler —— 每次 LLM call 之前对 messages 做语义编排。
-  //
-  // Stage 链顺序：
-  //   1. ToolResultAnchorStage：把历史 tool_result（非 Focus）替换为简短结构化锚，
-  //      与数据层 manageWindow.applyTierCompression 各司其职（数据层管 state.messages
-  //      体积；视图层管 LLM 视图认知质量）。
-  //   2. ToolSchemaCompilerStage：按 capabilityState 过滤 API tools[] 数组 ——
-  //      只暴露 always + hot 的完整 schema，discoverable / cold 不出现，
-  //      实测短对话场景 tools schema 体积可节省 ~96%。
-  //
-  // 两个 stage 字段维度正交（前者改 messages，后者改 tools），可独立运行。
   // 工具自助接入：anchorRegistry 通过 createDefaultAnchorRegistry() 预注册内置工具
   // generator，新工具按 AnchorGenerator 接口实现后 register 即生效，不改 stage。
   const anchorRegistry = createDefaultAnchorRegistry();
   const contextCompiler = new ContextCompiler([
     new ToolResultAnchorStage(anchorRegistry),
-    new ToolSchemaCompilerStage(capabilityState),
   ]);
 
   // 加载项目上下文（ZHIXING.md + 环境信息），注入到首条 user message
@@ -593,12 +527,7 @@ export async function createAgentRuntime(
 
   // 对话级 Resettable 注册表 —— 视图层 stage 实现 Resettable 后在装配期注册，
   // /clear 一并清空。
-  const resettables: Resettable[] = [
-    {
-      id: "capability-state",
-      reset: () => capabilityState.reset(),
-    },
-  ];
+  const resettables: Resettable[] = [];
 
   // Flush 用的 LLM 调用——绑定 secondary 角色。详见 compaction-llm.ts 的
   // 设计注释（路由契约 + 单测覆盖）。
@@ -630,7 +559,6 @@ export async function createAgentRuntime(
     confirmationBroker,
     resolvedWorkspace: workspace,
     workspaceDirStatus,
-    capabilityState,
 
     registerTurnContextProvider(provider: TurnContextProvider): void {
       turnContextInjector.register(provider);
@@ -948,8 +876,6 @@ export async function createAgentRuntime(
           // 估算器 per-LLM-call 校准：agent-loop 在每次成功 LLM call 后用本次实际
           // 送入的 messagesForLLM 对账 inputTokens，让系数与 LLM 实际处理的 size 对账
           tokenEstimator: estimator,
-          // 工具能力分层：tool_use 命中时由 agent-loop 调 recordToolUse 静默升级到 hot
-          capabilityState,
         });
 
         while (true) {
@@ -960,10 +886,6 @@ export async function createAgentRuntime(
 
             // 校准已下沉到 agent-loop per-LLM-call —— 这里仅 budget 评估用 state.messages
             // 维度（保 budget 与状态体积同源，与 calibration baseline 双 baseline 设计）。
-
-            // 推进工具能力分层 turn 序号，触发 LRU 降级评估 ——
-            // 与 commitTurn / writeMeta 的"一次 run = 一 turn"语义对齐。
-            capabilityState.advanceTurn();
 
             const budget = contextEngine.checkBudget(allMessages);
 

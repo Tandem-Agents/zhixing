@@ -28,4 +28,3 @@ export {
 
 // 内置 Stage
 export { ToolResultAnchorStage } from "./stages/tool-result-anchor.js";
-export { ToolSchemaCompilerStage } from "./stages/tool-schema-compiler.js";

@@ -267,8 +267,8 @@ export async function* runAgentLoop(
         });
         messagesForLLM = compiled.messages;
         toolsForLLM = compiled.tools as ToolDefinition[];
-        // stateDelta 当前为空 type；后续阶段引入 capabilityState / 任务系统状态时
-        // 由 caller 在 LLM call 完成后应用——目前空 type 无字段需应用。
+        // stateDelta 当前为空 type；后续 stage 引入状态字段时由 caller 在 LLM
+        // call 完成后应用——目前空 type 无字段需应用。
       }
       if (params.turnContextInjector) {
         messagesForLLM = params.turnContextInjector.inject(messagesForLLM);
@@ -399,17 +399,6 @@ export async function* runAgentLoop(
           message: llmResult.message,
           usage,
         });
-      }
-
-      // ── 工具能力激活（自动升级路径） ──
-      // 在执行前对每个 tool_use 调 recordToolUse —— discoverable 工具会被静默升级到
-      // hot（下一次 LLM call 暴露完整 schema）；always / hot 仅刷新 lastUseTurn 续期；
-      // cold / 未注册自动 no-op 由 executeToolCalls 现有 toolMap 路径处理。
-      // 不引入额外 LLM round，与 spec "直接执行 + 错误自修正循环" 路径对齐。
-      if (params.capabilityState) {
-        for (const call of toolCalls) {
-          params.capabilityState.recordToolUse(call.name);
-        }
       }
 
       // ── Step 2: Execute tools ──

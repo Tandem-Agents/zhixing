@@ -126,17 +126,6 @@ export {
 } from "./turn-context.js";
 
 export type {
-  CapabilityLayer,
-  CapabilityRecord,
-} from "./capability/index.js";
-export {
-  CapabilityState,
-  HOT_RETENTION_TURNS,
-  collectRecentToolUses,
-  rebuildCapabilityFromHistory,
-} from "./capability/index.js";
-
-export type {
   AnchorGenerator,
   CompileInput,
   CompileOutput,
@@ -150,7 +139,6 @@ export {
   AnchorRegistry,
   ContextCompiler,
   ToolResultAnchorStage,
-  ToolSchemaCompilerStage,
   bashAnchor,
   createDefaultAnchorRegistry,
   editAnchor,

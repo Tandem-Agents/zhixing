@@ -173,53 +173,8 @@ describe("buildSystemPrompt", () => {
       expect(prompt).toContain("`read`");
     });
 
-    it("含 request_capabilities 工具时，Tool Usage 段输出 capability 分组结构（按'语义归属'分组，不假设当前状态）", () => {
-      const tools = [
-        stubTool("request_capabilities"),
-        stubTool("memory"),
-        stubTool("read"),
-        stubTool("bash"),
-      ];
-      const prompt = buildSystemPrompt({ ...ctx, tools });
-      // 始终可调组（语义"always"，不指定具体数字）
-      expect(prompt).toContain("**Tools always in your tools[]**");
-      expect(prompt).toContain("`memory` —");
-      expect(prompt).toContain("`request_capabilities` —");
-      // 激活指令（让 LLM 自查 current tools[]，不假设状态）
-      expect(prompt).toContain("For tools NOT in your current tools[]");
-      expect(prompt).toContain(
-        "call `request_capabilities({ tools: [<names>] })`",
-      );
-      // 禁止 XML 输出格式
-      expect(prompt).toContain(
-        "DO NOT** output tool calls as XML text",
-      );
-      // 可能需激活分组（"may need activation" — 不假设当前未激活）
-      expect(prompt).toContain(
-        "Tools that may need activation (check your current tools[] before invoking):",
-      );
-      expect(prompt).toContain("`read` —");
-      expect(prompt).toContain("`bash` —");
-    });
-
-    it("capability prompt 不假设具体状态（不含 'exactly N' / 'right now' / 'NOT in tools[] until activated' 等状态硬编码）", () => {
-      // prompt 在 conversation 期间 byte-equal，描述规则 / 语义归属，不假设
-      // 当前 capability state 演化结果（如 hot 集合大小 / 已激活工具数）。
-      const tools = [
-        stubTool("request_capabilities"),
-        stubTool("memory"),
-        stubTool("read"),
-      ];
-      const prompt = buildSystemPrompt({ ...ctx, tools });
-      expect(prompt).not.toContain("exactly 3 tools");
-      expect(prompt).not.toContain("Right now your tools[]");
-      expect(prompt).not.toContain("NOT in your tools[] until activated");
-    });
-
-    it("不含 request_capabilities 时走传统 hint-list 模式（向后兼容旧装配）", () => {
+    it("常规装配下输出 hint-list 工具使用段", () => {
       const prompt = buildSystemPrompt({ ...ctx, tools: [stubTool("read")] });
-      expect(prompt).not.toContain("Tools always in your tools[]");
-      expect(prompt).not.toContain("Tools that may need activation");
       // 老格式 "Use `X` to ..." 仍然输出
       expect(prompt).toContain("Use `read` to view file contents");
     });
