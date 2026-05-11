@@ -51,7 +51,6 @@ import { emptyUsage, mergeUsage, type TokenUsage } from "../types/llm.js";
 import { extractText, extractToolCalls, toolResultMessage } from "../types/messages.js";
 import type { Message } from "../types/messages.js";
 import { toToolSpec } from "../types/tools.js";
-import type { ToolDefinition } from "../types/tools.js";
 import { streamLLMCall } from "./llm-call.js";
 import { executeToolCalls } from "./tool-executor.js";
 import { logDiagnostic } from "../diagnostics.js";
@@ -249,32 +248,18 @@ export async function* runAgentLoop(
         });
       }
 
-      // ── Step 1: 视图层编排（每次 LLM call 之前重做） ──
+      // ── Step 1: 准备 LLM 输入（每次 LLM call 之前重做） ──
       //
-      // 顺序：state.messages → contextCompiler.compile → turnContextInjector.inject →
-      // streamLLMCall。两者均为可选注入；缺省时 messages / tools 直接透传，行为与历史一致。
+      // 顺序：state.messages → turnContextInjector.inject → streamLLMCall。
+      // turn-context 注入是可选的；缺省时 messages 直接透传。
       //
       // 为什么是 per-LLM-call：同一 run() 内 LLM 多次 call 之间 turn-context 状态可能演化
       // （任务列表、定时任务等），单 run 入口注入一次会让后续 call 看到陈旧内容；
       // 每次 LLM call 之前重 inject 让最新状态实时可见，inject 内部自动 strip 旧块防累积。
       let messagesForLLM: readonly Message[] = state.messages;
-      let toolsForLLM = tools;
-      if (params.contextCompiler) {
-        const compiled = await params.contextCompiler.compile({
-          messages: state.messages,
-          tools,
-          state: {},
-        });
-        messagesForLLM = compiled.messages;
-        toolsForLLM = compiled.tools as ToolDefinition[];
-        // stateDelta 当前为空 type；后续 stage 引入状态字段时由 caller 在 LLM
-        // call 完成后应用——目前空 type 无字段需应用。
-      }
       if (params.turnContextInjector) {
         messagesForLLM = params.turnContextInjector.inject(messagesForLLM);
       }
-      const callToolSpecs =
-        toolsForLLM === tools ? toolSpecs : toolsForLLM.map(toToolSpec);
 
       // ── Step 2: Call LLM ──
       // 接 controller (非 signal):看门狗触发 idle-timeout 时需要 controller.abort() 写权限,
@@ -286,7 +271,7 @@ export async function* runAgentLoop(
         messages: messagesForLLM as Message[],
         model,
         systemPrompt,
-        toolSpecs: callToolSpecs,
+        toolSpecs,
         controller,
         watchdog: params.watchdog,
         eventBus,
@@ -296,10 +281,9 @@ export async function* runAgentLoop(
 
       // ── 估算器校准（仅成功无错路径） ──
       // 用 API 返回的真实 inputTokens 对账本次"实际送入 LLM 的 messages"
-      // （即 messagesForLLM —— ContextCompiler 编排 + TurnContextInjector 注入后），
-      // 让 calibration 系数与 LLM 实际处理的 size 对账，而非与数据层 state.messages 对账：
-      // 后者会因视图层锚化（tool_result 缩短）、turn-context 注入产生系统性偏差，
-      // 让 calibration 系数无法收敛。
+      // （即 messagesForLLM —— TurnContextInjector 注入后），让 calibration 系数与
+      // LLM 实际处理的 size 对账，而非与数据层 state.messages 对账：后者会因
+      // turn-context 注入产生系统性偏差，让 calibration 系数无法收敛。
       // abort / provider-error / inputTokens=0 路径全部跳过 —— 这些样本不可靠，
       // 注入会污染滑动平均。
       if (

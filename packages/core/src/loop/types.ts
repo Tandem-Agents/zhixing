@@ -26,7 +26,6 @@ import type {
   ContextManagerHook,
   ITokenEstimator,
 } from "../context/types.js";
-import type { ContextCompiler } from "../context/compiler/index.js";
 import type { TurnContextInjector } from "../context/turn-context.js";
 import type { CompactMarker, Turn } from "../transcript/types.js";
 import type { AbortReason, WatchdogPolicy } from "../interrupt/types.js";
@@ -96,21 +95,11 @@ export interface AgentLoopParams {
    */
   watchdog?: WatchdogPolicy;
   /**
-   * 视图层渲染器 —— 每次 LLM call 之前对 messages / tools 做语义编排。
-   *
-   * 缺省时不做任何编排，messages / tools 直接送 LLM（向后兼容）。
-   * 注册了 stage 时按 stage 链顺序串行渲染，输出送给 streamLLMCall。
-   */
-  contextCompiler?: ContextCompiler;
-  /**
    * Per-turn 动态上下文注入器 —— 每次 LLM call 之前把 `<turn-context>` 块
    * 注入到最新 user message。
    *
    * 缺省时不注入。注册时由 caller 在外部完成 provider 注册（如 TimeProvider /
    * SchedulerProvider 等），agent-loop 仅按调用约定每次 LLM call 之前调一次 inject。
-   *
-   * 与 contextCompiler 顺序：先 compile，再 inject——保证 turn-context 块基于
-   * 编排后的 messages 注入到正确位置。
    */
   turnContextInjector?: TurnContextInjector;
   /**
@@ -118,8 +107,8 @@ export interface AgentLoopParams {
    *
    * 缺省时不做任何校准（向后兼容）。注册时 agent-loop 在每次成功的 LLM call 后用
    * `estimateMessages(messagesForLLM)` ↔ `llmResult.usage.inputTokens` 校准，让系数
-   * 与 LLM 实际处理的 size（compile + inject 后的 rendered messages）对账，而不是
-   * 与数据层 state.messages 对账（后者会因视图层锚化、turn-context 注入产生系统性偏差）。
+   * 与 LLM 实际处理的 size（turn-context 注入后的 messages）对账，而不是
+   * 与数据层 state.messages 对账（后者会因 turn-context 注入产生系统性偏差）。
    *
    * 校准发生在 abort / error 路径之前的成功分支，inputTokens > 0 时才生效。
    */

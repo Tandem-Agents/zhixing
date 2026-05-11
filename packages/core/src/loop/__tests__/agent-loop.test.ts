@@ -1753,7 +1753,7 @@ describe("Agent Loop", () => {
   //
   // 校准 baseline 从 caller 侧（state.messages + 最终 cumulative usage）下沉到
   // agent-loop per-call（messagesForLLM ↔ 单次 inputTokens），让系数与 LLM 实际
-  // 处理的 size 对账，与视图层 ContextCompiler / TurnContextInjector 共生。
+  // 处理的 size 对账（含 turn-context 注入后的视图）。
 
   describe("tokenEstimator per-LLM-call 校准", () => {
     function makeMockEstimator() {

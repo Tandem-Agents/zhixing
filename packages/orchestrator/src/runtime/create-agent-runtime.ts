@@ -54,10 +54,6 @@ import {
   TurnContextInjector,
   TimeProvider,
   getAbortReason,
-  ContextCompiler,
-  ToolResultAnchorStage,
-  createDefaultAnchorRegistry,
-  type AnchorGenerator,
   type Resettable,
 } from "@zhixing/core";
 import {
@@ -180,20 +176,10 @@ export interface AgentRuntime {
   /** 注册 per-turn 上下文 provider（如 SchedulerProvider），支持后注册 */
   registerTurnContextProvider(provider: TurnContextProvider): void;
   /**
-   * 注册 tool_result 事实锚 generator，支持后注册。
-   *
-   * 与 registerTurnContextProvider 对称——MCP / 插件 / extraTools 接入新工具时
-   * 通过此入口注册自定义 AnchorGenerator，让该工具的历史 result 锚化成
-   * 结构化事实（路径 / 行数 / 命令等）而非通用 fallback `[<name>, ok, N chars]`。
-   * 同名 register 覆盖前者，方便扩展点替换默认实现。
-   */
-  registerAnchorGenerator(generator: AnchorGenerator): void;
-  /**
    * 注册"对话级"可重置组件 —— `/clear` 时一并清空。
    *
-   * 视图层 stage（含未来扩展的 state-bearing stage）
-   * 实现 Resettable 后在 runtime 装配时注册一次，无需 cli 在 /clear handler 里硬编码
-   * 各 state 的 reset 调用。Phase 0 视图层无状态化 stage，注册列表默认为空。
+   * 任何在会话期间持有对话级状态的组件实现 Resettable 后在 runtime 装配时注册
+   * 一次，无需 cli 在 /clear handler 里硬编码各 state 的 reset 调用。
    *
    * 多次注册按注册顺序累积；reset 按 LIFO 串行执行（让后注册组件先 reset，给"被
    * 后注册组件依赖"的前注册组件留下还能被读取的窗口）。
@@ -492,14 +478,6 @@ export async function createAgentRuntime(
     new TimeProvider(Intl.DateTimeFormat().resolvedOptions().timeZone),
   );
 
-  // 视图层 ContextCompiler —— 每次 LLM call 之前对 messages 做语义编排。
-  // 工具自助接入：anchorRegistry 通过 createDefaultAnchorRegistry() 预注册内置工具
-  // generator，新工具按 AnchorGenerator 接口实现后 register 即生效，不改 stage。
-  const anchorRegistry = createDefaultAnchorRegistry();
-  const contextCompiler = new ContextCompiler([
-    new ToolResultAnchorStage(anchorRegistry),
-  ]);
-
   // 加载项目上下文（ZHIXING.md + 环境信息），注入到首条 user message
   const projectContext = await loadProjectContext(cwd);
 
@@ -562,10 +540,6 @@ export async function createAgentRuntime(
 
     registerTurnContextProvider(provider: TurnContextProvider): void {
       turnContextInjector.register(provider);
-    },
-
-    registerAnchorGenerator(generator: AnchorGenerator): void {
-      anchorRegistry.register(generator);
     },
 
     registerConversationStateReset(target: Resettable): void {
@@ -870,9 +844,6 @@ export async function createAgentRuntime(
           // 视图层 turn-context 注入由 agent-loop 在每次 LLM call 之前调用，
           // 让任务状态 / 定时任务 / 时间等动态信息在多 LLM call 之间实时刷新
           turnContextInjector,
-          // 视图层 ContextCompiler：在 turn-context 注入之前对历史 tool_result
-          // 锚化，与数据层 tier-compressor 各司其职
-          contextCompiler,
           // 估算器 per-LLM-call 校准：agent-loop 在每次成功 LLM call 后用本次实际
           // 送入的 messagesForLLM 对账 inputTokens，让系数与 LLM 实际处理的 size 对账
           tokenEstimator: estimator,
