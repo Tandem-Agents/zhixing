@@ -257,3 +257,84 @@ describe("countTurns", () => {
     expect(count).toBe(0);
   });
 });
+
+// ─── CompactMarker 字段填法契约（段切换路径 vs 数据层兜底路径） ───
+
+describe("CompactMarker 填法契约", () => {
+  it("段切换路径：含 segmentId + structuredSummary + summary 完整往返", () => {
+    const segmentMarker: CompactMarker = {
+      type: "compact",
+      timestamp: "2026-05-11T10:00:00Z",
+      summary: "facts: 讨论了 X\nstate: 进行中 Y\nactive: file=A.ts",
+      turnsCompacted: 20,
+      tokensBefore: 130_000,
+      tokensAfter: 800,
+      segmentId: "seg-001",
+      structuredSummary: {
+        facts: "讨论了 X",
+        state: "进行中 Y",
+        active: "file=A.ts",
+      },
+    };
+
+    const json = JSON.stringify(segmentMarker);
+    const result = parseRecords(json);
+
+    expect(result.compacts).toHaveLength(1);
+    expect(result.compacts[0]?.segmentId).toBe("seg-001");
+    expect(result.compacts[0]?.structuredSummary?.facts).toBe("讨论了 X");
+    expect(result.compacts[0]?.structuredSummary?.state).toBe("进行中 Y");
+    expect(result.compacts[0]?.structuredSummary?.active).toBe("file=A.ts");
+    expect(result.compacts[0]?.summary).toContain("facts: 讨论了 X");
+  });
+
+  it("数据层兜底路径：只填 summary，扩展字段缺省", () => {
+    const fallbackMarker: CompactMarker = {
+      type: "compact",
+      timestamp: "2026-05-11T11:00:00Z",
+      summary: "纯文本摘要 from LLMSummarize",
+      turnsCompacted: 5,
+      tokensBefore: 50_000,
+      tokensAfter: 5_000,
+    };
+
+    const json = JSON.stringify(fallbackMarker);
+    const result = parseRecords(json);
+
+    expect(result.compacts).toHaveLength(1);
+    expect(result.compacts[0]?.summary).toBe("纯文本摘要 from LLMSummarize");
+    expect(result.compacts[0]?.segmentId).toBeUndefined();
+    expect(result.compacts[0]?.structuredSummary).toBeUndefined();
+  });
+
+  it("混合 JSONL：段切换 marker 与兜底 marker 共存，各自字段隔离", () => {
+    const content = [
+      JSON.stringify(HEADER),
+      JSON.stringify({
+        type: "compact",
+        timestamp: "T1",
+        summary: "fallback",
+        turnsCompacted: 1,
+        tokensBefore: 100,
+        tokensAfter: 50,
+      }),
+      JSON.stringify({
+        type: "compact",
+        timestamp: "T2",
+        summary: "struct",
+        turnsCompacted: 2,
+        tokensBefore: 200,
+        tokensAfter: 80,
+        segmentId: "seg-A",
+        structuredSummary: { facts: "f", state: "s", active: "a" },
+      }),
+    ].join("\n");
+
+    const result = parseRecords(content);
+
+    expect(result.compacts).toHaveLength(2);
+    expect(result.compacts[0]?.segmentId).toBeUndefined();
+    expect(result.compacts[1]?.segmentId).toBe("seg-A");
+    expect(result.compacts[1]?.structuredSummary?.facts).toBe("f");
+  });
+});

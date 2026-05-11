@@ -361,3 +361,127 @@ describe("writeMeta atomic + per-id lock", () => {
     expect(() => JSON.parse(content)).not.toThrow();
   });
 });
+
+// ─── 视图层状态字段持久化 + 清理 ───
+
+describe("视图层状态字段（taskListState / segmentMetadata）", () => {
+  /**
+   * 写入视图层字段的辅助函数 —— 模拟 task_list / SegmentManager 未来直接写
+   * conversation meta 的场景（PR-B3 内尚未有消费方）。
+   */
+  async function writeRawMeta(
+    repo: ConversationRepository,
+    id: string,
+    extra: Record<string, unknown>,
+  ): Promise<void> {
+    const existing = await repo.get(id);
+    if (!existing) throw new Error(`conversation "${id}" 不存在`);
+    const merged = { ...existing, ...extra };
+    const dir = path.join(tmpDir, "conversations", id);
+    await fs.writeFile(
+      path.join(dir, "meta.json"),
+      JSON.stringify(merged, null, 2),
+      "utf-8",
+    );
+  }
+
+  it("taskListState 字段持久化往返", async () => {
+    const repo = createRepo();
+    const conv = await repo.create({ name: "task-list-test" });
+
+    await writeRawMeta(repo, conv.id, {
+      taskListState: {
+        items: [
+          { id: "t1", content: "调研 module X", status: "in_progress" },
+          { id: "t2", content: "写测试", status: "pending" },
+        ],
+      },
+    });
+
+    const reloaded = await repo.get(conv.id);
+    expect(reloaded?.taskListState).toBeDefined();
+    expect(reloaded?.taskListState?.items).toHaveLength(2);
+    expect(reloaded?.taskListState?.items[0]?.status).toBe("in_progress");
+  });
+
+  it("segmentMetadata 字段持久化往返", async () => {
+    const repo = createRepo();
+    const conv = await repo.create({ name: "segment-test" });
+
+    await writeRawMeta(repo, conv.id, {
+      segmentMetadata: {
+        currentSegmentId: "seg-2",
+        segments: [
+          {
+            segmentId: "seg-1",
+            timestamp: "2026-05-11T10:00:00Z",
+            tokensBefore: 130_000,
+            tokensAfter: 800,
+          },
+          {
+            segmentId: "seg-2",
+            timestamp: "2026-05-11T12:00:00Z",
+            tokensBefore: 140_000,
+            tokensAfter: 900,
+          },
+        ],
+      },
+    });
+
+    const reloaded = await repo.get(conv.id);
+    expect(reloaded?.segmentMetadata?.currentSegmentId).toBe("seg-2");
+    expect(reloaded?.segmentMetadata?.segments).toHaveLength(2);
+  });
+
+  it("clearViewLayerState 清空两个字段；身份字段保留", async () => {
+    const repo = createRepo();
+    const conv = await repo.create({
+      name: "clear-test",
+      preferredModel: "deepseek-v4-pro",
+    });
+
+    await writeRawMeta(repo, conv.id, {
+      taskListState: { items: [{ id: "x", content: "y", status: "pending" }] },
+      segmentMetadata: {
+        currentSegmentId: "s1",
+        segments: [],
+      },
+    });
+
+    await repo.clearViewLayerState(conv.id);
+
+    const reloaded = await repo.get(conv.id);
+    expect(reloaded).not.toBeNull();
+    // 视图层字段清空
+    expect(reloaded?.taskListState).toBeUndefined();
+    expect(reloaded?.segmentMetadata).toBeUndefined();
+    // 身份字段保留
+    expect(reloaded?.name).toBe("clear-test");
+    expect(reloaded?.preferredModel).toBe("deepseek-v4-pro");
+    expect(reloaded?.id).toBe(conv.id);
+  });
+
+  it("clearViewLayerState 对不存在的 conversation 是 no-op", async () => {
+    const repo = createRepo();
+    await expect(repo.clearViewLayerState("nonexistent")).resolves.toBeUndefined();
+  });
+
+  it("clearViewLayerState 同时清理历史 phantom 字段 capabilityState", async () => {
+    const repo = createRepo();
+    const conv = await repo.create({ name: "legacy-field-test" });
+
+    // 模拟磁盘上的老 meta 仍残留 capabilityState
+    await writeRawMeta(repo, conv.id, {
+      capabilityState: { hotTools: ["read"] },
+      taskListState: { items: [] },
+    });
+
+    await repo.clearViewLayerState(conv.id);
+
+    const dir = path.join(tmpDir, "conversations", conv.id);
+    const content = await fs.readFile(path.join(dir, "meta.json"), "utf-8");
+    const raw = JSON.parse(content) as Record<string, unknown>;
+    expect(raw.capabilityState).toBeUndefined();
+    expect(raw.taskListState).toBeUndefined();
+  });
+});

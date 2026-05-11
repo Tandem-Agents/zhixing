@@ -199,6 +199,20 @@ function buildSlashCommands(
             ),
           );
         }
+        // 清空 conversation meta 的视图层状态（task_list / 段切换历史）。
+        // 与 transcript compact / runtime Resettable reset 同语义层级——
+        // /clear 是"重置对话内容到新起点"，conversation 身份字段保留不动。
+        if (state.conversationId) {
+          try {
+            await state.convRepo.clearViewLayerState(state.conversationId);
+          } catch (err) {
+            cliWriter.line(
+              chalk.yellow(
+                `\n  conversation meta 视图层字段清空失败（不影响对话清空）: ${err instanceof Error ? err.message : String(err)}\n`,
+              ),
+            );
+          }
+        }
         state.turnCounter = 0;
         state.lastToolEndCount = 0;
         cliWriter.line(chalk.dim("对话历史已清空\n"));

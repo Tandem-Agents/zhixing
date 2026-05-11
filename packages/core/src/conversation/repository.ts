@@ -193,6 +193,30 @@ export class ConversationRepository implements IConversationRepository {
     return conversations.length > 0 ? conversations[0]!.id : null;
   }
 
+  /**
+   * 清空视图层状态字段 —— `/clear` 命令路径。
+   *
+   * 在同一把 per-id 锁内做"读-删字段-写"原子操作；conversation 不存在时 no-op。
+   * 身份字段（id / name / scope / preferences 等）保留不动。
+   */
+  async clearViewLayerState(id: string): Promise<void> {
+    return this.withMetaLock(id, async () => {
+      const content = await fs
+        .readFile(metaPath(this.scope, id), "utf-8")
+        .catch(() => null);
+      if (content === null) return;
+      const parsed = JSON.parse(content) as Record<string, unknown>;
+      delete parsed.taskListState;
+      delete parsed.segmentMetadata;
+      // 顺手清理历史已弃用字段（与 readMeta 内的清理同源）
+      delete parsed.capabilityState;
+      await writeAtomic(
+        metaPath(this.scope, id),
+        JSON.stringify(parsed, null, 2),
+      );
+    });
+  }
+
   // ─── 内部方法 ───
 
   private async readMeta(id: string): Promise<Conversation | null> {

@@ -59,14 +59,45 @@ export interface ToolCallRecord {
   isError?: boolean;
 }
 
-/** JSONL 特殊行：上下文压缩边界标记 */
+/**
+ * JSONL 特殊行：上下文压缩边界标记。
+ *
+ * 两种来源产生 marker，填法契约不同：
+ *
+ *   1. 段切换路径（段式上下文管理触顶整段压缩）：必填 `segmentId` +
+ *      `structuredSummary` + `summary`；`summary` 是 `structuredSummary` 三段
+ *      拼接成的平文本副本（保下游兼容）。
+ *
+ *   2. 数据层兜底路径（budget critical 触发 LLMSummarize 直接摘 raw）：只填
+ *      `summary` 平文本；`segmentId` / `structuredSummary` 缺省。
+ *
+ * 消费方读 marker 时优先用 `structuredSummary` 重建结构化视图；不存在时降级
+ * 用 `summary` 平文本。这保证两条产生路径的 marker 在下游消费时的语义一致性。
+ *
+ * transcript 中 marker 是**单 frontier**（每次写入覆盖前 marker）—— 沿用现有
+ * normalize 语义；段切换的历史元数据累积走 `Conversation.segmentMetadata`（不
+ * 在 transcript 中数组化），两条数据流职责分离。
+ */
 export interface CompactMarker {
   type: "compact";
   timestamp: string;
+  /** 平文本摘要 —— 必填，两种产生路径都填 */
   summary: string;
   turnsCompacted: number;
   tokensBefore: number;
   tokensAfter: number;
+
+  /** 段切换路径必填：段唯一标识，与 Conversation.segmentMetadata.segments 关联 */
+  segmentId?: string;
+  /** 段切换路径必填：结构化摘要三段 */
+  structuredSummary?: {
+    /** 讨论过的事实、事件、决策（结论性陈述，不展开过程）*/
+    facts: string;
+    /** 当前进行中的任务、未完成事项、用户期望 */
+    state: string;
+    /** 后续协作必须知道的具体信息：文件路径、变量名、技术决策、用户偏好等 */
+    active: string;
+  };
 }
 
 /** 所有可出现在 JSONL 中的记录类型 */
