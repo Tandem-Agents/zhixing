@@ -1,16 +1,15 @@
 /**
- * 上下文引擎 — 窗口管理 + 策略编排
- *
- * 将 WindowManager 与 CompactionStrategy 整合为统一的 ContextManager。
+ * 上下文引擎 — 预算检查 + 策略编排
  *
  * 职责：
- * 1. 窗口管理：Tier 压缩 → 预算检查 → Pin-aware 淘汰（manageWindow）
- * 2. 策略兜底：窗口管理后仍超标时，按优先级执行 LLM 压缩等策略
+ * 1. 预算检查：按 messages 估算 token，与 budget 阈值比对得到 status
+ * 2. 策略兜底：budget 触达 compact/critical 时按优先级执行压缩策略
  *
  * onTurnComplete 流程：
- * 1. manageWindow：Tier 压缩（预防性，每轮运行）→ 预算检查 → 淘汰
- * 2. 如果仍超标：按优先级执行剩余策略（LLM 压缩等）
- * 3. 发射事件
+ * 1. checkBudget：估算当前 tokens → 计算 budget status
+ * 2. 触达 compact/critical 时按优先级执行策略
+ * 3. critical 仍无法压下时 force-apply 摘要型策略
+ * 4. 发射事件
  */
 
 import type { IEventBus } from "../events/types.js";
@@ -27,11 +26,8 @@ import type {
   ContextManagerInput,
   ContextManagerOutput,
   ITokenEstimator,
-  PinPredicate,
-  TierThresholds,
 } from "./types.js";
-import { calculateBudget, calculateEffectiveWindow, type ModelBudgetInfo } from "./budget.js";
-import { manageWindow, defaultIsPinned } from "./window-manager.js";
+import { calculateBudget, type ModelBudgetInfo } from "./budget.js";
 
 // ─── 引擎内部默认值 ───
 
@@ -48,28 +44,15 @@ const ENGINE_DEFAULT_BUDGET_THRESHOLDS: BudgetThresholds = {
   critical: 0.9,
 };
 
-/**
- * 引擎默认 tier 压缩阈值。tool_result 按轮距分级压缩到 manageWindow 中。
- */
-const ENGINE_DEFAULT_TIER_THRESHOLDS: TierThresholds = {
-  T1: 2,
-  T2: 8,
-  T3: 30,
-};
-
 // ─── 配置（对外） ───
 
 /**
- * 对外配置接口：thresholds / tierThresholds 可省略，由引擎归一化到内部默认值。
- *
- * tierThresholds 显式传 `null` 表示禁用 tier 压缩；省略（undefined）表示使用引擎默认。
+ * 对外配置接口：thresholds 可省略，由引擎归一化到内部默认值。
  */
 export interface ContextEngineConfig {
   modelInfo: ModelBudgetInfo;
   /** 覆盖 budget 阈值（手动 compact 场景下用来强制低阈值） */
   thresholds?: BudgetThresholds;
-  /** 覆盖 tier 压缩阈值；显式 `null` 表示禁用 tier 压缩 */
-  tierThresholds?: TierThresholds | null;
 }
 
 // ─── 配置（对内归一化） ───
@@ -83,7 +66,6 @@ export interface ContextEngineConfig {
 interface NormalizedContextEngineConfig {
   readonly modelInfo: ModelBudgetInfo;
   readonly thresholds: BudgetThresholds;
-  readonly tierThresholds: TierThresholds | null;
 }
 
 function normalizeConfig(
@@ -92,10 +74,6 @@ function normalizeConfig(
   return {
     modelInfo: raw.modelInfo,
     thresholds: raw.thresholds ?? ENGINE_DEFAULT_BUDGET_THRESHOLDS,
-    tierThresholds:
-      raw.tierThresholds !== undefined
-        ? raw.tierThresholds
-        : ENGINE_DEFAULT_TIER_THRESHOLDS,
   };
 }
 
@@ -147,39 +125,18 @@ export class ContextEngine implements ContextManagerHook {
   /**
    * Agent Loop 的 hook：每轮结束后调用。
    *
-   * 流程（级联淘汰）：
-   * 1. WindowManager：Tier 压缩（预防性）→ 预算检查 → Pin-aware turn 淘汰
-   * 2. 如果仍超标：按优先级执行剩余策略（LLM 压缩等）
-   * 3. 发射事件
+   * 流程：
+   * 1. 预算检查
+   * 2. budget 触达 compact/critical 时按优先级执行剩余策略
+   * 3. critical 仍无法压下时 force-apply 所有摘要型策略
+   * 4. 发射事件
    */
   async onTurnComplete(input: ContextManagerInput): Promise<ContextManagerOutput> {
     let { messages } = input;
     const { turnCount, abortSignal } = input;
-    // Pin 谓词由调用方注入；未传时 engine 用内部默认（保第一条 user message）。
-    // 同一谓词同时驱动 manageWindow.evictOldestTurns 与每个 strategy 的 context，
-    // 保证 Pin 在数据层的"驱逐 / 删除 / 摘要"三个动作上语义一致。
-    const isPinned: PinPredicate = input.isPinned ?? defaultIsPinned;
     let modified = false;
 
-    // ── Step 1: WindowManager 级联（Tier 压缩 + 淘汰） ──
-    if (this.config.tierThresholds) {
-      const windowResult = manageWindow(messages, {
-        tierThresholds: this.config.tierThresholds,
-        estimator: this.estimator,
-        effectiveWindow: calculateEffectiveWindow(
-          this.config.modelInfo.contextWindow,
-          this.config.modelInfo.maxOutputTokens,
-        ),
-        compactRatio: this.config.thresholds.compact,
-        isPinned,
-      });
-      if (windowResult.modified) {
-        messages = windowResult.messages;
-        modified = true;
-      }
-    }
-
-    // ── Step 2: 预算检查 ──
+    // ── Step 1: 预算检查 ──
     let budget = this.checkBudget(messages);
 
     await this.eventBus?.emit("context:budget_check", {
@@ -194,7 +151,7 @@ export class ContextEngine implements ContextManagerHook {
       return { messages: messages as Message[], modified };
     }
 
-    // ── Step 3: 剩余策略兜底（LLM 压缩等） ──
+    // ── Step 2: 策略兜底（LLM 压缩等） ──
     const contributions: CompactStrategyContribution[] = [];
     const transactionTokensBefore = budget.currentTokens;
     // 事务幂等启动 —— 第一次 canApply 成功（或 force-apply 入场）时 fire compact_start，
@@ -234,7 +191,6 @@ export class ContextEngine implements ContextManagerHook {
         budget,
         currentTurn: turnCount,
         abortSignal,
-        isPinned,
       };
 
       let compacted = false;
@@ -278,7 +234,6 @@ export class ContextEngine implements ContextManagerHook {
           budget,
           currentTurn: turnCount,
           abortSignal,
-          isPinned,
         };
 
         if (!strategy.canApply(checkContext)) continue;

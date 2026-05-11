@@ -515,9 +515,6 @@ export async function createAgentRuntime(
   //   priority 3   MemoryFlush     有 LLM 调用 — 仅 usage >= 0.75 触发
   //   priority 5   MessageDrop     免费 — usage < 0.9 触发（超过 0.9 让给 LLMSummarize）
   //   priority 200 LLMSummarize    昂贵 — usage >= 0.9 触发，MessageDrop 让位
-  //
-  // tool_result 体积管理由数据层 manageWindow.applyTierCompression 统一负责（每轮无条件运行），
-  // 不在 strategies 链路内重复处理。
   const strategies = [
     createMemoryFlushStrategy({ callLLM: flushCallLLM, store: memoryStore }),
     createMessageDropStrategy(),

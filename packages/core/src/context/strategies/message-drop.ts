@@ -4,13 +4,10 @@
  * 零成本 — 不需要 LLM 调用。
  *
  * 策略：
- * - 通过 isPinned 谓词判定保护的 message 索引（默认保留 messages[0] 即首条意图锚）
+ * - 永远保留 messages[0]（首条 user 意图锚——对话起点，丢失会让 LLM 失去对话主题）
  * - 保留最近 keepRecentTurns 轮完整对话
  * - 中间的消息全部丢弃
  * - 插入一条占位消息 "[前 X 轮对话已省略]"
- *
- * 对比 Claude Code：它有 microcompact + context collapse 两个层级。
- * 我们用单一策略实现，更简洁。
  */
 
 import type { Message } from "../../types/messages.js";
@@ -71,7 +68,7 @@ export class MessageDropStrategy implements CompactionStrategy {
   }
 
   async apply(context: CompactionContext): Promise<CompactionResult> {
-    const { messages, isPinned } = context;
+    const { messages } = context;
     const { keepRecentTurns } = this.config;
 
     // 按 turn 数切分（pair-aware），tool_use/tool_result 对不会被劈开
@@ -92,13 +89,6 @@ export class MessageDropStrategy implements CompactionStrategy {
       };
     }
 
-    // 是否保留首条意图锚 —— 由 Pin 谓词决定。
-    // 谓词未传时默认保留（与历史行为一致：messages[0] 是用户原始意图）。
-    // 任务系统接通后，Pin 谓词由 in_progress 任务的 turn 范围驱动，可能保留
-    // toSummarize 区间内的多个 turn —— 那种多 Pin 区间识别 + 保留的算法
-    // 与 task brief 同设计实现，本策略当前仅按"首条"轴消费谓词。
-    const pinFirst = isPinned?.(0) ?? true;
-
     // 丢弃的 turn 数 = toSummarize 中 distinct turn 号的最大值
     // （turn 0 是首条 user 意图锚，turn 1..maxSummarized 是被丢弃的完整 turn）
     const toSummarizeTurns = calculateMessageTurns(toSummarize);
@@ -108,9 +98,8 @@ export class MessageDropStrategy implements CompactionStrategy {
     // 占位符统一走 system-meta：kind="dropped-turns" count="N"
     const placeholder = buildDroppedTurnsMessage(droppedTurnCount);
 
-    const newMessages = pinFirst
-      ? [messages[0] as Message, placeholder, ...toPreserve]
-      : [placeholder, ...toPreserve];
+    // 永远保留首条意图锚（messages[0]）—— 对话起点不可丢失。
+    const newMessages = [messages[0] as Message, placeholder, ...toPreserve];
 
     return {
       messages: newMessages,

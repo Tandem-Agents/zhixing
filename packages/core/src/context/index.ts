@@ -14,8 +14,6 @@ export type {
   ContextManagerInput,
   ContextManagerOutput,
   ITokenEstimator,
-  PinPredicate,
-  TierThresholds,
 } from "./types.js";
 export { DEFAULT_THRESHOLDS, MAX_OUTPUT_RESERVE } from "./types.js";
 
@@ -98,21 +96,6 @@ export {
   REQUIRED_SUB_SECTIONS,
   validateSummary,
 } from "./validation.js";
-
-export type { TierLevel, TierStats } from "./tier-compressor.js";
-export {
-  TIER2_MAX_CHARS,
-  TIER3_MAX_CHARS,
-  applyTierCompression,
-  determineTier,
-} from "./tier-compressor.js";
-
-export type { WindowConfig, WindowResult } from "./window-manager.js";
-export {
-  MIN_RETAIN_TURNS,
-  defaultIsPinned,
-  manageWindow,
-} from "./window-manager.js";
 
 export type {
   TurnContextSection,

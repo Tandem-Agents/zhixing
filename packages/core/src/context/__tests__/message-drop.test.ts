@@ -184,49 +184,16 @@ describe("MessageDropStrategy.apply", () => {
     expect(result2.messages.length).toBeGreaterThan(result1.messages.length);
   });
 
-  // ─── isPinned 谓词驱动首条保留 ───
+  // ─── 首条 user 意图锚永远保留 ───
 
-  it("默认（未传 isPinned）保留 messages[0]，与历史行为一致", async () => {
+  it("messages[0] 永远保留（对话起点不丢失）", async () => {
     const strategy = createMessageDropStrategy({ keepRecentTurns: 2 });
     const messages = buildConversation(10);
-    const ctx = makeContext(messages, 10); // 不传 isPinned
+    const ctx = makeContext(messages, 10);
 
     const result = await strategy.apply(ctx);
 
     expect(result.compacted).toBe(true);
     expect(result.messages[0]).toBe(messages[0]);
-  });
-
-  it("isPinned(0)=true 显式保留 messages[0]", async () => {
-    const strategy = createMessageDropStrategy({ keepRecentTurns: 2 });
-    const messages = buildConversation(10);
-    const ctx: CompactionContext = {
-      messages,
-      budget: makeBudget(),
-      currentTurn: 10,
-      isPinned: (idx) => idx === 0,
-    };
-
-    const result = await strategy.apply(ctx);
-
-    expect(result.compacted).toBe(true);
-    expect(result.messages[0]).toBe(messages[0]);
-  });
-
-  it("isPinned(0)=false 不保留 messages[0]，仅留占位 + recent", async () => {
-    const strategy = createMessageDropStrategy({ keepRecentTurns: 2 });
-    const messages = buildConversation(10);
-    const ctx: CompactionContext = {
-      messages,
-      budget: makeBudget(),
-      currentTurn: 10,
-      isPinned: () => false,
-    };
-
-    const result = await strategy.apply(ctx);
-
-    expect(result.compacted).toBe(true);
-    // 第一条是占位符，不是原始 messages[0]
-    expect(detectSystemMetaKind(result.messages[0]!)).toBe("dropped-turns");
   });
 });

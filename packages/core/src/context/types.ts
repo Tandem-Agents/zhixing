@@ -83,20 +83,6 @@ export const MAX_OUTPUT_RESERVE = 20_000;
 
 // ─── Tier 压缩阈值 ───
 
-/**
- * Tier 压缩阈值：tool_result 按轮距四级压缩。
- *
- * - Tier 1（轮距 ≤ T1）：完整保留
- * - Tier 2（T1 < 轮距 ≤ T2）：trim 到 2000 字符
- * - Tier 3（T2 < 轮距 ≤ T3）：trim 到 500 字符 + 结构标记
- * - Tier 4（轮距 > T3）：替换为 `[tool=X bytes=N, recallable]` 骨架
- */
-export interface TierThresholds {
-  readonly T1: number;
-  readonly T2: number;
-  readonly T3: number;
-}
-
 // ─── LLM 调用契约 ───
 
 /**
@@ -117,20 +103,6 @@ export type CompactLLMFn = (
   opts?: { abortSignal?: AbortSignal },
 ) => Promise<string>;
 
-// ─── Pin 谓词（窗口管理 + 策略共用） ───
-
-/**
- * 判断给定 message 索引是否被 Pin 保护。
- *
- * Pin 来源由调用方注入：
- * - 数据层 manageWindow 内置默认：保第一条 user message（idx === 0）
- * - 任务系统驱动（未来扩展）：in_progress 任务关联的 turn 范围对应的 message indices
- *
- * Pin 内 message 不被 manageWindow eviction 物理驱逐 / MessageDrop 物理删除 /
- * LLMSummarize 摘要替代。
- */
-export type PinPredicate = (messageIndex: number) => boolean;
-
 // ─── 压缩策略 ───
 
 export interface CompactionContext {
@@ -145,14 +117,6 @@ export interface CompactionContext {
    * 未设置时策略按无限制运行（测试 / 手动 /compact 场景）。
    */
   readonly abortSignal?: AbortSignal;
-  /**
-   * Pin 谓词 —— 判断 message 索引是否受保护。
-   *
-   * 由 engine 注入：caller 通过 ContextManagerInput.isPinned 提供，
-   * 否则 engine 用内部默认（保第一条）。策略据此跳过 Pin 内 message
-   * 的修改/删除/摘要。
-   */
-  readonly isPinned?: PinPredicate;
 }
 
 export interface CompactionResult {
@@ -212,8 +176,7 @@ export type CompactionStrategyKind =
 /**
  * 可插拔的压缩策略接口。
  *
- * 内置策略按优先级（数据层 tool_result 体积管理由 manageWindow.applyTierCompression 处理，
- * 不在 strategies 链路内）：
+ * 内置策略按优先级：
  * - MemoryFlush  （LLM，提取并持久化）       kind=flush
  * - MessageDrop  （免费，丢弃早期消息）      kind=drop
  * - LLMSummarize （昂贵，LLM 生成摘要）     kind=summarize
@@ -291,14 +254,6 @@ export interface ContextManagerInput {
    * 由策略的 LLM 调用透传给 provider。未设置时策略无限制运行。
    */
   readonly abortSignal?: AbortSignal;
-  /**
-   * Pin 谓词 —— 调用方决定哪些 message 索引受保护，不被 eviction/删/摘要。
-   *
-   * 未传则 engine 用内部默认（保第一条 user message，与 v1.2 行为一致）。
-   * 任务系统接通后（in_progress 任务驱动 Pin），调用方传入 in_progress
-   * turn 范围映射到 message indices 的谓词。
-   */
-  readonly isPinned?: PinPredicate;
 }
 
 export interface ContextManagerOutput {

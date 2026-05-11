@@ -7,8 +7,8 @@
  *   LLM 看到的占位符格式就分裂，stripSummaryPlaceholderPair 识别就失败。
  *
  * 本模块是生成、识别、剥离 `<system-meta kind="...">` 元信息标签的唯一入口。
- * 所有插入占位符的代码（llm-summarize / message-drop / window-manager /
- * transcript/store / prompts）都必须调用这里的 buildXxx() 构造。
+ * 所有插入占位符的代码（llm-summarize / message-drop / transcript/store /
+ * prompts）都必须调用这里的 buildXxx() 构造。
  *
  * 格式：
  *   `<system-meta kind="<kind>">...</system-meta>`
