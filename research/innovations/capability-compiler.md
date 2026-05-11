@@ -1,5 +1,11 @@
 # Capability Compiler — 工具能力的动态分层与按需暴露
 
+> ⚠️ **DEPRECATED（2026-05-11 起）**
+>
+> 经 Anthropic prompt cache 经验 5（工具集自始至终不动）+ OpenAI 兼容协议无 server-side tool deferral 能力的双重验证，"工具集动态演化"范式破坏 prefix cache（tools 一变 messages 历史全失效），与知行 cache 第一优先方向冲突。tool 方向已锁定"满载稳定 + Profile 子集（启动时一次决定）"，见 [`../design/specifications/context-management-v3-redesign.md`](../design/specifications/context-management-v3-redesign.md) §七。本文保留为决策痕迹，不再作为实施依据。
+>
+> ---
+>
 > 知行设计沉淀 · 重新审视"tools schema 每次满载"的隐含假设
 >
 > 沉淀于 2026-05-08

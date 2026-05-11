@@ -31,7 +31,47 @@
 
 ---
 
-## 当前问题：上下文管理产品方向重设
+## 当前问题：v3 上下文管理实施进行中
+
+> 触发于 2026-05-11：原 v2 滑窗 + 任务纪要范式与 Anthropic prompt cache 元规则①（前缀任何位置变化让其后内容缓存失效）冲突，方案重设为 v3——**cache 第一优先 + 优质注意力窗口 + 段式管理 + tools 满载稳定**。v3 spec 已完成代码现状对齐、字段扩展契约、Phase 1 砍除/新增清单、原子上线约束声明，进入实施前置阶段。
+
+### 当前方向
+
+- v3 spec：[`specifications/context-management-v3-redesign.md`](specifications/context-management-v3-redesign.md)
+- 物理依据：[`../insights/_draft-prompt-cache-claude-code.md`](../insights/_draft-prompt-cache-claude-code.md) §7（cache 经济 120 倍 + attention 真实边界 32K-128K + 双约束并存）
+- 已 DEPRECATED 决策痕迹（不再作为实施依据）：
+  - [`specifications/context-management-v2-redesign.md`](specifications/context-management-v2-redesign.md)
+  - [`../innovations/capability-compiler.md`](../innovations/capability-compiler.md)
+  - [`../innovations/tool-result-anchor.md`](../innovations/tool-result-anchor.md)
+
+### 状态
+
+| 阶段 | 状态 |
+|---|---|
+| 物理依据调研（cache 经济 + attention 真实边界 + 多模型对比）| ✓ 完成 |
+| v3 spec 闭环（5 关键代码假设全部明示、字段扩展契约、Phase 1 清单含具体调用点）| ✓ 完成 |
+| 失效文档 deprecated 标记 | ✓ 完成 |
+| Phase 1 实施 | ⏳ 待启动 |
+
+### Phase 1 实施约束
+
+**原子上线**——v3 spec §10 中 1.A 砍除清单与 1.B / 1.C / 1.D 新机制存在功能耦合：只砍不上新会让上下文管理失去能力直接 regression；只上新机制不砍旧会与 v3 invariants 冲突。**1.A–1.D 必须同 release 合并发布**，PR 内部可分批 review。
+
+### 协作模式
+
+v3 spec 是实施权威。实施过程中浮现需要对齐的**具体决策**（如 prompt 措辞实测调优 / 阈值实测 / 边界场景处理 / cli UX 细节）按本工作台原则单独登记——一次只对齐一个问题，对齐完整段清空换下一个。
+
+### 待办
+
+- [ ] 启动 Phase 1 实施（参考 v3 spec §10 1.A–1.E 子任务）
+- [ ] 归档 v2 决议过程到 `problems/context-management-redesign.md`（脱过程化版本，可后置）
+- [ ] Phase 1 完成后归档 `problems/context-management-v3.md`
+
+---
+
+<!-- 以下为已被取代的 v2 决议过程（2026-05-08）。保留为历史决策痕迹，已不作为当前方向。Phase 1 实施完成后整段移除并归档到 problems/context-management-redesign.md。 -->
+
+## 历史：上下文管理产品方向重设（v2，已被 v3 取代）
 
 > 触发于 2026-05-08：用户实测 dump 日志发现 chat-20260504-41b4 单次 LLM 调用送 481 messages（已恢复对话累积），但因 budget 阈值 85% 远未触发，上下文系统视为"正常"——实质是**注意力被低价值历史稀释**。结合用户使用弱模型（MiniMax-M2.5）且产品同时承载"短对话 + 长 agent 任务"双形态，发现当前上下文管理的设计**默认假设强模型 + 单一对话形态**，与产品定位错位。
 

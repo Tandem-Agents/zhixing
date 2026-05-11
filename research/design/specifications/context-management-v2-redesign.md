@@ -1,5 +1,11 @@
 # 上下文管理 · v2 重构方向 (Context Management v2 Redesign)
 
+> ⚠️ **DEPRECATED（2026-05-11 起）**
+>
+> 本方案的"滑动窗口 + 任务纪要 + capability LRU"范式与 Anthropic prompt cache 元规则①（前缀任何位置变化让其后内容缓存失效）冲突。已被 [`context-management-v3-redesign.md`](./context-management-v3-redesign.md)（cache 第一优先 + 优质注意力窗口 + 段式管理 + tools 满载稳定）取代。本文保留为决策痕迹，不再作为实施依据。
+>
+> ---
+>
 > **状态**: 📐 方向已敲定（2026-05-08），spec 阶段未启动
 > **定位**: 描述上下文管理的 **v2 演进方向 + 实施计划**——在业务真实路径（`orchestrator/system-prompt.ts` + `core/context/turn-context.ts` + v1.2 数据层）之上扩展 + 加视图层（ContextCompiler 3-Stage）+ 主动管理 messages（滑窗 + 任务纪要生成）+ **复用现有 `TurnContextInjector`** 注入 per-turn 动态状态 + 砍 v1.2 设计稿但与业务路径不兼容/价值不足的死代码 + 砍冗余的 tool_result tier 压缩。实施完成后并入 [context-architecture.md](./context-architecture.md) 升级为 v2.0，本文废弃。
 > **关联**:

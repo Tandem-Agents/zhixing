@@ -1,5 +1,11 @@
 # Tool Result Anchor — 工具结果的焦点完整 + 消化后归档
 
+> ⚠️ **DEPRECATED（2026-05-11 起）**
+>
+> 锚化历史 tool_result 会改写消息字节，破坏 Anthropic prompt cache 元规则①（前缀稳定）。v3 改为段切换时 tool_result raw 一并消化进摘要，平时不动 tool_result。见 [`../design/specifications/context-management-v3-redesign.md`](../design/specifications/context-management-v3-redesign.md) §九 invariant 1。本文保留为决策痕迹，不再作为实施依据。
+>
+> ---
+>
 > 知行设计沉淀 · 重新审视"tool_result 持久完整保留"的隐含假设
 >
 > 沉淀于 2026-05-08
