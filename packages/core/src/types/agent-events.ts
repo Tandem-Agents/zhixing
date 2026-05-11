@@ -25,6 +25,7 @@ import type { Message } from "./messages.js";
 import type { ToolSpec } from "./tools.js";
 import type { CompactStrategyContribution } from "../context/types.js";
 import type { AbortReason } from "../interrupt/types.js";
+import type { CompactMarker } from "../transcript/types.js";
 
 /**
  * Agent Loop 终止原因。
@@ -226,6 +227,132 @@ export type AgentEventMap = {
     estimated: number;
     actual: number;
     newRatio: number;
+  };
+
+  // ─── 段切换 ───
+  //
+  // 段切换是 attention-driven 的离散事件，与 context:* 的 budget-driven 兜底
+  // 并列。SegmentManager 在 turn 边界评估当前 tokens 与 attention 阈值，
+  // 决策"切段 / 推迟 / pass"。
+  //
+  // 事件流（仅 trigger 路径完整 fire 全套）：
+  //   segment:evaluation        每次评估都 fire（含 pass / defer / trigger）
+  //   segment:transition_start  仅 trigger 时
+  //   segment:summarize_complete 压缩 LLM 完成（trigger 成功路径）
+  //   segment:new_started        新段 messages 已组装并落盘（成功完成切段）
+  //   segment:transition_failed  任一环节失败（含压缩 LLM 失败 / 持久化失败）
+
+  /**
+   * 评估完成，无论是否真切段。decision 字段反映决策结果。
+   *
+   * decision 形态结构兼容 `SegmentDecision` —— 故意 inline 而不是从段切换模块
+   * 反向 import 类型，保 agent-events 作为底层 types 不依赖任何业务模块。
+   * 模块内部传 SegmentDecision 给 emit 时 TypeScript 结构兼容性自动接受。
+   */
+  "segment:evaluation": {
+    decision:
+      | { kind: "pass"; reason: "below-optimal" | "no-conversation" }
+      | {
+          kind: "defer";
+          reason: "in-progress-task";
+          currentTokens: number;
+          threshold: number;
+        }
+      | {
+          kind: "trigger";
+          reason: "optimal-exceeded" | "risk-exceeded";
+          currentTokens: number;
+          threshold: number;
+        };
+    currentTokens: number;
+  };
+
+  /** trigger 决策触发，进入压缩流程。 */
+  "segment:transition_start": {
+    conversationId: string;
+    segmentId: string;
+    reason: "optimal-exceeded" | "risk-exceeded";
+    currentTokens: number;
+  };
+
+  /** 压缩 LLM call 完成并解析出有效摘要。 */
+  "segment:summarize_complete": {
+    segmentId: string;
+    summaryTokens: number;
+    latencyMs: number;
+  };
+
+  /**
+   * 新段就绪 —— newSegmentMessages 已组装、CompactMarker 已生成、segmentMetadata
+   * 已尝试写入。**transcript 的 marker 落盘不由 SegmentManager 直接做**，
+   * 而是通过本事件携带 marker 流向 orchestrator 的累积器，由 run-agent 在
+   * run 结束时通过 `commitTurn({ turn, compactBefore })` 单点原子写入。
+   *
+   * 这样段切换 marker 与本 turn 的 transcript 写入是同一原子事务，杜绝
+   * "marker 已写但 turn 未写"或"内存切了但 transcript 没切"类的状态不一致；
+   * 与 LLMSummarize 走 `context:compact_end` → accumulator → 单点 commit
+   * 同模式，整个 run 内 transcript 写入收敛到唯一路径。
+   */
+  "segment:new_started": {
+    segmentId: string;
+    bufferTurns: number;
+    tokensBefore: number;
+    tokensAfter: number;
+    /** 段切换 marker —— accumulator 收集后由 run-agent 单点写入 transcript */
+    marker: CompactMarker;
+  };
+
+  /**
+   * Hook 抛错事件 —— 与 transition_failed 区分语义：
+   *   - transition_failed：段切换整体失败（压缩 LLM / 解析失败 等 LLM 视图未生成的情形）
+   *   - hook_failed：用户注册的 hook 实现抛错，可能影响也可能不影响主流程
+   *
+   * 字段 `abortedTransition`：
+   *   - true：beforeSummarize 抛错，主流程中止（还没花 LLM 钱，安全回滚）
+   *   - false：afterSummarize / beforeNewSegmentStart 抛错，主流程继续
+   *     （压缩 LLM 已完成，不让 hook 错误浪费已花费的成本）
+   */
+  "segment:hook_failed": {
+    segmentId: string;
+    hookPhase:
+      | "beforeSummarize"
+      | "afterSummarize"
+      | "beforeNewSegmentStart";
+    error: string;
+    abortedTransition: boolean;
+  };
+
+  /**
+   * segmentMetadata 持久化失败 —— warning 性质事件，**段切换主流程仍成功**。
+   *
+   * 与 transition_failed 严格区分：
+   *   - transition_failed：段切换整体失败（无 marker 流出、无 newSegmentMessages），
+   *     调用方应降级为"不切"继续按原 messages 运行
+   *   - metadata_persist_failed：marker 已通过 segment:new_started 事件正常流出，
+   *     newSegmentMessages 已组装并返回；本事件仅表示段历史观测元数据（用于
+   *     未来段历史浏览 UI / 可观测性面板）未能落盘，不影响 LLM 视图正确性
+   *
+   * 调用方契约：
+   *   - 段历史 UI / 观测面板订阅本事件用于诊断报警
+   *   - 主对话流转**不**因本事件改变行为（段切换已成功，turn 继续推进）
+   *   - 一致性保障：下次成功 appendSegmentMeta 会把当前段一并写入吗？**不会** ——
+   *     单次失败造成该段元数据永久缺失，但 transcript marker 完整保留，
+   *     LLM 视图与段历史观测的解耦保证了 LLM 行为不退化
+   */
+  "segment:metadata_persist_failed": {
+    segmentId: string;
+    error: string;
+  };
+
+  /**
+   * 段切换失败 —— 压缩 LLM 失败 / 持久化失败 / 摘要全空 等任一环节失败。
+   * 调用方降级为"不切"，继续按原 messages 跑下一轮；下次 turn 边界再评估。
+   */
+  "segment:transition_failed": {
+    segmentId: string;
+    error: string;
+    /** true 表示压缩 LLM 重试已耗尽；false 表示其他失败（如持久化抛错）*/
+    retriesExhausted: boolean;
   };
 
   // ─── 中断 ───

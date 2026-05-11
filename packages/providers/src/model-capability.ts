@@ -101,3 +101,36 @@ export function resolveModelCapability(
     riskMaxTokens: override.riskMaxTokens ?? base.riskMaxTokens,
   };
 }
+
+/**
+ * 从 modelCapabilityOverrides map 中按 modelId 查找 override —— **大小写不敏感**。
+ *
+ * 设计原因：用户在 `config.jsonc` 写 modelId key 时大小写不可预测（如
+ * `"DeepSeek-V4-Pro"` / `"deepseek-v4-pro"` / `"DEEPSEEK-V4-PRO"`），与
+ * `MODEL_CAPABILITIES` 表内一律 lowercase 的命名约定不一致。把"大小写无关
+ * 查找"作为 helper 契约固化在 providers 包内，杜绝每个 caller 各自做
+ * normalize 的重复劳动 + 防止任一 caller 漏 normalize 导致"配置写了但不生效"
+ * 的沉默失效。
+ *
+ * 性能：优先 O(1) lowercase 直接匹配；只在精确匹配失败时才线性扫描（用户
+ * 误用大小写不一致 key 是罕见路径，O(N) 可接受）。
+ *
+ * @param overrides 用户配置 map（缺省 undefined）
+ * @param modelId 要查找的 modelId（大小写不敏感）
+ * @returns 匹配的 override；未匹配返 undefined
+ */
+export function getModelCapabilityOverride(
+  overrides: Record<string, ModelCapabilityOverride> | undefined,
+  modelId: string,
+): ModelCapabilityOverride | undefined {
+  if (!overrides) return undefined;
+  const normalized = modelId.toLowerCase();
+  // 优先 O(1) 精确 lowercase 匹配（推荐用户走这条路径，文档约定 key 用 lowercase）
+  const exact = overrides[normalized];
+  if (exact) return exact;
+  // fallback 线性扫描兜底用户误用大小写不一致 key 的情形
+  for (const [key, value] of Object.entries(overrides)) {
+    if (key.toLowerCase() === normalized) return value;
+  }
+  return undefined;
+}

@@ -218,6 +218,7 @@ export class RuntimeSession {
       onSecurityBlocked: this.opts.onSecurityBlocked,
       onUserDenied: this.opts.onUserDenied,
       permissionStore: existingPermissionStore,
+      segmentDeps: this.opts.segmentDeps,
     });
   }
 

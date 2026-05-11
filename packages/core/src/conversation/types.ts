@@ -120,6 +120,17 @@ export interface IConversationRepository {
    * 但不触动 segmentMetadata）。
    */
   updateTaskListState(id: string, state: TaskListState | undefined): Promise<void>;
+  /**
+   * 追加一段段切换元数据到 segmentMetadata.segments[] 并更新 currentSegmentId
+   * —— 段切换成功后由 SegmentManager 调用。
+   *
+   * 走与 writeMeta 同款的 atomic write + per-id lock；conversation 不存在时
+   * no-op（不抛错——与其他 view-layer 方法语义一致）。
+   *
+   * 首次调用时（segmentMetadata 缺失）自动初始化结构，currentSegmentId 设为
+   * 本次传入的 meta.segmentId。
+   */
+  appendSegmentMeta(id: string, meta: SegmentMeta): Promise<void>;
 }
 
 export interface CreateConversationOptions {

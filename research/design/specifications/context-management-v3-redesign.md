@@ -333,7 +333,7 @@ session 创建时根据 profile 一次性 freeze tools[]，会话期间 byte-equ
 - `in_progress` 状态作为 §4.2「无 in-progress 任务标识」的判定来源
 - **状态跨段保留**——段切换不清空、不修改 task_list（只受 LLM 主动 `set` 或用户 `/task done` 改变）；摘要 prompt 显式要求 LLM 在 `<state>` 部分总结 in_progress 项进展（见 §5.1）
 - cli 渲染当前任务列表 + `/tasklist` / `/task` / `/task new` / `/task done` 命令
-- 持久化到 conversation meta
+- 持久化到 conversation meta（**快照式**：每次 `set` 完整替换 `taskListState` 字段，非追加；历史 `set` 调用以 tool_use 事件留存于 `transcript.jsonl`——两文件互补：meta 表达"当前状态"、transcript 表达"历史事件"）
 
 ### 8.2 SegmentManager 模块位置
 

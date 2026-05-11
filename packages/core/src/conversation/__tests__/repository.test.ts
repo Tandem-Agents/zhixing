@@ -586,4 +586,123 @@ describe("视图层状态字段（taskListState / segmentMetadata）", () => {
     expect(reloaded?.taskListState?.items).toHaveLength(1);
     expect(reloaded?.segmentMetadata?.currentSegmentId).toBe("seg-A");
   });
+
+  // ─── appendSegmentMeta ───
+
+  it("appendSegmentMeta 首次调用初始化 segmentMetadata 结构", async () => {
+    const repo = createRepo();
+    const conv = await repo.create({ name: "first-segment" });
+
+    await repo.appendSegmentMeta(conv.id, {
+      segmentId: "seg-1",
+      timestamp: "2026-05-11T10:00:00Z",
+      tokensBefore: 150_000,
+      tokensAfter: 4_000,
+    });
+
+    const reloaded = await repo.get(conv.id);
+    expect(reloaded?.segmentMetadata).toEqual({
+      currentSegmentId: "seg-1",
+      segments: [
+        {
+          segmentId: "seg-1",
+          timestamp: "2026-05-11T10:00:00Z",
+          tokensBefore: 150_000,
+          tokensAfter: 4_000,
+        },
+      ],
+    });
+  });
+
+  it("appendSegmentMeta 二次调用追加到 segments[] 并更新 currentSegmentId", async () => {
+    const repo = createRepo();
+    const conv = await repo.create({ name: "multi-segment" });
+
+    await repo.appendSegmentMeta(conv.id, {
+      segmentId: "seg-1",
+      timestamp: "2026-05-11T10:00:00Z",
+      tokensBefore: 150_000,
+      tokensAfter: 4_000,
+    });
+    await repo.appendSegmentMeta(conv.id, {
+      segmentId: "seg-2",
+      timestamp: "2026-05-11T11:00:00Z",
+      tokensBefore: 200_000,
+      tokensAfter: 5_000,
+    });
+
+    const reloaded = await repo.get(conv.id);
+    expect(reloaded?.segmentMetadata?.currentSegmentId).toBe("seg-2");
+    expect(reloaded?.segmentMetadata?.segments).toHaveLength(2);
+    expect(reloaded?.segmentMetadata?.segments[0]?.segmentId).toBe("seg-1");
+    expect(reloaded?.segmentMetadata?.segments[1]?.segmentId).toBe("seg-2");
+  });
+
+  it("appendSegmentMeta 身份字段保留（id / name / preferredModel 等）", async () => {
+    const repo = createRepo();
+    const conv = await repo.create({
+      name: "identity-segment",
+      preferredModel: "deepseek-v4-pro",
+    });
+
+    await repo.appendSegmentMeta(conv.id, {
+      segmentId: "seg-x",
+      timestamp: "2026-05-11T10:00:00Z",
+      tokensBefore: 1000,
+      tokensAfter: 100,
+    });
+
+    const reloaded = await repo.get(conv.id);
+    expect(reloaded?.id).toBe(conv.id);
+    expect(reloaded?.name).toBe("identity-segment");
+    expect(reloaded?.preferredModel).toBe("deepseek-v4-pro");
+  });
+
+  it("appendSegmentMeta 不影响 taskListState 字段", async () => {
+    const repo = createRepo();
+    const conv = await repo.create({ name: "isolate-task" });
+
+    await repo.updateTaskListState(conv.id, {
+      items: [{ id: "t1", content: "task", status: "in_progress" }],
+    });
+    await repo.appendSegmentMeta(conv.id, {
+      segmentId: "seg-1",
+      timestamp: "2026-05-11T10:00:00Z",
+      tokensBefore: 1000,
+      tokensAfter: 100,
+    });
+
+    const reloaded = await repo.get(conv.id);
+    expect(reloaded?.taskListState?.items).toHaveLength(1);
+    expect(reloaded?.taskListState?.items[0]?.id).toBe("t1");
+    expect(reloaded?.segmentMetadata?.currentSegmentId).toBe("seg-1");
+  });
+
+  it("appendSegmentMeta 对不存在的 conversation 是 no-op（不抛错）", async () => {
+    const repo = createRepo();
+    await expect(
+      repo.appendSegmentMeta("never-existed", {
+        segmentId: "seg-1",
+        timestamp: "2026-05-11T10:00:00Z",
+        tokensBefore: 1000,
+        tokensAfter: 100,
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("appendSegmentMeta 与 clearViewLayerState 配合 —— clear 会清空段历史", async () => {
+    const repo = createRepo();
+    const conv = await repo.create({ name: "clear-test" });
+
+    await repo.appendSegmentMeta(conv.id, {
+      segmentId: "seg-1",
+      timestamp: "2026-05-11T10:00:00Z",
+      tokensBefore: 1000,
+      tokensAfter: 100,
+    });
+    await repo.clearViewLayerState(conv.id);
+
+    const reloaded = await repo.get(conv.id);
+    expect(reloaded?.segmentMetadata).toBeUndefined();
+  });
 });

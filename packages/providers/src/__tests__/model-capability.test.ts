@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import {
   MODEL_CAPABILITIES,
   UNKNOWN_MODEL_CAPABILITY,
+  getModelCapabilityOverride,
   resolveModelCapability,
+  type ModelCapabilityOverride,
 } from "../model-capability.js";
 
 describe("MODEL_CAPABILITIES 内置常量", () => {
@@ -96,5 +98,67 @@ describe("resolveModelCapability", () => {
     const cap = resolveModelCapability("deepseek-v4-flash", {});
     expect(cap.optimalMaxTokens).toBe(32_000);
     expect(cap.riskMaxTokens).toBe(64_000);
+  });
+});
+
+describe("getModelCapabilityOverride —— 大小写无关 lookup", () => {
+  const overrides: Record<string, ModelCapabilityOverride> = {
+    "deepseek-v4-pro": { optimalMaxTokens: 96_000 },
+    "GPT-4-TURBO": { optimalMaxTokens: 80_000, riskMaxTokens: 100_000 },
+    "Claude-3-Opus": { optimalMaxTokens: 150_000 },
+  };
+
+  it("undefined overrides → undefined", () => {
+    expect(getModelCapabilityOverride(undefined, "deepseek-v4-pro")).toBeUndefined();
+  });
+
+  it("空 map → undefined", () => {
+    expect(getModelCapabilityOverride({}, "deepseek-v4-pro")).toBeUndefined();
+  });
+
+  it("精确 lowercase 命中", () => {
+    expect(getModelCapabilityOverride(overrides, "deepseek-v4-pro")).toEqual({
+      optimalMaxTokens: 96_000,
+    });
+  });
+
+  it("查询 modelId 大写 + map key lowercase → 命中（normalize 查询侧）", () => {
+    expect(getModelCapabilityOverride(overrides, "DeepSeek-V4-Pro")).toEqual({
+      optimalMaxTokens: 96_000,
+    });
+  });
+
+  it("查询 modelId lowercase + map key 大写 → 命中（normalize 数据侧）", () => {
+    expect(getModelCapabilityOverride(overrides, "gpt-4-turbo")).toEqual({
+      optimalMaxTokens: 80_000,
+      riskMaxTokens: 100_000,
+    });
+  });
+
+  it("查询 modelId 与 map key 大小写完全不同 → 仍命中", () => {
+    expect(getModelCapabilityOverride(overrides, "CLAUDE-3-OPUS")).toEqual({
+      optimalMaxTokens: 150_000,
+    });
+    expect(getModelCapabilityOverride(overrides, "claude-3-opus")).toEqual({
+      optimalMaxTokens: 150_000,
+    });
+  });
+
+  it("未匹配 → undefined", () => {
+    expect(
+      getModelCapabilityOverride(overrides, "nonexistent-model"),
+    ).toBeUndefined();
+  });
+
+  it("配合 resolveModelCapability 端到端 —— 用户大写 key 也生效", () => {
+    const userConfig: Record<string, ModelCapabilityOverride> = {
+      "DeepSeek-V4-Pro": { optimalMaxTokens: 96_000 },
+    };
+    const cap = resolveModelCapability(
+      "deepseek-v4-pro",
+      getModelCapabilityOverride(userConfig, "deepseek-v4-pro"),
+    );
+    expect(cap.optimalMaxTokens).toBe(96_000);
+    expect(cap.riskMaxTokens).toBe(256_000); // 内置值不变
   });
 });

@@ -35,7 +35,13 @@ import {
   createEventBus,
   createContextEngine,
   createLLMSummarizeStrategy,
+  createSegmentManager,
+  createSegmentSummarizeFn,
   createTokenEstimator,
+  type SegmentPersistence,
+  type SegmentStreamFactory,
+  type TaskListReader,
+  wrapStreamWithWatchdog,
   ToolArgumentExtractor,
   emptyUsage,
   createMessageDropStrategy,
@@ -60,7 +66,9 @@ import {
   createProviderRoles,
   ensureWorkspaceDir,
   getGlobalConfigPath,
+  getModelCapabilityOverride,
   PROTOCOL_BUDGET_DEFAULTS,
+  resolveModelCapability,
   resolveWorkspace,
   type ResolvedWorkspace,
   type WorkspaceDirStatus,
@@ -73,6 +81,7 @@ import {
 import { mainProfile } from "../profile/default-profiles.js";
 import type { AgentRoleProfile } from "../profile/agent-role-profile.js";
 import { subscribeCompactAccumulator } from "./compact-accumulator.js";
+import { subscribeSegmentMarkerAccumulator } from "./segment-marker-accumulator.js";
 import { createCompactionFlush } from "./compaction-llm.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import {
@@ -325,6 +334,20 @@ export interface CreateAgentRuntimeOptions {
    * 注册），同一注入 store 被多次 register 不会累积重复规则。
    */
   permissionStore?: IPermissionStore;
+  /**
+   * 段切换外部依赖 —— cli 装配层注入 task_list 读取 + 持久化实现。
+   *
+   * orchestrator 内部用此 + 解析自身的依赖（provider / capability / estimator /
+   * per-run eventBus）构造 SegmentManager，按 turn 边界透传给 agent-loop。
+   *
+   * 缺省时 SegmentManager 不构造、不透传，agent-loop 走 budget-only 兜底路径
+   * （contextEngine LLMSummarize）。这让小型/极简集成（如纯测试 runtime）
+   * 不必装配段切换也能跑通；段切换是 cli 装配层的产品能力，不是 runtime 必需。
+   */
+  segmentDeps?: {
+    readonly taskListReader: TaskListReader;
+    readonly persistence: SegmentPersistence;
+  };
 }
 
 // ─── 创建运行时 ───
@@ -666,6 +689,78 @@ export async function createAgentRuntime(
         eventBus,
       );
 
+      // 段切换管理器 —— attention-driven 主路径，与 contextEngine 并列。
+      //
+      // 内部依赖（orchestrator 解析）：
+      //   - estimator / eventBus：与 contextEngine 共享
+      //   - capability：从 modelId 解析（含 config 用户 override）
+      //   - callLLM：**复用主对话同款保护链** —— resilientCallLLM (withRetry) +
+      //     wrapStreamWithWatchdog (idle timer + abort race)，让段切换 LLM 自动
+      //     继承容错与中断保护，避免"段切换路径绕过统一容错"的架构债
+      //
+      // 外部依赖（cli 装配层注入）：
+      //   - taskListReader：决策时读 in-progress 任务（用于 defer 判定）
+      //   - persistence：segmentMetadata 累积写入（transcript marker 不走这条，
+      //     走 segment:new_started 事件 → accumulator → run-agent 单点 commit）
+      //
+      // segmentDeps 缺省 → 不构造 SegmentManager，agent-loop 走 budget-only 兜底
+      // 路径（contextEngine LLMSummarize 在 critical 时承担兜底）。
+      //
+      // 不变量假设：budget compact 阈值 × contextWindow > optimalMaxTokens。
+      // 这保证 SegmentManager 在 attention 阈值（远早于 budget）先触发，
+      // contextManager 几乎从不在 SegmentManager 评估前改 messages。如果用户
+      // override 让阈值倒置，SegmentManager 会处理已被 LLMSummarize 改过的
+      // messages（套娃压缩，但功能上不破，仅降级摘要质量）。
+      const segmentWatchdog = params.watchdog ?? DEFAULT_WATCHDOG_POLICY;
+      const segmentStreamFactory: SegmentStreamFactory = (req) => {
+        // 上游 abortSignal 桥接到段切换内部 controller：让 watchdog idle
+        // 触发和上游 abort 共享同一 cancel 通道
+        const controller = new AbortController();
+        if (req.abortSignal) {
+          if (req.abortSignal.aborted) controller.abort();
+          else
+            req.abortSignal.addEventListener(
+              "abort",
+              () => controller.abort(),
+              { once: true },
+            );
+        }
+        return wrapStreamWithWatchdog(
+          resilientCallLLM({
+            model: req.model,
+            systemPrompt: req.systemPrompt,
+            tools: req.tools,
+            messages: req.messages,
+            abortSignal: controller.signal,
+          }),
+          controller,
+          segmentWatchdog,
+          eventBus,
+        );
+      };
+      const segmentManager = options.segmentDeps
+        ? createSegmentManager({
+            estimator,
+            // override 走 getModelCapabilityOverride helper —— 大小写无关查找，
+            // 杜绝用户写 "DeepSeek-V4-Pro" / "deepseek-v4-pro" 等不同大小写时
+            // 沉默失效。helper 在 providers 包内固化，所有 caller 共享语义。
+            capability: resolveModelCapability(
+              roles.main.model,
+              getModelCapabilityOverride(
+                config.modelCapabilityOverrides,
+                roles.main.model,
+              ),
+            ),
+            callLLM: createSegmentSummarizeFn(
+              segmentStreamFactory,
+              roles.main.model,
+            ),
+            persistence: options.segmentDeps.persistence,
+            taskListReader: options.segmentDeps.taskListReader,
+            eventBus,
+          })
+        : undefined;
+
       // 渲染装饰器 —— 调用方自管 retry / context / interrupt 等终端订阅。
       // runtime 主流程不再硬编码任何 UI 订阅,实现 runtime 层与展示层解耦。
       // 装饰器自身的 UI 依赖(renderer 实例等)由工厂层 closure 捕获,不入参传递。
@@ -678,12 +773,20 @@ export async function createAgentRuntime(
       // 注入的订阅处理(若有)。
       const accumulator = subscribeCompactAccumulator(eventBus);
 
+      // Segment marker 累积订阅 —— attention-driven 段切换 marker 走独立事件流。
+      // 与 compact accumulator 对偶：单 run 内段切换最多一次（attention 阈值
+      // 远早于 budget critical），重复触发取最新。run 结束时 segment marker
+      // 优先于 compact marker（段切换 marker 含 segmentId / structuredSummary
+      // 等更丰富的结构化信息）。
+      const segmentAccumulator = subscribeSegmentMarkerAccumulator(eventBus);
+
       // 资源清理统一入口 —— 每个 dispose 独立 try-catch 隔离故障传播:
       //   - accumulator 抛错不能阻断 disposeRender(否则 CLI 渲染订阅 / interrupt
       //     warn ticker 会跨 run 累积,造成内存泄漏与重复渲染);
       //   - dispose 内部异常仅记录日志,不再次 throw,见 safeDispose 注释。
       const disposeAll = (): void => {
         safeDispose("run.accumulator", () => accumulator.dispose());
+        safeDispose("run.segmentAccumulator", () => segmentAccumulator.dispose());
         safeDispose("run.decorate", () => disposeRender?.());
       };
 
@@ -852,6 +955,9 @@ export async function createAgentRuntime(
           // 估算器 per-LLM-call 校准：agent-loop 在每次成功 LLM call 后用本次实际
           // 送入的 messagesForLLM 对账 inputTokens，让系数与 LLM 实际处理的 size 对账
           tokenEstimator: estimator,
+          // 段切换：attention-driven 主路径，按 turn 边界评估 + 可选切段
+          segmentManager,
+          conversationId: params.conversationId,
         });
 
         while (true) {
@@ -866,7 +972,13 @@ export async function createAgentRuntime(
             const budget = contextEngine.checkBudget(allMessages);
 
             // 时序协调（见 buildPreFlightError 注释）：turn.timestamp > compactBefore.timestamp
-            const compactBefore = accumulator.getMarker();
+            //
+            // marker 优先级：segment > compact（段切换 marker 含 segmentId +
+            // structuredSummary 等结构化信息，应优先采用；compact 是 budget 兜底
+            // 路径产生的 marker，单 run 内两者通常不会同时存在 —— attention 触发
+            // 远早于 budget critical）。
+            const compactBefore =
+              segmentAccumulator.getMarker() ?? accumulator.getMarker();
             return {
               agentResult: value,
               turn: buildTurn({

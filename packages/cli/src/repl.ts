@@ -51,6 +51,7 @@ import { describeProxy, type ProxyDescription } from "@zhixing/network";
 import { loadConfig, loadCredentials, resolveHomeDir } from "@zhixing/providers";
 import type { TaskListService } from "@zhixing/tools-builtin";
 import { createBuiltinExtraToolsAssembly } from "./runtime/builtin-extra-tools.js";
+import { createCliSegmentDeps } from "./runtime/segment-deps.js";
 import { ConversationRepoTaskListStore } from "./runtime/task-list-stores.js";
 import { CommandDispatcher } from "./command-dispatcher.js";
 import { PASTE_TOKEN_PATTERN, PasteRegistry } from "./paste-registry.js";
@@ -842,6 +843,17 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     new ConversationRepoTaskListStore(convRepo),
   );
 
+  // 段切换外部依赖 —— 跨 reload 持久，封装 taskListReader（适配自 TaskListService）
+  // 与 segmentMetadata persistence（接 ConversationRepository）。
+  //
+  // 不含 transcript：marker 写入走"emit segment:new_started → orchestrator
+  // accumulator → run-agent 单点 commitTurn"路径，与本 turn 同一原子事务落盘，
+  // cli 装配层无需透传 transcript（与 LLMSummarize 同源、收敛到唯一 transcript 写路径）。
+  const segmentDeps = createCliSegmentDeps({
+    taskListService: builtinExtraTools.taskListService,
+    conversationRepo: convRepo,
+  });
+
   const session = await RuntimeSession.create({
     config,
     credentials,
@@ -856,6 +868,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     onSecurityBlocked: createBlockedRenderer(cliWriter),
     onUserDenied: createUserDeniedRenderer(cliWriter),
     builtinExtraTools,
+    segmentDeps,
   });
 
   let messages: Message[] = [];

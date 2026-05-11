@@ -481,6 +481,40 @@ export async function* runAgentLoop(
         newMessages = termination.output.messages;
       }
 
+      // ── Segment management: attention-driven 段切换 ──
+      //
+      // 与 contextManager 并列，是 attention-driven 主路径；contextManager 是
+      // budget-driven 兜底。SegmentManager 在 attention 阈值（远早于 budget compact
+      // 触发）主动切段；调用方可见 contextManager 处理后的 newMessages，再按
+      // attention 阈值评估。
+      //
+      // 隐式不变量：budget compact 阈值 × contextWindow > optimalMaxTokens。
+      // 此关系保证 SegmentManager 在 attention 阈值（远早于 budget）先触发，
+      // contextManager 几乎从不在 SegmentManager 评估前改 messages。如果用户
+      // 通过 modelCapabilityOverrides 让阈值倒置，SegmentManager 会处理已被
+      // LLMSummarize 改过的 messages（功能不破，仅降级摘要质量）。
+      //
+      // 段切换失败绝不阻塞 turn —— evaluate 返 modified:false 时拿原 newMessages
+      // 继续，budget 兜底（contextManager）仍会在下一轮 critical 时承担兜底。
+      //
+      // marker 写盘路径：SegmentManager 不直接写 transcript marker，而是通过
+      // segment:new_started 事件携带 marker 流向 orchestrator accumulator，
+      // 由 run-agent 在 run 结束时通过 commitTurn({turn, compactBefore}) 单点
+      // 原子落盘——与 LLMSummarize 走 context:compact_end → accumulator 同模式。
+      if (params.segmentManager) {
+        const segmentResult = await params.segmentManager.evaluate({
+          messages: newMessages,
+          systemPrompt: params.systemPrompt ?? "",
+          tools: (params.tools ?? []).map(toToolSpec),
+          turnCount: newTurnCount,
+          conversationId: params.conversationId,
+          abortSignal: controller.signal,
+        });
+        if (segmentResult.modified && segmentResult.newSegmentMessages) {
+          newMessages = segmentResult.newSegmentMessages;
+        }
+      }
+
       state = {
         messages: newMessages,
         turnCount: newTurnCount,

@@ -19,6 +19,8 @@ import type {
   ConversationScope,
   CreateConversationOptions,
   IConversationRepository,
+  SegmentMeta,
+  SegmentMetadata,
   TaskListState,
 } from "./types.js";
 import {
@@ -216,6 +218,33 @@ export class ConversationRepository implements IConversationRepository {
       } else {
         parsed.taskListState = state;
       }
+      await writeAtomic(
+        metaPath(this.scope, id),
+        JSON.stringify(parsed, null, 2),
+      );
+    });
+  }
+
+  /**
+   * 追加一段段切换元数据 —— 段切换成功后调用。
+   *
+   * 在同一把 per-id 锁内做"读-合并-写"原子操作；conversation 不存在时 no-op。
+   * 首次调用（segmentMetadata 缺失）自动初始化结构。
+   */
+  async appendSegmentMeta(id: string, meta: SegmentMeta): Promise<void> {
+    return this.withMetaLock(id, async () => {
+      const content = await fs
+        .readFile(metaPath(this.scope, id), "utf-8")
+        .catch(() => null);
+      if (content === null) return;
+      const parsed = JSON.parse(content) as Record<string, unknown>;
+      const existing = parsed.segmentMetadata as SegmentMetadata | undefined;
+      const prevSegments = existing?.segments ?? [];
+      const next: SegmentMetadata = {
+        currentSegmentId: meta.segmentId,
+        segments: [...prevSegments, meta],
+      };
+      parsed.segmentMetadata = next;
       await writeAtomic(
         metaPath(this.scope, id),
         JSON.stringify(parsed, null, 2),

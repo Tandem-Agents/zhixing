@@ -29,6 +29,7 @@ export { getPreset, getPresetIds, PROVIDER_PRESETS } from "./presets.js";
 export {
   MODEL_CAPABILITIES,
   UNKNOWN_MODEL_CAPABILITY,
+  getModelCapabilityOverride,
   resolveModelCapability,
 } from "./model-capability.js";
 export type {

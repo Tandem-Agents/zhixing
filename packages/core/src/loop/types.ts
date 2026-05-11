@@ -26,6 +26,7 @@ import type {
   ContextManagerHook,
   ITokenEstimator,
 } from "../context/types.js";
+import type { SegmentManager } from "../context/segment/segment-manager.js";
 import type { TurnContextInjector } from "../context/turn-context.js";
 import type { CompactMarker, Turn } from "../transcript/types.js";
 import type { AbortReason, WatchdogPolicy } from "../interrupt/types.js";
@@ -113,6 +114,27 @@ export interface AgentLoopParams {
    * 校准发生在 abort / error 路径之前的成功分支，inputTokens > 0 时才生效。
    */
   tokenEstimator?: ITokenEstimator;
+  /**
+   * Attention-driven 段切换管理器。
+   *
+   * 缺省时不做段切换。注入后 agent-loop 在 turn 边界（contextManager 之后、
+   * state 重建之前）调一次 `segmentManager.evaluate`；返回 modified=true 时用
+   * `newSegmentMessages` 替换 newMessages 进入下一轮。
+   *
+   * 段切换失败绝不阻塞 turn（拿原 newMessages 继续）；budget 兜底机制
+   * （contextManager）继续承担"上下文真不够时压缩"职责。
+   */
+  segmentManager?: SegmentManager;
+  /**
+   * 当前对话 ID —— 段切换路径需要用它读 task_list 状态、写 segmentMetadata。
+   *
+   * 缺省（ephemeral 路径：定时任务 / --print）→ 段切换静默 pass，不持久化、
+   * 不读 task_list，与 task_list 工具层 / TaskListProvider 同语义降级。
+   *
+   * 当 segmentManager 注入但 conversationId 缺失时，evaluate 内部会返回
+   * decision.kind="pass", reason="no-conversation"，不会污染段切换观测。
+   */
+  conversationId?: string;
 }
 
 // ─── 依赖注入 ───

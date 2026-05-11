@@ -1,0 +1,484 @@
+/**
+ * SegmentManager —— 段切换编排主类。
+ *
+ * 编排流程：
+ *   1. ephemeral 路径：conversationId 缺失 → 静默 pass（不 emit segment 事件，
+ *      避免污染观测；与 task_list 工具 / TaskListProvider 同语义降级）
+ *   2. 估算 currentTokens = system + messages + tools
+ *   3. 读 task_list in-progress 状态（cli 装配层注入 reader）
+ *   4. 纯函数决策 → SegmentDecision
+ *   5. emit segment:evaluation（pass / defer / trigger 全 fire，可观测全覆盖）
+ *   6. 非 trigger 直接返回（pass / defer 在此终结）
+ *   7. trigger 路径：
+ *      a. emit transition_start
+ *      b. beforeSummarize hooks（失败 → 中止：还没花 LLM 钱，安全回滚）
+ *      c. 压缩 LLM call（含 retry，指数退避；末尾追加压缩指令保 cache prefix byte-equal）
+ *      d. parseSummary（XML 三段）→ 全空视为失败
+ *      e. emit summarize_complete
+ *      f. afterSummarize hooks（失败 → 降级 warning + 继续：压缩成本不浪费）
+ *      g. beforeNewSegmentStart hooks（失败 → 降级 warning + 继续：压缩成本不浪费）
+ *      h. splitMessagesPairAware → toSummarize / toPreserve
+ *      i. composeNewSegmentMessages → 新段首条 user message
+ *      j. 构造 CompactMarker（含 segmentId + structuredSummary + 平文本 summary 副本）
+ *      k. persistence.appendSegment（segmentMetadata 累积；失败 emit warning 但仍成功）
+ *      l. emit new_started 携带 marker → 返回 modified=true
+ *   8. trigger 关键失败（压缩失败 / 解析空 / beforeSummarize hook 失败） → emit
+ *      transition_failed → return modified:false（降级不切，agent-loop 拿原 messages 继续）
+ *
+ * 关键不变量：
+ *   - 压缩请求 system + tools + messages 与上一轮 byte-equal（cache 完美命中）
+ *   - 段切换失败绝不阻塞 turn（agent-loop 拿原 messages 继续，下次再评估）
+ *   - **transcript marker 不由 SegmentManager 直接写**：通过 segment:new_started
+ *     事件携带 marker 流向 orchestrator accumulator，由 run-agent 在 run 结束时
+ *     通过 commitTurn({ turn, compactBefore }) 单点原子写入。与 LLMSummarize 走
+ *     context:compact_end → accumulator → commitTurn 路径同模式，整个 run 内
+ *     transcript 写入收敛到唯一路径，杜绝"内存切了但磁盘 marker 没写"类不一致
+ *   - segmentMetadata 是独立观测元数据流：写入失败不阻断段切换主流程
+ *     （marker 已通过事件流转出，下次启动 transcript rebuild 仍能还原新段 LLM 视图；
+ *     segmentMetadata 失败仅影响"段历史浏览"未来 UI，不影响 LLM 行为）
+ *   - hook 错误分级：beforeSummarize 失败中止段切换（safe，未花成本）；
+ *     after / beforeNewSegmentStart 失败 emit hook_failed 但继续段切换
+ *     （压缩 LLM 已花成本，不让 hook 错误浪费）
+ */
+
+import type { IEventBus } from "../../events/types.js";
+import type { SegmentMeta } from "../../conversation/types.js";
+import type { AgentEventMap } from "../../types/agent-events.js";
+import type { Message } from "../../types/messages.js";
+import type { ToolSpec } from "../../types/tools.js";
+import type { CompactMarker } from "../../transcript/types.js";
+import {
+  calculateMessageTurns,
+  splitMessagesPairAware,
+} from "../message-turns.js";
+import type { ITokenEstimator } from "../types.js";
+import { composeNewSegmentMessages } from "./compose.js";
+import { decideSegmentAction } from "./decision.js";
+import { parseSummary } from "./parser.js";
+import { SEGMENT_SUMMARIZE_INSTRUCTION } from "./prompts.js";
+import type {
+  ParsedSummary,
+  SegmentDecision,
+  SegmentManagerInput,
+  SegmentManagerOutput,
+  SegmentPersistence,
+  SegmentSummarizeLLMFn,
+  SegmentSummarizeRequest,
+  SegmentThresholds,
+  SegmentTransitionContext,
+  SegmentTransitionHook,
+  TaskListReader,
+} from "./types.js";
+
+// ─── 默认配置 ───
+
+const DEFAULT_BUFFER_TURNS = 2;
+const DEFAULT_RETRIES = 3;
+const DEFAULT_RETRY_BASE_MS = 200;
+
+// ─── 配置接口 ───
+
+export interface SegmentManagerConfig {
+  readonly estimator: ITokenEstimator;
+  readonly capability: SegmentThresholds;
+  readonly callLLM: SegmentSummarizeLLMFn;
+  readonly persistence: SegmentPersistence;
+  readonly taskListReader: TaskListReader;
+  readonly eventBus?: IEventBus<AgentEventMap>;
+  readonly hooks?: readonly SegmentTransitionHook[];
+  /** 缓冲带 turn 数，默认 2 */
+  readonly bufferTurns?: number;
+  /** 压缩 LLM 重试次数（不含首次尝试），默认 3 */
+  readonly retries?: number;
+  /** 重试基准延迟，第 N 次重试等 baseMs * 2^N ms，默认 200 */
+  readonly retryBaseMs?: number;
+  /** segmentId 生成器，测试注入 */
+  readonly generateSegmentId?: () => string;
+  /** 时钟，测试注入 */
+  readonly clock?: () => Date;
+}
+
+interface NormalizedConfig {
+  readonly estimator: ITokenEstimator;
+  readonly capability: SegmentThresholds;
+  readonly callLLM: SegmentSummarizeLLMFn;
+  readonly persistence: SegmentPersistence;
+  readonly taskListReader: TaskListReader;
+  readonly eventBus: IEventBus<AgentEventMap> | undefined;
+  readonly hooks: readonly SegmentTransitionHook[];
+  readonly bufferTurns: number;
+  readonly retries: number;
+  readonly retryBaseMs: number;
+  readonly generateSegmentId: () => string;
+  readonly clock: () => Date;
+}
+
+function normalizeConfig(raw: SegmentManagerConfig): NormalizedConfig {
+  return {
+    estimator: raw.estimator,
+    capability: raw.capability,
+    callLLM: raw.callLLM,
+    persistence: raw.persistence,
+    taskListReader: raw.taskListReader,
+    eventBus: raw.eventBus,
+    hooks: raw.hooks ?? [],
+    bufferTurns: raw.bufferTurns ?? DEFAULT_BUFFER_TURNS,
+    retries: raw.retries ?? DEFAULT_RETRIES,
+    retryBaseMs: raw.retryBaseMs ?? DEFAULT_RETRY_BASE_MS,
+    generateSegmentId: raw.generateSegmentId ?? defaultSegmentId,
+    clock: raw.clock ?? (() => new Date()),
+  };
+}
+
+function defaultSegmentId(): string {
+  const stamp = new Date()
+    .toISOString()
+    .replace(/[-:.TZ]/g, "")
+    .slice(0, 14);
+  const rand = Math.random().toString(36).slice(2, 8);
+  return `seg-${stamp}-${rand}`;
+}
+
+// ─── 主类 ───
+
+export class SegmentManager {
+  private readonly cfg: NormalizedConfig;
+
+  constructor(config: SegmentManagerConfig) {
+    this.cfg = normalizeConfig(config);
+  }
+
+  /**
+   * 评估当前对话状态并按需切段。
+   *
+   * 调用方：agent-loop 在 turn 边界（assistant 输出完成、newMessages 重建后）
+   * 调用一次。返回 modified=true 时替换 state.messages 为 newSegmentMessages。
+   */
+  async evaluate(input: SegmentManagerInput): Promise<SegmentManagerOutput> {
+    // ephemeral 路径：静默 pass，不 emit segment 事件
+    if (!input.conversationId) {
+      return {
+        decision: { kind: "pass", reason: "no-conversation" },
+        modified: false,
+      };
+    }
+
+    const currentTokens = this.estimateTotalTokens(input);
+    const hasInProgressTask = this.cfg.taskListReader.hasInProgress(
+      input.conversationId,
+    );
+    const decision = decideSegmentAction({
+      currentTokens,
+      capability: this.cfg.capability,
+      hasInProgressTask,
+    });
+
+    await this.cfg.eventBus?.emit("segment:evaluation", {
+      decision,
+      currentTokens,
+    });
+
+    if (decision.kind !== "trigger") {
+      return { decision, modified: false };
+    }
+
+    return await this.performTransition(input, decision, currentTokens);
+  }
+
+  // ─── 切段流程 ───
+
+  private async performTransition(
+    input: SegmentManagerInput,
+    decision: SegmentDecision & { kind: "trigger" },
+    tokensBefore: number,
+  ): Promise<SegmentManagerOutput> {
+    const conversationId = input.conversationId as string;
+    const segmentId = this.cfg.generateSegmentId();
+    const startedAt = this.cfg.clock();
+    const ctx: SegmentTransitionContext = {
+      conversationId,
+      segmentId,
+      tokensBefore,
+    };
+
+    await this.cfg.eventBus?.emit("segment:transition_start", {
+      conversationId,
+      segmentId,
+      reason: decision.reason,
+      currentTokens: tokensBefore,
+    });
+
+    // hook: beforeSummarize —— 失败中止段切换（安全回滚，未花 LLM 成本）
+    const beforeHookErr = await this.runHooksCatch((h) =>
+      h.beforeSummarize?.(ctx),
+    );
+    if (beforeHookErr) {
+      await this.cfg.eventBus?.emit("segment:hook_failed", {
+        segmentId,
+        hookPhase: "beforeSummarize",
+        error: errorMessage(beforeHookErr),
+        abortedTransition: true,
+      });
+      await this.cfg.eventBus?.emit("segment:transition_failed", {
+        segmentId,
+        error: `beforeSummarize hook aborted: ${errorMessage(beforeHookErr)}`,
+        retriesExhausted: false,
+      });
+      return { decision, modified: false };
+    }
+
+    // ── 压缩 LLM call ──
+    let summary: ParsedSummary;
+    try {
+      const summaryText = await this.callSummarizeWithRetry(
+        input.systemPrompt,
+        input.tools,
+        input.messages,
+        input.abortSignal,
+      );
+      summary = parseSummary(summaryText);
+      if (isEmptySummary(summary)) {
+        throw new Error("summary parser returned empty triplet");
+      }
+    } catch (e) {
+      await this.cfg.eventBus?.emit("segment:transition_failed", {
+        segmentId,
+        error: errorMessage(e),
+        retriesExhausted: true,
+      });
+      return { decision, modified: false };
+    }
+
+    const summarizeEndAt = this.cfg.clock();
+    const summaryTokens = this.cfg.estimator.estimateText(
+      summary.facts + summary.state + summary.active,
+    );
+    await this.cfg.eventBus?.emit("segment:summarize_complete", {
+      segmentId,
+      summaryTokens,
+      latencyMs: summarizeEndAt.getTime() - startedAt.getTime(),
+    });
+
+    // hook: afterSummarize —— 失败降级 warning 不中止主流程
+    // （压缩 LLM 已花成本，不让 hook 错误浪费已支付的代价）
+    const afterHookErr = await this.runHooksCatch((h) =>
+      h.afterSummarize?.(ctx, summary),
+    );
+    if (afterHookErr) {
+      await this.cfg.eventBus?.emit("segment:hook_failed", {
+        segmentId,
+        hookPhase: "afterSummarize",
+        error: errorMessage(afterHookErr),
+        abortedTransition: false,
+      });
+    }
+
+    // hook: beforeNewSegmentStart —— 同样降级 warning 不中止
+    const newSegHookErr = await this.runHooksCatch((h) =>
+      h.beforeNewSegmentStart?.(ctx),
+    );
+    if (newSegHookErr) {
+      await this.cfg.eventBus?.emit("segment:hook_failed", {
+        segmentId,
+        hookPhase: "beforeNewSegmentStart",
+        error: errorMessage(newSegHookErr),
+        abortedTransition: false,
+      });
+    }
+
+    // ── 拼新段 + 切分 ──
+    const { toSummarize, toPreserve } = splitMessagesPairAware(
+      input.messages,
+      this.cfg.bufferTurns,
+    );
+    const newSegmentMessages = composeNewSegmentMessages({
+      summary,
+      recentTurns: toPreserve,
+    });
+    const tokensAfter = this.cfg.estimator.estimateMessages(newSegmentMessages);
+    const turnsCompacted = computeTurnsCompacted(toSummarize);
+
+    const marker: CompactMarker = {
+      type: "compact",
+      timestamp: startedAt.toISOString(),
+      summary: flattenSummary(summary),
+      turnsCompacted,
+      tokensBefore,
+      tokensAfter,
+      segmentId,
+      structuredSummary: summary,
+    };
+
+    // segmentMetadata 累积写入 —— 失败走专属 warning 事件，**不**复用 transition_failed
+    // （避免"成功 + 失败"事件并存的语义矛盾）。
+    //
+    // 设计原因：transcript marker 通过 segment:new_started 事件流向 orchestrator
+    // accumulator，由 run-agent 在 run 结束时与本 turn 一并 commitTurn —— marker
+    // 与 turn 同一原子事务，是新段 LLM 视图的事实源。
+    // segmentMetadata 是独立观测元数据流（仅服务于段历史 UI），缺失不影响
+    // 段切换语义完成度，也不会让"内存切了但 transcript 没切"出现 —— marker
+    // 已通过事件流转出，后续与本 turn 一并落盘。
+    const meta: SegmentMeta = {
+      segmentId,
+      timestamp: startedAt.toISOString(),
+      tokensBefore,
+      tokensAfter,
+    };
+    try {
+      await this.cfg.persistence.appendSegment(conversationId, meta);
+    } catch (e) {
+      await this.cfg.eventBus?.emit("segment:metadata_persist_failed", {
+        segmentId,
+        error: errorMessage(e),
+      });
+      // 不 return —— 段切换主流程已完成（marker 即将通过 segment:new_started 流出）
+    }
+
+    await this.cfg.eventBus?.emit("segment:new_started", {
+      segmentId,
+      bufferTurns: this.cfg.bufferTurns,
+      tokensBefore,
+      tokensAfter,
+      marker,
+    });
+
+    return {
+      decision,
+      modified: true,
+      newSegmentMessages,
+      marker,
+    };
+  }
+
+  // ─── 私有 helpers ───
+
+  private estimateTotalTokens(input: SegmentManagerInput): number {
+    return (
+      this.cfg.estimator.estimateText(input.systemPrompt) +
+      this.cfg.estimator.estimateMessages(input.messages) +
+      this.cfg.estimator.estimateTools(input.tools)
+    );
+  }
+
+  /**
+   * 压缩 LLM call 含 retry。
+   *
+   * 请求构造：完整 system + tools + (原 messages + 末尾追加压缩指令 user message)。
+   * 末尾追加是缓存安全分叉的物理实现 —— 前 N-1 个 messages 与上一轮 byte-equal，
+   * 最后一条新增 message 是唯一新 token。
+   */
+  private async callSummarizeWithRetry(
+    systemPrompt: string,
+    tools: readonly ToolSpec[],
+    messages: readonly Message[],
+    abortSignal?: AbortSignal,
+  ): Promise<string> {
+    const request: SegmentSummarizeRequest = {
+      systemPrompt,
+      tools,
+      messages: [
+        ...messages,
+        {
+          role: "user",
+          content: [{ type: "text", text: SEGMENT_SUMMARIZE_INSTRUCTION }],
+        },
+      ],
+      abortSignal,
+    };
+
+    let lastError: unknown;
+    const total = this.cfg.retries + 1;
+    for (let attempt = 0; attempt < total; attempt++) {
+      if (abortSignal?.aborted) {
+        throw new Error("aborted");
+      }
+      try {
+        return await this.cfg.callLLM(request);
+      } catch (e) {
+        lastError = e;
+        if (attempt === total - 1) break;
+        const delay = this.cfg.retryBaseMs * Math.pow(2, attempt);
+        await sleepWithAbort(delay, abortSignal);
+      }
+    }
+    throw lastError;
+  }
+
+  /**
+   * 顺序执行 hooks，返回第一个 throw 的错误（或 undefined）。
+   *
+   * 第一个 hook 抛错即返回，后续 hooks 不再执行 —— 与 hook 顺序契约一致。
+   * 调用方根据返回值决定是否中止段切换。
+   */
+  private async runHooksCatch(
+    invoker: (hook: SegmentTransitionHook) => Promise<void> | undefined,
+  ): Promise<unknown> {
+    for (const hook of this.cfg.hooks) {
+      try {
+        await invoker(hook);
+      } catch (e) {
+        return e;
+      }
+    }
+    return undefined;
+  }
+}
+
+export function createSegmentManager(
+  config: SegmentManagerConfig,
+): SegmentManager {
+  return new SegmentManager(config);
+}
+
+// ─── 纯函数辅助 ───
+
+function isEmptySummary(summary: ParsedSummary): boolean {
+  return (
+    summary.facts === "" &&
+    summary.state === "" &&
+    summary.active === ""
+  );
+}
+
+function flattenSummary(summary: ParsedSummary): string {
+  return [summary.facts, summary.state, summary.active]
+    .filter((part) => part !== "")
+    .join("\n\n");
+}
+
+function computeTurnsCompacted(toSummarize: readonly Message[]): number {
+  if (toSummarize.length === 0) return 0;
+  const turns = calculateMessageTurns(toSummarize);
+  return turns[turns.length - 1] ?? 0;
+}
+
+function errorMessage(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  return String(e);
+}
+
+/**
+ * sleep with abort 支持。abort 发生时立即 reject —— 不等定时器自然过期。
+ *
+ * 边界：进入时已 aborted → 立即 reject；定时器期间 aborted → reject + 清定时器。
+ */
+async function sleepWithAbort(
+  ms: number,
+  abortSignal?: AbortSignal,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (abortSignal?.aborted) {
+      reject(new Error("aborted"));
+      return;
+    }
+    const timer = setTimeout(() => {
+      if (abortSignal) abortSignal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(new Error("aborted"));
+    };
+    abortSignal?.addEventListener("abort", onAbort, { once: true });
+  });
+}

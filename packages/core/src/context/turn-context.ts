@@ -247,9 +247,17 @@ export class TurnContextInjector {
    * 已包含 <turn-context> 的消息会被替换（防止重复注入）。
    *
    * `opts.skipTurnContext=true` 短路返回原 messages 的浅拷贝：用于"缓存安全
-   * 分叉"格式的特殊请求路径（段切换压缩请求等）—— 这些路径要求 messages 与
-   * 上一轮 byte-equal（不剥离旧 turn-context 块、不注入新块），保 prefix cache
-   * 在两轮请求间继续命中。
+   * 分叉"格式的特殊请求路径——这些路径要求 messages 与上一轮 byte-equal
+   * （不剥离旧 turn-context 块、不注入新块），保 prefix cache 在两轮请求间
+   * 继续命中。
+   *
+   * **当前消费者**：agent-loop 在 `streamLLMCall` 之前调用 `inject`，
+   * `skipTurnContext` 默认 false。段切换压缩 LLM 走的是独立 stream factory
+   * （orchestrator 包装 resilientCallLLM + watchdog 后构造），**完全绕过本
+   * injector**，自然满足"不注入"语义。本参数作为接口契约保留，给未来可能
+   * 通过 injector 路径的"缓存安全分叉"消费者使用（如果未来段切换实现重构
+   * 为走 streamLLMCall 主路径，调用方传 `skipTurnContext: true` 即可保 cache
+   * prefix 不变）。
    */
   inject(
     messages: readonly Message[],
