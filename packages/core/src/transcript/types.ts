@@ -48,9 +48,9 @@ export interface ToolCallRecord {
    * tool_use 协议层 id —— 同 turn 内 tool_use ↔ tool_result 配对锚点。
    *
    * 字段引入前的 transcript 文件中此字段缺失（undefined），新写入的 record
-   * 一定含有 id（buildRecord 强制写入）。consumers 在按 id 反查（如
-   * `recall_history` 的 toolUseId 模式）时对老文件 record.id=undefined
-   * 自然返 not found —— 与"已 compact 不可达"语义对等，不需要派生伪 id。
+   * 一定含有 id（buildRecord 强制写入）。consumers 在按 id 反查时对老文件
+   * record.id=undefined 自然返 not found —— 与"已 compact 不可达"语义对等，
+   * 不需要派生伪 id。
    */
   id?: string;
   name: string;
@@ -79,25 +79,6 @@ export interface LoadedTranscript {
   header: TranscriptHeader;
   messages: Message[];
   turnCount: number;
-}
-
-/**
- * 加载转录的"原始"结构 —— 暴露未 canonicalize 的 turns / compact markers，
- * 供 recall_history 等需要按 turn 边界 / tool_use id 取回特定历史片段的消费者使用。
- *
- * 与 LoadedTranscript 的差异：
- * - LoadedTranscript.messages 是 canonical 重建结果（compact 区间被替换为
- *   system-meta 占位 message 对），调用者拿到的是"喂给 LLM 的视图"
- * - RawTranscript.turns / compactBefore 保留原始结构，调用者可看到每一轮
- *   user / assistant / toolCalls 的细节，以及 frontier 之前压缩了多少轮
- *
- * 走同一把 per-id 锁 + 同一 normalize 流程，与 load() 行为一致；仅返回形态不同。
- */
-export interface RawTranscript {
-  header: TranscriptHeader;
-  turns: readonly Turn[];
-  /** compact frontier marker —— 文件中至多一条；无 compact 时为 null */
-  compactBefore: CompactMarker | null;
 }
 
 /**
@@ -175,16 +156,6 @@ export interface ITranscriptStore {
 
   load(conversationId: string): Promise<LoadedTranscript>;
 
-  /**
-   * 加载磁盘当前的原始结构（turns / compactBefore），不做 canonical 重建。
-   *
-   * 用途：recall_history 工具按 turnRange / toolUseId 取回特定历史片段时，
-   * 需要看到每一轮 raw user / assistant / toolCalls，以及 compact frontier
-   * 之前压缩了多少轮。canonical messages 已抹去这些边界，无法支持。
-   *
-   * 走与 load() 同一把 per-id 锁 + 同一 normalize 流程；并发安全语义一致。
-   */
-  loadRaw(conversationId: string): Promise<RawTranscript>;
   countTurns(conversationId: string): Promise<number>;
   exists(conversationId: string): Promise<boolean>;
 }

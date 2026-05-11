@@ -60,7 +60,6 @@ import {
   ToolSchemaCompilerStage,
   createDefaultAnchorRegistry,
   type AnchorGenerator,
-  type ITranscriptStore,
   type Resettable,
 } from "@zhixing/core";
 import {
@@ -80,7 +79,6 @@ import {
   createGrepTool,
   createBashTool,
   createMemoryTool,
-  createRecallHistoryTool,
   createRequestCapabilitiesTool,
   createWebFetchTool,
   WEB_FETCH_DEFAULT_RULES,
@@ -256,8 +254,8 @@ export interface RunParams {
    */
   turnIndex: number;
   /**
-   * 当前 conversation id —— 透传到 runContextStorage，工具按需取（如
-   * recall_history 读磁盘 transcript）。
+   * 当前 conversation id —— 透传到 runContextStorage，工具按需取（用于
+   * 在持久化会话中区分写入目标 / 读取上下文）。
    *
    * 可选：ephemeral 路径（一次性 --print / 定时任务 / 单测 fixture）省略；
    * 工具收到 undefined 时显式分支处理（拒绝执行 / graceful degrade）。
@@ -361,14 +359,6 @@ export interface CreateAgentRuntimeOptions {
    * 注册），同一注入 store 被多次 register 不会累积重复规则。
    */
   permissionStore?: IPermissionStore;
-  /**
-   * Transcript 仓库 —— 装配 recall_history 工具时通过 loadRaw 取磁盘原始结构。
-   *
-   * 不传时 recall_history 工具不接入（runtime 仍可正常 run，但 LLM 调
-   * recall_history 会得到 unknown tool 错误）。cli REPL / server 路径都已持有
-   * 一个共享 TranscriptStore 实例，传入即可。
-   */
-  transcriptStore?: ITranscriptStore;
 }
 
 // ─── 创建运行时 ───
@@ -441,18 +431,6 @@ export async function createAgentRuntime(
     createMemoryTool(),
     createWebFetchTool({ proxy: config.network?.proxy }),
     requestCapabilitiesTool,
-    ...(options.transcriptStore
-      ? [
-          // recall_history 兜底锚化 / tier-compressor 截断后历史无法 re-read 的场景：
-          // 通过磁盘 transcript 取回原始 turn / tool_use 内容。store 由 caller 注入，
-          // 工具运行时通过 runContextStorage 取当前 conversationId。
-          createRecallHistoryTool({
-            loadRaw: (id) => options.transcriptStore!.loadRaw(id),
-            getConversationId: () =>
-              runContextStorage.getStore()?.conversationId,
-          }),
-        ]
-      : []),
     ...(options.extraTools ?? []),
   ];
 

@@ -177,7 +177,6 @@ describe("buildSystemPrompt", () => {
       const tools = [
         stubTool("request_capabilities"),
         stubTool("memory"),
-        stubTool("recall_history"),
         stubTool("read"),
         stubTool("bash"),
       ];
@@ -185,7 +184,6 @@ describe("buildSystemPrompt", () => {
       // 始终可调组（语义"always"，不指定具体数字）
       expect(prompt).toContain("**Tools always in your tools[]**");
       expect(prompt).toContain("`memory` —");
-      expect(prompt).toContain("`recall_history` —");
       expect(prompt).toContain("`request_capabilities` —");
       // 激活指令（让 LLM 自查 current tools[]，不假设状态）
       expect(prompt).toContain("For tools NOT in your current tools[]");
@@ -210,7 +208,6 @@ describe("buildSystemPrompt", () => {
       const tools = [
         stubTool("request_capabilities"),
         stubTool("memory"),
-        stubTool("recall_history"),
         stubTool("read"),
       ];
       const prompt = buildSystemPrompt({ ...ctx, tools });

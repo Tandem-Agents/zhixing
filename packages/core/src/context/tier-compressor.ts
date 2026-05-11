@@ -6,7 +6,7 @@
  * - 阈值参数化：T1/T2/T3 由调用方注入的 TierThresholds 决定
  * - 每轮预防性运行：不等预算超标，始终保持 tool_result 在合适 tier
  * - 幂等：重复运行不会重复截断
- * - Tier 4 保留骨架：tool_use 结构不变，结果可通过 recall_history 恢复
+ * - Tier 4 保留骨架：tool_use 结构不变，原始结果不可恢复
  *
  * 四级定义：
  * Tier 1 (≤T1)  — 完整保留
@@ -127,7 +127,7 @@ function compressToolResult(
       if (content.length <= TIER2_MAX_CHARS) return block;
       if (isSkeleton(content)) return block;
       if (isAlreadyAtTier(content, TIER2_MAX_CHARS)) return block;
-      const trimmed = `${content.slice(0, TIER2_MAX_CHARS)}\n[已截断至 ${TIER2_MAX_CHARS} 字符，原始 ${originalLength} 字符，可通过 recall_history 恢复]`;
+      const trimmed = `${content.slice(0, TIER2_MAX_CHARS)}\n[已截断至 ${TIER2_MAX_CHARS} 字符，原始 ${originalLength} 字符]`;
       stats.charsSaved += content.length - trimmed.length;
       return { ...block, content: trimmed };
     }
@@ -137,7 +137,7 @@ function compressToolResult(
       if (content.length <= TIER3_MAX_CHARS) return block;
       if (isSkeleton(content)) return block;
       if (isAlreadyAtTier(content, TIER3_MAX_CHARS)) return block;
-      const trimmed = `${content.slice(0, TIER3_MAX_CHARS)}\n[截断至 ${TIER3_MAX_CHARS} 字符，原始 ${originalLength} 字符，可通过 recall_history 恢复]`;
+      const trimmed = `${content.slice(0, TIER3_MAX_CHARS)}\n[截断至 ${TIER3_MAX_CHARS} 字符，原始 ${originalLength} 字符]`;
       stats.charsSaved += content.length - trimmed.length;
       return { ...block, content: trimmed };
     }

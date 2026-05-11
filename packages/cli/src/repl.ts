@@ -806,8 +806,6 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   const config = loadConfig({ cwd: process.cwd() });
   const credentials = loadCredentials({ homeDir: resolveHomeDir() });
 
-  // Transcript store 要先于 RuntimeSession.create 构造 —— session 内部 createRuntime
-  // 装配 recall_history 时需要复用同一 store 实例（让工具看到 commitTurn 写入的最新磁盘状态）。
   const cwd = process.cwd();
   const projectId = getProjectId(cwd);
   const scope: ConversationScope = { kind: "project", projectId, projectPath: cwd };
@@ -828,7 +826,6 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     schedulerEventBus,
     onSecurityBlocked: createBlockedRenderer(cliWriter),
     onUserDenied: createUserDeniedRenderer(cliWriter),
-    transcriptStore: store,
   });
 
   let messages: Message[] = [];
@@ -1341,9 +1338,9 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       const runPromise = session.runtime.run({
         messages: [...state.messages],
         turnIndex: state.turnCounter,
-        // 透传当前 conversationId 进 RunContext —— 让 recall_history 等需要
-        // 取磁盘 transcript 的工具能拿到 id；ephemeral 路径（无 conversation）
-        // 自然为 undefined，工具自行 graceful degrade。
+        // 透传当前 conversationId 进 RunContext —— 让工具按需取（在持久化会话中
+        // 区分写入目标 / 读取上下文）；ephemeral 路径（无 conversation）自然为
+        // undefined，工具自行 graceful degrade。
         conversationId: state.conversationId ?? undefined,
         abortSignal: interruptRuntime.controller.signal,
         onYield: (e) => renderer.handleEvent(e),

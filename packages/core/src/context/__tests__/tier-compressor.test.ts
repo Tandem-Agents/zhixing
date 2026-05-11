@@ -116,7 +116,6 @@ describe("applyTierCompression", () => {
         if (block.type === "tool_result" && block.content.includes("已截断至")) {
           expect(block.content.length).toBeLessThan(5000);
           expect(block.content).toContain(`已截断至 ${TIER2_MAX_CHARS} 字符`);
-          expect(block.content).toContain("recall_history");
           return;
         }
       }

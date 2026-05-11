@@ -122,7 +122,7 @@ describe("buildTurn — tool-loop turn（含工具调用）", () => {
     expect(turn.assistantMessage).toBe(finalAssistant);
 
     // toolCalls 扁平化持久化：1 条记录；id 直接来自协议层 tool_use.id，
-    // 让 recall_history 等按 toolUseId 反查的消费方有可靠数据来源
+    // 保留按 id 反查能力（toolUseId ↔ tool_use 协议层锚点持久化）
     expect(turn.toolCalls).toHaveLength(1);
     expect(turn.toolCalls![0]).toEqual({
       id: "tc_1",
@@ -161,7 +161,7 @@ describe("buildTurn — tool-loop turn（含工具调用）", () => {
     expect(turn.toolCalls![0]!.result).toBe("match1\nmatch2");
     expect(turn.toolCalls![1]!.name).toBe("read");
     expect(turn.toolCalls![1]!.result).toBe("file content");
-    // tool_use id 持久化到 record.id —— recall_history 等按 id 反查的消费方依赖
+    // tool_use id 持久化到 record.id —— 保留按 id 反查能力（协议层锚点持久化）
     expect(turn.toolCalls![0]!.id).toBe("a");
     expect(turn.toolCalls![1]!.id).toBe("b");
   });

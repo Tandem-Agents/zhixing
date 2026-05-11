@@ -408,10 +408,6 @@ export function createDefaultClassifier(
   const internalClassifier: OperationClassifier = { classify: () => "internal" };
   composite.registerContext("schedule", internalClassifier);
   composite.registerContext("memory", internalClassifier);
-  // recall_history 仅读自身 transcript（zhixing home 内 conversation 文件），
-  // 与 memory / schedule 同质：内部状态查询，无外部副作用，不应被 fallback
-  // BoundaryImpactClassifier 因无 boundaries 声明而误判为 critical。
-  composite.registerContext("recall_history", internalClassifier);
   // request_capabilities 仅读写 runtime 内存中的 capabilityState（决定下一次
   // LLM call 暴露哪些工具的完整 schema），无外部副作用，与上述内部工具同质。
   composite.registerContext("request_capabilities", internalClassifier);

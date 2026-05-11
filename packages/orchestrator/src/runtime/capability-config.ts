@@ -6,8 +6,8 @@
  * - `system-prompt.ts:buildCapabilityToolUsage`：在 prompt 中告诉 LLM 哪些工具
  *   "始终在 tools[] 中"且每个工具的简短用途描述
  *
- * Map 形态而非 Set —— 让 always 工具名 + prompt 描述同源单写：未来加 always
- * 工具（如 Phase 2 的 task_list）时只需在此 Map 加一行，prompt 与装配自动同步。
+ * Map 形态而非 Set —— 让 always 工具名 + prompt 描述同源单写：新增 always
+ * 工具时只需在此 Map 加一行，prompt 与装配自动同步。
  *
  * 描述风格：动词短语，主语隐含为"用户"或"LLM"。配合 buildCapabilityToolUsage
  * 输出 `- \`<name>\` — <description>` 行格式。description 不出现在 API tools[]
@@ -16,7 +16,6 @@
  */
 export const ALWAYS_TOOL_PROMPT_DESCRIPTIONS = {
   memory: "save / search / manage the user's persistent memories",
-  recall_history: "recall raw historical content from the conversation transcript",
   request_capabilities: "activate the tools listed below",
 } as const;
 
