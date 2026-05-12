@@ -30,6 +30,7 @@ export {
   MODEL_CAPABILITIES,
   UNKNOWN_MODEL_CAPABILITY,
   getModelCapabilityOverride,
+  normalizeModelId,
   resolveModelCapability,
 } from "./model-capability.js";
 export type {

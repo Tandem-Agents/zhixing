@@ -67,8 +67,8 @@ import {
   createProviderRoles,
   ensureWorkspaceDir,
   getGlobalConfigPath,
-  getModelCapabilityOverride,
   PROTOCOL_BUDGET_DEFAULTS,
+  getModelCapabilityOverride,
   resolveModelCapability,
   resolveWorkspace,
   type ResolvedWorkspace,
@@ -469,7 +469,8 @@ export async function createAgentRuntime(
   // 找不到 → fail-closed → critical → 在 ci 模式下被 PermissionMatcher block。
   // 这同时是 MCP / 动态插件接入路径的统一模式,不是 Task 专用 hack。
   // ModelCapability 解析 —— Task 工具 + segmentManager 共用同源 capability。
-  // override 走 getModelCapabilityOverride helper(大小写无关查找)。
+  // 优先级:用户 modelCapabilityOverrides[model] > 内置 MODEL_CAPABILITIES > UNKNOWN 兜底。
+  // map key / model ID 双向 normalize(剥 vendor 前缀 + 大小写无关),用户任意形式都命中。
   const mainModelCapability = resolveModelCapability(
     roles.main.model,
     getModelCapabilityOverride(
@@ -765,7 +766,7 @@ export async function createAgentRuntime(
         ? createSegmentManager({
             estimator,
             // 复用装配期解析的 mainModelCapability —— 与 Task 工具的 riskMaxTokens
-            // 同源（override 已走 getModelCapabilityOverride helper 大小写无关查找）。
+            // 同源(config.llm.main.capability 已在 resolve 内合并)。
             capability: mainModelCapability,
             callLLM: createSegmentSummarizeFn(
               segmentStreamFactory,

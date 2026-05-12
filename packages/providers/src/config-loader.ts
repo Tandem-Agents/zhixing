@@ -256,6 +256,19 @@ function buildConfigTemplate(workspaceRoot: string): string {
   // 在 ~/.zhixing/credentials.json 的 channels.<id> 段。
   // 例：启用飞书 → "messaging": { "feishu": {} }
   "messaging": {}
+
+  // ─── 模型注意力阈值（罕见手动调整，可选）───
+  // 知行内置每个常见模型的建议阈值；本字段让用户**覆盖指定模型**的阈值。
+  // 阈值绑模型不绑 role：切换主模型后旧覆盖因 key 不匹配自动失效。
+  // key 写法不敏感：带 vendor 前缀 / 不带 / 大小写都行，系统 normalize 后命中。
+  //
+  // 取消注释 + 改数值生效：
+  // ,"modelCapabilityOverrides": {
+  //   "deepseek-ai/DeepSeek-V4-Flash": {
+  //     "optimalMaxTokens": 32000,
+  //     "riskMaxTokens": 64000
+  //   }
+  // }
 }
 `;
 }

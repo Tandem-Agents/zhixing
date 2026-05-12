@@ -308,18 +308,21 @@ export interface ZhixingConfig {
   /** 网络出口配置（@zhixing/network 共享底座） */
   network?: NetworkConfig;
   /**
-   * 模型注意力阈值覆盖（罕见场景手动调整）。
+   * 模型注意力阈值覆盖（罕见场景手动调整）—— map key 是 model ID。
    *
-   * 知行内置 `MODEL_CAPABILITIES` 已覆盖主流模型，本字段仅用于：
-   *   - 内置数据滞后于实测（用户发现某模型实际表现与默认阈值不符）
-   *   - 自定义私有模型 / 不在内置表的模型（走 UNKNOWN 兜底但想精调）
+   * 数据归属:阈值是模型固有属性,内置 `MODEL_CAPABILITIES` 表覆盖主流模型;
+   * 本字段让用户**针对特定 model** 覆盖其阈值,不绑 role —— 用户切换 main /
+   * secondary 模型后,旧 override 因 key 不匹配自动失效,不会误套到新模型。
    *
-   * key 为 modelId（小写匹配，与 `MODEL_CAPABILITIES` 命名约定一致）。
-   * 值是 Partial —— 用户可只指定 optimalMaxTokens 或 riskMaxTokens 之一，
-   * 另一个走内置默认。
+   * key 写法不敏感(用 `normalizeModelId` 双向规范化):带 vendor 前缀
+   * (如 `deepseek-ai/DeepSeek-V4-Flash`) / 不带前缀 / 大小写混合,全部命中。
    *
-   * 不进 credentials.json：领域知识属于功能配置；不持久化到 conversation meta：
-   * 模型可换、阈值跟模型走（不是会话级状态）。
+   * 何时手动配置:
+   *   - 内置阈值与实测不符(model 在自己场景下表现偏离默认)
+   *   - 用了不在内置表的私有 / 自部署模型(走 UNKNOWN 兜底想精调)
+   *
+   * 不进 credentials.json:领域知识属于功能配置;不持久化到 conversation meta:
+   * 模型可换、阈值跟模型走(不是会话级状态)。
    */
   modelCapabilityOverrides?: Record<string, ModelCapabilityOverride>;
 }

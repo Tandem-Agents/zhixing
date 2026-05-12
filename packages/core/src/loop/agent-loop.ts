@@ -491,7 +491,7 @@ export async function* runAgentLoop(
       // 隐式不变量：budget compact 阈值 × contextWindow > optimalMaxTokens。
       // 此关系保证 SegmentManager 在 attention 阈值（远早于 budget）先触发，
       // contextManager 几乎从不在 SegmentManager 评估前改 messages。如果用户
-      // 通过 modelCapabilityOverrides 让阈值倒置，SegmentManager 会处理已被
+      // 通过 llm.main.capability 让阈值倒置，SegmentManager 会处理已被
       // LLMSummarize 改过的 messages（功能不破，仅降级摘要质量）。
       //
       // 段切换失败绝不阻塞 turn —— evaluate 返 modified:false 时拿原 newMessages

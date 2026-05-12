@@ -4,6 +4,7 @@ import {
   MODEL_CAPABILITIES,
   UNKNOWN_MODEL_CAPABILITY,
   getModelCapabilityOverride,
+  normalizeModelId,
   resolveModelCapability,
   type ModelCapabilityOverride,
 } from "../model-capability.js";
@@ -101,64 +102,157 @@ describe("resolveModelCapability", () => {
   });
 });
 
-describe("getModelCapabilityOverride —— 大小写无关 lookup", () => {
-  const overrides: Record<string, ModelCapabilityOverride> = {
-    "deepseek-v4-pro": { optimalMaxTokens: 96_000 },
-    "GPT-4-TURBO": { optimalMaxTokens: 80_000, riskMaxTokens: 100_000 },
-    "Claude-3-Opus": { optimalMaxTokens: 150_000 },
-  };
+describe("normalizeModelId —— vendor 前缀剥除", () => {
+  it("无 '/' 直接 lowercase", () => {
+    expect(normalizeModelId("deepseek-v4-pro")).toBe("deepseek-v4-pro");
+    expect(normalizeModelId("GPT-4-Turbo")).toBe("gpt-4-turbo");
+  });
 
+  it("siliconflow / huggingface 风格 vendor/model 前缀", () => {
+    expect(normalizeModelId("deepseek-ai/DeepSeek-V4-Flash")).toBe(
+      "deepseek-v4-flash",
+    );
+    expect(normalizeModelId("Qwen/Qwen3-30B-A3B-Instruct-2507")).toBe(
+      "qwen3-30b-a3b-instruct-2507",
+    );
+  });
+
+  it("fireworks 多级前缀只取最后一段", () => {
+    expect(normalizeModelId("accounts/fireworks/models/llama-v3-70b")).toBe(
+      "llama-v3-70b",
+    );
+  });
+
+  it("空字符串 → 空字符串(防御性,不抛错)", () => {
+    expect(normalizeModelId("")).toBe("");
+  });
+
+  it("仅 '/' 结尾 → 空字符串", () => {
+    expect(normalizeModelId("prefix/")).toBe("");
+  });
+});
+
+describe("resolveModelCapability 端到端 —— vendor 前缀命中内置表", () => {
+  it("带 'deepseek-ai/' 前缀的 DeepSeek-V4-Flash 命中内置 deepseek-v4-flash", () => {
+    const cap = resolveModelCapability("deepseek-ai/DeepSeek-V4-Flash");
+    expect(cap.modelId).toBe("deepseek-v4-flash");
+    expect(cap.optimalMaxTokens).toBe(32_000);
+    expect(cap.riskMaxTokens).toBe(64_000);
+  });
+
+  it("用户 LLMRole.capability override 在内置之上覆盖单字段", () => {
+    const cap = resolveModelCapability("deepseek-ai/DeepSeek-V4-Flash", {
+      optimalMaxTokens: 3000,
+      riskMaxTokens: 5000,
+    });
+    expect(cap.optimalMaxTokens).toBe(3000);
+    expect(cap.riskMaxTokens).toBe(5000);
+  });
+
+  it("override 单字段 + 内置兜底另一字段", () => {
+    const cap = resolveModelCapability("deepseek-ai/DeepSeek-V4-Pro", {
+      optimalMaxTokens: 100_000,
+    });
+    expect(cap.optimalMaxTokens).toBe(100_000);
+    expect(cap.riskMaxTokens).toBe(256_000); // 内置值不变
+  });
+
+  it("不在内置表的 model + 无 override → UNKNOWN 兜底", () => {
+    const cap = resolveModelCapability("vendor/unknown-model-x");
+    expect(cap.modelId).toBe("unknown-model-x");
+    expect(cap.optimalMaxTokens).toBe(16_000);
+    expect(cap.riskMaxTokens).toBe(32_000);
+  });
+});
+
+describe("getModelCapabilityOverride —— normalize 双向匹配", () => {
   it("undefined overrides → undefined", () => {
-    expect(getModelCapabilityOverride(undefined, "deepseek-v4-pro")).toBeUndefined();
-  });
-
-  it("空 map → undefined", () => {
-    expect(getModelCapabilityOverride({}, "deepseek-v4-pro")).toBeUndefined();
-  });
-
-  it("精确 lowercase 命中", () => {
-    expect(getModelCapabilityOverride(overrides, "deepseek-v4-pro")).toEqual({
-      optimalMaxTokens: 96_000,
-    });
-  });
-
-  it("查询 modelId 大写 + map key lowercase → 命中（normalize 查询侧）", () => {
-    expect(getModelCapabilityOverride(overrides, "DeepSeek-V4-Pro")).toEqual({
-      optimalMaxTokens: 96_000,
-    });
-  });
-
-  it("查询 modelId lowercase + map key 大写 → 命中（normalize 数据侧）", () => {
-    expect(getModelCapabilityOverride(overrides, "gpt-4-turbo")).toEqual({
-      optimalMaxTokens: 80_000,
-      riskMaxTokens: 100_000,
-    });
-  });
-
-  it("查询 modelId 与 map key 大小写完全不同 → 仍命中", () => {
-    expect(getModelCapabilityOverride(overrides, "CLAUDE-3-OPUS")).toEqual({
-      optimalMaxTokens: 150_000,
-    });
-    expect(getModelCapabilityOverride(overrides, "claude-3-opus")).toEqual({
-      optimalMaxTokens: 150_000,
-    });
-  });
-
-  it("未匹配 → undefined", () => {
     expect(
-      getModelCapabilityOverride(overrides, "nonexistent-model"),
+      getModelCapabilityOverride(undefined, "deepseek-v4-pro"),
     ).toBeUndefined();
   });
 
-  it("配合 resolveModelCapability 端到端 —— 用户大写 key 也生效", () => {
-    const userConfig: Record<string, ModelCapabilityOverride> = {
+  it("空 map → undefined", () => {
+    expect(
+      getModelCapabilityOverride({}, "deepseek-v4-pro"),
+    ).toBeUndefined();
+  });
+
+  it("key normalize 形式 + query normalize 形式 → O(1) 命中", () => {
+    const overrides: Record<string, ModelCapabilityOverride> = {
+      "deepseek-v4-flash": { optimalMaxTokens: 3000, riskMaxTokens: 5000 },
+    };
+    expect(getModelCapabilityOverride(overrides, "deepseek-v4-flash")).toEqual({
+      optimalMaxTokens: 3000,
+      riskMaxTokens: 5000,
+    });
+  });
+
+  it("key 带 vendor 前缀 + query normalize 形式 → 命中（兜底扫描）", () => {
+    const overrides: Record<string, ModelCapabilityOverride> = {
+      "deepseek-ai/DeepSeek-V4-Flash": { optimalMaxTokens: 3000 },
+    };
+    expect(getModelCapabilityOverride(overrides, "deepseek-v4-flash")).toEqual(
+      { optimalMaxTokens: 3000 },
+    );
+  });
+
+  it("key normalize 形式 + query 带 vendor 前缀 → 命中", () => {
+    const overrides: Record<string, ModelCapabilityOverride> = {
+      "deepseek-v4-flash": { optimalMaxTokens: 3000 },
+    };
+    expect(
+      getModelCapabilityOverride(overrides, "deepseek-ai/DeepSeek-V4-Flash"),
+    ).toEqual({ optimalMaxTokens: 3000 });
+  });
+
+  it("key 大小写混合 + query 任意大小写 → 命中（normalize 双侧）", () => {
+    const overrides: Record<string, ModelCapabilityOverride> = {
       "DeepSeek-V4-Pro": { optimalMaxTokens: 96_000 },
     };
+    expect(getModelCapabilityOverride(overrides, "deepseek-v4-pro")).toEqual({
+      optimalMaxTokens: 96_000,
+    });
+    expect(getModelCapabilityOverride(overrides, "DEEPSEEK-V4-PRO")).toEqual({
+      optimalMaxTokens: 96_000,
+    });
+  });
+
+  it("未匹配（normalize 后也无对应 key）→ undefined", () => {
+    const overrides: Record<string, ModelCapabilityOverride> = {
+      "deepseek-v4-flash": { optimalMaxTokens: 3000 },
+    };
+    expect(
+      getModelCapabilityOverride(overrides, "claude-3-opus"),
+    ).toBeUndefined();
+  });
+
+  it("切换 model 语义：用户改 main.model 后旧 override 不再套用", () => {
+    // 用户配置覆盖 Flash 阈值
+    const overrides: Record<string, ModelCapabilityOverride> = {
+      "deepseek-ai/DeepSeek-V4-Flash": {
+        optimalMaxTokens: 3000,
+        riskMaxTokens: 5000,
+      },
+    };
+    // 切换主模型到 Pro → Flash 的 override 不应命中 Pro
+    expect(
+      getModelCapabilityOverride(overrides, "deepseek-ai/DeepSeek-V4-Pro"),
+    ).toBeUndefined();
+  });
+
+  it("端到端：resolveModelCapability 接收 getOverride 结果，覆盖单字段", () => {
+    const overrides: Record<string, ModelCapabilityOverride> = {
+      "deepseek-ai/DeepSeek-V4-Flash": {
+        optimalMaxTokens: 3000,
+        riskMaxTokens: 5000,
+      },
+    };
     const cap = resolveModelCapability(
-      "deepseek-v4-pro",
-      getModelCapabilityOverride(userConfig, "deepseek-v4-pro"),
+      "deepseek-ai/DeepSeek-V4-Flash",
+      getModelCapabilityOverride(overrides, "deepseek-ai/DeepSeek-V4-Flash"),
     );
-    expect(cap.optimalMaxTokens).toBe(96_000);
-    expect(cap.riskMaxTokens).toBe(256_000); // 内置值不变
+    expect(cap.optimalMaxTokens).toBe(3000);
+    expect(cap.riskMaxTokens).toBe(5000);
   });
 });

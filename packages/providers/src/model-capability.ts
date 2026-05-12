@@ -88,7 +88,7 @@ export function resolveModelCapability(
   modelId: string,
   override?: ModelCapabilityOverride,
 ): ModelCapability {
-  const normalized = modelId.toLowerCase();
+  const normalized = normalizeModelId(modelId);
   const base =
     MODEL_CAPABILITIES[normalized] ??
     ({ ...UNKNOWN_MODEL_CAPABILITY, modelId: normalized });
@@ -103,34 +103,57 @@ export function resolveModelCapability(
 }
 
 /**
- * 从 modelCapabilityOverrides map 中按 modelId 查找 override —— **大小写不敏感**。
+ * 规范化 model ID 用于查找 —— 处理 vendor 前缀 + 大小写差异。
  *
- * 设计原因：用户在 `config.jsonc` 写 modelId key 时大小写不可预测（如
- * `"DeepSeek-V4-Pro"` / `"deepseek-v4-pro"` / `"DEEPSEEK-V4-PRO"`），与
- * `MODEL_CAPABILITIES` 表内一律 lowercase 的命名约定不一致。把"大小写无关
- * 查找"作为 helper 契约固化在 providers 包内，杜绝每个 caller 各自做
- * normalize 的重复劳动 + 防止任一 caller 漏 normalize 导致"配置写了但不生效"
- * 的沉默失效。
+ * 实际 model ID 在各 provider 间命名不统一:
+ *   - 官方:  "deepseek-chat", "claude-3-opus-20240229", "gpt-4-turbo"
+ *   - 转发: "deepseek-ai/DeepSeek-V4-Flash" (siliconflow / huggingface 风格)
+ *           "accounts/fireworks/models/llama-v3" (fireworks 风格)
  *
- * 性能：优先 O(1) lowercase 直接匹配；只在精确匹配失败时才线性扫描（用户
- * 误用大小写不一致 key 是罕见路径，O(N) 可接受）。
+ * 内置 `MODEL_CAPABILITIES` 表用最简洁的"主名"作 key(如 "deepseek-v4-flash"),
+ * 同一个模型无论从哪条路径接入都能命中。
  *
- * @param overrides 用户配置 map（缺省 undefined）
- * @param modelId 要查找的 modelId（大小写不敏感）
- * @returns 匹配的 override；未匹配返 undefined
+ * 规则:取最后一个 '/' 之后的部分,lowercase。
+ *   - "deepseek-ai/DeepSeek-V4-Flash" → "deepseek-v4-flash" ✓
+ *   - "gpt-4-turbo" → "gpt-4-turbo"(无 '/' 直接 lowercase)
+ *   - "accounts/fireworks/models/llama-v3" → "llama-v3"
+ *
+ * 这是知行**单一 ID 规范化策略**,所有 capability 查找(内置表 + 用户 override)
+ * 都走此函数,杜绝"配置 ID 与表内 ID 不一致导致沉默失效"的问题。
+ */
+export function normalizeModelId(modelId: string): string {
+  const lastSlash = modelId.lastIndexOf("/");
+  const tail = lastSlash >= 0 ? modelId.slice(lastSlash + 1) : modelId;
+  return tail.toLowerCase();
+}
+
+/**
+ * 从 `modelCapabilityOverrides` map 查找指定 model 的 override —— 用 normalize
+ * 处理 key / query 任意一侧的 vendor 前缀或大小写差异。
+ *
+ * 设计契约:用户在 config 写 key 时怎么写都行 —— 带前缀
+ * `"deepseek-ai/DeepSeek-V4-Flash"`、不带前缀 `"deepseek-v4-flash"`、
+ * 大小写混合 `"DeepSeek-V4-Flash"`,全部 normalize 后命中同一个 entry。
+ *
+ * 性能:优先 O(1) normalize 后直接 lookup(用户用 normalize 形式时命中);
+ * 兜底 O(N) 线性扫描(用户用其他形式时命中)。N 通常很小(用户手配的 override
+ * 条目数为个位数),开销可忽略。
+ *
+ * 切换语义:caller 改 `llm.main.model` 后,旧 model 的 override 因 key normalize
+ * 后不匹配新 model 而自动失效 —— 阈值绑模型不绑 role。
  */
 export function getModelCapabilityOverride(
   overrides: Record<string, ModelCapabilityOverride> | undefined,
   modelId: string,
 ): ModelCapabilityOverride | undefined {
   if (!overrides) return undefined;
-  const normalized = modelId.toLowerCase();
-  // 优先 O(1) 精确 lowercase 匹配（推荐用户走这条路径，文档约定 key 用 lowercase）
-  const exact = overrides[normalized];
+  const target = normalizeModelId(modelId);
+  // O(1):用户 key 直接是 normalize 形式
+  const exact = overrides[target];
   if (exact) return exact;
-  // fallback 线性扫描兜底用户误用大小写不一致 key 的情形
+  // 兜底:用户 key 是任意形式,normalize 后比对
   for (const [key, value] of Object.entries(overrides)) {
-    if (key.toLowerCase() === normalized) return value;
+    if (normalizeModelId(key) === target) return value;
   }
   return undefined;
 }
