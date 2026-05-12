@@ -42,6 +42,7 @@ import {
   type SegmentStreamFactory,
   type TaskListReader,
   wrapStreamWithWatchdog,
+  wrapWithCalibration,
   ToolArgumentExtractor,
   emptyUsage,
   createMessageDropStrategy,
@@ -737,17 +738,27 @@ export async function createAgentRuntime(
               { once: true },
             );
         }
-        return wrapStreamWithWatchdog(
-          resilientCallLLM({
-            model: req.model,
-            systemPrompt: req.systemPrompt,
-            tools: req.tools,
-            messages: req.messages,
-            abortSignal: controller.signal,
-          }),
-          controller,
-          segmentWatchdog,
-          eventBus,
+        // 装配链(由内到外):resilientCallLLM → wrapStreamWithWatchdog → wrapWithCalibration
+        //   - resilientCallLLM: 重试与降级
+        //   - wrapStreamWithWatchdog: idle 看门狗 + abort race
+        //   - wrapWithCalibration: 每次段切换 LLM call 用真实 inputTokens 校准 estimator
+        //
+        // calibration 不走 EventBus(llm:request_end):段切换 LLM call 与主对话
+        // emit 同型事件,listener 无可靠方式区分归属;流包装层归属精确。
+        return wrapWithCalibration(
+          wrapStreamWithWatchdog(
+            resilientCallLLM({
+              model: req.model,
+              systemPrompt: req.systemPrompt,
+              tools: req.tools,
+              messages: req.messages,
+              abortSignal: controller.signal,
+            }),
+            controller,
+            segmentWatchdog,
+            eventBus,
+          ),
+          { estimator, messages: req.messages },
         );
       };
       const segmentManager = options.segmentDeps

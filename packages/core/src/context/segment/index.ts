@@ -19,6 +19,10 @@ export {
   type SegmentStreamFactory,
 } from "./llm-fn.js";
 export {
+  wrapWithCalibration,
+  type WrapWithCalibrationOptions,
+} from "./calibration.js";
+export {
   createSegmentManager,
   SegmentManager,
   type SegmentManagerConfig,
