@@ -17,3 +17,5 @@ export {
   createStdoutWriter,
   type CliWriter,
 } from "./cli-writer.js";
+
+export { STATUS_TAIL_IDS, type StatusTailId } from "./status-tail-ids.js";

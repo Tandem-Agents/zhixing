@@ -164,11 +164,75 @@ export interface AgentLoopDeps {
 
 // ─── 循环状态（不可变） ───
 
+/**
+ * Token 估算锚点 —— 用 API 真值替代部分字符估算的"已发送 token 真值锚"。
+ *
+ * ─── 是什么 ───
+ *
+ * 每次成功 LLM call 后，API 返回 `usage.inputTokens` = LLM 实际处理的总 token
+ * 真值（含 system + messages + tools）。agent-loop 把这个真值与当时的
+ * `state.messages.length` 配对存为 anchor —— 这是"那一刻 LLM 看到这么多 messages
+ * 时真实耗了 X 个 token"的钉子。
+ *
+ * 下次需要估算"当前上下文有多少 token"时（如 context-tokens snapshot），消费方可
+ * 用 anchor 把"已发送部分"按真值锚定，仅对"自 anchor 以来新增的 messages 后缀"
+ * 做字符估算。这是业界推测 Claude Code 用的策略 —— 已发送 100% 真值 + 增量字符估算。
+ *
+ * ─── 与 estimator.calibrate 的关系 ───
+ *
+ * estimator EMA 校准是"全局 factor 收敛"，对整段 messages 做整体缩放；anchor
+ * 是"已确认部分用真值"，两者正交：
+ *   - estimator factor 校准对**未锚定**的纯字符估算路径（fallback / SegmentManager
+ *     等其他消费者）持续生效
+ *   - anchor 路径仅在 turn-end ③ 步消费，把"已发送部分"从 factor × 字符估算
+ *     升级为真值锚定
+ *
+ * ─── 失效语义（自然降级，无需主动 invalidate）───
+ *
+ * anchor 是"messages[0..baselineMessageCount] 等于 LLM 看到的那批"的不变量
+ * 假设。若后续 contextManager 压缩 / SegmentManager 切段让 messages 缩到比
+ * baselineMessageCount 还短或前缀变了，消费方应**自动降级到字符估算**（用
+ * `messages.length < baselineMessageCount` 判定 + fallback）。
+ *
+ * 不需要 invalidate：下一次 LLM call 成功又会基于新 messages.length 写新 anchor，
+ * 自然刷新。这是用户明确的设计取舍（"段切段失效就失效，下一轮就正常"）。
+ *
+ * ─── 边界条件 ───
+ *
+ * `inputTokens` 含本次 LLM call 注入的 turn-context block 字节（~100-300 token，
+ * 时间 / 任务状态等）。消费方计算 `anchor.inputTokens + estimateMessages(delta)`
+ * 时，物理上重复计了下一次注入的 turn-context（量级 < 5%），属于可接受残余偏差，
+ * 不做"减去注入字节"的精细修正（YAGNI）。
+ */
+export interface TokenAnchor {
+  /** API 真值 —— LLM 那一刻处理的总 input token 数（含 system + messages + tools） */
+  readonly inputTokens: number;
+  /**
+   * Anchor 写入时的 `state.messages.length` —— 那一刻 LLM 看到的 messages 数。
+   *
+   * 消费方契约：把 messages 视为 anchor 时刻的延伸，仅当
+   * `messages.length >= baselineMessageCount` 时才能用 anchor + delta 路径
+   * （此时 `messages.slice(baselineMessageCount)` 是自 anchor 以来的新增后缀）；
+   * 否则降级到全量字符估算。
+   *
+   * 注：turn-context inject 不改 messages 数组长度（仅给最后一条 user message
+   * 加 content block），所以 LLM 视角的 length === state.messages.length。
+   */
+  readonly baselineMessageCount: number;
+}
+
 export interface LoopState {
   readonly messages: readonly Message[];
   readonly turnCount: number;
   readonly totalUsage: TokenUsage;
   readonly transition?: { readonly reason: ContinueReason };
+  /**
+   * 最近一次成功 LLM call 写入的 token 真值锚点 —— 见 {@link TokenAnchor}。
+   *
+   * 首次 LLM call 之前为 undefined；之后每次成功 call 都用 `{ ...state, anchor }`
+   * 刷新（仅 abort / error / inputTokens=0 路径跳过，因为这些样本不可靠）。
+   */
+  readonly anchor?: TokenAnchor;
 }
 
 // ─── 终止结果（判别联合） ───

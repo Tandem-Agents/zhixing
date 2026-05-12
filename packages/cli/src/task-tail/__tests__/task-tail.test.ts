@@ -32,15 +32,22 @@ function makeStubStore(): TaskListStore & {
 /**
  * 仅捕获 setStatusTail 调用的最小 ScreenController stub。
  * 其他 API 不实现（TaskTail 不应调用）—— 调到则测试自然挂。
+ *
+ * 协议适配：ScreenController.setStatusTail 是 (id, text) 多段协议；TaskTail
+ * 必然用 id="task" 调用，本 spy 只记 text 简化断言（id 偏离会单独断言）。
  */
 function makeScreenSpy(): {
-  setStatusTail: (text: string | null) => void;
+  setStatusTail: (id: string, text: string | null) => void;
   calls: (string | null)[];
+  idCalls: string[];
 } {
   const calls: (string | null)[] = [];
+  const idCalls: string[] = [];
   return {
     calls,
-    setStatusTail(text: string | null) {
+    idCalls,
+    setStatusTail(id: string, text: string | null) {
+      idCalls.push(id);
       calls.push(text);
     },
   };

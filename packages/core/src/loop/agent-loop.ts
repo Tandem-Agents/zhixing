@@ -279,24 +279,64 @@ export async function* runAgentLoop(
 
       const usage = mergeUsage(state.totalUsage, llmResult.usage);
 
-      // ── 估算器校准（仅成功无错路径） ──
+      // ── 估算器校准 + Token Anchor 写入（仅成功无错路径） ──
+      //
+      // 两件事共用同一 success guard，依赖的真值来源相同（llmResult.usage.inputTokens）。
+      // abort / provider-error / inputTokens=0 路径全部跳过 —— 这些样本不可靠：
+      // abort 时 token 数未必返完整、provider error 时 usage 可能未送达、
+      // inputTokens=0 是 abort 在 message_end 之前的防御占位。写入污染样本会让
+      // EMA factor 漂移、anchor 与真实 LLM 视图错位。
+      //
+      // ─── ① estimator EMA 校准 ───
+      //
       // 用 API 返回的真实 inputTokens 对账本次"实际送入 LLM 的 messages"
       // （即 messagesForLLM —— TurnContextInjector 注入后），让 calibration 系数与
       // LLM 实际处理的 size 对账，而非与数据层 state.messages 对账：后者会因
       // turn-context 注入产生系统性偏差，让 calibration 系数无法收敛。
-      // abort / provider-error / inputTokens=0 路径全部跳过 —— 这些样本不可靠，
-      // 注入会污染滑动平均。
-      if (
-        params.tokenEstimator &&
+      //
+      // **维度对齐契约**：`inputTokens` 是 API 返回的 system + messages + tools
+      // 总 token 真值；estimated 必须用同样的三件套加总。早期版本只 estimate
+      // messagesForLLM，导致 ratio = actual / estimated 被错误放大到 2x+,
+      // sliding average 把 calibrationFactor 推到 1.4-2.0，估算永久 +40~80% 偏高。
+      // 修复：把 system + tools 也算进 estimated，让 actual 与 estimated 维度严格对齐。
+      //
+      // ─── ② Token Anchor 写入 ───
+      //
+      // 把 "LLM 此刻看到 state.messages.length 条 messages → 实际处理 inputTokens
+      // 个 token" 的真值钉子存到 state.anchor，供下游（如 turn-end ③ tokens 快照）
+      // 用 "anchor + delta" 替代 "纯字符估算"路径 —— 已发送部分按 API 真值锚定，
+      // 仅自 anchor 以来新增的 messages 后缀做字符估算，业界推测 Claude Code 同模式。
+      //
+      // 与 estimator 校准正交：anchor 独立于 estimator factor，不依赖 estimator
+      // 是否注入；fallback 字符估算路径仍消费 estimator factor。详见 TokenAnchor docstring。
+      const llmCallSuccess =
         !llmResult.aborted &&
         !llmResult.error &&
-        llmResult.usage.inputTokens > 0
-      ) {
-        const estimated = params.tokenEstimator.estimateMessages(messagesForLLM);
+        llmResult.usage.inputTokens > 0;
+      if (llmCallSuccess && params.tokenEstimator) {
+        const estimated =
+          params.tokenEstimator.estimateText(systemPrompt ?? "") +
+          params.tokenEstimator.estimateMessages(messagesForLLM) +
+          params.tokenEstimator.estimateTools(toolSpecs);
         params.tokenEstimator.calibrate(
           estimated,
           llmResult.usage.inputTokens,
         );
+      }
+      if (llmCallSuccess) {
+        // baselineMessageCount 用 state.messages.length 而非 messagesForLLM.length：
+        // turn-context inject 仅给最后一条 user message 加 content block 不改数组长度，
+        // 两者数值相等。用 state.messages 视角与 turn-end 钩子里的 messages 视角对齐
+        // （turn-end 拿到的 newMessages 是 state.messages 的延伸，加了 assistant 与
+        // 可能的 tool_result），delta 切片 messages.slice(baselineMessageCount) 自然是
+        // 自 anchor 以来的新增后缀。
+        state = {
+          ...state,
+          anchor: {
+            inputTokens: llmResult.usage.inputTokens,
+            baselineMessageCount: state.messages.length,
+          },
+        };
       }
 
       // ── LLM 阶段 abort → 调 cleanup 出 partial assistant + 退出 ──
@@ -369,6 +409,9 @@ export async function* runAgentLoop(
           systemPrompt: params.systemPrompt ?? "",
           tools: params.tools ?? [],
           conversationId: params.conversationId,
+          tokenEstimator: params.tokenEstimator,
+          eventBus: params.eventBus,
+          anchor: state.anchor,
         });
         if (turnEnd.kind === "terminal") {
           return await finalizeRun(turnEnd.result);
@@ -471,16 +514,22 @@ export async function* runAgentLoop(
         systemPrompt: params.systemPrompt ?? "",
         tools: params.tools ?? [],
         conversationId: params.conversationId,
+        tokenEstimator: params.tokenEstimator,
+        eventBus: params.eventBus,
+        anchor: state.anchor,
       });
       if (turnEnd.kind === "terminal") {
         return await finalizeRun(turnEnd.result);
       }
 
+      // tool 路径 state 重建 —— 保留 anchor（同 run 内 anchor 跨 turn 有效，
+      // 下一次 LLM call 成功后写入新 anchor 自然覆盖）。
       state = {
         messages: turnEnd.messages,
         turnCount: newTurnCount,
         totalUsage: usage,
         transition: { reason: "tool_use" },
+        anchor: state.anchor,
       };
     }
   } catch (e) {

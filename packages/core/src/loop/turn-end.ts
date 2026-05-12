@@ -21,7 +21,8 @@
  *
  *   ① budget-driven 兜底（ContextManager / 窗口百分比触发）
  *   ② attention-driven 切段（SegmentManager / 注意力阈值触发）
- *   ③ 未来扩展：metrics / persistence checkpoint / per-turn 任意副作用
+ *   ③ 上下文 tokens 快照 emit（estimator + eventBus 注入时）
+ *   ④ 未来扩展：metrics / persistence checkpoint / per-turn 任意副作用
  *
  * 副作用按声明顺序串行执行，前者修改的 messages 自动流入后者；任一副作用返回
  * terminal（如 contextManager error/aborted）立即短路返回，不再继续。
@@ -54,13 +55,15 @@ import {
   resolveContextManager,
   type ContextTermination,
 } from "../context/termination.js";
-import type { ContextManagerHook } from "../context/types.js";
+import type { ContextManagerHook, ITokenEstimator } from "../context/types.js";
 import type { SegmentManager } from "../context/segment/segment-manager.js";
+import type { IEventBus } from "../events/types.js";
+import type { AgentEventMap } from "../types/agent-events.js";
 import type { TokenUsage } from "../types/llm.js";
 import type { Message } from "../types/messages.js";
-import { toToolSpec } from "../types/tools.js";
+import { toToolSpec, type ToolSpec } from "../types/tools.js";
 import type { ToolDefinition } from "../types/tools.js";
-import type { AgentResult } from "./types.js";
+import type { AgentResult, TokenAnchor } from "./types.js";
 
 // ─── 输出 ───
 
@@ -94,12 +97,42 @@ export interface TurnEndParams {
   readonly contextManager?: ContextManagerHook;
   /** attention-driven 段切换（可选；缺省时段切换步骤静默 no-op） */
   readonly segmentManager?: SegmentManager;
-  /** 段切换 LLM 调用必要：保 cache prefix byte-equal */
+  /**
+   * 段切换 LLM 调用必要：保 cache prefix byte-equal。
+   * 同时也是 ③ tokens 快照估算的 system 部分输入。
+   */
   readonly systemPrompt: string;
-  /** 段切换 LLM 调用必要：保 cache prefix byte-equal */
+  /**
+   * 段切换 LLM 调用必要：保 cache prefix byte-equal。
+   * 同时也是 ③ tokens 快照估算的 tools 部分输入。
+   */
   readonly tools: readonly ToolDefinition[];
   /** 段切换 ephemeral 路径判定（缺省 → SegmentManager 内部静默 pass） */
   readonly conversationId?: string;
+
+  /**
+   * Token 估算器 —— ③ tokens 快照 emit 的依赖。
+   *
+   * 缺省时静默跳过快照 emit（与 segmentManager 缺失同模式）；不影响其他副作用。
+   *
+   * 复用 agent-loop 已有的 tokenEstimator（用于 per-LLM-call 校准）。
+   */
+  readonly tokenEstimator?: ITokenEstimator;
+  /**
+   * 事件总线 —— ③ tokens 快照通过它 emit "context:tokens_snapshot"。
+   *
+   * 与 tokenEstimator 一起缺省 → 快照 emit 整体跳过。任一缺失即静默 no-op，
+   * 不报错、不警告（订阅方应能容忍事件不到达）。
+   */
+  readonly eventBus?: IEventBus<AgentEventMap>;
+  /**
+   * Token 真值锚点 —— ③ tokens 快照优先用 anchor + delta 路径替代纯字符估算。
+   *
+   * 缺省（首次 LLM call 之前）或失效（段切段 / 压缩后 messages.length < baseline）
+   * 时 ③ 步降级到纯字符估算路径（estimator 全量加总），失效契约由 computeContextTokens
+   * 内化处理，调用方无需感知。详见 {@link TokenAnchor}。
+   */
+  readonly anchor?: TokenAnchor;
 }
 
 // ─── 钩子 ───
@@ -167,7 +200,38 @@ export async function runTurnEnd(
     }
   }
 
-  // ③ 未来扩展点 —— 新副作用直接在此追加：
+  // ③ 上下文 tokens 快照 emit
+  //
+  // 反映"下次 LLM 将看到的"上下文占用 —— 必须在 ①② 处理之后估算，让快照与
+  // 真实 LLM 视图一致（contextManager 压缩后 + segmentManager 切段后的 messages）。
+  //
+  // 与 segment:evaluation.currentTokens 的关系：后者是评估副产物（仅 SegmentManager
+  // 装配时 emit），本事件是占用快照的一等公民信号（不依赖 SegmentManager）。
+  // 订阅方（UI 上下文指示器 / 诊断面板）应订阅 context:tokens_snapshot，不要
+  // 依赖 segment:evaluation 推断占用。
+  //
+  // 估算路径决策由 computeContextTokens 单点封装：
+  //   - anchor 可用 → "已发送部分用 API 真值 + 新增 delta 字符估算"，业界推测
+  //     Claude Code 同模式，误差从纯字符估算的 ±20-80% 降到 ±5-15%
+  //   - anchor 失效或缺失 → 纯字符估算 fallback，使用 estimator EMA 校准的 factor
+  //
+  // 静默语义：tokenEstimator / eventBus 任一缺失即跳过（与 ①②contextManager /
+  // segmentManager 缺失同模式）；订阅方应能容忍事件不到达。
+  if (params.tokenEstimator && params.eventBus) {
+    const totalTokens = computeContextTokens({
+      estimator: params.tokenEstimator,
+      systemPrompt: params.systemPrompt,
+      messages,
+      tools: params.tools.map(toToolSpec),
+      anchor: params.anchor,
+    });
+    await params.eventBus.emit("context:tokens_snapshot", {
+      totalTokens,
+      turnCount: params.turnCount,
+    });
+  }
+
+  // ④ 未来扩展点 —— 新副作用直接在此追加：
   //    - 复用上方 messages 变量（链式传递）
   //    - 失败语义按"是否致命"决定：致命返 terminal 短路；非致命降级继续
   //    - 不感知 caller 路径，纯粹按"turn 结束做什么"思考
@@ -206,4 +270,63 @@ function toTerminalAgentResult(
     case "aborted":
       return { reason: "aborted", usage };
   }
+}
+
+// ─── ③ tokens 快照计算 ───
+
+interface ContextTokensInput {
+  readonly estimator: ITokenEstimator;
+  readonly systemPrompt: string;
+  readonly messages: readonly Message[];
+  readonly tools: readonly ToolSpec[];
+  readonly anchor: TokenAnchor | undefined;
+}
+
+/**
+ * 计算"下次 LLM 将看到的上下文总 token 数"—— anchor + delta / fallback 字符估算双路径。
+ *
+ * ─── 路径决策 ───
+ *
+ *   Anchor 可用（首次 LLM call 之后 + messages 是 anchor 时刻的延伸）：
+ *     return anchor.inputTokens + estimator.estimateMessages(messages.slice(baseline))
+ *     - 已发送部分按 API 真值锚定（100% 精确）
+ *     - 仅自 anchor 以来新增的 messages 后缀做字符估算（增量字节小，绝对误差小）
+ *
+ *   Anchor 缺失（首次 LLM call 之前）/ 失效（段切段 / 压缩让 messages 缩到比 baseline 短）：
+ *     return estimateText(system) + estimateMessages(messages) + estimateTools(tools)
+ *     - 三件套全量字符估算 + estimator EMA 校准 factor
+ *     - 失效语义靠 `messages.length < anchor.baselineMessageCount` 自然降级，
+ *       不需要主动 invalidate —— 下一次 LLM call 成功又会基于新 length 写新 anchor
+ *
+ * ─── 为什么这个 helper 单独抽出 ───
+ *
+ * - turn-end 钩子主流程只关心"决定 emit 什么 totalTokens"，路径决策细节内化在此
+ *   单点，避免 ③ 步与主控制流耦合
+ * - 单一职责 + 纯函数：输入完整、无副作用、易测试（直接断言返回值）
+ * - 未来若再加估算路径（如 deepseek-tokenizer 真值），扩展点收敛于此函数体内的
+ *   `if-else if-fallback` 链，钩子主流程零改动
+ *
+ * ─── Anchor 路径的残余误差源 ───
+ *
+ * - anchor.inputTokens 含本次 LLM call 注入的 turn-context block 字节（~100-300
+ *   token），下次估算 `anchor.inputTokens + delta` 时物理上重复计了这部分 ——
+ *   业界共识可接受的小高估（< 5%），不做"减去注入字节"的精细修正（YAGNI）
+ * - delta 部分的字符估算用 estimator factor，仍受字符权重 ±10% 的天然偏差，
+ *   但增量字节小所以绝对误差可控
+ */
+function computeContextTokens(input: ContextTokensInput): number {
+  const { estimator, systemPrompt, messages, tools, anchor } = input;
+
+  // Anchor 路径 —— 已发送部分按真值锚定
+  if (anchor && messages.length >= anchor.baselineMessageCount) {
+    const delta = messages.slice(anchor.baselineMessageCount);
+    return anchor.inputTokens + estimator.estimateMessages(delta);
+  }
+
+  // Fallback —— 纯字符估算（首次 LLM call 之前 / anchor 失效）
+  return (
+    estimator.estimateText(systemPrompt) +
+    estimator.estimateMessages(messages) +
+    estimator.estimateTools(tools)
+  );
 }

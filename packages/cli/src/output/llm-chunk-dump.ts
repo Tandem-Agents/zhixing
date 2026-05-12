@@ -350,7 +350,14 @@ function formatStreamEvent(event: StreamEvent, elapsedMs: number): string {
     case "tool_call_end":
       return `${head} tool_call_end (id=${event.id})\n\n`;
     case "message_end":
-      return `${head} message_end (stopReason=${event.stopReason ?? "<none>"})\n\n`;
+      // usage 完整 dump —— 含 inputTokens / outputTokens 真值 + 可选 cacheReadTokens
+      // / cacheWriteTokens（provider 解析后的 TokenUsage）。诊断"cache 命中显示
+      // 不出来"等场景必看：JSON 里没出现 cacheReadTokens 字段 = 上游 API 没返回
+      // 或 vendor 方言未匹配；出现但 cli 不显示 = ContextIndicator / 渲染层问题。
+      return (
+        `${head} message_end (stopReason=${event.stopReason ?? "<none>"})\n` +
+        `  usage: ${JSON.stringify(event.usage)}\n\n`
+      );
     case "error":
       return `${head} error: ${event.error.message ?? String(event.error)}\n\n`;
     default: {

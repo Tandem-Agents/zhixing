@@ -34,6 +34,10 @@ import {
   type StatusBarHandle,
 } from "./status-bar/index.js";
 import { attachChunkDumpToBus } from "./output/index.js";
+import {
+  createContextIndicator,
+  type ContextIndicatorHandle,
+} from "./context-indicator/index.js";
 
 // ─── 中断诊断文本 ───
 
@@ -471,7 +475,7 @@ export interface CreateRenderSubscribersOptions {
   readonly renderer?: OutputRenderer;
   /** CliWriter——所有事件渲染必须经此写屏，禁止直接 console.log */
   readonly writer: CliWriter;
-  /** 可选 screen——存在时启用 status-bar；status-bar 直接调 setStatusBar，不经 writer */
+  /** 可选 screen——存在时启用 status-bar 与 context-indicator；不经 writer */
   readonly screen?: ScreenController;
 }
 
@@ -546,10 +550,22 @@ export function createRenderSubscribers(
 
     const interruptHandle = setupInterruptRendering(bus, pauseUI, writer);
 
-    // 注入 screen 时启用 status-bar——接管 spinner / sub-agent 嵌套等动态状态展示
+    // 注入 screen 时启用动态状态展示组件 —— status-bar (spinner / sub-agent 嵌套)
+    // + context-indicator (状态条尾部 "context" 段，合成 "~ Xk (cache Yk)")。
+    //
+    // 单一启用条件 = `if (screen)`：与 status-bar 同模式，无 chrome 的运行模式
+    // （runOnce / serve）自然不装配两者。不引入额外 ENV / CLI flag —— 常态化展示，
+    // 数据可用性自然降级（详见 context-indicator.ts docstring "自然降级"段）。
+    //
+    // 装配顺序 = 屏幕段顺序：context-indicator 在 status-bar 之后装配（status-bar
+    // 用 setStatusBar，与 tail 段集合无序冲突），最终状态条尾部展示顺序
+    // 「[task] │ [context]」由 task-tail（在 repl.ts 装配）先注册 + context-indicator
+    // 后注册形成（首次注册顺序决定视觉顺序）。
     let statusBar: StatusBarHandle | null = null;
+    let contextIndicator: ContextIndicatorHandle | null = null;
     if (screen) {
       statusBar = createStatusBar({ screen, eventBus: bus });
+      contextIndicator = createContextIndicator({ screen, eventBus: bus });
     }
 
     // chunk-dump 诊断旁路——ZHIXING_RAW_DUMP=1 启用时把 LLM stream 完整事件流（含
@@ -561,6 +577,7 @@ export function createRenderSubscribers(
       for (const u of unsubs) u();
       interruptHandle.dispose();
       statusBar?.dispose();
+      contextIndicator?.dispose();
       detachChunkDump();
     };
   };

@@ -1770,6 +1770,9 @@ describe("Agent Loop", () => {
             return msgs.length * 10;
           },
           estimateText: () => 0,
+          // calibrate 全量对账契约：estimated 必须含 system + messages + tools，
+          // 与 API 真值 inputTokens 维度对齐（agent-loop.ts 校准点强制此契约）
+          estimateTools: () => 0,
           calibrate: (estimated: number, actual: number) => {
             calls.push({ estimated, actual });
           },

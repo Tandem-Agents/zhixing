@@ -181,13 +181,13 @@ describe("ScreenController · setStatusBar", () => {
   });
 });
 
-describe("ScreenController · setStatusTail（task-tail 同行 / 独立双源）", () => {
+describe("ScreenController · setStatusTail（按 id 注册多段：单段语义）", () => {
   it("statusLines 非空 + tail 非空：tail 拼到第一行末尾，chrome 高度不变", () => {
     const { out, sc } = makeHarness({ rows: 10 });
     sc.attachInput(makeRegion(["> input"]));
     sc.setStatusBar(["S1", "S2"]);
     out.buffer = "";
-    sc.setStatusTail("TAIL");
+    sc.setStatusTail("task", "TAIL");
     // chrome 起手行 = scrollBottom + 1 = (rows - chromeHeight) + 1 = (10 - 3) + 1 = 8
     // —— 与 setStatusTail 调用前一致，说明 chromeHeight 没变（仍是 3）
     expect(out.buffer).toContain("\x1b[8;1H");
@@ -202,11 +202,11 @@ describe("ScreenController · setStatusTail（task-tail 同行 / 独立双源）
     const { out, sc } = makeHarness({ rows: 10 });
     sc.attachInput(makeRegion(["> input"]));
     out.buffer = "";
-    sc.setStatusTail("TAIL");
+    sc.setStatusTail("task", "TAIL");
     // chrome 从 1 (input) → 2 (tail + input)，scrollBottom 9 → 8
     expect(out.buffer).toContain("\x1b[1;8r");
     expect(out.buffer).toContain("TAIL");
-    // 独立显示时不应有 │ 分隔符
+    // 单段独立显示时不应有 │ 分隔符
     expect(out.buffer).not.toContain("│");
   });
 
@@ -214,38 +214,46 @@ describe("ScreenController · setStatusTail（task-tail 同行 / 独立双源）
     const { out, sc } = makeHarness({ rows: 10 });
     sc.attachInput(makeRegion(["> input"]));
     out.buffer = "";
-    sc.setStatusTail("X");
+    sc.setStatusTail("task", "X");
     // contentPrefix 是两空格 —— tail 行起手应有 "  X"
     expect(out.buffer).toMatch(/\x1b\[\d+;1H\x1b\[2K {2}X/);
   });
 
-  it("setStatusTail(null) 隐藏 tail（chrome 高度回退）", () => {
+  it("setStatusTail(id, null) 移除该段（chrome 高度回退）", () => {
     const { out, sc } = makeHarness({ rows: 10 });
     sc.attachInput(makeRegion(["> input"]));
-    sc.setStatusTail("TAIL");
+    sc.setStatusTail("task", "TAIL");
     out.buffer = "";
-    sc.setStatusTail(null);
+    sc.setStatusTail("task", null);
     // chrome 从 2 (tail + input) → 1 (input only)，scrollBottom 8 → 9
     expect(out.buffer).toContain("\x1b[1;9r");
   });
 
-  it("setStatusTail(空字符串) 等同 null（隐藏）", () => {
+  it("setStatusTail(id, 空字符串) 等同 null（移除该段）", () => {
     const { out, sc } = makeHarness({ rows: 10 });
     sc.attachInput(makeRegion(["> input"]));
-    sc.setStatusTail("TAIL");
+    sc.setStatusTail("task", "TAIL");
     out.buffer = "";
-    sc.setStatusTail("");
-    // 空字符串视为 null，chrome 高度回退
+    sc.setStatusTail("task", "");
     expect(out.buffer).toContain("\x1b[1;9r");
   });
 
-  it("setStatusTail 幂等：相同值连续调用不重画", () => {
+  it("setStatusTail 幂等：同 id 同值连续调用不重画", () => {
     const { out, sc } = makeHarness({ rows: 10 });
     sc.attachInput(makeRegion(["> input"]));
-    sc.setStatusTail("TAIL");
+    sc.setStatusTail("task", "TAIL");
     out.buffer = "";
-    sc.setStatusTail("TAIL");
+    sc.setStatusTail("task", "TAIL");
     // 相同值 → 跳过 refreshChrome → 无 ANSI 输出
+    expect(out.buffer).toBe("");
+  });
+
+  it("setStatusTail 幂等：同 id 持续不存在 + null 不重画", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    out.buffer = "";
+    sc.setStatusTail("task", null);
+    // 段本就不存在 → 跳过 refreshChrome → 无 ANSI 输出
     expect(out.buffer).toBe("");
   });
 
@@ -253,14 +261,14 @@ describe("ScreenController · setStatusTail（task-tail 同行 / 独立双源）
     const { out, sc } = makeHarness({ rows: 10 });
     sc.attachInput(makeRegion(["> input"]));
     sc.setStatusBar(["STATUS"]);
-    sc.setStatusTail("TAIL");
+    sc.setStatusTail("task", "TAIL");
     expect(out.buffer).toContain("STATUS");
     expect(out.buffer).toContain("TAIL");
   });
 
   it("attach 前 setStatusTail 入队，attach 时被读到", () => {
     const { out, sc } = makeHarness({ rows: 10 });
-    sc.setStatusTail("TAIL");
+    sc.setStatusTail("task", "TAIL");
     sc.attachInput(makeRegion(["> input"]));
     // chrome = 1 tail + 1 input = 2，scrollBottom = 8
     expect(out.buffer).toContain("\x1b[1;8r");
@@ -270,7 +278,7 @@ describe("ScreenController · setStatusTail（task-tail 同行 / 独立双源）
   it("detachInput 后 statusTail 被清理（重新 attach 不复活）", () => {
     const { out, sc } = makeHarness({ rows: 10 });
     sc.attachInput(makeRegion(["> input"]));
-    sc.setStatusTail("OLD_TAIL");
+    sc.setStatusTail("task", "OLD_TAIL");
     sc.detachInput();
     out.buffer = "";
     sc.attachInput(makeRegion(["> input"]));
@@ -281,14 +289,83 @@ describe("ScreenController · setStatusTail（task-tail 同行 / 独立双源）
     const { out, sc } = makeHarness({ rows: 10, cols: 30 });
     sc.attachInput(makeRegion(["> input"]));
     out.buffer = "";
-    sc.setStatusTail("a".repeat(100));
+    sc.setStatusTail("task", "a".repeat(100));
     // 找出 tail 行：以 \x1b[<row>;1H\x1b[2K 开头并含 a 的段
-    // 截断后行内 a 数量 + contentPrefix(2) <= 29 (cols - 1)
     const tailMatch = out.buffer.match(/\x1b\[2K(  a+\S*)/);
     expect(tailMatch).toBeTruthy();
     // visible width <= viewportCols - 1 (= 29)
-    // 由于 ansi.length 已知，简单检查 a 数量上界
     expect(tailMatch![1]!.replace(/[^a]/g, "").length).toBeLessThanOrEqual(28);
+  });
+});
+
+describe("ScreenController · setStatusTail 多段拼接（task + context 协议）", () => {
+  it("多段拼接：按首次注册顺序保序", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    sc.setStatusBar(["STATUS"]);
+    out.buffer = "";
+    sc.setStatusTail("task", "TASK_SEG");
+    sc.setStatusTail("context", "~ 14k");
+    // STATUS │ TASK_SEG │ ~ 14k —— 顺序由首次注册决定
+    const idxStatus = out.buffer.indexOf("STATUS");
+    const idxTask = out.buffer.indexOf("TASK_SEG");
+    const idxCtx = out.buffer.indexOf("~ 14k");
+    expect(idxStatus).toBeGreaterThanOrEqual(0);
+    expect(idxTask).toBeGreaterThan(idxStatus);
+    expect(idxCtx).toBeGreaterThan(idxTask);
+  });
+
+  it("多段拼接：相同 id 更新位置不变（不会被挪到末尾）", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    sc.setStatusBar(["STATUS"]);
+    sc.setStatusTail("task", "TASK_SEG_OLD");
+    sc.setStatusTail("context", "CTX_SEG");
+    out.buffer = "";
+    sc.setStatusTail("task", "TASK_SEG_NEW");
+    // task 段更新后位置仍在 context 之前
+    const idxTask = out.buffer.indexOf("TASK_SEG_NEW");
+    const idxCtx = out.buffer.indexOf("CTX_SEG");
+    expect(idxTask).toBeGreaterThan(0);
+    expect(idxCtx).toBeGreaterThan(idxTask);
+  });
+
+  it("多段拼接：移除一段不影响其他段", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    sc.setStatusTail("task", "TASK_SEG");
+    sc.setStatusTail("context", "CTX_SEG");
+    out.buffer = "";
+    sc.setStatusTail("task", null);
+    // task 移除后剩 context；上下文段独立显示
+    expect(out.buffer).not.toContain("TASK_SEG");
+    expect(out.buffer).toContain("CTX_SEG");
+  });
+
+  it("多段拼接：全部移除后等同无 tail（chrome 高度回退）", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    sc.setStatusTail("task", "TASK_SEG");
+    sc.setStatusTail("context", "CTX_SEG");
+    out.buffer = "";
+    sc.setStatusTail("task", null);
+    sc.setStatusTail("context", null);
+    // 双段全空 → 仅 input 在 chrome → scrollBottom = 9
+    expect(out.buffer).toContain("\x1b[1;9r");
+  });
+
+  it("多段拼接：statusLines 空 + 两段非空 → 独立成行包含双段", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    out.buffer = "";
+    sc.setStatusTail("task", "TASK");
+    sc.setStatusTail("context", "CTX");
+    // tail 独立成行（chrome 高度 = 2: tail + input）
+    expect(out.buffer).toContain("\x1b[1;8r");
+    expect(out.buffer).toContain("TASK");
+    expect(out.buffer).toContain("CTX");
+    // 多段独立成行时必含 │ 分隔符
+    expect(out.buffer).toContain("│");
   });
 });
 

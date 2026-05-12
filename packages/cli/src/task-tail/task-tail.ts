@@ -2,12 +2,15 @@
  * TaskTail —— 屏幕底部任务区控制器。
  *
  * 长生命周期模块：通过 TaskListService.subscribe 感知数据变化，
- * 调用 ScreenController.setStatusTail 投递渲染文本。
+ * 调用 ScreenController.setStatusTail("task", text) 投递渲染文本。
+ *
+ * 与其他 tail 段（如 ContextIndicator 的 "context" 段）通过稳定 id 隔离，
+ * 互不覆盖；段在状态条第一行按首次注册顺序拼接（参见 ScreenController.setStatusTail）。
  *
  * 生命周期：
  *   - start()：订阅 service + 初次拉 cache 同步显示
  *   - refresh()：显式刷新（conversation 切换 /new / /switch 路径调用）
- *   - dispose()：取消订阅 + 清空屏幕 tail
+ *   - dispose()：取消订阅 + 清空 "task" 段
  *
  * conversation 多路隔离：subscribe handler 内对比事件 conversationId 与
  * 当前活跃 conversationId，仅响应当前对话的变化。
@@ -15,7 +18,7 @@
 
 import type { TaskListState } from "@zhixing/core";
 import type { TaskListService } from "@zhixing/tools-builtin";
-import type { ScreenController } from "../screen/index.js";
+import { STATUS_TAIL_IDS, type ScreenController } from "../screen/index.js";
 import { renderTaskTail } from "./task-tail-render.js";
 
 export interface TaskTailOptions {
@@ -57,7 +60,7 @@ export class TaskTail {
     if (this.disposed) return;
     const convId = this.opts.getConversationId();
     if (!convId) {
-      this.opts.screen.setStatusTail(null);
+      this.opts.screen.setStatusTail(STATUS_TAIL_IDS.task, null);
       return;
     }
     this.applyState(this.opts.service.getCached(convId));
@@ -68,11 +71,14 @@ export class TaskTail {
     this.disposed = true;
     this.unsubscribe?.();
     this.unsubscribe = null;
-    this.opts.screen.setStatusTail(null);
+    this.opts.screen.setStatusTail(STATUS_TAIL_IDS.task, null);
   }
 
   private applyState(state: TaskListState | null): void {
     const text = renderTaskTail(state);
-    this.opts.screen.setStatusTail(text.length > 0 ? text : null);
+    this.opts.screen.setStatusTail(
+      STATUS_TAIL_IDS.task,
+      text.length > 0 ? text : null,
+    );
   }
 }

@@ -76,6 +76,18 @@ export const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
     quirks: {
       supportsTools: true,
       supportsStreamUsage: true,
+      // **不显式声明 usageDialect** —— 嗅探链自动 fallback：
+      //
+      // 硅基流动作为中转平台不透传上游 LLM 的 prompt cache 命中字段(实测 2026-05
+      // DeepSeek-V4-Flash via 硅基流动: 响应 usage 仅含 prompt_tokens /
+      // completion_tokens, 无 prompt_cache_hit_tokens 也无 prompt_tokens_details.
+      // cached_tokens, 无论上下文复用程度如何), 因此 CLI `--ctx` 指示器的
+      // `(cache Xk)` 后缀在此 provider 下**永远不显示** —— 这是上游限制, 非 zhixing
+      // 实现 bug。
+      //
+      // 历史推断: 中转平台按 token 计费, 暴露 cache 命中可能影响计费可见性 ——
+      // 是商业决策而非技术限制。需要看 cache 时换 DeepSeek 直连 (api.deepseek.com)
+      // 或其他暴露 cache 字段的 vendor (anthropic / openai)。
     },
   },
 

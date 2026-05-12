@@ -104,16 +104,25 @@ export interface ScreenController {
   /** 设置状态条内容；null / 空数组 = 隐藏状态条。 */
   setStatusBar(lines: readonly string[] | null): void;
   /**
-   * 设置状态行尾段文本（纯任务文本，不含分隔符）。
+   * 设置/移除状态行尾部一个独立段 —— 多 source 协议。
    *
-   * 渲染规则由 chrome 协议决定：
-   *   - statusLines 非空 + statusTail 非空 → 拼到第一行末尾（chrome 协议绘制 │ 分隔符）
-   *   - statusLines 空 + statusTail 非空 → tail 独立成行（加 contentPrefix 与全局对齐）
-   *   - statusTail 空 / null → 不渲染 tail
+   * 协议：
+   *   - 每个 source（task / context / 未来扩展）用稳定的 id 独占一段，
+   *     多个段按**首次注册顺序**保序拼接，段之间由 chrome 绘制 `│` 分隔符。
+   *   - 同 id 重复 set 是更新（位置不变），不会重新进入末尾。
+   *   - text=null / 空字符串 → 移除该 id 的段；其他段不受影响。
+   *
+   * 渲染规则（chrome 协议）：
+   *   - statusLines 非空 + 任一 tail 段非空 → 段集合拼到第一行末尾
+   *   - statusLines 空 + 任一 tail 段非空 → 段集合独立成行（加 contentPrefix 与全局对齐）
+   *   - 所有 tail 段为空 → 不渲染 tail
    *
    * 行末超长由 chrome 行宽 clamp 自然截断。
+   *
+   * 已知 id 集合：见 `screen/status-tail-ids.ts` 的 `STATUS_TAIL_IDS` 注册表
+   * （单一命名权威 —— 调用方必须引用常量，禁止直接写字符串字面量）。
    */
-  setStatusTail(text: string | null): void;
+  setStatusTail(id: string, text: string | null): void;
   /**
    * 写到滚动区——caller 通过 fn 接收的 write 函数追加内容。
    *
@@ -220,7 +229,16 @@ class ScreenControllerImpl implements ScreenController {
 
   private input: InputRegion | null = null;
   private statusLines: readonly string[] = [];
-  private statusTail: string | null = null;
+  /**
+   * 状态行尾部多段集合 —— 按 source id 注册的独立段，JS Map 自带插入顺序保序。
+   *
+   * 设计：每个独立 source（TaskTail / ContextIndicator / 未来扩展）持有自己的 id，
+   * 互不覆盖。chrome 拼接时按 Map iteration 顺序（= 首次注册顺序）拼，让"先注册先
+   * 显示"形成稳定的视觉顺序契约，调用方可预期最终位置。
+   *
+   * 同 id 重新 set 是"更新"（保位）；set 为 null/空 是"移除"（释放位）。
+   */
+  private statusTails: Map<string, string> = new Map();
 
   /**
    * 首次 attach 之前 caller 调用 cliWriter.line / withScrollWrite 累积的内容——
@@ -281,7 +299,7 @@ class ScreenControllerImpl implements ScreenController {
       }
       this.input = null;
       this.statusLines = [];
-      this.statusTail = null;
+      this.statusTails.clear();
       this.hasActiveSegment = false;
     });
   }
@@ -296,11 +314,20 @@ class ScreenControllerImpl implements ScreenController {
     });
   }
 
-  setStatusTail(text: string | null): void {
+  setStatusTail(id: string, text: string | null): void {
     this.enqueue(() => {
       const next = text && text.length > 0 ? text : null;
-      if (next === this.statusTail) return; // 幂等：无变化不重画
-      this.statusTail = next;
+      const current = this.statusTails.get(id);
+      // 幂等：值未变（含双方都不存在的情形）不重画
+      if (next === null && current === undefined) return;
+      if (next !== null && next === current) return;
+      if (next === null) {
+        this.statusTails.delete(id);
+      } else {
+        // 已存在的 id 在 Map 内位置不变（JS Map.set 对已有 key 不改变 iteration 顺序），
+        // 新 id 自然追加到末尾 —— 实现"先注册先显示"契约
+        this.statusTails.set(id, next);
+      }
       if (this.scrollRegion.state.attached) {
         this.refreshChrome();
       }
@@ -445,7 +472,7 @@ class ScreenControllerImpl implements ScreenController {
         }
         this.input = null;
         this.statusLines = [];
-        this.statusTail = null;
+        this.statusTails.clear();
         this.preAttachContent = "";
         this.hasActiveSegment = false;
       },
@@ -477,6 +504,18 @@ class ScreenControllerImpl implements ScreenController {
     this.repaintInputCursor();
   }
 
+  /**
+   * 按 Map 插入顺序拼接所有 tail 段 —— 多段间复用 STATUS_TAIL_SEPARATOR
+   * （与 statusLines[0] ↔ tail 之间使用同一分隔符，视觉一致：A │ B │ C）。
+   * 段集合为空 → 返回 null（caller 据此决定是否渲染 tail 区域）。
+   */
+  private joinStatusTails(): string | null {
+    if (this.statusTails.size === 0) return null;
+    const segments: string[] = [];
+    for (const text of this.statusTails.values()) segments.push(text);
+    return segments.join(ScreenControllerImpl.STATUS_TAIL_SEPARATOR);
+  }
+
   /** chrome 协议：高度可能变化时调用——重算 chromeHeight、拼字节、转 ScrollRegion */
   private refreshChrome(): void {
     const chromeHeight = this.computeChromeHeight();
@@ -486,9 +525,9 @@ class ScreenControllerImpl implements ScreenController {
   }
 
   /**
-   * status 区高度（不含 input）—— 按双源（statusLines / statusTail）existence 推导：
-   *   - statusLines 非空：保留原行数（tail 拼到第一行末尾，不占新行）
-   *   - statusLines 空 + statusTail 非空：1 行（tail 独立成行）
+   * status 区高度（不含 input）—— 按双源（statusLines / statusTails 段集合）existence 推导：
+   *   - statusLines 非空：保留原行数（tail 段集合拼到第一行末尾，不占新行）
+   *   - statusLines 空 + statusTails 非空：1 行（tail 段集合独立成行）
    *   - 两者都空：0 行
    *
    * 单一来源：computeChromeHeight + repaintInputCursor 共用，保证 chrome 边界与
@@ -496,7 +535,7 @@ class ScreenControllerImpl implements ScreenController {
    */
   private computeStatusHeight(): number {
     if (this.statusLines.length > 0) return this.statusLines.length;
-    if (this.statusTail !== null) return 1;
+    if (this.statusTails.size > 0) return 1;
     return 0;
   }
 
@@ -521,24 +560,21 @@ class ScreenControllerImpl implements ScreenController {
     const startRow = scrollBottom + 1;
     const lineBudget = this.viewportCols - 1; // chrome 行宽硬合约：防终端隐式 wrap
 
+    const tailJoined = this.joinStatusTails();
     const allLines: string[] = [];
     if (this.statusLines.length > 0) {
-      // statusLines 非空：第一行拼 tail（chrome 协议绘制分隔符），其余 status 行不变
+      // statusLines 非空：第一行拼 tail 段集合（chrome 协议绘制分隔符），其余 status 行不变
       for (let i = 0; i < this.statusLines.length; i++) {
         let line = this.statusLines[i]!;
-        if (i === 0 && this.statusTail !== null) {
+        if (i === 0 && tailJoined !== null) {
           line =
-            line +
-            ScreenControllerImpl.STATUS_TAIL_SEPARATOR +
-            this.statusTail;
+            line + ScreenControllerImpl.STATUS_TAIL_SEPARATOR + tailJoined;
         }
         allLines.push(clampLine(line, lineBudget));
       }
-    } else if (this.statusTail !== null) {
-      // statusLines 空 + tail 非空：tail 独立成行，加 contentPrefix 与 cli 全局对齐契约一致
-      allLines.push(
-        clampLine(layout.contentPrefix + this.statusTail, lineBudget),
-      );
+    } else if (tailJoined !== null) {
+      // statusLines 空 + tail 段集合非空：独立成行，加 contentPrefix 与 cli 全局对齐契约一致
+      allLines.push(clampLine(layout.contentPrefix + tailJoined, lineBudget));
     }
     if (this.input) {
       for (const line of this.input.renderLines()) allLines.push(line);
