@@ -821,6 +821,98 @@ describe("ScreenController · dispose", () => {
   });
 });
 
+describe("ScreenController · setFarewell", () => {
+  it("attached=true dispose：farewell emit 在清屏序列之后", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    sc.setFarewell("BYE-TEXT\n");
+    out.buffer = "";
+    sc.dispose();
+    // 清屏序列在前，farewell 在后
+    const clearIdx = out.buffer.indexOf("\x1b[2J");
+    const farewellIdx = out.buffer.indexOf("BYE-TEXT");
+    expect(clearIdx).toBeGreaterThanOrEqual(0);
+    expect(farewellIdx).toBeGreaterThan(clearIdx);
+  });
+
+  it("detached(after detachInput) dispose：farewell 仍 emit", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    sc.detachInput();
+    sc.setFarewell("BYE-TEXT\n");
+    out.buffer = "";
+    sc.dispose();
+    expect(out.buffer).toContain("BYE-TEXT");
+    // farewell 必须在 ANSI_DISPOSE_SEQUENCE 之后
+    expect(out.buffer.indexOf("BYE-TEXT")).toBeGreaterThan(
+      out.buffer.indexOf("\x1b[r"),
+    );
+  });
+
+  it("pre-attach dispose：即使 setFarewell 也不 emit（保护 shell 原状）", () => {
+    const { out, sc } = makeHarness();
+    sc.setFarewell("BYE-TEXT\n");
+    sc.dispose();
+    // everAttached=false → 不 emit farewell（与不写任何字节原则一致）
+    expect(out.buffer).toBe("");
+  });
+
+  it("未调 setFarewell 时 dispose 不 emit 告别内容", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    out.buffer = "";
+    sc.dispose();
+    // 只有清屏序列，没有额外文本
+    // 清屏序列 = \x1b[r\x1b[2J\x1b[1;1H，长度有限
+    expect(out.buffer).toContain("\x1b[r");
+    expect(out.buffer).toContain("\x1b[2J");
+    // 不应包含中文或其他可见 ASCII 文本
+    expect(out.buffer).not.toMatch(/[a-zA-Z]{4,}/); // 任何 4+ 字母连续就算异常
+  });
+
+  it("setFarewell(null) 清除已设置的告别块", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    sc.setFarewell("BYE-TEXT\n");
+    sc.setFarewell(null);
+    out.buffer = "";
+    sc.dispose();
+    expect(out.buffer).not.toContain("BYE-TEXT");
+  });
+
+  it("多次 setFarewell 以最后一次为准", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    sc.setFarewell("FIRST\n");
+    sc.setFarewell("SECOND\n");
+    out.buffer = "";
+    sc.dispose();
+    expect(out.buffer).toContain("SECOND");
+    expect(out.buffer).not.toContain("FIRST");
+  });
+
+  it("setFarewell 同步设值不触发立即写屏", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    out.buffer = "";
+    sc.setFarewell("SHOULD-NOT-APPEAR-YET\n");
+    // 设值后不应立即 emit
+    expect(out.buffer).not.toContain("SHOULD-NOT-APPEAR-YET");
+  });
+
+  it("dispose 后 setFarewell 不再写入 dead state（与其他 setter 一致）", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    sc.setFarewell("FIRST\n");
+    sc.dispose();
+    // dispose 后再 set，不应被记录（farewell 字段已归零，set 不能复活）
+    sc.setFarewell("AFTER-DISPOSE\n");
+    out.buffer = "";
+    sc.dispose(); // 第二次 dispose 短路 no-op，但即使 emit 也不能含 dead text
+    expect(out.buffer).not.toContain("AFTER-DISPOSE");
+  });
+});
+
 describe("ScreenController · 串行化", () => {
   it("嵌套 enqueue（写入回调内调 setStatusBar）按 FIFO 顺序执行", () => {
     const { out, sc } = makeHarness({ rows: 20 });

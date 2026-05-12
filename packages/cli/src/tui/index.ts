@@ -53,6 +53,13 @@ export {
   type ChromeOptions,
 } from "./chrome.js";
 export {
+  BRAND_ANCHOR_TOP_EDGE,
+  BRAND_ANCHOR_GLYPH_ROW1,
+  BRAND_ANCHOR_GLYPH_ROW2,
+  BRAND_ANCHOR_GLYPH_ROW3,
+  BRAND_ANCHOR_INLINE_GAP,
+} from "./brand-anchor.js";
+export {
   renderButton,
   renderButtonRow,
   type ButtonOptions,

@@ -82,6 +82,7 @@ import {
 import { detectTerminalCapability } from "./screen/terminal-capability.js";
 import { InputController } from "./typeahead-input.js";
 import { renderHomeWelcome, renderStartupAdvisories } from "./workbench/index.js";
+import { renderFarewell } from "./farewell/index.js";
 import { RuntimeSession } from "./runtime/session.js";
 import { handleConfigCommand } from "./runtime/config-command.js";
 import { parseTaskUsageFromMessages } from "./parse-task-usage.js";
@@ -1540,6 +1541,14 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   if (inputController) {
     inputController.stop();
   }
+
+  // 退出告别块 —— 仅在有 conversationId 时显示（ephemeral 路径不显示）。
+  // 必须在 renderScreen.dispose() 之前调，dispose 内 emit 时机由 ScreenController
+  // 自管（清屏序列之后）。详见 ScreenController.setFarewell docstring。
+  if (renderScreen && conversationId) {
+    renderScreen.setFarewell(renderFarewell({ conversationId }));
+  }
+
   renderScreen?.dispose();
 
   // 关闭 readline——typeahead 路径下 break 跳出循环后必须显式 close，否则 readline 持

@@ -233,6 +233,29 @@ export interface ScreenController {
    */
   onSuspendChange(listener: (suspended: boolean) => void): () => void;
 
+  /**
+   * 设置告别块文本 —— dispose 时在退出清屏序列之后 emit 到 main buffer，
+   * 作为 zhixing session 的临别 UI（典型形态：品牌锚 + 对话 ID）。
+   *
+   * 协议：
+   *   - **同步设值不入队**：告别块是"未来 dispose 时读取"的 state，不立即 emit
+   *     （chrome 还在显示时 emit 会污染屏幕）；dispose 同步读 + emit
+   *   - **多次调用以最后一次为准**：后调用覆盖前调用，与 setStatusBar / setStatusTail
+   *     同语义
+   *   - **null = 清除**：取消已设置的告别块（如用户取消退出场景）
+   *   - **必须在 dispose 之前调**：dispose 后调用无效（disposed flag 短路）
+   *   - **caller 渲染好字符串**：与 setStatusBar(lines) / setStatusTail(id, text)
+   *     同模式，caller 负责完整渲染（含换行 / ANSI 颜色），ScreenController 只负责
+   *     emit 时机；UI 改样式 = 改 caller 渲染函数，本协议层零感知
+   *
+   * 边界（caller 应处理）：
+   *   - 仅在 `everAttached=true` 时实际 emit —— pre-attach 路径 dispose 不写任何
+   *     字节（与"保护 shell 原状"原则一致），farewell 也跳过
+   *   - 异常退出 / runOnce 单次模式 / serve daemon → caller 不调 setFarewell
+   *     即可（默认无告别块）
+   */
+  setFarewell(text: string | null): void;
+
   /** 释放：撤 DECSTBM + cursor 回 viewport 底，停止接受新写入。 */
   dispose(): void;
 }
@@ -297,6 +320,14 @@ class ScreenControllerImpl implements ScreenController {
    * 此标志在 attachInput 设 true 后**永不回 false**，是 lifecycle 单向闸门。
    */
   private everAttached = false;
+  /**
+   * 告别块文本 —— 由 caller 通过 setFarewell 设置，dispose 时在退出清屏序列之后
+   * emit 到 main buffer。null = 不显示告别块。
+   *
+   * 同步状态，不进 enqueue 队列 —— 入队会立刻被 flush 写到屏幕扰乱 chrome 渲染。
+   * dispose task 内同步读取此 state 决定是否 emit。
+   */
+  private farewell: string | null = null;
   private statusLines: readonly string[] = [];
   /**
    * 状态行尾部多段集合 —— 按 source id 注册的独立段，JS Map 自带插入顺序保序。
@@ -531,6 +562,15 @@ class ScreenControllerImpl implements ScreenController {
     };
   }
 
+  setFarewell(text: string | null): void {
+    // 同步设值，不入队 —— 详见接口 docstring 与 farewell 字段注释。
+    // disposed 后 short-circuit：与 enqueue 路径的 setter（setStatusBar /
+    // setStatusTail）行为一致（enqueue 内有同款检查），避免 caller bug 在 dispose
+    // 后改 dead state。
+    if (this.disposed) return;
+    this.farewell = text && text.length > 0 ? text : null;
+  }
+
   dispose(): void {
     if (this.disposed) return;
     this.detachResize?.();
@@ -560,11 +600,18 @@ class ScreenControllerImpl implements ScreenController {
         } else if (this.everAttached) {
           this.stdout.write(ANSI_DISPOSE_SEQUENCE);
         }
+        // 告别块 emit —— 仅在 ①② 路径之后（清屏序列已写完 cursor 在 (1,1)）emit。
+        // ③ pre-attach 路径（everAttached=false）跳过，与"保护 shell 原状"原则一致：
+        // 从未接管过屏幕的 dispose 不该突然写一段品牌告别块到 shell 之中。
+        if (this.everAttached && this.farewell) {
+          this.stdout.write(this.farewell);
+        }
         this.input = null;
         this.statusLines = [];
         this.statusTails.clear();
         this.preAttachContent = "";
         this.hasActiveSegment = false;
+        this.farewell = null;
       },
     });
     this.disposed = true;

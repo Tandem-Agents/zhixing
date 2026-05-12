@@ -29,6 +29,11 @@
  */
 
 import {
+  BRAND_ANCHOR_GLYPH_ROW1,
+  BRAND_ANCHOR_GLYPH_ROW2,
+  BRAND_ANCHOR_GLYPH_ROW3,
+  BRAND_ANCHOR_INLINE_GAP,
+  BRAND_ANCHOR_TOP_EDGE,
   getTerminalWidth,
   renderChrome,
   tone,
@@ -50,28 +55,23 @@ export interface WorkbenchHomeInfo {
   resumedConversationName?: string;
 }
 
-// 品牌锚的物理形状常量——产品身份的不变部分，与组装逻辑分离
-const ANCHOR_TOP_EDGE = "╲";
-const ANCHOR_GLYPH_ROW1 = " ▄▄▄";
-const ANCHOR_GLYPH_ROW2 = "▌●●▐";
-const ANCHOR_GLYPH_ROW3 = " ▀▀ ";
-/** 锚 glyph 与右侧 inline 文字之间的列间距——所有 inline row 共用同一 gap */
-const ANCHOR_INLINE_GAP = "    ";
+// 品牌锚字符常量已抽到 tui/brand-anchor.ts 作为视觉身份单一事实源（welcome /
+// farewell / 未来扩展共用）；本文件仅消费常量 + 组装具体形态。
 
 function buildHomeBrandAnchor(info: WorkbenchHomeInfo): BrandAnchor {
-  const row1 = tone.brand.bold(ANCHOR_GLYPH_ROW1);
+  const row1 = tone.brand.bold(BRAND_ANCHOR_GLYPH_ROW1);
   const row2 =
-    tone.brand.bold(ANCHOR_GLYPH_ROW2) +
-    ANCHOR_INLINE_GAP +
+    tone.brand.bold(BRAND_ANCHOR_GLYPH_ROW2) +
+    BRAND_ANCHOR_INLINE_GAP +
     tone.brand.bold("知行");
   const row3 = info.resumedConversationName
-    ? tone.brand.bold(ANCHOR_GLYPH_ROW3) +
-      ANCHOR_INLINE_GAP +
+    ? tone.brand.bold(BRAND_ANCHOR_GLYPH_ROW3) +
+      BRAND_ANCHOR_INLINE_GAP +
       tone.dim(`已恢复对话 ${info.resumedConversationName}`)
-    : tone.brand.bold(ANCHOR_GLYPH_ROW3);
+    : tone.brand.bold(BRAND_ANCHOR_GLYPH_ROW3);
 
   return {
-    topEdge: ANCHOR_TOP_EDGE,
+    topEdge: BRAND_ANCHOR_TOP_EDGE,
     bodyLines: [row1, row2, row3],
   };
 }
