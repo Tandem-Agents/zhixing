@@ -45,6 +45,7 @@ import {
   type SegmentHandle,
 } from "./scroll-region.js";
 import type { TerminalCapability } from "./terminal-capability.js";
+import { clampLine, layout, tone } from "../tui/index.js";
 
 export interface InputRegion {
   /**
@@ -102,6 +103,17 @@ export interface ScreenController {
   detachInput(): void;
   /** 设置状态条内容；null / 空数组 = 隐藏状态条。 */
   setStatusBar(lines: readonly string[] | null): void;
+  /**
+   * 设置状态行尾段文本（纯任务文本，不含分隔符）。
+   *
+   * 渲染规则由 chrome 协议决定：
+   *   - statusLines 非空 + statusTail 非空 → 拼到第一行末尾（chrome 协议绘制 │ 分隔符）
+   *   - statusLines 空 + statusTail 非空 → tail 独立成行（加 contentPrefix 与全局对齐）
+   *   - statusTail 空 / null → 不渲染 tail
+   *
+   * 行末超长由 chrome 行宽 clamp 自然截断。
+   */
+  setStatusTail(text: string | null): void;
   /**
    * 写到滚动区——caller 通过 fn 接收的 write 函数追加内容。
    *
@@ -200,8 +212,15 @@ class ScreenControllerImpl implements ScreenController {
   private viewportRows: number;
   private viewportCols: number;
 
+  /**
+   * status / tail 同行渲染时绘制的分隔符 —— 归 chrome 协议而非任务模块。
+   * 任务模块只负责输出纯任务文本；分隔符的存在与否由 chrome 协议在拼接时决定。
+   */
+  private static readonly STATUS_TAIL_SEPARATOR = `  ${tone.dim("│")}  `;
+
   private input: InputRegion | null = null;
   private statusLines: readonly string[] = [];
+  private statusTail: string | null = null;
 
   /**
    * 首次 attach 之前 caller 调用 cliWriter.line / withScrollWrite 累积的内容——
@@ -262,6 +281,7 @@ class ScreenControllerImpl implements ScreenController {
       }
       this.input = null;
       this.statusLines = [];
+      this.statusTail = null;
       this.hasActiveSegment = false;
     });
   }
@@ -273,6 +293,17 @@ class ScreenControllerImpl implements ScreenController {
         this.refreshChrome();
       }
       // pre-attach 期间仅记录引用；首次 attach 时 build chromeBytes 会读到当前值
+    });
+  }
+
+  setStatusTail(text: string | null): void {
+    this.enqueue(() => {
+      const next = text && text.length > 0 ? text : null;
+      if (next === this.statusTail) return; // 幂等：无变化不重画
+      this.statusTail = next;
+      if (this.scrollRegion.state.attached) {
+        this.refreshChrome();
+      }
     });
   }
 
@@ -414,6 +445,7 @@ class ScreenControllerImpl implements ScreenController {
         }
         this.input = null;
         this.statusLines = [];
+        this.statusTail = null;
         this.preAttachContent = "";
         this.hasActiveSegment = false;
       },
@@ -453,10 +485,24 @@ class ScreenControllerImpl implements ScreenController {
     this.repaintInputCursor();
   }
 
-  /** chrome 总高度 = statusLines + input.renderLines */
+  /**
+   * status 区高度（不含 input）—— 按双源（statusLines / statusTail）existence 推导：
+   *   - statusLines 非空：保留原行数（tail 拼到第一行末尾，不占新行）
+   *   - statusLines 空 + statusTail 非空：1 行（tail 独立成行）
+   *   - 两者都空：0 行
+   *
+   * 单一来源：computeChromeHeight + repaintInputCursor 共用，保证 chrome 边界与
+   * input cursor row 用同一推导路径，避免双向不一致。
+   */
+  private computeStatusHeight(): number {
+    if (this.statusLines.length > 0) return this.statusLines.length;
+    if (this.statusTail !== null) return 1;
+    return 0;
+  }
+
   private computeChromeHeight(): number {
     const inputLines = this.input ? this.input.renderLines().length : 0;
-    return this.statusLines.length + inputLines;
+    return this.computeStatusHeight() + inputLines;
   }
 
   /**
@@ -473,9 +519,27 @@ class ScreenControllerImpl implements ScreenController {
     if (chromeHeight === 0) return "";
     const scrollBottom = this.viewportRows - chromeHeight;
     const startRow = scrollBottom + 1;
+    const lineBudget = this.viewportCols - 1; // chrome 行宽硬合约：防终端隐式 wrap
 
     const allLines: string[] = [];
-    for (const line of this.statusLines) allLines.push(line);
+    if (this.statusLines.length > 0) {
+      // statusLines 非空：第一行拼 tail（chrome 协议绘制分隔符），其余 status 行不变
+      for (let i = 0; i < this.statusLines.length; i++) {
+        let line = this.statusLines[i]!;
+        if (i === 0 && this.statusTail !== null) {
+          line =
+            line +
+            ScreenControllerImpl.STATUS_TAIL_SEPARATOR +
+            this.statusTail;
+        }
+        allLines.push(clampLine(line, lineBudget));
+      }
+    } else if (this.statusTail !== null) {
+      // statusLines 空 + tail 非空：tail 独立成行，加 contentPrefix 与 cli 全局对齐契约一致
+      allLines.push(
+        clampLine(layout.contentPrefix + this.statusTail, lineBudget),
+      );
+    }
     if (this.input) {
       for (const line of this.input.renderLines()) allLines.push(line);
     }
@@ -500,7 +564,7 @@ class ScreenControllerImpl implements ScreenController {
     if (!this.input || !this.scrollRegion.state.attached) return;
     const scrollBottom = this.scrollRegion.state.scrollBottom;
     const pos = this.input.cursorPosition();
-    const targetRow = scrollBottom + 1 + this.statusLines.length + pos.row;
+    const targetRow = scrollBottom + 1 + this.computeStatusHeight() + pos.row;
     const targetCol = 1 + pos.col;
     this.stdout.write(`\x1b[${targetRow};${targetCol}H`);
   }

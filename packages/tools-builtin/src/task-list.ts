@@ -42,14 +42,32 @@ import type {
  *
  * 契约：
  *   - `load` 返回 undefined 表示"无持久化记录"（正常状态，非错误）
- *   - `save` 必须在持久化失败时 throw —— service 据此回滚 cache，保 split-brain-free
+ *   - `save` 必须在持久化失败时 throw —— service 据此拒绝改 cache，保 split-brain-free
  *   - `delete` 必须幂等
+ *
+ * 串行化由 store 实现方保证（如 ConversationRepository per-id metaLock）。
+ * service 层不重复加锁。
  */
 export interface TaskListStore {
   load(conversationId: string): Promise<TaskListState | undefined>;
   save(conversationId: string, state: TaskListState): Promise<void>;
   delete(conversationId: string): Promise<void>;
 }
+
+// ─── Layer 2 订阅事件类型 ───
+
+/**
+ * task_list 状态变化事件 —— set 成功后 + clear 时触发。
+ *
+ * `state=null` 表示 cache 已清空 / 驱逐，与"cache miss"等价 —— UI 模块据此
+ * 隐藏视图。订阅者无需区分"未加载"与"已清空"，两者对显示语义一致。
+ */
+export interface TaskListStateEvent {
+  readonly conversationId: string;
+  readonly state: TaskListState | null;
+}
+
+export type TaskListStateListener = (event: TaskListStateEvent) => void;
 
 // ─── Layer 2: 业务服务 ───
 
@@ -71,6 +89,7 @@ export interface TaskListStore {
  */
 export class TaskListService {
   private readonly cache = new Map<string, TaskListState>();
+  private readonly subscribers = new Set<TaskListStateListener>();
 
   constructor(private readonly store: TaskListStore) {}
 
@@ -120,40 +139,80 @@ export class TaskListService {
    * 仅清 cache；磁盘端清除由调用方独立处理（cli 通常已通过
    * `ConversationRepository.clearViewLayerState` 完成 meta 字段清空）。
    * 分层避免双重职责。
+   *
+   * 同步触发 emit(state=null) —— 让订阅者（UI 模块）感知 cache 已清空。
    */
   clear(conversationId: string): void {
     this.cache.delete(conversationId);
+    this.emit(conversationId, null);
   }
 
   // ─── 原子写 ───
 
   /**
-   * 原子 set —— 工具 call 路径调用。
+   * 原子 set —— 先 save 后 cache 模式。
    *
-   * 失败回滚契约：store.save throw 时 cache 还原到旧值，**保证内存与磁盘要么同时
-   * 更新要么同时不变**——不存在"内存改了但磁盘没改"的 split-brain。
+   * 流程：await store.save → cache.set → emit。store.save 失败直接 throw 上抛，
+   * cache 不动 —— 保 cache 永远反映"已持久化"状态，不存在乐观更新的中间态。
    *
+   * 写入串行化由 store 实现方保证（如 ConversationRepository per-id metaLock）。
    * 异常上抛 —— 工具层捕获后转为 isError ToolResult，LLM 收到明确失败信号。
    */
   async set(
     conversationId: string,
     items: readonly TaskItem[],
   ): Promise<TaskListState> {
-    const prev = this.cache.get(conversationId);
     const next: TaskListState = { items: [...items] };
-
+    await this.store.save(conversationId, next);
     this.cache.set(conversationId, next);
-    try {
-      await this.store.save(conversationId, next);
-      return next;
-    } catch (err) {
-      // 回滚 cache —— 保 split-brain-free
-      if (prev === undefined) {
-        this.cache.delete(conversationId);
-      } else {
-        this.cache.set(conversationId, prev);
+    this.emit(conversationId, next);
+    return next;
+  }
+
+  /**
+   * Read-modify-write 便利方法 —— cli 命令（add / done）路径专用。
+   *
+   * 流程：ensure prime（从磁盘加载到 cache）→ 读 cache 快照 → 应用 mutator → 调 set。
+   * prime 是 service 层自防御：避免 caller 遗漏 prime 时 mutator 收到空数组，
+   * 错误覆盖磁盘已有数据。prime 幂等 + cache 有则 early return，零额外开销。
+   *
+   * 并发语义：cache 读 + mutator + store.save 之间不持锁；store 串行多次写入时，
+   * 结果由最后写入者决定 —— cli 命令的语义不要求"在 LLM 改动前后保持原子读改写"。
+   */
+  async mutate(
+    conversationId: string,
+    mutator: (current: readonly TaskItem[]) => readonly TaskItem[],
+  ): Promise<TaskListState> {
+    await this.prime(conversationId);
+    const curr = this.cache.get(conversationId)?.items ?? [];
+    return this.set(conversationId, mutator(curr));
+  }
+
+  // ─── 订阅 ───
+
+  /**
+   * 订阅 task_list 状态变化 —— UI 模块感知数据更新的唯一入口。
+   *
+   * 触发时机：set 成功后 emit({state}) + clear 时 emit({state: null})。
+   * 监听器抛错被 try-catch swallow，不影响其他订阅者也不传染 service。
+   *
+   * 返回的 unsubscribe 函数幂等；调用后 listener 从订阅集合移除，闭包引用释放，
+   * TaskTail 等订阅者实例可被 GC。
+   */
+  subscribe(listener: TaskListStateListener): () => void {
+    this.subscribers.add(listener);
+    return () => {
+      this.subscribers.delete(listener);
+    };
+  }
+
+  private emit(conversationId: string, state: TaskListState | null): void {
+    for (const listener of this.subscribers) {
+      try {
+        listener({ conversationId, state });
+      } catch {
+        // 隔离 listener 异常 —— 不影响其他订阅者，不传染 service
       }
-      throw err;
     }
   }
 

@@ -6,7 +6,12 @@ export { createGrepTool } from "./grep.js";
 export { createBashTool } from "./bash.js";
 export { createMemoryTool } from "./memory.js";
 export { createScheduleTool, type ScheduleToolOrigin } from "./schedule.js";
-export { TaskListService, type TaskListStore } from "./task-list.js";
+export {
+  TaskListService,
+  type TaskListStore,
+  type TaskListStateEvent,
+  type TaskListStateListener,
+} from "./task-list.js";
 export { createWebFetchTool } from "./web-fetch.js";
 export { WEB_FETCH_DEFAULT_RULES } from "./web-fetch-rules.js";
 export {

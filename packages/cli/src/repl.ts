@@ -54,6 +54,8 @@ import { createBuiltinExtraToolsAssembly } from "./runtime/builtin-extra-tools.j
 import { createCliSegmentDeps } from "./runtime/segment-deps.js";
 import { ConversationRepoTaskListStore } from "./runtime/task-list-stores.js";
 import { CommandDispatcher } from "./command-dispatcher.js";
+import { TaskTail } from "./task-tail/index.js";
+import { registerTaskCommands } from "./commands/task-commands.js";
 import { PASTE_TOKEN_PATTERN, PasteRegistry } from "./paste-registry.js";
 import { resolveFileRefs } from "./resolve-file-refs.js";
 import {
@@ -150,6 +152,11 @@ function buildSlashCommands(
   session: RuntimeSession,
   renderer: OutputRenderer,
   cliWriter: CliWriter,
+  /**
+   * 当 /new / /switch 切换 conversation 成功后调用 —— 通知 cli UI 层（如 TaskTail）
+   * 刷新数据。/clear 不走此回调（service.clear 会 emit state=null 自动触发订阅）。
+   */
+  onConversationChanged?: () => void,
 ): Record<
   string,
   {
@@ -309,6 +316,7 @@ function buildSlashCommands(
           // 新建对话无持久化 task_list 状态，prime 后 cache 项为空 items 列表
           await state.taskListService.prime(conversation.id);
           state.convRepo.touch(state.conversationId).catch(() => {});
+          onConversationChanged?.();
           cliWriter.line(
             chalk.dim(`\n  已创建新对话 ${chalk.cyan(conversation.name)}\n`),
           );
@@ -407,6 +415,7 @@ function buildSlashCommands(
           // 加载目标对话的 task_list 持久化状态到 service cache
           await state.taskListService.prime(target.id);
           state.convRepo.touch(state.conversationId).catch(() => {});
+          onConversationChanged?.();
           cliWriter.line(
             chalk.dim(
               `\n  已切换到 ${chalk.cyan(target.name)}（${loaded.turnCount} 轮对话）\n`,
@@ -1017,7 +1026,18 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     activeTurnPromise: null,
   };
 
-  const slashCommands = buildSlashCommands(rl, session, renderer, cliWriter);
+  // TaskTail 在 useTypeahead 分支内装配（需要 ScreenController）。声明在外层让
+  // /new / /switch handler 通过 onConversationChanged 闭包延迟引用 —— 命令 handler
+  // 触发时 TaskTail 早已创建完毕，无装配时序问题。
+  let taskTail: TaskTail | null = null;
+
+  const slashCommands = buildSlashCommands(
+    rl,
+    session,
+    renderer,
+    cliWriter,
+    () => taskTail?.refresh(),
+  );
 
   // ── Typeahead 路径接入（Phase 1 Step 5） ──
   //
@@ -1167,6 +1187,28 @@ export async function startRepl(options: ReplOptions): Promise<void> {
         return {};
       });
     }
+
+    // task_list cli 命令组 —— 不走 legacy slashCommands 桥接，直接注册到 tRegistry
+    // + typeaheadDispatcher。这是命令模块的现代路径（未来 /memory 等同模式抽出）。
+    registerTaskCommands({
+      registry: tRegistry,
+      dispatcher: typeaheadDispatcher,
+      service: session.taskListService,
+      getConversationId: () => state.conversationId,
+      writer: cliWriter,
+    });
+
+    // 屏幕底部任务区 —— 订阅 service 变化驱动 setStatusTail。
+    // 仅在有 renderScreen（capability.ok）时装配；无 chrome 终端走 legacy 路径
+    // 没有 status / input chrome，也不需要 tail。
+    if (renderScreen) {
+      taskTail = new TaskTail({
+        screen: renderScreen,
+        service: session.taskListService,
+        getConversationId: () => state.conversationId,
+      });
+      taskTail.start();
+    }
   }
 
   const getRuntime = (): RuntimeContext => ({
@@ -1210,6 +1252,9 @@ export async function startRepl(options: ReplOptions): Promise<void> {
 
   rl.on("close", async () => {
     renderer.stop();
+    // TaskTail 先于 session dispose —— 取消 service 订阅 + 清屏底 tail，
+    // 避免 session dispose 期间残留事件触发已无效的渲染
+    taskTail?.dispose();
     // session.dispose 内部 detach renderer + stop scheduler/delivery + dispose channels
     await session.dispose().catch((err) =>
       cliWriter.line(`[session.dispose] ${err instanceof Error ? err.message : String(err)}`),

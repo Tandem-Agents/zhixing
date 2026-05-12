@@ -162,7 +162,7 @@ describe("TaskListService — 原子 set", () => {
     expect(store.saveCalls).toHaveLength(1);
   });
 
-  it("set 失败：cache 回滚到旧值（无 split-brain）", async () => {
+  it("set 失败：cache 不动（无 split-brain）", async () => {
     const store = createStubStore();
     const service = new TaskListService(store);
 
@@ -170,18 +170,18 @@ describe("TaskListService — 原子 set", () => {
     await service.set("conv-1", [{ id: "a", content: "first", status: "pending" }]);
     const before = service.getCached("conv-1");
 
-    // 第二次 set 失败
+    // 第二次 set 失败 —— store.save throw，cache 不应被修改
     store.primeSaveFailure(new Error("disk full"));
     await expect(
       service.set("conv-1", [{ id: "b", content: "second", status: "in_progress" }]),
     ).rejects.toThrow("disk full");
 
-    // cache 已回滚 —— 与磁盘一致（都是 "first"）
+    // cache 保持失败前状态 —— 与磁盘一致（都是 "first"）
     expect(service.getCached("conv-1")).toEqual(before);
     expect(service.getCached("conv-1")?.items[0]?.content).toBe("first");
   });
 
-  it("set 首次失败：cache 完全清除（不留半态）", async () => {
+  it("set 首次失败：cache 仍为 null（不留半态）", async () => {
     const store = createStubStore();
     const service = new TaskListService(store);
 
@@ -190,7 +190,7 @@ describe("TaskListService — 原子 set", () => {
       service.set("conv-1", [{ id: "a", content: "x", status: "pending" }]),
     ).rejects.toThrow();
 
-    // cache 项被回滚为不存在（首次 set 之前本就不存在）
+    // store.save 失败 —— cache 从未被写入
     expect(service.getCached("conv-1")).toBeNull();
   });
 
@@ -305,7 +305,7 @@ describe("task_list 工具 — 原子语义", () => {
     expect(store.data.get("conv-1")?.items).toHaveLength(2);
   });
 
-  it("持久化失败 → isError + cache 回滚（修复 Trade-off-2）", async () => {
+  it("持久化失败 → isError + cache 保持失败前状态", async () => {
     const store = createStubStore();
     const service = new TaskListService(store);
     const tool = service.createTool(() => "conv-1");
@@ -328,7 +328,7 @@ describe("task_list 工具 — 原子语义", () => {
     expect(result.isError).toBe(true);
     expect(result.content).toContain("Failed to persist");
 
-    // cache 已回滚到失败前
+    // cache 保持失败前状态 —— store.save throw 时 service 不改 cache
     expect(service.getCached("conv-1")).toEqual(before);
     expect(service.getCached("conv-1")?.items[0]?.content).toBe("before");
   });
@@ -417,5 +417,182 @@ describe("task_list 工具 — 工具定义", () => {
     expect(tool.description.toLowerCase()).toMatch(
       /unavailable|one-shot|scheduled/,
     );
+  });
+});
+
+// ─── TaskListService mutate ───
+
+describe("TaskListService — mutate", () => {
+  it("mutate 基本：读 cache → 应用 mutator → set 写磁盘 + cache", async () => {
+    const store = createStubStore();
+    const service = new TaskListService(store);
+    await service.prime("conv-1");
+    await service.set("conv-1", [
+      { id: "a", content: "old", status: "pending" },
+    ]);
+
+    await service.mutate("conv-1", (curr) => [
+      ...curr,
+      { id: "b", content: "new", status: "pending" },
+    ]);
+
+    expect(service.getAllTasks("conv-1")).toHaveLength(2);
+    expect(store.data.get("conv-1")?.items).toHaveLength(2);
+  });
+
+  it("mutate 自动 prime —— cache miss 时不会用空数组覆盖磁盘数据", async () => {
+    const store = createStubStore();
+    store.data.set("conv-1", {
+      items: [
+        { id: "a", content: "exists-on-disk", status: "pending" },
+        { id: "b", content: "also-on-disk", status: "completed" },
+      ],
+    });
+    const service = new TaskListService(store);
+    // 故意不调 prime —— 模拟 cli 装配遗漏
+
+    await service.mutate("conv-1", (curr) => [
+      ...curr,
+      { id: "c", content: "added", status: "pending" },
+    ]);
+
+    // 关键：磁盘上原有的 a / b 不丢失，新增 c
+    expect(service.getAllTasks("conv-1")).toHaveLength(3);
+    expect(store.data.get("conv-1")?.items.map((t) => t.id)).toEqual([
+      "a",
+      "b",
+      "c",
+    ]);
+  });
+
+  it("mutate 失败：mutator 抛错直接上抛，cache 不动", async () => {
+    const store = createStubStore();
+    const service = new TaskListService(store);
+    await service.set("conv-1", [
+      { id: "a", content: "stable", status: "pending" },
+    ]);
+    const before = service.getCached("conv-1");
+
+    await expect(
+      service.mutate("conv-1", () => {
+        throw new Error("mutator boom");
+      }),
+    ).rejects.toThrow("mutator boom");
+
+    expect(service.getCached("conv-1")).toEqual(before);
+  });
+
+  it("mutate 失败：store.save 抛错直接上抛，cache 不动", async () => {
+    const store = createStubStore();
+    const service = new TaskListService(store);
+    await service.set("conv-1", [
+      { id: "a", content: "stable", status: "pending" },
+    ]);
+    const before = service.getCached("conv-1");
+
+    store.primeSaveFailure(new Error("disk full"));
+    await expect(
+      service.mutate("conv-1", (curr) => [
+        ...curr,
+        { id: "b", content: "x", status: "pending" },
+      ]),
+    ).rejects.toThrow("disk full");
+
+    expect(service.getCached("conv-1")).toEqual(before);
+  });
+});
+
+// ─── TaskListService subscribe ───
+
+describe("TaskListService — subscribe", () => {
+  it("set 成功后触发 emit（携带新 state）", async () => {
+    const store = createStubStore();
+    const service = new TaskListService(store);
+    const events: { conversationId: string; state: TaskListState | null }[] = [];
+    service.subscribe((e) => events.push(e));
+
+    await service.set("conv-1", [
+      { id: "a", content: "x", status: "pending" },
+    ]);
+
+    expect(events).toHaveLength(1);
+    expect(events[0]?.conversationId).toBe("conv-1");
+    expect(events[0]?.state?.items[0]?.content).toBe("x");
+  });
+
+  it("clear 触发 emit({state: null})", async () => {
+    const store = createStubStore();
+    const service = new TaskListService(store);
+    await service.set("conv-1", [
+      { id: "a", content: "x", status: "pending" },
+    ]);
+    const events: { conversationId: string; state: TaskListState | null }[] = [];
+    service.subscribe((e) => events.push(e));
+
+    service.clear("conv-1");
+
+    expect(events).toHaveLength(1);
+    expect(events[0]?.conversationId).toBe("conv-1");
+    expect(events[0]?.state).toBeNull();
+  });
+
+  it("set 失败不触发 emit（订阅者永远看持久化后真相）", async () => {
+    const store = createStubStore();
+    const service = new TaskListService(store);
+    const events: unknown[] = [];
+    service.subscribe((e) => events.push(e));
+
+    store.primeSaveFailure(new Error("disk full"));
+    await expect(
+      service.set("conv-1", [
+        { id: "a", content: "x", status: "pending" },
+      ]),
+    ).rejects.toThrow();
+
+    expect(events).toEqual([]);
+  });
+
+  it("多订阅者隔离：一个抛错不影响其他订阅者收到事件", async () => {
+    const store = createStubStore();
+    const service = new TaskListService(store);
+    const okEvents: unknown[] = [];
+    service.subscribe(() => {
+      throw new Error("listener boom");
+    });
+    service.subscribe((e) => okEvents.push(e));
+
+    await service.set("conv-1", [
+      { id: "a", content: "x", status: "pending" },
+    ]);
+
+    expect(okEvents).toHaveLength(1);
+  });
+
+  it("unsubscribe 后不再收到事件", async () => {
+    const store = createStubStore();
+    const service = new TaskListService(store);
+    const events: unknown[] = [];
+    const unsubscribe = service.subscribe((e) => events.push(e));
+
+    await service.set("conv-1", [
+      { id: "a", content: "x", status: "pending" },
+    ]);
+    unsubscribe();
+    await service.set("conv-1", [
+      { id: "b", content: "y", status: "pending" },
+    ]);
+
+    expect(events).toHaveLength(1);
+  });
+
+  it("unsubscribe 幂等 —— 重复调用不抛错", async () => {
+    const service = new TaskListService(createStubStore());
+    const unsubscribe = service.subscribe(() => {});
+
+    expect(() => {
+      unsubscribe();
+      unsubscribe();
+      unsubscribe();
+    }).not.toThrow();
   });
 });

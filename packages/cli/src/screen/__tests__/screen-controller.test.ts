@@ -181,6 +181,117 @@ describe("ScreenController · setStatusBar", () => {
   });
 });
 
+describe("ScreenController · setStatusTail（task-tail 同行 / 独立双源）", () => {
+  it("statusLines 非空 + tail 非空：tail 拼到第一行末尾，chrome 高度不变", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    sc.setStatusBar(["S1", "S2"]);
+    out.buffer = "";
+    sc.setStatusTail("TAIL");
+    // chrome 起手行 = scrollBottom + 1 = (rows - chromeHeight) + 1 = (10 - 3) + 1 = 8
+    // —— 与 setStatusTail 调用前一致，说明 chromeHeight 没变（仍是 3）
+    expect(out.buffer).toContain("\x1b[8;1H");
+    // tail 拼到 S1 末尾（含 │ 分隔符）；S2 不动
+    expect(out.buffer).toContain("S1");
+    expect(out.buffer).toContain("│");
+    expect(out.buffer).toContain("TAIL");
+    expect(out.buffer).toContain("S2");
+  });
+
+  it("statusLines 空 + tail 非空：tail 独立成行（chrome 高度 = 1 tail + input）", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    out.buffer = "";
+    sc.setStatusTail("TAIL");
+    // chrome 从 1 (input) → 2 (tail + input)，scrollBottom 9 → 8
+    expect(out.buffer).toContain("\x1b[1;8r");
+    expect(out.buffer).toContain("TAIL");
+    // 独立显示时不应有 │ 分隔符
+    expect(out.buffer).not.toContain("│");
+  });
+
+  it("tail 独立显示加 contentPrefix（与 cli 全局对齐契约一致）", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    out.buffer = "";
+    sc.setStatusTail("X");
+    // contentPrefix 是两空格 —— tail 行起手应有 "  X"
+    expect(out.buffer).toMatch(/\x1b\[\d+;1H\x1b\[2K {2}X/);
+  });
+
+  it("setStatusTail(null) 隐藏 tail（chrome 高度回退）", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    sc.setStatusTail("TAIL");
+    out.buffer = "";
+    sc.setStatusTail(null);
+    // chrome 从 2 (tail + input) → 1 (input only)，scrollBottom 8 → 9
+    expect(out.buffer).toContain("\x1b[1;9r");
+  });
+
+  it("setStatusTail(空字符串) 等同 null（隐藏）", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    sc.setStatusTail("TAIL");
+    out.buffer = "";
+    sc.setStatusTail("");
+    // 空字符串视为 null，chrome 高度回退
+    expect(out.buffer).toContain("\x1b[1;9r");
+  });
+
+  it("setStatusTail 幂等：相同值连续调用不重画", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    sc.setStatusTail("TAIL");
+    out.buffer = "";
+    sc.setStatusTail("TAIL");
+    // 相同值 → 跳过 refreshChrome → 无 ANSI 输出
+    expect(out.buffer).toBe("");
+  });
+
+  it("statusBar 和 statusTail 同时变化：拼接结果两者都在", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    sc.setStatusBar(["STATUS"]);
+    sc.setStatusTail("TAIL");
+    expect(out.buffer).toContain("STATUS");
+    expect(out.buffer).toContain("TAIL");
+  });
+
+  it("attach 前 setStatusTail 入队，attach 时被读到", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.setStatusTail("TAIL");
+    sc.attachInput(makeRegion(["> input"]));
+    // chrome = 1 tail + 1 input = 2，scrollBottom = 8
+    expect(out.buffer).toContain("\x1b[1;8r");
+    expect(out.buffer).toContain("TAIL");
+  });
+
+  it("detachInput 后 statusTail 被清理（重新 attach 不复活）", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    sc.setStatusTail("OLD_TAIL");
+    sc.detachInput();
+    out.buffer = "";
+    sc.attachInput(makeRegion(["> input"]));
+    expect(out.buffer).not.toContain("OLD_TAIL");
+  });
+
+  it("超长行被 clampLine 截断，不超 viewportCols-1", () => {
+    const { out, sc } = makeHarness({ rows: 10, cols: 30 });
+    sc.attachInput(makeRegion(["> input"]));
+    out.buffer = "";
+    sc.setStatusTail("a".repeat(100));
+    // 找出 tail 行：以 \x1b[<row>;1H\x1b[2K 开头并含 a 的段
+    // 截断后行内 a 数量 + contentPrefix(2) <= 29 (cols - 1)
+    const tailMatch = out.buffer.match(/\x1b\[2K(  a+\S*)/);
+    expect(tailMatch).toBeTruthy();
+    // visible width <= viewportCols - 1 (= 29)
+    // 由于 ansi.length 已知，简单检查 a 数量上界
+    expect(tailMatch![1]!.replace(/[^a]/g, "").length).toBeLessThanOrEqual(28);
+  });
+});
+
 describe("ScreenController · writeScrollLine（attach 后）", () => {
   it("写入直接转发 ScrollRegion.writeScrollLine 字节流", () => {
     const { out, sc } = makeHarness({ rows: 10 });
