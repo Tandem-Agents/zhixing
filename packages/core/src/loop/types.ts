@@ -70,9 +70,13 @@ export interface AgentLoopParams {
   /** 覆盖默认依赖（用于测试） */
   deps?: Partial<AgentLoopDeps>;
   /**
-   * 上下文管理器。
-   * 每轮工具执行后，Agent Loop 调用 onTurnComplete() 让上下文管理器
-   * 检查预算并执行压缩。可选 — 不传则不做上下文管理。
+   * 上下文管理器 —— budget-driven 兜底（按上下文窗口百分比触发压缩）。
+   *
+   * 每个 turn 结束时由 turn-end 钩子调用 onTurnComplete() 检查预算并按需压缩。
+   * 可选 —— 不传则不做 budget 兜底。
+   *
+   * 与 segmentManager（attention-driven 主路径）在 turn-end 钩子内并列调用，
+   * budget 兜底先于 attention 切段，详见 loop/turn-end.ts。
    */
   contextManager?: ContextManagerHook;
   /**
@@ -115,14 +119,16 @@ export interface AgentLoopParams {
    */
   tokenEstimator?: ITokenEstimator;
   /**
-   * Attention-driven 段切换管理器。
+   * Attention-driven 段切换管理器 —— attention 阈值触发主路径。
    *
-   * 缺省时不做段切换。注入后 agent-loop 在 turn 边界（contextManager 之后、
-   * state 重建之前）调一次 `segmentManager.evaluate`；返回 modified=true 时用
-   * `newSegmentMessages` 替换 newMessages 进入下一轮。
+   * 缺省时不做段切换。注入后由 turn-end 钩子在每个 turn 结束时调用一次
+   * `segmentManager.evaluate`（contextManager budget 兜底之后）；返回
+   * modified=true 时用 `newSegmentMessages` 替换 caller 传入的 messages。
    *
-   * 段切换失败绝不阻塞 turn（拿原 newMessages 继续）；budget 兜底机制
+   * 段切换失败绝不阻塞 turn（拿原 messages 继续）；budget 兜底机制
    * （contextManager）继续承担"上下文真不够时压缩"职责。
+   *
+   * 详见 loop/turn-end.ts。
    */
   segmentManager?: SegmentManager;
   /**

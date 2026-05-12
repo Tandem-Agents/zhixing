@@ -244,12 +244,15 @@ export interface CompactStrategyContribution {
 // ─── 上下文管理器 ───
 
 /**
- * Agent Loop 在每轮结束后调用此接口检查预算并执行压缩。
+ * 上下文管理 hook —— 在 turn 结束时执行预算检查与压缩。
  *
- * 这是 Agent Loop 与上下文管理的唯一耦合点。
- * Agent Loop 无需了解压缩的具体策略，只关心：
- * - 消息是否被修改了
- * - 修改后的消息列表是什么
+ * Agent Loop 通过 turn-end 钩子（loop/turn-end.ts）调用此接口，与压缩具体策略
+ * 解耦。Agent Loop 只关心：
+ *   - 消息是否被修改了
+ *   - 修改后的消息列表是什么
+ *
+ * 同接口也被 orchestrator 装配的 pre-flight / forceCompact 路径直接复用 ——
+ * 这些路径不是 turn 边界副作用，不经过 turn-end 钩子，但共享同一接口契约。
  */
 export interface ContextManagerHook {
   onTurnComplete(state: ContextManagerInput): Promise<ContextManagerOutput>;

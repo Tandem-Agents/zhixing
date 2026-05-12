@@ -112,7 +112,9 @@ describe("Agent Loop", () => {
         expect(result.error.type).toBe("context_overflow");
         expect(result.error.recoverable).toBe(false);
         expect(result.error.message).toContain("Context exhausted");
-        expect(result.error.message).toContain("pure-text");
+        // pathLabel 自钩子抽取后统一为 "turn-end"（纯文本/工具循环两条路径
+        // 都走 runTurnEnd 同一编排器；caller 路径细节不再泄漏到错误消息）。
+        expect(result.error.message).toContain("turn-end");
       }
     });
 
@@ -141,7 +143,8 @@ describe("Agent Loop", () => {
         expect(result.error.type).toBe("context_overflow");
         expect(result.error.recoverable).toBe(false);
         expect(result.error.message).toContain("Context exhausted");
-        expect(result.error.message).toContain("tool loop");
+        // pathLabel 自钩子抽取后统一为 "turn-end"，见上一测试注释
+        expect(result.error.message).toContain("turn-end");
       }
       // 第二次 LLM 调用不应发生 —— failed 提前终止
       expect(provider.callCount).toBe(1);

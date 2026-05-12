@@ -43,16 +43,16 @@
  * - error：LLM 调用出错 / contextManager 不可恢复错误 / agent-loop 内部抛错（finally 兜底捕获）。
  */
 
-import { resolveContextManager, type ContextTermination } from "../context/termination.js";
 import { buildCleanup } from "../interrupt/cleanup.js";
 import { createInterruptController, getAbortReason } from "../interrupt/controller.js";
 import { toAgentError } from "../types/errors.js";
-import { emptyUsage, mergeUsage, type TokenUsage } from "../types/llm.js";
+import { emptyUsage, mergeUsage } from "../types/llm.js";
 import { extractText, extractToolCalls, toolResultMessage } from "../types/messages.js";
 import type { Message } from "../types/messages.js";
 import { toToolSpec } from "../types/tools.js";
 import { streamLLMCall } from "./llm-call.js";
 import { executeToolCalls } from "./tool-executor.js";
+import { runTurnEnd } from "./turn-end.js";
 import { logDiagnostic } from "../diagnostics.js";
 import type {
   AgentLoopDeps,
@@ -347,36 +347,33 @@ export async function* runAgentLoop(
         );
       }
       if (toolCalls.length === 0) {
-        // 纯文本 return 前触发 compact 检查（社交通道 / 纯聊天场景原本漏掉）
+        // ── Turn 结束钩子 —— 纯文本路径 ──
         //
-        // 目的是**让 engine fire compact_end 事件**—— run-agent 的闭包累积订阅
-        // 读到真 summary + turnsCompacted，写入 RunResult.compactInfo → transcript。
+        // turn 结束副作用（budget 兜底 + attention 切段 + 未来扩展）统一由 runTurnEnd
+        // 编排，与工具循环路径调用同一钩子（钩子内部不感知 caller 路径）。
         //
-        // 设计细节：
-        //   - 本 run 已完成，compact 改的 messages 不影响返回值（无 newMessages 概念，
-        //     yield 流也已结束；调用方的 newMessages 由 yield 流追踪产生，独立）
-        //   - 传入的 messages 必须含当前 llmResult.message（最新 assistant 回复），
-        //     否则本轮对话没计入 compact 决策
-        //   - failed / abort / engine 抛错统一由 resolveContextManager 归一化
-        const termination = await resolveContextManager(
-          params.contextManager,
-          {
-            messages: [...state.messages, llmResult.message],
-            turnCount: state.turnCount + 1,
-            abortSignal: controller.signal,
-          },
-          controller.signal,
-          "pure-text return",
-        );
-        const terminal = toTerminalAgentResult(termination, usage);
-        if (terminal) {
-          // contextManager 触发的 abort/error 路径 —— terminal 已是终止 result。
-          // 若是 aborted 但 abortReason 缺失（toTerminalAgentResult 不预提取），
-          // finalizeRun 会从 controller 补提，让 contextManager abort 与主循环 abort
-          // 在 AgentResult.abortReason 上行为完全一致。
-          return await finalizeRun(terminal);
+        // 钩子返回 messages 不消费 —— 本 run 即将 finalizeRun，下一轮 LLM call 不存在；
+        // 段切换 marker 走 segment:new_started 事件 → orchestrator accumulator → 下次
+        // run 启动时从 transcript 重建用切段后历史，跨 run 生效。
+        //
+        // terminal 来源仍由 contextManager 引发（segmentManager 永不返 terminal）：
+        // aborted 但 abortReason 缺失会在 finalizeRun 内部从 controller 补提，让
+        // contextManager abort 与主循环 abort 在 AgentResult.abortReason 上行为一致。
+        const turnEnd = await runTurnEnd({
+          messages: [...state.messages, llmResult.message],
+          turnCount: state.turnCount + 1,
+          usage,
+          abortSignal: controller.signal,
+          contextManager: params.contextManager,
+          segmentManager: params.segmentManager,
+          systemPrompt: params.systemPrompt ?? "",
+          tools: params.tools ?? [],
+          conversationId: params.conversationId,
+        });
+        if (turnEnd.kind === "terminal") {
+          return await finalizeRun(turnEnd.result);
         }
-        // 正常 completed 路径 —— 若 abort 在 contextManager 之后到达（race window），
+        // 正常 completed 路径 —— 若 abort 在钩子之后到达（race window），
         // finalizeRun 自动覆盖为 aborted，避免 abort 被静默丢失。
         return await finalizeRun({
           reason: "completed",
@@ -447,76 +444,40 @@ export async function* runAgentLoop(
       const newTurnCount = state.turnCount + 1;
       yield { type: "turn_complete", turnCount: newTurnCount, usage: llmResult.usage };
 
-      // ── Advance state (immutable reconstruction) ──
-      let newMessages = [
+      // ── Turn 结束钩子 —— 工具循环路径 ──
+      //
+      // turn 结束副作用（budget 兜底 + attention 切段 + 未来扩展）统一由 runTurnEnd
+      // 编排，与纯文本路径调用同一钩子（钩子内部不感知 caller 路径）。
+      //
+      // newMessages 构造在 caller 侧完成：本路径需要把 assistant.message + 完整
+      // tool_results 都拼上（spread readonly → mutable 浅拷贝匹配 toolResultMessage
+      // 签名；内部不会 mutate 数组）—— 完整 turn 路径仅消费完整结果。
+      //
+      // 钩子返回 messages 必须消费写回 state.messages —— 下一轮 LLM call 用钩子
+      // 处理后的版本，让 contextManager 的 budget summarize / segmentManager 的
+      // attention 切段在本 run 内立即生效。
+      const newMessages = [
         ...state.messages,
         llmResult.message,
-        // spread readonly → mutable 浅拷贝,匹配 toolResultMessage 签名;
-        // 内部不会 mutate 数组,完整 turn 路径仅消费完整结果
         toolResultMessage([...toolExecutorResult.completedResults]),
       ];
-
-      // ── Context management: 预算检查 + 自动压缩 ──
-      //
-      // resolveContextManager 归一化 3 种终止场景（见 context/termination.ts）：
-      //   - engine / strategy 抛错 → ContextTermination.kind="error"
-      //   - output.failed + abortSignal.aborted → kind="aborted"（abort 优先）
-      //   - output.failed + 非 abort → kind="error"（AgentError.type=context_overflow）
-      // 正常返回 kind="ok" 供下方 modified 消费。
-      const termination = await resolveContextManager(
-        params.contextManager,
-        {
-          messages: newMessages,
-          turnCount: newTurnCount,
-          abortSignal: controller.signal,   // 透传：strategy 内部的 LLM 调用受同一 abort 控制
-        },
-        controller.signal,
-        "tool loop",
-      );
-      const terminal = toTerminalAgentResult(termination, usage);
-      if (terminal) {
-        return await finalizeRun(terminal);
-      }
-      if (termination.kind === "ok" && termination.output.modified) {
-        newMessages = termination.output.messages;
-      }
-
-      // ── Segment management: attention-driven 段切换 ──
-      //
-      // 与 contextManager 并列，是 attention-driven 主路径；contextManager 是
-      // budget-driven 兜底。SegmentManager 在 attention 阈值（远早于 budget compact
-      // 触发）主动切段；调用方可见 contextManager 处理后的 newMessages，再按
-      // attention 阈值评估。
-      //
-      // 隐式不变量：budget compact 阈值 × contextWindow > optimalMaxTokens。
-      // 此关系保证 SegmentManager 在 attention 阈值（远早于 budget）先触发，
-      // contextManager 几乎从不在 SegmentManager 评估前改 messages。如果用户
-      // 通过 llm.main.capability 让阈值倒置，SegmentManager 会处理已被
-      // LLMSummarize 改过的 messages（功能不破，仅降级摘要质量）。
-      //
-      // 段切换失败绝不阻塞 turn —— evaluate 返 modified:false 时拿原 newMessages
-      // 继续，budget 兜底（contextManager）仍会在下一轮 critical 时承担兜底。
-      //
-      // marker 写盘路径：SegmentManager 不直接写 transcript marker，而是通过
-      // segment:new_started 事件携带 marker 流向 orchestrator accumulator，
-      // 由 run-agent 在 run 结束时通过 commitTurn({turn, compactBefore}) 单点
-      // 原子落盘——与 LLMSummarize 走 context:compact_end → accumulator 同模式。
-      if (params.segmentManager) {
-        const segmentResult = await params.segmentManager.evaluate({
-          messages: newMessages,
-          systemPrompt: params.systemPrompt ?? "",
-          tools: (params.tools ?? []).map(toToolSpec),
-          turnCount: newTurnCount,
-          conversationId: params.conversationId,
-          abortSignal: controller.signal,
-        });
-        if (segmentResult.modified && segmentResult.newSegmentMessages) {
-          newMessages = segmentResult.newSegmentMessages;
-        }
+      const turnEnd = await runTurnEnd({
+        messages: newMessages,
+        turnCount: newTurnCount,
+        usage,
+        abortSignal: controller.signal,
+        contextManager: params.contextManager,
+        segmentManager: params.segmentManager,
+        systemPrompt: params.systemPrompt ?? "",
+        tools: params.tools ?? [],
+        conversationId: params.conversationId,
+      });
+      if (turnEnd.kind === "terminal") {
+        return await finalizeRun(turnEnd.result);
       }
 
       state = {
-        messages: newMessages,
+        messages: turnEnd.messages,
         turnCount: newTurnCount,
         totalUsage: usage,
         transition: { reason: "tool_use" },
@@ -600,36 +561,3 @@ function resolveDeps(params: AgentLoopParams): AgentLoopDeps {
   };
 }
 
-// ─── Context termination → AgentResult 映射 ───
-
-/**
- * 把 context/termination.ts 的判别联合映射到 agent-loop 的 AgentResult。
- *
- * 映射规则：
- *   - kind="ok"      → undefined（非终止，调用方继续流程并按需消费 output.messages）
- *   - kind="error"   → { reason: "error", error, usage }
- *   - kind="aborted" → { reason: "aborted", usage }（abortReason 由 finalizeRun 补提）
- *
- * 为什么返回 undefined 而非省略该分支：保持 switch 的类型穷尽性
- * （ContextTermination 加 kind 时 tsc 会报未穷尽错误），避免未来新增 kind 悄悄漏处理。
- *
- * usage 参数：当前 turn 的累积 usage —— 终止 AgentResult 需要带 usage 让订阅方统计消耗。
- *
- * abortReason / exitDelayMs 不在此处填充 —— finalizeRun 是单点退出 + 单点 abort 优先转换，
- * 任何 aborted result 经过 finalizeRun 都会从 controller 补提 abortReason 并算出 exitDelayMs。
- * 本函数只做协议层形状映射，不感知 abort 时间数据，也不持有 controller 引用
- * （协议层规定：controller 只在创建/触发 abort 的地方出现）。
- */
-function toTerminalAgentResult(
-  termination: ContextTermination,
-  usage: TokenUsage,
-): AgentResult | undefined {
-  switch (termination.kind) {
-    case "ok":
-      return undefined;
-    case "error":
-      return { reason: "error", error: termination.error, usage };
-    case "aborted":
-      return { reason: "aborted", usage };
-  }
-}

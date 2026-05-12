@@ -139,11 +139,17 @@ describe("agent-loop × SegmentManager 集成", () => {
       }),
     );
 
-    // 段切换在 turn 1 结束时触发：callLLM 被调一次，segmentMetadata 被写一次
-    // （transcript marker 不走 persistence.writeMarker —— 通过 segment:new_started
-    // 事件流向 orchestrator accumulator → run-agent 单点 commit）
-    expect(callLLM).toHaveBeenCalledTimes(1);
-    expect(persistence.appendSegment).toHaveBeenCalledTimes(1);
+    // turn-end 钩子在每个 turn 边界都调段切换 —— provider 跑 2 个 turn
+    // （turn 1 工具调用 / turn 2 纯文本结束），两个 turn 都触发 trigger 决策。
+    // 这是钩子单点设计的必然结果：纯文本路径和工具路径同走 runTurnEnd 一处编排，
+    // 不再像历史实现那样只在工具路径触发段切换。
+    //
+    // 历史 bug：纯文本路径漏调段切换 → 跨 run 段历史永不收敛；钩子抽取后修复。
+    //
+    // transcript marker 不走 persistence.writeMarker —— 通过 segment:new_started
+    // 事件流向 orchestrator accumulator → run-agent 单点 commit。
+    expect(callLLM).toHaveBeenCalledTimes(2);
+    expect(persistence.appendSegment).toHaveBeenCalledTimes(2);
   });
 
   it("段切换后 turn 2 的 LLM 请求使用新段 messages（state.messages 已替换）", async () => {

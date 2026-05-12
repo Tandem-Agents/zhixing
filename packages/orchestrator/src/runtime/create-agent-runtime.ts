@@ -766,7 +766,7 @@ export async function createAgentRuntime(
         ? createSegmentManager({
             estimator,
             // 复用装配期解析的 mainModelCapability —— 与 Task 工具的 riskMaxTokens
-            // 同源(config.llm.main.capability 已在 resolve 内合并)。
+            // 同源（modelCapabilityOverrides[normalize(model)] 已在 resolve 内合并）。
             capability: mainModelCapability,
             callLLM: createSegmentSummarizeFn(
               segmentStreamFactory,

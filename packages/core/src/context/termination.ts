@@ -2,7 +2,7 @@
  * ContextManagerHook 终止归一化
  *
  * 为什么单独成模块：
- *   多个调用点（agent-loop 的 pure-text / tool-loop 分支、run-agent 的 pre-flight，
+ *   多个调用点（agent-loop 的 turn-end 钩子、orchestrator 装配的 pre-flight，
  *   未来 server 路径 / ephemeral turn 等）都需要把 `onTurnComplete()` 的 3 种终止
  *   场景归一化成判别联合，再映射到各自的结果 shape（AgentResult / RunResult / ...）。
  *   若每个调用点各写一份，就会出现以下问题：
