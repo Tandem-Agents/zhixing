@@ -110,9 +110,8 @@ describe("ScreenController · pre-attach 缓冲（启动期 cliWriter 调用）"
     const { out, sc } = makeHarness({ rows: 10 });
     sc.writeScrollLine("welcome");
     sc.attachInput(makeRegion(["> input"]));
-    // 期待字节序列：清屏 + DECSTBM + cursor (1,1) + chrome 字节 + cursor (1,1) +
-    // appendInline("welcome\n") + repaintInputCursor
-    expect(out.buffer).toContain("\x1b[2J\x1b[1;1H"); // 清屏
+    // 期待字节序列：清屏 + cursor(1,1) + DECSTBM + chrome 字节 + flush 缓冲
+    expect(out.buffer).toContain("\x1b[2J\x1b[1;1H"); // 清屏 + cursor 顶
     expect(out.buffer).toContain("\x1b[1;9r"); // DECSTBM 1..(rows-chromeHeight) = 1..9
     expect(out.buffer).toContain("welcome\n"); // flush 缓冲内容
     expect(out.buffer).toContain("> input"); // chrome 输入行
@@ -120,7 +119,7 @@ describe("ScreenController · pre-attach 缓冲（启动期 cliWriter 调用）"
 });
 
 describe("ScreenController · attachInput", () => {
-  it("无缓冲时 attach 仅清屏 + DECSTBM + chrome", () => {
+  it("无缓冲时 attach 清屏 + DECSTBM + chrome", () => {
     const { out, sc } = makeHarness({ rows: 10 });
     sc.attachInput(makeRegion(["> input"]));
     expect(out.buffer).toContain("\x1b[2J\x1b[1;1H");
@@ -133,7 +132,7 @@ describe("ScreenController · attachInput", () => {
     sc.attachInput(makeRegion(["> a"]));
     out.buffer = "";
     sc.attachInput(makeRegion(["> b1", "> b2"])); // 高度从 1 → 2
-    // 不再清屏（首次 attach 已完成）
+    // 不再清屏（首次 attach 已完成 + ScrollRegion 仍 attached）
     expect(out.buffer).not.toContain("\x1b[2J");
     // 但应该 setChromeHeight 重设 DECSTBM
     expect(out.buffer).toContain("\x1b[1;8r"); // chromeHeight=2, scrollBottom=8
@@ -455,14 +454,13 @@ describe("ScreenController · detachInput", () => {
     expect(out.buffer).toBe("");
   });
 
-  it("detach → 重新 attach 走完整启动流程", () => {
+  it("detach → 重新 attach 走完整启动流程（再次清屏）", () => {
     const { out, sc } = makeHarness({ rows: 10 });
     sc.attachInput(makeRegion(["> a"]));
     sc.detachInput();
     out.buffer = "";
     sc.attachInput(makeRegion(["> b"]));
-    // 重新 attach 不再清屏（已 attached 过）；走 setChromeHeight 路径...
-    // 实际：detach 让 ScrollRegion.attached=false，下次 attachInput 仍走 firstAttach
+    // detach 让 ScrollRegion.attached=false，下次 attachInput 仍走 firstAttach → 再次整屏清
     expect(out.buffer).toContain("\x1b[2J");
     expect(out.buffer).toContain("> b");
   });
@@ -777,12 +775,25 @@ describe("ScreenController · resize 监听", () => {
 });
 
 describe("ScreenController · dispose", () => {
-  it("dispose 后撤 DECSTBM + 清状态", () => {
+  it("attached=true dispose：shutdown 完整退出序列（撤 DECSTBM + 整屏清 + cursor）", () => {
     const { out, sc } = makeHarness({ rows: 10 });
     sc.attachInput(makeRegion(["> input"]));
     out.buffer = "";
     sc.dispose();
-    expect(out.buffer).toContain("\x1b[r");
+    expect(out.buffer).toContain("\x1b[r"); // 撤 DECSTBM
+    expect(out.buffer).toContain("\x1b[2J"); // 整屏清
+    expect(out.buffer).toContain("\x1b[1;1H"); // cursor 回顶
+  });
+
+  it("detached(after detachInput) dispose：ScreenController 层补完整退出序列", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    sc.detachInput();
+    out.buffer = "";
+    sc.dispose();
+    // detachInput 已撤 DECSTBM + 清 chrome 几行，但 viewport 顶 region 内容仍残留
+    // dispose 补完整序列：撤 DECSTBM（idempotent）+ 整屏清 + cursor
+    expect(out.buffer).toContain("\x1b[r\x1b[2J\x1b[1;1H");
   });
 
   it("dispose 后 attach 不再产生输出", () => {
@@ -802,9 +813,10 @@ describe("ScreenController · dispose", () => {
     expect(out.buffer).toBe("");
   });
 
-  it("pre-attach dispose 不写字节", () => {
+  it("pre-attach dispose 不写字节（保护 shell 原状）", () => {
     const { out, sc } = makeHarness();
     sc.dispose();
+    // 从未 attach → everAttached=false → 不写任何字节
     expect(out.buffer).toBe("");
   });
 });

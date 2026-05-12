@@ -800,15 +800,17 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     cliWriter = createScreenWriter({ screen: renderScreen });
 
     // 异常退出兜底：SIGTERM / 父进程 kill / 未捕获异常等不走 main loop 的退出
-    // 路径，正常 dispose 不被调用 → DECSTBM 残留 → shell 接管后 \n 行为受 region
-    // 限制。process.on("exit") 是同步钩子，dispose 内 ScrollRegion.shutdown 同步
-    // 调 stdout.write("\x1b[r" + cursor) 能在退出前刷出。
+    // 路径，正常 dispose 不被调用 → DECSTBM 残留 + chrome 字节残留 → shell 接管
+    // 后 \n 行为受 region 限制 + 屏底残留 zhixing chrome 与 shell prompt 重叠。
+    // process.on("exit") 是同步钩子，dispose 内 ScrollRegion.shutdown 同步 emit
+    // `\x1b[r\x1b[2J\x1b[1;1H` 能在退出前刷出。
     //
-    // 与正常路径幂等：main loop break 后 renderScreen.dispose() 已撤 DECSTBM；
+    // 与正常路径幂等：main loop break 后 renderScreen.dispose() 已撤 DECSTBM + 整屏清；
     // 此处 listener 触发时 disposed=true，dispose 提前 return（library 层幂等保证）。
     //
     // 与 setupBracketedPasteMode 内的 process.on("exit") 形成"终端模式 reset 钩子族"
     // 语义对称：bracketed paste / DECSTBM 都是终端模式残留物，统一在退出钩子卸载。
+    // Node.js exit 事件除 SIGKILL 外都触发，业界都不防御 SIGKILL。
     process.on("exit", () => {
       renderScreen?.dispose();
     });

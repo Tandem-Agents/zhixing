@@ -971,13 +971,23 @@ describe("ScrollRegion · handleResize", () => {
 });
 
 describe("ScrollRegion · shutdown", () => {
-  it("撤 DECSTBM + cursor 跳 viewport 底、清状态", () => {
+  it("对称 firstAttach 协议：撤 DECSTBM + 整屏清 + cursor 回顶", () => {
     const { region, buffer } = makeRegion({ rows: 24 });
     region.attachInput(2, "");
     buffer.value = "";
     region.shutdown();
-    expect(buffer.value).toBe("\x1b[r" + "\x1b[24;1H");
+    // firstAttach 是 \x1b[2J + \x1b[1;1H + 设 DECSTBM；
+    // shutdown 反向：撤 DECSTBM + 整屏清 + cursor 回顶 (1,1)
+    expect(buffer.value).toBe("\x1b[r" + "\x1b[2J" + "\x1b[1;1H");
     expect(region.state.attached).toBe(false);
+  });
+
+  it("chromeHeight=0 时 shutdown 序列不变（整屏清不依赖 chromeHeight）", () => {
+    const { region, buffer } = makeRegion({ rows: 24 });
+    region.attachInput(0, "");
+    buffer.value = "";
+    region.shutdown();
+    expect(buffer.value).toBe("\x1b[r" + "\x1b[2J" + "\x1b[1;1H");
   });
 
   it("shutdown 后所有状态字段一致归零（与 detachInput 行为对称）", () => {

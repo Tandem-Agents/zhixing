@@ -816,8 +816,25 @@ export class ScrollRegion {
    */
   shutdown(): void {
     if (!this.attached) return;
+
+    // 对称 firstAttach 协议 —— attach 时用 `\x1b[2J + \x1b[1;1H` 整屏清让
+    // shell history 进 scrollback、region 顶 = viewport 顶；shutdown 反向撤掉
+    // **整个 viewport**（含 region 内对话历史 + chrome 全部）让 shell 接管干净
+    // viewport，与启动前视觉状态对称：
+    //
+    //   firstAttach:    [2J] 整屏清 → cursor (1,1) → 设 DECSTBM
+    //   shutdown:       撤 DECSTBM → [2J] 整屏清 → cursor (1,1)
+    //
+    // 对话历史保留？不需要 —— 已在 conversation 文件里持久化（chat-* JSON），
+    // 用户重启 zhixing 即恢复；viewport 内的对话视觉**只是当前 session 的临时
+    // 渲染**，不是事实源。退出时不保留与 cli REPL 的"接管 + 归还"语义一致。
+    //
+    // 但 scrollback 内的对话仍保留（main buffer 模式下被 region 滚出去的内容
+    // 已经进了 terminal 自身 scrollback），用户向上滚仍能看到 —— 这是 main
+    // buffer 模式选择的核心原因（详见模块头 docstring "设计取舍"段）。
     let out = this.decstbmResetSeq();
-    out += this.cursorToSeq(this.viewportRows, 1);
+    out += this.clearScreenSeq();
+    out += this.cursorToSeq(1, 1);
     this.writeOut(out);
     this.chromeHeight = 0;
     this.scrollBottom = this.viewportRows;
@@ -850,6 +867,11 @@ export class ScrollRegion {
   /** Erase from cursor to end of screen：CSI J */
   private clearScreenBelowSeq(): string {
     return `${ESC}[J`;
+  }
+
+  /** Erase entire screen（不动 cursor，不影响 scrollback）：CSI 2 J */
+  private clearScreenSeq(): string {
+    return `${ESC}[2J`;
   }
 }
 

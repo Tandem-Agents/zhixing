@@ -1,9 +1,9 @@
 /**
  * 屏幕协调器——cli 交互模式下所有写到屏幕的逻辑必须经此协调。
  *
- * 三区屏幕模型（DECSTBM-based）：
+ * 三区屏幕模型（DECSTBM-based，main buffer 模式）：
  *   ┌──────────────────────────┐
- *   │ Scrollback               │ region 顶部滚动自然进入；不可重画
+ *   │ Scrollback               │ region 顶部滚动自然进入；用户可向上滚回看历史
  *   ├──────────────────────────┤  ← row 1
  *   │ Scroll Region (DECSTBM)  │ 终端原生区域内自滚
  *   │  ─ welcome / 用户消息    │
@@ -22,19 +22,69 @@
  *     进 scrollback（用户向上滚回看），viewport 顶变成 region 顶
  *   - 之后所有写入实时转发 ScrollRegion，chrome 永驻语义由 DECSTBM 原生保证
  *
- * 行宽硬合约（caller 端保证）：
+ * 退出协议（dispose 三态）：
+ *   - ① attached=true → ScrollRegion 仍持有 region。shutdown 内 emit 完整退出
+ *      序列（撤 DECSTBM + \x1b[2J 整屏清 + cursor 顶）+ 重置内部状态字段。
+ *   - ② attached=false && everAttached=true → 已被 detachInput 撤过 DECSTBM 但
+ *      仅清 chromeHeight 行（不整屏清），viewport 顶 region 内容仍残留 →
+ *      ScreenController 层补整屏清。这是 ctrl+c 路径常见情况：inputController.stop()
+ *      触发 detachInput 后，dispose 接力补整屏清让 shell 拿到干净 viewport。
+ *   - ③ everAttached=false → 从未接管屏幕（pre-attach 误调 dispose），不写任何字节
+ *      保护 shell 原状。
+ *
+ * 异常路径（uncaught exception / SIGTERM）由 `process.on("exit")` 钩子兜底
+ * （见 repl.ts），Node.js exit 事件除 SIGKILL 外都会触发。
+ *
+ * ─── 设计取舍：main buffer 模式 vs alt screen 模式 ───
+ *
+ * 业界两派：
+ *   - main buffer 派：Claude Code classic（默认）/ Aider / Open Interpreter / **zhixing**
+ *   - alt screen 派：OpenCode (Bubble Tea) / Codex CLI (Ratatui) / vim / htop / lazygit
+ *
+ * zhixing 选 main buffer 派的理由：
+ *   - **滚看历史是高频刚需**：用户在长对话中需要向上滚动看早期对话内容，
+ *     alt screen 模式下 region 滚出去内容直接消失（alt buffer 不支持 scrollback），
+ *     用户每天都受影响 —— 远比"退出干净"重要
+ *   - tmux/screen copy mode 能选 zhixing 历史（远程 SSH 开发场景刚需）
+ *   - DECSTBM 钉 chrome 在 viewport 底，每帧 chrome 写入只覆盖 chromeHeight 行，
+ *     不会每帧把 chrome 推进 scrollback（Claude Code classic #11260 的痛点 zhixing 没有）
+ *   - config-editor 等 caller 自管的 alt screen 切换不冲突（zhixing 主体在 main buffer）
+ *
+ * 已知 trade-off：
+ *   - **退出后 scrollback 残留 zhixing 内容**：用户 ctrl+c 退出后向上滚仍能看到对话
+ *     历史 + chrome 边框。绝大多数桌面 / SSH 用户都接受（看历史比退出干净更重要）
+ *   - 不像 vim / htop 那样"完全恢复 shell 启动前状态"
+ *
+ * 何时需要切换到 alt screen 模式：
+ *   - zhixing 重写为"声明式重画"模型并实现内部 viewport scroll（vim 那种 Ctrl-b/Ctrl-f
+ *     的内部滚动）—— 此时滚看历史能力由 zhixing 自己实现，不依赖 terminal scrollback
+ *   - 用户群转向"轻交互快速退出"场景为主（不再需要长对话回看）
+ *
+ * 切换步骤（如果未来要切到 alt screen）：
+ *   1. `firstAttach` 内 `ANSI_CLEAR_AND_HOME` 改为 `"\x1b[?1049h\x1b[1;1H"`
+ *   2. `dispose` 三态内的 `ANSI_DISPOSE_SEQUENCE` emit 改为 `"\x1b[?1049l"`
+ *   3. `ScrollRegion.shutdown` 改为仅 emit `"\x1b[r"`（撤 DECSTBM，main buffer
+ *      恢复由 ScreenController 层 `\x1b[?1049l` 完成）
+ *   4. 必须先实现 zhixing 内部 viewport scroll 机制，否则用户无法滚看历史
+ *   5. 测试断言对应调整
+ *
+ * ─── 行宽硬合约（caller 端保证） ───
+ *
  *   送入 writeScrollLine / withScrollWrite / segment.replace / segment.commit 的字符串
  *   按 \n 切分后每段显示宽度 ≤ columns - 1。违反 → 终端隐式 wrap → 物理行数 >
  *   逻辑行数 → segment 位置漂移、滚动数低估。block-renderer / TextStream / wrapAnsiLine
  *   已在 caller 端落地此合约。
  *
- * Alt UI 嵌入协议（chrome 末尾让位）：
+ * ─── Alt UI 嵌入协议（chrome 末尾让位） ───
+ *
  *   confirmation panel 等 modal alt UI 通过 suspend / resume 进入；suspend 撤
  *   DECSTBM + 擦 chrome 让 alt UI 在 chrome 区直写 stdout；alt UI 退出 caller
  *   调 resume 重设 DECSTBM + 重画 chrome。alt-screen 切换（config-editor）由
- *   caller 自管，与 suspend 协议正交。
+ *   caller 自管，与 suspend 协议正交 —— main buffer 模式下 caller 自管 alt screen
+ *   不影响 zhixing 主体视图（main buffer 不动）。
  *
- * 串行化语义（保留 enqueue 队列）：
+ * ─── 串行化语义（保留 enqueue 队列） ───
+ *
  *   所有写入路径（attachInput / setStatusBar / writeScrollLine / withScrollWrite /
  *   segment 操作）入队 FIFO 执行；suspend 期间任务暂存等 resume 后 flush。这
  *   保证视觉操作的原子性（避免与异步 spinner / scheduler notify 交错）。
@@ -201,6 +251,16 @@ interface QueueTask {
 /** 清屏 + cursor 跳 (1, 1)——首次 attach 时 emit 让 region 顶 = viewport 顶 */
 const ANSI_CLEAR_AND_HOME = "\x1b[2J\x1b[1;1H";
 
+/**
+ * 退出清屏序列 —— dispose 时 emit。
+ *
+ * 撤 DECSTBM + 整屏清 + cursor 回顶，让 shell 接管一个干净的 viewport。
+ * 序列顺序：先撤 DECSTBM（否则后续 \x1b[2J / cursor 受 region 限制）→ 整屏清
+ * → cursor 回顶（shell prompt 起手位置由 shell 自己决定，cursor 在哪儿不重要，
+ * 唯一硬要求是别留任何 zhixing 字节）。
+ */
+const ANSI_DISPOSE_SEQUENCE = "\x1b[r\x1b[2J\x1b[1;1H";
+
 class ScreenControllerImpl implements ScreenController {
   private readonly stdout: NodeJS.WriteStream;
   private readonly capability: TerminalCapability;
@@ -228,6 +288,15 @@ class ScreenControllerImpl implements ScreenController {
   private static readonly STATUS_TAIL_SEPARATOR = `  ${tone.dim("│")}  `;
 
   private input: InputRegion | null = null;
+  /**
+   * 是否 attachInput 过 —— ScrollRegion.state.attached 在 detachInput 之后会回到
+   * false，但 dispose 路径需要区分"从未接管过屏幕"和"接管过但已 detachInput"两种
+   * 状态，前者 dispose 必须不写字节（pre-attach 契约保护 shell 内容），后者必须
+   * emit 整屏清（保证 shell 接管干净 viewport）。
+   *
+   * 此标志在 attachInput 设 true 后**永不回 false**，是 lifecycle 单向闸门。
+   */
+  private everAttached = false;
   private statusLines: readonly string[] = [];
   /**
    * 状态行尾部多段集合 —— 按 source id 注册的独立段，JS Map 自带插入顺序保序。
@@ -284,6 +353,7 @@ class ScreenControllerImpl implements ScreenController {
   attachInput(region: InputRegion): void {
     this.enqueue(() => {
       this.input = region;
+      this.everAttached = true; // dispose 路径据此区分 pre-attach 与 detached 两态
       if (!this.scrollRegion.state.attached) {
         this.firstAttach();
       } else {
@@ -467,8 +537,28 @@ class ScreenControllerImpl implements ScreenController {
     this.detachResize = null;
     this.queue.push({
       run: () => {
+        // dispose 三态退出协议 —— "shell 接管前最后一次清屏"，与 firstAttach 的
+        // `\x1b[2J + cursor(1,1) + 设 DECSTBM` 严格对偶。三态由 attached /
+        // everAttached 组合判定：
+        //
+        //   ① attached=true → ScrollRegion 仍持有 region，shutdown 内 emit 完整
+        //      退出序列（撤 DECSTBM + \x1b[2J + cursor）+ 重置内部状态字段。
+        //
+        //   ② attached=false && everAttached=true → 已被 detachInput 撤过 DECSTBM
+        //      但 detachInput 仅清 chromeHeight 行（不整屏清），viewport 顶 region
+        //      内容仍残留 → ScreenController 层补整屏清。这是 ctrl+c 路径的常见
+        //      情况：inputController.stop() 触发 detachInput 后，dispose 接力补
+        //      整屏清让 shell 拿到干净 viewport。
+        //
+        //   ③ everAttached=false → 从未接管屏幕，**不写任何字节**保护 shell 原状
+        //      （pre-attach dispose 误调 / 早期退出路径等场景）。
+        //
+        // 路径互斥保证无重复 emit：① 走 shutdown（内含整屏清），② 走 ScreenController
+        // 层补 emit。
         if (this.scrollRegion.state.attached) {
           this.scrollRegion.shutdown();
+        } else if (this.everAttached) {
+          this.stdout.write(ANSI_DISPOSE_SEQUENCE);
         }
         this.input = null;
         this.statusLines = [];
