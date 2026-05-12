@@ -13,14 +13,17 @@
  *   │ Chrome (status + input)  │ 区域外、不参与 region 滚动
  *   └──────────────────────────┘  ← viewportRows
  *
- * 启动协议（pre-attach 缓冲 + 首次 attach 清屏 flush）：
+ * 启动协议（pre-attach 缓冲 + 首次 attach 清 scrollback + 清屏 + flush）：
  *   - 构造期不立即启动 ScrollRegion——shell prompt 之上的历史保留显示
  *   - caller 早期 cliWriter.line(welcome) / setStatusBar 调用累积在 ScreenController
  *     内部缓冲——pre-attach 期间不直写 stdout，避免覆盖 shell history
- *   - typeahead-input.start() 触发 attachInput 时：清屏 + DECSTBM 启动 +
- *     emit chrome 字节 + 一次性写出缓冲内容 + 定位 input cursor。shell history
- *     进 scrollback（用户向上滚回看），viewport 顶变成 region 顶
- *   - 之后所有写入实时转发 ScrollRegion，chrome 永驻语义由 DECSTBM 原生保证
+ *   - typeahead-input.start() 触发 attachInput 时：emit `\x1b[3J\x1b[2J\x1b[1;1H`
+ *     （清 scrollback + 清 viewport + cursor 顶）+ DECSTBM 启动 + emit chrome
+ *     字节 + 一次性写出缓冲内容 + 定位 input cursor。viewport 与 scrollback **完全
+ *     干净**，zhixing 拿到一张白纸开始 session（详见 ANSI_FIRSTATTACH_SEQUENCE
+ *     常量 docstring "为什么清 scrollback" 段）
+ *   - 之后所有写入实时转发 ScrollRegion，chrome 永驻语义由 DECSTBM 原生保证；
+ *     被 DECSTBM 滚出 region 顶的内容自然进 scrollback，用户运行时可向上滚回看
  *
  * 退出协议（dispose 三态）：
  *   - ① attached=true → ScrollRegion 仍持有 region。shutdown 内 emit 完整退出
@@ -51,9 +54,14 @@
  *   - config-editor 等 caller 自管的 alt screen 切换不冲突（zhixing 主体在 main buffer）
  *
  * 已知 trade-off：
- *   - **退出后 scrollback 残留 zhixing 内容**：用户 ctrl+c 退出后向上滚仍能看到对话
- *     历史 + chrome 边框。绝大多数桌面 / SSH 用户都接受（看历史比退出干净更重要）
+ *   - **退出后 scrollback 残留本次 zhixing 内容**：用户 ctrl+c 退出后向上滚仍能
+ *     看到本次 session 的对话历史 + chrome 边框（绝大多数桌面 / SSH 用户都接受
+ *     —— 看历史比退出干净更重要）
  *   - 不像 vim / htop 那样"完全恢复 shell 启动前状态"
+ *   - 下次 zhixing 启动时 ANSI_FIRSTATTACH_SEQUENCE 的 `\x1b[3J` 清掉 scrollback，
+ *     **包括用户启动前 shell 跑过命令的视觉残留**（cd / ls / git 等命令输出）。
+ *     这是为了让进入 zhixing 后向上滚只看到本次 session 内容、不被 shell 噪音
+ *     干扰；PSReadLine / bash readline 维护的命令历史功能（按 ↑ 调出）不受影响
  *
  * 何时需要切换到 alt screen 模式：
  *   - zhixing 重写为"声明式重画"模型并实现内部 viewport scroll（vim 那种 Ctrl-b/Ctrl-f
@@ -61,7 +69,8 @@
  *   - 用户群转向"轻交互快速退出"场景为主（不再需要长对话回看）
  *
  * 切换步骤（如果未来要切到 alt screen）：
- *   1. `firstAttach` 内 `ANSI_CLEAR_AND_HOME` 改为 `"\x1b[?1049h\x1b[1;1H"`
+ *   1. `firstAttach` 内 `ANSI_FIRSTATTACH_SEQUENCE` 改为 `"\x1b[?1049h\x1b[1;1H"`
+ *      （alt buffer 进入后无 scrollback 概念，`\x1b[3J` 失效，干脆不要）
  *   2. `dispose` 三态内的 `ANSI_DISPOSE_SEQUENCE` emit 改为 `"\x1b[?1049l"`
  *   3. `ScrollRegion.shutdown` 改为仅 emit `"\x1b[r"`（撤 DECSTBM，main buffer
  *      恢复由 ScreenController 层 `\x1b[?1049l` 完成）
@@ -271,8 +280,47 @@ interface QueueTask {
   readonly run: () => void;
 }
 
-/** 清屏 + cursor 跳 (1, 1)——首次 attach 时 emit 让 region 顶 = viewport 顶 */
-const ANSI_CLEAR_AND_HOME = "\x1b[2J\x1b[1;1H";
+/**
+ * 启动序列（首次 attach 时 emit）—— 清 viewport + 清 scrollback + cursor 顶。
+ *
+ * 序列顺序（关键，不能调）：
+ *   `\x1b[2J` —— 清 viewport（终端可见区域所有字符）
+ *   `\x1b[3J` —— Erase Saved Lines (xterm 扩展) 清整个 terminal scrollback
+ *   `\x1b[1;1H` —— cursor 落 (1,1) 让 region 顶 = viewport 顶
+ *
+ * 为什么 `\x1b[3J` 必须在 `\x1b[2J` 之后：
+ *   ConPTY / Windows Terminal 对 `\x1b[2J` 的实现有 quirk —— 清 viewport 时
+ *   会**把内容推入 scrollback**（见 microsoft/terminal#5210，与 xterm 标准
+ *   "erase but don't scroll" 行为不同）。
+ *
+ *   若 `\x1b[3J` 在前：先清 scrollback → 然后 `\x1b[2J` 把 viewport 内容
+ *   （上次 zhixing 退出前的 farewell + shell prompt 等最后一帧）推入 scrollback
+ *   → 结果用户向上滚仍能看到这一帧。
+ *
+ *   `\x1b[3J` 在后：`\x1b[2J` 推入 scrollback → `\x1b[3J` 把刚推入的也清掉
+ *   → scrollback 真正空。
+ *
+ *   xterm 标准下两种顺序等效（\x1b[2J 不推送），但 Windows ConPTY 下顺序敏感。
+ *   按"严格能在两种终端都对"原则选当前顺序。
+ *
+ * 为什么清 scrollback：
+ *   zhixing 主体在 main buffer 渲染（详见模块头 docstring），DECSTBM 滚动会把
+ *   region 顶内容自然推入 terminal scrollback。两个场景下用户会看到不希望的内容：
+ *     - 启动 zhixing 前 shell 跑过的命令输出残留在 scrollback
+ *     - 上次 zhixing session 退出后写过的 chrome / 对话 / farewell 块残留
+ *   两类残留对当前 zhixing session 都是噪音 —— 启动时清掉让用户从空 scrollback
+ *   开始，进入 zhixing 后向上滚只看到本次 session 的对话历史。
+ *
+ *   `\x1b[3J` 兼容性：xterm 标准扩展，Windows Terminal / ConPTY (Win10 v1903+) /
+ *   PowerShell 7+ / iTerm2 / 主流 Linux 终端都支持；老 VT100 不识别但无害忽略。
+ *
+ * 副作用：
+ *   清 scrollback 同时清掉用户启动 zhixing 之前 shell 的视觉残留（cd / ls / git
+ *   等命令的文本输出）。但 PowerShell PSReadLine / bash readline 维护的命令历史
+ *   功能（按 ↑ 调出历史命令）**不受影响** —— 那是独立于 viewport scrollback 的
+ *   程序级数据。
+ */
+const ANSI_FIRSTATTACH_SEQUENCE = "\x1b[2J\x1b[3J\x1b[1;1H";
 
 /**
  * 退出清屏序列 —— dispose 时 emit。
@@ -281,6 +329,10 @@ const ANSI_CLEAR_AND_HOME = "\x1b[2J\x1b[1;1H";
  * 序列顺序：先撤 DECSTBM（否则后续 \x1b[2J / cursor 受 region 限制）→ 整屏清
  * → cursor 回顶（shell prompt 起手位置由 shell 自己决定，cursor 在哪儿不重要，
  * 唯一硬要求是别留任何 zhixing 字节）。
+ *
+ * 不清 scrollback：本次 zhixing session 写入 scrollback 的内容（被 DECSTBM 滚出
+ * 顶部的对话历史）**保留**，用户退出后在 shell 内可向上滚回看本次 session。下次
+ * zhixing 启动时由 ANSI_FIRSTATTACH_SEQUENCE 清掉。
  */
 const ANSI_DISPOSE_SEQUENCE = "\x1b[r\x1b[2J\x1b[1;1H";
 
@@ -621,12 +673,14 @@ class ScreenControllerImpl implements ScreenController {
     this.suspendListeners.clear();
   }
 
-  /** 首次 attach 启动序列：清屏 + DECSTBM + chrome 字节 + flush 缓冲 + cursor 定位 */
+  /** 首次 attach 启动序列：清 scrollback + 清 viewport + DECSTBM + chrome 字节 + flush 缓冲 + cursor 定位 */
   private firstAttach(): void {
     if (this.input === null) return; // 防御：attachInput 必传 region
 
-    // 清屏让 region 顶 = viewport 顶；shell history 进 scrollback 用户可向上滚回看
-    this.stdout.write(ANSI_CLEAR_AND_HOME);
+    // 清 scrollback + 清 viewport + cursor 顶 —— 让 region 顶 = viewport 顶 + 用户
+    // 向上滚不会看到 zhixing 启动前 shell 残留或上次 session 残留（见 ANSI_FIRSTATTACH_SEQUENCE
+    // 常量 docstring 详解副作用与兼容性）。
+    this.stdout.write(ANSI_FIRSTATTACH_SEQUENCE);
 
     const chromeHeight = this.computeChromeHeight();
     const chromeBytes = this.buildChromeBytes(chromeHeight);
