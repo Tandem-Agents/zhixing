@@ -129,7 +129,7 @@ export type AgentEventMap = {
     systemPrompt?: string;
     /**
      * 提交给 LLM 的完整 messages 历史（含 user / assistant / tool 全部 ContentBlock）。
-     * 引用传递无序列化开销；订阅者按需序列化（如 dump 在 ZHIXING_RAW_DUMP=1 时）。
+     * 引用传递无序列化开销；订阅者按需序列化（如 cli `--log` 启用时 dump 到文件）。
      */
     messages: readonly Message[];
     /**

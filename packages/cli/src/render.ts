@@ -568,7 +568,7 @@ export function createRenderSubscribers(
       contextIndicator = createContextIndicator({ screen, eventBus: bus });
     }
 
-    // chunk-dump 诊断旁路——ZHIXING_RAW_DUMP=1 启用时把 LLM stream 完整事件流（含
+    // chunk-dump 诊断旁路——`--log` 启用时把 LLM stream 完整事件流（含
     // tool_call_delta 等）写日志，默认 noop 零开销。在 EventBus 订阅装载点接入
     // 而非 output-renderer，覆盖范围与 status-bar 同源（StreamEvent）
     const detachChunkDump = attachChunkDumpToBus(bus);

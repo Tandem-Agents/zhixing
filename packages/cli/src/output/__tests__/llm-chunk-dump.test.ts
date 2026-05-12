@@ -9,22 +9,22 @@ import {
 } from "@zhixing/core";
 import {
   attachChunkDumpToBus,
+  configureLlmChunkDump,
   getLlmChunkDump,
   __resetForTesting,
 } from "../llm-chunk-dump.js";
 
 const LOG_DIR = path.join(os.homedir(), ".zhixing", "logs");
 
-describe("LLM chunk dump · 默认禁用（无 ZHIXING_RAW_DUMP env）", () => {
+describe("LLM chunk dump · 默认禁用（未 configure / configure false）", () => {
   beforeEach(() => {
     __resetForTesting();
-    delete process.env["ZHIXING_RAW_DUMP"];
   });
   afterEach(() => {
     __resetForTesting();
   });
 
-  it("env var 未启用时返回 noop handle —— 调用 record 不写文件不抛错", () => {
+  it("未 configure 时返回 noop handle —— 调用 record 不写文件不抛错", () => {
     const dump = getLlmChunkDump();
     expect(() => {
       dump.recordStreamEvent({ type: "text_delta", text: "hello" });
@@ -35,6 +35,14 @@ describe("LLM chunk dump · 默认禁用（无 ZHIXING_RAW_DUMP env）", () => {
       });
       dump.recordTurnBoundary();
       dump.dispose();
+    }).not.toThrow();
+  });
+
+  it("configure(false) 显式禁用同样走 noop 路径", () => {
+    configureLlmChunkDump(false);
+    const dump = getLlmChunkDump();
+    expect(() => {
+      dump.recordStreamEvent({ type: "text_delta", text: "x" });
     }).not.toThrow();
   });
 
@@ -51,12 +59,12 @@ describe("LLM chunk dump · 默认禁用（无 ZHIXING_RAW_DUMP env）", () => {
   });
 });
 
-describe("LLM chunk dump · 启用（ZHIXING_RAW_DUMP=1）", () => {
+describe("LLM chunk dump · 启用（configure(true)）", () => {
   let logsBefore: string[] = [];
 
   beforeEach(() => {
     __resetForTesting();
-    process.env["ZHIXING_RAW_DUMP"] = "1";
+    configureLlmChunkDump(true);
     try {
       logsBefore = fs.existsSync(LOG_DIR) ? fs.readdirSync(LOG_DIR) : [];
     } catch {
@@ -65,7 +73,6 @@ describe("LLM chunk dump · 启用（ZHIXING_RAW_DUMP=1）", () => {
   });
   afterEach(() => {
     __resetForTesting();
-    delete process.env["ZHIXING_RAW_DUMP"];
     try {
       const after = fs.existsSync(LOG_DIR) ? fs.readdirSync(LOG_DIR) : [];
       for (const name of after) {

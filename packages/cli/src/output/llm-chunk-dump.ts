@@ -20,21 +20,28 @@
  *
  * **使用方式**:
  *   ```
- *   ZHIXING_RAW_DUMP=1 zhixing                # bash
- *   $env:ZHIXING_RAW_DUMP="1"; zhixing        # PowerShell
+ *   zhixing --log                              # 启用 dump（默认关闭）
  *   ```
  *   启用后日志写到 `~/.zhixing/logs/llm-raw-{pid}-{ts}.log`，路径在第一次记录时
- *   通过 stderr 短提示一次（chrome 启动前打印,不破坏 chrome）。
+ *   通过 stderr 短提示一次（chrome 启动前打印，不破坏 chrome）。
+ *
+ *   历史：早期通过 ENV `ZHIXING_RAW_DUMP=1` 启用，但 PowerShell 的 `$env:VAR="1"; cmd`
+ *   语法会把 VAR 持久化到 session（与 bash `VAR=1 cmd` 单次性不同），用户曾因此
+ *   反馈"dump 状态拔不掉"。改为 CLI flag 后启用状态由 argv 显式标记，每次启动
+ *   都明确，避免任何 shell ENV 语法陷阱。
  *
  * **设计契约**:
- *   - **默认禁用**: env var 未启用时全 noop,零运行成本
- *   - **完全旁路**: dump 失败 swallow,不影响 LLM 流处理与渲染路径
- *   - **process-level singleton**: 一个 cli 进程一个日志文件,跨多个 turn / 多次
+ *   - **默认禁用**: caller 不传 `enabled` 或传 false 时全 noop，零运行成本
+ *   - **完全旁路**: dump 失败 swallow，不影响 LLM 流处理与渲染路径
+ *   - **process-level singleton**: 一个 cli 进程一个日志文件，跨多个 turn / 多次
  *     LLM 请求累积
- *   - **不依赖 chrome**: 直接 fs 同步写入,与 ScreenController / cliWriter 完全
+ *   - **不依赖 chrome**: 直接 fs 同步写入，与 ScreenController / cliWriter 完全
  *     解耦——chrome 出问题时仍能记录
- *   - **接入点单一**: 在 createRenderSubscribers (per-run-bus 订阅装载点) attach,
+ *   - **接入点单一**: 在 createRenderSubscribers (per-run-bus 订阅装载点) attach，
  *     不在 output-renderer 重复接入避免双轨道
+ *   - **caller 决定 enabled**: caller 在首次调 `getLlmChunkDump()` 之前调
+ *     `configureLlmChunkDump(enabled)` 显式传入；缺省 = 禁用，与 setStatusBar /
+ *     ContextIndicator 等"由 caller 显式注入开关"的模式一致
  */
 
 import fs from "node:fs";
@@ -48,8 +55,6 @@ import type {
   StreamEvent,
   ToolSpec,
 } from "@zhixing/core";
-
-const ENABLE_ENV = "ZHIXING_RAW_DUMP";
 
 /** 一次 LLM 请求的完整入参——dump 用于人类阅读 + 可机器还原 */
 export interface LlmRequestPayload {
@@ -75,17 +80,44 @@ export interface LlmChunkDump {
 }
 
 /**
- * 模块级 lazy singleton —— 第一次调用返回固定 handle，后续调用复用同一文件。
- * env var 未启用时返回 noop handle（零开销）。
+ * 模块级 lazy singleton + caller 注入 enabled。
  *
- * 不暴露"初始化失败"——任何 IO 错误 swallow 并退化为 noop，避免诊断模块本身
- * 影响 cli 主流程。
+ * ─── 协议 ───
+ *
+ *   caller 启动时调一次 `configureLlmChunkDump(enabled)` 显式设置启用状态，
+ *   之后任何 module 通过 `getLlmChunkDump()` 复用单例。
+ *
+ *   未 configure 直接调 `getLlmChunkDump()` → 默认禁用（零运行成本 noop）。
+ *
+ *   typical usage（cli REPL / runOnce 入口）：
+ *   ```
+ *   configureLlmChunkDump(options.log === true);
+ *   getLlmChunkDump();  // 预热 singleton（详见 attachChunkDumpToBus docstring）
+ *   ```
+ *
+ *   未来加新启用条件（如配置文件 / 多 dump 实例）扩展 configure 签名即可，
+ *   getLlmChunkDump 的 caller 零感知（singleton 单点协议稳定）。
+ *
+ * ─── 不暴露失败 ───
+ *
+ *   任何 IO 错误 swallow 并退化为 noop —— 诊断模块自身不应影响 cli 主流程。
  */
 let cachedHandle: LlmChunkDump | null = null;
+let pendingEnabled = false;
+
+/**
+ * 配置 chunk dump 启用状态 —— caller 在首次调 `getLlmChunkDump()` 之前调一次。
+ *
+ * 重复调用 / cached 之后调用 = 不生效（singleton 一旦创建状态固定，再 configure
+ * 不会替换 handle）。caller 应在启动入口一次性传 final 决定，不要中途切换。
+ */
+export function configureLlmChunkDump(enabled: boolean): void {
+  pendingEnabled = enabled;
+}
 
 export function getLlmChunkDump(): LlmChunkDump {
   if (cachedHandle !== null) return cachedHandle;
-  cachedHandle = createDump();
+  cachedHandle = pendingEnabled ? createDump() : NOOP;
   return cachedHandle;
 }
 
@@ -141,7 +173,8 @@ export function attachChunkDumpToBus(
 }
 
 function createDump(): LlmChunkDump {
-  if (process.env[ENABLE_ENV] !== "1") return NOOP;
+  // 启用状态由 configureLlmChunkDump 决定 —— 此函数只在 pendingEnabled=true 时被
+  // getLlmChunkDump 调用，自身无需再 check enabled flag。
 
   let fd: number | null = null;
   let logPath = "";
@@ -409,4 +442,5 @@ function formatCodepoints(text: string): string {
 export function __resetForTesting(): void {
   cachedHandle?.dispose();
   cachedHandle = null;
+  pendingEnabled = false;
 }

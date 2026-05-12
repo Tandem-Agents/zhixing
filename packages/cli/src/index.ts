@@ -9,6 +9,7 @@
 import chalk from "chalk";
 import { Command } from "commander";
 import { setDiagnosticLogger } from "@zhixing/core";
+import { configureLlmChunkDump } from "./output/llm-chunk-dump.js";
 import { runStartupCheck, type StartupCheckResult } from "./startup.js";
 import { runOnce } from "./run-agent.js";
 import { startRepl } from "./repl.js";
@@ -79,6 +80,7 @@ program
   .option("-c, --continue", "继续当前项目最近的会话")
   .option("-r, --resume [id]", "恢复指定会话（不带 ID 则交互选择）")
   .option("-n, --name <name>", "为会话命名")
+  .option("--log", "启用 LLM raw chunk dump 到 ~/.zhixing/logs/ —— 诊断渲染 / 上下文 / 流式问题用")
   .action(async (options: {
     print?: string;
     model?: string;
@@ -87,12 +89,16 @@ program
     continue?: boolean;
     resume?: string | true;
     name?: string;
+    log?: boolean;
   }) => {
     try {
       // cli 交互模式（REPL / -p）静默 core 诊断 log（[llm] 请求 / 工具调用等），
       // 避免污染对话 UI；serve / rpc / serve sub-commands 各自独立 action 不受影响，
       // 保持默认 console.log 输出供运维与调试观察
       setDiagnosticLogger(() => {});
+      // chunk-dump 启用配置 —— 必须在 startRepl / runOnce 触发 dump 预热之前调用，
+      // 否则 singleton cached 为 NOOP 后续无法激活。--log 是唯一开关（无 ENV 兜底）。
+      configureLlmChunkDump(options.log === true);
       // 启动期检查——任何模式（-p / REPL）下都先确保必要字段就绪
       const startupResult = await runStartupCheck({
         cwd: process.cwd(),
