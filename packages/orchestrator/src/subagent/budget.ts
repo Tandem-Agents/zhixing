@@ -37,20 +37,31 @@
 export type SubAgentConfirmationPolicy = "inherit-or-deny" | "auto-deny";
 
 /**
- * 子 agent 软上限触发种类 —— 三类 budget 触发统一建模
+ * 子 agent 软上限触发种类 —— 四类触发统一建模
  *
- * 三类触发的共同语义:graceful 在下次 LLM call 前停,partial 文本仍可抓取,
+ * 共同语义:graceful 在下次 LLM call 前停,partial 文本仍可抓取,
  * runChildAgent 折成 status="failed" + 对应 error.type:
  *   - max_turns:loop 内置 maxTurns 计数到达,reason="max_turns"
  *   - max_tokens:每次 llm:request_end 累加 usage 超阈,触发 abort with origin
  *   - wall_clock:setTimeout 触发,abort with origin
+ *   - context_overflow:单次 inputTokens 超模型 attention 风险阈值,触发 abort with origin
  *
- * 三类共用一个枚举的好处:
+ * 语义分类:
+ *   - 前三类是**成本类**软上限(用户配置 budget 或时间预算)
+ *   - context_overflow 是**质量类**软上限(模型固有注意力阈值,riskMaxTokens
+ *     从 ModelCapability 解析,而非用户 budget) —— sub-task prompt 累积超阈说明
+ *     任务过大需切片,继续执行会触发 attention 稀释 → LLM 响应质量下降
+ *
+ * 四类共用一个枚举的好处:
  *   - classifier 单一分支判断("有 kind 即 failed"),不解析 abortReason.origin 字符串
- *   - deriveErrorMeta 一处映射 error.type,新增 budget kind 时只改一处
+ *   - deriveErrorMeta 一处映射 error.type,新增 kind 时只改一处
  *   - 与 idle-timeout / parent-abort 等真正的中断语义清晰区分(后者 status="aborted")
  */
-export type BudgetExceededKind = "max_turns" | "max_tokens" | "wall_clock";
+export type BudgetExceededKind =
+  | "max_turns"
+  | "max_tokens"
+  | "wall_clock"
+  | "context_overflow";
 
 export interface SubAgentBudget {
   /** 子 agent loop 最大交互轮次,达到后终止 (透传 runAgentLoop.maxTurns) */

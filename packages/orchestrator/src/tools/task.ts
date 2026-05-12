@@ -78,6 +78,14 @@ export interface TaskToolEnv {
   parentBroker: IConfirmationBroker;
   /** 父工具集 —— 子工具按 sub-agent profile.enabledTools 过滤后从此派生 */
   parentTools: readonly ToolDefinition[];
+  /**
+   * 单次 input tokens 注意力风险阈值 —— 从 ModelCapability.riskMaxTokens 解析。
+   *
+   * sub-task prompt 累积超阈说明任务过大,继续执行会触发 attention 稀释致 LLM
+   * 响应质量下降。loop-runner 在每次 llm:request_end 后检查 usage.inputTokens,
+   * 超阈则 graceful 中止,主 LLM 收到 sub_agent_context_overflow 信号自主决策切片。
+   */
+  riskMaxTokens: number;
 }
 
 /**
@@ -351,6 +359,7 @@ export function createTaskTool(env: TaskToolEnv): ToolDefinition {
         parentTools: env.parentTools,
         parentSignal: abortSignal,
         task: prompt,
+        riskMaxTokens: env.riskMaxTokens,
       });
 
       return formatChildResultAsToolResult(result, description);

@@ -97,6 +97,8 @@ function makeBaseOpts(provider: MockLLMProvider, tools: ToolDefinition[] = []) {
     // 故意拉到极大值,避免常规测试路径意外触发 token 软上限;maxTokens 专属
     // describe 段会显式覆盖
     maxTokens: 10_000_000,
+    // 同上,默认大阈值;context_overflow 专属 describe 段会显式覆盖
+    riskMaxTokens: 10_000_000,
     watchdog: createWatchdogPolicy({ idleTimeoutMs: 0 }),
     wallClockTimeoutMs: 60_000,
   };
@@ -298,6 +300,122 @@ describe("runSubAgentLoop · max_tokens budget", () => {
   });
 });
 
+// ─── context_overflow 软上限触发 ───
+
+describe("runSubAgentLoop · context_overflow 软上限触发", () => {
+  it("单次 inputTokens 超 riskMaxTokens → graceful abort + budgetExceededKind", async () => {
+    // 第一次 LLM call 单次 inputTokens=300 > riskMaxTokens=200 → 触发 abort
+    // 第二次响应不应被消耗
+    const provider = new MockLLMProvider([
+      {
+        text: "first call exceeds risk",
+        usage: { inputTokens: 300, outputTokens: 10 },
+      },
+      { text: "should not be consumed" },
+    ]);
+
+    const result = await runSubAgentLoop({
+      ...makeBaseOpts(provider),
+      riskMaxTokens: 200,
+    });
+
+    expect(result.reason).toBe("aborted");
+    expect(result.budgetExceededKind).toBe("context_overflow");
+    expect(result.abortReason?.kind).toBe("external");
+    if (result.abortReason?.kind === "external") {
+      expect(result.abortReason.origin).toBe("subagent-context-overflow");
+    }
+    expect(provider.callCount).toBe(1);
+  });
+
+  it("累加超 maxTokens 但单次不超 riskMaxTokens → 触发 max_tokens 而非 context_overflow", async () => {
+    // 三次 50+30=80 tokens,累计 240 超 maxTokens=200;但单次 inputTokens=50 < riskMaxTokens=10000
+    const provider = new MockLLMProvider([
+      {
+        toolCalls: [{ id: "t1", name: "read", input: {} }],
+        usage: { inputTokens: 50, outputTokens: 30 },
+      },
+      {
+        toolCalls: [{ id: "t2", name: "read", input: {} }],
+        usage: { inputTokens: 50, outputTokens: 30 },
+      },
+      {
+        text: "third response",
+        usage: { inputTokens: 50, outputTokens: 30 },
+      },
+      { text: "should not run" },
+    ]);
+
+    const result = await runSubAgentLoop({
+      ...makeBaseOpts(provider, [makeReadOnlyTool("read")]),
+      maxTokens: 200,
+      riskMaxTokens: 10_000,
+    });
+
+    expect(result.reason).toBe("aborted");
+    expect(result.budgetExceededKind).toBe("max_tokens");
+  });
+
+  it("first-wins:同次 call 同时超 max_tokens 与 riskMaxTokens 时 max_tokens 抢占槽位", async () => {
+    // 单次 inputTokens=500 超 riskMaxTokens=300;同次累加 input+output=600 也超 maxTokens=400
+    // listener 检查顺序:先 max_tokens 累加判断,后 context_overflow 单次判断
+    // 二者同次满足 → max_tokens 先入槽 → first-wins 维持 max_tokens
+    const provider = new MockLLMProvider([
+      {
+        text: "both exceed",
+        usage: { inputTokens: 500, outputTokens: 100 },
+      },
+      { text: "should not run" },
+    ]);
+
+    const result = await runSubAgentLoop({
+      ...makeBaseOpts(provider),
+      maxTokens: 400,
+      riskMaxTokens: 300,
+    });
+
+    expect(result.reason).toBe("aborted");
+    expect(result.budgetExceededKind).toBe("max_tokens");
+  });
+
+  it("riskMaxTokens 设极大值 → 不触发,正常 completed", async () => {
+    const provider = new MockLLMProvider([
+      { text: "ok", usage: { inputTokens: 100, outputTokens: 50 } },
+    ]);
+
+    const result = await runSubAgentLoop({
+      ...makeBaseOpts(provider),
+      riskMaxTokens: 10_000_000,
+    });
+
+    expect(result.reason).toBe("completed");
+    expect(result.budgetExceededKind).toBeUndefined();
+  });
+
+  it("usage 内 cacheRead/Write 不影响 context_overflow 判定 —— 只看真实 inputTokens", async () => {
+    // inputTokens=100 < riskMaxTokens=200;cacheReadTokens 巨大也不应触发
+    const provider = new MockLLMProvider([
+      {
+        text: "cache heavy but real input small",
+        usage: {
+          inputTokens: 100,
+          outputTokens: 50,
+          cacheReadTokens: 500_000,
+          cacheWriteTokens: 100_000,
+        },
+      },
+    ]);
+
+    const result = await runSubAgentLoop({
+      ...makeBaseOpts(provider),
+      riskMaxTokens: 200,
+    });
+
+    expect(result.reason).toBe("completed");
+    expect(result.budgetExceededKind).toBeUndefined();
+  });
+});
+
 // ─── listener cleanup discipline ───
 
 describe("runSubAgentLoop · listener cleanup", () => {
@@ -468,6 +586,18 @@ describe("deriveBudgetExceededKind · 真值表(纯函数 first-wins 折叠契�
     // (因 reason 不是 aborted/max_turns,折叠规则不命中槽位通道)
     expect(deriveBudgetExceededKind("completed", "max_tokens")).toBeUndefined();
     expect(deriveBudgetExceededKind("completed", "wall_clock")).toBeUndefined();
+  });
+
+  it('reason="aborted" + 槽位="context_overflow" → "context_overflow"(质量类软上限触发)', () => {
+    expect(deriveBudgetExceededKind("aborted", "context_overflow")).toBe(
+      "context_overflow",
+    );
+  });
+
+  it('reason="max_turns" + 槽位="context_overflow" → "max_turns"(reason 优先)', () => {
+    expect(deriveBudgetExceededKind("max_turns", "context_overflow")).toBe(
+      "max_turns",
+    );
   });
 });
 

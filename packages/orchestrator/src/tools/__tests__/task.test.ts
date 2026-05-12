@@ -81,6 +81,9 @@ function makeEnv(provider: MockLLMProvider): TaskToolEnv {
     workspaceSource: "cwd-fallback",
     parentBroker: new ConfirmationBroker({ id: "parent-broker-test" }),
     parentTools: [makeReadOnlyTool("read")],
+    // 默认大阈值,避免现有测试场景误触发 context_overflow;
+    // 专项测试需要触发时单独构造 env 注入更小值
+    riskMaxTokens: 10_000_000,
   };
 }
 

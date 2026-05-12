@@ -76,6 +76,8 @@ function makeBaseOpts(
     parentTools: [makeReadOnlyTool("read")],
     parentSignal: new AbortController().signal,
     task: "test task description",
+    // 默认大阈值,避免常规测试场景误触发 context_overflow;专项测试 override
+    riskMaxTokens: 10_000_000,
     ...overrides,
   };
 }
@@ -189,6 +191,29 @@ describe("runChildAgent · failed paths", () => {
     expect(result.error?.type).toBe("wall_clock_timeout");
     expect(result.error?.message).toBe("sub-agent wall-clock timeout");
   }, 5000);
+
+  it("context_overflow 触发 → status=failed + error.type=sub_agent_context_overflow + 切片提示进 message", async () => {
+    // 单次 inputTokens=500 > riskMaxTokens=200 → 触发 context_overflow
+    // 主 LLM 通过 error.message 收到切片提示文本(Task 工具 failed 渲染会拼入 ToolResult)
+    const provider = new MockLLMProvider([
+      {
+        text: "I attempted but the context is too large.",
+        usage: { inputTokens: 500, outputTokens: 50 },
+      },
+      { text: "should not be consumed" },
+    ]);
+
+    const result = await runChildAgent(
+      makeBaseOpts(provider, { riskMaxTokens: 200 }),
+    );
+
+    expect(result.status).toBe("failed");
+    expect(result.error?.type).toBe("sub_agent_context_overflow");
+    expect(result.error?.message).toContain("Split the task");
+    // partial 文本仍可抓 —— 与其他 budget 触发同款 partial 复用契约
+    expect(result.partial).toContain("attempted");
+    expect(provider.callCount).toBe(1);
+  });
 });
 
 // ─── aborted ───

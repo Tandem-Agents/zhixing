@@ -93,6 +93,18 @@ export interface RunChildAgentOptions {
   task: string;
   /** 资源预算(可选,缺省走 resolveSubAgentBudget 默认值) */
   budget?: SubAgentBudget;
+  /**
+   * 单次 input tokens 注意力风险阈值 —— 从 ModelCapability.riskMaxTokens 解析。
+   *
+   * sub-task prompt 累积超阈说明任务过大,继续执行会触发 attention 稀释致 LLM
+   * 响应质量下降。loop-runner 在每次 llm:request_end 后检查 usage.inputTokens,
+   * 超阈则 graceful 中止,主 LLM 收到 ChildAgentResult.error.type
+   * = "sub_agent_context_overflow" 后自主决策切分子任务。
+   *
+   * 与 budget.maxTokens 的区别:本字段监控**单次质量**(模型固有阈值),
+   * maxTokens 监控**累计成本**(用户配置 budget)—— 数值不同,语义不同,触发互不抢占。
+   */
+  riskMaxTokens: number;
 }
 
 export interface ChildAgentResult {
@@ -242,6 +254,7 @@ async function runChildAgentInner(
           parentSignal: opts.parentSignal,
           maxTurns: budget.maxTurns,
           maxTokens: budget.maxTokens,
+          riskMaxTokens: opts.riskMaxTokens,
           watchdog: { idleTimeoutMs: budget.llmIdleTimeoutMs, warnThresholdRatio: 0.5 },
           wallClockTimeoutMs: budget.wallClockTimeoutMs,
         }),
@@ -335,8 +348,10 @@ function deriveErrorMeta(
       type: "loop_error",
     };
   }
-  // 三类软上限触发 —— 用 budgetExceededKind 结构化字段映射,避免散落 reason 判断
-  // 与 abortReason.origin 字符串解析(loop-runner 已把"abort 来源"折进 kind)
+  // 四类软上限触发 —— 用 budgetExceededKind 结构化字段映射,避免散落 reason 判断
+  // 与 abortReason.origin 字符串解析(loop-runner 已把"abort 来源"折进 kind)。
+  // message 写为 LLM 可读文本——Task 工具的 failed 渲染会把 message 直接拼入
+  // ToolResult content,主 LLM 据此自主决策(切片 / 调整策略等)。
   if (runResult?.budgetExceededKind) {
     switch (runResult.budgetExceededKind) {
       case "max_turns":
@@ -353,6 +368,12 @@ function deriveErrorMeta(
         return {
           message: "sub-agent wall-clock timeout",
           type: "wall_clock_timeout",
+        };
+      case "context_overflow":
+        return {
+          message:
+            "sub-task too large for reliable attention. Split the task into smaller, more focused sub-tasks.",
+          type: "sub_agent_context_overflow",
         };
     }
   }

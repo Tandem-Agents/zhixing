@@ -77,13 +77,15 @@ export interface SubAgentLoopResult {
   /** 累计 token usage(来自 AgentResult.usage) */
   usage: TokenUsage;
   /**
-   * 软上限触发种类 —— 三类 budget 触发统一建模(max_turns / max_tokens / wall_clock);
-   * 触发时填对应 kind,否则 undefined;classifier 据此折成 status="failed"。
+   * 软上限触发种类 —— 四类触发统一建模(max_turns / max_tokens / wall_clock /
+   * context_overflow);触发时填对应 kind,否则 undefined;classifier 据此折成
+   * status="failed"。
    *
    * 与 reason 字段的关系:
    *   - reason="max_turns" → budgetExceededKind="max_turns"(loop 内置,不走 abort 通道)
    *   - reason="aborted" + first-wins 槽位 abortBudgetKind="max_tokens" → budgetExceededKind="max_tokens"
    *   - reason="aborted" + first-wins 槽位 abortBudgetKind="wall_clock" → budgetExceededKind="wall_clock"
+   *   - reason="aborted" + first-wins 槽位 abortBudgetKind="context_overflow" → budgetExceededKind="context_overflow"
    *   - 其他(completed / error / 真正的 abort 如 parent-abort/idle-timeout) → undefined
    */
   budgetExceededKind?: BudgetExceededKind;
@@ -134,6 +136,19 @@ export interface RunSubAgentLoopOptions {
    * cache 字段不计入(budget 监控的是实际消耗,prompt cache 命中不算钱)
    */
   maxTokens: number;
+  /**
+   * 单次 input tokens 注意力风险阈值 —— 从 ModelCapability.riskMaxTokens 解析。
+   *
+   * 与 maxTokens 的区别:
+   *   - maxTokens 累加 input+output 监控**总成本**(用户配置 budget)
+   *   - riskMaxTokens 检查**单次 inputTokens**监控**注意力质量**(模型固有阈值)
+   *
+   * 触发时机:每次 llm:request_end 后,若 payload.usage.inputTokens > riskMaxTokens
+   * 则 first-wins 写槽位 "context_overflow" + abort with origin。下次 turn 不启动。
+   * 主 LLM 收到 ChildAgentResult { status:"failed", error.type:"sub_agent_context_overflow" }
+   * 后自主决策切分子任务。
+   */
+  riskMaxTokens: number;
   /** stream 看门狗策略,缺省时 runAgentLoop 内部走 DEFAULT_WATCHDOG_POLICY */
   watchdog: WatchdogPolicy;
   /** wall-clock 总超时(ms) —— 触发后 abort with origin="subagent-wall-clock-timeout" */
@@ -147,18 +162,27 @@ export interface RunSubAgentLoopOptions {
 export async function runSubAgentLoop(
   opts: RunSubAgentLoopOptions,
 ): Promise<SubAgentLoopResult> {
-  // wall-clock + maxTokens 两路软上限通过独立 AbortController 注入,用单一 first-wins
-  // 槽位 abortBudgetKind 记录"哪个 budget kind 先触发"—— 与 AbortController first-wins
-  // 语义对齐(任一 controller 先 abort 即决定 abortReason),槽位"先入为主"决定
+  // wall-clock + maxTokens + context_overflow 三路软上限通过独立 AbortController 注入,
+  // 用单一 first-wins 槽位 abortBudgetKind 记录"哪个 budget kind 先触发"—— 与 AbortController
+  // first-wins 语义对齐(任一 controller 先 abort 即决定 abortReason),槽位"先入为主"决定
   // budgetExceededKind,无后置静态优先级歧义,跨模块边界无字符串解析债务。
-  // 两个 controller 用 AbortSignal.any 合成单一 signal 透传给 loop 的 abortSignal 入参
+  // 三个 controller 用 AbortSignal.any 合成单一 signal 透传给 loop 的 abortSignal 入参
   // (loop 视为 external kind)。
+  //
+  // 选择独立 controller(不复用 maxTokensController)是为了 origin 字符串清晰对应
+  // 触发源 —— observability 路径(audit log / event 重放)按 origin 反查触发原因
+  // 不需要交叉解析 budgetExceededKind 槽位。
   const wallClockController = new AbortController();
   const maxTokensController = new AbortController();
-  // abort 通道触发的 budget kind 槽位 —— 容纳 max_tokens / wall_clock 两类(max_turns
-  // 不走 abort 通道,由 loop 内置 reason 直给)。null 表示"abort 通道无 budget 触发"
-  // (例如 parent-abort / idle-timeout / completed 路径)。
-  let abortBudgetKind: "max_tokens" | "wall_clock" | null = null;
+  const contextOverflowController = new AbortController();
+  // abort 通道触发的 budget kind 槽位 —— 容纳 max_tokens / wall_clock / context_overflow
+  // 三类(max_turns 不走 abort 通道,由 loop 内置 reason 直给)。null 表示"abort 通道
+  // 无 budget 触发"(例如 parent-abort / idle-timeout / completed 路径)。
+  let abortBudgetKind:
+    | "max_tokens"
+    | "wall_clock"
+    | "context_overflow"
+    | null = null;
 
   const wallClockTimer = setTimeout(() => {
     if (abortBudgetKind === null) abortBudgetKind = "wall_clock";
@@ -168,12 +192,21 @@ export async function runSubAgentLoop(
     });
   }, opts.wallClockTimeoutMs);
 
-  // maxTokens 软上限:监听 llm:request_end 同步累加 usage,超阈则 first-wins 入槽 + abort。
+  // usageListener 监听 llm:request_end 同步检查两类软上限:
+  //
+  //   1. maxTokens(成本): 累加 inputTokens+outputTokens 监控总消耗
+  //      —— cache 字段不计入(prompt cache 命中是节省的部分,把它算进 budget 会让
+  //      "用户对成本的直觉"和"实际触发软上限的时机"错配)
+  //
+  //   2. context_overflow(质量): 检查单次 inputTokens 监控注意力风险阈值
+  //      —— sub-task prompt 累积超 riskMaxTokens 说明任务过大,继续执行会触发 attention
+  //      稀释致 LLM 响应质量下降; graceful 中止,主 LLM 收到 error.type 后自主决策切片
+  //
   // EventBus emit 串行 await listener,listener 是 sync 函数 await 立即 resolve,
   // emit 完成时 abort 已 set,loop 下一次 turn 顶 abort guard 立即停。
-  // 累加只算 inputTokens+outputTokens(实际消耗),cacheRead/Write 不计 ——
-  // prompt cache 命中是节省的部分,把它算进 budget 会让"用户对成本的直觉"和
-  // "实际触发软上限的时机"错配。
+  //
+  // 检查顺序:成本类先于质量类 —— 历史不变量(成本类触发原本独占槽位)。两路条件可同时
+  // 满足时按 first-wins 槽位写入决定 kind,无后置仲裁歧义。
   let cumulativeTokens = 0;
   // listener payload 直接 deref AgentEventMap —— 与 EventBus 契约同步演进,
   // event 形状变化(新增 usage 子字段等)由 TypeScript 强制检查可见。
@@ -182,22 +215,30 @@ export async function runSubAgentLoop(
   ): void => {
     cumulativeTokens += payload.usage.inputTokens + payload.usage.outputTokens;
     if (cumulativeTokens > opts.maxTokens) {
-      // first-wins:仅当槽位为空才占位 —— 若已被 wallClock 抢占,本路 abort 仍幂等触发
-      // (但 budgetExceededKind 维持 wall_clock,反映真正的首发触发源)
+      // first-wins:仅当槽位为空才占位 —— 若已被其他 budget 抢占,本路 abort 仍幂等触发
+      // (但 budgetExceededKind 维持已写入值,反映真正的首发触发源)
       if (abortBudgetKind === null) abortBudgetKind = "max_tokens";
       abortWithReason(maxTokensController, {
         kind: "external",
         origin: "subagent-max-tokens-exceeded",
       });
     }
+    if (payload.usage.inputTokens > opts.riskMaxTokens) {
+      if (abortBudgetKind === null) abortBudgetKind = "context_overflow";
+      abortWithReason(contextOverflowController, {
+        kind: "external",
+        origin: "subagent-context-overflow",
+      });
+    }
   };
   opts.eventBus.on("llm:request_end", usageListener);
 
-  // AbortSignal.any 合并两路信号 —— Node ≥22 稳定,本仓库 engines.node:">=22.0.0";
+  // AbortSignal.any 合并三路信号 —— Node ≥22 稳定,本仓库 engines.node:">=22.0.0";
   // 子 loop 拿到的 abortSignal 是合并 signal,任一软上限触发都让它 aborted。
   const externalAbortSignal = AbortSignal.any([
     wallClockController.signal,
     maxTokensController.signal,
+    contextOverflowController.signal,
   ]);
 
   try {
@@ -282,7 +323,11 @@ export async function runSubAgentLoop(
  */
 export function deriveBudgetExceededKind(
   reason: AgentResult["reason"],
-  abortBudgetKind: "max_tokens" | "wall_clock" | null,
+  abortBudgetKind:
+    | "max_tokens"
+    | "wall_clock"
+    | "context_overflow"
+    | null,
 ): BudgetExceededKind | undefined {
   if (reason === "max_turns") return "max_turns";
   if (reason === "aborted" && abortBudgetKind !== null) return abortBudgetKind;
