@@ -651,15 +651,20 @@ export class ScrollRegion {
   /**
    * 暂停 region 模式——alt UI（confirmation panel 等）进入前调用。
    *
-   * 协议：
-   *   - 跳 chrome 顶 + erase 到屏幕底擦 chrome
-   *   - 撤 DECSTBM 恢复全屏 scroll region
-   *   - 清 segment 状态（caller 契约：suspend 期间不持有活跃 segment——LLM 流式
-   *     与 typeahead-input / panel 不并发）；活跃 handle 失活
-   *   - 标记 suspended；后续 region 写入抛错直到 resume
+   * 设计协议:让 alt UI 在 DECSTBM 保护的 region 内渲染,chrome 区完全不受影响
+   *   - DECSTBM 不撤,继续生效(region 范围 1 到 scrollBottom)
+   *   - cursor 跳到 region 顶 (1, 1) 作为 alt UI 起手行
+   *   - 逐行清 region(去 region 内既有内容,留出干净空间给 alt UI)
+   *   - alt UI 的 \r\n 推进受 DECSTBM 限制:在 region 内触发 region 滚动
+   *     (顶行进 scrollback,新行加底),cursor 永远不越 region 底界 → chrome 不受推
+   *   - alt UI 高度可任意:超 region 高度时旧内容自然滚到 scrollback,可回看
    *
-   * suspend / resume 与 alt-screen `\x1b[?1049h/l` 切换分离不共享状态——caller
-   * 自己协调（先 suspend 再进 alt-screen，退出 alt-screen 后 resume）。
+   * 与 alt-screen 1049 切换的对比:本协议纯 VT100 ANSI(DECSTBM + cursor + 逐行清),
+   * 跨终端兼容性最优(Windows ConPTY / 各 Linux 终端 / macOS 都支持);alt-screen 1049
+   * 在 ConPTY 等部分实现不可靠(EXIT 可能未完整恢复 main-screen)。
+   *
+   * caller 契约:suspend 期间不持有活跃 segment(LLM 流式与 typeahead-input /
+   * panel 不并发);活跃 handle 失活。
    */
   suspend(): void {
     if (!this.attached) {
@@ -667,12 +672,8 @@ export class ScrollRegion {
     }
     if (this.suspended) return;
 
-    let out = "";
-    if (this.chromeHeight > 0) {
-      out += this.cursorToSeq(this.scrollBottom + 1, 1);
-      out += this.clearScreenBelowSeq();
-    }
-    out += this.decstbmResetSeq();
+    let out = this.clearRegionSeq();
+    out += this.cursorToSeq(1, 1);
     this.writeOut(out);
 
     this.resetRegionState();
@@ -683,18 +684,22 @@ export class ScrollRegion {
   /**
    * 恢复 region 模式——alt UI 退出后调用。
    *
-   * 协议：
-   *   - 重设 DECSTBM: \x1b[1;<scrollBottom>r
-   *   - cursor 跳 (1, 1) 作为 region 顶起点；清 region 状态字段
-   *   - emit chromeBytes 重画 chrome 内容
-   *   - 取消 suspended 标记
+   * 设计协议:清掉 alt UI 留在 region 的痕迹 + 重画 chrome 反映最新状态
+   *   - 逐行清 region(擦掉 alt UI 在 region 内的渲染结果)
+   *   - 根据 caller 传入的 chromeHeight 重设 DECSTBM(可能因 suspend 期间暂存任务
+   *     消费导致 chrome 高度变化)
+   *   - 写 chromeBytes 重画 chrome
+   *   - cursor 跳 (1, 1) 作为 region 顶起点,与 attachInput 同协议
    *
-   * caller 在 resume 前可能经历 viewport resize，因此显式接受 viewportRows /
-   * viewportCols 重新计算 scrollBottom（非负、< viewportRows）；不变时传同值。
+   * caller 在 resume 前可能经历 viewport resize,因此 chromeHeight 是显式输入
+   * 而非 ScrollRegion 假设不变。
    */
   resume(chromeHeight: number, chromeBytes: string): void {
     if (!this.attached) {
       throw new Error("ScrollRegion: cannot resume when not attached");
+    }
+    if (!this.suspended) {
+      throw new Error("ScrollRegion: cannot resume when not suspended");
     }
     if (chromeHeight < 0) {
       throw new Error(
@@ -713,12 +718,29 @@ export class ScrollRegion {
     this.activeHandle = null;
     this.suspended = false;
 
-    let out = this.decstbmSeq(1, this.scrollBottom);
+    let out = this.clearRegionSeq();
+    out += this.decstbmSeq(1, this.scrollBottom);
     if (chromeHeight > 0 && chromeBytes.length > 0) {
       out += chromeBytes;
     }
     out += this.cursorToSeq(1, 1);
     this.writeOut(out);
+  }
+
+  /**
+   * 逐行清 region 范围(1 到 scrollBottom)—— 与 setChromeHeight 缩小路径同手法。
+   *
+   * 不用 `\x1b[1J`(清屏顶到 cursor)是因为该序列在 chrome 高度边界的清除范围
+   * 跨终端实现差异较大;逐行清是确定性手法,代价是 N 次序列写但 region 不大,
+   * 实测每帧 < 1ms。
+   */
+  private clearRegionSeq(): string {
+    let out = "";
+    for (let row = 1; row <= this.scrollBottom; row++) {
+      out += this.cursorToSeq(row, 1);
+      out += this.clearLineSeq();
+    }
+    return out;
   }
 
   /**

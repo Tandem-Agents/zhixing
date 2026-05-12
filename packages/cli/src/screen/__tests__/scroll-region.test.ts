@@ -773,12 +773,18 @@ describe("ScrollRegion · setChromeHeight 边界", () => {
 });
 
 describe("ScrollRegion · suspend / resume", () => {
-  it("suspend emit cursor (chrome 顶, 1) + erase below + 撤 DECSTBM", () => {
+  it("suspend 逐行清 region + cursor 跳 (1,1)（DECSTBM 不撤）", () => {
     const { region, buffer } = makeRegion({ rows: 24 });
     region.attachInput(3, "<chrome>");
     buffer.value = "";
     region.suspend();
-    expect(buffer.value).toBe("\x1b[22;1H" + "\x1b[J" + "\x1b[r");
+    // chrome=3 → scrollBottom=21, 清 row 1..21 + cursor 跳 (1,1)
+    let expected = "";
+    for (let row = 1; row <= 21; row++) {
+      expected += `\x1b[${row};1H\x1b[2K`;
+    }
+    expected += "\x1b[1;1H";
+    expect(buffer.value).toBe(expected);
     expect(region.state.suspended).toBe(true);
     expect(region.state.attached).toBe(true);
   });
@@ -807,12 +813,17 @@ describe("ScrollRegion · suspend / resume", () => {
     expect(() => region.beginReplaceableSegment()).toThrow(/suspended/);
   });
 
-  it("suspend chromeHeight=0 不发 erase chrome 序列", () => {
-    const { region, buffer } = makeRegion();
+  it("suspend chromeHeight=0 → region=整 viewport，逐行清整屏 + cursor (1,1)", () => {
+    const { region, buffer } = makeRegion({ rows: 10 });
     region.attachInput(0, "");
     buffer.value = "";
     region.suspend();
-    expect(buffer.value).toBe("\x1b[r");
+    let expected = "";
+    for (let row = 1; row <= 10; row++) {
+      expected += `\x1b[${row};1H\x1b[2K`;
+    }
+    expected += "\x1b[1;1H";
+    expect(buffer.value).toBe(expected);
   });
 
   it("重复 suspend 是 no-op", () => {
@@ -829,16 +840,20 @@ describe("ScrollRegion · suspend / resume", () => {
     expect(() => region.suspend()).toThrow(/not attached/);
   });
 
-  it("resume emit DECSTBM + chromeBytes + cursor (1,1)、状态归零", () => {
+  it("resume 清 region + DECSTBM + chromeBytes + cursor (1,1)、状态归零", () => {
     const { region, buffer } = makeRegion({ rows: 24 });
     region.attachInput(3, "");
     region.writeScrollLine("a");
     region.suspend();
     buffer.value = "";
     region.resume(2, "<new-chrome>");
-    expect(buffer.value).toBe(
-      "\x1b[1;22r" + "<new-chrome>" + "\x1b[1;1H",
-    );
+    // chrome=2 → scrollBottom=22；清 row 1..22 + 重设 DECSTBM + chromeBytes + cursor (1,1)
+    let expected = "";
+    for (let row = 1; row <= 22; row++) {
+      expected += `\x1b[${row};1H\x1b[2K`;
+    }
+    expected += "\x1b[1;22r" + "<new-chrome>" + "\x1b[1;1H";
+    expect(buffer.value).toBe(expected);
     const s = region.state;
     expect(s.suspended).toBe(false);
     expect(s.chromeHeight).toBe(2);

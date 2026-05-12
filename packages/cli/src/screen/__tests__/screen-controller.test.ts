@@ -485,12 +485,14 @@ describe("ScreenController · ReplaceableSegment（双态渲染）", () => {
 });
 
 describe("ScreenController · suspend / resume", () => {
-  it("suspend 同步擦 chrome + 设状态——不入队", () => {
+  it("suspend 同步清 region + cursor 跳 (1,1)——不入队", () => {
     const { out, sc } = makeHarness({ rows: 10 });
     sc.attachInput(makeRegion(["> input"]));
     out.buffer = "";
     sc.suspend();
-    expect(out.buffer).toContain("\x1b[r"); // 撤 DECSTBM
+    // chrome=1（仅 input）→ scrollBottom=9，清 row 1..9 + cursor (1,1)
+    expect(out.buffer).toContain("\x1b[9;1H\x1b[2K"); // 清最后一行 region
+    expect(out.buffer).toContain("\x1b[1;1H"); // cursor 收尾
   });
 
   it("suspend 期间 enqueue 任务不立即生效——等 resume 才 flush", () => {
