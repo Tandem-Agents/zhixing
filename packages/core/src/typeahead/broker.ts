@@ -294,7 +294,7 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
     } catch (err) {
       clearTimeout(timer);
       const error = err instanceof Error ? err : new Error(String(err));
-      this.handleProviderError(provider.id, error);
+      this.handleProviderError(provider.id, error, session.id);
       this.setLoadingFinished(session, provider, match, []);
       return;
     }
@@ -374,7 +374,7 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
           return;
         }
         const error = err instanceof Error ? err : new Error(String(err));
-        this.handleProviderError(provider.id, error);
+        this.handleProviderError(provider.id, error, session.id);
         this.setLoadingFinished(session, provider, match, []);
       },
     );
@@ -400,8 +400,9 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
     ) {
       try {
         ghostText = provider.computeGhostText(match);
-      } catch {
-        // Provider 出 bug 不传染 —— 和 query 错误同策略
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        this.handleProviderError(provider.id, error, session.id);
       }
     }
 
@@ -410,8 +411,9 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
     if (typeof provider.computeArgumentHint === "function") {
       try {
         argumentHint = provider.computeArgumentHint(match);
-      } catch {
-        // 和 ghostText / query 错误同策略 —— 不传染
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        this.handleProviderError(provider.id, error, session.id);
       }
     }
 
@@ -552,10 +554,10 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
       type: "typeahead:suggestion-accepted",
       sessionId,
       timestamp: this.now(),
-      providerId: session.state.activeProvider?.id ?? "ghost",
+      providerId: session.state.activeProvider?.id ?? "__ghost_text__",
       item: {
         id: "ghost-text",
-        providerId: session.state.activeProvider?.id ?? "ghost",
+        providerId: session.state.activeProvider?.id ?? "__ghost_text__",
         displayText: ghostText.fullValue,
       },
       result,
@@ -633,11 +635,15 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
     }
   }
 
-  private handleProviderError(providerId: string, error: Error): void {
+  private handleProviderError(
+    providerId: string,
+    error: Error,
+    sessionId?: string,
+  ): void {
     this.onProviderError(providerId, error);
     this.emit({
       type: "typeahead:provider-error",
-      sessionId: "",
+      sessionId: sessionId ?? "",
       timestamp: this.now(),
       providerId,
       error: { name: error.name, message: error.message },
@@ -647,8 +653,9 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
   private emit(event: TypeaheadEvent): void {
     try {
       this.eventSink(event);
-    } catch {
-      // EventSink 自己出 bug 不应影响 broker
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.onProviderError("event-sink", error);
     }
   }
 }

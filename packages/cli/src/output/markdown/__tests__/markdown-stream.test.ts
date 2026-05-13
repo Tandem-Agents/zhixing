@@ -288,6 +288,276 @@ describe("MarkdownStream · 边缘场景", () => {
   });
 });
 
+/**
+ * Space token 塌缩归一化 —— LLM 输出多空行（模型 artifact）在 markdown-stream
+ * 层归一化为单空行（CommonMark spec 下 `\n\n+` 与 `\n\n` 语义等价）。
+ *
+ * 架构契约：space token 的 emit 形态由 markdown-stream 强制为 1 个 `\n\n`，
+ * 与原始字节数无关；超额 `\n+` 字节通过 paragraphForwardedTo 推进被"标记为已处理"
+ * 但实际不 forward 给输出层。详见 markdown-stream.ts space token 处理点的注释。
+ *
+ * 这是 design language P1（安静而非热闹·少即是多）的协议层实现：跨模型给
+ * 用户提供一致的视觉节奏。
+ */
+describe("MarkdownStream · space token 塌缩归一化", () => {
+  /**
+   * 测量两段内容之间的换行字符数 —— 反映视觉空行数。
+   * 标准段落分隔 `\n\n` 产生 2 个 \n（= 1 空行）；多空行 bug 会产生 ≥3 个 \n。
+   */
+  const countNewlinesBetween = (
+    s: string,
+    after: string,
+    before: string,
+  ): number => {
+    const i1 = s.indexOf(after);
+    const i2 = s.indexOf(before);
+    if (i1 < 0 || i2 < 0) {
+      throw new Error(`markers not found: "${after}" / "${before}" in ${JSON.stringify(s)}`);
+    }
+    const between = s.substring(i1 + after.length, i2);
+    return (between.match(/\n/g) ?? []).length;
+  };
+
+  it("基线（回归屏障）：正常 \\n\\n 段落分隔 —— 视觉单空行 = 间隔 2 个 \\n", () => {
+    // 该断言锁定"未受 bug 影响的正常输入"的 baseline，让后续多空行断言能复用同一参考值
+    const { stream, out } = makeStream();
+    stream.feed("p1\n\np2");
+    stream.end();
+    const stripped = stripAnsi(out.combined);
+    expect(countNewlinesBetween(stripped, "p1", "p2")).toBe(2);
+  });
+
+  it("单 chunk 内 LLM 多空行 `\\n\\n\\n\\n` 塌缩为单空行（与正常 \\n\\n 视觉等价）", () => {
+    const ref = makeStream();
+    ref.stream.feed("p1\n\np2");
+    ref.stream.end();
+    const refBlankCount = countNewlinesBetween(stripAnsi(ref.out.combined), "p1", "p2");
+
+    const { stream, out } = makeStream();
+    stream.feed("p1\n\n\n\np2");
+    stream.end();
+    const stripped = stripAnsi(out.combined);
+    expect(countNewlinesBetween(stripped, "p1", "p2")).toBe(refBlankCount);
+    // 强声明：与 baseline 严格相等 —— bug 修复后视觉行为与正常输入完全一致
+    expect(countNewlinesBetween(stripped, "p1", "p2")).toBe(2);
+  });
+
+  it("极端多空行 `\\n\\n\\n\\n\\n\\n\\n\\n` 仍塌缩为单空行（任意数量都归一化）", () => {
+    const { stream, out } = makeStream();
+    stream.feed("p1\n\n\n\n\n\n\n\np2");
+    stream.end();
+    const stripped = stripAnsi(out.combined);
+    expect(countNewlinesBetween(stripped, "p1", "p2")).toBe(2);
+  });
+
+  it("跨 chunk 多空行边界 —— 第一 chunk 末尾 `\\n\\n`、第二 chunk 起首 `\\n\\nparagraph2` 仍塌缩为单空行", () => {
+    // 这是流式期最容易踩到 bug 的场景：space token 在 chunk N 时是末尾 hold
+    // 候选（不 emit），chunk N+1 拼出更多 `\n` 后才进入 emitClosedBlock。
+    // 必须验证跨 chunk 重 lex 时归一化仍生效（依赖 emittedBlockCount 单调推进保证只 emit 一次）。
+    const { stream, out } = makeStream();
+    stream.feed("p1\n\n");
+    stream.feed("\n\np2");
+    stream.end();
+    const stripped = stripAnsi(out.combined);
+    expect(countNewlinesBetween(stripped, "p1", "p2")).toBe(2);
+  });
+
+  it("strip 模式多空行同样塌缩 —— render / strip 行为对称", () => {
+    const ref = makeStream({ mode: "strip" });
+    ref.stream.feed("p1\n\np2");
+    ref.stream.end();
+    const refBlankCount = countNewlinesBetween(ref.out.combined, "p1", "p2");
+
+    const { stream, out } = makeStream({ mode: "strip" });
+    stream.feed("p1\n\n\n\np2");
+    stream.end();
+    expect(countNewlinesBetween(out.combined, "p1", "p2")).toBe(refBlankCount);
+  });
+
+  it("heading 与 paragraph 之间多空行 —— heading 的 \\n envelope + space token 跳过 emit 共同保证视觉 1 空行", () => {
+    // 此场景验证 paragraphStream === null 路径（heading emit 后流被关闭）下的
+    // 多空行归一化：space token 走 skip 分支（不重复给已用 envelope 分隔的 block
+    // 之间再加 \n\n），但 forwardedTo 仍正确推进。
+    const ref = makeStream();
+    ref.stream.feed("# heading\n\np2");
+    ref.stream.end();
+    const refBlankCount = countNewlinesBetween(stripAnsi(ref.out.combined), "heading", "p2");
+
+    const { stream, out } = makeStream();
+    stream.feed("# heading\n\n\n\np2");
+    stream.end();
+    const stripped = stripAnsi(out.combined);
+    expect(countNewlinesBetween(stripped, "heading", "p2")).toBe(refBlankCount);
+  });
+
+  /**
+   * ─── lookahead-based feed gate ───
+   *
+   * space token 在 paragraph→非 paragraph 转移时**不应** feed `\n\n` 给 TextStream。
+   * 否则 TextStream.feed(`\n\n`) + closeParagraphStream.end(`\n`) + 下一 block 的
+   * envelope `\n{content}\n` 前导 `\n` 三层叠加（共 4 个 `\n`）→ 视觉 3 空行 bug。
+   *
+   * 修复：仅当 `nextTokenType === "paragraph"` 时 feed `\n\n`；其他情况
+   * （heading / code / hr / list / blockquote 等）由 next block 自治分隔。
+   */
+  describe("paragraph → 非 paragraph 转移仅产生 1 空行（lookahead gate）", () => {
+    it("paragraph + hr", () => {
+      const { stream, out } = makeStream();
+      stream.feed("p1\n\n---\n\np2");
+      stream.end();
+      const stripped = stripAnsi(out.combined);
+      // p1 与 hr 之间应仅 2 个 \n（= 1 空行）
+      expect(countNewlinesBetween(stripped, "p1", "─")).toBe(2);
+    });
+
+    it("paragraph + heading", () => {
+      const { stream, out } = makeStream();
+      stream.feed("p1\n\n# heading\n\np2");
+      stream.end();
+      const stripped = stripAnsi(out.combined);
+      expect(countNewlinesBetween(stripped, "p1", "heading")).toBe(2);
+    });
+
+    it("paragraph + fenced code block", () => {
+      const { stream, out } = makeStream();
+      stream.feed("p1\n\n```\ncode\n```\n\np2");
+      stream.end();
+      const stripped = stripAnsi(out.combined);
+      expect(countNewlinesBetween(stripped, "p1", "code")).toBe(2);
+    });
+
+    it("paragraph + list", () => {
+      const { stream, out } = makeStream();
+      stream.feed("p1\n\n- item1\n- item2\n\np2");
+      stream.end();
+      const stripped = stripAnsi(out.combined);
+      // list 渲染为 `· item`，找第一个 item 字符
+      expect(countNewlinesBetween(stripped, "p1", "item1")).toBe(2);
+    });
+
+    it("paragraph + blockquote", () => {
+      const { stream, out } = makeStream();
+      stream.feed("p1\n\n> quoted\n\np2");
+      stream.end();
+      const stripped = stripAnsi(out.combined);
+      expect(countNewlinesBetween(stripped, "p1", "quoted")).toBe(2);
+    });
+
+    it("paragraph + 多空行 + hr —— 既归一化多空行又消除叠加", () => {
+      // 双重保护：LLM 输出多空行（应归一化为 \n\n）+ 后接非 paragraph block
+      // （应跳过 feed 避免叠加）。两条修复同时生效。
+      const { stream, out } = makeStream();
+      stream.feed("p1\n\n\n\n\n\n---\n\np2");
+      stream.end();
+      const stripped = stripAnsi(out.combined);
+      expect(countNewlinesBetween(stripped, "p1", "─")).toBe(2);
+    });
+  });
+
+  /**
+   * ─── 非 paragraph → paragraph 对称分隔 ───
+   *
+   * paragraph→非 paragraph 已通过 closeParagraphStream + envelope leading `\n`
+   * 共同提供 1 空行分隔。**反方向**（非 paragraph→paragraph）需 space handler
+   * emit 1 个 `\n` 配合前 block envelope trailing `\n` 得到对称的 1 空行。
+   *
+   * 该 emit 由 `lastEmittedWasParagraph === false` 分支触发——`paragraphStream`
+   * 在 render / strip 模式语义不一致（strip 恒为 null），用语义真值字段而非
+   * 实现细节作分流条件，render/strip 行为对称。
+   */
+  describe("非 paragraph → paragraph 转移产生 1 空行（对称分隔）", () => {
+    it("hr → paragraph", () => {
+      const { stream, out } = makeStream();
+      stream.feed("p1\n\n---\n\np2");
+      stream.end();
+      const stripped = stripAnsi(out.combined);
+      // hr 与 p2 之间应有 2 个 \n（= 1 空行），对称于 p1 与 hr 之间的 1 空行
+      expect(countNewlinesBetween(stripped, "─", "p2")).toBe(2);
+    });
+
+    it("heading → paragraph", () => {
+      const { stream, out } = makeStream();
+      stream.feed("# heading\n\nparagraph content");
+      stream.end();
+      const stripped = stripAnsi(out.combined);
+      expect(countNewlinesBetween(stripped, "heading", "paragraph content")).toBe(2);
+    });
+
+    it("code block → paragraph", () => {
+      const { stream, out } = makeStream();
+      stream.feed("```\ncode\n```\n\nafter code");
+      stream.end();
+      const stripped = stripAnsi(out.combined);
+      // code 内容 与 "after code" paragraph 之间应有 1 空行
+      expect(countNewlinesBetween(stripped, "code", "after code")).toBe(2);
+    });
+
+    it("list → paragraph", () => {
+      const { stream, out } = makeStream();
+      stream.feed("- item1\n- item2\n\nafter list");
+      stream.end();
+      const stripped = stripAnsi(out.combined);
+      // list 最后一项与 "after list" paragraph 之间应有 1 空行
+      expect(countNewlinesBetween(stripped, "item2", "after list")).toBe(2);
+    });
+
+    it("blockquote → paragraph", () => {
+      const { stream, out } = makeStream();
+      stream.feed("> quoted\n\nafter quote");
+      stream.end();
+      const stripped = stripAnsi(out.combined);
+      expect(countNewlinesBetween(stripped, "quoted", "after quote")).toBe(2);
+    });
+
+    it("paragraph → hr → paragraph 全对称（前后各 1 空行）", () => {
+      // 综合验证：rule 前后空行数相等且均为 1。这是 CommonMark 标准渲染契约
+      // 在我们渲染器上的具体表达。
+      const { stream, out } = makeStream();
+      stream.feed("p1\n\n---\n\np2");
+      stream.end();
+      const stripped = stripAnsi(out.combined);
+      const before = countNewlinesBetween(stripped, "p1", "─");
+      const after = countNewlinesBetween(stripped, "─", "p2");
+      expect(before).toBe(2);
+      expect(after).toBe(2);
+      expect(before).toBe(after); // 显式对称声明
+    });
+
+    it("首个 block 是 paragraph 时不引入文档起首空行", () => {
+      // 边界：emittedBlockCount === 0 时跳过 emit—— 避免文档起首平白多 1 空行。
+      // 通过断言起首字符是 paragraph 的 ◆ 锚（无前置空行）来验证。
+      const { stream, out } = makeStream();
+      stream.feed("first paragraph");
+      stream.end();
+      const stripped = stripAnsi(out.combined);
+      // 起首应是 paragraph 的 ◆ 锚（前面只有 indent，无 \n）
+      expect(stripped.match(/^\s*◆/)).not.toBeNull();
+    });
+
+    it("strip 模式 hr → paragraph 也产生 1 空行（render / strip 对称）", () => {
+      // 防御性补强：strip 模式与 render 模式走同一 lastEmittedWasParagraph
+      // 分支逻辑。该测试封口 strip 模式非 paragraph→paragraph 路径，确保
+      // 修复后该路径行为与 render 模式对称、未来重构不破坏。
+      //
+      // 注意：strip 模式之前对此路径输出 2 空行（feed `\n\n` 被原代码 `|| strip`
+      // 条件触发 + envelope trailing `\n` 叠加），属于 pre-existing bug；本次
+      // 修复将其纠正为 1 空行，符合 CommonMark 标准。
+      const { stream, out } = makeStream({ mode: "strip" });
+      stream.feed("p1\n\n---\n\np2");
+      stream.end();
+      // strip 模式无 ANSI，直接用 combined。hr 渲染为 ─ 字符序列。
+      expect(countNewlinesBetween(out.combined, "─", "p2")).toBe(2);
+    });
+
+    it("strip 模式 heading → paragraph 也产生 1 空行（render / strip 对称）", () => {
+      const { stream, out } = makeStream({ mode: "strip" });
+      stream.feed("# heading\n\nparagraph content");
+      stream.end();
+      expect(countNewlinesBetween(out.combined, "heading", "paragraph content")).toBe(2);
+    });
+  });
+});
+
 describe("MarkdownStream · paragraph inline ANSI 渲染", () => {
   it("闭合 paragraph 含 **bold** —— 输出 chalk.bold ANSI 序列、不出现 ** 字面", () => {
     const { stream, out } = makeStream();
@@ -312,14 +582,16 @@ describe("MarkdownStream · paragraph inline ANSI 渲染", () => {
     expect(out.combined).toContain(chalk.italic("emphasis"));
   });
 
-  it("闭合 paragraph 含 `codespan` —— 输出 cyan + bgAnsi256(245) 中灰底 ANSI、不出现 backtick 字面", () => {
+  it("闭合 paragraph 含 `codespan` —— 输出 bgAnsi256(238) 中深灰底 + 默认前景、不出现 backtick 字面", () => {
     const { stream, out } = makeStream();
     stream.feed("run `npm install` to start\n\n");
     stream.end();
     const stripped = stripAnsi(out.combined);
     expect(stripped).not.toContain("`");
     expect(stripped).toContain("run npm install to start");
-    expect(out.combined).toContain(chalk.bgAnsi256(245).cyan("npm install"));
+    // 视觉契约：bg 块给"内容引用"视觉锚 + 默认前景给所有终端配色最高对比;
+    // 不叠 cyan（brand cyan 仅留给选中 / 品牌 / 主操作 / 链接）
+    expect(out.combined).toContain(chalk.bgAnsi256(238)("npm install"));
   });
 
   it("闭合 paragraph 含 [text](url) —— OSC 8 + cyan + 虚线下划线、不出现 markdown 链接字面", () => {
@@ -365,7 +637,7 @@ describe("MarkdownStream · paragraph inline ANSI 渲染", () => {
     // 各 ANSI 序列存在
     expect(out.combined).toContain(chalk.bold("here"));
     expect(out.combined).toContain(chalk.italic("this"));
-    expect(out.combined).toContain(chalk.bgAnsi256(245).cyan("code"));
+    expect(out.combined).toContain(chalk.bgAnsi256(238)("code"));
     expect(out.combined).toContain("\x1b]8;;https://x.io\x1b\\");
     // link 用 dotted 4:4（不是 chalk 单实线 underline 4）
     expect(out.combined).toContain("\x1b[4:4m");

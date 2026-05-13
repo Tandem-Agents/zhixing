@@ -8,9 +8,12 @@
  *   text       —— 字面文字（原样输出）
  *   strong     —— `chalk.bold` 加粗
  *   em         —— `chalk.italic` 斜体（终端常退化为 dim/inverse）
- *   codespan   —— 中灰底 (bgAnsi256(245)) + cyan 文字（与 historyEcho 灰底视觉区分）
+ *   codespan   —— 中灰底 (bgAnsi256(238)) + **默认前景**——最大可读性（路径 /
+ *                 命令 / 标识符是用户要 *行动* 的事实引用，前景保默认色让所有终端
+ *                 配色都高对比；bg 块给"这是引用不是散文"的视觉锚）
  *   link       —— OSC 8 终端超链接（`osc8Hyperlink`）+ cyan 文字 + 虚线下划线
- *                 (`dottedUnderline`，SGR 4:4) 装饰，让链接在文本中明显可见
+ *                 (`dottedUnderline`，SGR 4:4) 装饰——link 例外保留 brand cyan，
+ *                 行业 universal 链接信号 + 虚线下划线作辨识符
  *   del        —— `chalk.strikethrough` 删除线
  *   br         —— 硬换行
  *
@@ -32,19 +35,38 @@ import type { MarkdownMode } from "./types.js";
  * inline 元素的视觉契约——集中在此让"未来调样式"只改一处。
  *
  * 设计原则：
- *   - codespan：中灰底 (bgAnsi256(245) ≈ #8a8a8a) + cyan 文字。中灰对深色终端
- *     bg 高对比，让 inline `code` 真正"跳出"（不再是 historyEcho 同色调的"被
- *     弱化"灰底）；cyan 文字保持 brand 一致性
- *   - link：cyan 文字 + 虚线下划线。OSC 8 终端原生只渲染单实线下划线辨识度
- *     低，cyan + 虚线让链接明显可见且与 strong（bold）/ em（italic）/ codespan
- *     （bg 块）形成层次区分
- *   - strong / em / del：保持终端原生（chalk.bold / italic / strikethrough），
- *     不叠颜色避免污染纯文本视觉重量
+ *
+ *   - **codespan**：bgAnsi256(238) ≈ #444444 + **默认前景**（不染 fg）。
+ *
+ *     用户视角：codespan 内容是路径 / 命令 / 文件名 / 标识符这类"事实引用"
+ *     ——用户读它们是 *为了行动*（拷贝、执行、查找）。默认前景在所有终端配色
+ *     方案下都保证最高对比 → 最大可读性；中深灰 bg 给"this is content not
+ *     prose"的视觉锚，但不喧宾夺主。
+ *
+ *     设计语言：cli-ui-design-language.md P5 锁定 brand cyan 仅用于 *选中 /
+ *     品牌 / 主操作*；codespan 是 *信息内容*（非以上三者），按 tone.dim 注释
+ *     原则"路径用 dim 系"——具象到 bg 块 + 默认 fg 而非彩色 fg。
+ *
+ *     与 historyEcho 区分：historyEcho 用 bgAnsi256(236) #303030（行级、用户
+ *     消息锚），codespan 用 bgAnsi256(238) #444444（token 级、内容引用）——
+ *     同灰族（视觉同源延伸单一来源）+ 差 0x14（人眼可辨，避免混淆）。
+ *
+ *     行业基准：GitHub web / glow / bat / Claude Code 等成熟工具均采用 "bg
+ *     块 + 默认 fg" 模式——用户预期已建立，无需重新学习。
+ *
+ *   - **link**：cyan + 虚线下划线（dottedUnderline，SGR 4:4）。设计语言 P5
+ *     "主操作" 释义包含 *导航主操作*——链接点击=去某处=主操作语义；同时
+ *     cyan + underline 是行业 universal 链接信号，破坏惯例代价 > P5 严格性。
+ *     虚线下划线作辅助辨识符让 link 在 codespan（bg 块）/ strong（bold）/
+ *     em（italic）之间有独立视觉身份。
+ *
+ *   - **strong / em / del**：保持终端原生（chalk.bold / italic / strikethrough），
+ *     不叠颜色避免污染纯文本视觉重量。
  */
 const STYLE = {
   strong: chalk.bold,
   em: chalk.italic,
-  codespan: chalk.bgAnsi256(245).cyan,
+  codespan: chalk.bgAnsi256(238),
   link: (text: string) => chalk.cyan(dottedUnderline(text)),
   del: chalk.strikethrough,
 } as const;

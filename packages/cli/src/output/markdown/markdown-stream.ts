@@ -95,6 +95,21 @@ export class MarkdownStream {
   /** 已 emit 的闭合 block 数（buffer 中前 N 个 token 已处理）。 */
   private emittedBlockCount = 0;
   /**
+   * 上一个已 emit 的闭合 block 是否为 paragraph。space token 处理点据此分流：
+   *   - true（paragraph→paragraph）：feed `\n\n` 给 paragraph 流内分隔两段
+   *   - false（非 paragraph→paragraph）：emit 1 个 `\n` via appendInline + 前
+   *     block envelope trailing `\n` = 视觉 1 空行
+   *   - 首 block 是 paragraph（emittedBlockCount === 0）：无前次内容，无需 emit
+   *
+   * 与 `paragraphStream !== null` 的差异：paragraphStream 是 render 模式实现细节
+   * （strip 模式下恒为 null），无法在 strip 区分前 block 类型。本字段是 **语义
+   * 真值**——render / strip 模式行为统一。
+   *
+   * 仅 emitClosedBlock 内部维护，space token 自身不修改（space 不算"内容
+   * block"，前后 block 的语义关系由 space 两端决定）。
+   */
+  private lastEmittedWasParagraph = false;
+  /**
    * 当前活跃的 paragraph TextStream；仅 render 模式使用。
    * 切换到 hold（末尾 code block）时关闭——之后再来非 code 末尾会重新创建。
    * 多 paragraph 共享同一实例（段落分隔靠 \n\n 字符 + TextStream 内部 hanging 续行
@@ -149,11 +164,14 @@ export class MarkdownStream {
     if (tokens.length === 0) return;
     const ranges = computeTokenRanges(tokens);
 
-    // 闭合 blocks（除末尾 hold 候选）逐个处理
+    // 闭合 blocks（除末尾 hold 候选）逐个处理。传入 nextTokenType 让 space token
+    // 处理点能决定是否需 feed `\n\n` 给 paragraph 流（仅 next=paragraph 时需要，
+    // 详见 emitClosedBlock space 分支注释）。
     const closedEnd = tokens.length - 1;
     while (this.emittedBlockCount < closedEnd) {
       const i = this.emittedBlockCount;
-      this.emitClosedBlock(tokens[i]!, ranges[i]!);
+      const nextType = i + 1 < tokens.length ? tokens[i + 1]!.type : null;
+      this.emitClosedBlock(tokens[i]!, ranges[i]!, nextType);
       this.emittedBlockCount++;
     }
 
@@ -177,7 +195,8 @@ export class MarkdownStream {
 
     while (this.emittedBlockCount < tokens.length) {
       const i = this.emittedBlockCount;
-      this.emitClosedBlock(tokens[i]!, ranges[i]!);
+      const nextType = i + 1 < tokens.length ? tokens[i + 1]!.type : null;
+      this.emitClosedBlock(tokens[i]!, ranges[i]!, nextType);
       this.emittedBlockCount++;
     }
 
@@ -193,6 +212,7 @@ export class MarkdownStream {
     this.emittedBlockCount = 0;
     this.paragraphForwardedTo = 0;
     this.paragraphStream = null;
+    this.lastEmittedWasParagraph = false;
     // 防御：流式期 segment 应已在 emitClosedBlock 时 commit 关闭；若仍活跃
     // （解析途中异常 / caller 错误），强制 close 避免残留 hasActiveSegment 状态
     if (this.codeSegment !== null) {
@@ -213,24 +233,33 @@ export class MarkdownStream {
    *   - paragraph → 走 inline 增量 ANSI 路径（emitInlineTokens 闭合 emit 全部 inline
    *     tokens 的 ANSI 渲染；递增推进 paragraphForwardedTo 到 range.end 让 paragraph
    *     末尾换行等残余字符不重复 forward）
-   *   - space → 仅当 paragraph 流活跃时 forward `\n\n` 触发段落分隔；流已关闭时（如刚
-   *     emit code block 后）跳过，仅推进 forwarded 边界（避免给新 paragraph 流喂 `\n\n`
-   *     创建空 ◆ 段）
+   *   - space → 仅当 paragraph 流活跃**且下一个 block 也是 paragraph** 时 forward
+   *     `\n\n` 触发段落分隔。其他场景（next=非 paragraph 或 paragraphStream null）
+   *     跳过 emit，让下一 block 自治分隔（detail 见 space 分支注释）。
    *   - heading / list / blockquote / hr → 字面 forward 给 paragraph 流（其 ANSI
    *     行级渲染留待后续 step）
+   *
+   * `nextTokenType` 是下一个 block 的 marked token type，用于 space 分支判定是否
+   * 需要 feed paragraph 分隔。最后一个 block 时为 null。
    */
-  private emitClosedBlock(token: Tokens.Generic, range: TokenRange): void {
+  private emitClosedBlock(
+    token: Tokens.Generic,
+    range: TokenRange,
+    nextTokenType: string | null,
+  ): void {
     if (range.end <= this.paragraphForwardedTo) return;
 
     if (token.type === "code") {
       this.emitClosedCode(token as Tokens.Code);
       this.paragraphForwardedTo = range.end;
+      this.lastEmittedWasParagraph = false;
       return;
     }
 
     if (token.type === "list") {
       this.emitClosedList(token as Tokens.List);
       this.paragraphForwardedTo = range.end;
+      this.lastEmittedWasParagraph = false;
       return;
     }
 
@@ -239,15 +268,53 @@ export class MarkdownStream {
       // paragraph.raw 末尾的换行 / 残余字符不在 inline tokens 累计长度内——直接推到
       // range.end 让后续 space 字符 forward 不重复历经这段空 delta
       this.paragraphForwardedTo = range.end;
+      this.lastEmittedWasParagraph = true;
       return;
     }
 
     if (token.type === "space") {
-      if (this.paragraphStream !== null || this.mode === "strip") {
-        this.forwardBufferRange(range.end);
-      } else {
-        this.paragraphForwardedTo = range.end;
+      // Space token = block 间分隔。CommonMark spec 下 `\n\n` 与 `\n\n\n+` 语义
+      // 等价（block-level 间空行不论行数都同一意义）→ 全部塌缩为 1 个段落分隔符
+      // `\n\n`。LLM 输出的多空行（模型 artifact / tokenizer 偏差）在此归一化。
+      //
+      // ─── lookahead-based emit 分流 ───
+      //
+      // 当下一个 block 是 paragraph 时，根据**上一个**已 emit block 类型分流：
+      //
+      //   prev=paragraph, next=paragraph（paragraph→paragraph）:
+      //     两段共享同一 TextStream，需 feed `\n\n` 通过流内部触发段落分隔
+      //     （TextStream feed 把 `\n\n` 解释为 paragraph break，下段重新起首
+      //     hanging 续行）。
+      //
+      //   prev=非 paragraph, next=paragraph（非 paragraph→paragraph）:
+      //     前 block 的 envelope `\n{content}\n` 末尾已留 1 个 `\n`（cursor 在
+      //     col 1），此处再 emit 1 个 `\n` 让 cursor 跨 1 空行——后续 paragraph 的
+      //     TextStream 首次 feed 的 "  ◆ " 起首前正好有 1 空行分隔。
+      //
+      //   首 block 是 paragraph（emittedBlockCount === 0，无前 block）:
+      //     跳过 emit—— 前面无内容，emit 会引入文档起首空行。
+      //
+      // 当下一个 block 是非 paragraph（heading / code / hr / list / blockquote）:
+      //   跳过 emit。下一 block 由 closeParagraphStream（TextStream.end() emit
+      //   `\n` 或 strip 模式 closeParagraphStream emit `\n`）+ envelope leading
+      //   `\n` 共同提供视觉 1 空行分隔。space 此时再 emit 会叠加。
+      //
+      // 该分流在 render / strip 两种模式下行为对称——`lastEmittedWasParagraph`
+      // 字段是 mode-independent 的语义真值（不依赖 paragraphStream 实现细节）。
+      //
+      // 不论是否 emit，paragraphForwardedTo 都推进到 range.end —— 超额 `\n+`
+      // 字节被"标记为已处理"但实际未 forward 给输出层，这就是塌缩归一化的实现
+      // 机制。space token 由 emittedBlockCount 在 main loop 保证只进入此分支一
+      // 次，无跨 chunk 重复 emit 风险。
+      const nextIsParagraph = nextTokenType === "paragraph";
+      if (nextIsParagraph && this.emittedBlockCount > 0) {
+        if (this.lastEmittedWasParagraph) {
+          this.forwardToParagraphStream("\n\n");
+        } else {
+          this.appendInline("\n");
+        }
       }
+      this.paragraphForwardedTo = range.end;
       return;
     }
 
@@ -258,6 +325,7 @@ export class MarkdownStream {
     this.closeParagraphStream();
     const ansi = renderBlock(token, this.blockCtx);
     if (ansi.length > 0) this.line(ansi);
+    this.lastEmittedWasParagraph = false;
   }
 
   /**

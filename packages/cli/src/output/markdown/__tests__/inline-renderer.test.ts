@@ -59,15 +59,21 @@ describe("renderInline · em", () => {
 });
 
 describe("renderInline · codespan", () => {
-  it("`code` 走 cyan 文字 + 中灰底（bgAnsi256(245)，对深色终端 bg 高对比）", () => {
+  it("`code` 走中深灰底（bgAnsi256(238)）+ **默认前景**——路径 / 命令最大可读性", () => {
     const tokens = parseInline("`some code`");
     const out = renderInlines(tokens, "render");
-    // 视觉契约：cyan fg + bgAnsi256(245) 中灰，让 inline code 真正"跳出"
-    expect(out).toBe(chalk.bgAnsi256(245).cyan("some code"));
+    // 视觉契约：bg 块给"内容引用"视觉锚 + 默认前景给所有终端配色高对比。
+    // 不再用 chalk.cyan—— brand cyan 仅用于选中 / 品牌 / 主操作（design language P5），
+    // codespan 是事实引用、属信息内容，按 tone.dim 注释原则"路径用 dim 系"。
+    expect(out).toBe(chalk.bgAnsi256(238)("some code"));
     expect(stripAnsi(out)).toBe("some code");
+    // 反向断言：codespan 前景不应叠 cyan（brand 误用回归屏障）
+    expect(out).not.toContain("\x1b[36m"); // chalk.cyan 起手 SGR
   });
 
-  it("codespan 不再用 historyEcho 同款 bgAnsi256(236)——避免与用户消息回显视觉同源", () => {
+  it("codespan 与 historyEcho（bgAnsi256(236)）同灰族但不同值——视觉同源 + 可辨识", () => {
+    // historyEcho 是行级 bg（用户消息锚），codespan 是 token 级 bg（内容引用）;
+    // 同 ansi-256 灰族但差 0x14 让两种 bg 在视觉上能被区分（避免混淆为同一语义）
     const tokens = parseInline("`x`");
     const out = renderInlines(tokens, "render");
     expect(out).not.toBe(chalk.bgAnsi256(236)("x"));
