@@ -26,7 +26,7 @@
  * renderChrome 的 body。
  */
 
-import { charWidth, stringWidth, stripAnsi } from "./tui/index.js";
+import { ANSI, charWidth, stringWidth, stripAnsi } from "./tui/index.js";
 
 export interface InputLayoutResult {
   /** 已格式化的多行（首行带 promptPrefix、续行 hanging indent），喂给 renderChrome.body */
@@ -48,6 +48,11 @@ export interface InputLayoutResult {
  * @param suffix - 最后一行末尾追加的提示文本（已含 ANSI dim 包装），不参与 wrap
  * @param contentBudget - chrome body 行的可见内容宽度（chrome 紧凑形态下 = frameWidth - 4）
  * @param atomicRegions - 可选 regex，识别为不可切碎的整体单元；不传时按字符级 wrap
+ * @param paintVisualCursor - 是否在 cursorRow 上把 cursor 位置的字符（或末尾空位）
+ *   用反色 SGR 包装，作为**视觉光标**渲染。这是 chrome-mode REPL 的标准做法 ——
+ *   硬件光标在 chrome 期间永久隐藏（由 ScreenController 统一管理），输入光标由
+ *   本函数以 reverse SGR 形式画在 body 内，解耦"输出区写入" vs "输入区光标可见性"。
+ *   默认 false（保留纯布局语义供测试 / 非交互场景使用）。
  */
 export function layoutInputBuffer(
   promptPrefix: string,
@@ -56,6 +61,7 @@ export function layoutInputBuffer(
   suffix: string,
   contentBudget: number,
   atomicRegions?: RegExp,
+  paintVisualCursor?: boolean,
 ): InputLayoutResult {
   const promptVisibleWidth = stringWidth(stripAnsi(promptPrefix));
   // 续行 hanging indent —— 与 prompt 等宽的空格，让 draft 左缘多行对齐
@@ -178,12 +184,18 @@ export function layoutInputBuffer(
   }
 
   // 拼装 bodyLines：首行带 promptPrefix，续行 hangingIndent；suffix 拼到末行末
+  // 可选视觉光标：cursorRow 上的 text 用 reverse SGR 包裹 cursor 位置的字符（或
+  // 末位反白空格）；非 cursorRow / 关闭视觉光标时按原样输出。
   const lastIdx = lines.length - 1;
   const bodyLines = lines.map((chars, idx) => {
     const text = chars.join("");
     const prefix = idx === 0 ? promptPrefix : hangingIndent;
     const tail = idx === lastIdx ? suffix : "";
-    return prefix + text + tail;
+    const decoratedText =
+      paintVisualCursor && idx === cursorRow
+        ? paintVisualCursorInText(text, cursorDraftCol)
+        : text;
+    return prefix + decoratedText + tail;
   });
 
   return {
@@ -191,6 +203,38 @@ export function layoutInputBuffer(
     cursorRow,
     cursorCol: promptVisibleWidth + cursorDraftCol,
   };
+}
+
+/**
+ * 在 text 中按可见列定位 cursor 字符并用 reverse SGR 包裹，模拟硬件光标的"反白"
+ * 视觉效果。chrome-mode 下硬件光标永久隐藏（ScreenController L1），输入光标在此
+ * 由 chrome 渲染层独立呈现 —— 与 LLM 输出区写入完全解耦。
+ *
+ * 行为：
+ *   - cursorDraftCol 落在某字符的左边界 → 包裹该字符（CJK 宽字符整体包裹，
+ *     视觉宽度不变）
+ *   - cursorDraftCol === 总可见宽度（cursor 在文本末尾）→ 末尾追加反白空格
+ *     （宽度 +1；若末尾跟随 suffix 视为占用一列在 suffix 之前）
+ *   - text 为空 + cursorDraftCol=0 → 仅一个反白空格
+ *
+ * 不变量：返回值的可见宽度 ≥ 输入 text 的可见宽度（仅在 cursor at end 路径 +1）；
+ * cursor 内嵌路径不改变可见宽度。
+ */
+function paintVisualCursorInText(text: string, cursorDraftCol: number): string {
+  const chars = Array.from(text);
+  let visibleWidth = 0;
+  for (let i = 0; i < chars.length; i++) {
+    if (visibleWidth === cursorDraftCol) {
+      const before = chars.slice(0, i).join("");
+      const cursorChar = chars[i]!;
+      const after = chars.slice(i + 1).join("");
+      return `${before}${ANSI.reverseOn}${cursorChar}${ANSI.reverseOff}${after}`;
+    }
+    const cp = chars[i]!.codePointAt(0);
+    if (cp === undefined) continue;
+    visibleWidth += charWidth(cp);
+  }
+  return `${text}${ANSI.reverseOn} ${ANSI.reverseOff}`;
 }
 
 /**

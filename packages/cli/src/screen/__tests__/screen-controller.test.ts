@@ -149,6 +149,70 @@ describe("ScreenController · attachInput", () => {
   });
 });
 
+describe("ScreenController · 硬件光标可见性 SoT（chrome 模式永久隐藏）", () => {
+  // chrome 模式下硬件光标永久隐藏，输入光标由 InputController 通过 reverse SGR
+  // 画在 chrome body 内承担——消除"输出区底行光标 + 输入光标随输出 chunk 闪烁"
+  // 双现象的根本架构。本组测试守住四个生命周期 emit 点的不变量。
+
+  it("firstAttach 末尾 emit hideCursor —— chrome 模式建立", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    expect(out.buffer).toContain("\x1b[?25l");
+    // hideCursor 必须在 FIRSTATTACH_SEQUENCE 之后（顺序：清屏 → 隐藏 → DECSTBM/chrome）
+    const idxClear = out.buffer.indexOf("\x1b[2J\x1b[3J\x1b[1;1H");
+    const idxHide = out.buffer.indexOf("\x1b[?25l");
+    expect(idxClear).toBeGreaterThanOrEqual(0);
+    expect(idxHide).toBeGreaterThan(idxClear);
+  });
+
+  it("detachInput emit showCursor —— shell 接管干净状态", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    out.buffer = "";
+    sc.detachInput();
+    expect(out.buffer).toContain("\x1b[?25h");
+  });
+
+  it("pre-attach 的 detachInput 不 emit showCursor（保护 shell 原状）", () => {
+    const { out, sc } = makeHarness();
+    sc.detachInput();
+    // pre-attach 路径未 hideCursor → 对偶不 showCursor，零字节写入
+    expect(out.buffer).toBe("");
+  });
+
+  it("resume 末尾重新 emit hideCursor —— modal 退出后重新断言 chrome 不变量", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    sc.suspend();
+    out.buffer = "";
+    sc.resume();
+    expect(out.buffer).toContain("\x1b[?25l");
+  });
+
+  it("dispose（attached 路径）emit showCursor —— 进程退出前最终恢复", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    out.buffer = "";
+    sc.dispose();
+    expect(out.buffer).toContain("\x1b[?25h");
+  });
+
+  it("dispose（detached 路径）仍 emit showCursor —— everAttached 兜底语义", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    sc.detachInput();
+    out.buffer = "";
+    sc.dispose();
+    expect(out.buffer).toContain("\x1b[?25h");
+  });
+
+  it("dispose（pre-attach 路径，everAttached=false）不写任何字节（保护 shell 原状）", () => {
+    const { out, sc } = makeHarness();
+    sc.dispose();
+    expect(out.buffer).toBe("");
+  });
+});
+
 describe("ScreenController · setStatusBar", () => {
   it("attach 之前 setStatusBar 只记录引用，attach 时被读到", () => {
     const { out, sc } = makeHarness({ rows: 10 });

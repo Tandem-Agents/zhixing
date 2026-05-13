@@ -255,8 +255,12 @@ export class InputController implements InputRegion {
   resume(): void {
     if (this.state !== "suspended") return;
     this.attachResources();
-    this.screen.attachInput(this);
+    // state 赋值顺序必须先于 screen.attachInput —— 后者经 enqueue→flush 同步
+    // 触发 input.renderLines() → computeRender，依赖 state 反映"active"语义。
+    // 与 start() 的相同顺序保持对偶；历史上 resume() 顺序与 start() 不一致，
+    // 在 paintVisualCursor 引入 state 依赖前隐患不可见，现在显式拉齐。
     this.state = "active";
+    this.screen.attachInput(this);
 
     if (this.options.signal?.aborted) {
       this.handleAbort();
@@ -409,6 +413,20 @@ export class InputController implements InputRegion {
 
     const frameWidth = Math.max(40, this.getColumns());
     const contentBudget = Math.max(1, frameWidth - 4);
+    // paintVisualCursor 的不变量谓词 = "input 资源 alive"，即 this.buffer !== null。
+    // 选 buffer 存在性而非 this.state === "active" 的理由：
+    //   - buffer 是 input 生命周期的真实物理资源 —— attachResources 同步创建、
+    //     detachResources 同步置 null。它是"input alive"的事实源（SoT）
+    //   - this.state 是字符串影子状态，赋值时机分散在 start() / resume() 中，
+    //     并不保证早于 screen.attachInput 的同步 enqueue→flush→paint 链路
+    //     （resume() 历史顺序：attachInput 在前、state="active" 在后）
+    //   - 用物理资源做谓词等于"无脑正确"：computeRender 顶部已早返
+    //     `!this.buffer || state==="stopped"`，到这里 buffer 必非 null →
+    //     paintVisualCursor 恒为 true。suspended / detach 阶段 buffer=null 在
+    //     早返就被拦住，根本到不了 layoutInputBuffer
+    // 视觉效果：硬件光标在 chrome 期间由 ScreenController 永久隐藏，输入光标在
+    // 此通过 reverse SGR 画在 cursorRow 上 —— 与 LLM 输出区写入完全解耦
+    // （消除"两个光标"现象 + 输入光标节奏不跟随输出 chunk 频率）。
     const layout = layoutInputBuffer(
       this.promptPrefix,
       this.buffer.draft,
@@ -416,6 +434,7 @@ export class InputController implements InputRegion {
       suffix,
       contentBudget,
       PASTE_TOKEN_PATTERN,
+      this.buffer !== null,
     );
 
     const boxLines = renderChrome({

@@ -270,7 +270,14 @@ export function renderSessionLines(
   const contentBudget = Math.max(1, frameWidth - 4);
 
   if (count === 0) {
-    return renderEmptyChrome(state, title, frameWidth, contentBudget, theme);
+    return renderEmptyChrome(
+      state,
+      title,
+      frameWidth,
+      contentBudget,
+      maxVisibleItems,
+      theme,
+    );
   }
 
   return renderActiveChrome(
@@ -300,12 +307,26 @@ function buildTitle(
   return `${providerLabel} · ${count} ${noun}`;
 }
 
-/** 空态 chrome —— body 单行（argumentHint / loading / "未找到匹配项"）+ 可选 Esc 提示。 */
+/**
+ * 空态 chrome —— body 首行（argumentHint / loading / "未找到匹配项"）+ padding
+ * 到与 active chrome body 同恒定行数 + 可选 Esc 提示。
+ *
+ * 高度恒定不变量（与 renderActiveChrome 对齐）：
+ *   chrome body 长度严格 = `maxVisibleItems + 2`（首行实质内容 + 后续空行 padding）。
+ *   这是消除"有候选 → 无候选"切换时面板高度跳变的必要条件 —— 用户输入过滤候选
+ *   过程中频繁触发空态（如打字超过任何前缀匹配长度），若空态 body 仅 1 行，
+ *   面板会从 maxVisibleItems+2 行骤缩到 1 行，视觉抖动剧烈。
+ *
+ * 首行内容（不动现有逻辑）：argumentHint > loading > "未找到匹配项" 的优先级，
+ * "未找到匹配项"分支额外加 Esc meta 提示（meta 行抖动不在本恒定契约内，由
+ * state 决定）。
+ */
 function renderEmptyChrome(
   state: TypeaheadSessionState,
   title: string,
   frameWidth: number,
   contentBudget: number,
+  maxVisibleItems: number,
   theme: TypeaheadTheme,
 ): string[] {
   const body: BodyLine[] = [];
@@ -322,6 +343,11 @@ function renderEmptyChrome(
     meta.push(`  ${theme.hint(clampLine("Esc 清空", frameWidth - 2))}`);
   }
 
+  // padding 空行到 maxVisibleItems + 2 行，与 active chrome body 严格对齐
+  while (body.length < maxVisibleItems + 2) {
+    body.push("");
+  }
+
   return [
     ...renderChrome({
       title,
@@ -334,7 +360,33 @@ function renderEmptyChrome(
   ];
 }
 
-/** 活跃 chrome —— 滚动 slot + 候选行（选中行点阵高亮）+ 滚动 slot；meta 行在 chrome 外。 */
+/**
+ * 活跃 chrome —— 顶 slot + 候选行（选中行点阵高亮）+ 底 slot；meta 行在 chrome 外。
+ *
+ * ─── 高度恒定不变量 ───
+ *
+ * chrome body 长度严格恒定为 `maxVisibleItems + 2`（1 行顶 slot + maxVisibleItems
+ * 行候选区 + 1 行底 slot），与 count / selectedIndex / isScrollable **无关**。
+ * 这是面板"不抖动"的核心契约：
+ *
+ *   - 用户输入 `/` 后边打字边过滤，候选数 N 跟着字符变化（1→5→2→8→0...）
+ *   - 旧实现 body 长度 = 候选数（不 scrollable）或 maxVisible+2（scrollable），
+ *     N 跨过 maxVisible 阈值时面板高度跳变；N 在阈值内变化时面板高度逐行抖
+ *   - 新实现 body 永远是 `maxVisibleItems + 2` 行，PanelRenderer 原地重绘
+ *     只改字符内容，不改光标移动高度 → 视觉绝对稳定
+ *
+ * Slot 占位策略：
+ *   - scrollable：顶/底 slot 渲染滚动指示（`↑ 上方还有 N 条` / `↓ 下方还有 N 条`
+ *     或边界标记 `──── 顶部 ────` / `──── 到底啦 ────`）
+ *   - 不 scrollable：顶/底 slot 渲染空字符串（chrome 协议按空 BodyLine 渲染为
+ *     纯左右边框 + 内部空白，行数占用与有内容时完全一致）
+ *
+ * 候选区 padding 策略：实际渲染候选数 < maxVisibleItems 时，末尾用空 BodyLine
+ * 填充到 maxVisibleItems 行。
+ *
+ * meta 行（chrome 外的 argumentHint / 快捷键提示）不在此恒定契约内，由 state
+ * 决定（argumentHint 是 state-level 不随候选过滤变化，仅在切换 trigger 时变）。
+ */
 function renderActiveChrome(
   state: TypeaheadSessionState,
   title: string,
@@ -347,11 +399,7 @@ function renderActiveChrome(
   const win = computeWindow(count, state.selectedIndex, maxVisibleItems);
   const body: BodyLine[] = [];
 
-  // 滚动指示行：scrollable 时**恒定预留 2 个 slot**（顶+底），内容随窗口位置
-  // 变化但行数不变，消除面板高度抖动。文案策略：
-  //   - 可滚动：`↑ 上方还有 N 条` / `↓ 下方还有 N 条`（量化剩余数量）
-  //   - 到边了：`──── 顶部 ────` / `──── 到底啦 ────`（明确的中文边界提示）
-  // 非 scrollable（total ≤ maxVisible）时完全不预留 slot —— 不浪费行。
+  // ─── 顶 slot（恒占 1 行） ───
   if (win.isScrollable) {
     const aboveCount = win.start;
     const topContent =
@@ -359,8 +407,11 @@ function renderActiveChrome(
         ? `↑ 上方还有 ${aboveCount} 条`
         : buildEdgeMarker("顶部", contentBudget);
     body.push(theme.hint(clampLine(topContent, contentBudget)));
+  } else {
+    body.push(""); // 空 slot 占位，让 body 总行数与 scrollable 路径恒等
   }
 
+  // ─── 候选区（恒占 maxVisibleItems 行） ───
   for (let i = win.start; i < win.end; i++) {
     const item = state.suggestions[i]!;
     const isSelected = i === state.selectedIndex;
@@ -371,7 +422,12 @@ function renderActiveChrome(
         : payload,
     );
   }
+  const filledCount = win.end - win.start;
+  for (let i = filledCount; i < maxVisibleItems; i++) {
+    body.push(""); // 候选不足时空行 padding，维持 maxVisibleItems 行恒定
+  }
 
+  // ─── 底 slot（恒占 1 行） ───
   if (win.isScrollable) {
     const belowCount = count - win.end;
     const bottomContent =
@@ -379,6 +435,8 @@ function renderActiveChrome(
         ? `↓ 下方还有 ${belowCount} 条`
         : buildEdgeMarker("到底啦", contentBudget);
     body.push(theme.hint(clampLine(bottomContent, contentBudget)));
+  } else {
+    body.push(""); // 空 slot 占位（同顶 slot）
   }
 
   // chrome 之后的 meta 行：argumentHint（如有）+ 快捷键提示

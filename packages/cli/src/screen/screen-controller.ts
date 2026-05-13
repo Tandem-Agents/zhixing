@@ -77,6 +77,26 @@
  *   4. 必须先实现 zhixing 内部 viewport scroll 机制，否则用户无法滚看历史
  *   5. 测试断言对应调整
  *
+ * ─── 硬件光标可见性 SoT（单源真相） ───
+ *
+ *   chrome 模式下硬件光标**永久隐藏**——输入光标由 InputController.computeRender
+ *   通过 input-layout.ts 在 cursorRow 上画 reverse SGR 视觉光标承担。这是消除
+ *   "输出区底行光标 + 输入光标随 LLM 输出 chunk 闪烁"双现象的根本架构。
+ *
+ *   生命周期 emit 点（ScreenController 唯一管理处，其他位置不得直接发 \x1b[?25l/h）：
+ *     - firstAttach 末尾 emit hideCursor —— chrome 模式建立
+ *     - detachInput 内 emit showCursor —— chrome 模式终止，shell 接管
+ *     - resume 末尾 emit hideCursor —— modal 退出后重新断言 chrome 不变量
+ *     - dispose 内 emit showCursor —— 进程退出前最终恢复
+ *
+ *   modal alt UI（select-with-input / config-editor）仍可自由 emit hideCursor /
+ *   showCursor 作为局部装饰——它们在 suspend/resume 之间运行，resume 兜底重隐藏，
+ *   不产生协议冲突。
+ *
+ *   repaintInputCursor 仍 emit cursor 定位序列（\x1b[r;cH），目的是维护 logical
+ *   cursor position 不变量供 screen reader / accessibility 工具追踪；在硬件光标
+ *   隐藏状态下视觉无副作用。
+ *
  * ─── 行宽硬合约（caller 端保证） ───
  *
  *   送入 writeScrollLine / withScrollWrite / segment.replace / segment.commit 的字符串
@@ -104,7 +124,7 @@ import {
   type SegmentHandle,
 } from "./scroll-region.js";
 import type { TerminalCapability } from "./terminal-capability.js";
-import { clampLine, layout, tone } from "../tui/index.js";
+import { ANSI, clampLine, layout, tone } from "../tui/index.js";
 
 export interface InputRegion {
   /**
@@ -447,8 +467,13 @@ class ScreenControllerImpl implements ScreenController {
 
   detachInput(): void {
     this.enqueue(() => {
-      if (this.scrollRegion.state.attached) {
+      const wasAttached = this.scrollRegion.state.attached;
+      if (wasAttached) {
         this.scrollRegion.detachInput();
+        // 退出 chrome 模式 —— 恢复硬件光标可见性（与 firstAttach 的 hideCursor
+        // 严格对偶）。仅在曾接管屏幕时 emit，pre-attach 路径下未 hideCursor →
+        // 不 showCursor，与"保护 shell 原状"语义一致。
+        this.stdout.write(ANSI.showCursor);
       }
       this.input = null;
       this.statusLines = [];
@@ -599,6 +624,10 @@ class ScreenControllerImpl implements ScreenController {
       const chromeBytes = this.buildChromeBytes(chromeHeight);
       this.scrollRegion.resume(chromeHeight, chromeBytes);
       this.repaintInputCursor();
+      // 重新断言 chrome 模式不变量：硬件光标隐藏。modal（select-with-input /
+      // config-editor）退出时可能自己 emit \x1b[?25h，由本 emit 兜底覆盖让
+      // 输入光标继续由 chrome 的 reverse SGR 视觉光标承担。
+      this.stdout.write(ANSI.hideCursor);
     }
     this.notifySuspendChange(false);
 
@@ -652,6 +681,12 @@ class ScreenControllerImpl implements ScreenController {
         } else if (this.everAttached) {
           this.stdout.write(ANSI_DISPOSE_SEQUENCE);
         }
+        // 恢复硬件光标可见性 —— firstAttach 的 hideCursor 对偶。①② 路径均需，
+        // ③ pre-attach 路径（everAttached=false）跳过保护 shell 原状。
+        // 与 detachInput 的 showCursor 幂等共存（重复 emit 同序列无副作用）。
+        if (this.everAttached) {
+          this.stdout.write(ANSI.showCursor);
+        }
         // 告别块 emit —— 仅在 ①② 路径之后（清屏序列已写完 cursor 在 (1,1)）emit。
         // ③ pre-attach 路径（everAttached=false）跳过，与"保护 shell 原状"原则一致：
         // 从未接管过屏幕的 dispose 不该突然写一段品牌告别块到 shell 之中。
@@ -680,7 +715,13 @@ class ScreenControllerImpl implements ScreenController {
     // 清 scrollback + 清 viewport + cursor 顶 —— 让 region 顶 = viewport 顶 + 用户
     // 向上滚不会看到 zhixing 启动前 shell 残留或上次 session 残留（见 ANSI_FIRSTATTACH_SEQUENCE
     // 常量 docstring 详解副作用与兼容性）。
+    //
+    // 紧随其后 emit hideCursor —— chrome 模式下硬件光标永久隐藏（详见模块头
+    // "硬件光标可见性 SoT"段）。这是消除"输出区底行光标 + 输入区光标随 chunk 闪烁"
+    // 双现象的根本手段：输入光标由 chrome 渲染层用 reverse SGR 画在 body 内，与
+    // LLM 流式输出写入完全解耦。
     this.stdout.write(ANSI_FIRSTATTACH_SEQUENCE);
+    this.stdout.write(ANSI.hideCursor);
 
     const chromeHeight = this.computeChromeHeight();
     const chromeBytes = this.buildChromeBytes(chromeHeight);
@@ -782,10 +823,18 @@ class ScreenControllerImpl implements ScreenController {
   }
 
   /**
-   * 把 cursor 移到 input cursor 位置——chrome 协议方法之后调用。
+   * 把硬件 cursor 移到 input cursor 的逻辑位置 —— chrome 协议方法之后调用。
    *
    * ScrollRegion 协议方法末尾把 cursor 拉回 region 末（top-anchored 不变量）；
-   * 这里再 emit 一次让 cursor 跳到 input 内的逻辑光标位置（用户按键时光标可见）。
+   * 这里再 emit 一次让硬件 cursor 跳到 input 内的逻辑位置。
+   *
+   * **视觉副作用 = 零**：模块头"硬件光标可见性 SoT"段中 chrome 模式硬件光标
+   * 永久隐藏，输入光标由 input-layout 的 reverse SGR 视觉光标承担。本函数 emit
+   * cursor 定位序列的目的不再是"让用户看到光标"，而是：
+   *   - 维护 logical cursor position 不变量供 screen reader / accessibility
+   *     工具追踪（部分 AT 工具读硬件 cursor 位置即使其不可见）
+   *   - 兜底防御：万一某个上游路径（modal / 异常退出）未走 SoT 让硬件光标暂时
+   *     可见，至少 cursor 落在正确位置而非 region 末乱跑
    */
   private repaintInputCursor(): void {
     if (!this.input || !this.scrollRegion.state.attached) return;

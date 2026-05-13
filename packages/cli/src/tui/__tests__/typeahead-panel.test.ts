@@ -452,7 +452,7 @@ describe("renderSessionLines", () => {
     expect(bottomJoined).toContain("到底啦");
   });
 
-  it("非 scrollable 列表：不预留指示 slot（节省行）", () => {
+  it("非 scrollable 列表：不渲染滚动量化文案（只占空 slot）", () => {
     const suggestions = Array.from({ length: 3 }, (_, i) =>
       makeSuggestion(`cmd${i}:b`, `/cmd${i}`),
     );
@@ -462,7 +462,76 @@ describe("renderSessionLines", () => {
       opts,
     );
     const joined = stripAnsi(lines.join("\n"));
-    expect(joined).not.toContain("more");
+    // 不 scrollable → 不显示"上方还有 / 下方还有"量化文案，也无边界标记
+    expect(joined).not.toMatch(/上方还有|下方还有/);
+    expect(joined).not.toContain("顶部");
+    expect(joined).not.toContain("到底啦");
+  });
+
+  it("active chrome 总行数恒定 —— 候选数 1 / 中等 / maxVisibleItems / 超出 全部相等（消除高度抖动）", () => {
+    // 用户输入 / 后边打字过滤候选，候选数 N 随字符变化（1→5→2→8→0...）。
+    // 旧实现 N 跨过 maxVisibleItems 阈值时 chrome 高度跳变；阈值内 N 变化时
+    // 逐行抖动。新实现保证：N > 0 的 active 态总行数严格恒定，与 N 无关。
+    const opts: RenderOptions = { ...defaultRenderOpts, maxVisibleItems: 8 };
+    const makeN = (n: number): TypeaheadSessionState =>
+      makeState({
+        suggestions: Array.from({ length: n }, (_, i) =>
+          makeSuggestion(`cmd${i}:b`, `/cmd${i}`),
+        ),
+        selectedIndex: 0,
+      });
+
+    const len1 = renderSessionLines(makeN(1), opts).length;
+    const len5 = renderSessionLines(makeN(5), opts).length;
+    const len8 = renderSessionLines(makeN(8), opts).length; // = maxVisibleItems
+    const len9 = renderSessionLines(makeN(9), opts).length; // 跨阈值
+    const len20 = renderSessionLines(makeN(20), opts).length;
+
+    expect(len5).toBe(len1);
+    expect(len8).toBe(len1);
+    expect(len9).toBe(len1);
+    expect(len20).toBe(len1);
+  });
+
+  it("empty chrome 体内行数与 active chrome 对齐 —— 候选 0 → N → 0 切换无 chrome body 跳变", () => {
+    // 真实场景：用户输入 /xxx，无任何前缀匹配 → 候选 0 → emptyChrome；
+    // 退一个字符回到 /xx → 命中候选 → activeChrome。两态切换时 chrome body
+    // 必须恒定行数，否则视觉抖动。
+    //
+    // 注意：emptyChrome 在 "未找到匹配项" 分支会额外渲染一行 Esc meta 提示，
+    // argumentHint / loading 分支不会；这个 meta 行的差异属于"内容差异"而非
+    // chrome body 抖动，不在本恒定契约内（也是符合直觉的状态指示）。
+    //
+    // 本测试通过比较 chrome 框线行数（顶/底框 + body）来验证 body 恒定。
+    const opts: RenderOptions = { ...defaultRenderOpts, maxVisibleItems: 8 };
+
+    // active 态参考：N=5 候选
+    const activeLines = renderSessionLines(
+      makeState({
+        suggestions: Array.from({ length: 5 }, (_, i) =>
+          makeSuggestion(`cmd${i}:b`, `/cmd${i}`),
+        ),
+        selectedIndex: 0,
+      }),
+      opts,
+    );
+    // empty 态：N=0 + 无 argumentHint/loading → "未找到匹配项"
+    const emptyLines = renderSessionLines(
+      makeState({ suggestions: [], selectedIndex: -1 }),
+      opts,
+    );
+
+    // 计算每个面板的 chrome 框行数（顶框 ╭ 到底框 ╰ 之间，包含两条框线）
+    const countChromeRows = (lines: string[]): number => {
+      const stripped = lines.map(stripAnsi);
+      const topIdx = stripped.findIndex((l) => l.includes("╭"));
+      const botIdx = stripped.findIndex((l) => l.includes("╰"));
+      expect(topIdx).toBeGreaterThanOrEqual(0);
+      expect(botIdx).toBeGreaterThan(topIdx);
+      return botIdx - topIdx + 1;
+    };
+
+    expect(countChromeRows(emptyLines)).toBe(countChromeRows(activeLines));
   });
 
   it("同一 state 重复调用产生相同输出（确定性）", () => {

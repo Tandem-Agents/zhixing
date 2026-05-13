@@ -7,6 +7,11 @@ describe("ANSI constants", () => {
     expect(ANSI.showCursor).toBe("\x1b[?25h");
   });
 
+  it("reverseOn / reverseOff are the standard VT codes", () => {
+    expect(ANSI.reverseOn).toBe("\x1b[7m");
+    expect(ANSI.reverseOff).toBe("\x1b[27m");
+  });
+
   it("clearLine is \\x1b[2K", () => {
     expect(ANSI.clearLine).toBe("\x1b[2K");
   });

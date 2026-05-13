@@ -317,3 +317,123 @@ describe("layoutInputBuffer — atomic + \\n 混合", () => {
     expect(r.cursorCol).toBe(2 + 1 + 6); // prompt + 'a' + [ATOM]
   });
 });
+
+describe("layoutInputBuffer — paintVisualCursor（chrome 模式视觉光标）", () => {
+  // chrome 模式下硬件光标永久隐藏，输入光标由 layout 在 cursorRow 上画 reverse
+  // SGR 承担。下列测试覆盖核心边界。视觉宽度不变量：cursor 内嵌路径输出可见
+  // 宽度 = 输入 text 可见宽度（不偏移）；末位 cursor 路径 +1（反白空格）。
+
+  const REVERSE_ON = "\x1b[7m";
+  const REVERSE_OFF = "\x1b[27m";
+
+  it("默认不画视觉光标——bodyLines 与原行为一致（向后兼容）", () => {
+    const r = layoutInputBuffer(PROMPT, "hello", 2, "", 80);
+    expect(r.bodyLines).toEqual([`${PROMPT}hello`]);
+    // 显式 false 与省略等价
+    const r2 = layoutInputBuffer(PROMPT, "hello", 2, "", 80, undefined, false);
+    expect(r2.bodyLines).toEqual([`${PROMPT}hello`]);
+  });
+
+  it("cursor 在文本中间——包裹该字符（视觉宽度不变）", () => {
+    const r = layoutInputBuffer(PROMPT, "hello", 2, "", 80, undefined, true);
+    // text="hello", cursorDraftCol=2 → 包裹 'l'（第二个 l）
+    expect(r.bodyLines).toEqual([
+      `${PROMPT}he${REVERSE_ON}l${REVERSE_OFF}lo`,
+    ]);
+    // stripAnsi 后视觉宽度不变
+    expect(stripAnsi(r.bodyLines[0]!)).toBe(`${PROMPT}hello`);
+  });
+
+  it("cursor 在文本开头——包裹首字符", () => {
+    const r = layoutInputBuffer(PROMPT, "hello", 0, "", 80, undefined, true);
+    expect(r.bodyLines).toEqual([
+      `${PROMPT}${REVERSE_ON}h${REVERSE_OFF}ello`,
+    ]);
+  });
+
+  it("cursor 在文本末尾——末位追加反白空格（可见宽度 +1）", () => {
+    const r = layoutInputBuffer(PROMPT, "hello", 5, "", 80, undefined, true);
+    expect(r.bodyLines).toEqual([
+      `${PROMPT}hello${REVERSE_ON} ${REVERSE_OFF}`,
+    ]);
+  });
+
+  it("空 draft + cursor=0——仅一个反白空格（输入框起始位置可见光标）", () => {
+    const r = layoutInputBuffer(PROMPT, "", 0, "", 80, undefined, true);
+    expect(r.bodyLines).toEqual([`${PROMPT}${REVERSE_ON} ${REVERSE_OFF}`]);
+  });
+
+  it("CJK 全角字符上的 cursor——整字符包裹，宽度不变", () => {
+    const r = layoutInputBuffer(PROMPT, "你好", 0, "", 80, undefined, true);
+    // cursor=0 → 包裹 '你'（全角宽 2）
+    expect(r.bodyLines).toEqual([
+      `${PROMPT}${REVERSE_ON}你${REVERSE_OFF}好`,
+    ]);
+    expect(stripAnsi(r.bodyLines[0]!)).toBe(`${PROMPT}你好`);
+  });
+
+  it("CJK 之后位置的 cursor——按可见列累计正确定位到下一字符", () => {
+    const r = layoutInputBuffer(PROMPT, "你好", 1, "", 80, undefined, true);
+    // cursor=1 → cursorDraftCol=2（'你'占 2 列）→ 包裹 '好'
+    expect(r.bodyLines).toEqual([
+      `${PROMPT}你${REVERSE_ON}好${REVERSE_OFF}`,
+    ]);
+  });
+
+  it("wrap 多行——仅 cursorRow 行画视觉光标", () => {
+    // contentBudget=10, prompt=2 → lineWidth=8；draft 10 字符 → wrap 8+2
+    const r = layoutInputBuffer(
+      PROMPT,
+      "abcdefghij",
+      9, // cursor=9 在 'j' 之上（chars[9]='j'，续行内 draftCol=1）
+      "",
+      10,
+      undefined,
+      true,
+    );
+    expect(r.bodyLines).toHaveLength(2);
+    // 首行：text="abcdefgh"，不是 cursorRow → 不画
+    expect(r.bodyLines[0]).toBe(`${PROMPT}abcdefgh`);
+    // 续行：cursorRow，text="ij"，cursor=9 → cursor 在 'j' 上 → 包裹 'j'
+    expect(r.bodyLines[1]).toBe(`  i${REVERSE_ON}j${REVERSE_OFF}`);
+  });
+
+  it("wrap 多行 + cursor 在末尾——续行末位追加反白空格", () => {
+    const r = layoutInputBuffer(
+      PROMPT,
+      "abcdefghij",
+      10, // cursor 在所有字符之后
+      "",
+      10,
+      undefined,
+      true,
+    );
+    expect(r.bodyLines).toHaveLength(2);
+    expect(r.bodyLines[0]).toBe(`${PROMPT}abcdefgh`);
+    expect(r.bodyLines[1]).toBe(`  ij${REVERSE_ON} ${REVERSE_OFF}`);
+  });
+
+  it("有 suffix（placeholder / ghost）+ cursor 在末尾——反白空格插入 text 与 suffix 之间", () => {
+    const suffix = `\x1b[2mghost\x1b[0m`; // dim ghost text
+    const r = layoutInputBuffer(
+      PROMPT,
+      "hello",
+      5, // cursor 在 'o' 之后
+      suffix,
+      80,
+      undefined,
+      true,
+    );
+    // text 后插反白空格再拼 suffix
+    expect(r.bodyLines).toEqual([
+      `${PROMPT}hello${REVERSE_ON} ${REVERSE_OFF}${suffix}`,
+    ]);
+  });
+
+  it("paint 不影响 cursorRow / cursorCol 元数据", () => {
+    const r1 = layoutInputBuffer(PROMPT, "hello", 3, "", 80, undefined, false);
+    const r2 = layoutInputBuffer(PROMPT, "hello", 3, "", 80, undefined, true);
+    expect(r2.cursorRow).toBe(r1.cursorRow);
+    expect(r2.cursorCol).toBe(r1.cursorCol);
+  });
+});

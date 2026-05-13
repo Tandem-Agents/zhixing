@@ -52,6 +52,9 @@ export const ANSI = {
   bold: "\x1b[1m",
   dim: "\x1b[2m",
   underline: "\x1b[4m",
+  /** 反色（前后景互换）——视觉光标 / 选中标记用 */
+  reverseOn: "\x1b[7m",
+  reverseOff: "\x1b[27m",
 
   // ── 前景色 ──
   red: "\x1b[31m",
