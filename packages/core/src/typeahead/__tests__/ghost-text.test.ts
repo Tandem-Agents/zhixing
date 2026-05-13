@@ -243,7 +243,10 @@ describe("Broker.acceptGhostText", () => {
     expect(result).toBeNull();
   });
 
-  it("accept 后 session state 被清空", () => {
+  it("acceptGhostText 是 state-纯函数 —— 不动 session state（与 accept 同契约）", () => {
+    // 与 broker.accept 同样的 state-纯契约：仅返回 AcceptResult + emit telemetry，
+    // **不**清 session state。caller 通过后续 updateInput 驱动状态变更。详见
+    // broker.ts acceptGhostText 方法的 docstring。
     const registry = new DefaultCommandRegistry();
     const commands = makeMinimalCommands();
     for (const cmd of commands) registry.register(cmd);
@@ -252,11 +255,15 @@ describe("Broker.acceptGhostText", () => {
     broker.register(new CommandProvider({ registry }));
 
     const session = broker.beginSession(makeCtx("/he"));
+    const beforeState = broker.getState(session.id)!;
+    expect(beforeState.ghostText).not.toBeNull();
+
     broker.acceptGhostText(session.id);
 
-    const state = broker.getState(session.id);
-    expect(state!.ghostText).toBeNull();
-    expect(state!.suggestions.length).toBe(0);
+    // session state 完全不变
+    const afterState = broker.getState(session.id)!;
+    expect(afterState.ghostText).toEqual(beforeState.ghostText);
+    expect(afterState.suggestions).toEqual(beforeState.suggestions);
   });
 
   it("draft 中间有 trigger 时正确替换", () => {

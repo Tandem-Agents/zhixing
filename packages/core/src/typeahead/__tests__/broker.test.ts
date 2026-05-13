@@ -373,7 +373,12 @@ describe("DefaultTypeaheadBroker — accept", () => {
     );
   });
 
-  it("accept 后 session state 清空（trigger, suggestions 都没了）", () => {
+  it("accept 是 state-纯函数 —— 不动 session state（caller 通过 updateInput / cancelSession 驱动状态变更）", () => {
+    // 架构契约：accept 仅 compute AcceptResult + emit telemetry，**不**触发任何 UI
+    // 副作用。历史 drift（已修复 2026-05-13）：accept 内同步调 `setSessionState(makeEmptyState)`
+    // 让 chrome 在 caller 写 buffer **之前**就用旧 buffer 重画一次 → TOCTOU。
+    // 现在 accept 是 state-纯，caller 显式按"accept → setDraft → syncBroker/submit"
+    // 顺序驱动状态机收敛。详见 broker.ts accept 方法的 docstring。
     const broker = new DefaultTypeaheadBroker();
     broker.register(
       makeSyncProvider("p", 100, "/", [
@@ -386,11 +391,17 @@ describe("DefaultTypeaheadBroker — accept", () => {
       ]),
     );
     const handle = broker.beginSession(makeCtx("/ne"));
-    broker.accept(handle.id, broker.getState(handle.id)!.suggestions[0]!);
-    const afterState = broker.getState(handle.id);
-    expect(afterState?.trigger).toBeNull();
-    expect(afterState?.suggestions).toEqual([]);
-    expect(afterState?.selectedIndex).toBe(-1);
+    const beforeState = broker.getState(handle.id)!;
+    expect(beforeState.trigger).not.toBeNull();
+    expect(beforeState.suggestions.length).toBe(1);
+
+    broker.accept(handle.id, beforeState.suggestions[0]!);
+
+    // accept 后 session state 完全不变
+    const afterState = broker.getState(handle.id)!;
+    expect(afterState.trigger).toEqual(beforeState.trigger);
+    expect(afterState.suggestions).toEqual(beforeState.suggestions);
+    expect(afterState.selectedIndex).toBe(beforeState.selectedIndex);
   });
 
   it("accept 使用 acceptPayload.cursorOffset 显式位置", () => {

@@ -662,15 +662,39 @@ export class InputController implements InputRegion {
     return true;
   }
 
+  /**
+   * 接受 suggestion 并按 acceptPayload.execute 决定后续动作。
+   *
+   * ─── 严格执行顺序契约 ───
+   *
+   *   1. broker.accept(item)         —— **state-纯**，返回 AcceptResult，不动 broker session state
+   *   2. buffer.setDraft(...)         —— buffer 先于任何 broker 观测被更新
+   *   3a. execute=true → this.submit() —— submit 内 buffer.commit + syncBroker 一次性把 broker 同步到"buffer 已清空"
+   *   3b. execute=false → this.syncBroker() —— broker 观测新 buffer 派生新 session（如 /file 后的 argument 补全）→ chrome 重画
+   *
+   * **不能调换的顺序**：若 broker 观测 buffer 先于 setDraft（如 broker.accept 内
+   * 同步副作用触发 listener），chrome 会用旧 buffer 重画一次——经典 TOCTOU。
+   * 详见 broker.ts accept 方法的 docstring 关于"历史 drift"的论证。
+   *
+   * **execute 路径不在此处 syncBroker** 的设计取舍：execute=true 意味着 buffer
+   * 马上要被 submit 内的 commit 抹掉；中间多调一次 syncBroker 会让 broker 先观
+   * 测 "/clear" 状态 → 多一次 chrome paint 显示 panel（1 match）→ 立刻又被 commit
+   * 后的 syncBroker 抹成空。视觉上是 panel "闪一下"——浪费一次 paint。submit 内
+   * 单点 syncBroker 直接从"buffer 旧 partial 文本"过渡到"empty"，单帧到位。
+   */
   private acceptSuggestion(item: SuggestionItem): void {
     if (!this.buffer || !this.sessionHandleId) return;
+
     const accepted = this.options.broker.accept(this.sessionHandleId, item);
     if (!accepted) return;
+
     this.buffer.setDraft(accepted.newDraft, accepted.newCursor);
+
     if (accepted.execute) {
       void this.submit();
       return;
     }
+
     this.syncBroker();
   }
 
@@ -690,11 +714,22 @@ export class InputController implements InputRegion {
       : rawDraft;
     const text = expanded.trim();
 
-    // 必须先 commit 让 buffer 清空，再走 echo——echoSubmittedDraft 内的 withScrollWrite
-    // 会调 input.renderLines() 重画 chrome；若 buffer 未 commit，首帧 chrome 仍含
-    // rawDraft，与 historyEcho 视觉重复，紧接 commit 后又 repaint 一次修正。
-    // 顺序对调后 chrome 直接显示空 buffer + placeholder，单帧无视觉抖动。
+    // 严格顺序：commit → syncBroker → echo → dispatch
+    //
+    //   1. buffer.commit()       清空 buffer
+    //   2. this.syncBroker()     通知 broker 新（空）buffer → broker 派生空 session →
+    //                            listener 触发 chrome 重画用空 buffer。**execute 路径
+    //                            TOCTOU 修复的关键点**：从 acceptSuggestion 进 submit 的
+    //                            链路中，本次 syncBroker 是 chrome 重画的唯一时机；
+    //                            缺失则 chrome 卡在 commit 前的 partial 文本（典型
+    //                            现象：home 模式输入 `/cle` 回车后 chrome 仍显示
+    //                            `/cle`，详见 acceptSuggestion + broker.accept docstring）
+    //   3. echoSubmittedDraft    把原始 draft 落 scrollback 作为历史
+    //                            （withScrollWrite 只 appendInline + repaintInputCursor，
+    //                            不触发 refreshChrome —— chrome 内容此时已由 #2 同步好）
+    //   4. dispatch              async 执行命令
     this.buffer.commit();
+    this.syncBroker();
     this.echoSubmittedDraft(rawDraft);
 
     if (!text) {

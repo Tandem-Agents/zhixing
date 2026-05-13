@@ -397,6 +397,26 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
     });
   }
 
+  /**
+   * 计算 accept 结果——**state-纯函数**：返回 AcceptResult + 发 telemetry 事件，
+   * **不动 session state**。caller 负责后续 updateInput / cancelSession 驱动状态变更。
+   *
+   * ─── 为什么是 state-纯 ───
+   *
+   * 历史 drift（已修复）：本方法曾在末尾同步调 `setSessionState(makeEmptyState)`
+   * 清 session state。该副作用同步通知 onSessionChange listener，listener 立刻在
+   * caller 写 buffer **之前**触发 chrome 重画——chrome 用旧 buffer（accept 之前的
+   * partial 文本）画完，caller 之后才 setDraft。execute=true 路径下 submit 内的
+   * buffer.commit 后无 chrome 重画环节 → chrome 卡在旧 partial 文本（典型现象：
+   * home 模式输入 `/cle` 回车后 /clear 已执行但输入行仍显示 `/cle`）。
+   *
+   * 修复后契约：accept 仅算结果 + 发 telemetry；caller 显式按"accept(pure) →
+   * setDraft → syncBroker / submit"顺序写。broker.updateInput（由 syncBroker
+   * 触发）观测新 draft 派生新 session state——状态机收敛在 updateInput 单点。
+   *
+   * 顺带保护：未来任何调用方按签名理解写"accept → 改 caller 状态 → 后续"，
+   * 不会再踩 TOCTOU。
+   */
   accept(sessionId: string, item: SuggestionItem): AcceptResult | null {
     const session = this.sessions.get(sessionId);
     if (!session) return null;
@@ -442,12 +462,17 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
       result,
     });
 
-    // Accept 清空 session state（session 本身还活着，等下次 updateInput）
-    this.setSessionState(session, makeEmptyState(sessionId));
-
     return result;
   }
 
+  /**
+   * 接受 ghost text 自动完成（Tab 触发）——**state-纯函数**（与 [[accept]] 同契约）：
+   * 返回 AcceptResult + 发 telemetry，不动 session state。caller 负责通过
+   * updateInput / cancelSession 驱动状态变更。
+   *
+   * 历史 drift 与 accept 完全同构（同一 TOCTOU 模式），fix 同步处理。详细论证见
+   * accept 方法注释。
+   */
   acceptGhostText(sessionId: string): AcceptResult | null {
     const session = this.sessions.get(sessionId);
     if (!session) return null;
@@ -481,9 +506,6 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
       },
       result,
     });
-
-    // 清空 session state，等下次 updateInput（新的完整命令名会触发新一轮 match）
-    this.setSessionState(session, makeEmptyState(sessionId));
 
     return result;
   }
