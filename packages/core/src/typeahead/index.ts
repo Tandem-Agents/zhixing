@@ -33,6 +33,7 @@ export type {
 export type {
   AcceptPayload,
   AcceptResult,
+  ActiveProviderInfo,
   ArgumentHint,
   GhostText,
   ITypeaheadBroker,

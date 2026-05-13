@@ -278,12 +278,11 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
     // 异步返回：先设 loading=true，等 Promise 结算
     this.setSessionState(session, {
       ...session.state,
-      activeProvider: provider,
+      activeProvider: { id: provider.id },
       trigger: match,
       suggestions: [],
       selectedIndex: -1,
       loading: true,
-      stale: false,
       ghostText: null,
       argumentHint: null,
     });
@@ -362,12 +361,11 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
 
     this.setSessionState(session, {
       sessionId: session.id,
-      activeProvider: provider,
+      activeProvider: { id: provider.id },
       trigger: match,
       suggestions,
       selectedIndex,
       loading: false,
-      stale: false,
       ghostText,
       argumentHint,
     });
@@ -609,7 +607,6 @@ function makeEmptyState(sessionId: string): TypeaheadSessionState {
     suggestions: [],
     selectedIndex: -1,
     loading: false,
-    stale: false,
     ghostText: null,
     argumentHint: null,
   };

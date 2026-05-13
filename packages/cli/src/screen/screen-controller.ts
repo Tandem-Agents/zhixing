@@ -225,6 +225,25 @@ export interface ScreenController {
   requestInputRepaint(): void;
 
   /**
+   * 段间空行幂等保证——caller 在"新段开始前"调用，确保 scroll 区上方至少 1 行
+   * 空行作为段间视觉间距。已有空行（trailingBlankRows ≥ 1）时 no-op；无空行
+   * 时补足；cursor 处于行中段时先收口再补。
+   *
+   * 设计意图：项目内存在隐含契约"每段负责自己段后空行"，但 LLM 输出段（mdStream
+   * 的 closeParagraphStream）只 emit 单 `\n`、不加段后空行；导致"LLM → user echo"
+   * 之间无视觉间距（典型现象：home 模式输入 /cle 回车后 chrome 上方无空行直接
+   * 紧贴 LLM 末尾消息）。本 API 把"段前空行确保"作为 caller 端的幂等工具，
+   * 不依赖上一段类型自报，靠 ScrollRegion 的视觉行级 tail state（currentRowHasVisible
+   * + trailingBlankRows）作事实源决定补几个 `\n`。
+   *
+   * 调用方典型场景：用户消息 echo 入口（`echoSubmittedDraft`）。未来若有其他
+   * "段入口"（外部 channel 消息推入 scrollback 等）需要相同语义可直接复用。
+   *
+   * 不动 chrome；不动 segment 状态；不触发 panel 重画。
+   */
+  ensureScrollLeadingBlank(): void;
+
+  /**
    * 开启可替换尾段——流式期反复 replace、闭合时 commit。
    *
    * 同步返回 handle；内部 begin task enqueue 到队列，按 cli writer 现有的
@@ -548,6 +567,27 @@ class ScreenControllerImpl implements ScreenController {
     this.enqueue(() => {
       if (this.scrollRegion.state.attached) {
         this.refreshChrome();
+      }
+    });
+  }
+
+  ensureScrollLeadingBlank(): void {
+    this.enqueue(() => {
+      if (!this.scrollRegion.state.attached) return;
+      const { currentRowHasVisible, trailingBlankRows } =
+        this.scrollRegion.state;
+      // 三态分支决定补几个 \n：
+      //   - cursor mid-line（行中段）：需 \n 收口当前行 + \n 加空行 = 2 个
+      //   - cursor 在新行起首但上一行有内容：仅补 1 个 \n 加空行
+      //   - cursor 在新行起首且上方已有空行：no-op（幂等保证）
+      let toEmit = "";
+      if (currentRowHasVisible) {
+        toEmit = "\n\n";
+      } else if (trailingBlankRows < 1) {
+        toEmit = "\n";
+      }
+      if (toEmit.length > 0) {
+        this.scrollRegion.appendInline(toEmit);
       }
     });
   }

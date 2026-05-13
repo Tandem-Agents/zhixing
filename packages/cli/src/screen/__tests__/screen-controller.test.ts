@@ -213,6 +213,72 @@ describe("ScreenController · 硬件光标可见性 SoT（chrome 模式永久隐
   });
 });
 
+describe("ScreenController · ensureScrollLeadingBlank（段间空行幂等保证）", () => {
+  // 修复 LLM → user echo 紧贴 bug 的核心 API。基于 ScrollRegion 视觉行级
+  // tail state 决定补 0/1/2 个 \n，幂等保护既有正确路径。
+
+  it("已有空行（trailingBlankRows ≥ 1）→ no-op，不写任何字节", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    // 写一段 + 空行 = trailingBlankRows=1
+    sc.writeScrollLine("hello");
+    sc.writeScrollLine("");
+    out.buffer = "";
+    sc.ensureScrollLeadingBlank();
+    // 不应有任何字节写出（光标定位是 repaintInputCursor 触发的，本 API 不调）
+    expect(out.buffer).toBe("");
+  });
+
+  it("无空行（trailingBlankRows = 0，上一行有内容）→ 补 1 个 \\n", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    sc.writeScrollLine("hello"); // trailingBlankRows=0
+    out.buffer = "";
+    sc.ensureScrollLeadingBlank();
+    // 应包含一个 \n（通过 appendInline 写入，附带 cursor 定位序列）
+    expect(out.buffer).toContain("\n");
+    // 不应有多个 \n（仅补 1 个）
+    expect(out.buffer.split("\n").length - 1).toBe(1);
+  });
+
+  it("cursor mid-line（currentRowHasVisible=true）→ 补 2 个 \\n（收口 + 空行）", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    sc.withScrollWrite((write) => write("partial chunk"));
+    out.buffer = "";
+    sc.ensureScrollLeadingBlank();
+    expect(out.buffer.split("\n").length - 1).toBe(2);
+  });
+
+  it("pre-attach 状态：ensureScrollLeadingBlank 不写字节（无 attached region 可写）", () => {
+    const { out, sc } = makeHarness();
+    sc.ensureScrollLeadingBlank();
+    expect(out.buffer).toBe("");
+  });
+
+  it("LLM 输出后调用 → 补 1 个 \\n（模拟 echoSubmittedDraft 真实场景）", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    // 模拟 LLM mdStream.end() 末尾 \n（trailingBlankRows=0 之后）
+    sc.withScrollWrite((write) => write("LLM 回答内容\n"));
+    out.buffer = "";
+    sc.ensureScrollLeadingBlank();
+    expect(out.buffer.split("\n").length - 1).toBe(1);
+  });
+
+  it("chalk.dim 包住 \\n 的 handler 输出后调用 → no-op（不 regression）", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    // 模拟 cliWriter.line(chalk.dim("对话历史已清空\n")) 路径
+    // writeScrollLine 会 ensure \n → 实际 emit 为 "\x1b[2m..\n\x1b[22m\n"
+    sc.writeScrollLine("\x1b[2m对话历史已清空\n\x1b[22m");
+    out.buffer = "";
+    sc.ensureScrollLeadingBlank();
+    // stripAnsi 后视觉行级判定：trailingBlankRows ≥ 1 → no-op
+    expect(out.buffer).toBe("");
+  });
+});
+
 describe("ScreenController · setStatusBar", () => {
   it("attach 之前 setStatusBar 只记录引用，attach 时被读到", () => {
     const { out, sc } = makeHarness({ rows: 10 });

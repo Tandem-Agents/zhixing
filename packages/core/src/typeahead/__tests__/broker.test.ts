@@ -9,7 +9,7 @@
  *   - Provider 优先级：priority 小的先匹配，首个命中胜出
  *   - Provider 异常：降级到空，不传染，发 provider-error 事件
  *   - Accept：SuggestionItem → AcceptResult（draft 替换 + cursor + execute）
- *   - MoveSelection：循环导航
+ *   - MoveSelection：clamp 非循环
  *   - onSessionChange：state 变更通知
  *   - EventSink：事件发射序列
  *   - 重复 provider id 抛 Error
@@ -162,6 +162,23 @@ describe("DefaultTypeaheadBroker — 会话生命周期", () => {
     const state = broker.getState(handle.id);
     expect(state?.activeProvider?.id).toBe("p");
     expect(state?.suggestions.length).toBe(1);
+  });
+
+  it("activeProvider 是 UI-facing 投影 —— 仅含 id，不暴露 provider 内部方法（封装边界）", () => {
+    // 类型层契约：TypeaheadSessionState.activeProvider: ActiveProviderInfo | null
+    // 仅含 { id }，不含 matchTrigger / query 等内部能力 —— 让 renderer 是被动观察者，
+    // 同时让 state 天然可序列化（未来跨进程 / Web 推送零成本）
+    const broker = new DefaultTypeaheadBroker();
+    broker.register(makeSyncProvider("p", 100, "/"));
+    const handle = broker.beginSession(makeCtx("/"));
+    const state = broker.getState(handle.id);
+    const ap = state?.activeProvider;
+    expect(ap).not.toBeNull();
+    expect(ap!.id).toBe("p");
+    // 运行时层确认：暴露字段仅有 id（不应包含 matchTrigger / query / priority）
+    expect(Object.keys(ap!)).toEqual(["id"]);
+    // 可序列化校验：JSON 往返无信息损失（plain data 不变量）
+    expect(JSON.parse(JSON.stringify(ap))).toEqual({ id: "p" });
   });
 
   it("cancelSession 删除 session 并发 session-ended 事件", () => {

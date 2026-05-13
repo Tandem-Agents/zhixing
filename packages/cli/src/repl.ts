@@ -80,6 +80,7 @@ import {
   type ScreenController,
 } from "./screen/index.js";
 import { detectTerminalCapability } from "./screen/terminal-capability.js";
+import { layout } from "./tui/style.js";
 import { InputController } from "./typeahead-input.js";
 import { renderHomeWelcome, renderStartupAdvisories } from "./workbench/index.js";
 import { renderFarewell } from "./farewell/index.js";
@@ -170,7 +171,7 @@ function buildSlashCommands(
       description: "显示帮助信息",
       handler: (_state) => {
         const commands = buildSlashCommands(rl, session, renderer, cliWriter);
-        cliWriter.line(`\n${chalk.bold("可用命令：")}`);
+        cliWriter.line(`\n${layout.contentPrefix}${chalk.bold("可用命令：")}`);
         for (const [cmd, { description }] of Object.entries(commands)) {
           cliWriter.line(
             `  ${chalk.cyan(cmd.padEnd(14))} ${chalk.dim(description)}`,
@@ -236,7 +237,7 @@ function buildSlashCommands(
         }
         state.turnCounter = 0;
         state.lastToolEndCount = 0;
-        cliWriter.line(chalk.dim("对话历史已清空\n"));
+        cliWriter.line(chalk.dim(`${layout.contentPrefix}对话历史已清空\n`));
       },
     },
     "/model": {
@@ -435,15 +436,15 @@ function buildSlashCommands(
       description: "为当前会话命名",
       handler: async (state, args) => {
         if (!args.trim()) {
-          cliWriter.line(chalk.yellow("用法: /name <名称>\n"));
+          cliWriter.line(chalk.yellow(`${layout.contentPrefix}用法: /name <名称>\n`));
           return;
         }
         if (!state.conversationId) {
-          cliWriter.line(chalk.yellow("当前会话尚未保存\n"));
+          cliWriter.line(chalk.yellow(`${layout.contentPrefix}当前会话尚未保存\n`));
           return;
         }
         await state.convRepo.rename(state.conversationId, args.trim());
-        cliWriter.line(chalk.dim(`会话已命名为: ${args.trim()}\n`));
+        cliWriter.line(chalk.dim(`${layout.contentPrefix}会话已命名为: ${args.trim()}\n`));
       },
     },
     "/me": {
@@ -1308,7 +1309,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     const legacy = slashCommands[cmd!];
     if (!legacy) {
       cliWriter.line(
-        chalk.yellow(`未知命令: ${cmd}`) +
+        chalk.yellow(`${layout.contentPrefix}未知命令: ${cmd}`) +
           chalk.dim("  输入 /help 查看帮助\n"),
       );
       return true;
@@ -1348,7 +1349,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
           continue;
         }
         if (d.kind === "error") {
-          cliWriter.line(chalk.red(`命令执行失败: ${d.error.message}\n`));
+          cliWriter.line(chalk.red(`${layout.contentPrefix}命令执行失败: ${d.error.message}\n`));
           continue;
         }
         if (d.kind === "hybrid") {

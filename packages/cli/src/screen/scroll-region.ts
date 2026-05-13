@@ -31,6 +31,7 @@
  *   紧贴前序内容尾——视觉上无断层。
  */
 
+import { stripAnsi } from "../tui/ansi.js";
 import { stringWidth } from "../tui/line-width.js";
 
 const ESC = "\x1b";
@@ -69,6 +70,20 @@ export interface ScrollRegionState {
   readonly committedLogicalRows: number;
   readonly attached: boolean;
   readonly suspended: boolean;
+  /**
+   * 当前 cursor 所在物理行是否已含可见字符（非 \n 非 ANSI）。
+   * `false` 表示 cursor 在某行起首尚未写入可见内容（典型态：刚写完 \n）。
+   * caller（如 ScreenController.ensureScrollLeadingBlank）用此字段配合
+   * trailingBlankRows 决定段间空行是否需要补。
+   */
+  readonly currentRowHasVisible: boolean;
+  /**
+   * cursor 上方连续空行数（不含 cursor 所在当前行）。
+   * 0 表示上一行有可见内容（无空行隔离）；≥1 表示上方有空行可作段间间距。
+   * 与 currentRowHasVisible 联合表达视觉行级 tail 状态——为"段间空行幂等
+   * 保证"提供事实依据，避免 caller 误判段间间距而引起 regression。
+   */
+  readonly trailingBlankRows: number;
 }
 
 /**
@@ -115,6 +130,26 @@ export class ScrollRegion {
   private attached = false;
   private suspended = false;
   private activeHandle: SegmentHandleImpl | null = null;
+  /**
+   * 视觉行级 tail state —— 配合 ScreenController.ensureScrollLeadingBlank
+   * 实现"段间空行幂等保证"。两字段联合表达"cursor 当前位置与上方空行情况"，
+   * 等价于 stripAnsi 后的字节流末尾视觉行状态：
+   *   - currentRowHasVisible=true：cursor 在某行中段，行已有可见字符
+   *   - currentRowHasVisible=false + trailingBlankRows=0：cursor 在新行起首，上一行有内容（无段间空行）
+   *   - currentRowHasVisible=false + trailingBlankRows≥1：cursor 在新行起首，上方至少 1 行空行
+   *
+   * 初始 trailingBlankRows=1（不是 0）：region 新建时 cursor 在 row 1，没有
+   * 实际"上一行"概念；初始为 1 让首次 ensureScrollLeadingBlank no-op，避免
+   * 在 region 顶端插无意义空行。
+   *
+   * 维护点：所有"写 region 内容"的方法在 writeOut 之后调一次 updateLineState
+   * 传入实际 emit 的字节流；stripAnsi 后逐字符演化状态机。
+   * **不维护点**：pushTopToScrollback（协议级 \n 触发硬件滚动，不代表内容追加）、
+   * 各 chromeBytes 写入路径（chrome 区在 region 外）、cursorToSeq / clearLineSeq
+   * 等纯 ANSI 控制序列（stripAnsi 自动剥掉，no-op）。
+   */
+  private currentRowHasVisible = false;
+  private trailingBlankRows = 1;
   private readonly writeOut: (chunk: string) => void;
 
   constructor(opts: ScrollRegionOptions) {
@@ -139,7 +174,36 @@ export class ScrollRegion {
       committedLogicalRows: this.committedLogicalRows,
       attached: this.attached,
       suspended: this.suspended,
+      currentRowHasVisible: this.currentRowHasVisible,
+      trailingBlankRows: this.trailingBlankRows,
     };
+  }
+
+  /**
+   * 视觉行级 tail state 更新——传入实际 emit 的字节流，stripAnsi 后逐字符演化。
+   * 所有"写 region 内容"路径（appendInline / writeScrollLine / replaceSegment /
+   * beginReplaceableSegment 的 fresh-line emit）在 writeOut 之后调用一次。
+   *
+   * 字符级语义：
+   *   - `\n`：当前行收口。若 currentRowHasVisible→trailingBlankRows=0；否则
+   *     trailingBlankRows++。cursor 进入新行，currentRowHasVisible=false。
+   *   - 可见字符：currentRowHasVisible=true（当前行染色为"有内容"）。
+   *   - ANSI 控制：stripAnsi 已剥离，不会进入本循环。
+   */
+  private updateLineState(emittedContent: string): void {
+    const visible = stripAnsi(emittedContent);
+    for (const ch of visible) {
+      if (ch === "\n") {
+        if (this.currentRowHasVisible) {
+          this.trailingBlankRows = 0;
+        } else {
+          this.trailingBlankRows++;
+        }
+        this.currentRowHasVisible = false;
+      } else {
+        this.currentRowHasVisible = true;
+      }
+    }
   }
 
   /**
@@ -248,6 +312,7 @@ export class ScrollRegion {
 
     this.regionTailCol = 1;
     this.applyScrollEvent(N, regionTailRow_post);
+    this.updateLineState(writeStr);
   }
 
   /**
@@ -286,6 +351,7 @@ export class ScrollRegion {
       this.regionTailCol = stringWidth(chunk.slice(lastNlIdx + 1)) + 1;
     }
     this.applyScrollEvent(N, regionTailRow_post);
+    this.updateLineState(chunk);
   }
 
   /**
@@ -317,6 +383,7 @@ export class ScrollRegion {
         N === 0 ? this.regionTailRow + 1 : this.scrollBottom;
       this.regionTailCol = 1;
       this.applyScrollEvent(N, regionTailRow_post);
+      this.updateLineState("\n");
     }
 
     this.clearSegmentState();
@@ -423,6 +490,7 @@ export class ScrollRegion {
     this.segmentRemainingRows = M_prime;
     this.regionTailCol = stringWidth(lastLine) + 1;
     this.applyScrollEvent(0, writeBottomRow);
+    this.updateLineState(slicedText);
   }
 
   /**
@@ -472,6 +540,7 @@ export class ScrollRegion {
     this.segmentRemainingRows =
       this.segmentBottomRow - this.segmentTopRow + 1;
     this.committedLogicalRows += M_prime - this.segmentRemainingRows;
+    this.updateLineState(slicedText);
   }
 
   /**
@@ -575,6 +644,12 @@ export class ScrollRegion {
     this.regionTailRow = 1;
     this.regionTailCol = 1;
     this.regionFilledRows = 0;
+    // 视觉行级 tail state 重置 —— 与 region 几何状态同生命周期：
+    // attach/detach/suspend/resume/shutdown/handleResize 全经此重置。
+    // 初始 trailingBlankRows=1 让 region 顶端的 ensureScrollLeadingBlank no-op
+    // （region 顶等价于"上方无限空"，无需补段间空行）。
+    this.currentRowHasVisible = false;
+    this.trailingBlankRows = 1;
     this.clearSegmentState();
   }
 
@@ -596,6 +671,14 @@ export class ScrollRegion {
     this.writeOut(out);
     const regionTailRow_post = Math.max(1, this.regionTailRow - pushRows);
     this.applyScrollEvent(pushRows, regionTailRow_post);
+    // **不更新 line state**：协议级 \n 触发硬件滚动，且 caller（setChromeHeight）
+    // 在本方法返回后会再次 cursorToSeq 把 cursor 跳到 regionTailRow_post（位于
+    // shifted-up content 的边界行），cursor 最终位置是"fresh 空行 + 上方紧邻 content"
+    // —— 等价于 push 前的 (false, 0) state，**保持不变即正确**。
+    //
+    // 早期试过 "trailingBlankRows = max(.., 1)" 的乐观更新——错误：把上方判定为有空行，
+    // 导致 echoSubmittedDraft 的 ensureScrollLeadingBlank no-op，从而"LLM 满 region +
+    // 用户输入 `/cmd` 触发 panel push + 回车"路径下用户行紧贴 LLM 无空行（实测 bug）。
   }
 
   /**

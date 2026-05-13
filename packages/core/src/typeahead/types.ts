@@ -629,6 +629,24 @@ export interface ArgumentHint {
 }
 
 /**
+ * 当前激活 provider 的 UI-facing 投影 —— 仅暴露 caller 真实需要的字段，
+ * 不携带 provider 的内部方法（matchTrigger / query）和实现细节。
+ *
+ * 设计动机：
+ *   1. 封装边界 —— renderer 是被动观察者，不应有调 provider.query 等的能力
+ *   2. 可序列化 —— 类型仅含 plain data，未来跨进程 / Web 推送 session state 时
+ *      天然可走 JSON 序列化，不需要再做投影/裁剪
+ *   3. 类型签名 = 真实意图 —— 与 broker.accept 改 state-纯同性质架构对齐：
+ *      签名暴露的能力 = caller 真实需要的能力，杜绝隐式扩权
+ *
+ * 未来若 renderer 需要 provider 的更多 UI 元数据（display name / icon 等），
+ * 在本接口加字段即可，由 broker 在 setSessionState 时按需投影注入。
+ */
+export interface ActiveProviderInfo {
+  readonly id: string;
+}
+
+/**
  * 一次输入会话的派生状态 —— 由 broker 维护，发给 renderer。
  *
  * **零键执行不变量**（spec §6.5）：
@@ -637,8 +655,8 @@ export interface ArgumentHint {
 export interface TypeaheadSessionState {
   readonly sessionId: string;
 
-  /** 当前激活的 provider；null 表示无 trigger 命中 */
-  readonly activeProvider: SuggestionProvider | null;
+  /** 当前激活的 provider（仅 UI-facing 信息）；null 表示无 trigger 命中 */
+  readonly activeProvider: ActiveProviderInfo | null;
 
   /** 当前触发信息；null 表示无 trigger */
   readonly trigger: TriggerMatch | null;
@@ -651,9 +669,6 @@ export interface TypeaheadSessionState {
 
   /** 是否在 async 查询中（显示 loading） */
   readonly loading: boolean;
-
-  /** 当前 suggestions 是否是过期结果（很少为 true，abort 正常丢弃） */
-  readonly stale: boolean;
 
   /** Ghost text，null 表示无（可与 suggestions 同时存在） */
   readonly ghostText: GhostText | null;

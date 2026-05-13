@@ -130,12 +130,11 @@ function makeState(
 ): TypeaheadSessionState {
   return {
     sessionId: "test-session",
-    activeProvider: dummyProvider,
+    activeProvider: { id: dummyProvider.id },
     trigger: makeTrigger(),
     suggestions: [],
     selectedIndex: -1,
     loading: false,
-    stale: false,
     ghostText: null,
     argumentHint: null,
     ...partial,

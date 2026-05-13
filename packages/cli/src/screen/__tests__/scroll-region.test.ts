@@ -44,6 +44,144 @@ describe("ScrollRegion · 构造与初始状态", () => {
     expect(s.segmentRemainingRows).toBeNull();
     expect(s.committedLogicalRows).toBe(0);
   });
+
+  it("初始视觉行级 tail state：currentRowHasVisible=false, trailingBlankRows=1（fresh region 等价上方无限空）", () => {
+    const { region } = makeRegion();
+    const s = region.state;
+    expect(s.currentRowHasVisible).toBe(false);
+    expect(s.trailingBlankRows).toBe(1);
+  });
+});
+
+describe("ScrollRegion · 视觉行级 tail state（段间空行幂等保证基础）", () => {
+  it("writeScrollLine 写非空内容后：currentRowHasVisible=false, trailingBlankRows=0（行已收口，上一行有内容）", () => {
+    const { region } = makeRegion();
+    region.attachInput(0, "");
+    region.writeScrollLine("hello");
+    const s = region.state;
+    expect(s.currentRowHasVisible).toBe(false);
+    expect(s.trailingBlankRows).toBe(0);
+  });
+
+  it("writeScrollLine 写空字符串后：currentRowHasVisible=false, trailingBlankRows+=1（写了空行）", () => {
+    const { region } = makeRegion();
+    region.attachInput(0, "");
+    region.writeScrollLine("hello"); // trailingBlankRows = 0
+    region.writeScrollLine(""); // 空行 → trailingBlankRows = 1
+    expect(region.state.trailingBlankRows).toBe(1);
+    region.writeScrollLine(""); // 再空行 → trailingBlankRows = 2
+    expect(region.state.trailingBlankRows).toBe(2);
+  });
+
+  it("appendInline 写普通文本：currentRowHasVisible=true（cursor 在行中段）", () => {
+    const { region } = makeRegion();
+    region.attachInput(0, "");
+    region.appendInline("partial");
+    const s = region.state;
+    expect(s.currentRowHasVisible).toBe(true);
+    expect(s.trailingBlankRows).toBe(1); // 初始值未变（没遇到 \n）
+  });
+
+  it("appendInline 写文本 + \\n：currentRowHasVisible=false, trailingBlankRows=0", () => {
+    const { region } = makeRegion();
+    region.attachInput(0, "");
+    region.appendInline("text\n");
+    const s = region.state;
+    expect(s.currentRowHasVisible).toBe(false);
+    expect(s.trailingBlankRows).toBe(0);
+  });
+
+  it("appendInline 写文本 + \\n\\n：trailingBlankRows=1（中间一行空）", () => {
+    const { region } = makeRegion();
+    region.attachInput(0, "");
+    region.appendInline("text\n\n");
+    expect(region.state.trailingBlankRows).toBe(1);
+  });
+
+  it("ANSI 嵌入 \\n 之间不算可见内容（修复 chalk.dim 包住 \\n 的 case）", () => {
+    // 模拟 cliWriter.line(chalk.dim("对话历史已清空\n")) 实际 emit 的字节
+    const { region } = makeRegion();
+    region.attachInput(0, "");
+    region.appendInline("text\n"); // baseline: trailingBlankRows=0
+    // emit "\x1b[2m...\n\x1b[22m\n" —— 两个 \n 之间夹 SGR reset
+    region.appendInline("\x1b[2mclear\n\x1b[22m\n");
+    // stripAnsi 后："clear\n\n"，trailingBlankRows 应为 1（中间空行）
+    expect(region.state.trailingBlankRows).toBe(1);
+    expect(region.state.currentRowHasVisible).toBe(false);
+  });
+
+  it("写可见字符重置：trailingBlankRows 归 0（cursor 当前行染色为有内容）", () => {
+    const { region } = makeRegion();
+    region.attachInput(0, "");
+    region.writeScrollLine(""); // trailingBlankRows=1
+    region.appendInline("new content");
+    expect(region.state.currentRowHasVisible).toBe(true);
+    // trailingBlankRows 不变（state 描述的是 cursor 上方，"新写入的可见字符"不
+    // 影响上方计数——只有遇到 \n 才决定上方那行算不算空）
+  });
+
+  it("可见内容后 \\n：trailingBlankRows 归 0（行有内容）", () => {
+    const { region } = makeRegion();
+    region.attachInput(0, "");
+    region.writeScrollLine(""); // trailingBlankRows=1
+    region.appendInline("content\n"); // 这个 \n 收口"有内容"的行，归 0
+    expect(region.state.trailingBlankRows).toBe(0);
+  });
+
+  it("detachInput 后重新 attachInput：tail state 重置为初始", () => {
+    const { region } = makeRegion();
+    region.attachInput(0, "");
+    region.writeScrollLine("text");
+    region.writeScrollLine("");
+    region.writeScrollLine(""); // trailingBlankRows=2
+    region.detachInput();
+    region.attachInput(0, "");
+    expect(region.state.currentRowHasVisible).toBe(false);
+    expect(region.state.trailingBlankRows).toBe(1); // reset 到初始
+  });
+
+  it("suspend / resume：tail state 重置", () => {
+    const { region } = makeRegion();
+    region.attachInput(0, "");
+    region.appendInline("mid-line content"); // currentRowHasVisible=true
+    region.suspend();
+    expect(region.state.currentRowHasVisible).toBe(false);
+    expect(region.state.trailingBlankRows).toBe(1);
+    region.resume(0, "");
+    expect(region.state.currentRowHasVisible).toBe(false);
+    expect(region.state.trailingBlankRows).toBe(1);
+  });
+
+  it("setChromeHeight 增高触发 pushTopToScrollback：tail state 保持不变（cursor 最终落在 content 边界）", () => {
+    // 模拟 region 满 + chrome 增高 surplus 不足 → pushTopToScrollback 路径
+    //
+    // 协议级 push 不更新 state 的物理依据：
+    //   push 在 scrollBottom_old emit \n × N → 终端硬件滚动 → 然后 setChromeHeight
+    //   再次 cursorToSeq 把 cursor 跳到 regionTailRow_post（= 原 tail - pushRows），
+    //   位于 shifted-up content 的边界行 —— 等价于 push 前的"fresh 空行 + 上方紧邻
+    //   content" 状态，无需 state 调整。
+    //
+    // 反例（曾试过的错误设计）：push 末尾乐观地 trailingBlankRows = max(.., 1)，
+    // 会误判"上方有空行" → echoSubmittedDraft 的 ensureScrollLeadingBlank no-op →
+    // 用户行紧贴 LLM 末尾无空行（user-visible bug）。
+    const { region } = makeRegion({ rows: 10 });
+    region.attachInput(2, "<chrome>");
+    for (let i = 0; i < 8; i++) {
+      region.appendInline(`line${i}\n`);
+    }
+    const beforeState = {
+      currentRowHasVisible: region.state.currentRowHasVisible,
+      trailingBlankRows: region.state.trailingBlankRows,
+    };
+    expect(beforeState).toEqual({ currentRowHasVisible: false, trailingBlankRows: 0 });
+
+    region.setChromeHeight(5, "<chrome-new>");
+
+    // 关键不变量：push 路径不破坏 line state（保留 push 前的 (false, 0) state，
+    // 让后续 ensureScrollLeadingBlank 能正确判定"无空行"补 \n）
+    expect(region.state.currentRowHasVisible).toBe(false);
+    expect(region.state.trailingBlankRows).toBe(0);
+  });
 });
 
 describe("ScrollRegion · attachInput", () => {

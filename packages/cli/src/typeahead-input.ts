@@ -764,12 +764,18 @@ export class InputController implements InputRegion {
   private echoSubmittedDraft(rawDraft: string): void {
     const echoLines = this.buildHistoryEchoLines(rawDraft);
     if (echoLines.length === 0) return;
+    // 段前空行幂等保证：处理"上一段不带段后空行"的场景（典型：LLM 输出段
+    // mdStream.end 仅 emit 单 \n，不含段间空行）。ScreenController 端按 scroll
+    // region 视觉行级 tail state 决定补 0/1/2 个 \n；上一段已带空行时 no-op，
+    // 不破坏 welcome→user、handler→user 等已正常的路径。
+    this.screen.ensureScrollLeadingBlank();
     this.screen.withScrollWrite((write) => {
       for (const line of echoLines) {
         write(line);
         write("\n");
       }
-      // 段间空行——用户消息和后续 AI 回复 / 反馈之间留 1 行视觉间距
+      // 段后空行——保留既有契约让本段对后续段也提供间距，与 ensureScrollLeadingBlank
+      // 形成双向保护（既保自己上方、又给下段留段前空间）
       write("\n");
     });
   }
