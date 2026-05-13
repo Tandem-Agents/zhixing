@@ -456,22 +456,30 @@ function buildSafety(): string {
 
 // ─── Dynamic: Environment ───
 
+/**
+ * Working directory 字段语义：用户心智模型里"工作目录"就是用户配置的工作区
+ * （workspace）—— 用户配置 workspace 的目的就是为了让它成为工作目录。本字段
+ * 优先使用 workspace 路径；workspace 未配置时 fallback 到 cwd（cli 启动位置）。
+ *
+ * **不暴露 `process.cwd()` 给 LLM**：cwd 是 cli 实现细节（用户在哪里启动 cli），
+ * 与用户认知的"工作目录"无关。同时暴露 cwd 与 workspace 双字段会让 LLM 在中
+ * 英文翻译时（中文"工作目录" ↔ 英文 "Working directory"）选错路径——单一字段
+ * 消除歧义，与 chrome welcome 的"工作目录 {workspaceRoot}"用户视角一致。
+ */
 function buildEnvironment(ctx: PromptBuildContext): string {
-  const lines = [
-    "## Environment",
-    `- Working directory: ${ctx.cwd}`,
-  ];
+  const lines = ["## Environment"];
+
+  const workingDirectory = ctx.workspace ?? ctx.cwd;
+  lines.push(`- Working directory: ${workingDirectory}`);
 
   if (ctx.workspace) {
-    lines.push(`- Workspace: ${ctx.workspace}`);
-    lines.push("- The workspace is the user's trusted zone — routine file reads/writes inside it are low-impact; operations outside require confirmation");
-    if (ctx.workspace !== ctx.cwd) {
-      lines.push("- Note: workspace and working directory differ — workspace is the security boundary, working directory is where the CLI was launched");
-    }
+    lines.push("- This is the user's configured trusted zone — routine file reads/writes inside are low-impact; operations outside (other system paths, user home, etc.) require explicit user confirmation");
     if (ctx.globalConfigPath) {
-      lines.push(`- Workspace is configured in: ${ctx.globalConfigPath} (field: workspace.root)`);
-      lines.push("- You CAN help the user change the workspace by editing that config file — the security system will ask the user to confirm (this confirmation cannot be skipped). Changes take effect on next session restart.");
+      lines.push(`- Configured in: ${ctx.globalConfigPath} (field: workspace.root)`);
+      lines.push("- You CAN help the user change the working directory by editing that config file — the security system will ask the user to confirm (this confirmation cannot be skipped). Changes take effect on next session restart.");
     }
+  } else {
+    lines.push("- No workspace is configured; the working directory defaults to the CLI launch location and serves as the trusted zone.");
   }
 
   // 当前时间已移至 per-turn <turn-context> 注入(TimeProvider),不再 session-level 冻结

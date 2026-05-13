@@ -153,6 +153,56 @@ describe("buildSystemPrompt", () => {
     expect(prompt).not.toContain("Shell:");
   });
 
+  describe("Working directory 字段语义（workspace > cwd 优先）", () => {
+    // 架构契约（单一字段语义）：用户配置 workspace 后,workspace 就是用户认知的
+    // "工作目录"。chrome welcome 也将其标为"工作目录"。LLM 收到的 "Working
+    // directory" 必须与用户视角一致——指向 workspace，避免中英文翻译
+    // （"工作目录" ↔ "Working directory"）让 LLM 错位到 cwd。
+
+    it("配置了 workspace 时,Working directory 指向 workspace 而非 cwd", () => {
+      const prompt = buildSystemPrompt({
+        ...ctx,
+        cwd: "/where/cli/launched",
+        workspace: "/user/workspace",
+      });
+      expect(prompt).toContain("Working directory: /user/workspace");
+      // 反向断言:cwd 不应作为"工作目录"暴露给 LLM
+      expect(prompt).not.toContain("Working directory: /where/cli/launched");
+    });
+
+    it("未配置 workspace 时,Working directory fallback 到 cwd", () => {
+      const prompt = buildSystemPrompt({ ...ctx, cwd: "/just/cwd" });
+      expect(prompt).toContain("Working directory: /just/cwd");
+    });
+
+    it("system prompt 不暴露 cwd 字段—— cwd 是 cli 实现细节,LLM 不需知道", () => {
+      // 即使 workspace 与 cwd 不同,prompt 也不应该把 cwd 作为独立字段告诉 LLM。
+      // 这是修复"用户问'工作目录里有什么',LLM 用 cwd 而非 workspace"bug 的核心契约。
+      const prompt = buildSystemPrompt({
+        ...ctx,
+        cwd: "/where/cli/launched",
+        workspace: "/user/workspace",
+      });
+      // 不出现单独的 cwd 字段(无论以何种名义)
+      expect(prompt).not.toContain("/where/cli/launched");
+      // 不出现描述两者差异的旧 Note
+      expect(prompt).not.toContain("workspace and working directory differ");
+    });
+
+    it("workspace === cwd 场景行为不变(用户在工作区内启动 cli)", () => {
+      const samePath = "/user/workspace";
+      const prompt = buildSystemPrompt({
+        ...ctx,
+        cwd: samePath,
+        workspace: samePath,
+      });
+      expect(prompt).toContain(`Working directory: ${samePath}`);
+      // 同一路径不应出现两次(消除"Working directory" + "Workspace" 双字段冗余)
+      const occurrences = prompt.split(samePath).length - 1;
+      expect(occurrences).toBe(1);
+    });
+  });
+
   describe("工具段动态适应", () => {
     it("仅有 read 工具时，工具段只包含 read", () => {
       const prompt = buildSystemPrompt({ ...ctx, tools: [stubTool("read")] });

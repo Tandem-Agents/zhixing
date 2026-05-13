@@ -257,6 +257,9 @@ async function runChildAgentInner(
           riskMaxTokens: opts.riskMaxTokens,
           watchdog: { idleTimeoutMs: budget.llmIdleTimeoutMs, warnThresholdRatio: 0.5 },
           wallClockTimeoutMs: budget.wallClockTimeoutMs,
+          // 子 agent 与父 agent 共享同一 workspace —— 工具执行目录与
+          // system prompt "Working directory" 字段对齐
+          workingDirectory: opts.workspace ?? process.cwd(),
         }),
     );
   } catch (loopError) {

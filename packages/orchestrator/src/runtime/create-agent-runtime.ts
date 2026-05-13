@@ -955,7 +955,11 @@ export async function createAgentRuntime(
           messages: loopMessages,
           systemPrompt,
           eventBus,
-          workingDirectory: process.cwd(),
+          // 工具执行的工作目录：与 system prompt 暴露给 LLM 的 "Working directory"
+          // 字段保持一致——workspace 配置存在时用 workspace，否则 fallback 到 cwd。
+          // 让 LLM 视图（用户配置的工作区即工作目录）与工具实际执行目录对齐，
+          // 消除"LLM 知道 workspace 是 D:\，但 Bash dir 在 E:\ 执行"的语义错位。
+          workingDirectory: workspace.path ?? process.cwd(),
           abortSignal: params.abortSignal,
           // watchdog fallback 单点: 调用边界注入默认值, agent-loop 内部不二次 fallback
           // 保证调用方显式传入的 policy(含禁用 idle-timer 的 `{ idleTimeoutMs: 0 }`)一路透传
