@@ -309,17 +309,32 @@ function buildTitle(
 
 /**
  * 空态 chrome —— body 首行（argumentHint / loading / "未找到匹配项"）+ padding
- * 到与 active chrome body 同恒定行数 + 可选 Esc 提示。
+ * 到与 active chrome body 同恒定行数 + 永远 1 行 Esc 提示。
  *
  * 高度恒定不变量（与 renderActiveChrome 对齐）：
- *   chrome body 长度严格 = `maxVisibleItems + 2`（首行实质内容 + 后续空行 padding）。
- *   这是消除"有候选 → 无候选"切换时面板高度跳变的必要条件 —— 用户输入过滤候选
- *   过程中频繁触发空态（如打字超过任何前缀匹配长度），若空态 body 仅 1 行，
- *   面板会从 maxVisibleItems+2 行骤缩到 1 行，视觉抖动剧烈。
+ *   - chrome body 行数严格 = `maxVisibleItems + 2`（首行实质内容 + 后续空行
+ *     padding），与 active 对齐
+ *   - meta 永远 1 行（"Esc 清空"），与 active 路径 meta 行数对齐
+ *   → 全 visible empty state 总行数（chrome + meta）严格相等于 active 状态
+ *     的对应行数（在 argumentHint 缺席场景下完全相等；含 argumentHint 场景
+ *     active 路径 meta 多 1 行 argHint，见方法 docstring "已知差异" 段）
  *
- * 首行内容（不动现有逻辑）：argumentHint > loading > "未找到匹配项" 的优先级，
- * "未找到匹配项"分支额外加 Esc meta 提示（meta 行抖动不在本恒定契约内，由
- * state 决定）。
+ * 这一不变量在 broker 异步路径下尤为关键：trigger 首次出现 emit loading 态、
+ * resolve 后 emit canonical 态，两次 emit 之间 panel 总行数不变 →
+ * `setChromeHeight` 走 transition=same 路径，不触发 DECSTBM 重排 → 视觉零跳变。
+ *
+ * 首行内容：argumentHint > loading > "未找到匹配项" 的优先级。
+ *
+ * ─── 已知差异（ArgumentProvider 场景，待后续重构）───
+ *
+ * 当 `state.argumentHint` 存在时，empty 路径把 hint 放在 body（"应该输入什么"
+ * 的引导提示），active 路径把 hint 放在 meta（参数上下文标签）—— 位置不同，
+ * 但行数不同：empty meta=1（Esc），active meta=2（argHint + shortcut）。
+ * 在 ArgumentProvider session 内当候选数从 N>0 跌到 0 时 panel 缩 1 行。
+ *
+ * 此差异**不影响 FileProvider / CommandProvider 等 argHint=null 场景**（实际
+ * 用户报告抖动的 bug case）。argHint 统一放置策略（放进 chrome title / 全
+ * 移到 meta / 全移到 body）涉及 UI 信息架构决策，留作独立重构。
  */
 function renderEmptyChrome(
   state: TypeaheadSessionState,
@@ -330,7 +345,6 @@ function renderEmptyChrome(
   theme: TypeaheadTheme,
 ): string[] {
   const body: BodyLine[] = [];
-  const meta: string[] = [];
 
   if (state.argumentHint && !state.loading) {
     body.push(
@@ -340,13 +354,19 @@ function renderEmptyChrome(
     body.push(theme.loading(clampLine("正在加载候选…", contentBudget)));
   } else {
     body.push(theme.emptyHint(clampLine("未找到匹配项", contentBudget)));
-    meta.push(`  ${theme.hint(clampLine("Esc 清空", frameWidth - 2))}`);
   }
 
   // padding 空行到 maxVisibleItems + 2 行，与 active chrome body 严格对齐
   while (body.length < maxVisibleItems + 2) {
     body.push("");
   }
+
+  // 永远 1 行 meta "Esc 清空"——empty 态下用户唯一可执行动作。与 active 路径
+  // 的 shortcut meta（"↑↓ 选择 · Enter 接受 · Tab 接受 · Esc 清空"，1 行）对齐
+  // 行数，让 empty ↔ active 切换不引入高度跳变。
+  const meta: string[] = [
+    `  ${theme.hint(clampLine("Esc 清空", frameWidth - 2))}`,
+  ];
 
   return [
     ...renderChrome({
@@ -363,17 +383,26 @@ function renderEmptyChrome(
 /**
  * 活跃 chrome —— 顶 slot + 候选行（选中行点阵高亮）+ 底 slot；meta 行在 chrome 外。
  *
- * ─── 高度恒定不变量 ───
+ * ─── 全 visible state 总行数恒等不变量 ───
  *
- * chrome body 长度严格恒定为 `maxVisibleItems + 2`（1 行顶 slot + maxVisibleItems
- * 行候选区 + 1 行底 slot），与 count / selectedIndex / isScrollable **无关**。
- * 这是面板"不抖动"的核心契约：
+ * panel 总行数（chrome + meta）在所有 visible state（loading / empty no-match /
+ * argHint empty / active 任意 count）下严格相等（FileProvider / CommandProvider
+ * 等 argHint=null 场景；argHint=set 的 ArgumentProvider 场景见 renderEmptyChrome
+ * docstring "已知差异" 段）。
  *
- *   - 用户输入 `/` 后边打字边过滤，候选数 N 跟着字符变化（1→5→2→8→0...）
- *   - 旧实现 body 长度 = 候选数（不 scrollable）或 maxVisible+2（scrollable），
- *     N 跨过 maxVisible 阈值时面板高度跳变；N 在阈值内变化时面板高度逐行抖
- *   - 新实现 body 永远是 `maxVisibleItems + 2` 行，PanelRenderer 原地重绘
- *     只改字符内容，不改光标移动高度 → 视觉绝对稳定
+ * 构成：
+ *
+ *   chrome body 行数 = `maxVisibleItems + 2`（1 行顶 slot + maxVisibleItems 行
+ *     候选区 + 1 行底 slot），与 count / selectedIndex / isScrollable **无关**。
+ *   chrome 自带顶 / 底框线 2 行 → chrome 总 = maxVisibleItems + 4。
+ *
+ *   meta 行数 = 1（active 路径的 shortcut "↑↓ 选择 · Enter 接受 · Tab 接受 ·
+ *     Esc 清空"；empty 路径对齐为 "Esc 清空"）+ 可选 argumentHint 1 行。
+ *
+ * 这一不变量与 broker emit 策略（详见 broker.runQuery docstring "emit 策略"）
+ * 共同保证：每次 emit 触发的 paint chromeHeight 严格相等 → `setChromeHeight`
+ * transition=same 不触发 DECSTBM 重排，视觉零跳变。两者缺一会导致 panel 在
+ * typing 期间 ±1 行震荡。
  *
  * Slot 占位策略：
  *   - scrollable：顶/底 slot 渲染滚动指示（`↑ 上方还有 N 条` / `↓ 下方还有 N 条`
@@ -383,9 +412,6 @@ function renderEmptyChrome(
  *
  * 候选区 padding 策略：实际渲染候选数 < maxVisibleItems 时，末尾用空 BodyLine
  * 填充到 maxVisibleItems 行。
- *
- * meta 行（chrome 外的 argumentHint / 快捷键提示）不在此恒定契约内，由 state
- * 决定（argumentHint 是 state-level 不随候选过滤变化，仅在切换 trigger 时变）。
  */
 function renderActiveChrome(
   state: TypeaheadSessionState,

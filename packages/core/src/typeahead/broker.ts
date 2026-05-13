@@ -194,8 +194,10 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
       });
     }
 
-    // 启动新的 query（同步或异步）
-    this.runQuery(session, provider, match);
+    // 启动新的 query（同步或异步）—— 传入 isNewTrigger 决定 async 路径是否需要
+    // emit 初始 loading 态（仅 trigger 首次出现时；同 trigger 续 typing 不 emit，
+    // 保留前次 canonical state，由 query resolve 时统一 swap）。
+    this.runQuery(session, provider, match, isNewTrigger);
   }
 
   /** 找第一个 matchTrigger 返回非 null 的 provider */
@@ -222,13 +224,51 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
 
   /**
    * 执行一次 query。
-   * - 同步结果立即更新 session
-   * - 异步结果用 AbortController + query token 双重 stale 检查
+   *
+   * ─── session state 双语义分层 ───
+   *
+   * `TypeaheadSessionState` 内部承载两类语义独立的字段：
+   *
+   *   **trigger 几何字段**（`trigger` / `activeProvider`）：表达"当前 draft 的
+   *   typeahead token 边界"。accept() 计算 replacement 几何依赖 tokenStart /
+   *   tokenEnd；UI 渲染依赖 activeProvider id。**每次 updateInput 必须立即反映
+   *   新鲜值**——否则 stale typing 期间用户 accept 会产生几何错位的替换。
+   *
+   *   **canonical 查询结果字段**（`suggestions` / `selectedIndex` / `ghostText` /
+   *   `argumentHint`）：表达"当前 trigger 下最近一次确定查询结果"。query
+   *   revalidate 飞行期间**保留前次值**（stale-while-revalidate）让 UI 继续
+   *   展示稳定内容，由 query resolve 时一次性 swap。
+   *
+   * 两类字段合并在同一个 state 对象 emit，但更新频率不同：trigger 几何每次
+   * updateInput 都新鲜，canonical 仅 resolve / trigger 首次出现时变化。
+   *
+   * ─── emit 策略 ───
+   *
+   *   - **同步 provider**：1 次 `setLoadingFinished` emit（trigger + canonical
+   *     同时新鲜，原子）。
+   *   - **异步 provider，trigger 首次出现**（`isNewTrigger=true`，panel 从无到
+   *     有）：emit 初始 empty + loading=true 让 panel 首次显示有 "loading…"
+   *     反馈；resolve 时再 emit canonical → 共 2 emit。
+   *   - **异步 provider，同 trigger 续 typing**（`isNewTrigger=false`）：emit
+   *     trigger-refresh —— trigger 几何字段更新到新 match，canonical 字段保留
+   *     前次值，`loading=false`（不在 typing 期间闪烁 "loading…" 标题污染稳定
+   *     的候选展示）；resolve 时再 emit canonical → 共 2 emit。
+   *
+   * 配合 panel renderer "全 visible state panel 总高度恒等" 不变量，每次 emit
+   * 触发的 paint chromeHeight 严格相等 → `setChromeHeight` transition=same 不
+   * 触发 DECSTBM 重排，视觉零跳变。async / sync provider 差异对 UI 完全透明。
+   *
+   * ─── 并发与 stale ───
+   *
+   * 异步路径用 AbortController + queryToken 双重 stale 检查。新 updateInput
+   * 进来时旧 query 的 abort 被触发 + queryToken 递增；旧 query 的 .then
+   * 回调（若仍在飞）通过双重检查丢弃 stale 结果。
    */
   private runQuery(
     session: InternalSession,
     provider: SuggestionProvider,
     match: TriggerMatch,
+    isNewTrigger: boolean,
   ): void {
     const token = ++session.queryToken;
     const abort = new AbortController();
@@ -275,17 +315,33 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
       return;
     }
 
-    // 异步返回：先设 loading=true，等 Promise 结算
-    this.setSessionState(session, {
-      ...session.state,
-      activeProvider: { id: provider.id },
-      trigger: match,
-      suggestions: [],
-      selectedIndex: -1,
-      loading: true,
-      ghostText: null,
-      argumentHint: null,
-    });
+    // 异步返回：两种 emit 形态，由 isNewTrigger 选择（详见方法 docstring "emit
+    // 策略" 段）。两条路径都 emit 一次保证 listener fire → UI paint（输入框新字符
+    // 可见 + trigger 几何更新）；canonical 字段则按 stale-while-revalidate 决定。
+    if (isNewTrigger) {
+      // Trigger 首次出现 —— canonical 无前次值可保留，初始化为 empty + loading=true
+      // 让 panel 首次显示有 "loading…" 反馈。
+      this.setSessionState(session, {
+        sessionId: session.id,
+        activeProvider: { id: provider.id },
+        trigger: match,
+        suggestions: [],
+        selectedIndex: -1,
+        loading: true,
+        ghostText: null,
+        argumentHint: null,
+      });
+    } else {
+      // 同 trigger 续 typing —— trigger 几何更新，canonical 字段保留前次值
+      // (stale-while-revalidate)；loading=false 避免 title 在 typing 期间闪烁
+      // "loading…" 污染稳定的候选展示。
+      this.setSessionState(session, {
+        ...session.state,
+        activeProvider: { id: provider.id },
+        trigger: match,
+        loading: false,
+      });
+    }
 
     result.then(
       (items) => {

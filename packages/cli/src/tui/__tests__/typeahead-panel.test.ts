@@ -492,16 +492,77 @@ describe("renderSessionLines", () => {
     expect(len20).toBe(len1);
   });
 
+  it("argHint=null 场景下全 visible state panel 总行数恒等 —— typing 期间零高度抖动的核心契约", () => {
+    // 架构契约（与 broker 契约对偶）：FileProvider / CommandProvider 等
+    // argHint=null 场景下，panel 在所有 visible state（loading / empty no-match /
+    // argHint empty / active 任意 count）下总行数（chrome 行数 + meta 行数）严格
+    // 相等。这与 broker "trigger 续 typing emit trigger-refresh，canonical 保留"
+    // 共同消除 typing 期间的 ±1 行震荡。
+    //
+    // 这是 @ panel 抖动 bug 的回归屏障 —— 任何让 empty 路径与 active 路径行数
+    // 偏离的修改必须显式权衡（如未来 argHint 信息架构重构）。
+    const opts: RenderOptions = { ...defaultRenderOpts, maxVisibleItems: 8 };
+
+    // 全 6 个 visible state（argHint=null 场景）
+    const states = {
+      "empty loading": makeState({
+        suggestions: [],
+        selectedIndex: -1,
+        loading: true,
+      }),
+      "empty no-match": makeState({
+        suggestions: [],
+        selectedIndex: -1,
+        loading: false,
+      }),
+      "active 1 候选": makeState({
+        suggestions: [makeSuggestion("a:b", "/a")],
+        selectedIndex: 0,
+      }),
+      "active maxVis 候选（恰满，不滚动）": makeState({
+        suggestions: Array.from({ length: 8 }, (_, i) =>
+          makeSuggestion(`c${i}:b`, `/c${i}`),
+        ),
+        selectedIndex: 0,
+      }),
+      "active maxVis+1 候选（首项选中，下滚指示）": makeState({
+        suggestions: Array.from({ length: 9 }, (_, i) =>
+          makeSuggestion(`c${i}:b`, `/c${i}`),
+        ),
+        selectedIndex: 0,
+      }),
+      "active maxVis+1 候选（中部选中，双向指示）": makeState({
+        suggestions: Array.from({ length: 9 }, (_, i) =>
+          makeSuggestion(`c${i}:b`, `/c${i}`),
+        ),
+        selectedIndex: 4,
+      }),
+    };
+
+    const lineCounts = Object.fromEntries(
+      Object.entries(states).map(([name, state]) => [
+        name,
+        renderSessionLines(state, opts).length,
+      ]),
+    );
+
+    // 全部 6 个 state 总行数严格相等
+    const counts = Object.values(lineCounts);
+    const referenceCount = counts[0]!;
+    for (const [name, count] of Object.entries(lineCounts)) {
+      expect(count, `${name} 总行数 ${count} 应等于参考 ${referenceCount}`).toBe(
+        referenceCount,
+      );
+    }
+  });
+
   it("empty chrome 体内行数与 active chrome 对齐 —— 候选 0 → N → 0 切换无 chrome body 跳变", () => {
     // 真实场景：用户输入 /xxx，无任何前缀匹配 → 候选 0 → emptyChrome；
     // 退一个字符回到 /xx → 命中候选 → activeChrome。两态切换时 chrome body
     // 必须恒定行数，否则视觉抖动。
     //
-    // 注意：emptyChrome 在 "未找到匹配项" 分支会额外渲染一行 Esc meta 提示，
-    // argumentHint / loading 分支不会；这个 meta 行的差异属于"内容差异"而非
-    // chrome body 抖动，不在本恒定契约内（也是符合直觉的状态指示）。
-    //
-    // 本测试通过比较 chrome 框线行数（顶/底框 + body）来验证 body 恒定。
+    // 本测试聚焦 chrome body（顶/底框线之间）恒定；总行数（含 meta）恒等的
+    // 强契约见上方 "argHint=null 场景下全 visible state panel 总行数恒等" 测试。
     const opts: RenderOptions = { ...defaultRenderOpts, maxVisibleItems: 8 };
 
     // active 态参考：N=5 候选

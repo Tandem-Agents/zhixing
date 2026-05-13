@@ -554,6 +554,195 @@ describe("DefaultTypeaheadBroker — 异步 query 与 abort", () => {
     expect(broker.getState(handle.id)?.suggestions[0]!.id).toBe("fresh");
   });
 
+  it("同 trigger 续 typing：emit trigger-refresh，canonical 保留前次（stale-while-revalidate）", async () => {
+    // 架构契约：异步 provider 同 trigger 续 typing 时，broker emit 的 state 必须
+    //   - trigger / activeProvider 字段：更新到新 match（accept 几何依赖）
+    //   - suggestions / selectedIndex / ghostText / argumentHint：保留前次值
+    //     （UI 在 query revalidate 期间展示稳定内容）
+    //   - loading=false：不在 typing 期间闪烁 "loading…" title 污染候选展示
+    //
+    // 违反此契约则 panel 在 typing 期间显示 in-flight phase（empty + loading），
+    // 与 resolve 后的 active state 高度不一致 → setChromeHeight transition=grew/shrunk
+    // → DECSTBM 重排 → 视觉每键抖动一行。
+    let firstResolve: (items: SuggestionItem[]) => void;
+    let secondResolve: (items: SuggestionItem[]) => void;
+    const firstPromise = new Promise<SuggestionItem[]>((r) => {
+      firstResolve = r;
+    });
+    const secondPromise = new Promise<SuggestionItem[]>((r) => {
+      secondResolve = r;
+    });
+    let callCount = 0;
+
+    const broker = new DefaultTypeaheadBroker();
+    broker.register({
+      id: "p",
+      priority: 100,
+      matchTrigger: (ctx) =>
+        ctx.draft.startsWith("/")
+          ? {
+              providerId: "p",
+              tokenStart: 0,
+              tokenEnd: ctx.draft.length,
+              token: ctx.draft,
+              query: ctx.draft.slice(1),
+              runtime: ctx.runtime,
+            }
+          : null,
+      query: () => {
+        callCount++;
+        return callCount === 1 ? firstPromise : secondPromise;
+      },
+    });
+
+    const handle = broker.beginSession(makeCtx("/a"));
+    // beginSession 触发 isNewTrigger=true → emit 初始 loading state
+    expect(broker.getState(handle.id)?.loading).toBe(true);
+    expect(broker.getState(handle.id)?.suggestions).toEqual([]);
+
+    // 第一次 query resolve
+    firstResolve!([
+      makeItem("alpha", { providerId: "p" }),
+      makeItem("beta", { providerId: "p" }),
+      makeItem("gamma", { providerId: "p" }),
+    ]);
+    await tick();
+    expect(broker.getState(handle.id)?.loading).toBe(false);
+    expect(broker.getState(handle.id)?.suggestions).toHaveLength(3);
+    expect(broker.getState(handle.id)?.selectedIndex).toBe(0);
+
+    // 模拟用户移动选中到 idx=2，然后继续 typing
+    broker.moveSelection(handle.id, 2);
+    expect(broker.getState(handle.id)?.selectedIndex).toBe(2);
+
+    // 续 typing：tokenStart 不变（都是 0），provider 不变 → isNewTrigger=false
+    broker.updateInput(handle.id, makeCtx("/ab"));
+
+    // 关键断言：trigger 几何已更新 + canonical 保留 + loading=false
+    const afterTyping = broker.getState(handle.id)!;
+    expect(afterTyping.trigger?.tokenEnd).toBe(3); // 新 trigger 几何
+    expect(afterTyping.trigger?.query).toBe("ab");
+    expect(afterTyping.suggestions).toHaveLength(3); // canonical 保留
+    expect(afterTyping.suggestions[0]!.id).toBe("alpha");
+    expect(afterTyping.selectedIndex).toBe(2); // 用户的选中位置保留
+    expect(afterTyping.loading).toBe(false); // 不闪 "loading…"
+
+    // 第二次 resolve 后才一次性 swap 为新 canonical
+    secondResolve!([makeItem("delta", { providerId: "p" })]);
+    await tick();
+    expect(broker.getState(handle.id)?.suggestions).toHaveLength(1);
+    expect(broker.getState(handle.id)?.suggestions[0]!.id).toBe("delta");
+    expect(broker.getState(handle.id)?.selectedIndex).toBe(0); // resolve 时 spec §6.5 重置
+  });
+
+  it("续 typing 期间 listener 仅在状态变化的边界处 fire（无 in-flight 中间态污染）", async () => {
+    // 架构契约：每次 updateInput 必有 1 次 emit（让 UI 重画输入框新字符 +
+    // trigger 几何更新），每次 query resolve 多 1 次 emit。N 次 typing + 异步
+    // provider → 总 emit 数 = N（trigger-refresh）+ 实际 resolve 次数。
+    //
+    // 关键：每次 typing 的 emit 不再走 "wipe-canonical-then-fill" 双 emit 模式
+    // —— typing 1 次 ≠ listener fire 2 次。
+    let resolveFn: (items: SuggestionItem[]) => void = () => {};
+    const broker = new DefaultTypeaheadBroker();
+    broker.register({
+      id: "p",
+      priority: 100,
+      matchTrigger: (ctx) =>
+        ctx.draft.startsWith("/")
+          ? {
+              providerId: "p",
+              tokenStart: 0,
+              tokenEnd: ctx.draft.length,
+              token: ctx.draft,
+              query: ctx.draft.slice(1),
+              runtime: ctx.runtime,
+            }
+          : null,
+      query: () =>
+        new Promise<SuggestionItem[]>((r) => {
+          resolveFn = r;
+        }),
+    });
+
+    const handle = broker.beginSession(makeCtx("/a"));
+    const fires: TypeaheadSessionState[] = [];
+    broker.onSessionChange(handle.id, (s) => fires.push(s));
+
+    // beginSession 已 emit 1 次（onSessionChange 订阅前），不计入 fires
+    // 续 typing 5 次（同 trigger）
+    broker.updateInput(handle.id, makeCtx("/ab"));
+    broker.updateInput(handle.id, makeCtx("/abc"));
+    broker.updateInput(handle.id, makeCtx("/abcd"));
+    broker.updateInput(handle.id, makeCtx("/abcde"));
+    broker.updateInput(handle.id, makeCtx("/abcdef"));
+
+    // 5 次 trigger-refresh emit（同步触发）
+    expect(fires).toHaveLength(5);
+    // 全部 loading=false（不在 typing 期间闪 loading 中间态）
+    expect(fires.every((s) => s.loading === false)).toBe(true);
+
+    // 最后一次 query resolve
+    resolveFn([makeItem("result", { providerId: "p" })]);
+    await tick();
+
+    // 再 1 次 emit（canonical swap），前面 5 次 query 都被 abort
+    expect(fires).toHaveLength(6);
+    expect(fires[5]!.suggestions).toHaveLength(1);
+    expect(fires[5]!.loading).toBe(false);
+  });
+
+  it("续 typing 期间 accept 用新鲜 trigger 几何（不被 stale canonical 误导）", () => {
+    // 架构契约：trigger 几何字段每次 updateInput 必须新鲜。即使 canonical
+    // suggestions 是 stale 的（来自前次 query），accept() 计算 replacement
+    // 几何用的是 **当前 trigger.tokenStart / tokenEnd**——保证替换永远落在
+    // 用户当前 typed 的 token 边界，不会留尾巴或越界。
+    let resolveFn: (items: SuggestionItem[]) => void = () => {};
+    const broker = new DefaultTypeaheadBroker();
+    broker.register({
+      id: "p",
+      priority: 100,
+      matchTrigger: (ctx) =>
+        ctx.draft.startsWith("/")
+          ? {
+              providerId: "p",
+              tokenStart: 0,
+              tokenEnd: ctx.draft.length,
+              token: ctx.draft,
+              query: ctx.draft.slice(1),
+              runtime: ctx.runtime,
+            }
+          : null,
+      query: () =>
+        new Promise<SuggestionItem[]>((r) => {
+          resolveFn = r;
+        }),
+    });
+
+    const handle = broker.beginSession(makeCtx("/a"));
+    // 让 /a 的 query resolve 一次拿到 canonical
+    resolveFn([
+      makeItem("foo", {
+        providerId: "p",
+        acceptPayload: { replacement: "/foo", execute: true },
+      }),
+    ]);
+    return tick().then(() => {
+      // 续 typing 到 /abcdef（同 trigger，token 边界从 2 变到 7）
+      broker.updateInput(handle.id, makeCtx("/abcdef"));
+
+      // 此时 suggestions 仍是 stale /a 的（foo），但 trigger 几何已新鲜
+      const state = broker.getState(handle.id)!;
+      expect(state.suggestions).toHaveLength(1);
+      expect(state.trigger?.tokenEnd).toBe(7);
+
+      // 用户 accept stale 候选 foo —— replacement 应替换 /abcdef 全部（tokenStart=0
+      // 到 tokenEnd=7），不留尾巴
+      const result = broker.accept(handle.id, state.suggestions[0]!);
+      expect(result?.newDraft).toBe("/foo"); // /abcdef 整段被 /foo 替换
+      expect(result?.newCursor).toBe(4); // /foo 末尾
+    });
+  });
+
   it("Provider 同步抛异常：降级到空 + 发 provider-error 事件", () => {
     const events: TypeaheadEvent[] = [];
     const broker = new DefaultTypeaheadBroker({
