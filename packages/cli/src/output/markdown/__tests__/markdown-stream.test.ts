@@ -1078,3 +1078,80 @@ describe("MarkdownStream · list 流式（ReplaceableSegment 复用）", () => {
     expect(["commit", "close"]).toContain(last);
   });
 });
+
+describe("MarkdownStream · table（hold 等闭合 + 整段 ANSI emit）", () => {
+  it("流式期 hold 不暴露字面——首行 `|` 字符在闭合前不 forward", () => {
+    const { stream, out } = makeStream();
+    // 喂入半截表格（仅 header + 分隔行，未到数据行）
+    stream.feed("| 项 | 内容 |\n|---|---|\n");
+    // 未闭合时主路径不应 emit 字面 `|---|`（hold 行为）
+    // 注：marked 在 buffer 末尾未闭合 table 时 token 是 paragraph 或 table,
+    //   handleOpenBlock 走 default hold 路径不 forward 字面
+    const earlyStripped = stripAnsi(out.combined);
+    expect(earlyStripped).not.toContain("|---|");
+
+    // 喂入数据行 + 末尾 \n\n 闭合表格
+    stream.feed("| 名称 | foo |\n| 版本 | 1.0 |\n\n");
+    stream.end();
+
+    const finalStripped = stripAnsi(out.combined);
+    // 闭合后表格内容渲染为 minimal markdown 风格（无 `|` 字面）
+    expect(finalStripped).not.toContain("|---|");
+    expect(finalStripped).not.toContain("| 名称 | foo |");
+    // 表格内容可见
+    expect(finalStripped).toContain("项");
+    expect(finalStripped).toContain("内容");
+    expect(finalStripped).toContain("名称");
+    expect(finalStripped).toContain("foo");
+    expect(finalStripped).toContain("版本");
+    // 分隔行 ─ 字符存在
+    expect(finalStripped).toContain("─");
+  });
+
+  it("闭合后整段 emit 走 line() 路径（独立段语义）", () => {
+    const { stream, out } = makeStream();
+    stream.feed("| a | b |\n|---|---|\n| 1 | 2 |\n\n");
+    stream.end();
+    // table 是独立块——走 line() 路径整段写入（而非 appendInline 流式接续）
+    expect(out.line.length).toBeGreaterThan(0);
+    const lineContent = out.line.join("");
+    expect(stripAnsi(lineContent)).toContain("a");
+    expect(stripAnsi(lineContent)).toContain("b");
+    expect(stripAnsi(lineContent)).toContain("1");
+    expect(stripAnsi(lineContent)).toContain("2");
+  });
+
+  it("table 与前后 paragraph 共存——段间分隔正确，不粘连", () => {
+    const { stream, out } = makeStream();
+    stream.feed("前导文字。\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n后续文字。");
+    stream.end();
+    const stripped = stripAnsi(out.combined);
+    expect(stripped).toContain("前导文字");
+    expect(stripped).toContain("a");
+    expect(stripped).toContain("1");
+    expect(stripped).toContain("后续文字");
+    // 段间至少有一个空行分隔（paragraph→table 或 table→paragraph）
+    const lines = stripped.split("\n");
+    expect(lines.length).toBeGreaterThan(5);
+  });
+
+  it("strip 模式——表格 layout 保留但去 ANSI（CI / pipe 友好）", () => {
+    const { stream, out } = makeStream({ mode: "strip" });
+    stream.feed("| 项 | 内容 |\n|---|---|\n| 名称 | foo |\n\n");
+    stream.end();
+    const combined = out.combined;
+    expect(combined).toBe(stripAnsi(combined)); // strip 模式无 ANSI
+    expect(combined).toContain("项");
+    expect(combined).toContain("foo");
+    expect(combined).toContain("─");
+  });
+
+  it("raw 模式——直接 forward 字面字符（不解析）", () => {
+    const { stream, out } = makeStream({ mode: "raw" });
+    const raw = "| a | b |\n|---|---|\n| 1 | 2 |\n";
+    stream.feed(raw);
+    stream.end();
+    // raw 模式整段字面 forward + 末尾 \n
+    expect(out.combined).toBe(raw + "\n");
+  });
+});

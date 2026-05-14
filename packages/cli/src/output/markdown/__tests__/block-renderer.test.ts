@@ -277,6 +277,196 @@ describe("renderBlock · space token", () => {
   });
 });
 
+describe("renderBlock · table（minimal markdown 风格 + 无框线）", () => {
+  it("基本 2 列表格——header 粗体 + dim ─ 分隔 + 双空格列分隔", () => {
+    const md = `| 项 | 内容 |
+|---|---|
+| 名称 | foo |
+| 版本 | 1.0 |
+`;
+    const t = lexFirst<Tokens.Table>(md);
+    const out = renderBlock(t, "render");
+    const stripped = stripAnsi(out);
+
+    // 头部 + 分隔 + 2 行数据 = 4 行内容 + 起首 \n + 末尾 \n
+    const lines = stripped.split("\n");
+    // ["", "  项   内容", "  ───  ───", "  名称  foo", "  版本  1.0", ""]
+    expect(lines[0]).toBe(""); // 起首 \n
+    expect(lines[lines.length - 1]).toBe(""); // 末尾 \n
+    expect(lines).toHaveLength(6);
+
+    // header 含粗体 ANSI
+    expect(out).toContain(chalk.bold("项"));
+    expect(out).toContain(chalk.bold("内容"));
+
+    // 分隔行 dim ─（全行 dim）
+    expect(out).toContain("─");
+    const sepLineIdx = lines.findIndex((l) => l.includes("─"));
+    expect(sepLineIdx).toBeGreaterThan(0);
+
+    // 列对齐（基于 stripped 内容）—— 起首带 layout.contentPrefix (2 空格)
+    expect(lines[1]!.startsWith(PREFIX)).toBe(true);
+    expect(lines[3]!.startsWith(PREFIX)).toBe(true);
+  });
+
+  it("cell 内 inline 元素——codespan / bold 经 renderInlines ANSI 化", () => {
+    const md = `| 名称 | 值 |
+|---|---|
+| 路径 | \`src/foo.ts\` |
+| 状态 | **完成** |
+`;
+    const t = lexFirst<Tokens.Table>(md);
+    const out = renderBlock(t, "render");
+    // codespan / bold 的 inline ANSI 在表格 cell 内仍生效
+    expect(stripAnsi(out)).toContain("src/foo.ts");
+    expect(stripAnsi(out)).toContain("完成");
+    // 含 codespan 的 cyan bg ANSI 序列特征（cli inline renderer 用 bgCyan）
+    expect(out).toContain("src/foo.ts");
+  });
+
+  it("对齐——align right / center 用左/右/双侧空格 padding", () => {
+    const md = `| L | C | R |
+|:--|:-:|--:|
+| a | b | c |
+`;
+    const t = lexFirst<Tokens.Table>(md);
+    const out = renderBlock(t, "render");
+    const stripped = stripAnsi(out);
+    const lines = stripped.split("\n").filter((l) => l.length > 0);
+    // 数据行索引 = 最后一行（lines[2]）—— header (0) + 分隔 (1) + data (2)
+    const dataLine = lines[lines.length - 1]!;
+    // 数据行去 PREFIX 后形态：left a 右 padding，center b 双侧 padding，right c 左 padding
+    expect(dataLine.startsWith(PREFIX)).toBe(true);
+    // 至少 "a" 在前、"c" 在末（按对齐推导）
+    expect(dataLine.indexOf("a")).toBeLessThan(dataLine.indexOf("b"));
+    expect(dataLine.indexOf("b")).toBeLessThan(dataLine.indexOf("c"));
+  });
+
+  it("空表头（header 全空字符串）—— 跳过 header + 分隔行，直接 emit rows", () => {
+    // 边界 case：手工构造 header 全空的 Tokens.Table（GFM 实际罕见但 robust）
+    const t = {
+      type: "table",
+      raw: "",
+      align: [null, null] as (TableAlign)[],
+      header: [
+        { text: "", tokens: [] },
+        { text: "", tokens: [] },
+      ],
+      rows: [
+        [
+          { text: "a", tokens: [{ type: "text", raw: "a", text: "a" } as Tokens.Text] },
+          { text: "b", tokens: [{ type: "text", raw: "b", text: "b" } as Tokens.Text] },
+        ],
+      ],
+    } as unknown as Tokens.Table;
+    const out = renderBlock(t, "render");
+    const stripped = stripAnsi(out);
+    expect(stripped).not.toContain("─"); // 无分隔行（因 header 全空）
+    expect(stripped).toContain("a");
+    expect(stripped).toContain("b");
+  });
+
+  it("完全空表（无 header 无 rows）→ 返回空字符串", () => {
+    const t = {
+      type: "table",
+      raw: "",
+      align: [],
+      header: [],
+      rows: [],
+    } as unknown as Tokens.Table;
+    expect(renderBlock(t, "render")).toBe("");
+  });
+
+  it("strip 模式——保留 layout（列宽 + padding + ─ 分隔）但去 ANSI 染色", () => {
+    const md = `| 项 | 内容 |
+|---|---|
+| 名称 | foo |
+`;
+    const t = lexFirst<Tokens.Table>(md);
+    const out = renderBlock(t, "strip");
+    expect(out).toBe(stripAnsi(out)); // strip 模式无 ANSI 字符
+    expect(out).toContain("项");
+    expect(out).toContain("内容");
+    expect(out).toContain("─"); // 分隔行字符保留（仅去 dim 染色）
+  });
+
+  it("raw 模式——直接返回 token.raw（不进入 renderTable 路径）", () => {
+    const md = `| a | b |
+|---|---|
+| 1 | 2 |
+`;
+    const t = lexFirst<Tokens.Table>(md);
+    expect(renderBlock(t, "raw")).toBe(t.raw);
+  });
+
+  it("超宽列压缩——单 cell 远超 budget 时按比例压缩 + clampLine 加 `…`", () => {
+    const longText = "x".repeat(100);
+    const md = `| 短 | 长 |
+|---|---|
+| a | ${longText} |
+`;
+    const t = lexFirst<Tokens.Table>(md);
+    // 强制窄 columns 触发压缩（budget = 30 - 2 indent - 2 separator = 26 字符给 cell）
+    const out = renderBlockRaw(t, { mode: "render", indentLevel: 0, columns: 30 });
+    expect(out).toContain("…"); // 超宽列被 clampLine 截断
+    expectAllLinesWithinBudget(out, 30);
+  });
+
+  it("行宽合约——典型表格各行可见宽度 ≤ columns - 1", () => {
+    const md = `| 项 | 内容 |
+|---|---|
+| 名称 | zhixing-workspace |
+| 版本 | 0.1.0 |
+| 描述 | 知行工作区（测试用） |
+`;
+    const t = lexFirst<Tokens.Table>(md);
+    const out = renderBlock(t, "render");
+    expectAllLinesWithinBudget(out, 80);
+  });
+
+  it("极窄终端 + 多列表格——退化到 raw fallback（保行宽合约严格不破）", () => {
+    // columns=15 + 5 列：separatorTotal=8, available = 15-1-2-8 = 4 < 5 (MIN*numCols)
+    // 退化路径走 raw 字面 + wrapAnsiLine（与未知 block 类型同 fallback），合约保住
+    const md = `| a | b | c | d | e |
+|---|---|---|---|---|
+| 1 | 2 | 3 | 4 | 5 |
+`;
+    const t = lexFirst<Tokens.Table>(md);
+    const out = renderBlockRaw(t, {
+      mode: "render",
+      indentLevel: 0,
+      columns: 15,
+    });
+    // 关键：每行可见宽度 ≤ columns - 1，无论退化路径用何种渲染
+    expectAllLinesWithinBudget(out, 15);
+    // 退化路径下不应进入 renderTable 的标准布局——表格内容仍按 raw 字面 emit
+    // （不保证 ─ 分隔行存在，因为 raw 字面 wrap 后无表格 layout 结构）
+    expect(out.length).toBeGreaterThan(0);
+  });
+
+  it("嵌套——indentLevel=1（list_item 内的表格）整体多 2 列缩进", () => {
+    const md = `| a | b |
+|---|---|
+| 1 | 2 |
+`;
+    const t = lexFirst<Tokens.Table>(md);
+    const out = renderBlockRaw(t, {
+      mode: "render",
+      indentLevel: 1,
+      columns: 80,
+    });
+    const stripped = stripAnsi(out);
+    // 起首缩进 = layout.contentPrefix (2) + INDENT_UNIT*1 (2) = 4 空格
+    const lines = stripped.split("\n").filter((l) => l.length > 0);
+    for (const line of lines) {
+      expect(line.startsWith(PREFIX + "  ")).toBe(true);
+    }
+  });
+});
+
+// 辅助：marked Tokens.Table.align 字段的 union 类型，便于手工构造表格用例
+type TableAlign = "left" | "right" | "center" | null;
+
 /**
  * Region 写入合约断言：output 按 `\n` 切分后每段显示宽度 ≤ columns - 1。
  * caller 输出违反该约束 → 终端隐式 wrap → 物理行数 > 逻辑行数 → segment 滚动数失算。

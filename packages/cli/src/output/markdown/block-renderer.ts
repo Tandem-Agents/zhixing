@@ -31,7 +31,7 @@ import chalk from "chalk";
 import { highlight, supportsLanguage, type Theme } from "cli-highlight";
 import type { Tokens } from "marked";
 import { splitAnsiLines } from "../../tui/ansi.js";
-import { stringWidth, wrapAnsiLine } from "../../tui/line-width.js";
+import { clampLine, stringWidth, wrapAnsiLine } from "../../tui/line-width.js";
 import { layout, tone } from "../../tui/style.js";
 import { renderInlines } from "./inline-renderer.js";
 import type { MarkdownMode } from "./types.js";
@@ -143,6 +143,8 @@ export function renderBlock(
       return renderHr(ctx);
     case "paragraph":
       return renderParagraph(token as Tokens.Paragraph, ctx);
+    case "table":
+      return renderTable(token as Tokens.Table, ctx);
     case "space":
       // 段落分隔由 caller 控制，此处不重复 emit
       return "";
@@ -379,6 +381,221 @@ function renderBlockquote(t: Tokens.Blockquote, ctx: RenderContext): string {
   const lines = splitAnsiLines(fullText);
   const styled = lines.map((l) => (l === "" ? l : tone.dim(l))).join("\n");
   return `\n${styled}\n`;
+}
+
+// ─── 表格渲染（GFM table，minimal markdown 风格无框线） ───
+
+/** 表格列分隔符——双空格（与 INDENT_UNIT 同），与 list/blockquote 视觉系一致 */
+const TABLE_COL_SEPARATOR = "  ";
+/**
+ * 列压缩下限——极窄终端的兜底硬合约：单列至少 1 字符。
+ *
+ * 为什么是 1 而不是 3 / 4：行宽合约（每段 ≤ columns - 1）必须严格保住，否则
+ * ScrollRegion 滚动数失算。极窄场景（columns=30 + 长列）下若 MIN=3 会让总宽
+ * 撑超 budget——选 MIN=1 接受极端 case 下单列截断到 `…`（可读性下降），换取
+ * 合约绝对不破。常规终端（80+ 列）+ 典型表格（2-3 列）从不触发下限。
+ */
+const TABLE_MIN_COL_WIDTH = 1;
+
+type TableAlign = "left" | "right" | "center" | null | undefined;
+
+/**
+ * 渲染 GFM table —— minimal markdown 风格（无框线、头部下方 `─` 分隔行、双空格
+ * 列分隔），与 list / blockquote 同 indent 系统，不抢 ◆ AI 决策行的主轴。
+ *
+ * 视觉契约：
+ *   ┌ header 行：粗体 cell，按列宽 padding 对齐
+ *   ├ 分隔行：每列 `─` × 列宽，整体 dim
+ *   └ rows：每行按列宽 + 对齐 padding，cell inline 元素经 renderInlines ANSI 化
+ *
+ * 列宽算法（保 ScrollRegion 行宽硬合约——每段 \n 切分 ≤ columns - 1）：
+ *   1. computeColWidths：每列 max(stringWidth(cell)) 全表
+ *   2. compressColWidths：总宽 > budget 时按比例缩放，保 TABLE_MIN_COL_WIDTH 下限
+ *   3. padOrTruncateCell：超宽走 clampLine（ANSI-aware truncate + `…`），不足按 align
+ *      padding（left/right/center）
+ *
+ * 流式策略：
+ *   表格 hold 等闭合（marked 在 ``\n`` 闭合 + 列宽统一计算后才能正确渲染）。与
+ *   heading / blockquote / hr 同模式——markdown-stream emitClosedBlock 的 default
+ *   分支天然 cover，不改 stream 流程。
+ *
+ * 边界：
+ *   - 完全空表（无 header 无 rows）→ 返回 ""（renderBlock 输出契约：空字符串不渲染）
+ *   - 空 header（header 长度 0 或全空字符串）→ 跳过 header + 分隔行，直接 emit rows
+ *   - raw mode：renderBlock 顶部已处理（返 token.raw），不进本函数
+ *   - strip mode：保留 layout（列宽 + padding + 分隔行）但 chalk.bold / tone.dim 跳过
+ */
+function renderTable(t: Tokens.Table, ctx: RenderContext): string {
+  const header = t.header ?? [];
+  const rows = t.rows ?? [];
+  const align = (t.align ?? []) as TableAlign[];
+
+  if (header.length === 0 && rows.length === 0) return "";
+
+  const numCols = Math.max(
+    header.length,
+    ...rows.map((r) => r.length),
+    0,
+  );
+  if (numCols === 0) return "";
+
+  // 渲染每 cell 为 ANSI 字符串（cell.tokens 含 inline 元素：codespan / strong /
+  // em / link 等，经 renderInlines 统一 ANSI 化）
+  const headerAnsi = header.map((cell) =>
+    renderInlines(cell.tokens ?? [], ctx.mode),
+  );
+  // header 加粗——与 heading 视觉系一致让"列名 vs 值"语义可视化；strip 模式跳过
+  const headerStyled =
+    ctx.mode === "render"
+      ? headerAnsi.map((cell) => (cell.length > 0 ? chalk.bold(cell) : cell))
+      : headerAnsi;
+
+  const rowsAnsi = rows.map((row) =>
+    row.map((cell) => renderInlines(cell.tokens ?? [], ctx.mode)),
+  );
+
+  // 列宽算法：先取每列 max，再按 budget 压缩
+  const allCellsByRow: string[][] = [headerStyled, ...rowsAnsi];
+  const rawWidths = computeColWidths(allCellsByRow, numCols);
+
+  const indent = lineIndent(ctx.indentLevel);
+  const indentWidth = stringWidth(indent);
+  const separatorTotal = TABLE_COL_SEPARATOR.length * Math.max(0, numCols - 1);
+  // budget = 终端可用宽度 - indent - 列分隔符总宽（剩下分给 cell 内容）
+  const availableCell = ctx.columns - 1 - indentWidth - separatorTotal;
+  // 极窄终端容纳不下表格（譬如 columns=15 + 5 列）—— 退化到 default block 同
+  // fallback 路径（raw 字面 + wrapAnsiLine），保 ScrollRegion 行宽硬合约严格不破。
+  // 现代终端 80+ 列 + 典型 LLM 表格 2-4 列从不触发此分支
+  if (availableCell < numCols * TABLE_MIN_COL_WIDTH) {
+    return ensureTrailingNewline(
+      indentAndWrapLine(t.raw ?? "", indent, ctx.columns),
+    );
+  }
+  const adjustedWidths = compressColWidths(rawWidths, availableCell);
+
+  // 渲染一行：每个 cell 按调整后列宽 padding/truncate + 列分隔符拼接
+  const renderRow = (cells: string[]): string => {
+    const parts: string[] = [];
+    for (let c = 0; c < numCols; c++) {
+      const cellText = cells[c] ?? "";
+      parts.push(
+        padOrTruncateCell(cellText, adjustedWidths[c]!, align[c] ?? null),
+      );
+    }
+    return indent + parts.join(TABLE_COL_SEPARATOR);
+  };
+
+  const lines: string[] = [];
+
+  // header 行 + 分隔行（仅当 header 非全空）
+  const headerHasContent = headerStyled.some((c) => c.length > 0);
+  if (headerHasContent) {
+    lines.push(renderRow(headerStyled));
+    const sepParts = adjustedWidths.map((w) => "─".repeat(w));
+    const sepLine = sepParts.join(TABLE_COL_SEPARATOR);
+    const sepStyled = ctx.mode === "render" ? tone.dim(sepLine) : sepLine;
+    lines.push(indent + sepStyled);
+  }
+
+  // 数据行
+  for (const row of rowsAnsi) {
+    lines.push(renderRow(row));
+  }
+
+  if (lines.length === 0) return "";
+  return `\n${lines.join("\n")}\n`;
+}
+
+/**
+ * 每列宽度 = 该列所有 cell 的 max(stringWidth)。空表 cell 视为 0 宽，但最终
+ * 列宽至少 1（避免空列触发 `─`.repeat(0) 渲染异常）。
+ */
+function computeColWidths(rows: string[][], numCols: number): number[] {
+  const widths: number[] = new Array(numCols).fill(0);
+  for (const row of rows) {
+    for (let c = 0; c < numCols; c++) {
+      const cell = row[c] ?? "";
+      const w = stringWidth(cell);
+      if (w > widths[c]!) widths[c] = w;
+    }
+  }
+  return widths.map((w) => Math.max(1, w));
+}
+
+/**
+ * 列宽压缩——总宽超 maxTotal 时按各列原宽度比例缩放，下限 TABLE_MIN_COL_WIDTH。
+ *
+ * 算法：
+ *   1. 总宽 ≤ maxTotal：原样返回
+ *   2. 否则按 `ratio = maxTotal / total` 比例缩放，每列至少 TABLE_MIN_COL_WIDTH
+ *   3. Math.floor 余数累加分配给最长列，让总宽精确 ≤ maxTotal
+ */
+function compressColWidths(widths: number[], maxTotal: number): number[] {
+  const total = widths.reduce((a, b) => a + b, 0);
+  if (total <= maxTotal) return widths;
+
+  const ratio = maxTotal / total;
+  const adjusted = widths.map((w) =>
+    Math.max(TABLE_MIN_COL_WIDTH, Math.floor(w * ratio)),
+  );
+
+  // 修正 floor 累积误差：剩余 budget 分配给最长列（理论 diff < numCols）。
+  // 极窄场景下 MIN=1 + ratio 压缩后 sum ≤ maxTotal 自然成立，无需 diff<0 兜底
+  let diff = maxTotal - adjusted.reduce((a, b) => a + b, 0);
+  if (diff <= 0) return adjusted;
+
+  // 多次循环分配（每轮把 1 字符给当前最长列），稳定且终止
+  let guard = diff + widths.length; // 防御无限循环
+  while (diff > 0 && guard-- > 0) {
+    let maxIdx = 0;
+    for (let i = 1; i < adjusted.length; i++) {
+      if (adjusted[i]! > adjusted[maxIdx]!) maxIdx = i;
+    }
+    adjusted[maxIdx]!++;
+    diff--;
+  }
+  return adjusted;
+}
+
+/**
+ * 按列宽 padding 或 truncate 一个 cell——保证返回的可见宽度恰好 = width。
+ *
+ *   - 宽 < width：按 align padding 空格（left/null → 右补 / right → 左补 /
+ *     center → 左右平均，左侧少一格让奇数余宽偏右）
+ *   - 宽 = width：原样
+ *   - 宽 > width：clampLine 复用 ANSI-aware truncate（添 `…` + reset），然后补
+ *     空格让总宽 == width（clampLine 可能因末 reset 字符串实际可见宽 < width-1，
+ *     此处补齐保 align 合约）
+ */
+function padOrTruncateCell(
+  text: string,
+  width: number,
+  align: TableAlign,
+): string {
+  const cellWidth = stringWidth(text);
+
+  if (cellWidth > width) {
+    // clampLine 添加 `…` + `\x1b[0m`，但返回视觉宽度可能略小于 width（因末字符
+    // 边界）—— 用 stringWidth 重新算并补尾空格让宽度精确
+    const truncated = clampLine(text, width);
+    const truncatedWidth = stringWidth(truncated);
+    const fillPad = Math.max(0, width - truncatedWidth);
+    // truncate 默认 left 对齐（保首字符可读）；align 右/居中时尾空格放右侧 OK
+    return truncated + " ".repeat(fillPad);
+  }
+
+  if (cellWidth === width) return text;
+
+  // cellWidth < width
+  const pad = width - cellWidth;
+  if (align === "right") return " ".repeat(pad) + text;
+  if (align === "center") {
+    const leftPad = Math.floor(pad / 2);
+    const rightPad = pad - leftPad;
+    return " ".repeat(leftPad) + text + " ".repeat(rightPad);
+  }
+  // left / null （默认）
+  return text + " ".repeat(pad);
 }
 
 function renderHr(ctx: RenderContext): string {
