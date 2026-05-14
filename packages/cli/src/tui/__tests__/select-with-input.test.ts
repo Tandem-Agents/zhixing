@@ -8,6 +8,7 @@
  * 无需 spawn 子进程，不依赖真 TTY。
  */
 
+import chalk from "chalk";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { stringWidth } from "../line-width.js";
@@ -18,6 +19,10 @@ import {
   type SelectOption,
   type SelectResult,
 } from "../select-with-input.js";
+
+// 强制启用 ANSI 染色——vitest non-TTY 环境下 chalk 默认降级，让 dim/yellow
+// 等 SGR 断言（边框 dim 化、theme 颜色变化等）有意义
+chalk.level = 3;
 
 // ─── 测试辅助 ───
 
@@ -733,5 +738,117 @@ describe("selectWithInput — 基本结构", () => {
     await sendKeys(stdin, [CTRL_C]);
     await promise;
     expect(_getRawModeRefcount()).toBe(0);
+  });
+});
+
+describe("selectWithInput — 居中能力（centered option）", () => {
+  it("centered=true 入口 emit 垂直居中 cursor positioning（ESC [ row ; 1 H）", async () => {
+    const { stdin, stdout, getCaptured } = makeStreams();
+    // 注入 rows 让 getRows() 读到固定值；columns/rows 都是测试稳定锚
+    (stdout as unknown as { rows: number }).rows = 24;
+
+    const promise = selectWithInput({
+      title: "t",
+      options: makeDefaultOptions(),
+      stdin,
+      stdout,
+      columns: 80,
+      centered: true,
+      keyHintBar: "",
+    });
+    await sendKeys(stdin, [CTRL_C]);
+    await promise;
+
+    const captured = getCaptured();
+    // ANSI cursor positioning `\x1b[<row>;1H` —— 出现至少一次（首次 render 前）
+    expect(captured).toMatch(/\x1b\[\d+;1H/);
+  });
+
+  it("centered=true 每行起首加水平 leftPad（columns - frameWidth 平均分到左侧）", async () => {
+    const { stdin, stdout, getCaptured } = makeStreams();
+    (stdout as unknown as { rows: number }).rows = 24;
+
+    const promise = selectWithInput({
+      title: "t",
+      options: makeDefaultOptions(),
+      stdin,
+      stdout,
+      columns: 100,
+      centered: true,
+      keyHintBar: "",
+    });
+    await sendKeys(stdin, [CTRL_C]);
+    await promise;
+
+    const captured = getCaptured();
+    // frameWidth = min(80, 100-2) = 80; leftPad = floor((100-80)/2) = 10 空格
+    // 每行 clearLine 后跟 10 个空格 + dim SGR + 边框字符 ╭ 或 │ 或 ╰
+    // leftPad 在 theme.border 之外（裸空格），边框字符在 dim SGR \x1b[2m 内
+    expect(captured).toMatch(/\x1b\[2K {10}\x1b\[2m[╭│╰]/);
+  });
+
+  it("centered=false（默认）—— 无 cursor positioning、无 leftPad", async () => {
+    const { stdin, stdout, getCaptured } = makeStreams();
+    (stdout as unknown as { rows: number }).rows = 24;
+
+    const promise = selectWithInput({
+      title: "t",
+      options: makeDefaultOptions(),
+      stdin,
+      stdout,
+      columns: 100,
+      // centered 不传 = false
+      keyHintBar: "",
+    });
+    await sendKeys(stdin, [CTRL_C]);
+    await promise;
+
+    const captured = getCaptured();
+    // 不应出现垂直居中 cursor positioning（不是 hideCursor 的 [?25l）
+    expect(captured).not.toMatch(/\x1b\[\d+;1H/);
+    // 每行 clearLine 后直接跟 dim SGR + 边框字符（无 leftPad 空格）
+    expect(captured).toMatch(/\x1b\[2K\x1b\[2m[╭│╰]/);
+  });
+});
+
+describe("selectWithInput — hint 文案变化", () => {
+  it("select 模式默认 hint 简化为「Enter 确认 · Esc 取消 · Ctrl+C 中止」（无 ↑↓）", async () => {
+    const { stdin, stdout, getCaptured } = makeStreams();
+    const promise = selectWithInput({
+      title: "t",
+      options: makeDefaultOptions(),
+      stdin,
+      stdout,
+      columns: 80,
+    });
+    await sendKeys(stdin, [CTRL_C]);
+    await promise;
+
+    const captured = getCaptured();
+    expect(captured).toContain("Enter 确认 · Esc 取消 · Ctrl+C 中止");
+    expect(captured).not.toContain("↑↓ 选择");
+    expect(captured).not.toContain("Esc 拒绝");
+  });
+});
+
+describe("selectWithInput — 边框 dim 化（去黄）", () => {
+  it("边框字符 ╭╰│ 不再用 yellow ANSI（33）—— 用 dim ANSI（2）", async () => {
+    const { stdin, stdout, getCaptured } = makeStreams();
+    const promise = selectWithInput({
+      title: "t",
+      options: makeDefaultOptions(),
+      stdin,
+      stdout,
+      columns: 80,
+      keyHintBar: "",
+    });
+    await sendKeys(stdin, [CTRL_C]);
+    await promise;
+
+    const captured = getCaptured();
+    // chalk.yellow 输出 SGR 33；chalk.dim 输出 SGR 2
+    // 边框字符应包裹在 dim SGR 内，无 yellow SGR
+    expect(captured).not.toMatch(/\x1b\[33m/); // 无 yellow
+    expect(captured).toMatch(/\x1b\[2m/); // 有 dim
   });
 });

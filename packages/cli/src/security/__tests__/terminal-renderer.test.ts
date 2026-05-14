@@ -150,6 +150,33 @@ describe("buildSelectOptions", () => {
     expect(selectOptions[0]!.hotkey).toBe("y");
     expect(selectOptions[1]!.hotkey).toBe("n");
   });
+
+  it("持久授权类（allow-session / workspace / global）label 加「⚠ 持久授权」后缀", () => {
+    const req = makeRequest({
+      options: [
+        { kind: "allow-once", label: "允许一次" },
+        { kind: "allow-session", label: "本会话允许", pattern: "git *" },
+        {
+          kind: "allow-workspace",
+          label: "本工作区允许",
+          pattern: "git *",
+        },
+        { kind: "allow-global", label: "全局允许", pattern: "git *" },
+        { kind: "deny", label: "拒绝" },
+      ],
+    });
+    const { selectOptions } = buildSelectOptions(req);
+    // allow-once / deny 不加后缀
+    expect(selectOptions[0]!.label).toBe("允许一次");
+    expect(selectOptions[4]!.label).toBe("拒绝");
+    // 持久授权三类加 ⚠ 持久授权 后缀
+    expect(selectOptions[1]!.label).toContain("本会话允许");
+    expect(selectOptions[1]!.label).toContain("⚠ 持久授权");
+    expect(selectOptions[2]!.label).toContain("本工作区允许");
+    expect(selectOptions[2]!.label).toContain("⚠ 持久授权");
+    expect(selectOptions[3]!.label).toContain("全局允许");
+    expect(selectOptions[3]!.label).toContain("⚠ 持久授权");
+  });
 });
 
 describe("translate", () => {
@@ -319,7 +346,7 @@ describe("buildPanelBody", () => {
     expect(lines.some((l) => l.includes("wechat_send"))).toBe(true);
   });
 
-  it("元数据块包含 cwd / 影响 / 风险", () => {
+  it("元数据块包含 cwd / 影响 / 风险（用户视角中文标签）", () => {
     const req = makeRequest({
       operationClass: "external",
       decision: {
@@ -332,9 +359,42 @@ describe("buildPanelBody", () => {
     const lines = buildPanelBody(req);
     const full = lines.join("\n");
     expect(full).toContain("/tmp/ws");
-    expect(full).toContain("external");
-    expect(full).toContain("medium");
+    // 操作类别 / 风险等级走中文文字（去多彩配色，P5 cyan 一致）
+    expect(full).toContain("外部"); // external → 外部
+    expect(full).toContain("中"); // medium → 中
     expect(full).toContain("需要网络");
+  });
+
+  it("high / critical 风险加 ⚠ 字符 + red bold（形态 + 颜色双重信号）", () => {
+    const reqHigh = makeRequest({
+      operationClass: "external",
+      decision: {
+        action: "confirm",
+        matchedRules: [],
+        reason: "x",
+        riskLevel: "high",
+      },
+    });
+    const linesHigh = buildPanelBody(reqHigh);
+    const fullHigh = linesHigh.join("\n");
+    expect(fullHigh).toContain("高");
+    expect(fullHigh).toContain("⚠");
+
+    const reqCritical = makeRequest({
+      operationClass: "critical",
+      decision: {
+        action: "confirm",
+        matchedRules: [],
+        reason: "x",
+        riskLevel: "critical",
+      },
+    });
+    const linesCritical = buildPanelBody(reqCritical);
+    const fullCritical = linesCritical.join("\n");
+    expect(fullCritical).toContain("严重");
+    expect(fullCritical).toContain("关键"); // operationClass critical → 关键
+    // critical 出现 2 个 ⚠（影响 + 风险）
+    expect((fullCritical.match(/⚠/g) ?? []).length).toBeGreaterThanOrEqual(2);
   });
 });
 

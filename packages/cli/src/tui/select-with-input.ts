@@ -91,14 +91,18 @@ export interface Theme {
  * Default theme 走 design token——视觉决策跟随 `tui/style.ts` 的 tone / icon。
  *
  * 关键 token 映射：
- *   border        → tone.warn   （黄色边框 = "等待用户决定"语义；confirmation/select 专属）
+ *   border        → tone.dim    （灰色边框 = 安静、不抢戏；P5 单 brand cyan 一致）
  *   selectedLabel → tone.brand  （选中态 = 品牌色）
  *   inputBuffer   → tone.brand  （正在输入的内容显眼）
  *   selectedArrow → icon.cursor （与其他面板共享 ▸ 选中标记）
  *   inputCursor   保留 ▎       （字符内光标，不是行选中标记，独立语义）
+ *
+ * 注：原方案用 tone.warn 黄色表达"等待用户决定"语义——但 zhixing 设计语言 P5
+ * 「单一品牌主色 cyan」要求避免无谓色彩；警示信号靠 caller 在内容（⚠ 字符、文案）
+ * 中承担，边框统一 dim 保持视觉安静。
  */
 export const defaultTheme: Theme = {
-  border: (s) => tone.warn(s),
+  border: (s) => tone.dim(s),
   title: (s) => tone.bold(s),
   bodyText: (s) => s,
   selectedArrow: `${icon.cursor} `,
@@ -142,6 +146,20 @@ export interface SelectWithInputOptions {
 
   /** 底部快捷键条；设为空字符串可隐藏 */
   keyHintBar?: string;
+
+  /**
+   * 面板居中——水平 + 垂直双向居中。
+   *
+   * 默认 false 保兼容（非 modal 调用 selectWithInput 不变）。confirmation panel
+   * 等 alt-screen 独占整屏的 modal 应传 true——让面板视觉聚焦中央而非缩在左
+   * 上角。
+   *
+   * **PanelRenderer cursor 不变量**：centered 模式下入口 emit cursor positioning
+   * 到 (verticalCenterRow, 1) 让 startRow = verticalCenterRow；后续 rerender 仍
+   * 上移 lastHeight 回到此 startRow ✓。水平居中靠 render() 内每行起首 leftPad
+   * （prefix 不计入 frameWidth，每行总宽 = leftPad + frameWidth ≤ columns）。
+   */
+  centered?: boolean;
 }
 
 // ─── Raw mode refcount shims（向后兼容导出） ───
@@ -214,10 +232,14 @@ export function selectWithInput(
       return;
     }
 
-    // ── 终端宽度探测 ──
+    // ── 终端宽度/行数探测 ──
     const getColumns = (): number => {
       if (typeof options.columns === "number") return options.columns;
       return stdout.columns ?? 80;
+    };
+    const getRows = (): number => {
+      // resize 时获取最新 rows——居中定位用，centered=false 时不读
+      return stdout.rows ?? 24;
     };
 
     // ── 渲染 ──
@@ -232,6 +254,12 @@ export function selectWithInput(
       // 我们的面板右侧不封口；只左边框 + 上/下边框。这简化了变宽行处理。
       const innerWidth = Math.max(10, frameWidth - 2);
 
+      // 水平居中：每行起首加 leftPad（columns - frameWidth 余量平均到左侧，
+      // hint bar 也共用同 leftPad 让两者对齐）。centered=false 时 leftPad=""。
+      const leftPad = options.centered
+        ? " ".repeat(Math.max(0, Math.floor((columns - frameWidth) / 2)))
+        : "";
+
       const lines: string[] = [];
 
       // ── 顶部边框 ──
@@ -243,9 +271,9 @@ export function selectWithInput(
         frameWidth - 2 - titleVisibleWidth,
       );
       lines.push(
-        theme.border(
+        `${leftPad}${theme.border(
           `╭─${theme.title(titleSegment)}${"─".repeat(dashesNeeded)}`,
-        ),
+        )}`,
       );
 
       // ── body ──
@@ -255,13 +283,18 @@ export function selectWithInput(
           : [options.body];
         for (const line of bodyLines) {
           lines.push(
-            `${theme.border("│")}  ${clampLine(theme.bodyText(line), innerWidth - 2)}`,
+            `${leftPad}${theme.border("│")}  ${clampLine(theme.bodyText(line), innerWidth - 2)}`,
           );
         }
-        lines.push(theme.border("│"));
+        lines.push(`${leftPad}${theme.border("│")}`);
       }
 
       // ── 选项 ──
+      //
+      // hotkey 列对齐：所有 hotkey 同样的 `(x)` 形态右对齐到 frameWidth-2 列，
+      // 让用户扫读时按键标记在视觉上自成一列。input 选项的 hotkey 同列对齐;
+      // 没有 hotkey 的选项末尾自然留空。
+      const hotkeyColumn = frameWidth - 2; // hotkey 右对齐的目标列（从左边框起算）
       options.options.forEach((opt, idx) => {
         const isCurrent = idx === state.selected;
         const arrow = isCurrent
@@ -272,6 +305,7 @@ export function selectWithInput(
 
         if (isCurrent && state.inputMode && opt.type === "input") {
           // Input 模式下的当前行：label + buffer（或 placeholder）+ cursor
+          // 输入模式不参与 hotkey 列对齐（用户已经在输入中，按键提示无意义）
           const bufferDisplay = state.inputBuffer
             ? theme.inputBuffer(state.inputBuffer)
             : theme.placeholder(`(${opt.placeholder})`);
@@ -280,45 +314,97 @@ export function selectWithInput(
           const label = isCurrent
             ? theme.selectedLabel(opt.label)
             : theme.unselectedLabel(opt.label);
-          let suffix = "";
-          if (opt.type === "input") {
-            suffix += ` ${theme.placeholder("(Enter 输入)")}`;
-          }
-          if (opt.hotkey) {
-            suffix += ` ${theme.hotkey(`(${opt.hotkey})`)}`;
-          }
-          lineContent = `${label}${suffix}`;
+          const hotkeyText = opt.hotkey
+            ? theme.hotkey(`(${opt.hotkey})`)
+            : "";
+          const inputHint =
+            opt.type === "input" ? theme.placeholder("Enter 输入") : "";
+
+          // 计算 label + inputHint 区段已占宽度（剥 ANSI）—— hotkey 右对齐
+          // 到 hotkeyColumn 需要中间 padding 数 = column - 占用宽度
+          const arrowVisible = stringWidth(arrow);
+          const labelVisible = stringWidth(opt.label);
+          const inputHintVisible = inputHint
+            ? stringWidth("Enter 输入") + 1 // 前导空格
+            : 0;
+          const hotkeyVisible = opt.hotkey
+            ? stringWidth(`(${opt.hotkey})`)
+            : 0;
+          // 已占（不含 hotkey）：arrow + label + inputHint(可选)
+          const occupied = arrowVisible + labelVisible + inputHintVisible;
+          const padNeeded = Math.max(
+            1,
+            hotkeyColumn - occupied - hotkeyVisible,
+          );
+          const padding = " ".repeat(padNeeded);
+          // 拼接：label + inputHint(可选，前缀空格) + padding + hotkey
+          lineContent = `${label}${inputHint ? ` ${inputHint}` : ""}${
+            hotkeyText ? `${padding}${hotkeyText}` : ""
+          }`;
         }
 
-        const line = `${theme.border("│")} ${arrow}${lineContent}`;
-        lines.push(clampLine(line, frameWidth));
+        const line = `${leftPad}${theme.border("│")} ${arrow}${lineContent}`;
+        lines.push(clampLine(line, leftPad.length + frameWidth));
       });
 
       // ── 底部边框 ──
-      lines.push(theme.border(`╰${"─".repeat(frameWidth - 1)}`));
+      lines.push(
+        `${leftPad}${theme.border(`╰${"─".repeat(frameWidth - 1)}`)}`,
+      );
 
       // ── 快捷键提示条 ──
       //
       // 模式感知：input 模式下的键义和 select 模式完全不同（Enter 是提交而
       // 不是进入，Esc 是退出输入而不是拒绝），不切换文案会误导用户。
+      //
+      // select 模式 hint 简化：移除显然的「↑↓ 选择」+ 改「Esc 拒绝」→「Esc 取消」
+      // 避免与"拒绝并说明原因"选项语义重叠
       const hintBar =
         customHintBar !== undefined
           ? customHintBar
           : state.inputMode
             ? "Enter 提交 · Esc 退出输入 · Ctrl+C 中止"
-            : "↑↓ 选择 · Enter 确认 · Esc 拒绝 · Ctrl+C 中止";
+            : "Enter 确认 · Esc 取消 · Ctrl+C 中止";
       if (hintBar) {
         lines.push(
-          `  ${theme.keyHintBar(clampLine(hintBar, frameWidth - 2))}`,
+          `${leftPad}  ${theme.keyHintBar(clampLine(hintBar, frameWidth - 2))}`,
         );
       }
 
       return lines;
     };
 
+    /**
+     * 垂直居中入口定位——把 cursor 移到 (verticalCenterRow, 1) 让 PanelRenderer
+     * 的 startRow = verticalCenterRow。后续 rerender 上移 lastHeight 仍回到该行。
+     *
+     * 注：centered=false 时此函数 no-op，selectWithInput 表现完全同改造前（默认
+     * 从当前 cursor 位置渲染）。
+     */
+    const positionCenteredCursor = (panelHeight: number): void => {
+      if (!options.centered) return;
+      const rows = getRows();
+      // 垂直居中：顶部空 (rows - panelHeight) / 2 行；至少 1 (避免 row 0)
+      const verticalCenterRow = Math.max(
+        1,
+        Math.floor((rows - panelHeight) / 2),
+      );
+      // ANSI cursor positioning：ESC [ row ; col H —— 1-indexed
+      stdout.write(`\x1b[${verticalCenterRow};1H`);
+    };
+
     // ── 原地重绘（委托给 panel renderer，其内部实现 spec §6.4 不变量） ──
+    //
+    // 首次 render 前定位 cursor 到垂直居中行（centered=true 时）；后续 rerender
+    // PanelRenderer 上移 lastHeight 自然回到同 startRow，不需要重新定位
+    let firstRender = true;
     const rerender = (): void => {
-      panel.render(render());
+      const linesToRender = render();
+      if (firstRender) {
+        positionCenteredCursor(linesToRender.length);
+        firstRender = false;
+      }
+      panel.render(linesToRender);
     };
 
     // ── 键盘处理 ──

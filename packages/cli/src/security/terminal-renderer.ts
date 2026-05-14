@@ -32,6 +32,7 @@ import type {
   RendererCapabilities,
 } from "@zhixing/core";
 import { getAgentIdentity } from "@zhixing/core";
+import { tone } from "../tui/style.js";
 import {
   selectWithInput,
   type SelectOption,
@@ -148,6 +149,8 @@ export class TerminalConfirmationRenderer implements ConfirmationRenderer {
           stdin: this.options.stdin ?? process.stdin,
           stdout: this.options.stdout ?? process.stdout,
           signal: abort.signal,
+          // alt-screen 独占整屏——居中布局让面板聚焦中央而非缩在左上角
+          centered: true,
           // keyHintBar 不传 → selectWithInput 在 select/input 模式切换时
           // 自动渲染不同文案（Enter 在两个模式下语义完全不同）。
         });
@@ -210,7 +213,7 @@ export function buildSelectOptions(
         selectOptions.push({
           type: "simple",
           value: id,
-          label: opt.label,
+          label: augmentLabelWithWarning(opt.kind, opt.label),
           hotkey: "hotkey" in opt ? opt.hotkey : undefined,
         });
         break;
@@ -220,7 +223,7 @@ export function buildSelectOptions(
         selectOptions.push({
           type: "input",
           value: id,
-          label: opt.label,
+          label: augmentLabelWithWarning(opt.kind, opt.label),
           placeholder: opt.placeholder,
           allowEmptySubmit: true,
           hotkey: opt.hotkey,
@@ -230,6 +233,31 @@ export function buildSelectOptions(
   });
 
   return { selectOptions, optionById };
+}
+
+/**
+ * 持久授权类选项加 ⚠ 警示后缀——让用户在 Critical 决策点（一次授权影响未来全部
+ * 同类操作）有视觉信号区分。
+ *
+ * 应用范围：allow-session / allow-workspace / allow-global —— 这三类都是"创建
+ * 授权规则"而非"单次放行"，错选代价大。
+ *
+ * 与 selectWithInput 解耦：augment 发生在 buildSelectOptions（terminal-renderer
+ * 即 confirmation 领域专属层），不下沉到 selectWithInput 通用组件——后者保持
+ * 领域无关。
+ */
+function augmentLabelWithWarning(
+  kind: ConfirmationOption["kind"],
+  label: string,
+): string {
+  if (
+    kind === "allow-session" ||
+    kind === "allow-workspace" ||
+    kind === "allow-global"
+  ) {
+    return `${label}  ${tone.dim("⚠ 持久授权")}`;
+  }
+  return label;
 }
 
 // ─── 从 SelectResult 翻译回 ConfirmationDecision ───
@@ -417,29 +445,45 @@ function truncate(s: string, maxChars: number): string {
   return `${s.slice(0, maxChars - 1)}…`;
 }
 
+/**
+ * 操作类别 → 用户视角中文标签。
+ *
+ * **去多彩配色**：原 observe/internal 绿、external 黄、critical 红——四个语义色
+ * 违反 P5「单一品牌主色 cyan」。新方案用中文文字承担分级语义 + 仅 critical 保留
+ * red 标识"严重"（错误信号语义保留）+ ⚠ 字符做形态信号让色弱用户也能识别。
+ */
 function formatOperationClass(cls: OperationClass): string {
   switch (cls) {
     case "observe":
-      return chalk.green("observe");
+      return "观察";
     case "internal":
-      return chalk.green("internal");
+      return "内部";
     case "external":
-      return chalk.yellow("external");
+      return "外部";
     case "critical":
-      return chalk.red("critical");
+      return `${tone.error.bold("关键")} ⚠`;
   }
 }
 
+/**
+ * 风险等级 → 用户视角中文标签 + 形态分级。
+ *
+ * **去多彩配色 + 形态承担分级**：
+ *   low / medium:    默认色 + 中文「低」/「中」——视觉安静、信号靠文字
+ *   high:            tone.error.bold「高」+ ⚠ ——错误信号 + 形态双重提示
+ *   critical:        tone.error.bold「严重」+ ⚠ ——同 high 但文字更紧迫
+ *   unknown:         原样返回 robust（防御未来扩展）
+ */
 function formatRiskLevel(level: string): string {
   switch (level) {
     case "low":
-      return chalk.green("low");
+      return "低";
     case "medium":
-      return chalk.yellow("medium");
+      return "中";
     case "high":
-      return chalk.red("high");
+      return `${tone.error.bold("高")} ⚠`;
     case "critical":
-      return chalk.bgRed.white(" critical ");
+      return `${tone.error.bold("严重")} ⚠`;
     default:
       return level;
   }
