@@ -72,7 +72,16 @@ export interface ProviderQuirks {
   maxTokensField: "max_tokens" | "max_completion_tokens";
   /** 流式响应中是否返回 usage 统计 */
   supportsStreamUsage: boolean;
-  /** 是否支持 extended thinking（如 Claude 的 thinking） */
+  /**
+   * Provider 全局粗粒度声明:该 provider 旗下至少有一个 model 支持 thinking 模式
+   * (DeepSeek deepseek-v4-pro / Claude extended thinking 等)。
+   *
+   * 仅用于 UI 层为 provider 打能力标签的粗粒度信号。**运行时不参与**
+   * reasoning_content 透传判定 —— openai-compatible adapter 走协议级处理
+   * (字段缺失自动跳过),不依赖本声明。
+   *
+   * Model 维度细粒度声明见 `ModelInfo.supportsThinking`,用于模型选择面板等场景。
+   */
   supportsThinking: boolean;
   /** 是否支持 function/tool calling */
   supportsTools: boolean;

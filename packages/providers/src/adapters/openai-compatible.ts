@@ -30,6 +30,39 @@ import type { Message, ContentBlock, ToolSpec } from "@zhixing/core";
 import type { ResolvedProvider } from "../types.js";
 import { parseOpenAICompatibleUsage } from "./openai-usage.js";
 
+// ─── Vendor Protocol Extensions ───
+//
+// OpenAI 兼容生态在标准 ChatCompletion 类型之上演化出一类 vendor 私有扩展字段。
+// 这些字段不在 OpenAI 官方 SDK 类型里,但已成为 de facto 标准——头部 vendor
+// 提出后被同生态其他厂商沿用,横切覆盖 thinking 类模型的通信协议。
+//
+// 当前已知扩展:
+//
+//   reasoning_content (string)
+//     出现在 stream delta 与 assistant message 上,内容是模型 thinking 阶段的
+//     输出文本。multi-turn replay 时必须原样回传给服务端,缺失会被协议层 400
+//     拒绝(DeepSeek thinking 模式严格校验;Qwen-QwQ / Kimi-thinking /
+//     MoonShot reasoning / 智谱 GLM-Z 等沿用同一字段约定)。
+//
+//     本适配器协议级处理:有则透传,缺失自动跳过。对非 thinking 模型零影响,
+//     字段从不出现在 delta 与出站 payload。
+//
+// 内部承载:reasoning_content 对应内部消息的 ThinkingBlock(语义同构,model
+// reasoning trace)。入站 reasoning_content delta 复用 StreamEvent.thinking_delta
+// 事件;出站时由 convertAssistantMessage 从 ThinkingBlock 拼回 reasoning_content。
+//
+// 扩展约定:
+//   - 字段名属于 de facto 标准(多 vendor 沿用) → 在本 section 扩展接口
+//   - 字段名在 vendor 间分裂(真正方言) → 抽 dialect 模块(参考 openai-usage.ts)
+
+interface DeepSeekChatDeltaExtension {
+  reasoning_content?: string;
+}
+
+type DeepSeekAssistantMessage = OpenAI.ChatCompletionAssistantMessageParam & {
+  reasoning_content?: string;
+};
+
 // ─── 工厂函数 ───
 
 /**
@@ -109,6 +142,15 @@ export function createOpenAICompatibleProvider(provider: ResolvedProvider): LLMP
           if (!choice) continue;
 
           const delta = choice.delta;
+
+          // Reasoning 内容(vendor 协议扩展,详见顶部 Vendor Protocol Extensions
+          // section)。DeepSeek 协议时序为 reasoning_content 先于 content,yield
+          // 顺序对齐:thinking_delta → text_delta;字段缺失自动跳过。
+          const reasoningDelta = (delta as DeepSeekChatDeltaExtension | undefined)
+            ?.reasoning_content;
+          if (reasoningDelta) {
+            yield { type: "thinking_delta", thinking: reasoningDelta };
+          }
 
           // 文本输出
           if (delta?.content) {
@@ -215,7 +257,7 @@ function convertMessages(messages: Message[]): OpenAI.ChatCompletionMessageParam
   return result;
 }
 
-function convertAssistantMessage(msg: Message): OpenAI.ChatCompletionAssistantMessageParam {
+function convertAssistantMessage(msg: Message): DeepSeekAssistantMessage {
   const content = msg.content;
 
   const textParts = content
@@ -223,26 +265,40 @@ function convertAssistantMessage(msg: Message): OpenAI.ChatCompletionAssistantMe
     .map((b) => b.text)
     .join("");
 
+  const thinkingParts = content
+    .filter((b): b is Extract<ContentBlock, { type: "thinking" }> => b.type === "thinking")
+    .map((b) => b.thinking)
+    .join("");
+
   const toolUses = content.filter(
     (b): b is Extract<ContentBlock, { type: "tool_use" }> => b.type === "tool_use",
   );
 
-  if (toolUses.length === 0) {
-    return { role: "assistant", content: textParts || null };
-  }
-
-  return {
+  const result: DeepSeekAssistantMessage = {
     role: "assistant",
     content: textParts || null,
-    tool_calls: toolUses.map((tc) => ({
+  };
+
+  // Reasoning 内容(vendor 协议扩展,详见顶部 Vendor Protocol Extensions section)。
+  // DeepSeek thinking 模式要求 multi-turn replay 时原样回传 reasoning_content,
+  // 否则 400 拒绝;Qwen-QwQ / Kimi-thinking 等沿用同一约定。
+  // 缺失 ThinkingBlock(非 thinking 模型) → 不写字段,出站 payload 与历史完全一致。
+  if (thinkingParts) {
+    result.reasoning_content = thinkingParts;
+  }
+
+  if (toolUses.length > 0) {
+    result.tool_calls = toolUses.map((tc) => ({
       id: tc.id,
       type: "function" as const,
       function: {
         name: tc.name,
         arguments: JSON.stringify(tc.input),
       },
-    })),
-  };
+    }));
+  }
+
+  return result;
 }
 
 // ─── 工具格式转换 ───

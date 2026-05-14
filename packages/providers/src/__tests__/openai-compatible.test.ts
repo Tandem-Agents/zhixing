@@ -78,6 +78,20 @@ function toolCallDeltaChunk(argsFragment: string) {
   };
 }
 
+// Vendor 协议扩展:reasoning_content delta chunk(thinking 模式专属字段,
+// 详见 adapter 顶部 Vendor Protocol Extensions section)
+function reasoningChunk(content: string) {
+  return {
+    choices: [
+      {
+        delta: { reasoning_content: content },
+        finish_reason: null,
+      },
+    ],
+    usage: null,
+  };
+}
+
 // usage 形态宽松到 Record —— 支持基础字段 + vendor 方言 cache 字段
 // (prompt_tokens_details.cached_tokens / prompt_cache_hit_tokens 等)。
 // 现有 { prompt_tokens, completion_tokens } 字面量调用站点仍然类型兼容。
@@ -469,5 +483,132 @@ describe("createOpenAICompatibleProvider", () => {
       tool_call_id: "call_1",
       content: "file contents here",
     });
+  });
+
+  // ─── Vendor 协议扩展: reasoning_content 字段 ───────────────────────────
+  //
+  // 协议级处理(详见 openai-compatible.ts 顶部 Vendor Protocol Extensions section):
+  //   - 入站: stream delta 的 reasoning_content → yield thinking_delta 事件
+  //   - 出站: ThinkingBlock → 拼回 assistant.reasoning_content 字段
+  //   - 缺失: ThinkingBlock 不存在时 outbound payload 完全不含此字段(向后兼容)
+  //
+  // 覆盖 DeepSeek thinking 模式 / Qwen-QwQ / Kimi-thinking / 智谱 GLM-Z 等
+  // 沿用 reasoning_content 约定的全部 thinking 模型。
+
+  it("入站: reasoning_content delta 应 yield 为 thinking_delta 事件并先于 text_delta", async () => {
+    mockCreate.mockResolvedValue(
+      mockStream([
+        reasoningChunk("思考中..."),
+        reasoningChunk("得出结论"),
+        textChunk("最终回答"),
+        finishChunk("stop"),
+      ]),
+    );
+
+    const provider = createOpenAICompatibleProvider(makeProvider());
+    const events = await collectEvents(
+      provider.chat({ model: "test-model", messages: [userMessage("Hi")] }),
+    );
+
+    const thinkingEvents = events.filter((e) => e.type === "thinking_delta");
+    expect(thinkingEvents).toHaveLength(2);
+    expect(thinkingEvents[0]).toEqual({ type: "thinking_delta", thinking: "思考中..." });
+    expect(thinkingEvents[1]).toEqual({ type: "thinking_delta", thinking: "得出结论" });
+
+    // 协议时序:reasoning 阶段先于 content 阶段,yield 顺序应一致
+    const firstThinkingIdx = events.findIndex((e) => e.type === "thinking_delta");
+    const firstTextIdx = events.findIndex((e) => e.type === "text_delta");
+    expect(firstThinkingIdx).toBeGreaterThanOrEqual(0);
+    expect(firstTextIdx).toBeGreaterThan(firstThinkingIdx);
+  });
+
+  it("出站: ThinkingBlock 应拼回 assistant.reasoning_content 字段供 replay 回传", async () => {
+    mockCreate.mockResolvedValue(mockStream([finishChunk("stop")]));
+
+    const provider = createOpenAICompatibleProvider(makeProvider());
+    await collectEvents(
+      provider.chat({
+        model: "test-model",
+        messages: [
+          userMessage("Read my file"),
+          {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "我需要先读文件再回答" },
+              {
+                type: "tool_use",
+                id: "call_1",
+                name: "read_file",
+                input: { path: "./test.ts" },
+              },
+            ],
+          },
+          {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                toolUseId: "call_1",
+                content: "file contents",
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const callArgs = mockCreate.mock.calls[0]?.[0];
+    const assistantMsg = callArgs.messages.find(
+      (m: { role: string }) => m.role === "assistant",
+    );
+    expect(assistantMsg).toBeDefined();
+    expect(assistantMsg.reasoning_content).toBe("我需要先读文件再回答");
+    // 同 message 内 reasoning_content 与 tool_calls 共存(thinking 模式产生工具调用的场景)
+    expect(assistantMsg.tool_calls).toHaveLength(1);
+    expect(assistantMsg.tool_calls[0].id).toBe("call_1");
+  });
+
+  it("回归: 无 ThinkingBlock 时 outbound 不写 reasoning_content 字段(非 thinking 模型路径)", async () => {
+    mockCreate.mockResolvedValue(mockStream([finishChunk("stop")]));
+
+    const provider = createOpenAICompatibleProvider(makeProvider());
+    await collectEvents(
+      provider.chat({
+        model: "test-model",
+        messages: [
+          userMessage("Read my file"),
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "call_1",
+                name: "read_file",
+                input: { path: "./test.ts" },
+              },
+            ],
+          },
+          {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                toolUseId: "call_1",
+                content: "file contents",
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const callArgs = mockCreate.mock.calls[0]?.[0];
+    const assistantMsg = callArgs.messages.find(
+      (m: { role: string }) => m.role === "assistant",
+    );
+    expect(assistantMsg).toBeDefined();
+    expect("reasoning_content" in assistantMsg).toBe(false);
+    // 既有 tool_calls 出站路径不受影响
+    expect(assistantMsg.tool_calls).toHaveLength(1);
   });
 });

@@ -81,8 +81,9 @@ export function mergeUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
  * 时通过 LLMProvider.id 获取。
  *
  * supports* 字段是 model-level capability 声明（与 ProviderQuirks 的 provider-level
- * 行为差异不同维度）。当前生产路径暂未消费，保留为未来 model picker / capability
- * 路由的扩展点；可选字段，不强制声明。
+ * 行为差异不同维度）。运行时协议透传不依赖此声明 —— openai-compatible adapter 走
+ * 协议级处理（字段缺失自动跳过），不读取 capability。这些字段为上层场景提供 UI
+ * 语义信号：model picker / 思考能力标签 / 选择面板高亮等。可选字段，不强制声明。
  */
 export interface ModelInfo {
   /** 模型标识符，如 'claude-sonnet-4-20250514' */
@@ -93,7 +94,10 @@ export interface ModelInfo {
   contextWindow: number;
   /** 最大输出 token 数 */
   maxOutputTokens: number;
-  /** 是否支持 extended thinking */
+  /**
+   * 是否支持 thinking 模式（extended thinking / reasoning trace / 思考输出）。
+   * UI 语义信号；运行时 reasoning_content 透传不依赖此字段（协议级处理）。
+   */
   supportsThinking?: boolean;
   /** 是否支持图片输入 */
   supportsImages?: boolean;

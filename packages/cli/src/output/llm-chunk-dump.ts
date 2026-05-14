@@ -64,6 +64,15 @@ export interface LlmRequestPayload {
   readonly tools: readonly ToolSpec[];
 }
 
+/**
+ * 最近一次 LLM 请求 payload 内存级缓存 —— 错误现场 forensic 必需。
+ *
+ * 关键设计：**无论 --log 是否启用都缓存**（性能开销 = 一次 reference 赋值，
+ * 可忽略）。错误是稀有事件，用户难以提前预判要不要开 --log 复现；缓存最近一次
+ * payload 让"错误自动 dump"成为可能，不依赖事先观测配置。
+ */
+let lastRequestPayload: LlmRequestPayload | null = null;
+
 export interface LlmChunkDump {
   /**
    * 记录一次 LLM 请求的完整入参——LLM 调用前记录,可对照后续接收的 stream event
@@ -149,12 +158,16 @@ export function attachChunkDumpToBus(
   const unsubs: Array<() => void> = [];
   unsubs.push(
     bus.on("llm:request_start", (event) => {
-      dump.recordRequestPayload({
+      const payload: LlmRequestPayload = {
         model: event.model,
         systemPrompt: event.systemPrompt,
         messages: event.messages,
         tools: event.tools,
-      });
+      };
+      // 总是缓存（无视 --log）—— 错误现场 forensic 用，零开销 reference 赋值
+      lastRequestPayload = payload;
+      // 仅 --log 启用时 dump 到 raw log
+      dump.recordRequestPayload(payload);
     }),
   );
   unsubs.push(
@@ -163,13 +176,233 @@ export function attachChunkDumpToBus(
     }),
   );
   unsubs.push(
-    bus.on("agent:run_end", () => {
+    bus.on("agent:run_end", (payload) => {
       dump.recordTurnBoundary();
+      // 错误时强制写 forensic 日志 —— 不依赖 --log 配置（错误是稀有事件值得
+      // 自动 forensic，用户难以提前预判要开 --log）
+      if (payload.reason === "error") {
+        writeLlmErrorForensic({
+          type: payload.errorType ?? "unknown",
+          message: payload.error ?? null,
+        });
+      }
     }),
   );
   return () => {
     for (const u of unsubs) u();
   };
+}
+
+/**
+ * LLM 错误现场 forensic dump —— 总是写（不依赖 --log），用于 provider_error /
+ * context_overflow / invalid_request 等错误的事后定位。
+ *
+ * **写入路径**：`~/.zhixing/logs/llm-error-<pid>-<ts>.log`（与 --log 的 raw dump
+ * 同目录，但独立文件以便区分主动 dump vs 错误自动 dump）。
+ *
+ * **写入内容**：
+ *   - 错误详情（type / message）
+ *   - 最近一次 LLM request payload 缓存（model / messages 摘要 / tools 数 / 估算
+ *     input tokens / 完整 system prompt 前 2000 字）
+ *   - messages 逐条 per-turn breakdown（role + block 类型 / 长度 / tool_use ↔
+ *     tool_result id 配对状态）
+ *
+ * 这套数据让 AI 一次性回答："是 token 超限 / tool pairing 破损 / 文件内容异常 /
+ * 其他"——postmortems #2 教训沉淀的"先看真实数据再下诊断结论"原则的工具化体现。
+ *
+ * **错误吞噬**：所有 IO 错误 swallow——forensic 工具自身故障不应再添乱。
+ */
+function writeLlmErrorForensic(error: {
+  type: string;
+  message: string | null;
+}): void {
+  try {
+    const logDir = path.join(os.homedir(), ".zhixing", "logs");
+    fs.mkdirSync(logDir, { recursive: true });
+    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    const logPath = path.join(logDir, `llm-error-${process.pid}-${ts}.log`);
+    const content = formatLlmErrorReport(error, lastRequestPayload);
+    fs.writeFileSync(logPath, content);
+    // 错误场景 stderr 提示日志路径（chrome 已接管 stdout 时 stderr 仍可见）
+    // allow-direct-stdout
+    process.stderr.write(`[zhixing] LLM error forensic → ${logPath}\n`);
+  } catch {
+    // 诊断模块自身故障吞噬——不应影响主流程
+  }
+}
+
+/**
+ * 把错误 + 缓存的 payload 格式化为人类可读的 forensic 报告。
+ *
+ * 分段：ERROR / LAST REQUEST PAYLOAD（含 token 估算）/ MESSAGES PER-TURN
+ * BREAKDOWN（block 类型 + tool_use/tool_result 配对状态）/ SYSTEM PROMPT（前
+ * 2000 字截断）。重点放在 messages 配对 + token 总量这两个最常见的 LLM 5xx
+ * 触发因素。
+ */
+function formatLlmErrorReport(
+  error: { type: string; message: string | null },
+  payload: LlmRequestPayload | null,
+): string {
+  const lines: string[] = [];
+  lines.push(`# zhixing LLM error forensic`);
+  lines.push(`# Time: ${new Date().toISOString()}`);
+  lines.push(`# Process: ${process.pid}`);
+  lines.push("");
+  lines.push(`## ERROR`);
+  lines.push(`type: ${error.type}`);
+  lines.push(`message: ${error.message ?? "(none)"}`);
+  lines.push("");
+
+  if (!payload) {
+    lines.push(`## LAST REQUEST PAYLOAD`);
+    lines.push(`(not captured —— 错误发生在首次 LLM 请求之前？)`);
+    lines.push("");
+    return lines.join("\n") + "\n";
+  }
+
+  const tokenEst = estimateInputTokens(payload);
+  lines.push(`## LAST REQUEST PAYLOAD`);
+  lines.push(`model: ${payload.model}`);
+  lines.push(
+    `systemPrompt: ${
+      payload.systemPrompt
+        ? `<${payload.systemPrompt.length} chars>`
+        : "(none)"
+    }`,
+  );
+  lines.push(`messagesCount: ${payload.messages.length}`);
+  lines.push(`toolsCount: ${payload.tools.length}`);
+  lines.push(`estimatedInputTokens: ~${tokenEst} (粗估：3 chars ≈ 1 token)`);
+  lines.push("");
+
+  // tool_use / tool_result 配对扫描
+  const pairing = scanToolPairing(payload.messages);
+  lines.push(`## TOOL PAIRING`);
+  lines.push(`tool_use_count: ${pairing.toolUseCount}`);
+  lines.push(`tool_result_count: ${pairing.toolResultCount}`);
+  lines.push(`unpaired_tool_use_ids: ${pairing.unpairedUseIds.length > 0 ? pairing.unpairedUseIds.join(", ") : "(none, all paired)"}`);
+  lines.push(`orphan_tool_result_ids: ${pairing.orphanResultIds.length > 0 ? pairing.orphanResultIds.join(", ") : "(none)"}`);
+  lines.push("");
+
+  lines.push(`## MESSAGES (per-turn breakdown)`);
+  payload.messages.forEach((msg, idx) => {
+    lines.push(`  [${idx}] ${msg.role}: ${summarizeMessage(msg)}`);
+  });
+  lines.push("");
+
+  lines.push(`## TOOLS (names + schema sizes)`);
+  payload.tools.forEach((tool) => {
+    const schemaSize = JSON.stringify(tool).length;
+    lines.push(`  ${tool.name}: ${schemaSize} chars schema`);
+  });
+  lines.push("");
+
+  if (payload.systemPrompt) {
+    lines.push(`## SYSTEM PROMPT (first 2000 chars)`);
+    lines.push(payload.systemPrompt.slice(0, 2000));
+    if (payload.systemPrompt.length > 2000) {
+      lines.push(
+        `... <truncated, total ${payload.systemPrompt.length} chars>`,
+      );
+    }
+  }
+
+  return lines.join("\n") + "\n";
+}
+
+/**
+ * 估算 LLM input tokens —— 粗略但够诊断："token 超 deepseek API 单请求上限"
+ * 是 provider_error 最常见原因之一。
+ *
+ * 算法：3 chars ≈ 1 token（英文 4 / CJK 2 的折中），覆盖 system / messages /
+ * tools 全部字符。
+ */
+function estimateInputTokens(payload: LlmRequestPayload): number {
+  let totalChars = 0;
+  if (payload.systemPrompt) totalChars += payload.systemPrompt.length;
+  for (const msg of payload.messages) {
+    for (const block of msg.content) {
+      if (block.type === "text") {
+        totalChars += block.text.length;
+      } else if (block.type === "tool_use") {
+        totalChars += JSON.stringify(block.input ?? {}).length + 50;
+      } else if (block.type === "tool_result") {
+        const c = block.content;
+        totalChars +=
+          typeof c === "string" ? c.length : JSON.stringify(c).length;
+      }
+    }
+  }
+  for (const tool of payload.tools) {
+    totalChars += JSON.stringify(tool).length;
+  }
+  return Math.round(totalChars / 3);
+}
+
+interface ToolPairingScan {
+  toolUseCount: number;
+  toolResultCount: number;
+  unpairedUseIds: string[];
+  orphanResultIds: string[];
+}
+
+function scanToolPairing(messages: readonly Message[]): ToolPairingScan {
+  const pendingUseIds = new Set<string>();
+  const seenResultIds = new Set<string>();
+  let toolUseCount = 0;
+  let toolResultCount = 0;
+  for (const msg of messages) {
+    for (const block of msg.content) {
+      if (block.type === "tool_use") {
+        toolUseCount++;
+        pendingUseIds.add(block.id);
+      } else if (block.type === "tool_result") {
+        toolResultCount++;
+        seenResultIds.add(block.toolUseId);
+        pendingUseIds.delete(block.toolUseId);
+      }
+    }
+  }
+  // orphan result = result.toolUseId 找不到任何 tool_use
+  const allUseIds = new Set<string>();
+  for (const msg of messages) {
+    for (const block of msg.content) {
+      if (block.type === "tool_use") allUseIds.add(block.id);
+    }
+  }
+  const orphanResultIds: string[] = [];
+  for (const id of seenResultIds) {
+    if (!allUseIds.has(id)) orphanResultIds.push(id);
+  }
+  return {
+    toolUseCount,
+    toolResultCount,
+    unpairedUseIds: [...pendingUseIds],
+    orphanResultIds,
+  };
+}
+
+function summarizeMessage(msg: Message): string {
+  // Message.content 类型上是 ContentBlock[]（不含 string union），用 typeof 守卫
+  // 会被 TS narrow 为 never。直接按 ContentBlock 数组路径处理
+  const blocks: string[] = [];
+  for (const block of msg.content) {
+    if (block.type === "text") {
+      blocks.push(`text(${block.text.length}c)`);
+    } else if (block.type === "tool_use") {
+      blocks.push(`tool_use(${block.name}, id=${block.id.slice(0, 8)})`);
+    } else if (block.type === "tool_result") {
+      const c = block.content;
+      const len = typeof c === "string" ? c.length : JSON.stringify(c).length;
+      blocks.push(
+        `tool_result(id=${block.toolUseId.slice(0, 8)}, ${len}c, isError=${block.isError ?? false})`,
+      );
+    } else {
+      // thinking / 其他类型
+      blocks.push(`${(block as { type: string }).type}`);
+    }
+  }
+  return blocks.join(" + ") || "(empty)";
 }
 
 function createDump(): LlmChunkDump {

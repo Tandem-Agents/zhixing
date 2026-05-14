@@ -36,6 +36,10 @@ export const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
     quirks: {
       supportsTools: true,
       supportsStreamUsage: true,
+      // DeepSeek 旗下至少 deepseek-v4-pro 支持 thinking 模式,粗粒度声明用于
+      // UI 标记;细粒度按 model 维度看 knownModels[*].supportsThinking。运行时
+      // 透传 reasoning_content 不依赖此字段(协议级处理,字段缺失自然 no-op)。
+      supportsThinking: true,
       // DeepSeek 用自有 usage 方言 prompt_cache_hit_tokens / prompt_cache_miss_tokens
       // (非 OpenAI 标准 prompt_tokens_details.cached_tokens),显式声明走最短解析路径
       usageDialect: "deepseek",
