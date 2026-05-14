@@ -40,6 +40,9 @@ function makeFakeScreen(): ScreenController & {
     writeScrollLine(text) {
       events.push({ kind: "writeScrollLine", text });
     },
+    ensureScrollLeadingBlank() {
+      events.push({ kind: "ensureScrollLeadingBlank" });
+    },
     beginReplaceableSegment() {
       const handle: ReplaceableSegmentHandle = {
         replace: (text) => events.push({ kind: "seg.replace", text }),
@@ -129,6 +132,15 @@ describe("ScreenWriter · 走 ScreenController 协调", () => {
       { kind: "writeScrollLine", text: "" },
     ]);
   });
+
+  it("ensureSegmentBreak 转发 screen.ensureScrollLeadingBlank（chrome 模式段间幂等保证）", () => {
+    const screen = makeFakeScreen();
+    const w = createScreenWriter({ screen });
+    w.ensureSegmentBreak();
+    expect(screen.events).toEqual([
+      { kind: "ensureScrollLeadingBlank" },
+    ]);
+  });
 });
 
 describe("StdoutWriter · 直写 stdout（无协调）", () => {
@@ -187,6 +199,38 @@ describe("StdoutWriter · 直写 stdout（无协调）", () => {
     writer.line("段落 B");
     expect(out.buffer).toBe("段落 A\n流式接续\n段落 B\n");
   });
+
+  describe("ensureSegmentBreak · stdout 模式 no-op（无 chrome 视觉协调职责）", () => {
+    // 架构契约：StdoutWriter 用于 pipe / CI / log 场景——消费者关心稳定 stream
+    // 格式（ndjson / awk 解析等），不需要也不应当被加入"段间视觉空行"。视觉
+    // 间距由 ScreenWriter（chrome 模式）独家负责。
+
+    it("ensureSegmentBreak 不写任何字节——pipe / CI 模式 stream 格式稳定", () => {
+      const { writer, out } = makeStdoutWriter();
+      writer.line("段 A");
+      writer.ensureSegmentBreak();
+      writer.line("段 B");
+      // 无间距 emit——caller 调 ensureSegmentBreak 在 stdout 模式下静默
+      expect(out.buffer).toBe("段 A\n段 B\n");
+    });
+
+    it("多次调 ensureSegmentBreak 仍 no-op（幂等成无操作）", () => {
+      const { writer, out } = makeStdoutWriter();
+      writer.ensureSegmentBreak();
+      writer.ensureSegmentBreak();
+      writer.ensureSegmentBreak();
+      expect(out.buffer).toBe("");
+    });
+
+    it("mid-line appendInline 后 ensureSegmentBreak 也 no-op（不主动收口）", () => {
+      const { writer, out } = makeStdoutWriter();
+      writer.appendInline("接续中");
+      writer.ensureSegmentBreak();
+      writer.line("新段");
+      // 接续中（无 \n） + 新段\n = "接续中新段\n" —— 收口由后续 line 自己保证
+      expect(out.buffer).toBe("接续中新段\n");
+    });
+  });
 });
 
 describe("CliWriter · 接口契约对称性", () => {
@@ -198,6 +242,7 @@ describe("CliWriter · 接口契约对称性", () => {
       expect(typeof w.line).toBe("function");
       expect(typeof w.appendInline).toBe("function");
       expect(typeof w.notify).toBe("function");
+      expect(typeof w.ensureSegmentBreak).toBe("function");
     }
   });
 });

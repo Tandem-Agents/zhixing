@@ -60,6 +60,33 @@ export interface CliWriter {
   notify(text: string): void;
 
   /**
+   * **声明 segment 边界**——caller 在"我即将开始一个新独立段"时显式调用，让底层
+   * 做幂等的视觉间距保证。intent-driven API：表达 caller 的语义意图（"段间应该
+   * 有视觉分隔"），不暴露具体机制（emit `\n` 与否、emit 几个）。
+   *
+   * 典型调用点：
+   *   - tool 卡片首行之前（与上一段卡片/文本拉开 1 空行）
+   *   - 新 paragraph 流首次起手之前（text_delta 首次 feed 前）
+   *   - 外部异步 notification 之前（scheduler / watchdog 等）
+   *   - 任何"我是新段，不要紧贴上一段"的边界
+   *
+   * 设计动机：`line()` 协议只保末尾 \n —— 适合卡片 header + result 这类"紧凑
+   * 成段"场景（卡内不分行）。但段与段之间（card→card / paragraph→card /
+   * card→paragraph 等）需要 1 空行分隔。把"段间间距"作为一等 API 暴露给 caller
+   * 显式声明，而非藏在 line() 内部——避免 line() 语义二义性（同段紧贴 vs 段间
+   * 分隔），让每个 caller 在自己的语义边界处主动声明。
+   *
+   * 双 writer 实现选择（架构对偶）：
+   *   - ScreenWriter（chrome 模式）：转发 ScreenController.ensureScrollLeadingBlank
+   *     —— 基于 ScrollRegion 真实 cursor 行级状态做幂等 emit（上方已空 no-op /
+   *     新行起首补 1 \n / 行中段补 2 \n）
+   *   - StdoutWriter（直写模式）：**no-op** —— pipe / CI / log 场景消费者关心
+   *     stream 格式稳定（ndjson / awk 解析等），无 chrome 视觉协调职责；视觉
+   *     可读性留给 chrome 模式负责
+   */
+  ensureSegmentBreak(): void;
+
+  /**
    * 可选——开启可替换尾段（流式期 replace、闭合时 commit、退化 close）。
    *
    * 仅 cli REPL 持久 chrome 模式（ScreenWriter）实现：转发 ScreenController 的
@@ -98,6 +125,9 @@ export function createScreenWriter(options: ScreenWriterOptions): CliWriter {
     // 而非 no-op，避免互换 writer 实现时行为漂移
     notify(text) {
       screen.writeScrollLine(text);
+    },
+    ensureSegmentBreak() {
+      screen.ensureScrollLeadingBlank();
     },
     beginReplaceableSegment() {
       return screen.beginReplaceableSegment();
@@ -139,5 +169,9 @@ export function createStdoutWriter(
       stdout.write(text);
     },
     notify: writeLine,
+    // StdoutWriter 无 chrome 视觉协调职责——pipe / CI / log 等消费者关心稳定
+    // stream 格式（ndjson / awk 解析等），而非视觉间距。视觉可读性由 chrome
+    // 模式（ScreenWriter）负责。详见接口 ensureSegmentBreak docstring。
+    ensureSegmentBreak: () => {},
   };
 }

@@ -85,6 +85,12 @@ export function createOutputRenderer(
         // 过滤 LLM 在工具调用前的纯空白前导——避免起手就写一个 ◆ 锚但什么都没说
         if (!mdStream && event.text.trim() === "") break;
         if (!mdStream) {
+          // 新 paragraph segment 起手——声明 segment 边界让 chrome 模式做视觉
+          // 间距保证。前一段可能是 tool 卡片 / 用户消息回显 / 另一个收尾的
+          // paragraph。stdout 模式（pipe / CI）下 ensureSegmentBreak 是 no-op，
+          // 保持 stream 格式稳定。
+          writer.ensureSegmentBreak();
+
           // MarkdownStream 协调 paragraph 字符流式（appendInline）+ 闭合 block 独立段
           // （line）+ fenced code block 双态渲染（流式期 dim 占位、闭合时 highlight 替换，
           // 仅 ScreenWriter 提供 segment factory 时启用；StdoutWriter 自动退化为 hold）
@@ -137,6 +143,10 @@ export function createOutputRenderer(
           event.duration,
         );
 
+        // 工具卡片是一个独立 segment（header + result 紧凑两行）——起手前声明
+        // segment 边界让 chrome 模式做视觉间距保证（与前一段 card / paragraph
+        // / 用户消息回显之间 1 空行）。stdout 模式下是 no-op。
+        writer.ensureSegmentBreak();
         // 卡片首行：`◆ Action(target)` 起首与 AI 行同列（layout.contentPrefix）
         writer.line(`${layout.contentPrefix}${colorAnchor("◆")} ${header}`);
         // 续行 ⎿ result：列 2 + 2 = 列 4，与 AI 文字续行 hanging 同基线
