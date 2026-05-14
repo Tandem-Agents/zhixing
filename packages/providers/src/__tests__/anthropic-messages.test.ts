@@ -261,9 +261,17 @@ describe("createAnthropicProvider", () => {
     }
   });
 
-  // ─── Thinking ───
-
-  it("应正确处理 thinking 流式事件", async () => {
+  // ─── Thinking 稳健性兜底 ───
+  //
+  // Claude thinking 模式当前未接入(详见 anthropic-messages.ts 顶部 BlockState
+  // 注释)。但 SDK 升级 / 服务端默认行为变化等场景下,仍可能意外收到 thinking
+  // 块。本测试锁死契约: adapter 静默丢弃 thinking 内容,不崩溃、不 yield
+  // thinking_delta 事件,且不影响同 stream 内其他正常 block(text / tool_use)
+  // 的处理路径。
+  //
+  // 若未来真正接入 Claude thinking,本测试应替换为正向断言("thinking_delta
+  // 正确 yield + signature 累积写入 ThinkingBlock")。
+  it("thinking 块出现时静默丢弃不崩溃 (Claude thinking 未接入的稳健性兜底)", async () => {
     mockCreate.mockResolvedValue(
       mockStream([
         messageStartEvent({ input_tokens: 30, output_tokens: 1 }),
@@ -284,14 +292,18 @@ describe("createAnthropicProvider", () => {
       provider.chat({ model: "claude-sonnet-4-20250514", messages: [userMessage("思考")] }),
     );
 
+    // 锁死: thinking_delta 不产生(adapter 不处理 thinking 块 stream)
     const thinkingEvents = events.filter((e) => e.type === "thinking_delta");
-    expect(thinkingEvents).toHaveLength(2);
-    expect(thinkingEvents[0]).toEqual({ type: "thinking_delta", thinking: "让我思考一下" });
-    expect(thinkingEvents[1]).toEqual({ type: "thinking_delta", thinking: "这个问题..." });
+    expect(thinkingEvents).toHaveLength(0);
 
+    // 锁死: 同 stream 内 text 块仍正常处理,thinking 块不污染后续 block 状态机
     const textEvents = events.filter((e) => e.type === "text_delta");
     expect(textEvents).toHaveLength(1);
     expect(textEvents[0]).toEqual({ type: "text_delta", text: "答案是42" });
+
+    // 锁死: 没有 error event 抛出,处理稳健
+    const errorEvents = events.filter((e) => e.type === "error");
+    expect(errorEvents).toHaveLength(0);
   });
 
   // ─── Token Usage & Cache ───

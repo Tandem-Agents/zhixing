@@ -144,7 +144,12 @@ export const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
     protocol: "anthropic-messages",
     defaultModel: "claude-sonnet-4-20250514",
     quirks: {
-      supportsThinking: true,
+      // Claude thinking(extended thinking)模式当前未接入:
+      //   - anthropic adapter 请求路径未传 thinking 参数,服务端不会进入 thinking 模式
+      //   - 出站不写 thinking block + signature(协议要求 multi-turn replay 带签名)
+      // 保持声明诚实。接入完整路径见 anthropic-messages.ts 顶部 BlockState 注释,
+      // 届时本字段改 true + Anthropic 模型 ModelInfo 标 supportsThinking: true。
+      supportsThinking: false,
       supportsTools: true,
       supportsStreamUsage: true,
     },

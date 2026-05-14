@@ -22,10 +22,22 @@ import type { Message, ContentBlock, ToolSpec } from "@zhixing/core";
 import type { ResolvedProvider } from "../types.js";
 
 // ─── 内部类型 ───
+//
+// Claude thinking 模式当前未接入:
+//   - 请求构造不传 thinking 参数(`params` 字段表里不含 thinking),Claude 4 不会
+//     进入 thinking 模式,服务端不会返回 thinking 块
+//   - 故 BlockState 不需要 thinking 成员;若意外收到 thinking 块(如 SDK 升级 /
+//     未来配置变化),content_block_start 走 fall-through 不 set 任何 state,
+//     后续 thinking_delta 自然无 block 可 set,静默丢弃不崩溃
+//
+// 接入 Claude thinking 模式需要完整链路:
+//   ChatRequest 加 thinking 字段 → 请求传 thinking 参数 → 入站累积 signature →
+//   ThinkingBlock 加 signature 字段 → 出站写 thinking block + signature →
+//   跨 provider 续聊兜底。当前选择不接入,保持声明诚实(presets.anthropic.quirks.
+//   supportsThinking = false)。
 
 type BlockState =
   | { type: "text" }
-  | { type: "thinking" }
   | { type: "tool_use"; id: string; name: string; argsJson: string };
 
 // ─── 工厂函数 ───
@@ -102,8 +114,6 @@ export function createAnthropicProvider(resolved: ResolvedProvider): LLMProvider
               const cb = event.content_block;
               if (cb.type === "text") {
                 blocks.set(event.index, { type: "text" });
-              } else if (cb.type === "thinking") {
-                blocks.set(event.index, { type: "thinking" });
               } else if (cb.type === "tool_use") {
                 blocks.set(event.index, {
                   type: "tool_use",
@@ -113,6 +123,9 @@ export function createAnthropicProvider(resolved: ResolvedProvider): LLMProvider
                 });
                 yield { type: "tool_call_start", id: cb.id, name: cb.name };
               }
+              // 未识别 block 类型(thinking / redacted_thinking / server_tool_use 等)
+              // 不 set BlockState,后续 delta 自然 fall-through 静默丢弃。详见
+              // 顶部 BlockState 注释中"Claude thinking 模式未接入"的说明。
               break;
             }
 
@@ -124,14 +137,6 @@ export function createAnthropicProvider(resolved: ResolvedProvider): LLMProvider
               if (delta.type === "text_delta" && block.type === "text") {
                 yield { type: "text_delta", text: delta.text };
               } else if (
-                delta.type === "thinking_delta" &&
-                block.type === "thinking"
-              ) {
-                yield {
-                  type: "thinking_delta",
-                  thinking: delta.thinking,
-                };
-              } else if (
                 delta.type === "input_json_delta" &&
                 block.type === "tool_use"
               ) {
@@ -142,7 +147,7 @@ export function createAnthropicProvider(resolved: ResolvedProvider): LLMProvider
                   argsFragment: delta.partial_json,
                 };
               }
-              // signature_delta：累积但不发射（由 LLM call 层在需要时使用）
+              // 未识别的 delta 类型(thinking_delta / signature_delta 等)静默丢弃
               break;
             }
 
@@ -239,6 +244,21 @@ function convertContentBlock(
       return { type: "text", text: `[Image: ${block.source.url}]` };
 
     case "thinking":
+      // 跨 provider 续聊兜底,不是 Claude thinking 实现:
+      //
+      // Message.content 是 provider-agnostic 类型,可能携带来自 OpenAI 兼容路径
+      // (DeepSeek v4-pro / Qwen-QwQ / Kimi-thinking 等)的 ThinkingBlock。当用户
+      // 在持久化对话里跨 provider 续聊或 main/secondary 路由分发到 anthropic
+      // 时,这些 block 会流到本 adapter。
+      //
+      // 选择降级为 text 而非抛错:
+      //   - 保留信息(thinking trace 转为普通文本,模型能读到推理痕迹)
+      //   - Anthropic 协议接受任意 text 块,不会因为缺 signature 拒绝
+      //   - 与抛错 / 静默丢弃相比,降级是最稳健的内容保真方案
+      //
+      // 真正接入 Claude thinking 的路径见 BlockState 顶部注释,届时本 case 需要
+      // 区分"来自 anthropic 自己 + 含 signature"与"跨 provider 流入 + 无 signature"
+      // 两种情形分别处理。当前 anthropic thinking 未接入,本 case 仅服务跨 provider 兜底。
       return { type: "text", text: block.thinking };
   }
 }
