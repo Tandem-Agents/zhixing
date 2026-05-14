@@ -12,23 +12,29 @@
  * 工具卡片 / 错误消息等用 writer.line（独立段，自动补 \n）。这是 frame buffer 模式
  * 下的接续合约——line 强制补 \n 会让 chunk 间被分行（视觉退化）。
  *
- * 工具调用职责切分：
- *   - 状态条（动态区）显示 "调用 Read (3s · 等待结果)" 进行中视觉，由 spinner 驱动
- *   - scrollback（永久区）仅在 tool_end 写完成卡片 `◆ Read(target) / ⎿ result`，
- *     成败编码于 ◆ 颜色（绿 / 红）
- *   - tool_start 不直接写 scrollback——避免与状态条职责重叠造成双重显示
+ * 工具调用职责切分（三方协作）：
+ *   - **状态条（动态区）**：显示 "调用 Read (3s · 等待结果)" 进行中视觉，由 spinner
+ *     驱动。走 EventBus tool:call_start/end 路径，独立于本文件。
+ *   - **批次协调器（永久区）**：连续 success tool_end 折叠为 5 行恒定上限批次
+ *     摘要——头部 `⟡ 已使用 N 个工具（分类）· duration` + ⋮ + 近邻 3 详情。
+ *     用 ReplaceableSegment 实时重渲。详见 tool-batch-coordinator.ts。
+ *   - **失败破窗（永久区）**：failure tool_end 由 coordinator.recordFailure 触发
+ *     红色独立 ◆ 行 emit，错误信号永不被批次淹没。
+ *   - tool_start 不直接写 scrollback——进行中视觉由状态条接管，避免双显
+ *
+ * **关键约束（单一活跃 segment）**：
+ *   ScreenController.beginReplaceableSegment 不支持嵌套——markdown stream 的
+ *   code block / list segment 与 batch segment 不可同时活跃。本 dispatcher 在
+ *   每个"换段"边界（text_delta 起手 / sub-agent-status 工具 start / turn_complete）
+ *   调 coordinator.closeBatch 释放，让后续 markdown stream 可安全 begin。
  */
 
 import chalk from "chalk";
 import type { AgentYield } from "@zhixing/core";
 import { getToolRenderStrategy } from "../tool-render-strategy.js";
-import {
-  formatToolHeader,
-  formatToolResult,
-} from "../tool-card-format.js";
 import type { CliWriter } from "../screen/index.js";
-import { layout } from "../tui/style.js";
 import { MarkdownStream, type MarkdownMode } from "./markdown/index.js";
+import { createToolBatchCoordinator } from "./tool-batch-coordinator.js";
 
 export interface OutputRenderer {
   startThinking: () => void;
@@ -64,11 +70,13 @@ export function createOutputRenderer(
     options.columns ?? process.stdout.columns ?? 80;
   const markdownMode: MarkdownMode = options.markdownMode ?? "render";
   let mdStream: MarkdownStream | null = null;
+  const batchCoordinator = createToolBatchCoordinator({ writer });
 
   /**
    * 已开始但未完成的工具调用 input 缓存——AgentYield.tool_end 不携带 input，
-   * 卡片 header 需要 tool_start 时的 input 重建。turn 内 tool 调用配对严格
-   * （每个 tool_start 都有对应 tool_end），end 时取出并清理，结束 turn 自然清空。
+   * 卡片 header / batch 详情行需要 tool_start 时的 input 重建。turn 内 tool 调用
+   * 配对严格（每个 tool_start 都有对应 tool_end），end 时取出并清理，结束 turn
+   * 自然清空。
    */
   const pendingToolInputs = new Map<string, Record<string, unknown>>();
 
@@ -85,10 +93,10 @@ export function createOutputRenderer(
         // 过滤 LLM 在工具调用前的纯空白前导——避免起手就写一个 ◆ 锚但什么都没说
         if (!mdStream && event.text.trim() === "") break;
         if (!mdStream) {
-          // 新 paragraph segment 起手——声明 segment 边界让 chrome 模式做视觉
-          // 间距保证。前一段可能是 tool 卡片 / 用户消息回显 / 另一个收尾的
-          // paragraph。stdout 模式（pipe / CI）下 ensureSegmentBreak 是 no-op，
-          // 保持 stream 格式稳定。
+          // 关键顺序：先 closeBatch 释放 segment（hasActiveSegment=false），再
+          // ensureSegmentBreak 写段间空行，最后 mdStream 创建时再按需 begin 新
+          // segment——保证不触发"single-segment only"约束抛错。
+          batchCoordinator.closeBatch();
           writer.ensureSegmentBreak();
 
           // MarkdownStream 协调 paragraph 字符流式（appendInline）+ 闭合 block 独立段
@@ -121,43 +129,54 @@ export function createOutputRenderer(
 
       case "tool_start": {
         flushTextStream();
-        if (getToolRenderStrategy(event.name) !== "default") break;
-        // 仅缓存 input 给 tool_end 用——进行中视觉由状态条接管，scrollback 在
-        // 完成时一次性写卡片（避免双区双显）
+        const strategy = getToolRenderStrategy(event.name);
+        if (strategy === "sub-agent-status") {
+          // Task —— status-bar 接管「父任务 + 子 agent」层次化进度展示。先关闭
+          // 当前 batch 让 Task 视觉独立呈现，避免与前序工具批次粘连。
+          batchCoordinator.closeBatch();
+          break;
+        }
+        // default + side-effect 都需要缓存 input 给 tool_end 用（构建 batch 详情
+        // 行 / 副作用单行）。进行中视觉由状态条接管，scrollback 在 tool_end 时
+        // 由 coordinator 按策略分流（折叠 vs 独立成行）。
+        //   - default 的 batch close 由 coordinator 在新 batch 开始 / text_delta /
+        //     turn_complete / Task start 等边界触发
+        //   - side-effect 的 batch close 由 coordinator.recordSideEffect 内部触发
         pendingToolInputs.set(event.id, event.input);
         break;
       }
 
       case "tool_end": {
-        if (getToolRenderStrategy(event.name) !== "default") break;
+        const strategy = getToolRenderStrategy(event.name);
+        // sub-agent-status（Task）走 status-bar 接管的层次化进度展示——主路径静默
+        if (strategy === "sub-agent-status") break;
+
         const input = pendingToolInputs.get(event.id) ?? {};
         pendingToolInputs.delete(event.id);
 
-        const isError = event.result.isError ?? false;
-        const colorAnchor = isError ? chalk.red : chalk.green;
-
-        const header = formatToolHeader(event.name, input);
-        const result = formatToolResult(
-          event.name,
-          event.result,
-          event.duration,
-        );
-
-        // 工具卡片是一个独立 segment（header + result 紧凑两行）——起手前声明
-        // segment 边界让 chrome 模式做视觉间距保证（与前一段 card / paragraph
-        // / 用户消息回显之间 1 空行）。stdout 模式下是 no-op。
-        writer.ensureSegmentBreak();
-        // 卡片首行：`◆ Action(target)` 起首与 AI 行同列（layout.contentPrefix）
-        writer.line(`${layout.contentPrefix}${colorAnchor("◆")} ${header}`);
-        // 续行 ⎿ result：列 2 + 2 = 列 4，与 AI 文字续行 hanging 同基线
-        writer.line(
-          `${layout.contentPrefix}  ${chalk.dim(`⎿ ${result}`)}`,
-        );
+        const snapshot = {
+          name: event.name,
+          input,
+          result: event.result,
+          duration: event.duration,
+        };
+        // 失败统一走 recordFailure 红色破窗——不论 default / side-effect 策略,
+        // 错误信号统一最高优先级展示，让用户绝不可能漏看
+        if (event.result.isError === true) {
+          batchCoordinator.recordFailure(snapshot);
+        } else if (strategy === "side-effect") {
+          // 副作用工具（write/edit/schedule）—— 独立成行 ✎ 锚，永不折叠
+          batchCoordinator.recordSideEffect(snapshot);
+        } else {
+          // 探索类工具（default）—— 入 batch 折叠展示
+          batchCoordinator.recordSuccess(snapshot);
+        }
         break;
       }
 
       case "turn_complete":
         flushTextStream();
+        batchCoordinator.closeBatch();
         // turn 结束兜底清理——正常路径每个 tool_start 都配对 tool_end，
         // 此处仅防御异常断开（如流被中断时未匹配的 tool_start）
         pendingToolInputs.clear();
@@ -179,6 +198,7 @@ export function createOutputRenderer(
 
     stop() {
       flushTextStream();
+      batchCoordinator.dispose();
       pendingToolInputs.clear();
     },
   };

@@ -2,31 +2,49 @@ import { describe, expect, it } from "vitest";
 import { createOutputRenderer } from "../output-renderer.js";
 import { stripAnsi } from "../../tui/ansi.js";
 import type { CliWriter } from "../../screen/index.js";
+import type {
+  ReplaceableSegmentHandle,
+} from "../../screen/screen-controller.js";
 
 /**
- * 测试 mock writer —— 双轨记录：
- *   - `buffer`：累积输出（用于内容断言：`◆ Read(...)` 等字面包含检查）
- *   - `events`：调用序列（用于编排断言：ensureSegmentBreak 在何时被调）
+ * 测试 mock writer ——双轨记录 + chrome 模式（提供 beginReplaceableSegment）：
+ *   - `buffer`：累积输出（用于内容断言：◆ 锚、Read(...)、error 文本等字面包含）
+ *   - `events`：调用序列（用于编排断言：ensureSegmentBreak / line / 段操作 顺序）
  *
- * 模仿 StdoutWriter 行为（直输 + ensureSegmentBreak no-op）—— 与生产中
- * StdoutWriter "无 chrome 视觉协调" 的契约一致。chrome 模式下 ScreenWriter 的
- * 段间视觉效果由 cli-writer.test.ts ScreenWriter 单测专门验证。
+ * chrome 模式让 batch coordinator 走 ReplaceableSegment 流式路径——测试覆盖
+ * "coordinator 接管 tool_end / closeBatch 在边界触发"的契约。stdout 退化路径
+ * （无 beginReplaceableSegment）的行为单独在 tool-batch-coordinator.test.ts 覆盖。
  */
+type CaptureEvent =
+  | { kind: "line"; text: string }
+  | { kind: "appendInline"; text: string }
+  | { kind: "notify"; text: string }
+  | { kind: "ensureSegmentBreak" }
+  | { kind: "beginReplaceableSegment" }
+  | { kind: "seg.replace"; text: string }
+  | { kind: "seg.commit"; text: string }
+  | { kind: "seg.close" };
+
 interface CapturedWriter extends CliWriter {
   buffer: string;
-  events: Array<{ kind: "line" | "appendInline" | "notify" | "ensureSegmentBreak"; text?: string }>;
+  events: CaptureEvent[];
+  segments: ReplaceableSegmentHandle[];
 }
 
 function makeCaptureWriter(): CapturedWriter {
   let buffer = "";
-  const events: CapturedWriter["events"] = [];
+  const events: CaptureEvent[] = [];
+  const segments: ReplaceableSegmentHandle[] = [];
 
-  return {
+  const writer: CapturedWriter = {
     get buffer() {
       return buffer;
     },
     get events() {
       return events;
+    },
+    get segments() {
+      return segments;
     },
     line(text) {
       events.push({ kind: "line", text });
@@ -46,10 +64,30 @@ function makeCaptureWriter(): CapturedWriter {
     ensureSegmentBreak() {
       events.push({ kind: "ensureSegmentBreak" });
     },
-  } as CapturedWriter;
+    beginReplaceableSegment() {
+      events.push({ kind: "beginReplaceableSegment" });
+      const handle: ReplaceableSegmentHandle = {
+        replace(text) {
+          events.push({ kind: "seg.replace", text });
+        },
+        commit(text) {
+          events.push({ kind: "seg.commit", text });
+          // commit 时把内容追加进 buffer 让内容断言可见
+          buffer += stripAnsi(text);
+          if (!text.endsWith("\n")) buffer += "\n";
+        },
+        close() {
+          events.push({ kind: "seg.close" });
+        },
+      };
+      segments.push(handle);
+      return handle;
+    },
+  };
+  return writer;
 }
 
-describe("createOutputRenderer · 工具卡片渲染", () => {
+describe("createOutputRenderer · 工具事件分流", () => {
   it("default 工具 tool_start 不立即写 scrollback——进行中视觉由状态条接管", () => {
     const writer = makeCaptureWriter();
     const renderer = createOutputRenderer({ writer });
@@ -62,7 +100,7 @@ describe("createOutputRenderer · 工具卡片渲染", () => {
     expect(writer.buffer).toBe("");
   });
 
-  it("Task 工具 tool_start → 主路径完全静默（sub-agent-status 接管）", () => {
+  it("Task 工具 tool_start → 主路径不直接 emit（sub-agent-status 接管视觉）", () => {
     const writer = makeCaptureWriter();
     const renderer = createOutputRenderer({ writer });
     renderer.handleEvent({
@@ -71,10 +109,14 @@ describe("createOutputRenderer · 工具卡片渲染", () => {
       name: "Task",
       input: { description: "x", prompt: "..." },
     });
-    expect(writer.buffer).toBe("");
+    // Task 自身不产生 line / segment.replace 等渲染操作
+    expect(writer.events.some((e) => e.kind === "line")).toBe(false);
+    expect(writer.events.some((e) => e.kind === "beginReplaceableSegment")).toBe(
+      false,
+    );
   });
 
-  it("Task 工具 tool_end → 主路径完全静默", () => {
+  it("Task 工具 tool_end → 主路径完全静默（不入 batch、不破窗）", () => {
     const writer = makeCaptureWriter();
     const renderer = createOutputRenderer({ writer });
     renderer.handleEvent({
@@ -84,10 +126,95 @@ describe("createOutputRenderer · 工具卡片渲染", () => {
       result: { content: "ok", isError: false },
       duration: 100,
     });
-    expect(writer.buffer).toBe("");
+    expect(writer.events).toEqual([]);
   });
 
-  it("default 工具 tool_end 渲染 ◆ Action(target) + ⎿ result 双行卡片", () => {
+  it("side-effect 工具 tool_end (success) → 独立成行 ✎（不入 batch，不开 segment）", () => {
+    const writer = makeCaptureWriter();
+    const renderer = createOutputRenderer({ writer });
+    renderer.handleEvent({
+      type: "tool_start",
+      id: "tc1",
+      name: "edit",
+      input: { path: "auth.ts" },
+    });
+    renderer.handleEvent({
+      type: "tool_end",
+      id: "tc1",
+      name: "edit",
+      result: { content: "applied", isError: false },
+      duration: 42,
+    });
+    // 副作用走 line emit，不开 segment
+    expect(writer.segments).toHaveLength(0);
+    const out = stripAnsi(writer.buffer);
+    expect(out).toContain("✎");
+    expect(out).toContain("Edit auth.ts");
+    expect(out).toContain("applied");
+  });
+
+  it("混合 read + edit + read → 探索入 batch、edit 独立成行 ✎、新探索起新 batch", () => {
+    const writer = makeCaptureWriter();
+    const renderer = createOutputRenderer({ writer });
+    // 探索 1：read
+    renderer.handleEvent({
+      type: "tool_start",
+      id: "t1",
+      name: "read",
+      input: { path: "a.ts" },
+    });
+    renderer.handleEvent({
+      type: "tool_end",
+      id: "t1",
+      name: "read",
+      result: { content: "x", isError: false },
+      duration: 5,
+    });
+    // 副作用：edit
+    renderer.handleEvent({
+      type: "tool_start",
+      id: "t2",
+      name: "edit",
+      input: { path: "auth.ts" },
+    });
+    renderer.handleEvent({
+      type: "tool_end",
+      id: "t2",
+      name: "edit",
+      result: { content: "applied", isError: false },
+      duration: 12,
+    });
+    // 验证 1：read
+    renderer.handleEvent({
+      type: "tool_start",
+      id: "t3",
+      name: "read",
+      input: { path: "b.ts" },
+    });
+    renderer.handleEvent({
+      type: "tool_end",
+      id: "t3",
+      name: "read",
+      result: { content: "y", isError: false },
+      duration: 5,
+    });
+    renderer.handleEvent({
+      type: "turn_complete",
+      turnCount: 1,
+      usage: { inputTokens: 0, outputTokens: 0 },
+    });
+    // 探索类应起两个独立 batch（edit 在中间破窗）
+    expect(writer.segments).toHaveLength(2);
+    const out = stripAnsi(writer.buffer);
+    // 三者都可见
+    expect(out).toContain("Read a.ts");
+    expect(out).toContain("Edit auth.ts");
+    expect(out).toContain("Read b.ts");
+    // 副作用锚 ✎ 出现
+    expect(out).toContain("✎");
+  });
+
+  it("default 工具 tool_end (success) → coordinator 接管：起 segment + replace 累积", () => {
     const writer = makeCaptureWriter();
     const renderer = createOutputRenderer({ writer });
     renderer.handleEvent({
@@ -103,14 +230,15 @@ describe("createOutputRenderer · 工具卡片渲染", () => {
       result: { content: "line1\nline2\nline3", isError: false },
       duration: 50,
     });
-    const out = stripAnsi(writer.buffer);
-    expect(out).toContain("◆");
-    expect(out).toContain("Read(a.ts)");
-    expect(out).toContain("⎿");
-    expect(out).toContain("3 lines");
+    // coordinator 起 segment 并 replace，未触发 line（折叠展示由 segment 持有）
+    const kinds = writer.events.map((e) => e.kind);
+    expect(kinds).toContain("beginReplaceableSegment");
+    expect(kinds).toContain("seg.replace");
+    // 不再以 line 形式 emit 工具卡片（旧契约已废弃）
+    expect(writer.events.filter((e) => e.kind === "line")).toHaveLength(0);
   });
 
-  it("失败工具 tool_end —— ◆ 锚 + Action(target) + error 首行", () => {
+  it("失败工具 tool_end → 破窗 emit 红色独立 ◆ 行（含 Action(target) + ⎿ + error）", () => {
     const writer = makeCaptureWriter();
     const renderer = createOutputRenderer({ writer });
     renderer.handleEvent({
@@ -129,10 +257,11 @@ describe("createOutputRenderer · 工具卡片渲染", () => {
     const out = stripAnsi(writer.buffer);
     expect(out).toContain("◆");
     expect(out).toContain("Read(missing.ts)");
+    expect(out).toContain("⎿");
     expect(out).toContain("ENOENT: no such file");
   });
 
-  it("混合序列 read + Task + write —— Task 静默 / read 与 write 各产生卡片", () => {
+  it("混合序列 read + Task + write —— Task 静默 / read 入 batch / write 走 ✎ 副作用单行", () => {
     const writer = makeCaptureWriter();
     const renderer = createOutputRenderer({ writer });
     renderer.handleEvent({
@@ -174,20 +303,26 @@ describe("createOutputRenderer · 工具卡片渲染", () => {
       result: { content: "done", isError: false },
       duration: 5,
     });
+    renderer.handleEvent({
+      type: "turn_complete",
+      turnCount: 1,
+      usage: { inputTokens: 0, outputTokens: 0 },
+    });
 
+    // 关键契约：read 进 batch 起 1 segment；Task 主路径静默；write 是副作用走
+    // 独立 ✎ 行（不入 batch、不开 segment）—— 故 segments.length === 1
+    expect(writer.segments).toHaveLength(1);
     const out = stripAnsi(writer.buffer);
-    expect(out).toContain("Read(a.ts)");
-    expect(out).toContain("Write(b.ts)");
-    expect(out).not.toContain("Task(");
-    // ◆ 锚出现两次（read + write 各一）
-    const anchors = out.match(/◆/g) ?? [];
-    expect(anchors.length).toBe(2);
+    expect(out).toContain("Read");
+    expect(out).toContain("Write b.ts");
+    expect(out).toContain("✎"); // 副作用锚
+    expect(out).not.toContain("Task "); // Task 主路径不渲染
   });
 
-  it("turn_complete 清理未配对的 pendingToolInputs（防御性 invariant）", () => {
+  it("turn_complete 清理未配对的 pendingToolInputs（异常路径防御）", () => {
     const writer = makeCaptureWriter();
     const renderer = createOutputRenderer({ writer });
-    // 异常路径：tool_start 后流被打断，没有 tool_end，turn_complete 兜底清理
+    // 异常路径：tool_start 后流被打断，无 tool_end；turn_complete 兜底清理
     renderer.handleEvent({
       type: "tool_start",
       id: "orphan",
@@ -199,7 +334,7 @@ describe("createOutputRenderer · 工具卡片渲染", () => {
       turnCount: 1,
       usage: { inputTokens: 0, outputTokens: 0 },
     });
-    // 下一轮起步——同 id（orphan）的 tool_end 不应再渲染（缓存已清理，input 退化为空）
+    // 下一轮 —— 同 id（orphan）的 tool_end input 应已被清理（退化为空 input）
     renderer.handleEvent({
       type: "tool_end",
       id: "orphan",
@@ -207,102 +342,139 @@ describe("createOutputRenderer · 工具卡片渲染", () => {
       result: { content: "x\ny", isError: false },
       duration: 5,
     });
+    // batch 详情行的 target 来自 input.path——清理后退化为空 target，
+    // 仅显示 `Read · 2 lines` 而非 `Read a.ts · 2 lines`
+    renderer.handleEvent({
+      type: "turn_complete",
+      turnCount: 2,
+      usage: { inputTokens: 0, outputTokens: 0 },
+    });
     const out = stripAnsi(writer.buffer);
-    // header 退化为 `Read`（无 target），证明 input 已被 turn_complete 清理
     expect(out).toContain("Read");
-    expect(out).not.toContain("Read(a.ts)");
+    expect(out).not.toContain("Read a.ts");
+  });
+});
+
+describe("createOutputRenderer · 段间编排（coordinator + ensureSegmentBreak）", () => {
+  // 架构契约：
+  //   - 每个 batch 起手由 coordinator 内部调 ensureSegmentBreak（段间空行）+
+  //     beginReplaceableSegment（流式重渲基础）
+  //   - text_delta 起手前调 closeBatch（释放 segment 让 mdStream 可安全 begin）
+  //     + 自身 ensureSegmentBreak（paragraph 起手空行）
+  //   - turn_complete 触发 closeBatch（commit batch）
+  //   - sub-agent-status 工具 start 触发 closeBatch（让 status-bar 接管视觉）
+
+  it("text_delta 起手前 closeBatch + ensureSegmentBreak（释放 segment 防嵌套）", () => {
+    const writer = makeCaptureWriter();
+    const renderer = createOutputRenderer({ writer });
+    // 先开一个 batch
+    renderer.handleEvent({
+      type: "tool_start",
+      id: "t1",
+      name: "read",
+      input: { path: "a.ts" },
+    });
+    renderer.handleEvent({
+      type: "tool_end",
+      id: "t1",
+      name: "read",
+      result: { content: "ok", isError: false },
+      duration: 5,
+    });
+    // 此时有活跃 batch segment。下一个 text_delta 必须先 commit
+    renderer.handleEvent({ type: "text_delta", text: "段落内容" });
+    renderer.stop();
+    // 必须有至少一个 seg.commit（关闭旧 batch）
+    expect(writer.events.some((e) => e.kind === "seg.commit")).toBe(true);
+    // commit 必须发生在 text_delta 引发的 ensureSegmentBreak 之前
+    const commitIdx = writer.events.findIndex((e) => e.kind === "seg.commit");
+    // 后续才出现 paragraph 内容 emit
+    const firstAppendIdx = writer.events.findIndex(
+      (e) => e.kind === "appendInline",
+    );
+    expect(firstAppendIdx).toBeGreaterThan(commitIdx);
   });
 
-  describe("段间编排（ensureSegmentBreak 在每个独立 segment 起手处声明）", () => {
-    // 架构契约：output-renderer 在每个独立 segment（tool 卡片 / 新 paragraph）
-    // 起手处主动调 writer.ensureSegmentBreak() 声明段边界。底层 ScreenWriter
-    // 据此 emit 视觉间距；StdoutWriter no-op 保持 stream 格式稳定。
-    //
-    // 测试关注点：编排（output-renderer 是否在正确时机调 ensureSegmentBreak），
-    // 而非底层视觉效果（视觉间距由 cli-writer.test.ts 单测 ScreenWriter 转发
-    // 行为验证）。本套测试只断言"调用序列"，不依赖具体 writer 实现的视觉机制。
-
-    /** 抓取所有 ensureSegmentBreak 调用相对于 line/appendInline 调用的索引位置 */
-    const segmentBreakIndices = (writer: CapturedWriter): number[] =>
-      writer.events
-        .map((e, i) => (e.kind === "ensureSegmentBreak" ? i : -1))
-        .filter((i) => i >= 0);
-
-    it("每个 tool_end 起手前调一次 ensureSegmentBreak（卡间编排）", () => {
-      const writer = makeCaptureWriter();
-      const renderer = createOutputRenderer({ writer });
-      for (const id of ["t1", "t2", "t3"]) {
-        renderer.handleEvent({
-          type: "tool_start",
-          id,
-          name: "read",
-          input: { path: `${id}.ts` },
-        });
-        renderer.handleEvent({
-          type: "tool_end",
-          id,
-          name: "read",
-          result: { content: "ok", isError: false },
-          duration: 5,
-        });
-      }
-      // 3 个 tool_end → 3 次 ensureSegmentBreak
-      expect(segmentBreakIndices(writer)).toHaveLength(3);
-      // 每个 ensureSegmentBreak 紧跟 2 行 line（header + result）
-      for (const idx of segmentBreakIndices(writer)) {
-        expect(writer.events[idx + 1]?.kind).toBe("line");
-        expect(writer.events[idx + 2]?.kind).toBe("line");
-      }
+  it("turn_complete 触发 closeBatch（commit segment）", () => {
+    const writer = makeCaptureWriter();
+    const renderer = createOutputRenderer({ writer });
+    renderer.handleEvent({
+      type: "tool_start",
+      id: "t1",
+      name: "read",
+      input: { path: "a.ts" },
     });
-
-    it("text_delta 首次 feed 前调一次 ensureSegmentBreak（paragraph 起手编排）", () => {
-      const writer = makeCaptureWriter();
-      const renderer = createOutputRenderer({ writer });
-      renderer.handleEvent({ type: "text_delta", text: "段落内容" });
-      renderer.stop();
-      // 至少 1 次 ensureSegmentBreak（paragraph 起手）
-      const breaks = segmentBreakIndices(writer);
-      expect(breaks.length).toBeGreaterThanOrEqual(1);
-      // 首个 ensureSegmentBreak 在第一次 appendInline / line 之前
-      const firstBreak = breaks[0]!;
-      const firstContent = writer.events.findIndex(
-        (e) => e.kind === "appendInline" || e.kind === "line",
-      );
-      expect(firstBreak).toBeLessThan(firstContent);
+    renderer.handleEvent({
+      type: "tool_end",
+      id: "t1",
+      name: "read",
+      result: { content: "ok", isError: false },
+      duration: 5,
     });
-
-    it("paragraph → tool → paragraph 编排：3 个 segment 边界各调一次 ensureSegmentBreak", () => {
-      const writer = makeCaptureWriter();
-      const renderer = createOutputRenderer({ writer });
-      // paragraph A
-      renderer.handleEvent({ type: "text_delta", text: "段落 A" });
-      // tool 卡片（flushTextStream 关闭 mdStream）
-      renderer.handleEvent({
-        type: "tool_start",
-        id: "t1",
-        name: "read",
-        input: { path: "x.ts" },
-      });
-      renderer.handleEvent({
-        type: "tool_end",
-        id: "t1",
-        name: "read",
-        result: { content: "ok", isError: false },
-        duration: 5,
-      });
-      // paragraph B（mdStream 已 null → 重新创建 + 触发 ensureSegmentBreak）
-      renderer.handleEvent({ type: "text_delta", text: "段落 B" });
-      renderer.stop();
-      // 3 次 ensureSegmentBreak：paragraph A 起手 / tool_end 起手 / paragraph B 起手
-      expect(segmentBreakIndices(writer)).toHaveLength(3);
+    renderer.handleEvent({
+      type: "turn_complete",
+      turnCount: 1,
+      usage: { inputTokens: 0, outputTokens: 0 },
     });
+    expect(writer.events.filter((e) => e.kind === "seg.commit")).toHaveLength(
+      1,
+    );
+  });
 
-    it("text_delta 纯空白前导被过滤——不创建 mdStream、不调 ensureSegmentBreak", () => {
-      const writer = makeCaptureWriter();
-      const renderer = createOutputRenderer({ writer });
-      // 纯 \n / 空格 起手——output-renderer 跳过（避免起一个 ◆ 锚但什么都没说）
-      renderer.handleEvent({ type: "text_delta", text: "  \n\n" });
-      expect(segmentBreakIndices(writer)).toEqual([]);
+  it("Task tool_start 触发 closeBatch（让 status-bar 接管 sub-agent-status 视觉）", () => {
+    const writer = makeCaptureWriter();
+    const renderer = createOutputRenderer({ writer });
+    // 一个 default 工具进 batch
+    renderer.handleEvent({
+      type: "tool_start",
+      id: "t1",
+      name: "read",
+      input: { path: "a.ts" },
     });
+    renderer.handleEvent({
+      type: "tool_end",
+      id: "t1",
+      name: "read",
+      result: { content: "ok", isError: false },
+      duration: 5,
+    });
+    // Task tool_start 触发 closeBatch（commit segment）
+    renderer.handleEvent({
+      type: "tool_start",
+      id: "t2",
+      name: "Task",
+      input: { description: "x", prompt: "..." },
+    });
+    expect(writer.events.some((e) => e.kind === "seg.commit")).toBe(true);
+  });
+
+  it("text_delta 纯空白前导被过滤——不创建 mdStream、不调 closeBatch", () => {
+    const writer = makeCaptureWriter();
+    const renderer = createOutputRenderer({ writer });
+    // 纯 \n / 空格 起手——output-renderer 跳过（避免起一个 paragraph 锚但什么都没说）
+    renderer.handleEvent({ type: "text_delta", text: "  \n\n" });
+    expect(writer.events).toEqual([]);
+  });
+
+  it("renderer.stop → coordinator.dispose 触发 closeBatch（commit segment）", () => {
+    const writer = makeCaptureWriter();
+    const renderer = createOutputRenderer({ writer });
+    renderer.handleEvent({
+      type: "tool_start",
+      id: "t1",
+      name: "read",
+      input: { path: "a.ts" },
+    });
+    renderer.handleEvent({
+      type: "tool_end",
+      id: "t1",
+      name: "read",
+      result: { content: "ok", isError: false },
+      duration: 5,
+    });
+    renderer.stop();
+    expect(writer.events.filter((e) => e.kind === "seg.commit")).toHaveLength(
+      1,
+    );
   });
 });

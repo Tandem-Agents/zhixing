@@ -23,12 +23,36 @@
 /**
  * 工具呈现策略枚举。
  *
- * - `default`:           主路径 renderer.handleEvent 渲染单行 ⟡ 卡片
- *                        (read / write / bash / grep / glob 等多数工具)
- * - `sub-agent-status`:  主路径不渲染,setupSubAgentStatus 接管层次化状态条
- *                        (Task 工具:展开父任务 + 子 agent 工具进度)
+ * - `default`:           探索类工具(read / glob / grep / bash / web_fetch 等)。
+ *                        走 ToolBatchCoordinator 折叠为「⟡ 已使用 N 个工具」批次摘要。
+ *                        探索是 AI「思考过程」,批量折叠为次级视觉。
+ * - `side-effect`:       副作用类工具(write / edit / schedule)——改变持久状态。
+ *                        **永不折叠**,独立成行 ✎ 锚展示,让用户随时知道「AI 改了
+ *                        我什么」。
+ *
+ *                        **二义性工具排除**(按 input.action 决定读/写性质的工具
+ *                        统一归 default,避免静态 strategy 错误归类把"AI 在查"
+ *                        与"AI 在改"混在一起):
+ *                          - bash:    `ls` 读 vs `npm install` 写
+ *                          - memory:  `search / list` 读 vs `save / update / delete` 写
+ *                                     (实测 LLM 高频 list / search,把 memory 整体
+ *                                     归 side-effect 会让真正 save 的视觉信号被
+ *                                     5 倍 list/search 的 ✎ 行稀释,违反"副作用必须
+ *                                     可见"产品原则)
+ *                          - web_fetch: stateless 网络请求归探索,非副作用
+ * - `sub-agent-status`:  主路径不渲染,status-bar 接管层次化状态条(Task 工具)。
+ *
+ * 设计意图——LLM 行为相位「探索→决策→行动→验证」与渲染锚的语义映射:
+ *   - ◆ AI 决策/答案(text_delta)
+ *   - ⟡ 探索批次(default → batch coordinator)
+ *   - ✎ 副作用(side-effect → 单行突出)
+ *   - ◆ 红色 失败破窗(任意策略的 isError tool_end)
+ * 用户扫一眼 scrollback 即可重构 AI 工作流,这是知行 agent UX 的产品基石。
  */
-export type ToolRenderStrategy = "default" | "sub-agent-status";
+export type ToolRenderStrategy =
+  | "default"
+  | "side-effect"
+  | "sub-agent-status";
 
 /**
  * 工具名 → 渲染策略 的注册表。未在表中的工具按 default 策略渲染。
@@ -37,14 +61,23 @@ export type ToolRenderStrategy = "default" | "sub-agent-status";
  *   - 编译期:`Readonly<Record>` 类型禁止赋值/删除字段
  *   - 运行期:`Object.freeze` 让任何 mutate 在 strict mode 下抛 TypeError
  *
- * 为什么强制 freeze:本表是"哪个工具走非默认渲染"的全局事实源,
- * 任何运行期 mutate 都会破坏 `renderer.handleEvent` 与 `setupSubAgentStatus`
- * 的双侧渲染契约,引入双重渲染回归。Readonly 类型只能拦编译期失误,
- * freeze 是对运行期(动态属性写入 / Object.assign / Reflect.set 等)的兜底防御。
+ * 为什么强制 freeze:本表是「哪个工具走非默认渲染」的全局事实源,任何运行期 mutate
+ * 都会破坏多侧消费方(renderer.handleEvent / batch coordinator / status-bar)的渲染
+ * 契约,引入双重渲染回归。Readonly 类型只能拦编译期失误,freeze 是对运行期
+ * (动态属性写入 / Object.assign / Reflect.set 等)的兜底防御。
+ *
+ * **副作用白名单维护准则**:
+ *   - 只加「100% 改变持久状态」的工具(write/edit/schedule 是清晰副作用)
+ *   - 不加二义性工具(bash 命令既能 ls 也能 npm install,静态分类必错)
+ *   - 不加 stateless 工具(web_fetch 网络请求归探索,非副作用)
+ *   - 加表需同步更新本文件 byte-equal 锚点断言 + 文档,强迫意识到"产品决策"
  */
 export const TOOL_RENDER_STRATEGY: Readonly<Record<string, ToolRenderStrategy>> =
   Object.freeze({
     Task: "sub-agent-status",
+    write: "side-effect",
+    edit: "side-effect",
+    schedule: "side-effect",
   } as const);
 
 /**
