@@ -159,7 +159,7 @@ describe("runSubAgentLoop · max_turns budget", () => {
 // ─── error ───
 
 describe("runSubAgentLoop · error path", () => {
-  it("provider 第一次 chat 流式 error → reason=error,函数本身不 throw", async () => {
+  it("provider 第一次 chat 流式 error → reason=error,函数本身不 throw,error 字段透传 AgentError(type+message)", async () => {
     const provider = new MockLLMProvider([
       { error: new Error("upstream connection refused") },
     ]);
@@ -169,6 +169,20 @@ describe("runSubAgentLoop · error path", () => {
     expect(result.reason).toBe("error");
     expect(result.budgetExceededKind).toBeUndefined();
     expect(result.abortReason).toBeUndefined();
+    // Layer 1 透传契约:reason="error" 时 error 字段含 AgentError 结构化字段。
+    // llm-call.ts 把 LLM stream Error 包成 AgentError(type="provider_error"),
+    // loop-runner 透传 type + message,让上层 factory.deriveErrorMeta 拿到真实
+    // 诊断信息(而非"agent_error"占位)。
+    expect(result.error).toBeDefined();
+    expect(result.error?.type).toBe("provider_error");
+    expect(result.error?.message).toContain("upstream connection refused");
+  });
+
+  it("非 error 路径(completed)error 字段为 undefined(只有 reason=error 时透传)", async () => {
+    const provider = new MockLLMProvider([{ text: "task done" }]);
+    const result = await runSubAgentLoop(makeBaseOpts(provider));
+    expect(result.reason).toBe("completed");
+    expect(result.error).toBeUndefined();
   });
 });
 

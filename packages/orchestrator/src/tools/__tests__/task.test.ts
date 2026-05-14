@@ -158,25 +158,29 @@ describe("formatChildResultAsToolResult · completed", () => {
 // ─── A. 三态格式化:failed ───
 
 describe("formatChildResultAsToolResult · failed", () => {
-  it("头部 [Task \"X\" failed: msg] + isError=true", () => {
+  it("头部 [Task \"X\" failed (<type>): msg] + isError=true", () => {
     const r = makeResult({
       status: "failed",
       finalAssistantText: "",
-      error: { message: "provider timeout", type: "agent_error" },
+      error: { message: "provider timeout", type: "provider_error" },
     });
 
     const tr = formatChildResultAsToolResult(r, "fetch data");
 
     expect(tr.isError).toBe(true);
-    expect(tr.content.startsWith('[Task "fetch data" failed: provider timeout]')).toBe(
-      true,
-    );
+    // type tag 让主 LLM 拿到结构化 error 分类(provider_error / context_overflow /
+    // rate_limit / ...),据此自主决策。比纯文本前缀更易解析。
+    expect(
+      tr.content.startsWith(
+        '[Task "fetch data" failed (provider_error): provider timeout]',
+      ),
+    ).toBe(true);
   });
 
   it("有 partial 时拼接 Partial output 段", () => {
     const r = makeResult({
       status: "failed",
-      error: { message: "x", type: "y" },
+      error: { message: "x", type: "unknown_error" },
       partial: "step 1 done\nstep 2 in progress",
     });
 
@@ -447,7 +451,7 @@ describe("createTaskTool.call · 集成 happy path", () => {
     expect(tr.content).toMatch(/<usage>tokens: \d+, tool_uses: 0, duration_ms: \d+, sub_id: [0-9a-f]{6}<\/usage>/);
   });
 
-  it("provider error → ToolResult 含 [Task X failed: ...] + isError=true(永不抛)", async () => {
+  it("provider error → ToolResult 含 [Task X failed (<type>): ...] + isError=true(永不抛) + 透传真实 type/message", async () => {
     const provider = new MockLLMProvider([
       { error: new Error("upstream rejected") },
     ]);
@@ -460,7 +464,12 @@ describe("createTaskTool.call · 集成 happy path", () => {
     );
 
     expect(tr.isError).toBe(true);
-    expect(tr.content).toContain('[Task "fetch" failed:');
+    // 真实 AgentError type 透传(provider_error)+ message 文本透传 → 主 LLM 拿到
+    // 结构化诊断信号。历史输出"[Task fetch failed: sub-agent loop terminated
+    // with error]"是占位丢信息;修复后是"[Task fetch failed (provider_error):
+    // upstream rejected]"含完整诊断。
+    expect(tr.content).toContain('[Task "fetch" failed (provider_error):');
+    expect(tr.content).toContain("upstream rejected");
   });
 
   it("emptyUsage helper 验证 —— 兜底用例,确保 inputTokens+outputTokens=0 时 tokens 字段为 0", () => {

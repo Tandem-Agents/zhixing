@@ -198,11 +198,19 @@ export function formatChildResultAsToolResult(
 
     case "failed": {
       const errMsg = result.error?.message ?? "unknown error";
+      // type tag 让主 LLM 拿到结构化 error 分类(SubAgentErrorType),据此自主决策:
+      //   provider_error / rate_limit → 重试 / 等待
+      //   context_overflow / sub_agent_context_overflow → 切片子任务
+      //   max_turns_exceeded → 调高 budget 或拆任务
+      //   auth → 提示用户检查配置
+      // 比文本前缀("failed:")更可解析,且避免主 LLM 对 message 做 substring 匹配。
+      // 缺失场景理论不可达(deriveErrorMeta 总返 type),保留兜底兼容历史结果。
+      const typeTag = result.error?.type ? ` (${result.error.type})` : "";
       const partialBlock = result.partial
         ? `Partial output:\n${result.partial}\n\n`
         : "";
       return {
-        content: `[Task "${description}" failed: ${errMsg}]\n\n${partialBlock}${usageTag}`,
+        content: `[Task "${description}" failed${typeTag}: ${errMsg}]\n\n${partialBlock}${usageTag}`,
         isError: true,
       };
     }

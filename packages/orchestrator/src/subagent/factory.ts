@@ -25,6 +25,7 @@ import {
   createEventBus,
   emptyUsage,
   type AbortReason,
+  type AgentErrorType,
   type AgentEventMap,
   type EventBus,
   type IConfirmationBroker,
@@ -49,6 +50,42 @@ import {
 import { runSubAgentLoop, type SubAgentLoopResult } from "./loop-runner.js";
 
 // ─── 公共类型 ───
+
+/**
+ * 子 agent 失败的结构化错误类型。
+ *
+ * 两类来源合并为单一联合,让 ChildAgentResult.error.type 字段编译期可枚举,
+ * 避免散落字符串字面量(添加新 type 时编译器强制更新所有匹配点):
+ *
+ *   1. **透传 AgentErrorType**:sub-agent 内部 LLM / tool 错误经 agent-loop
+ *      转成 AgentError, loop-runner 透传 type+message 字段, factory 在 reason="error"
+ *      时直接采用——例如 "provider_error" / "context_overflow" / "rate_limit"
+ *
+ *   2. **sub-agent 路径专属 type**:budget 软上限触发 + loop 基础设施崩 + 装配阶段
+ *      失败 + 永不抛兜底,这些不来自 AgentError 而是 factory 自己生成的:
+ *        - max_turns_exceeded / max_tokens_exceeded / wall_clock_timeout:三类
+ *          budget 软上限触发(factory.deriveErrorMeta 从 budgetExceededKind 映射)
+ *        - sub_agent_context_overflow:单次 inputTokens 注意力风险阈值触发
+ *        - loop_error:runSubAgentLoop 基础设施崩(catchError 路径,极少见)
+ *        - assembly_error:子原语装配阶段失败(EventBus / Broker / SystemPrompt
+ *          构造抛错)
+ *        - unexpected_error:runChildAgentInner 顶层兜底 catch(理论不可达)
+ *        - unknown_error:reason="error" 但 runResult.error 透传缺失(Layer 1
+ *          字段透传 bug 的 last-resort 占位,理论不可达)
+ *
+ * 主 LLM 收到该 type 后据此自主决策:rate_limit → 重试 / 等待;context_overflow →
+ * 切片子任务;max_turns_exceeded → 调高 budget 或拆任务;auth → 提示用户检查配置等。
+ */
+export type SubAgentErrorType =
+  | AgentErrorType
+  | "max_turns_exceeded"
+  | "max_tokens_exceeded"
+  | "wall_clock_timeout"
+  | "sub_agent_context_overflow"
+  | "loop_error"
+  | "assembly_error"
+  | "unexpected_error"
+  | "unknown_error";
 
 export interface RunChildAgentOptions {
   /** 共享父 LLMProvider 实例(连接池 / 限速 / 缓存共用,避免每次重建) */
@@ -120,8 +157,14 @@ export interface ChildAgentResult {
   durationMs: number;
   /** status="aborted" 才有 */
   abortReason?: AbortReason;
-  /** status="failed" 才有 */
-  error?: { message: string; type: string };
+  /**
+   * status="failed" 才有。
+   *
+   * `type` 是结构化 SubAgentErrorType 联合(详见类型定义注释),主 LLM 据此自主决策。
+   * `message` 是人类可读文本——sub-agent 内部 LLM 错误透传 AgentError.message
+   * (如 "400 invalid_request_error: ..."),budget 触发 / 基础设施崩等用固定文案。
+   */
+  error?: { message: string; type: SubAgentErrorType };
   /** failed/aborted 时尝试抓取 partial 输出(主 LLM 仍可据此判断) */
   partial?: string;
 }
@@ -344,7 +387,7 @@ function foldResult(args: FoldArgs): ChildAgentResult {
 function deriveErrorMeta(
   runResult: SubAgentLoopResult | null,
   caughtError: unknown,
-): { message: string; type: string } {
+): { message: string; type: SubAgentErrorType } {
   if (caughtError !== null && caughtError !== undefined) {
     return {
       message: errorMessage(caughtError),
@@ -380,11 +423,22 @@ function deriveErrorMeta(
         };
     }
   }
-  // reason="error" 兜底 —— runSubAgentLoop 透传 AgentResult.error 在 result 上未直接暴露,
-  // 给主 LLM 一个稳定可读的占位说明;详细 error 走 EventBus 历史/日志
+  // reason="error" 透传真实 AgentError —— loop-runner 在 reason="error" 时把
+  // AgentError 的 type + message 通过 SubAgentLoopResult.error 字段透传上来。
+  // 主 LLM 据此拿到结构化诊断信息(如 "provider_error: 400 invalid_request_error: ..."),
+  // 而非历史的 "agent_error: sub-agent loop terminated with error" 占位文案。
+  if (runResult?.error) {
+    return {
+      message: runResult.error.message,
+      type: runResult.error.type,
+    };
+  }
+  // 兜底 —— reason="error" 但 error 字段透传缺失,属于 loop-runner 透传 bug;
+  // 理论不可达,保留作 last-resort 防御。message 显式 "internal" 提示这是 zhixing
+  // 自身的字段透传问题而非 LLM/工具错误,便于定位。
   return {
-    message: "sub-agent loop terminated with error",
-    type: "agent_error",
+    message: "sub-agent loop terminated with unrecoverable internal error",
+    type: "unknown_error",
   };
 }
 
@@ -392,7 +446,7 @@ interface FailedArgs {
   subAgentId: string;
   startTime: number;
   error: unknown;
-  errorType: string;
+  errorType: SubAgentErrorType;
 }
 
 function buildFailedResult(args: FailedArgs): ChildAgentResult {

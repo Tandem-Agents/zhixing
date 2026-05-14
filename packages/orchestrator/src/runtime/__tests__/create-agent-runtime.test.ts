@@ -689,7 +689,8 @@ describe("Task 端到端集成 · 主子隔离 / 并发 / 子 fail / lineage 冒
     const taskCall = result.turn.toolCalls![0]!;
     expect(taskCall.name).toBe("Task");
     expect(taskCall.isError).toBe(true);
-    expect(taskCall.result).toMatch(/^\[Task "fetch" failed:/);
+    // type tag 透传:format 为 [Task "<desc>" failed (<type>): <msg>],含真实 AgentErrorType
+    expect(taskCall.result).toMatch(/^\[Task "fetch" failed \(provider_error\):/);
 
     // 主 LLM 看到 is_error 后继续输出(spec 强制要求 LLM 在 final response 中暴露 Task 失败)
     expect(getAssistantText(result.turn)).toContain("acknowledged");

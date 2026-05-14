@@ -3,7 +3,8 @@
  *
  * 覆盖矩阵:
  *   - happy:reason=completed → status=completed,finalAssistantText 取最后 assistant
- *   - failed (LLM error):reason=error → status=failed + error.type=agent_error
+ *   - failed (LLM error):reason=error → status=failed + error.type 透传真实 AgentErrorType
+ *     (如 provider_error / context_overflow / rate_limit) + message 携带 AgentError.message
  *   - failed (max_turns):reason=max_turns → status=failed + error.type=max_turns_exceeded + partial 抓
  *   - aborted (parent abort):parentSignal aborted → status=aborted + abortReason.kind=parent-abort
  *   - 子 lineage 派生:childBus.lineage 严格以 parentLineage 为前缀(EventBus 不变量)
@@ -115,15 +116,19 @@ describe("runChildAgent · happy path", () => {
 // ─── failed ───
 
 describe("runChildAgent · failed paths", () => {
-  it("provider chat error → status=failed + error.type=agent_error", async () => {
+  it("provider chat error → status=failed + error.type 透传真实 AgentErrorType (provider_error) + message 透传真实文本", async () => {
     const provider = new MockLLMProvider([
       { error: new Error("upstream connection refused") },
     ]);
     const result = await runChildAgent(makeBaseOpts(provider));
 
     expect(result.status).toBe("failed");
-    expect(result.error?.type).toBe("agent_error");
-    expect(result.error?.message).toBeTruthy();
+    // llm-call.ts 把 LLM stream error 包成 AgentError(type="provider_error"),
+    // loop-runner 透传 result.error,factory.deriveErrorMeta 优先使用 → 主 LLM
+    // 拿到真实 type 而非历史的 "agent_error" 占位。
+    expect(result.error?.type).toBe("provider_error");
+    // message 透传 AgentError.message,含 LLM 原始错误文本(便于主 LLM 决策)
+    expect(result.error?.message).toContain("upstream connection refused");
   });
 
   it("max_turns 触发 → status=failed + error.type=max_turns_exceeded + partial 抓", async () => {

@@ -52,6 +52,7 @@ import {
   abortWithReason,
   drainAgentLoop,
   type AbortReason,
+  type AgentErrorType,
   type AgentEventMap,
   type AgentResult,
   type EventBus,
@@ -95,6 +96,16 @@ export interface SubAgentLoopResult {
   reason: AgentResult["reason"];
   /** abort 透传(reason="aborted" 时由 AgentResult.aborted.abortReason 取) */
   abortReason?: AbortReason;
+  /**
+   * AgentError 透传(仅 reason="error" 时填充) —— 携带 AgentError.type 与
+   * AgentError.message,让上层 ChildAgentResult.error 暴露真实诊断信息(如
+   * "provider_error: 400 invalid_request_error: ..."),而非"agent_error"占位。
+   *
+   * 扁平 dict 形态(非 AgentError 实例):跨模块边界 plain object 更清洁,
+   * 与 ChildAgentResult.error 形态对称,且持久化(transcript jsonl)无 Error.stack
+   * 噪声。recoverable / cause 字段子 agent 路径不消费,故不透传。
+   */
+  error?: { type: AgentErrorType; message: string };
 }
 
 export interface RunSubAgentLoopOptions {
@@ -289,6 +300,10 @@ export async function runSubAgentLoop(
       budgetExceededKind: deriveBudgetExceededKind(result.reason, abortBudgetKind),
       abortReason:
         result.reason === "aborted" ? result.abortReason : undefined,
+      error:
+        result.reason === "error"
+          ? { type: result.error.type, message: result.error.message }
+          : undefined,
     };
   } finally {
     // listener 与 timer 双清理 —— 任一漏掉都会跨 dispatch 累积资源:

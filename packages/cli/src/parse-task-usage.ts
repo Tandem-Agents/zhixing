@@ -65,7 +65,21 @@ export interface SubAgentUsageEntry {
 const USAGE_REGEX =
   /<usage>tokens:\s*(\d+)(?:,\s*tool_uses:\s*(\d+))?,\s*duration_ms:\s*(\d+),\s*sub_id:\s*([0-9a-f]+)<\/usage>/;
 
-const FAILED_PREFIX = /^\[Task "[^"]*" failed:/;
+// 兼容两种 failed format(task.ts formatChildResultAsToolResult 输出):
+//   - `[Task "..." failed: <msg>]`                  (error 字段缺失兜底,理论不可达)
+//   - `[Task "..." failed (<type>): <msg>]`         (含 SubAgentErrorType tag,常态)
+// type tag 内的字符可能含字母 / 下划线(如 "provider_error" / "context_overflow"),
+// 用 `[^)]*` 通配,避免对具体 type 形态做强假设(SubAgentErrorType 联合未来若新增
+// 类型,本 regex 自动兼容)。
+//
+// ABORTED 当前只有 `aborted: <reason>` 一种 format,故 regex 不预加 type tag 兼容
+// (按事实写规则,不超前防御;未来若 aborted 也加 tag,在此处同步升级 + contract test)。
+//
+// 同步契约:这两个 regex 与 task.ts 的 format 字符串绑定。同步保护机制见
+// `parse-task-usage.test.ts` 末尾的 contract test —— 用真实 formatChildResultAsToolResult
+// 生成 ToolResult.content,断言 parse 能正确推断 status。task.ts format 任何改动
+// 都会让 contract test 失败,强制开发者同步更新本 regex。
+const FAILED_PREFIX = /^\[Task "[^"]*" failed(?:\s*\([^)]*\))?:/;
 const ABORTED_PREFIX = /^\[Task "[^"]*" aborted:/;
 
 /**

@@ -15,6 +15,8 @@
 
 import { describe, expect, it } from "vitest";
 import type { Message } from "@zhixing/core";
+import { formatChildResultAsToolResult } from "@zhixing/orchestrator/tools";
+import type { ChildAgentResult } from "@zhixing/orchestrator/subagent";
 import { parseTaskUsageFromMessages } from "../parse-task-usage.js";
 
 // ─── 测试辅助 ───
@@ -149,7 +151,7 @@ describe("parseTaskUsageFromMessages · succeeded 路径", () => {
 // ─── 单 Task failed/aborted ───
 
 describe("parseTaskUsageFromMessages · failed/aborted 路径", () => {
-  it("failed Task → status=failed + 无 tool_uses + partial 段不影响解析", () => {
+  it("failed Task (旧 format, 无 type tag) → status=failed + 无 tool_uses + partial 段不影响解析", () => {
     const usage = makeUsageTag(8000, { durationMs: 3000, subId: "fa11ed" });
     const content =
       `[Task "查 API" failed: sub-agent reached max tokens budget]\n\n` +
@@ -163,6 +165,24 @@ describe("parseTaskUsageFromMessages · failed/aborted 路径", () => {
     expect(entries[0]?.status).toBe("failed");
     expect(entries[0]?.tokens).toBe(8000);
     expect(entries[0]?.toolUses).toBeUndefined();
+  });
+
+  it("failed Task (新 format, 含 SubAgentErrorType tag) → status 正确推断为 failed", () => {
+    // task.ts format 升级后 sub-agent 失败时 ToolResult.content 含 type tag,
+    // 如 `[Task "X" failed (provider_error): 400 invalid_request_error: ...]`。
+    // 本测试覆盖 regex 同步兼容新 format,锁死跨包文本协议演进。
+    const usage = makeUsageTag(2000, { durationMs: 11000, subId: "abc123" });
+    const content =
+      `[Task "分析项目架构设计" failed (provider_error): 400 invalid_request_error: reasoning_content missing]\n\n` +
+      usage;
+    const messages: Message[] = [
+      taskUseMsg("t1", "分析项目架构设计"),
+      taskResultMsg("t1", content, true),
+    ];
+    const entries = parseTaskUsageFromMessages(messages);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.status).toBe("failed");
+    expect(entries[0]?.tokens).toBe(2000);
   });
 
   it("aborted Task → status=aborted + tokens 解析正确", () => {
@@ -261,5 +281,120 @@ describe("parseTaskUsageFromMessages · 容错性", () => {
     expect(entries[0]?.tokens).toBe(0);
     expect(entries[0]?.toolUses).toBe(0);
     expect(entries[0]?.durationMs).toBe(0);
+  });
+});
+
+// ─── Contract: 与 task.ts format 双向绑定 ─────────────────────────────
+//
+// 跨包文本协议同步守门:本 parser (cli) 反向解析 orchestrator 包 task.ts 输出
+// 的 ToolResult.content 字符串。parse-task-usage.ts 顶部注释已 acknowledge
+// 这种"任一改动需双向同步,否则解析静默退化"的契约脆弱性。
+//
+// 本组测试用**真实的** `formatChildResultAsToolResult` 函数生成 ToolResult.content,
+// 让 parser 跑一遍 → 断言 status 正确推断。锁死契约的机制:
+//   - task.ts format 任何改动 → 这里 status 断言失败 → 强制开发者同步 parse 端 regex
+//   - 不再靠人脑同步 / 注释提醒,silent failure 从架构层消除
+//
+// 不覆盖的内容:format 内详细文本(message / partial 等)由 task.test.ts 守 —— 本组
+// 关注 parser 视角"能否识别 status",字段级覆盖由直接 fixture 测试承担(上方测试)。
+
+describe("parseTaskUsageFromMessages · contract: 与 task.ts format 双向绑定", () => {
+  // 最小 ChildAgentResult 构造器 —— 各 status 共享 usage / id 字段,各分支独立填差异字段
+  function makeChildResult(overrides: Partial<ChildAgentResult>): ChildAgentResult {
+    const base: ChildAgentResult = {
+      status: "completed",
+      subAgentId: "00000000-0000-0000-0000-000000000abc",
+      finalAssistantText: "",
+      usage: { inputTokens: 100, outputTokens: 50 },
+      toolUses: 0,
+      durationMs: 1000,
+    };
+    return { ...base, ...overrides } as ChildAgentResult;
+  }
+
+  // 用真实 format function 生成 messages,只填 parse-task-usage 关心的 description 字段
+  function makeContractMessages(
+    description: string,
+    childResult: ChildAgentResult,
+  ): Message[] {
+    const toolResult = formatChildResultAsToolResult(childResult, description);
+    return [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "task-1",
+            name: "Task",
+            input: { description, prompt: "do work" },
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            toolUseId: "task-1",
+            content: toolResult.content,
+            ...(toolResult.isError && { isError: true }),
+          },
+        ],
+      },
+    ];
+  }
+
+  it("completed: parser 推断为 succeeded(无 failed/aborted 前缀)", () => {
+    const messages = makeContractMessages(
+      "test",
+      makeChildResult({
+        status: "completed",
+        finalAssistantText: "task done",
+        toolUses: 3,
+      }),
+    );
+    const entries = parseTaskUsageFromMessages(messages);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.status).toBe("succeeded");
+  });
+
+  it("failed (provider_error): parser 推断为 failed(SubAgentErrorType tag 同步)", () => {
+    // 锁死 Layer 1+2 的 type tag format 与 parser 的 regex 同步 —— 这是本 contract
+    // test 的核心目的: task.ts 若改 format → 此断言失败 → 强制改 regex
+    const messages = makeContractMessages(
+      "fetch data",
+      makeChildResult({
+        status: "failed",
+        error: { type: "provider_error", message: "upstream rejected" },
+      }),
+    );
+    const entries = parseTaskUsageFromMessages(messages);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.status).toBe("failed");
+  });
+
+  it("failed (max_turns_exceeded): sub-agent 专属 type 也正确识别", () => {
+    // 验证 regex 不依赖具体 type 字符串,SubAgentErrorType 联合任意值都兼容
+    const messages = makeContractMessages(
+      "long task",
+      makeChildResult({
+        status: "failed",
+        error: { type: "max_turns_exceeded", message: "max turns reached" },
+      }),
+    );
+    const entries = parseTaskUsageFromMessages(messages);
+    expect(entries[0]?.status).toBe("failed");
+  });
+
+  it("aborted: parser 推断为 aborted", () => {
+    const messages = makeContractMessages(
+      "research",
+      makeChildResult({
+        status: "aborted",
+        abortReason: { kind: "parent-abort" },
+      }),
+    );
+    const entries = parseTaskUsageFromMessages(messages);
+    expect(entries[0]?.status).toBe("aborted");
   });
 });
