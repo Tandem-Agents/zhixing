@@ -18,9 +18,11 @@
  *    纯函数：`options → string[]`，无状态、无副作用，caller 自己写 stdout。
  *    构造已 ANSI 染色的字符串行。
  *
- * 3. **TUI 应用组件**（select-with-input / typeahead-panel / typeahead-renderer）
+ * 3. **TUI 应用组件**（typeahead-panel / typeahead-renderer 等）
  *    有状态、自带 I/O：接管 stdin keypress、生命周期 attach/detach、
- *    内部走 raw mode 与 stdin ownership。
+ *    内部走 raw mode 与 stdin ownership。select 协议级类型（SelectOption /
+ *    SelectResult / SelectCancelCause）在此暴露——具体渲染实现（如
+ *    security/SelectOperationRegion 的 chrome inline 面板）在领域模块。
  *
  * 4. **平台原语**（ANSI 控制序列 / 显示宽度计算 / OSC 8 超链接）
  *    底层工具，渲染原语和应用组件都依赖。caller 一般不直接用——
@@ -86,19 +88,18 @@ export { highlightSelectedRow } from "./highlight.js";
 
 // ─── 3. TUI 应用组件 ─────────────────────────────────────
 
-export {
-  defaultTheme,
-  selectWithInput,
-  _getRawModeRefcount,
-  _resetRawModeRefcountForTests,
-} from "./select-with-input.js";
+// select 协议级类型 —— caller / 状态机 / 渲染器三方共享
 export type {
   SelectCancelCause,
   SelectOption,
   SelectResult,
-  SelectWithInputOptions,
-  Theme,
-} from "./select-with-input.js";
+} from "./select-types.js";
+
+// raw mode 测试辅助 —— 跨 modal 验证 refcount / 测试间隔离用
+export {
+  _getRawModeRefcount,
+  _resetRawModeRefcountForTests,
+} from "./_internal/raw-mode.js";
 export {
   computeWindow,
   createTypeaheadPanel,

@@ -4,7 +4,7 @@
  * 范式：从 per-turn `readInputLine(): Promise` 升级为 session-level `InputController`：
  *   - start() 一次性启动，stop() 真正释放；turn 之间不 cleanup
  *   - submit 触发 onSubmit 回调而非 resolve Promise，buffer commit + clear 后继续接收
- *   - suspend() / resume() 协调 select-with-input / config-editor 等独占 stdin 的面板
+ *   - suspend() / resume() 协调 SelectOperationRegion / config-editor 等独占 stdin 的面板
  *   - 实现 InputRegion 接口（renderLines + cursorPosition），写入位置交 ScreenController 协调
  *
  * 视觉契约：输入区 chrome 永驻屏幕底部；AI 输出 / 状态条由 ScreenController 统一编排。
@@ -248,7 +248,16 @@ export class InputController implements InputRegion {
   suspend(): void {
     if (this.state !== "active") return;
     this.detachResources();
-    this.screen.detachInput();
+    // 不调 screen.detachInput()——scrollRegion.detachInput 会清整屏 + reset region
+    // 状态（设计用于 cli 退出 chrome 模式），让 region 内的对话历史 + scrollback 全
+    // 部丢失。chrome 切换应由 caller 调 screen.attachInput(newRegion) 用替换语义完
+    // 成（refreshChrome 路径），自动保留 region content。
+    //
+    // suspend 期间 screen.input 仍指向本 InputController；computeRender 顶部检测
+    // state==="suspended" → renderLines 返回空数组让 chrome 高度自然降到 status 行
+    // 高度——chrome 切到「只剩 status bar」的紧凑形态。caller 接管 chrome 时调
+    // attachInput(newRegion) 直接替换。
+    this.screen.requestInputRepaint();
     this.state = "suspended";
   }
 

@@ -52,7 +52,14 @@ export interface RuntimeSessionOptions {
 
   /** 安全管线 UI 回调——透传给 createAgentRuntime */
   onSecurityBlocked: OnSecurityBlockedFn;
-  onUserDenied: OnUserDeniedFn;
+  /**
+   * 用户拒绝回调 —— optional。
+   *
+   * cli 已不再用此回调渲染独立 banner（拒绝反馈由 ◆ 工具失败破窗 + tool-card-format
+   * 的 `formatUserDeniedResult` 翻译承担，避免视觉重复）。保留 optional 字段
+   * 兼容未来其他渲染器需求（譬如 ServePush 推送、文件日志等）。
+   */
+  onUserDenied?: OnUserDeniedFn;
 
   /**
    * builtin extra tools 装配实例 —— cli 顶层创建（注入 task_list 持久化 store），

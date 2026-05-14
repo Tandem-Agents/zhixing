@@ -17,12 +17,15 @@
  *      让后续 render() 仍然能从 startRow 开始覆盖而不是在旧面板下面追加。
  *
  * 这个模块只负责"给我一组行、保证无副作用地在原地重绘"这一条语义 ——
- * 它不关心行的内容、颜色、截断 —— 这些是调用方的职责（比如 SelectWithInput
+ * 它不关心行的内容、颜色、截断 —— 这些是调用方的职责（比如 TypeaheadPanel
  * 用 `clampLine` 截断，用 theme 上色）。
  *
- * 单独的 kernel 让两类 consumer 都能复用：
- *   - SelectWithInput（一次性 modal，结束时留下最后一次渲染）
+ * 单独的 kernel 让 consumer 复用：
  *   - TypeaheadPanel（常驻组件，trigger 消失时调 clear() 无痕撤销）
+ *
+ * 一次性 modal 类组件（曾用此 kernel 的 SelectWithInput）已迁移到 chrome inline
+ * 形态（SelectOperationRegion 通过 ScreenController.attachInput），不再直写 stdout，
+ * 故不需 PanelRenderer。TypeaheadPanel 仍走直写路径（panel 在 input 区上方浮起）。
  */
 
 import { ANSI } from "../ansi.js";
@@ -57,8 +60,8 @@ export function createPanelRenderer(
       // 或首次渲染时 cursor 在任意"startRow"位置（调用方决定）
 
       // 整帧包裹同步输出 ANSI——避免 TTY 分段刷新让 cursor 在 moveUp / clearLine
-      // 之间短暂出现在中间状态，造成视觉闪烁（select-with-input / 任何用 PanelRenderer
-      // 的 TUI 组件按键 rerender 时受益）
+      // 之间短暂出现在中间状态，造成视觉闪烁（任何用 PanelRenderer 的 TUI 组件
+      // 按键 rerender 时受益）
       stdout.write(ANSI.syncBegin);
 
       if (lastHeight > 0) {

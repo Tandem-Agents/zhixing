@@ -93,3 +93,25 @@ function createRawModeController(): RawModeControllerInternal {
 // 模块级单例 —— raw mode 是 fd 级全局状态，控制器也必须全局
 export const rawModeController: RawModeControllerInternal =
   createRawModeController();
+
+// ─── 测试辅助 ───
+//
+// 内核暴露的测试 hook —— 给 cli 外层测试（如 typeahead-panel.test.ts）跨 modal
+// 验证 refcount 不泄漏 / 隔离测试之间状态用。生产代码**不要**调用 reset。
+//
+// 函数名 `_` 前缀沿用历史约定（select-with-input 旧版本 export 给外部）—— 移除
+// dormant selectWithInput 时这两个 helper 迁入内核单一定义点，避免重新选名引发
+// 外部 import 路径迁移成本。
+
+/** 测试辅助：读取 lease refcount。生产代码不应依赖。 */
+export function _getRawModeRefcount(): number {
+  return rawModeController.activeLeases();
+}
+
+/**
+ * 仅供测试用：重置 refcount。
+ * 避免测试之间状态泄漏——生产代码**不要**调用。
+ */
+export function _resetRawModeRefcountForTests(): void {
+  rawModeController.resetForTests();
+}

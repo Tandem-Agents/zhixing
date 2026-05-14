@@ -16,7 +16,6 @@ import { createOutputRenderer } from "./output/index.js";
 import { createStdoutWriter } from "./screen/index.js";
 import {
   createBlockedRenderer,
-  createUserDeniedRenderer,
 } from "./security/index.js";
 
 /**
@@ -54,7 +53,6 @@ export async function runOnce(options: RunOnceOptions): Promise<RunResult> {
       workspace: options.workspace,
       decorateRunBus: createRenderSubscribers({ renderer, writer }),
       onSecurityBlocked: createBlockedRenderer(writer),
-      onUserDenied: createUserDeniedRenderer(writer),
       // Task 工具由默认 mainProfile().enabledTools 含 "Task" 自动装配。
     });
     return await runtime.run({

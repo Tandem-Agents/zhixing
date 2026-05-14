@@ -6,10 +6,7 @@
  * 消费者从源包直接 import,不通过本 barrel 跨包 re-export。
  */
 
-export {
-  createBlockedRenderer,
-  createUserDeniedRenderer,
-} from "./security-event-renderer.js";
+export { createBlockedRenderer } from "./security-event-renderer.js";
 
 export {
   handleTrustCommand,
@@ -20,7 +17,8 @@ export {
   TerminalConfirmationRenderer,
   TERMINAL_RENDERER_CAPABILITIES,
   buildSelectOptions,
-  buildPanelBody,
+  buildInlinePanelTitle,
+  buildInlinePanelBody,
   translate,
 } from "./terminal-renderer.js";
 export type { TerminalConfirmationRendererOptions } from "./terminal-renderer.js";

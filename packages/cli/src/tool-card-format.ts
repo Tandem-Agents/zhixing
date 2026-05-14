@@ -179,6 +179,16 @@ export function formatToolResult(
 ): string {
   if (result.isError) {
     const raw = (result.content || "(unknown error)").trim();
+    // 用户拒绝场景识别 —— secure-executor 生成的 LLM-facing prompt（含"请根据该
+    // 反馈调整方案"指令）原样回流给 LLM 让模型理解为何被拒，但 cli 显示给用户
+    // 时换为简洁 user-facing 文案。识别 secure-executor 的稳定 prefix；模板若
+    // 未来变化，fallback 路径仍能 graceful 降级显示「已拒绝」不暴露 LLM 指令。
+    //
+    // 与 secure-executor.ts:257-258 文案模板隐式耦合 —— 该处文案修改需同步更新
+    // 本函数的 prefix 匹配 / reason 提取正则。
+    if (raw.startsWith("用户拒绝了这次工具调用")) {
+      return formatUserDeniedResult(raw);
+    }
     const firstLine = raw.split("\n")[0] ?? "";
     return truncate(firstLine, ERROR_TRUNCATE);
   }
@@ -200,6 +210,30 @@ export function formatToolResult(
     default:
       return formatToolDuration(durationMs);
   }
+}
+
+/**
+ * 用户拒绝场景的 user-facing 文案 —— 从 LLM-facing prompt 提取 reason。
+ *
+ * **隐式契约**（与 `@zhixing/orchestrator` 的 secure-executor 耦合）：
+ *   - 输入有 reason：`用户拒绝了这次工具调用。用户的反馈:<reason>。请根据该反馈调整方案。`
+ *   - 输入无 reason：`用户拒绝了这次工具调用。`
+ *   - 来源：`packages/orchestrator/src/security/secure-executor.ts:257-258`
+ *
+ * 输出：
+ *   - 有 reason: `已拒绝 · <reason>`
+ *   - 无 reason: `已拒绝`
+ *   - 模板未来变更不匹配正则：fallback `已拒绝`（不暴露原 LLM prompt 给用户）
+ */
+function formatUserDeniedResult(content: string): string {
+  const reasonMatch = content.match(
+    /用户的反馈[:：](.+?)。请根据该反馈调整方案。/,
+  );
+  if (reasonMatch) {
+    const reason = truncate(reasonMatch[1]!.trim(), ERROR_TRUNCATE - 8);
+    return `已拒绝 · ${reason}`;
+  }
+  return "已拒绝";
 }
 
 /**

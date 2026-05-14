@@ -91,7 +91,6 @@ import {
   handleTrustCommand,
   handleSecurityCommand,
   createBlockedRenderer,
-  createUserDeniedRenderer,
   TerminalConfirmationRenderer,
 } from "./security/index.js";
 import { createReplInterruptRuntime } from "./interrupt/repl-runtime.js";
@@ -746,7 +745,7 @@ function buildSlashCommands(
 /**
  * 全局启用 bracketed paste mode：进入 REPL 前一次性启用，process exit 时 reset。
  *
- * Paste 检测不依赖 bracketed paste mode markers——typeahead-input / select-with-input /
+ * Paste 检测不依赖 bracketed paste mode markers——typeahead-input / SelectOperationRegion /
  * typeahead-panel 各自用 keypress batcher（time-window）识别"同步多次 keypress = 粘贴"，
  * 跨终端兼容性好。本函数只发送 `\x1b[?2004h` 抑制 Windows Terminal 等的"多行粘贴
  * 警告"弹窗——是用户体验改进，与 paste 检测算法解耦。
@@ -882,7 +881,6 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     zhixingHome,
     schedulerEventBus,
     onSecurityBlocked: createBlockedRenderer(cliWriter),
-    onUserDenied: createUserDeniedRenderer(cliWriter),
     builtinExtraTools,
     segmentDeps,
   });
@@ -990,31 +988,38 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     terminal: true,
   });
 
-  // 挂载终端确认渲染器到会话 broker。
+  // 挂载终端确认渲染器到会话 broker。渲染器生命周期绑到 REPL 退出：rl.on("close") 里 detach。
   //
-  // 共存协议（chrome 模式 alt UI 嵌入）：
-  //   - rl 共存：selectWithInput 会进入 stdin raw mode 并独占 keypress 事件，
-  //     与 readline 的行缓冲冲突。beforeShow 调 rl.pause 让 readline 不消费 stdin；
-  //     afterShow 调 rl.resume 恢复主循环
-  //   - chrome 让位：confirmation panel 由 selectWithInput 直写 stdout（独占
-  //     stdin raw mode 实时响应按键的设计要求），与 ScreenController 的 chrome
-  //     paint 共享 stdout 会互相覆盖。beforeShow 调 screen.suspend 让 chrome 让
-  //     位（擦屏 + 暂存后续 paint 任务 + 通知 status-bar 暂停 ticker）；afterShow
-  //     调 screen.resume 恢复 chrome（flush 暂存任务 + 重画 frame）
+  // 共存协议（chrome inline SelectOperationRegion）：
+  //   - SelectOperationRegion 通过 ScreenController.attachInput 接入 chrome inline，
+  //     与 InputController（typeahead input）同 InputRegion 接口、共享 stdin keypress
+  //     路径。两者不能同时活跃（stdin raw mode + keypress listener 必须独占）。
+  //   - beforeShow 调 inputController.suspend()：让 typeahead 输入区 detach + 释放
+  //     keypress / raw mode 资源，让 SelectOperationRegion 接管 chrome 区域
+  //   - afterShow 调 inputController.resume()：SelectOperationRegion 结束并 detach 后
+  //     重新 attach typeahead 输入区，chrome 切回输入模式
   //
-  // 渲染器生命周期绑到 REPL 退出：rl.on("close") 里 detach。
-  const confirmationRenderer = new TerminalConfirmationRenderer({
-    beforeShow: () => {
-      renderScreen?.suspend();
-      rl.pause();
-    },
-    afterShow: () => {
-      rl.resume();
-      renderScreen?.resume();
-    },
-  });
-  // session 持有 renderer 与 broker 的绑定，dispose 时自动 detach
-  session.attachConfirmationRenderer(confirmationRenderer);
+  // 不再走 alt-screen 切换（ScreenController.suspend/resume）——权限请求面板与对话流
+  // 共存让 scrollback 始终可见，提升上下文连贯性。ScreenController.suspend/resume
+  // 协议保留供其他真正独占整屏的 modal（如 config-editor）使用。
+  //
+  // **NB**: inputController 在闭包内通过 let 引用（声明在下方）—— beforeShow/afterShow
+  // 在 confirmation 实际触发时才求值，那时 inputController 已 start()，可选链兜底 null。
+  const confirmationRenderer = renderScreen
+    ? new TerminalConfirmationRenderer({
+        screen: renderScreen,
+        beforeShow: () => {
+          inputController?.suspend();
+        },
+        afterShow: () => {
+          inputController?.resume();
+        },
+      })
+    : null;
+  if (confirmationRenderer) {
+    // session 持有 renderer 与 broker 的绑定，dispose 时自动 detach
+    session.attachConfirmationRenderer(confirmationRenderer);
+  }
 
   const state: ReplState = {
     messages,

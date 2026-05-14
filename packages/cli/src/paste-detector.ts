@@ -29,7 +29,7 @@
  * onKeypress；典型用法：
  *
  *   typeahead-input        → onPaste = finalizePaste（折叠/铺开内容）
- *   select-with-input      → onPaste = 丢弃（select 不支持 paste）
+ *   SelectOperationRegion  → onPaste = 字符流喂入 input buffer（input mode）/ 丢弃（select mode）
  *   typeahead-panel        → onPaste = 丢弃（panel 不输入文本）
  */
 

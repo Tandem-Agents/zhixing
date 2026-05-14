@@ -8,8 +8,8 @@
  *     原地重绘 dropdown；inactive 态**完全不占行**（0 字节输出）。
  *   - 提供 keyboard handler：↑↓ 导航、Tab/Enter 接受、Esc 清 trigger。
  *     Panel 本身不持有 draft —— 它只通过 onAccept / onCancel 回调通知上层。
- *   - 和 `SelectWithInput` 不同：panel 是**非阻塞**的，没有 Promise；
- *     它绑定到 broker session 直到 detach。
+ *   - 与 modal 类组件（如 SelectOperationRegion）不同：panel 是**非阻塞**的，
+ *     没有 Promise；它绑定到 broker session 直到 detach。
  *
  * 复用 spec §6.4 的内核（Phase 1 Step 1 抽取）：
  *   - `createPanelRenderer` —— 原地重绘 + 擦除的光标不变量
@@ -660,7 +660,7 @@ export function createTypeaheadPanel(
       if (attached) return;
       attached = true;
 
-      // 资源句柄：raw mode + stdin ownership（和 select-with-input 一样的模式）
+      // 资源句柄：raw mode + stdin ownership（与 SelectOperationRegion / InputController 一致的资源管理模式）
       stdinOwnership = acquireStdinOwnership(stdin);
       rawModeLease = rawModeController.acquire(stdin);
 

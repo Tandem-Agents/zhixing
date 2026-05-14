@@ -35,7 +35,7 @@ import { stripAnsi } from "../ansi.js";
 import {
   _getRawModeRefcount,
   _resetRawModeRefcountForTests,
-} from "../select-with-input.js";
+} from "../_internal/raw-mode.js";
 import {
   computeWindow,
   createTypeaheadPanel,

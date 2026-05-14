@@ -50,6 +50,7 @@ const ALLOW_LIST: ReadonlyArray<{ readonly file: string; readonly reason: string
   { file: "serve/ephemeral-executor.ts", reason: "serve 临时执行器——后台路径" },
   { file: "runtime/session.ts", reason: "RuntimeSession bootstrap / dispose 路径——chrome 未建立或已 detach" },
   { file: "setup-delivery.ts", reason: "delivery 装配 logger——bootstrap 时 chrome 未建立" },
+  { file: "security/keypress-dump.ts", reason: "诊断通道——`--log` flag 启用时 stderr 提示日志路径；与 llm-chunk-dump 同模式，仅诊断不影响生产路径" },
 ];
 
 const ALLOWED_DIR_PREFIXES: readonly string[] = [

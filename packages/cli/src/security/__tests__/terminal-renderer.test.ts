@@ -10,11 +10,16 @@
  * 2. **面板渲染**（`buildPanelBody`）：验证不同 DisplayBody.kind 产生合理的行。
  *
  * 3. **整合测试**（renderer + broker + PassThrough stdin/stdout）：真实走一遍
- *    attach → onRequest → selectWithInput → broker.resolve 流程。
+ *    attach → onRequest → SelectOperationRegion → broker.resolve 流程。
  */
 
+import chalk from "chalk";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+// 强制启用 ANSI 染色——vitest non-TTY 下 chalk 默认 level=0，让 tone.error.bold
+// 等染色断言生效（与 block-renderer.test.ts 一致策略）
+chalk.level = 3;
 import {
   ConfirmationBroker,
   type ConfirmationOption,
@@ -23,11 +28,41 @@ import {
 } from "@zhixing/core";
 import {
   TerminalConfirmationRenderer,
-  buildPanelBody,
+  buildInlinePanelBody,
+  buildInlinePanelTitle,
   buildSelectOptions,
   translate,
 } from "../terminal-renderer.js";
+import type { ScreenController } from "../../screen/index.js";
 import { _resetRawModeRefcountForTests } from "../../tui/index.js";
+
+/**
+ * Fake ScreenController —— integration 测试用。
+ * SelectOperationRegion 实际仅调用 attachInput / detachInput / requestInputRepaint
+ * 三个方法；其他方法 no-op 兜底满足接口。
+ */
+function makeFakeScreen(): ScreenController {
+  return {
+    attachInput: () => {},
+    detachInput: () => {},
+    setStatusBar: () => {},
+    setStatusTail: () => {},
+    withScrollWrite: () => {},
+    writeScrollLine: () => {},
+    requestInputRepaint: () => {},
+    ensureScrollLeadingBlank: () => {},
+    beginReplaceableSegment: () => ({
+      replace: () => {},
+      commit: () => {},
+      close: () => {},
+    }),
+    suspend: () => {},
+    resume: () => {},
+    onSuspendChange: () => () => {},
+    setFarewell: () => {},
+    dispose: () => {},
+  };
+}
 
 // ─── 测试辅助 ───
 
@@ -299,10 +334,10 @@ describe("translate", () => {
 
 // ─── 层 2：面板渲染 ───
 
-describe("buildPanelBody", () => {
+describe("buildInlinePanelBody", () => {
   it("bash body 首行包含 '$' + 命令", () => {
     const req = makeRequest();
-    const lines = buildPanelBody(req);
+    const lines = buildInlinePanelBody(req);
     expect(lines[0]).toContain("$");
     expect(lines[0]).toContain("npm install express");
   });
@@ -315,7 +350,7 @@ describe("buildPanelBody", () => {
         cwd: "/tmp",
       },
     });
-    const lines = buildPanelBody(req);
+    const lines = buildInlinePanelBody(req);
     expect(lines.some((l) => l.includes("写入") && l.includes("/tmp/x.ts"))).toBe(
       true,
     );
@@ -329,7 +364,7 @@ describe("buildPanelBody", () => {
         cwd: "/tmp",
       },
     });
-    const lines = buildPanelBody(req);
+    const lines = buildInlinePanelBody(req);
     expect(lines.some((l) => l.includes("张三"))).toBe(true);
     expect(lines.some((l) => l.includes("明天开会"))).toBe(true);
   });
@@ -342,11 +377,11 @@ describe("buildPanelBody", () => {
         cwd: "/tmp",
       },
     });
-    const lines = buildPanelBody(req);
+    const lines = buildInlinePanelBody(req);
     expect(lines.some((l) => l.includes("wechat_send"))).toBe(true);
   });
 
-  it("元数据块包含 cwd / 影响 / 风险（用户视角中文标签）", () => {
+  it("body 仅含主体——元信息/cwd/env/路径 全部不显示（用户决策真正依据是命令本身）", () => {
     const req = makeRequest({
       operationClass: "external",
       decision: {
@@ -356,18 +391,88 @@ describe("buildPanelBody", () => {
         riskLevel: "medium",
       },
     });
-    const lines = buildPanelBody(req);
+    const lines = buildInlinePanelBody(req);
     const full = lines.join("\n");
-    expect(full).toContain("/tmp/ws");
-    // 操作类别 / 风险等级走中文文字（去多彩配色，P5 cyan 一致）
-    expect(full).toContain("外部"); // external → 外部
-    expect(full).toContain("中"); // medium → 中
-    expect(full).toContain("需要网络");
+    // 主体（命令）存在
+    expect(full).toContain("npm install express");
+    // 元信息全删——对用户决策无增值
+    expect(full).not.toContain("/tmp/ws"); // cwd 删
+    expect(full).not.toContain("外部"); // operationClass 删
+    expect(full).not.toContain("中风险"); // riskLevel 删
+    expect(full).not.toContain("需要网络"); // decision.reason 删
   });
 
-  it("high / critical 风险加 ⚠ 字符 + red bold（形态 + 颜色双重信号）", () => {
-    const reqHigh = makeRequest({
-      operationClass: "external",
+  it("body 仅含建议提示——当 suggestion 存在时（actionable 信号）", () => {
+    const req = makeRequest({
+      suggestion: { suggest: PATTERN_NPM_INSTALL, count: 3 },
+    });
+    const lines = buildInlinePanelBody(req);
+    const full = lines.join("\n");
+    expect(full).toContain("npm install express"); // 命令仍在
+    expect(full).toContain("已经批准过 3 次相似操作"); // 建议提示在
+  });
+});
+
+describe("buildInlinePanelTitle", () => {
+  it("按 DisplayBody.kind 派生场景化中文意图短语", () => {
+    expect(
+      buildInlinePanelTitle(
+        makeRequest({
+          display: {
+            title: "x",
+            body: {
+              kind: "bash",
+              command: "ls",
+              commandPreview: "ls",
+            },
+            cwd: "/",
+          },
+        }),
+      ),
+    ).toContain("AI 想执行命令");
+
+    expect(
+      buildInlinePanelTitle(
+        makeRequest({
+          display: {
+            title: "x",
+            body: { kind: "file-write", path: "/a.ts" },
+            cwd: "/",
+          },
+        }),
+      ),
+    ).toContain("AI 想写入文件");
+
+    expect(
+      buildInlinePanelTitle(
+        makeRequest({
+          display: {
+            title: "x",
+            body: { kind: "network", host: "example.com", direction: "outbound" },
+            cwd: "/",
+          },
+        }),
+      ),
+    ).toContain("AI 想访问网络");
+  });
+
+  it("low / medium 风险——title 仅 intent 不染色不加 ⚠", () => {
+    const req = makeRequest({
+      decision: {
+        action: "confirm",
+        matchedRules: [],
+        reason: "x",
+        riskLevel: "medium",
+      },
+    });
+    const title = buildInlinePanelTitle(req);
+    expect(title).toBe("AI 想执行命令"); // 完全纯文本，无 ANSI
+    expect(title).not.toContain("⚠");
+    expect(title).not.toContain("\x1b"); // 无 ANSI 染色
+  });
+
+  it("high 风险——title 加 ⚠ + (高风险) 尾缀 + red bold 染色", () => {
+    const req = makeRequest({
       decision: {
         action: "confirm",
         matchedRules: [],
@@ -375,13 +480,15 @@ describe("buildPanelBody", () => {
         riskLevel: "high",
       },
     });
-    const linesHigh = buildPanelBody(reqHigh);
-    const fullHigh = linesHigh.join("\n");
-    expect(fullHigh).toContain("高");
-    expect(fullHigh).toContain("⚠");
+    const title = buildInlinePanelTitle(req);
+    expect(title).toContain("⚠");
+    expect(title).toContain("AI 想执行命令");
+    expect(title).toContain("(高风险)");
+    expect(title).toContain("\x1b["); // red bold ANSI
+  });
 
-    const reqCritical = makeRequest({
-      operationClass: "critical",
+  it("critical 风险——title 加 ⚠ + (关键操作) 尾缀 + red bold 染色", () => {
+    const req = makeRequest({
       decision: {
         action: "confirm",
         matchedRules: [],
@@ -389,23 +496,21 @@ describe("buildPanelBody", () => {
         riskLevel: "critical",
       },
     });
-    const linesCritical = buildPanelBody(reqCritical);
-    const fullCritical = linesCritical.join("\n");
-    expect(fullCritical).toContain("严重");
-    expect(fullCritical).toContain("关键"); // operationClass critical → 关键
-    // critical 出现 2 个 ⚠（影响 + 风险）
-    expect((fullCritical.match(/⚠/g) ?? []).length).toBeGreaterThanOrEqual(2);
+    const title = buildInlinePanelTitle(req);
+    expect(title).toContain("⚠");
+    expect(title).toContain("(关键操作)");
+    expect(title).toContain("\x1b[");
   });
 });
 
 // ─── 层 3：整合测试 ───
 
 describe("TerminalConfirmationRenderer integration", () => {
-  it("attach 后 broker 有请求 → selectWithInput 显示 → 用户选第一项 → broker.resolve", async () => {
+  it("attach 后 broker 有请求 → SelectOperationRegion 显示 → 用户选第一项 → broker.resolve", async () => {
     const { stdin, stdout } = makeStreams();
     const broker = new ConfirmationBroker();
 
-    const renderer = new TerminalConfirmationRenderer({ stdin, stdout });
+    const renderer = new TerminalConfirmationRenderer({ screen: makeFakeScreen(), stdin });
     const detach = renderer.attach(broker);
 
     const req = makeRequest({
@@ -431,7 +536,7 @@ describe("TerminalConfirmationRenderer integration", () => {
   it("用户按 down+enter 选中第二项（deny）", async () => {
     const { stdin, stdout } = makeStreams();
     const broker = new ConfirmationBroker();
-    const renderer = new TerminalConfirmationRenderer({ stdin, stdout });
+    const renderer = new TerminalConfirmationRenderer({ screen: makeFakeScreen(), stdin });
     const detach = renderer.attach(broker);
 
     const req = makeRequest({
@@ -453,7 +558,7 @@ describe("TerminalConfirmationRenderer integration", () => {
   it("用户按 Ctrl+C → broker 得到 cancelled/user-ctrl-c", async () => {
     const { stdin, stdout } = makeStreams();
     const broker = new ConfirmationBroker();
-    const renderer = new TerminalConfirmationRenderer({ stdin, stdout });
+    const renderer = new TerminalConfirmationRenderer({ screen: makeFakeScreen(), stdin });
     const detach = renderer.attach(broker);
 
     const promise = broker.requestConfirmation(makeRequest());
@@ -473,8 +578,8 @@ describe("TerminalConfirmationRenderer integration", () => {
     const afterShow = vi.fn();
 
     const renderer = new TerminalConfirmationRenderer({
+      screen: makeFakeScreen(),
       stdin,
-      stdout,
       beforeShow,
       afterShow,
     });
@@ -498,7 +603,7 @@ describe("TerminalConfirmationRenderer integration", () => {
   it("detach 后新请求不再进入渲染器，走非交互兜底", async () => {
     const { stdin, stdout } = makeStreams();
     const broker = new ConfirmationBroker();
-    const renderer = new TerminalConfirmationRenderer({ stdin, stdout });
+    const renderer = new TerminalConfirmationRenderer({ screen: makeFakeScreen(), stdin });
     const detach = renderer.attach(broker);
 
     detach();
@@ -521,7 +626,7 @@ describe("TerminalConfirmationRenderer integration", () => {
   it("FIFO：两个请求依次被展示，第一个 resolve 后第二个自动展示", async () => {
     const { stdin, stdout } = makeStreams();
     const broker = new ConfirmationBroker();
-    const renderer = new TerminalConfirmationRenderer({ stdin, stdout });
+    const renderer = new TerminalConfirmationRenderer({ screen: makeFakeScreen(), stdin });
     const detach = renderer.attach(broker);
 
     const p1 = broker.requestConfirmation(

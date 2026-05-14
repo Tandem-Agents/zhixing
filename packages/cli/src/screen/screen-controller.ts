@@ -89,7 +89,7 @@
  *     - resume 末尾 emit hideCursor —— modal 退出后重新断言 chrome 不变量
  *     - dispose 内 emit showCursor —— 进程退出前最终恢复
  *
- *   modal alt UI（select-with-input / config-editor）仍可自由 emit hideCursor /
+ *   modal alt UI（config-editor 等 alt-screen 独占屏组件）仍可自由 emit hideCursor /
  *   showCursor 作为局部装饰——它们在 suspend/resume 之间运行，resume 兜底重隐藏，
  *   不产生协议冲突。
  *
@@ -652,8 +652,8 @@ class ScreenControllerImpl implements ScreenController {
     // 对话历史）被 destructive clear 永久擦除"bug 的根本手段。
     //
     // 显式 `\x1b[1;1H` home cursor —— alt buffer 入口 cursor 位置 implementation-
-    // defined（部分终端继承 saved cursor 位置）；显式 home 让 alt UI（selectWithInput
-    // 用 PanelRenderer 假设 cursor 在 startRow）起手位置确定可预测。
+    // defined（部分终端继承 saved cursor 位置）；显式 home 让 alt UI（如
+    // config-editor 用 PanelRenderer 假设 cursor 在 startRow）起手位置确定可预测。
     this.stdout.write(ANSI.enterAltScreen);
     this.stdout.write("\x1b[1;1H");
 
@@ -697,7 +697,7 @@ class ScreenControllerImpl implements ScreenController {
       // 等）可能改变内部 chrome 状态——refreshChrome 用最新状态重画 chrome 字节
       // （内容不变时是 idempotent，状态变化时反映新状态）。
       this.refreshChrome();
-      // 重新断言 chrome 模式不变量：硬件光标隐藏。modal（selectWithInput）
+      // 重新断言 chrome 模式不变量：硬件光标隐藏。modal（config-editor 等 alt UI）
       // 可能自己 emit `\x1b[?25h` 显示光标做输入；alt-screen 切回 main buffer
       // 后 main 的 cursor 可见性状态由终端决定（implementation-defined），由本
       // emit 兜底强制隐藏，输入光标继续由 chrome 的 reverse SGR 视觉光标承担。

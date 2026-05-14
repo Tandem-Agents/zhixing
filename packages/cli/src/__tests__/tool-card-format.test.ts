@@ -107,6 +107,45 @@ describe("formatToolResult", () => {
     return { content, isError: true };
   }
 
+  it("用户拒绝场景——含 reason 时输出「已拒绝 · <reason>」（user-facing 翻译）", () => {
+    // secure-executor 生成的 LLM-facing prompt 模板：
+    //   "用户拒绝了这次工具调用。用户的反馈:<reason>。请根据该反馈调整方案。"
+    // cli 显示给用户时换成简洁 user-facing 文案，不暴露 LLM 指令
+    expect(
+      formatToolResult(
+        "bash",
+        err(
+          "用户拒绝了这次工具调用。用户的反馈:不要用 rm -rf,改用 rm -i。请根据该反馈调整方案。",
+        ),
+        100,
+      ),
+    ).toBe("已拒绝 · 不要用 rm -rf,改用 rm -i");
+  });
+
+  it("用户拒绝场景——无 reason 时输出「已拒绝」", () => {
+    expect(
+      formatToolResult("bash", err("用户拒绝了这次工具调用。"), 100),
+    ).toBe("已拒绝");
+  });
+
+  it("用户拒绝场景——模板未来变化时 fallback「已拒绝」（不暴露原 LLM prompt）", () => {
+    // prefix 匹配但 reason 正则不匹配的边界——譬如未来 secure-executor 文案改成
+    // 「用户拒绝了这次工具调用。原因是 X。」之类，cli 至少安全降级为「已拒绝」
+    expect(
+      formatToolResult(
+        "bash",
+        err("用户拒绝了这次工具调用。某种新文案不含反馈字段。"),
+        100,
+      ),
+    ).toBe("已拒绝");
+  });
+
+  it("用户拒绝场景——非该场景错误走原 error 首行截断路径", () => {
+    expect(formatToolResult("read", err("file not found"), 100)).toBe(
+      "file not found",
+    );
+  });
+
   it("失败——error 首行截断", () => {
     expect(formatToolResult("read", err("file not found"), 100)).toBe(
       "file not found",

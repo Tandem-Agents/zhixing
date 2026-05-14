@@ -3,20 +3,21 @@
  *
  * 职责：
  *   1. 订阅 broker 的新请求通知（broker.onRequest）
- *   2. 把 ConfirmationRequest → SelectWithInput 组件的入参
- *   3. 调 selectWithInput 拿到用户的 SelectResult
+ *   2. 把 ConfirmationRequest → SelectOperationRegion 的入参（title / body / options）
+ *   3. 启动 SelectOperationRegion（chrome inline 面板）拿到用户的 SelectResult
  *   4. 翻译回 ConfirmationDecision 并 broker.resolve
  *
- * 与 host REPL 的共存:
- *   REPL 用 readline.Interface 管主输入循环，selectWithInput 要独占 stdin
- *   并开 raw mode。两者不能同时消费 stdin。renderer 通过 beforeShow / afterShow
- *   两个 hook 通知 host——典型实现是 `rl.pause()` / `rl.resume()`。
+ * 与 host REPL 的共存：
+ *   REPL 用 InputController（typeahead input）占据 chrome input region + 独占
+ *   stdin keypress。SelectOperationRegion 也走 chrome inline + 独占 stdin。两者
+ *   不能同时活跃 —— renderer 通过 beforeShow / afterShow 两个 hook 通知 host，
+ *   典型实现：`() => inputController.suspend()` / `() => inputController.resume()`。
  *
  * 能力声明（`capabilities`）：
- *   - supportsInlineInput: true（selectWithInput 原生支持）
+ *   - supportsInlineInput: true（SelectOperationRegion 原生支持 input 类型选项）
  *   - supportsAllowNote / supportsDenyReason: true（通过 input 选项）
- *   - supportsQueue: false（Phase 2 的 Step 5 再加）
- *   - supportsEdit: false（Step 8 再加）
+ *   - supportsQueue: false（broker 顺序处理）
+ *   - supportsEdit: false（编辑后允许尚未支持）
  */
 
 import chalk from "chalk";
@@ -28,16 +29,13 @@ import type {
   ConfirmationRequest,
   DisplayBody,
   IConfirmationBroker,
-  OperationClass,
   RendererCapabilities,
 } from "@zhixing/core";
 import { getAgentIdentity } from "@zhixing/core";
 import { tone } from "../tui/style.js";
-import {
-  selectWithInput,
-  type SelectOption,
-  type SelectResult,
-} from "../tui/index.js";
+import type { SelectOption, SelectResult } from "../tui/select-types.js";
+import type { ScreenController } from "../screen/index.js";
+import { SelectOperationRegion } from "./select-operation-region.js";
 
 // ─── 能力声明 ───
 
@@ -52,7 +50,7 @@ export const TERMINAL_RENDERER_CAPABILITIES: RendererCapabilities = {
     "deny-with-reason",
     "always-ask",
     // "edit-then-allow" Step 8 再加
-    // "show-full" selectWithInput 内部通过自适应截断 + 手动展开处理
+    // "show-full" SelectOperationRegion 内部通过自适应截断 + 手动展开处理
   ],
   supportsAllowNote: true,
   supportsDenyReason: true,
@@ -64,18 +62,22 @@ export const TERMINAL_RENDERER_CAPABILITIES: RendererCapabilities = {
 // ─── 构造选项 ───
 
 export interface TerminalConfirmationRendererOptions {
+  /**
+   * 屏幕协调器——SelectOperationRegion 通过此协调 chrome inline 渲染。
+   * 必须注入：confirmation panel 走 chrome inline 而非独立屏，缺失协调器无法工作。
+   */
+  screen: ScreenController;
   /** 输入流——默认 process.stdin */
   stdin?: NodeJS.ReadStream;
-  /** 输出流——默认 process.stdout */
-  stdout?: NodeJS.WriteStream;
   /**
-   * selectWithInput 启动前的 hook——host（REPL）应在此暂停自己的 stdin 消费。
-   * 典型实现：`() => rl.pause()`。
+   * SelectOperationRegion 启动前的 hook —— host 应在此让当前 InputRegion（如 typeahead
+   * input）让位。典型实现：`() => inputController.suspend()`。region 走 chrome 共享
+   * stdin keypress 路径，必须由 caller 协调 input 资源切换避免双重消费。
    */
   beforeShow?: () => void | Promise<void>;
   /**
-   * selectWithInput 结束后的 hook——host 应恢复 stdin 消费。
-   * 典型实现：`() => rl.resume()`。
+   * SelectOperationRegion 结束后的 hook —— host 应恢复 InputRegion。典型实现：
+   * `() => inputController.resume()`。
    */
   afterShow?: () => void | Promise<void>;
 }
@@ -91,7 +93,7 @@ export class TerminalConfirmationRenderer implements ConfirmationRenderer {
   private currentAbort: AbortController | null = null;
   private detached = false;
 
-  constructor(private readonly options: TerminalConfirmationRendererOptions = {}) {}
+  constructor(private readonly options: TerminalConfirmationRendererOptions) {}
 
   attach(broker: IConfirmationBroker): () => void {
     if (this.broker && this.broker !== broker) {
@@ -131,31 +133,29 @@ export class TerminalConfirmationRenderer implements ConfirmationRenderer {
     this.currentAbort = abort;
 
     try {
-      // host 暂停
+      // host 暂停当前 InputRegion（让出 chrome 给 SelectOperationRegion）
       if (this.options.beforeShow) {
         await this.options.beforeShow();
       }
 
-      // 构造 selectWithInput 入参
+      // 构造面板入参
       const { selectOptions, optionById } = buildSelectOptions(request);
-      const bodyLines = buildPanelBody(request);
+      const title = buildInlinePanelTitle(request);
+      const bodyLines = buildInlinePanelBody(request);
 
       let result: SelectResult;
       try {
-        result = await selectWithInput({
-          title: request.display.title || "安全确认",
+        const region = new SelectOperationRegion({
+          screen: this.options.screen,
+          title,
           body: bodyLines,
           options: selectOptions,
           stdin: this.options.stdin ?? process.stdin,
-          stdout: this.options.stdout ?? process.stdout,
           signal: abort.signal,
-          // alt-screen 独占整屏——居中布局让面板聚焦中央而非缩在左上角
-          centered: true,
-          // keyHintBar 不传 → selectWithInput 在 select/input 模式切换时
-          // 自动渲染不同文案（Enter 在两个模式下语义完全不同）。
         });
+        result = await region.run();
       } finally {
-        // host 恢复——无论 selectWithInput 成功或抛错都要
+        // host 恢复 InputRegion —— 无论成功或抛错都要
         if (this.options.afterShow) {
           await this.options.afterShow();
         }
@@ -181,7 +181,7 @@ export class TerminalConfirmationRenderer implements ConfirmationRenderer {
 // ─── 从 ConfirmationRequest.options 构造 SelectOption[] ───
 
 /**
- * 把 broker 层的 ConfirmationOption 转成 selectWithInput 的 SelectOption。
+ * 把 broker 层的 ConfirmationOption 转成 SelectOption（select-types 协议）。
  * 同时返回一个 `optionById` 副表，用于在用户选中后把 value 映射回原始选项
  * （需要它来取回 pattern / 判断 kind）。
  *
@@ -242,9 +242,9 @@ export function buildSelectOptions(
  * 应用范围：allow-session / allow-workspace / allow-global —— 这三类都是"创建
  * 授权规则"而非"单次放行"，错选代价大。
  *
- * 与 selectWithInput 解耦：augment 发生在 buildSelectOptions（terminal-renderer
- * 即 confirmation 领域专属层），不下沉到 selectWithInput 通用组件——后者保持
- * 领域无关。
+ * 与 SelectOperationRegion 解耦：augment 发生在 buildSelectOptions（terminal-renderer
+ * 即 confirmation 领域专属层），不下沉到 SelectOperationRegion 通用组件——后者
+ * 保持领域无关。
  */
 function augmentLabelWithWarning(
   kind: ConfirmationOption["kind"],
@@ -332,65 +332,99 @@ export function translate(
   }
 }
 
-// ─── 面板 body 构造 ───
+// ─── 面板 title / body 构造（对话流嵌入式视觉） ───
 
 /**
- * 把 ConfirmationRequest 的显示信息构造成一组面板 body 行。
- * 包含主体（bash 命令 / 文件路径 / 消息...）+ 元数据表（cwd / env / 影响 / 风险 / 原因）。
+ * 构造 inline 面板的 title —— 场景化中文动词短语 + 高风险时形态警示。
  *
- * 注意：所有渲染走 chalk，chalk 会根据 NO_COLOR / CI 等自动降级。
- * 行宽由 clampLine 在 selectWithInput 内部处理，这里不需要考虑。
+ * 用户视角第一性原理：用户做决策真正依赖的是"AI 想做的具体的事"（命令 / 路径
+ * 等），而不是"操作类别 / 风险等级"等系统抽象分类。title 应直接告知用户 AI
+ * 的意图（"AI 想执行命令"/"AI 想写入文件"），让用户视线立刻聚焦到下方的具体
+ * 内容做判断。
+ *
+ * 风险分级靠 title **形态**承担，不引入新行：
+ *   - low / medium / 无：纯文字 title（典型场景，视觉安静）
+ *   - high / critical：⚠ + red bold + 风险标识尾缀（极端场景必须醒目）
+ *
+ *   普通：    "AI 想执行命令"
+ *   高风险：  "⚠ AI 想执行命令 (高风险)"  (red bold)
+ *   关键：    "⚠ AI 想执行命令 (关键操作)"  (red bold)
  */
-export function buildPanelBody(request: ConfirmationRequest): string[] {
-  const lines: string[] = [];
-  const body = request.display.body;
+export function buildInlinePanelTitle(request: ConfirmationRequest): string {
+  const intent = formatIntent(request.display.body);
+  const risk = request.decision?.riskLevel;
+  if (risk === "high") {
+    return tone.error.bold(`⚠ ${intent} (高风险)`);
+  }
+  if (risk === "critical") {
+    return tone.error.bold(`⚠ ${intent} (关键操作)`);
+  }
+  return intent;
+}
 
-  // ── 主体 ──
-  for (const line of renderBody(body)) {
+/**
+ * DisplayBody 派生场景化中文意图短语 —— title 主文案。
+ *
+ * 设计：每个 DisplayBody.kind 有清晰对应的"AI 想做 X"短语，让用户视觉接收
+ * 时立刻 grok AI 的意图类型。中文「想」表达请求语气（AI 在请你允许），与
+ * 平铺直叙的「执行」/「访问」拉开 —— 让用户感受到这是个 user-facing 决策点。
+ */
+function formatIntent(body: DisplayBody): string {
+  switch (body.kind) {
+    case "bash":
+      return "AI 想执行命令";
+    case "file-write":
+      return "AI 想写入文件";
+    case "file-edit":
+      return "AI 想修改文件";
+    case "file-read":
+      return "AI 想读取文件";
+    case "network":
+      return "AI 想访问网络";
+    case "messaging":
+      return "AI 想发送消息";
+    case "calendar":
+      return "AI 想创建日程";
+    case "generic":
+      return "AI 想做这件事";
+  }
+}
+
+/**
+ * 构造 inline 面板的 body 行 —— 紧凑对话流形态。
+ *
+ * 与旧 buildPanelBody（标签化多行）差异：
+ *   旧：`影响:  external` / `风险:  medium` / `原因:  无匹配规则` 各占一行
+ *   新：`外部 · 中风险 · 无匹配规则` 紧凑单行（去冗余 label）
+ *
+ * 行结构：
+ *   1. 主体（命令 / 路径 / 网络 host 等，来自 renderBody）
+ *   2. 元信息单行：`<影响> · <风险> · <原因>`（dim 渲染；缺省段省略）
+ *   3. cwd 单独 dim 行（仅当存在且 body 内未隐含路径时）
+ *   4. envKeys / resolvedPaths（如有，dim 单行）
+ *   5. 建议（如有，提示曾批准过相似操作）
+ *
+ * caller (SelectOperationRegion) 会在每行起首加 4 列 indent，本函数不负责 indent。
+ */
+export function buildInlinePanelBody(request: ConfirmationRequest): string[] {
+  const lines: string[] = [];
+
+  // ── 1. 主体（决策唯一依据） ──
+  // 用户做决策真正依赖的是命令本身/路径/URL 等具体内容——其他元信息（影响 / 风险 /
+  // 原因 / cwd / env / 路径列表）对决策无增值，全部删除。风险分级靠 title 形态
+  // （high/critical 时 ⚠ + red bold + 标识尾缀）承担，不占额外行
+  for (const line of renderBody(request.display.body)) {
     lines.push(line);
   }
 
-  // ── 元数据表 ──
-  lines.push("");
-
-  if (request.display.cwd) {
-    lines.push(`${chalk.dim("cwd:")}   ${request.display.cwd}`);
-  }
-
-  if (request.display.envKeys && request.display.envKeys.length > 0) {
-    lines.push(
-      `${chalk.dim("env:")}   ${request.display.envKeys.join(", ")}`,
-    );
-  }
-
-  if (request.display.resolvedPaths && request.display.resolvedPaths.length > 0) {
-    const preview = request.display.resolvedPaths.slice(0, 3).join(", ");
-    const suffix =
-      request.display.resolvedPaths.length > 3
-        ? ` (+${request.display.resolvedPaths.length - 3})`
-        : "";
-    lines.push(`${chalk.dim("路径:")}  ${preview}${suffix}`);
-  }
-
-  if (request.operationClass) {
-    lines.push(
-      `${chalk.dim("影响:")}  ${formatOperationClass(request.operationClass)}`,
-    );
-  }
-
-  if (request.decision?.riskLevel) {
-    lines.push(`${chalk.dim("风险:")}  ${formatRiskLevel(request.decision.riskLevel)}`);
-  }
-
-  if (request.decision?.reason) {
-    lines.push(`${chalk.dim("原因:")}  ${request.decision.reason}`);
-  }
-
+  // ── 2. 建议提示（actionable，仅 suggestion 存在时） ──
+  // 提示用户"曾批准过 N 次相似操作"——actionable 信号，帮用户判断常规度
   if (request.suggestion?.suggest) {
     const { displayName } = getAgentIdentity();
-    lines.push("");
     lines.push(
-      `${chalk.green("💡 提示")} ${chalk.dim(`${displayName} 已经批准过 ${request.suggestion.count} 次相似操作`)}`,
+      tone.dim(
+        `💡 ${displayName} 已经批准过 ${request.suggestion.count} 次相似操作`,
+      ),
     );
   }
 
@@ -445,46 +479,4 @@ function truncate(s: string, maxChars: number): string {
   return `${s.slice(0, maxChars - 1)}…`;
 }
 
-/**
- * 操作类别 → 用户视角中文标签。
- *
- * **去多彩配色**：原 observe/internal 绿、external 黄、critical 红——四个语义色
- * 违反 P5「单一品牌主色 cyan」。新方案用中文文字承担分级语义 + 仅 critical 保留
- * red 标识"严重"（错误信号语义保留）+ ⚠ 字符做形态信号让色弱用户也能识别。
- */
-function formatOperationClass(cls: OperationClass): string {
-  switch (cls) {
-    case "observe":
-      return "观察";
-    case "internal":
-      return "内部";
-    case "external":
-      return "外部";
-    case "critical":
-      return `${tone.error.bold("关键")} ⚠`;
-  }
-}
 
-/**
- * 风险等级 → 用户视角中文标签 + 形态分级。
- *
- * **去多彩配色 + 形态承担分级**：
- *   low / medium:    默认色 + 中文「低」/「中」——视觉安静、信号靠文字
- *   high:            tone.error.bold「高」+ ⚠ ——错误信号 + 形态双重提示
- *   critical:        tone.error.bold「严重」+ ⚠ ——同 high 但文字更紧迫
- *   unknown:         原样返回 robust（防御未来扩展）
- */
-function formatRiskLevel(level: string): string {
-  switch (level) {
-    case "low":
-      return "低";
-    case "medium":
-      return "中";
-    case "high":
-      return `${tone.error.bold("高")} ⚠`;
-    case "critical":
-      return `${tone.error.bold("严重")} ⚠`;
-    default:
-      return level;
-  }
-}

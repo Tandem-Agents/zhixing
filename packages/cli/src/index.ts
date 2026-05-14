@@ -10,6 +10,7 @@ import chalk from "chalk";
 import { Command } from "commander";
 import { setDiagnosticLogger } from "@zhixing/core";
 import { configureLlmChunkDump } from "./output/llm-chunk-dump.js";
+import { configureKeypressDump } from "./security/keypress-dump.js";
 import { runStartupCheck, type StartupCheckResult } from "./startup.js";
 import { runOnce } from "./run-agent.js";
 import { startRepl } from "./repl.js";
@@ -80,7 +81,7 @@ program
   .option("-c, --continue", "继续当前项目最近的会话")
   .option("-r, --resume [id]", "恢复指定会话（不带 ID 则交互选择）")
   .option("-n, --name <name>", "为会话命名")
-  .option("--log", "启用 LLM raw chunk dump 到 ~/.zhixing/logs/ —— 诊断渲染 / 上下文 / 流式问题用")
+  .option("--log", "启用诊断 dump 到 ~/.zhixing/logs/（LLM raw chunk + keypress 路径） —— 排查渲染 / 上下文 / 流式 / 按键输入问题用")
   .action(async (options: {
     print?: string;
     model?: string;
@@ -96,9 +97,16 @@ program
       // 避免污染对话 UI；serve / rpc / serve sub-commands 各自独立 action 不受影响，
       // 保持默认 console.log 输出供运维与调试观察
       setDiagnosticLogger(() => {});
-      // chunk-dump 启用配置 —— 必须在 startRepl / runOnce 触发 dump 预热之前调用，
-      // 否则 singleton cached 为 NOOP 后续无法激活。--log 是唯一开关（无 ENV 兜底）。
-      configureLlmChunkDump(options.log === true);
+      // 诊断 dump 启用配置 —— 必须在 startRepl / runOnce 触发 dump 预热之前调用，
+      // 否则 singleton cached 为 NOOP 后续无法激活。--log 是唯一开关（无 ENV 兜底）：
+      //   - llm-chunk-dump：LLM stream 完整事件流（含 codepoint hex）
+      //   - keypress-dump：SelectOperationRegion keypress 路径每节点（confirmation
+      //     panel 字符输入异常调查用）
+      // 两个 dump 写到不同文件，互不干扰；--log 单一开关统一启用，避免多 flag
+      // 心智负担与 PowerShell env var 持久化陷阱。
+      const dumpEnabled = options.log === true;
+      configureLlmChunkDump(dumpEnabled);
+      configureKeypressDump(dumpEnabled);
       // 启动期检查——任何模式（-p / REPL）下都先确保必要字段就绪
       const startupResult = await runStartupCheck({
         cwd: process.cwd(),
