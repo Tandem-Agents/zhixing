@@ -9,7 +9,7 @@
 import chalk from "chalk";
 import { Command } from "commander";
 import { setDiagnosticLogger } from "@zhixing/core";
-import { configureLlmChunkDump } from "./output/llm-chunk-dump.js";
+import { configureLlmChunkDump, pruneAllLogs } from "./output/llm-chunk-dump.js";
 import { configureKeypressDump } from "./security/keypress-dump.js";
 import { runStartupCheck, type StartupCheckResult } from "./startup.js";
 import { runOnce } from "./run-agent.js";
@@ -292,6 +292,18 @@ const dashIdx = argv.indexOf("--", 2);
 if (dashIdx !== -1) {
   argv.splice(dashIdx, 1);
 }
+
+// ─── 启动期日志守门 ───
+//
+// 在任何子命令分发之前巡检一次 ~/.zhixing/logs/ 子目录,把每个目录裁剪到上限。
+// 与 llm-chunk-dump 内部写盘内联的 prune 形成双 trigger 互补:启动巡检覆盖
+// 进程间累积 + 用户从此不再写盘的冷目录;写盘内联覆盖单进程内累积。两者
+// 覆盖区间不重叠,缺任何一边都会留下"日志无限增长"的真实漏洞。
+//
+// 全模式覆盖:本调用位于 program.parseAsync 之前,无论后续分发到 REPL / -p /
+// serve / rpc 等哪个 action,都已经过守门。pruneAllLogs 内部 swallow 一切 IO
+// 失败,不会影响后续主流程。
+pruneAllLogs();
 
 program.parseAsync(argv).catch((err: unknown) => {
   renderError(err, stdoutWriter);

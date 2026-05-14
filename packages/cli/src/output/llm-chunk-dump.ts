@@ -46,15 +46,89 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
-import type {
-  AgentEventMap,
-  ContentBlock,
-  IEventBus,
-  Message,
-  StreamEvent,
-  ToolSpec,
+import {
+  getZhixingHome,
+  type AgentEventMap,
+  type ContentBlock,
+  type IEventBus,
+  type Message,
+  type StreamEvent,
+  type ToolSpec,
 } from "@zhixing/core";
+
+// ─── 日志目录布局与轮转 ───────────────────────────────────────────────
+//
+// 物理结构(全部基于 getZhixingHome,从不直拼 os.homedir):
+//
+//   <ZHIXING_HOME>/logs/
+//     llm-raw/         —— --log 启用时的全 stream 详尽 dump (process-singleton)
+//       llm-raw-{pid}-{ts}.log
+//     llm-error/       —— LLM 错误时自动写出的 forensic 现场
+//       llm-error-{pid}-{ts}.log
+//
+// 两类日志各自独立子目录、独立轮转,互不干扰。子目录边界是分类容器——目录里
+// 出现什么前缀的文件,prune 一视同仁按 mtime 淘汰,不需要前缀过滤。
+//
+// 轮转规则: 每个子目录保留最近 7 个文件(MAX_LOG_FILES_PER_DIR),写盘后立即
+// prune 淘汰最旧的。Best-effort: Windows 下当前进程持有 fd 的文件 unlink 会
+// EBUSY,swallow 后进程退出再下次写盘时自然纳入候选;其他 IO 失败一律 swallow,
+// 诊断模块自身故障不应影响 cli 主流程。
+
+const MAX_LOG_FILES_PER_DIR = 7;
+
+function rawDumpDir(): string {
+  return path.join(getZhixingHome(), "logs", "llm-raw");
+}
+
+function forensicDir(): string {
+  return path.join(getZhixingHome(), "logs", "llm-error");
+}
+
+/**
+ * Prune-to-N: 保留目录里最近 N 个文件,按 mtime 倒序,淘汰其余。
+ *
+ * 算法:
+ *   1. readdir 拿到目录所有 entry
+ *   2. 若总数 <= keep 直接 return,无 IO
+ *   3. 否则 stat 每个 entry 拿 mtime(stat 失败的 entry 跳过)
+ *   4. 按 mtime 倒序排,取前 N 个保留,unlink 其余
+ *
+ * 错误模型: 整段 try/catch swallow + 单 entry stat/unlink 失败也 swallow ——
+ * Windows fd 锁、权限不足、目录不存在等场景一律 best-effort,不抛错不打印。
+ *
+ * 调用方:本模块内部 writeLlmErrorForensic / createDump 的写盘内联调用,
+ * 以及 pruneAllLogs() 启动巡检公共入口。两条 trigger 互补——单进程内累积
+ * 走写盘内联,进程间累积 / 用户从此不再写盘的目录走启动巡检。
+ */
+function pruneLogDir(dir: string, keep: number): void {
+  try {
+    const entries = fs.readdirSync(dir);
+    if (entries.length <= keep) return;
+
+    const stats: Array<{ full: string; mtime: number }> = [];
+    for (const name of entries) {
+      const full = path.join(dir, name);
+      try {
+        const st = fs.statSync(full);
+        if (st.isFile()) stats.push({ full, mtime: st.mtimeMs });
+      } catch {
+        // 单个 entry stat 失败 swallow —— 不影响其他文件淘汰
+      }
+    }
+
+    if (stats.length <= keep) return;
+    stats.sort((a, b) => b.mtime - a.mtime); // newest first
+    for (const { full } of stats.slice(keep)) {
+      try {
+        fs.unlinkSync(full);
+      } catch {
+        // Windows fd 锁 / 权限不足 swallow —— 下次轮转再尝试
+      }
+    }
+  } catch {
+    // readdir 失败(目录不存在/权限不足)swallow —— 诊断模块不影响主流程
+  }
+}
 
 /** 一次 LLM 请求的完整入参——dump 用于人类阅读 + 可机器还原 */
 export interface LlmRequestPayload {
@@ -197,8 +271,9 @@ export function attachChunkDumpToBus(
  * LLM 错误现场 forensic dump —— 总是写（不依赖 --log），用于 provider_error /
  * context_overflow / invalid_request 等错误的事后定位。
  *
- * **写入路径**：`~/.zhixing/logs/llm-error-<pid>-<ts>.log`（与 --log 的 raw dump
- * 同目录，但独立文件以便区分主动 dump vs 错误自动 dump）。
+ * **写入路径**：`<ZHIXING_HOME>/logs/llm-error/llm-error-<pid>-<ts>.log`。
+ * forensic 与 raw dump 分目录隔离(详见文件顶部"日志目录布局与轮转"section),
+ * 每个目录保留最近 MAX_LOG_FILES_PER_DIR 个文件。
  *
  * **写入内容**：
  *   - 错误详情（type / message）
@@ -208,7 +283,7 @@ export function attachChunkDumpToBus(
  *     tool_result id 配对状态）
  *
  * 这套数据让 AI 一次性回答："是 token 超限 / tool pairing 破损 / 文件内容异常 /
- * 其他"——postmortems #2 教训沉淀的"先看真实数据再下诊断结论"原则的工具化体现。
+ * 其他"——"先看真实数据再下诊断结论"原则的工具化体现。
  *
  * **错误吞噬**：所有 IO 错误 swallow——forensic 工具自身故障不应再添乱。
  */
@@ -216,8 +291,9 @@ function writeLlmErrorForensic(error: {
   type: string;
   message: string | null;
 }): void {
+  // logDir 是纯字符串拼接,不抛错;放在 try 外让后续 prune 在写盘失败路径也能读到
+  const logDir = forensicDir();
   try {
-    const logDir = path.join(os.homedir(), ".zhixing", "logs");
     fs.mkdirSync(logDir, { recursive: true });
     const ts = new Date().toISOString().replace(/[:.]/g, "-");
     const logPath = path.join(logDir, `llm-error-${process.pid}-${ts}.log`);
@@ -229,6 +305,12 @@ function writeLlmErrorForensic(error: {
   } catch {
     // 诊断模块自身故障吞噬——不应影响主流程
   }
+  // Prune 与写盘解耦 —— 无论写盘成功还是失败都尝试轮转:
+  //   - 写盘成功:含新文件的完整集合按 mtime 倒序保留 N,不会误删本次现场
+  //   - 写盘失败:旧文件仍可能 > N,这里收口防止"持续写盘失败 → 旧文件永久堆积"
+  // pruneLogDir 内部 swallow 所有 IO 失败(目录不存在 / 权限不足 / Windows fd 锁),
+  // 此处不需要二次 try。
+  pruneLogDir(logDir, MAX_LOG_FILES_PER_DIR);
 }
 
 /**
@@ -409,18 +491,25 @@ function createDump(): LlmChunkDump {
   // 启用状态由 configureLlmChunkDump 决定 —— 此函数只在 pendingEnabled=true 时被
   // getLlmChunkDump 调用，自身无需再 check enabled flag。
 
+  // logDir 是纯字符串拼接,不抛错;放在 try 外让后续 prune 在 mkdir/open 失败路径
+  // 也能读到目录路径
+  const logDir = rawDumpDir();
   let fd: number | null = null;
   let logPath = "";
   try {
-    const logDir = path.join(os.homedir(), ".zhixing", "logs");
     fs.mkdirSync(logDir, { recursive: true });
     const ts = new Date().toISOString().replace(/[:.]/g, "-");
     logPath = path.join(logDir, `llm-raw-${process.pid}-${ts}.log`);
     fd = fs.openSync(logPath, "a");
   } catch {
-    // IO 失败退化为 noop；不抛错让 cli 主流程不受影响
-    return NOOP;
+    // IO 失败让 fd 保持 null,下方统一处理(仍跑 prune,然后返 NOOP)
   }
+  // Prune 与 open 解耦 —— 无论本次 open 成功还是失败都尝试轮转。
+  // 成功路径:含新文件的完整集合按 mtime 倒序保留 N;当前 fd 持有的文件是最新
+  //   mtime 不会被淘汰,其他 fd 已释放的旧文件 unlink 成功,被占的旧文件 swallow。
+  // 失败路径:--log 启用但本次 open 失败,旧文件仍需要被轮转防止永久堆积。
+  pruneLogDir(logDir, MAX_LOG_FILES_PER_DIR);
+  if (fd === null) return NOOP;
 
   // 启动横幅 + 路径提示到 stderr——cli REPL chrome 接管 stdout 之前 stderr 仍可见
   const banner =
@@ -676,4 +765,38 @@ export function __resetForTesting(): void {
   cachedHandle?.dispose();
   cachedHandle = null;
   pendingEnabled = false;
+}
+
+/**
+ * 启动期日志守门 —— 巡检所有日志子目录,把每个目录裁剪到 MAX_LOG_FILES_PER_DIR
+ * 上限内。每次 cli 启动都调用一次(cli 入口),覆盖以下场景:
+ *
+ *   1. 进程间累积:上一个进程死了之后留下的旧文件,下一个进程启动时清理
+ *   2. 用户从此不再写盘:曾启用 --log 累积 raw dump,然后再也不用 --log
+ *      → 没有写盘内联 prune 可以触发,只能靠启动巡检兜底
+ *
+ * 与写盘内联 prune(writeLlmErrorForensic / createDump)双 trigger 互补:
+ *   - 启动巡检:进程粒度,每次启动一次,覆盖跨进程累积与冷目录
+ *   - 写盘内联:事件粒度,每次写盘后一次,覆盖单进程内累积
+ *
+ * 两者覆盖区间不重叠 —— 缺任何一边都会留下"目录无限增长"的真实漏洞。
+ *
+ * 性能开销:每个子目录一次 readdir + (若超额)若干 stat + unlink。
+ * 子目录上限 N=MAX_LOG_FILES_PER_DIR(7),典型场景 0 个 unlink,毫秒级,
+ * cli 启动延迟无感。
+ *
+ * 错误模型:pruneLogDir 内部 swallow 所有 IO 失败;本函数不抛错不打印。
+ */
+export function pruneAllLogs(): void {
+  pruneLogDir(rawDumpDir(), MAX_LOG_FILES_PER_DIR);
+  pruneLogDir(forensicDir(), MAX_LOG_FILES_PER_DIR);
+}
+
+/**
+ * 测试用:轮转 helper 的直接调用通道。生产路径(writeLlmErrorForensic / createDump
+ * 写盘内联 + pruneAllLogs 启动巡检)各自有调用点,本钩子仅为单元测试断言行为
+ * (任意 dir + 任意 keep)而存在,生产代码不应调用。
+ */
+export function __pruneLogDirForTesting(dir: string, keep: number): void {
+  pruneLogDir(dir, keep);
 }

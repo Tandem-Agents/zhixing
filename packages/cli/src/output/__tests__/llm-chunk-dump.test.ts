@@ -1,20 +1,28 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import {
   createEventBus,
+  getZhixingHome,
   type AgentEventMap,
   type IEventBus,
 } from "@zhixing/core";
+import { createDescribeTempDir, createTempDir } from "@zhixing/test-utils";
 import {
   attachChunkDumpToBus,
   configureLlmChunkDump,
   getLlmChunkDump,
+  pruneAllLogs,
   __resetForTesting,
+  __pruneLogDirForTesting,
 } from "../llm-chunk-dump.js";
 
-const LOG_DIR = path.join(os.homedir(), ".zhixing", "logs");
+// raw dump 落到 <ZHIXING_HOME>/logs/llm-raw/ 子目录(详见 llm-chunk-dump.ts
+// 顶部"日志目录布局与轮转"section)。动态读 ZHIXING_HOME —— "启用"测试组会
+// 切到 createDescribeTempDir 临时目录,避免测试期 prune 误删用户真实日志。
+function logDir(): string {
+  return path.join(getZhixingHome(), "logs", "llm-raw");
+}
 
 describe("LLM chunk dump · 默认禁用（未 configure / configure false）", () => {
   beforeEach(() => {
@@ -60,13 +68,20 @@ describe("LLM chunk dump · 默认禁用（未 configure / configure false）", 
 });
 
 describe("LLM chunk dump · 启用（configure(true)）", () => {
+  // 切 ZHIXING_HOME 到 describe-scope 临时目录 —— createDump 路径基于
+  // getZhixingHome() 派生,本组测试就在隔离根下跑(避免 prune 误删用户真实日志,
+  // 也避免测试间产物互相残留)。
+  const tempHome = createDescribeTempDir("llm-chunk-dump");
+  let originalHome: string | undefined;
   let logsBefore: string[] = [];
 
   beforeEach(() => {
     __resetForTesting();
+    originalHome = process.env.ZHIXING_HOME;
+    process.env.ZHIXING_HOME = tempHome.getDir();
     configureLlmChunkDump(true);
     try {
-      logsBefore = fs.existsSync(LOG_DIR) ? fs.readdirSync(LOG_DIR) : [];
+      logsBefore = fs.existsSync(logDir()) ? fs.readdirSync(logDir()) : [];
     } catch {
       logsBefore = [];
     }
@@ -74,12 +89,12 @@ describe("LLM chunk dump · 启用（configure(true)）", () => {
   afterEach(() => {
     __resetForTesting();
     try {
-      const after = fs.existsSync(LOG_DIR) ? fs.readdirSync(LOG_DIR) : [];
+      const after = fs.existsSync(logDir()) ? fs.readdirSync(logDir()) : [];
       for (const name of after) {
         if (logsBefore.includes(name)) continue;
         if (!name.startsWith("llm-raw-")) continue;
         try {
-          fs.unlinkSync(path.join(LOG_DIR, name));
+          fs.unlinkSync(path.join(logDir(), name));
         } catch {
           /* swallow */
         }
@@ -87,17 +102,19 @@ describe("LLM chunk dump · 启用（configure(true)）", () => {
     } catch {
       /* swallow */
     }
+    if (originalHome === undefined) delete process.env.ZHIXING_HOME;
+    else process.env.ZHIXING_HOME = originalHome;
   });
 
   function findNewLog(): string | null {
     try {
-      const after = fs.readdirSync(LOG_DIR);
+      const after = fs.readdirSync(logDir());
       const fresh = after.filter(
         (n) => n.startsWith("llm-raw-") && !logsBefore.includes(n),
       );
       if (fresh.length === 0) return null;
       fresh.sort();
-      return path.join(LOG_DIR, fresh[fresh.length - 1]!);
+      return path.join(logDir(), fresh[fresh.length - 1]!);
     } catch {
       return null;
     }
@@ -279,5 +296,143 @@ describe("LLM chunk dump · 启用（configure(true)）", () => {
     expect(content).toContain(">>> LLM REQUEST PAYLOAD <<<");
     expect(content).toContain("model:    test/m1");
     expect(content).toContain("system:   3 chars");
+  });
+});
+
+describe("LLM chunk dump · 日志目录轮转 (prune-to-N)", () => {
+  // 用临时目录隔离测试,不污染真实 ~/.zhixing/logs/
+
+  it("目录文件 <= keep 时 prune 不动任何文件", async () => {
+    const dir = await createTempDir("llm-chunk-dump-prune");
+    for (let i = 0; i < 5; i++) {
+      fs.writeFileSync(path.join(dir, `f${i}.log`), `content ${i}`);
+    }
+    __pruneLogDirForTesting(dir, 7);
+    expect(fs.readdirSync(dir).sort()).toEqual(
+      ["f0.log", "f1.log", "f2.log", "f3.log", "f4.log"].sort(),
+    );
+  });
+
+  it("目录文件 > keep 时按 mtime 倒序保留最新 N 个", async () => {
+    const dir = await createTempDir("llm-chunk-dump-prune");
+    // 写 10 个文件,人为拉开 mtime 顺序:文件 i 的 mtime = 基准时间 + i 秒
+    const base = Date.now() - 10_000;
+    for (let i = 0; i < 10; i++) {
+      const p = path.join(dir, `f${i}.log`);
+      fs.writeFileSync(p, `content ${i}`);
+      const t = new Date(base + i * 1000);
+      fs.utimesSync(p, t, t);
+    }
+
+    __pruneLogDirForTesting(dir, 7);
+
+    // 应保留 mtime 最新的 7 个 = f3..f9;淘汰 f0/f1/f2
+    const remaining = fs.readdirSync(dir).sort();
+    expect(remaining).toEqual(["f3.log", "f4.log", "f5.log", "f6.log", "f7.log", "f8.log", "f9.log"]);
+  });
+
+  it("目录不存在时 prune swallow 不抛错", () => {
+    expect(() => {
+      __pruneLogDirForTesting(path.join(getZhixingHome(), "logs", "non-existent-xxxx"), 7);
+    }).not.toThrow();
+  });
+
+  it("keep=0 时清空目录所有文件", async () => {
+    const dir = await createTempDir("llm-chunk-dump-prune");
+    for (let i = 0; i < 3; i++) {
+      fs.writeFileSync(path.join(dir, `f${i}.log`), `x`);
+    }
+    __pruneLogDirForTesting(dir, 0);
+    expect(fs.readdirSync(dir)).toEqual([]);
+  });
+});
+
+describe("LLM chunk dump · 守门 (启动巡检 + 写盘失败 fail-safe)", () => {
+  // ZHIXING_HOME 切到 describe-scope 临时目录,让 forensicDir / rawDumpDir 指向
+  // 隔离根。守门测试两条契约:
+  //   1. pruneAllLogs 巡检两个子目录(进程间累积 / 冷目录覆盖)
+  //   2. forensic 写盘失败时 prune 仍然跑(锁死"prune 在 try/catch 外"的结构性
+  //      保证 —— 防止未来有人不知情把 prune 挪回 try 块内绕过守门)
+  const tempHome = createDescribeTempDir("llm-chunk-dump-guard");
+  let originalHome: string | undefined;
+
+  beforeEach(() => {
+    __resetForTesting();
+    originalHome = process.env.ZHIXING_HOME;
+    process.env.ZHIXING_HOME = tempHome.getDir();
+    // describe-scope tempHome 跨 it 共享,每个 it 前清空 logs/ 子目录,
+    // 避免前一个 test 的 seed 文件污染当前 test 断言
+    const logsDir = path.join(tempHome.getDir(), "logs");
+    if (fs.existsSync(logsDir)) {
+      fs.rmSync(logsDir, { recursive: true, force: true });
+    }
+  });
+  afterEach(() => {
+    __resetForTesting();
+    if (originalHome === undefined) delete process.env.ZHIXING_HOME;
+    else process.env.ZHIXING_HOME = originalHome;
+  });
+
+  function seedDir(dir: string, count: number): void {
+    fs.mkdirSync(dir, { recursive: true });
+    const base = Date.now() - count * 1000;
+    for (let i = 0; i < count; i++) {
+      const p = path.join(dir, `seed-${i}.log`);
+      fs.writeFileSync(p, "seed");
+      const t = new Date(base + i * 1000);
+      fs.utimesSync(p, t, t);
+    }
+  }
+
+  it("pruneAllLogs 同时巡检 llm-raw/ 与 llm-error/ 子目录,各裁剪到 7", () => {
+    const rawDir = path.join(tempHome.getDir(), "logs", "llm-raw");
+    const errDir = path.join(tempHome.getDir(), "logs", "llm-error");
+    seedDir(rawDir, 10);
+    seedDir(errDir, 12);
+
+    pruneAllLogs();
+
+    expect(fs.readdirSync(rawDir)).toHaveLength(7);
+    expect(fs.readdirSync(errDir)).toHaveLength(7);
+  });
+
+  it("pruneAllLogs 在目录不存在时 swallow,不抛错", () => {
+    // tempHome 下当前没有 logs/ 子目录,pruneAllLogs 应 swallow 不抛错
+    expect(() => pruneAllLogs()).not.toThrow();
+  });
+
+  it("forensic 写盘失败时 prune 仍然跑(写盘失败不绕过守门)", async () => {
+    // 预放 8 个老文件到 forensic 目录,模拟"已有累积"
+    const errDir = path.join(tempHome.getDir(), "logs", "llm-error");
+    seedDir(errDir, 8);
+    expect(fs.readdirSync(errDir)).toHaveLength(8);
+
+    // Mock writeFileSync 抛错(模拟磁盘满 / 权限不足 / 等 IO 失败)
+    const spy = vi.spyOn(fs, "writeFileSync").mockImplementation(() => {
+      throw new Error("simulated IO failure");
+    });
+
+    try {
+      // 触发 writeLlmErrorForensic —— attachChunkDumpToBus 在 agent:run_end
+      // reason="error" 时强制调
+      const bus = createEventBus<AgentEventMap>();
+      const detach = attachChunkDumpToBus(bus);
+      await bus.emit("agent:run_end", {
+        reason: "error",
+        error: "test",
+        errorType: "provider_error",
+        duration: 0,
+        turnCount: 0,
+        usage: { inputTokens: 0, outputTokens: 0 },
+      });
+      detach();
+    } finally {
+      spy.mockRestore();
+    }
+
+    // 关键断言:writeFileSync 抛错 → 新 forensic 文件没落地,但 prune 仍跑过
+    // → 8 个老文件被裁剪到 7 个。若 prune 被写盘失败绕过,这里会断言失败,
+    // 测试锁死"prune 在 try/catch 外"的结构性保证。
+    expect(fs.readdirSync(errDir)).toHaveLength(7);
   });
 });
