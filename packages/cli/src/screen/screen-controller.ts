@@ -255,8 +255,17 @@ export interface ScreenController {
   beginReplaceableSegment(): ReplaceableSegmentHandle;
 
   /**
-   * 暂停 chrome 协调——confirmation panel 等 modal alt UI 进入前调用，让 alt UI
-   * 在 chrome 末尾区域 inline 起手（撤 DECSTBM + 擦 chrome）。
+   * 暂停 chrome 协调——modal alt UI（confirmation panel 等）进入前调用，切到
+   * 终端 alternate screen buffer 让 alt UI 独占整屏渲染。
+   *
+   * 协议：emit `\x1b[?1049h` 切到 alt buffer——终端**原子保存** main buffer 整体
+   * （viewport 内容 + scrollback + cursor）。alt UI 在 alt buffer 自由渲染、不
+   * 影响 main buffer 的对话历史；resume 时 `\x1b[?1049l` 原子恢复 main buffer。
+   *
+   * 与"手工 DECSTBM clear + 恢复"协议的对比：alt-screen 由终端保管 main buffer
+   * 状态——无 region 可视区内容丢失风险（未自然滚入 scrollback 的对话历史在 alt
+   * UI 退出后完整恢复）；DECSTBM clear 路径会 destructive 擦除 region 可视区，
+   * 是历史 bug 来源（home 页触发 modal 后历史消失）。
    *
    * 必须与 resume() 成对调用。重复 suspend 抛错（不可重入）。disposed 后
    * 调用抛错。
@@ -264,7 +273,13 @@ export interface ScreenController {
   suspend(): void;
 
   /**
-   * 恢复 chrome 协调——alt UI 退出后调用，重设 DECSTBM + 重画 chrome。
+   * 恢复 chrome 协调——alt UI 退出后调用。emit `\x1b[?1049l` 切回 main buffer，
+   * 终端原子恢复 viewport 内容 / scrollback / cursor / DECSTBM 状态。
+   *
+   * 防御性 refreshChrome：(1) DECSTBM 跨 alt-screen 是 implementation-defined 是
+   * 否随 buffer 保存——re-emit 兜底；(2) suspend 期间累积的 queue 任务可能
+   * 改变内部状态（如 setStatusBar），refreshChrome 把最新状态画到（已被终端
+   * 恢复的）chrome——idempotent 重画或反映新状态。
    *
    * 必须 suspend 之后调用。disposed 后调用抛错。
    */
@@ -630,8 +645,21 @@ class ScreenControllerImpl implements ScreenController {
       );
     }
 
-    // suspend 同步执行——不入队（与现有协议一致）。caller 在 alt UI 进入前
-    // 立即生效让位 chrome；后续任务暂存等 resume 后 flush。
+    // 切到 alternate screen buffer —— 终端原子保存 main buffer 整体（含
+    // viewport 内容、scrollback、cursor 位置、DECSTBM 状态由 terminal 自行
+    // 决策是否一并保存）。alt UI 在 alt buffer 独立渲染，main buffer 完全
+    // 不被触碰——这是消除"region 可视区内容（未自然滚入 scrollback 的活跃
+    // 对话历史）被 destructive clear 永久擦除"bug 的根本手段。
+    //
+    // 显式 `\x1b[1;1H` home cursor —— alt buffer 入口 cursor 位置 implementation-
+    // defined（部分终端继承 saved cursor 位置）；显式 home 让 alt UI（selectWithInput
+    // 用 PanelRenderer 假设 cursor 在 startRow）起手位置确定可预测。
+    this.stdout.write(ANSI.enterAltScreen);
+    this.stdout.write("\x1b[1;1H");
+
+    // scrollRegion.suspend() 仅切内部 flag——阻塞 suspend 期间任何对 region 的
+    // 写入路径（requireWritable check），与 ScreenController.suspendedFlag 保持
+    // 状态机镜像。不做任何 destructive emit——内容由终端 alt-screen 原子保管。
     if (this.scrollRegion.state.attached) {
       this.scrollRegion.suspend();
     }
@@ -650,23 +678,29 @@ class ScreenControllerImpl implements ScreenController {
       );
     }
 
-    // suspendedFlag 与 ScrollRegion.suspended 是状态机镜像对——必须同步翻转两者
-    // 才能让随后 flush 消费的暂存任务在"两个状态机都已 unsuspended"的一致世界
-    // 里执行 ScrollRegion 写入。否则 ScrollRegion 仍 suspended → requireWritable
-    // 抛错 → flush 内 try-catch 静默吞掉 → 暂存写入丢失（与 suspend 对称设计同
-    // 一处理：suspend 内也是同步翻转两者）。
+    // 切回 main buffer —— 终端原子恢复 main buffer 状态：viewport 内容（含
+    // region 内对话历史 + chrome）、scrollback、cursor 位置都回到 suspend 前。
+    this.stdout.write(ANSI.exitAltScreen);
+
+    // suspendedFlag 与 ScrollRegion.suspended 同步翻转—— flush 消费暂存任务前
+    // 两个状态机必须对齐 unsuspended，否则 ScrollRegion 仍 suspended →
+    // requireWritable 抛错 → 暂存写入丢失。
     this.suspendedFlag = false;
     if (
       this.scrollRegion.state.attached &&
       this.scrollRegion.state.suspended
     ) {
-      const chromeHeight = this.computeChromeHeight();
-      const chromeBytes = this.buildChromeBytes(chromeHeight);
-      this.scrollRegion.resume(chromeHeight, chromeBytes);
-      this.repaintInputCursor();
-      // 重新断言 chrome 模式不变量：硬件光标隐藏。modal（select-with-input /
-      // config-editor）退出时可能自己 emit \x1b[?25h，由本 emit 兜底覆盖让
-      // 输入光标继续由 chrome 的 reverse SGR 视觉光标承担。
+      this.scrollRegion.resume();
+      // 防御性 refreshChrome：(1) DECSTBM 跨 alt-screen 切换是 implementation-
+      // defined 是否保存——refreshChrome 内 setChromeHeight 会 re-emit DECSTBM
+      // 序列兜底；(2) suspend 期间累积的暂存任务（setStatusBar / setStatusTails
+      // 等）可能改变内部 chrome 状态——refreshChrome 用最新状态重画 chrome 字节
+      // （内容不变时是 idempotent，状态变化时反映新状态）。
+      this.refreshChrome();
+      // 重新断言 chrome 模式不变量：硬件光标隐藏。modal（selectWithInput）
+      // 可能自己 emit `\x1b[?25h` 显示光标做输入；alt-screen 切回 main buffer
+      // 后 main 的 cursor 可见性状态由终端决定（implementation-defined），由本
+      // emit 兜底强制隐藏，输入光标继续由 chrome 的 reverse SGR 视觉光标承担。
       this.stdout.write(ANSI.hideCursor);
     }
     this.notifySuspendChange(false);
@@ -696,8 +730,25 @@ class ScreenControllerImpl implements ScreenController {
     if (this.disposed) return;
     this.detachResize?.();
     this.detachResize = null;
+    // 同步捕获 suspend 状态：dispose 后续会强制 `suspendedFlag = false` 让 flush
+    // 消费 cleanup 任务，但 cleanup 任务需要知道"是否曾在 suspend 中"以决定
+    // 是否 emit exitAltScreen 防御切回 main buffer。
+    const wasSuspendedAtDispose = this.suspendedFlag;
     this.queue.push({
       run: () => {
+        // alt buffer 防御退出：若 dispose 时仍处于 suspend 态（如用户在 modal
+        // 中 Ctrl+C 终止 session），ScreenController 已被 dispose 入口同步设
+        // `suspendedFlag = false`（line below），但终端实际仍在 alt buffer。
+        // 必须 emit `\x1b[?1049l` 切回 main buffer，否则 shell 接管时停留在
+        // 空 alt buffer，用户视觉错乱（且 shell 输出会被 alt buffer 吞掉）。
+        //
+        // wasSuspendedAtDispose 由 dispose 入口同步捕获（line 上方），run 闭包
+        // 里访问局部值，与 `this.suspendedFlag` 的同步重置（dispose 强制清以让
+        // flush 消费 cleanup 任务）不冲突。
+        if (wasSuspendedAtDispose) {
+          this.stdout.write(ANSI.exitAltScreen);
+        }
+
         // dispose 三态退出协议 —— "shell 接管前最后一次清屏"，与 firstAttach 的
         // `\x1b[2J + cursor(1,1) + 设 DECSTBM` 严格对偶。三态由 attached /
         // everAttached 组合判定：

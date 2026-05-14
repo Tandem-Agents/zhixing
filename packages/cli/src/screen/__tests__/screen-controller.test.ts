@@ -691,14 +691,17 @@ describe("ScreenController · ReplaceableSegment（双态渲染）", () => {
 });
 
 describe("ScreenController · suspend / resume", () => {
-  it("suspend 同步清 region + cursor 跳 (1,1)——不入队", () => {
+  it("suspend 同步切到 alt-screen + cursor home——不入队、不 destructive 清 region", () => {
     const { out, sc } = makeHarness({ rows: 10 });
     sc.attachInput(makeRegion(["> input"]));
     out.buffer = "";
     sc.suspend();
-    // chrome=1（仅 input）→ scrollBottom=9，清 row 1..9 + cursor (1,1)
-    expect(out.buffer).toContain("\x1b[9;1H\x1b[2K"); // 清最后一行 region
-    expect(out.buffer).toContain("\x1b[1;1H"); // cursor 收尾
+    // 新协议：emit `\x1b[?1049h` 切到 alt buffer + `\x1b[1;1H` 显式 home cursor。
+    // main buffer 内容由终端原子保管——不再有 destructive clearLine emit。
+    expect(out.buffer).toContain("\x1b[?1049h"); // enterAltScreen
+    expect(out.buffer).toContain("\x1b[1;1H"); // 显式 home cursor
+    // 反向断言：旧协议的 destructive clearLine `\x1b[2K` 不应出现
+    expect(out.buffer).not.toContain("\x1b[2K");
   });
 
   it("suspend 期间 enqueue 任务不立即生效——等 resume 才 flush", () => {
@@ -765,13 +768,16 @@ describe("ScreenController · suspend / resume", () => {
     expect(() => sc.resume()).toThrow(/dispose/);
   });
 
-  it("dispose 时 suspended → cleanup 仍执行（dispose 是特权清理）", () => {
+  it("dispose 时 suspended → cleanup 仍执行 + 防御切回 main buffer（dispose 是特权清理）", () => {
     const { out, sc } = makeHarness({ rows: 10 });
     sc.attachInput(makeRegion(["> input"]));
     sc.suspend();
     out.buffer = "";
     sc.dispose();
-    // dispose 强制清 suspended，flush 消费 cleanup（撤 DECSTBM）
+    // (1) 防御性 emit `\x1b[?1049l` 切回 main buffer——dispose 时仍在 alt buffer
+    //     必须切回，否则 shell 接管时停留在空 alt buffer 视觉错乱
+    expect(out.buffer).toContain("\x1b[?1049l");
+    // (2) 后续 shutdown 走完整退出序列（撤 DECSTBM）
     expect(out.buffer).toContain("\x1b[r");
   });
 });

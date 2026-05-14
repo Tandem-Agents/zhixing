@@ -37,6 +37,31 @@ export const ANSI = {
     return n > 0 ? `\x1b[${n}B` : "";
   },
 
+  // ── 终端 buffer 切换（alternate screen） ──
+  /**
+   * 切到 alternate screen buffer —— xterm 标准扩展 `\x1b[?1049h`。
+   *
+   * 语义：终端原子保存当前 main buffer 整体（viewport 内容 + scrollback + cursor
+   * 位置），切到独立的 alt buffer 给 modal UI 使用。alt UI 在 alt buffer 内自由
+   * 渲染，main buffer 完全不动；`exitAltScreen` 时终端原子恢复 main buffer，
+   * 包括 viewport 内容 / scrollback / cursor 位置。
+   *
+   * 用途：modal alt UI（confirmation panel / config-editor）的"临时占用屏幕"
+   * 协议。相比手工 DECSTBM clear + 恢复，alt-screen 由终端保管 main buffer 状态
+   * 无内容丢失风险。
+   *
+   * 跨终端兼容：xterm / iTerm2 / Terminal.app / Windows Terminal (含 ConPTY 现代
+   * 版本) / gnome-terminal / konsole / alacritty / wezterm 等主流终端均支持。
+   * ConPTY 早期版本 `\x1b[?1049l` 退出可能不完整恢复——caller 用 refreshChrome
+   * 兜底。
+   *
+   * DECSTBM 跨 alt-screen 切换是 implementation-defined 是否随 buffer 一起保存。
+   * caller resume 路径需 re-emit DECSTBM 序列防御性兜底。
+   */
+  enterAltScreen: "\x1b[?1049h",
+  /** 退出 alternate screen buffer —— 原子恢复 main buffer 状态。详见 enterAltScreen */
+  exitAltScreen: "\x1b[?1049l",
+
   // ── 同步输出（Synchronized Output mode） ──
   /**
    * 告诉终端在 BSU..ESU 之间累积所有输出后一次性 render，避免分段刷新带来的
