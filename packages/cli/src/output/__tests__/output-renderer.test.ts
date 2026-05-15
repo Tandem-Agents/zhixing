@@ -478,3 +478,121 @@ describe("createOutputRenderer · 段间编排（coordinator + ensureSegmentBrea
     );
   });
 });
+
+// ─── Thinking rolling tail ─────────────────────────────────────────────
+//
+// 覆盖产品契约 (详见 output-renderer.ts thinking_block_* case 注释):
+//   - thinking 流: 边界事件触发 segment 生命周期 (begin → replace → close)
+//   - rolling: 内容 > 2 行时第一行加 "..." 标识
+//   - 防御 cleanup: text_delta / stop 时关闭悬挂 thinking segment
+//   - 降级: 无 thinking_block_start 的 thinking_delta 走 appendInline 旧路径
+//
+// 不覆盖: 60ms flush 节流 (依赖 timer,通过 thinking_block_end 同步 flush 验证
+// 最终内容正确性即可;timer 逻辑由 setTimeout/clearTimeout 标准实现保证)。
+
+describe("createOutputRenderer · thinking rolling tail", () => {
+  it("thinking_block_start → delta* → thinking_block_end: begin + replace + close 完整 segment 生命周期", () => {
+    const writer = makeCaptureWriter();
+    const renderer = createOutputRenderer({ writer, columns: 80 });
+
+    renderer.handleEvent({ type: "thinking_block_start" });
+    renderer.handleEvent({ type: "thinking_delta", thinking: "思考内容" });
+    renderer.handleEvent({ type: "thinking_block_end" });
+
+    // begin / close 各一次,replace 至少一次 (thinking_block_end 路径强制 flush)
+    expect(
+      writer.events.filter((e) => e.kind === "beginReplaceableSegment"),
+    ).toHaveLength(1);
+    expect(writer.events.filter((e) => e.kind === "seg.close")).toHaveLength(1);
+    const replaces = writer.events.filter((e) => e.kind === "seg.replace");
+    expect(replaces.length).toBeGreaterThanOrEqual(1);
+
+    // 最终 replace 内容含 ┊ 前缀 + thinking 文本 (dim 着色,stripAnsi 后断言)
+    const finalReplace = replaces[replaces.length - 1];
+    if (finalReplace?.kind === "seg.replace") {
+      expect(stripAnsi(finalReplace.text)).toContain("┊ 思考内容");
+    }
+  });
+
+  it("rolling: thinking 内容超过 2 行时第一行加 '...' 标识", () => {
+    const writer = makeCaptureWriter();
+    // 用 columns=20 制造短行,3 段 \n 强制 3 行 → 滚出第一行
+    const renderer = createOutputRenderer({ writer, columns: 20 });
+
+    renderer.handleEvent({ type: "thinking_block_start" });
+    renderer.handleEvent({
+      type: "thinking_delta",
+      thinking: "line1\nline2\nline3",
+    });
+    renderer.handleEvent({ type: "thinking_block_end" });
+
+    const replaces = writer.events.filter((e) => e.kind === "seg.replace");
+    expect(replaces.length).toBeGreaterThanOrEqual(1);
+    const finalReplace = replaces[replaces.length - 1];
+    if (finalReplace?.kind === "seg.replace") {
+      const stripped = stripAnsi(finalReplace.text);
+      // 应显示后两行 (line2 / line3),第一显示行加 "..." 标识
+      expect(stripped).toContain("...line2");
+      expect(stripped).toContain("┊ line3");
+      // 不含 line1 (已滚出)
+      expect(stripped).not.toContain("line1");
+    }
+  });
+
+  it("防御 cleanup: text_delta 到达时若 thinking segment 还在,先 close 再开 markdown 段", () => {
+    const writer = makeCaptureWriter();
+    const renderer = createOutputRenderer({ writer, columns: 80 });
+
+    // 模拟异常路径: thinking_block_start + delta,但没 thinking_block_end
+    renderer.handleEvent({ type: "thinking_block_start" });
+    renderer.handleEvent({ type: "thinking_delta", thinking: "悬挂 thinking" });
+    // text_delta 直接到来 (假设 adapter 漏 emit end)
+    renderer.handleEvent({ type: "text_delta", text: "正式回复" });
+
+    // thinking segment 应被 close (防御性 cleanup),不悬挂
+    expect(writer.events.filter((e) => e.kind === "seg.close")).toHaveLength(1);
+    // 时序: thinking ensureSegmentBreak → thinking segment begin → close (text_delta
+    // 防御) → text 段 ensureSegmentBreak → markdown begin。close 必须在 text 段
+    // 的 ensureSegmentBreak 之前 (单一活跃 segment 约束: markdown 段 begin 前
+    // 必须释放 thinking segment)。
+    const closeIdx = writer.events.findIndex((e) => e.kind === "seg.close");
+    const ensureBreakIndices = writer.events
+      .map((e, i) => (e.kind === "ensureSegmentBreak" ? i : -1))
+      .filter((i) => i >= 0);
+    // 应至少两次 ensureSegmentBreak: thinking 段开始时 + text 段开始时
+    expect(ensureBreakIndices.length).toBeGreaterThanOrEqual(2);
+    const textSegEnsureBreakIdx = ensureBreakIndices[ensureBreakIndices.length - 1];
+    expect(closeIdx).toBeLessThan(textSegEnsureBreakIdx!);
+  });
+
+  it("stop() 关闭悬挂 thinking segment (dispose 路径)", () => {
+    const writer = makeCaptureWriter();
+    const renderer = createOutputRenderer({ writer, columns: 80 });
+
+    renderer.handleEvent({ type: "thinking_block_start" });
+    renderer.handleEvent({ type: "thinking_delta", thinking: "悬挂" });
+    renderer.stop();
+
+    expect(writer.events.filter((e) => e.kind === "seg.close")).toHaveLength(1);
+  });
+
+  it("降级: 无 thinking_block_start 的 thinking_delta 走 appendInline 旧路径 (异常路径兜底)", () => {
+    const writer = makeCaptureWriter();
+    const renderer = createOutputRenderer({ writer, columns: 80 });
+
+    // 不发 thinking_block_start,直接 thinking_delta (协议漂移 / 跨 provider 续聊兜底)
+    renderer.handleEvent({ type: "thinking_delta", thinking: "降级显示" });
+
+    // 无 segment 创建,内容走 appendInline 保留(不丢失)
+    expect(
+      writer.events.filter((e) => e.kind === "beginReplaceableSegment"),
+    ).toHaveLength(0);
+    const appendEvents = writer.events.filter(
+      (e) => e.kind === "appendInline",
+    );
+    expect(appendEvents).toHaveLength(1);
+    if (appendEvents[0]?.kind === "appendInline") {
+      expect(stripAnsi(appendEvents[0].text)).toBe("降级显示");
+    }
+  });
+});

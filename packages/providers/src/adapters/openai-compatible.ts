@@ -121,6 +121,18 @@ export function createOpenAICompatibleProvider(provider: ResolvedProvider): LLMP
       // 追踪工具调用状态
       const activeToolCalls = new Map<number, { id: string; name: string }>();
 
+      // Thinking 块状态机 —— OpenAI 兼容协议下 reasoning_content / content 没有
+      // 显式 block_start/stop 事件,本状态机从字段切换推断 thinking 边界,emit
+      // zhixing 内部 StreamEvent.thinking_block_start / thinking_block_end 与
+      // anthropic 协议事件层对称(详见 core/types/llm.ts StreamEvent 注释):
+      //
+      //   首个 reasoning_content chunk → emit thinking_block_start + set true
+      //   content / tool_calls 到达且 inThinking=true → emit thinking_block_end + set false
+      //   finish_reason 到达且 inThinking=true → emit thinking_block_end 兜底
+      //     (与 tool_call_end finish_reason 兜底同模式,防 LLM 只 think 不 content
+      //     的极端场景 thinking 段悬挂)
+      let inThinking = false;
+
       try {
         const stream = await client.chat.completions.create(params, {
           signal: request.abortSignal ?? undefined,
@@ -145,20 +157,33 @@ export function createOpenAICompatibleProvider(provider: ResolvedProvider): LLMP
 
           // Reasoning 内容(vendor 协议扩展,详见顶部 Vendor Protocol Extensions
           // section)。DeepSeek 协议时序为 reasoning_content 先于 content,yield
-          // 顺序对齐:thinking_delta → text_delta;字段缺失自动跳过。
+          // 顺序对齐:thinking_block_start → thinking_delta → text_delta;字段
+          // 缺失自动跳过。
           const reasoningDelta = (delta as DeepSeekChatDeltaExtension | undefined)
             ?.reasoning_content;
           if (reasoningDelta) {
+            if (!inThinking) {
+              yield { type: "thinking_block_start" };
+              inThinking = true;
+            }
             yield { type: "thinking_delta", thinking: reasoningDelta };
           }
 
-          // 文本输出
+          // 文本输出 —— content 到达即标志 thinking 流结束(若曾进入)
           if (delta?.content) {
+            if (inThinking) {
+              yield { type: "thinking_block_end" };
+              inThinking = false;
+            }
             yield { type: "text_delta", text: delta.content };
           }
 
-          // 工具调用（流式）
+          // 工具调用（流式）—— tool_calls 同 content 一样标志 thinking 流结束
           if (delta?.tool_calls) {
+            if (inThinking) {
+              yield { type: "thinking_block_end" };
+              inThinking = false;
+            }
             for (const tc of delta.tool_calls) {
               const idx = tc.index;
 
@@ -186,8 +211,14 @@ export function createOpenAICompatibleProvider(provider: ResolvedProvider): LLMP
             }
           }
 
-          // 响应结束
+          // 响应结束 —— 兜底关闭未关闭的 thinking 块与 tool_call 块,避免悬挂
           if (choice.finish_reason) {
+            // 极端场景兜底:LLM 只 think 不输出 content(纯 reasoning),
+            // finish_reason 触发但 inThinking 仍为 true → 关闭 thinking 边界
+            if (inThinking) {
+              yield { type: "thinking_block_end" };
+              inThinking = false;
+            }
             // 发射所有未结束的工具调用的 end 事件
             for (const [, active] of activeToolCalls) {
               yield { type: "tool_call_end", id: active.id };

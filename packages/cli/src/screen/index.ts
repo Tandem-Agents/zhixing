@@ -10,6 +10,7 @@ export {
   createScreenController,
   type ScreenController,
   type InputRegion,
+  type ReplaceableSegmentHandle,
 } from "./screen-controller.js";
 
 export {

@@ -495,7 +495,7 @@ describe("createOpenAICompatibleProvider", () => {
   // 覆盖 DeepSeek thinking 模式 / Qwen-QwQ / Kimi-thinking / 智谱 GLM-Z 等
   // 沿用 reasoning_content 约定的全部 thinking 模型。
 
-  it("入站: reasoning_content delta 应 yield 为 thinking_delta 事件并先于 text_delta", async () => {
+  it("入站: reasoning_content → thinking_block_start → thinking_delta* → thinking_block_end → text_delta 完整边界序列", async () => {
     mockCreate.mockResolvedValue(
       mockStream([
         reasoningChunk("思考中..."),
@@ -510,16 +510,62 @@ describe("createOpenAICompatibleProvider", () => {
       provider.chat({ model: "test-model", messages: [userMessage("Hi")] }),
     );
 
+    // 边界事件: thinking_block_start / thinking_block_end 各 1 次,首次 reasoning_content
+    // 触发 start,首次 content 触发 end(状态机推断,DeepSeek 协议无显式边界事件)
+    expect(events.filter((e) => e.type === "thinking_block_start")).toHaveLength(1);
+    expect(events.filter((e) => e.type === "thinking_block_end")).toHaveLength(1);
+
     const thinkingEvents = events.filter((e) => e.type === "thinking_delta");
     expect(thinkingEvents).toHaveLength(2);
     expect(thinkingEvents[0]).toEqual({ type: "thinking_delta", thinking: "思考中..." });
     expect(thinkingEvents[1]).toEqual({ type: "thinking_delta", thinking: "得出结论" });
 
-    // 协议时序:reasoning 阶段先于 content 阶段,yield 顺序应一致
-    const firstThinkingIdx = events.findIndex((e) => e.type === "thinking_delta");
+    // 完整时序: start → delta* → end → text_delta —— 与 tool_call_start/end 对称
+    const startIdx = events.findIndex((e) => e.type === "thinking_block_start");
+    const firstDeltaIdx = events.findIndex((e) => e.type === "thinking_delta");
+    const endIdx = events.findIndex((e) => e.type === "thinking_block_end");
     const firstTextIdx = events.findIndex((e) => e.type === "text_delta");
-    expect(firstThinkingIdx).toBeGreaterThanOrEqual(0);
-    expect(firstTextIdx).toBeGreaterThan(firstThinkingIdx);
+    expect(startIdx).toBeLessThan(firstDeltaIdx);
+    expect(firstDeltaIdx).toBeLessThan(endIdx);
+    expect(endIdx).toBeLessThan(firstTextIdx);
+  });
+
+  it("入站: 纯 thinking 无 content (LLM 只 think 不回复) 时 finish_reason 兜底 emit thinking_block_end", async () => {
+    // 极端场景:LLM 完整生成 reasoning_content 但没有 content 字段,finish_reason
+    // 直接到达。状态机若不兜底,thinking_block_end 永不 emit,消费方 segment 悬挂。
+    mockCreate.mockResolvedValue(
+      mockStream([reasoningChunk("纯推理无回复"), finishChunk("stop")]),
+    );
+
+    const provider = createOpenAICompatibleProvider(makeProvider());
+    const events = await collectEvents(
+      provider.chat({ model: "test-model", messages: [userMessage("Hi")] }),
+    );
+
+    expect(events.filter((e) => e.type === "thinking_block_start")).toHaveLength(1);
+    expect(events.filter((e) => e.type === "thinking_block_end")).toHaveLength(1);
+    // text_delta 应零(LLM 没输出 content)
+    expect(events.filter((e) => e.type === "text_delta")).toHaveLength(0);
+    // thinking_block_end 应在 message_end 之前
+    const endIdx = events.findIndex((e) => e.type === "thinking_block_end");
+    const msgEndIdx = events.findIndex((e) => e.type === "message_end");
+    expect(endIdx).toBeLessThan(msgEndIdx);
+  });
+
+  it("入站: 无 reasoning_content(普通 model)零 thinking 事件,不影响 text_delta 流", async () => {
+    mockCreate.mockResolvedValue(
+      mockStream([textChunk("Hello"), textChunk(", world"), finishChunk("stop")]),
+    );
+
+    const provider = createOpenAICompatibleProvider(makeProvider());
+    const events = await collectEvents(
+      provider.chat({ model: "test-model", messages: [userMessage("Hi")] }),
+    );
+
+    expect(events.filter((e) => e.type === "thinking_block_start")).toHaveLength(0);
+    expect(events.filter((e) => e.type === "thinking_block_end")).toHaveLength(0);
+    expect(events.filter((e) => e.type === "thinking_delta")).toHaveLength(0);
+    expect(events.filter((e) => e.type === "text_delta")).toHaveLength(2);
   });
 
   it("出站: ThinkingBlock 应拼回 assistant.reasoning_content 字段供 replay 回传", async () => {

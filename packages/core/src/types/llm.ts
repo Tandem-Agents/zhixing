@@ -135,12 +135,27 @@ export interface ChatRequest {
  * 使用判别联合，消费方可通过 switch(event.type) 做穷尽匹配。
  *
  * 事件时序：
- *   message_start → (text_delta | thinking_delta | tool_call_*)* → message_end
+ *   message_start →
+ *     (thinking_block_start → thinking_delta* → thinking_block_end)?
+ *     → (text_delta | tool_call_*)*
+ *     → message_end
+ *
+ * Block 边界事件设计:
+ *   - tool_call_start/end:并行多 tool 调用,事件用 id 字段配对
+ *   - thinking_block_start/end:单一 thinking 块/message,无 id 配对需求
+ *     (anthropic 协议 thinking 块每 message 最多 1 个;openai-compatible reasoning_content
+ *     是连续单一逻辑块)
+ *
+ * 异常路径约定:
+ *   - catch err → yield error event + return,**不** emit 任何未关闭的 block_end
+ *     (与 tool_call_end 同模式);消费方在 error / dispose 时自行 cleanup 悬挂状态
  */
 export type StreamEvent =
   | StreamMessageStart
   | StreamTextDelta
+  | StreamThinkingBlockStart
   | StreamThinkingDelta
+  | StreamThinkingBlockEnd
   | StreamToolCallStart
   | StreamToolCallDelta
   | StreamToolCallEnd
@@ -157,9 +172,34 @@ export interface StreamTextDelta {
   text: string;
 }
 
+/**
+ * Thinking 块开始 —— 与 StreamToolCallStart 对称的显式边界事件。
+ *
+ * 消费方据此知道"thinking 流即将开始"(开 segment / 准备 UI / 累积 buffer 等),
+ * 不需要从 thinking_delta 首次出现自行推断,避免边界状态隐式化。
+ *
+ * thinking 块在 anthropic 协议下 message 内最多一个;openai-compatible 路径下
+ * reasoning_content 也是连续单一逻辑块。因此不需要 id 字段配对
+ * (与 tool_call_start 多并行场景不同)。
+ */
+export interface StreamThinkingBlockStart {
+  type: "thinking_block_start";
+}
+
 export interface StreamThinkingDelta {
   type: "thinking_delta";
   thinking: string;
+}
+
+/**
+ * Thinking 块结束 —— 与 StreamToolCallEnd 对称的显式边界事件。
+ *
+ * 消费方据此 commit/close 与 thinking 关联的资源(segment / buffer / UI 段等)。
+ * 异常路径(catch err)不 emit 本事件,消费方需在 error event / dispose 时自行
+ * cleanup 悬挂状态,与 tool_call_end 异常路径约定一致。
+ */
+export interface StreamThinkingBlockEnd {
+  type: "thinking_block_end";
 }
 
 export interface StreamToolCallStart {

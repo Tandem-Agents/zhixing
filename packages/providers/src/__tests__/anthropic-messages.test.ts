@@ -261,17 +261,22 @@ describe("createAnthropicProvider", () => {
     }
   });
 
-  // ─── Thinking 稳健性兜底 ───
+  // ─── Thinking 协议事件 ───
   //
-  // Claude thinking 模式当前未接入(详见 anthropic-messages.ts 顶部 BlockState
-  // 注释)。但 SDK 升级 / 服务端默认行为变化等场景下,仍可能意外收到 thinking
-  // 块。本测试锁死契约: adapter 静默丢弃 thinking 内容,不崩溃、不 yield
-  // thinking_delta 事件,且不影响同 stream 内其他正常 block(text / tool_use)
-  // 的处理路径。
+  // 协议层激活:adapter 把 Anthropic content_block (type=thinking) 流事件
+  // 转换为 zhixing StreamEvent: thinking_block_start → thinking_delta* →
+  // thinking_block_end 显式边界三元组。
   //
-  // 若未来真正接入 Claude thinking,本测试应替换为正向断言("thinking_delta
-  // 正确 yield + signature 累积写入 ThinkingBlock")。
-  it("thinking 块出现时静默丢弃不崩溃 (Claude thinking 未接入的稳健性兜底)", async () => {
+  // 与 tool_call_start/end 对称设计 —— 消费方(cli output-renderer / 测试)
+  // 据此知道 thinking 流边界,不再依赖"首个非 thinking 事件"的隐式推断。
+  //
+  // 注:Claude thinking **能力**层(请求传 thinking 参数 + 出站写 signature)
+  // 仍未接入,presets.anthropic.quirks.supportsThinking = false 保持诚实。
+  // 本组测试仅验证协议事件层正确性,真实生产路径下 Anthropic 不会主动返回
+  // thinking 块(zhixing 不传 thinking 参数);但 mock 模拟该路径锁死协议契约,
+  // 让未来接入能力层时本路径自动激活。
+
+  it("thinking 块流事件转换为 thinking_block_start → thinking_delta* → thinking_block_end", async () => {
     mockCreate.mockResolvedValue(
       mockStream([
         messageStartEvent({ input_tokens: 30, output_tokens: 1 }),
@@ -292,18 +297,39 @@ describe("createAnthropicProvider", () => {
       provider.chat({ model: "claude-sonnet-4-20250514", messages: [userMessage("思考")] }),
     );
 
-    // 锁死: thinking_delta 不产生(adapter 不处理 thinking 块 stream)
-    const thinkingEvents = events.filter((e) => e.type === "thinking_delta");
-    expect(thinkingEvents).toHaveLength(0);
+    // 边界事件: thinking_block_start / thinking_block_end 各 1 次
+    const startEvents = events.filter((e) => e.type === "thinking_block_start");
+    const endEvents = events.filter((e) => e.type === "thinking_block_end");
+    expect(startEvents).toHaveLength(1);
+    expect(endEvents).toHaveLength(1);
 
-    // 锁死: 同 stream 内 text 块仍正常处理,thinking 块不污染后续 block 状态机
+    // thinking_delta 透传 (按 chunk 数量 + 文本顺序)
+    const thinkingEvents = events.filter((e) => e.type === "thinking_delta");
+    expect(thinkingEvents).toHaveLength(2);
+    expect(thinkingEvents[0]).toEqual({ type: "thinking_delta", thinking: "让我思考一下" });
+    expect(thinkingEvents[1]).toEqual({ type: "thinking_delta", thinking: "这个问题..." });
+
+    // 边界事件时序: start 在所有 delta 之前, end 在所有 delta 之后
+    const startIdx = events.findIndex((e) => e.type === "thinking_block_start");
+    const endIdx = events.findIndex((e) => e.type === "thinking_block_end");
+    const firstDeltaIdx = events.findIndex((e) => e.type === "thinking_delta");
+    const lastDeltaIdx = events.findLastIndex
+      ? events.findLastIndex((e) => e.type === "thinking_delta")
+      : events.map((e) => e.type).lastIndexOf("thinking_delta");
+    expect(startIdx).toBeLessThan(firstDeltaIdx);
+    expect(lastDeltaIdx).toBeLessThan(endIdx);
+
+    // 与 text 块隔离: thinking_block_end 在 text_delta 之前
+    const textIdx = events.findIndex((e) => e.type === "text_delta");
+    expect(endIdx).toBeLessThan(textIdx);
+
+    // 同 stream 内 text 块仍正常处理
     const textEvents = events.filter((e) => e.type === "text_delta");
     expect(textEvents).toHaveLength(1);
     expect(textEvents[0]).toEqual({ type: "text_delta", text: "答案是42" });
 
-    // 锁死: 没有 error event 抛出,处理稳健
-    const errorEvents = events.filter((e) => e.type === "error");
-    expect(errorEvents).toHaveLength(0);
+    // 无 error event
+    expect(events.filter((e) => e.type === "error")).toHaveLength(0);
   });
 
   // ─── Token Usage & Cache ───

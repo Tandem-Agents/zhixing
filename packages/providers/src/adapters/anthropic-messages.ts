@@ -23,21 +23,23 @@ import type { ResolvedProvider } from "../types.js";
 
 // ─── 内部类型 ───
 //
-// Claude thinking 模式当前未接入:
-//   - 请求构造不传 thinking 参数(`params` 字段表里不含 thinking),Claude 4 不会
-//     进入 thinking 模式,服务端不会返回 thinking 块
-//   - 故 BlockState 不需要 thinking 成员;若意外收到 thinking 块(如 SDK 升级 /
-//     未来配置变化),content_block_start 走 fall-through 不 set 任何 state,
-//     后续 thinking_delta 自然无 block 可 set,静默丢弃不崩溃
+// BlockState 覆盖 anthropic 协议中需要在 stream 期间维持状态的三类 content block:
+//   - text:无内部状态,仅作类型标记让 content_block_delta 知道 emit text_delta
+//   - thinking:同上,让 content_block_delta 知道 emit thinking_delta
+//     (Claude thinking 模式当前未在请求侧接入,但仍要处理 content_block 协议事件 —
+//     未来接入或 SDK 默认行为变化时,本路径自动激活,无需重新加状态;同时跨
+//     provider 续聊场景下的 ThinkingBlock 不流经本 adapter 入站路径)
+//   - tool_use:维持 id / name / argsJson 累积
 //
-// 接入 Claude thinking 模式需要完整链路:
-//   ChatRequest 加 thinking 字段 → 请求传 thinking 参数 → 入站累积 signature →
-//   ThinkingBlock 加 signature 字段 → 出站写 thinking block + signature →
-//   跨 provider 续聊兜底。当前选择不接入,保持声明诚实(presets.anthropic.quirks.
-//   supportsThinking = false)。
+// 协议事件层 vs 能力层分离:
+//   本 adapter 正确发射 thinking_block_start / thinking_delta / thinking_block_end
+//   协议事件,与 tool_call_start/end 对称。但 Claude thinking **能力**完整接入
+//   (请求传 thinking 参数 + 出站写 thinking block + signature + 跨 provider 兜底)
+//   是独立工程;当前 presets.anthropic.quirks.supportsThinking = false 保持诚实。
 
 type BlockState =
   | { type: "text" }
+  | { type: "thinking" }
   | { type: "tool_use"; id: string; name: string; argsJson: string };
 
 // ─── 工厂函数 ───
@@ -114,6 +116,9 @@ export function createAnthropicProvider(resolved: ResolvedProvider): LLMProvider
               const cb = event.content_block;
               if (cb.type === "text") {
                 blocks.set(event.index, { type: "text" });
+              } else if (cb.type === "thinking") {
+                blocks.set(event.index, { type: "thinking" });
+                yield { type: "thinking_block_start" };
               } else if (cb.type === "tool_use") {
                 blocks.set(event.index, {
                   type: "tool_use",
@@ -123,9 +128,8 @@ export function createAnthropicProvider(resolved: ResolvedProvider): LLMProvider
                 });
                 yield { type: "tool_call_start", id: cb.id, name: cb.name };
               }
-              // 未识别 block 类型(thinking / redacted_thinking / server_tool_use 等)
-              // 不 set BlockState,后续 delta 自然 fall-through 静默丢弃。详见
-              // 顶部 BlockState 注释中"Claude thinking 模式未接入"的说明。
+              // 未识别 block 类型(redacted_thinking / server_tool_use 等)
+              // 不 set BlockState,后续 delta 自然 fall-through 静默丢弃。
               break;
             }
 
@@ -137,6 +141,11 @@ export function createAnthropicProvider(resolved: ResolvedProvider): LLMProvider
               if (delta.type === "text_delta" && block.type === "text") {
                 yield { type: "text_delta", text: delta.text };
               } else if (
+                delta.type === "thinking_delta" &&
+                block.type === "thinking"
+              ) {
+                yield { type: "thinking_delta", thinking: delta.thinking };
+              } else if (
                 delta.type === "input_json_delta" &&
                 block.type === "tool_use"
               ) {
@@ -147,13 +156,16 @@ export function createAnthropicProvider(resolved: ResolvedProvider): LLMProvider
                   argsFragment: delta.partial_json,
                 };
               }
-              // 未识别的 delta 类型(thinking_delta / signature_delta 等)静默丢弃
+              // 未识别的 delta 类型(signature_delta 等)静默丢弃 —— signature
+              // 当前不处理(Claude thinking 能力层未接入,见 BlockState 注释)
               break;
             }
 
             case "content_block_stop": {
               const block = blocks.get(event.index);
-              if (block?.type === "tool_use") {
+              if (block?.type === "thinking") {
+                yield { type: "thinking_block_end" };
+              } else if (block?.type === "tool_use") {
                 yield { type: "tool_call_end", id: block.id };
               }
               break;
