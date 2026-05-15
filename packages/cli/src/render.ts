@@ -557,10 +557,9 @@ export function createRenderSubscribers(
     // （runOnce / serve）自然不装配两者。不引入额外 ENV / CLI flag —— 常态化展示，
     // 数据可用性自然降级（详见 context-indicator.ts docstring "自然降级"段）。
     //
-    // 装配顺序 = 屏幕段顺序：context-indicator 在 status-bar 之后装配（status-bar
-    // 用 setStatusBar，与 tail 段集合无序冲突），最终状态条尾部展示顺序
-    // 「[task] │ [context]」由 task-tail（在 repl.ts 装配）先注册 + context-indicator
-    // 后注册形成（首次注册顺序决定视觉顺序）。
+    // tail 段视觉顺序「[task] │ [context]」由 STATUS_TAIL_IDS 声明顺序唯一决定
+    // （ScreenController.joinStatusTails 按此裁决），与本处装配顺序、各 source
+    // 运行时首次 emit 时序均无关 —— 此处装配顺序仅影响 listener 注册，不影响布局。
     let statusBar: StatusBarHandle | null = null;
     let contextIndicator: ContextIndicatorHandle | null = null;
     if (screen) {

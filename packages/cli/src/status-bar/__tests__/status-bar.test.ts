@@ -313,19 +313,66 @@ describe("StatusBar 状态切换", () => {
       // 这是修复"流式估算 + LLM 真值"双计 bug 的核心 invariant。
       const { screen, mainBus, bar } = setup();
       await mainBus.emit("agent:run_start", { prompt: "hi" });
-      // 流式 100 字符 → estimateTokens(100) ≈ 40
+      // 流式 100 个 Latin 字符 → estimateTextTokensRaw = ceil(100 * 0.25) = 25
       await mainBus.emit("llm:stream_event", {
         type: "text_delta",
         text: "a".repeat(100),
       } as never);
       // request_end 给真值 output=200，预期：streamingOutput 清零，committedOutput=200
-      // 总显示 output = committedOutput(200) + streamingOutput(0) = 200，**不是** 240
+      // 总显示 output = committedOutput(200) + streamingOutput(0) = 200，**不是** 225
       await mainBus.emit("llm:request_end", {
         usage: { inputTokens: 5000, outputTokens: 200 },
       } as never);
       const text = screen.statusLines!.join("");
       expect(text).toContain("200");
-      expect(text).not.toContain("240"); // 防双计回归
+      expect(text).not.toContain("225"); // 防双计回归（200 + 流式估算 25）
+      bar.dispose();
+    });
+
+    it("↑ 取 getTotalInputTokens 规范全量（Anthropic 含 cache 不低估）", async () => {
+      // Anthropic 风格 usage：inputTokens 仅非缓存残值，全量在 totalInputTokens。
+      // 状态区 ↑ 必须反映全量（49.5k），不能只显示非缓存的 0.3k。
+      const { screen, mainBus, bar } = setup();
+      await mainBus.emit("agent:run_start", { prompt: "hi" });
+      await mainBus.emit("llm:request_end", {
+        usage: {
+          inputTokens: 300,
+          totalInputTokens: 49_500,
+          outputTokens: 50,
+          cacheReadTokens: 48_000,
+          cacheWriteTokens: 1_200,
+        },
+      } as never);
+      const text = screen.statusLines!.join("");
+      expect(text).toContain("49.5k"); // 规范全量
+      expect(text).not.toContain("300"); // 不退回 vendor 非缓存残值
+      bar.dispose();
+    });
+
+    it("OpenAI 兼容族（无 totalInputTokens）↑ fallback 回 inputTokens——逐字节不变", async () => {
+      // 你们实际 runtime：prompt_tokens 本就是全量，totalInputTokens 不设。
+      // getTotalInputTokens fallback → inputTokens，与改造前完全一致。
+      const { screen, mainBus, bar } = setup();
+      await mainBus.emit("agent:run_start", { prompt: "hi" });
+      await mainBus.emit("llm:request_end", {
+        usage: { inputTokens: 8_100, outputTokens: 95 },
+      } as never);
+      expect(screen.statusLines!.join("")).toContain("8.1k");
+      bar.dispose();
+    });
+
+    it("流式 ↓ 用 CJK 估算器——中文不再 ~4x 低估", async () => {
+      // 50 个汉字：旧 /2.5 ≈ 20；新估算器 50 * 1.5 = 75。差异显著。
+      const { screen, mainBus, bar } = setup();
+      await mainBus.emit("agent:run_start", { prompt: "hi" });
+      await mainBus.emit("llm:stream_event", {
+        type: "text_delta",
+        text: "中".repeat(50),
+      } as never);
+      const text = screen.statusLines!.join("");
+      // 75 显示为 "75"（formatTokens 阈值内）；旧粗估 20 显然不应出现
+      expect(text).toContain("75");
+      expect(text).not.toContain("20");
       bar.dispose();
     });
 

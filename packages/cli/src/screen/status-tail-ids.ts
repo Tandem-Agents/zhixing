@@ -21,10 +21,12 @@
  * ─── 扩展约定 ───
  *
  * 新增 tail source 时：
- *   1. 在此对象上加新 key/value（key = 语义名，value = 稳定字符串 id）
+ *   1. 在此对象上加新 key/value（key = 语义名，value = 稳定字符串 id），
+ *      **声明位置即屏幕视觉顺序**
  *   2. source 模块 import 并使用，不允许直接字面量
- *   3. 顺序：注册表内的声明顺序无意义；屏幕上的视觉顺序由"首次注册到 Map"
- *      时间决定（见 render.ts 装配顺序）
+ *   3. 顺序权威：本对象的声明顺序唯一决定状态条尾部的左→右段顺序
+ *      （ScreenController.joinStatusTails 按此顺序拼接，与各 source 运行时
+ *      首次 emit 的时序无关）。要调整视觉顺序，改这里的 key 顺序即可
  */
 
 export const STATUS_TAIL_IDS = {

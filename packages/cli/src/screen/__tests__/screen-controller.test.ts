@@ -429,19 +429,34 @@ describe("ScreenController · setStatusTail（按 id 注册多段：单段语义
 });
 
 describe("ScreenController · setStatusTail 多段拼接（task + context 协议）", () => {
-  it("多段拼接：按首次注册顺序保序", () => {
+  it("多段拼接：按 STATUS_TAIL_IDS 声明顺序保序（task 在 context 前）", () => {
     const { out, sc } = makeHarness({ rows: 10 });
     sc.attachInput(makeRegion(["> input"]));
     sc.setStatusBar(["STATUS"]);
     out.buffer = "";
     sc.setStatusTail("task", "TASK_SEG");
     sc.setStatusTail("context", "~ 14k");
-    // STATUS │ TASK_SEG │ ~ 14k —— 顺序由首次注册决定
+    // STATUS │ TASK_SEG │ ~ 14k —— 顺序由注册表声明顺序决定
     const idxStatus = out.buffer.indexOf("STATUS");
     const idxTask = out.buffer.indexOf("TASK_SEG");
     const idxCtx = out.buffer.indexOf("~ 14k");
     expect(idxStatus).toBeGreaterThanOrEqual(0);
     expect(idxTask).toBeGreaterThan(idxStatus);
+    expect(idxCtx).toBeGreaterThan(idxTask);
+  });
+
+  it("多段拼接：顺序与注册时序无关（context 先注册仍排 task 之后）", () => {
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    sc.setStatusBar(["STATUS"]);
+    // 复现实测场景：context-indicator 的 emit 早于 task-tail。
+    // 旧实现按 Map 插入序 → context 在前（bug）；现按声明序裁决恒定 task 在前。
+    sc.setStatusTail("context", "~ 14k");
+    out.buffer = ""; // 只看 task 注册后的最终合并渲染
+    sc.setStatusTail("task", "TASK_SEG");
+    const idxTask = out.buffer.indexOf("TASK_SEG");
+    const idxCtx = out.buffer.indexOf("~ 14k");
+    expect(idxTask).toBeGreaterThan(0);
     expect(idxCtx).toBeGreaterThan(idxTask);
   });
 

@@ -124,6 +124,7 @@ import {
   type SegmentHandle,
 } from "./scroll-region.js";
 import type { TerminalCapability } from "./terminal-capability.js";
+import { STATUS_TAIL_IDS } from "./status-tail-ids.js";
 import { ANSI, clampLine, layout, tone } from "../tui/index.js";
 
 export interface InputRegion {
@@ -536,8 +537,8 @@ class ScreenControllerImpl implements ScreenController {
       if (next === null) {
         this.statusTails.delete(id);
       } else {
-        // 已存在的 id 在 Map 内位置不变（JS Map.set 对已有 key 不改变 iteration 顺序），
-        // 新 id 自然追加到末尾 —— 实现"先注册先显示"契约
+        // Map 仅作 id→text 存储，迭代顺序无关紧要 ——
+        // 视觉顺序由 joinStatusTails 按 STATUS_TAIL_IDS 声明顺序统一裁决
         this.statusTails.set(id, next);
       }
       if (this.scrollRegion.state.attached) {
@@ -828,14 +829,20 @@ class ScreenControllerImpl implements ScreenController {
   }
 
   /**
-   * 按 Map 插入顺序拼接所有 tail 段 —— 多段间复用 STATUS_TAIL_SEPARATOR
+   * 按 STATUS_TAIL_IDS 声明顺序拼接所有 tail 段 —— 多段间复用 STATUS_TAIL_SEPARATOR
    * （与 statusLines[0] ↔ tail 之间使用同一分隔符，视觉一致：A │ B │ C）。
+   *
+   * 视觉顺序由注册表声明顺序唯一决定，与各 source 运行时首次 emit 的时序无关 ——
+   * 注册表是命名与顺序的单一权威，避免顺序成为事件时序竞态的隐式产物。
    * 段集合为空 → 返回 null（caller 据此决定是否渲染 tail 区域）。
    */
   private joinStatusTails(): string | null {
     if (this.statusTails.size === 0) return null;
     const segments: string[] = [];
-    for (const text of this.statusTails.values()) segments.push(text);
+    for (const id of Object.values(STATUS_TAIL_IDS)) {
+      const text = this.statusTails.get(id);
+      if (text !== undefined) segments.push(text);
+    }
     return segments.join(ScreenControllerImpl.STATUS_TAIL_SEPARATOR);
   }
 

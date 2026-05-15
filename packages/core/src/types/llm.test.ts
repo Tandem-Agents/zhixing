@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { emptyUsage, mergeUsage } from "./llm.js";
+import { emptyUsage, mergeUsage, getTotalInputTokens } from "./llm.js";
 import type { StreamEvent, TokenUsage } from "./llm.js";
 
 describe("TokenUsage 辅助函数", () => {
@@ -66,6 +66,50 @@ describe("TokenUsage 辅助函数", () => {
 
       expect(merged.cacheReadTokens).toBe(150);
       expect(merged.cacheWriteTokens).toBeUndefined();
+    });
+
+    it("totalInputTokens 按 canonical 口径累加，inputTokens 累加正交不变", () => {
+      // a 走 fallback（无 totalInputTokens → 取 inputTokens=100）
+      const a: TokenUsage = { inputTokens: 100, outputTokens: 50 };
+      // b 显式归一（Anthropic 风格：inputTokens=200 但全量=900）
+      const b: TokenUsage = {
+        inputTokens: 200,
+        totalInputTokens: 900,
+        outputTokens: 80,
+      };
+
+      const merged = mergeUsage(a, b);
+
+      // 既有读 inputTokens 的消费方逐字节不变
+      expect(merged.inputTokens).toBe(300);
+      // canonical 全量 = 100(fallback) + 900
+      expect(merged.totalInputTokens).toBe(1000);
+      expect(getTotalInputTokens(merged)).toBe(1000);
+    });
+  });
+
+  describe("getTotalInputTokens", () => {
+    it("未设 totalInputTokens 时 fallback 回 inputTokens（OpenAI 兼容族 / emptyUsage）", () => {
+      expect(getTotalInputTokens({ inputTokens: 8000, outputTokens: 200 })).toBe(
+        8000,
+      );
+      expect(getTotalInputTokens(emptyUsage())).toBe(0);
+    });
+
+    it("设了 totalInputTokens 时取规范全量（Anthropic 含 cache）", () => {
+      const u: TokenUsage = {
+        inputTokens: 300,
+        totalInputTokens: 49_500,
+        outputTokens: 50,
+        cacheReadTokens: 48_000,
+        cacheWriteTokens: 1_200,
+      };
+      expect(getTotalInputTokens(u)).toBe(49_500);
+      // 不变量：total ≥ input，且 ≥ cacheRead+cacheWrite
+      expect(getTotalInputTokens(u)).toBeGreaterThanOrEqual(u.inputTokens);
+      expect(getTotalInputTokens(u)).toBeGreaterThanOrEqual(
+        (u.cacheReadTokens ?? 0) + (u.cacheWriteTokens ?? 0),
+      );
     });
   });
 });

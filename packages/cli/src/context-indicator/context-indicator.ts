@@ -65,8 +65,9 @@ import { formatTokens } from "../status-bar/verbs.js";
  * 本组件占用的 tail 段 id —— 引用注册表保证全 CLI 命名一致。
  *
  * 与 TaskTail (`STATUS_TAIL_IDS.task`) 等其他 tail source 通过 id 隔离；
- * 首次注册顺序决定视觉顺序（render.ts 装配 task-tail 后装配 context-indicator
- * → 最终顺序为 `[task] │ [context]`，"主任务进度在前、辅助诊断在后"）。
+ * 视觉顺序由 STATUS_TAIL_IDS 声明顺序唯一决定（task 在前、context 在后
+ * → `[task] │ [context]`，"主任务进度在前、辅助诊断在后"），与运行时
+ * 各 source 首次 emit 的时序无关。
  */
 const CONTEXT_TAIL_ID = STATUS_TAIL_IDS.context;
 

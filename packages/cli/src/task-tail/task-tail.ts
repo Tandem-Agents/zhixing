@@ -5,7 +5,8 @@
  * 调用 ScreenController.setStatusTail("task", text) 投递渲染文本。
  *
  * 与其他 tail 段（如 ContextIndicator 的 "context" 段）通过稳定 id 隔离，
- * 互不覆盖；段在状态条第一行按首次注册顺序拼接（参见 ScreenController.setStatusTail）。
+ * 互不覆盖；段在状态条第一行按 STATUS_TAIL_IDS 声明顺序拼接
+ * （参见 ScreenController.joinStatusTails）。
  *
  * 生命周期：
  *   - start()：订阅 service + 初次拉 cache 同步显示

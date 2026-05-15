@@ -319,25 +319,44 @@ function applyCacheControlToLastUserMessage(
 
 // ─── 辅助函数 ───
 
-interface AnthropicUsageLike {
+export interface AnthropicUsageLike {
   input_tokens: number;
   output_tokens: number;
   cache_read_input_tokens?: number | null;
   cache_creation_input_tokens?: number | null;
 }
 
-function extractUsage(apiUsage: AnthropicUsageLike): TokenUsage {
+/**
+ * Anthropic usage 归一。
+ *
+ * 关键语义：Anthropic 的 `input_tokens` 仅是"未命中的新输入"，cache 命中/写入
+ * 部分单列在 `cache_read_input_tokens` / `cache_creation_input_tokens`。因此：
+ *   - `inputTokens` 保留 vendor 原值（input_tokens）—— anchor / estimator 校准等
+ *     既有消费方按此锚定，**刻意不动**，保证依赖它的链路逐字节不变
+ *   - `totalInputTokens` = 三者之和，给到需要"全量输入"规范口径的消费方
+ *     （状态区流量等，经 getTotalInputTokens 读取）
+ *
+ * 这是唯一需要显式设 totalInputTokens 的 adapter —— OpenAI 兼容族 prompt_tokens
+ * 本就是全量，由 getTotalInputTokens 的 fallback 自然得到。
+ *
+ * 导出供 usage-conformance 测试做契约校验（纯函数，契约本就是公开关注点）。
+ */
+export function extractUsage(apiUsage: AnthropicUsageLike): TokenUsage {
+  const cacheRead = apiUsage.cache_read_input_tokens ?? 0;
+  const cacheWrite = apiUsage.cache_creation_input_tokens ?? 0;
+
   const usage: TokenUsage = {
     inputTokens: apiUsage.input_tokens,
+    totalInputTokens: apiUsage.input_tokens + cacheRead + cacheWrite,
     outputTokens: apiUsage.output_tokens,
   };
 
-  if (apiUsage.cache_read_input_tokens) {
-    usage.cacheReadTokens = apiUsage.cache_read_input_tokens;
+  if (cacheRead > 0) {
+    usage.cacheReadTokens = cacheRead;
   }
 
-  if (apiUsage.cache_creation_input_tokens) {
-    usage.cacheWriteTokens = apiUsage.cache_creation_input_tokens;
+  if (cacheWrite > 0) {
+    usage.cacheWriteTokens = cacheWrite;
   }
 
   return usage;

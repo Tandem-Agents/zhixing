@@ -15,8 +15,10 @@
  *
  * 计时与 token：
  *   - 计时：以 agent:run_start 时刻为锚，每 ~500ms 重画刷新秒数
- *   - 输出 token 流式估算：每个 stream chunk 字符长度求和（粗略，turn 末由 llm:request_end.usage 校准为真值）
- *   - 输入 token：llm:request_end.usage 给出真值，turn 中括号显示
+ *   - 输出 token 流式估算：每个 stream chunk 经 core CJK 估算器折算累加（过程值，
+ *     turn 末由 llm:request_end.usage 覆盖为真值）
+ *   - 输入 token：llm:request_end.usage 经 getTotalInputTokens 取规范全量口径
+ *     累加（含 cache 命中部分），turn 中括号显示
  *
  * 与 sub-agent-status 的整合：原 setupSubAgentStatus 用 `\r` 单行刷新主 Task 工具调用的
  * `[Task#N: desc] <最近工具>`，与此模块职责完全重叠。Phase 4 后整合于此，按 lineage 区分主/子
@@ -30,6 +32,7 @@ import type {
   EventMeta,
   IEventBus,
 } from "@zhixing/core";
+import { getTotalInputTokens, estimateTextTokensRaw } from "@zhixing/core";
 import type { ScreenController } from "../screen/index.js";
 import {
   spinnerFrame,
@@ -220,12 +223,12 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
 
   const offStreamEvent = eventBus.on("llm:stream_event", (event) => {
     if (!isPhaseRunning(phase)) return;
-    const charCount = extractStreamChars(event);
-    if (charCount > 0) {
+    const tokenEstimate = estimateStreamTokens(event);
+    if (tokenEstimate > 0) {
       // 流式估算累加进 streamingOutput——request_end 时会清零并 commit 真值
       const updated = withRunning(phase, (rs) => ({
         ...rs,
-        streamingOutput: rs.streamingOutput + estimateTokens(charCount),
+        streamingOutput: rs.streamingOutput + tokenEstimate,
       }));
       phase = updated;
       // streaming 状态从 thinking 切换：第一个 stream chunk 到达
@@ -242,9 +245,14 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
     if (!isPhaseRunning(phase)) return;
     // 一次 LLM 请求结束：把本次 usage 累加进 committed，清零流式估算（真值已 commit）。
     // 累加（不是覆盖）保证一轮内多次 LLM 请求（含工具调用循环）的 token 不丢失。
+    //
+    // input 用 getTotalInputTokens 取规范全量口径（含 cache 命中部分）——
+    // Anthropic 的 inputTokens 排除 cache 会系统性低估本 run 真实输入流量；
+    // OpenAI 兼容族 totalInputTokens 不设，fallback 回 inputTokens（prompt_tokens
+    // 本就是全量）与改前逐字节相同。anchor / 校准仍读 vendor 原值，互不影响。
     phase = withRunning(phase, (rs) => ({
       ...rs,
-      committedInput: rs.committedInput + (event.usage.inputTokens ?? 0),
+      committedInput: rs.committedInput + getTotalInputTokens(event.usage),
       committedOutput: rs.committedOutput + (event.usage.outputTokens ?? 0),
       streamingOutput: 0,
     }));
@@ -631,19 +639,23 @@ function phaseStartTime(
 // ─── 数据估算 ───
 
 /**
- * 从 stream event 提取本帧新增字符数（粗略估算 token）。
- * StreamEvent 是 discriminated union，按 type 字段缩窄安全提取。
+ * 从 stream event 估算本帧新增 token —— 复用 core 的 CJK 一等公民估算器
+ * （estimateTextTokensRaw：CJK 1.5 / emoji 2.0 / Latin 0.25 逐 code point 加权），
+ * 取代旧的 `字符数/2.5` 常数粗估。后者对中文约 4x 低估，流式 ↓ 边打边跳。
+ *
+ * 仍是过程估算：request_end 时 streamingOutput 清零、由 usage 真值覆盖，
+ * 本函数只决定"流式进行中"那段的体感精度，不影响 turn 末真值。
+ * StreamEvent 是 discriminated union，按 type 字段缩窄安全提取文本。
  */
-function extractStreamChars(event: AgentEventMap["llm:stream_event"]): number {
-  if (event.type === "text_delta") return event.text.length;
-  if (event.type === "thinking_delta") return event.thinking.length;
-  if (event.type === "tool_call_delta") return event.argsFragment.length;
+function estimateStreamTokens(
+  event: AgentEventMap["llm:stream_event"],
+): number {
+  if (event.type === "text_delta") return estimateTextTokensRaw(event.text);
+  if (event.type === "thinking_delta")
+    return estimateTextTokensRaw(event.thinking);
+  if (event.type === "tool_call_delta")
+    return estimateTextTokensRaw(event.argsFragment);
   return 0;
-}
-
-/** 字符数估算 token——4 chars ≈ 1 token (英文)；CJK 1:1，取折中 2.5。 */
-function estimateTokens(charCount: number): number {
-  return Math.max(1, Math.round(charCount / 2.5));
 }
 
 /** 从 Task 工具 input 提取 description（与 sub-agent-status 兼容） */

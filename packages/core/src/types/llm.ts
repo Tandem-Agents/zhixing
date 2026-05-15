@@ -29,8 +29,28 @@ export type StopReason =
 // ─── Token 统计 ───
 
 export interface TokenUsage {
+  /**
+   * Vendor 原样上报的"主输入"计数 —— **跨 provider 语义不一致**:
+   *   - OpenAI 兼容族（prompt_tokens）：已含 cache 命中部分，即等于全量输入
+   *   - Anthropic（input_tokens）：仅"未命中的新输入"，cache 命中部分单列在
+   *     cacheReadTokens / cacheWriteTokens，**不含**在本字段
+   *
+   * 需要"模型本次实际处理的全量输入"时一律用 {@link getTotalInputTokens}，
+   * 不要直接读本字段 —— 否则在 Anthropic 上会系统性低估。anchor / estimator
+   * 校准等既有消费方按 vendor 原值消费（语义稳定，本次改造刻意不动）。
+   */
   inputTokens: number;
   outputTokens: number;
+  /**
+   * 模型本次请求实际处理的**全量输入** token（fresh + cache-read + cache-write），
+   * provider 无关的规范口径。
+   *
+   * 由 adapter 边界负责填写，且**仅在 vendor 的 inputTokens ≠ 全量时才需显式设置**
+   * （目前只有 Anthropic：input_tokens 排除了 cache）。OpenAI 兼容族 prompt_tokens
+   * 本就是全量，可不设 —— {@link getTotalInputTokens} 的 fallback（`?? inputTokens`）
+   * 自然得到正确值。契约不变量见 getTotalInputTokens 与 usage-conformance 测试。
+   */
+  totalInputTokens?: number;
   /**
    * Prompt cache 命中的输入 token 数（被缓存复用、计费打折的那部分）。
    *
@@ -55,10 +75,29 @@ export function emptyUsage(): TokenUsage {
   return { inputTokens: 0, outputTokens: 0 };
 }
 
+/**
+ * 规范口径的"本次全量输入" token —— 单一语义权威。
+ *
+ * = `totalInputTokens`（adapter 显式归一时）`?? inputTokens`（vendor 原值已是
+ * 全量，如 OpenAI 兼容族；或 emptyUsage / 非 adapter 构造的兜底）。
+ *
+ * 想要"模型实际看了多少输入"的消费方（状态区流量、计费、累计）用本函数；
+ * 想要 vendor 原始锚点的消费方（anchor / estimator 校准）继续直接读 inputTokens
+ * —— 两条路径刻意分离，互不影响。
+ *
+ * 不变量：返回值 ≥ inputTokens，且 ≥ (cacheReadTokens ?? 0)+(cacheWriteTokens ?? 0)。
+ */
+export function getTotalInputTokens(usage: TokenUsage): number {
+  return usage.totalInputTokens ?? usage.inputTokens;
+}
+
 /** 合并两个 TokenUsage（累加） */
 export function mergeUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
   return {
     inputTokens: a.inputTokens + b.inputTokens,
+    // 规范全量输入按 canonical 口径累加（各侧经 getTotalInputTokens 归一后相加），
+    // 与 inputTokens 累加正交 —— 既有读 inputTokens 的消费方逐字节不变。
+    totalInputTokens: getTotalInputTokens(a) + getTotalInputTokens(b),
     outputTokens: a.outputTokens + b.outputTokens,
     cacheReadTokens:
       a.cacheReadTokens || b.cacheReadTokens

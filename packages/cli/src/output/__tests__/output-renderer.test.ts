@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createOutputRenderer } from "../output-renderer.js";
 import { stripAnsi } from "../../tui/ansi.js";
+import { stringWidth } from "../../tui/line-width.js";
 import type { CliWriter } from "../../screen/index.js";
 import type {
   ReplaceableSegmentHandle,
@@ -586,6 +587,88 @@ describe("createOutputRenderer · thinking rolling tail", () => {
       expect(stripped).toContain("...段2");
       expect(stripped).toContain("┊ 段3");
       expect(stripped).not.toContain("段1");
+    }
+  });
+
+  it("硬合约: CJK 长内容 + 滚出时,渲染出的每一行显示宽度 ≤ columns-1（锁死物理折行 bug）", () => {
+    // 截图 bug:首行 `...` 装饰未计入宽度预算 → 行超 columns-1 → 终端物理折行,
+    // 折出字落第 0 列、孤字成行。columns=30 → prefixWidth=4 → wrapWidth=25;
+    // 48 个全角"中"(各 2 列)强制 wrap 成 4 段 → 滚出 → 首行带 `...`。
+    const columns = 30;
+    const writer = makeCaptureWriter();
+    const renderer = createOutputRenderer({ writer, columns });
+
+    renderer.handleEvent({ type: "thinking_block_start" });
+    renderer.handleEvent({ type: "thinking_delta", thinking: "中".repeat(48) });
+    renderer.handleEvent({ type: "thinking_block_end" });
+
+    const replaces = writer.events.filter((e) => e.kind === "seg.replace");
+    const finalReplace = replaces[replaces.length - 1];
+    expect(finalReplace?.kind).toBe("seg.replace");
+    if (finalReplace?.kind === "seg.replace") {
+      const lines = stripAnsi(finalReplace.text).split("\n");
+      // 滚出 → 恰 2 行;首行带 `...` 标识
+      expect(lines).toHaveLength(2);
+      expect(lines[0]!.startsWith("  ┊ ...")).toBe(true);
+      // 核心不变量:每一行(含带 `...` 的首行)显示宽度都不破 columns-1
+      for (const line of lines) {
+        expect(stringWidth(line)).toBeLessThanOrEqual(columns - 1);
+      }
+    }
+  });
+
+  it("产品契约: 第二/最新行享满宽,不被首行省略号预算缩窄", () => {
+    // 否决过的"统一扣 3 列"会让第二行右侧空 3 列;此测试锁死"仅首行重折,
+    // 第二行满 wrapWidth"。columns=30 → wrapWidth=25,ellipsisLineContentWidth=22。
+    // 构造令第二行内容宽度落在 (22, 25] —— 若被错误地按 22 预算,该宽度不可能出现。
+    const columns = 30;
+    const writer = makeCaptureWriter();
+    const renderer = createOutputRenderer({ writer, columns });
+
+    renderer.handleEvent({ type: "thinking_block_start" });
+    renderer.handleEvent({ type: "thinking_delta", thinking: "中".repeat(48) });
+    renderer.handleEvent({ type: "thinking_block_end" });
+
+    const replaces = writer.events.filter((e) => e.kind === "seg.replace");
+    const finalReplace = replaces[replaces.length - 1];
+    if (finalReplace?.kind === "seg.replace") {
+      const lines = stripAnsi(finalReplace.text).split("\n");
+      const secondContent = lines[1]!.replace(/^ {2}┊ /, "");
+      const secondWidth = stringWidth(secondContent);
+      // 满宽 12 个"中"=24 列 > 22(若按省略号预算缩窄则上限只能 22）
+      expect(secondWidth).toBeGreaterThan(columns - 1 - 4 - 3);
+      expect(secondWidth).toBeLessThanOrEqual(columns - 1 - 4);
+    }
+  });
+
+  it("首行展示的是最贴近第二行的尾段（更早部分由 `...` 表达已滚走）", () => {
+    // fitTailToWidth 取重折后的尾段,保证与第二行内容连续。用可区分字符验证:
+    // 段落 = 'A'×30 + 'B'×30(60 字),columns=30(wrapWidth=25,ASCII 1 列/字)
+    // → wrap 成 3 段(25/25/10)→ 滚出;可见后 2 段,首段尾部已是 B。
+    const writer = makeCaptureWriter();
+    const renderer = createOutputRenderer({ writer, columns: 30 });
+
+    renderer.handleEvent({ type: "thinking_block_start" });
+    renderer.handleEvent({
+      type: "thinking_delta",
+      thinking: "A".repeat(30) + "B".repeat(30),
+    });
+    renderer.handleEvent({ type: "thinking_block_end" });
+
+    const replaces = writer.events.filter((e) => e.kind === "seg.replace");
+    const finalReplace = replaces[replaces.length - 1];
+    if (finalReplace?.kind === "seg.replace") {
+      const lines = stripAnsi(finalReplace.text).split("\n");
+      // 首行带 `...`,且其尾部是首个可见段的尾段(靠近第二行的最新部分),
+      // 不是被物理截断的最早字符堆。
+      expect(lines).toHaveLength(2);
+      expect(lines[0]!.startsWith("  ┊ ...")).toBe(true);
+      // 每行仍不破硬合约
+      for (const line of lines) {
+        expect(stringWidth(line)).toBeLessThanOrEqual(30 - 1);
+      }
+      // 最新内容 B 应出现在第二行(最新行不丢失)
+      expect(lines[1]).toContain("B");
     }
   });
 

@@ -67,13 +67,34 @@ interface ThinkingDisplayState {
 }
 
 /**
+ * 取 text 末尾、能放进 maxWidth 显示列的那一段。
+ *
+ * 用途:thinking rolling tail 的首行带 `...` 标识"上方有内容滚走"。`...` 是该行
+ * **专属装饰**,占 stringWidth(THINKING_ELLIPSIS) 列。为兼顾两条硬约束 ——
+ *   (a) 每行显示宽度 ≤ columns-1(违反则终端物理软折行,ScrollRegion 单维行号
+ *       erase 失算,即 postmortem 2026-05-09 根因类);
+ *   (b) **不缩第二/最新行宽度**(产品契约:第二行满宽,右侧不留空白)——
+ * 只对带 `...` 的首行按"满宽 - 省略号宽"重折一次,取最贴近下一行的**尾段**:
+ * 更早部分本就由 `...` 表达已滚走,丢弃语义自洽。复用 wrapToWidth(CJK 宽度
+ * 已正确)而非另写截断,杜绝并行宽度数学(同一根因类的复发源)。
+ *
+ * wrapToWidth 契约:非空 text 必返 ≥1 段、每段 ≤ maxWidth;maxWidth≤0 时返
+ * [text](不截)。故 caller 必须保证 maxWidth ≥ 1(下方 Math.max(1,..) 已保证)。
+ */
+function fitTailToWidth(text: string, maxWidth: number): string {
+  const wrapped = wrapToWidth(text, maxWidth);
+  return wrapped[wrapped.length - 1] ?? text;
+}
+
+/**
  * 渲染 thinking buffer 为最终 segment 文本 (最多 2 行 + 前缀 + dim + 可选 ELLIPSIS)。
  *
  * 步骤:
  *   1. 按 \n 硬切成段 (LLM thinking 输出可能含换行)
- *   2. 每段按 columns - prefixWidth 软换行 (wrapToWidth 处理 CJK 双宽)
+ *   2. 每段按 columns-1-prefixWidth 软换行 (wrapToWidth 处理 CJK 双宽)
  *   3. 取最后 2 行
- *   4. 第一行如果曾/此刻有滚出,加 ELLIPSIS 前缀标记
+ *   4. 带 `...` 的首行单独按"满宽 - 省略号宽"重折取尾段(见 fitTailToWidth);
+ *      第二行不动,仍享满宽 —— 由构造保证每行 ≤ columns-1 且不浪费横向空间
  *   5. 整体加 ┊ 前缀 + chalk.dim
  *
  * @returns text 与是否曾有内容滚出(累积语义:本次或之前任何一次滚出过都为 true)
@@ -89,6 +110,10 @@ function renderThinkingTail(
   // 行宽 = prefixWidth + body，故 body 上限 = columns - 1 - prefixWidth
   //（与 block-renderer indentAndWrapLine 同口径，留 1 列防御边界）。
   const wrapWidth = Math.max(1, columns - 1 - prefixWidth);
+  // `...` 是首行专属装饰,占 ellipsisWidth 列。带它的那行内容预算相应收窄,
+  // 其余行(含第二/最新行)保持满 wrapWidth —— 不浪费横向空间(产品契约)。
+  const ellipsisWidth = stringWidth(THINKING_ELLIPSIS);
+  const ellipsisLineContentWidth = Math.max(1, wrapWidth - ellipsisWidth);
 
   // 按 \n 硬切 + wrapToWidth 软换行 + **过滤空行**:
   //
@@ -114,9 +139,15 @@ function renderThinkingTail(
   const visibleLines = allLines.slice(-2);
 
   const formattedLines = visibleLines.map((line, idx) => {
-    const isFirst = idx === 0;
-    const body = scrolledOut && isFirst ? THINKING_ELLIPSIS + line : line;
-    return chalk.dim(THINKING_PREFIX + body);
+    // 仅"首行 + 确有滚出"才带 `...`:这一行内容重折到 ellipsisLineContentWidth
+    // 并取尾段(更早部分由 `...` 表达已滚走);其余行原样满宽。由 wrapToWidth
+    // 的"每段 ≤ maxWidth"契约,渲染行宽 = prefixWidth + ellipsisWidth +
+    // (≤ wrapWidth-ellipsisWidth) ≤ columns-1,对所有行恒成立(by construction)。
+    if (scrolledOut && idx === 0) {
+      const fitted = fitTailToWidth(line, ellipsisLineContentWidth);
+      return chalk.dim(THINKING_PREFIX + THINKING_ELLIPSIS + fitted);
+    }
+    return chalk.dim(THINKING_PREFIX + line);
   });
 
   return { text: formattedLines.join("\n"), scrolledOut };
