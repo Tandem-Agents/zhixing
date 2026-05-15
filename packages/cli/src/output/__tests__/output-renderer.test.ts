@@ -539,6 +539,56 @@ describe("createOutputRenderer · thinking rolling tail", () => {
     }
   });
 
+  it("段间空行: thinking 含空行时空行被过滤,'...' 不单独占行(回归 bug 锁死)", () => {
+    // LLM thinking 输出常含段间空行(如思考分段),早期实现按 \n 切后空段进入
+    // visibleLines,slice(-2) 可能取到 ["", "实质内容"],第一行加 "..." 拼空内容
+    // 产生单独 "┊ ..." 行 —— 与"...总是与实质内容同行"产品契约相悖。
+    // 本测试锁死过滤空行的契约。
+    const writer = makeCaptureWriter();
+    const renderer = createOutputRenderer({ writer, columns: 80 });
+
+    renderer.handleEvent({ type: "thinking_block_start" });
+    renderer.handleEvent({
+      type: "thinking_delta",
+      thinking: "用户问候\n\n让我简洁回复",
+    });
+    renderer.handleEvent({ type: "thinking_block_end" });
+
+    const replaces = writer.events.filter((e) => e.kind === "seg.replace");
+    const finalReplace = replaces[replaces.length - 1];
+    expect(finalReplace?.kind).toBe("seg.replace");
+    if (finalReplace?.kind === "seg.replace") {
+      const stripped = stripAnsi(finalReplace.text);
+      // 应是两行实质内容,空段过滤后总数 2 → 未滚出 → 无 "..."
+      expect(stripped).toContain("┊ 用户问候");
+      expect(stripped).toContain("┊ 让我简洁回复");
+      // 不应出现单独 "┊ ..." 行
+      expect(stripped).not.toMatch(/┊\s*\.\.\.\s*$/m);
+    }
+  });
+
+  it("段间空行 + 滚出: 多段含空行,'...' 拼接到最旧的实质内容前", () => {
+    const writer = makeCaptureWriter();
+    const renderer = createOutputRenderer({ writer, columns: 80 });
+
+    renderer.handleEvent({ type: "thinking_block_start" });
+    renderer.handleEvent({
+      type: "thinking_delta",
+      thinking: "段1\n\n段2\n\n段3",
+    });
+    renderer.handleEvent({ type: "thinking_block_end" });
+
+    const replaces = writer.events.filter((e) => e.kind === "seg.replace");
+    const finalReplace = replaces[replaces.length - 1];
+    if (finalReplace?.kind === "seg.replace") {
+      const stripped = stripAnsi(finalReplace.text);
+      // 过滤空行后 3 行,slice(-2)=[段2, 段3],第一行加 "..."
+      expect(stripped).toContain("...段2");
+      expect(stripped).toContain("┊ 段3");
+      expect(stripped).not.toContain("段1");
+    }
+  });
+
   it("防御 cleanup: text_delta 到达时若 thinking segment 还在,先 close 再开 markdown 段", () => {
     const writer = makeCaptureWriter();
     const renderer = createOutputRenderer({ writer, columns: 80 });

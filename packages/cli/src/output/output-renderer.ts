@@ -84,17 +84,23 @@ function renderThinkingTail(
   const prefixWidth = stringWidth(THINKING_PREFIX);
   const wrapWidth = Math.max(1, columns - prefixWidth);
 
-  // 按 \n 硬切 + wrapToWidth 软换行
+  // 按 \n 硬切 + wrapToWidth 软换行 + **过滤空行**:
+  //
+  // LLM thinking 输出常含段间空行(如 "思考1\n\n让我简洁回复\n"),在 rolling 2
+  // 行展示空间里这些空行无显示价值且会引发 bug —— 若 slice(-2) 取到 ["", "实质内容"]
+  // 第一行加 "..." 拼接空字符串会显示为单独的 `┊ ...` 行(用户期望 "..." 总是与
+  // 实质内容同行,作为"上方有内容缩略"的标识)。过滤空行让 visibleLines 总是实质内容。
+  //
+  // 同样过滤 wrap 产物中的空行(极端 wrapWidth 下可能产生),保证一致性。
   const paragraphs = buffer.split("\n");
   const allLines: string[] = [];
   for (const para of paragraphs) {
-    if (para === "") {
-      // 空段(连续 \n / 末尾 \n) 作为空行加入 — 保留 thinking 视觉结构
-      allLines.push("");
-      continue;
-    }
+    if (para.trim() === "") continue;
     const wrapped = wrapToWidth(para, wrapWidth);
-    allLines.push(...wrapped);
+    for (const line of wrapped) {
+      if (line.trim() === "") continue;
+      allLines.push(line);
+    }
   }
 
   const scrolledOutNow = allLines.length > 2;

@@ -690,8 +690,12 @@ function formatStreamEvent(event: StreamEvent, elapsedMs: number): string {
   switch (event.type) {
     case "text_delta":
       return formatDeltaEvent(head, "text_delta", event.text);
+    case "thinking_block_start":
+      return `${head} thinking_block_start\n\n`;
     case "thinking_delta":
       return formatDeltaEvent(head, "thinking_delta", event.thinking);
+    case "thinking_block_end":
+      return `${head} thinking_block_end\n\n`;
     case "tool_call_delta":
       return (
         `${head} tool_call_delta (id=${event.id}, args.len=${event.argsFragment.length})\n` +

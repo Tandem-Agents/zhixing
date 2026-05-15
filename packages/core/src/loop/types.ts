@@ -278,8 +278,20 @@ export type ContinueReason = "tool_use";
 export type AgentYield =
   /** LLM 输出的文本增量（实时流式） */
   | { readonly type: "text_delta"; readonly text: string }
+  /**
+   * LLM thinking 块开始 —— 与 StreamThinkingBlockStart 对称的 AgentYield 边界事件。
+   * 消费方(cli output-renderer 等)据此开 thinking 显示区(segment / 状态机),
+   * 不再从首个 thinking_delta 推断。透传链路:adapter emit → llm-call 透传 →
+   * agent-loop 透传 → 消费方。
+   */
+  | { readonly type: "thinking_block_start" }
   /** LLM 的思考过程增量（如 Claude extended thinking） */
   | { readonly type: "thinking_delta"; readonly thinking: string }
+  /**
+   * LLM thinking 块结束 —— 与 StreamThinkingBlockEnd 对称的 AgentYield 边界事件。
+   * 消费方据此 commit/close thinking 资源(与 thinking_block_start 配对)。
+   */
+  | { readonly type: "thinking_block_end" }
   /** LLM 响应完成后的完整 assistant 消息（用于持久化/日志） */
   | { readonly type: "assistant_message"; readonly message: Message }
   /** 工具开始执行 */

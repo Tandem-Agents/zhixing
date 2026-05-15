@@ -134,9 +134,21 @@ export async function* streamLLMCall(
           yield { type: "text_delta", text: event.text };
           break;
 
+        case "thinking_block_start":
+          // 透传 thinking 块开始边界给 AgentYield 流 —— 与 StreamEvent 对称,
+          // 让 cli output-renderer 等下游消费方据此开 thinking 显示区(segment /
+          // 状态机),不依赖从首个 thinking_delta 推断
+          yield { type: "thinking_block_start" };
+          break;
+
         case "thinking_delta":
           pendingThinking += event.thinking;
           yield { type: "thinking_delta", thinking: event.thinking };
+          break;
+
+        case "thinking_block_end":
+          // 透传 thinking 块结束边界 —— 让消费方 commit/close thinking 资源
+          yield { type: "thinking_block_end" };
           break;
 
         case "tool_call_start":
