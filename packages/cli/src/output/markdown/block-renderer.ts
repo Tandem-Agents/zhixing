@@ -192,13 +192,20 @@ function stripBlockBoundaryNewlines(s: string): string {
 function renderHeading(t: Tokens.Heading, ctx: RenderContext): string {
   const indent = lineIndent(ctx.indentLevel);
   const text = t.text;
-  const content =
+  // hash 前缀(行业事实标准,参考 marked-terminal showSectionPrefix 默认行为):
+  //   - 保留 markdown 原生 `#` / `##` / `###` 等层级标记,零学习成本
+  //   - dim 着色弱化前缀让标题文本主体突出(与 list marker dim 同原则)
+  //   - depth ∈ [1,6],生成 "# " ~ "###### "
+  //   - strip 模式按字面 hash 输出(供 CI / pipe 场景)
+  const rawHash = "#".repeat(t.depth) + " ";
+  const hashPrefix = ctx.mode === "strip" ? rawHash : tone.dim(rawHash);
+  const styledText =
     ctx.mode === "strip"
       ? text
       : t.depth === 1
       ? tone.brand.bold(text)
       : chalk.bold(text);
-  return `\n${indentAndWrapLine(content, indent, ctx.columns)}\n`;
+  return `\n${indentAndWrapLine(hashPrefix + styledText, indent, ctx.columns)}\n`;
 }
 
 function renderCode(t: Tokens.Code, ctx: RenderContext): string {
@@ -600,10 +607,14 @@ function padOrTruncateCell(
 
 function renderHr(ctx: RenderContext): string {
   const indent = lineIndent(ctx.indentLevel);
-  // 极窄终端把 40 字符 rule clamp 到 columns - 1 - indent，避免触发隐式 wrap
+  // 长度: 填满 columns - 1 - indent (避免触发隐式 wrap), 不再限 40 字符 ——
+  // hr 是内容间的视觉边界, 应占满可用宽度
   const indentWidth = stringWidth(indent);
-  const ruleLength = Math.max(1, Math.min(40, ctx.columns - 1 - indentWidth));
-  const rule = "─".repeat(ruleLength);
+  const ruleLength = Math.max(1, ctx.columns - 1 - indentWidth);
+  // 字符: ╌ (U+254C LIGHT DOUBLE DASH HORIZONTAL) 虚线横线 —— 内容间用虚线
+  // 而非实线 ─, 视觉是"分隔但不强分割";与 thinking 段 ┊ (LIGHT QUADRUPLE
+  // DASH VERTICAL) 同 box drawing dash family。
+  const rule = "╌".repeat(ruleLength);
   const styled = ctx.mode === "strip" ? rule : tone.dim(rule);
   return `\n${indent}${styled}\n`;
 }

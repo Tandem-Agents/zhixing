@@ -77,27 +77,29 @@ describe("MarkdownStream · 段落（paragraph）字符流式", () => {
     expect(stripped).toContain("段3");
   });
 
-  it("paragraph 之间夹 heading → heading 走 ANSI emit 独立段，code/heading 后段重新起锚", () => {
+  it("paragraph 之间夹 heading → heading 走 ANSI emit 独立段, ◆ 锚 turn 内仅 1 次(产品契约)", () => {
     const { stream, out } = makeStream();
     stream.feed("段1\n\n# 标题\n\n段2");
     stream.end();
     const stripped = stripAnsi(out.combined);
-    // heading 闭合走 line 独立段——关 paragraph 流；段2 重新起 ◆ 锚——共 2 锚
+    // 产品契约:一个 turn 一个 ◆ 锚(markdown-stream 跟踪 anchorEmittedThisStream
+    // 状态,paragraph stream 重建时不再重 emit ◆,只 emit hanging 4 空格 prefix)
     const anchorCount = (stripped.match(/◆/g) ?? []).length;
-    expect(anchorCount).toBe(2);
-    // # 字面标记不再泄露——renderBlock 已替换为 ANSI bold
-    expect(stripped).not.toContain("# 标题");
-    expect(stripped).toContain("标题");
+    expect(anchorCount).toBe(1);
+    // hash 字面保留(行业事实标准,参考 marked-terminal showSectionPrefix 默认)
+    expect(stripped).toContain("# 标题");
+    expect(stripped).toContain("段1");
+    expect(stripped).toContain("段2");
   });
 
-  it("paragraph 之间夹 code block → code block 走 ANSI emit + 关闭 paragraph 流，code 后段重新起锚", () => {
+  it("paragraph 之间夹 code block → code 走独立段, ◆ 锚 turn 内仅 1 次", () => {
     const { stream, out } = makeStream();
     stream.feed("段1\n\n```\nconst x = 1\n```\n\n段2");
     stream.end();
     const stripped = stripAnsi(out.combined);
-    // 仅 code block 走 hold + ANSI emit + closeParagraphStream → code 后的段是新 paragraph 流
+    // 产品契约:一个 turn 一个 ◆ 锚
     const anchorCount = (stripped.match(/◆/g) ?? []).length;
-    expect(anchorCount).toBe(2);
+    expect(anchorCount).toBe(1);
     expect(stripped).toContain("const x = 1");
     expect(stripped).toContain("段1");
     expect(stripped).toContain("段2");
@@ -105,20 +107,22 @@ describe("MarkdownStream · 段落（paragraph）字符流式", () => {
 });
 
 describe("MarkdownStream · 闭合 block 处理", () => {
-  it("heading 闭合走 ANSI emit 独立段 line()——# 字面字符不泄露，文字 bold 染色", () => {
+  it("heading 闭合走 ANSI emit 独立段 line()——保留原生 # 前缀(dim), 文字 bold 染色", () => {
     const { stream, out } = makeStream();
     stream.feed("# Title\n\nbody.");
     stream.end();
     // heading 走 line() 独立段 ANSI emit
     const headingLines = out.line.filter((s) => stripAnsi(s).includes("Title"));
     expect(headingLines.length).toBe(1);
-    // # 字面标记被替换；文字仍可读
-    expect(stripAnsi(out.combined)).not.toContain("# Title");
-    expect(stripAnsi(out.combined)).toContain("Title");
+    // 行业事实标准: hash 前缀保留(marked-terminal showSectionPrefix 默认),
+    // dim 着色让文本主体突出
+    expect(stripAnsi(out.combined)).toContain("# Title");
     expect(stripAnsi(out.combined)).toContain("body.");
     // depth=1 brand cyan + bold —— 含 cyan SGR
     expect(headingLines[0]!).toContain("\x1b[36m");
     expect(headingLines[0]!).toContain("\x1b[1m");
+    // dim 前缀 SGR(2 = dim)
+    expect(headingLines[0]!).toContain("\x1b[2m");
   });
 
   it("代码块闭合后 dim 文字独立段输出，line 调用契约：起首 \\n + 列 2 缩进 + 末尾 \\n", () => {
@@ -164,7 +168,7 @@ describe("MarkdownStream · 闭合 block 处理", () => {
     stream.feed("---\n\n");
     stream.end();
     const stripped = stripAnsi(out.combined);
-    expect(stripped).toContain("─"); // U+2500 box drawing
+    expect(stripped).toContain("╌"); // U+2500 box drawing
     expect(stripped).not.toContain("---");
   });
 });
@@ -179,7 +183,7 @@ describe("MarkdownStream · 流式跨 chunk 边界", () => {
     expect(stripAnsi(out.combined)).toContain("const x = 1");
   });
 
-  it("末尾未闭合 heading hold——闭合后才 emit ANSI，字面 # 标记不泄露", () => {
+  it("末尾未闭合 heading hold——闭合后 emit ANSI(保留 # 前缀)", () => {
     const { stream, out } = makeStream();
     stream.feed("# Title");
     // marked 在 chunk = "# Title" 时识别为 paragraph (text="# Title")—— paragraph
@@ -187,7 +191,8 @@ describe("MarkdownStream · 流式跨 chunk 边界", () => {
     expect(out.combined).toBe("");
     stream.feed("\n\n");
     expect(stripAnsi(out.combined)).toContain("Title");
-    expect(stripAnsi(out.combined)).not.toContain("# Title");
+    // 行业事实标准: hash 前缀保留(dim 着色, 见 heading 渲染规则)
+    expect(stripAnsi(out.combined)).toContain("# Title");
     stream.end();
   });
 
@@ -267,7 +272,7 @@ describe("MarkdownStream · 边缘场景", () => {
     expect(out.combined).toBe("");
   });
 
-  it("混合内容：标题 + 段落 + 代码块 + 列表 全流程 ANSI 渲染—— markdown 标记不泄露", () => {
+  it("混合内容: heading 保留 # 前缀, 其他 markdown 标记不泄露", () => {
     const { stream, out } = makeStream();
     stream.feed("# Heading\n\n");
     stream.feed("Paragraph text.\n\n");
@@ -281,8 +286,9 @@ describe("MarkdownStream · 边缘场景", () => {
     expect(stripped).toContain("const x = 1");
     expect(stripped).toContain("· item1");
     expect(stripped).toContain("· item2");
-    // 字面 markdown 标记全部不泄露
-    expect(stripped).not.toContain("# Heading");
+    // heading: 行业事实标准 hash 前缀保留
+    expect(stripped).toContain("# Heading");
+    // code/list 字面 markdown 标记不泄露(它们走 ANSI 替换路径)
     expect(stripped).not.toContain("```");
     expect(stripped).not.toContain("- item1");
   });
@@ -407,7 +413,7 @@ describe("MarkdownStream · space token 塌缩归一化", () => {
       stream.end();
       const stripped = stripAnsi(out.combined);
       // p1 与 hr 之间应仅 2 个 \n（= 1 空行）
-      expect(countNewlinesBetween(stripped, "p1", "─")).toBe(2);
+      expect(countNewlinesBetween(stripped, "p1", "╌")).toBe(2);
     });
 
     it("paragraph + heading", () => {
@@ -450,7 +456,7 @@ describe("MarkdownStream · space token 塌缩归一化", () => {
       stream.feed("p1\n\n\n\n\n\n---\n\np2");
       stream.end();
       const stripped = stripAnsi(out.combined);
-      expect(countNewlinesBetween(stripped, "p1", "─")).toBe(2);
+      expect(countNewlinesBetween(stripped, "p1", "╌")).toBe(2);
     });
   });
 
@@ -472,7 +478,7 @@ describe("MarkdownStream · space token 塌缩归一化", () => {
       stream.end();
       const stripped = stripAnsi(out.combined);
       // hr 与 p2 之间应有 2 个 \n（= 1 空行），对称于 p1 与 hr 之间的 1 空行
-      expect(countNewlinesBetween(stripped, "─", "p2")).toBe(2);
+      expect(countNewlinesBetween(stripped, "╌", "p2")).toBe(2);
     });
 
     it("heading → paragraph", () => {
@@ -516,8 +522,8 @@ describe("MarkdownStream · space token 塌缩归一化", () => {
       stream.feed("p1\n\n---\n\np2");
       stream.end();
       const stripped = stripAnsi(out.combined);
-      const before = countNewlinesBetween(stripped, "p1", "─");
-      const after = countNewlinesBetween(stripped, "─", "p2");
+      const before = countNewlinesBetween(stripped, "p1", "╌");
+      const after = countNewlinesBetween(stripped, "╌", "p2");
       expect(before).toBe(2);
       expect(after).toBe(2);
       expect(before).toBe(after); // 显式对称声明
@@ -546,7 +552,7 @@ describe("MarkdownStream · space token 塌缩归一化", () => {
       stream.feed("p1\n\n---\n\np2");
       stream.end();
       // strip 模式无 ANSI，直接用 combined。hr 渲染为 ─ 字符序列。
-      expect(countNewlinesBetween(out.combined, "─", "p2")).toBe(2);
+      expect(countNewlinesBetween(out.combined, "╌", "p2")).toBe(2);
     });
 
     it("strip 模式 heading → paragraph 也产生 1 空行（render / strip 对称）", () => {
@@ -1104,7 +1110,7 @@ describe("MarkdownStream · table（hold 等闭合 + 整段 ANSI emit）", () =>
     expect(finalStripped).toContain("名称");
     expect(finalStripped).toContain("foo");
     expect(finalStripped).toContain("版本");
-    // 分隔行 ─ 字符存在
+    // 分隔行 ─ 字符存在 (table header / column 分隔,与 hr 的 ╌ 不同)
     expect(finalStripped).toContain("─");
   });
 

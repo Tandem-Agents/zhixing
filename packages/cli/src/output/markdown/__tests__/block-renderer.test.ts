@@ -35,24 +35,44 @@ chalk.level = 3;
 const PREFIX = layout.contentPrefix;
 
 describe("renderBlock · heading", () => {
-  it("一级标题 render 模式：起首空行 + brand cyan + bold + 列 2 缩进", () => {
+  // 视觉契约升级:heading 保留 markdown 原生 hash 前缀(行业事实标准,参考
+  // marked-terminal `showSectionPrefix` 默认行为)。前缀 dim 弱化让文本主体
+  // 突出;层级 = hash 数自然递增。
+
+  it("一级标题 render 模式：起首空行 + dim # 前缀 + brand cyan + bold + 列 2 缩进", () => {
     const t = { type: "heading", depth: 1, text: "Title", raw: "# Title" } as Tokens.Heading;
     const out = renderBlock(t, "render");
-    expect(stripAnsi(out)).toBe(`\n${PREFIX}Title\n`);
+    expect(stripAnsi(out)).toBe(`\n${PREFIX}# Title\n`);
     expect(out).toContain(chalk.cyan.bold("Title"));
+    expect(out).toContain(chalk.dim("# "));
   });
 
-  it("二级标题 render 模式：起首空行 + default bold（不染色）", () => {
+  it("二级标题 render 模式：起首空行 + dim ## 前缀 + default bold（不染色）", () => {
     const t = { type: "heading", depth: 2, text: "Sub", raw: "## Sub" } as Tokens.Heading;
     const out = renderBlock(t, "render");
-    expect(stripAnsi(out)).toBe(`\n${PREFIX}Sub\n`);
+    expect(stripAnsi(out)).toBe(`\n${PREFIX}## Sub\n`);
     expect(out).toContain(chalk.bold("Sub"));
+    expect(out).toContain(chalk.dim("## "));
   });
 
-  it("strip 模式仅缩进 + 文本，不染色不加粗", () => {
+  it("三级标题 render 模式: dim ### 前缀 + bold", () => {
+    const t = { type: "heading", depth: 3, text: "H3", raw: "### H3" } as Tokens.Heading;
+    const out = renderBlock(t, "render");
+    expect(stripAnsi(out)).toBe(`\n${PREFIX}### H3\n`);
+    expect(out).toContain(chalk.dim("### "));
+  });
+
+  it("六级标题 render 模式: dim ###### 前缀 + bold", () => {
+    const t = { type: "heading", depth: 6, text: "H6", raw: "###### H6" } as Tokens.Heading;
+    const out = renderBlock(t, "render");
+    expect(stripAnsi(out)).toBe(`\n${PREFIX}###### H6\n`);
+    expect(out).toContain(chalk.dim("###### "));
+  });
+
+  it("strip 模式: 字面 hash + 缩进 + 文本，不染色不加粗", () => {
     const t = { type: "heading", depth: 1, text: "Title", raw: "# Title" } as Tokens.Heading;
     const out = renderBlock(t, "strip");
-    expect(out).toBe(`\n${PREFIX}Title\n`);
+    expect(out).toBe(`\n${PREFIX}# Title\n`);
     expect(out).not.toContain("\x1b[");
   });
 });
@@ -256,10 +276,11 @@ describe("renderBlock · blockquote", () => {
 });
 
 describe("renderBlock · hr", () => {
-  it("render 模式 dim 横线 + 起首空行", () => {
+  it("render 模式 dim 虚线 + 起首空行 + 填满 (columns - 1 - indent)", () => {
+    // 默认 columns=80, indent=2 → ruleLength = 80 - 1 - 2 = 77
     const t = { type: "hr", raw: "---" } as Tokens.Hr;
     const out = renderBlock(t, "render");
-    expect(stripAnsi(out)).toBe(`\n${PREFIX}${"─".repeat(40)}\n`);
+    expect(stripAnsi(out)).toBe(`\n${PREFIX}${"╌".repeat(77)}\n`);
   });
 });
 
@@ -547,7 +568,7 @@ describe("renderBlock · 行宽合约（wrap 落地）", () => {
     expectAllLinesWithinBudget(out, 20);
     const stripped = stripAnsi(out);
     // PREFIX (2) + rule_length ≤ 19 → rule_length ≤ 17
-    const ruleLine = stripped.split("\n").find((l) => l.includes("─"))!;
+    const ruleLine = stripped.split("\n").find((l) => l.includes("╌"))!;
     expect(stringWidth(ruleLine)).toBeLessThanOrEqual(19);
   });
 

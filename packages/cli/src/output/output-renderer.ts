@@ -34,6 +34,7 @@ import type { AgentYield } from "@zhixing/core";
 import { getToolRenderStrategy } from "../tool-render-strategy.js";
 import type { CliWriter, ReplaceableSegmentHandle } from "../screen/index.js";
 import { stringWidth, wrapToWidth } from "../tui/line-width.js";
+import { layout } from "../tui/style.js";
 import { MarkdownStream, type MarkdownMode } from "./markdown/index.js";
 import { createToolBatchCoordinator } from "./tool-batch-coordinator.js";
 
@@ -47,9 +48,10 @@ import { createToolBatchCoordinator } from "./tool-batch-coordinator.js";
 //   - 曾滚出过内容时, 显示第一行前缀加 ELLIPSIS 标记
 //   - thinking 流结束: segment.close() 固化进 scrollback,内容不变(显式不擦)
 //
-// 前缀符号: ┊ (U+250A 虚线竖线) + 空格 = 2 列;chalk.dim 灰色不抢戏。
-// 与 tool batch 视觉元素 (⟡ / ⋮ / etc) 风格一致 —— 信息分级清楚但不刺眼。
-const THINKING_PREFIX = "┊ ";
+// 前缀符号: `${layout.contentPrefix}┊ ` (列 2 缩进 + 虚线竖线 + 空格 = 4 列)。
+// 与 ◆/#/·/⟡ 等所有段标识同 col 2 起手视觉对齐(layout.contentPrefix 是全 cli
+// 共享的左缩进基准,详见 tui/style.ts)。chalk.dim 灰色让 thinking 不抢戏。
+const THINKING_PREFIX = `${layout.contentPrefix}┊ `;
 const THINKING_ELLIPSIS = "...";
 // flush 节流毫秒数 —— thinking_delta 高频(~30ms/chunk)时频繁 replace segment 会
 // 视觉闪烁。60ms 是 16fps 帧率粒度,人眼无感却足够 batch 多个 chunk 一次重绘。

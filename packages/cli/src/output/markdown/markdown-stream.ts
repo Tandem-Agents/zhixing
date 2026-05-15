@@ -45,7 +45,9 @@
 
 import { marked, type Tokens } from "marked";
 import type { ReplaceableSegmentHandle } from "../../screen/screen-controller.js";
-import { TextStream } from "../text-stream.js";
+import { TextStream, TEXT_STREAM_HANGING_PREFIX } from "../text-stream.js";
+import { aiTextAnchor } from "../speaker-state.js";
+import { layout } from "../../tui/style.js";
 import {
   formatStreamingCode,
   renderBlock,
@@ -116,6 +118,21 @@ export class MarkdownStream {
    * 语义实现，无需重新起 ◆ 锚）。
    */
   private paragraphStream: TextStream | null = null;
+  /**
+   * turn 内 ◆ 锚是否已 emit —— 解决 "paragraph → list → paragraph" 时
+   * closeParagraphStream 关闭 TextStream 又重建导致重复 emit ◆ 的 bug。
+   *
+   * 生命周期与 markdown-stream 实例 lifetime 对齐(一个 mdStream 实例 = 一个
+   * turn 的连续 text 段);reset() 重置为 false。下次创建 paragraph stream 时
+   * 据此选 firstLinePrefix:
+   *   - false(首次):传含 ◆ 的 ANCHOR_PREFIX,emit 后设 true
+   *   - true(后续):传 hanging 4 空格 prefix,无 ◆,与首行 hanging 续行视觉对齐
+   *
+   * 实现注:◆ 锚是 turn 级语义(LLM 一次回复一次),而 paragraph stream 因
+   * markdown 结构(list/heading/code 等中间 block)在 turn 内会被关闭重建多次。
+   * 把 anchor 控制权从 TextStream 上提到 markdown-stream 实例级,符合产品语义。
+   */
+  private anchorEmittedThisStream = false;
   /**
    * 当前活跃的 fenced code block 的 ReplaceableSegment——双态渲染流式期持有，
    * 闭合时 commit 切换到 highlight 后置 null。仅 render 模式 + caller 注入了
@@ -213,6 +230,7 @@ export class MarkdownStream {
     this.paragraphForwardedTo = 0;
     this.paragraphStream = null;
     this.lastEmittedWasParagraph = false;
+    this.anchorEmittedThisStream = false;
     // 防御：流式期 segment 应已在 emitClosedBlock 时 commit 关闭；若仍活跃
     // （解析途中异常 / caller 错误），强制 close 避免残留 hasActiveSegment 状态
     if (this.codeSegment !== null) {
@@ -506,10 +524,18 @@ export class MarkdownStream {
     }
 
     if (this.paragraphStream === null) {
+      // anchor 控制契约: turn 内首次创建 paragraph stream emit ◆ 锚;后续重建
+      // (中间 list / heading / code 等 block 闭合关流后再来 paragraph)走 hanging
+      // 4 空格无 ◆,实现"一个 turn 一个 ◆"产品语义
+      const firstLinePrefix = this.anchorEmittedThisStream
+        ? TEXT_STREAM_HANGING_PREFIX
+        : `${layout.contentPrefix}${aiTextAnchor()} `;
       this.paragraphStream = new TextStream({
         write: this.appendInline,
         columns: this.columns,
+        firstLinePrefix,
       });
+      this.anchorEmittedThisStream = true;
     }
     this.paragraphStream.feed(text);
   }
