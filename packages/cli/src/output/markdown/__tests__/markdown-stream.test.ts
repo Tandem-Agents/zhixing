@@ -12,37 +12,90 @@ const PREFIX = layout.contentPrefix;
 
 interface Capture {
   appendInline: string[];
+  /** segment lifecycle events (render 模式) */
+  segmentEvents: Array<{
+    kind: "begin" | "replace" | "commit" | "close";
+    content?: string;
+  }>;
+  /** segment.commit / segment.close 时把最终持有内容追加；strip / raw 走 appendInline */
   line: string[];
-  /** 时序合成视图——按调用顺序拼接 appendInline / line 的内容 */
+  /** 时序合成视图——含 appendInline 累计 + segment.commit/close 持有内容 */
   combined: string;
+  /** segment.replace 最新持有内容（流式中间态，用于 hold 视觉断言） */
+  segmentPending: string;
 }
 
-function makeStream(opts?: { columns?: number; mode?: "render" | "strip" | "raw" }) {
-  const out: Capture = { appendInline: [], line: [], combined: "" };
+function makeSpySegment(out: Capture) {
+  let currentContent = "";
+  let closed = false;
+  out.segmentEvents.push({ kind: "begin" });
+  return {
+    replace(t: string) {
+      if (closed) return;
+      currentContent = t;
+      out.segmentPending = t;
+      out.segmentEvents.push({ kind: "replace", content: t });
+    },
+    commit(t: string) {
+      if (closed) return;
+      currentContent = t;
+      closed = true;
+      out.segmentPending = "";
+      out.segmentEvents.push({ kind: "commit", content: t });
+      out.line.push(t);
+      out.combined += t;
+    },
+    close() {
+      if (closed) return;
+      closed = true;
+      out.segmentEvents.push({ kind: "close", content: currentContent });
+      if (currentContent.length > 0) {
+        out.line.push(currentContent);
+        out.combined += currentContent;
+      }
+      out.segmentPending = "";
+    },
+  };
+}
+
+function makeStream(opts?: {
+  columns?: number;
+  mode?: "render" | "strip" | "raw";
+  /** render 模式默认注入 segment factory；strip / raw 模式默认不注入；可显式覆盖 */
+  withSegment?: boolean;
+}) {
+  const out: Capture = {
+    appendInline: [],
+    segmentEvents: [],
+    line: [],
+    combined: "",
+    segmentPending: "",
+  };
+  const mode = opts?.mode ?? "render";
+  const withSegment = opts?.withSegment ?? mode === "render";
   const stream = new MarkdownStream({
     appendInline: (chunk) => {
       out.appendInline.push(chunk);
       out.combined += chunk;
     },
-    line: (text) => {
-      out.line.push(text);
-      out.combined += text;
-    },
+    beginReplaceableSegment: withSegment ? () => makeSpySegment(out) : undefined,
     columns: opts?.columns ?? 80,
-    mode: opts?.mode ?? "render",
+    mode,
   });
   return { stream, out };
 }
 
 describe("MarkdownStream · 段落（paragraph）字符流式", () => {
-  it("单段普通文字 chunk 流式 forward 给 TextStream（appendInline）", () => {
+  it("单段普通文字 chunk 流式——render 模式经 segment，闭合 commit 含内容", () => {
     const { stream, out } = makeStream();
     stream.feed("hello ");
     stream.feed("world");
     stream.end();
-    // paragraph 走 appendInline 路径（流式接续）
-    expect(out.appendInline.length).toBeGreaterThan(0);
+    // render 模式经 segment.replace / commit，闭合后 combined 含内容
     expect(stripAnsi(out.combined)).toContain("hello world");
+    // segment lifecycle：begin 1 + commit 1
+    expect(out.segmentEvents.filter((e) => e.kind === "begin")).toHaveLength(1);
+    expect(out.segmentEvents.filter((e) => e.kind === "commit")).toHaveLength(1);
   });
 
   it("end() 写末尾 \\n 让段独立落地", () => {
@@ -174,66 +227,62 @@ describe("MarkdownStream · 闭合 block 处理", () => {
 });
 
 describe("MarkdownStream · 流式跨 chunk 边界", () => {
-  it("不闭合的代码块 hold 直到 ``` 出现", () => {
+  it("不闭合代码块——流式期 segment 占位不暴露 ``` 字面，闭合后 commit 含内容", () => {
     const { stream, out } = makeStream();
     stream.feed("```\nconst x");
-    // 此时代码块未闭合——不应有任何 emit
-    expect(out.combined).toBe("");
+    // 流式期 segment 持有内容不暴露 fence 字面标记
+    expect(stripAnsi(out.segmentPending)).not.toContain("```");
     stream.feed(" = 1\n```\n\n");
+    stream.end();
     expect(stripAnsi(out.combined)).toContain("const x = 1");
   });
 
-  it("末尾未闭合 heading hold——闭合后 emit ANSI(保留 # 前缀)", () => {
+  it("末尾未闭合 heading hold——不暴露 # 字面，闭合后渲染保留 # 前缀", () => {
     const { stream, out } = makeStream();
     stream.feed("# Title");
-    // marked 在 chunk = "# Title" 时识别为 paragraph (text="# Title")—— paragraph
-    // 末尾 inline hold 路径覆盖（已不 emit 任何字符）。chunk 加 \n\n 才闭合为 heading
-    expect(out.combined).toBe("");
+    // 末位未闭合 heading hold——segment 持有内容不暴露 "# Title" 字面
+    expect(stripAnsi(out.segmentPending)).not.toContain("# Title");
     stream.feed("\n\n");
-    expect(stripAnsi(out.combined)).toContain("Title");
-    // 行业事实标准: hash 前缀保留(dim 着色, 见 heading 渲染规则)
-    expect(stripAnsi(out.combined)).toContain("# Title");
     stream.end();
+    const stripped = stripAnsi(out.combined);
+    expect(stripped).toContain("Title");
+    // 行业事实标准: hash 前缀保留(dim 着色)
+    expect(stripped).toContain("# Title");
   });
 
-  it("末尾未闭合 list hold（默认无 segment factory）——闭合后才 ANSI emit", () => {
+  it("末尾未闭合 list——闭合后渲染 · 中点 marker，不暴露 - 字面", () => {
     const { stream, out } = makeStream();
     stream.feed("- item1\n- item2");
-    // 默认无 segment factory —— hold 不 emit
-    expect(out.combined).toBe("");
-    // 闭合：双 \n 让 list 不再末尾
     stream.feed("\n\nfoo");
+    stream.end();
     const stripped = stripAnsi(out.combined);
     expect(stripped).toContain("· item1");
     expect(stripped).toContain("· item2");
     expect(stripped).not.toContain("- item1");
-    stream.end();
   });
 
-  it("末尾未闭合 blockquote hold——闭合后 ANSI emit", () => {
+  it("末尾未闭合 blockquote hold——闭合后渲染，不暴露 > 字面", () => {
     const { stream, out } = makeStream();
     stream.feed("> quoted text");
-    expect(out.combined).toBe("");
+    expect(stripAnsi(out.segmentPending)).not.toContain("> quoted");
     stream.feed("\n\nfoo");
+    stream.end();
     const stripped = stripAnsi(out.combined);
     expect(stripped).toContain("quoted text");
     expect(stripped).not.toContain("> quoted");
-    stream.end();
   });
 
-  it("paragraph 跨 chunk —— 末尾未闭合 hold（含 text）、闭合后整段 ANSI emit", () => {
+  it("paragraph 跨 chunk —— 末位未闭合 inline hold、闭合后整段 ANSI emit", () => {
     const { stream, out } = makeStream();
     stream.feed("Hello ");
-    // 末尾未闭合 paragraph hold——即使是纯 text 也 hold（避免后续 inline 起首
-    // 字符与 ANSI 渲染冲突）
-    expect(out.combined).toBe("");
+    // 末位未闭合 paragraph 仅 1 个 text inline → hold（跳过末位）→ segment 持有空
+    expect(stripAnsi(out.segmentPending)).not.toContain("Hello");
 
     stream.feed("world.");
-    // 仍未闭合（无 \n\n）—— 仍 hold
-    expect(out.combined).toBe("");
+    expect(stripAnsi(out.segmentPending)).not.toContain("world.");
 
     stream.feed("\n\n");
-    // 闭合后整段 emit
+    stream.end();
     expect(stripAnsi(out.combined)).toContain("Hello world.");
   });
 });
@@ -666,32 +715,29 @@ describe("MarkdownStream · paragraph inline ANSI 渲染", () => {
     expect(out.combined).toContain(chalk.bold("bold"));
   });
 
-  it("跨 chunk 纯文本 paragraph —— 末尾未闭合 hold、闭合后整段 emit（与字面 forward 不同）", () => {
+  it("跨 chunk 纯文本 paragraph —— 末位未闭合 hold、闭合后整段 emit", () => {
     const { stream, out } = makeStream();
     stream.feed("Hello ");
-    // 末尾未闭合 paragraph hold——付出"末尾段不流式"的代价换"闭合后 inline ANSI 正确"
-    expect(out.combined).toBe("");
+    expect(stripAnsi(out.segmentPending)).not.toContain("Hello");
     stream.feed("world\n\n");
-    expect(stripAnsi(out.combined)).toContain("Hello world");
     stream.end();
+    expect(stripAnsi(out.combined)).toContain("Hello world");
   });
 
-  it("中段闭合 + 末尾未闭合 —— 闭合段立即 ANSI、末尾段 hold 直到闭合", () => {
+  it("中段闭合 + 末位未闭合 —— 闭合段渲染 ANSI、末位段 hold 直到闭合", () => {
     const { stream, out } = makeStream();
     stream.feed("first **bold** done\n\n");
-    // 第一段闭合——立即 ANSI emit
-    const stripped1 = stripAnsi(out.combined);
-    expect(stripped1).toContain("first bold done");
-    expect(stripped1).not.toContain("**");
-    expect(out.combined).toContain(chalk.bold("bold"));
+    // 第一段闭合——segment.replace 含 ANSI bold（流式期持有内容可见）
+    const pending1 = stripAnsi(out.segmentPending);
+    expect(pending1).toContain("first bold done");
+    expect(pending1).not.toContain("**");
+    expect(out.segmentPending).toContain(chalk.bold("bold"));
 
-    // 起首第二段未闭合——内容 hold（仅 \n\n 段落分隔字符可能在 space token 处理时
-    // forward 给 paragraph 流，但段实际文字不 emit）
-    const beforeFeed = out.combined.length;
+    // 起首第二段未闭合——内容 hold（segment 持有内容不含第二段文字）
     stream.feed("second start");
-    expect(stripAnsi(out.combined.slice(beforeFeed))).not.toContain("second start");
+    expect(stripAnsi(out.segmentPending)).not.toContain("second start");
 
-    // 第二段闭合——一次性 emit
+    // 第二段闭合——commit 一次性含全部
     stream.feed(" ok\n\n");
     stream.end();
     expect(stripAnsi(out.combined)).toContain("second start ok");
@@ -744,29 +790,60 @@ interface SegmentEvent {
 function makeStreamWithSegment(opts?: {
   columns?: number;
   mode?: "render" | "strip" | "raw";
+  withSegment?: boolean;
 }) {
-  const out: Capture = { appendInline: [], line: [], combined: "" };
+  const out: Capture = {
+    appendInline: [],
+    segmentEvents: [],
+    line: [],
+    combined: "",
+    segmentPending: "",
+  };
   const segments: SegmentEvent[][] = [];
+  const mode = opts?.mode ?? "render";
+  const withSegment = opts?.withSegment ?? mode === "render";
   const stream = new MarkdownStream({
     appendInline: (chunk) => {
       out.appendInline.push(chunk);
       out.combined += chunk;
     },
-    line: (text) => {
-      out.line.push(text);
-      out.combined += text;
-    },
     columns: opts?.columns ?? 80,
-    mode: opts?.mode ?? "render",
-    beginReplaceableSegment: () => {
-      const events: SegmentEvent[] = [{ kind: "begin" }];
-      segments.push(events);
-      return {
-        replace: (text) => events.push({ kind: "replace", text }),
-        commit: (text) => events.push({ kind: "commit", text }),
-        close: () => events.push({ kind: "close" }),
-      };
-    },
+    mode,
+    beginReplaceableSegment: withSegment
+      ? () => {
+          const events: SegmentEvent[] = [{ kind: "begin" }];
+          segments.push(events);
+          let currentContent = "";
+          let closed = false;
+          return {
+            replace: (text) => {
+              if (closed) return;
+              currentContent = text;
+              out.segmentPending = text;
+              events.push({ kind: "replace", text });
+            },
+            commit: (text) => {
+              if (closed) return;
+              currentContent = text;
+              closed = true;
+              out.segmentPending = "";
+              events.push({ kind: "commit", text });
+              out.line.push(text);
+              out.combined += text;
+            },
+            close: () => {
+              if (closed) return;
+              closed = true;
+              events.push({ kind: "close", text: currentContent });
+              if (currentContent.length > 0) {
+                out.line.push(currentContent);
+                out.combined += currentContent;
+              }
+              out.segmentPending = "";
+            },
+          };
+        }
+      : undefined,
   });
   return { stream, out, segments };
 }
@@ -778,38 +855,33 @@ describe("MarkdownStream · code block 双态渲染", () => {
     stream.feed(" 1\nconst y = 2\n```\n\n");
     stream.end();
 
+    // 一段 markdown 一个 segment
     expect(segments).toHaveLength(1);
     const events = segments[0]!;
-    // 必含 begin → ≥1 次 replace（流式）→ commit
     expect(events[0]!.kind).toBe("begin");
     const replaceCount = events.filter((e) => e.kind === "replace").length;
     const commitCount = events.filter((e) => e.kind === "commit").length;
     expect(replaceCount).toBeGreaterThanOrEqual(1);
     expect(commitCount).toBe(1);
-    // 流式期 replace 的内容是 dim（无 highlight 颜色），最后 commit 内容含
-    // typescript 关键字色（cli-highlight + 自定义 theme）
-    const lastReplace = events.filter((e) => e.kind === "replace").at(-1)!;
-    expect(lastReplace.text).toContain("\x1b[2m"); // dim
+    // 流式期至少一次 replace 是 dim 占位（code 未闭合时 formatStreamingCode）
+    const replaces = events.filter((e) => e.kind === "replace");
+    expect(replaces.some((e) => e.text!.includes("\x1b[2m"))).toBe(true);
+    // commit 内容含代码 + 多色 SGR（cli-highlight + 自定义 theme，非纯 dim）
     const commit = events.find((e) => e.kind === "commit")!;
-    expect(commit.text).toContain("const"); // 内容
-    expect(commit.text).toMatch(/\x1b\[\d+m/); // 含 SGR
-    // commit 不仅是 dim——含其他颜色 SGR
-    const commitAnsi = (commit.text!.match(/\x1b\[\d+m/g) ?? []);
-    const uniqueParams = new Set(commitAnsi);
-    expect(uniqueParams.size).toBeGreaterThan(1);
-    // 双态期 line 路径不被调用（segment 替代 line emit）
-    expect(out.line.filter((t) => t.includes("const")).length).toBe(0);
+    expect(commit.text).toContain("const");
+    const commitAnsi = commit.text!.match(/\x1b\[\d+m/g) ?? [];
+    expect(new Set(commitAnsi).size).toBeGreaterThan(1);
   });
 
-  it("indented code（无 lang）退化 hold——不开 segment、走 line 路径", () => {
+  it("indented code（无 lang）—— render 模式整段 segment，dim 占位 + 内容完整", () => {
     const { stream, segments, out } = makeStreamWithSegment();
-    // 4 空格缩进的 indented code
     stream.feed("paragraph above\n\n    indented code line 1\n    indented code line 2\n\nparagraph below\n\n");
     stream.end();
-    // 不应开 segment——marked 把 indented 识别为 code 但 lang 是 undefined
-    expect(segments).toHaveLength(0);
-    // 走 line 路径
-    expect(out.line.some((t) => t.includes("indented code"))).toBe(true);
+    // render 模式整段一个 segment
+    expect(segments).toHaveLength(1);
+    expect(stripAnsi(out.combined)).toContain("indented code line 1");
+    expect(stripAnsi(out.combined)).toContain("paragraph above");
+    expect(stripAnsi(out.combined)).toContain("paragraph below");
   });
 
   it("无 lang 的 fenced code 退化 hold——避免无差异语法着色", () => {
@@ -831,26 +903,16 @@ describe("MarkdownStream · code block 双态渲染", () => {
     }
   });
 
-  it("StdoutWriter 场景：未注入 beginReplaceableSegment → 退化 hold", () => {
-    // 不传 beginReplaceableSegment 字段，等同 StdoutWriter 模式
-    const out: Capture = { appendInline: [], line: [], combined: "" };
+  it("render 模式未注入 segment factory → fail-fast 抛错（不 silent 退化）", () => {
     const stream = new MarkdownStream({
-      appendInline: (chunk) => {
-        out.appendInline.push(chunk);
-        out.combined += chunk;
-      },
-      line: (text) => {
-        out.line.push(text);
-        out.combined += text;
-      },
+      appendInline: () => {},
       columns: 80,
       mode: "render",
-      // beginReplaceableSegment 未注入
+      // beginReplaceableSegment 未注入——render 模式核心依赖缺失
     });
-    stream.feed("```typescript\nconst x = 1\n```\n\n");
-    stream.end();
-    // 应走 hold 路径——line 被调用 + line 内容含 highlight
-    expect(out.line.some((t) => t.includes("const"))).toBe(true);
+    expect(() => stream.feed("```typescript\nconst x = 1\n```\n\n")).toThrow(
+      /requires beginReplaceableSegment/,
+    );
   });
 
   it("strip 模式不启用双态——code 走 hold + line（即使 fenced + lang）", () => {
@@ -882,21 +944,23 @@ describe("MarkdownStream · code block 双态渲染", () => {
     expect(events.some((e) => e.kind === "commit")).toBe(true);
   });
 
-  it("多个连续 fenced code block 各自 begin + commit（跨 chunk 流式）", () => {
-    const { stream, segments } = makeStreamWithSegment();
-    // 拆 chunk 让 fenced 跨 chunk—— segment 仅在流式中间态时有意义
+  it("多个连续 fenced code block —— 一段 markdown 一 segment，commit 含全部代码", () => {
+    const { stream, segments, out } = makeStreamWithSegment();
     stream.feed("```typescript\n");
     stream.feed("const x = 1\n");
     stream.feed("```\n\n```python\n");
     stream.feed("print('y')\n");
     stream.feed("```\n\n");
     stream.end();
-    expect(segments).toHaveLength(2);
-    expect(segments[0]!.some((e) => e.kind === "commit")).toBe(true);
-    expect(segments[1]!.some((e) => e.kind === "commit")).toBe(true);
+    // 一段 markdown（整 turn 连续 text）一个 segment
+    expect(segments).toHaveLength(1);
+    const commit = segments[0]!.find((e) => e.kind === "commit");
+    const stripped = stripAnsi(commit?.text ?? "");
+    expect(stripped).toContain("const x = 1");
+    expect(stripped).toContain("print('y')");
   });
 
-  it("paragraph → fenced code → paragraph：paragraph 流先关 + segment begin 顺序对", () => {
+  it("paragraph → fenced code → paragraph：单 segment 内全部内容完整", () => {
     const { stream, segments, out } = makeStreamWithSegment();
     stream.feed("hello\n\n");
     stream.feed("```typescript\n");
@@ -907,19 +971,16 @@ describe("MarkdownStream · code block 双态渲染", () => {
     expect(segments).toHaveLength(1);
     expect(stripAnsi(out.combined)).toContain("hello");
     expect(stripAnsi(out.combined)).toContain("world");
-    // commit 内容含代码
     const commit = segments[0]!.find((e) => e.kind === "commit");
     expect(stripAnsi(commit?.text ?? "")).toContain("const x = 1");
   });
 
-  it("单 chunk 完整闭合的 fenced code 走 hold（无中间态可流式）→ line 路径", () => {
+  it("单 chunk 完整闭合 fenced code —— render 模式仍经 segment，commit 含内容", () => {
     const { stream, segments, out } = makeStreamWithSegment();
-    // 整 chunk 含 ``` 闭合——marked 一次 lex 给 closed code token，
-    // 不进入 handleOpenBlock（末尾是 space），走 emitClosedBlock 的 line 路径
     stream.feed("```typescript\nconst x = 1\n```\n\n");
     stream.end();
-    expect(segments).toHaveLength(0);
-    expect(out.line.some((t) => t.includes("const"))).toBe(true);
+    expect(segments).toHaveLength(1);
+    expect(stripAnsi(out.combined)).toContain("const x = 1");
   });
 
   it("流式期多次 replace 反映代码累积——每次 chunk 一次 replace", () => {
@@ -962,8 +1023,8 @@ describe("MarkdownStream · list 流式（ReplaceableSegment 复用）", () => {
     expect(stripped).toContain("· item 1");
     expect(stripped).toContain("· item 2");
     expect(stripped).toContain("· item 3");
-    // 双态期 line 路径不被调用（segment 替代）
-    expect(out.line.filter((t) => stripAnsi(t).includes("· item")).length).toBe(0);
+    // 一段 markdown 一个 segment（render 模式不走独立 line 路径）
+    expect(segments).toHaveLength(1);
   });
 
   it("流式期多次 replace 反映 items 累积——末次 replace 与 commit 共同覆盖全部 items", () => {
@@ -988,35 +1049,24 @@ describe("MarkdownStream · list 流式（ReplaceableSegment 复用）", () => {
     expect(stripAnsi(commit?.text ?? "")).toContain("· c");
   });
 
-  it("单 chunk 完整闭合的 list 走 hold（无中间态）→ line 路径", () => {
+  it("单 chunk 完整闭合 list —— render 模式仍经 segment，commit 含 · 中点 marker", () => {
     const { stream, segments, out } = makeStreamWithSegment();
     stream.feed("- a\n- b\n\n");
     stream.end();
-    // 整 chunk 给完整 list + space —— marked 一次 lex 给 closed list token，
-    // 不进入 handleOpenBlock（末尾是 space），走 line 路径
-    expect(segments).toHaveLength(0);
-    expect(out.line.some((t) => stripAnsi(t).includes("· a"))).toBe(true);
+    expect(segments).toHaveLength(1);
+    expect(stripAnsi(out.combined)).toContain("· a");
+    expect(stripAnsi(out.combined)).toContain("· b");
   });
 
-  it("StdoutWriter 场景未注入 segment factory → list 退化 hold", () => {
-    const out: Capture = { appendInline: [], line: [], combined: "" };
+  it("render 模式未注入 segment factory + list → fail-fast 抛错", () => {
     const stream = new MarkdownStream({
-      appendInline: (chunk) => {
-        out.appendInline.push(chunk);
-        out.combined += chunk;
-      },
-      line: (text) => {
-        out.line.push(text);
-        out.combined += text;
-      },
+      appendInline: () => {},
       columns: 80,
       mode: "render",
     });
-    stream.feed("- a\n");
-    stream.feed("- b\n\n");
-    stream.end();
-    // hold 路径：line 含 ANSI list
-    expect(out.line.some((t) => stripAnsi(t).includes("· a"))).toBe(true);
+    expect(() => stream.feed("- a\n")).toThrow(
+      /requires beginReplaceableSegment/,
+    );
   });
 
   it("strip 模式不启用 list 双态——走 hold + line", () => {
@@ -1159,5 +1209,248 @@ describe("MarkdownStream · table（hold 等闭合 + 整段 ANSI emit）", () =>
     stream.end();
     // raw 模式整段字面 forward + 末尾 \n
     expect(out.combined).toBe(raw + "\n");
+  });
+});
+
+// ─── REPRODUCER: 嵌套 list + heading + hr 多 block 场景乱序 ───
+// 实际 LLM 输出片段(transcript T4 第 67-89 行,用户截图渲染乱序的位置)。
+// 锁 markdown-stream 状态机在含嵌套 list 的复杂 markdown 下的 emit 顺序。
+describe("REPRODUCER · 嵌套 list 触发乱序", () => {
+  const FIXTURE = "### 五、网页抓取\n\n- 抓取指定 URL 的 HTML 内容\n- 两种模式：\n  - **带 prompt** — 由辅助模型提取\n  - **不带 prompt** — 返回完整 Markdown 原文\n- 预授权白名单\n- **我不会自己编造 URL**\n\n---\n\n### 六、子代理并行调研\n\n- 一次性派出最多 3 个子代理\n- 适用场景：\n  - 对比多个技术方案\n  - 多角度代码审查\n  - 大规模资料收集\n\n子代理返回结果后我负责整合汇报。\n\n---\n";
+
+  it("一次性 feed: 章节顺序保持 + 嵌套 list 内容正确出现一次", () => {
+    const { stream, out } = makeStream();
+    stream.feed(FIXTURE);
+    stream.end();
+    const stripped = stripAnsi(out.combined);
+    // 五在前,六在后
+    const idxFive = stripped.indexOf("五、网页抓取");
+    const idxSix = stripped.indexOf("六、子代理并行调研");
+    expect(idxFive).toBeGreaterThan(-1);
+    expect(idxSix).toBeGreaterThan(-1);
+    expect(idxFive).toBeLessThan(idxSix);
+    // 第六章嵌套 list 内容应在第六章标题之后
+    const idxNestedSix = stripped.indexOf("对比多个技术方案");
+    expect(idxNestedSix).toBeGreaterThan(idxSix);
+    // 第五章嵌套 list 内容应在第六章标题之前
+    const idxNestedFive = stripped.indexOf("带 prompt");
+    expect(idxNestedFive).toBeGreaterThan(idxFive);
+    expect(idxNestedFive).toBeLessThan(idxSix);
+    // 末段不应跑到第六章标题之前
+    const idxFinal = stripped.indexOf("子代理返回结果后");
+    expect(idxFinal).toBeGreaterThan(idxNestedSix);
+  });
+
+  function feedByChunks(stream: MarkdownStream, text: string, chunkSize: number): void {
+    for (let i = 0; i < text.length; i += chunkSize) {
+      stream.feed(text.slice(i, i + chunkSize));
+    }
+  }
+
+  function assertOrder(combined: string, label: string): void {
+    const stripped = stripAnsi(combined);
+    const idxFive = stripped.indexOf("五、网页抓取");
+    const idxSix = stripped.indexOf("六、子代理并行调研");
+    const idxNestedFive = stripped.indexOf("带 prompt");
+    const idxNestedSix = stripped.indexOf("对比多个技术方案");
+    const idxFinal = stripped.indexOf("子代理返回结果后");
+    expect(idxFive, `[${label}] 五标题缺失`).toBeGreaterThan(-1);
+    expect(idxSix, `[${label}] 六标题缺失`).toBeGreaterThan(-1);
+    expect(idxNestedFive, `[${label}] 五嵌套 list 缺失`).toBeGreaterThan(-1);
+    expect(idxNestedSix, `[${label}] 六嵌套 list 缺失`).toBeGreaterThan(-1);
+    expect(idxFinal, `[${label}] 末段缺失`).toBeGreaterThan(-1);
+    expect(idxFive, `[${label}] 五标题应在 五嵌套之前`).toBeLessThan(idxNestedFive);
+    expect(idxNestedFive, `[${label}] 五嵌套应在 六标题之前`).toBeLessThan(idxSix);
+    expect(idxSix, `[${label}] 六标题应在 六嵌套之前`).toBeLessThan(idxNestedSix);
+    expect(idxNestedSix, `[${label}] 六嵌套应在 末段之前`).toBeLessThan(idxFinal);
+  }
+
+  for (const chunkSize of [1, 3, 5, 10, 20, 50, 100]) {
+    it(`chunk 化 feed (chunkSize=${chunkSize}): 章节 + 嵌套 list 顺序保持`, () => {
+      const { stream, out } = makeStream();
+      feedByChunks(stream, FIXTURE, chunkSize);
+      stream.end();
+      assertOrder(out.combined, `chunkSize=${chunkSize}`);
+    });
+  }
+
+  // 诊断输出: 给失败 case 一个完整 dump 看 emit 到底缺什么
+  it("DIAGNOSTIC chunkSize=10 完整 dump", () => {
+    const { stream, out } = makeStream();
+    feedByChunks(stream, FIXTURE, 10);
+    stream.end();
+    const stripped = stripAnsi(out.combined);
+    // eslint-disable-next-line no-console
+    console.log("=== chunkSize=10 OUTPUT ===\n" + stripped + "\n=== END ===");
+    // 此测试始终通过(只 dump 不断言),用于跑测试时看 console
+    expect(stripped.length).toBeGreaterThan(0);
+  });
+});
+
+// 重设计核心契约专项：行数单调性（ScrollRegion.replaceSegment 硬约束承接）、
+// ◆ 锚定位、renderFullMarkdown 纯函数等价、paragraph 续行 hanging 4。这些不变量
+// 缺测试会让未来重构静默回归。
+describe("MarkdownStream · 重设计核心契约", () => {
+  function feedByChunk(fixture: string, chunkSize: number) {
+    const { stream, segments } = makeStreamWithSegment();
+    for (let i = 0; i < fixture.length; i += chunkSize) {
+      stream.feed(fixture.slice(i, i + chunkSize));
+    }
+    stream.end();
+    return segments[0]!;
+  }
+
+  describe("行数单调性（render 主路径硬不变量）", () => {
+    const fixtures: Array<{ name: string; md: string }> = [
+      {
+        name: "典型 markdown（paragraph + heading + hr）",
+        md: "# 标题\n\n第一段内容。\n\n---\n\n第二段内容结尾。\n\n",
+      },
+      {
+        name: "嵌套 list（token 振荡场景）",
+        md: "- 顶层一\n- 两种模式：\n  - 带 prompt 子项\n  - 不带 prompt 子项\n- 顶层二\n\n",
+      },
+      {
+        name: "paragraph 末位 inline 闭合切换",
+        md: "前缀文字 **加粗内容** 后缀文字结束。\n\n",
+      },
+      {
+        name: "code block 流式 → 闭合切换",
+        md: "```typescript\nconst x = 1\nconst y = 2\n```\n\n收尾段落。\n\n",
+      },
+      {
+        name: "混合（heading + nested list + code + paragraph）",
+        md: "## 章节\n\n- 列表项\n  - 嵌套项\n\n```js\nfoo()\n```\n\n正文段落。\n\n",
+      },
+    ];
+
+    for (const { name, md } of fixtures) {
+      for (const cs of [1, 3, 5, 10, 50]) {
+        it(`${name} · chunk=${cs} 输出行数单调非减`, () => {
+          const events = feedByChunk(md, cs);
+          const widths = events
+            .filter((e) => e.kind === "replace" || e.kind === "commit")
+            .map((e) => (e.text ?? "").split("\n").length);
+          for (let i = 1; i < widths.length; i++) {
+            expect(widths[i]!).toBeGreaterThanOrEqual(widths[i - 1]!);
+          }
+        });
+      }
+    }
+  });
+
+  describe("◆ 锚定位", () => {
+    it("buffer 起首是 paragraph → 渲染含 ◆", () => {
+      const { stream, out } = makeStream();
+      stream.feed("一段普通文字。\n\n");
+      stream.end();
+      expect(stripAnsi(out.combined)).toContain("◆");
+    });
+
+    it("buffer 起首是 heading（无 paragraph）→ 渲染不含 ◆", () => {
+      const { stream, out } = makeStream();
+      stream.feed("# 仅标题\n\n");
+      stream.end();
+      expect(stripAnsi(out.combined)).not.toContain("◆");
+    });
+
+    it("先 heading 再 paragraph → ◆ 出现在 paragraph 起首，全程仅 1 个", () => {
+      const { stream, out } = makeStream();
+      stream.feed("# 标题\n\n正文段落内容。\n\n");
+      stream.end();
+      const stripped = stripAnsi(out.combined);
+      expect((stripped.match(/◆/g) ?? []).length).toBe(1);
+      // ◆ 在标题之后、正文之前
+      expect(stripped.indexOf("◆")).toBeGreaterThan(stripped.indexOf("标题"));
+      expect(stripped.indexOf("◆")).toBeLessThan(stripped.indexOf("正文"));
+    });
+
+    it("多段 paragraph → 仅首段含 ◆，后续段回到内容基准列（无 ◆ 无额外缩进）", () => {
+      const { stream, out } = makeStream();
+      stream.feed("第一段。\n\n第二段。\n\n第三段。\n\n");
+      stream.end();
+      const stripped = stripAnsi(out.combined);
+      expect((stripped.match(/◆/g) ?? []).length).toBe(1);
+      expect(stripped.indexOf("◆")).toBeLessThan(stripped.indexOf("第一段"));
+      // 后续段起首 = contentPrefix（列 2），内容紧跟，非 hanging 4 凭空缩进
+      const lines = stripped.split("\n");
+      const p2 = lines.find((l) => l.includes("第二段"))!;
+      const p3 = lines.find((l) => l.includes("第三段"))!;
+      expect(p2.startsWith(`${PREFIX}第二段`)).toBe(true);
+      expect(p3.startsWith(`${PREFIX}第三段`)).toBe(true);
+    });
+  });
+
+  describe("多 block 混排左对齐（heading / list / 后续 paragraph 同列）", () => {
+    it("heading 之后的正文 paragraph 与 heading marker 同列（contentPrefix），不凭空缩进", () => {
+      const { stream, out } = makeStream();
+      stream.feed("首段引言。\n\n");
+      stream.feed("## 文件与代码\n\n");
+      stream.feed("我可以直接操作你的工作区文件。\n\n");
+      stream.feed("- 列表项一\n- 列表项二\n\n");
+      stream.feed("这意味着我可以帮你重构代码。\n\n");
+      stream.end();
+      const lines = stripAnsi(out.combined)
+        .split("\n")
+        .filter((l) => l.trim().length > 0);
+      const heading = lines.find((l) => l.includes("文件与代码"))!;
+      const listItem = lines.find((l) => l.includes("列表项一"))!;
+      const para1 = lines.find((l) => l.includes("我可以直接操作"))!;
+      const para2 = lines.find((l) => l.includes("这意味着"))!;
+      // heading marker `#` 在列 2（contentPrefix 之后）
+      expect(heading.startsWith(`${PREFIX}#`)).toBe(true);
+      // list marker `·` 在列 2
+      expect(listItem.startsWith(`${PREFIX}·`)).toBe(true);
+      // 后续 paragraph 内容也在列 2（与 heading/list marker 左边缘对齐）——
+      // 不再是凭空 hanging 4 缩进
+      expect(para1.startsWith(`${PREFIX}我可以直接操作`)).toBe(true);
+      expect(para2.startsWith(`${PREFIX}这意味着`)).toBe(true);
+    });
+  });
+
+  describe("renderFullMarkdown 纯函数等价", () => {
+    const md = "# 标题\n\n段落 **加粗** 文字。\n\n- 项一\n- 项二\n\n```js\nx()\n```\n\n结尾。\n\n";
+
+    it("分多次 feed（不同 chunkSize）vs 一次 feed → 最终 commit ANSI 完全一致", () => {
+      const oneShot = feedByChunk(md, md.length);
+      const oneCommit = oneShot.find((e) => e.kind === "commit")?.text ?? "";
+      for (const cs of [1, 2, 7, 13, 30]) {
+        const events = feedByChunk(md, cs);
+        const commit = events.find((e) => e.kind === "commit")?.text ?? "";
+        expect(commit).toBe(oneCommit);
+      }
+    });
+  });
+
+  describe("paragraph 续行 hanging 4（视觉契约）", () => {
+    it("长 paragraph wrap → 续行起首 4 空格（与 ◆ 锚后内容对齐），不退化列 2", () => {
+      const { stream, out } = makeStream({ columns: 40 });
+      stream.feed("a".repeat(120) + "\n\n");
+      stream.end();
+      const lines = stripAnsi(out.combined)
+        .split("\n")
+        .filter((l) => l.trim().length > 0);
+      expect(lines.length).toBeGreaterThan(1);
+      // 首行：contentPrefix(2) + ◆ + space = 4 列后是内容
+      expect(lines[0]!.startsWith(`${PREFIX}◆ `)).toBe(true);
+      // 续行：hanging 4 空格后直接内容（非列 2）
+      for (let i = 1; i < lines.length; i++) {
+        expect(lines[i]!.startsWith("    ")).toBe(true);
+        expect(lines[i]![4]).not.toBe(" ");
+      }
+    });
+
+    it("softbreak（单 \n）续行也 hanging 4", () => {
+      const { stream, out } = makeStream({ columns: 80 });
+      stream.feed("第一行内容\n第二行内容\n\n");
+      stream.end();
+      const lines = stripAnsi(out.combined)
+        .split("\n")
+        .filter((l) => l.trim().length > 0);
+      expect(lines.length).toBe(2);
+      expect(lines[0]!.startsWith(`${PREFIX}◆ `)).toBe(true);
+      expect(lines[1]!.startsWith("    ")).toBe(true);
+      expect(lines[1]![4]).not.toBe(" ");
+    });
   });
 });

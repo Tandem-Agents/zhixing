@@ -386,13 +386,13 @@ describe("createOutputRenderer · 段间编排（coordinator + ensureSegmentBrea
     renderer.stop();
     // 必须有至少一个 seg.commit（关闭旧 batch）
     expect(writer.events.some((e) => e.kind === "seg.commit")).toBe(true);
-    // commit 必须发生在 text_delta 引发的 ensureSegmentBreak 之前
+    // 旧 batch commit 后，markdown segment 才 begin（释放 segment 防嵌套：
+    // render 模式 markdown 经独立 segment，不再走 appendInline）
     const commitIdx = writer.events.findIndex((e) => e.kind === "seg.commit");
-    // 后续才出现 paragraph 内容 emit
-    const firstAppendIdx = writer.events.findIndex(
-      (e) => e.kind === "appendInline",
+    const mdBeginIdx = writer.events.findIndex(
+      (e, i) => i > commitIdx && e.kind === "beginReplaceableSegment",
     );
-    expect(firstAppendIdx).toBeGreaterThan(commitIdx);
+    expect(mdBeginIdx).toBeGreaterThan(commitIdx);
   });
 
   it("turn_complete 触发 closeBatch（commit segment）", () => {
@@ -644,5 +644,53 @@ describe("createOutputRenderer · thinking rolling tail", () => {
     if (appendEvents[0]?.kind === "appendInline") {
       expect(stripAnsi(appendEvents[0].text)).toBe("降级显示");
     }
+  });
+});
+
+// runOnce / pipe / CI 集成路径：createStdoutWriter 无 beginReplaceableSegment。
+// render 模式硬依赖 segment factory，缺失时由 output-renderer 显式降级 strip
+// （markdown 纯文本路径），而非 MarkdownStream 内抛错。单测覆盖此 caller 集成
+// 缺口（makeCaptureWriter 总注入 segment，无法暴露此路径）。
+describe("createOutputRenderer · 无 segment 能力 caller（StdoutWriter 集成）", () => {
+  it("render 模式 + 无 segment factory → 降级 strip，markdown 经 appendInline 输出不抛错", () => {
+    const sink: string[] = [];
+    const writer: CliWriter = {
+      line: (t) => sink.push(t),
+      appendInline: (t) => sink.push(t),
+      notify: (t) => sink.push(t),
+      ensureSegmentBreak: () => {},
+      // 无 beginReplaceableSegment —— 等同 createStdoutWriter（runOnce / pipe / CI）
+    };
+    const renderer = createOutputRenderer({ writer, markdownMode: "render" });
+    expect(() => {
+      renderer.handleEvent({
+        type: "text_delta",
+        text: "## 能力介绍\n\n正文段落内容。\n\n- 列表项一\n- 列表项二\n\n",
+      });
+      renderer.stop();
+    }).not.toThrow();
+    const out = sink.join("");
+    // 内容完整（strip 保 block 结构）
+    expect(out).toContain("能力介绍");
+    expect(out).toContain("正文段落内容");
+    expect(out).toContain("列表项一");
+    expect(out).toContain("列表项二");
+  });
+
+  it("raw 模式 + 无 segment factory → 原文转发不抛错", () => {
+    const sink: string[] = [];
+    const writer: CliWriter = {
+      line: (t) => sink.push(t),
+      appendInline: (t) => sink.push(t),
+      notify: (t) => sink.push(t),
+      ensureSegmentBreak: () => {},
+    };
+    const renderer = createOutputRenderer({ writer, markdownMode: "raw" });
+    expect(() => {
+      renderer.handleEvent({ type: "text_delta", text: "## 原文\n\n**保留**\n\n" });
+      renderer.stop();
+    }).not.toThrow();
+    expect(sink.join("")).toContain("## 原文");
+    expect(sink.join("")).toContain("**保留**");
   });
 });

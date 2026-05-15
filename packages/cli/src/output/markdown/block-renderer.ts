@@ -237,14 +237,62 @@ function renderCode(t: Tokens.Code, ctx: RenderContext): string {
   return `\n${lines.map((l) => indentAndWrapLine(l, indent, ctx.columns)).join("\n")}\n`;
 }
 
-function renderParagraph(t: Tokens.Paragraph, ctx: RenderContext): string {
-  const indent = lineIndent(ctx.indentLevel);
-  const inline = renderInlines(t.tokens ?? [], ctx.mode);
+/**
+ * Paragraph 续行 prefix 与首行 prefix 控制。caller 不传时退化为 `lineIndent(ctx.indentLevel)`
+ * 单 prefix 模式（list_item 嵌套 paragraph 等场景）；显式传入时 caller 控制首行（含 ◆
+ * 锚或 hanging 4 空格）+ 续行（hanging 4 空格与首行同宽对齐），承接 markdown 流式
+ * 渲染主路径的视觉契约。
+ */
+export interface ParagraphPrefix {
+  readonly firstLinePrefix: string;
+  readonly continuationPrefix: string;
+}
+
+/**
+ * Paragraph → 多行 ANSI（含起首 / 末尾 \n）。
+ *
+ * `paragraphPrefix` 缺省 → 走 `lineIndent(ctx.indentLevel)` 单 prefix 路径（用于
+ * list_item 内嵌 paragraph 等结构化嵌套场景）；显式传入 → 首行 / 续行分离。
+ *
+ * `isOpen=true` 表示 paragraph 仍为流式末位 token —— 跳过末位 inline 不渲染，
+ * 保留 hold 契约（如 `**bo` 期间末位未闭合 strong inline 不输出字面 `**bo`，
+ * 闭合后整段切到 ANSI bold）。inline-renderer 不感知 hold，逻辑内嵌于本函数循环层。
+ */
+export function renderParagraph(
+  t: Tokens.Paragraph,
+  ctx: RenderContext,
+  paragraphPrefix?: ParagraphPrefix,
+  isOpen: boolean = false,
+): string {
+  const inlineTokens = t.tokens ?? [];
+  const renderedTokens = isOpen ? inlineTokens.slice(0, -1) : inlineTokens;
+  if (renderedTokens.length === 0) return "";
+
+  const inline = renderInlines(renderedTokens, ctx.mode);
   if (inline === "") return "";
-  // inline 可能含 softbreak \n —— splitAnsiLines 让每行 SGR 自平衡，再逐行
-  // indent + wrap 让长 inline 行（含 ANSI 染色）软折到 columns - 1
+
+  // inline 可能含 softbreak \n —— splitAnsiLines 让每行 SGR 自平衡，逐行 wrap
   const lines = splitAnsiLines(inline);
-  return `\n${lines.map((l) => indentAndWrapLine(l, indent, ctx.columns)).join("\n")}\n`;
+
+  if (paragraphPrefix === undefined) {
+    const indent = lineIndent(ctx.indentLevel);
+    return `\n${lines.map((l) => indentAndWrapLine(l, indent, ctx.columns)).join("\n")}\n`;
+  }
+
+  const continuationWidth = stringWidth(paragraphPrefix.continuationPrefix);
+  const budget = Math.max(1, ctx.columns - 1 - continuationWidth);
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const prefix =
+      i === 0
+        ? paragraphPrefix.firstLinePrefix
+        : paragraphPrefix.continuationPrefix;
+    const { output } = wrapAnsiLine(lines[i]!, budget, {
+      continuationPrefix: paragraphPrefix.continuationPrefix,
+    });
+    out.push(prefix + output);
+  }
+  return `\n${out.join("\n")}\n`;
 }
 
 function renderList(t: Tokens.List, ctx: RenderContext): string {

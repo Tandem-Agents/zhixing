@@ -84,7 +84,11 @@ function renderThinkingTail(
   scrolledOutBefore: boolean,
 ): { text: string; scrolledOut: boolean } {
   const prefixWidth = stringWidth(THINKING_PREFIX);
-  const wrapWidth = Math.max(1, columns - prefixWidth);
+  // ScrollRegion 行宽硬合约：newText 按 \n 切分后每行显示宽度 ≤ columns - 1
+  //（违反则终端物理软折行，ScrollRegion 单维行号 erase 失算 → 残留重复）。
+  // 行宽 = prefixWidth + body，故 body 上限 = columns - 1 - prefixWidth
+  //（与 block-renderer indentAndWrapLine 同口径，留 1 列防御边界）。
+  const wrapWidth = Math.max(1, columns - 1 - prefixWidth);
 
   // 按 \n 硬切 + wrapToWidth 软换行 + **过滤空行**:
   //
@@ -231,15 +235,22 @@ export function createOutputRenderer(
           batchCoordinator.closeBatch();
           writer.ensureSegmentBreak();
 
-          // MarkdownStream 协调 paragraph 字符流式（appendInline）+ 闭合 block 独立段
-          // （line）+ fenced code block 双态渲染（流式期 dim 占位、闭合时 highlight 替换，
-          // 仅 ScreenWriter 提供 segment factory 时启用；StdoutWriter 自动退化为 hold）
+          // MarkdownStream 单一入口分发三档模式：
+          //   render —— "buffer + 单 segment + 整段 re-render" 主路径，需 segment factory
+          //   strip  —— 增量 emit 状态机 + appendInline 字面 forward（保留 block 结构无染色）
+          //   raw    —— appendInline 原文转发不解析
           const segFactory = writer.beginReplaceableSegment;
+          // 无 segment 能力的 writer（StdoutWriter：runOnce / pipe / CI）下 render
+          // 降级 strip —— strip 是 markdown 的纯文本路径（保 block 结构、走
+          // appendInline、不依赖 segment），正是无 chrome 环境应走的形态。raw
+          // 本身不碰 segment，不受影响。render 模式硬依赖 segment factory，缺失
+          // 时由 caller 在此显式分发（而非 MarkdownStream 内 silent 退化）。
+          const effectiveMode: MarkdownMode =
+            markdownMode === "render" && !segFactory ? "strip" : markdownMode;
           mdStream = new MarkdownStream({
             appendInline: (chunk) => writer.appendInline(chunk),
-            line: (text) => writer.line(text),
             columns: getColumns(),
-            mode: markdownMode,
+            mode: effectiveMode,
             beginReplaceableSegment: segFactory
               ? () => segFactory.call(writer)
               : undefined,
