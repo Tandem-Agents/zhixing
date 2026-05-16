@@ -207,21 +207,39 @@ export class ScrollRegion {
   }
 
   /**
-   * 启动序列——attach input region。
+   * 同步 viewport 几何（仅内部 viewportRows/viewportCols 字段，**不 emit**、
+   * 不动 DECSTBM / region）——resize internal-only 路径用。
    *
-   * chromeHeight：input + status 总高度（caller 自算）；0 = 暂无 chrome（welcome
-   * 期）。chromeBytes：chrome 区域字节序列，已包含 cursor positioning + 内容；
-   * caller 应保证只走 cursor positioning 切行、永不 emit \n（chrome 在 DECSTBM
-   * 区外，\n 会触发整屏滚动破坏 chrome 永驻）。
-   *
-   * 启动后：DECSTBM 设为 [1, scrollBottom]、cursor 跳 (1, 1) 作为 region 顶起点。
-   * 状态字段全归零（regionTailRow=1, regionTailCol=1, regionFilledRows=0,
-   * segment* = null, committedLogicalRows=0）。
+   * 缺它的根因：resize 逐帧不重画（internal-only），但 ScrollRegion 的
+   * viewportRows 原本只在已删的 handleResize 里更新；不同步会让后续 setChromeHeight
+   * （setStatusBar / refreshChrome 路径）与 rebuild（onResizeEnd 整屏重建）
+   * 用**构造时旧 viewport** 算 scrollBottom，DECSTBM 边界与新终端尺寸错位。
+   * 本方法让 ScrollRegion 与 ScreenController 的 viewport 认知始终一致。
    */
-  attachInput(chromeHeight: number, chromeBytes: string): void {
-    if (this.attached) {
-      throw new Error("ScrollRegion: attachInput called while already attached");
-    }
+  setViewport(viewportRows: number, viewportCols: number): void {
+    this.viewportRows = viewportRows;
+    this.viewportCols = viewportCols;
+  }
+
+  /**
+   * 建立 region 布局序列——`attachInput`（首次启动）与 `rebuild`（运行时
+   * 整屏重建）共享的同构核心。收敛二者原本逐字重复的 emit 序列（单一来源，
+   * 杜绝漂移）。
+   *
+   * 前提（caller 保证）：viewport 已被清空——attachInput 由 firstAttach 前置
+   * `ANSI_FIRSTATTACH_SEQUENCE`；rebuild 由 ScreenController 前置同序列。故
+   * `resetRegionState`（region 视空、cursor 回顶 (1,1)）与"已清空"现实一致。
+   *
+   * 序列：chromeHeight 校验 → 设 chromeHeight/scrollBottom → resetRegionState
+   * → activeHandle=null → emit DECSTBM(1,scrollBottom) + cursor(1,1) +
+   * [chrome>0: chromeBytes + cursor(1,1)] → writeOut。
+   *
+   * **不动 attached / suspended** —— 这是两个 caller 的唯一差异，故留在各自
+   * caller：attachInput 设 attached=true/suspended=false；rebuild 要求已
+   * attached、生命周期标志不变。chromeBytes：caller 已含 cursor positioning +
+   * 内容，且永不 emit \n（chrome 在 DECSTBM 区外，\n 会破坏 chrome 永驻）。
+   */
+  private establishLayout(chromeHeight: number, chromeBytes: string): void {
     if (chromeHeight < 0) {
       throw new Error(`ScrollRegion: chromeHeight must be ≥ 0, got ${chromeHeight}`);
     }
@@ -234,8 +252,6 @@ export class ScrollRegion {
     this.scrollBottom = this.viewportRows - chromeHeight;
     this.resetRegionState();
     this.activeHandle = null;
-    this.attached = true;
-    this.suspended = false;
 
     let out = this.decstbmSeq(1, this.scrollBottom);
     out += this.cursorToSeq(1, 1);
@@ -244,6 +260,45 @@ export class ScrollRegion {
       out += this.cursorToSeq(1, 1);
     }
     this.writeOut(out);
+  }
+
+  /**
+   * 启动序列——attach input region。
+   *
+   * chromeHeight：input + status 总高度（caller 自算）；0 = 暂无 chrome（welcome
+   * 期）。chromeBytes：chrome 区域字节序列。
+   *
+   * 启动后：DECSTBM 设为 [1, scrollBottom]、cursor 跳 (1, 1) 作为 region 顶起点，
+   * 状态字段全归零（见 establishLayout），attached=true / suspended=false。
+   */
+  attachInput(chromeHeight: number, chromeBytes: string): void {
+    if (this.attached) {
+      throw new Error("ScrollRegion: attachInput called while already attached");
+    }
+    this.establishLayout(chromeHeight, chromeBytes);
+    this.attached = true;
+    this.suspended = false;
+  }
+
+  /**
+   * 运行时整屏重建——resize 结束后 caller（ScreenController）已清空 viewport，
+   * 本方法复用 `establishLayout` 复位 region 几何 + 重设 DECSTBM + 重画 chrome。
+   *
+   * 与 `attachInput` **对称**：那个"首次启动清屏后建"，本方法"运行中清屏后
+   * 重建"——共享 `establishLayout`，唯一差异是 attachInput 设 attached/suspended、
+   * 本方法要求已 attached（生命周期标志不变）。
+   *
+   * 前提（caller 保证）：① 已 attached（运行中重建，非首次）；② caller 已
+   * 清空 viewport。本方法**不自己清屏**——清屏时机/范围由 ScreenController
+   * 掌控（resize-end 与 firstAttach 现均用 `ANSI_FIRSTATTACH_SEQUENCE` 全清含
+   * scrollback，单一来源；差别仅 region 内容来源：firstAttach 来自 pre-attach
+   * 缓冲，rebuild 来自 caller 的 regionContent 回调）。
+   */
+  rebuild(chromeHeight: number, chromeBytes: string): void {
+    if (!this.attached) {
+      throw new Error("ScrollRegion: rebuild called while not attached");
+    }
+    this.establishLayout(chromeHeight, chromeBytes);
   }
 
   /**
@@ -612,10 +667,13 @@ export class ScrollRegion {
       this.scrollBottom = scrollBottom_new;
       this.chromeHeight = newHeight;
       let out = this.decstbmSeq(1, scrollBottom_new);
-      for (let r = scrollBottom_old + 1; r <= scrollBottom_old + N_diff; r++) {
-        out += this.cursorToSeq(r, 1);
-        out += this.clearLineSeq();
-      }
+      // 擦原 chrome 顶部变 region 的 N_diff 行残留——经 eraseChromeBand 单一
+      // 收口。setChromeHeight 不改 columns 无 reflow，区间
+      // [scrollBottom_old+1, scrollBottom_old+N_diff] 语义自洽。
+      out += this.eraseChromeBand(
+        scrollBottom_old + 1,
+        scrollBottom_old + N_diff,
+      );
       if (chromeBytes.length > 0) out += chromeBytes;
       out += this.cursorToSeq(this.regionTailRow, this.regionTailCol);
       this.writeOut(out);
@@ -630,27 +688,52 @@ export class ScrollRegion {
   }
 
   /**
-   * 把 region 几何 + segment 状态字段全部归零——所有生命周期方法（attach /
-   * detach / suspend / resume / handleResize / shutdown）reset 的单一收口，
-   * 避免各路径手抄字段列表带来的不一致风险。
+   * 把 region 几何 + segment 状态字段全部归零——"屏幕将被真实清空"语义的
+   * region 重置策略。
+   *
+   * 调用方（均配套真实清屏，故"region 视空、cursor 回顶"与现实一致）：
+   * attachInput / rebuild（经 establishLayout，前置 `ANSI_FIRSTATTACH_SEQUENCE`）
+   * / detachInput / shutdown（撤 DECSTBM + `\x1b[2J`）。suspend / resume 不调
+   * 本方法（靠 alt-screen 终端原子保管内容，见 suspend() docstring）。
+   *
+   * 锚点语义：region 视为空 → cursor 回顶 (1,1)、filled=0、trailingBlankRows=1
+   * （region 顶等价"上方无限空"，让首次 ensureScrollLeadingBlank no-op）。
    *
    * 不动：
    *   - viewport / chromeHeight / scrollBottom（几何由调用方按场景设值）
    *   - attached / suspended（生命周期标记由调用方自管）
-   *   - activeHandle（失活语义由调用方按场景决定——handleResize 须保活让
-   *     caller 持有的跨 chunk handle 在下一次 replace 自动恢复）
+   *   - activeHandle（失活语义由调用方按场景决定）
    */
   private resetRegionState(): void {
     this.regionTailRow = 1;
     this.regionTailCol = 1;
     this.regionFilledRows = 0;
-    // 视觉行级 tail state 重置 —— 与 region 几何状态同生命周期：
-    // attach/detach/suspend/resume/shutdown/handleResize 全经此重置。
-    // 初始 trailingBlankRows=1 让 region 顶端的 ensureScrollLeadingBlank no-op
-    // （region 顶等价于"上方无限空"，无需补段间空行）。
     this.currentRowHasVisible = false;
     this.trailingBlankRows = 1;
     this.clearSegmentState();
+  }
+
+  /**
+   * 擦除 chrome 区指定行带 [fromRow, toRow]——逐行绝对寻址 cursor + clearLine，
+   * 返回字节串（不直接 writeOut，让 caller 拼进单次 writeOut 保帧原子性）。
+   *
+   * 唯一调用方：`setChromeHeight` chrome 变矮分支——chrome 变矮后原 chrome
+   * 顶部 N_diff 行变为 region，需清除那几行的旧 chrome 显示残留（chromeBytes
+   * 每行自带的 `\x1b[2K` 只覆盖新 chrome 将写的行，救不了变成 region 的旧行号）。
+   *
+   * 安全前提（caller 保证）：[fromRow, toRow] 必须确实是"旧 chrome 残留行"。
+   * setChromeHeight 不改 columns、无终端 reflow，区间
+   * [scrollBottom_old+1, scrollBottom_old+N_diff] 语义自洽，不与 region 内容重叠。
+   *
+   * fromRow > toRow → 返回 ""（空带 no-op，支持 caller 无条件调用）。
+   */
+  private eraseChromeBand(fromRow: number, toRow: number): string {
+    let out = "";
+    for (let r = fromRow; r <= toRow; r++) {
+      out += this.cursorToSeq(r, 1);
+      out += this.clearLineSeq();
+    }
+    return out;
   }
 
   /**
@@ -782,67 +865,6 @@ export class ScrollRegion {
     }
     this.suspended = false;
     this.writeOut(this.decstbmSeq(1, this.scrollBottom));
-  }
-
-  /**
-   * 终端 viewport resize 处理——viewport 尺寸 + chrome 高度同步变化的统一入口。
-   *
-   * 协议参数（与 attachInput / setChromeHeight / resume 协议族对称——chromeHeight
-   * 始终是 caller 显式输入而非内部假设不变）：
-   *   - viewportRows / viewportCols：新 viewport 几何
-   *   - newChromeHeight：新 chrome 高度——caller 在 resize 触发时重算（input.renderLines()
-   *     可能因 columns 变化触发 reflow 而行数变化）；ScrollRegion 由此推导 scrollBottom
-   *     = viewportRows - newChromeHeight，与 caller 拼 chromeBytes 时用的 scrollBottom
-   *     完全一致，避免 DECSTBM 边界与 chrome 起手行错位
-   *   - chromeBytes：caller 用上述 scrollBottom 拼好的 chrome 字节序列
-   *
-   * 行为：
-   *   - 重设 DECSTBM 与 scrollBottom（基于 newChromeHeight）
-   *   - 重画 chrome
-   *   - 保留 active handle 活性（不强制 commit——caller 持有的 handle 在下一次
-   *     replace 时按"首次"路径在新 (regionTailRow, regionTailCol) 重起，避免本
-   *     turn 内容渲染丢失）
-   *   - segment 字段清 null（resize 后终端 reflow，viewport 位置不可控）；
-   *     committedLogicalRows 不变（已固化部分仍已固化）
-   *   - cursor 跳 (1, 1) 作为新基线
-   */
-  handleResize(
-    viewportRows: number,
-    viewportCols: number,
-    newChromeHeight: number,
-    chromeBytes: string,
-  ): void {
-    if (!this.attached) {
-      throw new Error("ScrollRegion: cannot resize when not attached");
-    }
-    if (newChromeHeight < 0) {
-      throw new Error(
-        `ScrollRegion: chromeHeight must be ≥ 0, got ${newChromeHeight}`,
-      );
-    }
-    if (newChromeHeight >= viewportRows) {
-      throw new Error(
-        `ScrollRegion: chromeHeight ${newChromeHeight} leaves no room for region in viewport ${viewportRows}`,
-      );
-    }
-
-    this.viewportRows = viewportRows;
-    this.viewportCols = viewportCols;
-    this.chromeHeight = newChromeHeight;
-    this.scrollBottom = viewportRows - newChromeHeight;
-    // committedLogicalRows 是 resize 期间唯一保留字段——已固化部分仍已固化、
-    // segment.replace 用 slice 跳过；其它 region / segment / handle 状态因终端
-    // reflow 后 viewport 位置不可控而失效
-    const savedCommitted = this.committedLogicalRows;
-    this.resetRegionState();
-    this.committedLogicalRows = savedCommitted;
-
-    let out = this.decstbmSeq(1, this.scrollBottom);
-    if (newChromeHeight > 0 && chromeBytes.length > 0) {
-      out += chromeBytes;
-    }
-    out += this.cursorToSeq(1, 1);
-    this.writeOut(out);
   }
 
   /**

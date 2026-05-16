@@ -961,31 +961,43 @@ export async function startRepl(options: ReplOptions): Promise<void> {
 
   // 启动告警先于 chrome——异常状态需立即吸引注意；无告警时返回空数组，
   // 视觉序列退化为"shell prompt → chrome"无空行干扰
-  const advisoryLines = renderStartupAdvisories({
-    workspaceDirStatus: session.runtime.workspaceDirStatus,
-    workspacePath: session.runtime.resolvedWorkspace.path,
-    workspaceSource: session.runtime.resolvedWorkspace.source,
-  });
-  for (const line of advisoryLines) cliWriter.line(line);
-  if (advisoryLines.length > 0) cliWriter.line("");
-
-  for (const line of renderHomeWelcome({
-    providerId: session.runtime.providerId,
-    model: session.runtime.model,
-    workspaceRoot: session.runtime.resolvedWorkspace.path ?? undefined,
-    resumedConversationName: resumedConversationName ?? undefined,
-  })) {
-    cliWriter.line(line);
-  }
-  cliWriter.line("");
+  // 初始 region 内容（启动告警 + 欢迎块）单一来源——启动时逐行写入 +
+  // resize-end 整屏重建复用同一生成逻辑，杜绝两处渲染漂移（架构债务）。
+  // 延迟求值：每次调用按当时 session 状态重新生成（resize-end 时仍准确）。
+  const initialRegionLines = (): string[] => {
+    const lines: string[] = [];
+    const adv = renderStartupAdvisories({
+      workspaceDirStatus: session.runtime.workspaceDirStatus,
+      workspacePath: session.runtime.resolvedWorkspace.path,
+      workspaceSource: session.runtime.resolvedWorkspace.source,
+    });
+    lines.push(...adv);
+    if (adv.length > 0) lines.push("");
+    lines.push(
+      ...renderHomeWelcome({
+        providerId: session.runtime.providerId,
+        model: session.runtime.model,
+        workspaceRoot: session.runtime.resolvedWorkspace.path ?? undefined,
+        resumedConversationName: resumedConversationName ?? undefined,
+      }),
+    );
+    lines.push("");
+    return lines;
+  };
+  for (const line of initialRegionLines()) cliWriter.line(line);
 
   // 启动时检测 stale 技能，温和提醒
   await checkStaleSkills(cliWriter);
 
+  // chrome 模式（capability.ok）下主输入走 InputController，rl 仅作退出生命
+  // 周期钩子，不需要 terminal 能力。terminal:true 会让 readline 自监听 resize
+  // 并 _refreshLine 重画（裸 > prompt）绕过 ScreenController → 冲突碎裂（已由
+  // 排除实验证实）。legacy 模式（capability 探测失败）走 rl.question，需要
+  // terminal 行编辑能力，保持 true。
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
-    terminal: true,
+    terminal: !capability.ok,
   });
 
   // 挂载终端确认渲染器到会话 broker。渲染器生命周期绑到 REPL 退出：rl.on("close") 里 detach。
@@ -1246,6 +1258,31 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       registry: pasteRegistry,
     });
     inputController.start();
+
+    // resize 结束后整屏重建（A 方案）：拖拽过程中 ScreenController 不画
+    // （internal-only，无残留），resize 防抖稳定后一次性 \x1b[2J 清屏（保留
+    // scrollback）→ 重画欢迎块（initialRegionLines 单一来源）+ 自适应 chrome。
+    // 代价：屏内未滚出对话视觉刷新（早滚出的在 scrollback 可滚看、全量在磁盘，
+    // 已与用户对齐）。renderScreen 为 null（legacy 无 chrome）则不订阅。
+    if (renderScreen) {
+      // resize-end 重建内容 = 纯净 initialRegionLines()（启动共享的单一来源，
+      // 不污染）+ 一行 resize 提示（仅 resize 场景，在消费点装饰）。提示用
+      // layout.contentPrefix 左缩进对齐全局 + dim 低调，不抢欢迎块；紧跟
+      // initialRegionLines 末尾自带的空行之后，欢迎块 box 与提示天然分隔。
+      // 已知边界：极窄终端下该行显示宽度可能 > columns-1 被终端软 wrap（region
+      // 内容、无下游精细依赖，下次 resize 又整屏重建，影响可忽略，不额外 clamp
+      // 以免过度设计）。
+      const resizeNotice = `${layout.contentPrefix}${chalk.dim(
+        "⟳ 已适配新窗口 · 历史对话未丢失（磁盘已存），可继续正常使用",
+      )}`;
+      renderScreen.onResizeEnd(() => {
+        renderScreen?.rebuildAfterResize(() =>
+          [...initialRegionLines(), resizeNotice]
+            .map((l) => `${l}\n`)
+            .join(""),
+        );
+      });
+    }
   }
 
   // close 监听器 + 主循环的协作信号：

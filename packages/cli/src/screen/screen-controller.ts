@@ -298,6 +298,35 @@ export interface ScreenController {
   onSuspendChange(listener: (suspended: boolean) => void): () => void;
 
   /**
+   * 订阅 resize **结束**事件——返回 unsubscribe。
+   *
+   * 防抖语义：用户拖拽窗口时 stdout `resize` 高频连续触发；本接口把一串连续
+   * resize 事件**合并**，最后一个事件后静默 RESIZE_END_DEBOUNCE_MS 内无新
+   * 事件，才判定"resize 结束"，回调收到最终稳定的 viewport 尺寸。
+   *
+   * 与逐帧 resize 处理**正交**：本接口是"稳定尺寸后做一次性工作"的钩子，
+   * 不改变 resize 进行中的逐帧行为。多段拖拽（拖-停-拖-停）每段各触发一次，
+   * 互不混淆。订阅时不立即触发。
+   */
+  onResizeEnd(
+    listener: (size: { rows: number; cols: number }) => void,
+  ): () => void;
+
+  /**
+   * resize 结束后整屏重建——配合 onResizeEnd 使用。一个 enqueue task 内：
+   * 全清（`\x1b[2J\x1b[3J\x1b[1;1H`，含终端 scrollback——清除 resize 期间终端
+   * reflow 堆积的欢迎块/旧输入区残片；历史数据在磁盘 transcript 不受影响）→
+   * 复位 region 几何 + 重设 DECSTBM +
+   * 重画 chrome（按最新尺寸自适应）→ 经 regionContent() 重写 region 初始内容
+   * （欢迎块 / 启动告警，由 caller 提供——ScreenController 不持有业务内容）→
+   * cursor 复位。序列对齐 firstAttach（chrome-then-region）。
+   *
+   * regionContent：返回完整 region 初始内容字符串（含换行）。延迟到重建时
+   * 才调用，让 caller 用最新 session 状态重新生成。
+   */
+  rebuildAfterResize(regionContent: () => string): void;
+
+  /**
    * 设置告别块文本 —— dispose 时在退出清屏序列之后 emit 到 main buffer，
    * 作为 zhixing session 的临别 UI（典型形态：品牌锚 + 对话 ID）。
    *
@@ -474,6 +503,14 @@ class ScreenControllerImpl implements ScreenController {
 
   /** 解绑 stdout resize listener——dispose 时调用清理 */
   private detachResize: (() => void) | null = null;
+
+  /** resize 结束防抖静默期（ms）——大于拖拽中相邻 resize 事件间隔 */
+  private static readonly RESIZE_END_DEBOUNCE_MS = 200;
+  private readonly resizeEndListeners = new Set<
+    (size: { rows: number; cols: number }) => void
+  >();
+  /** resize 防抖 timer——连续 resize 合并；null=当前无未决 burst；dispose 清理 */
+  private resizeEndTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(options: ScreenControllerOptions) {
     this.capability = options.capability;
@@ -718,6 +755,45 @@ class ScreenControllerImpl implements ScreenController {
     };
   }
 
+  onResizeEnd(
+    listener: (size: { rows: number; cols: number }) => void,
+  ): () => void {
+    this.resizeEndListeners.add(listener);
+    return () => {
+      this.resizeEndListeners.delete(listener);
+    };
+  }
+
+  rebuildAfterResize(regionContent: () => string): void {
+    if (this.disposed) return;
+    this.enqueue(() => {
+      if (!this.scrollRegion.state.attached) return;
+      // 全清（含 scrollback）——复用 ANSI_FIRSTATTACH_SEQUENCE（= \x1b[2J\x1b[3J
+      // \x1b[1;1H），与 firstAttach **同一序列、单一来源**（消除清屏字面量重复）。
+      // 带 \x1b[3J 清终端 scrollback 的理由：resize 期间终端对欢迎块/旧输入区
+      // 做 reflow 产生的视觉残片，会随 viewport 滚动被推进 scrollback，多次
+      // resize 累积成垃圾——保留 scrollback = 保留这些垃圾，故全清。历史数据
+      // 不受影响（磁盘 transcript 完整）。hideCursor 对齐 chrome 模式硬件光标
+      // 隐藏不变量（同 firstAttach）。
+      this.stdout.write(ANSI_FIRSTATTACH_SEQUENCE);
+      this.stdout.write(ANSI.hideCursor);
+      // computeChromeHeight 内部调 input.renderLines()——InputController 按
+      // 最新 stdout.columns 重算输入框，chrome 自适应新尺寸。buildChromeBytes
+      // 用 this.viewportRows（resize listener 已 internal-only 更新为最新）。
+      const chromeHeight = this.computeChromeHeight();
+      const chromeBytes = this.buildChromeBytes(chromeHeight);
+      this.scrollRegion.rebuild(chromeHeight, chromeBytes);
+      // region 初始内容（欢迎块/告警）由 caller 重新生成后写入——对齐
+      // firstAttach 的 chrome-then-region 序列（chrome 在 DECSTBM 外固定行，
+      // region 内容从 region 顶 cursor(1,1) 往下写）。
+      const content = regionContent();
+      if (content.length > 0) {
+        this.scrollRegion.appendInline(content);
+      }
+      this.repaintInputCursor();
+    });
+  }
+
   setFarewell(text: string | null): void {
     // 同步设值，不入队 —— 详见接口 docstring 与 farewell 字段注释。
     // disposed 后 short-circuit：与 enqueue 路径的 setter（setStatusBar /
@@ -731,6 +807,10 @@ class ScreenControllerImpl implements ScreenController {
     if (this.disposed) return;
     this.detachResize?.();
     this.detachResize = null;
+    if (this.resizeEndTimer !== null) {
+      clearTimeout(this.resizeEndTimer);
+      this.resizeEndTimer = null;
+    }
     // 同步捕获 suspend 状态：dispose 后续会强制 `suspendedFlag = false` 让 flush
     // 消费 cleanup 任务，但 cleanup 任务需要知道"是否曾在 suspend 中"以决定
     // 是否 emit exitAltScreen 防御切回 main buffer。
@@ -798,6 +878,7 @@ class ScreenControllerImpl implements ScreenController {
     this.suspendedFlag = false;
     this.flush();
     this.suspendListeners.clear();
+    this.resizeEndListeners.clear();
   }
 
   /** 首次 attach 启动序列：清 scrollback + 清 viewport + DECSTBM + chrome 字节 + flush 缓冲 + cursor 定位 */
@@ -1014,26 +1095,47 @@ class ScreenControllerImpl implements ScreenController {
           (this.stdout as NodeJS.WriteStream).rows ?? this.viewportRows;
         const newCols =
           (this.stdout as NodeJS.WriteStream).columns ?? this.viewportCols;
-        // chromeHeight 显式贯穿 caller 端推导链——同一值拼 chromeBytes 与传给
-        // ScrollRegion.handleResize 推导 scrollBottom，确保 DECSTBM 边界与
-        // chrome 起手行用同一公式 (viewportRows - chromeHeight)
+        // resize 逐帧不重画（internal-only）——ScreenController 对 stdout
+        // **零写入**，输入区交终端 reflow（与欢迎块同等待遇），不制造程序
+        // 碎 box 残留；真正的整屏重建交 onResizeEnd 防抖稳定后做（rebuildAfterResize）。
+        // 仅同步 viewport 内部认知（纯内存，不写屏）：ScreenController **和**
+        // ScrollRegion 两处都更新——后者是 setChromeHeight / rebuild 算 scrollBottom
+        // 的真正依据，漏同步会用构造时旧 viewport 导致 DECSTBM 边界错位。
         this.viewportRows = newRows;
         this.viewportCols = newCols;
-        const chromeHeight = this.computeChromeHeight();
-        const chromeBytes = this.buildChromeBytes(chromeHeight);
-        this.scrollRegion.handleResize(
-          newRows,
-          newCols,
-          chromeHeight,
-          chromeBytes,
-        );
-        this.repaintInputCursor();
+        this.scrollRegion.setViewport(newRows, newCols);
       });
+      // 逐帧不重画之外，正交地推进 resize-end 防抖
+      this.scheduleResizeEnd();
     };
     stream.on("resize", listener);
     this.detachResize = () => {
       stream.off?.("resize", listener);
     };
+  }
+
+  /**
+   * resize 结束防抖调度——每个 resize 事件重置静默 timer；静默期满（期间无新
+   * resize）才判定 burst 结束，读最终稳定尺寸，通知 onResizeEnd 订阅者。
+   *
+   * 与逐帧不重画完全正交：本方法只调度延时通知，不触碰 ScrollRegion / chrome。
+   */
+  private scheduleResizeEnd(): void {
+    if (this.resizeEndTimer !== null) clearTimeout(this.resizeEndTimer);
+    this.resizeEndTimer = setTimeout(() => {
+      this.resizeEndTimer = null;
+      const rows =
+        (this.stdout as NodeJS.WriteStream).rows ?? this.viewportRows;
+      const cols =
+        (this.stdout as NodeJS.WriteStream).columns ?? this.viewportCols;
+      for (const l of this.resizeEndListeners) {
+        try {
+          l({ rows, cols });
+        } catch {
+          // 监听器异常不影响其它监听器与 ScreenController 自身
+        }
+      }
+    }, ScreenControllerImpl.RESIZE_END_DEBOUNCE_MS);
   }
 
   /** 同步通知所有 suspend 订阅者状态翻转——监听器异常 swallow 不传播 */

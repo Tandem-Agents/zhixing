@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   createScreenController,
   type InputRegion,
@@ -833,80 +833,29 @@ describe("ScreenController · onSuspendChange", () => {
   });
 });
 
-describe("ScreenController · resize 监听", () => {
-  it("emit resize 触发 ScrollRegion.handleResize", () => {
+describe("ScreenController · resize 监听（internal-only，重画交 onResizeEnd）", () => {
+  it("resize 逐帧零写屏——只更新内部 viewport + 调度 onResizeEnd 防抖", () => {
     const { out, sc } = makeHarness({ rows: 10 });
     sc.attachInput(makeRegion(["> input"]));
     out.buffer = "";
     out.rows = 20;
     out.columns = 100;
     out.emit("resize");
-    // handleResize 重设 DECSTBM 1..(rows-chromeHeight) = 1..19
-    expect(out.buffer).toContain("\x1b[1;19r");
+    // 旧逐帧重画路线已废弃（避免终端 reflow 残留累积）：resize 时
+    // ScreenController 对 stdout 零写入，重建交 onResizeEnd 防抖稳定后做。
+    expect(out.buffer).toBe("");
   });
 
-  it("resize 后 chrome 字节用新 scrollBottom 定位 cursor positioning（避免写错位置）", () => {
-    const { out, sc } = makeHarness({ rows: 10 });
-    sc.attachInput(makeRegion(["> input"]));
-    // 初始 chrome 在 row 10（scrollBottom=9, chrome 起手 row 10）
-    out.buffer = "";
-    out.rows = 30;
-    out.columns = 100;
-    out.emit("resize");
-    // 新 scrollBottom = 30 - 1 = 29，chrome 起手 row 30
-    // chromeBytes 内 cursor positioning 应该是 \x1b[30;1H 而非旧的 \x1b[10;1H
-    expect(out.buffer).toContain("\x1b[30;1H");
-    expect(out.buffer).not.toContain("\x1b[10;1H\x1b[2K> input");
-  });
-
-  it("resize 后 setStatusBar 用新 viewport 算 scrollBottom（chrome 协议持续正确）", () => {
+  it("resize 更新内部 viewport——后续 setStatusBar 用新尺寸算 scrollBottom", () => {
     const { out, sc } = makeHarness({ rows: 10 });
     sc.attachInput(makeRegion(["> input"]));
     out.rows = 30;
-    out.emit("resize");
+    out.emit("resize"); // internal-only：viewportRows 内部更新为 30
     out.buffer = "";
     sc.setStatusBar(["S"]);
     // 新 chrome = 1 status + 1 input = 2，新 scrollBottom = 30-2 = 28
-    // setChromeHeight 重设 DECSTBM 1..28
     expect(out.buffer).toContain("\x1b[1;28r");
-    // chrome 起手 row 29
     expect(out.buffer).toContain("\x1b[29;1H");
-  });
-
-  it("resize 时 input.renderLines() 因 columns 变化触发 reflow 行数变化——DECSTBM 与 chrome 起手行同步对齐", () => {
-    // Finding 1 端到端回归覆盖：caller 端 chromeHeight 与 ScrollRegion 内部
-    // chromeHeight 必须用同一值推导 scrollBottom，否则 chrome 第一行落到 region
-    // 末，下次写 region 推走 chrome（chrome 永驻协议失守）。
-    const out = new FakeStdout();
-    out.rows = 20;
-    out.columns = 80;
-    let dynamicLines: readonly string[] = ["> input"];
-    const region: InputRegion = {
-      renderLines: () => dynamicLines,
-      cursorPosition: () => ({ row: 0, col: 0 }),
-    };
-    const sc = createScreenController({
-      capability: makeCapability(20, 80),
-      stdout: out as unknown as NodeJS.WriteStream,
-    });
-    sc.attachInput(region);
-    // 初始 chromeHeight=1, scrollBottom=19
-
-    // 模拟 columns 80→40 导致 input box reflow 多 1 行
-    out.rows = 20;
-    out.columns = 40;
-    dynamicLines = ["> input head", "  cont"];
-    out.buffer = "";
-    out.emit("resize");
-
-    // 新 chromeHeight=2, 新 scrollBottom = 20 - 2 = 18
-    expect(out.buffer).toContain("\x1b[1;18r"); // DECSTBM 用新 chromeHeight
-    expect(out.buffer).toContain("\x1b[19;1H"); // chrome 起手 row = scrollBottom + 1 = 19
-    // 关键反向断言：旧 chromeHeight=1 算的 DECSTBM 必须不出现
-    expect(out.buffer).not.toContain("\x1b[1;19r");
-    // chrome 内容真实写出
-    expect(out.buffer).toContain("> input head");
-    expect(out.buffer).toContain("  cont");
   });
 
   it("dispose 解绑 resize listener——不再响应 emit", () => {
@@ -923,6 +872,144 @@ describe("ScreenController · resize 监听", () => {
     // 不 attach
     out.emit("resize");
     expect(out.buffer).toBe("");
+  });
+});
+
+describe("ScreenController · rebuildAfterResize（resize-end 整屏重建）", () => {
+  it("全清（含 scrollback）+ 重设 DECSTBM + 重画 chrome + 写 regionContent", () => {
+    const { out, sc } = makeHarness({ rows: 20 });
+    sc.attachInput(makeRegion(["> input"])); // chromeHeight=1, scrollBottom=19
+    out.buffer = "";
+    sc.rebuildAfterResize(() => "WELCOME-LINE\n");
+    // ANSI_FIRSTATTACH_SEQUENCE 全清（含 \x1b[3J 清终端 scrollback）
+    expect(out.buffer).toContain("\x1b[2J\x1b[3J\x1b[1;1H");
+    // 复位 + 重设 DECSTBM 到新 scrollBottom（rows20 - chromeHeight1 = 19）
+    expect(out.buffer).toContain("\x1b[1;19r");
+    // caller 提供的 region 内容写入
+    expect(out.buffer).toContain("WELCOME-LINE");
+  });
+
+  it("regionContent 延迟求值——传入时不调，重建时才调一次", () => {
+    const { out, sc } = makeHarness({ rows: 20 });
+    sc.attachInput(makeRegion(["> input"]));
+    let called = 0;
+    const content = (): string => {
+      called++;
+      return "X\n";
+    };
+    expect(called).toBe(0); // 传入时不求值
+    sc.rebuildAfterResize(content);
+    expect(called).toBe(1); // 重建时求值一次（用最新 session 状态）
+    expect(out.buffer).toContain("X");
+  });
+
+  it("disposed 后 rebuildAfterResize 不写屏", () => {
+    const { out, sc } = makeHarness({ rows: 20 });
+    sc.attachInput(makeRegion(["> input"]));
+    sc.dispose();
+    out.buffer = "";
+    sc.rebuildAfterResize(() => "Y\n");
+    expect(out.buffer).toBe("");
+  });
+
+  it("未 attached 时 rebuildAfterResize no-op（task 内 attached 检查）", () => {
+    const { out, sc } = makeHarness({ rows: 20 });
+    // 不 attachInput
+    out.buffer = "";
+    sc.rebuildAfterResize(() => "Z\n");
+    expect(out.buffer).toBe("");
+  });
+});
+
+describe("ScreenController · onResizeEnd 防抖接口", () => {
+  it("连续 resize 合并为一次 resize-end，回调收最终稳定尺寸", () => {
+    vi.useFakeTimers();
+    try {
+      const { out, sc } = makeHarness({ rows: 30, cols: 80 });
+      const calls: Array<{ rows: number; cols: number }> = [];
+      sc.onResizeEnd((s) => calls.push(s));
+
+      out.rows = 25;
+      out.columns = 70;
+      out.emit("resize");
+      vi.advanceTimersByTime(100); // < 200ms 静默期，不应触发
+      out.rows = 20;
+      out.columns = 60;
+      out.emit("resize");
+      vi.advanceTimersByTime(100);
+      out.rows = 40;
+      out.columns = 120;
+      out.emit("resize");
+
+      vi.advanceTimersByTime(199); // 仍未到静默期满
+      expect(calls).toEqual([]);
+
+      vi.advanceTimersByTime(1); // 200ms 静默期满 → 触发一次
+      expect(calls).toEqual([{ rows: 40, cols: 120 }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("多段拖拽（拖-停-拖-停）各触发一次，互不混淆", () => {
+    vi.useFakeTimers();
+    try {
+      const { out, sc } = makeHarness();
+      const calls: Array<{ rows: number; cols: number }> = [];
+      sc.onResizeEnd((s) => calls.push(s));
+
+      out.rows = 25;
+      out.columns = 70;
+      out.emit("resize");
+      out.rows = 22;
+      out.columns = 68;
+      out.emit("resize");
+      vi.advanceTimersByTime(200);
+      expect(calls).toEqual([{ rows: 22, cols: 68 }]);
+
+      out.rows = 50;
+      out.columns = 150;
+      out.emit("resize");
+      vi.advanceTimersByTime(200);
+      expect(calls).toEqual([
+        { rows: 22, cols: 68 },
+        { rows: 50, cols: 150 },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("unsubscribe 后不再收到 resize-end", () => {
+    vi.useFakeTimers();
+    try {
+      const { out, sc } = makeHarness();
+      const calls: Array<{ rows: number; cols: number }> = [];
+      const off = sc.onResizeEnd((s) => calls.push(s));
+      off();
+      out.rows = 20;
+      out.emit("resize");
+      vi.advanceTimersByTime(200);
+      expect(calls).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("dispose 清防抖 timer——未决 burst 不再触发，无泄漏", () => {
+    vi.useFakeTimers();
+    try {
+      const { out, sc } = makeHarness();
+      const calls: Array<{ rows: number; cols: number }> = [];
+      sc.onResizeEnd((s) => calls.push(s));
+      out.rows = 20;
+      out.emit("resize"); // 起一个未决 burst
+      sc.dispose();
+      vi.advanceTimersByTime(500);
+      expect(calls).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
