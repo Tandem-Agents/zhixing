@@ -42,12 +42,12 @@ describe("checkModel", () => {
     expect(missing.some((m) => m.path.endsWith(".apiKey"))).toBe(false);
   });
 
-  it("secondary 异 provider 且缺凭证 → 独立报", () => {
+  it("light 异 provider 且缺凭证 → 独立报", () => {
     const missing = checkModel(
       {
         llm: {
           main: { provider: "siliconflow", model: "Pro/M1" },
-          secondary: { provider: "anthropic", model: "claude-haiku" },
+          light: { provider: "anthropic", model: "claude-haiku" },
         },
       },
       { providers: { siliconflow: { apiKey: "sk-sf" } } },
@@ -56,12 +56,12 @@ describe("checkModel", () => {
     expect(missing[0]?.path).toBe("credentials.providers.anthropic.apiKey");
   });
 
-  it("secondary 同 provider 时复用 main 凭证（不重复报）", () => {
+  it("light 同 provider 时复用 main 凭证（不重复报）", () => {
     const missing = checkModel(
       {
         llm: {
           main: { provider: "siliconflow", model: "Pro/M1" },
-          secondary: { provider: "siliconflow", model: "Pro/M2" },
+          light: { provider: "siliconflow", model: "Pro/M2" },
         },
       },
       { providers: { siliconflow: { apiKey: "sk-sf" } } },
@@ -96,13 +96,13 @@ describe("checkModel", () => {
       {
         llm: {
           main: { provider: "siliconflow", model: "Pro/M1" },
-          secondary: { provider: "anthropic", model: "claude-haiku" },
+          light: { provider: "anthropic", model: "claude-haiku" },
         },
       },
       { providers: { siliconflow: { apiKey: "sk-sf" } } },
     );
     expect(missing).toHaveLength(1);
-    expect(missing[0]?.role).toBe("secondary");
+    expect(missing[0]?.role).toBe("light");
   });
 });
 

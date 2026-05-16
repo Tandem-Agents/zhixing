@@ -67,22 +67,22 @@ describe("readModelRole / writeModelRole", () => {
     expect(next.config.llm?.main).toEqual({ provider: "openai", model: "gpt-4o" });
   });
 
-  it("写 secondary 时若 main 不存在用占位空 main（保持 schema）", () => {
+  it("写 light 时若 main 不存在用占位空 main（保持 schema）", () => {
     const state = createInitialState({}, {});
-    const next = writeModelRole(state, "secondary", "openai", "gpt-4o-mini");
+    const next = writeModelRole(state, "light", "openai", "gpt-4o-mini");
     expect(next.config.llm?.main).toEqual({ provider: "", model: "" });
-    expect(next.config.llm?.secondary).toEqual({
+    expect(next.config.llm?.light).toEqual({
       provider: "openai",
       model: "gpt-4o-mini",
     });
   });
 
-  it("更新 main 不影响 secondary", () => {
+  it("更新 main 不影响 light", () => {
     const state = createInitialState(
       {
         llm: {
           main: { provider: "deepseek", model: "deepseek-chat" },
-          secondary: { provider: "openai", model: "gpt-4o-mini" },
+          light: { provider: "openai", model: "gpt-4o-mini" },
         },
       },
       {},
@@ -92,7 +92,7 @@ describe("readModelRole / writeModelRole", () => {
       provider: "anthropic",
       model: "claude-sonnet",
     });
-    expect(next.config.llm?.secondary).toEqual({
+    expect(next.config.llm?.light).toEqual({
       provider: "openai",
       model: "gpt-4o-mini",
     });

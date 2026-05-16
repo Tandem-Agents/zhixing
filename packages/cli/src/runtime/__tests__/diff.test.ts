@@ -152,11 +152,11 @@ describe("computeDiff", () => {
       expect(result.changedDomains).toEqual(["agent"]);
     });
 
-    it("secondary llm 变化 → agent-only changed", () => {
+    it("light llm 变化 → agent-only changed", () => {
       const newConfig: ZhixingConfig = {
         llm: {
           main: { provider: "siliconflow", model: "Qwen/Qwen3-32B" },
-          secondary: { provider: "openai", model: "gpt-4o-mini" },
+          light: { provider: "openai", model: "gpt-4o-mini" },
         },
       };
       const result = computeDiff(

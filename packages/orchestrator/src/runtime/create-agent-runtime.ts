@@ -552,7 +552,7 @@ export async function createAgentRuntime(
   // /clear 一并清空。
   const resettables: Resettable[] = [];
 
-  // Flush 用的 LLM 调用——绑定 secondary 角色。详见 compaction-llm.ts 的
+  // Flush 用的 LLM 调用——绑定 light 角色。详见 compaction-llm.ts 的
   // 设计注释（路由契约 + 单测覆盖）。
   const flushCallLLM = createCompactionFlush(roles);
 

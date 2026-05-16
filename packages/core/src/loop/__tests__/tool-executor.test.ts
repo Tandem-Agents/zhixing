@@ -5,7 +5,7 @@
  *   - 不传 llmRoles 时，工具收到的 ctx.llm 为 undefined（消费者必须处理 !ctx.llm）
  *   - 传 llmRoles 时，工具收到的就是 caller 传入的同一实例（不复制、不替换）
  *
- * 这层契约支撑后续 WebFetch distill / 子 agent / MCP digest 等需要 secondary 的工具
+ * 这层契约支撑后续 WebFetch distill / 子 agent / MCP digest 等需要 light/power 的工具
  * 能稳定从 ctx 拿到 roles，不被 tool-executor 的内部演化偷偷破坏。
  */
 
@@ -30,7 +30,7 @@ function makeStubRoles(): LLMRoles {
       // 测试不会触发 chat
     },
   };
-  return { main: stubRole, secondary: stubRole };
+  return { main: stubRole, light: stubRole, power: stubRole };
 }
 
 interface CapturedCtx {
@@ -111,7 +111,8 @@ describe("executeToolCalls · ctx.llm 注入契约", () => {
 
     expect(captured.ctx!.llm).toBe(roles);
     expect(captured.ctx!.llm!.main).toBe(roles.main);
-    expect(captured.ctx!.llm!.secondary).toBe(roles.secondary);
+    expect(captured.ctx!.llm!.light).toBe(roles.light);
+    expect(captured.ctx!.llm!.power).toBe(roles.power);
   });
 
   it("workingDirectory / abortSignal 同时透传，不被 llm 注入污染", async () => {

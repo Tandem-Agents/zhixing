@@ -1,9 +1,9 @@
 /**
  * compaction-llm 路由契约测试
  *
- * spec 承诺:上下文压缩 / I/O 边界净化的 LLM 调用走 secondary 角色,不消耗主对话
- * 成本(secondary-llm-capability.md)。本文件用 spy LLMRoles 反向验证:
- *   - secondary.chat 被调用一次
+ * spec 承诺:上下文压缩 / I/O 边界净化的 LLM 调用走 light 角色,不消耗主对话
+ * 成本(light-llm-capability.md)。本文件用 spy LLMRoles 反向验证:
+ *   - light.chat 被调用一次
  *   - main.chat 永远不被调用
  *   - text_delta 拼接正确
  *   - abortSignal 透传
@@ -60,36 +60,37 @@ function makeSpyRole(textChunks: string[]): SpyRole {
 
 function makeSpyRoles(opts: {
   mainChunks?: string[];
-  secondaryChunks?: string[];
-}): { roles: LLMRoles; mainChat: SpyRole["chat"]; secondaryChat: SpyRole["chat"] } {
+  lightChunks?: string[];
+}): { roles: LLMRoles; mainChat: SpyRole["chat"]; lightChat: SpyRole["chat"] } {
   const main = makeSpyRole(opts.mainChunks ?? ["MAIN"]);
-  const secondary = makeSpyRole(opts.secondaryChunks ?? ["SEC"]);
+  const light = makeSpyRole(opts.lightChunks ?? ["SEC"]);
   return {
-    roles: { main: main.role, secondary: secondary.role },
+    // power 走兜底（compaction 永不调用 power），复用 light spy 仅为满足 LLMRoles 三键
+    roles: { main: main.role, light: light.role, power: light.role },
     mainChat: main.chat,
-    secondaryChat: secondary.chat,
+    lightChat: light.chat,
   };
 }
 
 // ─── 测试 ───
 
 describe("createCompactionFlush · 路由契约", () => {
-  it("调用走 secondary，main 永不被调用", async () => {
-    const { roles, mainChat, secondaryChat } = makeSpyRoles({
-      secondaryChunks: ["compacted"],
+  it("调用走 light，main 永不被调用", async () => {
+    const { roles, mainChat, lightChat } = makeSpyRoles({
+      lightChunks: ["compacted"],
     });
     const flush = createCompactionFlush(roles);
 
     const result = await flush([userMessage("旧历史")]);
 
     expect(result).toBe("compacted");
-    expect(secondaryChat).toHaveBeenCalledTimes(1);
+    expect(lightChat).toHaveBeenCalledTimes(1);
     expect(mainChat).not.toHaveBeenCalled();
   });
 
   it("text_delta 多片拼接为完整字符串", async () => {
     const { roles } = makeSpyRoles({
-      secondaryChunks: ["第一段", "第二段", "第三段"],
+      lightChunks: ["第一段", "第二段", "第三段"],
     });
     const flush = createCompactionFlush(roles);
 
@@ -99,7 +100,7 @@ describe("createCompactionFlush · 路由契约", () => {
   });
 
   it("空响应回退为 \"[]\"——给 JSON parse 路径安全兜底", async () => {
-    const { roles } = makeSpyRoles({ secondaryChunks: [] });
+    const { roles } = makeSpyRoles({ lightChunks: [] });
     const flush = createCompactionFlush(roles);
 
     const result = await flush([userMessage("input")]);
@@ -107,31 +108,31 @@ describe("createCompactionFlush · 路由契约", () => {
     expect(result).toBe("[]");
   });
 
-  it("abortSignal 透传给 secondary.chat", async () => {
-    const { roles, secondaryChat } = makeSpyRoles({});
+  it("abortSignal 透传给 light.chat", async () => {
+    const { roles, lightChat } = makeSpyRoles({});
     const flush = createCompactionFlush(roles);
     const ac = new AbortController();
 
     await flush([userMessage("input")], { abortSignal: ac.signal });
 
-    const callArg = secondaryChat.mock.calls[0]![0] as Omit<ChatRequest, "model">;
+    const callArg = lightChat.mock.calls[0]![0] as Omit<ChatRequest, "model">;
     expect(callArg.abortSignal).toBe(ac.signal);
   });
 
   it("ChatRequest 不带 model 字段（由 LLMRole.chat 内部绑定）", async () => {
-    const { roles, secondaryChat } = makeSpyRoles({});
+    const { roles, lightChat } = makeSpyRoles({});
     const flush = createCompactionFlush(roles);
 
     await flush([userMessage("input")]);
 
-    const callArg = secondaryChat.mock.calls[0]![0] as Omit<ChatRequest, "model">;
+    const callArg = lightChat.mock.calls[0]![0] as Omit<ChatRequest, "model">;
     expect(callArg).not.toHaveProperty("model");
     expect(callArg.tools).toEqual([]);
     expect(callArg.messages).toHaveLength(1);
   });
 
   it("messages 原样透传，不做改写", async () => {
-    const { roles, secondaryChat } = makeSpyRoles({});
+    const { roles, lightChat } = makeSpyRoles({});
     const flush = createCompactionFlush(roles);
 
     const inputMsgs: Message[] = [
@@ -140,7 +141,7 @@ describe("createCompactionFlush · 路由契约", () => {
     ];
     await flush(inputMsgs);
 
-    const callArg = secondaryChat.mock.calls[0]![0] as Omit<ChatRequest, "model">;
+    const callArg = lightChat.mock.calls[0]![0] as Omit<ChatRequest, "model">;
     expect(callArg.messages).toBe(inputMsgs);
   });
 });

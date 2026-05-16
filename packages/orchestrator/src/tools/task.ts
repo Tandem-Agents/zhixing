@@ -61,7 +61,7 @@ export interface TaskToolEnv {
   provider: LLMProvider;
   /** 父 model id —— 子复用父模型,不支持单独 override */
   model: string;
-  /** 父 LLMRoles —— 子工具调 secondary 角色时透传 */
+  /** 父 LLMRoles —— 子工具调 light/power 角色时透传 */
   llmRoles: LLMRoles;
   /** 父 SecurityPipeline —— 权限规则 / boundary registry 跨 agent 共用 */
   securityPipeline: SecurityPipeline;

@@ -16,28 +16,27 @@ import type {
   SectionEntry,
   WorkingState,
 } from "../types.js";
+import { ROLE_SPECS } from "@zhixing/providers";
 import { readModelRole } from "../state.js";
 import { checkModel, type ModelIssue } from "../checks/model.js";
 
 export const modelSection: Section = {
   id: "model",
   title: "对话模型",
-  description: "主模型必填，辅助模型可选——预留给后续轻量子任务用，未配则沿用主模型",
+  description: "主模型必填；辅助角色（轻量 / 强力）可选，未配则沿用主模型",
   entries: (state) => {
     // 一次 audit，按 role 分发——避免 buildEntry 内重复遍历
     const allIssues = checkModel(state.config, state.credentials);
-    return [
-      buildEntry(state, "main", allIssues, {
-        label: "主模型",
-        missingStatusText: "待配置",
-        isOptional: false,
+    // 遍历 ROLE_SPECS（角色集单一事实源）生成入口——新增角色零改动。
+    // 标签后带中文括号说明（spec.parenZh：必填/轻量/更强等），让首次用户
+    // 一眼看懂每个角色干嘛。
+    return ROLE_SPECS.map((spec) =>
+      buildEntry(state, spec.id, allIssues, {
+        label: `${spec.labelZh}（${spec.parenZh}）`,
+        missingStatusText: spec.missingStatusZh,
+        isOptional: !spec.required,
       }),
-      buildEntry(state, "secondary", allIssues, {
-        label: "辅助模型",
-        missingStatusText: "未启用（默认沿用主模型）",
-        isOptional: true,
-      }),
-    ];
+    );
   },
 };
 

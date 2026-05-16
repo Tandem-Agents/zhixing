@@ -10,7 +10,7 @@
  * 编辑器自身不感知调用上下文。
  */
 
-import type { ZhixingConfig, ZhixingCredentials } from "@zhixing/providers";
+import type { RoleId, ZhixingConfig, ZhixingCredentials } from "@zhixing/providers";
 
 // ─── Section（用户视角的配置块） ───
 
@@ -40,7 +40,8 @@ export type PanelDescriptor =
   /** L3 (messaging)：channel 配置（appId + appSecret + 启用按钮） */
   | { kind: "channel-config"; channelId: string };
 
-export type ModelRole = "main" | "secondary";
+/** 模型角色 —— 单一事实源是 providers 的 ROLE_SPECS（main / light / power） */
+export type ModelRole = RoleId;
 
 // ─── KeyEvent（标准化按键） ───
 

@@ -60,12 +60,13 @@ function makeRoles(events: StreamEvent[] | (() => AsyncGenerator<StreamEvent, vo
     model: "mock-main",
     chat: () => gen(),
   };
-  const secondary = {
+  const light = {
     provider: { id: "mock", models: [], chat: () => gen() },
-    model: "mock-secondary",
+    model: "mock-light",
     chat: () => gen(),
   };
-  return { main, secondary };
+  // power 走兜底（web-fetch 仅用 light 做 distill），复用 light stub 满足 LLMRoles 三键
+  return { main, light, power: light };
 }
 
 // ─── tool definition shape ───
@@ -175,11 +176,11 @@ describe("graceful degrade", () => {
     expect(r.content).toContain("# Hi");
   });
 
-  it("有 ctx.llm + 无 prompt → 退到 raw markdown(不调 secondary)", async () => {
+  it("有 ctx.llm + 无 prompt → 退到 raw markdown(不调 light)", async () => {
     safeFetchMock.mockResolvedValue(makeFetchResult("<h1>Hi</h1>"));
     const chatSpy = vi.fn();
     const roles = makeRoles([]);
-    roles.secondary.chat = chatSpy;
+    roles.light.chat = chatSpy;
     const r = await tool.call({ url: "https://x.com/" }, makeContext({ llm: roles }));
     expect(r.isError).toBe(false);
     expect(r.content).toContain("# Hi");
@@ -190,7 +191,7 @@ describe("graceful degrade", () => {
 // ─── distill 主路径 ───
 
 describe("distill 主路径", () => {
-  it("ctx.llm + prompt → 调用 secondary.chat 并返回 distill 结果", async () => {
+  it("ctx.llm + prompt → 调用 light.chat 并返回 distill 结果", async () => {
     safeFetchMock.mockResolvedValue(makeFetchResult("<p>Big content here</p>"));
     const roles = makeRoles([{ type: "text_delta", text: "Distilled answer" }]);
     const r = await tool.call(
@@ -202,13 +203,13 @@ describe("distill 主路径", () => {
     expect(r.content).not.toContain("Big content");
   });
 
-  it("传入 abortSignal 透传到 secondary.chat", async () => {
+  it("传入 abortSignal 透传到 light.chat", async () => {
     safeFetchMock.mockResolvedValue(makeFetchResult("<p>X</p>"));
     const chatSpy = vi.fn(async function* (): AsyncGenerator<StreamEvent, void, undefined> {
       yield { type: "text_delta", text: "ok" };
     });
     const roles = makeRoles([]);
-    roles.secondary.chat = chatSpy as unknown as LLMRoles["secondary"]["chat"];
+    roles.light.chat = chatSpy as unknown as LLMRoles["light"]["chat"];
     const ac = new AbortController();
     await tool.call(
       { url: "https://x.com/", prompt: "x" },
@@ -218,13 +219,13 @@ describe("distill 主路径", () => {
     expect(callArg?.abortSignal).toBe(ac.signal);
   });
 
-  it("secondary 抛错 → graceful degrade 到 raw + 提示", async () => {
+  it("light 抛错 → graceful degrade 到 raw + 提示", async () => {
     safeFetchMock.mockResolvedValue(makeFetchResult("<p>Raw content</p>"));
     const chatThrow = vi.fn(async function* (): AsyncGenerator<StreamEvent, void, undefined> {
       throw new Error("LLM unavailable");
     });
     const roles = makeRoles([]);
-    roles.secondary.chat = chatThrow as unknown as LLMRoles["secondary"]["chat"];
+    roles.light.chat = chatThrow as unknown as LLMRoles["light"]["chat"];
     const r = await tool.call(
       { url: "https://x.com/", prompt: "x" },
       makeContext({ llm: roles }),
@@ -235,7 +236,7 @@ describe("distill 主路径", () => {
     expect(r.content).toContain("Raw content");
   });
 
-  it("secondary 返回空 → 退到 raw + 提示", async () => {
+  it("light 返回空 → 退到 raw + 提示", async () => {
     safeFetchMock.mockResolvedValue(makeFetchResult("<p>Raw</p>"));
     const roles = makeRoles([{ type: "text_delta", text: "   " }]);
     const r = await tool.call(

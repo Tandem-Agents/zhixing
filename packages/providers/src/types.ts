@@ -287,11 +287,12 @@ export interface LLMRoleConfig {
  */
 export interface ZhixingConfig {
   /**
-   * LLM 角色配置：
+   * LLM 角色配置（角色集单一事实源 = `role-spec.ts` 的 ROLE_SPECS）：
    * - main 必填——主对话循环、用户面对的最终输出
-   * - secondary 可缺省——I/O 边界净化（上下文压缩、WebFetch distill、工具结果摘要等）
-   *   缺省时直接用 main 实例 + main.model 兜底（隔离价值仍保留，仅放弃任务专门化）。
-   *   不预设任何 vendor 默认（provider 选择是用户主权范畴）。
+   * - light 可缺省——I/O 边界净化（上下文压缩、WebFetch distill、工具结果摘要等）
+   * - power 可缺省——编程等重活槽（基础设施就位，消费者按需接入）
+   *   辅助角色缺省时直接用 main 实例 + main.model 兜底（隔离价值仍保留，仅放弃
+   *   任务专门化）。不预设任何 vendor 默认（provider 选择是用户主权范畴）。
    *
    * 类型为 optional 是为了反映 loadConfig 的真实输出形状——文件可能缺这一段。
    * 真正的 fail-fast 校验在 resolveLLMRoles / resolveFromConfig 入口集中处理；
@@ -299,7 +300,8 @@ export interface ZhixingConfig {
    */
   llm?: {
     main: LLMRoleConfig;
-    secondary?: LLMRoleConfig;
+    light?: LLMRoleConfig;
+    power?: LLMRoleConfig;
   };
   /**
    * 启用的消息通道表（key = channelId，如 "feishu"）。
@@ -321,7 +323,7 @@ export interface ZhixingConfig {
    *
    * 数据归属:阈值是模型固有属性,内置 `MODEL_CAPABILITIES` 表覆盖主流模型;
    * 本字段让用户**针对特定 model** 覆盖其阈值,不绑 role —— 用户切换 main /
-   * secondary 模型后,旧 override 因 key 不匹配自动失效,不会误套到新模型。
+   * light / power 模型后,旧 override 因 key 不匹配自动失效,不会误套到新模型。
    *
    * key 写法不敏感(用 `normalizeModelId` 双向规范化):带 vendor 前缀
    * (如 `deepseek-ai/DeepSeek-V4-Flash`) / 不带前缀 / 大小写混合,全部命中。

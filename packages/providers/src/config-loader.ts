@@ -239,12 +239,19 @@ function buildConfigTemplate(workspaceRoot: string): string {
       "model": "deepseek-ai/DeepSeek-V4-Flash"
     }
 
-    // secondary（选填，建议配置）：用于上下文净化任务——压缩历史 / WebFetch 蒸馏 /
-    // 工具结果摘要 / 子 agent 返回压缩 / 通讯通道入站分类等。
-    // 缺省时用 main 兜底，仍保留调用上下文隔离价值（防 prompt injection 污染主对话），
-    // 但放弃任务专门化和 cost 优化。建议配一个轻量、便宜的模型。
-    // 取消下面这行注释并填入 provider/model 启用（provider 需在 credentials.providers 中存在）：
-    // ,"secondary": { "provider": "siliconflow", "model": "deepseek-ai/DeepSeek-V4-Flash" }
+    // light（选填，建议配置 · 轻量杂活）：上下文净化类后台任务——压缩历史 /
+    // WebFetch 蒸馏 / 工具结果摘要 / 子 agent 返回压缩 / 通讯通道入站分类等。
+    // 建议配一个轻量、便宜的模型。
+    // 取消下行注释填入 provider/model 启用（provider 需在 credentials.providers 中存在）：
+    // ,"light": { "provider": "siliconflow", "model": "deepseek-ai/DeepSeek-V4-Flash" }
+
+    // power（选填 · 编程等重活）：高难度任务槽，模型档位由你决定（即便塞弱模型
+    // 也合法，名字表达"接重活"而非"模型很强"）。当前为基础设施预留，按需配置。
+    // 取消下行注释填入 provider/model 启用：
+    // ,"power": { "provider": "siliconflow", "model": "deepseek-ai/DeepSeek-V4-Flash" }
+
+    // 以上两个辅助角色缺省时均用 main 兜底——仍保留调用上下文隔离价值
+    // （防 prompt injection 污染主对话），仅放弃任务专门化与 cost 优化。
   },
 
   // ─── 工作目录 ───
@@ -349,7 +356,8 @@ function deepMergeConfig(
   if (override.llm) {
     result.llm = {
       main: override.llm.main ?? base.llm?.main!,
-      secondary: override.llm.secondary ?? base.llm?.secondary,
+      light: override.llm.light ?? base.llm?.light,
+      power: override.llm.power ?? base.llm?.power,
     };
   }
 

@@ -4,7 +4,7 @@
  * 将配置解析 + 协议适配器选择合二为一。
  *
  * 三种创建方式：
- * - createProviderRoles() — 双角色解析（main + secondary），CLI/serve 入口
+ * - createProviderRoles() — 多角色解析（main + light + power），CLI/serve 入口
  * - createProvider()      — 传入显式 ZhixingConfig，单角色 LLMProvider
  * - createProviderDirect()— 指定 provider ID + 可选 ProviderCredentialEntry 覆盖，单角色 LLMProvider
  */
@@ -19,6 +19,7 @@ import {
   resolveLLMRoles,
   resolveProvider,
   type LLMRolesResolveOptions,
+  type ResolvedLLMRole,
   type ResolvedLLMRoles,
 } from "./resolve.js";
 import type {
@@ -107,7 +108,7 @@ export function createProviderDirect(
   return createFromResolved(resolved);
 }
 
-// ─── 双角色工厂（main + secondary） ───
+// ─── 多角色工厂（main + light + power） ───
 
 export interface ProviderRolesOptions extends LLMRolesResolveOptions {
   cwd?: string;
@@ -134,8 +135,8 @@ export interface ProviderRolesResult {
  * CLI override（providerOverride / modelOverride）直接在工厂内吸收，让
  * roles.main.{provider, model} 始终反映会话实际使用的 effective state。
  *
- * 用户没显式配 llm.secondary 时，secondary 自动用 main 实例 + main.model 兜底
- * （仍保留调用上下文隔离价值，仅放弃任务专门化/cost 优化）。这是正常状态，
+ * 用户没显式配 llm.light / llm.power 时，该辅助角色自动用 main 实例 + main.model
+ * 兜底（仍保留调用上下文隔离价值，仅放弃任务专门化/cost 优化）。这是正常状态，
  * 不打印任何提示——/status 命令未来可主动展示当前角色配置供用户决策是否专门化。
  *
  * options.env 仍保留——loadConfig / loadCredentials 需要它推断 ~/.zhixing 目录
@@ -155,18 +156,19 @@ export function createProviderRoles(
   const mainProvider = createFromResolved(resolved.main.resolved);
 
   // 同 provider id 复用 LLMProvider 实例：连接池/限速/cache 共用。
-  // 兜底路径下 secondary.resolved 与 main.resolved 是同一对象，必然命中。
-  const secondaryProvider =
-    resolved.secondary.resolved.id === resolved.main.resolved.id
+  // 辅助角色未配置走兜底时 resolved 与 main.resolved 是同一对象，必然命中。
+  const instanceFor = (role: ResolvedLLMRole): LLMProvider =>
+    role.resolved.id === resolved.main.resolved.id
       ? mainProvider
-      : createFromResolved(resolved.secondary.resolved);
+      : createFromResolved(role.resolved);
 
   return {
     config,
     resolvedRoles: resolved,
     roles: {
       main: bindRole(mainProvider, resolved.main.model),
-      secondary: bindRole(secondaryProvider, resolved.secondary.model),
+      light: bindRole(instanceFor(resolved.light), resolved.light.model),
+      power: bindRole(instanceFor(resolved.power), resolved.power.model),
     },
   };
 }

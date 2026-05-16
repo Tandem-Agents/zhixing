@@ -39,7 +39,7 @@ export function clearInputBuffer(state: WorkingState): WorkingState {
 
 // ─── 模型角色字段读写 ───
 
-/** 读 llm 角色配置（main / secondary） */
+/** 读 llm 角色配置（main / light / power） */
 export function readModelRole(
   state: WorkingState,
   role: ModelRole,
@@ -47,7 +47,13 @@ export function readModelRole(
   return state.config.llm?.[role];
 }
 
-/** 设置 llm 角色 provider + model */
+/**
+ * 设置 llm 角色 provider + model。
+ *
+ * 角色无关写入：main 是 schema 必填键，写非 main 角色而 llm 尚不存在时，
+ * 先放一个占位空 main 保持 schema 合法（写 main 时该占位被同次写入覆盖）。
+ * 不再有 `role === "main" ? … : secondary` 的逐角色分支——新增角色零改动。
+ */
 export function writeModelRole(
   state: WorkingState,
   role: ModelRole,
@@ -55,17 +61,9 @@ export function writeModelRole(
   model: string,
 ): WorkingState {
   const config = structuredClone(state.config);
-  if (!config.llm) {
-    config.llm = role === "main"
-      ? { main: { provider, model } }
-      : { main: { provider: "", model: "" }, secondary: { provider, model } };
-    return { ...state, config };
-  }
-  if (role === "main") {
-    config.llm.main = { provider, model };
-  } else {
-    config.llm.secondary = { provider, model };
-  }
+  const llm = config.llm ?? { main: { provider: "", model: "" } };
+  config.llm = { ...llm };
+  config.llm[role] = { provider, model };
   return { ...state, config };
 }
 

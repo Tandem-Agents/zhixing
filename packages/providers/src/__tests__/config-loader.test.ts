@@ -84,7 +84,7 @@ describe("loadConfig", () => {
     expect(config.workspace?.root).toBe("/some/workspace");
   });
 
-  it("项目配置的 llm 应覆盖全局配置（main 整体替换、secondary 字段级）", () => {
+  it("项目配置的 llm 应覆盖全局配置（main 整体替换、light 字段级）", () => {
     const globalDir = path.join(tempHome, ".zhixing");
     fs.mkdirSync(globalDir, { recursive: true });
     fs.writeFileSync(
@@ -92,7 +92,7 @@ describe("loadConfig", () => {
       JSON.stringify({
         llm: {
           main: { provider: "deepseek", model: "deepseek-chat" },
-          secondary: { provider: "anthropic", model: "claude-haiku-4-5-20251001" },
+          light: { provider: "anthropic", model: "claude-haiku-4-5-20251001" },
         },
       }),
     );
@@ -113,8 +113,8 @@ describe("loadConfig", () => {
     });
 
     expect(config.llm?.main).toEqual({ provider: "deepseek", model: "deepseek-reasoner" });
-    // 项目级仅覆盖 main，secondary 从全局保留
-    expect(config.llm?.secondary).toEqual({
+    // 项目级仅覆盖 main，light 从全局保留
+    expect(config.llm?.light).toEqual({
       provider: "anthropic",
       model: "claude-haiku-4-5-20251001",
     });
@@ -238,7 +238,7 @@ describe("loadConfig", () => {
     const rawContent = fs.readFileSync(configPath, "utf-8");
     expect(rawContent).toContain("//");
     expect(rawContent).toContain("main（必填）");
-    expect(rawContent).toContain("secondary");
+    expect(rawContent).toContain("light");
     expect(rawContent).toContain("workspace");
     expect(rawContent).toContain("messaging");
   });

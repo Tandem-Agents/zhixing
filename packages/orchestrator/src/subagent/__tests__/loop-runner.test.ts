@@ -74,7 +74,7 @@ function makeRoles(provider: MockLLMProvider): LLMRoles {
     model: "mock-model",
     chat: (req) => provider.chat(req),
   };
-  return { main: role, secondary: role };
+  return { main: role, light: role, power: role };
 }
 
 function userMsg(text: string): Message {

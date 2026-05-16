@@ -3,9 +3,9 @@
  *
  * 覆盖：
  * - main 三段优先级（modelOverride > providerOverride+defaultModel > config 原值）
- * - secondary 解析链（显式 / 用 main 兜底）—— 不预设任何 vendor 默认
+ * - light 解析链（显式 / 用 main 兜底）—— 不预设任何 vendor 默认
  * - Provider 实例复用（同 provider 共享）
- * - 错误文案（缺 llm.main / providerOverride 无默认 / 显式 secondary 缺凭证）
+ * - 错误文案（缺 llm.main / providerOverride 无默认 / 显式 light 缺凭证）
  * - bindRole 的 model 实绑契约
  */
 
@@ -112,39 +112,39 @@ describe("resolveLLMRoles · main 三段优先级", () => {
   });
 });
 
-describe("resolveLLMRoles · secondary 解析链（2 段）", () => {
+describe("resolveLLMRoles · light 解析链（2 段）", () => {
   // 解析链刻意保持 2 段——显式 / 用 main 兜底。**不**预设任何 vendor 默认。
   // 历史上的 SECONDARY_DEFAULT=anthropic 是 vendor lock-in 错误，已删除：知行
-  // provider 中立，不替用户挑选 secondary vendor；用户想专门化就显式配
-  // llm.secondary，不配就用 main 兜底（仍保留调用上下文隔离价值）。
+  // provider 中立，不替用户挑选 light vendor；用户想专门化就显式配
+  // llm.light，不配就用 main 兜底（仍保留调用上下文隔离价值）。
 
-  it("显式 secondary 配置 → 直接使用", () => {
+  it("显式 light 配置 → 直接使用", () => {
     const result = resolveLLMRoles(
       baseConfig({
         llm: {
           main: { provider: "deepseek", model: "deepseek-chat" },
-          secondary: { provider: "openai", model: "gpt-4o-mini" },
+          light: { provider: "openai", model: "gpt-4o-mini" },
         },
       }),
       credsFor({ deepseek: "sk-ds", openai: "sk-oai" }),
       {},
     );
-    expect(result.secondary.resolved.id).toBe("openai");
-    expect(result.secondary.model).toBe("gpt-4o-mini");
+    expect(result.light.resolved.id).toBe("openai");
+    expect(result.light.model).toBe("gpt-4o-mini");
   });
 
-  it("缺省 secondary → 直接用 main 实例 + main.model 兜底", () => {
+  it("缺省 light → 直接用 main 实例 + main.model 兜底", () => {
     const result = resolveLLMRoles(baseConfig(), baseCreds(), {});
-    // 用 main 兜底——secondary === main 在配置层
-    expect(result.secondary.resolved).toBe(result.main.resolved);
-    expect(result.secondary.model).toBe(result.main.model);
-    expect(result.secondary.resolved.id).toBe("deepseek");
-    expect(result.secondary.model).toBe("deepseek-chat");
+    // 用 main 兜底——light === main 在配置层
+    expect(result.light.resolved).toBe(result.main.resolved);
+    expect(result.light.model).toBe(result.main.model);
+    expect(result.light.resolved.id).toBe("deepseek");
+    expect(result.light.model).toBe("deepseek-chat");
   });
 
-  it("缺省 secondary + main 用任意 provider → 兜底语义对所有 vendor 一致", () => {
+  it("缺省 light + main 用任意 provider → 兜底语义对所有 vendor 一致", () => {
     // 验证兜底逻辑无 vendor 偏见——main 是 anthropic / openai / siliconflow 等
-    // 任何 provider 时，缺省路径行为一致：secondary === main。
+    // 任何 provider 时，缺省路径行为一致：light === main。
     for (const [providerId, model, apiKey] of [
       ["anthropic", "claude-opus-4-5", "sk-ant"],
       ["openai", "gpt-4o", "sk-oai"],
@@ -156,12 +156,12 @@ describe("resolveLLMRoles · secondary 解析链（2 段）", () => {
         credsFor({ [providerId]: apiKey }),
         {},
       );
-      expect(result.secondary.resolved).toBe(result.main.resolved);
-      expect(result.secondary.model).toBe(model);
+      expect(result.light.resolved).toBe(result.main.resolved);
+      expect(result.light.model).toBe(model);
     }
   });
 
-  it("显式 secondary 缺凭证 → fail-fast 不静默兜底", () => {
+  it("显式 light 缺凭证 → fail-fast 不静默兜底", () => {
     // 显式配置代表用户意图，必须 fail-fast——不能静默把"用户期望的双 provider
     // 架构"伪装成单 provider 在跑。
     expect(() => {
@@ -169,7 +169,7 @@ describe("resolveLLMRoles · secondary 解析链（2 段）", () => {
         baseConfig({
           llm: {
             main: { provider: "deepseek", model: "deepseek-chat" },
-            secondary: { provider: "openai", model: "gpt-4o-mini" },
+            light: { provider: "openai", model: "gpt-4o-mini" },
           },
         }),
         credsFor({ deepseek: "sk-ds" }), // openai 凭证缺失
@@ -178,12 +178,12 @@ describe("resolveLLMRoles · secondary 解析链（2 段）", () => {
     }).toThrow(ProviderConfigError);
   });
 
-  it("main 任一 override 不影响 secondary 解析路径", () => {
+  it("main 任一 override 不影响 light 解析路径", () => {
     const result = resolveLLMRoles(
       baseConfig({
         llm: {
           main: { provider: "deepseek", model: "deepseek-chat" },
-          secondary: { provider: "openai", model: "gpt-4o-mini" },
+          light: { provider: "openai", model: "gpt-4o-mini" },
         },
       }),
       credsFor({ deepseek: "sk-ds", openai: "sk-oai" }),
@@ -191,29 +191,29 @@ describe("resolveLLMRoles · secondary 解析链（2 段）", () => {
     );
     expect(result.main.resolved.id).toBe("openai");
     expect(result.main.model).toBe("gpt-4o");
-    // secondary 不动——但因为现在 main 也变成 openai，触发同 id 复用
-    expect(result.secondary.resolved.id).toBe("openai");
-    expect(result.secondary.model).toBe("gpt-4o-mini");
-    expect(result.secondary.resolved).toBe(result.main.resolved); // 同 id 复用
+    // light 不动——但因为现在 main 也变成 openai，触发同 id 复用
+    expect(result.light.resolved.id).toBe("openai");
+    expect(result.light.model).toBe("gpt-4o-mini");
+    expect(result.light.resolved).toBe(result.main.resolved); // 同 id 复用
   });
 });
 
 describe("resolveLLMRoles · 同 provider id 复用（避免重复 resolveProvider）", () => {
-  it("显式 secondary 同 id 时复用 main.resolved（不重 resolveProvider）", () => {
+  it("显式 light 同 id 时复用 main.resolved（不重 resolveProvider）", () => {
     const result = resolveLLMRoles(
       baseConfig({
         llm: {
           main: { provider: "deepseek", model: "deepseek-reasoner" },
-          secondary: { provider: "deepseek", model: "deepseek-chat" },
+          light: { provider: "deepseek", model: "deepseek-chat" },
         },
       }),
       baseCreds(),
       {},
     );
     expect(result.main.resolved.id).toBe("deepseek");
-    expect(result.secondary.resolved).toBe(result.main.resolved); // 复用引用
+    expect(result.light.resolved).toBe(result.main.resolved); // 复用引用
     expect(result.main.model).toBe("deepseek-reasoner");
-    expect(result.secondary.model).toBe("deepseek-chat"); // 各自 model 独立
+    expect(result.light.model).toBe("deepseek-chat"); // 各自 model 独立
   });
 
   it("不同 id 时不触发短路（回归保护）", () => {
@@ -221,15 +221,56 @@ describe("resolveLLMRoles · 同 provider id 复用（避免重复 resolveProvid
       baseConfig({
         llm: {
           main: { provider: "deepseek", model: "deepseek-chat" },
-          secondary: { provider: "openai", model: "gpt-4o-mini" },
+          light: { provider: "openai", model: "gpt-4o-mini" },
         },
       }),
       credsFor({ deepseek: "sk-ds", openai: "sk-oai" }),
       {},
     );
-    expect(result.secondary.resolved).not.toBe(result.main.resolved);
+    expect(result.light.resolved).not.toBe(result.main.resolved);
     expect(result.main.resolved.id).toBe("deepseek");
-    expect(result.secondary.resolved.id).toBe("openai");
+    expect(result.light.resolved.id).toBe("openai");
+  });
+});
+
+describe("resolveLLMRoles · power 角色（新增基础设施，与 light 同 resolveAuxRole 链）", () => {
+  it("缺省 power → 用 main 兜底（与 light 同语义）", () => {
+    const result = resolveLLMRoles(baseConfig(), baseCreds(), {});
+    expect(result.power.resolved).toBe(result.main.resolved);
+    expect(result.power.model).toBe(result.main.model);
+  });
+
+  it("显式 power → 独立解析，且与 light 互不影响", () => {
+    const result = resolveLLMRoles(
+      baseConfig({
+        llm: {
+          main: { provider: "deepseek", model: "deepseek-chat" },
+          light: { provider: "openai", model: "gpt-4o-mini" },
+          power: { provider: "anthropic", model: "claude-opus-4-5" },
+        },
+      }),
+      credsFor({ deepseek: "sk-ds", openai: "sk-oai", anthropic: "sk-ant" }),
+      {},
+    );
+    expect(result.power.resolved.id).toBe("anthropic");
+    expect(result.power.model).toBe("claude-opus-4-5");
+    expect(result.light.resolved.id).toBe("openai");
+    expect(result.power.resolved).not.toBe(result.light.resolved);
+  });
+
+  it("显式 power 缺凭证 → fail-fast 不静默兜底", () => {
+    expect(() => {
+      resolveLLMRoles(
+        baseConfig({
+          llm: {
+            main: { provider: "deepseek", model: "deepseek-chat" },
+            power: { provider: "anthropic", model: "claude-opus-4-5" },
+          },
+        }),
+        credsFor({ deepseek: "sk-ds" }),
+        {},
+      );
+    }).toThrow(ProviderConfigError);
   });
 });
 
@@ -312,12 +353,12 @@ describe("createProviderRoles · 实例化与角色装配", () => {
     return { ZHIXING_CONFIG_PATH: configPath };
   }
 
-  it("缺省 secondary → main/secondary 共享同一 LLMProvider 实例", () => {
+  it("缺省 light → main/light 共享同一 LLMProvider 实例", () => {
     writeFixture(baseConfig(), baseCreds());
     const { roles } = createProviderRoles({ env: envFor() });
 
-    expect(roles.main.provider).toBe(roles.secondary.provider);
-    expect(roles.main.model).toBe(roles.secondary.model);
+    expect(roles.main.provider).toBe(roles.light.provider);
+    expect(roles.main.model).toBe(roles.light.model);
   });
 
   it("不同 provider id → 各自独立 LLMProvider 实例", () => {
@@ -325,16 +366,16 @@ describe("createProviderRoles · 实例化与角色装配", () => {
       {
         llm: {
           main: { provider: "deepseek", model: "deepseek-chat" },
-          secondary: { provider: "openai", model: "gpt-4o-mini" },
+          light: { provider: "openai", model: "gpt-4o-mini" },
         },
       },
       credsFor({ deepseek: "sk-ds", openai: "sk-oai" }),
     );
     const { roles } = createProviderRoles({ env: envFor() });
 
-    expect(roles.main.provider).not.toBe(roles.secondary.provider);
+    expect(roles.main.provider).not.toBe(roles.light.provider);
     expect(roles.main.provider.id).toBe("deepseek");
-    expect(roles.secondary.provider.id).toBe("openai");
+    expect(roles.light.provider.id).toBe("openai");
   });
 
   it("LLMRole.chat 调用透传 model（caller 不传 model）", async () => {

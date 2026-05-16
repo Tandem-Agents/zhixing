@@ -122,7 +122,7 @@ export interface RunSubAgentLoopOptions {
   provider: LLMProvider;
   /** 共享父 model id */
   model: string;
-  /** 共享父 LLMRoles —— 工具调 secondary 角色时透传 */
+  /** 共享父 LLMRoles —— 工具调 light/power 角色时透传 */
   llmRoles: LLMRoles;
   /** 共享父 SecurityPipeline 实例(权限规则 / boundary registry 跨 agent 共用) */
   securityPipeline: SecurityPipeline;

@@ -3,7 +3,7 @@
  *
  * 切分目的:
  * - prompt 模板独立可调(未来可加多语言/风格变体),与工具主体解耦
- * - collectStream 是通用的 text_delta 累积器,可被其他 secondary LLM consumer 复用
+ * - collectStream 是通用的 text_delta 累积器,可被其他 light LLM consumer 复用
  *   (如未来 WebSearch 的搜索结果摘要)
  */
 
@@ -19,7 +19,7 @@ Guidelines:
 - Do not invent information not present in the content`;
 
 /**
- * 拼接发送给 secondary LLM 的 user message。
+ * 拼接发送给 light LLM 的 user message。
  * 结构: prompt + 分隔 + 源信息 + 内容。把用户意图放最前以提示模型聚焦。
  */
 export function buildDistillPrompt(url: string, content: string, prompt: string): string {

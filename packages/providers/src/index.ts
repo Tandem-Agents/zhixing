@@ -51,6 +51,10 @@ export type {
   ResolvedLLMRoles,
 } from "./resolve.js";
 
+// 角色集注册表（角色集单一事实源）
+export { AUX_ROLE_SPECS, ROLE_SPECS } from "./role-spec.js";
+export type { RoleId, RoleSpec } from "./role-spec.js";
+
 // 协议适配器
 export { createOpenAICompatibleProvider } from "./adapters/openai-compatible.js";
 

@@ -118,13 +118,14 @@ export interface ResolvedLLMRole {
   model: string;
 }
 
-/** 双角色解析结果。 */
+/** 多角色解析结果（键集与 role-spec.ts ROLE_SPECS / core LLMRoles 对应）。 */
 export interface ResolvedLLMRoles {
   main: ResolvedLLMRole;
-  secondary: ResolvedLLMRole;
+  light: ResolvedLLMRole;
+  power: ResolvedLLMRole;
 }
 
-/** CLI override 入口——main 角色受影响，secondary 不受影响。 */
+/** CLI override 入口——仅 main 角色受影响，辅助角色（light/power）不受影响。 */
 export interface LLMRolesResolveOptions {
   /** CLI `--provider`：替换 main role 的 provider；model 跟随新 provider 的预设默认（除非也提供 modelOverride）。 */
   providerOverride?: string;
@@ -152,10 +153,12 @@ export function resolveLLMRoles(
     );
   }
 
+  // main 先解析——辅助角色未配置时回落到它（ROLE_SPECS 中 fallbackTo: "main"）。
   const main = resolveMainRole(config.llm.main, credentials, options);
-  const secondary = resolveSecondaryRole(config.llm.secondary, credentials, main);
+  const light = resolveAuxRole(config.llm.light, credentials, main);
+  const power = resolveAuxRole(config.llm.power, credentials, main);
 
-  return { main, secondary };
+  return { main, light, power };
 }
 
 function resolveMainRole(
@@ -186,16 +189,20 @@ function resolveMainRole(
   return { resolved, model: finalModel };
 }
 
-function resolveSecondaryRole(
+/**
+ * 辅助角色（light / power）配置层解析 —— 注册表 ROLE_SPECS 中 fallbackTo:"main"
+ * 的角色共用此逻辑。explicit 缺省 → 回落 fallbackRole（当前恒为 main）。
+ */
+function resolveAuxRole(
   explicit: LLMRoleConfig | undefined,
   credentials: ZhixingCredentials,
-  main: ResolvedLLMRole,
+  fallbackRole: ResolvedLLMRole,
 ): ResolvedLLMRole {
-  // 没显式配置 → 用 main 实例 + main.model 兜底。
+  // 没显式配置 → 用 fallbackRole（main）实例 + 其 model 兜底。
   //
   // 这不是"降级"，是合理的未配置默认：
-  //   - 隔离价值（第一层）：调用上下文独立，secondary 一次性 conversation 与 main
-  //     conversation 物理隔离；prompt injection 通过工具结果污染 secondary 时，
+  //   - 隔离价值（第一层）：调用上下文独立，辅助角色一次性 conversation 与 main
+  //     conversation 物理隔离；prompt injection 通过工具结果污染辅助角色时，
   //     main 看到的只是结构化净化输出，攻击向量被切断
   //   - 任务专门化（第二层）：放弃——main 通常是为主对话挑的较强模型，跑摘要/抽取
   //     等轻量任务略大材小用
@@ -203,22 +210,22 @@ function resolveSecondaryRole(
   //
   // **不**预设任何 vendor 默认（曾经的 SECONDARY_DEFAULT=anthropic 是 vendor lock-in
   // 错误）—— 知行 provider 中立，预设 8 家服务商，不替用户挑选其中之一作为
-  // secondary 默认。用户想专门化就显式配 llm.secondary；不配就用 main 兜底。
+  // 辅助角色默认。用户想专门化就显式配 llm.light / llm.power；不配就 main 兜底。
   if (!explicit) {
-    return { resolved: main.resolved, model: main.model };
+    return { resolved: fallbackRole.resolved, model: fallbackRole.model };
   }
 
-  // 显式 secondary：用户的明确意图。
+  // 显式配置：用户的明确意图。
   //
-  // 同 provider id 时复用 main.resolved 实例——避免重复 credentials 查询。
+  // 同 provider id 时复用 fallbackRole.resolved 实例——避免重复 credentials 查询。
   // 复用的只是协议配置（baseUrl/apiKey/connection pool 等 stateless 资源），
   // conversation 仍然独立，隔离性不破坏。
-  if (explicit.provider === main.resolved.id) {
-    return { resolved: main.resolved, model: explicit.model };
+  if (explicit.provider === fallbackRole.resolved.id) {
+    return { resolved: fallbackRole.resolved, model: explicit.model };
   }
 
   // 不同 provider id：独立解析，失败 fail-fast（不静默降级到 main，避免把
-  // "用户期望的双 provider 架构"伪装成单 provider 在跑）。
+  // "用户期望的多 provider 架构"伪装成单 provider 在跑）。
   const resolved = resolveProvider(explicit.provider, credentials);
   return { resolved, model: explicit.model };
 }

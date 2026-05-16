@@ -81,7 +81,7 @@ export interface AgentLoopParams {
   contextManager?: ContextManagerHook;
   /**
    * 会话级 LLM 角色集合。注入到每个工具调用的 ToolExecutionContext.llm，
-   * 供工具在 I/O 边界使用 secondary 角色做信息净化（如 WebFetch distill）。
+   * 供工具在 I/O 边界使用 light 角色做信息净化（如 WebFetch distill）。
    *
    * 可选——单测 / 极简自动化路径可不传，consumer 必须显式分支处理 !ctx.llm。
    * 见 research/design/specifications/secondary-llm-capability.md §三。

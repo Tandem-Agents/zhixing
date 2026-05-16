@@ -73,11 +73,15 @@ vi.mock("@zhixing/providers", async (importOriginal) => {
         model: "mock-model",
         chat: (request) => provider.chat(request),
       };
-      const roles: LLMRoles = { main: role, secondary: role };
+      const roles: LLMRoles = { main: role, light: role, power: role };
       return {
         roles,
         config: { providers: {} } as never,
-        resolvedRoles: { main: resolvedRole, secondary: resolvedRole } as never,
+        resolvedRoles: {
+          main: resolvedRole,
+          light: resolvedRole,
+          power: resolvedRole,
+        } as never,
       };
     },
     // workspace 走 cwd-fallback,跳过配置层

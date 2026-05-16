@@ -260,7 +260,7 @@ function convertContentBlock(
       //
       // Message.content 是 provider-agnostic 类型,可能携带来自 OpenAI 兼容路径
       // (DeepSeek v4-pro / Qwen-QwQ / Kimi-thinking 等)的 ThinkingBlock。当用户
-      // 在持久化对话里跨 provider 续聊或 main/secondary 路由分发到 anthropic
+      // 在持久化对话里跨 provider 续聊或 main/light/power 路由分发到 anthropic
       // 时,这些 block 会流到本 adapter。
       //
       // 选择降级为 text 而非抛错:

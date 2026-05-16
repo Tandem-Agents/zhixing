@@ -211,16 +211,16 @@ describe("handleAddModelPanelKey", () => {
     }
   });
 
-  // 回归保护：跨 provider 引用 bug。用户在 secondary 角色之前选过 X 的某模型，
-  // 然后进入另一个 provider B 的 add-model 添加新模型。提交后 secondary 必须
-  // 整体切换到 (B, 新模型)——而非保留 secondary.provider = X 引用 B 的新模型。
+  // 回归保护：跨 provider 引用 bug。用户在 light 角色之前选过 X 的某模型，
+  // 然后进入另一个 provider B 的 add-model 添加新模型。提交后 light 必须
+  // 整体切换到 (B, 新模型)——而非保留 light.provider = X 引用 B 的新模型。
   // 详见 panels/input.ts handleAddModelPanelKey enter 分支的注释。
   it("跨 provider：descriptor.providerId 是写入 role 的 provider（非 currentRole.provider）", () => {
     let state = createInitialState(
       {
         llm: {
           main: { provider: "x-provider", model: "x-model" },
-          secondary: { provider: "x-provider", model: "x-model-old" },
+          light: { provider: "x-provider", model: "x-model-old" },
         },
       },
       { providers: { "x-provider": { apiKey: "sk-x" } } },
@@ -228,7 +228,7 @@ describe("handleAddModelPanelKey", () => {
     state = { ...state, inputBuffer: "b-new-model" };
     const otherDescriptor = {
       kind: "add-model",
-      role: "secondary",
+      role: "light",
       providerId: "b-provider",
     } as Extract<PanelDescriptor, { kind: "add-model" }>;
     const action = handleAddModelPanelKey(state, otherDescriptor, {
@@ -241,9 +241,9 @@ describe("handleAddModelPanelKey", () => {
         ["b-new-model"],
       );
       expect(action.state.credentials.providers?.["x-provider"]?.models).toBeUndefined();
-      // secondary 完整切到 (B, b-new-model)——而不是 (X, b-new-model)
-      expect(action.state.config.llm?.secondary?.provider).toBe("b-provider");
-      expect(action.state.config.llm?.secondary?.model).toBe("b-new-model");
+      // light 完整切到 (B, b-new-model)——而不是 (X, b-new-model)
+      expect(action.state.config.llm?.light?.provider).toBe("b-provider");
+      expect(action.state.config.llm?.light?.model).toBe("b-new-model");
       // main 不受影响
       expect(action.state.config.llm?.main?.provider).toBe("x-provider");
       expect(action.state.config.llm?.main?.model).toBe("x-model");

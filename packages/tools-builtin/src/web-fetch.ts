@@ -1,11 +1,11 @@
 /**
- * WebFetch 工具 — 抓取 URL 内容,可选用 secondary LLM 蒸馏。
+ * WebFetch 工具 — 抓取 URL 内容,可选用 light LLM 蒸馏。
  *
  * 设计要点:
  * - 编排型工具: 只串联 @zhixing/network(safeFetch/sanitize)、processContent(charset+turndown)、
- *   ctx.llm.secondary(distill);自身不发明任何能力
+ *   ctx.llm.light(distill);自身不发明任何能力
  * - 21A 自描述: boundaries + permissionArgumentKey 让 SecurityPipeline 自动接入
- * - graceful degrade: !ctx.llm || !prompt 时退到 raw markdown(单测/automation/无 secondary 配置场景)
+ * - graceful degrade: !ctx.llm || !prompt 时退到 raw markdown(单测/automation/无 light 配置场景)
  * - 错误是 ToolResult.isError, 不抛异常 —— 任何 FetchError 转成 LLM 友好的描述
  */
 
@@ -43,7 +43,7 @@ const MAX_PROMPT_LENGTH = 1000;
  */
 const WEB_FETCH_SYSTEM_PROMPT_HINTS: readonly string[] = [
   "- Use `web_fetch` to read content from a URL the user provided or that you already know — this tool fetches a URL, it does not search the web",
-  "- Two modes: with `prompt`, a secondary LLM extracts only the requested information (preferred for large pages); without `prompt`, raw Markdown is returned (use for short or specific pages)",
+  "- Two modes: with `prompt`, a light LLM extracts only the requested information (preferred for large pages); without `prompt`, raw Markdown is returned (use for short or specific pages)",
   `- Pre-approved hosts (no user confirmation needed): ${WEB_FETCH_PREAPPROVED_HOSTS.join(", ")}`,
   "- Do not invent URLs — only fetch what the user gave you or what appeared in prior tool results",
   "- If the user asks a question without a URL, do not call `web_fetch` with a guessed URL — ask for the URL or suggest a search engine",
@@ -67,8 +67,8 @@ export function createWebFetchTool(opts: WebFetchToolOptions = {}): ToolDefiniti
     name: "web_fetch",
     description:
       "Fetch a URL and return its content as Markdown. " +
-      "Provide `prompt` to extract specific information using a secondary LLM " +
-      "(falls back to raw content when secondary is unavailable). " +
+      "Provide `prompt` to extract specific information using a light LLM " +
+      "(falls back to raw content when light is unavailable). " +
       "Without prompt, returns raw Markdown.",
     inputSchema: {
       type: "object",
@@ -79,7 +79,7 @@ export function createWebFetchTool(opts: WebFetchToolOptions = {}): ToolDefiniti
         },
         prompt: {
           type: "string",
-          description: "Optional prompt to extract specific information using a secondary LLM",
+          description: "Optional prompt to extract specific information using a light LLM",
         },
         format: {
           type: "string",
@@ -111,7 +111,7 @@ export function createWebFetchTool(opts: WebFetchToolOptions = {}): ToolDefiniti
       const fetched = await fetchAndProcess(parsed, context.abortSignal, opts.proxy);
       if ("error" in fetched) return fetched.error;
 
-      // graceful degrade: 无 secondary 注入 / 无 prompt → 返回 raw
+      // graceful degrade: 无 light 注入 / 无 prompt → 返回 raw
       if (!context.llm || !parsed.prompt) {
         return formatResult(parsed.url, fetched.text);
       }
@@ -197,7 +197,7 @@ async function fetchAndProcess(
   }
 
   const processed = await processContent(result, parsed.format);
-  // distill 模式给 secondary 全量(100K)做摘要;raw 模式按用户 maxChars 截断
+  // distill 模式给 light 全量(100K)做摘要;raw 模式按用户 maxChars 截断
   const targetMax = parsed.prompt ? MAX_RAW_CHARS : parsed.maxChars;
   const sanitized = sanitizeUntrustedText(processed, { maxChars: targetMax });
 
@@ -219,7 +219,7 @@ async function distill(
 
   try {
     const summary = await collectStream(
-      context.llm.secondary.chat({
+      context.llm.light.chat({
         systemPrompt: DISTILL_SYSTEM_PROMPT,
         messages: [userMessage(buildDistillPrompt(parsed.url, content, parsed.prompt))],
         tools: [],
@@ -228,8 +228,8 @@ async function distill(
     );
     const trimmed = summary.trim();
     if (trimmed.length === 0) {
-      // secondary 返回空 → 退到 raw
-      return formatResult(parsed.url, content, "(secondary returned empty distill, showing raw content)");
+      // light 返回空 → 退到 raw
+      return formatResult(parsed.url, content, "(light returned empty distill, showing raw content)");
     }
     return formatResult(parsed.url, trimmed);
   } catch (err) {

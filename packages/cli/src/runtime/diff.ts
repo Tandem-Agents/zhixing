@@ -33,9 +33,9 @@ export function computeDiff(
     !stableEqual(oldCredentials.channels, newCredentials.channels);
 
   const agentChanged =
-    oldConfig.llm?.main?.provider !== newConfig.llm?.main?.provider ||
-    oldConfig.llm?.main?.model !== newConfig.llm?.main?.model ||
-    !stableEqual(oldConfig.llm?.secondary, newConfig.llm?.secondary) ||
+    // 整段 llm 比较——覆盖 main 及全部辅助角色（light/power/未来新增），
+    // 角色集变化无需在此逐一枚举（与 ROLE_SPECS 解耦，零漂移）。
+    !stableEqual(oldConfig.llm, newConfig.llm) ||
     // providers 资源池在 credentials.json（apiKey / baseUrl / protocol / models 等）
     !stableEqual(oldCredentials.providers, newCredentials.providers) ||
     !stableEqual(oldConfig.workspace, newConfig.workspace) ||

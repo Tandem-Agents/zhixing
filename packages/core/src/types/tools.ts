@@ -174,10 +174,11 @@ export interface ToolExecutionContext {
   turnOrigin?: TurnOrigin;
 
   /**
-   * 当前会话可用的 LLM 角色实例（main + secondary）。
+   * 当前会话可用的 LLM 角色实例（main + light + power）。
    *
    * 入口（cli/run-agent → core agent-loop → tool-executor）创建 ctx 时一次性注入；
-   * 工具消费 `ctx.llm.secondary` 在 I/O 边界做信息净化，避免噪音灌入主上下文。
+   * 工具消费 `ctx.llm.light` 在 I/O 边界做信息净化，避免噪音灌入主上下文；
+   * `ctx.llm.power` 是重活槽（基础设施已就位，消费者按需接入）。
    *
    * Optional 的语义：单测 / 极简自动化路径可能不注入。consumer 必须显式分支处理
    * `ctx.llm === undefined`（推荐 graceful degrade，如 WebFetch 退到 raw markdown；
