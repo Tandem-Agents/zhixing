@@ -95,7 +95,17 @@ message_delta           → （更新 stopReason、usage）
 
 ### Extended Thinking 支持
 
-通过 `ProviderQuirks` 扩展：
+> **2026-05-15 更新**：本节描述的 ProviderQuirks 双路径（adaptive/budget）**当前未接入实现**。
+> 现状（提交 `76bc0ef` 后）：`anthropic-messages.ts` 仅在**协议事件层**正确发射
+> `thinking_block_start / thinking_delta / thinking_block_end`（与 `tool_call_*` 对称），
+> 但**请求侧不传 `thinking` 参数**、出站不写 thinking block + signature。
+> `presets.anthropic.quirks.supportsThinking` 保持 `false`（诚实声明，不谎报未接入能力）。
+> 协议事件层的 `thinking` 块处理仅服务两个场景：① SDK 默认行为或未来接入时自动激活；
+> ② 跨 provider 续聊时来自 OpenAI 兼容路径（DeepSeek/Qwen-QwQ 等）的 `ThinkingBlock`
+> 在 `convertContentBlock` 降级为 text 兜底。下文 ProviderQuirks 双路径是**未来设计稿**，
+> 非当前实现。
+
+通过 `ProviderQuirks` 扩展（**未实现，未来设计**）：
 
 ```typescript
 // 扩展 ProviderQuirks
@@ -171,15 +181,28 @@ const args = JSON.parse(pending.argsJson);
 
 ### Token Usage 映射
 
+> **2026-05-15 更新（提交 `fd1a60f`）**：实现已引入 `totalInputTokens` 规范全量口径。
+> Anthropic 的 `input_tokens` 语义上**仅是"未命中的新输入"**，cache 命中/写入单列在
+> `cache_read_input_tokens` / `cache_creation_input_tokens`，**不含**在 `input_tokens` 内——
+> 直接把它当全量输入会系统性低估。因此 `extractUsage`（导出供 `usage-conformance.test.ts`
+> 契约校验）的实际映射为：
+
 ```typescript
-// Anthropic usage → 知行 TokenUsage
+// Anthropic usage → 知行 TokenUsage（extractUsage 实际实现）
 {
-  inputTokens:     usage.input_tokens,
-  outputTokens:    usage.output_tokens,
-  cacheReadTokens: usage.cache_read_input_tokens,
-  cacheWriteTokens: usage.cache_creation_input_tokens,
+  inputTokens:      usage.input_tokens,           // vendor 原值，anchor/estimator 校准锚定，刻意不动
+  totalInputTokens: usage.input_tokens
+                    + (cache_read_input_tokens ?? 0)
+                    + (cache_creation_input_tokens ?? 0),  // 规范全量口径，消费方经 getTotalInputTokens 读取
+  outputTokens:     usage.output_tokens,
+  cacheReadTokens:  cache_read_input_tokens,   // 仅 >0 才填（与 mergeUsage truthy 语义一致）
+  cacheWriteTokens: cache_creation_input_tokens, // 仅 >0 才填
 }
 ```
+
+Anthropic 是**唯一**需要显式设 `totalInputTokens` 的 adapter——OpenAI 兼容族
+`prompt_tokens` 本就是全量，由 `getTotalInputTokens` 的 `?? inputTokens` fallback 自然得到
+（详见 `core/src/types/llm.ts` 的 `getTotalInputTokens` / `mergeUsage` 注释）。
 
 `message_start` 和 `message_delta` 都可能返回 usage，以 `message_delta`（最终值）为准。
 

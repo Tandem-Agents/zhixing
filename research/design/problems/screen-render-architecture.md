@@ -557,67 +557,85 @@ input box / panel / status 高度随用户行为级事件变化（按键、paste
 
 ### Suspend / Resume 协议（alt UI 嵌入）
 
-confirmation panel 等 alt UI 进入 / 退出协议：
+> （2026-05-16 更新：本节描述的"suspend = 擦 chrome + 撤 DECSTBM 的 destructive
+> clear；调用方自己 emit `\x1b[?1049h`"协议**已被取代**。commit 26fab39 把
+> suspend/resume 改为由 `ScreenController` 自身切 alternate screen buffer——
+> destructive DECSTBM clear 路径是 home 页 modal 后历史丢失 bug 的根因，已废弃。
+> 当前实现见 `packages/cli/src/screen/screen-controller.ts` 的 `suspend()/resume()`
+> 与 `scroll-region.ts` 的 `suspend()/resume()`，下方为修正后的现状描述。)
+
+confirmation panel 等 modal alt UI 进入 / 退出协议：
 
 ```
-suspend()：
-  1. cursor 跳 (scrollBottom, 1)
-  2. cursor down 跨过 chrome 区域到 viewport 底
-  3. erase 到屏幕底（擦 chrome）
-  4. 显式撤 DECSTBM: \x1b[r （恢复全屏 scroll region）
-  5. 清 segment 状态：segmentTopRow = segmentBottomRow = segmentRemainingRows = null,
-     committedLogicalRows = 0
-     （契约：caller 不在 suspend 期间持有活跃 segment——
-      typeahead-input / confirmation panel 与 LLM 流式不并发）
-  6. 标记 suspended，状态变更广播给订阅者
+ScreenController.suspend()：
+  1. emit `\x1b[?1049h` 切到 alternate screen buffer
+     —— 终端**原子保存** main buffer 整体（viewport 内容含 region 可视区
+        对话历史 + scrollback + cursor + DECSTBM 状态由终端保管）
+  2. emit `\x1b[1;1H` home cursor（alt buffer 入口 cursor 位置 implementation-
+     defined，显式 home 让 alt UI 起手位置确定）
+  3. scrollRegion.suspend()：**纯 flag 切换、不做任何 destructive emit**
+     （内部状态字段 regionTailRow / segmentTopRow 等天然保留——内容由终端
+      alt-screen 原子保管，不需 reset；contract: suspend 期间不持有活跃 segment）
+  4. 标记 suspendedFlag，状态变更广播给订阅者
 
-resume()：
-  1. 重新探测 viewportRows（resize 期间可能变化）
-  2. 计算 chromeHeight + scrollBottom
-  3. 重设 DECSTBM: \x1b[1;<scrollBottom>r
-  4. 重画 chrome
-  5. cursor 跳 (1, 1) 作为 region 顶起点
-  6. regionTailRow = 1, regionTailCol = 1, regionFilledRows = 0
-     （suspend 已擦 region 显示，新写入从 region 顶起手）
-  7. 标记 unsuspended
+ScreenController.resume()：
+  1. emit `\x1b[?1049l` 切回 main buffer
+     —— 终端**原子恢复** viewport 内容 / scrollback / cursor / 到 suspend 前
+  2. scrollRegion.resume()：emit 防御性 `\x1b[1;<scrollBottom>r`
+     （DECSTBM 跨 alt-screen 是 implementation-defined 是否保存，re-emit 兜底）
+  3. refreshChrome()：用最新状态重画 chrome（idempotent 或反映 suspend
+     期间累积的 setStatusBar / setStatusTail 变化）
+  4. emit hideCursor 重新断言 chrome 模式硬件光标隐藏不变量
+  5. 标记 unsuspended，flush 消费 suspend 期间累积的暂存任务
 ```
 
-alt-screen（config-editor）协同 —— **显式协议，不假定终端自动**：
-
-```
-alt-screen 进入前：
-  ScreenController 要求先 suspend（撤 DECSTBM + 擦 chrome）
-  调用方再发 \x1b[?1049h 进 alt-screen
-
-alt-screen 退出后：
-  调用方发 \x1b[?1049l 退 alt-screen
-  ScreenController.resume() 重设 DECSTBM + 重画 chrome
-```
-
-两层正交：suspend / resume 与 alt-screen 切换分离，不共享状态。
+config-editor 等 caller 自管的 alt-screen 切换与本 suspend 协议**正交**——
+main buffer 模式下 caller 自管 alt screen 不影响 zhixing 主体视图（main buffer
+不动）。两层不共享状态。
 
 ### Resize 处理
 
+> （2026-05-16 更新：本节描述的"每个 `on('resize')` 事件逐帧重设 DECSTBM +
+> 重画 chrome"协议**已被取代**。commit b95e236 把 resize 改为"逐帧不重画
+> （ScreenController 对 stdout 零写入，输入区交终端 reflow）+ resize-end
+> 防抖后整屏重建"——逐帧重画会在拖拽窗口时制造碎 box 残留。下方为修正后的
+> 现状描述。当前实现见 `screen-controller.ts` 的 `attachResizeListener` /
+> `scheduleResizeEnd` / `onResizeEnd` / `rebuildAfterResize` 与 `scroll-region.ts`
+> 的 `setViewport` / `establishLayout` / `rebuild`；已删除 `ScrollRegion.handleResize`
+> / `anchorRegionAfterReflow`。)
+
 ```
-on('resize')：
-  1. 重读 viewportRows / viewportCols
-  2. 重计算 scrollBottom = viewportRows - chromeHeight
-  3. 重设 DECSTBM: \x1b[1;<scrollBottom>r
-  4. 重画 chrome
-  5. 若有 active segment：保留 handle 活性（不强制 commit）——
-     - committedLogicalRows 不变（已固化部分仍已固化）
-     - 清 segmentTopRow / segmentBottomRow / segmentRemainingRows = null
-       （resize 后 region 内容由终端 reflow、viewport 位置不可控；
-        下次 segment.replace 走"首次"路径在新 (regionTailRow, regionTailCol) 重起）
-  6. 状态保守重置：
-     - regionTailRow = 1, regionTailCol = 1（cursor 跳到 region 顶）
-     - regionFilledRows = 0（终端 reflow 后无法精确知道；下次写入按精确路径累积）
-  7. cursor 跳 (1, 1) 作为新基线
+on('resize')（逐帧，internal-only，对 stdout 零写入）：
+  1. 重读 stdout.rows / stdout.columns
+  2. 同步 ScreenController.viewportRows/Cols（纯内存）
+  3. scrollRegion.setViewport(rows, cols)：仅更新内部 viewportRows/Cols 认知，
+     **不动 DECSTBM / 不重画 chrome / 不写屏**——输入区与欢迎块同等待遇，
+     交终端自身 reflow，不制造程序碎 box 残留
+  4. scheduleResizeEnd()：重置 RESIZE_END_DEBOUNCE_MS（200ms）防抖 timer
+
+resize-end（防抖静默期满后单次触发，与逐帧路径正交）：
+  → 通知 onResizeEnd 订阅者最终稳定尺寸
+  → caller 调 rebuildAfterResize(regionContent)，单 enqueue task 内：
+     1. 全清（复用 ANSI_FIRSTATTACH_SEQUENCE = \x1b[2J\x1b[3J\x1b[1;1H，
+        含 \x1b[3J 清终端 scrollback——清掉 resize 期间终端 reflow 堆积的
+        欢迎块/旧输入区残片；磁盘 transcript 不受影响）+ hideCursor
+     2. 按最新尺寸 computeChromeHeight + buildChromeBytes
+     3. scrollRegion.rebuild（经 establishLayout 复位 region 几何 + 重设
+        DECSTBM + 重画 chrome，与 firstAttach 同序列、同 establishLayout）
+     4. 经 caller 的 regionContent() 回调重写 region 初始内容（欢迎块/告警，
+        延迟到重建时才生成，用最新 session 状态）
+     5. cursor 复位
 ```
 
-**为什么不强制 commit**：caller（markdown-stream）持有 ReplaceableSegmentHandle 跨多个 chunk；强制 commit 后 handle 闭合 → 后续 chunk 的 .replace() 全部 no-op → 本 turn 剩余 list / code 内容渲染丢失。改为保留 handle 活性后，markdown-stream 不感知 resize，下一个 chunk 到达即自动恢复正确显示。
+**为什么逐帧不重画**：拖拽窗口时 stdout `resize` 高频连续触发，逐帧重设
+DECSTBM + 重画 chrome 会与终端自身的 reflow 竞争，产生碎 box 残留累积。改为
+"逐帧交终端 reflow + resize-end 防抖稳定后整屏重建"——多段拖拽（拖-停-拖-停）
+每段各触发一次 resize-end，互不混淆。
 
-resize 期间已写出的 scrollback 内容 reflow 由终端处理，不可控也不需要控。
+**active segment 语义**：resize 不强制 commit segment——caller（markdown-stream）
+持有 ReplaceableSegmentHandle 跨多个 chunk，强制 commit 后 handle 闭合会让本 turn
+剩余 list / code 内容渲染丢失。整屏重建从 region 顶重写，下一个 chunk 到达即按
+新尺寸自动恢复正确显示。resize 期间已写出的 scrollback 内容 reflow 由终端处理。
 
 ### detachInput 行为
 
@@ -747,7 +765,7 @@ chrome 区域在 scroll region 之外。在 chrome 区域写 `\n` 可能跳出 v
 ## 不在本方案
 
 - **保留对极老终端兼容**——维护双路径（DECSTBM + 当前 freeze 物理行修复版）会重新引入架构债。声明最低终端要求是产品决策，与 zhixing 当前 ANSI 依赖范围一致
-- **alt screen buffer 接管整屏**——失去 scrollback 历史可见性，与产品定位（chrome 永驻 + 长对话历史）冲突
+- **alt screen buffer 接管 zhixing 主体视图**——失去 scrollback 历史可见性，与产品定位（chrome 永驻 + 长对话历史）冲突。（2026-05-16 更新：仅指"zhixing 主对话流常驻 alt buffer"这条不取；commit 26fab39 起 modal alt UI 的 suspend/resume **已改为局部切 alt buffer**，main buffer 由终端原子保管 + 原子恢复，zhixing 主体仍在 main buffer，与本条不矛盾）
 - **Ink / React-based 重写**——把命令式 ANSI 协议替换为声明式 React 模型是另一个架构方向，工程量超出本问题域；本方案保持命令式 ANSI 协议
 - **运行期 cursor query 双向通信**——`\x1b[6n` 等 query 依赖终端即时回 reply 通过 stdin，与 readline / raw mode 协议交互复杂；启动期一次性检测可用 query（同步等待 + 超时 fail-fast），运行期改用基于已知状态追踪 + 关键事件锚定
 
@@ -794,14 +812,14 @@ chrome 区域在 scroll region 之外。在 chrome 区域写 `\n` 可能跳出 v
 | 风险 | 性质 | 缓解 |
 |---|---|---|
 | 终端不支持 DECSTBM | 产品决策 | 启动期探测 + fail-fast；最低要求覆盖目标用户群 |
-| DECSTBM 区域顶行被 scroll 时推送 scrollback 是终端实现行为而非控制序列规范 | 产品决策 | 主流终端实测全部支持（xterm / xterm.js / Windows Terminal / conhost / Terminal.app / iTerm2 / tmux 非 alt-screen）；嵌入式 / 老旧终端可能不推送（scroll 出区域内容直接消失），按 fail-fast 处理；alt-screen 模式所有终端都不推送，由 suspend 协议在切 alt-screen 前撤 DECSTBM 规避 |
+| DECSTBM 区域顶行被 scroll 时推送 scrollback 是终端实现行为而非控制序列规范 | 产品决策 | 主流终端实测全部支持（xterm / xterm.js / Windows Terminal / conhost / Terminal.app / iTerm2 / tmux 非 alt-screen）；嵌入式 / 老旧终端可能不推送（scroll 出区域内容直接消失），按 fail-fast 处理（2026-05-16 更新：末句"由 suspend 协议在切 alt-screen 前撤 DECSTBM 规避"已过时——modal 期间的 alt-screen 切换由 `suspend()` 自身 emit `\x1b[?1049h`，main buffer 由终端原子保管而非撤 DECSTBM，见上文 Suspend/Resume 协议节修正） |
 | tmux 嵌套时 DECSTBM 行为差异 | 产品决策 | 启动期检测 `TMUX` env；tmux 把 DECSTBM 转译给宿主终端但有少量边缘行为差异（cursor 跨 region 边界、resize 重设时机），文档化已知差异 + tmux 用户报告 bug 时按 "tmux 路径" 单独诊断 |
 | notify interleave + segment 增长越过 notify | 设计约束 | erase 范围扩展（writeStartRow..max(segmentBottomRow, writeBottomRow)）保视觉清洁；notify 数据**会丢失**（与当前架构截断行为一致）——caller 若需 notify 持久应在 segment commit 后再发 |
 | caller 违反"Region 写入合约"行宽硬约束 | 设计约束 | 测试基础设施加合约断言（`screen/__tests__/`）；任何 caller 输出超 columns-1 的逻辑行 → 测试失败；block-renderer / 卡片渲染等 caller 在 PR 中标注 "已 wrapAnsiLine" |
 | segment 内容超 region 容量 | 设计约束 | partial commit 协议（基于 \n 在 scrollBottom 自然滚动） |
 | dim / highlight 撕裂视觉债（极长 block 在 scrollback "上 dim + 下 highlight"）| 已知妥协（继承自当前架构）| 不在本方案修复范围；与 "scrollback 不可改 + segment 双态" 的根本约束相关，待后续单独议题 |
 | chrome 高度动态变化时 cursor 跳跃 bug | 工程层 | 协议明确（场景区分 + 原子性） + 测试覆盖（input 多行 paste / panel 弹出 / status 切换） |
-| alt-screen 切换时 DECSTBM 状态丢失 | 工程层 | 显式协议：alt-screen 进入前 suspend，退出后 resume |
+| alt-screen 切换时 DECSTBM 状态丢失 | 工程层 | （2026-05-16 更新：现状为 `suspend()` 自身 emit `\x1b[?1049h` 进 alt buffer、`resume()` emit `\x1b[?1049l` 出；`scroll-region.ts:resume()` 防御性 re-emit `\x1b[1;<scrollBottom>r` 兜底 DECSTBM 跨 buffer implementation-defined） |
 | resize 时 segment 持有数据语义 | 工程层 | 不强制 commit，segment handle 保持活性；下次 replace 自然按新 scrollBottom 重写 |
 | 异常退出 DECSTBM 残留影响 shell | 工程层 | process.on('exit') + 异常处理路径清理 |
 | status-bar 250ms tick 触发频繁 chrome 重画 | 工程层 | 高度不变时仅刷内容，不重设 DECSTBM；重画范围限定 chrome 区域（极小） |

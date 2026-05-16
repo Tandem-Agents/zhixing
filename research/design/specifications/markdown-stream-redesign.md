@@ -145,7 +145,7 @@ end() → segment.commit(renderFullMarkdown(buffer))
 ### 设计原则
 
 1. **单不变量**：一段 markdown 一个 `ReplaceableSegment`，与平台 `ScreenController.hasActiveSegment` 单段约束天然对齐。不存在多 segment 切换错位（消除 Bug 1 整类）。
-2. **状态最少**：`buffer` + `segment` 两个字段，无其他状态。
+2. **状态最少**：`buffer` + `segment` 两个核心字段。（2026-05-15 更新：最终实现 render 路径为 3 个字段——`buffer` + `segment` + `lastRenderedAnsi`；`lastRenderedAnsi` 是本 spec "行数单调性"小节强制要求的"用前次 ANSI 兜底"机制的落地载体，属算法内部消化状态而非旧 7 字段那种互不正交的并行状态机，简化承诺的实质不变。）
 3. **emit 路径单一**：`segment.replace` 流式期 + `segment.commit` 闭合期。不存在 5 条路径互不收敛。
 4. **与 marked 行为脱钩**：黑盒输入字符 → 输出 ANSI；不依赖 token 边界稳定（消除 Bug 2 整类）。
 5. **现有 hold 契约保留**：`segment.replace` 是覆盖整段而非 append-only forward，所有末尾未闭合 token 的 hold 契约（heading / hr / blockquote / paragraph 末位 inline）**完整保留**——不引入"字面 markdown 标记暴露"的视觉退化。
@@ -204,7 +204,7 @@ export class MarkdownStream {
 
 **三档模式（单一入口分发）**：MarkdownStream 是 markdown 渲染的**单一入口**。三档模式由本类内部分发，**早返回简单路径**，不耦合 render 主状态机：
 
-- **render**（默认，TTY 完整渲染）：进入"buffer + 单 segment + 整段 re-render"主路径，要求注入 `beginReplaceableSegment`。状态字段简化为 `buffer + segment` 二态
+- **render**（默认，TTY 完整渲染）：进入"buffer + 单 segment + 整段 re-render"主路径，要求注入 `beginReplaceableSegment`。状态字段简化为 `buffer + segment` 二态（2026-05-15 更新：实现实际为 3 字段，含行数单调性兜底 `lastRenderedAnsi`，详见"设计原则"小节第 2 条标注）
 - **strip**（CI / pipe / 日志）：**保留当前增量 emit 状态机**（`emittedBlockCount` / `paragraphForwardedTo` / `lastEmittedWasParagraph` 等），调 `renderBlock(token, ctx with mode=strip)` + `renderInline(token, strip)` 获得保留 block 结构（hashes / markers / 缩进 / wrap）但无 ANSI 染色的输出，经 `appendInline` 增量 forward。链接退化为 `text (url)`；不进入 segment。**与 render 模式状态机模型独立**——append-only 路径不可整段 re-render
 - **raw**（调试）：`appendInline(chunk)` 原文转发，不解析
 

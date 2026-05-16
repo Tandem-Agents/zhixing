@@ -347,8 +347,10 @@ type NonInteractiveStrategy =
 
 ### 6.1.1 可行性调研结论（2026-04-13）
 
+> （2026-05-16 更新：本节及 §6.3 / §6.4 / 第九章 Step 2-3 描述的 **`packages/cli/src/tui/select-with-input.ts` 独立 alt-screen 组件已被取代并删除**。commit 6baa41e 用 chrome 内联的 `SelectOperationRegion` 替换 `selectWithInput`——权限面板不再切独立屏 / 不再"擦 N 行原地重绘"，而是作为 chrome 底部"操作区"（实现 `InputRegion`，经 `ScreenController.attachInput` 接入，与 typeahead InputController 同协议），scrollback 始终可见。当前实现见 [packages/cli/src/security/select-operation-region.ts](../../../packages/cli/src/security/select-operation-region.ts) + [packages/cli/src/security/terminal-renderer.ts](../../../packages/cli/src/security/terminal-renderer.ts)；状态机纯 reducer 见 `packages/cli/src/tui/_internal/select-state.ts`。下文"自研纯 Node + ANSI 原地重绘可行"的核心结论仍成立，但 §6.4 的 rerender cursor 不变量 / `\r\n` 分隔 / "擦 N 行"循环等细节是 alt-screen 原地重绘形态的历史教训，**不再对应现状**——chrome 内联形态的渲染由 ScreenController 协调，无独立组件自管原地重绘。)
+
 > 原方案预留了风险："自研组件工程量可能被低估"。已做专项调研并**证明风险消除**。
-> 调研产物已落地为生产代码 [packages/cli/src/tui/select-with-input.ts](../../../packages/cli/src/tui/select-with-input.ts) + 47 条测试；原型目录 `.tmp-tui-probe/` 完成使命后已删除。
+> 调研产物（已删，见上方更新）+ 47 条测试；原型目录 `.tmp-tui-probe/` 完成使命后已删除。
 >
 > **验证路径**：8 个自动化场景全绿 → 真实 Windows Terminal 手动验收 → 一次 cursor off-by-one bug 暴露 → 修复后再次验收通过。bug 的根因与规避已回写到 §6.4。
 
@@ -580,7 +582,9 @@ for (let i = 0; i < lastRenderHeight; i++) {
 
 #### 参考实现
 
-生产实现见 [packages/cli/src/tui/select-with-input.ts](../../../packages/cli/src/tui/select-with-input.ts)（已完成，含 §6.4 的全部修复）。Step 2 当初的原型约 200 行，落地版本补齐了：
+> （2026-05-16 更新：原"生产实现见 `packages/cli/src/tui/select-with-input.ts`"已过时——该独立 alt-screen 组件被 commit 6baa41e 删除并由 chrome 内联 `SelectOperationRegion` 取代，详见 §6.1.1 节首更新说明。下列落地清单是 alt-screen 形态的历史记录，chrome 内联形态见 [select-operation-region.ts](../../../packages/cli/src/security/select-operation-region.ts)。)
+
+历史落地版本（已删）在 ~200 行原型基础上补齐了：
 
 - 加入 `stdout.columns` 自适应 + wcwidth CJK 宽度计算
 - 加入 `process.stdout.on("resize", rerender)`
@@ -819,7 +823,9 @@ interface ConfirmationEvent {
 
 **目标**：基于可行性调研（见 §6.1.1），**一步到位**实现包含 inline input 能力的纯 Node 组件。不走 `@inquirer/prompts` 过渡。
 
-**交付物**：
+> （2026-05-16 更新：本 Step 与 Step 3 的 `select-with-input.ts` 独立 alt-screen 组件**已被 chrome 内联 `SelectOperationRegion` 取代并删除**，详见 §6.1.1 节首更新。下方为历史规划，现状实现见 [select-operation-region.ts](../../../packages/cli/src/security/select-operation-region.ts) + [terminal-renderer.ts](../../../packages/cli/src/security/terminal-renderer.ts)。）
+
+**交付物**（历史规划，已删）：
 - `packages/cli/src/tui/select-with-input.ts` — 核心组件，纯函数接口：
   ```typescript
   export interface SelectWithInputOptions {

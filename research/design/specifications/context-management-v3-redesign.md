@@ -1,8 +1,8 @@
 # 上下文管理 · v3 重构方向 (Context Management v3 Redesign)
 
-> **状态**: 📐 核心设计已敲定（2026-05-11），spec 阶段未启动
+> **状态**: ✅ Phase 1 已实施落地（2026-05-11 更新：原"spec 阶段未启动"已过时——§十 Phase 1 的 1.A 砍除 / 1.B 基础设施 / 1.C task_list / 1.D SegmentManager 已全部入主线，见 [`../implementation-v3-context-phase1.md`](../implementation-v3-context-phase1.md)；Phase 2 产品化仍后置）
 >
-> **定位**: 知行上下文管理的目标架构——以 **cache 第一优先 + 优质注意力窗口 + 段式管理** 为核心范式。
+> **定位**: 知行上下文管理的**新单一来源**——以 **cache 第一优先 + 优质注意力窗口 + 段式管理** 为核心范式。本文为权威设计；与已实现代码的对接点见 implementation-v3 计划文档。
 >
 > **关联**:
 > - [context-architecture.md](./context-architecture.md) — v1.2 数据层权威
@@ -315,7 +315,7 @@ interface AgentRoleProfile {
 
 session 创建时根据 profile 一次性 freeze tools[]，会话期间 byte-equal。
 
-**与现状的 gap**：当前 `AgentRoleProfile`（`packages/orchestrator/src/profile/agent-role-profile.ts:11-40`）**无 `enabledTools` 字段**，tools[] 在 `create-agent-runtime.ts:511-544` 处硬编码装配（`baseTools + Task`）不经 profile。v3 实施时必须：(a) 新增 `enabledTools` 字段；(b) 重构 tools[] 装配路径从硬编码改为 profile 驱动；(c) main / sub-agent 两个 profile 实例显式声明 `enabledTools`。这是 Phase 1 必做的**新增工作**，不是回退。
+**与现状的 gap**（2026-05-11 更新：以下 gap 已在 Phase 1 消除）：`AgentRoleProfile.enabledTools` 字段已新增（`packages/orchestrator/src/profile/agent-role-profile.ts:44`），tools[] 装配已重构为 profile 驱动（`create-agent-runtime.ts:387-483`，`profile.enabledTools` 为唯一权威源，含防递归：sub-agent profile 不含 "Task"），main / sub-agent 两个 profile 实例已显式声明 `enabledTools`。原文以下描述为该重构的设计意图，保留作记录。
 
 ### 7.3 与段切换的关系
 
@@ -327,7 +327,7 @@ session 创建时根据 profile 一次性 freeze tools[]，会话期间 byte-equ
 
 ### 8.1 task_list 工具
 
-- **当前 codebase 未实现**——Phase 1 必须新增（与 SegmentManager 同 Phase 内置，作为 §4.2 评估策略的前置依赖）
+- （2026-05-11 更新：原"当前 codebase 未实现"已过时——task_list 已在 Phase 1 实现，工具实现 `packages/tools-builtin/src/task-list.ts`、orchestrator 接线 `packages/orchestrator/src/tools/task.ts`，工具名 `task_list`，作为 main profile 内置）
 - LLM 自我组织工具（普通工具，main profile 内置）
 - 单一动作 `task_list.set(items)`，每项含 `content` + `status: pending | in_progress | completed`
 - `in_progress` 状态作为 §4.2「无 in-progress 任务标识」的判定来源

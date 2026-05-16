@@ -39,6 +39,8 @@
 - **自适应精度**：追踪估算误差，动态调整比率
 - **百分比阈值**：自适应不同窗口大小
 
+> 2026-05-11 更新：上方"知行策略"的"3 层压缩（L1 截断 / L2 丢弃 / L3 摘要）+ Tier 压缩 + 动态驱逐"为早期方案，已整体砍除。当前实现范式为 cache 第一优先 + 优质注意力窗口 + 段式 SegmentManager + tools 满载稳定，新单一来源见 [context-management-v3-redesign.md](../../design/specifications/context-management-v3-redesign.md)（Phase 1 已实施）。本文以下竞品调研内容仍有效。
+
 ## 对应源码分析
 
 - [OpenClaw 上下文管理](../../source-analysis/openclaw/context-management.md)

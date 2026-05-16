@@ -151,9 +151,9 @@
 - **共享**:`SecurityPipeline`、`PermissionStore`(父 alwaysAllow 规则自动惠及子调用)、`MemoryStore`(只读访问,Memory 工具 `subAgentSafe: false` 已硬隔离写)、provider / API key、tool registry、project context
 - **隔离 per spawn**:`AgentRoleProfile`、`IEventBus`(子 bus)、`AbortController`(forkController 派生)、`ConfirmationBroker`(子 broker 默认 `failToDenyResolver`)、conversation messages(空白起始,只含 synthetic Begin)
 
-**INV-S3. capability-tag 单一真相源(决定 #10)**:子 agent 工具子集 = `parentTools.filter(t => t.subAgentSafe === true)`。**禁止**维护独立黑名单 / 白名单。新增工具时其 `subAgentSafe` 由工具自身声明。
-- 默认 `subAgentSafe: undefined === false`(fail-closed,与 `isParallelSafe` / `needsPermission` 一致的保守哲学)
-- Task 工具自身 `subAgentSafe: false` 实现深度 1 限制
+**INV-S3. profile.enabledTools 单一真相源(决定 #10)**(2026-05-11 更新:实现已改为 profile 驱动,不再用 `subAgentSafe` capability tag——`ToolDefinition.subAgentSafe` 字段已从 `packages/core/src/types/tools.ts` 删除):子 agent 工具子集由 sub-agent `AgentRoleProfile.enabledTools` 显式声明驱动(`packages/orchestrator/src/profile/agent-role-profile.ts:44`),tools[] 装配以 `profile.enabledTools` 为唯一权威源(`packages/orchestrator/src/runtime/create-agent-runtime.ts:387-483`)。**禁止**维护独立黑名单 / 白名单。
+- 防递归由 sub-agent profile 的 `enabledTools` 不含 `"Task"` 实现(原"Task 自身 `subAgentSafe: false`"机制已废弃)
+- fail-closed:profile 未声明的工具名不进入装配
 - 配置 `intent.subagent.maxDepth` 默认 1;若放宽到 2+,`runChildAgent` 检测当前深度 + 1 < maxDepth 时显式注入 Task closure 到子 tools
 
 **INV-S4. AbortReason.parent-abort 单向 typed cascade(决定 #10)**:父 abort 触发的子 abort **必须**携带 `AbortReason { kind: "parent-abort", parentReason }`(由 [`forkController`](../../../packages/core/src/interrupt/controller.ts#L148-L167) 已自动注入)。子 fail / 子超时 / 子主动 user-cancel **不**反向触发父 abort,父继续运行,子失败包成 `tool_result.is_error: true` 由父 LLM 决定后续。
@@ -625,7 +625,9 @@ export function deriveChildLineage(
 }
 ```
 
-### 3.5 `ToolDefinition.subAgentSafe` capability tag
+### 3.5 子 agent 工具过滤:`profile.enabledTools`
+
+> 2026-05-11 更新:本节原描述 `ToolDefinition.subAgentSafe` capability tag 过滤方案,该字段已从代码删除。实现已改为 sub-agent `AgentRoleProfile.enabledTools` 显式声明驱动(`agent-role-profile.ts:44` + `create-agent-runtime.ts:387-483` 为唯一权威装配源)。下方原 `subAgentSafe` 字段定义与"8 个 builtin 默认值"表保留为决策痕迹,**不代表当前代码**——sub-agent 实际可用工具集以 sub-agent profile 的 `enabledTools` 列表为准。
 
 **位置**:[core/types/tools.ts:246-342](../../../packages/core/src/types/tools.ts#L246-L342)(M1.5 加字段)
 

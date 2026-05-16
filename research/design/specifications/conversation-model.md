@@ -876,15 +876,15 @@ T=3600s 钉钉来新消息
 
 ### 9.3 上下文架构 → 见 [context-architecture.md](./context-architecture.md)
 
-上下文管理的完整设计（Layer 组装、消息管理、多级压缩、场景参数化、LLM 压缩兜底）见 [context-architecture.md](./context-architecture.md)。
+上下文管理的完整设计见 [context-management-v3-redesign.md](./context-management-v3-redesign.md)（2026-05-11 更新：原指向的 context-architecture.md v1.2 已废弃——Tier 多级压缩 / 场景参数化 / 动态驱逐 / recall_history / Pinning 均已从 `packages/` 砍除；新范式为 cache 第一优先 + 段式 SegmentManager + tools 满载稳定，Phase 1 已实施）。
 
-核心要点：
+核心要点（2026-05-11 更新后）：
 
 - transcript.jsonl 严格 append-only
-- 上下文由 `prepareTurn()` 统一组装（CLI / Server 同一入口）
-- 默认路径用免费手段（Tier 压缩 + Turn 驱逐），CRITICAL 时 LLM 摘要兜底
-- 远轮原文通过 `recall_history` 工具按需取回（驱逐 ≠ 丢失）
-- Conversation 新增字段：`pinnedMessageIds` / `currentHint` / `ephemeral`（已在 §3.1 接口中声明）
+- 段内 messages append-only + tools[] / system byte-equal → cache 完美命中
+- 触顶（attention 双档阈值）在 turn 边界整段切，走"缓存安全分叉"一次性 LLM 摘要
+- 段切换复用 `CompactMarker`（扩展 `segmentId` / `structuredSummary` 选填字段）；段历史走 `Conversation.segmentMetadata`
+- `recall_history` / `pinnedMessageIds` / Tier 压缩 / Turn 驱逐机制**已删除**，不再是当前路径
 
 > **历史留存**：本节曾包含"三段窗口压缩方案"（长期摘要 + 中期摘要 + 近期原文），于 2026-04-17 被 [context-architecture.md](./context-architecture.md) 取代。撤销理由见 ADR-CM-011。完整原文存于 git 历史 `conversation-model.md@v2.0`。
 

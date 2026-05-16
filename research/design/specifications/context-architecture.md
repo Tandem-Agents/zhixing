@@ -1,5 +1,11 @@
 # 上下文架构 (Context Architecture)
 
+> ⚠️ **DEPRECATED（2026-05-11 起）**
+>
+> 本文（v1.2）描述的"场景参数化（ScenarioEvaluator/ContextProfile）+ 多级 Tier 压缩 + 动态驱逐 + Pinning + recall_history + TurnDigest"范式已被整体砍除（commit e182562~aa8678a，2026-05-11）。tier-compressor / window-manager / recall_history / capability 系统 / ContextCompiler 均已从 `packages/` 删除。上下文管理的新单一来源是 [`context-management-v3-redesign.md`](./context-management-v3-redesign.md)（cache 第一优先 + 优质注意力窗口 + 段式 SegmentManager + tools 满载稳定），Phase 1 已实施落地（见 [`../implementation-v3-context-phase1.md`](../implementation-v3-context-phase1.md)）。本文保留为决策痕迹，不再作为实施依据。
+>
+> ---
+>
 > **版本**: v1.2
 > **状态**: 📐 设计稿（2026-04-18）
 > **定位**: 上下文管理的**唯一权威设计文档**。取代 context-engine.md、context-management.md、context-architecture-draft.md 三份旧文档。

@@ -17,7 +17,7 @@
 | 007 | 输入补全 | [input-typeahead.md](input-typeahead.md) | 待审阅 |
 | 008 | Server Gateway | [server-gateway.md](server-gateway.md) | 待审阅 |
 | 009 | 对话模型（Conversation / SessionRuntime / Transcript） | [conversation-model.md](conversation-model.md) | 设计中 |
-| 010 | 上下文架构（场景参数化 + 多级压缩 + LLM 兜底 + Turn Digest） | [context-architecture.md](context-architecture.md) | 设计中 |
+| 010 | 上下文架构（v1.2 已废弃；新单一来源见 context-management-v3-redesign.md） | [context-architecture.md](context-architecture.md) | ⚠️ 已废弃 |
 | 011 | 网络出口原语（@zhixing/network） | [network-egress.md](network-egress.md) | 已实施 |
 | 012 | 内置工具集（@zhixing/tools-builtin） | [tools-builtin.md](tools-builtin.md) | 已实施 |
 | 013 | 可中断 Agent Loop（中断协议 + idle 看门狗 + 协议清理） | [interruptible-agent-loop-execution.md](interruptible-agent-loop-execution.md) | 设计中 |

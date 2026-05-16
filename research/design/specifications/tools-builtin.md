@@ -22,6 +22,9 @@
 | `memory` | 用户记忆持久化 | 工作空间内文件操作 |
 | `schedule` | 创建 / 列表 / 更新 / 删除定时任务 | 任务系统副作用 |
 | `web_fetch` | 抓取 URL，可选 secondary LLM 蒸馏 | network egress 边界，需确认 |
+| `task_list` | LLM 自我组织当前任务列表（`task_list.set` 单动作） | 只读副作用（写 conversation meta） |
+
+> 2026-05-11 更新：新增 `task_list`（`packages/tools-builtin/src/task-list.ts` + orchestrator 接线 `packages/orchestrator/src/tools/task.ts`），随 context-management v3 Phase 1 落地，仅 main profile 启用，是段切换 in-progress 判定的前置依赖（见 [context-management-v3-redesign.md](./context-management-v3-redesign.md) §8.1）。
 
 `read / write / edit / glob / grep / bash` 通过专属 context classifier（FileSystemClassifier / ShellClassifier）接管分类，**不**声明 `boundaries`。`memory / schedule` 同理走 Internal classifier。`web_fetch` 是首个无 context classifier、走 `BoundaryImpactClassifier` 的工具，因此**必须**声明 `boundaries`。
 

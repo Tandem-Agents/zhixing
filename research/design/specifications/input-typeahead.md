@@ -1039,7 +1039,18 @@ UX 不变量: suggestions.length > 0 ⇒ selectedIndex === 0  (初次渲染)
 
 ### 7.1 和 `SelectWithInput` 的关系
 
-`SelectWithInput`（[packages/cli/src/tui/select-with-input.ts](../../../packages/cli/src/tui/select-with-input.ts)，579 行）在 Phase 1 of confirmation-ux 已经交付，含 §6.4 的 cursor 不变量 + stdin 独占护栏两个关键修复。
+> （2026-05-16 更新：本节及下方"模块组织"树、第十章 Step 1、§风险 #1 把
+> `packages/cli/src/tui/select-with-input.ts`（"579 行"）当作已交付的独立
+> alt-screen 组件、并以"从它抽取内核"为前提——**该组件已被 commit 6baa41e
+> 删除**，由 chrome 内联的 `SelectOperationRegion` 取代（见 confirmation-ux.md
+> §6.1.1）。共通内核确实已抽到 `packages/cli/src/tui/_internal/`（`raw-mode.ts`
+> / `cursor-invariants.ts` / `select-state.ts` 等），但**复用方是
+> `SelectOperationRegion` 而非已删的 `select-with-input.ts`**；typeahead
+> 的现状实现见 [packages/cli/src/typeahead-input.ts](../../../packages/cli/src/typeahead-input.ts)
+> + [packages/cli/src/tui/typeahead-panel.ts](../../../packages/cli/src/tui/typeahead-panel.ts)。
+> "提取内核、不继承"的复用策略本身仍成立，下文按历史规划保留。)
+
+`SelectWithInput`（历史上的独立组件，已删，见上方更新）在 Phase 1 of confirmation-ux 已经交付，含 §6.4 的 cursor 不变量 + stdin 独占护栏两个关键修复。
 
 **但 `SelectWithInput` 是一次性组件** —— 进入 → 收决定 → 退出。Typeahead 不一样：**常驻在 REPL prompt 下方，跟随 draft 变化持续重绘**。
 

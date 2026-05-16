@@ -1,8 +1,10 @@
 # L3 LLM 摘要压缩方案
 
+> 2026-05-11 更新：本文锚定的 "L3" 三级 Tier 压缩模型（context-architecture.md v1.2 §九）已整体砍除。当前上下文管理范式见 [context-management-v3-redesign.md](./context-management-v3-redesign.md)——LLM 摘要不再是"L3 兜底层"，而是段切换（"缓存安全分叉"）时的一次性结构化摘要，prompt 三段结构（facts / state / active）见 v3 §5.1。本文的竞品摘要模板对比（OpenClaw / Claude Code）仍有参考价值，保留为设计调研；文中"L3 兜底层 / context-architecture §九"等描述指向已废弃路径，不代表当前实现。
+
 > **状态**: 📐 方案设计（2026-04-09）
-> **前置**: context-architecture.md 已设计；CircuitBreaker 已实现
-> **关联**: context-architecture.md §九 LLM 压缩、phase2-complete-agent.md Phase 2D-3
+> **前置**: ~~context-architecture.md 已设计~~（已废弃，见上）；CircuitBreaker 已实现
+> **关联**: ~~context-architecture.md §九 LLM 压缩~~ → context-management-v3-redesign.md §5；phase2-complete-agent.md Phase 2D-3
 
 ## 一、竞品摘要模板对比
 
