@@ -52,7 +52,7 @@ import type { Message } from "../types/messages.js";
 import { toToolSpec } from "../types/tools.js";
 import { streamLLMCall } from "./llm-call.js";
 import { executeToolCalls } from "./tool-executor.js";
-import { runTurnEnd } from "./turn-end.js";
+import { runTurnBegin, runTurnEnd } from "./turn-end.js";
 import { logDiagnostic } from "../diagnostics.js";
 import type {
   AgentLoopDeps,
@@ -226,6 +226,27 @@ export async function* runAgentLoop(
   });
 
   try {
+    // ── Turn 开始钩子 —— 首个 LLM 调用前一次性段切换（只 ②） ──
+    //
+    // 与 runTurnEnd 对称但只跑 ② segmentManager（①onTurnComplete 是"turn 完成"
+    // 语义钩子、③ 属 turn 结束，均不放首调前——见 runTurnBegin 注释）。位置在
+    // while 循环外 → 天然每 run 一次，无需 flag。无条件跑：未超阈是廉价 no-op
+    //（纯估算+比较，无 LLM）；超阈（恢复的持久对话 / 首条超大输入超注意力窗口）
+    // 则在第一次 streamLLMCall 前就压缩，而非先吃一个超窗口 turn 再 turn-end
+    // 自愈。runTurnBegin 永不 terminal，直接写回 state.messages 供首个 LLM call。
+    state = {
+      ...state,
+      messages: await runTurnBegin({
+        segmentManager: params.segmentManager,
+        messages: state.messages,
+        systemPrompt: params.systemPrompt ?? "",
+        tools: params.tools ?? [],
+        turnCount: state.turnCount,
+        conversationId: params.conversationId,
+        abortSignal: controller.signal,
+      }),
+    };
+
     while (true) {
       // ── Guard: abort ──
       // 早退出避免无意义的 LLM/工具调用工作。语义上"abort 优先"由 finalizeRun 内部

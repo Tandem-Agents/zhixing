@@ -21,6 +21,8 @@
  *
  *   ① budget-driven 兜底（ContextManager / 窗口百分比触发）
  *   ② attention-driven 切段（SegmentManager / 注意力阈值触发）
+ *      —— {@link runTurnBegin}（首个 LLM 调用前一次性）**只**跑 ②、不跑 ①③；
+ *      它自带 ② inline（不与本处抽公共 helper，理由见 runTurnBegin 注释）。
  *   ③ 上下文 tokens 快照 emit（estimator + eventBus 注入时）
  *   ④ 未来扩展：metrics / persistence checkpoint / per-turn 任意副作用
  *
@@ -133,6 +135,66 @@ export interface TurnEndParams {
    * 内化处理，调用方无需感知。详见 {@link TokenAnchor}。
    */
   readonly anchor?: TokenAnchor;
+}
+
+// ─── Turn 开始钩子（首个 LLM 调用前一次性，只 ②） ───
+
+/**
+ * runTurnBegin 入参 —— 仅 ② 段切换所需子集。
+ *
+ * 刻意比 TurnEndParams 窄：runTurnBegin 不需要 contextManager(①) / usage /
+ * tokenEstimator / eventBus / anchor(③)，签名不对调用方"撒谎"需要这些。
+ * messages 取 `readonly` —— 直接接受 agent-loop 的 state.messages
+ * （`readonly Message[]`），调用方无需先拷贝。
+ */
+export interface SegmentSwitchParams {
+  readonly segmentManager?: SegmentManager;
+  readonly messages: readonly Message[];
+  readonly systemPrompt: string;
+  readonly tools: readonly ToolDefinition[];
+  readonly turnCount: number;
+  readonly conversationId?: string;
+  readonly abortSignal: AbortSignal;
+}
+
+/**
+ * Turn 开始（首个 LLM 调用前）一次性段切换评估 —— 与 runTurnEnd 对称但**只跑 ②**。
+ *
+ * 为何只 ②：
+ *   - ① `contextManager.onTurnComplete` 是"turn 完成"语义钩子；turn 开始时无
+ *     已完成 turn、initial messages 非 user/assistant 配对，调它违反钩子契约
+ *     （契约由 agent-loop P0-F/P0-L 测试守护）。① 留 turn-end。
+ *   - ③ tokens 快照属 turn 结束语义，且首个 call 前 anchor 必缺。
+ *   - ② `segmentManager.evaluate` 是无状态"当前上下文是否超注意力窗口"评估，
+ *     首调前完全合法，且正是真实需求：恢复的持久对话 / 首条超大输入超注意力
+ *     窗口时，在第一次 streamLLMCall 前就压缩，而非先吃一个超窗口 turn 再
+ *     turn-end 自愈。② optimal 阈值是最早触发点（attention ≪ budget ≪ 硬窗口），
+ *     单跑 ② 已足以避免超窗口首调。
+ *
+ * 为何不与 runTurnEnd 的 ② 抽公共 helper：② 仅一次 evaluate 调用 + 一个三元；
+ * 且 turn-end 在 `Message[]`、turn-begin 在 `readonly Message[]` 上工作（数组
+ * 变体不同），强抽公共签名反而要 cast/拷贝。本文件 header 明示的 YAGNI 训诫下，
+ * 两处各自 inline 的 ~6 行更清晰，无隐式抽象债。
+ *
+ * 无条件每 run 一次（caller 放在循环外保证）；未超阈是廉价 no-op（纯估算+比较，
+ * 无 LLM）。永不 terminal（evaluate 内部已吞失败返 modified:false），返回 Message[]
+ * （no-op 路径浅拷贝 readonly 入参为 mutable，每 run 仅一次，成本可忽略）。
+ */
+export async function runTurnBegin(
+  params: SegmentSwitchParams,
+): Promise<Message[]> {
+  if (!params.segmentManager) return [...params.messages];
+  const seg = await params.segmentManager.evaluate({
+    messages: params.messages,
+    systemPrompt: params.systemPrompt,
+    tools: params.tools.map(toToolSpec),
+    turnCount: params.turnCount,
+    conversationId: params.conversationId,
+    abortSignal: params.abortSignal,
+  });
+  return seg.modified && seg.newSegmentMessages
+    ? seg.newSegmentMessages
+    : [...params.messages];
 }
 
 // ─── 钩子 ───

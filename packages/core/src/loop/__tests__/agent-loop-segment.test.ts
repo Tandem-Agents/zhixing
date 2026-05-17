@@ -139,17 +139,77 @@ describe("agent-loop × SegmentManager 集成", () => {
       }),
     );
 
-    // turn-end 钩子在每个 turn 边界都调段切换 —— provider 跑 2 个 turn
-    // （turn 1 工具调用 / turn 2 纯文本结束），两个 turn 都触发 trigger 决策。
-    // 这是钩子单点设计的必然结果：纯文本路径和工具路径同走 runTurnEnd 一处编排，
-    // 不再像历史实现那样只在工具路径触发段切换。
-    //
-    // 历史 bug：纯文本路径漏调段切换 → 跨 run 段历史永不收敛；钩子抽取后修复。
+    // 段切换共 3 次（aggressiveCap 下每次评估都 trigger）：
+    //   1× runTurnBegin —— 首个 LLM 调用前一次性 ②（初始 [user "hi"] 估算即超阈）
+    //   2× runTurnEnd  —— turn 1 工具路径 / turn 2 纯文本路径，同走 runTurnEnd 编排
+    // turn-begin 与 turn-end 同走 applySegmentSwitch 单点；纯文本路径不再像历史
+    // 实现那样漏调段切换（历史 bug：纯文本漏调 → 跨 run 段历史永不收敛）。
     //
     // transcript marker 不走 persistence.writeMarker —— 通过 segment:new_started
     // 事件流向 orchestrator accumulator → run-agent 单点 commit。
-    expect(callLLM).toHaveBeenCalledTimes(2);
-    expect(persistence.appendSegment).toHaveBeenCalledTimes(2);
+    expect(callLLM).toHaveBeenCalledTimes(3);
+    expect(persistence.appendSegment).toHaveBeenCalledTimes(3);
+  });
+
+  it("runTurnBegin：初始上下文超阈 → 首个 LLM 调用即用压缩后 messages（不先吃超窗口 turn）", async () => {
+    // 本测试锁定 runTurnBegin 的核心契约：超阈的起始上下文在**第一次
+    // streamLLMCall 之前**就被段切换压缩，而非先吃一个超窗口 turn 再 turn-end
+    // 自愈。验证手段：provider.calls[0]（turn 1，即首个 LLM 请求）的首条消息
+    // 已含 compose 段切换输出的 <previous-segment-summary>。
+    const callLLM = vi
+      .fn<(req: SegmentSummarizeRequest) => Promise<string>>()
+      .mockResolvedValue(SUMMARY_OK);
+
+    const segmentManager = createSegmentManager({
+      estimator: fakeEstimator(20),
+      capability: aggressiveCap,
+      callLLM,
+      persistence: fakePersistence(),
+      taskListReader: fakeReader(),
+      retryBaseMs: 0,
+      generateSegmentId: () => "seg-begin",
+    });
+
+    const provider = makeToolThenTextProvider("t");
+    await drainAgentLoop(
+      baseParams(provider, { segmentManager, conversationId: "conv-1" }),
+    );
+
+    // 首个 LLM 请求（turn 1）已是 runTurnBegin 压缩后的新段 messages
+    expect(provider.calls.length).toBeGreaterThanOrEqual(1);
+    const turn1FirstText = (
+      provider.calls[0]!.messages[0]!.content[0] as { type: string; text: string }
+    ).text;
+    expect(turn1FirstText).toContain("<previous-segment-summary>");
+    expect(turn1FirstText).toContain("<facts>F</facts>");
+  });
+
+  it("runTurnBegin：未超阈 → no-op，首个 LLM 调用用原始 messages、不调压缩 LLM", async () => {
+    const callLLM = vi
+      .fn<(req: SegmentSummarizeRequest) => Promise<string>>()
+      .mockResolvedValue(SUMMARY_OK);
+
+    const segmentManager = createSegmentManager({
+      estimator: fakeEstimator(1), // tokens 远低于 optimal
+      capability: lenientCap,
+      callLLM,
+      persistence: fakePersistence(),
+      taskListReader: fakeReader(),
+      retryBaseMs: 0,
+      generateSegmentId: () => "seg-noop",
+    });
+
+    const provider = makeToolThenTextProvider("t");
+    await drainAgentLoop(
+      baseParams(provider, { segmentManager, conversationId: "conv-1" }),
+    );
+
+    // 首个 LLM 请求仍是原始 user 输入（无段切换 XML），压缩 LLM 全程未被调用
+    const turn1FirstText = (
+      provider.calls[0]!.messages[0]!.content[0] as { type: string; text: string }
+    ).text;
+    expect(turn1FirstText).not.toContain("<previous-segment-summary>");
+    expect(callLLM).not.toHaveBeenCalled();
   });
 
   it("段切换后 turn 2 的 LLM 请求使用新段 messages（state.messages 已替换）", async () => {
