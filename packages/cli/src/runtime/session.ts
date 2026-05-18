@@ -325,6 +325,16 @@ export class RuntimeSession {
     return this.agentRuntime;
   }
 
+  /**
+   * 当前活动模式 —— 个人记忆维护（journal condense 等）的单一判定源：
+   * 个人记忆域只在 main 模式触达，工作场景模式记忆域是 workscene，绝不能
+   * 跑个人 journal（单向阀）。当前无工作场景叠加，恒为 main（真实当前态，
+   * 非占位）；接入工作场景叠加后本 getter 改为反映叠加，判定点零改动。
+   */
+  get activeMode(): { kind: "main" } {
+    return { kind: "main" };
+  }
+
   /** 当前 scheduler 实例——swap 后自动指向新值 */
   get scheduler(): Scheduler {
     return this.schedulerInstance;

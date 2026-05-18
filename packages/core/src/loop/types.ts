@@ -9,7 +9,10 @@
  */
 
 import type { IEventBus } from "../events/types.js";
-import type { AgentEventMap } from "../types/agent-events.js";
+import type {
+  AgentEventMap,
+  WorkModeSwitchIntent,
+} from "../types/agent-events.js";
 import type { AgentError } from "../types/errors.js";
 import type {
   ChatRequest,
@@ -454,4 +457,12 @@ export interface RunResult {
    * 暂未算出）允许省略；正常路径应填充以便调用方做 UI 预算显示。
    */
   readonly budget?: ContextBudget;
+
+  /**
+   * 本 run 内产生的工作模式切换意图（turn 内 emit、RunResult 带出，与
+   * compactBefore / injectedSkillIds 同构）。accumulator last-wins 收集；
+   * 无 emit 时 undefined。仅意图 —— 切换由 REPL 主回路 turn 边界单一事务
+   * 消费执行，本字段不触发任何切换。
+   */
+  readonly pendingModeSwitch?: WorkModeSwitchIntent;
 }

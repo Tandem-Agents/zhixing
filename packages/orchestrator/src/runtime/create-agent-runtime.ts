@@ -92,6 +92,7 @@ import { mainProfile } from "../profile/default-profiles.js";
 import type { AgentRoleProfile } from "../profile/agent-role-profile.js";
 import { subscribeCompactAccumulator } from "./compact-accumulator.js";
 import { subscribeSegmentMarkerAccumulator } from "./segment-marker-accumulator.js";
+import { subscribeWorkModeAccumulator } from "./workmode-accumulator.js";
 import { createCompactionFlush } from "./compaction-llm.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import {
@@ -895,6 +896,10 @@ export async function createAgentRuntime(
       // 等更丰富的结构化信息）。
       const segmentAccumulator = subscribeSegmentMarkerAccumulator(eventBus);
 
+      // 工作模式切换意图收集 —— last-wins 单一意图（非累加）。纯管道:
+      // 仅收集,run 结束带出 RunResult.pendingModeSwitch,不执行任何切换。
+      const workModeAccumulator = subscribeWorkModeAccumulator(eventBus);
+
       // 资源清理统一入口 —— 每个 dispose 独立 try-catch 隔离故障传播:
       //   - accumulator 抛错不能阻断 disposeRender(否则 CLI 渲染订阅 / interrupt
       //     warn ticker 会跨 run 累积,造成内存泄漏与重复渲染);
@@ -902,6 +907,9 @@ export async function createAgentRuntime(
       const disposeAll = (): void => {
         safeDispose("run.accumulator", () => accumulator.dispose());
         safeDispose("run.segmentAccumulator", () => segmentAccumulator.dispose());
+        safeDispose("run.workModeAccumulator", () =>
+          workModeAccumulator.dispose(),
+        );
         safeDispose("run.decorate", () => disposeRender?.());
       };
 
@@ -989,6 +997,7 @@ export async function createAgentRuntime(
             toolEndCount: 0,
             injectedSkillIds: enrichedContext.injectedSkillIds,
             compactBefore,
+            pendingModeSwitch: workModeAccumulator.getIntent(),
           };
         };
 
@@ -1121,6 +1130,7 @@ export async function createAgentRuntime(
               toolEndCount,
               injectedSkillIds: enrichedContext.injectedSkillIds,
               compactBefore,
+              pendingModeSwitch: workModeAccumulator.getIntent(),
             };
           }
 

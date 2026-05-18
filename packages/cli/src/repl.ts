@@ -99,7 +99,9 @@ import { createReplInterruptRuntime } from "./interrupt/repl-runtime.js";
 
 interface ReplState {
   messages: Message[];
-  agent: AgentRuntime;
+  // agent 不入 ReplState —— 它是 RuntimeSession 持有的运行时资源，唯一访问
+  // 路径是 session.runtime getter（reload / 工作模式切换后自动指向新实例）。
+  // 值捕获会与 getter 分叉（reload 后旧引用残留），故彻底移除。
   running: boolean;
   /** 持久化 */
   store: TranscriptStore;
@@ -208,7 +210,7 @@ function buildSlashCommands(
         // 顺序：先磁盘清，后视图层 reset —— 失败时内存 messages 仍是 canonical
         // 安全态，下一次 LLM call 不会因半态而异常。
         try {
-          await state.agent.resetConversationState();
+          await session.runtime.resetConversationState();
         } catch (err) {
           cliWriter.line(
             chalk.yellow(
@@ -243,8 +245,8 @@ function buildSlashCommands(
       description: "显示当前模型信息",
       handler: (state) => {
         cliWriter.line(
-          `\n  ${chalk.dim("Model:")} ${chalk.cyan(state.agent.model)}` +
-            `\n  ${chalk.dim("Provider:")} ${state.agent.providerId}` +
+          `\n  ${chalk.dim("Model:")} ${chalk.cyan(session.runtime.model)}` +
+            `\n  ${chalk.dim("Provider:")} ${session.runtime.providerId}` +
             `\n  ${chalk.dim("Turns:")} ${state.turnCounter}\n`,
         );
       },
@@ -268,8 +270,8 @@ function buildSlashCommands(
         cliWriter.line(
           `\n  ${chalk.dim("Session:")} ${state.conversationId ?? "(未保存)"}` +
             `\n  ${chalk.dim("Messages:")} ${state.messages.length} (${userMsgs} user, ${assistantMsgs} assistant)` +
-            `\n  ${chalk.dim("Model:")} ${chalk.cyan(state.agent.model)}` +
-            `\n  ${chalk.dim("Provider:")} ${state.agent.providerId}` +
+            `\n  ${chalk.dim("Model:")} ${chalk.cyan(session.runtime.model)}` +
+            `\n  ${chalk.dim("Provider:")} ${session.runtime.providerId}` +
             `\n  ${chalk.dim("Network proxy:")} ${proxyText}\n`,
         );
       },
@@ -303,12 +305,12 @@ function buildSlashCommands(
         try {
           const conversation = await state.convRepo.create({
             name,
-            preferredModel: state.agent.model,
-            preferredProvider: state.agent.providerId,
+            preferredModel: session.runtime.model,
+            preferredProvider: session.runtime.providerId,
           });
           await state.store.init(conversation.id, {
-            model: state.agent.model,
-            provider: state.agent.providerId,
+            model: session.runtime.model,
+            provider: session.runtime.providerId,
           });
           state.messages = [];
           state.conversationId = conversation.id;
@@ -728,14 +730,14 @@ function buildSlashCommands(
     "/usage": {
       description: "查看 token 用量详情",
       handler: (state) => {
-        const budget = state.agent.checkBudget(state.messages);
+        const budget = session.runtime.checkBudget(state.messages);
         // 解析 transcript 中所有 Task 工具的 <usage> trailer —— 没有 Task 调用时
         // parseTaskUsageFromMessages 返回空数组,renderUsageReport 自动跳过子段
         const subUsages = parseTaskUsageFromMessages(state.messages);
         renderUsageReport(
           budget,
           state.turnCounter,
-          state.agent.calibrationFactor,
+          session.runtime.calibrationFactor,
           subUsages,
           cliWriter,
         );
@@ -744,7 +746,7 @@ function buildSlashCommands(
     "/context": {
       description: "上下文容量可视化",
       handler: (state) => {
-        const budget = state.agent.checkBudget(state.messages);
+        const budget = session.runtime.checkBudget(state.messages);
         renderContextVisual(budget, cliWriter);
       },
     },
@@ -757,7 +759,7 @@ function buildSlashCommands(
         }
         cliWriter.line(chalk.yellow("\n  ⟳ 正在压缩上下文..."));
         try {
-          const result = await state.agent.forceCompact(
+          const result = await session.runtime.forceCompact(
             [...state.messages],
             state.turnCounter,
           );
@@ -798,9 +800,9 @@ function buildSlashCommands(
     },
     "/trust": {
       description: "权限规则管理 (list/revoke/reset)",
-      handler: async (state, args) => {
+      handler: async (_state, args) => {
         await handleTrustCommand(args, {
-          pipeline: state.agent.securityPipeline,
+          pipeline: session.runtime.securityPipeline,
           rl,
           writer: cliWriter,
         });
@@ -808,9 +810,9 @@ function buildSlashCommands(
     },
     "/security": {
       description: "安全状态概览 (rules: 列出策略规则)",
-      handler: (state, args) => {
+      handler: (_state, args) => {
         handleSecurityCommand(args, {
-          pipeline: state.agent.securityPipeline,
+          pipeline: session.runtime.securityPipeline,
           writer: cliWriter,
         });
       },
@@ -1155,7 +1157,6 @@ export async function startRepl(options: ReplOptions): Promise<void> {
 
   const state: ReplState = {
     messages,
-    agent: session.runtime,
     running: false,
     store,
     convRepo,
@@ -1674,10 +1675,14 @@ export async function startRepl(options: ReplOptions): Promise<void> {
           );
         }
 
-        // 首轮对话后异步执行 Journal 生命周期维护
-        if (!state.journalCondenseDone) {
+        // 首轮对话后异步执行 Journal 生命周期维护 —— 个人记忆维护单向阀：
+        // 仅 main 模式触发（工作场景模式记忆域是 workscene，绝不跑个人 journal）。
+        if (
+          session.activeMode.kind === "main" &&
+          !state.journalCondenseDone
+        ) {
           state.journalCondenseDone = true;
-          runJournalLifecycle(state.agent).catch(() => {});
+          runJournalLifecycle(session.runtime).catch(() => {});
         }
       } else {
         // 无会话 ID（无持久化）：降级为内存 append，保持对话语义
