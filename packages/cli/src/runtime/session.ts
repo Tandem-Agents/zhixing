@@ -26,11 +26,14 @@ import {
   type IPermissionStore,
   type IWorkSceneRegistry,
   type WorkScene,
+  type WorkModeSwitchIntent,
 } from "@zhixing/core";
 import {
   createAgentRuntime,
+  runContextStorage,
   type AgentRuntime,
 } from "@zhixing/orchestrator/runtime";
+import type { IWorkModeController } from "./work-mode-controller.js";
 import { powerProfile } from "@zhixing/orchestrator/profile";
 import type { TaskListService } from "@zhixing/tools-builtin";
 import { registerCliTurnContextProviders } from "./turn-context-providers.js";
@@ -75,7 +78,7 @@ interface OldResources {
   channels: ChannelRegistry | null;
 }
 
-export class RuntimeSession {
+export class RuntimeSession implements IWorkModeController {
   // 持有的运行时资源——dispose 时释放。
   // agentRuntime 是常驻 main 槽位（reload blue-green swap 的目标）；
   // workScene 是工作模式 overlay（enter 时装入、exit 时丢弃 GC，power runtime
@@ -216,8 +219,14 @@ export class RuntimeSession {
     spec: { kind: "main" } | { kind: "workscene"; scene: WorkScene },
     existingPermissionStore?: IPermissionStore,
   ): Promise<AgentRuntime> {
+    const isWorkscene = spec.kind === "workscene";
+
     // extra tools 装配走 assembly —— scheduler getter 用 closure 读 this.schedulerInstance，
     // swap 后自动响应；task_list 工具内部通过 ALS 拿 conversationId（assembly 已封装）。
+    // workmode 工具组按 spec.kind 二分注入：main 组（enter/change_approve/
+    // memory_query）vs power 组（exit）。workModeController getter 延迟取 this
+    // （assembly 早于 session 构造，与 scheduler getter 同构）——RuntimeSession
+    // 实现 IWorkModeController，工具只依赖窄接口、可独立单测。
     const extraTools = this.opts.builtinExtraTools.assembleTools({
       scheduler: () => {
         if (!this.schedulerInstance) {
@@ -225,9 +234,9 @@ export class RuntimeSession {
         }
         return this.schedulerInstance;
       },
+      spec: { kind: isWorkscene ? "workscene" : "main" },
+      workModeController: () => this,
     });
-
-    const isWorkscene = spec.kind === "workscene";
 
     return await createAgentRuntime({
       // 工作模式与 cli 会话级覆盖正交 —— 工作场景 runtime 不透传 cli override；
@@ -404,6 +413,27 @@ export class RuntimeSession {
    */
   get workSceneRegistry(): IWorkSceneRegistry {
     return this.workSceneRegistryInstance;
+  }
+
+  // ─── IWorkModeController 实现 ───
+  //
+  // workmode agent 工具经此窄接口与 session 交互（解循环引用 + 可独立单测）。
+  // registry 与 workSceneRegistry 同一实例：后者是 cli 命令既有访问名，前者
+  // 是工具侧的接口契约名，单一底层字段、无分叉。
+
+  get registry(): IWorkSceneRegistry {
+    return this.workSceneRegistryInstance;
+  }
+
+  /**
+   * emit 模式切换意图到当前 run 的 EventBus —— 经 runContextStorage（与
+   * task_list 工具取 conversationId 同款 ALS 机制）拿 per-run bus。只 emit
+   * 不执行切换；非 run 上下文（无 bus，如装配期/单测）下静默 no-op。
+   */
+  emitModeSwitch(intent: WorkModeSwitchIntent): void {
+    runContextStorage
+      .getStore()
+      ?.bus.emit("workmode:switch_requested", intent);
   }
 
   /**

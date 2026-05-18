@@ -32,6 +32,13 @@ import {
   type ScheduleToolOrigin,
   type TaskListStore,
 } from "@zhixing/tools-builtin";
+import type { IWorkModeController } from "./work-mode-controller.js";
+import {
+  createWorkmodeEnterTool,
+  createWorkmodeExitTool,
+  createWorksceneChangeApproveTool,
+  createWorksceneMemoryQueryTool,
+} from "./workmode-tools.js";
 
 // ─── Assembly 接口 ───
 
@@ -46,6 +53,18 @@ export interface ExtraToolsRuntimeContext {
   scheduler: () => Scheduler;
   /** 定时任务源 origin（可选） —— serve 模式按 sessionId 解析投递目标，REPL 模式不传 */
   scheduleOrigin?: () => ScheduleToolOrigin | null;
+  /**
+   * 本次 runtime 的模式 —— 决定追加哪组 workscene 工具（by-construction 隔离：
+   * power 物理不持有 main-only 工具）。缺省视为 main（serve / 单测等无 workmode
+   * 概念的装配点不必显式传）。
+   */
+  spec?: { kind: "main" } | { kind: "workscene" };
+  /**
+   * 工作模式控制器 getter —— assembly 早于 RuntimeSession 构造，故用 getter
+   * 延迟取（与 `scheduler` getter 同构解鸡生蛋）。仅 workmode 工具组需要，
+   * spec=main/workscene 任一组非空时必须提供。
+   */
+  workModeController?: () => IWorkModeController;
 }
 
 export interface BuiltinExtraToolsAssembly {
@@ -98,7 +117,25 @@ export function createBuiltinExtraToolsAssembly(
         () => runContextStorage.getStore()?.conversationId,
       );
 
-      return [scheduleTool, taskListTool];
+      const tools: ToolDefinition[] = [scheduleTool, taskListTool];
+
+      // workscene 工具组按 spec.kind 二分注入 —— by-construction 隔离：
+      // power runtime 物理不持有 main-only 工具，main 物理不持有 workmode_exit。
+      const kind = ctx.spec?.kind ?? "main";
+      if (ctx.workModeController) {
+        const controller = ctx.workModeController();
+        if (kind === "main") {
+          tools.push(
+            createWorkmodeEnterTool(controller),
+            createWorksceneChangeApproveTool(controller),
+            createWorksceneMemoryQueryTool(controller),
+          );
+        } else {
+          tools.push(createWorkmodeExitTool(controller));
+        }
+      }
+
+      return tools;
     },
   };
 }

@@ -13,12 +13,16 @@ import { Scheduler } from "@zhixing/core";
 import { runContextStorage } from "@zhixing/orchestrator/runtime";
 import { createBuiltinExtraToolsAssembly } from "../builtin-extra-tools.js";
 import { InMemoryTaskListStore } from "../task-list-stores.js";
+import type { IWorkModeController } from "../work-mode-controller.js";
 
 // ─── 测试 fixture ───
 
 function fakeScheduler(): Scheduler {
   return {} as Scheduler;
 }
+
+// 工厂仅在构造期 capture controller、call 体才用方法，故名集合断言用空桩足够。
+const fakeController = {} as IWorkModeController;
 
 describe("createBuiltinExtraToolsAssembly", () => {
   it("返回的 tools 数组包含 schedule + task_list", () => {
@@ -154,6 +158,60 @@ describe("createBuiltinExtraToolsAssembly", () => {
     expect(result.isError).toBe(true);
     expect(result.content).toContain("no conversation");
     expect(assembly.taskListService.getAllTasks("anything")).toEqual([]);
+  });
+
+  it("spec=main → 追加 main 组 workmode 工具，by-construction 不含 power-only", () => {
+    const assembly = createBuiltinExtraToolsAssembly(new InMemoryTaskListStore());
+    const names = assembly
+      .assembleTools({
+        scheduler: () => fakeScheduler(),
+        spec: { kind: "main" },
+        workModeController: () => fakeController,
+      })
+      .map((t) => t.name)
+      .sort();
+    expect(names).toEqual(
+      [
+        "schedule",
+        "task_list",
+        "workmode_enter",
+        "workscene_change_approve",
+        "workscene_memory_query",
+      ].sort(),
+    );
+    expect(names).not.toContain("workmode_exit");
+  });
+
+  it("spec=workscene → 仅追加 power-only workmode_exit，物理隔离 main-only 工具", () => {
+    const assembly = createBuiltinExtraToolsAssembly(new InMemoryTaskListStore());
+    const names = assembly
+      .assembleTools({
+        scheduler: () => fakeScheduler(),
+        spec: { kind: "workscene" },
+        workModeController: () => fakeController,
+      })
+      .map((t) => t.name)
+      .sort();
+    expect(names).toEqual(["schedule", "task_list", "workmode_exit"].sort());
+    for (const mainOnly of [
+      "workmode_enter",
+      "workscene_change_approve",
+      "workscene_memory_query",
+    ]) {
+      expect(names).not.toContain(mainOnly);
+    }
+  });
+
+  it("无 workModeController（serve 等）→ 不追加任何 workmode 工具", () => {
+    const assembly = createBuiltinExtraToolsAssembly(new InMemoryTaskListStore());
+    const names = assembly
+      .assembleTools({
+        scheduler: () => fakeScheduler(),
+        spec: { kind: "main" },
+      })
+      .map((t) => t.name)
+      .sort();
+    expect(names).toEqual(["schedule", "task_list"].sort());
   });
 
   it("scheduler getter 在工具 call 时 lazy 解析（装配期 scheduler 可未就绪）", () => {
