@@ -344,6 +344,15 @@ export interface CreateAgentRuntimeOptions {
     | { kind: "personal" }
     | { kind: "workscene"; sceneId: string };
   /**
+   * 主对话槽位 —— 缺省 "main"。决定主对话语义六处（capability /
+   * Task provider+model / budget resolveModelInfo / 返回 providerId+model /
+   * resilientCallLLM / runAgentLoop）取 roles[primaryRole]，及主对话 loop +
+   * Task 子 agent loop 的思考解析跟随；压缩两处（compaction + 段切换摘要）
+   * 恒走 roles.light，roleThinking 三角色映射为真实 per-role 不跟随。
+   * 工作模式装配 power runtime 时传 "power"。
+   */
+  primaryRole?: "main" | "power";
+  /**
    * 可选：注入会话级 PermissionStore——跨 hot reload 复用 session scope 授权
    * （用户的"本次会话允许"不丢）。
    *
@@ -408,6 +417,12 @@ export async function createAgentRuntime(
     providerOverride: options.provider,
     modelOverride: options.model,
   });
+
+  // 主对话槽位 —— 决定主对话语义六处取哪个 role（capability / Task
+  // provider+model / budget resolveModelInfo / 返回 providerId+model /
+  // resilientCallLLM / runAgentLoop）+ loop 思考解析跟随。压缩两处恒 light、
+  // roleThinking 三角色聚合不跟随（见下）。缺省 main，工作模式装配传 power。
+  const primaryRole = options.primaryRole ?? "main";
 
   // 应用级身份单例：启动时设一次，后续所有 user-facing 字符串通过
   // getAgentIdentity() 读取。默认 "知行"，可通过 zhixing.config.json
@@ -530,40 +545,38 @@ export async function createAgentRuntime(
   // ModelCapability 解析 —— Task 工具 + segmentManager 共用同源 capability。
   // 优先级:用户 modelCapabilityOverrides[model] > 内置 MODEL_CAPABILITIES > UNKNOWN 兜底。
   // map key / model ID 双向 normalize(剥 vendor 前缀 + 大小写无关),用户任意形式都命中。
-  const mainModelCapability = resolveModelCapability(
-    roles.main.model,
+  const primaryModelCapability = resolveModelCapability(
+    roles[primaryRole].model,
     getModelCapabilityOverride(
       config.modelCapabilityOverrides,
-      roles.main.model,
+      roles[primaryRole].model,
     ),
   );
 
   // 思考控制装配期一次性解析（runtime 生命周期内 config + 解析后的 role 均不变，
-  // 无需 per-run 重算）。对三角色各跑一次校验+兜底，组成单一规范对象：
-  //   - mainThinking ：runAgentLoop 主对话 loop 参数 + 段切换摘要
-  //     segmentStreamFactory（二者均走 roles.main 单 model）
-  //   - lightThinking：压缩 / flush createCompactionFlush（走 roles.light）
-  //   - roleThinking ：三角色聚合，沿 llmRoles 同路径下传到 ToolExecutionContext，
-  //     供工具在 I/O 边界按所用角色取生效思考配置；Task 子 agent 整体继承
-  const mainThinking = resolveRoleThinking(
-    roles.main,
-    config.llm?.main?.thinking,
-  );
-  const lightThinking = resolveRoleThinking(
-    roles.light,
-    config.llm?.light?.thinking,
-  );
+  // 无需 per-run 重算）。三类用途严格分区：
+  //   - roleThinking ：**真实 per-role 映射**（每个 role 按其自身 config 解析），
+  //     沿 llmRoles 同路径下传 ToolExecutionContext 供工具按所用角色扇出；
+  //     不跟随 primaryRole（工具调 ctx.llm.light 就该拿 light 的思考配置）
+  //   - primaryThinking：主对话 loop + Task 子 agent loop（二者均跑
+  //     roles[primaryRole] 单 model）→ 取 roleThinking[primaryRole]
+  //   - lightThinking ：压缩 flush + 段切换摘要（恒走 roles.light，不跟 primaryRole）
   const roleThinking: ResolvedRoleThinking = {
-    main: mainThinking,
-    light: lightThinking,
+    main: resolveRoleThinking(roles.main, config.llm?.main?.thinking),
+    light: resolveRoleThinking(roles.light, config.llm?.light?.thinking),
     power: resolveRoleThinking(roles.power, config.llm?.power?.thinking),
   };
+  const primaryThinking = roleThinking[primaryRole];
+  const lightThinking = roleThinking.light;
 
   let tools: ToolDefinition[] = baseTools;
   if (profile.enabledTools.includes("Task")) {
     const taskTool = createTaskTool({
-      provider: roles.main.provider,
-      model: roles.main.model,
+      // 子 agent 复用父 primaryRole 的 provider+model；其自身 loop 思考 =
+      // primaryThinking（与该 model 配对）；roleThinking 映射供子工具按角色扇出。
+      provider: roles[primaryRole].provider,
+      model: roles[primaryRole].model,
+      loopThinking: primaryThinking,
       roleThinking,
       llmRoles: roles,
       securityPipeline,
@@ -572,8 +585,8 @@ export async function createAgentRuntime(
       globalConfigPath: getGlobalConfigPath(),
       parentBroker: confirmationBroker,
       parentTools: baseTools,
-      // sub-agent 复用父 model,riskMaxTokens 从同一 capability 解析
-      riskMaxTokens: mainModelCapability.riskMaxTokens,
+      // sub-agent 复用父 primaryRole model,riskMaxTokens 从同一 capability 解析
+      riskMaxTokens: primaryModelCapability.riskMaxTokens,
     });
     tools = [...baseTools, taskTool];
     if (taskTool.boundaries && taskTool.boundaries.length > 0) {
@@ -616,12 +629,12 @@ export async function createAgentRuntime(
   //   4. CONSERVATIVE_FALLBACK                — defensive 兜底（生产路径不应触达）
   // estimator 跨 run() 共享以保持校准状态。
   const resolvedModel = resolveModelInfo({
-    providerId: roles.main.provider.id,
-    model: roles.main.model,
-    providerModels: roles.main.provider.models,
-    overrides: resolvedRoles.main.resolved.modelOverrides,
+    providerId: roles[primaryRole].provider.id,
+    model: roles[primaryRole].model,
+    providerModels: roles[primaryRole].provider.models,
+    overrides: resolvedRoles[primaryRole].resolved.modelOverrides,
     protocolDefaults:
-      PROTOCOL_BUDGET_DEFAULTS[resolvedRoles.main.resolved.protocol],
+      PROTOCOL_BUDGET_DEFAULTS[resolvedRoles[primaryRole].resolved.protocol],
   });
   for (const w of resolvedModel.warnings) {
     console.warn(`[zhixing] ${w.message}`);
@@ -653,8 +666,8 @@ export async function createAgentRuntime(
   ];
 
   return {
-    providerId: roles.main.provider.id,
-    model: roles.main.model,
+    providerId: roles[primaryRole].provider.id,
+    model: roles[primaryRole].model,
     securityPipeline,
     permissionStore: persistentStore,
     confirmationBroker,
@@ -771,7 +784,7 @@ export async function createAgentRuntime(
 
       // 通过 deps.callLLM 注入容错能力，agent-loop.ts 零修改
       const resilientCallLLM = withRetry(
-        (request) => roles.main.provider.chat(request),
+        (request) => roles[primaryRole].provider.chat(request),
         { eventBus },
       );
 
@@ -834,9 +847,9 @@ export async function createAgentRuntime(
               systemPrompt: req.systemPrompt,
               tools: req.tools,
               messages: req.messages,
-              // 段切换摘要现状走 roles.main（model 由 createSegmentSummarizeFn
-              // 绑 roles.main.model），思考控制随实际 role 注入 mainThinking。
-              thinking: mainThinking,
+              // 段切换摘要走 roles.light（model 由 createSegmentSummarizeFn
+              // 绑 roles.light.model），思考控制随实际 role 注入 lightThinking。
+              thinking: lightThinking,
               abortSignal: controller.signal,
             }),
             controller,
@@ -849,12 +862,13 @@ export async function createAgentRuntime(
       const segmentManager = options.segmentDeps
         ? createSegmentManager({
             estimator,
-            // 复用装配期解析的 mainModelCapability —— 与 Task 工具的 riskMaxTokens
-            // 同源（modelCapabilityOverrides[normalize(model)] 已在 resolve 内合并）。
-            capability: mainModelCapability,
+            // capability 是会话所跑的 primaryRole model 的注意力/风险阈值，
+            // 复用装配期解析的 primaryModelCapability（与 Task riskMaxTokens 同源）。
+            // 摘要 callLLM 与之正交 —— 摘要恒走 roles.light（廉价），不跟 primaryRole。
+            capability: primaryModelCapability,
             callLLM: createSegmentSummarizeFn(
               segmentStreamFactory,
-              roles.main.model,
+              roles.light.model,
             ),
             persistence: options.segmentDeps.persistence,
             taskListReader: options.segmentDeps.taskListReader,
@@ -1035,10 +1049,10 @@ export async function createAgentRuntime(
         });
 
         const gen = runAgentLoop({
-          provider: roles.main.provider,
-          model: roles.main.model,
-          // 主对话走 roles.main，思考控制随实际 role 注入（装配期已过校验兜底）。
-          thinking: mainThinking,
+          provider: roles[primaryRole].provider,
+          model: roles[primaryRole].model,
+          // 主对话走 roles[primaryRole]，loop 思考解析同 role（装配期已校验兜底）。
+          thinking: primaryThinking,
           tools,
           messages: loopMessages,
           systemPrompt,

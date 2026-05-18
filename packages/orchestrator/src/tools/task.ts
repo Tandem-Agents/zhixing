@@ -36,6 +36,7 @@ import {
   type LLMRoles,
   type ResolvedRoleThinking,
   type SecurityPipeline,
+  type ThinkingConfig,
   type ToolDefinition,
   type ToolExecutionContext,
   type ToolResult,
@@ -60,11 +61,17 @@ import { runContextStorage, type RunContext } from "../runtime/run-context.js";
 export interface TaskToolEnv {
   /** 父 LLMProvider 实例 —— 子复用,共享连接池 / 限速 / 缓存 */
   provider: LLMProvider;
-  /** 父 model id —— 子复用父模型,不支持单独 override */
+  /** 父 model id —— 子复用父 primaryRole 模型,不支持单独 override */
   model: string;
   /**
-   * 各角色生效思考控制 —— 子整体继承父：子 loop 复用父 main provider+model
-   * 故用 roleThinking.main，子工具调 light/power 时用对应角色。
+   * 子 agent 自身 loop 的思考控制 —— 与 model 配对（= 父 primaryRole 的
+   * 生效思考解析）。role-agnostic：子 loop 跑哪个 role 的 model 由装配期决定，
+   * 这里只收解析后的值，loop-runner 不需知角色。
+   */
+  loopThinking?: ThinkingConfig;
+  /**
+   * 各角色生效思考控制（真实 per-role 映射）—— 子工具在 I/O 边界调
+   * ctx.llm.<role> 时按所用角色取，不跟随 primaryRole。
    */
   roleThinking?: ResolvedRoleThinking;
   /** 父 LLMRoles —— 子工具调 light/power 角色时透传 */
@@ -362,6 +369,7 @@ export function createTaskTool(env: TaskToolEnv): ToolDefinition {
       const result = await runChildAgent({
         provider: env.provider,
         model: env.model,
+        loopThinking: env.loopThinking,
         roleThinking: env.roleThinking,
         llmRoles: env.llmRoles,
         securityPipeline: env.securityPipeline,

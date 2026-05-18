@@ -140,12 +140,12 @@ describe("runSubAgentLoop · happy path", () => {
 
 // ─── thinking 透传 ───
 
-describe("runSubAgentLoop · roleThinking 透传", () => {
-  it("roleThinking.main → 子 loop 的 ChatRequest.thinking（子复用父 main model）", async () => {
+describe("runSubAgentLoop · loopThinking 透传", () => {
+  it("loopThinking → 子 loop 的 ChatRequest.thinking（与 model 配对，role-agnostic）", async () => {
     const provider = new MockLLMProvider([{ text: "done" }]);
     await runSubAgentLoop({
       ...makeBaseOpts(provider),
-      roleThinking: { main: { mode: "effort", effort: "max" } },
+      loopThinking: { mode: "effort", effort: "max" },
     });
 
     expect(provider.calls[0]?.thinking).toEqual({
@@ -154,7 +154,18 @@ describe("runSubAgentLoop · roleThinking 透传", () => {
     });
   });
 
-  it("未传 roleThinking → ChatRequest.thinking 为 undefined（不发思考参数）", async () => {
+  it("roleThinking 映射不喂 loop —— 仅 loopThinking 决定 ChatRequest.thinking", async () => {
+    const provider = new MockLLMProvider([{ text: "done" }]);
+    // 只给 roleThinking.main、不给 loopThinking → loop 不应取 roleThinking.main
+    await runSubAgentLoop({
+      ...makeBaseOpts(provider),
+      roleThinking: { main: { mode: "on" } },
+    });
+
+    expect(provider.calls[0]?.thinking).toBeUndefined();
+  });
+
+  it("未传 loopThinking → ChatRequest.thinking 为 undefined（不发思考参数）", async () => {
     const provider = new MockLLMProvider([{ text: "done" }]);
     await runSubAgentLoop(makeBaseOpts(provider));
 

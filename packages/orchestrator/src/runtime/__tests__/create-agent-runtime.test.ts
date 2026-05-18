@@ -40,11 +40,18 @@ import {
 
 // ─── hoisted ref:让 vi.mock 工厂在 import 之前能引用 ───
 
-const { providerRef, decorateCalls, decorateDisposes } = vi.hoisted(() => ({
-  providerRef: { current: null as MockLLMProvider | null },
-  decorateCalls: [] as Array<IEventBus<AgentEventMap>>,
-  decorateDisposes: [] as Array<() => void>,
-}));
+const { providerRef, powerRoleRef, decorateCalls, decorateDisposes } =
+  vi.hoisted(() => ({
+    providerRef: { current: null as MockLLMProvider | null },
+    // opt-in 差异化 power 角色：默认 null = power 与 main 折叠（fallback 语义，
+    // 既有用例零影响）；设值时 power 用独立 model + provider，让 primaryRole
+    // 路由区分可观测断言。
+    powerRoleRef: {
+      current: null as null | { model: string; provider: MockLLMProvider },
+    },
+    decorateCalls: [] as Array<IEventBus<AgentEventMap>>,
+    decorateDisposes: [] as Array<() => void>,
+  }));
 
 vi.mock("@zhixing/providers", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@zhixing/providers")>();
@@ -68,19 +75,33 @@ vi.mock("@zhixing/providers", async (importOriginal) => {
     // mock 关键工厂:返回挂着 MockLLMProvider 的角色对,不触碰 fs / config
     createProviderRoles: () => {
       const provider = providerRef.current ?? new MockLLMProvider([{ text: "ok" }]);
-      const role: LLMRole = {
-        provider,
-        model: "mock-model",
-        chat: (request) => provider.chat(request),
+      const mkRole = (p: MockLLMProvider, model: string): LLMRole => ({
+        provider: p,
+        model,
+        chat: (request) => p.chat(request),
+      });
+      const mainRole = mkRole(provider, "mock-model");
+      // powerRoleRef 未设 → power 折叠为 main（fallback 语义，与历史一致）；
+      // 设了 → 独立 model + provider 实例，路由区分可断言。
+      const powerOverride = powerRoleRef.current;
+      const powerRole = powerOverride
+        ? mkRole(powerOverride.provider, powerOverride.model)
+        : mainRole;
+      const roles: LLMRoles = {
+        main: mainRole,
+        light: mainRole,
+        power: powerRole,
       };
-      const roles: LLMRoles = { main: role, light: role, power: role };
+      const powerResolved = powerOverride
+        ? { resolved: resolvedProvider, model: powerOverride.model }
+        : resolvedRole;
       return {
         roles,
         config: { providers: {} } as never,
         resolvedRoles: {
           main: resolvedRole,
           light: resolvedRole,
-          power: resolvedRole,
+          power: powerResolved,
         } as never,
       };
     },
@@ -102,6 +123,7 @@ const { mainProfile } = await import("../../profile/default-profiles.js");
 
 beforeEach(() => {
   providerRef.current = null;
+  powerRoleRef.current = null;
   decorateCalls.length = 0;
   decorateDisposes.length = 0;
 });
@@ -916,5 +938,50 @@ describe("createAgentRuntime · run() conversationId 透传", () => {
     });
 
     expect(observedConvId).toBeNull();
+  });
+});
+
+// ─── 契约: primaryRole 槽位路由 ───
+
+describe("createAgentRuntime · primaryRole 槽位", () => {
+  it("primaryRole='power' 未配（fallback main）→ 路径正常装配，model 取 fallback", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
+    // powerRoleRef 未设 → power 折叠为 main（fallback 语义）
+    const runtime = await createAgentRuntime({ primaryRole: "power" });
+    expect(runtime.model).toBe("mock-model");
+  });
+
+  it("primaryRole='power' + 差异化 power → 六处可观测点（返回 model + loop LLM）指向 power，非 main", async () => {
+    const mainProvider = new MockLLMProvider([{ text: "from-main" }]);
+    const powerProvider = new MockLLMProvider([{ text: "from-power" }]);
+    providerRef.current = mainProvider;
+    powerRoleRef.current = { model: "power-model", provider: powerProvider };
+
+    const runtime = await createAgentRuntime({ primaryRole: "power" });
+
+    // 返回 providerId+model（六处之一，直接可观测）指向 power
+    expect(runtime.model).toBe("power-model");
+
+    await runtime.run({ messages: [userMessage("hi")], turnIndex: 0 });
+
+    // 主对话 loop 的 LLM 调用打到 power provider，main provider 零调用
+    expect(powerProvider.calls.length).toBeGreaterThan(0);
+    expect(mainProvider.calls.length).toBe(0);
+  });
+
+  it("控制组：同样差异化 power 但缺省 primaryRole(main) → 仍指向 main，证明切换由 primaryRole 驱动", async () => {
+    const mainProvider = new MockLLMProvider([{ text: "from-main" }]);
+    const powerProvider = new MockLLMProvider([{ text: "from-power" }]);
+    providerRef.current = mainProvider;
+    powerRoleRef.current = { model: "power-model", provider: powerProvider };
+
+    const runtime = await createAgentRuntime({}); // 缺省 primaryRole = main
+
+    expect(runtime.model).toBe("mock-model");
+
+    await runtime.run({ messages: [userMessage("hi")], turnIndex: 0 });
+
+    expect(mainProvider.calls.length).toBeGreaterThan(0);
+    expect(powerProvider.calls.length).toBe(0);
   });
 });

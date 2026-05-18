@@ -34,6 +34,7 @@ import {
   type Message,
   type ResolvedRoleThinking,
   type SecurityPipeline,
+  type ThinkingConfig,
   type TokenUsage,
   type ToolDefinition,
 } from "@zhixing/core";
@@ -91,11 +92,16 @@ export type SubAgentErrorType =
 export interface RunChildAgentOptions {
   /** 共享父 LLMProvider 实例(连接池 / 限速 / 缓存共用,避免每次重建) */
   provider: LLMProvider;
-  /** 共享父 model id —— 子复用父模型,不支持单独 override */
+  /** 共享父 primaryRole model id —— 子复用,不支持单独 override */
   model: string;
   /**
-   * 各角色生效思考控制 —— 子整体继承父：子 loop 复用父 main provider+model
-   * 用 roleThinking.main，子工具调对应角色用对应配置。缺省 = 不发思考参数。
+   * 子 loop 自身思考控制 —— 与 model 配对（= 父 primaryRole 生效思考）。
+   * 缺省 = 不发思考参数。
+   */
+  loopThinking?: ThinkingConfig;
+  /**
+   * 各角色生效思考控制（真实 per-role 映射）—— 子工具调对应角色时取，
+   * 不跟随 primaryRole。缺省 = 不发思考参数。
    */
   roleThinking?: ResolvedRoleThinking;
   /** 共享父 LLMRoles —— 工具调 light/power 角色时透传 */
@@ -296,6 +302,7 @@ async function runChildAgentInner(
           tools: childTools,
           provider: opts.provider,
           model: opts.model,
+          loopThinking: opts.loopThinking,
           roleThinking: opts.roleThinking,
           llmRoles: opts.llmRoles,
           securityPipeline: opts.securityPipeline,

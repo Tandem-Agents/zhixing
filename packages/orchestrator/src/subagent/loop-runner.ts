@@ -61,6 +61,7 @@ import {
   type LLMRoles,
   type Message,
   type ResolvedRoleThinking,
+  type ThinkingConfig,
   type SecurityPipeline,
   type TokenUsage,
   type ToolDefinition,
@@ -121,12 +122,17 @@ export interface RunSubAgentLoopOptions {
   tools: readonly ToolDefinition[];
   /** 共享父 LLMProvider 实例(连接池 / 限速 / 缓存共用) */
   provider: LLMProvider;
-  /** 共享父 model id */
+  /** 共享父 primaryRole model id */
   model: string;
   /**
-   * 各角色生效思考控制（装配期已校验兜底）—— 子整体继承父：子 loop 复用父
-   * main provider+model 故用 roleThinking.main 作 loop 参数，子工具调
-   * light/power 时由 ctx.roleThinking 取对应角色。缺省 = 不发思考参数。
+   * 子 loop 自身思考控制（装配期已校验兜底）—— 与 model 配对（= 父
+   * primaryRole 生效思考）。role-agnostic：本 runner 不需知 model 属哪个
+   * role，只按值透传给 loop。缺省 = 不发思考参数。
+   */
+  loopThinking?: ThinkingConfig;
+  /**
+   * 各角色生效思考控制（真实 per-role 映射）—— 子工具调 light/power 时由
+   * ctx.roleThinking 取对应角色，不跟随 primaryRole。缺省 = 不发思考参数。
    */
   roleThinking?: ResolvedRoleThinking;
   /** 共享父 LLMRoles —— 工具调 light/power 角色时透传 */
@@ -274,9 +280,10 @@ export async function runSubAgentLoop(
     const { yields, result } = await drainAgentLoop({
       provider: opts.provider,
       model: opts.model,
-      // 子 loop 走 roles.main 单 model → loop 思考参数取 roleThinking.main；
-      // roleThinking 整体下传供子工具按所用角色取（如 WebFetch 蒸馏走 light）。
-      thinking: opts.roleThinking?.main,
+      // 子 loop 走父 primaryRole 单 model → loop 思考 = loopThinking（与该
+      // model 配对）；roleThinking 整体下传供子工具按所用角色取（如 WebFetch
+      // 蒸馏走 light）。
+      thinking: opts.loopThinking,
       roleThinking: opts.roleThinking,
       tools: [...opts.tools],
       messages: opts.messages,
