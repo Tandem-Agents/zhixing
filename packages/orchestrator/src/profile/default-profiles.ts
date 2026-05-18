@@ -9,6 +9,7 @@
  */
 
 import { getAgentIdentity } from "@zhixing/core";
+import type { WorkScene } from "@zhixing/core";
 import type { AgentRoleProfile } from "./agent-role-profile.js";
 
 /**
@@ -78,6 +79,49 @@ export interface SubAgentProfileOptions {
  * 子 agent 的输出仅给主 agent 看,所以 instructions 中明确"输出自包含、不引用上下文"
  * 等约束,避免子 agent 模仿主 agent 与用户对话的语气。
  */
+/**
+ * 无 workdir 工作场景的工具集 —— 从主工具集剔除全部本地文件类工具
+ * （bash/read/write/edit/glob/grep）。**by-construction 文件作用域隔离**：
+ * 无 workdir = 该场景不涉本地文件，装配期即无文件工具，根本不存在"文件
+ * 工具无根"问题；与"无 workdir power 的 workingDirectory 不落 cwd"互为
+ * 主防线（无文件操作面）与纵深防御。
+ */
+const WORKSCENE_NON_FILE_TOOLS = [
+  "memory",
+  "web_fetch",
+  "Task",
+] as const;
+
+/**
+ * 工作场景 power agent profile —— 用户面对的主对话循环，专注单一工作场景。
+ *
+ * 复用 subAgentProfile 把动态文本编进 instructions 的现成手法：同一 scene
+ * 输出固定 → 静态前缀 byte-equal，多次进入缓存可复用。
+ *
+ * 工具集按 scene.workdir 有无二分（by-construction）：
+ *   - 有 workdir：主工具全集（文件工具在 workdir 内操作）
+ *   - 无 workdir：剔除本地文件类，仅留非文件工具（memory/web_fetch/Task）
+ *
+ * capabilities 同 mainProfile（用户面对、可派 Task）。
+ */
+export function powerProfile(scene: WorkScene): AgentRoleProfile {
+  const hasWorkdir = Boolean(scene.workdir);
+  return {
+    name: getAgentIdentity().displayName,
+    role: "main",
+    instructions:
+      `${MAIN_IDENTITY_INSTRUCTIONS}\n\n` +
+      `You are now focused on the work scene "${scene.name}". ` +
+      `Work and memory in this scene are isolated from personal scope and other scenes. ` +
+      `When the work in this scene is done, you may conclude and return to the main conversation.`,
+    constraints: [],
+    enabledTools: hasWorkdir
+      ? MAIN_ENABLED_TOOLS
+      : WORKSCENE_NON_FILE_TOOLS,
+    capabilities: { canSpawnSubAgents: true, userFacing: true },
+  };
+}
+
 export function subAgentProfile(opts: SubAgentProfileOptions): AgentRoleProfile {
   const shortId = opts.subAgentId.slice(0, 6);
   return {

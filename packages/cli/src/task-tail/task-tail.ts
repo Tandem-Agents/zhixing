@@ -26,7 +26,7 @@ export interface TaskTailOptions {
   readonly screen: ScreenController;
   readonly service: TaskListService;
   /**
-   * 取当前活跃 conversation id —— 应来自 cli REPL state.conversationId
+   * 取当前活跃 conversation id —— 应来自 cli REPL 当前活跃对话运行态
    * （持久化对话场景），不是 task_list 工具的 ALS 路径（仅 turn run 内有效）。
    * 切换对话后由 caller 调 refresh()，subscribe 自身不感知 conversation 切换。
    */

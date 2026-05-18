@@ -3,12 +3,24 @@
  */
 
 import { describe, expect, it } from "vitest";
+import type { WorkScene } from "@zhixing/core";
 import {
   MAIN_IDENTITY_INSTRUCTIONS,
   mainProfile,
+  powerProfile,
   subAgentProfile,
 } from "../default-profiles.js";
 import { renderIdentity } from "../../runtime/system-prompt.js";
+
+function makeScene(overrides: Partial<WorkScene> = {}): WorkScene {
+  return {
+    id: "scene-x",
+    name: "知行 CLI 开发",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    lastActiveAt: "2026-01-01T00:00:00.000Z",
+    ...overrides,
+  };
+}
 
 describe("mainProfile()", () => {
   it("instructions 持历史身份段 verbatim 文本(byte-equal 锚点)", () => {
@@ -63,5 +75,48 @@ describe("subAgentProfile(opts)", () => {
     expect(rendered).toContain("find readme");
     expect(rendered).toContain("# Constraints");
     expect(rendered).toContain("- ");
+  });
+});
+
+describe("powerProfile(scene)", () => {
+  it("有 workdir → 主工具全集（含文件工具）", () => {
+    const p = powerProfile(makeScene({ workdir: "/tmp/proj" }));
+    expect(p.enabledTools).toEqual([
+      "read",
+      "write",
+      "edit",
+      "glob",
+      "grep",
+      "bash",
+      "memory",
+      "web_fetch",
+      "Task",
+    ]);
+  });
+
+  it("无 workdir → 剔除全部本地文件类工具（by-construction 隔离）", () => {
+    const p = powerProfile(makeScene());
+    expect(p.enabledTools).toEqual(["memory", "web_fetch", "Task"]);
+    for (const fileTool of ["read", "write", "edit", "glob", "grep", "bash"]) {
+      expect(p.enabledTools).not.toContain(fileTool);
+    }
+  });
+
+  it("instructions 含基础身份 + 场景名定位；capabilities 同 main", () => {
+    const p = powerProfile(makeScene({ name: "写作场景" }));
+    expect(p.instructions).toContain(MAIN_IDENTITY_INSTRUCTIONS);
+    expect(p.instructions).toContain("写作场景");
+    expect(p.capabilities).toEqual({
+      canSpawnSubAgents: true,
+      userFacing: true,
+    });
+    expect(p.role).toBe("main");
+  });
+
+  it("同一 scene 多次调用 instructions byte-equal（静态前缀缓存可复用）", () => {
+    const scene = makeScene({ workdir: "/x" });
+    expect(powerProfile(scene).instructions).toBe(
+      powerProfile(scene).instructions,
+    );
   });
 });

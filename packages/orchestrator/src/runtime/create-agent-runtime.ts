@@ -304,7 +304,16 @@ export class ResetConversationStateError extends Error {
 export interface CreateAgentRuntimeOptions {
   model?: string;
   provider?: string;
-  workspace?: string;
+  /**
+   * 工作区：
+   *   - string   → cli/配置工作区，经 resolveWorkspace 正常解析
+   *   - undefined → 同上（无 cli 覆盖，resolveWorkspace 按配置/兜底）
+   *   - null     → **显式无工作区**（无 workdir 的工作场景）：跳过
+   *     resolveWorkspace，直接 { path:null, source:"none" }，且
+   *     workingDirectory 不兜底 cwd —— 与 powerProfile 无文件工具二分
+   *     互为纵深，by-construction 杜绝串到 cwd / 主工作区
+   */
+  workspace?: string | null;
   /** 额外工具（如 schedule），在内置工具之后注入 */
   extraTools?: ToolDefinition[];
   /**
@@ -436,10 +445,15 @@ export async function createAgentRuntime(
   const sessionType: "interactive" | "ci" = process.stdin.isTTY
     ? "interactive"
     : "ci";
-  const workspace = resolveWorkspace(config, {
-    cliWorkspace: options.workspace,
-    sessionType,
-  });
+  // workspace === null：显式无工作区（无 workdir 工作场景），跳过解析、
+  // 直接 source:"none"；否则按优先级链 resolveWorkspace。
+  const workspace: ResolvedWorkspace =
+    options.workspace === null
+      ? { path: null, source: "none" }
+      : resolveWorkspace(config, {
+          cliWorkspace: options.workspace,
+          sessionType,
+        });
 
   // 确保工作区目录存在（首次启动自动创建，目录被删除则重建）
   const workspaceDirStatus = ensureWorkspaceDir(workspace);
@@ -1070,7 +1084,13 @@ export async function createAgentRuntime(
           // 字段保持一致——workspace 配置存在时用 workspace，否则 fallback 到 cwd。
           // 让 LLM 视图（用户配置的工作区即工作目录）与工具实际执行目录对齐，
           // 消除"LLM 知道 workspace 是 D:\，但 Bash dir 在 E:\ 执行"的语义错位。
-          workingDirectory: workspace.path ?? process.cwd(),
+          // source:"none"（显式无工作区，无 workdir 工作场景）→ 不兜底 cwd，
+          // 不让文件路径落进程 cwd / 主工作区（纵深防御；主防线是该场景
+          // 装配期无文件工具，见 powerProfile 二分）。其余路径维持原语义。
+          workingDirectory:
+            workspace.source === "none"
+              ? undefined
+              : (workspace.path ?? process.cwd()),
           abortSignal: params.abortSignal,
           // watchdog fallback 单点: 调用边界注入默认值, agent-loop 内部不二次 fallback
           // 保证调用方显式传入的 policy(含禁用 idle-timer 的 `{ idleTimeoutMs: 0 }`)一路透传

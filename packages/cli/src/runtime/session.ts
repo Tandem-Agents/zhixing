@@ -25,11 +25,13 @@ import {
   type AgentTurnResult,
   type IPermissionStore,
   type IWorkSceneRegistry,
+  type WorkScene,
 } from "@zhixing/core";
 import {
   createAgentRuntime,
   type AgentRuntime,
 } from "@zhixing/orchestrator/runtime";
+import { powerProfile } from "@zhixing/orchestrator/profile";
 import type { TaskListService } from "@zhixing/tools-builtin";
 import { registerCliTurnContextProviders } from "./turn-context-providers.js";
 import {
@@ -68,8 +70,14 @@ interface OldResources {
 }
 
 export class RuntimeSession {
-  // 持有的运行时资源——dispose 时释放
+  // 持有的运行时资源——dispose 时释放。
+  // agentRuntime 是常驻 main 槽位（reload blue-green swap 的目标）；
+  // workScene 是工作模式 overlay（enter 时装入、exit 时丢弃 GC，power runtime
+  // 无 dispose 接口、内部全 in-memory，失 ref 即回收）。runtime/activeMode
+  // getter 在二者间路由；scheduler / broker / turn-context 等仍锚定 main，
+  // 工作模式只切 agent loop runtime，不动这些主资源。
   private agentRuntime!: AgentRuntime;
+  private workScene?: { sceneId: string; runtime: AgentRuntime };
   private schedulerInstance!: Scheduler;
   private channelsInstance: ChannelRegistry | undefined;
   private deliveryStackInstance: DeliveryStack | undefined;
@@ -91,8 +99,10 @@ export class RuntimeSession {
   private readonly workSceneRegistryInstance: IWorkSceneRegistry =
     new FsWorkSceneRegistry();
 
-  // 生命周期 flags
-  private reloading = false;
+  // 生命周期忙标志 —— reload / 工作模式 enter / exit 共享同一 guard：三者
+  // 都是 turn 边界整体切换、互斥，忙时后到者拒绝（沿用"if(busy) 拒绝"模式，
+  // 非排队 mutex）。
+  private lifecycleBusy = false;
   private disposed = false;
 
   private constructor(opts: RuntimeSessionOptions) {
@@ -125,7 +135,7 @@ export class RuntimeSession {
     this.deliveryStackInstance = messaging.deliveryStack;
 
     // 首次创建不传 existingPermissionStore——让 createAgentRuntime 内部 new + 注册 builtin 规则
-    this.agentRuntime = await this.createAgent();
+    this.agentRuntime = await this.createAgent({ kind: "main" });
 
     this.schedulerInstance = this.createScheduler(
       this.deliveryStackInstance?.delivery,
@@ -200,6 +210,7 @@ export class RuntimeSession {
    * 传时复用注入实例，跳过内部 register（store 已 init 过 builtin）。
    */
   private async createAgent(
+    spec: { kind: "main" } | { kind: "workscene"; scene: WorkScene },
     existingPermissionStore?: IPermissionStore,
   ): Promise<AgentRuntime> {
     // extra tools 装配走 assembly —— scheduler getter 用 closure 读 this.schedulerInstance，
@@ -213,10 +224,24 @@ export class RuntimeSession {
       },
     });
 
+    const isWorkscene = spec.kind === "workscene";
+
     return await createAgentRuntime({
-      model: this.opts.cliModel,
-      provider: this.opts.cliProvider,
-      workspace: this.opts.cliWorkspace,
+      // 工作模式与 cli 会话级覆盖正交 —— 工作场景 runtime 不透传 cli override；
+      // primaryRole=power 选 power 角色；记忆域 = 该场景；profile = powerProfile；
+      // workspace：有 workdir 用之，无 workdir 显式 null（source:"none"，
+      // 无文件根）。main 路径维持原样（缺省 primaryRole/memoryScope/profile，
+      // createAgentRuntime 内部回退 main/personal/mainProfile）。
+      model: isWorkscene ? undefined : this.opts.cliModel,
+      provider: isWorkscene ? undefined : this.opts.cliProvider,
+      workspace: isWorkscene
+        ? (spec.scene.workdir ?? null)
+        : this.opts.cliWorkspace,
+      primaryRole: isWorkscene ? "power" : undefined,
+      memoryScope: isWorkscene
+        ? { kind: "workscene", sceneId: spec.scene.id }
+        : undefined,
+      profile: isWorkscene ? powerProfile(spec.scene) : undefined,
       extraTools,
       decorateRunBus: createRenderSubscribers({
         renderer: this.opts.renderer,
@@ -320,19 +345,24 @@ export class RuntimeSession {
     };
   }
 
-  /** 当前 agentRuntime 实例——swap 后自动指向新值 */
+  /**
+   * 当前活动 runtime —— REPL 唯一 agent 访问点。工作模式 overlay 优先，
+   * 否则 main 槽位（reload swap 自动指向新 main）。
+   */
   get runtime(): AgentRuntime {
-    return this.agentRuntime;
+    return this.workScene?.runtime ?? this.agentRuntime;
   }
 
   /**
    * 当前活动模式 —— 个人记忆维护（journal condense 等）的单一判定源：
    * 个人记忆域只在 main 模式触达，工作场景模式记忆域是 workscene，绝不能
-   * 跑个人 journal（单向阀）。当前无工作场景叠加，恒为 main（真实当前态，
-   * 非占位）；接入工作场景叠加后本 getter 改为反映叠加，判定点零改动。
+   * 跑个人 journal（单向阀）。反映 workScene overlay：进入工作模式即
+   * workscene，退出即 main —— journal-gate 判定点零改动自动随动。
    */
-  get activeMode(): { kind: "main" } {
-    return { kind: "main" };
+  get activeMode(): { kind: "main" } | { kind: "workscene"; sceneId: string } {
+    return this.workScene
+      ? { kind: "workscene", sceneId: this.workScene.sceneId }
+      : { kind: "main" };
   }
 
   /** 当前 scheduler 实例——swap 后自动指向新值 */
@@ -386,6 +416,59 @@ export class RuntimeSession {
   }
 
   /**
+   * 把已绑定的 confirmation renderer 从旧 broker 切到 target runtime 的
+   * broker。reload（agent 重建带新 broker）与工作模式 enter/exit（runtime
+   * overlay 切换）统一走此方法，消除"内联 vs 方法"两套实现。
+   *
+   * 未 attach renderer（serve / 测试等无终端确认路径）时整体 no-op —— 切
+   * broker 无意义。与 attachConfirmationRenderer 的"首次 attach throw"守卫
+   * 互不干扰：那个守卫只管首次绑定，broker 切换不经它（detach 旧 → attach
+   * 新，attachedRenderer 引用不变）。
+   */
+  private swapConfirmationBroker(target: AgentRuntime): void {
+    if (!this.attachedRenderer) return;
+    this.currentBrokerDetach?.();
+    this.currentBrokerDetach = this.attachedRenderer.attach(
+      target.confirmationBroker,
+    );
+  }
+
+  /**
+   * 进入工作模式 —— 装入 power runtime overlay。
+   *
+   * 内部构件，不自管 lifecycle guard（由顶层 applyModeSwitch / reload 持有
+   * 同一 guard，自管会与上层持锁双重 set / 误拒）。原子契约：装配中途抛错
+   * 绝不 set workScene —— 唯一可抛点是 createAgent（在 broker swap 之前，
+   * 失败即 main 态完好）；touch 是非关键 lastActiveAt（best-effort 不阻断
+   * 不污染）；broker swap 后紧随的纯赋值不可能失败。permissionStore 跨实例
+   * 复用（与 reload 同款，session scope 授权不丢）。
+   */
+  async enterWorkMode(sceneId: string): Promise<void> {
+    const scene = await this.workSceneRegistry.get(sceneId);
+    if (!scene) {
+      throw new Error(`工作场景 "${sceneId}" 不存在`);
+    }
+    const powerRuntime = await this.createAgent(
+      { kind: "workscene", scene },
+      this.agentRuntime.permissionStore,
+    );
+    await this.workSceneRegistry.touch(sceneId).catch(() => {});
+    this.swapConfirmationBroker(powerRuntime);
+    this.workScene = { sceneId, runtime: powerRuntime };
+  }
+
+  /**
+   * 退出工作模式 —— broker 切回 main、丢弃 overlay（power runtime 无 dispose
+   * 接口、内部全 in-memory，失 ref 即 GC）。非工作模式时幂等 no-op。同为
+   * 内部构件，不自管 lifecycle guard。
+   */
+  async exitWorkMode(): Promise<void> {
+    if (!this.workScene) return;
+    this.swapConfirmationBroker(this.agentRuntime);
+    this.workScene = undefined;
+  }
+
+  /**
    * Reload 配置——读最新 config/credentials，按 diff 重建对应资源域，swap fields，
    * 后台 dispose 旧资源。
    *
@@ -394,6 +477,25 @@ export class RuntimeSession {
    *
    * 串行：mutex 防止并发触发；dispose 后调用返回 failed。
    */
+  /**
+   * 尝试进入生命周期互斥区 —— reload 与工作模式 enter/exit 共享同一 guard
+   * 的唯一获取入口（互斥状态只在此 set、endLifecycleOp 唯一 clear，单一代码
+   * 路径）。已 dispose 或已有操作进行中返回 false，调用方应放弃并提示（忙时
+   * 后到者拒绝，非排队 mutex）。reload 在 REPL 内部经此原语；applyModeSwitch
+   * 在 REPL 主回路经此原语，二者天然互斥。
+   */
+  tryBeginLifecycleOp(): boolean {
+    if (this.disposed) return false;
+    if (this.lifecycleBusy) return false;
+    this.lifecycleBusy = true;
+    return true;
+  }
+
+  /** 离开生命周期互斥区 —— 与 tryBeginLifecycleOp 成对，finally 中调用。 */
+  endLifecycleOp(): void {
+    this.lifecycleBusy = false;
+  }
+
   async reload(): Promise<ReloadResult> {
     if (this.disposed) {
       return {
@@ -401,13 +503,13 @@ export class RuntimeSession {
         error: new Error("RuntimeSession already disposed"),
       };
     }
-    if (this.reloading) {
+    // disposed 已在上方以专属错误消息拦截，此处 tryBegin 仅会因 busy 失败。
+    if (!this.tryBeginLifecycleOp()) {
       return {
         kind: "failed",
         error: new Error("reload already in progress"),
       };
     }
-    this.reloading = true;
 
     try {
       const newConfig = loadConfig({ cwd: process.cwd() });
@@ -433,12 +535,10 @@ export class RuntimeSession {
         };
       }
 
-      // ConfirmationBroker re-attach（仅 agent 重建时——新 agent 带新 broker）
-      if (built.newAgentRuntime && this.attachedRenderer) {
-        this.currentBrokerDetach?.();
-        this.currentBrokerDetach = this.attachedRenderer.attach(
-          built.newAgentRuntime.confirmationBroker,
-        );
+      // ConfirmationBroker re-attach（仅 agent 重建时——新 agent 带新 broker）。
+      // 走统一方法（内部对未 attach renderer 自然 no-op，等价原 &&  守卫）。
+      if (built.newAgentRuntime) {
+        this.swapConfirmationBroker(built.newAgentRuntime);
       }
 
       // Snapshot 旧资源用于后台 dispose
@@ -473,7 +573,7 @@ export class RuntimeSession {
 
       return { kind: "applied", changedDomains: diff.changedDomains };
     } finally {
-      this.reloading = false;
+      this.endLifecycleOp();
     }
   }
 
@@ -512,6 +612,7 @@ export class RuntimeSession {
       if (diff.agentChanged) {
         // 跨 swap 复用 PermissionStore——保留 session scope 授权
         newAgentRuntime = await this.createAgent(
+          { kind: "main" },
           this.agentRuntime.permissionStore,
         );
 
@@ -594,6 +695,10 @@ export class RuntimeSession {
    */
   async dispose(): Promise<void> {
     this.disposed = true;
+
+    // 若在工作模式：先丢弃 workScene overlay（power runtime 无 dispose 接口、
+    // 内部全 in-memory，失 ref 即 GC），再走现有 main 资源 dispose 链。
+    this.workScene = undefined;
 
     // 先 detach renderer，防 dispose 后访问已释放的 broker
     this.currentBrokerDetach?.();

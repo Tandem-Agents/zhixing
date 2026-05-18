@@ -14,6 +14,7 @@
 
 import * as readline from "node:readline/promises";
 import path from "node:path";
+import { access } from "node:fs/promises";
 import chalk from "chalk";
 import {
   userMessage,
@@ -46,6 +47,8 @@ import {
   Scheduler,
   createEventBus,
   type SchedulerEventMap,
+  type WorkModeSwitchIntent,
+  getWorkSceneConversationsRoot,
 } from "@zhixing/core";
 import { describeProxy, type ProxyDescription } from "@zhixing/network";
 import { loadConfig, loadCredentials, resolveHomeDir } from "@zhixing/providers";
@@ -53,6 +56,7 @@ import type { TaskListService } from "@zhixing/tools-builtin";
 import { createBuiltinExtraToolsAssembly } from "./runtime/builtin-extra-tools.js";
 import { createCliSegmentDeps } from "./runtime/segment-deps.js";
 import { ConversationRepoTaskListStore } from "./runtime/task-list-stores.js";
+import { RoutingConversationRepository } from "./runtime/conversation-router.js";
 import { CommandDispatcher } from "./command-dispatcher.js";
 import { TaskTail } from "./task-tail/index.js";
 import { registerTaskCommands } from "./commands/task-commands.js";
@@ -97,20 +101,21 @@ import { createReplInterruptRuntime } from "./interrupt/repl-runtime.js";
 
 // ─── REPL 状态 ───
 
-interface ReplState {
+/**
+ * per-conversation 运行态聚合 —— 各字段与当前 active runtime 强绑，模式切换
+ * 时必须整体随 runtime 同一原子事务替换。main 与 workscene 各持一份独立实例，
+ * applyModeSwitch 在 turn 边界切换 ReplState.conv 指向（双份持有：进入工作
+ * 模式后 main 这份原样保留，退出时直接切回，无需重建）。
+ *
+ * 不含 agent —— agent 走 session.runtime getter（reload / 模式切换自动指向
+ * 新实例，值捕获会与 getter 分叉）。
+ */
+interface ConversationRuntimeState {
   messages: Message[];
-  // agent 不入 ReplState —— 它是 RuntimeSession 持有的运行时资源，唯一访问
-  // 路径是 session.runtime getter（reload / 工作模式切换后自动指向新实例）。
-  // 值捕获会与 getter 分叉（reload 后旧引用残留），故彻底移除。
-  running: boolean;
-  /** 持久化 */
+  /** transcript 持久化（main 项目域 / workscene 域各自独立实例） */
   store: TranscriptStore;
+  /** conversation meta 仓储（绑各自 ConversationScope） */
   convRepo: ConversationRepository;
-  /**
-   * task_list 服务 —— cli 主线程在 conversation 切换 / `/clear` 时显式调
-   * prime / clear 维护 cache。service 是 process-wide 单例，跨 reload 持续。
-   */
-  taskListService: TaskListService;
   conversationId: string | null;
   turnCounter: number;
   /** 上一轮的工具调用完成数（用于反思触发） */
@@ -119,6 +124,22 @@ interface ReplState {
   hasProposedSkill: boolean;
   /** 是否已执行过 Journal 自动凝练 */
   journalCondenseDone: boolean;
+}
+
+interface ReplState {
+  /**
+   * 当前活跃的 per-conversation 运行态（main 或 workscene）。模式切换由
+   * applyModeSwitch 在 turn 边界整体替换此引用——所有读写经 state.conv.*
+   * 自然跟随活跃域，无需逐字段同步。
+   */
+  conv: ConversationRuntimeState;
+  running: boolean;
+  /**
+   * task_list 服务 —— cli 主线程在 conversation 切换 / `/clear` 时显式调
+   * prime / clear 维护 cache。service 是 process-wide 单例，跨 reload 持续，
+   * 且跨 main/workscene 模式共用（其 per-convId cache 天然隔离两域）。
+   */
+  taskListService: TaskListService;
   /** Scheduler 实例（S1: CLI 进程内运行） */
   scheduler: Scheduler | null;
   /**
@@ -159,7 +180,16 @@ function buildSlashCommands(
    * 当 /new / /switch 切换 conversation 成功后调用 —— 通知 cli UI 层（如 TaskTail）
    * 刷新数据。/clear 不走此回调（service.clear 会 emit state=null 自动触发订阅）。
    */
-  onConversationChanged?: () => void,
+  onConversationChanged: (() => void) | undefined,
+  /**
+   * 模式切换唯一执行点 —— `/enter`·`/exit` 命令 handler 经此触发（先 await
+   * in-flight turn 到达 turn 边界，与主回路消费 pendingModeSwitch 同源）。
+   */
+  applyModeSwitch: (
+    intent: WorkModeSwitchIntent,
+    source: "llm" | "command",
+    triggerMsg?: Message,
+  ) => Promise<void>,
 ): Record<
   string,
   {
@@ -171,7 +201,14 @@ function buildSlashCommands(
     "/help": {
       description: "显示帮助信息",
       handler: (_state) => {
-        const commands = buildSlashCommands(rl, session, renderer, cliWriter);
+        const commands = buildSlashCommands(
+          rl,
+          session,
+          renderer,
+          cliWriter,
+          onConversationChanged,
+          applyModeSwitch,
+        );
         cliWriter.line(`\n${layout.contentPrefix}${chalk.bold("可用命令：")}`);
         for (const [cmd, { description }] of Object.entries(commands)) {
           cliWriter.line(
@@ -187,10 +224,10 @@ function buildSlashCommands(
         // 走 store.compactAll 写一条 compact marker 原子重写 transcript——内存与
         // 磁盘必须同时压缩才能让"清空"语义稳定（仅清内存会被下次 commitTurn 内
         // loadNormalized 把磁盘老 turns 重新拼回 canonical 让历史回流）。
-        if (state.conversationId) {
+        if (state.conv.conversationId) {
           try {
-            state.messages = await state.store.compactAll(
-              state.conversationId,
+            state.conv.messages = await state.conv.store.compactAll(
+              state.conv.conversationId,
               "(用户已清空对话历史)",
             );
           } catch (err) {
@@ -204,7 +241,7 @@ function buildSlashCommands(
         } else {
           // 无 conversationId 路径（极少见，正常 cli 流程总有 conversation）——
           // 仅清内存即可，无磁盘可清
-          state.messages = [];
+          state.conv.messages = [];
         }
         // 视图层组件通过 Resettable 注册到 runtime；这里一并清空它们的对话级状态。
         // 顺序：先磁盘清，后视图层 reset —— 失败时内存 messages 仍是 canonical
@@ -221,9 +258,9 @@ function buildSlashCommands(
         // 清空 conversation meta 的视图层状态（task_list / 段切换历史）。
         // 与 transcript compact / runtime Resettable reset 同语义层级——
         // /clear 是"重置对话内容到新起点"，conversation 身份字段保留不动。
-        if (state.conversationId) {
+        if (state.conv.conversationId) {
           try {
-            await state.convRepo.clearViewLayerState(state.conversationId);
+            await state.conv.convRepo.clearViewLayerState(state.conv.conversationId);
           } catch (err) {
             cliWriter.line(
               chalk.yellow(
@@ -234,10 +271,10 @@ function buildSlashCommands(
           // task_list service cache 同步清空 —— 磁盘端已由 clearViewLayerState 处理。
           // service 不实现 Resettable（process-wide 跨 conversation，不绑定 runtime
           // 生命周期），由本路径显式调 clear(convId) 维护一致性。
-          state.taskListService.clear(state.conversationId);
+          state.taskListService.clear(state.conv.conversationId);
         }
-        state.turnCounter = 0;
-        state.lastToolEndCount = 0;
+        state.conv.turnCounter = 0;
+        state.conv.lastToolEndCount = 0;
         cliWriter.line(chalk.dim(`${layout.contentPrefix}对话历史已清空\n`));
       },
     },
@@ -247,17 +284,17 @@ function buildSlashCommands(
         cliWriter.line(
           `\n  ${chalk.dim("Model:")} ${chalk.cyan(session.runtime.model)}` +
             `\n  ${chalk.dim("Provider:")} ${session.runtime.providerId}` +
-            `\n  ${chalk.dim("Turns:")} ${state.turnCounter}\n`,
+            `\n  ${chalk.dim("Turns:")} ${state.conv.turnCounter}\n`,
         );
       },
     },
     "/status": {
       description: "显示会话状态",
       handler: (state) => {
-        const userMsgs = state.messages.filter(
+        const userMsgs = state.conv.messages.filter(
           (m) => m.role === "user",
         ).length;
-        const assistantMsgs = state.messages.filter(
+        const assistantMsgs = state.conv.messages.filter(
           (m) => m.role === "assistant",
         ).length;
         // ProxyDescription.display 已脱敏（含凭证 URL 安全显示）+ 区分四态
@@ -268,8 +305,8 @@ function buildSlashCommands(
             ? chalk.dim(state.networkProxy.display)
             : state.networkProxy.display;
         cliWriter.line(
-          `\n  ${chalk.dim("Session:")} ${state.conversationId ?? "(未保存)"}` +
-            `\n  ${chalk.dim("Messages:")} ${state.messages.length} (${userMsgs} user, ${assistantMsgs} assistant)` +
+          `\n  ${chalk.dim("Session:")} ${state.conv.conversationId ?? "(未保存)"}` +
+            `\n  ${chalk.dim("Messages:")} ${state.conv.messages.length} (${userMsgs} user, ${assistantMsgs} assistant)` +
             `\n  ${chalk.dim("Model:")} ${chalk.cyan(session.runtime.model)}` +
             `\n  ${chalk.dim("Provider:")} ${session.runtime.providerId}` +
             `\n  ${chalk.dim("Network proxy:")} ${proxyText}\n`,
@@ -279,7 +316,7 @@ function buildSlashCommands(
     "/conversations": {
       description: "列出当前项目的对话",
       handler: async (state) => {
-        const conversations = await state.convRepo.list();
+        const conversations = await state.conv.convRepo.list();
         if (conversations.length === 0) {
           cliWriter.line(chalk.dim("\n  没有保存的对话\n"));
           return;
@@ -288,9 +325,9 @@ function buildSlashCommands(
         for (const c of conversations.slice(0, 15)) {
           const label = c.name ? chalk.white(c.name) : chalk.dim("(未命名)");
           const time = formatRelativeTime(new Date(c.lastActiveAt));
-          const turnCount = await state.store.countTurns(c.id);
+          const turnCount = await state.conv.store.countTurns(c.id);
           const current =
-            c.id === state.conversationId ? chalk.green(" ← 当前") : "";
+            c.id === state.conv.conversationId ? chalk.green(" ← 当前") : "";
           cliWriter.line(
             `  ${chalk.cyan(c.id)} ${label} ${chalk.dim(`(${time}, ${turnCount} 轮)`)}${current}`,
           );
@@ -301,24 +338,30 @@ function buildSlashCommands(
     "/new": {
       description: "创建新对话",
       handler: async (state, args) => {
+        if (session.activeMode.kind !== "main") {
+          cliWriter.line(
+            chalk.dim("\n  工作场景中不可新建对话，请先 /exit 退出\n"),
+          );
+          return;
+        }
         const name = args.trim() || undefined;
         try {
-          const conversation = await state.convRepo.create({
+          const conversation = await state.conv.convRepo.create({
             name,
             preferredModel: session.runtime.model,
             preferredProvider: session.runtime.providerId,
           });
-          await state.store.init(conversation.id, {
+          await state.conv.store.init(conversation.id, {
             model: session.runtime.model,
             provider: session.runtime.providerId,
           });
-          state.messages = [];
-          state.conversationId = conversation.id;
-          state.turnCounter = 0;
-          state.lastToolEndCount = 0;
+          state.conv.messages = [];
+          state.conv.conversationId = conversation.id;
+          state.conv.turnCounter = 0;
+          state.conv.lastToolEndCount = 0;
           // 新建对话无持久化 task_list 状态，prime 后 cache 项为空 items 列表
           await state.taskListService.prime(conversation.id);
-          state.convRepo.touch(state.conversationId).catch(() => {});
+          state.conv.convRepo.touch(state.conv.conversationId).catch(() => {});
           onConversationChanged?.();
           cliWriter.line(
             chalk.dim(`\n  已创建新对话 ${chalk.cyan(conversation.name)}\n`),
@@ -335,9 +378,15 @@ function buildSlashCommands(
     "/switch": {
       description: "切换到其他对话",
       handler: async (state, args) => {
+        if (session.activeMode.kind !== "main") {
+          cliWriter.line(
+            chalk.dim("\n  工作场景中不可切换对话，请先 /exit 退出\n"),
+          );
+          return;
+        }
         const input = args.trim();
         if (!input) {
-          const conversations = await state.convRepo.list();
+          const conversations = await state.conv.convRepo.list();
           if (conversations.length === 0) {
             cliWriter.line(chalk.dim("\n  没有可切换的对话\n"));
             return;
@@ -347,9 +396,9 @@ function buildSlashCommands(
             const c = conversations[i]!;
             const label = c.name ? chalk.white(c.name) : chalk.dim("(未命名)");
             const time = formatRelativeTime(new Date(c.lastActiveAt));
-            const turnCount = await state.store.countTurns(c.id);
+            const turnCount = await state.conv.store.countTurns(c.id);
             const current =
-              c.id === state.conversationId ? chalk.green(" ← 当前") : "";
+              c.id === state.conv.conversationId ? chalk.green(" ← 当前") : "";
             cliWriter.line(
               `  ${chalk.yellow(`[${i + 1}]`)} ${label} ${chalk.dim(`(${time}, ${turnCount} 轮)`)}${current}`,
             );
@@ -357,12 +406,12 @@ function buildSlashCommands(
           cliWriter.line(chalk.dim(`\n  使用 /switch <序号> 或 /switch <名称> 切换\n`));
           return;
         }
-        if (input === state.conversationId) {
+        if (input === state.conv.conversationId) {
           cliWriter.line(chalk.dim("\n  已在当前对话中\n"));
           return;
         }
 
-        const conversations = await state.convRepo.list();
+        const conversations = await state.conv.convRepo.list();
 
         // 按序号选择
         const num = Number(input);
@@ -374,7 +423,7 @@ function buildSlashCommands(
 
         // 按 ID 精确匹配
         if (!target) {
-          const conv = await state.convRepo.get(input);
+          const conv = await state.conv.convRepo.get(input);
           if (conv) target = { id: conv.id, name: conv.name };
         }
 
@@ -404,20 +453,20 @@ function buildSlashCommands(
           cliWriter.line(chalk.red(`\n  对话 "${input}" 不存在\n`));
           return;
         }
-        if (target.id === state.conversationId) {
+        if (target.id === state.conv.conversationId) {
           cliWriter.line(chalk.dim("\n  已在当前对话中\n"));
           return;
         }
 
         try {
-          const loaded = await state.store.load(target.id);
-          state.messages = loaded.messages;
-          state.conversationId = target.id;
-          state.turnCounter = loaded.turnCount;
-          state.lastToolEndCount = 0;
+          const loaded = await state.conv.store.load(target.id);
+          state.conv.messages = loaded.messages;
+          state.conv.conversationId = target.id;
+          state.conv.turnCounter = loaded.turnCount;
+          state.conv.lastToolEndCount = 0;
           // 加载目标对话的 task_list 持久化状态到 service cache
           await state.taskListService.prime(target.id);
-          state.convRepo.touch(state.conversationId).catch(() => {});
+          state.conv.convRepo.touch(state.conv.conversationId).catch(() => {});
           onConversationChanged?.();
           cliWriter.line(
             chalk.dim(
@@ -440,11 +489,11 @@ function buildSlashCommands(
           cliWriter.line(chalk.yellow(`${layout.contentPrefix}用法: /name <名称>\n`));
           return;
         }
-        if (!state.conversationId) {
+        if (!state.conv.conversationId) {
           cliWriter.line(chalk.yellow(`${layout.contentPrefix}当前会话尚未保存\n`));
           return;
         }
-        await state.convRepo.rename(state.conversationId, args.trim());
+        await state.conv.convRepo.rename(state.conv.conversationId, args.trim());
         cliWriter.line(chalk.dim(`${layout.contentPrefix}会话已命名为: ${args.trim()}\n`));
       },
     },
@@ -730,13 +779,13 @@ function buildSlashCommands(
     "/usage": {
       description: "查看 token 用量详情",
       handler: (state) => {
-        const budget = session.runtime.checkBudget(state.messages);
+        const budget = session.runtime.checkBudget(state.conv.messages);
         // 解析 transcript 中所有 Task 工具的 <usage> trailer —— 没有 Task 调用时
         // parseTaskUsageFromMessages 返回空数组,renderUsageReport 自动跳过子段
-        const subUsages = parseTaskUsageFromMessages(state.messages);
+        const subUsages = parseTaskUsageFromMessages(state.conv.messages);
         renderUsageReport(
           budget,
-          state.turnCounter,
+          state.conv.turnCounter,
           session.runtime.calibrationFactor,
           subUsages,
           cliWriter,
@@ -746,22 +795,22 @@ function buildSlashCommands(
     "/context": {
       description: "上下文容量可视化",
       handler: (state) => {
-        const budget = session.runtime.checkBudget(state.messages);
+        const budget = session.runtime.checkBudget(state.conv.messages);
         renderContextVisual(budget, cliWriter);
       },
     },
     "/compact": {
       description: "手动触发上下文压缩",
       handler: async (state) => {
-        if (state.messages.length < 4) {
+        if (state.conv.messages.length < 4) {
           cliWriter.line(chalk.dim("\n  对话历史过短，无需压缩\n"));
           return;
         }
         cliWriter.line(chalk.yellow("\n  ⟳ 正在压缩上下文..."));
         try {
           const result = await session.runtime.forceCompact(
-            [...state.messages],
-            state.turnCounter,
+            [...state.conv.messages],
+            state.conv.turnCounter,
           );
           if (result.modified) {
             const pct = Math.round(result.budget.usageRatio * 100);
@@ -769,16 +818,16 @@ function buildSlashCommands(
             // 走 commitTurn({compactBefore}) 统一持久化入口：
             //   - 仅在事务产生真 summary 时写 marker（避免 "(manual compact)" 假摘要）
             //   - commitTurn 内部原子重写：header + compactBefore + retained turns
-            //   - 返回 canonical → state.messages 整体替换，内存与磁盘严格一致
+            //   - 返回 canonical → state.conv.messages 整体替换，内存与磁盘严格一致
             //   - 无会话 ID 或无真 summary 时降级为纯内存更新（不持久化）
-            if (state.conversationId && result.compactBefore) {
+            if (state.conv.conversationId && result.compactBefore) {
               try {
-                state.messages = await state.store.commitTurn(state.conversationId, {
+                state.conv.messages = await state.conv.store.commitTurn(state.conv.conversationId, {
                   compactBefore: result.compactBefore,
                 });
               } catch (err) {
                 // 持久化失败：降级用 forceCompact 返回的内存版 messages
-                state.messages = result.messages;
+                state.conv.messages = result.messages;
                 cliWriter.line(
                   chalk.dim(
                     `  [持久化警告] ${err instanceof Error ? err.message : String(err)}`,
@@ -787,7 +836,7 @@ function buildSlashCommands(
               }
             } else {
               // 无真 summary（非摘要型策略）或无会话 ID → 仅更新内存
-              state.messages = result.messages;
+              state.conv.messages = result.messages;
             }
           } else {
             cliWriter.line(chalk.dim("  已无可压缩内容\n"));
@@ -845,11 +894,66 @@ function buildSlashCommands(
         cliWriter.line("");
       },
     },
+    "/enter": {
+      description: "进入工作场景",
+      handler: async (state, args) => {
+        if (session.activeMode.kind !== "main") {
+          cliWriter.line(chalk.dim("\n  已在工作场景中，请先 /exit 退出\n"));
+          return;
+        }
+        const q = args.trim();
+        if (!q) {
+          cliWriter.line(
+            chalk.yellow(
+              `${layout.contentPrefix}用法: /enter <场景 id 或名称>\n`,
+            ),
+          );
+          return;
+        }
+        const scenes = await session.workSceneRegistry.list();
+        // 精确 id 优先，其次唯一名称匹配（与 /switch 同款解析纪律）
+        let sceneId: string | null =
+          scenes.find((s) => s.id === q)?.id ?? null;
+        if (!sceneId) {
+          const lower = q.toLowerCase();
+          const named = scenes.filter((s) =>
+            s.name.toLowerCase().includes(lower),
+          );
+          if (named.length === 1) sceneId = named[0]!.id;
+          else if (named.length > 1) {
+            cliWriter.line(
+              chalk.yellow(
+                `\n  多个工作场景匹配 "${q}"，请用精确 id\n`,
+              ),
+            );
+            return;
+          }
+        }
+        if (!sceneId) {
+          cliWriter.line(chalk.red(`\n  工作场景 "${q}" 不存在\n`));
+          return;
+        }
+        // 命令可能在 turn 运行中输入：先 await in-flight turn 到达 turn 边界
+        // （与 hot-reload 先 await in-flight turn 的既有纪律一致）。
+        if (state.activeTurnPromise) {
+          await state.activeTurnPromise.catch(() => {});
+        }
+        await applyModeSwitch({ kind: "enter", sceneId }, "command");
+      },
+    },
     "/exit": {
-      description: "退出",
-      handler: async () => {
-        // 走 rl.close() 让 close 监听器统一执行完整 cleanup
-        // (scheduler / deliveryStack / channels / renderer / confirmation)
+      description: "退出工作场景 / 退出知行",
+      handler: async (state) => {
+        // 工作场景中：/exit 语义为退出工作场景回主对话（非退出进程）。
+        if (session.activeMode.kind === "workscene") {
+          if (state.activeTurnPromise) {
+            await state.activeTurnPromise.catch(() => {});
+          }
+          await applyModeSwitch({ kind: "exit" }, "command");
+          return;
+        }
+        // 主对话中：维持原语义——走 rl.close() 让 close 监听器统一执行完整
+        // cleanup (scheduler / deliveryStack / channels / renderer / confirmation)
         rl.close();
       },
     },
@@ -971,13 +1075,22 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   const convDir = path.join(zhixingHome, "projects", projectId, "conversations");
   const store = new TranscriptStore(convDir, cwd);
 
-  // builtin extra tools assembly —— task_list 持久化走 ConversationRepository。
+  // 对话仓储路由核 —— builtinExtraTools(含 TaskListService) 与 segmentDeps 在此
+  // 一次性装配并跨 reload 持久，二者构造期即绑定后端 repo、无法重建。插一层
+  // 路由代理：默认透传主项目 convRepo，进入工作模式时 applyModeSwitch 在 turn
+  // 边界 setActive 切到工作场景独立 repo，两个消费者无感知（spec：两个 facade
+  // 适配器包同一路由核——ConversationRepoTaskListStore 是 TaskListStore 形、
+  // createCliSegmentDeps 是 IConversationRepository 形，路由决策同源）。
+  const routingRepo = new RoutingConversationRepository(convRepo);
+
+  // builtin extra tools assembly —— task_list 持久化走路由核（按活跃模式落到
+  // 主项目 / 工作场景各自的 conversation meta）。
   //
   // assembly 持有 TaskListService 单例，跨 reload 复用（service.cache 与持久化连续
   // 性由此保障）。session 内部每次 createAgent 都调 assembly.assembleTools() 拿
   // 新的 ToolDefinition 实例，工具内部都闭包引用同一 service —— 行为一致。
   const builtinExtraTools = createBuiltinExtraToolsAssembly(
-    new ConversationRepoTaskListStore(convRepo),
+    new ConversationRepoTaskListStore(routingRepo),
   );
 
   // 段切换外部依赖 —— 跨 reload 持久，封装 taskListReader（适配自 TaskListService）
@@ -988,7 +1101,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   // cli 装配层无需透传 transcript（与 LLMSummarize 同源、收敛到唯一 transcript 写路径）。
   const segmentDeps = createCliSegmentDeps({
     taskListService: builtinExtraTools.taskListService,
-    conversationRepo: convRepo,
+    conversationRepo: routingRepo,
   });
 
   const session = await RuntimeSession.create({
@@ -1155,17 +1268,21 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     session.attachConfirmationRenderer(confirmationRenderer);
   }
 
-  const state: ReplState = {
+  // main 域运行态 —— 进入工作模式后此实例原样保留，退出时直接切回（双份持有）。
+  const mainConv: ConversationRuntimeState = {
     messages,
-    running: false,
     store,
     convRepo,
-    taskListService: session.taskListService,
     conversationId,
     turnCounter,
     lastToolEndCount: 0,
     hasProposedSkill: false,
     journalCondenseDone: false,
+  };
+  const state: ReplState = {
+    conv: mainConv,
+    running: false,
+    taskListService: session.taskListService,
     scheduler: session.scheduler,
     networkProxy: describeProxy(config.network?.proxy),
     activeTurnPromise: null,
@@ -1176,12 +1293,180 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   // 触发时 TaskTail 早已创建完毕，无装配时序问题。
   let taskTail: TaskTail | null = null;
 
+  /**
+   * 模式切换唯一执行点 —— REPL 主回路 turn 边界原子事务。
+   *
+   * 两条触发路径汇聚到此：LLM 工具经 RunResult.pendingModeSwitch（主回路 turn
+   * 结束后消费，source="llm"）、`/enter`·`/exit` 命令（handler 先 await
+   * in-flight turn，source="command"）。
+   *
+   * 原子性不对称（焊死）：
+   *   - enter 失败 = fail-back 到 main：按序执行有副作用步骤，任一步抛错则
+   *     逆序撤销已执行项，active 始终留 main（active 只在最后一步纯赋值切换、
+   *     不可能抛错）。
+   *   - exit 失败 = fail-forward 到 main：power overlay 一旦弃不可复原，弃后
+   *     任一步失败都继续推进到 main 干净态，绝不退回 workscene。
+   *
+   * 与 reload 共享 session 的单一 lifecycle guard（忙时拒绝并提示）。
+   */
+  const applyModeSwitch = async (
+    intent: WorkModeSwitchIntent,
+    source: "llm" | "command",
+    triggerMsg?: Message,
+  ): Promise<void> => {
+    if (!session.tryBeginLifecycleOp()) {
+      cliWriter.line(
+        chalk.dim("\n  模式切换被拒绝：另一生命周期操作正在进行\n"),
+      );
+      return;
+    }
+    try {
+      if (intent.kind === "enter") {
+        if (session.activeMode.kind !== "main") {
+          cliWriter.line(chalk.dim("\n  已在工作场景中，请先 /exit 退出\n"));
+          return;
+        }
+        const sceneId = intent.sceneId;
+        const scene = await session.workSceneRegistry.get(sceneId);
+        if (!scene) {
+          cliWriter.line(chalk.red(`\n  工作场景 "${sceneId}" 不存在\n`));
+          return;
+        }
+        // workdir 校验前置于全部副作用 —— 不可访问则整体失败、active 留 main，
+        // 无任何已执行副作用需撤销（fail-back 退化为零成本）。
+        if (scene.workdir) {
+          try {
+            await access(scene.workdir);
+          } catch {
+            cliWriter.line(
+              chalk.red(
+                `\n  工作场景 "${scene.name}" 的工作目录不可访问：${scene.workdir}\n`,
+              ),
+            );
+            return;
+          }
+        }
+
+        const worksceneRepo = new ConversationRepository({
+          kind: "workscene",
+          sceneId,
+        });
+        const wStore = new TranscriptStore(
+          getWorkSceneConversationsRoot(sceneId),
+          scene.workdir ?? process.cwd(),
+        );
+        // 起始 messages 按触发源：LLM 触发须带入引发进入的那句用户输入（vision：
+        // power 不读 main 历史，但触发那句须带入否则 power 不知干啥）；命令触发
+        // 非对话输入 → 空，用户随后在 workscene 输入。
+        //
+        // 触发句由主回路显式透传该 turn 构造的原始 userMsg —— 不扫描 canonical
+        // 反推：带工具调用的 turn 末尾 tool_result 消息同为 role:"user"
+        // （toolResultMessage），按 role 反查会误取工具结果而非用户原句。
+        const startMessages: Message[] =
+          source === "llm" && triggerMsg ? [triggerMsg] : [];
+
+        // 有副作用步骤按序执行，undo 逆序栈在任一步抛错时回退（fail-back）。
+        const undos: Array<() => Promise<void> | void> = [];
+        try {
+          // ① 路由核 register：后续 power turn 的 task_list / 段切换落 workscene
+          routingRepo.setActive(worksceneRepo);
+          undos.push(() => routingRepo.setActive(mainConv.convRepo));
+          // ② workscene scope 新建 conversation
+          const wConv = await worksceneRepo.create({ name: scene.name });
+          undos.push(async () => {
+            await worksceneRepo.delete(wConv.id).catch(() => {});
+          });
+          // ③ task_list service cache prime（新建 → 空 items）
+          await state.taskListService.prime(wConv.id);
+          undos.push(() => state.taskListService.clear(wConv.id));
+          // ④ 装 power runtime + broker swap（其自身原子由 RuntimeSession 保证）
+          await session.enterWorkMode(sceneId);
+          undos.push(async () => {
+            await session.exitWorkMode();
+          });
+          // enterWorkMode 后 session.runtime=power，transcript 头记准确模型
+          await wStore.init(wConv.id, {
+            model: session.runtime.model,
+            provider: session.runtime.providerId,
+          });
+          // ⑤ 构造并切 active（纯赋值，最后一步、不可能抛错 → 无需 undo）
+          state.conv = {
+            messages: startMessages,
+            store: wStore,
+            convRepo: worksceneRepo,
+            conversationId: wConv.id,
+            turnCounter: 0,
+            lastToolEndCount: 0,
+            hasProposedSkill: false,
+            journalCondenseDone: false,
+          };
+        } catch (err) {
+          for (const undo of undos.reverse()) {
+            try {
+              await undo();
+            } catch {
+              // 撤销尽力而为：单步撤销失败不阻断其余撤销，最终态仍是 main
+            }
+          }
+          cliWriter.line(
+            chalk.red(
+              `\n  进入工作场景失败：${err instanceof Error ? err.message : String(err)}（已回退主对话）\n`,
+            ),
+          );
+          return;
+        }
+
+        // 渲染：事务点直接 cliWriter（不经 EventBus 订阅）
+        cliWriter.line(
+          chalk.dim(
+            `\n  ${"─".repeat(48)}\n  已进入工作场景 ${chalk.cyan(scene.name)}` +
+              `${scene.workdir ? chalk.dim(`（${scene.workdir}）`) : ""}\n  ${"─".repeat(48)}\n`,
+          ),
+        );
+        taskTail?.refresh();
+        return;
+      }
+
+      // intent.kind === "exit"
+      if (session.activeMode.kind !== "workscene") {
+        cliWriter.line(chalk.dim("\n  当前不在工作场景中\n"));
+        return;
+      }
+      // 退出是用户明确意图：弃 power overlay 后不可复原，② 起任一步失败都继续
+      // 推进到 main 干净态（fail-forward），绝不退回 workscene。PR 范围内
+      // exit 暂不带纪要（纪要为后续 PR：power 退出前 callText 生成一句摘要）。
+      const worksceneConvId = state.conv.conversationId;
+      try {
+        await session.exitWorkMode();
+      } catch (err) {
+        cliWriter.line(
+          chalk.dim(
+            `\n  退出工作模式时 overlay 清理告警（不阻断回到主对话）：${err instanceof Error ? err.message : String(err)}\n`,
+          ),
+        );
+      }
+      // 切 active 回 main + 丢弃 workscene 运行态（路由核注销 + service cache 清）
+      state.conv = mainConv;
+      routingRepo.setActive(mainConv.convRepo);
+      if (worksceneConvId) state.taskListService.clear(worksceneConvId);
+      cliWriter.line(
+        chalk.dim(
+          `\n  ${"─".repeat(48)}\n  已退出工作场景，回到主对话\n  ${"─".repeat(48)}\n`,
+        ),
+      );
+      taskTail?.refresh();
+    } finally {
+      session.endLifecycleOp();
+    }
+  };
+
   const slashCommands = buildSlashCommands(
     rl,
     session,
     renderer,
     cliWriter,
     () => taskTail?.refresh(),
+    applyModeSwitch,
   );
 
   // ── Typeahead 路径接入（Phase 1 Step 5） ──
@@ -1241,7 +1526,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
         ctx: ArgQueryContext,
         signal: AbortSignal,
       ): Promise<readonly ArgChoice[]> {
-        const conversations = await state.convRepo.list();
+        const conversations = await state.conv.convRepo.list();
         if (signal.aborted) return [];
 
         const query = ctx.query.toLowerCase();
@@ -1251,8 +1536,8 @@ export async function startRepl(options: ReplOptions): Promise<void> {
             continue;
           }
           const time = formatRelativeTime(new Date(c.lastActiveAt));
-          const turnCount = await state.store.countTurns(c.id);
-          const current = c.id === state.conversationId ? " ← 当前" : "";
+          const turnCount = await state.conv.store.countTurns(c.id);
+          const current = c.id === state.conv.conversationId ? " ← 当前" : "";
           choices.push({
             value: c.id,
             label: c.name || c.id,
@@ -1290,7 +1575,8 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       { name: "conversations", aliases: ["sessions"], description: "列出当前项目的对话", category: "session", legacyKey: "/conversations", hidden: true },
       { name: "switch", description: "切换到其他对话", category: "session", legacyKey: "/switch", args: [switchArgSchema] },
       { name: "name", description: "为当前会话命名", category: "session", legacyKey: "/name" },
-      { name: "exit", aliases: ["quit"], description: "退出知行", category: "session", legacyKey: "/exit" },
+      { name: "enter", description: "进入工作场景", category: "session", legacyKey: "/enter" },
+      { name: "exit", aliases: ["quit"], description: "退出工作场景 / 退出知行", category: "session", legacyKey: "/exit" },
       // ─ info ─
       { name: "help", description: "显示帮助信息", category: "info", legacyKey: "/help" },
       { name: "status", description: "显示会话状态", category: "info", legacyKey: "/status" },
@@ -1340,7 +1626,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       registry: tRegistry,
       dispatcher: typeaheadDispatcher,
       service: session.taskListService,
-      getConversationId: () => state.conversationId,
+      getConversationId: () => state.conv.conversationId,
       writer: cliWriter,
     });
 
@@ -1351,7 +1637,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       taskTail = new TaskTail({
         screen: renderScreen,
         service: session.taskListService,
-        getConversationId: () => state.conversationId,
+        getConversationId: () => state.conv.conversationId,
       });
       taskTail.start();
     }
@@ -1561,7 +1847,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
 
     // 正常对话
     const userMsg = userMessage(resolvedInput);
-    state.messages.push(userMsg);
+    state.conv.messages.push(userMsg);
     state.running = true;
     renderer.startThinking();
 
@@ -1586,34 +1872,40 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       },
     });
 
+    // LLM 工具触发的模式切换意图 —— turn 内只产生意图，本回路在 turn 完全
+    // 落定后（commitTurn + finally 资源释放）于 turn 边界唯一消费。turn 出错
+    // （catch 路径）则 runResult 不可达、保持 undefined → 不切换。
+    let pendingModeSwitch: WorkModeSwitchIntent | undefined;
+
     try {
       const runPromise = session.runtime.run({
-        messages: [...state.messages],
-        turnIndex: state.turnCounter,
+        messages: [...state.conv.messages],
+        turnIndex: state.conv.turnCounter,
         // 透传当前 conversationId 进 RunContext —— 让工具按需取（在持久化会话中
         // 区分写入目标 / 读取上下文）；ephemeral 路径（无 conversation）自然为
         // undefined，工具自行 graceful degrade。
-        conversationId: state.conversationId ?? undefined,
+        conversationId: state.conv.conversationId ?? undefined,
         abortSignal: interruptRuntime.controller.signal,
         onYield: (e) => renderer.handleEvent(e),
         enrichOptions: {
-          lastToolEndCount: state.lastToolEndCount,
-          hasProposedSkill: state.hasProposedSkill,
+          lastToolEndCount: state.conv.lastToolEndCount,
+          hasProposedSkill: state.conv.hasProposedSkill,
         },
       });
       // 暴露给 RuntimeSession.reload 流程——reload 在 swap 之前 await 此 promise
       state.activeTurnPromise = runPromise;
       const runResult = await runPromise;
+      pendingModeSwitch = runResult.pendingModeSwitch;
       const { newMessages, toolEndCount, injectedSkillIds } = runResult;
 
       renderer.stop();
-      state.lastToolEndCount = toolEndCount;
+      state.conv.lastToolEndCount = toolEndCount;
       // turn 终止反馈（耗时 / token / abort 原因 / error 类型 / max_turns）由 status-bar
       // 单点接管——renderSummary 已移除，避免每条 AI 消息底下重复的 "─ 1.6s" 视觉噪音。
       // 状态条 done 永驻显示直到下一次 agent:run_start，新 turn 起始覆盖回 thinking。
 
       // 检测 Agent 是否在本轮回复中提议了技能保存/更新
-      if (!state.hasProposedSkill) {
+      if (!state.conv.hasProposedSkill) {
         const assistantText = newMessages
           .filter((m) => m.role === "assistant")
           .flatMap((m) => m.content)
@@ -1621,7 +1913,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
           .map((b) => b.text)
           .join("");
         if (assistantText.includes("存为技能") || assistantText.includes("保存为技能") || assistantText.includes("SKILL_CANDIDATE") || /💡.*技能/.test(assistantText)) {
-          state.hasProposedSkill = true;
+          state.conv.hasProposedSkill = true;
         }
       }
 
@@ -1640,23 +1932,23 @@ export async function startRepl(options: ReplOptions): Promise<void> {
 
       // 单一事实源持久化：
       //   commitTurn 一次原子写入 turn + compactBefore，返回 canonical messages。
-      //   state.messages = canonical 整体替换，不再分两步 "push newMessages + appendTurn"。
+      //   state.conv.messages = canonical 整体替换，不再分两步 "push newMessages + appendTurn"。
       //   canonical 自带压缩效果（compactBefore 截断后的末尾 turns + summaryPair），
-      //   下次 run 直接用 state.messages 作为 LLM 输入，跨 run 状态与磁盘严格一致。
-      if (state.conversationId) {
+      //   下次 run 直接用 state.conv.messages 作为 LLM 输入，跨 run 状态与磁盘严格一致。
+      if (state.conv.conversationId) {
         try {
-          const canonical = await state.store.commitTurn(state.conversationId, {
+          const canonical = await state.conv.store.commitTurn(state.conv.conversationId, {
             turn: runResult.turn,
             compactBefore: runResult.compactBefore,
           });
-          state.messages = canonical;
-          state.turnCounter++;
-          state.convRepo.touch(state.conversationId).catch(() => {});
+          state.conv.messages = canonical;
+          state.conv.turnCounter++;
+          state.conv.convRepo.touch(state.conv.conversationId).catch(() => {});
         } catch (err) {
-          // 持久化失败降级：state.messages 按未压缩形态 append newMessages
+          // 持久化失败降级：state.conv.messages 按未压缩形态 append newMessages
           //
           // 已知代价：runResult.compactBefore 若非空，此降级不应用 compact 截断 ——
-          // 内存 state.messages 会多出一些本应被截断的老 turns，与磁盘不一致。
+          // 内存 state.conv.messages 会多出一些本应被截断的老 turns，与磁盘不一致。
           //
           // 自愈机制：下一轮 run 的 pre-flight contextManager 会重新评估并触发
           // 新一轮 compact（因为内存超过阈值），恢复状态一致性。
@@ -1667,7 +1959,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
           //   a. 持久化失败是罕见事件（磁盘满 / 权限 / EIO），过度设计 ROI 低
           //   b. 简单 append 保证本轮对话对用户完整展示
           //   c. 自愈路径已经覆盖长期状态一致性
-          state.messages.push(...newMessages);
+          state.conv.messages.push(...newMessages);
           cliWriter.line(
             chalk.dim(
               `  [持久化警告] ${err instanceof Error ? err.message : String(err)}`,
@@ -1679,19 +1971,19 @@ export async function startRepl(options: ReplOptions): Promise<void> {
         // 仅 main 模式触发（工作场景模式记忆域是 workscene，绝不跑个人 journal）。
         if (
           session.activeMode.kind === "main" &&
-          !state.journalCondenseDone
+          !state.conv.journalCondenseDone
         ) {
-          state.journalCondenseDone = true;
+          state.conv.journalCondenseDone = true;
           runJournalLifecycle(session.runtime).catch(() => {});
         }
       } else {
         // 无会话 ID（无持久化）：降级为内存 append，保持对话语义
-        state.messages.push(...newMessages);
+        state.conv.messages.push(...newMessages);
       }
     } catch (err) {
       renderer.stop();
       renderError(err, cliWriter);
-      state.messages.pop();
+      state.conv.messages.pop();
     } finally {
       // 释放 stdin keypress ownership + 卸 SIGINT/SIGTERM listener;
       // 恢复 attach 前的 raw mode 状态,让下一轮 typeahead-input / readline 正常工作。
@@ -1705,6 +1997,14 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       if (exitRequested) {
         rl.close();
       }
+    }
+
+    // turn 边界：消费本轮 LLM 工具产生的模式切换意图（命令触发走 /enter·
+    // /exit handler 同源 applyModeSwitch）。此时 turn 已完全落定、in-flight
+    // promise 已清——切换天然在 turn 边界，旧 runtime 已跑完本轮。
+    if (pendingModeSwitch) {
+      // 透传本 turn 构造的原始 userMsg 作触发句（power 起始 messages[0]）。
+      await applyModeSwitch(pendingModeSwitch, "llm", userMsg);
     }
   }
 

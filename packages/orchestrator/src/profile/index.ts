@@ -5,6 +5,7 @@ export type {
 export {
   MAIN_IDENTITY_INSTRUCTIONS,
   mainProfile,
+  powerProfile,
   subAgentProfile,
   type SubAgentProfileOptions,
 } from "./default-profiles.js";

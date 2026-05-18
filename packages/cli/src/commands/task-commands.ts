@@ -35,7 +35,7 @@ export interface TaskCommandsOptions {
   readonly dispatcher: CommandDispatcher;
   readonly service: TaskListService;
   /**
-   * 取当前活跃 conversation id —— 应与 TaskTail 同源（来自 cli REPL state.conversationId）。
+   * 取当前活跃 conversation id —— 应与 TaskTail 同源（来自 cli REPL 当前活跃对话运行态）。
    * 缺失时命令返回 ephemeral 友好提示。
    */
   readonly getConversationId: () => string | null | undefined;
