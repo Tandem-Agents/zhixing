@@ -7,9 +7,12 @@
  *     - TimeProvider 由 `createAgentRuntime` 内部默认装配（不依赖 cli 资源）
  *     - SchedulerProvider 和 TaskListProvider 依赖 cli 注入的 Scheduler / TaskListService
  *
- *   后两者需要在 4 个 runtime 装配点全部注册：REPL bootstrap / REPL reload swap /
- *   serve per-session / serve ephemeral。本 helper 把"该注册什么"和"注册逻辑细节"
- *   集中一处，4 个 caller 各自只提供"如何取 scheduler 状态 + 哪个 service"两个 deps。
+ *   后两者需要在每一个 user-facing runtime 装配点全部注册：REPL 侧（bootstrap /
+ *   reload 重建 main / 进入工作模式建 power / reload 在工作模式连带重建 power）
+ *   由 RuntimeSession 内单一 attachTurnContextProviders 封装统一调用本 helper；
+ *   serve 侧（per-session / ephemeral）各自直接调用本 helper。本 helper 把"该
+ *   注册什么"和"注册逻辑细节"集中一处，各 caller 只提供"如何取 scheduler 状态
+ *   + 哪个 service"两个 deps。
  *
  * 为什么单独成文件 / 不塞进 BuiltinExtraToolsAssembly：
  *   - assembly 的语义是"task_list-aware 工具/服务集合"——把 SchedulerProvider 塞进
@@ -20,7 +23,7 @@
  * 未来扩展模板：
  *   新增 cli 装配层的 TurnContextProvider（如未来 SegmentMetadataProvider 把段切换
  *   边界信息注入 LLM），只需在本 helper 内追加 register 调用 + 在 deps 接口加对应
- *   service 引用——4 个 caller 装配代码不动。**杜绝"两入口不对齐"类回归**。
+ *   service 引用——所有 caller 装配代码不动。**杜绝"两入口不对齐"类回归**。
  */
 
 import {

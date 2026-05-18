@@ -49,6 +49,8 @@ import {
   type SchedulerEventMap,
   type WorkModeSwitchIntent,
   getWorkSceneConversationsRoot,
+  extractText,
+  buildWorksceneDigestMessage,
 } from "@zhixing/core";
 import { describeProxy, type ProxyDescription } from "@zhixing/network";
 import { loadConfig, loadCredentials, resolveHomeDir } from "@zhixing/providers";
@@ -167,6 +169,36 @@ export interface ReplOptions {
   continue?: boolean;
   resume?: string | true;
   name?: string;
+}
+
+/**
+ * 构造退出工作场景时给 power 的纪要指令。
+ *
+ * `callText` 单发无历史，故把本场景对话的文本内容嵌入 prompt，由 power（绑
+ * light = 用户中档，成本正确）概括成一段给主对话的交接。只取 text block
+ * （工具调用/结果噪音不入），无任何可读文本时返回 undefined（无可纪要 →
+ * 调用方跳过 LLM 调用）。
+ */
+function buildWorksceneDigestPrompt(
+  messages: readonly Message[],
+): string | undefined {
+  const transcript = messages
+    .map((m) => {
+      const text = extractText(m).trim();
+      if (!text) return null;
+      const who =
+        m.role === "user" ? "用户" : m.role === "assistant" ? "你" : m.role;
+      return `${who}: ${text}`;
+    })
+    .filter((line): line is string => line !== null)
+    .join("\n");
+  if (!transcript) return undefined;
+  return (
+    `以下是你在某个工作场景中与用户的完整对话：\n\n${transcript}\n\n` +
+    `你即将退出该工作场景、回到主对话。请用简短一段（中文，至多 5 句）向主` +
+    `对话交接：本场景做了什么、关键产出或结论、有无未尽事项。只输出这段交接` +
+    `文本本身，不要寒暄、不要提问、不要复述本提示。`
+  );
 }
 
 // ─── 斜杠命令 ───
@@ -1432,10 +1464,30 @@ export async function startRepl(options: ReplOptions): Promise<void> {
         cliWriter.line(chalk.dim("\n  当前不在工作场景中\n"));
         return;
       }
-      // 退出是用户明确意图：弃 power overlay 后不可复原，② 起任一步失败都继续
-      // 推进到 main 干净态（fail-forward），绝不退回 workscene。PR 范围内
-      // exit 暂不带纪要（纪要为后续 PR：power 退出前 callText 生成一句摘要）。
+      // 退出是用户明确意图：弃 power overlay 后不可复原，弃后任一步失败都继续
+      // 推进到 main 干净态（fail-forward），绝不退回 workscene。
       const worksceneConvId = state.conv.conversationId;
+
+      // 退出纪要（best-effort，失败不阻断退出 —— 退出是用户明确意图，不可因
+      // 纪要 LLM 失败卡在 workscene；失败则跳过 + 记降级提示，主对话后续仍可
+      // query 工作场景记忆兜底）。此刻 session.runtime 仍 = power（exitWorkMode
+      // 尚未调用），callText 绑 light（power 的 light = 用户中档）。state.conv
+      // 仍 = worksceneConv，持本场景全部消息。
+      let digest: string | undefined;
+      const digestPrompt = buildWorksceneDigestPrompt(state.conv.messages);
+      if (digestPrompt) {
+        try {
+          digest =
+            (await session.runtime.callText(digestPrompt)).trim() || undefined;
+        } catch (err) {
+          cliWriter.line(
+            chalk.dim(
+              `\n  工作场景纪要生成失败（不阻断退出，主对话后续可查工作场景记忆）：${err instanceof Error ? err.message : String(err)}\n`,
+            ),
+          );
+        }
+      }
+
       try {
         await session.exitWorkMode();
       } catch (err) {
@@ -1449,9 +1501,18 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       state.conv = mainConv;
       routingRepo.setActive(mainConv.convRepo);
       if (worksceneConvId) state.taskListService.clear(worksceneConvId);
+
+      // 仅纪要成功时，append 到 main 运行态消息末尾，以 system-meta 元标签包裹
+      // （主对话据既有 meta-protocol 通用框架识别为机制插入、非自己原话）。
+      // 这是一次性交接上下文：主对话下一 turn 见之，是否长存由主对话自判调
+      // memory 工具；不写个人记忆。
+      if (digest) {
+        mainConv.messages.push(buildWorksceneDigestMessage(digest));
+      }
       cliWriter.line(
         chalk.dim(
-          `\n  ${"─".repeat(48)}\n  已退出工作场景，回到主对话\n  ${"─".repeat(48)}\n`,
+          `\n  ${"─".repeat(48)}\n  已退出工作场景，回到主对话` +
+            `${digest ? "（已为主对话生成本场景交接纪要）" : ""}\n  ${"─".repeat(48)}\n`,
         ),
       );
       taskTail?.refresh();

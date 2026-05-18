@@ -60,6 +60,12 @@ interface BuildResult {
   newChannels: ChannelRegistry | undefined;
   newDeliveryStack: DeliveryStack | undefined;
   newAgentRuntime: AgentRuntime | undefined;
+  /**
+   * 工作模式下 agent 域变化时连带重建的 power runtime —— 与 newAgentRuntime
+   * 同事务构建/回滚，swap 时替换 workScene.runtime（main 与 power 两份运行态
+   * 同步刷新到新配置，退出工作模式回 main 也是新配置）。非工作模式恒 undefined。
+   */
+  newPowerRuntime: AgentRuntime | undefined;
   newScheduler: Scheduler | undefined;
 }
 
@@ -141,14 +147,11 @@ export class RuntimeSession {
       this.deliveryStackInstance?.delivery,
     );
 
-    // builtin TurnContextProvider 装配（SchedulerProvider + TaskListProvider）走 helper，
-    // 与 serve 模式两处装配同源 —— closure 内部读 this.schedulerInstance 让 scheduler
-    // 重建（channels 域）后 provider 自动指向新 instance；task_list 通过 ALS 取
-    // conversationId + service.cache 同步读，ephemeral 路径自然降级（空列表 → 整段跳过）。
-    registerCliTurnContextProviders(this.agentRuntime, {
-      getSchedulerStatus: () => this.schedulerInstance.getStatusSummary(),
-      taskListService: this.opts.builtinExtraTools.taskListService,
-    });
+    // builtin TurnContextProvider 装配（SchedulerProvider + TaskListProvider）经
+    // 单一注册源 —— scheduler 重建（channels 域）后 provider 自动指向新 instance；
+    // task_list 通过 ALS 取 conversationId + service.cache 同步读，ephemeral 路径
+    // 自然降级（空列表 → 整段跳过）。
+    this.attachTurnContextProviders(this.agentRuntime);
 
     await this.schedulerInstance.start();
   }
@@ -252,6 +255,22 @@ export class RuntimeSession {
       onUserDenied: this.opts.onUserDenied,
       permissionStore: existingPermissionStore,
       segmentDeps: this.opts.segmentDeps,
+    });
+  }
+
+  /**
+   * 把 cli 装配层 builtin TurnContextProvider（Scheduler + TaskList）注册到
+   * 一个 runtime —— 所有 user-facing runtime 装配点的单一注册源。
+   *
+   * deps closure 单点持有：getSchedulerStatus 读 this.schedulerInstance（scheduler
+   * 重建后自动指向新 instance）、taskListService 取 assembly 单例。bootstrap /
+   * reload main / 工作模式 enter / reload power 四个装配点全部经此方法，杜绝
+   * "某入口漏注册"类不对齐回归（与 helper 文件的对齐契约一致）。
+   */
+  private attachTurnContextProviders(runtime: AgentRuntime): void {
+    registerCliTurnContextProviders(runtime, {
+      getSchedulerStatus: () => this.schedulerInstance.getStatusSummary(),
+      taskListService: this.opts.builtinExtraTools.taskListService,
     });
   }
 
@@ -439,9 +458,10 @@ export class RuntimeSession {
    * 内部构件，不自管 lifecycle guard（由顶层 applyModeSwitch / reload 持有
    * 同一 guard，自管会与上层持锁双重 set / 误拒）。原子契约：装配中途抛错
    * 绝不 set workScene —— 唯一可抛点是 createAgent（在 broker swap 之前，
-   * 失败即 main 态完好）；touch 是非关键 lastActiveAt（best-effort 不阻断
-   * 不污染）；broker swap 后紧随的纯赋值不可能失败。permissionStore 跨实例
-   * 复用（与 reload 同款，session scope 授权不丢）。
+   * 失败即 main 态完好）；attachTurnContextProviders 同步非抛、touch 是非关键
+   * lastActiveAt（best-effort 不阻断不污染）、broker swap 后紧随的纯赋值不可能
+   * 失败。power runtime 与 main 同为 user-facing 主循环，须挂同款 turn-context
+   * provider。permissionStore 跨实例复用（与 reload 同款，session scope 授权不丢）。
    */
   async enterWorkMode(sceneId: string): Promise<void> {
     const scene = await this.workSceneRegistry.get(sceneId);
@@ -452,6 +472,7 @@ export class RuntimeSession {
       { kind: "workscene", scene },
       this.agentRuntime.permissionStore,
     );
+    this.attachTurnContextProviders(powerRuntime);
     await this.workSceneRegistry.touch(sceneId).catch(() => {});
     this.swapConfirmationBroker(powerRuntime);
     this.workScene = { sceneId, runtime: powerRuntime };
@@ -535,9 +556,13 @@ export class RuntimeSession {
         };
       }
 
-      // ConfirmationBroker re-attach（仅 agent 重建时——新 agent 带新 broker）。
-      // 走统一方法（内部对未 attach renderer 自然 no-op，等价原 &&  守卫）。
-      if (built.newAgentRuntime) {
+      // ConfirmationBroker re-attach（仅 agent 重建时——新 runtime 带新 broker）。
+      // broker 只跟当前 active runtime：工作模式下 active=power，故重建 power 时
+      // 把 broker 切到新 power（而非新 main）；非工作模式切到新 main。走统一
+      // 方法（内部对未 attach renderer 自然 no-op，等价原 && 守卫）。
+      if (built.newPowerRuntime && this.workScene) {
+        this.swapConfirmationBroker(built.newPowerRuntime);
+      } else if (built.newAgentRuntime) {
         this.swapConfirmationBroker(built.newAgentRuntime);
       }
 
@@ -555,6 +580,15 @@ export class RuntimeSession {
       // Swap fields——新资源全部活跃后所有 closure getter 自动指向新值
       if (built.newAgentRuntime) {
         this.agentRuntime = built.newAgentRuntime;
+      }
+      // 工作模式下连带 swap power（保 sceneId，只换 runtime 实例）——getter
+      // runtime()=workScene.runtime 随之指向新 power；REPL 侧 ConversationRuntimeState
+      // 不受影响（reload 只换 runtime 实例、不碰对话运行态，两份运行态不丢）。
+      if (built.newPowerRuntime && this.workScene) {
+        this.workScene = {
+          ...this.workScene,
+          runtime: built.newPowerRuntime,
+        };
       }
       if (built.newScheduler) {
         this.schedulerInstance = built.newScheduler;
@@ -595,6 +629,7 @@ export class RuntimeSession {
     let newChannels: ChannelRegistry | undefined;
     let newDeliveryStack: DeliveryStack | undefined;
     let newAgentRuntime: AgentRuntime | undefined;
+    let newPowerRuntime: AgentRuntime | undefined;
     let newScheduler: Scheduler | undefined;
     let channelsRebuilt = false;
 
@@ -616,12 +651,31 @@ export class RuntimeSession {
           this.agentRuntime.permissionStore,
         );
 
-        // 注册 builtin TurnContextProvider 到新 agent —— 与 bootstrap 同源走 helper，
-        // 装配契约不分叉
-        registerCliTurnContextProviders(newAgentRuntime, {
-          getSchedulerStatus: () => this.schedulerInstance.getStatusSummary(),
-          taskListService: this.opts.builtinExtraTools.taskListService,
-        });
+        // 注册 builtin TurnContextProvider 到新 agent —— 与 bootstrap 同源
+        this.attachTurnContextProviders(newAgentRuntime);
+
+        // 工作模式下连带重建 power —— main 与 power 两份运行态都要刷到新配置
+        // （否则退出工作模式回 main 用新配置、但工作模式中 power 仍旧配置）。
+        // scene 从 registry 重读（workdir/memoryScope 取最新）；createAgent
+        // workscene 分支内部 primaryRole=power、roles 经 createProviderRoles
+        // 重解析新 config（与 main 重建同机制）；复用 power 自身 permissionStore
+        // 保 session scope 授权。scene 已被移除（极端边界）则 throw → 整体 build
+        // 失败回滚、旧 power 完好。
+        if (this.workScene) {
+          const scene = await this.workSceneRegistry.get(
+            this.workScene.sceneId,
+          );
+          if (!scene) {
+            throw new Error(
+              `工作场景 "${this.workScene.sceneId}" 已不存在，无法在 reload 中重建 power`,
+            );
+          }
+          newPowerRuntime = await this.createAgent(
+            { kind: "workscene", scene },
+            this.workScene.runtime.permissionStore,
+          );
+          this.attachTurnContextProviders(newPowerRuntime);
+        }
       }
 
       return {
@@ -629,6 +683,7 @@ export class RuntimeSession {
         newChannels,
         newDeliveryStack,
         newAgentRuntime,
+        newPowerRuntime,
         newScheduler,
       };
     } catch (err) {
@@ -642,7 +697,7 @@ export class RuntimeSession {
       if (newChannels) {
         await newChannels.dispose().catch(() => {});
       }
-      // newAgentRuntime 无 dispose 接口——孤立后自然 GC
+      // newAgentRuntime / newPowerRuntime 无 dispose 接口——孤立后自然 GC
       const cause = err instanceof Error ? err : new Error(String(err));
       throw new ReloadBuildError(
         `build failed during reload: ${cause.message}`,

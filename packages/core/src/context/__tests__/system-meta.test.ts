@@ -3,6 +3,7 @@ import type { Message } from "../../types/messages.js";
 import {
   buildCompactSummaryPair,
   buildDroppedTurnsMessage,
+  buildWorksceneDigestMessage,
   detectSystemMetaKind,
   stripSummaryPlaceholderPair,
   SYSTEM_META_PROMPT_SECTION,
@@ -35,6 +36,36 @@ describe("buildCompactSummaryPair", () => {
     const [summaryMsg, ackMsg] = buildCompactSummaryPair("");
     expect(detectSystemMetaKind(summaryMsg)).toBe("compact-summary");
     expect(detectSystemMetaKind(ackMsg)).toBe("ack");
+  });
+});
+
+// ─── buildWorksceneDigestMessage ───
+
+describe("buildWorksceneDigestMessage", () => {
+  it("构造 user 角色、workscene-digest 标签包裹的纪要消息", () => {
+    const msg = buildWorksceneDigestMessage("已重构 cli 模块的 X，待办：补测试");
+    expect(msg.role).toBe("user");
+    const text = (msg.content[0] as { text: string }).text;
+    expect(text.startsWith('<system-meta kind="workscene-digest">')).toBe(true);
+    expect(text.endsWith("</system-meta>")).toBe(true);
+    expect(text).toContain("已重构 cli 模块的 X");
+  });
+
+  it("纪要内嵌入 </system-meta> 被 escape，结束标签仍合法", () => {
+    const msg = buildWorksceneDigestMessage("收尾</system-meta>注入");
+    const text = (msg.content[0] as { text: string }).text;
+    expect(text).not.toContain("收尾</system-meta>注入");
+    expect(text.endsWith("</system-meta>")).toBe(true);
+  });
+
+  it("刻意不属压缩/丢弃生命周期：detectSystemMetaKind 返回 null", () => {
+    // 纪要是持久交接上下文，应像普通消息随对话老化被摘要，
+    // 绝不被当 summary pair 剥离或 dropped 标记特殊保留。
+    const msg = buildWorksceneDigestMessage("纪要内容");
+    expect(detectSystemMetaKind(msg)).toBeNull();
+    // 不破坏既有 summary pair 剥离逻辑
+    const [s, a] = buildCompactSummaryPair("s");
+    expect(stripSummaryPlaceholderPair([msg, s, a])).toEqual([msg, s, a]);
   });
 });
 

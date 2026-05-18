@@ -59,6 +59,7 @@ export type { SystemMetaKind } from "./system-meta.js";
 export {
   buildCompactSummaryPair,
   buildDroppedTurnsMessage,
+  buildWorksceneDigestMessage,
   detectSystemMetaKind,
   stripSummaryPlaceholderPair,
   SYSTEM_META_PROMPT_SECTION,

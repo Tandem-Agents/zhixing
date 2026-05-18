@@ -96,6 +96,40 @@ export function buildDroppedTurnsMessage(count: number): Message {
   };
 }
 
+/**
+ * 构造工作场景退出纪要消息 —— power 退出工作模式时生成的一段交接，append 到
+ * 主对话运行态消息末尾，让主对话知道工作场景里做了什么。
+ *
+ * 角色 user：与 dropped-turns 同理，LLM 视角下"系统补充的上下文"以 user 发言
+ * 承载最自然（连续 user 消息 Anthropic API 允许）。payload 走同款 escape 防止
+ * 内容里的 `</system-meta>` 破坏标签识别。
+ *
+ * **刻意只提供构造、不进 SystemMetaKind / detectSystemMetaKind /
+ * stripSummaryPlaceholderPair / SYSTEM_META_PROMPT_SECTION**：
+ *   - 纪要是“持久交接上下文”，不属于压缩/丢弃生命周期。detectSystemMetaKind
+ *     对它返回 null 即正确行为 —— 它该像普通消息一样随对话老化被摘要，绝不
+ *     被当作 summary pair 剥离或当作 dropped 标记特殊保留。
+ *   - 不改 SYSTEM_META_PROMPT_SECTION：其通用框架（“对话历史中可能出现
+ *     <system-meta kind="..."> ……机制插入的元信息，不是用户原话；不要回应
+ *     标签本身；将其中内容作为上下文使用”）已泛化覆盖任意 kind，主对话据此
+ *     即把纪要识别为机制插入而非自己原话；新增枚举会改动 system prompt 静态
+ *     前缀（破坏既有前缀缓存与字节稳定），无必要。
+ * 仍走本模块构造：单一事实源 + escape 保护是本模块的职责，ad-hoc 拼串会重蹈
+ * “多处各自构造 placeholder”的回归。
+ */
+export function buildWorksceneDigestMessage(digest: string): Message {
+  const escaped = escapeSystemMetaPayload(digest);
+  return {
+    role: "user",
+    content: [
+      {
+        type: "text",
+        text: `<system-meta kind="workscene-digest">${escaped}</system-meta>`,
+      },
+    ],
+  };
+}
+
 // ─── 识别 ───
 
 /**
