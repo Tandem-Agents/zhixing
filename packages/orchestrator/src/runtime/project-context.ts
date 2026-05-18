@@ -43,10 +43,13 @@ export interface ProjectContext {
  * 优先级:项目级 > 用户级。如果项目级存在则忽略用户级(覆盖而非合并)。
  * 两级都不存在时 instructions 为 null。
  */
-export async function loadProjectContext(cwd: string): Promise<ProjectContext> {
+export async function loadProjectContext(
+  cwd: string,
+  memoryRoot?: string,
+): Promise<ProjectContext> {
   const [instructions, profile] = await Promise.all([
     loadInstructions(cwd),
-    loadProfile(),
+    loadProfile(memoryRoot),
   ]);
   const date = new Date().toISOString().slice(0, 10);
 
@@ -61,6 +64,12 @@ export interface EnrichOptions {
   lastToolEndCount?: number;
   /** 本会话是否已经提议过技能(每会话最多 1 次) */
   hasProposedSkill?: boolean;
+  /**
+   * 装配期注入的 scoped 检索器 —— 工作场景下指向 workscene 记忆域，
+   * 与 profile / memory 工具同源隔离。缺省回退默认个人域检索器
+   * （Layer-A 根治后路径正确，服务非装配调用方）。
+   */
+  retriever?: MemoryRetriever;
 }
 
 /**
@@ -83,8 +92,8 @@ export async function enrichContext(
 
   if (!userText.trim()) return context;
 
-  // 检索匹配的技能
-  const retriever = new MemoryRetriever();
+  // 检索匹配的技能 —— 优先用装配期注入的 scoped 检索器（工作场景隔离）
+  const retriever = options.retriever ?? new MemoryRetriever();
   const result = await retriever.retrieve(userText);
 
   const dynamicParts: string[] = [];

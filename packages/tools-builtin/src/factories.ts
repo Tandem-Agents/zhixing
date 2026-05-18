@@ -11,7 +11,7 @@
  *   3. 在需要启用该工具的 AgentRoleProfile.enabledTools 中加工具名
  */
 
-import type { ToolDefinition } from "@zhixing/core";
+import type { MemoryStore, ToolDefinition } from "@zhixing/core";
 import { createBashTool } from "./bash.js";
 import { createEditTool } from "./edit.js";
 import { createGlobTool } from "./glob.js";
@@ -24,12 +24,19 @@ import { createWriteTool } from "./write.js";
 /**
  * 工厂构造上下文 —— 工具实例化时可能需要的环境参数。
  *
- * 当前仅 web_fetch 需要 proxy（其他工具无参）。未来工具如需更多上下文（如
- * memoryStore / configContext 等）在此扩展即可，所有工厂签名保持一致。
+ * 装配期统一构造并注入；工厂按需取用，签名保持一致（`(ctx) => Tool`）。
+ * 未来工具如需更多上下文在此扩展即可。
  */
 export interface BuiltinToolContext {
   /** HTTP 代理地址，web_fetch 透传给底层 fetch 客户端 */
   readonly proxy?: string;
+  /**
+   * 装配期解析的单一 scoped MemoryStore —— memory 工具与 flush strategy
+   * 共用同一实例（按 memoryScope 定 root）。memory 工具启用时必须注入；
+   * 缺失即装配契约破坏，工厂 fail-fast 而非静默 new 默认实例（后者会在
+   * 工作场景下写穿个人记忆域）。
+   */
+  readonly memoryStore?: MemoryStore;
 }
 
 export type BuiltinToolFactory = (ctx: BuiltinToolContext) => ToolDefinition;
@@ -48,7 +55,15 @@ export const BUILTIN_TOOL_FACTORIES: Readonly<
   glob: () => createGlobTool(),
   grep: () => createGrepTool(),
   bash: () => createBashTool(),
-  memory: () => createMemoryTool(),
+  memory: (ctx) => {
+    if (!ctx.memoryStore) {
+      throw new Error(
+        "memory 工具需装配期注入 ctx.memoryStore（单一 scoped 实例）—— " +
+          "缺失说明装配未按 memoryScope 构造并下传，拒绝静默兜底",
+      );
+    }
+    return createMemoryTool(ctx.memoryStore);
+  },
   web_fetch: (ctx) => createWebFetchTool({ proxy: ctx.proxy }),
 };
 

@@ -52,6 +52,11 @@ import {
   createMemoryFlushStrategy,
   DEFAULT_WATCHDOG_POLICY,
   MemoryStore,
+  MemoryRetriever,
+  SkillsStore,
+  PeopleStore,
+  getMemoryDir,
+  getWorkSceneMemoryDir,
   PermissionStore,
   resolveAgentIdentity,
   resolveContextManager,
@@ -330,6 +335,15 @@ export interface CreateAgentRuntimeOptions {
    */
   profile?: AgentRoleProfile;
   /**
+   * 个人记忆域作用域 —— 装配期据此解析整域 root 并注入全部 me/ 访问者
+   * （单一 MemoryStore = 工具 + flush 共用、scoped MemoryRetriever、
+   * profile-loader），后续不可变。缺省 personal（root = getMemoryDir()，
+   * 对外行为与历史一致）。
+   */
+  memoryScope?:
+    | { kind: "personal" }
+    | { kind: "workscene"; sceneId: string };
+  /**
    * 可选：注入会话级 PermissionStore——跨 hot reload 复用 session scope 授权
    * （用户的"本次会话允许"不丢）。
    *
@@ -430,7 +444,22 @@ export async function createAgentRuntime(
   // baseTools 是 SecurityPipeline / BoundaryRegistry / ToolArgumentExtractor
   // 的注册输入（Task 工具 needsPermission: false 且无 boundaries，不参与
   // 这些链路）。
-  const builtinCtx = { proxy: config.network?.proxy };
+  // 个人记忆域 scope 解析 —— 装配期唯一解析点。从 memoryScope 定整域 root
+  // （personal = getMemoryDir() Layer-A 正确默认；workscene = 该场景 me/ 域），
+  // 据此构造**单一** MemoryStore（memory 工具 + flush strategy 共用，消除双
+  // 实例）与 scoped MemoryRetriever（technique/people 检索同源隔离），profile
+  // 经 loadProjectContext 透传同一 root。runtime 生命周期内不变。
+  const memoryRoot =
+    options.memoryScope?.kind === "workscene"
+      ? getWorkSceneMemoryDir(options.memoryScope.sceneId)
+      : getMemoryDir();
+  const memoryStore = new MemoryStore(memoryRoot);
+  const memoryRetriever = new MemoryRetriever(
+    new SkillsStore(memoryRoot),
+    new PeopleStore(memoryRoot),
+  );
+
+  const builtinCtx = { proxy: config.network?.proxy, memoryStore };
   const baseTools: ToolDefinition[] = [];
   for (const name of profile.enabledTools) {
     if (name === "Task") continue; // 后置装配
@@ -575,8 +604,9 @@ export async function createAgentRuntime(
     new TimeProvider(Intl.DateTimeFormat().resolvedOptions().timeZone),
   );
 
-  // 加载项目上下文（ZHIXING.md + 环境信息），注入到首条 user message
-  const projectContext = await loadProjectContext(cwd);
+  // 加载项目上下文（ZHIXING.md + 环境信息），注入到首条 user message。
+  // memoryRoot 透传 → profile 从 scoped 记忆域加载（与 store/retriever 同源）
+  const projectContext = await loadProjectContext(cwd, memoryRoot);
 
   // 解析模型预算信息 —— resolver 保证 info 永不为 undefined。
   // 数据源四层（高 → 低）：
@@ -598,7 +628,6 @@ export async function createAgentRuntime(
   }
   const modelBudgetInfo = resolvedModel.info;
   const estimator = createTokenEstimator();
-  const memoryStore = new MemoryStore();
 
   // 对话级 Resettable 注册表 —— 视图层 stage 实现 Resettable 后在装配期注册，
   // /clear 一并清空。
@@ -890,10 +919,12 @@ export async function createAgentRuntime(
 
       async function runMainLoop(): Promise<RunResult> {
         // 根据最后一条用户消息检索匹配的技能 + 反思提示
+        // scoped 检索器由装配期注入，置于 per-run options 之后 → scope 隔离
+        // 不可被调用方 enrichOptions 覆盖
         const enrichedContext = await enrichContext(
           projectContext,
           params.messages,
-          params.enrichOptions,
+          { ...params.enrichOptions, retriever: memoryRetriever },
         );
 
         // 将项目上下文 + 匹配的技能 + 反思提示注入到首条 user message

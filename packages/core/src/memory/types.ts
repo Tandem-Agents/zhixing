@@ -10,6 +10,9 @@
  * 所有记忆以 Markdown + YAML frontmatter 存储在 ~/.zhixing/me/ 下。
  */
 
+import path from "node:path";
+import { getZhixingHome } from "../paths.js";
+
 // ─── Profile ───
 
 export interface ProfileMeta {
@@ -29,10 +32,14 @@ export interface ProfileData {
 // ─── 记忆目录 ───
 
 /**
- * 获取记忆根目录路径：~/.zhixing/me/
- * 所有记忆文件都在此目录下。
+ * 个人记忆域根目录：`<zhixingHome>/me`。
+ *
+ * 经 getZhixingHome() 派生 —— 尊重 ZHIXING_HOME；未设时落 ~/.zhixing/me，
+ * 与历史默认逐字节一致。这是所有 me/ 域访问者（4 store class 的 baseDir
+ * fallback、profile-loader、cli 各 store）未显式注入 root 时的默认路径源；
+ * 工作场景的 scope 隔离另由装配期 root 注入覆盖（两层分工：本函数负责
+ * 默认路径正确，root 注入负责物理隔离）。
  */
 export function getMemoryDir(): string {
-  const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
-  return `${home}/.zhixing/me`;
+  return path.join(getZhixingHome(), "me");
 }

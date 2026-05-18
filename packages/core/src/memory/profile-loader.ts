@@ -32,11 +32,19 @@ import type { ProfileData, ProfileMeta } from "./types.js";
 import { getMemoryDir } from "./types.js";
 
 /**
- * 加载用户身份画像。
+ * 加载身份画像。
+ *
+ * root 缺省 = getMemoryDir()（Layer-A 根治后的正确个人记忆域默认，服务
+ * 非装配调用方如 cli /me）；装配期按 memoryScope 显式注入 scoped root 实现
+ * 工作场景隔离 —— profile-loader 是 me/ 域唯一函数式访问者，加此参数让它与
+ * 四个 store class 的 baseDir 注入同源。
+ *
  * @returns ProfileData 或 null（文件不存在/为空时）
  */
-export async function loadProfile(): Promise<ProfileData | null> {
-  const profilePath = path.join(getMemoryDir(), "profile.md");
+export async function loadProfile(
+  root?: string,
+): Promise<ProfileData | null> {
+  const profilePath = path.join(root ?? getMemoryDir(), "profile.md");
 
   let raw: string;
   try {

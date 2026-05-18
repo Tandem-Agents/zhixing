@@ -17,10 +17,13 @@
  */
 
 import type { ToolDefinition, ToolResult } from "@zhixing/core";
-import { MemoryStore, type MemoryCategory } from "@zhixing/core";
+import type { MemoryStore, MemoryCategory } from "@zhixing/core";
 
-export function createMemoryTool(): ToolDefinition {
-  const store = new MemoryStore();
+/**
+ * store 由装配期注入（单一 scoped 实例，与 flush strategy 共用）—— 工具不再
+ * 自建 `new MemoryStore()`，杜绝双实例与工作场景下写穿个人记忆域。
+ */
+export function createMemoryTool(store: MemoryStore): ToolDefinition {
 
   return {
     name: "memory",

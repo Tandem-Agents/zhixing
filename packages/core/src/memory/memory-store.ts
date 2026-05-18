@@ -15,7 +15,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { parseFrontmatter, stringifyFrontmatter } from "./frontmatter.js";
-import { getMemoryDir } from "./types.js";
 
 // ─── 类型 ───
 
@@ -44,8 +43,13 @@ export interface SaveOptions {
 export class MemoryStore {
   private readonly baseDir: string;
 
-  constructor(baseDir?: string) {
-    this.baseDir = baseDir ?? getMemoryDir();
+  /**
+   * root 必填 —— 调用方必须显式给出记忆域根（personal = getMemoryDir()，
+   * workscene = getWorkSceneMemoryDir(id)）。不提供隐式默认是 by-construction
+   * 的 scope 隔离前提：杜绝工作场景下误用而静默写穿个人记忆域。
+   */
+  constructor(root: string) {
+    this.baseDir = root;
   }
 
   /**
