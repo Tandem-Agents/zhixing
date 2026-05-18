@@ -13,6 +13,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { getZhixingHome, toSafePathSegment } from "../paths.js";
+import { getWorkSceneConversationsRoot } from "../workscene/paths.js";
 import { writeAtomic } from "../transcript/serializer.js";
 import type {
   Conversation,
@@ -32,6 +33,9 @@ function conversationsDir(scope: ConversationScope): string {
   const home = getZhixingHome();
   if (scope.kind === "project") {
     return path.join(home, "projects", scope.projectId, "conversations");
+  }
+  if (scope.kind === "workscene") {
+    return getWorkSceneConversationsRoot(scope.sceneId);
   }
   return path.join(home, "conversations");
 }

@@ -82,7 +82,7 @@ class RuntimeSession {
 }
 ```
 
-`swapConfirmationBroker(target)`:`this.currentBrokerDetach?.()` → `this.attachedRenderer?.attach(target.confirmationBroker)` → 记录新 detach。**reload(现状内联于 `session.ts:411-416`)与 enter/exit 统一调此方法**,不再有"内联 vs 方法"两套;`attachConfirmationRenderer` 的"已 attach throw"守卫只管首次 attach,broker 切换走本方法不经它。
+`swapConfirmationBroker(target)`:`this.currentBrokerDetach?.()` → `this.attachedRenderer?.attach(target.confirmationBroker)` → 记录新 detach。**reload(现状在 `session.ts` reload 路径内联实现 broker detach→re-attach)与 enter/exit 统一调此方法**,不再有"内联 vs 方法"两套;`attachConfirmationRenderer` 的"已 attach throw"守卫只管首次 attach,broker 切换走本方法不经它。
 
 `enterWorkMode(sceneId)`:`registry.get` → `createAgent({kind:"workscene",scene}, this.mainRuntime.permissionStore)`(复用 createAgent helper + reload 同款 permissionStore 跨实例复用)→ `swapConfirmationBroker(powerRuntime)` → `registry.touch` → set `workScene`。
 `exitWorkMode()`:`swapConfirmationBroker(mainRuntime)` → 清 `workScene`(power runtime 无 dispose 接口、内部全 in-memory、失 ref 后 GC,与 reload 丢弃旧 runtime 同款)。
@@ -98,8 +98,8 @@ class RuntimeSession {
 **作用对象是整个个人记忆域根(`me/` 目录),不是单个 store 类**。grep 实证 `me/` 域访问者两类:**(a) 四个 store class**(`MemoryStore`/`JournalStore`/`PeopleStore`/`SkillsStore`,均 `baseDir ?? getMemoryDir()` —— 有注入点);**(b) `profile-loader.ts` 函数**(`path.join(getMemoryDir(),"profile.md")` —— 无注入点、直调)。整域 scope 隔离须穷尽两类,任一漏掉破隔离。
 
 修正现状两处既存债:
-1. **双 `MemoryStore` 实例归一**:`create-agent-runtime.ts:549`(给 `createMemoryFlushStrategy`)与 `memory.ts:23`(给 memory 工具)各 `new MemoryStore()` 是两个独立实例。装配期构造**单一** MemoryStore(按 memoryScope 定 root),同时注入 builtinCtx(工具)与 flush strategy —— 否则 power 模式下 flush 仍写 `~/.zhixing/me/`,by-construction 隔离失效。
-2. **`getMemoryDir()` 根治**:`memory/types.ts:36` 现用 `HOME/USERPROFILE` 拼接、**不尊重 ZHIXING_HOME**(既存 bug)。改为走 `getZhixingHome()`,不隐式绕过。
+1. **双 `MemoryStore` 实例归一**:`create-agent-runtime.ts`(装配期给 `createMemoryFlushStrategy` 的 `new MemoryStore()`)与 `tools-builtin/src/memory.ts`(memory 工具内的 `new MemoryStore()`)是两个独立实例。装配期构造**单一** MemoryStore(按 memoryScope 定 root),同时注入 builtinCtx(工具)与 flush strategy —— 否则 power 模式下 flush 仍写 `~/.zhixing/me/`,by-construction 隔离失效。
+2. **`getMemoryDir()` 根治**:`memory/types.ts` 的 `getMemoryDir()` 现用 `HOME/USERPROFILE` 拼接、**不尊重 ZHIXING_HOME**(既存 bug)。改为走 `getZhixingHome()`,不隐式绕过。
 
 **两层分工(不可混淆)**:`getMemoryDir()` 根治只解决"默认 personal 路径尊重 ZHIXING_HOME";**scope 隔离**靠装配期 root 注入覆盖全部 `me/` 域访问者 —— 四个 store class 经 `baseDir` 注入,`profile-loader` 须从函数直调改造为接收 root 参数(与四 store 一致),由装配期按 memoryScope 统一注入。两者分别解决"默认路径正确"与"scope 物理隔离",缺一不可。
 
@@ -150,13 +150,22 @@ interface CreateAgentRuntimeOptions {
   // ... 现有字段(provider?/model? cli override、profile?) ...
 
   /**
-   * 主对话槽位 —— 缺省 "main"。create-agent-runtime 内 roles 引用穷尽分两类:
+   * 主对话槽位 —— 缺省 "main"。create-agent-runtime 内 roles 引用穷尽分三类:
    * ① 主对话语义六处统一取 roles[primaryRole](capability 解析 / Task
    *   provider+model / budget resolveModelInfo / 返回 providerId+model /
    *   resilientCallLLM / runAgentLoop);
    * ② 压缩语义两处走 roles.light,不跟随 primaryRole:compaction
    *   (createCompactionFlush,现状已是)+ 段切换摘要(createSegmentSummarizeFn
    *   callLLM model,现状误用 roles.main,本次归正到 light)。
+   * ③ 思考解析维度(随 thinking-control 落地新增,与 ①② 严格同分区):
+   *   主对话 loop 与 Task 子 agent loop 的 thinking 跟 primaryRole ——
+   *   resolveRoleThinking(roles[primaryRole], config.llm?.[primaryRole]?.thinking),
+   *   不得硬编码 roles.main / config.llm.main(否则 primaryRole=power 时
+   *   power 模型套用 main 思考配置、且按 main 模型 thinkingControl 误校验);
+   *   压缩 thinking 跟 light(createCompactionFlush 现状已收 lightThinking);
+   *   段切换 thinking 随 ② 的 model 归正同事务一并改 lightThinking。
+   *   roleThinking 三角色聚合对象(下传 ToolExecutionContext 供工具按所用
+   *   角色扇出)本身不变 —— 它是全角色映射、非 primaryRole 单值。
    */
   primaryRole?: "main" | "power";
 
@@ -167,7 +176,7 @@ interface CreateAgentRuntimeOptions {
 }
 ```
 
-**不新增 `workSceneContext` 选项**:workscene 工作目录走现有 `workspace` 选项(power 传 `scene.workdir`),由现有 Environment 段(`CACHE_BOUNDARY` 之后,`system-prompt.ts` 实证已渲染工作目录)呈现,不重复进 prompt;workscene 语义定位走现有 `profile` 选项 —— `powerProfile(scene)`(下文)。`primaryRole` 单一槽位选择 → 主对话六处统一同源、压缩两处独立 light;无 override 污染(power runtime 不透传 cli override,roles 由 `createProviderRoles` 正常解析,`resolve.ts` 实证 light 未配 fallback `roles.main`=config.llm.main 中档、非 power → 压缩成本正确)。systemPrompt 仍 byte-equal 冻结。
+**不新增 `workSceneContext` 选项**:workscene 工作目录走现有 `workspace` 选项(power 传 `scene.workdir`),由现有 Environment 段(`CACHE_BOUNDARY` 之后,`system-prompt.ts` 实证已渲染工作目录)呈现,不重复进 prompt;workscene 语义定位走现有 `profile` 选项 —— `powerProfile(scene)`(下文)。`primaryRole` 单一槽位选择 → 主对话六处统一同源、压缩两处独立 light、思考解析随同分区(主对话/子 agent loop 跟 primaryRole,压缩/段切换跟 light);无 override 污染(power runtime 不透传 cli override,roles 由 `createProviderRoles` 正常解析,`resolve.ts` 实证 light 未配 fallback `roles.main`=config.llm.main 中档、非 power → 压缩成本正确)。systemPrompt 仍 byte-equal 冻结。
 
 ### powerProfile(scene)
 
@@ -196,7 +205,7 @@ private createAgent(
 | memoryScope | `{ kind: "personal" }` | `{ kind: "workscene", sceneId }` |
 | profile | `mainProfile()` | `powerProfile(scene)` |
 
-**无 workdir power 文件作用域隔离(by-construction 不变量,须焊死)**:`create-agent-runtime.ts:962` 现状 `workingDirectory: workspace.path ?? process.cwd()` —— workspace 空时兜底进程 cwd(很可能 = 用户启动 cli 处 / main 工作区)。无 workdir 的 power 若走此兜底则文件工具串到 main 工作区,破单向阀。须**两处一起切断**(只改装配层无效:传 `{path:undefined,source:"none"}` 后 line 962 `undefined ?? cwd` 仍兜底):① 装配层对无 workdir power 标 `source:"none"`、跳 `resolveWorkspace`;② line 962 改条件式 —— `source:"none"` 时 `workingDirectory: undefined`,不 `?? process.cwd()`。**主防线是无 workdir power 不装文件工具(见 powerProfile 二分),根本无文件操作面**;line 962 切断是纵深防御 —— 即使 Task 子 agent 等其他路径触发 workspace 解析,也**物理上不可能落进程 cwd / main 工作区 / workscene 系统数据目录**。装配期切断,不靠运行时检查。
+**无 workdir power 文件作用域隔离(by-construction 不变量,须焊死)**:create-agent-runtime 现状在 runAgentLoop 装配处 `workingDirectory: workspace.path ?? process.cwd()` —— workspace 空时兜底进程 cwd(很可能 = 用户启动 cli 处 / main 工作区)。无 workdir 的 power 若走此兜底则文件工具串到 main 工作区,破单向阀。须**两处一起切断**(只改装配层无效:传 `{path:undefined,source:"none"}` 后该兜底 `undefined ?? cwd` 仍生效):① 装配层对无 workdir power 标 `source:"none"`、跳 `resolveWorkspace`;② 该 `workingDirectory` 兜底改条件式 —— `source:"none"` 时 `workingDirectory: undefined`,不 `?? process.cwd()`。**主防线是无 workdir power 不装文件工具(见 powerProfile 二分),根本无文件操作面**;此兜底切断是纵深防御 —— 即使 Task 子 agent 等其他路径触发 workspace 解析,也**物理上不可能落进程 cwd / main 工作区 / workscene 系统数据目录**。装配期切断,不靠运行时检查。
 
 ### workscene agent 工具(走 assembly 统一路径 + IWorkModeController 接口)
 
@@ -270,12 +279,12 @@ agent 工具与命令最终汇聚到同一 `applyModeSwitch` / `registry` 原语
 **验收**:跨包测试零回归;dev script 端到端 CRUD + 跨 process 持久化。
 
 **PR 2 — MemoryScope(整域 + 既存债根治)**
-`MemoryStore` 构造 `root` 必填;`getMemoryDir()` 根治走 `getZhixingHome()`(尊重 ZHIXING_HOME)或废弃;`BuiltinToolContext` 加 `memoryStore`;`createAgentRuntime` 加 `memoryScope`,装配期构造**单一** MemoryStore 同时注入 builtinCtx(工具)与 flush strategy(消除 549/memory.ts:23 双实例);审计 `me/` 域全部访问者:4 store class 经 baseDir 注入、`profile-loader` 改造加 root 参数,统一从同一 root 派生(getMemoryDir 根治负责默认路径、root 注入负责 scope 隔离,两层分工)。缺省 personal 对外不变。
+`MemoryStore` 构造 `root` 必填;`getMemoryDir()` 根治走 `getZhixingHome()`(尊重 ZHIXING_HOME)或废弃;`BuiltinToolContext` 加 `memoryStore`;`createAgentRuntime` 加 `memoryScope`,装配期构造**单一** MemoryStore 同时注入 builtinCtx(工具)与 flush strategy(消除 create-agent-runtime 装配期实例与 tools-builtin/memory.ts 工具内实例的双实例);审计 `me/` 域全部访问者:4 store class 经 baseDir 注入、`profile-loader` 改造加 root 参数,统一从同一 root 派生(getMemoryDir 根治负责默认路径、root 注入负责 scope 隔离,两层分工)。缺省 personal 对外不变。
 **验收**:跨包测试零回归;ZHIXING_HOME 设置后记忆写入正确目录;flush 与工具读写同一 store;me/ 域全访问者(4 store class + profile-loader)scope 注入穷尽、workscene 模式下无任何访问者写入 personal 目录。
 
 **PR 3 — createAgentRuntime primaryRole 槽位**
-加 `primaryRole?`(缺省 main);① 主对话六处统一 `roles[primaryRole]`;② 压缩两处 `roles.light`:compaction 现状已是,段切换摘要(`createSegmentSummarizeFn` callLLM model 现状 `roles.main`)归正 `roles.light`。
-**验收**:缺省 main 主对话六处字节级零变化;段切换改 light 后未配 light fallback main = 行为等价、配了 light 既存不一致被修正;单测 primaryRole=power 验证六处指向 power、压缩两处指向 light(未配=config.llm.main 中档非 power)。
+加 `primaryRole?`(缺省 main);① 主对话六处统一 `roles[primaryRole]`;② 压缩两处 `roles.light`:compaction 现状已是,段切换摘要(`createSegmentSummarizeFn` callLLM model 现状 `roles.main`)归正 `roles.light`;③ 思考解析维度(thinking-control 已落地,与 ①② 同分区,**必须同 PR 一并改否则 primaryRole=power 静默错位**):主对话 loop 与 Task 子 agent loop 的 thinking 由现状硬编码 `resolveRoleThinking(roles.main, config.llm?.main?.thinking)` 改为 `resolveRoleThinking(roles[primaryRole], config.llm?.[primaryRole]?.thinking)`,runAgentLoop / 子 agent loop 收该值;段切换 thinking 随 ② 的 model 归正在同一改动里一并切到 lightThinking;compaction 现状已收 lightThinking 不动;roleThinking 三角色聚合对象(下传 ToolExecutionContext)不变。
+**验收**:缺省 main 主对话六处 + 思考解析字节级零变化;段切换改 light 后 model 与 thinking 一致(未配 light fallback main 行为等价、配了 light 既存不一致被修正);单测 primaryRole=power 验证六处指向 power、loop thinking 解析自 config.llm.power(非 main)、压缩/段切换两处指向 light(未配=config.llm.main 中档非 power)。
 
 **PR 4 — WorkSceneRegistry 接入 + cli 命令**
 RuntimeSession 持有 Registry;cli `/workscene add/list/remove/rename/archive` 直接调 Registry。

@@ -47,7 +47,8 @@ export interface Conversation {
 /** 对话的隔离作用域 */
 export type ConversationScope =
   | { kind: "user" }
-  | { kind: "project"; projectId: string; projectPath: string };
+  | { kind: "project"; projectId: string; projectPath: string }
+  | { kind: "workscene"; sceneId: string };
 
 // ─── task_list 状态 ───
 
