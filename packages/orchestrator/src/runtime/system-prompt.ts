@@ -53,6 +53,8 @@ export const CACHE_BOUNDARY = "\n__ZHIXING_CACHE_BOUNDARY__\n";
  *   identity / principles / meta-protocol / tool-usage / style / safety  始终输出
  *   skill-evolution        条件:tools 含 memory 才渲染(避免让 LLM 看到无 memory 工具的 reflect 提示)
  *   sub-agent-delegation   条件:tools 含 Task 才渲染(避免让 LLM 看到不存在的 Task 工具说明)
+ *   working-mode           条件:tools 含 workmode_enter 才渲染(仅 main runtime 装配此工具;
+ *                          power / 子 agent / 无 workmode 装配点 → 段缺省,历史输出 byte-equal)
  *
  * meta-protocol 段说明:LLM 在 messages 历史中可能遇到 `<system-meta kind="...">`
  * 标签(由 compact / drop 等机制层插入),本段告知 LLM 如何识别并不当作用户原话回应。
@@ -64,6 +66,7 @@ export type SystemPromptSegment =
   | "tool-usage"
   | "skill-evolution"
   | "sub-agent-delegation"
+  | "working-mode"
   | "style"
   | "safety";
 
@@ -80,6 +83,7 @@ export const MAIN_AGENT_SEGMENTS: readonly SystemPromptSegment[] = [
   "meta-protocol",
   "tool-usage",
   "sub-agent-delegation",
+  "working-mode",
   "skill-evolution",
   "style",
   "safety",
@@ -150,6 +154,7 @@ export interface PromptBuildContext {
  * 默认主 agent 段顺序(MAIN_AGENT_SEGMENTS):
  *   Identity → Principles → Tool Usage
  *     → Sub-Agent Delegation (条件:tools 含 Task)
+ *     → Working Mode        (条件:tools 含 workmode_enter)
  *     → Skill Evolution     (条件:tools 含 memory)
  *     → Style → Safety
  *   + 缓存分界 + Environment(动态段,始终)
@@ -219,6 +224,8 @@ function renderSegment(
       return buildSkillEvolution(ctx.tools);
     case "sub-agent-delegation":
       return buildSubAgentDelegation(ctx.tools);
+    case "working-mode":
+      return buildWorkingMode(ctx.tools);
     case "style":
       return buildStyle();
     case "safety":
@@ -432,6 +439,47 @@ function buildSubAgentDelegation(tools: ToolDefinition[]): string | null {
   const hasTask = tools.some((t) => t.name === "Task");
   if (!hasTask) return null;
   return SUB_AGENT_DELEGATION_TEXT;
+}
+
+// ─── Segment: Working Mode ───
+
+/**
+ * Working Mode 指引 —— 教主对话何时进入工作场景、模糊时先探后问。
+ *
+ * 仅当 tools 含 `workmode_enter`（main runtime 装配的 main-only 工具）才渲染：
+ * power runtime 只有 workmode_exit（其退出自判走 powerProfile 身份段，不靠本段）；
+ * 子 agent / serve / 无 workmode 装配点无此工具，段缺省、历史输出 byte-equal。
+ *
+ * 段文本显式引用工具名字面值（workmode_enter / workscene_memory_query /
+ * workscene_change_approve）—— 与 sub-agent-delegation 同款"prompt-text 显式
+ * 契约"：宁可工具改名时同步本文本，也不动态拼接让段不可静态审查。
+ */
+export const WORKING_MODE_TEXT = `## Working Mode (work scenes)
+
+A "work scene" is an isolated context for a bounded line of work: its own working directory, its own private memory, and a dedicated model. Entering one switches the whole conversation into that scene; leaving returns to this main conversation.
+
+You have these tools:
+- \`workmode_enter\` — enter a work scene (requires the user to confirm; the switch takes effect at the end of the current turn).
+- \`workscene_memory_query\` — read-only probe of what any work scene already remembers.
+- \`workscene_change_approve\` — create / rename / archive / remove scenes (requires confirmation).
+
+How to decide:
+- Clear signal (the user explicitly wants to work within a specific bounded context that has — or clearly warrants — its own scene, e.g. "let's work on the cli module of project X"): call \`workmode_enter\` directly with that scene's id. If no scene fits, propose creating one via \`workscene_change_approve\` first.
+- Ambiguous signal: do NOT guess. First \`workscene_memory_query\` to see whether a relevant scene and its accumulated memory already exist, THEN decide — either ask the user a brief clarifying question, or enter the scene that clearly fits. (Probe before asking, ask before switching.)
+- Casual / one-off questions answerable here: stay in the main conversation, do not enter a scene.
+
+After you call \`workmode_enter\`, finish the current turn normally — the switch happens at the turn boundary, not mid-turn. Do not assume you are already inside the scene.`;
+
+/**
+ * Working Mode 段渲染。返回 `string | null`：
+ *   - `null`：tools 不含 workmode_enter（power / 子 agent / serve / 无 workmode
+ *     装配点）→ buildSystemPrompt 跳过，历史输出 byte-equal 无回归。
+ *   - `string`：含 workmode_enter（main runtime）→ 完整段。
+ */
+function buildWorkingMode(tools: ToolDefinition[]): string | null {
+  const hasEnter = tools.some((t) => t.name === "workmode_enter");
+  if (!hasEnter) return null;
+  return WORKING_MODE_TEXT;
 }
 
 // ─── Segment 5: Style ───

@@ -5,6 +5,7 @@ import {
   MAIN_AGENT_SEGMENTS,
   SUB_AGENT_DELEGATION_TEXT,
   SUB_AGENT_SEGMENTS,
+  WORKING_MODE_TEXT,
 } from "../system-prompt.js";
 import { subAgentProfile } from "../../profile/default-profiles.js";
 import type { ToolDefinition } from "@zhixing/core";
@@ -616,6 +617,61 @@ describe("buildSystemPrompt · sub-agent-delegation 段条件性渲染", () => {
       - Do not access files outside the workspace unless the user's intent is clear
       - Refuse requests that could compromise system security"
     `);
+  });
+});
+
+// ─── Segment: Working Mode 条件性渲染契约 ───
+
+describe("buildSystemPrompt · working-mode 段条件性渲染", () => {
+  const ctx = { tools: defaultTools, cwd: "/test/project" };
+
+  it("MAIN_AGENT_SEGMENTS 含 'working-mode'(主 agent 启用此段)", () => {
+    expect(MAIN_AGENT_SEGMENTS).toContain("working-mode");
+  });
+
+  it("SUB_AGENT_SEGMENTS 不含 'working-mode'(子 agent 无 workmode 工具)", () => {
+    expect(SUB_AGENT_SEGMENTS).not.toContain("working-mode");
+  });
+
+  it("tools 不含 workmode_enter 时不渲染(byte-equal 历史输出,无回归)", () => {
+    const prompt = buildSystemPrompt(ctx);
+    expect(prompt).not.toContain("## Working Mode");
+  });
+
+  it("含 workmode_enter(power 只有 exit)时也不渲染 —— 仅 main runtime 启用", () => {
+    const prompt = buildSystemPrompt({
+      ...ctx,
+      tools: [...defaultTools, stubTool("workmode_exit")],
+    });
+    expect(prompt).not.toContain("## Working Mode");
+  });
+
+  it("tools 含 workmode_enter 时渲染,内容 byte-equal WORKING_MODE_TEXT", () => {
+    const tools = [...defaultTools, stubTool("workmode_enter")];
+    const prompt = buildSystemPrompt({ ...ctx, tools });
+    expect(prompt).toContain(WORKING_MODE_TEXT);
+    expect(prompt).toContain("## Working Mode (work scenes)");
+  });
+
+  it("段含关键决策语义:先探后问 / turn 边界生效", () => {
+    const tools = [...defaultTools, stubTool("workmode_enter")];
+    const prompt = buildSystemPrompt({ ...ctx, tools });
+    expect(prompt).toContain("workscene_memory_query");
+    expect(prompt).toContain("Probe before asking, ask before switching");
+    expect(prompt).toContain("the switch happens at the turn boundary");
+  });
+
+  it("working-mode 段紧跟 sub-agent-delegation(段顺序不变)", () => {
+    const tools = [
+      ...defaultTools,
+      stubTool("Task"),
+      stubTool("workmode_enter"),
+    ];
+    const prompt = buildSystemPrompt({ ...ctx, tools });
+    const delegationIdx = prompt.indexOf("## Sub-Agent Delegation");
+    const workingModeIdx = prompt.indexOf("## Working Mode");
+    expect(delegationIdx).toBeGreaterThan(0);
+    expect(workingModeIdx).toBeGreaterThan(delegationIdx);
   });
 });
 

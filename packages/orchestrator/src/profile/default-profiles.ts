@@ -113,7 +113,9 @@ export function powerProfile(scene: WorkScene): AgentRoleProfile {
       `${MAIN_IDENTITY_INSTRUCTIONS}\n\n` +
       `You are now focused on the work scene "${scene.name}". ` +
       `Work and memory in this scene are isolated from personal scope and other scenes. ` +
-      `When the work in this scene is done, you may conclude and return to the main conversation.`,
+      `When the work in this scene is done — or the user signals they want to step back to the broader conversation — ` +
+      `judge for yourself that the scene is complete and call the workmode_exit tool to return to the main conversation. ` +
+      `Do not just narrate that you are done; leaving the scene only happens when you call workmode_exit.`,
     constraints: [],
     enabledTools: hasWorkdir
       ? MAIN_ENABLED_TOOLS
