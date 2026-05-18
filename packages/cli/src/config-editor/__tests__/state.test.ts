@@ -20,9 +20,11 @@ import {
   patchProviderEntry,
   readChannelEntry,
   readModelRole,
+  readModelThinking,
   readProviderEntry,
   setInputBuffer,
   writeModelRole,
+  writeModelThinking,
 } from "../state.js";
 
 describe("createInitialState", () => {
@@ -247,11 +249,51 @@ describe("enableMessaging / disableMessaging", () => {
   });
 });
 
+describe("readModelThinking / writeModelThinking", () => {
+  it("writeModelThinking 保留 provider+model，仅设 thinking", () => {
+    let state = createInitialState({}, {});
+    state = writeModelRole(state, "main", "deepseek", "deepseek-v4-pro");
+    state = writeModelThinking(state, "main", { mode: "effort", effort: "max" });
+
+    expect(state.config.llm?.main).toEqual({
+      provider: "deepseek",
+      model: "deepseek-v4-pro",
+      thinking: { mode: "effort", effort: "max" },
+    });
+    expect(readModelThinking(state, "main")).toEqual({
+      mode: "effort",
+      effort: "max",
+    });
+  });
+
+  it("writeModelRole 覆盖角色 → 丢弃旧 model 的残留 thinking", () => {
+    let state = createInitialState({}, {});
+    state = writeModelRole(state, "main", "deepseek", "deepseek-v4-pro");
+    state = writeModelThinking(state, "main", { mode: "on" });
+    // 换 model：写 provider+model 应清掉旧 thinking（形态随 model 变）
+    state = writeModelRole(state, "main", "deepseek", "deepseek-v4-flash");
+
+    expect(readModelThinking(state, "main")).toBeUndefined();
+  });
+
+  it("未配该角色时 readModelThinking 返回 undefined", () => {
+    const state = createInitialState({}, {});
+    expect(readModelThinking(state, "light")).toBeUndefined();
+  });
+});
+
 describe("不可变性回归保护", () => {
   it("所有写操作返回的 state 与输入引用不同", () => {
     const state = createInitialState({}, {});
     expect(setInputBuffer(state, "x")).not.toBe(state);
     expect(writeModelRole(state, "main", "p", "m")).not.toBe(state);
+    expect(
+      writeModelThinking(
+        writeModelRole(state, "main", "p", "m"),
+        "main",
+        { mode: "on" },
+      ),
+    ).not.toBe(state);
     expect(patchProviderEntry(state, "x", { apiKey: "k" })).not.toBe(state);
     expect(patchChannelEntry(state, "feishu", { appId: "x" })).not.toBe(state);
     expect(enableMessaging(state, "feishu")).not.toBe(state);

@@ -663,3 +663,196 @@ describe("createAnthropicProvider", () => {
     }
   });
 });
+
+describe("createAnthropicProvider · extended thinking 发送 + signature replay", () => {
+  beforeEach(() => {
+    mockCreate.mockReset();
+    MockAnthropic.mockClear();
+  });
+
+  function signatureDelta(index: number, signature: string) {
+    return {
+      type: "content_block_delta" as const,
+      index,
+      delta: { type: "signature_delta" as const, signature },
+    };
+  }
+
+  it("ChatRequest.thinking budget → 发原生 thinking{type,budget_tokens}", async () => {
+    mockCreate.mockResolvedValue(
+      mockStream([
+        messageStartEvent({ input_tokens: 5, output_tokens: 1 }),
+        textBlockStart(0),
+        textDelta(0, "ok"),
+        contentBlockStop(0),
+        messageDelta("end_turn", 2),
+        messageStop(),
+      ]),
+    );
+
+    const provider = createAnthropicProvider(makeProvider());
+    await collectEvents(
+      provider.chat({
+        model: "claude-sonnet-4-20250514",
+        messages: [userMessage("Hi")],
+        thinking: { mode: "budget", budget: 10000 },
+      }),
+    );
+
+    const callArgs = mockCreate.mock.calls[0]?.[0];
+    expect(callArgs.thinking).toEqual({ type: "enabled", budget_tokens: 10000 });
+  });
+
+  it("未配 thinking → 请求不带 thinking 参数（标准模式）", async () => {
+    mockCreate.mockResolvedValue(
+      mockStream([
+        messageStartEvent({ input_tokens: 5, output_tokens: 1 }),
+        textBlockStart(0),
+        textDelta(0, "ok"),
+        contentBlockStop(0),
+        messageDelta("end_turn", 2),
+        messageStop(),
+      ]),
+    );
+
+    const provider = createAnthropicProvider(makeProvider());
+    await collectEvents(
+      provider.chat({
+        model: "claude-sonnet-4-20250514",
+        messages: [userMessage("Hi")],
+      }),
+    );
+
+    const callArgs = mockCreate.mock.calls[0]?.[0];
+    expect(callArgs.thinking).toBeUndefined();
+  });
+
+  it("入站 signature_delta 累积 → 随 thinking_block_end 带出", async () => {
+    mockCreate.mockResolvedValue(
+      mockStream([
+        messageStartEvent({ input_tokens: 5, output_tokens: 1 }),
+        thinkingBlockStart(0),
+        thinkingDelta(0, "推理"),
+        signatureDelta(0, "sig-part-1"),
+        signatureDelta(0, "sig-part-2"),
+        contentBlockStop(0),
+        messageDelta("end_turn", 2),
+        messageStop(),
+      ]),
+    );
+
+    const provider = createAnthropicProvider(makeProvider());
+    const events = await collectEvents(
+      provider.chat({
+        model: "claude-sonnet-4-20250514",
+        messages: [userMessage("Hi")],
+      }),
+    );
+
+    const endEvent = events.find((e) => e.type === "thinking_block_end");
+    expect(endEvent).toEqual({
+      type: "thinking_block_end",
+      signature: "sig-part-1sig-part-2",
+    });
+  });
+
+  it("无 signature 的 thinking 块 → thinking_block_end signature 为 undefined", async () => {
+    mockCreate.mockResolvedValue(
+      mockStream([
+        messageStartEvent({ input_tokens: 5, output_tokens: 1 }),
+        thinkingBlockStart(0),
+        thinkingDelta(0, "推理"),
+        contentBlockStop(0),
+        messageDelta("end_turn", 2),
+        messageStop(),
+      ]),
+    );
+
+    const provider = createAnthropicProvider(makeProvider());
+    const events = await collectEvents(
+      provider.chat({
+        model: "claude-sonnet-4-20250514",
+        messages: [userMessage("Hi")],
+      }),
+    );
+
+    const endEvent = events.find((e) => e.type === "thinking_block_end");
+    expect(endEvent).toEqual({ type: "thinking_block_end", signature: undefined });
+  });
+
+  it("出站：含 signature 的思考块原样回传为原生 thinking 块", async () => {
+    mockCreate.mockResolvedValue(
+      mockStream([
+        messageStartEvent({ input_tokens: 5, output_tokens: 1 }),
+        textBlockStart(0),
+        textDelta(0, "ok"),
+        contentBlockStop(0),
+        messageDelta("end_turn", 2),
+        messageStop(),
+      ]),
+    );
+
+    const provider = createAnthropicProvider(makeProvider());
+    await collectEvents(
+      provider.chat({
+        model: "claude-sonnet-4-20250514",
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "我的推理", signature: "sig-xyz" },
+              { type: "text", text: "答案" },
+            ],
+          },
+          userMessage("继续"),
+        ],
+      }),
+    );
+
+    const callArgs = mockCreate.mock.calls[0]?.[0];
+    const assistantMsg = callArgs.messages.find(
+      (m: { role: string }) => m.role === "assistant",
+    );
+    expect(assistantMsg.content[0]).toEqual({
+      type: "thinking",
+      thinking: "我的推理",
+      signature: "sig-xyz",
+    });
+  });
+
+  it("出站：无 signature 的跨 provider 思考块降级为 text", async () => {
+    mockCreate.mockResolvedValue(
+      mockStream([
+        messageStartEvent({ input_tokens: 5, output_tokens: 1 }),
+        textBlockStart(0),
+        textDelta(0, "ok"),
+        contentBlockStop(0),
+        messageDelta("end_turn", 2),
+        messageStop(),
+      ]),
+    );
+
+    const provider = createAnthropicProvider(makeProvider());
+    await collectEvents(
+      provider.chat({
+        model: "claude-sonnet-4-20250514",
+        messages: [
+          {
+            role: "assistant",
+            content: [{ type: "thinking", thinking: "DeepSeek 的推理" }],
+          },
+          userMessage("继续"),
+        ],
+      }),
+    );
+
+    const callArgs = mockCreate.mock.calls[0]?.[0];
+    const assistantMsg = callArgs.messages.find(
+      (m: { role: string }) => m.role === "assistant",
+    );
+    expect(assistantMsg.content[0]).toEqual({
+      type: "text",
+      text: "DeepSeek 的推理",
+    });
+  });
+});

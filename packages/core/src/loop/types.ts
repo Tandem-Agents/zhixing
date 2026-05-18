@@ -17,6 +17,7 @@ import type {
   LLMRoles,
   StopReason,
   StreamEvent,
+  ThinkingConfig,
   TokenUsage,
 } from "../types/llm.js";
 import type { Message, ToolResultBlock, ToolUseBlock } from "../types/messages.js";
@@ -38,6 +39,11 @@ export interface AgentLoopParams {
   provider: LLMProvider;
   /** 使用的模型 ID */
   model: string;
+  /**
+   * 该次运行所用 role 的思考控制 —— 装配期按主对话实际 role 注入，
+   * 透传到每次 LLM call 的 ChatRequest。缺省 = 不发送思考参数。
+   */
+  thinking?: ThinkingConfig;
   /** 可用工具列表 */
   tools?: ToolDefinition[];
   /** 系统提示 */

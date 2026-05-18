@@ -22,7 +22,9 @@ import {
   type ToolResultBlock,
   type IPermissionStore,
   type IToolArgumentExtractor,
+  type LLMRole,
   type MutableToolBoundaryRegistry,
+  type ThinkingConfig,
   type ToolDefinition,
   type TurnContext,
   type TurnContextProvider,
@@ -56,6 +58,7 @@ import {
   SecurityPipeline,
   setAgentIdentity,
   userMessage,
+  validateThinkingConfig,
   withRetry,
   runAgentLoop,
   TurnContextInjector,
@@ -351,6 +354,32 @@ export interface CreateAgentRuntimeOptions {
   };
 }
 
+/**
+ * 装配期解析某 role 的**生效**思考控制 —— 三条 ChatRequest 构造路径
+ * （主对话 / 压缩 flush / 段切换摘要）统一经此注入，杜绝散落分支。
+ *
+ * 兜底语义（绝不向请求注入无效思考参数）：
+ *   - 未配置 → undefined（不发送思考参数，服务端用自身默认，确定安全）
+ *   - model 在 catalog 内：按其 thinkingControl（缺省等价 none）校验配置形态，
+ *     不相容（如换 model 后旧配置残留）→ warn + undefined
+ *   - model 不在 catalog 内（网关型 provider 返回 []，无法证伪）→ 透传，
+ *     交由 adapter 的 provider 思考方言作终判（用户主权范畴）
+ */
+function resolveRoleThinking(
+  role: LLMRole,
+  configured: ThinkingConfig | undefined,
+): ThinkingConfig | undefined {
+  if (configured === undefined) return undefined;
+  const modelInfo = role.provider.models.find((m) => m.id === role.model);
+  if (modelInfo === undefined) return configured;
+  const control = modelInfo.thinkingControl ?? { type: "none" };
+  if (validateThinkingConfig(configured, control)) return configured;
+  console.warn(
+    `[zhixing] 模型 ${role.model} 不支持所配置的思考控制形态，已忽略该思考配置`,
+  );
+  return undefined;
+}
+
 // ─── 创建运行时 ───
 
 /**
@@ -479,11 +508,26 @@ export async function createAgentRuntime(
     ),
   );
 
+  // 思考控制装配期一次性解析（runtime 生命周期内 config + 解析后的 role 均不变，
+  // 无需 per-run 重算）。各 LLM 调用点按其实际 role 复用：
+  //   - mainThinking ：主对话 runAgentLoop + 段切换摘要 segmentStreamFactory
+  //     + Task 子 agent（子复用父 main provider+model，故继承 main 思考配置）
+  //   - lightThinking：压缩 / flush createCompactionFlush（走 roles.light）
+  const mainThinking = resolveRoleThinking(
+    roles.main,
+    config.llm?.main?.thinking,
+  );
+  const lightThinking = resolveRoleThinking(
+    roles.light,
+    config.llm?.light?.thinking,
+  );
+
   let tools: ToolDefinition[] = baseTools;
   if (profile.enabledTools.includes("Task")) {
     const taskTool = createTaskTool({
       provider: roles.main.provider,
       model: roles.main.model,
+      thinking: mainThinking,
       llmRoles: roles,
       securityPipeline,
       workspace: workspace.path,
@@ -554,7 +598,7 @@ export async function createAgentRuntime(
 
   // Flush 用的 LLM 调用——绑定 light 角色。详见 compaction-llm.ts 的
   // 设计注释（路由契约 + 单测覆盖）。
-  const flushCallLLM = createCompactionFlush(roles);
+  const flushCallLLM = createCompactionFlush(roles, lightThinking);
 
   // 策略编排（engine 按 priority asc 执行，到 normal/warning 就 break）：
   //   priority 3   MemoryFlush     有 LLM 调用 — 仅 usage >= 0.75 触发
@@ -753,6 +797,9 @@ export async function createAgentRuntime(
               systemPrompt: req.systemPrompt,
               tools: req.tools,
               messages: req.messages,
+              // 段切换摘要现状走 roles.main（model 由 createSegmentSummarizeFn
+              // 绑 roles.main.model），思考控制随实际 role 注入 mainThinking。
+              thinking: mainThinking,
               abortSignal: controller.signal,
             }),
             controller,
@@ -951,6 +998,8 @@ export async function createAgentRuntime(
         const gen = runAgentLoop({
           provider: roles.main.provider,
           model: roles.main.model,
+          // 主对话走 roles.main，思考控制随实际 role 注入（装配期已过校验兜底）。
+          thinking: mainThinking,
           tools,
           messages: loopMessages,
           systemPrompt,

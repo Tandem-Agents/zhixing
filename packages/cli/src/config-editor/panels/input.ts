@@ -18,12 +18,14 @@ import type {
   WorkingState,
 } from "../types.js";
 import { Renderer } from "../ui/render.js";
+import { getPreset } from "@zhixing/providers";
 import {
   addProviderModel,
   patchChannelEntry,
   patchProviderEntry,
   setInputBuffer,
   writeModelRole,
+  writeModelThinking,
 } from "../state.js";
 import { maskForDisplay, maskForInput } from "../ui/mask.js";
 import { SUPPORTED_PROVIDERS, SUPPORTED_CHANNELS } from "../../registries/index.js";
@@ -44,6 +46,11 @@ const INPUT_FOOTER_HINTS = [
 ] as const;
 const ADD_MODEL_FOOTER_HINTS = [
   "Enter 添加",
+  "Esc 取消",
+  "Ctrl+C 退出",
+] as const;
+const THINKING_BUDGET_FOOTER_HINTS = [
+  "Enter 保存",
   "Esc 取消",
   "Ctrl+C 退出",
 ] as const;
@@ -306,6 +313,91 @@ export function handleAddModelPanelKey(
       let next = addProviderModel(state, descriptor.providerId, value);
       next = writeModelRole(next, descriptor.role, descriptor.providerId, value);
       next = setInputBuffer(next, "");
+      return { type: "pop", state: next };
+    }
+    case "backspace": {
+      if (state.inputBuffer.length === 0) return { type: "stay", state };
+      const chars = Array.from(state.inputBuffer);
+      chars.pop();
+      return { type: "stay", state: setInputBuffer(state, chars.join("")) };
+    }
+    case "char":
+      return { type: "stay", state: setInputBuffer(state, state.inputBuffer + key.ch) };
+    default:
+      return { type: "stay", state };
+  }
+}
+
+// ─── thinking-budget 面板 ───
+
+/**
+ * 解析 budget 形态的官方区间（仅用于输入提示，不做强校验——区间是官方建议，
+ * 个别端点/版本可能放宽，越界值交服务端裁决而非编辑器拦死）。
+ */
+function resolveBudgetRange(
+  providerId: string,
+  model: string,
+): readonly [number, number] | undefined {
+  const control = getPreset(providerId)?.knownModels?.find(
+    (m) => m.id === model,
+  )?.thinkingControl;
+  return control?.type === "budget" ? control.range : undefined;
+}
+
+export function renderThinkingBudgetPanel(
+  state: WorkingState,
+  descriptor: Extract<PanelDescriptor, { kind: "thinking-budget" }>,
+  renderer: Renderer,
+): void {
+  renderer.clear();
+  renderer.showCursor();
+
+  const width = renderer.terminalWidth();
+  const range = resolveBudgetRange(descriptor.providerId, descriptor.model);
+
+  const bodyLines: string[] = ["输入思考 token 预算（整数）"];
+  if (range) {
+    bodyLines.push("");
+    bodyLines.push(tone.dim(`官方建议区间：${range[0]}–${range[1]} token`));
+  }
+
+  renderer.writeLines(
+    renderChrome({
+      title: `${descriptor.model} · 自定义思考预算`,
+      body: bodyLines,
+      width,
+    }),
+  );
+  renderer.writeLine("");
+
+  writeInputThenFooterAndRestoreCursor(
+    renderer,
+    `${CONTENT_INDENT}> ${state.inputBuffer}`,
+    THINKING_BUDGET_FOOTER_HINTS,
+  );
+}
+
+export function handleThinkingBudgetPanelKey(
+  state: WorkingState,
+  descriptor: Extract<PanelDescriptor, { kind: "thinking-budget" }>,
+  key: KeyEvent,
+): PanelAction {
+  switch (key.type) {
+    case "ctrl-c":
+      return { type: "exit", result: { kind: "cancelled" } };
+    case "escape":
+      return { type: "pop", state: setInputBuffer(state, "") };
+    case "enter": {
+      const raw = state.inputBuffer.trim();
+      // 非法 / 空 → 取消不写（保留原 thinking 不动），与 input/add-model 一致
+      if (!/^\d+$/.test(raw)) {
+        return { type: "pop", state: setInputBuffer(state, "") };
+      }
+      const budget = Number.parseInt(raw, 10);
+      const next = setInputBuffer(
+        writeModelThinking(state, descriptor.role, { mode: "budget", budget }),
+        "",
+      );
       return { type: "pop", state: next };
     }
     case "backspace": {

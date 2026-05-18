@@ -41,8 +41,10 @@ import {
 import {
   handleAddModelPanelKey,
   handleInputPanelKey,
+  handleThinkingBudgetPanelKey,
   renderAddModelPanel,
   renderInputPanel,
+  renderThinkingBudgetPanel,
 } from "./panels/input.js";
 
 interface PanelFrame {
@@ -135,6 +137,7 @@ function renderTopPanel(
       return;
     case "provider-list":
     case "model-list":
+    case "thinking-config":
       renderListPanel(state, d, frame.cursor, renderer);
       return;
     case "provider-config":
@@ -146,6 +149,9 @@ function renderTopPanel(
       return;
     case "add-model":
       renderAddModelPanel(state, d, renderer);
+      return;
+    case "thinking-budget":
+      renderThinkingBudgetPanel(state, d, renderer);
       return;
   }
 }
@@ -170,7 +176,8 @@ function dispatchKey(
 
   switch (d.kind) {
     case "provider-list":
-    case "model-list": {
+    case "model-list":
+    case "thinking-config": {
       const result = handleListPanelKey(state, d, top.cursor, key);
       top.cursor = result.cursor;
       return result.action;
@@ -186,6 +193,8 @@ function dispatchKey(
       return handleInputPanelKey(state, d, key);
     case "add-model":
       return handleAddModelPanelKey(state, d, key);
+    case "thinking-budget":
+      return handleThinkingBudgetPanelKey(state, d, key);
     default:
       return { type: "stay", state };
   }

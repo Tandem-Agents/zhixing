@@ -31,6 +31,9 @@ export const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
         maxOutputTokens: 384_000,
         supportsTools: true,
         supportsThinking: true,
+        // 官方思考档：effort high(默认)/ max；off 关闭。low/med→high、
+        // xhigh→max 的兼容映射由 adapter 思考方言处理，不入用户可配档位。
+        thinkingControl: { type: "effort", efforts: ["high", "max"], default: "high" },
       },
     ],
     quirks: {
@@ -43,6 +46,7 @@ export const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
       // DeepSeek 用自有 usage 方言 prompt_cache_hit_tokens / prompt_cache_miss_tokens
       // (非 OpenAI 标准 prompt_tokens_details.cached_tokens),显式声明走最短解析路径
       usageDialect: "deepseek",
+      thinkingDialect: "deepseek",
     },
   },
 
@@ -144,14 +148,15 @@ export const PROVIDER_PRESETS: Record<string, ProviderPreset> = {
     protocol: "anthropic-messages",
     defaultModel: "claude-sonnet-4-20250514",
     quirks: {
-      // Claude thinking(extended thinking)模式当前未接入:
-      //   - anthropic adapter 请求路径未传 thinking 参数,服务端不会进入 thinking 模式
-      //   - 出站不写 thinking block + signature(协议要求 multi-turn replay 带签名)
-      // 保持声明诚实。接入完整路径见 anthropic-messages.ts 顶部 BlockState 注释,
-      // 届时本字段改 true + Anthropic 模型 ModelInfo 标 supportsThinking: true。
-      supportsThinking: false,
+      // Claude extended thinking 发送侧 + signature multi-turn replay 已接入
+      // (anthropic adapter 按 ChatRequest.thinking 发 thinking{type,budget_tokens},
+      // 入站累积 signature_delta、出站原样回传)。供 UI 粗标。逐 Claude 模型的
+      // ThinkingControl 档位枚举(opus/sonnet 各代 budget 范围差异)属 model
+      // catalog 数据填充,按模型补查官方后填 knownModels。
+      supportsThinking: true,
       supportsTools: true,
       supportsStreamUsage: true,
+      thinkingDialect: "anthropic",
     },
   },
 };

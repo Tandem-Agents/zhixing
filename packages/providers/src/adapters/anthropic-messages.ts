@@ -20,26 +20,25 @@ import type {
 } from "@zhixing/core";
 import type { Message, ContentBlock, ToolSpec } from "@zhixing/core";
 import type { ResolvedProvider } from "../types.js";
+import { buildAnthropicThinkingParam } from "./thinking-params.js";
 
 // ─── 内部类型 ───
 //
 // BlockState 覆盖 anthropic 协议中需要在 stream 期间维持状态的三类 content block:
 //   - text:无内部状态,仅作类型标记让 content_block_delta 知道 emit text_delta
-//   - thinking:同上,让 content_block_delta 知道 emit thinking_delta
-//     (Claude thinking 模式当前未在请求侧接入,但仍要处理 content_block 协议事件 —
-//     未来接入或 SDK 默认行为变化时,本路径自动激活,无需重新加状态;同时跨
-//     provider 续聊场景下的 ThinkingBlock 不流经本 adapter 入站路径)
+//   - thinking:维持 signature 累积(随 signature_delta 在块末到达),
+//     content_block_stop 时随 thinking_block_end 一次性带出
 //   - tool_use:维持 id / name / argsJson 累积
 //
-// 协议事件层 vs 能力层分离:
-//   本 adapter 正确发射 thinking_block_start / thinking_delta / thinking_block_end
-//   协议事件,与 tool_call_start/end 对称。但 Claude thinking **能力**完整接入
-//   (请求传 thinking 参数 + 出站写 thinking block + signature + 跨 provider 兜底)
-//   是独立工程;当前 presets.anthropic.quirks.supportsThinking = false 保持诚实。
+// Claude extended thinking 已完整接入:请求侧按 ChatRequest.thinking 发
+// thinking{type,budget_tokens}(buildAnthropicThinkingParam);入站累积
+// signature_delta;出站 convertContentBlock 对含 signature 的思考块原样回传
+// (thinking + signature 逐字节一致,服务端解密校验,改写/缺失会 400)。无
+// signature 的跨 provider 思考块降级为 text 兜底。
 
 type BlockState =
   | { type: "text" }
-  | { type: "thinking" }
+  | { type: "thinking"; signature: string }
   | { type: "tool_use"; id: string; name: string; argsJson: string };
 
 // ─── 工厂函数 ───
@@ -91,6 +90,13 @@ export function createAnthropicProvider(resolved: ResolvedProvider): LLMProvider
         params.tools = tools;
       }
 
+      // Extended thinking 原生参数（thinking{type:enabled,budget_tokens}）。
+      // 缺省 / 不适用形态 → 不传该参数 = 标准模式（安全兜底）。
+      const thinkingParam = buildAnthropicThinkingParam(request.thinking);
+      if (thinkingParam) {
+        params.thinking = thinkingParam;
+      }
+
       applyCacheControlToLastUserMessage(messages);
 
       yield { type: "message_start" };
@@ -117,7 +123,7 @@ export function createAnthropicProvider(resolved: ResolvedProvider): LLMProvider
               if (cb.type === "text") {
                 blocks.set(event.index, { type: "text" });
               } else if (cb.type === "thinking") {
-                blocks.set(event.index, { type: "thinking" });
+                blocks.set(event.index, { type: "thinking", signature: "" });
                 yield { type: "thinking_block_start" };
               } else if (cb.type === "tool_use") {
                 blocks.set(event.index, {
@@ -155,16 +161,25 @@ export function createAnthropicProvider(resolved: ResolvedProvider): LLMProvider
                   id: block.id,
                   argsFragment: delta.partial_json,
                 };
+              } else if (
+                delta.type === "signature_delta" &&
+                block.type === "thinking"
+              ) {
+                // Extended thinking 加密签名(块末到达)。累积后于
+                // content_block_stop 随 thinking_block_end 一次性带出,供消息
+                // 组装写入 ThinkingBlock.signature 以支持多轮原样回传。
+                block.signature += delta.signature;
               }
-              // 未识别的 delta 类型(signature_delta 等)静默丢弃 —— signature
-              // 当前不处理(Claude thinking 能力层未接入,见 BlockState 注释)
               break;
             }
 
             case "content_block_stop": {
               const block = blocks.get(event.index);
               if (block?.type === "thinking") {
-                yield { type: "thinking_block_end" };
+                yield {
+                  type: "thinking_block_end",
+                  signature: block.signature || undefined,
+                };
               } else if (block?.type === "tool_use") {
                 yield { type: "tool_call_end", id: block.id };
               }
@@ -256,7 +271,17 @@ function convertContentBlock(
       return { type: "text", text: `[Image: ${block.source.url}]` };
 
     case "thinking":
-      // 跨 provider 续聊兜底,不是 Claude thinking 实现:
+      // 含 signature → Anthropic 原生思考块,多轮**原样回传**(thinking +
+      // signature 字段必须与服务端返回逐字节一致,服务端解密校验,改写或缺失
+      // 会 400)。这是 Anthropic extended thinking 多轮对话的协议必要条件。
+      if (block.signature) {
+        return {
+          type: "thinking",
+          thinking: block.thinking,
+          signature: block.signature,
+        };
+      }
+      // 无 signature → 跨 provider 续聊兜底,非 Anthropic 原生思考块:
       //
       // Message.content 是 provider-agnostic 类型,可能携带来自 OpenAI 兼容路径
       // (DeepSeek v4-pro / Qwen-QwQ / Kimi-thinking 等)的 ThinkingBlock。当用户
@@ -265,12 +290,8 @@ function convertContentBlock(
       //
       // 选择降级为 text 而非抛错:
       //   - 保留信息(thinking trace 转为普通文本,模型能读到推理痕迹)
-      //   - Anthropic 协议接受任意 text 块,不会因为缺 signature 拒绝
+      //   - Anthropic 协议接受任意 text 块,无 signature 的 thinking 块直接传会被拒
       //   - 与抛错 / 静默丢弃相比,降级是最稳健的内容保真方案
-      //
-      // 真正接入 Claude thinking 的路径见 BlockState 顶部注释,届时本 case 需要
-      // 区分"来自 anthropic 自己 + 含 signature"与"跨 provider 流入 + 无 signature"
-      // 两种情形分别处理。当前 anthropic thinking 未接入,本 case 仅服务跨 provider 兜底。
       return { type: "text", text: block.thinking };
   }
 }

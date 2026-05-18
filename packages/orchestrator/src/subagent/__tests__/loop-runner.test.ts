@@ -138,6 +138,30 @@ describe("runSubAgentLoop · happy path", () => {
   });
 });
 
+// ─── thinking 透传 ───
+
+describe("runSubAgentLoop · thinking 透传", () => {
+  it("opts.thinking → 进入子 loop 的 ChatRequest.thinking", async () => {
+    const provider = new MockLLMProvider([{ text: "done" }]);
+    await runSubAgentLoop({
+      ...makeBaseOpts(provider),
+      thinking: { mode: "effort", effort: "max" },
+    });
+
+    expect(provider.calls[0]?.thinking).toEqual({
+      mode: "effort",
+      effort: "max",
+    });
+  });
+
+  it("未传 thinking → ChatRequest.thinking 为 undefined（不发思考参数）", async () => {
+    const provider = new MockLLMProvider([{ text: "done" }]);
+    await runSubAgentLoop(makeBaseOpts(provider));
+
+    expect(provider.calls[0]?.thinking).toBeUndefined();
+  });
+});
+
 // ─── max_turns ───
 
 describe("runSubAgentLoop · max_turns budget", () => {

@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { emptyUsage, mergeUsage, getTotalInputTokens } from "./llm.js";
-import type { StreamEvent, TokenUsage } from "./llm.js";
+import {
+  emptyUsage,
+  mergeUsage,
+  getTotalInputTokens,
+  validateThinkingConfig,
+} from "./llm.js";
+import type {
+  StreamEvent,
+  ThinkingControl,
+  TokenUsage,
+} from "./llm.js";
 
 describe("TokenUsage 辅助函数", () => {
   describe("emptyUsage", () => {
@@ -171,5 +180,69 @@ describe("StreamEvent 类型判别", () => {
       "message_end",
       "error",
     ]);
+  });
+});
+
+describe("validateThinkingConfig · 形态相容单一规则源", () => {
+  it("none 形态拒绝任何配置", () => {
+    const c: ThinkingControl = { type: "none" };
+    expect(validateThinkingConfig({ mode: "off" }, c)).toBe(false);
+    expect(validateThinkingConfig({ mode: "on" }, c)).toBe(false);
+    expect(validateThinkingConfig({ mode: "effort", effort: "high" }, c)).toBe(
+      false,
+    );
+  });
+
+  it("toggle 仅接受 off / on", () => {
+    const c: ThinkingControl = { type: "toggle" };
+    expect(validateThinkingConfig({ mode: "off" }, c)).toBe(true);
+    expect(validateThinkingConfig({ mode: "on" }, c)).toBe(true);
+    expect(validateThinkingConfig({ mode: "effort", effort: "high" }, c)).toBe(
+      false,
+    );
+    expect(validateThinkingConfig({ mode: "budget", budget: 1024 }, c)).toBe(
+      false,
+    );
+  });
+
+  it("effort 接受 off / on 及官方档枚举内的 effort", () => {
+    const c: ThinkingControl = {
+      type: "effort",
+      efforts: ["high", "max"],
+      default: "high",
+    };
+    expect(validateThinkingConfig({ mode: "off" }, c)).toBe(true);
+    expect(validateThinkingConfig({ mode: "on" }, c)).toBe(true);
+    expect(validateThinkingConfig({ mode: "effort", effort: "max" }, c)).toBe(
+      true,
+    );
+    expect(validateThinkingConfig({ mode: "effort", effort: "low" }, c)).toBe(
+      false,
+    );
+  });
+
+  it("budget 接受 off / on 及非负且区间内的 budget", () => {
+    const c: ThinkingControl = { type: "budget", range: [0, 8192] };
+    expect(validateThinkingConfig({ mode: "off" }, c)).toBe(true);
+    expect(validateThinkingConfig({ mode: "on" }, c)).toBe(true);
+    expect(validateThinkingConfig({ mode: "budget", budget: 4096 }, c)).toBe(
+      true,
+    );
+    expect(validateThinkingConfig({ mode: "budget", budget: -1 }, c)).toBe(
+      false,
+    );
+    expect(validateThinkingConfig({ mode: "budget", budget: 9000 }, c)).toBe(
+      false,
+    );
+  });
+
+  it("budget 区间缺省时不约束上下界（仍要求非负）", () => {
+    const c: ThinkingControl = { type: "budget" };
+    expect(validateThinkingConfig({ mode: "budget", budget: 999999 }, c)).toBe(
+      true,
+    );
+    expect(validateThinkingConfig({ mode: "budget", budget: -1 }, c)).toBe(
+      false,
+    );
   });
 });

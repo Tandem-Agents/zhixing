@@ -131,6 +131,26 @@ describe("createCompactionFlush · 路由契约", () => {
     expect(callArg.messages).toHaveLength(1);
   });
 
+  it("lightThinking 注入时透传给 light.chat", async () => {
+    const { roles, lightChat } = makeSpyRoles({});
+    const flush = createCompactionFlush(roles, { mode: "off" });
+
+    await flush([userMessage("input")]);
+
+    const callArg = lightChat.mock.calls[0]![0] as Omit<ChatRequest, "model">;
+    expect(callArg.thinking).toEqual({ mode: "off" });
+  });
+
+  it("未注入 lightThinking 时 ChatRequest.thinking 为 undefined", async () => {
+    const { roles, lightChat } = makeSpyRoles({});
+    const flush = createCompactionFlush(roles);
+
+    await flush([userMessage("input")]);
+
+    const callArg = lightChat.mock.calls[0]![0] as Omit<ChatRequest, "model">;
+    expect(callArg.thinking).toBeUndefined();
+  });
+
   it("messages 原样透传，不做改写", async () => {
     const { roles, lightChat } = makeSpyRoles({});
     const flush = createCompactionFlush(roles);

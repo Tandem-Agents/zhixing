@@ -29,6 +29,7 @@ import type {
 import type { Message, ContentBlock, ToolSpec } from "@zhixing/core";
 import type { ResolvedProvider } from "../types.js";
 import { parseOpenAICompatibleUsage } from "./openai-usage.js";
+import { buildOpenAICompatibleThinkingParams } from "./thinking-params.js";
 
 // ─── Vendor Protocol Extensions ───
 //
@@ -91,6 +92,17 @@ export function createOpenAICompatibleProvider(provider: ResolvedProvider): LLMP
         request.maxTokens ?? 4096,
       );
 
+      // 思考参数按 provider 思考方言写成原生形态（anthropic 走自有协议，
+      // 不应出现在 OpenAI 兼容路径；防御性归一为 none = 不发思考参数）。
+      const thinkingDialect =
+        provider.quirks.thinkingDialect === "anthropic"
+          ? "none"
+          : provider.quirks.thinkingDialect;
+      const thinkingParams = buildOpenAICompatibleThinkingParams(
+        thinkingDialect,
+        request.thinking,
+      );
+
       const params: OpenAI.ChatCompletionCreateParamsStreaming = {
         model: request.model,
         messages: openaiMessages,
@@ -102,7 +114,7 @@ export function createOpenAICompatibleProvider(provider: ResolvedProvider): LLMP
         ...(request.temperature != null ? { temperature: request.temperature } : {}),
         ...(request.stopSequences ? { stop: request.stopSequences } : {}),
         ...(tools && tools.length > 0 ? { tools } : {}),
-        ...(request.systemPrompt ? {} : {}),
+        ...thinkingParams,
       };
 
       // system prompt 作为首条 system 消息插入

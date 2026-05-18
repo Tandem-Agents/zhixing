@@ -85,7 +85,7 @@ export async function* runAgentLoop(
   // 这里仅解构透传,**不得**在 loop 内拼接 / 追加 / 重建。per-turn 动态信息
   // 走 turnContextInjector(注入到末尾 user message),不进 systemPrompt。
   // 详见 buildSystemPrompt 的"调用契约"注释。
-  const { model, systemPrompt, eventBus } = params;
+  const { model, thinking, systemPrompt, eventBus } = params;
   const tools = params.tools ?? [];
   const maxTurns = params.maxTurns ?? 100;
   const workingDirectory = params.workingDirectory ?? process.cwd();
@@ -291,6 +291,7 @@ export async function* runAgentLoop(
         deps,
         messages: messagesForLLM as Message[],
         model,
+        thinking,
         systemPrompt,
         toolSpecs,
         controller,

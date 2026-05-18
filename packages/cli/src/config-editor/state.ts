@@ -12,6 +12,7 @@ import type {
   ZhixingConfig,
   ZhixingCredentials,
 } from "@zhixing/providers";
+import type { ThinkingConfig } from "@zhixing/core";
 import type { ModelRole, WorkingState } from "./types.js";
 
 // ─── 初始化 ───
@@ -64,6 +65,33 @@ export function writeModelRole(
   const llm = config.llm ?? { main: { provider: "", model: "" } };
   config.llm = { ...llm };
   config.llm[role] = { provider, model };
+  return { ...state, config };
+}
+
+/** 读 llm 角色的思考控制配置（缺省 undefined = 不发思考参数） */
+export function readModelThinking(
+  state: WorkingState,
+  role: ModelRole,
+): ThinkingConfig | undefined {
+  return state.config.llm?.[role]?.thinking;
+}
+
+/**
+ * 设置 llm 角色的思考控制配置——保留已选 provider + model 不动。
+ *
+ * 仅在该角色已有 provider+model 时有意义（思考控制步骤总在 model 选定后进入）；
+ * 防御性兜底：llm/角色缺失时按 writeModelRole 同款占位逻辑保 schema 合法。
+ */
+export function writeModelThinking(
+  state: WorkingState,
+  role: ModelRole,
+  thinking: ThinkingConfig,
+): WorkingState {
+  const config = structuredClone(state.config);
+  const llm = config.llm ?? { main: { provider: "", model: "" } };
+  config.llm = { ...llm };
+  const existing = config.llm[role] ?? { provider: "", model: "" };
+  config.llm[role] = { ...existing, thinking };
   return { ...state, config };
 }
 

@@ -61,6 +61,7 @@ import {
   type LLMRoles,
   type Message,
   type SecurityPipeline,
+  type ThinkingConfig,
   type TokenUsage,
   type ToolDefinition,
   type ToolResultBlock,
@@ -122,6 +123,12 @@ export interface RunSubAgentLoopOptions {
   provider: LLMProvider;
   /** 共享父 model id */
   model: string;
+  /**
+   * 思考控制 —— 子 agent 复用父 main 的 provider+model，按"thinking 跟随该
+   * 调用点实际 role"统一规则继承父 main 的思考配置（装配期已过校验兜底）。
+   * 缺省 = 不发送思考参数。
+   */
+  thinking?: ThinkingConfig;
   /** 共享父 LLMRoles —— 工具调 light/power 角色时透传 */
   llmRoles: LLMRoles;
   /** 共享父 SecurityPipeline 实例(权限规则 / boundary registry 跨 agent 共用) */
@@ -267,6 +274,7 @@ export async function runSubAgentLoop(
     const { yields, result } = await drainAgentLoop({
       provider: opts.provider,
       model: opts.model,
+      thinking: opts.thinking,
       tools: [...opts.tools],
       messages: opts.messages,
       systemPrompt: opts.systemPrompt,

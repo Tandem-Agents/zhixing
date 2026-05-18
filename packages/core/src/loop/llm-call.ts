@@ -39,7 +39,7 @@ import { wrapStreamWithWatchdog } from "../interrupt/watchdog.js";
 import type { WatchdogPolicy } from "../interrupt/types.js";
 import type { AgentEventMap } from "../types/agent-events.js";
 import { AgentError } from "../types/errors.js";
-import type { ChatRequest, StopReason, TokenUsage } from "../types/llm.js";
+import type { ChatRequest, StopReason, ThinkingConfig, TokenUsage } from "../types/llm.js";
 import { emptyUsage } from "../types/llm.js";
 import type { ContentBlock, Message } from "../types/messages.js";
 import type { ToolSpec } from "../types/tools.js";
@@ -50,6 +50,8 @@ interface StreamLLMCallParams {
   deps: AgentLoopDeps;
   messages: readonly Message[];
   model: string;
+  /** 思考控制 —— 装配期注入的该 role 配置，原样写入 ChatRequest 供 adapter 派发。 */
+  thinking?: ThinkingConfig;
   systemPrompt?: string;
   toolSpecs: ToolSpec[];
   /**
@@ -78,13 +80,14 @@ interface StreamLLMCallParams {
 export async function* streamLLMCall(
   params: StreamLLMCallParams,
 ): AsyncGenerator<AgentYield, LLMCallResult> {
-  const { deps, messages, model, systemPrompt, toolSpecs, controller, watchdog, eventBus } = params;
+  const { deps, messages, model, thinking, systemPrompt, toolSpecs, controller, watchdog, eventBus } = params;
 
   const request: ChatRequest = {
     model,
     systemPrompt,
     messages: messages as Message[],
     tools: toolSpecs.length > 0 ? toolSpecs : undefined,
+    thinking,
     abortSignal: controller.signal,
   };
 
@@ -107,6 +110,9 @@ export async function* streamLLMCall(
   // 用于积累流式文本/思考
   let pendingText = "";
   let pendingThinking = "";
+  // Anthropic extended thinking 加密签名 —— 随 thinking_block_end 到达,
+  // 组装进 ThinkingBlock 以支持多轮原样回传(缺失=非 Anthropic 思考块)。
+  let pendingThinkingSignature: string | undefined;
 
   // 用于解析流式工具调用 (abort 路径丢弃)
   const pendingToolCalls = new Map<string, { id: string; name: string; argsJson: string }>();
@@ -147,7 +153,9 @@ export async function* streamLLMCall(
           break;
 
         case "thinking_block_end":
-          // 透传 thinking 块结束边界 —— 让消费方 commit/close thinking 资源
+          // 捕获 signature 供消息组装(Anthropic 多轮回传必需);消费方仅需边界
+          // 语义,故向 AgentYield 透传时不带 signature(签名属持久化/回传维度)。
+          if (event.signature) pendingThinkingSignature = event.signature;
           yield { type: "thinking_block_end" };
           break;
 
@@ -285,7 +293,13 @@ export async function* streamLLMCall(
     };
   }
 
-  const message = assembleMessage(contentBlocks, pendingText, pendingThinking, pendingToolCalls);
+  const message = assembleMessage(
+    contentBlocks,
+    pendingText,
+    pendingThinking,
+    pendingThinkingSignature,
+    pendingToolCalls,
+  );
   yield { type: "assistant_message", message };
 
   return {
@@ -306,12 +320,21 @@ function assembleMessage(
   existingBlocks: ContentBlock[],
   pendingText: string,
   pendingThinking: string,
+  pendingThinkingSignature: string | undefined,
   pendingToolCalls: Map<string, { id: string; name: string; argsJson: string }>,
 ): Message {
   const content: ContentBlock[] = [...existingBlocks];
 
   if (pendingThinking) {
-    content.push({ type: "thinking", thinking: pendingThinking });
+    content.push(
+      pendingThinkingSignature
+        ? {
+            type: "thinking",
+            thinking: pendingThinking,
+            signature: pendingThinkingSignature,
+          }
+        : { type: "thinking", thinking: pendingThinking },
+    );
   }
   if (pendingText) {
     content.push({ type: "text", text: pendingText });

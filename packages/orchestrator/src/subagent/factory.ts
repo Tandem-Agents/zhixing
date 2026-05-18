@@ -33,6 +33,7 @@ import {
   type LLMRoles,
   type Message,
   type SecurityPipeline,
+  type ThinkingConfig,
   type TokenUsage,
   type ToolDefinition,
 } from "@zhixing/core";
@@ -92,6 +93,11 @@ export interface RunChildAgentOptions {
   provider: LLMProvider;
   /** 共享父 model id —— 子复用父模型,不支持单独 override */
   model: string;
+  /**
+   * 思考控制 —— 子复用父 main 的 provider+model，按统一规则继承父 main 的
+   * 思考配置透传给子 loop。缺省 = 不发送思考参数。
+   */
+  thinking?: ThinkingConfig;
   /** 共享父 LLMRoles —— 工具调 light/power 角色时透传 */
   llmRoles: LLMRoles;
   /** 共享父 SecurityPipeline 实例 —— 权限规则 / boundary registry 跨 agent 共用 */
@@ -290,6 +296,7 @@ async function runChildAgentInner(
           tools: childTools,
           provider: opts.provider,
           model: opts.model,
+          thinking: opts.thinking,
           llmRoles: opts.llmRoles,
           securityPipeline: opts.securityPipeline,
           confirmationBroker: childBroker,

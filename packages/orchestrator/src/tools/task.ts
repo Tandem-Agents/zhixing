@@ -35,6 +35,7 @@ import {
   type LLMProvider,
   type LLMRoles,
   type SecurityPipeline,
+  type ThinkingConfig,
   type ToolDefinition,
   type ToolExecutionContext,
   type ToolResult,
@@ -61,6 +62,11 @@ export interface TaskToolEnv {
   provider: LLMProvider;
   /** 父 model id —— 子复用父模型,不支持单独 override */
   model: string;
+  /**
+   * 父 main 思考控制 —— 子复用父 main provider+model，按"thinking 跟随调用点
+   * 实际 role"统一规则继承。缺省 = 不发送思考参数。
+   */
+  thinking?: ThinkingConfig;
   /** 父 LLMRoles —— 子工具调 light/power 角色时透传 */
   llmRoles: LLMRoles;
   /** 父 SecurityPipeline —— 权限规则 / boundary registry 跨 agent 共用 */
@@ -356,6 +362,7 @@ export function createTaskTool(env: TaskToolEnv): ToolDefinition {
       const result = await runChildAgent({
         provider: env.provider,
         model: env.model,
+        thinking: env.thinking,
         llmRoles: env.llmRoles,
         securityPipeline: env.securityPipeline,
         workspace: env.workspace,

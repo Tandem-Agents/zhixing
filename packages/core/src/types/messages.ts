@@ -60,10 +60,17 @@ export interface ToolResultBlock {
 /**
  * 思考块 — LLM 的推理过程（如 Claude extended thinking）。
  * 出现在 assistant 消息中。
+ *
+ * signature：Anthropic extended thinking 的加密签名。Anthropic 协议要求
+ * 多轮对话中把思考块**原样**回传（含 signature），服务端解密校验，缺失或被
+ * 改写会 400。仅 Anthropic 原生思考块携带；OpenAI 兼容族（DeepSeek 等）的
+ * reasoning trace 无此维度，字段留空。出站时有 signature → 原样回传，无 →
+ * 降级为文本（跨 provider 续聊兜底，不破坏协议）。
  */
 export interface ThinkingBlock {
   type: "thinking";
   thinking: string;
+  signature?: string;
 }
 
 /**

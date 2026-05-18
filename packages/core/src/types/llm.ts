@@ -124,6 +124,25 @@ export function mergeUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
  * 协议级处理（字段缺失自动跳过），不读取 capability。这些字段为上层场景提供 UI
  * 语义信号：model picker / 思考能力标签 / 选择面板高亮等。可选字段，不强制声明。
  */
+/**
+ * 模型思考能力的细粒度描述 —— 还原各家官方原生形态，不做统一抽象。
+ *
+ * 各 provider 的思考控制分属不同维度（离散档位 / 纯开关 / 连续预算等），且同
+ * 一厂商跨版本档位会变；统一成中间抽象档必然向不支持的模型发出无效参数。故
+ * 按官方原生形态分类，配置项 1:1 还原官方取值。
+ *
+ * 仅驱动两处消费：用户配置校验、配置编辑器渲染。adapter 发送侧不读本类型 ——
+ * 它按 provider 思考方言（ProviderQuirks.thinkingDialect）把已校验的
+ * ThinkingConfig 写成原生请求参数，与本能力描述职责分离。
+ *
+ * 字段不声明等价 { type: "none" }：不暴露任何思考配置项。
+ */
+export type ThinkingControl =
+  | { type: "none" }
+  | { type: "toggle" }
+  | { type: "effort"; efforts: readonly string[]; default: string }
+  | { type: "budget"; range?: readonly [number, number] };
+
 export interface ModelInfo {
   /** 模型标识符，如 'claude-sonnet-4-20250514' */
   id: string;
@@ -138,6 +157,11 @@ export interface ModelInfo {
    * UI 语义信号；运行时 reasoning_content 透传不依赖此字段（协议级处理）。
    */
   supportsThinking?: boolean;
+  /**
+   * 思考控制能力的细粒度声明 —— supportsThinking 布尔粗标的细化形态。
+   * 缺省等价 { type: "none" }；supportsThinking 保留作 provider 能力粗标兼容。
+   */
+  thinkingControl?: ThinkingControl;
   /** 是否支持图片输入 */
   supportsImages?: boolean;
   /** 是否支持工具调用 */
@@ -145,6 +169,55 @@ export interface ModelInfo {
 }
 
 // ─── 对话请求 ───
+
+/**
+ * 用户为某角色配置的思考控制 —— 形态由该角色选中 model 的 ThinkingControl
+ * 决定（配置编辑器据其渲染、装配期据其校验）。还原各家官方原生取值，不做
+ * 统一抽象。字段缺省 = 不向请求注入任何思考参数（安全兜底）。
+ */
+export type ThinkingConfig =
+  | { mode: "off" }
+  | { mode: "on" }
+  | { mode: "effort"; effort: string }
+  | { mode: "budget"; budget: number };
+
+/**
+ * 校验一份 ThinkingConfig 是否与某 model 的 ThinkingControl 形态相容 ——
+ * 配置编辑器与运行时装配期共用的**单一规则源**，避免两处校验漂移。
+ *
+ * 相容规则（开/关对任何可思考形态都合法，故各形态均放行 off/on）：
+ *   - none   ：不暴露任何思考配置项，任何 config 均不相容
+ *   - toggle ：仅 off / on
+ *   - effort ：off / on / effort（取值须在官方档枚举内）
+ *   - budget ：off / on / budget（非负，且在官方区间内——区间缺省不约束上下界）
+ *
+ * 返回 false 的语义由调用方决定：配置编辑器据此拦截，装配期据此忽略并 warn
+ * （绝不向请求注入无效思考参数——“不发”确定安全，“发错”结果不可控）。
+ */
+export function validateThinkingConfig(
+  thinking: ThinkingConfig,
+  control: ThinkingControl,
+): boolean {
+  switch (control.type) {
+    case "none":
+      return false;
+    case "toggle":
+      return thinking.mode === "off" || thinking.mode === "on";
+    case "effort":
+      if (thinking.mode === "off" || thinking.mode === "on") return true;
+      return (
+        thinking.mode === "effort" && control.efforts.includes(thinking.effort)
+      );
+    case "budget":
+      if (thinking.mode === "off" || thinking.mode === "on") return true;
+      if (thinking.mode !== "budget" || thinking.budget < 0) return false;
+      return (
+        control.range === undefined ||
+        (thinking.budget >= control.range[0] &&
+          thinking.budget <= control.range[1])
+      );
+  }
+}
 
 export interface ChatRequest {
   /** 使用的模型 ID */
@@ -163,6 +236,11 @@ export interface ChatRequest {
   stopSequences?: string[];
   /** 中止信号 */
   abortSignal?: AbortSignal;
+  /**
+   * 思考控制 —— orchestrator 装配期按该次调用实际 role 的配置注入；
+   * adapter 按本 provider 思考方言写成原生参数。缺省 = 不发送思考参数。
+   */
+  thinking?: ThinkingConfig;
 }
 
 // ─── 流式事件（判别联合） ───
@@ -236,9 +314,15 @@ export interface StreamThinkingDelta {
  * 消费方据此 commit/close 与 thinking 关联的资源(segment / buffer / UI 段等)。
  * 异常路径(catch err)不 emit 本事件,消费方需在 error event / dispose 时自行
  * cleanup 悬挂状态,与 tool_call_end 异常路径约定一致。
+ *
+ * signature：Anthropic extended thinking 的加密签名,在块结束时已完整可知
+ * (随 signature_delta 在块末到达)。adapter 累积后于本事件一次性带出,供消息
+ * 组装写入 ThinkingBlock.signature 以支持多轮原样回传。OpenAI 兼容族无此维度,
+ * 留空。
  */
 export interface StreamThinkingBlockEnd {
   type: "thinking_block_end";
+  signature?: string;
 }
 
 export interface StreamToolCallStart {

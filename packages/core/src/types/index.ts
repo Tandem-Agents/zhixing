@@ -35,6 +35,8 @@ export { toToolSpec, generateTurnId } from "./tools.js";
 // ─── LLM 类型 ───
 export type {
   ChatRequest,
+  ThinkingConfig,
+  ThinkingControl,
   LLMProvider,
   LLMRole,
   LLMRoles,
@@ -51,7 +53,12 @@ export type {
   StreamToolCallStart,
   TokenUsage,
 } from "./llm.js";
-export { emptyUsage, mergeUsage, getTotalInputTokens } from "./llm.js";
+export {
+  emptyUsage,
+  mergeUsage,
+  getTotalInputTokens,
+  validateThinkingConfig,
+} from "./llm.js";
 
 // ─── 事件类型 ───
 export type { AgentEventMap, AgentRunEndReason } from "./agent-events.js";

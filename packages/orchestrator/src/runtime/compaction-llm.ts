@@ -16,7 +16,7 @@
  * MemoryFlush / LLMSummarize 内部)共享同一签名,避免重复定义带来的类型漂移。
  */
 
-import type { CompactLLMFn, LLMRoles } from "@zhixing/core";
+import type { CompactLLMFn, LLMRoles, ThinkingConfig } from "@zhixing/core";
 
 /**
  * 绑定 LLMRoles 后返回压缩用的 CompactLLMFn。
@@ -32,13 +32,20 @@ import type { CompactLLMFn, LLMRoles } from "@zhixing/core";
  * 无需也不应该自己做 fallback 决策。
  *
  * 返回的函数无状态,可在多个 ContextEngine / 多个 strategy 间共享。
+ *
+ * lightThinking:light 角色的思考控制,由装配期按 light 实际配置注入(已过校验
+ * 兜底,不相容形态在装配期已被归一为 undefined)。缺省 = 不发送思考参数。
  */
-export function createCompactionFlush(roles: LLMRoles): CompactLLMFn {
+export function createCompactionFlush(
+  roles: LLMRoles,
+  lightThinking?: ThinkingConfig,
+): CompactLLMFn {
   return async (messages, opts) => {
     const chunks: string[] = [];
     for await (const event of roles.light.chat({
       messages,
       tools: [],
+      thinking: lightThinking,
       abortSignal: opts?.abortSignal,
     })) {
       if (event.type === "text_delta") {

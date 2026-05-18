@@ -658,3 +658,59 @@ describe("createOpenAICompatibleProvider", () => {
     expect(assistantMsg.tool_calls).toHaveLength(1);
   });
 });
+
+describe("createOpenAICompatibleProvider · 思考控制发送侧", () => {
+  beforeEach(() => {
+    mockCreate.mockReset();
+  });
+
+  it("deepseek 方言 + effort 配置 → 发原生 thinking + reasoning_effort", async () => {
+    mockCreate.mockResolvedValue(mockStream([finishChunk("stop")]));
+
+    const provider = createOpenAICompatibleProvider(
+      makeProvider({ quirks: { ...DEFAULT_QUIRKS, thinkingDialect: "deepseek" } }),
+    );
+    await collectEvents(
+      provider.chat({
+        model: "deepseek-v4-pro",
+        messages: [userMessage("Hi")],
+        thinking: { mode: "effort", effort: "max" },
+      }),
+    );
+
+    const callArgs = mockCreate.mock.calls[0]?.[0];
+    expect(callArgs.thinking).toEqual({ type: "enabled" });
+    expect(callArgs.reasoning_effort).toBe("max");
+  });
+
+  it("未配 thinking → 请求不带任何思考参数", async () => {
+    mockCreate.mockResolvedValue(mockStream([finishChunk("stop")]));
+
+    const provider = createOpenAICompatibleProvider(
+      makeProvider({ quirks: { ...DEFAULT_QUIRKS, thinkingDialect: "deepseek" } }),
+    );
+    await collectEvents(
+      provider.chat({ model: "deepseek-v4-pro", messages: [userMessage("Hi")] }),
+    );
+
+    const callArgs = mockCreate.mock.calls[0]?.[0];
+    expect(callArgs.thinking).toBeUndefined();
+    expect(callArgs.reasoning_effort).toBeUndefined();
+  });
+
+  it("none 方言（默认 quirks）→ 即便配了 thinking 也不发", async () => {
+    mockCreate.mockResolvedValue(mockStream([finishChunk("stop")]));
+
+    const provider = createOpenAICompatibleProvider(makeProvider());
+    await collectEvents(
+      provider.chat({
+        model: "test-model",
+        messages: [userMessage("Hi")],
+        thinking: { mode: "on" },
+      }),
+    );
+
+    const callArgs = mockCreate.mock.calls[0]?.[0];
+    expect(callArgs.thinking).toBeUndefined();
+  });
+});

@@ -12,7 +12,7 @@
  * - API Key 支持三种格式统一解析
  */
 
-import type { ModelInfo } from "@zhixing/core";
+import type { ModelInfo, ThinkingConfig } from "@zhixing/core";
 import type { ModelCapabilityOverride } from "./model-capability.js";
 
 // ─── 协议类型 ───
@@ -47,6 +47,22 @@ export type Protocol = "openai-compatible" | "anthropic-messages";
 export type UsageDialect = "auto" | "openai-standard" | "deepseek";
 
 /**
+ * 思考控制方言 —— adapter 据此把已校验的 ChatRequest.thinking 写成该 provider
+ * 原生思考参数（deepseek 的 thinking+reasoning_effort / qwen 的
+ * enable_thinking+thinking_budget / glm·kimi 的 thinking.type / anthropic 的
+ * thinking budget）。新增 provider 方言只加一个枚举值 + 对应 adapter 映射，
+ * 与 usageDialect 同为方言派发机制。
+ * "none" = 不发送任何思考参数（未知 provider 安全兜底）。
+ */
+export type ThinkingDialect =
+  | "none"
+  | "deepseek"
+  | "qwen"
+  | "glm"
+  | "kimi"
+  | "anthropic";
+
+/**
  * 同协议下不同服务商的行为差异。
  * 预设中包含默认 quirks，自定义 provider 使用最保守的默认值。
  *
@@ -55,6 +71,8 @@ export type UsageDialect = "auto" | "openai-standard" | "deepseek";
  * 当前 quirks 接口混合了两类字段:
  *   - 协议无关: supportsTools / supportsThinking / supportsStreamUsage
  *   - 协议特定(仅 openai-compatible 消费): maxTokensField / usageDialect
+ *   - 跨协议方言派发: thinkingDialect(openai-compatible 多方言 + anthropic 自有，
+ *     不计入"协议特定"计数，独立的方言派发维度)
  *
  * 这是延续的工程惯例 —— 协议特定字段对其他协议路径无害(由各协议适配器选择性
  * 消费,anthropic-messages 不读这些字段)。优势是 ResolvedProvider.quirks 单
@@ -91,6 +109,12 @@ export interface ProviderQuirks {
    * 以获得最短解析路径与可预测性。详见 UsageDialect。
    */
   usageDialect: UsageDialect;
+  /**
+   * 思考控制方言 —— adapter 据此把已校验的 ChatRequest.thinking 写成该
+   * provider 原生思考参数；与 usageDialect 同为方言派发机制。
+   * 默认 "none"：不发送任何思考参数（安全兜底）。
+   */
+  thinkingDialect: ThinkingDialect;
 }
 
 /** 最保守的 quirks 默认值，用于未知自定义 provider */
@@ -100,6 +124,7 @@ export const DEFAULT_QUIRKS: ProviderQuirks = {
   supportsThinking: false,
   supportsTools: true,
   usageDialect: "auto",
+  thinkingDialect: "none",
 };
 
 // ─── Provider 预设 ───
@@ -272,6 +297,11 @@ export interface MessagingChannelEntry {
 export interface LLMRoleConfig {
   provider: string;
   model: string;
+  /**
+   * 该角色的思考控制配置 —— 形态由所选 model 的 ThinkingControl 决定。
+   * 缺省 = 不发送思考参数（服务端用其自身默认，安全兜底）。
+   */
+  thinking?: ThinkingConfig;
 }
 
 /**

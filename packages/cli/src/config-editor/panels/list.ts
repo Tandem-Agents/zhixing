@@ -9,6 +9,7 @@
  */
 
 import { getPreset } from "@zhixing/providers";
+import type { ThinkingConfig, ThinkingControl } from "@zhixing/core";
 import type {
   KeyEvent,
   PanelAction,
@@ -18,8 +19,10 @@ import type {
 import { Renderer } from "../ui/render.js";
 import {
   readModelRole,
+  readModelThinking,
   readProviderEntry,
   writeModelRole,
+  writeModelThinking,
 } from "../state.js";
 import { SUPPORTED_PROVIDERS } from "../../registries/index.js";
 import {
@@ -129,12 +132,23 @@ function buildModelListMeta(
       description,
       current: modelId === userSelectedModel,
       onEnter: (s) => {
-        const next = writeModelRole(
-          s,
-          descriptor.role,
-          currentRole?.provider ?? descriptor.providerId,
-          modelId,
-        );
+        const providerId = currentRole?.provider ?? descriptor.providerId;
+        const next = writeModelRole(s, descriptor.role, providerId, modelId);
+        // model 选定后：有可配思考形态 → 进入思考控制步骤；none/无元数据 →
+        // 直接返回（writeModelRole 已丢弃旧 model 的残留 thinking）。
+        const control = resolveThinkingControl(descriptor.providerId, modelId);
+        if (control && control.type !== "none") {
+          return {
+            type: "navigate",
+            state: next,
+            panel: {
+              kind: "thinking-config",
+              role: descriptor.role,
+              providerId: descriptor.providerId,
+              model: modelId,
+            },
+          };
+        }
         return { type: "pop", state: next };
       },
     };
@@ -162,6 +176,109 @@ function buildModelListMeta(
   };
 }
 
+/**
+ * 解析某 model 的思考控制元数据 —— 唯一来源是 preset per-model 声明
+ * （knownModels[*].thinkingControl）。自定义 / 未声明 model 无元数据 →
+ * undefined，调用方按 none 处理（不暴露思考配置步骤，与规格一致）。
+ */
+function resolveThinkingControl(
+  providerId: string,
+  modelId: string,
+): ThinkingControl | undefined {
+  return getPreset(providerId)?.knownModels?.find((m) => m.id === modelId)
+    ?.thinkingControl;
+}
+
+/** 两个 ThinkingConfig 是否等价（用于列表 ● 当前项标记） */
+function sameThinking(
+  a: ThinkingConfig | undefined,
+  b: ThinkingConfig,
+): boolean {
+  if (!a || a.mode !== b.mode) return false;
+  if (a.mode === "effort" && b.mode === "effort") return a.effort === b.effort;
+  if (a.mode === "budget" && b.mode === "budget") return a.budget === b.budget;
+  return true;
+}
+
+function buildThinkingConfigMeta(
+  state: WorkingState,
+  descriptor: Extract<PanelDescriptor, { kind: "thinking-config" }>,
+): ListPanelMeta {
+  const control = resolveThinkingControl(descriptor.providerId, descriptor.model);
+  const current = readModelThinking(state, descriptor.role);
+
+  // 选定一个固定形态 → 写入并返回 model-list（pop）
+  const pick = (thinking: ThinkingConfig) => (s: WorkingState): PanelAction => ({
+    type: "pop",
+    state: writeModelThinking(s, descriptor.role, thinking),
+  });
+
+  const items: ListItem[] = [
+    {
+      label: "关闭思考",
+      description: "不发送思考参数中的开启项（off）",
+      current: sameThinking(current, { mode: "off" }),
+      onEnter: pick({ mode: "off" }),
+    },
+  ];
+
+  let description = "选择该模型的思考控制；带 ● 的是当前已选";
+
+  if (control?.type === "toggle") {
+    items.push({
+      label: "开启思考",
+      description: "开启模型思考（on）",
+      current: sameThinking(current, { mode: "on" }),
+      onEnter: pick({ mode: "on" }),
+    });
+  } else if (control?.type === "effort") {
+    items.push({
+      label: "开启（服务端默认强度）",
+      current: sameThinking(current, { mode: "on" }),
+      onEnter: pick({ mode: "on" }),
+    });
+    for (const effort of control.efforts) {
+      items.push({
+        label: `强度 ${effort}`,
+        description: effort === control.default ? "官方默认档" : undefined,
+        current: sameThinking(current, { mode: "effort", effort }),
+        onEnter: pick({ mode: "effort", effort }),
+      });
+    }
+  } else if (control?.type === "budget") {
+    if (control.range) {
+      description = `选择该模型的思考控制；自定义预算需在 ${control.range[0]}–${control.range[1]} token 内`;
+    }
+    items.push({
+      label: "开启（服务端默认预算）",
+      current: sameThinking(current, { mode: "on" }),
+      onEnter: pick({ mode: "on" }),
+    });
+    items.push({
+      label: "自定义预算…",
+      description: "输入思考 token 预算",
+      current: current?.mode === "budget",
+      onEnter: (s) => ({
+        type: "navigate",
+        state: s,
+        panel: {
+          kind: "thinking-budget",
+          role: descriptor.role,
+          providerId: descriptor.providerId,
+          model: descriptor.model,
+        },
+      }),
+    });
+  }
+
+  return {
+    title: `${descriptor.model} · 思考控制`,
+    description,
+    hasCurrentConcept: true,
+    items,
+  };
+}
+
 function resolveListMeta(
   state: WorkingState,
   descriptor: PanelDescriptor,
@@ -171,6 +288,8 @@ function resolveListMeta(
       return buildProviderListMeta(state, descriptor);
     case "model-list":
       return buildModelListMeta(state, descriptor);
+    case "thinking-config":
+      return buildThinkingConfigMeta(state, descriptor);
     default:
       return null;
   }

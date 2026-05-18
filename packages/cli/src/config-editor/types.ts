@@ -37,6 +37,13 @@ export type PanelDescriptor =
   | { kind: "model-list"; role: ModelRole; providerId: string }
   /** L5：添加自定义模型（输入 model id） */
   | { kind: "add-model"; role: ModelRole; providerId: string }
+  /**
+   * L5：model 选定后的思考控制步骤——由所选 model 的 ThinkingControl
+   * 元数据驱动渲染（toggle/effort/budget），写 config.llm.<role>.thinking。
+   */
+  | { kind: "thinking-config"; role: ModelRole; providerId: string; model: string }
+  /** L6：自定义思考预算（输入 token 数，budget 形态用） */
+  | { kind: "thinking-budget"; role: ModelRole; providerId: string; model: string }
   /** L3 (messaging)：channel 配置（appId + appSecret + 启用按钮） */
   | { kind: "channel-config"; channelId: string };
 
