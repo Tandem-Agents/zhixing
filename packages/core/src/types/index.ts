@@ -37,6 +37,7 @@ export type {
   ChatRequest,
   ThinkingConfig,
   ThinkingControl,
+  ResolvedRoleThinking,
   LLMProvider,
   LLMRole,
   LLMRoles,

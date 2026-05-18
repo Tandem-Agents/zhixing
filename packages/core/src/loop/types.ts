@@ -15,6 +15,7 @@ import type {
   ChatRequest,
   LLMProvider,
   LLMRoles,
+  ResolvedRoleThinking,
   StopReason,
   StreamEvent,
   ThinkingConfig,
@@ -93,6 +94,12 @@ export interface AgentLoopParams {
    * 见 research/design/specifications/secondary-llm-capability.md §三。
    */
   llmRoles?: LLMRoles;
+  /**
+   * 各角色装配期已解析的思考控制 —— 与 llmRoles 平行、同路径注入到
+   * ToolExecutionContext.roleThinking，让工具在 I/O 边界调对应角色时遵循
+   * 用户思考配置。可选——缺省时工具不发思考参数（安全兜底）。
+   */
+  roleThinking?: ResolvedRoleThinking;
   /**
    * stream 看门狗策略 —— 控制 LLM 流 chunk 间隔的 idle-timer 行为。
    *

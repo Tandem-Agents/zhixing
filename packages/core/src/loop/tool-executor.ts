@@ -62,7 +62,7 @@
 import type { IEventBus } from "../events/types.js";
 import type { AgentEventMap } from "../types/agent-events.js";
 import { isUserFacingError } from "../types/errors.js";
-import type { LLMRoles } from "../types/llm.js";
+import type { LLMRoles, ResolvedRoleThinking } from "../types/llm.js";
 import type { ToolResultBlock, ToolUseBlock } from "../types/messages.js";
 import type {
   ToolDefinition,
@@ -87,6 +87,11 @@ interface ExecuteToolCallsParams {
    * 可不传，consumer 必须显式分支处理 !ctx.llm（见 ToolExecutionContext.llm 注释）。
    */
   llmRoles?: LLMRoles;
+  /**
+   * 各角色装配期已解析的思考控制，与 llmRoles 平行注入到 ctx.roleThinking。
+   * 可选——缺省时工具调对应角色不发思考参数（安全兜底）。
+   */
+  roleThinking?: ResolvedRoleThinking;
 }
 
 /**
@@ -128,6 +133,7 @@ async function* runSerialBatch(
     abortSignal,
     eventBus,
     llmRoles,
+    roleThinking,
   } = params;
 
   const results: ToolResultBlock[] = [];
@@ -191,6 +197,7 @@ async function* runSerialBatch(
       workingDirectory,
       abortSignal,
       llm: llmRoles,
+      roleThinking,
     };
 
     try {
@@ -342,6 +349,7 @@ async function* runParallelBatch(
     abortSignal,
     eventBus,
     llmRoles,
+    roleThinking,
   } = params;
 
   // 入口 abort guard:与串行循环顶 guard 等价,但批次粒度
@@ -370,6 +378,7 @@ async function* runParallelBatch(
     workingDirectory,
     abortSignal,
     llm: llmRoles,
+    roleThinking,
   };
 
   const startTime = Date.now();

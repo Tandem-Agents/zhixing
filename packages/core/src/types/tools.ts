@@ -15,7 +15,7 @@ import type {
   DeliveryTarget,
   OutboundContent,
 } from "../channels/types.js";
-import type { LLMRoles } from "./llm.js";
+import type { LLMRoles, ResolvedRoleThinking } from "./llm.js";
 import type { BoundaryCrossing } from "../security/types.js";
 
 // ─── Turn 上下文（ADR-007 Phase 2） ───
@@ -186,6 +186,16 @@ export interface ToolExecutionContext {
    * 禁止 silent return / 抛 throw 给 secure-executor 通用 catch。
    */
   llm?: LLMRoles;
+
+  /**
+   * 各角色装配期已解析的思考控制 —— 与 {@link llm} 平行、同路径注入。
+   *
+   * 工具在 I/O 边界调 `ctx.llm.<role>.chat` 时，附带
+   * `thinking: ctx.roleThinking?.<role>` 即让该次调用遵循用户对该角色的思考
+   * 配置（已过校验兜底）。缺省（单测 / 未注入路径）→ 不发思考参数，与
+   * `ctx.llm` 缺省同款 graceful degrade 语义。
+   */
+  roleThinking?: ResolvedRoleThinking;
 }
 
 /**

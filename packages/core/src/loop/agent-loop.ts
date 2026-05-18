@@ -456,6 +456,7 @@ export async function* runAgentLoop(
         abortSignal: controller.signal,
         eventBus,
         llmRoles: params.llmRoles,
+        roleThinking: params.roleThinking,
       });
 
       // ── Tool 阶段 abort → 调 cleanup 注入 placeholder + 退出 ──

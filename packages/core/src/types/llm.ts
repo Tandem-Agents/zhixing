@@ -446,3 +446,21 @@ export interface LLMRoles {
   light: LLMRole;
   power: LLMRole;
 }
+
+/**
+ * 装配期已解析的 per-role 思考控制 —— 与 {@link LLMRoles} 平行的结构，
+ * **携带于角色实例之外**而非烤进 LLMRole。
+ *
+ * 为什么不放进 LLMRole：LLMRole 是 provider 抽象，刻意保持 config 无关
+ * （思考控制经各调用点显式参数注入，不在无状态对象内读 config）。本结构由
+ * 装配期对每个角色跑一次校验+兜底（resolveRoleThinking）后产出，沿与
+ * llmRoles 同一通道下传，让跨角色扇出的消费方（如工具在 I/O 边界调
+ * ctx.llm.light）能拿到该角色的生效思考配置。
+ *
+ * 每个字段缺省 = 该角色不发送思考参数（服务端默认，安全兜底）。
+ */
+export interface ResolvedRoleThinking {
+  main?: ThinkingConfig;
+  light?: ThinkingConfig;
+  power?: ThinkingConfig;
+}

@@ -24,6 +24,7 @@ import {
   type IToolArgumentExtractor,
   type LLMRole,
   type MutableToolBoundaryRegistry,
+  type ResolvedRoleThinking,
   type ThinkingConfig,
   type ToolDefinition,
   type TurnContext,
@@ -509,10 +510,12 @@ export async function createAgentRuntime(
   );
 
   // 思考控制装配期一次性解析（runtime 生命周期内 config + 解析后的 role 均不变，
-  // 无需 per-run 重算）。各 LLM 调用点按其实际 role 复用：
-  //   - mainThinking ：主对话 runAgentLoop + 段切换摘要 segmentStreamFactory
-  //     + Task 子 agent（子复用父 main provider+model，故继承 main 思考配置）
+  // 无需 per-run 重算）。对三角色各跑一次校验+兜底，组成单一规范对象：
+  //   - mainThinking ：runAgentLoop 主对话 loop 参数 + 段切换摘要
+  //     segmentStreamFactory（二者均走 roles.main 单 model）
   //   - lightThinking：压缩 / flush createCompactionFlush（走 roles.light）
+  //   - roleThinking ：三角色聚合，沿 llmRoles 同路径下传到 ToolExecutionContext，
+  //     供工具在 I/O 边界按所用角色取生效思考配置；Task 子 agent 整体继承
   const mainThinking = resolveRoleThinking(
     roles.main,
     config.llm?.main?.thinking,
@@ -521,13 +524,18 @@ export async function createAgentRuntime(
     roles.light,
     config.llm?.light?.thinking,
   );
+  const roleThinking: ResolvedRoleThinking = {
+    main: mainThinking,
+    light: lightThinking,
+    power: resolveRoleThinking(roles.power, config.llm?.power?.thinking),
+  };
 
   let tools: ToolDefinition[] = baseTools;
   if (profile.enabledTools.includes("Task")) {
     const taskTool = createTaskTool({
       provider: roles.main.provider,
       model: roles.main.model,
-      thinking: mainThinking,
+      roleThinking,
       llmRoles: roles,
       securityPipeline,
       workspace: workspace.path,
@@ -1019,6 +1027,9 @@ export async function createAgentRuntime(
           },
           contextManager: contextEngine,
           llmRoles: roles,
+          // 各角色生效思考配置，沿 llmRoles 同路径注入到工具 ctx.roleThinking，
+          // 让工具 I/O 边界调对应角色（如 WebFetch 蒸馏走 light）遵循用户配置。
+          roleThinking,
           // 视图层 turn-context 注入由 agent-loop 在每次 LLM call 之前调用，
           // 让任务状态 / 定时任务 / 时间等动态信息在多 LLM call 之间实时刷新
           turnContextInjector,

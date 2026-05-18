@@ -223,6 +223,9 @@ async function distill(
         systemPrompt: DISTILL_SYSTEM_PROMPT,
         messages: [userMessage(buildDistillPrompt(parsed.url, content, parsed.prompt))],
         tools: [],
+        // 蒸馏是 light 角色的 I/O 边界调用 → 遵循用户对 light 的思考配置
+        // （装配期已校验兜底）。缺省 = 不发思考参数，服务端默认。
+        thinking: context.roleThinking?.light,
         ...(context.abortSignal !== undefined && { abortSignal: context.abortSignal }),
       }),
     );
