@@ -548,6 +548,126 @@ function buildSlashCommands(
         cliWriter.line(chalk.dim("\n  提示: /skills audit 查看健康报告\n"));
       },
     },
+    "/workscene": {
+      description:
+        "工作场景管理 (list, add <name> [--workdir <path>], remove <id> [--purge], rename <id> <name>, archive/unarchive <id>)",
+      handler: async (_state, args) => {
+        const reg = session.workSceneRegistry;
+        const tokens = args.trim().split(/\s+/).filter(Boolean);
+        const sub = (tokens[0] ?? "").toLowerCase();
+        const rest = tokens.slice(1);
+
+        const usage = (line: string) =>
+          cliWriter.line(chalk.red(`\n  用法: /workscene ${line}\n`));
+        const fail = (e: unknown) =>
+          cliWriter.line(
+            chalk.red(`\n  ✗ ${e instanceof Error ? e.message : String(e)}\n`),
+          );
+
+        if (sub === "add") {
+          const wdIdx = rest.indexOf("--workdir");
+          const name = (wdIdx === -1 ? rest : rest.slice(0, wdIdx))
+            .join(" ")
+            .trim();
+          const workdir = wdIdx === -1 ? undefined : rest[wdIdx + 1];
+          if (!name) return usage("add <name> [--workdir <path>]");
+          if (wdIdx !== -1 && !workdir)
+            return usage("add <name> --workdir <path>（缺 path）");
+          try {
+            const scene = await reg.add(
+              workdir ? { name, workdir } : { name },
+            );
+            cliWriter.line(
+              chalk.green(`\n  ✓ 已创建工作场景: ${chalk.cyan(scene.id)}`) +
+                (scene.workdir
+                  ? chalk.dim(` (workdir: ${scene.workdir})`)
+                  : "") +
+                "\n",
+            );
+          } catch (e) {
+            fail(e);
+          }
+          return;
+        }
+
+        if (sub === "" || sub === "list") {
+          const includeArchived = rest.includes("--archived");
+          const scenes = await reg.list({ includeArchived });
+          if (scenes.length === 0) {
+            cliWriter.line(
+              chalk.dim(
+                "\n  暂无工作场景。/workscene add <name> 创建。\n",
+              ),
+            );
+            return;
+          }
+          cliWriter.line(
+            `\n${chalk.bold("  工作场景")} ${chalk.dim(`(${scenes.length} 个)`)}`,
+          );
+          for (const s of scenes) {
+            const badge = s.archived ? chalk.dim("◌") : chalk.green("●");
+            const wd = s.workdir ? chalk.dim(` [${s.workdir}]`) : "";
+            cliWriter.line(
+              `  ${badge} ${chalk.cyan(s.id)} ${s.name}${wd}`,
+            );
+          }
+          cliWriter.line(chalk.dim("\n  提示: --archived 含已归档\n"));
+          return;
+        }
+
+        if (sub === "remove") {
+          const id = rest.find((t) => !t.startsWith("--"));
+          if (!id) return usage("remove <id> [--purge]");
+          const purge = rest.includes("--purge");
+          try {
+            await reg.remove(id, purge ? { purgeData: true } : undefined);
+            cliWriter.line(
+              chalk.green(`\n  ✓ 已移除登记: ${chalk.cyan(id)}`) +
+                chalk.dim(purge ? " (数据已清除)" : " (数据保留)") +
+                "\n",
+            );
+          } catch (e) {
+            fail(e);
+          }
+          return;
+        }
+
+        if (sub === "rename") {
+          const id = rest[0];
+          const name = rest.slice(1).join(" ").trim();
+          if (!id || !name) return usage("rename <id> <name>");
+          try {
+            const s = await reg.rename(id, name);
+            cliWriter.line(
+              chalk.green(`\n  ✓ 已重命名: ${chalk.cyan(s.id)} → ${s.name}\n`),
+            );
+          } catch (e) {
+            fail(e);
+          }
+          return;
+        }
+
+        if (sub === "archive" || sub === "unarchive") {
+          const id = rest[0];
+          if (!id) return usage(`${sub} <id>`);
+          try {
+            await reg.setArchived(id, sub === "archive");
+            cliWriter.line(
+              chalk.green(
+                `\n  ✓ 已${sub === "archive" ? "归档" : "取消归档"}: ${chalk.cyan(id)}\n`,
+              ),
+            );
+          } catch (e) {
+            fail(e);
+          }
+          return;
+        }
+
+        usage(
+          "<list|add|remove|rename|archive|unarchive> ...",
+        );
+      },
+    },
     "/journal": {
       description: "查看日志状态",
       handler: async () => {
@@ -1179,6 +1299,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       { name: "context", description: "上下文容量可视化", category: "info", legacyKey: "/context" },
       // ─ tools ─
       { name: "skills", description: "查看技能库", category: "tools", legacyKey: "/skills" },
+      { name: "workscene", description: "工作场景管理（增删改查/归档）", category: "tools", legacyKey: "/workscene" },
       { name: "journal", description: "查看日志状态", category: "tools", legacyKey: "/journal" },
       { name: "people", description: "查看关系网络", category: "tools", legacyKey: "/people" },
       { name: "compact", description: "手动触发上下文压缩", category: "tools", legacyKey: "/compact" },
