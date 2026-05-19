@@ -35,10 +35,12 @@ export interface RoleSpec {
  * 角色集定义。顺序即 config-editor 入口展示顺序。
  *
  * 文案语义：
- *   - light：后台杂活（上下文压缩 / WebFetch 蒸馏 / 工具结果摘要 / 子 agent
- *     返回压缩 / 入站分类），通常挑轻量便宜模型
- *   - power：编程等高难重活槽，模型档位由用户决定（即便塞弱模型也合法，名字
- *     表达的是"接重活"而非"模型很强"）；当前仅基础设施就位，不预绑调用点
+ *   - light：系统侧后台辅助任务（上下文压缩 / WebFetch 蒸馏 / 工具结果摘要 /
+ *     子 agent 返回压缩 / 入站分类等 I/O 边界净化），用户不直接调用，由
+ *     ContextEngine 与工具 ctx 注入消费；通常挑轻量便宜模型
+ *   - power：重活槽——工作场景主对话等高难任务，模型档位由用户决定（即便塞
+ *     弱模型也合法，名字表达的是"接重活"而非"模型很强"）；首个真实消费者是
+ *     work-mode（进入工作场景后 power 成为该场景的主对话循环）
  */
 export const ROLE_SPECS = [
   {
@@ -54,7 +56,7 @@ export const ROLE_SPECS = [
     required: false,
     fallbackTo: "main",
     labelZh: "轻量模型",
-    parenZh: "可选 · 轻量杂活，未配则沿用主模型",
+    parenZh: "可选 · 系统侧后台辅助任务",
     missingStatusZh: "未启用（默认沿用主模型）",
   },
   {
@@ -62,7 +64,7 @@ export const ROLE_SPECS = [
     required: false,
     fallbackTo: "main",
     labelZh: "强力模型",
-    parenZh: "可选 · 编程等重活，未配则沿用主模型",
+    parenZh: "可选 · 进入工作场景时使用",
     missingStatusZh: "未启用（默认沿用主模型）",
   },
 ] as const satisfies readonly RoleSpec[];
