@@ -42,7 +42,10 @@ describe("checkModel", () => {
     expect(missing.some((m) => m.path.endsWith(".apiKey"))).toBe(false);
   });
 
-  it("light 异 provider 且缺凭证 → 独立报", () => {
+  it("light 异 provider 且缺凭证 → 不进阻断清单（可选角色永不阻断）", () => {
+    // checkModel 只覆盖 required(main)。可选角色缺配回退 main（resolve.ts
+    // 记录降级 + 边缘层告警），不产生 blocking issue —— 否则一个选填项会
+    // 卡住启动/完成。其配置完善度由 section 层就地暗色派生，不在此。
     const missing = checkModel(
       {
         llm: {
@@ -52,16 +55,16 @@ describe("checkModel", () => {
       },
       { providers: { siliconflow: { apiKey: "sk-sf" } } },
     );
-    expect(missing).toHaveLength(1);
-    expect(missing[0]?.path).toBe("credentials.providers.anthropic.apiKey");
+    expect(missing).toEqual([]);
   });
 
-  it("light 同 provider 时复用 main 凭证（不重复报）", () => {
+  it("可选角色无论同/异 provider 都不进阻断清单", () => {
     const missing = checkModel(
       {
         llm: {
           main: { provider: "siliconflow", model: "Pro/M1" },
           light: { provider: "siliconflow", model: "Pro/M2" },
+          power: { provider: "anthropic", model: "claude-haiku" },
         },
       },
       { providers: { siliconflow: { apiKey: "sk-sf" } } },
@@ -91,7 +94,7 @@ describe("checkModel", () => {
     expect(fields).toContainEqual({ field: "model", fieldLabel: "模型" });
   });
 
-  it("role 字段存在且与角色匹配（sections 用此过滤）", () => {
+  it("role 字段存在且恒为 main（sections 用此过滤；可选角色不进清单）", () => {
     const missing = checkModel(
       {
         llm: {
@@ -99,10 +102,11 @@ describe("checkModel", () => {
           light: { provider: "anthropic", model: "claude-haiku" },
         },
       },
-      { providers: { siliconflow: { apiKey: "sk-sf" } } },
+      {}, // 连 main 的 siliconflow key 也缺
     );
-    expect(missing).toHaveLength(1);
-    expect(missing[0]?.role).toBe("light");
+    // 即便 light 异 provider 也无凭证，清单里也只有 main 的阻断项
+    expect(missing.every((m) => m.role === "main")).toBe(true);
+    expect(missing.some((m) => m.role === "light")).toBe(false);
   });
 });
 

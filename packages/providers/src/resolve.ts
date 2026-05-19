@@ -117,11 +117,30 @@ export interface ResolvedLLMRole {
   model: string;
 }
 
+/**
+ * 一条"可选角色降级"记录。
+ *
+ * 显式配置的可选角色（light/power）无法解析（缺凭证 / baseUrl / protocol 等）
+ * 时不 fail-fast —— 可选角色【永不阻断流程】是产品硬约束。改为回退 main 并
+ * 在此如实记录，边缘层据此打印一次**可见的非致命告警**：既不阻断、又不静默
+ * 掩盖用户期望的多 provider 架构（保留"可见性"这一原始关切，去掉"致命"）。
+ */
+export interface RoleDegradation {
+  /** 降级的可选角色 */
+  role: "light" | "power";
+  /** 用户原本的配置——告警如实回放其意图，便于定位 */
+  configured: { provider: string; model: string };
+  /** 无法解析的简短原因 */
+  reason: string;
+}
+
 /** 多角色解析结果（键集与 role-spec.ts ROLE_SPECS / core LLMRoles 对应）。 */
 export interface ResolvedLLMRoles {
   main: ResolvedLLMRole;
   light: ResolvedLLMRole;
   power: ResolvedLLMRole;
+  /** 可选角色降级记录；空数组 = 无降级。 */
+  degradations: RoleDegradation[];
 }
 
 /**
@@ -148,10 +167,17 @@ export function resolveLLMRoles(
 
   // main 先解析——辅助角色未配置时回落到它（ROLE_SPECS 中 fallbackTo: "main"）。
   const main = resolveMainRole(config.llm.main, credentials);
-  const light = resolveAuxRole(config.llm.light, credentials, main);
-  const power = resolveAuxRole(config.llm.power, credentials, main);
+  const light = resolveAuxRole(config.llm.light, credentials, main, "light");
+  const power = resolveAuxRole(config.llm.power, credentials, main, "power");
 
-  return { main, light, power };
+  return {
+    main,
+    light: light.role,
+    power: power.role,
+    degradations: [light.degradation, power.degradation].filter(
+      (d): d is RoleDegradation => d != null,
+    ),
+  };
 }
 
 function resolveMainRole(
@@ -170,7 +196,8 @@ function resolveAuxRole(
   explicit: LLMRoleConfig | undefined,
   credentials: ZhixingCredentials,
   fallbackRole: ResolvedLLMRole,
-): ResolvedLLMRole {
+  roleId: "light" | "power",
+): { role: ResolvedLLMRole; degradation?: RoleDegradation } {
   // 没显式配置 → 用 fallbackRole（main）实例 + 其 model 兜底。
   //
   // 这不是"降级"，是合理的未配置默认：
@@ -185,7 +212,9 @@ function resolveAuxRole(
   // 错误）—— 知行 provider 中立，预设 8 家服务商，不替用户挑选其中之一作为
   // 辅助角色默认。用户想专门化就显式配 llm.light / llm.power；不配就 main 兜底。
   if (!explicit) {
-    return { resolved: fallbackRole.resolved, model: fallbackRole.model };
+    return {
+      role: { resolved: fallbackRole.resolved, model: fallbackRole.model },
+    };
   }
 
   // 显式配置：用户的明确意图。
@@ -194,13 +223,31 @@ function resolveAuxRole(
   // 复用的只是协议配置（baseUrl/apiKey/connection pool 等 stateless 资源），
   // conversation 仍然独立，隔离性不破坏。
   if (explicit.provider === fallbackRole.resolved.id) {
-    return { resolved: fallbackRole.resolved, model: explicit.model };
+    return {
+      role: { resolved: fallbackRole.resolved, model: explicit.model },
+    };
   }
 
-  // 不同 provider id：独立解析，失败 fail-fast（不静默降级到 main，避免把
-  // "用户期望的多 provider 架构"伪装成单 provider 在跑）。
-  const resolved = resolveProvider(explicit.provider, credentials);
-  return { resolved, model: explicit.model };
+  // 不同 provider id：独立解析。可选角色【永不阻断流程】——解析失败（缺凭证
+  // / baseUrl / protocol 等配置类问题）不 fail-fast，回退 main 并记录降级，
+  // 由边缘层可见告警（不静默掩盖用户期望的多 provider 架构）。非配置类异常
+  // 是真实 bug，原样抛出，不掩盖。
+  try {
+    const resolved = resolveProvider(explicit.provider, credentials);
+    return { role: { resolved, model: explicit.model } };
+  } catch (err) {
+    if (err instanceof ProviderConfigError) {
+      return {
+        role: { resolved: fallbackRole.resolved, model: fallbackRole.model },
+        degradation: {
+          role: roleId,
+          configured: { provider: explicit.provider, model: explicit.model },
+          reason: "凭证或必要配置缺失",
+        },
+      };
+    }
+    throw err;
+  }
 }
 
 function buildMissingMainConfigMessage(): string {

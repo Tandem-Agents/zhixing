@@ -1,10 +1,15 @@
 /**
- * 主/辅模型角色基础配置缺失检测——纯函数。**单一规则源**。
+ * 模型角色【阻断性】配置缺失检测——纯函数。**单一规则源**。
  *
- * 「必要字段」= 没有它就无法启动 LLM 调用：
+ * 范围只覆盖 required 角色（main）。这是刻意的单一权威：可选角色
+ * （light/power）【永不阻断流程】——它们缺配时回退 main（resolve.ts 记录
+ * 降级 + 边缘层可见告警），不产生 blocking issue。可选角色配置是否完善是
+ * **咨询性**信息，由 section 层就地按 provider key 真值派生显示（暗色），
+ * 不进本检测。把可选角色塞进阻断清单会让一个选填项卡住启动 / 完成。
+ *
+ * 「必要字段」= 没有它 main 就无法启动 LLM 调用：
  *   - config.llm.main.provider / .model
  *   - credentials.providers[main.provider].apiKey
- *   - 显式配辅助角色（light/power）且 provider 不同时：credentials.providers[<aux>.provider].apiKey
  *
  * 输出 `ModelIssue[]` 同时服务三类 caller：
  *   - boot 阶段（startup.ts）：用 path 做 non-tty fail-fast 报错；用 label 做用户提示
@@ -14,7 +19,7 @@
  * 这样"缺什么字段"只在此处定义一次——避免 sections/entity/checks 三处漂移。
  */
 
-import { AUX_ROLE_SPECS, type ZhixingConfig, type ZhixingCredentials } from "@zhixing/providers";
+import type { ZhixingConfig, ZhixingCredentials } from "@zhixing/providers";
 import type { ModelRole } from "../types.js";
 
 /**
@@ -93,31 +98,21 @@ export function checkModel(
     });
   }
 
-  // 显式配置的辅助角色（light/power）且 provider 不同于 main 时需要独立 key。
-  // 遍历 ROLE_SPECS 中的辅助角色——新增角色零改动；未配置/同 main provider/
-  // 已有 key 的角色不报。
-  for (const spec of AUX_ROLE_SPECS) {
-    const aux = config.llm?.[spec.id];
-    if (
-      aux
-      && mainProvider
-      && aux.provider !== mainProvider
-      && !hasApiKey(credentials, aux.provider)
-    ) {
-      issues.push({
-        role: spec.id,
-        field: "apiKey",
-        providerId: aux.provider,
-        path: `credentials.providers.${aux.provider}.apiKey`,
-        label: `${spec.labelZh} - ${aux.provider} 的 API Key`,
-        fieldLabel: "API Key",
-      });
-    }
-  }
+  // 可选角色（light/power）不进阻断清单——它们永不阻断流程，缺配时回退
+  // main（见 resolve.ts 降级记录 + 边缘层告警）。其配置完善度是咨询性信息，
+  // 由 section 层就地派生暗色显示，不在此产出 issue。
 
   return issues;
 }
 
-function hasApiKey(credentials: ZhixingCredentials, providerId: string): boolean {
+/**
+ * 某 provider 是否已有 API Key —— "该 provider 能否真正发起请求"的**单一真值
+ * 谓词**。checkModel（生成可执行 issue 清单，对同 provider 去重）与 sections
+ * 的每行就绪态派生共用此谓词，杜绝两处各自判断 key 而漂移。
+ */
+export function hasApiKey(
+  credentials: ZhixingCredentials,
+  providerId: string,
+): boolean {
   return Boolean(credentials.providers?.[providerId]?.apiKey);
 }

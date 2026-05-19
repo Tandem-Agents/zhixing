@@ -80,6 +80,7 @@ import {
   getModelCapabilityOverride,
   resolveModelCapability,
   resolveWorkspace,
+  ROLE_SPECS,
   type ResolvedWorkspace,
   type WorkspaceDirStatus,
 } from "@zhixing/providers";
@@ -422,6 +423,19 @@ export async function createAgentRuntime(
   options: CreateAgentRuntimeOptions,
 ): Promise<AgentRuntime> {
   const { roles, config, resolvedRoles } = createProviderRoles();
+
+  // 可选角色降级（显式配了 light/power 但其 provider 凭证/配置缺失）——
+  // 已回退 main，不阻断启动；此处打一次可见的非致命告警，保留"不静默掩盖
+  // 用户期望的多 provider 架构"这一关切（与上方思考配置降级同址同范式）。
+  // `?? []` 是刻意的韧性边界：降级告警是最佳努力诊断，绝不能因其缺失/异常
+  // 反过来令 agent 创建崩溃（真实 resolveLLMRoles 恒返回数组，仅测试替身可能省略）。
+  for (const d of resolvedRoles.degradations ?? []) {
+    const label =
+      ROLE_SPECS.find((s) => s.id === d.role)?.labelZh ?? d.role;
+    console.warn(
+      `[zhixing] ${label} 配为 ${d.configured.provider} · ${d.configured.model} 但${d.reason}，已回退主模型（不影响启动；如需该角色请在配置中补全或移除该段）`,
+    );
+  }
 
   // 主对话槽位 —— 决定主对话语义六处取哪个 role（capability / Task
   // provider+model / budget resolveModelInfo / 返回 providerId+model /

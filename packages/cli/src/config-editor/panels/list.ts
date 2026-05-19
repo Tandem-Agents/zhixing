@@ -131,8 +131,18 @@ function buildModelListMeta(
       description,
       current: modelId === userSelectedModel,
       onEnter: (s) => {
-        const providerId = currentRole?.provider ?? descriptor.providerId;
-        const next = writeModelRole(s, descriptor.role, providerId, modelId);
+        // provider 取 descriptor.providerId —— 用户正是经 provider-list → 该
+        // provider 的 provider-config → model-list 进来的，这是权威上下文。
+        // 不读 currentRole.provider：那是该角色【已配】的旧 provider，与本次
+        // 浏览的 provider 不同时（换服务商）会把 model 错写到旧 provider 下，
+        // 导致选择永不生效。下方 thinkingControl 解析与 thinking-config 跳转
+        // 一直用 descriptor.providerId，此处同源。
+        const next = writeModelRole(
+          s,
+          descriptor.role,
+          descriptor.providerId,
+          modelId,
+        );
         // model 选定后：有可配思考形态 → 进入思考控制步骤；none/无元数据 →
         // 直接返回（writeModelRole 已丢弃旧 model 的残留 thinking）。
         const control = resolveThinkingControl(descriptor.providerId, modelId);

@@ -48,6 +48,7 @@ export {
 export type {
   ResolvedLLMRole,
   ResolvedLLMRoles,
+  RoleDegradation,
 } from "./resolve.js";
 
 // 角色集注册表（角色集单一事实源）

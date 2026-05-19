@@ -37,11 +37,17 @@ import {
   type AgentEventMap,
   type ToolDefinition,
 } from "@zhixing/core";
+import type { RoleDegradation } from "@zhixing/providers";
 
 // ─── hoisted ref:让 vi.mock 工厂在 import 之前能引用 ───
 
-const { providerRef, powerRoleRef, decorateCalls, decorateDisposes } =
-  vi.hoisted(() => ({
+const {
+  providerRef,
+  powerRoleRef,
+  degradationsRef,
+  decorateCalls,
+  decorateDisposes,
+} = vi.hoisted(() => ({
     providerRef: { current: null as MockLLMProvider | null },
     // opt-in 差异化 power 角色：默认 null = power 与 main 折叠（fallback 语义，
     // 既有用例零影响）；设值时 power 用独立 model + provider，让 primaryRole
@@ -49,6 +55,9 @@ const { providerRef, powerRoleRef, decorateCalls, decorateDisposes } =
     powerRoleRef: {
       current: null as null | { model: string; provider: MockLLMProvider },
     },
+    // opt-in 可选角色降级注入：默认空 = 无降级（既有用例零影响）；设值时
+    // mock 的 resolvedRoles.degradations 返回它，驱动边缘层告警分支可断言。
+    degradationsRef: { current: [] as RoleDegradation[] },
     decorateCalls: [] as Array<IEventBus<AgentEventMap>>,
     decorateDisposes: [] as Array<() => void>,
   }));
@@ -102,6 +111,7 @@ vi.mock("@zhixing/providers", async (importOriginal) => {
           main: resolvedRole,
           light: resolvedRole,
           power: powerResolved,
+          degradations: degradationsRef.current,
         } as never,
       };
     },
@@ -124,6 +134,7 @@ const { mainProfile } = await import("../../profile/default-profiles.js");
 beforeEach(() => {
   providerRef.current = null;
   powerRoleRef.current = null;
+  degradationsRef.current = [];
   decorateCalls.length = 0;
   decorateDisposes.length = 0;
 });
@@ -983,5 +994,44 @@ describe("createAgentRuntime · primaryRole 槽位", () => {
 
     expect(mainProvider.calls.length).toBeGreaterThan(0);
     expect(powerProvider.calls.length).toBe(0);
+  });
+});
+
+// ─── 契约: 可选角色降级 → 边缘层可见非致命告警 ───
+
+describe("createAgentRuntime · 可选角色降级可见告警", () => {
+  it("degradations 非空 → [zhixing] console.warn 含角色中文名 + 原配置，且不抛", async () => {
+    degradationsRef.current = [
+      {
+        role: "light",
+        configured: { provider: "openai", model: "gpt-4o-mini" },
+        reason: "凭证或必要配置缺失",
+      },
+    ];
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      // 降级永不阻断 agent 创建
+      const runtime = await createAgentRuntime({});
+      expect(runtime).toBeDefined();
+
+      const msg = warn.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(msg).toContain("[zhixing]");
+      expect(msg).toContain("轻量模型"); // ROLE_SPECS light.labelZh（单一事实源）
+      expect(msg).toContain("openai · gpt-4o-mini"); // 如实回放用户原配置
+      expect(msg).toContain("已回退主模型");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("degradations 为空 → 不产生降级告警", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await createAgentRuntime({});
+      const msg = warn.mock.calls.map((c) => String(c[0])).join("\n");
+      expect(msg).not.toContain("已回退主模型");
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

@@ -9,7 +9,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { createInitialState } from "../state.js";
+import { createInitialState, writeModelRole } from "../state.js";
 import { handleListPanelKey } from "../panels/list.js";
 import { handleThinkingBudgetPanelKey } from "../panels/input.js";
 import type { PanelDescriptor, WorkingState } from "../types.js";
@@ -58,6 +58,32 @@ describe("model-list 选定后导航", () => {
       expect(action.state.config.llm?.main?.model).toBe("deepseek-v4-flash");
       expect(action.state.config.llm?.main?.thinking).toBeUndefined();
     }
+  });
+});
+
+describe("model-list 选定 · provider 取 descriptor 权威上下文（回归）", () => {
+  it("角色已配旧 provider，在另一 provider 列表选 model → 切换到 descriptor.providerId", () => {
+    // 复现：模板默认 main=deepseek；用户改选 siliconflow 后进 siliconflow
+    // 列表选 model。旧实现 `currentRole?.provider ?? descriptor.providerId`
+    // 会把 model 错写到陈旧的 deepseek 下，导致 siliconflow 侧永远「待选」。
+    // 这里反向布置（已配 siliconflow，进 deepseek 列表选）等价验证同一根因。
+    const stale = writeModelRole(
+      createInitialState({}, {}),
+      "main",
+      "siliconflow",
+      "deepseek-ai/DeepSeek-V4-Flash",
+    );
+    const { action } = enterAt(stale, modelListDesc, 0); // modelListDesc.providerId = deepseek
+
+    const main =
+      action.type === "navigate"
+        ? action.state.config.llm?.main
+        : action.type === "pop"
+          ? action.state.config.llm?.main
+          : undefined;
+    // provider 必须切到用户当前浏览的 deepseek（descriptor.providerId），
+    // 不得停留在陈旧的 siliconflow；model 为所选项。
+    expect(main).toEqual({ provider: "deepseek", model: "deepseek-v4-pro" });
   });
 });
 

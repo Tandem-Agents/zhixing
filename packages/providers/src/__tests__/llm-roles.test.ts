@@ -5,7 +5,8 @@
  * - main 解析直取 config.llm.main（provider/model 唯一来源是配置文件）
  * - light / power 解析链（显式 / 用 main 兜底）—— 不预设任何 vendor 默认
  * - Provider 实例复用（同 provider 共享）
- * - 错误文案（缺 llm.main / 显式辅助角色缺凭证）
+ * - 缺 llm.main → fail-fast（required，阻断）
+ * - 显式可选角色无法解析 → 回退 main + 记录 degradation（永不阻断流程）
  * - bindRole 的 model 实绑契约
  */
 
@@ -111,20 +112,30 @@ describe("resolveLLMRoles · light 解析链（2 段）", () => {
     }
   });
 
-  it("显式 light 缺凭证 → fail-fast 不静默兜底", () => {
-    // 显式配置代表用户意图，必须 fail-fast——不能静默把"用户期望的双 provider
-    // 架构"伪装成单 provider 在跑。
-    expect(() => {
-      resolveLLMRoles(
-        baseConfig({
-          llm: {
-            main: { provider: "deepseek", model: "deepseek-chat" },
-            light: { provider: "openai", model: "gpt-4o-mini" },
-          },
-        }),
-        credsFor({ deepseek: "sk-ds" }), // openai 凭证缺失
-      );
-    }).toThrow(ProviderConfigError);
+  it("显式 light 缺凭证 → 回退 main + 记录 degradation（永不阻断）", () => {
+    // 可选角色永不阻断流程：显式配了但 provider 凭证缺失 → 不抛错，回退
+    // main，并在 degradations 如实记录（边缘层据此可见告警，不静默掩盖）。
+    const result = resolveLLMRoles(
+      baseConfig({
+        llm: {
+          main: { provider: "deepseek", model: "deepseek-chat" },
+          light: { provider: "openai", model: "gpt-4o-mini" },
+        },
+      }),
+      credsFor({ deepseek: "sk-ds" }), // openai 凭证缺失
+    );
+
+    // light 回退到 main 实例 + main.model
+    expect(result.light.resolved).toBe(result.main.resolved);
+    expect(result.light.model).toBe(result.main.model);
+    // 如实记录用户原意图，供边缘层告警
+    expect(result.degradations).toEqual([
+      {
+        role: "light",
+        configured: { provider: "openai", model: "gpt-4o-mini" },
+        reason: "凭证或必要配置缺失",
+      },
+    ]);
   });
 });
 
@@ -185,18 +196,26 @@ describe("resolveLLMRoles · power 角色（与 light 同 resolveAuxRole 链）"
     expect(result.power.resolved).not.toBe(result.light.resolved);
   });
 
-  it("显式 power 缺凭证 → fail-fast 不静默兜底", () => {
-    expect(() => {
-      resolveLLMRoles(
-        baseConfig({
-          llm: {
-            main: { provider: "deepseek", model: "deepseek-chat" },
-            power: { provider: "anthropic", model: "claude-opus-4-5" },
-          },
-        }),
-        credsFor({ deepseek: "sk-ds" }),
-      );
-    }).toThrow(ProviderConfigError);
+  it("显式 power 缺凭证 → 回退 main + 记录 degradation（永不阻断）", () => {
+    const result = resolveLLMRoles(
+      baseConfig({
+        llm: {
+          main: { provider: "deepseek", model: "deepseek-chat" },
+          power: { provider: "anthropic", model: "claude-opus-4-5" },
+        },
+      }),
+      credsFor({ deepseek: "sk-ds" }),
+    );
+
+    expect(result.power.resolved).toBe(result.main.resolved);
+    expect(result.power.model).toBe(result.main.model);
+    expect(result.degradations).toEqual([
+      {
+        role: "power",
+        configured: { provider: "anthropic", model: "claude-opus-4-5" },
+        reason: "凭证或必要配置缺失",
+      },
+    ]);
   });
 });
 

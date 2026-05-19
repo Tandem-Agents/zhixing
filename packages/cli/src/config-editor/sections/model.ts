@@ -18,7 +18,7 @@ import type {
 } from "../types.js";
 import { ROLE_SPECS } from "@zhixing/providers";
 import { readModelRole } from "../state.js";
-import { checkModel, type ModelIssue } from "../checks/model.js";
+import { checkModel, hasApiKey, type ModelIssue } from "../checks/model.js";
 
 export const modelSection: Section = {
   id: "model",
@@ -49,10 +49,26 @@ function buildEntry(
   const config = readModelRole(state, role);
   const isConfigured = Boolean(config?.provider && config?.model);
   const myIssues = allIssues.filter((i) => i.role === role);
+  // 该角色 provider 是否真有 key —— 就绪态的真值依据。可选角色永不进
+  // checkModel 阻断清单（选填不阻断），其"是否就绪"只能由此真值谓词判定，
+  // 不能用"myIssues 为空"代替（可选角色 myIssues 恒空 ≠ 就绪）。
+  const providerHasKey = config?.provider
+    ? hasApiKey(state.credentials, config.provider)
+    : false;
+  // main 的 provider —— 用于区分"与主模型同 provider（补 main 那把 key 即
+  // 一并就绪）"与"独立 provider（缺则运行时回退 main）"两种引导文案。
+  const mainProvider = state.config.llm?.main?.provider;
 
   return {
     label: display.label,
-    state: buildEntryState(config, isConfigured, myIssues, display),
+    state: buildEntryState(
+      config,
+      isConfigured,
+      myIssues,
+      providerHasKey,
+      mainProvider,
+      display,
+    ),
     // 始终走 provider-list——即使当前只有一家 provider，也保留"选服务商"上下文。
     // 一致的导航路径 > 节省 1 次按键；多 provider 阶段无需重新设计跳转逻辑。
     enterTarget: { kind: "provider-list", role },
@@ -72,6 +88,8 @@ function buildEntryState(
   config: ReturnType<typeof readModelRole>,
   isConfigured: boolean,
   myIssues: ModelIssue[],
+  providerHasKey: boolean,
+  mainProvider: string | undefined,
   display: { missingStatusText: string; isOptional: boolean },
 ): EntryState {
   // 未配置 + 可选 → disabled（fallback 到 main，不阻塞完成）
@@ -86,7 +104,8 @@ function buildEntryState(
       issues: myIssues.map((i) => i.label),
     };
   }
-  // 已配置但仍有 issues（典型：apiKey 未填）→ blocked，statusText 含字段名提示
+  // 已配置 + 本行有可执行 issue（自己 provider 的 key 未填，或必填 main 缺项）
+  // → blocked，statusText 含字段名提示，计入"待补充 N 项"。
   if (myIssues.length > 0) {
     const fields = myIssues.map((i) => i.fieldLabel).join(" / ");
     return {
@@ -95,7 +114,22 @@ function buildEntryState(
       issues: myIssues.map((i) => i.label),
     };
   }
-  // 全配齐 → ready
+  // 已配置、无阻断 issue，但该 provider 没有 key。只有可选角色会走到这——
+  // required(main) 缺 key 必有 checkModel issue，上面已 blocked。可选角色
+  // 【永不阻断流程】→ 归 disabled（暗色、不计 issue、不卡完成/启动），仅按
+  // "是否与 main 同 provider"给两种引导文案：
+  //   - 同 provider：补 main 那把 key 即一并就绪
+  //   - 异 provider：该 provider 自己的 key，运行时缺则回退主模型（咨询）
+  if (!providerHasKey) {
+    const sameAsMain = config!.provider === mainProvider;
+    return {
+      kind: "disabled",
+      statusText: sameAsMain
+        ? `${config!.provider} · ${config!.model}（随主模型补 API Key）`
+        : `${config!.provider} · ${config!.model}（待补 API Key，缺则回退主模型）`,
+    };
+  }
+  // 全配齐且 provider 有 key → ready
   return {
     kind: "ready",
     statusText: `${config!.provider} · ${config!.model}`,
