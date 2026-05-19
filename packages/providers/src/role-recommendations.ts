@@ -35,7 +35,7 @@ export interface RoleRecommendation {
 }
 
 /**
- * 三档推荐表。当前只定义 `main`；`light` / `power` 是预留扩展位 —— 何时推荐
+ * 三档推荐表。已定义 `main` 与 `light`；`power` 是预留扩展位 —— 它何时推荐
  * 什么是未定的产品决策，结构上不堵死，加一行即生效。
  *
  * 刻意用显式 `Partial<Record<RoleId, RoleRecommendation>>` 标注，而非
@@ -53,5 +53,9 @@ export interface RoleRecommendation {
  * 可校验，任何运行时校验都是无依据的自造约束。
  */
 export const ROLE_RECOMMENDATIONS: Partial<Record<RoleId, RoleRecommendation>> = {
+  // 主对话：deepseek 直连 v4-pro —— 支持思考模式，胜任复杂推理 / 编码 / 多步规划。
   main: { provider: "deepseek", model: "deepseek-v4-pro" },
+  // 系统侧后台辅助（压缩 / 蒸馏 / 摘要等 I/O 边界净化）：同家 v4-flash ——
+  // 与 main 同 provider 单 key 即可，价格约 v4-pro 的 1/3，胜任轻量净化任务。
+  light: { provider: "deepseek", model: "deepseek-v4-flash" },
 };

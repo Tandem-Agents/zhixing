@@ -33,7 +33,10 @@ import {
   getProjectConfigPath,
   resolveHomeDir,
 } from "./paths.js";
-import { ROLE_RECOMMENDATIONS } from "./role-recommendations.js";
+import {
+  ROLE_RECOMMENDATIONS,
+  type RoleRecommendation,
+} from "./role-recommendations.js";
 import type { ZhixingConfig } from "./types.js";
 
 export {
@@ -244,6 +247,21 @@ function buildConfigTemplate(workspaceRoot: string): string {
   }
   const mainProvider = mainRec.provider;
   const mainModel = mainRec.model;
+
+  // 辅助档位（light / power）的模板片段全部从档位推荐表派生——单一事实源，
+  // 不在模板里硬编码任何 vendor。某档位有推荐 → 直接写成生效条目（leading
+  // comma 续在 main 之后）；无推荐（本期未做产品决策）→ 诚实的 <provider>/
+  // <model> 注释占位，绝不假冒一个 vendor 误导用户。未来给 power 加一行推荐，
+  // 模板自动生效，无需改本函数。
+  const auxEntry = (
+    role: "light" | "power",
+    rec: RoleRecommendation | undefined,
+  ): string =>
+    rec
+      ? `    ,"${role}": { "provider": "${rec.provider}", "model": "${rec.model}" }`
+      : `    // ,"${role}": { "provider": "<provider>", "model": "<model>" }   // 本期无预设推荐，按需自填启用`;
+  const lightEntry = auxEntry("light", ROLE_RECOMMENDATIONS.light);
+  const powerEntry = auxEntry("power", ROLE_RECOMMENDATIONS.power);
   return `{
   // ─── LLM 角色 ───
   "llm": {
@@ -253,20 +271,18 @@ function buildConfigTemplate(workspaceRoot: string): string {
       "model": "${mainModel}"
     }
 
-    // light（选填，建议配置 · 系统侧后台辅助任务）：你不会直接调用它，由系统
-    // 内部消费——压缩历史 / WebFetch 蒸馏 / 工具结果摘要 / 子 agent 返回压缩 /
-    // 通讯通道入站分类等 I/O 边界净化任务。建议配一个轻量、便宜的模型。
-    // 取消下行注释填入 provider/model 启用（provider 需在 credentials.providers 中存在）：
-    // ,"light": { "provider": "siliconflow", "model": "deepseek-ai/DeepSeek-V4-Flash" }
+    // light：系统侧后台辅助任务（压缩历史 / WebFetch 蒸馏 / 工具结果摘要 /
+    // 子 agent 返回压缩 / 通讯通道入站分类等 I/O 边界净化），你不会直接调用。
+    // 默认即推荐的轻量模型（与 main 同 provider，单 key 即可，价格更低）；
+    // 不需要专门化可整段删除，缺省自动回落 main（隔离价值仍保留）。
+${lightEntry}
 
-    // power（选填 · 进入工作场景时使用）：重活槽——首个真实消费者是 work-mode，
-    // 进入工作场景（/enter）后由 power 接管该场景的主对话循环。模型档位由你
-    // 决定（即便塞弱模型也合法，名字表达"接重活"而非"模型很强"）。
-    // 取消下行注释填入 provider/model 启用：
-    // ,"power": { "provider": "siliconflow", "model": "deepseek-ai/DeepSeek-V4-Flash" }
+    // power：进入工作场景（/enter）后由它接管该场景的主对话循环；模型档位由
+    // 你决定（即便塞弱模型也合法，名字表达"接重活"而非"模型很强"）。
+${powerEntry}
 
-    // 以上两个辅助角色缺省时均用 main 兜底——仍保留调用上下文隔离价值
-    // （防 prompt injection 污染主对话），仅放弃任务专门化与 cost 优化。
+    // 任一辅助角色缺省（无对应行）时用 main 兜底——仍保留调用上下文隔离价值
+    // （防 prompt injection 污染主对话），仅放弃该角色的任务专门化与 cost 优化。
   },
 
   // ─── 工作目录 ───

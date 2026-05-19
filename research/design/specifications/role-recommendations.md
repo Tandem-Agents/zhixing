@@ -138,7 +138,8 @@ export interface RoleRecommendation {
  */
 export const ROLE_RECOMMENDATIONS: Partial<Record<RoleId, RoleRecommendation>> = {
   main: { provider: "deepseek", model: "deepseek-v4-pro" },
-  // light / power:未定义(R6 扩展位)——加一行即生效,无需改任何 consumer
+  light: { provider: "deepseek", model: "deepseek-v4-flash" },
+  // power:未定义(R6 扩展位)——加一行即生效,无需改任何 consumer
 };
 ```
 
@@ -183,7 +184,7 @@ export const ROLE_RECOMMENDATIONS: Partial<Record<RoleId, RoleRecommendation>> =
 
 | Consumer(代码位置) | defaultModel 当前职责 | 迁移目标 |
 |---|---|---|
-| [config-loader.ts buildConfigTemplate](../../../packages/providers/src/config-loader.ts) | 模板 main 默认 = `DEFAULT_MAIN_PROVIDER + preset.defaultModel` 派生 | 改为从 `ROLE_RECOMMENDATIONS.main` 的 `provider`/`model` 派生(R4) |
+| [config-loader.ts buildConfigTemplate](../../../packages/providers/src/config-loader.ts) | 模板 main 默认 = `DEFAULT_MAIN_PROVIDER + preset.defaultModel` 派生 | 改为从 `ROLE_RECOMMENDATIONS` 派生:每个有推荐的档位写成生效条目（main 必填恒在、有推荐的辅助档同 active），无推荐的档位（如本期 power）输出诚实 `<provider>/<model>` 注释占位、绝不硬编码 vendor —— 模板恒为推荐表的投影，加一行推荐即自动生效(R4) |
 | [resolve.ts:84](../../../packages/providers/src/resolve.ts) | `ResolvedProvider.defaultModel = entry?.defaultModel ?? preset?.defaultModel` | 删除该合并行(`ResolvedProvider.defaultModel` 字段删) |
 | [resolve.ts:164-189](../../../packages/providers/src/resolve.ts) `resolveMainRole` + `LLMRolesResolveOptions` | CLI override 解析(modelOverride / providerOverride 分支 + options 形参 + 接口) | **整段删除**(ADR-RR-006):接口删、`resolveLLMRoles`/`resolveMainRole` 去 options 形参、`resolveMainRole` 简化为 `resolved = resolveProvider(mainConfig.provider); finalModel = mainConfig.model`(即原 [:186](../../../packages/providers/src/resolve.ts) 正常路径,become 唯一路径) |
 | [panels/list.ts:100-104](../../../packages/cli/src/config-editor/panels/list.ts) | `preset.defaultModel` 作为 model-list **独立 model 来源**(push 进 allModels 首位) | 删除这段;model-list 可选项来源 = `knownModels[*].id`(物理层登记的)+ 用户自定义 model。无 knownModels 的 provider → 仅"+ 添加自定义"(R5 正常推论,见下「行为变更」) |
@@ -207,7 +208,7 @@ export const ROLE_RECOMMENDATIONS: Partial<Record<RoleId, RoleRecommendation>> =
 
 - model-list panel 拿到当前 panel context 的 `role`(main/light/power)
 - 若 `ROLE_RECOMMENDATIONS[role]` 存在,且其 `provider` 等于当前正在浏览的 provider,则 `ROLE_RECOMMENDATIONS[role].model` 那一行显示标签 **`{role} 推荐`**(如 `main 推荐`),其余 knownModels 平等无标签
-- 光标默认停在该推荐行;若 role 无推荐(light/power 未定义)或当前 provider 非推荐 provider → 无任何标签,光标停首行
+- 光标默认停在该推荐行;若 role 无推荐(本期 power 未定义)或当前 provider 非推荐 provider → 无任何标签,光标停首行
 
 **理由**:"main 推荐"四字明示这是**档位维度**的推荐,与 main panel 顶部"主模型"标题逻辑闭合。用户进入任意 provider 都不会再误解为"vendor 内部默认",siliconflow 浏览时不再出现"为啥显示的不是我刚选的 v4-pro"的认知冲突——因为 siliconflow 上没有 main 推荐指向,本就不显示任何推荐标签。
 
@@ -267,7 +268,7 @@ entity panel(provider-config)对应改造,与 §四 entity.ts 三处(122-123 显
 
 ### ADR-RR-004:`ROLE_RECOMMENDATIONS` 用 Partial,未定义即扩展位(R6)
 
-`light`/`power` 未定义。消费者显式处理 `undefined`:buildConfigTemplate 只 main 派生;UI 无推荐则不显示推荐标签。不预设兜底——"不发"安全,"发错"不可控(对齐 [secondary-llm-capability.md §〇.2](secondary-llm-capability.md) 原则 2)。加一行即所有 consumer 自动响应,零 consumer 代码改动。
+`main`/`light` 已定义,`power` 未定义(本期不做产品决策)。消费者统一显式处理 `undefined`:buildConfigTemplate 对有推荐的档位派生生效条目、对无推荐档位输出诚实占位;UI 无推荐则不显示推荐标签。未定义档位不预设兜底——"不发"安全,"发错"不可控(对齐 [secondary-llm-capability.md §〇.2](secondary-llm-capability.md) 原则 2)。给 `power` 加一行即所有 consumer 自动响应,零 consumer 代码改动(`light` 落地已实证此扩展性:仅改 `ROLE_RECOMMENDATIONS` 一处,无任何 consumer 改动)。
 
 ### ADR-RR-005:仅编译期校验 provider,model 不设任何运行时校验(R1/R3)
 
@@ -315,8 +316,7 @@ serve 的 `--model`/`--provider` 与 REPL 同性质(命令行绕过 `config.json
 
 | 项 | 触发条件 | 改动 |
 |---|---|---|
-| light 档推荐定义 | 产品决策定下 light 用什么 | `ROLE_RECOMMENDATIONS` 加一行,所有 consumer 自动响应 |
-| power 档推荐定义 | 同上 | 同上 |
+| power 档推荐定义 | 产品决策定下 power 用什么 | `ROLE_RECOMMENDATIONS` 加一行,所有 consumer 自动响应（`light` 已按此路径落地为先例：仅一处改动） |
 | 推荐运行时可变(如季度切换主推荐) | 主推荐策略需动态调整 | 新增 `getRoleRecommendation(role): RoleRecommendation \| undefined`(常量降为其内部数据源);**消费者从属性访问 `ROLE_RECOMMENDATIONS[role]` 改为函数调用 `getRoleRecommendation(role)`** —— 是一次性显式签名迁移,不是零改动(返回类型仍 `RoleRecommendation \| undefined`,§三 的 undefined 分支逻辑不变,迁移面仅"访问形态") |
 | agent 场景直接绑 `(provider, model)` | 用户/产品定义 agent 直接 pin model | agent config 引用 `{ provider: keyof typeof PROVIDER_PRESETS, model: string }` 同形式,与档位推荐复用 `RoleRecommendation` 类型;**与档位解耦,物理层职责清晰**(本 spec 的核心架构准备) |
 | `modelExample`(registries/providers.ts)语义重审 | 出现 modelExample / knownModels 漂移 | 独立任务,本 spec 不动 —— modelExample 服务"自定义输入示例",与"推荐"互补不重叠 |
