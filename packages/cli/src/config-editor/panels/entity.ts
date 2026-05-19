@@ -13,7 +13,7 @@
  * 这层统一让"按钮校验失败"和未来"行进入前 precondition 失败"用同一机制，无需扩接口。
  */
 
-import { getPreset } from "@zhixing/providers";
+import { ROLE_RECOMMENDATIONS } from "@zhixing/providers";
 import type {
   KeyEvent,
   PanelAction,
@@ -112,15 +112,17 @@ function buildProviderConfigMeta(
 
   const apiKey = readProviderEntry(state, descriptor.providerId)?.apiKey;
   const currentRole = readModelRole(state, descriptor.role);
-  const preset = getPreset(descriptor.providerId);
-  // 区分"用户主动选过"与"系统兜底默认"：currentRole.provider 与本 panel 一致 = 主动选；
-  // 否则 fallback 到 preset.defaultModel = 兜底（视觉应弱化，避免误以为"已选"）
+  // 区分"用户主动选过"与"档位推荐兜底"：currentRole.provider 与本 panel 一致
+  // = 用户主动选；否则用本档位对该 provider 的推荐 model 作引导默认（视觉弱化，
+  // 避免误以为"已选"）。物理层不再兜底，没有推荐命中就保持空——必填项的正常语义。
   const userSelectedModel =
     currentRole?.provider === descriptor.providerId
       ? currentRole?.model
       : undefined;
-  const fallbackModel = preset?.defaultModel;
-  const displayModel = userSelectedModel ?? fallbackModel;
+  const roleRec = ROLE_RECOMMENDATIONS[descriptor.role];
+  const recommendedModel =
+    roleRec?.provider === descriptor.providerId ? roleRec.model : undefined;
+  const displayModel = userSelectedModel ?? recommendedModel;
 
   const rows: EntityRow[] = [
     {
@@ -140,7 +142,7 @@ function buildProviderConfigMeta(
         ? { level: "pending", text: "待选" }
         : userSelectedModel
           ? { level: "ready", text: userSelectedModel }
-          : { level: "disabled", text: `(默认) ${fallbackModel}` },
+          : { level: "disabled", text: `(${descriptor.role} 推荐) ${recommendedModel}` },
       onEnter: (s) =>
         nav(s, {
           kind: "model-list",
@@ -153,8 +155,7 @@ function buildProviderConfigMeta(
   // Preview 校验：虚拟写入候选 provider/model 后跑 checkModel，决定按钮的 primary
   // 与 hint。复用单一规则源（vs 旧版 inline 校验与 checks 双源漂移）。
   // 渲染态与点击态共用同一 state → 视觉提示与点击响应永远一致，不会"看着可以但点了不行"。
-  const previewModel =
-    userSelectedModel ?? fallbackModel ?? "";
+  const previewModel = userSelectedModel ?? recommendedModel ?? "";
   const previewState = writeModelRole(
     state,
     descriptor.role,
@@ -178,7 +179,7 @@ function buildProviderConfigMeta(
         const model =
           currentRole?.provider === descriptor.providerId
             ? currentRole?.model
-            : preset?.defaultModel;
+            : recommendedModel;
         const next = writeModelRole(
           s,
           descriptor.role,

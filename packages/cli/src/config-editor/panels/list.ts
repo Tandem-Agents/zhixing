@@ -3,12 +3,12 @@
  *
  * 两种 list 共用同一渲染 + 导航逻辑，items 由 descriptor.kind 决定来源：
  *   - provider-list：SUPPORTED_PROVIDERS（model role 选服务商）
- *   - model-list：preset.defaultModel + preset.knownModels[].id + credentials.providers.<id>.models + [+ 添加自定义]
+ *   - model-list：preset.knownModels[].id + credentials.providers.<id>.models + [+ 添加自定义]
  *
  * 导航：↑↓ 选 / Enter 进入 / Esc pop / Ctrl+C 退出
  */
 
-import { getPreset } from "@zhixing/providers";
+import { getPreset, ROLE_RECOMMENDATIONS } from "@zhixing/providers";
 import type { ThinkingConfig, ThinkingControl } from "@zhixing/core";
 import type {
   KeyEvent,
@@ -92,18 +92,11 @@ function buildModelListMeta(
   const preset = getPreset(descriptor.providerId);
   const userModels = readProviderEntry(state, descriptor.providerId)?.models ?? [];
 
-  // 合并：preset 默认 + preset.knownModels + 用户自定义；去重保序
-  // 顺序：defaultModel 居首（标"预设默认"）→ 其它 preset.knownModels（标"推荐"）→ 用户自定义
+  // 可选项 = preset 登记过元信息的 model（knownModels）+ 用户自定义；去重保序。
+  // 物理层不再自荐 model，这里不放任何"provider 默认"。
   const seen = new Set<string>();
-  const knownIds = new Set<string>();
   const allModels: string[] = [];
-  if (preset?.defaultModel) {
-    allModels.push(preset.defaultModel);
-    seen.add(preset.defaultModel);
-    knownIds.add(preset.defaultModel);
-  }
   for (const m of preset?.knownModels ?? []) {
-    knownIds.add(m.id);
     if (!seen.has(m.id)) {
       allModels.push(m.id);
       seen.add(m.id);
@@ -116,6 +109,13 @@ function buildModelListMeta(
     }
   }
 
+  // 档位推荐：仅当本档位有推荐、且推荐 provider 正是当前浏览的 provider 时，
+  // 推荐的那个 model 标 "<档位> 推荐"。其余 model 一律平等无标签——"推荐"是
+  // 档位维度的价值判断，不是 provider 内置默认。
+  const roleRec = ROLE_RECOMMENDATIONS[descriptor.role];
+  const recommendedModel =
+    roleRec?.provider === descriptor.providerId ? roleRec.model : undefined;
+
   const currentRole = readModelRole(state, descriptor.role);
   // 仅当 currentRole 与本 panel 的 provider 匹配时，currentRole.model 才是"用户对本
   // provider 主动选过的模型"——否则（未配 / 选了别的 provider）不算 current
@@ -124,9 +124,8 @@ function buildModelListMeta(
       ? currentRole?.model
       : undefined;
   const items: ListItem[] = allModels.map((modelId) => {
-    let description: string | undefined;
-    if (modelId === preset?.defaultModel) description = "预设默认";
-    else if (knownIds.has(modelId)) description = "预设可选";
+    const description =
+      modelId === recommendedModel ? `${descriptor.role} 推荐` : undefined;
     return {
       label: modelId,
       description,

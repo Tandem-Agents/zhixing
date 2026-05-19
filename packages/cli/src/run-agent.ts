@@ -33,8 +33,6 @@ import {
  */
 export interface RunOnceOptions {
   prompt: string;
-  model?: string;
-  provider?: string;
   workspace?: string;
   onYield?: (event: AgentYield) => void;
 }
@@ -48,8 +46,6 @@ export async function runOnce(options: RunOnceOptions): Promise<RunResult> {
 
   try {
     const runtime = await createAgentRuntime({
-      model: options.model,
-      provider: options.provider,
       workspace: options.workspace,
       decorateRunBus: createRenderSubscribers({ renderer, writer }),
       onSecurityBlocked: createBlockedRenderer(writer),

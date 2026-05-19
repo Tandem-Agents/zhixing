@@ -18,7 +18,6 @@ import {
   resolveFromConfig,
   resolveLLMRoles,
   resolveProvider,
-  type LLMRolesResolveOptions,
   type ResolvedLLMRole,
   type ResolvedLLMRoles,
 } from "./resolve.js";
@@ -110,7 +109,7 @@ export function createProviderDirect(
 
 // ─── 多角色工厂（main + light + power） ───
 
-export interface ProviderRolesOptions extends LLMRolesResolveOptions {
+export interface ProviderRolesOptions {
   cwd?: string;
   env?: Record<string, string | undefined>;
 }
@@ -132,8 +131,7 @@ export interface ProviderRolesResult {
  * 一站式创建会话级 LLMRoles：从配置文件加载 → 双角色配置解析 →
  * 实例化 LLMProvider（同 provider id 共享实例）→ 绑定 model 成 LLMRole。
  *
- * CLI override（providerOverride / modelOverride）直接在工厂内吸收，让
- * roles.main.{provider, model} 始终反映会话实际使用的 effective state。
+ * provider/model 完全由配置文件 llm.* 决定，无任何命令行覆盖入口。
  *
  * 用户没显式配 llm.light / llm.power 时，该辅助角色自动用 main 实例 + main.model
  * 兜底（仍保留调用上下文隔离价值，仅放弃任务专门化/cost 优化）。这是正常状态，
@@ -148,10 +146,7 @@ export function createProviderRoles(
   const env = options.env ?? process.env;
   const config = loadConfig({ cwd: options.cwd, env });
   const credentials = loadCredentialsFromEnv(env);
-  const resolved = resolveLLMRoles(config, credentials, {
-    providerOverride: options.providerOverride,
-    modelOverride: options.modelOverride,
-  });
+  const resolved = resolveLLMRoles(config, credentials);
 
   const mainProvider = createFromResolved(resolved.main.resolved);
 

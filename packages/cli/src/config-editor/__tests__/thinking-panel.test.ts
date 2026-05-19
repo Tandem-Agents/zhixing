@@ -31,8 +31,8 @@ function enterAt(
 describe("model-list 选定后导航", () => {
   it("选有 thinkingControl 的 model（deepseek-v4-pro）→ navigate 到 thinking-config", () => {
     const state = createInitialState({}, {});
-    // items: [deepseek-v4-flash(0), deepseek-v4-pro(1), + 添加自定义(2)]
-    const { action } = enterAt(state, modelListDesc, 1);
+    // items: [deepseek-v4-pro(0, main 推荐), deepseek-v4-flash(1), + 添加自定义(2)]
+    const { action } = enterAt(state, modelListDesc, 0);
 
     expect(action.type).toBe("navigate");
     if (action.type === "navigate") {
@@ -51,7 +51,7 @@ describe("model-list 选定后导航", () => {
 
   it("选无 thinkingControl 的 model（deepseek-v4-flash）→ 直接 pop，不进思考步骤", () => {
     const state = createInitialState({}, {});
-    const { action } = enterAt(state, modelListDesc, 0);
+    const { action } = enterAt(state, modelListDesc, 1);
 
     expect(action.type).toBe("pop");
     if (action.type === "pop") {

@@ -78,8 +78,6 @@ const SERVER_VERSION = "0.1.0";
 export interface ServeOptions {
   port?: number;
   host?: string;
-  model?: string;
-  provider?: string;
   workspace?: string;
   /** 后台模式：父进程 spawn 一个 detached child 并握手确认就绪 */
   daemon?: boolean;
@@ -118,8 +116,6 @@ function buildForwardedArgs(opts: ServeOptions): string[] {
   const args: string[] = ["serve"];
   if (opts.port !== undefined) args.push("--port", String(opts.port));
   if (opts.host) args.push("--host", opts.host);
-  if (opts.model) args.push("--model", opts.model);
-  if (opts.provider) args.push("--provider", opts.provider);
   if (opts.workspace) args.push("--workspace", opts.workspace);
   return args;
 }
@@ -226,8 +222,6 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
       });
 
       const runtime = await createAgentRuntime({
-        model: opts.model,
-        provider: opts.provider,
         workspace: opts.workspace,
         extraTools,
         decorateRunBus: renderDecorator,
@@ -260,9 +254,10 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
       }
     },
     initTranscript: async (conversationId) => {
+      // 转写元数据反映实配主模型（provider/model 单一来源是 config.llm.main）。
       await transcript.init(conversationId, {
-        model: opts.model ?? "default",
-        provider: opts.provider ?? "default",
+        model: config.llm?.main?.model ?? "default",
+        provider: config.llm?.main?.provider ?? "default",
       });
     },
     // commitTurn 唯一原子持久化入口，返 canonical → ConversationManager
@@ -345,8 +340,6 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   // task_list 工具内部 ALS 取不到 conversationId 直接 isError 拒绝调用（不污染
   // 任何 conversation 的 cache）—— 装配一致性 + 行为隔离两全。
   const ephemeralRuntime = await createAgentRuntime({
-    model: opts.model,
-    provider: opts.provider,
     workspace: opts.workspace,
     extraTools: builtinExtraTools.assembleTools({
       scheduler: getSchedulerRef,

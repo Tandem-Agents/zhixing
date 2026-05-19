@@ -239,13 +239,11 @@ export class RuntimeSession implements IWorkModeController {
     });
 
     return await createAgentRuntime({
-      // 工作模式与 cli 会话级覆盖正交 —— 工作场景 runtime 不透传 cli override；
-      // primaryRole=power 选 power 角色；记忆域 = 该场景；profile = powerProfile；
-      // workspace：有 workdir 用之，无 workdir 显式 null（source:"none"，
-      // 无文件根）。main 路径维持原样（缺省 primaryRole/memoryScope/profile，
-      // createAgentRuntime 内部回退 main/personal/mainProfile）。
-      model: isWorkscene ? undefined : this.opts.cliModel,
-      provider: isWorkscene ? undefined : this.opts.cliProvider,
+      // 工作场景与 main 路径在此分叉：工作场景用 primaryRole=power 选 power
+      // 角色、记忆域绑该场景、profile=powerProfile，workspace 有 workdir 用之、
+      // 无 workdir 则显式 null（source:"none"，无文件根，by-construction 杜绝
+      // 串到 cwd）。main 路径缺省 primaryRole/memoryScope/profile，
+      // createAgentRuntime 内部回退 main/personal/mainProfile。
       workspace: isWorkscene
         ? (spec.scene.workdir ?? null)
         : this.opts.cliWorkspace,

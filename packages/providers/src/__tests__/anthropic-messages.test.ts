@@ -128,7 +128,6 @@ function makeProvider(overrides?: Partial<ResolvedProvider>): ResolvedProvider {
     baseUrl: "https://api.anthropic.com",
     apiKey: "sk-ant-test",
     protocol: "anthropic-messages",
-    defaultModel: "claude-sonnet-4-20250514",
     quirks: {
       ...DEFAULT_QUIRKS,
       supportsThinking: true,

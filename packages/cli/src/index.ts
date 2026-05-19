@@ -75,8 +75,6 @@ program
   .description("知行 — 智能体引擎")
   .version("0.1.0")
   .option("-p, --print <prompt>", "单次模式：执行 prompt 后退出")
-  .option("-m, --model <model>", "指定模型")
-  .option("--provider <provider>", "指定 Provider ID")
   .option("-w, --workspace <path>", "指定工作区目录（安全信任边界）")
   .option("-c, --continue", "继续当前项目最近的会话")
   .option("-r, --resume [id]", "恢复指定会话（不带 ID 则交互选择）")
@@ -84,8 +82,6 @@ program
   .option("--log", "启用诊断 dump 到 ~/.zhixing/logs/（LLM raw chunk + keypress 路径） —— 排查渲染 / 上下文 / 流式 / 按键输入问题用")
   .action(async (options: {
     print?: string;
-    model?: string;
-    provider?: string;
     workspace?: string;
     continue?: boolean;
     resume?: string | true;
@@ -120,16 +116,12 @@ program
         // 流式输出 + shell prompt 即知 turn 结束，无需额外摘要行）。
         await runOnce({
           prompt: options.print,
-          model: options.model,
-          provider: options.provider,
           workspace: options.workspace,
         });
         process.exit(0);
       }
 
       await startRepl({
-        model: options.model,
-        provider: options.provider,
         workspace: options.workspace,
         continue: options.continue,
         resume: options.resume,
@@ -201,15 +193,11 @@ const serveCmd = program
   .description("启动常驻服务（HTTP + WebSocket + 调度器）")
   .option("--port <port>", "监听端口", (v) => parseInt(v, 10))
   .option("--host <host>", "监听地址（默认 127.0.0.1，仅本地访问）")
-  .option("-m, --model <model>", "默认模型（每个会话可覆盖）")
-  .option("--provider <provider>", "Provider ID")
   .option("-w, --workspace <path>", "工作区目录")
   .option("--daemon", "后台模式：脱离终端独立运行")
   .action(async (options: {
     port?: number;
     host?: string;
-    model?: string;
-    provider?: string;
     workspace?: string;
     daemon?: boolean;
   }) => {
@@ -217,8 +205,6 @@ const serveCmd = program
       await runServeCommand({
         port: options.port,
         host: options.host,
-        model: options.model,
-        provider: options.provider,
         workspace: options.workspace,
         daemon: options.daemon,
       });

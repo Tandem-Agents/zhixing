@@ -25,10 +25,8 @@ export interface RuntimeSessionOptions {
   config: ZhixingConfig;
   credentials: ZhixingCredentials;
 
-  /** CLI override（仅启动时一次，reload 不读取这些字段——reload 永远从配置文件读） */
+  /** CLI 指定的工作区目录（仅启动时一次，reload 不读取——reload 永远从配置文件读）。 */
   cliWorkspace?: string;
-  cliModel?: string;
-  cliProvider?: string;
 
   /** 顶层资源——session 借用，不在 dispose 中关闭 */
   renderer: OutputRenderer;

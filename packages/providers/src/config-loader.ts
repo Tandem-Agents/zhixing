@@ -33,6 +33,7 @@ import {
   getProjectConfigPath,
   resolveHomeDir,
 } from "./paths.js";
+import { ROLE_RECOMMENDATIONS } from "./role-recommendations.js";
 import type { ZhixingConfig } from "./types.js";
 
 export {
@@ -230,23 +231,37 @@ function prepareWorkspaceRoot(): string {
 function buildConfigTemplate(workspaceRoot: string): string {
   // Windows 路径反斜杠在 JSON 字符串中需 escape
   const escapedRoot = workspaceRoot.replace(/\\/g, "\\\\");
+  // main 默认从档位推荐表派生——"首次推荐哪一对 provider+model"是档位维度的
+  // 产品决策，单一事实源在 ROLE_RECOMMENDATIONS.main，模板不再硬编码。main
+  // 档恒有推荐（它是必填档）；类型上仍是可选，缺失即推荐表自身被破坏，属
+  // 编程不变量违背，fail-fast 而非静默兜底一个 vendor。
+  const mainRec = ROLE_RECOMMENDATIONS.main;
+  if (!mainRec) {
+    throw new Error(
+      "ROLE_RECOMMENDATIONS.main 缺失：main 是必填档，其首选 provider+model " +
+        "必须有定义，配置模板无法生成。",
+    );
+  }
+  const mainProvider = mainRec.provider;
+  const mainModel = mainRec.model;
   return `{
   // ─── LLM 角色 ───
   "llm": {
     // main（必填）：主对话模型，所有用户面对的输出由它产生
     "main": {
-      "provider": "siliconflow",
-      "model": "deepseek-ai/DeepSeek-V4-Flash"
+      "provider": "${mainProvider}",
+      "model": "${mainModel}"
     }
 
-    // light（选填，建议配置 · 轻量杂活）：上下文净化类后台任务——压缩历史 /
-    // WebFetch 蒸馏 / 工具结果摘要 / 子 agent 返回压缩 / 通讯通道入站分类等。
-    // 建议配一个轻量、便宜的模型。
+    // light（选填，建议配置 · 系统侧后台辅助任务）：你不会直接调用它，由系统
+    // 内部消费——压缩历史 / WebFetch 蒸馏 / 工具结果摘要 / 子 agent 返回压缩 /
+    // 通讯通道入站分类等 I/O 边界净化任务。建议配一个轻量、便宜的模型。
     // 取消下行注释填入 provider/model 启用（provider 需在 credentials.providers 中存在）：
     // ,"light": { "provider": "siliconflow", "model": "deepseek-ai/DeepSeek-V4-Flash" }
 
-    // power（选填 · 编程等重活）：高难度任务槽，模型档位由你决定（即便塞弱模型
-    // 也合法，名字表达"接重活"而非"模型很强"）。当前为基础设施预留，按需配置。
+    // power（选填 · 进入工作场景时使用）：重活槽——首个真实消费者是 work-mode，
+    // 进入工作场景（/enter）后由 power 接管该场景的主对话循环。模型档位由你
+    // 决定（即便塞弱模型也合法，名字表达"接重活"而非"模型很强"）。
     // 取消下行注释填入 provider/model 启用：
     // ,"power": { "provider": "siliconflow", "model": "deepseek-ai/DeepSeek-V4-Flash" }
 
@@ -271,7 +286,7 @@ function buildConfigTemplate(workspaceRoot: string): string {
   //
   // 取消注释 + 改数值生效：
   // ,"modelCapabilityOverrides": {
-  //   "deepseek-ai/DeepSeek-V4-Flash": {
+  //   "${mainModel}": {
   //     "optimalMaxTokens": 32000,
   //     "riskMaxTokens": 64000
   //   }

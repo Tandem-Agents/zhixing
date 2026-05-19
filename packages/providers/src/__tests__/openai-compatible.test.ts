@@ -128,7 +128,6 @@ function makeProvider(overrides?: Partial<ResolvedProvider>): ResolvedProvider {
     baseUrl: "https://api.test.com",
     apiKey: "sk-test",
     protocol: "openai-compatible",
-    defaultModel: "test-model",
     quirks: { ...DEFAULT_QUIRKS },
     declaredModels: [],
     ...overrides,

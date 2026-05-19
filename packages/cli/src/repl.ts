@@ -163,8 +163,6 @@ interface ReplState {
 // ─── 会话恢复选项 ───
 
 export interface ReplOptions {
-  model?: string;
-  provider?: string;
   workspace?: string;
   continue?: boolean;
   resume?: string | true;
@@ -1140,8 +1138,6 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     config,
     credentials,
     cliWorkspace: options.workspace,
-    cliModel: options.model,
-    cliProvider: options.provider,
     renderer,
     writer: cliWriter,
     screen: renderScreen ?? undefined,

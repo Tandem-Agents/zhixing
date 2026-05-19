@@ -36,7 +36,6 @@ describe("resolveProvider", () => {
       expect(resolved.baseUrl).toBe("https://api.deepseek.com");
       expect(resolved.protocol).toBe("openai-compatible");
       expect(resolved.apiKey).toBe("sk-test-key");
-      expect(resolved.defaultModel).toBe("deepseek-v4-flash");
     });
 
     it("用户在 credentials 覆盖预设的 baseUrl", () => {
@@ -49,17 +48,6 @@ describe("resolveProvider", () => {
 
       expect(resolved.baseUrl).toBe("https://my-proxy.com/v1");
       expect(resolved.protocol).toBe("openai-compatible");
-    });
-
-    it("用户在 credentials 覆盖预设的 defaultModel", () => {
-      const resolved = resolveProvider(
-        "deepseek",
-        credsWith({
-          deepseek: { apiKey: "sk-test", defaultModel: "deepseek-reasoner" },
-        }),
-      );
-
-      expect(resolved.defaultModel).toBe("deepseek-reasoner");
     });
 
     it("用户在 credentials 提供 quirks 与预设合并（用户优先）", () => {

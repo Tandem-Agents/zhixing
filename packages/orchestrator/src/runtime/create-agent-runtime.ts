@@ -302,8 +302,6 @@ export class ResetConversationStateError extends Error {
 }
 
 export interface CreateAgentRuntimeOptions {
-  model?: string;
-  provider?: string;
   /**
    * 工作区：
    *   - string   → cli/配置工作区，经 resolveWorkspace 正常解析
@@ -423,10 +421,7 @@ function resolveRoleThinking(
 export async function createAgentRuntime(
   options: CreateAgentRuntimeOptions,
 ): Promise<AgentRuntime> {
-  const { roles, config, resolvedRoles } = createProviderRoles({
-    providerOverride: options.provider,
-    modelOverride: options.model,
-  });
+  const { roles, config, resolvedRoles } = createProviderRoles();
 
   // 主对话槽位 —— 决定主对话语义六处取哪个 role（capability / Task
   // provider+model / budget resolveModelInfo / 返回 providerId+model /

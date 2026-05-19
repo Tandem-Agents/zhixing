@@ -128,8 +128,8 @@ describe("config-editor panel 整屏快照", () => {
           主模型必填；辅助角色（轻量 / 强力）可选，未配则沿用主模型
 
       ░░▸ 主模型（必填 · 主对话）░░░░░░░░░░░░░⚠ 待配置░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
-        › 轻量模型（可选 · 轻量杂活，未配则沿用主模型）· 未启用（默认沿用主模型）
-        › 强力模型（可选 · 编程等重活，未配则沿用主模型）· 未启用（默认沿用主模型）
+        › 轻量模型（可选 · 系统侧后台辅助任务）· 未启用（默认沿用主模型）
+        › 强力模型（可选 · 进入工作场景时使用）· 未启用（默认沿用主模型）
 
        ▎ 消息通道
 
@@ -177,8 +177,8 @@ describe("config-editor panel 整屏快照", () => {
           主模型必填；辅助角色（轻量 / 强力）可选，未配则沿用主模型
 
         › 主模型（必填 · 主对话）             ✓ siliconflow · DeepSeek-V3
-      ░░▸ 轻量模型（可选 · 轻量杂活，未配则沿用主模型）· 未启用（默认沿用主模型）░░░░░
-        › 强力模型（可选 · 编程等重活，未配则沿用主模型）· 未启用（默认沿用主模型）
+      ░░▸ 轻量模型（可选 · 系统侧后台辅助任务）· 未启用（默认沿用主模型）░░░░░░░░░░░░░
+        › 强力模型（可选 · 进入工作场景时使用）· 未启用（默认沿用主模型）
 
        ▎ 消息通道
 
@@ -247,10 +247,10 @@ describe("config-editor panel 整屏快照", () => {
       ╰──────────────────────────────────────────────────────────────────────────────╯
 
       ░░▸ API Key░░░░░░░░░░░░░░░░░░░░░░░░░░░░░✓ sk-1****cdef░░░░░░░░░░░░░░░░░░░░░░░░░░
-        › 使用模型                            · (默认) deepseek-ai/DeepSeek-V4-Flash
+        › 使用模型                            ⚠ 待选
 
         ┌────────┐
-        │  完成  │   (保存此服务商配置)
+        │  完成  │   (请先补全必填项)
         └────────┘
 
       ────────────────────────────────────────────────────────────────────────────────
@@ -322,10 +322,14 @@ describe("config-editor panel 整屏快照", () => {
 
   // ─── list panel · model-list 分支 ───
   // 此快照守护：
-  //   - 列表渲染顺序：预设默认（首行）→ 其它 preset.knownModels（"预设可选"）→ 用户自定义 → "+ 添加自定义"
+  //   - 列表渲染顺序：preset.knownModels（保序）→ 用户自定义 → "+ 添加自定义"
+  //   - 档位推荐标签 "<role> 推荐" 仅出现在"该档位推荐的 provider 命中当前
+  //     浏览 provider"那一行；此处浏览 siliconflow 而 main 推荐指向 deepseek，
+  //     故全列表无推荐标签（物理层不自荐 model）
   //   - ● current 标记仅出现在用户实际选过的行
   //   - 选中态高亮覆盖整行
-  // 增删 preset.knownModels 或调整 defaultModel 时本快照应失败 —— 这是快照守护期望行为。
+  // 增删 preset.knownModels 或改 ROLE_RECOMMENDATIONS 时本快照应失败 —— 这是
+  // 快照守护期望行为。
   it("list panel · model-list（用户自定义模型已选 + ● 标记 + 末尾添加项被选中）", () => {
     const out = renderAndCapture((renderer, _stdout) => {
       let state = emptyState();
@@ -345,13 +349,78 @@ describe("config-editor panel 整屏快照", () => {
       │                                                                              │
       ╰──────────────────────────────────────────────────────────────────────────────╯
 
-        ›   deepseek-ai/DeepSeek-V4-Flash     预设默认
-      ░░▸░░░Pro/MiniMaxAI/MiniMax-M2.5░░░░░░░░预设可选░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+        ›   deepseek-ai/DeepSeek-V4-Flash
+      ░░▸░░░Pro/MiniMaxAI/MiniMax-M2.5░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
         › ● custom-model-x
         ›   + 添加自定义模型
 
       ────────────────────────────────────────────────────────────────────────────────
         ↑↓ 选择   ·   Enter 进入   ·   Esc 返回   ·   Ctrl+C 退出
+      "
+    `);
+  });
+
+  // 此快照守护档位推荐标签的**正分支**：浏览的 provider 正是某档位推荐指向的
+  // provider 时，被推荐的那个 model 行显示 "<role> 推荐"，其余行无标签。
+  // ROLE_RECOMMENDATIONS.main 指向 (deepseek, deepseek-v4-pro)，故 deepseek
+  // model-list 在 role=main 下，deepseek-v4-pro 行带 "main 推荐"。
+  // 改 ROLE_RECOMMENDATIONS.main 或 deepseek.knownModels 时本快照应失败。
+  it("list panel · model-list（档位推荐命中：deepseek + main → v4-pro 标 main 推荐）", () => {
+    const out = renderAndCapture((renderer, _stdout) => {
+      const state = emptyState();
+      const descriptor: PanelDescriptor = {
+        kind: "model-list",
+        role: "main",
+        providerId: "deepseek",
+      };
+      renderListPanel(state, descriptor, { index: 0 }, renderer);
+    });
+    expect(out).toMatchInlineSnapshot(`
+      "╭ DeepSeek 官方 · 选择模型 ────────────────────────────────────────────────────╮
+      │                                                                              │
+      │   选择具体使用的 model id；带 ● 的是当前已选                                 │
+      │                                                                              │
+      ╰──────────────────────────────────────────────────────────────────────────────╯
+
+      ░░▸░░░deepseek-v4-pro░░░░░░░░░░░░░░░░░░░main 推荐░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+        ›   deepseek-v4-flash
+        ›   + 添加自定义模型
+
+      ────────────────────────────────────────────────────────────────────────────────
+        ↑↓ 选择   ·   Enter 进入   ·   Esc 返回   ·   Ctrl+C 退出
+      "
+    `);
+  });
+
+  // 此快照守护 entity panel 的推荐**正分支**：用户未选 model 但该档位对当前
+  // provider 有推荐时，"使用模型"行以 disabled 级别显示 "(main 推荐) <model>"
+  // 作引导（非"已选"），preview 以该推荐 model 喂 checkModel。
+  it("entity panel · provider-config（档位推荐命中：deepseek + main → 引导显示推荐 model）", () => {
+    const out = renderAndCapture((renderer, _stdout) => {
+      const state = emptyState();
+      const descriptor: PanelDescriptor = {
+        kind: "provider-config",
+        role: "main",
+        providerId: "deepseek",
+      };
+      renderEntityPanel(state, descriptor, { index: 0 }, renderer);
+    });
+    expect(out).toMatchInlineSnapshot(`
+      "╭ 主模型 · DeepSeek 官方 ──────────────────────────────────────────────────────╮
+      │                                                                              │
+      │   配置 DeepSeek 官方 的 API Key 与使用的模型                                 │
+      │                                                                              │
+      ╰──────────────────────────────────────────────────────────────────────────────╯
+
+      ░░▸ API Key░░░░░░░░░░░░░░░░░░░░░░░░░░░░░⚠ 待填░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+        › 使用模型                            · (main 推荐) deepseek-v4-pro
+
+        ┌────────┐
+        │  完成  │   (请先补全必填项)
+        └────────┘
+
+      ────────────────────────────────────────────────────────────────────────────────
+        ↑↓ 选择   ·   Enter 进入/确认   ·   Esc 返回   ·   Ctrl+C 退出
       "
     `);
   });

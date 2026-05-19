@@ -11,6 +11,7 @@ import {
   getProjectConfigPath,
   writeConfig,
 } from "../config-loader.js";
+import { ROLE_RECOMMENDATIONS } from "../role-recommendations.js";
 import type { ZhixingConfig } from "../types.js";
 
 describe("getGlobalConfigPath", () => {
@@ -217,8 +218,12 @@ describe("loadConfig", () => {
     });
 
     expect(fs.existsSync(configPath)).toBe(true);
-    expect(config.llm?.main?.provider).toBe("siliconflow");
-    expect(config.llm?.main?.model).toBe("deepseek-ai/DeepSeek-V4-Flash");
+    // 断言"派生关系"而非"字面值"：模板从 ROLE_RECOMMENDATIONS.main 派生。
+    // 未来改主推荐只需改 role-recommendations.ts 一处，本测试自动跟上 —— 既
+    // 守护"单一事实源"的真值传递（loadConfig autoCreate → 写盘 → 读回），又
+    // 不在本处冻结字面值（避免成为第三份事实源）。
+    expect(config.llm?.main?.provider).toBe(ROLE_RECOMMENDATIONS.main?.provider);
+    expect(config.llm?.main?.model).toBe(ROLE_RECOMMENDATIONS.main?.model);
     // 模板不含 providers 字段（已删除——provider 资源在 credentials.json）
     expect((config as Record<string, unknown>).providers).toBeUndefined();
     // messaging 空对象（启用列表，用户用时手添）

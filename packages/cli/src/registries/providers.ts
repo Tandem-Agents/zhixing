@@ -9,7 +9,7 @@
  *
  * 增加 provider 流程：
  *   1. 这里加一项（label + id + 描述 + 文档链接）
- *   2. 确保 `packages/providers/src/presets.ts` 有对应 preset（baseUrl / protocol / defaultModel）
+ *   2. 确保 `packages/providers/src/presets.ts` 有对应 preset（baseUrl / protocol / quirks）
  *   3. `credentials.json` 模板加该 provider 占位（packages/providers/src/credentials-loader.ts）
  *
  * 文档链接以 `docUrl` / `modelListDocUrl` 显式声明（first-class 字段）——让

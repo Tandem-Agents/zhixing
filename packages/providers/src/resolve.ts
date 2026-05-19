@@ -81,7 +81,6 @@ export function resolveProvider(
     baseUrl: normalizeBaseUrl(baseUrl),
     apiKey,
     protocol,
-    defaultModel: entry?.defaultModel ?? preset?.defaultModel,
     quirks,
     declaredModels: preset?.knownModels ?? [],
     modelOverrides: entry?.modelOverrides,
@@ -125,24 +124,18 @@ export interface ResolvedLLMRoles {
   power: ResolvedLLMRole;
 }
 
-/** CLI override 入口——仅 main 角色受影响，辅助角色（light/power）不受影响。 */
-export interface LLMRolesResolveOptions {
-  /** CLI `--provider`：替换 main role 的 provider；model 跟随新 provider 的预设默认（除非也提供 modelOverride）。 */
-  providerOverride?: string;
-  /** CLI `--model`：替换 main role 的 model（最高优先级）。 */
-  modelOverride?: string;
-}
-
 /**
  * 配置层双角色解析——纯 ResolvedProvider 计算，**不**实例化 LLMProvider。
  *
  * 实例化与共享判断由 create-provider.ts 的 createProviderRoles 完成，保持
  * resolve.ts ↔ 配置层、create-provider.ts ↔ 实例层的单向依赖。
+ *
+ * provider/model 唯一来源是配置文件的 `llm.main`/`llm.light`/`llm.power`
+ * —— 不接受任何命令行覆盖入口。
  */
 export function resolveLLMRoles(
   config: ZhixingConfig,
   credentials: ZhixingCredentials,
-  options: LLMRolesResolveOptions = {},
 ): ResolvedLLMRoles {
   // 单一 fail-fast 边界——把 ZhixingConfig.llm? 的 optional 在此处一次性 narrow，
   // 让下游 helpers 接收已确定形状的字段（避免 TS 跨函数 narrow 失败 / non-null 断言）。
@@ -154,7 +147,7 @@ export function resolveLLMRoles(
   }
 
   // main 先解析——辅助角色未配置时回落到它（ROLE_SPECS 中 fallbackTo: "main"）。
-  const main = resolveMainRole(config.llm.main, credentials, options);
+  const main = resolveMainRole(config.llm.main, credentials);
   const light = resolveAuxRole(config.llm.light, credentials, main);
   const power = resolveAuxRole(config.llm.power, credentials, main);
 
@@ -164,29 +157,9 @@ export function resolveLLMRoles(
 function resolveMainRole(
   mainConfig: LLMRoleConfig,
   credentials: ZhixingCredentials,
-  options: LLMRolesResolveOptions,
 ): ResolvedLLMRole {
-  const finalProvider = options.providerOverride ?? mainConfig.provider;
-  const resolved = resolveProvider(finalProvider, credentials);
-
-  let finalModel: string;
-  if (options.modelOverride) {
-    finalModel = options.modelOverride;
-  } else if (options.providerOverride) {
-    if (!resolved.defaultModel) {
-      throw new ProviderConfigError(
-        `--provider "${finalProvider}" requires --model: provider has no ` +
-          `default model in preset or credentials.providers.${finalProvider}.defaultModel. ` +
-          `Pass --model <model-id> explicitly.`,
-        finalProvider,
-      );
-    }
-    finalModel = resolved.defaultModel;
-  } else {
-    finalModel = mainConfig.model;
-  }
-
-  return { resolved, model: finalModel };
+  const resolved = resolveProvider(mainConfig.provider, credentials);
+  return { resolved, model: mainConfig.model };
 }
 
 /**

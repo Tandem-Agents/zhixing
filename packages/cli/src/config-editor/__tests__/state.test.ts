@@ -116,7 +116,7 @@ describe("patchProviderEntry · 合并语义", () => {
           siliconflow: {
             apiKey: "old",
             baseUrl: "https://x",
-            defaultModel: "m1",
+            protocol: "openai-compatible",
           },
         },
       },
@@ -125,7 +125,7 @@ describe("patchProviderEntry · 合并语义", () => {
     expect(next.credentials.providers?.siliconflow).toEqual({
       apiKey: "new",
       baseUrl: "https://x",
-      defaultModel: "m1",
+      protocol: "openai-compatible",
     });
   });
 

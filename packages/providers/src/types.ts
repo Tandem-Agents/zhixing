@@ -137,8 +137,6 @@ export interface ProviderPreset {
   baseUrl: string;
   /** 使用的协议 */
   protocol: Protocol;
-  /** 默认模型 ID */
-  defaultModel?: string;
   /** 该服务商的 quirks（未指定的字段使用 DEFAULT_QUIRKS） */
   quirks?: Partial<ProviderQuirks>;
   /**
@@ -185,8 +183,6 @@ export interface ProviderCredentialEntry {
   baseUrl?: string;
   /** 覆盖预设的协议（自定义 provider 必填） */
   protocol?: Protocol;
-  /** 覆盖预设的默认模型 */
-  defaultModel?: string;
   /** 覆盖预设的 quirks */
   quirks?: Partial<ProviderQuirks>;
   /**
@@ -437,8 +433,6 @@ export interface ResolvedProvider {
   apiKey: string;
   /** 使用的协议 */
   protocol: Protocol;
-  /** 默认模型 */
-  defaultModel?: string;
   /** 行为差异配置 */
   quirks: ProviderQuirks;
   /**

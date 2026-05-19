@@ -46,7 +46,6 @@ export {
   resolveProvider,
 } from "./resolve.js";
 export type {
-  LLMRolesResolveOptions,
   ResolvedLLMRole,
   ResolvedLLMRoles,
 } from "./resolve.js";
@@ -54,6 +53,10 @@ export type {
 // 角色集注册表（角色集单一事实源）
 export { AUX_ROLE_SPECS, ROLE_SPECS } from "./role-spec.js";
 export type { RoleId, RoleSpec } from "./role-spec.js";
+
+// 档位推荐（"某档位首选哪一对 provider+model"的语义抽象层）
+export { ROLE_RECOMMENDATIONS } from "./role-recommendations.js";
+export type { RoleRecommendation } from "./role-recommendations.js";
 
 // 协议适配器
 export { createOpenAICompatibleProvider } from "./adapters/openai-compatible.js";

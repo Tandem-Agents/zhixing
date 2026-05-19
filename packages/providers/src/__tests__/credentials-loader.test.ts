@@ -177,7 +177,7 @@ describe("applyCredentialsPatch · 合并语义", () => {
         custom: {
           apiKey: "old",
           baseUrl: "https://x",
-          defaultModel: "model-1",
+          protocol: "openai-compatible",
         },
       },
     };
@@ -187,7 +187,7 @@ describe("applyCredentialsPatch · 合并语义", () => {
 
     expect(result.providers?.custom?.apiKey).toBe("new");
     expect(result.providers?.custom?.baseUrl).toBe("https://x");
-    expect(result.providers?.custom?.defaultModel).toBe("model-1");
+    expect(result.providers?.custom?.protocol).toBe("openai-compatible");
   });
 
   it("channels 同样 id 级 + 字段级合并", () => {
