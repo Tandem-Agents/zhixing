@@ -60,7 +60,8 @@ export type BoundaryType =
   | "messaging"
   | "calendar"
   | "external-service"
-  | "financial";
+  | "financial"
+  | "agent-context";
 
 /**
  * 工具声明的边界跨越。

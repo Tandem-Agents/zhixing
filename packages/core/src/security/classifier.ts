@@ -286,6 +286,9 @@ const BOUNDARY_READ_ACCESS: ReadonlySet<string> = new Set([
  * - process 的写（exec）本身是 internal，命令本身的影响由 ShellClassifier 判断
  * - filesystem 的写在无工作区上下文时回退到 external（有上下文时会走 FileSystemClassifier）
  * - secrets / system / financial 始终是 critical
+ * - agent-context 切换 agent 自身运行态（workspace / 记忆域 / runtime 实例 / 模式
+ *   / persona 等），影响后续所有 turn 的工具默认作用范围与可达资源 → external。
+ *   用户需对"切换"本身拍板（"我确认要进入这个 workscene 吗"），而不是事后等子操作再问。
  */
 const BOUNDARY_WRITE_IMPACT: Readonly<Record<BoundaryType, OperationClass>> = {
   process: "internal",
@@ -297,6 +300,7 @@ const BOUNDARY_WRITE_IMPACT: Readonly<Record<BoundaryType, OperationClass>> = {
   secrets: "critical",
   system: "critical",
   financial: "critical",
+  "agent-context": "external",
 };
 
 export class BoundaryImpactClassifier implements OperationClassifier {

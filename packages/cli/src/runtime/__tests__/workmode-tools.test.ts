@@ -50,6 +50,11 @@ describe("workmode_enter", () => {
     });
     const tool = createWorkmodeEnterTool(c);
     expect(tool.needsPermission).toBe(true);
+    // boundaries 是真正驱动 confirm 的字段(needsPermission 当前在运行时无消费):
+    // 声明 agent-context.switch 让 OperationClassifier 升级到 external → confirm。
+    expect(tool.boundaries).toEqual([
+      { boundaryType: "agent-context", access: "switch", dynamic: false },
+    ]);
     const r = await tool.call({ sceneId: "s1" }, CTX);
     expect(r.isError).toBeFalsy();
     expect(c.emitted).toEqual([{ kind: "enter", sceneId: "s1" }]);
@@ -65,10 +70,15 @@ describe("workmode_enter", () => {
 });
 
 describe("workmode_exit", () => {
-  it("无需确认；emit exit 意图", async () => {
+  it("声明 agent-context.switch → confirm；emit exit 意图", async () => {
     const c = makeController();
     const tool = createWorkmodeExitTool(c);
-    expect(tool.needsPermission).toBe(false);
+    // 退出和进入对称都要拍板:声明 agent-context.switch(external → confirm)。
+    // 用户主动 /exit cli 命令不经此工具,天然无需确认。
+    expect(tool.needsPermission).toBe(true);
+    expect(tool.boundaries).toEqual([
+      { boundaryType: "agent-context", access: "switch", dynamic: false },
+    ]);
     const r = await tool.call({}, CTX);
     expect(r.isError).toBeFalsy();
     expect(c.emitted).toEqual([{ kind: "exit" }]);
@@ -76,13 +86,17 @@ describe("workmode_exit", () => {
 });
 
 describe("workscene_change_approve", () => {
-  it("needsPermission 且按 action 派发 registry", async () => {
+  it("needsPermission + filesystem.write → confirm; 按 action 派发 registry", async () => {
     const add = vi
       .fn()
       .mockResolvedValue({ id: "x", name: "新场景", createdAt: "", lastActiveAt: "" });
     const c = makeController({ add });
     const tool = createWorksceneChangeApproveTool(c);
     expect(tool.needsPermission).toBe(true);
+    // 写场景注册表 → filesystem.write → external → confirm。
+    expect(tool.boundaries).toEqual([
+      { boundaryType: "filesystem", access: "write", dynamic: false },
+    ]);
 
     await tool.call({ action: "add", name: "新场景" }, CTX);
     expect(add).toHaveBeenCalledWith({ name: "新场景", workdir: undefined });
@@ -153,6 +167,10 @@ describe("workscene_memory_query", () => {
     const tool = createWorksceneMemoryQueryTool(c);
     expect(tool.isReadOnly).toBe(true);
     expect(tool.needsPermission).toBe(false);
+    // 只读检索场景记忆域 → filesystem.read → observe → 自动放行(不弹窗)。
+    expect(tool.boundaries).toEqual([
+      { boundaryType: "filesystem", access: "read", dynamic: false },
+    ]);
 
     const r = await tool.call({ query: "alpha" }, CTX);
     expect(r.isError).toBeFalsy();

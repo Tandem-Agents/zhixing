@@ -8,15 +8,27 @@
  *     收集、随 RunResult 带出，REPL 主回路 turn 边界唯一 applyModeSwitch 消费。
  *     工具 call 体返回的文本提示 LLM「切换将在本 turn 结束后发生」，让其先把
  *     本 turn 收尾。
- *   - needsPermission 由 secure-executor 在进入 call 体前处理（deny 不进 call、
- *     allow 才进）；call 体一律按「已拍板」语义实现，不自管确认。
  *   - by-construction 隔离：注入哪组由 spec.kind 决定（见 assembleTools），
  *     power runtime 物理不持有 main-only 工具。
+ *
+ * 权限策略（**load-bearing 字段是 boundaries，不是 needsPermission**）：
+ *   `needsPermission` 在当前实现里只是自描述文档字段（grep 全仓库无运行时消费）。
+ *   真正驱动 confirm 弹窗的是 `OperationClassifier`：声明 `boundaries` 让分类器
+ *   把 enter/exit/change_approve 归到 `agent-context` / `filesystem.write` 这类
+ *   external 类，自然升级到 confirm；memory_query 声明 `filesystem.read` 归为
+ *   observe，自动放行。声明而非依赖 BoundaryImpactClassifier 的 fail-closed
+ *   critical 兜底 —— 那条路径是"忘了声明的最后保底"，不应该作为 intended 行为。
+ *
+ *   - LLM 调 enter / exit / change_approve → 系统弹 confirm 让用户拍板
+ *   - LLM 调 memory_query → 自动放行
+ *   - 用户命令 `/enter` / `/exit` 走 cli 命令分发，根本不经 SecurityPipeline，
+ *     天然不需要确认（用户意图即授权）
  */
 
 import {
   MemoryStore,
   getWorkSceneMemoryDir,
+  type BoundaryCrossing,
   type JsonSchema,
   type MemoryCategory,
   type ToolDefinition,
@@ -25,6 +37,18 @@ import type { IWorkModeController } from "./work-mode-controller.js";
 
 /** 单条记忆片段上限 —— 控制注入主上下文的体量（只读检索非 raw dump）。 */
 const MEMORY_SNIPPET_CAP = 500;
+
+/**
+ * 切换 agent 自身运行态的边界 —— enter / exit 共用。
+ *
+ * `agent-context.switch` 在 BoundaryImpactClassifier 里映射为 external（见
+ * `BOUNDARY_WRITE_IMPACT["agent-context"]`），让分类器把 enter / exit 升级到
+ * confirm，让用户对"切换"本身拍板（而不是等切换后子操作再问）。dynamic=false：
+ * 工具一旦调用就确定地表达"切换意图"，无需运行时解析参数判断是否触发。
+ */
+const AGENT_CONTEXT_SWITCH_BOUNDARIES: readonly BoundaryCrossing[] = [
+  { boundaryType: "agent-context", access: "switch", dynamic: false },
+];
 
 function ok(content: string): Promise<{ content: string }> {
   return Promise.resolve({ content });
@@ -60,6 +84,7 @@ export function createWorkmodeEnterTool(
     isParallelSafe: false,
     needsPermission: true,
     permissionArgumentKey: "sceneId",
+    boundaries: [...AGENT_CONTEXT_SWITCH_BOUNDARIES],
     async call(input) {
       const sceneId = String(input.sceneId ?? "").trim();
       if (!sceneId) return fail("workmode_enter 需要 sceneId");
@@ -74,7 +99,11 @@ export function createWorkmodeEnterTool(
 }
 
 /**
- * workmode_exit（power-only，无需 confirmation）—— LLM 自判完结 emit 退出意图。
+ * workmode_exit（power-only，需 confirmation）—— LLM 自判完结 emit 退出意图。
+ *
+ * 退出和进入对称都要用户拍板：power runtime overlay 一旦弃不可复原（exit fail-forward
+ * 到 main 干净态），让用户对"是否真要离开当前 workscene"显式确认。用户主动用
+ * `/exit` cli 命令则不经此工具，天然无需确认（用户意图即授权）。
  */
 export function createWorkmodeExitTool(
   controller: IWorkModeController,
@@ -91,7 +120,8 @@ export function createWorkmodeExitTool(
     inputSchema,
     isReadOnly: false,
     isParallelSafe: false,
-    needsPermission: false,
+    needsPermission: true,
+    boundaries: [...AGENT_CONTEXT_SWITCH_BOUNDARIES],
     async call() {
       controller.emitModeSwitch({ kind: "exit" });
       return ok("已请求退出工作场景，将在本轮结束后返回主对话。");
@@ -141,6 +171,8 @@ export function createWorksceneChangeApproveTool(
     isParallelSafe: false,
     needsPermission: true,
     permissionArgumentKey: "action",
+    // 写场景注册表落盘文件 → filesystem.write → external → confirm。
+    boundaries: [{ boundaryType: "filesystem", access: "write", dynamic: false }],
     async call(input) {
       const action = String(input.action ?? "");
       const name = typeof input.name === "string" ? input.name.trim() : "";
@@ -227,6 +259,8 @@ export function createWorksceneMemoryQueryTool(
     isReadOnly: true,
     isParallelSafe: true,
     needsPermission: false,
+    // 只读检索各场景记忆域目录 → filesystem.read → observe → 自动放行。
+    boundaries: [{ boundaryType: "filesystem", access: "read", dynamic: false }],
     async call(input) {
       const sceneId =
         typeof input.sceneId === "string" ? input.sceneId.trim() : "";

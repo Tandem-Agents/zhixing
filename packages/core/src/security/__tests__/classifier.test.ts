@@ -349,6 +349,38 @@ describe("BoundaryImpactClassifier", () => {
     expect(classifier.classify(makeRequest({ tool: "sysconf" }))).toBe("critical");
   });
 
+  it("agent-context 切换 → external (新 BoundaryType: workmode enter/exit 等切换 agent 自身运行态的工具锚点)", () => {
+    const classifier = new BoundaryImpactClassifier(
+      registry({
+        workmode_enter: [
+          { boundaryType: "agent-context", access: "switch", dynamic: false },
+        ],
+        workmode_exit: [
+          { boundaryType: "agent-context", access: "switch", dynamic: false },
+        ],
+      }),
+    );
+    expect(classifier.classify(makeRequest({ tool: "workmode_enter" }))).toBe(
+      "external",
+    );
+    expect(classifier.classify(makeRequest({ tool: "workmode_exit" }))).toBe(
+      "external",
+    );
+  });
+
+  it("agent-context 只读 access → observe (read-class 走 BOUNDARY_READ_ACCESS 早路径,不到 write 映射)", () => {
+    const classifier = new BoundaryImpactClassifier(
+      registry({
+        peek_mode: [
+          { boundaryType: "agent-context", access: "describe", dynamic: false },
+        ],
+      }),
+    );
+    expect(classifier.classify(makeRequest({ tool: "peek_mode" }))).toBe(
+      "observe",
+    );
+  });
+
   it("多个边界跨越取最高影响等级", () => {
     const classifier = new BoundaryImpactClassifier(
       registry({

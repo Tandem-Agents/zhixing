@@ -28,11 +28,21 @@ export function createMemoryTool(store: MemoryStore): ToolDefinition {
   return {
     name: "memory",
     description:
-      "Manage the user's persistent memory — save, search, list, update, or delete memories. " +
-      "Use this when the user asks to remember something, or when you discover important personal information " +
-      "(name, preferences, relationships, technical skills). " +
-      "Categories: 'profile' (identity), 'person' (relationships), 'skill' (reusable methodologies). " +
-      "Always confirm with the user before saving new memories unless they explicitly asked you to remember.",
+      "Manage the user's persistent memory across three categories:\n" +
+      "  - profile : the user's own identity (id is always 'profile')\n" +
+      "  - person  : people in the user's life (id like 'wife-xiaoli')\n" +
+      "  - skill   : reusable methodologies the user has validated (id like 'docker-network-debug')\n" +
+      "\n" +
+      "Actions and required fields:\n" +
+      "  - save   : category + id + meta + content (create new entry)\n" +
+      "  - update : category + id + meta + content (replace existing entry)\n" +
+      "  - delete : category + id\n" +
+      "  - list   : category (enumerates entries in that category; call once per category to scan all)\n" +
+      "  - search : query (category optional; narrows scope when provided)\n" +
+      "\n" +
+      "Use this whenever the user asks to remember/recall something, or when you discover personal " +
+      "information worth keeping (name, preferences, relationships, validated methodologies). " +
+      "Confirm with the user before saving new memories unless they explicitly asked you to remember.",
     inputSchema: {
       type: "object",
       properties: {
