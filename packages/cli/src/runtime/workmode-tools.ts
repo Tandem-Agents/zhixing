@@ -155,10 +155,6 @@ export function createWorksceneChangeApproveTool(
         type: "string",
         description: "add 可选：该场景的工作目录（仅涉本地文件的场景需要）",
       },
-      purgeData: {
-        type: "boolean",
-        description: "remove 可选：true 连带删除该场景全部数据（记忆+会话）",
-      },
     },
     required: ["action"],
   };
@@ -191,12 +187,13 @@ export function createWorksceneChangeApproveTool(
           }
           case "remove": {
             if (!sceneId) return fail("remove 需要 sceneId");
-            await controller.registry.remove(sceneId, {
-              purgeData: input.purgeData === true,
-            });
-            return ok(
-              `已移除工作场景 ${sceneId}${input.purgeData === true ? "（含数据）" : ""}`,
-            );
+            // 走 controller.removeWorkScene(带 active guard):active 场景 id
+            // 命中时抛 friendly error,catch 回包到 isError 让 LLM 见错文本。
+            // 虽然本工具是 main-only(power 模式 by-construction 拿不到),
+            // 仍走 guard 入口做 defense-in-depth + 与 CLI 命令同源。
+            // 用户的 workdir 不动。"软隐藏" 语义请走 archive,不在此处。
+            await controller.removeWorkScene(sceneId);
+            return ok(`已删除工作场景 ${sceneId}（系统数据已物理清除）`);
           }
           case "rename": {
             if (!sceneId || !name)

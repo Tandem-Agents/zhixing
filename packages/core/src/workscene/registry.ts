@@ -2,9 +2,11 @@
  * FsWorkSceneRegistry — 工作场景登记的文件系统实现
  *
  * 持久化布局见 ./paths.ts。两类持久化分工：
- *   - index.json：已注册 id 集合（成员关系）—— 支撑"摘身份留数据"语义
- *     （remove 不 purge 时出 index 但磁盘数据保留）
+ *   - index.json：已注册 id 集合（成员关系）—— 决定 list/get 能否看到该场景
  *   - <id>/meta.json：该场景权威记录（全部可变字段）
+ *
+ * 删除语义：`remove(id)` 同时摘 index 并物理 rm 系统目录（meta + me + conversations）—— 不可恢复。
+ * 用户的 `workdir` 永远不动。"软隐藏可恢复" 走 `setArchived`，与 remove 语义分工独立。
  *
  * 并发安全同构复用 conversation repository：per-id meta 锁串行同场景读写、
  * 单一 index 锁串行 index.json 读-改-写、writeAtomic 保单文件写入完整。
@@ -12,7 +14,6 @@
 
 import fs from "node:fs/promises";
 import path from "node:path";
-import { getZhixingHome } from "../paths.js";
 import { writeAtomic } from "../transcript/serializer.js";
 import {
   getWorkSceneDir,
@@ -101,29 +102,32 @@ export class FsWorkSceneRegistry implements IWorkSceneRegistry {
     });
   }
 
-  async remove(
-    id: string,
-    opts?: { purgeData?: boolean },
-  ): Promise<void> {
+  /**
+   * 彻底移除：先从 index 摘 id（让 list/get 立即失效），再 fs.rm 物理删除系统目录
+   * （meta.json + 记忆域 me/ + 会话域 conversations/）。**workdir 不动**。
+   *
+   * 顺序由不变量决定，与 `add`（meta 先落盘再进 index）对偶：
+   *   - index 先摘 → 即便 rm 失败也不会出现"已 remove 但仍在 list"假象（一致性优先）
+   *   - rm 用 `force: true` → 目录本就不存在 / 上一次 remove 中途崩溃留下的部分目录，
+   *     统统能被清掉，幂等不抛错
+   *
+   * 锁协调：
+   *   - `indexLock` 串行 index 读-改-写，防并发 remove 撞写
+   *   - per-id `metaLock` 包住 fs.rm，防与并发 `readMeta` / `writeMeta` 撞 ENOENT
+   *   - 不在 caller 显式 `metaLocks.delete(id)`：withMetaLock 内部 `tail.then` 已有
+   *     "若当前 tail 仍是自己则 delete" 的 GC；caller 强制 delete 会抹掉并发 op 的
+   *     tail 引用，破坏后续同 id 串行不变量
+   */
+  async remove(id: string): Promise<void> {
     await this.withIndexLock(async () => {
       const index = await this.readIndex();
       await this.writeIndex({
         scenes: index.scenes.filter((s) => s !== id),
       });
     });
-    if (opts?.purgeData) {
-      // 与 conversation delete 同款可恢复删除：移入 trash，由外部 7 天清理。
-      const srcDir = getWorkSceneDir(id);
-      const trashDir = path.join(
-        getZhixingHome(),
-        "trash",
-        `workscene-${id}-${Date.now()}`,
-      );
-      await fs.mkdir(path.dirname(trashDir), { recursive: true });
-      await fs.rename(srcDir, trashDir).catch(() => {
-        // 目录本就不存在（仅注册无数据）→ 无需搬运
-      });
-    }
+    await this.withMetaLock(id, async () => {
+      await fs.rm(getWorkSceneDir(id), { recursive: true, force: true });
+    });
   }
 
   async rename(id: string, name: string): Promise<WorkScene> {

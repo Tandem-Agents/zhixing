@@ -19,6 +19,7 @@ import {
 
 function makeController(
   overrides: Partial<IWorkModeController["registry"]> = {},
+  controllerOverrides: Partial<IWorkModeController> = {},
 ): IWorkModeController & { emitted: unknown[] } {
   const emitted: unknown[] = [];
   return {
@@ -26,6 +27,10 @@ function makeController(
     emitModeSwitch: (intent) => {
       emitted.push(intent);
     },
+    // 带 guard 的删除入口 —— RuntimeSession 实现内含 active 守卫;
+    // 这里默认放一个无 guard 的 mock,需要测 guard 行为的 case 用
+    // controllerOverrides 注入抛错版本。
+    removeWorkScene: vi.fn().mockResolvedValue(undefined),
     registry: {
       get: vi.fn().mockResolvedValue(null),
       list: vi.fn().mockResolvedValue([]),
@@ -36,6 +41,7 @@ function makeController(
       touch: vi.fn().mockResolvedValue(undefined),
       ...overrides,
     },
+    ...controllerOverrides,
   } as unknown as IWorkModeController & { emitted: unknown[] };
 }
 
@@ -101,8 +107,29 @@ describe("workscene_change_approve", () => {
     await tool.call({ action: "add", name: "新场景" }, CTX);
     expect(add).toHaveBeenCalledWith({ name: "新场景", workdir: undefined });
 
-    await tool.call({ action: "remove", sceneId: "x", purgeData: true }, CTX);
-    expect(c.registry.remove).toHaveBeenCalledWith("x", { purgeData: true });
+    // remove 走 controller.removeWorkScene(带 active guard),不直接调 registry.remove。
+    // 单参彻底删除;purgeData / 软删除语义已废除。
+    await tool.call({ action: "remove", sceneId: "x" }, CTX);
+    expect(c.removeWorkScene).toHaveBeenCalledWith("x");
+    expect(c.registry.remove).not.toHaveBeenCalled();
+  });
+
+  it("remove 触发 active guard → 工具返回 isError、不抛", async () => {
+    // 模拟 RuntimeSession.removeWorkScene 抛 active-scene guard 错误
+    const c = makeController(
+      {},
+      {
+        removeWorkScene: vi
+          .fn()
+          .mockRejectedValue(
+            new Error('无法删除当前活跃的工作场景 "x" —— 请先 /exit'),
+          ),
+      },
+    );
+    const tool = createWorksceneChangeApproveTool(c);
+    const r = await tool.call({ action: "remove", sceneId: "x" }, CTX);
+    expect(r.isError).toBe(true);
+    expect(r.content).toContain("无法删除当前活跃的工作场景");
   });
 
   it("缺必填参数 → isError，不调 registry", async () => {

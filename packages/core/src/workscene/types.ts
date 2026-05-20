@@ -38,11 +38,17 @@ export interface IWorkSceneRegistry {
   get(id: string): Promise<WorkScene | null>;
   add(opts: { name: string; workdir?: string }): Promise<WorkScene>;
   /**
-   * 移除登记。`purgeData:true` 连带删该场景全部数据（记忆域 + 会话域）；
-   * 不传仅摘身份（出 index）、磁盘数据保留 —— 此时 list 不再列出，但 main
-   * 仍可按 id 检索其记忆域。
+   * 彻底移除工作场景：从 index 摘 id + 物理删除该场景系统目录
+   * (`meta.json` + 记忆域 `me/` + 会话域 `conversations/`)。**不可恢复**。
+   *
+   * 用户的代码工作目录 (`workdir`) **不动** —— 那是用户的代码资产，归用户自管，
+   * 系统从不写也不删。
+   *
+   * 幂等：id 不在 index / 目录已不存在 都按"删干净"语义处理，不抛错。
+   *
+   * 若仅想"软隐藏"该场景（list 不出现但数据全留可恢复），请用 `setArchived(id, true)`。
    */
-  remove(id: string, opts?: { purgeData?: boolean }): Promise<void>;
+  remove(id: string): Promise<void>;
   rename(id: string, name: string): Promise<WorkScene>;
   setArchived(id: string, archived: boolean): Promise<WorkScene>;
   /** 刷新 lastActiveAt —— 进入工作场景时调用。 */

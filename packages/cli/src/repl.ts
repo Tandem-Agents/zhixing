@@ -631,7 +631,7 @@ function buildSlashCommands(
     },
     "/workscene": {
       description:
-        "工作场景管理 (list, add <name> [--workdir <path>], remove <id> [--purge], rename <id> <name>, archive/unarchive <id>)",
+        "工作场景管理 (list, add <name> [--workdir <path>], remove <id>, rename <id> <name>, archive/unarchive <id>)",
       handler: async (_state, args) => {
         const reg = session.workSceneRegistry;
         const tokens = args.trim().split(/\s+/).filter(Boolean);
@@ -697,14 +697,20 @@ function buildSlashCommands(
         }
 
         if (sub === "remove") {
-          const id = rest.find((t) => !t.startsWith("--"));
-          if (!id) return usage("remove <id> [--purge]");
-          const purge = rest.includes("--purge");
+          const id = rest[0];
+          if (!id || id.startsWith("--")) return usage("remove <id>");
           try {
-            await reg.remove(id, purge ? { purgeData: true } : undefined);
+            // 走 session.removeWorkScene(带 active guard):active 场景 id 命中
+            // 时直接抛 friendly error,fail() 染红显示给用户。
+            // 与 LLM 工具 workscene_change_approve action=remove 同源,guard 不可绕过。
+            // 用户的 workdir 不动 —— 那是用户的代码资产,系统不碰。
+            // 想"软隐藏"该场景请用 /workscene archive <id>。
+            await session.removeWorkScene(id);
             cliWriter.line(
-              chalk.green(`\n  ✓ 已移除登记: ${chalk.cyan(id)}`) +
-                chalk.dim(purge ? " (数据已清除)" : " (数据保留)") +
+              chalk.green(`\n  ✓ 已删除工作场景: ${chalk.cyan(id)}`) +
+                chalk.dim(
+                  " (系统数据已物理清除;工作目录由你自己管理)",
+                ) +
                 "\n",
             );
           } catch (e) {
@@ -1444,11 +1450,15 @@ export async function startRepl(options: ReplOptions): Promise<void> {
           return;
         }
 
-        // 渲染：事务点直接 cliWriter（不经 EventBus 订阅）
+        // 渲染：事务点直接 cliWriter（不经 EventBus 订阅）。
+        // 分隔线宽度跟随终端、与 chrome / security banner frameWidth = max(40, cols-1)
+        // 同基线：整行 = 2 空格 prefix + sep，故 sep 宽 = frameWidth - 2 = max(38, cols-3)。
+        const sepWidth = Math.max(38, (process.stdout.columns ?? 80) - 3);
+        const sep = "─".repeat(sepWidth);
         cliWriter.line(
           chalk.dim(
-            `\n  ${"─".repeat(48)}\n  已进入工作场景 ${chalk.cyan(scene.name)}` +
-              `${scene.workdir ? chalk.dim(`（${scene.workdir}）`) : ""}\n  ${"─".repeat(48)}\n`,
+            `\n  ${sep}\n  已进入工作场景 ${chalk.cyan(scene.name)}` +
+              `${scene.workdir ? chalk.dim(`（${scene.workdir}）`) : ""}\n  ${sep}\n`,
           ),
         );
         taskTail?.refresh();
@@ -1505,10 +1515,12 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       if (digest) {
         mainConv.messages.push(buildWorksceneDigestMessage(digest));
       }
+      const sepWidth = Math.max(38, (process.stdout.columns ?? 80) - 3);
+      const sep = "─".repeat(sepWidth);
       cliWriter.line(
         chalk.dim(
-          `\n  ${"─".repeat(48)}\n  已退出工作场景，回到主对话` +
-            `${digest ? "（已为主对话生成本场景交接纪要）" : ""}\n  ${"─".repeat(48)}\n`,
+          `\n  ${sep}\n  已退出工作场景，回到主对话` +
+            `${digest ? "（已为主对话生成本场景交接纪要）" : ""}\n  ${sep}\n`,
         ),
       );
       taskTail?.refresh();

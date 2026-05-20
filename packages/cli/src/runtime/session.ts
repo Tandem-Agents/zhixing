@@ -435,6 +435,26 @@ export class RuntimeSession implements IWorkModeController {
   }
 
   /**
+   * 彻底删除工作场景的唯一入口（带 active 守卫）—— CLI `/workscene remove`
+   * 与 LLM 工具 `workscene_change_approve action=remove` 都过这里。
+   *
+   * Guard：当前活跃 sceneId 与目标 id 相同时直接抛错。power runtime 正在
+   * 用该场景的 me/ 与 conversations/ 目录,物理删除后续 memory 写入 /
+   * task_list 持久化 / exit digest 全撞 ENOENT。
+   *
+   * 业务规则不下沉到 registry(机制策略分离)：registry 是低层 CRUD 原语，
+   * 不该知道 activeMode；只有持 activeMode 的 session 能做这层 policy。
+   */
+  async removeWorkScene(id: string): Promise<void> {
+    if (this.workScene?.sceneId === id) {
+      throw new Error(
+        `无法删除当前活跃的工作场景 "${id}" —— 请先 /exit 退出该场景再删除`,
+      );
+    }
+    await this.workSceneRegistryInstance.remove(id);
+  }
+
+  /**
    * 把 confirmation renderer attach 到当前 broker。
    *
    * session 持有 renderer ref 与当前 detach handle；reload 重建 agentRuntime 时

@@ -131,35 +131,65 @@ describe("FsWorkSceneRegistry · CRUD", () => {
     await expect(reg.rename("nope", "x")).rejects.toThrow(/不存在/);
   });
 
-  it("remove 不 purge → 出 index 但磁盘数据保留（按 id 仍可 get）", async () => {
+  it("remove → index 摘 id + 系统目录(meta + me + conversations)物理消失", async () => {
     const reg = new FsWorkSceneRegistry();
-    const s = await reg.add({ name: "keep-data" });
+    const s = await reg.add({ name: "to-delete" });
     const dir = getWorkSceneDir(s.id);
+    // 模拟该场景已累积数据：写一份 me/ 与 conversations/ 子目录
+    await fs.mkdir(path.join(dir, "me"), { recursive: true });
+    await fs.writeFile(
+      path.join(dir, "me", "profile.md"),
+      "# fake profile",
+    );
+    await fs.mkdir(path.join(dir, "conversations"), { recursive: true });
+    await fs.writeFile(
+      path.join(dir, "conversations", "c-1.json"),
+      "{}",
+    );
 
     await reg.remove(s.id);
 
+    // index 摘掉,list/get 立即失效
     expect(await reg.list()).toEqual([]);
-    expect(JSON.parse(await fs.readFile(getWorkSceneIndexPath(), "utf-8"))).toEqual(
-      { scenes: [] },
-    );
-    // 数据留：目录与 meta 仍在，get 仍命中（main 按 id 检索记忆域的前提）
-    await expect(fs.stat(dir)).resolves.toBeTruthy();
-    expect((await reg.get(s.id))?.name).toBe("keep-data");
+    expect(
+      JSON.parse(await fs.readFile(getWorkSceneIndexPath(), "utf-8")),
+    ).toEqual({ scenes: [] });
+    expect(await reg.get(s.id)).toBeNull();
+
+    // 系统目录物理消失(meta + me + conversations 一刀清)
+    await expect(fs.stat(dir)).rejects.toThrow();
+
+    // 不会创建 trash 目录(本次需求废弃了搬 trash 语义)
+    await expect(
+      fs.stat(path.join(tmpDir, "trash")),
+    ).rejects.toThrow();
   });
 
-  it("remove purge → 数据移入 trash，list 清空", async () => {
+  it("remove 幂等 → 不存在的 id 不抛错(force:true 容忍)", async () => {
     const reg = new FsWorkSceneRegistry();
-    const s = await reg.add({ name: "purge-me" });
-    const dir = getWorkSceneDir(s.id);
+    // 从未 add 过的 id，直接 remove 不应抛错
+    await expect(reg.remove("never-existed")).resolves.toBeUndefined();
+    // 已 remove 一次后再 remove 同 id，也不抛错
+    const s = await reg.add({ name: "twice" });
+    await reg.remove(s.id);
+    await expect(reg.remove(s.id)).resolves.toBeUndefined();
+  });
 
-    await reg.remove(s.id, { purgeData: true });
+  it("remove 不动 workdir(系统永不写用户代码目录)", async () => {
+    const reg = new FsWorkSceneRegistry();
+    // 用 tmp 下一个独立目录模拟 workdir,与 ZHIXING_HOME 物理隔离
+    const userWorkdir = path.join(tmpDir, "user-code", "my-project");
+    await fs.mkdir(userWorkdir, { recursive: true });
+    await fs.writeFile(path.join(userWorkdir, "README.md"), "user content");
+    const s = await reg.add({ name: "with-wd", workdir: userWorkdir });
 
-    expect(await reg.list()).toEqual([]);
-    await expect(fs.stat(dir)).rejects.toThrow();
-    const trashEntries = await fs.readdir(path.join(tmpDir, "trash"));
-    expect(trashEntries.some((e) => e.startsWith(`workscene-${s.id}-`))).toBe(
-      true,
-    );
+    await reg.remove(s.id);
+
+    // workdir 及其内容完全不动
+    await expect(fs.stat(userWorkdir)).resolves.toBeTruthy();
+    expect(
+      await fs.readFile(path.join(userWorkdir, "README.md"), "utf-8"),
+    ).toBe("user content");
   });
 
   it("跨实例持久化：新 registry 实例读到既有数据", async () => {
