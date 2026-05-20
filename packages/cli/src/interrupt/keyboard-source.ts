@@ -30,6 +30,7 @@
 
 import { abortWithReason } from "@zhixing/core";
 import { acquireStdinOwnership, type StdinOwnershipHandle } from "../tui/_internal/stdin-ownership.js";
+import { recordStdinSnapshot } from "../security/keypress-dump.js";
 
 export interface KeyboardSourceHandle {
   /**
@@ -77,11 +78,13 @@ export function attachKeyboardSource(opts: AttachKeyboardSourceOptions): Keyboar
   // 即便 rl.pause() 也不会被 detach，会在 raw mode 期间继续 echo 字符)。
   // currentOwnership 用 let + nullable: pause 时 release 让 readline 恢复 →
   // null；resume 时 re-acquire 重新独占；detach 时 ?. 防御 pause 状态已为 null。
+  recordStdinSnapshot("keyboard.attach.before-acquire", stdin);
   let currentOwnership: StdinOwnershipHandle | null = acquireStdinOwnership(stdin);
   const wasRaw = stdin.isRaw;
 
   // attach 进 raw mode 让 keypress listener 在 agent run 期间拦截 Esc/Ctrl+C
   stdin.setRawMode(true);
+  recordStdinSnapshot("keyboard.attach.after-setRaw", stdin, { wasRaw });
 
   // 双击 Ctrl+C 检测：第一次走 abort，doublePressMs 内第二次走 onDoublePress
   // (第二次不再 abort，因为 abort 协议层幂等，第一次已生效)
@@ -114,6 +117,7 @@ export function attachKeyboardSource(opts: AttachKeyboardSourceOptions): Keyboar
   };
 
   stdin.on("keypress", onKeypress);
+  recordStdinSnapshot("keyboard.attach.after-listener", stdin);
 
   let paused = false;
   let detached = false;
@@ -144,16 +148,20 @@ export function attachKeyboardSource(opts: AttachKeyboardSourceOptions): Keyboar
       stdin.on("keypress", onKeypress);
     },
     detach: () => {
+      recordStdinSnapshot("keyboard.detach.entry", stdin, { paused, detached });
       if (detached) return;
       detached = true;
       // 严格 off → setRawMode → release 顺序：先卸 listener 防 release 后被恢复的
       // readline listener 在我们 setRawMode 翻转前收到杂事件
       if (!paused) stdin.off("keypress", onKeypress);
+      recordStdinSnapshot("keyboard.detach.after-off", stdin);
       // detach 恢复 attach 前的初始状态 (wasRaw)，与 pause(强制 cooked)语义不同
       stdin.setRawMode(wasRaw);
+      recordStdinSnapshot("keyboard.detach.after-setRaw", stdin, { wasRaw });
       // ?. 防御 pause 状态: pause 时已 release ownership 设 null,detach 不重复 release
       currentOwnership?.release();
       currentOwnership = null;
+      recordStdinSnapshot("keyboard.detach.after-release", stdin);
     },
   };
 }

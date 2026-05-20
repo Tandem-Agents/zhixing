@@ -37,6 +37,10 @@ import {
 import { layoutInputBuffer } from "./input-layout.js";
 import { wrapKeypressHandler } from "./paste-detector.js";
 import {
+  recordKeypressEvent,
+  recordStdinSnapshot,
+} from "./security/keypress-dump.js";
+import {
   PASTE_TOKEN_PATTERN,
   type PasteRegistry,
 } from "./paste-registry.js";
@@ -246,8 +250,23 @@ export class InputController implements InputRegion {
   }
 
   suspend(): void {
-    if (this.state !== "active") return;
-    this.detachResources();
+    recordStdinSnapshot("typeahead.suspend.entry", this.stdin, {
+      stateBefore: this.state,
+      hasBatcher: !!this.batcher,
+      hasBuffer: !!this.buffer,
+    });
+    if (this.state !== "active") {
+      recordKeypressEvent("typeahead.suspend.skip-not-active", {
+        state: this.state,
+      });
+      return;
+    }
+    // **只摘 keypress 订阅层**(不释放 rawModeLease / stdinOwnership)——
+    // confirm 面板 SelectOperationRegion 会自己 acquire 一层。让 rawModeController
+    // refcount 在面板期间走 1→2→1 而不是 1→0→1→0→1,避免 Windows ConPTY 在
+    // setRawMode(false)→setRawMode(true) 翻转后 keypress 静默死锁(可观测字段全
+    // 正常但 keypress 事件不 emit)。
+    this.detachKeypressOnly();
     // 不调 screen.detachInput()——scrollRegion.detachInput 会清整屏 + reset region
     // 状态（设计用于 cli 退出 chrome 模式），让 region 内的对话历史 + scrollback 全
     // 部丢失。chrome 切换应由 caller 调 screen.attachInput(newRegion) 用替换语义完
@@ -259,17 +278,39 @@ export class InputController implements InputRegion {
     // attachInput(newRegion) 直接替换。
     this.screen.requestInputRepaint();
     this.state = "suspended";
+    recordStdinSnapshot("typeahead.suspend.exit", this.stdin, {
+      stateAfter: this.state,
+      hasBatcher: !!this.batcher,
+      hasBuffer: !!this.buffer,
+    });
   }
 
   resume(): void {
-    if (this.state !== "suspended") return;
-    this.attachResources();
+    recordStdinSnapshot("typeahead.resume.entry", this.stdin, {
+      stateBefore: this.state,
+      hasBatcher: !!this.batcher,
+      hasBuffer: !!this.buffer,
+    });
+    if (this.state !== "suspended") {
+      recordKeypressEvent("typeahead.resume.skip-not-suspended", {
+        state: this.state,
+      });
+      return;
+    }
+    // **只装回 keypress 订阅层**(rawModeLease + stdinOwnership 从 start() 起一直
+    // 持有,suspend 没释放,这里不重复 acquire,避免 raw mode 翻转)。
+    this.attachKeypressOnly();
     // state 赋值顺序必须先于 screen.attachInput —— 后者经 enqueue→flush 同步
     // 触发 input.renderLines() → computeRender，依赖 state 反映"active"语义。
     // 与 start() 的相同顺序保持对偶；历史上 resume() 顺序与 start() 不一致，
     // 在 paintVisualCursor 引入 state 依赖前隐患不可见，现在显式拉齐。
     this.state = "active";
     this.screen.attachInput(this);
+    recordStdinSnapshot("typeahead.resume.exit", this.stdin, {
+      stateAfter: this.state,
+      hasBatcher: !!this.batcher,
+      hasBuffer: !!this.buffer,
+    });
 
     if (this.options.signal?.aborted) {
       this.handleAbort();
@@ -307,7 +348,51 @@ export class InputController implements InputRegion {
 
   // ─── 内部资源管理 ───
 
+  /**
+   * 完整 attach —— start() 路径用。三层资源:
+   *   1. broker session / buffer(逻辑层)
+   *   2. stdinOwnership + rawModeLease(物理 stdin 层)
+   *   3. batcher + keypress listener(事件订阅层)
+   *
+   * suspend / resume 之间**不重做层 2**(见 `attachKeypressOnly` / `detachKeypressOnly`):
+   * 跨 confirm 面板让 raw mode 与 stdin ownership 持续持有,避免 setRawMode(false)
+   * → setRawMode(true) 翻转触发 Windows ConPTY 的 keypress 静默死锁(postmortem
+   * 2026-05-20 confirm-input-freeze-conpty, raw=true/flowing=true/listener 全对
+   * 但事件不 emit 类问题)。
+   */
   private attachResources(): void {
+    this.attachLogicalAndStdin();
+    this.attachKeypressOnly();
+  }
+
+  /**
+   * 只摘 keypress 订阅层 —— suspend() 路径用。保留 stdinOwnership + rawModeLease,
+   * 让 SelectOperationRegion 的 stdinOwnership.acquire 走 refcount 增量路径(1→2)
+   * 而不是触发 setRawMode 翻转(0→1)。
+   */
+  private detachKeypressOnly(): void {
+    if (this.batcher) {
+      this.stdin.off("keypress", this.batcher.handler);
+      this.batcher.release();
+      this.batcher = null;
+    }
+    if (this.brokerUnsubscribe) {
+      this.brokerUnsubscribe();
+      this.brokerUnsubscribe = null;
+    }
+    if (this.sessionHandleId) {
+      this.options.broker.cancelSession(this.sessionHandleId);
+      this.sessionHandleId = null;
+    }
+    this.buffer = null;
+    this.lastSessionState = null;
+  }
+
+  /**
+   * 只装回 keypress 订阅层 —— resume() 路径用。复用 start() 时已建的
+   * stdinOwnership + rawModeLease(suspend 没动它们)。
+   */
+  private attachKeypressOnly(): void {
     this.buffer = new InputBuffer();
     this.lastSessionState = null;
 
@@ -326,9 +411,6 @@ export class InputController implements InputRegion {
 
     this.lastSessionState = this.options.broker.getState(sessionHandle.id);
 
-    this.stdinOwnership = acquireStdinOwnership(this.stdin);
-    this.rawModeLease = rawModeController.acquire(this.stdin);
-
     this.batcher = wrapKeypressHandler({
       onSingle: (str, key) => this.handleKeypress(str, key),
       onPaste: (content) => this.finalizePaste(content),
@@ -339,20 +421,14 @@ export class InputController implements InputRegion {
     }
   }
 
+  /** stdin 物理层 attach —— 仅 start() 调用。 */
+  private attachLogicalAndStdin(): void {
+    this.stdinOwnership = acquireStdinOwnership(this.stdin);
+    this.rawModeLease = rawModeController.acquire(this.stdin);
+  }
+
   private detachResources(): void {
-    if (this.batcher) {
-      this.stdin.off("keypress", this.batcher.handler);
-      this.batcher.release();
-      this.batcher = null;
-    }
-    if (this.brokerUnsubscribe) {
-      this.brokerUnsubscribe();
-      this.brokerUnsubscribe = null;
-    }
-    if (this.sessionHandleId) {
-      this.options.broker.cancelSession(this.sessionHandleId);
-      this.sessionHandleId = null;
-    }
+    this.detachKeypressOnly();
     if (this.options.signal && this.abortListenerAttached) {
       this.options.signal.removeEventListener("abort", this.onAbort);
       this.abortListenerAttached = false;
@@ -365,8 +441,7 @@ export class InputController implements InputRegion {
       this.stdinOwnership.release();
       this.stdinOwnership = null;
     }
-    this.buffer = null;
-    this.lastSessionState = null;
+    // buffer / lastSessionState 已在 detachKeypressOnly 内置 null,此处不重复。
   }
 
   private requestRepaint(): void {
@@ -493,6 +568,13 @@ export class InputController implements InputRegion {
     str: string,
     key: readline.Key | undefined,
   ): void {
+    recordKeypressEvent("typeahead.handleKeypress.entry", {
+      str: str ?? "",
+      keyName: key?.name ?? null,
+      ctrl: key?.ctrl ?? null,
+      state: this.state,
+      hasBuffer: !!this.buffer,
+    });
     if (!key) return;
     if (this.state !== "active" || !this.buffer) return;
 

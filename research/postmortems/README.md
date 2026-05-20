@@ -45,6 +45,7 @@
 | 2026-05-07 | [AI 起首 ◆ 行视觉为空](2026-05-07-anchor-empty-line.md) | 猜测扩字符列表、多轮"试试看"耗用户时间 | 观测优先、扩范围必须有实证、建立可保留的诊断通道 |
 | 2026-05-09 | [屏幕渲染复读 bug 的诊断失败与设计摇摆](2026-05-09-screen-render-misdiagnosis.md) | 用户给了数据但 AI 没读懂、被症状具体性带偏钻牛角尖、设计阶段用工程量做架构决策 | 普适性陈述是最高权重线索、注释 vs 实现硬对照、代码 trace 无果切换验证维度、最优架构第一原则也适用于设计阶段 |
 | 2026-05-14 | [Confirmation 面板输入消失](2026-05-14-confirm-input-paste-misroute.md) | dist 未 build 让用户测旧版本污染 hypothesis 验证回路、跨 host 模式照抄邻居 onPaste 实现导致协议漂移、修复理由停留在"猜中根因"层 | cli 改源码必 build + 时间戳验证才让用户测、同代码跨 host 模式可能 emergent 漂移需主动质疑、抄邻居前先看协议本意、修复理由优先业务语义/防御性原则而非"猜中根因" |
+| 2026-05-20 | [Confirm 面板退出后输入冻结 —— ConPTY raw-mode 翻转死锁](2026-05-20-confirm-input-freeze-conpty.md) | 「可观测字段全绿但功能挂」识别延迟、已有 postmortem 沉淀方法论没立即调用、refcount 共享资源 handoff 路径没设计 | 字段全绿但功能挂 = 立刻切 host 层；诊断开始先扫一遍 postmortems README 检查清单；共享资源 refcount 必须显式设计 handoff 不让 count 归零 |
 
 每写完一篇追加一行；让索引页本身成为可扫描的"反模式清单"。
 
