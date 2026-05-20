@@ -420,8 +420,9 @@ export interface LLMRole {
  * 三角色（角色集单一事实源 = `@zhixing/providers` 的 ROLE_SPECS 注册表，
  * 本接口键与注册表 id 一一对应；新增角色 = 注册表加一行 + 本接口加一字段）：
  *   - main ：必填，主对话循环 / 用户可见输出
- *   - light：选填，后台杂活（上下文压缩 / WebFetch 蒸馏 / 工具结果摘要 /
- *            子 agent 返回压缩 / 入站分类）
+ *   - light：选填，后台杂活（记忆提取 / WebFetch 蒸馏 / 工具结果摘要 /
+ *            子 agent 返回压缩 / 入站分类等 I/O 边界净化）
+ *            注：主对话压缩（LLMSummarize）走 main 不走 light
  *   - power：选填，重活槽（编程等高难任务），模型档位由用户决定；当前仅
  *            基础设施就位，消费者按需接入（不预绑任何调用点）
  *

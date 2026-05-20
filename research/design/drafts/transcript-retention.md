@@ -141,7 +141,7 @@ RunResult → REPL appendCompact → transcript.jsonl
 | P0-E | `turnsCompacted` 字段硬编码为 0 | run-agent.ts:357 | CompactMarker 元数据失真 |
 
 **方案**（骨架 2 事务化事件 + 骨架 6 配置安全网）：
-- **P0-A**：`run-agent.ts:248` append `createLLMSummarizeStrategy({callLLM: flushCallLLM, estimator, triggerRatio: 0.9, preserveRecentTurns: 4})`。严格依赖 Phase 1 的 P0-T + Phase 2 的 P0-W
+- **P0-A**：`run-agent.ts:248` append `createLLMSummarizeStrategy({callLLM: summarizeCallLLM, estimator, triggerRatio: 0.9, preserveRecentTurns: 4})`。严格依赖 Phase 1 的 P0-T + Phase 2 的 P0-W（注:`summarizeCallLLM` 走 `roles.main`,详见 [secondary-llm-capability ADR-SLLM-009](../specifications/secondary-llm-capability.md);MemoryFlush 走 `memoryFlushCallLLM`/`roles.light`,与主对话压缩物理分流）
 - **P0-B**：订阅方改读 `event.summary`（骨架 2 payload 字段），fallback `"(auto)"`；硬编码字符串仅作最后兜底
 - **P0-C**：`createContextEngine` 签名内部默认 `profile ?? INTERACTIVE_PROFILE`；调用方无需改动即自动激活 WindowManager + Tier 压缩。注意 P0-AA：激活后 ToolResultTrim 可能退化为 no-op（骨架 4 契约层面重新定位）
 - **P0-D**：骨架 2 核心——engine 改为事务模式：循环内累积各 strategy 贡献到 `CompactTransaction`，循环结束 fire **唯一** `context:compact_end { strategies: [{name, success, tokensSaved, summary?, turnsCompacted?}], summary, turnsCompacted, tokensBefore, tokensAfter }`；当前 compact_start 保留（标记事务开始）
@@ -302,7 +302,7 @@ RunResult → REPL appendCompact → transcript.jsonl
 - 正常情况：Tier 压缩 + MessageDrop 已能把 usage 压回 normal → 不触发 LLMSummarize → 无成本
 - 极端情况：前两者压不下去 → LLMSummarize 生成一次摘要（~1 次 LLM 调用，小 prompt）→ 上下文回到 50% 以下
 
-**摘要 LLM 选择**：复用现有 `flushCallLLM`（和 memory flush 同一路径）——避免再开新的 provider 通道。成本、能力都够用（memory flush 已在用它提取结构化数据）。
+**摘要 LLM 选择**:走 `createSummarizeCallLLM(roles, mainThinking)` → `roles.main.chat`。摘要质量直接关系到下一轮 LLM 认知输入,使用 main 档位;与 MemoryFlush 走的 `createMemoryFlushCallLLM` → `roles.light.chat` 物理分流(两条独立 ChatRequest 入口),详见 [secondary-llm-capability ADR-SLLM-009](../specifications/secondary-llm-capability.md)。
 
 ### 0.5 M0 里程碑（按 Phase 展开）
 

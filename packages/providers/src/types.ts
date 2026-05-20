@@ -315,7 +315,7 @@ export interface ZhixingConfig {
   /**
    * LLM 角色配置（角色集单一事实源 = `role-spec.ts` 的 ROLE_SPECS）：
    * - main 必填——主对话循环、用户面对的最终输出
-   * - light 可缺省——系统侧 I/O 边界净化（上下文压缩、WebFetch distill、工具结果摘要等），用户不直接调用
+   * - light 可缺省——系统侧 I/O 边界净化（记忆提取、WebFetch distill、工具结果摘要等），用户不直接调用；主对话压缩 LLMSummarize 走 main 不在 light 范围
    * - power 可缺省——重活槽（首个消费者：work-mode 工作场景主对话；其余预留按需接入）
    *   辅助角色缺省时直接用 main 实例 + main.model 兜底（隔离价值仍保留，仅放弃
    *   任务专门化）。不预设任何 vendor 默认（provider 选择是用户主权范畴）。

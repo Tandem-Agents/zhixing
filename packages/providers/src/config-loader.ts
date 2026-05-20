@@ -271,8 +271,9 @@ function buildConfigTemplate(workspaceRoot: string): string {
       "model": "${mainModel}"
     }
 
-    // light：系统侧后台辅助任务（压缩历史 / WebFetch 蒸馏 / 工具结果摘要 /
+    // light：系统侧后台辅助任务（记忆提取 / WebFetch 蒸馏 / 工具结果摘要 /
     // 子 agent 返回压缩 / 通讯通道入站分类等 I/O 边界净化），你不会直接调用。
+    // 注：主对话压缩（LLMSummarize）走 main 不走 light。
     // 默认即推荐的轻量模型（与 main 同 provider，单 key 即可，价格更低）；
     // 不需要专门化可整段删除，缺省自动回落 main（隔离价值仍保留）。
 ${lightEntry}

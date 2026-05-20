@@ -242,7 +242,7 @@ packages/orchestrator/
 │   │   ├── run-context.ts              // (M2.1) runContextStorage = AsyncLocalStorage<RunContext>;M2.3 主路径 run() 入口包裹
 │   │   ├── track-messages.ts           // (M1.6) 从 cli/run-agent.ts:638 抽出,主 / 子共用 yields → messages 累积
 │   │   ├── compact-accumulator.ts      // (M1.2a) 从 cli/compact-accumulator.ts 搬来 — runtime 数据收集
-│   │   ├── compaction-llm.ts           // (M1.2a) 从 cli/compaction-llm.ts 搬来 — runtime 用 flush callLLM 构造
+│   │   ├── compaction-llm.ts           // (M1.2a) 从 cli/compaction-llm.ts 搬来 — 压缩域两 helper 装配(createSummarizeCallLLM/main + createMemoryFlushCallLLM/light)
 │   │   └── project-context.ts          // (M1.2a) 从 cli/project-context.ts 搬来 — 项目元信息装配
 │   ├── security/
 │   │   └── secure-executor.ts          // (M1.2a) 从 cli/security/secure-executor.ts 搬来 — runtime 装配 tool dispatcher 包装(主 / 子共用)
@@ -287,7 +287,7 @@ packages/orchestrator/
 | `secure-executor.ts` | `cli/src/security/` | `orchestrator/src/security/` | runtime 装配 tool dispatcher 的包装(子 agent 也用)。**前置:删除 legacy prompt path**(见下) |
 | `request-builder.ts` | `cli/src/security/` | `core/src/confirmation/` | `ConfirmationRequest` 的 builder,与类型同包更合理 |
 | `compact-accumulator.ts` | `cli/src/` | `orchestrator/src/runtime/` | runtime 数据收集(订阅 compact 事件累积 marker) |
-| `compaction-llm.ts` | `cli/src/` | `orchestrator/src/runtime/` | runtime 用 flush callLLM 构造(LLMRoles 薄包装) |
+| `compaction-llm.ts` | `cli/src/` | `orchestrator/src/runtime/` | 压缩域两 helper 装配:`createSummarizeCallLLM`(LLMSummarize/main) + `createMemoryFlushCallLLM`(MemoryFlush/light),按 task 性质分流(详见 [secondary-llm-capability ADR-SLLM-009](secondary-llm-capability.md)) |
 | `project-context.ts` | `cli/src/` | `orchestrator/src/runtime/` | 项目元信息装配 / enrichContext / injectContext |
 | `system-prompt.ts` | `cli/src/` | `orchestrator/src/runtime/` | M1.6 同步多段重构(主 byte-equal) |
 
@@ -2030,7 +2030,7 @@ sub agent finalize
 | M1.4 | `EventBus` 扩 hierarchical(`parent` + `lineage`)+ listener `meta` 第二参 | 既有 callsite 零改动(snapshot test);INV-S5 校验 |
 | M1.5 | `ToolDefinition.subAgentSafe` 字段 + 8 个 builtin 声明 | 过滤函数测试 |
 | M1.6 | `AgentRoleProfile` + `mainProfile()` + `subAgentProfile()` + `renderIdentity` + `buildSystemPrompt` 多段重构(基于 M1.2a 的 system-prompt 雏形);抽出 `trackMessages` helper 到 orchestrator/runtime/track-messages.ts(internal,见 M1.7) | 主 agent system prompt byte-equal 旧实现(snapshot test) |
-| **M1.7** | API 治理收尾:`runtime/index.ts` barrel 仅暴露真公共 API(`createAgentRuntime` + 7 类型 / `buildSystemPrompt` 系列 / `EnrichOptions`),8 个 internal helper(`subscribeCompactAccumulator` / `trackMessages` / `createCompactionFlush` / `loadProjectContext` / `enrichContext` / `injectContext` / `REFLECTION_THRESHOLD` / `ProjectContext`)从 barrel 移除;同包测试用 `import "../X.js"` 直访 sub-module。死代码清退:`enrichContextWithSkills` 等 deprecated stub 一并移除,`@deprecated` 不留长期未清退残留。**生命周期契约测试**入位:`create-agent-runtime.test.ts` 覆盖 lineage="main" / decorateRunBus 1:1 / safeDispose 故障隔离 / per-run 隔离。**`safeDispose(label, fn)` 模块级辅助**抽出,`run()` 与 `forceCompact()` 共用同一防御契约 | 新测试全绿(10+ 用例);顶级 barrel d.ts 表面缩减(衡量公共 API 收紧) |
+| **M1.7** | API 治理收尾:`runtime/index.ts` barrel 仅暴露真公共 API(`createAgentRuntime` + 7 类型 / `buildSystemPrompt` 系列 / `EnrichOptions`),internal helper(`subscribeCompactAccumulator` / `trackMessages` / `createSummarizeCallLLM` / `createMemoryFlushCallLLM` / `loadProjectContext` / `enrichContext` / `injectContext` / `REFLECTION_THRESHOLD` / `ProjectContext`)从 barrel 移除;同包测试用 `import "../X.js"` 直访 sub-module。死代码清退:`enrichContextWithSkills` 等 deprecated stub 一并移除,`@deprecated` 不留长期未清退残留。**生命周期契约测试**入位:`create-agent-runtime.test.ts` 覆盖 lineage="main" / decorateRunBus 1:1 / safeDispose 故障隔离 / per-run 隔离。**`safeDispose(label, fn)` 模块级辅助**抽出,`run()` 与 `forceCompact()` 共用同一防御契约 | 新测试全绿(10+ 用例);顶级 barrel d.ts 表面缩减(衡量公共 API 收紧) |
 
 **M1 完成后**:零业务功能变化,所有现有 e2e 全绿。
 

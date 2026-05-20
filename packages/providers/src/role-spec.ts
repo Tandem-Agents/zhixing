@@ -35,9 +35,10 @@ export interface RoleSpec {
  * 角色集定义。顺序即 config-editor 入口展示顺序。
  *
  * 文案语义：
- *   - light：系统侧后台辅助任务（上下文压缩 / WebFetch 蒸馏 / 工具结果摘要 /
+ *   - light：系统侧后台辅助任务（记忆提取 / WebFetch 蒸馏 / 工具结果摘要 /
  *     子 agent 返回压缩 / 入站分类等 I/O 边界净化），用户不直接调用，由
  *     ContextEngine 与工具 ctx 注入消费；通常挑轻量便宜模型
+ *     （注：主对话压缩 LLMSummarize 走 main 不走 light）
  *   - power：重活槽——工作场景主对话等高难任务，模型档位由用户决定（即便塞
  *     弱模型也合法，名字表达的是"接重活"而非"模型很强"）；首个真实消费者是
  *     work-mode（进入工作场景后 power 成为该场景的主对话循环）

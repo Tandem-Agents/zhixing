@@ -359,8 +359,10 @@ export interface CreateAgentRuntimeOptions {
    * 主对话槽位 —— 缺省 "main"。决定主对话语义六处（capability /
    * Task provider+model / budget resolveModelInfo / 返回 providerId+model /
    * resilientCallLLM / runAgentLoop）取 roles[primaryRole]，及主对话 loop +
-   * Task 子 agent loop 的思考解析跟随；压缩两处（compaction + 段切换摘要）
-   * 恒走 roles.light，roleThinking 三角色映射为真实 per-role 不跟随。
+   * Task 子 agent loop 的思考解析跟随；压缩域按 task 性质分流（LLMSummarize
+   * →roles.main / MemoryFlush+callText→roles.light / 段切换→roles.light，
+   * 详见 secondary-llm-capability ADR-SLLM-009）不随 primaryRole 漂移，
+   * roleThinking 三角色映射为真实 per-role 不跟随。
    * 工作模式装配 power runtime 时传 "power"。
    */
   primaryRole?: "main" | "power";
@@ -442,8 +444,10 @@ export async function createAgentRuntime(
 
   // 主对话槽位 —— 决定主对话语义六处取哪个 role（capability / Task
   // provider+model / budget resolveModelInfo / 返回 providerId+model /
-  // resilientCallLLM / runAgentLoop）+ loop 思考解析跟随。压缩两处恒 light、
-  // roleThinking 三角色聚合不跟随（见下）。缺省 main，工作模式装配传 power。
+  // resilientCallLLM / runAgentLoop）+ loop 思考解析跟随。压缩域按 task 分流
+  // （LLMSummarize→main / MemoryFlush+callText→light / 段切换→light，详见
+  // secondary-llm-capability ADR-SLLM-009）不跟随、roleThinking 三角色聚合
+  // 不跟随（见下）。缺省 main，工作模式装配传 power。
   const primaryRole = options.primaryRole ?? "main";
 
   // 应用级身份单例：启动时设一次，后续所有 user-facing 字符串通过
@@ -587,7 +591,9 @@ export async function createAgentRuntime(
   //     不跟随 primaryRole（工具调 ctx.llm.light 就该拿 light 的思考配置）
   //   - primaryThinking：主对话 loop + Task 子 agent loop（二者均跑
   //     roles[primaryRole] 单 model）→ 取 roleThinking[primaryRole]
-  //   - lightThinking ：压缩 flush + 段切换摘要（恒走 roles.light，不跟 primaryRole）
+  //   - lightThinking ：MemoryFlush + callText + 段切换摘要（恒走 roles.light，
+  //     不跟 primaryRole；主对话压缩 LLMSummarize 走 roles.main 用 mainThinking，
+  //     见 secondary-llm-capability ADR-SLLM-009）
   const roleThinking: ResolvedRoleThinking = {
     main: resolveRoleThinking(roles.main, config.llm?.main?.thinking),
     light: resolveRoleThinking(roles.light, config.llm?.light?.thinking),
@@ -898,7 +904,8 @@ export async function createAgentRuntime(
             estimator,
             // capability 是会话所跑的 primaryRole model 的注意力/风险阈值，
             // 复用装配期解析的 primaryModelCapability（与 Task riskMaxTokens 同源）。
-            // 摘要 callLLM 与之正交 —— 摘要恒走 roles.light（廉价），不跟 primaryRole。
+            // 段切换摘要 callLLM 与之正交 —— 段切换摘要恒走 roles.light（廉价），不跟 primaryRole
+            //（注：主对话压缩 LLMSummarize 走 roles.main，见 secondary-llm-capability ADR-SLLM-009）。
             capability: primaryModelCapability,
             callLLM: createSegmentSummarizeFn(
               segmentStreamFactory,
