@@ -26,8 +26,7 @@ import {
   type TurnContext,
   JournalStore,
   TranscriptStore,
-  getZhixingHome,
-  getProjectId,
+  conversationsDir,
 } from "@zhixing/core";
 import {
   createServerContext,
@@ -71,7 +70,6 @@ import { loadOrCreateToken } from "./token.js";
 import { isDaemonChild } from "./self-exec.js";
 import { spawnDaemon } from "./daemon.js";
 import { registerTailCleanup, registerCoreCleanup } from "./shutdown-chain.js";
-import path from "node:path";
 
 const SERVER_VERSION = "0.1.0";
 
@@ -175,10 +173,8 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   }
 
   // 2. TranscriptStore
-  const zhixingHome = getZhixingHome();
-  const projectId = getProjectId(path.resolve(workspace));
-  const conversationsDir = path.join(zhixingHome, "projects", projectId, "conversations");
-  const transcript = new TranscriptStore(conversationsDir, workspace);
+  const convDir = conversationsDir({ kind: "user" });
+  const transcript = new TranscriptStore(convDir, workspace);
 
   // 3. RuntimeFactory + ConversationManager
   // scheduleTool → Scheduler → runAgentTurn → ConversationManager → runtimeFactory → scheduleTool

@@ -31,11 +31,6 @@ afterEach(async () => {
 // ─── Helpers ───
 
 const USER_SCOPE: ConversationScope = { kind: "user" };
-const PROJECT_SCOPE: ConversationScope = {
-  kind: "project",
-  projectId: "abc123",
-  projectPath: "/home/user/project",
-};
 
 function createRepo(scope: ConversationScope = USER_SCOPE) {
   return new ConversationRepository(scope);
@@ -174,20 +169,20 @@ describe("list", () => {
     expect(list.find((c) => c.id === conv.id)).toBeDefined();
   });
 
-  it("list 按 scope 隔离", async () => {
-    const userRepo = createRepo(USER_SCOPE);
-    const projectRepo = createRepo(PROJECT_SCOPE);
+  it("list 按 scope 隔离 (user vs workscene 路径独立)", async () => {
+    const userRepo = createRepo({ kind: "user" });
+    const worksceneRepo = createRepo({ kind: "workscene", sceneId: "scene-x" });
 
     await userRepo.create({ name: "user-conv" });
-    await projectRepo.create({ name: "project-conv" });
+    await worksceneRepo.create({ name: "workscene-conv" });
 
     const userList = await userRepo.list();
-    const projectList = await projectRepo.list();
+    const worksceneList = await worksceneRepo.list();
 
     expect(userList).toHaveLength(1);
     expect(userList[0]!.name).toBe("user-conv");
-    expect(projectList).toHaveLength(1);
-    expect(projectList[0]!.name).toBe("project-conv");
+    expect(worksceneList).toHaveLength(1);
+    expect(worksceneList[0]!.name).toBe("workscene-conv");
   });
 });
 

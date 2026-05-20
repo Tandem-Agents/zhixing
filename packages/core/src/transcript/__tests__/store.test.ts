@@ -4,7 +4,6 @@ import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
 import type { CompactMarker, Turn } from "../types.js";
 import { TranscriptStore } from "../store.js";
-import { getProjectId } from "../../paths.js";
 import { detectSystemMetaKind } from "../../context/system-meta.js";
 
 // ─── 测试 fixtures ───
@@ -32,33 +31,6 @@ let tmpDir: string;
 
 beforeEach(async () => {
   tmpDir = await createTempDir("transcript-store");
-});
-
-// ─── getProjectId（共享路径工具） ───
-
-describe("getProjectId", () => {
-  it("相同路径生成相同 ID", () => {
-    const id1 = getProjectId("E:\\Dev\\longxia\\zhixing");
-    const id2 = getProjectId("E:\\Dev\\longxia\\zhixing");
-    expect(id1).toBe(id2);
-  });
-
-  it("路径归一化：正斜杠和反斜杠生成相同 ID", () => {
-    const id1 = getProjectId("E:\\Dev\\longxia\\zhixing");
-    const id2 = getProjectId("E:/Dev/longxia/zhixing");
-    expect(id1).toBe(id2);
-  });
-
-  it("大小写不敏感", () => {
-    const id1 = getProjectId("E:\\Dev\\Longxia\\Zhixing");
-    const id2 = getProjectId("e:\\dev\\longxia\\zhixing");
-    expect(id1).toBe(id2);
-  });
-
-  it("生成 12 位 hex", () => {
-    const id = getProjectId("/some/path");
-    expect(id).toMatch(/^[0-9a-f]{12}$/);
-  });
 });
 
 // ─── TranscriptStore ───

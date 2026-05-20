@@ -1,11 +1,11 @@
 /**
  * ConversationRepository — Conversation 磁盘 CRUD
  *
- * 对应 conversation-model.md §12.1。纯文件操作，不涉及 SessionRuntime。
+ * 纯文件操作，不涉及 SessionRuntime。
  *
  * 磁盘结构：
- *   用户级:  ~/.zhixing/conversations/<id>/meta.json
- *   项目级:  ~/.zhixing/projects/<projectId>/conversations/<id>/meta.json
+ *   用户级:        ~/.zhixing/conversations/<id>/meta.json
+ *   workscene 级:  ~/.zhixing/workscenes/<sceneId>/conversations/<id>/meta.json
  *
  * delete 走回收站（~/.zhixing/trash/<id>-<ts>/），7 天后由外部清理。
  */
@@ -29,15 +29,16 @@ import {
   DEFAULT_CONVERSATION_NAME,
 } from "./types.js";
 
-function conversationsDir(scope: ConversationScope): string {
-  const home = getZhixingHome();
-  if (scope.kind === "project") {
-    return path.join(home, "projects", scope.projectId, "conversations");
-  }
-  if (scope.kind === "workscene") {
-    return getWorkSceneConversationsRoot(scope.sceneId);
-  }
-  return path.join(home, "conversations");
+/**
+ * Conversation 路径源单一 dispatcher —— 按 scope 解析磁盘根目录。
+ *
+ * 是 conversation 模块的对外路径源 API：cli / serve 等所有消费者通过此函数取得
+ * conversation 根目录，与 ConversationRepository / TranscriptStore 共用同源结果，
+ * 杜绝跨模块独立拼接 path 字符串。
+ */
+export function conversationsDir(scope: ConversationScope): string {
+  if (scope.kind === "workscene") return getWorkSceneConversationsRoot(scope.sceneId);
+  return path.join(getZhixingHome(), "conversations");
 }
 
 function conversationDir(scope: ConversationScope, id: string): string {

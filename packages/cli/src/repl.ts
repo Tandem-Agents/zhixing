@@ -13,16 +13,15 @@
  */
 
 import * as readline from "node:readline/promises";
-import path from "node:path";
 import { access } from "node:fs/promises";
 import chalk from "chalk";
 import {
   userMessage,
   type Message,
   TranscriptStore,
-  getProjectId,
   getZhixingHome,
   ConversationRepository,
+  conversationsDir,
   type Conversation,
   type ConversationScope,
   loadProfile,
@@ -48,7 +47,6 @@ import {
   createEventBus,
   type SchedulerEventMap,
   type WorkModeSwitchIntent,
-  getWorkSceneConversationsRoot,
   extractText,
   buildWorksceneDigestMessage,
 } from "@zhixing/core";
@@ -1105,10 +1103,9 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   const credentials = loadCredentials({ homeDir: resolveHomeDir() });
 
   const cwd = process.cwd();
-  const projectId = getProjectId(cwd);
-  const scope: ConversationScope = { kind: "project", projectId, projectPath: cwd };
+  const scope: ConversationScope = { kind: "user" };
   const convRepo = new ConversationRepository(scope);
-  const convDir = path.join(zhixingHome, "projects", projectId, "conversations");
+  const convDir = conversationsDir(scope);
   const store = new TranscriptStore(convDir, cwd);
 
   // 对话仓储路由核 —— builtinExtraTools(含 TaskListService) 与 segmentDeps 在此
@@ -1386,7 +1383,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
           sceneId,
         });
         const wStore = new TranscriptStore(
-          getWorkSceneConversationsRoot(sceneId),
+          conversationsDir({ kind: "workscene", sceneId }),
           scene.workdir ?? process.cwd(),
         );
         // 起始 messages 按触发源：LLM 触发须带入引发进入的那句用户输入（vision：

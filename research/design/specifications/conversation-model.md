@@ -169,9 +169,13 @@ interface Conversation {
 }
 
 type ConversationScope =
-  | { kind: "user" }                                     // 用户级:跨项目共享
-  | { kind: "project"; projectId: string; projectPath: string };  // 项目级:绑定到工作目录
+  | { kind: "user" }                                     // 用户级:任意目录运行同源(默认)
+  | { kind: "workscene"; sceneId: string };              // 工作场景级:绑定到显式 workscene 子树
 ```
+
+**产品哲学**:conversation 跟着用户走、不绑 cwd —— 知行核心定位是"任意目录运行效果一致"(对齐 [ADR-003](../architecture/decisions/003-config-system.md) workspace 是用户级偏好)。default 是用户级,跨 cwd 共享;workscene 是用户显式创建的工作语境实体,绑该场景子树。**不引入 cwd 自动隔离 scope**,因为 hash 目录冒充产品概念是与产品哲学逆向的设计。
+
+**路径源单一 dispatcher**:`conversationsDir(scope: ConversationScope): string` 是 conversation 模块的对外路径源 API,所有消费者(cli/serve 入口、TranscriptStore 等)通过此函数取得磁盘根目录,不独立拼接 path 字符串。未来增加 scope 时入口零改动(单点扩展)。
 
 ### 3.2 生命周期
 
@@ -675,7 +679,7 @@ CLI 有两种运行形态,生命周期略有不同:
 T=0   用户运行 zhixing(在 ~/dev/projectA 目录)
        │
        ├─ 进程启动 → 创建 in-process ConversationManager
-       │   作用域:project(基于 cwd 计算 projectId)
+       │   作用域:user(任意目录运行同源)
        ├─ 创建 CliChannel(in-process channel)
        ├─ 加载或创建 Conversation
        │   - 自动恢复本项目最近活跃对话（convRepo.findLatest()）
@@ -848,13 +852,6 @@ T=3600s 钉钉来新消息
 │       ├─ meta.json
 │       └─ transcript.jsonl
 │
-├─ projects/                                   ← 项目作用域(standalone CLI 默认)
-│   └─ <projectId-12hex>/
-│       ├─ project.json
-│       └─ conversations/
-│           ├─ default/...
-│           └─ <convId>/...
-│
 └─ trash/                                       ← 删除的对话(7 天后清理)
     └─ <convId>-<timestamp>/
 ```
@@ -890,19 +887,14 @@ T=3600s 钉钉来新消息
 
 ### 9.4 作用域选择
 
+| 启动方式                | 作用域                                                 |
+| ------------------- | --------------------------------------------------- |
+| `zhixing`(无 server) | user(默认)                                            |
+| `zhixing serve`     | user(默认)                                            |
+| `zhixing`(有 server) | 跟随 server                                           |
+| 用户显式进入 workscene    | workscene(scoped 到该 workscene 子树,enter/exit 由用户拍板) |
 
-| 启动方式                | 默认作用域           | 可覆盖                             |
-| ------------------- | --------------- | ------------------------------- |
-| `zhixing`(无 server) | project(基于 cwd) | `--user-scope`                  |
-| `zhixing serve`     | user            | `--workspace <path>` 切为 project |
-| `zhixing`(有 server) | 跟随 server       | n/a                             |
-
-
-#### 环境作用域规则(Ambient Scope)
-
-Standalone CLI 默认 project 作用域,但不是所有 cwd 都适合当 "project"。当 cwd **缺少项目标识**（无 `.git`、`package.json`、`.zhixing`、`Cargo.toml`、`go.mod` 等任一标志文件/目录）时,自动升级为 **user 作用域**,等同于 `--user-scope`。
-
-理由：用户在 `~` 或 `/tmp` 运行 `zhixing` 时,预期是"跟知行随便聊聊",而不是"在这个目录创建一个项目对话"。如果按 cwd 强行创建项目,同一用户从不同终端 cd 到 `~` 后各自得到不同 projectId（因为 terminal cwd 可能是 `~` 或 `/Users/sunhj`），产生意外的对话隔离。
+cli / serve 入口都构造 `{ kind: "user" }` scope —— 知行任意目录运行效果一致,对话跟着用户走、不绑 cwd(对齐 [ADR-003](../architecture/decisions/003-config-system.md))。workscene 是用户显式创建的工作语境实体,与 cli/serve 入口选择独立,由 RuntimeSession 在 enter workmode 时构造 `{ kind: "workscene"; sceneId }` scope。
 
 ### 9.5 Compact 原子截断（commitTurn 单一入口）
 
@@ -1337,10 +1329,9 @@ zhixing rpc conversation.send --conversationId=work --text="..."
 - 任务 conversationId 指向的对话 busy → emit `scheduler:task-skipped-busy`,推迟到下次 tick
 - busy 时发送超过 5 条消息 → 第 6 条返回 `queue-full`；`/abort` 后队列清空
 - REPL `/list` → 看到所有对话; `/new "test"` → prompt 变 `test ▸`; `/switch default` → 切回; 历史保留
-- REPL Standalone:`/dev/A` 启动看不到 `/dev/B` 的对话(项目隔离生效)
-- REPL Standalone：在 `~`（无项目标识）启动 → 自动使用 user 作用域
-- REPL Client(连 server)模式：看到 server 的用户级对话
-- `migrate-conversations --dry-run` 显示迁移计划; `--apply` 实际执行,旧路径备份完整
+- REPL Standalone:`/dev/A` 与 `/dev/B` 启动看到同一坨用户级对话(任意目录运行同源)
+- REPL Client(连 server)模式:看到 server 的用户级对话
+- 进入 workscene 后 `/list` 只显示该 workscene 子树的对话;退出后回 main 看到用户级对话
 - 旧 RPC `session.send` 仍可用,日志输出 deprecation warning
 - Session idle 30 分钟 → 释放,内存回收;再次访问自动重载
 
@@ -1458,11 +1449,11 @@ packages/cli/src/migrate/
 
 ---
 
-### ADR-CM-003:Server 与 Standalone CLI 双作用域
+### ADR-CM-003:cli / serve 统一 user 作用域
 
-**决策**:Server 默认 user 作用域,Standalone CLI 默认 project 作用域。两者均可显式覆盖。
+**决策**:cli / serve 入口都构造 `{ kind: "user" }` scope。不按 cwd 自动隔离对话。
 
-**理由**:用户在编程项目中需要"项目隔离的对话";接入第三方通道的 server 需要"用户级跨场景对话"。单一作用域无法同时满足。
+**理由**:知行核心产品哲学是"任意目录运行效果一致、对话跟着人走"(对齐 [ADR-003](../architecture/decisions/003-config-system.md) workspace 是用户级偏好)。"project" 在产品中不对应任何用户可感知抽象 —— 按 cwd 算 hash 自动隔离对话是 IDE 工具思路(VSCode workspace 那种),与个人助手定位逆向。workscene 是用户显式创建的工作语境,与 cwd 自动隔离机制独立;接入第三方通道的 server 同样在 user scope 下工作,无需"项目级"再分层。
 
 ---
 
@@ -1611,18 +1602,18 @@ packages/cli/src/migrate/
 - 分层后 CLI 只依赖 core,server 依赖 core + 自身,包依赖图干净
 - TranscriptStore 是**原子日志**系统,不是 CRUD 系统。commitTurn 单一入口消除分步写（appendTurn + appendCompact）产生的 race 和 timestamp 反序问题
 - 将查询/命名/生命周期操作混入日志系统会产生职责模糊和数据 drift（name 在 meta.json 和 JSONL 各存一份）
-- 两个 core 组件共享路径基础设施（`getZhixingHome` / `getProjectId`）但不互相依赖,支持未来独立替换存储后端
+- 两个 core 组件共享路径基础设施(`getZhixingHome` 与 conversation 模块的 `conversationsDir` dispatcher)但不互相依赖,支持未来独立替换存储后端
 
 ---
 
-### ADR-CM-016：环境作用域（Ambient Scope）
+### ADR-CM-016：cli/serve 统一 user 作用域(不按 cwd 隔离)
 
-**决策**：Standalone CLI 默认 project 作用域。但当 cwd 缺少项目标识文件（.git / package.json / .zhixing / Cargo.toml / go.mod 等）时,自动升级为 user 作用域。
+**决策**:cli / serve 入口都构造 user 作用域,不引入 cwd 自动隔离机制(无"环境作用域" / 无 ambient 升级 / 无 project 概念分支)。
 
-**理由**：
-- 用户在 `~` 或 `/tmp` 运行 `zhixing` 时,预期是"随便聊聊",不是"创建一个项目对话"
-- 不同终端 cd 到 `~` 后路径可能不同（`~` vs `/Users/sunhj`）,导致意外的 projectId 不一致
-- 用户可通过 `--user-scope` / `--project-scope` 显式覆盖,ambient 只影响默认行为
+**理由**:
+- 知行核心产品哲学是"任意目录运行效果一致、对话跟着人走"(对齐 [ADR-003](../architecture/decisions/003-config-system.md))
+- "project" 在产品中不对应任何用户可感知抽象 —— 按 cwd 算 hash 自动隔离是 IDE 工具思路,与个人助手定位逆向
+- workscene 是用户显式创建的工作语境实体,与 cwd 自动隔离机制独立。需要场景隔离请用 workscene,无需基于 cwd 的隐式分层
 
 ---
 

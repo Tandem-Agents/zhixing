@@ -4,7 +4,6 @@
  * 全 monorepo 路径解析的公共原语：
  *   - `getZhixingHome()`  ~/.zhixing 数据根（domain 子路径都从这里派生）
  *   - `expandUserHome()`  ~ 路径展开
- *   - `getProjectId()`    项目路径 → 12 位 hex id
  *   - `toSafePathSegment()` 跨平台目录名安全化
  *
  * 各 domain 自己的子路径 getter 在各 domain 模块内（如 server/paths.ts、
@@ -13,7 +12,6 @@
  * API"的唯一豁免点（防回归靠 ESLint no-restricted-imports）。
  */
 
-import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 
@@ -38,12 +36,6 @@ export function expandUserHome(input: string): string {
     return path.join(os.homedir(), input.slice(2));
   }
   return input;
-}
-
-/** 计算项目 ID：SHA-256(路径归一化) 前 12 位 hex */
-export function getProjectId(absolutePath: string): string {
-  const normalized = absolutePath.replace(/\\/g, "/").toLowerCase();
-  return createHash("sha256").update(normalized).digest("hex").slice(0, 12);
 }
 
 /**
