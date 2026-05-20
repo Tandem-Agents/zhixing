@@ -1,59 +1,81 @@
 /**
- * 上下文压缩 / I/O 边界净化的 LLM 调用工厂
+ * 上下文压缩 / 记忆提取的 LLM 调用助手
  *
- * 把 light 角色的"消费流式响应、拼接 text_delta"模式抽成独立可测单元——
- * 让 ContextEngine 的 callLLM 注入点和角色路由解耦:
+ * 把"消费 LLM 流式响应、拼接 text_delta"模式抽成 ContextEngine 注入点的两条
+ * 独立 callLLM 入口，按用途分流到不同角色：
  *
- *   ContextEngine ←─ callLLM (CompactLLMFn) ─── createCompactionFlush(roles)
- *                                                      │
- *                                                      └─→ roles.light.chat({...})
+ *   主对话压缩 (LLMSummarize) ←─ createSummarizeCallLLM    ─→ roles.main.chat
+ *   记忆提取  (MemoryFlush)   ←─ createMemoryFlushCallLLM ─→ roles.light.chat
  *
- * 路由决策(走 light 而非 main)的核心价值是"调用上下文隔离"—— 抽出此 helper
- * 让该承诺在单测中可以反向 assert(roles.main.chat 不应被调用),防止未来 refactor
- * 把 callsite 错绑到 main 而无人发现。
+ * **职责分工**：
  *
- * 返回类型采用 core 单源契约 `CompactLLMFn` —— 所有 ContextEngine 注入点(含
- * MemoryFlush / LLMSummarize 内部)共享同一签名,避免重复定义带来的类型漂移。
+ *   - 主对话压缩生成对话摘要替换早期消息——质量直接决定下一轮 LLM 的认知输入，
+ *     用 main 档位
+ *   - 记忆提取从即将压缩的消息中抽取 profile / person / skill / journal 写盘，
+ *     是 I/O 边界的结构化数据净化，用 light 档位
+ *
+ * **隔离价值**：两个助手都通过独立 ChatRequest 调用，摘要 prompt 与提取 prompt
+ * 都不出现在主对话的 conversation history——这切断了"工具结果中的 prompt
+ * injection 注入主对话"的攻击向量，并把噪音剥离从模型选择中解耦。即便 light 与
+ * main 是同一 provider+model，独立 conversation 调用本身仍有此价值。
+ *
+ * 返回类型统一为 core 单源契约 `CompactLLMFn`，ContextEngine 注入点共享同一签名，
+ * 避免重复定义带来的类型漂移。
  */
 
-import type { CompactLLMFn, LLMRoles, ThinkingConfig } from "@zhixing/core";
+import type { CompactLLMFn, LLMRole, LLMRoles, ThinkingConfig } from "@zhixing/core";
 
 /**
- * 绑定 LLMRoles 后返回压缩用的 CompactLLMFn。
+ * 把"消费流式响应 → 拼接 text_delta → 返回完整字符串"的模式抽成内部 helper，
+ * 让两个对外 helper 复用同一实现，避免代码重复。
  *
- * **关键契约**:实现固定走 `roles.light.chat`。light 角色的核心价值是
- * **调用上下文隔离** —— 把"压缩历史消息"这次专门调用与主对话物理隔离开,让
- * 摘要 prompt 不出现在 main 的 conversation history、工具结果里的噪音/prompt
- * injection 不污染 main。任务专门化(用更适合摘要的模型)和 cost 优化是派生收益,
- * 不是核心价值。
- *
- * light 兜底机制(resolveAuxRole):用户没显式配 llm.light 时,
- * light 自动用 main 实例 + main.model。隔离价值仍保留 —— createCompactionFlush
- * 无需也不应该自己做 fallback 决策。
- *
- * 返回的函数无状态,可在多个 ContextEngine / 多个 strategy 间共享。
- *
- * lightThinking:light 角色的思考控制,由装配期按 light 实际配置注入(已过校验
- * 兜底,不相容形态在装配期已被归一为 undefined)。缺省 = 不发送思考参数。
+ * 返回纯拼接结果（空响应即空字符串），不做任何语义兜底——caller 各自处理：
+ * LLMSummarize 经 validateSummary 章节校验自然失败 → 重试 → strategy 退化；
+ * MemoryFlush 经 parseExtractions try/catch 自然降级为空数组。
  */
-export function createCompactionFlush(
-  roles: LLMRoles,
-  lightThinking?: ThinkingConfig,
+function callLLMText(
+  role: LLMRole,
+  thinking?: ThinkingConfig,
 ): CompactLLMFn {
   return async (messages, opts) => {
     const chunks: string[] = [];
-    for await (const event of roles.light.chat({
+    for await (const event of role.chat({
       messages,
       tools: [],
-      thinking: lightThinking,
+      thinking,
       abortSignal: opts?.abortSignal,
     })) {
       if (event.type === "text_delta") {
         chunks.push(event.text);
       }
     }
-    // 空响应回 "[]" 是为给 LLMSummarize / MemoryFlush 的 JSON 解析路径一个安全
-    // 兜底——这些策略期望 LLM 返回 JSON 数组;空字符串会触发 parse 错。
-    return chunks.join("") || "[]";
+    return chunks.join("");
   };
+}
+
+/**
+ * 创建主对话压缩用的 callLLM —— 走 `roles.main`。
+ *
+ * LLMSummarize 策略调用此函数得到压缩摘要 LLM 入口。`mainThinking` 由装配期
+ * 按 main 角色的 thinking 配置解析后传入。
+ */
+export function createSummarizeCallLLM(
+  roles: LLMRoles,
+  mainThinking?: ThinkingConfig,
+): CompactLLMFn {
+  return callLLMText(roles.main, mainThinking);
+}
+
+/**
+ * 创建记忆提取用的 callLLM —— 走 `roles.light`。
+ *
+ * MemoryFlush 策略调用此函数从消息中提取结构化记忆数据。`lightThinking` 由装配期
+ * 按 light 角色的 thinking 配置解析后传入；用户未显式配 `llm.light` 时，light
+ * 自动用 main 实例兜底（resolveAuxRole 机制），无需本助手做 fallback 决策。
+ */
+export function createMemoryFlushCallLLM(
+  roles: LLMRoles,
+  lightThinking?: ThinkingConfig,
+): CompactLLMFn {
+  return callLLMText(roles.light, lightThinking);
 }

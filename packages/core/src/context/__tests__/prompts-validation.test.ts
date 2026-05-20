@@ -54,7 +54,7 @@ describe("getSummarizationPrompt", () => {
   it("main-session 返回 7 段模板", () => {
     const prompt = getSummarizationPrompt("main-session");
     expect(prompt).toContain("## 核心目标");
-    expect(prompt).toContain("## 关键标识符");
+    expect(prompt).toContain("## 相关文件");
   });
 
   it("sub-agent 返回 5 段模板", () => {
@@ -90,9 +90,9 @@ describe("getSummarizationPrompt", () => {
 
 describe("buildRetryPrompt", () => {
   it("列出缺失的章节", () => {
-    const prompt = buildRetryPrompt(["## 核心目标", "## 当前进度"]);
+    const prompt = buildRetryPrompt(["## 核心目标", "## 进度"]);
     expect(prompt).toContain("## 核心目标");
-    expect(prompt).toContain("## 当前进度");
+    expect(prompt).toContain("## 进度");
     expect(prompt).toContain("缺少");
   });
 });
@@ -136,12 +136,12 @@ describe("validateSummary", () => {
   });
 
   it("缺少章节时返回 missing 列表", () => {
-    const incomplete = "## 核心目标\n内容\n\n## 技术上下文\n内容";
+    const incomplete = "## 核心目标\n内容\n\n## 约束与偏好\n内容";
     const result = validateSummary(incomplete, "main-session");
     expect(result.valid).toBe(false);
-    expect(result.missing).toContain("## 文件与变更");
-    expect(result.missing).toContain("## 当前进度");
-    expect(result.missing).toContain("## 关键标识符");
+    expect(result.missing).toContain("## 进度");
+    expect(result.missing).toContain("## 关键决策");
+    expect(result.missing).toContain("## 相关文件");
   });
 
   it("空摘要检测所有章节缺失", () => {

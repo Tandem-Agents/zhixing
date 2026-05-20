@@ -94,7 +94,10 @@ import type { AgentRoleProfile } from "../profile/agent-role-profile.js";
 import { subscribeCompactAccumulator } from "./compact-accumulator.js";
 import { subscribeSegmentMarkerAccumulator } from "./segment-marker-accumulator.js";
 import { subscribeWorkModeAccumulator } from "./workmode-accumulator.js";
-import { createCompactionFlush } from "./compaction-llm.js";
+import {
+  createSummarizeCallLLM,
+  createMemoryFlushCallLLM,
+} from "./compaction-llm.js";
 import { buildSystemPrompt } from "./system-prompt.js";
 import {
   loadProjectContext,
@@ -670,19 +673,22 @@ export async function createAgentRuntime(
   // /clear 一并清空。
   const resettables: Resettable[] = [];
 
-  // Flush 用的 LLM 调用——绑定 light 角色。详见 compaction-llm.ts 的
-  // 设计注释（路由契约 + 单测覆盖）。
-  const flushCallLLM = createCompactionFlush(roles, lightThinking);
+  // 压缩管线的 LLM 调用按用途分流到不同角色——主对话压缩走 main（摘要质量直接
+  // 关系下一轮 LLM 认知输入），记忆提取走 light（I/O 边界结构化数据净化）。
+  // 详见 compaction-llm.ts 的设计注释。
+  const mainThinking = roleThinking.main;
+  const summarizeCallLLM = createSummarizeCallLLM(roles, mainThinking);
+  const memoryFlushCallLLM = createMemoryFlushCallLLM(roles, lightThinking);
 
   // 策略编排（engine 按 priority asc 执行，到 normal/warning 就 break）：
   //   priority 3   MemoryFlush     有 LLM 调用 — 仅 usage >= 0.75 触发
   //   priority 5   MessageDrop     免费 — usage < 0.9 触发（超过 0.9 让给 LLMSummarize）
   //   priority 200 LLMSummarize    昂贵 — usage >= 0.9 触发，MessageDrop 让位
   const strategies = [
-    createMemoryFlushStrategy({ callLLM: flushCallLLM, store: memoryStore }),
+    createMemoryFlushStrategy({ callLLM: memoryFlushCallLLM, store: memoryStore }),
     createMessageDropStrategy(),
     createLLMSummarizeStrategy({
-      callLLM: flushCallLLM,
+      callLLM: summarizeCallLLM,
       estimator,
       triggerRatio: 0.9,
       preserveRecentTurns: 2,
@@ -733,7 +739,11 @@ export async function createAgentRuntime(
     },
 
     async callText(prompt: string): Promise<string> {
-      return flushCallLLM([userMessage(prompt)]);
+      // 单发 LLM 文本调用入口（无对话历史），复用 light 通道 CompactLLMFn 实例：
+      // 与 MemoryFlush 共享同一 light 角色 + 同一独立 ChatRequest 隔离。
+      // 主对话压缩走 main 是因为摘要质量直接影响主对话下一轮认知；此处的单发调用
+      // （工作场景纪要 / 日志凝练等）属于轻量任务，沿用 light 通道。
+      return memoryFlushCallLLM([userMessage(prompt)]);
     },
 
     async forceCompact(messages: Message[], turnCount: number): Promise<ForceCompactResult> {

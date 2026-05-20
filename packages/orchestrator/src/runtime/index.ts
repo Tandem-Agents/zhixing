@@ -20,7 +20,7 @@
  * **不导出**(internal helper,仅 createAgentRuntime 内部装配使用):
  *   - `subscribeCompactAccumulator` / `CompactAccumulator`
  *   - `trackMessages`
- *   - `createCompactionFlush`
+ *   - `createSummarizeCallLLM` / `createMemoryFlushCallLLM`
  *   - `loadProjectContext` / `enrichContext` / `injectContext` /
  *     `REFLECTION_THRESHOLD` / `ProjectContext`
  *

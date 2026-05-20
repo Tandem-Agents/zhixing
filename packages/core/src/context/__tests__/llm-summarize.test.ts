@@ -32,7 +32,7 @@ const VALID_SUMMARY = REQUIRED_MAIN_SECTIONS.map(
   (s) => `${s}\n测试内容`,
 ).join("\n\n");
 
-const INCOMPLETE_SUMMARY = "## 核心目标\n内容\n\n## 技术上下文\n内容";
+const INCOMPLETE_SUMMARY = "## 核心目标\n内容\n\n## 约束与偏好\n内容";
 
 function createMockLLM(responses: string[]): SummarizeLLMFn {
   let callIndex = 0;

@@ -59,7 +59,7 @@ const TURN: Turn = {
 const COMPACT: CompactMarker = {
   type: "compact",
   timestamp: "2026-04-09T11:00:00.000Z",
-  summary: "## 核心目标\n用户想了解项目结构\n## 技术上下文\nTypeScript monorepo",
+  summary: "## 核心目标\n用户想了解项目结构\n## 约束与偏好\nTypeScript monorepo",
   turnsCompacted: 15,
   tokensBefore: 45000,
   tokensAfter: 8000,

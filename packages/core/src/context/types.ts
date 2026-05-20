@@ -105,7 +105,7 @@ export const MAX_OUTPUT_RESERVE = 20_000;
  *   - messages: 发送给 LLM 的消息列表（已含指令 prompt）
  *   - opts.abortSignal: 上游传入的 abort 信号；实现必须透传给底层 provider.chat
  *
- * 实现方从 LLMProvider 构造，或从 CLI 的 flushCallLLM 传入。
+ * 实现方由 caller 按需构造——例如装配期按用途分流到不同角色的 LLM 调用 helper。
  */
 export type CompactLLMFn = (
   messages: Message[],
