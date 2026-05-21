@@ -46,6 +46,8 @@ import {
   createEventBus,
   type SchedulerEventMap,
   type WorkModeSwitchIntent,
+  type Conversation,
+  type LoadedTranscript,
   extractText,
   buildWorksceneDigestMessage,
   maybeAutoNameFirstTurn,
@@ -60,6 +62,7 @@ import { createBuiltinExtraToolsAssembly } from "./runtime/builtin-extra-tools.j
 import { createCliSegmentDeps } from "./runtime/segment-deps.js";
 import { ConversationRepoTaskListStore } from "./runtime/task-list-stores.js";
 import { RoutingConversationRepository } from "./runtime/conversation-router.js";
+import { acquireWorksceneConversation } from "./runtime/workscene-conversation.js";
 import { CommandDispatcher } from "./command-dispatcher.js";
 import { TaskTail } from "./task-tail/index.js";
 import { registerTaskCommands } from "./commands/task-commands.js";
@@ -428,12 +431,6 @@ function buildSlashCommands(
     "/new": {
       description: "创建新对话",
       handler: async (state, args) => {
-        if (session.activeMode.kind !== "main") {
-          cliWriter.line(
-            chalk.dim("\n  工作场景中不可新建对话，请先 /exit 退出\n"),
-          );
-          return;
-        }
         const name = args.trim() || undefined;
         try {
           const conversation = await state.conv.convRepo.create({
@@ -468,12 +465,6 @@ function buildSlashCommands(
     "/resume": {
       description: "切换到其他对话",
       handler: async (state, args) => {
-        if (session.activeMode.kind !== "main") {
-          cliWriter.line(
-            chalk.dim("\n  工作场景中不可切换对话，请先 /exit 退出\n"),
-          );
-          return;
-        }
         const input = args.trim();
         if (!input) {
           const conversations = await state.conv.convRepo.list();
@@ -1154,7 +1145,6 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   const config = loadConfig({ cwd: process.cwd() });
   const credentials = loadCredentials({ homeDir: resolveHomeDir() });
 
-  const cwd = process.cwd();
   const scope: ConversationScope = { kind: "user" };
   const convRepo = new ConversationRepository(scope);
   const convDir = conversationsDir(scope);
@@ -1419,34 +1409,67 @@ export async function startRepl(options: ReplOptions): Promise<void> {
         const wStore = new TranscriptStore(
           conversationsDir({ kind: "workscene", sceneId }),
         );
-        // 起始 messages 按触发源：LLM 触发须带入引发进入的那句用户输入（vision：
-        // power 不读 main 历史，但触发那句须带入否则 power 不知干啥）；命令触发
-        // 非对话输入 → 空，用户随后在 workscene 输入。
-        //
-        // 触发句由主回路显式透传该 turn 构造的原始 userMsg —— 不扫描 canonical
-        // 反推：带工具调用的 turn 末尾 tool_result 消息同为 role:"user"
-        // （toolResultMessage），按 role 反查会误取工具结果而非用户原句。
-        const startMessages: Message[] =
-          source === "llm" && triggerMsg ? [triggerMsg] : [];
 
         // 有副作用步骤按序执行，undo 逆序栈在任一步抛错时回退（fail-back）。
         const undos: Array<() => Promise<void> | void> = [];
+        // 命令触发的 auto-resume 降级降级 create 时携带的提示文案，
+        // 仅 enter 整体成功后输出 —— 避免 helper 内即时输出 + 后续步骤
+        // 回滚导致用户看到 "已创建新对话" + "已回退主对话" 的双消息困惑。
+        let acquireWarning: string | undefined;
         try {
           // ① 路由核 register：后续 power turn 的 task_list / 段切换落 workscene
           routingRepo.setActive(worksceneRepo);
           undos.push(() => routingRepo.setActive(mainConv.convRepo));
-          // ② workscene scope 新建 conversation
+          // ② workscene scope 获取 conversation —— 按触发源分支：
+          //   - LLM 触发（workmode_enter 工具）：始终 create 新对话。LLM 是
+          //     为新任务进 scene，若读历史会让 power 上下文被上次无关主题污染、
+          //     answer 跑偏；新建 + 触发句作为起始 message + 第一轮 turn 后
+          //     自动命名落地，不产生孤儿空对话。
+          //   - 命令触发（/enter）：auto-resume 该 scene 最近活跃对话（与 main
+          //     启动 auto-resume 对齐 —— 用户手动进就是为回到最近对话继续）。
           //
           // 不传 name：让 convRepo.create 走默认 name=id（autoChatId）的 sentinel，
           // 与 main 模式 /new 无参一致。scene.name 是工作场景级语义，不应直接占
-          // conversation.name 槽位——否则 N 次进同 scene 会产生 N 个同名对话，
+          // conversation.name 槽位 —— 否则 N 次进同 scene 会产生 N 个同名对话，
           // 在 /resume typeahead 里完全无法区分。命名职责交给自动命名机制（第一
           // 轮 turn 完成后用 light LLM 生成精确主题名）统一接管。
-          const wConv = await worksceneRepo.create({});
-          undos.push(async () => {
-            await worksceneRepo.delete(wConv.id).catch(() => {});
-          });
-          // ③ task_list service cache prime（新建 → 空 items）
+          let wConv: Conversation;
+          let loaded: LoadedTranscript | null = null;
+          if (source === "llm") {
+            wConv = await worksceneRepo.create({});
+          } else {
+            const acquired = await acquireWorksceneConversation(
+              worksceneRepo,
+              wStore,
+            );
+            wConv = acquired.conversation;
+            loaded = acquired.loaded;
+            acquireWarning = acquired.warning;
+          }
+          // undo：仅 create 路径（LLM 触发 / 命令触发首次 / 命令触发降级）才
+          // push delete —— recovery 路径必须保留用户已有历史对话，不能因
+          // 后续 enter 步骤失败被回滚误删。
+          if (loaded === null) {
+            undos.push(async () => {
+              await worksceneRepo.delete(wConv.id).catch(() => {});
+            });
+          }
+          // 起始 messages 按触发源 × 路径：
+          //   - LLM：[triggerMsg]（触发句须带入否则 power 不知干啥）
+          //   - command-recovery：loaded.messages（接续历史对话）
+          //   - command-create / command-降级：[]（用户随后在 workscene 输入）
+          //
+          // 触发句由主回路显式透传该 turn 构造的原始 userMsg —— 不扫描 canonical
+          // 反推：带工具调用的 turn 末尾 tool_result 消息同为 role:"user"
+          // （toolResultMessage），按 role 反查会误取工具结果而非用户原句。
+          const startMessages: Message[] =
+            source === "llm" && triggerMsg
+              ? [triggerMsg]
+              : loaded
+                ? loaded.messages
+                : [];
+          // ③ task_list service cache prime（新建 → 空 items；recovery → 读
+          // 已落盘的 task_list state）
           await state.taskListService.prime(wConv.id);
           undos.push(() => state.taskListService.clear(wConv.id));
           // ④ 装 power runtime + broker swap（其自身原子由 RuntimeSession 保证）
@@ -1454,18 +1477,21 @@ export async function startRepl(options: ReplOptions): Promise<void> {
           undos.push(async () => {
             await session.exitWorkMode();
           });
-          // enterWorkMode 后 session.runtime=power，transcript 头记准确模型
-          await wStore.init(wConv.id, {
-            model: session.runtime.model,
-            provider: session.runtime.providerId,
-          });
+          // enterWorkMode 后 session.runtime=power，transcript 头记准确模型。
+          // recovery 路径 transcript 已存在 → 不 init（init 会覆盖丢数据）。
+          if (loaded === null) {
+            await wStore.init(wConv.id, {
+              model: session.runtime.model,
+              provider: session.runtime.providerId,
+            });
+          }
           // ⑤ 构造并切 active（纯赋值，最后一步、不可能抛错 → 无需 undo）
           state.conv = {
             messages: startMessages,
             store: wStore,
             convRepo: worksceneRepo,
             conversationId: wConv.id,
-            turnCounter: 0,
+            turnCounter: loaded?.turnCount ?? 0,
             lastToolEndCount: 0,
             hasProposedSkill: false,
             journalCondenseDone: false,
@@ -1497,6 +1523,9 @@ export async function startRepl(options: ReplOptions): Promise<void> {
               `${scene.workdir ? chalk.dim(`（${scene.workdir}）`) : ""}\n  ${sep}\n`,
           ),
         );
+        if (acquireWarning) {
+          cliWriter.line(chalk.dim(`  ${acquireWarning}\n`));
+        }
         taskTail?.refresh();
         return;
       }

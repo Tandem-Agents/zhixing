@@ -19,6 +19,7 @@ import {
   RunRegistry,
   createEventBus,
   generateTurnId,
+  getZhixingHome,
   type AgentTurnParams,
   type SchedulerEventMap,
   type AgentTurnResult,
@@ -122,6 +123,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   const port = opts.port ?? DEFAULT_SERVER_CONFIG.port;
   const host = opts.host ?? DEFAULT_SERVER_CONFIG.host;
   const workspace = opts.workspace ?? process.cwd();
+  const zhixingHome = getZhixingHome();
 
   // 启动期检查——加载 config + credentials，校验 schema，按 server 模式
   // 检查 model + messaging 必要字段；缺字段且 TTY 触发配置编辑器，否则 fail-fast。
