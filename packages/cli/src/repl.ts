@@ -42,6 +42,7 @@ import {
   type ArgQueryContext,
   type ArgChoice,
   type ArgSchema,
+  type SuggestionItem,
   Scheduler,
   createEventBus,
   type SchedulerEventMap,
@@ -63,6 +64,7 @@ import { createCliSegmentDeps } from "./runtime/segment-deps.js";
 import { ConversationRepoTaskListStore } from "./runtime/task-list-stores.js";
 import { RoutingConversationRepository } from "./runtime/conversation-router.js";
 import { acquireWorksceneConversation } from "./runtime/workscene-conversation.js";
+import { switchToNewConversation } from "./runtime/switch-to-new-conversation.js";
 import { CommandDispatcher } from "./command-dispatcher.js";
 import { TaskTail } from "./task-tail/index.js";
 import { registerTaskCommands } from "./commands/task-commands.js";
@@ -456,25 +458,14 @@ function buildSlashCommands(
       handler: async (state, args) => {
         const name = args.trim() || undefined;
         try {
-          const conversation = await state.conv.convRepo.create({
-            name,
-            preferredModel: session.runtime.model,
-            preferredProvider: session.runtime.providerId,
-          });
-          await state.conv.store.init(conversation.id, {
-            model: session.runtime.model,
-            provider: session.runtime.providerId,
-          });
-          state.conv.messages = [];
-          state.conv.conversationId = conversation.id;
-          state.conv.turnCounter = 0;
-          state.conv.lastToolEndCount = 0;
-          // 新建对话无持久化 task_list 状态，prime 后 cache 项为空 items 列表
-          await state.taskListService.prime(conversation.id);
-          state.conv.convRepo.touch(state.conv.conversationId).catch(() => {});
-          onConversationChanged?.();
+          const created = await switchToNewConversation(
+            state.conv,
+            session,
+            state.taskListService,
+            { name, notify: onConversationChanged },
+          );
           cliWriter.line(
-            chalk.dim(`\n  已创建新对话 ${chalk.cyan(conversation.name)}\n`),
+            chalk.dim(`\n  已创建新对话 ${chalk.cyan(created.name)}\n`),
           );
         } catch (err) {
           cliWriter.line(
@@ -1726,6 +1717,13 @@ export async function startRepl(options: ReplOptions): Promise<void> {
         }
         return choices;
       },
+      // opt-in 物理删除能力 —— 启用 typeahead "delete ctrl+d" UI(参 broker
+      // 的 computeDeletable hook + Panel 红背景准备态 + InputController 二次按确认)。
+      // 仅做数据层物理删除,业务编排(active 切换 / 自动新建 fallback)由
+      // onCandidateDelete callback 在 cli 层处理。
+      async delete(value: string, _signal: AbortSignal): Promise<void> {
+        await state.conv.convRepo.delete(value);
+      },
     };
 
     const resumeArgSchema: ArgSchema = {
@@ -1801,6 +1799,47 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     now: Date.now(),
   });
 
+  // typeahead 候选删除 callback —— Ctrl+D 二次按下时触发(仅当前 trigger 的
+  // provider 通过 computeDeletable 声明支持时)。本函数负责"物理删除 + 业务编排":
+  // 物理删除经 conversationArgProvider.delete → state.conv.convRepo.delete;若删的
+  // 是当前 active 对话则自动新建空对话切换(转载启动 auto-resume 同款 fallback,
+  // 视图层 reset 与 /clear handler 同款)。删的非当前对话仅删除不切换 active。
+  // 实施完成后由 InputController 调 broker.refresh 刷新候选列表(本回调无需感知)。
+  const onCandidateDelete = async (item: SuggestionItem): Promise<void> => {
+    const value =
+      typeof item.acceptPayload.metadata?.argValue === "string"
+        ? item.acceptPayload.metadata.argValue
+        : undefined;
+    if (!value) return;
+
+    const wasActive = value === state.conv.conversationId;
+
+    try {
+      await state.conv.convRepo.delete(value);
+    } catch (err) {
+      cliWriter.line(
+        chalk.red(
+          `\n  删除对话失败: ${err instanceof Error ? err.message : String(err)}\n`,
+        ),
+      );
+      return;
+    }
+
+    if (!wasActive) return;
+
+    try {
+      await switchToNewConversation(state.conv, session, state.taskListService, {
+        notify: () => taskTail?.refresh(),
+      });
+    } catch (err) {
+      cliWriter.line(
+        chalk.red(
+          `\n  新建空对话失败: ${err instanceof Error ? err.message : String(err)}\n`,
+        ),
+      );
+    }
+  };
+
   // 持久输入区——typeahead 模式下绑定 renderScreen（与 renderer / EventBus 渲染共用同一
   // 屏幕协调器），inputController 长生命周期持有 buffer / chrome / panel / paste，turn 间不
   // cleanup；主循环每轮 await inputController.waitOnce() 拿下次用户输入。
@@ -1813,6 +1852,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       screen: renderScreen ?? undefined,
       placeholder: "输入消息或 / 查看命令",
       registry: pasteRegistry,
+      onCandidateDelete,
     });
     inputController.start();
 

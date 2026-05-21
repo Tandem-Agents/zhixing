@@ -19,171 +19,118 @@
 
 ---
 
-## 当前 staging:REPL 输入与命令体验三项小改
+## 当前 staging:`/resume` 对话删除功能
 
 ### 明确需求
 
-1. **中文顿号 "、" 在输入行首位按命令唤醒符 `/` 处理**:输入行首位字符是 "、" 时(中文输入法下 `/` 键位对应字符),按 `/` 路径处理 —— 显示层保留用户实际输入的 "、" 字符,但解析层(typeahead 命令列表弹出 / 命令名匹配 / 回车提交执行)完全当作 `/` 处理。理由:中文输入法切换误打 "、" 后删除再重打效率低,而首位字符是 "、" 明显不是有效用户输入内容,可直接当 `/` 解析。仅首位字符触发,后续字符的 "、" 不替换语义(命令参数中的 "、" 保留原义)
-2. **`/clear` 执行后 UI 重置为刚进入交互模式时的初始态**:现状执行后仅在历史对话末尾追加一行提示,历史仍占满屏。期望:执行后**清屏 + 重渲染刚进入交互模式时的初始区域(advisories + welcome chrome)**,然后追加一行轻量提示。提示文案由设计阶段确认。数据层(messages / transcript compact / view layer reset)行为不变
-3. **`/workscene` 命令重命名为 `/work`**:`/workscene` 字面太长,且作为带二级指令(`<scene id/name>`)的命令,二级指令前必须输完整一级名才能继续,typeahead 直接选会触发无参数交互,所以必须手动输完整。缩短到 `/work`,无 legacy alias 直接换(参照 `/switch → /resume` 改名手法,全仓代码 + 测试 + spec/README 字面同步)
+1. **`/resume` 候选列表的 argument hint 行替换为"delete ctrl+d"功能区**:现状该行渲染当前参数的 ArgSchema(`/resume` 的 `conversation` 参数 kind=`async-enum`,显示 `[conversation: …]`),但 dropdown 已显示候选列表,hint placeholder 零信息量。改为显示 "delete ctrl+d",承载"删除选中对话"功能入口
+2. **二次按键确认删除**:用户在候选列表选中某条对话后,第一次按 `Ctrl+D` → **当前选中的对话行整行变红色背景填充 + 浅色文字**(对齐 Claude Code 删除二次确认的危险动作警告样式,视觉焦点直接落在"要被删的那条对话"上 —— 用户一眼看到自己要删哪条),同时底部 argument hint 行**仅文案切换**为 "再按一次 ctrl+d 确认删除"(不动背景);第二次按 `Ctrl+D` → **干净彻底删除当前选中的对话**(物理删除,非软删除 —— transcript / meta / 整个 conversation 目录全删)
+3. **准备态取消**:第一次按 `Ctrl+D` 后,**任何其他按键**(↑↓ 切换候选 / 改 query / Esc / Enter / 普通字符等)都取消准备态,选中行恢复默认选中态渲染(红色背景填充移除,❯ + 高亮文字),底部 argument hint 行文案恢复 "delete ctrl+d"
+4. **删除当前正在使用的对话**(列表标 "← 当前" 那条):删除后**自动新建空对话无缝衔接**(用户当前 active conversation 切到新对话)
+5. **删完最后一个对话(列表空)**:**自动新建空对话**(与启动 auto-resume `findLatest` 无 latest 时降级 create default 的语义一致)
+6. **范围**:main 模式 + work 模式都生效(各自 scope 下的 conversation 列表),即在 work 模式下 `/resume` 列出的是当前 work scene 的 conversations,删除也只动该 scene 域
+7. **Ctrl+D 原语义完全释放**:删除 Ctrl+D 在 `typeahead-input.ts:590-601` 的两个原语义 —— ① buffer 空时 `fireCancel("ctrl-d")` REPL EOF 退出;② buffer 非空时 `deleteForward()`(删 cursor 后字符)。Ctrl+D 仅在 typeahead `conversation` 候选激活时生效作"删对话",其他场景 no-op。理由:退出语义被 Ctrl+C 完全覆盖(双击 Ctrl+C 退出协议)、deleteForward 是冷门 readline 默认(99% 用户用 Backspace 从尾删),释放 Ctrl+D 避免三层条件判断与误删风险(用户在 `/resume xxx` 输 query 时 typeahead 已激活,若 Ctrl+D 仍保留 deleteForward 会触发"想删 query 字符却删了对话"的误操作)
 
 ### 架构设计
 
-三项需求互相**正交无依赖**,可串行设计串行实现。共同纪律:**语义边界单点拦截 + 单一事实源 + 纯函数可测 + 零架构债**(不引入兼容/降级/双轨)。
+**总览**:删除能力作为 typeahead 通用基础设施的**可插拔扩展**,而非"对话删除"专属硬编码。`ArgChoiceProvider` 接口加可选 `delete?` 方法,任何 async-enum 类型(目前只 conversation,未来 /people 等同款)opt-in 即可获得"delete ctrl+d"功能,Panel / InputController / Broker 零额外感知具体业务。改动跨 4 层 / 5 个模块,职责严格分离。
 
-#### R1 — 首位 `、` → `/` 别名规范化
+**关键事实**:
+- `ConversationRepository.delete()` (repository.ts:158-172) 是**软删除 rename 到 `~/.zhixing/trash/<id>-<ts>/`**,注释说"7 天后由外部清理",但**全仓 grep 无 restore 入口、无 trash 清理脚本** —— 是"永久残留"死代码软删
+- WorkSceneRegistry 在前 staging 已**废弃 trash 语义**(`registry.test.ts:162` 测试断言"不会创建 trash 目录"),conversation 这条是漏跟进的架构债
+- `delete()` 有 `isDefault` 守卫(L160-162),与需求"删当前对话(可能是 default)无缝衔接"冲突
+- `conversationArgProvider`(repl.ts:1704)用闭包捕获 `state`(convRepo + store),加 `delete()` 方法天然就近
+- typeahead 状态机权威在 `TypeaheadBroker`(`@zhixing/core/typeahead`),Panel 纯订阅 `TypeaheadSessionState` 渲染;InputController 持 keypress 但不持 typeahead 状态
 
-**事实**:命令解析有四个语义边界硬编码 `/` —— ① `CommandProvider.matchTrigger` 调 `findTriggerToken(triggerChar: "/")`;② `InputController.submit()`(typeahead-input.ts:831)的 `text.startsWith("/")` 分支;③ `CommandDispatcher.dispatch()`(command-dispatcher.ts:105)的 `trimmed.startsWith("/")` 保险检查;④ `runLegacyCommand`(repl.ts:1860)的 `trimmed.startsWith("/")`——legacy 终端(无 chrome 能力时,`useTypeahead=false`)走 `rl.question` 接收 input 后直接调本路径,**完全不经** InputController。①②③ 共属 chrome 路径(经 `InputController.submit()`),④ 是与之互斥的 legacy 路径。`InputBuffer.toTriggerContext()` 喂 broker;`InputController.submit()` 取 rawDraft 同时驱动 echo(显示)和 dispatch(语义)——显示路径与语义路径在 `submit()` 这一点天然分叉(rawDraft 给 echo、normalized text 给 dispatcher)。legacy 路径无 echo 层,本就**没有"显示/解析分叉"可言**——`rl.question` 由 readline 自己写屏,用户输什么终端显什么。
+#### 模块边界与职责
 
-**目标**:产品规则"`、` 首位等价于 `/`(仅首位、仅触发字符位置)"封装成独立模块,**显示层零感知**(保留 `、`),**语义层全部经规范化**(下游硬编码 `/` 不动)。
+| 层 | 职责 | 不做 |
+|---|---|---|
+| `ArgChoiceProvider` 接口 | 加可选 `delete?(value, signal): Promise<void>` —— 仅物理删除该候选 | 不管业务编排(切对话 / 自动新建) |
+| `TypeaheadSessionState` / `TypeaheadBroker` | 加 `deletable: boolean`(当前激活 trigger 是否支持 delete)+ `deletePending: string \| null`(当前准备删的 `SuggestionItem.id`);`SuggestionProvider` 接口加新 hook `computeDeletable?(match): boolean`(与 `computeGhostText` / `computeArgumentHint` 同款 opt-in 扩展点 —— broker 是通用 provider 抽象层,**不能跨层访问** `ArgumentProviderData` / `ArgChoiceProvider` 等下层数据结构;让 provider 自决);broker 在 `setLoadingFinished` 调 hook 写入 `state.deletable`;加 `markDeletePending(sessionId, suggestionId \| null)` 作为该字段**唯一**变更入口;**`deletePending` 字段单源不变量**:`setSessionState` 入参类型 `Omit<TypeaheadSessionState, "deletePending">`,内部强制设 `null`,任何走 `setSessionState` 的 mutate 路径(含 broker.ts:338 用 `...session.state` spread 续 typing 路径)自动 reset → 实现需求 3"任何其他按键取消" 由 broker 自身保证,InputController 零额外职责;`markDeletePending` 单独走专属内部 setter(改字段 + 调 emit helper),不复用 setSessionState;加 `refresh(sessionId): void` API —— 语义"强制重新 query 当前 trigger,canonical(`suggestions` / `selectedIndex` / `ghostText` / `argumentHint`)重置 + `loading=true`",`onCandidateDelete` 完成后由 InputController 调用触发候选列表刷新 | 不管 UI / 不直接调 provider.delete |
+| `TypeaheadPanel`(tui/typeahead-panel.ts) | 纯订阅渲染:① 选中行渲染时 `state.deletePending === item.id`(对比 SuggestionItem.id,typeahead 现有唯一标识)→ 整行红色背景填充 + 浅色文字(不走原 `dotted-row` highlight 路径,红背景已足够 focus);② argument hint 行分流(deletable + pending → "再按一次 ctrl+d 确认删除" / deletable + 非 pending → "delete ctrl+d" / 非 deletable → 原 `renderedHint`) | 不持交互状态 / 不知道具体业务 |
+| `InputController`(typeahead-input.ts) | Ctrl+D 完全重写:仅在 `state.deletable && state.suggestions.length > 0 && state.selectedIndex >= 0` 时生效;第一次按 → `broker.markDeletePending(sessionId, selected.id)`;第二次按 → `await onCandidateDelete(selected)` callback(接收完整 SuggestionItem)→ **callback 完成后调 `broker.refresh(sessionId)` 触发候选列表刷新**(否则 state.suggestions 残留删前列表导致视觉残留 + selectedIndex 指向已不存在候选);**其他场景 no-op**(原 EOF + deleteForward 两语义彻底删) | 不管业务 / 不管 typeahead 状态机内部 |
+| `onCandidateDelete` callback(repl.ts 注入) | 签名 `(item: SuggestionItem) => Promise<void>`,接收完整 SuggestionItem,业务编排:从 `item.acceptPayload.metadata.argValue`(ArgumentProvider 构造候选时注入的约定字段)提取业务 value(conversation id)→ `await provider.delete(value)` → 若 `value === state.conv.conversationId` 则创建新空对话 + 切 active + reset 视图层 + `onConversationChanged()` 通知 | 不直接操作 typeahead state |
 
-**方案**——新增 `packages/cli/src/runtime/leading-slash-alias.ts` 纯函数模块:
+#### 关键设计决策
 
-```ts
-// 当前约束:SLASH_ALIASES 仅支持单字符 alias。扩展多字符 alias 须同时
-// 重算 syncBroker override 后 ctx.cursor(draft 字符长度变化,cursor 需重映射),
-// 否则 cursor 与 draft 字符索引脱节。
-export const SLASH_ALIASES: readonly string[] = ["、"];
-export function normalizeLeadingSlashAlias(input: string): string {
-  for (const alias of SLASH_ALIASES) {
-    if (input.startsWith(alias)) return "/" + input.slice(alias.length);
-  }
-  return input;
-}
-```
+**决策 1:`ConversationRepository.delete()` 改真物理删除 + 释放 `isDefault` 守卫**
+- 改 `fs.rm(srcDir, { recursive: true, force: true })` 替代 rename to trash
+- 删除 trash 路径计算 + import + 注释 + `repository.test.ts:253` "删除移入 trash 目录" 测试改为 "删除物理删除目录"
+- 释放 `if (conversation.isDefault) throw` 守卫:**事实校正** —— grep 全仓 `ensureDefault` 生产路径**零调用**(repl.ts 启动走 `findLatest` + `convRepo.create({...})`,非 `ensureDefault`),`isDefault` 字段在生产对话上一直 `false`(repository.ts:130 `create` 时硬编码 `false`),`isDefault` 守卫(delete L160-162、archive L150-151)从未在生产触发过 —— 是永不触发的死分支。释放守卫即清理死分支(代码层面允许删任何对话,生产对话因 `isDefault` 一直 false 行为等价不变;若未来恢复 `ensureDefault` 调用,被删后下次调 `ensureDefault` 自动重建固定 id,与"语义清楚化"目标兼容)
+- 对齐 WorkSceneRegistry 已确立的"废弃 trash"纪律,消除架构债
+- **范围控制**:`ensureDefault` / `DEFAULT_CONVERSATION_ID` / `isDefault` 字段整体是更大的死代码债(仅测试在用,生产路径零调用),**本 staging 不做整体清理**(独立 task,避免范围 creep)
 
-chrome 路径两处 callsite 均在 `typeahead-input.ts`:
-1. `syncBroker()`:取 `buffer.toTriggerContext(runtime)` 后,把 `ctx.draft` override 为 `normalizeLeadingSlashAlias(ctx.draft)` 再喂 broker → typeahead 候选列表 / ghost text 看到 `/help`
-2. `submit()`:`text = normalizeLeadingSlashAlias(expanded.trim())` 再走原 `text.startsWith("/")` 分支 → rawDraft 给 echo 显示 `、help`,text 给 dispatcher 走 `/help`
+**决策 2:`deletable` 由 broker 调 provider 新 hook 自决(不跨层访问 provider 内部)**
+- `SuggestionProvider` 接口加 opt-in hook `computeDeletable?(match): boolean`,与 `computeGhostText` / `computeArgumentHint` 同款扩展点
+- `ArgumentProvider` 实现:`return data.currentSchema?.kind === "async-enum" && !!data.currentSchema.provider.delete`;`CommandProvider` / `FileProvider` 等不实现(默认 false)
+- broker 在 `setLoadingFinished` 调 hook 写入 `state.deletable`,**不直接读** `ArgumentProviderData` / `ArgChoiceProvider` 等下层结构(broker 是通用 provider 抽象层,跨层访问破坏抽象边界 —— hook 让 provider 自决是干净分层)
+- typeahead-input / Panel 不需感知具体 schema/provider 类型,仅读 session state
+- 可插拔性:未来其他 async-enum 加 `provider.delete` 即自动启用 UI,broker / typeahead-input / Panel 零额外感知
 
-legacy 路径(repl.ts:1920-1934)**不接入 normalize** —— legacy 无 echo 分叉,`rl.question` 由 readline 自己写屏:若把 `trimmed` 也 normalize,屏幕已显示 `、help` 但执行 `/help`,显示与解析仍不一致(与 chrome 路径"echo 显 `、` + 执行 `/`"的视觉契约**根本无法对齐**,因为 readline 那行字已经写在 scrollback 里无法回改);若不 normalize,行为等于"legacy 模式不支持 alias",语义清晰。chrome 是主流路径(Windows ConPTY / Win Terminal / iTerm / 主流 Linux 终端均触发 `capability.ok=true`),legacy 仅古老 / 探测失败终端兜底,产品上可接受。
+**决策 3:`deletePending` 放 broker session state 而非 InputController local + 严格单源不变量**
+- Panel 是纯订阅渲染(单源真相 = broker state),InputController local 状态需 Panel 主动 query 破坏单源
+- broker state 让 Panel 自动 reactive 渲染,与既有 ↑↓ 选中状态同款数据流
+- **deletePending 字段单源不变量**(关键):`setSessionState` 入参类型 `Omit<TypeaheadSessionState, "deletePending">`(类型层面禁止 caller 通过 setSessionState 设置 deletePending),内部强制 `null`;所有走 setSessionState 的 mutate 路径(含 broker.ts:338 `...session.state` spread 续 typing 路径,该路径若按 `...session.state` spread 会 carry 旧 deletePending 导致 stale,本不变量根治)自动 reset deletePending → 需求 3 "任何其他按键取消" 由 broker 单源不变量保证,InputController 无需在每个 keypress 路径显式取消(零职责漂移)
+- `markDeletePending` 是 deletePending 字段**唯一**变更入口,走专属内部 setter(改字段 + 调既有 emit listeners helper),与 setSessionState 路径正交
 
-**Trade-off**:
-- 不在 `InputBuffer` 内做 —— 它是底层 widget 状态容器,不该知 REPL 业务别名规则;`InputController` 才是业务层,在它两个语义出口拦截才职责正确
-- 不在 `findTriggerToken` 加 alias 参数 —— 那会把"输入法 alias"概念下沉到 `@zhixing/core/typeahead` 通用基础设施污染 core 层;CLI 层产品规则该留在 CLI 层
-- 用 readonly 数组而非单字符常量 —— 配置式,日后扩展(其他输入法误打字符)改一行不动函数,也方便单测参数化
-- legacy 路径不支持 alias —— 见上方说明,legacy 无显示/解析分叉无法对齐 chrome 路径的视觉契约,且 legacy 受众极少,接受此边界
+**决策 4:`provider.delete` 仅物理删除,业务编排在 cli 层 onCandidateDelete**
+- provider 是 typeahead 通用基础设施(@zhixing/core),不知道 conversation 业务(active id / scope / runtime / view layer)
+- onCandidateDelete callback 在 cli repl.ts 闭包定义,捕获完整业务上下文
+- main scope + work scope 都生效:`state.conv.convRepo` 是 RoutingConversationRepository(前 staging 已落地),自动跟随 active mode,callback 零额外分支
 
-**实施**:
-- 新增 `runtime/leading-slash-alias.ts`(函数 + 别名数组 + 单字符约束注释)
-- 新增 `runtime/__tests__/leading-slash-alias.test.ts` 7 case:空串 / 首位 `/` / 首位 `、` / 首位其他字符 / `、、` 仅替首位 / `、 ` 后跟空格 / `text、` 非首位不替
-- 改 `typeahead-input.ts`:`syncBroker()` override draft + `submit()` 规范化 text(legacy 路径 `repl.ts:1920-1934` 不动)
+**决策 5:argument hint 行分流策略**
+- deletable + pending → "再按一次 ctrl+d 确认删除"
+- deletable + 非 pending → "delete ctrl+d"
+- 非 deletable → 原 `renderedHint`(向后兼容,不破坏其他命令 ArgSchema 的 hint 渲染)
+- 单一位置(typeahead-panel meta 段)分流,Panel 知道 deletable + deletePending 即可决定文案
 
-**验收**:输入 `、resu` → typeahead 弹 `/resume` 候选;回车 → echo 显示 `、resume`,实际执行 `/resume`;输入 `hello、` 末尾的 `、` 保留原义不触发命令面板。
+**决策 6:`deletePending` 存 `SuggestionItem.id`,`onCandidateDelete` 接收完整 SuggestionItem**
+- `deletePending: string | null` 存的是 `SuggestionItem.id`(typeahead 现有唯一标识,格式如 `arg:resume:conversation:<conv_id>`),不存"业务 value":SuggestionItem.id 是 typeahead state 内一阶标识,Panel 对比 `item.id === state.deletePending` 渲染红背景,与 selectedIndex 对比同款数据流;若改存业务 value(如 conversation id),Panel 要再解析 id 后缀对比破坏抽象
+- `onCandidateDelete` callback 签名 `(item: SuggestionItem) => Promise<void>`:接收完整 SuggestionItem,callback 内部从 `item.acceptPayload.metadata.argValue`(`ArgumentProvider` 在构造候选时已注入,见 `argument-provider.ts:184`,是**既有约定字段**而非本 staging 新增)提取业务 value,而非从 id 后缀解析 — id 后缀格式是 typeahead 内部约定,callback 不应耦合
+- 既有 `metadata.argValue` 约定直接复用,**零新增字段**,callback 取 `metadata.argValue as string` 即得业务值
 
-#### R2 — `/clear` UI 重置到初始态
+#### Trade-off
 
-**事实**:`initialRegionLines()` (repl.ts:1257) 已是 advisories + welcome chrome 的单一来源,延迟求值(每次调用按当时 session 状态生成)。`renderScreen.rebuildAfterResize(buildContent: () => string)` 是"整屏清(`\x1b[2J\x1b[3J\x1b[1;1H` 含 **terminal scrollback** 全清)+ chrome 自适应重画 + region 内容重写"的成熟原语(screen-controller.ts:767,序列与 firstAttach 同源),resize 路径(repl.ts:1789-1795)已是参考样板。`/clear` 数据层逻辑(transcript compactAll + runtime resetConversationState + clearViewLayerState + taskListService.clear)完整正确,**仅 UI 重置缺失**。handler 中 `resetConversationState` / `clearViewLayerState` 两个 try/catch 块会在失败时 `cliWriter.line` 写 yellow 非致命 warning(repl.ts:367-371、380-384)到 scroll region —— 若直接调 rebuildAfterResize 这些 warning 会被一并清掉,**用户失去可观测性**。`renderScreen` 在 legacy 终端(无 chrome 能力)为 null,须有降级路径。
+- 不在 InputController 内推导 deletable:推导需要看 ArgSchema + provider.delete 是否存在;ArgSchema 由 ArgumentProvider 持有,InputController 反向访问破坏分层 —— broker 持完整 schema 信息(query 时拿到),计算 deletable 后写入 state 是最干净的
+- 不让 provider.delete 自带 post-delete 编排:provider 应保持通用 typeahead 基础设施职责,业务上下文(active conversation / runtime / scope)归 cli 层
+- 不保留 trash 软删除作"安全网":trash 无 restore + 无清理 = 永久残留,既不是"安全"也不是"网",纯架构债;用户原话明确"干净彻底"
+- 不删 default 概念整体(仅释放守卫):本 staging 不做无关清理范围 creep;default 仍是启动 fallback 的预创建 id,删后重建无副作用,后续 staging 可独立评估是否废弃
+- 准备态文案区分 deletable/非 deletable:其他 ArgSchema(非 conversation,如未来 enum 类型 `/permission` 的 level 参数)仍走 `renderedHint` —— 不破坏既有命令的 hint 渲染
+- **Ctrl+D 释放后 EOF 退出语义断层**:用户在 buffer 空 + typeahead 未激活(如刚启动 cli)按 Ctrl+D 完全 no-op,Mac/Linux 用户 Ctrl+D 退 shell 习惯被破坏。接受静默 no-op trade-off(Ctrl+C 双击退出协议仍能覆盖退出场景;`/help` 已是命令清单权威,不专门为 Ctrl+D 加说明 —— 避免每个被释放的旧绑定都要文档解释,反而污染 /help)
 
-**目标**:`/clear` 数据层零改,UI 层复用现有 `initialRegionLines + rebuildAfterResize` 原语,在 `buildSlashCommands` 边界上**注入一个"清屏到初始态"高阶能力**,handler 不知 renderScreen / initialRegionLines 内部细节。
+#### 实施步骤(渐进可验证)
 
-**方案**——startRepl 顶层(renderScreen + initialRegionLines 闭包内)定义,签名带 `extraLines` 参数承接 handler 收集的 warnings:
+按依赖关系 + 风险递增:
 
-```ts
-const clearScreenToInitial:
-  | ((extraLines?: readonly string[]) => void)
-  | undefined = renderScreen
-  ? (extraLines) => {
-      const clearedNotice = `${layout.contentPrefix}${chalk.dim(
-        "⟳ 对话已清空 · 可以从这里开始新一轮",
-      )}`;
-      renderScreen.rebuildAfterResize(() =>
-        [...initialRegionLines(), ...(extraLines ?? []), clearedNotice]
-          .map((l) => `${l}\n`)
-          .join(""),
-      );
-    }
-  : undefined;
-```
+**Step 1**:`core/conversation/repository.ts` `delete()` 改物理删除 + 释放 default 守卫 + 删 trash 相关 import / 注释;更新 `repository.test.ts`(改"移入 trash"为"物理删除"测试 + 改"default 不可删"为"default 可删")。验:`pnpm --filter @zhixing/core test`
 
-`buildSlashCommands` 签名新增参数 `clearScreenToInitial?: (extraLines?: readonly string[]) => void`;`/clear` handler 把现有两个 try/catch 内的 `cliWriter.line(chalk.yellow(...))` 改为 push 到本地 `warnings: string[]`,末尾分流:
+**Step 2**:`core/typeahead/types.ts` `ArgChoiceProvider` 加 `delete?(value, signal): Promise<void>`;`SuggestionProvider` 加 opt-in hook `computeDeletable?(match): boolean`;`TypeaheadSessionState` 加 `deletable: boolean` + `deletePending: string | null`;`ArgumentProvider` 实现 `computeDeletable`(返回 `data.currentSchema?.kind === "async-enum" && !!data.currentSchema.provider.delete`)—— `metadata.argValue` 既有(`argument-provider.ts:184`)直接复用无需新增;`broker.ts` 改造 `setSessionState` 入参类型为 `Omit<TypeaheadSessionState, "deletePending">` 内部强制 `null` + 抽 `emitSessionChange(session)` 私有 helper 复用 listener 通知 + 加 `markDeletePending(sessionId, suggestionId | null)` 走专属内部 setter(改字段 + 调 emit helper)+ 各 6 处 setSessionState 调用 build 的对象不带 deletePending field(broker.ts:338 spread 路径仍 spread `session.state` 是 OK 的 —— `setSessionState` 类型层面禁止 deletePending 字段,内部强制 null,spread 后被覆盖)+ `setLoadingFinished` 调 `provider.computeDeletable?.(match) ?? false` 写入 `state.deletable` + 加 `refresh(sessionId)` API(实现:从 session.lastContext / activeProvider 重新构建 TriggerContext + match,调 runQuery 强制走 `isNewTrigger=true` 分支让 canonical 重置为 empty + loading=true,resolve 后看到新候选)。补 broker 单测覆盖:① 各 mutate 入口自动 reset deletePending ② markDeletePending 设置 → 后续 mutate 自动清 ③ computeDeletable hook 命中/未命中两态 ④ refresh 后 state canonical 重置 + 重新 query
 
-```ts
-const warnings: string[] = [];
-// resetConversationState / clearViewLayerState 失败时 push 到 warnings
-// (替代原 cliWriter.line yellow,文案保持不变)
-// ...
-if (clearScreenToInitial) {
-  clearScreenToInitial(warnings);
-} else {
-  for (const w of warnings) cliWriter.line(w);
-  cliWriter.line(chalk.dim(`${layout.contentPrefix}对话历史已清空\n`));
-}
-```
+**Step 3**:`cli/tui/typeahead-panel.ts` `buildCandidatePayload` 加 deletePending 比对参数(红背景填充);meta 段 argument hint 分流(deletable + pending / deletable / 非 deletable 三态)。补 panel 单测三态
 
-**提示文案**:`⟳ 对话已清空 · 可以从这里开始新一轮` —— 与 resize notice(`⟳ 已适配新窗口 · 历史对话未丢失……`)风格对齐(同 `⟳` 前缀 + `·` 分隔 + dim),传递"重置完成 + 可以继续"双信号。
+**Step 4**:`cli/typeahead-input.ts` Ctrl+D 完全重写(删原 EOF + deleteForward 两语义 + 相关 `tryAtomicKeypress("delete")` 路径同步删,新逻辑见模块表);加 `onCandidateDelete?: (item: SuggestionItem) => Promise<void>` 到 InputControllerOptions;第二次按 Ctrl+D 路径:`await onCandidateDelete(selected)` 完成后**调 `broker.refresh(sessionHandleId)`** 触发候选刷新(避免删后视觉残留 + selectedIndex 指向已不存在候选);更新既有 typeahead-input 测试(删原 Ctrl+D 行为期望)
 
-**Trade-off**:
-- 不让 handler 自己取 renderScreen + initialRegionLines —— buildSlashCommands 参数已 6 项,再各加 2 项扩散无故;把"UI 重置"作为高阶能力注入是单一职责的正解,日后若 `/new` 等也需"清屏到初始态"可直接复用
-- 不抹去 `resumedConversationName`(重渲染时仍显示"恢复对话:foo")—— `/clear` 是"清对话内容不改对话身份",resume 来源是"如何来到这个对话"的事实,与"清内容"语义正交,抹去违反纪律
-- 不强行让 `/new` 共用 —— `/new` 切换 conversation 身份,UI 重置语义不同(有"已切到新对话"提示流),不预设统一
-- 复用 `rebuildAfterResize` 含 `\x1b[3J` 清 terminal scrollback —— 与 `/clear` 数据层 `compactAll` 写 marker 物理压缩磁盘历史的语义一致("清空 + 重新开始"包含滚动历史);不接受 trade-off 反例(保留 scrollback)的理由:scrollback 残留与磁盘已压缩的 transcript 不一致,反成用户认知噪音
-- warnings 经 `extraLines` 注入 region 内容而非走 `cliWriter` —— 因 rebuild 会清 scroll region,若 warnings 先写再 rebuild 则丢失;统一收集 → 整屏重建时一并落 region,可观测性零损失
+**Step 5**:`cli/repl.ts` `conversationArgProvider` 加 `async delete(value, signal)`(`await state.conv.convRepo.delete(value)`);定义 `onCandidateDelete = async (item: SuggestionItem) => { ... }` 闭包(从 `item.acceptPayload.metadata?.argValue` 提取 value 后做物理删除 + 当前对话判断 + 自动新建空对话切换 + onConversationChanged);传入 InputController(同 R2 clearScreenToInitial 注入模式)。verify main + work 两 scope 行为一致(state.conv.convRepo 自动跟随 RoutingConversationRepository)
 
-**实施**:
-- repl.ts 顶层 startRepl 内(initialRegionLines 之后)闭包定义 `clearScreenToInitial(extraLines?)` 
-- `buildSlashCommands` 签名加 `clearScreenToInitial?: (extraLines?: readonly string[]) => void` 参数
-- `/clear` handler 改写:两个 try/catch 把 yellow warning push 到本地 `warnings` 数组(文案不变),末尾按是否有 `clearScreenToInitial` 分流(chrome 路径传 warnings 整屏重建 / legacy 路径逐行 cliWriter 写后追加提示)
-- 调用 `buildSlashCommands(...)` 处传入 `clearScreenToInitial`
-- **换行规范**:`warnings` 数组每个元素是**不含 `\n` 的单行内容**(空行用空字符串 `''` 表示),统一由数组拼接处的 `map(l => l + '\n')` 控制换行——与 `initialRegionLines()` 的同款契约对齐。push 时把原 `cliWriter.line(chalk.yellow('\n  ...\n'))` 文案前后的 `\n` 去掉(原前后 `\n` 是 cliWriter 协议下的"段前/段后空行"惯例,在数组协议里改由 `''` 元素表达),否则会渲染多余空行
+**Step 6**:跨包 typecheck + test;chrome 终端人工验:① /resume 选第二条 Ctrl+D → 选中行红背景 + hint "再按一次..."  ② 任意键 → 准备态消失 ③ 第二次 Ctrl+D → 真删 + 列表刷新 ④ 删当前 → 立即切到新建空对话 ⑤ work 模式下同款行为 ⑥ 删 default 对话(原守卫释放后)→ 正常物理删除
 
-**验收**:chrome 终端 `/clear` 后屏幕仅剩 advisories(若有)+ welcome chrome + 一行 cleared notice,数据层 messages 已清空;若 reset 失败 warning 出现在 welcome 与 cleared notice 之间不丢失;legacy 终端 `/clear` 行为不变(逐行写 warning + 提示)。
-
-#### R3 — `/workscene` 重命名为 `/work`
-
-**事实**(全仓 `/workscene` 字面命中,与 `workscene` 标识符 / `workscenes` 复数目录路径严格区分):
-- 代码 9 处:repl.ts:254 (legacyKey) / repl.ts:673 (handler key) / repl.ts:683, 721, 748 (usage 文案 + 注释) / session.ts:107, 409, 438 / work-mode-controller.ts:38(均为命令名引用 / docstring 中引用)
-- 文档 6 处:packages/cli/README.md:96 / work-mode.md:274, 275, 276, 277, 300
-- 共 15 处字面
-- `argsByName` 字典无 `workscene` key(子命令是手动 token 解析,非 ArgSchema)—— 无需同步
-- `workmode-tools.ts` LLM 工具 description 不引用命令名(`workmode_enter` 等工具描述自身行为) —— 无需同步
-- 无 alias、无外部 hooks 引用
-
-**目标**:全仓直接换,无 legacy alias,与 `/switch → /resume` 同款手法。
-
-**方案**——精确同步以下字面:
-
-代码层:
-- `REPL_COMMAND_META`:`{ name: "work", description: "工作场景管理（增删改查/归档）", category: "tools", legacyKey: "/work" }`
-- `slashCommands` 字典 key:`"/workscene"` → `"/work"`
-- handler 内部 usage 文案 `/workscene ...` → `/work ...`(4 处)
-- `runtime/session.ts` + `runtime/work-mode-controller.ts` 注释中 `/workscene` → `/work`(4 处)
-
-文档层:
-- `packages/cli/README.md` 命令表
-- `research/design/specifications/work-mode.md` 命令清单 + 编排描述(6 处)
-
-**不动的**(领域标识符,与命令名解耦):
-- 模块路径 `packages/core/src/workscene/`、类型 `WorkScene` / `WorkSceneRegistry`、`ConversationScope.kind: "workscene"`、`workmode_enter` / `workscene_change_approve` 等 LLM 工具名
-- **复数目录路径** `<home>/workscenes/<id>/...`(paths.ts / repository.ts / 多份 spec):这是数据持久化目录层级,与单数命令名 `workscene` 是两个独立领域概念,**与本改名完全无关**
-- description 文案 `"工作场景管理（增删改查/归档）"`(领域概念词,与命令名独立)
-
-**Trade-off**:
-- 不留 `/workscene` alias —— `/switch → /resume` 已确立"无 legacy alias 直接换"纪律;留 alias 让 typeahead 出现双条目混淆,且字符长度的痛点正是要解决的
-- 命令名是 `work` 不是 `ws` 或其他 —— 与 `workscene` 同根、与 `workspace` / `work mode` 用户认知一致;3 字母过短易冲突且认知割裂;与 `/exit`、`/me` 等短命令风格一致
-
-**实施**:精确改上述 15 处字面。收尾验收 pattern `/workscene([^s]|$)`(正则尾部断言排除复数路径 `/workscenes` 假阳性;`grep -F "/workscene"` 是字面子串匹配会误命中 `/workscenes/...`,**不能用**);**必须排除 staging.md 自身 + active-problem.md + problems/ 归档 + drafts/ 草稿**(这些区域合理保留旧名作历史/工作台/草稿引用,沉淀进"最近一次沉淀:"区那一行也必然写"`/workscene` → `/work`"作历史描述,验收若不排除则永远不可能零命中)。
-
-**验收**:用 ripgrep 跑 pattern `/workscene([^s]|$)`,排除 `**/staging.md` / `**/active-problem.md` / `**/problems/**` / `**/drafts/**` 后零命中。**pattern 必须用单引号包裹**(bash 与 PowerShell 同款,单引号抑制变量插值,`$` 直传 rg 作行尾断言);若用双引号则 `$` 需写成 `\$`,但 rg regex 里 `\$` 是**字面美元符号**而非行尾断言,会漏掉行尾的 `/workscene`(如 markdown 列表项 `- /workscene`)。跨 shell 通用形:
-
-```
-rg -n '/workscene([^s]|$)' --glob '!**/staging.md' --glob '!**/active-problem.md' --glob '!**/problems/**' --glob '!**/drafts/**'
-```
-
-行为验收:typeahead 直接选 `/work` 触发工作场景管理列表;`/work add foo` / `/work list` / `/work remove <id>` 全部行为不变。
-
-#### 总验收
+#### 验收
 
 - `pnpm -r typecheck` 严格 tsc 全包 exit 0
-- `pnpm -r test` 全包零回归
-- R1 normalize 函数单测 7 case 全通
-- R2 chrome 终端 `/clear` 后视觉等价于"刚进入交互模式 + 一行 cleared notice";legacy 终端行为不变
-- R3 pattern `/workscene([^s]|$)` 在代码 + 当前权威 spec/README 中零命中(staging.md / active-problem.md / problems/ / drafts/ 历史归档区合理保留旧名,不在验收范围)
+- `pnpm -r test` 全包零回归(基线 5193 + 新增 broker/panel/repository 单测)
+- `core/repository.ts` trash 相关代码 grep 零残留(`grep -rn "trash" packages/core/src/conversation/`)
+- chrome 终端 /resume 按 Ctrl+D 视觉对齐 Claude Code 截图样式
+- main + work 模式各自 /resume + Ctrl+D 行为一致
+- 删除当前对话 → 立即切到新建空对话(turnCounter=0 / messages=[])
+- 删完最后一个 → 同款无缝衔接
+- 删除非当前对话 → active 不变,列表减一
 
 ---
 
 > 最近一次沉淀:
 >
+> - **REPL 输入与命令体验三项小改**(2026-05-21 完成):需求三条 R1 首位 `、`→`/` 别名规范化(中文输入法误打 `、` 直接当 `/` 解析;显示层保留 `、` / 解析层走 `/`)/ R2 `/clear` UI 重置回刚进入交互模式初始态(advisories + welcome chrome + 一行 cleared notice,warnings 经 extraLines 注入避免清屏丢失可观测性)/ R3 `/workscene` → `/work` 改名(16 处字面同步,实施时发现 staging 统计漏了 work-mode.md:64 一处并补改)。新增 [`packages/cli/src/runtime/leading-slash-alias.ts`](../../packages/cli/src/runtime/leading-slash-alias.ts) `SLASH_ALIASES` 单源数组 + 两公开 API:单字符串 `normalizeLeadingSlashAlias(input)` 给 syncBroker(直接 override `ctx.draft`)、双字符串 `normalizeLeadingSlashAliasInExpanded(target, guard)` 给 submit(基于 `rawDraft.trim()` 首位判断、在 `expanded.trim()` 上替换,避免 paste 长内容折叠为 token 后首位恰为 `、` 时被误识别为命令);typeahead-input.ts syncBroker 用 spread + override draft、submit 用 InExpanded 双参数;repl.ts 顶层 startRepl 闭包 `clearScreenToInitial(extraLines?: readonly string[])` 复用 `rebuildAfterResize` + `initialRegionLines` 单源原语,buildSlashCommands 加注入参数,/clear handler 收集 warnings push 到本地数组(去前后 `\n`)、末尾按是否 chrome 分流(chrome 整屏重建 [advisories,"",welcome,"",warnings...,clearedNotice] 单一来源 / legacy 逐行 cliWriter)。Ctrl+D 原 deleteForward + EOF 语义不动(本 topic 不涉及)。沉淀去向:[`leading-slash-alias.ts`](../../packages/cli/src/runtime/leading-slash-alias.ts) 顶部 docstring 为首位权威(单源数组 + 两 API 语义分叉 + 单字符约束 + paste 边界推演);9 包 5193 tests 零回归(基线 +14 单测含 paste 边界 6 case),严格 tsc 全包 exit 0
 > - **work 模式对话能力对齐 main**(2026-05-21 完成):需求三条 R1 `/resume` 解禁 / R2 `/new` 解禁 / R3 进入 scene 按触发源分流(用户 `/enter` 走 auto-resume / LLM `workmode_enter` 工具始终新建)。实施:删 `/resume` 和 `/new` 的 work-mode handler guard 共 8 行(scope 天然分隔由 `state.conv.convRepo` 自动跟随 → handler 零改动复用);新增 [`packages/cli/src/runtime/workscene-conversation.ts`](../../packages/cli/src/runtime/workscene-conversation.ts) 纯函数 helper 模块(三路径 A/B/C 正交:A latest 不存在直 create / B latest 存在 load+get 成功 recovery / C latest 存在加载失败降级 create + warning;`warning` 由 caller 在 try 成功后输出避免双消息困惑);`applyModeSwitch` enter 按 source 分支(LLM 直 create / command 调 helper),`undo` 分支 `loaded === null` 才 push delete(recovery 路径保留用户历史),`wStore.init` 仅 create 路径调用(recovery 不覆盖 transcript),`startMessages` 按"触发源 × 路径"三态组装(LLM `[triggerMsg]` / recovery `loaded.messages` / create `[]`)。顺手清理 baseline:`repl.ts` 死变量 `cwd` 删 + `serve/command.ts` `zhixingHome` 未定义补齐(后者是 `zhixing serve` + `config.messaging` 路径必崩的 production bug)。沉淀去向:helper 顶部 docstring 为首位权威(设计原则 / 三路径 / 触发源分流 / warning 输出协议均在);[work-mode.md](specifications/work-mode.md) 后续按需补"对话获取策略"节(独立 task,不阻塞);全包 5179 测试零回归,严格 tsc 全包 exit 0
 > - **`/switch` → `/resume` 改名 + 删序号匹配**(2026-05-21 完成):REPL 切换对话命令名从 `/switch` 改为 `/resume`(对齐 Claude Code 用户预期),无 legacy alias 直接换;handler 内删除"按序号选择"匹配段 + 列表渲染去序号编号,保留 ID 精确 + 名称模糊两档解析(有 name fallback id,序号是冗余信号源);全仓代码 + 测试 + 15 个 spec/README/staging 沉淀的 `/switch` 字面同步,grep `/switch` 零命中。架构升级:`argsByName` 字典 key 同步 `switch → resume`(避免 cmd.name 改而 typeahead conversation 选择器查不到的隐性 bug);列表 label fallback 从 `(未命名)` 改为 `chalk.dim(c.id)`,与 typeahead `c.name || c.id` 一致
 > - **transcript schema 历史一致性清理**(2026-05-21 完成):4 项审查识别的债务(`conversation-model.md §7.1` 旧架构描述残留 + `TranscriptHeader.projectPath` 死字段 + `writeHeader/readHeader` 生产零调用 + `session-persistence.md` 半完成归并)彻底处置。代码层:删 `projectPath` 字段 + TranscriptStore 构造签名变更 `(convDir, cwd, options?) → (convDir, options?)`(8 处 caller 同步)、删 `writeHeader/readHeader` 函数 + index re-export + 测试两类用途分别处理(测函数本身的 describe 整段删 / fixture 用法改 fs API)、清理 `normalize.test.ts` dead import。文档层:`conversation-model.md §7.1` 重写对齐 standalone cli 现实(RuntimeSession 替代 ConversationManager/SessionRuntime/CliChannel 旧描述)+ §7.3 表格修正 + §9.2 整段重写承接 session-persistence §2.3 JSONL 行格式细节 + §9.5 整合 §5.1 单向数据流意图;同款散落到 work-mode.md 目录树 + ConversationScope variant + TranscriptStore 签名描述、conversation-scope-flattening.md "后续评估项"标记为"已清理";引用方 context-architecture / usage-display 切到 conversation-model;session-persistence.md 删 §一-§八 正文留 18 行 stub(按维度索引指向当前权威)。沉淀去向:[conversation-model.md §九](specifications/conversation-model.md) 单一事实源;9 包 5174 tests 零回归

@@ -56,6 +56,8 @@ import {
   acquireStdinOwnership,
   type StdinOwnershipHandle,
 } from "./_internal/stdin-ownership.js";
+import chalk from "chalk";
+import { stripAnsi } from "./ansi.js";
 import { renderChrome, type BodyLine } from "./chrome.js";
 import { clampLine, stringWidth } from "./line-width.js";
 import { tone, icon } from "./style.js";
@@ -76,6 +78,12 @@ export interface TypeaheadTheme {
   readonly loading: (s: string) => string;
   readonly error: (s: string) => string;
   readonly emptyHint: (s: string) => string;
+  /**
+   * 删除准备态行的整行红色背景填充(选中行 + `deletePending === item.id`
+   * 命中时使用)。caller 应已把待包装的文本 strip ANSI + 补齐到 contentBudget,
+   * 函数仅负责套背景色 + 前景色。
+   */
+  readonly dangerPending: (s: string) => string;
 }
 
 /**
@@ -107,6 +115,7 @@ export const defaultTypeaheadTheme: TypeaheadTheme = {
   loading: (s) => tone.warn(s),
   error: (s) => tone.error(s),
   emptyHint: (s) => tone.dim(s),
+  dangerPending: (s) => chalk.bgHex("#D85050").white(s),
 };
 
 // ─── Panel 选项 ───
@@ -441,11 +450,22 @@ function renderActiveChrome(
   for (let i = win.start; i < win.end; i++) {
     const item = state.suggestions[i]!;
     const isSelected = i === state.selectedIndex;
-    const payload = buildCandidatePayload(item, isSelected, theme);
+    const isDeletePending = isSelected && state.deletePending === item.id;
+    const payload = buildCandidatePayload(
+      item,
+      isSelected,
+      state.deletePending,
+      contentBudget,
+      theme,
+    );
+    // 准备删除态:红背景填充自身已足够 focus,不再叠 dotted-row 高亮
+    // 否则两层视觉信号叠加反而损坏可读性
     body.push(
-      isSelected
-        ? { content: payload, highlight: "dotted-row" }
-        : payload,
+      isDeletePending
+        ? payload
+        : isSelected
+          ? { content: payload, highlight: "dotted-row" }
+          : payload,
     );
   }
   const filledCount = win.end - win.start;
@@ -465,9 +485,17 @@ function renderActiveChrome(
     body.push(""); // 空 slot 占位（同顶 slot）
   }
 
-  // chrome 之后的 meta 行：argumentHint（如有）+ 快捷键提示
+  // chrome 之后的 meta 行：deletable 时显删除提示(按 deletePending 切换文案);
+  // 非 deletable 走原 argumentHint 渲染 —— 不破坏其他命令 ArgSchema 的 hint。
+  // 快捷键提示行恒在末尾。两路径都是 hint(1) + shortcut(1) = 2 行(deletable
+  // 命令必然有 argumentHint),保持 panel 总高度恒等不变量。
   const meta: string[] = [];
-  if (state.argumentHint) {
+  if (state.deletable) {
+    const hintText = state.deletePending
+      ? "再按一次 ctrl+d 确认删除"
+      : "delete ctrl+d";
+    meta.push(`  ${theme.hint(clampLine(hintText, frameWidth - 2))}`);
+  } else if (state.argumentHint) {
     meta.push(
       `  ${theme.hint(clampLine(state.argumentHint.renderedHint, frameWidth - 2))}`,
     );
@@ -488,10 +516,20 @@ function renderActiveChrome(
   ];
 }
 
-/** 候选行 payload —— `{arrow}{name}{pad}{desc?}`，pad 让 desc 起始于 col 24（按可见宽度对齐）。 */
+/**
+ * 候选行 payload —— `{arrow}{name}{pad}{desc?}`,pad 让 desc 起始于 col 24
+ * (按可见宽度对齐)。
+ *
+ * 删除准备态(`isSelected && deletePending === item.id`)走专属红背景渲染:
+ * strip 常态 ANSI 后按 contentBudget 补齐空格,再整行套 theme.dangerPending —
+ * 避免 ANSI 序列嵌套导致背景色被 dim/bold 序列打断;红背景已足够 focus,
+ * caller 也不再套 dotted-row highlight。
+ */
 function buildCandidatePayload(
   item: SuggestionItem,
   isSelected: boolean,
+  deletePending: string | null,
+  contentBudget: number,
   theme: TypeaheadTheme,
 ): string {
   const arrow = isSelected ? theme.selectedArrow : theme.unselectedArrow;
@@ -499,17 +537,25 @@ function buildCandidatePayload(
     ? theme.selectedName(item.displayText)
     : theme.unselectedName(item.displayText);
 
+  let payload: string;
   if (!item.description) {
-    return `${arrow}${namePart}`;
+    payload = `${arrow}${namePart}`;
+  } else {
+    const nameVisible = stringWidth(item.displayText);
+    const padCount = Math.max(1, 24 - nameVisible);
+    const pad = " ".repeat(padCount);
+    const desc = isSelected
+      ? theme.selectedDescription(item.description)
+      : theme.description(item.description);
+    payload = `${arrow}${namePart}${pad}${desc}`;
   }
 
-  const nameVisible = stringWidth(item.displayText);
-  const padCount = Math.max(1, 24 - nameVisible);
-  const pad = " ".repeat(padCount);
-  const desc = isSelected
-    ? theme.selectedDescription(item.description)
-    : theme.description(item.description);
-  return `${arrow}${namePart}${pad}${desc}`;
+  if (!isSelected || deletePending !== item.id) return payload;
+
+  const stripped = stripAnsi(payload);
+  const visibleWidth = stringWidth(stripped);
+  const padding = " ".repeat(Math.max(0, contentBudget - visibleWidth));
+  return theme.dangerPending(stripped + padding);
 }
 
 /**

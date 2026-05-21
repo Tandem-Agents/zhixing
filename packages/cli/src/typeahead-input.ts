@@ -130,6 +130,16 @@ export interface InputControllerOptions {
 
   /** 粘贴附件 registry（REPL session 级共享） */
   readonly registry?: PasteRegistry;
+
+  /**
+   * 删除选中候选 callback —— Ctrl+D 第二次按下时触发(第一次按下仅标记
+   * broker 的 deletePending 准备态)。仅在 typeahead 当前 trigger 的 provider
+   * 通过 `computeDeletable` hook 声明支持删除时生效。callback 负责业务编排
+   * (调 provider.delete + active 切换 / 自动新建等);InputController 在
+   * `await callback` 完成后调 `broker.refresh` 触发候选列表刷新(避免视觉
+   * 残留 + selectedIndex 指向已不存在候选)。
+   */
+  readonly onCandidateDelete?: (item: SuggestionItem) => Promise<void>;
 }
 
 // 兼容性：保留旧名称导出（外部仍按 TypeaheadInputOptions import）
@@ -588,15 +598,28 @@ export class InputController implements InputRegion {
       return;
     }
     if (key.ctrl && key.name === "d") {
-      if (this.buffer.isEmpty) {
-        this.echoCancelLine();
-        this.fireCancel("ctrl-d");
-        return;
+      // Ctrl+D 完全释放给"删除选中候选"功能 —— 仅在 typeahead 当前 trigger 的
+      // provider 通过 `computeDeletable` hook 声明支持删除时生效(目前仅 /resume
+      // 的 conversation 候选)。其他场景 swallow no-op 不再走 EOF / deleteForward
+      // (退出依赖 Ctrl+C 双击协议;删字符依赖 Backspace)。
+      const state = this.lastSessionState;
+      if (
+        state &&
+        state.deletable &&
+        state.suggestions.length > 0 &&
+        state.selectedIndex >= 0 &&
+        this.sessionHandleId
+      ) {
+        const selected = state.suggestions[state.selectedIndex]!;
+        if (state.deletePending === selected.id) {
+          void this.executeCandidateDelete(selected);
+        } else {
+          this.options.broker.markDeletePending(
+            this.sessionHandleId,
+            selected.id,
+          );
+        }
       }
-      if (!this.tryAtomicKeypress("delete")) {
-        this.buffer.deleteForward();
-      }
-      this.syncBroker();
       return;
     }
 
@@ -747,6 +770,27 @@ export class InputController implements InputRegion {
       this.buffer.insertText(content);
     }
     this.syncBroker();
+  }
+
+  /**
+   * 执行候选删除业务编排 —— Ctrl+D 第二次按下时调用。委托 onCandidateDelete
+   * callback 做物理删除 + 业务编排(active 切换 / 新建 fallback 等),完成后
+   * 调 broker.refresh 触发候选列表刷新(canonical 重置 + 重新 query),避免
+   * 视觉残留删的项 / selectedIndex 指向已不存在候选。callback 抛错 swallow
+   * 防止 unhandled rejection —— callback 内部应已处理 user-facing 错误展示。
+   */
+  private async executeCandidateDelete(
+    selected: SuggestionItem,
+  ): Promise<void> {
+    if (!this.options.onCandidateDelete || !this.sessionHandleId) return;
+    try {
+      await this.options.onCandidateDelete(selected);
+    } catch {
+      // swallow
+    }
+    if (this.sessionHandleId) {
+      this.options.broker.refresh(this.sessionHandleId);
+    }
   }
 
   private tryAtomicKeypress(kind: AtomicEditKind): boolean {

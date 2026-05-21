@@ -329,7 +329,7 @@ describe("readInputLine — 取消路径", () => {
     expect(await p).toEqual({ kind: "cancelled", cause: "ctrl-c" });
   });
 
-  it("空 buffer 的 Ctrl+D 返回 cancelled/ctrl-d", async () => {
+  it("空 buffer 的 Ctrl+D 无 deletable 候选时 no-op(不退出,可继续输入)", async () => {
     const { stdin, stdout } = makeStreams();
     const { broker, dispatcher } = makeHarness();
     const p = readInputLine({
@@ -345,10 +345,12 @@ describe("readInputLine — 取消路径", () => {
       ctrl: true,
       sequence: "\x04",
     });
-    expect(await p).toEqual({ kind: "cancelled", cause: "ctrl-d" });
+    // Ctrl+D 不再 resolve cancelled(原 EOF 语义已释放);Enter 才完成
+    await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+    expect(await p).toMatchObject({ kind: "text", text: "" });
   });
 
-  it("非空 buffer 的 Ctrl+D 视作 deleteForward（不退出）", async () => {
+  it("非空 buffer 的 Ctrl+D 无 deletable 候选时 no-op(buffer 不动 + 不退出)", async () => {
     const { stdin, stdout } = makeStreams();
     const { broker, dispatcher } = makeHarness();
     const p = readInputLine({
@@ -360,13 +362,13 @@ describe("readInputLine — 取消路径", () => {
       columns: 80,
     });
     await typeChars(stdin, "abc");
-    // 光标在末尾，deleteForward 是 no-op —— 但重要的是 Ctrl+D 不 resolve
+    // Ctrl+D 原 deleteForward 语义已释放(完全释放给 typeahead delete 候选)
     await sendSyntheticKey(stdin, {
       name: "d",
       ctrl: true,
       sequence: "\x04",
     });
-    // 再 Enter 提交正常
+    // 再 Enter 提交,buffer 仍是 abc
     await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
     const result = await p;
     expect(result).toMatchObject({ kind: "text", text: "abc" });

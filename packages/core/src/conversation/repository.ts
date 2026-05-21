@@ -7,7 +7,9 @@
  *   用户级:        ~/.zhixing/conversations/<id>/meta.json
  *   workscene 级:  ~/.zhixing/workscenes/<sceneId>/conversations/<id>/meta.json
  *
- * delete 走回收站（~/.zhixing/trash/<id>-<ts>/），7 天后由外部清理。
+ * delete 物理删除整个 conversation 目录（meta + transcript + view layer state），
+ * 不可恢复。force:true 让目录已不存在 / 上次中途崩溃残留 partial 都不抛错。
+ * 对齐 WorkSceneRegistry.remove 的"废弃 trash 软删"纪律。
  */
 
 import fs from "node:fs/promises";
@@ -156,19 +158,10 @@ export class ConversationRepository implements IConversationRepository {
   }
 
   async delete(id: string): Promise<void> {
-    const conversation = await this.requireConversation(id);
-    if (conversation.isDefault) {
-      throw new Error("默认对话不可删除");
-    }
-
-    const srcDir = conversationDir(this.scope, id);
-    const trashDir = path.join(
-      getZhixingHome(),
-      "trash",
-      `${id}-${Date.now()}`,
-    );
-    await fs.mkdir(path.dirname(trashDir), { recursive: true });
-    await fs.rename(srcDir, trashDir);
+    await fs.rm(conversationDir(this.scope, id), {
+      recursive: true,
+      force: true,
+    });
   }
 
   async ensureDefault(): Promise<Conversation> {

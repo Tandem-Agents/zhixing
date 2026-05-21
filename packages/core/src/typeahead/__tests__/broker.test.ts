@@ -901,3 +901,151 @@ describe("DefaultTypeaheadBroker — 事件发射", () => {
     ).toBe(true);
   });
 });
+
+// ─── deletable / deletePending / refresh ───
+
+describe("DefaultTypeaheadBroker — deletable / deletePending / refresh", () => {
+  it("provider 实现 computeDeletable=true → state.deletable=true", () => {
+    const broker = new DefaultTypeaheadBroker();
+    const provider: SuggestionProvider = {
+      ...makeSyncProvider("p", 100, "/"),
+      computeDeletable: () => true,
+    };
+    broker.register(provider);
+    const handle = broker.beginSession(makeCtx("/"));
+    expect(broker.getState(handle.id)?.deletable).toBe(true);
+  });
+
+  it("provider 未实现 computeDeletable → state.deletable=false", () => {
+    const broker = new DefaultTypeaheadBroker();
+    broker.register(makeSyncProvider("p", 100, "/"));
+    const handle = broker.beginSession(makeCtx("/"));
+    expect(broker.getState(handle.id)?.deletable).toBe(false);
+  });
+
+  it("provider.computeDeletable 抛错 → 降级 false + 不传染", () => {
+    const broker = new DefaultTypeaheadBroker();
+    const provider: SuggestionProvider = {
+      ...makeSyncProvider("p", 100, "/"),
+      computeDeletable: () => {
+        throw new Error("boom");
+      },
+    };
+    broker.register(provider);
+    const handle = broker.beginSession(makeCtx("/"));
+    expect(broker.getState(handle.id)?.deletable).toBe(false);
+    expect(broker.getState(handle.id)?.suggestions.length).toBeGreaterThan(0);
+  });
+
+  it("初始 state.deletePending === null", () => {
+    const broker = new DefaultTypeaheadBroker();
+    broker.register(makeSyncProvider("p", 100, "/"));
+    const handle = broker.beginSession(makeCtx("/"));
+    expect(broker.getState(handle.id)?.deletePending).toBeNull();
+  });
+
+  it("markDeletePending 设置后 state.deletePending 反映 + emit listener", () => {
+    const broker = new DefaultTypeaheadBroker();
+    broker.register(makeSyncProvider("p", 100, "/"));
+    const handle = broker.beginSession(makeCtx("/"));
+    const states: TypeaheadSessionState[] = [];
+    broker.onSessionChange(handle.id, (s) => states.push(s));
+    broker.markDeletePending(handle.id, "candidate-id-1");
+    expect(broker.getState(handle.id)?.deletePending).toBe("candidate-id-1");
+    expect(states.at(-1)?.deletePending).toBe("candidate-id-1");
+  });
+
+  it("markDeletePending(null) 清空准备态", () => {
+    const broker = new DefaultTypeaheadBroker();
+    broker.register(makeSyncProvider("p", 100, "/"));
+    const handle = broker.beginSession(makeCtx("/"));
+    broker.markDeletePending(handle.id, "x");
+    broker.markDeletePending(handle.id, null);
+    expect(broker.getState(handle.id)?.deletePending).toBeNull();
+  });
+
+  it("单源不变量:markDeletePending 设置后 → moveSelection 自动 reset", () => {
+    const broker = new DefaultTypeaheadBroker();
+    broker.register(
+      makeSyncProvider("p", 100, "/", [
+        makeItem("a"),
+        makeItem("b"),
+      ]),
+    );
+    const handle = broker.beginSession(makeCtx("/"));
+    broker.markDeletePending(handle.id, "a");
+    expect(broker.getState(handle.id)?.deletePending).toBe("a");
+    broker.moveSelection(handle.id, 1);
+    expect(broker.getState(handle.id)?.deletePending).toBeNull();
+  });
+
+  it("单源不变量:markDeletePending 设置后 → updateInput 自动 reset", () => {
+    const broker = new DefaultTypeaheadBroker();
+    broker.register(makeSyncProvider("p", 100, "/"));
+    const handle = broker.beginSession(makeCtx("/"));
+    broker.markDeletePending(handle.id, "x");
+    broker.updateInput(handle.id, makeCtx("/foo"));
+    expect(broker.getState(handle.id)?.deletePending).toBeNull();
+  });
+
+  it("单源不变量:cancelSession → deletePending 清空", () => {
+    const broker = new DefaultTypeaheadBroker();
+    broker.register(makeSyncProvider("p", 100, "/"));
+    const handle = broker.beginSession(makeCtx("/"));
+    broker.markDeletePending(handle.id, "x");
+    broker.cancelSession(handle.id);
+    // cancelSession 之后 session 仍可读(state 已重置为空)
+    expect(broker.getState(handle.id)?.deletePending ?? null).toBeNull();
+  });
+
+  it("refresh: trigger 仍命中 → canonical 重置 + 重新 query", async () => {
+    let queryCount = 0;
+    const broker = new DefaultTypeaheadBroker();
+    broker.register({
+      id: "p",
+      priority: 100,
+      matchTrigger: (ctx) => {
+        if (!ctx.draft.startsWith("/")) return null;
+        return {
+          providerId: "p",
+          tokenStart: 0,
+          tokenEnd: ctx.draft.length,
+          token: ctx.draft,
+          query: ctx.draft.slice(1),
+          runtime: ctx.runtime,
+        };
+      },
+      query: () => {
+        queryCount++;
+        return [makeItem(`v${queryCount}`, { providerId: "p" })];
+      },
+    });
+    const handle = broker.beginSession(makeCtx("/"));
+    expect(queryCount).toBe(1);
+    broker.refresh(handle.id);
+    expect(queryCount).toBe(2);
+    expect(broker.getState(handle.id)?.suggestions[0]?.id).toBe("v2");
+  });
+
+  it("refresh: trigger 已 gone(用户清空 draft)→ 退化清空 state", () => {
+    const broker = new DefaultTypeaheadBroker();
+    broker.register(makeSyncProvider("p", 100, "/"));
+    const handle = broker.beginSession(makeCtx("/"));
+    expect(broker.getState(handle.id)?.activeProvider).not.toBeNull();
+    // 模拟用户清空 draft
+    broker.updateInput(handle.id, makeCtx(""));
+    broker.refresh(handle.id);
+    expect(broker.getState(handle.id)?.activeProvider).toBeNull();
+    expect(broker.getState(handle.id)?.suggestions).toEqual([]);
+  });
+
+  it("refresh: 不存在 sessionId → no-op 不抛", () => {
+    const broker = new DefaultTypeaheadBroker();
+    expect(() => broker.refresh("ghost")).not.toThrow();
+  });
+
+  it("markDeletePending: 不存在 sessionId → no-op 不抛", () => {
+    const broker = new DefaultTypeaheadBroker();
+    expect(() => broker.markDeletePending("ghost", "x")).not.toThrow();
+  });
+});

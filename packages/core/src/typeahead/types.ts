@@ -165,6 +165,13 @@ export interface ArgQueryContext {
  */
 export interface ArgChoiceProvider {
   list(ctx: ArgQueryContext, signal: AbortSignal): Promise<readonly ArgChoice[]>;
+  /**
+   * 可选:声明此 provider 支持物理删除候选。实现 = opt-in"删除选中候选"
+   * UI 能力(typeahead Panel 渲染 "delete ctrl+d" 提示行,InputController
+   * 拦截 Ctrl+D 走删除路径)。仅做数据层物理删除;业务编排(active 切换 /
+   * 新建 fallback)由调用方在 onCandidateDelete callback 内处理。
+   */
+  delete?(value: string, signal: AbortSignal): Promise<void>;
 }
 
 interface ArgBase {
@@ -600,6 +607,17 @@ export interface SuggestionProvider {
    */
   computeArgumentHint?(match: TriggerMatch): ArgumentHint | null;
 
+  /**
+   * 计算当前 trigger 是否支持"删除选中候选"操作。broker 在 query 完成后
+   * 调用,结果写入 `TypeaheadSessionState.deletable`。仅 provider 内部知道
+   * 自己当前 match 的下层 schema / provider 是否支持 delete —— broker 不
+   * 跨层访问 provider 内部数据结构,通过本 hook 让 provider 自决。
+   *
+   * 默认 false(未实现 = 不支持)。ArgumentProvider 实现为
+   * `currentSchema.kind === "async-enum" && !!currentSchema.provider.delete`。
+   */
+  computeDeletable?(match: TriggerMatch): boolean;
+
   /** 声明此 provider 是否支持 accept 后继续同 provider 的链式 query（比如两段式 /cmd → args） */
   readonly supportsChaining?: boolean;
 }
@@ -675,6 +693,21 @@ export interface TypeaheadSessionState {
 
   /** 参数提示，null 表示无 */
   readonly argumentHint: ArgumentHint | null;
+
+  /**
+   * 当前 trigger 是否支持"删除选中候选"。由 `SuggestionProvider.computeDeletable`
+   * hook 在 query 完成后推导写入,未实现 hook = false。typeahead Panel 据此
+   * 渲染 "delete ctrl+d" 提示行,InputController 据此决定 Ctrl+D 是否生效。
+   */
+  readonly deletable: boolean;
+
+  /**
+   * 当前准备删的 `SuggestionItem.id`(typeahead 现有唯一标识),null 表示无
+   * 准备态。**字段单源不变量**:`markDeletePending` 是该字段的**唯一**变更
+   * 入口;其他所有 mutate session 的路径(走 `setSessionState`)自动 reset
+   * 为 null —— 实现"任何其他按键取消准备态"由 broker 单源保证。
+   */
+  readonly deletePending: string | null;
 }
 
 /**
@@ -739,6 +772,23 @@ export interface ITypeaheadBroker {
   acceptGhostText(sessionId: string): AcceptResult | null;
   moveSelection(sessionId: string, delta: number): void;
   cancelSession(sessionId: string): void;
+
+  /**
+   * 标记或清除"准备删除"态。InputController 在 Ctrl+D 第一次按时调
+   * `markDeletePending(sessionId, selected.id)` 进入准备态;后续任何走
+   * `setSessionState` 的 session mutate 路径(`updateInput` / `moveSelection`
+   * 等)会自动清空,InputController 无需在每个按键路径显式取消。
+   */
+  markDeletePending(sessionId: string, suggestionId: string | null): void;
+
+  /**
+   * 强制重新 query 当前 trigger —— canonical(suggestions / selectedIndex /
+   * ghostText / argumentHint / deletable)重置为初始 loading 态,query resolve
+   * 后看到新候选。InputController 在 `onCandidateDelete` 完成后调用,触发
+   * 候选列表刷新(避免删后视觉残留 + selectedIndex 指向已不存在候选)。
+   * 当前 trigger 已 gone(用户改 query 全删 trigger 字符)时退化为清空 state。
+   */
+  refresh(sessionId: string): void;
 
   // ── 状态查询 ──
   getState(sessionId: string): TypeaheadSessionState | null;

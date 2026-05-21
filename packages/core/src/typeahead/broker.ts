@@ -127,7 +127,7 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
     const session: InternalSession = {
       id,
       lastContext: initial,
-      state: makeEmptyState(id),
+      state: { ...makeEmptyState(id), deletePending: null },
       inflightAbort: null,
       listeners: new Set(),
       queryToken: 0,
@@ -330,6 +330,7 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
         loading: true,
         ghostText: null,
         argumentHint: null,
+        deletable: false,
       });
     } else {
       // 同 trigger 续 typing —— trigger 几何更新，canonical 字段保留前次值
@@ -417,6 +418,20 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
       }
     }
 
+    // Deletable: provider 通过 computeDeletable hook 自决当前 trigger 是否支持
+    // 删除选中候选。broker 不跨层访问 provider 内部数据结构,opt-in hook 让
+    // provider 自决,结果写入 state.deletable 给 typeahead Panel / InputController
+    // 消费。
+    let deletable = false;
+    if (typeof provider.computeDeletable === "function") {
+      try {
+        deletable = provider.computeDeletable(match);
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        this.handleProviderError(provider.id, error, session.id);
+      }
+    }
+
     this.setSessionState(session, {
       sessionId: session.id,
       activeProvider: { id: provider.id },
@@ -426,6 +441,7 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
       loading: false,
       ghostText,
       argumentHint,
+      deletable,
     });
   }
 
@@ -566,6 +582,31 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
     return result;
   }
 
+  markDeletePending(sessionId: string, suggestionId: string | null): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    this.setDeletePending(session, suggestionId);
+  }
+
+  refresh(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    if (session.inflightAbort) {
+      session.inflightAbort.abort();
+      session.inflightAbort = null;
+    }
+    // 重新按 lastContext 算 trigger;命中则强制走 isNewTrigger=true 分支
+    // 让 canonical 重置 + emit loading=true(用户即时看到"正在刷新"反馈),
+    // query resolve 后看到新候选。trigger 已 gone(用户已改 query)时退化
+    // 到清空 state,与 updateInput 无命中路径同款。
+    const matchResult = this.findFirstMatch(session.lastContext);
+    if (!matchResult) {
+      this.setSessionState(session, makeEmptyState(sessionId));
+      return;
+    }
+    this.runQuery(session, matchResult.provider, matchResult.match, true);
+  }
+
   cancelSession(sessionId: string): void {
     const session = this.sessions.get(sessionId);
     if (!session) return;
@@ -618,16 +659,37 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
 
   // ─── 内部辅助 ───
 
+  /**
+   * session state 变更入口。入参类型 Omit deletePending —— 强制 caller 不能
+   * 通过本入口设置 deletePending,内部统一覆写为 null。该约束实现"任何
+   * mutate session 的路径(updateInput / moveSelection / setLoadingFinished
+   * 等)自动清空 deletePending"的单源不变量,无需 caller 在每条路径显式清。
+   *
+   * deletePending 字段的唯一变更入口是 markDeletePending(走 setDeletePending),
+   * 与本入口正交。
+   */
   private setSessionState(
     session: InternalSession,
-    next: TypeaheadSessionState,
+    next: Omit<TypeaheadSessionState, "deletePending">,
   ): void {
-    session.state = next;
+    session.state = { ...next, deletePending: null };
+    this.emitSessionChange(session);
+  }
+
+  private setDeletePending(
+    session: InternalSession,
+    value: string | null,
+  ): void {
+    session.state = { ...session.state, deletePending: value };
+    this.emitSessionChange(session);
+  }
+
+  private emitSessionChange(session: InternalSession): void {
     // 复制一份再遍历 —— 防止 listener 在回调里 unsubscribe
     const listeners = Array.from(session.listeners);
     for (const listener of listeners) {
       try {
-        listener(next);
+        listener(session.state);
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
         this.onProviderError("session-listener", error);
@@ -662,7 +724,9 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
 
 // ─── 辅助：构造空 state ───
 
-function makeEmptyState(sessionId: string): TypeaheadSessionState {
+function makeEmptyState(
+  sessionId: string,
+): Omit<TypeaheadSessionState, "deletePending"> {
   return {
     sessionId,
     activeProvider: null,
@@ -672,5 +736,6 @@ function makeEmptyState(sessionId: string): TypeaheadSessionState {
     loading: false,
     ghostText: null,
     argumentHint: null,
+    deletable: false,
   };
 }

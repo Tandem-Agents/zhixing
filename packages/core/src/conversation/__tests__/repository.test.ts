@@ -250,26 +250,39 @@ describe("delete", () => {
     expect(result).toBeNull();
   });
 
-  it("删除移入 trash 目录", async () => {
+  it("物理删除目录(不残留 trash)", async () => {
     const repo = createRepo();
-    const conv = await repo.create({ name: "trash-test" });
+    const conv = await repo.create({ name: "physical-delete-test" });
+    const convPath = path.join(tmpDir, "conversations", conv.id);
+    expect(
+      await fs
+        .stat(convPath)
+        .then(() => true)
+        .catch(() => false),
+    ).toBe(true);
+
     await repo.delete(conv.id);
 
-    const trashEntries = await fs.readdir(path.join(tmpDir, "trash"));
-    expect(trashEntries.some((e) => e.startsWith(conv.id))).toBe(true);
+    expect(
+      await fs
+        .stat(convPath)
+        .then(() => true)
+        .catch(() => false),
+    ).toBe(false);
+    // trash 目录不应被创建
+    await expect(fs.stat(path.join(tmpDir, "trash"))).rejects.toThrow();
   });
 
-  it("默认对话不可删除", async () => {
+  it("默认对话也可删除(isDefault 守卫已释放)", async () => {
     const repo = createRepo();
     await repo.ensureDefault();
-    await expect(
-      repo.delete(DEFAULT_CONVERSATION_ID),
-    ).rejects.toThrow(/默认对话/);
+    await expect(repo.delete(DEFAULT_CONVERSATION_ID)).resolves.toBeUndefined();
+    expect(await repo.get(DEFAULT_CONVERSATION_ID)).toBeNull();
   });
 
-  it("不存在的 ID 抛错", async () => {
+  it("删除不存在的 ID 不抛错(force:true)", async () => {
     const repo = createRepo();
-    await expect(repo.delete("ghost")).rejects.toThrow(/不存在/);
+    await expect(repo.delete("ghost")).resolves.toBeUndefined();
   });
 });
 
