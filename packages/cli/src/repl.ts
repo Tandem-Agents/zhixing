@@ -48,6 +48,10 @@ import {
   type WorkModeSwitchIntent,
   extractText,
   buildWorksceneDigestMessage,
+  maybeAutoNameFirstTurn,
+  sanitizeConversationName,
+  buildConversationNamerPrompt,
+  type InferConversationName,
 } from "@zhixing/core";
 import { describeProxy, type ProxyDescription } from "@zhixing/network";
 import { loadConfig, loadCredentials, resolveHomeDir } from "@zhixing/providers";
@@ -1209,6 +1213,20 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     segmentDeps,
   });
 
+  // 自动命名 inferer ── 在新对话第一轮 turn 完成后由 hook 触发，生成短主题名。
+  //
+  // 闭包内动态访问 session.runtime.callText：active runtime 在工作模式 enter/
+  // exit 时会切换（main ↔ power overlay），自动命名必须跟随当前 active runtime
+  // 的 light 通道。预捕获 `const callText = session.runtime.callText` 会与
+  // getter 分叉，模式切换后还指向旧 runtime。
+  const inferConversationName: InferConversationName = async (msg) => {
+    const text = extractText(msg).trim();
+    if (!text) return null;
+    const prompt = buildConversationNamerPrompt(text);
+    const raw = await session.runtime.callText(prompt);
+    return sanitizeConversationName(raw);
+  };
+
   let messages: Message[] = [];
   let conversationId: string | null = null;
   let turnCounter = 0;
@@ -1429,7 +1447,13 @@ export async function startRepl(options: ReplOptions): Promise<void> {
           routingRepo.setActive(worksceneRepo);
           undos.push(() => routingRepo.setActive(mainConv.convRepo));
           // ② workscene scope 新建 conversation
-          const wConv = await worksceneRepo.create({ name: scene.name });
+          //
+          // 不传 name：让 convRepo.create 走默认 name=id（autoChatId）的 sentinel，
+          // 与 main 模式 /new 无参一致。scene.name 是工作场景级语义，不应直接占
+          // conversation.name 槽位——否则 N 次进同 scene 会产生 N 个同名对话，
+          // 在 /switch typeahead 里完全无法区分。命名职责交给自动命名机制（第一
+          // 轮 turn 完成后用 light LLM 生成精确主题名）统一接管。
+          const wConv = await worksceneRepo.create({});
           undos.push(async () => {
             await worksceneRepo.delete(wConv.id).catch(() => {});
           });
@@ -2005,6 +2029,19 @@ export async function startRepl(options: ReplOptions): Promise<void> {
           state.conv.messages = canonical;
           state.conv.turnCounter++;
           state.conv.convRepo.touch(state.conv.conversationId).catch(() => {});
+
+          // 一次性自动命名 ── 仅当 turnCounter 刚 === 1 时由 helper 内部进入
+          // 异步分支（其它 turn helper 内同步 short-circuit）。fire-and-forget
+          // 不 await 不阻塞下一轮；helper 内部全 catch swallow，失败保持 name=id。
+          // commit 失败走外层 catch 分支 turnCounter 未 ++，此调用自然不会被
+          // 触发；即便误调，helper 内 short-circuit 兜底。
+          void maybeAutoNameFirstTurn({
+            conversationId: state.conv.conversationId,
+            turnCounter: state.conv.turnCounter,
+            userMessage: runResult.turn.userMessage,
+            inferName: inferConversationName,
+            convRepo: state.conv.convRepo,
+          });
         } catch (err) {
           // 持久化失败降级：state.conv.messages 按未压缩形态 append newMessages
           //

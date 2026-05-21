@@ -14,3 +14,13 @@ export {
 } from "./types.js";
 
 export { ConversationRepository, conversationsDir } from "./repository.js";
+
+export type {
+  InferConversationName,
+  MaybeAutoNameFirstTurnOptions,
+} from "./auto-name.js";
+export {
+  maybeAutoNameFirstTurn,
+  sanitizeConversationName,
+  buildConversationNamerPrompt,
+} from "./auto-name.js";
