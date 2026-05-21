@@ -4,7 +4,7 @@
  * 负责转录记录的磁盘读写。核心设计：
  * - 追加写入：每条记录独立一行，崩溃最多丢失最后一轮
  * - 损坏隔离：单行 JSON 解析失败只跳过该行，不影响其余记录
- * - 首行即 Header：无需额外索引文件，readHeader 只读一行
+ * - 首行即 Header：无需额外索引文件
  */
 
 import fs from "node:fs/promises";
@@ -25,16 +25,6 @@ export async function appendRecord(
 ): Promise<void> {
   const line = JSON.stringify(record) + "\n";
   await fs.appendFile(filePath, line, "utf-8");
-}
-
-/** 创建 JSONL 文件并写入 header 作为首行 */
-export async function writeHeader(
-  filePath: string,
-  header: TranscriptHeader,
-): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  const line = JSON.stringify(header) + "\n";
-  await fs.writeFile(filePath, line, "utf-8");
 }
 
 // ─── 原子写入 ───
@@ -137,23 +127,6 @@ function tmpPathFor(filePath: string): string {
 }
 
 // ─── 读取 ───
-
-/** 只读取 JSONL 首行，解析为 TranscriptHeader。文件不存在或首行非 header 返回 null */
-export async function readHeader(
-  filePath: string,
-): Promise<TranscriptHeader | null> {
-  try {
-    const content = await fs.readFile(filePath, "utf-8");
-    const newlineIdx = content.indexOf("\n");
-    const firstLine = newlineIdx === -1 ? content.trim() : content.slice(0, newlineIdx).trim();
-    if (!firstLine) return null;
-    const parsed = JSON.parse(firstLine) as unknown;
-    if (isTranscriptHeader(parsed)) return parsed;
-    return null;
-  } catch {
-    return null;
-  }
-}
 
 /**
  * 加载完整的 JSONL 文件，按类型分拣记录。

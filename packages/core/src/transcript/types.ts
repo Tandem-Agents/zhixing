@@ -21,7 +21,6 @@ export interface TranscriptHeader {
   conversationId: string;
   /** 用户可通过 REPL 内 `/name` / `/new <name>` 命令设置的显示名 */
   name: string | null;
-  projectPath: string;
   createdAt: string;
   model: string;
   provider: string;

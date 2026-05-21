@@ -41,7 +41,7 @@ describe("TranscriptStore", () => {
 
   beforeEach(() => {
     convDir = path.join(tmpDir, "conversations");
-    store = new TranscriptStore(convDir, "/test/project");
+    store = new TranscriptStore(convDir);
   });
 
   describe("init", () => {

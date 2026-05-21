@@ -33,7 +33,7 @@ let convDir: string;
 beforeEach(async () => {
   tmpDir = await createTempDir("compact-all");
   convDir = path.join(tmpDir, "conversations");
-  store = new TranscriptStore(convDir, "/test/project", { platform: "linux" });
+  store = new TranscriptStore(convDir, { platform: "linux" });
 });
 
 // ─── compactAll 行为 ───

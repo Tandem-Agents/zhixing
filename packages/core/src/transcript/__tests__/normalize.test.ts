@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
 import { TranscriptStore } from "../store.js";
-import { loadRecords, writeHeader, appendRecord } from "../serializer.js";
+import { loadRecords, appendRecord } from "../serializer.js";
 import type { CompactMarker, Turn } from "../types.js";
 
 // ─── 辅助 ───
@@ -45,7 +45,7 @@ let store: TranscriptStore;
 beforeEach(async () => {
   tmpDir = await createTempDir("normalize");
   convDir = path.join(tmpDir, "conversations");
-  store = new TranscriptStore(convDir, "/test/project", { platform: "linux" });
+  store = new TranscriptStore(convDir, { platform: "linux" });
 });
 
 // ─── Lazy normalize ───

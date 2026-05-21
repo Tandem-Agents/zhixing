@@ -92,7 +92,7 @@ export function conversationsDir(scope: ConversationScope): string {
 const scope: ConversationScope = { kind: "user" };
 const convRepo = new ConversationRepository(scope);
 const convDir = conversationsDir(scope);    // 单一路径源
-const store = new TranscriptStore(convDir, cwd);  // TranscriptStore 第二参 cwd 保留(见"不在范围")
+const store = new TranscriptStore(convDir);
 ```
 
 **workscene enter 流程同步改造**：
@@ -151,14 +151,13 @@ const store = new TranscriptStore(convDir, cwd);  // TranscriptStore 第二参 c
 | 旧数据 `~/.zhixing/projects/` 迁移 | **不做** | 知行未发布无外部用户；本仓库开发者机器上的旧目录是孤儿磁盘垃圾，无任何代码引用，可手动清或忽略；零迁移即零失败 UX 设计负担 |
 | `getProjectId` utility 保留 vs 删 | **删** | 保留 dead utility 即保留 dead API surface；"未来可能用"是 YAGNI 反面；真要 cwd 匿名化是另一独立设计决策、5 行代码重写不构成保留负担 |
 | `conversationsDir` 函数 export | **export** | 跨 scope 同构契约：user 与 workscene 两态都通过同一 dispatcher 取路径，cli/serve 单点接入；未来加 scope 时入口零改动 |
-| `transcript header.projectPath` 字段命运 | **本次不动** | 见"不在范围" |
+| `transcript header.projectPath` 字段命运 | **已清理** | 后续 transcript schema 清理 spec 中实施完成,字段与 TranscriptStore 第二参一并删除 |
 | 重命名 `kind: "user"` 为其他名 | **不重命名** | 二态语义下 user 含义清晰，重命名是无收益改动 |
 
 ## 不在范围
 
 以下条目存在但本次不动，独立评估：
 
-- **`TranscriptStore.projectPath` 入参 + transcript.jsonl header 字段**：与 conversation scope 同源的 cwd 持久化字段，与 `getProjectId` 同性质——都是为「cwd 自动隔离 conversation」设计的产物。本次因涉及 transcript header schema 变更（lazy normalize / 老文件兼容路径）成本独立而暂留，本质判定见下方「后续可独立评估项」。
 - **`workscene` scope 子树**：独立产品概念，不混在本次清理
 - **conversation `delete()` 走 trash 的 dead 入口**：除 enter workmode fail-back undo 那一处外无 caller、且 trash 清理器为 vapor commitment——是另一条独立 dead path 清理，不在本次范围
 
@@ -189,6 +188,5 @@ const store = new TranscriptStore(convDir, cwd);  // TranscriptStore 第二参 c
 
 不阻塞本次实施，作为路线图项独立评估：
 
-- **TranscriptStore.projectPath 入参 + transcript header schema 清理**：此字段与 `getProjectId` 同源——都是为 cwd 自动隔离 conversation 设计的产物。本次产品定位将 cwd 自动隔离判定为错位机制并整段清除，此字段**已被产品定位判定为 dead field**（grep 验证生产无 read）。仅因 transcript header schema 变更复杂度暂留，应在独立 schema 变更 spec 中清理，不作为"合法保留的设计"长期残留
 - conversation `delete()` 的 dead 入口清理（含 trash 路径）
 - 多对话能力的产品 UX 收敛（既然推荐"一个对话够用"，`/switch` 列表的展示策略是否需要简化）

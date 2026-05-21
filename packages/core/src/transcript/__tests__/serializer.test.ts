@@ -9,8 +9,6 @@ import {
   countTurns,
   loadRecords,
   parseRecords,
-  readHeader,
-  writeHeader,
 } from "../serializer.js";
 
 // ─── 测试 fixtures ───
@@ -20,7 +18,6 @@ const HEADER: TranscriptHeader = {
   version: 1,
   conversationId: "20260409-a3f1",
   name: "测试会话",
-  projectPath: "E:\\Dev\\longxia\\zhixing",
   createdAt: "2026-04-09T10:00:00.000Z",
   model: "deepseek-chat",
   provider: "deepseek",
@@ -154,7 +151,6 @@ describe("parseRecords", () => {
       version: 1,
       sessionId: "20260409-legacy",
       name: null,
-      projectPath: "/old",
       createdAt: "2026-04-09T10:00:00.000Z",
       model: "m",
       provider: "p",
@@ -168,45 +164,12 @@ describe("parseRecords", () => {
   });
 });
 
-// ─── writeHeader + readHeader ───
-
-describe("writeHeader / readHeader", () => {
-  it("写入 header 后可正确读取", async () => {
-    const file = tmpFile("transcript.jsonl");
-    await writeHeader(file, HEADER);
-
-    const header = await readHeader(file);
-    expect(header).toEqual(HEADER);
-  });
-
-  it("自动创建不存在的父目录", async () => {
-    const file = path.join(tmpDir, "deep", "nested", "transcript.jsonl");
-    await writeHeader(file, HEADER);
-
-    const header = await readHeader(file);
-    expect(header).toEqual(HEADER);
-  });
-
-  it("文件不存在时返回 null", async () => {
-    const header = await readHeader(tmpFile("nonexistent.jsonl"));
-    expect(header).toBeNull();
-  });
-
-  it("首行不是 header 时返回 null", async () => {
-    const file = tmpFile("bad.jsonl");
-    await fs.writeFile(file, JSON.stringify(TURN) + "\n");
-
-    const header = await readHeader(file);
-    expect(header).toBeNull();
-  });
-});
-
 // ─── appendRecord + loadRecords ───
 
 describe("appendRecord / loadRecords", () => {
   it("追加多条记录后可全部加载", async () => {
     const file = tmpFile("full.jsonl");
-    await writeHeader(file, HEADER);
+    await fs.writeFile(file, JSON.stringify(HEADER) + "\n", "utf-8");
     await appendRecord(file, TURN);
     await appendRecord(file, { ...TURN, turnIndex: 1 });
     await appendRecord(file, COMPACT);
@@ -220,7 +183,7 @@ describe("appendRecord / loadRecords", () => {
 
   it("round-trip 保持数据完整（序列化 → 反序列化 = 原始数据）", async () => {
     const file = tmpFile("roundtrip.jsonl");
-    await writeHeader(file, HEADER);
+    await fs.writeFile(file, JSON.stringify(HEADER) + "\n", "utf-8");
     await appendRecord(file, TURN);
 
     const result = await loadRecords(file);
@@ -234,7 +197,7 @@ describe("appendRecord / loadRecords", () => {
 describe("countTurns", () => {
   it("正确统计 turn 数量", async () => {
     const file = tmpFile("count.jsonl");
-    await writeHeader(file, HEADER);
+    await fs.writeFile(file, JSON.stringify(HEADER) + "\n", "utf-8");
     await appendRecord(file, TURN);
     await appendRecord(file, { ...TURN, turnIndex: 1 });
     await appendRecord(file, { ...TURN, turnIndex: 2 });
@@ -246,7 +209,7 @@ describe("countTurns", () => {
 
   it("空文件返回 0", async () => {
     const file = tmpFile("empty.jsonl");
-    await writeHeader(file, HEADER);
+    await fs.writeFile(file, JSON.stringify(HEADER) + "\n", "utf-8");
 
     const count = await countTurns(file);
     expect(count).toBe(0);

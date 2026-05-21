@@ -47,7 +47,7 @@ beforeEach(async () => {
   convDir = path.join(tmpDir, "conversations");
   // 显式锚定 platform 为 linux（测试默认走 POSIX 原子 rename）。
   // Windows fallback 路径在独立测试里用 platform: "win32" 锚定。
-  store = new TranscriptStore(convDir, "/test/project", { platform: "linux" });
+  store = new TranscriptStore(convDir, { platform: "linux" });
 });
 
 // ─── commitTurn 三形态 ───

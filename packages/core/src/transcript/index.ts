@@ -17,9 +17,7 @@ export {
   countTurns,
   loadRecords,
   parseRecords,
-  readHeader,
   writeAtomic,
-  writeHeader,
 } from "./serializer.js";
 export type { WriteAtomicOptions } from "./serializer.js";
 

@@ -601,7 +601,7 @@ const turnsCompacted = turnNumbers[turnNumbers.length - 1] ?? 0; // 最大 turn 
 
 返回 `{getMarker(), dispose()}` —— `getMarker()` 返回 `CompactMarker | undefined`,`dispose()` 移除 bus 订阅。run-agent 从 `RunResult.compactBefore` 向外透传,最终由 `TranscriptStore.commitTurn` 写入磁盘。
 
-> **类型演进**：老 `CompactInfo` 中间类型已废弃；accumulator 直接产出 `CompactMarker`（core 的权威类型,见 [session-persistence.md §2.3](./session-persistence.md) Compact 标记行）。单一事实源（Phase 5 §0.7.1）。
+> **类型演进**：老 `CompactInfo` 中间类型已废弃；accumulator 直接产出 `CompactMarker`（core 的权威类型,见 [conversation-model.md §9.2](./conversation-model.md) Compact 标记行）。单一事实源（Phase 5 §0.7.1）。
 
 ---
 

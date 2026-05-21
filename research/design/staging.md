@@ -19,246 +19,216 @@
 
 ---
 
-## 当前 staging:新对话自动命名
+## 当前 staging:transcript schema 历史一致性清理
 
 ### 明确需求
 
-1. **触发时机**:在一个**新对话**的**第一轮沟通结束后**,用 light 档模型给对话起一个名字,直接落到对话名上
-2. **一次性**:此功能**永远只触发一次**——新对话第一轮 turn 结束的瞬间。触发完此功能结束,与后续任何流程无关。后续重命名(如用户手动 `/name <name>`)是独立机制,跟本功能不冲突
-3. **触发前置判断**:创建时已经有名字的对话,直接不触发(name 不为空就不命名)
-4. **作用域**:main 模式和 work 模式一致行为
+1. **来源**:外部架构审查识别的 4 项 transcript schema 历史债务(草稿事实层调研 [drafts/transcript-schema-debt.md](drafts/transcript-schema-debt.md))
+2. **目标**:**彻底**消除一致性缺陷,遵循"避免架构债务、追求最优架构"项目原则——不修修补补、不半作妥协
+3. **范围**:**仅限审查识别的 4 项**,不擅自扩展产品方向:
+   - 债务 1:[conversation-model.md L710](specifications/conversation-model.md#L710) 旧路径残留
+   - 债务 2:`TranscriptHeader.projectPath` 死字段
+   - 债务 3:`writeHeader` / `readHeader` 生产零调用
+   - 债务 4:[session-persistence.md](specifications/session-persistence.md) deprecation 处置不彻底
 
-### 前置 bug 修复(确认需要)
-
-work 模式当前实现 [repl.ts:1432](../../packages/cli/src/repl.ts#L1432)(`applyModeSwitch` enter 分支步骤 ②)`worksceneRepo.create({ name: scene.name })` 把 `scene.name` 直接作为新建 conversation 的 name。意味着每次 `/enter <scene>` 都新建一个 name=场景名 的对话,**N 次进入同一场景产生 N 个同名对话,无法区分**。
-
-此 bug 在自动命名机制落地前必须修复,否则:
-- work 模式对话进入瞬间 name 已不为空(等于 scene.name),自动命名机制按"已有名字不触发"规则会跳过 → work 模式永远拿不到自动命名 → 与"main/work 一致"需求冲突
-- 即便不做自动命名,N 个同名对话本身就是产品缺陷(未来 workscene 历史对话访问能力一接入就爆炸)
-
-修复方向:`applyModeSwitch` enter 分支创建对话时**不传 name**(让 `convRepo.create` 走默认 `name = autoChatId() = id` 的 sentinel,与 main 模式 `/new` 无参一致),让自动命名机制统一接管。
+   架构设计段的事实层 grep 验证可能发现**同款债务在其他 spec 的散落**(同一概念错误在多处重复出现),属于"完整呈现该债务真实边界"而非"扩展产品方向";不同种类的债务(非同款)严格留待独立处置。
 
 ### 架构设计
 
-#### 事实层(grep 验证)
+#### 事实层(grep 验证,2026-05-21)
 
-1. **`Conversation.name` 是 `string` 不是 `string | null`** ([core/conversation/types.ts:15](../../packages/core/src/conversation/types.ts#L15))。`ConversationRepository.create({})` 不传 name 时,[repository.ts:122-127](../../packages/core/src/conversation/repository.ts#L122) `id = autoChatId()` + `name: opts.name ?? id` —— **未命名 conversation 的 name 默认等于 id**(如 `chat-20260521-a3f1`),不是 null。这是 sentinel value。
-2. **"未命名"判定 sentinel** = `conversation.name === conversation.id`。
-3. **`ConversationRepository.rename(id, name)`** ([repository.ts:141](../../packages/core/src/conversation/repository.ts#L141)) 现成,原子写 meta.json。
-4. **turn 完成主路径钩子位置** = [repl.ts:2001-2007](../../packages/cli/src/repl.ts#L2001) `commitTurn` 返回 canonical 之后、`turnCounter++` 处。此处是 turn 边界、状态全闭合、`state.conv` 全字段可用。
-5. **light LLM 调用通道** = `session.runtime.callText(prompt)` ([orchestrator/runtime L180](../../packages/orchestrator/src/runtime/create-agent-runtime.ts#L180)),内部走 `roles.light.chat`(见 `createMemoryFlushCallLLM` ADR-SLLM-009)。无需新加 helper。
-6. **work 模式 conversation 创建点** = [repl.ts:1432](../../packages/cli/src/repl.ts#L1432) `applyModeSwitch` enter 分支的 `worksceneRepo.create({ name: scene.name })`。这是要修的 Phase 0 改动点。
-7. **typeahead 候选 label 已经处理 fallback** ([repl.ts:1635](../../packages/cli/src/repl.ts#L1635)) `label: c.name || c.id` —— 但 `c.name || c.id` 在 c.name 是 id 时仍显示 id,体验降级。这正是本次自动命名要解决的问题。
-8. **REPL prompt 不显示对话名字** ([typeahead-input.ts:181](../../packages/cli/src/typeahead-input.ts#L181)) `❯ ` 是固定 prompt。对话名字的真实显示点只有两处:
-   - 启动 welcome chrome row3 一次性渲染 ([workbench/welcome.ts:67](../../packages/cli/src/workbench/welcome.ts#L67),闭包局部变量 `resumedConversationName`,启动后不再刷新)
-   - `/switch` typeahead 候选 label(实时读 `convRepo.list()`,每次弹列表都取最新 meta)
-9. **`ConversationRuntimeState`(`state.conv` 类型)无 name 字段** ([repl.ts:112-126](../../packages/cli/src/repl.ts#L112))。字段仅:`messages / store / convRepo / conversationId / turnCounter / lastToolEndCount / hasProposedSkill / journalCondenseDone`。**conversation.name 用磁盘 meta 单源**(`convRepo.get(id).name`),不缓存到内存。
-10. **`/name` handler 也是磁盘单源行为** ([repl.ts:582](../../packages/cli/src/repl.ts#L582)) 仅调 `convRepo.rename()` 写盘,不触发 `onConversationChanged`,不更新任何 UI 缓存。自动命名应遵循同款简洁模式。
-11. **`Turn` 类型字段** ([transcript/types.ts:34-39](../../packages/core/src/transcript/types.ts#L34)) `userMessage: Message` + `assistantMessage: Message` 等。`runResult.turn.userMessage` 是 turn 完成钩子位置可直接取到的精确数据源。
-12. **`extractText(message: Message): string`** 现成工具 ([types/messages.ts:112](../../packages/core/src/types/messages.ts#L112)),从 `@zhixing/core` 导出。已被 [repl.ts](../../packages/cli/src/repl.ts) 多处使用(如 [workscene 纪要 prompt 构造](../../packages/cli/src/repl.ts#L186))。**直接复用,不引入新 message→text 工具**。
+**债务 1 — conversation-model.md §7.1 旧架构描述残留(L710 路径是表象)**
 
-#### 核心抽象
+[L710](specifications/conversation-model.md#L710) 当前文本:
+> `Conversation 数据持久保留在 ~/.zhixing/projects/<id>/conversations/<convId>/transcript.jsonl`
 
-**`InferConversationName` 类型**(放在 [core/conversation/auto-name.ts](../../packages/core/src/conversation/auto-name.ts) 新文件):
-```ts
-/**
- * 推断对话名字 —— 基于第一 turn 的 user message 生成简短主题字符串。
- * 失败 / 异常 / 内容不合格 → 返回 null(caller 静默不更新)。
- * 成功 → 返回经 sanitize 的短名字。
- *
- * 接单条 Message(userMessage)而非 Turn:命名的稳定信号源是用户首句的 intent,
- * assistant 回复 / toolCalls / usage 与命名无关。接口收窄到 Message:
- *   - 模块依赖更短(conversation → types/messages,不引入 transcript/Turn 依赖)
- *   - 防未来误用 turn 其他字段(toolCalls 等做命名 → 噪音)
- *   - 与 sanitize / extractText 同款"基础类型为输入"的约定一致
- */
-export type InferConversationName = (
-  userMessage: Message,
-) => Promise<string | null>;
-```
+旧 `projects/<id>/` 路径已被 ADR-CM-016 替代,grep packages 内零命中。但 L710 不是孤立一行——嵌在 §7.1 "形态 A:Standalone CLI(in-process)" 整段生命周期流程图(L670-L711)里,**整段描述与当前实现不符**:
 
-**`maybeAutoNameFirstTurn` helper**(同文件,纯函数 + 二次门控):
-```ts
-/**
- * 一次性自动命名机制:新对话第一轮 turn 完成后触发一次,永远只触发一次。
- *
- * 主路径瞬时 short-circuit:turnCounter !== 1 直接 return,主路径零额外 IO。
- * 异步分支(turnCounter === 1 时)才做磁盘读 + LLM 调用:
- *   1. 读 conv.meta 检查 name === id (未命名 sentinel)
- *   2. inferName(userMessage) 生成短名字
- *   3. 二次门控:重读 conv.meta 确认 name 仍 === id (防 inflight 期间用户 `/name`)
- *   4. convRepo.rename 写磁盘
- *
- * 返回 `Promise<void>`(供测试 `await` 等待异步完成);调用方主路径用 `void` 不 await,
- * 实现 fire-and-forget 语义不阻塞 turn 完成。失败:全部静默(catch swallow),不阻塞主路径。
- * 不维护 UI 缓存:与 `/name` handler 同款,写盘单源 — `/switch` typeahead 下次自然取新值。
- */
-export function maybeAutoNameFirstTurn(opts: {
-  conversationId: string;
-  turnCounter: number;        // commitTurn 后 ++ 的值,刚 === 1 表示第一 turn 完成
-  userMessage: Message;        // 调用方传 `runResult.turn.userMessage`(命名的稳定信号源)
-  inferName: InferConversationName;
-  convRepo: IConversationRepository;
-}): Promise<void> {
-  // 主路径瞬时 short-circuit:turnCounter !== 1 直接 resolved
-  if (opts.turnCounter !== 1) return Promise.resolve();
+- L688 `ConversationManager.acquire(convId) → 创建 SessionRuntime #1`
+- L689 `CliChannel.registerConnection({ id: "cli-pid-12345", ... })`
+- L706 `SessionRuntime #1 observers 清空 → 立即进入释放流程`
 
-  // 返回 Promise(供测试 await);调用方主路径 fire-and-forget 用 `void` 不 await。
-  return (async () => {
-    try {
-      const conv = await opts.convRepo.get(opts.conversationId);
-      if (!conv || conv.name !== conv.id) return;  // 对话不存在 / 已命名
-      const inferred = await opts.inferName(opts.userMessage);
-      if (!inferred) return;
-      // 二次门控
-      const latest = await opts.convRepo.get(opts.conversationId);
-      if (!latest || latest.name !== latest.id) return;
-      await opts.convRepo.rename(opts.conversationId, inferred);
-    } catch {
-      // 静默 —— best-effort,失败不影响用户主路径
-    }
-  })();
-}
-```
+grep `ConversationManager|SessionRuntime|CliChannel` 在 `packages/cli/src` 的代码符号引用**只命中 `cli/src/serve/`**(cli 充当 server 时)和 `packages/server/`。standalone cli 主入口 [`repl.ts`](../../packages/cli/src/repl.ts) 零代码引用,实际用 `RuntimeSession`([repl.ts:1202](../../packages/cli/src/repl.ts#L1202));`cli/src/runtime/builtin-extra-tools.ts:50` 注释提及 ConversationManager 是描述 `ScheduleTool ↔ Scheduler ↔ runAgentTurn ↔ ConversationManager` 循环依赖,不是代码引用。
 
-**sanitize 函数**(同文件,导出供测试):
-```ts
-/**
- * 把 LLM 返回的原始字符串处理为合法对话名字。
- * 规则:trim → 去首尾引号 → 去内联换行 → 截长度上限。
- * 处理后为空 → 返回 null。
- */
-export function sanitizeConversationName(raw: string, maxLength = 20): string | null { ... }
-```
+**同款债务在其他 spec 散落**(grep `~/.zhixing/projects/` 在 design/specifications/ 下):
+- [work-mode.md L121](specifications/work-mode.md#L121) ASCII 目录树 `├── projects/<projectId>/conversations/<id>/  (project scope;现有)` — 写"现有"但 project scope 已被 ADR-CM-016 删除
+- [work-mode.md L142](specifications/work-mode.md#L142) `| { kind: "project"; projectId: string; projectPath: string }` — 描述已删除的 ConversationScope variant
+- `conversation-scope-flattening.md` 内的 `projects/` 提及是该 spec 自身在描述"已废弃路径"(L16/L40),属合理回溯,不构成债务
 
-**LLM-based inferer 装配**(cli 装配期内联,无需独立 factory):
-```ts
-const inferName: InferConversationName = async (userMessage) => {
-  const userText = extractText(userMessage);
-  if (!userText) return null;
-  const prompt = buildConversationNamerPrompt(userText);
-  // ⚠️ 必须在调用时动态访问 `session.runtime` getter —— 不可预捕获
-  // `const callText = session.runtime.callText` 之类的写法。`session.runtime`
-  // 在工作模式 enter/exit 时切换 active runtime(main ↔ power overlay),
-  // 自动命名要跟随当前 active runtime 的 light 通道(work 模式下走 power
-  // 的 light,main 模式下走 main 的 light)。
-  const raw = await session.runtime.callText(prompt);
-  return sanitizeConversationName(raw);
-};
-```
+**债务 2 — `TranscriptHeader.projectPath` 死字段**
 
-**`buildConversationNamerPrompt`**(放在 [core/conversation/auto-name.ts](../../packages/core/src/conversation/auto-name.ts) 或 [core/conversation/prompts.ts](../../packages/core/src/conversation/prompts.ts)):
-```text
-基于以下用户首次提问,用 5-15 个字概括这次对话的核心主题,作为对话名字。
+[`transcript/types.ts:24`](../../packages/core/src/transcript/types.ts#L24) `projectPath: string` 字段定义。grep `\bprojectPath\b` 在 `packages/core/src/transcript/` 的实际命中:
 
-要求:
-- 用对话的主要语言(中文提问用中文)
-- 5-15 个字符,不超过此范围
-- 不带任何标点、引号、编号、表情或说明
-- 只输出主题字符串本身,不要任何前后缀
+| 位置 | 用途 |
+|---|---|
+| [`types.ts:24`](../../packages/core/src/transcript/types.ts#L24) | 字段定义 |
+| [`store.ts:55/75/79`](../../packages/core/src/transcript/store.ts#L55) | 类成员 / 构造参数 / 赋值 |
+| [`store.ts:139`](../../packages/core/src/transcript/store.ts#L139) | 写入 header |
+| [`__tests__/serializer.test.ts:23/157`](../../packages/core/src/transcript/__tests__/serializer.test.ts) | 测试 fixture |
 
-用户提问:
-<user-message>
+**生产代码零读取**,纯 write-only。注:`providers/config-loader.ts` / `orchestrator/runtime/project-context.ts` 也命中 `projectPath`,但属其他子系统局部变量,与 transcript header 字段无关。
 
-主题:
-```
+**文档侧 projectPath 引用**(本字段清理后需同步):
+- [conversation-model.md L871](specifications/conversation-model.md#L871) "Header 是不可变的创建快照(conversationId、model、provider、projectPath、createdAt)" — 字段列举
+- [conversation-scope-flattening.md L154 / L161 / L192](specifications/conversation-scope-flattening.md) — 三处明确将本字段标记为"本次不动 / 后续独立评估项"。**本次清理即该 spec 预设的'独立评估'落实**,需同步更新这三处描述为"已清理"
+- [work-mode.md L142](specifications/work-mode.md#L142) — ConversationScope 描述含 `projectPath`,随债务 1 work-mode 修正一并处理
+- [session-persistence.md L137 / L304](specifications/session-persistence.md) — 历史 schema 示例,随债务 4 删正文一并消失
 
-#### Phase 0:work 模式 conversation.name 默认 bug 修复
+**债务 3 — `writeHeader` / `readHeader` 生产零调用 + dead import**
 
-[repl.ts:1432](../../packages/cli/src/repl.ts#L1432) `applyModeSwitch` enter 分支:
+[`serializer.ts:31`](../../packages/core/src/transcript/serializer.ts#L31) `writeHeader`(mkdir + writeFile)+ [`serializer.ts:142`](../../packages/core/src/transcript/serializer.ts#L142) `readHeader`(读首行解析)。grep 命中:
 
-```diff
-- const wConv = await worksceneRepo.create({ name: scene.name });
-+ // workscene 内对话与 main 同款 — 创建时 name 默认等于 id(autoChatId),让自动
-+ // 命名机制统一在第一轮 turn 后接管。scene.name 是工作场景级语义,不应直接占
-+ // conversation.name 槽位(N 次进入同 scene 会产生 N 个同名对话,无法区分)。
-+ const wConv = await worksceneRepo.create({});
-```
+- `serializer.ts`(自身定义)
+- `index.ts`(re-export)
+- `__tests__/serializer.test.ts` — 两类用途:**L171-202 `describe("writeHeader / readHeader")` 测试函数本身**(4 个用例:写入后读 / 自动创建父目录 / 文件不存在返 null / 首行非 header 返 null);**L207-258 `describe("appendRecord / loadRecords")` + `describe("countTurns")` 用 writeHeader 作 fixture**(6 处写一个 header 作为前置,然后测其它功能)
+- `__tests__/normalize.test.ts:6` `import { writeHeader }` —— grep `writeHeader\s*\(` 在本文件**零调用**,**dead import**
 
-**关联验证点**:
-- REPL prompt 本身不显示对话名(固定 `❯ `),Phase 0 修改无可见性影响
-- 启动 welcome chrome row3 渲染 `resumedConversationName`(work 模式 enter 不重渲染 welcome chrome,只在 cli 启动时渲染一次),不受 Phase 0 影响
-- `/switch` typeahead 候选 label = `c.name || c.id`:Phase 0 修复前 N 次进同 scene 显示 N 个 "OAuth 重构项目";修复后显示 N 个不同的 `chat-xxx` id(可区分),自动命名落地后变为各自精确的对话主题名
-- `/exit` 退出生成纪要的逻辑 [repl.ts:1500-1525](../../packages/cli/src/repl.ts#L1500) 不依赖 conversation.name,不受影响
+生产路径(`commitTurn` 单原子入口)完全取代了 writeHeader / readHeader。
 
-#### Phase 1:自动命名机制实施
+**注**:`readHeader` 是只读首行(性能),`loadRecords` 是全文件解析,**两者不等价**。删 readHeader 后测试要么用 `fs.readFile + 自解析`,要么用 `loadRecords(...).header`(全文件 IO,测试场景性能可接受)。
 
-**改动点 1: 新增 [core/src/conversation/auto-name.ts](../../packages/core/src/conversation/auto-name.ts)**
-- `InferConversationName` 类型(接 `userMessage: Message`)
-- `maybeAutoNameFirstTurn` helper(接 `conversationId / turnCounter / userMessage`)
-- `sanitizeConversationName` 工具
-- `buildConversationNamerPrompt` prompt 工厂(接 user text string)
-- (无需新增 message → text 工具,直接复用现有 `extractText` —— 见事实层第 12 条)
-- 单元测试:触发条件 × 二次门控 × sanitize 边界 × prompt 校验
+**债务 4 — session-persistence.md 处置不彻底,被引用方未真正承接**
 
-**改动点 2: 导出**
-- [core/src/conversation/index.ts](../../packages/core/src/conversation/index.ts) re-export `InferConversationName / maybeAutoNameFirstTurn / sanitizeConversationName`
+[`session-persistence.md`](specifications/session-persistence.md) 顶部 3 段 deprecation 标注完整,但正文 §一-§八(竞品对比 / SHA-256 哈希 / `--continue/--resume/--name/--fork-session` / `SessionStore` 等)仍是过时设计内容(L137/L304 含 `projectPath` 也属此正文残留)。
 
-**改动点 3: cli 装配期注入 + 钩子调用**
+**归并未真正完成(债务 4 的根因)**:
 
-[repl.ts](../../packages/cli/src/repl.ts) 内:
-1. `startRepl` 顶层装配 `inferName` —— 内部**动态访问** `session.runtime.callText`,跟随 active runtime(见核心抽象段的 inferer 装配注释)
-2. 钩子调用位置 = [repl.ts:2001-2007](../../packages/cli/src/repl.ts#L2001) **try 块内**,`state.conv.turnCounter++` 之后(commit 成功路径)。调用形态:`void maybeAutoNameFirstTurn({ conversationId: state.conv.conversationId, turnCounter: state.conv.turnCounter, userMessage: runResult.turn.userMessage, inferName, convRepo: state.conv.convRepo });`
-   - 用 `void` 不 await(主路径 fire-and-forget,不阻塞下一轮)
-   - **commit 失败时不触发**:catch 路径 turnCounter 未 ++,自然走不到此调用;即便误调,helper 内 `turnCounter !== 1` short-circuit 也会兜底
-3. **无 UI 刷新动作** —— 与 [`/name` handler](../../packages/cli/src/repl.ts#L582) 同款简洁模式:`convRepo.rename()` 写盘即完,不维护内存 name 缓存,不触发 `onConversationChanged`。落盘后所有"看名字"入口下次自然取新值(`/switch` typeahead 实时读 convRepo.list / 下次启动 welcome chrome 重新渲染)
+grep `session-persistence.md` 命中 5 处引用方:
 
-**改动点 4:测试**
-- 单元(core):helper 行为(turnCounter !== 1 short-circuit / name !== id short-circuit / 二次门控用户已命名时跳过 / inferer 失败静默 / sanitize 边界)
-- 集成(cli):mock `session.runtime.callText` 跑一个 turn → 检查 `convRepo.get(id).name` 已从 id 变为推断名;再跑一个 turn → name 不变(只触发一次);用户在 inflight 期间 `/name <X>` → 自动命名跳过覆盖
-- 端到端手动:`/new` → 发一句话 → 等 LLM 命名落地 → `/switch` typeahead 看到精确主题名
+| 引用方 | 行 | 引用形态 | 性质 |
+|---|---|---|---|
+| `conversation-model.md` | L7 | "(被本文档归并)" | **声明归并** |
+| `conversation-model.md` | L513 | "详见 [session-persistence.md](./session-persistence.md) §5(Turn-complete 时追加策略,本文档继承不变)" | **反向引用细节** |
+| `conversation-model.md` | L841 | "继承 [session-persistence.md](./session-persistence.md) 的 JSONL 设计" | **反向引用** |
+| `conversation-model.md` | L863 | "详见 [session-persistence.md](./session-persistence.md) §2.3。本文档仅修订" | **反向引用细节** |
+| `context-architecture.md` | L604 | "见 [session-persistence.md §2.3](./session-persistence.md)" | **anchor 引用** |
+| `usage-display.md` | L5 | 关联引用列举 | **see also** |
+| `drafts/transcript-retention.md` | L6 | 指 session-persistence.md §2.3 + §4.5 + §5 为"权威 spec" | **archival 引用**(本文件 L3-L9 已自标记"冻结归档") |
 
-#### 关键 trade-offs(已决策)
+conversation-model.md 声称归并,**实际 L513 / L841 / L863 仍反向引用 session-persistence.md 取 JSONL 行格式 / Turn-complete 追加策略等细节**。这是 session-persistence.md 长期残留的根本原因——**归并没做完**,直接删 §一-§八 正文会让 4 个 anchor link(§2.3 / §5)broken。
 
-| 决策点 | 选择 | 理由 |
+session-persistence.md 章节结构:§一 竞品 / §二 知行设计(含 §2.3 JSONL 格式)/ §三 CLI 集成 / §四 核心类型(含 §4.5 TranscriptStore 接口)/ §五 写入策略 / §六 文件结构 / §七 实现路线 / §八 ADR-005 修正 / §九 设计原则。被反向引用的 §2.3 / §4.5 / §5 是核心承接对象。
+
+**其他 3 处 deprecated 文档现状(用于对比)**:
+
+| 文档 | 当前 deprecation 形态 | 评估 |
 |---|---|---|
-| "未命名"sentinel | `name === id` | 现有 create 的默认行为就是 name=id;不引入 nullable 字段避免 schema 变更 |
-| 触发判定 | `turnCounter === 1`(主路径 short-circuit) + `name === id`(异步分支内) | turnCounter 是 commitTurn 后 ++ 的内存值,无需磁盘读;name 检查在异步分支才做;一次性语义天然蕴含在 sentinel 中(命名后 name≠id 永不再触发),无需额外 flag |
-| LLM 通道 | 复用 `session.runtime.callText`(走 light) | task shape "首句 → 短字符串" 是典型 light 场景;无需新 helper |
-| 异步策略 | helper 返回 `Promise<void>`,主路径 `void` 不 await(fire-and-forget),测试可 await | 不阻塞 turn 完成 + 失败静默(best-effort);**测试可 await 异步分支验证 name 落盘**,避免 polling/sleep 这种 fragile 测试 |
-| 钩子调用位置 | [repl.ts:2001-2007](../../packages/cli/src/repl.ts#L2001) **try 块内**,`turnCounter++` 之后 | commit 成功路径才触发;catch 路径 turnCounter 未 ++,即便误调也被 helper 内 short-circuit 兜底 |
-| `session.runtime` 访问方式 | inferer 闭包内**动态访问 getter**,不预捕获 | `session.runtime` 在工作模式 enter/exit 时切换 active runtime(main ↔ power overlay);自动命名要跟随当前 active runtime 的 light 通道 |
-| LLM 调用失败处理 | catch swallow + 同对话同 turn 周期不重试 | "永远只触发一次"按 `turnCounter === 1` 严格守门 — LLM 失败后该 turn 周期不再尝试(turnCounter 已 ++),用户需手动 `/name <name>` 或继续聊后 `/clear` 重置。补充语义:`/clear` 走 [repl.ts:380](../../packages/cli/src/repl.ts#L380) `state.conv.turnCounter = 0` 重置,若此时 name 仍 === id(从未成功命名),下次 turn 完成会再次进入触发判定 —— 这是合理恢复机制,符合"尊重已命名 + 给未命名机会"的深层意图,不与"永远只触发一次"字面冲突(name 已 !== id 的对话被 sentinel 永久阻断) |
-| 竞态防御 | inferer 完成后二次读 meta 门控(best-effort) | 防住主要 race 顺序:用户 `/name` 在 inferer LLM 调用 inflight 期间 → 二次 get 命中 `name !== id` → 跳过覆盖。承认极小 TOCTOU 窗口:若用户 `/name` 精确落在自动命名"二次 get 通过"与"调 rename"之间(promise microtask 级,几十 ms 内),会覆盖用户操作。**接受此 best-effort 语义**,不引入 `compareAndSwap` 这类新 API 强化原子性(代价不匹配真实场景概率) |
-| 输入材料 | helper 接 `userMessage: Message`(调用方传 `runResult.turn.userMessage`);inferer 内部 `extractText` 取 text | 命名稳定信号源是 user intent — assistant 回复可能很长(代码/列表/啰嗦)+ 易跑偏,toolCalls 是噪音;接口收窄到 Message 不接整个 Turn,模块依赖更短(conversation → types/messages,不引 transcript/Turn)+ 防未来误用 |
-| 长度上限 | 20 字符(prompt 引导 5-15,sanitize 截 20 兜底) | typeahead label 行宽约束,过长会折行影响候选列表渲染 |
-| UI 刷新策略 | 不刷新,写盘即完 | 现有架构 `/name` handler 同款行为(rename 后不动 UI 缓存);REPL prompt 不显示对话名,welcome chrome 只启动时渲染一次,`/switch` typeahead 候选实时读 convRepo.list — 自动命名落盘后所有"看名字"入口下次自然取新值,无需引入新 UI 同步通路 |
-| 钩子归属包 | core/conversation/auto-name.ts(helper 主体)+ cli 装配(注入) | helper 纯函数无 LLM 依赖,可测;LLM 调用在 cli 装配期注入 |
-| work 模式行为 | Phase 0 修复后与 main 完全一致 | "main/work 一样"产品原则 + 解决 N 次进入同名 bug |
-| server 模式 | **本次不接入** | server 端 `runManagedTurn` 是 RPC 路径,与 REPL 用户面解耦;若 IDE / Web UI 需自动命名,作为独立议题 |
+| [`context-management-v2-redesign.md L3`](specifications/context-management-v2-redesign.md) | "DEPRECATED + 决策痕迹保留"标注 + 正文承载 v2 设计与 prompt cache 元规则①冲突推演 | 正文承载**决策反思价值**(为何 v2 失败 → v3 出生),无反向引用问题,已最佳实践 |
+| [`phase2-complete-agent.md L7-15`](specifications/phase2-complete-agent.md) | "废弃 + **按维度索引**"形态(6 个维度各指向当前权威) | **已做优质维度索引导航**,无反向引用问题,删除反丢价值 |
+| [`ADR-005 §决策 6 L88-108`](architecture/decisions/005-cli-architecture.md) | 顶部 deprecation + 维度索引 + 决策主体(13 行) | ADR 标准模式(decision snapshot),无反向引用问题,已最佳实践 |
+
+**结论**:session-persistence.md 与其他 3 处性质不同 ——
+- 其他 3 处:**无反向引用,正文是独立决策痕迹**,保留是最佳实践
+- session-persistence.md:**正文是被归并的细节**,但归并方(conversation-model.md §九)没真正承接,留正文是"半完成归并"的债务症状
+
+要彻底删 session-persistence.md 正文,前置必须真正完成归并(把 §2.3 / §5 / §4.5 内容本地化到 conversation-model.md §九)。
+
+#### 待决策点(本段是审查迭代主战场)
+
+**决策 1 — 债务 1 范围**(推荐:扩展到 §7.1 整段 + work-mode.md 同款修正)
+
+- A. 仅修 L710 一行路径
+- **B. 修 conversation-model.md §7.1 整段对齐 standalone cli 现实(RuntimeSession + auto-resume + REPL 内 /switch /new /name),同步修 work-mode.md L120-L143 目录树 + ConversationScope variant 描述**
+- **推荐 B**:L710 是 §7.1 整段过时的表象;只改一行留 §7.1 整段过时债务;work-mode.md L121/L142 是同款债务的另一处散落,放任不修留"为什么这次只改一处"的解释债务。这不是扩展范围,是事实层完整呈现该债务的真实边界
+
+**决策 2 — 债务 2 处置**(推荐:删除字段 + 同步文档)
+
+- A. 删除字段 + 所有引用 + 文档同步
+- B. 保留 + 文档化实际用途(需找/补真用例)
+- **推荐 A**:[conversation-scope-flattening.md L192](specifications/conversation-scope-flattening.md) 已明确"本字段已被产品定位判定为 dead field,仅因 schema 变更复杂度暂留,应在独立 schema 变更 spec 中清理"——本次即该 spec 预设的清理。无数据迁移代价(旧 transcript 文件 header 多余字段被 normalize 静默忽略)
+
+**决策 3 — 债务 3 处置**(推荐:删除函数 + 测试改写 + 清理 dead import)
+
+- A. 删除 `writeHeader` / `readHeader` 函数 + index re-export + 测试改用直接 fs API 或测试内部 helper + 清理 normalize.test.ts dead import
+- B. 保留为公共测试 API
+- **推荐 A**:internal-only 项目无外部消费者,公开 API 价值低;函数被 `commitTurn` 单原子入口完全取代,留着诱导未来误用。测试改写不是"等价替换"(readHeader 全文件 IO 性能退化在测试场景无意义)
+
+**决策 4 — 债务 4 处置**(推荐:先完成归并再删正文,两步法;其他 3 处不动)
+
+- A. **两步法**:
+  - **前置**:`conversation-model.md §九` 真正承接 `session-persistence.md` 被 active spec 反向引用的细节 —— §2.3 JSONL 行格式 → §9.2 / §5.1 Turn-complete 追加策略(单向数据流设计意图)→ §9.5 **本地化内联**,L513 / L841 / L863 反向引用全部就近迁移,消除归并未完成的根因。**不承接**:§4.5 TranscriptStore 接口 + §5.2/§5.3/§5.4 写入/读取/消息重建实现细节(grep 验证 active spec 无任何反向引用,由代码契约 + ADR-CM-015/017 承载,spec 镜像反成噪音)
+  - **后续**:删 `session-persistence.md` §一-§八 正文,留 stub(指向 conversation-model.md 对应章节 + 决策痕迹见 git history)
+  - **同步引用方**:`context-architecture.md L604` / `usage-display.md L5` 引用更新到 conversation-model.md 对应章节;`drafts/transcript-retention.md` 自身已 archival(L3-L9 自标"冻结归档"),其中的 anchor 引用退化为墓碑形态可接受,不动
+  - **其他 3 处不动**:v2-redesign / phase2 / ADR-005 §决策 6 各自都是已实现的最佳实践(决策反思 / 维度索引 / ADR 标准模式),无反向引用问题
+- B. **简化删法**(仅删 session-persistence.md 正文,不做前置承接):省事但留 4 处 anchor link broken + 不消除归并未完成的根因
+- C. **一刀切 4 处齐删齐留**:统一形式但毁掉其他 3 处已经做好的决策痕迹/维度索引/ADR 标准模式
+- **推荐 A**:B 引入新债务(broken link)且没解决根因;C 引入反向损失。两步法的"前置承接"才是债务 4 的真正解决方案——session-persistence.md 长期残留不是因为"忘了删",而是因为归并方没真正承接细节,半完成的归并把这个文档钉在这里
 
 #### 不在范围(本次不动)
 
-- `Conversation.name` schema 是否改为 `string | null` — 当前 sentinel `name===id` 已足够,改 schema 引发跨包数据迁移,代价不匹配
-- workscene 历史对话访问能力(`/workscene history` 或 work 内 `/switch` 解禁) — 用户之前提出但是独立议题
-- server 模式 RPC `session.send` 自动命名 — 独立议题
-- prompt cache 优化 — 本次单发短 prompt 不依赖 cache,无优化空间
+- `Conversation.name` schema 改 nullable(sentinel `name === id` 已沉淀,工作良好)
+- `TranscriptHeader.name: string | null` vs `Conversation.name: string` 设计不对称(独立议题,外部审查未识别)
+- transcript schema 演进(新增字段 / 新机制)
+- workscene 历史对话访问能力(独立议题)
+- `ConversationScope` 三态→二态扁平化(已在 commit a2917df 完成)
+- 新对话自动命名(已沉淀)
+- conversation-model.md §7.2(形态 B,server 客户端模式)— 与当前 server 端实现对齐审查作为独立 scope
 
-#### 实施清单(按依赖顺序)
+#### 实施清单(决策落定后启用,按依赖顺序)
 
-1. **Phase 0**:[repl.ts:1432](../../packages/cli/src/repl.ts#L1432) work 模式 `create({ name: scene.name })` → `create({})`;`pnpm -F @zhixing/cli test` 通过 + 手动验证 enter 多次同 scene → id 不同 / name 不同。
-2. **Phase 1 · core helper**:新增 [core/src/conversation/auto-name.ts](../../packages/core/src/conversation/auto-name.ts) 完整内容 + index 导出 + 单元测试。`pnpm -F @zhixing/core test` 通过。
-3. **Phase 1 · cli 装配**:[repl.ts](../../packages/cli/src/repl.ts) 装配 `inferName` 闭包 + commitTurn 后调 `maybeAutoNameFirstTurn`(传 conversationId / turnCounter / runResult.turn.userMessage / inferName / convRepo)。`pnpm -F @zhixing/cli test` 通过。
-4. **综合验证**:全包 build + test 零回归 + 手动 e2e(main 模式 `/new` 发一句话 → 名字落盘;work 模式 `/enter` 发一句话 → 名字落盘且与 scene.name 解耦;两次进同 scene → 两个对话名字不同)。
+> 以下基于决策 1B / 2A / 3A / 4A 起草。最终清单待用户审查后启用。
 
-#### 验收
+1. **决策 2 字段层清理**(无文档依赖,先做):
+   - 删 [`transcript/types.ts:24`](../../packages/core/src/transcript/types.ts#L24) `projectPath` 字段
+   - 删 [`transcript/store.ts`](../../packages/core/src/transcript/store.ts) L55/75/79/139 字段引用
+   - **TranscriptStore 构造签名变更**:从 `(convDir, cwd, options?)` 变为 `(convDir, options?)`。同步以下 8 处 caller 删第二参数:
+     - 生产代码 3 处:[`cli/src/repl.ts:1171`](../../packages/cli/src/repl.ts#L1171)(main scope 传 cwd)/ [`cli/src/repl.ts:1429`](../../packages/cli/src/repl.ts#L1429)(workscene 传 scene.workdir)/ [`cli/src/serve/command.ts:177`](../../packages/cli/src/serve/command.ts#L177)(传 workspace)
+     - 测试代码 5 处:`store.test.ts:44` / `normalize.test.ts:48` / `lock.test.ts:32` / `compact-all.test.ts:36` / `commit-turn.test.ts:50`
+   - 修测试 fixture [`__tests__/serializer.test.ts:23/157`](../../packages/core/src/transcript/__tests__/serializer.test.ts) 中 `HEADER` 字面量删 `projectPath`
 
-- [Phase 0] work 模式 N 次进同 scene → N 个对话各自有不同 id(create 默认 autoChatId),name 默认 = id;不再出现"N 个同名对话"
-- [Phase 1] main 模式 `/new` 不带 name → 发一句话 → 名字自动从 id 变为 LLM 生成的短主题
-- [Phase 1] work 模式 `/enter <scene>` → 发一句话 → 名字自动从 id 变为短主题(与 main 一致)
-- 第二轮 turn 后名字不变(只触发一次)
-- 用户 `/new <name>` 或 `/name <name>` 显式命名的对话第一轮后不被自动命名覆盖
-- LLM 调用失败 → 名字保持 id(降级)+ 不报错给用户
+2. **决策 3 函数层清理**:
+   - 删 [`serializer.ts:31/142`](../../packages/core/src/transcript/serializer.ts) `writeHeader` + `readHeader`
+   - 删 [`transcript/index.ts`](../../packages/core/src/transcript/index.ts) re-export
+   - **删除** [`__tests__/serializer.test.ts`](../../packages/core/src/transcript/__tests__/serializer.test.ts) L171-202 `describe("writeHeader / readHeader", ...)` 整段(测试函数本身,函数删了测试随之删除)
+   - **改写**同文件 L207-258 `describe("appendRecord / loadRecords")` + `describe("countTurns")` 中 writeHeader 作 fixture 的用法 → 直接 fs API 或测试内部 helper
+   - 清理 [`__tests__/normalize.test.ts:6`](../../packages/core/src/transcript/__tests__/normalize.test.ts) dead import
+
+3. **决策 1 + 决策 2 文档同步**:
+   - [`conversation-model.md §7.1`](specifications/conversation-model.md#L674) (L674-L711) 整段重写对齐 standalone cli 当前实现(RuntimeSession / auto-resume / REPL 内 /switch /new /name),L710 路径修正
+   - *(`conversation-model.md L871` 删 `projectPath` 字段列举合并进 item 4a 第 1 条 §9.2 承接重写;避免本 item 局部改后被 item 4a 整段重写覆盖)*
+   - [`work-mode.md L120-L143`](specifications/work-mode.md) ASCII 目录树删 project scope 行 + ConversationScope 类型定义删 project variant
+   - [`work-mode.md L260`](specifications/work-mode.md#L260) TranscriptStore 接口签名描述从 `TranscriptStore(convDir, workdir)` 更新为 `TranscriptStore(convDir, options?)`(与决策 2 构造签名变更对齐)
+   - [`conversation-scope-flattening.md L95`](specifications/conversation-scope-flattening.md#L95) 代码示例更新为 `const store = new TranscriptStore(convDir);` + 删除"(见'不在范围')" 注释(本次清理后该"不在范围"已落实)
+   - [`conversation-scope-flattening.md L154 / L161 / L192`](specifications/conversation-scope-flattening.md) 三处"本次不动 / 后续独立评估"描述更新为"已清理"
+
+4. **决策 4 两步法**(实施顺序 4a 承接 → 4b 切引用 → 4c 删正文,过程中无 broken 中间态):
+
+   4a. **前置 — conversation-model.md §九 真正承接 session-persistence.md 细节**(消除归并未完成的根因):
+   - [`conversation-model.md §9.2`](specifications/conversation-model.md) **整段重写**(非末尾追加):把 session-persistence.md §2.3 JSONL 行格式细节(Header / Turn / Compact 三种行的字段定义、JSON schema、行级 corruption 隔离语义)本地化内联,L863 "详见 session-persistence.md §2.3" 反向引用消除。**承接 schema 反映决策 2 清理后状态**(Header 字段不含 `projectPath`,§9.2 整段重写过程中现有 L871 `projectPath` 字段列举自然被新内容覆盖消除);**保留 §9.2 现有的修订增量描述**(SessionHeader.sessionId → TranscriptHeader.conversationId、新增 meta.json 拆出可变字段)
+   - [`conversation-model.md §9.5`](specifications/conversation-model.md) 整合 session-persistence.md **§5.1** Turn-complete 追加策略(单向数据流设计意图),L513 / L841 反向引用消除。**§5.2/§5.3/§5.4 不承接**(写入/读取/消息重建实现细节由代码契约 + ADR-CM-015/017 承载,与 §4.5 不承接同款原则)
+   - 同步 [`conversation-model.md L7`](specifications/conversation-model.md#L7) 引用文案,从"(被本文档归并)"改为"(已被本文档完整归并,保留为决策痕迹归档)"
+
+   4b. **切引用方到新承接位置**(此时 session-persistence.md 仍在,新旧引用并存可用):
+   - [`context-architecture.md L604`](specifications/context-architecture.md#L604) 引用更新到 `conversation-model.md §9.2`(Compact 标记行新承接位置)
+   - [`usage-display.md L5`](specifications/usage-display.md#L5) 关联引用列表把 `session-persistence.md(会话追踪)` 改为 `conversation-model.md(Conversation / Transcript 持久化)` —— 标签同步精确化,不照搬"会话追踪"(后者是 session-persistence 语义,不准描述 conversation-model)
+   - [`drafts/transcript-retention.md`](drafts/transcript-retention.md) 自身已 archival(L3-L9 自标"冻结归档"),anchor 引用退化为墓碑形态可接受,不动
+
+   4c. **删 session-persistence.md 正文**(所有 active 引用已切到新位置,删除瞬间无 broken):§一-§八 整段删除,保留顶部 stub(~15 行:指向 conversation-model.md §九 对应章节 + 维度索引 + 决策痕迹见 git history)
+
+5. **综合验证**:
+   - 全包 build 零错误
+   - 全包测试零回归
+   - grep 验收(见下)
+
+#### 验收(决策定下后启用)
+
+- packages 内 `\bprojectPath\b` 仅命中 `providers/config-loader.ts` / `orchestrator/runtime/project-context.ts` 两处无关局部变量
+- packages 内 `writeHeader|readHeader` 零命中
+- spec 内 `~/.zhixing/projects/` 仅命中 `conversation-scope-flattening.md` 在描述"已废弃路径"的合理回溯
+- spec 内 `ConversationManager|SessionRuntime|CliChannel` 在 standalone cli 流程描述中零命中(`cli/src/runtime/builtin-extra-tools.ts:50` 的注释引用是代码内,不在 spec 验收范围)
+- `session-persistence.md` 主体 ≤ 30 行(stub 形态);v2-redesign / phase2 / ADR-005 保持现状
+- spec 内 `session-persistence.md#` anchor 引用零命中(`drafts/transcript-retention.md` 自身 archival 内允许墓碑引用,不算)
+- `conversation-model.md` 内 "详见 session-persistence.md" / "继承 session-persistence.md" 等反向引用零命中(归并已真正完成)
 - 全包测试零回归
 
 ---
 
 > 最近一次沉淀:
 >
+> - **新对话自动命名**(2026-05-21 完成):新对话第一轮 turn 完成后用 light LLM 生成短主题名,落 `conversation.meta.name`。[core/conversation/auto-name.ts](../../packages/core/src/conversation/auto-name.ts) 提供 `InferConversationName` 函数依赖注入 + `maybeAutoNameFirstTurn` 协议(主路径同步 short-circuit / 异步分支二次门控 / 全 catch swallow);cli 装配 inferer 闭包(动态访问 `session.runtime.callText` 跟随 work mode active runtime 切换),commitTurn 成功 + `turnCounter++` 之后 fire-and-forget 触发钩子;Phase 0 顺带修复 work 模式 `worksceneRepo.create({ name: scene.name })` → `create({})` 的"N 次进同 scene 产生 N 个同名对话"bug。沉淀去向:[core/conversation/auto-name.ts](../../packages/core/src/conversation/auto-name.ts) 顶部 docstring 为首位权威(设计原则 / 跨层职责 / 触发协议 / sanitize 规则均在);[conversation-model.md](specifications/conversation-model.md) 后续按需补"自动命名"节(独立 task,不阻塞本 staging)
 > - **CLI 启动参数清理**(2026-05-21 完成):彻底删除 `-c, --continue` / `-r, --resume [id]` / `-n, --name <name>` 三个启动参数 + 字段 + 透传 + `interactiveConversationPicker` 函数 + `Conversation` 死 import。架构升级:启动参数纯粹只承载"运行模式 / 环境配置"维度,对话选择维度统一收敛到 REPL 内 `/switch` / `/new` / `/name` + auto-resume。文档:session-persistence.md / phase2-complete-agent.md / ADR-005 决策 6 三处补 DEPRECATED/SUPERSEDED 标注
 > - **`/conversations` 与 `/sessions` 冗余命令清理**(2026-05-21 完成):删除 `/conversations` handler + typeahead 注册 + `["sessions"]` 别名;架构升级:`/help` 改读 REPL_COMMAND_META 单源(过滤 hidden 与 typeahead dropdown 一致),消除命令可见性双轨。`/switch` 作为查看+切换对话唯一入口
 > - **摘要质量升级**(2026-05-20 完成):主对话压缩(LLMSummarize)模型档位从 light 升级到 main;`compaction-llm.ts` 拆为 `createSummarizeCallLLM` + `createMemoryFlushCallLLM` 两个独立 helper;`MAIN_SESSION_PROMPT` 重写为吸取 opencode 精华的新 7 段(约束与偏好 / 关键决策 / 进度三态)。沉淀去向:
 >   - [secondary-llm-capability.md ADR-SLLM-009](specifications/secondary-llm-capability.md) — 角色分流决策权威
 >   - [llm-summarization.md](specifications/llm-summarization.md) — 7 段结构 / prompt / 校验同步更新到代码现状
 >   - [thinking-control.md](specifications/thinking-control.md) / [work-mode.md](specifications/work-mode.md) / [subagent-execution.md](specifications/subagent-execution.md) — 引用同步
-

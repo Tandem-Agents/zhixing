@@ -4,7 +4,7 @@
 > **状态**:📐 设计稿（2026-04-21 修订：新增 TurnId）
 > **关联**:
 >
-> - [session-persistence.md](./session-persistence.md) — Transcript 持久化层（被本文档归并）
+> - [session-persistence.md](./session-persistence.md) — 历史持久化设计快照(已被本文档 §九 完整归并;保留为决策痕迹归档)
 > - [server-gateway.md](./server-gateway.md) — RPC 协议层（含 Channel 接入）
 > - [persistent-service.md](./persistent-service.md) — Scheduler / Background Agent 集成点
 > - [message-outbox.md](./message-outbox.md) — TurnId 的消费者（因果依赖标签）
@@ -510,7 +510,7 @@ Turn 结束 → append 到 Transcript → emit complete 事件
 - 用户消息 + agent 最终消息 + 工具调用记录 + token usage 一并 append 到 transcript.jsonl
 - 中途崩溃 → 整个 Turn 不写入(用户视角:刚才那条没回复,重发即可),不留半成品
 
-详见 [session-persistence.md](./session-persistence.md) §5(Turn-complete 时追加策略,本文档继承不变)。
+写入路径(原子单一入口 + 单向数据流)详见本文档 §9.5。
 
 ### 5.3 TurnId（Outbox 因果标签载体，v2.3 新增）
 
@@ -673,41 +673,40 @@ CLI 有两种运行形态,生命周期略有不同:
 
 ### 7.1 形态 A:Standalone CLI(in-process)
 
-不依赖独立的 zhixing serve 进程。CLI 进程内嵌 ConversationManager 和单一 CliChannel,数据写入本地磁盘。
+不依赖独立的 zhixing serve 进程。CLI 进程内嵌 `RuntimeSession`(运行态容器,装载 active runtime 与跨 turn 状态),数据写入本地磁盘的用户域 / 工作场景域。
 
 ```
-T=0   用户运行 zhixing(在 ~/dev/projectA 目录)
+T=0   用户运行 zhixing
        │
-       ├─ 进程启动 → 创建 in-process ConversationManager
-       │   作用域:user(任意目录运行同源)
-       ├─ 创建 CliChannel(in-process channel)
-       ├─ 加载或创建 Conversation
-       │   - 自动恢复本项目最近活跃对话（convRepo.findLatest()）
-       │   - 无历史对话 → 创建 default conversation
-       │   - REPL 内通过 /new、/switch 管理对话，不依赖启动参数
-       ├─ ConversationManager.acquire(convId) → 创建 SessionRuntime #1
-       ├─ CliChannel.registerConnection({ id: "cli-pid-12345", ... })
-       └─ REPL 启动,prompt 显示当前对话名
+       ├─ 进程启动 → 创建 RuntimeSession(in-process)
+       │   作用域:user(默认)/ workscene(REPL 内 /enter 切换)
+       ├─ auto-resume:convRepo.findLatest() 加载最近活跃对话;
+       │   - 加载失败或无 latest → 创建 default conversation
+       │   - REPL 内通过 /switch /new /name 管理对话身份;
+       │     启动参数只承载"运行模式 / 环境配置",不承载对话选择
+       └─ REPL 启动
 
 T=2s  用户输入 "你好"
        │
-       ├─ Turn 1 开始 → SessionRuntime #1 跑 agent loop
-       ├─ 流式 yield 到 CliChannel → 终端渲染
-       ├─ Turn 1 结束 → append 到 transcript.jsonl
-       └─ Session #1.lastTurnAt = now
+       ├─ Turn 1 开始 → RuntimeSession.runtime 跑 agent loop
+       ├─ 流式 yield 到 TerminalRenderer → 终端渲染
+       ├─ Turn 1 结束 → TranscriptStore.commitTurn 原子写入
+       │   (header + [compact?] + post-compact turns 不变量保持)
+       └─ 第一轮完成后异步触发自动命名(若 name === id,light LLM 生成短主题名)
 
 T=10s 用户输入 "再说一遍"
-       └─ 同一 SessionRuntime #1 跑 Turn 2(享受 prompt cache)
+       └─ 同一 RuntimeSession 跑 Turn 2(享受 prompt cache)
 
 T=600s 用户 Ctrl+D 退出
        │
-       ├─ CliChannel.unregisterConnection("cli-pid-12345")
-       ├─ SessionRuntime #1 observers 清空 → 立即进入释放流程
-       ├─ Session #1.dispose() → 等待无 Turn → 释放内存
-       ├─ ConversationManager 关闭
+       ├─ TerminalRenderer 渲染告别
+       ├─ RuntimeSession 释放(active runtime 关闭 + broker 解绑)
        └─ 进程退出
-       
-       Conversation 数据持久保留在 ~/.zhixing/projects/<id>/conversations/<convId>/transcript.jsonl
+
+       Conversation 数据持久保留在:
+         user scope:      ~/.zhixing/conversations/<convId>/
+         workscene scope: ~/.zhixing/workscenes/<sceneId>/conversations/<convId>/
+       每个目录含 meta.json(身份)+ transcript.jsonl(内容日志)
 ```
 
 ### 7.2 形态 B:CLI as Client(连接外部 server)
@@ -747,18 +746,18 @@ T=600s 用户 Ctrl+D 退出 CLI
 ### 7.3 两种形态对比
 
 
-| 维度                  | Standalone CLI                            | CLI as Client                 |
-| ------------------- | ----------------------------------------- | ----------------------------- |
-| ConversationManager | in-process                                | 在 server                      |
-| 默认作用域               | project(cwd)                              | 跟随 server(默认 user)            |
-| Conversation 数据位置   | `~/.zhixing/projects/<id>/conversations/` | `~/.zhixing/conversations/`   |
-| Session 生命周期        | 与进程同生死                                    | 由 server 管理(idle/observer 规则) |
-| 多客户端并存              | 不支持(单 CLI)                                | 支持(多 CLI/钉钉/Web 共享)           |
-| 通道                  | CliChannel(in-process)                    | RpcChannel(WebSocket)         |
-| 何时启用                | 默认(无 server 运行时)                          | 自动(检测到 server.pid)            |
+| 维度                  | Standalone CLI                                                              | CLI as Client                 |
+| ------------------- | --------------------------------------------------------------------------- | ----------------------------- |
+| 运行态容器              | `RuntimeSession`(in-process)                                                | 在 server(`ConversationManager` + `SessionRuntime`) |
+| 默认作用域               | user                                                                        | 跟随 server(默认 user)            |
+| Conversation 数据位置   | `~/.zhixing/conversations/<convId>/` (user) / `~/.zhixing/workscenes/<sceneId>/conversations/<convId>/` (workscene) | `~/.zhixing/conversations/<convId>/` |
+| 运行态生命周期            | 与 CLI 进程同生死                                                                  | 由 server 管理(idle / observer 规则) |
+| 多客户端并存              | 不支持(单 CLI)                                                                  | 支持(多 CLI / 钉钉 / Web 共享)        |
+| 通道                  | TerminalRenderer(in-process)                                                | RpcChannel(WebSocket)         |
+| 何时启用                | 默认(无 server 运行时)                                                            | 自动(检测到 server.pid)            |
 
 
-**用户视角无差别**:一样的命令、一样的 prompt、一样的 conversation 列表(只是数据位置不同)。
+**用户视角无差别**:一样的命令、一样的 prompt、一样的 conversation 列表。
 
 ---
 
@@ -838,7 +837,7 @@ T=3600s 钉钉来新消息
 
 ## 九、Transcript 持久化
 
-继承 [session-persistence.md](./session-persistence.md) 的 JSONL 设计(Header + Turn + Compact 三种行类型),仅做术语和路径更新。
+Transcript 持久化层的完整规格(JSONL 行格式 / 文件路径 / 上下文架构 / 作用域选择 / commitTurn 原子截断)。本节是单一事实源。
 
 ### 9.1 文件路径
 
@@ -858,18 +857,66 @@ T=3600s 钉钉来新消息
 
 > **不变量**：transcript.jsonl 始终满足 `header + [compact?] + post-compact turns` —— 至多 1 个 compact 行紧跟 header；compact 之前的 turns 在 `commitTurn({compactBefore})` 时被原子截断（非归档）。详见 §9.5 / ADR-CM-017。
 
-### 9.2 JSONL 行格式(继承不变)
+### 9.2 JSONL 行格式
 
-详见 [session-persistence.md](./session-persistence.md) §2.3。本文档仅修订:
+`transcript.jsonl` 由首行 Header + 后续 Turn / Compact 三种行类型组成,每行独立 JSON,单行解析失败只跳过该行不影响其余记录。
 
-- `SessionHeader.sessionId` → `TranscriptHeader.conversationId`
-- 新增 `meta.json`(从 header 拆出可变字段:name、archived、preferredModel/Provider)
+**第一行:Header**
+
+```json
+{
+  "type": "header",
+  "version": 1,
+  "conversationId": "20260409-a3f1",
+  "name": null,
+  "createdAt": "2026-04-09T10:00:00.000Z",
+  "model": "deepseek-chat",
+  "provider": "deepseek"
+}
+```
+
+`name` 历史字段,由 conversation meta.json 接管后保留为 `null`(写入时不携带语义)。
+
+**后续行:Turn 记录**
+
+```json
+{
+  "type": "turn",
+  "turnIndex": 0,
+  "timestamp": "2026-04-09T10:00:05.000Z",
+  "userMessage": { "role": "user", "content": "..." },
+  "assistantMessage": { "role": "assistant", "content": [...] },
+  "toolCalls": [
+    { "name": "read_file", "input": { "path": "..." }, "result": "..." }
+  ],
+  "usage": { "inputTokens": 1234, "outputTokens": 567 }
+}
+```
+
+**Turn 级粒度而非消息级**:一轮 turn(user → assistant + tools)要么完整保存要么不保存;不留半成品 assistant 消息(中途崩溃 = 整 turn 不写入,用户视角"刚才那条没回复,重发即可")。
+
+**Compact 标记行**
+
+```json
+{
+  "type": "compact",
+  "timestamp": "2026-04-09T11:00:00.000Z",
+  "summary": "## 核心目标\n...",
+  "turnsCompacted": 15,
+  "tokensBefore": 45000,
+  "tokensAfter": 8000
+}
+```
+
+字段语义:`turnsCompacted` 是本次 compact 事务替代的文件 Turn 数(由 §9.5 commitTurn 按此值 `slice(-keepCount)` 保留末尾);`summary` 是 LLM 生成的摘要平文本(段切换路径额外携带 `segmentId` + `structuredSummary` 三段结构,详见 transcript types 内联文档);`tokensBefore` / `tokensAfter` 用于 UI 预算显示。
 
 **职责边界**:
 
-- `meta.json` — 可变元数据,由 ConversationRepository 读写(name、archived、lastActiveAt、scope 等)
-- `transcript.jsonl` — 不可变内容日志,由 TranscriptStore 追加(Header + Turn + Compact 行)。Header 是不可变的创建快照(conversationId、model、provider、projectPath、createdAt),不含 name 等可变字段
-- 推论:**name 只存 meta.json**。TranscriptStore 不提供 rename。list / delete / findLatest 等身份操作由 ConversationRepository 负责,TranscriptStore 不感知
+- `meta.json` — 可变元数据,由 ConversationRepository 读写(name、archived、lastActiveAt、scope、preferredModel/Provider 等)
+- `transcript.jsonl` — 不可变内容日志,由 TranscriptStore 追加(Header + Turn + Compact 行)。Header 是不可变的创建快照(conversationId、model、provider、createdAt),不含 name 等可变字段
+- 推论:**name 只存 meta.json**。TranscriptStore 不提供 rename;list / delete / findLatest 等身份操作由 ConversationRepository 负责,TranscriptStore 不感知
+
+**身份字段从 header 拆出 meta.json 的设计动机**:可变身份(name / archived / preferredModel 等)与不可变内容日志各自独立演进,身份改动不重写整条 JSONL;同时 `sessionId` 已迁移为 `conversationId`(语义对齐"对话身份"而非"会话实例")。
 
 ### 9.3 上下文架构 → 见 [context-architecture.md](./context-architecture.md)
 

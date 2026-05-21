@@ -29,7 +29,7 @@ let store: TranscriptStore;
 beforeEach(async () => {
   tmpDir = await createTempDir("lock");
   convDir = path.join(tmpDir, "conversations");
-  store = new TranscriptStore(convDir, "/test/project", { platform: "linux" });
+  store = new TranscriptStore(convDir, { platform: "linux" });
 });
 
 // ─── Per-id 锁 ───

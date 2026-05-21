@@ -1168,7 +1168,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   const scope: ConversationScope = { kind: "user" };
   const convRepo = new ConversationRepository(scope);
   const convDir = conversationsDir(scope);
-  const store = new TranscriptStore(convDir, cwd);
+  const store = new TranscriptStore(convDir);
 
   // 对话仓储路由核 —— builtinExtraTools(含 TaskListService) 与 segmentDeps 在此
   // 一次性装配并跨 reload 持久，二者构造期即绑定后端 repo、无法重建。插一层
@@ -1428,7 +1428,6 @@ export async function startRepl(options: ReplOptions): Promise<void> {
         });
         const wStore = new TranscriptStore(
           conversationsDir({ kind: "workscene", sceneId }),
-          scene.workdir ?? process.cwd(),
         );
         // 起始 messages 按触发源：LLM 触发须带入引发进入的那句用户输入（vision：
         // power 不读 main 历史，但触发那句须带入否则 power 不知干啥）；命令触发

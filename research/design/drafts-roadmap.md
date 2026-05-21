@@ -31,7 +31,8 @@
 | 草稿 | 状态 | 摘要 | 目标合并到 |
 |------|------|------|-----------|
 | [首次配置·连接测试（被动）](drafts/onboarding-connection-test.md) | 待起草 | 配置编辑器提供用户主动触发的 API Key 连接测试，避免首次错误推迟到 REPL | [specifications/credentials-and-onboarding.md](specifications/credentials-and-onboarding.md) |
-| [transcript schema 历史债务清理](drafts/transcript-schema-debt.md) | 待起草 | ADR-CM-016 scope 扁平化后遗留:conversation-model.md L710 旧路径 + `TranscriptHeader.projectPath` 死字段 + `writeHeader/readHeader` 生产零调用 + session-persistence.md 处置升级(删正文 vs 保留)| [specifications/conversation-model.md](specifications/conversation-model.md) + transcript schema 同步 |
+
+> 注:原"transcript schema 历史债务清理"草稿(decision points 涉及 4 项跨文件一致性 + 处置方式 trade-off)已升级到 staging 轨道,详见 [staging.md "当前 staging"](staging.md)。drafts 文件 [transcript-schema-debt.md](drafts/transcript-schema-debt.md) 保留作为 staging 引用的事实层调研材料。
 
 ## 已升级到正式 spec
 

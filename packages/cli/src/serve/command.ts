@@ -174,7 +174,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
 
   // 2. TranscriptStore
   const convDir = conversationsDir({ kind: "user" });
-  const transcript = new TranscriptStore(convDir, workspace);
+  const transcript = new TranscriptStore(convDir);
 
   // 3. RuntimeFactory + ConversationManager
   // scheduleTool → Scheduler → runAgentTurn → ConversationManager → runtimeFactory → scheduleTool

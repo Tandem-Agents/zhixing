@@ -52,7 +52,6 @@ export interface TranscriptStoreOptions {
 
 export class TranscriptStore implements ITranscriptStore {
   private readonly conversationsDir: string;
-  private readonly projectPath: string;
   private readonly platform: NodeJS.Platform;
 
   /**
@@ -72,11 +71,9 @@ export class TranscriptStore implements ITranscriptStore {
 
   constructor(
     conversationsDir: string,
-    projectPath: string,
     options?: TranscriptStoreOptions,
   ) {
     this.conversationsDir = conversationsDir;
-    this.projectPath = path.resolve(projectPath);
     this.platform = options?.platform ?? process.platform;
   }
 
@@ -136,7 +133,6 @@ export class TranscriptStore implements ITranscriptStore {
         version: TRANSCRIPT_FORMAT_VERSION,
         conversationId,
         name: null,
-        projectPath: this.projectPath,
         createdAt: new Date().toISOString(),
         model: options.model,
         provider: options.provider,
