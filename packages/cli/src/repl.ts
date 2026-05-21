@@ -197,6 +197,69 @@ function buildWorksceneDigestPrompt(
   );
 }
 
+// ─── 斜杠命令元信息（单源真相） ───
+//
+// `/help` 输出 + typeahead 命令面板 都从这份元信息派生,确保命令可见性
+// (hidden) / 分类 (category) / 别名 (aliases) / 描述 (description) 全系统一致。
+//
+// 字段语义:
+//   - name      : typeahead 命令名 (不带 / 前缀,如 "new" "switch")
+//   - aliases   : 命令别名 (typeahead 路径生效;legacy 路径暂不解析)
+//   - legacyKey : `slashCommands` 字典 key (带 / 前缀,如 "/new" "/switch")—— 桥接
+//                 buildSlashCommands 返回的字典与 typeahead registry
+//   - category  : 命令分类 (session / info / tools / config),驱动 /help 分组与
+//                 typeahead panel 标题
+//   - hidden    : true 时 typeahead dropdown 不显示、`/help` 不打印 (escape hatch:
+//                 用户精确打名字仍能召唤;但当前无业务用例,删除 conversations/
+//                 sessions 后该字段所有命令均显式 false/undefined)
+//
+// args 字段不在本元信息里——args 是 typeahead 系统专属维度,在 typeahead 注册
+// 时按 name 注入 (目前仅 /switch 需要 conversation 选择器),不污染 /help 视图。
+
+type ReplCommandMeta = {
+  readonly name: string;
+  readonly aliases?: readonly string[];
+  readonly description: string;
+  readonly category: "session" | "info" | "tools" | "config";
+  readonly legacyKey: string;
+  readonly hidden?: boolean;
+};
+
+const REPL_COMMAND_META: ReadonlyArray<ReplCommandMeta> = [
+  // ─ session ─
+  { name: "new", description: "创建新对话", category: "session", legacyKey: "/new" },
+  { name: "clear", description: "清空对话历史", category: "session", legacyKey: "/clear" },
+  { name: "switch", description: "切换到其他对话", category: "session", legacyKey: "/switch" },
+  { name: "name", description: "为当前会话命名", category: "session", legacyKey: "/name" },
+  { name: "enter", description: "进入工作场景", category: "session", legacyKey: "/enter" },
+  { name: "exit", aliases: ["quit"], description: "退出工作场景 / 退出知行", category: "session", legacyKey: "/exit" },
+  // ─ info ─
+  { name: "help", description: "显示帮助信息", category: "info", legacyKey: "/help" },
+  { name: "status", description: "显示会话状态", category: "info", legacyKey: "/status" },
+  { name: "me", description: "查看身份画像", category: "info", legacyKey: "/me" },
+  { name: "model", description: "显示当前模型信息", category: "info", legacyKey: "/model" },
+  { name: "usage", description: "查看 token 用量详情", category: "info", legacyKey: "/usage" },
+  { name: "context", description: "上下文容量可视化", category: "info", legacyKey: "/context" },
+  // ─ tools ─
+  { name: "skills", description: "查看技能库", category: "tools", legacyKey: "/skills" },
+  { name: "workscene", description: "工作场景管理（增删改查/归档）", category: "tools", legacyKey: "/workscene" },
+  { name: "journal", description: "查看日志状态", category: "tools", legacyKey: "/journal" },
+  { name: "people", description: "查看关系网络", category: "tools", legacyKey: "/people" },
+  { name: "compact", description: "手动触发上下文压缩", category: "tools", legacyKey: "/compact" },
+  { name: "tasks", description: "查看定时任务", category: "tools", legacyKey: "/tasks" },
+  // ─ config ─
+  { name: "config", description: "修改基础配置（服务商 / 模型 / API Key / 消息通道等）", category: "config", legacyKey: "/config" },
+  { name: "trust", description: "权限规则管理", category: "config", legacyKey: "/trust" },
+  { name: "security", description: "安全状态概览", category: "config", legacyKey: "/security" },
+];
+
+const REPL_COMMAND_CATEGORY_LABELS: Record<ReplCommandMeta["category"], string> = {
+  session: "会话管理",
+  info: "信息查询",
+  tools: "工具",
+  config: "配置",
+};
+
 // ─── 斜杠命令 ───
 
 function buildSlashCommands(
@@ -229,19 +292,34 @@ function buildSlashCommands(
     "/help": {
       description: "显示帮助信息",
       handler: (_state) => {
-        const commands = buildSlashCommands(
-          rl,
-          session,
-          renderer,
-          cliWriter,
-          onConversationChanged,
-          applyModeSwitch,
-        );
+        // 命令清单单源 = REPL_COMMAND_META;hidden 命令统一不打印,与 typeahead
+        // dropdown 可见性对齐,避免双轨不一致(以前直接遍历 slashCommands 字典
+        // 会漏 hidden 标记 → hidden 命令仍在 /help 出现,造成用户困惑)。
         cliWriter.line(`\n${layout.contentPrefix}${chalk.bold("可用命令：")}`);
-        for (const [cmd, { description }] of Object.entries(commands)) {
+        const groups = new Map<ReplCommandMeta["category"], ReplCommandMeta[]>();
+        for (const cmd of REPL_COMMAND_META) {
+          if (cmd.hidden) continue;
+          const bucket = groups.get(cmd.category) ?? [];
+          bucket.push(cmd);
+          groups.set(cmd.category, bucket);
+        }
+        const categoryOrder: ReplCommandMeta["category"][] = [
+          "session",
+          "info",
+          "tools",
+          "config",
+        ];
+        for (const cat of categoryOrder) {
+          const items = groups.get(cat);
+          if (!items || items.length === 0) continue;
           cliWriter.line(
-            `  ${chalk.cyan(cmd.padEnd(14))} ${chalk.dim(description)}`,
+            `\n  ${chalk.bold(REPL_COMMAND_CATEGORY_LABELS[cat])}`,
           );
+          for (const cmd of items) {
+            cliWriter.line(
+              `    ${chalk.cyan(cmd.legacyKey.padEnd(14))} ${chalk.dim(cmd.description)}`,
+            );
+          }
         }
         cliWriter.line("");
       },
@@ -339,28 +417,6 @@ function buildSlashCommands(
             `\n  ${chalk.dim("Provider:")} ${session.runtime.providerId}` +
             `\n  ${chalk.dim("Network proxy:")} ${proxyText}\n`,
         );
-      },
-    },
-    "/conversations": {
-      description: "列出当前项目的对话",
-      handler: async (state) => {
-        const conversations = await state.conv.convRepo.list();
-        if (conversations.length === 0) {
-          cliWriter.line(chalk.dim("\n  没有保存的对话\n"));
-          return;
-        }
-        cliWriter.line(`\n${chalk.bold("  保存的对话：")}`);
-        for (const c of conversations.slice(0, 15)) {
-          const label = c.name ? chalk.white(c.name) : chalk.dim("(未命名)");
-          const time = formatRelativeTime(new Date(c.lastActiveAt));
-          const turnCount = await state.conv.store.countTurns(c.id);
-          const current =
-            c.id === state.conv.conversationId ? chalk.green(" ← 当前") : "";
-          cliWriter.line(
-            `  ${chalk.cyan(c.id)} ${label} ${chalk.dim(`(${time}, ${turnCount} 轮)`)}${current}`,
-          );
-        }
-        cliWriter.line("");
       },
     },
     "/new": {
@@ -1622,51 +1678,20 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       provider: conversationArgProvider,
     };
 
-    // ── REPL 命令目录：typeahead panel 的单源真相 ──
+    // ── REPL 命令注册 ──
     //
-    // 每一条对应一个 legacy `slashCommands` 的 key，跑 local execution，
-    // handler 就是 legacy 闭包的原样包装。新增命令只需要在这里加一行。
-    const REPL_COMMANDS: ReadonlyArray<{
-      readonly name: string;
-      readonly aliases?: readonly string[];
-      readonly description: string;
-      readonly category: "session" | "info" | "tools" | "config";
-      readonly legacyKey: string;
-      readonly args?: readonly ArgSchema[];
-      readonly hidden?: boolean;
-    }> = [
-      // ─ session ─
-      { name: "new", description: "创建新对话", category: "session", legacyKey: "/new" },
-      { name: "clear", description: "清空对话历史", category: "session", legacyKey: "/clear" },
-      { name: "conversations", aliases: ["sessions"], description: "列出当前项目的对话", category: "session", legacyKey: "/conversations", hidden: true },
-      { name: "switch", description: "切换到其他对话", category: "session", legacyKey: "/switch", args: [switchArgSchema] },
-      { name: "name", description: "为当前会话命名", category: "session", legacyKey: "/name" },
-      { name: "enter", description: "进入工作场景", category: "session", legacyKey: "/enter" },
-      { name: "exit", aliases: ["quit"], description: "退出工作场景 / 退出知行", category: "session", legacyKey: "/exit" },
-      // ─ info ─
-      { name: "help", description: "显示帮助信息", category: "info", legacyKey: "/help" },
-      { name: "status", description: "显示会话状态", category: "info", legacyKey: "/status" },
-      { name: "me", description: "查看身份画像", category: "info", legacyKey: "/me" },
-      { name: "model", description: "显示当前模型信息", category: "info", legacyKey: "/model" },
-      { name: "usage", description: "查看 token 用量详情", category: "info", legacyKey: "/usage" },
-      { name: "context", description: "上下文容量可视化", category: "info", legacyKey: "/context" },
-      // ─ tools ─
-      { name: "skills", description: "查看技能库", category: "tools", legacyKey: "/skills" },
-      { name: "workscene", description: "工作场景管理（增删改查/归档）", category: "tools", legacyKey: "/workscene" },
-      { name: "journal", description: "查看日志状态", category: "tools", legacyKey: "/journal" },
-      { name: "people", description: "查看关系网络", category: "tools", legacyKey: "/people" },
-      { name: "compact", description: "手动触发上下文压缩", category: "tools", legacyKey: "/compact" },
-      { name: "tasks", description: "查看定时任务", category: "tools", legacyKey: "/tasks" },
-      // ─ config ─
-      { name: "config", description: "修改基础配置（服务商 / 模型 / API Key / 消息通道等）", category: "config", legacyKey: "/config" },
-      { name: "trust", description: "权限规则管理", category: "config", legacyKey: "/trust" },
-      { name: "security", description: "安全状态概览", category: "config", legacyKey: "/security" },
-    ];
+    // 命令元信息单源在文件顶层 REPL_COMMAND_META。本块只负责把元信息桥接到
+    // typeahead registry: 每条注册 + handler 包装 legacy slashCommands 闭包。
+    // args 字段不在元信息内,在此处按命令名注入(目前只 /switch 需要对话选择器)。
+    const argsByName: Record<string, ReadonlyArray<ArgSchema>> = {
+      switch: [switchArgSchema],
+    };
 
-    for (const cmd of REPL_COMMANDS) {
+    for (const cmd of REPL_COMMAND_META) {
       const legacy = slashCommands[cmd.legacyKey];
       if (!legacy) continue; // 防御式跳过，防止 legacyKey 和 slashCommands 不一致
       const id = `${cmd.name}:repl`;
+      const args = argsByName[cmd.name];
       tRegistry.register({
         id,
         name: cmd.name,
@@ -1675,7 +1700,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
         category: cmd.category,
         execution: "local",
         tag: "builtin",
-        args: cmd.args ? [...cmd.args] : undefined,
+        args: args ? [...args] : undefined,
         hidden: cmd.hidden,
       });
       typeaheadDispatcher.registerHandler(id, async (ctx: CommandHandlerContext) => {

@@ -76,7 +76,7 @@
 | 会话持久化 | `@zhixing/core` | ✅ 已完成 | 34 个单元测试通过（JSONL 序列化 + SessionStore CRUD） |
 | L3: LLM 摘要压缩 | `@zhixing/core` | ✅ 已完成 | 29 个测试通过（7 段模板 + 校验 + CircuitBreaker） |
 | CLI 上下文可视化 | `@zhixing/cli` | ✅ 已完成 | 预算状态 + 压缩过程渲染 |
-| CLI 会话管理 | `@zhixing/cli` | ✅ 已完成 | --continue/--resume/--name + /sessions + /name |
+| CLI 对话管理 | `@zhixing/cli` | ✅ 已完成 | /new + /switch（列+切统一入口）+ /name + /clear + REPL 启动 auto-resume |
 | Frontmatter 解析器 | `@zhixing/core` | ✅ 已完成 | 16 个单元测试通过（parse+stringify+roundtrip） |
 | Profile Loader (M1) | `@zhixing/core` | ✅ 已完成 | 9 个测试通过（加载+格式化+容错） |
 | MemoryStore (M2) | `@zhixing/core` | ✅ 已完成 | 15 个测试通过（CRUD+搜索+分类） |

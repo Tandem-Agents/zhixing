@@ -80,38 +80,29 @@ zhixing
 
 | 命令 | 作用 |
 |------|------|
-| `/help` | 显示所有命令 |
-| `/clear` | 清空对话历史 |
-| `/status` | 当前会话状态 |
-| `/sessions` | 列出本项目所有保存的会话 |
+| `/help` | 显示所有命令（按分类输出） |
+| `/new` | 创建新对话 |
+| `/switch` | 列出对话 + 切换到已有对话（typeahead async-enum 选择 / 序号 / 名称 / id 三级匹配） |
+| `/clear` | 清空当前对话历史 |
+| `/name` | 为当前对话命名 |
+| `/enter` | 进入工作场景 |
+| `/exit` | 退出工作场景 / 退出知行 |
+| `/status` | 显示当前会话状态 |
 | `/me` | 查看身份画像 |
-| `/skills` | 技能库管理（含 `audit` 子命令） |
-| `/journal` | 日志状态 |
-| `/people` | 关系网络 |
+| `/model` | 显示当前模型信息 |
 | `/usage` | Token 用量详情 |
 | `/context` | 上下文容量可视化 |
+| `/skills` | 查看技能库 |
+| `/workscene` | 工作场景管理（增删改查/归档） |
+| `/journal` | 查看日志状态 |
+| `/people` | 查看关系网络 |
 | `/compact` | 手动触发上下文压缩 |
-| `/tasks` | 查看定时任务（S1 Scheduler） |
+| `/tasks` | 查看定时任务 |
+| `/config` | 修改基础配置（服务商 / 模型 / API Key / 消息通道等） |
 | `/trust` | 权限规则管理 |
 | `/security` | 安全状态概览 |
-| `/exit` | 退出 |
 
-**会话恢复**：
-
-```bash
-zhixing -c                     # 继续本项目最近的会话
-zhixing -r                     # 交互式选择恢复
-zhixing -r <sessionId>         # 恢复指定会话
-zhixing -n "我的会话名"         # 启动时命名
-```
-
-**模型选择**：
-
-```bash
-zhixing -m claude-3-5-sonnet
-zhixing --provider siliconflow
-zhixing -w /path/to/workspace  # 指定工作区（安全信任边界）
-```
+**对话恢复**：REPL 启动时默认自动恢复用户域最近一个对话，无需手动指定。进入 REPL 后用 `/new` 创建新对话、`/switch` 列出并切换到其它对话。
 
 ---
 

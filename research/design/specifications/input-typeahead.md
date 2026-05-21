@@ -1387,7 +1387,7 @@ async function dispatchAccepted(result: AcceptResult): Promise<void> {
 ```
 
 **典型归属**（2026-04-16 基于 Phase 1 Step 5 实测重新分类）：
-- `local`：`/new`、`/clear`、`/exit`、`/help`、`/status`、`/me`、`/model`、`/usage`、`/context`、`/sessions`、`/skills`、`/journal`、`/people`、`/trust`、`/security`、`/compact`、`/name` —— 所有 info 查询 + 所有项目管理命令。**不产生 agent turn**。
+- `local`：`/new`、`/clear`、`/switch`、`/exit`、`/help`、`/status`、`/me`、`/model`、`/usage`、`/context`、`/skills`、`/journal`、`/people`、`/trust`、`/security`、`/compact`、`/name` —— 所有 info 查询 + 所有项目管理命令。**不产生 agent turn**。
 - `agent`：`/background`、`/btw`、`/queue` —— 本质是 system prompt 的便捷入口
 - `hybrid`：**暂无内建命令使用**。这一档为将来"真的需要 agent 知道本地副作用才能正确推理"的场景保留（如 `/switch-workspace` 切工作区，后续对话里 agent 必须知道新 cwd），不开放给 info 类或项目管理类命令。
 

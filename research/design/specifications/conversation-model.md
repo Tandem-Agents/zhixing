@@ -1104,14 +1104,13 @@ interface BackgroundSpawnOptions {
 | `/delete <id>`         | 删除(不可删 default) | 移入回收站                                           |
 | `/history [n]`         | 查看当前对话最近 n 轮    |                                                 |
 | `/clear`               | 清空当前对话历史         | `compactAll` 原子重写 transcript：保留 conversationId + meta + 写一条 compact marker（placeholder summary），老 turns 不可恢复。与自动 compact / `/compact` 共享 `commitTurn(compactBefore)` 路径。需保留原对话历史用 `/new` 创建新对话 |
-| `/list`                | `/switch` 无参别名   | hidden; alias: `/conversations`,`/sessions`(deprecated) |
 
 **CLI UX 合并决策（S3.C 实施）：**
 
 在 CLI 模式下,"列出对话"和"切换对话"是同一个用户意图的连续动作——用户看列表几乎必然是为了选一个。因此 `/switch` 同时承担列表和切换功能:
 - **typeahead 模式**: 用户选中 `/switch` 后,ArgumentProvider 的 async-enum 自动展示对话列表作为参数候选,用户箭头选择后直接切换
 - **legacy 模式 / 手动输入**: `/switch <text>` 按名称模糊匹配;`/switch`（无参）显示编号列表 + 提示
-- `/list` / `/conversations` / `/sessions` 保留为 hidden 别名,不出现在 typeahead 菜单
+- **不留 hidden 别名**: `/switch` 是查看 + 切换对话的唯一入口,不引入 `/list` / `/conversations` / `/sessions` 之类"只读列出"别名 —— 切换语义天然内含查看,功能真子集没有独立价值,只会让 `/help` 输出与 typeahead 可见性产生双轨不一致
 - Server 模式未来可使用独立的 UI 控件（下拉框/弹窗）,核心查询逻辑在 `ConversationRepository` 层复用
 
 **`/delete` 延迟实施决策（随 S3.8 Ephemeral 一起落地）：**
