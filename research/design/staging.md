@@ -128,7 +128,7 @@ session-persistence.md 章节结构:§一 竞品 / §二 知行设计(含 §2.3 
 **决策 1 — 债务 1 范围**(推荐:扩展到 §7.1 整段 + work-mode.md 同款修正)
 
 - A. 仅修 L710 一行路径
-- **B. 修 conversation-model.md §7.1 整段对齐 standalone cli 现实(RuntimeSession + auto-resume + REPL 内 /switch /new /name),同步修 work-mode.md L120-L143 目录树 + ConversationScope variant 描述**
+- **B. 修 conversation-model.md §7.1 整段对齐 standalone cli 现实(RuntimeSession + auto-resume + REPL 内 /resume /new /name),同步修 work-mode.md L120-L143 目录树 + ConversationScope variant 描述**
 - **推荐 B**:L710 是 §7.1 整段过时的表象;只改一行留 §7.1 整段过时债务;work-mode.md L121/L142 是同款债务的另一处散落,放任不修留"为什么这次只改一处"的解释债务。这不是扩展范围,是事实层完整呈现该债务的真实边界
 
 **决策 2 — 债务 2 处置**(推荐:删除字段 + 同步文档)
@@ -184,7 +184,7 @@ session-persistence.md 章节结构:§一 竞品 / §二 知行设计(含 §2.3 
    - 清理 [`__tests__/normalize.test.ts:6`](../../packages/core/src/transcript/__tests__/normalize.test.ts) dead import
 
 3. **决策 1 + 决策 2 文档同步**:
-   - [`conversation-model.md §7.1`](specifications/conversation-model.md#L674) (L674-L711) 整段重写对齐 standalone cli 当前实现(RuntimeSession / auto-resume / REPL 内 /switch /new /name),L710 路径修正
+   - [`conversation-model.md §7.1`](specifications/conversation-model.md#L674) (L674-L711) 整段重写对齐 standalone cli 当前实现(RuntimeSession / auto-resume / REPL 内 /resume /new /name),L710 路径修正
    - *(`conversation-model.md L871` 删 `projectPath` 字段列举合并进 item 4a 第 1 条 §9.2 承接重写;避免本 item 局部改后被 item 4a 整段重写覆盖)*
    - [`work-mode.md L120-L143`](specifications/work-mode.md) ASCII 目录树删 project scope 行 + ConversationScope 类型定义删 project variant
    - [`work-mode.md L260`](specifications/work-mode.md#L260) TranscriptStore 接口签名描述从 `TranscriptStore(convDir, workdir)` 更新为 `TranscriptStore(convDir, options?)`(与决策 2 构造签名变更对齐)
@@ -226,8 +226,8 @@ session-persistence.md 章节结构:§一 竞品 / §二 知行设计(含 §2.3 
 > 最近一次沉淀:
 >
 > - **新对话自动命名**(2026-05-21 完成):新对话第一轮 turn 完成后用 light LLM 生成短主题名,落 `conversation.meta.name`。[core/conversation/auto-name.ts](../../packages/core/src/conversation/auto-name.ts) 提供 `InferConversationName` 函数依赖注入 + `maybeAutoNameFirstTurn` 协议(主路径同步 short-circuit / 异步分支二次门控 / 全 catch swallow);cli 装配 inferer 闭包(动态访问 `session.runtime.callText` 跟随 work mode active runtime 切换),commitTurn 成功 + `turnCounter++` 之后 fire-and-forget 触发钩子;Phase 0 顺带修复 work 模式 `worksceneRepo.create({ name: scene.name })` → `create({})` 的"N 次进同 scene 产生 N 个同名对话"bug。沉淀去向:[core/conversation/auto-name.ts](../../packages/core/src/conversation/auto-name.ts) 顶部 docstring 为首位权威(设计原则 / 跨层职责 / 触发协议 / sanitize 规则均在);[conversation-model.md](specifications/conversation-model.md) 后续按需补"自动命名"节(独立 task,不阻塞本 staging)
-> - **CLI 启动参数清理**(2026-05-21 完成):彻底删除 `-c, --continue` / `-r, --resume [id]` / `-n, --name <name>` 三个启动参数 + 字段 + 透传 + `interactiveConversationPicker` 函数 + `Conversation` 死 import。架构升级:启动参数纯粹只承载"运行模式 / 环境配置"维度,对话选择维度统一收敛到 REPL 内 `/switch` / `/new` / `/name` + auto-resume。文档:session-persistence.md / phase2-complete-agent.md / ADR-005 决策 6 三处补 DEPRECATED/SUPERSEDED 标注
-> - **`/conversations` 与 `/sessions` 冗余命令清理**(2026-05-21 完成):删除 `/conversations` handler + typeahead 注册 + `["sessions"]` 别名;架构升级:`/help` 改读 REPL_COMMAND_META 单源(过滤 hidden 与 typeahead dropdown 一致),消除命令可见性双轨。`/switch` 作为查看+切换对话唯一入口
+> - **CLI 启动参数清理**(2026-05-21 完成):彻底删除 `-c, --continue` / `-r, --resume [id]` / `-n, --name <name>` 三个启动参数 + 字段 + 透传 + `interactiveConversationPicker` 函数 + `Conversation` 死 import。架构升级:启动参数纯粹只承载"运行模式 / 环境配置"维度,对话选择维度统一收敛到 REPL 内 `/resume` / `/new` / `/name` + auto-resume。文档:session-persistence.md / phase2-complete-agent.md / ADR-005 决策 6 三处补 DEPRECATED/SUPERSEDED 标注
+> - **`/conversations` 与 `/sessions` 冗余命令清理**(2026-05-21 完成):删除 `/conversations` handler + typeahead 注册 + `["sessions"]` 别名;架构升级:`/help` 改读 REPL_COMMAND_META 单源(过滤 hidden 与 typeahead dropdown 一致),消除命令可见性双轨。`/resume` 作为查看+切换对话唯一入口
 > - **摘要质量升级**(2026-05-20 完成):主对话压缩(LLMSummarize)模型档位从 light 升级到 main;`compaction-llm.ts` 拆为 `createSummarizeCallLLM` + `createMemoryFlushCallLLM` 两个独立 helper;`MAIN_SESSION_PROMPT` 重写为吸取 opencode 精华的新 7 段(约束与偏好 / 关键决策 / 进度三态)。沉淀去向:
 >   - [secondary-llm-capability.md ADR-SLLM-009](specifications/secondary-llm-capability.md) — 角色分流决策权威
 >   - [llm-summarization.md](specifications/llm-summarization.md) — 7 段结构 / prompt / 校验同步更新到代码现状

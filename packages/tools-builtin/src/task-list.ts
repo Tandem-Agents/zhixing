@@ -118,7 +118,7 @@ export class TaskListService {
   // ─── cache 生命周期 ───
 
   /**
-   * 异步加载持久化状态到 cache —— cli 启动 / `/new` / `/switch` 路径调用。
+   * 异步加载持久化状态到 cache —— cli 启动 / `/new` / `/resume` 路径调用。
    *
    * 加载失败不抛错（退化为空列表 cache 项），保 cli 启动不被磁盘错误阻塞。
    * 已 cache 时跳过 load（避免重复 I/O，但允许显式 clear() 后重新 prime）。

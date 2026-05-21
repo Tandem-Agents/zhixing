@@ -105,7 +105,7 @@ WebSocket 不是亲儿子专享的协议,只是某些通道恰好用 WS 做 tran
 
 ### 原则 4:默认零配置,可选感知
 
-新用户从不需要理解 Conversation 概念也能使用——所有交互自动落入"默认对话"。需要话题分类的进阶用户才会接触 `/new`、`/switch` 等管理命令。
+新用户从不需要理解 Conversation 概念也能使用——所有交互自动落入"默认对话"。需要话题分类的进阶用户才会接触 `/new`、`/resume` 等管理命令。
 
 ### 原则 5:Conversation 是用户资产
 
@@ -220,7 +220,7 @@ type ConversationScope =
 
 **Conversation ID 用 slug 而非 UUID**:
 
-- 用户在多通道说 `/switch trip-2026` 比 `/switch 550e8400-...` 自然
+- 用户在多通道说 `/resume trip-2026` 比 `/resume 550e8400-...` 自然
 - 出现在日志、文件路径、命令里都可读
 - 用户未显式命名时,自动生成 `chat-<日期>-<序号>`(如 `chat-20260417-1`)
 
@@ -243,7 +243,7 @@ function generateConversationId(name?: string): string {
 ```
 1. 显式 conversationId(RPC / 工具参数携带)
         ↓ 未指定
-2. Connection 的 active conversation(用户在该 connection 上 /switch 设置的)
+2. Connection 的 active conversation(用户在该 connection 上 /resume 设置的)
         ↓ 未设置
 3. 通道的 BindingPolicy(per-thread / per-group / always-default 等,见 §六)
         ↓ 未配置
@@ -259,7 +259,7 @@ function generateConversationId(name?: string): string {
 | 层级 | 占比预估 | 形态 | 用户操作 |
 |------|---------|------|---------|
 | **P0 主对话(核心场景)** | 80% | default 这一个对话承接所有日常交互 | 启动 → 直接聊,什么都不用配 |
-| **P1 多对话(可选)** | 15% | 用户主动分话题:"工作"、"学习"、"旅行计划" | `/new <name>`、`/switch`、`/list` |
+| **P1 多对话(可选)** | 15% | 用户主动分话题:"工作"、"学习"、"旅行计划" | `/new <name>`、`/resume`、`/list` |
 | **P2 高级管理(进阶)** | 5% | 重命名、归档、删除、跨对话搜索 | `/rename`、`/archive`、`/delete`、未来的 `/search` |
 
 **P0 主对话(默认对话)**:
@@ -274,7 +274,7 @@ function generateConversationId(name?: string): string {
 - 当用户感觉"主对话里啥都聊有点乱"时(可能是几周或几个月后),才需要这层
 - 用 `/new "学日语"` 创建 → 后续在该 connection 上的对话进入"学日语"
 - 不同对话之间有独立的上下文——AI 在"学日语"里不会混入"工作对话"的细节
-- **创建多对话不会影响默认对话的存在和使用**:用户随时 `/switch default` 回到主对话
+- **创建多对话不会影响默认对话的存在和使用**:用户随时 `/resume default` 回到主对话
 
 **P2 高级管理(进阶)**:
 
@@ -579,7 +579,7 @@ Connection (本文档)
 interface Connection {
   id: string;
   channelId: string;
-  /** 当前 active conversation(可被 /switch 改变) */
+  /** 当前 active conversation(可被 /resume 改变) */
   activeConversationId: string | null;
   /** 此 connection 是否对应"持久在线"(钉钉适配器 yes,CLI 进程 no) */
   persistent: boolean;
@@ -682,7 +682,7 @@ T=0   用户运行 zhixing
        │   作用域:user(默认)/ workscene(REPL 内 /enter 切换)
        ├─ auto-resume:convRepo.findLatest() 加载最近活跃对话;
        │   - 加载失败或无 latest → 创建 default conversation
-       │   - REPL 内通过 /switch /new /name 管理对话身份;
+       │   - REPL 内通过 /resume /new /name 管理对话身份;
        │     启动参数只承载"运行模式 / 环境配置",不承载对话选择
        └─ REPL 启动
 
@@ -1144,7 +1144,7 @@ interface BackgroundSpawnOptions {
 
 | 命令                     | 用途              | 备注                                              |
 | ---------------------- | --------------- | ----------------------------------------------- |
-| `/switch <id-or-name>` | 列出对话 + 切换到已有对话  | CLI 统一入口: typeahead async-enum 参数补全展示对话列表; 无参时显示编号列表; 支持 ID 精确匹配和名称模糊匹配 |
+| `/resume <id-or-name>` | 列出对话 + 切换到已有对话  | CLI 统一入口: typeahead async-enum 参数补全展示对话列表; 无参时显示对话列表; 支持 ID 精确匹配和名称模糊匹配 |
 | `/new <name>`          | 创建新对话并切换        | 创建新 conversation（新 ID + 新 meta + 新 transcript），不影响原对话      |
 | `/rename <new-name>`   | 重命名当前对话         |                                                 |
 | `/archive [id]`        | 归档(默认归档当前)      |                                                 |
@@ -1154,10 +1154,10 @@ interface BackgroundSpawnOptions {
 
 **CLI UX 合并决策（S3.C 实施）：**
 
-在 CLI 模式下,"列出对话"和"切换对话"是同一个用户意图的连续动作——用户看列表几乎必然是为了选一个。因此 `/switch` 同时承担列表和切换功能:
-- **typeahead 模式**: 用户选中 `/switch` 后,ArgumentProvider 的 async-enum 自动展示对话列表作为参数候选,用户箭头选择后直接切换
-- **legacy 模式 / 手动输入**: `/switch <text>` 按名称模糊匹配;`/switch`（无参）显示编号列表 + 提示
-- **不留 hidden 别名**: `/switch` 是查看 + 切换对话的唯一入口,不引入 `/list` / `/conversations` / `/sessions` 之类"只读列出"别名 —— 切换语义天然内含查看,功能真子集没有独立价值,只会让 `/help` 输出与 typeahead 可见性产生双轨不一致
+在 CLI 模式下,"列出对话"和"切换对话"是同一个用户意图的连续动作——用户看列表几乎必然是为了选一个。因此 `/resume` 同时承担列表和切换功能:
+- **typeahead 模式**: 用户选中 `/resume` 后,ArgumentProvider 的 async-enum 自动展示对话列表作为参数候选,用户箭头选择后直接切换
+- **legacy 模式 / 手动输入**: `/resume <text>` 按 ID 精确匹配优先 + 名称模糊匹配;`/resume`（无参）显示对话列表 + 提示
+- **不留 hidden 别名**: `/resume` 是查看 + 切换对话的唯一入口,不引入 `/list` / `/conversations` / `/sessions` 之类"只读列出"别名 —— 切换语义天然内含查看,功能真子集没有独立价值,只会让 `/help` 输出与 typeahead 可见性产生双轨不一致
 - Server 模式未来可使用独立的 UI 控件（下拉框/弹窗）,核心查询逻辑在 `ConversationRepository` 层复用
 
 **`/delete` 延迟实施决策（随 S3.8 Ephemeral 一起落地）：**
@@ -1170,7 +1170,7 @@ interface BackgroundSpawnOptions {
 **实施时机：** Step 8（Ephemeral + auto-promote）完成后，对话分为 ephemeral / persistent / archived 三态，此时 `/delete` 的语义明确：仅作用于 persistent 和 archived 对话。
 
 **交互设计要点：**
-- 复用 `/switch` 的 `ConversationArgProvider`（async-enum 参数补全选择目标对话）
+- 复用 `/resume` 的 `ConversationArgProvider`（async-enum 参数补全选择目标对话）
 - 二次确认：`⚠ 确认删除对话「xxx」？此操作不可恢复。(y/N)`，默认 N
 - 不可删 default 对话
 - 删除当前对话后自动 fallback：`convRepo.findLatest()` → 有则切换，无则创建 default
@@ -1187,7 +1187,7 @@ interface BackgroundSpawnOptions {
 
 Server 模式下 ConversationManager 是单例。所有客户端(多个 CLI、Web、钉钉)看到的 Conversation 列表、消息历史完全一致。
 
-`/switch` 是 connection-level 的——一个 CLI `/switch work` 不影响另一个 CLI 当前在 default。但他们看到的"对话列表"和"对话内容"是一致的。
+`/resume` 是 connection-level 的——一个 CLI `/resume work` 不影响另一个 CLI 当前在 default。但他们看到的"对话列表"和"对话内容"是一致的。
 
 ---
 
@@ -1317,7 +1317,7 @@ zhixing rpc conversation.send --conversationId=work --text="..."
 ```
 
 > **设计决策（ADR-CM-016）：** 移除 `-c`/`-r`/`-k` 启动参数。
-> REPL 默认自动恢复最近对话，对话切换通过 REPL 内 `/switch` 完成。
+> REPL 默认自动恢复最近对话，对话切换通过 REPL 内 `/resume` 完成。
 > 自动化场景走 Server RPC，不通过 CLI 启动参数路由。
 > 迁移计划：Step 8 清除遗留 `-c`/`-r` 代码。
 
@@ -1353,7 +1353,7 @@ zhixing rpc conversation.send --conversationId=work --text="..."
 | 6 | 实现 `ConversationManager`（acquire / release / observer 管理）。依赖 core 的 `ConversationRepository` 做持久化,自身只管运行时生命周期 | `packages/server/src/conversation/manager.ts` | 单测 + 多 connection 共享同一 SessionRuntime |
 | 7 | RPC 方法 `conversation.*` 实现 + `session.*` 兼容别名 | `packages/server/src/rpc/methods/conversation.ts` | E2E：通过 `zhixing rpc conversation.list` 等命令验证 |
 | 8 | Scheduler `TaskAction.conversationId` 支持（类型 + serve/command.ts 接入） | `packages/core/src/scheduler/types.ts`、`packages/cli/src/serve/command.ts` | E2E：创建带 conversationId 的任务,执行后 transcript 多一轮 |
-| 9 | REPL prompt 显示当前对话名 + `/new <name>` 真实创建对话 + `/switch` / `/rename` / `/archive` / `/delete` / `/history` 命令 | `packages/cli/src/repl.ts` 与 `packages/cli/src/conversation/commands.ts` | E2E：逐条命令验证 |
+| 9 | REPL prompt 显示当前对话名 + `/new <name>` 真实创建对话 + `/resume` / `/rename` / `/archive` / `/delete` / `/history` 命令 | `packages/cli/src/repl.ts` 与 `packages/cli/src/conversation/commands.ts` | E2E：逐条命令验证 |
 | 10 | 数据迁移命令 `zhixing migrate-conversations` (--dry-run / --apply) | `packages/cli/src/migrate/conversations.ts` | dry-run 显示计划,apply 后旧数据备份到 `~/.zhixing/.backup/<ts>/` |
 | 11 | Standalone CLI 模式适配：CLI 直接使用 core 的 `ConversationRepository` + 轻量 `CliSessionRuntime`（无 observer 管理——单进程单连接,进程死了 runtime 就没了） | `packages/cli/src/repl.ts` 与 `packages/cli/src/conversation/cli-runtime.ts` | 旧 REPL 行为完全保留 |
 
@@ -1374,7 +1374,7 @@ zhixing rpc conversation.send --conversationId=work --text="..."
 - 创建定时任务 agent-turn 带 `conversationId="default"` → default 多一轮,metadata.source=scheduler
 - 任务 conversationId 指向的对话 busy → emit `scheduler:task-skipped-busy`,推迟到下次 tick
 - busy 时发送超过 5 条消息 → 第 6 条返回 `queue-full`；`/abort` 后队列清空
-- REPL `/list` → 看到所有对话; `/new "test"` → prompt 变 `test ▸`; `/switch default` → 切回; 历史保留
+- REPL `/list` → 看到所有对话; `/new "test"` → prompt 变 `test ▸`; `/resume default` → 切回; 历史保留
 - REPL Standalone:`/dev/A` 与 `/dev/B` 启动看到同一坨用户级对话(任意目录运行同源)
 - REPL Client(连 server)模式:看到 server 的用户级对话
 - 进入 workscene 后 `/list` 只显示该 workscene 子树的对话;退出后回 main 看到用户级对话
@@ -1403,7 +1403,7 @@ packages/server/src/rpc/methods/
   └─ conversation.ts             # 新 RPC + session.* 别名
 
 packages/cli/src/conversation/
-  ├─ commands.ts                 # /list /new /switch /rename /archive /delete /history
+  ├─ commands.ts                 # /list /new /resume /rename /archive /delete /history
   ├─ cli-runtime.ts              # 轻量 CliSessionRuntime（standalone 用,无 observer）
   └─ prompt.ts                   # prompt 显示对话名
 
@@ -1507,7 +1507,7 @@ packages/cli/src/migrate/
 
 **决策**:人类可读的 slug(`default` / `work` / `trip-2026`),自动 fallback 用 `chat-<日期>-<序号>`。
 
-**理由**:用户 `/switch trip-2026` 比 `/switch 550e8400-...` 自然百倍;在多通道指令、日志、文件路径里都可读;碰撞处理简单。
+**理由**:用户 `/resume trip-2026` 比 `/resume 550e8400-...` 自然百倍;在多通道指令、日志、文件路径里都可读;碰撞处理简单。
 
 ---
 

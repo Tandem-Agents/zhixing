@@ -19,7 +19,7 @@
 - 引入 `RuntimeSession` 类聚合 `agentRuntime` / `scheduler` / `deliveryStack` / `channels` / `permissionStore`
 - 添加 `/config` slash 命令——REPL 内修改 `~/.zhixing/config.json` + `~/.zhixing/credentials.json`
 - 添加 `reload()` 流程——blue-green swap 应用配置变更
-- 修复前置 sub-bug：`/switch` `/new` 漏 `convRepo.touch()`、`/exit` 半吊子 cleanup
+- 修复前置 sub-bug：`/resume` `/new` 漏 `convRepo.touch()`、`/exit` 半吊子 cleanup
 - REPL 状态机暴露 `activeTurnPromise`，让 reload 调用方能等 in-flight turn
 
 ### 2.2 不在范围（明确不做）
@@ -552,7 +552,7 @@ async function runTurn(input: string) {
 
 ### 7.2 Sub-bug 修复
 
-#### A. `/switch` `/new` 漏 `convRepo.touch()`
+#### A. `/resume` `/new` 漏 `convRepo.touch()`
 
 [`repl.ts:209,239`](../../../packages/cli/src/repl.ts)：两个 handler 切换/新建 conversation 后未调 `state.convRepo.touch(state.conversationId)`，导致 `lastActiveAt` 不更新——下次启动 `findLatest` 选错对话。
 
@@ -629,7 +629,7 @@ rl.on("close", async () => {
 |---|---|
 | 单元（RuntimeSession） | `create` 各配置组合（含/不含 messaging）；`reload` 各 diff 情况（no-change / channels-only / agent-only / both）；事务性回滚（mock setupChannels / setupDelivery / createAgentRuntime / Scheduler 任一 throw）；dispose 顺序验证（spy stop/dispose 调用顺序） |
 | 单元（diff 算法） | 各字段独立变更触发对应 domain；channels 与 agent 同时变；deepEqual 边界（undefined vs `{}` / 数组顺序敏感性） |
-| 单元（sub-bug 修复） | `/switch` `/new` 后 `convRepo.touch` 被调用一次；`/exit` 走 `rl.close()` 触发 close 监听器 |
+| 单元（sub-bug 修复） | `/resume` `/new` 后 `convRepo.touch` 被调用一次；`/exit` 走 `rl.close()` 触发 close 监听器 |
 | 集成（REPL → session） | REPL 启动用 `RuntimeSession.create` 替代散落 const；所有 slash 命令行为不变（/help /status /usage /model 等回归）；`/config` completed 后 `session.runtime` 指向新 instance |
 | 集成（hot reload 端到端） | 临时 HOME：用户初始 config → 进入 REPL → 触发 `/config` → 修改 model → 完成 → 下条消息验证用新 model；同样验证修改 channel；同样验证修改 displayName（重建 systemPrompt） |
 | 集成（PermissionStore 跨 swap） | 用户授予 session scope "本次允许 web_fetch" → reload → 同一调用不再 prompt（store ref 复用） |
@@ -659,7 +659,7 @@ rl.on("close", async () => {
 
 | 阶段 | 内容 | 验证 |
 |---|---|---|
-| **1. Sub-bug 修复**（独立 PR） | `/switch` `/new` 加 `convRepo.touch()`；`/exit` 改走 `rl.close()` 路径 | 现有 REPL 行为不变 + auto-resume 选对最近对话 |
+| **1. Sub-bug 修复**（独立 PR） | `/resume` `/new` 加 `convRepo.touch()`；`/exit` 改走 `rl.close()` 路径 | 现有 REPL 行为不变 + auto-resume 选对最近对话 |
 | **2. 引入 RuntimeSession 类**（独立 PR） | 新建 `packages/cli/src/runtime/session.ts`；REPL 启动改用 `RuntimeSession.create()` 替代散落 const；**`dispose` 必须实施**（替换 `rl.on("close")` 现有 cleanup chain，不可延后——否则 PR 合入即破坏 REPL 退出）；`reload` 接口可暂 throw `"not implemented"` 留待阶段 4 | 现有 REPL 行为不变；slash 命令全部回归通过；REPL 退出走 `session.dispose()` 完整 cleanup |
 | **3. PermissionStore 注入**（独立 PR） | `CreateAgentRuntimeOptions.permissionStore?` 添加；RuntimeSession.create 创建并注入 | 单元测试覆盖 optional 参数向后兼容；权限授权行为不变 |
 | **4. 实现 reload 流程**（独立 PR） | `RuntimeSession.reload()` 完整实现 + diff + 事务性 + 后台 dispose；REPL 状态机加 `activeTurnPromise` | 集成测试覆盖 hot reload 端到端 |

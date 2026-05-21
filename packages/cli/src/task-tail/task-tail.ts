@@ -10,7 +10,7 @@
  *
  * 生命周期：
  *   - start()：订阅 service + 初次拉 cache 同步显示
- *   - refresh()：显式刷新（conversation 切换 /new / /switch 路径调用）
+ *   - refresh()：显式刷新（conversation 切换 /new / /resume 路径调用）
  *   - dispose()：取消订阅 + 清空 "task" 段
  *
  * conversation 多路隔离：subscribe handler 内对比事件 conversationId 与

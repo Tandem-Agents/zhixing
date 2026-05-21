@@ -730,7 +730,7 @@ LLM 通过 transplanted `SYSTEM_META_PROMPT_SECTION`（always-on 静态 segment 
 - 实现 LRU 降级（onTurnComplete hook）
 - 实现 `request_capabilities` 元工具（Always 层）
 - 启动 / 切换 conversation / 重启 cli 时由 `rebuildCapabilityFromHistory` 从 transcript 历史 tool_use 重建 Hot 集（最近 7 个含 tool_use 的 assistant message 内的工具升级到 hot）
-- capability state **不持久化**（与 innovation 重置规则中"cli session 重启 → 新 process 全新开始"对齐）—— tool_use 历史的权威源是 transcript，capability 是其衍生视图，单源避免双源不一致；rebuild 的 hot 集合等价于持久化 snapshot 的信息含量，但跨 process 不携带 session 状态。/clear / /switch / 重启走 reset + rebuild 同一路径
+- capability state **不持久化**（与 innovation 重置规则中"cli session 重启 → 新 process 全新开始"对齐）—— tool_use 历史的权威源是 transcript，capability 是其衍生视图，单源避免双源不一致；rebuild 的 hot 集合等价于持久化 snapshot 的信息含量，但跨 process 不携带 session 状态。/clear / /resume / 重启走 reset + rebuild 同一路径
 
 **风险**: 中（LLM 对 system prompt tool-usage 文本中"工具存在"提示的识别准确度需实测；自动升级 +1 轮延迟；冷启动后已恢复对话的 Hot 集重建准确度）。
 **收益**: API `tools[]` 短对话场景 96% schema 节省；任务稳态后 Hot 集稳定 tools cache 仍可命中；system prompt cache 完全不受影响。

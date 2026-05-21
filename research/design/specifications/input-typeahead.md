@@ -1387,9 +1387,9 @@ async function dispatchAccepted(result: AcceptResult): Promise<void> {
 ```
 
 **典型归属**（2026-04-16 基于 Phase 1 Step 5 实测重新分类）：
-- `local`：`/new`、`/clear`、`/switch`、`/exit`、`/help`、`/status`、`/me`、`/model`、`/usage`、`/context`、`/skills`、`/journal`、`/people`、`/trust`、`/security`、`/compact`、`/name` —— 所有 info 查询 + 所有项目管理命令。**不产生 agent turn**。
+- `local`：`/new`、`/clear`、`/resume`、`/exit`、`/help`、`/status`、`/me`、`/model`、`/usage`、`/context`、`/skills`、`/journal`、`/people`、`/trust`、`/security`、`/compact`、`/name` —— 所有 info 查询 + 所有项目管理命令。**不产生 agent turn**。
 - `agent`：`/background`、`/btw`、`/queue` —— 本质是 system prompt 的便捷入口
-- `hybrid`：**暂无内建命令使用**。这一档为将来"真的需要 agent 知道本地副作用才能正确推理"的场景保留（如 `/switch-workspace` 切工作区，后续对话里 agent 必须知道新 cwd），不开放给 info 类或项目管理类命令。
+- `hybrid`：**暂无内建命令使用**。这一档为将来"真的需要 agent 知道本地副作用才能正确推理"的场景保留（如 `/cd` 切工作区，后续对话里 agent 必须知道新 cwd），不开放给 info 类或项目管理类命令。
 
 **⚠️ 反模式警告（2026-04-16 实测教训）**：不要把 **info 查询命令** 设成 `hybrid`。初版 Phase 1 Step 5 里 `/model` 是 hybrid —— local handler 正确打印了 `Pro/MiniMaxAI/MiniMax-M2.5`，随后把 system message "用户查看了当前模型" 丢给 agent，**agent 完全不知道 runtime 模型是什么，凭训练记忆瞎编 "Claude 3.5 Sonnet"**。`/new` 同理：hybrid 的 system message 让 agent 生成了一段欢迎语，纯噪音。
 

@@ -14,5 +14,5 @@
 | 文件路径(user / workscene 双 scope) | [conversation-model.md §9.1](./conversation-model.md) |
 | Turn-complete 追加策略 + commitTurn 原子单一入口 | [conversation-model.md §9.5](./conversation-model.md) |
 | 上下文压缩与段切换 | [context-management-v3-redesign.md](./context-management-v3-redesign.md) |
-| CLI 启动 / 对话查看与切换 | [conversation-model.md §11.2](./conversation-model.md) — 启动统一 auto-resume + REPL 内 `/switch` / `/new` / `/name` |
+| CLI 启动 / 对话查看与切换 | [conversation-model.md §11.2](./conversation-model.md) — 启动统一 auto-resume + REPL 内 `/resume` / `/new` / `/name` |
 | TranscriptStore 接口契约 | 代码层 `packages/core/src/transcript/` + ADR-CM-015 / ADR-CM-017 |

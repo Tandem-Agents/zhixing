@@ -521,7 +521,7 @@ CLI 对话 (user: sunhj) ──→ Conversation: default（同一个）
 飞书 DM (user: sunhj) ──→ Conversation: default（同一个）
 ```
 
-用户可在任意通道说 `/new <name>` 创建新 Conversation，并通过 `/switch` 切换。
+用户可在任意通道说 `/new <name>` 创建新 Conversation，并通过 `/resume` 切换。
 
 **实现**：DM 场景的 `ChannelBindingPolicy.dm = "per-user"` 使得跨通道的 DM 消息天然落入同一 Conversation（默认为 `default`）。非 DM 场景按 group / thread 策略独立归组。
 

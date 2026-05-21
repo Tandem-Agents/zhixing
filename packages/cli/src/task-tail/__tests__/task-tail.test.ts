@@ -159,7 +159,7 @@ describe("TaskTail · 订阅 → setStatusTail 投递", () => {
       "A 任务",
     );
 
-    // 模拟 /switch
+    // 模拟 /resume
     currentConv = "conv-B";
     tail.refresh();
 

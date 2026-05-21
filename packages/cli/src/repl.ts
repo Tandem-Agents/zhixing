@@ -164,10 +164,10 @@ interface ReplState {
 // ─── REPL 启动选项 ───
 //
 // 启动期只承载"运行模式 / 环境配置"维度的选项;"对话选择"维度统一由 REPL 内
-// 的 `/new` `/switch` `/name` 命令承担,启动期不再有 `--continue`/`--resume`/`--name`
+// 的 `/new` `/resume` `/name` 命令承担,启动期不再有 `--continue`/`--resume`/`--name`
 // 这类与 REPL 命令同语义的双轨入口(见 conversation-model.md §11.2)。
 // 启动行为:总是 auto-resume `convRepo.findLatest()` 最近一条对话(无 latest 则
-// 创建 default)。用户想切换到其它对话或新建,进入 REPL 后用 `/switch` / `/new`。
+// 创建 default)。用户想切换到其它对话或新建,进入 REPL 后用 `/resume` / `/new`。
 
 export interface ReplOptions {
   workspace?: string;
@@ -209,9 +209,9 @@ function buildWorksceneDigestPrompt(
 // (hidden) / 分类 (category) / 别名 (aliases) / 描述 (description) 全系统一致。
 //
 // 字段语义:
-//   - name      : typeahead 命令名 (不带 / 前缀,如 "new" "switch")
+//   - name      : typeahead 命令名 (不带 / 前缀,如 "new" "resume")
 //   - aliases   : 命令别名 (typeahead 路径生效;legacy 路径暂不解析)
-//   - legacyKey : `slashCommands` 字典 key (带 / 前缀,如 "/new" "/switch")—— 桥接
+//   - legacyKey : `slashCommands` 字典 key (带 / 前缀,如 "/new" "/resume")—— 桥接
 //                 buildSlashCommands 返回的字典与 typeahead registry
 //   - category  : 命令分类 (session / info / tools / config),驱动 /help 分组与
 //                 typeahead panel 标题
@@ -220,7 +220,7 @@ function buildWorksceneDigestPrompt(
 //                 sessions 后该字段所有命令均显式 false/undefined)
 //
 // args 字段不在本元信息里——args 是 typeahead 系统专属维度,在 typeahead 注册
-// 时按 name 注入 (目前仅 /switch 需要 conversation 选择器),不污染 /help 视图。
+// 时按 name 注入 (目前仅 /resume 需要 conversation 选择器),不污染 /help 视图。
 
 type ReplCommandMeta = {
   readonly name: string;
@@ -235,7 +235,7 @@ const REPL_COMMAND_META: ReadonlyArray<ReplCommandMeta> = [
   // ─ session ─
   { name: "new", description: "创建新对话", category: "session", legacyKey: "/new" },
   { name: "clear", description: "清空对话历史", category: "session", legacyKey: "/clear" },
-  { name: "switch", description: "切换到其他对话", category: "session", legacyKey: "/switch" },
+  { name: "resume", description: "切换到其他对话", category: "session", legacyKey: "/resume" },
   { name: "name", description: "为当前会话命名", category: "session", legacyKey: "/name" },
   { name: "enter", description: "进入工作场景", category: "session", legacyKey: "/enter" },
   { name: "exit", aliases: ["quit"], description: "退出工作场景 / 退出知行", category: "session", legacyKey: "/exit" },
@@ -274,7 +274,7 @@ function buildSlashCommands(
   renderer: OutputRenderer,
   cliWriter: CliWriter,
   /**
-   * 当 /new / /switch 切换 conversation 成功后调用 —— 通知 cli UI 层（如 TaskTail）
+   * 当 /new / /resume 切换 conversation 成功后调用 —— 通知 cli UI 层（如 TaskTail）
    * 刷新数据。/clear 不走此回调（service.clear 会 emit state=null 自动触发订阅）。
    */
   onConversationChanged: (() => void) | undefined,
@@ -465,7 +465,7 @@ function buildSlashCommands(
         }
       },
     },
-    "/switch": {
+    "/resume": {
       description: "切换到其他对话",
       handler: async (state, args) => {
         if (session.activeMode.kind !== "main") {
@@ -484,16 +484,16 @@ function buildSlashCommands(
           cliWriter.line(`\n${chalk.bold("  可用对话：")}`);
           for (let i = 0; i < Math.min(conversations.length, 15); i++) {
             const c = conversations[i]!;
-            const label = c.name ? chalk.white(c.name) : chalk.dim("(未命名)");
+            const label = c.name ? chalk.white(c.name) : chalk.dim(c.id);
             const time = formatRelativeTime(new Date(c.lastActiveAt));
             const turnCount = await state.conv.store.countTurns(c.id);
             const current =
               c.id === state.conv.conversationId ? chalk.green(" ← 当前") : "";
             cliWriter.line(
-              `  ${chalk.yellow(`[${i + 1}]`)} ${label} ${chalk.dim(`(${time}, ${turnCount} 轮)`)}${current}`,
+              `  ${label} ${chalk.dim(`(${time}, ${turnCount} 轮)`)}${current}`,
             );
           }
-          cliWriter.line(chalk.dim(`\n  使用 /switch <序号> 或 /switch <名称> 切换\n`));
+          cliWriter.line(chalk.dim(`\n  使用 /resume <名称或 id> 切换\n`));
           return;
         }
         if (input === state.conv.conversationId) {
@@ -503,19 +503,10 @@ function buildSlashCommands(
 
         const conversations = await state.conv.convRepo.list();
 
-        // 按序号选择
-        const num = Number(input);
-        let target: { id: string; name: string } | null = null;
-        if (Number.isInteger(num) && num >= 1 && num <= conversations.length) {
-          const c = conversations[num - 1]!;
-          target = { id: c.id, name: c.name };
-        }
-
         // 按 ID 精确匹配
-        if (!target) {
-          const conv = await state.conv.convRepo.get(input);
-          if (conv) target = { id: conv.id, name: conv.name };
-        }
+        let target: { id: string; name: string } | null = null;
+        const conv = await state.conv.convRepo.get(input);
+        if (conv) target = { id: conv.id, name: conv.name };
 
         // 按名称模糊匹配
         if (!target) {
@@ -527,14 +518,13 @@ function buildSlashCommands(
             target = { id: matches[0]!.id, name: matches[0]!.name };
           } else if (matches.length > 1) {
             cliWriter.line(`\n${chalk.bold("  多个匹配：")}`);
-            for (let i = 0; i < Math.min(matches.length, 10); i++) {
-              const c = matches[i]!;
+            for (const c of matches.slice(0, 10)) {
               const time = formatRelativeTime(new Date(c.lastActiveAt));
               cliWriter.line(
-                `  ${chalk.yellow(`[${i + 1}]`)} ${chalk.white(c.name)} ${chalk.dim(`(${time})`)}`,
+                `  ${chalk.white(c.name)} ${chalk.dim(`(${time})`)}`,
               );
             }
-            cliWriter.line(chalk.dim(`\n  请使用更精确的名称或 /switch <序号>\n`));
+            cliWriter.line(chalk.dim(`\n  请使用更精确的名称或 id\n`));
             return;
           }
         }
@@ -1007,7 +997,7 @@ function buildSlashCommands(
           return;
         }
         const scenes = await session.workSceneRegistry.list();
-        // 精确 id 优先，其次唯一名称匹配（与 /switch 同款解析纪律）
+        // 精确 id 优先，其次唯一名称匹配（与 /resume 同款解析纪律）
         let sceneId: string | null =
           scenes.find((s) => s.id === q)?.id ?? null;
         if (!sceneId) {
@@ -1237,7 +1227,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
 
   // 启动期对话选择策略：统一 auto-resume `convRepo.findLatest()` 最近一条对话,
   // 无 latest 或加载失败则降级到创建 default 新对话。
-  // 用户想切换到其它对话或新建命名,进入 REPL 后用 `/switch` / `/new <name>`。
+  // 用户想切换到其它对话或新建命名,进入 REPL 后用 `/resume` / `/new <name>`。
   const latest = await convRepo.findLatest();
   if (latest) {
     try {
@@ -1266,7 +1256,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   }
 
   // 加载 task_list 持久化状态到 service cache —— 新建 conversation 时为空，
-  // 恢复时拉取 meta.taskListState。conversation 切换走 /new / /switch 处的 prime 调用。
+  // 恢复时拉取 meta.taskListState。conversation 切换走 /new / /resume 处的 prime 调用。
   await session.taskListService.prime(conversationId);
 
   // 启动告警先于 chrome——异常状态需立即吸引注意；无告警时返回空数组，
@@ -1364,7 +1354,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   };
 
   // TaskTail 在 useTypeahead 分支内装配（需要 ScreenController）。声明在外层让
-  // /new / /switch handler 通过 onConversationChanged 闭包延迟引用 —— 命令 handler
+  // /new / /resume handler 通过 onConversationChanged 闭包延迟引用 —— 命令 handler
   // 触发时 TaskTail 早已创建完毕，无装配时序问题。
   let taskTail: TaskTail | null = null;
 
@@ -1450,7 +1440,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
           // 不传 name：让 convRepo.create 走默认 name=id（autoChatId）的 sentinel，
           // 与 main 模式 /new 无参一致。scene.name 是工作场景级语义，不应直接占
           // conversation.name 槽位——否则 N 次进同 scene 会产生 N 个同名对话，
-          // 在 /switch typeahead 里完全无法区分。命名职责交给自动命名机制（第一
+          // 在 /resume typeahead 里完全无法区分。命名职责交给自动命名机制（第一
           // 轮 turn 完成后用 light LLM 生成精确主题名）统一接管。
           const wConv = await worksceneRepo.create({});
           undos.push(async () => {
@@ -1632,7 +1622,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     );
     typeaheadDispatcher = new CommandDispatcher({ registry: tRegistry });
 
-    // ── ConversationArgProvider: /switch 的 async-enum 参数补全 ──
+    // ── ConversationArgProvider: /resume 的 async-enum 参数补全 ──
     //
     // 实现 ArgChoiceProvider 接口，查询 convRepo.list() 生成对话候选。
     // 通过闭包捕获 state（convRepo + store），无需额外依赖注入。
@@ -1663,7 +1653,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       },
     };
 
-    const switchArgSchema: ArgSchema = {
+    const resumeArgSchema: ArgSchema = {
       kind: "async-enum",
       name: "conversation",
       description: "目标对话名称或 ID",
@@ -1675,9 +1665,9 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     //
     // 命令元信息单源在文件顶层 REPL_COMMAND_META。本块只负责把元信息桥接到
     // typeahead registry: 每条注册 + handler 包装 legacy slashCommands 闭包。
-    // args 字段不在元信息内,在此处按命令名注入(目前只 /switch 需要对话选择器)。
+    // args 字段不在元信息内,在此处按命令名注入(目前只 /resume 需要对话选择器)。
     const argsByName: Record<string, ReadonlyArray<ArgSchema>> = {
-      switch: [switchArgSchema],
+      resume: [resumeArgSchema],
     };
 
     for (const cmd of REPL_COMMAND_META) {

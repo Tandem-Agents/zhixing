@@ -223,7 +223,7 @@ reload 触发时如果有 turn 在跑（agent 正在响应），怎么处理？d
 
 8. **同时修复发现的前置 sub-bugs**（不论 hot reload 路径如何都要修）
 
-   - `/switch` `/new` 漏 `convRepo.touch()`——切换/新建后 `lastActiveAt` 未更新，重启 `findLatest` 选错对话
+   - `/resume` `/new` 漏 `convRepo.touch()`——切换/新建后 `lastActiveAt` 未更新，重启 `findLatest` 选错对话
    - `/exit` 半吊子 cleanup——只 `scheduler.stop()` + `process.exit(0)`，漏 `deliveryStack.stop()` / `channels.dispose()`；改走 `rl.close()` 让 close 监听器统一清理
 
 9. **零原功能回归风险**——设计是严格的 superset

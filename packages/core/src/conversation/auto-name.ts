@@ -62,7 +62,7 @@ export interface MaybeAutoNameFirstTurnOptions {
  *
  * 返回 Promise<void>，供测试 await 等待异步完成；调用方主路径用 `void` 不
  * await，实现 fire-and-forget 语义不阻塞 turn 完成。失败：全部 catch swallow。
- * 不维护 UI 缓存：与 /name 命令同款，写盘即完——/switch typeahead 下次自然
+ * 不维护 UI 缓存：与 /name 命令同款，写盘即完——/resume typeahead 下次自然
  * 读到新值，启动 welcome chrome 下次启动重新渲染。
  */
 export function maybeAutoNameFirstTurn(

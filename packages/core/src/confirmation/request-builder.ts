@@ -183,7 +183,7 @@ function pickWorkspacePattern(
  *   - allow-with-note      —— 实测罕用,删除以减心智负担
  *   - allow-session        —— 个人助手用户感知不到"会话"概念;
  *                             且实现是 in-memory,与对话 session 不挂钩,
- *                             保留会制造 "为什么 REPL 重启 / `/switch` 后又问我" 的假 bug
+ *                             保留会制造 "为什么 REPL 重启 / `/resume` 后又问我" 的假 bug
  *   - allow-global         —— 高风险低频,应通过 /trust 命令显式管理
  *
  * 这三种 kind 仍可以被 /trust 命令、Web/微信渲染器、未来的 LLM 分诊产生,

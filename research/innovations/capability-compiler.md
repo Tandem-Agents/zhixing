@@ -123,7 +123,7 @@ LLM 看 input + 索引 → 自主决定调哪个工具。
 | 触发 | 行为 |
 |---|---|
 | `/clear` 命令 | 与历史压缩同步 |
-| `/switch` 切换对话 | 新对话 state 独立 |
+| `/resume` 切换对话 | 新对话 state 独立 |
 | cli session 重启 | 新 process 全新开始 |
 
 ### 4.8 LLM ↔ 程序双向契约（核心设计）

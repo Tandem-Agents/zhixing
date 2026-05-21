@@ -6,8 +6,8 @@
 >
 > ⚠️ **本文档已废弃 / 历史决策痕迹（2026-05-21 标注）**：Phase 2 早期方案稿(2026-04-08),系统实际演进中多处偏离本文设想,**不代表当前实现**。当前权威按维度索引:
 > - **对话持久化路径**：本文 "`~/.zhixing/sessions/<id>.jsonl`" 已收敛到用户域 `~/.zhixing/conversations/<id>/` 与工作场景域 `~/.zhixing/workscenes/<sceneId>/conversations/<id>/` → 见 [conversation-model.md §九](./conversation-model.md)（Transcript 持久化）+ [conversation-scope-flattening.md](./conversation-scope-flattening.md)
-> - **CLI 启动参数**：本文提及的 `--resume [id]` 启动参数已彻底删除（2026-05-21）,启动统一 auto-resume + REPL 内 `/switch`
-> - **斜杠命令**：本文提及的 `/sessions` 命令已删除,统一为 `/switch`(列+切+resume 三合一)→ 见 [conversation-model.md §11.2](./conversation-model.md)
+> - **CLI 启动参数**：本文提及的 `--resume [id]` 启动参数已彻底删除（2026-05-21）,启动统一 auto-resume + REPL 内 `/resume`
+> - **斜杠命令**：本文提及的 `/sessions` 命令已删除,统一为 `/resume`(列+切+resume 三合一)→ 见 [conversation-model.md §11.2](./conversation-model.md)
 > - **上下文管理**：本文描述的 L1/L2/L3 三级 Tier 压缩范式已整体砍除,被段切换(缓存安全分叉)+ LLMSummarize strategy 取代 → 见 [context-management-v3-redesign.md](./context-management-v3-redesign.md)
 > - **LLM 摘要**：本文的 7 段结构已升级(吸取 opencode 三大精华)→ 见 [llm-summarization.md](./llm-summarization.md)
 > - **LLM 角色**：本文的二档(main/secondary)已演进为三档注册表(main/light/power)→ 见 [secondary-llm-capability.md](./secondary-llm-capability.md)

@@ -551,12 +551,12 @@ packages/cli/src/
 | 3 | `ScreenController.setStatusTail` API + chrome 第一行拼接 + clampLine | 现有 status-bar / segment / cursor 测试不退化 + 新拼接 + 超长截断集成测试 |
 | 4 | `TaskTail` 类：service 订阅 + setStatusTail 投递 + refresh + dispose | 集成测试：service 写入 / clear / refresh 触发 tail 更新；start 前已有数据时 refresh 拉初值 |
 | 5 | `commands/task-commands.ts` 4 命令 + 子命令 parser + echo（命令 id 用 `:repl` 后缀） | E2E：通过 dispatcher 调用，断言 service state + writer output |
-| 6 | `repl.ts` bootstrap 接线 + conversation 切换路径接线 + 手动 smoke | 实测：启动 cli、`/task new ...` → tail 出现；`/new` `/switch` 后 tail 跟随新对话；与 LLM 工具同步刷新 |
+| 6 | `repl.ts` bootstrap 接线 + conversation 切换路径接线 + 手动 smoke | 实测：启动 cli、`/task new ...` → tail 出现；`/new` `/resume` 后 tail 跟随新对话；与 LLM 工具同步刷新 |
 
 **Step 6 接线清单**（明确，避免装配遗漏）：
 - bootstrap：创建 `TaskTail` 实例，`getConversationId: () => state.conversationId`，调 `start()`
 - `/new` handler 末尾（line 306 之后）：`taskTail.refresh()`
-- `/switch` handler 末尾（line 349 之后）：`taskTail.refresh()`
+- `/resume` handler 末尾（line 349 之后）：`taskTail.refresh()`
 - `/clear` 已通过 `service.clear` emit(null) 自动处理，**无需**额外 refresh
 - `registerTaskCommands({ ..., service, getConversationId, writer })` 在 bootstrap 调一次完成命令注册
 
@@ -853,7 +853,7 @@ export class TaskTail {
   }
 
   /**
-   * 显式刷新 —— conversation 切换路径（/new / /switch）必须调用。
+   * 显式刷新 —— conversation 切换路径（/new / /resume）必须调用。
    * /clear 路径不需要（service.clear 会 emit state=null → subscribe handler 自动处理）。
    */
   refresh(): void {
@@ -890,7 +890,7 @@ export class TaskTail {
 | ConversationRepository per-id metaLock | `repository.ts` `withMetaLock` | store.save 已 FIFO 原子；service 层不重复加锁 |
 | `/clear` 走 clearViewLayerState + service.clear | `repl.ts` | service.clear 触发 emit(state=null) → TaskTail subscribe handler 自动 setStatusTail(null) |
 | `state.conversationId`（cli REPL 状态） | `repl.ts:109` CliReplState | TaskTail.getConversationId 注入 `() => state.conversationId`——与 task_list 工具的 ALS 路径独立 |
-| `/new` / `/switch` 改 state.conversationId | `repl.ts:306 / 349` | conversation 切换后 caller 必须显式调 `taskTail.refresh()`（subscribe 不感知 state.conversationId 变化） |
+| `/new` / `/resume` 改 state.conversationId | `repl.ts:306 / 349` | conversation 切换后 caller 必须显式调 `taskTail.refresh()`（subscribe 不感知 state.conversationId 变化） |
 
 ### 8.14 风险防控与测试覆盖
 
@@ -904,7 +904,7 @@ export class TaskTail {
 | 订阅者抛错传染 service | emit 内 try-catch swallow | 多订阅者测试，一个抛错不影响其他订阅者收到事件 |
 | TaskTail 启动时 service 已有数据但未 emit | start() 内显式 refresh() 拉初值 | 启动顺序测试：service 先 set → 后 start，断言 tail 立即显示 |
 | `/clear` 路径 tail 不刷新 | service.clear emit (state=null) → subscribe handler 自动 setStatusTail(null) | clear 集成测试：clear 后 emit 收到 null + tail 立即隐藏 |
-| `/new` `/switch` 切换 conversation tail 不刷新 | caller 切换 state.conversationId 后必须显式调 taskTail.refresh() | conversation 切换集成测试，断言 tail 跟随新 convId 内容 |
+| `/new` `/resume` 切换 conversation tail 不刷新 | caller 切换 state.conversationId 后必须显式调 taskTail.refresh() | conversation 切换集成测试，断言 tail 跟随新 convId 内容 |
 | detach / dispose 后重新 attach 旧 tail 复活 | detachInput / dispose 同步清空 statusTail（对称清理） | detach → attach 测试：attach 后 chrome 不含旧 tail |
 | tail 独立显示时违反 cli 全局对齐契约 | buildChromeBytes 独立分支注入 `layout.contentPrefix` —— 与 status / AI / 工具卡片等同对齐 token | 视觉测试：idle + tail → 行前 2 空格，与有 status 时 statusLines[0] 起手列对齐 |
 | 长任务内容 truncate 后 `(N/M)` 被截掉 | clampLine 是从末尾截断，超长任务可能丢进度 —— 接受此降级（窄终端语义） | 文档化此行为；不为之引入复杂的优先级保留策略 |
@@ -928,7 +928,7 @@ export class TaskTail {
 | cli `/task new` `/task done` | 否 | mutate → set → emit → subscribe 自动处理 |
 | cli `/clear` | 否 | service.clear emit(state=null) → subscribe 自动处理 |
 | cli `/new` 创建新对话 | **是** | state.conversationId 改变，但 service 未必 emit；显式调 taskTail.refresh() |
-| cli `/switch` 切换对话 | **是** | 同上 |
+| cli `/resume` 切换对话 | **是** | 同上 |
 | cli session 启动 / 恢复 | 已在 TaskTail.start() 内自动 refresh | 不需要 caller 额外调 |
 
 **TaskListService API 行为变更（PR-C2 内的破坏性调整）**：

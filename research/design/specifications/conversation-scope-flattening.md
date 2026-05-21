@@ -28,7 +28,7 @@
 ## 产品决策（已敲定，无需再对齐）
 
 1. **conversation 默认走用户级**：用户在任意 cwd 起 cli 都看到同一坨对话历史
-2. **推荐"一个对话够用"**：产品定位上引导用户主要使用 default 对话；多对话能力（`/new` / `/switch`）作为高阶兜底能力完整保留
+2. **推荐"一个对话够用"**：产品定位上引导用户主要使用 default 对话；多对话能力（`/new` / `/resume`）作为高阶兜底能力完整保留
 3. **project scope 整段废除**：包括 union variant、cli/serve 构造点、`getProjectId` utility 及其所有引用
 4. **workscene scope 不动**：那是用户**显式**创建的工作语境实体，与 cwd 自动隔离机制独立，不混淆
 
@@ -189,4 +189,4 @@ const store = new TranscriptStore(convDir);
 不阻塞本次实施，作为路线图项独立评估：
 
 - conversation `delete()` 的 dead 入口清理（含 trash 路径）
-- 多对话能力的产品 UX 收敛（既然推荐"一个对话够用"，`/switch` 列表的展示策略是否需要简化）
+- 多对话能力的产品 UX 收敛（既然推荐"一个对话够用"，`/resume` 列表的展示策略是否需要简化）
