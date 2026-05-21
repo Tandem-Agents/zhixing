@@ -93,7 +93,7 @@ zhixing
 | `/usage` | Token 用量详情 |
 | `/context` | 上下文容量可视化 |
 | `/skills` | 查看技能库 |
-| `/workscene` | 工作场景管理（增删改查/归档） |
+| `/work` | 工作场景管理（增删改查/归档） |
 | `/journal` | 查看日志状态 |
 | `/people` | 查看关系网络 |
 | `/compact` | 手动触发上下文压缩 |

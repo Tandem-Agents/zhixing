@@ -251,7 +251,7 @@ const REPL_COMMAND_META: ReadonlyArray<ReplCommandMeta> = [
   { name: "context", description: "上下文容量可视化", category: "info", legacyKey: "/context" },
   // ─ tools ─
   { name: "skills", description: "查看技能库", category: "tools", legacyKey: "/skills" },
-  { name: "workscene", description: "工作场景管理（增删改查/归档）", category: "tools", legacyKey: "/workscene" },
+  { name: "work", description: "工作场景管理（增删改查/归档）", category: "tools", legacyKey: "/work" },
   { name: "journal", description: "查看日志状态", category: "tools", legacyKey: "/journal" },
   { name: "people", description: "查看关系网络", category: "tools", legacyKey: "/people" },
   { name: "compact", description: "手动触发上下文压缩", category: "tools", legacyKey: "/compact" },
@@ -290,6 +290,16 @@ function buildSlashCommands(
     source: "llm" | "command",
     triggerMsg?: Message,
   ) => Promise<void>,
+  /**
+   * 把屏幕清回"刚进入交互模式"的初始态(advisories + welcome chrome + 一行
+   * 轻量提示)。`/clear` 在清完数据后调用,无此能力(legacy 终端 / 无 chrome)
+   * 时为 undefined,handler 退回到仅写一行提示。extraLines 承接 handler 收集
+   * 的非致命 warning(如 reset 失败),与初始 region 内容一起重建,可观测性
+   * 不丢失。
+   */
+  clearScreenToInitial:
+    | ((extraLines?: readonly string[]) => void)
+    | undefined,
 ): Record<
   string,
   {
@@ -358,15 +368,22 @@ function buildSlashCommands(
           // 仅清内存即可，无磁盘可清
           state.conv.messages = [];
         }
+
+        // 非致命 warning 收集到本地数组,末尾按 clearScreenToInitial 是否可用分流:
+        // chrome 路径(rebuild 会清 scroll region)把 warnings 作为 extraLines 一并
+        // 注入重建内容避免丢失;legacy 路径(无 rebuild)逐行 cliWriter 输出。
+        // 数组元素是不含 \n 的单行内容,由数组结构 / 各自输出路径控制换行。
+        const warnings: string[] = [];
+
         // 视图层组件通过 Resettable 注册到 runtime；这里一并清空它们的对话级状态。
         // 顺序：先磁盘清，后视图层 reset —— 失败时内存 messages 仍是 canonical
         // 安全态，下一次 LLM call 不会因半态而异常。
         try {
           await session.runtime.resetConversationState();
         } catch (err) {
-          cliWriter.line(
+          warnings.push(
             chalk.yellow(
-              `\n  视图层部分组件 reset 失败（不影响对话清空）: ${err instanceof Error ? err.message : String(err)}\n`,
+              `  视图层部分组件 reset 失败（不影响对话清空）: ${err instanceof Error ? err.message : String(err)}`,
             ),
           );
         }
@@ -377,9 +394,9 @@ function buildSlashCommands(
           try {
             await state.conv.convRepo.clearViewLayerState(state.conv.conversationId);
           } catch (err) {
-            cliWriter.line(
+            warnings.push(
               chalk.yellow(
-                `\n  conversation meta 视图层字段清空失败（不影响对话清空）: ${err instanceof Error ? err.message : String(err)}\n`,
+                `  conversation meta 视图层字段清空失败（不影响对话清空）: ${err instanceof Error ? err.message : String(err)}`,
               ),
             );
           }
@@ -390,7 +407,13 @@ function buildSlashCommands(
         }
         state.conv.turnCounter = 0;
         state.conv.lastToolEndCount = 0;
-        cliWriter.line(chalk.dim(`${layout.contentPrefix}对话历史已清空\n`));
+
+        if (clearScreenToInitial) {
+          clearScreenToInitial(warnings);
+        } else {
+          for (const w of warnings) cliWriter.line(w);
+          cliWriter.line(chalk.dim(`${layout.contentPrefix}对话历史已清空\n`));
+        }
       },
     },
     "/model": {
@@ -670,7 +693,7 @@ function buildSlashCommands(
         cliWriter.line(chalk.dim("\n  提示: /skills audit 查看健康报告\n"));
       },
     },
-    "/workscene": {
+    "/work": {
       description:
         "工作场景管理 (list, add <name> [--workdir <path>], remove <id>, rename <id> <name>, archive/unarchive <id>)",
       handler: async (_state, args) => {
@@ -680,7 +703,7 @@ function buildSlashCommands(
         const rest = tokens.slice(1);
 
         const usage = (line: string) =>
-          cliWriter.line(chalk.red(`\n  用法: /workscene ${line}\n`));
+          cliWriter.line(chalk.red(`\n  用法: /work ${line}\n`));
         const fail = (e: unknown) =>
           cliWriter.line(
             chalk.red(`\n  ✗ ${e instanceof Error ? e.message : String(e)}\n`),
@@ -718,7 +741,7 @@ function buildSlashCommands(
           if (scenes.length === 0) {
             cliWriter.line(
               chalk.dim(
-                "\n  暂无工作场景。/workscene add <name> 创建。\n",
+                "\n  暂无工作场景。/work add <name> 创建。\n",
               ),
             );
             return;
@@ -745,7 +768,7 @@ function buildSlashCommands(
             // 时直接抛 friendly error,fail() 染红显示给用户。
             // 与 LLM 工具 workscene_change_approve action=remove 同源,guard 不可绕过。
             // 用户的 workdir 不动 —— 那是用户的代码资产,系统不碰。
-            // 想"软隐藏"该场景请用 /workscene archive <id>。
+            // 想"软隐藏"该场景请用 /work archive <id>。
             await session.removeWorkScene(id);
             cliWriter.line(
               chalk.green(`\n  ✓ 已删除工作场景: ${chalk.cyan(id)}`) +
@@ -1276,6 +1299,28 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   };
   for (const line of initialRegionLines()) cliWriter.line(line);
 
+  // 清屏回到刚进入交互模式的初始态 —— `/clear` 在清完数据后调用。chrome 终端
+  // 走 renderScreen.rebuildAfterResize(整屏清 + scrollback 全清 + chrome 自适应
+  // 重画 + region 内容重写,与 firstAttach 同源序列),复用 initialRegionLines
+  // 单一来源避免视觉漂移;extraLines 承接 handler 收集的非致命 warning,与
+  // initialRegionLines + cleared notice 一起作为 region 内容重建,可观测性
+  // 不丢失。legacy 终端无 renderScreen,本闭包为 undefined,handler 退回到
+  // 逐行写 warning + 一行提示。
+  const clearScreenToInitial:
+    | ((extraLines?: readonly string[]) => void)
+    | undefined = renderScreen
+    ? (extraLines) => {
+        const clearedNotice = `${layout.contentPrefix}${chalk.dim(
+          "⟳ 对话已清空 · 可以从这里开始新一轮",
+        )}`;
+        renderScreen.rebuildAfterResize(() =>
+          [...initialRegionLines(), ...(extraLines ?? []), clearedNotice]
+            .map((l) => `${l}\n`)
+            .join(""),
+        );
+      }
+    : undefined;
+
   // 启动时检测 stale 技能，温和提醒
   await checkStaleSkills(cliWriter);
 
@@ -1601,6 +1646,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     cliWriter,
     () => taskTail?.refresh(),
     applyModeSwitch,
+    clearScreenToInitial,
   );
 
   // ── Typeahead 路径接入（Phase 1 Step 5） ──

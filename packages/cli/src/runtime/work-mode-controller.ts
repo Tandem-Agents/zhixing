@@ -35,7 +35,7 @@ export interface IWorkModeController {
   emitModeSwitch(intent: WorkModeSwitchIntent): void;
 
   /**
-   * 彻底删除工作场景（带 active 守卫）—— CLI `/workscene remove <id>` 与
+   * 彻底删除工作场景（带 active 守卫）—— CLI `/work remove <id>` 与
    * LLM 工具 `workscene_change_approve action=remove` 共用入口。
    *
    * **Guard**：不能删除当前活跃的工作场景。power runtime 正在使用该场景的

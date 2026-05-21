@@ -104,7 +104,7 @@ export class RuntimeSession implements IWorkModeController {
 
   // 工作场景登记单例 —— 纯 fs CRUD,无 async bootstrap / dispose,生命周期
   // 同 session。reload 重建 agentRuntime 不触碰它（注册表与运行时资源正交）；
-  // 后续 enter/exit 工作模式与 cli /workscene 命令共用此同一实例。
+  // 后续 enter/exit 工作模式与 cli /work 命令共用此同一实例。
   private readonly workSceneRegistryInstance: IWorkSceneRegistry =
     new FsWorkSceneRegistry();
 
@@ -406,7 +406,7 @@ export class RuntimeSession implements IWorkModeController {
   }
 
   /**
-   * 工作场景登记单例 —— cli /workscene 命令与后续 enter/exit 工作模式
+   * 工作场景登记单例 —— cli /work 命令与后续 enter/exit 工作模式
    * 共用，唯一写入入口，跨 reload 持续。
    */
   get workSceneRegistry(): IWorkSceneRegistry {
@@ -435,7 +435,7 @@ export class RuntimeSession implements IWorkModeController {
   }
 
   /**
-   * 彻底删除工作场景的唯一入口（带 active 守卫）—— CLI `/workscene remove`
+   * 彻底删除工作场景的唯一入口（带 active 守卫）—— CLI `/work remove`
    * 与 LLM 工具 `workscene_change_approve action=remove` 都过这里。
    *
    * Guard：当前活跃 sceneId 与目标 id 相同时直接抛错。power runtime 正在

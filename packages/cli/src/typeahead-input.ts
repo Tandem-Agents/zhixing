@@ -60,6 +60,10 @@ import {
 } from "./tui/_internal/stdin-ownership.js";
 import { InputBuffer } from "./input-buffer.js";
 import {
+  normalizeLeadingSlashAlias,
+  normalizeLeadingSlashAliasInExpanded,
+} from "./runtime/leading-slash-alias.js";
+import {
   CommandDispatcher,
   type DispatchResult,
 } from "./command-dispatcher.js";
@@ -712,10 +716,14 @@ export class InputController implements InputRegion {
     if (this.options.registry) {
       this.options.registry.cleanup(extractAliveIds(this.buffer.draft));
     }
-    this.options.broker.updateInput(
-      this.sessionHandleId,
-      this.buffer.toTriggerContext(this.options.getRuntime()),
-    );
+    // 首位 `、` 等输入法别名按 `/` 喂 broker:typeahead 命令面板 / ghost text
+    // 看到规范化后的 draft,显示层保留原字符不动(echo 走 rawDraft 路径)。
+    // 单字符 alias 下 cursor 数值不变;扩展多字符 alias 须重映射 cursor。
+    const ctx = this.buffer.toTriggerContext(this.options.getRuntime());
+    this.options.broker.updateInput(this.sessionHandleId, {
+      ...ctx,
+      draft: normalizeLeadingSlashAlias(ctx.draft),
+    });
   }
 
   private finalizePaste(content: string): void {
@@ -803,7 +811,15 @@ export class InputController implements InputRegion {
     const expanded = this.options.registry
       ? expandPastes(rawDraft, this.options.registry)
       : rawDraft;
-    const text = expanded.trim();
+    // 首位 `、` 等输入法别名按 `/` 喂下游 dispatcher;rawDraft 仍是用户原文
+    // 用于 echo 显示,显示/解析在此分叉。基于 rawDraft.trim() 首位(用户原始
+    // 输入意图)判断而非 expanded.trim() 首位:rawDraft 在长 paste 折叠时
+    // 首位是 token `<`,expanded 首位是 paste 内容首字符 —— 若用 expanded
+    // 判断会把"以顿号开头的粘贴文本"误识别为命令。
+    const text = normalizeLeadingSlashAliasInExpanded(
+      expanded.trim(),
+      rawDraft.trim(),
+    );
 
     // 严格顺序：commit → syncBroker → echo → dispatch
     //
