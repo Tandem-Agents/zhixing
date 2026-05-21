@@ -19,7 +19,7 @@ export interface TranscriptHeader {
   version: number;
   /** 所属 Conversation ID */
   conversationId: string;
-  /** 用户可通过 --name 或 /name 设置的显示名 */
+  /** 用户可通过 REPL 内 `/name` / `/new <name>` 命令设置的显示名 */
   name: string | null;
   projectPath: string;
   createdAt: string;

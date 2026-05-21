@@ -76,16 +76,10 @@ program
   .version("0.1.0")
   .option("-p, --print <prompt>", "单次模式：执行 prompt 后退出")
   .option("-w, --workspace <path>", "指定工作区目录（安全信任边界）")
-  .option("-c, --continue", "继续当前项目最近的会话")
-  .option("-r, --resume [id]", "恢复指定会话（不带 ID 则交互选择）")
-  .option("-n, --name <name>", "为会话命名")
   .option("--log", "启用诊断 dump 到 ~/.zhixing/logs/（LLM raw chunk + keypress 路径） —— 排查渲染 / 上下文 / 流式 / 按键输入问题用")
   .action(async (options: {
     print?: string;
     workspace?: string;
-    continue?: boolean;
-    resume?: string | true;
-    name?: string;
     log?: boolean;
   }) => {
     try {
@@ -123,9 +117,6 @@ program
 
       await startRepl({
         workspace: options.workspace,
-        continue: options.continue,
-        resume: options.resume,
-        name: options.name,
       });
     } catch (err) {
       renderError(err, stdoutWriter);

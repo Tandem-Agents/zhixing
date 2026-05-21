@@ -11,6 +11,17 @@
 >
 > ⚠️ **写入模型升级（Phase 5 治理）**：老 `appendTurn + appendCompact` 分步写入因多个隐蔽 bug 被 `commitTurn(id, {turn?, compactBefore?})` **原子单入口** 替代。文件新不变量 `header + [compact?] + post-compact turns`（至多 1 个 compact,紧跟 header）。详见 [conversation-model.md §9.5 + ADR-CM-017](./conversation-model.md)。本文档 §4.5 / §5 已同步更新接口签名；§2.3 行格式描述保留（Compact 行字段完全兼容）。
 >
+> ⚠️ **CLI 启动参数已废弃（2026-05-21）**：本文描述的所有"启动参数恢复模式" **均不代表当前实现**:
+> - **`--continue` / `--resume [id|name]` / `--name <name>`** —— 历史曾实施(2026-04-09 落地),2026-05-21 已**彻底删除**。详见 git log
+> - **`--fork-session` / `--no-session-persistence`** —— spec 设计设想,**从未实施**(代码层 grep 零命中)
+>
+> 当前实现:
+> - REPL 启动**统一 auto-resume** `convRepo.findLatest()` 最近一条对话(无 latest 则创建 default)
+> - 对话查看 / 切换 / 创建 / 命名走 REPL 内 `/switch` / `/new <name>` / `/name <name>` 命令（详见 [conversation-model.md §11.2](./conversation-model.md)）
+> - 启动参数纯粹只承载"运行模式 / 环境配置"维度（`-p` / `-w` / `--log`），不再有"对话选择"维度——消除双轨入口
+>
+> 本文下文 §三、§六、§十一 等处所有 `--continue` / `--resume` / `--name` / `--fork-session` 引用为**历史决策痕迹**(2026-04-09 时点的设想),不代表当前实现。
+>
 > 阅读顺序：先看 [conversation-model.md](./conversation-model.md) 理解概念分层 + commitTurn 原子语义,再看本文档了解持久化细节。
 
 ## 一、竞品方案对比

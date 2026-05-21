@@ -116,7 +116,7 @@
 - [x] **M13**: 上下文管理调研 + 方案设计 → Token 估算 + 3 层压缩策略 ✅ 2026-04-08
 - [x] **M14**: Token 估算器实现 → CJK 感知 + 自适应校准 ✅ 2026-04-08
 - [x] **M15**: 上下文预算 + L1/L2 压缩策略 + 引擎 + Agent Loop 集成 ✅ 2026-04-08
-- [x] **M16**: 会话持久化实现 → JSONL + SessionStore + --resume/--continue ✅ 2026-04-09
+- [x] **M16**: 对话持久化实现 → JSONL + TranscriptStore + ConversationRepository + REPL 启动 auto-resume ✅ 2026-04-09
 - [x] **M17**: L3 LLM 摘要压缩 → 7 段模板 + 校验 + CircuitBreaker ✅ 2026-04-09
 - [x] **M18**: CLI 上下文状态集成 → 预算显示 + 压缩过程可视化 ✅ 2026-04-09
 - [x] **M19**: Hermes Agent 源码分析 → 核心循环 + Skills 进化 + 分层记忆 + 消息网关 ✅ 2026-04-10

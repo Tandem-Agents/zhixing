@@ -22,7 +22,6 @@ import {
   getZhixingHome,
   ConversationRepository,
   conversationsDir,
-  type Conversation,
   type ConversationScope,
   loadProfile,
   getMemoryDir,
@@ -158,13 +157,16 @@ interface ReplState {
   activeTurnPromise: Promise<RunResult> | null;
 }
 
-// ─── 会话恢复选项 ───
+// ─── REPL 启动选项 ───
+//
+// 启动期只承载"运行模式 / 环境配置"维度的选项;"对话选择"维度统一由 REPL 内
+// 的 `/new` `/switch` `/name` 命令承担,启动期不再有 `--continue`/`--resume`/`--name`
+// 这类与 REPL 命令同语义的双轨入口(见 conversation-model.md §11.2)。
+// 启动行为:总是 auto-resume `convRepo.findLatest()` 最近一条对话(无 latest 则
+// 创建 default)。用户想切换到其它对话或新建,进入 REPL 后用 `/switch` / `/new`。
 
 export interface ReplOptions {
   workspace?: string;
-  continue?: boolean;
-  resume?: string | true;
-  name?: string;
 }
 
 /**
@@ -1210,63 +1212,31 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   let messages: Message[] = [];
   let conversationId: string | null = null;
   let turnCounter = 0;
-  // 当前 REPL 接续的对话名称——三个恢复入口（显式 ID / interactive picker /
-  // 默认最近）共同写入此变量，最终喂给 welcome chrome 内的锚 row2 inline 渲染，
-  // 替代分散在三处的 cliWriter.line("已恢复对话...") 噪音。新会话保持 null →
-  // 锚 row2 退化为仅 glyph。
+  // 当前 REPL 接续的对话名称——auto-resume 命中时写入,喂给 welcome chrome 内
+  // 的锚 row2 inline 渲染（替代分散的 cliWriter.line "已恢复对话..." 噪音）。
+  // 新对话保持 null → 锚 row2 退化为仅 glyph。
   let resumedConversationName: string | null = null;
 
-  if (options.resume !== undefined) {
-    if (typeof options.resume === "string") {
-      const conv = await convRepo.get(options.resume);
-      if (!conv) {
-        cliWriter.line(chalk.red(`\n  对话 "${options.resume}" 不存在\n`));
-        return;
-      }
-      try {
-        const loaded = await store.load(options.resume);
-        messages = loaded.messages;
-        conversationId = options.resume;
-        turnCounter = loaded.turnCount;
-        resumedConversationName = conv.name;
-      } catch (err) {
-        cliWriter.line(
-          chalk.red(
-            `\n  无法恢复对话 ${options.resume}: ${err instanceof Error ? err.message : String(err)}\n`,
-          ),
-        );
-        return;
-      }
-    } else {
-      const picked = await interactiveConversationPicker(convRepo, cliWriter);
-      if (picked) {
-        conversationId = picked.id;
-        const loaded = await store.load(picked.id);
-        messages = loaded.messages;
-        turnCounter = loaded.turnCount;
-        resumedConversationName = picked.name;
-      }
-    }
-  } else {
-    const latest = await convRepo.findLatest();
-    if (latest) {
-      try {
-        const loaded = await store.load(latest);
-        messages = loaded.messages;
-        conversationId = latest;
-        turnCounter = loaded.turnCount;
-        const conv = await convRepo.get(latest);
-        resumedConversationName = conv?.name ?? latest;
-      } catch {
-        // transcript 加载失败 → 降级到创建新对话
-      }
+  // 启动期对话选择策略：统一 auto-resume `convRepo.findLatest()` 最近一条对话,
+  // 无 latest 或加载失败则降级到创建 default 新对话。
+  // 用户想切换到其它对话或新建命名,进入 REPL 后用 `/switch` / `/new <name>`。
+  const latest = await convRepo.findLatest();
+  if (latest) {
+    try {
+      const loaded = await store.load(latest);
+      messages = loaded.messages;
+      conversationId = latest;
+      turnCounter = loaded.turnCount;
+      const conv = await convRepo.get(latest);
+      resumedConversationName = conv?.name ?? latest;
+    } catch {
+      // transcript 加载失败 → 降级到创建新对话
     }
   }
 
-  // 新会话：先创建 Conversation（meta.json），再创建 Transcript（transcript.jsonl）
+  // 新对话：先创建 Conversation（meta.json），再创建 Transcript（transcript.jsonl）
   if (!conversationId) {
     const conversation = await convRepo.create({
-      name: options.name,
       preferredModel: session.runtime.model,
       preferredProvider: session.runtime.providerId,
     });
@@ -2117,57 +2087,6 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   // 关闭 readline——typeahead 路径下 break 跳出循环后必须显式 close，否则 readline 持
   // stdin 让事件循环不空，进程不退出。Legacy 路径下 readline 已 close，幂等 no-op。
   rl.close();
-}
-
-// ─── 交互式会话选择器 ───
-
-/**
- * 交互式会话选择器——展示最近 10 个对话让用户选号恢复。
- *
- * 返回完整 Conversation 而非 id：picker 内部 list() 已持有完整对象，
- * 让 caller 直接拿 name / lastActiveAt 等字段，避免被迫二次 convRepo.get(id)
- * 重读磁盘（ConversationRepository 无缓存层）。
- */
-async function interactiveConversationPicker(
-  convRepo: ConversationRepository,
-  cliWriter: CliWriter,
-): Promise<Conversation | null> {
-  const conversations = await convRepo.list();
-  if (conversations.length === 0) {
-    return null;
-  }
-
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    terminal: true,
-  });
-
-  cliWriter.line(`\n${chalk.bold("选择要恢复的会话：")}`);
-  const displayed = conversations.slice(0, 10);
-  for (let i = 0; i < displayed.length; i++) {
-    const c = displayed[i]!;
-    const label = c.name ? chalk.white(c.name) : chalk.dim("(未命名)");
-    const time = formatRelativeTime(new Date(c.lastActiveAt));
-    cliWriter.line(
-      `  ${chalk.cyan(String(i + 1).padStart(2))}. [${c.id}] ${label} ${chalk.dim(`(${time})`)}`,
-    );
-  }
-  cliWriter.line(`  ${chalk.dim(" 0. 新建会话")}`);
-
-  try {
-    const answer = await rl.question(chalk.green("\n选择 (1-10, 0=新建): "));
-    rl.close();
-
-    const num = parseInt(answer.trim(), 10);
-    if (num > 0 && num <= displayed.length) {
-      return displayed[num - 1]!;
-    }
-    return null;
-  } catch {
-    rl.close();
-    return null;
-  }
 }
 
 // ─── /skills audit ───

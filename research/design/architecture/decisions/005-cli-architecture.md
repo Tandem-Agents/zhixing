@@ -87,6 +87,11 @@ System Prompt（静态，可缓存）：
 
 ### 决策 6：会话管理策略
 
+> ⚠️ **本决策已被后续演进取代（2026-05-21 标注）** —— 持久化路径与启动参数均已变更,以当前实现为准。ADR 主体保留作为 2026-04-07 时点的决策快照,不再代表现状:
+> - 路径 `~/.zhixing/sessions/<project-hash>/...` 已收敛到 `~/.zhixing/conversations/<id>/` 用户域 / `~/.zhixing/workscenes/<sceneId>/conversations/<id>/` 工作场景域(项目级隔离整段废除,见 [conversation-scope-flattening.md](../../specifications/conversation-scope-flattening.md))
+> - 启动参数 `zhixing --continue` / `zhixing --resume <id>` **已删除**,启动期统一 auto-resume `convRepo.findLatest()`;对话查看/切换/创建/命名走 REPL 内 `/switch` / `/new` / `/name`(见 [conversation-model.md §11.2](../../specifications/conversation-model.md))
+> - 数据模型权威见 [conversation-model.md](../../specifications/conversation-model.md)
+
 **本地 JSONL 持久化**（同 Claude Code）：
 
 ```
