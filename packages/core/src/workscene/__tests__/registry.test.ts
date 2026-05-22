@@ -88,7 +88,7 @@ describe("FsWorkSceneRegistry · CRUD", () => {
     ]);
   });
 
-  it("list 按 lastActiveAt 倒序，默认过滤 archived", async () => {
+  it("list 按 lastActiveAt 倒序", async () => {
     const reg = new FsWorkSceneRegistry();
     const a = await reg.add({ name: "alpha" });
     const b = await reg.add({ name: "beta" });
@@ -98,15 +98,9 @@ describe("FsWorkSceneRegistry · CRUD", () => {
 
     const list = await reg.list();
     expect(list.map((s) => s.id)).toEqual([a.id, b.id]);
-
-    await reg.setArchived(b.id, true);
-    expect((await reg.list()).map((s) => s.id)).toEqual([a.id]);
-    expect(
-      (await reg.list({ includeArchived: true })).map((s) => s.id).sort(),
-    ).toEqual([a.id, b.id].sort());
   });
 
-  it("rename / setArchived / touch 改 meta 并持久化", async () => {
+  it("rename / touch 改 meta 并持久化", async () => {
     const reg = new FsWorkSceneRegistry();
     const s = await reg.add({ name: "old" });
 
@@ -114,9 +108,6 @@ describe("FsWorkSceneRegistry · CRUD", () => {
     expect(renamed.name).toBe("new name");
     expect(renamed.id).toBe(s.id); // id 不可变
     expect((await reg.get(s.id))?.name).toBe("new name");
-
-    await reg.setArchived(s.id, true);
-    expect((await reg.get(s.id))?.archived).toBe(true);
 
     const before = (await reg.get(s.id))!.lastActiveAt;
     await new Promise((r) => setTimeout(r, 5));

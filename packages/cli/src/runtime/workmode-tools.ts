@@ -21,7 +21,7 @@
  *
  *   - LLM 调 enter / exit / change_approve → 系统弹 confirm 让用户拍板
  *   - LLM 调 memory_query → 自动放行
- *   - 用户命令 `/enter` / `/exit` 走 cli 命令分发，根本不经 SecurityPipeline，
+ *   - 用户命令 `/work` / `/exit` 走 cli 命令分发，根本不经 SecurityPipeline，
  *     天然不需要确认（用户意图即授权）
  */
 
@@ -140,7 +140,7 @@ export function createWorksceneChangeApproveTool(
     properties: {
       action: {
         type: "string",
-        enum: ["add", "remove", "rename", "archive", "unarchive"],
+        enum: ["add", "remove", "rename"],
         description: "对工作场景注册表的变更动作",
       },
       name: {
@@ -149,7 +149,7 @@ export function createWorksceneChangeApproveTool(
       },
       sceneId: {
         type: "string",
-        description: "remove/rename/archive/unarchive 的目标场景 id",
+        description: "remove/rename 的目标场景 id",
       },
       workdir: {
         type: "string",
@@ -161,7 +161,7 @@ export function createWorksceneChangeApproveTool(
   return {
     name: "workscene_change_approve",
     description:
-      "增删改工作场景注册表（add/remove/rename/archive/unarchive）。需用户确认。",
+      "增删改工作场景注册表（add/remove/rename）。需用户确认。",
     inputSchema,
     isReadOnly: false,
     isParallelSafe: false,
@@ -191,7 +191,7 @@ export function createWorksceneChangeApproveTool(
             // 命中时抛 friendly error,catch 回包到 isError 让 LLM 见错文本。
             // 虽然本工具是 main-only(power 模式 by-construction 拿不到),
             // 仍走 guard 入口做 defense-in-depth + 与 CLI 命令同源。
-            // 用户的 workdir 不动。"软隐藏" 语义请走 archive,不在此处。
+            // 用户的 workdir 不动 —— 那是用户的代码资产,系统不碰。
             await controller.removeWorkScene(sceneId);
             return ok(`已删除工作场景 ${sceneId}（系统数据已物理清除）`);
           }
@@ -200,17 +200,6 @@ export function createWorksceneChangeApproveTool(
               return fail("rename 需要 sceneId 与 name");
             const s = await controller.registry.rename(sceneId, name);
             return ok(`已重命名为「${s.name}」`);
-          }
-          case "archive":
-          case "unarchive": {
-            if (!sceneId) return fail(`${action} 需要 sceneId`);
-            const s = await controller.registry.setArchived(
-              sceneId,
-              action === "archive",
-            );
-            return ok(
-              `已${action === "archive" ? "归档" : "取消归档"}「${s.name}」`,
-            );
           }
           default:
             return fail(`未知 action: ${action}`);
@@ -228,8 +217,7 @@ export function createWorksceneChangeApproveTool(
  * workscene_memory_query（main-only，只读）—— 检索任一/全部工作场景记忆域。
  *
  * v1：按 query 子串搜（无 query 则列目录索引），返回 id + 标题 + 截断片段；
- * 归档场景仍可检索（archived 只影响 list 默认过滤，不影响记忆可达）。各场景
- * 独立 readonly MemoryStore，不写。
+ * 各场景独立 readonly MemoryStore，不写。
  */
 export function createWorksceneMemoryQueryTool(
   controller: IWorkModeController,
@@ -269,7 +257,7 @@ export function createWorksceneMemoryQueryTool(
             const s = await controller.registry.get(sceneId);
             return s ? [s] : [];
           })()
-        : await controller.registry.list({ includeArchived: true });
+        : await controller.registry.list();
 
       if (scenes.length === 0) {
         return ok(

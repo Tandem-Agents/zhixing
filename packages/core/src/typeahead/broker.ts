@@ -29,6 +29,7 @@ import {
 } from "./events.js";
 import type {
   AcceptResult,
+  InlineActionSupport,
   ITypeaheadBroker,
   SuggestionItem,
   SuggestionProvider,
@@ -330,7 +331,7 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
         loading: true,
         ghostText: null,
         argumentHint: null,
-        deletable: false,
+        inlineActions: {},
       });
     } else {
       // 同 trigger 续 typing —— trigger 几何更新，canonical 字段保留前次值
@@ -418,14 +419,14 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
       }
     }
 
-    // Deletable: provider 通过 computeDeletable hook 自决当前 trigger 是否支持
-    // 删除选中候选。broker 不跨层访问 provider 内部数据结构,opt-in hook 让
-    // provider 自决,结果写入 state.deletable 给 typeahead Panel / InputController
-    // 消费。
-    let deletable = false;
-    if (typeof provider.computeDeletable === "function") {
+    // Inline actions: provider 通过 computeInlineActions hook 自决当前 trigger
+    // 的候选列表支持哪些就地操作。broker 不跨层访问 provider 内部数据结构,
+    // opt-in hook 让 provider 自决,结果写入 state.inlineActions 给 typeahead
+    // Panel / InputController 消费。
+    let inlineActions: InlineActionSupport = {};
+    if (typeof provider.computeInlineActions === "function") {
       try {
-        deletable = provider.computeDeletable(match);
+        inlineActions = provider.computeInlineActions(match);
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
         this.handleProviderError(provider.id, error, session.id);
@@ -441,7 +442,7 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
       loading: false,
       ghostText,
       argumentHint,
-      deletable,
+      inlineActions,
     });
   }
 
@@ -736,6 +737,6 @@ function makeEmptyState(
     loading: false,
     ghostText: null,
     argumentHint: null,
-    deletable: false,
+    inlineActions: {},
   };
 }

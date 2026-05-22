@@ -485,15 +485,26 @@ function renderActiveChrome(
     body.push(""); // 空 slot 占位（同顶 slot）
   }
 
-  // chrome 之后的 meta 行：deletable 时显删除提示(按 deletePending 切换文案);
-  // 非 deletable 走原 argumentHint 渲染 —— 不破坏其他命令 ArgSchema 的 hint。
-  // 快捷键提示行恒在末尾。两路径都是 hint(1) + shortcut(1) = 2 行(deletable
-  // 命令必然有 argumentHint),保持 panel 总高度恒等不变量。
+  // chrome 之后的 meta 行：有 inline 操作时显快捷键提示(delete 准备态切确认
+  // 文案);无 inline 操作走原 argumentHint 渲染 —— 不破坏其他命令 ArgSchema 的
+  // hint。快捷键提示行恒在末尾。两路径都是 hint(1) + shortcut(1) = 2 行
+  // (inline-actions 命令必有 argumentHint),保持 panel 总高度恒等不变量。
   const meta: string[] = [];
-  if (state.deletable) {
-    const hintText = state.deletePending
-      ? "再按一次 ctrl+d 确认删除"
-      : "delete ctrl+d";
+  const ia = state.inlineActions;
+  const hasInlineActions = Boolean(ia.delete || ia.rename || ia.create);
+  if (hasInlineActions) {
+    let hintText: string;
+    if (state.deletePending) {
+      // 删除准备态优先 —— 覆盖其他操作提示,聚焦二次确认
+      hintText = "再按一次 ctrl+d 确认删除";
+    } else {
+      // 多操作拼成单行(· 分隔),严守 meta 恒 2 行高度不变量
+      const parts: string[] = [];
+      if (ia.delete) parts.push("delete ctrl+d");
+      if (ia.rename) parts.push("rename ctrl+r");
+      if (ia.create) parts.push("new ctrl+n");
+      hintText = parts.join(" · ");
+    }
     meta.push(`  ${theme.hint(clampLine(hintText, frameWidth - 2))}`);
   } else if (state.argumentHint) {
     meta.push(

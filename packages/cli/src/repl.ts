@@ -93,6 +93,7 @@ import {
 } from "./screen/index.js";
 import { detectTerminalCapability } from "./screen/terminal-capability.js";
 import { layout } from "./tui/style.js";
+import { InlineTextPromptRegion } from "./tui/inline-text-prompt.js";
 import { InputController } from "./typeahead-input.js";
 import { renderHomeWelcome, renderStartupAdvisories } from "./workbench/index.js";
 import { renderFarewell } from "./farewell/index.js";
@@ -242,7 +243,6 @@ const REPL_COMMAND_META: ReadonlyArray<ReplCommandMeta> = [
   { name: "clear", description: "清空对话历史", category: "session", legacyKey: "/clear" },
   { name: "resume", description: "切换到其他对话", category: "session", legacyKey: "/resume" },
   { name: "name", description: "为当前会话命名", category: "session", legacyKey: "/name" },
-  { name: "enter", description: "进入工作场景", category: "session", legacyKey: "/enter" },
   { name: "exit", aliases: ["quit"], description: "退出工作场景 / 退出知行", category: "session", legacyKey: "/exit" },
   // ─ info ─
   { name: "help", description: "显示帮助信息", category: "info", legacyKey: "/help" },
@@ -253,7 +253,7 @@ const REPL_COMMAND_META: ReadonlyArray<ReplCommandMeta> = [
   { name: "context", description: "上下文容量可视化", category: "info", legacyKey: "/context" },
   // ─ tools ─
   { name: "skills", description: "查看技能库", category: "tools", legacyKey: "/skills" },
-  { name: "work", description: "工作场景管理（增删改查/归档）", category: "tools", legacyKey: "/work" },
+  { name: "work", description: "进入工作场景", category: "tools", legacyKey: "/work" },
   { name: "journal", description: "查看日志状态", category: "tools", legacyKey: "/journal" },
   { name: "people", description: "查看关系网络", category: "tools", legacyKey: "/people" },
   { name: "compact", description: "手动触发上下文压缩", category: "tools", legacyKey: "/compact" },
@@ -284,7 +284,7 @@ function buildSlashCommands(
    */
   onConversationChanged: (() => void) | undefined,
   /**
-   * 模式切换唯一执行点 —— `/enter`·`/exit` 命令 handler 经此触发（先 await
+   * 模式切换唯一执行点 —— `/work`·`/exit` 命令 handler 经此触发（先 await
    * in-flight turn 到达 turn 边界，与主回路消费 pendingModeSwitch 同源）。
    */
   applyModeSwitch: (
@@ -685,129 +685,51 @@ function buildSlashCommands(
       },
     },
     "/work": {
-      description:
-        "工作场景管理 (list, add <name> [--workdir <path>], remove <id>, rename <id> <name>, archive/unarchive <id>)",
-      handler: async (_state, args) => {
-        const reg = session.workSceneRegistry;
-        const tokens = args.trim().split(/\s+/).filter(Boolean);
-        const sub = (tokens[0] ?? "").toLowerCase();
-        const rest = tokens.slice(1);
-
-        const usage = (line: string) =>
-          cliWriter.line(chalk.red(`\n  用法: /work ${line}\n`));
-        const fail = (e: unknown) =>
-          cliWriter.line(
-            chalk.red(`\n  ✗ ${e instanceof Error ? e.message : String(e)}\n`),
-          );
-
-        if (sub === "add") {
-          const wdIdx = rest.indexOf("--workdir");
-          const name = (wdIdx === -1 ? rest : rest.slice(0, wdIdx))
-            .join(" ")
-            .trim();
-          const workdir = wdIdx === -1 ? undefined : rest[wdIdx + 1];
-          if (!name) return usage("add <name> [--workdir <path>]");
-          if (wdIdx !== -1 && !workdir)
-            return usage("add <name> --workdir <path>（缺 path）");
-          try {
-            const scene = await reg.add(
-              workdir ? { name, workdir } : { name },
-            );
-            cliWriter.line(
-              chalk.green(`\n  ✓ 已创建工作场景: ${chalk.cyan(scene.id)}`) +
-                (scene.workdir
-                  ? chalk.dim(` (workdir: ${scene.workdir})`)
-                  : "") +
-                "\n",
-            );
-          } catch (e) {
-            fail(e);
-          }
+      description: "进入工作场景(↑↓ 选择 · Enter 进入 · Ctrl+R 改名 · Ctrl+N 新建)",
+      handler: async (state, args) => {
+        // 已在工作场景中:不重复进入(work 模式内切换到另一场景属后续需求)。
+        if (session.activeMode.kind !== "main") {
+          cliWriter.line(chalk.dim("\n  已在工作场景中，请先 /exit 退出\n"));
           return;
         }
-
-        if (sub === "" || sub === "list") {
-          const includeArchived = rest.includes("--archived");
-          const scenes = await reg.list({ includeArchived });
-          if (scenes.length === 0) {
+        const q = args.trim();
+        // 空 args(手敲 /work 直接 Enter,或空场景面板内 Enter):不进场景、不报错。
+        // 列表浏览 / 进入 / 改名 / 新建全部走 typeahead 二级面板(↑↓ + Enter +
+        // Ctrl+R + Ctrl+N),命令行不再承担这些子操作。
+        if (!q) {
+          cliWriter.line(
+            chalk.dim("\n  用 ↑↓ 选场景 Enter 进入,Ctrl+N 新建\n"),
+          );
+          return;
+        }
+        // <idOrName> → 解析(精确 id 优先,其次唯一名称匹配,与 /resume 同款纪律)。
+        // typeahead 面板 accept 候选时填的是精确 id;手敲也支持名称。
+        const scenes = await session.workSceneRegistry.list();
+        let sceneId: string | null =
+          scenes.find((s) => s.id === q)?.id ?? null;
+        if (!sceneId) {
+          const lower = q.toLowerCase();
+          const named = scenes.filter((s) =>
+            s.name.toLowerCase().includes(lower),
+          );
+          if (named.length === 1) sceneId = named[0]!.id;
+          else if (named.length > 1) {
             cliWriter.line(
-              chalk.dim(
-                "\n  暂无工作场景。/work add <name> 创建。\n",
-              ),
+              chalk.yellow(`\n  多个工作场景匹配 "${q}"，请用精确 id\n`),
             );
             return;
           }
-          cliWriter.line(
-            `\n${chalk.bold("  工作场景")} ${chalk.dim(`(${scenes.length} 个)`)}`,
-          );
-          for (const s of scenes) {
-            const badge = s.archived ? chalk.dim("◌") : chalk.green("●");
-            const wd = s.workdir ? chalk.dim(` [${s.workdir}]`) : "";
-            cliWriter.line(
-              `  ${badge} ${chalk.cyan(s.id)} ${s.name}${wd}`,
-            );
-          }
-          cliWriter.line(chalk.dim("\n  提示: --archived 含已归档\n"));
+        }
+        if (!sceneId) {
+          cliWriter.line(chalk.red(`\n  工作场景 "${q}" 不存在\n`));
           return;
         }
-
-        if (sub === "remove") {
-          const id = rest[0];
-          if (!id || id.startsWith("--")) return usage("remove <id>");
-          try {
-            // 走 session.removeWorkScene(带 active guard):active 场景 id 命中
-            // 时直接抛 friendly error,fail() 染红显示给用户。
-            // 与 LLM 工具 workscene_change_approve action=remove 同源,guard 不可绕过。
-            // 用户的 workdir 不动 —— 那是用户的代码资产,系统不碰。
-            // 想"软隐藏"该场景请用 /work archive <id>。
-            await session.removeWorkScene(id);
-            cliWriter.line(
-              chalk.green(`\n  ✓ 已删除工作场景: ${chalk.cyan(id)}`) +
-                chalk.dim(
-                  " (系统数据已物理清除;工作目录由你自己管理)",
-                ) +
-                "\n",
-            );
-          } catch (e) {
-            fail(e);
-          }
-          return;
+        // 命令可能在 turn 运行中输入:先 await in-flight turn 到达 turn 边界
+        // (与 hot-reload 先 await in-flight turn 的既有纪律一致)。
+        if (state.activeTurnPromise) {
+          await state.activeTurnPromise.catch(() => {});
         }
-
-        if (sub === "rename") {
-          const id = rest[0];
-          const name = rest.slice(1).join(" ").trim();
-          if (!id || !name) return usage("rename <id> <name>");
-          try {
-            const s = await reg.rename(id, name);
-            cliWriter.line(
-              chalk.green(`\n  ✓ 已重命名: ${chalk.cyan(s.id)} → ${s.name}\n`),
-            );
-          } catch (e) {
-            fail(e);
-          }
-          return;
-        }
-
-        if (sub === "archive" || sub === "unarchive") {
-          const id = rest[0];
-          if (!id) return usage(`${sub} <id>`);
-          try {
-            await reg.setArchived(id, sub === "archive");
-            cliWriter.line(
-              chalk.green(
-                `\n  ✓ 已${sub === "archive" ? "归档" : "取消归档"}: ${chalk.cyan(id)}\n`,
-              ),
-            );
-          } catch (e) {
-            fail(e);
-          }
-          return;
-        }
-
-        usage(
-          "<list|add|remove|rename|archive|unarchive> ...",
-        );
+        await applyModeSwitch({ kind: "enter", sceneId }, "command");
       },
     },
     "/journal": {
@@ -983,53 +905,6 @@ function buildSlashCommands(
           cliWriter.line(`    ${schedule}${lastInfo}${next}`);
         }
         cliWriter.line("");
-      },
-    },
-    "/enter": {
-      description: "进入工作场景",
-      handler: async (state, args) => {
-        if (session.activeMode.kind !== "main") {
-          cliWriter.line(chalk.dim("\n  已在工作场景中，请先 /exit 退出\n"));
-          return;
-        }
-        const q = args.trim();
-        if (!q) {
-          cliWriter.line(
-            chalk.yellow(
-              `${layout.contentPrefix}用法: /enter <场景 id 或名称>\n`,
-            ),
-          );
-          return;
-        }
-        const scenes = await session.workSceneRegistry.list();
-        // 精确 id 优先，其次唯一名称匹配（与 /resume 同款解析纪律）
-        let sceneId: string | null =
-          scenes.find((s) => s.id === q)?.id ?? null;
-        if (!sceneId) {
-          const lower = q.toLowerCase();
-          const named = scenes.filter((s) =>
-            s.name.toLowerCase().includes(lower),
-          );
-          if (named.length === 1) sceneId = named[0]!.id;
-          else if (named.length > 1) {
-            cliWriter.line(
-              chalk.yellow(
-                `\n  多个工作场景匹配 "${q}"，请用精确 id\n`,
-              ),
-            );
-            return;
-          }
-        }
-        if (!sceneId) {
-          cliWriter.line(chalk.red(`\n  工作场景 "${q}" 不存在\n`));
-          return;
-        }
-        // 命令可能在 turn 运行中输入：先 await in-flight turn 到达 turn 边界
-        // （与 hot-reload 先 await in-flight turn 的既有纪律一致）。
-        if (state.activeTurnPromise) {
-          await state.activeTurnPromise.catch(() => {});
-        }
-        await applyModeSwitch({ kind: "enter", sceneId }, "command");
       },
     },
     "/exit": {
@@ -1388,7 +1263,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
    * 模式切换唯一执行点 —— REPL 主回路 turn 边界原子事务。
    *
    * 两条触发路径汇聚到此：LLM 工具经 RunResult.pendingModeSwitch（主回路 turn
-   * 结束后消费，source="llm"）、`/enter`·`/exit` 命令（handler 先 await
+   * 结束后消费，source="llm"）、`/work`·`/exit` 命令（handler 先 await
    * in-flight turn，source="command"）。
    *
    * 原子性不对称（焊死）：
@@ -1461,7 +1336,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
           //     为新任务进 scene，若读历史会让 power 上下文被上次无关主题污染、
           //     answer 跑偏；新建 + 触发句作为起始 message + 第一轮 turn 后
           //     自动命名落地，不产生孤儿空对话。
-          //   - 命令触发（/enter）：auto-resume 该 scene 最近活跃对话（与 main
+          //   - 命令触发（/work）：auto-resume 该 scene 最近活跃对话（与 main
           //     启动 auto-resume 对齐 —— 用户手动进就是为回到最近对话继续）。
           //
           // 不传 name：让 convRepo.create 走默认 name=id（autoChatId）的 sentinel，
@@ -1717,13 +1592,10 @@ export async function startRepl(options: ReplOptions): Promise<void> {
         }
         return choices;
       },
-      // opt-in 物理删除能力 —— 启用 typeahead "delete ctrl+d" UI(参 broker
-      // 的 computeDeletable hook + Panel 红背景准备态 + InputController 二次按确认)。
-      // 仅做数据层物理删除,业务编排(active 切换 / 自动新建 fallback)由
-      // onCandidateDelete callback 在 cli 层处理。
-      async delete(value: string, _signal: AbortSignal): Promise<void> {
-        await state.conv.convRepo.delete(value);
-      },
+      // 静态声明:对话候选支持 inline 删除(驱动 "delete ctrl+d" UI)。物理删除
+      // + 业务编排(active 切换 / 自动新建 fallback)由 onCandidateDelete callback
+      // 在 cli 层直调 convRepo 完成 —— 此处只声明能力,不承担执行。
+      inlineActions: { delete: true },
     };
 
     const resumeArgSchema: ArgSchema = {
@@ -1734,6 +1606,52 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       provider: conversationArgProvider,
     };
 
+    // ── WorkSceneArgProvider: /work 的 async-enum 参数补全 ──
+    //
+    // 查询 workSceneRegistry.list() 生成场景候选,与 conversationArgProvider 同构。
+    // inlineActions 声明 delete / rename / create —— 删除走 onCandidateDelete
+    // (work 分流),重命名 / 新建走主循环消费 inline-edit-request,均直调 registry。
+    const workSceneArgProvider: ArgChoiceProvider = {
+      async list(
+        ctx: ArgQueryContext,
+        signal: AbortSignal,
+      ): Promise<readonly ArgChoice[]> {
+        const scenes = await session.workSceneRegistry.list();
+        if (signal.aborted) return [];
+
+        const query = ctx.query.toLowerCase();
+        const choices: ArgChoice[] = [];
+        for (const s of scenes) {
+          if (
+            query &&
+            !s.name.toLowerCase().includes(query) &&
+            !s.id.toLowerCase().includes(query)
+          ) {
+            continue;
+          }
+          const wd = s.workdir ? ` · ${s.workdir}` : "";
+          choices.push({
+            value: s.id,
+            label: s.name || s.id,
+            description: `${s.id}${wd}`,
+          });
+        }
+        return choices;
+      },
+      // 静态声明场景候选支持的 inline 操作。物理执行在 cli 层:delete 走
+      // onCandidateDelete(work 分流 → session.removeWorkScene),rename / create
+      // 走主循环消费 inline-edit-request(→ session.workSceneRegistry)。
+      inlineActions: { delete: true, rename: true, create: true },
+    };
+
+    const workSceneArgSchema: ArgSchema = {
+      kind: "async-enum",
+      name: "scene",
+      description: "目标工作场景名称或 ID",
+      required: true,
+      provider: workSceneArgProvider,
+    };
+
     // ── REPL 命令注册 ──
     //
     // 命令元信息单源在文件顶层 REPL_COMMAND_META。本块只负责把元信息桥接到
@@ -1741,6 +1659,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     // args 字段不在元信息内,在此处按命令名注入(目前只 /resume 需要对话选择器)。
     const argsByName: Record<string, ReadonlyArray<ArgSchema>> = {
       resume: [resumeArgSchema],
+      work: [workSceneArgSchema],
     };
 
     for (const cmd of REPL_COMMAND_META) {
@@ -1806,12 +1725,27 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   // 视图层 reset 与 /clear handler 同款)。删的非当前对话仅删除不切换 active。
   // 实施完成后由 InputController 调 broker.refresh 刷新候选列表(本回调无需感知)。
   const onCandidateDelete = async (item: SuggestionItem): Promise<void> => {
-    const value =
-      typeof item.acceptPayload.metadata?.argValue === "string"
-        ? item.acceptPayload.metadata.argValue
-        : undefined;
+    const meta = item.acceptPayload.metadata;
+    const value = typeof meta?.argValue === "string" ? meta.argValue : undefined;
     if (!value) return;
+    const commandId = typeof meta?.commandId === "string" ? meta.commandId : "";
 
+    // 删场景(/work 面板):走 session.removeWorkScene(带 active guard),error
+    // 染红。无 fallback 新建(与删对话不同)—— 系统数据物理清除,用户 workdir 不动。
+    if (commandId === "work:repl") {
+      try {
+        await session.removeWorkScene(value);
+      } catch (err) {
+        cliWriter.line(
+          chalk.red(
+            `\n  删除工作场景失败: ${err instanceof Error ? err.message : String(err)}\n`,
+          ),
+        );
+      }
+      return;
+    }
+
+    // 删对话(/resume 面板):物理删 + 删的若是当前对话则自动新建空对话切换。
     const wasActive = value === state.conv.conversationId;
 
     try {
@@ -1974,6 +1908,50 @@ export async function startRepl(options: ReplOptions): Promise<void> {
 
       if (result.kind === "cancelled") {
         if (result.cause === "ctrl-c" || result.cause === "ctrl-d") break;
+        continue;
+      }
+
+      if (result.kind === "inline-edit-request") {
+        // inline 编辑(/work 面板 Ctrl+R 改名 / Ctrl+N 新建):suspend typeahead 让
+        // InlineTextPromptRegion 接管键盘收一行文本,改 registry 后 resume + 刷新
+        // 候选。suspend/resume 由主循环驱动(它知道此刻不在等普通输入),无死锁窗口。
+        if (renderScreen) {
+          const isRename = result.editKind === "rename";
+          const sceneId =
+            typeof result.item?.acceptPayload.metadata?.argValue === "string"
+              ? result.item.acceptPayload.metadata.argValue
+              : undefined;
+          const prefill = isRename ? result.item?.displayText : undefined;
+          inputController.suspend();
+          try {
+            const text = await new InlineTextPromptRegion({
+              prompt: isRename ? "重命名工作场景" : "新建工作场景",
+              prefill,
+              placeholder: isRename ? undefined : "场景名称",
+              screen: renderScreen,
+            }).run();
+            const name = text?.trim();
+            if (name) {
+              try {
+                if (isRename) {
+                  if (sceneId) await session.workSceneRegistry.rename(sceneId, name);
+                } else {
+                  await session.workSceneRegistry.add({ name });
+                }
+              } catch (err) {
+                cliWriter.line(
+                  chalk.red(
+                    `\n  ${isRename ? "重命名" : "新建"}工作场景失败: ${
+                      err instanceof Error ? err.message : String(err)
+                    }\n`,
+                  ),
+                );
+              }
+            }
+          } finally {
+            inputController.resume();
+          }
+        }
         continue;
       }
 
@@ -2201,7 +2179,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       }
     }
 
-    // turn 边界：消费本轮 LLM 工具产生的模式切换意图（命令触发走 /enter·
+    // turn 边界：消费本轮 LLM 工具产生的模式切换意图（命令触发走 /work·
     // /exit handler 同源 applyModeSwitch）。此时 turn 已完全落定、in-flight
     // promise 已清——切换天然在 turn 边界，旧 runtime 已跑完本轮。
     if (pendingModeSwitch) {

@@ -160,18 +160,33 @@ export interface ArgQueryContext {
 }
 
 /**
+ * 候选列表支持的 inline 操作能力集 —— provider 静态声明"这个候选列表支持
+ * 哪些就地操作",驱动 typeahead Panel 的快捷键提示行与 InputController 的按键
+ * 拦截。声明与执行分离:这里只声明能力(纯数据),物理操作 + 业务编排由 cli
+ * 层 callback 承担(delete 走 onCandidateDelete,rename / create 走主循环消费
+ * inline 编辑请求)。
+ *
+ *   - delete / rename:作用于选中候选,依赖 selectedIndex >= 0
+ *   - create:新建一条,作用于整个列表,不依赖选中
+ */
+export interface InlineActionSupport {
+  readonly delete?: boolean;
+  readonly rename?: boolean;
+  readonly create?: boolean;
+}
+
+/**
  * 异步参数候选提供者。
  * 实现者返回一个 Promise，**必须**在 signal abort 时尽快 reject 或返回部分结果。
  */
 export interface ArgChoiceProvider {
   list(ctx: ArgQueryContext, signal: AbortSignal): Promise<readonly ArgChoice[]>;
   /**
-   * 可选:声明此 provider 支持物理删除候选。实现 = opt-in"删除选中候选"
-   * UI 能力(typeahead Panel 渲染 "delete ctrl+d" 提示行,InputController
-   * 拦截 Ctrl+D 走删除路径)。仅做数据层物理删除;业务编排(active 切换 /
-   * 新建 fallback)由调用方在 onCandidateDelete callback 内处理。
+   * 可选:静态声明此 provider 的候选列表支持哪些 inline 操作。仅声明能力 ——
+   * Panel 据此渲染快捷键提示、InputController 据此拦截按键;实际的物理操作与
+   * 业务编排在 cli 层 callback 完成。
    */
-  delete?(value: string, signal: AbortSignal): Promise<void>;
+  readonly inlineActions?: InlineActionSupport;
 }
 
 interface ArgBase {
@@ -608,15 +623,15 @@ export interface SuggestionProvider {
   computeArgumentHint?(match: TriggerMatch): ArgumentHint | null;
 
   /**
-   * 计算当前 trigger 是否支持"删除选中候选"操作。broker 在 query 完成后
-   * 调用,结果写入 `TypeaheadSessionState.deletable`。仅 provider 内部知道
-   * 自己当前 match 的下层 schema / provider 是否支持 delete —— broker 不
+   * 计算当前 trigger 的候选列表支持哪些 inline 操作。broker 在 query 完成后
+   * 调用,结果写入 `TypeaheadSessionState.inlineActions`。仅 provider 内部
+   * 知道自己当前 match 的下层 schema / provider 声明了哪些能力 —— broker 不
    * 跨层访问 provider 内部数据结构,通过本 hook 让 provider 自决。
    *
-   * 默认 false(未实现 = 不支持)。ArgumentProvider 实现为
-   * `currentSchema.kind === "async-enum" && !!currentSchema.provider.delete`。
+   * 默认 `{}`(未实现 = 无 inline 操作)。ArgumentProvider 实现为读取
+   * async-enum schema 的 `provider.inlineActions`。
    */
-  computeDeletable?(match: TriggerMatch): boolean;
+  computeInlineActions?(match: TriggerMatch): InlineActionSupport;
 
   /** 声明此 provider 是否支持 accept 后继续同 provider 的链式 query（比如两段式 /cmd → args） */
   readonly supportsChaining?: boolean;
@@ -695,11 +710,12 @@ export interface TypeaheadSessionState {
   readonly argumentHint: ArgumentHint | null;
 
   /**
-   * 当前 trigger 是否支持"删除选中候选"。由 `SuggestionProvider.computeDeletable`
-   * hook 在 query 完成后推导写入,未实现 hook = false。typeahead Panel 据此
-   * 渲染 "delete ctrl+d" 提示行,InputController 据此决定 Ctrl+D 是否生效。
+   * 当前 trigger 的候选列表支持的 inline 操作集。由
+   * `SuggestionProvider.computeInlineActions` hook 在 query 完成后推导写入,
+   * 未实现 hook = `{}`。typeahead Panel 据此渲染快捷键提示行,InputController
+   * 据此决定 Ctrl+D / Ctrl+R / Ctrl+N 是否生效。
    */
-  readonly deletable: boolean;
+  readonly inlineActions: InlineActionSupport;
 
   /**
    * 当前准备删的 `SuggestionItem.id`(typeahead 现有唯一标识),null 表示无
@@ -783,7 +799,7 @@ export interface ITypeaheadBroker {
 
   /**
    * 强制重新 query 当前 trigger —— canonical(suggestions / selectedIndex /
-   * ghostText / argumentHint / deletable)重置为初始 loading 态,query resolve
+   * ghostText / argumentHint / inlineActions)重置为初始 loading 态,query resolve
    * 后看到新候选。InputController 在 `onCandidateDelete` 完成后调用,触发
    * 候选列表刷新(避免删后视觉残留 + selectedIndex 指向已不存在候选)。
    * 当前 trigger 已 gone(用户改 query 全删 trigger 字符)时退化为清空 state。

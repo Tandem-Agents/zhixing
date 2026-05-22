@@ -902,38 +902,38 @@ describe("DefaultTypeaheadBroker — 事件发射", () => {
   });
 });
 
-// ─── deletable / deletePending / refresh ───
+// ─── inlineActions / deletePending / refresh ───
 
-describe("DefaultTypeaheadBroker — deletable / deletePending / refresh", () => {
-  it("provider 实现 computeDeletable=true → state.deletable=true", () => {
+describe("DefaultTypeaheadBroker — inlineActions / deletePending / refresh", () => {
+  it("provider 实现 computeInlineActions → state.inlineActions 透传", () => {
     const broker = new DefaultTypeaheadBroker();
     const provider: SuggestionProvider = {
       ...makeSyncProvider("p", 100, "/"),
-      computeDeletable: () => true,
+      computeInlineActions: () => ({ delete: true }),
     };
     broker.register(provider);
     const handle = broker.beginSession(makeCtx("/"));
-    expect(broker.getState(handle.id)?.deletable).toBe(true);
+    expect(broker.getState(handle.id)?.inlineActions.delete).toBe(true);
   });
 
-  it("provider 未实现 computeDeletable → state.deletable=false", () => {
+  it("provider 未实现 computeInlineActions → state.inlineActions 为空集", () => {
     const broker = new DefaultTypeaheadBroker();
     broker.register(makeSyncProvider("p", 100, "/"));
     const handle = broker.beginSession(makeCtx("/"));
-    expect(broker.getState(handle.id)?.deletable).toBe(false);
+    expect(broker.getState(handle.id)?.inlineActions).toEqual({});
   });
 
-  it("provider.computeDeletable 抛错 → 降级 false + 不传染", () => {
+  it("provider.computeInlineActions 抛错 → 降级空集 + 不传染", () => {
     const broker = new DefaultTypeaheadBroker();
     const provider: SuggestionProvider = {
       ...makeSyncProvider("p", 100, "/"),
-      computeDeletable: () => {
+      computeInlineActions: () => {
         throw new Error("boom");
       },
     };
     broker.register(provider);
     const handle = broker.beginSession(makeCtx("/"));
-    expect(broker.getState(handle.id)?.deletable).toBe(false);
+    expect(broker.getState(handle.id)?.inlineActions).toEqual({});
     expect(broker.getState(handle.id)?.suggestions.length).toBeGreaterThan(0);
   });
 

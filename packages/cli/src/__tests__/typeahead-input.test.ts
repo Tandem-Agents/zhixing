@@ -329,7 +329,7 @@ describe("readInputLine — 取消路径", () => {
     expect(await p).toEqual({ kind: "cancelled", cause: "ctrl-c" });
   });
 
-  it("空 buffer 的 Ctrl+D 无 deletable 候选时 no-op(不退出,可继续输入)", async () => {
+  it("空 buffer 的 Ctrl+D 无 inline delete 候选时 no-op(不退出,可继续输入)", async () => {
     const { stdin, stdout } = makeStreams();
     const { broker, dispatcher } = makeHarness();
     const p = readInputLine({
@@ -350,7 +350,7 @@ describe("readInputLine — 取消路径", () => {
     expect(await p).toMatchObject({ kind: "text", text: "" });
   });
 
-  it("非空 buffer 的 Ctrl+D 无 deletable 候选时 no-op(buffer 不动 + 不退出)", async () => {
+  it("非空 buffer 的 Ctrl+D 无 inline delete 候选时 no-op(buffer 不动 + 不退出)", async () => {
     const { stdin, stdout } = makeStreams();
     const { broker, dispatcher } = makeHarness();
     const p = readInputLine({

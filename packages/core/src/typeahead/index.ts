@@ -36,6 +36,7 @@ export type {
   ActiveProviderInfo,
   ArgumentHint,
   GhostText,
+  InlineActionSupport,
   ITypeaheadBroker,
   SuggestionItem,
   SuggestionProvider,

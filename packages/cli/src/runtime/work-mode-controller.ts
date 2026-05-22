@@ -21,7 +21,7 @@ import type {
 export interface IWorkModeController {
   /**
    * 工作场景注册表 —— 无 guard 操作的 CRUD 落点（list / get / add / rename /
-   * setArchived / touch）。**写性操作中需要业务规则守卫的（如 remove 不能
+   * touch）。**写性操作中需要业务规则守卫的（如 remove 不能
    * 删活跃场景），不要直接调 registry，走本接口的语义方法**（如 `removeWorkScene`）。
    */
   readonly registry: IWorkSceneRegistry;

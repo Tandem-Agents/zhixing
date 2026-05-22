@@ -37,7 +37,6 @@ function makeController(
       add: vi.fn(),
       remove: vi.fn().mockResolvedValue(undefined),
       rename: vi.fn(),
-      setArchived: vi.fn(),
       touch: vi.fn().mockResolvedValue(undefined),
       ...overrides,
     },
@@ -177,13 +176,12 @@ describe("workscene_memory_query", () => {
         add: vi.fn(),
         remove: vi.fn(),
         rename: vi.fn(),
-        setArchived: vi.fn(),
         touch: vi.fn(),
       },
     } as unknown as IWorkModeController;
   }
 
-  it("query 模式：命中场景记忆，返回 id+片段；list 带 includeArchived", async () => {
+  it("query 模式：命中场景记忆，返回 id+片段", async () => {
     await new MemoryStore(getWorkSceneMemoryDir("scene-a")).save({
       category: "skill",
       id: "slug1",
@@ -204,7 +202,7 @@ describe("workscene_memory_query", () => {
     expect(r.content).toContain("场景A");
     expect(r.content).toContain("slug1");
     expect(r.content).toContain("关键词 alpha");
-    expect(c.registry.list).toHaveBeenCalledWith({ includeArchived: true });
+    expect(c.registry.list).toHaveBeenCalledWith();
   });
 
   it("无 query：返回各类别 id 索引", async () => {

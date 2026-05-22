@@ -461,7 +461,7 @@ A "work scene" is an isolated context for a bounded line of work: its own workin
 You have these tools:
 - \`workmode_enter\` — enter a work scene (requires the user to confirm; the switch takes effect at the end of the current turn).
 - \`workscene_memory_query\` — read-only probe of what any work scene already remembers.
-- \`workscene_change_approve\` — create / rename / archive / remove scenes (requires confirmation).
+- \`workscene_change_approve\` — create / rename / remove scenes (requires confirmation).
 
 How to decide:
 - Clear signal (the user explicitly wants to work within a specific bounded context that has — or clearly warrants — its own scene, e.g. "let's work on the cli module of project X"): call \`workmode_enter\` directly with that scene's id. If no scene fits, propose creating one via \`workscene_change_approve\` first.

@@ -1,7 +1,7 @@
 /**
  * acquireWorksceneConversation —— 进入工作场景时的对话获取策略。
  *
- * 命令触发的 `/enter` 走 auto-resume 语义（与 main 启动 auto-resume 对齐：
+ * 命令触发的 `/work` 走 auto-resume 语义（与 main 启动 auto-resume 对齐：
  * 用户手动进就是为了回到最近对话继续）；LLM 触发的 `workmode_enter` 工具
  * 始终新建（不走本 helper），避免上次主题完全无关的历史污染 power 上下文。
  *

@@ -58,7 +58,7 @@ import {
   acquireStdinOwnership,
   type StdinOwnershipHandle,
 } from "./tui/_internal/stdin-ownership.js";
-import { InputBuffer } from "./input-buffer.js";
+import { InputBuffer, type InputBufferSnapshot } from "./input-buffer.js";
 import {
   normalizeLeadingSlashAlias,
   normalizeLeadingSlashAliasInExpanded,
@@ -93,7 +93,12 @@ export type InputLineResult =
       readonly text: string;
       readonly dispatchResult: DispatchResult;
     }
-  | { readonly kind: "cancelled"; readonly cause: "ctrl-c" | "ctrl-d" | "aborted" };
+  | { readonly kind: "cancelled"; readonly cause: "ctrl-c" | "ctrl-d" | "aborted" }
+  | {
+      readonly kind: "inline-edit-request";
+      readonly editKind: "rename" | "new";
+      readonly item?: SuggestionItem;
+    };
 
 // ─── 选项 ───
 
@@ -134,10 +139,10 @@ export interface InputControllerOptions {
   /**
    * 删除选中候选 callback —— Ctrl+D 第二次按下时触发(第一次按下仅标记
    * broker 的 deletePending 准备态)。仅在 typeahead 当前 trigger 的 provider
-   * 通过 `computeDeletable` hook 声明支持删除时生效。callback 负责业务编排
-   * (调 provider.delete + active 切换 / 自动新建等);InputController 在
-   * `await callback` 完成后调 `broker.refresh` 触发候选列表刷新(避免视觉
-   * 残留 + selectedIndex 指向已不存在候选)。
+   * 通过 `inlineActions.delete` 声明支持删除时生效。callback 负责物理删除 +
+   * 业务编排(直调底层 repo / registry + active 切换 / 自动新建等);
+   * InputController 在 `await callback` 完成后调 `broker.refresh` 触发候选
+   * 列表刷新(避免视觉残留 + selectedIndex 指向已不存在候选)。
    */
   readonly onCandidateDelete?: (item: SuggestionItem) => Promise<void>;
 }
@@ -153,6 +158,10 @@ export type SubmitHandler = (
 
 export type CancelHandler = (
   cause: "ctrl-c" | "ctrl-d" | "aborted",
+) => void | Promise<void>;
+
+export type InlineEditHandler = (
+  request: Extract<InputLineResult, { kind: "inline-edit-request" }>,
 ) => void | Promise<void>;
 
 // ─── InputController ───
@@ -183,6 +192,9 @@ export class InputController implements InputRegion {
 
   private submitHandler: SubmitHandler | null = null;
   private cancelHandler: CancelHandler | null = null;
+  private inlineEditHandler: InlineEditHandler | null = null;
+  /** suspend 时快照的输入态 —— resume 用它恢复 buffer + 重新 query（挂起/恢复对称）。 */
+  private suspendedSnapshot: InputBufferSnapshot | null = null;
 
   // 渲染缓存（InputRegion 契约要求）
   private cachedLines: readonly string[] = [];
@@ -280,6 +292,9 @@ export class InputController implements InputRegion {
     // refcount 在面板期间走 1→2→1 而不是 1→0→1→0→1,避免 Windows ConPTY 在
     // setRawMode(false)→setRawMode(true) 翻转后 keypress 静默死锁(可观测字段全
     // 正常但 keypress 事件不 emit)。
+    // 快照当前输入态 —— resume 时恢复（候选浏览中途被 inline 编辑接管后原样还原）。
+    // confirm 场景挂起时 buffer 已是空（命令已提交），快照为空 → resume 恢复空 = 现状。
+    this.suspendedSnapshot = this.buffer?.snapshot() ?? null;
     this.detachKeypressOnly();
     // 不调 screen.detachInput()——scrollRegion.detachInput 会清整屏 + reset region
     // 状态（设计用于 cli 退出 chrome 模式），让 region 内的对话历史 + scrollback 全
@@ -314,6 +329,15 @@ export class InputController implements InputRegion {
     // **只装回 keypress 订阅层**(rawModeLease + stdinOwnership 从 start() 起一直
     // 持有,suspend 没释放,这里不重复 acquire,避免 raw mode 翻转)。
     this.attachKeypressOnly();
+    // 恢复挂起前的输入态：attachKeypressOnly 已用空 buffer 建了新 session，这里把
+    // 快照 draft 写回并重新 query —— 候选浏览中途被 inline 编辑接管的场景，返回后
+    // 面板原样恢复且反映最新数据（rename / new 已落盘）。快照空（confirm 场景）则跳过。
+    const snapshot = this.suspendedSnapshot;
+    this.suspendedSnapshot = null;
+    if (snapshot && snapshot.draft) {
+      this.buffer!.setDraft(snapshot.draft, snapshot.cursor);
+      this.syncBroker();
+    }
     // state 赋值顺序必须先于 screen.attachInput —— 后者经 enqueue→flush 同步
     // 触发 input.renderLines() → computeRender，依赖 state 反映"active"语义。
     // 与 start() 的相同顺序保持对偶；历史上 resume() 顺序与 start() 不一致，
@@ -342,10 +366,12 @@ export class InputController implements InputRegion {
       const finish = (result: InputLineResult): void => {
         this.submitHandler = null;
         this.cancelHandler = null;
+        this.inlineEditHandler = null;
         resolve(result);
       };
       this.submitHandler = (result) => finish(result);
       this.cancelHandler = (cause) => finish({ kind: "cancelled", cause });
+      this.inlineEditHandler = (request) => finish(request);
     });
   }
 
@@ -578,6 +604,16 @@ export class InputController implements InputRegion {
     void Promise.resolve(handler?.(result));
   }
 
+  // inline 编辑请求(Ctrl+R rename / Ctrl+N new)走独立第三路 —— 不混入
+  // fireSubmit 的"提交"语义。由 waitOnce 的 inlineEditHandler resolve,REPL
+  // 主循环消费后 suspend + 弹 InlineTextPromptRegion。
+  private fireInlineEdit(
+    request: Extract<InputLineResult, { kind: "inline-edit-request" }>,
+  ): void {
+    const handler = this.inlineEditHandler;
+    void Promise.resolve(handler?.(request));
+  }
+
   private handleKeypress(
     str: string,
     key: readline.Key | undefined,
@@ -599,13 +635,13 @@ export class InputController implements InputRegion {
     }
     if (key.ctrl && key.name === "d") {
       // Ctrl+D 完全释放给"删除选中候选"功能 —— 仅在 typeahead 当前 trigger 的
-      // provider 通过 `computeDeletable` hook 声明支持删除时生效(目前仅 /resume
-      // 的 conversation 候选)。其他场景 swallow no-op 不再走 EOF / deleteForward
-      // (退出依赖 Ctrl+C 双击协议;删字符依赖 Backspace)。
+      // provider 通过 `computeInlineActions` 声明 delete 时生效(目前 /resume 的
+      // 对话候选、/work 的场景候选)。其他场景 swallow no-op 不走 EOF /
+      // deleteForward(退出依赖 Ctrl+C 双击协议;删字符依赖 Backspace)。
       const state = this.lastSessionState;
       if (
         state &&
-        state.deletable &&
+        state.inlineActions.delete &&
         state.suggestions.length > 0 &&
         state.selectedIndex >= 0 &&
         this.sessionHandleId
@@ -619,6 +655,34 @@ export class InputController implements InputRegion {
             selected.id,
           );
         }
+      }
+      return;
+    }
+    if (key.ctrl && key.name === "r") {
+      // Ctrl+R 重命名选中候选 —— 仅 provider 声明 rename 时生效。fireInlineEdit
+      // 让 waitOnce resolve,主循环 suspend + 弹 InlineTextPromptRegion(预填当前名)。
+      const state = this.lastSessionState;
+      if (
+        state &&
+        state.inlineActions.rename &&
+        state.suggestions.length > 0 &&
+        state.selectedIndex >= 0
+      ) {
+        const selected = state.suggestions[state.selectedIndex]!;
+        this.fireInlineEdit({
+          kind: "inline-edit-request",
+          editKind: "rename",
+          item: selected,
+        });
+      }
+      return;
+    }
+    if (key.ctrl && key.name === "n") {
+      // Ctrl+N 新建 —— list 级操作,不依赖选中。fireInlineEdit 让主循环弹
+      // 空白 InlineTextPromptRegion 收名字。
+      const state = this.lastSessionState;
+      if (state && state.inlineActions.create) {
+        this.fireInlineEdit({ kind: "inline-edit-request", editKind: "new" });
       }
       return;
     }

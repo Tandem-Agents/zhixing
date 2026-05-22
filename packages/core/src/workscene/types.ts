@@ -23,8 +23,6 @@ export interface WorkScene {
   workdir?: string;
   createdAt: string;
   lastActiveAt: string;
-  /** 仅影响 list 默认过滤，不影响 main 能否检索其记忆。 */
-  archived?: boolean;
 }
 
 /**
@@ -34,7 +32,7 @@ export interface WorkScene {
  * 单一 index 锁 + 原子写。
  */
 export interface IWorkSceneRegistry {
-  list(opts?: { includeArchived?: boolean }): Promise<WorkScene[]>;
+  list(): Promise<WorkScene[]>;
   get(id: string): Promise<WorkScene | null>;
   add(opts: { name: string; workdir?: string }): Promise<WorkScene>;
   /**
@@ -45,12 +43,9 @@ export interface IWorkSceneRegistry {
    * 系统从不写也不删。
    *
    * 幂等：id 不在 index / 目录已不存在 都按"删干净"语义处理，不抛错。
-   *
-   * 若仅想"软隐藏"该场景（list 不出现但数据全留可恢复），请用 `setArchived(id, true)`。
    */
   remove(id: string): Promise<void>;
   rename(id: string, name: string): Promise<WorkScene>;
-  setArchived(id: string, archived: boolean): Promise<WorkScene>;
   /** 刷新 lastActiveAt —— 进入工作场景时调用。 */
   touch(id: string): Promise<void>;
 }

@@ -6,7 +6,7 @@
  *   - <id>/meta.json：该场景权威记录（全部可变字段）
  *
  * 删除语义：`remove(id)` 同时摘 index 并物理 rm 系统目录（meta + me + conversations）—— 不可恢复。
- * 用户的 `workdir` 永远不动。"软隐藏可恢复" 走 `setArchived`，与 remove 语义分工独立。
+ * 用户的 `workdir` 永远不动 —— 那是用户的代码资产，系统从不写也不删。
  *
  * 并发安全同构复用 conversation repository：per-id meta 锁串行同场景读写、
  * 单一 index 锁串行 index.json 读-改-写、writeAtomic 保单文件写入完整。
@@ -58,13 +58,12 @@ export class FsWorkSceneRegistry implements IWorkSceneRegistry {
   /** 单一 index.json 读-改-写串行锁。 */
   private indexLock: Promise<unknown> = Promise.resolve();
 
-  async list(opts?: { includeArchived?: boolean }): Promise<WorkScene[]> {
+  async list(): Promise<WorkScene[]> {
     const ids = await this.withIndexLock(() => this.readIndex());
     const scenes: WorkScene[] = [];
     for (const id of ids.scenes) {
       const meta = await this.readMeta(id);
       if (!meta) continue;
-      if (!opts?.includeArchived && meta.archived) continue;
       scenes.push(meta);
     }
     return scenes.sort(
@@ -133,12 +132,6 @@ export class FsWorkSceneRegistry implements IWorkSceneRegistry {
   async rename(id: string, name: string): Promise<WorkScene> {
     return this.mutateMeta(id, (scene) => {
       scene.name = name;
-    });
-  }
-
-  async setArchived(id: string, archived: boolean): Promise<WorkScene> {
-    return this.mutateMeta(id, (scene) => {
-      scene.archived = archived;
     });
   }
 

@@ -137,6 +137,8 @@ function makeState(
     loading: false,
     ghostText: null,
     argumentHint: null,
+    inlineActions: {},
+    deletePending: null,
     ...partial,
   };
 }
@@ -385,6 +387,51 @@ describe("renderSessionLines", () => {
     const lines = renderSessionLines(state, defaultRenderOpts);
     const joined = stripAnsi(lines.join("\n"));
     expect(joined).toMatch(/↑↓.*Enter.*Esc/);
+  });
+
+  it("多操作 inlineActions 拼成单行(· 分隔)", () => {
+    const state = makeState({
+      suggestions: [makeSuggestion("a:b", "/a"), makeSuggestion("c:d", "/c")],
+      selectedIndex: 0,
+      inlineActions: { delete: true, rename: true, create: true },
+    });
+    const lines = renderSessionLines(state, defaultRenderOpts);
+    const joined = stripAnsi(lines.join("\n"));
+    expect(joined).toContain("delete ctrl+d · rename ctrl+r · new ctrl+n");
+  });
+
+  it("deletePending 态 hint 切到确认文案,覆盖其他操作提示", () => {
+    const state = makeState({
+      suggestions: [makeSuggestion("a:b", "/a")],
+      selectedIndex: 0,
+      inlineActions: { delete: true, rename: true, create: true },
+      deletePending: "a:b",
+    });
+    const lines = renderSessionLines(state, defaultRenderOpts);
+    const joined = stripAnsi(lines.join("\n"));
+    expect(joined).toContain("再按一次 ctrl+d 确认删除");
+    expect(joined).not.toContain("rename ctrl+r");
+  });
+
+  it("inlineActions 单操作与多操作渲染行数恒等(单行拼接不增高)", () => {
+    const suggestions = [makeSuggestion("a:b", "/a"), makeSuggestion("c:d", "/c")];
+    const oneAction = renderSessionLines(
+      makeState({
+        suggestions,
+        selectedIndex: 0,
+        inlineActions: { delete: true },
+      }),
+      defaultRenderOpts,
+    );
+    const threeActions = renderSessionLines(
+      makeState({
+        suggestions,
+        selectedIndex: 0,
+        inlineActions: { delete: true, rename: true, create: true },
+      }),
+      defaultRenderOpts,
+    );
+    expect(threeActions.length).toBe(oneAction.length);
   });
 
   it("suggestions 多于 maxVisibleItems 时显示 more... 滚动标志", () => {

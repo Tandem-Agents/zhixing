@@ -22,6 +22,7 @@ import type {
   ArgumentHint,
   CommandDef,
   ICommandRegistry,
+  InlineActionSupport,
   SuggestionItem,
   SuggestionProvider,
   TriggerContext,
@@ -145,20 +146,17 @@ export class ArgumentProvider implements SuggestionProvider {
     };
   }
 
-  // ── Deletable ──
+  // ── Inline actions ──
 
   /**
-   * 当前 trigger 是否支持"删除选中候选"。仅 async-enum 且 provider 显式
-   * 实现 `delete?` 方法时返回 true —— enum/text/path/boolean/number 等
-   * schema 类型概念上无"候选条目可删"语义,默认 false。
+   * 当前 trigger 的候选列表支持哪些 inline 操作。仅 async-enum schema 透传其
+   * provider 静态声明的 `inlineActions`;enum/text/path/boolean/number 等 schema
+   * 类型概念上无"候选条目就地操作"语义,返回空集。
    */
-  computeDeletable(match: TriggerMatch): boolean {
+  computeInlineActions(match: TriggerMatch): InlineActionSupport {
     const data = match.providerData as ArgumentProviderData | undefined;
-    if (!data) return false;
-    return (
-      data.currentSchema.kind === "async-enum" &&
-      typeof data.currentSchema.provider.delete === "function"
-    );
+    if (!data || data.currentSchema.kind !== "async-enum") return {};
+    return data.currentSchema.provider.inlineActions ?? {};
   }
 
   // ── 静态枚举 ──
