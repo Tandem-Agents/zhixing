@@ -1,0 +1,282 @@
+# MCP Host（船坞）架构设计
+
+> 状态：架构设计（待 review，作者拍板前不实施） | 日期：2026-05-23
+>
+> 本文设计知行作为 MCP（Model Context Protocol）host 的架构：连接外部 MCP server，把其工具接入 agent 工具集。设计基于对 OpenClaw / Claude Code / Hermes 三家的源码调研（见 `source-analysis/*/mcp-architecture.md`）与知行自身架构的事实勘察，所有架构决策附知行 `文件:行号` 依据。**只设计，不在 review 通过前实施。**
+
+---
+
+## 〇、置顶认知：劲该使在哪
+
+**这关系到知行做这件事时该把劲使在哪。**
+
+**对的那一半：协议适配层，架构确实一样，而且基本没有优化空间。** 连接 server、`initialize` 握手、`tools/list` 动态发现、`tools/call` 转发、transport 收发——这些是 MCP 协议定死的，而且三家都直接调官方 SDK（`@modelcontextprotocol/sdk`）实现。这一层照着做就行，想"优化"也优化不出花来，因为协议和 SDK 已经把形状固定了。三家在这层本质相同，知行也将相同。
+
+**要校准的那一半：MCP host 的架构空间不在协议层，在"宿主集成层"——MCP 怎么嵌进知行自己的工具系统、安全模型、运行时生命周期。** 这一层三家明显不同，而且不是"代码优劣"，是真正的架构选择，每一套都被各自宿主的架构倒逼出来：
+
+- Hermes 是单文件 + 一个专用后台 asyncio loop + 同步桥接——因为它主体是同步的，必须把异步 MCP 桥到同步 agent 线程。
+- OpenClaw 是 session 级 runtime manager + 全局单例 + 配置指纹缓存 + idle TTL 回收，把 MCP 拆成三子系统。
+- Claude Code 是连接 memoize + local/remote 分组并发 + 接入它那套权限规则三粒度匹配。
+
+同一个固定协议，接进不同的宿主，长出三种不同的集成形态。**所以知行这一层不是"在三家相同架构上抠代码"，而是要做知行自己的架构决策，因为知行的宿主和三家都不一样。** 本文的全部设计重量都压在集成层；协议层只说明"用官方 SDK"，不展开。
+
+---
+
+## 一、设计目标：基于三家，做得更好
+
+**定位原则（先于一切）**：MCP 补的是知行内置工具**够不到的外部盲区**——外部服务 / SaaS 集成（GitHub、Notion、数据库、第三方 API 等），**不重复**知行已有的本地/通用能力（文件读写、bash、memory、web_fetch 这些内置工具已覆盖，且分类更精细）。凡知行内置已有等价能力的，用内置工具、不用 MCP（例如官方 reference 的 filesystem/git/fetch/memory server 在知行里没有价值，因为 read/write/bash/web_fetch/memory 已覆盖且更精细）。这与"MCP 工具统一声明 `external-service` 边界"自洽——MCP 在知行里就是"外部服务"那一类。预设库据此只收外部服务类 server。
+
+知行能在集成层做得比三家更好的，全部来自"知行宿主架构与三家不同"这一事实，不是凭空创新：
+
+| 维度 | 三家现状 | 知行可做得更好（事实依据） |
+|------|---------|--------------------------|
+| **异步集成** | Hermes 必须用后台 asyncio loop + 同步桥接（宿主同步） | 知行全异步（`provider.chat`/`runAgentLoop`/`tool.call` 均 async generator/Promise，`llm.ts:390`、`agent-loop.ts:81`、`tools.ts:354`），MCP 调用直接 `await`，**零桥接负担** |
+| **安全统一** | 三家各起一套：OpenClaw tool-policy group / Claude Code 权限规则三粒度 / Hermes 配置发现期 env 过滤，MCP 工具是旁路 | MCP 工具声明 `boundaries`（`external-service`）→ 走与 builtin 工具**完全相同**的 `SecurityPipeline` + 渐进信任（ADR-004/ADR-006），不是嫁接旁路。`boundary-registry.ts:14` 注释本就为 MCP 预留 |
+| **凭证隔离** | 三家 token 都在配置/env 里（Hermes 还专门做 env 过滤防泄漏） | MCP 凭证落 `credentials.json`，**天然继承 bypassImmune 物理隔离**（`builtin-rules.ts` block 整个 credentials.json 的任何 AI 访问）——AI 工具体系不可读不可写，by-design 安全 |
+| **生命周期** | 各自 ad-hoc（OpenClaw session manager + idle TTL；Claude Code memoize） | 复用知行既有"进程级单例 client + closure getter 引用 + per-runtime 工具实例"模式（与 scheduler 解 chicken-and-egg 同款，`builtin-extra-tools.ts:52`），连接归两入口共享的 assembly、由 cli/serve 各自退出链 async dispose |
+| **结果处理** | 三家只做截断（防撑爆） | MCP 巨结果可走 `ctx.llm.light` 蒸馏（与 web_fetch distill 同款，`distill.ts` 的 collectStream 已注释预留复用），不止截断 |
+| **热重载** | 三家多数需重启 | 知行有 `session.reload` + `computeDiff`，MCP 配置变更可热重连 |
+| **用户接入** | CLI 命令 / 手写配置文件（开发者门槛） | `/mcp` 交互面板（对齐 /work、/resume）+ 智能引导：系统用预设库 + agent 推断准备技术字段、discovery 验证，**用户只填密钥**——契合"AI 系统该兜住智能"，不碰技术字段、无 CLI |
+
+设计原则：**MCP 工具与 builtin 工具在装配、安全、执行上走同一套路径**，不是平行的第二套系统。让 MCP 浑然一体，而非嫁接孤岛。
+
+---
+
+## 二、整体架构：两层分离 + 数据流
+
+```
+配置/凭证          连接层(进程级单例)        映射层(per-runtime)      宿主既有管线
+─────────         ──────────────────       ───────────────────     ──────────────
+config.mcp    ┐                                                    
+              ├─→  McpHub                ┌─→ MCP 工具(ToolDefinition[])
+credentials.mcp┘   - SDK Client × N      │   - name: mcp__<srv>__<tool>
+                   - transport(stdio/http)│   - inputSchema 透传
+                   - initialize/tools/list│   - boundaries: external-service
+                   - tools/call 转发       │   - call() → hub.callTool()
+                   - 重连/async dispose    │           │
+                        │                  │           ↓
+                   (closure getter) ───────┘    extraTools 注入 assembleTools
+                        │                              │
+                        │                              ↓
+              归 builtinExtraTools assembly       baseTools = builtin + extraTools
+              (cli/serve 退出链各调 hub.dispose)        │
+                                                      ↓
+                                          BoundaryRegistry.fromTools(baseTools)
+                                          → SecurityPipeline → tool-executor
+```
+
+**两层分离是核心架构决策**：
+
+- **连接层 `McpHub`（进程级单例）**：持有所有 MCP server 的 SDK Client + transport，负责连接/发现/调用/重连/关闭。**生命周期归两入口共享的 `builtinExtraTools` assembly**（`createBuiltinExtraToolsAssembly`，REPL 的 `session.ts` 与 serve 的 `command.ts:209` 都创建并共享它、已持有 `taskListService` 等跨 runtime 单例）。async `dispose()` 由各入口退出链调用：cli 走 `RuntimeSession.dispose()`（`session.ts:799`），serve 走 `shutdown-chain`（`registerCoreCleanup`，`command.ts:521`）。
+- **映射层（per-runtime）**：每次 `createAgent` 时把 hub 的工具目录物化成 `ToolDefinition[]`，经 `extraTools` 注入。工具实例随 runtime swap 重建，但都 closure 引用同一个 hub（与 scheduler getter 同款，`builtin-extra-tools.ts:52`）。
+
+**为什么挂 assembly 而非 RuntimeSession**（事实依据）：`AgentRuntime` 接口**无 dispose 方法**（`create-agent-runtime.ts:166-220`），`safeDispose` 是**同步契约**（`:128-131`），swap 时旧 runtime 靠 GC 回收（`session.ts:792`）——而 MCP 连接（stdio 子进程 / http 长连）的关闭是**异步**的，挂 per-runtime 会随 swap 丢弃子进程。更关键：`RuntimeSession` 是 cli REPL 专属，**serve 模式没有它**（serve 用 `createCliRuntimeFactory` + `shutdown-chain`，`command.ts:213,73`）。两入口唯一共享、且本就持有跨 runtime 单例的宿主是 `builtinExtraTools` assembly——McpHub 归它、dispose 由各入口退出链触发，cli/serve 统一；并让 serve 多 session 共享同一批连接（避免每 session 重连）。工具实例则 per-runtime（与 schedule/task_list 同构）。
+
+---
+
+## 三、连接层 McpHub（协议层，照搬 SDK）
+
+职责单一：管理 MCP server 连接，对上层暴露"列出工具 / 调用工具"两个能力。
+
+- **SDK**：用官方 `@modelcontextprotocol/sdk` 的 `Client`，不自研协议（与三家一致，协议层无优化空间）。
+- **transport**：阶段一仅 `stdio`（`StdioClientTransport`，本地子进程）；阶段二加 `streamable-http`（`StreamableHTTPClientTransport`，远程）。SSE 是被 streamable-http 取代的旧标准（Hermes 已弃用切到 streamable-http），**不做**，除非后续有 server 只支持 SSE。
+- **HTTP 出站必须走知行 network 层（SSRF 防护，硬约束）**：SDK transport 默认用全局 fetch，**不会自动走知行 `@zhixing/network`（undici）出站封装**。因此 streamable-http transport 构造时必须注入基于 `@zhixing/network` 的 fetch / undici dispatcher（与 OpenClaw 给 `SSEClientTransport` 注入 `fetchWithUndici` 同款手法），让 MCP HTTP 出站继承 `network.proxy`（`types.ts:373`）与 SSRF egress 防护——否则 MCP HTTP 调用绕过知行出站安全。不是可选项。
+- **连接生命周期**：`connect → initialize 握手（SDK）→ tools/list 发现 → 缓存 catalog`。关闭：stdio 进程树 kill（参考三家：SIGTERM→SIGKILL 升级，知行已有 gracefulKill helper，见 `tools.ts` interruptBehavior "grace" 注释）；http 终止 session。
+- **重连**：连接失败不阻塞启动（单 server 失败只记录、跳过，其余照常——参考 OpenClaw `getCatalog` 的隔离策略）；运行中断线指数退避重连。
+- **async dispose**：`hub.dispose()` 关闭所有 client + 子进程；由 assembly 暴露、各入口退出链调用（见第二节）。
+- **空配置 = no-op hub（零判空分支）**：`config.mcp` 为空时 hub 仍是一个 no-op 实例（`connectAll` 立即 resolve 空 catalog、`callTool` 返回 "no such tool" isError、`dispose` no-op）。hub 引用**恒非空**——assembleTools / dispose 链 / 热重载等调用方无需任何判空分支，用一个空实例的微小开销换全链路零分支。
+
+McpHub 由 `builtinExtraTools` assembly 创建持有，通过 `ExtraToolsRuntimeContext` 的 getter（新增 `mcpHub: () => McpHub`，与现有 `scheduler` getter 同款，`builtin-extra-tools.ts:52-53`）传给 assembleTools。
+
+---
+
+## 四、映射层：MCP tool → ToolDefinition（集成层核心）
+
+每个 MCP 工具物化成一个知行 `ToolDefinition`（`tools.ts:261`）。字段映射（全部基于已核验的 ToolDefinition 接口）：
+
+| ToolDefinition 字段 | MCP 来源 / 取值 | 依据 |
+|---------------------|----------------|------|
+| `name` | `mcp__<server>__<tool>` | 业界事实标准（Claude Code 同款）；`__` 分隔（消毒保证 server/tool 名内无 `__`，见下方命名消毒）；前缀对应权限 namespace `mcp:<server>` |
+| `description` | MCP tool.description（超长截断） | 防巨描述灌爆 system prompt（Claude Code 截 2048） |
+| `inputSchema` | 透传 MCP tool.inputSchema | 知行 `JsonSchema` 要求顶层 `type:"object"`（`tools.ts:110`），不合规则包裹/拒绝 |
+| `isReadOnly` | MCP `annotations.readOnlyHint` | 缺省 `false`（fail-closed，`tools.ts:270`） |
+| `isParallelSafe` | MCP `annotations.readOnlyHint` | 缺省 `false`（fail-closed）；只读工具并发安全（不改状态），与 Claude Code `readOnlyHint→isConcurrencySafe` 一致；决定能否并发（`tool-executor.ts:316`） |
+| `needsPermission` | 默认 `true` | fail-closed（`tools.ts:274`）；只读工具经 boundary 分类自动放行，无需在此放 |
+| `boundaries` | `[{ boundaryType:"external-service", access: <readOnlyHint?"query":"invoke">, dynamic:false }]` | **必须声明**否则 fail-closed critical（`tools.ts:291`）。`external-service` 是为外部服务预留的边界类型（`security/types.ts:62`）。读类 access→observe 放行，否则→external 确认（`security/types.ts:75-78`） |
+| `maxResultChars` | 设固定上限（如 100_000） | 防 MCP server 巨结果撑爆上下文（`tool-executor.ts:499`，Hermes 同款 100_000） |
+| `interruptBehavior` | stdio server → `"grace"`；http → `"cancel"` | stdio 持有子进程需优雅停止（`tools.ts:233`） |
+| `systemPromptHints` | 可选，server 级提示 | `tools.ts:309` 注释明确举例"mcp 工具:按服务器特性提示参数约定" |
+| `permissionArgumentKey` | MCP 多 string 字段工具可显式声明 | `tools.ts:319`，否则用内置启发式 |
+| `call(input, ctx)` | `await hub.callTool(server, tool, input, { signal: ctx.abortSignal })` | 透传 abortSignal 支持中断（`tools.ts:133`）；失败 `return {isError:true}` 不 throw（`tool-executor.ts:268` 错误隔离）；巨结果可选 `ctx.llm.light` 蒸馏 |
+
+**命名消毒（保证 `__` 三段唯一可解）**：`mcp__<server>__<tool>` 以 `__` 为分隔，故 server / tool 名内部**不得再含 `__`**，否则权限通配 `mcp__<server>__*` 的反解析会错位。规则：① server id 在 `config.mcp` 校验阶段约束命名（禁 `__`，建议 `[a-zA-Z0-9-]`，从源头杜绝）；② tool 名（server 动态提供、不可控）映射时把内部连续下划线折为单 `_`、非法字符替为 `_`；③ 同 server 内消毒后若重名，加 `-2/-3` 后缀防冲突（OpenClaw `buildSafeToolName` 同款）。三段由此唯一可解。
+
+**关键简化（推导自事实）**：MCP 工具作为 `extraTools` 进入 `baseTools`（`create-agent-runtime.ts:521`），而 `BoundaryRegistry.fromTools(baseTools)`（`:552`）在装配时**自动注册**所有声明了 boundaries 的工具。因此 MCP 工具的 boundaries 在 runtime 装配时自动进 registry，**正常路径无需** Task 那样的后置 `register`——与 schedule/task_list 完全同构。动态 `register/unregister` 只在"不重建 runtime 的热连接"优化里才需要（见第七节）。
+
+**annotations 有意降维**：映射只消费 MCP `annotations` 的 `readOnlyHint` / `openWorldHint`（→ `isReadOnly` / `isParallelSafe`），其余（`title` / `destructiveHint` / `idempotentHint`）**有意不消费**——知行 `ToolDefinition` 无对应语义槽，且安全分类走 `boundaries`（不依赖 `destructiveHint`）。未来若需要，扩 `ToolDefinition` 增槽，而非在 MCP 映射层 hack。
+
+---
+
+## 五、安全接入：走统一管线，不另起旁路
+
+- **boundary 分类**：MCP 工具声明 `external-service` 边界 → `BoundaryRegistry.fromTools` 自动注册 → `SecurityPipeline` 的 `BoundaryImpactClassifier` 据此分类（`classifier.ts:310`）。只读工具（access=query）→ observe → 自动放行；非只读（access=invoke）→ external → 触发用户确认。与所有 builtin 工具同一条管线、同一套渐进信任。
+- **server 级预置规则（可选增强）**：用 `permissionStore.registerBuiltinRules("mcp:<server>", rules)`（`permission-store.ts:446`，namespace 约定 `mcp:<server>` 见 `:443` 注释）给某 server 注册默认放行/拒绝规则。builtin 规则严格让位用户池（用户随时可覆盖）。断开时 `unregisterBuiltinRules("mcp:<server>")` 对偶清理。
+- **凭证隔离**：远程 server 凭证在 `credentials.json`，被 `bypassImmune` 规则物理隔离（AI 工具不可读写），无需额外防护。
+- **stdio env 安全**（参考三家共识）：spawn stdio server 时过滤"解释器启动型"危险 env（`NODE_OPTIONS`/`PYTHONPATH`/`DYLD_*` 等）——OpenClaw/Hermes 都做了，知行应复用或新建一个 env 白名单（实现阶段对照 OpenClaw `host-env-security-policy.json` 的清单）。
+- **子 agent 暴露面（by-construction 安全）**：MCP 工具进 `baseTools` 后是 Task 的 `parentTools` 候选，但子 agent 的 `subAgentProfile.enabledTools` 是白名单 `["read","glob","grep"]`（`default-profiles.ts:52`），Task 按它过滤 parentTools（`subagent/factory.ts:248`）——`mcp__*` 不在白名单，**子 agent 天然不暴露 MCP**（fail-closed）。未来若要让子 agent 用 MCP，再设计白名单扩展，当前无需处理。
+
+---
+
+## 六、用户接入（智能引导）、配置与凭证
+
+### 用户接入：`/mcp` 交互面板 + 智能引导，用户只填私密值
+
+**用户唯一入口是 `/mcp` 交互面板**（形态对齐 `/work` / `/resume` 的选择式面板）——**无 CLI 命令、无手写配置文件**。面板内浏览已接入 server（状态/工具数）、添加、启用/停用/删除/重连、查看工具，全部选择式操作。
+
+下方的 `config.mcp` / `credentials.mcp` 是面板的**产物**（系统写入），不是用户手写面。配置由"智能接入引导"产生——这正是知行作为 AI 系统的智能该兜住的：
+
+1. **系统准备技术字段**：外部服务类 server 走**内置预设库**（首批 GitHub、Notion，渐进式扩展；其 `command`/`args`/`transport` 系统已备好，参考 Hermes `_MCP_PRESETS`）；非预设的，用 agent 智能从用户给的标识（包名 / URL）**推断**启动方式。`command`/`args`/`url`/`transport` 等技术字段**全程由系统填**，用户不接触、不需要懂。推断 + discovery 失败时面板 graceful 反馈（提示 / 请用户给更明确的标识 / 极端情况标"暂不支持自动接入"），**不退回让用户手填技术字段**——预设库覆盖常见 server 保证多数一步接入。
+2. **discovery 验证（临时连接，复用同一套安全）**：系统用 McpHub 的**同一套安全连接逻辑**（stdio env 过滤 / http 的 `@zhixing/network` SSRF dispatcher，不走任何旁路）临时连上去、列出该 server 的工具——连上即证明配置正确（自验证），连不上则面板明确指出卡点（缺密钥 / 需调整）。这是**临时验证连接**，与正式接入（见下方"接入生效路径"）分开。
+3. **用户只填私密值**：唯一需要用户亲手输入的是密钥 / token（私密、必须用户处理），面板**明确指引到那一个字段**（"请填入 GitHub Personal Access Token"），用户**只填值**——无需知道它在请求里叫 `Authorization`、要不要 `Bearer ` 前缀（系统拼）。
+4. **用户勾选启用哪些工具**（discovery 列出后），落 `config.mcp.servers.<id>.tools`。
+
+即：除私密值外一切由系统处理；让用户做的只剩"选 server + 填一个密钥 + 勾工具"，每步有明确指引。
+
+**接入生效路径（运行时 + prompt cache 安全）**：`/mcp` 面板是运行时操作的，而工具集已 freeze 进当前 runtime 的 system prompt（prompt cache 死线）——故新接入的工具**不塞当前 runtime**。流程：discovery 临时验证 → 用户确认 → 写入 `config.mcp` / `credentials.mcp` → 触发 `session.reload`（复用第七节既有 reload 机制：`config.mcp` 进 `agentChanged` → `await hub.applyConfig` 正式连接 → 重建 runtime）→ 工具进**下一个** runtime 的 system prompt 生效。即"面板确认即在下一轮生效"，不破坏当前已 freeze 的 cache，零新增机制。
+
+### 存储：决策层 / 内容层分离
+
+严格遵循知行既有的"config=决策层 / credentials=内容层、按 id 关联"契约（`types.ts:304-313`），以 `messaging` ↔ `channels` 为同构模板。
+
+**`config.mcp`（落 `ZhixingConfig`，`types.ts:314`）—— 决策层，无凭证**：
+```jsonc
+{
+  "mcp": {
+    "servers": {
+      "<id>": {
+        "type": "stdio" | "http",      // 缺省 stdio
+        "command": "uvx", "args": [...],   // stdio
+        "url": "https://...",              // http
+        "enabled": true,                   // 缺省 true
+        "tools": { "include": [...], "exclude": [...] }  // 可选白/黑名单
+      }
+    }
+  }
+}
+```
+参照 `MessagingChannelEntry`（`types.ts:278`，只有 type/options/defaultTarget，无凭证字段）。
+
+**`credentials.mcp`（落 `ZhixingCredentials`，`types.ts:400`）—— 内容层，凭证**：
+```jsonc
+{ "mcp": { "<id>": { "apiKey": "...", "token": "...", "Authorization": "Bearer ..." } } }
+```
+新增 `mcp?: Record<string, Record<string,string>>` 子表，与 `channels`（`types.ts:419`）完全同构，按 server id 关联。自动继承 bypassImmune 隔离。
+
+**合并策略（与 messaging 同构）**：`config.mcp.servers` 是 id-map，照 `deepMergeConfig` 的 messaging 模板（`config-loader.ts:396-407`）做 **server id 级合并 + server 内字段浅覆盖**——同 id 的 server 项目级覆盖全局级（`{...existing, ...value}`），其中 `tools.include/exclude` 列表随浅合并整体**覆盖**（不 append，与现有 messaging 嵌套字段行为一致）。`credentials.mcp` 同 `channels` 走 id-map 合并。
+
+**需要改动的既有点（事实清单）**：
+- `deepMergeConfig`（`config-loader.ts:382`）加 `mcp` 分支（server id-map 合并，仿 messaging `:396`）；`applyConfigPatch`（`:176`）加 `mcp` 分支。
+- `applyCredentialsPatch`（`credentials-loader.ts:163`）加 `mcp` 子表 mergeIdMap 分支（现仅 providers/channels）。
+- `computeDiff`（`diff.ts:35-44`）的 `agentChanged` 加 `config.mcp` 与 `credentials.mcp` 比较——否则纯 MCP 变更不触发 runtime 重建（见第七节）。
+- `network.proxy`（`types.ts:373`）已声明影响"MCP HTTP"出站，http transport 经第三节的 dispatcher 注入复用。
+- 新增 `credentials.mcp` 子表后，同步更新 `bi-zhixing-credentials-block` 的 `suggestion` 文案（`builtin-rules.ts:88-91`，现仅列 `providers.<id>.apiKey` 与 `channels.<id>.<field>`），补上 `mcp.<id>.<field>`——否则 AI 告知用户的凭证 schema 不完整。
+
+> 既有模式延续：MCP 接入沿用 `computeDiff` 域模型、`extraTools` getter、`deepMergeConfig` 逐字段分支这三处既有模式（一致性，非妥协）。这些模式自身的演进（如域模型重构）是独立议题，不在本设计范围。
+
+---
+
+## 七、连接时机、生命周期、热重载、work-mode
+
+**连接时机是承重约束（决定 MCP 工具能否进 system prompt）。** MCP 工具经 extraTools 进 `baseTools`，而 system prompt 在 `createAgent` 中后置于 tools 装配构造、且是 prompt cache 死线（同一构造点 byte-equal 不变）。因此 **hub 的 catalog 必须在 `createAgent` 之前就 ready**——否则 MCP 工具进不了首个 system prompt（LLM 看不到），或事后加入会破坏 prompt cache。这条约束定死了下面的 await 时序；**lazy 连接不可行**（工具进不了已 freeze 的 system prompt），await-connect-then-assemble 是该约束下唯一干净解。
+
+- **创建**：入口（cli bootstrap / serve 启动）先令 assembly `await hub.connectAll({ perServerTimeoutMs })`（并发连接所有 enabled server）→ catalog ready → 再 `createAgent`（assembleTools 同步物化，catalog 已在内存）。cli `createAgent`（`session.ts:147`）与 serve `createCliRuntimeFactory`（`command.ts:213`）本就是 async，前置 await 不改变其形态。
+- **工具装配**：`assembleTools`（`builtin-extra-tools.ts:106`）从 hub 物化 MCP 工具进 extraTools，与 schedule/task_list 并列。
+- **热重载（cli）**：`session.reload` → `computeDiff`。当前 `agentChanged`（`diff.ts:35-44`）只比较 llm/providers/workspace/network/agent/intent——**必须把 `config.mcp` 与 `credentials.mcp` 加入 `agentChanged`**（`!stableEqual(oldConfig.mcp,newConfig.mcp) || !stableEqual(oldCredentials.mcp,newCredentials.mcp)`），否则纯 MCP 变更不触发 runtime 重建、LLM 看不到新工具。变更时 `await hub.applyConfig(newMcp)`（增量：新增 connect / 删除 disconnect）→ 再 createAgent 重新物化。hub 跨 swap 存活不重建。
+- **关闭**：cli `RuntimeSession.dispose()`（`session.ts:799`）与 serve `shutdown-chain`（`command.ts:521`）各增加一步 `await hub.dispose()`（与 scheduler/channels 同款独立 try/catch），关闭所有连接/子进程（stdio 进程树 kill）。
+- **失败与断线语义**：连接失败/超时的 server 不进 catalog（其工具不出现），**不阻塞启动**——成功的 server 照常可用（参考 OpenClaw 单 server 失败隔离）。运行中 server 断线时，工具仍在已 freeze 的 system prompt 里（LLM 仍"可见"），但 `call()` 返回明确的 "server unavailable" isError——这是"静态工具集快照 vs server 动态状态"的固有张力（三家皆然，`tool-executor.ts` 错误隔离已 cover）；hub 后台重连，重连成功的 server 工具在下次 runtime 重建后恢复（不动态改已 freeze 的 system prompt）。
+- **work-mode 装配——MCP 与 profile 隔离是两条正交通道**：`extraTools` 无条件追加进 `baseTools`（`create-agent-runtime.ts:521`，**不受 `profile.enabledTools` 约束**），而无 workdir workscene 的隔离是在 `profile.enabledTools` 层剔除本地文件工具（隔离语义="无本地文件操作面"，`default-profiles.ts:83-88`）。MCP 工具是**外部服务能力、不属于本地文件操作面**，因此不参与该隔离，在 main / 所有 workscene 一律按 `spec.kind` 装配（`assembleTools` 二分，`builtin-extra-tools.ts:124`：main 与 workscene 均注入）。注：`assembleTools` 的 ctx 只有 `spec.kind`、拿不到 workdir 有无，故 MCP 也无法、无需按 workdir 细分——这与"MCP 是外部能力"语义自洽，不是限制（不引入 `localFs` 之类接口支持不了的标记）。
+
+---
+
+## 八、比三家更好——逐条对照
+
+1. **异步零桥接**：知行全异步，MCP `await hub.callTool()` 直连，省掉 Hermes 整个"后台 asyncio loop + 同步桥接"复杂度。
+2. **安全浑然一体**：MCP 工具走与 builtin 完全相同的 `boundaries → SecurityPipeline → 渐进信任`，不是三家那种平行旁路；`boundary-registry` 本就为 MCP 预留接口。
+3. **凭证 by-design 隔离**：MCP token 落 credentials.json 自动被 bypassImmune 物理隔离，AI 工具读不到——三家做不到（token 在普通配置/env）。
+4. **连接/工具两层分离**：连接挂两入口共享的进程级 assembly（cli `RuntimeSession.dispose` / serve `shutdown-chain` 各自 async dispose），工具 per-runtime（closure getter 引用）——职责单一、生命周期对齐知行既有模式，且天然覆盖 cli + serve 两入口，比三家把连接/工具/server 混在一起更清晰。
+5. **结果智能蒸馏**：巨结果可走 `ctx.llm.light` 蒸馏，不止截断。
+6. **热重载重连**：配置变更热重连，不需重启。
+7. **接入零门槛**：用户经 `/mcp` 面板 + 智能引导接入（系统准备技术配置、用户只填密钥），不写配置、不敲 CLI——三家都要用户手写配置或敲命令。这是知行"AI 系统"身份的直接兑现。
+
+注意：知行**不抄** OpenClaw 的"作 MCP server 对外（双向）"和"给下游 CLI 注入配置"——知行是个人助手不是 coding harness 编排器，现阶段只做 host（作 client）。这是有意的范围收敛，不是缺失。
+
+---
+
+## 九、渐进执行计划（每阶段独立、可验证）
+
+每个阶段交付一个**独立可验证**的增量；前一阶段是后一阶段的基础，但每阶段自身有明确的验收点。
+
+**阶段一：连接层 + 工具映射（stdio，最小可用且安全正确）**
+- McpHub：SDK Client + stdio transport + initialize + tools/list + tools/call；由 assembly 持有，启动 `await hub.connectAll`。
+- 工具映射：MCP tool → ToolDefinition（name/inputSchema/maxResultChars/call，annotations→isReadOnly/isParallelSafe）。**含 `boundaries` 声明**——经 `fromTools` 自动注册、`SecurityPipeline` 自动分类（只读放行 / 非只读确认），安全在本阶段**内建生效**，非后续才补（缺 boundaries 会 fail-closed critical 即不可用，故安全不可能拆成独立后置阶段）。
+- stdio spawn 的 env 危险变量过滤（spawn 安全前提，本阶段内建）。
+- extraTools 注入；`config.mcp`（stdio）加载。
+- **验收**：配一个 stdio reference server（如 `@modelcontextprotocol/server-everything`），启动后 LLM 看到工具并成功调用；非只读触发确认、只读放行；env 过滤生效；单测覆盖映射纯函数 + boundary 分类 + mock hub。
+- **独立性**：不依赖 http/凭证/热重载。
+
+**阶段二：HTTP transport + 凭证**
+- streamable-http transport（**注入 `@zhixing/network` dispatcher 走 SSRF 防护**，见第三节）；`credentials.mcp` 子表 + loader 合并分支 + `network.proxy` 复用。
+- **验收**：配一个远程 http MCP server（带 token）能连接调用；凭证落 credentials.json 且被 bypassImmune 隔离（AI 读取报 block）；HTTP 出站走 proxy/SSRF；单测。
+- **独立性**：扩展 transport+凭证，阶段一不回归。
+
+**阶段三：生命周期（async dispose + 热重载重连）**
+- `hub.dispose()` 接入 cli `RuntimeSession.dispose()` 与 serve `shutdown-chain`；`computeDiff` 的 `agentChanged` 加 `mcp` config + credentials 比较；reload 增量重连。
+- **验收**：reload 改 `config.mcp` 触发重连（新增/删除 server 生效）；退出时 stdio 子进程无残留（进程树确认）；cli 与 serve 两入口均验证。
+- **独立性**：生命周期完善，工具行为不变。
+
+**阶段四：用户接入层（`/mcp` 交互面板 + 智能引导，用户唯一入口）**
+- `/mcp` 交互面板（对齐 `/work` / `/resume`）：浏览 / 添加 / 启停 / 删除 / 重连 / 查看工具，全选择式，**无 CLI、无手写配置**。
+- 智能接入引导：预设库 + agent 推断技术字段 + discovery 验证 + 用户只填密钥（明确指引），见第六节。
+- 同期：MCP 巨结果 `ctx.llm.light` 蒸馏；server 级预置规则（`mcp:<server>` namespace，可选）。
+- **验收**：用户全程不写配置、不敲命令，仅在面板"选 server + 填一个密钥 + 勾工具"即可接入并使用；预设 server 一步接入；蒸馏对超阈结果生效。
+- **说明**：这是**面向用户的必要交付、唯一入口**（非"可选增强"）。阶段一~三的手写 `config.mcp` 仅限开发期自测，用户从不接触配置文件。
+
+---
+
+## 十、设计自验证（三遍走查）
+
+**第一遍·正确性**：
+- MCP→ToolDefinition 每个字段都有已核验的接口字段对应（第四节表），无虚构字段。
+- boundaries 自动注册路径成立：MCP 工具进 extraTools→baseTools→`fromTools` 自动 register（`create-agent-runtime.ts:521,552`，已读核验）。
+- 只读放行/非只读确认成立：`BoundaryImpactClassifier.classifyCrossing` access-first（读类 access→observe，否则按 `BOUNDARY_WRITE_IMPACT`，`external-service`→external），已读核验（`classifier.ts:299,322-326`）。
+- 异步链成立：`call()` 是 Promise（`tools.ts:354`），hub.callTool 是 async，全程无同步桥接（`agent-loop.ts` async generator 已核验）。
+- 凭证隔离成立：`bi-zhixing-credentials-block`（`builtin-rules.ts:75-92`）`match` 路径 `.zhixing/credentials.json`、`access:"any"`、`action:"block"`、`bypassImmune:true` 已核实，MCP 凭证落该文件自动被隔离。
+
+**第二遍·可行性**：
+- 连接挂载点覆盖两入口：McpHub 归 `builtinExtraTools` assembly（REPL + serve 共享，`command.ts:209`），dispose 由 cli `RuntimeSession.dispose`（`session.ts:799`）与 serve `shutdown-chain`（`command.ts:521`）各自调用；已核验 RuntimeSession 是 cli 专属、serve 无之、AgentRuntime 无 dispose。
+- getter 模式有先例：scheduler getter 解 chicken-and-egg（`builtin-extra-tools.ts:52`，已读）。
+- 配置/凭证/diff 扩展点已读核验：`deepMergeConfig` messaging id-map 字段合并模板（`config-loader.ts:396`）；`diff.ts` 的 `agentChanged`（`:35-44`）需加 mcp config+credentials 比较，否则纯 MCP 变更不重建 runtime。
+- 安全 API 签名已核验：`BoundaryRegistry.register/unregister`、`PermissionStore.registerBuiltinRules`。
+
+**第三遍·是否最优架构**：
+- 两层分离 vs 单层：若把连接也放 per-runtime，会撞上"无 async dispose + swap 丢弃子进程"的硬约束——两层是被宿主事实逼出的唯一干净解，非过度设计。
+- 走统一 SecurityPipeline vs 另起旁路：复用既有管线避免第二套安全系统（三家旁路的教训），架构债最低。
+- extraTools vs profile.enabledTools：MCP 工具运行时动态发现，与 profile 的"静态名 + fail-fast 校验"模型冲突（`create-agent-runtime.ts:512-518`），extraTools 是唯一无冲突路径。
+- **结论**：在知行既有约束下，本设计是把 MCP 长进知行的最小架构债方案，未发现更优解。
+
+---
+
+## 十一、留给作者拍板的关键决策点
+
+1. **工具命名**：采用业界事实标准 `mcp__<server>__<tool>`（利于互操作 + 对应权限 namespace）。是否认可，或要知行自有前缀。
+2. **transport 范围**：阶段一 stdio + 阶段二 streamable-http，**不做 SSE**（旧标准）。是否够。
+3. **无 workdir workscene 的 MCP 工具**：MCP 是外部服务能力、与本地文件隔离正交，在所有 workscene 一律保留（见第七节，不引入 `assembleTools` 拿不到 workdir 而支持不了的 `localFs` 标记）。确认这个语义。
+4. **server 级预置权限规则**（`mcp:<server>` namespace）：列为阶段四可选增强，非必须。是否要提前。
+5. **双向（作 MCP server）/ 给下游 CLI 注入**：明确**不做**（知行是个人助手非编排器）。确认这个范围收敛。
+6. **接入引导的预设库初始范围（已定）**：首批仅 **GitHub、Notion**（外部服务类），渐进式扩展；只收外部服务类 server（知行内置已覆盖的本地/通用能力不预设，见第一节定位原则），非预设走 agent 推断 + discovery 验证兜底。
+
+## 参考
+- 三家 MCP 调研：`source-analysis/openclaw|claude-code|hermes-agent/mcp-architecture.md`
+- 工具系统：ADR-004；安全系统：ADR-006、`tool-permission-execution.md`
+- 配置/凭证：ADR-003（schema 段已过时，以 `providers/src/types.ts` 为准）、`credentials-and-onboarding.md`
+- 知行接入点事实底座：本文各节 `文件:行号`（ToolDefinition `core/types/tools.ts`；安全 `core/security/{boundary-registry,permission-store,classifier,types}.ts`；装配 `orchestrator/runtime/create-agent-runtime.ts` + `cli/runtime/builtin-extra-tools.ts`；生命周期 `cli/runtime/session.ts`；配置凭证 `providers/src/{types,config-loader,credentials-loader}.ts`）
