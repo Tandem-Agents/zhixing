@@ -1,0 +1,30 @@
+{
+  "name": "@zhixing/mcp",
+  "version": "0.1.0",
+  "description": "知行 MCP host — 连接外部 MCP server，把其工具接入 agent 工具集",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest watch",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@zhixing/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.2",
+    "tsup": "^8.4.0",
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.1"
+  }
+}
