@@ -27,6 +27,23 @@ export interface McpServerContext {
 }
 
 /**
+ * 连接一个 MCP server 所需的规格 —— 来源于 config.mcp，由上层装配传给 hub。
+ * 这是 server 级输入；工具发现后产出的 McpToolDescriptor 只含工具自身属性。
+ */
+export interface McpServerSpec {
+  /** server 的 id（config.mcp.servers 的 key），同时是工具命名的 server 段。 */
+  serverId: string;
+  /** 传输方式。 */
+  transport: McpTransportKind;
+  /** stdio：启动 server 进程的可执行命令。 */
+  command?: string;
+  /** stdio：命令行参数。 */
+  args?: string[];
+  /** http：server 的端点 URL（后续阶段启用）。 */
+  url?: string;
+}
+
+/**
  * 一个已被 `tools/list` 发现的 MCP 工具的中性描述 —— 仅含工具自身属性。
  * 由 hub 从 SDK 的 Tool 物化（SDK 的 Tool 同样不含 server 信息）。
  */

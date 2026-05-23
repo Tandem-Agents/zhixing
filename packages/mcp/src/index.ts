@@ -1,3 +1,5 @@
+export { createMcpHub } from "./hub.js";
+export type { McpHub, McpHubOptions, McpServerCatalog } from "./hub.js";
 export { mapServerTools } from "./mapping.js";
 export {
   isValidServerId,
@@ -6,10 +8,12 @@ export {
   parseToolName,
   sanitizeToolName,
 } from "./naming.js";
-export { filterSpawnEnv } from "./env-filter.js";
+export { toToolResult } from "./result.js";
+export type { McpCallOutcome } from "./result.js";
 export type {
   McpCallFn,
   McpServerContext,
+  McpServerSpec,
   McpToolDescriptor,
   McpTransportKind,
 } from "./types.js";
