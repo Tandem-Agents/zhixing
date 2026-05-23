@@ -95,6 +95,7 @@ import { detectTerminalCapability } from "./screen/terminal-capability.js";
 import { layout } from "./tui/style.js";
 import { InlineTextPromptRegion } from "./tui/inline-text-prompt.js";
 import { InputController } from "./typeahead-input.js";
+import { BottomInfoModel } from "./bottom-info/index.js";
 import { renderHomeWelcome, renderStartupAdvisories } from "./workbench/index.js";
 import { renderFarewell } from "./farewell/index.js";
 import { RuntimeSession } from "./runtime/session.js";
@@ -1781,6 +1782,9 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   // cleanup；主循环每轮 await inputController.waitOnce() 拿下次用户输入。
   let inputController: InputController | null = null;
   if (useTypeahead && typeaheadBroker && typeaheadDispatcher) {
+    // 底部信息行内容容器(来源无关)。本期唯一来源是 InputController 自身
+    // (输入态 → "esc 清空");未来其他来源(系统事件等)持本引用 set 即可。
+    const bottomInfo = new BottomInfoModel();
     inputController = new InputController({
       broker: typeaheadBroker,
       dispatcher: typeaheadDispatcher,
@@ -1789,6 +1793,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       placeholder: "输入消息或 / 查看命令",
       registry: pasteRegistry,
       onCandidateDelete,
+      bottomInfo,
     });
     inputController.start();
 

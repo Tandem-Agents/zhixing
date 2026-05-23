@@ -35,6 +35,7 @@ import {
 } from "../tui/index.js";
 import { InputController, readInputLine, type InputLineResult } from "../typeahead-input.js";
 import type { ScreenController } from "../screen/index.js";
+import { BottomInfoModel } from "../bottom-info/index.js";
 
 // PassThrough 非 TTY，chalk 默认禁用颜色——强开 level=3 让 bg / dim 等 ANSI
 // 真实出现在 captured 里供回归断言（与 chalk 在真实 TTY 的输出一致）
@@ -877,6 +878,137 @@ describe("InputController — suspend/resume 输入态快照恢复", () => {
     await new Promise((r) => setImmediate(r));
     expect(stripAnsi(controller.renderLines().join("\n"))).not.toContain("/he");
 
+    controller.stop();
+  });
+});
+
+describe("InputController — 底部信息行(bottomInfo)", () => {
+  function makeScreen(): ScreenController {
+    return {
+      attachInput: vi.fn(),
+      detachInput: vi.fn(),
+      dispose: vi.fn(),
+      requestInputRepaint: vi.fn(),
+      ensureScrollLeadingBlank: vi.fn(),
+      withScrollWrite: vi.fn(),
+    } as unknown as ScreenController;
+  }
+
+  function makeController(bottomInfo?: BottomInfoModel): {
+    controller: InputController;
+    stdin: ReturnType<typeof makeStreams>["stdin"];
+  } {
+    const { stdin } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+    const controller = new InputController({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      screen: makeScreen(),
+      stdin,
+      columns: 80,
+      bottomInfo,
+    });
+    return { controller, stdin };
+  }
+
+  it("普通模式输入文字 → 底部信息行右区显示 esc 清空;空 buffer 不显示", async () => {
+    const bottomInfo = new BottomInfoModel();
+    const { controller, stdin } = makeController(bottomInfo);
+    controller.start();
+    // 空 buffer:占位但不显示 esc 清空
+    expect(stripAnsi(controller.renderLines().join("\n"))).not.toContain(
+      "esc 清空",
+    );
+
+    await typeChars(stdin, "hello");
+    // 纯文字(无 trigger)→ 普通模式 → 底部信息行显示 esc 清空
+    expect(stripAnsi(controller.renderLines().join("\n"))).toContain("esc 清空");
+
+    // 删空 → esc 清空 消失
+    await sendSyntheticKey(stdin, { name: "escape", sequence: "\x1b" });
+    expect(stripAnsi(controller.renderLines().join("\n"))).not.toContain(
+      "esc 清空",
+    );
+
+    controller.stop();
+  });
+
+  it("命令面板模式(/)→ 不追加底部信息行(面板自带 meta 行)", async () => {
+    const bottomInfo = new BottomInfoModel();
+    const { controller, stdin } = makeController(bottomInfo);
+    controller.start();
+    await typeChars(stdin, "/");
+    // 有 trigger → panelLines 非空 → 渲染不追加底部信息行(即便 model 里有 escHint)
+    expect(stripAnsi(controller.renderLines().join("\n"))).not.toContain(
+      "esc 清空",
+    );
+    controller.stop();
+  });
+
+  it("stop() 清除自己贡献的 esc hint 块,不留残留", async () => {
+    const bottomInfo = new BottomInfoModel();
+    const { controller, stdin } = makeController(bottomInfo);
+    controller.start();
+    await typeChars(stdin, "hi");
+    expect(bottomInfo.snapshot().right.length).toBe(1); // buffer 非空 → 有 escHint 块
+    controller.stop();
+    expect(bottomInfo.snapshot().right.length).toBe(0); // stop 清除自己的块
+  });
+
+  it("未注入 bottomInfo → 不渲染信息行(向后兼容)", async () => {
+    const { controller, stdin } = makeController(undefined);
+    controller.start();
+    await typeChars(stdin, "hello");
+    expect(stripAnsi(controller.renderLines().join("\n"))).not.toContain(
+      "esc 清空",
+    );
+    controller.stop();
+  });
+
+  it("顺序守护:broker.updateInput 触发的本次 repaint 已能看到 esc hint", async () => {
+    // 守护"syncBottomInfo 必须早于 broker.updateInput":updateInput 同步触发一次
+    // repaint,若 syncBottomInfo 晚于它,本次 repaint 读到的 model 尚未更新 →
+    // esc 清空 落后一帧。捕获 requestInputRepaint 被调那一刻的 model 状态来锁住顺序。
+    const { stdin } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+    const bottomInfo = new BottomInfoModel();
+    let escVisibleAtLastRepaint = false;
+    const screen = {
+      attachInput: vi.fn(),
+      detachInput: vi.fn(),
+      dispose: vi.fn(),
+      requestInputRepaint: vi.fn(() => {
+        escVisibleAtLastRepaint = bottomInfo.snapshot().right.length > 0;
+      }),
+      ensureScrollLeadingBlank: vi.fn(),
+      withScrollWrite: vi.fn(),
+    } as unknown as ScreenController;
+    const controller = new InputController({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      screen,
+      stdin,
+      columns: 80,
+      bottomInfo,
+    });
+    controller.start();
+    await typeChars(stdin, "a");
+    expect(escVisibleAtLastRepaint).toBe(true);
+    controller.stop();
+  });
+
+  it("resume 后 esc hint 与恢复的 buffer 一致", async () => {
+    const bottomInfo = new BottomInfoModel();
+    const { controller, stdin } = makeController(bottomInfo);
+    controller.start();
+    await typeChars(stdin, "hi");
+    controller.suspend(); // buffer=null,model 残留(suspend 不清)
+    controller.resume();
+    await new Promise((r) => setImmediate(r));
+    // resume 恢复 "hi" 非空 → attachKeypressOnly 末尾 + syncBroker 同步 escHint
+    expect(stripAnsi(controller.renderLines().join("\n"))).toContain("esc 清空");
     controller.stop();
   });
 });
