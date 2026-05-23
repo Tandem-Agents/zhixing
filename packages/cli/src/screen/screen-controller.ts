@@ -690,8 +690,7 @@ class ScreenControllerImpl implements ScreenController {
     // 对话历史）被 destructive clear 永久擦除"bug 的根本手段。
     //
     // 显式 `\x1b[1;1H` home cursor —— alt buffer 入口 cursor 位置 implementation-
-    // defined（部分终端继承 saved cursor 位置）；显式 home 让 alt UI（如
-    // config-editor 用 PanelRenderer 假设 cursor 在 startRow）起手位置确定可预测。
+    // defined（部分终端继承 saved cursor 位置）；显式 home 让 alt UI 起手位置确定可预测。
     this.stdout.write(ANSI.enterAltScreen);
     this.stdout.write("\x1b[1;1H");
 

@@ -1,67 +1,31 @@
 /**
- * TypeaheadPanel — 常驻式 typeahead 下拉面板（CLI/TTY 渲染器）
+ * Typeahead 面板渲染 —— 纯函数：把 `TypeaheadSessionState` 翻译成可写入终端的行。
  *
- * 角色（spec §7.2）：
- *   - 订阅 `broker.onSessionChange(sessionId)`，把 `TypeaheadSessionState`
- *     翻译成可视面板。
- *   - active（trigger 命中、有 suggestions 或处于 loading 态）时在 stdout 下方
- *     原地重绘 dropdown；inactive 态**完全不占行**（0 字节输出）。
- *   - 提供 keyboard handler：↑↓ 导航、Tab/Enter 接受、Esc 清 trigger。
- *     Panel 本身不持有 draft —— 它只通过 onAccept / onCancel 回调通知上层。
- *   - 与 modal 类组件（如 SelectOperationRegion）不同：panel 是**非阻塞**的，
- *     没有 Promise；它绑定到 broker session 直到 detach。
+ * 角色：
+ *   - `renderSessionLines(state, opts)` —— 一个 session state → 面板行数组
+ *     （chrome 框 + 候选区 + meta 提示行）。inactive（无 trigger）返回空数组，
+ *     调用方据此擦除。无副作用，不碰 stdin / raw mode / 光标。
+ *   - `computeWindow(total, selectedIndex, maxVisible)` —— 候选超出可视高度时
+ *     "选中项居中、贴顶贴底"的窗口计算，可独立测试。
  *
- * 复用 spec §6.4 的内核（Phase 1 Step 1 抽取）：
- *   - `createPanelRenderer` —— 原地重绘 + 擦除的光标不变量
- *   - `rawModeController` —— 多 modal 安全的 raw mode 引用计数
- *   - `acquireStdinOwnership` —— 摘除 readline 预挂的 echo 监听器
- *   - `clampLine` / `stringWidth` —— CJK 安全的行截断
+ * 调用方：生产输入区 `InputController`（typeahead-input.ts）订阅
+ * `broker.onSessionChange`、持有 buffer 与 keypress，把最新 state 交本模块渲染、
+ * 拼进自己的 chrome。本模块只读 state，不主动改 selectedIndex —— 上下键由
+ * InputController 经 `broker.moveSelection(±1)` 驱动、新 state 回灌触发重绘
+ * （零键执行依赖 broker 在 query 完成时已把 selectedIndex 固定到 0）。
  *
- * 零键执行（spec §6.5）的前置条件：broker 已经在 query 完成时把
- * `selectedIndex` 固定到 0。Panel 只读不写 —— 它**不**主动改 selectedIndex，
- * 上下箭头通过 `broker.moveSelection(±1)` 让 broker 更新状态再回灌回来。
- *
- * 窗口滚动：suggestions 多于 maxVisibleItems 时采用"选中项居中"策略，
- * 末尾/开头时固定到一侧。纯函数 `computeWindow` 可独立测试。
- *
- * 生命周期：
- *   attach() ──▶ 订阅 broker + 挂 keypress listener + 首次空渲染
- *     │
- *     │ broker 发 session state 变更
- *     ▼
- *   applySessionState() ──▶ 计算 lines → panel.render()
- *     │
- *     │ 用户按键（↑↓/Tab/Enter/Esc）
- *     ▼
- *   handleKeypress() ──▶ broker.moveSelection / onAccept / onCancel
- *     │
- *     ▼
- *   detach() ──▶ 解绑所有 listener + panel.clear()
+ * 视觉契约：与输入框 box / config-editor 共用 `renderChrome` 原语（紧凑形态）；
+ * 全 visible state（loading / empty / active 任意 count）面板总行数恒等，配合
+ * broker emit 策略保证 typing 期间零高度跳变（详见 renderActiveChrome docstring）。
  */
 
-import type * as readline from "node:readline";
+import type { SuggestionItem, TypeaheadSessionState } from "@zhixing/core";
 
-import type {
-  ITypeaheadBroker,
-  SuggestionItem,
-  TypeaheadSessionState,
-} from "@zhixing/core";
-
-import {
-  createPanelRenderer,
-  type PanelRenderer,
-} from "./_internal/cursor-invariants.js";
-import { rawModeController, type RawModeLease } from "./_internal/raw-mode.js";
-import {
-  acquireStdinOwnership,
-  type StdinOwnershipHandle,
-} from "./_internal/stdin-ownership.js";
 import chalk from "chalk";
 import { stripAnsi } from "./ansi.js";
 import { renderChrome, type BodyLine } from "./chrome.js";
 import { clampLine, stringWidth } from "./line-width.js";
 import { tone, icon } from "./style.js";
-import { wrapKeypressHandler } from "../paste-detector.js";
 
 // ─── 主题 ───
 
@@ -117,45 +81,6 @@ export const defaultTypeaheadTheme: TypeaheadTheme = {
   emptyHint: (s) => tone.dim(s),
   dangerPending: (s) => chalk.bgHex("#D85050").white(s),
 };
-
-// ─── Panel 选项 ───
-
-export interface TypeaheadPanelOptions {
-  readonly broker: ITypeaheadBroker;
-  readonly sessionId: string;
-
-  /** 接受某条 suggestion 后的回调 —— 上层负责 broker.accept + draft 更新 */
-  readonly onAccept: (item: SuggestionItem) => void;
-  /** Esc 清除 trigger 后的回调 —— 上层可选择清 draft token 或整行 */
-  readonly onCancel?: () => void;
-
-  readonly stdin?: NodeJS.ReadStream;
-  readonly stdout?: NodeJS.WriteStream;
-  readonly theme?: Partial<TypeaheadTheme>;
-
-  /** 面板最多可见条目数；多余走窗口滚动。默认 8 */
-  readonly maxVisibleItems?: number;
-  /** 面板最小宽度（极窄终端兜底）；默认 40。常态下 panel 与终端同宽。 */
-  readonly minWidth?: number;
-  /** 强制面板宽度探测（测试用） */
-  readonly columns?: number;
-}
-
-// ─── 公开 API ───
-
-export interface TypeaheadPanelHandle {
-  /** 启动订阅 + keypress 监听 + 首次渲染。幂等。 */
-  attach(): void;
-  /** 解除订阅、释放 raw mode / stdin ownership、擦除面板。幂等。 */
-  detach(): void;
-  /**
-   * 手动触发重绘 —— 主要用于终端 resize 后让外层调。
-   * Panel 本身不订阅 stdout.resize（跨 session 的 renderer 更合适做这件事）。
-   */
-  rerender(): void;
-  /** 当前渲染了多少行；测试和诊断用 */
-  readonly lastRenderHeight: number;
-}
 
 // ─── 纯函数：窗口计算（可独立测试） ───
 
@@ -614,196 +539,4 @@ function titleOfProvider(id: string): string {
     default:
       return id;
   }
-}
-
-// ─── 主组件 ───
-
-/**
- * 创建一个 TypeaheadPanel。**必须调用 attach() 才会订阅 broker**。
- *
- * 注意：本组件接管 stdin 的 keypress 事件处理。任何其它需要拿按键的组件必须
- * 通过 broker 里 panel 的 onAccept 回调走，**不要**在 panel attached 时自己
- * 在 stdin 上挂 keypress listener —— stdin-ownership snapshot/restore 会漏掉
- * 后续新增的 listener。
- */
-export function createTypeaheadPanel(
-  options: TypeaheadPanelOptions,
-): TypeaheadPanelHandle {
-  const stdin = options.stdin ?? process.stdin;
-  const stdout = options.stdout ?? process.stdout;
-  const theme: TypeaheadTheme = {
-    ...defaultTypeaheadTheme,
-    ...(options.theme ?? {}),
-  };
-  const maxVisibleItems = options.maxVisibleItems ?? 12;
-  const minWidth = options.minWidth ?? 40;
-
-  const panel: PanelRenderer = createPanelRenderer(stdout);
-
-  let attached = false;
-  let unsubscribe: (() => void) | null = null;
-  let rawModeLease: RawModeLease | null = null;
-  let stdinOwnership: StdinOwnershipHandle | null = null;
-  let lastState: TypeaheadSessionState | null = null;
-  let pasteBatcher: ReturnType<typeof wrapKeypressHandler> | null = null;
-
-  const getColumns = (): number => {
-    if (typeof options.columns === "number") return options.columns;
-    return stdout.columns ?? 80;
-  };
-
-  const computeRenderOptions = (): RenderOptions => {
-    const columns = getColumns();
-    // 与终端同宽，与输入框 box 对齐；minWidth 仅对极窄终端兜底
-    const frameWidth = Math.max(minWidth, columns);
-    const innerWidth = Math.max(10, frameWidth - 2);
-    return { theme, frameWidth, innerWidth, maxVisibleItems };
-  };
-
-  const doRender = (state: TypeaheadSessionState | null): void => {
-    if (!state) {
-      // 无 state：擦除（clear 内部对 lastHeight=0 是 no-op）
-      panel.clear();
-      return;
-    }
-    const lines = renderSessionLines(state, computeRenderOptions());
-    if (lines.length === 0) {
-      // active provider 为 null（trigger 清掉了）→ 擦除
-      panel.clear();
-      return;
-    }
-    panel.render(lines);
-  };
-
-  // ── 按键处理 ──
-  // 单 keypress 走原逻辑；同步多次 keypress（粘贴）默认丢弃——typeahead panel 不
-  // 接受 paste 内容，避免 paste 字符流误触发 accept / 进 query 等
-  const handleKeypress = (_str: string, key: readline.Key | undefined): void => {
-    if (!key) return;
-    const state = lastState;
-    // 只在有 active trigger 时消费按键；否则让宿主继续看（不过我们已经摘了
-    // 宿主 listeners —— 宿主按键驱动由上层通过 broker.updateInput 来带）。
-    if (!state || !state.trigger) return;
-
-    // Esc 清 trigger —— 调 onCancel，由上层决定清 token 还是整 draft
-    if (key.name === "escape") {
-      options.onCancel?.();
-      return;
-    }
-
-    // Ctrl+C 也关闭面板（和 Esc 同效，但不 swallow —— 上层可能要退 REPL）
-    if (key.ctrl && key.name === "c") {
-      options.onCancel?.();
-      return;
-    }
-
-    // ↑↓ 导航：不要求 suggestions 非空（broker.moveSelection 内部短路）
-    if (key.name === "up") {
-      options.broker.moveSelection(options.sessionId, -1);
-      return;
-    }
-    if (key.name === "down") {
-      options.broker.moveSelection(options.sessionId, +1);
-      return;
-    }
-
-    // Enter / Tab 接受选中项。零键执行（spec §6.5）的核心：
-    // 用户刚打完 query，不用按 ↓ 选择，Enter 直接命中 index 0。
-    if (key.name === "return" || key.name === "tab") {
-      if (state.suggestions.length === 0) return;
-      if (state.selectedIndex < 0) return;
-      const item = state.suggestions[state.selectedIndex];
-      if (!item) return;
-      options.onAccept(item);
-      return;
-    }
-  };
-
-  // ── Session state 订阅回调 ──
-  const onSessionChange = (state: TypeaheadSessionState): void => {
-    lastState = state;
-    doRender(state);
-  };
-
-  return {
-    attach(): void {
-      if (attached) return;
-      attached = true;
-
-      // 资源句柄：raw mode + stdin ownership（与 SelectOperationRegion / InputController 一致的资源管理模式）
-      stdinOwnership = acquireStdinOwnership(stdin);
-      rawModeLease = rawModeController.acquire(stdin);
-
-      // 挂 keypress listener（在 stdin-ownership snapshot 之后 —— 这样 release
-      // 时我们自己的 listener 已经由本文件的 detach() 主动摘除，不会和恢复的
-      // saved listeners 并存）
-      // wrapKeypressHandler 区分单 keypress 与同步多 keypress（粘贴）：panel 不
-      // 接受 paste 内容，paste 路径默认丢弃避免误触发 accept / 进 query
-      pasteBatcher = wrapKeypressHandler({
-        onSingle: handleKeypress,
-        onPaste: () => {},
-      });
-      stdin.on("keypress", pasteBatcher.handler);
-
-      // 订阅 broker session state 变更
-      unsubscribe = options.broker.onSessionChange(
-        options.sessionId,
-        onSessionChange,
-      );
-
-      // 首次立即拉取一次 state（可能 broker 已经有 suggestions）
-      const initial = options.broker.getState(options.sessionId);
-      if (initial) {
-        lastState = initial;
-        doRender(initial);
-      }
-
-      // 确保 stdin flowing 以触发 keypress
-      if (typeof stdin.resume === "function") {
-        stdin.resume();
-      }
-    },
-
-    detach(): void {
-      if (!attached) return;
-      attached = false;
-
-      // 先解订阅（避免 detach 过程中再被回调打扰）
-      if (unsubscribe) {
-        unsubscribe();
-        unsubscribe = null;
-      }
-
-      // 摘自己挂的 listener —— 必须在 stdinOwnership.release 之前
-      if (pasteBatcher) {
-        stdin.off("keypress", pasteBatcher.handler);
-        pasteBatcher.release();
-        pasteBatcher = null;
-      }
-
-      // 擦除面板（防止残留行）
-      panel.clear();
-
-      // 释放 raw mode 在前（可能 restore isRaw），再恢复 saved listeners
-      if (rawModeLease) {
-        rawModeLease.release();
-        rawModeLease = null;
-      }
-      if (stdinOwnership) {
-        stdinOwnership.release();
-        stdinOwnership = null;
-      }
-
-      lastState = null;
-    },
-
-    rerender(): void {
-      if (!attached) return;
-      doRender(lastState);
-    },
-
-    get lastRenderHeight(): number {
-      return panel.lastRenderHeight;
-    },
-  };
 }

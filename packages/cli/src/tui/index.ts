@@ -102,25 +102,14 @@ export {
 } from "./_internal/raw-mode.js";
 export {
   computeWindow,
-  createTypeaheadPanel,
   defaultTypeaheadTheme,
   renderSessionLines,
 } from "./typeahead-panel.js";
 export type {
   RenderOptions,
-  TypeaheadPanelHandle,
-  TypeaheadPanelOptions,
   TypeaheadTheme,
   VisibleWindow,
 } from "./typeahead-panel.js";
-export {
-  createTerminalTypeaheadRenderer,
-  TERMINAL_TYPEAHEAD_CAPABILITIES,
-} from "./typeahead-renderer.js";
-export type {
-  TerminalTypeaheadRenderer,
-  TerminalTypeaheadRendererOptions,
-} from "./typeahead-renderer.js";
 
 // ─── 4. 平台原语 ─────────────────────────────────────────
 
