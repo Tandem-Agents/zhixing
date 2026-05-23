@@ -454,6 +454,12 @@ export interface ZhixingCredentials {
    * 等链接信息与 appSecret 等密字段）。具体字段由 channel 适配器约定。
    */
   channels?: Record<string, Record<string, string>>;
+  /**
+   * MCP server 凭证池：按 server id 索引；含远程 server 的 token / apiKey 等密字段，
+   * 具体字段由接入引导按 server 约定。与 channels 同构，自动继承 credentials.json
+   * 的 bypassImmune 隔离（AI 不可读写）。
+   */
+  mcp?: Record<string, Record<string, string>>;
 }
 
 // ─── 解析后的 Provider ───

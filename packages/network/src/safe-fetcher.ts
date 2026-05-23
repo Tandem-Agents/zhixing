@@ -261,6 +261,63 @@ export async function safeFetch(
   return { kind: "redirect-blocked", from, to: currentUrl, reason: "too-many" };
 }
 
+// ─── SSRF 安全的标准 fetch（供长连接 / 第三方 client 注入） ───
+
+/** 标准 fetch 形态——与第三方 client（如 MCP SDK）的 FetchLike 结构兼容。 */
+export type SafeFetch = (
+  url: string | URL,
+  init?: RequestInit,
+) => Promise<Response>;
+
+/**
+ * 创建 SSRF 安全的标准 fetch —— 供需要原生 Response / 长连接（如 SSE）的第三方
+ * client 注入（如 MCP HTTP transport）。
+ *
+ * 与 safeFetch 的分工：safeFetch 是 GET-only 高层（逐跳 redirect 复检 + body 字节
+ * 限制 + FetchResult union），适合"抓取一个 URL 的内容"；本函数返回标准 fetch，不
+ * 限制 method / body / 流，SSRF 防护落在两层、与 safeFetch 主循环同一安全模型：
+ *   - 同步：对请求 URL 做 validateUrl + 字面 IP 检查（覆盖代理路径——代理 Agent 不
+ *     挂 lookup hook，目标字面 IP 必须在此同步拦截）
+ *   - 连接：dispatcher 的 DNS-pinning lookup hook（直连路径）
+ *   - redirect：强制禁止（redirect:"error"）—— 本函数为支持 SSE 放弃了 safeFetch 的
+ *     逐跳复检，无法校验 redirect 目标；故一律不 follow、redirect 即报错，杜绝 redirect
+ *     绕过 SSRF（字面 IP / 代理路径的 redirect 目标都不经 lookup hook）。需要 follow
+ *     redirect 的场景用 safeFetch（逐跳复检）。
+ * 代理路径的目标解析在代理端、不挂 lookup hook（用户对自配代理负责，与 createDispatcher 一致）。
+ *
+ * SSRF / 非法 URL 同步抛 Error（标准 fetch 失败契约）；连接级错误由 undici 抛。
+ */
+export function createSafeFetch(policyOverride?: Partial<NetworkPolicy>): SafeFetch {
+  const policy = mergePolicy(policyOverride);
+  const dispatcher = createDispatcher(policy.blockedNetworks, policy.proxy);
+
+  return async (input, init) => {
+    const url = typeof input === "string" ? input : input.toString();
+
+    const validation = validateUrl(url, policy);
+    if (validation) {
+      throw new Error(`Request blocked by network policy (${validation.kind})`);
+    }
+    const hostname = extractHostname(new URL(url));
+    if (isIpLiteral(hostname)) {
+      const cls = classifyIp(hostname, policy.blockedNetworks);
+      if (cls) {
+        throw new Error(
+          `SSRF blocked: ${hostname} is in restricted network ${cls.range}`,
+        );
+      }
+    }
+
+    const undiciInit = {
+      ...init,
+      dispatcher,
+      // 强制覆盖调用方的 redirect —— 安全契约不可被外部放宽（见上方 redirect 说明）。
+      redirect: "error",
+    } as Parameters<typeof undiciFetch>[1];
+    return (await undiciFetch(url, undiciInit)) as unknown as Response;
+  };
+}
+
 // ─── 代理上下文标注 ───
 
 /**

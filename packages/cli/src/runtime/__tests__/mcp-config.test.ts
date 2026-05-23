@@ -55,4 +55,39 @@ describe("parseServerSpecs", () => {
     });
     expect(specs.map((s) => s.serverId)).toEqual(["github", "notion"]);
   });
+
+  it("http server 的凭证注入为请求头", () => {
+    const specs = parseServerSpecs(
+      { servers: { remote: { type: "http", url: "https://example.com/mcp" } } },
+      { remote: { Authorization: "Bearer tok" } },
+    );
+    expect(specs[0]).toEqual({
+      serverId: "remote",
+      transport: "http",
+      url: "https://example.com/mcp",
+      headers: { Authorization: "Bearer tok" },
+    });
+  });
+
+  it("stdio server 的凭证注入为环境变量", () => {
+    const specs = parseServerSpecs(
+      { servers: { github: { command: "uvx" } } },
+      { github: { GITHUB_TOKEN: "ghp_x" } },
+    );
+    expect(specs[0]).toEqual({
+      serverId: "github",
+      transport: "stdio",
+      command: "uvx",
+      env: { GITHUB_TOKEN: "ghp_x" },
+    });
+  });
+
+  it("无凭证时不注入 headers / env", () => {
+    const specs = parseServerSpecs({ servers: { github: { command: "uvx" } } });
+    expect(specs[0]).toEqual({
+      serverId: "github",
+      transport: "stdio",
+      command: "uvx",
+    });
+  });
 });

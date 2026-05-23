@@ -87,7 +87,7 @@ export const BUILTIN_RULES: SecurityRule[] = [
     message: "知行凭证文件 ~/.zhixing/credentials.json 不允许 AI 读写——含敏感凭证",
     suggestion:
       "若用户需要修改凭证，请告知用户：(1) 文件位置 ~/.zhixing/credentials.json " +
-      "(2) schema：providers.<id>.apiKey 与 channels.<id>.<field> " +
+      "(2) schema：providers.<id>.apiKey、channels.<id>.<field> 与 mcp.<id>.<field> " +
       "(3) 让用户自己编辑该文件，AI 不参与读写",
   },
 

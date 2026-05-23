@@ -1,7 +1,12 @@
 // 知行网络出口原语 — 公共 API
 
 // 安全 fetch
-export { DEFAULT_NETWORK_POLICY, safeFetch } from "./safe-fetcher.js";
+export {
+  createSafeFetch,
+  DEFAULT_NETWORK_POLICY,
+  safeFetch,
+} from "./safe-fetcher.js";
+export type { SafeFetch } from "./safe-fetcher.js";
 
 // URL / IP 防护
 export { DEFAULT_BLOCKED_NETWORKS, classifyIp, validateUrl } from "./url-guard.js";

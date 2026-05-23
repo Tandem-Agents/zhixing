@@ -211,7 +211,9 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   // MCP host —— 连接 config.mcp 声明的外部 server。connectAll 在首个
   // createAgentRuntime（assembleTools）之前完成，工具目录才能进入 system prompt。
   // serve 进程内单例，多 session 共享同一批连接。空配置时为 no-op。
-  const mcpHub = createMcpHub(parseServerSpecs(config.mcp));
+  const mcpHub = createMcpHub(parseServerSpecs(config.mcp, credentials.mcp), {
+    networkProxy: config.network?.proxy,
+  });
   await mcpHub.connectAll();
 
   const builtinExtraTools = createBuiltinExtraToolsAssembly(

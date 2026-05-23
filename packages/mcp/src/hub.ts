@@ -11,8 +11,12 @@
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { NetworkPolicy } from "@zhixing/network";
 import { toToolResult } from "./result.js";
-import { createTransport as defaultCreateTransport } from "./transport.js";
+import {
+  createTransport as defaultCreateTransport,
+  type CreateTransportOptions,
+} from "./transport.js";
 import type {
   McpCallFn,
   McpServerContext,
@@ -44,8 +48,10 @@ export interface McpHub {
 export interface McpHubOptions {
   /** 单 server 连接 + 首次 tools/list 的超时（毫秒）。 */
   connectTimeoutMs?: number;
+  /** 网络代理配置 —— 透传给 http transport 的 SSRF-safe fetch（继承 network.proxy）。 */
+  networkProxy?: NetworkPolicy["proxy"];
   /** transport 构造注入点 —— 默认按 spec 造真实 transport，测试可注入内存传输。 */
-  createTransport?: (spec: McpServerSpec) => Transport;
+  createTransport?: (spec: McpServerSpec, options: CreateTransportOptions) => Transport;
 }
 
 interface Connection {
@@ -63,6 +69,7 @@ export function createMcpHub(
   const connectTimeoutMs =
     options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
   const createTransport = options.createTransport ?? defaultCreateTransport;
+  const networkProxy = options.networkProxy;
   const connections = new Map<string, Connection>();
 
   async function connectOne(spec: McpServerSpec): Promise<void> {
@@ -71,7 +78,7 @@ export function createMcpHub(
       transport: spec.transport,
     };
     try {
-      const transport = createTransport(spec);
+      const transport = createTransport(spec, { proxy: networkProxy });
       const client = new Client(CLIENT_INFO, { capabilities: {} });
       await client.connect(transport, { timeout: connectTimeoutMs });
       const listed = await client.listTools({}, { timeout: connectTimeoutMs });

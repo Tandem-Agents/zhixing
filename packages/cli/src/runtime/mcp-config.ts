@@ -10,9 +10,19 @@
  */
 
 import { isValidServerId, type McpServerSpec } from "@zhixing/mcp";
-import type { McpConfig } from "@zhixing/providers";
+import type { McpConfig, ZhixingCredentials } from "@zhixing/providers";
 
-export function parseServerSpecs(mcp: McpConfig | undefined): McpServerSpec[] {
+/**
+ * config.mcp（决策层）+ credentials.mcp（内容层）→ 连接规格。
+ *
+ * 凭证按 server 的 transport 注入：http → 请求头（如 Authorization）、stdio → 环境
+ * 变量。当前阶段直接把 credentials.mcp.<id> 的字段作为 header / env 键值对（用户 / 接入
+ * 引导填写正确的 key），系统不解释字段语义。
+ */
+export function parseServerSpecs(
+  mcp: McpConfig | undefined,
+  credentials?: ZhixingCredentials["mcp"],
+): McpServerSpec[] {
   const servers = mcp?.servers;
   if (!servers) return [];
 
@@ -21,13 +31,21 @@ export function parseServerSpecs(mcp: McpConfig | undefined): McpServerSpec[] {
     if (entry.enabled === false) continue;
     if (!isValidServerId(serverId)) continue;
 
-    const spec: McpServerSpec = {
-      serverId,
-      transport: entry.type ?? "stdio",
-    };
+    const transport = entry.type ?? "stdio";
+    const spec: McpServerSpec = { serverId, transport };
     if (entry.command !== undefined) spec.command = entry.command;
     if (entry.args !== undefined) spec.args = entry.args;
     if (entry.url !== undefined) spec.url = entry.url;
+
+    const cred = credentials?.[serverId];
+    if (cred && Object.keys(cred).length > 0) {
+      if (transport === "http") {
+        spec.headers = cred;
+      } else {
+        spec.env = cred;
+      }
+    }
+
     specs.push(spec);
   }
   return specs;

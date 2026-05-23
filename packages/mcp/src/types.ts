@@ -39,8 +39,12 @@ export interface McpServerSpec {
   command?: string;
   /** stdio：命令行参数。 */
   args?: string[];
-  /** http：server 的端点 URL（后续阶段启用）。 */
+  /** http：server 的端点 URL。 */
   url?: string;
+  /** http：附加请求头（凭证拼成的 Authorization 等）。 */
+  headers?: Record<string, string>;
+  /** stdio：附加环境变量（凭证 / server 专属配置），叠加在 SDK 安全 env 白名单之上。 */
+  env?: Record<string, string>;
 }
 
 /**

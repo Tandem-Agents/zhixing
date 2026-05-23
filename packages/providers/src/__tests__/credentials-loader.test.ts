@@ -207,6 +207,23 @@ describe("applyCredentialsPatch · 合并语义", () => {
     });
   });
 
+  it("mcp 同样 id 级 + 字段级合并", () => {
+    const current: ZhixingCredentials = {
+      mcp: {
+        github: { token: "old", apiBase: "u-1" },
+        notion: { token: "n-1" },
+      },
+    };
+    const result = applyCredentialsPatch(current, {
+      mcp: { github: { token: "new" } },
+    });
+
+    expect(result.mcp).toEqual({
+      github: { token: "new", apiBase: "u-1" },
+      notion: { token: "n-1" },
+    });
+  });
+
   it("patch 未提到的子表保留 current", () => {
     const current: ZhixingCredentials = {
       providers: { siliconflow: { apiKey: "sk-sf" } },

@@ -1059,7 +1059,9 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   // MCP host —— 连接 config.mcp 声明的外部 server，其工具经 assembleTools 进入工具集。
   // connectAll 必须在 createAgent（RuntimeSession.create 内部 assembleTools）之前完成，
   // 工具目录才能进入首个 system prompt。空配置时 hub 为 no-op，connectAll 立即返回。
-  const mcpHub = createMcpHub(parseServerSpecs(config.mcp));
+  const mcpHub = createMcpHub(parseServerSpecs(config.mcp, credentials.mcp), {
+    networkProxy: config.network?.proxy,
+  });
   await mcpHub.connectAll();
 
   const builtinExtraTools = createBuiltinExtraToolsAssembly(

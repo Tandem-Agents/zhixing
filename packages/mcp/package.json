@@ -20,7 +20,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@zhixing/core": "workspace:*"
+    "@zhixing/core": "workspace:*",
+    "@zhixing/network": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.15.2",

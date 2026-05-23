@@ -173,6 +173,9 @@ export function applyCredentialsPatch(
   if (patch.channels !== undefined) {
     result.channels = mergeIdMap(current.channels, patch.channels);
   }
+  if (patch.mcp !== undefined) {
+    result.mcp = mergeIdMap(current.mcp, patch.mcp);
+  }
 
   return result;
 }
