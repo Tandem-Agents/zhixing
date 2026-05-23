@@ -24,4 +24,8 @@ describe("createSafeFetch", () => {
   it("proxy=off 时仍构造成功（直连 + SSRF 防护）", () => {
     expect(typeof createSafeFetch({ proxy: "off" })).toBe("function");
   });
+
+  it("close 释放连接池且不抛", async () => {
+    await expect(createSafeFetch().close()).resolves.toBeUndefined();
+  });
 });

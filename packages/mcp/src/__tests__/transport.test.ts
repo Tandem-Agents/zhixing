@@ -8,7 +8,8 @@ describe("createTransport", () => {
       transport: "stdio",
       command: "echo",
     });
-    expect(t).toBeDefined();
+    expect(t.transport).toBeDefined();
+    expect(t.dispose).toBeUndefined(); // stdio 无额外连接池资源
   });
 
   it("stdio 缺 command → 抛错", () => {
@@ -22,7 +23,8 @@ describe("createTransport", () => {
       { serverId: "demo", transport: "http", url: "https://example.com/mcp" },
       { proxy: "off" },
     );
-    expect(t).toBeDefined();
+    expect(t.transport).toBeDefined();
+    expect(t.dispose).toBeDefined(); // http 持有连接池，需 dispose 释放
   });
 
   it("http 缺 url → 抛错", () => {

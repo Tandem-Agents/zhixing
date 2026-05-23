@@ -10,11 +10,11 @@
  */
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { NetworkPolicy } from "@zhixing/network";
 import { toToolResult } from "./result.js";
 import {
   createTransport as defaultCreateTransport,
+  type CreatedTransport,
   type CreateTransportOptions,
 } from "./transport.js";
 import type {
@@ -37,6 +37,12 @@ export interface McpServerCatalog {
 export interface McpHub {
   /** 并发连接所有 server（单 server 失败被隔离、不阻塞其余）。装配前调用一次。 */
   connectAll(): Promise<void>;
+  /**
+   * 热重载：以新规格集增量调整连接 —— 新增的 connect、移除的 disconnect、规格变更的
+   * 重连（先断后连）、未变的保持不动。供配置变更时调用，hub 跨 runtime 重建存活，
+   * 不会误断未变 server。
+   */
+  applyConfig(specs: readonly McpServerSpec[]): Promise<void>;
   /** 已连接 server 的工具目录（失败 / 未连接的 server 不出现）。 */
   catalog(): McpServerCatalog[];
   /** 调用某 server 的工具；server 不可用返回 isError，abort 时让异常冒泡。 */
@@ -51,7 +57,10 @@ export interface McpHubOptions {
   /** 网络代理配置 —— 透传给 http transport 的 SSRF-safe fetch（继承 network.proxy）。 */
   networkProxy?: NetworkPolicy["proxy"];
   /** transport 构造注入点 —— 默认按 spec 造真实 transport，测试可注入内存传输。 */
-  createTransport?: (spec: McpServerSpec, options: CreateTransportOptions) => Transport;
+  createTransport?: (
+    spec: McpServerSpec,
+    options: CreateTransportOptions,
+  ) => CreatedTransport;
 }
 
 interface Connection {
@@ -60,6 +69,8 @@ interface Connection {
   tools: McpToolDescriptor[];
   status: "connected" | "failed";
   error?: string;
+  /** 释放 transport 的额外资源（http 连接池）；stdio 为空。 */
+  disposeTransport?: () => Promise<void>;
 }
 
 export function createMcpHub(
@@ -71,24 +82,45 @@ export function createMcpHub(
   const createTransport = options.createTransport ?? defaultCreateTransport;
   const networkProxy = options.networkProxy;
   const connections = new Map<string, Connection>();
+  // 当前规格集 —— connectAll 连这些；applyConfig 据此 diff 出增量并更新。
+  let currentSpecs: readonly McpServerSpec[] = specs;
+
+  async function disconnectOne(serverId: string): Promise<void> {
+    const conn = connections.get(serverId);
+    if (conn?.client) {
+      await conn.client.close().catch(() => {});
+    }
+    if (conn?.disposeTransport) {
+      await conn.disposeTransport().catch(() => {});
+    }
+    connections.delete(serverId);
+  }
 
   async function connectOne(spec: McpServerSpec): Promise<void> {
     const context: McpServerContext = {
       serverId: spec.serverId,
       transport: spec.transport,
     };
+    let created: CreatedTransport | undefined;
     try {
-      const transport = createTransport(spec, { proxy: networkProxy });
+      created = createTransport(spec, { proxy: networkProxy });
       const client = new Client(CLIENT_INFO, { capabilities: {} });
-      await client.connect(transport, { timeout: connectTimeoutMs });
+      await client.connect(created.transport, { timeout: connectTimeoutMs });
       const listed = await client.listTools({}, { timeout: connectTimeoutMs });
       connections.set(spec.serverId, {
         context,
         client,
         tools: listed.tools.map(toDescriptor),
         status: "connected",
+        disposeTransport: created.dispose,
       });
     } catch (err) {
+      // 连接失败时释放已创建的资源：先 close transport（kill 已 spawn 的 stdio 子进程
+      // / 关 http transport），再 dispose（释放 http 连接池），避免泄漏。
+      if (created) {
+        await created.transport.close().catch(() => {});
+        await created.dispose?.().catch(() => {});
+      }
       connections.set(spec.serverId, {
         context,
         tools: [],
@@ -100,7 +132,27 @@ export function createMcpHub(
 
   return {
     async connectAll() {
-      await Promise.allSettled(specs.map(connectOne));
+      await Promise.allSettled(currentSpecs.map(connectOne));
+    },
+
+    async applyConfig(newSpecs) {
+      const newById = new Map(newSpecs.map((s) => [s.serverId, s] as const));
+      const oldById = new Map(
+        currentSpecs.map((s) => [s.serverId, s] as const),
+      );
+      // 断开：被移除的 server，以及规格变更的（先断后连）。
+      const toDisconnect = [...oldById.keys()].filter((id) => {
+        const next = newById.get(id);
+        return !next || !specEqual(oldById.get(id)!, next);
+      });
+      // 连接：新增的 server，以及规格变更的。
+      const toConnect = [...newById.values()].filter((s) => {
+        const prev = oldById.get(s.serverId);
+        return !prev || !specEqual(prev, s);
+      });
+      currentSpecs = [...newSpecs];
+      await Promise.allSettled(toDisconnect.map(disconnectOne));
+      await Promise.allSettled(toConnect.map(connectOne));
     },
 
     catalog() {
@@ -139,7 +191,10 @@ export function createMcpHub(
 
     async dispose() {
       await Promise.allSettled(
-        [...connections.values()].map((conn) => conn.client?.close()),
+        [...connections.values()].flatMap((conn) => [
+          conn.client?.close(),
+          conn.disposeTransport?.(),
+        ]),
       );
       connections.clear();
     },
@@ -164,4 +219,36 @@ function toDescriptor(tool: {
     descriptor.readOnlyHint = tool.annotations.readOnlyHint;
   }
   return descriptor;
+}
+
+/** 规格是否等价 —— 决定 applyConfig 是否需要重连某 server（serverId 由 Map key 比较，此处不重复）。 */
+function specEqual(a: McpServerSpec, b: McpServerSpec): boolean {
+  return (
+    a.transport === b.transport &&
+    a.command === b.command &&
+    a.url === b.url &&
+    stringArrayEqual(a.args, b.args) &&
+    stringRecordEqual(a.headers, b.headers) &&
+    stringRecordEqual(a.env, b.env)
+  );
+}
+
+function stringArrayEqual(
+  a?: readonly string[],
+  b?: readonly string[],
+): boolean {
+  if (a === b) return true;
+  if (!a || !b || a.length !== b.length) return false;
+  return a.every((v, i) => v === b[i]);
+}
+
+function stringRecordEqual(
+  a?: Record<string, string>,
+  b?: Record<string, string>,
+): boolean {
+  if (a === b) return true;
+  const aKeys = a ? Object.keys(a) : [];
+  const bKeys = b ? Object.keys(b) : [];
+  if (aKeys.length !== bKeys.length) return false;
+  return aKeys.every((k) => a?.[k] === b?.[k]);
 }

@@ -95,6 +95,36 @@ describe("computeDiff", () => {
       expect(result.changedDomains).toEqual(["agent"]);
     });
 
+    it("config.mcp 变化 → agent-only changed", () => {
+      const newConfig: ZhixingConfig = {
+        llm: { main: { provider: "siliconflow", model: "Qwen/Qwen3-32B" } },
+        mcp: { servers: { github: { command: "uvx" } } },
+      };
+      const result = computeDiff(
+        baseConfig,
+        baseCredentials,
+        newConfig,
+        baseCredentials,
+      );
+      expect(result.agentChanged).toBe(true);
+      expect(result.changedDomains).toEqual(["agent"]);
+    });
+
+    it("credentials.mcp 变化 → agent-only changed", () => {
+      const newCredentials: ZhixingCredentials = {
+        providers: { siliconflow: { apiKey: "sk-old" } },
+        mcp: { github: { token: "ghp_x" } },
+      };
+      const result = computeDiff(
+        baseConfig,
+        baseCredentials,
+        baseConfig,
+        newCredentials,
+      );
+      expect(result.agentChanged).toBe(true);
+      expect(result.changedDomains).toEqual(["agent"]);
+    });
+
     it("apiKey（credentials.providers）变化 → agent-only changed", () => {
       const newCredentials: ZhixingCredentials = {
         providers: {

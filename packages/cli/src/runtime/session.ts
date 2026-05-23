@@ -50,6 +50,7 @@ import { createRenderSubscribers } from "../render.js";
 import type { TerminalConfirmationRenderer } from "../security/index.js";
 import type { RuntimeSessionOptions, ReloadResult } from "./types.js";
 import { computeDiff, type DiffResult } from "./diff.js";
+import { parseServerSpecs } from "./mcp-config.js";
 import { ReloadBuildError } from "./errors.js";
 
 interface MessagingResources {
@@ -693,6 +694,13 @@ export class RuntimeSession implements IWorkModeController {
       }
 
       if (diff.agentChanged) {
+        // MCP 连接增量重连 —— 在重建 agentRuntime 之前完成，新配置的工具目录才能物化
+        // 进新 runtime 的 system prompt。MCP 未变时 applyConfig 据 specEqual 自然 no-op；
+        // hub 跨 swap 存活、未变 server 不被打断。
+        await this.opts.builtinExtraTools.mcpHub.applyConfig(
+          parseServerSpecs(newConfig.mcp, newCredentials.mcp),
+        );
+
         // 跨 swap 复用 PermissionStore——保留 session scope 授权
         newAgentRuntime = await this.createAgent(
           { kind: "main" },

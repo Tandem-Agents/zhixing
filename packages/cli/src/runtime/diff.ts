@@ -41,7 +41,10 @@ export function computeDiff(
     !stableEqual(oldConfig.workspace, newConfig.workspace) ||
     !stableEqual(oldConfig.network, newConfig.network) ||
     !stableEqual(oldConfig.agent, newConfig.agent) ||
-    !stableEqual(oldConfig.intent, newConfig.intent);
+    !stableEqual(oldConfig.intent, newConfig.intent) ||
+    // MCP server 表（决策）或其凭证变化 → 重连 + 重建 runtime（工具集变 → system prompt 变）
+    !stableEqual(oldConfig.mcp, newConfig.mcp) ||
+    !stableEqual(oldCredentials.mcp, newCredentials.mcp);
 
   if (!channelsChanged && !agentChanged) {
     return {

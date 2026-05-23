@@ -263,11 +263,15 @@ export async function safeFetch(
 
 // ─── SSRF 安全的标准 fetch（供长连接 / 第三方 client 注入） ───
 
-/** 标准 fetch 形态——与第三方 client（如 MCP SDK）的 FetchLike 结构兼容。 */
-export type SafeFetch = (
-  url: string | URL,
-  init?: RequestInit,
-) => Promise<Response>;
+/**
+ * 标准 fetch 形态（与第三方 client 的 FetchLike 结构兼容）+ close（释放底层连接池）。
+ * 长连接消费者（如 MCP HTTP transport）断开时应调 close 显式释放 socket，而非依赖 GC。
+ */
+export interface SafeFetch {
+  (url: string | URL, init?: RequestInit): Promise<Response>;
+  /** 关闭底层 undici Agent 的连接池，释放保持的 socket。 */
+  close(): Promise<void>;
+}
 
 /**
  * 创建 SSRF 安全的标准 fetch —— 供需要原生 Response / 长连接（如 SSE）的第三方
@@ -291,7 +295,10 @@ export function createSafeFetch(policyOverride?: Partial<NetworkPolicy>): SafeFe
   const policy = mergePolicy(policyOverride);
   const dispatcher = createDispatcher(policy.blockedNetworks, policy.proxy);
 
-  return async (input, init) => {
+  const safeFetch = async (
+    input: string | URL,
+    init?: RequestInit,
+  ): Promise<Response> => {
     const url = typeof input === "string" ? input : input.toString();
 
     const validation = validateUrl(url, policy);
@@ -316,6 +323,14 @@ export function createSafeFetch(policyOverride?: Partial<NetworkPolicy>): SafeFe
     } as Parameters<typeof undiciFetch>[1];
     return (await undiciFetch(url, undiciInit)) as unknown as Response;
   };
+
+  return Object.assign(safeFetch, {
+    // 包成 async 显式返回 void —— undici dispatcher.close() resolve 值不保证为
+    // undefined，调用方只关心"已关闭"。
+    close: async () => {
+      await dispatcher.close();
+    },
+  });
 }
 
 // ─── 代理上下文标注 ───
