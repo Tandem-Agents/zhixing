@@ -389,7 +389,7 @@ describe("renderSessionLines", () => {
     expect(joined).toMatch(/↑↓.*Enter.*Esc/);
   });
 
-  it("多操作 inlineActions 拼成单行(· 分隔)", () => {
+  it("多操作 inlineActions 拼成单行(动作词 + 按键,空格分隔)", () => {
     const state = makeState({
       suggestions: [makeSuggestion("a:b", "/a"), makeSuggestion("c:d", "/c")],
       selectedIndex: 0,
@@ -397,7 +397,30 @@ describe("renderSessionLines", () => {
     });
     const lines = renderSessionLines(state, defaultRenderOpts);
     const joined = stripAnsi(lines.join("\n"));
-    expect(joined).toContain("delete ctrl+d · rename ctrl+r · new ctrl+n");
+    expect(joined).toContain("delete ctrl+d   rename ctrl+r   new ctrl+n");
+  });
+
+  it("第二行 nav hint:无 ghostText 不含 Tab,有 ghostText 插入 Tab", () => {
+    const base = {
+      suggestions: [makeSuggestion("a:b", "/a")],
+      selectedIndex: 0,
+    };
+    const noGhost = stripAnsi(
+      renderSessionLines(makeState(base), defaultRenderOpts).join("\n"),
+    );
+    expect(noGhost).toMatch(/↑↓ · Enter · Esc/);
+    expect(noGhost).not.toContain("Tab");
+
+    const withGhost = stripAnsi(
+      renderSessionLines(
+        makeState({
+          ...base,
+          ghostText: { suffix: "ear", fullValue: "/clear" },
+        }),
+        defaultRenderOpts,
+      ).join("\n"),
+    );
+    expect(withGhost).toContain("↑↓ · Enter · Tab · Esc");
   });
 
   it("deletePending 态 hint 切到确认文案,覆盖其他操作提示", () => {
@@ -432,6 +455,57 @@ describe("renderSessionLines", () => {
       defaultRenderOpts,
     );
     expect(threeActions.length).toBe(oneAction.length);
+  });
+
+  it("空候选 + create 能力 → empty 态提示 new ctrl+n", () => {
+    const lines = renderSessionLines(
+      makeState({
+        suggestions: [],
+        selectedIndex: -1,
+        inlineActions: { delete: true, rename: true, create: true },
+      }),
+      defaultRenderOpts,
+    );
+    const joined = stripAnsi(lines.join("\n"));
+    expect(joined).toContain("new ctrl+n");
+  });
+
+  it("空候选无 create 能力 → empty 态仅 Esc 清空", () => {
+    const lines = renderSessionLines(
+      makeState({
+        suggestions: [],
+        selectedIndex: -1,
+        inlineActions: { delete: true },
+      }),
+      defaultRenderOpts,
+    );
+    const joined = stripAnsi(lines.join("\n"));
+    expect(joined).not.toContain("new ctrl+n");
+    expect(joined).toContain("Esc 清空");
+  });
+
+  it("空候选 + provider emptyHint → body 显引导替代技术占位", () => {
+    const lines = renderSessionLines(
+      makeState({
+        suggestions: [],
+        selectedIndex: -1,
+        argumentHint: {
+          argIndex: 0,
+          renderedHint: "[scene: …]",
+          currentArg: {
+            kind: "text",
+            name: "scene",
+            description: "",
+            required: true,
+          },
+          emptyHint: "暂无工作场景，Ctrl+N 新建一个",
+        },
+      }),
+      defaultRenderOpts,
+    );
+    const joined = stripAnsi(lines.join("\n"));
+    expect(joined).toContain("暂无工作场景");
+    expect(joined).not.toContain("[scene: …]");
   });
 
   it("suggestions 多于 maxVisibleItems 时显示 more... 滚动标志", () => {

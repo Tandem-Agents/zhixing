@@ -1642,6 +1642,8 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       // onCandidateDelete(work 分流 → session.removeWorkScene),rename / create
       // 走主循环消费 inline-edit-request(→ session.workSceneRegistry)。
       inlineActions: { delete: true, rename: true, create: true },
+      // 候选为空（还没场景 / query 无匹配）时的引导,替代技术占位 "[scene: …]"。
+      emptyHint: "暂无工作场景，Ctrl+N 新建一个",
     };
 
     const workSceneArgSchema: ArgSchema = {

@@ -258,7 +258,7 @@ export interface RenderOptions {
  *   │    /reset              Alias of /new          │
  *   │  ↓ 下方还有 N 条                               │
  *   ╰────────────────────────────────────────────────╯
- *     ↑↓ 选择 · Enter 接受 · Tab 接受 · Esc 清空
+ *     ↑↓ · Enter · Esc      （有 ghostText 时插入 · Tab ·）
  *
  * inactive 时返回空数组 —— 调用方直接 `panel.render([])` 擦除之前的渲染。
  */
@@ -355,12 +355,18 @@ function renderEmptyChrome(
 ): string[] {
   const body: BodyLine[] = [];
 
-  if (state.argumentHint && !state.loading) {
+  if (state.loading) {
+    body.push(theme.loading(clampLine("正在加载候选…", contentBudget)));
+  } else if (state.argumentHint?.emptyHint) {
+    // provider 声明了空态引导（如"暂无工作场景，Ctrl+N 新建一个"）—— 优先于
+    // 技术占位（参数 hint / "未找到匹配项"），让空候选对用户有引导意义。
+    body.push(
+      theme.emptyHint(clampLine(state.argumentHint.emptyHint, contentBudget)),
+    );
+  } else if (state.argumentHint) {
     body.push(
       theme.hint(clampLine(state.argumentHint.renderedHint, contentBudget)),
     );
-  } else if (state.loading) {
-    body.push(theme.loading(clampLine("正在加载候选…", contentBudget)));
   } else {
     body.push(theme.emptyHint(clampLine("未找到匹配项", contentBudget)));
   }
@@ -370,11 +376,13 @@ function renderEmptyChrome(
     body.push("");
   }
 
-  // 永远 1 行 meta "Esc 清空"——empty 态下用户唯一可执行动作。与 active 路径
-  // 的 shortcut meta（"↑↓ 选择 · Enter 接受 · Tab 接受 · Esc 清空"，1 行）对齐
-  // 行数，让 empty ↔ active 切换不引入高度跳变。
+  // 1 行 meta。空候选下唯一有意义的 inline 操作是 create（new ctrl+n，list 级、
+  // 不依赖选中）—— delete / rename 需选中候选，空列表无候选可操作，故 empty 态只
+  // 提示 new。仍单行拼接，与 active 路径 shortcut meta（1 行）对齐，不引入高度跳变。
   const meta: string[] = [
-    `  ${theme.hint(clampLine("Esc 清空", frameWidth - 2))}`,
+    state.inlineActions.create
+      ? `  ${theme.hint(clampLine("new ctrl+n · Esc 清空", frameWidth - 2))}`
+      : `  ${theme.hint(clampLine("Esc 清空", frameWidth - 2))}`,
   ];
 
   return [
@@ -405,8 +413,8 @@ function renderEmptyChrome(
  *     候选区 + 1 行底 slot），与 count / selectedIndex / isScrollable **无关**。
  *   chrome 自带顶 / 底框线 2 行 → chrome 总 = maxVisibleItems + 4。
  *
- *   meta 行数 = 1（active 路径的 shortcut "↑↓ 选择 · Enter 接受 · Tab 接受 ·
- *     Esc 清空"；empty 路径对齐为 "Esc 清空"）+ 可选 argumentHint 1 行。
+ *   meta 行数 = 1（active 路径的 nav shortcut "↑↓ · Enter · Esc"，有 ghostText
+ *     时插入 Tab；empty 路径对齐为 "Esc 清空"）+ 可选 inlineActions / argumentHint 1 行。
  *
  * 这一不变量与 broker emit 策略（详见 broker.runQuery docstring "emit 策略"）
  * 共同保证：每次 emit 触发的 paint chromeHeight 严格相等 → `setChromeHeight`
@@ -493,27 +501,32 @@ function renderActiveChrome(
   const ia = state.inlineActions;
   const hasInlineActions = Boolean(ia.delete || ia.rename || ia.create);
   if (hasInlineActions) {
-    let hintText: string;
     if (state.deletePending) {
-      // 删除准备态优先 —— 覆盖其他操作提示,聚焦二次确认
-      hintText = "再按一次 ctrl+d 确认删除";
+      // 删除准备态优先 —— 覆盖其他操作提示,聚焦二次确认（整行 dim）
+      meta.push(
+        `  ${theme.hint(clampLine("再按一次 ctrl+d 确认删除", frameWidth - 2))}`,
+      );
     } else {
-      // 多操作拼成单行(· 分隔),严守 meta 恒 2 行高度不变量
-      const parts: string[] = [];
-      if (ia.delete) parts.push("delete ctrl+d");
-      if (ia.rename) parts.push("rename ctrl+r");
-      if (ia.create) parts.push("new ctrl+n");
-      hintText = parts.join(" · ");
+      // 每个操作 = 动作词（默认前景，亮）+ 按键（dim），让"做什么"与"按哪个键"
+      // 分两层视觉；pair 之间用空格而非 · 分隔。整行已分段上色，不再整体套 hint。
+      const pairs: string[] = [];
+      if (ia.delete) pairs.push(`delete ${tone.dim("ctrl+d")}`);
+      if (ia.rename) pairs.push(`rename ${tone.dim("ctrl+r")}`);
+      if (ia.create) pairs.push(`new ${tone.dim("ctrl+n")}`);
+      meta.push(`  ${clampLine(pairs.join("   "), frameWidth - 2)}`);
     }
-    meta.push(`  ${theme.hint(clampLine(hintText, frameWidth - 2))}`);
   } else if (state.argumentHint) {
     meta.push(
       `  ${theme.hint(clampLine(state.argumentHint.renderedHint, frameWidth - 2))}`,
     );
   }
-  meta.push(
-    `  ${theme.hint(clampLine("↑↓ 选择 · Enter 接受 · Tab 接受 · Esc 清空", frameWidth - 2))}`,
-  );
+  // 第二行导航 hint —— 纯按键、点分隔、无说明文本。Tab 仅在当前有 ghostText
+  // （灰字补全）时插入：那时 Tab 接受补全、与 Enter 接受候选语义不同才值得提示；
+  // 无 ghost 时 Tab == Enter，省去避免噪音（场景 / 参数面板无 ghost，故永不显示）。
+  const navKeys = ["↑↓", "Enter"];
+  if (state.ghostText) navKeys.push("Tab");
+  navKeys.push("Esc");
+  meta.push(`  ${theme.hint(clampLine(navKeys.join(" · "), frameWidth - 2))}`);
 
   return [
     ...renderChrome({

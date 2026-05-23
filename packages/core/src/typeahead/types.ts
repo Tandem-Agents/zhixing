@@ -187,6 +187,11 @@ export interface ArgChoiceProvider {
    * 业务编排在 cli 层 callback 完成。
    */
   readonly inlineActions?: InlineActionSupport;
+  /**
+   * 可选:候选为空时面板显示的引导文案,替代技术占位（"未找到匹配项" / 参数
+   * hint）。如 workscene 的"暂无工作场景，Ctrl+N 新建一个"。
+   */
+  readonly emptyHint?: string;
 }
 
 interface ArgBase {
@@ -659,6 +664,8 @@ export interface ArgumentHint {
   readonly renderedHint: string;
   /** 当前参数的 schema（用于类型分派） */
   readonly currentArg: ArgSchema;
+  /** 候选为空时的引导文案 —— 来自 async-enum 的 provider.emptyHint。 */
+  readonly emptyHint?: string;
 }
 
 /**

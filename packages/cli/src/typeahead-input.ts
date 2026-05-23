@@ -700,9 +700,16 @@ export class InputController implements InputRegion {
       ) {
         const tokenStart = this.lastSessionState.trigger.tokenStart;
         const chars = Array.from(this.buffer.draft);
-        this.buffer.setDraft(chars.slice(0, tokenStart).join(""), tokenStart);
-        this.syncBroker();
-        return;
+        // 渐进式 Esc：仅当截断到 tokenStart 真能去掉字符时清当前 typeahead token
+        // （保留触发前缀，如 `/work ` —— 面板回到"未过滤全量"态）。token 已空
+        // （tokenStart 已达 draft 末尾，截断是 no-op）则落到下方清空整个 buffer。
+        // 命令面板 tokenStart=0 一步清空、argument 面板空 token 也一步清空，二者
+        // 语义自然统一；少了这道判断时，`/work ` 这类空参数态按 Esc 会原地无反应。
+        if (chars.length > tokenStart) {
+          this.buffer.setDraft(chars.slice(0, tokenStart).join(""), tokenStart);
+          this.syncBroker();
+          return;
+        }
       }
       this.buffer.clear();
       this.syncBroker();

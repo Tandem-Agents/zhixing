@@ -143,6 +143,10 @@ export class ArgumentProvider implements SuggestionProvider {
       argIndex: data.argIndex,
       renderedHint: renderFullHintLine(data.allSchemas, data.argIndex),
       currentArg: data.currentSchema,
+      emptyHint:
+        data.currentSchema.kind === "async-enum"
+          ? data.currentSchema.provider.emptyHint
+          : undefined,
     };
   }
 

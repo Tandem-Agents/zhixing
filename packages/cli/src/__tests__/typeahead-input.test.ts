@@ -18,6 +18,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import chalk from "chalk";
 
 import {
+  ArgumentProvider,
   CommandProvider,
   DefaultCommandRegistry,
   DefaultTypeaheadBroker,
@@ -32,7 +33,8 @@ import {
   stringWidth,
   stripAnsi,
 } from "../tui/index.js";
-import { readInputLine, type InputLineResult } from "../typeahead-input.js";
+import { InputController, readInputLine, type InputLineResult } from "../typeahead-input.js";
+import type { ScreenController } from "../screen/index.js";
 
 // PassThrough 非 TTY，chalk 默认禁用颜色——强开 level=3 让 bg / dim 等 ANSI
 // 真实出现在 captured 里供回归断言（与 chalk 在真实 TTY 的输出一致）
@@ -458,6 +460,57 @@ describe("readInputLine — 导航与 Esc", () => {
     const result = await p;
     expect(result).toMatchObject({ kind: "text", text: "" });
   });
+
+  it("argument 面板空 token 时 Esc 清整行（不原地无反应）", async () => {
+    // `/cmd ` 进入 argument 面板但还没敲参数时，trigger.tokenStart 已达 draft
+    // 末尾 —— 截断到 tokenStart 是 no-op。Esc 必须退一步清整个 buffer，否则
+    // 用户感知"按 Esc 无反应"（回归保护：见 typeahead-input.ts 渐进式 Esc）。
+    const { stdin, stdout, getCaptured } = makeStreams();
+    const registry = new DefaultCommandRegistry();
+    registry.register({
+      name: "pick",
+      id: "pick:test",
+      description: "选一个水果",
+      category: "session",
+      execution: "local",
+      args: [
+        {
+          kind: "enum",
+          name: "fruit",
+          description: "水果",
+          required: true,
+          choices: ["alpha", "beta"],
+        },
+      ],
+    });
+    const broker = new DefaultTypeaheadBroker({
+      now: () => 1_700_000_000_000,
+    });
+    broker.register(new CommandProvider({ registry }));
+    broker.register(new ArgumentProvider({ registry }));
+    const dispatcher = new CommandDispatcher({ registry });
+
+    const p = readInputLine({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      stdin,
+      stdout,
+      columns: 80,
+    });
+
+    // "/pick " —— 命令名 + 空格进入参数面板，参数 token 为空
+    await typeChars(stdin, "/pick ");
+    expect(getCaptured()).toContain("alpha"); // 候选已渲染（确认在面板态）
+
+    // Esc 清整行 → Enter 提交空文本。修复前：Esc 原地无反应、buffer 仍是
+    // "/pick "、面板仍在，Enter 会 accept 候选 → command-dispatched（非空 text）。
+    await sendSyntheticKey(stdin, { name: "escape", sequence: "\x1b" });
+    await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+
+    const result = await p;
+    expect(result).toMatchObject({ kind: "text", text: "" });
+  });
 });
 
 describe("readInputLine — 资源管理", () => {
@@ -764,5 +817,66 @@ describe("readInputLine — 历史回显视觉护栏", () => {
     expect(frame).not.toContain("\x1b[48;5;236m");
 
     await p;
+  });
+});
+
+describe("InputController — suspend/resume 输入态快照恢复", () => {
+  function makeScreen(): ScreenController {
+    return {
+      attachInput: vi.fn(),
+      detachInput: vi.fn(),
+      dispose: vi.fn(),
+      requestInputRepaint: vi.fn(),
+      ensureScrollLeadingBlank: vi.fn(),
+      withScrollWrite: vi.fn(),
+    } as unknown as ScreenController;
+  }
+
+  it("候选浏览中途 suspend → resume：draft 原样恢复并重新触发候选", async () => {
+    const { stdin } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+    const controller = new InputController({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      screen: makeScreen(),
+      stdin,
+      columns: 80,
+    });
+    controller.start();
+    await typeChars(stdin, "/he");
+    expect(stripAnsi(controller.renderLines().join("\n"))).toContain("/he");
+
+    controller.suspend();
+    // 挂起态不渲染输入行（chrome 收缩到 status 高度）
+    expect(stripAnsi(controller.renderLines().join("\n"))).not.toContain("/he");
+
+    controller.resume();
+    await new Promise((r) => setImmediate(r));
+    // 恢复挂起前的 draft —— 候选浏览中途被 inline 编辑接管后原样还原
+    expect(stripAnsi(controller.renderLines().join("\n"))).toContain("/he");
+
+    controller.stop();
+  });
+
+  it("空 buffer suspend → resume 无残留（confirm 场景零影响）", async () => {
+    const { stdin } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+    const controller = new InputController({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      screen: makeScreen(),
+      stdin,
+      columns: 80,
+    });
+    controller.start();
+    // 不输入任何字符（模拟 confirm 在 turn 运行时挂起，buffer 已空）
+    controller.suspend();
+    controller.resume();
+    await new Promise((r) => setImmediate(r));
+    expect(stripAnsi(controller.renderLines().join("\n"))).not.toContain("/he");
+
+    controller.stop();
   });
 });

@@ -24,7 +24,11 @@
 
 import type * as readline from "node:readline";
 
-import { tone, icon, layout } from "./style.js";
+import { tone, icon } from "./style.js";
+import { renderChrome } from "./chrome.js";
+import { ANSI } from "./ansi.js";
+import { layoutInputBuffer } from "../input-layout.js";
+import { PASTE_TOKEN_PATTERN } from "../paste-registry.js";
 import {
   rawModeController,
   type RawModeLease,
@@ -50,11 +54,16 @@ export interface InlineTextPromptOptions {
   readonly stdin?: NodeJS.ReadStream;
   /** 外部取消信号 —— abort 等价取消（返回 null） */
   readonly signal?: AbortSignal;
+  /** 覆盖终端宽度 —— 测试用 */
+  readonly columns?: number;
+  /** 输入框最小宽度（极窄终端兜底）；缺省 40，与候选面板同款 */
+  readonly minWidth?: number;
 }
 
 export class InlineTextPromptRegion implements InputRegion {
   private readonly buffer = new InputBuffer();
   private cachedLines: readonly string[] = [];
+  private cachedCursor: { row: number; col: number } = { row: 0, col: 0 };
   private finished = false;
   private resolveResult: ((r: string | null) => void) | null = null;
 
@@ -117,49 +126,61 @@ export class InlineTextPromptRegion implements InputRegion {
   }
 
   cursorPosition(): { row: number; col: number } {
-    // chrome 模式硬件光标永久隐藏，光标以 ▎ 视觉呈现（同 SelectOperationRegion）。
-    return { row: 0, col: 0 };
+    return this.cachedCursor;
   }
 
   // ─── 渲染 ───
 
-  /**
-   * 渲染当前帧为 chrome lines —— 纯函数（不写 stdout）。三行结构：
-   *   ▎ <prompt>            ← header
-   *     <文本>▎             ← 输入行（▎ 是光标位置，空时显 placeholder）
-   *   Enter 提交 · Esc 取消  ← hint
-   */
-  private computeLines(): void {
-    const lines: string[] = [];
-
-    lines.push(
-      `${layout.contentPrefix}${tone.brand(icon.section)} ${tone.bold(
-        this.opts.prompt,
-      )}`,
-    );
-
-    lines.push(`${layout.contentPrefix}  ${this.renderInputLine()}`);
-
-    lines.push(
-      `${layout.contentPrefix}${tone.dim("Enter 提交 · Esc 取消")}`,
-    );
-
-    this.cachedLines = lines;
+  private getColumns(): number {
+    if (typeof this.opts.columns === "number") return this.opts.columns;
+    return process.stdout.columns ?? 80;
   }
 
-  /** 输入行内容 —— 在 cursor 字符位置插入 ▎ 视觉光标；空 buffer 显 placeholder。 */
-  private renderInputLine(): string {
-    const draft = this.buffer.draft;
-    if (!draft) {
-      return this.opts.placeholder
-        ? `▎${tone.dim(this.opts.placeholder)}`
-        : "▎";
-    }
-    const chars = Array.from(draft);
-    const cursor = this.buffer.cursor;
-    const before = chars.slice(0, cursor).join("");
-    const after = chars.slice(cursor).join("");
-    return `${tone.brand(before)}▎${tone.brand(after)}`;
+  /**
+   * 渲染当前帧 —— 纯函数（不写 stdout）。结构：
+   *   ▎ <prompt>              ← 标题行（brand 章节锚 + bold，框外标签缩进 1 格）
+   *   ╭──────────────╮        ← 输入框（renderChrome 紧凑模式，与候选面板同宽）
+   *   │ <文本>            │    ← 框内输入行
+   *   ╰──────────────╯
+   *   Enter 提交 · Esc 取消    ← hint 行（dim，框外标签缩进 1 格）
+   *
+   * 框内输入行复用普通输入框同款 `layoutInputBuffer`：文字默认色、光标走 reverse
+   * SGR、placeholder dim —— 与 InputController 视觉完全一致（promptPrefix 传空，
+   * 框内不需要 ❯）。边框 / padding / 宽度感知截断委托 renderChrome（CJK 安全）。
+   */
+  private computeLines(): void {
+    const frameWidth = Math.max(this.opts.minWidth ?? 40, this.getColumns());
+    const contentBudget = Math.max(1, frameWidth - 4);
+    const suffix =
+      this.buffer.isEmpty && this.opts.placeholder
+        ? `${ANSI.dim}${this.opts.placeholder}${ANSI.reset}`
+        : "";
+    const layout = layoutInputBuffer(
+      "",
+      this.buffer.draft,
+      this.buffer.cursor,
+      suffix,
+      contentBudget,
+      PASTE_TOKEN_PATTERN,
+      true,
+    );
+    const boxLines = renderChrome({
+      body: layout.bodyLines,
+      width: frameWidth,
+      bodyPadding: false,
+      indent: 1,
+    });
+    this.cachedLines = [
+      ` ${tone.brand.bold(icon.section)}${tone.bold(this.opts.prompt)}`,
+      ...boxLines,
+      ` ${tone.dim("Enter 提交 · Esc 取消")}`,
+    ];
+    // 标题(1) + box 顶边(1) → cursor 落在第 2 + layout.cursorRow 行；
+    // 列 = 左 │(1) + indent(1) + layout.cursorCol。
+    this.cachedCursor = {
+      row: 2 + layout.cursorRow,
+      col: 2 + layout.cursorCol,
+    };
   }
 
   // ─── 键盘处理 ───
