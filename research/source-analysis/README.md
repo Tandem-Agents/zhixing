@@ -23,6 +23,7 @@
 | [设计模式](./openclaw/key-patterns.md) | 关键设计模式提取 | 🔲 待分析 |
 | [安全系统](./openclaw/security-system.md) | 沙箱隔离 + 执行审批 + 工具策略 + 安全审计 | ✅ 已完成 |
 | [常驻服务](./openclaw/persistent-service.md) | Gateway + Daemon + Cron + Heartbeat + Channel Plugin + WebSocket RPC | ✅ 已完成 |
+| [MCP 架构](./openclaw/mcp-architecture.md) | 三子系统（embedded Pi 作 client / CLI-runner 注入下游 CLI / 作 server）+ `<server>__<tool>` 命名 + 危险 env 过滤 | ✅ 已完成 |
 
 ### Claude Code
 
@@ -32,6 +33,7 @@
 | [设计模式](./claude-code/key-patterns.md) | 关键设计模式提取 | 🔲 待分析 |
 | [安全系统](./claude-code/security-system.md) | 8 层纵深防御 + OS 级沙箱 + Auto 分类器 + Bash AST 安全 | ✅ 已完成 |
 | [常驻服务](./claude-code/persistent-service.md) | 无 Gateway 的架构抉择 + MCP + Daemon + DirectConnect + 多实例协调 | ✅ 已完成 |
+| [MCP 架构](./claude-code/mcp-architecture.md) | 官方 SDK host/server + 7 transport + 7 scope + `mcp__server__tool` + OAuth/XAA + prompts→slash / resources→@提及 | ✅ 已完成 |
 
 ### Hermes Agent
 
@@ -50,6 +52,16 @@ Nous Research 开发的自主进化型开源智能体，核心差异化在于 Sk
 | 上下文压缩 | 上下文压缩 + Anthropic 前缀缓存策略 | 🔲 待分析 |
 | 设计模式 | 关键设计模式提取（与 OpenClaw/Claude Code 交叉对比） | 🔲 待分析 |
 | [安全系统](./hermes-agent/security-system.md) | Tirith 扫描 + 审批机制 + 文件/网络安全 + 代码执行沙箱 | ✅ 已完成 |
+| [MCP 架构](./hermes-agent/mcp-architecture.md) | 单文件 client + 后台 asyncio loop + 官方 Python SDK + discovery-first CLI + 消息桥 server | ✅ 已完成 |
+
+### 跨产品专题
+
+> 同一主题在多个参考项目间的横向对比，为知行的对应设计提供事实依据。
+
+| 文档 | 内容 | 状态 |
+|------|------|------|
+| [动态上下文注入](./dynamic-context-injection.md) | openclaw / hermes / claude-code 的 per-turn 动态注入对比 | ✅ 已完成 |
+| [Web 搜索工具](./web-search-tool.md) | 三方 web_search 实现对比（服务端 hosted / 客户端多 provider）+ 对知行启示 | ✅ 已完成 |
 
 ## 分析规范
 
