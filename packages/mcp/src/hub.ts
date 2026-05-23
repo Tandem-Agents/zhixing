@@ -22,7 +22,7 @@ import type {
 
 /** 知行作为 MCP client 向 server 申报的身份。 */
 const CLIENT_INFO = { name: "zhixing", version: "0.1.0" };
-const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
+const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 
 /** 一个已连接 server 暴露给上层的工具目录。 */
 export interface McpServerCatalog {

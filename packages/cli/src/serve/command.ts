@@ -58,7 +58,9 @@ import {
   createBlockedRenderer,
 } from "../security/index.js";
 import { setupDelivery, type DeliveryStack } from "../setup-delivery.js";
+import { createMcpHub } from "@zhixing/mcp";
 import { createBuiltinExtraToolsAssembly } from "../runtime/builtin-extra-tools.js";
+import { parseServerSpecs } from "../runtime/mcp-config.js";
 import { InMemoryTaskListStore } from "../runtime/task-list-stores.js";
 import {
   EMPTY_TASK_STATUS_SUMMARY,
@@ -206,8 +208,15 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   // ConversationRepository，没有 meta.json 持久化路径。后续独立 PR 让 serve 接入
   // conversation meta 后，把此处切换为 ConversationRepoTaskListStore（其余装配
   // 代码不动，演化路径线性）。
+  // MCP host —— 连接 config.mcp 声明的外部 server。connectAll 在首个
+  // createAgentRuntime（assembleTools）之前完成，工具目录才能进入 system prompt。
+  // serve 进程内单例，多 session 共享同一批连接。空配置时为 no-op。
+  const mcpHub = createMcpHub(parseServerSpecs(config.mcp));
+  await mcpHub.connectAll();
+
   const builtinExtraTools = createBuiltinExtraToolsAssembly(
     new InMemoryTaskListStore(),
+    mcpHub,
   );
 
   const runtimeFactory = createCliRuntimeFactory({
@@ -524,6 +533,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     scheduler,
     channels,
     deliveryStack,
+    mcpHub: builtinExtraTools.mcpHub,
   });
 
   // 8b.4 ConfirmationBridge —— hub 事件 → RPC notification 单一出口。

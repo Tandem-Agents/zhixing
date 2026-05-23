@@ -5,6 +5,8 @@ export type {
   AgentConfig,
   IntentConfig,
   LLMRoleConfig,
+  McpConfig,
+  McpServerConfigEntry,
   MessagingChannelEntry,
   ModelBudgetOverride,
   NetworkConfig,

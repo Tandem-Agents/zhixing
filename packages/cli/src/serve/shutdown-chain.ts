@@ -24,6 +24,7 @@ import type {
   ExitReason,
 } from "@zhixing/server";
 import type { ChannelRegistry, Scheduler } from "@zhixing/core";
+import type { McpHub } from "@zhixing/mcp";
 import type { DeliveryStack } from "../setup-delivery.js";
 
 /**
@@ -40,6 +41,8 @@ export interface ShutdownChainResources {
   scheduler?: Scheduler;
   channels?: ChannelRegistry;
   deliveryStack?: DeliveryStack;
+  /** MCP 连接层 hub —— 关闭所有 MCP server 连接 / stdio 子进程。 */
+  mcpHub?: McpHub;
   /** PID 锁路径。必须与 runServer 的 lockPaths 同一引用（见接口注释） */
   lockPaths?: ProcessLockPaths;
 }
@@ -89,11 +92,12 @@ export function registerTailCleanup(
  * 在 `runServer` **之后**调用，注册 LIFO 核心资源清理（最先执行的那些）。
  *
  * 注册顺序（LIFO 执行由下到上）：
- *   1. heartbeat.clear          （LIFO 执行 ⑤ —— 停 heartbeat timer）
- *   2. deliveryStack.stop       （④ —— 关投递栈）
- *   3. channels.dispose         （③ —— 断通道）
- *   4. scheduler.stop           （② —— 停调度器）
- *   5. stateFile.markStopping   （① —— 最先执行：对外宣告停机）
+ *   1. heartbeat.clear          （LIFO 执行 ⑥ —— 停 heartbeat timer）
+ *   2. deliveryStack.stop       （⑤ —— 关投递栈）
+ *   3. channels.dispose         （④ —— 断通道）
+ *   4. mcpHub.dispose           （③ —— 关 MCP 连接 / stdio 子进程）
+ *   5. scheduler.stop           （② —— 停调度器）
+ *   6. stateFile.markStopping   （① —— 最先执行：对外宣告停机）
  *
  * 为什么这些在 runServer **之后**注册：
  * - scheduler/channels/delivery 由 command.ts 顶层创建，runServer 之前已经启动，但
@@ -116,6 +120,14 @@ export function registerCoreCleanup(
   if (resources.channels) {
     registry.register("channels.dispose", async () => {
       await resources.channels!.dispose();
+    });
+  }
+  if (resources.mcpHub) {
+    // LIFO 执行落在 scheduler.stop 之后、channels.dispose 之前：先停调度（不再有
+    // 新 turn）→ 关 MCP 连接 / 子进程。in-flight turn 已由 graceful shutdown 等待
+    // 完成，此刻关 hub 不会切断进行中的 MCP 调用。
+    registry.register("mcpHub.dispose", async () => {
+      await resources.mcpHub!.dispose();
     });
   }
   if (resources.scheduler) {

@@ -18,6 +18,7 @@
   "dependencies": {
     "@zhixing/channel-feishu": "workspace:*",
     "@zhixing/core": "workspace:*",
+    "@zhixing/mcp": "workspace:*",
     "@zhixing/network": "workspace:*",
     "@zhixing/orchestrator": "workspace:*",
     "@zhixing/providers": "workspace:*",

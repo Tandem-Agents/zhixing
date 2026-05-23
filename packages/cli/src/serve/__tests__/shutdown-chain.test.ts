@@ -32,6 +32,7 @@ function mkFullResources(heartbeatTimerRef = { current: null as NodeJS.Timeout |
     } as any,
     scheduler: { stop: vi.fn(async () => {}) } as any,
     channels: { dispose: vi.fn(async () => {}) } as any,
+    mcpHub: { dispose: vi.fn(async () => {}) } as any,
     deliveryStack: { stop: vi.fn(async () => {}) } as any,
   };
 }
@@ -60,7 +61,7 @@ describe("registerTailCleanup", () => {
 });
 
 describe("registerCoreCleanup", () => {
-  it("with full resources: registers 5 items in correct order", () => {
+  it("with full resources: registers 6 items in correct order", () => {
     const registry = new CleanupRegistry({ logger: quietLogger() });
     const spy = vi.spyOn(registry, "register");
 
@@ -70,6 +71,7 @@ describe("registerCoreCleanup", () => {
       "heartbeat.clear",
       "deliveryStack.stop",
       "channels.dispose",
+      "mcpHub.dispose",
       "scheduler.stop",
       "stateFile.markStopping",
     ]);
@@ -137,6 +139,11 @@ describe("LIFO execution order (spec §3.6.1 regression guard)", () => {
           order.push("deliveryStack.stop");
         }),
       } as any,
+      mcpHub: {
+        dispose: vi.fn(async () => {
+          order.push("mcpHub.dispose");
+        }),
+      } as any,
     };
 
     // 模拟 command.ts 的真实注册时序：tail → [runServer 注册 server.close] → core
@@ -152,13 +159,14 @@ describe("LIFO execution order (spec §3.6.1 regression guard)", () => {
     expect(order).toEqual([
       "stateFile.markStopping", // ①
       "scheduler.stop", // ②
-      "channels.dispose", // ③
-      "deliveryStack.stop", // ④
-      // heartbeat.clear 无副作用（timer=null），被跳过
-      "server.close", // ⑥ (⑤ skipped)
-      "stateFile.markStopped", // ⑦
-      "stateFile.cleanup", // ⑧
-      // releaseLock 最后（⑨），但我们没 mock
+      "mcpHub.dispose", // ③ —— 先停调度再关 MCP 连接 / 子进程
+      "channels.dispose", // ④
+      "deliveryStack.stop", // ⑤
+      // heartbeat.clear 无副作用（timer=null），被跳过（⑥）
+      "server.close", // ⑦
+      "stateFile.markStopped", // ⑧
+      "stateFile.cleanup", // ⑨
+      // releaseLock 最后（⑩），但我们没 mock
     ]);
   });
 
@@ -175,7 +183,7 @@ describe("LIFO execution order (spec §3.6.1 regression guard)", () => {
 
     // Before runAll, capture original functions and replace with order-tracking ones
     // 最干净的方式：用真实资源 mock（上一个测试已做），这里只断言 LIFO 计数
-    expect(registry.size).toBe(3 /* tail */ + 5 /* core */ + 1 /* server.close */);
+    expect(registry.size).toBe(3 /* tail */ + 6 /* core */ + 1 /* server.close */);
 
     await registry.runAll("test");
     expect(registry.finished).toBe(true);

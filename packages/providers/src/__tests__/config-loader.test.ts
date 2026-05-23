@@ -162,6 +162,51 @@ describe("loadConfig", () => {
     expect(config.messaging?.wecom).toEqual({});
   });
 
+  it("项目配置的 mcp.servers 应按 server id 合并（不是替换）", () => {
+    const globalDir = path.join(tempHome, ".zhixing");
+    fs.mkdirSync(globalDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(globalDir, "config.jsonc"),
+      JSON.stringify({
+        mcp: {
+          servers: {
+            github: { command: "uvx", args: ["a"] },
+            notion: { command: "b" },
+          },
+        },
+      }),
+    );
+
+    fs.writeFileSync(
+      path.join(tempProject, "zhixing.config.jsonc"),
+      JSON.stringify({
+        mcp: {
+          servers: {
+            github: { enabled: false },
+            linear: { command: "c" },
+          },
+        },
+      }),
+    );
+
+    const config = loadConfig({
+      cwd: tempProject,
+      env: { ZHIXING_CONFIG_PATH: path.join(globalDir, "config.jsonc") },
+      noAutoCreate: true,
+    });
+
+    // github: 全局 command/args 保留，项目 enabled 合入
+    expect(config.mcp?.servers?.github).toEqual({
+      command: "uvx",
+      args: ["a"],
+      enabled: false,
+    });
+    // notion: 全局保留
+    expect(config.mcp?.servers?.notion).toEqual({ command: "b" });
+    // linear: 项目新增
+    expect(config.mcp?.servers?.linear).toEqual({ command: "c" });
+  });
+
   it("intent.cancelKeywords 是 append 合并：全局 + 项目都生效", () => {
     const globalDir = path.join(tempHome, ".zhixing");
     fs.mkdirSync(globalDir, { recursive: true });
@@ -360,6 +405,31 @@ describe("applyConfigPatch · 合并语义", () => {
       },
       slack: { type: "slack" },
       wecom: {},
+    });
+  });
+
+  it("mcp.servers 子表 → server id 级 + 字段级合并", () => {
+    const current: Partial<ZhixingConfig> = {
+      mcp: {
+        servers: {
+          github: { command: "uvx", args: ["a"] },
+          notion: { command: "b" },
+        },
+      },
+    };
+    const result = applyConfigPatch(current, {
+      mcp: {
+        servers: {
+          github: { enabled: false },
+          linear: { command: "c" },
+        },
+      },
+    });
+
+    expect(result.mcp?.servers).toEqual({
+      github: { command: "uvx", args: ["a"], enabled: false },
+      notion: { command: "b" },
+      linear: { command: "c" },
     });
   });
 

@@ -11,6 +11,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { Scheduler } from "@zhixing/core";
 import { runContextStorage } from "@zhixing/orchestrator/runtime";
+import { createMcpHub, type McpHub } from "@zhixing/mcp";
 import { createBuiltinExtraToolsAssembly } from "../builtin-extra-tools.js";
 import { InMemoryTaskListStore } from "../task-list-stores.js";
 import type { IWorkModeController } from "../work-mode-controller.js";
@@ -26,7 +27,7 @@ const fakeController = {} as IWorkModeController;
 
 describe("createBuiltinExtraToolsAssembly", () => {
   it("返回的 tools 数组包含 schedule + task_list", () => {
-    const assembly = createBuiltinExtraToolsAssembly(new InMemoryTaskListStore());
+    const assembly = createBuiltinExtraToolsAssembly(new InMemoryTaskListStore(), createMcpHub([]));
     const tools = assembly.assembleTools({
       scheduler: () => fakeScheduler(),
     });
@@ -35,8 +36,29 @@ describe("createBuiltinExtraToolsAssembly", () => {
     expect(names).toEqual(["schedule", "task_list"].sort());
   });
 
+  it("MCP 工具经 hub.catalog 物化注入 extraTools", () => {
+    const fakeHub: McpHub = {
+      connectAll: async () => {},
+      catalog: () => [
+        {
+          server: { serverId: "demo", transport: "stdio" },
+          tools: [{ name: "echo", inputSchema: { type: "object" } }],
+        },
+      ],
+      callTool: async () => ({ content: "" }),
+      dispose: async () => {},
+    };
+    const assembly = createBuiltinExtraToolsAssembly(
+      new InMemoryTaskListStore(),
+      fakeHub,
+    );
+
+    const tools = assembly.assembleTools({ scheduler: () => fakeScheduler() });
+    expect(tools.map((t) => t.name)).toContain("mcp__demo__echo");
+  });
+
   it("assembleTools 多次调用返回**新的** ToolDefinition 实例（runtime swap 友好）", () => {
-    const assembly = createBuiltinExtraToolsAssembly(new InMemoryTaskListStore());
+    const assembly = createBuiltinExtraToolsAssembly(new InMemoryTaskListStore(), createMcpHub([]));
 
     const tools1 = assembly.assembleTools({ scheduler: () => fakeScheduler() });
     const tools2 = assembly.assembleTools({ scheduler: () => fakeScheduler() });
@@ -47,7 +69,7 @@ describe("createBuiltinExtraToolsAssembly", () => {
   });
 
   it("多次 assembleTools 共享同一 TaskListService —— state 跨 runtime 持续", async () => {
-    const assembly = createBuiltinExtraToolsAssembly(new InMemoryTaskListStore());
+    const assembly = createBuiltinExtraToolsAssembly(new InMemoryTaskListStore(), createMcpHub([]));
 
     // 第一次装配，工具 set 一些 state
     const tools1 = assembly.assembleTools({ scheduler: () => fakeScheduler() });
@@ -103,7 +125,7 @@ describe("createBuiltinExtraToolsAssembly", () => {
   });
 
   it("task_list 工具走 ALS 取 conversationId —— runtime.run 入口 conversationId 注入透传", async () => {
-    const assembly = createBuiltinExtraToolsAssembly(new InMemoryTaskListStore());
+    const assembly = createBuiltinExtraToolsAssembly(new InMemoryTaskListStore(), createMcpHub([]));
     const tools = assembly.assembleTools({ scheduler: () => fakeScheduler() });
     const taskListTool = tools.find((t) => t.name === "task_list")!;
 
@@ -145,7 +167,7 @@ describe("createBuiltinExtraToolsAssembly", () => {
   });
 
   it("无 ALS 上下文（ephemeral 路径）→ task_list 调用 isError 拒绝", async () => {
-    const assembly = createBuiltinExtraToolsAssembly(new InMemoryTaskListStore());
+    const assembly = createBuiltinExtraToolsAssembly(new InMemoryTaskListStore(), createMcpHub([]));
     const tools = assembly.assembleTools({ scheduler: () => fakeScheduler() });
     const taskListTool = tools.find((t) => t.name === "task_list")!;
 
@@ -161,7 +183,7 @@ describe("createBuiltinExtraToolsAssembly", () => {
   });
 
   it("spec=main → 追加 main 组 workmode 工具，by-construction 不含 power-only", () => {
-    const assembly = createBuiltinExtraToolsAssembly(new InMemoryTaskListStore());
+    const assembly = createBuiltinExtraToolsAssembly(new InMemoryTaskListStore(), createMcpHub([]));
     const names = assembly
       .assembleTools({
         scheduler: () => fakeScheduler(),
@@ -183,7 +205,7 @@ describe("createBuiltinExtraToolsAssembly", () => {
   });
 
   it("spec=workscene → 仅追加 power-only workmode_exit，物理隔离 main-only 工具", () => {
-    const assembly = createBuiltinExtraToolsAssembly(new InMemoryTaskListStore());
+    const assembly = createBuiltinExtraToolsAssembly(new InMemoryTaskListStore(), createMcpHub([]));
     const names = assembly
       .assembleTools({
         scheduler: () => fakeScheduler(),
@@ -203,7 +225,7 @@ describe("createBuiltinExtraToolsAssembly", () => {
   });
 
   it("无 workModeController（serve 等）→ 不追加任何 workmode 工具", () => {
-    const assembly = createBuiltinExtraToolsAssembly(new InMemoryTaskListStore());
+    const assembly = createBuiltinExtraToolsAssembly(new InMemoryTaskListStore(), createMcpHub([]));
     const names = assembly
       .assembleTools({
         scheduler: () => fakeScheduler(),
@@ -215,7 +237,7 @@ describe("createBuiltinExtraToolsAssembly", () => {
   });
 
   it("scheduler getter 在工具 call 时 lazy 解析（装配期 scheduler 可未就绪）", () => {
-    const assembly = createBuiltinExtraToolsAssembly(new InMemoryTaskListStore());
+    const assembly = createBuiltinExtraToolsAssembly(new InMemoryTaskListStore(), createMcpHub([]));
     let scheduler: Scheduler | null = null;
     const getter = vi.fn(() => {
       if (!scheduler) throw new Error("not ready");

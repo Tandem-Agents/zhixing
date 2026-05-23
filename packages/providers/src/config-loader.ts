@@ -189,6 +189,12 @@ export function applyConfigPatch(
     result.messaging = mergeIdMap(current.messaging, patch.messaging);
   }
 
+  if (patch.mcp !== undefined) {
+    result.mcp = {
+      servers: mergeIdMap(current.mcp?.servers, patch.mcp.servers ?? {}),
+    };
+  }
+
   return result as ZhixingConfig;
 }
 
@@ -404,6 +410,13 @@ function deepMergeConfig(
         result.messaging[key] = value;
       }
     }
+  }
+
+  // mcp：按 server id 字段级合并（与 messaging 同构）
+  if (override.mcp) {
+    result.mcp = {
+      servers: mergeIdMap(base.mcp?.servers, override.mcp.servers ?? {}),
+    };
   }
 
   if (override.agent !== undefined) {

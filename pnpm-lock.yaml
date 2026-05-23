@@ -45,6 +45,9 @@ importers:
       '@zhixing/core':
         specifier: workspace:*
         version: link:../core
+      '@zhixing/mcp':
+        specifier: workspace:*
+        version: link:../mcp
       '@zhixing/network':
         specifier: workspace:*
         version: link:../network

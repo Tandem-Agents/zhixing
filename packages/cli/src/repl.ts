@@ -59,7 +59,9 @@ import {
 import { describeProxy, type ProxyDescription } from "@zhixing/network";
 import { loadConfig, loadCredentials, resolveHomeDir } from "@zhixing/providers";
 import type { TaskListService } from "@zhixing/tools-builtin";
+import { createMcpHub } from "@zhixing/mcp";
 import { createBuiltinExtraToolsAssembly } from "./runtime/builtin-extra-tools.js";
+import { parseServerSpecs } from "./runtime/mcp-config.js";
 import { createCliSegmentDeps } from "./runtime/segment-deps.js";
 import { ConversationRepoTaskListStore } from "./runtime/task-list-stores.js";
 import { RoutingConversationRepository } from "./runtime/conversation-router.js";
@@ -1054,8 +1056,15 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   // assembly 持有 TaskListService 单例，跨 reload 复用（service.cache 与持久化连续
   // 性由此保障）。session 内部每次 createAgent 都调 assembly.assembleTools() 拿
   // 新的 ToolDefinition 实例，工具内部都闭包引用同一 service —— 行为一致。
+  // MCP host —— 连接 config.mcp 声明的外部 server，其工具经 assembleTools 进入工具集。
+  // connectAll 必须在 createAgent（RuntimeSession.create 内部 assembleTools）之前完成，
+  // 工具目录才能进入首个 system prompt。空配置时 hub 为 no-op，connectAll 立即返回。
+  const mcpHub = createMcpHub(parseServerSpecs(config.mcp));
+  await mcpHub.connectAll();
+
   const builtinExtraTools = createBuiltinExtraToolsAssembly(
     new ConversationRepoTaskListStore(routingRepo),
+    mcpHub,
   );
 
   // 段切换外部依赖 —— 跨 reload 持久，封装 taskListReader（适配自 TaskListService）
@@ -1845,6 +1854,11 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     // session.dispose 内部 detach renderer + stop scheduler/delivery + dispose channels
     await session.dispose().catch((err) =>
       cliWriter.line(`[session.dispose] ${err instanceof Error ? err.message : String(err)}`),
+    );
+    // MCP 连接 / stdio 子进程关闭 —— 在 session 停止之后（工具不再被调用），由 hub 的
+    // owner（本入口）释放，避免子进程在 CLI 退出后成为孤儿。
+    await builtinExtraTools.mcpHub.dispose().catch((err) =>
+      cliWriter.line(`[mcpHub.dispose] ${err instanceof Error ? err.message : String(err)}`),
     );
     cliWriter.line(chalk.dim("\n再见 👋"));
     process.exit(0);

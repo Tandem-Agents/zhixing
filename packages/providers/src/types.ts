@@ -285,6 +285,35 @@ export interface MessagingChannelEntry {
 }
 
 /**
+ * 单个 MCP server 的配置条目（决策层，无凭证）。
+ *
+ * 出现在 config.mcp.servers 即视为接入；远程 server 的凭证（token 等）在
+ * credentials.mcp.<id>，本表只放连接决策（传输方式 + 启动信息 + 启用开关）。
+ */
+export interface McpServerConfigEntry {
+  /** 传输方式，缺省 stdio。 */
+  type?: "stdio" | "http";
+  /** stdio：启动 server 进程的可执行命令。 */
+  command?: string;
+  /** stdio：命令行参数。 */
+  args?: string[];
+  /** http：server 的端点 URL。 */
+  url?: string;
+  /** 是否启用，缺省 true；置 false 则不连接、其工具不出现。 */
+  enabled?: boolean;
+  /** 可选的工具白 / 黑名单（按 MCP 原始工具名）。 */
+  tools?: { include?: string[]; exclude?: string[] };
+}
+
+/**
+ * MCP host 配置 —— 知行作为 MCP client 接入的外部 server 集合。
+ * 与 messaging 同构：servers 按 id 索引，id 同时用作工具命名的 server 段。
+ */
+export interface McpConfig {
+  servers?: Record<string, McpServerConfigEntry>;
+}
+
+/**
  * 单个 LLM 角色的 provider+model 选择。
  *
  * - provider：必须是内置预设 ID 或 credentials.providers 表中的 key
@@ -336,6 +365,14 @@ export interface ZhixingConfig {
    * 在 credentials.channels.<id>。本表只放功能选项（type / options / defaultTarget）。
    */
   messaging?: Record<string, MessagingChannelEntry>;
+  /**
+   * 接入的 MCP server 表。
+   *
+   * 出现在 servers 表的 server 视为接入；远程 server 的凭证在 credentials.mcp.<id>，
+   * 本表只放连接决策。MCP 工具以 `mcp__<id>__<tool>` 命名进入 agent 工具集，走与
+   * 内置工具相同的安全管线。
+   */
+  mcp?: McpConfig;
   /** 智能体身份配置（名字、人格等） */
   agent?: AgentConfig;
   /** 控制意图配置（cancel 关键词扩展等） */
