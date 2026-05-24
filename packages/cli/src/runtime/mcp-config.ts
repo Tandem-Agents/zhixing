@@ -10,7 +10,11 @@
  */
 
 import { isValidServerId, type McpServerSpec } from "@zhixing/mcp";
-import type { McpConfig, ZhixingCredentials } from "@zhixing/providers";
+import type {
+  McpConfig,
+  McpServerConfigEntry,
+  ZhixingCredentials,
+} from "@zhixing/providers";
 
 /**
  * config.mcp（决策层）+ credentials.mcp（内容层）→ 连接规格。
@@ -30,23 +34,35 @@ export function parseServerSpecs(
   for (const [serverId, entry] of Object.entries(servers)) {
     if (entry.enabled === false) continue;
     if (!isValidServerId(serverId)) continue;
-
-    const transport = entry.type ?? "stdio";
-    const spec: McpServerSpec = { serverId, transport };
-    if (entry.command !== undefined) spec.command = entry.command;
-    if (entry.args !== undefined) spec.args = entry.args;
-    if (entry.url !== undefined) spec.url = entry.url;
-
-    const cred = credentials?.[serverId];
-    if (cred && Object.keys(cred).length > 0) {
-      if (transport === "http") {
-        spec.headers = cred;
-      } else {
-        spec.env = cred;
-      }
-    }
-
-    specs.push(spec);
+    specs.push(toServerSpec(serverId, entry, credentials?.[serverId]));
   }
   return specs;
+}
+
+/**
+ * 单个 server 的 config 条目（+ 可选凭证）→ 连接规格。
+ *
+ * 凭证按 transport 注入：http → 请求头、stdio → 环境变量（系统不解释字段语义，用户 / 引导
+ * 填的 key 即注入 key）。enabled / serverId 合法性的过滤是 parseServerSpecs 的装载策略，
+ * 不在此处——接入引导验证一个候选时直接调本函数、不受装载过滤影响。
+ */
+export function toServerSpec(
+  serverId: string,
+  entry: McpServerConfigEntry,
+  secrets?: Record<string, string>,
+): McpServerSpec {
+  const transport = entry.type ?? "stdio";
+  const spec: McpServerSpec = { serverId, transport };
+  if (entry.command !== undefined) spec.command = entry.command;
+  if (entry.args !== undefined) spec.args = entry.args;
+  if (entry.url !== undefined) spec.url = entry.url;
+
+  if (secrets && Object.keys(secrets).length > 0) {
+    if (transport === "http") {
+      spec.headers = secrets;
+    } else {
+      spec.env = secrets;
+    }
+  }
+  return spec;
 }

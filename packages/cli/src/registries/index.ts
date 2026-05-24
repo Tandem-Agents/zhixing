@@ -19,3 +19,11 @@ export {
   type SupportedChannel,
   type ChannelFieldSpec,
 } from "./channels.js";
+export {
+  MCP_PRESETS,
+  findMcpPreset,
+  applyMcpPreset,
+  applyMcpSecretFields,
+  type McpPreset,
+  type McpSecretFieldSpec,
+} from "./mcp-presets.js";

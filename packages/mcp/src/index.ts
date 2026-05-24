@@ -6,6 +6,8 @@ export type {
   McpServerStatus,
 } from "./hub.js";
 export { mapServerTools } from "./mapping.js";
+export { probeServer } from "./probe.js";
+export type { ProbeOptions, ProbeResult } from "./probe.js";
 export {
   isValidServerId,
   makeToolName,

@@ -13,14 +13,15 @@
  * 返回 isError、dispose 空），故 hub 引用恒非空、调用方无需任何判空分支。
  */
 
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { NetworkPolicy } from "@zhixing/network";
-import { toToolResult } from "./result.js";
 import {
-  createTransport as defaultCreateTransport,
-  type CreatedTransport,
-  type CreateTransportOptions,
-} from "./transport.js";
+  connectAndListTools,
+  type ConnectedClient,
+  type CreateTransportFn,
+} from "./connect.js";
+import { toToolResult } from "./result.js";
+import { createTransport as defaultCreateTransport } from "./transport.js";
 import type {
   McpCallFn,
   McpServerContext,
@@ -29,8 +30,6 @@ import type {
   McpTransportKind,
 } from "./types.js";
 
-/** 知行作为 MCP client 向 server 申报的身份。 */
-const CLIENT_INFO = { name: "zhixing", version: "0.1.0" };
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 /** 后台重连的退避：首次 1s，每次翻倍，封顶 30s 后等间隔无限重试（server 恢复即自愈）。 */
 const RECONNECT_BASE_DELAY_MS = 1_000;
@@ -84,10 +83,7 @@ export interface McpHubOptions {
   /** 网络代理配置 —— 透传给 http transport 的 SSRF-safe fetch（继承 network.proxy）。 */
   networkProxy?: NetworkPolicy["proxy"];
   /** transport 构造注入点 —— 默认按 spec 造真实 transport，测试可注入内存传输。 */
-  createTransport?: (
-    spec: McpServerSpec,
-    options: CreateTransportOptions,
-  ) => CreatedTransport;
+  createTransport?: CreateTransportFn;
 }
 
 interface Connection {
@@ -97,13 +93,6 @@ interface Connection {
   status: "connected" | "connecting";
   error?: string;
   /** 释放 transport 的额外资源（http 连接池）；stdio 为空。 */
-  disposeTransport?: () => Promise<void>;
-}
-
-/** 一次成功建链的产物 —— 与"落进 connections 并安装监听"分离，供首连与重连共用。 */
-interface Established {
-  client: Client;
-  tools: McpToolDescriptor[];
   disposeTransport?: () => Promise<void>;
 }
 
@@ -120,30 +109,14 @@ export function createMcpHub(
   // 当前规格集 —— connectAll 连这些；applyConfig 据此 diff 出增量并更新。
   let currentSpecs: readonly McpServerSpec[] = specs;
 
-  /**
-   * 建链：造 transport → connect → 首次 tools/list。成功返回产物，失败先释放已创建的
-   * transport 资源（kill 已 spawn 的 stdio 子进程 / 关 http 连接池）再抛，由调用方
-   * 决定落 connected 还是排后台重试。
-   */
-  async function establish(spec: McpServerSpec): Promise<Established> {
-    let created: CreatedTransport | undefined;
-    try {
-      created = createTransport(spec, { proxy: networkProxy });
-      const client = new Client(CLIENT_INFO, { capabilities: {} });
-      await client.connect(created.transport, { timeout: connectTimeoutMs });
-      const listed = await client.listTools({}, { timeout: connectTimeoutMs });
-      return {
-        client,
-        tools: listed.tools.map(toDescriptor),
-        disposeTransport: created.dispose,
-      };
-    } catch (err) {
-      if (created) {
-        await created.transport.close().catch(() => {});
-        await created.dispose?.().catch(() => {});
-      }
-      throw err;
-    }
+  // 建链复用 connect 原语（与一次性探测同一套安全连接路径）；失败由调用方决定落
+  // connected 还是排后台重试。
+  function establish(spec: McpServerSpec): Promise<ConnectedClient> {
+    return connectAndListTools(spec, {
+      createTransport,
+      proxy: networkProxy,
+      timeoutMs: connectTimeoutMs,
+    });
   }
 
   /**
@@ -156,7 +129,7 @@ export function createMcpHub(
   function setConnected(
     spec: McpServerSpec,
     context: McpServerContext,
-    est: Established,
+    est: ConnectedClient,
   ): void {
     est.client.onclose = () => onPassiveDisconnect(spec, context);
     connections.set(spec.serverId, {
@@ -387,26 +360,6 @@ export function createMcpHub(
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
-}
-
-/** SDK 的 tool 描述 → 知行中性 McpToolDescriptor（只取映射层需要的字段）。 */
-function toDescriptor(tool: {
-  name: string;
-  description?: string;
-  inputSchema: unknown;
-  annotations?: { readOnlyHint?: boolean };
-}): McpToolDescriptor {
-  const descriptor: McpToolDescriptor = {
-    name: tool.name,
-    inputSchema: tool.inputSchema,
-  };
-  if (typeof tool.description === "string") {
-    descriptor.description = tool.description;
-  }
-  if (typeof tool.annotations?.readOnlyHint === "boolean") {
-    descriptor.readOnlyHint = tool.annotations.readOnlyHint;
-  }
-  return descriptor;
 }
 
 /** 规格是否等价 —— 决定 applyConfig 是否需要重连某 server（serverId 由 Map key 比较，此处不重复）。 */
