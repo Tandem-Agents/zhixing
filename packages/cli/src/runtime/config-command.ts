@@ -1,5 +1,5 @@
 /**
- * `/config` slash 命令 handler——REPL 内打开配置编辑器，保存后触发 hot reload。
+ * `/config` 与 `/mcp` 命令 handler——REPL 内打开配置编辑器，保存后触发 hot reload。
  *
  * 流程：
  * 1. 暂停 readline + 停 spinner，让出 stdin 给编辑器接管 alt screen
@@ -27,6 +27,8 @@ import {
   writeCredentials,
 } from "@zhixing/providers";
 import { BASE_CONFIG_SECTION_IDS, runConfigEditor } from "../config-editor/index.js";
+import type { ConfigEditorRuntime, SectionId } from "../config-editor/index.js";
+import { probeServer, type McpHub } from "@zhixing/mcp";
 import type { CliWriter } from "../screen/index.js";
 import type { RuntimeSession } from "./session.js";
 import type { ReloadResult } from "./types.js";
@@ -45,8 +47,9 @@ export interface ConfigCommandDeps {
   writer: CliWriter;
 }
 
-export async function handleConfigCommand(
+async function runEditorCommand(
   deps: ConfigCommandDeps,
+  opts: { sections: SectionId[]; title: string; runtime?: ConfigEditorRuntime },
 ): Promise<void> {
   const { rl, state, session, renderer, writer } = deps;
 
@@ -66,8 +69,9 @@ export async function handleConfigCommand(
     const editorResult = await runConfigEditor({
       initialConfig: config,
       initialCredentials: credentials,
-      sections: BASE_CONFIG_SECTION_IDS.slice(),
-      title: "基础配置",
+      sections: opts.sections,
+      title: opts.title,
+      ...(opts.runtime ? { runtime: opts.runtime } : {}),
       header: {
         workspaceRoot: config.workspace?.root,
         configPath,
@@ -134,4 +138,33 @@ export async function handleConfigCommand(
         break;
     }
   }
+}
+
+/** `/config`——基础配置（服务商 / 模型 / 消息通道）。 */
+export async function handleConfigCommand(deps: ConfigCommandDeps): Promise<void> {
+  await runEditorCommand(deps, {
+    sections: BASE_CONFIG_SECTION_IDS.slice(),
+    title: "基础配置",
+  });
+}
+
+/**
+ * `/mcp`——MCP 服务管理 + 接入引导（用户唯一入口）。
+ *
+ * 注入 hub 运行态（serverStatuses，让 section 显示连接状态）+ discovery 探测
+ * （probeServer，接入向导验证连接，proxy 与 hub 同源 config.network.proxy）。
+ */
+export async function handleMcpCommand(
+  deps: ConfigCommandDeps & { hub: McpHub },
+): Promise<void> {
+  const proxy = loadConfig({ cwd: process.cwd() }).network?.proxy;
+  const runtime: ConfigEditorRuntime = {
+    mcpServerStatuses: () => deps.hub.serverStatuses(),
+    mcpProbe: (spec, signal) => probeServer(spec, { signal, proxy }),
+  };
+  await runEditorCommand(deps, {
+    sections: ["mcp"],
+    title: "MCP 服务",
+    runtime,
+  });
 }

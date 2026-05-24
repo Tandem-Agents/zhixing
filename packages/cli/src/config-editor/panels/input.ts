@@ -38,7 +38,7 @@ import {
   stringWidth,
 } from "../../tui/index.js";
 
-const CONTENT_INDENT = " ".repeat(layout.contentIndent);
+export const CONTENT_INDENT = " ".repeat(layout.contentIndent);
 const INPUT_FOOTER_HINTS = [
   "Enter 保存",
   "Esc 取消",
@@ -62,7 +62,7 @@ const THINKING_BUDGET_FOOTER_HINTS = [
  * 回跳距离 = INPUT 之后的 writeLine 数 + 1（因为最后一次 writeLine 后 cursor
  * 自动下移到 footer 之下的"未写区"，多 1 行）。
  */
-function writeInputThenFooterAndRestoreCursor(
+export function writeInputThenFooterAndRestoreCursor(
   renderer: Renderer,
   inputLineContent: string,
   footerHints: readonly string[],

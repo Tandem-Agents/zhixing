@@ -11,7 +11,7 @@
  */
 
 import type { RoleId, ZhixingConfig, ZhixingCredentials } from "@zhixing/providers";
-import type { McpServerStatus } from "@zhixing/mcp";
+import type { McpServerSpec, McpServerStatus, ProbeResult } from "@zhixing/mcp";
 
 // ─── Section（用户视角的配置块） ───
 
@@ -48,7 +48,12 @@ export type PanelDescriptor =
   /** L3 (messaging)：channel 配置（appId + appSecret + 启用按钮） */
   | { kind: "channel-config"; channelId: string }
   /** L3 (mcp)：已接入 server 详情（启停 / 删除 / 查看状态） */
-  | { kind: "mcp-server"; serverId: string };
+  | { kind: "mcp-server"; serverId: string }
+  /**
+   * L3 (mcp)：按预设接入新 server——输入密钥 → 带密钥 discovery 验证。
+   * error：上次验证失败原因，原地回显（验证失败时 replace 本面板带上它）。
+   */
+  | { kind: "mcp-add"; presetId: string; error?: string };
 
 /** 模型角色 —— 单一事实源是 providers 的 ROLE_SPECS（main / light / power） */
 export type ModelRole = RoleId;
@@ -130,6 +135,11 @@ export interface FieldSpec {
 export interface ConfigEditorRuntime {
   /** 全部受管 server 的运行状态（缺省 = 无 hub 注入，section 仅显示配置态）。 */
   mcpServerStatuses?: () => readonly McpServerStatus[];
+  /**
+   * 一次性 discovery 探测（缺省 = 无法验证，接入向导不可用）—— 接入引导验证连接用，
+   * 由 caller 注入（生产注 @zhixing/mcp 的 probeServer，测试注 mock）。
+   */
+  mcpProbe?: (spec: McpServerSpec, signal?: AbortSignal) => Promise<ProbeResult>;
 }
 
 /**
@@ -221,6 +231,8 @@ export type PanelAction =
   | { type: "stay"; state: WorkingState }
   | { type: "navigate"; state: WorkingState; panel: PanelDescriptor }
   | { type: "pop"; state: WorkingState }
+  /** 替换栈顶面板（不 push）——原地更新当前面板（如把 mcp-add 换成带 error 的同款）。 */
+  | { type: "replace"; state: WorkingState; panel: PanelDescriptor }
   | { type: "exit"; result: ConfigEditorResult }
   /**
    * loading：执行一个异步任务（如 discovery 验证 / LLM 推断），期间渲染 loading 态并可

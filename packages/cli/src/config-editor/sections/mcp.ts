@@ -19,6 +19,7 @@ import type {
 } from "../types.js";
 import type { McpServerStatus } from "@zhixing/mcp";
 import { isMcpServerEnabled, listMcpServerIds } from "../state.js";
+import { MCP_PRESETS } from "../../registries/index.js";
 
 export const mcpSection: Section = {
   id: "mcp",
@@ -28,9 +29,20 @@ export const mcpSection: Section = {
     const statusById = new Map(
       (runtime?.mcpServerStatuses?.() ?? []).map((s) => [s.serverId, s] as const),
     );
-    return listMcpServerIds(state).map((serverId) =>
+    const ids = listMcpServerIds(state);
+    const servers = ids.map((serverId) =>
       buildEntry(state, serverId, statusById.get(serverId)),
     );
+    // 未接入的预设列为"添加 X"入口——已接入的不重复列（按 server id 判定）
+    const installed = new Set(ids);
+    const additions = MCP_PRESETS.filter((p) => !installed.has(p.id)).map(
+      (preset): SectionEntry => ({
+        label: `添加 ${preset.label}`,
+        state: { kind: "disabled", statusText: "未接入" },
+        enterTarget: { kind: "mcp-add", presetId: preset.id },
+      }),
+    );
+    return [...servers, ...additions];
   },
 };
 

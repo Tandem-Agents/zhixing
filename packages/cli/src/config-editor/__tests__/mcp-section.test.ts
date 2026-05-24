@@ -8,11 +8,15 @@
  */
 
 import { describe, expect, it } from "vitest";
-import type { McpServerStatus } from "@zhixing/mcp";
-import { createInitialState } from "../state.js";
+import type { McpServerStatus, ProbeResult } from "@zhixing/mcp";
+import { createInitialState, setInputBuffer } from "../state.js";
 import { mcpSection } from "../sections/mcp.js";
-import { handleMcpServerPanelKey } from "../panels/mcp.js";
-import type { ConfigEditorRuntime, WorkingState } from "../types.js";
+import { handleMcpAddPanelKey, handleMcpServerPanelKey } from "../panels/mcp.js";
+import type {
+  ConfigEditorContext,
+  ConfigEditorRuntime,
+  WorkingState,
+} from "../types.js";
 
 function stateWith(servers: Record<string, unknown>): WorkingState {
   return createInitialState({ mcp: { servers } } as never, {});
@@ -23,8 +27,14 @@ function runtimeOf(statuses: McpServerStatus[]): ConfigEditorRuntime {
 }
 
 describe("mcpSection.entries", () => {
-  it("空配置 → 无条目", () => {
-    expect(mcpSection.entries(createInitialState({}, {}))).toEqual([]);
+  // 过滤出"已接入 server"条目（排除"添加预设"入口）
+  const serverEntries = (entries: ReturnType<typeof mcpSection.entries>) =>
+    entries.filter((e) => e.enterTarget?.kind === "mcp-server");
+
+  it("空配置 → 无 server 条目（只列可添加的预设入口）", () => {
+    const entries = mcpSection.entries(createInitialState({}, {}));
+    expect(serverEntries(entries)).toEqual([]);
+    expect(entries.every((e) => e.enterTarget?.kind === "mcp-add")).toBe(true);
   });
 
   it("列出 config 中全部 server（含已停用），enterTarget 指向 mcp-server", () => {
@@ -32,11 +42,11 @@ describe("mcpSection.entries", () => {
       github: { type: "http", url: "https://x" },
       old: { type: "stdio", command: "c", enabled: false },
     });
-    const entries = mcpSection.entries(state);
-    expect(entries.map((e) => e.label)).toEqual(["github", "old"]);
-    expect(entries[0]!.enterTarget).toEqual({ kind: "mcp-server", serverId: "github" });
+    const servers = serverEntries(mcpSection.entries(state));
+    expect(servers.map((e) => e.label)).toEqual(["github", "old"]);
+    expect(servers[0]!.enterTarget).toEqual({ kind: "mcp-server", serverId: "github" });
     // 已停用 → disabled
-    expect(entries[1]!.state).toEqual({ kind: "disabled", statusText: "已停用" });
+    expect(servers[1]!.state).toEqual({ kind: "disabled", statusText: "已停用" });
   });
 
   it("叠加运行态：connected 显示工具数、connecting 显示原因，均为 ready（不 blocked）", () => {
@@ -61,8 +71,93 @@ describe("mcpSection.entries", () => {
   it("列表来源是 config——已停用 server 不在 serverStatuses 也仍出现", () => {
     const state = stateWith({ off: { type: "stdio", command: "c", enabled: false } });
     // runtime 不含 off（停用 server 不受管），列表仍要列出它供重新启用
-    const entries = mcpSection.entries(state, runtimeOf([]));
-    expect(entries.map((e) => e.label)).toEqual(["off"]);
+    const servers = serverEntries(mcpSection.entries(state, runtimeOf([])));
+    expect(servers.map((e) => e.label)).toEqual(["off"]);
+  });
+
+  it("未接入的预设列为'添加 X'入口；已接入的不重复列", () => {
+    // 已装 github，未装 notion
+    const state = stateWith({ github: { type: "http", url: "https://x" } });
+    const entries = mcpSection.entries(state);
+    const labels = entries.map((e) => e.label);
+    expect(labels).toContain("github"); // 已接入 server
+    expect(labels).toContain("添加 Notion"); // 未接入预设
+    expect(labels).not.toContain("添加 GitHub"); // github 已接入、不重复
+    const addNotion = entries.find((e) => e.label === "添加 Notion");
+    expect(addNotion?.enterTarget).toEqual({ kind: "mcp-add", presetId: "notion" });
+  });
+});
+
+describe("handleMcpAddPanelKey — 接入向导", () => {
+  const desc = { kind: "mcp-add", presetId: "github" } as const;
+  const okProbe = async (): Promise<ProbeResult> => ({
+    ok: true,
+    tools: [{ name: "x", inputSchema: {} }],
+  });
+  const failProbe = async (): Promise<ProbeResult> => ({
+    ok: false,
+    error: "401 bad token",
+  });
+  function ctxWith(
+    mcpProbe?: ConfigEditorRuntime["mcpProbe"],
+  ): ConfigEditorContext {
+    return { runtime: mcpProbe ? { mcpProbe } : {} } as unknown as ConfigEditorContext;
+  }
+
+  it("字符累积；空 Enter 不前进；Esc 取消", () => {
+    const s0 = createInitialState({}, {});
+    const typed = handleMcpAddPanelKey(ctxWith(okProbe), s0, desc, {
+      type: "char",
+      ch: "g",
+    });
+    expect(typed.type).toBe("stay");
+    if (typed.type === "stay") expect(typed.state.inputBuffer).toBe("g");
+    expect(
+      handleMcpAddPanelKey(ctxWith(okProbe), s0, desc, { type: "enter" }).type,
+    ).toBe("stay");
+    expect(
+      handleMcpAddPanelKey(ctxWith(okProbe), s0, desc, { type: "escape" }).type,
+    ).toBe("pop");
+  });
+
+  it("Enter（有输入）→ loading；run 验证成功 → 写盘 + pop", async () => {
+    const s0 = setInputBuffer(createInitialState({}, {}), "ghp_abc");
+    const action = handleMcpAddPanelKey(ctxWith(okProbe), s0, desc, { type: "enter" });
+    expect(action.type).toBe("loading");
+    if (action.type !== "loading") return;
+    const result = await action.run(new AbortController().signal);
+    expect(result.type).toBe("pop");
+    if (result.type === "pop") {
+      expect(result.state.config.mcp?.servers?.github?.url).toBe(
+        "https://api.githubcopilot.com/mcp/",
+      );
+      expect(result.state.credentials.mcp?.github?.Authorization).toBe("Bearer ghp_abc");
+      expect(result.state.inputBuffer).toBe("");
+    }
+  });
+
+  it("run 验证失败 → replace 回带 error 的 mcp-add、保留输入、不写盘", async () => {
+    const s0 = setInputBuffer(createInitialState({}, {}), "ghp_bad");
+    const action = handleMcpAddPanelKey(ctxWith(failProbe), s0, desc, { type: "enter" });
+    expect(action.type).toBe("loading");
+    if (action.type !== "loading") return;
+    const result = await action.run(new AbortController().signal);
+    expect(result.type).toBe("replace");
+    if (result.type === "replace") {
+      expect(result.panel).toMatchObject({
+        kind: "mcp-add",
+        presetId: "github",
+        error: "401 bad token",
+      });
+      expect(result.state.inputBuffer).toBe("ghp_bad"); // 保留供修改重试
+      expect(result.state.config.mcp?.servers?.github).toBeUndefined(); // 失败不写盘
+    }
+  });
+
+  it("未注入 probe → 防御性 replace 报错", () => {
+    const s0 = setInputBuffer(createInitialState({}, {}), "x");
+    const action = handleMcpAddPanelKey(ctxWith(undefined), s0, desc, { type: "enter" });
+    expect(action.type).toBe("replace");
   });
 });
 

@@ -8,6 +8,7 @@
  */
 
 import type {
+  ConfigEditorContext,
   ConfigEditorRuntime,
   KeyEvent,
   PanelAction,
@@ -17,12 +18,33 @@ import type {
 import type { McpServerStatus } from "@zhixing/mcp";
 import { Renderer } from "../ui/render.js";
 import {
+  clearInputBuffer,
   isMcpServerEnabled,
+  patchMcpSecrets,
   readMcpServer,
   removeMcpServer,
+  setInputBuffer,
   setMcpServerEnabled,
+  upsertMcpServer,
 } from "../state.js";
-import { tone, renderChrome, renderButtonRow, renderFooter } from "../../tui/index.js";
+import {
+  applyMcpSetup,
+  presetToCandidate,
+  validateMcpSetup,
+} from "../mcp-setup.js";
+import { findMcpPreset } from "../../registries/index.js";
+import { maskForInput } from "../ui/mask.js";
+import {
+  CONTENT_INDENT,
+  writeInputThenFooterAndRestoreCursor,
+} from "./input.js";
+import {
+  tone,
+  renderChrome,
+  renderButtonRow,
+  renderFooter,
+  osc8Hyperlink,
+} from "../../tui/index.js";
 
 const FOOTER_HINTS = ["↑↓ 选择", "Enter 确认", "Esc 返回", "Ctrl+C 退出"] as const;
 
@@ -152,5 +174,140 @@ export function handleMcpServerPanelKey(
     }
     default:
       return { action: { type: "stay", state }, cursor };
+  }
+}
+
+// ─── mcp-add：按预设接入新 server（输入密钥 → 带密钥 discovery 验证） ───
+
+const MCP_ADD_FOOTER_HINTS = [
+  "Enter 验证并接入",
+  "Esc 取消",
+  "Ctrl+C 退出",
+] as const;
+
+export function renderMcpAddPanel(
+  state: WorkingState,
+  descriptor: Extract<PanelDescriptor, { kind: "mcp-add" }>,
+  renderer: Renderer,
+): void {
+  renderer.clear();
+  renderer.showCursor();
+
+  const width = renderer.terminalWidth();
+  const preset = findMcpPreset(descriptor.presetId);
+  if (!preset) {
+    renderer.writeLine(tone.error(`未知预设：${descriptor.presetId}`));
+    return;
+  }
+
+  // 当前预设均为单密钥；多密钥预设需把此处扩展为逐字段收集（见接入引导设计）。
+  const field = preset.secretFields[0];
+  const bodyLines: string[] = [`接入 ${preset.label}：${preset.description}`];
+  if (field) {
+    bodyLines.push("");
+    for (const line of field.hint.split("\n")) bodyLines.push(line);
+    if (field.docUrl) {
+      bodyLines.push(`${tone.dim("文档：")}${osc8Hyperlink(field.docUrl)}`);
+    }
+    bodyLines.push("");
+    bodyLines.push(tone.dim(`示例：${field.example}`));
+  }
+
+  renderer.writeLines(
+    renderChrome({ title: `接入 ${preset.label}`, body: bodyLines, width }),
+  );
+  renderer.writeLine("");
+
+  if (descriptor.error) {
+    renderer.writeLine(tone.error(`  ✗ ${descriptor.error}`));
+    renderer.writeLine("");
+  }
+
+  // 密钥是敏感字段——mask 显示
+  writeInputThenFooterAndRestoreCursor(
+    renderer,
+    `${CONTENT_INDENT}> ${maskForInput(state.inputBuffer)}`,
+    MCP_ADD_FOOTER_HINTS,
+  );
+}
+
+export function handleMcpAddPanelKey(
+  ctx: ConfigEditorContext,
+  state: WorkingState,
+  descriptor: Extract<PanelDescriptor, { kind: "mcp-add" }>,
+  key: KeyEvent,
+): PanelAction {
+  const preset = findMcpPreset(descriptor.presetId);
+  if (!preset) return { type: "pop", state: clearInputBuffer(state) };
+
+  switch (key.type) {
+    case "ctrl-c":
+      return { type: "exit", result: { kind: "cancelled" } };
+    case "escape":
+      return { type: "pop", state: clearInputBuffer(state) };
+    case "backspace": {
+      if (state.inputBuffer.length === 0) return { type: "stay", state };
+      const chars = Array.from(state.inputBuffer);
+      chars.pop();
+      return { type: "stay", state: setInputBuffer(state, chars.join("")) };
+    }
+    case "char":
+      return {
+        type: "stay",
+        state: setInputBuffer(state, state.inputBuffer + key.ch),
+      };
+    case "enter": {
+      const value = state.inputBuffer.trim();
+      if (!value) return { type: "stay", state }; // 需先输入密钥
+
+      const probe = ctx.runtime?.mcpProbe;
+      if (!probe) {
+        // 理论上 /mcp 必注入 probe；防御性原地报错而非静默
+        return {
+          type: "replace",
+          state,
+          panel: {
+            kind: "mcp-add",
+            presetId: descriptor.presetId,
+            error: "无法验证连接（未注入探测能力）",
+          },
+        };
+      }
+
+      const candidate = presetToCandidate(preset);
+      const field = preset.secretFields[0];
+      const inputs: Record<string, string> = field ? { [field.key]: value } : {};
+
+      return {
+        type: "loading",
+        message: `正在验证 ${preset.label} 连接…`,
+        state: clearInputBuffer(state), // 取消（Esc）→ pop，丢弃输入
+        run: async (signal) => {
+          const result = await validateMcpSetup(candidate, inputs, probe, signal);
+          if (result.ok) {
+            const { entry, secrets } = applyMcpSetup(candidate, inputs);
+            let next = upsertMcpServer(
+              clearInputBuffer(state),
+              candidate.serverId,
+              entry,
+            );
+            next = patchMcpSecrets(next, candidate.serverId, secrets);
+            return { type: "pop", state: next };
+          }
+          // 失败：保留已输入密钥，原地回显错误供修改重试
+          return {
+            type: "replace",
+            state,
+            panel: {
+              kind: "mcp-add",
+              presetId: descriptor.presetId,
+              error: result.error,
+            },
+          };
+        },
+      };
+    }
+    default:
+      return { type: "stay", state };
   }
 }

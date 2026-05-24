@@ -47,7 +47,9 @@ import {
   renderThinkingBudgetPanel,
 } from "./panels/input.js";
 import {
+  handleMcpAddPanelKey,
   handleMcpServerPanelKey,
+  renderMcpAddPanel,
   renderMcpServerPanel,
 } from "./panels/mcp.js";
 import { runLoadingAction, renderLoadingFrame } from "./loading.js";
@@ -118,7 +120,12 @@ export async function runEventLoop(
         return action.result;
       }
 
-      if (action.type === "stay" || action.type === "navigate" || action.type === "pop") {
+      if (
+        action.type === "stay" ||
+        action.type === "navigate" ||
+        action.type === "pop" ||
+        action.type === "replace"
+      ) {
         state = action.state;
       }
 
@@ -127,6 +134,14 @@ export async function runEventLoop(
         main.errorMessage = undefined;
       } else if (action.type === "pop") {
         stack.pop();
+      } else if (action.type === "replace") {
+        // 替换栈顶面板（不改变栈深）；空栈时无栈顶可替换，忽略。
+        if (stack.length > 0) {
+          stack[stack.length - 1] = {
+            descriptor: action.panel,
+            cursor: { index: 0 },
+          };
+        }
       }
     }
   } finally {
@@ -160,6 +175,9 @@ function renderTopPanel(
       return;
     case "mcp-server":
       renderMcpServerPanel(state, d, frame.cursor, renderer, ctx.runtime);
+      return;
+    case "mcp-add":
+      renderMcpAddPanel(state, d, renderer);
       return;
     case "input":
       renderInputPanel(state, d, renderer);
@@ -211,6 +229,8 @@ function dispatchKey(
       top.cursor = result.cursor;
       return result.action;
     }
+    case "mcp-add":
+      return handleMcpAddPanelKey(ctx, state, d, key);
     case "input":
       return handleInputPanelKey(state, d, key);
     case "add-model":

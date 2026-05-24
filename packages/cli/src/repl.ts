@@ -59,7 +59,7 @@ import {
 import { describeProxy, type ProxyDescription } from "@zhixing/network";
 import { loadConfig, loadCredentials, resolveHomeDir } from "@zhixing/providers";
 import type { TaskListService } from "@zhixing/tools-builtin";
-import { createMcpHub } from "@zhixing/mcp";
+import { createMcpHub, type McpHub } from "@zhixing/mcp";
 import { createBuiltinExtraToolsAssembly } from "./runtime/builtin-extra-tools.js";
 import { parseServerSpecs } from "./runtime/mcp-config.js";
 import { createCliSegmentDeps } from "./runtime/segment-deps.js";
@@ -101,7 +101,7 @@ import { BottomInfoModel } from "./bottom-info/index.js";
 import { renderHomeWelcome, renderStartupAdvisories } from "./workbench/index.js";
 import { renderFarewell } from "./farewell/index.js";
 import { RuntimeSession } from "./runtime/session.js";
-import { handleConfigCommand } from "./runtime/config-command.js";
+import { handleConfigCommand, handleMcpCommand } from "./runtime/config-command.js";
 import { parseTaskUsageFromMessages } from "./parse-task-usage.js";
 import {
   handleTrustCommand,
@@ -263,6 +263,7 @@ const REPL_COMMAND_META: ReadonlyArray<ReplCommandMeta> = [
   { name: "tasks", description: "查看定时任务", category: "tools", legacyKey: "/tasks" },
   // ─ config ─
   { name: "config", description: "修改基础配置（服务商 / 模型 / API Key / 消息通道等）", category: "config", legacyKey: "/config" },
+  { name: "mcp", description: "管理 MCP 服务（接入外部工具 / 启停 / 查看连接）", category: "config", legacyKey: "/mcp" },
   { name: "trust", description: "权限规则管理", category: "config", legacyKey: "/trust" },
   { name: "security", description: "安全状态概览", category: "config", legacyKey: "/security" },
 ];
@@ -305,6 +306,8 @@ function buildSlashCommands(
   clearScreenToInitial:
     | ((extraLines?: readonly string[]) => void)
     | undefined,
+  /** MCP host —— `/mcp` 命令注入运行状态查询 + discovery 探测。 */
+  mcpHub: McpHub,
 ): Record<
   string,
   {
@@ -932,6 +935,19 @@ function buildSlashCommands(
         await handleConfigCommand({ rl, state, session, renderer, writer: cliWriter });
       },
     },
+    "/mcp": {
+      description: "管理 MCP 服务（接入外部工具 / 启停 / 查看连接）",
+      handler: async (state) => {
+        await handleMcpCommand({
+          rl,
+          state,
+          session,
+          renderer,
+          writer: cliWriter,
+          hub: mcpHub,
+        });
+      },
+    },
   };
 }
 
@@ -1525,6 +1541,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     () => taskTail?.refresh(),
     applyModeSwitch,
     clearScreenToInitial,
+    mcpHub,
   );
 
   // ── Typeahead 路径接入（Phase 1 Step 5） ──

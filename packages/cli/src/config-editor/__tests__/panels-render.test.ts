@@ -26,7 +26,7 @@ import {
 import { renderListPanel } from "../panels/list.js";
 import { renderEntityPanel } from "../panels/entity.js";
 import { renderInputPanel, renderAddModelPanel } from "../panels/input.js";
-import { renderMcpServerPanel } from "../panels/mcp.js";
+import { renderMcpServerPanel, renderMcpAddPanel } from "../panels/mcp.js";
 import { renderLoadingFrame } from "../loading.js";
 import {
   createInitialState,
@@ -508,5 +508,21 @@ describe("mcp 面板渲染冒烟", () => {
     );
     expect(out).toContain("正在验证连接…");
     expect(out).toContain("Esc 取消");
+  });
+
+  it("mcp-add panel · 含预设说明、密钥提示与错误回显", () => {
+    const out = renderAndCapture((renderer) => {
+      const state = setInputBuffer(emptyState(), "ghp_secret");
+      renderMcpAddPanel(
+        state,
+        { kind: "mcp-add", presetId: "github", error: "401 bad token" },
+        renderer,
+      );
+    });
+    expect(out).toContain("接入 GitHub");
+    expect(out).toContain("401 bad token");
+    expect(out).toContain("Enter 验证并接入");
+    // 密钥 mask 显示，不泄漏明文
+    expect(out).not.toContain("ghp_secret");
   });
 });
