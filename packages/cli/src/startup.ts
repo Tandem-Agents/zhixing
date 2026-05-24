@@ -59,7 +59,6 @@ export type StartupCheckResult =
   | { kind: "non-tty"; missingLabels: string[] };
 
 export interface RunStartupCheckOptions {
-  cwd?: string;
   /** ~/.zhixing/ 目录覆盖（仅测试用） */
   homeDir?: string;
   env?: Record<string, string | undefined>;
@@ -89,7 +88,7 @@ export async function runStartupCheck(
   let config: ZhixingConfig;
   let credentials: ZhixingCredentials;
   try {
-    config = loadConfig({ cwd: options.cwd, homeDir: explicitHomeDir, env });
+    config = loadConfig({ homeDir: explicitHomeDir, env });
     credentials = loadCredentials({ homeDir: credentialsHomeDir });
   } catch (err) {
     if (
@@ -161,7 +160,6 @@ export async function runStartupCheck(
   if (editorResult.kind === "completed") {
     // reload 拿到落盘后的最新内容
     const updatedConfig = loadConfig({
-      cwd: options.cwd,
       homeDir: explicitHomeDir,
       env,
     });

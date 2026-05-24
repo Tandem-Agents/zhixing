@@ -69,7 +69,7 @@ async function runEditorCommand(
     const credentialsPath = getCredentialsPath(homeDir);
 
     // 重新 load 最新——保证用户外部编辑后的一致性，不复用启动缓存
-    const config = loadConfig({ cwd: process.cwd() });
+    const config = loadConfig();
     const credentials = loadCredentials({ homeDir });
 
     const editorResult = await runConfigEditor({
@@ -175,7 +175,7 @@ export async function handleConfigCommand(deps: ConfigCommandDeps): Promise<void
 export async function handleMcpCommand(
   deps: ConfigCommandDeps & { hub: McpHub },
 ): Promise<void> {
-  const proxy = loadConfig({ cwd: process.cwd() }).network?.proxy;
+  const proxy = loadConfig().network?.proxy;
   const runtime: ConfigEditorRuntime = {
     mcpServerStatuses: () => deps.hub.serverStatuses(),
     mcpProbe: (spec, signal) => probeServer(spec, { signal, proxy }),

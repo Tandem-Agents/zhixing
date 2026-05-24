@@ -1,9 +1,9 @@
 /**
- * 配置文件加载与合并
+ * 配置文件加载
  *
- * 两层配置级联（优先级从高到低）：
- * 1. 项目级  <cwd>/zhixing.config.json
- * 2. 用户全局 ~/.zhixing/config.json
+ * 单一来源：用户全局 ~/.zhixing/config.jsonc（ZHIXING_CONFIG_PATH 可覆盖路径）。
+ * 配置与运行目录无关——知行是个人助手，在任何位置启动效果一致；不存在 cwd 绑定
+ * 的项目级配置层（早期 cwd-project 设计已废弃，见 ADR-003 增补）。
  *
  * 配置文件格式：JSONC（JSON with Comments）—— 支持 `//` 和 `/* *​/` 注释，
  * 让用户编辑时直接看到字段说明。读取用 jsonc-parser；写入仍用标准 JSON.stringify
@@ -11,9 +11,7 @@
  * 的注释；未来需要改 config.json 时用 surgical edit 保留注释）。
  *
  * 设计决策：
- * - 缺失文件 = 跳过，不报错
- * - 字段级 deep merge，messaging 按 key 合并
- * - 首次运行自动创建全局配置模板
+ * - 缺失文件 = 首次运行自动创建全局配置模板
  * - ZHIXING_CONFIG_PATH 可覆盖全局配置路径
  */
 
@@ -30,7 +28,6 @@ import {
   GLOBAL_CONFIG_FILENAME,
   getGlobalConfigDir,
   getGlobalConfigPath,
-  getProjectConfigPath,
   resolveHomeDir,
 } from "./paths.js";
 import {
@@ -42,7 +39,6 @@ import type { ZhixingConfig } from "./types.js";
 export {
   getGlobalConfigDir,
   getGlobalConfigPath,
-  getProjectConfigPath,
   resolveHomeDir,
 };
 
@@ -67,23 +63,20 @@ export class ConfigSchemaError extends Error {
 // ─── 配置加载 ───
 
 /**
- * 加载并合并配置。
+ * 加载全局配置（单一来源，与运行目录 cwd 无关）。
  *
- * 顺序：全局 → 项目级覆盖（字段级 deep merge）
  * 环境变量中的 API Key 由 resolveProvider 在更下游处理，这里不涉及。
  */
 export function loadConfig(options: {
-  cwd?: string;
   /** ~/.zhixing/ 目录覆盖；优先于 env.ZHIXING_CONFIG_PATH 与默认路径 */
   homeDir?: string;
   env?: Record<string, string | undefined>;
   /** 禁止自动创建全局配置（测试用） */
   noAutoCreate?: boolean;
 } = {}): ZhixingConfig {
-  const cwd = options.cwd ?? process.cwd();
   const env = options.env ?? process.env;
 
-  // 全局配置路径：homeDir 显式 → env.ZHIXING_CONFIG_PATH → 默认 ~/.zhixing/config.json
+  // 全局配置路径：homeDir 显式 → env.ZHIXING_CONFIG_PATH → 默认 ~/.zhixing/config.jsonc
   const globalPath = options.homeDir
     ? path.join(options.homeDir, GLOBAL_CONFIG_FILENAME)
     : getGlobalConfigPath(env);
@@ -95,12 +88,7 @@ export function loadConfig(options: {
     globalConfig = readJsonSafe(globalPath);
   }
 
-  // 项目配置
-  const projectPath = getProjectConfigPath(cwd);
-  const projectConfig = readJsonSafe(projectPath);
-
-  // 合并：全局为底，项目覆盖
-  return deepMergeConfig(globalConfig ?? {}, projectConfig ?? {});
+  return (globalConfig ?? {}) as ZhixingConfig;
 }
 
 // ─── 配置写入 ───
@@ -165,8 +153,6 @@ export async function writeConfig(
  *   - `"replace"`：**整体替换**——供配置编辑器的权威完整写入；删除某 id 由"省略它"表达，
  *     合并模式删不掉被省略的 id（这是删除功能失效的根因，故编辑器必须用 replace）
  * 其余字段一律 provided 则整体替换；未提及的顶层字段保留 current。
- *
- * 读取侧 deepMergeConfig 的 global+project 分层另走 id 级合并（合并两个文件），是不同操作。
  *
  * 导出供测试与未来 update_config 流程复用。
  */
@@ -375,74 +361,6 @@ function readJsonSafe(filePath: string): ZhixingConfig | undefined {
     );
   }
   return parsed as ZhixingConfig;
-}
-
-/**
- * 字段级 deep merge。
- * messaging 按 key 合并（项目级覆盖全局级的同名 channel 字段）。
- *
- * `base` / `override` 是文件 JSON（readJsonSafe），用户实际可能漏配 `llm.main`；
- * 这里保持原样合并，把 fail-fast 校验留给 resolveLLMRoles，避免在加载层吞掉
- * 用户错误。返回值类型仍 ZhixingConfig —— 下游 resolve 时若 llm.main 缺失会
- * 抛带迁移提示的 ProviderConfigError。
- */
-function deepMergeConfig(
-  base: Partial<ZhixingConfig>,
-  override: Partial<ZhixingConfig>,
-): ZhixingConfig {
-  const result = { ...base } as ZhixingConfig;
-
-  if (override.llm) {
-    result.llm = {
-      main: override.llm.main ?? base.llm?.main!,
-      light: override.llm.light ?? base.llm?.light,
-      power: override.llm.power ?? base.llm?.power,
-    };
-  }
-
-  // messaging：按 key 字段级合并
-  if (override.messaging) {
-    result.messaging = { ...base.messaging };
-    for (const [key, value] of Object.entries(override.messaging)) {
-      const existing = result.messaging[key];
-      if (existing) {
-        result.messaging[key] = { ...existing, ...value };
-      } else {
-        result.messaging[key] = value;
-      }
-    }
-  }
-
-  // mcp：按 server id 字段级合并（与 messaging 同构）
-  if (override.mcp) {
-    result.mcp = {
-      servers: mergeIdMap(base.mcp?.servers, override.mcp.servers ?? {}),
-    };
-  }
-
-  if (override.agent !== undefined) {
-    result.agent = { ...base.agent, ...override.agent };
-  }
-
-  // intent：cancelKeywords 是 append 列表（项目级追加全局级，让两层都生效）
-  if (override.intent !== undefined || base.intent !== undefined) {
-    const baseKw = base.intent?.cancelKeywords ?? [];
-    const overrideKw = override.intent?.cancelKeywords ?? [];
-    const merged = [...baseKw, ...overrideKw];
-    result.intent = {
-      ...base.intent,
-      ...override.intent,
-      ...(merged.length > 0 ? { cancelKeywords: merged } : {}),
-    };
-  }
-
-  // workspace：目录级配置整体覆盖全局配置（不做字段级 merge，
-  // 因为目录级 workspace 含义是"在此目录下工作区换成这个"）
-  if (override.workspace !== undefined) {
-    result.workspace = override.workspace;
-  }
-
-  return result;
 }
 
 // ─── 工作区解析 ───

@@ -1063,7 +1063,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   const schedulerEventBus = createEventBus<SchedulerEventMap>();
 
   const zhixingHome = getZhixingHome();
-  const config = loadConfig({ cwd: process.cwd() });
+  const config = loadConfig();
   const credentials = loadCredentials({ homeDir: resolveHomeDir() });
 
   const scope: ConversationScope = { kind: "user" };

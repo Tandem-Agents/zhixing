@@ -27,7 +27,6 @@ import { expandUserHome, getZhixingHome } from "@zhixing/core";
  * 各自重复定义。
  */
 export const GLOBAL_CONFIG_FILENAME = "config.jsonc";
-export const PROJECT_CONFIG_FILENAME = "zhixing.config.jsonc";
 export const CREDENTIALS_FILENAME = "credentials.json";
 
 /**
@@ -64,11 +63,6 @@ export function getGlobalConfigPath(
     return expandUserHome(override);
   }
   return path.join(getZhixingHome(), GLOBAL_CONFIG_FILENAME);
-}
-
-/** 项目配置文件路径（cwd 相对）—— 与 ~/.zhixing 无关。 */
-export function getProjectConfigPath(cwd: string = process.cwd()): string {
-  return path.join(cwd, PROJECT_CONFIG_FILENAME);
 }
 
 /**

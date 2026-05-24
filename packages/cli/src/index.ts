@@ -99,7 +99,6 @@ program
       configureKeypressDump(dumpEnabled);
       // 启动期检查——任何模式（-p / REPL）下都先确保必要字段就绪
       const startupResult = await runStartupCheck({
-        cwd: process.cwd(),
         mode: "repl",
       });
       handleStartupResult(startupResult);

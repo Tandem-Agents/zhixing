@@ -110,7 +110,6 @@ export function createProviderDirect(
 // ─── 多角色工厂（main + light + power） ───
 
 export interface ProviderRolesOptions {
-  cwd?: string;
   env?: Record<string, string | undefined>;
 }
 
@@ -144,7 +143,7 @@ export function createProviderRoles(
   options: ProviderRolesOptions = {},
 ): ProviderRolesResult {
   const env = options.env ?? process.env;
-  const config = loadConfig({ cwd: options.cwd, env });
+  const config = loadConfig({ env });
   const credentials = loadCredentialsFromEnv(env);
   const resolved = resolveLLMRoles(config, credentials);
 

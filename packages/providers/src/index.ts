@@ -72,7 +72,6 @@ export {
   getDefaultWorkspacePath,
   getGlobalConfigDir,
   getGlobalConfigPath,
-  getProjectConfigPath,
   loadConfig,
   resolveHomeDir,
   resolveWorkspace,

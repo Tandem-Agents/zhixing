@@ -8,7 +8,6 @@ import {
   ConfigSchemaError,
   loadConfig,
   getGlobalConfigPath,
-  getProjectConfigPath,
   writeConfig,
 } from "../config-loader.js";
 import { ROLE_RECOMMENDATIONS } from "../role-recommendations.js";
@@ -36,25 +35,15 @@ describe("getGlobalConfigPath", () => {
   });
 });
 
-describe("getProjectConfigPath", () => {
-  it("应返回 cwd 下的 zhixing.config.jsonc", () => {
-    const result = getProjectConfigPath("/some/project");
-    expect(result).toBe(path.join("/some/project", "zhixing.config.jsonc"));
-  });
-});
-
 describe("loadConfig", () => {
   let tempHome: string;
-  let tempProject: string;
 
   beforeEach(async () => {
     tempHome = await createTempDir("config-home");
-    tempProject = await createTempDir("config-project");
   });
 
-  it("全局和项目配置都不存在时应返回空对象（noAutoCreate）", () => {
+  it("全局配置不存在时应返回空对象（noAutoCreate）", () => {
     const config = loadConfig({
-      cwd: tempProject,
       env: { ZHIXING_CONFIG_PATH: path.join(tempHome, "nonexistent.json") },
       noAutoCreate: true,
     });
@@ -76,7 +65,6 @@ describe("loadConfig", () => {
     );
 
     const config = loadConfig({
-      cwd: tempProject,
       env: { ZHIXING_CONFIG_PATH: path.join(globalDir, "config.jsonc") },
       noAutoCreate: true,
     });
@@ -85,159 +73,42 @@ describe("loadConfig", () => {
     expect(config.workspace?.root).toBe("/some/workspace");
   });
 
-  it("项目配置的 llm 应覆盖全局配置（main 整体替换、light 字段级）", () => {
+  it("配置与运行目录无关：cwd 下的 zhixing.config.jsonc 被忽略（无项目配置层）", async () => {
     const globalDir = path.join(tempHome, ".zhixing");
     fs.mkdirSync(globalDir, { recursive: true });
     fs.writeFileSync(
       path.join(globalDir, "config.jsonc"),
       JSON.stringify({
-        llm: {
-          main: { provider: "deepseek", model: "deepseek-chat" },
-          light: { provider: "anthropic", model: "claude-haiku-4-5-20251001" },
-        },
+        llm: { main: { provider: "deepseek", model: "deepseek-chat" } },
       }),
     );
-
+    // 在某工作目录放一份旧式项目配置——loadConfig 不再读 cwd，应被完全忽略
+    const strayDir = await createTempDir("config-stray");
     fs.writeFileSync(
-      path.join(tempProject, "zhixing.config.jsonc"),
+      path.join(strayDir, "zhixing.config.jsonc"),
       JSON.stringify({
-        llm: {
-          main: { provider: "deepseek", model: "deepseek-reasoner" },
-        },
+        llm: { main: { provider: "SHOULD-BE-IGNORED", model: "x" } },
       }),
     );
 
-    const config = loadConfig({
-      cwd: tempProject,
-      env: { ZHIXING_CONFIG_PATH: path.join(globalDir, "config.jsonc") },
-      noAutoCreate: true,
-    });
-
-    expect(config.llm?.main).toEqual({ provider: "deepseek", model: "deepseek-reasoner" });
-    // 项目级仅覆盖 main，light 从全局保留
-    expect(config.llm?.light).toEqual({
-      provider: "anthropic",
-      model: "claude-haiku-4-5-20251001",
-    });
+    const prevCwd = process.cwd();
+    try {
+      process.chdir(strayDir);
+      const config = loadConfig({
+        env: { ZHIXING_CONFIG_PATH: path.join(globalDir, "config.jsonc") },
+        noAutoCreate: true,
+      });
+      // 取全局值，cwd 下的文件零影响
+      expect(config.llm?.main).toEqual({
+        provider: "deepseek",
+        model: "deepseek-chat",
+      });
+    } finally {
+      process.chdir(prevCwd);
+    }
   });
 
-  it("项目配置的 messaging 应按 key 合并（不是替换）", () => {
-    const globalDir = path.join(tempHome, ".zhixing");
-    fs.mkdirSync(globalDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(globalDir, "config.jsonc"),
-      JSON.stringify({
-        messaging: {
-          feishu: { type: "feishu", options: { logLevel: "info" } },
-          slack: {},
-        },
-      }),
-    );
-
-    fs.writeFileSync(
-      path.join(tempProject, "zhixing.config.jsonc"),
-      JSON.stringify({
-        messaging: {
-          feishu: { defaultTarget: { to: "C12345" } },
-          wecom: {},
-        },
-      }),
-    );
-
-    const config = loadConfig({
-      cwd: tempProject,
-      env: { ZHIXING_CONFIG_PATH: path.join(globalDir, "config.jsonc") },
-      noAutoCreate: true,
-    });
-
-    // feishu: 全局 type/options 保留，项目 defaultTarget 合入
-    expect(config.messaging?.feishu).toEqual({
-      type: "feishu",
-      options: { logLevel: "info" },
-      defaultTarget: { to: "C12345" },
-    });
-    // slack: 全局保留
-    expect(config.messaging?.slack).toEqual({});
-    // wecom: 项目新增
-    expect(config.messaging?.wecom).toEqual({});
-  });
-
-  it("项目配置的 mcp.servers 应按 server id 合并（不是替换）", () => {
-    const globalDir = path.join(tempHome, ".zhixing");
-    fs.mkdirSync(globalDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(globalDir, "config.jsonc"),
-      JSON.stringify({
-        mcp: {
-          servers: {
-            github: { command: "uvx", args: ["a"] },
-            notion: { command: "b" },
-          },
-        },
-      }),
-    );
-
-    fs.writeFileSync(
-      path.join(tempProject, "zhixing.config.jsonc"),
-      JSON.stringify({
-        mcp: {
-          servers: {
-            github: { enabled: false },
-            linear: { command: "c" },
-          },
-        },
-      }),
-    );
-
-    const config = loadConfig({
-      cwd: tempProject,
-      env: { ZHIXING_CONFIG_PATH: path.join(globalDir, "config.jsonc") },
-      noAutoCreate: true,
-    });
-
-    // github: 全局 command/args 保留，项目 enabled 合入
-    expect(config.mcp?.servers?.github).toEqual({
-      command: "uvx",
-      args: ["a"],
-      enabled: false,
-    });
-    // notion: 全局保留
-    expect(config.mcp?.servers?.notion).toEqual({ command: "b" });
-    // linear: 项目新增
-    expect(config.mcp?.servers?.linear).toEqual({ command: "c" });
-  });
-
-  it("intent.cancelKeywords 是 append 合并：全局 + 项目都生效", () => {
-    const globalDir = path.join(tempHome, ".zhixing");
-    fs.mkdirSync(globalDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(globalDir, "config.jsonc"),
-      JSON.stringify({
-        intent: { cancelKeywords: ["全局词1", "全局词2"] },
-      }),
-    );
-
-    fs.writeFileSync(
-      path.join(tempProject, "zhixing.config.jsonc"),
-      JSON.stringify({
-        intent: { cancelKeywords: ["项目词"] },
-      }),
-    );
-
-    const config = loadConfig({
-      cwd: tempProject,
-      env: { ZHIXING_CONFIG_PATH: path.join(globalDir, "config.jsonc") },
-      noAutoCreate: true,
-    });
-
-    expect(config.intent?.cancelKeywords).toEqual([
-      "全局词1",
-      "全局词2",
-      "项目词",
-    ]);
-  });
-
-  it("intent 仅全局配置 → 透传", () => {
+  it("intent 从全局配置正常加载", () => {
     const globalDir = path.join(tempHome, ".zhixing");
     fs.mkdirSync(globalDir, { recursive: true });
     fs.writeFileSync(
@@ -246,7 +117,6 @@ describe("loadConfig", () => {
     );
 
     const config = loadConfig({
-      cwd: tempProject,
       env: { ZHIXING_CONFIG_PATH: path.join(globalDir, "config.jsonc") },
       noAutoCreate: true,
     });
@@ -258,7 +128,6 @@ describe("loadConfig", () => {
     const configPath = path.join(tempHome, ".zhixing", "config.jsonc");
 
     const config = loadConfig({
-      cwd: tempProject,
       env: { ZHIXING_CONFIG_PATH: configPath },
     });
 
@@ -285,7 +154,6 @@ describe("loadConfig", () => {
     const configPath = path.join(tempHome, ".zhixing", "config.jsonc");
 
     loadConfig({
-      cwd: tempProject,
       env: { ZHIXING_CONFIG_PATH: configPath },
     });
 
@@ -309,7 +177,6 @@ describe("loadConfig", () => {
     );
 
     loadConfig({
-      cwd: tempProject,
       env: { ZHIXING_CONFIG_PATH: configPath },
     });
 
@@ -332,7 +199,6 @@ describe("loadConfig", () => {
     );
 
     const config = loadConfig({
-      cwd: tempProject,
       env: { ZHIXING_CONFIG_PATH: path.join(globalDir, "config.jsonc") },
       noAutoCreate: true,
     });
@@ -349,7 +215,6 @@ describe("loadConfig", () => {
     let caught: unknown;
     try {
       loadConfig({
-        cwd: tempProject,
         env: { ZHIXING_CONFIG_PATH: filePath },
         noAutoCreate: true,
       });

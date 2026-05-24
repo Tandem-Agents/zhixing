@@ -582,7 +582,7 @@ export class RuntimeSession implements IWorkModeController {
     }
 
     try {
-      const newConfig = loadConfig({ cwd: process.cwd() });
+      const newConfig = loadConfig();
       const newCredentials = loadCredentials({ homeDir: resolveHomeDir() });
 
       const diff = computeDiff(

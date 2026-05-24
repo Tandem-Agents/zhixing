@@ -3,7 +3,7 @@
  *
  * 这些是 writer（writeConfig / writeCredentials）共享的纯工具：
  *   - 原子写：唯一 tmp + wx flag + leak-proof 清理
- *   - id 级 + 字段级合并：与 reader 的 deepMergeConfig 行为对偶
+ *   - id 级 + 字段级合并：供 applyConfigPatch / applyCredentialsPatch 的 merge 模式复用
  *
  * 故意不在 index.ts 导出——provider 包外部不应依赖这些 helper，未来重构
  * （提到独立 io 包、换实现等）零外部成本。
@@ -65,12 +65,11 @@ export async function writeJsonAtomic(
  *   - patch 新增 id 直接放入
  *   - current 有但 patch 没提的 id 保留
  *
- * 与 reader 端 deepMergeConfig 在 providers / channels 上的合并行为对偶——
- * writer 视角下 "current 文件 + patch" 等同于 reader 视角下 "全局 + 项目" 的
- * id 级合并，让两端对同一份文件的看法一致。
+ * 供 applyConfigPatch / applyCredentialsPatch 的 merge 模式做"current 文件 + 部分
+ * patch"的 id 级合并（同 id 字段级 spread、新增 id 放入、未提及 id 保留）。
  *
  * 删除单个 id 的语义不在此函数内（patch 不包含 = 保留 current 而非删除）；
- * 显式删除由未来的 removeXxx API 承载。
+ * 显式删除由编辑器的 replace 模式（省略即删除）承载。
  */
 export function mergeIdMap<T extends object>(
   current: Record<string, T> | undefined,
