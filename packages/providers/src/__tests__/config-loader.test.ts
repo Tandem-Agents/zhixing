@@ -449,6 +449,39 @@ describe("applyConfigPatch · 合并语义", () => {
   });
 });
 
+describe("applyConfigPatch · replace 模式（编辑器权威写入，支持删除）", () => {
+  it("id 子表整体替换——patch 省略的 server / channel 被删除", () => {
+    const current: Partial<ZhixingConfig> = {
+      mcp: { servers: { notion: { type: "stdio" }, github: { type: "http" } } },
+      messaging: { feishu: {}, slack: {} },
+    };
+    // patch 省略 notion 与 slack（编辑器删除它们）
+    const result = applyConfigPatch(
+      current,
+      {
+        mcp: { servers: { github: { type: "http" } } },
+        messaging: { feishu: {} },
+      },
+      "replace",
+    );
+    expect(result.mcp?.servers).toEqual({ github: { type: "http" } });
+    expect(result.messaging).toEqual({ feishu: {} });
+  });
+
+  it("默认 merge 模式：patch 省略的 id 仍保留（契约不变）", () => {
+    const current: Partial<ZhixingConfig> = {
+      mcp: { servers: { notion: { type: "stdio" } } },
+    };
+    const result = applyConfigPatch(current, {
+      mcp: { servers: { github: { type: "http" } } },
+    });
+    expect(result.mcp?.servers).toEqual({
+      notion: { type: "stdio" },
+      github: { type: "http" },
+    });
+  });
+});
+
 describe("writeConfig · 端到端持久化", () => {
   let tempHome: string;
 
@@ -456,28 +489,27 @@ describe("writeConfig · 端到端持久化", () => {
     tempHome = await createTempDir("write-config");
   });
 
-  it("追加新 messaging 后磁盘文件包含所有原 messaging", async () => {
+  it("权威写入：id 子表整体替换（省略的 id 被删除）+ 未提及顶层字段保留", async () => {
     const filePath = path.join(tempHome, "config.jsonc");
     fs.writeFileSync(
       filePath,
       JSON.stringify({
         llm: { main: { provider: "deepseek", model: "deepseek-chat" } },
-        messaging: { feishu: { type: "feishu" } },
+        messaging: { feishu: { type: "feishu" }, wecom: {} },
       }),
       "utf-8",
     );
 
+    // 编辑器权威写入：省略 wecom（= 删除它）；不带 llm（代表"本入口不管的字段"）
     await writeConfig(
-      { messaging: { wecom: {} } },
+      { messaging: { feishu: { type: "feishu" } } } as ZhixingConfig,
       { homeDir: tempHome },
     );
 
     const persisted = JSON.parse(fs.readFileSync(filePath, "utf-8"));
-    expect(persisted.messaging).toEqual({
-      feishu: { type: "feishu" },
-      wecom: {},
-    });
-    // 顶层 llm 字段应保留
+    // wecom 被删除（id 子表整体替换，删除由省略表达）
+    expect(persisted.messaging).toEqual({ feishu: { type: "feishu" } });
+    // 未提及的顶层 llm 保留（护未知 / 未管字段不被误删）
     expect(persisted.llm).toEqual({
       main: { provider: "deepseek", model: "deepseek-chat" },
     });

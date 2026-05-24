@@ -78,6 +78,8 @@ async function runEditorCommand(
         credentialsPath,
       },
       writers: {
+        // writeConfig / writeCredentials 即"权威完整写入"——编辑器持有完整配置，写入令文件
+        // 等同它，删除某 server / channel 由"省略该 id"表达、真正落盘。
         writeConfig: (next) => writeConfig(next, { homeDir }),
         writeCredentials: (next) => writeCredentials(next, { homeDir }),
       },

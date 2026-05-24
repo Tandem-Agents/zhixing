@@ -106,18 +106,20 @@ export function loadConfig(options: {
 // ─── 配置写入 ───
 
 /**
- * 写全局配置文件。原子写 + reader/writer 对偶合并。
+ * 写全局配置文件（**权威完整写入**）——读现存文件 → 用传入的完整配置覆盖 → 原子写。
  *
- * 合并行为见 applyConfigPatch 文档。
+ * id 子表（messaging / mcp）整体替换：以传入的为准，**省略的 id 即删除**；未提及的顶层字段
+ * 保留现存（护未知 / 未来字段）。这是配置编辑器的落盘语义：编辑器持有完整配置，"写"即"令
+ * 文件等同此配置"。参数类型是完整 `ZhixingConfig`（非 Partial）以从类型上表达这一意图。
  *
- * 路径解析：传 homeDir → `<homeDir>/config.json`（测试用）；
- * 否则走 `getGlobalConfigPath` 同款解析（含 `ZHIXING_CONFIG_PATH` 环境覆盖）。
+ * 部分 patch 的合并写入是 applyConfigPatch 的另一模式（默认 merge），留待未来 update_config
+ * 暴露专用入口、不复用本函数——避免"以为是合并"的误用导致删除失效。
  *
- * 错误：current 文件存在但读 / 解析失败 → throw ConfigSchemaError（不静默吞）。
- * 不经任何 AI 工具体系——是程序级 file IO，wizard 与未来 update_config 流程直接调。
+ * 路径解析：传 homeDir → `<homeDir>/config.jsonc`（测试用）；否则走 `getGlobalConfigPath`
+ * （含 `ZHIXING_CONFIG_PATH` 环境覆盖）。错误：current 存在但读 / 解析失败 → throw（不静默吞）。
  */
 export async function writeConfig(
-  patch: Partial<ZhixingConfig>,
+  config: ZhixingConfig,
   options: {
     homeDir?: string;
     env?: Record<string, string | undefined>;
@@ -151,31 +153,27 @@ export async function writeConfig(
     current = (parsed ?? {}) as Partial<ZhixingConfig>;
   }
 
-  const merged = applyConfigPatch(current, patch);
+  const merged = applyConfigPatch(current, config, "replace");
   await writeJsonAtomic(filePath, merged);
 }
 
 /**
- * 合并 ZhixingConfig 现状与 patch。
+ * 把 patch 应用到 ZhixingConfig 现状，产出待写入的配置。
  *
- * 合并语义（与 reader 端 deepMergeConfig 对偶）：
- *   - 标量 / 简单字段（llm / agent / intent / workspace / network）：
- *     patch 显式提供则**整体替换**——caller 显式意图明确
- *   - id-based 子表（messaging）：**id 级 + 字段级合并**——
- *     修改单 id 不清空其它 id；修改单 id 内单字段不丢其它字段
- *   - patch 未提到的顶层字段：保留 current
+ * id 子表（messaging / mcp）由 `idMapMode` 决定：
+ *   - 默认 `"merge"`：**id 级合并**（修改单 id 不清空其它）——供部分 patch 写入
+ *   - `"replace"`：**整体替换**——供配置编辑器的权威完整写入；删除某 id 由"省略它"表达，
+ *     合并模式删不掉被省略的 id（这是删除功能失效的根因，故编辑器必须用 replace）
+ * 其余字段一律 provided 则整体替换；未提及的顶层字段保留 current。
  *
- * 这与 reader 在 messaging 上的 id 级合并行为对偶——writer 视角下
- * "current 文件 + patch" 等同于 reader 视角下 "全局 + 项目" 的 id 级合并。
- *
- * 显式删除单字段不在此函数语义内（patch 不包含 = 保留 current）；
- * 显式删除由未来的 removeXxx API 承载。
+ * 读取侧 deepMergeConfig 的 global+project 分层另走 id 级合并（合并两个文件），是不同操作。
  *
  * 导出供测试与未来 update_config 流程复用。
  */
 export function applyConfigPatch(
   current: Partial<ZhixingConfig>,
   patch: Partial<ZhixingConfig>,
+  idMapMode: "merge" | "replace" = "merge",
 ): ZhixingConfig {
   const result: Partial<ZhixingConfig> = { ...current };
 
@@ -186,13 +184,16 @@ export function applyConfigPatch(
   if (patch.network !== undefined) result.network = patch.network;
 
   if (patch.messaging !== undefined) {
-    result.messaging = mergeIdMap(current.messaging, patch.messaging);
+    result.messaging =
+      idMapMode === "replace"
+        ? patch.messaging
+        : mergeIdMap(current.messaging, patch.messaging);
   }
-
   if (patch.mcp !== undefined) {
-    result.mcp = {
-      servers: mergeIdMap(current.mcp?.servers, patch.mcp.servers ?? {}),
-    };
+    result.mcp =
+      idMapMode === "replace"
+        ? patch.mcp
+        : { servers: mergeIdMap(current.mcp?.servers, patch.mcp.servers ?? {}) };
   }
 
   return result as ZhixingConfig;

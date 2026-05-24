@@ -126,15 +126,18 @@ function ensureSkeleton(filePath: string): void {
 }
 
 /**
- * 写凭证。原子写 + 子表 id 级 + 字段级合并。
+ * 写凭证文件（**权威完整写入**）——读现存 → 用传入的完整凭证覆盖 → 原子写。
  *
- * 合并行为见 applyCredentialsPatch 文档。
+ * id 子表（providers / channels / mcp）整体替换：以传入的为准，**省略的 id 即删除**；未提及的
+ * 子表保留现存。这是配置编辑器的落盘语义。参数类型是完整 `ZhixingCredentials`（非 Partial）。
  *
- * 不经任何 AI 工具体系——是程序级 file IO，wizard 与未来 update_credentials 流程
- * 直接调用；与 builtin 安全规则无关（规则约束的是 AI 工具，不是程序级写）。
+ * 部分 patch 的合并写入是 applyCredentialsPatch 的另一模式（默认 merge），留待未来
+ * update_credentials 暴露专用入口、不复用本函数。
+ *
+ * 不经任何 AI 工具体系——程序级 file IO；与 builtin 安全规则无关（规则约束 AI 工具，非程序级写）。
  */
 export async function writeCredentials(
-  patch: Partial<ZhixingCredentials>,
+  credentials: ZhixingCredentials,
   options: { homeDir?: string } = {},
 ): Promise<void> {
   const filePath = getCredentialsPath(options.homeDir);
@@ -142,39 +145,43 @@ export async function writeCredentials(
     homeDir: options.homeDir,
     noAutoCreate: true,
   });
-  const merged = applyCredentialsPatch(current, patch);
+  const merged = applyCredentialsPatch(current, credentials, "replace");
   await writeJsonAtomic(filePath, merged);
 }
 
 /**
  * 合并 ZhixingCredentials 现状与 patch。
  *
- * 与 applyConfigPatch 镜像对称：spread current 起点 + 显式覆盖 / mergeIdMap。
- *
- * 合并语义：
- *   - id-based 子表（providers / channels）：**id 级 + 字段级合并**——
- *     修改单 id 不清空其它 id；修改单 id 内单字段不丢其它字段
- *   - patch 未提到的子表：保留 current
- *   - version：patch 显式提供则保留，否则不主动写入（schema 演进时按
- *     "无字段=v1" 探测）
+ * 与 applyConfigPatch 镜像对称：id 子表（providers / channels / mcp）由 `idMapMode` 决定——
+ * 默认 `"merge"`（id 级合并，供部分 patch）；`"replace"` 整体替换（供编辑器的权威完整写入，
+ * 删除某 id 由"省略它"表达，合并模式删不掉被省略的 id）。未提供的子表保留 current；
+ * version 显式提供则保留，否则不主动写入（schema 演进时按"无字段=v1"探测）。
  *
  * 导出供测试与未来 update_credentials 流程复用。
  */
 export function applyCredentialsPatch(
   current: ZhixingCredentials,
   patch: Partial<ZhixingCredentials>,
+  idMapMode: "merge" | "replace" = "merge",
 ): ZhixingCredentials {
   const result: ZhixingCredentials = { ...current };
   if (patch.version !== undefined) result.version = patch.version;
 
   if (patch.providers !== undefined) {
-    result.providers = mergeIdMap(current.providers, patch.providers);
+    result.providers =
+      idMapMode === "replace"
+        ? patch.providers
+        : mergeIdMap(current.providers, patch.providers);
   }
   if (patch.channels !== undefined) {
-    result.channels = mergeIdMap(current.channels, patch.channels);
+    result.channels =
+      idMapMode === "replace"
+        ? patch.channels
+        : mergeIdMap(current.channels, patch.channels);
   }
   if (patch.mcp !== undefined) {
-    result.mcp = mergeIdMap(current.mcp, patch.mcp);
+    result.mcp =
+      idMapMode === "replace" ? patch.mcp : mergeIdMap(current.mcp, patch.mcp);
   }
 
   return result;

@@ -6,7 +6,8 @@
  *   - 文件不存在 + noAutoCreate → 返回空对象（caller 不创建文件）
  *   - JSON 损坏 → throw CredentialsSchemaError（fail-fast，不 silent）
  *   - 错误消息不泄漏密值（fuzz 含 sk-* 前缀的损坏文件）
- *   - writeCredentials 子表合并是 id 级 + 字段级（不丢任何已有字段）
+ *   - applyCredentialsPatch 默认 merge（id 级 + 字段级合并）；replace 模式整体替换支持删除
+ *   - writeCredentials 是权威完整写入（replace）：省略的 id 即删除，未提及的子表保留
  *   - version 字段不主动写入；用户已写时原样保留
  */
 
@@ -237,28 +238,54 @@ describe("applyCredentialsPatch · 合并语义", () => {
   });
 });
 
+describe("applyCredentialsPatch · replace 模式（编辑器权威写入，支持删除）", () => {
+  it("id 子表整体替换——patch 省略的凭证条目被删除", () => {
+    const current = {
+      providers: { openai: { apiKey: "sk-o" } },
+      mcp: {
+        notion: { NOTION_TOKEN: "ntn" },
+        github: { Authorization: "Bearer x" },
+      },
+    } as ZhixingCredentials;
+    // patch 省略 notion（编辑器删除它）
+    const result = applyCredentialsPatch(
+      current,
+      { mcp: { github: { Authorization: "Bearer x" } } },
+      "replace",
+    );
+    expect(result.mcp).toEqual({ github: { Authorization: "Bearer x" } });
+    // 未提供的 providers 子表保留
+    expect(result.providers).toEqual({ openai: { apiKey: "sk-o" } });
+  });
+});
+
 describe("writeCredentials · 端到端持久化", () => {
-  it("追加新 provider 后磁盘文件包含所有原 provider", async () => {
+  it("权威写入：id 子表整体替换（省略的条目被删除）+ 未提及子表保留", async () => {
     const filePath = getCredentialsPath(tmpDir);
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     fs.writeFileSync(
       filePath,
       JSON.stringify({
-        providers: { siliconflow: { apiKey: "sk-sf" } },
+        providers: {
+          siliconflow: { apiKey: "sk-sf" },
+          openai: { apiKey: "sk-oai" },
+        },
+        channels: { feishu: { appSecret: "sec-1" } },
       }),
       "utf-8",
     );
 
+    // 编辑器权威写入：providers 省略 openai（= 删除它）；不带 channels（代表本入口不管的子表）
     await writeCredentials(
-      { providers: { openai: { apiKey: "sk-oai" } } },
+      { providers: { siliconflow: { apiKey: "sk-sf" } } },
       { homeDir: tmpDir },
     );
 
     const persisted = JSON.parse(fs.readFileSync(filePath, "utf-8"));
-    expect(persisted.providers).toEqual({
-      siliconflow: { apiKey: "sk-sf" },
-      openai: { apiKey: "sk-oai" },
-    });
+    // openai 被删除（id 子表整体替换，删除由省略表达）
+    expect(persisted.providers).toEqual({ siliconflow: { apiKey: "sk-sf" } });
+    // 未提及的 channels 子表保留
+    expect(persisted.channels).toEqual({ feishu: { appSecret: "sec-1" } });
   });
 
   it("文件不存在时 writeCredentials 创建文件（仅含 patch 内容，不主动加 version）", async () => {
