@@ -30,6 +30,7 @@ export async function runConfigEditor(
 export type {
   ConfigEditorContext,
   ConfigEditorResult,
+  ConfigEditorRuntime,
   ConfigEditorWriters,
   EntryState,
   KeyEvent,
@@ -51,4 +52,4 @@ export { checkModel, type ModelIssue } from "./checks/model.js";
 export { checkMessaging, type MessagingIssue } from "./checks/messaging.js";
 
 // ─── Section 注册再导出（caller 用来"打开全部 sections"等场景） ───
-export { ALL_SECTION_IDS } from "./sections/index.js";
+export { ALL_SECTION_IDS, BASE_CONFIG_SECTION_IDS } from "./sections/index.js";

@@ -11,10 +11,11 @@
  */
 
 import type { RoleId, ZhixingConfig, ZhixingCredentials } from "@zhixing/providers";
+import type { McpServerStatus } from "@zhixing/mcp";
 
 // ─── Section（用户视角的配置块） ───
 
-export type SectionId = "model" | "messaging";
+export type SectionId = "model" | "messaging" | "mcp";
 
 // ─── Panel（UI 面板状态描述） ───
 
@@ -45,7 +46,9 @@ export type PanelDescriptor =
   /** L6：自定义思考预算（输入 token 数，budget 形态用） */
   | { kind: "thinking-budget"; role: ModelRole; providerId: string; model: string }
   /** L3 (messaging)：channel 配置（appId + appSecret + 启用按钮） */
-  | { kind: "channel-config"; channelId: string };
+  | { kind: "channel-config"; channelId: string }
+  /** L3 (mcp)：已接入 server 详情（启停 / 删除 / 查看状态） */
+  | { kind: "mcp-server"; serverId: string };
 
 /** 模型角色 —— 单一事实源是 providers 的 ROLE_SPECS（main / light / power） */
 export type ModelRole = RoleId;
@@ -115,6 +118,20 @@ export interface FieldSpec {
 
 // ─── Section 接口 ───
 
+// ─── 运行时只读快照（配置之外的状态） ───
+
+/**
+ * config-editor 的运行时只读访问器 —— 由 caller 注入，section 渲染时叠加配置之外的状态。
+ *
+ * 当前只有 MCP server 的连接状态：mcp section 列出 config 里的 server 后，按 serverId
+ * 叠加 connected / connecting + 工具数。保持纯只读、与 WorkingState（事务暂存的配置）
+ * 分离，避免运行时快照被 writers 误落盘。
+ */
+export interface ConfigEditorRuntime {
+  /** 全部受管 server 的运行状态（缺省 = 无 hub 注入，section 仅显示配置态）。 */
+  mcpServerStatuses?: () => readonly McpServerStatus[];
+}
+
 /**
  * 一个 Section 是用户视角的配置块（"主/辅模型" / "消息通道"）。
  *
@@ -136,8 +153,14 @@ export interface Section {
    * 但产品用户不知与对话模型并列的意义；副标题"用于接收外部消息触发 agent"消除歧义。
    */
   description?: string;
-  /** L1 主面板显示的入口项列表（每项一行） */
-  entries: (state: WorkingState) => SectionEntry[];
+  /**
+   * L1 主面板显示的入口项列表（每项一行）。
+   *
+   * runtime（可选）携带配置之外的运行时只读快照（如 MCP server 连接状态）——由 runner
+   * 渲染前从 ctx 取并传入；section 据 serverId 等叠加运行态。model / messaging 不需要、
+   * 忽略该参数。
+   */
+  entries: (state: WorkingState, runtime?: ConfigEditorRuntime) => SectionEntry[];
 }
 
 /**
@@ -198,7 +221,21 @@ export type PanelAction =
   | { type: "stay"; state: WorkingState }
   | { type: "navigate"; state: WorkingState; panel: PanelDescriptor }
   | { type: "pop"; state: WorkingState }
-  | { type: "exit"; result: ConfigEditorResult };
+  | { type: "exit"; result: ConfigEditorResult }
+  /**
+   * loading：执行一个异步任务（如 discovery 验证 / LLM 推断），期间渲染 loading 态并可
+   * 取消。runner 执行 `run(signal)` 得到下一步 PanelAction 后续跑（可再次 loading 以分阶段）。
+   * 这是同步 handler 接入异步的唯一通路——只有需要异步的面板才产出它。
+   */
+  | {
+      type: "loading";
+      /** loading 期间展示的提示（如"正在验证连接…"）。 */
+      message: string;
+      /** 取消（Esc）时 pop 回上一面板的 state——task 不改 state，故用进入时的快照。 */
+      state: WorkingState;
+      /** 异步任务：收 AbortSignal（取消时 abort），返回下一步 PanelAction。 */
+      run: (signal: AbortSignal) => Promise<PanelAction>;
+    };
 
 // ─── 主入口 Context / Result ───
 
@@ -226,6 +263,11 @@ export interface ConfigEditorContext {
   stdout: NodeJS.WritableStream;
   /** 是否 TTY——非 TTY 时编辑器直接返回 cancelled，caller 走 fail-fast 路径 */
   isTTY: boolean;
+  /**
+   * 运行时只读快照访问器（可选）—— /mcp 注入 hub 的 serverStatuses，让 mcp section 叠加
+   * 连接状态；/config 等不注入时 section 仅显示配置态。
+   */
+  runtime?: ConfigEditorRuntime;
 }
 
 export interface ConfigEditorWriters {

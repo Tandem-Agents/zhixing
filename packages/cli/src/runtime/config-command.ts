@@ -26,7 +26,7 @@ import {
   writeConfig,
   writeCredentials,
 } from "@zhixing/providers";
-import { ALL_SECTION_IDS, runConfigEditor } from "../config-editor/index.js";
+import { BASE_CONFIG_SECTION_IDS, runConfigEditor } from "../config-editor/index.js";
 import type { CliWriter } from "../screen/index.js";
 import type { RuntimeSession } from "./session.js";
 import type { ReloadResult } from "./types.js";
@@ -66,7 +66,7 @@ export async function handleConfigCommand(
     const editorResult = await runConfigEditor({
       initialConfig: config,
       initialCredentials: credentials,
-      sections: ALL_SECTION_IDS.slice(),
+      sections: BASE_CONFIG_SECTION_IDS.slice(),
       title: "基础配置",
       header: {
         workspaceRoot: config.workspace?.root,

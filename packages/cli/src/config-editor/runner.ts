@@ -46,6 +46,11 @@ import {
   renderInputPanel,
   renderThinkingBudgetPanel,
 } from "./panels/input.js";
+import {
+  handleMcpServerPanelKey,
+  renderMcpServerPanel,
+} from "./panels/mcp.js";
+import { runLoadingAction, renderLoadingFrame } from "./loading.js";
 
 interface PanelFrame {
   descriptor: PanelDescriptor;
@@ -93,13 +98,21 @@ export async function runEventLoop(
         renderMainPanel(ctx, state, main.cursor, renderer, main.errorMessage);
       } else {
         const top = stack[stack.length - 1]!;
-        renderTopPanel(state, top, renderer);
+        renderTopPanel(ctx, state, top, renderer);
       }
       // 每帧渲染完一次性 write 到 stdout——双缓冲减少分段闪烁
       renderer.flush();
 
       const key = await stream.next();
-      const action = dispatchKey(ctx, state, main, stack, key);
+      let action = dispatchKey(ctx, state, main, stack, key);
+
+      // loading：执行异步任务（带取消），用其结果继续；支持多阶段链式 loading。
+      while (action.type === "loading") {
+        action = await runLoadingAction(action, stream, (message) => {
+          renderLoadingFrame(renderer, message);
+          renderer.flush();
+        });
+      }
 
       if (action.type === "exit") {
         return action.result;
@@ -126,6 +139,7 @@ export async function runEventLoop(
 }
 
 function renderTopPanel(
+  ctx: ConfigEditorContext,
   state: WorkingState,
   frame: PanelFrame,
   renderer: Renderer,
@@ -143,6 +157,9 @@ function renderTopPanel(
     case "provider-config":
     case "channel-config":
       renderEntityPanel(state, d, frame.cursor, renderer, frame.errorMessage);
+      return;
+    case "mcp-server":
+      renderMcpServerPanel(state, d, frame.cursor, renderer, ctx.runtime);
       return;
     case "input":
       renderInputPanel(state, d, renderer);
@@ -187,6 +204,11 @@ function dispatchKey(
       const result = handleEntityPanelKey(state, d, top.cursor, key);
       top.cursor = result.cursor;
       top.errorMessage = result.errorMessage;
+      return result.action;
+    }
+    case "mcp-server": {
+      const result = handleMcpServerPanelKey(state, d, top.cursor, key);
+      top.cursor = result.cursor;
       return result.action;
     }
     case "input":

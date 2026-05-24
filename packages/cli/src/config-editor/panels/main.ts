@@ -77,7 +77,7 @@ function buildOptions(
   state: WorkingState,
 ): { sections: Array<{ section: Section; entries: MainPanelItem[] }>; options: MainPanelOption[] } {
   const sections = getSections(ctx.sections).map((section) => {
-    const entries = section.entries(state).map<MainPanelItem>((entry, idx) => ({
+    const entries = section.entries(state, ctx.runtime).map<MainPanelItem>((entry, idx) => ({
       kind: "section-entry",
       sectionId: section.id,
       entryIndex: idx,

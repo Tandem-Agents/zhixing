@@ -26,6 +26,8 @@ import {
 import { renderListPanel } from "../panels/list.js";
 import { renderEntityPanel } from "../panels/entity.js";
 import { renderInputPanel, renderAddModelPanel } from "../panels/input.js";
+import { renderMcpServerPanel } from "../panels/mcp.js";
+import { renderLoadingFrame } from "../loading.js";
 import {
   createInitialState,
   writeModelRole,
@@ -33,6 +35,7 @@ import {
   patchChannelEntry,
   addProviderModel,
   setInputBuffer,
+  upsertMcpServer,
 } from "../state.js";
 import { stripAnsi } from "../../tui/index.js";
 import type {
@@ -455,5 +458,55 @@ describe("config-editor panel 整屏快照", () => {
         Enter 添加   ·   Esc 取消   ·   Ctrl+C 退出
       "
     `);
+  });
+});
+
+// ─── mcp-server 详情面板 + loading 态：冒烟（渲染不抛 + 含关键文案） ───
+// 用内容断言而非精确快照——只守护"不崩 + 关键信息在场"，不锁死布局细节。
+describe("mcp 面板渲染冒烟", () => {
+  it("mcp-server panel · 含 server 信息、连接状态与启停/删除按钮", () => {
+    const out = renderAndCapture((renderer) => {
+      const state = upsertMcpServer(emptyState(), "github", {
+        type: "http",
+        url: "https://api.githubcopilot.com/mcp/",
+      });
+      renderMcpServerPanel(
+        state,
+        { kind: "mcp-server", serverId: "github" },
+        { index: 0 },
+        renderer,
+        {
+          mcpServerStatuses: () => [
+            { serverId: "github", transport: "http", status: "connected", toolCount: 14 },
+          ],
+        },
+      );
+    });
+    expect(out).toContain("github");
+    expect(out).toContain("已连接 · 14 工具");
+    expect(out).toContain("停用");
+    expect(out).toContain("删除");
+  });
+
+  it("mcp-server panel · 无 runtime 时只显示配置态、不抛", () => {
+    const out = renderAndCapture((renderer) => {
+      const state = upsertMcpServer(emptyState(), "x", { type: "stdio", command: "c" });
+      renderMcpServerPanel(
+        state,
+        { kind: "mcp-server", serverId: "x" },
+        { index: 1 },
+        renderer,
+      );
+    });
+    expect(out).toContain("x");
+    expect(out).toContain("已启用（暂无连接信息）");
+  });
+
+  it("loading frame · 含提示与取消脚注", () => {
+    const out = renderAndCapture((renderer) =>
+      renderLoadingFrame(renderer, "正在验证连接…"),
+    );
+    expect(out).toContain("正在验证连接…");
+    expect(out).toContain("Esc 取消");
   });
 });

@@ -177,3 +177,25 @@ describe("KeyEventStream · 普通字符流", () => {
     stream.stop();
   });
 });
+
+describe("KeyEventStream · 可取消 next(signal)", () => {
+  it("abort 摘除 waiter 并 reject，后续按键落到新 next（不被悬挂 waiter 吞掉）", async () => {
+    const stdin = createMockStdin();
+    const stream = createKeyEventStream(stdin);
+    stream.start();
+
+    const controller = new AbortController();
+    const aborted = stream
+      .next(controller.signal)
+      .then(() => "resolved", () => "rejected");
+    controller.abort();
+    expect(await aborted).toBe("rejected");
+
+    // waiter 已摘除：新按键由新的 next 接收，而非被已 abort 的等待吞掉
+    const pending = stream.next();
+    stdin.emit("data", "a");
+    expect(await pending).toEqual({ type: "char", ch: "a" });
+
+    stream.stop();
+  });
+});

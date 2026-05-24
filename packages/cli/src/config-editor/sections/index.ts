@@ -7,21 +7,28 @@
 import type { Section, SectionId } from "../types.js";
 import { modelSection } from "./model.js";
 import { messagingSection } from "./messaging.js";
+import { mcpSection } from "./mcp.js";
 
 const REGISTRY: Record<SectionId, Section> = {
   model: modelSection,
   messaging: messagingSection,
+  mcp: mcpSection,
 };
 
 /**
  * 全部已注册 section id——单一事实源派生自 REGISTRY，加新 section 时只在 REGISTRY 改一处。
- *
- * 用于 caller 想"打开全部 sections"的场景（如 REPL `/config` 让用户改任何字段）；
- * bootstrap 等"按缺失字段决定 sections"的场景仍然显式传子集。
  */
 export const ALL_SECTION_IDS: readonly SectionId[] = Object.keys(
   REGISTRY,
 ) as readonly SectionId[];
+
+/**
+ * `/config`（基础配置）默认展示的 sections。
+ *
+ * mcp 不在此列：它有专属 `/mcp` 入口（带连接状态 + 接入引导，需注入 hub / probe / LLM），
+ * 在 `/config` 里只能半工作（无运行态、无引导）。故基础配置只放 model + messaging。
+ */
+export const BASE_CONFIG_SECTION_IDS: readonly SectionId[] = ["model", "messaging"];
 
 export function getSection(id: SectionId): Section {
   return REGISTRY[id];

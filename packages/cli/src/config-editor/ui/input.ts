@@ -50,7 +50,12 @@ const ESCAPE_TIMEOUT_MS = 50;
 export interface KeyEventStream {
   start(): void;
   stop(): void;
-  next(): Promise<KeyEvent>;
+  /**
+   * 取下一个 KeyEvent。传 signal 可取消本次等待——abort 时摘除内部 waiter 并 reject，
+   * 避免悬挂的 waiter 吞掉后续按键（单消费者队列）。用于 loading 态把"等按键"与异步任务
+   * race、任务先完成时清理这次等待。主循环不传 signal。
+   */
+  next(signal?: AbortSignal): Promise<KeyEvent>;
 }
 
 export function createKeyEventStream(stdin: NodeJS.ReadStream): KeyEventStream {
@@ -134,11 +139,22 @@ export function createKeyEventStream(stdin: NodeJS.ReadStream): KeyEventStream {
         waiters.shift()!({ type: "ctrl-c" });
       }
     },
-    next(): Promise<KeyEvent> {
+    next(signal?: AbortSignal): Promise<KeyEvent> {
       const queued = queue.shift();
       if (queued) return Promise.resolve(queued);
-      return new Promise<KeyEvent>((resolve) => {
-        waiters.push(resolve);
+      if (signal?.aborted) return Promise.reject(signal.reason);
+      return new Promise<KeyEvent>((resolve, reject) => {
+        const waiter = (event: KeyEvent): void => {
+          signal?.removeEventListener("abort", onAbort);
+          resolve(event);
+        };
+        function onAbort(): void {
+          const idx = waiters.indexOf(waiter);
+          if (idx >= 0) waiters.splice(idx, 1);
+          reject(signal?.reason);
+        }
+        waiters.push(waiter);
+        signal?.addEventListener("abort", onAbort, { once: true });
       });
     },
   };
