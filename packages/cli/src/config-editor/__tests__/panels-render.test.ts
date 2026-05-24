@@ -155,6 +155,22 @@ describe("config-editor panel 整屏快照", () => {
     `);
   });
 
+  it("main panel · 全可选编辑器（仅 mcp）不显示就绪 pill", () => {
+    const out = renderAndCapture((renderer, stdout) => {
+      const ctx: ConfigEditorContext = {
+        ...makeContext(stdout),
+        sections: ["mcp"],
+        title: "MCP 服务",
+      };
+      renderMainPanel(ctx, emptyState(), initialMainCursor(), renderer);
+    });
+    // "操作"区仍在，mcp 条目正常渲染——但无完成门槛，故不出现就绪裁决
+    expect(out).toContain("操作");
+    expect(out).toContain("添加 GitHub");
+    expect(out).not.toContain("全部就绪");
+    expect(out).not.toContain("待补充");
+  });
+
   it("main panel · 主模型已配齐 + 选中第二个 entry（辅助模型）", () => {
     const out = renderAndCapture((renderer, stdout) => {
       const ctx = makeContext(stdout);

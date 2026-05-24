@@ -25,6 +25,8 @@ export const mcpSection: Section = {
   id: "mcp",
   title: "MCP 服务",
   description: "接入外部 MCP server，把其工具加入 agent 工具集",
+  // 纯可选：接不接 server 都不阻塞完成；主面板据此不显示"全部就绪"裁决。
+  optional: true,
   entries: (state, runtime) => {
     const statusById = new Map(
       (runtime?.mcpServerStatuses?.() ?? []).map((s) => [s.serverId, s] as const),

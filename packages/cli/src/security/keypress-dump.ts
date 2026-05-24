@@ -33,8 +33,8 @@
  */
 
 import { mkdirSync, appendFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import { getZhixingHome } from "@zhixing/core";
 
 let pendingEnabled = false;
 let logPath: string | null = null;
@@ -94,7 +94,9 @@ function ensurePath(): string | null {
 
   try {
     const ts = new Date().toISOString().replace(/[:.]/g, "-");
-    const dir = join(homedir(), ".zhixing", "logs");
+    // 走 getZhixingHome（含 ZHIXING_HOME 解析）而非直拼 homedir——否则 ZHIXING_HOME
+    // 覆盖时其余数据进自定义目录、唯独这份调试日志漏到真实家目录，位置不一致。
+    const dir = join(getZhixingHome(), "logs");
     mkdirSync(dir, { recursive: true });
     const path = join(dir, `keypress-${process.pid}-${ts}.log`);
 

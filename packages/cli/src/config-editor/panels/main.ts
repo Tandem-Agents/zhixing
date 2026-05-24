@@ -216,15 +216,21 @@ export function renderMainPanel(
     renderer.writeLine("");
   }
 
-  // "操作"是 section 形态——头部带进度 pill，紧挨标题（非右对齐）
+  // "操作"区头部进度 pill 仅在"有意义"时显示：存在完成门槛（含必填项的 section），
+  // 或当前确有待补充项。全可选编辑器（如 /mcp）且无待补充 → pill 恒真、无信息且误导，
+  // 省略。`|| pending > 0` 让显示与 optional 标志的准确性解耦：万一某 optional section
+  // 仍产出 issues，pill 仍以"待补充 N 项"解释为何"完成"被挡，不会出现"无 pill 却被挡"的矛盾。
+  const hasCompletionGate = sections.some(({ section }) => !section.optional);
   const opStatus =
-    pending === 0
-      ? ({ kind: "ready", text: "全部就绪" } as const)
-      : ({ kind: "pending", text: `待补充 ${pending} 项` } as const);
+    !hasCompletionGate && pending === 0
+      ? undefined
+      : pending === 0
+        ? ({ kind: "ready", text: "全部就绪" } as const)
+        : ({ kind: "pending", text: `待补充 ${pending} 项` } as const);
   renderer.writeLines(
     renderSectionHead({
       title: "操作",
-      status: opStatus,
+      ...(opStatus ? { status: opStatus } : {}),
     }),
   );
   renderer.writeLine("");

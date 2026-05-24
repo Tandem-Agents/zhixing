@@ -164,6 +164,12 @@ export interface Section {
    */
   description?: string;
   /**
+   * 是否纯可选——无必填完成门槛。缺省 false = 含必填项，参与"全部就绪 / 待补充 N 项"
+   * 完成度裁决。MCP 这类"可选增益"section 置 true：条目永不阻塞完成；主面板据此在
+   * "全部 section 皆可选"时**隐藏就绪 pill**——无门槛处的"全部就绪"恒真、无信息且误导。
+   */
+  optional?: boolean;
+  /**
    * L1 主面板显示的入口项列表（每项一行）。
    *
    * runtime（可选）携带配置之外的运行时只读快照（如 MCP server 连接状态）——由 runner
