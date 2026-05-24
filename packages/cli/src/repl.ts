@@ -308,6 +308,11 @@ function buildSlashCommands(
     | undefined,
   /** MCP host —— `/mcp` 命令注入运行状态查询 + discovery 探测。 */
   mcpHub: McpHub,
+  /**
+   * chrome 屏幕控制器（无 chrome 终端为 null）—— `/config`·`/mcp` 编辑器退出后用它
+   * 重申硬件光标隐藏不变量（编辑器是自管 alt-screen + 光标的全屏 modal）。
+   */
+  renderScreen: ScreenController | null,
 ): Record<
   string,
   {
@@ -932,7 +937,14 @@ function buildSlashCommands(
     "/config": {
       description: "修改基础配置（服务商 / 模型 / API Key / 消息通道等）",
       handler: async (state) => {
-        await handleConfigCommand({ rl, state, session, renderer, writer: cliWriter });
+        await handleConfigCommand({
+          rl,
+          state,
+          session,
+          renderer,
+          writer: cliWriter,
+          screen: renderScreen,
+        });
       },
     },
     "/mcp": {
@@ -944,6 +956,7 @@ function buildSlashCommands(
           session,
           renderer,
           writer: cliWriter,
+          screen: renderScreen,
           hub: mcpHub,
         });
       },
@@ -1241,8 +1254,10 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   //     重新 attach typeahead 输入区，chrome 切回输入模式
   //
   // 不再走 alt-screen 切换（ScreenController.suspend/resume）——权限请求面板与对话流
-  // 共存让 scrollback 始终可见，提升上下文连贯性。ScreenController.suspend/resume
-  // 协议保留供其他真正独占整屏的 modal（如 config-editor）使用。
+  // 共存让 scrollback 始终可见，提升上下文连贯性。config-editor 是另一类全屏 modal，
+  // 但它自管 alt-screen + 光标（startup 期无 ScreenController 也要能独立运行），退出后
+  // 经 ScreenController.reassertCursorHidden() 重申光标隐藏不变量——不走 suspend/resume，
+  // 故该协议目前无调用方（作为"真正委托 ScreenController 接管整屏"的 modal 原语保留）。
   //
   // **NB**: inputController 在闭包内通过 let 引用（声明在下方）—— beforeShow/afterShow
   // 在 confirmation 实际触发时才求值，那时 inputController 已 start()，可选链兜底 null。
@@ -1542,6 +1557,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     applyModeSwitch,
     clearScreenToInitial,
     mcpHub,
+    renderScreen,
   );
 
   // ── Typeahead 路径接入（Phase 1 Step 5） ──

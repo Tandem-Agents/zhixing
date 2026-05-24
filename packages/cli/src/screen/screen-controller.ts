@@ -287,6 +287,16 @@ export interface ScreenController {
   resume(): void;
 
   /**
+   * 重新断言 chrome 模式的硬件光标隐藏不变量。
+   *
+   * 供"自管 alt-screen + 光标、不走 suspend/resume 的全屏 modal（如 config-editor）"
+   * 返回后调用——modal 退出 alt-screen 时硬件光标可见性 implementation-defined，
+   * 回到 chrome 后须重申隐藏，否则残留随流式输出闪烁的硬件光标。region 已 detach
+   * 时 no-op。
+   */
+  reassertCursorHidden(): void;
+
+  /**
    * 订阅 suspended 状态变化——返回 unsubscribe。
    *
    * 仅在状态实际翻转时触发回调；订阅时不立即触发，订阅者自行处理初始状态
@@ -745,6 +755,23 @@ class ScreenControllerImpl implements ScreenController {
     // 触发 flush 消费 suspend 期间累积的暂存任务——此刻两个状态机已对齐，
     // ScrollRegion 写入路径全部畅通
     this.flush();
+  }
+
+  /**
+   * 重新断言 chrome 模式的硬件光标隐藏不变量。
+   *
+   * 供"自管 alt-screen + 光标的全屏 modal（如 config-editor）"返回后调用——这类
+   * modal 不走 suspend/resume（自己进退 alt-screen），其内为输入显示过光标，退出
+   * alt-screen 时硬件光标可见性 implementation-defined（部分终端保留 alt 内可见
+   * 状态），回到 chrome 后必须重申隐藏，否则残留一个随流式输出闪烁的硬件光标。
+   * 输入光标由 chrome 渲染层的 reverse SGR 视觉光标承担，与硬件光标解耦。
+   *
+   * 与 firstAttach / resume / rebuildAfterResize 的 hideCursor emit 同口径、单一来源；
+   * 仅在 region 仍 attached（chrome 活跃）时 emit，保护非 chrome / 已 detach 路径。
+   */
+  reassertCursorHidden(): void {
+    if (this.disposed || !this.scrollRegion.state.attached) return;
+    this.stdout.write(ANSI.hideCursor);
   }
 
   onSuspendChange(listener: (suspended: boolean) => void): () => void {

@@ -524,5 +524,8 @@ describe("mcp 面板渲染冒烟", () => {
     expect(out).toContain("Enter 验证并接入");
     // 密钥 mask 显示，不泄漏明文
     expect(out).not.toContain("ghp_secret");
+    // 长说明按内容宽度折行而非截断——80 列下 GitHub 提示远超单行预算，旧的"交给
+    // chrome 截断加 …"会丢字；折行后输出不应出现截断省略号。
+    expect(out).not.toContain("…");
   });
 });

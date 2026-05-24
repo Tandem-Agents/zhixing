@@ -59,7 +59,7 @@ export const MCP_PRESETS: McpPreset[] = [
   {
     id: "github",
     label: "GitHub",
-    description: "读写仓库、Issue / PR、代码搜索（GitHub 官方远程 MCP server）",
+    description: "读写仓库、Issue / PR、代码搜索",
     // GitHub 官方现以远程 Streamable HTTP server 提供（旧的 npx @modelcontextprotocol/
     // server-github 已停止支持）；PAT 经 Authorization 头鉴权。URL 末尾斜杠与官方一致——
     // 缺斜杠可能触发重定向，而连接层 fetch 禁止跟随重定向（SSRF 防护）。
@@ -71,7 +71,7 @@ export const MCP_PRESETS: McpPreset[] = [
       {
         key: "Authorization",
         label: "GitHub Personal Access Token",
-        hint: "GitHub → Settings → Developer settings → Personal access tokens 生成，按需勾选 repo 等权限；该远程 server 凭 PAT 对所有 GitHub 用户可用（仓库 / Issue / PR 等工具按 PAT 权限授予，Copilot 专属工具才另需订阅）。",
+        hint: "GitHub → Settings → Developer settings → Personal access tokens 生成，按需勾选 repo 等权限。",
         example: "ghp_xxxxxxxxxxxxxxxxxxxx",
         docUrl: "https://github.com/settings/tokens",
         // 远程 server 要 `Authorization: Bearer <PAT>`，故把裸 token 包成 Bearer 头。
@@ -82,7 +82,7 @@ export const MCP_PRESETS: McpPreset[] = [
   {
     id: "notion",
     label: "Notion",
-    description: "读写 Notion 页面与数据库（官方 notion-mcp-server）",
+    description: "读写 Notion 页面与数据库",
     entry: {
       type: "stdio",
       command: "npx",

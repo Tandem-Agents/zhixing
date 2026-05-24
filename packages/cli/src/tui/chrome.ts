@@ -132,6 +132,19 @@ export function renderChrome(opts: ChromeOptions): string[] {
   return lines;
 }
 
+/**
+ * chrome body 内容区的可用显示宽度——与 `renderBodyLine` 的 contentBudget 同源。
+ *
+ * chrome 对超宽 body 行按字符截断（追加 …），适合"展示行"。但**段落型说明文字**
+ * 应折行而非丢字——caller 先用本函数取内容宽度，再 `wrapToWidth` 折成多行交给
+ * renderChrome（每行一物理行）。把预算计算放这里是单一来源：indent / 内边距口径
+ * 变了只改 renderBodyLine + 本函数，caller 不重复硬编码。
+ */
+export function chromeContentWidth(width: number, indent = 3): number {
+  const innerWidth = Math.max(4, width) - 2;
+  return Math.max(1, innerWidth - indent - RIGHT_INNER_PAD);
+}
+
 function unpackBrandAnchor(
   anchor: string | BrandAnchor | undefined,
 ): { topEdgeChar: string | undefined; bodyLines: readonly string[] } {

@@ -41,9 +41,11 @@ import {
 import {
   tone,
   renderChrome,
+  chromeContentWidth,
   renderButtonRow,
   renderFooter,
   osc8Hyperlink,
+  wrapToWidth,
 } from "../../tui/index.js";
 
 const FOOTER_HINTS = ["↑↓ 选择", "Enter 确认", "Esc 返回", "Ctrl+C 退出"] as const;
@@ -200,12 +202,19 @@ export function renderMcpAddPanel(
     return;
   }
 
+  // 段落型说明文字按 chrome 内容宽度折行（chrome 对超宽 body 行截断加 …，会丢字）；
+  // split("\n") 保留显式硬换行，再逐段 wrapToWidth 软折行（wrapToWidth 不识别 ANSI，
+  // 故只折无色 raw 文本——文档 / 示例行带色且短，保持单行不折）。
+  const contentWidth = chromeContentWidth(width);
+  const wrapProse = (text: string): string[] =>
+    text.split("\n").flatMap((seg) => wrapToWidth(seg, contentWidth));
+
   // 当前预设均为单密钥；多密钥预设需把此处扩展为逐字段收集（见接入引导设计）。
   const field = preset.secretFields[0];
-  const bodyLines: string[] = [`接入 ${preset.label}：${preset.description}`];
+  const bodyLines: string[] = wrapProse(`接入 ${preset.label}：${preset.description}`);
   if (field) {
     bodyLines.push("");
-    for (const line of field.hint.split("\n")) bodyLines.push(line);
+    for (const line of wrapProse(field.hint)) bodyLines.push(line);
     if (field.docUrl) {
       bodyLines.push(`${tone.dim("文档：")}${osc8Hyperlink(field.docUrl)}`);
     }

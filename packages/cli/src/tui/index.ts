@@ -50,6 +50,7 @@ export {
 
 export {
   renderChrome,
+  chromeContentWidth,
   type BodyLine,
   type BrandAnchor,
   type ChromeOptions,

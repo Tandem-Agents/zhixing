@@ -29,7 +29,8 @@ import {
 import { BASE_CONFIG_SECTION_IDS, runConfigEditor } from "../config-editor/index.js";
 import type { ConfigEditorRuntime, SectionId } from "../config-editor/index.js";
 import { probeServer, type McpHub } from "@zhixing/mcp";
-import type { CliWriter } from "../screen/index.js";
+import { layout } from "../tui/index.js";
+import type { CliWriter, ScreenController } from "../screen/index.js";
 import type { RuntimeSession } from "./session.js";
 import type { ReloadResult } from "./types.js";
 
@@ -45,6 +46,11 @@ export interface ConfigCommandDeps {
   renderer: { stop: () => void };
   /** 写屏 sink——所有反馈（成功 / 失败 / 防御性提示）经此协调，避免推走 chrome */
   writer: CliWriter;
+  /**
+   * chrome 屏幕控制器（无 chrome 终端为 null）——编辑器是自管 alt-screen + 光标的全屏
+   * modal，退出回到 chrome 后由它重申"硬件光标隐藏"不变量（光标可见性的单一来源）。
+   */
+  screen: ScreenController | null;
 }
 
 async function runEditorCommand(
@@ -105,36 +111,46 @@ async function runEditorCommand(
         break;
       case "non-tty":
         // REPL 必为 TTY，正常路径不会到达；防御性提示
-        writer.line(chalk.yellow("当前终端非 TTY，无法启动配置编辑器"));
+        writer.line(
+          chalk.yellow(`${layout.contentPrefix}当前终端非 TTY，无法启动配置编辑器`),
+        );
         break;
     }
   } catch (err) {
     // /config 处理本身异常（罕见——alt screen 切换 / TTY 异常）
     writer.line(
       chalk.red(
-        `⚠ 配置编辑器异常：${err instanceof Error ? err.message : String(err)}`,
+        `${layout.contentPrefix}⚠ 配置编辑器异常：${
+          err instanceof Error ? err.message : String(err)
+        }`,
       ),
     );
   } finally {
     rl.resume();
+    // 编辑器（自管 alt-screen + 光标的全屏 modal）退出后重申 chrome 的硬件光标隐藏
+    // 不变量——modal 内为输入显示过光标，退出 alt-screen 时其可见性 implementation-
+    // defined，不重申会残留一个随流式输出闪烁的硬件光标。
+    deps.screen?.reassertCursorHidden();
   }
 
   function renderReloadFeedback(result: ReloadResult): void {
     switch (result.kind) {
       case "no-change":
-        writer.line(chalk.dim("(无变更)"));
+        writer.line(chalk.dim(`${layout.contentPrefix}(无变更)`));
         break;
       case "applied": {
         const domains = result.changedDomains.join(" + ");
         writer.line(
-          chalk.green(`✓ 配置已保存。下条消息使用新配置（${domains}）。`),
+          chalk.green(
+            `${layout.contentPrefix}✓ 配置已保存。下条消息使用新配置（${domains}）。`,
+          ),
         );
         break;
       }
       case "failed":
         writer.line(
           chalk.yellow(
-            `⚠ 配置已保存但应用失败：${result.error.message}。下次启动生效。`,
+            `${layout.contentPrefix}⚠ 配置已保存但应用失败：${result.error.message}。下次启动生效。`,
           ),
         );
         break;

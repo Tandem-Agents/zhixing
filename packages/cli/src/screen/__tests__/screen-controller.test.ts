@@ -189,6 +189,22 @@ describe("ScreenController · 硬件光标可见性 SoT（chrome 模式永久隐
     expect(out.buffer).toContain("\x1b[?25l");
   });
 
+  it("reassertCursorHidden（attached）emit hideCursor —— 自管屏幕 modal 退出后重申不变量", () => {
+    // config-editor 等自管 alt-screen + 光标的全屏 modal 不走 suspend/resume；退出后
+    // 由 caller 调本方法重申隐藏，否则残留随流式输出闪烁的硬件光标（回归来源）。
+    const { out, sc } = makeHarness({ rows: 10 });
+    sc.attachInput(makeRegion(["> input"]));
+    out.buffer = "";
+    sc.reassertCursorHidden();
+    expect(out.buffer).toContain("\x1b[?25l");
+  });
+
+  it("reassertCursorHidden（region 未 attached）no-op —— 保护非 chrome 路径", () => {
+    const { out, sc } = makeHarness();
+    sc.reassertCursorHidden();
+    expect(out.buffer).toBe("");
+  });
+
   it("dispose（attached 路径）emit showCursor —— 进程退出前最终恢复", () => {
     const { out, sc } = makeHarness({ rows: 10 });
     sc.attachInput(makeRegion(["> input"]));
