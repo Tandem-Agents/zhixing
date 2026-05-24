@@ -33,10 +33,10 @@
 | **异步集成** | Hermes 必须用后台 asyncio loop + 同步桥接（宿主同步） | 知行全异步（`provider.chat`/`runAgentLoop`/`tool.call` 均 async generator/Promise，`llm.ts:390`、`agent-loop.ts:81`、`tools.ts:354`），MCP 调用直接 `await`，**零桥接负担** |
 | **安全统一** | 三家各起一套：OpenClaw tool-policy group / Claude Code 权限规则三粒度 / Hermes 配置发现期 env 过滤，MCP 工具是旁路 | MCP 工具声明 `boundaries`（`external-service`）→ 走与 builtin 工具**完全相同**的 `SecurityPipeline` + 渐进信任（ADR-004/ADR-006），不是嫁接旁路。`boundary-registry.ts:14` 注释本就为 MCP 预留 |
 | **凭证隔离** | 三家 token 都在配置/env 里（Hermes 还专门做 env 过滤防泄漏） | MCP 凭证落 `credentials.json`，**天然继承 bypassImmune 物理隔离**（`builtin-rules.ts` block 整个 credentials.json 的任何 AI 访问）——AI 工具体系不可读不可写，by-design 安全 |
-| **生命周期** | 各自 ad-hoc（OpenClaw session manager + idle TTL；Claude Code memoize） | 复用知行既有"进程级单例 client + closure getter 引用 + per-runtime 工具实例"模式（与 scheduler 解 chicken-and-egg 同款，`builtin-extra-tools.ts:52`），连接归两入口共享的 assembly、由 cli/serve 各自退出链 async dispose |
+| **生命周期** | 各自 ad-hoc（OpenClaw session manager + idle TTL；Claude Code memoize） | 复用知行既有"进程级单例 + per-runtime 工具实例"模式（工具闭包捕获 assembly 持有的 hub，`builtin-extra-tools.ts:52`），连接归两入口共享的 assembly、由 cli/serve 各自退出链 async dispose |
 | **结果处理** | 三家只做截断（防撑爆） | MCP 巨结果可走 `ctx.llm.light` 蒸馏（与 web_fetch distill 同款，`distill.ts` 的 collectStream 已注释预留复用），不止截断 |
 | **热重载** | 三家多数需重启 | 知行有 `session.reload` + `computeDiff`，MCP 配置变更可热重连 |
-| **用户接入** | CLI 命令 / 手写配置文件（开发者门槛） | `/mcp` 交互面板（对齐 /work、/resume）+ 智能引导：系统用预设库 + agent 推断准备技术字段、discovery 验证，**用户只填密钥**——契合"AI 系统该兜住智能"，不碰技术字段、无 CLI |
+| **用户接入** | CLI 命令 / 手写配置文件（开发者门槛） | `/mcp` 交互面板（对齐 `/config` 配置编辑器）+ 智能引导：系统用预设库 + agent 推断准备技术字段、discovery 验证，**用户只填密钥**——契合"AI 系统该兜住智能"，不碰技术字段、无 CLI |
 
 设计原则：**MCP 工具与 builtin 工具在装配、安全、执行上走同一套路径**，不是平行的第二套系统。让 MCP 浑然一体，而非嫁接孤岛。
 
@@ -55,7 +55,7 @@ credentials.mcp┘   - SDK Client × N      │   - name: mcp__<srv>__<tool>
                    - tools/call 转发       │   - call() → hub.callTool()
                    - 重连/async dispose    │           │
                         │                  │           ↓
-                   (closure getter) ───────┘    extraTools 注入 assembleTools
+                   (闭包捕获) ───────┘    extraTools 注入 assembleTools
                         │                              │
                         │                              ↓
               归 builtinExtraTools assembly       baseTools = builtin + extraTools
@@ -68,7 +68,7 @@ credentials.mcp┘   - SDK Client × N      │   - name: mcp__<srv>__<tool>
 **两层分离是核心架构决策**：
 
 - **连接层 `McpHub`（进程级单例）**：持有所有 MCP server 的 SDK Client + transport，负责连接/发现/调用/重连/关闭。**生命周期归两入口共享的 `builtinExtraTools` assembly**（`createBuiltinExtraToolsAssembly`，REPL 的 `session.ts` 与 serve 的 `command.ts:209` 都创建并共享它、已持有 `taskListService` 等跨 runtime 单例）。async `dispose()` 由各入口退出链调用：cli 走 `RuntimeSession.dispose()`（`session.ts:799`），serve 走 `shutdown-chain`（`registerCoreCleanup`，`command.ts:521`）。
-- **映射层（per-runtime）**：每次 `createAgent` 时把 hub 的工具目录物化成 `ToolDefinition[]`，经 `extraTools` 注入。工具实例随 runtime swap 重建，但都 closure 引用同一个 hub（与 scheduler getter 同款，`builtin-extra-tools.ts:52`）。
+- **映射层（per-runtime）**：每次 `createAgent` 时把 hub 的工具目录物化成 `ToolDefinition[]`，经 `extraTools` 注入。工具实例随 runtime swap 重建，但都闭包捕获同一个 hub（assembly 工厂参数；hub 无 chicken-and-egg，不需 scheduler 那样的 ctx getter，`builtin-extra-tools.ts:52`）。
 
 **为什么挂 assembly 而非 RuntimeSession**（事实依据）：`AgentRuntime` 接口**无 dispose 方法**（`create-agent-runtime.ts:166-220`），`safeDispose` 是**同步契约**（`:128-131`），swap 时旧 runtime 靠 GC 回收（`session.ts:792`）——而 MCP 连接（stdio 子进程 / http 长连）的关闭是**异步**的，挂 per-runtime 会随 swap 丢弃子进程。更关键：`RuntimeSession` 是 cli REPL 专属，**serve 模式没有它**（serve 用 `createCliRuntimeFactory` + `shutdown-chain`，`command.ts:213,73`）。两入口唯一共享、且本就持有跨 runtime 单例的宿主是 `builtinExtraTools` assembly——McpHub 归它、dispose 由各入口退出链触发，cli/serve 统一；并让 serve 多 session 共享同一批连接（避免每 session 重连）。工具实例则 per-runtime（与 schedule/task_list 同构）。
 
@@ -86,7 +86,7 @@ credentials.mcp┘   - SDK Client × N      │   - name: mcp__<srv>__<tool>
 - **async dispose**：`hub.dispose()` 关闭所有 client + 子进程；由 assembly 暴露、各入口退出链调用（见第二节）。
 - **空配置 = no-op hub（零判空分支）**：`config.mcp` 为空时 hub 仍是一个 no-op 实例（`connectAll` 立即 resolve 空 catalog、`callTool` 返回 "no such tool" isError、`dispose` no-op）。hub 引用**恒非空**——assembleTools / dispose 链 / 热重载等调用方无需任何判空分支，用一个空实例的微小开销换全链路零分支。
 
-McpHub 由 `builtinExtraTools` assembly 创建持有，通过 `ExtraToolsRuntimeContext` 的 getter（新增 `mcpHub: () => McpHub`，与现有 `scheduler` getter 同款，`builtin-extra-tools.ts:52-53`）传给 assembleTools。
+McpHub 由 `builtinExtraTools` assembly 创建持有，作为 assembly 工厂参数由 assembleTools **闭包捕获**（不走 `ExtraToolsRuntimeContext` getter —— getter 是为 `scheduler` 那类"依赖晚于 assembly 构造"的 chicken-and-egg 延迟解析；hub 在 assembly 构造时即传入、无此问题，闭包捕获更简洁，`builtin-extra-tools.ts:52`）。
 
 ---
 
@@ -131,7 +131,9 @@ McpHub 由 `builtinExtraTools` assembly 创建持有，通过 `ExtraToolsRuntime
 
 ### 用户接入：`/mcp` 交互面板 + 智能引导，用户只填私密值
 
-**用户唯一入口是 `/mcp` 交互面板**（形态对齐 `/work` / `/resume` 的选择式面板）——**无 CLI 命令、无手写配置文件**。面板内浏览已接入 server（状态/工具数）、添加、启用/停用/删除/重连、查看工具，全部选择式操作。
+**用户唯一入口是 `/mcp` 交互面板**（形态对齐 `/config` 的配置编辑器：config-editor 多级面板，**非** `/work` 的 typeahead 命令补全）——**无 CLI 命令、无手写配置文件**。面板内浏览已接入 server（状态 / 工具数）、添加、启用 / 停用 / 删除 / 重连、查看工具。
+
+选 config-editor 而非 typeahead 的依据：`/mcp` 本质是管理 `config.mcp` / `credentials.mcp` + 接入后 reload + 多步引导，与 config-editor 的"事务暂存 → 落盘 → reload"同构（其 `channel-config` 面板与 mcp server 同构：配置条目 + 凭证 + 启用开关）；typeahead 的单行 inline 操作（delete / rename / create）承载不了多步引导与启停 / 重连 / 查看等丰富操作，且 typeahead 不触发 reload。
 
 下方的 `config.mcp` / `credentials.mcp` 是面板的**产物**（系统写入），不是用户手写面。配置由"智能接入引导"产生——这正是知行作为 AI 系统的智能该兜住的：
 
@@ -203,7 +205,7 @@ McpHub 由 `builtinExtraTools` assembly 创建持有，通过 `ExtraToolsRuntime
 1. **异步零桥接**：知行全异步，MCP `await hub.callTool()` 直连，省掉 Hermes 整个"后台 asyncio loop + 同步桥接"复杂度。
 2. **安全浑然一体**：MCP 工具走与 builtin 完全相同的 `boundaries → SecurityPipeline → 渐进信任`，不是三家那种平行旁路；`boundary-registry` 本就为 MCP 预留接口。
 3. **凭证 by-design 隔离**：MCP token 落 credentials.json 自动被 bypassImmune 物理隔离，AI 工具读不到——三家做不到（token 在普通配置/env）。
-4. **连接/工具两层分离**：连接挂两入口共享的进程级 assembly（cli `RuntimeSession.dispose` / serve `shutdown-chain` 各自 async dispose），工具 per-runtime（closure getter 引用）——职责单一、生命周期对齐知行既有模式，且天然覆盖 cli + serve 两入口，比三家把连接/工具/server 混在一起更清晰。
+4. **连接/工具两层分离**：连接挂两入口共享的进程级 assembly（cli `RuntimeSession.dispose` / serve `shutdown-chain` 各自 async dispose），工具 per-runtime（闭包捕获 hub）——职责单一、生命周期对齐知行既有模式，且天然覆盖 cli + serve 两入口，比三家把连接/工具/server 混在一起更清晰。
 5. **结果智能蒸馏**：巨结果可走 `ctx.llm.light` 蒸馏，不止截断。
 6. **热重载重连**：配置变更热重连，不需重启。
 7. **接入零门槛**：用户经 `/mcp` 面板 + 智能引导接入（系统准备技术配置、用户只填密钥），不写配置、不敲 CLI——三家都要用户手写配置或敲命令。这是知行"AI 系统"身份的直接兑现。
@@ -235,11 +237,21 @@ McpHub 由 `builtinExtraTools` assembly 创建持有，通过 `ExtraToolsRuntime
 - **独立性**：生命周期完善，工具行为不变。
 
 **阶段四：用户接入层（`/mcp` 交互面板 + 智能引导，用户唯一入口）**
-- `/mcp` 交互面板（对齐 `/work` / `/resume`）：浏览 / 添加 / 启停 / 删除 / 重连 / 查看工具，全选择式，**无 CLI、无手写配置**。
-- 智能接入引导：预设库 + agent 推断技术字段 + discovery 验证 + 用户只填密钥（明确指引），见第六节。
-- 同期：MCP 巨结果 `ctx.llm.light` 蒸馏；server 级预置规则（`mcp:<server>` namespace，可选）。
-- **验收**：用户全程不写配置、不敲命令，仅在面板"选 server + 填一个密钥 + 勾工具"即可接入并使用；预设 server 一步接入；蒸馏对超阈结果生效。
-- **说明**：这是**面向用户的必要交付、唯一入口**（非"可选增强"）。阶段一~三的手写 `config.mcp` 仅限开发期自测，用户从不接触配置文件。
+
+> 阶段四显著大于前三阶段（hub 运行时韧性 + 交互面板 UI + 智能引导 + LLM 推断 + discovery + 预设库 + 可选蒸馏 / 规则），且面板是终端交互、难自动化。故再拆为下列子步，每步独立可验证：核心路径 4.1→4.5 顺序依赖，4.6 / 4.7 为独立可选增强。复用面以 `/config` 配置编辑器（config-editor）为准 —— slash command 三层（`core/typeahead` 的 builtin-commands / registry + `cli/command-dispatcher`）注册 `/mcp`、config-editor 多级面板状态机 + 事务 `WorkingState` + writers + 经 `config-command` 同款模式落盘 → `session.reload`（复用阶段三热重载：写配置 → `applyConfig` 增量重连）。
+
+- **4.1 hub 运行时能力 + 配置写入原语（基础，可单测、无 UI）**：① McpHub 新增 `serverStatuses()` 暴露每 server 运行状态（connected / **connecting** + 工具数 / transport + 最近一次失败原因）—— 当前 `catalog()` 只返回 connected，面板需全量状态；② McpHub 补**后台自动重连**——监听 Client 公开的 `onclose`（不抢占被 Protocol 内部占用的 transport.onclose）→ 标记 connecting → 指数退避定时重连 → 成功后更新 catalog（工具于下次 runtime 重建进 system prompt），兑现第三 / 七节既述的运行时韧性：**已配置 server 统一收敛到 connected**——首次连接失败、首次 `tools/list` 超时（首次 `npx` 下载常 >10s）、连上后被对端断开，都进同一条退避重试、连上即恢复，用户无需手动重连；失败原因记在状态里供面板诊断（不再有终态 failed，也不靠 `onerror` 记错——避免连上后残留 stale 错误）。三个正确性前提：**区分主动 close 与被动断线**（`disconnectOne` / `dispose` 在主动 close 前先解绑 `onclose`，否则误触发重连——删了又连回来）、**`dispose` 清重连定时器**（否则退出后 timer 仍触发重连，错误且泄漏）、**建链异步期间 server 被移除 / 替换则丢弃孤儿连接**（重连 `await` 建链后复查状态，已非 connecting 则关闭新连接，避免泄漏子进程 / 连接池）；③ `config.mcp` / `credentials.mcp` 写入原语（add / remove / setEnabled，复用 `applyConfigPatch` / `applyCredentialsPatch` + `writeConfig` / `writeCredentials`，与现有 `/config` 同路径：写入走标准 `JSON.stringify`、注释由读时 jsonc-parser 容忍）。验收：`serverStatuses` + 重连调度（注入触发 onclose 的 transport + 假定时器，断言指数退避、首次失败也重试、主动 close 不重连、dispose 清 timer、孤儿连接丢弃）+ 写入原语单测。
+- **4.2 预设库（数据 + 纯函数，可单测）**：内置预设（首批 GitHub / Notion）—— 技术字段（command / args / transport / url）模板 + 需用户填的密钥字段标识（http→header / stdio→env）+ "请填入 X" 指引。验收：预设 → 规格映射单测。
+- **4.3 discovery 验证（临时连接，复用 hub 安全连接，可测）**：用 McpHub 同一套安全连接临时连上 + `tools/list`（连上即自证配置正确），用完 dispose；与正式接入分开，**用独立的更长超时**（stdio server 首次 `npx` 下载常 >10s，不复用 `connectTimeoutMs`，避免误判失败）。验收：InMemory 临时连 / 列 / dispose；失败给明确卡点。
+- **4.4 智能接入引导逻辑（组合 4.1–4.3，可测纯逻辑）**：预设匹配 / 非预设走**注入的 light LLM**（由 config-editor ctx 注入，非工具的 `ctx.llm`——引导在面板内、不在工具调用上下文）从包名 · URL 推断启动方式 → discovery 验证 → 用户只填密钥 → 写配置。失败 graceful，不退回让用户手填技术字段。验收：引导编排单测（预设路径 + 推断路径 mock light LLM + discovery mock）。
+- **4.5 `/mcp` 面板 UI（扩展 config-editor 加 `"mcp"` section，手动测）**：`/mcp` 打开 config-editor（对齐 `/config`，非 typeahead 命令补全）。新增工作：`SectionId` 加 `"mcp"`、`PanelDescriptor` 加 mcp-server / mcp-add 等 panel kind、`ConfigEditorContext` 注入 hub（运行时状态查询）与 light LLM（引导推断）、**config-editor 支持异步 panel（loading 态）** 承载引导的推断 / discovery（当前 `handleKey` 是纯同步函数，异步通路是真实新增能力，扩展方式见本步末「config-editor 扩展锚点」）。复用：多级面板状态机 + 事务 `WorkingState` + writers + 经 `config-command` 同款模式落盘 → `session.reload`。流程：main 列出 config 中**全部** server（含已停用——列表来自 `config.mcp`，**非** `serverStatuses()`，否则停用 server 会从面板消失、无法重新启用），运行态按 serverId 叠加 `serverStatuses()`（`entry.statusText`：connected · N 工具 / connecting · 上次错误 / 已停用）→ 选中进 server 面板（启停 / 删除 / 查看工具——**无手动重连**，未连上的 server 由 hub 后台持续退避重试，见 4.1）→ 添加进引导面板（选预设 / 输入标识 → 异步推断 + discovery → 填密钥）→ 完成落盘 + reload。验收：**手动测**终端交互全流程；底层 4.1–4.4 已自动化覆盖。
+  - **config-editor 扩展锚点 ①·异步 panel**：`PanelAction` 增一种 `{ type: "loading"; task: (signal: AbortSignal) => Promise<PanelAction>; render }`——handler 返回它时，runner 渲染 loading 态并把 `task(signal)` 与取消键（Esc / Ctrl+C）`Promise.race`：task 先返回则 apply 其 `PanelAction`，取消键先到则 abort signal 并 pop 回上级。discovery（4.3）/ 推断（4.4）本就把 signal 透传给 SDK `Client`（`hub.ts:177` callTool 同款），取消天然落地。对现有 4 种同步 variant（stay / navigate / pop / exit）是纯增量，loading 仅由 mcp panel 产生，既有 handler 不受影响。
+  - **config-editor 扩展锚点 ②·同步面板读运行时态**：`serverStatuses()` 是纯内存读（同步、非 async）。`Section.entries` 签名加可选只读 runtime 访问器 `entries(state, runtime?)`——**列表仍来自 config（`listMcpServerIds`，含已停用 server）**，再按 serverId 叠加 `serverStatuses()` 运行态（serverStatuses 只含受管的启用 server，不能用作列表来源）；model / messaging 忽略该参数。`WorkingState` 保持纯事务暂存（运行时快照不混入、杜绝被 writers 误序列化）。键驱动循环按键时刷新、非实时：`connecting` 显示为上次按键的快照，MVP 可接受（无需 live 订阅）。
+- **4.6 巨结果蒸馏（可选，对原方案的修正）**：与 `web_fetch` distill 不同，MCP 工具调用无"用户提取意图"（LLM 要的是工具原始结果），无脑摘要会丢掉 LLM 后续需要的细节。故默认仍以 `maxResultChars` 截断 + 明确"已截断"提示（阶段一已具备）；蒸馏仅在能给出明确蒸馏目标时才接入，否则不做（避免丢信息债）。这是对原"同期蒸馏"表述的修正。
+- **4.7 server 级预置规则（可选）**：`permissionStore.registerBuiltinRules("mcp:<server>", rules)` 给某 server 默认放行 / 拒绝，断开时 `unregisterBuiltinRules` 对偶清理；builtin 规则严格让位用户池。验收：注册 / 注销单测。
+
+- **总验收**：用户全程不写配置、不敲命令，仅在 `/mcp` 面板"选 server + 填一个密钥 + 勾工具"即可接入并使用；预设 server 一步接入。
+- **说明**：4.5 是**面向用户的必要交付、唯一入口**（非"可选增强"）；阶段一~三的手写 `config.mcp` 仅限开发期自测，用户从不接触配置文件。
 
 ---
 
@@ -254,7 +266,7 @@ McpHub 由 `builtinExtraTools` assembly 创建持有，通过 `ExtraToolsRuntime
 
 **第二遍·可行性**：
 - 连接挂载点覆盖两入口：McpHub 归 `builtinExtraTools` assembly（REPL + serve 共享，`command.ts:209`），dispose 由 cli `RuntimeSession.dispose`（`session.ts:799`）与 serve `shutdown-chain`（`command.ts:521`）各自调用；已核验 RuntimeSession 是 cli 专属、serve 无之、AgentRuntime 无 dispose。
-- getter 模式有先例：scheduler getter 解 chicken-and-egg（`builtin-extra-tools.ts:52`，已读）。
+- hub 经 assembly 工厂参数闭包捕获：hub 在 assembly 构造时即传入、无 `scheduler` 那类 chicken-and-egg，故无需 ctx getter（getter 仅"依赖晚于 assembly 构造"的延迟解析场景需要，`builtin-extra-tools.ts:52`，已读）。
 - 配置/凭证/diff 扩展点已读核验：`deepMergeConfig` messaging id-map 字段合并模板（`config-loader.ts:396`）；`diff.ts` 的 `agentChanged`（`:35-44`）需加 mcp config+credentials 比较，否则纯 MCP 变更不重建 runtime。
 - 安全 API 签名已核验：`BoundaryRegistry.register/unregister`、`PermissionStore.registerBuiltinRules`。
 

@@ -1,9 +1,13 @@
 /**
- * 连接层 McpHub —— 管理所有 MCP server 的连接，对上层只暴露"列工具 / 调工具 / 关闭"。
+ * 连接层 McpHub —— 管理所有 MCP server 的连接，对上层只暴露"列工具 / 调工具 / 状态 / 关闭"。
  *
  * 职责单一、与集成层解耦：hub 只做连接 + 协议（SDK Client），产出中性的工具目录
  * 与一个 McpCallFn；把目录映射成知行 ToolDefinition 是映射层的事，hub 不反向依赖
  * 装配 / cli。
+ *
+ * 运行时韧性：已配置（启用）的 server 收敛到 connected —— 无论首次连接失败、首次 tools/list
+ * 超时，还是连上后被对端断开，hub 都以指数退避在后台持续重试，连上即恢复，用户无需手动重连。
+ * 最近一次失败原因记在状态里供面板展示。
  *
  * 空 server 列表时所有方法天然 no-op（connectAll 空跑、catalog 返回 []、callTool
  * 返回 isError、dispose 空），故 hub 引用恒非空、调用方无需任何判空分支。
@@ -22,16 +26,37 @@ import type {
   McpServerContext,
   McpServerSpec,
   McpToolDescriptor,
+  McpTransportKind,
 } from "./types.js";
 
 /** 知行作为 MCP client 向 server 申报的身份。 */
 const CLIENT_INFO = { name: "zhixing", version: "0.1.0" };
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
+/** 后台重连的退避：首次 1s，每次翻倍，封顶 30s 后等间隔无限重试（server 恢复即自愈）。 */
+const RECONNECT_BASE_DELAY_MS = 1_000;
+const RECONNECT_MAX_DELAY_MS = 30_000;
 
 /** 一个已连接 server 暴露给上层的工具目录。 */
 export interface McpServerCatalog {
   server: McpServerContext;
   tools: McpToolDescriptor[];
+}
+
+/**
+ * 一个 server 的运行时状态快照 —— 供用户面板展示全量 server（含未连上、后台重试中的）。
+ *
+ * 与 `catalog()` 的区别：catalog 只返回 connected 的（喂给映射层装配工具），
+ * serverStatuses 返回**所有**受管（启用）server 的运行态（含 connecting）。
+ */
+export interface McpServerStatus {
+  serverId: string;
+  transport: McpTransportKind;
+  /** connected：工具可用；connecting：未连上、后台退避重试中（error 带最近一次失败原因）。 */
+  status: "connected" | "connecting";
+  /** 当前可用工具数（仅 connected 非 0）。 */
+  toolCount: number;
+  /** 最近一次连接失败原因（connecting 且曾失败时有；connected 时无）。 */
+  error?: string;
 }
 
 export interface McpHub {
@@ -43,11 +68,13 @@ export interface McpHub {
    * 不会误断未变 server。
    */
   applyConfig(specs: readonly McpServerSpec[]): Promise<void>;
-  /** 已连接 server 的工具目录（失败 / 未连接的 server 不出现）。 */
+  /** 已连接 server 的工具目录（未连上的 server 不出现）。 */
   catalog(): McpServerCatalog[];
+  /** 全部受管 server 的运行时状态（含 connecting）—— 供状态面板展示。 */
+  serverStatuses(): McpServerStatus[];
   /** 调用某 server 的工具；server 不可用返回 isError，abort 时让异常冒泡。 */
   callTool: McpCallFn;
-  /** 关闭所有连接 / 子进程。 */
+  /** 关闭所有连接 / 子进程，清理重连定时器。 */
   dispose(): Promise<void>;
 }
 
@@ -67,9 +94,16 @@ interface Connection {
   context: McpServerContext;
   client?: Client;
   tools: McpToolDescriptor[];
-  status: "connected" | "failed";
+  status: "connected" | "connecting";
   error?: string;
   /** 释放 transport 的额外资源（http 连接池）；stdio 为空。 */
+  disposeTransport?: () => Promise<void>;
+}
+
+/** 一次成功建链的产物 —— 与"落进 connections 并安装监听"分离，供首连与重连共用。 */
+interface Established {
+  client: Client;
+  tools: McpToolDescriptor[];
   disposeTransport?: () => Promise<void>;
 }
 
@@ -82,18 +116,154 @@ export function createMcpHub(
   const createTransport = options.createTransport ?? defaultCreateTransport;
   const networkProxy = options.networkProxy;
   const connections = new Map<string, Connection>();
+  const reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
   // 当前规格集 —— connectAll 连这些；applyConfig 据此 diff 出增量并更新。
   let currentSpecs: readonly McpServerSpec[] = specs;
 
-  async function disconnectOne(serverId: string): Promise<void> {
-    const conn = connections.get(serverId);
-    if (conn?.client) {
-      await conn.client.close().catch(() => {});
+  /**
+   * 建链：造 transport → connect → 首次 tools/list。成功返回产物，失败先释放已创建的
+   * transport 资源（kill 已 spawn 的 stdio 子进程 / 关 http 连接池）再抛，由调用方
+   * 决定落 connected 还是排后台重试。
+   */
+  async function establish(spec: McpServerSpec): Promise<Established> {
+    let created: CreatedTransport | undefined;
+    try {
+      created = createTransport(spec, { proxy: networkProxy });
+      const client = new Client(CLIENT_INFO, { capabilities: {} });
+      await client.connect(created.transport, { timeout: connectTimeoutMs });
+      const listed = await client.listTools({}, { timeout: connectTimeoutMs });
+      return {
+        client,
+        tools: listed.tools.map(toDescriptor),
+        disposeTransport: created.dispose,
+      };
+    } catch (err) {
+      if (created) {
+        await created.transport.close().catch(() => {});
+        await created.dispose?.().catch(() => {});
+      }
+      throw err;
     }
-    if (conn?.disposeTransport) {
-      await conn.disposeTransport().catch(() => {});
+  }
+
+  /**
+   * 把建链产物落进 connections 并安装断线监听。
+   *
+   * onclose 监听 Client 的**公开**回调（SDK 内部已占用 transport.onclose，公开层不与之
+   * 冲突）—— 对端断开 transport 时触发后台重连。主动 close（disconnectOne / dispose）
+   * 前会先解绑，故不会误触发。
+   */
+  function setConnected(
+    spec: McpServerSpec,
+    context: McpServerContext,
+    est: Established,
+  ): void {
+    est.client.onclose = () => onPassiveDisconnect(spec, context);
+    connections.set(spec.serverId, {
+      context,
+      client: est.client,
+      tools: est.tools,
+      status: "connected",
+      disposeTransport: est.disposeTransport,
+    });
+  }
+
+  /**
+   * 进入后台重试 —— 标记 connecting（error 带最近一次失败原因，对端干净断开时无）并排下一次
+   * 退避重连。首次连接失败、首次 tools/list 超时、连上后断开统一走这里，使已配置 server 收敛
+   * 到 connected：连上即恢复，无需用户手动重连。
+   */
+  function enterRetry(
+    spec: McpServerSpec,
+    context: McpServerContext,
+    error: string | undefined,
+    attempt: number,
+  ): void {
+    connections.set(spec.serverId, {
+      context,
+      tools: [],
+      status: "connecting",
+      ...(error !== undefined ? { error } : {}),
+    });
+    scheduleReconnect(spec, context, attempt);
+  }
+
+  /** 对端断开已连接 server 的回调 —— 转 connecting 并排首次重连。 */
+  function onPassiveDisconnect(
+    spec: McpServerSpec,
+    context: McpServerContext,
+  ): void {
+    const conn = connections.get(spec.serverId);
+    // 只处理"仍标记 connected"的连接：重复触发 / 已被主动移除时直接忽略（幂等）。
+    if (!conn || conn.status !== "connected") return;
+    // 释放断掉那条连接的 transport 资源（http 连接池）；transport 自身已被对端关闭。
+    if (conn.disposeTransport) void conn.disposeTransport().catch(() => {});
+    enterRetry(spec, context, undefined, 0);
+  }
+
+  function scheduleReconnect(
+    spec: McpServerSpec,
+    context: McpServerContext,
+    attempt: number,
+  ): void {
+    const delay = Math.min(
+      RECONNECT_BASE_DELAY_MS * 2 ** attempt,
+      RECONNECT_MAX_DELAY_MS,
+    );
+    const timer = setTimeout(() => {
+      reconnectTimers.delete(spec.serverId);
+      void attemptReconnect(spec, context, attempt);
+    }, delay);
+    // 重连定时器不应单独拖住进程退出（dispose 会显式清，这里是兜底）。
+    (timer as { unref?: () => void }).unref?.();
+    reconnectTimers.set(spec.serverId, timer);
+  }
+
+  async function attemptReconnect(
+    spec: McpServerSpec,
+    context: McpServerContext,
+    attempt: number,
+  ): Promise<void> {
+    // 定时器等待期间该 server 可能已被移除 / 改规格 —— 不再是当前期望目标则放弃。
+    if (!isCurrentSpec(spec)) return;
+    try {
+      const est = await establish(spec);
+      // 建链是异步的：期间该 server 可能被移除或被 applyConfig 改规格，这条新连接已是孤儿，
+      // 必须解绑监听并关闭，避免泄漏子进程 / 连接池（仅看状态会误采纳——改规格后它又是 connecting）。
+      if (!isCurrentSpec(spec)) {
+        est.client.onclose = undefined;
+        await est.client.close().catch(() => {});
+        await est.disposeTransport?.().catch(() => {});
+        return;
+      }
+      setConnected(spec, context, est);
+    } catch (err) {
+      // 仍是当前目标才排下一次（退避递增、记录原因）；否则说明已被移除 / 改规格，停手。
+      if (isCurrentSpec(spec)) {
+        enterRetry(spec, context, errMsg(err), attempt + 1);
+      }
     }
-    connections.delete(serverId);
+  }
+
+  function cancelReconnect(serverId: string): void {
+    const timer = reconnectTimers.get(serverId);
+    if (timer) {
+      clearTimeout(timer);
+      reconnectTimers.delete(serverId);
+    }
+  }
+
+  /**
+   * 这条 spec 是否仍是当前期望的连接目标 —— serverId 仍在 currentSpecs 且规格未变。
+   *
+   * 重连建链是异步的：期间 server 可能被移除、或被 applyConfig 改了规格（此时它会以**新**
+   * 规格重新进入 connecting）。只看 connecting 状态无法区分"还是原来那次重连"，故按身份判定，
+   * 防止过期建链被误采纳成 connected。
+   */
+  function isCurrentSpec(spec: McpServerSpec): boolean {
+    return currentSpecs.some(
+      (s) => s.serverId === spec.serverId && specEqual(s, spec),
+    );
   }
 
   async function connectOne(spec: McpServerSpec): Promise<void> {
@@ -101,33 +271,26 @@ export function createMcpHub(
       serverId: spec.serverId,
       transport: spec.transport,
     };
-    let created: CreatedTransport | undefined;
     try {
-      created = createTransport(spec, { proxy: networkProxy });
-      const client = new Client(CLIENT_INFO, { capabilities: {} });
-      await client.connect(created.transport, { timeout: connectTimeoutMs });
-      const listed = await client.listTools({}, { timeout: connectTimeoutMs });
-      connections.set(spec.serverId, {
-        context,
-        client,
-        tools: listed.tools.map(toDescriptor),
-        status: "connected",
-        disposeTransport: created.dispose,
-      });
+      setConnected(spec, context, await establish(spec));
     } catch (err) {
-      // 连接失败时释放已创建的资源：先 close transport（kill 已 spawn 的 stdio 子进程
-      // / 关 http transport），再 dispose（释放 http 连接池），避免泄漏。
-      if (created) {
-        await created.transport.close().catch(() => {});
-        await created.dispose?.().catch(() => {});
-      }
-      connections.set(spec.serverId, {
-        context,
-        tools: [],
-        status: "failed",
-        error: err instanceof Error ? err.message : String(err),
-      });
+      // 首次连接失败不终止：进入后台退避重试，server 就绪后自愈（首次 npx 下载 / 临时宕机）。
+      enterRetry(spec, context, errMsg(err), 0);
     }
+  }
+
+  async function disconnectOne(serverId: string): Promise<void> {
+    cancelReconnect(serverId);
+    const conn = connections.get(serverId);
+    if (conn?.client) {
+      // 主动 close 前先解绑 onclose —— 否则 close 触发 onclose 会误排重连（删了又连回来）。
+      conn.client.onclose = undefined;
+      await conn.client.close().catch(() => {});
+    }
+    if (conn?.disposeTransport) {
+      await conn.disposeTransport().catch(() => {});
+    }
+    connections.delete(serverId);
   }
 
   return {
@@ -165,6 +328,23 @@ export function createMcpHub(
       return result;
     },
 
+    serverStatuses() {
+      // 以 currentSpecs 为序（贴合用户配置顺序）联结运行态；连接尚未落定的极短窗口跳过。
+      const result: McpServerStatus[] = [];
+      for (const spec of currentSpecs) {
+        const conn = connections.get(spec.serverId);
+        if (!conn) continue;
+        result.push({
+          serverId: spec.serverId,
+          transport: spec.transport,
+          status: conn.status,
+          toolCount: conn.tools.length,
+          ...(conn.error !== undefined ? { error: conn.error } : {}),
+        });
+      }
+      return result;
+    },
+
     callTool: async (serverId, toolName, input, callOptions) => {
       const conn = connections.get(serverId);
       if (!conn || conn.status !== "connected" || !conn.client) {
@@ -181,24 +361,32 @@ export function createMcpHub(
         // abort 让异常冒泡，交 tool-executor 统一中断；其余协议 / 连接错误转 isError。
         if (callOptions.signal?.aborted) throw err;
         return {
-          content: `MCP 工具 "${toolName}"（${serverId}）调用失败：${
-            err instanceof Error ? err.message : String(err)
-          }`,
+          content: `MCP 工具 "${toolName}"（${serverId}）调用失败：${errMsg(err)}`,
           isError: true,
         };
       }
     },
 
     async dispose() {
+      for (const id of [...reconnectTimers.keys()]) cancelReconnect(id);
+      // 清空期望规格集 —— 在途的重连建链复查时即判为孤儿丢弃，不会在关停后又连回来。
+      currentSpecs = [];
       await Promise.allSettled(
-        [...connections.values()].flatMap((conn) => [
-          conn.client?.close(),
-          conn.disposeTransport?.(),
-        ]),
+        [...connections.values()].flatMap((conn) => {
+          if (conn.client) {
+            // 解绑后再关 —— 否则 close 触发 onclose 会在退出途中误排重连。
+            conn.client.onclose = undefined;
+          }
+          return [conn.client?.close(), conn.disposeTransport?.()];
+        }),
       );
       connections.clear();
     },
   };
+}
+
+function errMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 /** SDK 的 tool 描述 → 知行中性 McpToolDescriptor（只取映射层需要的字段）。 */

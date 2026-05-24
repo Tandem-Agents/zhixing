@@ -1,5 +1,10 @@
 export { createMcpHub } from "./hub.js";
-export type { McpHub, McpHubOptions, McpServerCatalog } from "./hub.js";
+export type {
+  McpHub,
+  McpHubOptions,
+  McpServerCatalog,
+  McpServerStatus,
+} from "./hub.js";
 export { mapServerTools } from "./mapping.js";
 export {
   isValidServerId,

@@ -15,14 +15,22 @@ import {
   createInitialState,
   disableMessaging,
   enableMessaging,
+  isMcpServerEnabled,
   isMessagingEnabled,
+  listMcpServerIds,
   patchChannelEntry,
+  patchMcpSecrets,
   patchProviderEntry,
   readChannelEntry,
+  readMcpSecrets,
+  readMcpServer,
   readModelRole,
   readModelThinking,
   readProviderEntry,
+  removeMcpServer,
   setInputBuffer,
+  setMcpServerEnabled,
+  upsertMcpServer,
   writeModelRole,
   writeModelThinking,
 } from "../state.js";
@@ -282,6 +290,81 @@ describe("readModelThinking / writeModelThinking", () => {
   });
 });
 
+describe("MCP server 读写原语", () => {
+  it("upsertMcpServer 新增 server，listMcpServerIds 保配置顺序", () => {
+    let state = createInitialState({}, {});
+    state = upsertMcpServer(state, "github", {
+      type: "stdio",
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-github"],
+    });
+    state = upsertMcpServer(state, "notion", { type: "http", url: "https://x" });
+
+    expect(readMcpServer(state, "github")).toEqual({
+      type: "stdio",
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-github"],
+    });
+    expect(listMcpServerIds(state)).toEqual(["github", "notion"]);
+  });
+
+  it("upsertMcpServer 整体替换——切 transport 时清掉旧字段", () => {
+    let state = createInitialState(
+      { mcp: { servers: { x: { type: "stdio", command: "old", args: ["a"] } } } },
+      {},
+    );
+    state = upsertMcpServer(state, "x", { type: "http", url: "https://new" });
+    // 切到 http：旧的 command / args 不得残留
+    expect(readMcpServer(state, "x")).toEqual({ type: "http", url: "https://new" });
+  });
+
+  it("setMcpServerEnabled 合并 enabled、保留连接字段", () => {
+    let state = createInitialState(
+      { mcp: { servers: { x: { type: "stdio", command: "c" } } } },
+      {},
+    );
+    state = setMcpServerEnabled(state, "x", false);
+    expect(readMcpServer(state, "x")).toEqual({
+      type: "stdio",
+      command: "c",
+      enabled: false,
+    });
+    expect(isMcpServerEnabled(state, "x")).toBe(false);
+  });
+
+  it("isMcpServerEnabled 缺省视为启用，仅显式 false 才停用", () => {
+    const state = createInitialState(
+      { mcp: { servers: { x: { type: "stdio" } } } },
+      {},
+    );
+    expect(isMcpServerEnabled(state, "x")).toBe(true);
+  });
+
+  it("setMcpServerEnabled 对不存在的 server 不变", () => {
+    const state = createInitialState({}, {});
+    expect(setMcpServerEnabled(state, "ghost", false)).toBe(state);
+  });
+
+  it("removeMcpServer 同时清 config.mcp 与 credentials.mcp 条目", () => {
+    let state = createInitialState(
+      { mcp: { servers: { x: { type: "stdio" }, y: { type: "http" } } } },
+      { mcp: { x: { token: "secret" }, y: { token: "keep" } } },
+    );
+    state = removeMcpServer(state, "x");
+    expect(readMcpServer(state, "x")).toBeUndefined();
+    expect(readMcpSecrets(state, "x")).toBeUndefined();
+    // 其余 server 不受影响
+    expect(readMcpServer(state, "y")).toEqual({ type: "http" });
+    expect(readMcpSecrets(state, "y")).toEqual({ token: "keep" });
+  });
+
+  it("patchMcpSecrets 合并凭证字段、不丢已有字段", () => {
+    let state = createInitialState({}, { mcp: { x: { token: "old" } } });
+    state = patchMcpSecrets(state, "x", { extra: "v" });
+    expect(readMcpSecrets(state, "x")).toEqual({ token: "old", extra: "v" });
+  });
+});
+
 describe("不可变性回归保护", () => {
   it("所有写操作返回的 state 与输入引用不同", () => {
     const state = createInitialState({}, {});
@@ -297,5 +380,7 @@ describe("不可变性回归保护", () => {
     expect(patchProviderEntry(state, "x", { apiKey: "k" })).not.toBe(state);
     expect(patchChannelEntry(state, "feishu", { appId: "x" })).not.toBe(state);
     expect(enableMessaging(state, "feishu")).not.toBe(state);
+    expect(upsertMcpServer(state, "x", { type: "stdio" })).not.toBe(state);
+    expect(patchMcpSecrets(state, "x", { token: "k" })).not.toBe(state);
   });
 });
