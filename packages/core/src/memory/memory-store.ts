@@ -8,7 +8,6 @@
  *   ~/.zhixing/me/
  *   ├── profile.md          ← Phase M1
  *   ├── people/<slug>.md    ← Phase M3
- *   ├── skills/<slug>.md    ← Phase M4
  *   └── journal/YYYY-MM-DD.md ← Phase M6
  */
 
@@ -18,7 +17,7 @@ import { parseFrontmatter, stringifyFrontmatter } from "./frontmatter.js";
 
 // ─── 类型 ───
 
-export type MemoryCategory = "profile" | "person" | "skill" | "journal";
+export type MemoryCategory = "profile" | "person" | "journal";
 
 export interface MemoryEntry {
   category: MemoryCategory;
@@ -142,7 +141,7 @@ export class MemoryStore {
     const results: MemoryEntry[] = [];
     const q = query.toLowerCase();
 
-    for (const category of ["profile", "person", "skill"] as MemoryCategory[]) {
+    for (const category of ["profile", "person"] as MemoryCategory[]) {
       const entries = await this.list(category);
       for (const entry of entries) {
         const searchable = [
@@ -168,7 +167,6 @@ export class MemoryStore {
     switch (category) {
       case "profile": return this.baseDir;
       case "person": return path.join(this.baseDir, "people");
-      case "skill": return path.join(this.baseDir, "skills");
       case "journal": return path.join(this.baseDir, "journal");
     }
   }

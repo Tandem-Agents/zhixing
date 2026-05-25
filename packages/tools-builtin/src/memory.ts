@@ -4,7 +4,7 @@
  * Phase M2 核心交付：让 AI 可以保存、查询、更新和删除用户记忆。
  *
  * 支持的操作：
- * - save: 保存一条记忆（profile / person / skill）
+ * - save: 保存一条记忆（profile / person）
  * - search: 搜索记忆
  * - list: 列出某类别下所有记忆
  * - update: 更新已有记忆
@@ -31,7 +31,6 @@ export function createMemoryTool(store: MemoryStore): ToolDefinition {
       "Manage the user's persistent memory across three categories:\n" +
       "  - profile : the user's own identity (id is always 'profile')\n" +
       "  - person  : people in the user's life (id like 'wife-xiaoli')\n" +
-      "  - skill   : reusable methodologies the user has validated (id like 'docker-network-debug')\n" +
       "\n" +
       "Actions and required fields:\n" +
       "  - save   : category + id + meta + content (create new entry)\n" +
@@ -41,7 +40,7 @@ export function createMemoryTool(store: MemoryStore): ToolDefinition {
       "  - search : query (category optional; narrows scope when provided)\n" +
       "\n" +
       "Use this whenever the user asks to remember/recall something, or when you discover personal " +
-      "information worth keeping (name, preferences, relationships, validated methodologies). " +
+      "information worth keeping (name, preferences, relationships). " +
       "Confirm with the user before saving new memories unless they explicitly asked you to remember.",
     inputSchema: {
       type: "object",
@@ -54,22 +53,20 @@ export function createMemoryTool(store: MemoryStore): ToolDefinition {
         category: {
           type: "string",
           description:
-            "Memory category: 'profile' (user identity), 'person' (relationships), 'skill' (reusable methodologies)",
-          enum: ["profile", "person", "skill"],
+            "Memory category: 'profile' (user identity), 'person' (relationships)",
+          enum: ["profile", "person"],
         },
         id: {
           type: "string",
           description:
             "Memory ID (filename without .md). For profile, always use 'profile'. " +
-            "For person, use a slug like 'wife-xiaoli'. " +
-            "For skill, use a slug like 'docker-network-debug'.",
+            "For person, use a slug like 'wife-xiaoli'.",
         },
         meta: {
           type: "object",
           description:
             "YAML frontmatter fields. For profile: {name, language?, timezone?}. " +
-            "For person: {name, relation, birthday?, tags?}. " +
-            "For skill: {title, tags, triggers, source}.",
+            "For person: {name, relation, birthday?, tags?}.",
         },
         content: {
           type: "string",

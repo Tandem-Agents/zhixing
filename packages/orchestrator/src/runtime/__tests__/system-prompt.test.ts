@@ -342,10 +342,10 @@ describe("buildSystemPrompt", () => {
     `);
   });
 
-  // 含 memory 工具时主 agent 完整 6 段(skill-evolution 段被激活)的 byte-equal 锚点。
-  // 与上一条无 memory 锚点互补:任何 skill-evolution 段文案改动 / Tool Usage 的 memory
-  // 提示行改动 / 段顺序变化都会被此快照拦截。两个快照共同覆盖主 agent 段集全态。
-  it("主路径静态区(默认 profile + 含 memory 工具)完整 6 段 byte-equal 锚点", () => {
+  // 含 memory 工具时主 agent 完整段集的 byte-equal 锚点。
+  // 与上一条无 memory 锚点互补:Tool Usage 的 memory 提示行改动 / 段顺序变化
+  // 都会被此快照拦截。两个快照共同覆盖主 agent 段集全态。
+  it("主路径静态区(默认 profile + 含 memory 工具)完整段集 byte-equal 锚点", () => {
     const prompt = buildSystemPrompt({
       ...ctx,
       tools: [...defaultTools, stubTool("memory")],
@@ -382,36 +382,10 @@ describe("buildSystemPrompt", () => {
       - Use \`edit\` for targeted text replacements, not bash sed/awk
       - Use \`write\` to create files or overwrite entire content
       - Use \`bash\` for system commands, package management, git operations, and tasks not covered by other tools
-      - Use \`memory\` to save, search, and manage the user's persistent memories (identity, relationships, skills)
+      - Use \`memory\` to save, search, and manage the user's persistent memories (identity, relationships)
       - When the user says "remember this" or shares personal info, save it with \`memory\`
       - Always confirm before saving new memories, unless the user explicitly asked you to remember
       - If a tool result ends with \`[Commitment already sent to user. Do not restate.]\`, the user has already seen the tool's confirmation directly via a commit message. Do NOT restate what the tool just did (no "已创建..." / "I've scheduled..."). If no additional insight is needed, end the turn with a brief acknowledgment or no text.
-
-      ## Skill Evolution
-      After completing a complex task (one that required multiple tool calls, trial-and-error, or iterative problem-solving), reflect on whether the approach contains a reusable methodology.
-
-      Ask yourself:
-      - Did I discover a non-obvious approach through trial and error?
-      - Did the user correct my initial approach, revealing a better method?
-      - Does a similar skill already exist that should be updated with new learnings?
-
-      If the approach is worth saving, propose it naturally at the end of your response:
-
-        "💡 这个过程中我总结了一套方法,要存为技能吗?
-         名称:[skill name]
-         适用场景:[when this would be useful]
-         核心要点:[brief summary]"
-
-      If you used an existing skill but found improvements, propose an update:
-
-        "💡 我发现之前的技能「[name]」可以改进,要更新吗?
-         改进点:[what changed]"
-
-      Rules:
-      - Never silently create or update skills — always propose and wait for confirmation
-      - At most one skill proposal per conversation
-      - Only propose after complex tasks, not simple Q&A
-      - When the user confirms, use the \`memory\` tool with action "save" and category "skill"
 
       ## Style
       - Be warm, concise, and natural in conversation
@@ -433,10 +407,10 @@ describe("buildSystemPrompt", () => {
   //   - SUB_AGENT_SEGMENTS 段集合 / 段顺序变更
   //   - subAgentProfile() 身份段 / Constraints 文案变更
   //   - principles / tool-usage / safety 段文案变更对子的影响
-  //   - 子 agent 渗透 skill-evolution / style 段(应被严格排除)
+  //   - 子 agent 渗透 style 段(应被严格排除)
   //
   // 与主 agent 双锚点互补 —— 共同保证主子两条 system prompt 路径都被 byte-equal 锁定。
-  it("子 agent SUB_AGENT_SEGMENTS 4 段(无 memory / 无 style / 无 skill-evolution)byte-equal 锚点", () => {
+  it("子 agent SUB_AGENT_SEGMENTS 4 段(无 memory / 无 style)byte-equal 锚点", () => {
     // 固定 subAgentId 让 displayName 可锚定;真实 spawn 时 id 由 dispatcher 生成
     const profile = subAgentProfile({
       subAgentId: "abc123def",
@@ -697,7 +671,6 @@ describe("buildSystemPrompt · profile + segments 扩展点", () => {
     expect(prompt).toContain("Zhixing");
     expect(prompt).toContain("## Tool Usage");
     expect(prompt).not.toContain("## Principles");
-    expect(prompt).not.toContain("## Skill Evolution");
     expect(prompt).not.toContain("## Style");
     expect(prompt).not.toContain("## Safety");
   });

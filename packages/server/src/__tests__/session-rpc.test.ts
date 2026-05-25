@@ -78,8 +78,6 @@ function createMockRuntime(sessionId: string, opts: MockOptions = {}, initialMes
         },
         newMessages: [reply],
         durationMs: 0,
-        toolEndCount: 0,
-        injectedSkillIds: [],
       };
     },
     getHistory(limit) {

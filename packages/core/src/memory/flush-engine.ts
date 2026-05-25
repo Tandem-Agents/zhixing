@@ -7,8 +7,8 @@
  * 设计要点：
  * - 作为 CompactionStrategy 嵌入引擎，零侵入现有管线
  * - 不修改消息（compacted: false），仅执行持久化副作用
- * - 提取结果分流到三支柱 + Journal：
- *   profile（身份信息）、person（关系人）、skill（方法论）、journal（事件日志）
+ * - 提取结果分流到记忆支柱 + Journal：
+ *   profile（身份信息）、person（关系人）、journal（事件日志）
  * - 提取失败时静默降级——不能因为记忆提取失败阻塞对话
  *
  * 与 Hermes flush_memories 的对比：
@@ -73,7 +73,7 @@ const EXTRACTION_TAIL_TURNS = 8;
 
 /** LLM 返回的单条提取结果 */
 export interface FlushExtraction {
-  category: "profile" | "person" | "skill" | "journal";
+  category: "profile" | "person" | "journal";
   id: string;
   meta: Record<string, unknown>;
   content: string;
@@ -93,15 +93,14 @@ export const FLUSH_EXTRACTION_PROMPT = `You are a memory extraction assistant. A
 Extract ONLY genuinely important information. Do NOT extract trivial or transient details.
 
 Return a JSON array of extractions. Each extraction must have:
-- category: one of "profile", "person", "skill", "journal"
-- id: a slug identifier (e.g. "docker-network-debug", "wife-xiaoli")
+- category: one of "profile", "person", "journal"
+- id: a slug identifier (e.g. "wife-xiaoli", "2025-06-15")
 - meta: frontmatter fields appropriate for the category
 - content: markdown body text
 
 Category guidelines:
 - "profile": User's identity, preferences, technical stack, work style (id should be "profile")
 - "person": People mentioned by name with relationship context (id: slug like "wife-xiaoli")
-- "skill": Reusable methodology discovered through problem-solving (id: slug like "docker-network-debug", meta must include title, tags, triggers)
 - "journal": Notable events, decisions, or outcomes from this session (id: today's date YYYY-MM-DD)
 
 Rules:
@@ -109,7 +108,6 @@ Rules:
 - If nothing is worth extracting, return an empty array: []
 - For journal entries, append to existing content (use "---" separator between entries)
 - For profile, only extract if genuinely new identity information was shared
-- For skills, only extract if a non-trivial methodology was discovered through effort
 - Keep extractions concise — each content field should be 2-5 lines max
 
 Respond with ONLY a valid JSON array, no markdown fences, no explanation.`;
@@ -304,7 +302,7 @@ export function parseExtractions(raw: string): FlushExtraction[] {
   return parsed.filter((item): item is FlushExtraction => {
     if (!item || typeof item !== "object") return false;
     const obj = item as Record<string, unknown>;
-    if (!["profile", "person", "skill", "journal"].includes(String(obj.category))) return false;
+    if (!["profile", "person", "journal"].includes(String(obj.category))) return false;
     if (typeof obj.id !== "string" || !obj.id) return false;
     if (typeof obj.content !== "string") return false;
     return true;

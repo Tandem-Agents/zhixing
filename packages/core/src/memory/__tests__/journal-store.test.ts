@@ -149,7 +149,7 @@ describe("JournalStore", () => {
   describe("condense", () => {
     const mockLLM: CondenseLLM = {
       async condense(content: string) {
-        return `## Monthly Summary\n\nKey points from ${content.split("---").length} entries.\n\n[SKILL_CANDIDATE] Docker 网络调试方法论`;
+        return `## Monthly Summary\n\nKey points from ${content.split("---").length} entries.`;
       },
     };
 
@@ -180,14 +180,6 @@ describe("JournalStore", () => {
       expect(condensed!.meta.condensedFrom).toBe(2);
     });
 
-    it("检测 SKILL_CANDIDATE 标记", async () => {
-      await store.append("content", daysAgo(35));
-      const plan = await store.scan();
-      const result = await store.condense(plan.condensePlan!, mockLLM);
-
-      expect(result.skillCandidates).toHaveLength(1);
-      expect(result.skillCandidates[0]).toContain("Docker 网络调试方法论");
-    });
   });
 
   // ─── 自定义配置 ───

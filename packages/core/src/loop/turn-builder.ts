@@ -37,7 +37,7 @@ export interface BuildTurnInput {
    * 原始 user 消息（未经 enrichContext / turnContextInjector 增强的版本）。
    *
    * 设计（§0.7.8）：持久化的 userMessage 必须是用户真实输入，而不是带 project context /
-   * skill injection 的内部增强版。AgentRuntime.run 在内部维护 `params.messages` /
+   * 动态上下文注入 的内部增强版。AgentRuntime.run 在内部维护 `params.messages` /
    * `messagesWithContext` 两份引用，调用方传入前者。
    */
   readonly userMessage: Message;

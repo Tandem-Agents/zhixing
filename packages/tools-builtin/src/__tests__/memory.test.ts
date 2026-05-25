@@ -36,18 +36,18 @@ describe("Memory Tool (integration via MemoryStore)", () => {
 
   it("save → list → delete → list roundtrip", async () => {
     await store.save({
-      category: "skill",
-      id: "test-skill",
-      meta: { title: "Test Skill", tags: ["test"] },
+      category: "person",
+      id: "test-person",
+      meta: { name: "Test Person", tags: ["test"] },
       content: "步骤 1",
     });
 
-    let entries = await store.list("skill");
+    let entries = await store.list("person");
     expect(entries).toHaveLength(1);
 
-    await store.delete("skill", "test-skill");
+    await store.delete("person", "test-person");
 
-    entries = await store.list("skill");
+    entries = await store.list("person");
     expect(entries).toHaveLength(0);
   });
 
@@ -59,10 +59,10 @@ describe("Memory Tool (integration via MemoryStore)", () => {
       content: "likes TypeScript",
     });
     await store.save({
-      category: "skill",
-      id: "ts-debug",
-      meta: { title: "TypeScript Debugging" },
-      content: "use breakpoints",
+      category: "person",
+      id: "bob",
+      meta: { name: "Bob" },
+      content: "TypeScript expert",
     });
 
     const results = await store.search("TypeScript");
@@ -71,20 +71,20 @@ describe("Memory Tool (integration via MemoryStore)", () => {
 
   it("update 覆盖已有内容", async () => {
     await store.save({
-      category: "skill",
-      id: "evolving-skill",
-      meta: { title: "My Skill", version: 1 },
+      category: "person",
+      id: "evolving-person",
+      meta: { name: "My Person", version: 1 },
       content: "Version 1 content",
     });
 
     await store.save({
-      category: "skill",
-      id: "evolving-skill",
-      meta: { title: "My Skill (Updated)", version: 2 },
+      category: "person",
+      id: "evolving-person",
+      meta: { name: "My Person (Updated)", version: 2 },
       content: "Version 2 content",
     });
 
-    const entry = await store.load("skill", "evolving-skill");
+    const entry = await store.load("person", "evolving-person");
     expect(entry!.meta.version).toBe(2);
     expect(entry!.content).toBe("Version 2 content");
   });

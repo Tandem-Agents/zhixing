@@ -25,11 +25,8 @@ import {
   type ConversationScope,
   loadProfile,
   getMemoryDir,
-  SkillsStore,
   PeopleStore,
   JournalStore,
-  inferEffectiveness,
-  applyEffectivenessUpdates,
   CommandProvider,
   FileProvider,
   ArgumentProvider,
@@ -130,10 +127,6 @@ interface ConversationRuntimeState {
   convRepo: ConversationRepository;
   conversationId: string | null;
   turnCounter: number;
-  /** 上一轮的工具调用完成数（用于反思触发） */
-  lastToolEndCount: number;
-  /** 本会话是否已提议过技能（每会话最多 1 次） */
-  hasProposedSkill: boolean;
   /** 是否已执行过 Journal 自动凝练 */
   journalCondenseDone: boolean;
 }
@@ -255,7 +248,6 @@ const REPL_COMMAND_META: ReadonlyArray<ReplCommandMeta> = [
   { name: "usage", description: "查看 token 用量详情", category: "info", legacyKey: "/usage" },
   { name: "context", description: "上下文容量可视化", category: "info", legacyKey: "/context" },
   // ─ tools ─
-  { name: "skills", description: "查看技能库", category: "tools", legacyKey: "/skills" },
   { name: "work", description: "进入工作场景", category: "tools", legacyKey: "/work" },
   { name: "journal", description: "查看日志状态", category: "tools", legacyKey: "/journal" },
   { name: "people", description: "查看关系网络", category: "tools", legacyKey: "/people" },
@@ -419,7 +411,6 @@ function buildSlashCommands(
           state.taskListService.clear(state.conv.conversationId);
         }
         state.conv.turnCounter = 0;
-        state.conv.lastToolEndCount = 0;
 
         if (clearScreenToInitial) {
           clearScreenToInitial(warnings);
@@ -559,7 +550,6 @@ function buildSlashCommands(
           state.conv.messages = loaded.messages;
           state.conv.conversationId = target.id;
           state.conv.turnCounter = loaded.turnCount;
-          state.conv.lastToolEndCount = 0;
           // 加载目标对话的 task_list 持久化状态到 service cache
           await state.taskListService.prime(target.id);
           state.conv.convRepo.touch(state.conv.conversationId).catch(() => {});
@@ -627,72 +617,6 @@ function buildSlashCommands(
           }
         }
         cliWriter.line("");
-      },
-    },
-    "/skills": {
-      description: "查看技能库 (audit: 健康审查, archive/restore/delete <id>)",
-      handler: async (_state, args) => {
-        const store = new SkillsStore();
-        const subcommand = args.trim().split(/\s+/)[0]?.toLowerCase() ?? "";
-        const subArgs = args.trim().split(/\s+/).slice(1).join(" ");
-
-        if (subcommand === "audit") {
-          await renderSkillsAudit(store, cliWriter);
-          return;
-        }
-
-        if (subcommand === "archive" && subArgs) {
-          const ok = await store.archive(subArgs);
-          cliWriter.line(ok
-            ? chalk.green(`\n  ✓ 已归档: ${subArgs}\n`)
-            : chalk.red(`\n  ✗ 未找到: ${subArgs}\n`));
-          return;
-        }
-
-        if (subcommand === "restore" && subArgs) {
-          const ok = await store.restore(subArgs);
-          cliWriter.line(ok
-            ? chalk.green(`\n  ✓ 已恢复: ${subArgs}\n`)
-            : chalk.red(`\n  ✗ 未找到归档: ${subArgs}\n`));
-          return;
-        }
-
-        if (subcommand === "delete" && subArgs) {
-          const ok = await store.delete(subArgs);
-          cliWriter.line(ok
-            ? chalk.green(`\n  ✓ 已删除: ${subArgs}\n`)
-            : chalk.red(`\n  ✗ 未找到: ${subArgs}\n`));
-          return;
-        }
-
-        // 默认：列出所有技能
-        const skills = await store.listAll();
-
-        if (skills.length === 0) {
-          cliWriter.line(
-            `\n${chalk.dim("  技能库为空。")}` +
-              `\n${chalk.dim('  对话中说"存为技能"可以保存方法论。\n')}`,
-          );
-          return;
-        }
-
-        cliWriter.line(`\n${chalk.bold("  技能库")} ${chalk.dim(`(${skills.length} 个)`)}`);
-        for (const skill of skills) {
-          const status = store.getStatus(skill);
-          const statusBadge = status === "active"
-            ? chalk.green("●")
-            : status === "stale"
-              ? chalk.yellow("○")
-              : chalk.dim("◌");
-          const tags = skill.meta.tags.length > 0
-            ? chalk.dim(` [${skill.meta.tags.join(", ")}]`)
-            : "";
-          const usage = chalk.dim(` (v${skill.meta.version} · ${skill.meta.useCount}次)`);
-          cliWriter.line(
-            `  ${statusBadge} ${skill.meta.title}${tags}${usage}`,
-          );
-        }
-        cliWriter.line(chalk.dim("\n  提示: /skills audit 查看健康报告\n"));
       },
     },
     "/work": {
@@ -1228,9 +1152,6 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       }
     : undefined;
 
-  // 启动时检测 stale 技能，温和提醒
-  await checkStaleSkills(cliWriter);
-
   // chrome 模式（capability.ok）下主输入走 InputController，rl 仅作退出生命
   // 周期钩子，不需要 terminal 能力。terminal:true 会让 readline 自监听 resize
   // 并 _refreshLine 重画（裸 > prompt）绕过 ScreenController → 冲突碎裂（已由
@@ -1284,8 +1205,6 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     convRepo,
     conversationId,
     turnCounter,
-    lastToolEndCount: 0,
-    hasProposedSkill: false,
     journalCondenseDone: false,
   };
   const state: ReplState = {
@@ -1446,8 +1365,6 @@ export async function startRepl(options: ReplOptions): Promise<void> {
             convRepo: worksceneRepo,
             conversationId: wConv.id,
             turnCounter: loaded?.turnCount ?? 0,
-            lastToolEndCount: 0,
-            hasProposedSkill: false,
             journalCondenseDone: false,
           };
         } catch (err) {
@@ -2017,7 +1934,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
           continue;
         }
         if (d.kind === "unknown" || d.kind === "missing-handler") {
-          // Fallthrough 到 legacy（未桥接的 /skills /trust /people 等）
+          // Fallthrough 到 legacy（未桥接的 /trust /people 等）
           await runLegacyCommand(result.text);
           continue;
         }
@@ -2110,48 +2027,17 @@ export async function startRepl(options: ReplOptions): Promise<void> {
         conversationId: state.conv.conversationId ?? undefined,
         abortSignal: interruptRuntime.controller.signal,
         onYield: (e) => renderer.handleEvent(e),
-        enrichOptions: {
-          lastToolEndCount: state.conv.lastToolEndCount,
-          hasProposedSkill: state.conv.hasProposedSkill,
-        },
       });
       // 暴露给 RuntimeSession.reload 流程——reload 在 swap 之前 await 此 promise
       state.activeTurnPromise = runPromise;
       const runResult = await runPromise;
       pendingModeSwitch = runResult.pendingModeSwitch;
-      const { newMessages, toolEndCount, injectedSkillIds } = runResult;
+      const { newMessages } = runResult;
 
       renderer.stop();
-      state.conv.lastToolEndCount = toolEndCount;
       // turn 终止反馈（耗时 / token / abort 原因 / error 类型 / max_turns）由 status-bar
       // 单点接管——renderSummary 已移除，避免每条 AI 消息底下重复的 "─ 1.6s" 视觉噪音。
       // 状态条 done 永驻显示直到下一次 agent:run_start，新 turn 起始覆盖回 thinking。
-
-      // 检测 Agent 是否在本轮回复中提议了技能保存/更新
-      if (!state.conv.hasProposedSkill) {
-        const assistantText = newMessages
-          .filter((m) => m.role === "assistant")
-          .flatMap((m) => m.content)
-          .filter((b): b is { type: "text"; text: string } => b.type === "text")
-          .map((b) => b.text)
-          .join("");
-        if (assistantText.includes("存为技能") || assistantText.includes("保存为技能") || assistantText.includes("SKILL_CANDIDATE") || /💡.*技能/.test(assistantText)) {
-          state.conv.hasProposedSkill = true;
-        }
-      }
-
-      // 效果推断：根据对话信号更新本轮注入的技能 effectiveness
-      if (injectedSkillIds.length > 0) {
-        const thisRoundMessages = [userMsg, ...newMessages];
-        inferEffectiveness(
-          { injectedSkillIds, turnMessages: thisRoundMessages },
-          new SkillsStore(),
-        ).then((result) => {
-          if (result.updates.length > 0) {
-            applyEffectivenessUpdates(result, new SkillsStore()).catch(() => {});
-          }
-        }).catch(() => {});
-      }
 
       // 单一事实源持久化：
       //   commitTurn 一次原子写入 turn + compactBefore，返回 canonical messages。
@@ -2264,109 +2150,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   rl.close();
 }
 
-// ─── /skills audit ───
-
-async function renderSkillsAudit(
-  store: SkillsStore,
-  cliWriter: CliWriter,
-): Promise<void> {
-  const [active, archived] = await Promise.all([
-    store.listAll(),
-    store.listArchived(),
-  ]);
-
-  if (active.length === 0 && archived.length === 0) {
-    cliWriter.line(chalk.dim("\n  技能库为空，无需审查。\n"));
-    return;
-  }
-
-  const activeList = active.filter((s) => store.getStatus(s) === "active");
-  const staleList = active.filter((s) => store.getStatus(s) === "stale");
-  const needsUpdate = active.filter((s) => s.meta.effectiveness === "needs-update");
-
-  cliWriter.line(`\n${chalk.bold("  📊 技能库健康报告")}\n`);
-  cliWriter.line(`  ${chalk.green("●")} 活跃 (Active):  ${activeList.length} 个`);
-  cliWriter.line(`  ${chalk.yellow("○")} 沉寂 (Stale):   ${staleList.length} 个`);
-  cliWriter.line(`  ${chalk.dim("◌")} 归档 (Archived): ${archived.length} 个`);
-
-  if (needsUpdate.length > 0) {
-    cliWriter.line(`  ${chalk.red("!")} 待更新:          ${needsUpdate.length} 个`);
-  }
-
-  if (staleList.length > 0) {
-    cliWriter.line(chalk.yellow(`\n  沉寂技能（超过 90 天未使用）：`));
-    for (const skill of staleList) {
-      const lastUsed = skill.meta.lastUsedAt ?? skill.meta.created;
-      const daysSince = Math.floor(
-        (Date.now() - new Date(lastUsed).getTime()) / 86400000,
-      );
-      cliWriter.line(
-        `  ${chalk.yellow("○")} ${skill.meta.title}` +
-          chalk.dim(` (${skill.id})`) +
-          chalk.dim(` · 使用 ${skill.meta.useCount} 次 · ${daysSince} 天前`),
-      );
-    }
-    cliWriter.line(chalk.dim(`\n  操作: /skills archive <id>  归档`));
-    cliWriter.line(chalk.dim(`        /skills delete <id>   删除`));
-  }
-
-  if (needsUpdate.length > 0) {
-    cliWriter.line(chalk.red(`\n  效果存疑（用户反馈过时或有误）：`));
-    for (const skill of needsUpdate) {
-      cliWriter.line(
-        `  ${chalk.red("!")} ${skill.meta.title}` +
-          chalk.dim(` (${skill.id})`) +
-          chalk.dim(` · v${skill.meta.version} · 使用 ${skill.meta.useCount} 次`),
-      );
-    }
-    cliWriter.line(chalk.dim(`\n  提示: 对话中提到该技能场景，AI 会自动提议更新`));
-  }
-
-  if (archived.length > 0) {
-    cliWriter.line(chalk.dim(`\n  归档技能：`));
-    for (const skill of archived) {
-      cliWriter.line(
-        chalk.dim(`  ◌ ${skill.meta.title} (${skill.id})`),
-      );
-    }
-    cliWriter.line(chalk.dim(`\n  操作: /skills restore <id>  恢复`));
-  }
-
-  if (staleList.length === 0 && needsUpdate.length === 0) {
-    cliWriter.line(chalk.green(`\n  ✓ 所有技能状态健康`));
-  }
-
-  cliWriter.line("");
-}
-
 // ─── 工具函数 ───
-
-async function checkStaleSkills(cliWriter: CliWriter): Promise<void> {
-  try {
-    const skillsStore = new SkillsStore();
-    const all = await skillsStore.listAll();
-    if (all.length === 0) return;
-
-    const staleSkills = all.filter((s) => skillsStore.getStatus(s) === "stale");
-    const needsUpdateSkills = all.filter((s) => s.meta.effectiveness === "needs-update");
-
-    const issues: string[] = [];
-    if (staleSkills.length > 0) {
-      issues.push(`${staleSkills.length} 个技能超过 90 天未使用`);
-    }
-    if (needsUpdateSkills.length > 0) {
-      issues.push(`${needsUpdateSkills.length} 个技能需要更新`);
-    }
-
-    if (issues.length > 0) {
-      cliWriter.line(
-        chalk.dim(`  💡 ${issues.join("，")}。输入 /skills audit 查看详情\n`),
-      );
-    }
-  } catch {
-    // 静默——启动提醒不应阻塞 REPL
-  }
-}
 
 /**
  * 异步执行 Journal 生命周期维护。
@@ -2386,7 +2170,7 @@ async function runJournalLifecycle(session: AgentRuntime): Promise<void> {
   await jStore.condense(plan.condensePlan, {
     async condense(dailyContents: string): Promise<string> {
       return session.callText(
-        `请将以下日志内容凝练为简洁的月度摘要，保留关键事实和决策，去掉冗余细节。如果发现可复用的方法论，用 [SKILL_CANDIDATE] 标记。\n\n${dailyContents}`,
+        `请将以下日志内容凝练为简洁的月度摘要，保留关键事实和决策，去掉冗余细节。\n\n${dailyContents}`,
       );
     },
   });

@@ -95,8 +95,6 @@ function buildAbortedResult(
     },
     newMessages: [],
     durationMs: 1,
-    toolEndCount: 0,
-    injectedSkillIds: [],
   };
 }
 
@@ -143,8 +141,6 @@ function buildResultByReason(
     },
     newMessages,
     durationMs: 10,
-    toolEndCount: 0,
-    injectedSkillIds: [],
   };
 }
 

@@ -45,27 +45,6 @@ describe("MemoryStore", () => {
       expect(content).toContain("relation: 妻子");
     });
 
-    it("保存 skill 记忆", async () => {
-      const filePath = await store.save({
-        category: "skill",
-        id: "docker-network-debug",
-        meta: {
-          title: "Docker 网络调试",
-          tags: ["docker", "networking"],
-          triggers: ["docker network", "容器连不上"],
-          source: "conversation",
-          version: 1,
-          useCount: 0,
-        },
-        content: "## 排查步骤\n1. 检查网络模式",
-      });
-
-      expect(filePath).toContain(path.join("skills", "docker-network-debug.md"));
-      const content = await fs.readFile(filePath, "utf-8");
-      expect(content).toContain("title: Docker 网络调试");
-      expect(content).toContain("tags: [docker, networking]");
-    });
-
     it("覆盖已有记忆", async () => {
       await store.save({
         category: "person",
@@ -177,7 +156,7 @@ describe("MemoryStore", () => {
     });
 
     it("目录不存在时返回空数组", async () => {
-      const entries = await store.list("skill");
+      const entries = await store.list("journal");
       expect(entries).toEqual([]);
     });
 
@@ -209,10 +188,10 @@ describe("MemoryStore", () => {
         content: "喜欢咖啡",
       });
       await store.save({
-        category: "skill",
-        id: "docker-debug",
-        meta: { title: "Docker 调试", tags: ["docker"] },
-        content: "检查网络模式",
+        category: "person",
+        id: "docker-mentor",
+        meta: { name: "老王" },
+        content: "Docker 调试经验丰富",
       });
     });
 
@@ -227,10 +206,10 @@ describe("MemoryStore", () => {
       expect(results).toHaveLength(1);
     });
 
-    it("按 title 搜索 skill", async () => {
+    it("按内容搜索（含 Docker）", async () => {
       const results = await store.search("Docker");
       expect(results).toHaveLength(1);
-      expect(results[0]!.meta.title).toBe("Docker 调试");
+      expect(results[0]!.meta.name).toBe("老王");
     });
 
     it("无结果时返回空数组", async () => {

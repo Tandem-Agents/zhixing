@@ -72,7 +72,6 @@ function makeState(
     convRepo: makeRepo(),
     conversationId: "old-id",
     turnCounter: 5,
-    lastToolEndCount: 3,
     ...overrides,
   };
 }
@@ -122,7 +121,6 @@ describe("switchToNewConversation", () => {
     expect(conv.conversationId).toBe("new-id");
     expect(conv.messages).toEqual([]);
     expect(conv.turnCounter).toBe(0);
-    expect(conv.lastToolEndCount).toBe(0);
     expect(service.prime).toHaveBeenCalledWith("new-id");
     expect(conv.convRepo.touch).toHaveBeenCalledWith("new-id");
     expect(session.runtime.resetConversationState).toHaveBeenCalled();

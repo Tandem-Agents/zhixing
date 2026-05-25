@@ -12,7 +12,7 @@
 | v2.1 | 2026-04-16 | Server Gateway：两层通道适配（Core 3 方法 + Capability Traits）、JSON-RPC 2.0 over WebSocket（~20 方法 v1）、InboundRouter（normalize→debounce→session-bind→agent turn）、会话漫游、智能投递路由、ConfirmationBroker 多通道渲染、钉钉首选通道、OpenAI 兼容 API | [Server Gateway 设计](../specifications/server-gateway.md) |
 | v2.0 | 2026-04-12 | 安全系统重新设计：三条原则（操作按影响范围分类、每条放行追溯到用户选择、全平台行为一致）、五个组件（策略引擎、操作分类、权限系统、执行守卫、安全仪表盘）、域无关基础设施——通过边界声明自动覆盖任何业务场景 | [安全系统设计](../specifications/security-system.md) |
 | v1.0 | 2026-04-12 | ~~安全系统初版~~（已被 v2.0 替代）：信任梯度、可组合沙箱、补偿机制——设计反复修改，v2.0 重新设计 | — |
-| v0.9 | 2026-04-10 | 技能进化：四阶段生命周期（创生/使用/进化/治理）、反思提议（系统提示引导，零额外 LLM 成本）、使用追踪（useCount+effectiveness）、版本追踪（revisions）、内容安全扫描、Active→Stale→Archived 治理、/skills audit | [技能进化系统设计](../specifications/skills-evolution.md) |
+| v0.9 | 2026-04-10 | 技能进化：四阶段生命周期（创生/使用/进化/治理）、反思提议（系统提示引导，零额外 LLM 成本）、使用追踪（useCount+effectiveness）、版本追踪（revisions）、内容安全扫描、Active→Stale→Archived 治理、/skills audit | 技能进化系统设计（已废弃，见 drafts/skill-module.md） |
 | v0.8 | 2026-04-10 | 常驻服务：入站/调度/出站三层架构、Server/CLI 双模式、Scheduler（并发控制+优先级+Active Hours）、Delivery Pipeline（持久化+去重+免打扰）、Channel Adapter 统一接口、三级渐进 Daemon、消除 Heartbeat 依赖 | [常驻服务架构设计](../specifications/persistent-service.md) |
 | v0.7 | 2026-04-08 | 容错引擎：指数退避、通用熔断器、错误分类、withRetry 包装器、可观测重试事件 | [容错引擎设计](../specifications/resilience-engine.md) |
 | v0.6 | 2026-04-07 | CLI 架构：渐进式三阶段演进、单体+预留 Gateway、MVP 终端方案、系统提示策略、会话管理、命令体系 | [q06-CLI 架构](../../_private/questions/q06-cli-architecture.md) |
@@ -147,7 +147,7 @@ graph TB
 | 技能生命周期 Active→Stale→Archived | 无限累积降低信噪比；90 天未使用标记 stale，归档需用户确认 | 已确认 |
 | 技能写入前安全扫描 | 记忆内容注入 system prompt，需防提示注入/数据外泄；声明式威胁模式 | 已确认 |
 | Trigger 注入 + 领域索引优于三级渐进加载 | Trigger 被动精准注入 + 一行领域索引兜底，优于 Hermes 索引→全文→文件三级工具调用 | 已确认 |
-| 技能进化系统 | 见 [技能进化系统设计](../specifications/skills-evolution.md) | 已确认 |
+| 技能进化系统 | 见 技能进化系统设计（已废弃，见 drafts/skill-module.md） | 已确认 |
 | 声明式安全策略引擎（规则是数据非代码） | Claude Code 7000 行命令式 Bash AST 维护不可持续；声明式规则可版本管理、社区贡献、热加载 | 已确认 |
 | 威胁边界模型（保护资源非限制工具） | 工具级 allow/deny 粒度不足；新增 MCP/插件工具需自动受保护 | 已确认 |
 | 操作影响分类 + 显式权限规则 | 按影响范围四级分类（observe/internal/external/critical），三个区域（工作区内/工作区外/外部系统），域无关——上下文分类器（文件系统/Shell）+ 边界影响分类器（通用），不含业务领域分类器 | 已确认 |

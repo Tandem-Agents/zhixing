@@ -59,7 +59,7 @@ export type CommandCategory =
   | "session" // /new /reset /history /save /resume
   | "config" // /model /elevated /verbose /fast
   | "info" // /status /help /profile
-  | "tools" // /skill /mcp
+  | "tools" // /work /mcp
   | "debug" // /debug /logs
   | "plugin" // 动态注册的插件命令
   | "hidden"; // 不显示在分类头，但存在（escape hatch 见 spec §6.4.1）

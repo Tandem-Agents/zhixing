@@ -434,8 +434,7 @@ export interface RunResult {
   /**
    * 本 run yield 流重建的原始新消息增量（与 canonical 正交）。
    *
-   * 用途：技能提议检测（扫 assistant 文本）、技能效果推断、诊断日志、
-   * 非 REPL 单次运行的输出显示。
+   * 用途：诊断日志、非 REPL 单次运行的输出显示。
    *
    * 不用于状态同步（后者由 commitTurn 返回的 canonical 承担）。
    */
@@ -443,12 +442,6 @@ export interface RunResult {
 
   /** 诊断：本 run 耗时（ms） */
   readonly durationMs: number;
-
-  /** 诊断：本 run 工具完成次数（tool_end 事件数），供反思触发 */
-  readonly toolEndCount: number;
-
-  /** 诊断：本 run 注入的技能 id 列表，供效果推断 */
-  readonly injectedSkillIds: string[];
 
   /**
    * 诊断：run 结束后的预算快照。
@@ -460,7 +453,7 @@ export interface RunResult {
 
   /**
    * 本 run 内产生的工作模式切换意图（turn 内 emit、RunResult 带出，与
-   * compactBefore / injectedSkillIds 同构）。accumulator last-wins 收集；
+   * compactBefore 同构）。accumulator last-wins 收集；
    * 无 emit 时 undefined。仅意图 —— 切换由 REPL 主回路 turn 边界单一事务
    * 消费执行，本字段不触发任何切换。
    */

@@ -38,12 +38,12 @@ describe("parseExtractions", () => {
   it("解析有效的 JSON 数组", () => {
     const input = JSON.stringify([
       { category: "profile", id: "profile", meta: { name: "张三" }, content: "全栈开发者" },
-      { category: "skill", id: "docker-network", meta: { title: "Docker 网络调试" }, content: "步骤..." },
+      { category: "person", id: "wife-xiaoli", meta: { name: "小丽" }, content: "妻子" },
     ]);
     const result = parseExtractions(input);
     expect(result).toHaveLength(2);
     expect(result[0]!.category).toBe("profile");
-    expect(result[1]!.category).toBe("skill");
+    expect(result[1]!.category).toBe("person");
   });
 
   it("处理 markdown 代码块包裹", () => {
@@ -65,7 +65,7 @@ describe("parseExtractions", () => {
     const input = JSON.stringify([
       { category: "profile", id: "profile", content: "valid" },
       { category: "invalid-cat", id: "x", content: "bad category" },
-      { category: "skill", content: "missing id" },
+      { category: "person", content: "missing id" },
       { id: "y", content: "missing category" },
     ]);
     const result = parseExtractions(input);
@@ -101,10 +101,10 @@ describe("MemoryFlushStrategy", () => {
         content: "深圳全栈开发者",
       },
       {
-        category: "skill",
-        id: "docker-network",
-        meta: { title: "Docker 网络调试", tags: ["docker"], triggers: ["容器网络"] },
-        content: "使用 bridge 模式解决容器通信",
+        category: "person",
+        id: "wife-xiaoli",
+        meta: { name: "小丽", relation: "wife" },
+        content: "妻子，喜欢爬山",
       },
     ];
 
@@ -133,9 +133,9 @@ describe("MemoryFlushStrategy", () => {
     expect(profile).not.toBeNull();
     expect(profile!.meta.name).toBe("张三");
 
-    const skill = await store.load("skill", "docker-network");
-    expect(skill).not.toBeNull();
-    expect(skill!.content).toContain("bridge");
+    const person = await store.load("person", "wife-xiaoli");
+    expect(person).not.toBeNull();
+    expect(person!.content).toContain("爬山");
   });
 
   it("journal 追加模式", async () => {

@@ -11,7 +11,7 @@
  *
  *   - 主对话压缩生成对话摘要替换早期消息——质量直接决定下一轮 LLM 的认知输入，
  *     用 main 档位
- *   - 记忆提取从即将压缩的消息中抽取 profile / person / skill / journal 写盘，
+ *   - 记忆提取从即将压缩的消息中抽取 profile / person / journal 写盘，
  *     是 I/O 边界的结构化数据净化，用 light 档位
  *
  * **隔离价值**：两个助手都通过独立 ChatRequest 调用，摘要 prompt 与提取 prompt

@@ -34,7 +34,6 @@ export interface MutableConversationState {
   convRepo: IConversationRepository;
   conversationId: string | null;
   turnCounter: number;
-  lastToolEndCount: number;
 }
 
 /**
@@ -87,7 +86,6 @@ export async function switchToNewConversation(
   conv.conversationId = created.id;
   conv.messages = [];
   conv.turnCounter = 0;
-  conv.lastToolEndCount = 0;
   await taskListService.prime(created.id);
   conv.convRepo.touch(created.id).catch(() => {
     /* 时间戳更新失败不阻塞 */

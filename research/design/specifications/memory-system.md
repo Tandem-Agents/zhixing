@@ -190,7 +190,7 @@ tags: [family, important]
 
 #### 支柱 3：技能沉淀（Skills）
 
-> **进化能力**：技能不仅是静态存储，还具备完整的进化生命周期。详见 [技能进化系统设计方案](./skills-evolution.md)。
+> **⚠️ 已废弃（2026-05-25）**：技能已从记忆系统中抽离。旧的"技能记忆"实现（SkillsStore / trigger 子串匹配注入 / 效果推断 / 治理）已**彻底删除**，将作为**独立的 Skill 模块**重建（采用"索引进 system 稳定层 + 渐进披露"，不再作为 memory 的一个支柱、不再走 per-turn 注入）。本节仅作历史记录，新设计见 [drafts/skill-module.md](../drafts/skill-module.md)。下文描述的是已删除的旧方案。
 
 **文件**：`~/.zhixing/me/skills/<slug>.md`
 
@@ -233,7 +233,7 @@ revisions:
 
 **triggers 设计理念**：Skill 不是被动的笔记，而是有"触发条件"的能力单元。当用户遇到匹配的问题时，AI 自动获得这个技能加持，无需用户主动想起。
 
-**进化能力**（详见 [技能进化系统](./skills-evolution.md)）：
+**进化能力**（详见 技能进化系统（已废弃，见 drafts/skill-module.md））：
 - **4 种创建路径**：显式创建、反思提议、Flush 分流、凝练晋升——全部经过用户确认
 - **使用追踪**：useCount、lastUsedAt、effectiveness，提供技能质量的数据依据
 - **版本迭代**：发现更优方法时提议更新，保留修订历史
@@ -789,7 +789,7 @@ Phase M7: 召回优化 + 效果反馈（未来）  │
 
 ### Phase M4: 技能沉淀 + 进化基础
 
-> 详细设计见 [技能进化系统设计方案](./skills-evolution.md)
+> 详细设计见 技能进化系统设计方案（已废弃，见 drafts/skill-module.md）
 
 **做什么**：
 - M4a：`skills/` 目录管理、Trigger 匹配注入、"存为技能"对话流、`/skills` 命令
@@ -810,7 +810,7 @@ Phase M7: 召回优化 + 效果反馈（未来）  │
 
 ### Phase M5: 主动提议 + 反思触发 + 更新提议
 
-> 详细设计见 [技能进化系统设计方案](./skills-evolution.md)
+> 详细设计见 技能进化系统设计方案（已废弃，见 drafts/skill-module.md）
 
 **做什么**：
 - M5a：AI 检测到值得记忆的信息时，主动提议保存（原设计）
@@ -828,7 +828,7 @@ Phase M7: 召回优化 + 效果反馈（未来）  │
 
 ### Phase M6: Journal + Auto Flush + 凝练晋升
 
-> 技能凝练晋升详细设计见 [技能进化系统设计方案](./skills-evolution.md)
+> 技能凝练晋升详细设计见 技能进化系统设计方案（已废弃，见 drafts/skill-module.md）
 
 **做什么**：
 - `journal/` 目录 CRUD + 文件锁
@@ -875,7 +875,7 @@ interface PersonMeta {
 
 /**
  * 增强的 SkillMeta，含进化追踪和使用追踪字段。
- * 完整类型定义见 skills-evolution.md §五。
+ * 完整类型定义见已删除的 skills-evolution.md（历史记录）。
  */
 interface SkillMeta {
   title: string;

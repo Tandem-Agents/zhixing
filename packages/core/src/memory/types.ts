@@ -1,10 +1,9 @@
 /**
  * 记忆系统类型定义
  *
- * 三支柱 + 暂存层架构：
+ * 记忆支柱 + 暂存层架构：
  * - Profile（身份画像）— 始终注入
  * - People（关系网络）— 按需检索注入
- * - Skills（技能沉淀）— Trigger 匹配注入
  * - Journal（对话日志）— 暂存层，有生命周期
  *
  * 所有记忆以 Markdown + YAML frontmatter 存储在 ~/.zhixing/me/ 下。

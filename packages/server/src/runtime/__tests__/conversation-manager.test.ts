@@ -45,8 +45,6 @@ function createMockRuntime(sessionId: string): SessionRuntime {
         },
         newMessages: [assistantMsg],
         durationMs: 0,
-        toolEndCount: 0,
-        injectedSkillIds: [],
       };
     },
     getHistory(limit) {

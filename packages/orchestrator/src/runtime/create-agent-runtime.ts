@@ -52,8 +52,6 @@ import {
   createMemoryFlushStrategy,
   DEFAULT_WATCHDOG_POLICY,
   MemoryStore,
-  MemoryRetriever,
-  SkillsStore,
   PeopleStore,
   getMemoryDir,
   getWorkSceneMemoryDir,
@@ -352,7 +350,7 @@ export interface CreateAgentRuntimeOptions {
   profile?: AgentRoleProfile;
   /**
    * 个人记忆域作用域 —— 装配期据此解析整域 root 并注入全部 me/ 访问者
-   * （单一 MemoryStore = 工具 + flush 共用、scoped MemoryRetriever、
+   * （单一 MemoryStore = 工具 + flush 共用、scoped PeopleStore、
    * profile-loader），后续不可变。缺省 personal（root = getMemoryDir()，
    * 对外行为与历史一致）。
    */
@@ -497,17 +495,14 @@ export async function createAgentRuntime(
   // 个人记忆域 scope 解析 —— 装配期唯一解析点。从 memoryScope 定整域 root
   // （personal = getMemoryDir() Layer-A 正确默认；workscene = 该场景 me/ 域），
   // 据此构造**单一** MemoryStore（memory 工具 + flush strategy 共用，消除双
-  // 实例）与 scoped MemoryRetriever（technique/people 检索同源隔离），profile
+  // 实例）与 scoped PeopleStore（人物检索同源隔离），profile
   // 经 loadProjectContext 透传同一 root。runtime 生命周期内不变。
   const memoryRoot =
     options.memoryScope?.kind === "workscene"
       ? getWorkSceneMemoryDir(options.memoryScope.sceneId)
       : getMemoryDir();
   const memoryStore = new MemoryStore(memoryRoot);
-  const memoryRetriever = new MemoryRetriever(
-    new SkillsStore(memoryRoot),
-    new PeopleStore(memoryRoot),
-  );
+  const peopleStore = new PeopleStore(memoryRoot);
 
   const builtinCtx = { proxy: config.network?.proxy, memoryStore };
   const baseTools: ToolDefinition[] = [];
@@ -655,7 +650,7 @@ export async function createAgentRuntime(
   );
 
   // 加载项目上下文（ZHIXING.md + 环境信息），注入到首条 user message。
-  // memoryRoot 透传 → profile 从 scoped 记忆域加载（与 store/retriever 同源）
+  // memoryRoot 透传 → profile 从 scoped 记忆域加载（与 store/people 同源）
   const projectContext = await loadProjectContext(cwd, memoryRoot);
 
   // 解析模型预算信息 —— resolver 保证 info 永不为 undefined。
@@ -825,7 +820,6 @@ export async function createAgentRuntime(
       // 收集本轮产生的新消息，用于 REPL 对话历史
       const newMessages: Message[] = [];
       let pendingToolResults: ToolResultBlock[] = [];
-      let toolEndCount = 0;
 
       // 通过 deps.callLLM 注入容错能力，agent-loop.ts 零修改
       const resilientCallLLM = withRetry(
@@ -985,23 +979,23 @@ export async function createAgentRuntime(
       }
 
       async function runMainLoop(): Promise<RunResult> {
-        // 根据最后一条用户消息检索匹配的技能 + 反思提示
-        // scoped 检索器由装配期注入，置于 per-run options 之后 → scope 隔离
+        // 根据最后一条用户消息检索匹配的人物
+        // scoped 存储由装配期注入，置于 per-run options 之后 → scope 隔离
         // 不可被调用方 enrichOptions 覆盖
         const enrichedContext = await enrichContext(
           projectContext,
           params.messages,
-          { ...params.enrichOptions, retriever: memoryRetriever },
+          { ...params.enrichOptions, peopleStore },
         );
 
-        // 将项目上下文 + 匹配的技能 + 反思提示注入到首条 user message
+        // 将项目上下文 + 匹配的人物注入到首条 user message
         const messagesWithContext = injectContext(params.messages, enrichedContext);
 
         // pre-flight compact 检查 —— 防止上 run 尾累积到超标、下 run 入口直接送 LLM 爆 context。
         //
-        // 关键设计：跑在 messagesWithContext（含项目上下文与技能注入）上，不在 params.messages。
+        // 关键设计：跑在 messagesWithContext（含项目上下文与人物注入）上，不在 params.messages。
         //   params.messages 到 messagesWithContext 的 token 增量可能达数 K（project context +
-        //   enriched skills），在小模型（32K）上可能跨越一个预算阈值。pre-flight 必须看真实输入
+        //   动态上下文），在小模型（32K）上可能跨越一个预算阈值。pre-flight 必须看真实输入
         //   才能做出正确决策。
         //
         // turn-context 块（时间、任务状态等）由 agent-loop 在每次 LLM call 之前 per-call inject，
@@ -1039,8 +1033,6 @@ export async function createAgentRuntime(
             // budget 快照用 messagesWithContext —— 即使 engine 抛错也能给一个保守值；
             // turn-context 块由 agent-loop per-LLM-call 注入，不在此 budget 估算里
             budget: contextEngine.checkBudget(messagesWithContext),
-            toolEndCount: 0,
-            injectedSkillIds: enrichedContext.injectedSkillIds,
             compactBefore,
             pendingModeSwitch: workModeAccumulator.getIntent(),
           };
@@ -1178,8 +1170,6 @@ export async function createAgentRuntime(
               newMessages,
               durationMs: Date.now() - startTime,
               budget,
-              toolEndCount,
-              injectedSkillIds: enrichedContext.injectedSkillIds,
               compactBefore,
               pendingModeSwitch: workModeAccumulator.getIntent(),
             };
@@ -1189,7 +1179,6 @@ export async function createAgentRuntime(
           params.onYield?.(value);
 
           // 追踪消息以维护对话历史
-          if (value.type === "tool_end") toolEndCount++;
           trackMessages(value, newMessages, pendingToolResults);
         }
       }

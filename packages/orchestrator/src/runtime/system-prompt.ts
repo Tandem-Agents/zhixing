@@ -9,7 +9,6 @@
  * │ Meta Protocol         始终  消息流元信息标签解释              │
  * │ Tool Usage            始终  从工具列表动态生成                 │
  * │ Sub-Agent Delegation  条件  ctx.tools 含 Task 才渲染          │
- * │ Skill Evolution       条件  ctx.tools 含 memory 才渲染        │
  * │ Style                 始终  输出风格                          │
  * │ Safety                始终  安全边界                          │
  * ├─ __ZHIXING_CACHE_BOUNDARY__ ─────────────────────────────────┤
@@ -51,7 +50,6 @@ export const CACHE_BOUNDARY = "\n__ZHIXING_CACHE_BOUNDARY__\n";
  *
  * 各段适配策略(条件性 vs 始终):
  *   identity / principles / meta-protocol / tool-usage / style / safety  始终输出
- *   skill-evolution        条件:tools 含 memory 才渲染(避免让 LLM 看到无 memory 工具的 reflect 提示)
  *   sub-agent-delegation   条件:tools 含 Task 才渲染(避免让 LLM 看到不存在的 Task 工具说明)
  *   working-mode           条件:tools 含 workmode_enter 才渲染(仅 main runtime 装配此工具;
  *                          power / 子 agent / 无 workmode 装配点 → 段缺省,历史输出 byte-equal)
@@ -64,7 +62,6 @@ export type SystemPromptSegment =
   | "principles"
   | "meta-protocol"
   | "tool-usage"
-  | "skill-evolution"
   | "sub-agent-delegation"
   | "working-mode"
   | "style"
@@ -84,7 +81,6 @@ export const MAIN_AGENT_SEGMENTS: readonly SystemPromptSegment[] = [
   "tool-usage",
   "sub-agent-delegation",
   "working-mode",
-  "skill-evolution",
   "style",
   "safety",
 ];
@@ -97,13 +93,12 @@ export const MAIN_AGENT_SEGMENTS: readonly SystemPromptSegment[] = [
  *   principles  ✓ "Read before edit" 等硬约束子 agent 同样适用
  *   tool-usage  ✓ 工具描述按子 agent 装配的 childTools 动态生成
  *   safety      ✓ destructive 命令防护是绝对底线,子 agent 不可豁免
- *   skill-evolution      ✗ Memory 工具不在 sub-agent profile.enabledTools 中,子 agent 不持有 memory,提示反思保存技能对子 agent 是无效噪声
  *   sub-agent-delegation ✗ sub-agent profile.enabledTools 不含 Task 防递归,子 agent 工具集不含 Task,delegation 段无意义
  *   style       ✗ 子 agent 输出回写父 tool_result,不直接对话用户,
  *                 风格指引("be concise"等)会让子误解为对话场景
  *
  * 不继承的内容:
- *   - 项目上下文(ZHIXING.md / enriched skills)—— 由主 agent 在 Task prompt
+ *   - 项目上下文(ZHIXING.md / enriched 动态上下文)—— 由主 agent 在 Task prompt
  *     中显式提炼相关部分传给子,避免子 system prompt 膨胀且利于跨 spawn 的
  *     prompt cache 命中(同角色子 agent 的静态前缀 byte-identical)
  *   - 用户记忆段 —— 同上,且 Memory 工具不暴露给子 agent
@@ -155,7 +150,6 @@ export interface PromptBuildContext {
  *   Identity → Principles → Tool Usage
  *     → Sub-Agent Delegation (条件:tools 含 Task)
  *     → Working Mode        (条件:tools 含 workmode_enter)
- *     → Skill Evolution     (条件:tools 含 memory)
  *     → Style → Safety
  *   + 缓存分界 + Environment(动态段,始终)
  *
@@ -183,7 +177,7 @@ export function buildSystemPrompt(ctx: PromptBuildContext): string {
   const profile = ctx.profile ?? mainProfile();
   const segments = ctx.segments ?? MAIN_AGENT_SEGMENTS;
 
-  // 跳过 null —— 段在当前 ctx 下不适用(如 skill-evolution 在 tools 不含 memory
+  // 跳过 null —— 段在当前 ctx 下不适用(如 sub-agent-delegation 在 tools 不含 Task
   // 时返回 null)。用 `=== null` 判别而非 falsy,与"段输出空字符串"语义清晰区分,
   // 避免 join 在空字符串处产生连续 \n\n\n\n 的多余空白。
   const staticSegments: string[] = [];
@@ -220,8 +214,6 @@ function renderSegment(
       return buildMetaProtocol();
     case "tool-usage":
       return buildToolUsage(ctx.tools);
-    case "skill-evolution":
-      return buildSkillEvolution(ctx.tools);
     case "sub-agent-delegation":
       return buildSubAgentDelegation(ctx.tools);
     case "working-mode":
@@ -324,7 +316,7 @@ function buildToolUsageLines(
     lines.push("- Use `bash` for system commands, package management, git operations, and tasks not covered by other tools");
   }
   if (names.has("memory")) {
-    lines.push("- Use `memory` to save, search, and manage the user's persistent memories (identity, relationships, skills)");
+    lines.push("- Use `memory` to save, search, and manage the user's persistent memories (identity, relationships)");
     lines.push("- When the user says \"remember this\" or shares personal info, save it with `memory`");
     lines.push("- Always confirm before saving new memories, unless the user explicitly asked you to remember");
   }
@@ -348,53 +340,6 @@ function buildToolUsageLines(
   );
 
   return lines.join("\n");
-}
-
-// ─── Segment 4: Skill Evolution(仅当 memory 工具注册时生效) ───
-
-/**
- * 技能进化指导。
- *
- * 引导 Agent 在复杂任务后反思并提议保存/更新技能。
- * 这不是后台静默操作(区别于 Hermes),而是在回复中自然提议,用户确认后执行。
- * 零额外 LLM 成本——反思是最终回复的一部分。
- *
- * 返回类型 `string | null`:
- *   - `null`:tools 不含 memory 工具时此段不适用,buildSystemPrompt 自动跳过
- *   - `string`:含 memory 时输出完整段落
- *
- * 用 `null` 而非 `""` 表达"不适用"语义,避免 join 在空字符串处产生多余空白,
- * 也让段渲染契约清晰:返回 null = 这段不该出现在最终 prompt 里。
- */
-function buildSkillEvolution(tools: ToolDefinition[]): string | null {
-  const hasMemory = tools.some((t) => t.name === "memory");
-  if (!hasMemory) return null;
-
-  return `## Skill Evolution
-After completing a complex task (one that required multiple tool calls, trial-and-error, or iterative problem-solving), reflect on whether the approach contains a reusable methodology.
-
-Ask yourself:
-- Did I discover a non-obvious approach through trial and error?
-- Did the user correct my initial approach, revealing a better method?
-- Does a similar skill already exist that should be updated with new learnings?
-
-If the approach is worth saving, propose it naturally at the end of your response:
-
-  "💡 这个过程中我总结了一套方法,要存为技能吗?
-   名称:[skill name]
-   适用场景:[when this would be useful]
-   核心要点:[brief summary]"
-
-If you used an existing skill but found improvements, propose an update:
-
-  "💡 我发现之前的技能「[name]」可以改进,要更新吗?
-   改进点:[what changed]"
-
-Rules:
-- Never silently create or update skills — always propose and wait for confirmation
-- At most one skill proposal per conversation
-- Only propose after complex tasks, not simple Q&A
-- When the user confirms, use the \`memory\` tool with action "save" and category "skill"`;
 }
 
 // ─── Segment: Sub-Agent Delegation(仅当 Task 工具注册时生效) ───

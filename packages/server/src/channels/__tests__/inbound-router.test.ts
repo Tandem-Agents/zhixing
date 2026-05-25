@@ -49,8 +49,6 @@ function createMockRuntime(response?: { text: string }): SessionRuntime {
         },
         newMessages: [assistantMsg],
         durationMs: 0,
-        toolEndCount: 0,
-        injectedSkillIds: [],
       };
     }) as unknown as SessionRuntime["run"],
     getHistory: () => [],
@@ -272,8 +270,6 @@ describe("InboundRouter", () => {
           },
           newMessages: [],
           durationMs: 0,
-          toolEndCount: 0,
-          injectedSkillIds: [],
         };
       }) as unknown as SessionRuntime["run"],
       getHistory: () => [],
@@ -389,8 +385,6 @@ describe("InboundRouter", () => {
           },
           newMessages: [assistantMsg],
           durationMs: 0,
-          toolEndCount: 0,
-          injectedSkillIds: [],
         };
       }) as unknown as SessionRuntime["run"],
       getHistory: () => [],

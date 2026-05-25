@@ -1071,7 +1071,7 @@ context/
 | conversation-model | `pinnedMessageIds` / `currentHint` / `ephemeral`（见 conversation-model §3.1） |
 | memory-system (profile.md) | 结构化 `relations` 段 |
 | memory-system (journal) | 条目新增 `about_person?: string[]` |
-| skills-evolution | triggers 升级为多维（keywords / relations / scenarios / emotions） |
+| skills-evolution（已废弃） | triggers 升级为多维（keywords / relations / scenarios / emotions） |
 | tools-builtin | 所有工具新增 `categories: ToolCategory[]` |
 
 ### 17.4 迁移阶段

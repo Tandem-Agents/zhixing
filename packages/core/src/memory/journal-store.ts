@@ -73,7 +73,6 @@ export interface CondenseMonth {
 
 export interface CondenserResult {
   condensedMonths: string[];
-  skillCandidates: string[];
   deletedFiles: number;
 }
 
@@ -261,7 +260,6 @@ export class JournalStore {
    */
   async condense(plan: CondensePlan, llm: CondenseLLM): Promise<CondenserResult> {
     const condensedMonths: string[] = [];
-    const skillCandidates: string[] = [];
     let deletedFiles = 0;
 
     for (const monthPlan of plan.months) {
@@ -279,13 +277,6 @@ export class JournalStore {
 
       const combined = contents.join("\n\n---\n\n");
       const condensedContent = await llm.condense(combined);
-
-      // 检测 [SKILL_CANDIDATE] 标记
-      const candidateRegex = /\[SKILL_CANDIDATE\]\s*(.+)/g;
-      let match: RegExpExecArray | null;
-      while ((match = candidateRegex.exec(condensedContent)) !== null) {
-        skillCandidates.push(match[1]!.trim());
-      }
 
       // 写入月度凝练文件
       const condensedPath = path.join(this.journalDir, `${monthPlan.month}.md`);
@@ -312,7 +303,7 @@ export class JournalStore {
       condensedMonths.push(monthPlan.month);
     }
 
-    return { condensedMonths, skillCandidates, deletedFiles };
+    return { condensedMonths, deletedFiles };
   }
 
   // ─── 内部 ───

@@ -238,7 +238,7 @@ export function createWorksceneMemoryQueryTool(
   return {
     name: "workscene_memory_query",
     description:
-      "只读检索工作场景的记忆域（技能/人物/画像）。用于进入场景前先探查已有积累，" +
+      "只读检索工作场景的记忆域（人物/画像）。用于进入场景前先探查已有积累，" +
       "据此决定直接进入、还是先向用户澄清。",
     inputSchema,
     isReadOnly: true,
@@ -284,7 +284,7 @@ export function createWorksceneMemoryQueryTool(
           });
           blocks.push(`${header}\n${lines.join("\n")}`);
         } else {
-          const cats: MemoryCategory[] = ["skill", "person", "profile"];
+          const cats: MemoryCategory[] = ["person", "profile"];
           const idx: string[] = [];
           for (const cat of cats) {
             const entries = await store.list(cat);

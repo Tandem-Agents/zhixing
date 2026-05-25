@@ -183,10 +183,10 @@ describe("workscene_memory_query", () => {
 
   it("query 模式：命中场景记忆，返回 id+片段", async () => {
     await new MemoryStore(getWorkSceneMemoryDir("scene-a")).save({
-      category: "skill",
+      category: "person",
       id: "slug1",
-      meta: { title: "标题1" },
-      content: "这里包含关键词 alpha 的技能正文",
+      meta: { name: "标题1" },
+      content: "这里包含关键词 alpha 的人物正文",
     });
     const c = controllerWith([SCENE]);
     const tool = createWorksceneMemoryQueryTool(c);
@@ -207,22 +207,22 @@ describe("workscene_memory_query", () => {
 
   it("无 query：返回各类别 id 索引", async () => {
     await new MemoryStore(getWorkSceneMemoryDir("scene-a")).save({
-      category: "skill",
-      id: "skillX",
+      category: "person",
+      id: "personX",
       meta: {},
       content: "正文",
     });
     const tool = createWorksceneMemoryQueryTool(controllerWith([SCENE]));
     const r = await tool.call({}, CTX);
-    expect(r.content).toContain("skill: skillX");
+    expect(r.content).toContain("person: personX");
   });
 
   it("片段按上限截断（不 raw dump 整条）", async () => {
     const long = "x".repeat(2000);
     await new MemoryStore(getWorkSceneMemoryDir("scene-a")).save({
-      category: "skill",
+      category: "person",
       id: "big",
-      meta: { title: "大" },
+      meta: { name: "大" },
       content: `命中词 beta ${long}`,
     });
     const tool = createWorksceneMemoryQueryTool(controllerWith([SCENE]));

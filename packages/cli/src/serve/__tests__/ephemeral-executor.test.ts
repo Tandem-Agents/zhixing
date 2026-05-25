@@ -60,8 +60,6 @@ function createMockAgentRuntime(behavior: MockBehavior = {}): AgentRuntime {
         agentResult: result,
         newMessages,
         durationMs: 10,
-        toolEndCount: 0,
-        injectedSkillIds: [],
       };
     },
   });
@@ -146,8 +144,6 @@ describe("runEphemeralTurn", () => {
       },
       newMessages: [],
       durationMs: 1,
-      toolEndCount: 0,
-      injectedSkillIds: [],
     }));
     const runtime = Object.assign({} as AgentRuntime, {
       providerId: "mock",
@@ -190,8 +186,6 @@ describe("runEphemeralTurn", () => {
       },
       newMessages: [],
       durationMs: 1,
-      toolEndCount: 0,
-      injectedSkillIds: [],
     }));
     const runtime = Object.assign({} as AgentRuntime, {
       providerId: "mock",
@@ -230,8 +224,6 @@ describe("runEphemeralTurn", () => {
       },
       newMessages: [],
       durationMs: 1,
-      toolEndCount: 0,
-      injectedSkillIds: [],
     }));
     const runtime = Object.assign({} as AgentRuntime, {
       providerId: "mock",

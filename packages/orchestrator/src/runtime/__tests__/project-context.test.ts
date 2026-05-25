@@ -13,7 +13,8 @@ vi.mock("@zhixing/core", async (importOriginal) => {
   };
 });
 
-import { loadProjectContext, injectContext, type ProjectContext } from "../project-context.js";
+import { loadProjectContext, injectContext, enrichContext, type ProjectContext } from "../project-context.js";
+import { PeopleStore } from "@zhixing/core";
 
 // ─── 辅助 ───
 
@@ -36,8 +37,6 @@ describe("injectContext", () => {
     date: "2025-06-15",
     profile: null,
     dynamicContext: null,
-    injectedSkillIds: [],
-    reflectionHint: null,
   };
 
   const ctxNoInstructions: ProjectContext = {
@@ -45,8 +44,6 @@ describe("injectContext", () => {
     date: "2025-06-15",
     profile: null,
     dynamicContext: null,
-    injectedSkillIds: [],
-    reflectionHint: null,
   };
 
   it("将 <context> 注入首条 user message 前", () => {
@@ -171,5 +168,52 @@ describe("loadProjectContext", () => {
     const ctx = await loadProjectContext(tmpDir);
     const today = new Date().toISOString().slice(0, 10);
     expect(ctx.date).toBe(today);
+  });
+});
+
+// ─── enrichContext 测试（people 注入 —— MemoryRetriever 收掉后的幸存路径） ───
+
+describe("enrichContext — people 注入", () => {
+  const baseCtx: ProjectContext = {
+    instructions: null,
+    date: "2025-06-15",
+    profile: null,
+    dynamicContext: null,
+  };
+
+  let peopleStore: PeopleStore;
+
+  beforeEach(async () => {
+    const dir = await createTempDir("enrich-people");
+    peopleStore = new PeopleStore(dir);
+    await peopleStore.save(
+      "girlfriend-xiaoli",
+      { name: "小丽", relation: "女友" },
+      "喜欢吃寿司",
+    );
+  });
+
+  it("用户消息命中人物 → dynamicContext 注入人物信息", async () => {
+    const result = await enrichContext(
+      baseCtx,
+      [userMsg("帮我给小丽挑个生日礼物")],
+      { peopleStore },
+    );
+    expect(result.dynamicContext).not.toBeNull();
+    expect(result.dynamicContext).toContain("小丽");
+  });
+
+  it("无人物命中 → dynamicContext 保持 null", async () => {
+    const result = await enrichContext(
+      baseCtx,
+      [userMsg("今天天气不错")],
+      { peopleStore },
+    );
+    expect(result.dynamicContext).toBeNull();
+  });
+
+  it("无 user 消息 → 原样返回 context", async () => {
+    const result = await enrichContext(baseCtx, [], { peopleStore });
+    expect(result).toBe(baseCtx);
   });
 });

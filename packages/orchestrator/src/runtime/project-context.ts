@@ -16,7 +16,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { Message, ProfileData } from "@zhixing/core";
-import { loadProfile, formatProfileForContext, MemoryRetriever } from "@zhixing/core";
+import { loadProfile, formatProfileForContext, PeopleStore } from "@zhixing/core";
 
 // ─── 类型 ───
 
@@ -27,12 +27,8 @@ export interface ProjectContext {
   date: string;
   /** 用户身份画像(~/.zhixing/me/profile.md),null 表示未配置 */
   profile: ProfileData | null;
-  /** 动态注入的额外上下文(如匹配的技能),每次对话设置 */
+  /** 动态注入的额外上下文(如匹配的人物),每次对话设置 */
   dynamicContext: string | null;
-  /** 本轮注入的技能 ID 列表(用于更新提议) */
-  injectedSkillIds: string[];
-  /** 反思提示(当上一轮 toolEndCount >= threshold 时注入) */
-  reflectionHint: string | null;
 }
 
 // ─── 加载 ───
@@ -53,28 +49,19 @@ export async function loadProjectContext(
   ]);
   const date = new Date().toISOString().slice(0, 10);
 
-  return { instructions, date, profile, dynamicContext: null, injectedSkillIds: [], reflectionHint: null };
+  return { instructions, date, profile, dynamicContext: null };
 }
 
-/** 反思触发阈值:toolEndCount >= 此值时注入反思提示 */
-export const REFLECTION_THRESHOLD = 8;
-
 export interface EnrichOptions {
-  /** 上一轮的 toolEndCount(用于判断是否触发反思) */
-  lastToolEndCount?: number;
-  /** 本会话是否已经提议过技能(每会话最多 1 次) */
-  hasProposedSkill?: boolean;
   /**
-   * 装配期注入的 scoped 检索器 —— 工作场景下指向 workscene 记忆域，
-   * 与 profile / memory 工具同源隔离。缺省回退默认个人域检索器
-   * （Layer-A 根治后路径正确，服务非装配调用方）。
+   * 装配期注入的 scoped 人物存储 —— 工作场景下指向 workscene 记忆域，
+   * 与 profile / memory 工具同源隔离。缺省回退默认个人域。
    */
-  retriever?: MemoryRetriever;
+  peopleStore?: PeopleStore;
 }
 
 /**
- * 根据最后一条用户消息检索匹配的技能,
- * 并在合适时机注入反思提示到 dynamicContext。
+ * 根据最后一条用户消息检索匹配的人物，注入到 dynamicContext。
  * 每次 run() 前调用。
  */
 export async function enrichContext(
@@ -92,57 +79,16 @@ export async function enrichContext(
 
   if (!userText.trim()) return context;
 
-  // 检索匹配的技能 —— 优先用装配期注入的 scoped 检索器（工作场景隔离）
-  const retriever = options.retriever ?? new MemoryRetriever();
-  const result = await retriever.retrieve(userText);
+  // 检索匹配的人物 —— 优先用装配期注入的 scoped 存储（工作场景隔离）
+  const peopleStore = options.peopleStore ?? new PeopleStore();
+  const people = await peopleStore.matchByMessage(userText);
 
-  const dynamicParts: string[] = [];
-  const injectedSkillIds: string[] = [];
-
-  if (result.contextText) {
-    dynamicParts.push(result.contextText);
-    injectedSkillIds.push(...result.skills.map((s) => s.skill.id));
-  }
-
-  // 反思提示:上一轮复杂任务后,且本会话未提议过
-  const reflectionHint = buildReflectionHint(options, injectedSkillIds);
-  if (reflectionHint) {
-    dynamicParts.push(reflectionHint);
-  }
+  if (people.length === 0) return context;
 
   return {
     ...context,
-    dynamicContext: dynamicParts.length > 0 ? dynamicParts.join("\n\n") : null,
-    injectedSkillIds,
-    reflectionHint,
+    dynamicContext: PeopleStore.formatForContext(people),
   };
-}
-
-/**
- * 构建反思提示。
- * 仅在上一轮 toolEndCount >= threshold 且本会话未提议过时返回。
- */
-function buildReflectionHint(
-  options: EnrichOptions,
-  injectedSkillIds: string[],
-): string | null {
-  const { lastToolEndCount = 0, hasProposedSkill = false } = options;
-
-  if (hasProposedSkill) return null;
-  if (lastToolEndCount < REFLECTION_THRESHOLD) return null;
-
-  const lines = [
-    "# Reflection Hint",
-    `The previous task involved ${lastToolEndCount} tool calls, indicating a complex problem-solving process.`,
-    "Consider whether this experience contains a reusable methodology worth saving as a skill.",
-  ];
-
-  if (injectedSkillIds.length > 0) {
-    lines.push(`Skills used this session: ${injectedSkillIds.join(", ")}`);
-    lines.push("If you found improvements to any of these skills, propose an update.");
-  }
-
-  return lines.join("\n");
 }
 
 async function loadInstructions(cwd: string): Promise<string | null> {

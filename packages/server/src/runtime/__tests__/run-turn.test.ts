@@ -77,8 +77,6 @@ function createMockRuntime(
           },
           newMessages: [assistantMsg],
           durationMs: 0,
-          toolEndCount: 0,
-          injectedSkillIds: [],
         };
       }
 
@@ -99,8 +97,6 @@ function createMockRuntime(
           },
           newMessages: [],
           durationMs: 0,
-          toolEndCount: 0,
-          injectedSkillIds: [],
         };
       }
 
@@ -120,8 +116,6 @@ function createMockRuntime(
           },
           newMessages: [],
           durationMs: 0,
-          toolEndCount: 0,
-          injectedSkillIds: [],
         };
       }
 
@@ -141,8 +135,6 @@ function createMockRuntime(
         },
         newMessages: [],
         durationMs: 0,
-        toolEndCount: 0,
-        injectedSkillIds: [],
       };
     },
     getHistory(limit) {
