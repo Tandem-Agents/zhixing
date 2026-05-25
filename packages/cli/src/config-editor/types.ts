@@ -52,7 +52,8 @@ export type PanelDescriptor =
   | { kind: "mcp-server"; serverId: string }
   /**
    * L3 (mcp)：统一输入接入——用户键入包名 / URL / 命令 / 预设名，经 runtime.mcpResolve
-   * （预设命中 / light LLM 推断）解析成候选后导航到 mcp-add。error：上次解析失败 / 撞名提示。
+   * （预设命中 / 推断）解析成候选后 replace 为 mcp-add（接入成功即 pop 回主列表）。
+   * error：上次解析失败 / 撞名提示。
    */
   | { kind: "mcp-add-input"; error?: string }
   /**

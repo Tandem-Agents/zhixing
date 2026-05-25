@@ -189,15 +189,15 @@ export function deriveServerId(identifier: string): string {
   return id;
 }
 
-/** 构造给 light LLM 的推断提示 —— 要求严格 JSON 输出。 */
+/** 构造给推断 LLM 的提示 —— 要求严格 JSON 输出。 */
 function buildInferencePrompt(identifier: string): string {
   return [
     "你是 MCP server 接入助手。给定一个 MCP server 标识（npm 包名 / 可执行命令 / URL），",
     "判断它的启动方式，只输出 JSON、不要解释、不要代码围栏。",
     `标识：${identifier}`,
     "JSON 格式：",
-    '{"transport":"stdio"|"http","command":"stdio 的命令(通常 npx)","args":["stdio 参数(通常 -y 和包名)"],"url":"http 的端点 URL","secretFields":[{"key":"环境变量名或请求头名","label":"展示名","hint":"获取方式","example":"示例"}]}',
-    "规则：stdio 用 command+args、不要 url；http 用 url、不要 command/args；无密钥需求时 secretFields 为 []。",
+    '{"transport":"stdio"|"http","command":"stdio 的命令(通常 npx)","args":["stdio 参数(通常 -y 和包名)"],"url":"http 的端点 URL","secretFields":[{"key":"环境变量名或请求头名","label":"展示名","hint":"获取方式","example":"示例","docUrl":"获取该密钥的页面 URL(如有)"}]}',
+    "规则：stdio 用 command+args、不要 url；http 用 url、不要 command/args；无密钥需求时 secretFields 为 []；docUrl 不确定就省略。",
   ].join("\n");
 }
 
@@ -253,12 +253,15 @@ function parseSecretFields(value: unknown): McpSecretFieldSpec[] {
     if (typeof item !== "object" || item === null) continue;
     const rec = item as Record<string, unknown>;
     if (typeof rec.key !== "string" || rec.key === "") continue;
-    fields.push({
+    const field: McpSecretFieldSpec = {
       key: rec.key,
       label: typeof rec.label === "string" && rec.label !== "" ? rec.label : rec.key,
       hint: typeof rec.hint === "string" ? rec.hint : "",
       example: typeof rec.example === "string" ? rec.example : "",
-    });
+    };
+    // docUrl 可选——有则带上，让推断来的 server 也能显示可点击的"取密钥"链接（同预设）
+    if (typeof rec.docUrl === "string" && rec.docUrl !== "") field.docUrl = rec.docUrl;
+    fields.push(field);
   }
   return fields;
 }

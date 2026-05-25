@@ -176,8 +176,12 @@ export interface AgentRuntime {
   checkBudget: (messages: readonly Message[]) => ContextBudget;
   /** 手动触发上下文压缩，无论当前预算状态如何 */
   forceCompact: (messages: Message[], turnCount: number) => Promise<ForceCompactResult>;
-  /** 简易 LLM 文本调用（用于 Journal condense 等辅助任务） */
-  callText: (prompt: string) => Promise<string>;
+  /**
+   * 简易单发 LLM 文本调用（无对话历史，独立 ChatRequest 隔离）。
+   * 默认 `light` 档——Journal condense 等轻量辅助任务；传 `"main"` 走主档，
+   * 用于质量敏感的单发任务（如 MCP 接入的标识 → 连接方式推断）。
+   */
+  callText: (prompt: string, role?: "main" | "light") => Promise<string>;
   /** 当前 Token 估算器的校准因子（1.0 = 未校准） */
   readonly calibrationFactor: number;
   /** 安全管线（用于 /trust /security 命令访问权限规则、审计日志等） */
@@ -744,12 +748,13 @@ export async function createAgentRuntime(
       return engine.checkBudget(messages);
     },
 
-    async callText(prompt: string): Promise<string> {
-      // 单发 LLM 文本调用入口（无对话历史），复用 light 通道 CompactLLMFn 实例：
-      // 与 MemoryFlush 共享同一 light 角色 + 同一独立 ChatRequest 隔离。
-      // 主对话压缩走 main 是因为摘要质量直接影响主对话下一轮认知；此处的单发调用
-      // （工作场景纪要 / 日志凝练等）属于轻量任务，沿用 light 通道。
-      return memoryFlushCallLLM([userMessage(prompt)]);
+    async callText(prompt: string, role: "main" | "light" = "light"): Promise<string> {
+      // 单发 LLM 文本调用入口（无对话历史，独立 ChatRequest 隔离）。按 role 复用已装配
+      // 的角色通道 CompactLLMFn：默认 light（工作场景纪要 / 日志凝练等轻量任务，与
+      // MemoryFlush 同 light 角色）；role="main" 走主档（质量敏感的单发任务，如 MCP
+      // 接入标识推断，与主对话压缩同 main 角色 + mainThinking）。
+      const caller = role === "main" ? summarizeCallLLM : memoryFlushCallLLM;
+      return caller([userMessage(prompt)]);
     },
 
     async forceCompact(messages: Message[], turnCount: number): Promise<ForceCompactResult> {

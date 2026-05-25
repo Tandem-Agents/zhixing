@@ -91,7 +91,8 @@ export function renderMcpServerPanel(
     bodyLines.push(`${tone.dim("命令")}        ${entry.command}${args ? ` ${args}` : ""}`);
   }
   if (entry?.url) {
-    bodyLines.push(`${tone.dim("地址")}        ${entry.url}`);
+    // 地址包成 OSC-8 可点击链接——与文档链接同款（终端默认虚线下划线），视觉一致
+    bodyLines.push(`${tone.dim("地址")}        ${osc8Hyperlink(entry.url)}`);
   }
   bodyLines.push("");
   bodyLines.push(`${tone.dim("状态")}        ${describeStatus(enabled, status)}`);
@@ -462,9 +463,11 @@ export function handleMcpAddInputPanelKey(
               },
             };
           }
-          // 导航到候选面板收集密钥（无 label：标题用 serverId）
+          // 用 replace（非 navigate）切到候选面板收集密钥：这样接入成功 / 取消时单次 pop
+          // 即回到 MCP 服务主列表（看到刚接入的 server），而不是停在本输入页造成"没成功"
+          // 的错觉（无 label：候选面板标题用 serverId）。
           return {
-            type: "navigate",
+            type: "replace",
             state: clearInputBuffer(state),
             panel: { kind: "mcp-add", candidate, inputs: {}, fieldIndex: 0 },
           };

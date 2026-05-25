@@ -238,15 +238,15 @@ describe("handleMcpAddInputPanelKey — 统一输入接入", () => {
     expect(handleMcpAddInputPanelKey(ctxFail, s0, inputDesc, { type: "escape" }).type).toBe("pop");
   });
 
-  it("Enter → loading；解析成功 → navigate 到 mcp-add 候选面板", async () => {
+  it("Enter → loading；解析成功 → replace 为 mcp-add 候选面板（成功后 pop 回主列表）", async () => {
     const s0 = setInputBuffer(createInitialState({}, {}), "linear-mcp");
     const ctx = ctxResolve(async () => ({ ok: true, candidate: okCandidate }));
     const action = handleMcpAddInputPanelKey(ctx, s0, inputDesc, { type: "enter" });
     expect(action.type).toBe("loading");
     if (action.type !== "loading") return;
     const result = await action.run(new AbortController().signal);
-    expect(result.type).toBe("navigate");
-    if (result.type === "navigate" && result.panel.kind === "mcp-add") {
+    expect(result.type).toBe("replace");
+    if (result.type === "replace" && result.panel.kind === "mcp-add") {
       expect(result.panel.candidate.serverId).toBe("linear");
       expect(result.panel.fieldIndex).toBe(0);
       expect(result.panel.inputs).toEqual({});

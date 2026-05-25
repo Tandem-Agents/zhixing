@@ -186,10 +186,11 @@ export async function handleMcpCommand(
 ): Promise<void> {
   const proxy = loadConfig().network?.proxy;
 
-  // 接入推断 LLM——用 AgentRuntime 暴露的 callText（辅助任务用，恒走 light 档），
-  // 正合"标识 → 启动方式"这类轻量结构化推断。callText 不收 signal：面板取消（Esc）会
-  // 放弃等待，后台调用结果被丢弃即可，无需中断底层调用。
-  const inferLlm: McpSetupLlm = (prompt) => deps.session.runtime.callText(prompt);
+  // 接入推断 LLM——走 main 档（callText 的 "main" 通道）：标识 → 连接方式的解析质量
+  // 直接决定接入成败，是质量敏感任务，不用 light。callText 不收 signal：面板取消（Esc）
+  // 放弃等待、后台结果丢弃即可，无需中断底层调用。
+  const inferLlm: McpSetupLlm = (prompt) =>
+    deps.session.runtime.callText(prompt, "main");
 
   const runtime: ConfigEditorRuntime = {
     mcpServerStatuses: () => deps.hub.serverStatuses(),
