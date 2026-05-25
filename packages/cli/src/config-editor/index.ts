@@ -53,3 +53,10 @@ export { checkMessaging, type MessagingIssue } from "./checks/messaging.js";
 
 // ─── Section 注册再导出（caller 用来"打开全部 sections"等场景） ───
 export { ALL_SECTION_IDS, BASE_CONFIG_SECTION_IDS } from "./sections/index.js";
+
+// ─── MCP 接入引导再导出——caller（/mcp 命令）据此把 light LLM 绑成 mcpResolve 注入 ───
+export {
+  resolveMcpSetup,
+  type McpSetupLlm,
+  type McpResolveResult,
+} from "./mcp-setup.js";

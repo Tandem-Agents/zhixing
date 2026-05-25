@@ -12,6 +12,7 @@
 
 import type { RoleId, ZhixingConfig, ZhixingCredentials } from "@zhixing/providers";
 import type { McpServerSpec, McpServerStatus, ProbeResult } from "@zhixing/mcp";
+import type { McpSetupCandidate, McpResolveResult } from "./mcp-setup.js";
 
 // ─── Section（用户视角的配置块） ───
 
@@ -50,10 +51,29 @@ export type PanelDescriptor =
   /** L3 (mcp)：已接入 server 详情（启停 / 删除 / 查看状态） */
   | { kind: "mcp-server"; serverId: string }
   /**
-   * L3 (mcp)：按预设接入新 server——输入密钥 → 带密钥 discovery 验证。
-   * error：上次验证失败原因，原地回显（验证失败时 replace 本面板带上它）。
+   * L3 (mcp)：统一输入接入——用户键入包名 / URL / 命令 / 预设名，经 runtime.mcpResolve
+   * （预设命中 / light LLM 推断）解析成候选后导航到 mcp-add。error：上次解析失败 / 撞名提示。
    */
-  | { kind: "mcp-add"; presetId: string; error?: string };
+  | { kind: "mcp-add-input"; error?: string }
+  /**
+   * L3 (mcp)：接入候选 server——逐字段录入密钥 → 带密钥 discovery 验证。
+   *
+   * 以 `McpSetupCandidate` 为驱动：预设、输入标识推断等来源殊途同归到候选，本面板只管
+   * "收集候选所需密钥 → 验证 → 落盘"，不感知来源。展示用的 label / description 放描述符
+   * （UI 关注点），不污染候选模型。
+   *
+   * inputs：已逐字段累积的密钥（按 field.key）。fieldIndex：当前录入字段下标（指向
+   * candidate.secretFields）。error：上次验证失败原因，原地回显。
+   */
+  | {
+      kind: "mcp-add";
+      candidate: McpSetupCandidate;
+      label?: string;
+      description?: string;
+      inputs: Record<string, string>;
+      fieldIndex: number;
+      error?: string;
+    };
 
 /** 模型角色 —— 单一事实源是 providers 的 ROLE_SPECS（main / light / power） */
 export type ModelRole = RoleId;
@@ -140,6 +160,12 @@ export interface ConfigEditorRuntime {
    * 由 caller 注入（生产注 @zhixing/mcp 的 probeServer，测试注 mock）。
    */
   mcpProbe?: (spec: McpServerSpec, signal?: AbortSignal) => Promise<ProbeResult>;
+  /**
+   * 把用户输入的标识（包名 / URL / 命令 / 预设名）解析为接入候选（缺省 = 统一输入接入
+   * 不可用）—— 由 caller 注入，已绑定 light LLM（生产经 resolveMcpSetup + light 角色，
+   * 测试注 mock）。面板只调它、不感知 LLM，与 mcpProbe 同构。
+   */
+  mcpResolve?: (input: string, signal?: AbortSignal) => Promise<McpResolveResult>;
 }
 
 /**

@@ -26,7 +26,13 @@ import {
 import { renderListPanel } from "../panels/list.js";
 import { renderEntityPanel } from "../panels/entity.js";
 import { renderInputPanel, renderAddModelPanel } from "../panels/input.js";
-import { renderMcpServerPanel, renderMcpAddPanel } from "../panels/mcp.js";
+import {
+  renderMcpServerPanel,
+  renderMcpAddPanel,
+  renderMcpAddInputPanel,
+} from "../panels/mcp.js";
+import { presetToCandidate, type McpSetupCandidate } from "../mcp-setup.js";
+import { findMcpPreset } from "../../registries/index.js";
 import { renderLoadingFrame } from "../loading.js";
 import {
   createInitialState,
@@ -526,12 +532,21 @@ describe("mcp 面板渲染冒烟", () => {
     expect(out).toContain("Esc 取消");
   });
 
-  it("mcp-add panel · 含预设说明、密钥提示与错误回显", () => {
+  it("mcp-add panel · 预设候选：说明、密钥提示与错误回显", () => {
+    const github = findMcpPreset("github")!;
     const out = renderAndCapture((renderer) => {
       const state = setInputBuffer(emptyState(), "ghp_secret");
       renderMcpAddPanel(
         state,
-        { kind: "mcp-add", presetId: "github", error: "401 bad token" },
+        {
+          kind: "mcp-add",
+          candidate: presetToCandidate(github),
+          label: github.label,
+          description: github.description,
+          inputs: {},
+          fieldIndex: 0,
+          error: "401 bad token",
+        },
         renderer,
       );
     });
@@ -543,5 +558,80 @@ describe("mcp 面板渲染冒烟", () => {
     // 长说明按内容宽度折行而非截断——80 列下 GitHub 提示远超单行预算，旧的"交给
     // chrome 截断加 …"会丢字；折行后输出不应出现截断省略号。
     expect(out).not.toContain("…");
+  });
+
+  it("mcp-add panel · 多字段候选：显示进度与当前字段，标题用 serverId 兜底", () => {
+    const candidate: McpSetupCandidate = {
+      serverId: "custom-x",
+      entry: { type: "stdio", command: "npx", args: ["-y", "x"] },
+      secretFields: [
+        { key: "TOKEN_A", label: "令牌 A", hint: "获取 A 的方式", example: "a_xxx" },
+        { key: "TOKEN_B", label: "令牌 B", hint: "获取 B 的方式", example: "b_xxx" },
+      ],
+      source: "inferred",
+    };
+    const out = renderAndCapture((renderer) => {
+      renderMcpAddPanel(
+        emptyState(),
+        { kind: "mcp-add", candidate, inputs: {}, fieldIndex: 0 },
+        renderer,
+      );
+    });
+    // 无 label → 标题用 serverId 兜底
+    expect(out).toContain("接入 custom-x");
+    // 多字段 → 显示进度与当前字段名 / 提示
+    expect(out).toContain("密钥 1/2");
+    expect(out).toContain("令牌 A");
+    expect(out).toContain("获取 A 的方式");
+  });
+
+  it("mcp-add panel · 推断 stdio 候选显示'将运行'命令（探测前知情同意）", () => {
+    const candidate: McpSetupCandidate = {
+      serverId: "linear",
+      entry: { type: "stdio", command: "npx", args: ["-y", "linear-mcp"] },
+      secretFields: [],
+      source: "inferred",
+    };
+    const out = renderAndCapture((renderer) => {
+      renderMcpAddPanel(
+        emptyState(),
+        { kind: "mcp-add", candidate, inputs: {}, fieldIndex: 0 },
+        renderer,
+      );
+    });
+    expect(out).toContain("将在本机运行");
+    expect(out).toContain("npx -y linear-mcp");
+    // 无密钥 → 提示直接 Enter
+    expect(out).toContain("无需密钥");
+  });
+
+  it("mcp-add panel · 预设来源不显示'将运行'命令（curated 可信）", () => {
+    const candidate: McpSetupCandidate = {
+      serverId: "x",
+      entry: { type: "stdio", command: "npx", args: ["y"] },
+      secretFields: [{ key: "K", label: "K", hint: "", example: "" }],
+      source: "preset",
+    };
+    const out = renderAndCapture((renderer) => {
+      renderMcpAddPanel(
+        emptyState(),
+        { kind: "mcp-add", candidate, label: "X", inputs: {}, fieldIndex: 0 },
+        renderer,
+      );
+    });
+    expect(out).not.toContain("将在本机运行");
+  });
+
+  it("mcp-add-input panel · 提示输入标识 + 错误回显（标识明文不 mask）", () => {
+    const out = renderAndCapture((renderer) => {
+      renderMcpAddInputPanel(
+        setInputBuffer(emptyState(), "@org/x"),
+        { kind: "mcp-add-input", error: "推断失败" },
+        renderer,
+      );
+    });
+    expect(out).toContain("接入其他 server");
+    expect(out).toContain("推断失败");
+    expect(out).toContain("@org/x");
   });
 });

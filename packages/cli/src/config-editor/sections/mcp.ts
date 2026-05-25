@@ -19,6 +19,7 @@ import type {
 } from "../types.js";
 import type { McpServerStatus } from "@zhixing/mcp";
 import { isMcpServerEnabled, listMcpServerIds } from "../state.js";
+import { presetToCandidate } from "../mcp-setup.js";
 import { MCP_PRESETS } from "../../registries/index.js";
 
 export const mcpSection: Section = {
@@ -41,10 +42,25 @@ export const mcpSection: Section = {
       (preset): SectionEntry => ({
         label: `添加 ${preset.label}`,
         state: { kind: "disabled", statusText: "未接入" },
-        enterTarget: { kind: "mcp-add", presetId: preset.id },
+        // 预设是"预填的候选"——与推断 / 输入标识来源收敛到同一 mcp-add 候选面板；
+        // label / description 作展示元数据随描述符携带，不进候选模型。
+        enterTarget: {
+          kind: "mcp-add",
+          candidate: presetToCandidate(preset),
+          label: preset.label,
+          description: preset.description,
+          inputs: {},
+          fieldIndex: 0,
+        },
       }),
     );
-    return [...servers, ...additions];
+    // 统一输入入口——预设之外的任意 server（输入包名 / URL / 命令 → 推断接入）
+    const custom: SectionEntry = {
+      label: "添加其他 server",
+      state: { kind: "disabled", statusText: "自定义 / 输入标识" },
+      enterTarget: { kind: "mcp-add-input" },
+    };
+    return [...servers, ...additions, custom];
   },
 };
 

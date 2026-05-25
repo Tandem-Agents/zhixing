@@ -26,8 +26,16 @@ import {
   writeConfig,
   writeCredentials,
 } from "@zhixing/providers";
-import { BASE_CONFIG_SECTION_IDS, runConfigEditor } from "../config-editor/index.js";
-import type { ConfigEditorRuntime, SectionId } from "../config-editor/index.js";
+import {
+  BASE_CONFIG_SECTION_IDS,
+  resolveMcpSetup,
+  runConfigEditor,
+} from "../config-editor/index.js";
+import type {
+  ConfigEditorRuntime,
+  McpSetupLlm,
+  SectionId,
+} from "../config-editor/index.js";
 import { probeServer, type McpHub } from "@zhixing/mcp";
 import { layout } from "../tui/index.js";
 import type { CliWriter, ScreenController } from "../screen/index.js";
@@ -169,16 +177,24 @@ export async function handleConfigCommand(deps: ConfigCommandDeps): Promise<void
 /**
  * `/mcp`——MCP 服务管理 + 接入引导（用户唯一入口）。
  *
- * 注入 hub 运行态（serverStatuses，让 section 显示连接状态）+ discovery 探测
- * （probeServer，接入向导验证连接，proxy 与 hub 同源 config.network.proxy）。
+ * 注入三件运行态：① serverStatuses（让 section 显示连接状态）；② discovery 探测
+ * （probeServer，接入向导验证连接，proxy 与 hub 同源 config.network.proxy）；③ mcpResolve
+ * （把输入标识解析为候选——绑定 light 角色作推断 LLM，面板不感知 LLM 本身）。
  */
 export async function handleMcpCommand(
   deps: ConfigCommandDeps & { hub: McpHub },
 ): Promise<void> {
   const proxy = loadConfig().network?.proxy;
+
+  // 接入推断 LLM——用 AgentRuntime 暴露的 callText（辅助任务用，恒走 light 档），
+  // 正合"标识 → 启动方式"这类轻量结构化推断。callText 不收 signal：面板取消（Esc）会
+  // 放弃等待，后台调用结果被丢弃即可，无需中断底层调用。
+  const inferLlm: McpSetupLlm = (prompt) => deps.session.runtime.callText(prompt);
+
   const runtime: ConfigEditorRuntime = {
     mcpServerStatuses: () => deps.hub.serverStatuses(),
     mcpProbe: (spec, signal) => probeServer(spec, { signal, proxy }),
+    mcpResolve: (input, signal) => resolveMcpSetup(input, inferLlm, signal),
   };
   await runEditorCommand(deps, {
     sections: ["mcp"],

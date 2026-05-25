@@ -13,6 +13,7 @@ import {
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { createSafeFetch, type NetworkPolicy } from "@zhixing/network";
+import { filterDangerousEnv } from "./env-security.js";
 import type { McpServerSpec } from "./types.js";
 
 export interface CreateTransportOptions {
@@ -42,10 +43,12 @@ export function createTransport(
         command: spec.command,
         args: spec.args ?? [],
         // 无附加 env 时不传：SDK 默认用 getDefaultEnvironment() 安全白名单（只继承
-        // PATH / HOME 等，挡掉 NODE_OPTIONS / LD_PRELOAD / DYLD_*）。有 server 专属
-        // env / 凭证时，叠加在该白名单基线之上，而非继承整个 process.env。
+        // PATH / HOME 等，不继承整个 process.env）。有 server 专属 env / 凭证时，
+        // 叠加在该白名单基线之上——但叠加前先过 filterDangerousEnv 剔除"启动型注入"
+        // 危险变量（NODE_OPTIONS / LD_* / DYLD_* 等），否则一份显式 env 就能借这些
+        // 变量在 spawn 时注入代码 / 库。
         ...(spec.env && {
-          env: { ...getDefaultEnvironment(), ...spec.env },
+          env: { ...getDefaultEnvironment(), ...filterDangerousEnv(spec.env).safe },
         }),
       }),
     };

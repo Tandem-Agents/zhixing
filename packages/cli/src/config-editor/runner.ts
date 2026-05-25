@@ -47,8 +47,10 @@ import {
   renderThinkingBudgetPanel,
 } from "./panels/input.js";
 import {
+  handleMcpAddInputPanelKey,
   handleMcpAddPanelKey,
   handleMcpServerPanelKey,
+  renderMcpAddInputPanel,
   renderMcpAddPanel,
   renderMcpServerPanel,
 } from "./panels/mcp.js";
@@ -179,6 +181,9 @@ function renderTopPanel(
     case "mcp-add":
       renderMcpAddPanel(state, d, renderer);
       return;
+    case "mcp-add-input":
+      renderMcpAddInputPanel(state, d, renderer);
+      return;
     case "input":
       renderInputPanel(state, d, renderer);
       return;
@@ -231,6 +236,8 @@ function dispatchKey(
     }
     case "mcp-add":
       return handleMcpAddPanelKey(ctx, state, d, key);
+    case "mcp-add-input":
+      return handleMcpAddInputPanelKey(ctx, state, d, key);
     case "input":
       return handleInputPanelKey(state, d, key);
     case "add-model":

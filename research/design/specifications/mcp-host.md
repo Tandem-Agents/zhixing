@@ -288,6 +288,69 @@ McpHub 由 `builtinExtraTools` assembly 创建持有，作为 assembly 工厂参
 5. **双向（作 MCP server）/ 给下游 CLI 注入**：明确**不做**（知行是个人助手非编排器）。确认这个范围收敛。
 6. **接入引导的预设库初始范围（已定）**：首批仅 **GitHub、Notion**（外部服务类），渐进式扩展；只收外部服务类 server（知行内置已覆盖的本地/通用能力不预设，见第一节定位原则），非预设走 agent 推断 + discovery 验证兜底。
 
+---
+
+## 十二、自定义 server 接入向导（规划增量，未实施）
+
+> 状态：规划（未实施，待 review）｜ 日期：2026-05-24（同日复审：对照已实现代码修正——推断管线已建成，本节范围收敛为"UI 接线"）
+>
+> **隔开说明**：〇–十一是已 review / 已落地的 host 架构；本节是其上的**后续增量**，单独成节、与已实施部分隔开，不混写。
+
+### 背景：缺的是 UI 接线，不是逻辑
+
+阶段四落地时 `/mcp` 面板**只接通了预设路径**（GitHub / Notion 一键、单密钥）。但 4.4 设想的"输入标识 → 推断"的**编排逻辑早已实现且有测试**（`config-editor/mcp-setup.ts` + `mcp-setup.test.ts`），只是没接进 UI。复审（grep 实证）确认的真实状态：
+
+- **已实现且通用**：`McpSetupCandidate`（entry 可为任意 stdio `command/args` 或 http `url`）、`presetToCandidate`、`resolveMcpSetup`（按 id/label 命中预设，否则走 LLM 推断）、`inferMcpSetup` + `buildInferencePrompt` + `parseInference`、`deriveServerId`、`parseSecretFields`（**已支持多密钥**）、`validateMcpSetup`（候选+密钥 → `toServerSpec` → probe）、`applyMcpSetup`、`applyMcpSecretFields`（多字段）。
+- **缺的 UI 接线**：① `resolveMcpSetup` / `inferMcpSetup` **无任何调用方**；② `ConfigEditorRuntime` **不注入 light LLM**（只有 `mcpServerStatuses` + `mcpProbe`）；③ `mcp-add` 面板**只收 `secretFields[0]`（单字段）**；④ 没有"输入标识接入"的入口（mcp section 只列预设"添加 X"）。
+
+后果：接任意 server 当前只能手改 `config.jsonc`——与第六节"用户唯一入口 `/mcp`、**无手写配置文件**"的不变量相矛盾。本增量 = **把已建成的推断管线接进面板**兑现该不变量，**不重建逻辑、不动连接核心**。
+
+### 核心架构：单一候选管线（已在代码中实现，本节只补输入源 UI）
+
+预设与"输入标识推断"**已殊途同归到 `McpSetupCandidate`**，共用同一尾段：`validateMcpSetup`（带密钥 discovery）→ `applyMcpSetup`（拆 `entry` + `secrets`）→ `upsertMcpServer` + `patchMcpSecrets` → 落盘 → `session.reload`。本增量**不新增平行落盘 / 连接路径、不新增候选模型**——只补"统一输入"这一候选来源的 UI 与多密钥录入。
+
+### 增量范围（承接 4.5 延后的"输入标识 → 推断"）
+
+1. **注入 light LLM**：`ConfigEditorRuntime` 增一个推断访问器（包 `McpSetupLlm`），由命令层（`handleMcpCommand`，与现注入 `mcpProbe` **同一处、同一手法**）接通；light 角色系统已具备（`createProviderRoles` 产出 `roles.light`），具体取用点实现期接通。
+2. **统一输入面板**：mcp section 加"添加其他 server"入口 → 输入面板：用户键入包名 / URL / 命令 / 预设名 → 异步 loading 调**已有的** `resolveMcpSetup`（命中预设直用，否则 LLM 推断）→ 得候选。复用 config-editor 既有异步 panel（loading 态）。
+3. **serverId 冲突处理（统一输入流必须新增）**：拿到候选后须校验 `serverId` 是否已存在于 `config.mcp.servers`。`upsertMcpServer` 默认**静默覆盖**（`config.mcp.servers[serverId] = entry`，无防护），现有预设流程靠"过滤已接入预设"（`sections/mcp.ts`）规避冲突，**统一输入流绕过该过滤**——若 `deriveServerId` / 用户输入派生出重名 id，会静默覆盖既有 server 及其凭证（数据丢失）。处理：已存在 → 提示"已存在 `<id>`：覆盖 / 改名"（覆盖语义与 12.2 编辑现有自然统一）；不存在 → 按新增走。`isValidServerId` 只管格式，不替代此唯一性校验。
+4. **多密钥录入**：把密钥收集从单字段（`secretFields[0]`）扩为**遍历 `candidate.secretFields`**——模型 / `applyMcpSecretFields` / `parseSecretFields` 均已支持，仅 UI 侧扩展。
+5. **同尾段**：`validateMcpSetup` → `applyMcpSetup` → `upsertMcpServer` + `patchMcpSecrets` → reload。**完全复用，零改动。**
+
+**关键不变量**：**LLM 只见 server 标识、推断启动方式，绝不接触密钥的值**——值由用户在面板填入、直落 `credentials.mcp.<id>`（AI 不可达）。与预设路径一致。
+
+**（后续）编辑现有 server** —— 同面板预填现存 `config.mcp.servers[id]`，让用户改 command/url/密钥（当前 server 面板仅启停 / 删除）。自然延伸，可独立后置。
+
+### 安全（推断 / 任意 server 引入的新面）
+
+- **任意命令执行确认（确认点必须前置到 discovery 探测之前）**：推断 / 解析出的 stdio `command` = 本机代码执行。**关键时序**：`validateMcpSetup`（discovery 探测）即经 `connectAndListTools` → `createTransport` **spawn 该命令**——首次执行发生在**探测**、不是落盘。故对**非预设**的 stdio 候选，确认必须放在**调 `validateMcpSetup` 之前**（拿到候选、确认 command 后才探测）；放在落盘前是马后炮（命令已运行过）。预设 curated（可信）不需此确认。比 Claude Code / OpenClaw 的"`mcp add` 直接落配置"更强护栏。
+- **env 黑名单（待补，落在连接层）**：继承环境的白名单基线**已具备**（`transport.ts` 用 SDK `getDefaultEnvironment()`，不继承整个 `process.env`，挡掉父进程的危险变量——主防护）；但对**显式** `spec.env` 目前**无黑名单过滤**（`...spec.env` 无过滤叠加）。本增量引入用户输入 env 后，须补对显式 env 的"解释器启动型"危险变量（`NODE_OPTIONS` / `LD_*` / `DYLD_*` 等）过滤——**落在 `createTransport`（探测与运行时连接共用的单一点），从而覆盖首次 spawn**（对照第五节 / OpenClaw policy）。
+- **凭证隔离**：密钥只入 `credentials.mcp.<id>`、永不进 `config`；LLM 只见标识不见密钥值。
+- **http**：推断 url 走既有连接层（禁跟随重定向的 SSRF 防护）。
+
+### 复用锚点（绝大多数已存在且测试覆盖）
+
+已存在：`resolveMcpSetup` / `inferMcpSetup` / `McpSetupCandidate` / `validateMcpSetup` / `applyMcpSetup` / `applyMcpSecretFields` / `presetToCandidate` / `deriveServerId`（`config-editor/mcp-setup.ts`，`mcp-setup.test.ts` 覆盖）、`upsertMcpServer` / `patchMcpSecrets`（`config-editor/state.ts`）、`toServerSpec` / `parseServerSpecs`（`cli/runtime/mcp-config.ts`）、`createTransport`（`mcp/transport.ts`）、`isValidServerId`（`@zhixing/mcp`）、config-editor 异步 panel。**新增仅**：light LLM 注入口 + 一个"统一输入 + 多密钥"面板 + 一个 section 入口 + 命令执行确认 + env 黑名单。
+
+### 渐进执行
+
+- **12.1 接通推断接入（核心，兑现"无手写配置"不变量）**：light LLM 注入 + "添加其他 server"入口 + 统一输入面板（调**已有的** `resolveMcpSetup`）+ 多密钥录入 + 命令执行确认 + env 黑名单 → 同尾段。验收：底层 `mcp-setup` 逻辑已有 `mcp-setup.test.ts` 覆盖；新增 UI 装配最小单测 + 面板手动测全流程。
+- **（后续）12.2 编辑现有 server**：同面板预填现存 `config.mcp.servers[id]`。
+
+### 留待拍板
+
+- **推断失败时是否提供"手填技术字段"兜底**：现有原则（4.4，line 247）是**推断失败不退回手填**，只提示"改用预设 / 核对标识"。推断已能覆盖多数 npm 包 / URL / 命令型 server；是否为冷门 server 加结构化手填兜底（与该原则相悖），由你定——**默认遵循现有原则、不加手填**（这也是本次复审推翻"先做结构化表单"草案的依据：结构化手填既重复 `resolveMcpSetup`、又违背既定原则）。
+- 任意命令执行确认的形态：面板内一步确认 vs 复用 `SecurityPipeline` 的确认机制。
+
+### 未尽项与边界（钉死，次要信息）
+
+划定本模块剩余工作的边界，避免反复重提：
+
+- **已决定不做（不再议）**：① MCP 结果**蒸馏**——默认以 `maxResultChars` 截断 + "已截断"提示替代（理由见 4.6）；② **SSE** transport（被 streamable-http 取代的旧标准，见三 / 十一）；③ 知行**作 MCP server 对外**（双向）、给**下游 CLI 注入配置**（范围收敛：个人助手非编排器，见八 / 十一）。这些是经设计否决的边界，不是缺失。
+- **可选未来（低优先，有空再做）**：① **4.7 server 级预置权限规则**（`mcp:<server>` 默认放行 / 拒绝）——当前 MCP 工具走默认安全管线（只读放行 / 非只读确认）已够用，预置规则仅省确认次数；② **stdio 配置级 env 黑名单**（过滤显式 `spec.env` 里的 `NODE_OPTIONS` / `LD_*` 等）——继承环境的白名单基线已具备（主防护），黑名单随本节 12.1 自定义 env 入口一并落地，当前无自定义 env 入口、无暴露面。
+
+除本节（十二）的自定义接入外，阶段一~四核心（连接 / 映射 / HTTP / 凭证 / 生命周期 / 热重连 / `/mcp` 面板 / 预设接入）均已落地。
+
 ## 参考
 - 三家 MCP 调研：`source-analysis/openclaw|claude-code|hermes-agent/mcp-architecture.md`
 - 工具系统：ADR-004；安全系统：ADR-006、`tool-permission-execution.md`
