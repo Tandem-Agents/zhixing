@@ -407,7 +407,62 @@ McpHub 由 `builtinExtraTools` assembly 创建持有，作为 assembly 工厂参
 - **13.2 事实驱动解析** ✅ `cli` `mcp-setup.ts` `resolveMcpSetup(input, {fetchSource, llm})`：分类——预设 / URL（http 确定性）/ 含空格命令（stdio 确定性，按空格拆）/ 裸包名（`groundFromSource`：查源三态 + 据 README grounded 提取）。提取 prompt（`buildExtractionPrompt`）站 LLM 视角、含真实 README 文本 + "禁止用自身知识、缺失标 null"；`parseExtraction` 在 LLM 输出不可解析 / 缺字段时回落 `npx -y <真实包名>` 基线（仍是确定性真实命令，由实连证伪），不当硬失败。README 按字符上限截断（覆盖开头的安装 / 配置段；按标题精确截取留作后续优化）。撤掉了 docUrl 凭知识臆造——docUrl 仅从 README grounded 而来，无则缺省。22 个 mock 单测断言"源没有则不编"（`__tests__/mcp-setup.test.ts`）。
 - **13.3 UI 诚实呈现 + 手动兜底** ✅ `config-command.ts` 把 `fetchMcpServerSource`（proxy 与 hub / probe 同源）+ main 档 LLM 装配进 `mcpResolve`（面板仍只认 `mcpResolve`，未新增 runtime 注入点）；`mcp-add-input` 面板透传三态诚实失败原因；统一输入框文案说明"预设 / URL / 命令直接采用，包名查 npm 确认"，URL / 命令分支即手动出口。密钥字段无 docUrl 时，候选携带的真实 `homepage`（查源得到）作"获取地址未提供，可查项目主页"的诚实兜底，绝不臆造获取链接。
 
+## 十四、接入识别升级：搜索引导（轻量工具循环的首个使用者）
+
+> 取代关系：十三的"事实驱动"原则与确定性分支（预设 / URL / 完整命令）**全部保留**；仅"裸输入"一支从"把输入当精确包名直接查"升级为"关键词 → 搜索引导 → ≤5 主流候选 → 选 → grounded 提取"。底层由通用原语[轻量工具循环](./lightweight-tool-loop.md)驱动，本节是它在 MCP 接入的使用层。
+
+### 动机
+
+十三要求用户输入**精确的 npm 包名**（大小写、scope 都要对），否则诚实"没找到"。但用户的自然直觉是输产品名 / 模糊词（如 `Context7`），必然查不到——"产品名 → 包名"是凭记忆的不稳定映射，正是十三刻意不让 LLM 臆造的。出路是把这层映射也变成**事实驱动**：用 npm 搜索接口（真实索引）把关键词变成一组真实存在的包，让 LLM 在真实结果上判断、挑主流，而不是凭记忆猜包名。
+
+### 输入分流（在十三 `resolveMcpSetup` 之上）
+
+- 预设名 / URL / 完整命令（含空格）→ 确定性分支，**不变**（见十三）。
+- **裸输入（单 token，可能是精确包名，也可能是模糊词）→ 搜索引导**（本节），取代原"直接 `groundFromSource`"。
+
+### 两个工具（场景注入给轻量工具循环）
+
+- `searchMcpServers(query)`——**新增**于 `@zhixing/mcp`（与 `fetchMcpServerSource` 同层同关注点：网络 / registry / SSRF-safe）。打 `registry.npmmirror.com/-/v1/search?text=<query>`（大陆实测可达），返回真实包列表：`name` / `description` / `keywords` / `downloads.all`。`HttpGetText` 可注入便于 mock。
+- `fetchMcpServerSource(packageName)`——**已有**。引导期供 LLM 按需读某候选 README，确认它是不是真 MCP server / 看用途。
+
+### 给 LLM 的 goal（站它视角，无设计者反思）
+
+- 任务：帮用户找到他想接入的那个 MCP server。
+- 预期：主流的、真实存在的、确实是 MCP server。
+- 方法：用搜索工具搜；"是不是 mcp"看包的 keywords（含 `mcp`/`modelcontextprotocol`）和名字 / 描述；"主不主流"看 `downloads`；一次搜不到就换个词再搜（加 `mcp`、拆词、换同义词）；拿不准某个包就读它 README 确认。
+- 输出契约：最终给用户**最多 5 个**候选（可以少、不能多），每个含包名 + 一句话用途 + 选它的理由；一个合适的都没有就如实给"没找到"。
+
+### 场景护栏（`parseFinal`，事实焊死）
+
+搜索引导的 `parseFinal` 在 MCP 场景层强制（通用框架不掺和业务）：
+
+- **不许编造**：`searchMcpServers` 工具的 `run` 把每次真实返回累积进一个场景私有集合；`parseFinal` 校验 LLM 给的每个候选包名必须 ∈ 这个真实集合，不在就 reject（回灌让它重挑——它编不出不存在的包）。这就是轻量工具循环"事实焊死"在 MCP 的落地（见 [lightweight-tool-loop.md](./lightweight-tool-loop.md) §二）。
+- **硬截 ≤5**：多于 5 个截断 / reject 让它精选。
+- **空 → 没找到**：候选为空 → 诚实"没找到"，不硬凑。
+- 轮数上限（如 `maxRounds=5`）防无限换词。
+
+### 选中之后（复用十三，不变）
+
+用户从 ≤5 候选里选中一个**真实包** → 走十三的 `fetchMcpServerSource` + grounded 提取（读该包 README 提启动命令 / 密钥，docUrl / homepage 诚实兜底）→ 现有填密钥面板 → 实连验证 → 落盘。即：搜索引导只是把"选中哪个真实包"前置成事实驱动的一步，选中后的 grounded 提取与验证管线**完全复用**。
+
+### 接口与面板演进
+
+- `McpResolveResult` 增"待选"态：`{ok, candidate}`（确定性 / 精确）、`{ok, choices}`（搜索引导待选，`choices` 为 ≤5 项 `{name, 用途, 理由}`）、`{ok:false, error}`（没找到 / 出错的诚实失败）。
+- 新增**候选选择面板**：列出 ≤5 候选（名 + 一句话用途），选中 → grounded 提取（loading）→ 现有填密钥面板。
+- **两阶段 resolve，需第二个入口（关键）**：搜索引导出 `choices` 与"选中后提取"是两个阶段。选中一个 choice（确定的真实包名）后**不能复用 `mcpResolve`**——裸词分支现在是搜索引导，会把这个精确包名当关键词再次触发 `runToolLoop` 搜索。需独立入口 `mcpExtract(packageName) → {ok, candidate} | {ok:false, error}`（内部即十三的 `groundFromSource`：读该包 README 提取启动配置 / 密钥），由候选选择面板在选中时调用；`choices` 项携带 `name`（+ 展示用的用途 / 理由），阶段2 用 `name` 提取。`mcpExtract` 与 `mcpProbe`/`mcpResolve` 并列注入 `ConfigEditorRuntime`。
+- 统一输入框文案：从"只给包名时查 npm 确认"改为"给包名 / 关键词，自动搜 npm 找出主流可选项"。
+- **搜索引导期显示当前步骤**：引导循环可能跑几轮（搜 → 换词 → 读 README → 定候选），`loading` 面板据 `runToolLoop` 的结构化进度实时显示人话步骤（"正在搜索 \"X\"…""正在读取 Y 的说明…""正在分析…"）。这需要 config-editor 的 `loading` 机制增强：`run` 签名加 `report(message)` 回调、`runLoadingAction` 维护 `currentMessage` 收到即重渲染——**通用增强、非 MCP 专属、向后兼容**（现有 loading 的 `run(signal)` 不调 report 即保持静态，TS 函数参数逆变保证旧签名零改动）；MCP 引导层负责把结构化进度翻译成人话（`mcpProgressText`），框架不掺业务（见 [lightweight-tool-loop.md](./lightweight-tool-loop.md) §二）。
+
+### 渐进执行（各步独立可验证）
+
+- **14.1 通用原语** `runToolLoop`（含 `onProgress` 结构化进度）+ mock 单测（见 [lightweight-tool-loop.md](./lightweight-tool-loop.md) §六）。
+- **14.2** `@zhixing/mcp` `searchMcpServers` + mock 单测（类比 `fetchMcpServerSource`：可注入 httpGet、解析 name+keywords+downloads、查询失败诚实态）。
+- **14.3 MCP 搜索引导**：组装 spec（注入两工具 + goal + `parseFinal` 护栏）+ mock 单测（断言：换词重搜、编造候选被 reject、≤5、空→没找到）。
+- **14.4** `McpResolveResult` choices 态 + `mcpExtract` 提取入口（阶段2，绕开搜索）+ 候选选择面板 + 输入分流接线 + **`loading` 机制增强（`run` 加 `report` 回调，通用、向后兼容）** + `mcpProgressText` 进度翻译 + 面板测试。
+- **14.5** `config-command` 装配（`callText("main")` 绑 `complete`、两工具绑入）+ 全量构建 + 真机测。
+
 ## 参考
+- 轻量工具循环（接入识别的底层原语）：`lightweight-tool-loop.md`
 - 三家 MCP 调研：`source-analysis/openclaw|claude-code|hermes-agent/mcp-architecture.md`
 - 工具系统：ADR-004；安全系统：ADR-006、`tool-permission-execution.md`
 - 配置/凭证：ADR-003（schema 段已过时，以 `providers/src/types.ts` 为准）、`credentials-and-onboarding.md`

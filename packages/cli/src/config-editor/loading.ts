@@ -54,10 +54,16 @@ export async function runLoadingAction(
 ): Promise<PanelAction> {
   const taskController = new AbortController();
   const keyController = new AbortController();
-  renderLoading(action.message);
+  // 当前显示的步骤——task 可经 report 更新（多阶段进度）；忽略键重渲染也用它，不回退初始。
+  let currentMessage = action.message;
+  const report = (message: string): void => {
+    currentMessage = message;
+    renderLoading(message);
+  };
+  renderLoading(currentMessage);
 
   const taskWon = action
-    .run(taskController.signal)
+    .run(taskController.signal, report)
     .then((next) => ({ tag: "task" as const, next }));
 
   try {
@@ -82,8 +88,8 @@ export async function runLoadingAction(
         taskController.abort();
         return { type: "pop", state: action.state };
       }
-      // 其它键在 loading 期间无意义 —— 忽略、重渲染后继续等
-      renderLoading(action.message);
+      // 其它键在 loading 期间无意义 —— 忽略、重渲染后继续等（保留当前步骤，不回退初始）
+      renderLoading(currentMessage);
     }
   } finally {
     // 摘除可能悬挂的 stream.next waiter，避免吞掉 loading 结束后的第一个按键

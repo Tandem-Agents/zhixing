@@ -30,6 +30,7 @@ import {
   renderMcpServerPanel,
   renderMcpAddPanel,
   renderMcpAddInputPanel,
+  renderMcpChoicesPanel,
 } from "../panels/mcp.js";
 import { presetToCandidate, type McpSetupCandidate } from "../mcp-setup.js";
 import { findMcpPreset } from "../../registries/index.js";
@@ -670,5 +671,29 @@ describe("mcp 面板渲染冒烟", () => {
     expect(out).toContain("接入其他 server");
     expect(out).toContain("推断失败");
     expect(out).toContain("@org/x");
+  });
+
+  it("mcp-choices panel · 列出候选 + 高亮选中项 + 错误回显", () => {
+    const out = renderAndCapture((renderer) => {
+      renderMcpChoicesPanel(
+        emptyState(),
+        {
+          kind: "mcp-choices",
+          choices: [
+            { name: "@upstash/context7-mcp", summary: "MCP server for Context7", reason: "下载最高" },
+            { name: "ctx7", summary: "CLI", reason: "次之" },
+          ],
+          selectedIndex: 0,
+          error: "提取失败",
+        },
+        renderer,
+      );
+    });
+    expect(out).toContain("选择 MCP server");
+    expect(out).toContain("@upstash/context7-mcp");
+    expect(out).toContain("MCP server for Context7");
+    expect(out).toContain("ctx7");
+    expect(out).toContain("❯"); // 高亮标记
+    expect(out).toContain("提取失败");
   });
 });

@@ -7,13 +7,14 @@
  *   - 启停 / 删除是 WorkingState 事务变更
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { McpServerStatus, ProbeResult } from "@zhixing/mcp";
 import { createInitialState, setInputBuffer } from "../state.js";
 import { mcpSection } from "../sections/mcp.js";
 import {
   handleMcpAddInputPanelKey,
   handleMcpAddPanelKey,
+  handleMcpChoicesPanelKey,
   handleMcpServerPanelKey,
 } from "../panels/mcp.js";
 import { presetToCandidate, type McpSetupCandidate } from "../mcp-setup.js";
@@ -283,6 +284,92 @@ describe("handleMcpAddInputPanelKey — 统一输入接入", () => {
     const ctx = { runtime: {} } as unknown as ConfigEditorContext;
     const action = handleMcpAddInputPanelKey(ctx, s0, inputDesc, { type: "enter" });
     expect(action.type).toBe("replace");
+  });
+
+  it("搜索引导出 choices → replace 为候选选择面板", async () => {
+    const s0 = setInputBuffer(createInitialState({}, {}), "context7");
+    const ctx = ctxResolve(async () => ({
+      ok: true,
+      choices: [{ name: "@upstash/context7-mcp", summary: "Context7", reason: "主流" }],
+    }));
+    const action = handleMcpAddInputPanelKey(ctx, s0, inputDesc, { type: "enter" });
+    if (action.type !== "loading") return;
+    const result = await action.run(new AbortController().signal, () => {});
+    expect(result.type).toBe("replace");
+    if (result.type === "replace" && result.panel.kind === "mcp-choices") {
+      expect(result.panel.choices[0]?.name).toBe("@upstash/context7-mcp");
+      expect(result.panel.selectedIndex).toBe(0);
+    }
+  });
+});
+
+describe("handleMcpChoicesPanelKey — 候选选择 + 阶段2 提取", () => {
+  const choices = [
+    { name: "@upstash/context7-mcp", summary: "Context7", reason: "主流" },
+    { name: "ctx7", summary: "CLI", reason: "次之" },
+  ];
+  const choicesDesc = { kind: "mcp-choices" as const, choices, selectedIndex: 0 };
+  const cand: McpSetupCandidate = {
+    serverId: "context7-mcp",
+    entry: { type: "stdio", command: "npx", args: ["-y", "@upstash/context7-mcp"] },
+    secretFields: [],
+    source: "inferred",
+  };
+  const ctxExtract = (
+    extract: ConfigEditorRuntime["mcpExtract"],
+  ): ConfigEditorContext =>
+    ({ runtime: { mcpExtract: extract } }) as unknown as ConfigEditorContext;
+  const s0 = createInitialState({}, {});
+
+  it("↑↓ 移动高亮（环绕）", () => {
+    const ctx = ctxExtract(async () => ({ ok: true, candidate: cand }));
+    const down = handleMcpChoicesPanelKey(ctx, s0, choicesDesc, { type: "arrow-down" });
+    if (down.type === "replace" && down.panel.kind === "mcp-choices") {
+      expect(down.panel.selectedIndex).toBe(1);
+    }
+    const up = handleMcpChoicesPanelKey(ctx, s0, choicesDesc, { type: "arrow-up" });
+    if (up.type === "replace" && up.panel.kind === "mcp-choices") {
+      expect(up.panel.selectedIndex).toBe(1); // 从 0 向上环绕到末项
+    }
+  });
+
+  it("Esc → replace 回输入框重输", () => {
+    const ctx = ctxExtract(async () => ({ ok: true, candidate: cand }));
+    const action = handleMcpChoicesPanelKey(ctx, s0, choicesDesc, { type: "escape" });
+    expect(action.type).toBe("replace");
+    if (action.type === "replace") expect(action.panel.kind).toBe("mcp-add-input");
+  });
+
+  it("Enter 选中 → loading → mcpExtract → mcp-add 候选面板", async () => {
+    const extract = vi.fn(async () => ({ ok: true as const, candidate: cand }));
+    const action = handleMcpChoicesPanelKey(ctxExtract(extract), s0, choicesDesc, { type: "enter" });
+    expect(action.type).toBe("loading");
+    if (action.type !== "loading") return;
+    const result = await action.run(new AbortController().signal, () => {});
+    expect(extract.mock.calls[0]?.[0]).toBe("@upstash/context7-mcp");
+    expect(result.type).toBe("replace");
+    if (result.type === "replace" && result.panel.kind === "mcp-add") {
+      expect(result.panel.candidate.serverId).toBe("context7-mcp");
+    }
+  });
+
+  it("提取失败 → 原地回显错误、留在候选列表", async () => {
+    const extract = vi.fn(async () => ({ ok: false as const, error: "没有可用的设置说明" }));
+    const action = handleMcpChoicesPanelKey(ctxExtract(extract), s0, choicesDesc, { type: "enter" });
+    if (action.type !== "loading") return;
+    const result = await action.run(new AbortController().signal, () => {});
+    if (result.type === "replace" && result.panel.kind === "mcp-choices") {
+      expect(result.panel.error).toContain("没有可用的设置说明");
+    }
+  });
+
+  it("未注入 mcpExtract → 防御性回显错误", () => {
+    const ctx = { runtime: {} } as unknown as ConfigEditorContext;
+    const action = handleMcpChoicesPanelKey(ctx, s0, choicesDesc, { type: "enter" });
+    expect(action.type).toBe("replace");
+    if (action.type === "replace" && action.panel.kind === "mcp-choices") {
+      expect(action.panel.error).toContain("未注入");
+    }
   });
 });
 

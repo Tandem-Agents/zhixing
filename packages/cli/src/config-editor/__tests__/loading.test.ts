@@ -128,4 +128,39 @@ describe("runLoadingAction", () => {
     expect((await p).type).toBe("pop");
     expect(f.pending()).toBe(0);
   });
+
+  it("run 经 report 更新当前步骤 → renderLoading 收到新文案（多阶段进度）", async () => {
+    const f = fakeStream();
+    const messages: string[] = [];
+    let resolveTask!: (a: PanelAction) => void;
+    const action = loadingAction((_signal, report) => {
+      report("正在搜索…");
+      report("正在读取…");
+      return new Promise<PanelAction>((r) => (resolveTask = r));
+    });
+
+    const p = runLoadingAction(action, f.stream, (m) => messages.push(m));
+    expect(messages).toEqual(["正在处理…", "正在搜索…", "正在读取…"]); // 初始 + 两次 report
+
+    resolveTask({ type: "pop", state: SNAPSHOT });
+    await p;
+  });
+
+  it("report 更新后，非取消键重渲染用当前步骤（不回退初始 message）", async () => {
+    const f = fakeStream();
+    const messages: string[] = [];
+    let resolveTask!: (a: PanelAction) => void;
+    const action = loadingAction((_signal, report) => {
+      report("正在搜索…");
+      return new Promise<PanelAction>((r) => (resolveTask = r));
+    });
+
+    const p = runLoadingAction(action, f.stream, (m) => messages.push(m));
+    f.feed({ type: "char", ch: "x" }); // 忽略键 → 重渲染
+    await new Promise<void>((r) => setTimeout(r, 0));
+    expect(messages[messages.length - 1]).toBe("正在搜索…"); // 用当前步骤，非初始
+
+    resolveTask({ type: "pop", state: SNAPSHOT });
+    await p;
+  });
 });

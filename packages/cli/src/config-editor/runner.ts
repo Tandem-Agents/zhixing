@@ -49,9 +49,11 @@ import {
 import {
   handleMcpAddInputPanelKey,
   handleMcpAddPanelKey,
+  handleMcpChoicesPanelKey,
   handleMcpServerPanelKey,
   renderMcpAddInputPanel,
   renderMcpAddPanel,
+  renderMcpChoicesPanel,
   renderMcpServerPanel,
 } from "./panels/mcp.js";
 import { runLoadingAction, renderLoadingFrame } from "./loading.js";
@@ -184,6 +186,9 @@ function renderTopPanel(
     case "mcp-add-input":
       renderMcpAddInputPanel(state, d, renderer);
       return;
+    case "mcp-choices":
+      renderMcpChoicesPanel(state, d, renderer);
+      return;
     case "input":
       renderInputPanel(state, d, renderer);
       return;
@@ -238,6 +243,8 @@ function dispatchKey(
       return handleMcpAddPanelKey(ctx, state, d, key);
     case "mcp-add-input":
       return handleMcpAddInputPanelKey(ctx, state, d, key);
+    case "mcp-choices":
+      return handleMcpChoicesPanelKey(ctx, state, d, key);
     case "input":
       return handleInputPanelKey(state, d, key);
     case "add-model":

@@ -1,5 +1,7 @@
 export * from "./paths.js";
 export * from "./diagnostics.js";
+export * from "./json.js";
+export * from "./tool-loop/index.js";
 export * from "./events/index.js";
 export * from "./types/index.js";
 export * from "./loop/index.js";

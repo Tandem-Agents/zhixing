@@ -28,6 +28,7 @@ import {
 } from "@zhixing/providers";
 import {
   BASE_CONFIG_SECTION_IDS,
+  extractMcpCandidate,
   resolveMcpSetup,
   runConfigEditor,
 } from "../config-editor/index.js";
@@ -36,7 +37,12 @@ import type {
   McpSetupLlm,
   SectionId,
 } from "../config-editor/index.js";
-import { fetchMcpServerSource, probeServer, type McpHub } from "@zhixing/mcp";
+import {
+  fetchMcpServerSource,
+  probeServer,
+  searchMcpServers,
+  type McpHub,
+} from "@zhixing/mcp";
 import { layout } from "../tui/index.js";
 import type { CliWriter, ScreenController } from "../screen/index.js";
 import type { RuntimeSession } from "./session.js";
@@ -186,26 +192,26 @@ export async function handleMcpCommand(
 ): Promise<void> {
   const proxy = loadConfig().network?.proxy;
 
-  // 据源文本提取的 LLM——走 main 档（callText 的 "main" 通道）：从 README 抽启动方式 /
-  // 密钥的质量直接决定接入成败，是质量敏感任务，不用 light。callText 不收 signal：面板
+  // 接入相关的 LLM——走 main 档（callText 的 "main" 通道）：搜索引导的判断 / 从 README 抽
+  // 启动方式的质量直接决定接入成败，是质量敏感任务，不用 light。callText 不收 signal：面板
   // 取消（Esc）放弃等待、后台结果丢弃即可，无需中断底层调用。
   const inferLlm: McpSetupLlm = (prompt) =>
     deps.session.runtime.callText(prompt, "main");
 
+  // 查源 / 搜索都走 SSRF-safe fetch，proxy 与 hub / probe 同源 config.network.proxy
+  const fetchSource = (name: string, sig?: AbortSignal) =>
+    fetchMcpServerSource(name, { proxy, ...(sig ? { signal: sig } : {}) });
+  const search = (query: string, sig?: AbortSignal) =>
+    searchMcpServers(query, { proxy, ...(sig ? { signal: sig } : {}) });
+
   const runtime: ConfigEditorRuntime = {
     mcpServerStatuses: () => deps.hub.serverStatuses(),
     mcpProbe: (spec, signal) => probeServer(spec, { signal, proxy }),
-    // 查源走 SSRF-safe fetch，proxy 与 hub / probe 同源 config.network.proxy
-    mcpResolve: (input, signal) =>
-      resolveMcpSetup(
-        input,
-        {
-          fetchSource: (name, sig) =>
-            fetchMcpServerSource(name, { proxy, ...(sig ? { signal: sig } : {}) }),
-          llm: inferLlm,
-        },
-        signal,
-      ),
+    // 统一输入解析：确定性输入直接出候选，裸输入经搜索引导出 choices（onStep 回报当前步骤）
+    mcpResolve: (input, signal, onStep) =>
+      resolveMcpSetup(input, { fetchSource, search, llm: inferLlm }, signal, onStep),
+    // 阶段2：搜索引导选中真实包后，读其 README 提取启动配置（与 mcpResolve 分开）
+    mcpExtract: (name, signal) => extractMcpCandidate(name, { fetchSource, llm: inferLlm }, signal),
   };
   await runEditorCommand(deps, {
     sections: ["mcp"],

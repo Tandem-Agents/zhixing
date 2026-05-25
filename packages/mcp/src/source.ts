@@ -13,18 +13,16 @@
  * HTTP 经 SSRF-safe fetch；`httpGetText` 可注入以便单测（不真联网）。
  */
 
-import { createSafeFetch, type NetworkPolicy } from "@zhixing/network";
+import type { NetworkPolicy } from "@zhixing/network";
+import { defaultHttpGetText, httpErrText, type HttpGetText } from "./http.js";
+
+// 查源与搜索共用的 HTTP 底座现集中在 ./http.js；此处再导出 HttpGetText 保持既有引用路径。
+export type { HttpGetText } from "./http.js";
 
 export type McpSourceResult =
   | { kind: "found"; readme: string; homepage?: string }
   | { kind: "not-found" }
   | { kind: "error"; reason: string };
-
-/** 文本 GET：返回 HTTP 状态码与响应体。注入点——测试用 mock 替换，避免真联网。 */
-export type HttpGetText = (
-  url: string,
-  signal?: AbortSignal,
-) => Promise<{ status: number; body: string }>;
 
 export interface FetchMcpSourceOptions {
   /** 注入 HTTP 文本 GET（缺省走 SSRF-safe fetch）。 */
@@ -50,7 +48,7 @@ export async function fetchMcpServerSource(
   try {
     res = await get(`${REGISTRY_BASE}/${name}`, options.signal);
   } catch (err) {
-    return { kind: "error", reason: errText(err) };
+    return { kind: "error", reason: httpErrText(err) };
   }
   if (res.status === 404) return { kind: "not-found" };
   if (res.status !== 200) {
@@ -118,16 +116,4 @@ async function fetchReadmeFile(
     }
   }
   return undefined;
-}
-
-function defaultHttpGetText(proxy?: NetworkPolicy["proxy"]): HttpGetText {
-  const fetch = createSafeFetch(proxy ? { proxy } : undefined);
-  return async (url, signal) => {
-    const res = await fetch(url, signal ? { signal } : undefined);
-    return { status: res.status, body: await res.text() };
-  };
-}
-
-function errText(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
 }

@@ -13,6 +13,7 @@
 import type { RoleId, ZhixingConfig, ZhixingCredentials } from "@zhixing/providers";
 import type { McpServerSpec, McpServerStatus, ProbeResult } from "@zhixing/mcp";
 import type { McpSetupCandidate, McpResolveResult } from "./mcp-setup.js";
+import type { McpDiscoveryChoice } from "./mcp-discovery.js";
 
 // ─── Section（用户视角的配置块） ───
 
@@ -73,6 +74,17 @@ export type PanelDescriptor =
       description?: string;
       inputs: Record<string, string>;
       fieldIndex: number;
+      error?: string;
+    }
+  /**
+   * L3 (mcp)：搜索引导出的候选列表——用户输入关键词后搜真实 npm 包挑出的 ≤5 个候选，
+   * 上下选一个 → 阶段2 提取（runtime.mcpExtract）→ replace 为 mcp-add 填密钥。
+   * selectedIndex：当前高亮项；error：提取失败原地回显。
+   */
+  | {
+      kind: "mcp-choices";
+      choices: McpDiscoveryChoice[];
+      selectedIndex: number;
       error?: string;
     };
 
@@ -162,11 +174,22 @@ export interface ConfigEditorRuntime {
    */
   mcpProbe?: (spec: McpServerSpec, signal?: AbortSignal) => Promise<ProbeResult>;
   /**
-   * 把用户输入的标识（包名 / URL / 命令 / 预设名）解析为接入候选（缺省 = 统一输入接入
-   * 不可用）—— 由 caller 注入，已绑定 light LLM（生产经 resolveMcpSetup + light 角色，
-   * 测试注 mock）。面板只调它、不感知 LLM，与 mcpProbe 同构。
+   * 把用户输入（包名 / 关键词 / URL / 命令 / 预设名）解析为接入候选或候选列表（缺省 =
+   * 统一输入接入不可用）—— 由 caller 注入（生产经 resolveMcpSetup + main LLM + 搜索，
+   * 测试注 mock）。确定性输入直接出 candidate，裸输入经搜索引导出 choices。
+   * `onStep` 回报当前步骤（已是人话）供 loading 显示。面板只调它、不感知 LLM / 搜索。
    */
-  mcpResolve?: (input: string, signal?: AbortSignal) => Promise<McpResolveResult>;
+  mcpResolve?: (
+    input: string,
+    signal?: AbortSignal,
+    onStep?: (message: string) => void,
+  ) => Promise<McpResolveResult>;
+  /**
+   * 阶段2 提取：从一个确定的真实包名（搜索引导选中的候选）读 README 提取启动配置为候选
+   * （缺省 = 选择候选后无法接入）。**与 mcpResolve 分开**——选中的精确包名若回走 mcpResolve
+   * 会被当关键词重新搜索；故由候选选择面板在选中时调此入口。
+   */
+  mcpExtract?: (packageName: string, signal?: AbortSignal) => Promise<McpResolveResult>;
 }
 
 /**
@@ -278,8 +301,12 @@ export type PanelAction =
       message: string;
       /** 取消（Esc）时 pop 回上一面板的 state——task 不改 state，故用进入时的快照。 */
       state: WorkingState;
-      /** 异步任务：收 AbortSignal（取消时 abort），返回下一步 PanelAction。 */
-      run: (signal: AbortSignal) => Promise<PanelAction>;
+      /**
+       * 异步任务：收 AbortSignal（取消时 abort），返回下一步 PanelAction。
+       * `report(message)` 可在执行中更新 loading 显示的当前步骤（多阶段任务用，如搜索引导
+       * 的"正在搜索…→正在读取…"）；不调则保持进入时的静态 message。
+       */
+      run: (signal: AbortSignal, report: (message: string) => void) => Promise<PanelAction>;
     };
 
 // ─── 主入口 Context / Result ───

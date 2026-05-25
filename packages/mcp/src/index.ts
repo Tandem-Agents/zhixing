@@ -14,6 +14,8 @@ export type {
   HttpGetText,
   FetchMcpSourceOptions,
 } from "./source.js";
+export { searchMcpServers } from "./search.js";
+export type { McpSearchResult, SearchMcpServersOptions } from "./search.js";
 export {
   isValidServerId,
   makeToolName,

@@ -26,6 +26,8 @@
 | 016 | RuntimeSession 与配置热重载（REPL 内 `/config` + blue-green swap + 协同生命周期聚合） | [runtime-session-hot-reload.md](runtime-session-hot-reload.md) | 设计中 |
 | 017 | CLI 视觉设计语言（七条核心原则 + 视觉元素规范，覆盖配置编辑器 + REPL + 未来 TUI） | [cli-ui-design-language.md](cli-ui-design-language.md) | 设计中 |
 | 018 | 输入区视觉规范（box chrome + 多行扩展 + typeahead 选中行点阵纹理同源） | [input-zone-visual.md](input-zone-visual.md) | 设计中 |
+| 019 | 轻量工具循环（来源无关原语：代码发起 + 注入工具集 + 多轮 LLM 决策，事实焊死/判断信任） | [lightweight-tool-loop.md](lightweight-tool-loop.md) | 设计中 |
+| 020 | MCP Host（船坞）（连接层 + 映射层 + 事实驱动接入 + 搜索引导） | [mcp-host.md](mcp-host.md) | 部分实施 |
 
 ## 编写规范
 

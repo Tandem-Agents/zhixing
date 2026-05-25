@@ -450,9 +450,10 @@ export function handleMcpAddInputPanelKey(
         type: "loading",
         message: `正在识别 ${input}…`,
         state: clearInputBuffer(state),
-        run: async (signal) => {
-          const result = await resolve(input, signal);
-          // 解析失败：保留输入供修改（不退回让用户手填技术字段）
+        // report 把搜索引导的当前步骤（已是人话）更新到 loading 显示
+        run: async (signal, report) => {
+          const result = await resolve(input, signal, report);
+          // 解析失败 / 没找到：保留输入供修改（不退回让用户手填技术字段）
           if (!result.ok) {
             return {
               type: "replace",
@@ -460,7 +461,15 @@ export function handleMcpAddInputPanelKey(
               panel: { kind: "mcp-add-input", error: result.error },
             };
           }
-          // 唯一性：撞名不静默覆盖——提示去其面板编辑 / 换标识，保留输入
+          // 裸输入经搜索引导出候选列表 → 选择面板（选中后再阶段2提取）
+          if ("choices" in result) {
+            return {
+              type: "replace",
+              state: clearInputBuffer(state),
+              panel: { kind: "mcp-choices", choices: result.choices, selectedIndex: 0 },
+            };
+          }
+          // 确定性候选（预设 / URL / 命令）→ 唯一性检查 → 填密钥面板
           const { candidate } = result;
           if (listMcpServerIds(state).includes(candidate.serverId)) {
             return {
@@ -475,6 +484,121 @@ export function handleMcpAddInputPanelKey(
           // 用 replace（非 navigate）切到候选面板收集密钥：这样接入成功 / 取消时单次 pop
           // 即回到 MCP 服务主列表（看到刚接入的 server），而不是停在本输入页造成"没成功"
           // 的错觉（无 label：候选面板标题用 serverId）。
+          return {
+            type: "replace",
+            state: clearInputBuffer(state),
+            panel: { kind: "mcp-add", candidate, inputs: {}, fieldIndex: 0 },
+          };
+        },
+      };
+    }
+    default:
+      return { type: "stay", state };
+  }
+}
+
+// ─── mcp-choices：搜索引导出的候选列表（↑↓ 选一个 → 阶段2 提取 → 填密钥） ───
+
+const MCP_CHOICES_FOOTER_HINTS = [
+  "↑↓ 选择",
+  "Enter 接入",
+  "Esc 重新输入",
+  "Ctrl+C 退出",
+] as const;
+
+export function renderMcpChoicesPanel(
+  _state: WorkingState,
+  descriptor: Extract<PanelDescriptor, { kind: "mcp-choices" }>,
+  renderer: Renderer,
+): void {
+  renderer.clear();
+  renderer.hideCursor();
+
+  const width = renderer.terminalWidth();
+  const contentWidth = chromeContentWidth(width);
+  const wrapProse = (text: string): string[] =>
+    text.split("\n").flatMap((seg) => wrapToWidth(seg, contentWidth));
+
+  const bodyLines: string[] = wrapProse(
+    "找到这些 MCP server，选一个接入（↑↓ 选择，Enter 确认）：",
+  );
+  bodyLines.push("");
+  descriptor.choices.forEach((choice, i) => {
+    const selected = i === descriptor.selectedIndex;
+    const name = `${selected ? "❯ " : "  "}${choice.name}`;
+    bodyLines.push(selected ? tone.bold(name) : name);
+    const detail = choice.summary || choice.reason;
+    if (detail) {
+      for (const line of wrapProse(`    ${detail}`)) bodyLines.push(tone.dim(line));
+    }
+  });
+
+  renderer.writeLines(
+    renderChrome({ title: "选择 MCP server", body: bodyLines, width }),
+  );
+  renderer.writeLine("");
+
+  if (descriptor.error) {
+    renderer.writeLine(tone.error(`  ✗ ${descriptor.error}`));
+    renderer.writeLine("");
+  }
+
+  renderer.writeLines(renderFooter({ width, hints: MCP_CHOICES_FOOTER_HINTS }));
+}
+
+export function handleMcpChoicesPanelKey(
+  ctx: ConfigEditorContext,
+  state: WorkingState,
+  descriptor: Extract<PanelDescriptor, { kind: "mcp-choices" }>,
+  key: KeyEvent,
+): PanelAction {
+  const count = descriptor.choices.length;
+
+  switch (key.type) {
+    case "ctrl-c":
+      return { type: "exit", result: { kind: "cancelled" } };
+    case "escape":
+      // 回输入框重输关键词（choices 由 replace 而来，栈上无输入页可 pop）
+      return { type: "replace", state, panel: { kind: "mcp-add-input" } };
+    case "arrow-up": {
+      const idx = (descriptor.selectedIndex - 1 + count) % count;
+      return { type: "replace", state, panel: { ...descriptor, selectedIndex: idx, error: undefined } };
+    }
+    case "arrow-down": {
+      const idx = (descriptor.selectedIndex + 1) % count;
+      return { type: "replace", state, panel: { ...descriptor, selectedIndex: idx, error: undefined } };
+    }
+    case "enter": {
+      const choice = descriptor.choices[descriptor.selectedIndex];
+      if (!choice) return { type: "stay", state };
+
+      const extract = ctx.runtime?.mcpExtract;
+      if (!extract) {
+        return { type: "replace", state, panel: { ...descriptor, error: "无法接入（未注入提取能力）" } };
+      }
+
+      return {
+        type: "loading",
+        message: `正在读取 ${choice.name} 的说明…`,
+        state,
+        run: async (signal) => {
+          const result = await extract(choice.name, signal);
+          // 提取失败 / 无设置说明：原地回显，留在候选列表让用户换一个
+          if (!result.ok) {
+            return { type: "replace", state, panel: { ...descriptor, error: result.error } };
+          }
+          // mcpExtract 是确定包名提取，不应返回 choices——防御
+          if ("choices" in result) {
+            return { type: "replace", state, panel: { ...descriptor, error: "提取结果异常，请换一个" } };
+          }
+          const { candidate } = result;
+          if (listMcpServerIds(state).includes(candidate.serverId)) {
+            return {
+              type: "replace",
+              state,
+              panel: { ...descriptor, error: `已存在 server "${candidate.serverId}"——换一个，或去其面板编辑。` },
+            };
+          }
           return {
             type: "replace",
             state: clearInputBuffer(state),

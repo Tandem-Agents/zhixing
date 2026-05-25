@@ -12,6 +12,7 @@
 
 import { isValidServerId } from "@zhixing/mcp";
 import type {
+  McpSearchResult,
   McpServerSpec,
   McpSourceResult,
   McpToolDescriptor,
@@ -26,6 +27,11 @@ import {
   type McpSecretFieldSpec,
 } from "../registries/index.js";
 import { toServerSpec } from "../runtime/mcp-config.js";
+import {
+  mcpProgressText,
+  runMcpDiscovery,
+  type McpDiscoveryChoice,
+} from "./mcp-discovery.js";
 
 /**
  * 接入引导所需的 LLM 能力 —— 由 config-editor ctx 注入（light 模型），与工具调用上下文无关。
@@ -45,9 +51,11 @@ export type McpSourceFetcher = (
   signal?: AbortSignal,
 ) => Promise<McpSourceResult>;
 
-/** resolveMcpSetup 的注入依赖：查真实信息源 + 据源文本提取的 LLM。 */
+/** resolveMcpSetup 的注入依赖：搜真实包 + 查真实信息源 + 据源文本提取的 LLM。 */
 export interface McpResolveDeps {
   fetchSource: McpSourceFetcher;
+  /** 搜真实 npm 包（裸输入走搜索引导用；注入 @zhixing/mcp 的 searchMcpServers）。 */
+  search: (query: string, signal?: AbortSignal) => Promise<McpSearchResult[]>;
   llm: McpSetupLlm;
 }
 
@@ -70,6 +78,7 @@ export interface McpSetupCandidate {
 
 export type McpResolveResult =
   | { ok: true; candidate: McpSetupCandidate }
+  | { ok: true; choices: McpDiscoveryChoice[] }
   | { ok: false; error: string };
 
 export type McpValidateResult =
@@ -91,15 +100,17 @@ export function presetToCandidate(preset: McpPreset): McpSetupCandidate {
  *   - 预设名 / id   → curated 预设（人工核过的事实）
  *   - URL           → http 候选，地址就是用户给的（确定性，不经 LLM）
  *   - 完整命令（含空格，如 `npx -y @x/y`）→ stdio 候选，按空格拆即用户给的事实（确定性）
- *   - 裸包名        → 查 npm 真实信息源（README），据真实文本提取启动方式 / 密钥（grounded）
+ *   - 裸输入（包名 / 关键词）→ 搜真实 npm 包 + LLM 多轮挑出主流候选（出 choices 供用户选）
  *
  * 查不到 / 源里没写的，一律返回诚实的失败原因，引导用户改输完整命令或 URL，不填假值。
- * 面板"选预设"可直接 presetToCandidate；此函数服务"统一输入框"。
+ * 面板"选预设"可直接 presetToCandidate；此函数服务"统一输入框"。`onStep` 用于把搜索引导的
+ * 当前步骤（已翻译成人话）回报给 UI（loading 显示）。
  */
 export async function resolveMcpSetup(
   input: string,
   deps: McpResolveDeps,
   signal?: AbortSignal,
+  onStep?: (message: string) => void,
 ): Promise<McpResolveResult> {
   const trimmed = input.trim();
   if (trimmed === "") return { ok: false, error: "请输入 server 标识" };
@@ -117,8 +128,20 @@ export async function resolveMcpSetup(
   // 完整命令（含空格）：用户给出的确切启动命令即事实，按空格拆，不经 LLM
   if (/\s/.test(trimmed)) return buildCommandCandidate(trimmed);
 
-  // 裸包名：查真实源 + 据 README 文本 grounded 提取
-  return groundFromSource(trimmed, deps, signal);
+  // 裸输入：搜真实 npm 包 + LLM 据真实结果挑出 ≤5 主流候选（编不出不存在的包）
+  const discovery = await runMcpDiscovery(
+    trimmed,
+    {
+      search: deps.search,
+      fetchSource: deps.fetchSource,
+      complete: deps.llm,
+      ...(onStep ? { onProgress: (p) => onStep(mcpProgressText(p)) } : {}),
+    },
+    signal,
+  );
+  return discovery.ok
+    ? { ok: true, choices: discovery.choices }
+    : { ok: false, error: discovery.error };
 }
 
 /** URL → http 候选：地址原样，无需 LLM；只兜底 server 名推导。 */
@@ -158,17 +181,18 @@ function buildCommandCandidate(commandLine: string): McpResolveResult {
 }
 
 /**
- * 裸包名 → 查 npm 真实信息源（README）→ 据真实文本提取启动配置（grounded）。
+ * 确定包名 → 查 npm 真实信息源（README）→ 据真实文本提取启动配置（grounded）为候选。
  *
- * 三态诚实失败，绝不臆造：
+ * 用于搜索引导选中某真实包之后的"阶段2 提取"（与 `resolveMcpSetup` 分开——选中的精确包名
+ * 不能再走 resolveMcpSetup 的搜索引导分支，否则会重新搜索）。三态诚实失败，绝不臆造：
  *   - 包确不存在        → "没找到这个包"
  *   - 查询失败（网络等）→ "暂时查不到，请重试或直接输入完整命令 / URL"
  *   - 找到但无 README   → "没有可用的设置说明，请直接输入完整命令或改用预设"
  * 有 README 才交给 LLM 抽取，且只让它用给定文本、缺的标 null（见 buildExtractionPrompt）。
  */
-async function groundFromSource(
+export async function extractMcpCandidate(
   packageName: string,
-  deps: McpResolveDeps,
+  deps: { fetchSource: McpSourceFetcher; llm: McpSetupLlm },
   signal?: AbortSignal,
 ): Promise<McpResolveResult> {
   const serverId = deriveServerId(packageName);
