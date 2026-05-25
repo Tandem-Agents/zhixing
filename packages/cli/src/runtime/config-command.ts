@@ -36,7 +36,7 @@ import type {
   McpSetupLlm,
   SectionId,
 } from "../config-editor/index.js";
-import { probeServer, type McpHub } from "@zhixing/mcp";
+import { fetchMcpServerSource, probeServer, type McpHub } from "@zhixing/mcp";
 import { layout } from "../tui/index.js";
 import type { CliWriter, ScreenController } from "../screen/index.js";
 import type { RuntimeSession } from "./session.js";
@@ -179,23 +179,33 @@ export async function handleConfigCommand(deps: ConfigCommandDeps): Promise<void
  *
  * 注入三件运行态：① serverStatuses（让 section 显示连接状态）；② discovery 探测
  * （probeServer，接入向导验证连接，proxy 与 hub 同源 config.network.proxy）；③ mcpResolve
- * （把输入标识解析为候选——绑定 light 角色作推断 LLM，面板不感知 LLM 本身）。
+ * （把输入标识解析为候选——事实驱动：查 npm 真实源 + 据源文本提取，面板不感知查源 / LLM）。
  */
 export async function handleMcpCommand(
   deps: ConfigCommandDeps & { hub: McpHub },
 ): Promise<void> {
   const proxy = loadConfig().network?.proxy;
 
-  // 接入推断 LLM——走 main 档（callText 的 "main" 通道）：标识 → 连接方式的解析质量
-  // 直接决定接入成败，是质量敏感任务，不用 light。callText 不收 signal：面板取消（Esc）
-  // 放弃等待、后台结果丢弃即可，无需中断底层调用。
+  // 据源文本提取的 LLM——走 main 档（callText 的 "main" 通道）：从 README 抽启动方式 /
+  // 密钥的质量直接决定接入成败，是质量敏感任务，不用 light。callText 不收 signal：面板
+  // 取消（Esc）放弃等待、后台结果丢弃即可，无需中断底层调用。
   const inferLlm: McpSetupLlm = (prompt) =>
     deps.session.runtime.callText(prompt, "main");
 
   const runtime: ConfigEditorRuntime = {
     mcpServerStatuses: () => deps.hub.serverStatuses(),
     mcpProbe: (spec, signal) => probeServer(spec, { signal, proxy }),
-    mcpResolve: (input, signal) => resolveMcpSetup(input, inferLlm, signal),
+    // 查源走 SSRF-safe fetch，proxy 与 hub / probe 同源 config.network.proxy
+    mcpResolve: (input, signal) =>
+      resolveMcpSetup(
+        input,
+        {
+          fetchSource: (name, sig) =>
+            fetchMcpServerSource(name, { proxy, ...(sig ? { signal: sig } : {}) }),
+          llm: inferLlm,
+        },
+        signal,
+      ),
   };
   await runEditorCommand(deps, {
     sections: ["mcp"],

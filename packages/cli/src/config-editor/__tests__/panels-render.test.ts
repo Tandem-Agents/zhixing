@@ -585,6 +585,43 @@ describe("mcp 面板渲染冒烟", () => {
     expect(out).toContain("获取 A 的方式");
   });
 
+  it("mcp-add panel · 推断字段 example 为空 → 不渲染孤立的'示例：'行", () => {
+    const candidate: McpSetupCandidate = {
+      serverId: "custom-x",
+      entry: { type: "stdio", command: "npx", args: ["-y", "x"] },
+      secretFields: [{ key: "FOO_TOKEN", label: "Foo Token", hint: "在后台获取", example: "" }],
+      source: "inferred",
+    };
+    const out = renderAndCapture((renderer) => {
+      renderMcpAddPanel(
+        emptyState(),
+        { kind: "mcp-add", candidate, inputs: {}, fieldIndex: 0 },
+        renderer,
+      );
+    });
+    expect(out).toContain("在后台获取");
+    expect(out).not.toContain("示例：");
+  });
+
+  it("mcp-add panel · 密钥字段无 docUrl 但有主页 → 诚实兜底到项目主页", () => {
+    const candidate: McpSetupCandidate = {
+      serverId: "bar",
+      entry: { type: "stdio", command: "npx", args: ["-y", "@foo/bar"] },
+      secretFields: [{ key: "FOO_TOKEN", label: "Foo Token", hint: "需要令牌", example: "" }],
+      source: "inferred",
+      homepage: "https://bar.dev",
+    };
+    const out = renderAndCapture((renderer) => {
+      renderMcpAddPanel(
+        emptyState(),
+        { kind: "mcp-add", candidate, inputs: {}, fieldIndex: 0 },
+        renderer,
+      );
+    });
+    expect(out).toContain("可查项目主页");
+    expect(out).toContain("bar.dev");
+  });
+
   it("mcp-add panel · 推断 stdio 候选显示'将运行'命令（探测前知情同意）", () => {
     const candidate: McpSetupCandidate = {
       serverId: "linear",

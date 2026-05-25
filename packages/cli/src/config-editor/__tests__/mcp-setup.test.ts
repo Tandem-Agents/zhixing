@@ -1,54 +1,116 @@
 /**
- * MCP 接入引导编排测试 —— 预设路径 + 推断路径（mock light LLM）+ discovery（mock probe）。
+ * MCP 接入引导编排测试 —— 事实驱动解析（预设 / URL / 命令确定性 + 裸包名查源 grounded）
+ * + discovery（mock probe）。
  *
- * 全程纯函数 / 注入依赖，无真实连接、无定时器。
+ * 全程注入 mock 依赖（fetchSource + llm），无真实联网、无真实 LLM、无定时器。
+ * 重点验证"源里没有就不编"：查不到 / 无 README 给诚实失败，提取只认源文本。
  */
 
 import { describe, expect, it, vi } from "vitest";
-import type { McpServerSpec, ProbeResult } from "@zhixing/mcp";
+import type { McpServerSpec, McpSourceResult, ProbeResult } from "@zhixing/mcp";
 import {
   applyMcpSetup,
   deriveServerId,
-  inferMcpSetup,
   presetToCandidate,
   resolveMcpSetup,
   validateMcpSetup,
+  type McpResolveDeps,
   type McpSetupCandidate,
 } from "../mcp-setup.js";
 import { findMcpPreset } from "../../registries/index.js";
 
-const STDIO_INFERENCE = JSON.stringify({
-  transport: "stdio",
+// 据 README 抽取的 grounded 输出（无 transport——裸包名恒为 stdio）；含从 README 取到的 docUrl
+const EXTRACTED = JSON.stringify({
   command: "npx",
   args: ["-y", "@foo/bar-mcp"],
   secretFields: [
-    { key: "FOO_TOKEN", label: "Foo Token", hint: "从 foo 后台获取", example: "foo_xxx" },
+    { key: "FOO_TOKEN", label: "Foo Token", hint: "在 foo 后台创建", docUrl: "https://foo.dev/keys" },
   ],
 });
 
-describe("resolveMcpSetup — 预设优先、否则推断", () => {
-  it("按 id 命中预设，不调 LLM", async () => {
-    const llm = vi.fn();
-    const result = await resolveMcpSetup("github", llm);
+const found = (readme: string): McpSourceResult => ({ kind: "found", readme });
+
+/** 组装注入依赖；缺省 fetchSource 返回 not-found、llm 返回空对象（各测试按需覆盖）。 */
+function makeDeps(over: Partial<McpResolveDeps> = {}): McpResolveDeps {
+  return {
+    fetchSource: over.fetchSource ?? vi.fn(async (): Promise<McpSourceResult> => ({ kind: "not-found" })),
+    llm: over.llm ?? vi.fn(async () => "{}"),
+  };
+}
+
+describe("resolveMcpSetup — 预设 / 确定性输入，不查源不调 LLM", () => {
+  it("按 id 命中预设，不查源、不调 LLM", async () => {
+    const deps = makeDeps();
+    const result = await resolveMcpSetup("github", deps);
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.candidate.source).toBe("preset");
-    expect(llm).not.toHaveBeenCalled();
+    expect(deps.fetchSource).not.toHaveBeenCalled();
+    expect(deps.llm).not.toHaveBeenCalled();
   });
 
   it("按名称（大小写不敏感）命中预设", async () => {
-    const result = await resolveMcpSetup("GitHub", vi.fn());
+    const result = await resolveMcpSetup("GitHub", makeDeps());
     expect(result.ok).toBe(true);
     if (result.ok) expect(result.candidate.serverId).toBe("github");
   });
 
   it("空输入直接报错", async () => {
-    const result = await resolveMcpSetup("   ", vi.fn());
+    const result = await resolveMcpSetup("   ", makeDeps());
     expect(result.ok).toBe(false);
   });
 
-  it("非预设走 LLM 推断", async () => {
-    const llm = vi.fn(async () => STDIO_INFERENCE);
-    const result = await resolveMcpSetup("@foo/bar-mcp", llm);
+  it("URL → http 候选：地址原样，不查源、不调 LLM", async () => {
+    const deps = makeDeps();
+    const result = await resolveMcpSetup("https://mcp.example.com/sse", deps);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.candidate.entry).toEqual({ type: "http", url: "https://mcp.example.com/sse" });
+      expect(result.candidate.serverId).toBe("mcp-example-com");
+      expect(result.candidate.secretFields).toEqual([]);
+    }
+    expect(deps.fetchSource).not.toHaveBeenCalled();
+    expect(deps.llm).not.toHaveBeenCalled();
+  });
+
+  it("完整命令（含空格）→ stdio 候选：按空格拆，server 名取末段包名，不查源、不调 LLM", async () => {
+    const deps = makeDeps();
+    const result = await resolveMcpSetup("npx -y @foo/bar-mcp", deps);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.candidate.entry).toEqual({
+        type: "stdio",
+        command: "npx",
+        args: ["-y", "@foo/bar-mcp"],
+      });
+      expect(result.candidate.serverId).toBe("bar-mcp");
+    }
+    expect(deps.fetchSource).not.toHaveBeenCalled();
+    expect(deps.llm).not.toHaveBeenCalled();
+  });
+
+  it("命令带路径参数 → server 名取首个非 flag 实参（包名），不取末参路径", async () => {
+    const result = await resolveMcpSetup(
+      "npx -y @mcp/server-filesystem /some/path",
+      makeDeps(),
+    );
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.candidate.serverId).toBe("server-filesystem");
+      expect(result.candidate.entry).toEqual({
+        type: "stdio",
+        command: "npx",
+        args: ["-y", "@mcp/server-filesystem", "/some/path"],
+      });
+    }
+  });
+});
+
+describe("resolveMcpSetup — 裸包名：查真实源 + grounded 提取", () => {
+  it("找到 + 有 README → 调 LLM 据源抽取，产出 stdio 候选 + 源里的密钥/docUrl", async () => {
+    const fetchSource = vi.fn(async () => found("# bar-mcp\n设置：在 foo 后台拿 FOO_TOKEN"));
+    const llm = vi.fn(async () => EXTRACTED);
+    const result = await resolveMcpSetup("@foo/bar-mcp", makeDeps({ fetchSource, llm }));
+    expect(fetchSource).toHaveBeenCalledOnce();
     expect(llm).toHaveBeenCalledOnce();
     expect(result.ok).toBe(true);
     if (result.ok) {
@@ -60,50 +122,137 @@ describe("resolveMcpSetup — 预设优先、否则推断", () => {
         args: ["-y", "@foo/bar-mcp"],
       });
       expect(result.candidate.secretFields[0]?.key).toBe("FOO_TOKEN");
+      expect(result.candidate.secretFields[0]?.docUrl).toBe("https://foo.dev/keys");
     }
   });
-});
 
-describe("inferMcpSetup — LLM 推断解析", () => {
-  it("http 推断：取 url、不要 command", async () => {
-    const llm = async () =>
-      '{"transport":"http","url":"https://mcp.example.com/sse"}';
-    const result = await inferMcpSetup("https://mcp.example.com/sse", llm);
+  it("提示词带上真实 README 文本，且约束只用给定文本", async () => {
+    let seenPrompt = "";
+    const fetchSource = vi.fn(async () => found("READMETOKEN_设置说明在这里"));
+    const llm = vi.fn(async (prompt: string) => {
+      seenPrompt = prompt;
+      return EXTRACTED;
+    });
+    await resolveMcpSetup("@foo/bar-mcp", makeDeps({ fetchSource, llm }));
+    expect(seenPrompt).toContain("READMETOKEN_设置说明在这里");
+    expect(seenPrompt).toContain("禁止用你自己的知识");
+  });
+
+  it("无法推导合法 server 名（纯符号输入）→ 诚实早退，不查源、不调 LLM", async () => {
+    const fetchSource = vi.fn();
+    const llm = vi.fn();
+    const result = await resolveMcpSetup("@@@", makeDeps({ fetchSource, llm }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("无法从");
+    expect(fetchSource).not.toHaveBeenCalled();
+    expect(llm).not.toHaveBeenCalled();
+  });
+
+  it("包确不存在（not-found）→ 诚实报错，不调 LLM", async () => {
+    const fetchSource = vi.fn(async (): Promise<McpSourceResult> => ({ kind: "not-found" }));
+    const llm = vi.fn();
+    const result = await resolveMcpSetup("@foo/does-not-exist", makeDeps({ fetchSource, llm }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("没找到");
+    expect(llm).not.toHaveBeenCalled();
+  });
+
+  it("查询失败（error）→ 诚实报错并引导改输命令 / URL，不调 LLM", async () => {
+    const fetchSource = vi.fn(
+      async (): Promise<McpSourceResult> => ({ kind: "error", reason: "ECONNRESET" }),
+    );
+    const llm = vi.fn();
+    const result = await resolveMcpSetup("@foo/bar-mcp", makeDeps({ fetchSource, llm }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toContain("暂时查不到");
+      expect(result.error).toContain("ECONNRESET");
+    }
+    expect(llm).not.toHaveBeenCalled();
+  });
+
+  it("找到但 README 为空 → 诚实报错（无设置说明），不调 LLM", async () => {
+    const fetchSource = vi.fn(async () => found("   "));
+    const llm = vi.fn();
+    const result = await resolveMcpSetup("@foo/bar-mcp", makeDeps({ fetchSource, llm }));
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("没有可用的设置说明");
+    expect(llm).not.toHaveBeenCalled();
+  });
+
+  it("LLM 输出不可解析 → 回落基线 npx -y <包名>（非硬失败，由实连证伪）", async () => {
+    const fetchSource = vi.fn(async () => found("# bar-mcp"));
+    const llm = vi.fn(async () => "抱歉我不确定");
+    const result = await resolveMcpSetup("@foo/bar-mcp", makeDeps({ fetchSource, llm }));
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.candidate.entry).toEqual({
-        type: "http",
-        url: "https://mcp.example.com/sse",
+        type: "stdio",
+        command: "npx",
+        args: ["-y", "@foo/bar-mcp"],
       });
-      expect(result.candidate.serverId).toBe("mcp-example-com");
+      expect(result.candidate.secretFields).toEqual([]);
     }
   });
 
   it("容忍代码围栏 / 前后文字", async () => {
-    const llm = async () => "```json\n" + STDIO_INFERENCE + "\n```";
-    const result = await inferMcpSetup("@foo/bar-mcp", llm);
+    const fetchSource = vi.fn(async () => found("# bar-mcp"));
+    const llm = vi.fn(async () => "```json\n" + EXTRACTED + "\n```");
+    const result = await resolveMcpSetup("@foo/bar-mcp", makeDeps({ fetchSource, llm }));
     expect(result.ok).toBe(true);
-  });
-
-  it("输出不可解析 → graceful 报错", async () => {
-    const result = await inferMcpSetup("x", async () => "抱歉我不知道");
-    expect(result.ok).toBe(false);
+    if (result.ok) expect(result.candidate.secretFields[0]?.key).toBe("FOO_TOKEN");
   });
 
   it("LLM 抛错 → graceful 报错", async () => {
-    const result = await inferMcpSetup("x", async () => {
+    const fetchSource = vi.fn(async () => found("# bar-mcp"));
+    const llm = vi.fn(async () => {
       throw new Error("model timeout");
     });
+    const result = await resolveMcpSetup("@foo/bar-mcp", makeDeps({ fetchSource, llm }));
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.error).toContain("model timeout");
   });
 
-  it("stdio 缺 command → 报错", async () => {
-    const result = await inferMcpSetup(
-      "@foo/bar-mcp",
-      async () => '{"transport":"stdio"}',
+  it("README 里没提密钥 → secretFields 为空（不臆造密钥）", async () => {
+    const fetchSource = vi.fn(async () => found("# bar-mcp 无需密钥"));
+    const llm = vi.fn(async () =>
+      JSON.stringify({ command: "npx", args: ["-y", "@foo/bar-mcp"], secretFields: [] }),
     );
-    expect(result.ok).toBe(false);
+    const result = await resolveMcpSetup("@foo/bar-mcp", makeDeps({ fetchSource, llm }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.candidate.secretFields).toEqual([]);
+  });
+
+  it("查源带回主页 → 透传到候选（作密钥无 docUrl 时的诚实兜底）", async () => {
+    const fetchSource = vi.fn(
+      async (): Promise<McpSourceResult> => ({ kind: "found", readme: "# bar", homepage: "https://bar.dev" }),
+    );
+    const llm = vi.fn(async () => EXTRACTED);
+    const result = await resolveMcpSetup("@foo/bar-mcp", makeDeps({ fetchSource, llm }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.candidate.homepage).toBe("https://bar.dev");
+  });
+
+  it("查源无主页 → 候选不带 homepage（不臆造）", async () => {
+    const fetchSource = vi.fn(async () => found("# bar"));
+    const llm = vi.fn(async () => EXTRACTED);
+    const result = await resolveMcpSetup("@foo/bar-mcp", makeDeps({ fetchSource, llm }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.candidate.homepage).toBeUndefined();
+  });
+
+  it("docUrl 为 null（README 没给链接）→ 不带 docUrl（不臆造链接）", async () => {
+    const fetchSource = vi.fn(async () => found("# bar-mcp"));
+    const llm = vi.fn(async () =>
+      JSON.stringify({
+        command: "npx",
+        args: ["-y", "@foo/bar-mcp"],
+        secretFields: [{ key: "FOO_TOKEN", label: "Token", hint: "见后台", docUrl: null }],
+      }),
+    );
+    const result = await resolveMcpSetup("@foo/bar-mcp", makeDeps({ fetchSource, llm }));
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.candidate.secretFields[0]?.docUrl).toBeUndefined();
   });
 });
 

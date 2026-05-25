@@ -226,9 +226,17 @@ export function renderMcpAddPanel(
     for (const line of wrapProse(field.hint)) bodyLines.push(line);
     if (field.docUrl) {
       bodyLines.push(`${tone.dim("文档：")}${osc8Hyperlink(field.docUrl)}`);
+    } else if (candidate.homepage) {
+      // 源没给该密钥的获取地址——诚实兜底到真实项目主页，不臆造链接
+      bodyLines.push(
+        `${tone.dim("获取地址未提供，可查项目主页：")}${osc8Hyperlink(candidate.homepage)}`,
+      );
     }
-    bodyLines.push("");
-    bodyLines.push(tone.dim(`示例：${field.example}`));
+    // 示例仅预设字段才有（推断来源不臆造示例值）——为空则不渲染孤立的"示例："行
+    if (field.example) {
+      bodyLines.push("");
+      bodyLines.push(tone.dim(`示例：${field.example}`));
+    }
   } else {
     // 无密钥需求（如推断出的免鉴权 server）——直接 Enter 验证并接入
     if (bodyLines.length > 0) bodyLines.push("");
@@ -377,10 +385,11 @@ export function renderMcpAddInputPanel(
 
   const bodyLines: string[] = wrapProse(
     "输入 MCP server 标识——npm 包名、启动命令、远程 URL，或预设名（github / notion）。" +
-      "回车后自动识别接入方式（预设直接命中，否则智能推断）。",
+      "预设、URL 与完整命令直接采用；只给包名时会查 npm 确认并读取其设置说明。",
   );
   bodyLines.push("");
   bodyLines.push(tone.dim("示例：@notionhq/notion-mcp-server"));
+  bodyLines.push(tone.dim("示例：npx -y @notionhq/notion-mcp-server"));
   bodyLines.push(tone.dim("示例：https://api.example.com/mcp/"));
 
   renderer.writeLines(

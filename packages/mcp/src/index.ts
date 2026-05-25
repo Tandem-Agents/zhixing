@@ -8,6 +8,12 @@ export type {
 export { mapServerTools } from "./mapping.js";
 export { probeServer } from "./probe.js";
 export type { ProbeOptions, ProbeResult } from "./probe.js";
+export { fetchMcpServerSource } from "./source.js";
+export type {
+  McpSourceResult,
+  HttpGetText,
+  FetchMcpSourceOptions,
+} from "./source.js";
 export {
   isValidServerId,
   makeToolName,

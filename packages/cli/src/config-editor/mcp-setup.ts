@@ -13,6 +13,7 @@
 import { isValidServerId } from "@zhixing/mcp";
 import type {
   McpServerSpec,
+  McpSourceResult,
   McpToolDescriptor,
   ProbeResult,
 } from "@zhixing/mcp";
@@ -38,9 +39,21 @@ export type McpProbe = (
   signal?: AbortSignal,
 ) => Promise<ProbeResult>;
 
+/** 信息源抓取函数 —— 由调用方注入（默认 @zhixing/mcp 的 fetchMcpServerSource），测试注入 mock。 */
+export type McpSourceFetcher = (
+  packageName: string,
+  signal?: AbortSignal,
+) => Promise<McpSourceResult>;
+
+/** resolveMcpSetup 的注入依赖：查真实信息源 + 据源文本提取的 LLM。 */
+export interface McpResolveDeps {
+  fetchSource: McpSourceFetcher;
+  llm: McpSetupLlm;
+}
+
 /** 一次接入的候选方案 —— 预设命中或 LLM 推断，面板据此引导填密钥 + 验证 + 写盘。 */
 export interface McpSetupCandidate {
-  /** 默认 server id（预设 id / 从标识推导；用户可在面板改名）。 */
+  /** server id（预设 id / 从标识推导）；撞名时由输入页提示换标识重输，不在候选页改名。 */
   serverId: string;
   /** 连接配置（不含密钥）。 */
   entry: McpServerConfigEntry;
@@ -48,6 +61,11 @@ export interface McpSetupCandidate {
   secretFields: McpSecretFieldSpec[];
   /** 来源：预设命中 vs LLM 推断（面板可对推断结果加"请核对"提示）。 */
   source: "preset" | "inferred";
+  /**
+   * 项目主页（仅查源得到的真实地址，源未给则缺省）——当某密钥字段没有 docUrl 时，面板
+   * 据此给"获取地址未提供，可查项目主页"的诚实兜底，不臆造获取链接。
+   */
+  homepage?: string;
 }
 
 export type McpResolveResult =
@@ -69,13 +87,18 @@ export function presetToCandidate(preset: McpPreset): McpSetupCandidate {
 }
 
 /**
- * 解析用户输入为接入候选：先按 id / 名称匹配预设，未命中走 LLM 推断。
+ * 解析用户输入为接入候选 —— 事实驱动，每个字段都有真实出处，绝不靠 LLM 凭记忆臆造：
+ *   - 预设名 / id   → curated 预设（人工核过的事实）
+ *   - URL           → http 候选，地址就是用户给的（确定性，不经 LLM）
+ *   - 完整命令（含空格，如 `npx -y @x/y`）→ stdio 候选，按空格拆即用户给的事实（确定性）
+ *   - 裸包名        → 查 npm 真实信息源（README），据真实文本提取启动方式 / 密钥（grounded）
  *
- * 面板"选预设"可直接 presetToCandidate；此函数服务"统一输入框"（用户键入包名 / URL / 预设名）。
+ * 查不到 / 源里没写的，一律返回诚实的失败原因，引导用户改输完整命令或 URL，不填假值。
+ * 面板"选预设"可直接 presetToCandidate；此函数服务"统一输入框"。
  */
 export async function resolveMcpSetup(
   input: string,
-  llm: McpSetupLlm,
+  deps: McpResolveDeps,
   signal?: AbortSignal,
 ): Promise<McpResolveResult> {
   const trimmed = input.trim();
@@ -88,34 +111,98 @@ export async function resolveMcpSetup(
   );
   if (byLabel) return { ok: true, candidate: presetToCandidate(byLabel) };
 
-  return inferMcpSetup(trimmed, llm, signal);
+  // URL：远程 server，地址即事实，不经 LLM
+  if (/^https?:\/\//i.test(trimmed)) return buildUrlCandidate(trimmed);
+
+  // 完整命令（含空格）：用户给出的确切启动命令即事实，按空格拆，不经 LLM
+  if (/\s/.test(trimmed)) return buildCommandCandidate(trimmed);
+
+  // 裸包名：查真实源 + 据 README 文本 grounded 提取
+  return groundFromSource(trimmed, deps, signal);
+}
+
+/** URL → http 候选：地址原样，无需 LLM；只兜底 server 名推导。 */
+function buildUrlCandidate(url: string): McpResolveResult {
+  const serverId = deriveServerId(url);
+  if (!isValidServerId(serverId)) {
+    return { ok: false, error: "无法从该 URL 推导合法 server 名，请确认地址是否正确" };
+  }
+  return {
+    ok: true,
+    candidate: { serverId, entry: { type: "http", url }, secretFields: [], source: "inferred" },
+  };
+}
+
+/** 完整命令 → stdio 候选：按空格拆 command + args，server 名取最像包名的实参。 */
+function buildCommandCandidate(commandLine: string): McpResolveResult {
+  const tokens = commandLine.split(/\s+/).filter(Boolean);
+  const command = tokens[0];
+  if (command === undefined) return { ok: false, error: "命令为空，请重新输入" };
+  const args = tokens.slice(1);
+  // server 名取第一个非 flag 实参（通常是包名 / 子命令）；取首参而非末参——末参常是
+  // 路径 / URL 等取值（如 `npx -y @x/fs /some/path` 末参是路径），会推出 "path" 这种错名。
+  const pkgish = args.find((t) => !t.startsWith("-")) ?? command;
+  const serverId = deriveServerId(pkgish);
+  if (!isValidServerId(serverId)) {
+    return { ok: false, error: "无法从该命令推导合法 server 名，请检查命令是否正确" };
+  }
+  return {
+    ok: true,
+    candidate: {
+      serverId,
+      entry: { type: "stdio", command, args },
+      secretFields: [],
+      source: "inferred",
+    },
+  };
 }
 
 /**
- * 非预设：调 light LLM 从标识（包名 / URL / 命令）推断启动方式，解析成候选。
+ * 裸包名 → 查 npm 真实信息源（README）→ 据真实文本提取启动配置（grounded）。
  *
- * 失败 graceful（LLM 异常 / 输出不可解析 / 推不出合法 id）—— 返回明确原因，由面板提示
- * "改用预设或核对标识"，不退回让用户手填技术字段。
+ * 三态诚实失败，绝不臆造：
+ *   - 包确不存在        → "没找到这个包"
+ *   - 查询失败（网络等）→ "暂时查不到，请重试或直接输入完整命令 / URL"
+ *   - 找到但无 README   → "没有可用的设置说明，请直接输入完整命令或改用预设"
+ * 有 README 才交给 LLM 抽取，且只让它用给定文本、缺的标 null（见 buildExtractionPrompt）。
  */
-export async function inferMcpSetup(
-  identifier: string,
-  llm: McpSetupLlm,
+async function groundFromSource(
+  packageName: string,
+  deps: McpResolveDeps,
   signal?: AbortSignal,
 ): Promise<McpResolveResult> {
+  const serverId = deriveServerId(packageName);
+  if (!isValidServerId(serverId)) {
+    return {
+      ok: false,
+      error: `无法从 "${packageName}" 推导合法 server 名，请直接输入完整启动命令或远程 URL`,
+    };
+  }
+
+  const source = await deps.fetchSource(packageName, signal);
+  if (source.kind === "not-found") {
+    return { ok: false, error: `没找到 npm 包 "${packageName}"，请核对名称是否正确` };
+  }
+  if (source.kind === "error") {
+    return {
+      ok: false,
+      error: `暂时查不到 "${packageName}"（${source.reason}）——请重试，或直接输入完整启动命令 / 远程 URL`,
+    };
+  }
+  if (source.readme.trim() === "") {
+    return {
+      ok: false,
+      error: `找到了 "${packageName}" 但没有可用的设置说明——请直接输入完整启动命令（如 \`npx -y ${packageName}\`）或改用预设`,
+    };
+  }
+
   let raw: string;
   try {
-    raw = await llm(buildInferencePrompt(identifier), signal);
+    raw = await deps.llm(buildExtractionPrompt(packageName, source.readme), signal);
   } catch (err) {
-    return { ok: false, error: `推断失败：${errMsg(err)}` };
+    return { ok: false, error: `读取设置说明失败：${errMsg(err)}` };
   }
-
-  const parsed = parseInference(raw);
-  if (!parsed.ok) return { ok: false, error: parsed.error };
-
-  const serverId = deriveServerId(identifier);
-  if (!isValidServerId(serverId)) {
-    return { ok: false, error: `无法从 "${identifier}" 推导合法 server id，请改用预设或手动命名` };
-  }
+  const parsed = parseExtraction(raw, packageName);
 
   return {
     ok: true,
@@ -124,6 +211,8 @@ export async function inferMcpSetup(
       entry: parsed.entry,
       secretFields: parsed.secretFields,
       source: "inferred",
+      // 真实主页透传给面板，作密钥字段无 docUrl 时的诚实"去哪找"兜底
+      ...(source.homepage ? { homepage: source.homepage } : {}),
     },
   };
 }
@@ -189,15 +278,30 @@ export function deriveServerId(identifier: string): string {
   return id;
 }
 
-/** 构造给推断 LLM 的提示 —— 要求严格 JSON 输出。 */
-function buildInferencePrompt(identifier: string): string {
+// README 截断上限：覆盖绝大多数包的"安装 / 配置 / 用法"段（多在开头），又不撑爆 token 预算。
+const README_MAX_CHARS = 12000;
+
+/** README 过长时截断，并明确告知 LLM 文本被截断（避免它以为后文无内容而臆造）。 */
+function truncateReadme(readme: string): string {
+  if (readme.length <= README_MAX_CHARS) return readme;
+  return `${readme.slice(0, README_MAX_CHARS)}\n…（README 已截断）`;
+}
+
+/**
+ * 给提取 LLM 的提示 —— 只让它从给定 README 文本里抽启动配置，严禁用自身知识补全 / 猜测。
+ * 这是事实驱动的核心：源里有什么就抽什么，没有的标 null，由上层据此做诚实兜底（基线命令）。
+ */
+function buildExtractionPrompt(packageName: string, readme: string): string {
   return [
-    "你是 MCP server 接入助手。给定一个 MCP server 标识（npm 包名 / 可执行命令 / URL），",
-    "判断它的启动方式，只输出 JSON、不要解释、不要代码围栏。",
-    `标识：${identifier}`,
+    `下面是 npm 包 "${packageName}" 的 README。请从中提取把它作为 MCP server 启动所需的配置。`,
+    "只依据下面的 README 文本，文本里没有写的就输出 null / 空数组，禁止用你自己的知识补全或猜测。",
+    "只输出 JSON，不要解释、不要代码围栏。",
     "JSON 格式：",
-    '{"transport":"stdio"|"http","command":"stdio 的命令(通常 npx)","args":["stdio 参数(通常 -y 和包名)"],"url":"http 的端点 URL","secretFields":[{"key":"环境变量名或请求头名","label":"展示名","hint":"获取方式","example":"示例","docUrl":"获取该密钥的页面 URL(如有)"}]}',
-    "规则：stdio 用 command+args、不要 url；http 用 url、不要 command/args；无密钥需求时 secretFields 为 []；docUrl 不确定就省略。",
+    '{"command":"启动命令(README 配置示例里的，通常 npx；没有则 null)","args":["启动参数(README 配置示例里的，通常含包名；没有则 []）"],"secretFields":[{"key":"环境变量名/请求头名","label":"展示名","hint":"README 里写的获取方式","docUrl":"README 里给的获取链接(没有则 null)"}]}',
+    "规则：secretFields 只列 README 明确要求的密钥；README 没提密钥就给 []；docUrl 只填 README 里真实出现的链接，没有就 null。",
+    "--- README 开始 ---",
+    truncateReadme(readme),
+    "--- README 结束 ---",
   ].join("\n");
 }
 
@@ -206,43 +310,36 @@ interface ParsedInference {
   secretFields: McpSecretFieldSpec[];
 }
 
-/** 解析 LLM 推断输出为连接配置 + 密钥字段；不可解析 / 字段缺失则返回明确错误。 */
-function parseInference(
-  raw: string,
-): ({ ok: true } & ParsedInference) | { ok: false; error: string } {
+/**
+ * 解析提取输出为 stdio 启动配置 + 密钥字段。
+ *
+ * 裸包名经 npx 运行是 MCP server 的事实基线，故 command/args 缺失或不可解析时回落
+ * `npx -y <包名>`（仍是确定性的真实命令，最终由实连验证证伪），不再当作硬失败。
+ */
+function parseExtraction(raw: string, packageName: string): ParsedInference {
+  const baselineArgs = ["-y", packageName];
   const json = extractJsonObject(raw);
   if (json === undefined) {
-    return { ok: false, error: "推断输出不是可解析的 JSON" };
+    return { entry: { type: "stdio", command: "npx", args: baselineArgs }, secretFields: [] };
   }
   let data: Record<string, unknown>;
   try {
     data = JSON.parse(json) as Record<string, unknown>;
   } catch {
-    return { ok: false, error: "推断输出不是可解析的 JSON" };
+    return { entry: { type: "stdio", command: "npx", args: baselineArgs }, secretFields: [] };
   }
 
-  const transport = data.transport;
-  if (transport !== "stdio" && transport !== "http") {
-    return { ok: false, error: "推断未给出有效 transport（stdio / http）" };
-  }
+  const command =
+    typeof data.command === "string" && data.command !== "" ? data.command : "npx";
+  const parsedArgs = Array.isArray(data.args)
+    ? data.args.filter((a): a is string => typeof a === "string")
+    : [];
+  const args = parsedArgs.length > 0 ? parsedArgs : baselineArgs;
 
-  const entry: McpServerConfigEntry = { type: transport };
-  if (transport === "stdio") {
-    if (typeof data.command !== "string" || data.command === "") {
-      return { ok: false, error: "stdio server 推断缺少 command" };
-    }
-    entry.command = data.command;
-    if (Array.isArray(data.args)) {
-      entry.args = data.args.filter((a): a is string => typeof a === "string");
-    }
-  } else {
-    if (typeof data.url !== "string" || data.url === "") {
-      return { ok: false, error: "http server 推断缺少 url" };
-    }
-    entry.url = data.url;
-  }
-
-  return { ok: true, entry, secretFields: parseSecretFields(data.secretFields) };
+  return {
+    entry: { type: "stdio", command, args },
+    secretFields: parseSecretFields(data.secretFields),
+  };
 }
 
 /** 容错解析推断出的密钥字段（只取合法项，缺省字段补空）。 */
