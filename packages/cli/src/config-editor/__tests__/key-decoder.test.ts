@@ -90,6 +90,12 @@ describe("decodeChar · 单字符解码", () => {
     ]);
   });
 
+  it("Ctrl+S (0x13) 触发 ctrl-s（主面板完成快捷键）", () => {
+    expect(decodeChar("\x13", createKeyDecoderState()).events).toEqual([
+      { type: "ctrl-s" },
+    ]);
+  });
+
   it("DEL (0x7F) 触发 backspace", () => {
     expect(decodeChar("\x7f", createKeyDecoderState()).events).toEqual([
       { type: "backspace" },

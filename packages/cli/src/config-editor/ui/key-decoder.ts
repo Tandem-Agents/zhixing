@@ -110,6 +110,11 @@ export function decodeChar(
     return { newState: { ...state, lastWasCR: false }, events: [{ type: "ctrl-c" }] };
   }
 
+  // Ctrl+S（0x13）—— 主面板"完成"快捷键。raw mode 已关 IXON 流控，0x13 能传到应用。
+  if (code === 0x13) {
+    return { newState: { ...state, lastWasCR: false }, events: [{ type: "ctrl-s" }] };
+  }
+
   // Enter (\r) —— 标记 lastWasCR，让紧随的 \n 被吞
   if (ch === "\r") {
     return {

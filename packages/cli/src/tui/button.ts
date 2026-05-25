@@ -70,6 +70,8 @@ export interface ButtonRowOptions {
   label: string;
   /** 按钮右侧 dim 提示文本（不含括号——渲染时自动包） */
   hint?: string;
+  /** hint 之后、括号外的 dim 快捷键提示（如 "Ctrl+S"）——告知按钮的全局快捷键。 */
+  shortcut?: string;
   /** 主按钮（绿色）——通常是"建议动作" */
   primary?: boolean;
   /** 是否选中——选中时左侧外置 cursor + 整体加粗 */
@@ -99,9 +101,11 @@ export function renderButtonRow(opts: ButtonRowOptions): string[] {
     selected: opts.selected,
     primary: opts.primary,
   });
-  const middleWithHint = opts.hint
-    ? middle + BUTTON_HINT_GAP + tone.dim(`(${opts.hint})`)
-    : middle!;
+  const hintPart = opts.hint ? BUTTON_HINT_GAP + tone.dim(`(${opts.hint})`) : "";
+  const shortcutPart = opts.shortcut
+    ? BUTTON_HINT_GAP + tone.dim(opts.shortcut)
+    : "";
+  const middleWithHint = middle! + hintPart + shortcutPart;
   const cursorMark = opts.selected ? tone.brand.bold(icon.cursor) : " ";
   return [
     indentStr + top!,

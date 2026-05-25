@@ -31,7 +31,12 @@ import {
   renderFooter,
 } from "../../tui/index.js";
 
-const FOOTER_HINTS = ["↑↓ 选择", "Enter 进入/确认", "Ctrl+C 退出"] as const;
+const FOOTER_HINTS = [
+  "↑↓ 选择",
+  "Enter 进入/确认",
+  "Ctrl+S 完成",
+  "Esc / Ctrl+C 退出",
+] as const;
 
 /**
  * 品牌锚"浮灵 / Drift"的固定形态：
@@ -247,6 +252,8 @@ export function renderMainPanel(
       renderButtonRow({
         label: option.action === "complete" ? "完成" : "取消",
         hint: pickButtonHint(option.action, pending),
+        // 全局快捷键提示（接在括号说明后）：完成 Ctrl+S、取消 Esc（Ctrl+C 亦可，见 footer）
+        shortcut: option.action === "complete" ? "Ctrl+S" : "Esc",
         primary: option.action === "complete" && pending === 0,
         selected,
       }),
@@ -299,10 +306,16 @@ export function handleMainPanelKey(
         cursor: { index: cursor.index < max ? cursor.index + 1 : 0 },
       };
     case "ctrl-c":
+    case "escape":
+      // 主面板是顶层：Esc 与 Ctrl+C 都退出（cancelled）。
+      // 子页面的 Esc=返回上一页由各子面板 handler 自己处理，不到这里。
       return {
         action: { type: "exit", result: { kind: "cancelled" } },
         cursor,
       };
+    case "ctrl-s":
+      // 全局"完成"快捷键——等同选中并确认完成按钮（含必填校验），无需把光标移到按钮区
+      return completeAction(sections, state, cursor);
     case "enter": {
       const selected = options[cursor.index];
       if (!selected) return { action: { type: "stay", state }, cursor };
@@ -311,21 +324,7 @@ export function handleMainPanelKey(
           return { action: { type: "exit", result: { kind: "cancelled" } }, cursor };
         }
         // complete：校验所有 entries 的 issues（与进度计数同源）
-        const errors = collectAllIssues(sections);
-        if (errors.length > 0) {
-          return {
-            action: { type: "stay", state },
-            cursor,
-            errorMessage: errors.join("；"),
-          };
-        }
-        return {
-          action: {
-            type: "exit",
-            result: { kind: "completed", config: state.config, credentials: state.credentials },
-          },
-          cursor,
-        };
+        return completeAction(sections, state, cursor);
       }
       // section-entry：跳转
       if (selected.enterTarget) {
@@ -339,6 +338,28 @@ export function handleMainPanelKey(
     default:
       return { action: { type: "stay", state }, cursor };
   }
+}
+
+/**
+ * 触发"完成"——校验所有 entries 的 issues（与进度计数同源）：有错回 main 面板原地显示，
+ * 无错则 exit completed。由"完成"按钮 Enter 与全局 Ctrl+S 共用，逻辑单点不重复。
+ */
+function completeAction(
+  sections: Parameters<typeof collectAllIssues>[0],
+  state: WorkingState,
+  cursor: MainPanelCursor,
+): MainPanelKeyResult {
+  const errors = collectAllIssues(sections);
+  if (errors.length > 0) {
+    return { action: { type: "stay", state }, cursor, errorMessage: errors.join("；") };
+  }
+  return {
+    action: {
+      type: "exit",
+      result: { kind: "completed", config: state.config, credentials: state.credentials },
+    },
+    cursor,
+  };
 }
 
 /**

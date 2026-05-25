@@ -104,6 +104,7 @@ export type KeyEvent =
   | { type: "backspace" }
   | { type: "escape" }
   | { type: "ctrl-c" }
+  | { type: "ctrl-s" }
   | { type: "arrow-up" }
   | { type: "arrow-down" }
   | { type: "arrow-left" }
