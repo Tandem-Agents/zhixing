@@ -413,7 +413,7 @@ describe("SecurityPipeline", () => {
       expect(result.matchedPermissionRule?.decision).toBe("deny");
     });
 
-    it("CI 模式 + 无匹配规则 + confirm 操作 → block", async () => {
+    it("CI 模式 + 无匹配规则 + confirm 操作 → 保持 confirm（block 由 broker 兜底）", async () => {
       const pipeline = new SecurityPipeline({
         trustContext: { kind: "workspace", dir: "/home/user/project" },
         sessionType: "ci",
@@ -425,8 +425,8 @@ describe("SecurityPipeline", () => {
         "/home/user/project",
       );
 
-      expect(result.allowed).toBe(false);
-      expect(result.reason).toMatch(/ci.*无匹配/);
+      expect(result.allowed).toBe(true);
+      expect(result.requiresConfirmation).toBe(true);
     });
 
     it("CI 模式 + 预配置 allow 规则 → 放行", async () => {
@@ -532,13 +532,19 @@ describe("SecurityPipeline", () => {
       expect(names).toContain("PermissionMatcher");
     });
 
-    it("pipeline.getPermissionStore 和 getWorkspaceId 暴露访问", () => {
+    it("pipeline.getPermissionStore 和 getContextId 暴露访问", () => {
       const pipeline = new SecurityPipeline({
         trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
 
       expect(pipeline.getPermissionStore()).toBeDefined();
-      expect(pipeline.getWorkspaceId()).toMatch(/^[0-9a-f]{16}$/);
+      expect(pipeline.getContextId()).toMatch(/^[0-9a-f]{16}$/);
+    });
+
+    it("result 透出 trustLevel（global 上下文 → global）", async () => {
+      const pipeline = new SecurityPipeline({ trustContext: { kind: "global" } });
+      const result = await pipeline.evaluate("read", { path: "x.ts" }, "/tmp");
+      expect(result.trustLevel).toBe("global");
     });
 
     it("发射 security:permission_matched 事件", async () => {

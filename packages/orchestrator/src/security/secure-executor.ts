@@ -237,7 +237,7 @@ async function handleBrokerPath(params: {
     input,
     workingDirectory: context.workingDirectory,
     result,
-    workspaceId: pipeline.getWorkspaceId(),
+    workspaceId: pipeline.getContextId(),
     sessionType,
     // 远程确认回程地址透传:AgentRuntime → ToolExecutionContext.turnOrigin
     //   → ConfirmationRequest.turnOrigin → Hub / Renderer / Bridge
@@ -439,7 +439,7 @@ async function applyBrokerDecision(params: {
 
   const store: IPermissionStore = pipeline.getPermissionStore();
   const tracker: IConfirmationTracker = pipeline.getConfirmationTracker();
-  const workspaceId = pipeline.getWorkspaceId();
+  const workspaceId = pipeline.getContextId();
 
   const request: SecurityRequest = {
     tool: toolName,

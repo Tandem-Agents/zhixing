@@ -31,8 +31,8 @@ export class PermissionMatcherMiddleware implements SecurityMiddleware {
 
   constructor(
     private readonly store: IPermissionStore,
-    /** 返回当前工作区 ID 的 getter（null 表示无工作区上下文） */
-    private readonly getWorkspaceId: () => string | null,
+    /** 返回当前信任上下文作用域 ID 的 getter（null 表示无作用域）。 */
+    private readonly getContextId: () => string | null,
   ) {}
 
   async execute(
@@ -46,8 +46,8 @@ export class PermissionMatcherMiddleware implements SecurityMiddleware {
       return next();
     }
 
-    const workspaceId = this.getWorkspaceId();
-    const matched = this.store.match(workspaceId, ctx.request);
+    const contextId = this.getContextId();
+    const matched = this.store.match(contextId, ctx.request);
 
     if (matched) {
       ctx.state.matchedPermissionRule = matched;
@@ -86,25 +86,9 @@ export class PermissionMatcherMiddleware implements SecurityMiddleware {
       };
     }
 
-    // 无匹配规则：按会话类型决定
-    const sessionType = ctx.request.context.sessionType;
-    if (sessionType !== "interactive") {
-      const blockDecision: SecurityDecision = {
-        ...current,
-        action: "block",
-        reason: `${sessionType} 模式下无匹配权限规则，非交互环境默认拒绝`,
-      };
-      ctx.state.decision = blockDecision;
-      return {
-        allowed: false,
-        requiresConfirmation: false,
-        operationClass: ctx.state.operationClass,
-        decision: blockDecision,
-        reason: blockDecision.reason,
-      };
-    }
-
-    // interactive + 无匹配：保持 confirm，上层弹 UI
+    // 无匹配规则：保持 confirm，交由编排层处置（管家研判 / broker 确认）。
+    // 非交互环境"无 UI → 拒绝"的语义下移到 broker —— 其默认 resolver 在无监听器时
+    // fail-to-deny，与原先在此短路 block 的端到端效果一致，且让管家得以覆盖灰色 external。
     return next();
   }
 }

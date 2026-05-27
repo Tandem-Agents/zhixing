@@ -71,6 +71,9 @@ export { ToolArgumentExtractor } from "./tool-aware-extractor.js";
 // 权限匹配中间件
 export { PermissionMatcherMiddleware } from "./permission-matcher.js";
 
+// 信任等级分类中间件
+export { TrustClassifierMiddleware } from "./trust-classifier.js";
+
 // 确认追踪与建议
 export {
   ConfirmationTracker,

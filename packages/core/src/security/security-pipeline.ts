@@ -43,6 +43,7 @@ import { PermissionStore } from "./permission-store.js";
 import { PolicyEngine } from "./policy-engine.js";
 import type { AgentEventMapWithSecurity } from "./security-auditor.js";
 import { SecurityAuditor } from "./security-auditor.js";
+import { TrustClassifierMiddleware } from "./trust-classifier.js";
 import { workspaceDirOf } from "./trust.js";
 import type { TrustContext } from "./trust.js";
 import type {
@@ -254,6 +255,21 @@ export interface SecurityPipelineOptions {
  *   else if (result.requiresConfirmation) askUser();
  *   else execute();
  */
+/**
+ * 从信任上下文派生 PermissionStore 的作用域 key：
+ * workspace 用工作目录的稳定 hash、scene 用 sceneId、global 无作用域（null）。
+ */
+function deriveContextId(trust: TrustContext): string | null {
+  switch (trust.kind) {
+    case "workspace":
+      return PermissionStore.workspaceIdFromPath(trust.dir);
+    case "scene":
+      return trust.sceneId;
+    case "global":
+      return null;
+  }
+}
+
 export class SecurityPipeline {
   private readonly middlewares: SecurityMiddleware[];
   private readonly policyEngine: PolicyEngine;
@@ -263,16 +279,13 @@ export class SecurityPipeline {
   private readonly executionGuard: ExecutionGuardMiddleware;
   private readonly sessionType: SessionType;
   private readonly trustContext: TrustContext;
-  private readonly workspaceId: string | null;
+  private readonly contextId: string | null;
 
   constructor(options: SecurityPipelineOptions = {}) {
     this.policyEngine = new PolicyEngine();
     this.sessionType = options.sessionType ?? "interactive";
     this.trustContext = options.trustContext ?? { kind: "global" };
-    const anchorDir = workspaceDirOf(this.trustContext);
-    this.workspaceId = anchorDir
-      ? PermissionStore.workspaceIdFromPath(anchorDir)
-      : null;
+    this.contextId = deriveContextId(this.trustContext);
     this.classifier =
       options.classifier ??
       createDefaultClassifier({ registry: options.toolBoundaryRegistry });
@@ -291,9 +304,10 @@ export class SecurityPipeline {
       new PathResolveMiddleware(),
       new PolicyEvaluatorMiddleware(this.policyEngine),
       new OperationClassifierMiddleware(this.classifier),
+      new TrustClassifierMiddleware(),
       new PermissionMatcherMiddleware(
         this.permissionStore,
-        () => this.workspaceId,
+        () => this.contextId,
       ),
       new SuggestionMiddleware(this.confirmationTracker),
       this.executionGuard,
@@ -373,9 +387,9 @@ export class SecurityPipeline {
     return this.executionGuard;
   }
 
-  /** 获取当前工作区的稳定 ID（用于创建 workspace 作用域规则） */
-  getWorkspaceId(): string | null {
-    return this.workspaceId;
+  /** 获取当前信任上下文的作用域 ID（workspace 用 path hash、scene 用 sceneId、global 为 null）。 */
+  getContextId(): string | null {
+    return this.contextId;
   }
 
   /** 获取当前信任上下文。 */
@@ -424,6 +438,7 @@ export class SecurityPipeline {
       allowed: action !== "block",
       requiresConfirmation: action === "confirm",
       operationClass: ctx.state.operationClass,
+      trustLevel: ctx.state.trustLevel,
       decision,
       matchedPermissionRule: ctx.state.matchedPermissionRule,
       suggestion: ctx.state.suggestion,

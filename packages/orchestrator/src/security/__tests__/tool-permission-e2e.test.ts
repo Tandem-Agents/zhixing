@@ -147,7 +147,7 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
       expect(sixthReq.suggestion?.patterns.length).toBeGreaterThan(0);
 
       // 关键断言：allow-workspace 决策落库——store 中出现 workspace 规则
-      const wsId = pipeline.getWorkspaceId();
+      const wsId = pipeline.getContextId();
       expect(wsId).toBeTruthy();
       const wsRules = store.list(wsId).filter((r) => r.scope === "workspace");
       expect(wsRules).toHaveLength(1);
@@ -272,7 +272,7 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
       );
 
       // 验证规则创建
-      const wsId = pipeline.getWorkspaceId();
+      const wsId = pipeline.getContextId();
       const wsRules = store.list(wsId).filter((r) => r.scope === "workspace");
       expect(wsRules).toHaveLength(1);
       expect(wsRules[0]!.pattern.argument).toBe("curl https://api1.com");

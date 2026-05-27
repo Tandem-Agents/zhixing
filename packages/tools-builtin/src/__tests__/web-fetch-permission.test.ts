@@ -90,12 +90,12 @@ describe("WebFetch + SecurityPipeline — interactive 触发 confirmation", () =
   });
 });
 
-describe("WebFetch + SecurityPipeline — non-interactive fail-to-deny", () => {
-  it("ci 模式 + 未配置 host → 不 allow,不要求 confirmation(直接 deny)", async () => {
+describe("WebFetch + SecurityPipeline — 非交互灰色操作交 broker 兜底", () => {
+  it("ci 模式 + 未配置 host → pipeline 保持 confirm（deny 由 broker fail-to-deny 兜底）", async () => {
     const p = makePipeline({ sessionType: "ci", injectBuiltin: true });
     const r = await p.evaluate("web_fetch", { url: "https://random.example/" }, CWD);
-    expect(r.allowed).toBe(false);
-    expect(r.requiresConfirmation).toBeFalsy();
+    expect(r.allowed).toBe(true);
+    expect(r.requiresConfirmation).toBe(true);
   });
 });
 

@@ -180,7 +180,7 @@ describe("PermissionMatcherMiddleware", () => {
     });
 
     for (const sessionType of ["ci", "gateway", "api"] as const) {
-      it(`${sessionType}：无匹配 → 降级为 block 并短路`, async () => {
+      it(`${sessionType}：无匹配 → 保持 confirm，交编排层（会话策略下移 broker）`, async () => {
         const store: IPermissionStore = {
           match: () => null,
           create: () => {},
@@ -191,19 +191,21 @@ describe("PermissionMatcherMiddleware", () => {
         };
         const matcher = new PermissionMatcherMiddleware(store, () => null);
         const ctx = makeCtx(confirmDecision(), sessionType);
-        const next = vi.fn(async () => ({ allowed: true }));
+        const next = vi.fn(async () => ({
+          allowed: true,
+          requiresConfirmation: true,
+        }));
 
-        const result = await matcher.execute(ctx, next);
+        await matcher.execute(ctx, next);
 
-        expect(result.allowed).toBe(false);
-        expect(ctx.state.decision?.action).toBe("block");
-        expect(next).not.toHaveBeenCalled();
+        expect(ctx.state.decision?.action).toBe("confirm");
+        expect(next).toHaveBeenCalled();
       });
     }
   });
 
-  describe("workspaceId 传递", () => {
-    it("match 调用使用 getWorkspaceId 返回的值", async () => {
+  describe("作用域 ID 传递", () => {
+    it("match 调用使用 getContextId 返回的值", async () => {
       const store: IPermissionStore = {
         match: vi.fn(() => null),
         create: () => {},

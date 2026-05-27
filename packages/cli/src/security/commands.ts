@@ -108,7 +108,7 @@ function printTrustHelp(writer: CliWriter): void {
 function listRules(args: string[], opts: TrustOptions): void {
   const { pipeline, writer } = opts;
   const store = pipeline.getPermissionStore();
-  const workspaceId = pipeline.getWorkspaceId();
+  const workspaceId = pipeline.getContextId();
   const workspacePath = pipeline.getWorkspace();
 
   const filter = args[0]?.toLowerCase();
@@ -169,7 +169,7 @@ async function revokeRule(args: string[], opts: TrustOptions): Promise<void> {
   }
 
   const store = opts.pipeline.getPermissionStore();
-  const workspaceId = opts.pipeline.getWorkspaceId();
+  const workspaceId = opts.pipeline.getContextId();
   const all = store.list(workspaceId);
 
   const matches = all.filter((r) => r.id.startsWith(prefix));
@@ -206,7 +206,7 @@ async function revokeRule(args: string[], opts: TrustOptions): Promise<void> {
 async function resetRules(args: string[], opts: TrustOptions): Promise<void> {
   const { pipeline, rl, writer } = opts;
   const store = pipeline.getPermissionStore();
-  const workspaceId = pipeline.getWorkspaceId();
+  const workspaceId = pipeline.getContextId();
 
   const isAll = args[0]?.toLowerCase() === "all";
 
@@ -284,7 +284,7 @@ function printSecurityHelp(writer: CliWriter): void {
 function showSecurityOverview(opts: SecurityOptions): void {
   const { pipeline, writer } = opts;
   const store = pipeline.getPermissionStore();
-  const workspaceId = pipeline.getWorkspaceId();
+  const workspaceId = pipeline.getContextId();
   const workspacePath = pipeline.getWorkspace();
   const guard = pipeline.getExecutionGuard();
   const tracker = pipeline.getConfirmationTracker();

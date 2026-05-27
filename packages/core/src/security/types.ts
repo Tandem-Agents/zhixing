@@ -401,6 +401,8 @@ export interface SecurityMiddlewareState {
   decision?: SecurityDecision;
   /** 操作影响分类（由 OperationClassifierMiddleware 写入） */
   operationClass?: OperationClass;
+  /** 信任等级（由 TrustClassifierMiddleware 写入） */
+  trustLevel?: import("./trust.js").TrustLevel;
   /** 匹配到的权限规则（由 PermissionMatcherMiddleware 写入） */
   matchedPermissionRule?: PermissionRule;
   /** 智能建议（由 SuggestionMiddleware 写入，仅在达到阈值时存在） */
@@ -418,10 +420,12 @@ export interface SecurityMiddlewareResult {
    * 注意：allowed=true 但 requiresConfirmation=true 时仍需用户确认才能放行。
    */
   allowed: boolean;
-  /** 是否需要用户确认（Phase 2：external/critical 或策略规则 confirm 动作） */
+  /** 是否需要用户确认（external/critical 或策略规则 confirm 动作） */
   requiresConfirmation?: boolean;
   /** 操作影响分类 */
   operationClass?: OperationClass;
+  /** 信任等级（当前会话上下文的有效信任级） */
+  trustLevel?: import("./trust.js").TrustLevel;
   /** 最终安全决策（包含所有匹配规则、风险等级、建议） */
   decision?: SecurityDecision;
   /** 匹配到的权限规则（若有） */
