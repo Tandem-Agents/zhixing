@@ -25,6 +25,7 @@ import type {
  * 使用交叉类型将安全事件合并到 AgentEventMap。
  */
 import { PathGuard } from "./path-guard.js";
+import { workspaceDirOf } from "./trust.js";
 
 export type AgentEventMapWithSecurity = AgentEventMap & SecurityEventMap;
 
@@ -105,7 +106,7 @@ export class SecurityAuditor implements SecurityMiddleware {
           resolvedPath,
           withinWorkspace: this.checkWithinWorkspace(
             resolvedPath,
-            ctx.request.context.workspace,
+            workspaceDirOf(ctx.request.context.trust),
             ctx.request.context.cwd,
           ),
         });

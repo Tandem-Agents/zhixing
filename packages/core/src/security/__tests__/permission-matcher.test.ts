@@ -30,7 +30,7 @@ function makeCtx(
       arguments: args,
       context: {
         cwd: "/tmp",
-        workspace: null,
+        trust: { kind: "global" },
         sessionType,
       },
     },

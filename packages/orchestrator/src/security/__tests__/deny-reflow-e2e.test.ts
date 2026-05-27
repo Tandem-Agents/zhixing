@@ -104,7 +104,7 @@ describe("端到端：拒绝理由回流到模型", () => {
 
     // 2. 构造真实的 SecurityPipeline + Broker
     const pipeline = new SecurityPipeline({
-      workspace: "/tmp/ws",
+      trustContext: { kind: "workspace", dir: "/tmp/ws" },
       sessionType: "interactive",
     });
     const broker = new ConfirmationBroker();
@@ -185,7 +185,7 @@ describe("端到端：拒绝理由回流到模型", () => {
     ]);
 
     const pipeline = new SecurityPipeline({
-      workspace: "/tmp/ws",
+      trustContext: { kind: "workspace", dir: "/tmp/ws" },
       sessionType: "interactive",
     });
     const broker = new ConfirmationBroker();
@@ -238,7 +238,7 @@ describe("端到端：拒绝理由回流到模型", () => {
     ]);
 
     const pipeline = new SecurityPipeline({
-      workspace: "/tmp/ws",
+      trustContext: { kind: "workspace", dir: "/tmp/ws" },
       sessionType: "interactive",
     });
     const broker = new ConfirmationBroker();

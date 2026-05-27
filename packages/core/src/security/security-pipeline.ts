@@ -43,6 +43,8 @@ import { PermissionStore } from "./permission-store.js";
 import { PolicyEngine } from "./policy-engine.js";
 import type { AgentEventMapWithSecurity } from "./security-auditor.js";
 import { SecurityAuditor } from "./security-auditor.js";
+import { workspaceDirOf } from "./trust.js";
+import type { TrustContext } from "./trust.js";
 import type {
   IPermissionStore,
   OperationClass,
@@ -215,8 +217,8 @@ export interface SecurityPipelineOptions {
   middlewares?: SecurityMiddleware[];
   /** 会话类型 */
   sessionType?: SessionType;
-  /** 工作区路径 */
-  workspace?: string | null;
+  /** 信任上下文 —— 决定本次会话的信任范围（取代早期的 workspace 字段）。 */
+  trustContext?: TrustContext;
   /**
    * 操作分类器。未提供时使用默认分类器（FS + Shell + 空边界注册表）。
    * 生产环境应注入真实的 ToolBoundaryRegistry，让 MCP 工具能被正确分类。
@@ -260,15 +262,16 @@ export class SecurityPipeline {
   private readonly confirmationTracker: IConfirmationTracker;
   private readonly executionGuard: ExecutionGuardMiddleware;
   private readonly sessionType: SessionType;
-  private readonly workspace: string | null;
+  private readonly trustContext: TrustContext;
   private readonly workspaceId: string | null;
 
   constructor(options: SecurityPipelineOptions = {}) {
     this.policyEngine = new PolicyEngine();
     this.sessionType = options.sessionType ?? "interactive";
-    this.workspace = options.workspace ?? null;
-    this.workspaceId = this.workspace
-      ? PermissionStore.workspaceIdFromPath(this.workspace)
+    this.trustContext = options.trustContext ?? { kind: "global" };
+    const anchorDir = workspaceDirOf(this.trustContext);
+    this.workspaceId = anchorDir
+      ? PermissionStore.workspaceIdFromPath(anchorDir)
       : null;
     this.classifier =
       options.classifier ??
@@ -329,7 +332,7 @@ export class SecurityPipeline {
       arguments: toolInput,
       context: {
         cwd: workingDirectory,
-        workspace: this.workspace,
+        trust: this.trustContext,
         sessionType: this.sessionType,
       },
     };
@@ -375,9 +378,14 @@ export class SecurityPipeline {
     return this.workspaceId;
   }
 
-  /** 获取当前工作区的绝对路径（用于 UI 友好显示） */
+  /** 获取当前信任上下文。 */
+  getTrust(): TrustContext {
+    return this.trustContext;
+  }
+
+  /** 获取当前工作区的绝对路径（用于 UI 友好显示；仅 workspace 信任有，其余为 null）。 */
   getWorkspace(): string | null {
-    return this.workspace;
+    return workspaceDirOf(this.trustContext);
   }
 
   /** 获取所有中间件（用于调试和测试） */

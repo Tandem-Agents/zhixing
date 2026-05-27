@@ -30,6 +30,10 @@ export type {
   ToolBoundaryRegistry,
 } from "./types.js";
 
+// 信任上下文
+export type { TrustContext, TrustLevel } from "./trust.js";
+export { workspaceDirOf } from "./trust.js";
+
 // 策略引擎
 export { PolicyEngine } from "./policy-engine.js";
 

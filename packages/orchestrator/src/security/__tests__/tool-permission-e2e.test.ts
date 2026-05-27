@@ -67,7 +67,7 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
     // SecurityPipeline 内部默认实例化 ConfirmationTracker（per-pipeline 生命周期）。
     const store = new PermissionStore({ rootDir: null });
     const pipeline = new SecurityPipeline({
-      workspace: "/tmp/ws-e2e",
+      trustContext: { kind: "workspace", dir: "/tmp/ws-e2e" },
       permissionStore: store,
     });
     const broker = new ConfirmationBroker();
@@ -173,7 +173,7 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
     // - 但 allow-workspace 用精确 pattern 时，规则 argument 是用户选的具体 pattern
     const store = new PermissionStore({ rootDir: null });
     const pipeline = new SecurityPipeline({
-      workspace: "/tmp/ws-e2e",
+      trustContext: { kind: "workspace", dir: "/tmp/ws-e2e" },
       permissionStore: store,
     });
     const broker = new ConfirmationBroker();
@@ -227,7 +227,7 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
     // tracker 保持原有计数（即不会因为某次 allow-workspace 跳过计数）。
     const store = new PermissionStore({ rootDir: null });
     const pipeline = new SecurityPipeline({
-      workspace: "/tmp/ws-e2e",
+      trustContext: { kind: "workspace", dir: "/tmp/ws-e2e" },
       permissionStore: store,
     });
     const broker = new ConfirmationBroker();

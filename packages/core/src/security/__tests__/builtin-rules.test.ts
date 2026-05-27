@@ -31,7 +31,7 @@ function makeRequest(overrides: Partial<SecurityRequest> = {}): SecurityRequest 
     arguments: {},
     context: {
       cwd: TEST_CWD,
-      workspace: TEST_CWD,
+      trust: { kind: "workspace", dir: TEST_CWD },
       sessionType: "interactive",
     },
     ...overrides,

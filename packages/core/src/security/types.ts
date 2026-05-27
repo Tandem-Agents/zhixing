@@ -6,10 +6,11 @@
  * - 每条放行都追溯到用户选择（自动放行 = 低影响 或 用户规则）
  * - 平台无关：所有安全行为全平台一致
  *
- * Phase 1 类型覆盖：SecurityRule、SecurityRequest、SecurityDecision、
- * SecurityMiddleware 以及所有基础枚举类型。
- * Phase 2+ 的类型（PermissionRule、OperationClassifier 等）在后续迭代中追加。
+ * 覆盖 SecurityRule、SecurityRequest、SecurityDecision、SecurityMiddleware、
+ * PermissionRule、OperationClassifier 等安全子系统的全部类型与枚举。
  */
+
+export type { TrustContext, TrustLevel } from "./trust.js";
 
 // ─── 会话类型 ───
 
@@ -320,8 +321,8 @@ export interface SecurityRequest {
   context: {
     /** 当前工作目录 */
     cwd: string;
-    /** 工作区目录（用户指定的工作目录，null 表示无工作区上下文） */
-    workspace: string | null;
+    /** 信任上下文 —— 当前会话所处的用户授予信任范围（取代早期的裸 workspace 字段）。 */
+    trust: import("./trust.js").TrustContext;
     /** 会话类型 */
     sessionType: SessionType;
   };

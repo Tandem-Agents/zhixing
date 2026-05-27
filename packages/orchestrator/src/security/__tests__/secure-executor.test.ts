@@ -69,7 +69,7 @@ function mockExecute(): {
 function makePipeline(): { pipeline: SecurityPipeline; store: PermissionStore } {
   const store = new PermissionStore({ rootDir: null });
   const pipeline = new SecurityPipeline({
-    workspace: "/tmp/ws",
+    trustContext: { kind: "workspace", dir: "/tmp/ws" },
     permissionStore: store,
   });
   return { pipeline, store };

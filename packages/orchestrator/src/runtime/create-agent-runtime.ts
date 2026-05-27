@@ -551,7 +551,10 @@ export async function createAgentRuntime(
   const boundaryRegistry: MutableToolBoundaryRegistry =
     BoundaryRegistry.fromTools(baseTools);
   const securityPipeline = new SecurityPipeline({
-    workspace: workspace.path,
+    trustContext:
+      workspace.path !== null
+        ? { kind: "workspace", dir: workspace.path }
+        : { kind: "global" },
     sessionType,
     permissionStore: persistentStore,
     toolBoundaryRegistry: boundaryRegistry,

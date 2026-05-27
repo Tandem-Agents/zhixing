@@ -34,7 +34,7 @@ function makeRequest(
     arguments: args,
     context: {
       cwd: process.cwd(),
-      workspace: null,
+      trust: { kind: "global" },
       sessionType: "interactive",
     },
   };

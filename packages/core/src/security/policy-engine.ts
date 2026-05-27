@@ -24,6 +24,7 @@ import * as path from "node:path";
 
 import { expandUserHome } from "../paths.js";
 import { PathGuard } from "./path-guard.js";
+import { workspaceDirOf } from "./trust.js";
 
 // ─── 动作严格度排序 ───
 
@@ -214,7 +215,7 @@ export class PolicyEngine implements IPolicyEngine {
 
     const anchor =
       spec.anchor === "{workspace}"
-        ? request.context.workspace
+        ? workspaceDirOf(request.context.trust)
         : spec.anchor;
 
     if (!anchor) return true;

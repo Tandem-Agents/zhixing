@@ -34,7 +34,7 @@ function makeCtx(
     request: {
       tool: toolName,
       arguments: {},
-      context: { cwd: "/tmp", workspace: null, sessionType: "interactive" },
+      context: { cwd: "/tmp", trust: { kind: "global" }, sessionType: "interactive" },
     },
     toolName,
     toolInput: {},

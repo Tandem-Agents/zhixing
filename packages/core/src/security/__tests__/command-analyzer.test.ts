@@ -292,7 +292,7 @@ describe("CommandAnalyzerMiddleware", () => {
         arguments: args,
         context: {
           cwd: "/tmp",
-          workspace: null,
+          trust: { kind: "global" },
           sessionType: "interactive",
         },
       },

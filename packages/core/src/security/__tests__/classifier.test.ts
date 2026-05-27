@@ -35,7 +35,7 @@ function makeRequest(
     arguments: overrides.arguments ?? {},
     context: {
       cwd: overrides.context?.cwd ?? process.cwd(),
-      workspace: overrides.context?.workspace ?? null,
+      trust: overrides.context?.trust ?? { kind: "global" },
       sessionType: overrides.context?.sessionType ?? "interactive",
     },
     resolvedAccess: overrides.resolvedAccess,
@@ -85,7 +85,7 @@ describe("FileSystemClassifier", () => {
     const req = makeRequest({
       tool: "write",
       arguments: { path: target },
-      context: { cwd: workspace, workspace, sessionType: "interactive" },
+      context: { cwd: workspace, trust: { kind: "workspace", dir: workspace }, sessionType: "interactive" },
     });
     expect(classifier.classify(req)).toBe("internal");
   });
@@ -96,7 +96,7 @@ describe("FileSystemClassifier", () => {
     const req = makeRequest({
       tool: "write",
       arguments: { path: path.join(outsideDir, "leak.txt") },
-      context: { cwd: workspace, workspace, sessionType: "interactive" },
+      context: { cwd: workspace, trust: { kind: "workspace", dir: workspace }, sessionType: "interactive" },
     });
     expect(classifier.classify(req)).toBe("external");
   });
@@ -106,7 +106,7 @@ describe("FileSystemClassifier", () => {
     const req = makeRequest({
       tool: "write",
       arguments: { path: path.join(workspace, "foo.ts") },
-      context: { cwd: workspace, workspace: null, sessionType: "interactive" },
+      context: { cwd: workspace, trust: { kind: "global" }, sessionType: "interactive" },
     });
     expect(classifier.classify(req)).toBe("external");
   });
@@ -116,7 +116,7 @@ describe("FileSystemClassifier", () => {
     const req = makeRequest({
       tool: "write",
       arguments: {},
-      context: { cwd: workspace, workspace, sessionType: "interactive" },
+      context: { cwd: workspace, trust: { kind: "workspace", dir: workspace }, sessionType: "interactive" },
     });
     expect(classifier.classify(req)).toBe("external");
   });
@@ -134,7 +134,7 @@ describe("FileSystemClassifier", () => {
     const req = makeRequest({
       tool: "write",
       arguments: { path: path.join(linkPath, "payload.txt") },
-      context: { cwd: workspace, workspace, sessionType: "interactive" },
+      context: { cwd: workspace, trust: { kind: "workspace", dir: workspace }, sessionType: "interactive" },
     });
     expect(classifier.classify(req)).toBe("external");
   });
@@ -148,7 +148,7 @@ describe("FileSystemClassifier", () => {
         path: path.join(workspace, "ok.ts"),
         destination: path.join(outsideDir, "escape.ts"),
       },
-      context: { cwd: workspace, workspace, sessionType: "interactive" },
+      context: { cwd: workspace, trust: { kind: "workspace", dir: workspace }, sessionType: "interactive" },
     });
     expect(classifier.classify(req)).toBe("external");
   });
@@ -158,7 +158,7 @@ describe("FileSystemClassifier", () => {
     const req = makeRequest({
       tool: "write",
       arguments: {},
-      context: { cwd: workspace, workspace, sessionType: "interactive" },
+      context: { cwd: workspace, trust: { kind: "workspace", dir: workspace }, sessionType: "interactive" },
       resolvedAccess: { paths: [path.join(workspace, "from-access.ts")] },
     });
     expect(classifier.classify(req)).toBe("internal");

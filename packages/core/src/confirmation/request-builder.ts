@@ -202,7 +202,7 @@ export function buildConfirmationOptions(
   const patterns = suggestPatterns({
     tool: toolName,
     arguments: input,
-    context: { cwd: "", workspace: null, sessionType },
+    context: { cwd: "", trust: { kind: "global" }, sessionType },
   });
 
   const workspacePattern = pickWorkspacePattern(patterns);

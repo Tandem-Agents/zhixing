@@ -65,7 +65,7 @@ function makeBaseOpts(
     model: "mock-model",
     llmRoles: makeRoles(provider),
     securityPipeline: new SecurityPipeline({
-      workspace: process.cwd(),
+      trustContext: { kind: "workspace", dir: process.cwd() },
       sessionType: "ci",
       permissionStore: new PermissionStore({ rootDir: null }),
     }),

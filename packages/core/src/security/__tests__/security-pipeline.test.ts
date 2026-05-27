@@ -15,7 +15,7 @@ describe("SecurityPipeline", () => {
   describe("基本管线行为", () => {
     it("安全操作通过管线", async () => {
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
 
       const result = await pipeline.evaluate(
@@ -29,7 +29,7 @@ describe("SecurityPipeline", () => {
 
     it("危险操作被阻止", async () => {
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
 
       const result = await pipeline.evaluate(
@@ -44,7 +44,7 @@ describe("SecurityPipeline", () => {
 
     it("需确认的操作不被阻止但标记为 requiresConfirmation", async () => {
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
         sessionType: "interactive",
       });
 
@@ -64,7 +64,7 @@ describe("SecurityPipeline", () => {
   describe("管线组件", () => {
     it("包含必要的中间件", () => {
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
 
       const middlewares = pipeline.getMiddlewares();
@@ -77,7 +77,7 @@ describe("SecurityPipeline", () => {
     it("有 EventBus 时包含审计器", () => {
       const eventBus = new EventBus<AgentEventMapWithSecurity>();
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
         eventBus,
       });
 
@@ -89,7 +89,7 @@ describe("SecurityPipeline", () => {
 
     it("无 EventBus 时不包含审计器", () => {
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
 
       const middlewares = pipeline.getMiddlewares();
@@ -101,7 +101,7 @@ describe("SecurityPipeline", () => {
     it("中间件按正确顺序排列（post-execute → authorize → guard）", () => {
       const eventBus = new EventBus<AgentEventMapWithSecurity>();
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
         eventBus,
       });
 
@@ -120,7 +120,7 @@ describe("SecurityPipeline", () => {
 
     it("包含 OperationClassifier 中间件", () => {
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
 
       const names = pipeline.getMiddlewares().map((m) => m.name);
@@ -131,7 +131,7 @@ describe("SecurityPipeline", () => {
   describe("策略引擎集成", () => {
     it("可以通过管线访问策略引擎加载自定义规则", async () => {
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
 
       const customRule: SecurityRule = {
@@ -164,7 +164,7 @@ describe("SecurityPipeline", () => {
     it("block 决策发射 security:blocked 事件（auditor 在 onion 外层观察最终状态）", async () => {
       const eventBus = new EventBus<AgentEventMapWithSecurity>();
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
         eventBus,
       });
 
@@ -185,7 +185,7 @@ describe("SecurityPipeline", () => {
     it("allow 决策发射 security:evaluation 事件", async () => {
       const eventBus = new EventBus<AgentEventMapWithSecurity>();
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
         eventBus,
       });
 
@@ -207,7 +207,7 @@ describe("SecurityPipeline", () => {
   describe("操作分类集成", () => {
     it("observe 操作不需要确认", async () => {
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
 
       const result = await pipeline.evaluate(
@@ -226,7 +226,7 @@ describe("SecurityPipeline", () => {
       const { createTempDir } = await import("@zhixing/test-utils");
 
       const ws = await createTempDir("pipe-internal");
-      const pipeline = new SecurityPipeline({ workspace: ws });
+      const pipeline = new SecurityPipeline({ trustContext: { kind: "workspace", dir: ws } });
       const result = await pipeline.evaluate(
         "write",
         { path: path.join(ws, "foo.ts") },
@@ -240,7 +240,7 @@ describe("SecurityPipeline", () => {
 
     it("external 操作升级为 requiresConfirmation（即使无策略规则匹配）", async () => {
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
         // 没有传入 registry → 未声明边界的工具分类为 critical
         classifier: {
           classify: () => "external" as const,
@@ -261,7 +261,7 @@ describe("SecurityPipeline", () => {
 
     it("critical 操作升级为 requiresConfirmation 且 riskLevel=critical", async () => {
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
         classifier: {
           classify: (): OperationClass => "critical",
         },
@@ -281,7 +281,7 @@ describe("SecurityPipeline", () => {
 
     it("未注册工具使用默认边界分类器 → critical → 升级为 confirm", async () => {
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
 
       const result = await pipeline.evaluate(
@@ -304,7 +304,7 @@ describe("SecurityPipeline", () => {
       };
 
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
         toolBoundaryRegistry: registry,
       });
 
@@ -320,7 +320,7 @@ describe("SecurityPipeline", () => {
 
     it("block 优先于 classifier 的升级（policy block 不被分类器抵消）", async () => {
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
 
       // .git/ 写入触发 bi-git-write (block)
@@ -336,7 +336,7 @@ describe("SecurityPipeline", () => {
 
     it("policy confirm + classifier observe：仍 confirm（policy 胜出）", async () => {
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
 
       // cf-privilege-escalation 对 sudo 规则 confirm
@@ -354,7 +354,7 @@ describe("SecurityPipeline", () => {
     it("发射 security:classified 事件", async () => {
       const eventBus = new EventBus<AgentEventMapWithSecurity>();
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
         eventBus,
       });
 
@@ -387,7 +387,7 @@ describe("SecurityPipeline", () => {
       );
 
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
         permissionStore: store,
       });
 
@@ -415,7 +415,7 @@ describe("SecurityPipeline", () => {
       );
 
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
         permissionStore: store,
       });
 
@@ -432,7 +432,7 @@ describe("SecurityPipeline", () => {
 
     it("CI 模式 + 无匹配规则 + confirm 操作 → block", async () => {
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
         sessionType: "ci",
       });
 
@@ -458,7 +458,7 @@ describe("SecurityPipeline", () => {
       );
 
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
         sessionType: "ci",
         permissionStore: store,
       });
@@ -487,7 +487,7 @@ describe("SecurityPipeline", () => {
       );
 
       const pipeline = new SecurityPipeline({
-        workspace: wsPath,
+        trustContext: { kind: "workspace", dir: wsPath },
         permissionStore: store,
       });
 
@@ -524,7 +524,7 @@ describe("SecurityPipeline", () => {
       );
 
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
         permissionStore: store,
       });
 
@@ -542,7 +542,7 @@ describe("SecurityPipeline", () => {
 
     it("包含 PermissionMatcher 中间件", () => {
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
 
       const names = pipeline.getMiddlewares().map((m) => m.name);
@@ -551,7 +551,7 @@ describe("SecurityPipeline", () => {
 
     it("pipeline.getPermissionStore 和 getWorkspaceId 暴露访问", () => {
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
 
       expect(pipeline.getPermissionStore()).toBeDefined();
@@ -571,7 +571,7 @@ describe("SecurityPipeline", () => {
       );
 
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
         permissionStore: store,
         eventBus,
       });
@@ -595,7 +595,7 @@ describe("SecurityPipeline", () => {
   describe("智能建议集成", () => {
     it("初次 confirm 不附带 suggestion", async () => {
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
 
       const result = await pipeline.evaluate(
@@ -611,7 +611,7 @@ describe("SecurityPipeline", () => {
     it("达到阈值后 confirm 附带 suggestion（curl 是 medium 风险，5 次）", async () => {
       const tracker = new ConfirmationTracker();
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
         confirmationTracker: tracker,
       });
 
@@ -623,7 +623,7 @@ describe("SecurityPipeline", () => {
             arguments: { command: `curl https://api.example.com/${i}` },
             context: {
               cwd: "/home/user/project",
-              workspace: "/home/user/project",
+              trust: { kind: "workspace", dir: "/home/user/project" },
               sessionType: "interactive",
             },
           },
@@ -649,7 +649,7 @@ describe("SecurityPipeline", () => {
     it("critical 风险操作即使多次手动确认也永不建议", async () => {
       const tracker = new ConfirmationTracker();
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
         confirmationTracker: tracker,
       });
 
@@ -661,7 +661,7 @@ describe("SecurityPipeline", () => {
             arguments: { command: "rm -rf /tmp/junk" },
             context: {
               cwd: "/home/user/project",
-              workspace: "/home/user/project",
+              trust: { kind: "workspace", dir: "/home/user/project" },
               sessionType: "interactive",
             },
           },
@@ -691,13 +691,13 @@ describe("SecurityPipeline", () => {
         {
           tool: "read",
           arguments: { path: "/tmp/a" },
-          context: { cwd: "/tmp", workspace: "/tmp", sessionType: "interactive" },
+          context: { cwd: "/tmp", trust: { kind: "workspace", dir: "/tmp" }, sessionType: "interactive" },
         },
         "low",
       );
 
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
         confirmationTracker: tracker,
       });
 
@@ -732,7 +732,7 @@ describe("SecurityPipeline", () => {
             arguments: { command: "curl https://example.com" },
             context: {
               cwd: "/home/user/project",
-              workspace: "/home/user/project",
+              trust: { kind: "workspace", dir: "/home/user/project" },
               sessionType: "interactive",
             },
           },
@@ -741,7 +741,7 @@ describe("SecurityPipeline", () => {
       }
 
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
         permissionStore: store,
         confirmationTracker: tracker,
       });
@@ -759,7 +759,7 @@ describe("SecurityPipeline", () => {
 
     it("pipeline.getConfirmationTracker 暴露访问", () => {
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
 
       expect(pipeline.getConfirmationTracker()).toBeDefined();
@@ -768,7 +768,7 @@ describe("SecurityPipeline", () => {
 
     it("包含 SuggestionGenerator 中间件", () => {
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
 
       const names = pipeline.getMiddlewares().map((m) => m.name);
@@ -779,7 +779,7 @@ describe("SecurityPipeline", () => {
   describe("执行守卫集成", () => {
     it("放行的 read 操作携带 executionConstraints", async () => {
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
 
       const result = await pipeline.evaluate(
@@ -796,7 +796,7 @@ describe("SecurityPipeline", () => {
 
     it("bash 工具拿到 120s timeout / 10MB 输出限制", async () => {
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
 
       const result = await pipeline.evaluate(
@@ -813,7 +813,7 @@ describe("SecurityPipeline", () => {
       let now = 1000;
       const limiter = new SlidingWindowRateLimiter(60_000, 2, () => now);
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
         executionGuard: { rateLimiter: limiter },
       });
 
@@ -843,7 +843,7 @@ describe("SecurityPipeline", () => {
 
     it("自定义 executionGuard.toolProfiles 覆盖默认", async () => {
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
         executionGuard: {
           toolProfiles: {
             bash: { timeoutMs: 30_000 },
@@ -864,7 +864,7 @@ describe("SecurityPipeline", () => {
       let now = 1000;
       const limiter = new SlidingWindowRateLimiter(60_000, 1, () => now);
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
         executionGuard: { rateLimiter: limiter },
       });
 
@@ -894,7 +894,7 @@ describe("SecurityPipeline", () => {
       let now = 1000;
       const limiter = new SlidingWindowRateLimiter(60_000, 5, () => now);
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
         executionGuard: { rateLimiter: limiter },
       });
 
@@ -911,7 +911,7 @@ describe("SecurityPipeline", () => {
 
     it("包含 ExecutionGuard 中间件", () => {
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
 
       const names = pipeline.getMiddlewares().map((m) => m.name);
@@ -920,7 +920,7 @@ describe("SecurityPipeline", () => {
 
     it("pipeline.getExecutionGuard 暴露访问", () => {
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
 
       const guard = pipeline.getExecutionGuard();
@@ -932,7 +932,7 @@ describe("SecurityPipeline", () => {
   describe("命令预解析集成（纵深防御）", () => {
     it("bash 命令内的 ~/.ssh/ 路径触发 bi-ssh-keys block", async () => {
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
 
       const result = await pipeline.evaluate(
@@ -949,7 +949,7 @@ describe("SecurityPipeline", () => {
 
     it("bash 命令内的 LD_PRELOAD=xxx 触发 bi-env-injection block", async () => {
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
 
       const result = await pipeline.evaluate(
@@ -964,7 +964,7 @@ describe("SecurityPipeline", () => {
 
     it("引号内的 | 不被误判为链式（精准 quote-aware 检测）", async () => {
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
 
       // echo "a | b" 本身是 safe read-only 命令
@@ -989,7 +989,7 @@ describe("SecurityPipeline", () => {
 
     it("resolvedAccess 被填充了命令分析结果", async () => {
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
 
       // 用一个会被 confirm 的命令，然后检查内部 state
@@ -1006,7 +1006,7 @@ describe("SecurityPipeline", () => {
       };
 
       const pipelineWithSniffer = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
         middlewares: [sniffer],
       });
 
@@ -1027,7 +1027,7 @@ describe("SecurityPipeline", () => {
 
     it("包含 CommandAnalyzer 中间件且位于最前", () => {
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
 
       const middlewares = pipeline.getMiddlewares();
@@ -1044,7 +1044,7 @@ describe("SecurityPipeline", () => {
   describe("路径守卫集成", () => {
     it("文件操作的路径被解析", async () => {
       const pipeline = new SecurityPipeline({
-        workspace: "/home/user/project",
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
 
       const result = await pipeline.evaluate(

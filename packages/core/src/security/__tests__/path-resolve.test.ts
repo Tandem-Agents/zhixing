@@ -21,7 +21,7 @@ function makeCtx(
     request: {
       tool: toolName,
       arguments: toolInput,
-      context: { cwd, workspace: cwd, sessionType: "interactive" },
+      context: { cwd, trust: { kind: "workspace", dir: cwd }, sessionType: "interactive" },
       ...(seedPaths ? { resolvedAccess: { paths: seedPaths } } : {}),
     },
     toolName,
@@ -92,7 +92,7 @@ describe("PathResolveMiddleware", () => {
   describe("S1 端到端回归：symlink 不再绕过 bypassImmune 凭证保护", () => {
     it("read 指向 .zhixing/credentials.json 的 symlink → 被 block", async () => {
       if (!symlinkOk) return;
-      const pipeline = new SecurityPipeline({ workspace: ws });
+      const pipeline = new SecurityPipeline({ trustContext: { kind: "workspace", dir: ws } });
       const result = await pipeline.evaluate("read", { path: "innocent.txt" }, ws);
       // 修复前：matchPath 看到未解析的 "innocent.txt"、匹配不上凭证规则，read 又被判 observe → 放行
       // 修复后：PathResolve 先 realpath 出真实凭证路径 → bi-zhixing-credentials-block 命中 → block

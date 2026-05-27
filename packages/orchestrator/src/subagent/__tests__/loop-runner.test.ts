@@ -58,7 +58,7 @@ function makeReadOnlyTool(name: string): ToolDefinition {
 
 function makePipeline(): SecurityPipeline {
   return new SecurityPipeline({
-    workspace: process.cwd(),
+    trustContext: { kind: "workspace", dir: process.cwd() },
     sessionType: "ci",
     permissionStore: new PermissionStore({ rootDir: null }),
   });

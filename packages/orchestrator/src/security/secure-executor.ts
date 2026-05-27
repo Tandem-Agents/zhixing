@@ -446,7 +446,7 @@ async function applyBrokerDecision(params: {
     arguments: input,
     context: {
       cwd: workingDirectory,
-      workspace: workingDirectory,
+      trust: pipeline.getTrust(),
       sessionType: "interactive",
     },
   };

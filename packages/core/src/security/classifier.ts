@@ -21,6 +21,7 @@
  */
 
 import { PathGuard } from "./path-guard.js";
+import { workspaceDirOf } from "./trust.js";
 import type {
   BoundaryCrossing,
   BoundaryType,
@@ -83,7 +84,7 @@ export class FileSystemClassifier implements OperationClassifier {
       const paths = this.extractPaths(request);
       if (paths.length === 0) return "external";
 
-      const workspace = request.context.workspace;
+      const workspace = workspaceDirOf(request.context.trust);
       if (!workspace) return "external";
 
       // 任一目标路径逃出工作区即升级为 external——

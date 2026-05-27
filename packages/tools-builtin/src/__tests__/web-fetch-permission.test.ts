@@ -44,7 +44,7 @@ function makePipeline(opts: PipelineSetup): SecurityPipeline {
     }
   }
   return new SecurityPipeline({
-    workspace: WORKSPACE,
+    trustContext: { kind: "workspace", dir: WORKSPACE },
     sessionType: opts.sessionType,
     permissionStore: store,
     toolBoundaryRegistry: BoundaryRegistry.fromTools(tools),

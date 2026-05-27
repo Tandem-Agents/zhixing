@@ -256,7 +256,7 @@ describe("ADR-TPE-009 守卫：register 后 SecurityPipeline 即时生效", () =
   it("空 registry 注入 pipeline → unknown 工具分类为 critical", async () => {
     const registry: MutableToolBoundaryRegistry = new BoundaryRegistry();
     const pipeline = new SecurityPipeline({
-      workspace: "/tmp/test",
+      trustContext: { kind: "workspace", dir: "/tmp/test" },
       toolBoundaryRegistry: registry,
     });
 
@@ -268,7 +268,7 @@ describe("ADR-TPE-009 守卫：register 后 SecurityPipeline 即时生效", () =
   it("register 后再 evaluate 同一工具 → 立即按新边界分类", async () => {
     const registry: MutableToolBoundaryRegistry = new BoundaryRegistry();
     const pipeline = new SecurityPipeline({
-      workspace: "/tmp/test",
+      trustContext: { kind: "workspace", dir: "/tmp/test" },
       toolBoundaryRegistry: registry,
     });
 
@@ -292,7 +292,7 @@ describe("ADR-TPE-009 守卫：register 后 SecurityPipeline 即时生效", () =
     ]);
 
     const pipeline = new SecurityPipeline({
-      workspace: "/tmp/test",
+      trustContext: { kind: "workspace", dir: "/tmp/test" },
       toolBoundaryRegistry: registry,
     });
 

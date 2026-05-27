@@ -10,7 +10,7 @@ function makeRequest(overrides: Partial<SecurityRequest> = {}): SecurityRequest 
     arguments: {},
     context: {
       cwd: "/home/user/project",
-      workspace: "/home/user/project",
+      trust: { kind: "workspace", dir: "/home/user/project" },
       sessionType: "interactive",
     },
     ...overrides,
@@ -207,7 +207,7 @@ describe("PolicyEngine", () => {
           arguments: { path: "/etc/hosts" },
           context: {
             cwd: "/home/user/project",
-            workspace: "/home/user/project",
+            trust: { kind: "workspace", dir: "/home/user/project" },
             sessionType: "interactive",
           },
         }),

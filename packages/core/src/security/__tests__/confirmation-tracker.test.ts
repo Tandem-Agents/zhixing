@@ -27,7 +27,7 @@ function bashRequest(command: string): SecurityRequest {
     arguments: { command },
     context: {
       cwd: "/tmp",
-      workspace: null,
+      trust: { kind: "global" },
       sessionType: "interactive",
     },
   };
@@ -39,7 +39,7 @@ function writeRequest(filePath: string): SecurityRequest {
     arguments: { path: filePath },
     context: {
       cwd: "/tmp",
-      workspace: null,
+      trust: { kind: "global" },
       sessionType: "interactive",
     },
   };
@@ -51,7 +51,7 @@ function genericRequest(tool: string): SecurityRequest {
     arguments: { to: "张三", content: "hello" },
     context: {
       cwd: "/tmp",
-      workspace: null,
+      trust: { kind: "global" },
       sessionType: "interactive",
     },
   };
@@ -116,7 +116,7 @@ describe("suggestPatterns", () => {
       const patterns = suggestPatterns({
         tool: "write",
         arguments: {},
-        context: { cwd: "/tmp", workspace: null, sessionType: "interactive" },
+        context: { cwd: "/tmp", trust: { kind: "global" }, sessionType: "interactive" },
       });
       expect(patterns).toEqual([]);
     });
