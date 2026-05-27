@@ -175,9 +175,13 @@ describe("createSecureExecuteTool", () => {
       expect(exec.callCount()).toBe(0);
     });
 
-    it("管家 needs-confirm → 走 broker（allow-once 后执行）", async () => {
+    it("管家 needs-confirm → 走 broker（allow-once 后执行），研判理由透传到确认请求", async () => {
       const broker = new ConfirmationBroker();
-      autoResolveBroker(broker, { kind: "allow-once" });
+      let capturedReq: ConfirmationRequest | undefined;
+      broker.onRequest((req) => {
+        capturedReq = req;
+        queueMicrotask(() => broker.resolve(req.id, { kind: "allow-once" }));
+      });
       const exec = mockExecute();
       const { pipeline } = makePipeline();
       const wrapped = createSecureExecuteTool({
@@ -194,6 +198,8 @@ describe("createSecureExecuteTool", () => {
 
       expect(result.content).toBe("executed");
       expect(exec.callCount()).toBe(1);
+      // 管家研判理由透传到确认请求的展示信息，供 UI 向用户说明为何要确认
+      expect(capturedReq?.display.stewardReason).toBe("不确定");
     });
 
     it("无 ctx.llm → 不触发管家，走 broker", async () => {

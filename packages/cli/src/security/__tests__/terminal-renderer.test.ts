@@ -401,6 +401,22 @@ describe("buildInlinePanelBody", () => {
     expect(full).not.toContain("中风险"); // riskLevel 删
     expect(full).not.toContain("需要网络"); // decision.reason 删
   });
+
+  it("stewardReason 存在时渲染安全管家研判理由（needs-confirm 经管家）", () => {
+    const req = makeRequest({});
+    req.display.stewardReason =
+      "该命令会向外部地址上传文件，与当前任务意图不完全匹配";
+    const lines = buildInlinePanelBody(req);
+    const full = lines.join("\n");
+    expect(full).toContain("安全管家");
+    expect(full).toContain("与当前任务意图不完全匹配");
+  });
+
+  it("无 stewardReason 时不渲染管家行", () => {
+    const req = makeRequest({});
+    const lines = buildInlinePanelBody(req);
+    expect(lines.some((l) => l.includes("安全管家"))).toBe(false);
+  });
 });
 
 describe("buildInlinePanelTitle", () => {

@@ -412,6 +412,13 @@ export function buildInlinePanelBody(request: ConfirmationRequest): string[] {
     lines.push(line);
   }
 
+  // ── 2. 安全管家研判理由（仅 needs-confirm 经管家研判时存在） ──
+  // 这不是被省略的元信息，而是 actionable 信号：管家为何把这次操作上交确认，
+  // 帮用户判断是否放行
+  if (request.display.stewardReason) {
+    lines.push(tone.dim(`🛡 安全管家：${request.display.stewardReason}`));
+  }
+
   return lines;
 }
 

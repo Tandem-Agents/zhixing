@@ -16,7 +16,7 @@
  *     所有 authenticated 连接；多租户时应加 role 过滤。
  *
  * 推送 schema（参见 spec §3.9）：
- *   - `confirmation.pending`：新 pending 到达 → tool / operationDetail / riskLevel / expiresAt / turnOrigin
+ *   - `confirmation.pending`：新 pending 到达 → tool / operationDetail / riskLevel / stewardReason / expiresAt / turnOrigin
  *   - `confirmation.resolved`：请求被解决 → requestId / decision.kind / resolvedAt（**不暴露** reason / note）
  */
 
@@ -104,6 +104,7 @@ function buildPendingPayload(entry: HubEntry): {
   operationSummary: string;
   operationDetail: string;
   riskLevel?: string;
+  stewardReason?: string;
   expiresAt: number;
   turnOrigin?: unknown;
 } {
@@ -115,6 +116,8 @@ function buildPendingPayload(entry: HubEntry): {
     operationSummary: req.display.title,
     operationDetail: flattenDisplayBody(req.display.body),
     riskLevel: req.decision?.riskLevel,
+    // 安全管家研判理由——与本地/远程文本渲染同源（display.stewardReason），让 RPC 客户端也能展示
+    stewardReason: req.display.stewardReason,
     expiresAt: req.expiresAt,
     turnOrigin: req.turnOrigin,
   };

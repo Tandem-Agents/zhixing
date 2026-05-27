@@ -136,16 +136,23 @@ export function formatConfirmationMessage(request: ConfirmationRequest): string 
     1,
     Math.round((request.expiresAt - Date.now()) / 60_000),
   );
-  return [
+  const lines = [
     `🔒 需要批准：${request.display.title}`,
     ``,
     detail,
+  ];
+  // 安全管家研判理由（needs-confirm 经管家时存在）——远程用户上下文更少，理由更关键
+  if (request.display.stewardReason) {
+    lines.push(``, `🛡 安全管家：${request.display.stewardReason}`);
+  }
+  lines.push(
     ``,
     `风险等级：${riskLevel} · ${minutes} 分钟内回复：`,
     `• 允许本次：好 / y / yes / 可以 / 同意 / 干吧 / 1`,
     `• 拒绝：   不 / n / no / 拒绝 / 算了 / 2`,
     `• 或直接说明拒绝理由（会传给 AI 参考）`,
-  ].join("\n");
+  );
+  return lines.join("\n");
 }
 
 /** 按 DisplayBody kind 构造详情段 */

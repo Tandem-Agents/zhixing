@@ -71,6 +71,8 @@ export interface ConfirmationDisplay {
   resolvedPaths?: string[];
   /** 执行位置 */
   cwd: string;
+  /** AI 安全管家的研判理由 —— 仅 needs-confirm 经管家研判时存在，向用户说明为何需要确认 */
+  stewardReason?: string;
 }
 
 // ─── 选项 ───

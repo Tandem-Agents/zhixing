@@ -403,4 +403,54 @@ describe("formatConfirmationMessage", () => {
     const text = formatConfirmationMessage(req);
     expect(text).toContain("风险等级：medium");
   });
+
+  it("display.stewardReason 存在时渲染安全管家研判理由（远程通道也可见）", () => {
+    const now = Date.now();
+    const req: ConfirmationRequest = {
+      id: "r1",
+      tool: "bash",
+      toolInput: { command: "curl https://x.com" },
+      workingDirectory: "/tmp",
+      display: {
+        title: "Bash 命令",
+        body: {
+          kind: "bash",
+          command: "curl https://x.com",
+          commandPreview: "curl https://x.com",
+        },
+        cwd: "/tmp",
+        stewardReason: "向外部地址上传数据，与当前任务意图不完全匹配",
+      },
+      options: [],
+      sessionType: "interactive",
+      workspaceId: null,
+      createdAt: now,
+      expiresAt: now + 60_000,
+    };
+    const text = formatConfirmationMessage(req);
+    expect(text).toContain("安全管家");
+    expect(text).toContain("与当前任务意图不完全匹配");
+  });
+
+  it("无 stewardReason 时不渲染管家行", () => {
+    const now = Date.now();
+    const req: ConfirmationRequest = {
+      id: "r1",
+      tool: "bash",
+      toolInput: { command: "ls" },
+      workingDirectory: "/tmp",
+      display: {
+        title: "Bash 命令",
+        body: { kind: "bash", command: "ls", commandPreview: "ls" },
+        cwd: "/tmp",
+      },
+      options: [],
+      sessionType: "interactive",
+      workspaceId: null,
+      createdAt: now,
+      expiresAt: now + 60_000,
+    };
+    const text = formatConfirmationMessage(req);
+    expect(text).not.toContain("安全管家");
+  });
 });

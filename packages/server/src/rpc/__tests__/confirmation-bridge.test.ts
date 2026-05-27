@@ -232,7 +232,7 @@ describe("ConfirmationBridge — observer-scoped 推送", () => {
 // ─── pending payload 字段 ───
 
 describe("ConfirmationBridge — confirmation.pending payload", () => {
-  it("payload 含 requestId / tool / operationSummary / operationDetail / expiresAt", async () => {
+  it("payload 含 requestId / tool / operationSummary / operationDetail / stewardReason / expiresAt", async () => {
     const hub = new ConfirmationHub();
     const broker = new ConfirmationBroker();
     broker.onRequest(() => {});
@@ -249,6 +249,7 @@ describe("ConfirmationBridge — confirmation.pending payload", () => {
     });
 
     const req = makeRequest("r-payload", "Bash 命令");
+    req.display.stewardReason = "向外部地址上传数据，与任务意图不完全匹配";
     const promise = broker.requestConfirmation(req);
     broker.resolve("r-payload", { kind: "allow-once" });
     await promise;
@@ -263,6 +264,9 @@ describe("ConfirmationBridge — confirmation.pending payload", () => {
     expect(payload.tool).toBe("bash");
     expect(payload.operationSummary).toBe("Bash 命令");
     expect(payload.operationDetail).toBe("ls");
+    expect(payload.stewardReason).toBe(
+      "向外部地址上传数据，与任务意图不完全匹配",
+    );
     expect(payload.expiresAt).toBe(req.expiresAt);
 
     bridge.dispose();

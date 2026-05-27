@@ -212,6 +212,8 @@ export function createSecureExecuteTool(
           sessionType,
           fallbackStrategy,
           onUserDenied,
+          // needs-confirm 时管家给出了研判理由；未触发管家时为 undefined
+          stewardReason: verdict?.reason,
         });
       } else {
         // 管家放行 → 喂信任沉淀（累计达阈值后免管家），跳过 broker、落到下方执行
@@ -291,6 +293,8 @@ async function handleBrokerPath(params: {
   sessionType: SessionType;
   fallbackStrategy: ConfirmationFallbackStrategy;
   onUserDenied?: OnUserDeniedFn;
+  /** AI 安全管家的研判理由 —— needs-confirm 经管家时透传给确认请求 */
+  stewardReason?: string;
 }): Promise<void> {
   const {
     broker,
@@ -302,6 +306,7 @@ async function handleBrokerPath(params: {
     sessionType,
     fallbackStrategy,
     onUserDenied,
+    stewardReason,
   } = params;
 
   const request = buildConfirmationRequest({
@@ -314,6 +319,7 @@ async function handleBrokerPath(params: {
     // 远程确认回程地址透传:AgentRuntime → ToolExecutionContext.turnOrigin
     //   → ConfirmationRequest.turnOrigin → Hub / Renderer / Bridge
     turnOrigin: context.turnOrigin,
+    stewardReason,
   });
 
   const decision = await broker.requestConfirmation(request);

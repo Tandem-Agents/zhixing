@@ -255,6 +255,8 @@ export interface BuildConfirmationRequestParams {
    * Renderer / Hub / Bridge 读此字段决定把确认请求推回哪个通道 / RPC 连接。
    */
   turnOrigin?: TurnOrigin;
+  /** AI 安全管家的研判理由 —— needs-confirm 经管家时透传，渲染给用户说明为何要确认 */
+  stewardReason?: string;
 }
 
 /**
@@ -307,6 +309,7 @@ export function buildConfirmationRequest(
       commandFull: body.kind === "bash" ? body.command : undefined,
       resolvedPaths: result.resolvedPaths,
       cwd: workingDirectory,
+      stewardReason: params.stewardReason,
     },
     options,
     sessionType,
