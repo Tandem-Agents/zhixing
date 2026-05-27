@@ -138,6 +138,9 @@ export function createScheduleTool(
     isReadOnly: false,
     isParallelSafe: false,
     needsPermission: false,
+    // 定时任务是知行应用本地状态：写本地数据、无外部副作用 →
+    // 经 app-state 边界判 internal（自动放行）。
+    boundaries: [{ boundaryType: "app-state", access: "write", dynamic: false }],
 
     async call(input, context): Promise<ToolResult> {
       const action = input.action as string;

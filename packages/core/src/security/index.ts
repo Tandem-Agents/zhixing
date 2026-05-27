@@ -90,7 +90,6 @@ export type {
 } from "./command-analyzer.js";
 
 // 执行守卫
-export { EnvSanitize } from "./env-sanitize.js";
 export { PathGuard } from "./path-guard.js";
 export {
   ExecutionGuardMiddleware,

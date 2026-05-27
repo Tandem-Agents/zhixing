@@ -282,10 +282,12 @@ export interface ToolDefinition {
    * 用于让 `BoundaryImpactClassifier`（OperationClassifier 兜底分类器）
    * 按工具自描述的边界判断 OperationClass，避免每个新工具都被默认归为 critical。
    *
-   * **何时不应声明**：现有 8 个 builtin 工具（read / write / edit / glob / grep /
-   * bash / schedule / memory）均通过专属 context classifier（FileSystemClassifier /
-   * ShellClassifier / Internal）接管分类。`CompositeClassifier` 优先 contextClassifiers，
-   * 因此 boundaries 对它们是死代码——**不应**声明，否则污染心智模型。
+   * **何时不应声明**：read / write / edit / glob / grep / bash 通过专属 context
+   * classifier（FileSystemClassifier / ShellClassifier）接管——它们的影响取决于运行时
+   * 上下文（路径在不在 workspace、命令内容），非静态边界；`CompositeClassifier` 优先
+   * contextClassifiers，对这几个工具声明 boundaries 是死代码、**不应**声明。
+   * 反之，memory / schedule 等"固定写本地应用状态"的工具应声明 `app-state` 边界
+   * （判 internal），而非硬编码进 classifier。
    *
    * **何时必须声明**：未来无 context classifier 的新工具（如 web_fetch / web_search /
    * MCP HTTP 工具 / 第三方插件）必须声明，否则 `BoundaryImpactClassifier` 会

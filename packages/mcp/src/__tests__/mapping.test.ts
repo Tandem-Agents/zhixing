@@ -68,6 +68,42 @@ describe("mapServerTools — 字段映射", () => {
         .inputSchema,
     ).toEqual({ type: "object" });
   });
+
+  it("permissionArgumentKey：取 required 中第一个 string 字段（跳过非 string）", () => {
+    const t = mapServerTools(
+      stdioGithub,
+      [
+        desc({
+          name: "x",
+          inputSchema: {
+            type: "object",
+            properties: { count: { type: "number" }, url: { type: "string" } },
+            required: ["count", "url"],
+          },
+        }),
+      ],
+      noop,
+    )[0]!;
+    expect(t.permissionArgumentKey).toBe("url");
+  });
+
+  it("permissionArgumentKey：无 required string 字段 → 不设（回退默认启发式）", () => {
+    const t = mapServerTools(
+      stdioGithub,
+      [
+        desc({
+          name: "x",
+          inputSchema: {
+            type: "object",
+            properties: { count: { type: "number" } },
+            required: ["count"],
+          },
+        }),
+      ],
+      noop,
+    )[0]!;
+    expect(t.permissionArgumentKey).toBeUndefined();
+  });
 });
 
 describe("mapServerTools — 命名与去重", () => {

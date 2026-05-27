@@ -48,7 +48,6 @@ export const TERMINAL_RENDERER_CAPABILITIES: RendererCapabilities = {
     "deny",
     "allow-with-note",
     "deny-with-reason",
-    "always-ask",
     // "edit-then-allow" Step 8 再加
     // "show-full" SelectOperationRegion 内部通过自适应截断 + 手动展开处理
   ],
@@ -207,7 +206,6 @@ export function buildSelectOptions(
       case "allow-workspace":
       case "allow-global":
       case "deny":
-      case "always-ask":
       case "show-full":
       case "edit-then-allow":
         selectOptions.push({
@@ -314,8 +312,6 @@ export function translate(
         pattern: opt.pattern,
         note: result.note,
       };
-    case "always-ask":
-      return { kind: "always-ask", pattern: opt.pattern };
     case "deny":
       return { kind: "deny" };
     case "deny-with-reason":

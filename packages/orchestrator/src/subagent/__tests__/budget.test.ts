@@ -32,10 +32,10 @@ describe("resolveSubAgentBudget", () => {
   it("部分字段覆盖 → 仅覆盖给定字段,其余取默认", () => {
     const resolved = resolveSubAgentBudget({
       maxTurns: 5,
-      confirmationPolicy: "auto-deny",
+      confirmationPolicy: "inherit-or-deny",
     });
     expect(resolved.maxTurns).toBe(5);
-    expect(resolved.confirmationPolicy).toBe("auto-deny");
+    expect(resolved.confirmationPolicy).toBe("inherit-or-deny");
     expect(resolved.maxTokens).toBe(DEFAULT_SUB_MAX_TOKENS);
     expect(resolved.wallClockTimeoutMs).toBe(DEFAULT_SUB_WALL_CLOCK_MS);
     expect(resolved.llmIdleTimeoutMs).toBe(DEFAULT_SUB_IDLE_TIMEOUT_MS);

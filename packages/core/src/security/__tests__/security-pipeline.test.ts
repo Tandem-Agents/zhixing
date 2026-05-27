@@ -71,8 +71,7 @@ describe("SecurityPipeline", () => {
       const names = middlewares.map((m) => m.name);
 
       expect(names).toContain("PolicyEvaluator");
-      expect(names).toContain("EnvSanitize");
-      expect(names).toContain("PathGuard");
+      expect(names).toContain("PathResolve");
     });
 
     it("有 EventBus 时包含审计器", () => {
@@ -514,7 +513,6 @@ describe("SecurityPipeline", () => {
     });
 
     it("deny 规则 + 短路：guards 不应运行", async () => {
-      // 通过 resolvedPaths 是否被设置来验证 PathGuard 是否跑过
       const store = new PermissionStore({ rootDir: null });
       store.create(
         null,
@@ -537,9 +535,9 @@ describe("SecurityPipeline", () => {
       );
 
       expect(result.allowed).toBe(false);
-      // PathGuard 应该没跑过（bash 工具没有 path 参数，所以 resolvedPaths 会是 undefined 不管跑没跑）
-      // 更可靠的验证：EnvSanitize 的 sanitizedEnv 应该不存在
-      expect(result.sanitizedEnv).toBeUndefined();
+      // deny 在 PolicyEvaluator 阶段短路，guard 阶段（ExecutionGuard）不应运行
+      // → executionConstraints 不会被写入
+      expect(result.executionConstraints).toBeUndefined();
     });
 
     it("包含 PermissionMatcher 中间件", () => {

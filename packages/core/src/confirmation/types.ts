@@ -71,11 +71,6 @@ export interface ConfirmationDisplay {
   resolvedPaths?: string[];
   /** 执行位置 */
   cwd: string;
-  /**
-   * 可变文件的当前 sha256 快照——防 TOCTOU。
-   * 渲染器可忽略，由 secure-executor 在执行前验证。
-   */
-  mutableFileSnapshots?: Array<{ path: string; sha256: string }>;
 }
 
 // ─── 选项 ───
@@ -125,13 +120,7 @@ export type ConfirmationOption =
       hotkey?: string;
     }
   | { kind: "edit-then-allow"; label: string; hotkey?: string }
-  | { kind: "show-full"; label: string; hotkey?: string }
-  | {
-      kind: "always-ask";
-      label: string;
-      pattern: SuggestedPattern;
-      hotkey?: string;
-    };
+  | { kind: "show-full"; label: string; hotkey?: string };
 
 /**
  * `ConfirmationOption` 的 kind 字段集合——用于 RendererCapabilities.supportedOptions。
@@ -210,7 +199,6 @@ export type ConfirmationDecision =
   | { kind: "allow-session"; pattern: SuggestedPattern; note?: string }
   | { kind: "allow-workspace"; pattern: SuggestedPattern; note?: string }
   | { kind: "allow-global"; pattern: SuggestedPattern; note?: string }
-  | { kind: "always-ask"; pattern: SuggestedPattern }
   | {
       kind: "edit-then-allow";
       modifiedInput: Record<string, unknown>;
@@ -240,7 +228,6 @@ export type CancelCause =
   | "user-ctrl-c" // 用户按 Ctrl+C
   | "user-ctrl-d" // 用户按 Ctrl+D
   | "session-end" // 会话结束时清场
-  | "renderer-detached" // 渲染器在 showing 状态下断开
   | "aborted" // 外部 AbortSignal 触发
   | "backpressure"; // 队列已满
 

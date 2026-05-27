@@ -52,16 +52,20 @@ function mapOne(
   callTool: McpCallFn,
 ): ToolDefinition {
   const readOnly = descriptor.readOnlyHint === true;
+  const inputSchema = normalizeSchema(descriptor.inputSchema);
 
   return {
     name: toolName,
     description: truncate(descriptor.description ?? "", MAX_DESCRIPTION_CHARS),
-    inputSchema: normalizeSchema(descriptor.inputSchema),
+    inputSchema,
     // 只读工具不改外部状态：可并发、经 boundary 分类自动放行。
     // fail-closed：缺 readOnlyHint 视为有副作用、不可并发。
     isReadOnly: readOnly,
     isParallelSafe: readOnly,
     needsPermission: true,
+    // 权限规则匹配的主参数：取 inputSchema.required 中第一个 string 字段（比
+    // 依赖 Object.values 顺序的默认启发式稳定）；无合适字段则留空、回退启发式。
+    permissionArgumentKey: inferPermissionArgumentKey(inputSchema),
     // MCP 在知行里属"外部服务"类。读类 access 经分类器归 observe 放行，
     // 非只读归 external 触发用户确认 —— 与内置工具同一条安全管线。
     boundaries: [
@@ -103,6 +107,16 @@ function normalizeSchema(raw: unknown): JsonSchema {
     return raw as JsonSchema;
   }
   return { type: "object" };
+}
+
+/** 从 inputSchema.required 推断权限匹配主参数：第一个 type:"string" 的 required 字段。 */
+function inferPermissionArgumentKey(schema: JsonSchema): string | undefined {
+  const required = schema.required;
+  if (!required || required.length === 0) return undefined;
+  for (const key of required) {
+    if (schema.properties?.[key]?.type === "string") return key;
+  }
+  return undefined;
 }
 
 function truncate(text: string, max: number): string {

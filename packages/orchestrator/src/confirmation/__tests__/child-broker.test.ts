@@ -63,10 +63,6 @@ describe("resolveSubAgentResolver — 策略路由", () => {
     expect(resolveSubAgentResolver("inherit-or-deny")).toBe(failToDenyResolver);
   });
 
-  it("auto-deny → failToDenyResolver (与 inherit-or-deny 共享 resolver,语义显式化)", () => {
-    expect(resolveSubAgentResolver("auto-deny")).toBe(failToDenyResolver);
-  });
-
   it("policy 参数必填(无字面默认值)—— 编译期类型契约强制 caller 走 resolveSubAgentBudget", () => {
     // 编译期类型契约:Parameters<typeof resolveSubAgentResolver> 必须严格匹配
     // [SubAgentConfirmationPolicy](必填,无 optional 修饰)。
@@ -93,7 +89,6 @@ describe("resolveSubAgentResolver — 策略路由", () => {
     // 审查者立即捕获。这是"misuse 防御"的编译期实施层。
     const allPolicies = exhaustivePolicyList([
       "inherit-or-deny",
-      "auto-deny",
     ] as const);
 
     for (const policy of allPolicies) {
@@ -110,14 +105,6 @@ describe("resolveSubAgentResolver — broker 集成路径", () => {
       nonInteractiveResolver: resolveSubAgentResolver("inherit-or-deny"),
     });
     const decision = await broker.requestConfirmation(makeRequest("d1"));
-    expect(decision.kind).toBe("deny");
-  });
-
-  it("auto-deny resolver 注入 broker 后,无 listener 路径 auto-resolve 为 deny(显式策略名)", async () => {
-    const broker = new ConfirmationBroker({
-      nonInteractiveResolver: resolveSubAgentResolver("auto-deny"),
-    });
-    const decision = await broker.requestConfirmation(makeRequest("d2"));
     expect(decision.kind).toBe("deny");
   });
 });

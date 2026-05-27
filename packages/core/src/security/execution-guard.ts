@@ -94,7 +94,7 @@ export interface ExecutionGuardOptions {
 export class ExecutionGuardMiddleware implements SecurityMiddleware {
   readonly name = "ExecutionGuard";
   readonly phase = "guard" as const;
-  readonly order = 30; // 在 EnvSanitize(10) + PathGuard(20) 之后
+  readonly order = 30; // guard 阶段最后一步
 
   private readonly profiles: Record<string, ToolExecutionProfile>;
   private readonly limiter: SlidingWindowRateLimiter;

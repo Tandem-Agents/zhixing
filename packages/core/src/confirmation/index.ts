@@ -35,7 +35,6 @@ export {
   failToAllowResolver,
   failToDenyResolver,
   failToExpiredResolver,
-  getBuiltinNonInteractiveResolver,
 } from "./non-interactive.js";
 
 export {

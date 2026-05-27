@@ -295,7 +295,6 @@ async function handleBrokerPath(params: {
     case "allow-session":
     case "allow-workspace":
     case "allow-global":
-    case "always-ask":
       await applyBrokerDecision({
         decision,
         pipeline,
@@ -323,8 +322,6 @@ function cancelLabel(cause: string): string {
       return "被用户退出";
     case "session-end":
       return "因会话结束被清场";
-    case "renderer-detached":
-      return "因渲染器断开被取消";
     case "aborted":
       return "被外部 abort";
     case "backpressure":
@@ -422,8 +419,7 @@ async function applyBrokerDecision(params: {
         | "allow-once"
         | "allow-session"
         | "allow-workspace"
-        | "allow-global"
-        | "always-ask";
+        | "allow-global";
     }
   >;
   pipeline: SecurityPipeline;
@@ -506,11 +502,6 @@ async function applyBrokerDecision(params: {
           scope: "global",
         }),
       );
-      return;
-
-    case "always-ask":
-      // 当前按 allow-once 兜底(track 到累计器,不创建规则)
-      tracker.record(request, riskLevel);
       return;
   }
 }

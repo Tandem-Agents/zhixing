@@ -521,16 +521,16 @@ export async function createAgentRuntime(
 
   // 安全管线：会话级单例，跨多次 run() 共享权限规则、确认追踪、频率限制状态。
   //
-  // BoundaryRegistry / ToolArgumentExtractor 当前均走"启动时 snapshot"路径
+  // BoundaryRegistry / ToolArgumentExtractor 均走"启动时 snapshot"路径
   // (`fromTools(tools)`)，把 boundaries / permissionArgumentKey 声明从工具
-  // 自描述映射到 security 基础设施。两者都暴露 `register/unregister` API，
-  // 未来 MCP / 插件动态接入工具时无需 reconfigure 整个 SecurityPipeline。
+  // 自描述映射到 security 基础设施。运行时工具集变更（MCP 连接等）走 reload
+  // 整体重建后重新 fromTools，不走 in-place 增删（故无 unregister）。
   //
-  // 现有 8 个 builtin 工具均不声明 boundaries（context classifier 接管），
-  // boundary registry 实际为空但链路已通；未来无 context classifier 的新工具
-  // （web_fetch / web_search 等）声明后立即生效。tool-aware extractor 让
-  // PermissionStore.match 按工具自身声明的 permissionArgumentKey 提取参数，
-  // 避免多 string 字段工具的字段顺序歧义。
+  // boundary registry 内容：read/write/edit/glob/grep/bash 走 context classifier、
+  // 不声明 boundaries；memory/schedule（app-state）、web_fetch（network）、MCP 工具
+  // （external-service）等声明边界的工具进 registry。tool-aware extractor 让
+  // PermissionStore.match 按工具声明的 permissionArgumentKey 提参，避免多 string
+  // 字段工具的字段顺序歧义。
   const toolArgumentExtractor: IToolArgumentExtractor =
     ToolArgumentExtractor.fromTools(baseTools);
   // 注入式优先：caller 跨 reload 复用 session scope 授权（store 已在首次创建时 init

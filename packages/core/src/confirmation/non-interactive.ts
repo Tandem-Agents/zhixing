@@ -59,8 +59,8 @@ export const failToExpiredResolver: NonInteractiveResolver = {
  * ```
  *
  * **任何高层 API 都不暴露本 resolver 的字符串路径** —— sub-agent 的
- * `SubAgentConfirmationPolicy` 字面量类型仅含生产安全策略(`inherit-or-deny` /
- * `auto-deny`),配置文件 / API caller 不可能通过字符串误传到本 resolver。
+ * `SubAgentConfirmationPolicy` 字面量类型仅含生产安全策略(`inherit-or-deny`)，
+ * 配置文件 / API caller 不可能通过字符串误传到本 resolver。
  * 该设计让"显式构造 broker"成为唯一启用路径,刻意的动作即是最好的 misuse 防御。
  */
 export const failToAllowResolver: NonInteractiveResolver = {
@@ -70,19 +70,3 @@ export const failToAllowResolver: NonInteractiveResolver = {
   },
 };
 
-/**
- * 工具函数：按名字获取内置解析器。
- * Phase 2 接预审批 API 时新增的 delegate-to-preapproval 也会在这里注册。
- */
-export function getBuiltinNonInteractiveResolver(
-  name: "fail-to-deny" | "fail-to-expired" | "fail-to-allow",
-): NonInteractiveResolver {
-  switch (name) {
-    case "fail-to-deny":
-      return failToDenyResolver;
-    case "fail-to-expired":
-      return failToExpiredResolver;
-    case "fail-to-allow":
-      return failToAllowResolver;
-  }
-}

@@ -33,8 +33,10 @@
  * v2+ 扩展(在本 union 加新值即可,resolveSubAgentResolver 通过 TS exhaustive
  * check 强制覆盖):
  *   - `inherit-or-prompt`: 把子 confirmation 弹回父用户(需 hub 双向 UI 路由)
+ *   - `auto-deny`: 不继承父授权、一律拒绝(差异化点在"子用独立 pipeline / 空
+ *     permissionStore",不在 resolver；曾存在但与 inherit-or-deny 等价、无落点，已删)
  */
-export type SubAgentConfirmationPolicy = "inherit-or-deny" | "auto-deny";
+export type SubAgentConfirmationPolicy = "inherit-or-deny";
 
 /**
  * 子 agent 软上限触发种类 —— 四类触发统一建模

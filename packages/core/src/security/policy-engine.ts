@@ -23,6 +23,7 @@ import type {
 import * as path from "node:path";
 
 import { expandUserHome } from "../paths.js";
+import { PathGuard } from "./path-guard.js";
 
 // ─── 动作严格度排序 ───
 
@@ -218,14 +219,13 @@ export class PolicyEngine implements IPolicyEngine {
 
     if (!anchor) return true;
 
-    return paths.some((p) => {
-      const resolved = path.resolve(request.context.cwd, p);
-      const anchorResolved = path.resolve(anchor);
-      return (
-        !resolved.startsWith(anchorResolved + path.sep) &&
-        resolved !== anchorResolved
-      );
-    });
+    // 用 PathGuard.isWithinWorkspace（realpath 两边）判断，与 FileSystemClassifier 对齐——
+    // 避免"path 已 realpath（PathResolveMiddleware）、anchor 未 realpath"的不对称：
+    // 否则 workspace 路径含 symlink（如 macOS /tmp→/private/tmp、软链的工作目录）时，
+    // 工作区内写会被误判为工作区外写而多触发一次 confirm。
+    return paths.some(
+      (p) => !PathGuard.isWithinWorkspace(p, anchor, request.context.cwd),
+    );
   }
 
   private matchNetwork(

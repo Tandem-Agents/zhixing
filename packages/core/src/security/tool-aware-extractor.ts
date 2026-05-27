@@ -12,11 +12,11 @@
  *
  * 两种使用模式（与 `BoundaryRegistry` 对偶）：
  *
- * 1. **静态启动（当前主用法）**：`ToolArgumentExtractor.fromTools(tools)`
- *    一次性 snapshot 启动时所有工具的 `permissionArgumentKey` 声明
+ * 1. **静态启动（主用法）**：`ToolArgumentExtractor.fromTools(tools)`
+ *    一次性 snapshot 所有工具的 `permissionArgumentKey` 声明
  *
- * 2. **动态扩展（未来路径）**：runtime 调 `extractor.register(toolName, key)`
- *    注册新工具的 argument key，支持 MCP / 插件动态接入
+ * 2. **装配期补注册**：`extractor.register(name, key)`。运行时动态增删工具
+ *    （MCP 连接变更等）走 reload 整体重建后重新 fromTools，不走 in-place 增删
  *
  * 见 [tool-permission-execution.md §4.2](../../../../research/design/specifications/tool-permission-execution.md)
  * 与 ADR-TPE-007（依赖注入而非穿透 tools）。
@@ -29,7 +29,7 @@ import type { IToolArgumentExtractor, SecurityRequest } from "./types.js";
 /**
  * 可演进的工具参数提取器实现。
  *
- * implements `IToolArgumentExtractor`——caller（cli / MCP / 子 agent）持有接口
+ * implements `IToolArgumentExtractor`——caller（cli 入口）持有接口
  * 类型，未来 swap 实现零成本。注入到 `PermissionStoreOptions.extractArgument` 时
  * 使用 `(req) => extractor.extract(req)` 箭头函数桥接保持 store 端函数式契约。
  */
@@ -63,11 +63,6 @@ export class ToolArgumentExtractor implements IToolArgumentExtractor {
       );
     }
     this.keys.set(toolName.toLowerCase(), key);
-  }
-
-  /** 注销一个工具的 argument key（动态卸载场景）。 */
-  unregister(toolName: string): void {
-    this.keys.delete(toolName.toLowerCase());
   }
 
   /**

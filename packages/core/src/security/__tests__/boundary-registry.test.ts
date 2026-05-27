@@ -110,7 +110,7 @@ describe("BoundaryRegistry.fromTools (启动时 snapshot 模式)", () => {
     expect(registry.getBoundaries("anything")).toBeUndefined();
   });
 
-  it("现实场景：现有 8 个 builtin 工具均不声明 boundaries → registry 全为空", () => {
+  it("走 context classifier 的工具不声明 boundaries → registry 全为空", () => {
     const builtinNames = [
       "read",
       "write",
@@ -118,8 +118,6 @@ describe("BoundaryRegistry.fromTools (启动时 snapshot 模式)", () => {
       "glob",
       "grep",
       "bash",
-      "schedule",
-      "memory",
     ];
     const tools = builtinNames.map((name) => makeTool(name, undefined));
 
@@ -222,38 +220,6 @@ describe("BoundaryRegistry: 动态 register / unregister", () => {
     expect(registry.getBoundaries("tool")).toEqual([NETWORK_EGRESS]);
   });
 
-  it("清除工具的边界声明应显式调 unregister（与 register 拒空数组对偶）", () => {
-    const registry = new BoundaryRegistry();
-    registry.register("tool", [NETWORK_EGRESS]);
-
-    registry.unregister("tool");
-    expect(registry.getBoundaries("tool")).toBeUndefined();
-  });
-
-  it("unregister 幂等：未注册的 toolName 调用 noop", () => {
-    const registry = new BoundaryRegistry();
-    expect(() => registry.unregister("never_registered")).not.toThrow();
-    expect(registry.getBoundaries("never_registered")).toBeUndefined();
-  });
-
-  it("unregister 移除工具", () => {
-    const registry = BoundaryRegistry.fromTools([
-      makeTool("web_fetch", [NETWORK_EGRESS]),
-    ]);
-    expect(registry.getBoundaries("web_fetch")).toEqual([NETWORK_EGRESS]);
-
-    registry.unregister("web_fetch");
-    expect(registry.getBoundaries("web_fetch")).toBeUndefined();
-  });
-
-  it("unregister 大小写不敏感", () => {
-    const registry = new BoundaryRegistry();
-    registry.register("WebFetch", [NETWORK_EGRESS]);
-
-    registry.unregister("WEBFETCH");
-    expect(registry.getBoundaries("webfetch")).toBeUndefined();
-  });
-
   it("list 返回所有已注册的工具名（小写）", () => {
     const registry = new BoundaryRegistry();
     registry.register("web_fetch", [NETWORK_EGRESS]);
@@ -265,30 +231,26 @@ describe("BoundaryRegistry: 动态 register / unregister", () => {
     expect(list).toHaveLength(2);
   });
 
-  it("MCP 接入场景：fromTools snapshot + 后续 register 动态扩展", () => {
+  it("装配期补注册场景：fromTools snapshot + 后续 register（如 Task 工具晚于 snapshot）", () => {
     const registry = BoundaryRegistry.fromTools([
-      makeTool("read", undefined), // builtin 工具不声明
+      makeTool("read", undefined), // 走 context classifier 的工具不声明
     ]);
     expect(registry.list()).toEqual([]);
 
-    // 模拟 /mcp connect 后注册新工具
-    registry.register("mcp_tool", [NETWORK_EGRESS]);
-    expect(registry.getBoundaries("mcp_tool")).toEqual([NETWORK_EGRESS]);
-
-    // 模拟 /mcp disconnect 后注销
-    registry.unregister("mcp_tool");
-    expect(registry.getBoundaries("mcp_tool")).toBeUndefined();
+    // 装配晚于 fromTools 的工具（如 Task）补注册
+    registry.register("task", [NETWORK_EGRESS]);
+    expect(registry.getBoundaries("task")).toEqual([NETWORK_EGRESS]);
   });
 });
 
-// ─── R3 守卫：从 SecurityPipeline 顶层观察 register 即时生效 ───
+// ─── 守卫：从 SecurityPipeline 顶层观察 register 即时生效 ───
 //
-// ADR-TPE-009 承诺：runtime 调 `registry.register(...)` 后 SecurityPipeline.evaluate
-// 立即反映新分类——不需要 reconfigure pipeline。这条承诺是 dynamic 工具加载（MCP /
-// 插件）的核心能力，但仅在 BoundaryImpactClassifier 不缓存 registry 查询结果时成立。
+// ADR-TPE-009 承诺：caller 调 `registry.register(...)` 后 SecurityPipeline.evaluate
+// 立即反映新分类——不需要 reconfigure pipeline（装配期 Task 工具补注册即依赖此）。
+// 仅在 BoundaryImpactClassifier 不缓存 registry 查询结果时成立。
 //
 // 守卫这条不变：若未来 BoundaryImpactClassifier 加内部缓存做性能优化，本测试会
-// 立即发现破坏，避免 dynamic 路径 silent 失效。
+// 立即发现破坏。
 
 describe("ADR-TPE-009 守卫：register 后 SecurityPipeline 即时生效", () => {
   it("空 registry 注入 pipeline → unknown 工具分类为 critical", async () => {
@@ -314,31 +276,12 @@ describe("ADR-TPE-009 守卫：register 后 SecurityPipeline 即时生效", () =
     const before = await pipeline.evaluate("mcp_tool", {}, "/tmp/test");
     expect(before.operationClass).toBe("critical");
 
-    // 模拟 /mcp connect 动态注册
+    // 装配期补注册（如 Task 工具晚于 fromTools）
     registry.register("mcp_tool", [NETWORK_EGRESS]);
 
     // 再 evaluate：立即按 network/egress 分类（external，不再 critical）
     const after = await pipeline.evaluate("mcp_tool", {}, "/tmp/test");
     expect(after.operationClass).toBe("external");
-  });
-
-  it("unregister 后再 evaluate → 立即回到未声明状态（critical）", async () => {
-    const registry: MutableToolBoundaryRegistry = new BoundaryRegistry();
-    registry.register("mcp_tool", [NETWORK_EGRESS]);
-
-    const pipeline = new SecurityPipeline({
-      workspace: "/tmp/test",
-      toolBoundaryRegistry: registry,
-    });
-
-    const before = await pipeline.evaluate("mcp_tool", {}, "/tmp/test");
-    expect(before.operationClass).toBe("external");
-
-    // 模拟 /mcp disconnect 动态注销
-    registry.unregister("mcp_tool");
-
-    const after = await pipeline.evaluate("mcp_tool", {}, "/tmp/test");
-    expect(after.operationClass).toBe("critical");
   });
 
   it("更换边界声明（覆盖式 register）→ 立即按新边界分类", async () => {

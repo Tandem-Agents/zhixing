@@ -61,7 +61,9 @@ export type BoundaryType =
   | "calendar"
   | "external-service"
   | "financial"
-  | "agent-context";
+  | "agent-context"
+  /** 知行应用本地状态（~/.zhixing 下 memory / schedule / skill 数据）：写=internal、读=observe */
+  | "app-state";
 
 /**
  * 工具声明的边界跨越。
@@ -99,35 +101,35 @@ export interface ToolBoundaryRegistry {
 }
 
 /**
- * 工具边界注册表的可变子接口——caller 持有此类型以支持运行时注册/注销。
+ * 工具边界注册表的可变子接口——caller 持有此类型以支持注册（含装配期补注册）。
  *
  * 设计目的（ADR-TPE-009）：让 caller 依赖**接口**而非具体类，未来 swap 实现
  * （如 immutable + observable / 远程同步等）零成本——只要新实现 implements
  * 同接口即可。当前唯一实现是 `BoundaryRegistry`。
  *
  * 用法：
- * - **静态启动**：`BoundaryRegistry.fromTools(tools)` 一次性 snapshot
- * - **动态扩展**：`registry.register("mcp_tool", [...])` runtime 注入新工具，
- *   无需 reconfigure SecurityPipeline——`BoundaryImpactClassifier` 实时反映
+ * - **静态启动**：`BoundaryRegistry.fromTools(tools)` 一次性 snapshot 所有工具边界
+ * - **装配期补注册**：`registry.register(name, [...])`（如 Task 工具晚于 fromTools 装配）
+ *
+ * 注意：运行时动态增删工具（如 MCP 连接变更）走 reload 整体重建后重新 fromTools
+ * snapshot，**不**走 in-place 增删——故本接口不提供 unregister。
  */
 export interface MutableToolBoundaryRegistry extends ToolBoundaryRegistry {
   /**
    * 注册或覆盖单工具的边界声明。
    * - 重复注册同 toolName：覆盖旧声明
-   * - **拒绝空数组**（fail-fast）：传入 `[]` 必须 throw；清除工具应显式调
-   *   `unregister(toolName)`。与 `IToolArgumentExtractor.register` 拒空 key throw 对偶
+   * - **拒绝空数组**（fail-fast）：传入 `[]` 必须 throw。与
+   *   `IToolArgumentExtractor.register` 拒空 key throw 对偶
    * - 工具名小写归一化；内部独立深拷贝防止 caller mutate 污染
    */
   register(toolName: string, boundaries: readonly BoundaryCrossing[]): void;
-  /** 注销工具的边界声明（动态卸载场景，如 MCP disconnect）。幂等：未注册的 toolName 调用 noop。 */
-  unregister(toolName: string): void;
   /** 调试 / 可观测性：列出已注册的工具名（小写）。 */
   list(): string[];
 }
 
 /**
  * 工具参数提取器接口——`PermissionStore.match` 通过 `extractArgument` 函数式注入消费，
- * 但 caller 在持有 extractor 实例时使用此接口以支持运行时 register/unregister。
+ * 但 caller 在持有 extractor 实例时使用此接口以支持注册（含装配期补注册）。
  *
  * 设计目的（ADR-TPE-009）：与 `MutableToolBoundaryRegistry` 对偶——caller 依赖接口
  * 而非具体类，未来 swap 实现零成本。当前唯一实现是 `ToolArgumentExtractor`。
@@ -144,8 +146,6 @@ export interface IToolArgumentExtractor {
   extract(request: SecurityRequest): string;
   /** 注册或覆盖单工具的 argument key。空 / 非 string key throw。 */
   register(toolName: string, key: string): void;
-  /** 注销工具的 key 声明（动态卸载场景）。 */
-  unregister(toolName: string): void;
   /** 调试 / 可观测性：列出已注册的工具名（小写）。 */
   list(): string[];
 }
@@ -407,7 +407,6 @@ export interface SecurityMiddlewareState {
   suggestion?: import("./confirmation-tracker.js").SuggestionStatus;
   /** 执行约束（由 ExecutionGuardMiddleware 写入） */
   executionConstraints?: import("./execution-guard.js").ExecutionConstraints;
-  sanitizedEnv?: Record<string, string | undefined>;
   resolvedPaths?: string[];
   [key: string]: unknown;
 }
@@ -433,9 +432,7 @@ export interface SecurityMiddlewareResult {
   executionConstraints?: import("./execution-guard.js").ExecutionConstraints;
   /** 原因说明 */
   reason?: string;
-  /** 修改后的环境变量（由 EnvSanitize 提供） */
-  sanitizedEnv?: Record<string, string | undefined>;
-  /** 规范化后的路径（由 PathGuard 提供） */
+  /** 规范化后的路径（realpath，由 PathResolveMiddleware 提供） */
   resolvedPaths?: string[];
 }
 
@@ -480,12 +477,6 @@ export type SecurityEventMap = {
     reason: string;
     riskLevel: RiskLevel;
     matchedRules: string[];
-  };
-
-  /** 环境变量被净化 */
-  "security:env_sanitized": {
-    removedVars: string[];
-    tool: string;
   };
 
   /** 路径规范化 */

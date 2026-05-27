@@ -417,22 +417,6 @@ describe("runChildAgent · audit 血缘 (parentBrokerId / sourceAgentId)", () =>
     }
   });
 
-  it("budget.confirmationPolicy='auto-deny' → child broker resolver = fail-to-deny (与缺省语义等价显式化)", async () => {
-    const provider = new MockLLMProvider([{ text: "ok" }]);
-    const cancelSpy = vi.spyOn(ConfirmationBroker.prototype, "cancelAll");
-
-    try {
-      await runChildAgent(
-        makeBaseOpts(provider, { budget: { confirmationPolicy: "auto-deny" } }),
-      );
-      const childBroker = findChildBroker(cancelSpy, "parent-broker-test");
-      expect(childBroker?.snapshot().nonInteractiveResolver).toBe(
-        "fail-to-deny",
-      );
-    } finally {
-      cancelSpy.mockRestore();
-    }
-  });
 });
 
 // ─── ALS 嵌套隔离 ───

@@ -344,7 +344,6 @@ describe("confirmation.resolve", () => {
     ["allow-session", { pattern: { pattern: { executable: "x", argument: "y" } } }],
     ["allow-workspace", { pattern: { pattern: { executable: "x", argument: "y" } } }],
     ["allow-global", { pattern: { pattern: { executable: "x", argument: "y" } } }],
-    ["always-ask", { pattern: { pattern: { executable: "x", argument: "y" } } }],
     ["edit-then-allow", { modifiedInput: {} }],
   ])("远程 kind='%s' → invalid params（远程路径不支持持久授权 / 编辑）", (kind, extra) => {
     const hub = new ConfirmationHub();

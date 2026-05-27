@@ -476,4 +476,16 @@ describe("createDefaultClassifier", () => {
       "critical",
     );
   });
+
+  it("声明 app-state 边界的工具 → internal（memory / schedule 由硬编码改为声明式的路径）", () => {
+    const classifier = createDefaultClassifier({
+      registry: {
+        getBoundaries: (name) =>
+          name === "memory"
+            ? [{ boundaryType: "app-state", access: "write", dynamic: false }]
+            : undefined,
+      },
+    });
+    expect(classifier.classify(makeRequest({ tool: "memory" }))).toBe("internal");
+  });
 });

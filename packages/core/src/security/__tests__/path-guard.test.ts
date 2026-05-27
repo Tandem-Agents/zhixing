@@ -1,174 +1,89 @@
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PathGuard } from "../path-guard.js";
 
 describe("PathGuard", () => {
-  const home = os.homedir();
-  const cwd = path.join(home, "project");
+  let root: string; // 真实存在的根（已 realpath，规避 tmpdir 自身的 symlink，如 macOS /var→/private/var）
+  let ws: string;
+  let symlinkOk = false;
+
+  beforeAll(() => {
+    root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "pg-")));
+    ws = path.join(root, "ws");
+    fs.mkdirSync(path.join(ws, "src"), { recursive: true });
+    fs.writeFileSync(path.join(ws, "src", "index.ts"), "x");
+    fs.writeFileSync(path.join(root, "secret.txt"), "s");
+    fs.mkdirSync(path.join(root, "outside"), { recursive: true });
+    try {
+      // workspace 内指向 workspace 外文件的 symlink
+      fs.symlinkSync(path.join(root, "secret.txt"), path.join(ws, "link-to-secret"));
+      // workspace 内指向 workspace 外目录的 symlink
+      fs.symlinkSync(path.join(root, "outside"), path.join(ws, "link-dir"));
+      symlinkOk = true;
+    } catch {
+      symlinkOk = false; // Windows 无开发者模式 / 无权限时跳过 symlink 用例
+    }
+  });
+
+  afterAll(() => {
+    fs.rmSync(root, { recursive: true, force: true });
+  });
 
   describe("resolve", () => {
     it("相对路径解析为绝对路径", () => {
-      const resolved = PathGuard.resolve("src/index.ts", cwd);
-      expect(path.isAbsolute(resolved)).toBe(true);
+      const r = PathGuard.resolve("ws/src/index.ts", root);
+      expect(r).toBe(path.join(ws, "src", "index.ts"));
     });
 
-    it("~ 展开为用户主目录", () => {
-      const resolved = PathGuard.resolve("~/Documents/test.txt", cwd);
-      expect(resolved.startsWith(home)).toBe(true);
-      expect(resolved).toContain("Documents");
+    it(".. 被规范化、无残留", () => {
+      const r = PathGuard.resolve("ws/../ws/src/index.ts", root);
+      expect(r).not.toContain("..");
+      expect(r).toBe(path.join(ws, "src", "index.ts"));
     });
 
-    it(".. 路径遍历被规范化", () => {
-      const resolved = PathGuard.resolve("../other/file.txt", cwd);
-      expect(resolved).not.toContain("..");
+    it("不存在的新建路径：存在的父目录被 realpath、拼接剩余段", () => {
+      const r = PathGuard.resolve("ws/src/new-file.ts", root);
+      expect(r).toBe(path.join(ws, "src", "new-file.ts"));
     });
 
-    it("绝对路径直接返回（规范化后）", () => {
-      const input = path.join(home, "absolute", "path.txt");
-      const resolved = PathGuard.resolve(input, cwd);
-      expect(resolved).toContain("absolute");
+    it("symlink 被解析到真实目标", () => {
+      if (!symlinkOk) return;
+      expect(PathGuard.resolve("ws/link-to-secret", root)).toBe(
+        path.join(root, "secret.txt"),
+      );
+    });
+
+    it("经 symlink 目录的新建文件：父 symlink 被解析（堵绕过残留）", () => {
+      if (!symlinkOk) return;
+      // 父目录 ws/link-dir 是 symlink → outside；newfile 不存在 → 祖先解析应穿透 symlink
+      expect(PathGuard.resolve("ws/link-dir/newfile.txt", root)).toBe(
+        path.join(root, "outside", "newfile.txt"),
+      );
     });
   });
 
   describe("isWithinWorkspace", () => {
-    it("工作区内的文件返回 true", () => {
-      expect(
-        PathGuard.isWithinWorkspace("src/index.ts", cwd, cwd),
-      ).toBe(true);
+    it("工作区内文件 → true", () => {
+      expect(PathGuard.isWithinWorkspace("ws/src/index.ts", ws, root)).toBe(true);
     });
 
-    it("工作区根目录本身返回 true", () => {
-      expect(PathGuard.isWithinWorkspace(".", cwd, cwd)).toBe(true);
+    it("工作区根本身 → true", () => {
+      expect(PathGuard.isWithinWorkspace(ws, ws, root)).toBe(true);
     });
 
-    it("工作区外的文件返回 false", () => {
-      expect(
-        PathGuard.isWithinWorkspace("/etc/passwd", cwd, cwd),
-      ).toBe(false);
+    it("工作区外文件 → false", () => {
+      expect(PathGuard.isWithinWorkspace(path.join(root, "secret.txt"), ws, root)).toBe(false);
     });
 
-    it("路径遍历到工作区外返回 false", () => {
-      expect(
-        PathGuard.isWithinWorkspace("../../etc/passwd", cwd, cwd),
-      ).toBe(false);
+    it(".. 逃逸到工作区外 → false", () => {
+      expect(PathGuard.isWithinWorkspace("../secret.txt", ws, ws)).toBe(false);
     });
 
-    it("~ 路径的工作区检查", () => {
-      expect(
-        PathGuard.isWithinWorkspace("~/.ssh/id_rsa", cwd, cwd),
-      ).toBe(false);
-    });
-  });
-
-  describe("isSystemProtected", () => {
-    it("~/.ssh 是系统保护路径", () => {
-      expect(PathGuard.isSystemProtected("~/.ssh/id_rsa", cwd)).toBe(true);
-    });
-
-    it("~/.ssh 目录本身是保护路径", () => {
-      expect(PathGuard.isSystemProtected("~/.ssh", cwd)).toBe(true);
-    });
-
-    it("~/.gnupg 是系统保护路径", () => {
-      expect(PathGuard.isSystemProtected("~/.gnupg/pubring.kbx", cwd)).toBe(
-        true,
-      );
-    });
-
-    it("~/.aws/credentials 是系统保护路径", () => {
-      expect(
-        PathGuard.isSystemProtected("~/.aws/credentials", cwd),
-      ).toBe(true);
-    });
-
-    it("普通路径不是系统保护路径", () => {
-      expect(PathGuard.isSystemProtected("src/index.ts", cwd)).toBe(false);
-    });
-
-    it("用户主目录本身不是系统保护路径", () => {
-      expect(PathGuard.isSystemProtected("~", cwd)).toBe(false);
-    });
-  });
-
-  describe("hasTraversalSequence", () => {
-    it("检测 ../ 遍历序列", () => {
-      expect(PathGuard.hasTraversalSequence("../../etc/passwd")).toBe(true);
-    });
-
-    it("检测 ..\\ 遍历序列（Windows）", () => {
-      expect(PathGuard.hasTraversalSequence("..\\..\\Windows\\System32")).toBe(
-        true,
-      );
-    });
-
-    it("检测单独的 ..", () => {
-      expect(PathGuard.hasTraversalSequence("..")).toBe(true);
-    });
-
-    it("正常路径不包含遍历序列", () => {
-      expect(PathGuard.hasTraversalSequence("src/components/App.tsx")).toBe(
-        false,
-      );
-    });
-
-    it("包含 .. 但非遍历的路径不误报", () => {
-      // "file..txt" 不是遍历，因为 .. 后面跟的不是 / 或 \\
-      expect(PathGuard.hasTraversalSequence("file..txt")).toBe(false);
-    });
-  });
-
-  describe("中间件执行", () => {
-    it("提取并解析路径参数", async () => {
-      const guard = new PathGuard();
-      const ctx = {
-        request: {
-          tool: "write",
-          arguments: { path: "src/test.ts" },
-          context: {
-            cwd,
-            workspace: cwd,
-            sessionType: "interactive" as const,
-          },
-        },
-        toolName: "write",
-        toolInput: { path: "src/test.ts" },
-        workingDirectory: cwd,
-        state: {},
-      };
-
-      const result = await guard.execute(ctx, async () => ({
-        allowed: true,
-      }));
-
-      expect(result.resolvedPaths).toBeDefined();
-      expect(result.resolvedPaths!.length).toBe(1);
-      expect(path.isAbsolute(result.resolvedPaths![0]!)).toBe(true);
-    });
-
-    it("无路径参数时直接传递", async () => {
-      const guard = new PathGuard();
-      const ctx = {
-        request: {
-          tool: "bash",
-          arguments: { command: "echo hello" },
-          context: {
-            cwd,
-            workspace: cwd,
-            sessionType: "interactive" as const,
-          },
-        },
-        toolName: "bash",
-        toolInput: { command: "echo hello" },
-        workingDirectory: cwd,
-        state: {},
-      };
-
-      const result = await guard.execute(ctx, async () => ({
-        allowed: true,
-      }));
-
-      expect(result.resolvedPaths).toBeUndefined();
+    it("工作区内 symlink 指向工作区外 → false（防 symlink 逃逸）", () => {
+      if (!symlinkOk) return;
+      expect(PathGuard.isWithinWorkspace("link-to-secret", ws, ws)).toBe(false);
     });
   });
 });

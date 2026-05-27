@@ -1,154 +1,80 @@
 /**
- * 路径守卫
+ * 路径守卫 — 路径解析工具（static）
  *
- * 职责：
- * 1. 路径规范化 — 解析 ../ 和符号链接，防止路径遍历攻击
- * 2. 边界检查 — 判断路径是否在工作区内
- * 3. 敏感路径保护 — 阻止访问系统关键目录
+ * 提供 realpath 解析（防 symlink 逃逸）与工作区边界判断。
  *
- * 符号链接攻击防护：
- * 对所有路径做 realpath 解析后再判断是否在工作区内，
- * 防止 workspace/link → ~/.ssh/id_rsa 这样的攻击。
+ * 不再是 SecurityMiddleware —— 路径解析职责已上移到 authorize 阶段的
+ * `PathResolveMiddleware`（在 PolicyEvaluator 之前把 realpath 后的路径填进
+ * `resolvedAccess.paths`，下游 PolicyEngine / FileSystemClassifier 统一消费）。
+ * 本模块退化为被该中间件与 FileSystemClassifier 复用的纯解析 static。
+ *
+ * 敏感路径保护由 `builtin-rules.ts` 的 bypassImmune 规则（经 PolicyEngine）
+ * 统一负责 —— 本模块不再持有第二套敏感路径清单（消除双清单认知坑）。
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { expandUserHome } from "../paths.js";
-import type {
-  SecurityMiddleware,
-  SecurityMiddlewareContext,
-  SecurityMiddlewareResult,
-} from "./types.js";
 
-/**
- * 系统保护路径——无论工作区配置如何，这些路径下的写操作都会被标记。
- * 策略引擎的 bypassImmune 规则处理阻止逻辑，PathGuard 只做规范化和标记。
- */
-const SYSTEM_PROTECTED_PATHS = [
-  "~/.ssh",
-  "~/.gnupg",
-  "~/.aws/credentials",
-  "~/.config/gcloud",
-] as const;
-
-export class PathGuard implements SecurityMiddleware {
-  readonly name = "PathGuard";
-  readonly phase = "guard" as const;
-  readonly order = 20;
-
-  async execute(
-    ctx: SecurityMiddlewareContext,
-    next: () => Promise<SecurityMiddlewareResult>,
-  ): Promise<SecurityMiddlewareResult> {
-    const rawPaths = this.extractPaths(ctx);
-
-    if (rawPaths.length === 0) {
-      return next();
-    }
-
-    const cwd = ctx.request.context.cwd;
-    const resolvedPaths: string[] = [];
-
-    for (const rawPath of rawPaths) {
-      const resolved = PathGuard.resolve(rawPath, cwd);
-      resolvedPaths.push(resolved);
-    }
-
-    ctx.state.resolvedPaths = resolvedPaths;
-
-    // 补充 resolvedAccess.paths 供后续中间件使用
-    if (!ctx.request.resolvedAccess) {
-      ctx.request.resolvedAccess = {};
-    }
-    ctx.request.resolvedAccess.paths = resolvedPaths;
-
-    const result = await next();
-    return {
-      ...result,
-      resolvedPaths,
-    };
-  }
-
+export class PathGuard {
   /**
-   * 解析路径：展开 ~，解析 ../ 和 .，尝试 realpath 解析符号链接。
-   * 路径不存在时回退到逻辑路径解析（新建文件场景）。
+   * 解析路径：展开 ~，解析 ../ 和符号链接（realpath）。
+   *
+   * 路径不存在时（新建文件场景）回退到「最近存在祖先目录的 realpath + 拼接剩余段」——
+   * 确保父目录中的 symlink 也被解析，防止 `workspace/<软链目录>/newfile` 通过未解析
+   * 的父 symlink 绕过边界检查。全程无存在祖先（极端）时兜底 normalize（只会更严）。
    */
   static resolve(targetPath: string, cwd: string): string {
-    const expanded = expandUserHome(targetPath);
-    const absolute = path.resolve(cwd, expanded);
-
+    const absolute = path.resolve(cwd, expandUserHome(targetPath));
     try {
       return fs.realpathSync(absolute);
     } catch {
-      return path.normalize(absolute);
+      return PathGuard.resolveExistingAncestor(absolute);
     }
   }
 
   /**
-   * 判断路径是否在工作区内。
-   * 使用 realpath 解析后比较，防止符号链接逃逸。
+   * 对不存在的路径：逐级回退到最近存在的祖先目录做 realpath，再拼回剩余不存在段。
+   * 到达文件系统根仍找不到存在祖先时兜底 normalize。
+   */
+  private static resolveExistingAncestor(absolute: string): string {
+    const normalized = path.normalize(absolute);
+    const missing: string[] = [];
+    let current = normalized;
+
+    while (true) {
+      const parent = path.dirname(current);
+      if (parent === current) {
+        // 到根仍不存在 —— 兜底逻辑路径
+        return normalized;
+      }
+      missing.unshift(path.basename(current));
+      try {
+        const realParent = fs.realpathSync(parent);
+        return path.join(realParent, ...missing);
+      } catch {
+        current = parent;
+      }
+    }
+  }
+
+  /**
+   * 判断路径是否在工作区内 —— realpath 两边后比较，防 symlink 逃逸。
    */
   static isWithinWorkspace(
     targetPath: string,
     workspace: string,
     cwd: string,
   ): boolean {
+    // 两边走同一 resolve（realpath + 祖先解析），保证对称——避免 target 解析了
+    // symlink 而 workspace 没解析（或反之）导致前缀比较失真。
     const resolved = PathGuard.resolve(targetPath, cwd);
-    let workspaceResolved: string;
-
-    try {
-      workspaceResolved = fs.realpathSync(path.resolve(workspace));
-    } catch {
-      workspaceResolved = path.normalize(path.resolve(workspace));
-    }
+    const workspaceResolved = PathGuard.resolve(workspace, cwd);
 
     return (
-      resolved.startsWith(workspaceResolved + path.sep) ||
-      resolved === workspaceResolved
+      resolved === workspaceResolved ||
+      resolved.startsWith(workspaceResolved + path.sep)
     );
-  }
-
-  /**
-   * 检查路径是否指向系统保护路径。
-   * 系统保护路径下的任何操作都应该被特殊处理。
-   */
-  static isSystemProtected(targetPath: string, cwd: string): boolean {
-    const resolved = PathGuard.resolve(targetPath, cwd);
-
-    for (const protectedPath of SYSTEM_PROTECTED_PATHS) {
-      const normalizedProtected = path.normalize(expandUserHome(protectedPath));
-
-      if (
-        resolved.startsWith(normalizedProtected + path.sep) ||
-        resolved === normalizedProtected
-      ) {
-        return true;
-      }
-    }
-
-    return false;
-  }
-
-  /**
-   * 检测路径中是否包含路径遍历序列（../）。
-   * 即使最终 resolve 后合法，遍历序列本身也值得记录。
-   */
-  static hasTraversalSequence(targetPath: string): boolean {
-    return /\.\.[/\\]/.test(targetPath) || targetPath === "..";
-  }
-
-  /** 从中间件上下文中提取文件路径 */
-  private extractPaths(ctx: SecurityMiddlewareContext): string[] {
-    const paths: string[] = [];
-    const args = ctx.toolInput;
-
-    if (typeof args["path"] === "string") paths.push(args["path"]);
-    if (typeof args["file_path"] === "string") paths.push(args["file_path"]);
-    if (typeof args["target"] === "string") paths.push(args["target"]);
-    if (typeof args["destination"] === "string")
-      paths.push(args["destination"]);
-
-    return paths;
   }
 }

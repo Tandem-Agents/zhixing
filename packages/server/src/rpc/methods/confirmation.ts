@@ -26,9 +26,8 @@ import type { HubEntry } from "../../confirmation/hub.js";
  *   spec §2.2 明确"持久授权走本地 /trust 命令，远程路径不支持"——否则远程
  *   客户端可以一键批准后，在本地 PermissionStore 留下永久规则，绕过本地审计。
  *
- * 为什么不包含 cancelled / expired / always-ask / edit-then-allow：
+ * 为什么不包含 cancelled / expired / edit-then-allow：
  *   - cancelled / expired 不是用户决策——由 broker 内部产生
- *   - always-ask：需要 pattern；用户意图是"以后还是问我"，应走本地 /trust
  *   - edit-then-allow：需要改工具输入，远程 UX 未设计
  *
  * 自由文本拒绝：通过 `{ kind: "deny", reason: "..." }` 表达——RPC 客户端传 reason

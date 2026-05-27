@@ -38,7 +38,6 @@ export function resolveSubAgentResolver(
 ): NonInteractiveResolver {
   switch (policy) {
     case "inherit-or-deny":
-    case "auto-deny":
       return failToDenyResolver;
   }
 }

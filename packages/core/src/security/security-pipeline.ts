@@ -8,13 +8,12 @@
  *     └── SecurityAuditor        观察最终决策，发射事件
  *   authorize
  *     ├── CommandAnalyzer        (order=-10) Shell 命令预解析，填 resolvedAccess
+ *     ├── PathResolve            (order=-5)  路径 realpath 解析，填 resolvedAccess.paths
  *     ├── PolicyEvaluator        (order=0)   评估内置/用户规则
  *     ├── OperationClassifier    (order=10)  按影响范围分类
  *     ├── PermissionMatcher      (order=20)  查询用户权限规则
  *     └── SuggestionGenerator    (order=30)  智能建议（达阈值时）
  *   guard
- *     ├── EnvSanitize            (order=10)  清理危险环境变量
- *     ├── PathGuard              (order=20)  路径规范化 + 边界检查
  *     └── ExecutionGuard         (order=30)  超时 / 输出 / 频率约束
  *
  * ── Onion 模型排序 ──
@@ -34,12 +33,11 @@ import {
 import { CommandAnalyzerMiddleware } from "./command-analyzer.js";
 import { ConfirmationTracker } from "./confirmation-tracker.js";
 import type { IConfirmationTracker } from "./confirmation-tracker.js";
-import { EnvSanitize } from "./env-sanitize.js";
 import {
   ExecutionGuardMiddleware,
   type ExecutionGuardOptions,
 } from "./execution-guard.js";
-import { PathGuard } from "./path-guard.js";
+import { PathResolveMiddleware } from "./path-resolve.js";
 import { PermissionMatcherMiddleware } from "./permission-matcher.js";
 import { PermissionStore } from "./permission-store.js";
 import { PolicyEngine } from "./policy-engine.js";
@@ -287,6 +285,7 @@ export class SecurityPipeline {
     // 组装中间件管线
     const middlewares: SecurityMiddleware[] = [
       new CommandAnalyzerMiddleware(),
+      new PathResolveMiddleware(),
       new PolicyEvaluatorMiddleware(this.policyEngine),
       new OperationClassifierMiddleware(this.classifier),
       new PermissionMatcherMiddleware(
@@ -294,8 +293,6 @@ export class SecurityPipeline {
         () => this.workspaceId,
       ),
       new SuggestionMiddleware(this.confirmationTracker),
-      new EnvSanitize(),
-      new PathGuard(),
       this.executionGuard,
     ];
 
@@ -424,7 +421,6 @@ export class SecurityPipeline {
       suggestion: ctx.state.suggestion,
       executionConstraints: ctx.state.executionConstraints,
       reason: decision?.reason,
-      sanitizedEnv: ctx.state.sanitizedEnv,
       resolvedPaths: ctx.state.resolvedPaths,
     };
   }

@@ -231,7 +231,7 @@ async function runChildAgentInner(
     //   - nonInteractiveResolver 由 budget.confirmationPolicy 决定(从 resolved
     //     budget 取,而非 opts.budget?.confirmationPolicy —— 后者绕过单一真相源,
     //     默认值同步将断裂):
-    //       inherit-or-deny / auto-deny → fail-to-deny(默认安全姿态)
+    //       inherit-or-deny → fail-to-deny(默认安全姿态)
     //   - 共享父 PermissionStore 走 SecurityPipeline 而非 broker,
     //     父 alwaysAllow 规则自动命中,根本不进 broker
     childBroker = new ConfirmationBroker({

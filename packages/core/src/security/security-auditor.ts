@@ -7,7 +7,6 @@
  * 发射的事件：
  * - security:evaluation — 每次策略评估的结果
  * - security:blocked — 操作被阻止时
- * - security:env_sanitized — 环境变量被净化时
  * - security:path_resolved — 路径被规范化时
  */
 
@@ -25,7 +24,7 @@ import type {
  * 扩展后的事件映射表，包含安全事件。
  * 使用交叉类型将安全事件合并到 AgentEventMap。
  */
-import * as path from "node:path";
+import { PathGuard } from "./path-guard.js";
 
 export type AgentEventMapWithSecurity = AgentEventMap & SecurityEventMap;
 
@@ -97,15 +96,6 @@ export class SecurityAuditor implements SecurityMiddleware {
       }
     }
 
-    // 环境变量净化事件
-    const removedVars = ctx.state.removedEnvVars as string[] | undefined;
-    if (removedVars && removedVars.length > 0) {
-      await this.eventBus.emit("security:env_sanitized", {
-        removedVars,
-        tool: ctx.toolName,
-      });
-    }
-
     // 路径规范化事件
     const resolvedPaths = ctx.state.resolvedPaths as string[] | undefined;
     if (resolvedPaths) {
@@ -116,6 +106,7 @@ export class SecurityAuditor implements SecurityMiddleware {
           withinWorkspace: this.checkWithinWorkspace(
             resolvedPath,
             ctx.request.context.workspace,
+            ctx.request.context.cwd,
           ),
         });
       }
@@ -150,13 +141,12 @@ export class SecurityAuditor implements SecurityMiddleware {
   private checkWithinWorkspace(
     resolvedPath: string,
     workspace: string | null,
+    cwd: string,
   ): boolean {
     if (!workspace) return false;
-
-    const normalizedWorkspace = path.normalize(path.resolve(workspace));
-    return (
-      resolvedPath.startsWith(normalizedWorkspace + path.sep) ||
-      resolvedPath === normalizedWorkspace
-    );
+    // 与决策路径（matchPathOutside / FileSystemClassifier）统一用 PathGuard.isWithinWorkspace
+    // （realpath 两边）——避免 resolvedPath 已 realpath 而 workspace 未 realpath 的不对称
+    // 导致 symlink workspace 下审计 withinWorkspace 字段失真。
+    return PathGuard.isWithinWorkspace(resolvedPath, workspace, cwd);
   }
 }

@@ -316,36 +316,6 @@ describe("PermissionStore builtin scope", () => {
       ).toBe("allow");
     });
 
-    it("unregisterBuiltinRules 显式删除指定 namespace（与 register 拒空对偶）", () => {
-      const store = new PermissionStore({ rootDir: null });
-      store.registerBuiltinRules("web_fetch", [
-        makeBuiltinRule({ tool: "web_fetch", argument: "*" }),
-      ]);
-      store.registerBuiltinRules("subagent", [
-        makeBuiltinRule({ tool: "task", argument: "*" }),
-      ]);
-
-      store.unregisterBuiltinRules("web_fetch");
-
-      expect(store.listBuiltinNamespaces()).not.toContain("web_fetch");
-      // 其他 namespace 不受影响
-      expect(store.listBuiltinNamespaces()).toContain("subagent");
-      expect(
-        store.match(null, makeRequest("web_fetch", { url: "x" })),
-      ).toBeNull();
-      expect(
-        store.match(null, makeRequest("task", { name: "x" }))?.decision,
-      ).toBe("allow");
-    });
-
-    it("unregisterBuiltinRules 幂等：未注册的 namespace 调用 noop", () => {
-      const store = new PermissionStore({ rootDir: null });
-      expect(() =>
-        store.unregisterBuiltinRules("never_registered"),
-      ).not.toThrow();
-      expect(store.listBuiltinNamespaces()).toEqual([]);
-    });
-
     it("严格 scope：传入 scope!=='builtin' 的规则 → throw", () => {
       const store = new PermissionStore({ rootDir: null });
       expect(() =>

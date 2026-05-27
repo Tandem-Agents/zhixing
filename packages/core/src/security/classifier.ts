@@ -301,6 +301,9 @@ const BOUNDARY_WRITE_IMPACT: Readonly<Record<BoundaryType, OperationClass>> = {
   system: "critical",
   financial: "critical",
   "agent-context": "external",
+  // 知行应用本地状态（~/.zhixing 下 memory / schedule / skill 数据）：写本地数据、
+  // 无外部副作用 → internal（自动放行）；读 access 经 BOUNDARY_READ_ACCESS 归 observe。
+  "app-state": "internal",
 };
 
 export class BoundaryImpactClassifier implements OperationClassifier {
@@ -408,10 +411,8 @@ export function createDefaultClassifier(
   composite.registerContext("bash", shellClassifier);
   composite.registerContext("shell", shellClassifier);
 
-  // 内部状态管理工具——只操作进程内/本地文件状态，无外部副作用
-  const internalClassifier: OperationClassifier = { classify: () => "internal" };
-  composite.registerContext("schedule", internalClassifier);
-  composite.registerContext("memory", internalClassifier);
+  // memory / schedule 等"写本地应用状态"的工具不再在此硬编码 —— 它们通过声明
+  // app-state 边界（见 BOUNDARY_WRITE_IMPACT）落到下方的边界分类器、判为 internal。
 
   // 其他工具走边界分类器
   const registry = options.registry ?? EMPTY_BOUNDARY_REGISTRY;

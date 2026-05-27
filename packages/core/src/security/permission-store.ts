@@ -417,8 +417,8 @@ export class PermissionStore implements IPermissionStore {
    * **严格契约**（fail-fast，不静默修正 caller bug；与 `BoundaryRegistry.register`
    * 拒空数组对偶 / 与 `ToolArgumentExtractor.register` 拒空 key 对偶）：
    * - `namespace` 必须是非空字符串，否则 throw
-   * - `rules` **拒绝空数组**——清除某 namespace 应显式调 `unregisterBuiltinRules(ns)`，
-   *   不混入"注册"语义
+   * - `rules` **拒绝空数组**（fail-fast，空规则集无意义）；namespace 生命周期随 store
+   *   实例——MCP / 插件等变更走 reload 整体重建，不单独卸载
    * - `rules` 中每条规则的 `scope` 必须为 `"builtin"`，否则 throw
    *   （用 `PermissionStore.createRule({ ..., scope: "builtin" })` 构造）
    *
@@ -438,9 +438,6 @@ export class PermissionStore implements IPermissionStore {
    *     scope: "builtin",
    *   }),
    * ]);
-   *
-   * // 显式卸载某 namespace（如 /mcp disconnect）
-   * store.unregisterBuiltinRules("mcp:linear");
    * ```
    */
   registerBuiltinRules(namespace: string, rules: PermissionRule[]): void {
@@ -451,7 +448,7 @@ export class PermissionStore implements IPermissionStore {
     }
     if (rules.length === 0) {
       throw new Error(
-        `registerBuiltinRules: rules 不能为空数组——清除 namespace 应显式调 unregisterBuiltinRules(namespace) (namespace="${namespace}")`,
+        `registerBuiltinRules: rules 不能为空数组（空规则集无意义）(namespace="${namespace}")`,
       );
     }
     for (const rule of rules) {
@@ -468,19 +465,6 @@ export class PermissionStore implements IPermissionStore {
       namespace,
       rules.map((r) => cloneRule(r)),
     );
-  }
-
-  /**
-   * 注销某个 namespace 的所有 builtin 规则。
-   *
-   * **幂等**：未注册的 namespace 调用 noop（与 `BoundaryRegistry.unregister` 对偶
-   * 匹配"卸载"操作的容错预期）。
-   *
-   * 用于场景：MCP `/mcp disconnect xyz` 清除该 MCP 服务器引入的预置规则；
-   * 子 agent / 插件卸载时清除其 namespace。
-   */
-  unregisterBuiltinRules(namespace: string): void {
-    this.builtinRulesByNamespace.delete(namespace);
   }
 
   /**

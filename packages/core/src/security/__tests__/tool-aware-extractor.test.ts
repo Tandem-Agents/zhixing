@@ -200,24 +200,6 @@ describe("ToolArgumentExtractor: 动态 register / unregister", () => {
     expect(() => extractor.register("tool", "")).toThrow(/非空字符串/);
   });
 
-  it("unregister 移除工具的 key 声明（回退到 fallback）", () => {
-    const extractor = ToolArgumentExtractor.fromTools([
-      makeTool("web_fetch", "url"),
-    ]);
-    expect(
-      extractor.extract(
-        makeRequest("web_fetch", { url: "https://x.com", path: "/y" }),
-      ),
-    ).toBe("https://x.com");
-
-    extractor.unregister("web_fetch");
-    expect(
-      extractor.extract(
-        makeRequest("web_fetch", { url: "https://x.com", path: "/y" }),
-      ),
-    ).toBe("/y"); // 走 priority list 命中 path
-  });
-
   it("list 返回当前已注册的工具名（小写）", () => {
     const extractor = new ToolArgumentExtractor();
     extractor.register("WebFetch", "url");
@@ -229,27 +211,18 @@ describe("ToolArgumentExtractor: 动态 register / unregister", () => {
     expect(list).toHaveLength(2);
   });
 
-  it("MCP 接入场景：fromTools snapshot + 后续 register 动态扩展", () => {
+  it("装配期补注册场景：fromTools snapshot + 后续 register（如 Task 工具晚于 snapshot）", () => {
     const extractor = ToolArgumentExtractor.fromTools([
       makeTool("bash", "command"),
     ]);
 
-    // 模拟 /mcp connect 后注册新工具的 argument key
+    // 装配晚于 fromTools 的工具补注册 argument key
     extractor.register("mcp_http", "url");
     expect(
       extractor.extract(
         makeRequest("mcp_http", { method: "GET", url: "https://api.com" }),
       ),
     ).toBe("https://api.com");
-
-    // 模拟 /mcp disconnect 后注销
-    extractor.unregister("mcp_http");
-    // 走 fallback：priority list 全不命中，第一字段 fallback (method)
-    expect(
-      extractor.extract(
-        makeRequest("mcp_http", { method: "GET", url: "https://api.com" }),
-      ),
-    ).toBe("GET");
   });
 });
 
