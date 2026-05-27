@@ -199,30 +199,6 @@ describe("PolicyEngine", () => {
       expect(decision.action).toBe("confirm");
     });
 
-    it("工作区外写操作需要确认", () => {
-      const engine = new PolicyEngine();
-      const decision = engine.evaluate(
-        makeRequest({
-          tool: "write",
-          arguments: { path: "/etc/hosts" },
-          context: {
-            cwd: "/home/user/project",
-            trust: { kind: "workspace", dir: "/home/user/project" },
-            sessionType: "interactive",
-          },
-        }),
-      );
-      expect(decision.action).toBe("confirm");
-    });
-
-    it("系统配置修改需要确认", () => {
-      const engine = new PolicyEngine();
-      const decision = engine.evaluate(
-        writeRequest("/etc/nginx/nginx.conf"),
-      );
-      expect(decision.action).toBe("confirm");
-    });
-
     it("PATH 修改需要确认", () => {
       const engine = new PolicyEngine();
       const decision = engine.evaluate(

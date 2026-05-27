@@ -145,9 +145,8 @@ export class SecurityAuditor implements SecurityMiddleware {
     cwd: string,
   ): boolean {
     if (!workspace) return false;
-    // 与决策路径（matchPathOutside / FileSystemClassifier）统一用 PathGuard.isWithinWorkspace
-    // （realpath 两边）——避免 resolvedPath 已 realpath 而 workspace 未 realpath 的不对称
-    // 导致 symlink workspace 下审计 withinWorkspace 字段失真。
+    // 纯审计字段：用 PathGuard.isWithinWorkspace（realpath 两边）报告 resolvedPath
+    // 是否落在信任工作目录内，不参与决策；realpath 两边避免 symlink 工作目录下失真。
     return PathGuard.isWithinWorkspace(resolvedPath, workspace, cwd);
   }
 }

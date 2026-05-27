@@ -6,7 +6,6 @@
  * 文件系统只用 os.tmpdir() 下的测试目录。
  */
 
-import * as fs from "node:fs";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -58,9 +57,7 @@ function bashRequest(
 describe("FileSystemClassifier", () => {
   const classifier = new FileSystemClassifier();
 
-  // 使用真实的临时目录，便于 realpath 解析
   const workspaceDir = createDescribeTempDir("classifier-ws");
-  const outsideDirHandle = createDescribeTempDir("classifier-out");
 
   it("read 工具始终分类为 observe", () => {
     const req = makeRequest({
@@ -79,89 +76,19 @@ describe("FileSystemClassifier", () => {
     ).toBe("observe");
   });
 
-  it("写入工作区内路径 → internal", () => {
+  it("写入操作一律 external（影响与位置无关）", () => {
     const workspace = workspaceDir.getDir();
-    const target = path.join(workspace, "src", "foo.ts");
     const req = makeRequest({
       tool: "write",
-      arguments: { path: target },
-      context: { cwd: workspace, trust: { kind: "workspace", dir: workspace }, sessionType: "interactive" },
-    });
-    expect(classifier.classify(req)).toBe("internal");
-  });
-
-  it("写入工作区外路径 → external", () => {
-    const workspace = workspaceDir.getDir();
-    const outsideDir = outsideDirHandle.getDir();
-    const req = makeRequest({
-      tool: "write",
-      arguments: { path: path.join(outsideDir, "leak.txt") },
+      arguments: { path: path.join(workspace, "src", "foo.ts") },
       context: { cwd: workspace, trust: { kind: "workspace", dir: workspace }, sessionType: "interactive" },
     });
     expect(classifier.classify(req)).toBe("external");
   });
 
-  it("无工作区上下文时所有写操作都是 external", () => {
-    const workspace = workspaceDir.getDir();
-    const req = makeRequest({
-      tool: "write",
-      arguments: { path: path.join(workspace, "foo.ts") },
-      context: { cwd: workspace, trust: { kind: "global" }, sessionType: "interactive" },
-    });
+  it("无路径参数的写入 → external", () => {
+    const req = makeRequest({ tool: "write", arguments: {} });
     expect(classifier.classify(req)).toBe("external");
-  });
-
-  it("无任何路径参数时 → external（保守默认）", () => {
-    const workspace = workspaceDir.getDir();
-    const req = makeRequest({
-      tool: "write",
-      arguments: {},
-      context: { cwd: workspace, trust: { kind: "workspace", dir: workspace }, sessionType: "interactive" },
-    });
-    expect(classifier.classify(req)).toBe("external");
-  });
-
-  it("符号链接指向工作区外 → external（防符号链接逃逸）", () => {
-    const workspace = workspaceDir.getDir();
-    const outsideDir = outsideDirHandle.getDir();
-    const linkPath = path.join(workspace, "secret-link");
-    // Windows 创建 symlink 可能需要管理员权限——失败则跳过
-    try {
-      fs.symlinkSync(outsideDir, linkPath, "dir");
-    } catch {
-      return; // 跳过此用例
-    }
-    const req = makeRequest({
-      tool: "write",
-      arguments: { path: path.join(linkPath, "payload.txt") },
-      context: { cwd: workspace, trust: { kind: "workspace", dir: workspace }, sessionType: "interactive" },
-    });
-    expect(classifier.classify(req)).toBe("external");
-  });
-
-  it("多个目标路径中任一逃出工作区 → external", () => {
-    const workspace = workspaceDir.getDir();
-    const outsideDir = outsideDirHandle.getDir();
-    const req = makeRequest({
-      tool: "write",
-      arguments: {
-        path: path.join(workspace, "ok.ts"),
-        destination: path.join(outsideDir, "escape.ts"),
-      },
-      context: { cwd: workspace, trust: { kind: "workspace", dir: workspace }, sessionType: "interactive" },
-    });
-    expect(classifier.classify(req)).toBe("external");
-  });
-
-  it("使用 resolvedAccess.paths 代替 arguments 提取路径", () => {
-    const workspace = workspaceDir.getDir();
-    const req = makeRequest({
-      tool: "write",
-      arguments: {},
-      context: { cwd: workspace, trust: { kind: "workspace", dir: workspace }, sessionType: "interactive" },
-      resolvedAccess: { paths: [path.join(workspace, "from-access.ts")] },
-    });
-    expect(classifier.classify(req)).toBe("internal");
   });
 
   it("未知文件系统工具分类为 external", () => {
@@ -234,18 +161,15 @@ describe("ShellClassifier", () => {
     }
   });
 
-  it("本地作用域命令 → internal", () => {
+  it("包管理 / 构建 / 测试命令无特殊处理 → external", () => {
     for (const cmd of [
       "npm install express",
       "pnpm build",
-      "yarn test",
       "cargo build --release",
-      "make install",
-      "pip install requests",
       "tsc --noEmit",
       "vitest run",
     ]) {
-      expect(classifier.classify(bashRequest(cmd))).toBe("internal");
+      expect(classifier.classify(bashRequest(cmd))).toBe("external");
     }
   });
 
@@ -451,7 +375,7 @@ describe("createDefaultClassifier", () => {
       classifier.classify(makeRequest({ tool: "read", arguments: { path: "/tmp/x" } })),
     ).toBe("observe");
     expect(classifier.classify(bashRequest("git status"))).toBe("observe");
-    expect(classifier.classify(bashRequest("npm install"))).toBe("internal");
+    expect(classifier.classify(bashRequest("npm install"))).toBe("external");
     expect(classifier.classify(bashRequest("rm -rf /tmp/x"))).toBe("critical");
   });
 

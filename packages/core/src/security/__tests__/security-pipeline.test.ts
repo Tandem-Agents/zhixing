@@ -221,23 +221,6 @@ describe("SecurityPipeline", () => {
       expect(result.operationClass).toBe("observe");
     });
 
-    it("internal 操作不需要确认（工作区内写入）", async () => {
-      const path = await import("node:path");
-      const { createTempDir } = await import("@zhixing/test-utils");
-
-      const ws = await createTempDir("pipe-internal");
-      const pipeline = new SecurityPipeline({ trustContext: { kind: "workspace", dir: ws } });
-      const result = await pipeline.evaluate(
-        "write",
-        { path: path.join(ws, "foo.ts") },
-        ws,
-      );
-
-      expect(result.allowed).toBe(true);
-      expect(result.requiresConfirmation).toBeFalsy();
-      expect(result.operationClass).toBe("internal");
-    });
-
     it("external 操作升级为 requiresConfirmation（即使无策略规则匹配）", async () => {
       const pipeline = new SecurityPipeline({
         trustContext: { kind: "workspace", dir: "/home/user/project" },

@@ -270,7 +270,6 @@ export type MatchSpec =
   | { type: "command"; pattern: string; flags?: string }
   | { type: "command_prefix"; prefixes: string[] }
   | { type: "path"; paths: string[]; access: "read" | "write" | "any" }
-  | { type: "path_outside"; anchor: string }
   | {
       type: "network";
       hosts?: string[];

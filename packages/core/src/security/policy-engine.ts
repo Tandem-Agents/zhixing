@@ -23,8 +23,6 @@ import type {
 import * as path from "node:path";
 
 import { expandUserHome } from "../paths.js";
-import { PathGuard } from "./path-guard.js";
-import { workspaceDirOf } from "./trust.js";
 
 // ─── 动作严格度排序 ───
 
@@ -117,8 +115,6 @@ export class PolicyEngine implements IPolicyEngine {
         return this.matchCommandPrefix(spec, request);
       case "path":
         return this.matchPath(spec, request);
-      case "path_outside":
-        return this.matchPathOutside(spec, request);
       case "network":
         return this.matchNetwork(spec, request);
       case "env_var":
@@ -200,33 +196,6 @@ export class PolicyEngine implements IPolicyEngine {
         );
       });
     });
-  }
-
-  private matchPathOutside(
-    spec: Extract<MatchSpec, { type: "path_outside" }>,
-    request: SecurityRequest,
-  ): boolean {
-    const paths = this.extractPaths(request);
-    if (paths.length === 0) return false;
-
-    const isWrite =
-      request.tool === "write" || request.tool === "edit";
-    if (!isWrite) return false;
-
-    const anchor =
-      spec.anchor === "{workspace}"
-        ? workspaceDirOf(request.context.trust)
-        : spec.anchor;
-
-    if (!anchor) return true;
-
-    // 用 PathGuard.isWithinWorkspace（realpath 两边）判断，与 FileSystemClassifier 对齐——
-    // 避免"path 已 realpath（PathResolveMiddleware）、anchor 未 realpath"的不对称：
-    // 否则 workspace 路径含 symlink（如 macOS /tmp→/private/tmp、软链的工作目录）时，
-    // 工作区内写会被误判为工作区外写而多触发一次 confirm。
-    return paths.some(
-      (p) => !PathGuard.isWithinWorkspace(p, anchor, request.context.cwd),
-    );
   }
 
   private matchNetwork(

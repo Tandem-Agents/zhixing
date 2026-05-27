@@ -1,7 +1,7 @@
 /**
  * 操作分类器 — 按影响范围分类
  *
- * 这是 Phase 2 安全系统的核心判断器。它不拦截也不确认，
+ * 这是安全系统的核心判断器。它不拦截也不确认，
  * 只回答一个问题："这个操作的影响范围多大？"
  *
  * 四级分类：
@@ -20,8 +20,6 @@
  * 未注册的工具落入边界分类器；未声明边界的工具一律 critical（fail-to-confirm）。
  */
 
-import { PathGuard } from "./path-guard.js";
-import { workspaceDirOf } from "./trust.js";
 import type {
   BoundaryCrossing,
   BoundaryType,
@@ -47,15 +45,12 @@ function maxClass(a: OperationClass, b: OperationClass): OperationClass {
 // ─── FileSystemClassifier ───
 
 /**
- * 文件系统分类器。
- * 影响等级取决于目标路径是否在工作区内：
- * - 读取 → observe（始终）
- * - 写入工作区内 → internal
- * - 写入工作区外 → external
- * - 无工作区上下文 → 所有写操作都是 external
+ * 文件系统分类器 —— 纯操作影响，不看位置。
+ * - 读取 → observe（无副作用）
+ * - 写入 → external（影响用户文件）
  *
- * 符号链接攻击防护：通过 PathGuard.isWithinWorkspace 的 realpath 解析，
- * 防止工作区内的 symlink 指向外部敏感文件。
+ * 写操作是否放行交由信任体系判定；分类阶段不按工作区位置预判，
+ * 保持"影响"与"信任"两个维度正交。
  */
 const FS_READ_TOOLS = new Set([
   "read",
@@ -76,42 +71,9 @@ const FS_WRITE_TOOLS = new Set([
 
 export class FileSystemClassifier implements OperationClassifier {
   classify(request: SecurityRequest): OperationClass {
-    const tool = request.tool.toLowerCase();
-
-    if (FS_READ_TOOLS.has(tool)) return "observe";
-
-    if (FS_WRITE_TOOLS.has(tool)) {
-      const paths = this.extractPaths(request);
-      if (paths.length === 0) return "external";
-
-      const workspace = workspaceDirOf(request.context.trust);
-      if (!workspace) return "external";
-
-      // 任一目标路径逃出工作区即升级为 external——
-      // 防止通过多路径参数绕过边界检查
-      const allInside = paths.every((p) =>
-        PathGuard.isWithinWorkspace(p, workspace, request.context.cwd),
-      );
-      return allInside ? "internal" : "external";
-    }
-
-    return "external";
-  }
-
-  private extractPaths(request: SecurityRequest): string[] {
-    if (
-      request.resolvedAccess?.paths &&
-      request.resolvedAccess.paths.length > 0
-    ) {
-      return request.resolvedAccess.paths;
-    }
-    const paths: string[] = [];
-    const args = request.arguments;
-    for (const key of ["path", "file_path", "target", "destination"]) {
-      const val = args[key];
-      if (typeof val === "string") paths.push(val);
-    }
-    return paths;
+    return FS_READ_TOOLS.has(request.tool.toLowerCase())
+      ? "observe"
+      : "external";
   }
 }
 
@@ -152,34 +114,6 @@ const SAFE_SUBCOMMANDS: Readonly<Record<string, ReadonlySet<string>>> = {
     "remote",
   ]),
 };
-
-/**
- * 本地作用域命令——包管理器、构建工具、测试运行器。
- * 这些命令修改本地项目状态但通常不触及外部系统（哪怕拉 npm 包，用户意图就是如此）。
- */
-const LOCAL_SCOPED_COMMANDS: ReadonlySet<string> = new Set([
-  "npm",
-  "pnpm",
-  "yarn",
-  "npx",
-  "cargo",
-  "go",
-  "mvn",
-  "gradle",
-  "make",
-  "cmake",
-  "ninja",
-  "pip",
-  "poetry",
-  "pipenv",
-  "uv",
-  "tsc",
-  "vitest",
-  "jest",
-  "mocha",
-  "eslint",
-  "prettier",
-]);
 
 /**
  * 破坏性命令正则表达式——对齐策略引擎的 cf-destructive-commands 规则，
@@ -225,8 +159,6 @@ export class ShellClassifier implements OperationClassifier {
     const subcommand = tokens[1]?.toLowerCase();
     const subList = SAFE_SUBCOMMANDS[executable];
     if (subcommand && subList?.has(subcommand)) return "observe";
-
-    if (LOCAL_SCOPED_COMMANDS.has(executable)) return "internal";
 
     return "external";
   }
