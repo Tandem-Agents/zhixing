@@ -217,6 +217,11 @@ export interface PermissionRule {
    * 实际定位规则使用 workspaceId（hash）。
    */
   workspace?: string;
+  /**
+   * 规则来源："user" = 用户显式创建 / 确认沉淀；"steward" = AI 安全管家放行沉淀。
+   * 缺省视为 user。用于 /trust 区分展示与撤销 steward 自动沉淀的规则。
+   */
+  origin?: "user" | "steward";
 }
 
 /**

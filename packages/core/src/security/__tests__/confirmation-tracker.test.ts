@@ -175,11 +175,11 @@ describe("ConfirmationTracker", () => {
       expect(tracker.shouldSuggest(req, "low").suggest).toBe(true);
     });
 
-    it("medium 风险：5 次后建议", () => {
+    it("medium 风险：3 次后沉淀", () => {
       const tracker = new ConfirmationTracker();
       const req = bashRequest("npm install express");
 
-      for (let i = 0; i < 4; i++) {
+      for (let i = 0; i < 2; i++) {
         tracker.record(req, "medium");
         expect(tracker.shouldSuggest(req, "medium").suggest).toBe(false);
       }

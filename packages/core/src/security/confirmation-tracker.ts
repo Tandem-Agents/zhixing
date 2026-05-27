@@ -1,30 +1,29 @@
 /**
- * 确认追踪器 — 智能建议引擎
+ * 确认追踪器 — 信任沉淀引擎
  *
  * 职责：
- *   1. 追踪用户手动确认（选 [y] 一次性允许）的次数
- *   2. 当同一模式累计达到风险等级对应的阈值时，建议创建持久规则
- *   3. 永不自动创建规则——决策权始终在用户手中
+ *   1. 追踪同一模式被放行（用户确认 / AI 安全管家判 safe）的累计次数
+ *   2. 累计达到风险等级对应阈值时，给出"该自动沉淀为持久放行规则"的信号
+ *   3. 提供沉淀用的代表模式（persistencePattern）
  *
- * 与确认 UI 的关系：
- *   - UI 在用户选 [y] 后调用 tracker.record(...)
- *   - 管线在 confirm 决策时调用 tracker.shouldSuggest(...) 检查是否需要建议
- *   - 这种分工让 tracker 同时服务 CLI / Web / API 多通道
+ * 沉淀的执行（创建规则）由编排层完成：放行后调 record，达阈值则按
+ * persistencePattern 创建标记来源的 allow 规则。信任根源始终是用户意图
+ * （用户确认、或管家在用户已授予信任的上下文内放行），沉淀规则可在 /trust 撤销。
  */
 
 import type { RiskLevel, SecurityRequest } from "./types.js";
 
-// ─── 阈值定义（规格 4.4） ───
+// ─── 阈值定义 ───
 
 /**
- * 建议阈值——同一模式被手动确认达到此次数时，建议创建持久规则。
- * 与风险等级关联：风险越高越保守。
+ * 沉淀阈值——同类操作被放行（用户确认 / 管家 safe）累计达此次数时自动沉淀为
+ * 持久放行规则。风险越高越保守；critical 永不沉淀。
  */
 const SUGGESTION_THRESHOLDS: Record<RiskLevel, number> = {
   low: 3,
-  medium: 5,
+  medium: 3,
   high: 10,
-  critical: -1, // critical 永不建议自动规则
+  critical: -1,
 };
 
 const RISK_ORDER: Record<RiskLevel, number> = {
@@ -140,6 +139,17 @@ export function suggestPatterns(request: SecurityRequest): SuggestedPattern[] {
   ];
 }
 
+/**
+ * 选取用于累计 / 沉淀的"代表模式"——中间精度（如 `npm install *`），让同一类
+ * 操作（不同末参）累计到同一 key、并沉淀为同一规则；累计与沉淀粒度由此保持一致。
+ */
+function selectKeyPattern(
+  patterns: SuggestedPattern[],
+): SuggestedPattern | null {
+  if (patterns.length === 0) return null;
+  return patterns.length >= 3 ? patterns[1]! : patterns[patterns.length - 1]!;
+}
+
 // ─── Tracker 接口和类型 ───
 
 /**
@@ -164,6 +174,8 @@ export interface IConfirmationTracker {
     request: SecurityRequest,
     riskLevel: RiskLevel,
   ): SuggestionStatus;
+  /** 返回沉淀用的代表模式（与累计 key 同粒度）；无可用模式时 null。 */
+  persistencePattern(request: SecurityRequest): SuggestedPattern | null;
   reset(request?: SecurityRequest): void;
   /** 调试/可观测性：返回所有追踪条目（供 /security 展示） */
   snapshot(): Array<{ key: string; count: number; highestRisk: RiskLevel }>;
@@ -222,6 +234,10 @@ export class ConfirmationTracker implements IConfirmationTracker {
     };
   }
 
+  persistencePattern(request: SecurityRequest): SuggestedPattern | null {
+    return selectKeyPattern(suggestPatterns(request));
+  }
+
   reset(request?: SecurityRequest): void {
     if (!request) {
       this.entries.clear();
@@ -250,15 +266,8 @@ export class ConfirmationTracker implements IConfirmationTracker {
    * 如果只有 2 个建议（如 `ls`），用最通用的；如果只有 1 个（如未知工具），用唯一那个。
    */
   private buildKey(request: SecurityRequest): string | null {
-    const patterns = suggestPatterns(request);
-    if (patterns.length === 0) return null;
-
-    let chosen: SuggestedPattern;
-    if (patterns.length >= 3) {
-      chosen = patterns[1]!;
-    } else {
-      chosen = patterns[patterns.length - 1]!;
-    }
+    const chosen = selectKeyPattern(suggestPatterns(request));
+    if (!chosen) return null;
     return `${chosen.pattern.tool}::${chosen.pattern.argument}`;
   }
 }

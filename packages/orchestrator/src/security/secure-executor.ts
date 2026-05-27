@@ -23,7 +23,6 @@ import {
   type ConfirmationFallbackStrategy,
   type ExecutionConstraints,
   type IConfirmationBroker,
-  type IConfirmationTracker,
   type IPermissionStore,
   type SecurityMiddlewareResult,
   type SecurityPipeline,
@@ -32,6 +31,7 @@ import {
   type ToolDefinition,
   type ToolExecutionContext,
   type ToolResult,
+  type RiskLevel,
   type TurnContext,
 } from "@zhixing/core";
 import { AISecuritySteward } from "./ai-steward.js";
@@ -213,8 +213,24 @@ export function createSecureExecuteTool(
           fallbackStrategy,
           onUserDenied,
         });
+      } else {
+        // 管家放行 → 喂信任沉淀（累计达阈值后免管家），跳过 broker、落到下方执行
+        maybePersistTrust({
+          pipeline,
+          request: {
+            tool: tool.name,
+            arguments: input,
+            context: {
+              cwd: augmentedContext.workingDirectory,
+              trust: pipeline.getTrust(),
+              sessionType,
+            },
+          },
+          riskLevel: result.decision?.riskLevel ?? "medium",
+          origin: "steward",
+          bypassImmune: false,
+        });
       }
-      // verdict.decision === "safe" → 管家放行，跳过 broker，落到下方执行
     }
 
     // 3. 执行实际工具 —— 应用 pipeline 计算的执行约束
@@ -358,6 +374,8 @@ async function handleBrokerPath(params: {
         input,
         workingDirectory: context.workingDirectory,
         riskLevel: result.decision?.riskLevel ?? "medium",
+        bypassImmune:
+          result.decision?.matchedRules.some((r) => r.bypassImmune) ?? false,
       });
       return;
 
@@ -465,6 +483,39 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
 }
 
+// ─── 信任沉淀 ───
+
+/**
+ * 把一次放行喂给信任机制：累计达阈值则自动沉淀为持久 allow 规则（标记来源、可在
+ * /trust 撤销）。bypassImmune 永不沉淀（禁区底线）；critical 由 tracker 阈值 -1 自动排除。
+ */
+function maybePersistTrust(params: {
+  pipeline: SecurityPipeline;
+  request: SecurityRequest;
+  riskLevel: RiskLevel;
+  origin: "user" | "steward";
+  bypassImmune: boolean;
+}): void {
+  if (params.bypassImmune) return;
+  const { pipeline, request, riskLevel, origin } = params;
+  const tracker = pipeline.getConfirmationTracker();
+  tracker.record(request, riskLevel);
+  if (!tracker.shouldSuggest(request, riskLevel).suggest) return;
+  const pattern = tracker.persistencePattern(request);
+  if (!pattern) return;
+  const contextId = pipeline.getContextId();
+  pipeline.getPermissionStore().create(
+    contextId,
+    PermissionStore.createRule({
+      pattern: pattern.pattern,
+      decision: "allow",
+      scope: contextId ? "workspace" : "global",
+      ...(contextId ? { workspace: pipeline.getWorkspace() ?? undefined } : {}),
+      origin,
+    }),
+  );
+}
+
 // ─── Broker decision 的副作用 ───
 
 async function applyBrokerDecision(params: {
@@ -483,6 +534,7 @@ async function applyBrokerDecision(params: {
   input: Record<string, unknown>;
   workingDirectory: string;
   riskLevel: "low" | "medium" | "high" | "critical";
+  bypassImmune: boolean;
 }): Promise<void> {
   const {
     decision,
@@ -491,10 +543,10 @@ async function applyBrokerDecision(params: {
     input,
     workingDirectory,
     riskLevel,
+    bypassImmune,
   } = params;
 
   const store: IPermissionStore = pipeline.getPermissionStore();
-  const tracker: IConfirmationTracker = pipeline.getConfirmationTracker();
   const workspaceId = pipeline.getContextId();
 
   const request: SecurityRequest = {
@@ -509,8 +561,14 @@ async function applyBrokerDecision(params: {
 
   switch (decision.kind) {
     case "allow-once":
-      // 一次性允许 → 累计到追踪器以便未来建议创建规则
-      tracker.record(request, riskLevel);
+      // 一次性允许 → 喂信任沉淀（累计达阈值后自动沉淀放行规则）
+      maybePersistTrust({
+        pipeline,
+        request,
+        riskLevel,
+        origin: "user",
+        bypassImmune,
+      });
       return;
 
     case "allow-session":

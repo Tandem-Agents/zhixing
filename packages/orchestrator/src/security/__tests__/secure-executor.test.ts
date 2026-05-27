@@ -216,6 +216,83 @@ describe("createSecureExecuteTool", () => {
       expect(result.content).toBe("executed");
       expect(exec.callCount()).toBe(1);
     });
+
+    it("管家连续 safe 达阈值 → 自动沉淀（origin=steward）", async () => {
+      const broker = new ConfirmationBroker();
+      const exec = mockExecute();
+      const { pipeline, store } = makePipeline();
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: exec.fn,
+        broker,
+      });
+      const ctx = makeContextWithSteward(
+        '{"decision":"safe","reason":"对齐","confidence":0.9}',
+      );
+
+      // echo 属 external/medium，阈值 3；第 3 次管家 safe 后累计达阈值自动沉淀
+      for (let i = 0; i < 3; i++) {
+        await wrapped(makeTool("bash"), { command: "echo hello" }, ctx);
+      }
+      expect(exec.callCount()).toBe(3);
+
+      const wsId = pipeline.getContextId();
+      const wsRules = store.list(wsId).filter((r) => r.scope === "workspace");
+      expect(wsRules).toHaveLength(1);
+      expect(wsRules[0]!.decision).toBe("allow");
+      expect(wsRules[0]!.origin).toBe("steward");
+    });
+  });
+
+  describe("信任沉淀底线", () => {
+    it("critical 操作多次 → 永不沉淀（阈值 -1）", async () => {
+      const broker = new ConfirmationBroker();
+      autoResolveBroker(broker, { kind: "allow-once" });
+      const exec = mockExecute();
+      const { pipeline, store } = makePipeline();
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: exec.fn,
+        broker,
+      });
+
+      // rm -rf 属 critical（threshold -1）；即便被 bypassImmune 拦截也不沉淀
+      for (let i = 0; i < 6; i++) {
+        try {
+          await wrapped(
+            makeTool("bash"),
+            { command: "rm -rf /tmp/junk" },
+            makeContext(),
+          );
+        } catch {
+          // block 路径抛 SecurityBlockError —— 同样不沉淀
+        }
+      }
+      expect(store.list(pipeline.getContextId())).toHaveLength(0);
+    });
+
+    it("bypassImmune confirm（写 .zhixing/）多次 allow-once → 永不沉淀", async () => {
+      const broker = new ConfirmationBroker();
+      autoResolveBroker(broker, { kind: "allow-once" });
+      const exec = mockExecute();
+      const { pipeline, store } = makePipeline();
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: exec.fn,
+        broker,
+      });
+
+      // 写 .zhixing/ 命中 bi-zhixing-config-write（bypassImmune + confirm）；
+      // 即便 4 次（超 medium 阈值 3）也永不沉淀（maybePersistTrust bypassImmune 守卫）
+      for (let i = 0; i < 4; i++) {
+        await wrapped(
+          makeTool("write"),
+          { path: ".zhixing/config.json" },
+          makeContext(),
+        );
+      }
+      expect(store.list(pipeline.getContextId())).toHaveLength(0);
+    });
   });
 
   describe("block 路径(显式 deny 规则)", () => {

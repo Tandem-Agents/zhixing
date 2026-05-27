@@ -61,7 +61,7 @@ function mockExecuteFactory() {
 // ─── 测试 ───
 
 describe("Confirmation → PermissionRule 端到端链路", () => {
-  it("连续 5 次 allow-once → 第 6 次 suggestion.suggest=true → allow-workspace 创建规则 → 第 7 次直接 allow", async () => {
+  it("连续 5 次 allow-once 累计达阈值 → 自动沉淀规则 → 后续直接 allow", async () => {
     // ─── 装配 ───
     // 真实 PermissionStore（in-memory）+ 真实 SecurityPipeline + 真实 broker。
     // SecurityPipeline 内部默认实例化 ConfirmationTracker（per-pipeline 生命周期）。
@@ -78,31 +78,11 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
       broker,
     });
 
-    // ─── 拦截器：捕获每次 ConfirmationRequest 并按设定 resolve ───
+    // ─── 拦截器：捕获每次 ConfirmationRequest，统一 allow-once ───
     const capturedRequests: ConfirmationRequest[] = [];
-    let nextDecisionKind:
-      | "allow-once"
-      | "allow-workspace" = "allow-once";
-
     broker.onRequest((req) => {
       capturedRequests.push(req);
-      queueMicrotask(() => {
-        if (nextDecisionKind === "allow-once") {
-          broker.resolve(req.id, { kind: "allow-once" });
-        } else {
-          // 用户选 allow-workspace 应用建议——使用第一个 SuggestedPattern（最精确）
-          const suggestion = req.suggestion;
-          if (!suggestion || !suggestion.patterns[0]) {
-            throw new Error(
-              "测试装配错误：选 allow-workspace 时 ConfirmationRequest 应携带 suggestion.patterns",
-            );
-          }
-          broker.resolve(req.id, {
-            kind: "allow-workspace",
-            pattern: suggestion.patterns[0],
-          });
-        }
-      });
+      queueMicrotask(() => broker.resolve(req.id, { kind: "allow-once" }));
     });
 
     // ─── 用 console.log spy 抑制确认 UI 文本 ───
@@ -114,60 +94,33 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
       // bash patterns 对该命令产出：[精确, "curl *"]（looksLikeSubcommand 不匹配 https://...）
       const command = "curl https://example.com/foo";
 
-      // ─── 累计阶段:前 5 次 allow-once,tracker 累计到阈值边缘 ───
-      for (let i = 0; i < 5; i++) {
+      // ─── 前 3 次 allow-once：第 3 次 record 后累计达 medium 阈值（3）→ 自动沉淀 ───
+      for (let i = 0; i < 3; i++) {
         await wrapped(bashTool, { command }, makeContext());
       }
+      expect(capturedRequests).toHaveLength(3);
+      expect(exec.callCount()).toBe(3);
 
-      // 5 次 confirm + 5 次执行
-      expect(capturedRequests).toHaveLength(5);
-      expect(exec.callCount()).toBe(5);
-
-      // 关键断言：前 5 次的 ConfirmationRequest.suggestion 应**不建议加规则**
-      // （第 i 次请求时 count = i，medium 阈值是 5，count < 5 时 suggest === false）
-      for (let i = 0; i < 5; i++) {
-        const req = capturedRequests[i]!;
-        expect(req.suggestion?.suggest ?? false).toBe(false);
-      }
-
-      // ─── 触发建议阶段:第 6 次 suggestion.suggest=true,用户选 allow-workspace ───
-      nextDecisionKind = "allow-workspace";
-      await wrapped(bashTool, { command }, makeContext());
-
-      expect(capturedRequests).toHaveLength(6);
-      expect(exec.callCount()).toBe(6);
-
-      // 关键断言：第 6 次 ConfirmationRequest.suggestion.suggest === true
-      // （前 5 次 allow-once 各 record 一次 → count = 5，达到 medium 阈值）
-      const sixthReq = capturedRequests[5]!;
-      expect(sixthReq.suggestion).toBeDefined();
-      expect(sixthReq.suggestion?.suggest).toBe(true);
-      expect(sixthReq.suggestion?.count).toBe(5);
-      expect(sixthReq.suggestion?.threshold).toBe(5);
-      expect(sixthReq.suggestion?.patterns.length).toBeGreaterThan(0);
-
-      // 关键断言：allow-workspace 决策落库——store 中出现 workspace 规则
+      // 自动沉淀：中间精度 allow 规则（curl *），标记 origin=user
       const wsId = pipeline.getContextId();
       expect(wsId).toBeTruthy();
       const wsRules = store.list(wsId).filter((r) => r.scope === "workspace");
       expect(wsRules).toHaveLength(1);
       expect(wsRules[0]!.decision).toBe("allow");
+      expect(wsRules[0]!.origin).toBe("user");
       expect(wsRules[0]!.pattern.tool).toBe("bash");
-      // 规则 argument 来自 SuggestedPattern（精确命令）
-      expect(wsRules[0]!.pattern.argument).toBe(command);
+      expect(wsRules[0]!.pattern.argument).toBe("curl *");
 
-      // ─── 规则生效阶段:第 7 次同操作 pipeline 匹配新规则,直接 allow(不触发 confirm)───
+      // 第 4 次同操作 → 命中沉淀规则 → 直接 allow（无新 confirm）
       await wrapped(bashTool, { command }, makeContext());
-
-      expect(exec.callCount()).toBe(7);
-      // 关键断言：没有新的 ConfirmationRequest（链路直接 allow）
-      expect(capturedRequests).toHaveLength(6);
+      expect(exec.callCount()).toBe(4);
+      expect(capturedRequests).toHaveLength(3);
     } finally {
       logSpy.mockRestore();
     }
   });
 
-  it("中途切换命令：仍命中同 tracker key（patterns[1] = 'curl *'），但 allow-workspace 用精确 pattern 时仅精确命令受规则保护", async () => {
+  it("中途切换命令：累计同 tracker key（curl *）→ 自动沉淀中间精度规则 → 切换命令也命中", async () => {
     // 验证 buildKey 用 patterns[1]（中间精度）的语义：
     // - tracker 把 "curl https://a.com" 与 "curl https://b.com" 视为同一计数 key
     // - 但 allow-workspace 用精确 pattern 时，规则 argument 是用户选的具体 pattern
@@ -198,24 +151,27 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
         "curl https://a.com",
         "curl https://b.com",
         "curl https://c.com",
-        "curl https://d.com",
-        "curl https://e.com",
       ];
       for (const command of commands) {
         await wrapped(bashTool, { command }, makeContext());
       }
+      expect(capturedRequests).toHaveLength(3);
 
-      // 第 6 次：count=5，suggestion.suggest=true（同一 tracker key 累计）
+      // 5 次不同 curl 累计到同一 key（curl *）→ 第 5 次自动沉淀中间精度规则
+      const wsId = pipeline.getContextId();
+      const wsRules = store.list(wsId).filter((r) => r.scope === "workspace");
+      expect(wsRules).toHaveLength(1);
+      expect(wsRules[0]!.pattern.argument).toBe("curl *");
+      expect(wsRules[0]!.origin).toBe("user");
+
+      // 第 4 次切换命令（curl f）→ 命中 curl * → 直接 allow（中间精度覆盖切换命令）
       await wrapped(
         bashTool,
         { command: "curl https://f.com" },
         makeContext(),
       );
-
-      expect(capturedRequests).toHaveLength(6);
-      const sixthReq = capturedRequests[5]!;
-      expect(sixthReq.suggestion?.suggest).toBe(true);
-      expect(sixthReq.suggestion?.count).toBe(5);
+      expect(exec.callCount()).toBe(4);
+      expect(capturedRequests).toHaveLength(3);
     } finally {
       logSpy.mockRestore();
     }

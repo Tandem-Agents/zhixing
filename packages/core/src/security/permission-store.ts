@@ -506,7 +506,7 @@ export class PermissionStore implements IPermissionStore {
    */
   static createRule(
     input: Pick<PermissionRule, "pattern" | "decision" | "scope"> &
-      Partial<Pick<PermissionRule, "workspace">>,
+      Partial<Pick<PermissionRule, "workspace" | "origin">>,
     now: () => number = () => Date.now(),
   ): PermissionRule {
     return {
@@ -518,6 +518,7 @@ export class PermissionStore implements IPermissionStore {
       lastMatchedAt: 0,
       matchCount: 0,
       workspace: input.workspace,
+      origin: input.origin,
     };
   }
 
