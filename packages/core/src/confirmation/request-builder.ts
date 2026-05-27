@@ -299,7 +299,6 @@ export function buildConfirmationRequest(
     decision: result.decision,
     operationClass: result.operationClass,
     matchedPermissionRule: result.matchedPermissionRule,
-    suggestion: result.suggestion,
     display: {
       title,
       body,

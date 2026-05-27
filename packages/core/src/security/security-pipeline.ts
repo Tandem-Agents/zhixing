@@ -1,7 +1,7 @@
 /**
  * 安全中间件管线
  *
- * 将命令预解析、策略评估、操作分类、权限匹配、建议生成、守卫、审计记录串联执行。
+ * 将命令预解析、策略评估、操作分类、信任分级、权限匹配、守卫、审计记录串联执行。
  *
  * 安全管线：
  *   post-execute (outermost wrapper)
@@ -11,8 +11,8 @@
  *     ├── PathResolve            (order=-5)  路径 realpath 解析，填 resolvedAccess.paths
  *     ├── PolicyEvaluator        (order=0)   评估内置/用户规则
  *     ├── OperationClassifier    (order=10)  按影响范围分类
- *     ├── PermissionMatcher      (order=20)  查询用户权限规则
- *     └── SuggestionGenerator    (order=30)  智能建议（达阈值时）
+ *     ├── TrustClassifier        (order=15)  按会话信任上下文分级
+ *     └── PermissionMatcher      (order=20)  查询用户权限规则
  *   guard
  *     └── ExecutionGuard         (order=30)  超时 / 输出 / 频率约束
  *
@@ -173,42 +173,6 @@ class OperationClassifierMiddleware implements SecurityMiddleware {
   }
 }
 
-// ─── Suggestion 中间件 ───
-
-/**
- * 智能建议中间件——authorize 阶段最后一步。
- * 当决策为 confirm 时，查询 ConfirmationTracker 看是否到达建议阈值。
- * 不修改决策本身，只把建议状态写入 ctx.state.suggestion 供 UI 渲染。
- */
-class SuggestionMiddleware implements SecurityMiddleware {
-  readonly name = "SuggestionGenerator";
-  readonly phase = "authorize" as const;
-  readonly order = 30;
-
-  constructor(private readonly tracker: IConfirmationTracker) {}
-
-  async execute(
-    ctx: SecurityMiddlewareContext,
-    next: () => Promise<SecurityMiddlewareResult>,
-  ): Promise<SecurityMiddlewareResult> {
-    const current = ctx.state.decision;
-    if (current?.action === "confirm") {
-      // bypassImmune 规则永远需要确认，不建议创建自动放行规则
-      const hasBypassImmune = current.matchedRules.some(r => r.bypassImmune);
-      if (!hasBypassImmune) {
-        const status = this.tracker.shouldSuggest(
-          ctx.request,
-          current.riskLevel,
-        );
-        if (status.suggest) {
-          ctx.state.suggestion = status;
-        }
-      }
-    }
-    return next();
-  }
-}
-
 // ─── 管线选项 ───
 
 export interface SecurityPipelineOptions {
@@ -309,7 +273,6 @@ export class SecurityPipeline {
         this.permissionStore,
         () => this.contextId,
       ),
-      new SuggestionMiddleware(this.confirmationTracker),
       this.executionGuard,
     ];
 
@@ -441,7 +404,6 @@ export class SecurityPipeline {
       trustLevel: ctx.state.trustLevel,
       decision,
       matchedPermissionRule: ctx.state.matchedPermissionRule,
-      suggestion: ctx.state.suggestion,
       executionConstraints: ctx.state.executionConstraints,
       reason: decision?.reason,
       resolvedPaths: ctx.state.resolvedPaths,

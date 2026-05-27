@@ -31,7 +31,6 @@ import type {
   IConfirmationBroker,
   RendererCapabilities,
 } from "@zhixing/core";
-import { getAgentIdentity } from "@zhixing/core";
 import { tone } from "../tui/style.js";
 import type { SelectOption, SelectResult } from "../tui/select-types.js";
 import type { ScreenController } from "../screen/index.js";
@@ -411,17 +410,6 @@ export function buildInlinePanelBody(request: ConfirmationRequest): string[] {
   // （high/critical 时 ⚠ + red bold + 标识尾缀）承担，不占额外行
   for (const line of renderBody(request.display.body)) {
     lines.push(line);
-  }
-
-  // ── 2. 建议提示（actionable，仅 suggestion 存在时） ──
-  // 提示用户"曾批准过 N 次相似操作"——actionable 信号，帮用户判断常规度
-  if (request.suggestion?.suggest) {
-    const { displayName } = getAgentIdentity();
-    lines.push(
-      tone.dim(
-        `💡 ${displayName} 已经批准过 ${request.suggestion.count} 次相似操作`,
-      ),
-    );
   }
 
   return lines;

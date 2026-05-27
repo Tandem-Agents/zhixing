@@ -1,12 +1,10 @@
 /**
- * 端到端验收测试 —— Confirmation → PermissionRule 链路
+ * 端到端验收测试 —— 信任沉淀(自动持久化)链路
  *
  * 验收目标:验证整条链路端到端工作:
- *   1. 连续多次 confirm 同操作(用户选 allow-once)→ ConfirmationTracker 累积计数
- *   2. 触达风险等级阈值后,下次 confirm 时 ConfirmationRequest.suggestion.suggest === true
- *      (SuggestionMiddleware 把建议透传到 SecurityMiddlewareResult.suggestion,
- *       request-builder 再透传到 ConfirmationRequest.suggestion)
- *   3. 用户选 allow-workspace 应用建议 → applyBrokerDecision 调 store.create 创建规则
+ *   1. 连续多次放行(用户选 allow-once)→ ConfirmationTracker 累积计数
+ *   2. 累计触达风险等级阈值 → 自动沉淀为持久 allow 规则(origin=user)
+ *   3. 用户选 allow-workspace → applyBrokerDecision 调 store.create 创建规则
  *   4. 同操作再次执行 → pipeline.evaluate 匹配规则 → 直接 allow(不触发 confirm)
  *
  * 纯端到端验证 wiring。
@@ -250,9 +248,13 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
         makeContext(),
       );
       expect(capturedRequests).toHaveLength(2);
-      // 第 2 个 ConfirmationRequest 的 suggestion.count 应为 0（tracker 未被 allow-workspace 触动）
-      const secondReq = capturedRequests[1]!;
-      expect(secondReq.suggestion?.count ?? 0).toBe(0);
+      // allow-workspace 不 record：tracker 对 curl 的累计只来自第 3 次 allow-once（count=1），
+      // 不含第 1 次 allow-workspace（否则会是 2）
+      const curlEntry = pipeline
+        .getConfirmationTracker()
+        .snapshot()
+        .find((e) => e.key.includes("curl"));
+      expect(curlEntry?.count).toBe(1);
     } finally {
       logSpy.mockRestore();
     }

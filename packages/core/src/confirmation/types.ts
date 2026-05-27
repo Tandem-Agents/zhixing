@@ -15,7 +15,7 @@
 
 import type { OperationClass, RiskLevel, SecurityDecision, SessionType } from "../security/types.js";
 import type { PermissionRule } from "../security/types.js";
-import type { SuggestedPattern, SuggestionStatus } from "../security/confirmation-tracker.js";
+import type { SuggestedPattern } from "../security/confirmation-tracker.js";
 import type { TurnOrigin } from "../types/tools.js";
 
 // ─── 请求标识 ───
@@ -152,8 +152,6 @@ export interface ConfirmationRequest {
   operationClass?: OperationClass;
   /** 命中的权限规则（如果有） */
   matchedPermissionRule?: PermissionRule;
-  /** 智能建议状态 */
-  suggestion?: SuggestionStatus;
 
   // ── 显示信息 ──
   display: ConfirmationDisplay;

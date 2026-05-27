@@ -401,16 +401,6 @@ describe("buildInlinePanelBody", () => {
     expect(full).not.toContain("中风险"); // riskLevel 删
     expect(full).not.toContain("需要网络"); // decision.reason 删
   });
-
-  it("body 仅含建议提示——当 suggestion 存在时（actionable 信号）", () => {
-    const req = makeRequest({
-      suggestion: { suggest: PATTERN_NPM_INSTALL, count: 3 },
-    });
-    const lines = buildInlinePanelBody(req);
-    const full = lines.join("\n");
-    expect(full).toContain("npm install express"); // 命令仍在
-    expect(full).toContain("已经批准过 3 次相似操作"); // 建议提示在
-  });
 });
 
 describe("buildInlinePanelTitle", () => {

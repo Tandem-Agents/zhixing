@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { EventBus } from "../../events/event-bus.js";
-import { ConfirmationTracker } from "../confirmation-tracker.js";
 import { PermissionStore } from "../permission-store.js";
 import { SlidingWindowRateLimiter } from "../rate-limiter.js";
 import type { AgentEventMapWithSecurity } from "../security-auditor.js";
@@ -581,127 +580,8 @@ describe("SecurityPipeline", () => {
     });
   });
 
-  describe("智能建议集成", () => {
-    it("初次 confirm 不附带 suggestion", async () => {
-      const pipeline = new SecurityPipeline({
-        trustContext: { kind: "workspace", dir: "/home/user/project" },
-      });
-
-      const result = await pipeline.evaluate(
-        "bash",
-        { command: "curl https://example.com" },
-        "/home/user/project",
-      );
-
-      expect(result.requiresConfirmation).toBe(true);
-      expect(result.suggestion).toBeUndefined();
-    });
-
-    it("达到阈值后 confirm 附带 suggestion（curl 是 medium 风险，5 次）", async () => {
-      const tracker = new ConfirmationTracker();
-      const pipeline = new SecurityPipeline({
-        trustContext: { kind: "workspace", dir: "/home/user/project" },
-        confirmationTracker: tracker,
-      });
-
-      // 模拟用户连续 5 次手动确认
-      for (let i = 0; i < 5; i++) {
-        tracker.record(
-          {
-            tool: "bash",
-            arguments: { command: `curl https://api.example.com/${i}` },
-            context: {
-              cwd: "/home/user/project",
-              trust: { kind: "workspace", dir: "/home/user/project" },
-              sessionType: "interactive",
-            },
-          },
-          "medium",
-        );
-      }
-
-      const result = await pipeline.evaluate(
-        "bash",
-        { command: "curl https://api.example.com/6" },
-        "/home/user/project",
-      );
-
-      expect(result.requiresConfirmation).toBe(true);
-      expect(result.suggestion).toBeDefined();
-      expect(result.suggestion?.suggest).toBe(true);
-      expect(result.suggestion?.patterns.length).toBeGreaterThan(0);
-      // 最后一个候选模式应该是最通用的 "curl *"
-      const argList = result.suggestion!.patterns.map((p) => p.pattern.argument);
-      expect(argList).toContain("curl *");
-    });
-
-    it("critical 风险操作即使多次手动确认也永不建议", async () => {
-      const tracker = new ConfirmationTracker();
-      const pipeline = new SecurityPipeline({
-        trustContext: { kind: "workspace", dir: "/home/user/project" },
-        confirmationTracker: tracker,
-      });
-
-      // 注入 100 次记录
-      for (let i = 0; i < 100; i++) {
-        tracker.record(
-          {
-            tool: "bash",
-            arguments: { command: "rm -rf /tmp/junk" },
-            context: {
-              cwd: "/home/user/project",
-              trust: { kind: "workspace", dir: "/home/user/project" },
-              sessionType: "interactive",
-            },
-          },
-          "critical",
-        );
-      }
-
-      // rm -rf 走 cf-destructive-commands 规则 → confirm + high 风险
-      // 但即使被分类为 critical，也不应建议
-      const result = await pipeline.evaluate(
-        "bash",
-        { command: "rm -rf /tmp/junk" },
-        "/home/user/project",
-      );
-
-      // 不论决策如何，suggestion 都应该是 undefined（critical 永不建议）
-      // 注：实际决策可能是 high 而非 critical，这里仅验证逻辑路径
-      if (result.decision?.riskLevel === "critical") {
-        expect(result.suggestion).toBeUndefined();
-      }
-    });
-
-    it("allow 决策不会触发 suggestion（observe 操作）", async () => {
-      const tracker = new ConfirmationTracker();
-      // 即使 tracker 里有大量记录
-      tracker.record(
-        {
-          tool: "read",
-          arguments: { path: "/tmp/a" },
-          context: { cwd: "/tmp", trust: { kind: "workspace", dir: "/tmp" }, sessionType: "interactive" },
-        },
-        "low",
-      );
-
-      const pipeline = new SecurityPipeline({
-        trustContext: { kind: "workspace", dir: "/home/user/project" },
-        confirmationTracker: tracker,
-      });
-
-      const result = await pipeline.evaluate(
-        "read",
-        { path: "src/index.ts" },
-        "/home/user/project",
-      );
-
-      expect(result.allowed).toBe(true);
-      expect(result.requiresConfirmation).toBeFalsy();
-      expect(result.suggestion).toBeUndefined();
-    });
-
-    it("权限规则 allow 命中后不再 confirm，也不需 suggestion", async () => {
+  describe("信任沉淀 tracker 集成", () => {
+    it("权限规则 allow 命中后直接放行，不再触发 confirm", async () => {
       const store = new PermissionStore({ rootDir: null });
       store.create(
         null,
@@ -712,27 +592,9 @@ describe("SecurityPipeline", () => {
         }),
       );
 
-      const tracker = new ConfirmationTracker();
-      // 即使 tracker 里有 5 次记录
-      for (let i = 0; i < 5; i++) {
-        tracker.record(
-          {
-            tool: "bash",
-            arguments: { command: "curl https://example.com" },
-            context: {
-              cwd: "/home/user/project",
-              trust: { kind: "workspace", dir: "/home/user/project" },
-              sessionType: "interactive",
-            },
-          },
-          "medium",
-        );
-      }
-
       const pipeline = new SecurityPipeline({
         trustContext: { kind: "workspace", dir: "/home/user/project" },
         permissionStore: store,
-        confirmationTracker: tracker,
       });
 
       const result = await pipeline.evaluate(
@@ -743,7 +605,6 @@ describe("SecurityPipeline", () => {
 
       expect(result.allowed).toBe(true);
       expect(result.requiresConfirmation).toBeFalsy();
-      expect(result.suggestion).toBeUndefined();
     });
 
     it("pipeline.getConfirmationTracker 暴露访问", () => {
@@ -753,15 +614,6 @@ describe("SecurityPipeline", () => {
 
       expect(pipeline.getConfirmationTracker()).toBeDefined();
       expect(typeof pipeline.getConfirmationTracker().record).toBe("function");
-    });
-
-    it("包含 SuggestionGenerator 中间件", () => {
-      const pipeline = new SecurityPipeline({
-        trustContext: { kind: "workspace", dir: "/home/user/project" },
-      });
-
-      const names = pipeline.getMiddlewares().map((m) => m.name);
-      expect(names).toContain("SuggestionGenerator");
     });
   });
 

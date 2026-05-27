@@ -410,8 +410,6 @@ export interface SecurityMiddlewareState {
   trustLevel?: import("./trust.js").TrustLevel;
   /** 匹配到的权限规则（由 PermissionMatcherMiddleware 写入） */
   matchedPermissionRule?: PermissionRule;
-  /** 智能建议（由 SuggestionMiddleware 写入，仅在达到阈值时存在） */
-  suggestion?: import("./confirmation-tracker.js").SuggestionStatus;
   /** 执行约束（由 ExecutionGuardMiddleware 写入） */
   executionConstraints?: import("./execution-guard.js").ExecutionConstraints;
   resolvedPaths?: string[];
@@ -431,12 +429,10 @@ export interface SecurityMiddlewareResult {
   operationClass?: OperationClass;
   /** 信任等级（当前会话上下文的有效信任级） */
   trustLevel?: import("./trust.js").TrustLevel;
-  /** 最终安全决策（包含所有匹配规则、风险等级、建议） */
+  /** 最终安全决策（包含所有匹配规则、风险等级） */
   decision?: SecurityDecision;
   /** 匹配到的权限规则（若有） */
   matchedPermissionRule?: PermissionRule;
-  /** 智能建议（达到阈值时的"始终允许"提示） */
-  suggestion?: import("./confirmation-tracker.js").SuggestionStatus;
   /** 执行约束（timeout / output limit / rate limit 状态） */
   executionConstraints?: import("./execution-guard.js").ExecutionConstraints;
   /** 原因说明 */
