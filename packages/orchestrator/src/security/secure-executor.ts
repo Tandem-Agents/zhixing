@@ -34,6 +34,8 @@ import {
   type ToolResult,
   type TurnContext,
 } from "@zhixing/core";
+import { AISecuritySteward } from "./ai-steward.js";
+import type { StewardOperation, StewardVerdict } from "./ai-steward.js";
 
 // ─── 错误类型 ───
 
@@ -181,19 +183,38 @@ export function createSecureExecuteTool(
       );
     }
 
-    // 2. 需要确认 —— 走 broker
+    // 2. 需要确认 —— 灰色 external 先经 AI 安全管家研判，其余走 broker
     if (result.requiresConfirmation) {
-      await handleBrokerPath({
-        broker,
-        pipeline,
+      const verdict = await consultSteward({
+        result,
+        context: augmentedContext,
+        turnContext,
         toolName: tool.name,
         input,
-        context: augmentedContext,
-        result,
-        sessionType,
-        fallbackStrategy,
-        onUserDenied,
       });
+      if (verdict?.decision === "escalate") {
+        onBlocked?.(tool.name, input, result);
+        throw new SecurityBlockError(
+          `操作被安全管家拦截:${verdict.reason}`,
+          tool.name,
+          verdict.reason,
+        );
+      }
+      if (verdict?.decision !== "safe") {
+        // needs-confirm / 未触发管家 → broker（非交互由其 fail-to-deny 兜底）
+        await handleBrokerPath({
+          broker,
+          pipeline,
+          toolName: tool.name,
+          input,
+          context: augmentedContext,
+          result,
+          sessionType,
+          fallbackStrategy,
+          onUserDenied,
+        });
+      }
+      // verdict.decision === "safe" → 管家放行，跳过 broker，落到下方执行
     }
 
     // 3. 执行实际工具 —— 应用 pipeline 计算的执行约束
@@ -205,6 +226,41 @@ export function createSecureExecuteTool(
       originalExecute,
     });
   };
+}
+
+// ─── AI 安全管家路径 ───
+
+/**
+ * 灰色 external 操作交 AI 安全管家研判。仅 "external + 无用户规则 + 无 bypassImmune
+ * 命中 + 有 LLM" 才触发；critical / bypassImmune / 无 LLM 返回 undefined → 走 broker。
+ */
+async function consultSteward(params: {
+  result: SecurityMiddlewareResult;
+  context: ToolExecutionContext;
+  turnContext: TurnContext | undefined;
+  toolName: string;
+  input: Record<string, unknown>;
+}): Promise<StewardVerdict | undefined> {
+  const { result, context, turnContext, toolName, input } = params;
+  if (result.operationClass !== "external") return undefined;
+  if (result.matchedPermissionRule) return undefined;
+  if (result.decision?.matchedRules.some((r) => r.bypassImmune)) return undefined;
+  const main = context.llm?.main;
+  if (!main) return undefined;
+
+  const operation: StewardOperation = { tool: toolName };
+  if (result.resolvedPaths && result.resolvedPaths.length > 0) {
+    operation.resolvedPaths = result.resolvedPaths;
+  }
+  const command = input["command"];
+  if (typeof command === "string") operation.command = command;
+
+  const steward = new AISecuritySteward(main);
+  return steward.review({
+    userIntent: turnContext?.userIntent,
+    operation,
+    trustLevel: result.trustLevel ?? "global",
+  });
 }
 
 // ─── Broker 路径 ───

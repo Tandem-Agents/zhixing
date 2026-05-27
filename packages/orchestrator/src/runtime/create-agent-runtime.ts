@@ -61,6 +61,7 @@ import {
   resolveModelInfo,
   SecurityPipeline,
   setAgentIdentity,
+  extractText,
   userMessage,
   validateThinkingConfig,
   withRetry,
@@ -1092,7 +1093,10 @@ export async function createAgentRuntime(
           broker: confirmationBroker,
           sessionType,
           confirmationFallback: options.confirmationFallback,
-          turnContext: params.turnContext,
+          turnContext: {
+            ...params.turnContext,
+            userIntent: extractText(originalUserMessage),
+          },
           onBlocked: options.onSecurityBlocked,
           onUserDenied: options.onUserDenied,
         });

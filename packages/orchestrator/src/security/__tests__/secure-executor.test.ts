@@ -19,6 +19,8 @@ import {
   type ConfirmationDecision,
   type ConfirmationRequest,
   type ToolDefinition,
+  type LLMRoles,
+  type StreamEvent,
   type ToolExecutionContext,
   type ToolResult,
 } from "@zhixing/core";
@@ -42,6 +44,19 @@ function makeTool(name: string): ToolDefinition {
 
 function makeContext(cwd: string = "/tmp/ws"): ToolExecutionContext {
   return { workingDirectory: cwd };
+}
+
+/** 注入一个产出固定管家裁决的 ctx.llm（main/light/power 同一 mock role）。 */
+function makeContextWithSteward(
+  verdictJSON: string,
+  cwd: string = "/tmp/ws",
+): ToolExecutionContext {
+  const chat = async function* () {
+    yield { type: "text_delta", text: verdictJSON } as StreamEvent;
+  };
+  const role = { provider: {}, model: "mock", chat };
+  const llm = { main: role, light: role, power: role } as unknown as LLMRoles;
+  return { workingDirectory: cwd, llm };
 }
 
 function mockExecute(): {
@@ -108,6 +123,93 @@ describe("createSecureExecuteTool", () => {
       const result = await wrapped(
         makeTool("read"),
         { path: "/tmp/foo" },
+        makeContext(),
+      );
+
+      expect(result.content).toBe("executed");
+      expect(exec.callCount()).toBe(1);
+    });
+  });
+
+  describe("AI 安全管家路径", () => {
+    it("管家 safe → 放行，跳过 broker，调 originalExecute", async () => {
+      const broker = new ConfirmationBroker();
+      const exec = mockExecute();
+      const { pipeline } = makePipeline();
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: exec.fn,
+        broker,
+      });
+
+      const result = await wrapped(
+        makeTool("bash"),
+        { command: "echo hello" },
+        makeContextWithSteward('{"decision":"safe","reason":"对齐","confidence":0.9}'),
+      );
+
+      expect(result.content).toBe("executed");
+      expect(exec.callCount()).toBe(1);
+    });
+
+    it("管家 escalate → onBlocked + 抛 SecurityBlockError，不执行", async () => {
+      const broker = new ConfirmationBroker();
+      const exec = mockExecute();
+      const onBlocked = vi.fn();
+      const { pipeline } = makePipeline();
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: exec.fn,
+        broker,
+        onBlocked,
+      });
+
+      await expect(
+        wrapped(
+          makeTool("bash"),
+          { command: "echo danger" },
+          makeContextWithSteward('{"decision":"escalate","reason":"高危","confidence":0.8}'),
+        ),
+      ).rejects.toThrow(SecurityBlockError);
+      expect(onBlocked).toHaveBeenCalled();
+      expect(exec.callCount()).toBe(0);
+    });
+
+    it("管家 needs-confirm → 走 broker（allow-once 后执行）", async () => {
+      const broker = new ConfirmationBroker();
+      autoResolveBroker(broker, { kind: "allow-once" });
+      const exec = mockExecute();
+      const { pipeline } = makePipeline();
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: exec.fn,
+        broker,
+      });
+
+      const result = await wrapped(
+        makeTool("bash"),
+        { command: "echo gray" },
+        makeContextWithSteward('{"decision":"needs-confirm","reason":"不确定","confidence":0.4}'),
+      );
+
+      expect(result.content).toBe("executed");
+      expect(exec.callCount()).toBe(1);
+    });
+
+    it("无 ctx.llm → 不触发管家，走 broker", async () => {
+      const broker = new ConfirmationBroker();
+      autoResolveBroker(broker, { kind: "allow-once" });
+      const exec = mockExecute();
+      const { pipeline } = makePipeline();
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: exec.fn,
+        broker,
+      });
+
+      const result = await wrapped(
+        makeTool("bash"),
+        { command: "echo gray" },
         makeContext(),
       );
 

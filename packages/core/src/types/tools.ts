@@ -65,7 +65,7 @@ export function generateTurnId(): string {
 }
 
 export interface TurnContext {
-  /** 全局唯一 turn 标识（Phase 2 用于观测；Phase 3 起接 Outbox Turn Slot） */
+  /** 全局唯一 turn 标识（用于观测 / Outbox Turn Slot 关联）。 */
   turnId?: string;
   /** 当前 turn 绑定的用户 target */
   emissionTarget?: DeliveryTarget;
@@ -85,6 +85,11 @@ export interface TurnContext {
    * REPL / 一次性命令为 undefined。
    */
   turnOrigin?: TurnOrigin;
+  /**
+   * 当前 turn 的用户原始意图（用户消息文本）—— 供 AI 安全管家做"用户意图 vs 操作"
+   * 对齐研判。只取用户可信源，不含 agent 推理 / 对话历史。
+   */
+  userIntent?: string;
 }
 
 // ─── JSON Schema ───
