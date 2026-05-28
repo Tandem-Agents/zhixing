@@ -16,13 +16,16 @@
 
 import {
   PermissionStore,
+  SecurityAuditor,
   truncateOutput,
   wrapWithConstraints,
   buildConfirmationRequest,
+  type AgentEventMap,
   type ConfirmationDecision,
   type ConfirmationFallbackStrategy,
   type ExecutionConstraints,
   type IConfirmationBroker,
+  type IEventBus,
   type IPermissionStore,
   type SecurityMiddlewareResult,
   type SecurityPipeline,
@@ -131,12 +134,28 @@ export interface SecureExecuteToolOptions {
   onBlocked?: OnBlockedFn;
   /** 用户在 confirmation 面板选择拒绝时的 UI 通知;不传则静默 */
   onUserDenied?: OnUserDeniedFn;
+  /**
+   * Per-run 事件总线 —— 启用安全审计事件发射。
+   * 传入则 secure-executor 构造 SecurityAuditor，将 pipeline 决策评估与管家
+   * 三态裁决发射成统一的 security:* 事件流；不传则不发射（向后兼容）。
+   */
+  eventBus?: IEventBus<AgentEventMap>;
 }
 
 export function createSecureExecuteTool(
   opts: SecureExecuteToolOptions,
 ): ExecuteToolFn {
-  const { pipeline, originalExecute, broker, turnContext, onBlocked, onUserDenied } = opts;
+  const {
+    pipeline,
+    originalExecute,
+    broker,
+    turnContext,
+    onBlocked,
+    onUserDenied,
+    eventBus,
+  } = opts;
+  // run 级审计发射器——传入 eventBus 时启用，发射 pipeline 安全事件与管家三态裁决事件
+  const auditor = eventBus ? new SecurityAuditor(eventBus) : null;
   const sessionType: SessionType =
     opts.sessionType ?? (process.stdin.isTTY ? "interactive" : "ci");
   const fallbackStrategy: ConfirmationFallbackStrategy =
@@ -167,11 +186,22 @@ export function createSecureExecuteTool(
       turnOrigin: turnContext?.turnOrigin ?? context.turnOrigin,
     };
 
+    const evalStart = performance.now();
     const result = await pipeline.evaluate(
       tool.name,
       input,
       augmentedContext.workingDirectory,
     );
+    if (auditor) {
+      await auditor.auditEvaluation({
+        toolName: tool.name,
+        toolInput: input,
+        result,
+        trust: pipeline.getTrust(),
+        cwd: augmentedContext.workingDirectory,
+        durationMs: performance.now() - evalStart,
+      });
+    }
 
     // 1. block → 通知 UI 并抛错
     if (!result.allowed) {
@@ -192,6 +222,15 @@ export function createSecureExecuteTool(
         toolName: tool.name,
         input,
       });
+      if (verdict && auditor) {
+        await auditor.auditStewardReview({
+          toolName: tool.name,
+          toolInput: input,
+          decision: verdict.decision,
+          reason: verdict.reason,
+          confidence: verdict.confidence,
+        });
+      }
       if (verdict?.decision === "escalate") {
         onBlocked?.(tool.name, input, result);
         throw new SecurityBlockError(

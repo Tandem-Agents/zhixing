@@ -26,6 +26,7 @@ import type { ToolSpec } from "./tools.js";
 import type { CompactStrategyContribution } from "../context/types.js";
 import type { AbortReason } from "../interrupt/types.js";
 import type { CompactMarker } from "../transcript/types.js";
+import type { SecurityEventMap } from "../security/types.js";
 
 /**
  * Agent Loop 终止原因。
@@ -453,4 +454,4 @@ export type AgentEventMap = {
    * 切换事务）。
    */
   "workmode:switch_requested": WorkModeSwitchIntent;
-};
+} & SecurityEventMap;

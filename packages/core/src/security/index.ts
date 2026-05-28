@@ -113,9 +113,8 @@ export type {
 export { SlidingWindowRateLimiter } from "./rate-limiter.js";
 export type { RateLimitResult } from "./rate-limiter.js";
 
-// 安全审计
+// 安全审计（run 级发射器；由 secure-executor 在 evaluate 后调用）
 export { SecurityAuditor } from "./security-auditor.js";
-export type { AgentEventMapWithSecurity } from "./security-auditor.js";
 
 // 安全管线
 export { SecurityPipeline } from "./security-pipeline.js";

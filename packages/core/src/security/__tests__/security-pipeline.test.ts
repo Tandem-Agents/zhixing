@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { EventBus } from "../../events/event-bus.js";
 import { PermissionStore } from "../permission-store.js";
 import { SlidingWindowRateLimiter } from "../rate-limiter.js";
-import type { AgentEventMapWithSecurity } from "../security-auditor.js";
 import { SecurityPipeline } from "../security-pipeline.js";
 import type {
   OperationClass,
@@ -73,42 +71,15 @@ describe("SecurityPipeline", () => {
       expect(names).toContain("PathResolve");
     });
 
-    it("有 EventBus 时包含审计器", () => {
-      const eventBus = new EventBus<AgentEventMapWithSecurity>();
+    it("中间件按正确顺序排列（authorize → guard）", () => {
       const pipeline = new SecurityPipeline({
         trustContext: { kind: "workspace", dir: "/home/user/project" },
-        eventBus,
-      });
-
-      const middlewares = pipeline.getMiddlewares();
-      const names = middlewares.map((m) => m.name);
-
-      expect(names).toContain("SecurityAuditor");
-    });
-
-    it("无 EventBus 时不包含审计器", () => {
-      const pipeline = new SecurityPipeline({
-        trustContext: { kind: "workspace", dir: "/home/user/project" },
-      });
-
-      const middlewares = pipeline.getMiddlewares();
-      const names = middlewares.map((m) => m.name);
-
-      expect(names).not.toContain("SecurityAuditor");
-    });
-
-    it("中间件按正确顺序排列（post-execute → authorize → guard）", () => {
-      const eventBus = new EventBus<AgentEventMapWithSecurity>();
-      const pipeline = new SecurityPipeline({
-        trustContext: { kind: "workspace", dir: "/home/user/project" },
-        eventBus,
       });
 
       const middlewares = pipeline.getMiddlewares();
       const phases = middlewares.map((m) => m.phase);
 
-      // post-execute 必须在数组最前（onion 最外层），以便在其他中间件 return 后观察到最终状态
-      const phaseOrder = { "post-execute": 0, authorize: 1, guard: 2 };
+      const phaseOrder = { authorize: 0, guard: 1 };
       let lastPhaseOrder = -1;
       for (const phase of phases) {
         const order = phaseOrder[phase] ?? 0;
@@ -156,50 +127,6 @@ describe("SecurityPipeline", () => {
       );
 
       expect(result.allowed).toBe(false);
-    });
-  });
-
-  describe("安全事件发射", () => {
-    it("block 决策发射 security:blocked 事件（auditor 在 onion 外层观察最终状态）", async () => {
-      const eventBus = new EventBus<AgentEventMapWithSecurity>();
-      const pipeline = new SecurityPipeline({
-        trustContext: { kind: "workspace", dir: "/home/user/project" },
-        eventBus,
-      });
-
-      const blockedEvents: unknown[] = [];
-      eventBus.on("security:blocked", (payload) => {
-        blockedEvents.push(payload);
-      });
-
-      await pipeline.evaluate(
-        "write",
-        { path: ".git/config" },
-        "/home/user/project",
-      );
-
-      expect(blockedEvents.length).toBe(1);
-    });
-
-    it("allow 决策发射 security:evaluation 事件", async () => {
-      const eventBus = new EventBus<AgentEventMapWithSecurity>();
-      const pipeline = new SecurityPipeline({
-        trustContext: { kind: "workspace", dir: "/home/user/project" },
-        eventBus,
-      });
-
-      const evalEvents: unknown[] = [];
-      eventBus.on("security:evaluation", (payload) => {
-        evalEvents.push(payload);
-      });
-
-      await pipeline.evaluate(
-        "read",
-        { path: "src/index.ts" },
-        "/home/user/project",
-      );
-
-      expect(evalEvents.length).toBe(1);
     });
   });
 
@@ -333,27 +260,6 @@ describe("SecurityPipeline", () => {
       expect(result.requiresConfirmation).toBe(true);
     });
 
-    it("发射 security:classified 事件", async () => {
-      const eventBus = new EventBus<AgentEventMapWithSecurity>();
-      const pipeline = new SecurityPipeline({
-        trustContext: { kind: "workspace", dir: "/home/user/project" },
-        eventBus,
-      });
-
-      const events: Array<{ operationClass: OperationClass }> = [];
-      eventBus.on("security:classified", (payload) => {
-        events.push(payload as { operationClass: OperationClass });
-      });
-
-      await pipeline.evaluate(
-        "read",
-        { path: "src/a.ts" },
-        "/home/user/project",
-      );
-
-      expect(events.length).toBe(1);
-      expect(events[0]!.operationClass).toBe("observe");
-    });
   });
 
   describe("权限匹配集成", () => {
@@ -546,38 +452,6 @@ describe("SecurityPipeline", () => {
       expect(result.trustLevel).toBe("global");
     });
 
-    it("发射 security:permission_matched 事件", async () => {
-      const eventBus = new EventBus<AgentEventMapWithSecurity>();
-      const store = new PermissionStore({ rootDir: null });
-      store.create(
-        null,
-        PermissionStore.createRule({
-          pattern: { tool: "bash", argument: "curl *" },
-          decision: "allow",
-          scope: "global",
-        }),
-      );
-
-      const pipeline = new SecurityPipeline({
-        trustContext: { kind: "workspace", dir: "/home/user/project" },
-        permissionStore: store,
-        eventBus,
-      });
-
-      const events: Array<{ ruleId: string; decision: string }> = [];
-      eventBus.on("security:permission_matched", (payload) => {
-        events.push(payload as { ruleId: string; decision: string });
-      });
-
-      await pipeline.evaluate(
-        "bash",
-        { command: "curl https://example.com" },
-        "/home/user/project",
-      );
-
-      expect(events.length).toBe(1);
-      expect(events[0]!.decision).toBe("allow");
-    });
   });
 
   describe("信任沉淀 tracker 集成", () => {

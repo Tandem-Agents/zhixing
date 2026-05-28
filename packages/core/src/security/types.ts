@@ -459,14 +459,14 @@ export type SecurityEventMap = {
     operationClass?: OperationClass;
   };
 
-  /** 操作被分类（Phase 2） */
+  /** 操作被分类——按影响范围归类 */
   "security:classified": {
     tool: string;
     operation: string;
     operationClass: OperationClass;
   };
 
-  /** 匹配到权限规则（Phase 2） */
+  /** 匹配到用户权限规则 */
   "security:permission_matched": {
     tool: string;
     operation: string;
@@ -489,5 +489,14 @@ export type SecurityEventMap = {
     originalPath: string;
     resolvedPath: string;
     withinWorkspace: boolean;
+  };
+
+  /** AI 安全管家对灰色 external 操作的三态研判裁决 */
+  "security:steward_review": {
+    tool: string;
+    operation: string;
+    decision: "safe" | "needs-confirm" | "escalate";
+    reason: string;
+    confidence: number;
   };
 };

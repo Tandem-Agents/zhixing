@@ -1099,6 +1099,8 @@ export async function createAgentRuntime(
           },
           onBlocked: options.onSecurityBlocked,
           onUserDenied: options.onUserDenied,
+          // per-run 事件总线 —— 启用安全审计发射（pipeline 决策事件 + 管家三态裁决事件）
+          eventBus,
         });
 
         const gen = runAgentLoop({

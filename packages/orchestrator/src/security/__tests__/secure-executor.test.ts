@@ -14,8 +14,10 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   ConfirmationBroker,
+  EventBus,
   PermissionStore,
   SecurityPipeline,
+  type AgentEventMap,
   type ConfirmationDecision,
   type ConfirmationRequest,
   type ToolDefinition,
@@ -479,6 +481,87 @@ describe("createSecureExecuteTool", () => {
       expect(ctx?.turnOrigin).toEqual({ channel: "feishu", triggeredBy: "u-1" });
       // commitToUser 被包装了一层(自动注入 toolName),不直接 ===
       expect(ctx?.commitToUser).toBeDefined();
+    });
+  });
+
+  // 验证 secure-executor 的 audit 接线：传入 eventBus 时确实发射事件、不传则不发（向后兼容）
+  // SecurityAuditor 的发射内容由 security-auditor.test 单测覆盖，这里只验证调用链路
+  describe("安全审计接线", () => {
+    it("传入 eventBus → evaluate 后发射 security:evaluation 事件", async () => {
+      const broker = new ConfirmationBroker();
+      const exec = mockExecute();
+      const { pipeline } = makePipeline();
+      const eventBus = new EventBus<AgentEventMap>();
+      const events: Array<Record<string, unknown>> = [];
+      eventBus.on("security:evaluation", (p) =>
+        events.push(p as Record<string, unknown>),
+      );
+
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: exec.fn,
+        broker,
+        eventBus,
+      });
+
+      await wrapped(makeTool("read"), { path: "/tmp/a" }, makeContext());
+
+      expect(events).toHaveLength(1);
+      expect(events[0]!.tool).toBe("read");
+      expect(events[0]!.decision).toBeDefined();
+      expect(typeof events[0]!.duration).toBe("number");
+    });
+
+    it("传入 eventBus + 管家 needs-confirm → 发射 security:steward_review 事件", async () => {
+      const broker = new ConfirmationBroker();
+      autoResolveBroker(broker, { kind: "allow-once" });
+      const exec = mockExecute();
+      const { pipeline } = makePipeline();
+      const eventBus = new EventBus<AgentEventMap>();
+      const events: Array<Record<string, unknown>> = [];
+      eventBus.on("security:steward_review", (p) =>
+        events.push(p as Record<string, unknown>),
+      );
+
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: exec.fn,
+        broker,
+        eventBus,
+      });
+
+      await wrapped(
+        makeTool("bash"),
+        { command: "curl https://example.com/gray" },
+        makeContextWithSteward(
+          '{"decision":"needs-confirm","reason":"灰色操作需用户确认","confidence":0.4}',
+        ),
+      );
+
+      expect(events).toHaveLength(1);
+      expect(events[0]!.decision).toBe("needs-confirm");
+      expect(events[0]!.reason).toBe("灰色操作需用户确认");
+      expect(events[0]!.confidence).toBe(0.4);
+    });
+
+    it("不传 eventBus → 不发射事件、不影响放行（向后兼容）", async () => {
+      const broker = new ConfirmationBroker();
+      const exec = mockExecute();
+      const { pipeline } = makePipeline();
+
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: exec.fn,
+        broker,
+      });
+
+      const result = await wrapped(
+        makeTool("read"),
+        { path: "/tmp/a" },
+        makeContext(),
+      );
+      expect(result.content).toBe("executed");
+      expect(exec.callCount()).toBe(1);
     });
   });
 });

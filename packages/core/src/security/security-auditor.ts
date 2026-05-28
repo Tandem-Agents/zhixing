@@ -1,95 +1,88 @@
 /**
- * 安全审计器
+ * 安全审计器 —— run 级审计发射器
  *
- * 在安全决策流程的最后阶段，将安全事件发射到 EventBus。
- * 不做决策、不阻止操作——纯粹的可观测性组件。
+ * 拿到一次工具调用的安全决策结果后，把安全事件发射到 EventBus。不做决策、
+ * 不阻止操作——纯粹的可观测性组件，由 secure-executor 在每次工具调用的
+ * 决策评估后调用。
+ *
+ * 设计要点：
+ *   - run 级实例：由 create-agent-runtime 在每次 run 的 per-run eventBus 上实例化，
+ *     生命周期与 eventBus 对齐（pipeline 是 runtime 级、跨 run 复用，不能持 per-run eventBus）。
+ *   - 通过 AgentEventMap（已并入 SecurityEventMap）的 eventBus 发射，安全事件
+ *     与 agent 运行事件同流，可被 renderer / accumulator / 任意订阅者消费。
+ *   - 发射器 ≠ sink：本组件只 emit，落地（日志/UI/存储）由订阅者按需实现，可插拔。
  *
  * 发射的事件：
- * - security:evaluation — 每次策略评估的结果
- * - security:blocked — 操作被阻止时
- * - security:path_resolved — 路径被规范化时
+ *   - security:evaluation        每次策略评估的结果
+ *   - security:classified        操作影响分类
+ *   - security:permission_matched 命中用户权限规则
+ *   - security:blocked           操作被阻止
+ *   - security:path_resolved     路径规范化
+ *   - security:steward_review    AI 安全管家的三态研判裁决
  */
 
 import type { IEventBus } from "../events/types.js";
 import type { AgentEventMap } from "../types/agent-events.js";
-import type {
-  SecurityAction,
-  SecurityEventMap,
-  SecurityMiddleware,
-  SecurityMiddlewareContext,
-  SecurityMiddlewareResult,
-} from "./types.js";
-
-/**
- * 扩展后的事件映射表，包含安全事件。
- * 使用交叉类型将安全事件合并到 AgentEventMap。
- */
 import { PathGuard } from "./path-guard.js";
+import type { TrustContext } from "./trust.js";
 import { workspaceDirOf } from "./trust.js";
+import type { SecurityMiddlewareResult } from "./types.js";
 
-export type AgentEventMapWithSecurity = AgentEventMap & SecurityEventMap;
+export class SecurityAuditor {
+  constructor(private readonly eventBus: IEventBus<AgentEventMap>) {}
 
-export class SecurityAuditor implements SecurityMiddleware {
-  readonly name = "SecurityAuditor";
-  readonly phase = "post-execute" as const;
-  readonly order = 100;
-
-  constructor(
-    private readonly eventBus: IEventBus<AgentEventMapWithSecurity>,
-  ) {}
-
-  async execute(
-    ctx: SecurityMiddlewareContext,
-    next: () => Promise<SecurityMiddlewareResult>,
-  ): Promise<SecurityMiddlewareResult> {
-    const startTime = performance.now();
-
-    const result = await next();
-
-    const duration = performance.now() - startTime;
-    const decision = ctx.state.decision;
+  /**
+   * 发射一次 pipeline 安全决策评估的事件流（evaluation / classified /
+   * permission_matched / blocked / path_resolved）。
+   */
+  async auditEvaluation(params: {
+    toolName: string;
+    toolInput: Record<string, unknown>;
+    result: SecurityMiddlewareResult;
+    trust: TrustContext;
+    cwd: string;
+    durationMs: number;
+  }): Promise<void> {
+    const { toolName, toolInput, result, trust, cwd, durationMs } = params;
+    const decision = result.decision;
+    const operation = describeOperation(toolName, toolInput);
 
     if (decision) {
-      const action: SecurityAction = decision.action;
-      const operationClass = ctx.state.operationClass;
+      const operationClass = result.operationClass;
 
-      // 发射评估事件
       await this.eventBus.emit("security:evaluation", {
-        tool: ctx.toolName,
-        operation: this.describeOperation(ctx),
+        tool: toolName,
+        operation,
         riskLevel: decision.riskLevel,
-        decision: action,
+        decision: decision.action,
         matchedRules: decision.matchedRules.map((r) => r.id),
-        duration,
+        duration: durationMs,
         operationClass,
       });
 
-      // 发射分类事件（Phase 2）
       if (operationClass) {
         await this.eventBus.emit("security:classified", {
-          tool: ctx.toolName,
-          operation: this.describeOperation(ctx),
+          tool: toolName,
+          operation,
           operationClass,
         });
       }
 
-      // 发射权限匹配事件（Phase 2）
-      const matchedPermRule = ctx.state.matchedPermissionRule;
+      const matchedPermRule = result.matchedPermissionRule;
       if (matchedPermRule) {
         await this.eventBus.emit("security:permission_matched", {
-          tool: ctx.toolName,
-          operation: this.describeOperation(ctx),
+          tool: toolName,
+          operation,
           ruleId: matchedPermRule.id,
           decision: matchedPermRule.decision,
           scope: matchedPermRule.scope,
         });
       }
 
-      // 操作被阻止时发射专门事件
-      if (action === "block") {
+      if (decision.action === "block") {
         await this.eventBus.emit("security:blocked", {
-          tool: ctx.toolName,
-          operation: this.describeOperation(ctx),
+          tool: toolName,
+          operation,
           reason: decision.reason,
           riskLevel: decision.riskLevel,
           matchedRules: decision.matchedRules.map((r) => r.id),
@@ -97,56 +90,60 @@ export class SecurityAuditor implements SecurityMiddleware {
       }
     }
 
-    // 路径规范化事件
-    const resolvedPaths = ctx.state.resolvedPaths as string[] | undefined;
-    if (resolvedPaths) {
+    const resolvedPaths = result.resolvedPaths;
+    if (resolvedPaths && resolvedPaths.length > 0) {
+      const workspace = workspaceDirOf(trust);
+      const originalPath = getOriginalPath(toolInput);
       for (const resolvedPath of resolvedPaths) {
         await this.eventBus.emit("security:path_resolved", {
-          originalPath: this.getOriginalPath(ctx) ?? resolvedPath,
+          originalPath: originalPath ?? resolvedPath,
           resolvedPath,
-          withinWorkspace: this.checkWithinWorkspace(
-            resolvedPath,
-            workspaceDirOf(ctx.request.context.trust),
-            ctx.request.context.cwd,
-          ),
+          withinWorkspace: workspace
+            ? PathGuard.isWithinWorkspace(resolvedPath, workspace, cwd)
+            : false,
         });
       }
     }
-
-    return result;
   }
 
-  private describeOperation(ctx: SecurityMiddlewareContext): string {
-    const args = ctx.toolInput;
-
-    if (ctx.toolName === "bash" && typeof args["command"] === "string") {
-      const cmd = args["command"];
-      return cmd.length > 80 ? `${cmd.slice(0, 77)}...` : cmd;
-    }
-
-    if (typeof args["path"] === "string") {
-      return `${ctx.toolName}: ${args["path"]}`;
-    }
-
-    return ctx.toolName;
+  /**
+   * 发射 AI 安全管家的三态研判裁决事件（safe / needs-confirm / escalate）。
+   * 由 secure-executor 在管家研判后调用（管家在 orchestrator 层、不属 pipeline）。
+   */
+  async auditStewardReview(params: {
+    toolName: string;
+    toolInput: Record<string, unknown>;
+    decision: "safe" | "needs-confirm" | "escalate";
+    reason: string;
+    confidence: number;
+  }): Promise<void> {
+    await this.eventBus.emit("security:steward_review", {
+      tool: params.toolName,
+      operation: describeOperation(params.toolName, params.toolInput),
+      decision: params.decision,
+      reason: params.reason,
+      confidence: params.confidence,
+    });
   }
+}
 
-  private getOriginalPath(ctx: SecurityMiddlewareContext): string | null {
-    const args = ctx.toolInput;
-    if (typeof args["path"] === "string") return args["path"];
-    if (typeof args["file_path"] === "string") return args["file_path"];
-    if (typeof args["target"] === "string") return args["target"];
-    return null;
+function describeOperation(
+  toolName: string,
+  args: Record<string, unknown>,
+): string {
+  if (toolName === "bash" && typeof args["command"] === "string") {
+    const cmd = args["command"];
+    return cmd.length > 80 ? `${cmd.slice(0, 77)}...` : cmd;
   }
+  if (typeof args["path"] === "string") {
+    return `${toolName}: ${args["path"]}`;
+  }
+  return toolName;
+}
 
-  private checkWithinWorkspace(
-    resolvedPath: string,
-    workspace: string | null,
-    cwd: string,
-  ): boolean {
-    if (!workspace) return false;
-    // 纯审计字段：用 PathGuard.isWithinWorkspace（realpath 两边）报告 resolvedPath
-    // 是否落在信任工作目录内，不参与决策；realpath 两边避免 symlink 工作目录下失真。
-    return PathGuard.isWithinWorkspace(resolvedPath, workspace, cwd);
-  }
+function getOriginalPath(args: Record<string, unknown>): string | null {
+  if (typeof args["path"] === "string") return args["path"];
+  if (typeof args["file_path"] === "string") return args["file_path"];
+  if (typeof args["target"] === "string") return args["target"];
+  return null;
 }

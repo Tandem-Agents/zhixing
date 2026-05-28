@@ -1,11 +1,11 @@
 /**
  * 安全中间件管线
  *
- * 将命令预解析、策略评估、操作分类、信任分级、权限匹配、守卫、审计记录串联执行。
+ * 将命令预解析、策略评估、操作分类、信任分级、权限匹配、守卫串联执行。
+ * 安全审计（事件发射）由 run 级 SecurityAuditor 在 secure-executor 中调用，
+ * 与 pipeline 解耦——pipeline 是 runtime 级单例（持沉淀状态），audit 是 per-run。
  *
  * 安全管线：
- *   post-execute (outermost wrapper)
- *     └── SecurityAuditor        观察最终决策，发射事件
  *   authorize
  *     ├── CommandAnalyzer        (order=-10) Shell 命令预解析，填 resolvedAccess
  *     ├── PathResolve            (order=-5)  路径 realpath 解析，填 resolvedAccess.paths
@@ -16,16 +16,11 @@
  *   guard
  *     └── ExecutionGuard         (order=30)  超时 / 输出 / 频率约束
  *
- * ── Onion 模型排序 ──
- * post-execute 阶段（SecurityAuditor）在数组中位于最前，作为 onion 最外层包装器。
- * 这样即使 PolicyEvaluator 在 block 时短路，auditor 仍能观察到最终决策并发射事件。
- *
  * ── 决策累积 ──
  * 中间件不各自拼装结果，而是把状态写入 ctx.state（decision / operationClass / ...）。
  * 管线最底层的 buildFinalResult 从累积状态构造统一的 SecurityMiddlewareResult。
  */
 
-import type { IEventBus } from "../events/types.js";
 import {
   CompositeClassifier,
   createDefaultClassifier,
@@ -41,8 +36,6 @@ import { PathResolveMiddleware } from "./path-resolve.js";
 import { PermissionMatcherMiddleware } from "./permission-matcher.js";
 import { PermissionStore } from "./permission-store.js";
 import { PolicyEngine } from "./policy-engine.js";
-import type { AgentEventMapWithSecurity } from "./security-auditor.js";
-import { SecurityAuditor } from "./security-auditor.js";
 import { TrustClassifierMiddleware } from "./trust-classifier.js";
 import { workspaceDirOf } from "./trust.js";
 import type { TrustContext } from "./trust.js";
@@ -176,8 +169,6 @@ class OperationClassifierMiddleware implements SecurityMiddleware {
 // ─── 管线选项 ───
 
 export interface SecurityPipelineOptions {
-  /** 事件总线（用于审计事件发射） */
-  eventBus?: IEventBus<AgentEventMapWithSecurity>;
   /** 额外的自定义中间件 */
   middlewares?: SecurityMiddleware[];
   /** 会话类型 */
@@ -275,11 +266,6 @@ export class SecurityPipeline {
       ),
       this.executionGuard,
     ];
-
-    // 审计器（post-execute）作为 onion 最外层包装其他中间件
-    if (options.eventBus) {
-      middlewares.push(new SecurityAuditor(options.eventBus));
-    }
 
     // 追加用户自定义中间件
     if (options.middlewares) {
