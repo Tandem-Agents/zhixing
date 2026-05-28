@@ -27,6 +27,7 @@ import { PathGuard } from "./path-guard.js";
 import type { TrustContext } from "./trust.js";
 import { workspaceDirOf } from "./trust.js";
 import type {
+  PermissionContextId,
   PermissionScope,
   SecurityMiddlewareResult,
   TrustContribution,
@@ -140,7 +141,7 @@ export class SecurityAuditor {
     toolInput: Record<string, unknown>;
     pattern: { tool: string; argument: string };
     scope: PermissionScope;
-    contextId: string;
+    contextId: PermissionContextId;
     ruleId: string;
     contributors: TrustContribution[];
   }): Promise<void> {

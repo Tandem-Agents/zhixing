@@ -16,6 +16,7 @@ import { describe, expect, it } from "vitest";
 import {
   PermissionStore,
   SecurityPipeline,
+  type PermissionContextId,
   type PermissionRule,
 } from "@zhixing/core";
 import type { CliWriter } from "../../screen/index.js";
@@ -78,7 +79,7 @@ function makePipeline(opts?: {
 
 function seedContextRule(
   store: PermissionStore,
-  contextId: string,
+  contextId: PermissionContextId,
   overrides: Partial<PermissionRule> & {
     pattern: PermissionRule["pattern"];
   },
@@ -95,6 +96,13 @@ function seedContextRule(
   });
   store.create(contextId, rule);
   return rule;
+}
+
+/** 主模式 contextId fixture。 */
+const MAIN: PermissionContextId = { kind: "main" };
+/** 工作场景 contextId fixture（接 hash 字符串）。 */
+function wsCtx(hash: string): PermissionContextId {
+  return { kind: "workspace", hash };
 }
 
 // ─── 测试 ───
@@ -115,7 +123,7 @@ describe("handleTrustCommand /trust 面板", () => {
 
   it("列表渲染含核心列：编号 / 生效范围 / contributors / 工具 / pattern", async () => {
     const { pipeline, store } = makePipeline();
-    seedContextRule(store, "main", {
+    seedContextRule(store, MAIN, {
       pattern: { tool: "bash", argument: "npm install *" },
       contributors: [
         { origin: "user", timestamp: 1_700_000_000_000 },
@@ -138,7 +146,7 @@ describe("handleTrustCommand /trust 面板", () => {
 
   it("工作场景上下文 → 生效范围显示「当前工作场景」", async () => {
     const wsDir = "/tmp/ws-trust-test";
-    const contextId = PermissionStore.contextIdFromPath(wsDir);
+    const contextId = wsCtx(PermissionStore.workspaceHashFromPath(wsDir));
     const { pipeline, store } = makePipeline({
       trustKind: "workspace",
       workspace: wsDir,
@@ -165,7 +173,7 @@ describe("handleTrustCommand /trust 面板", () => {
       scope: "global",
       contributors: [{ origin: "user", timestamp: 1_700_000_000_000 }],
     });
-    store.create("main", rule);
+    store.create(MAIN, rule);
     const writer = new CollectWriter();
     const rl = makeFakeRl([""]);
 
@@ -179,7 +187,7 @@ describe("handleTrustCommand /trust 面板", () => {
   it("builtin 规则被过滤 —— 不进 /trust 面板", async () => {
     const { pipeline, store } = makePipeline();
     // 用户的 context 规则（应该显示）
-    seedContextRule(store, "main", {
+    seedContextRule(store, MAIN, {
       pattern: { tool: "bash", argument: "ls" },
     });
     // 注入一条 builtin 规则（不应显示）
@@ -202,7 +210,7 @@ describe("handleTrustCommand /trust 面板", () => {
 
   it("输入有效编号 → 显示详情区（操作 / 范围 / 累计允许记录）", async () => {
     const { pipeline, store } = makePipeline();
-    seedContextRule(store, "main", {
+    seedContextRule(store, MAIN, {
       pattern: { tool: "bash", argument: "npm install *" },
       contributors: [
         { origin: "user", timestamp: 1_700_000_000_000 },
@@ -225,10 +233,10 @@ describe("handleTrustCommand /trust 面板", () => {
 
   it("d<编号> + y → 撤销成功、列表少一条", async () => {
     const { pipeline, store } = makePipeline();
-    seedContextRule(store, "main", {
+    seedContextRule(store, MAIN, {
       pattern: { tool: "bash", argument: "npm install *" },
     });
-    seedContextRule(store, "main", {
+    seedContextRule(store, MAIN, {
       pattern: { tool: "bash", argument: "git status" },
     });
     const writer = new CollectWriter();
@@ -238,12 +246,12 @@ describe("handleTrustCommand /trust 面板", () => {
 
     expect(writer.joined()).toContain("已撤销");
     // 撤销后剩 1 条
-    expect(store.list("main").filter((r) => r.scope === "context")).toHaveLength(1);
+    expect(store.list(MAIN).filter((r) => r.scope === "context")).toHaveLength(1);
   });
 
   it("d<编号> + N（默认拒）→ 不撤销、保留规则", async () => {
     const { pipeline, store } = makePipeline();
-    seedContextRule(store, "main", {
+    seedContextRule(store, MAIN, {
       pattern: { tool: "bash", argument: "npm install *" },
     });
     const writer = new CollectWriter();
@@ -253,12 +261,12 @@ describe("handleTrustCommand /trust 面板", () => {
     await handleTrustCommand("", { pipeline, rl, writer });
 
     expect(writer.joined()).toContain("已取消");
-    expect(store.list("main").filter((r) => r.scope === "context")).toHaveLength(1);
+    expect(store.list(MAIN).filter((r) => r.scope === "context")).toHaveLength(1);
   });
 
   it("非法编号（超出范围）→ 提示并继续循环", async () => {
     const { pipeline, store } = makePipeline();
-    seedContextRule(store, "main", {
+    seedContextRule(store, MAIN, {
       pattern: { tool: "bash", argument: "ls" },
     });
     const writer = new CollectWriter();
@@ -271,7 +279,7 @@ describe("handleTrustCommand /trust 面板", () => {
 
   it("非法 d 编号 → 提示并继续循环（不影响规则）", async () => {
     const { pipeline, store } = makePipeline();
-    seedContextRule(store, "main", {
+    seedContextRule(store, MAIN, {
       pattern: { tool: "bash", argument: "ls" },
     });
     const writer = new CollectWriter();
@@ -280,12 +288,12 @@ describe("handleTrustCommand /trust 面板", () => {
     await handleTrustCommand("", { pipeline, rl, writer });
 
     expect(writer.joined()).toContain("无效编号");
-    expect(store.list("main").filter((r) => r.scope === "context")).toHaveLength(1);
+    expect(store.list(MAIN).filter((r) => r.scope === "context")).toHaveLength(1);
   });
 
   it("Enter 空输入 → 立即退出，不抛错", async () => {
     const { pipeline, store } = makePipeline();
-    seedContextRule(store, "main", {
+    seedContextRule(store, MAIN, {
       pattern: { tool: "bash", argument: "ls" },
     });
     const writer = new CollectWriter();
@@ -298,10 +306,10 @@ describe("handleTrustCommand /trust 面板", () => {
 
   it("撤销后列表实时刷新 —— 再撤一次仍正常", async () => {
     const { pipeline, store } = makePipeline();
-    seedContextRule(store, "main", {
+    seedContextRule(store, MAIN, {
       pattern: { tool: "bash", argument: "a" },
     });
-    seedContextRule(store, "main", {
+    seedContextRule(store, MAIN, {
       pattern: { tool: "bash", argument: "b" },
     });
     const writer = new CollectWriter();
@@ -310,6 +318,6 @@ describe("handleTrustCommand /trust 面板", () => {
 
     await handleTrustCommand("", { pipeline, rl, writer });
 
-    expect(store.list("main").filter((r) => r.scope === "context")).toHaveLength(0);
+    expect(store.list(MAIN).filter((r) => r.scope === "context")).toHaveLength(0);
   });
 });

@@ -95,7 +95,7 @@ function makeRequest(
     },
     options: [],
     sessionType: "interactive",
-    contextId: "main",
+    contextId: { kind: "main" },
     createdAt: now,
     expiresAt: now + 30 * 60 * 1000,
     turnOrigin: target
@@ -344,7 +344,7 @@ describe("formatConfirmationMessage", () => {
       },
       options: [],
       sessionType: "interactive",
-      contextId: "main",
+      contextId: { kind: "main" },
       createdAt: now,
       expiresAt: now + 30 * 60 * 1000,
     };
@@ -373,7 +373,7 @@ describe("formatConfirmationMessage", () => {
       },
       options: [],
       sessionType: "interactive",
-      contextId: "main",
+      contextId: { kind: "main" },
       createdAt: now,
       expiresAt: now + 60_000,
     };
@@ -396,7 +396,7 @@ describe("formatConfirmationMessage", () => {
       },
       options: [],
       sessionType: "interactive",
-      contextId: "main",
+      contextId: { kind: "main" },
       createdAt: now,
       expiresAt: now + 60_000,
     };
@@ -423,7 +423,7 @@ describe("formatConfirmationMessage", () => {
       },
       options: [],
       sessionType: "interactive",
-      contextId: "main",
+      contextId: { kind: "main" },
       createdAt: now,
       expiresAt: now + 60_000,
     };
@@ -447,7 +447,7 @@ describe("formatConfirmationMessage", () => {
       },
       options: [],
       sessionType: "interactive",
-      contextId: "main",
+      contextId: { kind: "main" },
       createdAt: now,
       expiresAt: now + 60_000,
     };

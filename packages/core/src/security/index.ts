@@ -11,6 +11,7 @@ export type {
   MutableToolBoundaryRegistry,
   OperationClass,
   OperationClassifier,
+  PermissionContextId,
   PermissionDecision,
   PermissionRule,
   PermissionScope,

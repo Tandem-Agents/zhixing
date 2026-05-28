@@ -29,6 +29,7 @@ import type {
   ConfirmationRequest,
   DisplayBody,
   IConfirmationBroker,
+  PermissionContextId,
   RendererCapabilities,
   SecurityEventMap,
 } from "@zhixing/core";
@@ -512,11 +513,9 @@ export function renderAuditEvent(event:
     return `${indent}${output}`;
   }
 
-  // rule_sedimented：按 contextId 动态拼接作用范围
-  const scope =
-    event.payload.contextId === "main"
-      ? `${chalk.bold("主模式")}`
-      : `${chalk.bold("当前工作场景")}`;
+  // rule_sedimented：按 contextId.kind switch exhaustive 拼接作用范围
+  // （未来加新 kind 时 TypeScript 强制 highlight 此处，不靠 substring 反推）
+  const scope = chalk.bold(formatAuditContextScope(event.payload.contextId));
   const count = event.payload.contributors.length;
   const raw = tone.dim(
     `🛡 已在 ${scope} 记住 ${count} 次同类操作，自动建立放行规则：${event.payload.pattern.argument}（进 /trust 可查看/撤销）`,
@@ -527,4 +526,19 @@ export function renderAuditEvent(event:
   return `${indent}${output}`;
 }
 
-
+/**
+ * 沉淀作用范围标签 —— 按 contextId.kind switch exhaustive。
+ *
+ * 主模式标为「主模式」、workspace / scene 都属于"工作场景"对用户呈现统一术语。
+ * 未来要 UX 区分 workspace 与 scene 仅需在此处分两支，type system 强制把所有
+ * caller 同步 highlight。
+ */
+function formatAuditContextScope(contextId: PermissionContextId): string {
+  switch (contextId.kind) {
+    case "main":
+      return "主模式";
+    case "workspace":
+    case "scene":
+      return "当前工作场景";
+  }
+}

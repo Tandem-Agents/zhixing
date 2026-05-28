@@ -548,9 +548,9 @@ function formatBytes(bytes: number): string {
  *
  * bypassImmune 永不沉淀（禁区底线）；critical 由 tracker 阈值 -1 自动排除。
  *
- * 沉淀产出规则的 contextId 由 pipeline 当前上下文决定（主模式 "main" / 工作场景
- * hash），永远非空。global 规则**不**由自动沉淀产出 —— 仅在用户 confirm 弹窗
- * 显式选 allow-global 时建立。
+ * 沉淀产出规则的 contextId 由 pipeline 当前上下文决定（PermissionContextId
+ * discriminated union），永远非空。global 规则**不**由自动沉淀产出 —— 仅在用户
+ * confirm 弹窗显式选 allow-global 时建立。
  */
 async function maybePersistTrust(params: {
   pipeline: SecurityPipeline;

@@ -175,7 +175,7 @@ export type PermissionDecision = "allow" | "deny";
  * 三种**用户授权**作用域：
  * - session：本次会话有效（进程重启后消失，不落盘）
  * - context：绑定在某个上下文（主模式 OR 任一工作场景）内有效，落盘到
- *   ~/.zhixing/permissions/<contextId>.json（主模式为 main.json，工作场景为 hash 文件）
+ *   `~/.zhixing/permissions/<toStorageKey(contextId)>.json`
  * - global：跨所有上下文有效，落盘到 ~/.zhixing/permissions/global.json
  *
  * 一种**系统预置**作用域：
@@ -189,6 +189,31 @@ export type PermissionScope =
   | "context"
   | "global"
   | "builtin";
+
+/**
+ * 权限上下文标识 —— discriminated union，把"哪种上下文"与"哪个实例"通过 type system
+ * 显式分离，杜绝 namespace 碰撞（例如用户起名 "Main" 的工作场景与主模式撞 `"main"`
+ * 字符串）。
+ *
+ * 三种 kind：
+ * - `main`：主模式（无工作锚 / 无场景锚）。全局唯一，无 payload。
+ * - `workspace`：用户指定了工作目录的会话。payload 是工作目录的 SHA-256 前 16 字符
+ *   hash（确定性、跨进程稳定、不含敏感路径明文）。
+ * - `scene`：用户主动进入的命名工作场景。payload 是 workscene registry 的 sceneId
+ *   （slugify 输出，仅含字母数字 + 连字符，跨平台文件名安全）。
+ *
+ * **物理路径段转换走单独的 `toStorageKey()` 边界函数**——内存模型用结构化对象，
+ * 磁盘 JSON / Map key 用紧凑字符串，两套模型清晰分离。任何"按 contextId 分支"
+ * 的展示 / 标签 / 渲染逻辑都走 `switch (id.kind)` exhaustive，不允许 substring
+ * 反推 kind（旧设计的反模式：`contextId === "main"`）。
+ *
+ * 未来扩展新 kind（如 "remote-scene"、"project"）仅需追加 union 成员 + 更新
+ * `toStorageKey` 分支，所有 caller 由 TypeScript exhaustive 自动 highlight。
+ */
+export type PermissionContextId =
+  | { kind: "main" }
+  | { kind: "workspace"; hash: string }
+  | { kind: "scene"; sceneId: string };
 
 /**
  * 一次"信任贡献"记录——用户在 confirm 中选 allow-once 或 AI 安全助理判 safe 的
@@ -222,11 +247,11 @@ export interface PermissionRule {
   matchCount: number;
   /**
    * 上下文定位 ID —— 决定规则挂载到哪个上下文文件。
-   * - `scope === "context"`：必填（主模式存 `"main"`，工作场景存 workspace hash）
+   * - `scope === "context"`：必填（PermissionContextId discriminated union）
    * - `scope === "global"` / `scope === "session"`：字段为 undefined（作用域由 scope
    *   自身承载，无需上下文锚）
    */
-  contextId?: string;
+  contextId?: PermissionContextId;
   /**
    * 上下文工作区绝对路径 —— UI 友好显示用、不参与匹配。
    * - `scope === "context"` + 工作场景：填该场景的 workdir
@@ -247,21 +272,20 @@ export interface PermissionRule {
  * 权限规则存储接口。
  * 负责管理三种作用域的规则集合，提供匹配、创建、查询、撤销等操作。
  *
- * **入参 `contextId` 语义**：调用方的"当前上下文 ID"（永远非 null：主模式 `"main"`、
- * 工作场景 hash），决定 session 池子 key 与 context 池子规则落盘文件。与
- * `PermissionRule.contextId` 是不同语义：后者是规则自身记录的"绑哪个上下文"，
- * 仅当 `rule.scope === "context"` 时填。
+ * **入参 `contextId` 语义**：调用方的"当前上下文 ID"（PermissionContextId 永远非空），
+ * 决定 session 池子 key 与 context 池子规则落盘文件。与 `PermissionRule.contextId`
+ * 是不同语义：后者是规则自身记录的"绑哪个上下文"，仅当 `rule.scope === "context"` 时填。
  */
 export interface IPermissionStore {
   /**
    * 查询匹配的权限规则。
    * 按 deny > allow、精确 > 宽泛 的顺序解决冲突。
-   * @param contextId 调用方的当前上下文 ID（主模式 `"main"` / 工作场景 hash）
+   * @param contextId 调用方的当前上下文 ID
    * @param request 工具调用请求
    * @returns 最匹配的规则，或 null 表示无匹配
    */
   match(
-    contextId: string,
+    contextId: PermissionContextId,
     request: SecurityRequest,
   ): PermissionRule | null;
 
@@ -271,16 +295,16 @@ export interface IPermissionStore {
    * - context 作用域：落盘到当前上下文文件（按入参 contextId 路由）
    * - global 作用域：落盘到全局文件
    */
-  create(contextId: string, rule: PermissionRule): void;
+  create(contextId: PermissionContextId, rule: PermissionRule): void;
 
   /** 列出当前上下文可见的所有规则（session + 该上下文 + global） */
-  list(contextId: string): PermissionRule[];
+  list(contextId: PermissionContextId): PermissionRule[];
 
   /** 撤销某条规则。返回是否找到并撤销。 */
   revoke(ruleId: string): boolean;
 
   /** 清除当前上下文的规则（session + context 作用域，不影响 global） */
-  reset(contextId: string): void;
+  reset(contextId: PermissionContextId): void;
 
   /** 清除全部规则（包括 global 和所有上下文）。不影响 builtin（boot-time 系统配置）。 */
   resetAll(): void;
@@ -535,7 +559,7 @@ export type SecurityEventMap = {
     pattern: { tool: string; argument: string };
     scope: PermissionScope;
     /** 沉淀规则绑哪个上下文（自动沉淀必为 scope=context，contextId 非空） */
-    contextId: string;
+    contextId: PermissionContextId;
     ruleId: string;
     contributors: TrustContribution[];
   };

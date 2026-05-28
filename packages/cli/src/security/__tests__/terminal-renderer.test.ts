@@ -94,7 +94,7 @@ function makeRequest(
       { kind: "deny-with-reason", label: "拒绝", placeholder: "告诉知行哪里错了" },
     ],
     sessionType: "interactive",
-    contextId: "ws-1",
+    contextId: { kind: "workspace", hash: "ws-1" },
     createdAt: now,
     expiresAt: now + 60_000,
     ...opts,

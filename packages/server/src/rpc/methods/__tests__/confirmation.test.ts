@@ -68,7 +68,7 @@ function makeRequest(id: string): ConfirmationRequest {
     },
     options: [],
     sessionType: "interactive",
-    contextId: "main",
+    contextId: { kind: "main" },
     createdAt: now,
     expiresAt: now + 60_000,
   };

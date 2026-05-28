@@ -24,11 +24,59 @@ import * as path from "node:path";
 import { getZhixingHome } from "../paths.js";
 import type {
   IPermissionStore,
+  PermissionContextId,
   PermissionRule,
   PermissionScope,
   SecurityRequest,
   TrustContribution,
 } from "./types.js";
+
+// ─── PermissionContextId ↔ 紧凑 string（Map key + 磁盘文件名） ───
+
+/**
+ * 把 PermissionContextId discriminated union 转为紧凑 string —— 用作 contextRules /
+ * sessionRules 的 Map key、`<rootDir>/<storageKey>.json` 文件名段。
+ *
+ * 格式：
+ *   - `{kind:"main"}`                       → `"main"`
+ *   - `{kind:"workspace",hash}`             → `"workspace-<hash>"`
+ *   - `{kind:"scene",sceneId}`              → `"scene-<sceneId>"`
+ *
+ * 三个 namespace 互不重叠（"main" 4 字符无连字符；workspace hash 是 16 字符 hex；
+ * sceneId 是 slugify 输出仅含字母数字 + 连字符），所以 prefix 反向 parse 不歧义。
+ * 字符集全部跨平台文件名安全（无 `:` / `\` / `<` / `>`）。
+ */
+export function toStorageKey(id: PermissionContextId): string {
+  switch (id.kind) {
+    case "main":
+      return "main";
+    case "workspace":
+      return `workspace-${id.hash}`;
+    case "scene":
+      return `scene-${id.sceneId}`;
+  }
+}
+
+/**
+ * 反序列化紧凑 string 回 PermissionContextId —— 读盘 sanitizeRules 用。
+ *
+ * 未识别 prefix（损坏数据 / 旧 schema 残留）返回 null，由 caller 决定降级策略
+ * （sanitizeRules 风格：整条丢弃）。这避免幽灵 contextId 串入 Map。
+ */
+export function parseStorageKey(stored: string): PermissionContextId | null {
+  if (stored === "main") return { kind: "main" };
+  if (stored.startsWith("workspace-")) {
+    const hash = stored.slice("workspace-".length);
+    if (!hash) return null;
+    return { kind: "workspace", hash };
+  }
+  if (stored.startsWith("scene-")) {
+    const sceneId = stored.slice("scene-".length);
+    if (!sceneId) return null;
+    return { kind: "scene", sceneId };
+  }
+  return null;
+}
 
 // ─── Glob 匹配 ───
 
@@ -148,6 +196,7 @@ function cloneRule(rule: PermissionRule): PermissionRule {
   return {
     ...rule,
     pattern: { ...rule.pattern },
+    contextId: rule.contextId ? { ...rule.contextId } : undefined,
     contributors: rule.contributors
       ? rule.contributors.map((c) => ({ ...c }))
       : undefined,
@@ -177,6 +226,37 @@ function sanitizeContributors(
     out.push({ origin: c.origin, timestamp: c.timestamp });
   }
   return out;
+}
+
+/**
+ * 把 unknown 反序列化为合法的 PermissionContextId discriminated union。
+ *
+ * 不合法（非 object / kind 不在白名单 / payload 字段类型错）返回 undefined。
+ * sanitizeRules 调用此函数恢复 `PermissionRule.contextId` —— magic prefix string
+ * （旧 schema 残留如裸 `"main"` 字符串）一律识别失败，整条 rule 不丢但 contextId
+ * 字段变 undefined（与设计"未识别 prefix 整条丢弃 contextId"对齐）。
+ */
+function sanitizePermissionContextId(
+  raw: unknown,
+): PermissionContextId | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const c = raw as Partial<PermissionContextId> & { kind?: unknown };
+  switch (c.kind) {
+    case "main":
+      return { kind: "main" };
+    case "workspace": {
+      const hash = (c as { hash?: unknown }).hash;
+      if (typeof hash !== "string" || !hash) return undefined;
+      return { kind: "workspace", hash };
+    }
+    case "scene": {
+      const sceneId = (c as { sceneId?: unknown }).sceneId;
+      if (typeof sceneId !== "string" || !sceneId) return undefined;
+      return { kind: "scene", sceneId };
+    }
+    default:
+      return undefined;
+  }
 }
 
 /**
@@ -212,10 +292,21 @@ export function defaultExtractArgument(request: SecurityRequest): string {
   return "";
 }
 
+/**
+ * 磁盘 JSON 文件 schema。
+ *
+ * `contextStorageKey` 字段是 `toStorageKey(contextId)` 输出（紧凑 string，如
+ * `"main"` / `"workspace-<hash>"` / `"scene-<sceneId>"`），仅供人工 inspect 磁盘
+ * 文件时知道这是哪个上下文 —— 不参与运行时匹配（运行时上下文身份由文件名决定）。
+ *
+ * `PermissionRule.contextId` 字段在 JSON 中是 discriminated union object（`{kind,
+ * ...}`）——JSON 序列化 / 反序列化天然支持 object round-trip，sanitizeRules 校验
+ * shape 合法。
+ */
 interface StorageFile {
   version: number;
   scope?: "global";
-  contextId?: string;
+  contextStorageKey?: string;
   contextPath?: string;
   rules: PermissionRule[];
 }
@@ -260,9 +351,10 @@ export class PermissionStore implements IPermissionStore {
   // ─── 公共 API ───
 
   match(
-    contextId: string,
+    contextId: PermissionContextId,
     request: SecurityRequest,
   ): PermissionRule | null {
+    const storageKey = toStorageKey(contextId);
     const tool = request.tool.toLowerCase();
     const argument = this.extractArgumentFn(request);
 
@@ -272,15 +364,15 @@ export class PermissionStore implements IPermissionStore {
     // allow 击败，与"用户拥有最终决定权"的产品语义一致。
     const userCandidates: PermissionRule[] = [];
 
-    const sessionList = this.sessionRules.get(this.sessionKey(contextId));
+    const sessionList = this.sessionRules.get(storageKey);
     if (sessionList) {
       for (const rule of sessionList) {
         if (this.ruleMatches(rule, tool, argument)) userCandidates.push(rule);
       }
     }
 
-    this.ensureContextLoaded(contextId);
-    const ctxList = this.contextRules.get(contextId);
+    this.ensureContextLoaded(storageKey);
+    const ctxList = this.contextRules.get(storageKey);
     if (ctxList) {
       for (const rule of ctxList) {
         if (this.ruleMatches(rule, tool, argument)) userCandidates.push(rule);
@@ -320,21 +412,21 @@ export class PermissionStore implements IPermissionStore {
     return null;
   }
 
-  create(contextId: string, rule: PermissionRule): void {
+  create(contextId: PermissionContextId, rule: PermissionRule): void {
+    const storageKey = toStorageKey(contextId);
     switch (rule.scope) {
       case "session": {
-        const key = this.sessionKey(contextId);
-        const list = this.sessionRules.get(key) ?? [];
+        const list = this.sessionRules.get(storageKey) ?? [];
         list.push(rule);
-        this.sessionRules.set(key, list);
+        this.sessionRules.set(storageKey, list);
         return;
       }
       case "context": {
-        this.ensureContextLoaded(contextId);
-        const list = this.contextRules.get(contextId) ?? [];
+        this.ensureContextLoaded(storageKey);
+        const list = this.contextRules.get(storageKey) ?? [];
         list.push(rule);
-        this.contextRules.set(contextId, list);
-        this.persistContext(contextId);
+        this.contextRules.set(storageKey, list);
+        this.persistContext(storageKey);
         return;
       }
       case "global": {
@@ -351,13 +443,14 @@ export class PermissionStore implements IPermissionStore {
     }
   }
 
-  list(contextId: string): PermissionRule[] {
+  list(contextId: PermissionContextId): PermissionRule[] {
+    const storageKey = toStorageKey(contextId);
     const result: PermissionRule[] = [];
-    const sessionList = this.sessionRules.get(this.sessionKey(contextId));
+    const sessionList = this.sessionRules.get(storageKey);
     if (sessionList) result.push(...sessionList);
 
-    this.ensureContextLoaded(contextId);
-    const ctxList = this.contextRules.get(contextId);
+    this.ensureContextLoaded(storageKey);
+    const ctxList = this.contextRules.get(storageKey);
     if (ctxList) result.push(...ctxList);
 
     this.ensureGlobalLoaded();
@@ -375,12 +468,12 @@ export class PermissionStore implements IPermissionStore {
         return true;
       }
     }
-    // 上下文
-    for (const [ctxId, rules] of this.contextRules) {
+    // 上下文：storageKey 直接复用作 persistContext 入参
+    for (const [storageKey, rules] of this.contextRules) {
       const idx = rules.findIndex((r) => r.id === ruleId);
       if (idx !== -1) {
         rules.splice(idx, 1);
-        this.persistContext(ctxId);
+        this.persistContext(storageKey);
         return true;
       }
     }
@@ -395,10 +488,11 @@ export class PermissionStore implements IPermissionStore {
     return false;
   }
 
-  reset(contextId: string): void {
-    this.sessionRules.delete(this.sessionKey(contextId));
-    this.contextRules.set(contextId, []);
-    this.persistContext(contextId);
+  reset(contextId: PermissionContextId): void {
+    const storageKey = toStorageKey(contextId);
+    this.sessionRules.delete(storageKey);
+    this.contextRules.set(storageKey, []);
+    this.persistContext(storageKey);
   }
 
   resetAll(): void {
@@ -505,12 +599,14 @@ export class PermissionStore implements IPermissionStore {
   // ─── 静态辅助 ───
 
   /**
-   * 根据工作区绝对路径生成稳定的上下文 ID hash（SHA-256 前 16 字符）。
+   * 根据工作区绝对路径生成稳定的 hash（SHA-256 前 16 字符），作为
+   * `PermissionContextId{kind:"workspace"}` 的 `hash` payload。
    * Windows 平台规范化为小写以吸收大小写差异。
    *
-   * 仅工作场景上下文用此 hash；主模式上下文 ID 固定为 `"main"`，不经此函数。
+   * 仅 workspace 信任上下文用此 hash；主模式与 scene 信任有独立 payload，
+   * 不经此函数。
    */
-  static contextIdFromPath(workspacePath: string): string {
+  static workspaceHashFromPath(workspacePath: string): string {
     const abs = path.resolve(workspacePath);
     const normalized = process.platform === "win32" ? abs.toLowerCase() : abs;
     return crypto
@@ -524,10 +620,11 @@ export class PermissionStore implements IPermissionStore {
    * 构造一条权限规则，自动填充 id / createdAt / 统计字段。
    *
    * 字段语义：
-   * - `contextId`：仅 `scope === "context"` 时填（主模式 `"main"` / 工作场景 hash），
-   *   决定规则挂载到哪个上下文文件
-   * - `contextPath`：仅 `scope === "context"` 且为工作场景时填该场景的 workdir，
-   *   UI 友好显示用、不参与匹配
+   * - `contextId`：仅 `scope === "context"` 时填，是 PermissionContextId
+   *   discriminated union（`{kind:"main"}` / `{kind:"workspace",hash}` /
+   *   `{kind:"scene",sceneId}`），决定规则挂载到哪个上下文
+   * - `contextPath`：仅 `scope === "context"` 且为工作场景（kind=workspace）时填该
+   *   场景的 workdir，UI 友好显示用、不参与匹配
    * - `contributors`：信任来源累积时间线；自动沉淀路径拷贝 tracker 累积数组，
    *   用户显式选 allow-context/allow-global 时为单条 `[{origin:"user", timestamp:now}]`
    */
@@ -589,11 +686,12 @@ export class PermissionStore implements IPermissionStore {
     return best;
   }
 
-  private sessionKey(contextId: string): string {
-    return contextId;
-  }
-
   // ─── 内部：持久化 ───
+  //
+  // 公共 API 接受 `PermissionContextId`（discriminated union）；私有 helper 全部
+  // 接受 `storageKey: string`（即 `toStorageKey(contextId)` 输出）。两层签名让
+  // 文件名 / Map key / 锁等"物理路径段"细节集中在私有层；公共 API 永远只对
+  // discriminated union 表态，namespace 隔离由类型系统强制。
 
   private ensureGlobalLoaded(): void {
     if (this.globalLoaded) return;
@@ -613,23 +711,23 @@ export class PermissionStore implements IPermissionStore {
     }
   }
 
-  private ensureContextLoaded(contextId: string): void {
-    if (this.loadedContexts.has(contextId)) return;
-    this.loadedContexts.add(contextId);
+  private ensureContextLoaded(storageKey: string): void {
+    if (this.loadedContexts.has(storageKey)) return;
+    this.loadedContexts.add(storageKey);
 
     if (!this.rootDir) return;
-    const file = path.join(this.rootDir, `${contextId}.json`);
+    const file = path.join(this.rootDir, `${storageKey}.json`);
     if (!fs.existsSync(file)) return;
 
     try {
       const raw = fs.readFileSync(file, "utf-8");
       const data = JSON.parse(raw) as StorageFile;
       this.contextRules.set(
-        contextId,
+        storageKey,
         this.sanitizeRules(data.rules ?? [], "context"),
       );
     } catch {
-      this.contextRules.set(contextId, []);
+      this.contextRules.set(storageKey, []);
     }
   }
 
@@ -676,7 +774,7 @@ export class PermissionStore implements IPermissionStore {
         lastMatchedAt:
           typeof r.lastMatchedAt === "number" ? r.lastMatchedAt : 0,
         matchCount: typeof r.matchCount === "number" ? r.matchCount : 0,
-        contextId: typeof r.contextId === "string" ? r.contextId : undefined,
+        contextId: sanitizePermissionContextId(r.contextId),
         contextPath:
           typeof r.contextPath === "string" ? r.contextPath : undefined,
         contributors: sanitizeContributors(r.contributors),
@@ -685,16 +783,16 @@ export class PermissionStore implements IPermissionStore {
     return out;
   }
 
-  private persistContext(contextId: string): void {
+  private persistContext(storageKey: string): void {
     if (!this.rootDir) return;
     this.ensureDir();
-    const file = path.join(this.rootDir, `${contextId}.json`);
-    const rules = this.contextRules.get(contextId) ?? [];
+    const file = path.join(this.rootDir, `${storageKey}.json`);
+    const rules = this.contextRules.get(storageKey) ?? [];
     // contextPath 取首条规则的字段值（同一上下文内所有规则的 contextPath 应一致，
     // 取首条即代表）；主模式或无 path 上下文为 undefined
     const data: StorageFile = {
       version: STORAGE_VERSION,
-      contextId,
+      contextStorageKey: storageKey,
       contextPath: rules.find((r) => r.contextPath)?.contextPath,
       rules,
     };

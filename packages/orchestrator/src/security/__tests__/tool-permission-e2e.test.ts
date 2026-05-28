@@ -261,11 +261,12 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
   });
 
   // 决策 6 核心安全 invariant：主模式自动沉淀**只**产生本上下文规则（scope=context +
-  // contextId="main"），**绝不**建 scope=global 规则。这从根本上消除"主模式不知不觉
-  // 积出全局规则"的安全风险——global 规则只允许用户在 confirm 弹窗显式选 allow-global
-  // 时建立。任何让 maybePersistTrust 重新走 scope=global 分支的回归（例如把
-  // hard-coded `scope: "context"` 改回旧的三元 contextId-based 分支）都会在此处失败。
-  it("主模式自动沉淀 → scope=context + contextId='main'，不创建 global 规则", async () => {
+  // contextId={kind:"main"}），**绝不**建 scope=global 规则。这从根本上消除"主模式
+  // 不知不觉积出全局规则"的安全风险——global 规则只允许用户在 confirm 弹窗显式选
+  // allow-global 时建立。任何让 maybePersistTrust 重新走 scope=global 分支的回归
+  // （例如把 hard-coded `scope: "context"` 改回旧的三元 contextId-based 分支）都会
+  // 在此处失败。
+  it("主模式自动沉淀 → scope=context + contextId={kind:'main'}，不创建 global 规则", async () => {
     const store = new PermissionStore({ rootDir: null });
     const pipeline = new SecurityPipeline({
       trustContext: { kind: "global" },
@@ -291,16 +292,16 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
         await wrapped(bashTool, { command }, makeContext());
       }
 
-      // 主模式 contextId 固定 "main"
-      expect(pipeline.getContextId()).toBe("main");
+      // 主模式 contextId = {kind:"main"} discriminated union
+      expect(pipeline.getContextId()).toEqual({ kind: "main" });
 
-      const all = store.list("main");
+      const all = store.list({ kind: "main" });
       const ctxRules = all.filter((r) => r.scope === "context");
       const globalRules = all.filter((r) => r.scope === "global");
 
-      // 沉淀产 1 条 scope=context + contextId=main 的规则
+      // 沉淀产 1 条 scope=context + contextId={kind:"main"} 的规则
       expect(ctxRules).toHaveLength(1);
-      expect(ctxRules[0]!.contextId).toBe("main");
+      expect(ctxRules[0]!.contextId).toEqual({ kind: "main" });
       expect(ctxRules[0]!.pattern.argument).toBe("curl *");
 
       // 关键反向断言：绝不产生 global 规则

@@ -13,8 +13,14 @@
  *   上层根据 decision 决定执行 / 拒绝 / 编辑后执行
  */
 
-import type { OperationClass, RiskLevel, SecurityDecision, SessionType } from "../security/types.js";
-import type { PermissionRule } from "../security/types.js";
+import type {
+  OperationClass,
+  PermissionContextId,
+  PermissionRule,
+  RiskLevel,
+  SecurityDecision,
+  SessionType,
+} from "../security/types.js";
 import type { SuggestedPattern } from "../security/confirmation-tracker.js";
 import type { TurnOrigin } from "../types/tools.js";
 
@@ -164,11 +170,11 @@ export interface ConfirmationRequest {
   // ── 会话上下文 ──
   sessionType: SessionType;
   /**
-   * 当前上下文 ID（主模式 `"main"` / 工作场景 hash，永远非空）—— 用于：
+   * 当前上下文 ID（PermissionContextId discriminated union，永远非空）—— 用于：
    * - broker / bridge 推送时让客户端知道是哪个上下文的请求
-   * - 用户选 allow-context 时 secure-executor 把规则落到对应上下文文件
+   * - 用户选 allow-context 时 secure-executor 把规则落到对应上下文
    */
-  contextId: string;
+  contextId: PermissionContextId;
 
   // ── 时间约束 ──
   /** 创建时间戳（ms） */

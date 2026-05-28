@@ -18,6 +18,7 @@
 
 import type {
   IPermissionStore,
+  PermissionContextId,
   SecurityDecision,
   SecurityMiddleware,
   SecurityMiddlewareContext,
@@ -31,8 +32,8 @@ export class PermissionMatcherMiddleware implements SecurityMiddleware {
 
   constructor(
     private readonly store: IPermissionStore,
-    /** 返回当前信任上下文 ID 的 getter（主模式 `"main"` / 工作场景 hash，永远非空）。 */
-    private readonly getContextId: () => string,
+    /** 返回当前信任上下文 ID 的 getter（PermissionContextId discriminated union，永远非空）。 */
+    private readonly getContextId: () => PermissionContextId,
   ) {}
 
   async execute(

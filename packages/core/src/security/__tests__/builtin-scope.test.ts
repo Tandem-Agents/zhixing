@@ -21,9 +21,16 @@ import { beforeEach, describe, expect, it } from "vitest";
 
 import { createTempDir } from "@zhixing/test-utils";
 import { PermissionStore } from "../permission-store.js";
-import type { PermissionRule, SecurityRequest } from "../types.js";
+import type {
+  PermissionContextId,
+  PermissionRule,
+  SecurityRequest,
+} from "../types.js";
 
 // ─── 测试辅助 ───
+
+/** 主模式上下文 ID —— 测试用 fixture，避免在每个调用点重复构造 union。 */
+const MAIN: PermissionContextId = { kind: "main" };
 
 function makeRequest(
   tool: string,
@@ -51,7 +58,7 @@ function makeRule(
     createdAt: overrides.createdAt ?? 1000,
     lastMatchedAt: overrides.lastMatchedAt ?? 0,
     matchCount: overrides.matchCount ?? 0,
-    workspace: overrides.workspace,
+    contextId: overrides.contextId,
   };
 }
 
@@ -78,7 +85,7 @@ describe("PermissionStore builtin scope", () => {
       ]);
 
       const result = store.match(
-        null,
+        MAIN,
         makeRequest("web_fetch", { url: "https://docs.npmjs.com/cli" }),
       );
       expect(result?.decision).toBe("allow");
@@ -91,7 +98,7 @@ describe("PermissionStore builtin scope", () => {
         makeBuiltinRule({ tool: "web_fetch", argument: "*" }, "deny"),
       ]);
       store.create(
-        null,
+        MAIN,
         makeRule({
           pattern: { tool: "web_fetch", argument: "https://example.com/*" },
           decision: "allow",
@@ -100,7 +107,7 @@ describe("PermissionStore builtin scope", () => {
       );
 
       const result = store.match(
-        null,
+        MAIN,
         makeRequest("web_fetch", { url: "https://example.com/foo" }),
       );
       expect(result?.decision).toBe("allow");
@@ -117,7 +124,7 @@ describe("PermissionStore builtin scope", () => {
         }),
       ]);
       store.create(
-        null,
+        MAIN,
         makeRule({
           pattern: { tool: "web_fetch", argument: "*" },
           decision: "deny",
@@ -126,7 +133,7 @@ describe("PermissionStore builtin scope", () => {
       );
 
       const result = store.match(
-        null,
+        MAIN,
         makeRequest("web_fetch", { url: "https://docs.npmjs.com/cli" }),
       );
       expect(result?.decision).toBe("deny");
@@ -142,7 +149,7 @@ describe("PermissionStore builtin scope", () => {
         }),
       ]);
       store.create(
-        null,
+        MAIN,
         makeRule({
           pattern: { tool: "bash", argument: "npm install *" },
           decision: "allow",
@@ -151,7 +158,7 @@ describe("PermissionStore builtin scope", () => {
       );
 
       const result = store.match(
-        null,
+        MAIN,
         makeRequest("web_fetch", { url: "https://npmjs.com/foo" }),
       );
       expect(result?.decision).toBe("allow");
@@ -166,7 +173,7 @@ describe("PermissionStore builtin scope", () => {
 
       expect(
         store.match(
-          null,
+          MAIN,
           makeRequest("web_fetch", { url: "https://b.com/foo" }),
         ),
       ).toBeNull();
@@ -180,7 +187,7 @@ describe("PermissionStore builtin scope", () => {
       ]);
 
       const result = store.match(
-        null,
+        MAIN,
         makeRequest("bash", { command: "npm install foo" }),
       );
       expect(result?.decision).toBe("deny");
@@ -198,7 +205,7 @@ describe("PermissionStore builtin scope", () => {
         makeBuiltinRule({ tool: "x", argument: "*" }, "deny"),
       ]);
 
-      const result = store.match(null, makeRequest("x", { foo: "bar" }));
+      const result = store.match(MAIN, makeRequest("x", { foo: "bar" }));
       expect(result?.decision).toBe("deny");
     });
 
@@ -220,7 +227,7 @@ describe("PermissionStore builtin scope", () => {
       ]);
 
       const result = store.match(
-        null,
+        MAIN,
         makeRequest("bash", { command: "npm install foo" }),
       );
       // 特异性更高的 "npm install *" 胜出（即便在不同 namespace）
@@ -238,7 +245,7 @@ describe("PermissionStore builtin scope", () => {
       ]);
 
       const r1 = store.match(
-        null,
+        MAIN,
         makeRequest("web_fetch", { url: "https://a.com" }),
       );
       expect(r1?.matchCount).toBe(1);
@@ -246,7 +253,7 @@ describe("PermissionStore builtin scope", () => {
 
       nowValue = 67890;
       const r2 = store.match(
-        null,
+        MAIN,
         makeRequest("web_fetch", { url: "https://b.com" }),
       );
       expect(r2?.matchCount).toBe(2);
@@ -268,10 +275,10 @@ describe("PermissionStore builtin scope", () => {
 
       // 两个 namespace 都生效（不互相覆盖）
       expect(
-        store.match(null, makeRequest("web_fetch", { url: "x" }))?.decision,
+        store.match(MAIN, makeRequest("web_fetch", { url: "x" }))?.decision,
       ).toBe("allow");
       expect(
-        store.match(null, makeRequest("task", { name: "x" }))?.decision,
+        store.match(MAIN, makeRequest("task", { name: "x" }))?.decision,
       ).toBe("allow");
     });
 
@@ -289,13 +296,13 @@ describe("PermissionStore builtin scope", () => {
         makeBuiltinRule({ tool: "tool_a_new", argument: "*" }),
       ]);
 
-      expect(store.match(null, makeRequest("tool_a", { x: "y" }))).toBeNull();
+      expect(store.match(MAIN, makeRequest("tool_a", { x: "y" }))).toBeNull();
       expect(
-        store.match(null, makeRequest("tool_a_new", { x: "y" }))?.decision,
+        store.match(MAIN, makeRequest("tool_a_new", { x: "y" }))?.decision,
       ).toBe("allow");
       // namespace "b" 不受影响
       expect(
-        store.match(null, makeRequest("tool_b", { x: "y" }))?.decision,
+        store.match(MAIN, makeRequest("tool_b", { x: "y" }))?.decision,
       ).toBe("allow");
     });
 
@@ -312,7 +319,7 @@ describe("PermissionStore builtin scope", () => {
       // 原注册保持不变（throw 不改 store 状态）
       expect(store.listBuiltinNamespaces()).toContain("web_fetch");
       expect(
-        store.match(null, makeRequest("web_fetch", { url: "x" }))?.decision,
+        store.match(MAIN, makeRequest("web_fetch", { url: "x" }))?.decision,
       ).toBe("allow");
     });
 
@@ -355,7 +362,7 @@ describe("PermissionStore builtin scope", () => {
       original.pattern.argument = "MUTATED"; // 模拟外部修改
 
       // store 内部规则不受影响
-      const result = store.match(null, makeRequest("x", { foo: "bar" }));
+      const result = store.match(MAIN, makeRequest("x", { foo: "bar" }));
       expect(result?.decision).toBe("allow");
       expect(result?.pattern.argument).toBe("*");
     });
@@ -373,7 +380,7 @@ describe("PermissionStore builtin scope", () => {
       store.resetAll();
 
       // builtin 规则仍生效
-      const result = store.match(null, makeRequest("web_fetch", { url: "x" }));
+      const result = store.match(MAIN, makeRequest("web_fetch", { url: "x" }));
       expect(result?.decision).toBe("allow");
       expect(result?.scope).toBe("builtin");
       expect(store.listBuiltinNamespaces()).toContain("test");
@@ -382,7 +389,7 @@ describe("PermissionStore builtin scope", () => {
     it("resetAll 仍清除 user 池（session/workspace/global）", () => {
       const store = new PermissionStore({ rootDir: null });
       store.create(
-        null,
+        MAIN,
         makeRule({
           pattern: { tool: "x", argument: "*" },
           decision: "allow",
@@ -391,7 +398,7 @@ describe("PermissionStore builtin scope", () => {
       );
 
       store.resetAll();
-      expect(store.match(null, makeRequest("x", { foo: "y" }))).toBeNull();
+      expect(store.match(MAIN, makeRequest("x", { foo: "y" }))).toBeNull();
     });
 
     it("测试隔离推荐：每 test 创建新 store 实例（resetAll 不再保证完全隔离）", () => {
@@ -403,7 +410,7 @@ describe("PermissionStore builtin scope", () => {
 
       const store2 = new PermissionStore({ rootDir: null });
       // store2 是新实例，不受 store1 的 builtin 影响
-      expect(store2.match(null, makeRequest("x", { foo: "y" }))).toBeNull();
+      expect(store2.match(MAIN, makeRequest("x", { foo: "y" }))).toBeNull();
       expect(store2.listBuiltinNamespaces()).toEqual([]);
     });
   });
@@ -415,7 +422,7 @@ describe("PermissionStore builtin scope", () => {
       const store = new PermissionStore({ rootDir: null });
       expect(() =>
         store.create(
-          null,
+          MAIN,
           makeRule({
             pattern: { tool: "web_fetch", argument: "*" },
             decision: "allow",
@@ -507,7 +514,7 @@ describe("PermissionStore builtin scope", () => {
       const store = new PermissionStore({ rootDir: tmpDir });
 
       const allowMatch = store.match(
-        null,
+        MAIN,
         makeRequest("bash", { command: "npm install lodash" }),
       );
       expect(allowMatch?.decision).toBe("allow");
@@ -515,7 +522,7 @@ describe("PermissionStore builtin scope", () => {
       expect(allowMatch?.id).toBe("rule-1");
 
       const denyMatch = store.match(
-        null,
+        MAIN,
         makeRequest("bash", { command: "rm -rf /" }),
       );
       expect(denyMatch?.decision).toBe("deny");
@@ -556,12 +563,12 @@ describe("PermissionStore builtin scope", () => {
 
       // 正常 global 规则被加载
       expect(
-        store.match(null, makeRequest("bash", { command: "ls -la" }))?.id,
+        store.match(MAIN, makeRequest("bash", { command: "ls -la" }))?.id,
       ).toBe("rule-good");
 
       // 磁盘上的 builtin 规则被拒绝——既不进 builtin 池也不进其他池
       expect(
-        store.match(null, makeRequest("web_fetch", { url: "https://x.com" })),
+        store.match(MAIN, makeRequest("web_fetch", { url: "https://x.com" })),
       ).toBeNull();
       expect(store.listBuiltinNamespaces()).toEqual([]);
     });

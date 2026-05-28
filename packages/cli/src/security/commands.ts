@@ -13,6 +13,7 @@ import * as readline from "node:readline/promises";
 import chalk from "chalk";
 import { getAgentIdentity } from "@zhixing/core";
 import type {
+  PermissionContextId,
   PermissionRule,
   SecurityPipeline,
   SecurityRule,
@@ -26,18 +27,55 @@ import { padEndDisplay } from "../tui/line-width.js";
 /**
  * 按 scope + contextId 渲染"生效范围"中文标签 —— /trust 面板列表与详情共用。
  *
- * 上下文平等：主模式与工作场景在权限层都是"上下文"，差别仅在 contextId 取值。
- * contextId === "main" → 主模式上下文；contextId === 工作场景 hash → 工作场景上下文；
- * scope=global → 跨所有上下文。
+ * 上下文平等：主模式与工作场景在权限层都是"上下文"，由 contextId.kind discriminator
+ * 区分。scope=global 跨所有上下文，独立于 contextId。
+ *
+ * 按 kind switch exhaustive —— 未来加新 kind 时 TypeScript 强制 highlight 此处，
+ * 避免 substring 反推 kind 的反模式。
  */
 function formatScope(rule: PermissionRule): string {
   if (rule.scope === "global") return chalk.magenta("全局");
   if (rule.scope === "session") return chalk.gray("本次会话");
   if (rule.scope === "context") {
-    if (rule.contextId === "main") return chalk.cyan("主模式");
-    return chalk.cyan("当前工作场景");
+    return chalk.cyan(formatContextKindLabel(rule.contextId));
   }
   return chalk.dim("builtin");
+}
+
+/**
+ * PermissionContextId.kind → 中文标签 —— /trust 面板 / /security 概览 / 沉淀提示
+ * 共享同一术语规约。`{kind:"main"}` 显示「主模式」，workspace / scene 统一显示
+ * 「当前工作场景」（向用户呈现统一术语；底层 kind 由 type system 严守隔离）。
+ *
+ * contextId 缺失（异常状态：context 规则丢了 contextId 字段）显示占位符。
+ */
+function formatContextKindLabel(
+  contextId: PermissionContextId | undefined,
+): string {
+  if (!contextId) return "(unknown context)";
+  switch (contextId.kind) {
+    case "main":
+      return "主模式";
+    case "workspace":
+    case "scene":
+      return "当前工作场景";
+  }
+}
+
+/**
+ * PermissionContextId → 内联 inspect 字符串（供 /security contextId 行展示）。
+ * 与 toStorageKey 的格式约定一致，但属于 CLI 展示层独立函数（不耦合 permission
+ * 模块的物理路径 API）。
+ */
+function formatContextIdInline(contextId: PermissionContextId): string {
+  switch (contextId.kind) {
+    case "main":
+      return "main";
+    case "workspace":
+      return `workspace-${contextId.hash}`;
+    case "scene":
+      return `scene-${contextId.sceneId}`;
+  }
 }
 
 /**
@@ -162,7 +200,7 @@ export async function handleTrustCommand(
 
     if (rules.length === 0) {
       writer.line("");
-      const ctxLabel = contextId === "main" ? "主模式" : "当前工作场景";
+      const ctxLabel = formatContextKindLabel(contextId);
       writer.line(chalk.dim(`  ${ctxLabel} 与全局都没有建立信任规则`));
       const { displayName } = getAgentIdentity();
       writer.line(
@@ -278,7 +316,8 @@ function showSecurityOverview(opts: SecurityOptions): void {
   const rateSnapshot = guard.getRateLimiter().snapshot();
   const trackerSnapshot = tracker.snapshot();
 
-  const ctxLabel = contextId === "main" ? "主模式" : "工作场景";
+  const ctxLabel = formatContextKindLabel(contextId);
+  const ctxIdDisplay = formatContextIdInline(contextId);
 
   writer.line("");
   writer.line(chalk.bold("╭─ 安全状态 ─────────────────────────────"));
@@ -287,7 +326,7 @@ function showSecurityOverview(opts: SecurityOptions): void {
     `${chalk.bold("│")} ${chalk.dim("上下文：")}    ${chalk.cyan(ctxLabel)}` +
       (workspacePath ? `  ${chalk.dim(workspacePath)}` : ""),
   );
-  writer.line(`${chalk.bold("│")} ${chalk.dim("contextId：")} ${chalk.dim(contextId)}`);
+  writer.line(`${chalk.bold("│")} ${chalk.dim("contextId：")} ${chalk.dim(ctxIdDisplay)}`);
   writer.line(chalk.bold("│"));
   writer.line(`${chalk.bold("│")} ${chalk.bold("── 策略规则 ──")}`);
   writer.line(

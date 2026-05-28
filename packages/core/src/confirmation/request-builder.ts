@@ -29,6 +29,7 @@ import { suggestPatterns } from "../security/confirmation-tracker.js";
 import type { SuggestedPattern } from "../security/confirmation-tracker.js";
 import type {
   OperationClass,
+  PermissionContextId,
   SecurityDecision,
   SecurityMiddlewareResult,
   SecurityRequest,
@@ -192,14 +193,16 @@ function pickPersistentPattern(
  * 且实现是 in-memory，与对话 session 不挂钩。类型定义保留（type 系统支持），
  * 由 broker / renderer / secure-executor 兼容处理。
  *
- * **主模式 vs 工作场景的差异仅在 allow-context label 动态文案**：
- *   - contextId === "main"：「始终允许（仅主模式生效）」
- *   - contextId !== "main"（工作场景 hash）：「始终允许（本工作场景生效）」
+ * **主模式 vs 工作场景的差异仅在 allow-context label 动态文案**——按 contextId.kind
+ * switch exhaustive（不靠 substring 反推 kind，未来加新 kind 时 TypeScript 强制
+ * 把这里 highlight 出来）：
+ *   - `{kind:"main"}` → 「仅主模式生效」
+ *   - `{kind:"workspace"|"scene"}` → 「本工作场景生效」
  */
 export function buildConfirmationOptions(
   toolName: string,
   input: Record<string, unknown>,
-  contextId: string,
+  contextId: PermissionContextId,
   sessionType: SessionType,
   flags?: { bypassImmune?: boolean },
 ): ConfirmationOption[] {
@@ -220,19 +223,17 @@ export function buildConfirmationOptions(
 
   // 2-3. 持久授权选项（bypassImmune 时跳过 —— 禁区永不沉淀）
   if (persistentPattern && !flags?.bypassImmune) {
-    const contextLabel =
-      contextId === "main"
-        ? `始终允许 "${persistentPattern.pattern.argument}"（仅主模式生效）`
-        : `始终允许 "${persistentPattern.pattern.argument}"（本工作场景生效）`;
+    const arg = persistentPattern.pattern.argument;
+    const contextScopeLabel = formatContextScopeLabel(contextId);
     options.push({
       kind: "allow-context",
-      label: contextLabel,
+      label: `始终允许 "${arg}"（${contextScopeLabel}）`,
       pattern: persistentPattern,
       hotkey: "a",
     });
     options.push({
       kind: "allow-global",
-      label: `始终允许 "${persistentPattern.pattern.argument}"（全局，所有场景生效）`,
+      label: `始终允许 "${arg}"（全局，所有场景生效）`,
       pattern: persistentPattern,
       hotkey: "g",
     });
@@ -249,6 +250,21 @@ export function buildConfirmationOptions(
   return options;
 }
 
+/**
+ * allow-context label 的"作用范围"文案 —— 按 contextId.kind exhaustive 分支。
+ * 主模式标为「仅主模式生效」；workspace / scene 都属于"工作场景"，对用户呈现
+ * 统一术语。未来若要 UX 上区分 workspace 与 scene，仅需在此处分两支。
+ */
+function formatContextScopeLabel(contextId: PermissionContextId): string {
+  switch (contextId.kind) {
+    case "main":
+      return "仅主模式生效";
+    case "workspace":
+    case "scene":
+      return "本工作场景生效";
+  }
+}
+
 // ─── 主构造器 ───
 
 export interface BuildConfirmationRequestParams {
@@ -256,8 +272,8 @@ export interface BuildConfirmationRequestParams {
   input: Record<string, unknown>;
   workingDirectory: string;
   result: SecurityMiddlewareResult;
-  /** 当前上下文 ID（主模式 `"main"` / 工作场景 hash） */
-  contextId: string;
+  /** 当前上下文 ID（PermissionContextId discriminated union） */
+  contextId: PermissionContextId;
   sessionType: SessionType;
   /** 可选覆盖 id（测试用） */
   id?: string;

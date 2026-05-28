@@ -43,6 +43,7 @@ import type {
   IPermissionStore,
   OperationClass,
   OperationClassifier,
+  PermissionContextId,
   SecurityDecision,
   SecurityMiddleware,
   SecurityMiddlewareContext,
@@ -211,21 +212,29 @@ export interface SecurityPipelineOptions {
  *   else execute();
  */
 /**
- * 从信任上下文派生 PermissionStore 的上下文 ID：
- * - workspace 信任：工作目录的稳定 hash
- * - scene 信任：sceneId
- * - global 信任（主模式）：固定常量 `"main"` —— 主模式与工作场景在权限层平等都是
- *   "上下文"，自动沉淀流程仅产生本上下文规则；全局规则只在用户 confirm 显式选
- *   allow-global 时建立，从根本上消除"主模式不知不觉建全局规则"的安全风险
+ * 从信任上下文派生 PermissionContextId discriminated union。
+ *
+ * 三种信任 → 三种 contextId kind，每种 kind 自带独立 payload namespace（不存在
+ * 字符串撞车的可能）：
+ * - workspace 信任 → `{kind:"workspace", hash}`（工作目录的稳定 hash）
+ * - scene 信任 → `{kind:"scene", sceneId}`（workscene registry 注册名）
+ * - global 信任（主模式）→ `{kind:"main"}`（全局唯一、无 payload）
+ *
+ * 主模式与工作场景在权限层平等都是"上下文"，自动沉淀流程仅产生本上下文规则；
+ * 全局规则只在用户 confirm 显式选 allow-global 时建立，从根本上消除"主模式不
+ * 知不觉建全局规则"的安全风险。
  */
-function deriveContextId(trust: TrustContext): string {
+function deriveContextId(trust: TrustContext): PermissionContextId {
   switch (trust.kind) {
     case "workspace":
-      return PermissionStore.contextIdFromPath(trust.dir);
+      return {
+        kind: "workspace",
+        hash: PermissionStore.workspaceHashFromPath(trust.dir),
+      };
     case "scene":
-      return trust.sceneId;
+      return { kind: "scene", sceneId: trust.sceneId };
     case "global":
-      return "main";
+      return { kind: "main" };
   }
 }
 
@@ -238,7 +247,7 @@ export class SecurityPipeline {
   private readonly executionGuard: ExecutionGuardMiddleware;
   private readonly sessionType: SessionType;
   private readonly trustContext: TrustContext;
-  private readonly contextId: string;
+  private readonly contextId: PermissionContextId;
 
   constructor(options: SecurityPipelineOptions = {}) {
     this.policyEngine = new PolicyEngine();
@@ -341,14 +350,12 @@ export class SecurityPipeline {
   }
 
   /**
-   * 获取当前信任上下文的 ID。
-   * - workspace 信任：工作目录的稳定 hash
-   * - scene 信任：sceneId
-   * - global 信任（主模式）：固定常量 `"main"`
+   * 获取当前信任上下文的 ID（PermissionContextId discriminated union）。
    *
-   * 永远非空字符串 —— 主模式与工作场景在权限层平等都是"上下文"。
+   * 主模式与工作场景在权限层平等都是"上下文"；三种 kind 各有独立 namespace，
+   * 由 type system 保证不互相碰撞。
    */
-  getContextId(): string {
+  getContextId(): PermissionContextId {
     return this.contextId;
   }
 

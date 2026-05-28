@@ -312,7 +312,7 @@ describe("createSecureExecuteTool", () => {
 
       // 显式注册 deny 规则:`bash` 工具的 `dangerous *` 命令
       store.create(
-        null,
+        { kind: "main" },
         PermissionStore.createRule({
           pattern: { tool: "bash", argument: "dangerous *" },
           decision: "deny",
@@ -341,7 +341,7 @@ describe("createSecureExecuteTool", () => {
       const { pipeline, store } = makePipeline();
 
       store.create(
-        null,
+        { kind: "main" },
         PermissionStore.createRule({
           pattern: { tool: "bash", argument: "dangerous *" },
           decision: "deny",

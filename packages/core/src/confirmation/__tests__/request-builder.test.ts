@@ -144,7 +144,7 @@ describe("buildConfirmationOptions", () => {
     const opts = buildConfirmationOptions(
       "bash",
       { command: "npm install express" },
-      "ctx-ws-1",
+      { kind: "workspace", hash: "ctx-ws-1" },
       "interactive",
     );
     const kinds = opts.map((o) => o.kind);
@@ -157,7 +157,7 @@ describe("buildConfirmationOptions", () => {
     const opts = buildConfirmationOptions(
       "bash",
       { command: "npm install express" },
-      "ctx-ws-1",
+      { kind: "workspace", hash: "ctx-ws-1" },
       "interactive",
     );
     expect(opts.length).toBe(4);
@@ -171,7 +171,7 @@ describe("buildConfirmationOptions", () => {
     const opts = buildConfirmationOptions(
       "bash",
       { command: "npm install express" },
-      "main",
+      { kind: "main" },
       "interactive",
     );
     const ctx = opts.find((o) => o.kind === "allow-context");
@@ -182,7 +182,7 @@ describe("buildConfirmationOptions", () => {
     const opts = buildConfirmationOptions(
       "bash",
       { command: "npm install express" },
-      "ctx-ws-1",
+      { kind: "workspace", hash: "ctx-ws-1" },
       "interactive",
     );
     const ctx = opts.find((o) => o.kind === "allow-context");
@@ -194,7 +194,7 @@ describe("buildConfirmationOptions", () => {
     const opts = buildConfirmationOptions(
       "bash",
       { command: "npm install" },
-      "main",
+      { kind: "main" },
       "interactive",
       { bypassImmune: true },
     );
@@ -209,7 +209,7 @@ describe("buildConfirmationOptions", () => {
     const opts = buildConfirmationOptions(
       "bash",
       { command: "npm install express" },
-      "ctx-ws-1",
+      { kind: "workspace", hash: "ctx-ws-1" },
       "interactive",
     );
     const kinds = opts.map((o) => o.kind);
@@ -226,7 +226,7 @@ describe("buildConfirmationOptions", () => {
     const opts = buildConfirmationOptions(
       "bash",
       { command: "npm install express" },
-      "ctx-ws-1",
+      { kind: "workspace", hash: "ctx-ws-1" },
       "interactive",
     );
     const ws = opts.find((o) => o.kind === "allow-context");
@@ -240,7 +240,7 @@ describe("buildConfirmationOptions", () => {
     const opts = buildConfirmationOptions(
       "bash",
       { command: "git push origin main" },
-      "ctx-ws-1",
+      { kind: "workspace", hash: "ctx-ws-1" },
       "interactive",
     );
     const ws = opts.find((o) => o.kind === "allow-context");
@@ -257,7 +257,7 @@ describe("buildConfirmationOptions", () => {
     const opts = buildConfirmationOptions(
       "bash",
       { command: 'echo "Hello from bash" && pwd && ls' },
-      "ctx-ws-1",
+      { kind: "workspace", hash: "ctx-ws-1" },
       "interactive",
     );
     const ws = opts.find((o) => o.kind === "allow-context");
@@ -274,7 +274,7 @@ describe("buildConfirmationOptions", () => {
     const opts = buildConfirmationOptions(
       "bash",
       { command: "ls" },
-      "ctx-ws-1",
+      { kind: "workspace", hash: "ctx-ws-1" },
       "interactive",
     );
     const ws = opts.find((o) => o.kind === "allow-context");
@@ -289,7 +289,7 @@ describe("buildConfirmationOptions", () => {
     const opts = buildConfirmationOptions(
       "bash",
       { command: "ls" },
-      "ctx-ws-1",
+      { kind: "workspace", hash: "ctx-ws-1" },
       "interactive",
     );
     const denyReason = opts.find((o) => o.kind === "deny-with-reason");
@@ -322,7 +322,7 @@ describe("buildConfirmationRequest", () => {
       input: { command: "npm install express" },
       workingDirectory: "/tmp/ws",
       result: minimalResult(),
-      contextId: "ctx-ws-1",
+      contextId: { kind: "workspace", hash: "ctx-ws-1" },
       sessionType: "interactive",
       now: 1_700_000_000_000,
     });
@@ -332,7 +332,7 @@ describe("buildConfirmationRequest", () => {
     expect(req.toolInput).toEqual({ command: "npm install express" });
     expect(req.workingDirectory).toBe("/tmp/ws");
     expect(req.sessionType).toBe("interactive");
-    expect(req.contextId).toBe("ctx-ws-1");
+    expect(req.contextId).toEqual({ kind: "workspace", hash: "ctx-ws-1" });
     expect(req.createdAt).toBe(1_700_000_000_000);
     expect(req.expiresAt).toBe(1_700_000_000_000 + 30 * 60 * 1000);
     expect(req.display.body.kind).toBe("bash");
@@ -347,7 +347,7 @@ describe("buildConfirmationRequest", () => {
       input: { command: "ls" },
       workingDirectory: "/tmp",
       result: minimalResult(),
-      contextId: "main",
+      contextId: { kind: "main" },
       sessionType: "ci",
       id: "fixed-id",
       now: 0,
@@ -374,7 +374,7 @@ describe("buildConfirmationRequest", () => {
       input: { command: "rm -rf /" },
       workingDirectory: "/tmp",
       result,
-      contextId: "ctx-ws-1",
+      contextId: { kind: "workspace", hash: "ctx-ws-1" },
       sessionType: "interactive",
     });
     expect(req.operationClass).toBe("critical");
@@ -387,7 +387,7 @@ describe("buildConfirmationRequest", () => {
       input: { command: "\x1b[31mrm -rf /\x1b[0m" },
       workingDirectory: "/tmp",
       result: minimalResult(),
-      contextId: "ctx-ws-1",
+      contextId: { kind: "workspace", hash: "ctx-ws-1" },
       sessionType: "interactive",
     });
     expect(req.display.commandPreview).toBe("rm -rf /");
@@ -402,7 +402,7 @@ describe("buildConfirmationRequest", () => {
       input: { command: "ls" },
       workingDirectory: "/tmp",
       result: minimalResult(),
-      contextId: "ctx-ws-1",
+      contextId: { kind: "workspace", hash: "ctx-ws-1" },
       sessionType: "interactive",
       turnOrigin: {
         channel: "feishu",
@@ -423,7 +423,7 @@ describe("buildConfirmationRequest", () => {
       input: { command: "ls" },
       workingDirectory: "/tmp",
       result: minimalResult(),
-      contextId: "ctx-ws-1",
+      contextId: { kind: "workspace", hash: "ctx-ws-1" },
       sessionType: "interactive",
     });
     expect(req.turnOrigin).toBeUndefined();
@@ -435,7 +435,7 @@ describe("buildConfirmationRequest", () => {
       input: { command: "ls" },
       workingDirectory: "/tmp",
       result: minimalResult(),
-      contextId: "main",
+      contextId: { kind: "main" },
       sessionType: "ci",
       turnOrigin: {
         channel: "scheduler",

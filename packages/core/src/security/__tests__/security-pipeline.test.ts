@@ -266,7 +266,7 @@ describe("SecurityPipeline", () => {
     it("用户 allow 规则可以免除 confirm（curl 场景）", async () => {
       const store = new PermissionStore({ rootDir: null });
       store.create(
-        null,
+        { kind: "main" },
         PermissionStore.createRule({
           pattern: { tool: "bash", argument: "curl *" },
           decision: "allow",
@@ -294,7 +294,7 @@ describe("SecurityPipeline", () => {
     it("用户 deny 规则将 confirm 操作降级为 block", async () => {
       const store = new PermissionStore({ rootDir: null });
       store.create(
-        null,
+        { kind: "main" },
         PermissionStore.createRule({
           pattern: { tool: "bash", argument: "curl *" },
           decision: "deny",
@@ -337,7 +337,7 @@ describe("SecurityPipeline", () => {
     it("CI 模式 + 预配置 allow 规则 → 放行", async () => {
       const store = new PermissionStore({ rootDir: null });
       store.create(
-        null,
+        { kind: "main" },
         PermissionStore.createRule({
           pattern: { tool: "bash", argument: "curl *" },
           decision: "allow",
@@ -363,10 +363,13 @@ describe("SecurityPipeline", () => {
     it("workspace 作用域规则可以精确匹配当前工作区", async () => {
       const store = new PermissionStore({ rootDir: null });
       const wsPath = "/home/user/project";
-      const wsId = PermissionStore.contextIdFromPath(wsPath);
+      const wsCtx = {
+        kind: "workspace" as const,
+        hash: PermissionStore.workspaceHashFromPath(wsPath),
+      };
 
       store.create(
-        wsId,
+        wsCtx,
         PermissionStore.createRule({
           pattern: { tool: "bash", argument: "npm install *" },
           decision: "allow",
@@ -382,7 +385,7 @@ describe("SecurityPipeline", () => {
       // npm install 本身是 internal（不会触发 confirm），
       // 用一个会触发 confirm 的命令来验证
       store.create(
-        wsId,
+        wsCtx,
         PermissionStore.createRule({
           pattern: { tool: "bash", argument: "sudo *" },
           decision: "allow",
@@ -403,7 +406,7 @@ describe("SecurityPipeline", () => {
     it("deny 规则 + 短路：guards 不应运行", async () => {
       const store = new PermissionStore({ rootDir: null });
       store.create(
-        null,
+        { kind: "main" },
         PermissionStore.createRule({
           pattern: { tool: "bash", argument: "*" },
           decision: "deny",
@@ -443,25 +446,42 @@ describe("SecurityPipeline", () => {
       });
 
       expect(pipeline.getPermissionStore()).toBeDefined();
-      expect(pipeline.getContextId()).toMatch(/^[0-9a-f]{16}$/);
+      const id = pipeline.getContextId();
+      expect(id.kind).toBe("workspace");
     });
 
-    // 决策 6 核心 invariant：主模式与工作场景在权限层平等都是"上下文"，主模式
-    // contextId 固定 `"main"`、永远非空。任何让 getContextId 重新返回 null 的
-    // 改动都会在此处失败 —— 锁住主模式自动沉淀绑当前上下文（而非建全局规则）
-    // 的安全语义起点。
-    it("getContextId 主模式（global 信任）返回固定常量 'main'", () => {
+    // 决策 6 核心 invariant：主模式与工作场景在权限层平等都是"上下文"，三种 kind
+    // 由 type system 严守独立 namespace —— 永不可能产生 namespace 碰撞（例如用户
+    // 起名 "Main" 的 scene 与主模式撞 contextId 字符串）。锁住主模式自动沉淀绑
+    // 当前上下文（而非建全局规则）的安全语义起点。
+    it("getContextId 主模式（global 信任）返回 {kind:'main'} union", () => {
       const pipeline = new SecurityPipeline({ trustContext: { kind: "global" } });
-      expect(pipeline.getContextId()).toBe("main");
+      expect(pipeline.getContextId()).toEqual({ kind: "main" });
     });
 
-    it("getContextId 工作场景返回 path hash（与 'main' 不冲突）", () => {
+    it("getContextId 工作场景返回 {kind:'workspace', hash} union（与主模式不同 kind）", () => {
       const pipeline = new SecurityPipeline({
         trustContext: { kind: "workspace", dir: "/home/user/project" },
       });
       const id = pipeline.getContextId();
-      expect(id).toMatch(/^[0-9a-f]{16}$/);
-      expect(id).not.toBe("main");
+      expect(id.kind).toBe("workspace");
+      if (id.kind === "workspace") {
+        expect(id.hash).toMatch(/^[0-9a-f]{16}$/);
+      }
+    });
+
+    // namespace 隔离反向断言：sceneId 即使等于 "main" 字符串也走 kind="scene"
+    // 分支，与主模式上下文完全独立（discriminated union 保证）。
+    it("getContextId scene 信任与同名主模式上下文 namespace 隔离", () => {
+      const main = new SecurityPipeline({ trustContext: { kind: "global" } });
+      // sceneId 故意取 "main" —— 旧 string 实现下会与主模式撞 contextId
+      const scene = new SecurityPipeline({
+        trustContext: { kind: "scene", sceneId: "main" },
+      });
+      expect(main.getContextId()).toEqual({ kind: "main" });
+      expect(scene.getContextId()).toEqual({ kind: "scene", sceneId: "main" });
+      // 两个 ID 不相等：kind 不同 → 持久化文件名不同 → 规则永不互相泄漏
+      expect(main.getContextId()).not.toEqual(scene.getContextId());
     });
 
     it("result 透出 trustLevel（global 上下文 → global）", async () => {
@@ -476,7 +496,7 @@ describe("SecurityPipeline", () => {
     it("权限规则 allow 命中后直接放行，不再触发 confirm", async () => {
       const store = new PermissionStore({ rootDir: null });
       store.create(
-        null,
+        { kind: "main" },
         PermissionStore.createRule({
           pattern: { tool: "bash", argument: "curl *" },
           decision: "allow",
