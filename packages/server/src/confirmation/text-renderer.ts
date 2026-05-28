@@ -141,9 +141,14 @@ export function formatConfirmationMessage(request: ConfirmationRequest): string 
     ``,
     detail,
   ];
-  // 安全管家研判理由（needs-confirm 经管家时存在）——远程用户上下文更少，理由更关键
+  // 安全助理察觉风险（needs-confirm 经管家时存在）——与 TTY 渲染同步，措辞对齐
+  // （远程文本是 markdown 化 IM 消息，不可用 yellow 颜色，措辞和分行对齐即可）
   if (request.display.stewardReason) {
-    lines.push(``, `🛡 安全管家：${request.display.stewardReason}`);
+    lines.push(
+      ``,
+      `⚠ 安全助理察觉风险：${request.display.stewardReason}`,
+      `请你决定是否继续 ↓`,
+    );
   }
   lines.push(
     ``,

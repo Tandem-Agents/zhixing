@@ -94,7 +94,7 @@ function makeRequest(
       { kind: "deny-with-reason", label: "拒绝", placeholder: "告诉知行哪里错了" },
     ],
     sessionType: "interactive",
-    workspaceId: "ws-1",
+    contextId: "ws-1",
     createdAt: now,
     expiresAt: now + 60_000,
     ...opts,
@@ -186,13 +186,13 @@ describe("buildSelectOptions", () => {
     expect(selectOptions[1]!.hotkey).toBe("n");
   });
 
-  it("持久授权类（allow-session / workspace / global）label 加「⚠ 持久授权」后缀", () => {
+  it("持久授权类（allow-session / context / global）label 加「持久授权」淡化后缀", () => {
     const req = makeRequest({
       options: [
         { kind: "allow-once", label: "允许一次" },
         { kind: "allow-session", label: "本会话允许", pattern: "git *" },
         {
-          kind: "allow-workspace",
+          kind: "allow-context",
           label: "本工作区允许",
           pattern: "git *",
         },
@@ -204,13 +204,16 @@ describe("buildSelectOptions", () => {
     // allow-once / deny 不加后缀
     expect(selectOptions[0]!.label).toBe("允许一次");
     expect(selectOptions[4]!.label).toBe("拒绝");
-    // 持久授权三类加 ⚠ 持久授权 后缀
+    // 持久授权三类加「持久授权」淡化后缀（无 ⚠ 图标）
     expect(selectOptions[1]!.label).toContain("本会话允许");
-    expect(selectOptions[1]!.label).toContain("⚠ 持久授权");
+    expect(selectOptions[1]!.label).toContain("持久授权");
+    expect(selectOptions[1]!.label).not.toContain("⚠");
     expect(selectOptions[2]!.label).toContain("本工作区允许");
-    expect(selectOptions[2]!.label).toContain("⚠ 持久授权");
+    expect(selectOptions[2]!.label).toContain("持久授权");
+    expect(selectOptions[2]!.label).not.toContain("⚠");
     expect(selectOptions[3]!.label).toContain("全局允许");
-    expect(selectOptions[3]!.label).toContain("⚠ 持久授权");
+    expect(selectOptions[3]!.label).toContain("持久授权");
+    expect(selectOptions[3]!.label).not.toContain("⚠");
   });
 });
 
@@ -250,16 +253,16 @@ describe("translate", () => {
     expect(result).toEqual({ kind: "deny", reason: "别用 rm -rf" });
   });
 
-  it("selected allow-workspace 携带 pattern", () => {
+  it("selected allow-context 携带 pattern", () => {
     const opt: ConfirmationOption = {
-      kind: "allow-workspace",
+      kind: "allow-context",
       label: "x",
       pattern: PATTERN_NPM_INSTALL,
     };
     const map = new Map([["opt-0", opt]]);
     const result = translate({ kind: "selected", value: "opt-0" }, map);
     expect(result).toEqual({
-      kind: "allow-workspace",
+      kind: "allow-context",
       pattern: PATTERN_NPM_INSTALL,
       note: undefined,
     });
@@ -402,20 +405,31 @@ describe("buildInlinePanelBody", () => {
     expect(full).not.toContain("需要网络"); // decision.reason 删
   });
 
-  it("stewardReason 存在时渲染安全管家研判理由（needs-confirm 经管家）", () => {
+  it("stewardReason 存在时渲染安全助理察觉风险前置标识（needs-confirm 经管家）", () => {
     const req = makeRequest({});
     req.display.stewardReason =
       "该命令会向外部地址上传文件，与当前任务意图不完全匹配";
     const lines = buildInlinePanelBody(req);
     const full = lines.join("\n");
-    expect(full).toContain("安全管家");
+    expect(full).toContain("安全助理察觉风险");
     expect(full).toContain("与当前任务意图不完全匹配");
+    expect(full).toContain("请你决定是否继续");
   });
 
-  it("无 stewardReason 时不渲染管家行", () => {
+  it("stewardReason 提到 body 顶部 —— 先于操作内容渲染", () => {
+    const req = makeRequest({});
+    req.display.stewardReason = "测试理由";
+    const lines = buildInlinePanelBody(req);
+    const stewardIdx = lines.findIndex((l) => l.includes("安全助理察觉风险"));
+    const bodyIdx = lines.findIndex((l) => l.includes("npm install"));
+    expect(stewardIdx).toBeGreaterThanOrEqual(0);
+    expect(bodyIdx).toBeGreaterThan(stewardIdx);
+  });
+
+  it("无 stewardReason 时不渲染助理风险行", () => {
     const req = makeRequest({});
     const lines = buildInlinePanelBody(req);
-    expect(lines.some((l) => l.includes("安全管家"))).toBe(false);
+    expect(lines.some((l) => l.includes("安全助理"))).toBe(false);
   });
 });
 

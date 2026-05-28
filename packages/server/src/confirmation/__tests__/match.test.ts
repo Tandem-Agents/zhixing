@@ -36,7 +36,7 @@ function makeRequest(title: string = "Bash 命令"): ConfirmationRequest {
     },
     options: [],
     sessionType: "interactive",
-    workspaceId: null,
+    contextId: "main",
     createdAt: now,
     expiresAt: now + 60_000,
   };

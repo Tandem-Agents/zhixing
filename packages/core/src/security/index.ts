@@ -28,6 +28,7 @@ export type {
   SessionType,
   ThreatCategory,
   ToolBoundaryRegistry,
+  TrustContribution,
 } from "./types.js";
 
 // 信任上下文

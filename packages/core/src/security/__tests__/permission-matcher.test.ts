@@ -105,7 +105,7 @@ describe("PermissionMatcherMiddleware", () => {
             id: "user-allow-git",
             pattern: { tool: "bash", argument: "git *" },
             decision: "allow",
-            scope: "workspace",
+            scope: "context",
           }),
         create: () => {},
         list: () => [],

@@ -174,23 +174,31 @@ export type PermissionDecision = "allow" | "deny";
  *
  * 三种**用户授权**作用域：
  * - session：本次会话有效（进程重启后消失，不落盘）
- * - workspace：当前工作区内有效，落盘到 ~/.zhixing/permissions/<workspace-hash>.json
- * - global：跨所有工作区有效，落盘到 ~/.zhixing/permissions/global.json
+ * - context：绑定在某个上下文（主模式 OR 任一工作场景）内有效，落盘到
+ *   ~/.zhixing/permissions/<contextId>.json（主模式为 main.json，工作场景为 hash 文件）
+ * - global：跨所有上下文有效，落盘到 ~/.zhixing/permissions/global.json
  *
  * 一种**系统预置**作用域：
- * - builtin：代码定义的默认规则（如未来 web_fetch 的 preapproved 域名 allow 列表），
+ * - builtin：代码定义的默认规则（如 web_fetch 的 preapproved 域名 allow 列表），
  *   仅 in-memory，启动时由 `registerBuiltinRules` 注入，不落盘。匹配时严格让位
  *   于用户池（user 池任一命中 → 完全决定结果，builtin 池不参与；user 池空 →
  *   builtin 池接管），保证用户拥有最终决定权。
- *
- * 见 [tool-permission-execution.md §4.3](../../../../research/design/specifications/tool-permission-execution.md)
- * 与 ADR-TPE-002 / ADR-TPE-008。
  */
 export type PermissionScope =
   | "session"
-  | "workspace"
+  | "context"
   | "global"
   | "builtin";
+
+/**
+ * 一次"信任贡献"记录——用户在 confirm 中选 allow-once 或 AI 安全助理判 safe 的
+ * 时间点 + 来源。`ConfirmationTracker` 累积一组此记录达阈值时触发自动沉淀；
+ * 沉淀产出的 `PermissionRule.contributors` 字段直接拷贝累积数组，保留完整时间线。
+ */
+export interface TrustContribution {
+  origin: "user" | "steward";
+  timestamp: number;
+}
 
 /**
  * 权限规则——用户创建的明确授权或拒绝。
@@ -213,52 +221,68 @@ export interface PermissionRule {
   /** 累计匹配次数 */
   matchCount: number;
   /**
-   * 工作区路径（仅 workspace 作用域需要记录，便于 /trust list 展示）。
-   * 实际定位规则使用 workspaceId（hash）。
+   * 上下文定位 ID —— 决定规则挂载到哪个上下文文件。
+   * - `scope === "context"`：必填（主模式存 `"main"`，工作场景存 workspace hash）
+   * - `scope === "global"` / `scope === "session"`：字段为 undefined（作用域由 scope
+   *   自身承载，无需上下文锚）
    */
-  workspace?: string;
+  contextId?: string;
   /**
-   * 规则来源："user" = 用户显式创建 / 确认沉淀；"steward" = AI 安全管家放行沉淀。
-   * 缺省视为 user。用于 /trust 区分展示与撤销 steward 自动沉淀的规则。
+   * 上下文工作区绝对路径 —— UI 友好显示用、不参与匹配。
+   * - `scope === "context"` + 工作场景：填该场景的 workdir
+   * - `scope === "context"` + 主模式：undefined（主模式无工作区路径概念）
+   * - `scope === "global"` / `scope === "session"`：undefined
    */
-  origin?: "user" | "steward";
+  contextPath?: string;
+  /**
+   * 信任来源累积时间线 —— 用户确认与 AI 安全助理放行平权累积。沉淀那一刻拷贝
+   * tracker 中该模式的完整数组；后续命中规则直接放行不再 record，数组截止于沉淀
+   * 时刻。用户在 confirm 弹窗显式选 allow-context / allow-global 直接建规则时为
+   * 单条 `[{ origin:"user", timestamp: now }]`。
+   */
+  contributors?: TrustContribution[];
 }
 
 /**
  * 权限规则存储接口。
  * 负责管理三种作用域的规则集合，提供匹配、创建、查询、撤销等操作。
+ *
+ * **入参 `contextId` 语义**：调用方的"当前上下文 ID"（永远非 null：主模式 `"main"`、
+ * 工作场景 hash），决定 session 池子 key 与 context 池子规则落盘文件。与
+ * `PermissionRule.contextId` 是不同语义：后者是规则自身记录的"绑哪个上下文"，
+ * 仅当 `rule.scope === "context"` 时填。
  */
 export interface IPermissionStore {
   /**
    * 查询匹配的权限规则。
    * 按 deny > allow、精确 > 宽泛 的顺序解决冲突。
-   * @param workspaceId 当前工作区标识（null 表示无工作区上下文）
+   * @param contextId 调用方的当前上下文 ID（主模式 `"main"` / 工作场景 hash）
    * @param request 工具调用请求
    * @returns 最匹配的规则，或 null 表示无匹配
    */
   match(
-    workspaceId: string | null,
+    contextId: string,
     request: SecurityRequest,
   ): PermissionRule | null;
 
   /**
    * 创建一条规则。
    * - session 作用域：不落盘
-   * - workspace 作用域：落盘到该工作区文件
+   * - context 作用域：落盘到当前上下文文件（按入参 contextId 路由）
    * - global 作用域：落盘到全局文件
    */
-  create(workspaceId: string | null, rule: PermissionRule): void;
+  create(contextId: string, rule: PermissionRule): void;
 
-  /** 列出给定工作区可见的所有规则（session + 该工作区 + global） */
-  list(workspaceId: string | null): PermissionRule[];
+  /** 列出当前上下文可见的所有规则（session + 该上下文 + global） */
+  list(contextId: string): PermissionRule[];
 
   /** 撤销某条规则。返回是否找到并撤销。 */
   revoke(ruleId: string): boolean;
 
-  /** 清除给定工作区的所有规则（session + workspace 作用域，不影响 global） */
-  reset(workspaceId: string | null): void;
+  /** 清除当前上下文的规则（session + context 作用域，不影响 global） */
+  reset(contextId: string): void;
 
-  /** 清除全部规则（包括 global 和所有工作区）。不影响 builtin（boot-time 系统配置）。 */
+  /** 清除全部规则（包括 global 和所有上下文）。不影响 builtin（boot-time 系统配置）。 */
   resetAll(): void;
 }
 
@@ -498,5 +522,21 @@ export type SecurityEventMap = {
     decision: "safe" | "needs-confirm" | "escalate";
     reason: string;
     confidence: number;
+  };
+
+  /**
+   * 自动信任沉淀产出规则 —— 累积阈值跨过那一刻发射，UI 据此输出"已记住 N 次同类
+   * 操作，自动建立放行规则"低调提示。仅自动沉淀路径发射；用户在 confirm 弹窗
+   * 显式选 allow-context / allow-global 直接建规则不发射（用户主动行为无需事后提示）。
+   */
+  "security:rule_sedimented": {
+    tool: string;
+    operation: string;
+    pattern: { tool: string; argument: string };
+    scope: PermissionScope;
+    /** 沉淀规则绑哪个上下文（自动沉淀必为 scope=context，contextId 非空） */
+    contextId: string;
+    ruleId: string;
+    contributors: TrustContribution[];
   };
 };

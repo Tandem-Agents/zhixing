@@ -132,28 +132,31 @@ export function buildPanelTitle(toolName: string): string {
 // ─── ConfirmationOption 构造 ───
 
 /**
- * 为"始终允许(本工作区)"挑选最合适的 pattern。
+ * 为"持久授权"挑选最合适的 pattern。
  *
- * 设计原则:永远不把"完整原始命令"作为永久授权的 pattern —— 那种 pattern 下次
- * 几乎一定不会再命中(参数会变),对用户毫无价值,只是把 confirmation 面板
- * 的视觉负担留在那里。
+ * 设计原则：永远不把"完整原始命令"作为永久授权的 pattern —— 那种 pattern 下次
+ * 几乎一定不会再命中（参数会变），对用户毫无价值，只是把 confirmation 面板的
+ * 视觉负担留在那里。
  *
- * 优先级(从最理想到最兜底):
- *   1. **subcommand wildcard**:形如 `npm install *` / `git push *`。
- *      这是最常用的"工作区永久允许"粒度 —— 把同类操作一并放行,但仍把
- *      `npm uninstall` / `git push --force` 等危险变体留在 confirmation 之外。
- *   2. **executable wildcard**:形如 `echo *` / `ls *`。
- *      用于不存在子命令结构的命令(典型:`echo "..."` 这类带引号 / 复合表达式
- *      的命令),suggestPatterns 不会生成 "echo something *" 那种二级模式。
- *   3. **最广义的兜底**:`patterns[length-1]`。覆盖 `write` 工具的 `dir/**` 等
- *      非命令行类 pattern,以及任何意外的边缘情况。
+ * 优先级（从最理想到最兜底）：
+ *   1. **subcommand wildcard**：形如 `npm install *` / `git push *`。
+ *      最常用的"持久允许"粒度 —— 把同类操作一并放行，但仍把 `npm uninstall` /
+ *      `git push --force` 等危险变体留在 confirmation 之外。
+ *   2. **executable wildcard**：形如 `echo *` / `ls *`。用于不存在子命令结构的
+ *      命令（典型：`echo "..."` 这类带引号 / 复合表达式的命令），suggestPatterns
+ *      不会生成 "echo something *" 那种二级模式。
+ *   3. **最广义的兜底**：`patterns[length-1]`。覆盖 `write` 工具的 `dir/**` 等
+ *      非命令行类 pattern，以及任何意外的边缘情况。
  *
- * 注意:对**危险命令**(`rm -rf /` 这类)走到这里本身就已经是异常情况——
+ * 注意：对**危险命令**（`rm -rf /` 这类）走到这里本身就已经是异常情况 ——
  * SecurityPipeline 的 builtin-rules 应该在前置 classify/authorize 阶段把它们
- * 直接 BLOCK 掉,根本不该到 confirmation 面板。所以这里"取最广义"不会
- * 给危险命令开后门。
+ * 直接 BLOCK 掉，根本不该到 confirmation 面板。所以这里"取最广义"不会给危险
+ * 命令开后门。
+ *
+ * allow-context 与 allow-global 共用同一 pattern 选择逻辑 —— 两者粒度都是
+ * "持久授权"，只是作用域不同（本上下文 vs 跨所有上下文）。
  */
-function pickWorkspacePattern(
+function pickPersistentPattern(
   patterns: SuggestedPattern[],
 ): SuggestedPattern | undefined {
   if (patterns.length === 0) return undefined;
@@ -172,28 +175,31 @@ function pickWorkspacePattern(
 }
 
 /**
- * 生成用户可选的 ConfirmationOption 列表。
+ * 生成用户可选的 ConfirmationOption 列表 —— 上下文平等三选 + 拒绝。
  *
- * **当前 CLI 设计:3 个选项**:
- *   1. 允许这一次          —— 默认焦点,覆盖 ~60% 的"一次性任务"
- *   2. 始终允许 pattern    —— 工作区级永久授权,可通过 /trust revoke 撤销
- *   3. 拒绝并说明原因      —— 核心差异化:拒绝理由会回流给模型
+ * **正常路径生成 4 个选项**：
+ *   1. 允许这一次（allow-once）—— 默认焦点
+ *   2. 始终允许（仅本上下文生效）（allow-context）—— 按 contextId 动态 label
+ *   3. 始终允许（全局，所有场景生效）（allow-global）
+ *   4. 拒绝并说明原因（deny-with-reason）—— 拒绝理由回流模型
  *
- * **不生成但 broker / type 系统仍支持的 kinds**(保留架构灵活性):
- *   - allow-with-note      —— 实测罕用,删除以减心智负担
- *   - allow-session        —— 个人助手用户感知不到"会话"概念;
- *                             且实现是 in-memory,与对话 session 不挂钩,
- *                             保留会制造 "为什么 REPL 重启 / `/resume` 后又问我" 的假 bug
- *   - allow-global         —— 高风险低频,应通过 /trust 命令显式管理
+ * **bypassImmune 守卫（禁区操作）**：bypassImmune 命中的操作（凭证 / .git /
+ * .ssh / .zhixing 等禁区）**只给 allow-once + deny-with-reason** —— 禁区永不
+ * 沉淀、跨所有上下文都不能放宽。这从 UI 层断绝"用户多次 allow-context 把禁区
+ * 操作攒成永久规则"的可能性。
  *
- * 这三种 kind 仍可以被 /trust 命令、Web/微信渲染器、未来的 LLM 分诊产生,
- * broker.ts / secure-executor.applyBrokerDecision / terminal-renderer.translate
- * 都继续完整支持它们的 dispatching。
+ * **allow-session 不生成**（产品决策）：个人助手用户感知不到"会话"概念，
+ * 且实现是 in-memory，与对话 session 不挂钩。类型定义保留（type 系统支持），
+ * 由 broker / renderer / secure-executor 兼容处理。
+ *
+ * **主模式 vs 工作场景的差异仅在 allow-context label 动态文案**：
+ *   - contextId === "main"：「始终允许（仅主模式生效）」
+ *   - contextId !== "main"（工作场景 hash）：「始终允许（本工作场景生效）」
  */
 export function buildConfirmationOptions(
   toolName: string,
   input: Record<string, unknown>,
-  workspaceId: string | null,
+  contextId: string,
   sessionType: SessionType,
   flags?: { bypassImmune?: boolean },
 ): ConfirmationOption[] {
@@ -205,25 +211,34 @@ export function buildConfirmationOptions(
     context: { cwd: "", trust: { kind: "global" }, sessionType },
   });
 
-  const workspacePattern = pickWorkspacePattern(patterns);
+  const persistentPattern = pickPersistentPattern(patterns);
 
   const options: ConfirmationOption[] = [];
 
-  // 1. 允许这一次(默认焦点)
+  // 1. 允许这一次（默认焦点）
   options.push({ kind: "allow-once", label: "允许这一次", hotkey: "y" });
 
-  // 2. 始终允许(本工作区)—— 仅在有 workspaceId 且能找到合理 pattern 时出现
-  //    bypassImmune 规则不允许创建持久规则 —— 每次必须确认
-  if (workspaceId && workspacePattern && !flags?.bypassImmune) {
+  // 2-3. 持久授权选项（bypassImmune 时跳过 —— 禁区永不沉淀）
+  if (persistentPattern && !flags?.bypassImmune) {
+    const contextLabel =
+      contextId === "main"
+        ? `始终允许 "${persistentPattern.pattern.argument}"（仅主模式生效）`
+        : `始终允许 "${persistentPattern.pattern.argument}"（本工作场景生效）`;
     options.push({
-      kind: "allow-workspace",
-      label: `始终允许 "${workspacePattern.pattern.argument}"(本工作区)`,
-      pattern: workspacePattern,
+      kind: "allow-context",
+      label: contextLabel,
+      pattern: persistentPattern,
       hotkey: "a",
+    });
+    options.push({
+      kind: "allow-global",
+      label: `始终允许 "${persistentPattern.pattern.argument}"（全局，所有场景生效）`,
+      pattern: persistentPattern,
+      hotkey: "g",
     });
   }
 
-  // 3. 拒绝并说明原因,note 回流到模型
+  // 4. 拒绝并说明原因，reason 回流到模型
   options.push({
     kind: "deny-with-reason",
     label: "拒绝并说明原因...",
@@ -241,21 +256,22 @@ export interface BuildConfirmationRequestParams {
   input: Record<string, unknown>;
   workingDirectory: string;
   result: SecurityMiddlewareResult;
-  workspaceId: string | null;
+  /** 当前上下文 ID（主模式 `"main"` / 工作场景 hash） */
+  contextId: string;
   sessionType: SessionType;
-  /** 可选覆盖 id(测试用) */
+  /** 可选覆盖 id（测试用） */
   id?: string;
   /** 当前时间戳 —— 便于 fake clock 测试 */
   now?: number;
-  /** 超时毫秒数,默认 30min */
+  /** 超时毫秒数，默认 30min */
   timeoutMs?: number;
   /**
    * Turn 发起入口的元信息 —— 远程确认的回程地址。
-   * 由 secure-executor 从 ToolExecutionContext.turnOrigin 透传;
+   * 由 secure-executor 从 ToolExecutionContext.turnOrigin 透传；
    * Renderer / Hub / Bridge 读此字段决定把确认请求推回哪个通道 / RPC 连接。
    */
   turnOrigin?: TurnOrigin;
-  /** AI 安全管家的研判理由 —— needs-confirm 经管家时透传，渲染给用户说明为何要确认 */
+  /** AI 安全助理的研判理由 —— needs-confirm 经管家时透传，渲染给用户说明为何要确认 */
   stewardReason?: string;
 }
 
@@ -270,7 +286,7 @@ export function buildConfirmationRequest(
     input,
     workingDirectory,
     result,
-    workspaceId,
+    contextId,
     sessionType,
   } = params;
 
@@ -288,7 +304,7 @@ export function buildConfirmationRequest(
   const options = buildConfirmationOptions(
     toolName,
     input,
-    workspaceId,
+    contextId,
     sessionType,
     { bypassImmune: hasBypassImmune },
   );
@@ -313,7 +329,7 @@ export function buildConfirmationRequest(
     },
     options,
     sessionType,
-    workspaceId,
+    contextId,
     createdAt: now,
     expiresAt: now + timeoutMs,
     turnOrigin: params.turnOrigin,

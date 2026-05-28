@@ -238,7 +238,7 @@ export function createSecureExecuteTool(
       if (verdict?.decision === "escalate") {
         onBlocked?.(tool.name, input, result);
         throw new SecurityBlockError(
-          `操作被安全管家拦截:${verdict.reason}`,
+          `操作被安全助理拦截：${verdict.reason}`,
           tool.name,
           verdict.reason,
         );
@@ -255,12 +255,13 @@ export function createSecureExecuteTool(
           sessionType,
           fallbackStrategy,
           onUserDenied,
+          auditor,
           // needs-confirm 时管家给出了研判理由；未触发管家时为 undefined
           stewardReason: verdict?.reason,
         });
       } else {
         // 管家放行 → 喂信任沉淀（累计达阈值后免管家），跳过 broker、落到下方执行
-        maybePersistTrust({
+        await maybePersistTrust({
           pipeline,
           request: {
             tool: tool.name,
@@ -274,6 +275,9 @@ export function createSecureExecuteTool(
           riskLevel: result.decision?.riskLevel ?? "medium",
           origin: "steward",
           bypassImmune: false,
+          toolName: tool.name,
+          toolInput: input,
+          auditor,
         });
       }
     }
@@ -336,7 +340,9 @@ async function handleBrokerPath(params: {
   sessionType: SessionType;
   fallbackStrategy: ConfirmationFallbackStrategy;
   onUserDenied?: OnUserDeniedFn;
-  /** AI 安全管家的研判理由 —— needs-confirm 经管家时透传给确认请求 */
+  /** run 级审计发射器 —— 自动沉淀时发射 security:rule_sedimented */
+  auditor: SecurityAuditor | null;
+  /** AI 安全助理的研判理由 —— needs-confirm 经管家时透传给确认请求 */
   stewardReason?: string;
 }): Promise<void> {
   const {
@@ -349,6 +355,7 @@ async function handleBrokerPath(params: {
     sessionType,
     fallbackStrategy,
     onUserDenied,
+    auditor,
     stewardReason,
   } = params;
 
@@ -357,9 +364,9 @@ async function handleBrokerPath(params: {
     input,
     workingDirectory: context.workingDirectory,
     result,
-    workspaceId: pipeline.getContextId(),
+    contextId: pipeline.getContextId(),
     sessionType,
-    // 远程确认回程地址透传:AgentRuntime → ToolExecutionContext.turnOrigin
+    // 远程确认回程地址透传：AgentRuntime → ToolExecutionContext.turnOrigin
     //   → ConfirmationRequest.turnOrigin → Hub / Renderer / Bridge
     turnOrigin: context.turnOrigin,
     stewardReason,
@@ -369,15 +376,15 @@ async function handleBrokerPath(params: {
 
   switch (decision.kind) {
     case "deny": {
-      // `reason` 可选:
-      //   - 有 reason → 自由文本拒绝(来自远程通道 / terminal 的"拒绝并说明原因"选项)
-      //   - 无 reason → 结构化拒绝(词集匹配到拒绝词 / 用户直接点"拒绝")
+      // `reason` 可选：
+      //   - 有 reason → 自由文本拒绝（来自远程通道 / terminal 的"拒绝并说明原因"选项）
+      //   - 无 reason → 结构化拒绝（词集匹配到拒绝词 / 用户直接点"拒绝"）
       // 两种都把 reason 原样作为 tool_result.content 回流到 LLM —— 让模型理解"为什么被拒绝"。
       const reason = decision.reason;
       const reasonText = reason
-        ? `用户拒绝了这次工具调用。用户的反馈:${reason}。请根据该反馈调整方案。`
+        ? `用户拒绝了这次工具调用。用户的反馈：${reason}。请根据该反馈调整方案。`
         : `用户拒绝了这次工具调用。`;
-      // 通知 UI(主路径触发终端"用户拒绝"渲染;子 agent 路径不传 callback)
+      // 通知 UI（主路径触发终端"用户拒绝"渲染；子 agent 路径不传 callback）
       onUserDenied?.(toolName, input, reason);
       throw new SecurityBlockError(
         reasonText,
@@ -389,32 +396,32 @@ async function handleBrokerPath(params: {
     case "cancelled": {
       const label = cancelLabel(decision.cause);
       throw new SecurityBlockError(
-        `确认${label}(${decision.cause})`,
+        `确认${label}（${decision.cause}）`,
         toolName,
         decision.cause,
       );
     }
 
     case "expired":
-      // 超时降级:
-      //   - deny(默认):严格拒绝
-      //   - auto-approve-safe:observe / internal 放行(低风险工具);
+      // 超时降级：
+      //   - deny（默认）：严格拒绝
+      //   - auto-approve-safe：observe / internal 放行（低风险工具）；
       //                       external / critical 仍然拒绝
       if (fallbackStrategy === "auto-approve-safe") {
         const opClass = result.operationClass;
         if (opClass === "observe" || opClass === "internal") {
-          return; // 放行,调用方继续执行工具
+          return; // 放行，调用方继续执行工具
         }
       }
       throw new SecurityBlockError(
-        `确认超时:${toolName}`,
+        `确认超时：${toolName}`,
         toolName,
         "expired",
       );
 
     case "allow-once":
     case "allow-session":
-    case "allow-workspace":
+    case "allow-context":
     case "allow-global":
       await applyBrokerDecision({
         decision,
@@ -425,6 +432,7 @@ async function handleBrokerPath(params: {
         riskLevel: result.decision?.riskLevel ?? "medium",
         bypassImmune:
           result.decision?.matchedRules.some((r) => r.bypassImmune) ?? false,
+        auditor,
       });
       return;
 
@@ -535,34 +543,64 @@ function formatBytes(bytes: number): string {
 // ─── 信任沉淀 ───
 
 /**
- * 把一次放行喂给信任机制：累计达阈值则自动沉淀为持久 allow 规则（标记来源、可在
- * /trust 撤销）。bypassImmune 永不沉淀（禁区底线）；critical 由 tracker 阈值 -1 自动排除。
+ * 把一次放行喂给信任机制：累计达阈值则自动沉淀为持久 allow 规则（contributors 完整
+ * 时间线 + scope=context 绑当前上下文，可在 /trust 面板撤销）。
+ *
+ * bypassImmune 永不沉淀（禁区底线）；critical 由 tracker 阈值 -1 自动排除。
+ *
+ * 沉淀产出规则的 contextId 由 pipeline 当前上下文决定（主模式 "main" / 工作场景
+ * hash），永远非空。global 规则**不**由自动沉淀产出 —— 仅在用户 confirm 弹窗
+ * 显式选 allow-global 时建立。
  */
-function maybePersistTrust(params: {
+async function maybePersistTrust(params: {
   pipeline: SecurityPipeline;
   request: SecurityRequest;
   riskLevel: RiskLevel;
   origin: "user" | "steward";
   bypassImmune: boolean;
-}): void {
+  toolName: string;
+  toolInput: Record<string, unknown>;
+  auditor: SecurityAuditor | null;
+}): Promise<void> {
   if (params.bypassImmune) return;
-  const { pipeline, request, riskLevel, origin } = params;
+  const {
+    pipeline,
+    request,
+    riskLevel,
+    origin,
+    toolName,
+    toolInput,
+    auditor,
+  } = params;
   const tracker = pipeline.getConfirmationTracker();
-  tracker.record(request, riskLevel);
-  if (!tracker.shouldSuggest(request, riskLevel).suggest) return;
+  tracker.record(request, riskLevel, origin);
+  const status = tracker.shouldSuggest(request, riskLevel);
+  if (!status.suggest) return;
   const pattern = tracker.persistencePattern(request);
   if (!pattern) return;
   const contextId = pipeline.getContextId();
-  pipeline.getPermissionStore().create(
+  const contextPath = pipeline.getWorkspace() ?? undefined;
+  // status.contributors 已是独立副本（shouldSuggest 内部深拷贝）—— 直接持有
+  const rule = PermissionStore.createRule({
+    pattern: pattern.pattern,
+    decision: "allow",
+    scope: "context",
     contextId,
-    PermissionStore.createRule({
+    contextPath,
+    contributors: status.contributors,
+  });
+  pipeline.getPermissionStore().create(contextId, rule);
+  if (auditor) {
+    await auditor.auditRuleSedimented({
+      toolName,
+      toolInput,
       pattern: pattern.pattern,
-      decision: "allow",
-      scope: contextId ? "workspace" : "global",
-      ...(contextId ? { workspace: pipeline.getWorkspace() ?? undefined } : {}),
-      origin,
-    }),
-  );
+      scope: "context",
+      contextId,
+      ruleId: rule.id,
+      contributors: rule.contributors ?? [],
+    });
+  }
 }
 
 // ─── Broker decision 的副作用 ───
@@ -574,7 +612,7 @@ async function applyBrokerDecision(params: {
       kind:
         | "allow-once"
         | "allow-session"
-        | "allow-workspace"
+        | "allow-context"
         | "allow-global";
     }
   >;
@@ -582,8 +620,9 @@ async function applyBrokerDecision(params: {
   toolName: string;
   input: Record<string, unknown>;
   workingDirectory: string;
-  riskLevel: "low" | "medium" | "high" | "critical";
+  riskLevel: RiskLevel;
   bypassImmune: boolean;
+  auditor: SecurityAuditor | null;
 }): Promise<void> {
   const {
     decision,
@@ -593,10 +632,11 @@ async function applyBrokerDecision(params: {
     workingDirectory,
     riskLevel,
     bypassImmune,
+    auditor,
   } = params;
 
   const store: IPermissionStore = pipeline.getPermissionStore();
-  const workspaceId = pipeline.getContextId();
+  const contextId = pipeline.getContextId();
 
   const request: SecurityRequest = {
     tool: toolName,
@@ -608,21 +648,27 @@ async function applyBrokerDecision(params: {
     },
   };
 
+  const now = Date.now();
+
   switch (decision.kind) {
     case "allow-once":
       // 一次性允许 → 喂信任沉淀（累计达阈值后自动沉淀放行规则）
-      maybePersistTrust({
+      await maybePersistTrust({
         pipeline,
         request,
         riskLevel,
         origin: "user",
         bypassImmune,
+        toolName,
+        toolInput: input,
+        auditor,
       });
       return;
 
     case "allow-session":
+      // session 规则不落盘、不进 contributors 时间线 —— 重启即消失，无沉淀语义
       store.create(
-        workspaceId,
+        contextId,
         PermissionStore.createRule({
           pattern: decision.pattern.pattern,
           decision: "allow",
@@ -631,38 +677,35 @@ async function applyBrokerDecision(params: {
       );
       return;
 
-    case "allow-workspace": {
-      if (!workspaceId) {
-        // 无工作区上下文时 fallback 到 global
-        store.create(
-          null,
-          PermissionStore.createRule({
-            pattern: decision.pattern.pattern,
-            decision: "allow",
-            scope: "global",
-          }),
-        );
-        return;
-      }
+    case "allow-context": {
+      // 用户显式选 allow-context → 直接在本上下文建立 allow 规则
+      // contributors 为单条 user 记录（与决策 4「完整保留每次记录」一致：本次显式
+      // 选择就是一次 user contribution）
+      const contextPath = pipeline.getWorkspace() ?? undefined;
       store.create(
-        workspaceId,
+        contextId,
         PermissionStore.createRule({
           pattern: decision.pattern.pattern,
           decision: "allow",
-          scope: "workspace",
-          workspace: workingDirectory,
+          scope: "context",
+          contextId,
+          contextPath,
+          contributors: [{ origin: "user", timestamp: now }],
         }),
       );
       return;
     }
 
     case "allow-global":
+      // 用户显式选 allow-global → 跨所有上下文 allow 规则
+      // 不传 contextId / contextPath —— global 规则不绑任何具体上下文
       store.create(
-        null,
+        contextId,
         PermissionStore.createRule({
           pattern: decision.pattern.pattern,
           decision: "allow",
           scope: "global",
+          contributors: [{ origin: "user", timestamp: now }],
         }),
       );
       return;

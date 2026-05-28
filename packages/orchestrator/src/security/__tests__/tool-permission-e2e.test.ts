@@ -102,10 +102,10 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
       // 自动沉淀：中间精度 allow 规则（curl *），标记 origin=user
       const wsId = pipeline.getContextId();
       expect(wsId).toBeTruthy();
-      const wsRules = store.list(wsId).filter((r) => r.scope === "workspace");
+      const wsRules = store.list(wsId).filter((r) => r.scope === "context");
       expect(wsRules).toHaveLength(1);
       expect(wsRules[0]!.decision).toBe("allow");
-      expect(wsRules[0]!.origin).toBe("user");
+      expect(wsRules[0]!.contributors?.map((c) => c.origin)).toContain("user");
       expect(wsRules[0]!.pattern.tool).toBe("bash");
       expect(wsRules[0]!.pattern.argument).toBe("curl *");
 
@@ -157,10 +157,10 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
 
       // 5 次不同 curl 累计到同一 key（curl *）→ 第 5 次自动沉淀中间精度规则
       const wsId = pipeline.getContextId();
-      const wsRules = store.list(wsId).filter((r) => r.scope === "workspace");
+      const wsRules = store.list(wsId).filter((r) => r.scope === "context");
       expect(wsRules).toHaveLength(1);
       expect(wsRules[0]!.pattern.argument).toBe("curl *");
-      expect(wsRules[0]!.origin).toBe("user");
+      expect(wsRules[0]!.contributors?.map((c) => c.origin)).toContain("user");
 
       // 第 4 次切换命令（curl f）→ 命中 curl * → 直接 allow（中间精度覆盖切换命令）
       await wrapped(
@@ -202,7 +202,7 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
           // 但 ConfirmationDecision.allow-workspace 必须携带 pattern——
           // 用 fallback：构造一个简单 pattern（与 command 一致）
           broker.resolve(req.id, {
-            kind: "allow-workspace",
+            kind: "allow-context",
             pattern: {
               pattern: { tool: "bash", argument: "curl https://api1.com" },
               label: "curl https://api1.com",
@@ -227,7 +227,7 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
 
       // 验证规则创建
       const wsId = pipeline.getContextId();
-      const wsRules = store.list(wsId).filter((r) => r.scope === "workspace");
+      const wsRules = store.list(wsId).filter((r) => r.scope === "context");
       expect(wsRules).toHaveLength(1);
       expect(wsRules[0]!.pattern.argument).toBe("curl https://api1.com");
 
@@ -255,6 +255,56 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
         .snapshot()
         .find((e) => e.key.includes("curl"));
       expect(curlEntry?.count).toBe(1);
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  // 决策 6 核心安全 invariant：主模式自动沉淀**只**产生本上下文规则（scope=context +
+  // contextId="main"），**绝不**建 scope=global 规则。这从根本上消除"主模式不知不觉
+  // 积出全局规则"的安全风险——global 规则只允许用户在 confirm 弹窗显式选 allow-global
+  // 时建立。任何让 maybePersistTrust 重新走 scope=global 分支的回归（例如把
+  // hard-coded `scope: "context"` 改回旧的三元 contextId-based 分支）都会在此处失败。
+  it("主模式自动沉淀 → scope=context + contextId='main'，不创建 global 规则", async () => {
+    const store = new PermissionStore({ rootDir: null });
+    const pipeline = new SecurityPipeline({
+      trustContext: { kind: "global" },
+      permissionStore: store,
+    });
+    const broker = new ConfirmationBroker();
+    const exec = mockExecuteFactory();
+    const wrapped = createSecureExecuteTool({
+      pipeline,
+      originalExecute: exec.fn,
+      broker,
+    });
+
+    broker.onRequest((req) => {
+      queueMicrotask(() => broker.resolve(req.id, { kind: "allow-once" }));
+    });
+
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const bashTool = makeTool("bash");
+      const command = "curl https://example.com/foo";
+      for (let i = 0; i < 3; i++) {
+        await wrapped(bashTool, { command }, makeContext());
+      }
+
+      // 主模式 contextId 固定 "main"
+      expect(pipeline.getContextId()).toBe("main");
+
+      const all = store.list("main");
+      const ctxRules = all.filter((r) => r.scope === "context");
+      const globalRules = all.filter((r) => r.scope === "global");
+
+      // 沉淀产 1 条 scope=context + contextId=main 的规则
+      expect(ctxRules).toHaveLength(1);
+      expect(ctxRules[0]!.contextId).toBe("main");
+      expect(ctxRules[0]!.pattern.argument).toBe("curl *");
+
+      // 关键反向断言：绝不产生 global 规则
+      expect(globalRules).toHaveLength(0);
     } finally {
       logSpy.mockRestore();
     }

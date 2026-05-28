@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   charWidth,
   clampLine,
+  padEndDisplay,
   stringWidth,
   wrapAnsiLine,
   wrapToWidth,
@@ -90,6 +91,54 @@ describe("stringWidth", () => {
   it("handles surrogate pairs correctly", () => {
     // 😀 is U+1F600 (in emoji range → width 2)
     expect(stringWidth("😀")).toBe(2);
+  });
+});
+
+describe("padEndDisplay", () => {
+  it("纯 ASCII 等价 String.padEnd", () => {
+    expect(padEndDisplay("abc", 6)).toBe("abc   ");
+    expect(padEndDisplay("hello", 10)).toBe("hello     ");
+  });
+
+  it("含 ANSI 色彩转义：按可见宽度算补齐，保留 ANSI 序列不动", () => {
+    // \x1b[36m...\x1b[39m 是 chalk.cyan 等效——可见 3 字符，应补 3 空格到宽度 6
+    const colored = "\x1b[36mabc\x1b[39m";
+    const result = padEndDisplay(colored, 6);
+    // 可见 = abc (3) + 3 空格 → 总显示宽度 6
+    expect(result.endsWith("   ")).toBe(true);
+    expect(result).toContain(colored);
+    // 原生 String.padEnd 会因 ANSI 算 char count（10+）→ 完全不补
+    expect(colored.padEnd(6)).toBe(colored);
+  });
+
+  it("CJK 全角：中文每字 2 列，按显示宽度算", () => {
+    // "主模式" 显示宽度 = 6 → padEndDisplay(_, 10) 应补 4 空格
+    expect(padEndDisplay("主模式", 10)).toBe("主模式    ");
+    // "当前工作场景" 显示宽度 = 12 → 已超 10，不补
+    expect(padEndDisplay("当前工作场景", 10)).toBe("当前工作场景");
+  });
+
+  it("ANSI + CJK 混合：cli /trust 列表场景", () => {
+    // 模拟 chalk.cyan("主模式") + padEnd 到 20 列
+    const styled = "\x1b[36m主模式\x1b[39m";
+    const result = padEndDisplay(styled, 20);
+    // 可见 = "主模式" = 6 cells → 补 14 空格
+    expect(result).toBe(styled + " ".repeat(14));
+  });
+
+  it("已达或超目标宽度不补、不截断", () => {
+    expect(padEndDisplay("abc", 3)).toBe("abc");
+    expect(padEndDisplay("abc", 2)).toBe("abc");
+    expect(padEndDisplay("abcdef", 3)).toBe("abcdef");
+  });
+
+  it("空字符串：补齐到目标宽度", () => {
+    expect(padEndDisplay("", 4)).toBe("    ");
+    expect(padEndDisplay("", 0)).toBe("");
+  });
+
+  it("emoji（2 列宽）：按显示宽度算", () => {
+    expect(padEndDisplay("😀", 6)).toBe("😀    ");
   });
 });
 

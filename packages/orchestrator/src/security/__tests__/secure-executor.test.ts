@@ -245,10 +245,10 @@ describe("createSecureExecuteTool", () => {
       expect(exec.callCount()).toBe(3);
 
       const wsId = pipeline.getContextId();
-      const wsRules = store.list(wsId).filter((r) => r.scope === "workspace");
+      const wsRules = store.list(wsId).filter((r) => r.scope === "context");
       expect(wsRules).toHaveLength(1);
       expect(wsRules[0]!.decision).toBe("allow");
-      expect(wsRules[0]!.origin).toBe("steward");
+      expect(wsRules[0]!.contributors?.map((c) => c.origin)).toContain("steward");
     });
   });
 

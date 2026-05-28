@@ -144,52 +144,80 @@ describe("buildConfirmationOptions", () => {
     const opts = buildConfirmationOptions(
       "bash",
       { command: "npm install express" },
-      "ws-1",
+      "ctx-ws-1",
       "interactive",
     );
     const kinds = opts.map((o) => o.kind);
     expect(kinds).toContain("allow-once");
-    expect(kinds).toContain("allow-workspace");
+    expect(kinds).toContain("allow-context");
     expect(kinds).toContain("deny-with-reason");
   });
 
-  it("有 workspaceId 时正好生成 3 项，顺序固定 once → workspace → deny", () => {
+  it("正常路径生成 4 项，顺序固定 once → context → global → deny", () => {
     const opts = buildConfirmationOptions(
       "bash",
       { command: "npm install express" },
-      "ws-1",
+      "ctx-ws-1",
       "interactive",
     );
-    expect(opts.length).toBe(3);
+    expect(opts.length).toBe(4);
     expect(opts[0]!.kind).toBe("allow-once");
-    expect(opts[1]!.kind).toBe("allow-workspace");
-    expect(opts[2]!.kind).toBe("deny-with-reason");
+    expect(opts[1]!.kind).toBe("allow-context");
+    expect(opts[2]!.kind).toBe("allow-global");
+    expect(opts[3]!.kind).toBe("deny-with-reason");
   });
 
-  it("无 workspaceId 时只生成 2 项（allow-once + deny-with-reason），无 workspace 选项", () => {
+  it("主模式时 allow-context label 为「仅主模式生效」", () => {
+    const opts = buildConfirmationOptions(
+      "bash",
+      { command: "npm install express" },
+      "main",
+      "interactive",
+    );
+    const ctx = opts.find((o) => o.kind === "allow-context");
+    expect(ctx?.label).toContain("仅主模式生效");
+  });
+
+  it("工作场景时 allow-context label 为「本工作场景生效」", () => {
+    const opts = buildConfirmationOptions(
+      "bash",
+      { command: "npm install express" },
+      "ctx-ws-1",
+      "interactive",
+    );
+    const ctx = opts.find((o) => o.kind === "allow-context");
+    expect(ctx?.label).toContain("本工作场景生效");
+  });
+
+  it("bypassImmune 操作只给 allow-once + deny-with-reason（禁区永不沉淀、跨上下文都不放宽）", () => {
+    // bypassImmune 操作（凭证 / .git / .ssh / .zhixing 等禁区）只给 allow-once + deny —— 禁区永不沉淀、跨上下文都不放宽
     const opts = buildConfirmationOptions(
       "bash",
       { command: "npm install" },
-      null,
+      "main",
       "interactive",
+      { bypassImmune: true },
     );
     expect(opts.length).toBe(2);
     expect(opts[0]!.kind).toBe("allow-once");
     expect(opts[1]!.kind).toBe("deny-with-reason");
-    expect(opts.some((o) => o.kind === "allow-workspace")).toBe(false);
+    expect(opts.some((o) => o.kind === "allow-context")).toBe(false);
+    expect(opts.some((o) => o.kind === "allow-global")).toBe(false);
   });
 
-  it("不生成 allow-with-note / allow-global / allow-session（broker 仍支持，但 CLI 不暴露）", () => {
+  it("不生成 allow-with-note / allow-session（broker 仍支持，但 CLI 不暴露）", () => {
     const opts = buildConfirmationOptions(
       "bash",
       { command: "npm install express" },
-      "ws-1",
+      "ctx-ws-1",
       "interactive",
     );
     const kinds = opts.map((o) => o.kind);
     expect(kinds).not.toContain("allow-with-note");
-    expect(kinds).not.toContain("allow-global");
     expect(kinds).not.toContain("allow-session");
+    // allow-context + allow-global 现在都是正常生成的持久授权选项（决策 6 上下文平等三选）
+    expect(kinds).toContain("allow-context");
+    expect(kinds).toContain("allow-global");
   });
 
   // ─── pickWorkspacePattern：避免 exact-command bug ───
@@ -198,12 +226,12 @@ describe("buildConfirmationOptions", () => {
     const opts = buildConfirmationOptions(
       "bash",
       { command: "npm install express" },
-      "ws-1",
+      "ctx-ws-1",
       "interactive",
     );
-    const ws = opts.find((o) => o.kind === "allow-workspace");
+    const ws = opts.find((o) => o.kind === "allow-context");
     expect(ws).toBeDefined();
-    if (ws && ws.kind === "allow-workspace") {
+    if (ws && ws.kind === "allow-context") {
       expect(ws.pattern.pattern.argument).toBe("npm install *");
     }
   });
@@ -212,11 +240,11 @@ describe("buildConfirmationOptions", () => {
     const opts = buildConfirmationOptions(
       "bash",
       { command: "git push origin main" },
-      "ws-1",
+      "ctx-ws-1",
       "interactive",
     );
-    const ws = opts.find((o) => o.kind === "allow-workspace");
-    if (ws && ws.kind === "allow-workspace") {
+    const ws = opts.find((o) => o.kind === "allow-context");
+    if (ws && ws.kind === "allow-context") {
       expect(ws.pattern.pattern.argument).toBe("git push *");
     }
   });
@@ -229,12 +257,12 @@ describe("buildConfirmationOptions", () => {
     const opts = buildConfirmationOptions(
       "bash",
       { command: 'echo "Hello from bash" && pwd && ls' },
-      "ws-1",
+      "ctx-ws-1",
       "interactive",
     );
-    const ws = opts.find((o) => o.kind === "allow-workspace");
+    const ws = opts.find((o) => o.kind === "allow-context");
     expect(ws).toBeDefined();
-    if (ws && ws.kind === "allow-workspace") {
+    if (ws && ws.kind === "allow-context") {
       // 关键断言：pattern 不应包含原始命令的引号或 &&
       expect(ws.pattern.pattern.argument).toBe("echo *");
       expect(ws.pattern.pattern.argument).not.toContain("&&");
@@ -246,11 +274,11 @@ describe("buildConfirmationOptions", () => {
     const opts = buildConfirmationOptions(
       "bash",
       { command: "ls" },
-      "ws-1",
+      "ctx-ws-1",
       "interactive",
     );
-    const ws = opts.find((o) => o.kind === "allow-workspace");
-    if (ws && ws.kind === "allow-workspace") {
+    const ws = opts.find((o) => o.kind === "allow-context");
+    if (ws && ws.kind === "allow-context") {
       expect(ws.pattern.pattern.argument).toBe("ls *");
     }
   });
@@ -261,7 +289,7 @@ describe("buildConfirmationOptions", () => {
     const opts = buildConfirmationOptions(
       "bash",
       { command: "ls" },
-      "ws-1",
+      "ctx-ws-1",
       "interactive",
     );
     const denyReason = opts.find((o) => o.kind === "deny-with-reason");
@@ -294,7 +322,7 @@ describe("buildConfirmationRequest", () => {
       input: { command: "npm install express" },
       workingDirectory: "/tmp/ws",
       result: minimalResult(),
-      workspaceId: "ws-1",
+      contextId: "ctx-ws-1",
       sessionType: "interactive",
       now: 1_700_000_000_000,
     });
@@ -304,7 +332,7 @@ describe("buildConfirmationRequest", () => {
     expect(req.toolInput).toEqual({ command: "npm install express" });
     expect(req.workingDirectory).toBe("/tmp/ws");
     expect(req.sessionType).toBe("interactive");
-    expect(req.workspaceId).toBe("ws-1");
+    expect(req.contextId).toBe("ctx-ws-1");
     expect(req.createdAt).toBe(1_700_000_000_000);
     expect(req.expiresAt).toBe(1_700_000_000_000 + 30 * 60 * 1000);
     expect(req.display.body.kind).toBe("bash");
@@ -319,7 +347,7 @@ describe("buildConfirmationRequest", () => {
       input: { command: "ls" },
       workingDirectory: "/tmp",
       result: minimalResult(),
-      workspaceId: null,
+      contextId: "main",
       sessionType: "ci",
       id: "fixed-id",
       now: 0,
@@ -346,7 +374,7 @@ describe("buildConfirmationRequest", () => {
       input: { command: "rm -rf /" },
       workingDirectory: "/tmp",
       result,
-      workspaceId: "ws-1",
+      contextId: "ctx-ws-1",
       sessionType: "interactive",
     });
     expect(req.operationClass).toBe("critical");
@@ -359,7 +387,7 @@ describe("buildConfirmationRequest", () => {
       input: { command: "\x1b[31mrm -rf /\x1b[0m" },
       workingDirectory: "/tmp",
       result: minimalResult(),
-      workspaceId: "ws-1",
+      contextId: "ctx-ws-1",
       sessionType: "interactive",
     });
     expect(req.display.commandPreview).toBe("rm -rf /");
@@ -374,7 +402,7 @@ describe("buildConfirmationRequest", () => {
       input: { command: "ls" },
       workingDirectory: "/tmp",
       result: minimalResult(),
-      workspaceId: "ws-1",
+      contextId: "ctx-ws-1",
       sessionType: "interactive",
       turnOrigin: {
         channel: "feishu",
@@ -395,7 +423,7 @@ describe("buildConfirmationRequest", () => {
       input: { command: "ls" },
       workingDirectory: "/tmp",
       result: minimalResult(),
-      workspaceId: "ws-1",
+      contextId: "ctx-ws-1",
       sessionType: "interactive",
     });
     expect(req.turnOrigin).toBeUndefined();
@@ -407,7 +435,7 @@ describe("buildConfirmationRequest", () => {
       input: { command: "ls" },
       workingDirectory: "/tmp",
       result: minimalResult(),
-      workspaceId: null,
+      contextId: "main",
       sessionType: "ci",
       turnOrigin: {
         channel: "scheduler",

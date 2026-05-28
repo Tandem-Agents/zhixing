@@ -53,7 +53,9 @@ function makeRule(
     createdAt: overrides.createdAt ?? 1000,
     lastMatchedAt: overrides.lastMatchedAt ?? 0,
     matchCount: overrides.matchCount ?? 0,
-    workspace: overrides.workspace,
+    contextId: overrides.contextId,
+    contextPath: overrides.contextPath,
+    contributors: overrides.contributors,
   };
 }
 
@@ -148,23 +150,23 @@ describe("PermissionStore (in-memory)", () => {
   describe("会话作用域", () => {
     it("创建的会话规则可被 list 和 match", () => {
       store.create(
-        null,
+        "main",
         makeRule({
           pattern: { tool: "bash", argument: "git *" },
           scope: "session",
         }),
       );
 
-      expect(store.list(null)).toHaveLength(1);
+      expect(store.list("main")).toHaveLength(1);
       const match = store.match(
-        null,
+        "main",
         makeRequest("bash", { command: "git status" }),
       );
       expect(match).not.toBeNull();
       expect(match?.decision).toBe("allow");
     });
 
-    it("session 规则按 workspaceId 隔离", () => {
+    it("session 规则按 contextId 隔离", () => {
       const wsA = "workspace-aaa";
       const wsB = "workspace-bbb";
 
@@ -182,7 +184,7 @@ describe("PermissionStore (in-memory)", () => {
 
     it("未匹配时返回 null", () => {
       const match = store.match(
-        null,
+        "main",
         makeRequest("bash", { command: "curl foo" }),
       );
       expect(match).toBeNull();
@@ -197,17 +199,17 @@ describe("PermissionStore (in-memory)", () => {
       });
 
       timedStore.create(
-        null,
+        "main",
         makeRule({
           pattern: { tool: "bash", argument: "*" },
           scope: "session",
         }),
       );
 
-      timedStore.match(null, makeRequest("bash", { command: "ls" }));
-      timedStore.match(null, makeRequest("bash", { command: "pwd" }));
+      timedStore.match("main", makeRequest("bash", { command: "ls" }));
+      timedStore.match("main", makeRequest("bash", { command: "pwd" }));
 
-      const rules = timedStore.list(null);
+      const rules = timedStore.list("main");
       expect(rules[0]!.matchCount).toBe(2);
       expect(rules[0]!.lastMatchedAt).toBeGreaterThan(0);
     });
@@ -216,7 +218,7 @@ describe("PermissionStore (in-memory)", () => {
   describe("工具匹配", () => {
     it("工具名大小写不敏感", () => {
       store.create(
-        null,
+        "main",
         makeRule({
           pattern: { tool: "BASH", argument: "*" },
           scope: "session",
@@ -224,7 +226,7 @@ describe("PermissionStore (in-memory)", () => {
       );
 
       const match = store.match(
-        null,
+        "main",
         makeRequest("bash", { command: "ls" }),
       );
       expect(match).not.toBeNull();
@@ -232,7 +234,7 @@ describe("PermissionStore (in-memory)", () => {
 
     it('pattern.tool = "*" 匹配任何工具', () => {
       store.create(
-        null,
+        "main",
         makeRule({
           pattern: { tool: "*", argument: "*" },
           scope: "session",
@@ -240,16 +242,16 @@ describe("PermissionStore (in-memory)", () => {
       );
 
       expect(
-        store.match(null, makeRequest("read", { path: "/tmp/a" })),
+        store.match("main", makeRequest("read", { path: "/tmp/a" })),
       ).not.toBeNull();
       expect(
-        store.match(null, makeRequest("bash", { command: "ls" })),
+        store.match("main", makeRequest("bash", { command: "ls" })),
       ).not.toBeNull();
     });
 
     it("不同工具的规则不会错配", () => {
       store.create(
-        null,
+        "main",
         makeRule({
           pattern: { tool: "bash", argument: "*" },
           scope: "session",
@@ -257,7 +259,7 @@ describe("PermissionStore (in-memory)", () => {
       );
 
       const match = store.match(
-        null,
+        "main",
         makeRequest("write", { path: "/tmp/a" }),
       );
       expect(match).toBeNull();
@@ -267,20 +269,20 @@ describe("PermissionStore (in-memory)", () => {
   describe("参数提取", () => {
     it("bash 从 command 提取", () => {
       store.create(
-        null,
+        "main",
         makeRule({
           pattern: { tool: "bash", argument: "git status" },
           scope: "session",
         }),
       );
       expect(
-        store.match(null, makeRequest("bash", { command: "git status" })),
+        store.match("main", makeRequest("bash", { command: "git status" })),
       ).not.toBeNull();
     });
 
     it("write/edit 从 path 或 file_path 提取", () => {
       store.create(
-        null,
+        "main",
         makeRule({
           pattern: { tool: "write", argument: "src/**" },
           scope: "session",
@@ -288,16 +290,16 @@ describe("PermissionStore (in-memory)", () => {
       );
 
       expect(
-        store.match(null, makeRequest("write", { path: "src/a.ts" })),
+        store.match("main", makeRequest("write", { path: "src/a.ts" })),
       ).not.toBeNull();
       expect(
-        store.match(null, makeRequest("write", { file_path: "src/b.ts" })),
+        store.match("main", makeRequest("write", { file_path: "src/b.ts" })),
       ).not.toBeNull();
     });
 
     it("通用工具回退到第一个字符串参数", () => {
       store.create(
-        null,
+        "main",
         makeRule({
           pattern: { tool: "wechat", argument: "*张三*" },
           scope: "session",
@@ -305,7 +307,7 @@ describe("PermissionStore (in-memory)", () => {
       );
 
       expect(
-        store.match(null, makeRequest("wechat", { to: "张三", content: "x" })),
+        store.match("main", makeRequest("wechat", { to: "张三", content: "x" })),
       ).not.toBeNull();
     });
   });
@@ -313,7 +315,7 @@ describe("PermissionStore (in-memory)", () => {
   describe("冲突解决（规格 §4.7）", () => {
     it("deny 胜出 allow", () => {
       store.create(
-        null,
+        "main",
         makeRule({
           id: "allow-all",
           pattern: { tool: "bash", argument: "*" },
@@ -322,7 +324,7 @@ describe("PermissionStore (in-memory)", () => {
         }),
       );
       store.create(
-        null,
+        "main",
         makeRule({
           id: "deny-rm",
           pattern: { tool: "bash", argument: "rm *" },
@@ -332,7 +334,7 @@ describe("PermissionStore (in-memory)", () => {
       );
 
       const match = store.match(
-        null,
+        "main",
         makeRequest("bash", { command: "rm foo" }),
       );
       expect(match?.id).toBe("deny-rm");
@@ -341,7 +343,7 @@ describe("PermissionStore (in-memory)", () => {
 
     it("精确规则胜出宽泛规则（同决策）", () => {
       store.create(
-        null,
+        "main",
         makeRule({
           id: "broad",
           pattern: { tool: "bash", argument: "*" },
@@ -349,7 +351,7 @@ describe("PermissionStore (in-memory)", () => {
         }),
       );
       store.create(
-        null,
+        "main",
         makeRule({
           id: "specific",
           pattern: { tool: "bash", argument: "git status" },
@@ -358,7 +360,7 @@ describe("PermissionStore (in-memory)", () => {
       );
 
       const match = store.match(
-        null,
+        "main",
         makeRequest("bash", { command: "git status" }),
       );
       expect(match?.id).toBe("specific");
@@ -366,7 +368,7 @@ describe("PermissionStore (in-memory)", () => {
 
     it("多条 deny 规则之间取最精确的", () => {
       store.create(
-        null,
+        "main",
         makeRule({
           id: "deny-broad",
           pattern: { tool: "bash", argument: "*" },
@@ -375,7 +377,7 @@ describe("PermissionStore (in-memory)", () => {
         }),
       );
       store.create(
-        null,
+        "main",
         makeRule({
           id: "deny-specific",
           pattern: { tool: "bash", argument: "rm -rf /" },
@@ -385,7 +387,7 @@ describe("PermissionStore (in-memory)", () => {
       );
 
       const match = store.match(
-        null,
+        "main",
         makeRequest("bash", { command: "rm -rf /" }),
       );
       expect(match?.id).toBe("deny-specific");
@@ -396,7 +398,7 @@ describe("PermissionStore (in-memory)", () => {
     it("按 id 撤销会话规则", () => {
       const ruleId = "target-rule";
       store.create(
-        null,
+        "main",
         makeRule({
           id: ruleId,
           pattern: { tool: "bash", argument: "*" },
@@ -405,7 +407,7 @@ describe("PermissionStore (in-memory)", () => {
       );
 
       expect(store.revoke(ruleId)).toBe(true);
-      expect(store.list(null)).toHaveLength(0);
+      expect(store.list("main")).toHaveLength(0);
     });
 
     it("撤销不存在的 id 返回 false", () => {
@@ -457,19 +459,6 @@ describe("PermissionStore (in-memory)", () => {
     });
   });
 
-  describe("作用域参数校验", () => {
-    it("workspace 作用域必须提供 workspaceId", () => {
-      expect(() =>
-        store.create(
-          null,
-          makeRule({
-            pattern: { tool: "bash", argument: "*" },
-            scope: "workspace",
-          }),
-        ),
-      ).toThrow();
-    });
-  });
 });
 
 // ─── 磁盘持久化 ───
@@ -490,7 +479,7 @@ describe("PermissionStore (disk persistence)", () => {
       PermissionStore.createRule({
         pattern: { tool: "bash", argument: "npm install *" },
         decision: "allow",
-        scope: "workspace",
+        scope: "context",
       }),
     );
 
@@ -506,7 +495,7 @@ describe("PermissionStore (disk persistence)", () => {
   it("创建 global 规则 → global.json → 新实例可加载", () => {
     const storeA = new PermissionStore({ rootDir });
     storeA.create(
-      null,
+      "main",
       PermissionStore.createRule({
         pattern: { tool: "*", argument: "*" },
         decision: "deny",
@@ -531,7 +520,7 @@ describe("PermissionStore (disk persistence)", () => {
     const rule = PermissionStore.createRule({
       pattern: { tool: "bash", argument: "*" },
       decision: "allow",
-      scope: "workspace",
+      scope: "context",
     });
     store.create(wsId, rule);
     store.revoke(rule.id);
@@ -563,9 +552,9 @@ describe("PermissionStore (disk persistence)", () => {
       JSON.stringify({
         version: 1,
         rules: [
-          { id: "good", pattern: { tool: "bash", argument: "*" }, decision: "allow", scope: "workspace", createdAt: 1, lastMatchedAt: 0, matchCount: 0 },
-          { id: "bad-no-pattern", decision: "allow", scope: "workspace" },
-          { id: "bad-decision", pattern: { tool: "bash", argument: "*" }, decision: "maybe", scope: "workspace" },
+          { id: "good", pattern: { tool: "bash", argument: "*" }, decision: "allow", scope: "context", createdAt: 1, lastMatchedAt: 0, matchCount: 0 },
+          { id: "bad-no-pattern", decision: "allow", scope: "context" },
+          { id: "bad-decision", pattern: { tool: "bash", argument: "*" }, decision: "maybe", scope: "context" },
           null,
           "not-an-object",
         ],
@@ -587,7 +576,7 @@ describe("PermissionStore (disk persistence)", () => {
       PermissionStore.createRule({
         pattern: { tool: "bash", argument: "ls" },
         decision: "allow",
-        scope: "workspace",
+        scope: "context",
       }),
     );
 
@@ -608,11 +597,11 @@ describe("PermissionStore (disk persistence)", () => {
       PermissionStore.createRule({
         pattern: { tool: "bash", argument: "*" },
         decision: "allow",
-        scope: "workspace",
+        scope: "context",
       }),
     );
     store.create(
-      null,
+      "main",
       PermissionStore.createRule({
         pattern: { tool: "*", argument: "*" },
         decision: "deny",
@@ -640,29 +629,202 @@ describe("PermissionStore (disk persistence)", () => {
   });
 });
 
-// ─── workspaceIdFromPath ───
+// ─── sanitizeRules 字段持久化往返（含 contributors / contextId / contextPath） ───
+//
+// sanitizeRules 是反序列化关键链路 —— 任何字段在 JSON 往返中漏读都不会被 build /
+// 类型检查发现，但会在生产破坏 /trust 面板（contributors 显示空、生效范围误判）。
+// 这组测试把 sanitize 链路所有分支（happy path / 单条 filter 鲁棒 / optional 缺失
+// 兼容 / 类型错误降级）锁死，未来 PermissionRule 加字段时按同一模式扩展即可。
 
-describe("PermissionStore.workspaceIdFromPath", () => {
+describe("PermissionStore — sanitizeRules 字段持久化往返", () => {
+  let rootDir: string;
+
+  beforeEach(async () => {
+    rootDir = await createTempDir("perm-sanitize");
+  });
+
+  it("完整字段往返：contributors / contextId / contextPath 全部恢复", () => {
+    const wsId = "ws-full";
+    const storeA = new PermissionStore({ rootDir });
+    storeA.create(
+      wsId,
+      PermissionStore.createRule({
+        pattern: { tool: "bash", argument: "npm install *" },
+        decision: "allow",
+        scope: "context",
+        contextId: wsId,
+        contextPath: "/home/user/project",
+        contributors: [
+          { origin: "user", timestamp: 1_700_000_000_000 },
+          { origin: "steward", timestamp: 1_700_000_001_000 },
+        ],
+      }),
+    );
+
+    // 新实例读盘 → sanitizeRules 必须恢复所有字段（schema 升级时易遗漏的回归点）
+    const storeB = new PermissionStore({ rootDir });
+    const rules = storeB.list(wsId).filter((r) => r.scope === "context");
+    expect(rules).toHaveLength(1);
+    expect(rules[0]!.contextId).toBe(wsId);
+    expect(rules[0]!.contextPath).toBe("/home/user/project");
+    expect(rules[0]!.contributors).toEqual([
+      { origin: "user", timestamp: 1_700_000_000_000 },
+      { origin: "steward", timestamp: 1_700_000_001_000 },
+    ]);
+  });
+
+  it("contributors 中混入非法条目：单条 filter，合法条目正常恢复", () => {
+    const wsId = "ws-mixed";
+    fs.mkdirSync(rootDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(rootDir, `${wsId}.json`),
+      JSON.stringify({
+        version: 1,
+        contextId: wsId,
+        rules: [
+          {
+            id: "rule-mixed",
+            pattern: { tool: "bash", argument: "*" },
+            decision: "allow",
+            scope: "context",
+            contextId: wsId,
+            createdAt: 1,
+            lastMatchedAt: 0,
+            matchCount: 0,
+            contributors: [
+              { origin: "user", timestamp: 1 },
+              { origin: "invalid", timestamp: 2 }, // origin 不在白名单
+              { origin: "steward", timestamp: 3 },
+              { timestamp: 4 }, // 缺 origin
+              { origin: "user" }, // 缺 timestamp
+              null, // null 整条
+            ],
+          },
+        ],
+      }),
+      "utf-8",
+    );
+
+    const store = new PermissionStore({ rootDir });
+    const rules = store.list(wsId).filter((r) => r.scope === "context");
+    expect(rules).toHaveLength(1);
+    // 仅保留合法 user + steward 两条，其余降级丢弃
+    expect(rules[0]!.contributors).toEqual([
+      { origin: "user", timestamp: 1 },
+      { origin: "steward", timestamp: 3 },
+    ]);
+  });
+
+  it("contributors / contextId / contextPath 字段缺失：恢复为 undefined，不崩溃", () => {
+    // 模拟旧版本或外部手写 JSON：没有新增字段。这是 optional 字段语义的兼容性
+    // 保护点 —— 历史数据 / 第三方工具写盘的最小 schema 仍能读
+    const wsId = "ws-minimal";
+    fs.mkdirSync(rootDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(rootDir, `${wsId}.json`),
+      JSON.stringify({
+        version: 1,
+        rules: [
+          {
+            id: "rule-min",
+            pattern: { tool: "bash", argument: "*" },
+            decision: "allow",
+            scope: "context",
+            createdAt: 1,
+            lastMatchedAt: 0,
+            matchCount: 0,
+          },
+        ],
+      }),
+      "utf-8",
+    );
+
+    const store = new PermissionStore({ rootDir });
+    const rules = store.list(wsId).filter((r) => r.scope === "context");
+    expect(rules).toHaveLength(1);
+    expect(rules[0]!.contributors).toBeUndefined();
+    expect(rules[0]!.contextId).toBeUndefined();
+    expect(rules[0]!.contextPath).toBeUndefined();
+  });
+
+  it("contributors 类型错（非数组）：整体降级 undefined，不崩溃", () => {
+    // 防御性：JSON 损坏或第三方工具写错类型时，sanitizeContributors 应单条丢弃
+    // 而不让整个 PermissionStore.load 抛错
+    const wsId = "ws-typeerr";
+    fs.mkdirSync(rootDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(rootDir, `${wsId}.json`),
+      JSON.stringify({
+        version: 1,
+        rules: [
+          {
+            id: "rule-typeerr",
+            pattern: { tool: "bash", argument: "*" },
+            decision: "allow",
+            scope: "context",
+            createdAt: 1,
+            lastMatchedAt: 0,
+            matchCount: 0,
+            contributors: "not-an-array",
+          },
+        ],
+      }),
+      "utf-8",
+    );
+
+    expect(() => {
+      const store = new PermissionStore({ rootDir });
+      const rules = store.list(wsId);
+      expect(rules[0]!.contributors).toBeUndefined();
+    }).not.toThrow();
+  });
+
+  it("global 规则不依赖 contextId / contextPath：往返后 scope=global、上下文字段为 undefined", () => {
+    const storeA = new PermissionStore({ rootDir });
+    storeA.create(
+      "main",
+      PermissionStore.createRule({
+        pattern: { tool: "*", argument: "*" },
+        decision: "allow",
+        scope: "global",
+        contributors: [{ origin: "user", timestamp: 1_700_000_000_000 }],
+      }),
+    );
+
+    const storeB = new PermissionStore({ rootDir });
+    const rules = storeB.list("main").filter((r) => r.scope === "global");
+    expect(rules).toHaveLength(1);
+    expect(rules[0]!.contextId).toBeUndefined();
+    expect(rules[0]!.contextPath).toBeUndefined();
+    expect(rules[0]!.contributors).toEqual([
+      { origin: "user", timestamp: 1_700_000_000_000 },
+    ]);
+  });
+});
+
+// ─── contextIdFromPath ───
+
+describe("PermissionStore.contextIdFromPath", () => {
   it("相同路径产生相同 ID", () => {
-    const a = PermissionStore.workspaceIdFromPath("/home/user/project");
-    const b = PermissionStore.workspaceIdFromPath("/home/user/project");
+    const a = PermissionStore.contextIdFromPath("/home/user/project");
+    const b = PermissionStore.contextIdFromPath("/home/user/project");
     expect(a).toBe(b);
   });
 
   it("不同路径产生不同 ID", () => {
-    const a = PermissionStore.workspaceIdFromPath("/home/user/a");
-    const b = PermissionStore.workspaceIdFromPath("/home/user/b");
+    const a = PermissionStore.contextIdFromPath("/home/user/a");
+    const b = PermissionStore.contextIdFromPath("/home/user/b");
     expect(a).not.toBe(b);
   });
 
   it("ID 为 16 字符十六进制", () => {
-    const id = PermissionStore.workspaceIdFromPath("/home/user/project");
+    const id = PermissionStore.contextIdFromPath("/home/user/project");
     expect(id).toMatch(/^[0-9a-f]{16}$/);
   });
 
   it("相对路径被解析为绝对路径", () => {
-    const relative = PermissionStore.workspaceIdFromPath("./project");
-    const absolute = PermissionStore.workspaceIdFromPath(
+    const relative = PermissionStore.contextIdFromPath("./project");
+    const absolute = PermissionStore.contextIdFromPath(
       path.resolve("./project"),
     );
     expect(relative).toBe(absolute);
@@ -694,11 +856,11 @@ describe("PermissionStore 跨作用域组合", () => {
       PermissionStore.createRule({
         pattern: { tool: "bash", argument: "git *" },
         decision: "allow",
-        scope: "workspace",
+        scope: "context",
       }),
     );
     store.create(
-      null,
+      "main",
       PermissionStore.createRule({
         pattern: { tool: "*", argument: "*" },
         decision: "deny",
@@ -729,12 +891,12 @@ describe("PermissionStore 跨作用域组合", () => {
       PermissionStore.createRule({
         pattern: { tool: "bash", argument: "git status" },
         decision: "allow",
-        scope: "workspace",
+        scope: "context",
       }),
     );
     // 全局：宽泛 deny —— deny 应胜出
     store.create(
-      null,
+      "main",
       PermissionStore.createRule({
         pattern: { tool: "bash", argument: "*" },
         decision: "deny",

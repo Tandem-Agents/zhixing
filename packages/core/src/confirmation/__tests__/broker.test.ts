@@ -66,7 +66,7 @@ function makeRequest(
       { kind: "deny", label: "拒绝" },
     ],
     sessionType: "interactive",
-    workspaceId: null,
+    contextId: "main",
     createdAt: now,
     expiresAt: now + 60_000,
     ...overrides,

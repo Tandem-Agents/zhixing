@@ -30,8 +30,10 @@ import type {
   DisplayBody,
   IConfirmationBroker,
   RendererCapabilities,
+  SecurityEventMap,
 } from "@zhixing/core";
 import { tone } from "../tui/style.js";
+import { wrapAnsiLine } from "../tui/line-width.js";
 import type { SelectOption, SelectResult } from "../tui/select-types.js";
 import type { ScreenController } from "../screen/index.js";
 import { SelectOperationRegion } from "./select-operation-region.js";
@@ -42,13 +44,13 @@ export const TERMINAL_RENDERER_CAPABILITIES: RendererCapabilities = {
   supportedOptions: [
     "allow-once",
     "allow-session",
-    "allow-workspace",
+    "allow-context",
     "allow-global",
     "deny",
     "allow-with-note",
     "deny-with-reason",
-    // "edit-then-allow" Step 8 再加
-    // "show-full" SelectOperationRegion 内部通过自适应截断 + 手动展开处理
+    // "edit-then-allow" 尚未实现
+    // "show-full" 由 SelectOperationRegion 内部通过自适应截断 + 手动展开处理
   ],
   supportsAllowNote: true,
   supportsDenyReason: true,
@@ -202,7 +204,7 @@ export function buildSelectOptions(
     switch (opt.kind) {
       case "allow-once":
       case "allow-session":
-      case "allow-workspace":
+      case "allow-context":
       case "allow-global":
       case "deny":
       case "show-full":
@@ -249,10 +251,10 @@ function augmentLabelWithWarning(
 ): string {
   if (
     kind === "allow-session" ||
-    kind === "allow-workspace" ||
+    kind === "allow-context" ||
     kind === "allow-global"
   ) {
-    return `${label}  ${tone.dim("⚠ 持久授权")}`;
+    return `${label}  ${tone.dim("持久授权")}`;
   }
   return label;
 }
@@ -299,9 +301,9 @@ export function translate(
         pattern: opt.pattern,
         note: result.note,
       };
-    case "allow-workspace":
+    case "allow-context":
       return {
-        kind: "allow-workspace",
+        kind: "allow-context",
         pattern: opt.pattern,
         note: result.note,
       };
@@ -404,19 +406,21 @@ function formatIntent(body: DisplayBody): string {
 export function buildInlinePanelBody(request: ConfirmationRequest): string[] {
   const lines: string[] = [];
 
-  // ── 1. 主体（决策唯一依据） ──
+  // ── 1. 安全助理察觉风险（提到顶部、yellow、actionable 信号） ──
+  // 助理在 needs-confirm 路径主动把操作上交用户拍板，研判理由是判断是否放行的
+  // 关键信号。提到 body 顶部 + yellow，让用户在看具体操作前先接收风险提示。
+  if (request.display.stewardReason) {
+    lines.push(chalk.yellow(`⚠ 安全助理察觉风险：${request.display.stewardReason}`));
+    lines.push(chalk.yellow(`请你决定是否继续 ↓`));
+    lines.push("");
+  }
+
+  // ── 2. 主体（决策唯一依据） ──
   // 用户做决策真正依赖的是命令本身/路径/URL 等具体内容——其他元信息（影响 / 风险 /
   // 原因 / cwd / env / 路径列表）对决策无增值，全部删除。风险分级靠 title 形态
   // （high/critical 时 ⚠ + red bold + 标识尾缀）承担，不占额外行
   for (const line of renderBody(request.display.body)) {
     lines.push(line);
-  }
-
-  // ── 2. 安全管家研判理由（仅 needs-confirm 经管家研判时存在） ──
-  // 这不是被省略的元信息，而是 actionable 信号：管家为何把这次操作上交确认，
-  // 帮用户判断是否放行
-  if (request.display.stewardReason) {
-    lines.push(tone.dim(`🛡 安全管家：${request.display.stewardReason}`));
   }
 
   return lines;
@@ -468,6 +472,59 @@ function renderBody(body: DisplayBody): string[] {
 function truncate(s: string, maxChars: number): string {
   if (s.length <= maxChars) return s;
   return `${s.slice(0, maxChars - 1)}…`;
+}
+
+// ─── 安全审计事件渲染（订阅 EventBus 后注入输出区） ───
+
+/**
+ * 渲染安全审计事件为一行用户友好提示（不含末尾换行，由 caller 加）。
+ *
+ * 当前覆盖两类事件：
+ * - `security:steward_review`（仅 safe 分支）：助理自动放行，输出区一行低调提示
+ *   让用户感知到助理在背后做了判断
+ * - `security:rule_sedimented`：累积阈值跨过那一刻自动建立持久放行规则，按
+ *   contextId 动态拼接作用范围 + 引导进 /trust 撤销
+ *
+ * 返回 null 表示该事件不在输出区渲染：
+ * - steward_review 的 needs-confirm / escalate（分别由 confirm 面板和
+ *   SecurityBlockError 错误界面承担，不重复输出）
+ */
+export function renderAuditEvent(event:
+  | { type: "steward_review"; payload: SecurityEventMap["security:steward_review"] }
+  | { type: "rule_sedimented"; payload: SecurityEventMap["security:rule_sedimented"] },
+): string | null {
+  // 输出含 2 空格 indent，与 user / assistant / 工具卡片首列对齐。长内容（含外部
+  // 自由文本 reason / pattern）超 columns 时按 wrapAnsiLine 软换行，续行通过
+  // continuationPrefix 自动维持 indent —— ANSI 序列与 CJK 全角宽度均原生支持。
+  // 段间空行不在此处理：caller 应调 `writer.ensureSegmentBreak()` 表达段间语义。
+  const indent = "  ";
+  const cols = process.stdout.columns ?? 80;
+  const wrapWidth = Math.max(1, cols - indent.length);
+
+  if (event.type === "steward_review") {
+    if (event.payload.decision !== "safe") return null;
+    const raw = tone.dim(
+      `🛡 安全助理放行 ${event.payload.tool} ${event.payload.operation}（理由：${event.payload.reason}）`,
+    );
+    const { output } = wrapAnsiLine(raw, wrapWidth, {
+      continuationPrefix: indent,
+    });
+    return `${indent}${output}`;
+  }
+
+  // rule_sedimented：按 contextId 动态拼接作用范围
+  const scope =
+    event.payload.contextId === "main"
+      ? `${chalk.bold("主模式")}`
+      : `${chalk.bold("当前工作场景")}`;
+  const count = event.payload.contributors.length;
+  const raw = tone.dim(
+    `🛡 已在 ${scope} 记住 ${count} 次同类操作，自动建立放行规则：${event.payload.pattern.argument}（进 /trust 可查看/撤销）`,
+  );
+  const { output } = wrapAnsiLine(raw, wrapWidth, {
+    continuationPrefix: indent,
+  });
+  return `${indent}${output}`;
 }
 
 

@@ -1,15 +1,15 @@
 /**
- * 权限规则存储 — Phase 2
+ * 权限规则存储
  *
  * 管理三种作用域的权限规则：
- *   session   — 本次会话有效（纯内存，不落盘）
- *   workspace — 当前工作区有效（{rootDir}/{workspaceId}.json）
- *   global    — 跨工作区有效（{rootDir}/global.json）
+ *   session — 本次会话有效（纯内存，不落盘）
+ *   context — 当前上下文（主模式 OR 工作场景）内有效（{rootDir}/{contextId}.json）
+ *   global  — 跨所有上下文有效（{rootDir}/global.json）
  *
  * 匹配流程：
- *   1. 收集所有可见规则（session + workspace + global）
+ *   1. 收集所有可见规则（session + context + global）
  *   2. 过滤出匹配当前工具 + 参数 glob 的规则
- *   3. 冲突解决：deny > allow，精确 > 宽泛（规格 §4.7）
+ *   3. 冲突解决：deny > allow，精确 > 宽泛
  *
  * 落盘策略：
  *   - 只在 create / revoke / reset 时落盘
@@ -27,6 +27,7 @@ import type {
   PermissionRule,
   PermissionScope,
   SecurityRequest,
+  TrustContribution,
 } from "./types.js";
 
 // ─── Glob 匹配 ───
@@ -140,14 +141,42 @@ export interface PermissionStoreOptions {
 }
 
 /**
- * 深拷贝 PermissionRule（pattern 是唯一嵌套可变字段，其他都是 primitive）。
+ * 深拷贝 PermissionRule —— 嵌套可变字段（pattern / contributors）需独立拷贝防 mutate 串扰。
  * 用于 `registerBuiltinRules` 入栈时和 `getBuiltinRules` 出栈时的双向防御性拷贝。
  */
 function cloneRule(rule: PermissionRule): PermissionRule {
   return {
     ...rule,
     pattern: { ...rule.pattern },
+    contributors: rule.contributors
+      ? rule.contributors.map((c) => ({ ...c }))
+      : undefined,
   };
+}
+
+/**
+ * 把 unknown 反序列化为合法的 TrustContribution 数组。
+ *
+ * 不合法（非数组 / 某条结构错）整体降级为 undefined（与"字段缺失"等价）；
+ * 单条结构错的不会污染其余条目（剩余合法条目正常恢复，损坏条丢弃）。
+ */
+function sanitizeContributors(
+  raw: unknown,
+): TrustContribution[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: TrustContribution[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const c = item as Partial<TrustContribution>;
+    if (
+      (c.origin !== "user" && c.origin !== "steward") ||
+      typeof c.timestamp !== "number"
+    ) {
+      continue;
+    }
+    out.push({ origin: c.origin, timestamp: c.timestamp });
+  }
+  return out;
 }
 
 /**
@@ -186,8 +215,8 @@ export function defaultExtractArgument(request: SecurityRequest): string {
 interface StorageFile {
   version: number;
   scope?: "global";
-  workspaceId?: string;
-  workspacePath?: string;
+  contextId?: string;
+  contextPath?: string;
   rules: PermissionRule[];
 }
 
@@ -195,7 +224,7 @@ interface StorageFile {
 
 export class PermissionStore implements IPermissionStore {
   private readonly sessionRules = new Map<string, PermissionRule[]>();
-  private readonly workspaceRules = new Map<string, PermissionRule[]>();
+  private readonly contextRules = new Map<string, PermissionRule[]>();
   private globalRules: PermissionRule[] = [];
   /**
    * 系统预置规则池（in-memory，不持久化）—— 按 namespace 分组管理。
@@ -209,7 +238,7 @@ export class PermissionStore implements IPermissionStore {
    * 于用户池（ADR-TPE-008）。
    */
   private readonly builtinRulesByNamespace = new Map<string, PermissionRule[]>();
-  private readonly loadedWorkspaces = new Set<string>();
+  private readonly loadedContexts = new Set<string>();
   private globalLoaded = false;
 
   private readonly rootDir: string | null;
@@ -231,32 +260,30 @@ export class PermissionStore implements IPermissionStore {
   // ─── 公共 API ───
 
   match(
-    workspaceId: string | null,
+    contextId: string,
     request: SecurityRequest,
   ): PermissionRule | null {
     const tool = request.tool.toLowerCase();
     const argument = this.extractArgumentFn(request);
 
-    // ─── 第一阶段：用户池（session / workspace / global）─────────────
+    // ─── 第一阶段：用户池（session / context / global）─────────────
     // 用户池任一命中 → 完全按用户池 resolveConflict 决定结果（builtin 不参与）。
     // 这保证用户的通配 deny（如 `pattern.argument: "*"`）不会被 builtin 高特异性
-    // allow 击败，与"用户拥有最终决定权"的产品语义一致（ADR-TPE-008）。
+    // allow 击败，与"用户拥有最终决定权"的产品语义一致。
     const userCandidates: PermissionRule[] = [];
 
-    const sessionList = this.sessionRules.get(this.sessionKey(workspaceId));
+    const sessionList = this.sessionRules.get(this.sessionKey(contextId));
     if (sessionList) {
       for (const rule of sessionList) {
         if (this.ruleMatches(rule, tool, argument)) userCandidates.push(rule);
       }
     }
 
-    if (workspaceId) {
-      this.ensureWorkspaceLoaded(workspaceId);
-      const wsList = this.workspaceRules.get(workspaceId);
-      if (wsList) {
-        for (const rule of wsList) {
-          if (this.ruleMatches(rule, tool, argument)) userCandidates.push(rule);
-        }
+    this.ensureContextLoaded(contextId);
+    const ctxList = this.contextRules.get(contextId);
+    if (ctxList) {
+      for (const rule of ctxList) {
+        if (this.ruleMatches(rule, tool, argument)) userCandidates.push(rule);
       }
     }
 
@@ -293,26 +320,21 @@ export class PermissionStore implements IPermissionStore {
     return null;
   }
 
-  create(workspaceId: string | null, rule: PermissionRule): void {
+  create(contextId: string, rule: PermissionRule): void {
     switch (rule.scope) {
       case "session": {
-        const key = this.sessionKey(workspaceId);
+        const key = this.sessionKey(contextId);
         const list = this.sessionRules.get(key) ?? [];
         list.push(rule);
         this.sessionRules.set(key, list);
         return;
       }
-      case "workspace": {
-        if (!workspaceId) {
-          throw new Error(
-            "workspace 作用域的规则需要 workspaceId——当前无工作区上下文",
-          );
-        }
-        this.ensureWorkspaceLoaded(workspaceId);
-        const list = this.workspaceRules.get(workspaceId) ?? [];
+      case "context": {
+        this.ensureContextLoaded(contextId);
+        const list = this.contextRules.get(contextId) ?? [];
         list.push(rule);
-        this.workspaceRules.set(workspaceId, list);
-        this.persistWorkspace(workspaceId);
+        this.contextRules.set(contextId, list);
+        this.persistContext(contextId);
         return;
       }
       case "global": {
@@ -329,16 +351,14 @@ export class PermissionStore implements IPermissionStore {
     }
   }
 
-  list(workspaceId: string | null): PermissionRule[] {
+  list(contextId: string): PermissionRule[] {
     const result: PermissionRule[] = [];
-    const sessionList = this.sessionRules.get(this.sessionKey(workspaceId));
+    const sessionList = this.sessionRules.get(this.sessionKey(contextId));
     if (sessionList) result.push(...sessionList);
 
-    if (workspaceId) {
-      this.ensureWorkspaceLoaded(workspaceId);
-      const wsList = this.workspaceRules.get(workspaceId);
-      if (wsList) result.push(...wsList);
-    }
+    this.ensureContextLoaded(contextId);
+    const ctxList = this.contextRules.get(contextId);
+    if (ctxList) result.push(...ctxList);
 
     this.ensureGlobalLoaded();
     result.push(...this.globalRules);
@@ -355,12 +375,12 @@ export class PermissionStore implements IPermissionStore {
         return true;
       }
     }
-    // 工作区
-    for (const [wsId, rules] of this.workspaceRules) {
+    // 上下文
+    for (const [ctxId, rules] of this.contextRules) {
       const idx = rules.findIndex((r) => r.id === ruleId);
       if (idx !== -1) {
         rules.splice(idx, 1);
-        this.persistWorkspace(wsId);
+        this.persistContext(ctxId);
         return true;
       }
     }
@@ -375,12 +395,10 @@ export class PermissionStore implements IPermissionStore {
     return false;
   }
 
-  reset(workspaceId: string | null): void {
-    this.sessionRules.delete(this.sessionKey(workspaceId));
-    if (workspaceId) {
-      this.workspaceRules.set(workspaceId, []);
-      this.persistWorkspace(workspaceId);
-    }
+  reset(contextId: string): void {
+    this.sessionRules.delete(this.sessionKey(contextId));
+    this.contextRules.set(contextId, []);
+    this.persistContext(contextId);
   }
 
   resetAll(): void {
@@ -389,9 +407,9 @@ export class PermissionStore implements IPermissionStore {
     // 注入；runtime 的 resetAll（用户清自己规则）不该牵连系统配置。
     // 测试套件需要"完全重置"时应创建新 PermissionStore 实例，而不是 resetAll。
     this.sessionRules.clear();
-    this.workspaceRules.clear();
+    this.contextRules.clear();
     this.globalRules = [];
-    this.loadedWorkspaces.clear();
+    this.loadedContexts.clear();
     this.globalLoaded = false;
 
     if (this.rootDir && fs.existsSync(this.rootDir)) {
@@ -487,10 +505,12 @@ export class PermissionStore implements IPermissionStore {
   // ─── 静态辅助 ───
 
   /**
-   * 根据工作区路径生成稳定的 workspaceId（SHA-256 前 16 字符）。
+   * 根据工作区绝对路径生成稳定的上下文 ID hash（SHA-256 前 16 字符）。
    * Windows 平台规范化为小写以吸收大小写差异。
+   *
+   * 仅工作场景上下文用此 hash；主模式上下文 ID 固定为 `"main"`，不经此函数。
    */
-  static workspaceIdFromPath(workspacePath: string): string {
+  static contextIdFromPath(workspacePath: string): string {
     const abs = path.resolve(workspacePath);
     const normalized = process.platform === "win32" ? abs.toLowerCase() : abs;
     return crypto
@@ -502,11 +522,20 @@ export class PermissionStore implements IPermissionStore {
 
   /**
    * 构造一条权限规则，自动填充 id / createdAt / 统计字段。
-   * 业务层调用方只需提供 pattern / decision / scope。
+   *
+   * 字段语义：
+   * - `contextId`：仅 `scope === "context"` 时填（主模式 `"main"` / 工作场景 hash），
+   *   决定规则挂载到哪个上下文文件
+   * - `contextPath`：仅 `scope === "context"` 且为工作场景时填该场景的 workdir，
+   *   UI 友好显示用、不参与匹配
+   * - `contributors`：信任来源累积时间线；自动沉淀路径拷贝 tracker 累积数组，
+   *   用户显式选 allow-context/allow-global 时为单条 `[{origin:"user", timestamp:now}]`
    */
   static createRule(
     input: Pick<PermissionRule, "pattern" | "decision" | "scope"> &
-      Partial<Pick<PermissionRule, "workspace" | "origin">>,
+      Partial<
+        Pick<PermissionRule, "contextId" | "contextPath" | "contributors">
+      >,
     now: () => number = () => Date.now(),
   ): PermissionRule {
     return {
@@ -517,8 +546,9 @@ export class PermissionStore implements IPermissionStore {
       createdAt: now(),
       lastMatchedAt: 0,
       matchCount: 0,
-      workspace: input.workspace,
-      origin: input.origin,
+      contextId: input.contextId,
+      contextPath: input.contextPath,
+      contributors: input.contributors,
     };
   }
 
@@ -559,8 +589,8 @@ export class PermissionStore implements IPermissionStore {
     return best;
   }
 
-  private sessionKey(workspaceId: string | null): string {
-    return workspaceId ?? "";
+  private sessionKey(contextId: string): string {
+    return contextId;
   }
 
   // ─── 内部：持久化 ───
@@ -583,36 +613,37 @@ export class PermissionStore implements IPermissionStore {
     }
   }
 
-  private ensureWorkspaceLoaded(workspaceId: string): void {
-    if (this.loadedWorkspaces.has(workspaceId)) return;
-    this.loadedWorkspaces.add(workspaceId);
+  private ensureContextLoaded(contextId: string): void {
+    if (this.loadedContexts.has(contextId)) return;
+    this.loadedContexts.add(contextId);
 
     if (!this.rootDir) return;
-    const file = path.join(this.rootDir, `${workspaceId}.json`);
+    const file = path.join(this.rootDir, `${contextId}.json`);
     if (!fs.existsSync(file)) return;
 
     try {
       const raw = fs.readFileSync(file, "utf-8");
       const data = JSON.parse(raw) as StorageFile;
-      this.workspaceRules.set(
-        workspaceId,
-        this.sanitizeRules(data.rules ?? [], "workspace"),
+      this.contextRules.set(
+        contextId,
+        this.sanitizeRules(data.rules ?? [], "context"),
       );
     } catch {
-      this.workspaceRules.set(workspaceId, []);
+      this.contextRules.set(contextId, []);
     }
   }
 
   /**
    * 对从磁盘读取的规则做基本校验：过滤掉结构不对的条目，
-   * 防止损坏数据传染到后续决策。
+   * 防止损坏数据传染到后续决策。同时恢复 contributors / contextId / contextPath
+   * 字段（这些字段写盘自然走 JSON.stringify、读盘必须显式恢复才不会丢）。
    *
    * **scope 处理**：
-   * - `session` / `workspace` / `global` 通过白名单
+   * - `session` / `context` / `global` 通过白名单
    * - `builtin` 显式**拒绝**——builtin 规则永远不该写磁盘（仅 in-memory，由
    *   `registerBuiltinRules` 注入）。磁盘上若出现（旧版本 bug 或人工编辑），
    *   立即跳过避免幽灵规则进 builtin 池
-   * - 其他未知 scope（含未来扩展）一律跳过
+   * - 其他未知 scope（含未来扩展或旧 schema 残留如 "workspace"）一律跳过
    */
   private sanitizeRules(
     rules: unknown[],
@@ -629,13 +660,12 @@ export class PermissionStore implements IPermissionStore {
         typeof r.pattern.argument !== "string" ||
         (r.decision !== "allow" && r.decision !== "deny") ||
         (r.scope !== "session" &&
-          r.scope !== "workspace" &&
+          r.scope !== "context" &&
           r.scope !== "global")
       ) {
-        // builtin scope 走这条 continue（不在白名单），符合"拒绝磁盘 builtin"语义
         continue;
       }
-      // 磁盘上只应该有 workspace/global 作用域
+      // global 文件不应包含其他作用域规则；context 文件可含任何用户作用域
       if (r.scope !== expectedScope && expectedScope === "global") continue;
       out.push({
         id: r.id,
@@ -646,21 +676,26 @@ export class PermissionStore implements IPermissionStore {
         lastMatchedAt:
           typeof r.lastMatchedAt === "number" ? r.lastMatchedAt : 0,
         matchCount: typeof r.matchCount === "number" ? r.matchCount : 0,
-        workspace: typeof r.workspace === "string" ? r.workspace : undefined,
+        contextId: typeof r.contextId === "string" ? r.contextId : undefined,
+        contextPath:
+          typeof r.contextPath === "string" ? r.contextPath : undefined,
+        contributors: sanitizeContributors(r.contributors),
       });
     }
     return out;
   }
 
-  private persistWorkspace(workspaceId: string): void {
+  private persistContext(contextId: string): void {
     if (!this.rootDir) return;
     this.ensureDir();
-    const file = path.join(this.rootDir, `${workspaceId}.json`);
-    const rules = this.workspaceRules.get(workspaceId) ?? [];
+    const file = path.join(this.rootDir, `${contextId}.json`);
+    const rules = this.contextRules.get(contextId) ?? [];
+    // contextPath 取首条规则的字段值（同一上下文内所有规则的 contextPath 应一致，
+    // 取首条即代表）；主模式或无 path 上下文为 undefined
     const data: StorageFile = {
       version: STORAGE_VERSION,
-      workspaceId,
-      workspacePath: rules[0]?.workspace,
+      contextId,
+      contextPath: rules.find((r) => r.contextPath)?.contextPath,
       rules,
     };
     this.atomicWriteJson(file, data);

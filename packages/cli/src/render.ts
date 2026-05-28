@@ -34,6 +34,7 @@ import {
   type StatusBarHandle,
 } from "./status-bar/index.js";
 import { attachChunkDumpToBus } from "./output/index.js";
+import { renderAuditEvent } from "./security/terminal-renderer.js";
 import {
   createContextIndicator,
   type ContextIndicatorHandle,
@@ -545,6 +546,32 @@ export function createRenderSubscribers(
       bus.on("context:compact_end", (info) => {
         pauseUI();
         renderCompactEnd(info, writer);
+      }),
+    );
+
+    // 安全审计事件订阅 —— 让 AI 安全助理的自动放行（safe）与自动沉淀那一刻
+    // （rule_sedimented）对用户透明。needs-confirm / escalate 不在此渲染：前者由
+    // confirm 面板的前置标识承担，后者由 SecurityBlockError 错误界面承担。
+    //
+    // 段间空行用 writer.ensureSegmentBreak() —— intent-driven API，让底层（chrome /
+    // 直写双模式）各自做幂等：chrome 模式按 cursor 行级状态 emit 1 空行；直写模式
+    // no-op。比 helper 内 `\n` 字面量更解耦：未来段间策略调整在 writer 一处变更。
+    unsubs.push(
+      bus.on("security:steward_review", (payload) => {
+        const line = renderAuditEvent({ type: "steward_review", payload });
+        if (!line) return;
+        pauseUI();
+        writer.ensureSegmentBreak();
+        writer.line(line);
+      }),
+    );
+    unsubs.push(
+      bus.on("security:rule_sedimented", (payload) => {
+        const line = renderAuditEvent({ type: "rule_sedimented", payload });
+        if (!line) return;
+        pauseUI();
+        writer.ensureSegmentBreak();
+        writer.line(line);
       }),
     );
 

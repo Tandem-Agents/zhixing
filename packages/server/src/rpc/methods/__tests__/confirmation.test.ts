@@ -68,7 +68,7 @@ function makeRequest(id: string): ConfirmationRequest {
     },
     options: [],
     sessionType: "interactive",
-    workspaceId: null,
+    contextId: "main",
     createdAt: now,
     expiresAt: now + 60_000,
   };
@@ -342,7 +342,7 @@ describe("confirmation.resolve", () => {
 
   it.each([
     ["allow-session", { pattern: { pattern: { executable: "x", argument: "y" } } }],
-    ["allow-workspace", { pattern: { pattern: { executable: "x", argument: "y" } } }],
+    ["allow-context", { pattern: { pattern: { executable: "x", argument: "y" } } }],
     ["allow-global", { pattern: { pattern: { executable: "x", argument: "y" } } }],
     ["edit-then-allow", { modifiedInput: {} }],
   ])("远程 kind='%s' → invalid params（远程路径不支持持久授权 / 编辑）", (kind, extra) => {

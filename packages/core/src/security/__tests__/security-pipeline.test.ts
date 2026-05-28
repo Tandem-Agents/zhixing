@@ -363,14 +363,14 @@ describe("SecurityPipeline", () => {
     it("workspace 作用域规则可以精确匹配当前工作区", async () => {
       const store = new PermissionStore({ rootDir: null });
       const wsPath = "/home/user/project";
-      const wsId = PermissionStore.workspaceIdFromPath(wsPath);
+      const wsId = PermissionStore.contextIdFromPath(wsPath);
 
       store.create(
         wsId,
         PermissionStore.createRule({
           pattern: { tool: "bash", argument: "npm install *" },
           decision: "allow",
-          scope: "workspace",
+          scope: "context",
         }),
       );
 
@@ -386,7 +386,7 @@ describe("SecurityPipeline", () => {
         PermissionStore.createRule({
           pattern: { tool: "bash", argument: "sudo *" },
           decision: "allow",
-          scope: "workspace",
+          scope: "context",
         }),
       );
 
@@ -397,7 +397,7 @@ describe("SecurityPipeline", () => {
       );
 
       expect(result.allowed).toBe(true);
-      expect(result.matchedPermissionRule?.scope).toBe("workspace");
+      expect(result.matchedPermissionRule?.scope).toBe("context");
     });
 
     it("deny 规则 + 短路：guards 不应运行", async () => {
@@ -444,6 +444,24 @@ describe("SecurityPipeline", () => {
 
       expect(pipeline.getPermissionStore()).toBeDefined();
       expect(pipeline.getContextId()).toMatch(/^[0-9a-f]{16}$/);
+    });
+
+    // 决策 6 核心 invariant：主模式与工作场景在权限层平等都是"上下文"，主模式
+    // contextId 固定 `"main"`、永远非空。任何让 getContextId 重新返回 null 的
+    // 改动都会在此处失败 —— 锁住主模式自动沉淀绑当前上下文（而非建全局规则）
+    // 的安全语义起点。
+    it("getContextId 主模式（global 信任）返回固定常量 'main'", () => {
+      const pipeline = new SecurityPipeline({ trustContext: { kind: "global" } });
+      expect(pipeline.getContextId()).toBe("main");
+    });
+
+    it("getContextId 工作场景返回 path hash（与 'main' 不冲突）", () => {
+      const pipeline = new SecurityPipeline({
+        trustContext: { kind: "workspace", dir: "/home/user/project" },
+      });
+      const id = pipeline.getContextId();
+      expect(id).toMatch(/^[0-9a-f]{16}$/);
+      expect(id).not.toBe("main");
     });
 
     it("result 透出 trustLevel（global 上下文 → global）", async () => {

@@ -95,7 +95,7 @@ function makeRequest(
     },
     options: [],
     sessionType: "interactive",
-    workspaceId: null,
+    contextId: "main",
     createdAt: now,
     expiresAt: now + 30 * 60 * 1000,
     turnOrigin: target
@@ -344,7 +344,7 @@ describe("formatConfirmationMessage", () => {
       },
       options: [],
       sessionType: "interactive",
-      workspaceId: null,
+      contextId: "main",
       createdAt: now,
       expiresAt: now + 30 * 60 * 1000,
     };
@@ -373,7 +373,7 @@ describe("formatConfirmationMessage", () => {
       },
       options: [],
       sessionType: "interactive",
-      workspaceId: null,
+      contextId: "main",
       createdAt: now,
       expiresAt: now + 60_000,
     };
@@ -396,7 +396,7 @@ describe("formatConfirmationMessage", () => {
       },
       options: [],
       sessionType: "interactive",
-      workspaceId: null,
+      contextId: "main",
       createdAt: now,
       expiresAt: now + 60_000,
     };
@@ -404,7 +404,7 @@ describe("formatConfirmationMessage", () => {
     expect(text).toContain("风险等级：medium");
   });
 
-  it("display.stewardReason 存在时渲染安全管家研判理由（远程通道也可见）", () => {
+  it("display.stewardReason 存在时渲染安全助理察觉风险（远程通道也可见、与 TTY 同步术语）", () => {
     const now = Date.now();
     const req: ConfirmationRequest = {
       id: "r1",
@@ -423,16 +423,17 @@ describe("formatConfirmationMessage", () => {
       },
       options: [],
       sessionType: "interactive",
-      workspaceId: null,
+      contextId: "main",
       createdAt: now,
       expiresAt: now + 60_000,
     };
     const text = formatConfirmationMessage(req);
-    expect(text).toContain("安全管家");
+    expect(text).toContain("安全助理察觉风险");
     expect(text).toContain("与当前任务意图不完全匹配");
+    expect(text).toContain("请你决定是否继续");
   });
 
-  it("无 stewardReason 时不渲染管家行", () => {
+  it("无 stewardReason 时不渲染助理风险行", () => {
     const now = Date.now();
     const req: ConfirmationRequest = {
       id: "r1",
@@ -446,11 +447,11 @@ describe("formatConfirmationMessage", () => {
       },
       options: [],
       sessionType: "interactive",
-      workspaceId: null,
+      contextId: "main",
       createdAt: now,
       expiresAt: now + 60_000,
     };
     const text = formatConfirmationMessage(req);
-    expect(text).not.toContain("安全管家");
+    expect(text).not.toContain("安全助理");
   });
 });

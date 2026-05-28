@@ -796,7 +796,7 @@ function buildSlashCommands(
       },
     },
     "/trust": {
-      description: "权限规则管理 (list/revoke/reset)",
+      description: "已建立的信任规则查看与撤销",
       handler: async (_state, args) => {
         await handleTrustCommand(args, {
           pipeline: session.runtime.securityPipeline,

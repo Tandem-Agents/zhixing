@@ -110,6 +110,26 @@ export function stringWidth(s: string): number {
 }
 
 /**
+ * 按显示宽度右补空格 —— 列对齐场景的 String.padEnd 替代品。
+ *
+ * JS 原生 String.padEnd 按 char count 算，对含 ANSI 色彩转义 / CJK 全角 / emoji
+ * 的字符串无法对齐。本函数：
+ *   1. stringWidth 内部已剥 ANSI + 按 CJK-aware 累计（全角 2 列）
+ *   2. 用 `targetCols - 可见宽度` 补空格，保留原 ANSI 转义不动
+ *
+ * 已显示宽度 ≥ targetCols 时不补（不截断 —— 截断由 caller 按需另行处理，
+ * 例如 wrapToWidth / 按需 slice）。
+ *
+ * 任何需要列对齐渲染的场景（/trust 面板、/security 概览、未来表格 UI 等）
+ * 都应走此函数，避免每个 caller 自己组合 stripAnsi + stringWidth + repeat。
+ */
+export function padEndDisplay(s: string, targetCols: number): string {
+  const visible = stringWidth(s);
+  if (visible >= targetCols) return s;
+  return s + " ".repeat(targetCols - visible);
+}
+
+/**
  * 按显示宽度软换行——不在词边界换，按 code point 粒度切。
  *
  * CJK 字符按 2 列、emoji 按 2 列、控制符按 0 列计算。空文本返回 [""]——

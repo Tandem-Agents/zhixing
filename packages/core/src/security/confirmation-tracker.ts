@@ -11,7 +11,7 @@
  * （用户确认、或管家在用户已授予信任的上下文内放行），沉淀规则可在 /trust 撤销。
  */
 
-import type { RiskLevel, SecurityRequest } from "./types.js";
+import type { RiskLevel, SecurityRequest, TrustContribution } from "./types.js";
 
 // ─── 阈值定义 ───
 
@@ -154,21 +154,33 @@ function selectKeyPattern(
 
 /**
  * shouldSuggest 的查询结果。
- * 即使 suggest=false 也返回 patterns/count，方便 UI 展示当前进度。
+ *
+ * 同一查询暴露完整 contributors 数组给调用方（secure-executor.maybePersistTrust
+ * 在判 `suggest=true` 后直接据此构造 `PermissionRule.contributors`，无需二次查询）。
+ *
+ * **`contributors` 是独立副本**：shouldSuggest 内部已对 entry 数组与每条记录做
+ * 深拷贝，调用方可直接持有 / 传给 createRule，无需再 .map 一次。隐式契约下沉
+ * 到边界，避免调用方忘了拷贝把 tracker 内部数组反向污染。
  */
 export interface SuggestionStatus {
-  /** 是否达到建议阈值 */
+  /** 是否达到沉淀阈值 */
   suggest: boolean;
   /** 候选模式列表（最精确到最通用） */
   patterns: SuggestedPattern[];
-  /** 当前累计的手动确认次数 */
+  /** 当前累计的贡献次数（= contributors.length，避免存储冗余字段） */
   count: number;
-  /** 风险等级对应的阈值（-1 表示永不建议） */
+  /** 风险等级对应的阈值（-1 表示永不沉淀） */
   threshold: number;
+  /** 完整贡献时间线 —— 用户确认与 AI 安全助理放行平权累积（独立副本，可放心持有） */
+  contributors: TrustContribution[];
 }
 
 export interface IConfirmationTracker {
-  record(request: SecurityRequest, riskLevel: RiskLevel): void;
+  record(
+    request: SecurityRequest,
+    riskLevel: RiskLevel,
+    origin: TrustContribution["origin"],
+  ): void;
   getCount(request: SecurityRequest): number;
   shouldSuggest(
     request: SecurityRequest,
@@ -182,7 +194,7 @@ export interface IConfirmationTracker {
 }
 
 interface TrackerEntry {
-  count: number;
+  contributors: TrustContribution[];
   /** 已观察到的最高风险等级 */
   highestRisk: RiskLevel;
 }
@@ -192,25 +204,33 @@ interface TrackerEntry {
 export class ConfirmationTracker implements IConfirmationTracker {
   private readonly entries = new Map<string, TrackerEntry>();
 
-  record(request: SecurityRequest, riskLevel: RiskLevel): void {
+  record(
+    request: SecurityRequest,
+    riskLevel: RiskLevel,
+    origin: TrustContribution["origin"],
+  ): void {
     const key = this.buildKey(request);
     if (!key) return;
 
+    const contribution: TrustContribution = { origin, timestamp: Date.now() };
     const existing = this.entries.get(key);
     if (existing) {
-      existing.count += 1;
+      existing.contributors.push(contribution);
       if (RISK_ORDER[riskLevel] > RISK_ORDER[existing.highestRisk]) {
         existing.highestRisk = riskLevel;
       }
     } else {
-      this.entries.set(key, { count: 1, highestRisk: riskLevel });
+      this.entries.set(key, {
+        contributors: [contribution],
+        highestRisk: riskLevel,
+      });
     }
   }
 
   getCount(request: SecurityRequest): number {
     const key = this.buildKey(request);
     if (!key) return 0;
-    return this.entries.get(key)?.count ?? 0;
+    return this.entries.get(key)?.contributors.length ?? 0;
   }
 
   shouldSuggest(
@@ -219,11 +239,16 @@ export class ConfirmationTracker implements IConfirmationTracker {
   ): SuggestionStatus {
     const patterns = suggestPatterns(request);
     const key = this.buildKey(request);
-    const count = key ? this.entries.get(key)?.count ?? 0 : 0;
+    const entry = key ? this.entries.get(key) : undefined;
+    // 深拷贝 contributors —— 调用方持有 / 传给 createRule 时不会反向污染 tracker
+    const contributors = entry
+      ? entry.contributors.map((c) => ({ ...c }))
+      : [];
+    const count = contributors.length;
     const threshold = SUGGESTION_THRESHOLDS[riskLevel];
 
     if (patterns.length === 0 || threshold <= 0) {
-      return { suggest: false, patterns, count, threshold };
+      return { suggest: false, patterns, count, threshold, contributors };
     }
 
     return {
@@ -231,6 +256,7 @@ export class ConfirmationTracker implements IConfirmationTracker {
       patterns,
       count,
       threshold,
+      contributors,
     };
   }
 
@@ -251,7 +277,7 @@ export class ConfirmationTracker implements IConfirmationTracker {
   snapshot(): Array<{ key: string; count: number; highestRisk: RiskLevel }> {
     return [...this.entries.entries()].map(([key, entry]) => ({
       key,
-      count: entry.count,
+      count: entry.contributors.length,
       highestRisk: entry.highestRisk,
     }));
   }

@@ -26,7 +26,11 @@ import type { AgentEventMap } from "../types/agent-events.js";
 import { PathGuard } from "./path-guard.js";
 import type { TrustContext } from "./trust.js";
 import { workspaceDirOf } from "./trust.js";
-import type { SecurityMiddlewareResult } from "./types.js";
+import type {
+  PermissionScope,
+  SecurityMiddlewareResult,
+  TrustContribution,
+} from "./types.js";
 
 export class SecurityAuditor {
   constructor(private readonly eventBus: IEventBus<AgentEventMap>) {}
@@ -123,6 +127,31 @@ export class SecurityAuditor {
       decision: params.decision,
       reason: params.reason,
       confidence: params.confidence,
+    });
+  }
+
+  /**
+   * 发射自动信任沉淀事件 —— 累积阈值跨过那一刻产生持久放行规则。
+   * 仅自动沉淀路径发射；用户在 confirm 弹窗显式选 allow-context / allow-global
+   * 直接建规则不发射（用户主动行为无需事后提示）。
+   */
+  async auditRuleSedimented(params: {
+    toolName: string;
+    toolInput: Record<string, unknown>;
+    pattern: { tool: string; argument: string };
+    scope: PermissionScope;
+    contextId: string;
+    ruleId: string;
+    contributors: TrustContribution[];
+  }): Promise<void> {
+    await this.eventBus.emit("security:rule_sedimented", {
+      tool: params.toolName,
+      operation: describeOperation(params.toolName, params.toolInput),
+      pattern: params.pattern,
+      scope: params.scope,
+      contextId: params.contextId,
+      ruleId: params.ruleId,
+      contributors: params.contributors,
     });
   }
 }

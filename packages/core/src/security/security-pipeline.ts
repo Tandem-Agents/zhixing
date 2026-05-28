@@ -211,17 +211,21 @@ export interface SecurityPipelineOptions {
  *   else execute();
  */
 /**
- * 从信任上下文派生 PermissionStore 的作用域 key：
- * workspace 用工作目录的稳定 hash、scene 用 sceneId、global 无作用域（null）。
+ * 从信任上下文派生 PermissionStore 的上下文 ID：
+ * - workspace 信任：工作目录的稳定 hash
+ * - scene 信任：sceneId
+ * - global 信任（主模式）：固定常量 `"main"` —— 主模式与工作场景在权限层平等都是
+ *   "上下文"，自动沉淀流程仅产生本上下文规则；全局规则只在用户 confirm 显式选
+ *   allow-global 时建立，从根本上消除"主模式不知不觉建全局规则"的安全风险
  */
-function deriveContextId(trust: TrustContext): string | null {
+function deriveContextId(trust: TrustContext): string {
   switch (trust.kind) {
     case "workspace":
-      return PermissionStore.workspaceIdFromPath(trust.dir);
+      return PermissionStore.contextIdFromPath(trust.dir);
     case "scene":
       return trust.sceneId;
     case "global":
-      return null;
+      return "main";
   }
 }
 
@@ -234,7 +238,7 @@ export class SecurityPipeline {
   private readonly executionGuard: ExecutionGuardMiddleware;
   private readonly sessionType: SessionType;
   private readonly trustContext: TrustContext;
-  private readonly contextId: string | null;
+  private readonly contextId: string;
 
   constructor(options: SecurityPipelineOptions = {}) {
     this.policyEngine = new PolicyEngine();
@@ -336,8 +340,15 @@ export class SecurityPipeline {
     return this.executionGuard;
   }
 
-  /** 获取当前信任上下文的作用域 ID（workspace 用 path hash、scene 用 sceneId、global 为 null）。 */
-  getContextId(): string | null {
+  /**
+   * 获取当前信任上下文的 ID。
+   * - workspace 信任：工作目录的稳定 hash
+   * - scene 信任：sceneId
+   * - global 信任（主模式）：固定常量 `"main"`
+   *
+   * 永远非空字符串 —— 主模式与工作场景在权限层平等都是"上下文"。
+   */
+  getContextId(): string {
     return this.contextId;
   }
 

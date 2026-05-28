@@ -22,9 +22,10 @@ import type { HubEntry } from "../../confirmation/hub.js";
 /**
  * 远程 RPC 允许的 ConfirmationDecision.kind 白名单。
  *
- * 为什么不包含 allow-session / allow-workspace / allow-global：
- *   spec §2.2 明确"持久授权走本地 /trust 命令，远程路径不支持"——否则远程
- *   客户端可以一键批准后，在本地 PermissionStore 留下永久规则，绕过本地审计。
+ * 为什么不包含 allow-session / allow-context / allow-global：
+ *   持久授权走本地 /trust 命令，远程路径不支持——否则远程客户端可以一键批准后，
+ *   在本地 PermissionStore 留下永久规则，绕过本地审计与"用户对持久授权显式拍板"
+ *   的契约。
  *
  * 为什么不包含 cancelled / expired / edit-then-allow：
  *   - cancelled / expired 不是用户决策——由 broker 内部产生

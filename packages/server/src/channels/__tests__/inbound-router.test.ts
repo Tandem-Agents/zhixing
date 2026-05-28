@@ -500,7 +500,7 @@ describe("InboundRouter", () => {
         },
         options: [],
         sessionType: "interactive",
-        workspaceId: null,
+        contextId: "main",
         createdAt: now,
         expiresAt: now + 60_000,
       };
@@ -549,7 +549,7 @@ describe("InboundRouter", () => {
         },
         options: [],
         sessionType: "interactive",
-        workspaceId: null,
+        contextId: "main",
         createdAt: now,
         expiresAt: now + 60_000,
       };
@@ -583,7 +583,7 @@ describe("InboundRouter", () => {
         },
         options: [],
         sessionType: "interactive",
-        workspaceId: null,
+        contextId: "main",
         createdAt: now,
         expiresAt: now + 60_000,
       };
@@ -632,7 +632,7 @@ describe("InboundRouter", () => {
         },
         options: [],
         sessionType: "interactive",
-        workspaceId: null,
+        contextId: "main",
         createdAt: now,
         expiresAt: now + 60_000,
       });
@@ -678,7 +678,7 @@ describe("InboundRouter", () => {
         },
         options: [],
         sessionType: "interactive",
-        workspaceId: null,
+        contextId: "main",
         createdAt: now,
         expiresAt: now + 60_000,
       };
@@ -716,7 +716,7 @@ describe("InboundRouter", () => {
         },
         options: [],
         sessionType: "interactive",
-        workspaceId: null,
+        contextId: "main",
         createdAt: now,
         expiresAt: now + 60_000,
       };
@@ -776,7 +776,7 @@ describe("InboundRouter", () => {
         },
         options: [],
         sessionType: "interactive",
-        workspaceId: null,
+        contextId: "main",
         createdAt: now,
         expiresAt: now + 60_000,
         turnOrigin: {
@@ -842,7 +842,7 @@ describe("InboundRouter", () => {
         },
         options: [],
         sessionType: "interactive",
-        workspaceId: null,
+        contextId: "main",
         createdAt: now,
         expiresAt: now + 60_000,
         turnOrigin: {
@@ -888,7 +888,7 @@ describe("InboundRouter", () => {
         },
         options: [],
         sessionType: "interactive",
-        workspaceId: null,
+        contextId: "main",
         createdAt: now,
         expiresAt: now + 60_000,
       };

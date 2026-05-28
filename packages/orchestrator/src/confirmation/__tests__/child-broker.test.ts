@@ -52,7 +52,7 @@ function makeRequest(id: string) {
       { kind: "deny" as const, label: "deny" },
     ],
     sessionType: "ci" as const,
-    workspaceId: null,
+    contextId: "main",
     createdAt: now,
     expiresAt: now + 60_000,
   };

@@ -75,7 +75,7 @@ function makeRequest(
     },
     options: [],
     sessionType: "interactive",
-    workspaceId: null,
+    contextId: "main",
     createdAt: now,
     expiresAt: now + 60_000,
   };

@@ -97,7 +97,7 @@ export type ConfirmationOption =
       hotkey?: string;
     }
   | {
-      kind: "allow-workspace";
+      kind: "allow-context";
       label: string;
       pattern: SuggestedPattern;
       hotkey?: string;
@@ -163,7 +163,12 @@ export interface ConfirmationRequest {
 
   // ── 会话上下文 ──
   sessionType: SessionType;
-  workspaceId: string | null;
+  /**
+   * 当前上下文 ID（主模式 `"main"` / 工作场景 hash，永远非空）—— 用于：
+   * - broker / bridge 推送时让客户端知道是哪个上下文的请求
+   * - 用户选 allow-context 时 secure-executor 把规则落到对应上下文文件
+   */
+  contextId: string;
 
   // ── 时间约束 ──
   /** 创建时间戳（ms） */
@@ -197,7 +202,7 @@ export interface ConfirmationRequest {
 export type ConfirmationDecision =
   | { kind: "allow-once"; note?: string }
   | { kind: "allow-session"; pattern: SuggestedPattern; note?: string }
-  | { kind: "allow-workspace"; pattern: SuggestedPattern; note?: string }
+  | { kind: "allow-context"; pattern: SuggestedPattern; note?: string }
   | { kind: "allow-global"; pattern: SuggestedPattern; note?: string }
   | {
       kind: "edit-then-allow";
