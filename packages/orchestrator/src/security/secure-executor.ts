@@ -184,6 +184,10 @@ export function createSecureExecuteTool(
         ? (content) => turnContext.commitToUser!(content, { toolName: tool.name })
         : context.commitToUser,
       turnOrigin: turnContext?.turnOrigin ?? context.turnOrigin,
+      // userIntent 沿 ToolExecutionContext 透传——子 agent（Task → runChildAgent →
+      // loop-runner）的工具调用时管家仍按顶层用户意图研判，子 agent 不能借助
+      // 自身收到的指令伪装意图来绕过管家
+      userIntent: turnContext?.userIntent ?? context.userIntent,
     };
 
     const evalStart = performance.now();

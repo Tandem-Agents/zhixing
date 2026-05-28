@@ -140,6 +140,12 @@ export interface RunChildAgentOptions {
   parentSignal: AbortSignal;
   /** 任务文本(进 system prompt 的 "Your Role" 段,不进 user message) */
   task: string;
+  /**
+   * 顶层用户原始意图 —— 由父 agent 工具调用的 ctx.userIntent 透传而来，
+   * 让子 agent 工具调用时 AI 安全管家仍按顶层用户意图研判（避免子 agent
+   * 借助自身收到的 task 文本伪装意图绕过管家）。
+   */
+  userIntent?: string;
   /** 资源预算(可选,缺省走 resolveSubAgentBudget 默认值) */
   budget?: SubAgentBudget;
   /**
@@ -308,6 +314,9 @@ async function runChildAgentInner(
           securityPipeline: opts.securityPipeline,
           confirmationBroker: childBroker,
           eventBus: childBus,
+          // 顶层用户意图沿子链路透传 —— 子 secure-executor 在 augmentedContext
+          // 中展开后，孙子 agent 的工具调用仍按同一顶层意图研判
+          userIntent: opts.userIntent,
           parentSignal: opts.parentSignal,
           maxTurns: budget.maxTurns,
           maxTokens: budget.maxTokens,

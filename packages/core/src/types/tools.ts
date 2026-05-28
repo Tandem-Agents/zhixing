@@ -179,6 +179,14 @@ export interface ToolExecutionContext {
   turnOrigin?: TurnOrigin;
 
   /**
+   * 当前 turn 的用户原始意图（用户消息文本）—— 由 secure-executor 从
+   * turnContext.userIntent 展开注入；供 AI 安全管家做"用户意图 vs 操作"对齐研判，
+   * 并沿 Task 子 agent 链路透传，让子 agent 工具调用时管家仍按顶层意图研判
+   * （子 agent 不能借助自身收到的 task 文本伪装意图绕过管家）。
+   */
+  userIntent?: string;
+
+  /**
    * 当前会话可用的 LLM 角色实例（main + light + power）。
    *
    * 入口（cli/run-agent → core agent-loop → tool-executor）创建 ctx 时一次性注入；

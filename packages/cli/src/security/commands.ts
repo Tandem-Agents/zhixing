@@ -1,15 +1,16 @@
 /**
- * /trust 和 /security 斜杠命令处理器 — Phase 2 Step 8 收尾
+ * /trust 和 /security 斜杠命令处理器
  *
- * - /trust list [scope]    列出权限规则（可按 scope 过滤）
- * - /trust revoke <id>     按 id 前缀撤销规则
- * - /trust reset           清除当前工作区的会话+工作区规则（需要确认）
- * - /trust reset all       清除所有规则（含 global，需要二次确认）
- * - /security              安全状态概览
- * - /security rules        列出当前生效的策略规则
+ * - /trust list [scope]      列出权限规则（可按 scope 过滤），含 origin 列区分来源
+ * - /trust revoke <id>       按 id 前缀撤销单条规则
+ * - /trust revoke-steward    跨 scope 撤销 AI 安全管家自动沉淀的所有规则（需确认）
+ * - /trust reset             清除当前工作区的会话+工作区规则（需确认）
+ * - /trust reset all         清除所有规则（含 global，需二次确认）
+ * - /security                安全状态概览
+ * - /security rules          列出当前生效的策略规则
  *
- * 这些命令是 Phase 2 用户体验的最后一公里：让用户看见和管理自己创建的规则，
- * 不需要去手动编辑 ~/.zhixing/permissions/<hash>.json
+ * 让用户能看见并管理自己创建的规则与管家自动沉淀的规则，不必手动编辑
+ * ~/.zhixing/permissions/<hash>.json
  */
 
 import * as readline from "node:readline/promises";
@@ -43,6 +44,7 @@ function formatRule(rule: PermissionRule): string {
   const decision =
     rule.decision === "allow" ? chalk.green("allow") : chalk.red("deny ");
   const scope = SCOPE_BADGE[rule.scope];
+  const origin = formatOrigin(rule.origin);
   const tool = chalk.cyan(rule.pattern.tool.padEnd(8));
   const arg = rule.pattern.argument.padEnd(28).slice(0, 28);
   const matched = rule.matchCount > 0 ? `匹配 ${rule.matchCount} 次` : "未匹配";
@@ -50,7 +52,15 @@ function formatRule(rule: PermissionRule): string {
     rule.lastMatchedAt > 0
       ? chalk.dim(formatRelativeMs(rule.lastMatchedAt))
       : chalk.dim("—");
-  return `  ${chalk.dim(idShort)}  ${scope}  ${decision}  ${tool} ${arg} ${chalk.dim(matched)} ${ts}`;
+  return `  ${chalk.dim(idShort)}  ${scope}  ${origin}  ${decision}  ${tool} ${arg} ${chalk.dim(matched)} ${ts}`;
+}
+
+// user = 用户在 confirm 中手动选"始终允许"创建；steward = AI 安全管家在自动
+// 沉淀阈值后建立。origin 缺失表示内置 / 历史遗留规则，以占位展示。
+function formatOrigin(origin: PermissionRule["origin"]): string {
+  if (origin === "user") return chalk.blue("[user]   ");
+  if (origin === "steward") return chalk.yellow("[steward]");
+  return chalk.dim("[—]      ");
 }
 
 function formatRelativeMs(timestamp: number): string {
@@ -85,6 +95,8 @@ export async function handleTrustCommand(
       return listRules(tokens.slice(1), opts);
     case "revoke":
       return revokeRule(tokens.slice(1), opts);
+    case "revoke-steward":
+      return revokeStewardRules(opts);
     case "reset":
       return resetRules(tokens.slice(1), opts);
     case "help":
@@ -98,8 +110,9 @@ function printTrustHelp(writer: CliWriter): void {
   writer.line("");
   writer.line(chalk.bold("  /trust — 权限规则管理"));
   writer.line("");
-  writer.line("  /trust list [scope]      列出规则（scope: session/workspace/global）");
-  writer.line("  /trust revoke <id>       按 id 前缀撤销规则");
+  writer.line("  /trust list [scope]      列出规则（scope: session/workspace/global），含 origin 列");
+  writer.line("  /trust revoke <id>       按 id 前缀撤销单条规则");
+  writer.line("  /trust revoke-steward    撤销 AI 安全管家自动沉淀的所有规则（跨 scope，需确认）");
   writer.line("  /trust reset             清除当前工作区的所有规则");
   writer.line("  /trust reset all         清除所有规则（含 global，需二次确认）");
   writer.line("");
@@ -145,9 +158,9 @@ function listRules(args: string[], opts: TrustOptions): void {
     writer.line(chalk.dim(`  当前工作区: ${workspacePath}`));
   }
   writer.line(
-    chalk.dim("  id        scope     dec    tool      pattern                       匹配状态"),
+    chalk.dim("  id        scope     origin     dec    tool     pattern                       匹配状态"),
   );
-  writer.line(chalk.dim("  ─────────────────────────────────────────────────────────────────────"));
+  writer.line(chalk.dim("  ──────────────────────────────────────────────────────────────────────────────"));
 
   // 按 scope 分组：global → workspace → session
   const order: PermissionScope[] = ["global", "workspace", "session"];
@@ -201,6 +214,45 @@ async function revokeRule(args: string[], opts: TrustOptions): Promise<void> {
   } else {
     writer.line(chalk.red(`\n  ✗ 撤销失败\n`));
   }
+}
+
+// 批量撤销 AI 安全管家自动沉淀的规则——跨 scope（global + workspace + session），
+// 提供"清除 steward 沉淀、保留手动规则"的精准入口，避免一刀切 /trust reset 把
+// 用户主动建立的规则也一起删掉。
+async function revokeStewardRules(opts: TrustOptions): Promise<void> {
+  const { pipeline, rl, writer } = opts;
+  const store = pipeline.getPermissionStore();
+  const workspaceId = pipeline.getContextId();
+
+  const all = store.list(workspaceId);
+  const stewardRules = all.filter((r) => r.origin === "steward");
+
+  if (stewardRules.length === 0) {
+    writer.line(chalk.dim("\n  没有 AI 安全管家自动沉淀的规则\n"));
+    return;
+  }
+
+  writer.line(
+    chalk.yellow(
+      `\n  即将撤销 ${stewardRules.length} 条 AI 安全管家自动沉淀的规则（跨 scope）：`,
+    ),
+  );
+  for (const rule of stewardRules) {
+    writer.line(formatRule(rule));
+  }
+  writer.line("");
+
+  const answer = await rl.question(chalk.yellow("  确认撤销？(y/N): "));
+  if (answer.trim().toLowerCase() !== "y") {
+    writer.line(chalk.dim("  已取消\n"));
+    return;
+  }
+
+  let revoked = 0;
+  for (const rule of stewardRules) {
+    if (store.revoke(rule.id)) revoked += 1;
+  }
+  writer.line(chalk.green(`  ✓ 已撤销 ${revoked} 条 steward 规则\n`));
 }
 
 async function resetRules(args: string[], opts: TrustOptions): Promise<void> {

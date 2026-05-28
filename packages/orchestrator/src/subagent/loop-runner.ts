@@ -179,6 +179,12 @@ export interface RunSubAgentLoopOptions {
   wallClockTimeoutMs: number;
   /** 工具执行的工作目录,缺省 process.cwd() */
   workingDirectory?: string;
+  /**
+   * 顶层用户原始意图 —— 由父 runChildAgent 透传，子 secure-executor 设置进
+   * turnContext.userIntent 后由 augmentedContext 展开给所有子工具调用；
+   * AI 安全管家在子链路中仍按此意图研判，杜绝子 agent 伪装意图绕过。
+   */
+  userIntent?: string;
 }
 
 // ─── 实现 ───
@@ -274,6 +280,15 @@ export async function runSubAgentLoop(
       originalExecute: (tool, input, ctx) => tool.call(input, ctx),
       broker: opts.confirmationBroker,
       sessionType: "ci",
+      // 子链路 turnContext：直接包装 userIntent 透传给管家研判（不做 truthy
+      // 守卫——"" 等 falsy 字符串在主 agent 入口直接进 turnContext，子链路
+      // 也保持同样语义，由 secure-executor 的 nullish coalescing 统一兜底）；
+      // turnId/turnOrigin 等父字段不复用——子 agent 是独立 run，子 secure-executor
+      // 自有 turn 边界
+      turnContext: { userIntent: opts.userIntent },
+      // 子 EventBus 接通安全审计 —— 子 agent 的 pipeline 决策事件与管家裁决
+      // 事件发射到子 bus，与父 bus 通过 lineage 关联（runChildAgent 派生时设置）
+      eventBus: opts.eventBus,
     });
 
     // drain yields + 终止 result —— drainAgentLoop 收集所有 yield 直到 done

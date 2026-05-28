@@ -564,4 +564,45 @@ describe("createSecureExecuteTool", () => {
       expect(exec.callCount()).toBe(1);
     });
   });
+
+  // turnContext.userIntent 是子 agent 透传的入口字段——secure-executor 把它
+  // 展开到 augmentedContext.userIntent，让子工具（Task）能从 ctx.userIntent 读取
+  // 并沿 runChildAgent → loop-runner → 子 secure-executor 接力，使管家在
+  // 整个子 agent 链路中仍按顶层用户意图研判。
+  describe("userIntent 展开（管家研判与子 agent 透传的源头）", () => {
+    it("turnContext.userIntent → augmentedContext.userIntent → 工具 ctx 可读", async () => {
+      const broker = new ConfirmationBroker();
+      const exec = mockExecute();
+      const { pipeline } = makePipeline();
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: exec.fn,
+        broker,
+        turnContext: {
+          userIntent: "调研 X 并整理笔记",
+        },
+      });
+
+      await wrapped(makeTool("read"), { path: "/tmp/a" }, makeContext());
+
+      const ctx = exec.lastContext();
+      expect(ctx?.userIntent).toBe("调研 X 并整理笔记");
+    });
+
+    it("无 turnContext → ctx.userIntent 保持 undefined（不破坏既有行为）", async () => {
+      const broker = new ConfirmationBroker();
+      const exec = mockExecute();
+      const { pipeline } = makePipeline();
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: exec.fn,
+        broker,
+      });
+
+      await wrapped(makeTool("read"), { path: "/tmp/a" }, makeContext());
+
+      const ctx = exec.lastContext();
+      expect(ctx?.userIntent).toBeUndefined();
+    });
+  });
 });
