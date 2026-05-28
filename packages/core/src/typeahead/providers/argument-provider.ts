@@ -23,6 +23,7 @@ import type {
   CommandDef,
   ICommandRegistry,
   InlineActionSupport,
+  PanelMode,
   SuggestionItem,
   SuggestionProvider,
   TriggerContext,
@@ -161,6 +162,17 @@ export class ArgumentProvider implements SuggestionProvider {
     const data = match.providerData as ArgumentProviderData | undefined;
     if (!data || data.currentSchema.kind !== "async-enum") return {};
     return data.currentSchema.provider.inlineActions ?? {};
+  }
+
+  /**
+   * 当前 trigger 的面板语义模式。仅 async-enum schema 透传其 provider 静态声明
+   * 的 `mode`；其他 schema 类型（enum/text/path/boolean/number）概念上都是
+   * picker（用户选一个值给业务用），默认 `"picker"`。
+   */
+  computePanelMode(match: TriggerMatch): PanelMode {
+    const data = match.providerData as ArgumentProviderData | undefined;
+    if (!data || data.currentSchema.kind !== "async-enum") return "picker";
+    return data.currentSchema.provider.mode;
   }
 
   // ── 静态枚举 ──

@@ -87,6 +87,7 @@ function makeState(
     ghostText: null,
     argumentHint: null,
     inlineActions: {},
+    panelMode: "picker",
     deletePending: null,
     ...partial,
   };
@@ -290,6 +291,20 @@ describe("renderSessionLines", () => {
       ).join("\n"),
     );
     expect(withGhost).toContain("↑↓ · Enter · Tab · Esc");
+  });
+
+  // management 模式 footer 不显 Enter —— /trust 等"管理面板"语义。锁住"Enter 在
+  // management 面板内 no-op"的契约：任何回退到把 Enter 写死进 navKeys 的改动
+  // 立即在此 fail。
+  it("panelMode='management' 时 footer 不含 Enter（仅 picker 显 Enter）", () => {
+    const state = makeState({
+      suggestions: [makeSuggestion("a:b", "/a")],
+      selectedIndex: 0,
+      panelMode: "management",
+    });
+    const out = stripAnsi(renderSessionLines(state, defaultRenderOpts).join("\n"));
+    expect(out).toMatch(/↑↓ · Esc/);
+    expect(out).not.toContain("Enter");
   });
 
   it("deletePending 态 hint 切到确认文案,覆盖其他操作提示", () => {

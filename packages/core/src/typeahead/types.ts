@@ -176,11 +176,33 @@ export interface InlineActionSupport {
 }
 
 /**
+ * 面板语义模式 —— provider 必填，决定 typeahead 框架对该候选列表的 Enter / footer /
+ * 按键 dispatch 行为。两种模式语义彻底分离，避免"列表面板"抽象被多种语义隐式重载：
+ *
+ *   - `picker`：选择器。用户从候选挑一个值给业务用（典型：/work 切场景、/resume
+ *     切对话）。Enter accept 候选触发业务动作；footer 显「↑↓ · Enter · Esc」；
+ *     inlineActions（delete/rename/create）是辅助操作。
+ *   - `management`：管理面板。用户对资源做就地操作（典型：/trust 撤销规则）。
+ *     "选中"只是导航位置，无 accept 业务语义；Enter 在面板内 no-op；footer 显
+ *     「↑↓ · {inline 操作} · Esc」不含 Enter；inlineActions 是主操作。
+ *
+ * 未来扩新模式（multi-select / read-only 等）仅需追加 union 成员 + 各层 switch
+ * exhaustive 分支，TypeScript 强制把所有 caller highlight 出来。
+ */
+export type PanelMode = "picker" | "management";
+
+/**
  * 异步参数候选提供者。
  * 实现者返回一个 Promise，**必须**在 signal abort 时尽快 reject 或返回部分结果。
  */
 export interface ArgChoiceProvider {
   list(ctx: ArgQueryContext, signal: AbortSignal): Promise<readonly ArgChoice[]>;
+  /**
+   * **必填**：面板语义模式（picker / management）。决定 Enter / footer / 按键
+   * dispatch 行为。type system 强制 caller 显式表态，杜绝"所有候选列表都是
+   * picker"的隐式假设。详见 PanelMode 注释。
+   */
+  readonly mode: PanelMode;
   /**
    * 可选:静态声明此 provider 的候选列表支持哪些 inline 操作。仅声明能力 ——
    * Panel 据此渲染快捷键提示、InputController 据此拦截按键;实际的物理操作与
@@ -638,6 +660,17 @@ export interface SuggestionProvider {
    */
   computeInlineActions?(match: TriggerMatch): InlineActionSupport;
 
+  /**
+   * 计算当前 trigger 的面板语义模式。broker 在 query 完成后调用，结果写入
+   * `TypeaheadSessionState.panelMode`。仅 provider 内部知道自己当前 match 的
+   * 下层 schema / provider 的 mode 声明 —— broker 不跨层访问，通过本 hook 让
+   * provider 自决。
+   *
+   * 未实现 = 默认 `"picker"`（命令选择面板永远是 picker，CommandProvider 不实现）。
+   * ArgumentProvider 实现为读取 async-enum schema 的 `provider.mode`。
+   */
+  computePanelMode?(match: TriggerMatch): PanelMode;
+
   /** 声明此 provider 是否支持 accept 后继续同 provider 的链式 query（比如两段式 /cmd → args） */
   readonly supportsChaining?: boolean;
 }
@@ -723,6 +756,14 @@ export interface TypeaheadSessionState {
    * 据此决定 Ctrl+D / Ctrl+R / Ctrl+N 是否生效。
    */
   readonly inlineActions: InlineActionSupport;
+
+  /**
+   * 当前 trigger 的面板语义模式。由 `SuggestionProvider.computePanelMode` hook
+   * 在 query 完成后推导写入，未实现 hook = `"picker"`（CommandProvider 默认）。
+   * typeahead Panel 据此决定 footer navKeys 是否含 Enter；InputController 据此
+   * 决定 Enter 键是 accept 还是 no-op。
+   */
+  readonly panelMode: PanelMode;
 
   /**
    * 当前准备删的 `SuggestionItem.id`(typeahead 现有唯一标识),null 表示无

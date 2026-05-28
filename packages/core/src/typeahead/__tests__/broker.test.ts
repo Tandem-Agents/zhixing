@@ -937,6 +937,60 @@ describe("DefaultTypeaheadBroker — inlineActions / deletePending / refresh", (
     expect(broker.getState(handle.id)?.suggestions.length).toBeGreaterThan(0);
   });
 
+  // panelMode 透传链路守护 —— 与 inlineActions 同款 6 步 pipeline，由
+  // SuggestionProvider.computePanelMode hook 决定，未实现默认 "picker"。
+  it("provider 实现 computePanelMode → state.panelMode 透传", () => {
+    const broker = new DefaultTypeaheadBroker();
+    const provider: SuggestionProvider = {
+      ...makeSyncProvider("p", 100, "/"),
+      computePanelMode: () => "management",
+    };
+    broker.register(provider);
+    const handle = broker.beginSession(makeCtx("/"));
+    expect(broker.getState(handle.id)?.panelMode).toBe("management");
+  });
+
+  it("provider 未实现 computePanelMode → state.panelMode 默认 'picker'", () => {
+    const broker = new DefaultTypeaheadBroker();
+    broker.register(makeSyncProvider("p", 100, "/"));
+    const handle = broker.beginSession(makeCtx("/"));
+    expect(broker.getState(handle.id)?.panelMode).toBe("picker");
+  });
+
+  it("provider.computePanelMode 抛错 → 降级 'picker' + 不传染", () => {
+    const broker = new DefaultTypeaheadBroker();
+    const provider: SuggestionProvider = {
+      ...makeSyncProvider("p", 100, "/"),
+      computePanelMode: () => {
+        throw new Error("boom");
+      },
+    };
+    broker.register(provider);
+    const handle = broker.beginSession(makeCtx("/"));
+    expect(broker.getState(handle.id)?.panelMode).toBe("picker");
+    expect(broker.getState(handle.id)?.suggestions.length).toBeGreaterThan(0);
+  });
+
+  // 锁住"trigger 命中那一刻 panelMode + inlineActions 立即等于最终值"的不变量。
+  // 用永不 resolve 的 async provider 模拟"query 尚未完成的 loading 中间态"，
+  // 验证 state 已经反映 provider 静态声明（不是 picker / 空集默认）。任何回退到
+  // "loading 初始字段写死默认、等 query 完成才覆盖"的实现立即在此 fail。
+  it("loading 中间态 panelMode + inlineActions 与最终值一致（不延迟到 query 完成）", () => {
+    const broker = new DefaultTypeaheadBroker();
+    const provider: SuggestionProvider = {
+      ...makeAsyncProvider("p", 100, "/", () => new Promise(() => {})),
+      computePanelMode: () => "management",
+      computeInlineActions: () => ({ delete: true }),
+    };
+    broker.register(provider);
+    const handle = broker.beginSession(makeCtx("/"));
+
+    const state = broker.getState(handle.id);
+    expect(state?.loading).toBe(true);
+    expect(state?.panelMode).toBe("management");
+    expect(state?.inlineActions.delete).toBe(true);
+  });
+
   it("初始 state.deletePending === null", () => {
     const broker = new DefaultTypeaheadBroker();
     broker.register(makeSyncProvider("p", 100, "/"));

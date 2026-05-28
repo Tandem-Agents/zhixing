@@ -24,7 +24,12 @@ import {
   DefaultTypeaheadBroker,
   registerBuiltinCommands,
 } from "@zhixing/core";
-import type { RuntimeContext } from "@zhixing/core";
+import type {
+  PanelMode,
+  RuntimeContext,
+  SuggestionItem,
+  SuggestionProvider,
+} from "@zhixing/core";
 
 import { CommandDispatcher } from "../command-dispatcher.js";
 import {
@@ -576,6 +581,174 @@ describe("readInputLine — 结果 narrowing smoke", () => {
   it("InputLineResult kind 判别有效", async () => {
     const test: InputLineResult = { kind: "text", text: "x" };
     if (test.kind === "text") expect(test.text).toBe("x");
+  });
+});
+
+// Enter 按键的 panelMode 分支 —— 锁住 picker / management 两种模式下的回车契约。
+// 关键不变量：management 模式下 Enter 完全 no-op（无论候选是否存在），picker
+// 模式保持现状（有候选则 accept、无候选则 submit）。锁住此契约后任何"把
+// management 检查捆绑 hasActiveSuggestions"的回归直接在此 fail。
+
+function makeMockItem(id: string, providerId: string): SuggestionItem {
+  return {
+    id,
+    providerId,
+    displayText: id,
+    acceptPayload: {
+      replacement: id,
+      execute: false,
+    },
+  };
+}
+
+function makeModeProbeProvider(opts: {
+  id: string;
+  mode: PanelMode;
+  items: SuggestionItem[];
+}): SuggestionProvider {
+  const triggerChar = "?";
+  return {
+    id: opts.id,
+    priority: 200,
+    matchTrigger: (ctx) => {
+      if (!ctx.draft.startsWith(triggerChar)) return null;
+      return {
+        providerId: opts.id,
+        tokenStart: 0,
+        tokenEnd: ctx.draft.length,
+        token: ctx.draft,
+        query: ctx.draft.slice(1),
+        runtime: ctx.runtime,
+      };
+    },
+    query: () => opts.items,
+    computePanelMode: () => opts.mode,
+  };
+}
+
+describe("readInputLine — Enter 按键的 panelMode 行为", () => {
+  it("management + 有候选 → Enter 完全 swallow（不 accept、不 submit），Esc 取消", async () => {
+    const { stdin, stdout } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+    broker.register(
+      makeModeProbeProvider({
+        id: "mgmt",
+        mode: "management",
+        items: [makeMockItem("a", "mgmt"), makeMockItem("b", "mgmt")],
+      }),
+    );
+
+    const resultP = readInputLine({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      stdin,
+      stdout,
+      columns: 80,
+    });
+
+    await typeChars(stdin, "?");
+    await new Promise((r) => setTimeout(r, 20));
+    await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+    await new Promise((r) => setTimeout(r, 20));
+    await sendSyntheticKey(stdin, {
+      name: "c",
+      ctrl: true,
+      sequence: "\x03",
+    });
+
+    const result = await resultP;
+    expect(result.kind).toBe("cancelled");
+  });
+
+  it("management + 空候选 → Enter 完全 swallow（不 submit），Esc 取消", async () => {
+    const { stdin, stdout } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+    broker.register(
+      makeModeProbeProvider({ id: "mgmt", mode: "management", items: [] }),
+    );
+
+    const resultP = readInputLine({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      stdin,
+      stdout,
+      columns: 80,
+    });
+
+    await typeChars(stdin, "?");
+    await new Promise((r) => setTimeout(r, 20));
+    await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+    await new Promise((r) => setTimeout(r, 20));
+    await sendSyntheticKey(stdin, {
+      name: "c",
+      ctrl: true,
+      sequence: "\x03",
+    });
+
+    const result = await resultP;
+    expect(result.kind).toBe("cancelled");
+  });
+
+  it("picker + 有候选 → Enter accept 候选（acceptPayload.replacement 写入 buffer）", async () => {
+    const { stdin, stdout } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+    broker.register(
+      makeModeProbeProvider({
+        id: "pick",
+        mode: "picker",
+        items: [makeMockItem("alpha", "pick")],
+      }),
+    );
+
+    const resultP = readInputLine({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      stdin,
+      stdout,
+      columns: 80,
+    });
+
+    await typeChars(stdin, "?");
+    await new Promise((r) => setTimeout(r, 20));
+    await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+    await new Promise((r) => setTimeout(r, 20));
+    await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+
+    const result = await resultP;
+    expect(result.kind).toBe("text");
+    if (result.kind === "text") {
+      expect(result.text).toBe("alpha");
+    }
+  });
+
+  it("picker + 空候选 → Enter 走 submit fallback（保护现状）", async () => {
+    const { stdin, stdout } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+    broker.register(
+      makeModeProbeProvider({ id: "pick", mode: "picker", items: [] }),
+    );
+
+    const resultP = readInputLine({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      stdin,
+      stdout,
+      columns: 80,
+    });
+
+    await typeChars(stdin, "?xyz");
+    await new Promise((r) => setTimeout(r, 20));
+    await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+
+    const result = await resultP;
+    expect(result.kind).toBe("text");
+    if (result.kind === "text") {
+      expect(result.text).toBe("?xyz");
+    }
   });
 });
 

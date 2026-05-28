@@ -25,6 +25,9 @@ export function createTrustRuleArgProvider(
   pipeline: SecurityPipeline,
 ): ArgChoiceProvider {
   return {
+    // 管理面板：列出已沉淀规则做就地撤销，无"选中给业务"语义；Enter 在面板内
+    // no-op、footer 不显 Enter，状态机由 inline 操作主导（Ctrl+D 双击撤销 / Esc 退出）。
+    mode: "management",
     async list(
       ctx: ArgQueryContext,
       signal: AbortSignal,

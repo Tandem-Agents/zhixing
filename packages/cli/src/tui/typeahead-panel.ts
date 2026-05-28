@@ -448,7 +448,11 @@ function renderActiveChrome(
   // 第二行导航 hint —— 纯按键、点分隔、无说明文本。Tab 仅在当前有 ghostText
   // （灰字补全）时插入：那时 Tab 接受补全、与 Enter 接受候选语义不同才值得提示；
   // 无 ghost 时 Tab == Enter，省去避免噪音（场景 / 参数面板无 ghost，故永不显示）。
-  const navKeys = ["↑↓", "Enter"];
+  //
+  // management 模式无 accept 业务语义（/trust 撤销规则列表）—— navKeys 去掉
+  // Enter，提示准确反映：Enter 在 management 面板内 no-op。
+  const navKeys: string[] = ["↑↓"];
+  if (state.panelMode === "picker") navKeys.push("Enter");
   if (state.ghostText) navKeys.push("Tab");
   navKeys.push("Esc");
   meta.push(`  ${theme.hint(clampLine(navKeys.join(" · "), frameWidth - 2))}`);

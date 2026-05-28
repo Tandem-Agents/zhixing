@@ -778,6 +778,16 @@ export class InputController implements InputRegion {
     }
 
     if (key.name === "return") {
+      // management 模式面板无 accept 业务语义（典型：/trust 撤销规则列表）——
+      // Enter 完全 no-op：不调 acceptSuggestion、不 submit。状态机由 inline
+      // actions 主导（Ctrl+D 撤销 / Esc 退出）。
+      //
+      // 此检查必须早于 hasActiveSuggestions / submit fallback 分支 —— 不然
+      // query 过滤后空候选 / 首次进入空列表态下 Enter 会触发 submit，违反
+      // management 契约。
+      if (this.lastSessionState?.panelMode === "management") {
+        return;
+      }
       if (hasActiveSuggestions && this.lastSessionState) {
         const item =
           this.lastSessionState.suggestions[this.lastSessionState.selectedIndex];

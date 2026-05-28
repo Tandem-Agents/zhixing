@@ -31,6 +31,7 @@ import type {
   AcceptResult,
   InlineActionSupport,
   ITypeaheadBroker,
+  PanelMode,
   SuggestionItem,
   SuggestionProvider,
   TriggerContext,
@@ -322,6 +323,14 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
     if (isNewTrigger) {
       // Trigger 首次出现 —— canonical 无前次值可保留，初始化为 empty + loading=true
       // 让 panel 首次显示有 "loading…" 反馈。
+      // panelMode / inlineActions 通过 helper 跟 query 完成路径同源计算 ——
+      // 保证 loading 中间态字段值跟最终值一致，杜绝 management provider 在
+      // 异步 query loading 期间用户按 Enter 触发 submit 的契约漂移。
+      const { panelMode, inlineActions } = this.resolveProviderDerivedFields(
+        provider,
+        match,
+        session.id,
+      );
       this.setSessionState(session, {
         sessionId: session.id,
         activeProvider: { id: provider.id },
@@ -331,7 +340,8 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
         loading: true,
         ghostText: null,
         argumentHint: null,
-        inlineActions: {},
+        inlineActions,
+        panelMode,
       });
     } else {
       // 同 trigger 续 typing —— trigger 几何更新，canonical 字段保留前次值
@@ -419,19 +429,13 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
       }
     }
 
-    // Inline actions: provider 通过 computeInlineActions hook 自决当前 trigger
-    // 的候选列表支持哪些就地操作。broker 不跨层访问 provider 内部数据结构,
-    // opt-in hook 让 provider 自决,结果写入 state.inlineActions 给 typeahead
-    // Panel / InputController 消费。
-    let inlineActions: InlineActionSupport = {};
-    if (typeof provider.computeInlineActions === "function") {
-      try {
-        inlineActions = provider.computeInlineActions(match);
-      } catch (err) {
-        const error = err instanceof Error ? err : new Error(String(err));
-        this.handleProviderError(provider.id, error, session.id);
-      }
-    }
+    // Provider 静态派生字段（panelMode + inlineActions）—— 与 loading 初始路径
+    // 同源计算，跨 query lifecycle 保持一致。详见 resolveProviderDerivedFields。
+    const { panelMode, inlineActions } = this.resolveProviderDerivedFields(
+      provider,
+      match,
+      session.id,
+    );
 
     this.setSessionState(session, {
       sessionId: session.id,
@@ -443,7 +447,50 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
       ghostText,
       argumentHint,
       inlineActions,
+      panelMode,
     });
+  }
+
+  /**
+   * 计算 trigger 命中那一刻的 provider 静态派生字段（panelMode + inlineActions）。
+   *
+   * 这两个字段是 provider 静态元数据 —— 不依赖 list 返回的候选数据，所以应在
+   * trigger 命中那一刻就确定，跨 loading 与 query-completed 两个时刻保持一致。
+   * loading 初始与 query 完成两处都调此 helper 拿到同样的结果，杜绝"loading
+   * 中间态 panelMode/inlineActions 跟最终值不一致"导致的契约漂移（典型：
+   * management provider 在异步 query loading 期间用户按 Enter 触发 submit）。
+   *
+   * ghostText / argumentHint 跟候选数据相关、必须 query 完成后才能算，不属此处。
+   *
+   * 每个 hook 独立 try/catch 抛错降级 —— 单个 hook 失败不影响另一个，降级值
+   * 与未实现 hook 时相同（panelMode 默认 picker / inlineActions 默认空集）。
+   */
+  private resolveProviderDerivedFields(
+    provider: SuggestionProvider,
+    match: TriggerMatch,
+    sessionId: string,
+  ): { panelMode: PanelMode; inlineActions: InlineActionSupport } {
+    let panelMode: PanelMode = "picker";
+    if (typeof provider.computePanelMode === "function") {
+      try {
+        panelMode = provider.computePanelMode(match);
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        this.handleProviderError(provider.id, error, sessionId);
+      }
+    }
+
+    let inlineActions: InlineActionSupport = {};
+    if (typeof provider.computeInlineActions === "function") {
+      try {
+        inlineActions = provider.computeInlineActions(match);
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        this.handleProviderError(provider.id, error, sessionId);
+      }
+    }
+
+    return { panelMode, inlineActions };
   }
 
   // ─── 选择与接受 ───
@@ -738,5 +785,6 @@ function makeEmptyState(
     ghostText: null,
     argumentHint: null,
     inlineActions: {},
+    panelMode: "picker",
   };
 }

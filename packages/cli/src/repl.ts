@@ -1553,6 +1553,8 @@ export async function startRepl(options: ReplOptions): Promise<void> {
         }
         return choices;
       },
+      // 选择器面板：用户从对话列表挑一个 conversationId 给业务（/resume 切对话）。
+      mode: "picker",
       // 静态声明:对话候选支持 inline 删除(驱动 "delete ctrl+d" UI)。物理删除
       // + 业务编排(active 切换 / 自动新建 fallback)由 onCandidateDelete callback
       // 在 cli 层直调 convRepo 完成 —— 此处只声明能力,不承担执行。
@@ -1599,6 +1601,8 @@ export async function startRepl(options: ReplOptions): Promise<void> {
         }
         return choices;
       },
+      // 选择器面板：用户从场景列表挑一个 sceneId 给业务（/work 进场景）。
+      mode: "picker",
       // 静态声明场景候选支持的 inline 操作。物理执行在 cli 层:delete 走
       // onCandidateDelete(work 分流 → session.removeWorkScene),rename / create
       // 走主循环消费 inline-edit-request(→ session.workSceneRegistry)。
