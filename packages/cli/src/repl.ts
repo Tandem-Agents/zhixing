@@ -801,7 +801,8 @@ function buildSlashCommands(
         await handleTrustCommand(args, {
           pipeline: session.runtime.securityPipeline,
           rl,
-          writer: cliWriter,
+          renderer,
+          screen: renderScreen,
         });
       },
     },
