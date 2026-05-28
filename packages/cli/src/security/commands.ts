@@ -1,58 +1,18 @@
 /**
- * /trust 和 /security 斜杠命令处理器。
+ * /security 斜杠命令处理器 —— 安全系统状态概览 + 内置策略规则列表（只读）。
  *
- * /trust  —— 调用 trust-panel modal 控制器；面板内 ↑↓ 选 / d 双击撤销 / ESC 退出。
- * /security —— 安全系统状态概览 + 内置策略规则列表（只读，无法撤销）。
+ * /trust 的列表交互在 repl.ts 注册为 typeahead args 命令（trustRuleArgProvider），
+ * 与 /work /resume 同范式 —— 用户从命令面板 accept /trust 后 typeahead 自动进入
+ * args 输入态、立即弹规则候选 dropdown，无需独立 handler。
  */
 
 import chalk from "chalk";
-import { getAgentIdentity } from "@zhixing/core";
 import type {
   PermissionContextId,
   SecurityPipeline,
   SecurityRule,
 } from "@zhixing/core";
-import type { CliWriter, ScreenController } from "../screen/index.js";
-import { runTrustPanel } from "./trust-panel/index.js";
-
-// ─── /trust ───
-
-interface TrustOptions {
-  pipeline: SecurityPipeline;
-  /** stop ink renderer 让 trust-panel 接管 stdout */
-  renderer: { stop: () => void };
-  /** readline pause/resume 让 trust-panel 独占 stdin */
-  rl: { pause: () => void; resume: () => void };
-  /** chrome screen controller；trust-panel inline 渲染，退出后重申光标隐藏不变量 */
-  screen: ScreenController | null;
-}
-
-/**
- * `/trust` 命令入口 —— 渲染器让位 + readline 让位 → 启动 trust 面板 → 收尾恢复。
- * 与 /config /mcp handler 同一启停纪律。
- */
-export async function handleTrustCommand(
-  _args: string,
-  opts: TrustOptions,
-): Promise<void> {
-  const { pipeline, rl, renderer, screen } = opts;
-
-  renderer.stop();
-  rl.pause();
-
-  try {
-    const { displayName } = getAgentIdentity();
-    await runTrustPanel({
-      pipeline,
-      stdin: process.stdin,
-      stdout: process.stdout,
-      agentDisplayName: displayName,
-    });
-  } finally {
-    rl.resume();
-    screen?.reassertCursorHidden();
-  }
-}
+import type { CliWriter } from "../screen/index.js";
 
 // ─── /security ───
 

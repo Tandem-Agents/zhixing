@@ -9,7 +9,6 @@
 export { createBlockedRenderer } from "./security-event-renderer.js";
 
 export {
-  handleTrustCommand,
   handleSecurityCommand,
 } from "./commands.js";
 

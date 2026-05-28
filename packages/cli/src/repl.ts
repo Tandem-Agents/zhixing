@@ -101,11 +101,11 @@ import { RuntimeSession } from "./runtime/session.js";
 import { handleConfigCommand, handleMcpCommand } from "./runtime/config-command.js";
 import { parseTaskUsageFromMessages } from "./parse-task-usage.js";
 import {
-  handleTrustCommand,
   handleSecurityCommand,
   createBlockedRenderer,
   TerminalConfirmationRenderer,
 } from "./security/index.js";
+import { createTrustRuleArgProvider } from "./security/trust-rule-arg-provider.js";
 import { createReplInterruptRuntime } from "./interrupt/repl-runtime.js";
 
 // ─── REPL 状态 ───
@@ -796,14 +796,12 @@ function buildSlashCommands(
       },
     },
     "/trust": {
-      description: "已建立的信任规则查看与撤销",
-      handler: async (_state, args) => {
-        await handleTrustCommand(args, {
-          pipeline: session.runtime.securityPipeline,
-          rl,
-          renderer,
-          screen: renderScreen,
-        });
+      description: "已建立的信任规则查看与撤销（↑↓ 选 · Ctrl+D 双击撤销 · ESC 退出）",
+      handler: async () => {
+        // /trust 在 typeahead args dropdown 里完成全部交互（↑↓ 浏览 + Ctrl+D
+        // 双击撤销 + ESC/Ctrl+C 退出）。"选中规则"在 /trust 语境下没有业务动作
+        // （区别于 /work 的"进入场景"、/resume 的"切换对话"），accept 候选后
+        // handler 是 noop —— 用户按 Enter 等同 silent 返回 prompt。
       },
     },
     "/security": {
@@ -1617,6 +1615,17 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       provider: workSceneArgProvider,
     };
 
+    // /trust 规则候选 provider —— 与 workSceneArgProvider 同结构，inlineActions
+    // 声明 delete 启用 Ctrl+D 双击撤销；物理撤销在下面 onCandidateDelete 的
+    // trust:repl 分支调 store.revoke。
+    const trustRuleArgSchema: ArgSchema = {
+      kind: "async-enum",
+      name: "rule",
+      description: "已沉淀的信任规则",
+      required: true,
+      provider: createTrustRuleArgProvider(session.runtime.securityPipeline),
+    };
+
     // ── REPL 命令注册 ──
     //
     // 命令元信息单源在文件顶层 REPL_COMMAND_META。本块只负责把元信息桥接到
@@ -1625,6 +1634,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     const argsByName: Record<string, ReadonlyArray<ArgSchema>> = {
       resume: [resumeArgSchema],
       work: [workSceneArgSchema],
+      trust: [trustRuleArgSchema],
     };
 
     for (const cmd of REPL_COMMAND_META) {
@@ -1704,6 +1714,22 @@ export async function startRepl(options: ReplOptions): Promise<void> {
         cliWriter.line(
           chalk.red(
             `\n  删除工作场景失败: ${err instanceof Error ? err.message : String(err)}\n`,
+          ),
+        );
+      }
+      return;
+    }
+
+    // 撤销信任规则（/trust 面板）：物理调 store.revoke；规则刚被并发删时
+    // ok=false 时静默忽略（后续 broker.refresh 会拿到最新列表）。撤销成功
+    // 不打印反馈 —— 候选行从 dropdown 消失即用户得到的视觉确认。
+    if (commandId === "trust:repl") {
+      try {
+        session.runtime.securityPipeline.getPermissionStore().revoke(value);
+      } catch (err) {
+        cliWriter.line(
+          chalk.red(
+            `\n  撤销信任规则失败: ${err instanceof Error ? err.message : String(err)}\n`,
           ),
         );
       }
