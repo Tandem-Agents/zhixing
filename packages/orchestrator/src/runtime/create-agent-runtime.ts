@@ -69,6 +69,10 @@ import {
   TurnContextInjector,
   TimeProvider,
   getAbortReason,
+  SkillStore,
+  getSkillsRoot,
+  renderSkillIndex,
+  type SkillMode,
   type Resettable,
 } from "@zhixing/core";
 import {
@@ -112,6 +116,15 @@ import {
 import { trackMessages } from "./track-messages.js";
 import { runContextStorage } from "./run-context.js";
 import { createTaskTool } from "../tools/task.js";
+
+/**
+ * 注入系统提示词的技能索引上限(按当前模式 top-N)。
+ *
+ * 索引落在 prompt 缓存稳定前缀里,每轮都计费 —— N 越大覆盖越全但前缀越贵。
+ * 个人助理的技能集天然不大,20 条足以覆盖常用;超出部分靠 usage 排序的 top-N
+ * 自然让位(高频技能优先入索引),未来由技能管家(分级 / 淘汰)进一步策展。
+ */
+const SKILL_INDEX_TOP_N = 20;
 
 // ─── 内部辅助 ───
 
@@ -505,7 +518,15 @@ export async function createAgentRuntime(
   const memoryStore = new MemoryStore(memoryRoot);
   const peopleStore = new PeopleStore(memoryRoot);
 
-  const builtinCtx = { proxy: config.network?.proxy, memoryStore };
+  // 技能分区跟随场景,与记忆域同源于 memoryScope —— "工作场景"这一个轴同时定
+  // 记忆域与技能区:工作场景注入 work 区技能,个人对话注入 main 区。SkillStore
+  // 是技能库唯一磁盘访问点(库根固定 ~/.zhixing/skills,不随场景隔离 —— 技能跨
+  // 场景共享,只按 mode 分区注入),load_skill 工具与索引段共用此实例。
+  const skillMode: SkillMode =
+    options.memoryScope?.kind === "workscene" ? "work" : "main";
+  const skillStore = new SkillStore(getSkillsRoot());
+
+  const builtinCtx = { proxy: config.network?.proxy, memoryStore, skillStore };
   const baseTools: ToolDefinition[] = [];
   for (const name of profile.enabledTools) {
     if (name === "Task") continue; // 后置装配
@@ -638,6 +659,15 @@ export async function createAgentRuntime(
   // 字符串引用透传给 runAgentLoop —— 不得在 run() / loop / LLM call 路径里
   // 重建 systemPrompt,不得追加 per-turn 信息(时间走 turn-context 注入,
   // tools[] 装配一次 freeze 不变)。详见 buildSystemPrompt 的"调用契约"注释。
+  //
+  // 技能索引段(渐进披露的"廉价目录"):装配期取该模式 top-N 渲染成文本,作为
+  // 系统提示词稳定前缀的一段一次性注入(模型按 id 调 load_skill 取全文展开)。
+  // 在此预渲染而非 buildSystemPrompt 内部取数,是为让后者保持纯同步、不耦合
+  // SkillStore —— 技能扫描的磁盘 I/O 归装配方,与 systemPrompt 同生命周期(切模式
+  // = 重建 runtime = 新窗口,故窗口内 byte-equal 不变)。无技能 → null → 段跳过。
+  const skillIndex = renderSkillIndex(
+    await skillStore.queryTopN(skillMode, SKILL_INDEX_TOP_N),
+  );
   const systemPrompt = buildSystemPrompt({
     profile,
     tools,
@@ -645,6 +675,7 @@ export async function createAgentRuntime(
     workspace: workspace.path,
     workspaceSource: workspace.source,
     globalConfigPath: getGlobalConfigPath(),
+    skillIndex,
   });
 
   // Per-turn 上下文注入器：时间 + 后续注册的 provider（如 scheduler）

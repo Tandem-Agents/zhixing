@@ -64,6 +64,7 @@ export type SystemPromptSegment =
   | "tool-usage"
   | "sub-agent-delegation"
   | "working-mode"
+  | "skill-index"
   | "style"
   | "safety";
 
@@ -73,6 +74,10 @@ export type SystemPromptSegment =
  * sub-agent-delegation 紧跟 tool-usage:概念上 delegation 是 Task 工具使用的
  * 延伸说明,放工具段后是自然语义流;条件性渲染保证 tools 不含 Task 时
  * 输出仍 byte-equal 历史(段返 null 被 buildSystemPrompt 跳过,不留空白)。
+ *
+ * skill-index 紧随 working-mode:都是模式相关的条件段(working-mode 看是否工作
+ * 场景,skill-index 看当前模式有无可注入技能),作为参考资料置于行为段(style /
+ * safety)之前;无技能时段返 null 被跳过,无技能用户的输出仍 byte-equal 历史。
  */
 export const MAIN_AGENT_SEGMENTS: readonly SystemPromptSegment[] = [
   "identity",
@@ -81,6 +86,7 @@ export const MAIN_AGENT_SEGMENTS: readonly SystemPromptSegment[] = [
   "tool-usage",
   "sub-agent-delegation",
   "working-mode",
+  "skill-index",
   "style",
   "safety",
 ];
@@ -139,6 +145,13 @@ export interface PromptBuildContext {
    * 子 agent 通常传子集(只 identity + tool-usage + safety 之类的最小集)。
    */
   segments?: readonly SystemPromptSegment[];
+  /**
+   * 预渲染的「Available Skills」索引段文本 —— 由装配方按当前模式取 top-N 经
+   * renderSkillIndex 生成。无可注入技能时为 null / 省略 → skill-index 段跳过,
+   * 输出 byte-equal 历史(无技能用户无回归)。本字段只承载已构造好的字符串,
+   * buildSystemPrompt 借此保持纯同步、不触磁盘 —— 技能扫描的 I/O 归装配方。
+   */
+  skillIndex?: string | null;
 }
 
 // ─── 主构建函数 ───
@@ -150,6 +163,7 @@ export interface PromptBuildContext {
  *   Identity → Principles → Tool Usage
  *     → Sub-Agent Delegation (条件:tools 含 Task)
  *     → Working Mode        (条件:tools 含 workmode_enter)
+ *     → Skill Index         (条件:当前模式有可注入技能,ctx.skillIndex 非空)
  *     → Style → Safety
  *   + 缓存分界 + Environment(动态段,始终)
  *
@@ -218,6 +232,9 @@ function renderSegment(
       return buildSubAgentDelegation(ctx.tools);
     case "working-mode":
       return buildWorkingMode(ctx.tools);
+    case "skill-index":
+      // 装配期预渲染好的索引文本;无技能(null/省略)→ 跳过,byte-equal 历史。
+      return ctx.skillIndex ?? null;
     case "style":
       return buildStyle();
     case "safety":

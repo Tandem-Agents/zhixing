@@ -649,6 +649,51 @@ describe("buildSystemPrompt · working-mode 段条件性渲染", () => {
   });
 });
 
+// ─── Segment: Skill Index 条件性渲染契约 ───
+
+describe("buildSystemPrompt · skill-index 段条件性渲染", () => {
+  const ctx = { tools: defaultTools, cwd: "/test/project" };
+  // 段只逐字透传装配方预渲染好的字符串,不感知 renderSkillIndex 的具体产出 ——
+  // 故用任意标记串验证"透传 / 跳过"语义,不耦合 core 的渲染实现。
+  const SKILL_INDEX_SAMPLE =
+    "## Available Skills\n- **deploy**: 部署流程\n- **review**: 代码审查约定";
+
+  it("MAIN_AGENT_SEGMENTS 含 'skill-index'(主 agent 启用此段)", () => {
+    expect(MAIN_AGENT_SEGMENTS).toContain("skill-index");
+  });
+
+  it("SUB_AGENT_SEGMENTS 不含 'skill-index'(子 agent 不注入技能)", () => {
+    expect(SUB_AGENT_SEGMENTS).not.toContain("skill-index");
+  });
+
+  it("不传 skillIndex 时不渲染(byte-equal 历史输出,无技能用户无回归)", () => {
+    const prompt = buildSystemPrompt(ctx);
+    expect(prompt).not.toContain("## Available Skills");
+  });
+
+  it("skillIndex 为 null 时不渲染(与缺省同义)", () => {
+    const prompt = buildSystemPrompt({ ...ctx, skillIndex: null });
+    expect(prompt).not.toContain("## Available Skills");
+  });
+
+  it("skillIndex 为字符串时逐字透传进 prompt", () => {
+    const prompt = buildSystemPrompt({ ...ctx, skillIndex: SKILL_INDEX_SAMPLE });
+    expect(prompt).toContain(SKILL_INDEX_SAMPLE);
+  });
+
+  it("skill-index 段紧随 working-mode(置于 working-mode 之后)", () => {
+    const prompt = buildSystemPrompt({
+      ...ctx,
+      tools: [...defaultTools, stubTool("workmode_enter")],
+      skillIndex: SKILL_INDEX_SAMPLE,
+    });
+    const workingModeIdx = prompt.indexOf("## Working Mode");
+    const skillIdx = prompt.indexOf("## Available Skills");
+    expect(workingModeIdx).toBeGreaterThan(0);
+    expect(skillIdx).toBeGreaterThan(workingModeIdx);
+  });
+});
+
 // ─── profile / segments 扩展点 ───
 
 describe("buildSystemPrompt · profile + segments 扩展点", () => {

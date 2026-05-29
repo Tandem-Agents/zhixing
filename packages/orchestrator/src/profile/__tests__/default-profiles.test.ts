@@ -90,13 +90,20 @@ describe("powerProfile(scene)", () => {
       "bash",
       "memory",
       "web_fetch",
+      "load_skill",
       "Task",
     ]);
   });
 
   it("无 workdir → 剔除全部本地文件类工具（by-construction 隔离）", () => {
     const p = powerProfile(makeScene());
-    expect(p.enabledTools).toEqual(["memory", "web_fetch", "Task"]);
+    // load_skill 读 app-state(~/.zhixing/skills)、非 workdir 本地文件,故保留。
+    expect(p.enabledTools).toEqual([
+      "memory",
+      "web_fetch",
+      "load_skill",
+      "Task",
+    ]);
     for (const fileTool of ["read", "write", "edit", "glob", "grep", "bash"]) {
       expect(p.enabledTools).not.toContain(fileTool);
     }

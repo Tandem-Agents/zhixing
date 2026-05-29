@@ -25,7 +25,7 @@ export const MAIN_IDENTITY_INSTRUCTIONS = [
  * 主 agent 启用的工具集 —— builtin 与 Task 的权威源。
  *
  * 包含：
- *   - 8 个内置工具（由 BUILTIN_TOOL_FACTORIES 提供实例）
+ *   - 9 个内置工具（由 BUILTIN_TOOL_FACTORIES 提供实例）
  *   - Task（启用子 agent 派发；create-agent-runtime 后置装配）
  *
  * **不含外部依赖型工具**（如 schedule 需要 scheduler ref，由 cli 通过
@@ -41,6 +41,7 @@ const MAIN_ENABLED_TOOLS = [
   "bash",
   "memory",
   "web_fetch",
+  "load_skill",
   "Task",
 ] as const;
 
@@ -85,10 +86,14 @@ export interface SubAgentProfileOptions {
  * 无 workdir = 该场景不涉本地文件，装配期即无文件工具，根本不存在"文件
  * 工具无根"问题；与"无 workdir power 的 workingDirectory 不落 cwd"互为
  * 主防线（无文件操作面）与纵深防御。
+ *
+ * 保留 load_skill：技能库读的是 ~/.zhixing/skills（app-state，非 workdir 本地
+ * 文件），不属被剔除的本地文件类；无 workdir 场景仍可加载 work 区技能。
  */
 const WORKSCENE_NON_FILE_TOOLS = [
   "memory",
   "web_fetch",
+  "load_skill",
   "Task",
 ] as const;
 
@@ -100,7 +105,7 @@ const WORKSCENE_NON_FILE_TOOLS = [
  *
  * 工具集按 scene.workdir 有无二分（by-construction）：
  *   - 有 workdir：主工具全集（文件工具在 workdir 内操作）
- *   - 无 workdir：剔除本地文件类，仅留非文件工具（memory/web_fetch/Task）
+ *   - 无 workdir：剔除本地文件类，仅留非文件工具（memory/web_fetch/load_skill/Task）
  *
  * capabilities 同 mainProfile（用户面对、可派 Task）。
  */
