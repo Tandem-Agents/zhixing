@@ -96,6 +96,12 @@ describe("decodeChar · 单字符解码", () => {
     ]);
   });
 
+  it("Ctrl+E (0x05) 触发 ctrl-e（AI 编辑屏外部编辑器快捷键）", () => {
+    expect(decodeChar("\x05", createKeyDecoderState()).events).toEqual([
+      { type: "ctrl-e" },
+    ]);
+  });
+
   it("DEL (0x7F) 触发 backspace", () => {
     expect(decodeChar("\x7f", createKeyDecoderState()).events).toEqual([
       { type: "backspace" },

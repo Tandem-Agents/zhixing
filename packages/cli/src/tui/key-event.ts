@@ -11,6 +11,7 @@ export type KeyEvent =
   | { type: "escape" }
   | { type: "ctrl-c" }
   | { type: "ctrl-s" }
+  | { type: "ctrl-e" }
   | { type: "arrow-up" }
   | { type: "arrow-down" }
   | { type: "arrow-left" }

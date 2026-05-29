@@ -115,6 +115,12 @@ export function decodeChar(
     return { newState: { ...state, lastWasCR: false }, events: [{ type: "ctrl-s" }] };
   }
 
+  // Ctrl+E（0x05）—— AI 编辑屏"用外部编辑器打开"快捷键。底部为自由文本输入，故元命令走
+  // 控制键、不抢普通字符。raw mode 下 0x05 能传到应用。
+  if (code === 0x05) {
+    return { newState: { ...state, lastWasCR: false }, events: [{ type: "ctrl-e" }] };
+  }
+
   // Enter (\r) —— 标记 lastWasCR，让紧随的 \n 被吞
   if (ch === "\r") {
     return {

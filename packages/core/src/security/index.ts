@@ -121,3 +121,7 @@ export { SecurityAuditor } from "./security-auditor.js";
 // 安全管线
 export { SecurityPipeline } from "./security-pipeline.js";
 export type { SecurityPipelineOptions } from "./security-pipeline.js";
+
+// 通用 secret 脱敏（系统层共用：技能正文为首个消费者，落地前过滤固化密钥）
+export { scrubSecrets } from "./secret-scrubber.js";
+export type { ScrubResult, SecretRedaction } from "./secret-scrubber.js";

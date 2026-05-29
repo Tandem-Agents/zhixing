@@ -32,20 +32,24 @@
 
 ## 二、入口与草稿生成
 
-**两个创建入口**(都是 agent 起草、用户策展;**都先开 AI 编辑屏、再在屏内起草**——立刻见屏,不在主屏干等几秒 LLM):
+**创建入口 `/skill-new`**(agent 起草、用户策展;**先开 AI 编辑屏、再在屏内起草**——立刻见屏,不在主屏干等几秒 LLM)。一个命令按对话上下文自适应,覆盖两种来法:
 
-1. **从对话(主)** —— 做完某事后触发一个轻命令(可附一句指向,如「聚焦部署那段」)。它**照 `/config`·`/mcp` 的 REPL 层 handler 模式接线**(`config-command.ts:handleConfigCommand`/`runEditorCommand`):注入 `{ rl, state, session, renderer, writer, screen }` 这组 deps,`renderer.stop()` + `rl.pause()` 让出 stdin → **立刻开 AI 编辑屏**(§3.1)并把"最近对话上下文"(经 REPL state 的 `state.conv.messages` 取)传入 → 屏内调起草引擎(scoped `core/tool-loop`,**不进主 agent 回合**)起草(loading 态)→ 退出时 `rl.resume()` + `screen.reassertCursorHidden()`。**不能写成 `execution:local/hybrid` 的普通 `CommandDef`** —— 通用分发的 `CommandHandlerContext` 只有 `{ args, rawInput, runtime }`(`command-dispatcher.ts:128`),**拿不到 session / screen**(故 config-command 另立 `ConfigCommandDeps`,`config-command.ts:51`);也**不走 `execution:"agent"`**(那是父规格 §5.1 `/<name>` 唤醒用、整条发主 agent loop,既非独立会话、也无"开屏"路径)。
-2. **从意图(冷启动)** —— 无现成对话时,从 `/skills` 技能管理器(父规格 §5.2 的 alt-screen)「新建」进**空白** AI 编辑屏视图;用户在屏内输入区说的第一句「我想要个什么技能」即意图,屏内据此起草骨架。管理器(浏览 / 状态操作)与 AI 编辑屏同属一个 alt-screen 工作区,「新建」是其内的视图切换;开屏走与 entry 1 同一套 REPL 层接线(注入 deps → 开屏)。
+1. **从对话(做完某事后)** —— 带最近对话上下文(经 `state.conv.messages` 取、`extractText` 转写成「用户 / 助手: …」),进屏即从对话起草;可附一句指向(命令 rest)作首句意图。
+2. **从意图(冷启动空库)** —— 无对话上下文时进**空白**编辑屏,用户在输入区说的第一句即意图、据此起草骨架。
+
+接线**照 `/config`·`/mcp` 的 REPL 层 handler 模式**(`config-command.ts:handleConfigCommand`/`runEditorCommand`):`renderer.stop()` + `rl.pause()` 让出 stdin → 开 AI 编辑屏(§3.1)→ 退出时 `rl.resume()` + `screen.reassertCursorHidden()`,保存后刷新 `/<name>` 补全。注册走命令现代路径(直接挂 `tRegistry` + `CommandDispatcher`,同 `/skills`、task 命令);handler 经闭包注入窄能力(`callText("main")` / `store.create` / 取 messages / 取场景默认 mode),**不写成普通 `CommandDef`** —— 通用分发的 `CommandHandlerContext` 只有 `{ args, rawInput, runtime }`、拿不到这些会话能力(故照 config-command 在 REPL 层装配),也**不走 `execution:"agent"`**(那是父规格 §5.1 `/<name>` 唤醒用、整条发主 agent loop,既非独立会话、也无"开屏"路径)。起草引擎是**单发结构化生成、不进主 agent 回合**。
+
+> 父规格 §5.2 设想的「管理器内『新建』视图切换」(管理器与编辑屏同 alt-screen 工作区内切换)v1 未做 —— `/skill-new` 已覆盖两种来法的功能(含冷启动空库),管理器内切换是后续的体验增量。
 
 **草稿内容**(agent 替用户解决质量与安全,这正是用户做不好的部分):
 
 - `name`
 - `description` —— 以**「什么时候该用」**为导向(直接决定日后被模型检索命中)
 - 正文 —— **瘦版**:只留用户的特定约定 + 这次的坑 / 最优路径,主动丢通用步骤(父规格 §1 形态)
-- **凭证脱敏(待建依赖、安全关键)** —— 草稿源自对话、对话里可能粘过 secret,而技能会反复加载进上下文、且设计上可分享,危害被放大,**绝不固化进技能**。**但当前代码库没有通用 secret-scrubber**——只有领域专用件(`@zhixing/network` 出口脱敏、代理 URL 显示脱敏、`sanitizeConversationName`);故脱敏是**落地前必须先建立的依赖**:按父规格 §3「不自造」之意,建在**系统层**(供 skill 与未来其他模块共用,非 skill 专属),输入可借 `bi-zhixing-credentials-block`(`builtin-rules.ts:76`)已知的凭证字段 schema + 模式匹配。**不可假设"已可复用"。**
+- **凭证脱敏(安全关键)** —— 草稿源自对话、对话里可能粘过 secret,而技能会反复加载进上下文、且设计上可分享,危害被放大,**绝不固化进技能**。通用 secret 脱敏建在系统层(供 skill 与未来其他模块共用,非 skill 专属):`scrubSecrets`(`core/src/security/secret-scrubber.ts`)—— 只匹配**高置信**模式(已知服务商密钥前缀 / PEM 私钥块 / JWT / Bearer / 明确的「字段名=值」赋值),**不做高熵串猜测**以免把 git sha / base64 图片等正常长串误当 secret 毁掉正文,命中处替换成带类别占位符。`bi-zhixing-credentials-block`(`builtin-rules.ts:76`)只是挡 AI 读写 credentials.json 的 **path 规则、不含文本扫描模式**,故 scrubber 是自建件、非复用内置规则。
 - `mode` 默认按**当前所处场景**(在工作场景里建 → `work`,否则 `main`),可在策展时由 AI 改(对齐父规格 §七「用户写的由用户定 mode」)
 
-**起草引擎**:与 Admission「AI 语义识别」同构 —— 复用轻量工具循环(`core/tool-loop`)+ `AgentRuntime.callText`(父规格 §六.2),取 `main` 档(质量敏感的撰写任务),读上下文 / 意图产**结构化草稿**(name + description + body + mode)。**引擎在 AI 编辑屏内被调用**(首次起草 = 对话上下文或意图;后续 = 用户指令,即 §3.1 的 `editSkill`),产出落 WorkingState、不直接落盘。
+**起草引擎**(`core/src/skills/drafting.ts`):`draftSkill`(首次,从上下文 / 意图)+ `reviseSkill`(按指令改写),取 `main` 档(质量敏感的撰写任务)产**结构化草稿**(name + description + body + mode)。机制同 `AISecuritySteward`(`ai-steward.ts`)的「一次独立调用 + 解析结构化输出 + fail-safe」范式 —— 注入一个窄 LLM 接口 `(prompt) => Promise<string>`,拼 system 角色 + 上下文 → 单发 → 解析 JSON 草稿(无 JSON / 缺字段即抛:起草失败就是失败、不兜底半成品,与裁判的 fail-safe 不同)→ 过脱敏。**不是工具循环**:起草只是一次结构化生成、不需要工具(authoring 早期措辞写的 `tool-loop` 不准,以此为准)。引擎只收注入的 LLM 接口、不绑运行时,故 v1 在 cli 绑 `callText("main")`、v2 技能管家在 orchestrator 绑自己的通道,同一引擎纯增量(父规格 §九)。**在 AI 编辑屏内被调用**(首次起草 / 后续按指令改写,即 §3.1 的 `editSkill` 访问器),产出落事务草稿态、不直接落盘。
 
 ## 三、编辑交互(两路,文件为唯一真相源)
 
@@ -66,12 +70,12 @@
 
 ### 3.2 逃生口:外部编辑器(用户自己的 GUI 编辑器)
 
-提示"想自己改?按 X 用你的编辑器打开"。**打开是纯确定性问题、不放 AI**(见决策三)。
+提示"想自己改?按 Ctrl+E 用你的编辑器打开"(底部是自由文本输入,故元命令走控制键 —— `tui/key-event.ts` 为此新增 `ctrl-e`)。**打开是纯确定性问题、不放 AI**(见决策三),实现在 `editor-resolve.ts`。
 
-- **编辑器解析(确定性链)**:用户显式设置(类 git `core.editor` 的一个 skill 编辑器配置)→ `$VISUAL` → `$EDITOR` → `git config core.editor` → 在 PATH 上探测已知编辑器(code / cursor / subl / idea / nvim / vim / notepad++…)→ OS 兜底(Windows `notepad`、mac `open -t`、linux `nano`/`vi`)。都没命中 → 退 OS 默认 + 提示用户固定设一个。
-- **无闪启动**(实测经验):配置命令常是 `.cmd`/`.bat` 包装(如 `code.cmd`),直接拉会闪一个临时控制台。故**优先解析到底层 GUI 可执行**(从 `code.cmd` 推同级上一层 `Code.exe`)直接拉 —— GUI 子系统不分配控制台、**零闪**、非阻塞、复用已开窗口;只能走 `.cmd` 包装时用**无窗口**方式启动(.NET `ProcessStartInfo.CreateNoWindow`)。
-- **`--wait` 与否**:不需等(用户改完自己说一声)就拉起即返回;需要"等关掉标签再读回"才走 `--wait`(GUI 编辑器需此标志才阻塞)。
-- **本地 TTY 专用**:此路要有真实终端 / 桌面挂载编辑器;远程 / daemon / 无头模式没有 → 这些场景只走 3.1 AI 编辑屏(对话式哪儿都能用,外部编辑器是本地逃生口)。
+- **编辑器解析(确定性链)**:用户显式配置 → `$VISUAL` → `$EDITOR` → `git config core.editor` → 在 PATH 上探测已知编辑器(code / cursor / subl / idea / zed / nvim / vim)→ OS 兜底(Windows `notepad`、mac `open -t`、linux `nano`)。都没命中 → 退 OS 兜底 + caller 提示固定设一个。探测(which / where)与 spawn 都注入、可纯逻辑单测。`git config core.editor` 这环留了注入位(`gitEditor`)但 v1 REPL 暂未读取 —— env + PATH 探测 + OS 兜底已覆盖常见情形,后续补一次 `git config` 读取即接上。
+- **无闪启动**:`.cmd`/`.bat` 包装(如 `code.cmd`)直接拉会闪一个临时控制台,故 spawn 走 **`windowsHide`**(等价 .NET `CreateNoWindow`)+ detached + `unref`,无窗口启动规避闪屏。(更细的「从 `code.cmd` 推同级 `Code.exe`」精确解析 v1 未做,`windowsHide` 已覆盖;若实测仍有闪再补,按"TUI 必须自跑视觉"规约由 `pnpm cli` 确认。)
+- **不等关闭**:v1 拉起即返回、**不加 `--wait`** —— 用户在 GUI 窗口里改,回屏靠 §3.3 的 mtime 比对一次性重读,比阻塞等关闭轻且稳。
+- **本地 TTY 专用**:`/skill-new` 注册在 typeahead(chrome 本地 cli)路径,故外部编辑器入口在此天然可用;远程 / daemon / 无头没有桌面编辑器 → 那些场景只走 3.1 AI 编辑屏(对话式哪儿都能用,外部编辑器是本地逃生口)。
 
 ### 3.3 两路的衔接(决策四:文件单一真相源、一次一面)
 
@@ -83,11 +87,11 @@
 
 ## 四、保存与生效
 
-确认 → 经注入 writer 调 Store 写 `own/<id>/SKILL.md`(父规格 §二):`id = skillNameToId(name)`(父规格 §5.1,撞名校验:own 同名遮蔽 linked / 提示改名)、`mode` 写 `index.json`、原子写(`writeAtomic`)。**这是 Store 新增的"从草稿创建 / 更新 own 技能"写 API**,区别于接入 `linked/` 的 `admit`(父规格 §二 `SkillStore` 接口需补 `create(draft)` / `update(id, draft)`)。落盘后**立即可 `/<name>` 唤醒**,下个会话 / 模式切换由索引产生管线自然纳入(父规格 §三,本步不强制即时重建索引)。
+确认 → 经注入 writer 调 Store 写 `own/<id>/SKILL.md`(父规格 §二):`id = skillNameToId(name)`(父规格 §5.1,撞名校验:own 同名遮蔽 linked / 提示改名)、`mode` 写 `index.json`、原子写(`writeAtomic`)。落盘走 **Store 已落地的 own 写 API**:`create(draft)`(新建)/ `update(id, draft)`(改写,linked-only 触发 fork-on-edit、改名时迁移 index 状态与 usage 到新 id + 撞名校验),区别于接入 `linked/` 的 `admit`。落盘后**立即可 `/<name>` 唤醒**,下个会话 / 模式切换由索引产生管线自然纳入(父规格 §三,本步不强制即时重建索引)。
 
 ## 五、安全归属
 
-- **凭证脱敏**:起草与每次 `editSkill` 都必须过脱敏(§二);该通用 scrubber 是**待建依赖**(当前不存在),建在系统层、不自造 skill 专属件。
+- **凭证脱敏**:起草与每次 `editSkill` 都过脱敏(`scrubSecrets`,§二);通用 scrubber 已建在系统层(`core/src/security/secret-scrubber.ts`),非 skill 专属件。
 - **app-state 内部**:若起草 / 编辑经 agent 侧工具(写 `own/` 草稿)实现,该工具声明 `app-state` 边界、判 `internal` 自动放行(对标 `load_skill`,父规格 §四)。
 - **外部编辑器 spawn 是宿主侧本地操作**:拉起的是用户自己的编辑器进程,非 agent 经工具调用的写入,不经 SecurityPipeline(同 Store 自身 fs 操作,父规格 §六放行落盘的宿主侧写语义);realpath 目录边界仍由 Store 在读写 `own/` 时一处收口(父规格 §一边界判断#1)。
 
@@ -95,9 +99,10 @@
 
 | 包 | 内容 | 关键对接 |
 |---|---|---|
-| `core/src/skills/` | 起草引擎、Store `create`/`update` 写 API、脱敏接线 | `core/tool-loop`、`AgentRuntime.callText`(起草,同 Admission)、`skillNameToId`、`writeAtomic`;**通用 secret-scrubber(待建,系统层)**——输入借 `bi-zhixing-credentials-block`(`builtin-rules.ts:76`)凭证字段 schema |
-| `orchestrator` | `editSkill` 访问器(起草引擎按指令改草稿 + 脱敏) | 注入进 AI 编辑屏,对标 `ConfigEditorRuntime.mcpResolve`(`config-editor/types.ts:183`) |
-| `cli` | AI 编辑屏(**专门 alt-screen 循环,复用 tui 共享原语**)、外部编辑器解析 + 无闪 spawn、两入口 | `Renderer`(`tui/render.ts`)、`KeyEventStream`(`tui/input.ts`)、alt-screen + 三层退出防御模式(`runner.ts:88-94`/`97`/`154`)、`WorkingState`(`types.ts:121`)与 `writers`(`types.ts:321`)模式、`screen/screen-controller.ts:reassertCursorHidden`;两入口接线照 `config-command.ts:handleConfigCommand`/`runEditorCommand`(REPL 层注入 `{rl,state,session,renderer,writer,screen}`)、`/skills` 技能管理器「新建」/「编辑」入口(父规格 §5.2) |
+| `core/src/skills/` | 起草引擎 `draftSkill` / `reviseSkill` | `drafting.ts`:注入窄 LLM 接口 `(prompt)=>Promise<string>` + 拼 system 角色单发 + 解析 JSON + 过脱敏(同 `ai-steward.ts` 范式,**非 tool-loop**);落盘用 Store 已落地的 `create` / `update`、`skillNameToId`、`writeAtomic` |
+| `core/src/security/` | 通用 secret 脱敏(系统层,首个消费者是 skill) | `secret-scrubber.ts`:`scrubSecrets` 高置信模式(服务商密钥 / PEM / JWT / Bearer / 赋值)+ 带类别占位符;**不复用** `bi-zhixing-credentials-block`(那是 path 规则、无文本扫描) |
+| `orchestrator` | 起草用的 main 档单发 LLM 能力 | `AgentRuntime.callText(_, "main")`(`create-agent-runtime.ts`)—— editSkill 访问器在 **cli** 绑它装配,对标 mcpResolve 的注入处(`config-command.ts`) |
+| `cli` | AI 编辑屏(controller + render + key + alt-screen loop)、外部编辑器解析 + 无闪 spawn、editSkill 访问器装配、`/skill-new` 入口 | `editor-controller.ts` / `editor-screen.ts`(复用 `tui/` 的 `Renderer` / `KeyEventStream` + 三层退出防御,同 `/skills` 管理器、不反依赖 config-editor)、`editor-resolve.ts`(确定性解析链 + `windowsHide` 无闪 + mtime 重读)、`authoring-command.ts`(照 `config-command.ts` 开屏 + 绑 `callText("main")` + `store.create` + 取 `state.conv.messages`);`tui/key-event.ts` 新增 `ctrl-e`;`screen-controller.ts:reassertCursorHidden` |
 
 ## 七、v1 → v2 跨版插座
 
@@ -107,9 +112,12 @@
 
 ## 八、测试拓扑
 
-- **起草引擎**:从对话 / 意图产结构化草稿(name + description + 瘦正文 + mode);**凭证脱敏断言**(对话内 secret 不进草稿 —— 依赖通用 scrubber,见 §二);注入 mock LLM,无真网真 LLM。
-- **AI 编辑屏**:**必走 alt-screen**(断言进 / 退 alt buffer、禁用主 buffer 清屏路径)+ 三层退出防御(异常 / Ctrl+C 必切回 main buffer、主对话历史完好);事务草稿(取消丢弃、不半落盘);`editSkill` 异步可取消;**内容保留式重画**(`editSkill` 返回后内容区就地重画可断言,**非 spinner 帧**);返回主回路 `reassertCursorHidden`。
-- **外部编辑器解析**:探测链分支(setting / env / git / PATH 探测 / OS 兜底);无闪启动(`.cmd` → GUI exe 解析、`CreateNoWindow`);本地 TTY 专用(远程 / 无头返回不可用、只走 AI 编辑屏)。
-- **两路衔接**:同一时刻仅一面可写;外部改完回屏 mtime 比对 + 一次性重读;不存在持续 watch。
-- **保存**:`create`/`update` 写 `own/<id>/SKILL.md`、`skillNameToId` 定 id + 撞名校验、`mode` 写 index、原子写;落盘后 `/<name>` 即可唤醒。
-- 纯逻辑注入 mock(fs / LLM / stdin/stdout / editor spawn),无真编辑器真网真 LLM。
+落地单测全用 mock 注入(LLM / fs / stdin·stdout / editor spawn),无真编辑器真网真 LLM;alt-screen 的进退 / 流畅度 / 键感按"TUI 必须自跑视觉"由 `pnpm cli` 实测(同 `/skills` 管理器,loop 是 I/O、不单测)。
+
+- **secret 脱敏**(`secret-scrubber.test.ts`):各类高置信模式命中 + 占位符替换;正常长串(git sha / base64)不误伤;赋值式保字段名换值;组合去重。
+- **起草引擎**(`drafting.test.ts`):从上下文 / 意图产结构化草稿;mode 默认 / 覆盖;**对话内 secret 不进草稿**(脱敏断言);起草失败即抛(无 JSON / 缺字段)、不兜底;prompt 含上下文与意图。
+- **编辑屏控制器**(`editor-controller.test.ts`):起草成功换草稿 / 失败记错留原草稿 / **放弃等待结果丢弃**;保存交 writer;外部编辑两路衔接(进暂停态、mtime 变了重读、未变保留)。
+- **编辑屏视图 + 按键**(`editor-screen.test.ts`):各阶段渲染(空草稿引导 / 字段 + 正文 / **drafting 保留内容非全屏 spinner** / external 提示 / error);按键映射(输入缓冲 / 回车提交 / Ctrl+S 保存 / Ctrl+E 外部 / Ctrl+C·Esc 放弃 / external 态任意键读回)。
+- **外部编辑器解析**(`editor-resolve.test.ts`):优先级链(configured / VISUAL / EDITOR / git / PATH 探测 / OS 兜底)、空串跳过、spawn 收到 命令 + [...参数, 文件]。
+- **接线纯件**(`authoring-command.test.ts`):对话上下文转写 + 取最近 N 条;外部文件 round-trip(含 mode 保留 / 缺失回落)。
+- **保存生效**:走 Store 已落地的 `create` / `update`(`own/<id>/SKILL.md`、`skillNameToId` 定 id + 撞名、`mode` 写 index、原子写),其测试在 Store 侧;落盘后 `/<name>` 即可唤醒。

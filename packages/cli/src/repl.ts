@@ -69,6 +69,7 @@ import { TaskTail } from "./task-tail/index.js";
 import { registerTaskCommands } from "./commands/task-commands.js";
 import { SkillCommandSource } from "./commands/skill-command-source.js";
 import { registerSkillsCommand } from "./skills/manager-command.js";
+import { registerSkillNewCommand } from "./skills/authoring-command.js";
 import { PASTE_TOKEN_PATTERN, PasteRegistry } from "./paste-registry.js";
 import { resolveFileRefs } from "./resolve-file-refs.js";
 import {
@@ -1688,6 +1689,24 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       renderer,
       screen: renderScreen,
       skillStore: session.skillStore,
+      refreshCommands: () => tRegistry.refresh(),
+    });
+
+    // /skill-new 创作入口 —— alt-screen AI 编辑屏,把刚做的事 / 一个想法收成技能。同样
+    // 注册在 /<name> 动态源之前(撞名探测可见);LLM 走 main 档单发(质量敏感撰写),落盘
+    // 经 Store.create,保存后刷新 /<name> 补全让新技能即时可唤醒。
+    registerSkillNewCommand({
+      registry: tRegistry,
+      dispatcher: typeaheadDispatcher,
+      rl,
+      renderer,
+      screen: renderScreen,
+      writer: cliWriter,
+      callText: (prompt) => session.runtime.callText(prompt, "main"),
+      createSkill: (draft) => session.skillStore.create(draft),
+      getMessages: () => state.conv.messages,
+      getDefaultMode: () =>
+        session.activeMode.kind === "workscene" ? "work" : "main",
       refreshCommands: () => tRegistry.refresh(),
     });
 
