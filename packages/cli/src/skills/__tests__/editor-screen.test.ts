@@ -158,6 +158,7 @@ describe("runDraftWithCancel — 取消立即响应(不等后台 LLM)", () => {
     return {
       start() {},
       stop() {},
+      drain() {},
       next: async () => keys[Math.min(i++, keys.length - 1)] as KeyEvent,
     };
   };

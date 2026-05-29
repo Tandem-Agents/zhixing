@@ -18,10 +18,12 @@ import { PathGuard } from "../security/path-guard.js";
 import { parseFrontmatter, stringifyFrontmatter } from "../memory/frontmatter.js";
 import { skillNameToId } from "./id.js";
 import {
+  SKILL_FILE,
   archivedRoot,
   getSkillsRoot,
   skillsIndexPath,
   sourceRoot,
+  stagingRoot,
   usageDir,
   usagePath,
 } from "./paths.js";
@@ -35,7 +37,6 @@ import type {
   SkillUsage,
 } from "./types.js";
 
-const SKILL_FILE = "SKILL.md";
 /** 先扫 linked、再扫 own —— own 对同 id 后写遮蔽 linked。 */
 const SCAN_SOURCES: readonly SkillSource[] = ["linked", "own"];
 
@@ -318,6 +319,24 @@ export class SkillStore {
       disabled: false,
       createdAt,
     };
+  }
+
+  /**
+   * 分配并创建一个空的接入候选暂存目录,返回绝对路径。接入流程把候选文件放进去后调 `admit`;
+   * 无论过审与否,结束都应 `discardStaging` 清理 —— 过审是 copy 到 linked、不移动暂存。
+   */
+  async prepareStaging(): Promise<string> {
+    await fs.mkdir(stagingRoot(this.root), { recursive: true });
+    const dir = await this.reserveDir(stagingRoot(this.root), "candidate");
+    await fs.mkdir(dir, { recursive: true });
+    return dir;
+  }
+
+  /** 清理一个暂存目录。只接受 staging 区内的路径(防 caller 误传库内其它目录)。 */
+  async discardStaging(dir: string): Promise<void> {
+    const rel = path.relative(stagingRoot(this.root), path.resolve(dir));
+    if (rel.startsWith("..") || path.isAbsolute(rel)) return;
+    await fs.rm(dir, { recursive: true, force: true });
   }
 
   // ─── 定位与目录移动 ───

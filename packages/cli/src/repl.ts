@@ -70,6 +70,7 @@ import { registerTaskCommands } from "./commands/task-commands.js";
 import { SkillCommandSource } from "./commands/skill-command-source.js";
 import { registerSkillsCommand } from "./skills/manager-command.js";
 import { registerSkillNewCommand } from "./skills/authoring-command.js";
+import { registerSkillAddCommand } from "./skills/admission-command.js";
 import { PASTE_TOKEN_PATTERN, PasteRegistry } from "./paste-registry.js";
 import { resolveFileRefs } from "./resolve-file-refs.js";
 import {
@@ -1707,6 +1708,20 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       getMessages: () => state.conv.messages,
       getDefaultMode: () =>
         session.activeMode.kind === "workscene" ? "work" : "main",
+      refreshCommands: () => tRegistry.refresh(),
+    });
+
+    // /skill-add 接入入口 —— 外部技能(本地路径)经扫描 + AI 研判后入库。同样注册在
+    // /<name> 动态源之前(撞名探测可见);研判 LLM 走 main 档,接入后刷新 /<name> 补全。
+    registerSkillAddCommand({
+      registry: tRegistry,
+      dispatcher: typeaheadDispatcher,
+      rl,
+      renderer,
+      screen: renderScreen,
+      writer: cliWriter,
+      callText: (prompt) => session.runtime.callText(prompt, "main"),
+      skillStore: session.skillStore,
       refreshCommands: () => tRegistry.refresh(),
     });
 

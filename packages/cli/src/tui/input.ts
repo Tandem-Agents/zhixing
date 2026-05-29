@@ -56,6 +56,11 @@ export interface KeyEventStream {
    * race、任务先完成时清理这次等待。主循环不传 signal。
    */
   next(signal?: AbortSignal): Promise<KeyEvent>;
+  /**
+   * 丢弃已入队但未消费的事件。用于"接管期间累积的按键不应被下一次 next 误读"——
+   * 如接入审查等 LLM 数秒期间用户的乱按,在弹确认前清掉,免得被当成确认回应。
+   */
+  drain(): void;
 }
 
 export function createKeyEventStream(stdin: NodeJS.ReadStream): KeyEventStream {
@@ -156,6 +161,9 @@ export function createKeyEventStream(stdin: NodeJS.ReadStream): KeyEventStream {
         waiters.push(waiter);
         signal?.addEventListener("abort", onAbort, { once: true });
       });
+    },
+    drain(): void {
+      queue.length = 0;
     },
   };
 }

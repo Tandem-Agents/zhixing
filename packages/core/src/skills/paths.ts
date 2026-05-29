@@ -23,6 +23,9 @@ import path from "node:path";
 import { getZhixingHome } from "../paths.js";
 import type { SkillSource } from "./types.js";
 
+/** 技能正文文件名 —— 每个技能目录下唯一的正文文件。 */
+export const SKILL_FILE = "SKILL.md";
+
 /** 运行期默认技能库根 `<home>/skills`。 */
 export function getSkillsRoot(): string {
   return path.join(getZhixingHome(), "skills");
