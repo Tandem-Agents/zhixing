@@ -68,6 +68,7 @@ import { CommandDispatcher } from "./command-dispatcher.js";
 import { TaskTail } from "./task-tail/index.js";
 import { registerTaskCommands } from "./commands/task-commands.js";
 import { SkillCommandSource } from "./commands/skill-command-source.js";
+import { registerSkillsCommand } from "./skills/manager-command.js";
 import { PASTE_TOKEN_PATTERN, PasteRegistry } from "./paste-registry.js";
 import { resolveFileRefs } from "./resolve-file-refs.js";
 import {
@@ -1674,6 +1675,20 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       service: session.taskListService,
       getConversationId: () => state.conv.conversationId,
       writer: cliWriter,
+    });
+
+    // /skills 技能管理器 —— alt-screen,走命令现代路径(直接注册到 registry +
+    // dispatcher,同 task 命令)。注册在 /<name> 动态源之前,使其撞名探测能看见
+    // /skills(避免名为 "skills" 的技能遮蔽本命令);onMutate 接 tRegistry.refresh,
+    // 让管理器内禁用 / 归档后 /<name> 补全即时反映(§5.1)。
+    registerSkillsCommand({
+      registry: tRegistry,
+      dispatcher: typeaheadDispatcher,
+      rl,
+      renderer,
+      screen: renderScreen,
+      skillStore: session.skillStore,
+      refreshCommands: () => tRegistry.refresh(),
     });
 
     // 技能 /<name> 动态唤醒 —— 把技能库投影成 execution:"agent" 命令。注册在
