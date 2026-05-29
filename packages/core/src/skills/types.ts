@@ -62,3 +62,14 @@ export interface SkillRecord {
   disabled: boolean;
   createdAt: string;
 }
+
+/**
+ * 创建 / 编辑技能的草稿 —— 由起草引擎产出、用户策展确认后落盘。
+ * id 由 name 派生(skillNameToId),不入草稿;创建恒落 own(本地区)。
+ */
+export interface SkillDraft {
+  name: string;
+  description: string;
+  body: string;
+  mode: SkillMode;
+}

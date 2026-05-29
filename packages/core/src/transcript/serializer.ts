@@ -53,14 +53,16 @@ export interface WriteAtomicOptions {
 
 export async function writeAtomic(
   filePath: string,
-  content: string,
+  content: string | Uint8Array,
   opts?: WriteAtomicOptions,
 ): Promise<void> {
   const platform = opts?.platform ?? process.platform;
   await fs.mkdir(path.dirname(filePath), { recursive: true });
 
   const tmp = tmpPathFor(filePath);
-  await fs.writeFile(tmp, content, "utf-8");
+  // string 默认按 utf-8 写;Uint8Array / Buffer 原样写 —— 二进制安全
+  // (技能附属文件需逐字节保真,与 Agent Skills 生态兼容)。
+  await fs.writeFile(tmp, content);
 
   if (platform === "win32") {
     // Windows fallback：先 unlink，再 rename
