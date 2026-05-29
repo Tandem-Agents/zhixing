@@ -21,6 +21,8 @@ import {
   JsonTaskStore,
   userMessage,
   FsWorkSceneRegistry,
+  SkillStore,
+  getSkillsRoot,
   type ChannelRegistry,
   type AgentTurnResult,
   type IPermissionStore,
@@ -108,6 +110,14 @@ export class RuntimeSession implements IWorkModeController {
   // 后续 enter/exit 工作模式与 cli /work 命令共用此同一实例。
   private readonly workSceneRegistryInstance: IWorkSceneRegistry =
     new FsWorkSceneRegistry();
+
+  // 技能库 store 单例 —— 与 workSceneRegistry 同范式:纯 fs 访问、无 async
+  // bootstrap / dispose、生命周期同 session。reload / 模式切换重建 agentRuntime 时
+  // 经 createAgent 注入同一实例,使运行时(索引读 / load_skill)与 cli 侧(/<name>
+  // 唤醒、技能管理面板)共享单一锁域,index.json 读改写跨面串行、不丢更新。
+  private readonly skillStoreInstance: SkillStore = new SkillStore(
+    getSkillsRoot(),
+  );
 
   // 生命周期忙标志 —— reload / 工作模式 enter / exit 共享同一 guard：三者
   // 都是 turn 边界整体切换、互斥，忙时后到者拒绝（沿用"if(busy) 拒绝"模式，
@@ -253,6 +263,8 @@ export class RuntimeSession implements IWorkModeController {
         ? { kind: "workscene", sceneId: spec.scene.id }
         : undefined,
       profile: isWorkscene ? powerProfile(spec.scene) : undefined,
+      // 注入会话级单一实例,与 cli 侧 /<name>、管理面板共享锁域(见字段注释)
+      skillStore: this.skillStoreInstance,
       extraTools,
       decorateRunBus: createRenderSubscribers({
         renderer: this.opts.renderer,
@@ -412,6 +424,14 @@ export class RuntimeSession implements IWorkModeController {
    */
   get workSceneRegistry(): IWorkSceneRegistry {
     return this.workSceneRegistryInstance;
+  }
+
+  /**
+   * 技能库 store 单例 —— cli 的 /<name> 唤醒(SkillCommandSource)与后续技能管理
+   * 面板的访问名;与注入运行时的是同一实例,跨 reload / 模式切换持续。
+   */
+  get skillStore(): SkillStore {
+    return this.skillStoreInstance;
   }
 
   // ─── IWorkModeController 实现 ───

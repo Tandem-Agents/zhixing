@@ -1,8 +1,11 @@
 /**
  * load_skill 工具 —— 命中索引后按需加载技能全文(渐进披露的"展开"动作)。
  *
- * 模型扫到 Available Skills 索引里某个 id 与当前任务相关时调用本工具,取回该技能
- * 的完整正文(做法 / 约定 / 坑)。固定工具:技能再增删,工具集恒只此一个加载工具。
+ * 两条触发统一收口到本工具:(1)模型扫到 Available Skills 索引里某个 id 与当前任务
+ * 相关 → 主动加载;(2)用户发来一条恰为「斜杠 + 技能 id」的消息(如 `/deploy`,由
+ * cli 的 /<name> 唤醒派发为普通 user message)→ 显式调用该技能。手动唤醒不走旁路、
+ * 与自动命中同经本工具,故技能全集(含未进 top-N 索引的)都可达。取回技能完整正文
+ * (做法 / 约定 / 坑)。固定工具:技能再增删,工具集恒只此一个加载工具。
  *
  * 依赖按接口隔离:只依赖 `SkillTextLoader`(按 id 取全文),不耦合整个 SkillStore,
  * 便于注入与测试。读全文 + 写命中度量属知行应用本地状态,声明 app-state 边界 →
@@ -15,10 +18,12 @@ export function createLoadSkillTool(loader: SkillTextLoader): ToolDefinition {
   return {
     name: "load_skill",
     description:
-      "Load the full instructions of a skill by its id (the id shown in the Available Skills index). " +
-      "Call this when a listed skill matches the current task: the one-line description is only a pointer — " +
-      "the loaded full text tells you how to do it (the user's conventions, steps, pitfalls). " +
-      "Pass the exact id from the index.",
+      "Load the full instructions of a skill by its id. The Available Skills index lists skills with a " +
+      "one-line description — that description is only a pointer; the loaded full text tells you how to do " +
+      "the task (the user's conventions, steps, pitfalls). Two triggers: (1) a listed skill matches the " +
+      "current task — load it before proceeding; (2) the user's message is exactly a slash followed by a " +
+      "skill id (for example `/deploy`) — they are explicitly invoking that skill, so call this tool with " +
+      "that id even if it is not shown in the index. Pass the exact id.",
     inputSchema: {
       type: "object",
       properties: {

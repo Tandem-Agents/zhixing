@@ -372,6 +372,15 @@ export interface CreateAgentRuntimeOptions {
     | { kind: "personal" }
     | { kind: "workscene"; sceneId: string };
   /**
+   * 技能库 store —— 缺省时内部按全局库根(~/.zhixing/skills)自建一个。
+   *
+   * cli 注入会话级单一实例,使 runtime 的索引读 / load_skill 与 cli 侧的 /<name>
+   * 唤醒、技能管理面板共享同一锁域(index.json 读改写串行),从根上杜绝跨实例
+   * 并发写丢更新。serve / 一次性 --print / 测试等无 cli 面板的路径不传,走内部
+   * 自建即可(技能为全局、库根固定,实例无状态、无生命周期负担)。
+   */
+  skillStore?: SkillStore;
+  /**
    * 主对话槽位 —— 缺省 "main"。决定主对话语义六处（capability /
    * Task provider+model / budget resolveModelInfo / 返回 providerId+model /
    * resilientCallLLM / runAgentLoop）取 roles[primaryRole]，及主对话 loop +
@@ -524,7 +533,7 @@ export async function createAgentRuntime(
   // 场景共享,只按 mode 分区注入),load_skill 工具与索引段共用此实例。
   const skillMode: SkillMode =
     options.memoryScope?.kind === "workscene" ? "work" : "main";
-  const skillStore = new SkillStore(getSkillsRoot());
+  const skillStore = options.skillStore ?? new SkillStore(getSkillsRoot());
 
   const builtinCtx = { proxy: config.network?.proxy, memoryStore, skillStore };
   const baseTools: ToolDefinition[] = [];

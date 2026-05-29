@@ -67,6 +67,7 @@ import { switchToNewConversation } from "./runtime/switch-to-new-conversation.js
 import { CommandDispatcher } from "./command-dispatcher.js";
 import { TaskTail } from "./task-tail/index.js";
 import { registerTaskCommands } from "./commands/task-commands.js";
+import { SkillCommandSource } from "./commands/skill-command-source.js";
 import { PASTE_TOKEN_PATTERN, PasteRegistry } from "./paste-registry.js";
 import { resolveFileRefs } from "./resolve-file-refs.js";
 import {
@@ -1674,6 +1675,18 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       getConversationId: () => state.conv.conversationId,
       writer: cliWriter,
     });
+
+    // 技能 /<name> 动态唤醒 —— 把技能库投影成 execution:"agent" 命令。注册在
+    // builtin / task 命令之后,撞名探测(findExisting)才看得见它们、让核心命令优先。
+    // 初次 refresh 把当前技能集拉进补全缓存;后续创建 / 接入技能由各自流程触发
+    // registry.refresh() 增量纳入(刷新触发点随创作 / 接入单元落地,本单元只接入唤醒)。
+    tRegistry.registerDynamicSource(
+      new SkillCommandSource({
+        listAll: () => session.skillStore.listAll(),
+        findExisting: (name) => tRegistry.findByName(name),
+      }),
+    );
+    await tRegistry.refresh();
 
     // 屏幕底部任务区 —— 订阅 service 变化驱动 setStatusTail。
     // 仅在有 renderScreen（capability.ok）时装配；无 chrome 终端走 legacy 路径
