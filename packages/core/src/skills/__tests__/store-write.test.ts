@@ -154,3 +154,29 @@ describe("SkillStore 写路径", () => {
     });
   });
 });
+
+describe("listForManagement(面向管理的全集读)", () => {
+  it("返回全集含 disabled 并带回 usage —— 与剔 disabled 的 listAll 对比", async () => {
+    await writeSkill("own", "a", { name: "A" });
+    await writeSkill("linked", "b", { name: "B" });
+    const store = new SkillStore(root);
+    await store.setState("a", { disabled: true }); // 禁用 a
+    await store.loadText("b"); // 记一次 b 的命中(usage)
+
+    const managed = await store.listForManagement();
+    expect(managed.map((m) => m.id).sort()).toEqual(["a", "b"]); // 全集:含被禁用的 a
+
+    const a = managed.find((m) => m.id === "a")!;
+    const b = managed.find((m) => m.id === "b")!;
+    expect(a.disabled).toBe(true); // 禁用技能可见、带状态(供就地重启用)
+    expect(a.usage).toBeNull(); // 未命中过 → usage 为 null
+    expect(b.usage?.hitCount).toBe(1); // 带回 usage
+
+    // 对比:listAll 剔 disabled,只剩 b
+    expect((await store.listAll()).map((r) => r.id)).toEqual(["b"]);
+  });
+
+  it("空库返回空数组", async () => {
+    expect(await new SkillStore(root).listForManagement()).toEqual([]);
+  });
+});

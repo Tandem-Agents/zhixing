@@ -26,6 +26,7 @@ import {
   usagePath,
 } from "./paths.js";
 import type {
+  ManagedSkillRecord,
   SkillDraft,
   SkillMode,
   SkillRecord,
@@ -64,6 +65,17 @@ export class SkillStore {
   /** 按 mode 过滤 + 排序 + 取前 n,供索引产生。与 listAll 共享单一过滤点。 */
   async queryTopN(mode: SkillMode, n: number): Promise<SkillRecord[]> {
     return this.project({ mode, limit: n });
+  }
+
+  /**
+   * 面向管理的全集读 —— 全集(own + linked,**含 disabled**)+ 每条 usage,供
+   * `/skills` 管理器浏览:显示 ⊘ 并就地重新启用、显示使用度。与剔 disabled 的
+   * `listAll` / `queryTopN`(补全 / 索引用)区分:本读返回全集、无过滤,故不经
+   * `project` 的过滤点,直接 `discoverWithState`(全集发现、本含 disabled)+
+   * `rankWithUsage`(与上述两者排序共用同一 usage 旁路读、并把 usage 一并带回)。
+   */
+  async listForManagement(): Promise<ManagedSkillRecord[]> {
+    return this.rankWithUsage(await this.discoverWithState());
   }
 
   /**
@@ -387,28 +399,37 @@ export class SkillStore {
     const records = await this.discoverWithState();
     let filtered = records.filter((r) => !r.disabled);
     if (opts.mode) filtered = filtered.filter((r) => r.mode === opts.mode);
-    const ranked = await this.rank(filtered);
+    const ranked = await this.rankWithUsage(filtered);
     return opts.limit !== undefined ? ranked.slice(0, opts.limit) : ranked;
   }
 
-  /** pinned 优先;其余按 (usage.lastHitAt ?? createdAt) 降序,hitCount 作 tiebreaker。 */
-  private async rank(records: SkillRecord[]): Promise<SkillRecord[]> {
+  /**
+   * 唯一排序点:读 usage + 排序 + 带回 usage。pinned 优先,其余按
+   * (usage.lastHitAt ?? createdAt) 降序、hitCount 作 tiebreaker。
+   *
+   * 返回 `ManagedSkillRecord`(带 usage):`listForManagement` 直接用;
+   * `project`(listAll / queryTopN)取此结果当 `SkillRecord[]`——usage 字段在类型
+   * 上收敛掉、消费方只按显式字段取,不外泄。usage 旁路一处读、无重复读。
+   */
+  private async rankWithUsage(
+    records: SkillRecord[],
+  ): Promise<ManagedSkillRecord[]> {
     const keyed = await Promise.all(
       records.map(async (r) => {
         const usage = await this.readUsage(r.id);
         return {
-          r,
+          record: { ...r, usage },
           recency: usage?.lastHitAt ?? r.createdAt,
           hitCount: usage?.hitCount ?? 0,
         };
       }),
     );
     keyed.sort((a, b) => {
-      if (a.r.pinned !== b.r.pinned) return a.r.pinned ? -1 : 1;
+      if (a.record.pinned !== b.record.pinned) return a.record.pinned ? -1 : 1;
       if (a.recency !== b.recency) return a.recency < b.recency ? 1 : -1;
       return b.hitCount - a.hitCount;
     });
-    return keyed.map((k) => k.r);
+    return keyed.map((k) => k.record);
   }
 
   // ─── 扫描发现 ───

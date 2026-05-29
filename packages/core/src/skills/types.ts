@@ -64,6 +64,15 @@ export interface SkillRecord {
 }
 
 /**
+ * 管理面读出的一条技能 —— 在 `SkillRecord` 基础上带回 `usage`,供 `/skills`
+ * 管理器显示「使用度」并据以排序。usage 是高频旁路、刻意不入 `SkillRecord`
+ * (见上),仅管理 / 排序这类按需读时附带回来。
+ */
+export interface ManagedSkillRecord extends SkillRecord {
+  usage: SkillUsage | null;
+}
+
+/**
  * 创建 / 编辑技能的草稿 —— 由起草引擎产出、用户策展确认后落盘。
  * id 由 name 派生(skillNameToId),不入草稿;创建恒落 own(本地区)。
  */

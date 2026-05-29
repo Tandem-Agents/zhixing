@@ -35,7 +35,7 @@
 **两个创建入口**(都是 agent 起草、用户策展;**都先开 AI 编辑屏、再在屏内起草**——立刻见屏,不在主屏干等几秒 LLM):
 
 1. **从对话(主)** —— 做完某事后触发一个轻命令(可附一句指向,如「聚焦部署那段」)。它**照 `/config`·`/mcp` 的 REPL 层 handler 模式接线**(`config-command.ts:handleConfigCommand`/`runEditorCommand`):注入 `{ rl, state, session, renderer, writer, screen }` 这组 deps,`renderer.stop()` + `rl.pause()` 让出 stdin → **立刻开 AI 编辑屏**(§3.1)并把"最近对话上下文"(经 REPL state 的 `state.conv.messages` 取)传入 → 屏内调起草引擎(scoped `core/tool-loop`,**不进主 agent 回合**)起草(loading 态)→ 退出时 `rl.resume()` + `screen.reassertCursorHidden()`。**不能写成 `execution:local/hybrid` 的普通 `CommandDef`** —— 通用分发的 `CommandHandlerContext` 只有 `{ args, rawInput, runtime }`(`command-dispatcher.ts:128`),**拿不到 session / screen**(故 config-command 另立 `ConfigCommandDeps`,`config-command.ts:51`);也**不走 `execution:"agent"`**(那是父规格 §5.1 `/<name>` 唤醒用、整条发主 agent loop,既非独立会话、也无"开屏"路径)。
-2. **从意图(冷启动)** —— 无现成对话时,`/skills` 管理面板 `Ctrl+N`「新建」(父规格 §5.2)开**空白** AI 编辑屏;用户在屏内输入区说的第一句「我想要个什么技能」即意图,屏内据此起草骨架。开屏走与 entry 1 同一套 REPL 层接线(`/skills` 面板触发 → 注入 deps → 开屏)。
+2. **从意图(冷启动)** —— 无现成对话时,从 `/skills` 技能管理器(父规格 §5.2 的 alt-screen)「新建」进**空白** AI 编辑屏视图;用户在屏内输入区说的第一句「我想要个什么技能」即意图,屏内据此起草骨架。管理器(浏览 / 状态操作)与 AI 编辑屏同属一个 alt-screen 工作区,「新建」是其内的视图切换;开屏走与 entry 1 同一套 REPL 层接线(注入 deps → 开屏)。
 
 **草稿内容**(agent 替用户解决质量与安全,这正是用户做不好的部分):
 
@@ -58,7 +58,7 @@
 - **底线 —— 必须走 alt-screen,禁用主 buffer 清屏路径。** 编辑屏进 alternate screen buffer(`\x1b[?1049h`),终端**原子保存** main buffer 整体(scrollback + viewport + chrome + 对话历史),退出(`\x1b[?1049l`)**原子恢复** —— 在 alt buffer 里随便重画都碰不到主对话历史,是**终端层物理隔离、不靠纪律**(`screen-controller.ts` suspend/resume 注释明述此为"不毁主历史"而选的路;DECSTBM 手工清屏那条曾是"历史消失"bug 源,**禁用**)。返回主回路调 `ScreenController.reassertCursorHidden()`(`screen/screen-controller.ts:reassertCursorHidden`)重申 chrome 光标不变量。
 - **复用的原语**(均为 config-editor 已落地的独立件):`Renderer`(`config-editor/ui/render.ts`,整帧渲染成串、一次 `flush` 的**双缓冲**)、`KeyEventStream`(`config-editor/ui/input.ts`,`next(signal)` 可取消)、alt-screen 进退 + **三层退出防御**(`finally` + `process.once("exit")` emit `\x1b[?1049l`,`runner.ts:88-94`/`97`/`154`)、**事务草稿**模式(改完不即落盘、`Ctrl+C` 整体丢弃,对标 `WorkingState`,`types.ts:121`)、**注入式异步访问器**模式(面板不感知 LLM,对标 `mcpResolve`,`types.ts:183`)。
 - **专门的事件循环**:`渲染整帧 → await 按键 / 等 editSkill(可取消) → 应用结果`;异步 AI 编辑期间**保留内容区、改完(或流式)就地重画内容**,而非 `loading` 的全屏 spinner 帧——这是与现成 `loading` 的关键区别。
-- **避免耦合债**:上述原语应抽到一个**共享的 alt-screen 屏基础模块**,config-editor 与本编辑屏同建其上;本编辑屏不反向依赖 config-editor 内部。
+- **避免耦合债**:上述原语应抽到一个**共享的 alt-screen 屏基础模块**,config-editor、`/skills` 技能管理器(浏览 / 状态操作,父规格 §5.2)与本编辑屏同建其上;skill 侧不反向依赖 config-editor 内部。
 
 **核心交互**:用户在底部说需求 → 调注入的 `editSkill(draft, instruction, signal, report)`(内部走起草引擎 §二、按指令改草稿、过脱敏,返回新草稿)→ 内容区**就地重画**(alt buffer 自有、对主对话零影响)。**所有修改(name / description / `mode` / 正文)全经 AI,屏内不设手动可编辑字段** —— 独立编辑会话(AI 上下文 = 这一个技能 + 改动意图,与主对话隔离)。满意 → 确认 → 经注入 writer(对标 `ConfigEditorContext.writers`,`types.ts:321`/`346`)落 Store(§四)。
 
@@ -97,7 +97,7 @@
 |---|---|---|
 | `core/src/skills/` | 起草引擎、Store `create`/`update` 写 API、脱敏接线 | `core/tool-loop`、`AgentRuntime.callText`(起草,同 Admission)、`skillNameToId`、`writeAtomic`;**通用 secret-scrubber(待建,系统层)**——输入借 `bi-zhixing-credentials-block`(`builtin-rules.ts:76`)凭证字段 schema |
 | `orchestrator` | `editSkill` 访问器(起草引擎按指令改草稿 + 脱敏) | 注入进 AI 编辑屏,对标 `ConfigEditorRuntime.mcpResolve`(`config-editor/types.ts:183`) |
-| `cli` | AI 编辑屏(**专门 alt-screen 循环,复用 config-editor 原语**)、外部编辑器解析 + 无闪 spawn、两入口 | `Renderer`(`config-editor/ui/render.ts`)、`KeyEventStream`(`config-editor/ui/input.ts`)、alt-screen + 三层退出防御模式(`runner.ts:88-94`/`97`/`154`)、`WorkingState`(`types.ts:121`)与 `writers`(`types.ts:321`)模式、`screen/screen-controller.ts:reassertCursorHidden`;两入口接线照 `config-command.ts:handleConfigCommand`/`runEditorCommand`(REPL 层注入 `{rl,state,session,renderer,writer,screen}`)、`/skills` 面板 `Ctrl+N`(父规格 §5.2) |
+| `cli` | AI 编辑屏(**专门 alt-screen 循环,复用 config-editor 原语**)、外部编辑器解析 + 无闪 spawn、两入口 | `Renderer`(`config-editor/ui/render.ts`)、`KeyEventStream`(`config-editor/ui/input.ts`)、alt-screen + 三层退出防御模式(`runner.ts:88-94`/`97`/`154`)、`WorkingState`(`types.ts:121`)与 `writers`(`types.ts:321`)模式、`screen/screen-controller.ts:reassertCursorHidden`;两入口接线照 `config-command.ts:handleConfigCommand`/`runEditorCommand`(REPL 层注入 `{rl,state,session,renderer,writer,screen}`)、`/skills` 技能管理器「新建」/「编辑」入口(父规格 §5.2) |
 
 ## 七、v1 → v2 跨版插座
 
