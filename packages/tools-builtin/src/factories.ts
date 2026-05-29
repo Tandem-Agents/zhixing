@@ -11,12 +11,13 @@
  *   3. 在需要启用该工具的 AgentRoleProfile.enabledTools 中加工具名
  */
 
-import type { MemoryStore, ToolDefinition } from "@zhixing/core";
+import type { MemoryStore, SkillStore, ToolDefinition } from "@zhixing/core";
 import { createBashTool } from "./bash.js";
 import { createEditTool } from "./edit.js";
 import { createGlobTool } from "./glob.js";
 import { createGrepTool } from "./grep.js";
 import { createMemoryTool } from "./memory.js";
+import { createLoadSkillTool } from "./skill.js";
 import { createReadTool } from "./read.js";
 import { createWebFetchTool } from "./web-fetch.js";
 import { createWriteTool } from "./write.js";
@@ -37,6 +38,11 @@ export interface BuiltinToolContext {
    * 工作场景下写穿个人记忆域）。
    */
   readonly memoryStore?: MemoryStore;
+  /**
+   * 装配期构造的 SkillStore —— load_skill 工具据此按 id 取技能全文。load_skill
+   * 启用时必须注入;缺失即装配未按约定构造下传,工厂 fail-fast 而非静默兜底。
+   */
+  readonly skillStore?: SkillStore;
 }
 
 export type BuiltinToolFactory = (ctx: BuiltinToolContext) => ToolDefinition;
@@ -63,6 +69,14 @@ export const BUILTIN_TOOL_FACTORIES: Readonly<
       );
     }
     return createMemoryTool(ctx.memoryStore);
+  },
+  load_skill: (ctx) => {
+    if (!ctx.skillStore) {
+      throw new Error(
+        "load_skill 工具需装配期注入 ctx.skillStore —— 缺失说明 SkillStore 未构造并下传,拒绝静默兜底",
+      );
+    }
+    return createLoadSkillTool(ctx.skillStore);
   },
   web_fetch: (ctx) => createWebFetchTool({ proxy: ctx.proxy }),
 };

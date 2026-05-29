@@ -7,5 +7,7 @@
 
 export { skillNameToId } from "./id.js";
 export { SkillStore } from "./store.js";
+export { renderSkillIndex } from "./render.js";
+export type { RenderSkillIndexOptions } from "./render.js";
 export * from "./types.js";
 export * from "./paths.js";

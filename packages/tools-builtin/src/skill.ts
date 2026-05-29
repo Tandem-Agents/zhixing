@@ -1,0 +1,58 @@
+/**
+ * load_skill 工具 —— 命中索引后按需加载技能全文(渐进披露的"展开"动作)。
+ *
+ * 模型扫到 Available Skills 索引里某个 id 与当前任务相关时调用本工具,取回该技能
+ * 的完整正文(做法 / 约定 / 坑)。固定工具:技能再增删,工具集恒只此一个加载工具。
+ *
+ * 依赖按接口隔离:只依赖 `SkillTextLoader`(按 id 取全文),不耦合整个 SkillStore,
+ * 便于注入与测试。读全文 + 写命中度量属知行应用本地状态,声明 app-state 边界 →
+ * 判 internal 自动放行,不每次弹确认;不设 maxResultChars,全文须完整入上下文。
+ */
+
+import type { SkillTextLoader, ToolDefinition, ToolResult } from "@zhixing/core";
+
+export function createLoadSkillTool(loader: SkillTextLoader): ToolDefinition {
+  return {
+    name: "load_skill",
+    description:
+      "Load the full instructions of a skill by its id (the id shown in the Available Skills index). " +
+      "Call this when a listed skill matches the current task: the one-line description is only a pointer — " +
+      "the loaded full text tells you how to do it (the user's conventions, steps, pitfalls). " +
+      "Pass the exact id from the index.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: {
+          type: "string",
+          description: "The skill id, exactly as shown in the Available Skills index.",
+        },
+      },
+      required: ["id"],
+    },
+
+    isReadOnly: false, // 写命中度量(usage)
+    isParallelSafe: true, // per-id 锁护 usage 写
+    needsPermission: false,
+    // 技能数据 = 知行应用本地状态(~/.zhixing/skills):读全文 + 写 usage、无外部副作用
+    // → 经 app-state 边界判 internal(自动放行),不每次加载弹确认。
+    boundaries: [{ boundaryType: "app-state", access: "write", dynamic: false }],
+
+    async call(input): Promise<ToolResult> {
+      const id = typeof input.id === "string" ? input.id.trim() : "";
+      if (!id) {
+        return { content: "load_skill 需要非空的 id 参数。", isError: true };
+      }
+      try {
+        const { name, body } = await loader.loadText(id);
+        return { content: `# ${name}\n\n${body}`, isError: false };
+      } catch (e) {
+        return {
+          content: `加载技能 "${id}" 失败:${
+            e instanceof Error ? e.message : String(e)
+          }`,
+          isError: true,
+        };
+      }
+    },
+  };
+}

@@ -73,3 +73,11 @@ export interface SkillDraft {
   body: string;
   mode: SkillMode;
 }
+
+/**
+ * load_skill 工具对 Store 的最小依赖契约(接口隔离)——工具只需"按 id 取全文",
+ * 不依赖整个 SkillStore。SkillStore 结构上满足此接口;测试可注入轻量 mock。
+ */
+export interface SkillTextLoader {
+  loadText(id: string): Promise<{ id: string; name: string; body: string }>;
+}
