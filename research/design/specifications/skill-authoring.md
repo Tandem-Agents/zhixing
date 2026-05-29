@@ -56,9 +56,9 @@
 一个**专门写的 alt-screen 交互屏**:顶部内容区(渲染 `name` / `description` / 路径 / 正文预览),底部输入区(用户的自然语言指令)。它**不复用** config-editor 的 `runEventLoop`(那是 panel-stack 表单导航器、不是对话式编辑器),**也不复用** `loading` action(其 `renderLoadingFrame` 会 `renderer.clear()` 盖成全屏"请稍候"spinner、把内容预览藏掉 —— `loading.ts:20`);而是复用更低层、合身的原语与模式:
 
 - **底线 —— 必须走 alt-screen,禁用主 buffer 清屏路径。** 编辑屏进 alternate screen buffer(`\x1b[?1049h`),终端**原子保存** main buffer 整体(scrollback + viewport + chrome + 对话历史),退出(`\x1b[?1049l`)**原子恢复** —— 在 alt buffer 里随便重画都碰不到主对话历史,是**终端层物理隔离、不靠纪律**(`screen-controller.ts` suspend/resume 注释明述此为"不毁主历史"而选的路;DECSTBM 手工清屏那条曾是"历史消失"bug 源,**禁用**)。返回主回路调 `ScreenController.reassertCursorHidden()`(`screen/screen-controller.ts:reassertCursorHidden`)重申 chrome 光标不变量。
-- **复用的原语**(均为 config-editor 已落地的独立件):`Renderer`(`config-editor/ui/render.ts`,整帧渲染成串、一次 `flush` 的**双缓冲**)、`KeyEventStream`(`config-editor/ui/input.ts`,`next(signal)` 可取消)、alt-screen 进退 + **三层退出防御**(`finally` + `process.once("exit")` emit `\x1b[?1049l`,`runner.ts:88-94`/`97`/`154`)、**事务草稿**模式(改完不即落盘、`Ctrl+C` 整体丢弃,对标 `WorkingState`,`types.ts:121`)、**注入式异步访问器**模式(面板不感知 LLM,对标 `mcpResolve`,`types.ts:183`)。
+- **复用的原语**(均为中性 `tui/` 的独立件):`Renderer`(`tui/render.ts`,整帧渲染成串、一次 `flush` 的**双缓冲**)、`KeyEventStream`(`tui/input.ts`,`next(signal)` 可取消)、alt-screen 进退 + **三层退出防御**(`finally` + `process.once("exit")` emit `\x1b[?1049l`,`runner.ts:88-94`/`97`/`154`)、**事务草稿**模式(改完不即落盘、`Ctrl+C` 整体丢弃,对标 `WorkingState`,`types.ts:121`)、**注入式异步访问器**模式(面板不感知 LLM,对标 `mcpResolve`,`types.ts:183`)。
 - **专门的事件循环**:`渲染整帧 → await 按键 / 等 editSkill(可取消) → 应用结果`;异步 AI 编辑期间**保留内容区、改完(或流式)就地重画内容**,而非 `loading` 的全屏 spinner 帧——这是与现成 `loading` 的关键区别。
-- **避免耦合债**:上述原语应抽到一个**共享的 alt-screen 屏基础模块**,config-editor、`/skills` 技能管理器(浏览 / 状态操作,父规格 §5.2)与本编辑屏同建其上;skill 侧不反向依赖 config-editor 内部。
+- **避免耦合债**:上述原语已抽到中性 `tui/`(`tui/render.ts` / `tui/input.ts` / `tui/key-event.ts` / `tui/key-decoder.ts` + 既有 `screen/screen-controller.ts`)—— config-editor、`/skills` 技能管理器(浏览 / 状态操作,父规格 §5.2)与本编辑屏同建其上;skill 侧不反向依赖 config-editor 内部。
 
 **核心交互**:用户在底部说需求 → 调注入的 `editSkill(draft, instruction, signal, report)`(内部走起草引擎 §二、按指令改草稿、过脱敏,返回新草稿)→ 内容区**就地重画**(alt buffer 自有、对主对话零影响)。**所有修改(name / description / `mode` / 正文)全经 AI,屏内不设手动可编辑字段** —— 独立编辑会话(AI 上下文 = 这一个技能 + 改动意图,与主对话隔离)。满意 → 确认 → 经注入 writer(对标 `ConfigEditorContext.writers`,`types.ts:321`/`346`)落 Store(§四)。
 
@@ -97,7 +97,7 @@
 |---|---|---|
 | `core/src/skills/` | 起草引擎、Store `create`/`update` 写 API、脱敏接线 | `core/tool-loop`、`AgentRuntime.callText`(起草,同 Admission)、`skillNameToId`、`writeAtomic`;**通用 secret-scrubber(待建,系统层)**——输入借 `bi-zhixing-credentials-block`(`builtin-rules.ts:76`)凭证字段 schema |
 | `orchestrator` | `editSkill` 访问器(起草引擎按指令改草稿 + 脱敏) | 注入进 AI 编辑屏,对标 `ConfigEditorRuntime.mcpResolve`(`config-editor/types.ts:183`) |
-| `cli` | AI 编辑屏(**专门 alt-screen 循环,复用 config-editor 原语**)、外部编辑器解析 + 无闪 spawn、两入口 | `Renderer`(`config-editor/ui/render.ts`)、`KeyEventStream`(`config-editor/ui/input.ts`)、alt-screen + 三层退出防御模式(`runner.ts:88-94`/`97`/`154`)、`WorkingState`(`types.ts:121`)与 `writers`(`types.ts:321`)模式、`screen/screen-controller.ts:reassertCursorHidden`;两入口接线照 `config-command.ts:handleConfigCommand`/`runEditorCommand`(REPL 层注入 `{rl,state,session,renderer,writer,screen}`)、`/skills` 技能管理器「新建」/「编辑」入口(父规格 §5.2) |
+| `cli` | AI 编辑屏(**专门 alt-screen 循环,复用 tui 共享原语**)、外部编辑器解析 + 无闪 spawn、两入口 | `Renderer`(`tui/render.ts`)、`KeyEventStream`(`tui/input.ts`)、alt-screen + 三层退出防御模式(`runner.ts:88-94`/`97`/`154`)、`WorkingState`(`types.ts:121`)与 `writers`(`types.ts:321`)模式、`screen/screen-controller.ts:reassertCursorHidden`;两入口接线照 `config-command.ts:handleConfigCommand`/`runEditorCommand`(REPL 层注入 `{rl,state,session,renderer,writer,screen}`)、`/skills` 技能管理器「新建」/「编辑」入口(父规格 §5.2) |
 
 ## 七、v1 → v2 跨版插座
 

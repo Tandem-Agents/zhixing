@@ -12,12 +12,10 @@
  */
 
 import type {
-  KeyEvent,
   PanelAction,
   PanelDescriptor,
   WorkingState,
 } from "../types.js";
-import { Renderer } from "../ui/render.js";
 import { getPreset } from "@zhixing/providers";
 import {
   addProviderModel,
@@ -36,6 +34,8 @@ import {
   renderFooter,
   osc8Hyperlink,
   stringWidth,
+  Renderer,
+  type KeyEvent,
 } from "../../tui/index.js";
 
 export const CONTENT_INDENT = " ".repeat(layout.contentIndent);

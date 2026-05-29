@@ -91,25 +91,6 @@ export type PanelDescriptor =
 /** 模型角色 —— 单一事实源是 providers 的 ROLE_SPECS（main / light / power） */
 export type ModelRole = RoleId;
 
-// ─── KeyEvent（标准化按键） ───
-
-/**
- * 标准化键盘事件——chunk → KeyEvent 由 ui/key-decoder 完成。
- *
- * Panel handleKey 只关心高层语义（enter / arrow / char），不处理原始字符或 ANSI 序列。
- */
-export type KeyEvent =
-  | { type: "char"; ch: string }
-  | { type: "enter" }
-  | { type: "backspace" }
-  | { type: "escape" }
-  | { type: "ctrl-c" }
-  | { type: "ctrl-s" }
-  | { type: "arrow-up" }
-  | { type: "arrow-down" }
-  | { type: "arrow-left" }
-  | { type: "arrow-right" };
-
 // ─── 状态层 ───
 
 /**

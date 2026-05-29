@@ -9,10 +9,14 @@
  * 摘除悬挂 waiter（依赖 KeyEventStream.next(signal) 的可取消语义）。
  */
 
-import type { KeyEvent, PanelAction } from "./types.js";
-import type { KeyEventStream } from "./ui/input.js";
-import { Renderer } from "./ui/render.js";
-import { renderChrome, renderFooter } from "../tui/index.js";
+import type { PanelAction } from "./types.js";
+import {
+  Renderer,
+  renderChrome,
+  renderFooter,
+  type KeyEvent,
+  type KeyEventStream,
+} from "../tui/index.js";
 
 const LOADING_FOOTER_HINTS = ["Esc 取消", "Ctrl+C 退出"] as const;
 

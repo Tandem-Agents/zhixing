@@ -33,7 +33,6 @@ export type {
   ConfigEditorRuntime,
   ConfigEditorWriters,
   EntryState,
-  KeyEvent,
   ModelRole,
   PanelDescriptor,
   Section,

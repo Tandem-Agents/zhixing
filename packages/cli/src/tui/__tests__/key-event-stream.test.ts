@@ -11,8 +11,8 @@
 
 import { EventEmitter } from "node:events";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createKeyEventStream } from "../ui/input.js";
-import type { KeyEvent } from "../types.js";
+import { createKeyEventStream } from "../input.js";
+import type { KeyEvent } from "../key-event.js";
 
 /**
  * Mock stdin：支持 setRawMode / setEncoding / resume / pause / on('data') /

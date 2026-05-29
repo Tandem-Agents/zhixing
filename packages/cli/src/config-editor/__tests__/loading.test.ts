@@ -9,8 +9,8 @@
 
 import { describe, expect, it } from "vitest";
 import { runLoadingAction } from "../loading.js";
-import type { KeyEvent, PanelAction, WorkingState } from "../types.js";
-import type { KeyEventStream } from "../ui/input.js";
+import type { PanelAction, WorkingState } from "../types.js";
+import type { KeyEvent, KeyEventStream } from "../../tui/index.js";
 
 type LoadingAction = Extract<PanelAction, { type: "loading" }>;
 

@@ -11,12 +11,10 @@
 import { getPreset, ROLE_RECOMMENDATIONS } from "@zhixing/providers";
 import type { ThinkingConfig, ThinkingControl } from "@zhixing/core";
 import type {
-  KeyEvent,
   PanelAction,
   PanelDescriptor,
   WorkingState,
 } from "../types.js";
-import { Renderer } from "../ui/render.js";
 import {
   readModelRole,
   readModelThinking,
@@ -29,6 +27,8 @@ import {
   renderChrome,
   renderListRow,
   renderFooter,
+  Renderer,
+  type KeyEvent,
 } from "../../tui/index.js";
 
 const FOOTER_HINTS = [

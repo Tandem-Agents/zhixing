@@ -87,6 +87,15 @@ export {
 } from "./footer.js";
 export { highlightSelectedRow } from "./highlight.js";
 
+// ─── alt-screen 屏基础（全屏交互面共用：config-editor / 技能管理器 / AI 编辑屏） ───
+
+export { Renderer } from "./render.js";
+export {
+  createKeyEventStream,
+  type KeyEventStream,
+} from "./input.js";
+export type { KeyEvent } from "./key-event.js";
+
 // ─── 3. TUI 应用组件 ─────────────────────────────────────
 
 // select 协议级类型 —— caller / 状态机 / 渲染器三方共享

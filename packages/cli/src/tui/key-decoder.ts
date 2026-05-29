@@ -15,7 +15,7 @@
  * 孤立 Esc 后跟随非 [ 字符时，Esc 触发 escape 事件 + 字符正常入流。
  */
 
-import type { KeyEvent } from "../types.js";
+import type { KeyEvent } from "./key-event.js";
 
 export interface KeyDecoderState {
   /** ANSI 序列识别状态机 */

@@ -16,13 +16,16 @@
 import type {
   ConfigEditorContext,
   ConfigEditorResult,
-  KeyEvent,
   PanelAction,
   PanelDescriptor,
   WorkingState,
 } from "./types.js";
-import { Renderer } from "./ui/render.js";
-import { createKeyEventStream, type KeyEventStream } from "./ui/input.js";
+import {
+  Renderer,
+  createKeyEventStream,
+  type KeyEvent,
+  type KeyEventStream,
+} from "../tui/index.js";
 import { createInitialState } from "./state.js";
 import {
   handleMainPanelKey,

@@ -21,12 +21,12 @@ import {
 import {
   rawModeController,
   type RawModeLease,
-} from "../../tui/_internal/raw-mode.js";
+} from "./_internal/raw-mode.js";
 import {
   acquireStdinOwnership,
   type StdinOwnershipHandle,
-} from "../../tui/_internal/stdin-ownership.js";
-import type { KeyEvent } from "../types.js";
+} from "./_internal/stdin-ownership.js";
+import type { KeyEvent } from "./key-event.js";
 
 const ESCAPE_TIMEOUT_MS = 50;
 

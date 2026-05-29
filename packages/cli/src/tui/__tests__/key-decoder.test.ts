@@ -14,7 +14,7 @@ import {
   createKeyDecoderState,
   decodeChar,
   decodeChunk,
-} from "../ui/key-decoder.js";
+} from "../key-decoder.js";
 
 describe("decodeChar · 单字符解码", () => {
   it("普通字符 → char event", () => {

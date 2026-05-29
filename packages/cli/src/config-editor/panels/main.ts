@@ -11,7 +11,6 @@
 
 import type {
   ConfigEditorContext,
-  KeyEvent,
   PanelAction,
   PanelDescriptor,
   Section,
@@ -19,7 +18,6 @@ import type {
   WorkingState,
 } from "../types.js";
 import { deriveEntryIssues, deriveEntryStatus } from "../entry.js";
-import { Renderer } from "../ui/render.js";
 import { getSections } from "../sections/index.js";
 import {
   tone,
@@ -29,6 +27,8 @@ import {
   renderEntryRow,
   renderButtonRow,
   renderFooter,
+  Renderer,
+  type KeyEvent,
 } from "../../tui/index.js";
 
 const FOOTER_HINTS = [

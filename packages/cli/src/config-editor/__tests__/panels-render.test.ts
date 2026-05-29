@@ -18,7 +18,7 @@
 import { describe, it, expect } from "vitest";
 import { Writable } from "node:stream";
 
-import { Renderer } from "../ui/render.js";
+import { Renderer, stripAnsi } from "../../tui/index.js";
 import {
   renderMainPanel,
   initialMainCursor,
@@ -44,7 +44,6 @@ import {
   setInputBuffer,
   upsertMcpServer,
 } from "../state.js";
-import { stripAnsi } from "../../tui/index.js";
 import type {
   ConfigEditorContext,
   PanelDescriptor,

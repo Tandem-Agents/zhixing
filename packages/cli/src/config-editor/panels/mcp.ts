@@ -10,13 +10,11 @@
 import type {
   ConfigEditorContext,
   ConfigEditorRuntime,
-  KeyEvent,
   PanelAction,
   PanelDescriptor,
   WorkingState,
 } from "../types.js";
 import type { McpServerStatus } from "@zhixing/mcp";
-import { Renderer } from "../ui/render.js";
 import {
   clearInputBuffer,
   isMcpServerEnabled,
@@ -42,6 +40,8 @@ import {
   renderFooter,
   osc8Hyperlink,
   wrapToWidth,
+  Renderer,
+  type KeyEvent,
 } from "../../tui/index.js";
 
 const FOOTER_HINTS = ["↑↓ 选择", "Enter 确认", "Esc 返回", "Ctrl+C 退出"] as const;

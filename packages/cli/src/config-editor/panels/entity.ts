@@ -15,13 +15,11 @@
 
 import { ROLE_RECOMMENDATIONS } from "@zhixing/providers";
 import type {
-  KeyEvent,
   PanelAction,
   PanelDescriptor,
   Status,
   WorkingState,
 } from "../types.js";
-import { Renderer } from "../ui/render.js";
 import {
   disableMessaging,
   enableMessaging,
@@ -41,6 +39,8 @@ import {
   renderEntryRow,
   renderButtonRow,
   renderFooter,
+  Renderer,
+  type KeyEvent,
 } from "../../tui/index.js";
 
 const FOOTER_HINTS = [
