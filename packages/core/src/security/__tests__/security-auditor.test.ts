@@ -270,3 +270,81 @@ describe("SecurityAuditor.auditStewardReview", () => {
     ]);
   });
 });
+
+// ─── auditRuleSedimented ───
+//
+// 锁住"自动沉淀达阈值时 emit security:rule_sedimented + payload 完整"的契约。
+// CLI 渲染层订阅此事件展示"已记住 N 次同类操作"沉淀提示 —— 任何 refactor 把
+// emit 调用删了 / 改错 payload 字段，沉淀提示会 silently 丢失 + 在此 fail。
+
+describe("SecurityAuditor.auditRuleSedimented", () => {
+  it("发射 rule_sedimented 含完整 payload（tool/operation/pattern/scope/contextId/ruleId/contributors）", async () => {
+    const bus = makeBus();
+    const events: unknown[] = [];
+    bus.on("security:rule_sedimented", (p) => events.push(p));
+
+    const auditor = new SecurityAuditor(bus);
+    const contributors = [
+      { origin: "user" as const, timestamp: 1_700_000_000_000 },
+      { origin: "user" as const, timestamp: 1_700_000_001_000 },
+      { origin: "steward" as const, timestamp: 1_700_000_002_000 },
+    ];
+
+    await auditor.auditRuleSedimented({
+      toolName: "bash",
+      toolInput: { command: "curl https://example.com" },
+      pattern: { tool: "bash", argument: "curl *" },
+      scope: "context",
+      contextId: { kind: "main" },
+      ruleId: "rule-abc-123",
+      contributors,
+    });
+
+    expect(events).toHaveLength(1);
+    const payload = events[0] as {
+      tool: string;
+      operation: string;
+      pattern: { tool: string; argument: string };
+      scope: string;
+      contextId: { kind: string };
+      ruleId: string;
+      contributors: typeof contributors;
+    };
+    expect(payload.tool).toBe("bash");
+    expect(payload.operation).toContain("curl https://example.com");
+    expect(payload.pattern).toEqual({ tool: "bash", argument: "curl *" });
+    expect(payload.scope).toBe("context");
+    expect(payload.contextId).toEqual({ kind: "main" });
+    expect(payload.ruleId).toBe("rule-abc-123");
+    expect(payload.contributors).toEqual(contributors);
+  });
+
+  it("PermissionContextId 三种 kind 都能在 payload 中正确透传", async () => {
+    const bus = makeBus();
+    const events: Array<{ contextId: { kind: string } }> = [];
+    bus.on("security:rule_sedimented", (p) =>
+      events.push(p as { contextId: { kind: string } }),
+    );
+
+    const auditor = new SecurityAuditor(bus);
+    const ids = [
+      { kind: "main" as const },
+      { kind: "workspace" as const, hash: "abc123" },
+      { kind: "scene" as const, sceneId: "my-scene" },
+    ];
+
+    for (const contextId of ids) {
+      await auditor.auditRuleSedimented({
+        toolName: "bash",
+        toolInput: { command: "ls" },
+        pattern: { tool: "bash", argument: "*" },
+        scope: "context",
+        contextId,
+        ruleId: `r-${contextId.kind}`,
+        contributors: [{ origin: "user", timestamp: 0 }],
+      });
+    }
+
+    expect(events.map((e) => e.contextId)).toEqual(ids);
+  });
+});

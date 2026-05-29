@@ -138,9 +138,9 @@ describe("ConfirmationTracker", () => {
   describe("基本计数", () => {
     it("record 后 getCount 返回累计次数", () => {
       const tracker = new ConfirmationTracker();
-      tracker.record(bashRequest("npm install express"), "medium");
-      tracker.record(bashRequest("npm install lodash"), "medium");
-      tracker.record(bashRequest("npm install foo"), "medium");
+      tracker.record(bashRequest("npm install express"), "medium", "user");
+      tracker.record(bashRequest("npm install lodash"), "medium", "user");
+      tracker.record(bashRequest("npm install foo"), "medium", "user");
 
       // 三次 npm install ... 应该被同一 key 计数
       expect(tracker.getCount(bashRequest("npm install bar"))).toBe(3);
@@ -148,8 +148,8 @@ describe("ConfirmationTracker", () => {
 
     it("不同 executable 独立计数", () => {
       const tracker = new ConfirmationTracker();
-      tracker.record(bashRequest("npm install express"), "medium");
-      tracker.record(bashRequest("yarn add lodash"), "medium");
+      tracker.record(bashRequest("npm install express"), "medium", "user");
+      tracker.record(bashRequest("yarn add lodash"), "medium", "user");
 
       expect(tracker.getCount(bashRequest("npm install foo"))).toBe(1);
       expect(tracker.getCount(bashRequest("yarn add bar"))).toBe(1);
@@ -157,8 +157,30 @@ describe("ConfirmationTracker", () => {
 
     it("空命令不被追踪", () => {
       const tracker = new ConfirmationTracker();
-      tracker.record(bashRequest(""), "medium");
+      tracker.record(bashRequest(""), "medium", "user");
       expect(tracker.getCount(bashRequest(""))).toBe(0);
+    });
+
+    // record 的 origin 必须被实际写入 contributors 时间线 —— 锁住"contributors
+    // 元素的 origin 字段反映 caller 实际传入的 user / steward"契约。沉淀产出的
+    // PermissionRule.contributors 直接拷贝 tracker 累积数组，/trust 面板按时间
+    // 顺序展示 `[你 你 助理]` token 依赖此字段正确。
+    it("record(origin) 写入 contributors 数组，按调用顺序保留 user/steward", () => {
+      const tracker = new ConfirmationTracker();
+      const req = bashRequest("curl https://example.com");
+      tracker.record(req, "medium", "user");
+      tracker.record(req, "medium", "steward");
+      tracker.record(req, "medium", "user");
+
+      const status = tracker.shouldSuggest(req, "medium");
+      expect(status.contributors.map((c) => c.origin)).toEqual([
+        "user",
+        "steward",
+        "user",
+      ]);
+      expect(status.contributors.every((c) => typeof c.timestamp === "number")).toBe(
+        true,
+      );
     });
   });
 
@@ -168,10 +190,10 @@ describe("ConfirmationTracker", () => {
       const req = bashRequest("ls foo");
 
       expect(tracker.shouldSuggest(req, "low").suggest).toBe(false);
-      tracker.record(req, "low");
-      tracker.record(req, "low");
+      tracker.record(req, "low", "user");
+      tracker.record(req, "low", "user");
       expect(tracker.shouldSuggest(req, "low").suggest).toBe(false);
-      tracker.record(req, "low");
+      tracker.record(req, "low", "user");
       expect(tracker.shouldSuggest(req, "low").suggest).toBe(true);
     });
 
@@ -180,10 +202,10 @@ describe("ConfirmationTracker", () => {
       const req = bashRequest("npm install express");
 
       for (let i = 0; i < 2; i++) {
-        tracker.record(req, "medium");
+        tracker.record(req, "medium", "user");
         expect(tracker.shouldSuggest(req, "medium").suggest).toBe(false);
       }
-      tracker.record(req, "medium");
+      tracker.record(req, "medium", "user");
       expect(tracker.shouldSuggest(req, "medium").suggest).toBe(true);
     });
 
@@ -192,11 +214,11 @@ describe("ConfirmationTracker", () => {
       const req = bashRequest("sudo apt update");
 
       for (let i = 0; i < 9; i++) {
-        tracker.record(req, "high");
+        tracker.record(req, "high", "user");
       }
       expect(tracker.shouldSuggest(req, "high").suggest).toBe(false);
 
-      tracker.record(req, "high");
+      tracker.record(req, "high", "user");
       expect(tracker.shouldSuggest(req, "high").suggest).toBe(true);
     });
 
@@ -205,9 +227,9 @@ describe("ConfirmationTracker", () => {
       const req = bashRequest("rm -rf /important");
 
       for (let i = 0; i < 100; i++) {
-        tracker.record(req, "critical");
+        tracker.record(req, "critical", "user");
       }
-      const status = tracker.shouldSuggest(req, "critical");
+      const status = tracker.shouldSuggest(req, "critical", "user");
       expect(status.suggest).toBe(false);
       expect(status.threshold).toBe(-1);
     });
@@ -228,9 +250,9 @@ describe("ConfirmationTracker", () => {
     it("达到阈值时 suggest=true 且 count >= threshold", () => {
       const tracker = new ConfirmationTracker();
       const req = bashRequest("npm install express");
-      for (let i = 0; i < 5; i++) tracker.record(req, "medium");
+      for (let i = 0; i < 5; i++) tracker.record(req, "medium", "user");
 
-      const status = tracker.shouldSuggest(req, "medium");
+      const status = tracker.shouldSuggest(req, "medium", "user");
       expect(status.suggest).toBe(true);
       expect(status.count).toBeGreaterThanOrEqual(status.threshold);
     });
@@ -239,8 +261,8 @@ describe("ConfirmationTracker", () => {
   describe("reset", () => {
     it("reset(request) 只清除特定模式的计数", () => {
       const tracker = new ConfirmationTracker();
-      tracker.record(bashRequest("npm install foo"), "medium");
-      tracker.record(bashRequest("yarn add bar"), "medium");
+      tracker.record(bashRequest("npm install foo"), "medium", "user");
+      tracker.record(bashRequest("yarn add bar"), "medium", "user");
 
       tracker.reset(bashRequest("npm install baz"));
 
@@ -250,8 +272,8 @@ describe("ConfirmationTracker", () => {
 
     it("reset() 不传参清除所有计数", () => {
       const tracker = new ConfirmationTracker();
-      tracker.record(bashRequest("npm install foo"), "medium");
-      tracker.record(bashRequest("yarn add bar"), "medium");
+      tracker.record(bashRequest("npm install foo"), "medium", "user");
+      tracker.record(bashRequest("yarn add bar"), "medium", "user");
 
       tracker.reset();
 
@@ -263,9 +285,9 @@ describe("ConfirmationTracker", () => {
   describe("snapshot", () => {
     it("返回所有追踪条目", () => {
       const tracker = new ConfirmationTracker();
-      tracker.record(bashRequest("npm install foo"), "medium");
-      tracker.record(bashRequest("npm install bar"), "medium");
-      tracker.record(bashRequest("yarn add baz"), "low");
+      tracker.record(bashRequest("npm install foo"), "medium", "user");
+      tracker.record(bashRequest("npm install bar"), "medium", "user");
+      tracker.record(bashRequest("yarn add baz"), "low", "user");
 
       const snapshot = tracker.snapshot();
       expect(snapshot).toHaveLength(2);
@@ -277,8 +299,8 @@ describe("ConfirmationTracker", () => {
   describe("跨工具", () => {
     it("write 工具的计数与 bash 隔离", () => {
       const tracker = new ConfirmationTracker();
-      tracker.record(writeRequest("src/foo.ts"), "medium");
-      tracker.record(bashRequest("ls"), "low");
+      tracker.record(writeRequest("src/foo.ts"), "medium", "user");
+      tracker.record(bashRequest("ls"), "low", "user");
 
       expect(tracker.getCount(writeRequest("src/bar.ts"))).toBe(1);
       expect(tracker.getCount(bashRequest("ls"))).toBe(1);

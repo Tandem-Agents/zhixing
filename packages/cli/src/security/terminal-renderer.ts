@@ -239,7 +239,7 @@ export function buildSelectOptions(
  * 持久授权类选项加 ⚠ 警示后缀——让用户在 Critical 决策点（一次授权影响未来全部
  * 同类操作）有视觉信号区分。
  *
- * 应用范围：allow-session / allow-workspace / allow-global —— 这三类都是"创建
+ * 应用范围：allow-session / allow-context / allow-global —— 这三类都是"创建
  * 授权规则"而非"单次放行"，错选代价大。
  *
  * 与 SelectOperationRegion 解耦：augment 发生在 buildSelectOptions（terminal-renderer

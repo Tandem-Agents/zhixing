@@ -544,6 +544,80 @@ describe("createSecureExecuteTool", () => {
       expect(events[0]!.confidence).toBe(0.4);
     });
 
+    // 自动沉淀那一刻 emit security:rule_sedimented —— CLI 渲染层订阅此事件
+    // 输出"已记住 N 次同类操作"提示。锁住"maybePersistTrust 达阈值时调
+    // auditor.auditRuleSedimented + 订阅器收到事件"的契约 —— 任何 refactor
+    // 误删 wire-up 或改错 payload 字段在此 fail。
+    it("连续 3 次 allow-once medium 风险 → 沉淀时发射 security:rule_sedimented 事件", async () => {
+      const broker = new ConfirmationBroker();
+      autoResolveBroker(broker, { kind: "allow-once" });
+      const exec = mockExecute();
+      const { pipeline } = makePipeline();
+      const eventBus = new EventBus<AgentEventMap>();
+      const events: Array<Record<string, unknown>> = [];
+      eventBus.on("security:rule_sedimented", (p) =>
+        events.push(p as Record<string, unknown>),
+      );
+
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: exec.fn,
+        broker,
+        eventBus,
+      });
+
+      // curl 命中 medium 网络边界，阈值 3 次。前两次累积不沉淀（不 emit）；
+      // 第三次跨阈值瞬间自动沉淀 + emit 一次。
+      const command = "curl https://example.com/foo";
+      for (let i = 0; i < 3; i++) {
+        await wrapped(makeTool("bash"), { command }, makeContext());
+      }
+
+      expect(events).toHaveLength(1);
+      const payload = events[0] as {
+        tool: string;
+        operation: string;
+        pattern: { tool: string; argument: string };
+        scope: string;
+        contextId: { kind: string };
+        ruleId: string;
+        contributors: Array<{ origin: string; timestamp: number }>;
+      };
+      expect(payload.tool).toBe("bash");
+      expect(payload.pattern.tool).toBe("bash");
+      expect(payload.pattern.argument).toBe("curl *");
+      expect(payload.scope).toBe("context");
+      expect(payload.contextId.kind).toBe("workspace");
+      expect(typeof payload.ruleId).toBe("string");
+      expect(payload.ruleId.length).toBeGreaterThan(0);
+      expect(payload.contributors).toHaveLength(3);
+      expect(payload.contributors.every((c) => c.origin === "user")).toBe(true);
+    });
+
+    it("未达阈值（1-2 次 allow-once）→ 不发射 rule_sedimented", async () => {
+      const broker = new ConfirmationBroker();
+      autoResolveBroker(broker, { kind: "allow-once" });
+      const exec = mockExecute();
+      const { pipeline } = makePipeline();
+      const eventBus = new EventBus<AgentEventMap>();
+      const events: unknown[] = [];
+      eventBus.on("security:rule_sedimented", (p) => events.push(p));
+
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: exec.fn,
+        broker,
+        eventBus,
+      });
+
+      const command = "curl https://example.com/foo";
+      for (let i = 0; i < 2; i++) {
+        await wrapped(makeTool("bash"), { command }, makeContext());
+      }
+
+      expect(events).toHaveLength(0);
+    });
+
     it("不传 eventBus → 不发射事件、不影响放行（向后兼容）", async () => {
       const broker = new ConfirmationBroker();
       const exec = mockExecute();

@@ -140,7 +140,7 @@ describe("buildPanelTitle", () => {
 describe("buildConfirmationOptions", () => {
   // ─── 必选项 + 顺序 + 数量（3 项设计 v2026-04-16） ───
 
-  it("包含 allow-once / allow-workspace / deny-with-reason 三个必选项", () => {
+  it("包含 allow-once / allow-context / deny-with-reason 三个必选项", () => {
     const opts = buildConfirmationOptions(
       "bash",
       { command: "npm install express" },

@@ -4,7 +4,7 @@
  * 验收目标:验证整条链路端到端工作:
  *   1. 连续多次放行(用户选 allow-once)→ ConfirmationTracker 累积计数
  *   2. 累计触达风险等级阈值 → 自动沉淀为持久 allow 规则(origin=user)
- *   3. 用户选 allow-workspace → applyBrokerDecision 调 store.create 创建规则
+ *   3. 用户选 allow-context → applyBrokerDecision 调 store.create 创建规则
  *   4. 同操作再次执行 → pipeline.evaluate 匹配规则 → 直接 allow(不触发 confirm)
  *
  * 纯端到端验证 wiring。
@@ -121,7 +121,7 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
   it("中途切换命令：累计同 tracker key（curl *）→ 自动沉淀中间精度规则 → 切换命令也命中", async () => {
     // 验证 buildKey 用 patterns[1]（中间精度）的语义：
     // - tracker 把 "curl https://a.com" 与 "curl https://b.com" 视为同一计数 key
-    // - 但 allow-workspace 用精确 pattern 时，规则 argument 是用户选的具体 pattern
+    // - 但 allow-context 用精确 pattern 时，规则 argument 是用户选的具体 pattern
     const store = new PermissionStore({ rootDir: null });
     const pipeline = new SecurityPipeline({
       trustContext: { kind: "workspace", dir: "/tmp/ws-e2e" },
@@ -175,10 +175,10 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
     }
   });
 
-  it("用户中途选 allow-workspace（未到阈值）：仍创建规则；不影响 tracker 进度", async () => {
+  it("用户中途选 allow-context（未到阈值）：仍创建规则；不影响 tracker 进度", async () => {
     // 验证 secure-executor.applyBrokerDecision 的分支独立性：
-    // allow-workspace kind 走 store.create 路径，**不**调 tracker.record。
-    // tracker 保持原有计数（即不会因为某次 allow-workspace 跳过计数）。
+    // allow-context kind 走 store.create 路径，**不**调 tracker.record。
+    // tracker 保持原有计数（即不会因为某次 allow-context 跳过计数）。
     const store = new PermissionStore({ rootDir: null });
     const pipeline = new SecurityPipeline({
       trustContext: { kind: "workspace", dir: "/tmp/ws-e2e" },
@@ -196,10 +196,10 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
     broker.onRequest((req) => {
       capturedRequests.push(req);
       queueMicrotask(() => {
-        // 第 1 次：用户直接选 allow-workspace（建议未触发，但用户主动选择）
+        // 第 1 次：用户直接选 allow-context（建议未触发，但用户主动选择）
         if (capturedRequests.length === 1) {
           // 此时 suggestion 可能是 undefined 或 suggest=false
-          // 但 ConfirmationDecision.allow-workspace 必须携带 pattern——
+          // 但 ConfirmationDecision.allow-context 必须携带 pattern——
           // 用 fallback：构造一个简单 pattern（与 command 一致）
           broker.resolve(req.id, {
             kind: "allow-context",
@@ -218,7 +218,7 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
     try {
       const bashTool = makeTool("bash");
 
-      // 第 1 次：curl 命令（network 边界，需要 confirm）→ 选 allow-workspace
+      // 第 1 次：curl 命令（network 边界，需要 confirm）→ 选 allow-context
       await wrapped(
         bashTool,
         { command: "curl https://api1.com" },
@@ -241,15 +241,15 @@ describe("Confirmation → PermissionRule 端到端链路", () => {
       expect(exec.callCount()).toBe(2);
 
       // 第 3 次不同命令（同工具但不命中规则）→ 仍触发 confirm；
-      // tracker 应从 0 开始（allow-workspace 不 record）
+      // tracker 应从 0 开始（allow-context 不 record）
       await wrapped(
         bashTool,
         { command: "curl https://api2.com" },
         makeContext(),
       );
       expect(capturedRequests).toHaveLength(2);
-      // allow-workspace 不 record：tracker 对 curl 的累计只来自第 3 次 allow-once（count=1），
-      // 不含第 1 次 allow-workspace（否则会是 2）
+      // allow-context 不 record：tracker 对 curl 的累计只来自第 3 次 allow-once（count=1），
+      // 不含第 1 次 allow-context（否则会是 2）
       const curlEntry = pipeline
         .getConfirmationTracker()
         .snapshot()
