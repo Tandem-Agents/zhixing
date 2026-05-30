@@ -94,7 +94,7 @@
 
 ## 4. 落地分期（路线）
 
-> 详细架构与跨版插座见 [skill-system.md](../specifications/skill-system.md)。
+> 详细架构见 [skill-system.md](../specifications/skill-system.md)(v1 地基)与 [skill-evolution.md](../specifications/skill-evolution.md)(v2 自进化)。
 
 - **第一版 · 地基**：静态 + 手动 + 模式分区的技能库（渐进披露 · 格式统一 · 外部接入 · 外来技能审查 · 目录边界约束 · 主动 top-N · 专用加载工具 · 写隔离 · 模式分区 · 可复用边界 · 看得见管得了）。
 - **第二版 · 自进化**：技能管家（产生 · 治理 · 淘汰防误删 · 来源边界 · 凭证脱敏）。
