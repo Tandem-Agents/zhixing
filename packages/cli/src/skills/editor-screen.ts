@@ -8,6 +8,9 @@
  * 内容区**、底部只切到"起草中"提示,改完就地重画 —— 这是与现成 loading 的关键区别。
  * 全建在中性 tui/ 原语上(同 /skills 管理器、同 config-editor runner 的三层退出防御),
  * 进 alternate screen buffer 由终端原子保存 / 恢复主对话历史,不靠纪律手工清屏。
+ *
+ * 底部输入区走 `renderInputBox`(主输入区 / `/work` 新建场景框同一原语):带框、
+ * 字符级光标(reverse SGR 软件画,alt-screen hideCursor 下可见)、CJK 安全。
  */
 
 import { skillNameToId } from "@zhixing/core";
@@ -15,35 +18,48 @@ import {
   Renderer,
   createKeyEventStream,
   renderChrome,
-  renderFooter,
   tone,
+  glyph,
+  stringWidth,
   wrapToWidth,
   type KeyEvent,
   type KeyEventStream,
 } from "../tui/index.js";
+import { renderInputBox } from "../input-box.js";
 import {
   SkillEditorController,
   type SkillEditorDeps,
   type SkillEditorView,
-  type EditorPhase,
 } from "./editor-controller.js";
 
-function footerHints(phase: EditorPhase, canExternal: boolean): string[] {
-  if (phase === "drafting") return ["Ctrl+C 取消起草"];
-  if (phase === "external") return ["任意键 读回改动"];
-  const hints = ["回车 提交", "Ctrl+S 保存"];
+/**
+ * editing 阶段输入框下方的操作提示 —— drafting / external 阶段的可用操作已内含在
+ * 各自状态行(「起草中…(Ctrl+C 取消)」/「…按任意键读回」),故此处只服务 editing。
+ */
+function editingHints(canExternal: boolean): string[] {
+  const hints = ["Enter 提交", "Ctrl+S 保存"];
   if (canExternal) hints.push("Ctrl+E 外部编辑器");
   hints.push("Esc 放弃");
   return hints;
 }
 
-/** 纯渲染:`controller.view()` → 帧文本行。顶部内容区(字段 + 正文预览)+ 底部输入 / 状态区。 */
+/**
+ * 全宽小节分隔线 —— `── 正文 ────────`。label 左嵌,横线填到与上下 chrome 框等宽的
+ * 内容区(width - 4:左右各 2 列边距,与元信息行 2 空格缩进对齐),让正文区有清晰起止。
+ */
+function renderBodyDivider(label: string, width: number): string {
+  const head = `── ${label} `;
+  const fill = Math.max(0, width - 4 - stringWidth(head));
+  return tone.dim(`  ${head}${glyph.horizontal.repeat(fill)}`);
+}
+
+/** 纯渲染:`controller.view()` → 帧文本行。四区:顶部框 / 元信息 / 正文预览 / 底部输入。 */
 export function renderSkillEditor(
   view: SkillEditorView,
   width: number,
   title: string,
 ): string[] {
-  const { draft, input, phase, error, canExternal } = view;
+  const { draft, input, inputCursor, phase, error, canExternal } = view;
   const lines: string[] = [
     ...renderChrome({
       title,
@@ -64,9 +80,10 @@ export function renderSkillEditor(
   } else {
     lines.push(`  ${tone.dim("名称")}  ${draft.name}`);
     lines.push(`  ${tone.dim("触发")}  ${draft.description}`);
-    lines.push(`  ${tone.dim("模式")}  [${draft.mode}]`);
+    lines.push(`  ${tone.dim("模式")}  ${draft.mode}`);
     lines.push("");
-    lines.push(tone.dim("  ── 正文 ──"));
+    lines.push(renderBodyDivider("正文", width));
+    lines.push("");
     for (const l of wrapToWidth(draft.body, Math.max(width - 4, 20))) {
       lines.push(`  ${l}`);
     }
@@ -75,17 +92,25 @@ export function renderSkillEditor(
   lines.push("");
   if (error) lines.push(tone.error(`  ⚠ ${error}`));
 
+  // drafting / external 是过渡态:原地切到状态提示(内含可用操作),输入框收起;
+  // editing 态画带框输入区(与主输入区 / `/work` 同一 renderInputBox 原语)。
   if (phase === "drafting") {
     lines.push(tone.dim("  起草中…(Ctrl+C 取消)"));
   } else if (phase === "external") {
     lines.push(tone.dim("  外部编辑器已打开 —— 改完保存后按任意键读回。"));
   } else {
-    lines.push("  说点什么改它(回车提交):");
-    lines.push(`  › ${input}`);
+    const box = renderInputBox({
+      // 标题两态(对话感):无草稿 = 从无到有问意图;有草稿 = 对着草稿问怎么改。
+      title: draft ? "想怎么改？" : "想要个什么技能？",
+      draft: input,
+      cursor: inputCursor,
+      placeholder: draft ? "比如:语气再轻松些" : "说说看,我帮你起草",
+      hint: editingHints(canExternal).join(" · "),
+      width,
+    });
+    lines.push(...box.lines);
   }
 
-  lines.push("");
-  lines.push(...renderFooter({ width, hints: footerHints(phase, canExternal) }));
   return lines;
 }
 
@@ -100,8 +125,8 @@ export type EditorAction =
 
 /**
  * 按键映射(editing / external 阶段;drafting 阶段的按键由循环的起草 race 单独处理)。
- * 外部编辑暂停态下任意键即"读回";editing 态下 char/backspace 改输入缓冲,回车提交指令,
- * Ctrl+S 保存、Ctrl+E 外部编辑器(均需已有草稿),Ctrl+C / Esc 放弃。
+ * 外部编辑暂停态下任意键即"读回";editing 态下 char/backspace 改输入缓冲、←→ 移光标,
+ * 回车提交指令,Ctrl+S 保存、Ctrl+E 外部编辑器(均需已有草稿),Ctrl+C / Esc 放弃。
  */
 export function handleEditorKey(
   controller: SkillEditorController,
@@ -129,6 +154,12 @@ export function handleEditorKey(
       return { kind: "continue" };
     case "backspace":
       controller.backspace();
+      return { kind: "continue" };
+    case "arrow-left":
+      controller.moveCursorLeft();
+      return { kind: "continue" };
+    case "arrow-right":
+      controller.moveCursorRight();
       return { kind: "continue" };
     default:
       return { kind: "continue" };

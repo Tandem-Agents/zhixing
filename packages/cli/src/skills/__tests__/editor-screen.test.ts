@@ -25,6 +25,7 @@ const plain = (view: SkillEditorView): string =>
 const view = (over: Partial<SkillEditorView>): SkillEditorView => ({
   draft: null,
   input: "",
+  inputCursor: 0,
   phase: "editing",
   error: null,
   canExternal: false,
@@ -35,19 +36,20 @@ describe("renderSkillEditor", () => {
   it("无草稿 → 引导文案 + 输入区", () => {
     const out = plain(view({}));
     expect(out).toContain("还没有草稿");
-    expect(out).toContain("回车 提交");
+    expect(out).toContain("Enter 提交");
   });
 
-  it("有草稿 → 字段 + 正文 + 落点路径", () => {
+  it("有草稿 → 字段 + 正文 + 落点路径 + 正文分隔线", () => {
     const out = plain(view({ draft: draftA }));
     expect(out).toContain("部署服务");
     expect(out).toContain("部署到生产时用");
-    expect(out).toContain("[work]");
+    expect(out).toContain("work"); // 模式行(无方括号)
     expect(out).toContain("先 build 再推镜像");
     expect(out).toContain("own/"); // 落点 id 预览
+    expect(out).toContain("── 正文 ─"); // 全宽小节分隔线
   });
 
-  it("canExternal → footer 出现 Ctrl+E", () => {
+  it("canExternal → 输入框 hint 出现 Ctrl+E", () => {
     expect(plain(view({ draft: draftA, canExternal: true }))).toContain(
       "Ctrl+E 外部编辑器",
     );
@@ -56,17 +58,25 @@ describe("renderSkillEditor", () => {
     );
   });
 
+  it("editing 态 → 带框输入区(标题随草稿态变 + hint)", () => {
+    const withDraft = plain(view({ draft: draftA }));
+    expect(withDraft).toContain("想怎么改？"); // 有草稿:问怎么改
+    expect(withDraft).toContain("回车 提交"); // 输入框 hint
+    const noDraft = plain(view({}));
+    expect(noDraft).toContain("想要个什么技能？"); // 无草稿:问意图
+  });
+
   it("drafting 态 → 保留内容、底部显示起草中(非 spinner 全屏)", () => {
     const out = plain(view({ draft: draftA, phase: "drafting" }));
     expect(out).toContain("起草中");
     expect(out).toContain("部署服务"); // 内容区仍在
-    expect(out).toContain("Ctrl+C 取消起草");
+    expect(out).toContain("Ctrl+C 取消");
   });
 
   it("external 态 → 提示读回", () => {
     const out = plain(view({ draft: draftA, phase: "external" }));
     expect(out).toContain("外部编辑器已打开");
-    expect(out).toContain("任意键 读回");
+    expect(out).toContain("按任意键读回");
   });
 
   it("error → 红色警示行", () => {
@@ -101,6 +111,18 @@ describe("handleEditorKey", () => {
     expect(c.view().input).toBe("改简");
     handleEditorKey(c, { type: "backspace" });
     expect(c.view().input).toBe("改");
+  });
+
+  it("← → 移动光标(中间插入)", () => {
+    const c = mk();
+    handleEditorKey(c, char("a"));
+    handleEditorKey(c, char("c"));
+    expect(handleEditorKey(c, { type: "arrow-left" })).toEqual({ kind: "continue" });
+    expect(c.view().inputCursor).toBe(1);
+    handleEditorKey(c, char("b"));
+    expect(c.view().input).toBe("abc");
+    handleEditorKey(c, { type: "arrow-right" });
+    expect(c.view().inputCursor).toBe(3);
   });
 
   it("回车 + 非空输入 → submit 并清空", () => {

@@ -130,4 +130,48 @@ describe("SkillEditorController — 底部输入缓冲", () => {
     expect(c.takeInput()).toBe("改简");
     expect(c.view().input).toBe("");
   });
+
+  it("光标:moveCursorLeft 后插入落到光标处(中间插入)", () => {
+    const c = mk();
+    c.typeChar("a");
+    c.typeChar("c");
+    expect(c.view().inputCursor).toBe(2);
+    c.moveCursorLeft();
+    expect(c.view().inputCursor).toBe(1);
+    c.typeChar("b");
+    expect(c.view().input).toBe("abc");
+    expect(c.view().inputCursor).toBe(2);
+  });
+
+  it("光标:backspace 删光标左字符(中间删除)", () => {
+    const c = mk();
+    c.typeChar("a");
+    c.typeChar("b");
+    c.typeChar("c");
+    c.moveCursorLeft(); // cursor=2，停在 c 前
+    c.backspace(); // 删 b
+    expect(c.view().input).toBe("ac");
+    expect(c.view().inputCursor).toBe(1);
+  });
+
+  it("CJK:中文按字符 offset 计光标(非 UTF-16)", () => {
+    const c = mk();
+    c.typeChar("中");
+    c.typeChar("文");
+    expect(c.view().input).toBe("中文");
+    expect(c.view().inputCursor).toBe(2);
+    c.moveCursorLeft();
+    c.typeChar("简");
+    expect(c.view().input).toBe("中简文");
+    expect(c.view().inputCursor).toBe(2);
+  });
+
+  it("takeInput 后光标归零", () => {
+    const c = mk();
+    c.typeChar("x");
+    c.typeChar("y");
+    c.takeInput();
+    expect(c.view().input).toBe("");
+    expect(c.view().inputCursor).toBe(0);
+  });
 });

@@ -7,12 +7,16 @@
  * 是异步且可取消的:取消语义按底层范本 = 上层放弃等待、后台结果丢弃(不中断 LLM),故
  * `runEdit` 在 await 后用 `signal.aborted` 守门,放弃时不污染当前草稿。
  *
+ * 底部输入缓冲复用 `InputBuffer`(主输入区 / `/work` 输入框同一底层件):字符级光标、
+ * 左右移动、CJK / emoji 安全 —— 与手搓字符串拼接相比,行为与主交互一致、零重复实现。
+ *
  * 两路编辑、文件单一真相源:跳外部编辑器前先把草稿交给注入方落文件并记 mtime,进"外部
  * 编辑中"暂停态(不收 AI 指令);回屏时按 mtime 比对、变了才一次性重读 —— 不做持续 watch、
  * 任何时刻只一面在写。
  */
 
 import type { SkillDraft } from "@zhixing/core";
+import { InputBuffer } from "../input-buffer.js";
 
 /** 编辑屏阶段:等指令 / 起草中(可取消)/ 外部编辑中(暂停)。 */
 export type EditorPhase = "editing" | "drafting" | "external";
@@ -47,7 +51,10 @@ export interface SkillEditorDeps {
 /** 渲染所需的视图快照。 */
 export interface SkillEditorView {
   readonly draft: SkillDraft | null;
+  /** 底部输入缓冲的当前文本。 */
   readonly input: string;
+  /** 输入缓冲的光标字符 offset —— 渲染层据此画框内软件光标。 */
+  readonly inputCursor: number;
   readonly phase: EditorPhase;
   /** 上次操作的错误(起草失败等),展示后由下一次成功操作清除。 */
   readonly error: string | null;
@@ -57,7 +64,7 @@ export interface SkillEditorView {
 
 export class SkillEditorController {
   private draft: SkillDraft | null = null;
-  private input = "";
+  private readonly buffer = new InputBuffer();
   private phase: EditorPhase = "editing";
   private error: string | null = null;
   private external: { file: string; mtime: number } | null = null;
@@ -67,7 +74,8 @@ export class SkillEditorController {
   view(): SkillEditorView {
     return {
       draft: this.draft,
-      input: this.input,
+      input: this.buffer.draft,
+      inputCursor: this.buffer.cursor,
       phase: this.phase,
       error: this.error,
       canExternal: Boolean(this.deps.openExternal),
@@ -78,20 +86,29 @@ export class SkillEditorController {
     return this.phase;
   }
 
-  // ─── 底部输入缓冲(仅 editing 阶段可改)───
+  // ─── 底部输入缓冲(仅 editing 阶段可改)———— 委托 InputBuffer:写入 / 删除 /
+  // 光标移动都走它,字符级 offset、CJK 安全,与主输入区行为一致。
 
   typeChar(ch: string): void {
-    if (this.phase === "editing") this.input += ch;
+    if (this.phase === "editing") this.buffer.insertText(ch);
   }
 
   backspace(): void {
-    if (this.phase === "editing") this.input = this.input.slice(0, -1);
+    if (this.phase === "editing") this.buffer.deleteBackward();
+  }
+
+  moveCursorLeft(): void {
+    if (this.phase === "editing") this.buffer.moveCursorLeft();
+  }
+
+  moveCursorRight(): void {
+    if (this.phase === "editing") this.buffer.moveCursorRight();
   }
 
   /** 取走并清空当前输入(提交指令时用)。 */
   takeInput(): string {
-    const text = this.input.trim();
-    this.input = "";
+    const text = this.buffer.draft.trim();
+    this.buffer.clear();
     return text;
   }
 

@@ -10,6 +10,9 @@
  * stdin ownership / keypress listener）+ screen.attachInput(self)，finish() 时
  * release + resolve。文本编辑委托 InputBuffer（字符 offset、CJK / emoji 安全）。
  *
+ * **视觉单一来源**：框 + 标题 + hint 的渲染委托 `renderInputBox`（与主输入区 /
+ * 技能 AI 编辑屏同一原语）——本类只管 I/O 生命周期与键盘，不重复拼框。
+ *
  * **协作契约**：InputController（typeahead）先 suspend 让出键盘，本 region run()
  * 接管；run() resolve 后由 caller 调 inputController.resume() 恢复 typeahead ——
  * 与 SelectOperationRegion 的让位/恢复时序完全一致。
@@ -24,11 +27,7 @@
 
 import type * as readline from "node:readline";
 
-import { tone, icon } from "./style.js";
-import { renderChrome } from "./chrome.js";
-import { ANSI } from "./ansi.js";
-import { layoutInputBuffer } from "../input-layout.js";
-import { PASTE_TOKEN_PATTERN } from "../paste-registry.js";
+import { renderInputBox } from "../input-box.js";
 import {
   rawModeController,
   type RawModeLease,
@@ -137,50 +136,28 @@ export class InlineTextPromptRegion implements InputRegion {
   }
 
   /**
-   * 渲染当前帧 —— 纯函数（不写 stdout）。结构：
-   *   ▎ <prompt>              ← 标题行（brand 章节锚 + bold，框外标签缩进 1 格）
-   *   ╭──────────────╮        ← 输入框（renderChrome 紧凑模式，与候选面板同宽）
-   *   │ <文本>            │    ← 框内输入行
+   * 渲染当前帧 —— 委托 `renderInputBox`（▎标题 + 框 + hint，框内 reverse SGR 软件
+   * 光标）。结构：
+   *   ▎ <prompt>
+   *   ╭──────────────╮
+   *   │ <文本>            │
    *   ╰──────────────╯
-   *   Enter 提交 · Esc 取消    ← hint 行（dim，框外标签缩进 1 格）
+   *    Enter 提交 · Esc 取消
    *
-   * 框内输入行复用普通输入框同款 `layoutInputBuffer`：文字默认色、光标走 reverse
-   * SGR、placeholder dim —— 与 InputController 视觉完全一致（promptPrefix 传空，
-   * 框内不需要 ❯）。边框 / padding / 宽度感知截断委托 renderChrome（CJK 安全）。
+   * cursorPosition() 返回 renderInputBox 算出的框内坐标，供 chrome 定位。
    */
   private computeLines(): void {
-    const frameWidth = Math.max(this.opts.minWidth ?? 40, this.getColumns());
-    const contentBudget = Math.max(1, frameWidth - 4);
-    const suffix =
-      this.buffer.isEmpty && this.opts.placeholder
-        ? `${ANSI.dim}${this.opts.placeholder}${ANSI.reset}`
-        : "";
-    const layout = layoutInputBuffer(
-      "",
-      this.buffer.draft,
-      this.buffer.cursor,
-      suffix,
-      contentBudget,
-      PASTE_TOKEN_PATTERN,
-      true,
-    );
-    const boxLines = renderChrome({
-      body: layout.bodyLines,
-      width: frameWidth,
-      bodyPadding: false,
-      indent: 1,
+    const box = renderInputBox({
+      title: this.opts.prompt,
+      draft: this.buffer.draft,
+      cursor: this.buffer.cursor,
+      placeholder: this.opts.placeholder,
+      hint: "Enter 提交 · Esc 取消",
+      width: this.getColumns(),
+      minWidth: this.opts.minWidth ?? 40,
     });
-    this.cachedLines = [
-      ` ${tone.brand.bold(icon.section)}${tone.bold(this.opts.prompt)}`,
-      ...boxLines,
-      ` ${tone.dim("Enter 提交 · Esc 取消")}`,
-    ];
-    // 标题(1) + box 顶边(1) → cursor 落在第 2 + layout.cursorRow 行；
-    // 列 = 左 │(1) + indent(1) + layout.cursorCol。
-    this.cachedCursor = {
-      row: 2 + layout.cursorRow,
-      col: 2 + layout.cursorCol,
-    };
+    this.cachedLines = box.lines;
+    this.cachedCursor = box.cursor;
   }
 
   // ─── 键盘处理 ───
