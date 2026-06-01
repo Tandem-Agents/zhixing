@@ -61,7 +61,7 @@ describe("renderSkillEditor", () => {
   it("editing 态 → 带框输入区(标题随草稿态变 + hint)", () => {
     const withDraft = plain(view({ draft: draftA }));
     expect(withDraft).toContain("想怎么改？"); // 有草稿:问怎么改
-    expect(withDraft).toContain("回车 提交"); // 输入框 hint
+    expect(withDraft).toContain("Enter 提交"); // 输入框 hint
     const noDraft = plain(view({}));
     expect(noDraft).toContain("想要个什么技能？"); // 无草稿:问意图
   });
