@@ -1709,6 +1709,8 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       getDefaultMode: () =>
         session.activeMode.kind === "workscene" ? "work" : "main",
       refreshCommands: () => tRegistry.refresh(),
+      isLibraryEmpty: async () =>
+        (await session.skillStore.listAll()).length === 0,
     });
 
     // /skill-add 接入入口 —— 外部技能(本地路径)经扫描 + AI 研判后入库。同样注册在

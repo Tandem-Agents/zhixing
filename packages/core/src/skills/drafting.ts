@@ -7,10 +7,15 @@
  * 同一引擎、不同触发方。故引擎只依赖一个注入的窄 LLM 接口、不绑任何运行时:v1 在 cli
  * 绑 callText("main"),v2 在 orchestrator 绑自己的通道,纯增量。
  *
+ * **内容 vs 元信息的边界**:返回值把「落盘内容」与「给用户看的元信息」分开 ——
+ * `SkillDraft` 是写进 SKILL.md 的纯内容(name/description/body/mode);`subject`(收的是
+ * 哪件事)与 `redactionCount`(抹了几处密钥)是起草过程产出、只服务草稿屏呈现的元信息,
+ * **不进磁盘、不进 Store**。日后起草要产出更多元信息(置信度 / 警告)往结果对象加,不污染草稿。
+ *
  * LLM 失败语义与安全裁判不同:裁判不确定要 fail-safe(宁可多问),起草不确定就是失败
  * (重说一句即可、无安全含义)—— 故解析不出草稿直接抛,由编辑屏接住、提示重试,不兜底成
  * 半成品草稿。脱敏则是硬约束:草稿源自对话、可能粘过密钥,而技能反复加载又可分享,故每次
- * 产出都过 secret-scrubber,密钥绝不固化进技能。
+ * 产出都过 secret-scrubber,密钥绝不固化进技能;抹了几处经 `redactionCount` 透出供草稿屏可见。
  */
 
 import type { SkillDraft, SkillMode } from "./types.js";
@@ -30,7 +35,30 @@ export interface DraftSeed {
   defaultMode: SkillMode;
 }
 
-const FORMAT = `严格只输出一个 JSON 对象,不要任何其他文字 / 代码块标记:
+/**
+ * 首次起草结果 —— 草稿内容 + 两项「给用户看、不落盘」的元信息。
+ * 元信息与 `SkillDraft` 分离的理由见文件头注释。
+ */
+export interface SkillDraftResult {
+  draft: SkillDraft;
+  /** AI 一句话概括「这个技能收的是哪件事」—— 草稿屏顶部「收自」,搭起草便车产出、零额外 LLM。 */
+  subject: string;
+  /** 本次起草脱敏抹掉的密钥数 —— 草稿屏据此显隐「已抹掉 N 处密钥」灰字(0 = 不显示)。 */
+  redactionCount: number;
+}
+
+/** 改写结果 —— 主题不变,故不含 subject;仍回传本次脱敏计数(改写也可能引入 secret)。 */
+export interface SkillReviseResult {
+  draft: SkillDraft;
+  redactionCount: number;
+}
+
+/** 首次起草的输出契约 —— 比改写多一个 `subject`(AI 同次产出,零额外调用)。 */
+const DRAFT_FORMAT = `严格只输出一个 JSON 对象,不要任何其他文字 / 代码块标记:
+{"subject":"一句话说这个技能收的是哪件事(口语、具体,给用户确认方向用,不写进技能)","name":"简短技能名","description":"什么时候该用(决定日后被检索命中,要尖)","body":"正文 markdown(瘦版)","mode":"main"|"work"}`;
+
+/** 改写的输出契约 —— 不含 subject(改写不换主题)。 */
+const REVISE_FORMAT = `严格只输出一个 JSON 对象,不要任何其他文字 / 代码块标记:
 {"name":"简短技能名","description":"什么时候该用(决定日后被检索命中,要尖)","body":"正文 markdown(瘦版)","mode":"main"|"work"}`;
 
 const PRINCIPLES = `技能 = 用户的特定约定 + 这次踩的坑 / 最优路径,**瘦身**:主动丢掉通用步骤,只留有指向性的部分。
@@ -55,7 +83,7 @@ ${PRINCIPLES.replace("{{MODE}}", seed.defaultMode)}
 
 ${source}
 
-${FORMAT}`;
+${DRAFT_FORMAT}`;
 }
 
 function buildRevisePrompt(draft: SkillDraft, instruction: string): string {
@@ -70,15 +98,21 @@ ${JSON.stringify(draft)}
 [修改指令]
 ${instruction}
 
-${FORMAT}`;
+${REVISE_FORMAT}`;
 }
 
-/** 首次起草:从上下文 / 意图产结构化草稿。 */
+/** 首次起草:从上下文 / 意图产结构化草稿 + 主题 + 脱敏计数。 */
 export async function draftSkill(
   llm: SkillDraftLlm,
   seed: DraftSeed,
-): Promise<SkillDraft> {
-  return generate(llm, buildDraftPrompt(seed), seed.defaultMode);
+): Promise<SkillDraftResult> {
+  const obj = parseJson(await llm(buildDraftPrompt(seed)));
+  const rawDraft = extractDraft(obj, seed.defaultMode);
+  // subject 取 AI 给的;缺失时 fallback 到 description(「什么时候用」近似「收的是什么」)。
+  // 也过脱敏(可能源自含 secret 的对话),但它不是草稿内容、不计入 redactionCount。
+  const rawSubject = asText(obj["subject"]) || rawDraft.description;
+  const { draft, redactionCount } = scrubDraft(rawDraft);
+  return { draft, subject: scrubSecrets(rawSubject).scrubbed, redactionCount };
 }
 
 /** 按指令改写已有草稿。 */
@@ -86,29 +120,27 @@ export async function reviseSkill(
   llm: SkillDraftLlm,
   draft: SkillDraft,
   instruction: string,
-): Promise<SkillDraft> {
-  return generate(llm, buildRevisePrompt(draft, instruction), draft.mode);
+): Promise<SkillReviseResult> {
+  const obj = parseJson(await llm(buildRevisePrompt(draft, instruction)));
+  return scrubDraft(extractDraft(obj, draft.mode));
 }
 
-async function generate(
-  llm: SkillDraftLlm,
-  prompt: string,
-  fallbackMode: SkillMode,
-): Promise<SkillDraft> {
-  const raw = await llm(prompt);
-  return scrubDraft(parseDraft(raw, fallbackMode));
-}
-
-/** 从模型输出提取草稿。无 JSON / 解析失败 / 必填字段缺失即抛 —— 起草失败就是失败,不兜底半成品。 */
-function parseDraft(raw: string, fallbackMode: SkillMode): SkillDraft {
+/** 从模型输出提取 JSON 对象。无 JSON / 解析失败即抛 —— 起草失败就是失败,不兜底半成品。 */
+function parseJson(raw: string): Record<string, unknown> {
   const match = raw.match(/\{[\s\S]*\}/);
   if (!match) throw new Error("起草失败:模型未返回 JSON 草稿");
-  let obj: Record<string, unknown>;
   try {
-    obj = JSON.parse(match[0]) as Record<string, unknown>;
+    return JSON.parse(match[0]) as Record<string, unknown>;
   } catch {
     throw new Error("起草失败:草稿 JSON 无法解析");
   }
+}
+
+/** 校验 + 取出草稿四字段。必填字段缺失即抛。 */
+function extractDraft(
+  obj: Record<string, unknown>,
+  fallbackMode: SkillMode,
+): SkillDraft {
   const name = asText(obj["name"]);
   const description = asText(obj["description"]);
   const body = asText(obj["body"]);
@@ -120,13 +152,28 @@ function parseDraft(raw: string, fallbackMode: SkillMode): SkillDraft {
   return { name, description, body, mode };
 }
 
-/** 每个文本字段过脱敏 —— 密钥绝不固化进技能(草稿源自对话,可能粘过 secret)。 */
-function scrubDraft(draft: SkillDraft): SkillDraft {
+/**
+ * 每个文本字段过脱敏 —— 密钥绝不固化进技能(草稿源自对话,可能粘过 secret)。
+ * 合并三字段的命中数为 `redactionCount`,透出供草稿屏可见。
+ */
+function scrubDraft(draft: SkillDraft): {
+  draft: SkillDraft;
+  redactionCount: number;
+} {
+  const name = scrubSecrets(draft.name);
+  const description = scrubSecrets(draft.description);
+  const body = scrubSecrets(draft.body);
   return {
-    name: scrubSecrets(draft.name).scrubbed,
-    description: scrubSecrets(draft.description).scrubbed,
-    body: scrubSecrets(draft.body).scrubbed,
-    mode: draft.mode,
+    draft: {
+      name: name.scrubbed,
+      description: description.scrubbed,
+      body: body.scrubbed,
+      mode: draft.mode,
+    },
+    redactionCount:
+      name.redactions.length +
+      description.redactions.length +
+      body.redactions.length,
   };
 }
 

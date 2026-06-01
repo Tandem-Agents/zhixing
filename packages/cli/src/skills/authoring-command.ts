@@ -113,12 +113,15 @@ export interface SkillAuthoringDeps {
   readonly getDefaultMode: () => SkillMode;
   /** 变更后刷新 `/<name>` 补全,让新技能即时可唤醒。 */
   readonly refreshCommands: () => void | Promise<void>;
+  /** 技能库是否为空 —— 等意图态据此决定是否顶"技能=…"认知解释(新手降门槛、老手不啰嗦)。 */
+  readonly isLibraryEmpty: () => Promise<boolean>;
 }
 
-/** 组装一次编辑屏运行所需的注入(每次开屏重建,捕获当下对话上下文 / 场景 mode)。 */
+/** 组装一次编辑屏运行所需的注入(每次开屏重建,捕获当下对话上下文 / 场景 mode / 库是否为空)。 */
 function buildEditorDeps(
   deps: SkillAuthoringDeps,
   initialInstruction: string,
+  isLibraryEmpty: boolean,
   onSaved: (draft: SkillDraft) => void,
 ): SkillEditorRunDeps {
   const llm: SkillDraftLlm = (prompt) => deps.callText(prompt);
@@ -128,26 +131,32 @@ function buildEditorDeps(
   // 外部编辑两路衔接:记下打开时的草稿,回读时为缺失字段兜底(尤其文件未写全 mode 时)。
   let externalBase: SkillDraft | null = null;
 
-  const edit: SkillEditorDeps["edit"] = async (current, instruction) => {
-    // signal 仅供上层放弃等待(callText 不收 signal、底层不中断);故此处不用。
-    if (current === null) {
-      return draftSkill(llm, {
-        context: context || undefined,
-        intent: instruction || undefined,
-        defaultMode,
-      });
-    }
-    return reviseSkill(llm, current, instruction);
+  // 起草 / 改写两个访问器(屏不感知 LLM)。signal 仅供上层放弃等待(callText 不收 signal、
+  // 底层不中断),故访问器不透传。draftSkill / reviseSkill 直接产出含元信息的结果。
+  const draft: SkillEditorDeps["draft"] = (intent) =>
+    draftSkill(llm, {
+      context: context || undefined,
+      intent: intent || undefined,
+      defaultMode,
+    });
+  const revise: SkillEditorDeps["revise"] = (current, instruction) =>
+    reviseSkill(llm, current, instruction);
+
+  const save: SkillEditorDeps["save"] = async (d) => {
+    await deps.createSkill(d);
+    onSaved(d);
   };
 
-  const save: SkillEditorDeps["save"] = async (draft) => {
-    await deps.createSkill(draft);
-    onSaved(draft);
-  };
-
-  const openExternal: SkillEditorDeps["openExternal"] = async (draft) => {
-    externalBase = draft;
-    await fs.writeFile(tmpFile, draftToExternalFile(draft), "utf-8");
+  const openExternal: SkillEditorDeps["openExternal"] = async (current) => {
+    // 手写直通车:还没起草(current=null)也能进编辑器,落一个带引导的空骨架。
+    const toWrite: SkillDraft = current ?? {
+      name: "",
+      description: "",
+      body: "在这里写正文：你的特定约定、踩过的坑、最优路径。\n",
+      mode: defaultMode,
+    };
+    externalBase = toWrite;
+    await fs.writeFile(tmpFile, draftToExternalFile(toWrite), "utf-8");
     const stat = await fs.stat(tmpFile);
     openInEditor(
       tmpFile,
@@ -170,12 +179,14 @@ function buildEditorDeps(
   };
 
   return {
-    edit,
+    draft,
+    revise,
     save,
     openExternal,
     rereadExternal,
     autoDraft: context.length > 0 || initialInstruction.length > 0,
     initialInstruction,
+    isLibraryEmpty,
     title: "新建技能",
     stdin: process.stdin,
     stdout: process.stdout,
@@ -201,8 +212,9 @@ export function registerSkillNewCommand(deps: SkillAuthoringDeps): void {
     deps.renderer.stop();
     deps.rl.pause();
     try {
+      const libraryEmpty = await deps.isLibraryEmpty();
       const result = await runSkillEditor(
-        buildEditorDeps(deps, rest, (draft) => {
+        buildEditorDeps(deps, rest, libraryEmpty, (draft) => {
           saved = draft;
         }),
       );
@@ -218,10 +230,17 @@ export function registerSkillNewCommand(deps: SkillAuthoringDeps): void {
 
     if (saved) {
       const draft = saved as SkillDraft;
+      const id = skillNameToId(draft.name);
+      // 诚实闭环:只承诺 v1 真有的能力 —— 手动唤起 + description 检索命中。**不说**"自动想起它"
+      // (那是 v2 技能管家的主动唤醒,v1 做不到,承诺即在兑现的第一刻失信)。
       deps.writer.line(
-        chalk.green(
-          `${layout.contentPrefix}✓ 技能「${draft.name}」已保存,可 /${skillNameToId(draft.name)} 唤醒。`,
-        ),
+        chalk.green(`${layout.contentPrefix}✓ 技能「${draft.name}」存好了。`),
+      );
+      deps.writer.line(
+        `${layout.contentPrefix}${chalk.dim("· 回到聊天输入框,打")} ${chalk.cyan(`/${id}`)} ${chalk.dim("就能唤起它")}`,
+      );
+      deps.writer.line(
+        `${layout.contentPrefix}${chalk.dim(`· 下次你聊到「${draft.description}」,我会检索到它`)}`,
       );
       await deps.refreshCommands();
     }

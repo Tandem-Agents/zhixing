@@ -10,7 +10,12 @@ export { SkillStore } from "./store.js";
 export { renderSkillIndex } from "./render.js";
 export type { RenderSkillIndexOptions } from "./render.js";
 export { draftSkill, reviseSkill } from "./drafting.js";
-export type { SkillDraftLlm, DraftSeed } from "./drafting.js";
+export type {
+  SkillDraftLlm,
+  DraftSeed,
+  SkillDraftResult,
+  SkillReviseResult,
+} from "./drafting.js";
 export { scanSkillContent } from "./content-scan.js";
 export type { ContentThreat } from "./content-scan.js";
 export { reviewAdmission, assessSkill, acquireToStaging } from "./admission.js";

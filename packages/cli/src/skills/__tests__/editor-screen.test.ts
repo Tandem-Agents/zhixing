@@ -1,5 +1,9 @@
 import { describe, it, expect } from "vitest";
-import { stripAnsi, type KeyEvent, type KeyEventStream } from "../../tui/index.js";
+import {
+  stripAnsi,
+  type KeyEvent,
+  type KeyEventStream,
+} from "../../tui/index.js";
 import {
   renderSkillEditor,
   handleEditorKey,
@@ -19,8 +23,10 @@ const draftA: SkillDraft = {
   mode: "work",
 };
 
-const plain = (view: SkillEditorView): string =>
-  stripAnsi(renderSkillEditor(view, 80, "新建技能").join("\n"));
+const plain = (
+  v: SkillEditorView,
+  opts: { spinnerChar?: string; libraryEmpty?: boolean } = {},
+): string => stripAnsi(renderSkillEditor(v, 80, "新建技能", opts).join("\n"));
 
 const view = (over: Partial<SkillEditorView>): SkillEditorView => ({
   draft: null,
@@ -29,67 +35,102 @@ const view = (over: Partial<SkillEditorView>): SkillEditorView => ({
   phase: "editing",
   error: null,
   canExternal: false,
+  subject: "",
+  redactionCount: 0,
+  pendingDiscard: false,
+  revisions: 0,
   ...over,
 });
 
 describe("renderSkillEditor", () => {
-  it("无草稿 → 引导文案 + 输入区", () => {
-    const out = plain(view({}));
-    expect(out).toContain("还没有草稿");
-    expect(out).toContain("提交 Enter");
+  it("等意图态(无草稿)→ 开场 + 输入框;库为空顶认知解释", () => {
+    const out = plain(view({}), { libraryEmpty: true });
+    expect(out).toContain("想收个什么技能");
+    expect(out).toContain("技能 = 教我一次");
   });
 
-  it("有草稿 → 字段 + 正文 + 落点路径 + 正文分隔线", () => {
-    const out = plain(view({ draft: draftA }));
-    expect(out).toContain("部署服务");
-    expect(out).toContain("部署到生产时用");
-    expect(out).toContain("work"); // 模式行(无方括号)
-    expect(out).toContain("先 build 再推镜像");
-    expect(out).toContain("own/"); // 落点 id 预览
-    expect(out).toContain("── 正文 ─"); // 全宽小节分隔线
-  });
-
-  it("canExternal → 输入框 hint 出现 Ctrl+E", () => {
-    expect(plain(view({ draft: draftA, canExternal: true }))).toContain(
-      "外部编辑器 Ctrl+E",
-    );
-    expect(plain(view({ draft: draftA, canExternal: false }))).not.toContain(
-      "Ctrl+E",
+  it("库非空 → 不顶认知解释", () => {
+    expect(plain(view({}), { libraryEmpty: false })).not.toContain(
+      "技能 = 教我一次",
     );
   });
 
-  it("editing 态 → 带框输入区(标题随草稿态变 + hint)", () => {
-    const withDraft = plain(view({ draft: draftA }));
-    expect(withDraft).toContain("想怎么改？"); // 有草稿:问怎么改
-    expect(withDraft).toContain("提交 Enter"); // 输入框 hint
-    const noDraft = plain(view({}));
-    expect(noDraft).toContain("想要个什么技能？"); // 无草稿:问意图
+  it("策展态(有草稿)→ 收自 + 字段(什么时候用)+ 正文 + 教学『我来改』", () => {
+    const out = plain(view({ draft: draftA, subject: "收部署做法" }));
+    expect(out).toContain("收自：收部署做法");
+    expect(out).toContain("部署服务"); // 名称
+    expect(out).toContain("什么时候用"); // 白话标签
+    expect(out).toContain("先 build 再推镜像"); // 正文
+    expect(out).toContain("我来改"); // 教学:打字=指挥 AI
   });
 
-  it("drafting 态 → 保留内容、底部显示起草中(非 spinner 全屏)", () => {
-    const out = plain(view({ draft: draftA, phase: "drafting" }));
-    expect(out).toContain("起草中");
-    expect(out).toContain("部署服务"); // 内容区仍在
-    expect(out).toContain("Ctrl+C 取消");
+  it("脱敏可见:redactionCount>0 才显示抹掉提示", () => {
+    expect(plain(view({ draft: draftA, redactionCount: 2 }))).toContain(
+      "已自动抹掉对话里的 2 处密钥",
+    );
+    expect(plain(view({ draft: draftA, redactionCount: 0 }))).not.toContain(
+      "已自动抹掉",
+    );
+  });
+
+  it("模式降为白话灰字、顶栏不暴露 own/ 内部目录", () => {
+    const out = plain(view({ draft: draftA })); // mode work
+    expect(out).toContain("归到工作场景");
+    expect(out).not.toContain("own/");
+    expect(out).not.toContain("落点");
+  });
+
+  it("放弃二次确认态 → 确认行(含改了 N 轮)", () => {
+    const out = plain(view({ draft: draftA, pendingDiscard: true, revisions: 3 }));
+    expect(out).toContain("放弃这份草稿");
+    expect(out).toContain("改了 3 轮");
+  });
+
+  it("显影态(首次,无草稿)→ 收自 + 骨架占位,无矛盾引导", () => {
+    const out = plain(view({ phase: "drafting", subject: "部署流程" }));
+    expect(out).toContain("收自：部署流程");
+    expect(out).toContain("正在写");
+    expect(out).toContain("░"); // 骨架
+    expect(out).not.toContain("还没有草稿"); // 旧矛盾引导已消除
+  });
+
+  it("显影态 subject 空(纯对话提炼)→ 顶部显示提炼中占位、不露空『收自：』", () => {
+    const out = plain(view({ phase: "drafting", subject: "" }));
+    expect(out).toContain("正在从最近的对话里提炼");
+    expect(out).not.toContain("收自："); // 空 subject 不渲染空字段
+  });
+
+  it("显影态(改写,有草稿)→ 保留现草稿 + 增量语气", () => {
+    const out = plain(view({ phase: "drafting", draft: draftA, subject: "x" }));
+    expect(out).toContain("正在按你说的改");
+    expect(out).toContain("部署服务"); // 现草稿保留
+    expect(out).toContain("原来的会留着");
   });
 
   it("external 态 → 提示读回", () => {
-    const out = plain(view({ draft: draftA, phase: "external" }));
-    expect(out).toContain("外部编辑器已打开");
+    const out = plain(view({ phase: "external", draft: draftA, subject: "x" }));
+    expect(out).toContain("已用你的编辑器打开");
     expect(out).toContain("按任意键读回");
   });
 
-  it("error → 红色警示行", () => {
-    expect(plain(view({ error: "起草失败:模型未返回 JSON 草稿" }))).toContain(
-      "起草失败",
+  it("起草失败(无草稿 + error)→ 友好重试文案、不露开发者黑话", () => {
+    const out = plain(view({ error: "起草失败:模型未返回 JSON 草稿" }));
+    expect(out).toContain("偶尔会抽风");
+    expect(out).not.toContain("模型未返回 JSON");
+  });
+
+  it("spinnerChar 注入 → 显影态渲染该帧", () => {
+    expect(plain(view({ phase: "drafting", subject: "x" }), { spinnerChar: "▣" })).toContain(
+      "▣",
     );
   });
 });
 
-const draftA2: SkillDraft = draftA;
+const draftResult = { draft: draftA, subject: "AI主题", redactionCount: 0 };
 const mk = (over: Partial<SkillEditorDeps> = {}): SkillEditorController =>
   new SkillEditorController({
-    edit: async () => draftA2,
+    draft: async () => draftResult,
+    revise: async () => ({ draft: draftA, redactionCount: 0 }),
     save: async () => {},
     autoDraft: false,
     ...over,
@@ -121,11 +162,9 @@ describe("handleEditorKey", () => {
     expect(c.view().inputCursor).toBe(1);
     handleEditorKey(c, char("b"));
     expect(c.view().input).toBe("abc");
-    handleEditorKey(c, { type: "arrow-right" });
-    expect(c.view().inputCursor).toBe(3);
   });
 
-  it("回车 + 非空输入 → submit 并清空", () => {
+  it("回车 + 非空输入 → submit 并清空;空输入 → continue", () => {
     const c = mk();
     handleEditorKey(c, char("改"));
     handleEditorKey(c, char("尖"));
@@ -134,9 +173,6 @@ describe("handleEditorKey", () => {
       instruction: "改尖",
     });
     expect(c.view().input).toBe("");
-  });
-
-  it("回车 + 空输入 → continue", () => {
     expect(handleEditorKey(mk(), { type: "enter" })).toEqual({ kind: "continue" });
   });
 
@@ -147,21 +183,40 @@ describe("handleEditorKey", () => {
     });
   });
 
-  it("Ctrl+E:有草稿且可外部编辑 → external;否则 continue", async () => {
-    const withExt = await seeded({
-      openExternal: async () => ({ file: "/tmp/x", mtime: 1 }),
-    });
+  it("Ctrl+E 放宽:canExternal 即可进外部编辑(无草稿也行,手写直通车)", () => {
+    const withExt = mk({ openExternal: async () => ({ file: "/tmp/x", mtime: 1 }) });
     expect(handleEditorKey(withExt, { type: "ctrl-e" })).toEqual({
       kind: "external",
-    });
-    expect(handleEditorKey(await seeded(), { type: "ctrl-e" })).toEqual({
-      kind: "continue",
-    });
+    }); // 还没起草也能进
+    expect(handleEditorKey(mk(), { type: "ctrl-e" })).toEqual({ kind: "continue" }); // 没注入 openExternal
   });
 
-  it("Ctrl+C / Esc → cancel", () => {
+  it("Esc 分层:输入非空→清空(continue);为空且无草稿→cancel", () => {
+    const c = mk();
+    handleEditorKey(c, char("半"));
+    handleEditorKey(c, char("句"));
+    expect(handleEditorKey(c, { type: "escape" })).toEqual({ kind: "continue" });
+    expect(c.view().input).toBe(""); // 第一次 Esc 清空输入
+    expect(handleEditorKey(c, { type: "escape" })).toEqual({ kind: "cancel" }); // 再 Esc:空+无草稿→退
+  });
+
+  it("Esc:为空且有草稿 → 先二次确认(continue),再按 → cancel", async () => {
+    const c = await seeded();
+    expect(handleEditorKey(c, { type: "escape" })).toEqual({ kind: "continue" });
+    expect(c.view().pendingDiscard).toBe(true);
+    expect(handleEditorKey(c, { type: "escape" })).toEqual({ kind: "cancel" });
+  });
+
+  it("非 Esc 键解除放弃确认(确认行不黏住)", async () => {
+    const c = await seeded();
+    handleEditorKey(c, { type: "escape" }); // 进确认
+    expect(c.view().pendingDiscard).toBe(true);
+    handleEditorKey(c, char("x")); // 任意键
+    expect(c.view().pendingDiscard).toBe(false);
+  });
+
+  it("Ctrl+C → 直接 cancel(强终端语义、底层兜底)", () => {
     expect(handleEditorKey(mk(), { type: "ctrl-c" })).toEqual({ kind: "cancel" });
-    expect(handleEditorKey(mk(), { type: "escape" })).toEqual({ kind: "cancel" });
   });
 
   it("external 暂停态:任意键 → resume", async () => {
@@ -186,10 +241,10 @@ describe("runDraftWithCancel — 取消立即响应(不等后台 LLM)", () => {
   };
 
   it("起草中 Ctrl+C → 立即回 editing 重画,不阻塞等后台返回", async () => {
-    // edit 永不 settle:模拟慢 / 卡住的后台 LLM。取消必须立即返回,否则此测试会超时
-    // —— 直接守住"放弃等待"语义(回归此 race loop 时第一道防线)。
+    // draft 永不 settle:模拟慢 / 卡住的后台 LLM。取消必须立即返回,否则此测试会超时。
     const c = new SkillEditorController({
-      edit: () => new Promise<SkillDraft>(() => {}),
+      draft: () => new Promise(() => {}),
+      revise: async () => ({ draft: draftA, redactionCount: 0 }),
       save: async () => {},
       autoDraft: false,
     });
@@ -198,7 +253,7 @@ describe("runDraftWithCancel — 取消立即响应(不等后台 LLM)", () => {
       phases.push(c.view().phase),
     );
     expect(c.view().phase).toBe("editing");
-    expect(phases[0]).toBe("drafting"); // 开头画过"起草中"
+    expect(phases[0]).toBe("drafting"); // 开头画过显影态
     expect(phases).toContain("editing"); // 取消后立即重画 editing
   });
 });

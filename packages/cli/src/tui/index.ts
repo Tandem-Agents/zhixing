@@ -136,6 +136,7 @@ export {
 export {
   charWidth,
   clampLine,
+  padEndDisplay,
   stringWidth,
   wrapToWidth,
 } from "./line-width.js";
