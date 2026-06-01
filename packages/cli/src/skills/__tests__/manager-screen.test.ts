@@ -33,7 +33,7 @@ describe("renderSkillManager", () => {
   it("空库显示引导,footer 仍在", () => {
     const out = plain({ items: [], selectedIndex: -1 });
     expect(out).toContain("还没有技能");
-    expect(out).toContain("Esc 退出");
+    expect(out).toContain("退出 Esc");
   });
 
   it("空库引导用公用左边距(contentPrefix)缩进,不顶格 col 0", () => {
@@ -75,7 +75,7 @@ describe("renderSkillManager", () => {
 
   it("footer 含全部操作键位", () => {
     const out = plain({ items: [rec("a")], selectedIndex: 0 });
-    for (const hint of ["↑↓", "p 置顶", "d 禁用", "m 改 mode", "a 归档", "Esc 退出"]) {
+    for (const hint of ["导航 ↑↓", "置顶 p", "禁用 d", "改 mode m", "归档 a", "退出 Esc"]) {
       expect(out).toContain(hint);
     }
   });

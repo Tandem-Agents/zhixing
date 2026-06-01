@@ -22,6 +22,37 @@ describe("renderInputBox", () => {
     expect(r.lines.length).toBe(4);
   });
 
+  it("hintBar:框下结构化提示行(说明 键、左右分区),共 5 行", () => {
+    const r = renderInputBox({
+      title: "新建",
+      draft: "",
+      cursor: 0,
+      width: 60,
+      hintBar: {
+        hints: [{ label: "放弃", key: "Esc" }],
+        rightHints: [{ label: "提交", key: "Enter" }],
+      },
+    });
+    expect(r.lines.length).toBe(5); // 标题 + 框(3) + hintBar(1)
+    const joined = stripAnsi(r.lines.join("\n"));
+    expect(joined).toContain("放弃 Esc");
+    expect(joined).toContain("提交 Enter");
+  });
+
+  it("hintBar 优先于 hint(同时传时只画 hintBar)", () => {
+    const r = renderInputBox({
+      title: "x",
+      draft: "",
+      cursor: 0,
+      width: 60,
+      hint: "旧提示文本",
+      hintBar: { hints: [{ label: "提交", key: "Enter" }] },
+    });
+    const joined = stripAnsi(r.lines.join("\n"));
+    expect(joined).toContain("提交 Enter");
+    expect(joined).not.toContain("旧提示文本");
+  });
+
   it("空 draft + placeholder → 框内显示占位", () => {
     const r = renderInputBox({
       title: "x",

@@ -16,6 +16,7 @@ import {
   wrapToWidth,
   layout,
   tone,
+  type KeyHint,
 } from "../tui/index.js";
 import { SkillManagerController } from "./manager-controller.js";
 import type {
@@ -25,8 +26,17 @@ import type {
 
 // Footer 两端对齐分区:左 = 基础 / 导航操作(不改数据)、右 = 功能 / 变更操作
 // (对选中技能落 Store)。语义分组让"通用怎么动"与"对这个技能做什么"一眼分立。
-const FOOTER_HINTS_BASIC = ["↑↓ 导航", "Esc 退出"] as const;
-const FOOTER_HINTS_ACTION = ["p 置顶", "d 禁用", "m 改 mode", "a 归档"] as const;
+// KeyHint 样式:操作说明亮在前、按键标识暗在后。
+const FOOTER_HINTS_BASIC: KeyHint[] = [
+  { label: "导航", key: "↑↓" },
+  { label: "退出", key: "Esc" },
+];
+const FOOTER_HINTS_ACTION: KeyHint[] = [
+  { label: "置顶", key: "p" },
+  { label: "禁用", key: "d" },
+  { label: "改 mode", key: "m" },
+  { label: "归档", key: "a" },
+];
 
 /** 空库引导:替代技术性"无项"占位,给出下一步去向。 */
 const EMPTY_HINT = "还没有技能 —— 让 agent 把某摊事的做法沉淀成一个技能,即可在此管理。";

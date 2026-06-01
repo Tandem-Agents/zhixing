@@ -65,4 +65,24 @@ describe("renderFooter", () => {
     const [, hint] = renderFooter({ width: 30, hints: ["x".repeat(100)] });
     expect(stringWidth(stripAnsi(hint!))).toBeLessThanOrEqual(30);
   });
+
+  it("KeyHint hints:走新样式(说明 键)、两端对齐、恒 2 行", () => {
+    const lines = renderFooter({
+      width: 60,
+      hints: [
+        { label: "导航", key: "↑↓" },
+        { label: "退出", key: "Esc" },
+      ],
+      rightHints: [
+        { label: "置顶", key: "p" },
+        { label: "归档", key: "a" },
+      ],
+    });
+    expect(lines).toHaveLength(2);
+    const plain = stripAnsi(lines[1]!);
+    expect(plain).toContain("导航 ↑↓");
+    expect(plain.indexOf("导航")).toBeLessThan(plain.indexOf("置顶")); // 左在前
+    expect(plain.endsWith("归档 a")).toBe(true); // 右贴右
+    expect(stringWidth(plain)).toBe(60);
+  });
 });

@@ -24,6 +24,7 @@ import {
   wrapToWidth,
   type KeyEvent,
   type KeyEventStream,
+  type KeyHint,
 } from "../tui/index.js";
 import { renderInputBox } from "../input-box.js";
 import {
@@ -35,12 +36,20 @@ import {
 /**
  * editing 阶段输入框下方的操作提示 —— drafting / external 阶段的可用操作已内含在
  * 各自状态行(「起草中…(Ctrl+C 取消)」/「…按任意键读回」),故此处只服务 editing。
+ *
+ * 两端对齐分区(同 /skills 管理器):左 = 基础操作(放弃)、右 = 功能操作(提交 / 保存 /
+ * 外部编辑)。KeyHint 样式:操作说明亮在前、按键标识暗在后。
  */
-function editingHints(canExternal: boolean): string[] {
-  const hints = ["Enter 提交", "Ctrl+S 保存"];
-  if (canExternal) hints.push("Ctrl+E 外部编辑器");
-  hints.push("Esc 放弃");
-  return hints;
+function editingHintBar(canExternal: boolean): {
+  hints: KeyHint[];
+  rightHints: KeyHint[];
+} {
+  const rightHints: KeyHint[] = [
+    { label: "提交", key: "Enter" },
+    { label: "保存", key: "Ctrl+S" },
+  ];
+  if (canExternal) rightHints.push({ label: "外部编辑器", key: "Ctrl+E" });
+  return { hints: [{ label: "放弃", key: "Esc" }], rightHints };
 }
 
 /**
@@ -105,7 +114,7 @@ export function renderSkillEditor(
       draft: input,
       cursor: inputCursor,
       placeholder: draft ? "比如:语气再轻松些" : "说说看,我帮你起草",
-      hint: editingHints(canExternal).join(" · "),
+      hintBar: editingHintBar(canExternal),
       width,
     });
     lines.push(...box.lines);

@@ -26,7 +26,7 @@
  * 编辑屏 hideCursor 后同样适用。返回的 `cursor` 坐标供 inline region 额外定位用。
  */
 
-import { renderChrome, tone, icon, ANSI } from "./tui/index.js";
+import { renderChrome, tone, icon, ANSI, renderHintBar, type KeyHint } from "./tui/index.js";
 import { layoutInputBuffer } from "./input-layout.js";
 import { PASTE_TOKEN_PATTERN } from "./paste-registry.js";
 
@@ -41,6 +41,11 @@ export interface InputBoxOptions {
   readonly placeholder?: string;
   /** 框下方提示行（成品文本，本函数加 dim + 缩进）。省略则不画提示行。 */
   readonly hint?: string;
+  /**
+   * 框下方提示行的结构化形态——「说明亮 + 按键暗」，可左右分区，委托 `renderHintBar`
+   * 渲染（不额外 dim、样式自带）。优先于 `hint`；两者皆省略则不画提示行。
+   */
+  readonly hintBar?: { hints: readonly KeyHint[]; rightHints?: readonly KeyHint[] };
   /** 框宽（含左右边框）；与 minWidth 取大。 */
   readonly width: number;
   /** 框最小宽度（极窄终端兜底）；缺省 40，与候选面板同款。 */
@@ -87,7 +92,19 @@ export function renderInputBox(opts: InputBoxOptions): InputBoxResult {
     ` ${tone.brand.bold(icon.section)}${tone.bold(opts.title)}`,
     ...boxLines,
   ];
-  if (opts.hint) lines.push(` ${tone.dim(opts.hint)}`);
+  // hintBar（结构化，说明亮 + 按键暗）优先；否则旧 hint（整体 dim）。缩进 1 列对齐框。
+  if (opts.hintBar) {
+    lines.push(
+      renderHintBar({
+        width: frameWidth,
+        indent: " ",
+        hints: opts.hintBar.hints,
+        rightHints: opts.hintBar.rightHints,
+      }),
+    );
+  } else if (opts.hint) {
+    lines.push(` ${tone.dim(opts.hint)}`);
+  }
 
   // 标题(1) + box 顶边(1) → cursor 落在第 2 + layout.cursorRow 行；
   // 列 = 左 │(1) + indent(1) + layout.cursorCol。

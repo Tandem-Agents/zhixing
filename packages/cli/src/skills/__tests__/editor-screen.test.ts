@@ -36,7 +36,7 @@ describe("renderSkillEditor", () => {
   it("无草稿 → 引导文案 + 输入区", () => {
     const out = plain(view({}));
     expect(out).toContain("还没有草稿");
-    expect(out).toContain("Enter 提交");
+    expect(out).toContain("提交 Enter");
   });
 
   it("有草稿 → 字段 + 正文 + 落点路径 + 正文分隔线", () => {
@@ -51,7 +51,7 @@ describe("renderSkillEditor", () => {
 
   it("canExternal → 输入框 hint 出现 Ctrl+E", () => {
     expect(plain(view({ draft: draftA, canExternal: true }))).toContain(
-      "Ctrl+E 外部编辑器",
+      "外部编辑器 Ctrl+E",
     );
     expect(plain(view({ draft: draftA, canExternal: false }))).not.toContain(
       "Ctrl+E",
@@ -61,7 +61,7 @@ describe("renderSkillEditor", () => {
   it("editing 态 → 带框输入区(标题随草稿态变 + hint)", () => {
     const withDraft = plain(view({ draft: draftA }));
     expect(withDraft).toContain("想怎么改？"); // 有草稿:问怎么改
-    expect(withDraft).toContain("Enter 提交"); // 输入框 hint
+    expect(withDraft).toContain("提交 Enter"); // 输入框 hint
     const noDraft = plain(view({}));
     expect(noDraft).toContain("想要个什么技能？"); // 无草稿:问意图
   });

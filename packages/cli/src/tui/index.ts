@@ -85,6 +85,11 @@ export {
   renderFooter,
   type FooterOptions,
 } from "./footer.js";
+export {
+  renderHintBar,
+  type KeyHint,
+  type HintBarOptions,
+} from "./hints.js";
 export { highlightSelectedRow } from "./highlight.js";
 
 // ─── alt-screen 屏基础（全屏交互面共用：config-editor / 技能管理器 / AI 编辑屏） ───
