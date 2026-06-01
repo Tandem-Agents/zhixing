@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { stripAnsi } from "../../tui/index.js";
+import { stringWidth, stripAnsi } from "../../tui/index.js";
 import type { KeyEvent } from "../../tui/index.js";
 import type { ManagedSkillRecord } from "@zhixing/core";
 import { renderSkillManager, handleSkillManagerKey } from "../manager-screen.js";
@@ -34,6 +34,21 @@ describe("renderSkillManager", () => {
     const out = plain({ items: [], selectedIndex: -1 });
     expect(out).toContain("还没有技能");
     expect(out).toContain("Esc 退出");
+  });
+
+  it("空库引导用公用左边距(contentPrefix)缩进,不顶格 col 0", () => {
+    const lines = renderSkillManager({ items: [], selectedIndex: -1 }, 80);
+    const hintLine = lines.find((l) => stripAnsi(l).includes("还没有技能"));
+    expect(hintLine).toBeDefined();
+    expect(stripAnsi(hintLine!)).toMatch(/^ {2}还没有技能/);
+  });
+
+  it("窄终端下整屏每行不超 width(空库引导折行,守 alt-screen 行宽不变量)", () => {
+    const width = 24;
+    const lines = renderSkillManager({ items: [], selectedIndex: -1 }, width);
+    for (const l of lines) {
+      expect(stringWidth(stripAnsi(l))).toBeLessThanOrEqual(width);
+    }
   });
 
   it("状态徽标:★置顶 / ⊘禁用 / [mode] / 来源 / 使用次数", () => {

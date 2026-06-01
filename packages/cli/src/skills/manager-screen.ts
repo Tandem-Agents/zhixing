@@ -13,6 +13,8 @@ import {
   renderChrome,
   renderListRow,
   renderFooter,
+  wrapToWidth,
+  layout,
   tone,
 } from "../tui/index.js";
 import { SkillManagerController } from "./manager-controller.js";
@@ -21,14 +23,10 @@ import type {
   SkillManagerView,
 } from "./manager-controller.js";
 
-const FOOTER_HINTS = [
-  "↑↓ 导航",
-  "p 置顶",
-  "d 禁用",
-  "m 改 mode",
-  "a 归档",
-  "Esc 退出",
-] as const;
+// Footer 两端对齐分区:左 = 基础 / 导航操作(不改数据)、右 = 功能 / 变更操作
+// (对选中技能落 Store)。语义分组让"通用怎么动"与"对这个技能做什么"一眼分立。
+const FOOTER_HINTS_BASIC = ["↑↓ 导航", "Esc 退出"] as const;
+const FOOTER_HINTS_ACTION = ["p 置顶", "d 禁用", "m 改 mode", "a 归档"] as const;
 
 /** 空库引导:替代技术性"无项"占位,给出下一步去向。 */
 const EMPTY_HINT = "还没有技能 —— 让 agent 把某摊事的做法沉淀成一个技能,即可在此管理。";
@@ -52,7 +50,13 @@ export function renderSkillManager(
   ];
 
   if (view.items.length === 0) {
-    lines.push(tone.dim(EMPTY_HINT));
+    // 走公用左边距 token,与列表行 / footer hint 同列对齐(否则顶到 col 0);按可用
+    // 宽度折行,守住 alt-screen 行宽不变量(每行 ≤ width、续行同缩进),与 renderListRow
+    // 一致——wrap 在剥色前的 raw 文本上做,再对每行整段套 dim(line-width.ts 约定)。
+    const avail = Math.max(1, width - layout.contentIndent);
+    for (const ln of wrapToWidth(EMPTY_HINT, avail)) {
+      lines.push(layout.contentPrefix + tone.dim(ln));
+    }
   } else {
     view.items.forEach((s, i) => {
       const star = s.pinned ? "★" : " ";
@@ -69,7 +73,14 @@ export function renderSkillManager(
     });
   }
 
-  lines.push("", ...renderFooter({ width, hints: FOOTER_HINTS }));
+  lines.push(
+    "",
+    ...renderFooter({
+      width,
+      hints: FOOTER_HINTS_BASIC,
+      rightHints: FOOTER_HINTS_ACTION,
+    }),
+  );
   return lines;
 }
 
