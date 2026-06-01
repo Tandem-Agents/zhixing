@@ -203,7 +203,7 @@ describe("SkillEditorController — 保存", () => {
 describe("SkillEditorController — 外部编辑两路衔接", () => {
   it("打开 → 进 external 暂停态", async () => {
     const c = mk({
-      openExternal: async () => ({ file: "/tmp/SKILL.md", mtime: 100 }),
+      openExternal: async () => ({ file: "/tmp/SKILL.md", mtime: 100, opened: true }),
     });
     await c.runEdit("x", sig());
     await c.openExternalAndPause();
@@ -215,7 +215,7 @@ describe("SkillEditorController — 外部编辑两路衔接", () => {
     const c = mk({
       openExternal: async (d) => {
         receivedNull = d === null;
-        return { file: "/tmp/SKILL.md", mtime: 100 };
+        return { file: "/tmp/SKILL.md", mtime: 100, opened: true };
       },
     });
     await c.openExternalAndPause(); // 还没起草
@@ -226,7 +226,7 @@ describe("SkillEditorController — 外部编辑两路衔接", () => {
   it("回屏:mtime 变了重读换草稿", async () => {
     const draftB: SkillDraft = { ...draftA, body: "外部改过的正文" };
     const c = mk({
-      openExternal: async () => ({ file: "/tmp/SKILL.md", mtime: 100 }),
+      openExternal: async () => ({ file: "/tmp/SKILL.md", mtime: 100, opened: true }),
       rereadExternal: async () => ({ draft: draftB, mtime: 200 }),
     });
     await c.runEdit("x", sig());
@@ -238,7 +238,7 @@ describe("SkillEditorController — 外部编辑两路衔接", () => {
 
   it("回屏:未变(reread null)→ 保留原草稿", async () => {
     const c = mk({
-      openExternal: async () => ({ file: "/tmp/SKILL.md", mtime: 100 }),
+      openExternal: async () => ({ file: "/tmp/SKILL.md", mtime: 100, opened: true }),
       rereadExternal: async () => null,
     });
     await c.runEdit("x", sig());
@@ -254,6 +254,20 @@ describe("SkillEditorController — 外部编辑两路衔接", () => {
     expect(c.view().canExternal).toBe(false);
     await c.openExternalAndPause();
     expect(c.view().phase).toBe("editing");
+  });
+
+  it("自动打开失败(opened:false)→ 仍进 external 态、view 暴露文件路径供手动打开", async () => {
+    const c = mk({
+      openExternal: async () => ({
+        file: "/tmp/SKILL.md",
+        mtime: 100,
+        opened: false,
+      }),
+    });
+    await c.runEdit("x", sig());
+    await c.openExternalAndPause();
+    expect(c.view().phase).toBe("external"); // 不退回编辑屏,顺着外部编辑意图
+    expect(c.view().external).toEqual({ file: "/tmp/SKILL.md", opened: false });
   });
 });
 

@@ -46,11 +46,14 @@ export interface SkillEditorDeps {
   /** 确认落盘:把草稿写进 Store(create / update,注入)。 */
   save: (draft: SkillDraft) => Promise<void>;
   /**
-   * 跳外部编辑器:把草稿落到文件 + 拉起编辑器,返回文件路径与当时 mtime。本地 TTY 专用,
-   * 远程 / 无头不注入 → 屏内不提供该入口。`draft` 为 null = 手写直通车(还没起草),由注入方
-   * 落一个空骨架文件交编辑器。
+   * 跳外部编辑器:把草稿落到文件 + 拉起编辑器,返回文件路径、当时 mtime、是否自动拉起成功。
+   * 本地 TTY 专用,远程 / 无头不注入 → 屏内不提供该入口。`draft` 为 null = 手写直通车
+   * (还没起草),由注入方落一个空骨架文件交编辑器。`opened:false` = 没能自动打开,编辑屏给
+   * 文件路径请用户手动打开(文件已写好、闭环照走,顺着用户要外部编辑的意图)。
    */
-  openExternal?: (draft: SkillDraft | null) => Promise<{ file: string; mtime: number }>;
+  openExternal?: (
+    draft: SkillDraft | null,
+  ) => Promise<{ file: string; mtime: number; opened: boolean }>;
   /** 回屏重读:文件 mtime 比 `since` 新则重读返回新草稿,未变返回 null。 */
   rereadExternal?: (
     file: string,
@@ -80,6 +83,11 @@ export interface SkillEditorView {
   readonly pendingDiscard: boolean;
   /** 已改写轮数 —— 放弃确认文案"改了 N 轮"用。 */
   readonly revisions: number;
+  /**
+   * 外部编辑态:草稿文件路径 + 是否自动拉起成功;非该态为 null。`opened:false` 时编辑屏
+   * 显示文件路径、请用户手动打开(自动拉起失败的优雅降级,不掰回 AI、顺着外部编辑意图)。
+   */
+  readonly external: { file: string; opened: boolean } | null;
 }
 
 export class SkillEditorController {
@@ -87,7 +95,7 @@ export class SkillEditorController {
   private readonly buffer = new InputBuffer();
   private phase: EditorPhase = "editing";
   private error: string | null = null;
-  private external: { file: string; mtime: number } | null = null;
+  private external: { file: string; mtime: number; opened: boolean } | null = null;
   private subject = "";
   private redactionCount = 0;
   /** 最近一次提交的意图 —— 失败 / 取消时预填回输入框,接住"我刚说的还在"。 */
@@ -109,6 +117,9 @@ export class SkillEditorController {
       redactionCount: this.redactionCount,
       pendingDiscard: this.pendingDiscard,
       revisions: this.revisions,
+      external: this.external
+        ? { file: this.external.file, opened: this.external.opened }
+        : null,
     };
   }
 

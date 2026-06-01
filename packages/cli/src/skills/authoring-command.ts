@@ -43,6 +43,9 @@ import { layout } from "../tui/index.js";
 /** 拼进起草上下文的最近对话条数上限 —— 够蒸馏出"刚做的事",又不撑爆单发 prompt。 */
 const CONTEXT_MESSAGE_LIMIT = 24;
 
+/** spawn 后等多久看是否立即失败 —— ENOENT 类在下一 tick emit,窗口内无错即认为拉起成功。 */
+const SPAWN_PROBE_MS = 120;
+
 /** 把最近对话转成起草上下文文本(同工作场景纪要的转写口径)。 */
 export function buildSkillContext(
   messages: readonly Message[],
@@ -158,16 +161,30 @@ function buildEditorDeps(
     externalBase = toWrite;
     await fs.writeFile(tmpFile, draftToExternalFile(toWrite), "utf-8");
     const stat = await fs.stat(tmpFile);
-    openInEditor(
-      tmpFile,
-      resolveEditor({
-        visual: process.env["VISUAL"],
-        editor: process.env["EDITOR"],
-        platform: process.platform,
-        probe: probeOnPath,
-      }),
-    );
-    return { file: tmpFile, mtime: stat.mtimeMs };
+    // 拉起编辑器,给 spawn 一个短窗口看是否立即失败(ENOENT 类在下一 tick emit)。窗口内没
+    // 报错 = 拉起成功(GUI 启动中);报错 = 没自动打开 → 编辑屏据 opened:false 给路径请用户
+    // 手动开。无论成败,文件已写好,external 闭环照走(手动打开改、回来 mtime 比对重读)。
+    const opened = await new Promise<boolean>((resolve) => {
+      let settled = false;
+      const settle = (ok: boolean): void => {
+        if (!settled) {
+          settled = true;
+          resolve(ok);
+        }
+      };
+      openInEditor(
+        tmpFile,
+        resolveEditor({
+          visual: process.env["VISUAL"],
+          editor: process.env["EDITOR"],
+          platform: process.platform,
+          probe: probeOnPath,
+        }),
+        () => settle(false), // spawn 失败(回传的 error)
+      );
+      setTimeout(() => settle(true), SPAWN_PROBE_MS); // 窗口内无错 → 认为拉起成功
+    });
+    return { file: tmpFile, mtime: stat.mtimeMs, opened };
   };
 
   const rereadExternal: SkillEditorDeps["rereadExternal"] = async (file, since) => {

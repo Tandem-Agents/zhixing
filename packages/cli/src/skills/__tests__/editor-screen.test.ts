@@ -39,6 +39,7 @@ const view = (over: Partial<SkillEditorView>): SkillEditorView => ({
   redactionCount: 0,
   pendingDiscard: false,
   revisions: 0,
+  external: null,
   ...over,
 });
 
@@ -107,10 +108,33 @@ describe("renderSkillEditor", () => {
     expect(out).toContain("原来的会留着");
   });
 
-  it("external 态 → 提示读回", () => {
-    const out = plain(view({ phase: "external", draft: draftA, subject: "x" }));
+  it("external 态(自动打开成功)→ 提示读回", () => {
+    const out = plain(
+      view({
+        phase: "external",
+        draft: draftA,
+        subject: "x",
+        external: { file: "/tmp/s.md", opened: true },
+      }),
+    );
     expect(out).toContain("已用你的编辑器打开");
     expect(out).toContain("按任意键读回");
+  });
+
+  it("external 态(自动打开失败)→ 给文件路径请用户手动打开、不假装已打开、闭环照走", () => {
+    const path = "C:\\Users\\me\\AppData\\Local\\Temp\\zhixing-skill.md";
+    const out = plain(
+      view({
+        phase: "external",
+        draft: draftA,
+        subject: "x",
+        external: { file: path, opened: false },
+      }),
+    );
+    expect(out).toContain("没能自动打开编辑器");
+    expect(out).toContain(path); // 路径直接给用户手动打开
+    expect(out).toContain("按任意键读回"); // 闭环不变
+    expect(out).not.toContain("已用你的编辑器打开"); // 不假装
   });
 
   it("起草失败(无草稿 + error)→ 友好重试文案、不露开发者黑话", () => {

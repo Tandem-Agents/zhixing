@@ -200,12 +200,30 @@ export function renderSkillEditor(
 
   // ── 外部编辑暂停态 ──
   if (phase === "external") {
+    const head = renderChrome({
+      title: `${title} · 草稿`,
+      body: [subject ? `收自：${subject}` : "从你说的话里收一个技能"],
+      width,
+    });
+    // 自动拉起失败:不假装已打开,把草稿文件路径直接给用户、请他手动打开 —— 顺着"按 Ctrl+E
+    // 就是想用外部编辑器"的意图,文件已写好,手动打开改、回来按任意键读回是同一条闭环。
+    if (view.external && !view.external.opened) {
+      return [
+        ...head,
+        "",
+        ...wrapBlock(
+          "◇ 没能自动打开编辑器。草稿已存到下面这个文件，你用编辑器打开它改：",
+          width,
+          tone.dim,
+        ),
+        "",
+        ...wrapBlock(view.external.file, width), // 路径醒目(不染色)、折行守不变量、便于看全
+        "",
+        ...wrapBlock("改完保存，回来按任意键读回。", width, tone.dim),
+      ];
+    }
     return [
-      ...renderChrome({
-        title: `${title} · 草稿`,
-        body: [subject ? `收自：${subject}` : "从你说的话里收一个技能"],
-        width,
-      }),
+      ...head,
       "",
       ...wrapBlock(
         "◇ 已用你的编辑器打开草稿。改完保存，回来按任意键读回。",
