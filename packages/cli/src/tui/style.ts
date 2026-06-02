@@ -134,3 +134,18 @@ export function getTerminalWidth(stream?: NodeJS.WritableStream): number {
   if (Number.isFinite(envCols) && envCols > 0) return envCols;
   return 80;
 }
+
+/**
+ * 获取终端可用行数。
+ *
+ * 优先级：stdout.rows（TTY 时）→ env.LINES → 24（兜底）。与 getTerminalWidth 同哲学:
+ * 不读 stty / TERM,跨平台不可靠。供分区布局(固定顶/底 + 滚动中间)按整高渲染用。
+ */
+export function getTerminalHeight(stream?: NodeJS.WritableStream): number {
+  const stdout = stream ?? process.stdout;
+  const rows = (stdout as NodeJS.WriteStream).rows;
+  if (typeof rows === "number" && rows > 0) return rows;
+  const envRows = parseInt(process.env["LINES"] ?? "", 10);
+  if (Number.isFinite(envRows) && envRows > 0) return envRows;
+  return 24;
+}

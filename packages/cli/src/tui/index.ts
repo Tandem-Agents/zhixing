@@ -44,6 +44,7 @@ export {
   glyph,
   layout,
   getTerminalWidth,
+  getTerminalHeight,
 } from "./style.js";
 
 // ─── 2. 渲染原语 ─────────────────────────────────────────
@@ -90,6 +91,10 @@ export {
   type KeyHint,
   type HintBarOptions,
 } from "./hints.js";
+export {
+  composeViewport,
+  type ViewportOptions,
+} from "./viewport.js";
 export { highlightSelectedRow } from "./highlight.js";
 
 // ─── alt-screen 屏基础（全屏交互面共用：config-editor / 技能管理器 / AI 编辑屏） ───

@@ -31,8 +31,10 @@ import { layoutInputBuffer } from "./input-layout.js";
 import { PASTE_TOKEN_PATTERN } from "./paste-registry.js";
 
 export interface InputBoxOptions {
-  /** 框上方标题（本函数加 ▎ 锚 + bold）。 */
+  /** 框上方标题（本函数加 bold）。 */
   readonly title: string;
+  /** 标题行前缀字符(已染色);缺省 ▎章节锚。drafting 等态可传别的(如笔帧)替换标题行而不动框。 */
+  readonly titleGlyph?: string;
   /** 当前输入文本（裸，无 ANSI；可含硬换行）。 */
   readonly draft: string;
   /** 光标字符 offset（不是 UTF-16 unit），与 InputBuffer.cursor 同口径。 */
@@ -89,7 +91,7 @@ export function renderInputBox(opts: InputBoxOptions): InputBoxResult {
   });
 
   const lines = [
-    ` ${tone.brand.bold(icon.section)}${tone.bold(opts.title)}`,
+    ` ${opts.titleGlyph ?? tone.brand.bold(icon.section)}${tone.bold(opts.title)}`,
     ...boxLines,
   ];
   // hintBar（结构化，说明亮 + 按键暗）优先；否则旧 hint（整体 dim）。缩进 1 列对齐框。

@@ -25,8 +25,11 @@ const draftA: SkillDraft = {
 
 const plain = (
   v: SkillEditorView,
-  opts: { spinnerChar?: string; libraryEmpty?: boolean } = {},
-): string => stripAnsi(renderSkillEditor(v, 80, "新建技能", opts).join("\n"));
+  opts: { penChar?: string; libraryEmpty?: boolean } = {},
+): string => {
+  const f = renderSkillEditor(v, 80, "新建技能", opts);
+  return stripAnsi([...f.top, ...f.scroll, ...f.bottom].join("\n"));
+};
 
 const view = (over: Partial<SkillEditorView>): SkillEditorView => ({
   draft: null,
@@ -56,13 +59,18 @@ describe("renderSkillEditor", () => {
     );
   });
 
-  it("策展态(有草稿)→ 收自 + 字段(什么时候用)+ 正文 + 教学『我来改』", () => {
-    const out = plain(view({ draft: draftA, subject: "收部署做法" }));
+  it("策展态(有草稿)→ 收自 + 字段(什么时候用)+ 正文 + 产品化操作词、无教学行", () => {
+    const out = plain(
+      view({ draft: draftA, subject: "收部署做法", canExternal: true }),
+    );
     expect(out).toContain("收自：收部署做法");
     expect(out).toContain("部署服务"); // 名称
     expect(out).toContain("什么时候用"); // 白话标签
     expect(out).toContain("先 build 再推镜像"); // 正文
-    expect(out).toContain("我来改"); // 教学:打字=指挥 AI
+    expect(out).toContain("发送 Enter"); // 主操作产品词(放最左)
+    expect(out).toContain("保存 Ctrl+S");
+    expect(out).toContain("外部编辑 Ctrl+E");
+    expect(out).not.toContain("这是草稿。在下面"); // 教学行已去掉(与输入框引导重复)
   });
 
   it("脱敏可见:redactionCount>0 才显示抹掉提示", () => {
@@ -74,25 +82,29 @@ describe("renderSkillEditor", () => {
     );
   });
 
-  it("模式降为白话灰字、顶栏不暴露 own/ 内部目录", () => {
+  it("mode 不在创建屏暴露(内部分发概念)、顶栏也不露 own/ 落点", () => {
     const out = plain(view({ draft: draftA })); // mode work
-    expect(out).toContain("归到工作场景");
+    expect(out).not.toContain("归到"); // 模式行已去掉
+    expect(out).not.toContain("工作场景");
     expect(out).not.toContain("own/");
     expect(out).not.toContain("落点");
   });
 
-  it("放弃二次确认态 → 确认行(含改了 N 轮)", () => {
+  it("退出二次确认态 → 确认行(退出会丢草稿、含改了 N 轮、产品词保存)", () => {
     const out = plain(view({ draft: draftA, pendingDiscard: true, revisions: 3 }));
-    expect(out).toContain("放弃这份草稿");
+    expect(out).toContain("退出会丢掉这份草稿");
     expect(out).toContain("改了 3 轮");
+    expect(out).toContain("Ctrl+S 保存");
   });
 
-  it("显影态(首次,无草稿)→ 收自 + 骨架占位,无矛盾引导", () => {
-    const out = plain(view({ phase: "drafting", subject: "部署流程" }));
+  it("显影态(首次,无草稿)→ 去骨架(简洁占位)、底部输入区固定换成笔、无矛盾引导", () => {
+    const out = plain(view({ phase: "drafting", subject: "部署流程" }), { penChar: "✎" });
     expect(out).toContain("收自：部署流程");
-    expect(out).toContain("正在写");
-    expect(out).toContain("░"); // 骨架
-    expect(out).not.toContain("还没有草稿"); // 旧矛盾引导已消除
+    expect(out).toContain("正在落笔"); // 去骨架,内容区简洁占位
+    expect(out).toContain("奋笔疾书中"); // 底部输入区标题(不消失)
+    expect(out).not.toContain("░"); // 骨架已去掉(B)
+    expect(out).not.toContain("还没有草稿");
+    expect(out.indexOf("正在落笔")).toBeLessThan(out.indexOf("奋笔疾书中")); // 内容在上、输入区在下
   });
 
   it("显影态 subject 空(纯对话提炼)→ 顶部显示提炼中占位、不露空『收自：』", () => {
@@ -101,11 +113,11 @@ describe("renderSkillEditor", () => {
     expect(out).not.toContain("收自："); // 空 subject 不渲染空字段
   });
 
-  it("显影态(改写,有草稿)→ 保留现草稿 + 增量语气", () => {
+  it("显影态(改写,有草稿)→ 保留现草稿在上、进度『奋笔疾书中』在下", () => {
     const out = plain(view({ phase: "drafting", draft: draftA, subject: "x" }));
-    expect(out).toContain("正在按你说的改");
+    expect(out).toContain("奋笔疾书中");
     expect(out).toContain("部署服务"); // 现草稿保留
-    expect(out).toContain("原来的会留着");
+    expect(out.indexOf("部署服务")).toBeLessThan(out.indexOf("奋笔疾书中")); // 内容在上、进度在下
   });
 
   it("external 态(自动打开成功)→ 提示读回", () => {
@@ -143,10 +155,22 @@ describe("renderSkillEditor", () => {
     expect(out).not.toContain("模型未返回 JSON");
   });
 
-  it("spinnerChar 注入 → 显影态渲染该帧", () => {
-    expect(plain(view({ phase: "drafting", subject: "x" }), { spinnerChar: "▣" })).toContain(
-      "▣",
+  it("penChar 注入 → drafting 底部输入区标题用该笔帧(纯函数可断言)", () => {
+    expect(
+      plain(view({ phase: "drafting", subject: "x" }), { penChar: "P!" }),
+    ).toContain("P!");
+  });
+
+  it("返回三段 EditorFrame:输入区在 bottom(固定底部)、草稿在 scroll(滚动区)", () => {
+    const f = renderSkillEditor(
+      view({ draft: draftA, subject: "x" }),
+      80,
+      "新建技能",
+      {},
     );
+    expect(stripAnsi(f.bottom.join("\n"))).toContain("想怎么改"); // 输入框标题在固定底部
+    expect(stripAnsi(f.scroll.join("\n"))).toContain("部署服务"); // 草稿在滚动内容区
+    expect(stripAnsi(f.top.join("\n"))).toContain("收自"); // chrome 在固定顶部
   });
 });
 

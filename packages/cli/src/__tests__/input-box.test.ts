@@ -22,6 +22,21 @@ describe("renderInputBox", () => {
     expect(r.lines.length).toBe(4);
   });
 
+  it("titleGlyph 替换默认 ▎ 标题前缀(drafting 换笔用),框结构不变", () => {
+    const def = renderInputBox({ title: "想怎么改", draft: "", cursor: 0, width: 50 });
+    const pen = renderInputBox({
+      title: "奋笔疾书中",
+      draft: "",
+      cursor: 0,
+      width: 50,
+      titleGlyph: "P!",
+    });
+    expect(stripAnsi(def.lines[0]!)).toContain("▎"); // 默认 ▎ 章节锚
+    expect(stripAnsi(pen.lines[0]!)).toContain("P!"); // 自定义替换
+    expect(stripAnsi(pen.lines[0]!)).not.toContain("▎");
+    expect(pen.lines.length).toBe(def.lines.length); // 框结构不变
+  });
+
   it("hintBar:框下结构化提示行(说明 键、左右分区),共 5 行", () => {
     const r = renderInputBox({
       title: "新建",
