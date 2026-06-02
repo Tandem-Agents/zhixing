@@ -45,6 +45,3 @@ temp/
 
 # Private research notes (local only)
 research/_private/
-
-# 开发协作白板 — 约定层（README / .gitkeep）进 git 随仓库走，运行时动态状态留本地
-.coordination/branches/*.json
