@@ -90,6 +90,7 @@
 │  @zhixing/core — Typeahead Core                               │
 │  ──────────────────────────────────────                        │
 │  CommandRegistry          (命令的单一真相源)                   │
+│  CommandDispatcher        (统一执行器：local / agent / hybrid) │
 │  SuggestionProvider       (接口：任意触发类型的实现)           │
 │  TypeaheadBroker          (核心：trigger 检测 + 分派 + 取消)   │
 │  TypeaheadSession         (单次输入会话的状态机)               │
@@ -628,19 +629,15 @@ interface DynamicCommandSource {
 - **`onChange` 事件**：broker 订阅后重建 FuzzyIndex 缓存。抄 Claude Code 的"按引用身份缓存"，但事件更显式。
 - **`find` vs `findByName`**：`find` 按稳定 id（用于 accept 后查回 def），`findByName` 按 name/alias（用于执行路径的命名解析）。
 
-**2026-04-16 refinement：静态命令的真正所有者是 REPL 不是 core**：
+**命令真相源与 handler 归属**：
 
-初版设计让 `@zhixing/core/typeahead/builtin-commands.ts` 持有一个"理想化的"内建命令清单（`/new /clear /help /status /model /elevated /fast /verbose /history /debug /exit`），REPL 调 `registerBuiltinCommands(registry)` 一次性注册全部。Phase 1 Step 5 实测暴露三个问题：
+`CommandRegistry` 是命令元数据的唯一真相源。命令由**各域模块的原子注册函数**（`registerInfoCommands` / `registerSessionCommands` / `registerModeCommands` / `registerConfigCommands` / `registerTaskCommands` / `registerSkillsCommand`）在 bootstrap 时注入：每个函数把本域 `CommandDef` register 进 registry 的**同时**，在 dispatcher 上 `registerHandler(id, handler)` 绑定执行体——声明与 handler 原子成对、就近同处，杜绝二者漂移。
 
-1. **幽灵命令**：core 清单里有 `/elevated /fast /verbose` 等尚未在 REPL 实现 handler 的命令，用户能在 panel 看到但执行时"未知命令"
-2. **设计集与实际集的二元分裂**：core 的 builtin-commands.ts 和 REPL 的 `buildSlashCommands()` 不重合 —— core 里有 `/elevated` 但 REPL 没有，REPL 里有 `/skills /journal /trust` 但 core 没有
-3. **handler 归属模糊**：命令在 core 里定义，handler 在 CLI 里实现，绑定关系靠"id 字符串精确匹配"维护，容易漂移
+- **Handler 不进 `CommandDef`**：`CommandDef` 是可序列化的纯元数据，跨 target（CLI / 未来渠道）共享；handler 由 `CommandDispatcher` 持有一份 `Map<commandId, CommandHandler>`，各装配方在本地注入。元数据共享、执行体本地，是命令层 target 无关的关键。
+- **registry 是唯一消费源**：`/help` 与补全 dropdown 都读 `registry.list(ctx)`，不存在第二份静态表；环境约束（如 alt-screen 编辑器在无 chrome 终端不可用）由 `CommandDef.visibility.predicate` 基于 `RuntimeContext` 过滤，"列得出"与"打得开"天然一致——**zero 幽灵命令**。
+- 动态命令（技能 / plugin / filesystem）走 `registerDynamicSource`，与静态注册各自生命周期，这条没变。
 
-**新约定**：
-- `@zhixing/core/typeahead/builtin-commands.ts` **降级为"命令目录范例"**，只供测试和设计参考使用，**不再作为 REPL 运行时的注册源**
-- REPL 在 bootstrap 时持有一张**本地 `REPL_COMMANDS` 表**（见 `packages/cli/src/repl.ts`），每一行同时定义 `{ name, aliases, description, category, execution, legacyKey }`，循环注册到 registry 并绑定 handler
-- 好处：zero 幽灵命令（每一条都有可执行 handler）、单一增删点（表里加一行就行）、CLI 独立演进不受 core 限制
-- Plugin / 动态 source 不受影响，仍走 `registerDynamicSource` 路径 —— 这条设计没变
+> 这一形态是对早期设计的纠偏。最初把"理想化命令清单"放在 `@zhixing/core/typeahead/builtin-commands.ts`、由 REPL 一次性 `registerBuiltinCommands` 注册，实测暴露三个问题：① core 清单里有尚未实现 handler 的命令，用户在 panel 看得到却执行"未知命令"（幽灵命令）；② core 清单与 REPL 本地命令集二元分裂、互不重合；③ 命令在 core 定义、handler 在 CLI 实现，靠 id 字符串维系易漂移。改为按域模块化原子注册后三者同时消解，`builtin-commands.ts` 已删除。
 
 ### 5.9 `TypeaheadEventBus` 事件
 
@@ -1356,40 +1353,44 @@ panel.detach();
 
 ### 9.2 Slash Command 执行：local / agent / hybrid
 
+执行收口在 `CommandDispatcher`（`@zhixing/core` 内、target 无关）。handler 在 bootstrap 时由各域注册函数绑定，与 `CommandDef` 注册原子成对；dispatcher 按名字（含 hidden）在 registry 解析命令、读 `CommandDef.execution` 分档、在自己的 `Map<commandId, handler>` 里取执行体，handler 收到的是渲染器无关的 `CommandHandlerContext`。
+
 ```typescript
-async function dispatchAccepted(result: AcceptResult): Promise<void> {
-  const execution = result.executionHint ?? "agent";
+// bootstrap：声明与 handler 原子成对（各域 registerXxxCommands 内）
+//   registry.register({ id: "clear:builtin", name: "clear", execution: "local", ... });
+//   dispatcher.registerHandler("clear:builtin", (ctx) => { clearScreen(); return {}; });
+//   // ctx: CommandHandlerContext = { args, rawInput, runtime }
 
-  switch (execution) {
-    case "local": {
-      // 纯本地：不产生 agent turn，不消耗 token
-      const cmd = commandRegistry.findByName(parseCommandName(result.newDraft));
-      await cmd.handler({ args: parseArgs(result.newDraft), repl, session });
-      break;
-    }
+// 用户提交一条命令 draft → 统一交给 dispatcher（runtime 为 RuntimeContext）
+const result = await dispatcher.dispatch(rawDraft, runtime);
 
-    case "agent": {
-      // 纯 agent：整条 draft 作为 user message 送进 agent loop
-      await agentLoop.processInput(result.newDraft);
-      break;
-    }
+switch (result.kind) {
+  case "local-handled":
+    // handler 已执行（清屏 / 打印状态 …），不产生 agent turn、不消耗 token
+    break;
 
-    case "hybrid": {
-      // 先本地副作用，再通知 agent
-      const cmd = commandRegistry.findByName(parseCommandName(result.newDraft));
-      const localEffect = await cmd.handler({ args: parseArgs(result.newDraft), repl, session });
-      // localEffect 包含要作为 system message 发给 agent 的说明
-      await agentLoop.processSystemMessage(localEffect.systemMessage);
-      break;
-    }
-  }
+  case "agent-message":
+    // execution=agent：dispatcher 不调 handler，整条 draft 作为 user message
+    await agentLoop.processInput(result.text);
+    break;
+
+  case "hybrid":
+    // 本地副作用已发生，再把 handler 给出的说明作为 system message 通知 agent
+    await agentLoop.processSystemMessage(result.systemMessage);
+    break;
+
+  case "unknown":         // registry 里没这个名字
+  case "missing-handler": // 命令声明了却没绑 handler
+  case "error":           // handler 抛异常（已捕获，不传染主循环）
+    cliWriter.line(formatDispatchProblem(result));
+    break;
 }
 ```
 
-**典型归属**（2026-04-16 基于 Phase 1 Step 5 实测重新分类）：
-- `local`：`/new`、`/clear`、`/resume`、`/exit`、`/help`、`/status`、`/me`、`/model`、`/usage`、`/context`、`/skills`、`/journal`、`/people`、`/trust`、`/security`、`/compact`、`/name` —— 所有 info 查询 + 所有项目管理命令。**不产生 agent turn**。
-- `agent`：`/background`、`/btw`、`/queue` —— 本质是 system prompt 的便捷入口
-- `hybrid`：**暂无内建命令使用**。这一档为将来"真的需要 agent 知道本地副作用才能正确推理"的场景保留（如 `/cd` 切工作区，后续对话里 agent 必须知道新 cwd），不开放给 info 类或项目管理类命令。
+**典型归属**（与 cli 实际注册的内建命令对齐）：
+- `local`：全部内建命令——info 查询 `/help` `/status` `/me` `/model` `/usage` `/context` `/journal` `/people` `/tasks`、会话管理 `/new` `/clear` `/resume` `/name` `/compact`、模式 `/work` `/exit`、配置与安全 `/config` `/mcp` `/trust` `/security`、任务 `/tasklist` `/task`、技能管理 `/skills`。**不产生 agent turn、不消耗 token**。
+- `agent`：动态技能命令（`/<技能名>`，由 `SkillCommandSource` 投影、`execution: "agent"`）——dispatcher 不调 handler，把整条 draft 当 user message 交给 agent loop。内建命令无一属此档。
+- `hybrid`：**生产中暂无命令使用**。保留这一档给"真的需要 agent 知道本地副作用才能正确推理"的场景（如 `/cd` 切工作区，后续对话里 agent 必须知道新 cwd），不开放给 info 类或项目管理类命令。
 
 **⚠️ 反模式警告（2026-04-16 实测教训）**：不要把 **info 查询命令** 设成 `hybrid`。初版 Phase 1 Step 5 里 `/model` 是 hybrid —— local handler 正确打印了 `Pro/MiniMaxAI/MiniMax-M2.5`，随后把 system message "用户查看了当前模型" 丢给 agent，**agent 完全不知道 runtime 模型是什么，凭训练记忆瞎编 "Claude 3.5 Sonnet"**。`/new` 同理：hybrid 的 system message 让 agent 生成了一段欢迎语，纯噪音。
 

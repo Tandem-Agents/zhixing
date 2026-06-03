@@ -255,3 +255,22 @@ deps 注入模式 task/skill 已验证（`getMessages` / `getConversationId` / `
 - 本文件末尾追加各阶段 commit 的 checklist 勾选，作为活文档追踪。
 
 > 本文档内已无需评审者决断的架构选项——上述全部依据"单一真相源 / 命令层 target 无关 / 避免架构债务（而非最小变更）"原则定稿。唯一会改变方向的是"渠道是否需要 `/` 命令"这一**需求**（决定阶段 D 何时启动）；在该需求出现前，本方案不实现 server 命令层、只把命令层的解耦边界放到正确的物理位置（core）。
+
+---
+
+## 附录 · 各阶段 commit 记录
+
+迁移按下列 commit 落地，每个都通过构建 + 测试 + 行为核对后由人提交（阶段 0/C 动 core 走 `pnpm build` 全量，阶段 A/B 动 cli 走 `pnpm cli:build`）。原 Step 7（config 域）与 Step 8（桥接收尾删除）合并为一个 commit——config 是最后一个迁移域，迁完后 `buildSlashCommands` 即空、其参数全 unused 触发类型错误，强制连带拆除桥接。
+
+- [x] 阶段 0 · Step 0 — CommandDispatcher 下沉 `@zhixing/core` · `6881ca5`
+- [x] 阶段 A · Step 1 — 命令层提到顶层无条件构建（与终端能力解耦）· `4cd2bde`
+- [x] 阶段 A · Step 2 — 执行归一 `dispatcher.dispatch` + `/help` 读 `registry.list` + `features.chrome` 环境过滤 · `e301825`
+- [x] 阶段 A · Step 3 — `requireChrome` 兜底 + non-tty 死代码清理 · `9e3fadc`
+- [x] 阶段 B · Step 4 — info 域 `registerInfoCommands` · `e0c1f7e`
+- [x] 阶段 B · Step 5 — session 域 `registerSessionCommands` · `8c76675`
+- [x] 阶段 B · Step 6 — mode（work/exit）`registerModeCommands` · `3460a5a`
+- [x] 阶段 B · Step 7+8 — config 域 `registerConfigCommands` + 桥接彻底拆除（`/trust` 改 getter 注入）· `3b5b216`
+- [x] 阶段 C · Step 9 — 删除 `core/typeahead/builtin-commands.ts`，registry 成唯一真相源 · `07d7ab3`
+- [x] 收尾 — 回校父 spec `input-typeahead.md`（§4.1 / §5.8 / §9.2）+ 本 checklist（本次收尾 commit）
+
+可长期停留的稳定 checkpoint：Step 0 后（归位稳）、Step 3 后（统一完成、症状全修、`/help` 全）、Step 7+8 后（桥接消失、真相源唯一）、Step 9 后（第三个声明源删除）。
