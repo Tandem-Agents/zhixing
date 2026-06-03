@@ -16,11 +16,13 @@
 
 import type * as readline from "node:readline";
 
-import type {
-  ITypeaheadBroker,
-  RuntimeContext,
-  SuggestionItem,
-  TypeaheadSessionState,
+import {
+  CommandDispatcher,
+  type DispatchResult,
+  type ITypeaheadBroker,
+  type RuntimeContext,
+  type SuggestionItem,
+  type TypeaheadSessionState,
 } from "@zhixing/core";
 
 import {
@@ -63,10 +65,6 @@ import {
   normalizeLeadingSlashAlias,
   normalizeLeadingSlashAliasInExpanded,
 } from "./runtime/leading-slash-alias.js";
-import {
-  CommandDispatcher,
-  type DispatchResult,
-} from "./command-dispatcher.js";
 import {
   createScreenController,
   type ScreenController,

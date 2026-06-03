@@ -16,13 +16,13 @@
 
 import { randomUUID } from "node:crypto";
 import type {
+  CommandDispatcher,
   CommandHandlerContext,
   CommandHandlerResult,
   ICommandRegistry,
   TaskItem,
 } from "@zhixing/core";
 import type { TaskListService } from "@zhixing/tools-builtin";
-import type { CommandDispatcher } from "../command-dispatcher.js";
 import { renderTaskList } from "../task-tail/index.js";
 import { tone } from "../tui/index.js";
 

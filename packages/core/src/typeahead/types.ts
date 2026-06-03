@@ -318,15 +318,6 @@ export interface CommandDef {
    * 和 visibility.targets=[] 的区别：hidden 永远隐藏，visibility 是条件隐藏。
    */
   readonly hidden?: boolean;
-
-  /**
-   * 本地执行 handler。execution = "local" 或 "hybrid" 时**应该**填写；
-   * execution = "agent" 时必须留空。
-   *
-   * Phase 1 Step 2（核心类型落地）不填 handler，Step 5（REPL 接入）负责
-   * 为每个 builtin 命令注册真正的 handler。此时留空允许类型通过编译。
-   */
-  readonly handler?: CommandHandler;
 }
 
 // ─── 动态命令源 ───

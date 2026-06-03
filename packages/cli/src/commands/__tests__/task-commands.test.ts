@@ -9,11 +9,11 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import type { RuntimeContext, TaskListState } from "@zhixing/core";
 import {
+  CommandDispatcher,
   DefaultCommandRegistry,
   type ICommandRegistry,
 } from "@zhixing/core";
 import { TaskListService, type TaskListStore } from "@zhixing/tools-builtin";
-import { CommandDispatcher } from "../../command-dispatcher.js";
 import { registerTaskCommands } from "../task-commands.js";
 import { stripAnsi } from "../../tui/index.js";
 

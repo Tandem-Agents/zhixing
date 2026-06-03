@@ -12,8 +12,7 @@
  */
 
 import type * as readline from "node:readline/promises";
-import type { ICommandRegistry } from "@zhixing/core";
-import type { CommandDispatcher } from "../command-dispatcher.js";
+import type { CommandDispatcher, ICommandRegistry } from "@zhixing/core";
 import type { ScreenController } from "../screen/index.js";
 import { runSkillManager } from "./manager-screen.js";
 import type { SkillManagerStore } from "./manager-controller.js";

@@ -19,6 +19,7 @@ import chalk from "chalk";
 
 import {
   ArgumentProvider,
+  CommandDispatcher,
   CommandProvider,
   DefaultCommandRegistry,
   DefaultTypeaheadBroker,
@@ -30,8 +31,6 @@ import type {
   SuggestionItem,
   SuggestionProvider,
 } from "@zhixing/core";
-
-import { CommandDispatcher } from "../command-dispatcher.js";
 import {
   _getRawModeRefcount,
   _resetRawModeRefcountForTests,

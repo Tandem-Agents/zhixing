@@ -19,13 +19,13 @@ import {
   skillNameToId,
   type AdmissionVerdict,
   type ContentThreat,
+  type CommandDispatcher,
   type ICommandRegistry,
   type SkillRecord,
 } from "@zhixing/core";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type * as readline from "node:readline/promises";
-import type { CommandDispatcher } from "../command-dispatcher.js";
 import type { CliWriter, ScreenController } from "../screen/index.js";
 
 /** Store 的接入相关子集(接口隔离,便于装配 / 测试)。 */

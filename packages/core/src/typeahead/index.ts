@@ -57,6 +57,13 @@ export {
   type CommandRegistryOptions,
 } from "./registry.js";
 
+// ── Dispatcher（命令执行器） ──
+export {
+  CommandDispatcher,
+  type CommandDispatcherOptions,
+  type DispatchResult,
+} from "./command-dispatcher.js";
+
 // ── Builtin 命令 ──
 export {
   buildBuiltinCommands,

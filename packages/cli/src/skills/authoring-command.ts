@@ -23,6 +23,7 @@ import {
   stringifyFrontmatter,
   parseFrontmatter,
   extractText,
+  type CommandDispatcher,
   type ICommandRegistry,
   type Message,
   type SkillDraft,
@@ -36,7 +37,6 @@ import {
   type SkillEditorRunDeps,
 } from "./editor-screen.js";
 import type { SkillEditorDeps } from "./editor-controller.js";
-import type { CommandDispatcher } from "../command-dispatcher.js";
 import type { CliWriter, ScreenController } from "../screen/index.js";
 import { layout } from "../tui/index.js";
 

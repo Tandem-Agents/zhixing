@@ -9,14 +9,12 @@
  */
 
 import { describe, expect, it, vi } from "vitest";
-import type { RuntimeContext } from "@zhixing/core";
-import {
-  DefaultCommandRegistry,
-  registerBuiltinCommands,
-} from "@zhixing/core";
+import type { RuntimeContext } from "../types.js";
+import { DefaultCommandRegistry } from "../registry.js";
+import { registerBuiltinCommands } from "../builtin-commands.js";
 import {
   CommandDispatcher,
-  parseCommandDraft,
+  parseCommandInvocation,
 } from "../command-dispatcher.js";
 
 function makeRuntime(): RuntimeContext {
@@ -36,24 +34,24 @@ function makeRegistry() {
   return reg;
 }
 
-describe("parseCommandDraft", () => {
+describe("parseCommandInvocation", () => {
   it("只有 /cmd", () => {
-    expect(parseCommandDraft("/new")).toMatchObject({ name: "new", rest: "" });
+    expect(parseCommandInvocation("/new")).toMatchObject({ name: "new", rest: "" });
   });
   it("/cmd args", () => {
-    expect(parseCommandDraft("/model claude-opus-4-6")).toMatchObject({
+    expect(parseCommandInvocation("/model claude-opus-4-6")).toMatchObject({
       name: "model",
       rest: "claude-opus-4-6",
     });
   });
   it("leading whitespace 被 trim", () => {
-    expect(parseCommandDraft("  /help")).toMatchObject({ name: "help" });
+    expect(parseCommandInvocation("  /help")).toMatchObject({ name: "help" });
   });
   it("非 / 行返回空 name", () => {
-    expect(parseCommandDraft("hello world").name).toBe("");
+    expect(parseCommandInvocation("hello world").name).toBe("");
   });
   it("多空格 rest 合并", () => {
-    expect(parseCommandDraft("/cmd   a b   c")).toMatchObject({
+    expect(parseCommandInvocation("/cmd   a b   c")).toMatchObject({
       name: "cmd",
       rest: "a b   c",
     });

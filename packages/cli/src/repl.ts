@@ -52,6 +52,7 @@ import {
   sanitizeConversationName,
   buildConversationNamerPrompt,
   type InferConversationName,
+  CommandDispatcher,
 } from "@zhixing/core";
 import { describeProxy, type ProxyDescription } from "@zhixing/network";
 import { loadConfig, loadCredentials, resolveHomeDir } from "@zhixing/providers";
@@ -64,7 +65,6 @@ import { ConversationRepoTaskListStore } from "./runtime/task-list-stores.js";
 import { RoutingConversationRepository } from "./runtime/conversation-router.js";
 import { acquireWorksceneConversation } from "./runtime/workscene-conversation.js";
 import { switchToNewConversation } from "./runtime/switch-to-new-conversation.js";
-import { CommandDispatcher } from "./command-dispatcher.js";
 import { TaskTail } from "./task-tail/index.js";
 import { registerTaskCommands } from "./commands/task-commands.js";
 import { SkillCommandSource } from "./commands/skill-command-source.js";

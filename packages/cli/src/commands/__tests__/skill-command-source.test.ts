@@ -4,13 +4,13 @@ import fs from "node:fs/promises";
 import { describe, it, expect } from "vitest";
 import { SkillCommandSource } from "../skill-command-source.js";
 import {
+  CommandDispatcher,
   SkillStore,
   DefaultCommandRegistry,
   type CommandDef,
   type RuntimeContext,
   type SkillRecord,
 } from "@zhixing/core";
-import { CommandDispatcher } from "../../command-dispatcher.js";
 
 function rec(id: string, name: string, description = "desc"): SkillRecord {
   return {
@@ -61,7 +61,7 @@ describe("SkillCommandSource", () => {
     expect(await sourceWith([]).list()).toEqual([]);
   });
 
-  it("技能映射为 execution:agent 的 plugin 命令(name=id、id 命名空间化、无 handler)", async () => {
+  it("技能映射为 execution:agent 的 plugin 命令(name=id、id 命名空间化)", async () => {
     const cmds = await sourceWith([rec("deploy", "deploy", "部署到生产")]).list();
     expect(cmds).toHaveLength(1);
     const c = cmds[0]!;
@@ -71,7 +71,6 @@ describe("SkillCommandSource", () => {
     expect(c.category).toBe("plugin");
     expect(c.tag).toBe("plugin");
     expect(c.description).toBe("部署到生产");
-    expect(c.handler).toBeUndefined();
   });
 
   it("原始 name 与 id 不同 → aliases 保留原名;相同 → 无 aliases", async () => {
