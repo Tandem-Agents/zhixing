@@ -38,6 +38,7 @@ import {
 } from "./editor-screen.js";
 import type { SkillEditorDeps } from "./editor-controller.js";
 import type { CliWriter, ScreenController } from "../screen/index.js";
+import { chromeOnlyVisibility } from "../commands/command-visibility.js";
 import { layout } from "../tui/index.js";
 
 /** 拼进起草上下文的最近对话条数上限 —— 够蒸馏出"刚做的事",又不撑爆单发 prompt。 */
@@ -219,6 +220,8 @@ export function registerSkillNewCommand(deps: SkillAuthoringDeps): void {
     category: "tools",
     execution: "local",
     tag: "builtin",
+    // alt-screen 创作屏需要 chrome——无 chrome 终端下补全与 /help 不列出。
+    visibility: chromeOnlyVisibility,
   });
 
   deps.dispatcher.registerHandler("skill-new:repl", async (ctx) => {

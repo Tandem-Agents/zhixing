@@ -3,9 +3,9 @@
  * (直接注册到 `tRegistry` + `CommandDispatcher`,同 registerTaskCommands,不走
  * legacy slashCommands 桥接)。
  *
- * 注册在 typeahead 块内有两点契合:① 管理器是 alt-screen、本就需要 chrome 终端,
- * 而 typeahead 块正是 chrome 可用的路径(无 chrome 的 legacy 终端下管理器无法渲染,
- * 不注册即不提供,避免坏命令);② 变更后刷新 `/<name>` 补全需要 `tRegistry`,此处直取。
+ * 管理器是 alt-screen、本就需要 chrome 终端。命令无条件注册进 registry,但挂
+ * `chromeOnlyVisibility`——无 chrome 的 legacy 终端(非 TTY / 管道)下补全与 /help 都
+ * 不列出它(执行期硬打名字的友好兜底由 handler 入口另行处理)。
  *
  * 开屏接线同 `/config`(config-command.ts):停 spinner + 让出 readline 的 stdin →
  * 跑 alt-screen 管理器 → 退屏后恢复 readline 并重申 chrome 硬件光标隐藏不变量。
@@ -14,6 +14,7 @@
 import type * as readline from "node:readline/promises";
 import type { CommandDispatcher, ICommandRegistry } from "@zhixing/core";
 import type { ScreenController } from "../screen/index.js";
+import { chromeOnlyVisibility } from "../commands/command-visibility.js";
 import { runSkillManager } from "./manager-screen.js";
 import type { SkillManagerStore } from "./manager-controller.js";
 
@@ -39,6 +40,7 @@ export function registerSkillsCommand(opts: SkillsCommandOptions): void {
     category: "tools",
     execution: "local",
     tag: "builtin",
+    visibility: chromeOnlyVisibility,
   });
 
   opts.dispatcher.registerHandler("skills:repl", async () => {

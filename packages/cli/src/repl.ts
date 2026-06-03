@@ -35,6 +35,9 @@ import {
   UsageTracker,
   type CommandHandlerContext,
   type RuntimeContext,
+  type DispatchResult,
+  type CommandDef,
+  type CommandCategory,
   type ArgChoiceProvider,
   type ArgQueryContext,
   type ArgChoice,
@@ -68,6 +71,7 @@ import { switchToNewConversation } from "./runtime/switch-to-new-conversation.js
 import { TaskTail } from "./task-tail/index.js";
 import { registerTaskCommands } from "./commands/task-commands.js";
 import { SkillCommandSource } from "./commands/skill-command-source.js";
+import { FEATURE_CHROME, chromeOnlyVisibility } from "./commands/command-visibility.js";
 import { registerSkillsCommand } from "./skills/manager-command.js";
 import { registerSkillNewCommand } from "./skills/authoring-command.js";
 import { registerSkillAddCommand } from "./skills/admission-command.js";
@@ -209,24 +213,25 @@ function buildWorksceneDigestPrompt(
   );
 }
 
-// ─── 斜杠命令元信息（单源真相） ───
+// ─── 斜杠命令元信息（桥接形态的注册来源） ───
 //
-// `/help` 输出 + typeahead 命令面板 都从这份元信息派生,确保命令可见性
-// (hidden) / 分类 (category) / 别名 (aliases) / 描述 (description) 全系统一致。
+// 这份数组是核心命令的元信息来源:下方桥接循环逐条注册进 `tRegistry`(命令真相源)
+// + dispatcher(handler 包装 legacy `slashCommands` 闭包)。命令的最终可见性 / 分类 /
+// 描述由 registry 派生——`/help` 与 typeahead 补全都读 `registry.list(ctx)`,不再直接
+// 遍历本数组。
 //
 // 字段语义:
-//   - name      : typeahead 命令名 (不带 / 前缀,如 "new" "resume")
-//   - aliases   : 命令别名 (typeahead 路径生效;legacy 路径暂不解析)
-//   - legacyKey : `slashCommands` 字典 key (带 / 前缀,如 "/new" "/resume")—— 桥接
-//                 buildSlashCommands 返回的字典与 typeahead registry
-//   - category  : 命令分类 (session / info / tools / config),驱动 /help 分组与
-//                 typeahead panel 标题
-//   - hidden    : true 时 typeahead dropdown 不显示、`/help` 不打印 (escape hatch:
-//                 用户精确打名字仍能召唤;但当前无业务用例,删除 conversations/
-//                 sessions 后该字段所有命令均显式 false/undefined)
+//   - name          : 命令名 (不带 / 前缀,如 "new" "resume")
+//   - aliases       : 命令别名
+//   - legacyKey     : `slashCommands` 字典 key (带 / 前缀)—— 桥接定位其 handler 闭包
+//   - category      : 命令分类,驱动 /help 分组与 typeahead panel 排序
+//   - requiresChrome: true 时桥接为该命令挂 chrome visibility——无 chrome 终端
+//                     (非 TTY / 管道)下补全与 /help 都不列出 (config/mcp 的 alt-screen
+//                     编辑器需要 chrome 才能渲染)
+//   - hidden        : true 时补全与 /help 都不列出 (escape hatch:精确打名字仍可召唤)
 //
-// args 字段不在本元信息里——args 是 typeahead 系统专属维度,在 typeahead 注册
-// 时按 name 注入 (目前仅 /resume 需要 conversation 选择器),不污染 /help 视图。
+// args 不在本元信息里——args 是 CommandDef 维度,在桥接处按 name 注入 (resume/work/
+// trust 各需一个选择器),见下方 argsByName。
 
 type ReplCommandMeta = {
   readonly name: string;
@@ -234,6 +239,8 @@ type ReplCommandMeta = {
   readonly description: string;
   readonly category: "session" | "info" | "tools" | "config";
   readonly legacyKey: string;
+  /** 需要 chrome 终端才能交互(alt-screen 编辑器)——桥接据此挂 chrome visibility。 */
+  readonly requiresChrome?: boolean;
   readonly hidden?: boolean;
 };
 
@@ -245,7 +252,8 @@ const REPL_COMMAND_META: ReadonlyArray<ReplCommandMeta> = [
   { name: "name", description: "为当前会话命名", category: "session", legacyKey: "/name" },
   { name: "exit", aliases: ["quit"], description: "退出工作场景 / 退出知行", category: "session", legacyKey: "/exit" },
   // ─ info ─
-  { name: "help", description: "显示帮助信息", category: "info", legacyKey: "/help" },
+  // 注:/help 不在此表——它是 registry 的消费者(把命令集渲染成命令地图),走现代
+  // 路径直接注册(见下方 registerHelpCommand 处),不能像其它命令那样桥接静态闭包。
   { name: "status", description: "显示会话状态", category: "info", legacyKey: "/status" },
   { name: "me", description: "查看身份画像", category: "info", legacyKey: "/me" },
   { name: "model", description: "显示当前模型信息", category: "info", legacyKey: "/model" },
@@ -258,18 +266,69 @@ const REPL_COMMAND_META: ReadonlyArray<ReplCommandMeta> = [
   { name: "compact", description: "手动触发上下文压缩", category: "tools", legacyKey: "/compact" },
   { name: "tasks", description: "查看定时任务", category: "tools", legacyKey: "/tasks" },
   // ─ config ─
-  { name: "config", description: "修改基础配置（服务商 / 模型 / API Key / 消息通道等）", category: "config", legacyKey: "/config" },
-  { name: "mcp", description: "管理 MCP 服务（接入外部工具 / 启停 / 查看连接）", category: "config", legacyKey: "/mcp" },
+  { name: "config", description: "修改基础配置（服务商 / 模型 / API Key / 消息通道等）", category: "config", legacyKey: "/config", requiresChrome: true },
+  { name: "mcp", description: "管理 MCP 服务（接入外部工具 / 启停 / 查看连接）", category: "config", legacyKey: "/mcp", requiresChrome: true },
   { name: "trust", description: "权限规则管理", category: "config", legacyKey: "/trust" },
   { name: "security", description: "安全状态概览", category: "config", legacyKey: "/security" },
 ];
 
-const REPL_COMMAND_CATEGORY_LABELS: Record<ReplCommandMeta["category"], string> = {
+// `/help` 命令地图的分类显示顺序 + 中文标签——命令分类展示的单一来源。`registry.list`
+// 已剔除 hidden 与不可见命令,这里只按类聚合渲染。动态 `/<name>` 技能(plugin 类)数量
+// 可能很多,聚合成一行汇总置末尾——/help 是命令地图、不是技能浏览器。
+const HELP_CATEGORY_ORDER: readonly CommandCategory[] = [
+  "session",
+  "info",
+  "tools",
+  "config",
+];
+
+const HELP_CATEGORY_LABELS: Record<CommandCategory, string> = {
   session: "会话管理",
   info: "信息查询",
   tools: "工具",
   config: "配置",
+  debug: "调试",
+  plugin: "技能",
+  hidden: "",
 };
+
+/**
+ * 渲染 `/help` 命令地图。入参是 `registry.list(ctx)` 的结果(已按 ctx 过滤 hidden +
+ * visibility),故此处不感知终端能力——no-chrome 下 alt-screen 命令早在 list 阶段被滤掉。
+ */
+function renderHelpCommands(
+  commands: readonly CommandDef[],
+  writer: CliWriter,
+): void {
+  writer.line(`\n${layout.contentPrefix}${chalk.bold("可用命令：")}`);
+
+  const byCategory = new Map<CommandCategory, CommandDef[]>();
+  for (const cmd of commands) {
+    const bucket = byCategory.get(cmd.category) ?? [];
+    bucket.push(cmd);
+    byCategory.set(cmd.category, bucket);
+  }
+
+  for (const cat of HELP_CATEGORY_ORDER) {
+    const items = byCategory.get(cat);
+    if (!items || items.length === 0) continue;
+    writer.line(`\n  ${chalk.bold(HELP_CATEGORY_LABELS[cat])}`);
+    for (const cmd of items) {
+      writer.line(
+        `    ${chalk.cyan(`/${cmd.name}`.padEnd(14))} ${chalk.dim(cmd.description)}`,
+      );
+    }
+  }
+
+  // 动态技能聚合一行(可能很多,逐条列会淹没命令地图)。
+  const pluginCount = byCategory.get("plugin")?.length ?? 0;
+  if (pluginCount > 0) {
+    writer.line(
+      `\n  ${chalk.bold(HELP_CATEGORY_LABELS.plugin)} ${chalk.dim(`(${pluginCount} 个) · 输入 / 浏览全部`)}`,
+    );
+  }
+  writer.line("");
+}
 
 // ─── 斜杠命令 ───
 
@@ -317,41 +376,6 @@ function buildSlashCommands(
   }
 > {
   return {
-    "/help": {
-      description: "显示帮助信息",
-      handler: (_state) => {
-        // 命令清单单源 = REPL_COMMAND_META;hidden 命令统一不打印,与 typeahead
-        // dropdown 可见性对齐,避免双轨不一致(以前直接遍历 slashCommands 字典
-        // 会漏 hidden 标记 → hidden 命令仍在 /help 出现,造成用户困惑)。
-        cliWriter.line(`\n${layout.contentPrefix}${chalk.bold("可用命令：")}`);
-        const groups = new Map<ReplCommandMeta["category"], ReplCommandMeta[]>();
-        for (const cmd of REPL_COMMAND_META) {
-          if (cmd.hidden) continue;
-          const bucket = groups.get(cmd.category) ?? [];
-          bucket.push(cmd);
-          groups.set(cmd.category, bucket);
-        }
-        const categoryOrder: ReplCommandMeta["category"][] = [
-          "session",
-          "info",
-          "tools",
-          "config",
-        ];
-        for (const cat of categoryOrder) {
-          const items = groups.get(cat);
-          if (!items || items.length === 0) continue;
-          cliWriter.line(
-            `\n  ${chalk.bold(REPL_COMMAND_CATEGORY_LABELS[cat])}`,
-          );
-          for (const cmd of items) {
-            cliWriter.line(
-              `    ${chalk.cyan(cmd.legacyKey.padEnd(14))} ${chalk.dim(cmd.description)}`,
-            );
-          }
-        }
-        cliWriter.line("");
-      },
-    },
     "/clear": {
       description: "清空对话历史",
       handler: async (state) => {
@@ -1628,6 +1652,9 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       execution: "local",
       tag: "builtin",
       args: args ? [...args] : undefined,
+      // 需要 chrome 的命令(config/mcp 的 alt-screen 编辑器)挂可见性 predicate——
+      // 无 chrome 终端下 list(ctx) 不返回它,补全与 /help 都不列出。
+      visibility: cmd.requiresChrome ? chromeOnlyVisibility : undefined,
       hidden: cmd.hidden,
     });
     typeaheadDispatcher.registerHandler(id, async (ctx: CommandHandlerContext) => {
@@ -1637,6 +1664,22 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       return {};
     });
   }
+
+  // /help —— registry 的消费者:把当前命令集渲染成命令地图。它必须读
+  // registry.list(ctx)(按 ctx 过滤 hidden + visibility),不能像其它命令那样桥接静态
+  // 闭包,故走现代路径直接注册。注册在动态技能源之前,使撞名探测能看见 /help。
+  tRegistry.register({
+    id: "help:repl",
+    name: "help",
+    description: "显示帮助信息",
+    category: "info",
+    execution: "local",
+    tag: "builtin",
+  });
+  typeaheadDispatcher.registerHandler("help:repl", async (ctx: CommandHandlerContext) => {
+    renderHelpCommands(tRegistry.list(ctx.runtime), cliWriter);
+    return {};
+  });
 
   // task_list cli 命令组 —— 不走 legacy slashCommands 桥接，直接注册到 registry +
   // dispatcher。这是命令模块的现代路径（未来 /memory 等同模式抽出）。
@@ -1743,7 +1786,9 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     workspaceId: session.runtime.resolvedWorkspace.path,
     cwd: process.cwd(),
     target: "cli",
-    features: {},
+    // chrome 能力进 features:需要 alt-screen 的命令(config/mcp/skills)据此被
+    // visibility 过滤——非 TTY / 管道(capability.ok=false)下补全与 /help 不列出。
+    features: { [FEATURE_CHROME]: capability.ok },
     now: Date.now(),
   });
 
@@ -1928,21 +1973,43 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     );
   });
 
-  // ── 旧/新路径都要处理的"命令 fallthrough 到 legacy slashCommands"助手 ──
-  const runLegacyCommand = async (rawDraft: string): Promise<boolean> => {
-    const trimmed = rawDraft.trim();
-    if (!trimmed.startsWith("/")) return false;
-    const [cmd, ...rest] = trimmed.split(/\s+/);
-    const legacy = slashCommands[cmd!];
-    if (!legacy) {
-      cliWriter.line(
-        chalk.yellow(`${layout.contentPrefix}未知命令: ${cmd}`) +
-          chalk.dim("  输入 /help 查看帮助\n"),
-      );
-      return true;
+  // ── dispatcher 分派结果落地（两条输入路径共用）──
+  //
+  // typeahead 持久输入区与 legacy rl.question 都把命令交给同一个 dispatcher,再把
+  // DispatchResult 喂进这里——命令执行语义单点一致。返回 `{ input }` 表示要作为 user
+  // turn 发给 agent loop 的文本(agent-message / hybrid);返回 null 表示本轮已就地消化
+  // (local 执行完 / 未知命令 / 缺 handler / 执行出错都打印反馈后不产生 agent turn)。
+  const applyDispatchResult = (
+    d: DispatchResult,
+  ): { readonly input: string } | null => {
+    switch (d.kind) {
+      case "local-handled":
+        return null;
+      case "agent-message":
+        return { input: d.text };
+      case "hybrid":
+        return { input: d.systemMessage };
+      case "unknown":
+        cliWriter.line(
+          chalk.yellow(`${layout.contentPrefix}未知命令: /${d.commandName}`) +
+            chalk.dim("  输入 /help 查看帮助\n"),
+        );
+        return null;
+      case "missing-handler":
+        cliWriter.line(
+          chalk.red(
+            `${layout.contentPrefix}命令缺少执行体: ${d.commandId}（内部错误，请反馈）\n`,
+          ),
+        );
+        return null;
+      case "error":
+        cliWriter.line(
+          chalk.red(
+            `${layout.contentPrefix}命令执行失败: ${d.error.message}\n`,
+          ),
+        );
+        return null;
     }
-    await legacy.handler(state, rest.join(" "));
-    return true;
   };
 
   // REPL 主循环
@@ -2010,26 +2077,10 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       }
 
       if (result.kind === "command-dispatched") {
-        const d = result.dispatchResult;
-        if (d.kind === "local-handled") {
-          continue;
-        }
-        if (d.kind === "unknown" || d.kind === "missing-handler") {
-          // Fallthrough 到 legacy（未桥接的 /trust /people 等）
-          await runLegacyCommand(result.text);
-          continue;
-        }
-        if (d.kind === "error") {
-          cliWriter.line(chalk.red(`${layout.contentPrefix}命令执行失败: ${d.error.message}\n`));
-          continue;
-        }
-        if (d.kind === "hybrid") {
-          // 已执行本地副作用；把 systemMessage 作为 user turn 发给 agent
-          input = d.systemMessage;
-        } else {
-          // agent-message
-          input = d.text;
-        }
+        // dispatch 已在 InputController 内完成,这里只落地结果(与 legacy 路径共用）。
+        const applied = applyDispatchResult(result.dispatchResult);
+        if (!applied) continue;
+        input = applied.input;
       } else {
         // kind === "text"
         if (!result.text) continue;
@@ -2047,8 +2098,12 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       if (!trimmed) continue;
 
       if (trimmed.startsWith("/")) {
-        await runLegacyCommand(trimmed);
-        continue;
+        // 命令统一交 dispatcher——与 typeahead 路径同源,所有命令在 legacy 终端也可达。
+        const applied = applyDispatchResult(
+          await typeaheadDispatcher.dispatch(trimmed, getRuntime()),
+        );
+        if (!applied) continue;
+        input = applied.input;
       }
     }
 

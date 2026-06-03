@@ -27,6 +27,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type * as readline from "node:readline/promises";
 import type { CliWriter, ScreenController } from "../screen/index.js";
+import { chromeOnlyVisibility } from "../commands/command-visibility.js";
 
 /** Store 的接入相关子集(接口隔离,便于装配 / 测试)。 */
 export interface AdmissionStore {
@@ -79,6 +80,8 @@ export function registerSkillAddCommand(deps: SkillAdmissionDeps): void {
     category: "tools",
     execution: "local",
     tag: "builtin",
+    // alt-screen 确认交互需要 chrome——无 chrome 终端下补全与 /help 不列出。
+    visibility: chromeOnlyVisibility,
   });
 
   deps.dispatcher.registerHandler("skill-add:repl", async (ctx) => {
