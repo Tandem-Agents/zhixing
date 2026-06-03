@@ -1,25 +1,21 @@
 /**
- * /trust 命令的 typeahead args provider —— 与 /work workSceneArgProvider 同构。
+ * /trust 命令的 typeahead args provider —— 命令的"渐进增强"前端（浏览 + Ctrl+D 撤销）。
  *
- * 用户从命令面板 accept /trust 后，typeahead 自动进入 args 输入态、立即调
- * provider.list("") 把所有用户/管家沉淀规则映射成候选 dropdown。
- *
- * 候选行 description 单行紧凑展示「生效范围 · contributors token · 匹配次数」；
- * inlineActions 声明 delete 启用 Ctrl+D 双击撤销协议（与 /work /resume 一致）；
- * emptyHint 空态文案引导用户触发 confirm 创建规则。
- *
- * builtin 系统防护规则不归用户管，归 /security 查看，此处过滤。
+ * 用户从命令面板 accept /trust 后，typeahead 自动进入 args 输入态、立即调 provider.list("")
+ * 把规则映射成候选 dropdown。数据取自 core 的 listUserTrustRules（"哪些规则归用户管"的单一
+ * 定义），候选行 description 用共享的 formatRuleDescription 渲染；inlineActions 声明 delete
+ * 启用 Ctrl+D 双击撤销（与 /work /resume 一致）。命令本身的 list/revoke 由 handleTrustCommand
+ * 在所有模式可达，此 provider 仅是 typeahead 下的增强。
  */
 
-import type {
-  ArgChoice,
-  ArgChoiceProvider,
-  ArgQueryContext,
-  PermissionContextId,
-  PermissionRule,
-  SecurityPipeline,
-  TrustContribution,
+import {
+  listUserTrustRules,
+  type ArgChoice,
+  type ArgChoiceProvider,
+  type ArgQueryContext,
+  type SecurityPipeline,
 } from "@zhixing/core";
+import { formatRuleDescription } from "./trust-rule-format.js";
 
 /**
  * `getPipeline` 是 getter 而非快照 —— securityPipeline 随 session reload / 模式切换被
@@ -38,11 +34,7 @@ export function createTrustRuleArgProvider(
       signal: AbortSignal,
     ): Promise<readonly ArgChoice[]> {
       const pipeline = getPipeline();
-      const store = pipeline.getPermissionStore();
-      const contextId = pipeline.getContextId();
-      const rules = store
-        .list(contextId)
-        .filter((r) => r.scope !== "builtin");
+      const rules = listUserTrustRules(pipeline);
       if (signal.aborted) return [];
 
       const query = ctx.query.toLowerCase();
@@ -65,46 +57,4 @@ export function createTrustRuleArgProvider(
     emptyHint:
       "暂无信任规则，触发 confirm 时选 [a]/[g] 显式创建，或同模式累计达阈值自动建立",
   };
-}
-
-// ─── description 紧凑信息：生效范围 · contributors · 匹配次数 ───
-
-function formatRuleDescription(rule: PermissionRule): string {
-  const scope = formatScope(rule);
-  const contributors = formatContributorsList(rule.contributors);
-  const matched =
-    rule.matchCount > 0 ? `${rule.matchCount} 次` : "未匹配";
-  return `${scope} · ${contributors} · ${matched}`;
-}
-
-function formatScope(rule: PermissionRule): string {
-  if (rule.scope === "global") return "全局";
-  if (rule.scope === "session") return "本次会话";
-  if (rule.scope === "context") {
-    return formatContextKindLabel(rule.contextId);
-  }
-  return "builtin";
-}
-
-function formatContextKindLabel(
-  contextId: PermissionContextId | undefined,
-): string {
-  if (!contextId) return "(unknown context)";
-  switch (contextId.kind) {
-    case "main":
-      return "主模式";
-    case "workspace":
-    case "scene":
-      return "当前工作场景";
-  }
-}
-
-function formatContributorsList(
-  contributors: ReadonlyArray<TrustContribution> | undefined,
-): string {
-  if (!contributors || contributors.length === 0) return "[—]";
-  const tokens = contributors.map((c) =>
-    c.origin === "user" ? "你" : "助理",
-  );
-  return `[${tokens.join(" ")}]`;
 }

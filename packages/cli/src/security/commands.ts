@@ -7,12 +7,14 @@
  */
 
 import chalk from "chalk";
-import type {
-  PermissionContextId,
-  SecurityPipeline,
-  SecurityRule,
+import {
+  listUserTrustRules,
+  type PermissionContextId,
+  type SecurityPipeline,
+  type SecurityRule,
 } from "@zhixing/core";
 import type { CliWriter } from "../screen/index.js";
+import { formatRuleDescription } from "./trust-rule-format.js";
 
 // ─── /security ───
 
@@ -143,6 +145,76 @@ function showPolicyRules(opts: SecurityOptions): void {
   }
   writer.line(chalk.dim("  ─────────────────────────────────────────────────────"));
   writer.line(chalk.dim("  [!] = bypassImmune（任何配置都无法覆盖）"));
+  writer.line("");
+}
+
+// ─── /trust ───
+
+interface TrustOptions {
+  pipeline: SecurityPipeline;
+  writer: CliWriter;
+}
+
+/**
+ * /trust 的 target 无关命令行为（cli 文本前端）—— 列出 / 撤销用户信任规则。
+ *
+ * list 取自 core 的 listUserTrustRules、撤销走 IPermissionStore.revoke，能力本身在所有
+ * 模式可达；typeahead 模式下另有 trust-rule-arg-provider 的面板增强（浏览 + Ctrl+D），是
+ * 同一能力之上的渐进增强，非唯一入口。
+ */
+export function handleTrustCommand(args: string, opts: TrustOptions): void {
+  const trimmed = args.trim();
+  const sub = trimmed.split(/\s+/)[0]?.toLowerCase() ?? "";
+  if (sub === "revoke") {
+    return revokeTrustRule(trimmed.slice("revoke".length).trim(), opts);
+  }
+  if (sub === "help") {
+    return printTrustHelp(opts.writer);
+  }
+  return listTrustRules(opts);
+}
+
+function listTrustRules(opts: TrustOptions): void {
+  const { pipeline, writer } = opts;
+  const rules = listUserTrustRules(pipeline);
+  if (rules.length === 0) {
+    writer.line(chalk.dim("\n  暂无信任规则\n"));
+    return;
+  }
+  writer.line(`\n${chalk.bold(`  信任规则 (${rules.length} 条)`)}`);
+  for (const rule of rules) {
+    writer.line(
+      `  ${chalk.cyan(rule.id)}  ${chalk.white(`${rule.pattern.tool} ${rule.pattern.argument}`)}`,
+    );
+    writer.line(`    ${chalk.dim(formatRuleDescription(rule))}`);
+  }
+  writer.line(chalk.dim("\n  撤销: /trust revoke <id>\n"));
+}
+
+function revokeTrustRule(id: string, opts: TrustOptions): void {
+  const { pipeline, writer } = opts;
+  if (!id) {
+    writer.line(chalk.yellow("\n  用法: /trust revoke <id>\n"));
+    return;
+  }
+  const ok = pipeline.getPermissionStore().revoke(id);
+  if (ok) {
+    writer.line(chalk.dim(`\n  已撤销信任规则 ${chalk.cyan(id)}\n`));
+  } else {
+    writer.line(chalk.red(`\n  信任规则 "${id}" 不存在\n`));
+  }
+}
+
+function printTrustHelp(writer: CliWriter): void {
+  writer.line("");
+  writer.line(chalk.bold("  /trust — 信任规则管理"));
+  writer.line("");
+  writer.line("  /trust                列出用户信任规则");
+  writer.line("  /trust revoke <id>    撤销指定规则");
+  writer.line("");
+  writer.line(
+    chalk.dim("  typeahead 模式下可在 /trust 面板浏览并 Ctrl+D 双击撤销"),
+  );
   writer.line("");
 }
 

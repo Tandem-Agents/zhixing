@@ -22,7 +22,7 @@ import {
   handleConfigCommand,
   handleMcpCommand,
 } from "../runtime/config-command.js";
-import { handleSecurityCommand } from "../security/index.js";
+import { handleSecurityCommand, handleTrustCommand } from "../security/index.js";
 import { createTrustRuleArgProvider } from "../security/trust-rule-arg-provider.js";
 import { chromeOnlyVisibility } from "./command-visibility.js";
 
@@ -91,9 +91,9 @@ export function registerConfigCommands(deps: ConfigCommandsDeps): void {
   });
 
   // ── /trust ──
-  // 全部交互在 typeahead args dropdown 完成（↑↓ 浏览 + Ctrl+D 双击撤销 + ESC 退出）；
-  // "选中规则"无业务动作，accept 候选后 handler noop。物理撤销由交互层 onCandidateDelete
-  // 的 trust 分支调 store.revoke。
+  // 命令行为（列表 / 撤销）走 handleTrustCommand、target 无关、所有模式可达。typeahead 下
+  // 额外挂 args dropdown 面板增强（↑↓ 浏览 + Ctrl+D 双击撤销 + ESC 退出）；面板的物理撤销由
+  // 交互层 onCandidateDelete 的 trust 分支调 store.revoke，与命令行撤销同一 core 能力。
   const trustRuleArgSchema: ArgSchema = {
     kind: "async-enum",
     name: "rule",
@@ -112,7 +112,12 @@ export function registerConfigCommands(deps: ConfigCommandsDeps): void {
     tag: "builtin",
     args: [trustRuleArgSchema],
   });
-  dispatcher.registerHandler("trust:repl", () => {
+  dispatcher.registerHandler("trust:repl", (ctx: CommandHandlerContext) => {
+    const args = typeof ctx.args._rest === "string" ? ctx.args._rest : "";
+    handleTrustCommand(args, {
+      pipeline: deps.session.runtime.securityPipeline,
+      writer,
+    });
     return {};
   });
 

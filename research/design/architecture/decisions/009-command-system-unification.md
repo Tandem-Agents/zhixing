@@ -28,6 +28,10 @@ CLI 命令系统长期是"半程实现"的架构债：父 spec input-typeahead.m
 6. **消费派生唯一**：`/help`、补全 dropdown、未来任何前端命令面板都从 `registry.list(ctx)` 派生。
 7. **环境约束用 visibility 表达、真相源恒全集**：需 chrome 的命令（config / mcp / skills…）仍无条件注册，由 `CommandDef.visibility.predicate` 读 `RuntimeContext.features.chrome` 过滤；handler 入口 `requireChrome` 兜底"硬打名字"。
 
+**补充总则（target 无关的命令行为归属）**：命令 handler 是 target 无关 core 能力之上的**薄前端**——职责限于"调用 core 能力 + 为本 target 渲染"，业务逻辑与可达性不属于它。由此：① 真正的行为（list / revoke / 切换等）必须落在 core 的 target 无关能力上，各 target（cli / server / 渠道）各写一层薄前端复用同一能力；② 行为不得困在某个 target 的交互回调里（如 cli typeahead 的 `onCandidateDelete`），否则该功能只对一种接入方式可达，违背"功能 target 无关、cli 只是接入方式之一"。inline 副作用（删除 / 改名 / 撤销）尤其要经 core 能力 + 命令层可达，交互手势只是触发器之一。
+
+> 首个落地：`/trust` 的 list / revoke 曾整个困在 cli typeahead（noop handler + arg provider + `onCandidateDelete`），非 typeahead 模式完全不可达。改造为 core 能力（`listUserTrustRules` + `IPermissionStore.revoke`）+ cli 薄前端（命令行 `/trust` 列表、`/trust revoke <id>`）+ typeahead 面板降级为增强，所有模式与未来渠道均可达。`/resume` `/work` 的 inline 删除 / 改名共享同模式，但有 handler 兜底（不急），列为后续。
+
 ## 依据
 
 - 父 spec [input-typeahead.md](../../specifications/input-typeahead.md) §4.1 / §5.8 / §9.2 早已定下目标架构——本决策是"贯彻已定设计到终点"，非新设计。

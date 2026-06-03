@@ -122,6 +122,9 @@ export { SecurityAuditor } from "./security-auditor.js";
 export { SecurityPipeline } from "./security-pipeline.js";
 export type { SecurityPipelineOptions } from "./security-pipeline.js";
 
+// /trust 命令的 target 无关核心查询（用户可管信任规则的单一定义）
+export { listUserTrustRules } from "./trust-rules.js";
+
 // 通用 secret 脱敏（系统层共用：技能正文为首个消费者，落地前过滤固化密钥）
 export { scrubSecrets } from "./secret-scrubber.js";
 export type { ScrubResult, SecretRedaction } from "./secret-scrubber.js";
