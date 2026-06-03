@@ -1485,6 +1485,8 @@ class ArgumentProvider implements SuggestionProvider {
 
 ## 十、渐进实现计划
 
+> **关于命令系统部分**：本章 Step 1 / 2 / 5 描述的命令注册形态（core `builtin-commands.ts`、REPL 本地 `REPL_COMMANDS` 表、`buildSlashCommands`）是 Phase 1 的历史建造记录，已被后续的命令系统统一迁移取代。**当前形态以 §5.8 / §9.2 为准**，决策见 [ADR-009](../architecture/decisions/009-command-system-unification.md)，完整迁移记录见 [migrations/command-system-unification.md](../migrations/command-system-unification.md)。本章正文作历史快照保留、不回改。
+
 ### 10.1 原则
 
 每一步必须：

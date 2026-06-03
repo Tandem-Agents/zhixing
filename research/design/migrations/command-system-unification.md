@@ -1,5 +1,8 @@
 # 命令系统统一 — 债务诊断与迁移架构
 
+> **状态**：✅ 已完成并归档（2026-06-03，commits `6881ca5`…`07d7ab3`，文档回校 `6ee7241`）。本文档是该次迁移的**完整记录**（债务诊断 + 可执行方案 + 执行 journal），保留作历史归档、不再更新。
+> **决策摘要**：[ADR-009 命令系统统一](../architecture/decisions/009-command-system-unification.md)。
+> **当前架构**以父 spec [input-typeahead.md](../specifications/input-typeahead.md) §4.1 / §5.8 / §9.2 为准。
 > **性质**：架构债务诊断（第一部分）+ 目标架构（第二部分）+ 可执行迁移方案（第三部分）。
 > **父 spec**：[input-typeahead.md](../specifications/input-typeahead.md) —— 命令系统"单一真相源 + 多 target 视图派生"的设计意图在此已定稿。
 > **本文档不引入新设计**：它把父 spec 已经定下、但实现只走到一半的架构，贯彻到终点。所有目标态都能在 input-typeahead.md §4.1 / §5.8 / §9.2 找到出处。
