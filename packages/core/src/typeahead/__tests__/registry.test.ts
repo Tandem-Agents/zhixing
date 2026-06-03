@@ -8,11 +8,9 @@
  *   - Hidden 命令的 escape hatch 语义
  *   - onChange 事件订阅与 unsubscribe
  *   - 异常传播与 error hook
- *   - Builtin 命令的注册完整性
  */
 
 import { describe, expect, it, vi } from "vitest";
-import { buildBuiltinCommands, registerBuiltinCommands } from "../builtin-commands.js";
 import { DefaultCommandRegistry } from "../registry.js";
 import type { CommandDef, DynamicCommandSource, RuntimeContext } from "../types.js";
 
@@ -382,54 +380,5 @@ describe("DefaultCommandRegistry — onChange", () => {
     expect(() =>
       reg.register(makeCmd({ id: "c:d", name: "c" })),
     ).not.toThrow();
-  });
-});
-
-// ─── Builtin 命令 ───
-
-describe("buildBuiltinCommands / registerBuiltinCommands", () => {
-  it("构造函数返回非空数组（至少 10 个命令）", () => {
-    const commands = buildBuiltinCommands();
-    expect(commands.length).toBeGreaterThanOrEqual(10);
-  });
-
-  it("每次调用返回新数组（不共享引用）", () => {
-    const a = buildBuiltinCommands();
-    const b = buildBuiltinCommands();
-    expect(a).not.toBe(b);
-    expect(a.length).toBe(b.length);
-  });
-
-  it("所有命令 id 符合 `{name}:builtin` 约定", () => {
-    for (const cmd of buildBuiltinCommands()) {
-      expect(cmd.id).toBe(`${cmd.name}:builtin`);
-    }
-  });
-
-  it("registerBuiltinCommands 注册到空 registry 不抛（无 id 冲突）", () => {
-    const reg = new DefaultCommandRegistry();
-    expect(() => registerBuiltinCommands(reg)).not.toThrow();
-  });
-
-  it("注册后常见命令可按 name 和 alias 查到", () => {
-    const reg = new DefaultCommandRegistry();
-    registerBuiltinCommands(reg);
-    expect(reg.findByName("new")?.id).toBe("new:builtin");
-    // reset 是 new 的 alias
-    expect(reg.findByName("reset")?.id).toBe("new:builtin");
-    expect(reg.findByName("elevated")?.id).toBe("elevated:builtin");
-    expect(reg.findByName("elev")?.id).toBe("elevated:builtin"); // alias
-    expect(reg.findByName("help")?.id).toBe("help:builtin");
-    expect(reg.findByName("exit")?.id).toBe("exit:builtin");
-    expect(reg.findByName("quit")?.id).toBe("exit:builtin"); // alias
-  });
-
-  it("list 默认 ctx 下不含 hidden debug 命令", () => {
-    const reg = new DefaultCommandRegistry();
-    registerBuiltinCommands(reg);
-    const names = reg.list(makeCtx()).map((c) => c.name);
-    expect(names).not.toContain("debug");
-    // 但 findByName 能找到
-    expect(reg.findByName("debug")).not.toBeNull();
   });
 });

@@ -64,12 +64,6 @@ export {
   type DispatchResult,
 } from "./command-dispatcher.js";
 
-// ── Builtin 命令 ──
-export {
-  buildBuiltinCommands,
-  registerBuiltinCommands,
-} from "./builtin-commands.js";
-
 // ── Usage tracker ──
 export {
   UsageTracker,

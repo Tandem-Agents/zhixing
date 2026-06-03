@@ -22,7 +22,6 @@ import {
   CommandProvider,
   DefaultCommandRegistry,
   DefaultTypeaheadBroker,
-  registerBuiltinCommands,
   UsageTracker,
   getAgentIdentity,
 } from "@zhixing/core";
@@ -40,8 +39,24 @@ console.log("打 '/' 开始补全；↑↓ 导航；Enter 接受；Esc 清空；
 console.log();
 
 // ── Broker + provider 接线 ──
+// 一组用于演示面板的命令（多 category + 别名 + 必填参数 + hidden），仅供本手动脚本
+// 视觉验收；真实命令由 cli 各域的 registerXxxCommands 注册。
+const DEMO_COMMANDS = [
+  { id: "new:builtin", name: "new", aliases: ["reset"], description: "开始一个新的会话", category: "session", execution: "hybrid", icon: "＋" },
+  { id: "clear:builtin", name: "clear", description: "清屏并开始新会话", category: "session", execution: "local" },
+  { id: "exit:builtin", name: "exit", aliases: ["quit"], description: "退出知行", category: "session", execution: "local", icon: "×" },
+  { id: "model:builtin", name: "model", description: "切换模型", category: "config", execution: "hybrid", icon: "◆" },
+  {
+    id: "elevated:builtin", name: "elevated", aliases: ["elev"], description: "切换 elevated（高权限）模式",
+    category: "config", execution: "hybrid",
+    args: [{ kind: "enum", name: "level", description: "elevated 等级", required: true, choices: [{ value: "off", label: "off" }, { value: "on", label: "on" }] }],
+  },
+  { id: "status:builtin", name: "status", description: "显示会话状态", category: "info", execution: "local", icon: "◉" },
+  { id: "help:builtin", name: "help", description: "显示命令帮助", category: "info", execution: "local", icon: "?" },
+  { id: "debug:builtin", name: "debug", description: "显示调试信息（内部使用）", category: "debug", execution: "local", hidden: true },
+];
 const registry = new DefaultCommandRegistry();
-registerBuiltinCommands(registry);
+for (const cmd of DEMO_COMMANDS) registry.register(cmd);
 
 const usageTracker = new UsageTracker({
   // 不持久化：手动验收里不要在用户目录留文件

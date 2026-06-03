@@ -9,9 +9,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import {
-  registerBuiltinCommands,
-} from "../builtin-commands.js";
+import { registerSampleCommands } from "./sample-commands.js";
 import { DefaultTypeaheadBroker } from "../broker.js";
 import { CommandProvider, getBestPrefixMatch } from "../providers/command-provider.js";
 import { DefaultCommandRegistry } from "../registry.js";
@@ -151,7 +149,7 @@ describe("getBestPrefixMatch", () => {
 describe("CommandProvider.computeGhostText", () => {
   it("通过 registry 端到端返回 ghost", () => {
     const registry = new DefaultCommandRegistry();
-    registerBuiltinCommands(registry);
+    registerSampleCommands(registry);
     const provider = new CommandProvider({ registry });
 
     // "hi" 只匹配 "history"
@@ -165,7 +163,7 @@ describe("CommandProvider.computeGhostText", () => {
 
   it("空 query → null", () => {
     const registry = new DefaultCommandRegistry();
-    registerBuiltinCommands(registry);
+    registerSampleCommands(registry);
     const provider = new CommandProvider({ registry });
 
     const match = provider.matchTrigger(makeCtx("/"))!;

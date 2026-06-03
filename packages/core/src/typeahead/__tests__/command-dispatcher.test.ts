@@ -11,7 +11,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { RuntimeContext } from "../types.js";
 import { DefaultCommandRegistry } from "../registry.js";
-import { registerBuiltinCommands } from "../builtin-commands.js";
+import { registerSampleCommands } from "./sample-commands.js";
 import {
   CommandDispatcher,
   parseCommandInvocation,
@@ -30,7 +30,7 @@ function makeRuntime(): RuntimeContext {
 
 function makeRegistry() {
   const reg = new DefaultCommandRegistry();
-  registerBuiltinCommands(reg);
+  registerSampleCommands(reg);
   return reg;
 }
 

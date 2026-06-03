@@ -23,9 +23,9 @@ import {
   CommandProvider,
   DefaultCommandRegistry,
   DefaultTypeaheadBroker,
-  registerBuiltinCommands,
 } from "@zhixing/core";
 import type {
+  CommandDef,
   PanelMode,
   RuntimeContext,
   SuggestionItem,
@@ -119,9 +119,63 @@ interface Harness {
   readonly registry: DefaultCommandRegistry;
 }
 
+// 驱动输入读取器所需的最小命令集 —— 覆盖本测试用到的 local / hybrid / 必填参数 /
+// 前缀匹配各路径（/clear /new+reset /elevated /help）。命令真相源在 cli 各域的
+// registerXxxCommands，这里只为集成测试提供一组稳定可断言的 registry 输入。
+const SAMPLE_COMMANDS: readonly CommandDef[] = [
+  {
+    id: "new:builtin",
+    name: "new",
+    aliases: ["reset"],
+    description: "开始一个新的会话",
+    category: "session",
+    execution: "hybrid",
+  },
+  {
+    id: "clear:builtin",
+    name: "clear",
+    description: "清屏并开始新会话",
+    category: "session",
+    execution: "local",
+  },
+  {
+    id: "status:builtin",
+    name: "status",
+    description: "显示会话状态",
+    category: "info",
+    execution: "local",
+  },
+  {
+    id: "help:builtin",
+    name: "help",
+    description: "显示命令帮助",
+    category: "info",
+    execution: "local",
+  },
+  {
+    id: "elevated:builtin",
+    name: "elevated",
+    description: "切换 elevated（高权限）模式",
+    category: "config",
+    execution: "hybrid",
+    args: [
+      {
+        kind: "enum",
+        name: "level",
+        description: "elevated 等级",
+        required: true,
+        choices: [
+          { value: "off", label: "off" },
+          { value: "on", label: "on" },
+        ],
+      },
+    ],
+  },
+];
+
 function makeHarness(): Harness {
   const registry = new DefaultCommandRegistry();
-  registerBuiltinCommands(registry);
+  for (const cmd of SAMPLE_COMMANDS) registry.register(cmd);
   const broker = new DefaultTypeaheadBroker({
     now: () => 1_700_000_000_000,
   });

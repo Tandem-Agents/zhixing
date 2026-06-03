@@ -13,9 +13,9 @@
 
 import { describe, expect, it } from "vitest";
 import {
-  buildBuiltinCommands,
-  registerBuiltinCommands,
-} from "../builtin-commands.js";
+  buildSampleCommands,
+  registerSampleCommands,
+} from "./sample-commands.js";
 import { CommandProvider } from "../providers/command-provider.js";
 import { DefaultCommandRegistry } from "../registry.js";
 import type {
@@ -55,7 +55,7 @@ function makeRuntime(overrides: Partial<RuntimeContext> = {}): RuntimeContext {
 /** 构造一个带 builtin 命令的 registry */
 function makeRegistry() {
   const reg = new DefaultCommandRegistry();
-  registerBuiltinCommands(reg);
+  registerSampleCommands(reg);
   return reg;
 }
 
@@ -125,7 +125,7 @@ describe("CommandProvider.query — 空 query（MRU + 分类）", () => {
     ) as import("../types.js").SuggestionItem[];
 
     // 第一条应来自 session 类别
-    const sessionCmds = buildBuiltinCommands().filter(
+    const sessionCmds = buildSampleCommands().filter(
       (c) => c.category === "session" && !c.hidden,
     );
     expect(items[0]!.id).toBe(
