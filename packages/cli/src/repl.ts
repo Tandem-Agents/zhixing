@@ -33,9 +33,6 @@ import {
   type CommandHandlerContext,
   type RuntimeContext,
   type DispatchResult,
-  type ArgChoiceProvider,
-  type ArgQueryContext,
-  type ArgChoice,
   type ArgSchema,
   type SuggestionItem,
   Scheduler,
@@ -66,7 +63,10 @@ import { switchToNewConversation } from "./runtime/switch-to-new-conversation.js
 import { TaskTail } from "./task-tail/index.js";
 import { registerTaskCommands } from "./commands/task-commands.js";
 import { registerInfoCommands } from "./commands/info-commands.js";
-import { registerSessionCommands } from "./commands/session-commands.js";
+import {
+  registerSessionCommands,
+  registerModeCommands,
+} from "./commands/session-commands.js";
 import { SkillCommandSource } from "./commands/skill-command-source.js";
 import { FEATURE_CHROME, chromeOnlyVisibility } from "./commands/command-visibility.js";
 import { registerSkillsCommand } from "./skills/manager-command.js";
@@ -237,13 +237,9 @@ type ReplCommandMeta = {
 };
 
 const REPL_COMMAND_META: ReadonlyArray<ReplCommandMeta> = [
-  // ─ session ─
-  { name: "exit", aliases: ["quit"], description: "退出工作场景 / 退出知行", category: "session", legacyKey: "/exit" },
-  // 注:已迁到现代路径 commands/ 的命令不再走本桥接表——info 域(help/status/me/model/
-  // usage/context/journal/people/tasks)在 info-commands.ts;session 域(new/clear/resume/
-  // name/compact)在 session-commands.ts。
-  // ─ tools ─
-  { name: "work", description: "进入工作场景", category: "tools", legacyKey: "/work" },
+  // 已迁到现代路径 commands/ 的命令不再走本桥接表——info 域在 info-commands.ts，session 域
+  // (new/clear/resume/name/compact) 与模式切换 (work/exit) 在 session-commands.ts。剩下
+  // config 域待迁移。
   // ─ config ─
   { name: "config", description: "修改基础配置（服务商 / 模型 / API Key / 消息通道等）", category: "config", legacyKey: "/config", requiresChrome: true },
   { name: "mcp", description: "管理 MCP 服务（接入外部工具 / 启停 / 查看连接）", category: "config", legacyKey: "/mcp", requiresChrome: true },
@@ -258,15 +254,6 @@ function buildSlashCommands(
   session: RuntimeSession,
   renderer: OutputRenderer,
   cliWriter: CliWriter,
-  /**
-   * 模式切换唯一执行点 —— `/work`·`/exit` 命令 handler 经此触发（先 await
-   * in-flight turn 到达 turn 边界，与主回路消费 pendingModeSwitch 同源）。
-   */
-  applyModeSwitch: (
-    intent: WorkModeSwitchIntent,
-    source: "llm" | "command",
-    triggerMsg?: Message,
-  ) => Promise<void>,
   /** MCP host —— `/mcp` 命令注入运行状态查询 + discovery 探测。 */
   mcpHub: McpHub,
   /**
@@ -282,54 +269,6 @@ function buildSlashCommands(
   }
 > {
   return {
-    "/work": {
-      description: "进入工作场景(↑↓ 选择 · Enter 进入 · Ctrl+R 改名 · Ctrl+N 新建)",
-      handler: async (state, args) => {
-        // 已在工作场景中:不重复进入(work 模式内切换到另一场景属后续需求)。
-        if (session.activeMode.kind !== "main") {
-          cliWriter.line(chalk.dim("\n  已在工作场景中，请先 /exit 退出\n"));
-          return;
-        }
-        const q = args.trim();
-        // 空 args(手敲 /work 直接 Enter,或空场景面板内 Enter):不进场景、不报错。
-        // 列表浏览 / 进入 / 改名 / 新建全部走 typeahead 二级面板(↑↓ + Enter +
-        // Ctrl+R + Ctrl+N),命令行不再承担这些子操作。
-        if (!q) {
-          cliWriter.line(
-            chalk.dim("\n  用 ↑↓ 选场景 Enter 进入,Ctrl+N 新建\n"),
-          );
-          return;
-        }
-        // <idOrName> → 解析(精确 id 优先,其次唯一名称匹配,与 /resume 同款纪律)。
-        // typeahead 面板 accept 候选时填的是精确 id;手敲也支持名称。
-        const scenes = await session.workSceneRegistry.list();
-        let sceneId: string | null =
-          scenes.find((s) => s.id === q)?.id ?? null;
-        if (!sceneId) {
-          const lower = q.toLowerCase();
-          const named = scenes.filter((s) =>
-            s.name.toLowerCase().includes(lower),
-          );
-          if (named.length === 1) sceneId = named[0]!.id;
-          else if (named.length > 1) {
-            cliWriter.line(
-              chalk.yellow(`\n  多个工作场景匹配 "${q}"，请用精确 id\n`),
-            );
-            return;
-          }
-        }
-        if (!sceneId) {
-          cliWriter.line(chalk.red(`\n  工作场景 "${q}" 不存在\n`));
-          return;
-        }
-        // 命令可能在 turn 运行中输入:先 await in-flight turn 到达 turn 边界
-        // (与 hot-reload 先 await in-flight turn 的既有纪律一致)。
-        if (state.activeTurnPromise) {
-          await state.activeTurnPromise.catch(() => {});
-        }
-        await applyModeSwitch({ kind: "enter", sceneId }, "command");
-      },
-    },
     "/trust": {
       description: "已建立的信任规则查看与撤销（↑↓ 选 · Ctrl+D 双击撤销 · ESC 退出）",
       handler: async () => {
@@ -346,22 +285,6 @@ function buildSlashCommands(
           pipeline: session.runtime.securityPipeline,
           writer: cliWriter,
         });
-      },
-    },
-    "/exit": {
-      description: "退出工作场景 / 退出知行",
-      handler: async (state) => {
-        // 工作场景中：/exit 语义为退出工作场景回主对话（非退出进程）。
-        if (session.activeMode.kind === "workscene") {
-          if (state.activeTurnPromise) {
-            await state.activeTurnPromise.catch(() => {});
-          }
-          await applyModeSwitch({ kind: "exit" }, "command");
-          return;
-        }
-        // 主对话中：维持原语义——走 rl.close() 让 close 监听器统一执行完整
-        // cleanup (scheduler / deliveryStack / channels / renderer / confirmation)
-        rl.close();
       },
     },
     "/config": {
@@ -976,7 +899,6 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     session,
     renderer,
     cliWriter,
-    applyModeSwitch,
     mcpHub,
     renderScreen,
   );
@@ -1008,53 +930,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   const tRegistry = new DefaultCommandRegistry();
   const typeaheadDispatcher = new CommandDispatcher({ registry: tRegistry });
 
-  // /work 的场景选择器 —— 查 workSceneRegistry.list() 生成候选，与 resume 同构。
-  // inlineActions 声明 delete / rename / create：删除走 onCandidateDelete（work
-  // 分流 → session.removeWorkScene），重命名 / 新建走主循环消费 inline-edit-request
-  // （→ session.workSceneRegistry），均直调 registry。
-  const workSceneArgProvider: ArgChoiceProvider = {
-    async list(
-      ctx: ArgQueryContext,
-      signal: AbortSignal,
-    ): Promise<readonly ArgChoice[]> {
-      const scenes = await session.workSceneRegistry.list();
-      if (signal.aborted) return [];
-
-      const query = ctx.query.toLowerCase();
-      const choices: ArgChoice[] = [];
-      for (const s of scenes) {
-        if (
-          query &&
-          !s.name.toLowerCase().includes(query) &&
-          !s.id.toLowerCase().includes(query)
-        ) {
-          continue;
-        }
-        const wd = s.workdir ? ` · ${s.workdir}` : "";
-        choices.push({
-          value: s.id,
-          label: s.name || s.id,
-          description: `${s.id}${wd}`,
-        });
-      }
-      return choices;
-    },
-    // 选择器面板：从场景列表挑一个 sceneId 给 /work。
-    mode: "picker",
-    inlineActions: { delete: true, rename: true, create: true },
-    // 候选为空（还没场景 / query 无匹配）时的引导，替代技术占位 "[scene: …]"。
-    emptyHint: "暂无工作场景，Ctrl+N 新建一个",
-  };
-
-  const workSceneArgSchema: ArgSchema = {
-    kind: "async-enum",
-    name: "scene",
-    description: "目标工作场景名称或 ID",
-    required: true,
-    provider: workSceneArgProvider,
-  };
-
-  // /trust 规则候选 —— 与 workSceneArgProvider 同构，inlineActions.delete 启用
+  // /trust 规则候选 —— inlineActions.delete 启用
   // Ctrl+D 撤销；物理撤销在下面 onCandidateDelete 的 trust 分支调 store.revoke。
   const trustRuleArgSchema: ArgSchema = {
     kind: "async-enum",
@@ -1065,10 +941,9 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   };
 
   // 桥接循环把每条 REPL_COMMAND_META 注册进 registry + dispatcher（handler 包装 legacy
-  // slashCommands 闭包）。args 不在元信息内，在此按命令名注入（work / trust 各需一个
-  // async-enum 选择器；resume 已随 session 域迁出、其 arg 在 session-commands 内构造）。
+  // slashCommands 闭包）。args 不在元信息内，在此按命令名注入（仅 trust 还在桥接；resume /
+  // work 已随 session 域迁出、其 arg 在 session-commands 内构造）。
   const argsByName: Record<string, ReadonlyArray<ArgSchema>> = {
-    work: [workSceneArgSchema],
     trust: [trustRuleArgSchema],
   };
 
@@ -1127,6 +1002,19 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     taskListService: state.taskListService,
     onConversationChanged: () => taskTail?.refresh(),
     clearScreenToInitial,
+  });
+
+  // 模式切换命令（work/exit）—— 与对话生命周期 deps 不相交，独立注册。applyModeSwitch
+  // 是模式切换唯一执行点；activeMode / in-flight turn 以 getter 注入按调用时读。
+  registerModeCommands({
+    registry: tRegistry,
+    dispatcher: typeaheadDispatcher,
+    writer: cliWriter,
+    applyModeSwitch,
+    getActiveMode: () => session.activeMode,
+    getActiveTurnPromise: () => state.activeTurnPromise,
+    workSceneRegistry: session.workSceneRegistry,
+    rl,
   });
 
   // task_list cli 命令组 —— 不走 legacy slashCommands 桥接，直接注册到 registry +

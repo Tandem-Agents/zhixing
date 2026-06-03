@@ -1,13 +1,17 @@
 /**
- * session 域命令注册 —— 对话生命周期类命令的模块化原子注册（范式同 registerInfoCommands）。
+ * session 域命令注册 —— 对话生命周期 + 模式切换的模块化原子注册（范式同
+ * registerInfoCommands）。按依赖隔离拆成两个注册函数：
  *
- * 本批覆盖 /new /clear /resume /name /compact（模式切换 /work·/exit 依赖 applyModeSwitch，
- * 重，单独成批）。这些命令会**读写** active conversation 运行态，故以 `getConv()` getter
- * 注入：模式切换会整体替换该引用，getter 在调用时解析当前对象、写其字段即写真实状态。
- * session.runtime 同理 getter 注入；taskListService 是跨 reload 单例、直接注入。
+ *   - registerSessionCommands：/new /clear /resume /name /compact（对话生命周期）。这些
+ *     命令会**读写** active conversation 运行态，故以 `getConv()` getter 注入——模式切换
+ *     会整体替换该引用，getter 在调用时解析当前对象、写其字段即写真实状态；session.runtime
+ *     同理 getter；taskListService 跨 reload 单例直接注入。
+ *   - registerModeCommands：/work /exit（模式切换）。依赖 applyModeSwitch（模式切换唯一
+ *     执行点）+ active mode / in-flight turn，与对话生命周期 deps 不相交，故独立窄接口。
  *
- * /resume 的对话选择器（ArgChoiceProvider）就近在本模块构造、落进 CommandDef.args；其
- * inline 删除只声明能力，物理删除 + active 切换编排由 cli 交互层的 onCandidateDelete 承担。
+ * /resume·/work 的选择器（ArgChoiceProvider）就近在本模块构造、落进 CommandDef.args；其
+ * inline 删除 / 改名 / 新建只声明能力，物理执行由 cli 交互层（onCandidateDelete + 主循环
+ * inline-edit）承担。
  */
 
 import chalk from "chalk";
@@ -19,6 +23,7 @@ import {
   type ArgQueryContext,
   type ArgChoice,
   type ArgSchema,
+  type WorkModeSwitchIntent,
 } from "@zhixing/core";
 import type { AgentRuntime } from "@zhixing/orchestrator/runtime";
 import {
@@ -388,6 +393,151 @@ function buildResumeArgSchema(deps: SessionCommandsDeps): ArgSchema {
     kind: "async-enum",
     name: "conversation",
     description: "目标对话名称或 ID",
+    required: true,
+    provider,
+  };
+}
+
+export interface ModeCommandsDeps {
+  readonly registry: ICommandRegistry;
+  readonly dispatcher: CommandDispatcher;
+  readonly writer: CliWriter;
+  /** 模式切换唯一执行点（先 await in-flight turn 到 turn 边界，再 swap runtime/conv）。 */
+  readonly applyModeSwitch: (
+    intent: WorkModeSwitchIntent,
+    source: "llm" | "command",
+  ) => Promise<void>;
+  /** 当前活跃模式 —— 模式切换会变，以 getter 注入按调用时读。仅读 kind 判别。 */
+  readonly getActiveMode: () => { readonly kind: string };
+  /** 当前 in-flight turn promise（turn idle 时 null）—— 切换前先 await 到 turn 边界。 */
+  readonly getActiveTurnPromise: () => Promise<unknown> | null;
+  /** 工作场景注册表 —— /work 选择器列候选、命令解析 idOrName。 */
+  readonly workSceneRegistry: {
+    list(): Promise<readonly { id: string; name: string; workdir?: string }[]>;
+  };
+  /** readline —— 主对话 /exit 走 rl.close() 触发完整 cleanup。 */
+  readonly rl: { close(): void };
+}
+
+export function registerModeCommands(deps: ModeCommandsDeps): void {
+  const { registry, dispatcher, writer } = deps;
+
+  // ── /work ──
+  registry.register({
+    id: "work:repl",
+    name: "work",
+    description: "进入工作场景(↑↓ 选择 · Enter 进入 · Ctrl+R 改名 · Ctrl+N 新建)",
+    category: "tools",
+    execution: "local",
+    tag: "builtin",
+    args: [buildWorkSceneArgSchema(deps)],
+  });
+  dispatcher.registerHandler("work:repl", async (ctx) => {
+    // 已在工作场景中：不重复进入（work 模式内切换到另一场景属后续需求）。
+    if (deps.getActiveMode().kind !== "main") {
+      writer.line(chalk.dim("\n  已在工作场景中，请先 /exit 退出\n"));
+      return {};
+    }
+    const q = argRest(ctx).trim();
+    // 空 args（手敲 /work 直接 Enter，或空场景面板内 Enter）：不进场景、不报错。列表浏览 /
+    // 进入 / 改名 / 新建全部走 typeahead 二级面板，命令行不承担这些子操作。
+    if (!q) {
+      writer.line(chalk.dim("\n  用 ↑↓ 选场景 Enter 进入,Ctrl+N 新建\n"));
+      return {};
+    }
+    // <idOrName> → 解析（精确 id 优先，其次唯一名称匹配，与 /resume 同款纪律）。
+    const scenes = await deps.workSceneRegistry.list();
+    let sceneId: string | null = scenes.find((s) => s.id === q)?.id ?? null;
+    if (!sceneId) {
+      const lower = q.toLowerCase();
+      const named = scenes.filter((s) => s.name.toLowerCase().includes(lower));
+      if (named.length === 1) sceneId = named[0]!.id;
+      else if (named.length > 1) {
+        writer.line(
+          chalk.yellow(`\n  多个工作场景匹配 "${q}"，请用精确 id\n`),
+        );
+        return {};
+      }
+    }
+    if (!sceneId) {
+      writer.line(chalk.red(`\n  工作场景 "${q}" 不存在\n`));
+      return {};
+    }
+    // 命令可能在 turn 运行中输入：先 await in-flight turn 到达 turn 边界（与 hot-reload
+    // 先 await in-flight turn 的既有纪律一致）。
+    const turn = deps.getActiveTurnPromise();
+    if (turn) await turn.catch(() => {});
+    await deps.applyModeSwitch({ kind: "enter", sceneId }, "command");
+    return {};
+  });
+
+  // ── /exit ──
+  registry.register({
+    id: "exit:repl",
+    name: "exit",
+    aliases: ["quit"],
+    description: "退出工作场景 / 退出知行",
+    category: "session",
+    execution: "local",
+    tag: "builtin",
+  });
+  dispatcher.registerHandler("exit:repl", async () => {
+    // 工作场景中：/exit 语义为退出工作场景回主对话（非退出进程）。
+    if (deps.getActiveMode().kind === "workscene") {
+      const turn = deps.getActiveTurnPromise();
+      if (turn) await turn.catch(() => {});
+      await deps.applyModeSwitch({ kind: "exit" }, "command");
+      return {};
+    }
+    // 主对话中：维持原语义——走 rl.close() 让 close 监听器统一执行完整 cleanup
+    // (scheduler / deliveryStack / channels / renderer / confirmation)。
+    deps.rl.close();
+    return {};
+  });
+}
+
+/**
+ * /work 的工作场景选择器 —— async-enum arg，调用时查 workSceneRegistry.list() 生成候选。
+ * inline 删除 / 改名 / 新建只声明能力；物理删除走交互层 onCandidateDelete，改名 / 新建走
+ * 主循环消费 inline-edit-request。
+ */
+function buildWorkSceneArgSchema(deps: ModeCommandsDeps): ArgSchema {
+  const provider: ArgChoiceProvider = {
+    async list(
+      ctx: ArgQueryContext,
+      signal: AbortSignal,
+    ): Promise<readonly ArgChoice[]> {
+      const scenes = await deps.workSceneRegistry.list();
+      if (signal.aborted) return [];
+
+      const query = ctx.query.toLowerCase();
+      const choices: ArgChoice[] = [];
+      for (const s of scenes) {
+        if (
+          query &&
+          !s.name.toLowerCase().includes(query) &&
+          !s.id.toLowerCase().includes(query)
+        ) {
+          continue;
+        }
+        const wd = s.workdir ? ` · ${s.workdir}` : "";
+        choices.push({
+          value: s.id,
+          label: s.name || s.id,
+          description: `${s.id}${wd}`,
+        });
+      }
+      return choices;
+    },
+    mode: "picker",
+    inlineActions: { delete: true, rename: true, create: true },
+    emptyHint: "暂无工作场景，Ctrl+N 新建一个",
+  };
+
+  return {
+    kind: "async-enum",
+    name: "scene",
+    description: "目标工作场景名称或 ID",
     required: true,
     provider,
   };

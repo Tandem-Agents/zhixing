@@ -17,7 +17,9 @@ import {
 } from "@zhixing/core";
 import {
   registerSessionCommands,
+  registerModeCommands,
   type SessionCommandsDeps,
+  type ModeCommandsDeps,
 } from "../session-commands.js";
 import { stripAnsi } from "../../tui/index.js";
 import type { CliWriter } from "../../screen/index.js";
@@ -168,5 +170,95 @@ describe("registerSessionCommands · /resume", () => {
     const h = setup();
     await h.dispatcher.dispatch("/resume", RUNTIME);
     expect(visible(h.writer)).toContain("没有可切换的对话");
+  });
+});
+
+interface ModeHarness {
+  registry: DefaultCommandRegistry;
+  dispatcher: CommandDispatcher;
+  writer: CliWriter & { lines: string[] };
+  applyModeSwitch: ReturnType<typeof vi.fn>;
+  close: ReturnType<typeof vi.fn>;
+}
+
+function setupMode(overrides: Partial<ModeCommandsDeps> = {}): ModeHarness {
+  const registry = new DefaultCommandRegistry();
+  const dispatcher = new CommandDispatcher({ registry });
+  const writer = makeWriter();
+  const applyModeSwitch = vi.fn(async () => {});
+  const close = vi.fn();
+  const deps: ModeCommandsDeps = {
+    registry,
+    dispatcher,
+    writer,
+    applyModeSwitch,
+    getActiveMode: () => ({ kind: "main" }),
+    getActiveTurnPromise: () => null,
+    workSceneRegistry: {
+      list: async () => [{ id: "s1", name: "项目A" }],
+    },
+    rl: { close },
+    ...overrides,
+  };
+  registerModeCommands(deps);
+  return { registry, dispatcher, writer, applyModeSwitch, close };
+}
+
+describe("registerModeCommands · 注册", () => {
+  it("work/exit 注册为 local；work 带 scene 选择器；exit 有 quit 别名", () => {
+    const { registry } = setupMode();
+    expect(registry.findByName("work")?.execution).toBe("local");
+    expect(registry.findByName("work")?.args?.[0]?.name).toBe("scene");
+    const exit = registry.findByName("exit");
+    expect(exit?.execution).toBe("local");
+    expect(registry.findByName("quit")?.id).toBe("exit:repl");
+  });
+});
+
+describe("registerModeCommands · /work", () => {
+  it("main 模式 + 精确 id → applyModeSwitch(enter)", async () => {
+    const h = setupMode();
+    await h.dispatcher.dispatch("/work s1", RUNTIME);
+    expect(h.applyModeSwitch).toHaveBeenCalledWith(
+      { kind: "enter", sceneId: "s1" },
+      "command",
+    );
+  });
+
+  it("已在工作场景 → 提示，不切换", async () => {
+    const h = setupMode({ getActiveMode: () => ({ kind: "workscene" }) });
+    await h.dispatcher.dispatch("/work s1", RUNTIME);
+    expect(h.applyModeSwitch).not.toHaveBeenCalled();
+    expect(visible(h.writer)).toContain("已在工作场景中");
+  });
+
+  it("空参数 → 引导提示，不切换", async () => {
+    const h = setupMode();
+    await h.dispatcher.dispatch("/work", RUNTIME);
+    expect(h.applyModeSwitch).not.toHaveBeenCalled();
+    expect(visible(h.writer)).toContain("选场景");
+  });
+
+  it("名称不存在 → 报错，不切换", async () => {
+    const h = setupMode();
+    await h.dispatcher.dispatch("/work 不存在的场景", RUNTIME);
+    expect(h.applyModeSwitch).not.toHaveBeenCalled();
+    expect(visible(h.writer)).toContain("不存在");
+  });
+});
+
+describe("registerModeCommands · /exit", () => {
+  it("主对话 → rl.close（退出进程路径），不走 applyModeSwitch", async () => {
+    const h = setupMode({ getActiveMode: () => ({ kind: "main" }) });
+    await h.dispatcher.dispatch("/exit", RUNTIME);
+    expect(h.close).toHaveBeenCalled();
+    expect(h.applyModeSwitch).not.toHaveBeenCalled();
+  });
+
+  it("工作场景 → applyModeSwitch(exit)，不 close", async () => {
+    const h = setupMode({ getActiveMode: () => ({ kind: "workscene" }) });
+    await h.dispatcher.dispatch("/exit", RUNTIME);
+    expect(h.applyModeSwitch).toHaveBeenCalledWith({ kind: "exit" }, "command");
+    expect(h.close).not.toHaveBeenCalled();
   });
 });
