@@ -5,7 +5,7 @@
  *
  * 管理器是 alt-screen、本就需要 chrome 终端。命令无条件注册进 registry,但挂
  * `chromeOnlyVisibility`——无 chrome 的 legacy 终端(非 TTY / 管道)下补全与 /help 都
- * 不列出它(执行期硬打名字的友好兜底由 handler 入口另行处理)。
+ * 不列出它;硬打命令名(绕过 visibility)由 handler 入口的 `requireChrome` 友好兜底。
  *
  * 开屏接线同 `/config`(config-command.ts):停 spinner + 让出 readline 的 stdin →
  * 跑 alt-screen 管理器 → 退屏后恢复 readline 并重申 chrome 硬件光标隐藏不变量。
@@ -13,8 +13,8 @@
 
 import type * as readline from "node:readline/promises";
 import type { CommandDispatcher, ICommandRegistry } from "@zhixing/core";
-import type { ScreenController } from "../screen/index.js";
-import { chromeOnlyVisibility } from "../commands/command-visibility.js";
+import type { CliWriter, ScreenController } from "../screen/index.js";
+import { chromeOnlyVisibility, requireChrome } from "../commands/command-visibility.js";
 import { runSkillManager } from "./manager-screen.js";
 import type { SkillManagerStore } from "./manager-controller.js";
 
@@ -26,6 +26,8 @@ export interface SkillsCommandOptions {
   readonly renderer: { stop: () => void };
   /** chrome 屏幕控制器(无 chrome 为 null)—— 退屏后重申硬件光标隐藏不变量。 */
   readonly screen: ScreenController | null;
+  /** 写屏 sink —— 无 chrome 时 requireChrome 经此打印兜底提示。 */
+  readonly writer: CliWriter;
   /** 会话级单一技能库 store(管理器浏览 / 状态操作的落点)。 */
   readonly skillStore: SkillManagerStore;
   /** 技能集变更后刷新动态命令,让 `/<name>` 补全即时反映禁用 / 归档(§5.1)。 */
@@ -44,6 +46,7 @@ export function registerSkillsCommand(opts: SkillsCommandOptions): void {
   });
 
   opts.dispatcher.registerHandler("skills:repl", async () => {
+    if (!requireChrome(opts.screen, opts.writer, "技能管理器")) return {};
     opts.renderer.stop();
     opts.rl.pause();
     try {

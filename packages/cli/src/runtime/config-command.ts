@@ -2,13 +2,13 @@
  * `/config` 与 `/mcp` 命令 handler——REPL 内打开配置编辑器，保存后触发 hot reload。
  *
  * 流程：
+ * 0. requireChrome 门禁——编辑器是 alt-screen，无 chrome 终端（非 TTY / 管道）跑不了；
+ *    硬打命令名会绕过 visibility 进到这里，在此友好提示并早退
  * 1. 暂停 readline + 停 spinner，让出 stdin 给编辑器接管 alt screen
  * 2. 重新 load 最新 config/credentials——不复用启动缓存（保证用户外部编辑后的一致性）
  * 3. 调 runConfigEditor——与 startup-check 共用接口、不同 caller，差异由 ctx 注入
- * 4. 处理 ConfigEditorResult：
- *    - completed → await in-flight turn → session.reload() → 透明性反馈
- *    - cancelled → 静默回 REPL
- *    - non-tty → 防御性提示（REPL 必为 TTY，理论不可能）
+ * 4. 处理 ConfigEditorResult：completed → await in-flight turn → session.reload() → 透明性
+ *    反馈；cancelled → 静默回 REPL（非 TTY 已被步骤 0 拦在前面，editor 不会返回 non-tty）
  * 5. 恢复 readline 主循环
  *
  * activeTurnPromise 的 await 是**调用方语义**——session.reload() 自身不读 REPL state，
@@ -45,6 +45,7 @@ import {
 } from "@zhixing/mcp";
 import { layout } from "../tui/index.js";
 import type { CliWriter, ScreenController } from "../screen/index.js";
+import { requireChrome } from "../commands/command-visibility.js";
 import type { RuntimeSession } from "./session.js";
 import type { ReloadResult } from "./types.js";
 
@@ -72,6 +73,10 @@ async function runEditorCommand(
   opts: { sections: SectionId[]; title: string; runtime?: ConfigEditorRuntime },
 ): Promise<void> {
   const { rl, state, session, renderer, writer } = deps;
+
+  // 无 chrome 终端跑不了 alt-screen 编辑器——硬打命令名会绕过 visibility 进到这里，
+  // 在动手让出 stdin 之前先友好提示并早退。
+  if (!requireChrome(deps.screen, writer, opts.title)) return;
 
   // 让出 stdin 给编辑器：先停 spinner（避免动画覆盖编辑器面板），再 pause readline
   renderer.stop();
@@ -124,10 +129,8 @@ async function runEditorCommand(
         // 静默回 REPL——用户主动取消，无副作用
         break;
       case "non-tty":
-        // REPL 必为 TTY，正常路径不会到达；防御性提示
-        writer.line(
-          chalk.yellow(`${layout.contentPrefix}当前终端非 TTY，无法启动配置编辑器`),
-        );
+        // requireChrome 已在入口拦下无 chrome 终端，functioning REPL 不会到达此分支；
+        // editor 类型仍保留 non-tty（startup 等非 REPL caller 复用），这里不再单独提示。
         break;
     }
   } catch (err) {

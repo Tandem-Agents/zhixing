@@ -38,7 +38,7 @@ import {
 } from "./editor-screen.js";
 import type { SkillEditorDeps } from "./editor-controller.js";
 import type { CliWriter, ScreenController } from "../screen/index.js";
-import { chromeOnlyVisibility } from "../commands/command-visibility.js";
+import { chromeOnlyVisibility, requireChrome } from "../commands/command-visibility.js";
 import { layout } from "../tui/index.js";
 
 /** 拼进起草上下文的最近对话条数上限 —— 够蒸馏出"刚做的事",又不撑爆单发 prompt。 */
@@ -225,6 +225,7 @@ export function registerSkillNewCommand(deps: SkillAuthoringDeps): void {
   });
 
   deps.dispatcher.registerHandler("skill-new:repl", async (ctx) => {
+    if (!requireChrome(deps.screen, deps.writer, "技能创作")) return {};
     const rest =
       typeof ctx.args["_rest"] === "string" ? ctx.args["_rest"].trim() : "";
 
@@ -233,16 +234,12 @@ export function registerSkillNewCommand(deps: SkillAuthoringDeps): void {
     deps.rl.pause();
     try {
       const libraryEmpty = await deps.isLibraryEmpty();
-      const result = await runSkillEditor(
+      // requireChrome 已在入口拦下无 chrome 终端，editor 不会再返回 non-tty。
+      await runSkillEditor(
         buildEditorDeps(deps, rest, libraryEmpty, (draft) => {
           saved = draft;
         }),
       );
-      if (result === "non-tty") {
-        deps.writer.line(
-          chalk.yellow(`${layout.contentPrefix}当前终端非 TTY,无法打开技能编辑屏`),
-        );
-      }
     } finally {
       deps.rl.resume();
       deps.screen?.reassertCursorHidden();

@@ -13,7 +13,13 @@ import {
   type CommandDef,
   type RuntimeContext,
 } from "@zhixing/core";
-import { FEATURE_CHROME, chromeOnlyVisibility } from "../command-visibility.js";
+import {
+  FEATURE_CHROME,
+  chromeOnlyVisibility,
+  requireChrome,
+} from "../command-visibility.js";
+import { stripAnsi } from "../../tui/index.js";
+import type { CliWriter, ScreenController } from "../../screen/index.js";
 
 function runtime(chrome: boolean): RuntimeContext {
   return {
@@ -66,5 +72,32 @@ describe("chromeOnlyVisibility · 环境过滤", () => {
     const r = new DefaultCommandRegistry();
     r.register(chromeCmd);
     expect(r.findByName("config")?.id).toBe("config:repl");
+  });
+});
+
+function makeWriter(): CliWriter & { lines: string[] } {
+  const lines: string[] = [];
+  return {
+    lines,
+    line: (text: string) => {
+      lines.push(text);
+    },
+  } as unknown as CliWriter & { lines: string[] };
+}
+
+describe("requireChrome · 执行期兜底", () => {
+  it("有 chrome(screen 非 null) → 放行、不打印", () => {
+    const w = makeWriter();
+    const ok = requireChrome({} as ScreenController, w, "配置编辑器");
+    expect(ok).toBe(true);
+    expect(w.lines).toHaveLength(0);
+  });
+
+  it("无 chrome(screen null) → 拦截、打印含命令用途的提示", () => {
+    const w = makeWriter();
+    const ok = requireChrome(null, w, "配置编辑器");
+    expect(ok).toBe(false);
+    expect(w.lines).toHaveLength(1);
+    expect(stripAnsi(w.lines[0]!)).toContain("配置编辑器");
   });
 });

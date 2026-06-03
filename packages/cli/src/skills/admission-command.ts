@@ -27,7 +27,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type * as readline from "node:readline/promises";
 import type { CliWriter, ScreenController } from "../screen/index.js";
-import { chromeOnlyVisibility } from "../commands/command-visibility.js";
+import { chromeOnlyVisibility, requireChrome } from "../commands/command-visibility.js";
 
 /** Store 的接入相关子集(接口隔离,便于装配 / 测试)。 */
 export interface AdmissionStore {
@@ -85,6 +85,9 @@ export function registerSkillAddCommand(deps: SkillAdmissionDeps): void {
   });
 
   deps.dispatcher.registerHandler("skill-add:repl", async (ctx) => {
+    // 接入要全程接管 stdin 收确认键(createKeyEventStream),无 chrome 终端跑不了;
+    // 硬打命令名会绕过 visibility 进到这里，在此友好兜底。
+    if (!requireChrome(deps.screen, deps.writer, "技能接入")) return {};
     const rest = typeof ctx.args["_rest"] === "string" ? ctx.args["_rest"] : "";
     const { path: srcPath, force } = parseAddArgs(rest);
     const line = (s: string): void => deps.writer.line(`${layout.contentPrefix}${s}`);

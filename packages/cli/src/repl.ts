@@ -1700,6 +1700,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     rl,
     renderer,
     screen: renderScreen,
+    writer: cliWriter,
     skillStore: session.skillStore,
     refreshCommands: () => tRegistry.refresh(),
   });
