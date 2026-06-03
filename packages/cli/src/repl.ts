@@ -30,10 +30,8 @@ import {
   DefaultCommandRegistry,
   DefaultTypeaheadBroker,
   UsageTracker,
-  type CommandHandlerContext,
   type RuntimeContext,
   type DispatchResult,
-  type ArgSchema,
   type SuggestionItem,
   Scheduler,
   createEventBus,
@@ -52,7 +50,7 @@ import {
 import { describeProxy, type ProxyDescription } from "@zhixing/network";
 import { loadConfig, loadCredentials, resolveHomeDir } from "@zhixing/providers";
 import type { TaskListService } from "@zhixing/tools-builtin";
-import { createMcpHub, type McpHub } from "@zhixing/mcp";
+import { createMcpHub } from "@zhixing/mcp";
 import { createBuiltinExtraToolsAssembly } from "./runtime/builtin-extra-tools.js";
 import { parseServerSpecs } from "./runtime/mcp-config.js";
 import { createCliSegmentDeps } from "./runtime/segment-deps.js";
@@ -67,8 +65,9 @@ import {
   registerSessionCommands,
   registerModeCommands,
 } from "./commands/session-commands.js";
+import { registerConfigCommands } from "./commands/config-commands.js";
 import { SkillCommandSource } from "./commands/skill-command-source.js";
-import { FEATURE_CHROME, chromeOnlyVisibility } from "./commands/command-visibility.js";
+import { FEATURE_CHROME } from "./commands/command-visibility.js";
 import { registerSkillsCommand } from "./skills/manager-command.js";
 import { registerSkillNewCommand } from "./skills/authoring-command.js";
 import { registerSkillAddCommand } from "./skills/admission-command.js";
@@ -79,11 +78,7 @@ import {
   type RunResult,
 } from "@zhixing/orchestrator/runtime";
 import { renderError } from "./render.js";
-import {
-  createOutputRenderer,
-  getLlmChunkDump,
-  type OutputRenderer,
-} from "./output/index.js";
+import { createOutputRenderer, getLlmChunkDump } from "./output/index.js";
 import {
   createScreenController,
   createScreenWriter,
@@ -99,13 +94,10 @@ import { BottomInfoModel } from "./bottom-info/index.js";
 import { renderHomeWelcome, renderStartupAdvisories } from "./workbench/index.js";
 import { renderFarewell } from "./farewell/index.js";
 import { RuntimeSession } from "./runtime/session.js";
-import { handleConfigCommand, handleMcpCommand } from "./runtime/config-command.js";
 import {
-  handleSecurityCommand,
   createBlockedRenderer,
   TerminalConfirmationRenderer,
 } from "./security/index.js";
-import { createTrustRuleArgProvider } from "./security/trust-rule-arg-provider.js";
 import { createReplInterruptRuntime } from "./interrupt/repl-runtime.js";
 
 // ─── REPL 状态 ───
@@ -203,118 +195,6 @@ function buildWorksceneDigestPrompt(
     `对话交接：本场景做了什么、关键产出或结论、有无未尽事项。只输出这段交接` +
     `文本本身，不要寒暄、不要提问、不要复述本提示。`
   );
-}
-
-// ─── 斜杠命令元信息（桥接形态的注册来源） ───
-//
-// 这份数组是核心命令的元信息来源:下方桥接循环逐条注册进 `tRegistry`(命令真相源)
-// + dispatcher(handler 包装 legacy `slashCommands` 闭包)。命令的最终可见性 / 分类 /
-// 描述由 registry 派生——`/help` 与 typeahead 补全都读 `registry.list(ctx)`,不再直接
-// 遍历本数组。
-//
-// 字段语义:
-//   - name          : 命令名 (不带 / 前缀,如 "new" "resume")
-//   - aliases       : 命令别名
-//   - legacyKey     : `slashCommands` 字典 key (带 / 前缀)—— 桥接定位其 handler 闭包
-//   - category      : 命令分类,驱动 /help 分组与 typeahead panel 排序
-//   - requiresChrome: true 时桥接为该命令挂 chrome visibility——无 chrome 终端
-//                     (非 TTY / 管道)下补全与 /help 都不列出 (config/mcp 的 alt-screen
-//                     编辑器需要 chrome 才能渲染)
-//   - hidden        : true 时补全与 /help 都不列出 (escape hatch:精确打名字仍可召唤)
-//
-// args 不在本元信息里——args 是 CommandDef 维度,在桥接处按 name 注入 (resume/work/
-// trust 各需一个选择器),见下方 argsByName。
-
-type ReplCommandMeta = {
-  readonly name: string;
-  readonly aliases?: readonly string[];
-  readonly description: string;
-  readonly category: "session" | "info" | "tools" | "config";
-  readonly legacyKey: string;
-  /** 需要 chrome 终端才能交互(alt-screen 编辑器)——桥接据此挂 chrome visibility。 */
-  readonly requiresChrome?: boolean;
-  readonly hidden?: boolean;
-};
-
-const REPL_COMMAND_META: ReadonlyArray<ReplCommandMeta> = [
-  // 已迁到现代路径 commands/ 的命令不再走本桥接表——info 域在 info-commands.ts，session 域
-  // (new/clear/resume/name/compact) 与模式切换 (work/exit) 在 session-commands.ts。剩下
-  // config 域待迁移。
-  // ─ config ─
-  { name: "config", description: "修改基础配置（服务商 / 模型 / API Key / 消息通道等）", category: "config", legacyKey: "/config", requiresChrome: true },
-  { name: "mcp", description: "管理 MCP 服务（接入外部工具 / 启停 / 查看连接）", category: "config", legacyKey: "/mcp", requiresChrome: true },
-  { name: "trust", description: "权限规则管理", category: "config", legacyKey: "/trust" },
-  { name: "security", description: "安全状态概览", category: "config", legacyKey: "/security" },
-];
-
-// ─── 斜杠命令 ───
-
-function buildSlashCommands(
-  rl: readline.Interface,
-  session: RuntimeSession,
-  renderer: OutputRenderer,
-  cliWriter: CliWriter,
-  /** MCP host —— `/mcp` 命令注入运行状态查询 + discovery 探测。 */
-  mcpHub: McpHub,
-  /**
-   * chrome 屏幕控制器（无 chrome 终端为 null）—— `/config`·`/mcp` 编辑器退出后用它
-   * 重申硬件光标隐藏不变量（编辑器是自管 alt-screen + 光标的全屏 modal）。
-   */
-  renderScreen: ScreenController | null,
-): Record<
-  string,
-  {
-    description: string;
-    handler: (state: ReplState, args: string) => Promise<void> | void;
-  }
-> {
-  return {
-    "/trust": {
-      description: "已建立的信任规则查看与撤销（↑↓ 选 · Ctrl+D 双击撤销 · ESC 退出）",
-      handler: async () => {
-        // /trust 在 typeahead args dropdown 里完成全部交互（↑↓ 浏览 + Ctrl+D
-        // 双击撤销 + ESC/Ctrl+C 退出）。"选中规则"在 /trust 语境下没有业务动作
-        // （区别于 /work 的"进入场景"、/resume 的"切换对话"），accept 候选后
-        // handler 是 noop —— 用户按 Enter 等同 silent 返回 prompt。
-      },
-    },
-    "/security": {
-      description: "安全状态概览 (rules: 列出策略规则)",
-      handler: (_state, args) => {
-        handleSecurityCommand(args, {
-          pipeline: session.runtime.securityPipeline,
-          writer: cliWriter,
-        });
-      },
-    },
-    "/config": {
-      description: "修改基础配置（服务商 / 模型 / API Key / 消息通道等）",
-      handler: async (state) => {
-        await handleConfigCommand({
-          rl,
-          state,
-          session,
-          renderer,
-          writer: cliWriter,
-          screen: renderScreen,
-        });
-      },
-    },
-    "/mcp": {
-      description: "管理 MCP 服务（接入外部工具 / 启停 / 查看连接）",
-      handler: async (state) => {
-        await handleMcpCommand({
-          rl,
-          state,
-          session,
-          renderer,
-          writer: cliWriter,
-          screen: renderScreen,
-          hub: mcpHub,
-        });
-      },
-    },
-  };
 }
 
 // ─── bracketed paste mode 设置 ───
@@ -894,15 +774,6 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     }
   };
 
-  const slashCommands = buildSlashCommands(
-    rl,
-    session,
-    renderer,
-    cliWriter,
-    mcpHub,
-    renderScreen,
-  );
-
   // ── 命令系统装配 ──
   //
   // 命令层（registry 真相源 + dispatcher 执行器 + 全部注册）无条件构建、与终端能力
@@ -910,10 +781,10 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   // （默认 "on"）与终端 chrome 能力都满足时走 typeahead 持久输入区 + 补全，否则
   // （显式 legacy / 无 chrome）回退到 rl.question 行编辑。
   //
-  // 命令真相源当前从 legacy slashCommands 派生（下方桥接循环）—— 有什么 legacy 命令，
-  // registry / panel 就有什么，零幽灵命令；核心命令 execution 统一 "local"，不把本地
-  // 动作泄露给 agent loop（否则 agent 不知 runtime 真实状态、会凭训练记忆瞎编），
-  // 也不产生多余 agent turn / token。
+  // 命令由各域 registerXxxCommands 模块（info / session / mode / config / task / skill）
+  // 原子注册进 registry + dispatcher，动态 /<name> 技能由 SkillCommandSource 投影；registry
+  // 是唯一真相源，/help 与补全都读 registry.list(ctx)。核心命令 execution 统一 "local"，
+  // 不把本地动作泄露给 agent loop（否则 agent 不知 runtime 真实状态、会凭训练记忆瞎编）。
   const typeaheadMode = (process.env.ZHIXING_INPUT_TYPEAHEAD ?? "on").toLowerCase();
   // capability 探测失败时强制走 legacy `rl.question` 路径——typeahead 持久输入区
   // 依赖 ScreenController 的 chrome 模式，无 chrome 终端（管道 / 重定向 / dumb）下
@@ -929,50 +800,6 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   // 交互层（补全 broker + 渲染）才依 chrome 分叉。
   const tRegistry = new DefaultCommandRegistry();
   const typeaheadDispatcher = new CommandDispatcher({ registry: tRegistry });
-
-  // /trust 规则候选 —— inlineActions.delete 启用
-  // Ctrl+D 撤销；物理撤销在下面 onCandidateDelete 的 trust 分支调 store.revoke。
-  const trustRuleArgSchema: ArgSchema = {
-    kind: "async-enum",
-    name: "rule",
-    description: "已沉淀的信任规则",
-    required: true,
-    provider: createTrustRuleArgProvider(session.runtime.securityPipeline),
-  };
-
-  // 桥接循环把每条 REPL_COMMAND_META 注册进 registry + dispatcher（handler 包装 legacy
-  // slashCommands 闭包）。args 不在元信息内，在此按命令名注入（仅 trust 还在桥接；resume /
-  // work 已随 session 域迁出、其 arg 在 session-commands 内构造）。
-  const argsByName: Record<string, ReadonlyArray<ArgSchema>> = {
-    trust: [trustRuleArgSchema],
-  };
-
-  for (const cmd of REPL_COMMAND_META) {
-    const legacy = slashCommands[cmd.legacyKey];
-    if (!legacy) continue; // 防御式跳过，防止 legacyKey 和 slashCommands 不一致
-    const id = `${cmd.name}:repl`;
-    const args = argsByName[cmd.name];
-    tRegistry.register({
-      id,
-      name: cmd.name,
-      aliases: cmd.aliases ? [...cmd.aliases] : undefined,
-      description: cmd.description,
-      category: cmd.category,
-      execution: "local",
-      tag: "builtin",
-      args: args ? [...args] : undefined,
-      // 需要 chrome 的命令(config/mcp 的 alt-screen 编辑器)挂可见性 predicate——
-      // 无 chrome 终端下 list(ctx) 不返回它,补全与 /help 都不列出。
-      visibility: cmd.requiresChrome ? chromeOnlyVisibility : undefined,
-      hidden: cmd.hidden,
-    });
-    typeaheadDispatcher.registerHandler(id, async (ctx: CommandHandlerContext) => {
-      const rest =
-        typeof ctx.args._rest === "string" ? ctx.args._rest : "";
-      await legacy.handler(state, rest);
-      return {};
-    });
-  }
 
   // info 域命令（help/status/me/model/usage/context/journal/people/tasks）—— 现代路径
   // 模块化原子注册。reload / 模式切换会 swap runtime 与 conv,故以 getter 注入、handler
@@ -1017,8 +844,22 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     rl,
   });
 
-  // task_list cli 命令组 —— 不走 legacy slashCommands 桥接，直接注册到 registry +
-  // dispatcher。这是命令模块的现代路径（未来 /memory 等同模式抽出）。
+  // config 域命令（config/mcp/trust/security）—— config/mcp 是 alt-screen 编辑器（挂
+  // chromeOnlyVisibility）；/trust 选择器的 securityPipeline 以 getter 注入（reload 会 swap）。
+  registerConfigCommands({
+    registry: tRegistry,
+    dispatcher: typeaheadDispatcher,
+    writer: cliWriter,
+    rl,
+    renderer,
+    screen: renderScreen,
+    session,
+    getActiveTurnPromise: () => state.activeTurnPromise,
+    mcpHub,
+  });
+
+  // task_list cli 命令组 —— 直接注册到 registry + dispatcher 的命令现代路径
+  // （未来 /memory 等同模式抽出）。
   registerTaskCommands({
     registry: tRegistry,
     dispatcher: typeaheadDispatcher,
