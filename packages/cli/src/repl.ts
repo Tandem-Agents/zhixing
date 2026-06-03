@@ -23,9 +23,6 @@ import {
   ConversationRepository,
   conversationsDir,
   type ConversationScope,
-  loadProfile,
-  getMemoryDir,
-  PeopleStore,
   JournalStore,
   CommandProvider,
   FileProvider,
@@ -36,8 +33,6 @@ import {
   type CommandHandlerContext,
   type RuntimeContext,
   type DispatchResult,
-  type CommandDef,
-  type CommandCategory,
   type ArgChoiceProvider,
   type ArgQueryContext,
   type ArgChoice,
@@ -70,8 +65,10 @@ import { acquireWorksceneConversation } from "./runtime/workscene-conversation.j
 import { switchToNewConversation } from "./runtime/switch-to-new-conversation.js";
 import { TaskTail } from "./task-tail/index.js";
 import { registerTaskCommands } from "./commands/task-commands.js";
+import { registerInfoCommands } from "./commands/info-commands.js";
 import { SkillCommandSource } from "./commands/skill-command-source.js";
 import { FEATURE_CHROME, chromeOnlyVisibility } from "./commands/command-visibility.js";
+import { formatRelativeTime } from "./commands/format.js";
 import { registerSkillsCommand } from "./skills/manager-command.js";
 import { registerSkillNewCommand } from "./skills/authoring-command.js";
 import { registerSkillAddCommand } from "./skills/admission-command.js";
@@ -81,11 +78,7 @@ import {
   type AgentRuntime,
   type RunResult,
 } from "@zhixing/orchestrator/runtime";
-import {
-  renderError,
-  renderUsageReport,
-  renderContextVisual,
-} from "./render.js";
+import { renderError } from "./render.js";
 import {
   createOutputRenderer,
   getLlmChunkDump,
@@ -107,7 +100,6 @@ import { renderHomeWelcome, renderStartupAdvisories } from "./workbench/index.js
 import { renderFarewell } from "./farewell/index.js";
 import { RuntimeSession } from "./runtime/session.js";
 import { handleConfigCommand, handleMcpCommand } from "./runtime/config-command.js";
-import { parseTaskUsageFromMessages } from "./parse-task-usage.js";
 import {
   handleSecurityCommand,
   createBlockedRenderer,
@@ -251,84 +243,17 @@ const REPL_COMMAND_META: ReadonlyArray<ReplCommandMeta> = [
   { name: "resume", description: "切换到其他对话", category: "session", legacyKey: "/resume" },
   { name: "name", description: "为当前会话命名", category: "session", legacyKey: "/name" },
   { name: "exit", aliases: ["quit"], description: "退出工作场景 / 退出知行", category: "session", legacyKey: "/exit" },
-  // ─ info ─
-  // 注:/help 不在此表——它是 registry 的消费者(把命令集渲染成命令地图),走现代
-  // 路径直接注册(见下方 registerHelpCommand 处),不能像其它命令那样桥接静态闭包。
-  { name: "status", description: "显示会话状态", category: "info", legacyKey: "/status" },
-  { name: "me", description: "查看身份画像", category: "info", legacyKey: "/me" },
-  { name: "model", description: "显示当前模型信息", category: "info", legacyKey: "/model" },
-  { name: "usage", description: "查看 token 用量详情", category: "info", legacyKey: "/usage" },
-  { name: "context", description: "上下文容量可视化", category: "info", legacyKey: "/context" },
+  // 注:info 域(help/status/me/model/usage/context/journal/people/tasks)已迁到现代
+  // 路径 commands/info-commands.ts,不再走本桥接表。
   // ─ tools ─
   { name: "work", description: "进入工作场景", category: "tools", legacyKey: "/work" },
-  { name: "journal", description: "查看日志状态", category: "tools", legacyKey: "/journal" },
-  { name: "people", description: "查看关系网络", category: "tools", legacyKey: "/people" },
   { name: "compact", description: "手动触发上下文压缩", category: "tools", legacyKey: "/compact" },
-  { name: "tasks", description: "查看定时任务", category: "tools", legacyKey: "/tasks" },
   // ─ config ─
   { name: "config", description: "修改基础配置（服务商 / 模型 / API Key / 消息通道等）", category: "config", legacyKey: "/config", requiresChrome: true },
   { name: "mcp", description: "管理 MCP 服务（接入外部工具 / 启停 / 查看连接）", category: "config", legacyKey: "/mcp", requiresChrome: true },
   { name: "trust", description: "权限规则管理", category: "config", legacyKey: "/trust" },
   { name: "security", description: "安全状态概览", category: "config", legacyKey: "/security" },
 ];
-
-// `/help` 命令地图的分类显示顺序 + 中文标签——命令分类展示的单一来源。`registry.list`
-// 已剔除 hidden 与不可见命令,这里只按类聚合渲染。动态 `/<name>` 技能(plugin 类)数量
-// 可能很多,聚合成一行汇总置末尾——/help 是命令地图、不是技能浏览器。
-const HELP_CATEGORY_ORDER: readonly CommandCategory[] = [
-  "session",
-  "info",
-  "tools",
-  "config",
-];
-
-const HELP_CATEGORY_LABELS: Record<CommandCategory, string> = {
-  session: "会话管理",
-  info: "信息查询",
-  tools: "工具",
-  config: "配置",
-  debug: "调试",
-  plugin: "技能",
-  hidden: "",
-};
-
-/**
- * 渲染 `/help` 命令地图。入参是 `registry.list(ctx)` 的结果(已按 ctx 过滤 hidden +
- * visibility),故此处不感知终端能力——no-chrome 下 alt-screen 命令早在 list 阶段被滤掉。
- */
-function renderHelpCommands(
-  commands: readonly CommandDef[],
-  writer: CliWriter,
-): void {
-  writer.line(`\n${layout.contentPrefix}${chalk.bold("可用命令：")}`);
-
-  const byCategory = new Map<CommandCategory, CommandDef[]>();
-  for (const cmd of commands) {
-    const bucket = byCategory.get(cmd.category) ?? [];
-    bucket.push(cmd);
-    byCategory.set(cmd.category, bucket);
-  }
-
-  for (const cat of HELP_CATEGORY_ORDER) {
-    const items = byCategory.get(cat);
-    if (!items || items.length === 0) continue;
-    writer.line(`\n  ${chalk.bold(HELP_CATEGORY_LABELS[cat])}`);
-    for (const cmd of items) {
-      writer.line(
-        `    ${chalk.cyan(`/${cmd.name}`.padEnd(14))} ${chalk.dim(cmd.description)}`,
-      );
-    }
-  }
-
-  // 动态技能聚合一行(可能很多,逐条列会淹没命令地图)。
-  const pluginCount = byCategory.get("plugin")?.length ?? 0;
-  if (pluginCount > 0) {
-    writer.line(
-      `\n  ${chalk.bold(HELP_CATEGORY_LABELS.plugin)} ${chalk.dim(`(${pluginCount} 个) · 输入 / 浏览全部`)}`,
-    );
-  }
-  writer.line("");
-}
 
 // ─── 斜杠命令 ───
 
@@ -446,41 +371,6 @@ function buildSlashCommands(
           for (const w of warnings) cliWriter.line(w);
           cliWriter.line(chalk.dim(`${layout.contentPrefix}对话历史已清空\n`));
         }
-      },
-    },
-    "/model": {
-      description: "显示当前模型信息",
-      handler: (state) => {
-        cliWriter.line(
-          `\n  ${chalk.dim("Model:")} ${chalk.cyan(session.runtime.model)}` +
-            `\n  ${chalk.dim("Provider:")} ${session.runtime.providerId}` +
-            `\n  ${chalk.dim("Turns:")} ${state.conv.turnCounter}\n`,
-        );
-      },
-    },
-    "/status": {
-      description: "显示会话状态",
-      handler: (state) => {
-        const userMsgs = state.conv.messages.filter(
-          (m) => m.role === "user",
-        ).length;
-        const assistantMsgs = state.conv.messages.filter(
-          (m) => m.role === "assistant",
-        ).length;
-        // ProxyDescription.display 已脱敏（含凭证 URL 安全显示）+ 区分四态
-        // off / auto+null / auto+url / explicit—— mode=auto+null 时 dim 灰色
-        // 提示直连，其他状态正常色
-        const proxyText =
-          state.networkProxy.resolved === null && state.networkProxy.mode === "auto"
-            ? chalk.dim(state.networkProxy.display)
-            : state.networkProxy.display;
-        cliWriter.line(
-          `\n  ${chalk.dim("Session:")} ${state.conv.conversationId ?? "(未保存)"}` +
-            `\n  ${chalk.dim("Messages:")} ${state.conv.messages.length} (${userMsgs} user, ${assistantMsgs} assistant)` +
-            `\n  ${chalk.dim("Model:")} ${chalk.cyan(session.runtime.model)}` +
-            `\n  ${chalk.dim("Provider:")} ${session.runtime.providerId}` +
-            `\n  ${chalk.dim("Network proxy:")} ${proxyText}\n`,
-        );
       },
     },
     "/new": {
@@ -611,42 +501,6 @@ function buildSlashCommands(
         cliWriter.line(chalk.dim(`${layout.contentPrefix}会话已命名为: ${args.trim()}\n`));
       },
     },
-    "/me": {
-      description: "查看身份画像",
-      handler: async () => {
-        const profile = await loadProfile();
-        if (!profile) {
-          const memDir = getMemoryDir();
-          cliWriter.line(
-            `\n${chalk.dim("  未找到身份画像。")}` +
-              `\n${chalk.dim(`  创建 ${memDir}/profile.md 来设置你的身份信息。`)}` +
-              `\n\n${chalk.dim("  示例内容：")}` +
-              `\n${chalk.dim("  ---")}` +
-              `\n${chalk.dim("  name: 你的名字")}` +
-              `\n${chalk.dim("  language: zh-CN")}` +
-              `\n${chalk.dim("  ---")}` +
-              `\n${chalk.dim("  ## 技术栈")}` +
-              `\n${chalk.dim("  TypeScript, React, Node.js\n")}`,
-          );
-          return;
-        }
-        cliWriter.line(`\n${chalk.bold("  身份画像")}`);
-        cliWriter.line(`  ${chalk.dim("Name:")} ${chalk.cyan(profile.meta.name)}`);
-        if (profile.meta.language) {
-          cliWriter.line(`  ${chalk.dim("Language:")} ${profile.meta.language}`);
-        }
-        if (profile.meta.timezone) {
-          cliWriter.line(`  ${chalk.dim("Timezone:")} ${profile.meta.timezone}`);
-        }
-        if (profile.content) {
-          cliWriter.line("");
-          for (const line of profile.content.split("\n")) {
-            cliWriter.line(`  ${line}`);
-          }
-        }
-        cliWriter.line("");
-      },
-    },
     "/work": {
       description: "进入工作场景(↑↓ 选择 · Enter 进入 · Ctrl+R 改名 · Ctrl+N 新建)",
       handler: async (state, args) => {
@@ -693,86 +547,6 @@ function buildSlashCommands(
           await state.activeTurnPromise.catch(() => {});
         }
         await applyModeSwitch({ kind: "enter", sceneId }, "command");
-      },
-    },
-    "/journal": {
-      description: "查看日志状态",
-      handler: async () => {
-        const jStore = new JournalStore();
-        const plan = await jStore.scan();
-        const { stats, condensePlan, expiredFiles } = plan;
-
-        if (stats.totalFiles === 0) {
-          cliWriter.line(
-            `\n${chalk.dim("  日志为空。对话中的信息将自动记录到日志中。\n")}`,
-          );
-          return;
-        }
-
-        cliWriter.line(`\n${chalk.bold("  日志状态")} ${chalk.dim(`(${stats.totalFiles} 文件)`)}`);
-        cliWriter.line(`  ${chalk.green("●")} 热 (≤30天): ${stats.hotCount}`);
-        cliWriter.line(`  ${chalk.yellow("●")} 温 (>30天): ${stats.warmCount}`);
-        cliWriter.line(`  ${chalk.blue("●")} 凝练: ${stats.condensedCount}`);
-
-        if (expiredFiles.length > 0) {
-          cliWriter.line(`  ${chalk.red("●")} 过期待删除: ${expiredFiles.length}`);
-        }
-        if (condensePlan) {
-          const monthCount = condensePlan.months.length;
-          const fileCount = condensePlan.months.reduce((sum: number, m: { files: string[] }) => sum + m.files.length, 0);
-          cliWriter.line(
-            chalk.dim(`\n  💡 ${fileCount} 条日志（${monthCount} 个月）待凝练，首轮对话后自动执行`),
-          );
-        }
-        cliWriter.line("");
-      },
-    },
-    "/people": {
-      description: "查看关系网络",
-      handler: async () => {
-        const store = new PeopleStore();
-        const people = await store.listAll();
-
-        if (people.length === 0) {
-          cliWriter.line(
-            `\n${chalk.dim("  关系网络为空。")}` +
-              `\n${chalk.dim('  对话中说"记住小丽是我女朋友"可以添加关系人。\n')}`,
-          );
-          return;
-        }
-
-        cliWriter.line(`\n${chalk.bold("  关系网络")} ${chalk.dim(`(${people.length} 人)`)}`);
-        for (const person of people) {
-          const relation = chalk.dim(` (${person.meta.relation})`);
-          const birthday = person.meta.birthday ? chalk.dim(` 🎂 ${person.meta.birthday}`) : "";
-          cliWriter.line(
-            `  ${chalk.cyan("•")} ${person.meta.name}${relation}${birthday}`,
-          );
-        }
-        cliWriter.line("");
-      },
-    },
-    "/usage": {
-      description: "查看 token 用量详情",
-      handler: (state) => {
-        const budget = session.runtime.checkBudget(state.conv.messages);
-        // 解析 transcript 中所有 Task 工具的 <usage> trailer —— 没有 Task 调用时
-        // parseTaskUsageFromMessages 返回空数组,renderUsageReport 自动跳过子段
-        const subUsages = parseTaskUsageFromMessages(state.conv.messages);
-        renderUsageReport(
-          budget,
-          state.conv.turnCounter,
-          session.runtime.calibrationFactor,
-          subUsages,
-          cliWriter,
-        );
-      },
-    },
-    "/context": {
-      description: "上下文容量可视化",
-      handler: (state) => {
-        const budget = session.runtime.checkBudget(state.conv.messages);
-        renderContextVisual(budget, cliWriter);
       },
     },
     "/compact": {
@@ -839,34 +613,6 @@ function buildSlashCommands(
           pipeline: session.runtime.securityPipeline,
           writer: cliWriter,
         });
-      },
-    },
-    "/tasks": {
-      description: "查看定时任务",
-      handler: (state) => {
-        if (!state.scheduler) {
-          cliWriter.line(chalk.dim("\n  调度器未初始化\n"));
-          return;
-        }
-        const tasks = state.scheduler.listTasks();
-        if (tasks.length === 0) {
-          cliWriter.line(chalk.dim("\n  没有定时任务。对话中说\"每天早上8点提醒我...\"可以创建任务。\n"));
-          return;
-        }
-        cliWriter.line(`\n${chalk.bold("  定时任务")} ${chalk.dim(`(${tasks.length} 个, ${state.scheduler.activeTaskCount} 个执行中)`)}`);
-        for (const task of tasks) {
-          const status = task.enabled ? chalk.green("●") : chalk.dim("○");
-          const schedule = formatTaskSchedule(task.schedule);
-          const lastInfo = task.state.lastRunAt
-            ? chalk.dim(` · 上次: ${task.state.lastStatus ?? "?"} ${formatRelativeTime(new Date(task.state.lastRunAt))}`)
-            : chalk.dim(" · 未执行过");
-          const next = task.state.nextRunAt
-            ? chalk.dim(` · 下次: ${new Date(task.state.nextRunAt).toLocaleString()}`)
-            : "";
-          cliWriter.line(`  ${status} ${task.name} ${chalk.dim(`(${task.id})`)}`);
-          cliWriter.line(`    ${schedule}${lastInfo}${next}`);
-        }
-        cliWriter.line("");
       },
     },
     "/exit": {
@@ -1665,20 +1411,19 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     });
   }
 
-  // /help —— registry 的消费者:把当前命令集渲染成命令地图。它必须读
-  // registry.list(ctx)(按 ctx 过滤 hidden + visibility),不能像其它命令那样桥接静态
-  // 闭包,故走现代路径直接注册。注册在动态技能源之前,使撞名探测能看见 /help。
-  tRegistry.register({
-    id: "help:repl",
-    name: "help",
-    description: "显示帮助信息",
-    category: "info",
-    execution: "local",
-    tag: "builtin",
-  });
-  typeaheadDispatcher.registerHandler("help:repl", async (ctx: CommandHandlerContext) => {
-    renderHelpCommands(tRegistry.list(ctx.runtime), cliWriter);
-    return {};
+  // info 域命令（help/status/me/model/usage/context/journal/people/tasks）—— 现代路径
+  // 模块化原子注册。reload / 模式切换会 swap runtime 与 conv,故以 getter 注入、handler
+  // 调用时读最新值。/help 在此注入 registry 用于列命令；注册在动态技能源之前使撞名可见。
+  registerInfoCommands({
+    registry: tRegistry,
+    dispatcher: typeaheadDispatcher,
+    writer: cliWriter,
+    getRuntime: () => session.runtime,
+    getMessages: () => state.conv.messages,
+    getConversationId: () => state.conv.conversationId,
+    getTurnCounter: () => state.conv.turnCounter,
+    getNetworkProxy: () => state.networkProxy,
+    getScheduler: () => state.scheduler,
   });
 
   // task_list cli 命令组 —— 不走 legacy slashCommands 桥接，直接注册到 registry +
@@ -2313,31 +2058,3 @@ async function runJournalLifecycle(session: AgentRuntime): Promise<void> {
   });
 }
 
-function formatTaskSchedule(schedule: { kind: string; at?: string; everyMs?: number; expr?: string; tz?: string }): string {
-  switch (schedule.kind) {
-    case "once":
-      return `一次性 ${schedule.at ? new Date(schedule.at).toLocaleString() : ""}`;
-    case "interval": {
-      const ms = schedule.everyMs ?? 0;
-      if (ms < 60_000) return `每 ${Math.round(ms / 1000)} 秒`;
-      if (ms < 3_600_000) return `每 ${Math.round(ms / 60_000)} 分钟`;
-      return `每 ${Math.round(ms / 3_600_000)} 小时`;
-    }
-    case "cron":
-      return `cron "${schedule.expr}"${schedule.tz ? ` (${schedule.tz})` : ""}`;
-    default:
-      return schedule.kind;
-  }
-}
-
-function formatRelativeTime(date: Date): string {
-  const diff = Date.now() - date.getTime();
-  const minutes = Math.floor(diff / 60000);
-  if (minutes < 1) return "刚刚";
-  if (minutes < 60) return `${minutes} 分钟前`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours} 小时前`;
-  const days = Math.floor(hours / 24);
-  if (days === 1) return "昨天";
-  return `${days} 天前`;
-}
