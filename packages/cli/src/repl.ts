@@ -1480,20 +1480,17 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     renderScreen,
   );
 
-  // ── Typeahead 路径接入（Phase 1 Step 5） ──
+  // ── 命令系统装配 ──
   //
-  // Feature flag：`ZHIXING_INPUT_TYPEAHEAD`。默认 "on"；显式 "legacy" 回退到
-  // `rl.question` 的行编辑路径。
+  // 命令层（registry 真相源 + dispatcher 执行器 + 全部注册）无条件构建、与终端能力
+  // 无关；其上的输入交互层才依 chrome 分叉：feature flag ZHIXING_INPUT_TYPEAHEAD
+  // （默认 "on"）与终端 chrome 能力都满足时走 typeahead 持久输入区 + 补全，否则
+  // （显式 legacy / 无 chrome）回退到 rl.question 行编辑。
   //
-  // 单源真相设计（v2，2026-04-16）：不再调 `registerBuiltinCommands` 注册
-  // 设计层面的 builtin 集合，而是**从 legacy `slashCommands` 派生** typeahead
-  // registry —— 有什么 legacy 命令，panel 里就显示什么，零幽灵命令。
-  //
-  // 所有命令 execution = "local"：
-  //   1. 不把 info 查询泄露给 agent loop（否则 agent 会瞎编 "Claude 3.5 Sonnet"
-  //      这类幻觉，因为它不知道真正的 runtime 状态）
-  //   2. 不产生多余的 agent turn 和 token 消耗
-  //   3. `/new` 清历史后 agent 自然从空白开始，不需要 system message 提醒
+  // 命令真相源当前从 legacy slashCommands 派生（下方桥接循环）—— 有什么 legacy 命令，
+  // registry / panel 就有什么，零幽灵命令；核心命令 execution 统一 "local"，不把本地
+  // 动作泄露给 agent loop（否则 agent 不知 runtime 真实状态、会凭训练记忆瞎编），
+  // 也不产生多余 agent turn / token。
   const typeaheadMode = (process.env.ZHIXING_INPUT_TYPEAHEAD ?? "on").toLowerCase();
   // capability 探测失败时强制走 legacy `rl.question` 路径——typeahead 持久输入区
   // 依赖 ScreenController 的 chrome 模式，无 chrome 终端（管道 / 重定向 / dumb）下
@@ -1504,244 +1501,233 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     typeaheadMode !== "off" &&
     capability.ok;
 
+  // ── 命令层（无条件构建，与终端能力无关）──
+  // registry 是命令的单一真相源、dispatcher 是统一执行器，任何模式恒在；其上的
+  // 交互层（补全 broker + 渲染）才依 chrome 分叉。
+  const tRegistry = new DefaultCommandRegistry();
+  const typeaheadDispatcher = new CommandDispatcher({ registry: tRegistry });
+
+  // /resume 的对话选择器 —— async-enum arg，闭包查 convRepo.list() 生成候选。
+  const conversationArgProvider: ArgChoiceProvider = {
+    async list(
+      ctx: ArgQueryContext,
+      signal: AbortSignal,
+    ): Promise<readonly ArgChoice[]> {
+      const conversations = await state.conv.convRepo.list();
+      if (signal.aborted) return [];
+
+      const query = ctx.query.toLowerCase();
+      const choices: ArgChoice[] = [];
+      for (const c of conversations.slice(0, 15)) {
+        if (query && !c.name.toLowerCase().includes(query) && !c.id.toLowerCase().includes(query)) {
+          continue;
+        }
+        const time = formatRelativeTime(new Date(c.lastActiveAt));
+        const turnCount = await state.conv.store.countTurns(c.id);
+        const current = c.id === state.conv.conversationId ? " ← 当前" : "";
+        choices.push({
+          value: c.id,
+          label: c.name || c.id,
+          description: `${time}, ${turnCount} 轮${current}`,
+        });
+      }
+      return choices;
+    },
+    // 选择器面板：从对话列表挑一个 conversationId 给 /resume。
+    mode: "picker",
+    // 候选支持 inline 删除（驱动 "delete ctrl+d" UI）。物理删除 + 业务编排
+    // （active 切换 / 自动新建 fallback）由 onCandidateDelete callback 在 cli 层
+    // 直调 convRepo 完成 —— 此处只声明能力，不承担执行。
+    inlineActions: { delete: true },
+  };
+
+  const resumeArgSchema: ArgSchema = {
+    kind: "async-enum",
+    name: "conversation",
+    description: "目标对话名称或 ID",
+    required: true,
+    provider: conversationArgProvider,
+  };
+
+  // /work 的场景选择器 —— 查 workSceneRegistry.list() 生成候选，与 resume 同构。
+  // inlineActions 声明 delete / rename / create：删除走 onCandidateDelete（work
+  // 分流 → session.removeWorkScene），重命名 / 新建走主循环消费 inline-edit-request
+  // （→ session.workSceneRegistry），均直调 registry。
+  const workSceneArgProvider: ArgChoiceProvider = {
+    async list(
+      ctx: ArgQueryContext,
+      signal: AbortSignal,
+    ): Promise<readonly ArgChoice[]> {
+      const scenes = await session.workSceneRegistry.list();
+      if (signal.aborted) return [];
+
+      const query = ctx.query.toLowerCase();
+      const choices: ArgChoice[] = [];
+      for (const s of scenes) {
+        if (
+          query &&
+          !s.name.toLowerCase().includes(query) &&
+          !s.id.toLowerCase().includes(query)
+        ) {
+          continue;
+        }
+        const wd = s.workdir ? ` · ${s.workdir}` : "";
+        choices.push({
+          value: s.id,
+          label: s.name || s.id,
+          description: `${s.id}${wd}`,
+        });
+      }
+      return choices;
+    },
+    // 选择器面板：从场景列表挑一个 sceneId 给 /work。
+    mode: "picker",
+    inlineActions: { delete: true, rename: true, create: true },
+    // 候选为空（还没场景 / query 无匹配）时的引导，替代技术占位 "[scene: …]"。
+    emptyHint: "暂无工作场景，Ctrl+N 新建一个",
+  };
+
+  const workSceneArgSchema: ArgSchema = {
+    kind: "async-enum",
+    name: "scene",
+    description: "目标工作场景名称或 ID",
+    required: true,
+    provider: workSceneArgProvider,
+  };
+
+  // /trust 规则候选 —— 与 workSceneArgProvider 同构，inlineActions.delete 启用
+  // Ctrl+D 撤销；物理撤销在下面 onCandidateDelete 的 trust 分支调 store.revoke。
+  const trustRuleArgSchema: ArgSchema = {
+    kind: "async-enum",
+    name: "rule",
+    description: "已沉淀的信任规则",
+    required: true,
+    provider: createTrustRuleArgProvider(session.runtime.securityPipeline),
+  };
+
+  // 命令元信息单源在文件顶层 REPL_COMMAND_META —— 桥接循环把每条注册进 registry +
+  // dispatcher（handler 包装 legacy slashCommands 闭包）。args 字段不在元信息内，
+  // 在此按命令名注入（resume / work / trust 各需一个 async-enum 选择器）。
+  const argsByName: Record<string, ReadonlyArray<ArgSchema>> = {
+    resume: [resumeArgSchema],
+    work: [workSceneArgSchema],
+    trust: [trustRuleArgSchema],
+  };
+
+  for (const cmd of REPL_COMMAND_META) {
+    const legacy = slashCommands[cmd.legacyKey];
+    if (!legacy) continue; // 防御式跳过，防止 legacyKey 和 slashCommands 不一致
+    const id = `${cmd.name}:repl`;
+    const args = argsByName[cmd.name];
+    tRegistry.register({
+      id,
+      name: cmd.name,
+      aliases: cmd.aliases ? [...cmd.aliases] : undefined,
+      description: cmd.description,
+      category: cmd.category,
+      execution: "local",
+      tag: "builtin",
+      args: args ? [...args] : undefined,
+      hidden: cmd.hidden,
+    });
+    typeaheadDispatcher.registerHandler(id, async (ctx: CommandHandlerContext) => {
+      const rest =
+        typeof ctx.args._rest === "string" ? ctx.args._rest : "";
+      await legacy.handler(state, rest);
+      return {};
+    });
+  }
+
+  // task_list cli 命令组 —— 不走 legacy slashCommands 桥接，直接注册到 registry +
+  // dispatcher。这是命令模块的现代路径（未来 /memory 等同模式抽出）。
+  registerTaskCommands({
+    registry: tRegistry,
+    dispatcher: typeaheadDispatcher,
+    service: session.taskListService,
+    getConversationId: () => state.conv.conversationId,
+    writer: cliWriter,
+  });
+
+  // /skills 技能管理器（alt-screen）—— 走命令现代路径。注册在 /<name> 动态源之前，
+  // 使撞名探测能看见 /skills（避免名为 "skills" 的技能遮蔽本命令）；onMutate 接
+  // tRegistry.refresh，让管理器内禁用 / 归档后 /<name> 补全即时反映。
+  registerSkillsCommand({
+    registry: tRegistry,
+    dispatcher: typeaheadDispatcher,
+    rl,
+    renderer,
+    screen: renderScreen,
+    skillStore: session.skillStore,
+    refreshCommands: () => tRegistry.refresh(),
+  });
+
+  // /skill-new 创作入口（alt-screen AI 编辑屏）—— 把刚做的事 / 一个想法收成技能。
+  // 注册在 /<name> 动态源之前（撞名探测可见）；LLM 走 main 档单发，落盘经
+  // Store.create，保存后刷新 /<name> 补全让新技能即时可唤醒。
+  registerSkillNewCommand({
+    registry: tRegistry,
+    dispatcher: typeaheadDispatcher,
+    rl,
+    renderer,
+    screen: renderScreen,
+    writer: cliWriter,
+    callText: (prompt) => session.runtime.callText(prompt, "main"),
+    createSkill: (draft) => session.skillStore.create(draft),
+    getMessages: () => state.conv.messages,
+    getDefaultMode: () =>
+      session.activeMode.kind === "workscene" ? "work" : "main",
+    refreshCommands: () => tRegistry.refresh(),
+    isLibraryEmpty: async () =>
+      (await session.skillStore.listAll()).length === 0,
+  });
+
+  // /skill-add 接入入口 —— 外部技能（本地路径）经扫描 + AI 研判后入库。注册在
+  // /<name> 动态源之前（撞名探测可见）；研判 LLM 走 main 档，接入后刷新 /<name> 补全。
+  registerSkillAddCommand({
+    registry: tRegistry,
+    dispatcher: typeaheadDispatcher,
+    rl,
+    renderer,
+    screen: renderScreen,
+    writer: cliWriter,
+    callText: (prompt) => session.runtime.callText(prompt, "main"),
+    skillStore: session.skillStore,
+    refreshCommands: () => tRegistry.refresh(),
+  });
+
+  // 技能 /<name> 动态唤醒 —— 把技能库投影成 execution:"agent" 命令。注册在
+  // builtin / task 命令之后，撞名探测（findExisting）才让核心命令优先。初次 refresh
+  // 把当前技能集拉进补全缓存；后续创建 / 接入由各自流程触发 registry.refresh() 增量纳入。
+  tRegistry.registerDynamicSource(
+    new SkillCommandSource({
+      listAll: () => session.skillStore.listAll(),
+      findExisting: (name) => tRegistry.findByName(name),
+    }),
+  );
+  await tRegistry.refresh();
+
+  // ── 交互层（依 chrome）：补全 broker + providers + 屏幕底部任务区 ──
+  // 有 chrome 走 typeahead 补全；无 chrome / 显式 legacy 不构建（输入走 rl.question）。
   let typeaheadBroker: DefaultTypeaheadBroker | null = null;
-  let typeaheadDispatcher: CommandDispatcher | null = null;
   if (useTypeahead) {
-    const tRegistry = new DefaultCommandRegistry();
     const usageTracker = new UsageTracker({ rootDir: null });
     typeaheadBroker = new DefaultTypeaheadBroker({
       now: () => Date.now(),
-      // 粘贴占位符 token 作 word 边界——trigger 反向扫不跨过占位符；用户在 `/file `
-      // 后粘贴长文件路径时，占位符整段不进 trigger query，typeahead 自然退出
+      // 粘贴占位符 token 作 word 边界 —— trigger 反向扫不跨过占位符；用户在 `/file `
+      // 后粘贴长文件路径时，占位符整段不进 trigger query，typeahead 自然退出。
       wordTerminators: [PASTE_TOKEN_PATTERN],
     });
     typeaheadBroker.register(
       new CommandProvider({ registry: tRegistry, usageTracker }),
     );
-    typeaheadBroker.register(
-      new ArgumentProvider({ registry: tRegistry }),
-    );
+    typeaheadBroker.register(new ArgumentProvider({ registry: tRegistry }));
     typeaheadBroker.register(
       new FileProvider({
         root: session.runtime.resolvedWorkspace.path ?? process.cwd(),
       }),
     );
-    typeaheadDispatcher = new CommandDispatcher({ registry: tRegistry });
 
-    // ── ConversationArgProvider: /resume 的 async-enum 参数补全 ──
-    //
-    // 实现 ArgChoiceProvider 接口，查询 convRepo.list() 生成对话候选。
-    // 通过闭包捕获 state（convRepo + store），无需额外依赖注入。
-    const conversationArgProvider: ArgChoiceProvider = {
-      async list(
-        ctx: ArgQueryContext,
-        signal: AbortSignal,
-      ): Promise<readonly ArgChoice[]> {
-        const conversations = await state.conv.convRepo.list();
-        if (signal.aborted) return [];
-
-        const query = ctx.query.toLowerCase();
-        const choices: ArgChoice[] = [];
-        for (const c of conversations.slice(0, 15)) {
-          if (query && !c.name.toLowerCase().includes(query) && !c.id.toLowerCase().includes(query)) {
-            continue;
-          }
-          const time = formatRelativeTime(new Date(c.lastActiveAt));
-          const turnCount = await state.conv.store.countTurns(c.id);
-          const current = c.id === state.conv.conversationId ? " ← 当前" : "";
-          choices.push({
-            value: c.id,
-            label: c.name || c.id,
-            description: `${time}, ${turnCount} 轮${current}`,
-          });
-        }
-        return choices;
-      },
-      // 选择器面板：用户从对话列表挑一个 conversationId 给业务（/resume 切对话）。
-      mode: "picker",
-      // 静态声明:对话候选支持 inline 删除(驱动 "delete ctrl+d" UI)。物理删除
-      // + 业务编排(active 切换 / 自动新建 fallback)由 onCandidateDelete callback
-      // 在 cli 层直调 convRepo 完成 —— 此处只声明能力,不承担执行。
-      inlineActions: { delete: true },
-    };
-
-    const resumeArgSchema: ArgSchema = {
-      kind: "async-enum",
-      name: "conversation",
-      description: "目标对话名称或 ID",
-      required: true,
-      provider: conversationArgProvider,
-    };
-
-    // ── WorkSceneArgProvider: /work 的 async-enum 参数补全 ──
-    //
-    // 查询 workSceneRegistry.list() 生成场景候选,与 conversationArgProvider 同构。
-    // inlineActions 声明 delete / rename / create —— 删除走 onCandidateDelete
-    // (work 分流),重命名 / 新建走主循环消费 inline-edit-request,均直调 registry。
-    const workSceneArgProvider: ArgChoiceProvider = {
-      async list(
-        ctx: ArgQueryContext,
-        signal: AbortSignal,
-      ): Promise<readonly ArgChoice[]> {
-        const scenes = await session.workSceneRegistry.list();
-        if (signal.aborted) return [];
-
-        const query = ctx.query.toLowerCase();
-        const choices: ArgChoice[] = [];
-        for (const s of scenes) {
-          if (
-            query &&
-            !s.name.toLowerCase().includes(query) &&
-            !s.id.toLowerCase().includes(query)
-          ) {
-            continue;
-          }
-          const wd = s.workdir ? ` · ${s.workdir}` : "";
-          choices.push({
-            value: s.id,
-            label: s.name || s.id,
-            description: `${s.id}${wd}`,
-          });
-        }
-        return choices;
-      },
-      // 选择器面板：用户从场景列表挑一个 sceneId 给业务（/work 进场景）。
-      mode: "picker",
-      // 静态声明场景候选支持的 inline 操作。物理执行在 cli 层:delete 走
-      // onCandidateDelete(work 分流 → session.removeWorkScene),rename / create
-      // 走主循环消费 inline-edit-request(→ session.workSceneRegistry)。
-      inlineActions: { delete: true, rename: true, create: true },
-      // 候选为空（还没场景 / query 无匹配）时的引导,替代技术占位 "[scene: …]"。
-      emptyHint: "暂无工作场景，Ctrl+N 新建一个",
-    };
-
-    const workSceneArgSchema: ArgSchema = {
-      kind: "async-enum",
-      name: "scene",
-      description: "目标工作场景名称或 ID",
-      required: true,
-      provider: workSceneArgProvider,
-    };
-
-    // /trust 规则候选 provider —— 与 workSceneArgProvider 同结构，inlineActions
-    // 声明 delete 启用 Ctrl+D 双击撤销；物理撤销在下面 onCandidateDelete 的
-    // trust:repl 分支调 store.revoke。
-    const trustRuleArgSchema: ArgSchema = {
-      kind: "async-enum",
-      name: "rule",
-      description: "已沉淀的信任规则",
-      required: true,
-      provider: createTrustRuleArgProvider(session.runtime.securityPipeline),
-    };
-
-    // ── REPL 命令注册 ──
-    //
-    // 命令元信息单源在文件顶层 REPL_COMMAND_META。本块只负责把元信息桥接到
-    // typeahead registry: 每条注册 + handler 包装 legacy slashCommands 闭包。
-    // args 字段不在元信息内,在此处按命令名注入(目前只 /resume 需要对话选择器)。
-    const argsByName: Record<string, ReadonlyArray<ArgSchema>> = {
-      resume: [resumeArgSchema],
-      work: [workSceneArgSchema],
-      trust: [trustRuleArgSchema],
-    };
-
-    for (const cmd of REPL_COMMAND_META) {
-      const legacy = slashCommands[cmd.legacyKey];
-      if (!legacy) continue; // 防御式跳过，防止 legacyKey 和 slashCommands 不一致
-      const id = `${cmd.name}:repl`;
-      const args = argsByName[cmd.name];
-      tRegistry.register({
-        id,
-        name: cmd.name,
-        aliases: cmd.aliases ? [...cmd.aliases] : undefined,
-        description: cmd.description,
-        category: cmd.category,
-        execution: "local",
-        tag: "builtin",
-        args: args ? [...args] : undefined,
-        hidden: cmd.hidden,
-      });
-      typeaheadDispatcher.registerHandler(id, async (ctx: CommandHandlerContext) => {
-        const rest =
-          typeof ctx.args._rest === "string" ? ctx.args._rest : "";
-        await legacy.handler(state, rest);
-        return {};
-      });
-    }
-
-    // task_list cli 命令组 —— 不走 legacy slashCommands 桥接，直接注册到 tRegistry
-    // + typeaheadDispatcher。这是命令模块的现代路径（未来 /memory 等同模式抽出）。
-    registerTaskCommands({
-      registry: tRegistry,
-      dispatcher: typeaheadDispatcher,
-      service: session.taskListService,
-      getConversationId: () => state.conv.conversationId,
-      writer: cliWriter,
-    });
-
-    // /skills 技能管理器 —— alt-screen,走命令现代路径(直接注册到 registry +
-    // dispatcher,同 task 命令)。注册在 /<name> 动态源之前,使其撞名探测能看见
-    // /skills(避免名为 "skills" 的技能遮蔽本命令);onMutate 接 tRegistry.refresh,
-    // 让管理器内禁用 / 归档后 /<name> 补全即时反映(§5.1)。
-    registerSkillsCommand({
-      registry: tRegistry,
-      dispatcher: typeaheadDispatcher,
-      rl,
-      renderer,
-      screen: renderScreen,
-      skillStore: session.skillStore,
-      refreshCommands: () => tRegistry.refresh(),
-    });
-
-    // /skill-new 创作入口 —— alt-screen AI 编辑屏,把刚做的事 / 一个想法收成技能。同样
-    // 注册在 /<name> 动态源之前(撞名探测可见);LLM 走 main 档单发(质量敏感撰写),落盘
-    // 经 Store.create,保存后刷新 /<name> 补全让新技能即时可唤醒。
-    registerSkillNewCommand({
-      registry: tRegistry,
-      dispatcher: typeaheadDispatcher,
-      rl,
-      renderer,
-      screen: renderScreen,
-      writer: cliWriter,
-      callText: (prompt) => session.runtime.callText(prompt, "main"),
-      createSkill: (draft) => session.skillStore.create(draft),
-      getMessages: () => state.conv.messages,
-      getDefaultMode: () =>
-        session.activeMode.kind === "workscene" ? "work" : "main",
-      refreshCommands: () => tRegistry.refresh(),
-      isLibraryEmpty: async () =>
-        (await session.skillStore.listAll()).length === 0,
-    });
-
-    // /skill-add 接入入口 —— 外部技能(本地路径)经扫描 + AI 研判后入库。同样注册在
-    // /<name> 动态源之前(撞名探测可见);研判 LLM 走 main 档,接入后刷新 /<name> 补全。
-    registerSkillAddCommand({
-      registry: tRegistry,
-      dispatcher: typeaheadDispatcher,
-      rl,
-      renderer,
-      screen: renderScreen,
-      writer: cliWriter,
-      callText: (prompt) => session.runtime.callText(prompt, "main"),
-      skillStore: session.skillStore,
-      refreshCommands: () => tRegistry.refresh(),
-    });
-
-    // 技能 /<name> 动态唤醒 —— 把技能库投影成 execution:"agent" 命令。注册在
-    // builtin / task 命令之后,撞名探测(findExisting)才看得见它们、让核心命令优先。
-    // 初次 refresh 把当前技能集拉进补全缓存;后续创建 / 接入技能由各自流程触发
-    // registry.refresh() 增量纳入(刷新触发点随创作 / 接入单元落地,本单元只接入唤醒)。
-    tRegistry.registerDynamicSource(
-      new SkillCommandSource({
-        listAll: () => session.skillStore.listAll(),
-        findExisting: (name) => tRegistry.findByName(name),
-      }),
-    );
-    await tRegistry.refresh();
-
-    // 屏幕底部任务区 —— 订阅 service 变化驱动 setStatusTail。
-    // 仅在有 renderScreen（capability.ok）时装配；无 chrome 终端走 legacy 路径
-    // 没有 status / input chrome，也不需要 tail。
+    // 屏幕底部任务区 —— 订阅 service 变化驱动 setStatusTail，仅 chrome 终端需要。
     if (renderScreen) {
       taskTail = new TaskTail({
         screen: renderScreen,
@@ -1837,7 +1823,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   // 屏幕协调器），inputController 长生命周期持有 buffer / chrome / panel / paste，turn 间不
   // cleanup；主循环每轮 await inputController.waitOnce() 拿下次用户输入。
   let inputController: InputController | null = null;
-  if (useTypeahead && typeaheadBroker && typeaheadDispatcher) {
+  if (useTypeahead && typeaheadBroker) {
     // 底部信息行内容容器(来源无关)。本期唯一来源是 InputController 自身
     // (输入态 → "esc 清空");未来其他来源(系统事件等)持本引用 set 即可。
     const bottomInfo = new BottomInfoModel();
