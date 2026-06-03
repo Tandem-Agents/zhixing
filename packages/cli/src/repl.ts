@@ -66,9 +66,9 @@ import { switchToNewConversation } from "./runtime/switch-to-new-conversation.js
 import { TaskTail } from "./task-tail/index.js";
 import { registerTaskCommands } from "./commands/task-commands.js";
 import { registerInfoCommands } from "./commands/info-commands.js";
+import { registerSessionCommands } from "./commands/session-commands.js";
 import { SkillCommandSource } from "./commands/skill-command-source.js";
 import { FEATURE_CHROME, chromeOnlyVisibility } from "./commands/command-visibility.js";
-import { formatRelativeTime } from "./commands/format.js";
 import { registerSkillsCommand } from "./skills/manager-command.js";
 import { registerSkillNewCommand } from "./skills/authoring-command.js";
 import { registerSkillAddCommand } from "./skills/admission-command.js";
@@ -238,16 +238,12 @@ type ReplCommandMeta = {
 
 const REPL_COMMAND_META: ReadonlyArray<ReplCommandMeta> = [
   // ─ session ─
-  { name: "new", description: "创建新对话", category: "session", legacyKey: "/new" },
-  { name: "clear", description: "清空对话历史", category: "session", legacyKey: "/clear" },
-  { name: "resume", description: "切换到其他对话", category: "session", legacyKey: "/resume" },
-  { name: "name", description: "为当前会话命名", category: "session", legacyKey: "/name" },
   { name: "exit", aliases: ["quit"], description: "退出工作场景 / 退出知行", category: "session", legacyKey: "/exit" },
-  // 注:info 域(help/status/me/model/usage/context/journal/people/tasks)已迁到现代
-  // 路径 commands/info-commands.ts,不再走本桥接表。
+  // 注:已迁到现代路径 commands/ 的命令不再走本桥接表——info 域(help/status/me/model/
+  // usage/context/journal/people/tasks)在 info-commands.ts;session 域(new/clear/resume/
+  // name/compact)在 session-commands.ts。
   // ─ tools ─
   { name: "work", description: "进入工作场景", category: "tools", legacyKey: "/work" },
-  { name: "compact", description: "手动触发上下文压缩", category: "tools", legacyKey: "/compact" },
   // ─ config ─
   { name: "config", description: "修改基础配置（服务商 / 模型 / API Key / 消息通道等）", category: "config", legacyKey: "/config", requiresChrome: true },
   { name: "mcp", description: "管理 MCP 服务（接入外部工具 / 启停 / 查看连接）", category: "config", legacyKey: "/mcp", requiresChrome: true },
@@ -263,11 +259,6 @@ function buildSlashCommands(
   renderer: OutputRenderer,
   cliWriter: CliWriter,
   /**
-   * 当 /new / /resume 切换 conversation 成功后调用 —— 通知 cli UI 层（如 TaskTail）
-   * 刷新数据。/clear 不走此回调（service.clear 会 emit state=null 自动触发订阅）。
-   */
-  onConversationChanged: (() => void) | undefined,
-  /**
    * 模式切换唯一执行点 —— `/work`·`/exit` 命令 handler 经此触发（先 await
    * in-flight turn 到达 turn 边界，与主回路消费 pendingModeSwitch 同源）。
    */
@@ -276,16 +267,6 @@ function buildSlashCommands(
     source: "llm" | "command",
     triggerMsg?: Message,
   ) => Promise<void>,
-  /**
-   * 把屏幕清回"刚进入交互模式"的初始态(advisories + welcome chrome + 一行
-   * 轻量提示)。`/clear` 在清完数据后调用,无此能力(legacy 终端 / 无 chrome)
-   * 时为 undefined,handler 退回到仅写一行提示。extraLines 承接 handler 收集
-   * 的非致命 warning(如 reset 失败),与初始 region 内容一起重建,可观测性
-   * 不丢失。
-   */
-  clearScreenToInitial:
-    | ((extraLines?: readonly string[]) => void)
-    | undefined,
   /** MCP host —— `/mcp` 命令注入运行状态查询 + discovery 探测。 */
   mcpHub: McpHub,
   /**
@@ -301,206 +282,6 @@ function buildSlashCommands(
   }
 > {
   return {
-    "/clear": {
-      description: "清空对话历史",
-      handler: async (state) => {
-        // 走 store.compactAll 写一条 compact marker 原子重写 transcript——内存与
-        // 磁盘必须同时压缩才能让"清空"语义稳定（仅清内存会被下次 commitTurn 内
-        // loadNormalized 把磁盘老 turns 重新拼回 canonical 让历史回流）。
-        if (state.conv.conversationId) {
-          try {
-            state.conv.messages = await state.conv.store.compactAll(
-              state.conv.conversationId,
-              "(用户已清空对话历史)",
-            );
-          } catch (err) {
-            cliWriter.line(
-              chalk.red(
-                `\n  清空失败: ${err instanceof Error ? err.message : String(err)}\n`,
-              ),
-            );
-            return;
-          }
-        } else {
-          // 无 conversationId 路径（极少见，正常 cli 流程总有 conversation）——
-          // 仅清内存即可，无磁盘可清
-          state.conv.messages = [];
-        }
-
-        // 非致命 warning 收集到本地数组,末尾按 clearScreenToInitial 是否可用分流:
-        // chrome 路径(rebuild 会清 scroll region)把 warnings 作为 extraLines 一并
-        // 注入重建内容避免丢失;legacy 路径(无 rebuild)逐行 cliWriter 输出。
-        // 数组元素是不含 \n 的单行内容,由数组结构 / 各自输出路径控制换行。
-        const warnings: string[] = [];
-
-        // 视图层组件通过 Resettable 注册到 runtime；这里一并清空它们的对话级状态。
-        // 顺序：先磁盘清，后视图层 reset —— 失败时内存 messages 仍是 canonical
-        // 安全态，下一次 LLM call 不会因半态而异常。
-        try {
-          await session.runtime.resetConversationState();
-        } catch (err) {
-          warnings.push(
-            chalk.yellow(
-              `  视图层部分组件 reset 失败（不影响对话清空）: ${err instanceof Error ? err.message : String(err)}`,
-            ),
-          );
-        }
-        // 清空 conversation meta 的视图层状态（task_list / 段切换历史）。
-        // 与 transcript compact / runtime Resettable reset 同语义层级——
-        // /clear 是"重置对话内容到新起点"，conversation 身份字段保留不动。
-        if (state.conv.conversationId) {
-          try {
-            await state.conv.convRepo.clearViewLayerState(state.conv.conversationId);
-          } catch (err) {
-            warnings.push(
-              chalk.yellow(
-                `  conversation meta 视图层字段清空失败（不影响对话清空）: ${err instanceof Error ? err.message : String(err)}`,
-              ),
-            );
-          }
-          // task_list service cache 同步清空 —— 磁盘端已由 clearViewLayerState 处理。
-          // service 不实现 Resettable（process-wide 跨 conversation，不绑定 runtime
-          // 生命周期），由本路径显式调 clear(convId) 维护一致性。
-          state.taskListService.clear(state.conv.conversationId);
-        }
-        state.conv.turnCounter = 0;
-
-        if (clearScreenToInitial) {
-          clearScreenToInitial(warnings);
-        } else {
-          for (const w of warnings) cliWriter.line(w);
-          cliWriter.line(chalk.dim(`${layout.contentPrefix}对话历史已清空\n`));
-        }
-      },
-    },
-    "/new": {
-      description: "创建新对话",
-      handler: async (state, args) => {
-        const name = args.trim() || undefined;
-        try {
-          const created = await switchToNewConversation(
-            state.conv,
-            session,
-            state.taskListService,
-            { name, notify: onConversationChanged },
-          );
-          cliWriter.line(
-            chalk.dim(`\n  已创建新对话 ${chalk.cyan(created.name)}\n`),
-          );
-        } catch (err) {
-          cliWriter.line(
-            chalk.red(
-              `\n  创建对话失败: ${err instanceof Error ? err.message : String(err)}\n`,
-            ),
-          );
-        }
-      },
-    },
-    "/resume": {
-      description: "切换到其他对话",
-      handler: async (state, args) => {
-        const input = args.trim();
-        if (!input) {
-          const conversations = await state.conv.convRepo.list();
-          if (conversations.length === 0) {
-            cliWriter.line(chalk.dim("\n  没有可切换的对话\n"));
-            return;
-          }
-          cliWriter.line(`\n${chalk.bold("  可用对话：")}`);
-          for (let i = 0; i < Math.min(conversations.length, 15); i++) {
-            const c = conversations[i]!;
-            const label = c.name ? chalk.white(c.name) : chalk.dim(c.id);
-            const time = formatRelativeTime(new Date(c.lastActiveAt));
-            const turnCount = await state.conv.store.countTurns(c.id);
-            const current =
-              c.id === state.conv.conversationId ? chalk.green(" ← 当前") : "";
-            cliWriter.line(
-              `  ${label} ${chalk.dim(`(${time}, ${turnCount} 轮)`)}${current}`,
-            );
-          }
-          cliWriter.line(chalk.dim(`\n  使用 /resume <名称或 id> 切换\n`));
-          return;
-        }
-        if (input === state.conv.conversationId) {
-          cliWriter.line(chalk.dim("\n  已在当前对话中\n"));
-          return;
-        }
-
-        const conversations = await state.conv.convRepo.list();
-
-        // 按 ID 精确匹配
-        let target: { id: string; name: string } | null = null;
-        const conv = await state.conv.convRepo.get(input);
-        if (conv) target = { id: conv.id, name: conv.name };
-
-        // 按名称模糊匹配
-        if (!target) {
-          const lowerInput = input.toLowerCase();
-          const matches = conversations.filter(
-            (c) => c.name.toLowerCase().includes(lowerInput),
-          );
-          if (matches.length === 1) {
-            target = { id: matches[0]!.id, name: matches[0]!.name };
-          } else if (matches.length > 1) {
-            cliWriter.line(`\n${chalk.bold("  多个匹配：")}`);
-            for (const c of matches.slice(0, 10)) {
-              const time = formatRelativeTime(new Date(c.lastActiveAt));
-              cliWriter.line(
-                `  ${chalk.white(c.name)} ${chalk.dim(`(${time})`)}`,
-              );
-            }
-            cliWriter.line(chalk.dim(`\n  请使用更精确的名称或 id\n`));
-            return;
-          }
-        }
-
-        if (!target) {
-          cliWriter.line(chalk.red(`\n  对话 "${input}" 不存在\n`));
-          return;
-        }
-        if (target.id === state.conv.conversationId) {
-          cliWriter.line(chalk.dim("\n  已在当前对话中\n"));
-          return;
-        }
-
-        try {
-          const loaded = await state.conv.store.load(target.id);
-          state.conv.messages = loaded.messages;
-          state.conv.conversationId = target.id;
-          state.conv.turnCounter = loaded.turnCount;
-          // 加载目标对话的 task_list 持久化状态到 service cache
-          await state.taskListService.prime(target.id);
-          state.conv.convRepo.touch(state.conv.conversationId).catch(() => {});
-          onConversationChanged?.();
-          cliWriter.line(
-            chalk.dim(
-              `\n  已切换到 ${chalk.cyan(target.name)}（${loaded.turnCount} 轮对话）\n`,
-            ),
-          );
-        } catch (err) {
-          cliWriter.line(
-            chalk.red(
-              `\n  加载对话失败: ${err instanceof Error ? err.message : String(err)}\n`,
-            ),
-          );
-        }
-      },
-    },
-    "/name": {
-      description: "为当前会话命名",
-      handler: async (state, args) => {
-        if (!args.trim()) {
-          cliWriter.line(chalk.yellow(`${layout.contentPrefix}用法: /name <名称>\n`));
-          return;
-        }
-        if (!state.conv.conversationId) {
-          cliWriter.line(chalk.yellow(`${layout.contentPrefix}当前会话尚未保存\n`));
-          return;
-        }
-        await state.conv.convRepo.rename(state.conv.conversationId, args.trim());
-        cliWriter.line(chalk.dim(`${layout.contentPrefix}会话已命名为: ${args.trim()}\n`));
-      },
-    },
     "/work": {
       description: "进入工作场景(↑↓ 选择 · Enter 进入 · Ctrl+R 改名 · Ctrl+N 新建)",
       handler: async (state, args) => {
@@ -547,54 +328,6 @@ function buildSlashCommands(
           await state.activeTurnPromise.catch(() => {});
         }
         await applyModeSwitch({ kind: "enter", sceneId }, "command");
-      },
-    },
-    "/compact": {
-      description: "手动触发上下文压缩",
-      handler: async (state) => {
-        if (state.conv.messages.length < 4) {
-          cliWriter.line(chalk.dim("\n  对话历史过短，无需压缩\n"));
-          return;
-        }
-        cliWriter.line(chalk.yellow("\n  ⟳ 正在压缩上下文..."));
-        try {
-          const result = await session.runtime.forceCompact(
-            [...state.conv.messages],
-            state.conv.turnCounter,
-          );
-          if (result.modified) {
-            const pct = Math.round(result.budget.usageRatio * 100);
-            cliWriter.line(chalk.green(`  ✓ 压缩完成，当前上下文占用 ${pct}%\n`));
-            // 走 commitTurn({compactBefore}) 统一持久化入口：
-            //   - 仅在事务产生真 summary 时写 marker（避免 "(manual compact)" 假摘要）
-            //   - commitTurn 内部原子重写：header + compactBefore + retained turns
-            //   - 返回 canonical → state.conv.messages 整体替换，内存与磁盘严格一致
-            //   - 无会话 ID 或无真 summary 时降级为纯内存更新（不持久化）
-            if (state.conv.conversationId && result.compactBefore) {
-              try {
-                state.conv.messages = await state.conv.store.commitTurn(state.conv.conversationId, {
-                  compactBefore: result.compactBefore,
-                });
-              } catch (err) {
-                // 持久化失败：降级用 forceCompact 返回的内存版 messages
-                state.conv.messages = result.messages;
-                cliWriter.line(
-                  chalk.dim(
-                    `  [持久化警告] ${err instanceof Error ? err.message : String(err)}`,
-                  ),
-                );
-              }
-            } else {
-              // 无真 summary（非摘要型策略）或无会话 ID → 仅更新内存
-              state.conv.messages = result.messages;
-            }
-          } else {
-            cliWriter.line(chalk.dim("  已无可压缩内容\n"));
-          }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          cliWriter.line(chalk.red(`  ✗ 压缩失败: ${msg}\n`));
-        }
       },
     },
     "/trust": {
@@ -1243,9 +976,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     session,
     renderer,
     cliWriter,
-    () => taskTail?.refresh(),
     applyModeSwitch,
-    clearScreenToInitial,
     mcpHub,
     renderScreen,
   );
@@ -1276,48 +1007,6 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   // 交互层（补全 broker + 渲染）才依 chrome 分叉。
   const tRegistry = new DefaultCommandRegistry();
   const typeaheadDispatcher = new CommandDispatcher({ registry: tRegistry });
-
-  // /resume 的对话选择器 —— async-enum arg，闭包查 convRepo.list() 生成候选。
-  const conversationArgProvider: ArgChoiceProvider = {
-    async list(
-      ctx: ArgQueryContext,
-      signal: AbortSignal,
-    ): Promise<readonly ArgChoice[]> {
-      const conversations = await state.conv.convRepo.list();
-      if (signal.aborted) return [];
-
-      const query = ctx.query.toLowerCase();
-      const choices: ArgChoice[] = [];
-      for (const c of conversations.slice(0, 15)) {
-        if (query && !c.name.toLowerCase().includes(query) && !c.id.toLowerCase().includes(query)) {
-          continue;
-        }
-        const time = formatRelativeTime(new Date(c.lastActiveAt));
-        const turnCount = await state.conv.store.countTurns(c.id);
-        const current = c.id === state.conv.conversationId ? " ← 当前" : "";
-        choices.push({
-          value: c.id,
-          label: c.name || c.id,
-          description: `${time}, ${turnCount} 轮${current}`,
-        });
-      }
-      return choices;
-    },
-    // 选择器面板：从对话列表挑一个 conversationId 给 /resume。
-    mode: "picker",
-    // 候选支持 inline 删除（驱动 "delete ctrl+d" UI）。物理删除 + 业务编排
-    // （active 切换 / 自动新建 fallback）由 onCandidateDelete callback 在 cli 层
-    // 直调 convRepo 完成 —— 此处只声明能力，不承担执行。
-    inlineActions: { delete: true },
-  };
-
-  const resumeArgSchema: ArgSchema = {
-    kind: "async-enum",
-    name: "conversation",
-    description: "目标对话名称或 ID",
-    required: true,
-    provider: conversationArgProvider,
-  };
 
   // /work 的场景选择器 —— 查 workSceneRegistry.list() 生成候选，与 resume 同构。
   // inlineActions 声明 delete / rename / create：删除走 onCandidateDelete（work
@@ -1375,11 +1064,10 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     provider: createTrustRuleArgProvider(session.runtime.securityPipeline),
   };
 
-  // 命令元信息单源在文件顶层 REPL_COMMAND_META —— 桥接循环把每条注册进 registry +
-  // dispatcher（handler 包装 legacy slashCommands 闭包）。args 字段不在元信息内，
-  // 在此按命令名注入（resume / work / trust 各需一个 async-enum 选择器）。
+  // 桥接循环把每条 REPL_COMMAND_META 注册进 registry + dispatcher（handler 包装 legacy
+  // slashCommands 闭包）。args 不在元信息内，在此按命令名注入（work / trust 各需一个
+  // async-enum 选择器；resume 已随 session 域迁出、其 arg 在 session-commands 内构造）。
   const argsByName: Record<string, ReadonlyArray<ArgSchema>> = {
-    resume: [resumeArgSchema],
     work: [workSceneArgSchema],
     trust: [trustRuleArgSchema],
   };
@@ -1424,6 +1112,21 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     getTurnCounter: () => state.conv.turnCounter,
     getNetworkProxy: () => state.networkProxy,
     getScheduler: () => state.scheduler,
+  });
+
+  // session 域命令（new/clear/resume/name/compact）—— 对话生命周期，会读写 active conv，
+  // 故 getConv / getRuntime 以 getter 注入；taskListService 是跨 reload 单例直接注入。
+  // /resume 的对话选择器在模块内构造、落进 CommandDef.args，其 inline 删除的物理执行仍由
+  // 下方交互层 onCandidateDelete 承担。
+  registerSessionCommands({
+    registry: tRegistry,
+    dispatcher: typeaheadDispatcher,
+    writer: cliWriter,
+    getConv: () => state.conv,
+    getRuntime: () => session.runtime,
+    taskListService: state.taskListService,
+    onConversationChanged: () => taskTail?.refresh(),
+    clearScreenToInitial,
   });
 
   // task_list cli 命令组 —— 不走 legacy slashCommands 桥接，直接注册到 registry +
