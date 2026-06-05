@@ -45,6 +45,7 @@ export interface SwitchToNewConversationSession {
     readonly model: string;
     readonly providerId: string;
     resetConversationState(): Promise<void>;
+    onAttentionWindowChange(reason: "resume"): Promise<void>;
   };
 }
 
@@ -94,6 +95,13 @@ export async function switchToNewConversation(
     await session.runtime.resetConversationState();
   } catch {
     /* 非致命:视图层组件 reset 失败不阻塞切换;runtime 自身仍可用 */
+  }
+  // /resume 换对话 = 注意力窗口换代 —— 开新窗触发 onWindowClose(resume)→
+  // onWindowOpen(resume),更新实例权威 prompt。失败非致命、不阻塞切换。
+  try {
+    await session.runtime.onAttentionWindowChange("resume");
+  } catch {
+    /* 非致命:窗口重建失败不阻塞切换;下个 run 仍可用当前 prompt */
   }
   try {
     await conv.convRepo.clearViewLayerState(created.id);

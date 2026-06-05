@@ -554,7 +554,19 @@ export class RuntimeSession implements IWorkModeController {
    */
   async exitWorkMode(): Promise<void> {
     if (!this.workScene) return;
+    const work = this.workScene.runtime;
     this.swapConfirmationBroker(this.agentRuntime);
+    // work 运行体末窗 onWindowClose —— overlay 丢弃即实例销毁,置 undefined 前
+    // 触发（否则失 ref）。失败仅 warn,不阻断退出。
+    try {
+      await work.dispose("workmode-exit");
+    } catch (err) {
+      this.opts.writer.notify(
+        chalk.yellow(
+          `  ⚠ 退出工作模式时运行体收尾失败: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
+    }
     this.workScene = undefined;
   }
 
@@ -646,14 +658,37 @@ export class RuntimeSession implements IWorkModeController {
           : null,
       };
 
-      // Swap fields——新资源全部活跃后所有 closure getter 自动指向新值
+      // Swap fields——新资源全部活跃后所有 closure getter 自动指向新值。旧 main /
+      // power 运行体在 swap 前触发末窗 onWindowClose("reload-replace")——不搭
+      // disposeOldInBackground 便车（old 不含 agentRuntime、且受 channels 守卫门控、
+      // agent-only reload 不执行）。末窗第一版 no-op、await 瞬时;失败仅 warn。
       if (built.newAgentRuntime) {
+        const oldAgent = this.agentRuntime;
+        try {
+          await oldAgent.dispose("reload-replace");
+        } catch (err) {
+          this.opts.writer.notify(
+            chalk.yellow(
+              `  ⚠ 旧运行体收尾失败: ${err instanceof Error ? err.message : String(err)}`,
+            ),
+          );
+        }
         this.agentRuntime = built.newAgentRuntime;
       }
       // 工作模式下连带 swap power（保 sceneId，只换 runtime 实例）——getter
       // runtime()=workScene.runtime 随之指向新 power；REPL 侧 ConversationRuntimeState
       // 不受影响（reload 只换 runtime 实例、不碰对话运行态，两份运行态不丢）。
       if (built.newPowerRuntime && this.workScene) {
+        const oldPower = this.workScene.runtime;
+        try {
+          await oldPower.dispose("reload-replace");
+        } catch (err) {
+          this.opts.writer.notify(
+            chalk.yellow(
+              `  ⚠ 旧运行体收尾失败: ${err instanceof Error ? err.message : String(err)}`,
+            ),
+          );
+        }
         this.workScene = {
           ...this.workScene,
           runtime: built.newPowerRuntime,
@@ -773,7 +808,15 @@ export class RuntimeSession implements IWorkModeController {
       if (newChannels) {
         await newChannels.dispose().catch(() => {});
       }
-      // newAgentRuntime / newPowerRuntime 无 dispose 接口——孤立后自然 GC
+      // 已激活的新 main / power 运行体（createAgent 成功、首窗 onWindowOpen 已触发）
+      // 补末窗 onWindowClose("assembly-rollback")——否则其末窗永不触发。回滚路径
+      // 吞错（已在抛 ReloadBuildError）。
+      if (newAgentRuntime) {
+        await newAgentRuntime.dispose("assembly-rollback").catch(() => {});
+      }
+      if (newPowerRuntime) {
+        await newPowerRuntime.dispose("assembly-rollback").catch(() => {});
+      }
       const cause = err instanceof Error ? err : new Error(String(err));
       throw new ReloadBuildError(
         `build failed during reload: ${cause.message}`,
@@ -827,9 +870,21 @@ export class RuntimeSession implements IWorkModeController {
   async dispose(): Promise<void> {
     this.disposed = true;
 
-    // 若在工作模式：先丢弃 workScene overlay（power runtime 无 dispose 接口、
-    // 内部全 in-memory，失 ref 即 GC），再走现有 main 资源 dispose 链。
-    this.workScene = undefined;
+    // 若在工作模式：先触发 work 运行体末窗 onWindowClose（dispose 前 workScene
+    // 须仍在,否则失 ref）,再置空、走 main 资源 dispose 链。
+    if (this.workScene) {
+      const work = this.workScene.runtime;
+      try {
+        await work.dispose("session-dispose");
+      } catch (err) {
+        this.opts.writer.notify(
+          chalk.yellow(
+            `  ⚠ 运行体收尾失败: ${err instanceof Error ? err.message : String(err)}`,
+          ),
+        );
+      }
+      this.workScene = undefined;
+    }
 
     // 先 detach renderer，防 dispose 后访问已释放的 broker
     this.currentBrokerDetach?.();
@@ -863,6 +918,15 @@ export class RuntimeSession implements IWorkModeController {
         );
       }
     }
-    // agentRuntime 无 dispose 接口——内部全 in-memory，replace ref 后自然 GC
+    // main 运行体末窗 onWindowClose（销毁链最后一步）。失败仅 warn,不抛。
+    try {
+      await this.agentRuntime.dispose("session-dispose");
+    } catch (err) {
+      this.opts.writer.notify(
+        chalk.yellow(
+          `  ⚠ 运行体收尾失败: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
+    }
   }
 }

@@ -98,6 +98,7 @@ function setup(convOverrides: Partial<Record<string, unknown>> = {}): Harness {
         model: "m",
         providerId: "p",
         resetConversationState: vi.fn(async () => {}),
+        onAttentionWindowChange: vi.fn(async () => {}),
         forceCompact: vi.fn(async () => ({ modified: false })),
       }) as unknown as ReturnType<SessionCommandsDeps["getRuntime"]>,
     taskListService: { prime: taskPrime, clear: taskClear },

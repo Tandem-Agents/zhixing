@@ -84,6 +84,7 @@ function makeSession(
       model: "test-model",
       providerId: "test-provider",
       resetConversationState: vi.fn(resetImpl ?? (() => Promise.resolve())),
+      onAttentionWindowChange: vi.fn(() => Promise.resolve()),
     },
   };
 }

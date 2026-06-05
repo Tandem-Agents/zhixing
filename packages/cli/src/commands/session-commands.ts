@@ -162,6 +162,19 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
     }
     conv.turnCounter = 0;
 
+    // /clear 既是 conversation 数据重置、也是注意力窗口换代 —— 开新窗触发
+    // onWindowClose(clear)→onWindowOpen(clear),更新实例权威 prompt（重建 skill
+    // 索引等数据驱动段）。失败仅 warn,不阻断清空。
+    try {
+      await deps.getRuntime().onAttentionWindowChange("clear");
+    } catch (err) {
+      warnings.push(
+        chalk.yellow(
+          `  注意力窗口重建失败（不影响对话清空）: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
+    }
+
     if (deps.clearScreenToInitial) {
       deps.clearScreenToInitial(warnings);
     } else {
