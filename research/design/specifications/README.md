@@ -28,6 +28,7 @@
 | 018 | 输入区视觉规范（box chrome + 多行扩展 + typeahead 选中行点阵纹理同源） | [input-zone-visual.md](input-zone-visual.md) | 设计中 |
 | 019 | 轻量工具循环（来源无关原语：代码发起 + 注入工具集 + 多轮 LLM 决策，事实焊死/判断信任） | [lightweight-tool-loop.md](lightweight-tool-loop.md) | 设计中 |
 | 020 | MCP Host（船坞）（连接层 + 映射层 + 事实驱动接入 + 搜索引导） | [mcp-host.md](mcp-host.md) | 部分实施 |
+| 021 | 主对话运行体生命周期钩子（实例建立/run 前/run 后/实例销毁 四阶段 + cache 安全 system prompt 重建 + skill 索引边界重建） | [agent-runtime-lifecycle.md](agent-runtime-lifecycle.md) | 设计中 |
 
 ## 编写规范
 

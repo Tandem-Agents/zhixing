@@ -4,7 +4,7 @@
 
 ## 一、设计原则
 
-- **runtime 不可变契约保留**：reload = `create new` + `replace ref` + `dispose old`，不引入 mutable refs 或 lazy build cache 等内部状态；`AgentRuntime` 仍是不可变值
+- **runtime 不可变契约保留（约束 reload 路径）**：reload = `create new` + `replace ref` + `dispose old`，**绝不靠原地改 runtime 字段热替换配置**；reload 机制本身不引入用于热改配置的 mutable 字段。此契约约束的是 reload 路径，不等于「runtime 无任何可变状态」——runtime 内部本就持有受控的实例级可变状态（`turnContextInjector` providers、`resettables`，以及 [agent-runtime-lifecycle.md](./agent-runtime-lifecycle.md) §5.3 的 system-prompt 边界重建 `promptHolder`、§四④ 的 `dispose` 钩子触发点），它们服务于单实例生命周期内的演化、不改变 reload 的 blue-green 换代语义
 - **零跨包 API 改动**：除 `CreateAgentRuntimeOptions` 加一个向后兼容的 optional 字段（`permissionStore?`），不动 orchestrator 公共 API、不动 tools-builtin、不动 core/scheduler/channels/delivery 任何接口
 - **会话级单例归属正确**：用户运行期授权（`PermissionStore` session scope）从 runtime 内部 new 抽到 session 持有，跨 reload 复用——避免改完配置后用户授权全丢的 UX 灾难
 - **边界清晰**：`RuntimeSession` 只管协同资源生命周期；不读 REPL state、不感知 turn 状态、不感知用户输入——业务流程归 REPL

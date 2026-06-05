@@ -663,17 +663,26 @@ export async function createAgentRuntime(
   // systemPrompt 后置到 tools 装配完成之后 —— Task 工具的描述文本需进入
   // ## Tool Usage 段,LLM 才能学习"何时派 Task / 何时直接调单工具"的决策。
   //
-  // ⚠ Prompt cache 死线:此处是 main agent systemPrompt 的**唯一构造点**,
-  // 整个 runtime 生命周期内 byte-equal 不变。每轮 run() 在 line ~944 把同一
-  // 字符串引用透传给 runAgentLoop —— 不得在 run() / loop / LLM call 路径里
-  // 重建 systemPrompt,不得追加 per-turn 信息(时间走 turn-context 注入,
-  // tools[] 装配一次 freeze 不变)。详见 buildSystemPrompt 的"调用契约"注释。
+  // ⚠ Prompt cache 死线:此处是 main agent systemPrompt 的**唯一构造点**。
+  // cache 不变量的范围是「单个注意力窗口」而非「整个 runtime 永久」——窗口内
+  // byte-equal 不动,跨窗口边界(段切换 / compact / clear / resume)才允许重建
+  //(检查→变了才换、没变 byte-equal 不动;本意见 skill-system.md §3.1 /
+  // lifecycle-concepts.md)。运行时跨窗口重建尚未落地(规划见
+  // agent-runtime-lifecycle.md / runtime-session-hot-reload.md),故现状仍是装配期
+  // 构造一次、每轮 run() 透传同一字符串引用——这是当前实现状态,非「永久不可变」
+  // 的概念契约。任何时候都不得在 run() / loop / LLM call 路径里重建 systemPrompt
+  //(那在窗口内),不得追加 per-turn 信息(时间走 turn-context 注入;tools[] 装配
+  // 一次 freeze 不变——tools 是 reload 级冻结、比注意力窗口更强)。详见
+  // buildSystemPrompt 的"调用契约"注释。
   //
   // 技能索引段(渐进披露的"廉价目录"):装配期取该模式 top-N 渲染成文本,作为
   // 系统提示词稳定前缀的一段一次性注入(模型按 id 调 load_skill 取全文展开)。
   // 在此预渲染而非 buildSystemPrompt 内部取数,是为让后者保持纯同步、不耦合
-  // SkillStore —— 技能扫描的磁盘 I/O 归装配方,与 systemPrompt 同生命周期(切模式
-  // = 重建 runtime = 新窗口,故窗口内 byte-equal 不变)。无技能 → null → 段跳过。
+  // SkillStore —— 技能扫描的磁盘 I/O 归装配方。skill 索引落在 systemPrompt 稳定
+  // 前缀,同受「注意力窗口内 byte-equal、跨窗口边界才重建」约束——窗口换代含段
+  // 切换 / compact / clear / resume,以及切模式=重建 runtime(不止后者)。现状仅
+  // 装配期注入一次,运行时窗口边界重建待落地(见 skill-system.md §3)。无技能 →
+  // null → 段跳过。
   const skillIndex = renderSkillIndex(
     await skillStore.queryTopN(skillMode, SKILL_INDEX_TOP_N),
   );

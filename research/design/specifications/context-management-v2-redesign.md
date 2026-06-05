@@ -4,6 +4,8 @@
 >
 > 本方案的"滑动窗口 + 任务纪要 + capability LRU"范式与 Anthropic prompt cache 元规则①（前缀任何位置变化让其后内容缓存失效）冲突。已被 [`context-management-v3-redesign.md`](./context-management-v3-redesign.md)（cache 第一优先 + 优质注意力窗口 + 段式管理 + tools 满载稳定）取代。本文保留为决策痕迹，不再作为实施依据。
 >
+> 另注：本文多处"system prompt 启动构造一次、永远 byte-equal"是 v2「不引入运行时重建」语境下的表述。cache 不变量的范围其后已收窄为「**单个注意力窗口**内 byte-equal、跨窗口边界（段切换 / compact / clear / resume）才允许重建」，不是 runtime 永久不变——以 [`context-management-v3-redesign.md`](./context-management-v3-redesign.md) / [`../drafts/lifecycle-concepts.md`](../drafts/lifecycle-concepts.md) 为准。本文正文保留原貌、不逐处订正。
+>
 > ---
 >
 > **状态**: 📐 方向已敲定（2026-05-08），spec 阶段未启动

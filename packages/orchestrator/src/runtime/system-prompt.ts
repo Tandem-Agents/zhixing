@@ -174,18 +174,25 @@ export interface PromptBuildContext {
  * 精简集——仅 identity / principles / tool-usage / safety 四段,其余由子任务
  * 专注 / 输出回写父 / prompt cache 友好等理由排除)。
  *
- * ─── 调用契约: SystemPrompt 一旦构造,生命周期内 byte-equal 不变 ───
+ * ─── 调用契约: SystemPrompt 在「一个 cache 周期」内 byte-equal 不变 ───
  * 这是 prompt cache 的死线 —— 系统提示词作为缓存前缀的最前段,任何变化
  * (插入时间戳 / 重排段顺序 / 让 ctx.tools 在装配后变化等)都会破坏前缀缓存,
- * 让此后所有消息都得重新计费。所以本函数必须由调用方在 runtime 装配阶段
- * 调用一次,把返回字符串绑定到长生命周期上下文(主 agent 走
- * create-agent-runtime,子 agent 走 subagent/factory),后续每轮 run() / LLM
- * call 一律透传该字符串,不得重建、不得在末尾追加 per-turn 信息。
+ * 让此后所有消息都得重新计费。cache 周期的范围因调用方而异:
+ *   - 主 agent(main / power,走 create-agent-runtime):cache 周期 = 单个**注意力
+ *     窗口**;窗口内 byte-equal 不动,跨窗口边界(段切换 / compact / clear / resume)
+ *     才允许重建,重建是「检查→变了才换、没变 byte-equal 不动」(本意见
+ *     skill-system.md §3.1 / lifecycle-concepts.md)。运行时跨窗口重建尚未落地
+ *     (规划见 agent-runtime-lifecycle.md),故现状是装配期构造一次。
+ *   - 子 agent(走 subagent/factory):不启用段切换、无窗口换代,整个子 agent 生命
+ *     周期 byte-equal(byte-equal-across-spawns,见 context-management-v3-redesign.md §8.4)。
+ * 两类都在装配阶段构造一次、把字符串绑定到对应生命周期上下文,后续每轮 run() /
+ * LLM call 一律透传,**不得在 run() / loop / LLM call 路径里重建**(那在窗口/生命
+ * 周期内),不得在末尾追加 per-turn 信息。
  *
  * Per-turn 动态信息(当前时间 / 任务状态 / 工作目录变更等)通过 turn-context
  * 注入到末尾 user message,**不**进入 systemPrompt(参见 TimeProvider /
- * TurnContextInjector 注释)。tools[] 在 session 创建后冻结不变,prompt 内
- * tool-usage 段与 API tools[] 字段同源稳定。
+ * TurnContextInjector 注释)。tools[] 在 session 创建后冻结不变(reload 级、比注意
+ * 力窗口更强),prompt 内 tool-usage 段与 API tools[] 字段同源稳定。
  */
 export function buildSystemPrompt(ctx: PromptBuildContext): string {
   const profile = ctx.profile ?? mainProfile();
