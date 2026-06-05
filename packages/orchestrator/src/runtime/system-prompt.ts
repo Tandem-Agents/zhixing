@@ -152,6 +152,13 @@ export interface PromptBuildContext {
    * buildSystemPrompt 借此保持纯同步、不触磁盘 —— 技能扫描的 I/O 归装配方。
    */
   skillIndex?: string | null;
+  /**
+   * 段内容运行时覆盖 —— 数据驱动段(如 skill-index)在注意力窗口边界经
+   * updateSystemPromptSegment 贡献的最新内容。renderSegment 渲染每段前先查此处:
+   * 命中(含显式 null=清空该段)即用之、不走默认渲染。装配方据此让 system prompt
+   * 的数据驱动段随窗口边界重建,而无需把可变数据源耦进本纯函数。
+   */
+  segmentOverrides?: Partial<Record<SystemPromptSegment, string | null>>;
 }
 
 // ─── 主构建函数 ───
@@ -226,6 +233,11 @@ function renderSegment(
   ctx: PromptBuildContext,
   profile: AgentRoleProfile,
 ): string | null {
+  // 运行时段覆盖优先 —— 数据驱动段经窗口边界更新写入 segmentOverrides;
+  // 命中(含显式 null=清空该段)即用之、不走默认渲染。
+  if (ctx.segmentOverrides && segment in ctx.segmentOverrides) {
+    return ctx.segmentOverrides[segment] ?? null;
+  }
   switch (segment) {
     case "identity":
       return renderIdentity(profile);

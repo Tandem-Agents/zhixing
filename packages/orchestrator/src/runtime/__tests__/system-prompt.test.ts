@@ -775,3 +775,52 @@ describe("buildSystemPrompt · profile + segments 扩展点", () => {
     expect(prompt.indexOf("# Tone")).toBeLessThan(prompt.indexOf("I am Bot."));
   });
 });
+
+describe("segmentOverrides(段内容运行时覆盖)", () => {
+  const base = { tools: defaultTools, cwd: "/test/project" };
+
+  it("覆盖 skill-index 段:输出含 override 内容", () => {
+    const out = buildSystemPrompt({
+      ...base,
+      segmentOverrides: { "skill-index": "## OVERRIDE-SKILLS" },
+    });
+    expect(out).toContain("## OVERRIDE-SKILLS");
+  });
+
+  it("override 优先于 ctx.skillIndex", () => {
+    const out = buildSystemPrompt({
+      ...base,
+      skillIndex: "OLD-FROM-FIELD",
+      segmentOverrides: { "skill-index": "NEW-FROM-OVERRIDE" },
+    });
+    expect(out).toContain("NEW-FROM-OVERRIDE");
+    expect(out).not.toContain("OLD-FROM-FIELD");
+  });
+
+  it("override 为 null:该段被跳过", () => {
+    const withSkill = buildSystemPrompt({ ...base, skillIndex: "SOME-SKILLS" });
+    expect(withSkill).toContain("SOME-SKILLS");
+    const cleared = buildSystemPrompt({
+      ...base,
+      skillIndex: "SOME-SKILLS",
+      segmentOverrides: { "skill-index": null },
+    });
+    expect(cleared).not.toContain("SOME-SKILLS");
+  });
+
+  it("不传 / 空 segmentOverrides:输出 byte-equal 历史(无回归)", () => {
+    const a = buildSystemPrompt(base);
+    const b = buildSystemPrompt({ ...base, segmentOverrides: {} });
+    expect(b).toBe(a);
+  });
+
+  it("可覆盖任意段(如 identity)、与默认渲染不同", () => {
+    const def = buildSystemPrompt(base);
+    const overridden = buildSystemPrompt({
+      ...base,
+      segmentOverrides: { identity: "## CUSTOM-IDENTITY" },
+    });
+    expect(overridden).toContain("## CUSTOM-IDENTITY");
+    expect(overridden).not.toBe(def);
+  });
+});
