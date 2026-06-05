@@ -1,6 +1,6 @@
 # 主对话运行体生命周期钩子 (Agent Runtime Lifecycle Hooks)
 
-> **状态**: 📐 方案设计（待实施）
+> **状态**: ✅ 已落地（orchestrator + core + cli + server，含测试拓扑）
 >
 > **定位**: 为 main / work 两类 user-facing 主对话 runtime 实例提供**四阶段生命周期钩子**——**注意力窗口开启 / 每次 run 前 / 每次 run 后 / 注意力窗口结束**。统一"在生命周期边界做注册式介入"的接入点，把散落在装配期、段切换、`/compact`、`/clear`、`/resume`、实例销毁处的各类"边界动作"收敛到同一抽象。首个内置消费者是 skill 索引的**注意力窗口边界重建**（承接 [skill-system.md](./skill-system.md) §3.2 预留、§3.3 描述的 `systemPrompt` 可重建插座）。
 >
@@ -524,6 +524,6 @@ cli 交互模式（REPL / -p，主用户面）启动时 `setDiagnosticLogger(() 
 
 | 字段 | 值 |
 |---|---|
-| 状态 | 方案设计，待实施 |
-| 前置依赖 | ① `SkillStore` 暴露 `version(mode)`（单调 + publish-after-commit，现状无、须先行）；② core agent-loop per-run 现取 + windowLifecycle 回调 + turn-end `windowChange` 扩展 + turn-begin 返回扩展（§十二 B）；③ `buildSystemPrompt` segmentOverrides 段覆盖（§十二 A.3） |
-| 实施完成后 | 在 [skill-system.md](./skill-system.md) §3.2/§3.3/§九 标注"注意力窗口边界重建已落地"；在 [lifecycle-concepts.md](../drafts/lifecycle-concepts.md) §二标注四钩子需求已实现 |
+| 状态 | ✅ 已落地 —— §十二 A–E（orchestrator 契约 / 双层 holder / core 换代信号 / cli 销毁链 / server async 化）+ D 测试拓扑全部实现并通过全包测试 |
+| 前置依赖 | ① `SkillStore` 暴露 `version(mode)`（单调 + publish-after-commit）✅；② core agent-loop per-run 现取 + windowLifecycle 回调 + turn-end `windowChange` 扩展 + turn-begin 返回扩展 ✅；③ `buildSystemPrompt` segmentOverrides 段覆盖 ✅ |
+| 关联文档已回写 | [skill-system.md](./skill-system.md) §3.2/§3.3/§九 已标注注意力窗口边界重建落地；[lifecycle-concepts.md](../drafts/lifecycle-concepts.md) §二已标注四钩子需求实现 |
