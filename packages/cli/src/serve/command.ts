@@ -1,23 +1,28 @@
 /**
- * `zhixing serve` 命令 — 启动常驻服务
+ * `zhixing serve` 命令 — 启动常驻服务（核心宿主）
  *
- * 流程：
- * 1. 加载/生成 token
- * 2. 创建 TranscriptStore
- * 3. 创建 RuntimeFactory + ConversationManager（用户/channel 会话）
- * 4. 连接社交通道（Channel Adapters — 按配置启用）
- * 5. 创建 DeliveryPipeline（依赖通道）
- * 6. 创建 Ephemeral Runtime（定时任务专用，绕过 ConversationManager）
- * 7. 创建 Scheduler（注入 delivery + runAgentTurn→ephemeral）
- * 8. 创建 ServerContext + 启动 runServer
- * 9. 等待停机（信号触发或主动 shutdown）
+ * 核心宿主 = 恒定核心（runtime + 会话态 owner 位 + Scheduler + RPC server）+ 一组**可挂载的
+ * 接入面**（access surface）。装配主干：
+ *   1. 备齐恒定核心前置（token / transcript / confirmationHub / mcpHub / builtinExtraTools /
+ *      runtimeFactory / CleanupRegistry）—— 接入面 setup 从这里读依赖
+ *   2. 建 AssemblyContext，`setupAccessSurfaces(pre-server)` 数据驱动装入 profile 启用的接入面
+ *      （MCP / 会话执行面 / 通道 / 投递栈 / 文本确认渲染器，产物写回 ctx）
+ *   3. 恒定核心后置（ephemeralRuntime / runAgentTurn / systemHandlers）—— ephemeralRuntime 消费
+ *      mcp 接入面 connectAll 后的工具目录，故排在 pre-server 接入面之后构造
+ *   4. 构造核心 Scheduler（读 ctx.deliveryStack）+ start + seed 系统任务
+ *   5. createServerContext + runServer
+ *   6. `setupAccessSurfaces(post-server)`（confirmationBridge，依赖 runServer 后的 connections）
+ *   7. registerCoreCleanup 用接入面产物注册 teardown（shutdown-chain，LIFO）
+ *   8. banner / idle reaper / waitForShutdown
+ *
+ * profile 不"砍主干"，只声明启用哪组接入面（见 PROFILES 描述符）；新增接入面 = 写一个
+ * AccessSurface 单元 + 在集合加名字，装配主干一行不改。接入面体系详见 access-surface.ts。
  */
 
 import {
   Scheduler,
   JsonTaskStore,
   RunRegistry,
-  LocalSchedulerFacade,
   computeStatusSummary,
   isInternal,
   createEventBus,
@@ -27,7 +32,7 @@ import {
   type SchedulerEventMap,
   type AgentTurnResult,
   type SchedulerFacade,
-  type ChannelRegistry,
+  type LocalSchedulerFacade,
   type TurnContext,
   JournalStore,
   TranscriptStore,
@@ -37,17 +42,12 @@ import {
   createServerContext,
   runServer,
   buildSystemHandlers,
-  ConversationManager,
   ConfirmationHub,
   DEFAULT_SERVER_CONFIG,
   ServerStateFile,
   CleanupRegistry,
-  TextConfirmationRenderer,
-  createConfirmationBridge,
-  type InboundRouter,
   type RunningServer,
   type ProcessLockPaths,
-  type ConfirmationBridge,
 } from "@zhixing/server";
 import type {
   ZhixingConfig,
@@ -61,13 +61,11 @@ import { createStdoutWriter } from "../screen/index.js";
 import {
   createBlockedRenderer,
 } from "../security/index.js";
-import { setupDelivery, type DeliveryStack } from "../setup-delivery.js";
 import { createMcpHub } from "@zhixing/mcp";
 import { createBuiltinExtraToolsAssembly } from "../runtime/builtin-extra-tools.js";
 import { parseServerSpecs } from "../runtime/mcp-config.js";
 import { InMemoryTaskListStore } from "../runtime/task-list-stores.js";
 import { registerCliTurnContextProviders } from "../runtime/turn-context-providers.js";
-import { setupChannels } from "./channels.js";
 import { createCliRuntimeFactory } from "./session-adapter.js";
 import { runEphemeralTurn } from "./ephemeral-executor.js";
 import { loadOrCreateToken } from "./token.js";
@@ -75,16 +73,11 @@ import { isDaemonChild } from "./self-exec.js";
 import { spawnDaemon } from "./daemon.js";
 import { homeToPort } from "./host-port.js";
 import { registerTailCleanup, registerCoreCleanup } from "./shutdown-chain.js";
+import { setupAccessSurfaces, type AssemblyContext } from "./access-surface.js";
+import { PROFILES, DEFAULT_PROFILE, type ServerProfile } from "./profile.js";
+import { ACCESS_SURFACES } from "./access-surfaces.js";
 
 const SERVER_VERSION = "0.1.0";
-
-/**
- * 核心宿主装配档位：
- * - full：全量（默认）—— 调度 + 会话执行面 + 通道 + MCP，显式 `zhixing serve` 用。
- * - schedule：最小调度宿主 —— 只装恒定核心（调度 + RPC server），省略会话执行面 /
- *   通道 / MCP eager 连接，供按需拉起（ensure）一个轻量定时宿主用。
- */
-export type ServerProfile = "schedule" | "full";
 
 export interface ServeOptions {
   port?: number;
@@ -130,12 +123,14 @@ function buildForwardedArgs(opts: ServeOptions): string[] {
   if (opts.port !== undefined) args.push("--port", String(opts.port));
   if (opts.host) args.push("--host", opts.host);
   if (opts.workspace) args.push("--workspace", opts.workspace);
-  if (opts.profile === "schedule") args.push("--profile", "schedule");
+  // profile 中立透传：有则原样传给 child（默认 full 时 opts.profile 为 undefined、不传，child 走默认）。
+  // 不枚举具体 profile 名——加新档位零改。
+  if (opts.profile) args.push("--profile", opts.profile);
   return args;
 }
 
 async function runServerProcess(opts: ServeOptions): Promise<void> {
-  const profile: ServerProfile = opts.profile ?? "full";
+  const profile: ServerProfile = opts.profile ?? DEFAULT_PROFILE;
   const zhixingHome = getZhixingHome();
   // 端口按 home 派生（同 home 同端口 → listen 的 EADDRINUSE 原子仲裁单例 + 并发安全；
   // 不同 home 不同端口 → 多实例并行不撞）。用户显式 --port 覆盖。
@@ -146,7 +141,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   // schedule 档只校验 model（最小调度宿主不需要通道凭证）。缺字段且 TTY 触发配置编辑器，
   // 否则 fail-fast。
   const startupResult = await runStartupCheck({
-    mode: profile === "full" ? "server" : "schedule",
+    mode: PROFILES[profile].startupMode,
   });
 
   if (startupResult.kind !== "ready") {
@@ -185,22 +180,26 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   const config: ZhixingConfig = startupResult.config;
   const credentials: ZhixingCredentials = startupResult.credentials;
 
+  // ============================================================================
+  // 恒定核心前置 —— 与 profile 无关，schedule / full 都装。接入面 setup 从这里读依赖。
+  // ============================================================================
+
   // 1. token
   const tokenInfo = await loadOrCreateToken();
   if (tokenInfo.generated) {
     console.log(chalk.dim(`Generated new token: ${tokenInfo.path}`));
   }
 
-  // 2. TranscriptStore
+  // 2. TranscriptStore —— 会话执行面接入时读它做历史 / 落盘；schedule 档无副作用留位。
   const convDir = conversationsDir({ kind: "user" });
   const transcript = new TranscriptStore(convDir);
 
-  // 3. RuntimeFactory + ConversationManager
-  // scheduleTool → Scheduler → runAgentTurn → ConversationManager → runtimeFactory → scheduleTool
-  // 用 lazy getter 打破循环依赖（标准 IoC 模式）
+  // 3. Scheduler facade lazy ref —— 打破循环依赖（标准 IoC 模式）：
+  //    scheduleTool → Scheduler → runAgentTurn → ephemeralRuntime → scheduleTool
   let schedulerRef: Scheduler | null = null;
-  let schedulerFacadeRef: LocalSchedulerFacade | null = null;
   // schedule 工具经门面接入——daemon 内直调本进程 Scheduler（LocalSchedulerFacade）。
+  // 注：facade 实例化（schedulerFacadeRef 赋值）是 ensure+facade 接线步骤的落点，当前未接。
+  let schedulerFacadeRef: LocalSchedulerFacade | null = null;
   const getSchedulerFacade = (): SchedulerFacade => {
     if (!schedulerFacadeRef) throw new Error("Scheduler not initialized yet");
     return schedulerFacadeRef;
@@ -214,34 +213,29 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   const renderDecorator = createRenderSubscribers({ writer: serveWriter });
 
   // 3a. ConfirmationHub —— 远程权限确认聚合层（remote-confirmation-execution.md §3.2）
-  //   在 ConversationManager / setupChannels / ephemeralRuntime / ServerContext 之前创建，
-  //   以便各组件构造时能接入。未提供 hub 时 serve 模式会回退到"confirmation 永久 pending → expire"。
+  //   在会话执行面 / 通道 / ephemeralRuntime / ServerContext 之前创建，以便各组件构造时能接入。
   const confirmationHub = new ConfirmationHub();
 
-  // 3b. Builtin extra tools assembly —— task_list / schedule 工具的装配点，所有
-  //   per-session runtime 共享同一 service 单例（cache by sessionId/conversationId）。
-  //
-  // serve 模式当前用 InMemoryTaskListStore 作过渡 —— serve 不接入
-  // ConversationRepository，没有 meta.json 持久化路径。后续独立 PR 让 serve 接入
-  // conversation meta 后，把此处切换为 ConversationRepoTaskListStore（其余装配
-  // 代码不动，演化路径线性）。
-  // MCP host —— 连接 config.mcp 声明的外部 server。connectAll 在首个
-  // createAgentRuntime（assembleTools）之前完成，工具目录才能进入 system prompt。
-  // serve 进程内单例，多 session 共享同一批连接。空配置时为 no-op。
+  // 3b. MCP host —— 创建（不 eager 连接）。connectAll 由 mcp 接入面在 pre-server 阶段触发，
+  //   故 schedule 档（无 mcp 接入面）省去 eager 连接，仅 hub 对象在位、ephemeral 可用 builtin 工具。
+  //   serve 进程内单例，多 session 共享同一批连接。空配置时为 no-op。
   const mcpHub = createMcpHub(parseServerSpecs(config.mcp, credentials.mcp), {
     networkProxy: config.network?.proxy,
   });
-  // schedule 档不 eager 连接外部 MCP server（最小宿主要轻）；hub 对象仍在，
-  // ephemeral 执行可用 builtin 工具，只是没有 MCP 工具目录。
-  if (profile === "full") {
-    await mcpHub.connectAll();
-  }
 
+  // 3c. Builtin extra tools assembly —— task_list / schedule 工具的装配点，所有
+  //   per-session runtime 共享同一 service 单例（cache by sessionId/conversationId）。
+  //   serve 模式当前用 InMemoryTaskListStore 作过渡（serve 未接 ConversationRepository）。
   const builtinExtraTools = createBuiltinExtraToolsAssembly(
     new InMemoryTaskListStore(),
     mcpHub,
   );
 
+  // 3d. RuntimeFactory —— 会话执行面（接入面）建 per-session runtime 的工厂。schedule 档无
+  //   会话执行面，工厂作无副作用留位（不连接、不建目录）。
+  //   注：工厂内 createAgentRuntime 是 lazy（session 调用时才建），那时 mcp 接入面 connectAll
+  //   早已完成（pre-server 阶段），故工厂装配可前置、不受 connectAll 时序约束（与 eager 的
+  //   ephemeralRuntime 不同——后者须排在接入面之后，见下）。
   const runtimeFactory = createCliRuntimeFactory({
     createAgentRuntime: async (sessionId: string) => {
       // 从 sessionId（如 dm:feishu:ou_xxx）解析 origin，用于任务创建时自动捕获投递目标
@@ -278,108 +272,69 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
       return runtime;
     },
   });
-  // schedule 档不实例化会话执行面（只保留挂载位）；full 档点亮。
-  // 注：transcript / runtimeFactory 在 schedule 档是无副作用对象（不连接、不建目录），
-  // 作为会话执行面的依赖留位，故不额外条件化。
-  let conversations: ConversationManager | undefined;
-  if (profile === "full") {
-    conversations = new ConversationManager(runtimeFactory, undefined, {
-    loadHistory: async (conversationId) => {
-      try {
-        if (!(await transcript.exists(conversationId))) return undefined;
-        const loaded = await transcript.load(conversationId);
-        return loaded.messages;
-      } catch {
-        return undefined;
-      }
+
+  // 4. CleanupRegistry —— 唯一清理出口。LIFO 语义 + 跨包注入。注册序列封装在
+  //    shutdown-chain.ts，方便单测顺序正确性。post-server 接入面在自己 setup 内注册到此。
+  const registry = new CleanupRegistry({
+    logger: {
+      info: (msg) => console.log(chalk.dim(`[cleanup] ${msg}`)),
+      error: (msg, err) =>
+        console.error(chalk.red(`[cleanup] ${msg}`), err instanceof Error ? err.message : err),
     },
-    initTranscript: async (conversationId) => {
-      // 转写元数据反映实配主模型（provider/model 单一来源是 config.llm.main）。
-      await transcript.init(conversationId, {
-        model: config.llm?.main?.model ?? "default",
-        provider: config.llm?.main?.provider ?? "default",
-      });
-    },
-    // commitTurn 唯一原子持久化入口，返 canonical → ConversationManager
-    // 内部走 session.runtime.updateMessages(canonical) 完成单一事实源回喂
-    commitTurn: async (conversationId, payload) => {
-      return await transcript.commitTurn(conversationId, payload);
-    },
-    // 每次 getOrCreate 后自动把 runtime.confirmationBroker attach 到 hub；
-    // 四处 dispose（delete / grace / idle / disposeAll）前自动 detach。
+  });
+
+  // 4a. Daemon child 才启用 ServerStateFile——前台模式不写 state 文件
+  const isChild = isDaemonChild();
+  const stateFile = isChild ? new ServerStateFile() : undefined;
+  const heartbeatTimerRef: { current: NodeJS.Timeout | null } = { current: null };
+
+  // lockPaths —— 单一事实源。同时传给 runServer（acquireLock）和 registerTailCleanup（releaseLock），
+  // 保证 acquire/release 走同一路径。当前 undefined = 默认 ~/.zhixing/server.pid。
+  const lockPaths: ProcessLockPaths | undefined = undefined;
+
+  // ============================================================================
+  // 接入面装配 —— 数据驱动。profile 经 PROFILES.surfaces 声明启用哪组接入面，setupAccessSurfaces
+  // 按依赖拓扑序遍历、各自 setup（产物写回 ctx）。主干不出现任何 `if (profile === ...)`。
+  // ============================================================================
+  const ctx: AssemblyContext = {
+    profile,
+    config,
+    credentials,
+    zhixingHome,
     confirmationHub,
-    });
-  }
+    mcpHub,
+    transcript,
+    runtimeFactory,
+    cleanup: registry,
+  };
 
-  // 4. Channels（config + credentials 已在启动期顶部 load 完成）
-  let channels: ChannelRegistry | undefined;
-  let inboundRouter: InboundRouter | null = null;
-  if (conversations && config.messaging && Object.keys(config.messaging).length > 0) {
-    const channelLogger = {
-      debug: (msg: string, ...args: unknown[]) => console.log(chalk.dim(`[channel] ${msg}`), ...args),
-      info: (msg: string, ...args: unknown[]) => console.log(chalk.dim(`[channel] ${msg}`), ...args),
-      warn: (msg: string, ...args: unknown[]) => console.warn(chalk.yellow(`[channel] ${msg}`), ...args),
-      error: (msg: string, ...args: unknown[]) => console.error(chalk.red(`[channel] ${msg}`), ...args),
-    };
+  // pre-server 接入面：MCP（connectAll）/ 会话执行面 / 通道 / 投递栈 / 文本确认渲染器。
+  // 产物写回 ctx.conversations / channels / inboundRouter / deliveryStack / textRenderer。
+  await setupAccessSurfaces(ACCESS_SURFACES, ctx, "pre-server");
 
-    try {
-      const result = await setupChannels({
-        entries: config.messaging,
-        credentials,
-        conversations,
-        logger: channelLogger,
-        // InboundRouter pending-aware 拦截依赖 hub
-        confirmationHub,
-        // 用户配置的 cancel 关键词扩展（与 DEFAULT_CANCEL_KEYWORDS append 合并）
-        cancelKeywords: config.intent?.cancelKeywords,
-      });
-      channels = result.registry;
-      inboundRouter = result.router;
-    } catch (err) {
-      console.warn(chalk.yellow(`[channel] Setup failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`));
-    }
-  }
+  // ============================================================================
+  // 恒定核心后置 —— 须在 pre-server 接入面之后构造。
+  // ephemeralRuntime 经 builtinExtraTools.assembleTools 同步物化 mcpHub.catalog()（MCP 工具目录），
+  // 而 catalog 由 mcp 接入面 connectAll 填充；故这个 eager runtime 必须排在 mcp 接入面之后，
+  // 否则其 system prompt 缺 MCP 工具（runtimeFactory 是 lazy，session 调用时 connectAll 已完成，
+  // 不受此序约束、可前置）。
+  // ============================================================================
 
-  // 5. Delivery Pipeline（共享模块，serve/repl 同一路径）
-  let deliveryStack: DeliveryStack | undefined;
-  if (channels && config.messaging) {
-    deliveryStack = await setupDelivery({
-      channels,
-      zhixingHome,
-      logger: {
-        info: (msg) => console.log(chalk.dim(msg)),
-        warn: (msg) => console.warn(chalk.yellow(msg)),
-        error: (msg) => console.error(chalk.red(msg)),
-      },
-    });
-
-    // 5b. Late-bind Outbox 到 InboundRouter —— LLM 回复现在也过 Outbox（ADR-007 Phase 1）
-    if (inboundRouter) {
-      inboundRouter.setOutboxRegistry(deliveryStack.outboxRegistry);
-    }
-  }
-
-  // 6. Ephemeral Runtime — 定时任务专用（Step 16e）
+  // 4b. Ephemeral Runtime — 定时任务专用（恒定核心，不属任何接入面）。
   //
-  // 为什么独立于 conversations：
-  // - conversations (ConversationManager) 是为持久用户会话设计，会 initTranscript → 创建
-  //   conv_xxx/ 目录、累积消息历史、依赖 idle-reaper 释放。定时任务若走此路径，每次执行
-  //   都留下磁盘痕迹（即使内存被 reaper 回收），导致 conversations/ 无限膨胀。
+  // 为什么独立于会话执行面：
+  // - ConversationManager 为持久用户会话设计，会 initTranscript → 创建 conv_xxx/ 目录、累积
+  //   消息历史、依赖 idle-reaper 释放。定时任务若走此路径，每次执行都留磁盘痕迹，导致
+  //   conversations/ 无限膨胀。
   // - Ephemeral 执行对标 K8s Job / Serverless / Claude Code 子 Agent：任务独立、无身份、
   //   不累积历史、零磁盘痕迹。与持久用户会话是两套完全独立的语义。
   //
-  // 为什么共享单例 runtime 而非每任务新建：
-  // - createAgentRuntime 有 provider 连接、系统提示、项目上下文加载等启动成本
-  // - AgentRuntime.run() 本身对会话历史无状态（messages 每次传入），复用安全
-  // - Token estimator 校准、permission 规则跨任务共享是正收益
+  // 为什么共享单例 runtime 而非每任务新建：createAgentRuntime 有 provider 连接、系统提示、
+  // 项目上下文加载等启动成本；AgentRuntime.run() 对会话历史无状态（messages 每次传入），
+  // 复用安全；token estimator 校准、permission 规则跨任务共享是正收益。
   //
   // scheduleTool 的 origin：定时任务 AI 若创建子任务，origin=null（非用户发起）。
-  // 用户发起的任务走 channel → ConversationManager 路径，在那里 origin 已从
-  // sessionId（dm:feishu:ou_xxx）解析并在 task.origin 持久化。
-  // ephemeral 定时任务 runtime 用同一个 assembly 装配 extra tools —— 与持久会话
-  // runtime 共享同一 TaskListService。定时任务不传 conversationId 到 runtime.run，
-  // task_list 工具内部 ALS 取不到 conversationId 直接 isError 拒绝调用（不污染
-  // 任何 conversation 的 cache）—— 装配一致性 + 行为隔离两全。
+  // 用户发起的任务走会话执行面路径，origin 已从 sessionId（dm:feishu:ou_xxx）解析。
   const ephemeralRuntime = await createAgentRuntime({
     workspace: opts.workspace,
     extraTools: builtinExtraTools.assembleTools({
@@ -390,8 +345,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     decorateRunBus: renderDecorator,
     onSecurityBlocked: createBlockedRenderer(serveWriter),
     // Task 工具由默认 mainProfile().enabledTools 含 "Task" 自动装配；定时任务
-    // 的 ephemeral 执行路径同样可派发子 agent 隔离子任务（并发探查 / 大文档
-    // 检索 / 复杂工具链），与持久会话能力对齐。
+    // 的 ephemeral 执行路径同样可派发子 agent 隔离子任务，与持久会话能力对齐。
   });
   // ephemeral 定时任务 runtime 也走同一 helper —— 装配契约与 main session runtime
   // 完全对称。定时任务路径 runtime.run 不传 conversationId，TaskListProvider 闭包
@@ -407,29 +361,14 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     taskListService: builtinExtraTools.taskListService,
   });
 
-  // 6a. 把 ephemeralRuntime 的 broker 挂到 hub —— 定时任务的 confirmation 从这里流出。
+  // 4c. 把 ephemeralRuntime 的 broker 挂到 hub —— 定时任务的 confirmation 从这里流出。
   //     命名空间用 "ephemeral"（与 conversation broker 的 "conv:${convId}" 命名规约区分）。
   //     进程生命周期内不 detach——ephemeralRuntime 也不单独 dispose。
+  //     attach 与 hub.onEvent（textRenderer / bridge 订阅）相互独立，hub 是中介；装配期无
+  //     confirmation 流动，故 attach 落在 textRenderer 接入面之后亦安全。
   confirmationHub.attach("ephemeral", ephemeralRuntime.confirmationBroker);
 
-  // 6b. TextConfirmationRenderer —— 把 hub 的 request 事件翻译为通道纯文本消息。
-  //     必须在 channels 就绪后才有意义；无 channels 时本地只有 RPC 推送（未来 Bridge 接入后生效）。
-  let textRenderer: TextConfirmationRenderer | undefined;
-  if (channels) {
-    textRenderer = new TextConfirmationRenderer({
-      hub: confirmationHub,
-      channels,
-      logger: {
-        debug: (msg, ...args) => console.log(chalk.dim(`[confirm] ${msg}`), ...args),
-        info: (msg, ...args) => console.log(chalk.dim(`[confirm] ${msg}`), ...args),
-        warn: (msg, ...args) => console.warn(chalk.yellow(`[confirm] ${msg}`), ...args),
-        error: (msg, ...args) => console.error(chalk.red(`[confirm] ${msg}`), ...args),
-      },
-    });
-    textRenderer.start();
-  }
-
-  // 7. Scheduler
+  // 4d. Scheduler 装配的恒定核心料件（eventBus / runRegistry / runAgentTurn / systemHandlers）。
   const schedulerEventBus = createEventBus<SchedulerEventMap>();
 
   // RunRegistry —— 每个 ephemeral run 注册一个 AbortController,允许:
@@ -487,12 +426,16 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     },
   });
 
+  // ============================================================================
+  // 核心 Scheduler —— 吃 ctx.deliveryStack（delivery 构造期 readonly 不能 late-bind）。
+  // schedule 档 ctx.deliveryStack 为 undefined → 无投递。
+  // ============================================================================
   const scheduler = new Scheduler({
     store: new JsonTaskStore(),
     eventBus: schedulerEventBus,
     runAgentTurn,
     systemHandlers,
-    delivery: deliveryStack?.delivery,
+    delivery: ctx.deliveryStack?.delivery,
     logger: {
       info: (msg, data) => console.log(chalk.dim(`[scheduler] ${msg}`), data ? chalk.dim(JSON.stringify(data)) : ""),
       warn: (msg, data) => console.warn(chalk.yellow(`[scheduler] ${msg}`), data ? chalk.dim(JSON.stringify(data)) : ""),
@@ -512,45 +455,28 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     schedule: { kind: "cron", expr: "0 3 * * *" },
   });
 
-  // 8. ServerContext + runServer
-  const ctx = createServerContext({
+  // ============================================================================
+  // ServerContext + runServer —— 读接入面产物（conversations / channels）。
+  // ============================================================================
+  const serverCtx = createServerContext({
     config: { ...DEFAULT_SERVER_CONFIG, port, host },
     version: SERVER_VERSION,
     token: tokenInfo.token,
     scheduler,
-    conversations,
-    channels,
+    conversations: ctx.conversations,
+    channels: ctx.channels,
     confirmationHub,
     runRegistry,
   });
 
-  // 8a. Daemon child 才启用 ServerStateFile——前台模式不写 state 文件
-  const isChild = isDaemonChild();
-  const stateFile = isChild ? new ServerStateFile() : undefined;
-  const heartbeatTimerRef: { current: NodeJS.Timeout | null } = { current: null };
-
-  // lockPaths —— 单一事实源。同时传给 runServer（acquireLock）和 registerTailCleanup（releaseLock），
-  // 保证 acquire/release 走同一路径。当前 undefined = 默认 ~/.zhixing/server.pid。
-  const lockPaths: ProcessLockPaths | undefined = undefined;
-
-  // 8b. CleanupRegistry —— 唯一清理出口。LIFO 语义 + 跨包注入。
-  //     注册序列封装在 shutdown-chain.ts，方便单测顺序正确性。
-  const registry = new CleanupRegistry({
-    logger: {
-      info: (msg) => console.log(chalk.dim(`[cleanup] ${msg}`)),
-      error: (msg, err) =>
-        console.error(chalk.red(`[cleanup] ${msg}`), err instanceof Error ? err.message : err),
-    },
-  });
-
-  // 8b.1 runServer 之前：尾部清理（LIFO 最后执行 —— releaseLock / state 文件）
+  // runServer 之前：尾部清理（LIFO 最后执行 —— releaseLock / state 文件）
   registerTailCleanup(registry, { stateFile, heartbeatTimerRef, lockPaths });
 
-  // 8b.2 runServer —— 内部会向 registry 注册 server.close（注入模式）
+  // runServer —— 内部会向 registry 注册 server.close（注入模式）
   let runner: RunningServer;
   try {
     runner = await runServer({
-      context: ctx,
+      context: serverCtx,
       scheduler,
       schedulerEventBus,
       cleanupRegistry: registry,
@@ -563,66 +489,58 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     });
   } catch (err) {
     // runServer 抛错（startServer / acquireLock 冲突）—— server 未运行。
-    // 清理策略：先跑 registry.runAll（已注册的 tail 项对未完成 acquire 场景全 no-op 安全，
-    // 保证与正常路径的清理一致性）→ 再手动清理 registry 未感知的资源（scheduler / channels /
-    // delivery 是在 command.ts step 4-7 启动的，还没进入 registry）。
+    // 清理策略：先跑 registry.runAll（已注册的 tail 项对未完成 acquire 场景全 no-op 安全）
+    // → 再手动清理 registry 未感知的资源（scheduler / 接入面产物在 registerCoreCleanup
+    // 之前启动，还没进入 registry）。
     await registry.runAll("startup-failure").catch(() => {});
     await scheduler.stop().catch(() => {});
-    await deliveryStack?.stop().catch(() => {});
-    await channels?.dispose().catch(() => {});
-    textRenderer?.stop();
+    await ctx.deliveryStack?.stop().catch(() => {});
+    await ctx.channels?.dispose().catch(() => {});
+    ctx.textRenderer?.stop();
     throw err;
   }
 
-  // 8b.3 runServer 之后：核心资源清理（LIFO 最先执行 —— markStopping / scheduler / channels / delivery / heartbeat）
+  // runServer resolve 后填 runner，供 post-server 接入面读 server.connections。
+  ctx.runner = runner;
+
+  // runServer 之后：核心资源清理（LIFO 最先执行 —— markStopping / scheduler / channels /
+  // delivery / heartbeat）。接入面产物（channels / deliveryStack）从 ctx 取。
   registerCoreCleanup(registry, {
     stateFile,
     heartbeatTimerRef,
     scheduler,
-    channels,
-    deliveryStack,
+    channels: ctx.channels,
+    deliveryStack: ctx.deliveryStack,
     mcpHub: builtinExtraTools.mcpHub,
   });
 
-  // 8b.4 ConfirmationBridge —— hub 事件 → RPC notification 单一出口。
-  //     依赖 runner.server.connections（runServer 之后才可用），放在 registerCoreCleanup 后。
-  //     LIFO：bridge.dispose 在 textRenderer.stop 之前执行（两者都在 LIFO 最先执行的位置）。
-  // 远程确认桥依赖会话执行面（把 hub 事件按 conversation observer 定向推送）——
-  // schedule 档无会话面，跳过。
-  if (conversations) {
-    const confirmationBridge: ConfirmationBridge = createConfirmationBridge({
-      connections: runner.server.connections,
-      hub: confirmationHub,
-      conversations,
-    });
-    registry.register("confirmationBridge.dispose", () => {
-      confirmationBridge.dispose();
-    });
-  }
+  // post-server 接入面：confirmationBridge（依赖 runner.server.connections，在自己 setup 内
+  // 注册 dispose 到 ctx.cleanup —— LIFO 落在 registerCoreCleanup 之后、即更先执行）。
+  await setupAccessSurfaces(ACCESS_SURFACES, ctx, "post-server");
 
-  // 8b.5 最后注册 = LIFO 最先执行——停止 hub 事件订阅（防止 shutdown 期间还有
-  //     confirmation 请求被派发到即将断开的 channel adapter）。仅 textRenderer 存在时注册。
-  if (textRenderer) {
+  // pre-server 接入面 teardown —— 时序硬约束（必须在 server.close 之前 = runServer 之后注册）
+  // 决定它们不能在自己 setup 内自注册，故由主干用 ctx 产物注册到 shutdown-chain。LIFO 顺序：
+  //   后注册 = 更先执行。以下三项都在 registerCoreCleanup 之后注册，先于核心资源清理执行。
+
+  // 文本确认渲染器停订阅（防 shutdown 期间还有 confirmation 派发到即将断开的 channel）。
+  if (ctx.textRenderer) {
+    const renderer = ctx.textRenderer;
     registry.register("confirmationRenderer.stop", () => {
-      textRenderer!.stop();
+      renderer.stop();
     });
   }
 
-  // 8b.6 远程中断模块的关停链 —— LIFO 最先执行(在 channels.dispose / scheduler.stop /
-  //     server.close 之前)。两条新增项的 LIFO 执行序:
-  //       1. inboundRouter.refuseNew         (LIFO 1) 拒新入站,避免下游 drain 期间又来新消息
-  //       2. execution.abortAllAndWait       (LIFO 2) Promise.all([conv, run]) 并行 fire abort
-  //                                                   + 等所有 in-flight 走完主模块 cleanup
-  //                                                   (partial yields + RunResult + 取消反馈)
-  //
-  //     必须 await drain —— 没有它 server.close / channels.dispose 抢断 partial 流和取消反馈,
-  //     违反"关停期反馈不丢"。30s 总超时兜底由 abortAllAndWait 自身实现,超时不抛
-  //     直接进下一步,避免 grace 类工具 hang 整条关停链。
+  // 远程中断模块关停链 —— LIFO 最先执行（在 channels.dispose / scheduler.stop / server.close 之前）：
+  //   1. inboundRouter.refuseNew  拒新入站，避免下游 drain 期间又来新消息
+  //   2. execution.abortAllAndWait  并行 fire abort + 等所有 in-flight 走完 cleanup
+  //                                 （partial yields + RunResult + 取消反馈）
+  // 必须 await drain —— 没有它 server.close / channels.dispose 抢断 partial 流和取消反馈，
+  // 违反"关停期反馈不丢"。30s 总超时兜底由 abortAllAndWait 自身实现，超时不抛直接进下一步。
   registry.register("execution.abortAllAndWait", async () => {
     await Promise.all([
-      ...(conversations
+      ...(ctx.conversations
         ? [
-            conversations.abortAllAndWait(
+            ctx.conversations.abortAllAndWait(
               { kind: "external", origin: "scheduler-shutdown" },
               30_000,
             ),
@@ -635,16 +553,17 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     ]);
   });
 
-  if (inboundRouter) {
+  if (ctx.inboundRouter) {
+    const router = ctx.inboundRouter;
     registry.register("inboundRouter.refuseNew", () => {
-      inboundRouter!.refuseNewMessages();
+      router.refuseNewMessages();
     });
   }
 
-  // 8c. Post-runServer 启动步骤（startup guard 包裹）
-  //     不变量：runServer 已 resolve → server listening + PID 锁持有 + registry 全注册完毕。
-  //     此后若任何步骤抛错（markReady / banner 等），必须走 runner.shutdown 让 registry 完整跑完，
-  //     否则 daemon child 会孤儿化 + PID 锁/state 文件残留 —— 下次启动被假 "already running" 误挡。
+  // Post-runServer 启动步骤（startup guard 包裹）
+  //   不变量：runServer 已 resolve → server listening + PID 锁持有 + registry 全注册完毕。
+  //   此后若任何步骤抛错（markReady / banner 等），必须走 runner.shutdown 让 registry 完整跑完，
+  //   否则 daemon child 会孤儿化 + PID 锁/state 文件残留 —— 下次启动被假 "already running" 误挡。
   try {
     // markReady + markRunning + heartbeat（仅 daemon child）
     // 紧邻调用：running 才是稳态；ready 仅作为 .ready marker 的语义锚点
@@ -669,8 +588,8 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     console.log(chalk.dim(`  HTTP:      http://${runner.server.host}:${runner.server.port}`));
     console.log(chalk.dim(`  WebSocket: ws://${runner.server.host}:${runner.server.port}/ws`));
     console.log(chalk.dim(`  Token:     ${tokenInfo.path}`));
-    if (channels) {
-      const statuses = channels.listStatuses();
+    if (ctx.channels) {
+      const statuses = ctx.channels.listStatuses();
       const connected = statuses.filter((s) => s.state === "connected");
       console.log(chalk.dim(`  Channels:  ${connected.length}/${statuses.length} connected`));
       for (const s of statuses) {
@@ -691,11 +610,11 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     throw err;
   }
 
-  // idle reaper —— 仅 schedule 档（按需拉起的最小宿主要轻）：周期检查「无活跃 RPC client
-  // + scheduler 无近期 nextRunAt」即空闲退出。退出走正常 shutdown（drain 在跑任务）、不改
-  // idempotent shutdown 契约——client 下次操作重新 ensure 拉起。near 窗口覆盖近期 once 任务，
-  // 让「N 小时后提醒」期间宿主守到触发再退。full serve 长驻、不 idle 退。
-  if (profile === "schedule") {
+  // idle reaper —— 由 PROFILES.idleReap 门控（当前仅 schedule 档：按需拉起的最小宿主要轻）：
+  // 周期检查「无活跃 RPC client + scheduler 无近期 nextRunAt」即空闲退出。退出走正常 shutdown
+  // （drain 在跑任务）、不改 idempotent shutdown 契约——client 下次操作重新 ensure 拉起。near
+  // 窗口覆盖近期 once 任务，让「N 小时后提醒」期间宿主守到触发再退。full serve 长驻、不 idle 退。
+  if (PROFILES[profile].idleReap) {
     const IDLE_CHECK_MS = 60_000;
     const IDLE_NEAR_WINDOW_MS = 2 * 60 * 60 * 1000;
     const idleTimer = setInterval(() => {
@@ -708,7 +627,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
           new Date(t.state.nextRunAt).getTime() - now <= IDLE_NEAR_WINDOW_MS,
       );
       if (hasNearTask) return;
-      ctx.requestShutdown?.("idle");
+      serverCtx.requestShutdown?.("idle");
     }, IDLE_CHECK_MS);
     idleTimer.unref();
     registry.register("idleReaper.clear", () => clearInterval(idleTimer));

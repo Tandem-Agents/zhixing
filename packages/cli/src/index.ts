@@ -17,6 +17,7 @@ import { startRepl } from "./repl.js";
 import { renderError } from "./render.js";
 import { createStdoutWriter } from "./screen/index.js";
 import { runServeCommand } from "./serve/command.js";
+import { PROFILES, DEFAULT_PROFILE, type ServerProfile } from "./serve/profile.js";
 import { runStopCommand } from "./serve/stop.js";
 import { runStatusCommand } from "./serve/status.js";
 import { runLogsCommand } from "./serve/logs.js";
@@ -202,7 +203,10 @@ const serveCmd = program
         host: options.host,
         workspace: options.workspace,
         daemon: options.daemon,
-        profile: options.profile === "schedule" ? "schedule" : "full",
+        profile:
+          options.profile && options.profile in PROFILES
+            ? (options.profile as ServerProfile)
+            : DEFAULT_PROFILE,
       });
       process.exit(0);
     } catch (err) {

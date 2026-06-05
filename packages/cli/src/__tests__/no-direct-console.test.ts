@@ -41,6 +41,7 @@ const ALLOW_LIST: ReadonlyArray<{ readonly file: string; readonly reason: string
   { file: "screen/screen-controller.ts", reason: "ScreenController 实现本身——是 stdout 协调的最底层" },
   { file: "rpc/command.ts", reason: "RPC 客户端——stdout 是协议输出（非 cli 交互）" },
   { file: "serve/command.ts", reason: "serve daemon——后台进程无 chrome；setup chrome 之前的 logger" },
+  { file: "serve/access-surfaces.ts", reason: "serve 接入面装配单元——从 command.ts 抽出的 serve 后台路径，logger 输出走无 chrome daemon 的 console" },
   { file: "serve/daemon.ts", reason: "daemon 启动诊断——chrome 未建立" },
   { file: "serve/logs.ts", reason: "serve logs 命令——独立子命令，stdout 是输出主 sink" },
   { file: "serve/status.ts", reason: "serve status 命令——独立子命令" },
