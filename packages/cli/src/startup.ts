@@ -40,7 +40,7 @@ import {
   type SectionId,
 } from "./config-editor/index.js";
 
-export type StartupMode = "repl" | "server";
+export type StartupMode = "repl" | "server" | "schedule";
 
 /**
  * 启动检查结果——caller 据此决定后续动作。

@@ -17,12 +17,16 @@ import {
   Scheduler,
   JsonTaskStore,
   RunRegistry,
+  LocalSchedulerFacade,
+  computeStatusSummary,
+  isInternal,
   createEventBus,
   generateTurnId,
   getZhixingHome,
   type AgentTurnParams,
   type SchedulerEventMap,
   type AgentTurnResult,
+  type SchedulerFacade,
   type ChannelRegistry,
   type TurnContext,
   JournalStore,
@@ -62,19 +66,25 @@ import { createMcpHub } from "@zhixing/mcp";
 import { createBuiltinExtraToolsAssembly } from "../runtime/builtin-extra-tools.js";
 import { parseServerSpecs } from "../runtime/mcp-config.js";
 import { InMemoryTaskListStore } from "../runtime/task-list-stores.js";
-import {
-  EMPTY_TASK_STATUS_SUMMARY,
-  registerCliTurnContextProviders,
-} from "../runtime/turn-context-providers.js";
+import { registerCliTurnContextProviders } from "../runtime/turn-context-providers.js";
 import { setupChannels } from "./channels.js";
 import { createCliRuntimeFactory } from "./session-adapter.js";
 import { runEphemeralTurn } from "./ephemeral-executor.js";
 import { loadOrCreateToken } from "./token.js";
 import { isDaemonChild } from "./self-exec.js";
 import { spawnDaemon } from "./daemon.js";
+import { homeToPort } from "./host-port.js";
 import { registerTailCleanup, registerCoreCleanup } from "./shutdown-chain.js";
 
 const SERVER_VERSION = "0.1.0";
+
+/**
+ * 核心宿主装配档位：
+ * - full：全量（默认）—— 调度 + 会话执行面 + 通道 + MCP，显式 `zhixing serve` 用。
+ * - schedule：最小调度宿主 —— 只装恒定核心（调度 + RPC server），省略会话执行面 /
+ *   通道 / MCP eager 连接，供按需拉起（ensure）一个轻量定时宿主用。
+ */
+export type ServerProfile = "schedule" | "full";
 
 export interface ServeOptions {
   port?: number;
@@ -82,6 +92,8 @@ export interface ServeOptions {
   workspace?: string;
   /** 后台模式：父进程 spawn 一个 detached child 并握手确认就绪 */
   daemon?: boolean;
+  /** 装配档位，默认 full */
+  profile?: ServerProfile;
 }
 
 /**
@@ -118,18 +130,23 @@ function buildForwardedArgs(opts: ServeOptions): string[] {
   if (opts.port !== undefined) args.push("--port", String(opts.port));
   if (opts.host) args.push("--host", opts.host);
   if (opts.workspace) args.push("--workspace", opts.workspace);
+  if (opts.profile === "schedule") args.push("--profile", "schedule");
   return args;
 }
 
 async function runServerProcess(opts: ServeOptions): Promise<void> {
-  const port = opts.port ?? DEFAULT_SERVER_CONFIG.port;
-  const host = opts.host ?? DEFAULT_SERVER_CONFIG.host;
+  const profile: ServerProfile = opts.profile ?? "full";
   const zhixingHome = getZhixingHome();
+  // 端口按 home 派生（同 home 同端口 → listen 的 EADDRINUSE 原子仲裁单例 + 并发安全；
+  // 不同 home 不同端口 → 多实例并行不撞）。用户显式 --port 覆盖。
+  const port = opts.port ?? homeToPort(zhixingHome);
+  const host = opts.host ?? DEFAULT_SERVER_CONFIG.host;
 
-  // 启动期检查——加载 config + credentials，校验 schema，按 server 模式
-  // 检查 model + messaging 必要字段；缺字段且 TTY 触发配置编辑器，否则 fail-fast。
+  // 启动期检查——加载 config + credentials、校验 schema。full 档校验 model + messaging；
+  // schedule 档只校验 model（最小调度宿主不需要通道凭证）。缺字段且 TTY 触发配置编辑器，
+  // 否则 fail-fast。
   const startupResult = await runStartupCheck({
-    mode: "server",
+    mode: profile === "full" ? "server" : "schedule",
   });
 
   if (startupResult.kind !== "ready") {
@@ -182,9 +199,11 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   // scheduleTool → Scheduler → runAgentTurn → ConversationManager → runtimeFactory → scheduleTool
   // 用 lazy getter 打破循环依赖（标准 IoC 模式）
   let schedulerRef: Scheduler | null = null;
-  const getSchedulerRef = () => {
-    if (!schedulerRef) throw new Error("Scheduler not initialized yet");
-    return schedulerRef;
+  let schedulerFacadeRef: LocalSchedulerFacade | null = null;
+  // schedule 工具经门面接入——daemon 内直调本进程 Scheduler（LocalSchedulerFacade）。
+  const getSchedulerFacade = (): SchedulerFacade => {
+    if (!schedulerFacadeRef) throw new Error("Scheduler not initialized yet");
+    return schedulerFacadeRef;
   };
 
   // serve 模式无 spinner —— 不传 renderer,pauseUI 退化为 no-op。
@@ -212,7 +231,11 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   const mcpHub = createMcpHub(parseServerSpecs(config.mcp, credentials.mcp), {
     networkProxy: config.network?.proxy,
   });
-  await mcpHub.connectAll();
+  // schedule 档不 eager 连接外部 MCP server（最小宿主要轻）；hub 对象仍在，
+  // ephemeral 执行可用 builtin 工具，只是没有 MCP 工具目录。
+  if (profile === "full") {
+    await mcpHub.connectAll();
+  }
 
   const builtinExtraTools = createBuiltinExtraToolsAssembly(
     new InMemoryTaskListStore(),
@@ -224,7 +247,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
       // 从 sessionId（如 dm:feishu:ou_xxx）解析 origin，用于任务创建时自动捕获投递目标
       const origin = parseOriginFromSessionId(sessionId);
       const extraTools = builtinExtraTools.assembleTools({
-        scheduler: getSchedulerRef,
+        scheduler: getSchedulerFacade,
         scheduleOrigin: () => origin,
       });
 
@@ -244,13 +267,23 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
       // 未就绪时 fallback 空状态保鲁棒性。
       registerCliTurnContextProviders(runtime, {
         getSchedulerStatus: () =>
-          schedulerRef?.getStatusSummary() ?? EMPTY_TASK_STATUS_SUMMARY,
+          schedulerRef
+          ? computeStatusSummary(
+              schedulerRef.listTasks().filter((t) => !isInternal(t)),
+              new Date(),
+            )
+          : { active: [], recentlyCompleted: [], recentlyFailed: [] },
         taskListService: builtinExtraTools.taskListService,
       });
       return runtime;
     },
   });
-  const conversations = new ConversationManager(runtimeFactory, undefined, {
+  // schedule 档不实例化会话执行面（只保留挂载位）；full 档点亮。
+  // 注：transcript / runtimeFactory 在 schedule 档是无副作用对象（不连接、不建目录），
+  // 作为会话执行面的依赖留位，故不额外条件化。
+  let conversations: ConversationManager | undefined;
+  if (profile === "full") {
+    conversations = new ConversationManager(runtimeFactory, undefined, {
     loadHistory: async (conversationId) => {
       try {
         if (!(await transcript.exists(conversationId))) return undefined;
@@ -273,14 +306,15 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
       return await transcript.commitTurn(conversationId, payload);
     },
     // 每次 getOrCreate 后自动把 runtime.confirmationBroker attach 到 hub；
-    // 四处 dispose（delete / grace / idle / disposeAll）前自动 detach（§3.2 INV-H3）
+    // 四处 dispose（delete / grace / idle / disposeAll）前自动 detach。
     confirmationHub,
-  });
+    });
+  }
 
   // 4. Channels（config + credentials 已在启动期顶部 load 完成）
   let channels: ChannelRegistry | undefined;
   let inboundRouter: InboundRouter | null = null;
-  if (config.messaging && Object.keys(config.messaging).length > 0) {
+  if (conversations && config.messaging && Object.keys(config.messaging).length > 0) {
     const channelLogger = {
       debug: (msg: string, ...args: unknown[]) => console.log(chalk.dim(`[channel] ${msg}`), ...args),
       info: (msg: string, ...args: unknown[]) => console.log(chalk.dim(`[channel] ${msg}`), ...args),
@@ -349,7 +383,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   const ephemeralRuntime = await createAgentRuntime({
     workspace: opts.workspace,
     extraTools: builtinExtraTools.assembleTools({
-      scheduler: getSchedulerRef,
+      scheduler: getSchedulerFacade,
       // 定时任务自创建子任务 origin=null（非用户发起，渠道无投递目标）
       scheduleOrigin: () => null,
     }),
@@ -364,7 +398,12 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   // 内 ALS 取不到 → getItems 返 [] → 整段跳过，不污染 turn-context。
   registerCliTurnContextProviders(ephemeralRuntime, {
     getSchedulerStatus: () =>
-      schedulerRef?.getStatusSummary() ?? EMPTY_TASK_STATUS_SUMMARY,
+      schedulerRef
+        ? computeStatusSummary(
+            schedulerRef.listTasks().filter((t) => !isInternal(t)),
+            new Date(),
+          )
+        : { active: [], recentlyCompleted: [], recentlyFailed: [] },
     taskListService: builtinExtraTools.taskListService,
   });
 
@@ -396,8 +435,8 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   // RunRegistry —— 每个 ephemeral run 注册一个 AbortController,允许:
   //   - schedule.abortRun(runId) RPC 主动中断
   //   - graceful shutdown 通过 abortAllAndWait 让所有 in-flight 走完 cleanup
-  // Scheduler 本身对同 task 不允许并发(scheduler.ts 互斥锁保证),params.taskId
-  // 与 in-flight run 一一对应,作为 RunRegistry key 安全。
+  // Scheduler 对同 task 不允许并发(executeSingleTask 入口的 activeTasks 守卫保证),
+  // 故 params.taskId 与 in-flight run 一一对应,作为 RunRegistry key 安全。
   const runRegistry = new RunRegistry();
 
   const runAgentTurn = async (
@@ -463,6 +502,15 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   });
   schedulerRef = scheduler;
   await scheduler.start();
+
+  // 系统维护任务落地（seed-if-absent、幂等）——handler 已在 systemHandlers 注册。
+  // 各自 cron、各自周期；未来 __skill-evict 等同此追加。
+  await scheduler.ensureSystemTask({
+    id: "__journal-gc",
+    name: "journal-gc",
+    handler: "__journal-gc",
+    schedule: { kind: "cron", expr: "0 3 * * *" },
+  });
 
   // 8. ServerContext + runServer
   const ctx = createServerContext({
@@ -539,14 +587,18 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   // 8b.4 ConfirmationBridge —— hub 事件 → RPC notification 单一出口。
   //     依赖 runner.server.connections（runServer 之后才可用），放在 registerCoreCleanup 后。
   //     LIFO：bridge.dispose 在 textRenderer.stop 之前执行（两者都在 LIFO 最先执行的位置）。
-  const confirmationBridge: ConfirmationBridge = createConfirmationBridge({
-    connections: runner.server.connections,
-    hub: confirmationHub,
-    conversations,
-  });
-  registry.register("confirmationBridge.dispose", () => {
-    confirmationBridge.dispose();
-  });
+  // 远程确认桥依赖会话执行面（把 hub 事件按 conversation observer 定向推送）——
+  // schedule 档无会话面，跳过。
+  if (conversations) {
+    const confirmationBridge: ConfirmationBridge = createConfirmationBridge({
+      connections: runner.server.connections,
+      hub: confirmationHub,
+      conversations,
+    });
+    registry.register("confirmationBridge.dispose", () => {
+      confirmationBridge.dispose();
+    });
+  }
 
   // 8b.5 最后注册 = LIFO 最先执行——停止 hub 事件订阅（防止 shutdown 期间还有
   //     confirmation 请求被派发到即将断开的 channel adapter）。仅 textRenderer 存在时注册。
@@ -568,10 +620,14 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   //     直接进下一步,避免 grace 类工具 hang 整条关停链。
   registry.register("execution.abortAllAndWait", async () => {
     await Promise.all([
-      conversations.abortAllAndWait(
-        { kind: "external", origin: "scheduler-shutdown" },
-        30_000,
-      ),
+      ...(conversations
+        ? [
+            conversations.abortAllAndWait(
+              { kind: "external", origin: "scheduler-shutdown" },
+              30_000,
+            ),
+          ]
+        : []),
       runRegistry.abortAllAndWait(
         { kind: "external", origin: "scheduler-shutdown" },
         30_000,
@@ -633,6 +689,29 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     console.error(chalk.red(`Startup failed after server listening: ${msg}`));
     await runner.shutdown("startup-error").catch(() => {});
     throw err;
+  }
+
+  // idle reaper —— 仅 schedule 档（按需拉起的最小宿主要轻）：周期检查「无活跃 RPC client
+  // + scheduler 无近期 nextRunAt」即空闲退出。退出走正常 shutdown（drain 在跑任务）、不改
+  // idempotent shutdown 契约——client 下次操作重新 ensure 拉起。near 窗口覆盖近期 once 任务，
+  // 让「N 小时后提醒」期间宿主守到触发再退。full serve 长驻、不 idle 退。
+  if (profile === "schedule") {
+    const IDLE_CHECK_MS = 60_000;
+    const IDLE_NEAR_WINDOW_MS = 2 * 60 * 60 * 1000;
+    const idleTimer = setInterval(() => {
+      if (runner.server.connections.size > 0) return;
+      const now = Date.now();
+      const hasNearTask = scheduler.listTasks().some(
+        (t) =>
+          t.enabled &&
+          t.state.nextRunAt &&
+          new Date(t.state.nextRunAt).getTime() - now <= IDLE_NEAR_WINDOW_MS,
+      );
+      if (hasNearTask) return;
+      ctx.requestShutdown?.("idle");
+    }, IDLE_CHECK_MS);
+    idleTimer.unref();
+    registry.register("idleReaper.clear", () => clearInterval(idleTimer));
   }
 
   // 等待停机 —— 所有清理由 lifecycle.ts 的 shutdown → registry.runAll 统一完成
