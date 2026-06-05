@@ -17,7 +17,9 @@ import {
   createEventBus,
   JsonTaskStore,
   Scheduler,
+  LocalSchedulerFacade,
   type SchedulerEventMap,
+  type SchedulerFacade,
   type ToolExecutionContext,
 } from "@zhixing/core";
 import { createTempDir } from "@zhixing/test-utils";
@@ -26,12 +28,13 @@ import { createScheduleTool } from "../schedule.js";
 // ─── 测试工具 ───
 
 async function withScheduler<T>(
-  fn: (scheduler: Scheduler, dir: string) => Promise<T>,
+  fn: (scheduler: Scheduler, facade: SchedulerFacade, dir: string) => Promise<T>,
 ): Promise<T> {
   const dir = await createTempDir("sched");
+  const eventBus = createEventBus<SchedulerEventMap>();
   const scheduler = new Scheduler({
     store: new JsonTaskStore(join(dir, "tasks.json")),
-    eventBus: createEventBus<SchedulerEventMap>(),
+    eventBus,
     runAgentTurn: async () => ({ status: "ok", durationMs: 0 }),
     systemHandlers: new Map(),
     logger: {
@@ -42,8 +45,9 @@ async function withScheduler<T>(
     },
   });
   await scheduler.start();
+  const facade = new LocalSchedulerFacade(scheduler, eventBus);
   try {
-    return await fn(scheduler, dir);
+    return await fn(scheduler, facade, dir);
   } finally {
     await scheduler.stop();
   }
@@ -71,8 +75,8 @@ function onceInput(overrides?: Record<string, unknown>) {
 
 describe("schedule tool — create behavior (post ADR-007 Phase 3)", () => {
   it("create 成功 → 返回 formatTask 内容，不设 committedToUser", async () => {
-    await withScheduler(async (scheduler) => {
-      const tool = createScheduleTool(scheduler);
+    await withScheduler(async (scheduler, facade) => {
+      const tool = createScheduleTool(() => facade);
       const result = await tool.call(onceInput(), baseContext());
 
       expect(result.isError).toBeFalsy();
@@ -84,9 +88,9 @@ describe("schedule tool — create behavior (post ADR-007 Phase 3)", () => {
   it("架构回归：即使 ctx.commitToUser 存在，schedule 也不调用它", async () => {
     // Phase 3 slot 已结构性保证 task fire 排在 LLM 回复之后——commitment 冗余。
     // 本测试防止未来误加 commit 调用回归（再次引入重复消息）。
-    await withScheduler(async (scheduler) => {
+    await withScheduler(async (scheduler, facade) => {
       const commitToUser = vi.fn(async () => ({ success: true, retryable: false }));
-      const tool = createScheduleTool(scheduler);
+      const tool = createScheduleTool(() => facade);
       const result = await tool.call(
         onceInput({ name: "晨间会议" }),
         baseContext({ commitToUser }),
@@ -102,8 +106,8 @@ describe("schedule tool — create behavior (post ADR-007 Phase 3)", () => {
   });
 
   it("create 参数不全 → 返回 isError，不创建 task", async () => {
-    await withScheduler(async (scheduler) => {
-      const tool = createScheduleTool(scheduler);
+    await withScheduler(async (scheduler, facade) => {
+      const tool = createScheduleTool(() => facade);
       const result = await tool.call(
         { action: "create", name: "bad" /* 缺少 prompt/schedule_kind */ },
         baseContext(),
@@ -117,8 +121,8 @@ describe("schedule tool — create behavior (post ADR-007 Phase 3)", () => {
   // ─── P3c: createdInTurn 捕获（ADR-007 Phase 3） ───
 
   it("P3c: ctx.turnId 存在 → task.createdInTurn 被设为该值", async () => {
-    await withScheduler(async (scheduler) => {
-      const tool = createScheduleTool(scheduler);
+    await withScheduler(async (scheduler, facade) => {
+      const tool = createScheduleTool(() => facade);
       const result = await tool.call(
         onceInput({ name: "t-with-turn" }),
         baseContext({ turnId: "turn_abc" }),
@@ -133,8 +137,8 @@ describe("schedule tool — create behavior (post ADR-007 Phase 3)", () => {
   });
 
   it("P3c: 无 ctx.turnId（REPL/ephemeral）→ task.createdInTurn undefined", async () => {
-    await withScheduler(async (scheduler) => {
-      const tool = createScheduleTool(scheduler);
+    await withScheduler(async (scheduler, facade) => {
+      const tool = createScheduleTool(() => facade);
       const result = await tool.call(
         onceInput({ name: "t-no-turn" }),
         baseContext(),

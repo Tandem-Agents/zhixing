@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import { Scheduler } from "@zhixing/core";
+import type { SchedulerFacade } from "@zhixing/core";
 import { runContextStorage } from "@zhixing/orchestrator/runtime";
 import { createMcpHub, type McpHub } from "@zhixing/mcp";
 import { createBuiltinExtraToolsAssembly } from "../builtin-extra-tools.js";
@@ -18,8 +18,8 @@ import type { IWorkModeController } from "../work-mode-controller.js";
 
 // ─── 测试 fixture ───
 
-function fakeScheduler(): Scheduler {
-  return {} as Scheduler;
+function fakeScheduler(): SchedulerFacade {
+  return {} as SchedulerFacade;
 }
 
 // 工厂仅在构造期 capture controller、call 体才用方法，故名集合断言用空桩足够。

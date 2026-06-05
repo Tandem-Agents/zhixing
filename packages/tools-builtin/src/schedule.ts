@@ -18,7 +18,13 @@
  */
 
 import type { ToolDefinition, ToolExecutionContext, ToolResult } from "@zhixing/core";
-import type { Scheduler, ScheduledTask, TaskSchedule, TaskPriority } from "@zhixing/core";
+import { isInternal } from "@zhixing/core";
+import type {
+  SchedulerFacade,
+  ScheduledTask,
+  TaskSchedule,
+  TaskPriority,
+} from "@zhixing/core";
 
 // 架构演化记：
 //   ADR-007 Phase 2 引入了 `commitToUser` API + COMMITMENT_SIGNAL，让工具在
@@ -52,12 +58,9 @@ export interface ScheduleToolOrigin {
 }
 
 export function createScheduleTool(
-  schedulerOrGetter: Scheduler | (() => Scheduler),
+  getFacade: () => SchedulerFacade,
   getOrigin?: () => ScheduleToolOrigin | null,
 ): ToolDefinition {
-  const getScheduler = typeof schedulerOrGetter === "function" && !("createTask" in schedulerOrGetter)
-    ? schedulerOrGetter as () => Scheduler
-    : () => schedulerOrGetter as Scheduler;
   return {
     name: "schedule",
     description:
@@ -147,18 +150,18 @@ export function createScheduleTool(
       console.log(`[tool:schedule] action=${action}${input.name ? ` name="${input.name}"` : ""}${input.schedule_kind ? ` kind=${input.schedule_kind}` : ""}`);
 
       try {
-        const scheduler = getScheduler();
+        const facade = getFacade();
         switch (action) {
           case "create":
-            return await handleCreate(scheduler, input, getOrigin, context);
+            return await handleCreate(facade, input, getOrigin, context);
           case "list":
-            return handleList(scheduler);
+            return await handleList(facade);
           case "update":
-            return await handleUpdate(scheduler, input);
+            return await handleUpdate(facade, input);
           case "delete":
-            return await handleDelete(scheduler, input);
+            return await handleDelete(facade, input);
           case "run":
-            return await handleRun(scheduler, input);
+            return await handleRun(facade, input);
           default:
             return { content: `Unknown action: ${action}`, isError: true };
         }
@@ -173,7 +176,7 @@ export function createScheduleTool(
 // ─── Action Handlers ───
 
 async function handleCreate(
-  scheduler: Scheduler,
+  facade: SchedulerFacade,
   input: Record<string, unknown>,
   getOrigin?: () => ScheduleToolOrigin | null,
   context?: ToolExecutionContext,
@@ -198,7 +201,7 @@ async function handleCreate(
   // REPL/ephemeral 上下文无 turnId，createdInTurn 保持 undefined。
   const createdInTurn = context?.turnId;
 
-  const task = await scheduler.createTask({
+  const task = await facade.create({
     name,
     description: (input.description as string) ?? undefined,
     enabled: true,
@@ -217,8 +220,9 @@ async function handleCreate(
   };
 }
 
-function handleList(scheduler: Scheduler): ToolResult {
-  const tasks = scheduler.listTasks();
+async function handleList(facade: SchedulerFacade): Promise<ToolResult> {
+  // 只列外部（用户）任务——内部系统维护任务不进用户视图。
+  const tasks = (await facade.list()).filter((t) => !isInternal(t));
 
   if (tasks.length === 0) {
     return { content: "No scheduled tasks." };
@@ -229,7 +233,7 @@ function handleList(scheduler: Scheduler): ToolResult {
 }
 
 async function handleUpdate(
-  scheduler: Scheduler,
+  facade: SchedulerFacade,
   input: Record<string, unknown>,
 ): Promise<ToolResult> {
   const id = input.id as string;
@@ -246,29 +250,29 @@ async function handleUpdate(
     if (schedule) patch.schedule = schedule;
   }
 
-  const task = await scheduler.updateTask(id, patch);
+  const task = await facade.update(id, patch);
   return { content: formatTask(task, "Task updated successfully") };
 }
 
 async function handleDelete(
-  scheduler: Scheduler,
+  facade: SchedulerFacade,
   input: Record<string, unknown>,
 ): Promise<ToolResult> {
   const id = input.id as string;
   if (!id) return { content: "Missing required parameter: id", isError: true };
 
-  await scheduler.deleteTask(id);
+  await facade.delete(id);
   return { content: `Task ${id} deleted.` };
 }
 
 async function handleRun(
-  scheduler: Scheduler,
+  facade: SchedulerFacade,
   input: Record<string, unknown>,
 ): Promise<ToolResult> {
   const id = input.id as string;
   if (!id) return { content: "Missing required parameter: id", isError: true };
 
-  const result = await scheduler.runTask(id);
+  const result = await facade.run(id);
   return {
     content: `Task executed: ${result.status}\nDuration: ${result.durationMs}ms${result.output ? `\nOutput: ${result.output}` : ""}${result.error ? `\nError: ${result.error}` : ""}`,
   };

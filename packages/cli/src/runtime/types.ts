@@ -2,15 +2,18 @@
  * RuntimeSession 公共契约。
  *
  * 资源所有权约定：
- * - 注入式（caller 持有，session 借用，不在 dispose 中关闭）：renderer / schedulerEventBus / 配置数据
- * - 持有式（session 拥有，通过 dispose 释放）：agentRuntime / scheduler / channels / deliveryStack
+ * - 注入式（caller 持有，session 借用，不在 dispose 中关闭）：renderer / 配置数据
+ * - 注入但 dispose 责任移交 session：schedulerFacade —— caller 创建并注入，但其底层
+ *   RPC 连接 / 事件订阅的生命周期随 session，由 session.dispose 调 facade.dispose 关闭
+ * - 持有式（session 拥有，通过 dispose 释放）：agentRuntime
  *
- * 外部访问持有式资源走 getter——每次读最新实例，跨 reload swap 自动响应。
+ * 调度权威在核心宿主，cli 经注入的 schedulerFacade 接入——session 不再持有本地
+ * Scheduler / channels / deliveryStack（cli 是纯交互接入面）。
  */
 
 import type { CreateAgentRuntimeOptions } from "@zhixing/orchestrator/runtime";
 import type { ZhixingConfig, ZhixingCredentials } from "@zhixing/providers";
-import type { IEventBus, SchedulerEventMap } from "@zhixing/core";
+import type { SchedulerFacade } from "@zhixing/core";
 import type { OutputRenderer } from "../output/index.js";
 import type { CliWriter, ScreenController } from "../screen/index.js";
 import type { BuiltinExtraToolsAssembly } from "./builtin-extra-tools.js";
@@ -42,11 +45,10 @@ export interface RuntimeSessionOptions {
   screen?: ScreenController;
   zhixingHome: string;
   /**
-   * Scheduler 事件总线——稳定的"事件集线器"，跨 reload 持久。
-   * REPL 在外部订阅 task-completed 等事件；session 内部 reload 时即使重建 scheduler，
-   * 新 scheduler 仍发送到同一 eventBus，外部 listener 不丢。
+   * 调度门面 —— cli 经它接入核心宿主（RpcSchedulerFacade）。session 把它注入 schedule
+   * 工具、turn-context provider；自身不持有本地 Scheduler（调度权威在核心宿主）。
    */
-  schedulerEventBus: IEventBus<SchedulerEventMap>;
+  schedulerFacade: SchedulerFacade;
 
   /** 安全管线 UI 回调——透传给 createAgentRuntime */
   onSecurityBlocked: OnSecurityBlockedFn;

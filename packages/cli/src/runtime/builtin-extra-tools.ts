@@ -24,7 +24,7 @@
  *     维护 cache —— 这是 conversation 边界事件，不在 runtime 边界
  */
 
-import type { Scheduler, ToolDefinition } from "@zhixing/core";
+import type { SchedulerFacade, ToolDefinition } from "@zhixing/core";
 import { mapServerTools, type McpHub } from "@zhixing/mcp";
 import { runContextStorage } from "@zhixing/orchestrator/runtime";
 import {
@@ -46,12 +46,12 @@ import {
 /**
  * 装配 extra tools 实例时需要的 per-runtime 上下文。
  *
- * scheduler 用 getter —— REPL 模式 scheduler 在 session 内部 lazy 创建，必须
- * 用 closure getter 避开 chicken-and-egg；serve 模式同样用 lazy getter 解循环
- * 依赖（ScheduleTool ↔ Scheduler ↔ runAgentTurn ↔ ConversationManager）。
+ * scheduler 用 SchedulerFacade getter —— cli 注入 RpcSchedulerFacade（懒接入核心宿主），
+ * serve 的 ephemeral 注入 LocalSchedulerFacade（直调本进程 Scheduler）。getter 形态让工具
+ * 不感知"本地实例 vs 远程接入"，也解 serve 侧 scheduler lazy 装配的顺序依赖。
  */
 export interface ExtraToolsRuntimeContext {
-  scheduler: () => Scheduler;
+  scheduler: () => SchedulerFacade;
   /** 定时任务源 origin（可选） —— serve 模式按 sessionId 解析投递目标，REPL 模式不传 */
   scheduleOrigin?: () => ScheduleToolOrigin | null;
   /**

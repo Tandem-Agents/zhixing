@@ -33,7 +33,7 @@ import {
   type RuntimeContext,
   type DispatchResult,
   type SuggestionItem,
-  Scheduler,
+  type SchedulerFacade,
   createEventBus,
   type SchedulerEventMap,
   type WorkModeSwitchIntent,
@@ -94,6 +94,8 @@ import { BottomInfoModel } from "./bottom-info/index.js";
 import { renderHomeWelcome, renderStartupAdvisories } from "./workbench/index.js";
 import { renderFarewell } from "./farewell/index.js";
 import { RuntimeSession } from "./runtime/session.js";
+import { RpcSchedulerFacade } from "./runtime/rpc-scheduler-facade.js";
+import { shouldEnsureOnStartup } from "./runtime/scheduler-projection.js";
 import {
   createBlockedRenderer,
   TerminalConfirmationRenderer,
@@ -137,8 +139,8 @@ interface ReplState {
    * 且跨 main/workscene 模式共用（其 per-convId cache 天然隔离两域）。
    */
   taskListService: TaskListService;
-  /** Scheduler 实例（S1: CLI 进程内运行） */
-  scheduler: Scheduler | null;
+  /** 调度门面 —— cli 经它接入核心宿主（无本地 scheduler）。 */
+  scheduler: SchedulerFacade;
   /**
    * 启动时计算的代理诊断（mode + resolved + display 三元组）。用于 /status
    * 展示——区分 off / auto+null / auto+url / explicit 四态，display 字段
@@ -290,10 +292,27 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   // renderer 接收 cliWriter，所有 AI 输出（text/thinking/tool 卡片）经 writer 协调。
   const renderer = createOutputRenderer({ writer: cliWriter });
 
-  // schedulerEventBus 由调用方持有——稳定的"事件集线器"，跨 reload 持久。
-  // REPL 在后续订阅 task-completed 等事件；session 内部即使重建 scheduler，
-  // 新 scheduler 仍发送到同一 eventBus，外部 listener 不丢
+  // schedulerEventBus 作为渲染中转——REPL 订阅它渲染任务通知。cli 无本地 scheduler，
+  // 事件来自下面 schedulerFacade.onEvent 经 RPC 订阅核心宿主后桥接到此 bus。
   const schedulerEventBus = createEventBus<SchedulerEventMap>();
+
+  // 调度门面 —— cli 经它接入核心宿主（懒拉起 + 读写分离）。注入 session（schedule 工具 /
+  // turn-context），供 /tasks 命令读投影、订阅任务事件桥回渲染。
+  const schedulerFacade = new RpcSchedulerFacade();
+
+  // cli 启动轻检查：纯聊天零后台；仅在「系统维护未 seed / 逾期」或「近期用户任务待触发」
+  // 时主动 ensure 核心宿主（防饿死 + 守候近期任务）。fire-and-forget，不阻塞 REPL 启动。
+  if (shouldEnsureOnStartup()) {
+    // ensure 失败不静默：给一行友好降级提示（不阻塞 REPL 启动）。失败时定时任务
+    // 可能不按时触发——让用户可观测，而非零感知丢失。
+    void schedulerFacade.ensureHost().catch((err) => {
+      cliWriter.notify(
+        chalk.yellow(
+          `  ⚠ ${err instanceof Error ? err.message : "定时功能当前不可用"}`,
+        ),
+      );
+    });
+  }
 
   const zhixingHome = getZhixingHome();
   const config = loadConfig();
@@ -350,7 +369,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     writer: cliWriter,
     screen: renderScreen ?? undefined,
     zhixingHome,
-    schedulerEventBus,
+    schedulerFacade,
     onSecurityBlocked: createBlockedRenderer(cliWriter),
     builtinExtraTools,
     segmentDeps,
@@ -1128,6 +1147,34 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   const writeScheduledNotice = (text: string): void => {
     cliWriter.notify(text);
   };
+  // 经门面订阅核心宿主任务事件，桥回 schedulerEventBus 复用下面的终端渲染。
+  // RPC 事件模型 completed 含 ok/error，拆回本地 task-completed / task-failed；
+  // started 终端无渲染需求，不桥（避免只发不收的空事件 + 失真的占位字段）。
+  schedulerFacade.onEvent((e) => {
+    if (e.kind === "completed" && e.status === "ok") {
+      void schedulerEventBus.emit("scheduler:task-completed", {
+        taskId: e.taskId,
+        name: e.name,
+        durationMs: e.durationMs ?? 0,
+        summary: e.summary,
+      });
+    } else if (e.kind === "completed") {
+      void schedulerEventBus.emit("scheduler:task-failed", {
+        taskId: e.taskId,
+        name: e.name,
+        error: e.error ?? "Unknown error",
+        consecutiveErrors: e.consecutiveErrors ?? 0,
+        nextRunAt: e.nextRunAt,
+      });
+    } else if (e.kind === "disabled") {
+      void schedulerEventBus.emit("scheduler:task-disabled", {
+        taskId: e.taskId,
+        name: e.name,
+        reason: e.reason ?? "",
+        lastError: e.lastError,
+      });
+    }
+  });
   schedulerEventBus.on("scheduler:task-completed", (info) => {
     writeScheduledNotice(
       chalk.green(`  ✓ 任务完成: ${info.name}`) +

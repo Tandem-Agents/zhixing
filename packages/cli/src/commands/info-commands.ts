@@ -16,8 +16,9 @@ import {
   getMemoryDir,
   JournalStore,
   PeopleStore,
+  isInternal,
   type Message,
-  type Scheduler,
+  type SchedulerFacade,
   type ICommandRegistry,
   type CommandDispatcher,
   type CommandHandlerContext,
@@ -46,8 +47,8 @@ export interface InfoCommandsDeps {
   readonly getTurnCounter: () => number;
   /** 网络代理诊断（/status，display 字段已脱敏）。 */
   readonly getNetworkProxy: () => ProxyDescription;
-  /** 调度器（/tasks，未初始化为 null）。 */
-  readonly getScheduler: () => Scheduler | null;
+  /** 调度门面（/tasks 读 scheduler.json 投影，cli 无本地 scheduler）。 */
+  readonly getScheduler: () => SchedulerFacade;
 }
 
 // /help 命令地图的分类显示顺序 + 中文标签——命令分类展示的单一来源。registry.list 已
@@ -367,13 +368,12 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
     execution: "local",
     tag: "builtin",
   });
-  dispatcher.registerHandler("tasks:repl", () => {
-    const scheduler = deps.getScheduler();
-    if (!scheduler) {
-      writer.line(chalk.dim("\n  调度器未初始化\n"));
-      return {};
-    }
-    const tasks = scheduler.listTasks();
+  dispatcher.registerHandler("tasks:repl", async () => {
+    // 读 scheduler.json 从属投影（cli 无本地 scheduler）；只列外部任务。
+    // 「执行中」是宿主内存瞬态，读投影拿不到，故不显示。
+    const tasks = (await deps.getScheduler().list()).filter(
+      (t) => !isInternal(t),
+    );
     if (tasks.length === 0) {
       writer.line(
         chalk.dim(
@@ -383,7 +383,7 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
       return {};
     }
     writer.line(
-      `\n${chalk.bold("  定时任务")} ${chalk.dim(`(${tasks.length} 个, ${scheduler.activeTaskCount} 个执行中)`)}`,
+      `\n${chalk.bold("  定时任务")} ${chalk.dim(`(${tasks.length} 个)`)}`,
     );
     for (const task of tasks) {
       const status = task.enabled ? chalk.green("●") : chalk.dim("○");

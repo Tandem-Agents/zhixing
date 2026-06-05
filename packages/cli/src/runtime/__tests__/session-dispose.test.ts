@@ -16,7 +16,6 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createEventBus, type AgentEventMap } from "@zhixing/core";
 
 // ─── hoisted refs(vi.mock 工厂在 import 前引用)───
 
@@ -112,7 +111,7 @@ function makeOptions() {
     renderer: { stop: vi.fn() },
     writer: { notify: vi.fn(), line: vi.fn() },
     zhixingHome: "/tmp/zhixing-home",
-    schedulerEventBus: createEventBus<AgentEventMap>(),
+    schedulerFacade: { dispose: vi.fn(async () => {}) },
     onSecurityBlocked: vi.fn(),
     builtinExtraTools: {
       assembleTools: vi.fn(() => []),

@@ -13,6 +13,8 @@ import {
   type CommandDef,
   type Message,
   type RuntimeContext,
+  type SchedulerFacade,
+  type ScheduledTask,
 } from "@zhixing/core";
 import {
   registerInfoCommands,
@@ -61,7 +63,8 @@ function setup(overrides: Partial<InfoCommandsDeps> = {}) {
       ({ resolved: null, mode: "auto", display: "直连" }) as unknown as ReturnType<
         InfoCommandsDeps["getNetworkProxy"]
       >,
-    getScheduler: () => null,
+    getScheduler: () =>
+      ({ list: async () => [] }) as unknown as SchedulerFacade,
     ...overrides,
   };
   registerInfoCommands(deps);
@@ -146,19 +149,50 @@ describe("registerInfoCommands · /status", () => {
 });
 
 describe("registerInfoCommands · /tasks", () => {
-  it("调度器未初始化 → 提示", async () => {
-    const { dispatcher, writer } = setup({ getScheduler: () => null });
-    await dispatcher.dispatch("/tasks", RUNTIME);
-    expect(visible(writer)).toContain("调度器未初始化");
-  });
+  function task(o: {
+    id: string;
+    name: string;
+    system?: boolean;
+  }): ScheduledTask {
+    return {
+      id: o.id,
+      name: o.name,
+      enabled: true,
+      priority: "normal",
+      schedule: { kind: "interval", everyMs: 60_000 },
+      action: { kind: "agent-turn", prompt: "x" },
+      state: { consecutiveErrors: 0, runCount: 0 },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      system: o.system,
+    };
+  }
+
+  // /tasks 经 SchedulerFacade.list() 读 scheduler.json 投影；测试只需 stub list()。
+  function facadeWith(tasks: ScheduledTask[]): SchedulerFacade {
+    return { list: async () => tasks } as unknown as SchedulerFacade;
+  }
 
   it("无任务 → 友好提示", async () => {
-    const scheduler = {
-      listTasks: () => [],
-      activeTaskCount: 0,
-    } as never;
-    const { dispatcher, writer } = setup({ getScheduler: () => scheduler });
+    const { dispatcher, writer } = setup({
+      getScheduler: () => facadeWith([]),
+    });
     await dispatcher.dispatch("/tasks", RUNTIME);
     expect(visible(writer)).toContain("没有定时任务");
+  });
+
+  it("列出外部任务、过滤内部维护任务", async () => {
+    const { dispatcher, writer } = setup({
+      getScheduler: () =>
+        facadeWith([
+          task({ id: "u1", name: "每天提醒" }),
+          task({ id: "__gc", name: "journal-gc", system: true }),
+        ]),
+    });
+    await dispatcher.dispatch("/tasks", RUNTIME);
+    const out = visible(writer);
+    expect(out).toContain("每天提醒");
+    expect(out).not.toContain("journal-gc"); // 内部维护任务被 isInternal 过滤
+    expect(out).toContain("1 个");
   });
 });

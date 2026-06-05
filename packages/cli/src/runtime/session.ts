@@ -1,14 +1,17 @@
 /**
  * RuntimeSession——REPL 协同生命周期资源 owner。
  *
- * 聚合 agentRuntime / scheduler / deliveryStack / channels 的 create / reload / dispose，
- * 让 REPL 主回路只关心业务流程（用户输入 / turn 状态 / 对话历史），不感知运行时资源装配。
+ * 聚合 agentRuntime（含工作模式 power overlay）的 create / reload / dispose，让 REPL 主回路
+ * 只关心业务流程（用户输入 / turn 状态 / 对话历史），不感知运行时资源装配。调度权威在核心
+ * 宿主、cli 是纯交互接入面——session 不持有本地 Scheduler / channels / deliveryStack，只
+ * 借用注入的 schedulerFacade 接入宿主。
  *
  * 设计要点：
- * - `runtime` / `scheduler` 是 getter——每次访问读最新 instance，配合 closure getter 模式
- *   让 scheduleTool / runAgentTurn / SchedulerProvider 在 swap 后自动指向新值
- * - dispose 顺序硬约束：scheduler 持有 delivery ref → 旧 scheduler stop 完成之后才能
- *   dispose 旧 deliveryStack / channels，反序会 use-after-dispose
+ * - `runtime` 是 getter——每次访问读最新 instance（reload blue-green swap 后自动指向新值；
+ *   工作模式下优先 power overlay）。`scheduler` getter 返回注入的 schedulerFacade 单例——
+ *   跨 reload 稳定、不随 swap 变（只有 agentRuntime swap）。
+ * - dispose 顺序：work overlay 收尾 → detach confirmation renderer → 关 schedulerFacade
+ *   连接 → main 运行体末窗 onWindowClose。
  * - confirmationRenderer 通过 attach/detach 模式与 ConfirmationBroker 解耦，跨 reload
  *   re-attach 到新 broker
  * - PermissionStore 跨 swap 复用——保留用户 session scope 授权（"本次会话允许"）不丢
@@ -17,14 +20,10 @@
 
 import chalk from "chalk";
 import {
-  Scheduler,
-  JsonTaskStore,
-  userMessage,
   FsWorkSceneRegistry,
   SkillStore,
   getSkillsRoot,
-  type ChannelRegistry,
-  type AgentTurnResult,
+  type SchedulerFacade,
   type IPermissionStore,
   type IWorkSceneRegistry,
   type WorkScene,
@@ -46,25 +45,15 @@ import {
   type ZhixingConfig,
   type ZhixingCredentials,
 } from "@zhixing/providers";
-import { setupChannels } from "../serve/channels.js";
-import { setupDelivery, type DeliveryStack } from "../setup-delivery.js";
 import { createRenderSubscribers } from "../render.js";
+import { readSchedulerSummarySync } from "./scheduler-projection.js";
 import type { TerminalConfirmationRenderer } from "../security/index.js";
 import type { RuntimeSessionOptions, ReloadResult } from "./types.js";
 import { computeDiff, type DiffResult } from "./diff.js";
 import { parseServerSpecs } from "./mcp-config.js";
 import { ReloadBuildError } from "./errors.js";
 
-interface MessagingResources {
-  channels: ChannelRegistry | undefined;
-  deliveryStack: DeliveryStack | undefined;
-}
-
 interface BuildResult {
-  /** true 时 messaging 域已重建——swap 用此标记决定是否替换 channels/delivery 字段（包括"重建为空"的场景） */
-  channelsRebuilt: boolean;
-  newChannels: ChannelRegistry | undefined;
-  newDeliveryStack: DeliveryStack | undefined;
   newAgentRuntime: AgentRuntime | undefined;
   /**
    * 工作模式下 agent 域变化时连带重建的 power runtime —— 与 newAgentRuntime
@@ -72,13 +61,6 @@ interface BuildResult {
    * 同步刷新到新配置，退出工作模式回 main 也是新配置）。非工作模式恒 undefined。
    */
   newPowerRuntime: AgentRuntime | undefined;
-  newScheduler: Scheduler | undefined;
-}
-
-interface OldResources {
-  scheduler: Scheduler | null;
-  deliveryStack: DeliveryStack | null;
-  channels: ChannelRegistry | null;
 }
 
 export class RuntimeSession implements IWorkModeController {
@@ -90,9 +72,6 @@ export class RuntimeSession implements IWorkModeController {
   // 工作模式只切 agent loop runtime，不动这些主资源。
   private agentRuntime!: AgentRuntime;
   private workScene?: { sceneId: string; runtime: AgentRuntime };
-  private schedulerInstance!: Scheduler;
-  private channelsInstance: ChannelRegistry | undefined;
-  private deliveryStackInstance: DeliveryStack | undefined;
 
   // 注入的配置/资源
   private readonly opts: RuntimeSessionOptions;
@@ -139,85 +118,11 @@ export class RuntimeSession implements IWorkModeController {
 
   /** 装配所有运行时资源——首次创建路径，与 reload 重建路径共用 helper */
   private async bootstrap(): Promise<void> {
-    // bootstrap 下 messaging setup 失败 non-fatal——降级为无 channel 的 REPL 让用户至少能用主对话。
-    // reload 路径不走这层包装：错误传播到事务性回滚，保留旧 channels 不动避免 silent regression。
-    let messaging: MessagingResources;
-    try {
-      messaging = await this.setupMessaging(this.config, this.credentials);
-    } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      console.warn(
-        chalk.yellow(`  [channel] Setup failed (non-fatal): ${errMsg}`),
-      );
-      messaging = { channels: undefined, deliveryStack: undefined };
-    }
-    this.channelsInstance = messaging.channels;
-    this.deliveryStackInstance = messaging.deliveryStack;
-
-    // 首次创建不传 existingPermissionStore——让 createAgentRuntime 内部 new + 注册 builtin 规则
+    // cli 是纯交互接入面：不自起 Scheduler、不接通道——调度权威在核心宿主，
+    // schedule 工具 / turn-context 经注入的 schedulerFacade 接入（懒拉起）。
+    // 首次创建不传 existingPermissionStore——让 createAgentRuntime 内部 new + 注册 builtin 规则。
     this.agentRuntime = await this.createAgent({ kind: "main" });
-
-    this.schedulerInstance = this.createScheduler(
-      this.deliveryStackInstance?.delivery,
-    );
-
-    // builtin TurnContextProvider 装配（SchedulerProvider + TaskListProvider）经
-    // 单一注册源 —— scheduler 重建（channels 域）后 provider 自动指向新 instance；
-    // task_list 通过 ALS 取 conversationId + service.cache 同步读，ephemeral 路径
-    // 自然降级（空列表 → 整段跳过）。
     this.attachTurnContextProviders(this.agentRuntime);
-
-    await this.schedulerInstance.start();
-  }
-
-  /** 装配 channels + deliveryStack——messaging 配置缺失时返回空对 */
-  private async setupMessaging(
-    config: ZhixingConfig,
-    credentials: ZhixingCredentials,
-  ): Promise<MessagingResources> {
-    if (!config.messaging || Object.keys(config.messaging).length === 0) {
-      return { channels: undefined, deliveryStack: undefined };
-    }
-
-    const channelLogger = {
-      debug: (msg: string, ...args: unknown[]) =>
-        console.log(chalk.dim(`  [channel] ${msg}`), ...args),
-      info: (msg: string, ...args: unknown[]) =>
-        console.log(chalk.dim(`  [channel] ${msg}`), ...args),
-      warn: (msg: string, ...args: unknown[]) =>
-        console.warn(chalk.yellow(`  [channel] ${msg}`), ...args),
-      error: (msg: string, ...args: unknown[]) =>
-        console.error(chalk.red(`  [channel] ${msg}`), ...args),
-    };
-
-    let channels: ChannelRegistry | undefined;
-    try {
-      const result = await setupChannels({
-        entries: config.messaging,
-        credentials,
-        logger: channelLogger,
-      });
-      channels = result.registry;
-
-      const deliveryStack = await setupDelivery({
-        channels,
-        zhixingHome: this.opts.zhixingHome,
-        logger: {
-          info: (msg) => console.log(chalk.dim(`  ${msg}`)),
-          warn: (msg) => console.warn(chalk.yellow(`  ${msg}`)),
-          error: (msg) => console.error(chalk.red(`  ${msg}`)),
-        },
-      });
-      return { channels, deliveryStack };
-    } catch (err) {
-      // setupChannels 成功后 setupDelivery 失败时，channels 已分配——dispose 防 leak 再向上抛。
-      // 错误语义归属是 caller：bootstrap 路径包 try/catch 保持 non-fatal；reload 路径不包，
-      // 错误自然传播到 buildNewResources 的事务性回滚（旧 channels 保持不动）。
-      if (channels) {
-        await channels.dispose().catch(() => {});
-      }
-      throw err;
-    }
   }
 
   /**
@@ -232,19 +137,14 @@ export class RuntimeSession implements IWorkModeController {
   ): Promise<AgentRuntime> {
     const isWorkscene = spec.kind === "workscene";
 
-    // extra tools 装配走 assembly —— scheduler getter 用 closure 读 this.schedulerInstance，
-    // swap 后自动响应；task_list 工具内部通过 ALS 拿 conversationId（assembly 已封装）。
+    // extra tools 装配走 assembly —— scheduler getter 用 closure 读注入的 schedulerFacade
+    //（跨 reload 稳定单例）；task_list 工具内部通过 ALS 拿 conversationId（assembly 已封装）。
     // workmode 工具组按 spec.kind 二分注入：main 组（enter/change_approve/
     // memory_query）vs power 组（exit）。workModeController getter 延迟取 this
     // （assembly 早于 session 构造，与 scheduler getter 同构）——RuntimeSession
     // 实现 IWorkModeController，工具只依赖窄接口、可独立单测。
     const extraTools = this.opts.builtinExtraTools.assembleTools({
-      scheduler: () => {
-        if (!this.schedulerInstance) {
-          throw new Error("Scheduler not initialized yet");
-        }
-        return this.schedulerInstance;
-      },
+      scheduler: () => this.opts.schedulerFacade,
       spec: { kind: isWorkscene ? "workscene" : "main" },
       workModeController: () => this,
     });
@@ -282,106 +182,15 @@ export class RuntimeSession implements IWorkModeController {
    * 把 cli 装配层 builtin TurnContextProvider（Scheduler + TaskList）注册到
    * 一个 runtime —— 所有 user-facing runtime 装配点的单一注册源。
    *
-   * deps closure 单点持有：getSchedulerStatus 读 this.schedulerInstance（scheduler
-   * 重建后自动指向新 instance）、taskListService 取 assembly 单例。bootstrap /
-   * reload main / 工作模式 enter / reload power 四个装配点全部经此方法，杜绝
-   * "某入口漏注册"类不对齐回归（与 helper 文件的对齐契约一致）。
+   * getSchedulerStatus 读 scheduler.json 从属投影（cli 无本地 scheduler）；taskListService
+   * 取 assembly 单例。bootstrap / reload main / 工作模式 enter / reload power 四个装配点
+   * 全部经此方法，杜绝"某入口漏注册"类不对齐回归（与 helper 文件的对齐契约一致）。
    */
   private attachTurnContextProviders(runtime: AgentRuntime): void {
     registerCliTurnContextProviders(runtime, {
-      getSchedulerStatus: () => this.schedulerInstance.getStatusSummary(),
+      getSchedulerStatus: () => readSchedulerSummarySync(),
       taskListService: this.opts.builtinExtraTools.taskListService,
     });
-  }
-
-  /**
-   * 装配 scheduler——runAgentTurn 通过 this.agentRuntime closure 自动响应 swap。
-   * delivery 是 value capture（Scheduler 公共 API 无 setDelivery），所以 channels 域
-   * 重建时必须重建 scheduler 拿新 delivery ref。
-   *
-   * Logger 注入策略：
-   *
-   *   info 静默——启动 chrome 之前不应被日志污染；任务执行进度由 spinner 渲染，
-   *   完成事件由 schedulerEventBus 的 task-completed 推送给 REPL 渲染。logger.info
-   *   是子系统内部诊断输出，不属于"用户该看到的东西"。
-   *
-   *   warn / error 保留 console 兜底——当前 schedulerEventBus 事件不覆盖
-   *   delivery-enqueue-failed / invalid-cron-expression / shutdown-timeout 等
-   *   子告警，全 no-op 会让用户错过"任务执行成功但消息没投到"这类静默失败。
-   *   这两类告警升级为 EventBus 专属事件后 logger 才能完全 no-op。
-   */
-  private createScheduler(
-    delivery: DeliveryStack["delivery"] | undefined,
-  ): Scheduler {
-    const writer = this.opts.writer;
-    return new Scheduler({
-      store: new JsonTaskStore(),
-      runAgentTurn: this.makeRunAgentTurn(),
-      eventBus: this.opts.schedulerEventBus,
-      delivery,
-      logger: {
-        info: () => {},
-        warn: (msg, data) =>
-          writer.notify(
-            `${chalk.yellow(`  [scheduler] ${msg}`)} ${data ? chalk.dim(JSON.stringify(data)) : ""}`,
-          ),
-        error: (msg, data) =>
-          writer.notify(
-            `${chalk.red(`  [scheduler] ${msg}`)} ${data ? chalk.dim(JSON.stringify(data)) : ""}`,
-          ),
-        debug: () => {},
-      },
-    });
-  }
-
-  /**
-   * runAgentTurn 工厂——返回的 closure 通过 this.agentRuntime 读最新 ref。
-   * scheduler 重建时调用此工厂得新 closure；agent swap 时旧 closure 自动指向新 agent。
-   */
-  private makeRunAgentTurn(): (params: {
-    prompt: string;
-    model?: string;
-    tools?: string[];
-    abortSignal?: AbortSignal;
-    context?: "scheduled-task";
-  }) => Promise<AgentTurnResult> {
-    return async (params) => {
-      const startTime = Date.now();
-      try {
-        const taskPrompt =
-          params.context === "scheduled-task"
-            ? `[系统] 这是一个定时任务的自动执行。请直接执行以下指令并输出结果，不要反问用户、不要引导对话。\n\n${params.prompt}`
-            : params.prompt;
-        const result = await this.agentRuntime.run({
-          messages: [userMessage(taskPrompt)],
-          turnIndex: 0,
-        });
-        const output = result.newMessages
-          .filter((m) => m.role === "assistant")
-          .flatMap((m) => m.content)
-          .filter(
-            (b): b is { type: "text"; text: string } => b.type === "text",
-          )
-          .map((b) => b.text)
-          .join("\n");
-
-        return {
-          status: result.agentResult.reason === "completed" ? "ok" : "error",
-          output: output || undefined,
-          error:
-            result.agentResult.reason === "error"
-              ? result.agentResult.error.message
-              : undefined,
-          durationMs: result.durationMs,
-        };
-      } catch (err: unknown) {
-        return {
-          status: "error",
-          error: err instanceof Error ? err.message : String(err),
-          durationMs: Date.now() - startTime,
-        };
-      }
-    };
   }
 
   /**
@@ -404,9 +213,9 @@ export class RuntimeSession implements IWorkModeController {
       : { kind: "main" };
   }
 
-  /** 当前 scheduler 实例——swap 后自动指向新值 */
-  get scheduler(): Scheduler {
-    return this.schedulerInstance;
+  /** 调度门面——cli 经它接入核心宿主。 */
+  get scheduler(): SchedulerFacade {
+    return this.opts.schedulerFacade;
   }
 
   /**
@@ -647,21 +456,8 @@ export class RuntimeSession implements IWorkModeController {
         this.swapConfirmationBroker(built.newAgentRuntime);
       }
 
-      // Snapshot 旧资源用于后台 dispose
-      const old: OldResources = {
-        scheduler: built.newScheduler ? this.schedulerInstance : null,
-        deliveryStack: built.channelsRebuilt
-          ? (this.deliveryStackInstance ?? null)
-          : null,
-        channels: built.channelsRebuilt
-          ? (this.channelsInstance ?? null)
-          : null,
-      };
-
-      // Swap fields——新资源全部活跃后所有 closure getter 自动指向新值。旧 main /
-      // power 运行体在 swap 前触发末窗 onWindowClose("reload-replace")——不搭
-      // disposeOldInBackground 便车（old 不含 agentRuntime、且受 channels 守卫门控、
-      // agent-only reload 不执行）。末窗第一版 no-op、await 瞬时;失败仅 warn。
+      // Swap fields——新 agent 活跃后所有 closure getter 自动指向新值。旧 main /
+      // power 运行体在 swap 前触发末窗 onWindowClose("reload-replace")。失败仅 warn。
       if (built.newAgentRuntime) {
         const oldAgent = this.agentRuntime;
         try {
@@ -694,20 +490,8 @@ export class RuntimeSession implements IWorkModeController {
           runtime: built.newPowerRuntime,
         };
       }
-      if (built.newScheduler) {
-        this.schedulerInstance = built.newScheduler;
-      }
-      if (built.channelsRebuilt) {
-        this.channelsInstance = built.newChannels;
-        this.deliveryStackInstance = built.newDeliveryStack;
-      }
       this.config = newConfig;
       this.credentials = newCredentials;
-
-      // 后台 dispose 旧资源（不阻塞 reload Promise——用户立即看到反馈）
-      if (old.scheduler || old.deliveryStack || old.channels) {
-        void this.disposeOldInBackground(old);
-      }
 
       return { kind: "applied", changedDomains: diff.changedDomains };
     } finally {
@@ -719,35 +503,18 @@ export class RuntimeSession implements IWorkModeController {
    * 事务性构建新资源——任一步失败回滚已分配的部分，throw ReloadBuildError；
    * 旧 session 保持不动。
    *
-   * 重建条件：
-   * - channels 域变化 → 重建 channels + deliveryStack + scheduler（Scheduler 公共 API
-   *   无 setDelivery，必须重建拿新 delivery ref）
-   * - agent 域变化 → 仅重建 agentRuntime（旧 scheduler 的 runAgentTurn closure 通过
-   *   this.agentRuntime 自动响应 swap，不必跟随重建）
+   * cli 是纯交互接入面，只重建 agent 域（model / profile / MCP 变化）——调度 / 通道
+   * 都在核心宿主，cli reload 不涉及。
    */
   private async buildNewResources(
     newConfig: ZhixingConfig,
     newCredentials: ZhixingCredentials,
     diff: DiffResult,
   ): Promise<BuildResult> {
-    let newChannels: ChannelRegistry | undefined;
-    let newDeliveryStack: DeliveryStack | undefined;
     let newAgentRuntime: AgentRuntime | undefined;
     let newPowerRuntime: AgentRuntime | undefined;
-    let newScheduler: Scheduler | undefined;
-    let channelsRebuilt = false;
 
     try {
-      if (diff.channelsChanged) {
-        const messaging = await this.setupMessaging(newConfig, newCredentials);
-        newChannels = messaging.channels;
-        newDeliveryStack = messaging.deliveryStack;
-        channelsRebuilt = true;
-
-        newScheduler = this.createScheduler(newDeliveryStack?.delivery);
-        await newScheduler.start();
-      }
-
       if (diff.agentChanged) {
         // MCP 连接增量重连 —— 在重建 agentRuntime 之前完成，新配置的工具目录才能物化
         // 进新 runtime 的 system prompt。MCP 未变时 applyConfig 据 specEqual 自然 no-op；
@@ -767,11 +534,9 @@ export class RuntimeSession implements IWorkModeController {
 
         // 工作模式下连带重建 power —— main 与 power 两份运行态都要刷到新配置
         // （否则退出工作模式回 main 用新配置、但工作模式中 power 仍旧配置）。
-        // scene 从 registry 重读（workdir/memoryScope 取最新）；createAgent
-        // workscene 分支内部 primaryRole=power、roles 经 createProviderRoles
-        // 重解析新 config（与 main 重建同机制）；复用 power 自身 permissionStore
-        // 保 session scope 授权。scene 已被移除（极端边界）则 throw → 整体 build
-        // 失败回滚、旧 power 完好。
+        // scene 从 registry 重读（workdir/memoryScope 取最新）；复用 power 自身
+        // permissionStore 保 session scope 授权。scene 已被移除（极端边界）则 throw
+        // → 整体 build 失败回滚、旧 power 完好。
         if (this.workScene) {
           const scene = await this.workSceneRegistry.get(
             this.workScene.sceneId,
@@ -789,28 +554,10 @@ export class RuntimeSession implements IWorkModeController {
         }
       }
 
-      return {
-        channelsRebuilt,
-        newChannels,
-        newDeliveryStack,
-        newAgentRuntime,
-        newPowerRuntime,
-        newScheduler,
-      };
+      return { newAgentRuntime, newPowerRuntime };
     } catch (err) {
-      // 回滚：dispose 已分配的新资源，顺序硬约束（scheduler → delivery → channels）
-      if (newScheduler) {
-        await newScheduler.stop().catch(() => {});
-      }
-      if (newDeliveryStack) {
-        await newDeliveryStack.stop().catch(() => {});
-      }
-      if (newChannels) {
-        await newChannels.dispose().catch(() => {});
-      }
-      // 已激活的新 main / power 运行体（createAgent 成功、首窗 onWindowOpen 已触发）
-      // 补末窗 onWindowClose("assembly-rollback")——否则其末窗永不触发。回滚路径
-      // 吞错（已在抛 ReloadBuildError）。
+      // 回滚：已激活的新 main / power 运行体补末窗 onWindowClose("assembly-rollback")，
+      // 否则其末窗永不触发。回滚路径吞错（已在抛 ReloadBuildError）。
       if (newAgentRuntime) {
         await newAgentRuntime.dispose("assembly-rollback").catch(() => {});
       }
@@ -826,45 +573,7 @@ export class RuntimeSession implements IWorkModeController {
   }
 
   /**
-   * 后台 dispose 旧资源——顺序硬约束 + 单步失败仅 warn log 不阻塞用户。
-   * reload Promise 在 swap 完成后立即 resolve，让用户立即看到反馈。
-   */
-  private async disposeOldInBackground(old: OldResources): Promise<void> {
-    if (old.scheduler) {
-      try {
-        await old.scheduler.stop();
-      } catch (err) {
-        console.error(
-          "[RuntimeSession.disposeOld] scheduler.stop failed:",
-          err,
-        );
-      }
-    }
-    if (old.deliveryStack) {
-      try {
-        await old.deliveryStack.stop();
-      } catch (err) {
-        console.error(
-          "[RuntimeSession.disposeOld] deliveryStack.stop failed:",
-          err,
-        );
-      }
-    }
-    if (old.channels) {
-      try {
-        await old.channels.dispose();
-      } catch (err) {
-        console.error(
-          "[RuntimeSession.disposeOld] channels.dispose failed:",
-          err,
-        );
-      }
-    }
-    // 旧 agentRuntime 无 dispose 接口——失去 ref 后自然 GC
-  }
-
-  /**
-   * 协同 cleanup——固定顺序避免 use-after-dispose（scheduler 持有 delivery ref）。
+   * 协同 cleanup——dispose workScene / main 运行体 + 关闭调度门面连接。
    * 每步独立 try/catch，单步失败仅记录日志，不阻塞后续步骤。
    */
   async dispose(): Promise<void> {
@@ -891,33 +600,16 @@ export class RuntimeSession implements IWorkModeController {
     this.currentBrokerDetach = null;
     this.attachedRenderer = null;
 
+    // 关闭调度门面——断开 cli 与核心宿主的连接、清订阅。
     try {
-      await this.schedulerInstance.stop();
+      await this.opts.schedulerFacade.dispose?.();
     } catch (err) {
-      console.error("[RuntimeSession.dispose] scheduler.stop failed:", err);
+      console.error(
+        "[RuntimeSession.dispose] schedulerFacade.dispose failed:",
+        err,
+      );
     }
 
-    if (this.deliveryStackInstance) {
-      try {
-        await this.deliveryStackInstance.stop();
-      } catch (err) {
-        console.error(
-          "[RuntimeSession.dispose] deliveryStack.stop failed:",
-          err,
-        );
-      }
-    }
-
-    if (this.channelsInstance) {
-      try {
-        await this.channelsInstance.dispose();
-      } catch (err) {
-        console.error(
-          "[RuntimeSession.dispose] channels.dispose failed:",
-          err,
-        );
-      }
-    }
     // main 运行体末窗 onWindowClose（销毁链最后一步）。失败仅 warn,不抛。
     try {
       await this.agentRuntime.dispose("session-dispose");
