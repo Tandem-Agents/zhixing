@@ -82,8 +82,13 @@ export interface SessionRuntime {
    * 幂等:重复调用 / 已 aborted 时立即返 false,不覆盖原 reason(first-wins)。
    */
   abort(reason?: AbortReason): boolean;
-  /** 释放资源（Server 关闭时调用） */
-  dispose(): void;
+  /**
+   * 释放资源（Server 关闭 / 会话驱逐时调用）。
+   *
+   * async：实现透传底层运行体的末窗 onWindowClose（收尾 / flush 须可等待、失败须
+   * 可被销毁调用方捕获），排除 fire-and-forget。调用方应 await。
+   */
+  dispose(): Promise<void>;
   /**
    * 确认交互 broker —— 可选。
    *

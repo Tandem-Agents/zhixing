@@ -157,8 +157,8 @@ export async function startServer(opts: StartServerOptions): Promise<ZhixingServ
       if (ctx.channels) {
         await ctx.channels.dispose().catch(() => {});
       }
-      // 1. 释放所有对话运行时（timer 清理 + 资源回收）
-      ctx.conversations?.disposeAll();
+      // 1. 释放所有对话运行时（timer 清理 + 资源回收 + 各会话末窗 onWindowClose）
+      await ctx.conversations?.disposeAll();
       // 2. 取消事件桥接订阅（否则 scheduler 后续事件还会调 conn.notify）
       disposeBridge();
       // 3. 关闭所有 WebSocket（触发 ws.on("close") → 从 connections 移除）

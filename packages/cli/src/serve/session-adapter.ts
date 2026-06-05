@@ -173,8 +173,11 @@ export function createServerRuntimeAdapter(
       return true;
     },
 
-    dispose() {
+    async dispose() {
       messages = [];
+      // 透传底层运行体末窗 onWindowClose —— serve 每会话经 createAgentRuntime
+      // 建 main runtime（首窗 onWindowOpen 已触发）,销毁须触发其末窗。
+      await agentRuntime.dispose("session-dispose");
     },
   };
 }

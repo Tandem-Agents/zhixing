@@ -70,6 +70,7 @@ function createMockAgentRuntime(behavior: MockBehavior = {}): AgentRuntime {
       const reason = behavior.reason ?? "completed";
       return buildResultByReason(params, reason);
     },
+    async dispose() {},
   });
 }
 
@@ -246,7 +247,7 @@ describe("createServerRuntimeAdapter", () => {
     commitNewMessages(runtime, result!.newMessages);
     expect(runtime.getHistory()).toHaveLength(2);
 
-    runtime.dispose();
+    await runtime.dispose();
     expect(runtime.getHistory()).toHaveLength(0);
   });
 

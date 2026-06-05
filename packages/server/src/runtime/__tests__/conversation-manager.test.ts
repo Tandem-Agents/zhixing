@@ -88,8 +88,8 @@ describe("ConversationManager", () => {
     });
   });
 
-  afterEach(() => {
-    manager.disposeAll();
+  afterEach(async () => {
+    await manager.disposeAll();
     vi.useRealTimers();
   });
 
@@ -134,7 +134,7 @@ describe("ConversationManager", () => {
       expect(s1).toBe(s2);
       expect(createCount).toBe(1);
       expect(mgr.list()).toHaveLength(1);
-      mgr.disposeAll();
+      await mgr.disposeAll();
     });
 
     it("calls initTranscript for new conversations (no history)", async () => {
@@ -150,7 +150,7 @@ describe("ConversationManager", () => {
 
       await mgr.getOrCreate("new-conv");
       expect(inited).toEqual(["new-conv"]);
-      mgr.disposeAll();
+      await mgr.disposeAll();
     });
 
     it("does NOT call initTranscript when loadHistory returns messages", async () => {
@@ -171,7 +171,7 @@ describe("ConversationManager", () => {
       const session = await mgr.getOrCreate("existing");
       expect(inited).toEqual([]);
       expect(session.turnCount).toBe(1);
-      mgr.disposeAll();
+      await mgr.disposeAll();
     });
 
     it("initializes turnCount from loaded history", async () => {
@@ -191,7 +191,7 @@ describe("ConversationManager", () => {
 
       const session = await mgr.getOrCreate("restored");
       expect(session.turnCount).toBe(2);
-      mgr.disposeAll();
+      await mgr.disposeAll();
     });
 
     it("creates session with specified id when not present", async () => {
@@ -259,26 +259,26 @@ describe("ConversationManager", () => {
 
     it("delete() removes session and disposes runtime", async () => {
       await manager.getOrCreate("a");
-      expect(manager.delete("a")).toBe(true);
+      expect(await manager.delete("a")).toBe(true);
       expect(manager.has("a")).toBe(false);
       expect(manager.list()).toHaveLength(0);
     });
 
-    it("delete() returns false for unknown id", () => {
-      expect(manager.delete("nope")).toBe(false);
+    it("delete() returns false for unknown id", async () => {
+      expect(await manager.delete("nope")).toBe(false);
     });
 
     it("disposeAll() clears everything", async () => {
       await manager.getOrCreate("a");
       await manager.getOrCreate("b");
-      manager.disposeAll();
+      await manager.disposeAll();
       expect(manager.list()).toHaveLength(0);
     });
 
     it("getOrCreate updates lastActiveAt on existing session", async () => {
       const s = await manager.getOrCreate("a");
       const initialLast = s.lastActiveAt;
-      vi.advanceTimersByTime(100);
+      await vi.advanceTimersByTimeAsync(100);
       await manager.getOrCreate("a");
       expect(s.lastActiveAt > initialLast).toBe(true);
     });
@@ -343,9 +343,9 @@ describe("ConversationManager", () => {
       manager.removeObserver("a", "conn-1");
 
       expect(manager.has("a")).toBe(true);
-      vi.advanceTimersByTime(59_999);
+      await vi.advanceTimersByTimeAsync(59_999);
       expect(manager.has("a")).toBe(true);
-      vi.advanceTimersByTime(2);
+      await vi.advanceTimersByTimeAsync(2);
       expect(manager.has("a")).toBe(false);
     });
 
@@ -354,10 +354,10 @@ describe("ConversationManager", () => {
       manager.addObserver("a", "conn-1");
       manager.removeObserver("a", "conn-1");
 
-      vi.advanceTimersByTime(30_000);
+      await vi.advanceTimersByTimeAsync(30_000);
       manager.addObserver("a", "conn-2");
 
-      vi.advanceTimersByTime(60_000);
+      await vi.advanceTimersByTimeAsync(60_000);
       expect(manager.has("a")).toBe(true);
     });
 
@@ -366,10 +366,10 @@ describe("ConversationManager", () => {
       manager.addObserver("a", "conn-1");
       manager.removeObserver("a", "conn-1");
 
-      vi.advanceTimersByTime(30_000);
+      await vi.advanceTimersByTimeAsync(30_000);
       await manager.getOrCreate("a");
 
-      vi.advanceTimersByTime(60_000);
+      await vi.advanceTimersByTimeAsync(60_000);
       expect(manager.has("a")).toBe(true);
     });
 
@@ -379,7 +379,7 @@ describe("ConversationManager", () => {
       manager.setBusy("a", true);
       manager.removeObserver("a", "conn-1");
 
-      vi.advanceTimersByTime(120_000);
+      await vi.advanceTimersByTimeAsync(120_000);
       expect(manager.has("a")).toBe(true);
     });
 
@@ -388,7 +388,7 @@ describe("ConversationManager", () => {
       manager.setBusy("a", true);
 
       manager.setBusy("a", false);
-      vi.advanceTimersByTime(60_001);
+      await vi.advanceTimersByTimeAsync(60_001);
       expect(manager.has("a")).toBe(false);
     });
 
@@ -404,9 +404,9 @@ describe("ConversationManager", () => {
       mgr.addObserver("a", "conn-1");
       mgr.removeObserver("a", "conn-1");
 
-      vi.advanceTimersByTime(101);
+      await vi.advanceTimersByTimeAsync(101);
       expect(released).toEqual([["a", "grace"]]);
-      mgr.disposeAll();
+      await mgr.disposeAll();
     });
   });
 
@@ -416,7 +416,7 @@ describe("ConversationManager", () => {
     it("releases idle session after 30 minutes", async () => {
       await manager.getOrCreate("a");
 
-      vi.advanceTimersByTime(30 * 60_000 + 60_001);
+      await vi.advanceTimersByTimeAsync(30 * 60_000 + 60_001);
       expect(manager.has("a")).toBe(false);
     });
 
@@ -424,7 +424,7 @@ describe("ConversationManager", () => {
       await manager.getOrCreate("a");
       manager.setBusy("a", true);
 
-      vi.advanceTimersByTime(30 * 60_000 + 60_001);
+      await vi.advanceTimersByTimeAsync(30 * 60_000 + 60_001);
       expect(manager.has("a")).toBe(true);
     });
 
@@ -432,14 +432,14 @@ describe("ConversationManager", () => {
       await manager.getOrCreate("a");
       manager.addObserver("a", "conn-1");
 
-      vi.advanceTimersByTime(20 * 60_000);
+      await vi.advanceTimersByTimeAsync(20 * 60_000);
       manager.setBusy("a", true);
       manager.setBusy("a", false);
 
-      vi.advanceTimersByTime(20 * 60_000);
+      await vi.advanceTimersByTimeAsync(20 * 60_000);
       expect(manager.has("a")).toBe(true);
 
-      vi.advanceTimersByTime(11 * 60_000);
+      await vi.advanceTimersByTimeAsync(11 * 60_000);
       expect(manager.has("a")).toBe(false);
     });
 
@@ -452,9 +452,9 @@ describe("ConversationManager", () => {
       );
 
       await mgr.getOrCreate("a");
-      vi.advanceTimersByTime(1501);
+      await vi.advanceTimersByTimeAsync(1501);
       expect(released).toEqual([["a", "idle"]]);
-      mgr.disposeAll();
+      await mgr.disposeAll();
     });
   });
 
@@ -466,10 +466,10 @@ describe("ConversationManager", () => {
       manager.addObserver("a", "conn-1");
       manager.removeObserver("a", "conn-1");
 
-      vi.advanceTimersByTime(30_000);
+      await vi.advanceTimersByTimeAsync(30_000);
       manager.setBusy("a", true);
 
-      vi.advanceTimersByTime(60_000);
+      await vi.advanceTimersByTimeAsync(60_000);
       expect(manager.has("a")).toBe(true);
     });
   });
@@ -512,7 +512,7 @@ describe("ConversationManager", () => {
       expect(mgr.enqueue("a", { execute: async () => {}, cancel: () => {} })).toBe("queued");
       expect(mgr.enqueue("a", { execute: async () => {}, cancel: () => {} })).toBe("queued");
       expect(mgr.enqueue("a", { execute: async () => {}, cancel: () => {} })).toBe("full");
-      mgr.disposeAll();
+      await mgr.disposeAll();
     });
 
     it("dequeues next task when setBusy(false)", async () => {
@@ -552,7 +552,7 @@ describe("ConversationManager", () => {
       });
 
       manager.setBusy("a", false);
-      vi.advanceTimersByTime(60_001);
+      await vi.advanceTimersByTimeAsync(60_001);
       expect(manager.has("a")).toBe(true);
     });
 
@@ -569,7 +569,7 @@ describe("ConversationManager", () => {
       await vi.advanceTimersByTimeAsync(0);
 
       manager.setBusy("a", false);
-      vi.advanceTimersByTime(60_001);
+      await vi.advanceTimersByTimeAsync(60_001);
       expect(manager.has("a")).toBe(false);
     });
 
@@ -587,7 +587,7 @@ describe("ConversationManager", () => {
         cancel: () => { cancelled.push("task-2"); },
       });
 
-      manager.delete("a");
+      await manager.delete("a");
       expect(cancelled).toEqual(["task-1", "task-2"]);
       expect(manager.pendingCount("a")).toBe(0);
     });
@@ -602,7 +602,7 @@ describe("ConversationManager", () => {
         cancel: () => { cancelled.push("task-1"); },
       });
 
-      manager.disposeAll();
+      await manager.disposeAll();
       expect(cancelled).toEqual(["task-1"]);
     });
 
@@ -760,7 +760,7 @@ describe("ConversationManager", () => {
           const aborted = await drainPromise;
           expect(aborted).toBe(1);
         } finally {
-          mgr.disposeAll();
+          await mgr.disposeAll();
         }
       } finally {
         vi.useFakeTimers();
@@ -788,7 +788,7 @@ describe("ConversationManager", () => {
           // session 仍 busy,但 abortAllAndWait 不抛
           expect(mgr.list()[0]!.busy).toBe(true);
         } finally {
-          mgr.disposeAll();
+          await mgr.disposeAll();
         }
       } finally {
         vi.useFakeTimers();
@@ -818,7 +818,7 @@ describe("ConversationManager", () => {
       expect(session.ephemeral).toBe(true);
       expect(loaded).toEqual([]);
       expect(inited).toEqual([]);
-      mgr.disposeAll();
+      await mgr.disposeAll();
     });
 
     it("ephemeral session accumulates pendingTurns instead of persisting", async () => {
@@ -849,7 +849,7 @@ describe("ConversationManager", () => {
       expect(persisted).toHaveLength(0);
       expect(session.pendingTurns).toHaveLength(1);
       expect(session.turnCount).toBe(1);
-      mgr.disposeAll();
+      await mgr.disposeAll();
     });
 
     it("auto-promotes ephemeral session on 2nd turn", async () => {
@@ -887,7 +887,7 @@ describe("ConversationManager", () => {
       expect(persisted).toHaveLength(2);
       expect(session.pendingTurns).toHaveLength(0);
       expect(session.turnCount).toBe(2);
-      mgr.disposeAll();
+      await mgr.disposeAll();
     });
 
     it("promote() flushes pendingTurns and calls initTranscript", async () => {
@@ -922,7 +922,7 @@ describe("ConversationManager", () => {
       expect(inited).toEqual(["eph-promote"]);
       expect(persisted).toHaveLength(1);
       expect(session.pendingTurns).toHaveLength(0);
-      mgr.disposeAll();
+      await mgr.disposeAll();
     });
 
     it("promote() returns false for non-ephemeral session", async () => {
@@ -963,7 +963,7 @@ describe("ConversationManager", () => {
 
       const session = mgr.getSession("persist-1")!;
       expect(session.turnCount).toBe(1);
-      mgr.disposeAll();
+      await mgr.disposeAll();
     });
 
     it("list() includes ephemeral field", async () => {
@@ -981,7 +981,7 @@ describe("ConversationManager", () => {
       const eph = list.find(s => s.conversationId === "eph")!;
       expect(pers.ephemeral).toBe(false);
       expect(eph.ephemeral).toBe(true);
-      mgr.disposeAll();
+      await mgr.disposeAll();
     });
 
     it("promote() is idempotent — partial failure + retry does not duplicate init or turns", async () => {
@@ -1034,7 +1034,7 @@ describe("ConversationManager", () => {
       expect(session.pendingTurns).toHaveLength(0);
       expect(session.ephemeral).toBe(false);
 
-      mgr.disposeAll();
+      await mgr.disposeAll();
     });
   });
 
@@ -1126,7 +1126,7 @@ describe("ConversationManager", () => {
       expect(session.ephemeral).toBe(true);
       expect(session.pendingTurns).toHaveLength(1);
 
-      mgr.disposeAll();
+      await mgr.disposeAll();
     });
   });
 
@@ -1166,7 +1166,7 @@ describe("ConversationManager", () => {
       const found = hub.findBrokerByConversation("conv-A");
       expect(found).toBe(session.runtime.confirmationBroker);
 
-      mgr.disposeAll();
+      await mgr.disposeAll();
     });
 
     it("runtime 无 confirmationBroker 时 attachToHub 是 no-op（不抛错）", async () => {
@@ -1182,7 +1182,7 @@ describe("ConversationManager", () => {
       expect(hub.findBrokerByConversation("conv-no-broker")).toBeUndefined();
       expect(hub.snapshot().brokers).toHaveLength(0);
 
-      mgr.disposeAll();
+      await mgr.disposeAll();
     });
 
     it("delete 触发 detach，hub 反查返 undefined", async () => {
@@ -1196,7 +1196,7 @@ describe("ConversationManager", () => {
       await mgr.getOrCreate("conv-A");
       expect(hub.findBrokerByConversation("conv-A")).toBeDefined();
 
-      mgr.delete("conv-A");
+      await mgr.delete("conv-A");
       expect(hub.findBrokerByConversation("conv-A")).toBeUndefined();
     });
 
@@ -1216,7 +1216,7 @@ describe("ConversationManager", () => {
       await vi.advanceTimersByTimeAsync(1_001);
       expect(hub.findBrokerByConversation("conv-A")).toBeUndefined();
 
-      mgr.disposeAll();
+      await mgr.disposeAll();
     });
 
     it("disposeAll → 所有会话的 broker 均 detach", async () => {
@@ -1231,7 +1231,7 @@ describe("ConversationManager", () => {
       await mgr.getOrCreate("conv-B");
       expect(hub.snapshot().brokers).toHaveLength(2);
 
-      mgr.disposeAll();
+      await mgr.disposeAll();
       expect(hub.snapshot().brokers).toHaveLength(0);
     });
 
@@ -1244,11 +1244,11 @@ describe("ConversationManager", () => {
       );
 
       await mgr.getOrCreate("conv-A");
-      mgr.delete("conv-A");
+      await mgr.delete("conv-A");
       // 立即重建应无 INV-H1 冲突
       await expect(mgr.getOrCreate("conv-A")).resolves.toBeDefined();
 
-      mgr.disposeAll();
+      await mgr.disposeAll();
     });
   });
 });

@@ -280,14 +280,14 @@ export function buildSessionDeleteMethod(): MethodEntry {
   return {
     name: "session.delete",
     requiresAuth: true,
-    handler(rawParams, ctx): void {
+    async handler(rawParams, ctx): Promise<void> {
       const params = (rawParams ?? {}) as SessionDeleteParams;
       const id = params.conversationId ?? params.sessionId;
       if (typeof id !== "string") {
         throw RpcErrors.invalidParams("session.delete requires 'conversationId'");
       }
       const manager = requireConversations(ctx.server);
-      if (!manager.delete(id)) {
+      if (!(await manager.delete(id))) {
         throw RpcErrors.notFound(`Session not found: ${id}`);
       }
     },

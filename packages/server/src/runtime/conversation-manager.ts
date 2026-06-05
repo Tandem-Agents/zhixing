@@ -699,19 +699,25 @@ export class ConversationManager {
     this.pendingQueues.delete(conversationId);
   }
 
-  delete(conversationId: string): boolean {
+  async delete(conversationId: string): Promise<boolean> {
     const session = this.sessions.get(conversationId);
     if (!session) return false;
     this.clearPendingQueue(conversationId);
     this.clearGraceTimer(conversationId);
     this.detachFromHub(conversationId);
-    session.runtime.dispose();
+    // 末窗 onWindowClose（serve main runtime 销毁）—— await 让 flush 完成;失败
+    // 不阻断删除（与销毁链"不阻断"语义一致）。
+    try {
+      await session.runtime.dispose();
+    } catch (err) {
+      console.error("[ConversationManager.delete] runtime.dispose failed:", err);
+    }
     this.sessions.delete(conversationId);
     return true;
   }
 
-  /** 释放所有运行时资源（Server 关闭时调用） */
-  disposeAll(): void {
+  /** 释放所有运行时资源（Server 关闭时调用）。async —— 透传各会话末窗 onWindowClose。 */
+  async disposeAll(): Promise<void> {
     const queueIds = [...this.pendingQueues.keys()];
     for (const id of queueIds) {
       this.clearPendingQueue(id);
@@ -725,7 +731,7 @@ export class ConversationManager {
     for (const [id, session] of this.sessions) {
       try {
         this.detachFromHub(id);
-        session.runtime.dispose();
+        await session.runtime.dispose();
       } catch {
         // ignore
       }
@@ -740,7 +746,7 @@ export class ConversationManager {
     this.clearGraceTimer(conversationId);
     const timer = setTimeout(() => {
       this.graceTimers.delete(conversationId);
-      this.releaseIfEmpty(conversationId, "grace");
+      void this.releaseIfEmpty(conversationId, "grace");
     }, this.graceTimeoutMs);
     // 不阻止进程退出
     if (timer.unref) timer.unref();
@@ -755,13 +761,23 @@ export class ConversationManager {
     }
   }
 
-  private releaseIfEmpty(conversationId: string, reason: "grace" | "idle"): void {
+  private async releaseIfEmpty(
+    conversationId: string,
+    reason: "grace" | "idle",
+  ): Promise<void> {
     const session = this.sessions.get(conversationId);
     if (!session) return;
     if (session.observers.size > 0 || session.busy) return;
     this.clearPendingQueue(conversationId);
     this.detachFromHub(conversationId);
-    session.runtime.dispose();
+    try {
+      await session.runtime.dispose();
+    } catch (err) {
+      console.error(
+        "[ConversationManager.releaseIfEmpty] runtime.dispose failed:",
+        err,
+      );
+    }
     this.sessions.delete(conversationId);
     this.onRelease?.(conversationId, reason);
   }
@@ -779,19 +795,32 @@ export class ConversationManager {
           expired.push(id);
         }
       }
-      for (const id of expired) {
-        this.clearPendingQueue(id);
-        this.clearGraceTimer(id);
-        const session = this.sessions.get(id);
-        if (session) {
-          this.detachFromHub(id);
-          session.runtime.dispose();
-          this.sessions.delete(id);
-          this.onRelease?.(id, "idle");
-        }
-      }
+      // setInterval 回调本身 sync —— 末窗 onWindowClose 的 await 收敛到 reapExpired,
+      // void 化（后台收割,失败逐项吞 + log,不让 unhandled rejection 逃逸）。
+      void this.reapExpired(expired);
     }, intervalMs);
     if (this.idleInterval.unref) this.idleInterval.unref();
+  }
+
+  private async reapExpired(expired: string[]): Promise<void> {
+    for (const id of expired) {
+      this.clearPendingQueue(id);
+      this.clearGraceTimer(id);
+      const session = this.sessions.get(id);
+      if (session) {
+        this.detachFromHub(id);
+        try {
+          await session.runtime.dispose();
+        } catch (err) {
+          console.error(
+            "[ConversationManager.idleReaper] runtime.dispose failed:",
+            err,
+          );
+        }
+        this.sessions.delete(id);
+        this.onRelease?.(id, "idle");
+      }
+    }
   }
 }
 
