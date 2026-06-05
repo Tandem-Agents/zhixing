@@ -180,3 +180,58 @@ describe("listForManagement(面向管理的全集读)", () => {
     expect(await new SkillStore(root).listForManagement()).toEqual([]);
   });
 });
+
+describe("version(投影版本号)", () => {
+  it("结构性写递增、usage 命中不计入", async () => {
+    const store = new SkillStore(root);
+    const v0 = store.version("main");
+
+    await store.create({ name: "A", description: "", body: "b", mode: "main" });
+    const v1 = store.version("main");
+    expect(v1).toBeGreaterThan(v0);
+
+    await store.setState("a", { pinned: true });
+    const v2 = store.version("main");
+    expect(v2).toBeGreaterThan(v1);
+
+    // usage 命中(loadText → recordHit):不计入版本
+    await store.loadText("a");
+    expect(store.version("main")).toBe(v2);
+
+    await store.update("a", { name: "A", description: "改", body: "b2", mode: "main" });
+    const v3 = store.version("main");
+    expect(v3).toBeGreaterThan(v2);
+
+    await store.archive("a");
+    expect(store.version("main")).toBeGreaterThan(v3);
+  });
+
+  it("admit 令版本递增", async () => {
+    const store = new SkillStore(root);
+    const v0 = store.version("main");
+    const staging = await store.prepareStaging();
+    await fs.writeFile(
+      path.join(staging, "SKILL.md"),
+      `---\nname: Imported\n---\nbody`,
+      "utf-8",
+    );
+    await store.admit(staging, { mode: "main" });
+    expect(store.version("main")).toBeGreaterThan(v0);
+  });
+
+  it("fork 不改投影、版本不变;读路径(listAll)也不递增版本", async () => {
+    await writeSkill("linked", "lk", { name: "Lk" });
+    const store = new SkillStore(root);
+    await store.listAll(); // 触发首次状态落盘,但读路径不计入版本
+    const v0 = store.version("main");
+    await store.fork("lk");
+    expect(store.version("main")).toBe(v0);
+  });
+
+  it("publish-after-commit:版本递增后投影即可读到该变更", async () => {
+    const store = new SkillStore(root);
+    await store.create({ name: "P", description: "", body: "b", mode: "main" });
+    expect(store.version("main")).toBeGreaterThan(0);
+    expect((await store.queryTopN("main", 10)).map((r) => r.id)).toContain("p");
+  });
+});

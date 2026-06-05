@@ -53,6 +53,11 @@ export class SkillStore {
   private readonly root: string;
   private readonly idLocks = new Map<string, Promise<unknown>>();
   private indexLock: Promise<unknown> = Promise.resolve();
+  /**
+   * 索引投影的内存版本号 —— 任何改变 top-N 投影的结构性写后单调自增;消费方据此
+   * O(1) 比对决定是否需要重建索引,避免每次扫盘。
+   */
+  private structuralVersion = 0;
 
   constructor(root: string = getSkillsRoot()) {
     this.root = root;
@@ -66,6 +71,22 @@ export class SkillStore {
   /** 按 mode 过滤 + 排序 + 取前 n,供索引产生。与 listAll 共享单一过滤点。 */
   async queryTopN(mode: SkillMode, n: number): Promise<SkillRecord[]> {
     return this.project({ mode, limit: n });
+  }
+
+  /**
+   * 索引投影的当前版本号 —— 任何改变 top-N 投影的结构性写(setState / create /
+   * admit / update / archive)令其递增;usage 度量写不计入(频次只被动影响排序)。
+   * 版本在结构性写落盘之后才递增,故任一读到的版本所对应的磁盘投影必已就绪。
+   * 当前按全局粒度递增(不区分 mode,保守保证任一 mode 的投影变更都不漏检)。
+   */
+  version(mode: SkillMode): number {
+    void mode;
+    return this.structuralVersion;
+  }
+
+  /** 结构性写落盘后调用 —— 投影版本单调递增。 */
+  private bumpStructuralVersion(): void {
+    this.structuralVersion += 1;
   }
 
   /**
@@ -117,6 +138,7 @@ export class SkillStore {
       };
       cur.set(id, { ...base, ...patch, id });
       await this.writeIndex(cur);
+      this.bumpStructuralVersion();
     });
   }
 
@@ -133,6 +155,7 @@ export class SkillStore {
       path.basename(located.dir),
     );
     await this.movePath(located.dir, dest);
+    this.bumpStructuralVersion();
   }
 
   /**
@@ -165,6 +188,7 @@ export class SkillStore {
         createdAt,
       });
       await this.writeIndex(cur);
+      this.bumpStructuralVersion();
     });
     return {
       id,
@@ -250,6 +274,7 @@ export class SkillStore {
       if (newId !== id) cur.delete(id);
       cur.set(newId, { id: newId, mode: draft.mode, pinned, disabled, createdAt });
       await this.writeIndex(cur);
+      this.bumpStructuralVersion();
     });
     if (newId !== id) {
       await fs
@@ -307,6 +332,7 @@ export class SkillStore {
       const cur = await this.readIndex();
       cur.set(id, { id, mode, pinned: false, disabled: false, createdAt });
       await this.writeIndex(cur);
+      this.bumpStructuralVersion();
     });
     return {
       id,
