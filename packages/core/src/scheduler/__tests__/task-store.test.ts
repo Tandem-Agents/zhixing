@@ -88,4 +88,24 @@ describe("JsonTaskStore", () => {
 
     expect(store.list()).toHaveLength(2);
   });
+
+  it("并发 save 不丢更新（单写队列串行化）", async () => {
+    const store = new JsonTaskStore(storePath);
+    await store.load();
+    for (let i = 0; i < 5; i++) {
+      await store.addTask(createTask({ id: `t${i}`, name: `task-${i}` }));
+    }
+
+    // 并发触发 5 个 read-modify-write + save，不逐个 await
+    await Promise.all(
+      [0, 1, 2, 3, 4].map((i) => store.updateTask(`t${i}`, { name: `updated-${i}` })),
+    );
+
+    // 从磁盘重载，验证所有更新都落盘（无 last-rename-wins 丢更新）
+    const reloaded = await new JsonTaskStore(storePath).load();
+    expect(reloaded).toHaveLength(5);
+    for (let i = 0; i < 5; i++) {
+      expect(reloaded.find((t) => t.id === `t${i}`)?.name).toBe(`updated-${i}`);
+    }
+  });
 });

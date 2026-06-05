@@ -5,7 +5,7 @@
  * - 管理任务生命周期（CRUD）
  * - 协调 TimerLoop + TaskExecutor + ErrorPolicy + TaskStore
  * - 并发控制（maxConcurrent）
- * - Missed task 追赶（重启后补执行）
+ * - Missed 分流（以本次上线时刻为锚：离线期间错过的记录不补，在线到点的正常执行）
  * - EventBus 事件通知
  * - 下次执行时间计算（cron / interval / once）
  *
@@ -22,12 +22,15 @@ import { DEFAULT_SCHEDULER_CONFIG } from "./config.js";
 import { applyErrorPolicy, resetErrorState } from "./error-policy.js";
 import { executeTask, type TaskExecutorDeps } from "./task-executor.js";
 import { TimerLoop } from "./timer-loop.js";
+import { computeStatusSummary, isInternal } from "./status-summary.js";
 import type {
   AgentTurnParams,
   AgentTurnResult,
   ScheduledTask,
   SchedulerLogger,
   SystemHandler,
+  TaskPriority,
+  TaskSchedule,
   TaskStatusSummary,
   TaskStore,
 } from "./types.js";
@@ -67,6 +70,14 @@ export class Scheduler {
   /** 优雅停机用的 AbortController */
   private shutdownController: AbortController | null = null;
 
+  /**
+   * 本次上线时刻（epoch ms）—— start 时置、stop 不清、下次 start 重置。
+   * 「错过」判定以它为锚（非 now）：应触发于「上线 - 容差」之前 = 宿主离线期间错过、
+   * 之后 = 在线到点。锚在固定值、不随 now 漂移，故在线并发延迟无论多久都不被误判。
+   * per-instance 运行时状态、不持久化——每次拉起重新计「本次在线」（与按需起落一致）。
+   */
+  private onlineSince: number | null = null;
+
   constructor(deps: SchedulerDeps) {
     this.config = { ...DEFAULT_SCHEDULER_CONFIG, ...deps.config };
     this.store = deps.store;
@@ -88,29 +99,20 @@ export class Scheduler {
   // ─── 生命周期 ───
 
   /**
-   * 启动调度器：加载任务 → 检查 missed → 启动 timer
+   * 启动调度器：加载任务 → 记本次上线时刻 → 启动 timer（过期任务交首次 tick 到点分流）
    */
   async start(): Promise<void> {
     await this.store.load();
     this.shutdownController = new AbortController();
-
-    // 检查 missed tasks（重启补执行）
-    const now = this.now();
-    const tasks = this.getEnabledTasks();
-    let missedCount = 0;
-
-    for (const task of tasks) {
-      if (task.state.nextRunAt && new Date(task.state.nextRunAt) < now) {
-        missedCount++;
-      }
-    }
-
-    if (missedCount > 0) {
-      this.logger.info(`Found ${missedCount} missed task(s), will catch up on next tick`);
-    }
+    // 记本次上线时刻——「错过」以它为锚（见 handleDueTasks / isMissedWhileOffline）。
+    // 过期任务不在启动时补执行：应触发于上线之前的（离线期间错过）记错过、不补；
+    // 之后到点的正常执行。
+    this.onlineSince = this.now().getTime();
 
     this.timerLoop.start();
-    this.logger.info("Scheduler started", { taskCount: tasks.length, missedCount });
+    this.logger.info("Scheduler started", {
+      taskCount: this.getEnabledTasks().length,
+    });
   }
 
   /**
@@ -175,12 +177,59 @@ export class Scheduler {
     return task;
   }
 
+  /**
+   * 确保系统内置任务存在（seed-if-absent，幂等）。固定 id 用于判存在性——
+   * 绕过 createTask 的 generateId，直接以给定 id 落库（system:true 不可删）。
+   * 已存在则不动（schedule 变更的迁移留待未来 reconcile）。
+   */
+  async ensureSystemTask(spec: {
+    id: string;
+    name: string;
+    handler: string;
+    schedule: TaskSchedule;
+    priority?: TaskPriority;
+    description?: string;
+  }): Promise<void> {
+    if (this.store.getTask(spec.id)) return;
+
+    const now = this.now();
+    const task: ScheduledTask = {
+      id: spec.id,
+      name: spec.name,
+      description: spec.description,
+      enabled: true,
+      priority: spec.priority ?? "low",
+      schedule: spec.schedule,
+      action: { kind: "system", handler: spec.handler },
+      state: {
+        consecutiveErrors: 0,
+        runCount: 0,
+        nextRunAt: this.computeNextRunAt(spec.schedule, now),
+      },
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString(),
+      system: true,
+    };
+    await this.store.addTask(task);
+    this.logger.info(`System task seeded: ${task.name}`, {
+      id: task.id,
+      nextRunAt: task.state.nextRunAt,
+    });
+    this.timerLoop.rearm();
+  }
+
   async updateTask(
     id: string,
     patch: Partial<Pick<ScheduledTask, "name" | "description" | "enabled" | "priority" | "schedule" | "action" | "delivery">>,
   ): Promise<ScheduledTask> {
     const existing = this.store.getTask(id);
     if (!existing) throw new Error(`Task not found: ${id}`);
+    // 内部维护任务不可改（对齐 deleteTask 的拒删）——显式守卫，不靠「可见性过滤让外部
+    // 拿不到 id」间接兜底。系统任务执行后的 state 更新走 store.updateTask（内部直写）、
+    // 不经此入口，故不受影响。
+    if (existing.system) {
+      throw new Error(`Cannot modify system task: ${existing.name}`);
+    }
 
     // 如果 schedule 变了，重新计算 nextRunAt
     const updatedPatch: Partial<ScheduledTask> = { ...patch };
@@ -250,49 +299,7 @@ export class Scheduler {
    * @param recentWindowMs 最近完成/失败的时间窗口（默认 30 分钟）
    */
   getStatusSummary(recentWindowMs: number = 30 * 60 * 1000): TaskStatusSummary {
-    const now = this.now();
-    const cutoff = new Date(now.getTime() - recentWindowMs);
-    const tasks = this.getAllTasks();
-
-    return {
-      active: tasks
-        .filter((t) => t.enabled && t.state.nextRunAt)
-        .sort((a, b) => (a.state.nextRunAt ?? "").localeCompare(b.state.nextRunAt ?? ""))
-        .map((t) => ({
-          name: t.name,
-          schedule: formatSchedule(t.schedule),
-          nextRunAt: t.state.nextRunAt,
-        })),
-
-      recentlyCompleted: tasks
-        .filter(
-          (t) =>
-            t.state.lastRunAt &&
-            new Date(t.state.lastRunAt) >= cutoff &&
-            !t.state.lastError,
-        )
-        .sort((a, b) => (b.state.lastRunAt ?? "").localeCompare(a.state.lastRunAt ?? ""))
-        .map((t) => ({
-          name: t.name,
-          completedAt: t.state.lastRunAt!,
-          summary: t.state.lastSummary?.slice(0, 100),
-          delivered: t.state.lastDeliveryStatus === "sent",
-        })),
-
-      recentlyFailed: tasks
-        .filter(
-          (t) =>
-            t.state.lastError &&
-            t.state.lastRunAt &&
-            new Date(t.state.lastRunAt) >= cutoff,
-        )
-        .sort((a, b) => (b.state.lastRunAt ?? "").localeCompare(a.state.lastRunAt ?? ""))
-        .map((t) => ({
-          name: t.name,
-          failedAt: t.state.lastRunAt!,
-          error: t.state.lastError!,
-        })),
-    };
+    return computeStatusSummary(this.getAllTasks(), this.now(), recentWindowMs);
   }
 
   // ─── 内部方法 ───
@@ -306,20 +313,86 @@ export class Scheduler {
   }
 
   private async handleDueTasks(dueTasks: ScheduledTask[]): Promise<void> {
-    // 并发控制：只取 maxConcurrent - activeTasks.size 个
+    const now = this.now();
+
+    // 到点分流（以本次上线时刻为锚，见 isMissedWhileOffline）：应触发于「上线 - 容差」
+    // 之前的，是宿主离线期间真正错过的触发——记「错过」、不补、推进 nextRunAt（once 即
+    // 终止）；其余是在线到点（含被并发推迟很久的），进 ontime 受并发上限执行、未轮到则
+    // 保持 due 等待，绝不因等待时长被误判错过。错过的不占并发额度。
+    const ontime: ScheduledTask[] = [];
+    for (const task of dueTasks) {
+      const scheduledFor = task.state.nextRunAt;
+      if (!scheduledFor) continue;
+      if (this.isMissedWhileOffline(scheduledFor)) {
+        await this.markMissed(task, scheduledFor, now);
+      } else {
+        ontime.push(task);
+      }
+    }
+
+    // 准时任务受并发上限约束执行
     const available = this.config.maxConcurrent - this.activeTasks.size;
     if (available <= 0) return;
-
-    const toExecute = dueTasks
+    const toExecute = ontime
       .filter((t) => !this.activeTasks.has(t.id))
       .slice(0, available);
+    await Promise.allSettled(toExecute.map((task) => this.executeSingleTask(task)));
+  }
 
-    // 并发启动（不 await 每个——让它们并行执行）
-    const promises = toExecute.map((task) => this.executeSingleTask(task));
-    await Promise.allSettled(promises);
+  /**
+   * 「错过」判定 —— 以本次上线时刻 onlineSince 为锚、而非 now：任务应触发时刻早于
+   * 「上线 - 容差」即宿主离线期间错过的触发；之后（含在线被并发推迟很久）都是在线到点、
+   * 该执行不该误判。判据锚在固定的 onlineSince、不随 now 漂移，是「在线并发延迟不被
+   * 误判错过」的关键（once 任务因此不会被并发饿死后误判 terminal）。容差只吸收上线
+   * 边界附近的短暂离线（如重启间隙）。onlineSince 未设（未 start）时兜底当作在线。
+   */
+  private isMissedWhileOffline(scheduledFor: string): boolean {
+    if (this.onlineSince === null) return false;
+    return (
+      new Date(scheduledFor).getTime() <
+      this.onlineSince - this.config.graceWindowMs
+    );
+  }
+
+  /**
+   * 记录一次「错过」：不执行，只把错过的事实写入 state.lastMissed，并推进 nextRunAt
+   * 到下一个未来时刻（once 错过则终止：disable + 清 nextRunAt）。供使用侧未来查询。
+   */
+  private async markMissed(
+    task: ScheduledTask,
+    scheduledFor: string,
+    detectedAt: Date,
+  ): Promise<void> {
+    task.state.lastMissed = {
+      scheduledFor,
+      detectedAt: detectedAt.toISOString(),
+    };
+    if (task.schedule.kind === "once") {
+      task.enabled = false;
+      task.state.nextRunAt = undefined;
+    } else {
+      task.state.nextRunAt = this.computeNextRunAt(task.schedule, detectedAt);
+    }
+    await this.store.updateTask(task.id, {
+      enabled: task.enabled,
+      state: task.state,
+    });
+    this.logger.info(`[错过] "${task.name}" 应触发于 ${scheduledFor}，超容差不补`, {
+      id: task.id,
+    });
   }
 
   private async executeSingleTask(task: ScheduledTask): Promise<AgentTurnResult> {
+    // 同 task 并发守卫：撞上正在跑的同一 task 即拒绝。runTask（RPC schedule.run / 工具）
+    // 与 handleDueTasks 都经此唯一入口，保证「同 task 同时只一个 run」——taskId 与
+    // in-flight run 因此一一对应，RunRegistry 以 taskId 为 key 才安全。
+    if (this.activeTasks.has(task.id)) {
+      return {
+        status: "error",
+        error: `Task "${task.name}" is already running`,
+        durationMs: 0,
+      };
+    }
     this.activeTasks.add(task.id);
     this.logger.info(`[执行] "${task.name}" id=${task.id} kind=${task.action.kind}`);
 
@@ -410,6 +483,13 @@ export class Scheduler {
     task: ScheduledTask,
     result: AgentTurnResult,
   ): Promise<void> {
+    // 内部维护任务静默：结果不触达用户（不投递 channel）——与事件广播边界对内部
+    // 任务的处理一致，由同一 isInternal 谓词推导，不靠「内部任务碰巧没配 delivery」兜底。
+    if (isInternal(task)) {
+      task.state.lastDeliveryStatus = "skipped";
+      return;
+    }
+
     if (!this.delivery) {
       task.state.lastDeliveryStatus = "skipped";
       return;
@@ -520,25 +600,6 @@ function generateId(): string {
   const ts = Date.now().toString(36);
   const rand = Math.random().toString(36).slice(2, 8);
   return `task_${ts}_${rand}`;
-}
-
-function formatSchedule(schedule: ScheduledTask["schedule"]): string {
-  switch (schedule.kind) {
-    case "once":
-      return "一次性";
-    case "interval": {
-      const sec = Math.round(schedule.everyMs / 1000);
-      if (sec < 60) return `每 ${sec} 秒`;
-      const min = Math.round(sec / 60);
-      if (min < 60) return `每 ${min} 分钟`;
-      const hr = Math.round(min / 60);
-      return `每 ${hr} 小时`;
-    }
-    case "cron":
-      return `cron ${schedule.expr}${schedule.tz ? ` (${schedule.tz})` : ""}`;
-    default:
-      return "未知";
-  }
 }
 
 function createDefaultLogger(): SchedulerLogger {

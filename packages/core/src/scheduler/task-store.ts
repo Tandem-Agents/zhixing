@@ -33,6 +33,8 @@ export function getSchedulerStorePath(): string {
 export class JsonTaskStore implements TaskStore {
   private tasks: Map<string, ScheduledTask> = new Map();
   private readonly filePath: string;
+  /** 单写队列：所有 save 排到这条链上串行执行，避免并发写互相覆盖丢更新。 */
+  private writeChain: Promise<void> = Promise.resolve();
 
   constructor(filePath?: string) {
     this.filePath = filePath ?? getSchedulerStorePath();
@@ -65,18 +67,23 @@ export class JsonTaskStore implements TaskStore {
       }
     }
 
-    const data: StoreFile = {
-      version: 1,
-      tasks: this.allTasks(),
+    // 写入串行化：把「序列化当前 Map 快照 + 原子写 + rename」排到单写队列尾，
+    // 任意时刻只有一个写在进行；后到的写等前一个完成、读到最新快照——根治多任务
+    // 并发 save 的 last-rename-wins 丢更新（快照在串行执行时才读、而非排队时）。
+    const doWrite = async (): Promise<void> => {
+      const data: StoreFile = {
+        version: 1,
+        tasks: this.allTasks(),
+      };
+      await mkdir(dirname(this.filePath), { recursive: true });
+      // 原子写入：先写 tmp 再 rename
+      const tmpPath = this.filePath + ".tmp";
+      await writeFile(tmpPath, JSON.stringify(data, null, 2), "utf-8");
+      await rename(tmpPath, this.filePath);
     };
-
-    // 确保目录存在
-    await mkdir(dirname(this.filePath), { recursive: true });
-
-    // 原子写入：先写 tmp 再 rename
-    const tmpPath = this.filePath + ".tmp";
-    await writeFile(tmpPath, JSON.stringify(data, null, 2), "utf-8");
-    await rename(tmpPath, this.filePath);
+    // 前一个写无论成败都接着跑下一个，避免一次失败卡死整条写链
+    this.writeChain = this.writeChain.then(doWrite, doWrite);
+    return this.writeChain;
   }
 
   async addTask(task: ScheduledTask): Promise<void> {

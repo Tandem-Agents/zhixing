@@ -298,6 +298,50 @@ describe("Scheduler", () => {
     await scheduler.stop();
   });
 
+  it("内部维护任务即便配了 delivery 也静默（结果触达边界拦截）", async () => {
+    const enqueue = vi.fn().mockResolvedValue("dlv_internal");
+    const mockDelivery = { enqueue, flush: vi.fn(), stats: vi.fn() };
+    const mockRun = vi.fn<[], Promise<AgentTurnResult>>().mockResolvedValue({
+      status: "ok",
+      output: "internal result",
+      durationMs: 10,
+    });
+
+    const store = new JsonTaskStore(join(tempDir, "tasks.json"));
+    const eventBus = createEventBus<SchedulerEventMap>();
+    const scheduler = new Scheduler({
+      store,
+      eventBus,
+      runAgentTurn: mockRun,
+      delivery: mockDelivery,
+    });
+    await scheduler.start();
+
+    // system:true + agent-turn + 显式 delivery：即便配了投递目标，内部任务结果也不
+    // 触达用户——enqueueDelivery 在边界用 isInternal 拦掉（区别于「无 target 跳过」）。
+    await store.addTask({
+      id: "__internal-agent",
+      name: "internal-agent",
+      enabled: true,
+      priority: "low",
+      schedule: {
+        kind: "once",
+        at: new Date(Date.now() + 999_999).toISOString(),
+      },
+      action: { kind: "agent-turn", prompt: "x" },
+      delivery: { kind: "channel", channel: "feishu", to: "u1" },
+      state: { consecutiveErrors: 0, runCount: 0 },
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      system: true,
+    });
+
+    await scheduler.runTask("__internal-agent");
+
+    expect(enqueue).not.toHaveBeenCalled();
+    await scheduler.stop();
+  });
+
   it("P3b: 任务带 createdInTurn 时，enqueue 的 source 透传该字段", async () => {
     const enqueue = vi.fn().mockResolvedValue("dlv_turn");
     const mockDelivery = { enqueue, flush: vi.fn(), stats: vi.fn() };
@@ -623,5 +667,286 @@ describe("Scheduler", () => {
     expect(s2.scheduler.listTasks()).toHaveLength(1);
     expect(s2.scheduler.listTasks()[0]!.name).toBe("persistent");
     await s2.scheduler.stop();
+  });
+
+  it("宿主离线期间错过的任务（应触发于上线前）记为「错过」、不补、推进 nextRunAt", async () => {
+    const mockRun = vi.fn<[], Promise<AgentTurnResult>>().mockResolvedValue({
+      status: "ok",
+      output: "done",
+      durationMs: 10,
+    });
+    const storePath = join(tempDir, "offline-missed.json");
+    let currentNow = new Date("2026-01-01T00:00:00.000Z");
+
+    // session 1：创建任务（nextRunAt=00:01:00）后下线
+    const s1 = createTestScheduler({
+      storePath,
+      runAgentTurn: mockRun,
+      now: () => currentNow,
+    });
+    await s1.scheduler.start();
+    const task = await s1.scheduler.createTask({
+      name: "periodic",
+      enabled: true,
+      priority: "normal",
+      schedule: { kind: "interval", everyMs: 60_000 },
+      action: { kind: "agent-turn", prompt: "x" },
+    });
+    const originalNextRun = task.state.nextRunAt!; // 00:01:00
+    await s1.scheduler.stop();
+
+    // 离线期间时间快进过 nextRunAt + grace；session 2 重新上线（onlineSince=01:00:00）
+    currentNow = new Date("2026-01-01T01:00:00.000Z");
+    const s2 = createTestScheduler({
+      storePath,
+      runAgentTurn: mockRun,
+      now: () => currentNow,
+    });
+    await s2.scheduler.start();
+    await s2.scheduler["timerLoop"].tick();
+
+    // 应触发于上线之前 → 离线期间错过 → 记录不补、推进 nextRunAt
+    expect(mockRun).not.toHaveBeenCalled();
+    const updated = s2.scheduler.getTask(task.id)!;
+    expect(updated.state.lastMissed?.scheduledFor).toBe(originalNextRun);
+    expect(new Date(updated.state.nextRunAt!).getTime()).toBeGreaterThan(
+      currentNow.getTime(),
+    );
+
+    await s2.scheduler.stop();
+  });
+
+  it("在线到点的任务被推迟远超容差也不误判错过（锚定上线时刻、不随 now 漂移）", async () => {
+    const mockRun = vi.fn<[], Promise<AgentTurnResult>>().mockResolvedValue({
+      status: "ok",
+      output: "done",
+      durationMs: 10,
+    });
+    let currentNow = new Date("2026-01-01T00:00:00.000Z");
+    const { scheduler } = createTestScheduler({
+      storePath: join(tempDir, "online-late.json"),
+      runAgentTurn: mockRun,
+      now: () => currentNow,
+    });
+    await scheduler.start(); // onlineSince = 00:00:00
+
+    const task = await scheduler.createTask({
+      name: "periodic",
+      enabled: true,
+      priority: "normal",
+      schedule: { kind: "interval", everyMs: 60_000 },
+      action: { kind: "agent-turn", prompt: "x" },
+    });
+
+    // nextRunAt=00:01:00 在上线之后；now 快进到 01:00:00（迟到 59min 远超 grace）。
+    // 这是在线延迟（非离线错过）——必须执行、绝不误判错过。
+    currentNow = new Date("2026-01-01T01:00:00.000Z");
+    await scheduler["timerLoop"].tick();
+
+    expect(mockRun).toHaveBeenCalledOnce();
+    expect(scheduler.getTask(task.id)!.state.lastMissed).toBeUndefined();
+
+    await scheduler.stop();
+  });
+
+  it("once 任务离线期间错过 → terminal（disable + 清 nextRunAt）", async () => {
+    const mockRun = vi.fn<[], Promise<AgentTurnResult>>().mockResolvedValue({
+      status: "ok",
+      output: "done",
+      durationMs: 10,
+    });
+    const storePath = join(tempDir, "once-missed.json");
+    let currentNow = new Date("2026-01-01T00:00:00.000Z");
+
+    const s1 = createTestScheduler({
+      storePath,
+      runAgentTurn: mockRun,
+      now: () => currentNow,
+    });
+    await s1.scheduler.start();
+    const task = await s1.scheduler.createTask({
+      name: "once-remind",
+      enabled: true,
+      priority: "normal",
+      schedule: { kind: "once", at: "2026-01-01T00:01:00.000Z" },
+      action: { kind: "agent-turn", prompt: "x" },
+    });
+    await s1.scheduler.stop();
+
+    currentNow = new Date("2026-01-01T01:00:00.000Z");
+    const s2 = createTestScheduler({
+      storePath,
+      runAgentTurn: mockRun,
+      now: () => currentNow,
+    });
+    await s2.scheduler.start();
+    await s2.scheduler["timerLoop"].tick();
+
+    expect(mockRun).not.toHaveBeenCalled();
+    const updated = s2.scheduler.getTask(task.id)!;
+    expect(updated.enabled).toBe(false);
+    expect(updated.state.nextRunAt).toBeUndefined();
+    expect(updated.state.lastMissed?.scheduledFor).toBe(
+      "2026-01-01T00:01:00.000Z",
+    );
+
+    await s2.scheduler.stop();
+  });
+
+  it("重启间隙内错过的任务（应触发于上线前、但只离线了容差内）补执行、不记错过", async () => {
+    const mockRun = vi.fn<[], Promise<AgentTurnResult>>().mockResolvedValue({
+      status: "ok",
+      output: "done",
+      durationMs: 10,
+    });
+    const storePath = join(tempDir, "restart-gap.json");
+    let currentNow = new Date("2026-01-01T00:00:00.000Z");
+
+    // session 1：创建任务（nextRunAt=00:01:00）后下线
+    const s1 = createTestScheduler({
+      storePath,
+      runAgentTurn: mockRun,
+      now: () => currentNow,
+    });
+    await s1.scheduler.start();
+    const task = await s1.scheduler.createTask({
+      name: "periodic",
+      enabled: true,
+      priority: "normal",
+      schedule: { kind: "interval", everyMs: 60_000 },
+      action: { kind: "agent-turn", prompt: "x" },
+    });
+    await s1.scheduler.stop();
+
+    // 重启间隙：只离线 30s（< grace 90s）。s2 上线 00:01:30 → onlineSince-grace=00:00:00；
+    // scheduledFor=00:01:00 落在 [onlineSince-grace, onlineSince) → 容差内、补执行、非错过。
+    currentNow = new Date("2026-01-01T00:01:30.000Z");
+    const s2 = createTestScheduler({
+      storePath,
+      runAgentTurn: mockRun,
+      now: () => currentNow,
+    });
+    await s2.scheduler.start();
+    await s2.scheduler["timerLoop"].tick();
+
+    expect(mockRun).toHaveBeenCalledOnce();
+    expect(s2.scheduler.getTask(task.id)!.state.lastMissed).toBeUndefined();
+
+    await s2.scheduler.stop();
+  });
+
+  it("迟到落在容差窗口内的过期任务仍准时执行", async () => {
+    const mockRun = vi.fn<[], Promise<AgentTurnResult>>().mockResolvedValue({
+      status: "ok",
+      output: "done",
+      durationMs: 10,
+    });
+    let currentNow = new Date("2026-01-01T00:00:00.000Z");
+    const { scheduler } = createTestScheduler({
+      storePath: join(tempDir, "tasks.json"),
+      runAgentTurn: mockRun,
+      now: () => currentNow,
+    });
+    await scheduler.start();
+
+    const task = await scheduler.createTask({
+      name: "periodic",
+      enabled: true,
+      priority: "normal",
+      schedule: { kind: "interval", everyMs: 60_000 },
+      action: { kind: "agent-turn", prompt: "x" },
+    });
+
+    // nextRunAt = 00:01:00；快进到 00:01:30（迟到 30s < grace 90s）
+    currentNow = new Date("2026-01-01T00:01:30.000Z");
+    await scheduler["timerLoop"].tick();
+
+    expect(mockRun).toHaveBeenCalledOnce();
+    expect(scheduler.getTask(task.id)!.state.lastMissed).toBeUndefined();
+
+    await scheduler.stop();
+  });
+
+  it("同一 task 并发执行时第二个被拒绝（守卫下沉 executeSingleTask）", async () => {
+    let releaseFirst: () => void = () => {};
+    const firstGate = new Promise<void>((r) => {
+      releaseFirst = r;
+    });
+    const mockRun = vi
+      .fn<[], Promise<AgentTurnResult>>()
+      .mockImplementation(async () => {
+        await firstGate; // 阻塞第一个 run，制造 in-flight 窗口
+        return { status: "ok", output: "done", durationMs: 10 };
+      });
+    const { scheduler } = createTestScheduler({
+      storePath: join(tempDir, "tasks.json"),
+      runAgentTurn: mockRun,
+    });
+    await scheduler.start();
+
+    const task = await scheduler.createTask({
+      name: "long-task",
+      enabled: true,
+      priority: "normal",
+      schedule: { kind: "once", at: new Date(Date.now() + 999_999).toISOString() },
+      action: { kind: "agent-turn", prompt: "x" },
+    });
+
+    // 第一个 run 启动并阻塞在 gate（activeTasks 已记入）
+    const first = scheduler.runTask(task.id);
+    // 第二个 run 在第一个 in-flight 时进入——应被守卫拒绝
+    const second = await scheduler.runTask(task.id);
+    expect(second.status).toBe("error");
+    expect(second.error).toContain("already running");
+
+    // 放行第一个，确认只有它真正执行
+    releaseFirst();
+    expect((await first).status).toBe("ok");
+    expect(mockRun).toHaveBeenCalledOnce();
+
+    await scheduler.stop();
+  });
+
+  it("ensureSystemTask: 固定 id seed-if-absent、幂等、system 不可删", async () => {
+    const { scheduler } = createTestScheduler({
+      storePath: join(tempDir, "tasks.json"),
+    });
+    await scheduler.start();
+
+    await scheduler.ensureSystemTask({
+      id: "__journal-gc",
+      name: "journal-gc",
+      handler: "__journal-gc",
+      schedule: { kind: "cron", expr: "0 3 * * *" },
+    });
+
+    const tasks = scheduler.listTasks();
+    expect(tasks).toHaveLength(1);
+    const seeded = scheduler.getTask("__journal-gc")!;
+    expect(seeded.system).toBe(true);
+    expect(seeded.action).toEqual({ kind: "system", handler: "__journal-gc" });
+    expect(seeded.state.nextRunAt).toBeTruthy();
+
+    // 幂等：再次调用不重复、不覆盖已有定义
+    await scheduler.ensureSystemTask({
+      id: "__journal-gc",
+      name: "renamed",
+      handler: "__journal-gc",
+      schedule: { kind: "cron", expr: "0 5 * * *" },
+    });
+    expect(scheduler.listTasks()).toHaveLength(1);
+    expect(scheduler.getTask("__journal-gc")!.name).toBe("journal-gc");
+
+    // 系统任务不可删
+    await expect(scheduler.deleteTask("__journal-gc")).rejects.toThrow(
+      "Cannot delete system task",
+    );
+
+    // 系统任务不可改（对齐拒删的显式守卫）
+    await expect(
+      scheduler.updateTask("__journal-gc", { enabled: false }),
+    ).rejects.toThrow("Cannot modify system task");
+
+    await scheduler.stop();
   });
 });

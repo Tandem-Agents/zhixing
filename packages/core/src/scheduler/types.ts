@@ -76,6 +76,8 @@ export interface TaskState {
   lastDeliveryStatus?: "sent" | "skipped" | "failed";
   consecutiveErrors: number;
   runCount: number;
+  /** 最近一次「错过」的事实：应触发时刻 + 检测到时刻。错过不补执行，仅记录供使用侧查询。 */
+  lastMissed?: { scheduledFor: string; detectedAt: string };
 }
 
 // ─── 完整的调度任务 ───

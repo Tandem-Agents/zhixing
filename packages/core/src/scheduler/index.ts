@@ -1,6 +1,6 @@
 export { Scheduler } from "./scheduler.js";
 export type { SchedulerDeps } from "./scheduler.js";
-export { JsonTaskStore } from "./task-store.js";
+export { JsonTaskStore, getSchedulerStorePath } from "./task-store.js";
 export { TimerLoop } from "./timer-loop.js";
 export { RunRegistry } from "./run-registry.js";
 export { DEFAULT_SCHEDULER_CONFIG } from "./config.js";
@@ -21,3 +21,17 @@ export type {
   SchedulerLogger,
 } from "./types.js";
 export { PRIORITY_WEIGHT } from "./types.js";
+export {
+  computeStatusSummary,
+  formatSchedule,
+  isInternal,
+} from "./status-summary.js";
+export { LocalSchedulerFacade } from "./facade.js";
+export type {
+  SchedulerFacade,
+  TaskView,
+  TaskSpec,
+  TaskPatch,
+  SchedulerFacadeEvent,
+  SchedulerFacadeEventHandler,
+} from "./facade.js";

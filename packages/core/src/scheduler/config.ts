@@ -19,6 +19,14 @@ export interface SchedulerConfig {
   errorBackoffMaxMs: number;
   /** 优雅停机等待活跃任务的超时（毫秒）。默认 10_000 */
   shutdownTimeoutMs: number;
+  /**
+   * 上线边界容差窗口（毫秒）。默认 90_000。
+   * 「错过」以本次上线时刻为锚（非任务迟到时长）：应触发于「上线时刻 - 此窗口」之前 =
+   * 宿主离线期间真正错过的触发——不补执行、记 state.lastMissed、推进 nextRunAt；之后
+   * （含在线被并发推迟）都是在线到点、正常执行。此窗口只吸收上线边界附近的短暂离线
+   * （如重启间隙），不随任务迟到时长漂移——故在线并发延迟无论多久都不会被误判错过。
+   */
+  graceWindowMs: number;
 }
 
 export const DEFAULT_SCHEDULER_CONFIG: SchedulerConfig = {
@@ -30,4 +38,5 @@ export const DEFAULT_SCHEDULER_CONFIG: SchedulerConfig = {
   errorBackoffBaseMs: 60_000,
   errorBackoffMaxMs: 3_600_000,
   shutdownTimeoutMs: 10_000,
+  graceWindowMs: 90_000,
 };
