@@ -14,6 +14,7 @@
 import { createServer, type Server as HttpServer } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { IEventBus, SchedulerEventMap } from "@zhixing/core";
+import { isInternal } from "@zhixing/core";
 import { dispatchRest } from "./routes.js";
 import type { ServerContext } from "./context.js";
 import { DEFAULT_SERVER_CONFIG, type ServerConfig } from "./types.js";
@@ -135,10 +136,16 @@ export async function startServer(opts: StartServerOptions): Promise<ZhixingServ
   // 回填实际监听地址到 context，供 status 等端点读取
   ctx.listenAddr = { port: addr.port, host: addr.address };
 
-  // EventBus → RPC notification 桥接（订阅 scheduler 等事件，向所有连接广播）
+  // EventBus → RPC notification 桥接（订阅 scheduler 等事件，向所有连接广播）。
+  // 内部维护任务的运行事件不广播给 client（结果触达：内部静默）——谓词用 ctx.scheduler
+  // 现查 task.system，与 channel 投递、facade.onEvent 两个触达边界一致。
   const disposeBridge: DisposeBridge = createEventBridge({
     connections,
     schedulerEventBus: opts.schedulerEventBus,
+    isInternalTask: (taskId) => {
+      const task = ctx.scheduler?.getTask(taskId);
+      return task ? isInternal(task) : false;
+    },
   });
 
   let closed = false;
