@@ -14,6 +14,8 @@ export type {
   ContinueReason,
   LLMCallResult,
   RunResult,
+  WindowChangeReason,
+  WindowLifecycle,
 } from "./types.js";
 export type { BuildTurnInput } from "./turn-builder.js";
 export type { MockResponse, MockToolCall } from "./mock-provider.js";

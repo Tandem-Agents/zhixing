@@ -81,11 +81,15 @@ import type {
 export async function* runAgentLoop(
   params: AgentLoopParams,
 ): AsyncGenerator<AgentYield, AgentResult> {
-  // ⚠ systemPrompt 是 prompt cache 前缀死线:由 runtime 装配阶段构造一次,
-  // 这里仅解构透传,**不得**在 loop 内拼接 / 追加 / 重建。per-turn 动态信息
-  // 走 turnContextInjector(注入到末尾 user message),不进 systemPrompt。
-  // 详见 buildSystemPrompt 的"调用契约"注释。
-  const { model, thinking, systemPrompt, eventBus } = params;
+  // systemPrompt 现取 —— 主对话路径传 getSystemPrompt(绑 per-run 局部 prompt),让
+  // 注意力窗口边界(段切换 / 压缩)重建后的值在下个 LLM call 生效;sub-agent / 单测等
+  // 不在 run 内重建的路径传固定 systemPrompt,getSP 回退到它。每个 LLM call 现取:
+  // run 内无换代时每 turn 取同值 → byte-equal → cache 命中。per-turn 动态信息仍走
+  // turnContextInjector(注入末尾 user message),不进 systemPrompt。
+  const { model, thinking, eventBus } = params;
+  const getSystemPrompt =
+    params.getSystemPrompt ?? (() => params.systemPrompt ?? "");
+  const windowLifecycle = params.windowLifecycle;
   const tools = params.tools ?? [];
   const maxTurns = params.maxTurns ?? 100;
   const workingDirectory = params.workingDirectory ?? process.cwd();
@@ -234,18 +238,19 @@ export async function* runAgentLoop(
     //（纯估算+比较，无 LLM）；超阈（恢复的持久对话 / 首条超大输入超注意力窗口）
     // 则在第一次 streamLLMCall 前就压缩，而非先吃一个超窗口 turn 再 turn-end
     // 自愈。runTurnBegin 永不 terminal，直接写回 state.messages 供首个 LLM call。
-    state = {
-      ...state,
-      messages: await runTurnBegin({
-        segmentManager: params.segmentManager,
-        messages: state.messages,
-        systemPrompt: params.systemPrompt ?? "",
-        tools: params.tools ?? [],
-        turnCount: state.turnCount,
-        conversationId: params.conversationId,
-        abortSignal: controller.signal,
-      }),
-    };
+    const begin = await runTurnBegin({
+      segmentManager: params.segmentManager,
+      messages: state.messages,
+      systemPrompt: getSystemPrompt(),
+      tools: params.tools ?? [],
+      turnCount: state.turnCount,
+      conversationId: params.conversationId,
+      abortSignal: controller.signal,
+      // 段切换→新窗的换代由 runTurnBegin 内部触发(收敛,见 turn-end.ts ④);
+      // 重建后下个 getSystemPrompt() 现取新的本 run 局部 prompt。
+      windowLifecycle,
+    });
+    state = { ...state, messages: begin.messages };
 
     while (true) {
       // ── Guard: abort ──
@@ -292,7 +297,7 @@ export async function* runAgentLoop(
         messages: messagesForLLM as Message[],
         model,
         thinking,
-        systemPrompt,
+        systemPrompt: getSystemPrompt(),
         toolSpecs,
         controller,
         watchdog: params.watchdog,
@@ -337,7 +342,7 @@ export async function* runAgentLoop(
         llmResult.usage.inputTokens > 0;
       if (llmCallSuccess && params.tokenEstimator) {
         const estimated =
-          params.tokenEstimator.estimateText(systemPrompt ?? "") +
+          params.tokenEstimator.estimateText(getSystemPrompt()) +
           params.tokenEstimator.estimateMessages(messagesForLLM) +
           params.tokenEstimator.estimateTools(toolSpecs);
         params.tokenEstimator.calibrate(
@@ -428,12 +433,15 @@ export async function* runAgentLoop(
           abortSignal: controller.signal,
           contextManager: params.contextManager,
           segmentManager: params.segmentManager,
-          systemPrompt: params.systemPrompt ?? "",
+          systemPrompt: getSystemPrompt(),
           tools: params.tools ?? [],
           conversationId: params.conversationId,
           tokenEstimator: params.tokenEstimator,
           eventBus: params.eventBus,
           anchor: state.anchor,
+          // 纯文本末轮的段切换 / 压缩也是注意力窗口换代 —— runTurnEnd 内部触发
+          // 换代回调更新实例权威 prompt(给下个 run),与工具路径同走一条出口、不漏。
+          windowLifecycle,
         });
         if (turnEnd.kind === "terminal") {
           return await finalizeRun(turnEnd.result);
@@ -534,12 +542,15 @@ export async function* runAgentLoop(
         abortSignal: controller.signal,
         contextManager: params.contextManager,
         segmentManager: params.segmentManager,
-        systemPrompt: params.systemPrompt ?? "",
+        systemPrompt: getSystemPrompt(),
         tools: params.tools ?? [],
         conversationId: params.conversationId,
         tokenEstimator: params.tokenEstimator,
         eventBus: params.eventBus,
         anchor: state.anchor,
+        // 段切换 / 压缩→新窗的换代由 runTurnEnd 内部触发(收敛,见 turn-end.ts ④);
+        // 重建后下个 getSystemPrompt() 现取新的本 run 局部 prompt。
+        windowLifecycle,
       });
       if (turnEnd.kind === "terminal") {
         return await finalizeRun(turnEnd.result);

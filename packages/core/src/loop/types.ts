@@ -36,6 +36,20 @@ import type { TurnContextInjector } from "../context/turn-context.js";
 import type { CompactMarker, Turn } from "../transcript/types.js";
 import type { AbortReason, WatchdogPolicy } from "../interrupt/types.js";
 
+// ─── 注意力窗口换代 ───
+
+/** 注意力窗口换代的触发原因 —— 段切换 / budget 压缩。 */
+export type WindowChangeReason = "segment-transition" | "compact";
+
+/**
+ * 注意力窗口换代回调契约 —— run 内上下文重构后由 agent-loop 调用。
+ * 装配方实现它(触发窗口生命周期钩子 + 重建 per-run 局部 prompt);agent-loop 只
+ * 负责在重构改完 messages 后、下个 LLM call 之前调一次。
+ */
+export interface WindowLifecycle {
+  onChange(reason: WindowChangeReason): Promise<void>;
+}
+
 // ─── Agent Loop 参数 ───
 
 export interface AgentLoopParams {
@@ -50,8 +64,17 @@ export interface AgentLoopParams {
   thinking?: ThinkingConfig;
   /** 可用工具列表 */
   tools?: ToolDefinition[];
-  /** 系统提示 */
+  /**
+   * 系统提示(固定值)。与 getSystemPrompt 二选一(同传时 getSystemPrompt 优先)。
+   * sub-agent / 单测等不在 run 内重建 system prompt 的路径传此固定串。
+   */
   systemPrompt?: string;
+  /**
+   * 系统提示的现取函数 —— 每个 LLM call 前调一次取当前值。主对话路径传此函数
+   * (绑 per-run 局部 prompt),让注意力窗口边界重建后的 system prompt 在下个 call
+   * 生效。缺省时回退到固定 systemPrompt。
+   */
+  getSystemPrompt?: () => string;
   /** 初始消息（至少包含一条 user 消息） */
   messages: Message[];
   /** 最大 LLM↔工具交互轮次，达到后终止。默认 100 */
@@ -157,6 +180,12 @@ export interface AgentLoopParams {
    * decision.kind="pass", reason="no-conversation"，不会污染段切换观测。
    */
   conversationId?: string;
+  /**
+   * 注意力窗口换代回调 —— agent-loop 在 run 内上下文重构(段切换 / 压缩)改完
+   * messages 后、下个 LLM call 之前调一次。装配方(orchestrator)注入,内部据此触发
+   * 窗口生命周期钩子并重建 per-run 局部 prompt。缺省时不触发(no-op)。
+   */
+  windowLifecycle?: WindowLifecycle;
 }
 
 // ─── 依赖注入 ───

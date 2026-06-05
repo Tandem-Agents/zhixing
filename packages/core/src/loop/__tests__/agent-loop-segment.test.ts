@@ -414,4 +414,92 @@ describe("agent-loop × SegmentManager 集成", () => {
 
     expect(reader.hasInProgress).toHaveBeenCalledWith("conv-XYZ");
   });
+
+  it("段切换 → windowLifecycle.onChange 收到 segment-transition", async () => {
+    const onChange = vi.fn<(reason: string) => Promise<void>>().mockResolvedValue();
+
+    const segmentManager = createSegmentManager({
+      estimator: fakeEstimator(20),
+      capability: aggressiveCap,
+      callLLM: vi
+        .fn<(req: SegmentSummarizeRequest) => Promise<string>>()
+        .mockResolvedValue(SUMMARY_OK),
+      persistence: fakePersistence(),
+      taskListReader: fakeReader(),
+      retryBaseMs: 0,
+      generateSegmentId: () => "seg-wl",
+    });
+
+    const provider = makeToolThenTextProvider("t");
+    await drainAgentLoop(
+      baseParams(provider, {
+        segmentManager,
+        conversationId: "conv-1",
+        windowLifecycle: { onChange },
+      }),
+    );
+
+    // runTurnBegin（起始超阈）+ turn 1 工具路径 runTurnEnd + turn 2 纯文本末轮
+    // runTurnEnd 各触发一次 —— 所有 messages 重构出口都经 turn-end 内部统一触发
+    // 换代,一条不漏(纯文本末轮不再漏)。与段切换摘要 callLLM 的 3 次对齐。
+    expect(onChange).toHaveBeenCalledWith("segment-transition");
+    expect(onChange).toHaveBeenCalledTimes(3);
+  });
+
+  it("不注入 windowLifecycle → 段切换照常执行、不抛错", async () => {
+    const segmentManager = createSegmentManager({
+      estimator: fakeEstimator(20),
+      capability: aggressiveCap,
+      callLLM: vi
+        .fn<(req: SegmentSummarizeRequest) => Promise<string>>()
+        .mockResolvedValue(SUMMARY_OK),
+      persistence: fakePersistence(),
+      taskListReader: fakeReader(),
+      retryBaseMs: 0,
+      generateSegmentId: () => "seg-nowl",
+    });
+
+    const provider = makeToolThenTextProvider("t");
+    const { result } = await drainAgentLoop(
+      baseParams(provider, {
+        segmentManager,
+        conversationId: "conv-1",
+        windowLifecycle: undefined,
+      }),
+    );
+
+    expect(result.reason).toBe("completed");
+  });
+
+  it("getSystemPrompt：每次 LLM 调用现取其返回值，优先于固定 systemPrompt", async () => {
+    const provider = makeToolThenTextProvider("t");
+    const getSystemPrompt = vi.fn(() => "DYNAMIC-SYS");
+
+    await drainAgentLoop(
+      baseParams(provider, {
+        systemPrompt: "STATIC-SYS",
+        getSystemPrompt,
+        conversationId: "conv-1",
+      }),
+    );
+
+    // 两次 LLM 调用现取后进入 ChatRequest.systemPrompt —— 固定 systemPrompt 被覆盖。
+    expect(getSystemPrompt).toHaveBeenCalled();
+    expect(provider.calls.length).toBe(2);
+    expect(provider.calls[0]!.systemPrompt).toBe("DYNAMIC-SYS");
+    expect(provider.calls[1]!.systemPrompt).toBe("DYNAMIC-SYS");
+  });
+
+  it("缺省 getSystemPrompt → 回退到固定 systemPrompt", async () => {
+    const provider = makeToolThenTextProvider("t");
+
+    await drainAgentLoop(
+      baseParams(provider, {
+        systemPrompt: "STATIC-SYS",
+        conversationId: "conv-1",
+      }),
+    );
+
+    expect(provider.calls[0]!.systemPrompt).toBe("STATIC-SYS");
+  });
 });

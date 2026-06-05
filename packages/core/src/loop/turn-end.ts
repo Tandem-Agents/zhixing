@@ -65,7 +65,12 @@ import type { TokenUsage } from "../types/llm.js";
 import type { Message } from "../types/messages.js";
 import { toToolSpec, type ToolSpec } from "../types/tools.js";
 import type { ToolDefinition } from "../types/tools.js";
-import type { AgentResult, TokenAnchor } from "./types.js";
+import type {
+  AgentResult,
+  TokenAnchor,
+  WindowChangeReason,
+  WindowLifecycle,
+} from "./types.js";
 
 // ─── 输出 ───
 
@@ -76,7 +81,10 @@ import type { AgentResult, TokenAnchor } from "./types.js";
  *   - kind="terminal" → 某个副作用要求终止 run，caller 据此调 finalizeRun
  */
 export type TurnEndOutcome =
-  | { readonly kind: "ok"; readonly messages: Message[] }
+  | {
+      readonly kind: "ok";
+      readonly messages: Message[];
+    }
   | { readonly kind: "terminal"; readonly result: AgentResult };
 
 // ─── 输入 ───
@@ -135,6 +143,17 @@ export interface TurnEndParams {
    * 内化处理，调用方无需感知。详见 {@link TokenAnchor}。
    */
   readonly anchor?: TokenAnchor;
+  /**
+   * 注意力窗口换代回调 —— 本 turn 发生段切换 / budget 压缩（messages 重构=新窗
+   * 诞生）时，在 messages 重构完成后由本钩子**内部**触发。装配方（orchestrator）
+   * 注入，据此重建 per-run 局部 prompt + 更新实例权威 prompt。缺省（sub-agent /
+   * 单测）→ no-op。
+   *
+   * 触发收敛进本钩子（与 ③ tokens 快照 emit 同模式）、而非返回信号交 caller 各
+   * 路径自行触发 —— 保证「所有 messages 重构出口都触发换代」一条不漏:runTurnEnd
+   * 的纯文本末轮与工具路径同走本函数、同样覆盖,从结构上消除"某路径漏触发"。
+   */
+  readonly windowLifecycle?: WindowLifecycle;
 }
 
 // ─── Turn 开始钩子（首个 LLM 调用前一次性，只 ②） ───
@@ -155,6 +174,8 @@ export interface SegmentSwitchParams {
   readonly turnCount: number;
   readonly conversationId?: string;
   readonly abortSignal: AbortSignal;
+  /** 注意力窗口换代回调 —— 段切换后内部触发(同 runTurnEnd)。缺省 → no-op。 */
+  readonly windowLifecycle?: WindowLifecycle;
 }
 
 /**
@@ -177,13 +198,15 @@ export interface SegmentSwitchParams {
  * 两处各自 inline 的 ~6 行更清晰，无隐式抽象债。
  *
  * 无条件每 run 一次（caller 放在循环外保证）；未超阈是廉价 no-op（纯估算+比较，
- * 无 LLM）。永不 terminal（evaluate 内部已吞失败返 modified:false），返回 Message[]
- * （no-op 路径浅拷贝 readonly 入参为 mutable，每 run 仅一次，成本可忽略）。
+ * 无 LLM）。永不 terminal（evaluate 内部已吞失败返 modified:false）。返回处理后的
+ * messages（no-op 路径浅拷贝 readonly 入参为 mutable，每 run 仅一次，成本可忽略）。
+ * 段切换时窗口换代由本函数**内部**触发 windowLifecycle.onChange（在返回前、首个
+ * LLM call 之前），与 runTurnEnd 同模式 —— caller 拿到的就是已重建好的窗口。
  */
 export async function runTurnBegin(
   params: SegmentSwitchParams,
-): Promise<Message[]> {
-  if (!params.segmentManager) return [...params.messages];
+): Promise<{ messages: Message[] }> {
+  if (!params.segmentManager) return { messages: [...params.messages] };
   const seg = await params.segmentManager.evaluate({
     messages: params.messages,
     systemPrompt: params.systemPrompt,
@@ -192,9 +215,11 @@ export async function runTurnBegin(
     conversationId: params.conversationId,
     abortSignal: params.abortSignal,
   });
-  return seg.modified && seg.newSegmentMessages
-    ? seg.newSegmentMessages
-    : [...params.messages];
+  if (seg.modified && seg.newSegmentMessages) {
+    await params.windowLifecycle?.onChange("segment-transition");
+    return { messages: seg.newSegmentMessages };
+  }
+  return { messages: [...params.messages] };
 }
 
 // ─── 钩子 ───
@@ -218,6 +243,7 @@ export async function runTurnEnd(
   params: TurnEndParams,
 ): Promise<TurnEndOutcome> {
   let messages = params.messages;
+  let windowChange: WindowChangeReason | undefined;
 
   // ① budget-driven 兜底
   const ctx = await resolveContextManager(
@@ -234,6 +260,7 @@ export async function runTurnEnd(
   if (terminal) return { kind: "terminal", result: terminal };
   if (ctx.kind === "ok" && ctx.output.modified) {
     messages = ctx.output.messages;
+    windowChange = "compact";
   }
 
   // ② attention-driven 段切换
@@ -259,6 +286,7 @@ export async function runTurnEnd(
     });
     if (seg.modified && seg.newSegmentMessages) {
       messages = seg.newSegmentMessages;
+      windowChange = "segment-transition";
     }
   }
 
@@ -293,7 +321,16 @@ export async function runTurnEnd(
     });
   }
 
-  // ④ 未来扩展点 —— 新副作用直接在此追加：
+  // ④ 注意力窗口换代触发 —— 本 turn 的 ①/② 重构了 messages = 新注意力窗口诞生,
+  //    在此(messages 已最终化、下个 LLM call 之前)通知 windowLifecycle 做窗口边界
+  //    重建。收敛于此、而非返回信号交 caller 各路径自行触发:runTurnEnd 的所有调用
+  //    路径(纯文本末轮 / 工具路径)都经本函数,「所有 messages 重构出口都触发换代」
+  //    从结构上一条不漏。缺省 windowLifecycle(sub-agent / 单测)→ no-op。
+  if (windowChange) {
+    await params.windowLifecycle?.onChange(windowChange);
+  }
+
+  // ⑤ 未来扩展点 —— 新副作用直接在此追加：
   //    - 复用上方 messages 变量（链式传递）
   //    - 失败语义按"是否致命"决定：致命返 terminal 短路；非致命降级继续
   //    - 不感知 caller 路径，纯粹按"turn 结束做什么"思考
