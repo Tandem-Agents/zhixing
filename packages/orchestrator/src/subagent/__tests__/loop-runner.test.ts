@@ -684,3 +684,24 @@ describe("runSubAgentLoop · first-wins 端到端", () => {
     }
   });
 });
+
+// ─── 无注意力窗口换代（lifecycle by-construction 排除）───
+
+describe("runSubAgentLoop · 无注意力窗口换代", () => {
+  it("多 turn 全程 systemPrompt byte-equal —— 固定串,不接 getSystemPrompt/windowLifecycle", async () => {
+    const provider = new MockLLMProvider([
+      { toolCalls: [{ id: "t1", name: "read", input: {} }] },
+      { toolCalls: [{ id: "t2", name: "read", input: {} }] },
+      { text: "done" },
+    ]);
+    await runSubAgentLoop(makeBaseOpts(provider, [makeReadOnlyTool("read")]));
+
+    // 三次 LLM call(两工具轮 + 收尾轮)的 systemPrompt 全程 byte-equal = 固定串。
+    // sub-agent 经 loop-runner 传 systemPrompt: string、不传 getSystemPrompt /
+    // windowLifecycle —— 无 per-run 现取、无窗口换代,跨 turn(等价跨 spawn)死线不变,
+    // lifecycle 钩子 by-construction 不触及(不经 createAgentRuntime)。
+    expect(provider.calls.length).toBe(3);
+    const prompts = provider.calls.map((c) => c.systemPrompt);
+    expect(prompts.every((p) => p === "test system")).toBe(true);
+  });
+});

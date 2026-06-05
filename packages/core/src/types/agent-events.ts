@@ -454,4 +454,33 @@ export type AgentEventMap = {
    * 切换事务）。
    */
   "workmode:switch_requested": WorkModeSwitchIntent;
+
+  // ─── 运行体生命周期钩子（run 内） ───
+  //
+  // 注意力窗口 / run 边界的注册式钩子（onWindowOpen / onBeforeRun / onAfterRun /
+  // onWindowClose）由运行体（orchestrator）触发。仅 **run 内** 的两类信号进
+  // AgentEventMap —— 它们经 per-run eventBus 流向 cli/serve 渲染订阅，是失败安全
+  // 网；首窗（装配期抛错）/ 末窗（销毁调用方 warn）的 run 外信号不在此（无 per-run
+  // bus）。不押 logDiagnostic（cli 交互模式被静默）。
+
+  /**
+   * 钩子实现抛错 —— onBeforeRun / onAfterRun / run 内窗口换代（onWindowClose /
+   * onWindowOpen）任一订阅者抛错。失败不阻塞主对话：emit 此事件 + 用当前 prompt
+   * 继续。渲染方据 hookId / phase 给用户一条可见告警，避免内置 skill 重建每窗
+   * 静默失败、索引永久陈旧却无人知。
+   */
+  "lifecycle:hook_failed": {
+    /** 抛错订阅者的标识（AgentRuntimeLifecycle.id） */
+    hookId: string;
+    phase: "onWindowOpen" | "onBeforeRun" | "onAfterRun" | "onWindowClose";
+    error: string;
+  };
+
+  /**
+   * 注意力窗口边界重建后 system prompt 真换（byte-equal 比较不同才 emit）——
+   * 内置 skill 索引重建是首个来源。renderer 可静默或轻提示。
+   */
+  "lifecycle:prompt_rebuilt": {
+    reason: "segment-transition" | "compact";
+  };
 } & SecurityEventMap;

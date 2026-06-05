@@ -50,3 +50,16 @@ export {
 } from "./create-agent-runtime.js";
 export type { EnrichOptions } from "./project-context.js";
 export { runContextStorage, type RunContext } from "./run-context.js";
+export type {
+  AgentRuntimeLifecycle,
+  DataDrivenSegment,
+  LifecycleContextBase,
+  LifecycleWindowOpenContext,
+  LifecycleBeforeRunContext,
+  LifecycleAfterRunContext,
+  LifecycleWindowCloseContext,
+  WindowOpenReason,
+  WindowCloseReason,
+  DisposeReason,
+  AttentionWindowChangeReason,
+} from "./lifecycle.js";

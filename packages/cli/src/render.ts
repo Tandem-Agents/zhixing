@@ -575,6 +575,26 @@ export function createRenderSubscribers(
       }),
     );
 
+    // 运行体生命周期钩子（run 内）—— hook_failed 是失败安全网（内置 skill 重建
+    // 每窗静默失败会让索引永久陈旧却无人知,故必须用户可见）;prompt_rebuilt 是
+    // 系统提示词随窗口重建的轻提示。
+    unsubs.push(
+      bus.on("lifecycle:hook_failed", (info) => {
+        pauseUI();
+        writer.line(
+          `  ${chalk.yellow("⚠")} ${chalk.dim(`生命周期钩子 ${info.hookId} 在 ${info.phase} 失败: ${info.error}`)}`,
+        );
+      }),
+    );
+    unsubs.push(
+      bus.on("lifecycle:prompt_rebuilt", (info) => {
+        pauseUI();
+        writer.line(
+          chalk.dim(`  ⟳ 系统提示词已随注意力窗口重建 (${info.reason})`),
+        );
+      }),
+    );
+
     const interruptHandle = setupInterruptRendering(bus, pauseUI, writer);
 
     // 注入 screen 时启用动态状态展示组件 —— status-bar (spinner / sub-agent 嵌套)

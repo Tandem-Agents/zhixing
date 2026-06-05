@@ -20,6 +20,9 @@
  *   - vi.hoisted ref 让每个测试动态注入不同的 provider 响应序列
  */
 
+import fs from "node:fs/promises";
+import path from "node:path";
+import os from "node:os";
 import {
   beforeEach,
   describe,
@@ -30,6 +33,7 @@ import {
 } from "vitest";
 import {
   MockLLMProvider,
+  SkillStore,
   userMessage,
   type IEventBus,
   type LLMRole,
@@ -1033,5 +1037,384 @@ describe("createAgentRuntime · 可选角色降级可见告警", () => {
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+// ─── 契约: 运行体生命周期钩子 ───
+
+describe("createAgentRuntime · 生命周期钩子", () => {
+  const SKILL_MARKER = "ZX_LIFECYCLE_SKILL_MARKER";
+
+  it("首窗 onWindowOpen(instance-start, windowIndex=0) 在装配期触发,贡献的段进 systemPrompt", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
+    const opens: { reason: string; windowIndex: number }[] = [];
+
+    const runtime = await createAgentRuntime({
+      lifecycle: [
+        {
+          id: "test-sub",
+          onWindowOpen: (ctx) => {
+            opens.push({ reason: ctx.reason, windowIndex: ctx.windowIndex });
+            ctx.updateSystemPromptSegment("skill-index", SKILL_MARKER);
+          },
+        },
+      ],
+    });
+
+    // 首窗在装配期已触发（不等 run）
+    expect(opens).toEqual([{ reason: "instance-start", windowIndex: 0 }]);
+
+    await runtime.run({ messages: [userMessage("hi")], turnIndex: 0 });
+    // 贡献的 skill-index 段进了首个 LLM call 的 system prompt
+    expect(providerRef.current.calls[0]!.systemPrompt).toContain(SKILL_MARKER);
+  });
+
+  it("run() 触发 onBeforeRun(enrich 前 messages) → onAfterRun(RunResult),顺序与字段正确", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "done" }]);
+    const order: string[] = [];
+    let beforeMsgCount: number | undefined;
+    let afterReason: string | undefined;
+    let afterTurnIndex: number | undefined;
+
+    const runtime = await createAgentRuntime({
+      lifecycle: [
+        {
+          id: "test-sub",
+          onBeforeRun: (ctx) => {
+            order.push("before");
+            beforeMsgCount = ctx.messages.length;
+          },
+          onAfterRun: (ctx) => {
+            order.push("after");
+            afterReason = ctx.result.agentResult.reason;
+            afterTurnIndex = ctx.turnIndex;
+          },
+        },
+      ],
+    });
+
+    await runtime.run({ messages: [userMessage("hi")], turnIndex: 7 });
+
+    expect(order).toEqual(["before", "after"]);
+    expect(beforeMsgCount).toBe(1); // enrich 前的原始用户输入
+    expect(afterReason).toBe("completed");
+    expect(afterTurnIndex).toBe(7);
+  });
+
+  it("首窗 onWindowOpen(instance-start) 抛错 → createAgentRuntime 失败(安全回滚)", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
+
+    await expect(
+      createAgentRuntime({
+        lifecycle: [
+          {
+            id: "boom",
+            onWindowOpen: () => {
+              throw new Error("first window boom");
+            },
+          },
+        ],
+      }),
+    ).rejects.toThrow("first window boom");
+  });
+
+  it("onBeforeRun 抛错不阻塞 run → emit lifecycle:hook_failed + 继续完成", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
+    const failed: { hookId: string; phase: string }[] = [];
+
+    const runtime = await createAgentRuntime({
+      decorateRunBus: (ctx) =>
+        ctx.bus.on("lifecycle:hook_failed", (e) =>
+          failed.push({ hookId: e.hookId, phase: e.phase }),
+        ),
+      lifecycle: [
+        {
+          id: "flaky",
+          onBeforeRun: () => {
+            throw new Error("before boom");
+          },
+        },
+      ],
+    });
+
+    const result = await runtime.run({
+      messages: [userMessage("hi")],
+      turnIndex: 0,
+    });
+
+    expect(result.agentResult.reason).toBe("completed");
+    expect(failed).toContainEqual({ hookId: "flaky", phase: "onBeforeRun" });
+  });
+
+  it("窗口内多 turn:无换代时每个 LLM call 的 systemPrompt byte-equal", async () => {
+    providerRef.current = new MockLLMProvider([
+      { toolCalls: [{ id: "p1", name: "probe", input: {} }] },
+      { text: "done" },
+    ]);
+    const probe: ToolDefinition = {
+      name: "probe",
+      description: "test probe",
+      inputSchema: { type: "object" as const },
+      isReadOnly: true,
+      isParallelSafe: true,
+      needsPermission: false,
+      call: async () => ({ content: "ok" }),
+    };
+
+    const runtime = await createAgentRuntime({
+      extraTools: [probe],
+      lifecycle: [
+        {
+          id: "test-sub",
+          onWindowOpen: (ctx) =>
+            ctx.updateSystemPromptSegment("skill-index", SKILL_MARKER),
+        },
+      ],
+    });
+
+    await runtime.run({ messages: [userMessage("hi")], turnIndex: 0 });
+
+    // 两次 LLM call（工具轮 + 收尾轮）—— 同一窗口内无换代,systemPrompt byte-equal
+    expect(providerRef.current.calls.length).toBe(2);
+    expect(providerRef.current.calls[0]!.systemPrompt).toBe(
+      providerRef.current.calls[1]!.systemPrompt,
+    );
+    expect(providerRef.current.calls[0]!.systemPrompt).toContain(SKILL_MARKER);
+  });
+
+  it("dispose(reason) 触发末窗 onWindowClose(reason 透传),幂等", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
+    const closes: string[] = [];
+
+    const runtime = await createAgentRuntime({
+      lifecycle: [
+        {
+          id: "test-sub",
+          onWindowClose: (ctx) => {
+            closes.push(ctx.reason);
+          },
+        },
+      ],
+    });
+
+    await runtime.dispose("session-dispose");
+    expect(closes).toEqual(["session-dispose"]);
+
+    // 幂等：第二次起 no-op（reason 取首次）
+    await runtime.dispose("workmode-exit");
+    expect(closes).toEqual(["session-dispose"]);
+  });
+
+  it("首窗 open(windowIndex=0) 与末窗 close 配对", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
+    const opens: number[] = [];
+    const closes: { reason: string; windowIndex: number }[] = [];
+
+    const runtime = await createAgentRuntime({
+      lifecycle: [
+        {
+          id: "test-sub",
+          onWindowOpen: (ctx) => opens.push(ctx.windowIndex),
+          onWindowClose: (ctx) =>
+            closes.push({ reason: ctx.reason, windowIndex: ctx.windowIndex }),
+        },
+      ],
+    });
+
+    expect(opens).toEqual([0]); // 首窗 windowIndex 0
+    await runtime.dispose("session-dispose");
+    // 末窗 = 首窗 index（无中间换代）
+    expect(closes).toEqual([{ reason: "session-dispose", windowIndex: 0 }]);
+  });
+
+  it("onAttentionWindowChange(clear): onWindowClose(clear)→onWindowOpen(clear),更新实例权威", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "1" }, { text: "2" }]);
+    const events: string[] = [];
+    let openCount = 0;
+
+    const runtime = await createAgentRuntime({
+      lifecycle: [
+        {
+          id: "test-sub",
+          onWindowOpen: (ctx) => {
+            events.push(`open:${ctx.reason}`);
+            ctx.updateSystemPromptSegment("skill-index", `SKILL_v${openCount++}`);
+          },
+          onWindowClose: (ctx) => {
+            events.push(`close:${ctx.reason}`);
+          },
+        },
+      ],
+    });
+
+    // 首窗已 open（贡献 v0）
+    expect(events).toEqual(["open:instance-start"]);
+    await runtime.run({ messages: [userMessage("a")], turnIndex: 0 });
+    expect(providerRef.current.calls[0]!.systemPrompt).toContain("SKILL_v0");
+
+    // clear 换代：close(clear) → open(clear)（贡献 v1）
+    await runtime.onAttentionWindowChange("clear");
+    expect(events).toEqual(["open:instance-start", "close:clear", "open:clear"]);
+
+    // 下个 run 入口 capture 更新后的实例权威（含 v1、不再是 v0）
+    await runtime.run({ messages: [userMessage("b")], turnIndex: 1 });
+    expect(providerRef.current.calls[1]!.systemPrompt).toContain("SKILL_v1");
+    expect(providerRef.current.calls[1]!.systemPrompt).not.toContain("SKILL_v0");
+  });
+
+  it("末窗 onWindowClose 抛错 → dispose 抛 LifecycleHookError,不阻断其他订阅者", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
+    const closed: string[] = [];
+
+    const runtime = await createAgentRuntime({
+      lifecycle: [
+        {
+          id: "boom",
+          onWindowClose: () => {
+            throw new Error("close boom");
+          },
+        },
+        {
+          id: "ok-sub",
+          onWindowClose: () => {
+            closed.push("ok-sub");
+          },
+        },
+      ],
+    });
+
+    await expect(runtime.dispose("session-dispose")).rejects.toThrow("dispose");
+    // 抛错订阅者不阻断后续订阅者
+    expect(closed).toEqual(["ok-sub"]);
+  });
+
+  it("并发隔离:实例权威在 run 飞行中途更新,该 run 窗口内 systemPrompt 不变", async () => {
+    // 锁 Inv-2 承重面:本 run 局部 prompt 私有 + 入口 capture 快照 —— 飞行 run 的
+    // getSystemPrompt 在其窗口内不被外部实例级换代穿透。用 probe 工具 gate 把 run
+    // 卡在两个 LLM call 之间,期间经 onAttentionWindowChange 改实例权威(模拟另一
+    // 并发操作的换代),验证该 run 第二个 call 仍取入口 capture 的旧值。
+    providerRef.current = new MockLLMProvider([
+      { toolCalls: [{ id: "p1", name: "probe", input: {} }] },
+      { text: "done" },
+    ]);
+    let openVersion = 0;
+    let probeEntered!: () => void;
+    const probeReady = new Promise<void>((r) => {
+      probeEntered = r;
+    });
+    let gateResolve!: () => void;
+    const gate = new Promise<void>((r) => {
+      gateResolve = r;
+    });
+    const probe: ToolDefinition = {
+      name: "probe",
+      description: "gate probe",
+      inputSchema: { type: "object" as const },
+      isReadOnly: true,
+      isParallelSafe: true,
+      needsPermission: false,
+      // 声明 app-state read 边界 —— 经 BoundaryRegistry.fromTools(baseTools) 注册进
+      // registry,boundary classifier 据此判 low-impact 放行;否则无 boundaries 的
+      // 未知工具 fail-closed → critical → ci 模式 block,probe.call 不执行。
+      boundaries: [{ boundaryType: "app-state", access: "read", dynamic: false }],
+      call: async () => {
+        probeEntered();
+        await gate;
+        return { content: "ok" };
+      },
+    };
+
+    const runtime = await createAgentRuntime({
+      extraTools: [probe],
+      // 放行 probe —— 测试环境无 confirmation renderer,默认 deny 会让 probe.call
+      // 不执行、gate 永不进入。allow 让工具真执行,run 在两 call 之间卡在 gate。
+      confirmationFallback: "allow",
+      lifecycle: [
+        {
+          id: "test-sub",
+          onWindowOpen: (ctx) =>
+            ctx.updateSystemPromptSegment("skill-index", `V${openVersion++}`),
+        },
+      ],
+    });
+
+    // 飞行 run 入口 capture V0;第一个 call 发出后卡在 probe(两 call 之间）
+    const inflight = runtime.run({ messages: [userMessage("x")], turnIndex: 0 });
+    await probeReady;
+
+    // 飞行中途改实例权威(V1）—— 不得穿透飞行 run 的局部 prompt
+    await runtime.onAttentionWindowChange("clear");
+    gateResolve();
+    await inflight;
+
+    expect(providerRef.current.calls.length).toBe(2);
+    expect(providerRef.current.calls[0]!.systemPrompt).toContain("V0");
+    expect(providerRef.current.calls[1]!.systemPrompt).toContain("V0");
+    expect(providerRef.current.calls[1]!.systemPrompt).not.toContain("V1");
+  });
+
+  it("run() 自身抛错时 onBeforeRun 触发、onAfterRun 不触发(非强配对)", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
+    let beforeCalled = false;
+    let afterCalled = false;
+
+    const runtime = await createAgentRuntime({
+      lifecycle: [
+        {
+          id: "test-sub",
+          onBeforeRun: () => {
+            beforeCalled = true;
+          },
+          onAfterRun: () => {
+            afterCalled = true;
+          },
+        },
+      ],
+    });
+
+    // onYield 抛错 → 传播出 runMainLoop → run() reject(ALS 内抛,onAfterRun 不触发)
+    await expect(
+      runtime.run({
+        messages: [userMessage("hi")],
+        turnIndex: 0,
+        onYield: () => {
+          throw new Error("yield boom");
+        },
+      }),
+    ).rejects.toThrow("yield boom");
+
+    expect(beforeCalled).toBe(true);
+    expect(afterCalled).toBe(false);
+  });
+
+  it("内置 skill 订阅者:version 未变 → 窗口换代零重算(不扫盘)", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "skills-lc-"));
+    try {
+      const store = new SkillStore(root);
+      const querySpy = vi.spyOn(store, "queryTopN");
+
+      const runtime = await createAgentRuntime({ skillStore: store });
+      // 首窗:version(0) ≠ builtVersion(-1) → 重算一次
+      expect(querySpy).toHaveBeenCalledTimes(1);
+
+      // clear 换代:version 仍 0 = builtVersion 0 → 零重算、不扫盘
+      await runtime.onAttentionWindowChange("clear");
+      expect(querySpy).toHaveBeenCalledTimes(1);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("dispose 透传销毁类 reason 到末窗 onWindowClose(assembly-rollback)", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
+    const closes: string[] = [];
+    const runtime = await createAgentRuntime({
+      lifecycle: [
+        { id: "test-sub", onWindowClose: (ctx) => closes.push(ctx.reason) },
+      ],
+    });
+    await runtime.dispose("assembly-rollback");
+    expect(closes).toEqual(["assembly-rollback"]);
   });
 });

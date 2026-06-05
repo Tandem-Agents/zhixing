@@ -8,6 +8,7 @@
  * 都通过依赖注入(decorateRunBus / onSecurityBlocked / onUserDenied)从外部接入。
  */
 
+import { randomUUID } from "node:crypto";
 import {
   type AgentResult,
   type AgentYield,
@@ -74,6 +75,8 @@ import {
   renderSkillIndex,
   type SkillMode,
   type Resettable,
+  type WindowLifecycle,
+  type WindowChangeReason,
 } from "@zhixing/core";
 import {
   createProviderRoles,
@@ -101,7 +104,7 @@ import {
   createSummarizeCallLLM,
   createMemoryFlushCallLLM,
 } from "./compaction-llm.js";
-import { buildSystemPrompt } from "./system-prompt.js";
+import { buildSystemPrompt, type SystemPromptSegment } from "./system-prompt.js";
 import {
   loadProjectContext,
   injectContext,
@@ -116,6 +119,18 @@ import {
 import { trackMessages } from "./track-messages.js";
 import { runContextStorage } from "./run-context.js";
 import { createTaskTool } from "../tools/task.js";
+import type {
+  AgentRuntimeLifecycle,
+  LifecycleContextBase,
+  LifecycleWindowOpenContext,
+  LifecycleWindowCloseContext,
+  LifecycleBeforeRunContext,
+  LifecycleAfterRunContext,
+  WindowOpenReason,
+  WindowCloseReason,
+  DisposeReason,
+  AttentionWindowChangeReason,
+} from "./lifecycle.js";
 
 /**
  * 注入系统提示词的技能索引上限(按当前模式 top-N)。
@@ -147,6 +162,39 @@ function safeDispose(label: string, dispose: () => void): void {
   } catch (error) {
     console.error(`[orchestrator.${label}] dispose failed:`, error);
   }
+}
+
+/**
+ * 内置 skill 索引订阅者 —— lifecycle 框架的首个消费者。每个注意力窗口开启时用
+ * O(1) 版本比对决定是否重建：版本未变（绝大多数段切换）零 IO、零重算、不调接口；
+ * 版本变了才 queryTopN 渲染、经公共 updateSystemPromptSegment 贡献 skill-index 段，
+ * 拼装 / byte-equal / 单调提交归运行体。
+ *
+ * skill 索引的唯一来源是此订阅者 —— 装配期不再硬编码注入，首窗 onWindowOpen 首次
+ * 贡献、运行体首次 buildSystemPrompt 即含 skill 段，单一路径无并存。
+ */
+function makeSkillIndexLifecycle(
+  skillStore: SkillStore,
+  skillMode: SkillMode,
+): AgentRuntimeLifecycle {
+  let builtVersion = -1; // 上次贡献所依据的 skill 版本
+  return {
+    id: "skill-index-rebuild",
+    async onWindowOpen(ctx) {
+      const cur = skillStore.version(skillMode);
+      if (cur === builtVersion) return; // 已最新 → 零 IO、零重算、不调接口
+      const next = renderSkillIndex(
+        await skillStore.queryTopN(skillMode, SKILL_INDEX_TOP_N),
+      );
+      ctx.updateSystemPromptSegment("skill-index", next);
+      builtVersion = cur;
+    },
+  };
+}
+
+/** 钩子错误转可读消息 —— lifecycle 失败事件 / 销毁调用方 warn 共用。 */
+function lifecycleErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 // ─── 类型 ───
@@ -233,6 +281,22 @@ export interface AgentRuntime {
    * 内存语义已是"清空"，下次 LLM call 仍会按新视图编排）。
    */
   resetConversationState(): Promise<void>;
+  /**
+   * 销毁运行体实例 —— 触发末窗 onWindowClose（reason 透传销毁类型）。幂等
+   *（重复调第二次起 no-op，reason 取首次）。运行体内部本无需释放的资源（全
+   * in-memory），dispose 的存在意义是承载末窗 onWindowClose。
+   *
+   * 失败语义：onWindowClose 抛错不阻断销毁链 —— 全部跑完后若有失败,聚合抛
+   * {@link LifecycleHookError} 让销毁调用方 warn（cli writer.notify）,不押 console。
+   */
+  dispose(reason: DisposeReason): Promise<void>;
+  /**
+   * run 外注意力窗口换代（/clear · /resume）—— 旧窗 onWindowClose → 新窗
+   * onWindowOpen，更新实例权威 prompt（下个 run 入口 capture 到新值）。失败聚合
+   * 抛 {@link LifecycleHookError}。run 内换代（段切换 / compact）不走此入口,由
+   * agent-loop 的 windowLifecycle.onChange 驱动。
+   */
+  onAttentionWindowChange(reason: AttentionWindowChangeReason): Promise<void>;
 }
 
 export interface ForceCompactResult {
@@ -317,6 +381,27 @@ export class ResetConversationStateError extends Error {
     const ids = failures.map((f) => f.id).join(", ");
     super(`resetConversationState 失败：${ids}`);
     this.name = "ResetConversationStateError";
+    this.failures = failures;
+  }
+}
+
+/**
+ * 末窗 / run 外换代的 onWindowClose / onWindowOpen 失败聚合异常 —— 单个订阅者
+ * 抛错不阻断销毁链 / 换代后续,全跑完再抛此聚合异常让销毁 / 命令调用方 warn
+ *（cli writer.notify,不沿用 console）。
+ */
+export class LifecycleHookError extends Error {
+  readonly phase: string;
+  readonly failures: ReadonlyArray<{ id: string; error: unknown }>;
+
+  constructor(
+    phase: string,
+    failures: ReadonlyArray<{ id: string; error: unknown }>,
+  ) {
+    const ids = failures.map((f) => f.id).join(", ");
+    super(`生命周期钩子 ${phase} 失败：${ids}`);
+    this.name = "LifecycleHookError";
+    this.phase = phase;
     this.failures = failures;
   }
 }
@@ -415,6 +500,12 @@ export interface CreateAgentRuntimeOptions {
     readonly taskListReader: TaskListReader;
     readonly persistence: SegmentPersistence;
   };
+  /**
+   * 运行体生命周期钩子订阅者集合 —— 装配期注入、实例内恒定（注册单位是实例，
+   * 触发单位是注意力窗口 / run）。内置 skill 索引重建订阅者默认置于列表首位，
+   * 此处传入的订阅者追加其后。第一版不做运行时 register（首窗语义需装配期注入）。
+   */
+  lifecycle?: readonly AgentRuntimeLifecycle[];
 }
 
 /**
@@ -660,41 +751,149 @@ export async function createAgentRuntime(
     }
   }
 
-  // systemPrompt 后置到 tools 装配完成之后 —— Task 工具的描述文本需进入
-  // ## Tool Usage 段,LLM 才能学习"何时派 Task / 何时直接调单工具"的决策。
+  // ─── 系统提示词的双层 holder + 注意力窗口生命周期钩子 ───
   //
-  // ⚠ Prompt cache 死线:此处是 main agent systemPrompt 的**唯一构造点**。
-  // cache 不变量的范围是「单个注意力窗口」而非「整个 runtime 永久」——窗口内
-  // byte-equal 不动,跨窗口边界(段切换 / compact / clear / resume)才允许重建
-  //(检查→变了才换、没变 byte-equal 不动;本意见 skill-system.md §3.1 /
-  // lifecycle-concepts.md)。运行时跨窗口重建尚未落地(规划见
-  // agent-runtime-lifecycle.md / runtime-session-hot-reload.md),故现状仍是装配期
-  // 构造一次、每轮 run() 透传同一字符串引用——这是当前实现状态,非「永久不可变」
-  // 的概念契约。任何时候都不得在 run() / loop / LLM call 路径里重建 systemPrompt
-  //(那在窗口内),不得追加 per-turn 信息(时间走 turn-context 注入;tools[] 装配
-  // 一次 freeze 不变——tools 是 reload 级冻结、比注意力窗口更强)。详见
-  // buildSystemPrompt 的"调用契约"注释。
+  // systemPrompt 后置到 tools 装配之后 —— Task 工具描述需进 ## Tool Usage 段,LLM
+  // 才能学习"何时派 Task / 何时直接调单工具"。
   //
-  // 技能索引段(渐进披露的"廉价目录"):装配期取该模式 top-N 渲染成文本,作为
-  // 系统提示词稳定前缀的一段一次性注入(模型按 id 调 load_skill 取全文展开)。
-  // 在此预渲染而非 buildSystemPrompt 内部取数,是为让后者保持纯同步、不耦合
-  // SkillStore —— 技能扫描的磁盘 I/O 归装配方。skill 索引落在 systemPrompt 稳定
-  // 前缀,同受「注意力窗口内 byte-equal、跨窗口边界才重建」约束——窗口换代含段
-  // 切换 / compact / clear / resume,以及切模式=重建 runtime(不止后者)。现状仅
-  // 装配期注入一次,运行时窗口边界重建待落地(见 skill-system.md §3)。无技能 →
-  // null → 段跳过。
-  const skillIndex = renderSkillIndex(
-    await skillStore.queryTopN(skillMode, SKILL_INDEX_TOP_N),
-  );
-  const systemPrompt = buildSystemPrompt({
+  // 生效 systemPrompt 不是装配期一个 const,而是双层 holder（prompt cache 死线的
+  // 承重设计,本意见 skill-system.md §3.1 / lifecycle-concepts.md / buildSystemPrompt
+  // 的"调用契约"注释）:
+  //   - 实例权威 prompt + 实例级段覆盖,由实例级窗口换代维护（首窗 / clear / resume
+  //     / reload）,供新 run 起步快照;
+  //   - 每个 run 入口 capture 一份本 run 局部 prompt（run() 内）,agent-loop 每个 LLM
+  //     call 经 getSystemPrompt 现取它。
+  // 窗口内 byte-equal 靠 run 局部私有成立;并发 run 各自换代互不干扰（一个 run 的
+  // 窗口重建绝不改另一 in-flight run 的生效 prompt）;窗口跨多 run 靠 run 入口
+  // capture 实例权威延续值 byte-equal。tools[] 装配一次冻结（reload 级、比注意力
+  // 窗口更强）,任何阶段不增删改;per-turn 信息走 turn-context 注入、不进 systemPrompt。
+  //
+  // 数据驱动段（skill-index）的内容不在装配期硬编码,而由 onWindowOpen 订阅者经公共
+  // updateSystemPromptSegment 贡献 —— 首窗首次贡献、首次 buildSystemPrompt 即含该段
+  //（单一路径,无装配期与订阅者并存）。固定段输入（profile / tools / cwd / workspace,
+  // 运行体生命周期内不变）装配期 capture,与段覆盖一起喂 buildSystemPrompt 重拼。
+  const runtimeId = randomUUID();
+  const lifecycle: readonly AgentRuntimeLifecycle[] = [
+    makeSkillIndexLifecycle(skillStore, skillMode),
+    ...(options.lifecycle ?? []),
+  ];
+  const fixedPromptInputs = {
     profile,
     tools,
     cwd,
     workspace: workspace.path,
     workspaceSource: workspace.source,
     globalConfigPath: getGlobalConfigPath(),
-    skillIndex,
+  };
+  const buildPrompt = (
+    overrides: Partial<Record<SystemPromptSegment, string | null>>,
+  ): string =>
+    buildSystemPrompt({ ...fixedPromptInputs, segmentOverrides: overrides });
+
+  // 实例级 holder（所有 run 共享）—— authoritativePrompt 由首窗 onWindowOpen 建立。
+  const instanceSegmentOverrides: Partial<
+    Record<SystemPromptSegment, string | null>
+  > = {};
+  let authoritativePrompt = "";
+  // 单调提交：实例权威只接受"更晚换代"的贡献,不被滞后并发 run 回退。windowEpoch
+  // 按换代触发顺序递增分配,instanceEpoch 记已提交进实例级的最大 epoch。
+  let instanceEpoch = 0;
+  let windowEpochCounter = 0;
+  // windowIndex 实例内自增（首窗 0）。仅用于钩子归属 / 日志,并发下不要求精确。
+  let windowCounter = 0;
+
+  const lifecycleBase = (): LifecycleContextBase => ({
+    runtimeId,
+    mode: skillMode,
+    sceneId:
+      options.memoryScope?.kind === "workscene"
+        ? options.memoryScope.sceneId
+        : undefined,
+    providerId: roles[primaryRole].provider.id,
+    model: roles[primaryRole].model,
   });
+
+  // 实例级窗口开启 —— 首窗（instance-start）/ run 外换代（clear / resume / reload）。
+  // 订阅者经 ctx 写实例级段覆盖,全部跑完后重拼实例权威。collectFailures:
+  //   false（首窗）→ 订阅者抛错直接传播（让 createAgentRuntime 失败、安全回滚）;
+  //   true（run 外换代）→ 收集失败返回（命令调用方 warn、不阻断后续订阅者）。
+  const openInstanceWindow = async (
+    reason: WindowOpenReason,
+    collectFailures: boolean,
+  ): Promise<Array<{ id: string; error: unknown }>> => {
+    const windowIndex = windowCounter++;
+    const failures: Array<{ id: string; error: unknown }> = [];
+    const ctx: LifecycleWindowOpenContext = {
+      ...lifecycleBase(),
+      reason,
+      windowIndex,
+      updateSystemPromptSegment(segment, content) {
+        instanceSegmentOverrides[segment] = content;
+      },
+    };
+    for (const sub of lifecycle) {
+      if (collectFailures) {
+        try {
+          await sub.onWindowOpen?.(ctx);
+        } catch (err) {
+          failures.push({ id: sub.id, error: err });
+        }
+      } else {
+        await sub.onWindowOpen?.(ctx);
+      }
+    }
+    instanceEpoch = ++windowEpochCounter;
+    authoritativePrompt = buildPrompt(instanceSegmentOverrides);
+    return failures;
+  };
+
+  // 实例级窗口关闭钩子 —— 末窗（dispose）/ run 外换代旧窗。收集失败返回（不抛、
+  // 不阻断后续订阅者）,由调用方聚合处理。run 内换代的旧窗 close 走 windowLifecycle
+  //（per-run bus emit 通道,不复用此处）。
+  const runCloseHooks = async (
+    reason: WindowCloseReason,
+    windowIndex: number,
+  ): Promise<Array<{ id: string; error: unknown }>> => {
+    const ctx: LifecycleWindowCloseContext = {
+      ...lifecycleBase(),
+      reason,
+      windowIndex,
+    };
+    const failures: Array<{ id: string; error: unknown }> = [];
+    for (const sub of lifecycle) {
+      try {
+        await sub.onWindowClose?.(ctx);
+      } catch (err) {
+        failures.push({ id: sub.id, error: err });
+      }
+    }
+    return failures;
+  };
+
+  let disposed = false;
+
+  // 实例销毁 —— 末窗 onWindowClose（幂等;抛错不阻断销毁链,全跑完聚合抛）。
+  const dispose = async (reason: DisposeReason): Promise<void> => {
+    if (disposed) return;
+    disposed = true;
+    const failures = await runCloseHooks(reason, windowCounter - 1);
+    if (failures.length > 0) {
+      throw new LifecycleHookError("dispose", failures);
+    }
+  };
+
+  // run 外注意力窗口换代（/clear · /resume）—— 旧窗 close → 新窗 open、更新实例
+  // 权威。close + open 失败聚合抛,不阻断换代后续。
+  const onAttentionWindowChange = async (
+    reason: AttentionWindowChangeReason,
+  ): Promise<void> => {
+    const closeFailures = await runCloseHooks(reason, windowCounter - 1);
+    const openFailures = await openInstanceWindow(reason, true);
+    const failures = [...closeFailures, ...openFailures];
+    if (failures.length > 0) {
+      throw new LifecycleHookError("onAttentionWindowChange", failures);
+    }
+  };
 
   // Per-turn 上下文注入器：时间 + 后续注册的 provider（如 scheduler）
   const turnContextInjector = new TurnContextInjector();
@@ -753,6 +952,11 @@ export async function createAgentRuntime(
     }),
   ];
 
+  // 首窗 onWindowOpen（instance-start）—— 订阅者贡献数据驱动段（skill-index 等）,
+  // 据此首次 buildSystemPrompt 建实例权威 prompt。抛错让装配失败（实例未就绪、
+  // 安全回滚,对齐 work-mode）。createAgentRuntime 为 async,此处 await 合法。
+  await openInstanceWindow("instance-start", false);
+
   return {
     providerId: roles[primaryRole].provider.id,
     model: roles[primaryRole].model,
@@ -786,6 +990,9 @@ export async function createAgentRuntime(
         throw new ResetConversationStateError(failures);
       }
     },
+
+    dispose,
+    onAttentionWindowChange,
 
     get calibrationFactor(): number {
       return estimator.calibrationFactor;
@@ -1005,6 +1212,104 @@ export async function createAgentRuntime(
         safeDispose("run.decorate", () => disposeRender?.());
       };
 
+      // ─── 本 run 局部 prompt + 注意力窗口换代回调 ───
+      //
+      // 入口 capture 实例权威当前值（窗口延续则 byte-equal、cache 跨 run 命中;上个
+      // run 末轮切段 / run 外换代已更新实例权威则取到新值）。run 内换代只改本 run
+      // 局部,并发 run 互不观测对方的换代（窗口内 byte-equal 在并发下成立的根本）。
+      const localSegmentOverrides: Partial<
+        Record<SystemPromptSegment, string | null>
+      > = { ...instanceSegmentOverrides };
+      let localPrompt = authoritativePrompt;
+      const getRunSystemPrompt = (): string => localPrompt;
+
+      // run 内三条上下文重构出口（runTurnBegin 段切换 / pre-flight 压缩 / runTurnEnd
+      // 段切换-压缩）统一经此触发窗口换代：旧窗 onWindowClose → 新窗 onWindowOpen →
+      // 重拼本 run 局部 prompt（+ 单调更新实例权威给后续新 run）。失败不阻塞主对话。
+      const windowLifecycle: WindowLifecycle = {
+        async onChange(reason: WindowChangeReason): Promise<void> {
+          const myEpoch = ++windowEpochCounter;
+          const closingIndex = windowCounter - 1;
+          const openingIndex = windowCounter++;
+
+          const closeCtx: LifecycleWindowCloseContext = {
+            ...lifecycleBase(),
+            reason,
+            windowIndex: closingIndex,
+          };
+          for (const sub of lifecycle) {
+            try {
+              await sub.onWindowClose?.(closeCtx);
+            } catch (err) {
+              eventBus.emit("lifecycle:hook_failed", {
+                hookId: sub.id,
+                phase: "onWindowClose",
+                error: lifecycleErrorMessage(err),
+              });
+            }
+          }
+
+          // 新窗 open —— 订阅者贡献写本 run 局部段覆盖（重拼本 run 局部 prompt）,
+          // 并单调写实例级（给后续新 run,不回退滞后并发 run 的旧值）。
+          const openCtx: LifecycleWindowOpenContext = {
+            ...lifecycleBase(),
+            reason,
+            windowIndex: openingIndex,
+            updateSystemPromptSegment(segment, content) {
+              localSegmentOverrides[segment] = content;
+              if (myEpoch > instanceEpoch) {
+                instanceSegmentOverrides[segment] = content;
+              }
+            },
+          };
+          for (const sub of lifecycle) {
+            try {
+              await sub.onWindowOpen?.(openCtx);
+            } catch (err) {
+              eventBus.emit("lifecycle:hook_failed", {
+                hookId: sub.id,
+                phase: "onWindowOpen",
+                error: lifecycleErrorMessage(err),
+              });
+            }
+          }
+
+          // 重拼本 run 局部 prompt —— byte-equal 比较:skill 没变（绝大多数段切换）
+          // 则不动、保住 cache;真换才 emit prompt_rebuilt。
+          const nextLocal = buildPrompt(localSegmentOverrides);
+          if (nextLocal !== localPrompt) {
+            localPrompt = nextLocal;
+            eventBus.emit("lifecycle:prompt_rebuilt", { reason });
+          }
+          // 单调更新实例权威 —— 仅当本次换代是迄今最晚的提交。
+          if (myEpoch > instanceEpoch) {
+            instanceEpoch = myEpoch;
+            authoritativePrompt = buildPrompt(instanceSegmentOverrides);
+          }
+        },
+      };
+
+      // onBeforeRun —— run 边界（窗口内）;观测即将发送的 messages（enrich 前）+
+      // 异步副作用。ALS 外（与 onAfterRun 同侧）、enrichContext 前;不重建 system
+      // prompt（run 入口重建会违反窗口内 byte-equal）。抛错不阻塞 run。
+      const beforeRunCtx: LifecycleBeforeRunContext = {
+        ...lifecycleBase(),
+        conversationId: params.conversationId,
+        turnIndex: params.turnIndex,
+        messages: params.messages,
+      };
+      for (const sub of lifecycle) {
+        try {
+          await sub.onBeforeRun?.(beforeRunCtx);
+        } catch (err) {
+          eventBus.emit("lifecycle:hook_failed", {
+            hookId: sub.id,
+            phase: "onBeforeRun",
+            error: lifecycleErrorMessage(err),
+          });
+        }
+      }
+
       // ALS 包裹整个 run loop 主体 —— 让 Task 工具(及未来任何 closure 工具)
       // 在 call() 内部通过 runContextStorage.getStore() 拿到当前 run 的
       // bus 与 lineage,无需把这两字段塞进 ToolExecutionContext 接口(只对
@@ -1017,7 +1322,7 @@ export async function createAgentRuntime(
       // disposeAll 留在 finally(ALS 包裹外):dispose 不依赖 RunContext,
       // 且 finally 的语义是"无论 ALS 内 throw 与否都执行清理",位置正确。
       try {
-        return await runContextStorage.run(
+        const result = await runContextStorage.run(
           {
             bus: eventBus,
             lineage: "main",
@@ -1027,6 +1332,26 @@ export async function createAgentRuntime(
             return await runMainLoop();
           },
         );
+        // onAfterRun —— run 产出 RunResult 后（ALS 外、disposeAll 前;若 run() 自身
+        // 抛错则不触发,onBeforeRun→onAfterRun 非强配对）。抛错不污染已就绪结果。
+        const afterRunCtx: LifecycleAfterRunContext = {
+          ...lifecycleBase(),
+          conversationId: params.conversationId,
+          turnIndex: params.turnIndex,
+          result,
+        };
+        for (const sub of lifecycle) {
+          try {
+            await sub.onAfterRun?.(afterRunCtx);
+          } catch (err) {
+            eventBus.emit("lifecycle:hook_failed", {
+              hookId: sub.id,
+              phase: "onAfterRun",
+              error: lifecycleErrorMessage(err),
+            });
+          }
+        }
+        return result;
       } finally {
         disposeAll();
       }
@@ -1124,6 +1449,9 @@ export async function createAgentRuntime(
           case "ok":
             if (preFlight.output.modified) {
               loopMessages = preFlight.output.messages;
+              // pre-flight 压缩改了 messages = 注意力窗口换代 → 重拼本 run 局部
+              // prompt,在进入 agent-loop 之前。
+              await windowLifecycle.onChange("compact");
             }
             break;
         }
@@ -1159,7 +1487,7 @@ export async function createAgentRuntime(
           thinking: primaryThinking,
           tools,
           messages: loopMessages,
-          systemPrompt,
+          getSystemPrompt: getRunSystemPrompt,
           eventBus,
           // 工具执行的工作目录：与 system prompt 暴露给 LLM 的 "Working directory"
           // 字段保持一致——workspace 配置存在时用 workspace，否则 fallback 到 cwd。
@@ -1194,6 +1522,9 @@ export async function createAgentRuntime(
           // 段切换：attention-driven 主路径，按 turn 边界评估 + 可选切段
           segmentManager,
           conversationId: params.conversationId,
+          // 注意力窗口换代回调 —— run 内 messages 重构后触发窗口钩子、重拼本 run
+          // 局部 prompt（让重建后的 system prompt 在下个 LLM call 生效）。
+          windowLifecycle,
         });
 
         while (true) {
