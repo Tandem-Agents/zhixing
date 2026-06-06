@@ -204,7 +204,7 @@ interface SchedulerFacade {
 ```
 
 - 两实现：`LocalSchedulerFacade`（直调本进程 `Scheduler`，daemon 内用——它是**恒定核心**，在核心 `Scheduler` 创建后实例化一次；daemon 内**所有执行面**经 `getSchedulerFacade` 惰性共用同一实例：当前 ephemeralRuntime（定时 agent-turn）+ 会话执行面（per-session，飞书等 channel 会话创建 / 管理任务），未来 unified-core 点亮会话执行面亦复用同一 facade、非承重件替换——facade 绑核心 Scheduler、与「哪个执行面」正交。惰性原因：per-session `runtimeFactory` 装配早于 Scheduler 创建，故消费者持 getter 闭包、晚绑；工具 call 必在 daemon 跑起来后、ref 已就位）、`RpcSchedulerFacade`（经 RPC client 调 daemon，cli 用，调用前 ensure 宿主）。
-- 所有调度消费者（schedule 工具、cli `/schedule` 命令）只依赖此门面——不再直接 `new Scheduler`、不直接碰 RPC。这是「单一权威 + 多 client」的接口落点。**读写分离**：写 / 执行（create / update / delete / run）经宿主 ensure（唯一写权威）；list / get 这类纯读直接读 `scheduler.json` 从属投影、**不拉 daemon**——磁盘是宿主单写者的只读投影（每次状态变更都 save），读它不构成第二写权威、不破单一权威；代价仅是看不到「此刻哪个正在跑」的瞬态运行态（价值低，且宿主没跑时本无运行态）。用户 `list` 只列 external（按 `isInternal` 过滤、内部维护不进用户视图，见决策 6）。读投影仅适用 scheduler 这类**无状态、可序列化、宿主单写**的子系统（依赖原子 rename，读到的要么旧版、要么新版完整快照）；有状态会话（unified-core）的跨端共享是另一套机制、不在本模块、不可照搬此读投影。**读投影的状态摘要计算须纯函数化**：现状 `getStatusSummary` 是 `Scheduler` 实例方法（`scheduler.ts:252`），cli 去自起后没有实例——把它抽成平台无关纯函数 `computeStatusSummary(tasks, now, window)`（放 `core/scheduler`），Scheduler 与 cli 读投影共用，cli **不重复实现**这套 active/recentlyCompleted/recentlyFailed 逻辑（否则即新的重复债）。
+- 所有调度消费者（schedule 工具、cli `/schedule` 命令）只依赖此门面——不再直接 `new Scheduler`、不直接碰 RPC。这是「单一权威 + 多 client」的接口落点。**读写分离**：写 / 执行（create / update / delete / run）经宿主 ensure（唯一写权威）；list / get 这类纯读直接读 `scheduler.json` 从属投影、**不拉 daemon**——磁盘是宿主单写者的只读投影（每次状态变更都 save），读它不构成第二写权威、不破单一权威；代价仅是看不到「此刻哪个正在跑」的瞬态运行态（价值低，且宿主没跑时本无运行态）。用户 `list` 只列 external（按 `isInternal` 过滤、内部维护不进用户视图，见决策 6）。读投影仅适用 scheduler 这类**无状态、可序列化、宿主单写**的子系统（依赖原子 rename，读到的要么旧版、要么新版完整快照）；有状态会话（unified-core）的跨端共享是另一套机制、不在本模块、不可照搬此读投影。**读投影的状态摘要计算须纯函数化**：现状 `getStatusSummary` 是 `Scheduler` 实例方法（`scheduler.ts:252`），cli 去自起后没有实例——把它抽成平台无关纯函数 `computeStatusSummary(tasks, now, window)`（放 `core/scheduler`），daemon turn-context（持 Scheduler 实例、过滤 internal 后直接调）与 cli 读投影共用，cli **不重复实现**这套 active/recentlyCompleted/recentlyFailed 逻辑（否则即新的重复债）。**已落地补记**：纯函数抽出后 `Scheduler.getStatusSummary` 这层 wrapper 失去消费者（去自起后 turn-context 改 closure 投影）、已删除——共用点就是 `computeStatusSummary` 本身，不再经 Scheduler 实例方法。
 
 **B. 核心宿主装配：接入面单元 + 数据驱动 profile（`cli/serve/command.ts`，现 `runServerProcess`）**
 
@@ -277,3 +277,16 @@ cli 进程现状有四类 scheduler 消费者（grep 全仓 `listTasks/createTas
 - **定时不绑某个终端、尽力而为**：任务交给独立后台进程，不依赖你开着哪个窗口；近期的（如「1 小时后」）会守到触发，远期周期（每天 n 点）你在用时触发、后台让位时若错过就记下来下次告知（不默默丢、不开机轰炸式补）——要雷打不动可显式开常驻。
 - **跨端一致**：cli、server、未来其他端，同一套任务、同样行为。
 - **多个独立知行各管各的**：用不同 `ZHIXING_HOME` 起的多个知行各自独立（数据 / 后台 / 端口都不共享、互不干扰）；同一个知行开多个终端则共享同一套任务（多终端一致）。
+
+---
+
+## 待根治项登记（技术债，留待专项重构）
+
+> 审查过程中发现、但**不属当前步骤范围、也不宜用补丁修补**的债，登记于此，待对应专项重构统一根治——避免「为一个轻症状加一行补丁」反而延续病根。
+
+### scheduler 错误结构化（消除 RPC handler 的 `message.startsWith` 错误分类）
+
+- **债**：`server/src/rpc/methods/schedule.ts` 各 handler 用 `err.message.startsWith(...)` 字符串匹配 scheduler 抛出的 plain `Error`（"Task not found" / "Cannot delete system task" / "Cannot modify system task"…）来映射 RPC 错误码。脆弱（scheduler 改个错误措辞，handler 分类就错）、分散（create / update / delete / run 各写一遍）、易漏。
+- **现表现**：`schedule.delete` 把 "Cannot delete system task" 转 `INVALID_PARAMS`，`schedule.update` 漏了 "Cannot modify system task"、throw 原始 → `INTERNAL_ERROR`——update / delete 改 / 删 system task 的错误码不对称，正是「字符串匹配易漏」的症状。
+- **为何不在此修**：功能正确（decision 6 内核双向守卫已拒改 / 拒删 system）、仅 RPC 错误码语义不当、触发面窄（用户经 `list` 过滤拿不到 system task id）。给 update 再补一条 `startsWith` 是在脆弱字符串匹配上叠加、延续病根（违「不修修补补」）。
+- **最优根治**：scheduler 定义结构化错误（typed error 带 `kind`：not-found / system-protected / invalid-schedule …），抛错点用它；RPC handler / facade / 工具按 `kind` 分类映射，彻底不碰 message 字符串。属 scheduler 错误体系专项重构，范围跨所有抛错点 + 消费者，单独评估优先级后统一做。

@@ -25,7 +25,6 @@ const { createAgentRuntimeMock, schedulerStub, sceneRegistryStub, diffRef } =
     schedulerStub: {
       start: vi.fn(async () => {}),
       stop: vi.fn(async () => {}),
-      getStatusSummary: vi.fn(() => ""),
     },
     sceneRegistryStub: {
       get: vi.fn(),

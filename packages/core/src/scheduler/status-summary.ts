@@ -1,10 +1,10 @@
 /**
  * 任务状态摘要 —— 平台无关纯函数。
  *
- * 把「任务列表 → 状态摘要」的计算从 Scheduler 实例方法里抽出来，让两个消费者共用同一逻辑、
- * 不各写一套：
- * - daemon 内 Scheduler.getStatusSummary（持有实例、读内存任务）
- * - cli 读 scheduler.json 从属投影（去自起 Scheduler 后没有实例，只有磁盘上的任务快照）
+ * 把「任务列表 → 状态摘要」的计算抽成纯函数，让所有消费者共用同一逻辑、不各写一套：
+ * - daemon 内 turn-context：持有 Scheduler 实例，过滤 internal 后直接调 computeStatusSummary（command.ts）
+ * - cli turn-context：去自起 Scheduler 后没有实例，读 scheduler.json 从属投影后调（readSchedulerSummarySync）
+ * 内部 / 外部过滤由调用方按视角决定（见下方 computeStatusSummary 注释），本模块只做纯计算。
  */
 
 import type { ScheduledTask, TaskStatusSummary } from "./types.js";

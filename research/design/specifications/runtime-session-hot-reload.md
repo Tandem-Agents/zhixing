@@ -1,6 +1,8 @@
 # RuntimeSession 与配置热重载
 
 > REPL 运行期内修改基础配置（`/config` slash 命令）+ 改完立即生效（hot reload）。本规格通过引入 `RuntimeSession` 抽象聚合 REPL 中协同生命周期的资源，支撑 blue-green swap 模式的热重载，同时消除 `repl.ts` 散落资源的 god module 债。
+>
+> ⚠ **scheduler 部分已被调度器重构取代（决策 1 去自起，已落地）**：本规格描述的「session 自起 `new Scheduler` + `SchedulerProvider(() => scheduler.getStatusSummary())` + scheduler dispose 顺序」是去自起前的设计。cli 现已不自起 Scheduler——改注入 `RpcSchedulerFacade`（`SchedulerFacade`，接入核心宿主），SchedulerProvider 数据源改 `getSchedulerStatus` closure（读 `scheduler.json` 投影 / `computeStatusSummary`），`scheduler.getStatusSummary` 已删；reload 不再涉及 scheduler（它在核心宿主、跨 reload 稳定）。hot-reload 的 agentRuntime blue-green swap 核心仍有效；下文 scheduler 相关步骤为历史设计，以 `cli/runtime/session.ts` + `scheduler-architecture.md` 决策 1 为准。
 
 ## 一、设计原则
 

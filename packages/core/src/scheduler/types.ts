@@ -118,7 +118,7 @@ export interface ScheduledTask {
  *
  *   - 接口层强制只读：编译期阻止 `summary.active.push(...)` 等误用，避免污染
  *     scheduler 内部状态推导出的快照
- *   - 实现侧自然兼容：scheduler.getStatusSummary 内部用 `.filter().map()` 产新
+ *   - 实现侧自然兼容：computeStatusSummary 内部用 `.filter().map()` 产新
  *     mutable Array，赋给 readonly 字段时 TypeScript 自动 widening 接受
  *   - fallback 单例兼容：`EMPTY_TASK_STATUS_SUMMARY`（cli 装配层 fallback 常量）
  *     可天然类型化为 readonly TaskStatusSummary，配合 `Object.freeze` 形成"编译期

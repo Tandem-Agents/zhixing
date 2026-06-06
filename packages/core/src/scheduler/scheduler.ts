@@ -22,7 +22,7 @@ import { DEFAULT_SCHEDULER_CONFIG } from "./config.js";
 import { applyErrorPolicy, resetErrorState } from "./error-policy.js";
 import { executeTask, type TaskExecutorDeps } from "./task-executor.js";
 import { TimerLoop } from "./timer-loop.js";
-import { computeStatusSummary, isInternal } from "./status-summary.js";
+import { isInternal } from "./status-summary.js";
 import type {
   AgentTurnParams,
   AgentTurnResult,
@@ -31,7 +31,6 @@ import type {
   SystemHandler,
   TaskPriority,
   TaskSchedule,
-  TaskStatusSummary,
   TaskStore,
 } from "./types.js";
 import type { SchedulerEventMap } from "./events.js";
@@ -291,15 +290,6 @@ export class Scheduler {
 
   get activeTaskCount(): number {
     return this.activeTasks.size;
-  }
-
-  /**
-   * 获取任务状态摘要（用于 per-turn 上下文注入）。
-   *
-   * @param recentWindowMs 最近完成/失败的时间窗口（默认 30 分钟）
-   */
-  getStatusSummary(recentWindowMs: number = 30 * 60 * 1000): TaskStatusSummary {
-    return computeStatusSummary(this.getAllTasks(), this.now(), recentWindowMs);
   }
 
   // ─── 内部方法 ───

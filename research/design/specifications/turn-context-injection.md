@@ -375,6 +375,13 @@ class SchedulerProvider implements TurnContextProvider {
 }
 ```
 
+> ⚠ **已更新（调度器重构）**：`scheduler.getStatusSummary()` 已删除——cli 去自起 Scheduler 后，
+> SchedulerProvider 的数据源改为 `getSchedulerStatus` closure：cli 读 `scheduler.json` 从属投影
+> （`readSchedulerSummarySync`）、daemon 直接调平台无关纯函数 `computeStatusSummary`（均先按
+> `isInternal` 过滤 internal）。本节下方 getStatusSummary 实现、以及后文
+> `SchedulerProvider(() => scheduler.getStatusSummary())` 直连写法为历史设计，以
+> `core/scheduler/status-summary.ts` + `cli/runtime/turn-context-providers.ts` 为准。
+
 **Scheduler 端暴露 `getStatusSummary()`：**
 
 ```typescript
