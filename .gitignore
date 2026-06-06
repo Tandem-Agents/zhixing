@@ -45,3 +45,6 @@ temp/
 
 # Private research notes (local only)
 research/_private/
+
+# Local-only agent playbooks — 过程活文档（审核执行追踪等），不提交
+research/playbooks/local/

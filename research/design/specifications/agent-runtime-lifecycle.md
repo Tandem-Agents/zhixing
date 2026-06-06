@@ -203,7 +203,7 @@ interface CreateAgentRuntimeOptions {
    - **pre-flight 压缩**（`create-agent-runtime.ts` run() 内、`runAgentLoop` 之前的 `resolveContextManager("pre-flight")`，reason=`compact`）；
    - **runTurnEnd**（`turn-end.ts`，turn 结束的段切换 `segment-transition` / budget 压缩 `compact`，文本路径 `agent-loop.ts:431` 与工具路径 `:537` 两条）。
 
-   这三条经统一信号驱动（§五.3 第2步：返回值携带 `windowChange`），agent-loop / run 在**该重构改完 messages 后、下一个 LLM call 之前** `await windowLifecycle.onChange(reason)`。orchestrator 通过装配期注入的 `windowLifecycle` 回调（与 `turnContextInjector` 同范式）持有 lifecycle 订阅者集合并按序触发。
+   这三条统一经装配期注入的 `windowLifecycle` 回调触发（与 `turnContextInjector` 同范式，orchestrator 持有 lifecycle 订阅者集合并按序触发），**触发点收敛在 messages 重构处内部、不外泄信号给 caller**：runTurnBegin / runTurnEnd 接收 `windowLifecycle`，在其内部（messages 最终化后、下个 LLM call 之前）直接 `await windowLifecycle?.onChange(reason)`——`windowChange` 是这两个函数的内部局部信号（`seg.modified` / `ctx.output.modified`），**不进返回值**；pre-flight 压缩在 orchestrator `run()` 内（agent-loop 之前）触发。收敛于重构出口内部、而非返回信号交 caller 各路径自调——runTurnEnd 的所有调用路径（文本末轮 / 工具路径）都经该函数，「所有 messages 重构出口都触发换代」从结构上一条不漏（Inv-1）。
 3. **run 外换代（`clear` / `resume`，实例级）**：`/clear`（cli `resetConversationState` 路径）、`/resume`（换对话）在 run 之间发生。cli 在这两条路径上调 `runtime.onAttentionWindowChange(reason)`（§十二 C 新增的薄方法）触发窗口钩子、更新实例权威 prompt。
 
 **run 入口的窗口延续 vs 换代**：run() 入口 capture 实例权威 prompt 的当前值作为**本 run 局部 prompt**（§五.3）——窗口跨多 run 时若实例权威未变则本 run 取到同值（byte-equal、cache 跨 run 命中），不触发重建；上个 run 末轮切段 / run 外 clear/resume 已更新实例权威时，本 run 自然 capture 到新值。故 run 入口本身不发 onWindowOpen，只做快照；新窗的 onWindowOpen 在其真实换代点（上述三类）触发。
@@ -292,13 +292,13 @@ skill 索引段（`skill-index`）落在 system prompt **静态缓存区**（`sy
 
 **provider 现读**：provider 每轮从 `request.systemPrompt` 现读（已核实 `anthropic-messages.ts`、`openai-compatible.ts` 两协议），无脏引用。getSystemPrompt 返回本 run 局部 prompt 当前值，run 内无换代时每 turn 取同值 → byte-equal → cache 命中。
 
-**重建触发（统一信号源）**：`runAgentLoop` 新增可选 `windowLifecycle?: { onChange(reason): Promise<void> }`（orchestrator 装配期注入，与 `turnContextInjector` 同范式）。§四①.2 三条 run 内重构出口统一携带换代信号：
+**重建触发（统一信号源）**：`runAgentLoop` / `runTurnBegin` / `runTurnEnd` 接收可选 `windowLifecycle?: { onChange(reason): Promise<void> }`（orchestrator 装配期注入，与 `turnContextInjector` 同范式）。§四①.2 三条 run 内重构出口统一经它触发，**触发点收敛在重构处内部、不把信号外泄给 caller**：
 
-- `runTurnEnd` 的 `TurnEndOutcome` 的 `ok` variant 加 `windowChange?: { reason }`（`turn-end.ts` 内本有 `seg.modified` / `ctx.output.modified` 局部信号）；
-- `runTurnBegin` 同样改返回 `{ messages, windowChange? }`（不能只返回 `Message[]` 丢弃 `seg.modified`）；
-- pre-flight 压缩在 orchestrator `run()` 内（agent-loop 之前），其 `modified` 直接驱动一次 `onChange("compact")`。
+- `runTurnEnd`：内部 `seg.modified`（段切换）/ `ctx.output.modified`（压缩）算出局部 `windowChange`，在 messages 最终化后、返回前直接 `await windowLifecycle?.onChange(reason)`；`TurnEndOutcome` 仍只返回 `{ kind:"ok", messages }`、**不带 `windowChange` 字段**。
+- `runTurnBegin`：同样接收 `windowLifecycle`，段切换时在其内部 `await windowLifecycle?.onChange("segment-transition")`、再返回；返回值不带换代信号。
+- pre-flight 压缩在 orchestrator `run()` 内（agent-loop 之前），其 `modified` 直接驱动一次 `await windowLifecycle.onChange("compact")`。
 
-agent-loop / run 在该重构改完 messages 后、下个 LLM call 之前 `await windowLifecycle?.onChange(reason)`，内部按序触发 onWindowClose(旧窗)→onWindowOpen(新窗)，订阅者经 `updateSystemPromptSegment` 贡献段 → runtime 重拼**本 run 局部 prompt**。run 外换代（clear/resume）由 cli 经 `runtime.onAttentionWindowChange`（§十二 C）触发、更新实例权威。
+`onChange` 内部按序触发 onWindowClose(旧窗)→onWindowOpen(新窗)，订阅者经 `updateSystemPromptSegment` 贡献段 → runtime 重拼**本 run 局部 prompt**。**收敛在 runTurnBegin / runTurnEnd 内部触发、而非返回信号交 agent-loop 各路径自调**——所有 messages 重构出口都经这两函数，从结构上保证 Inv-1「一条不漏」（消除 agent-loop 两条 turn-end 路径各自漏调的风险）。run 外换代（clear/resume）由 cli 经 `runtime.onAttentionWindowChange`（§十二 C）触发、更新实例权威。
 
 ### 5.4 公共段更新接口 + buildSystemPrompt 支持段覆盖
 
@@ -416,7 +416,7 @@ runtime 侧（`updateSystemPromptSegment` + 重拼）负责：把贡献记入段
 
 ## 十、Invariants
 
-1. **窗口换代触发面无遗漏**：所有 messages 重构出口都是注意力窗口换代、都成对触发 onWindowClose→onWindowOpen。run 内三条出口（runTurnBegin 段切换 / pre-flight 压缩 / runTurnEnd 段切换-压缩，§四①.2）经统一 `windowChange` 信号驱动，一条不漏；run 外换代（clear/resume/reload）+ 首窗 / 末窗各有触发点。
+1. **窗口换代触发面无遗漏**：所有 messages 重构出口都是注意力窗口换代、都成对触发 onWindowClose→onWindowOpen。run 内三条出口（runTurnBegin 段切换 / pre-flight 压缩 / runTurnEnd 段切换-压缩，§四①.2）统一经 `windowLifecycle.onChange` 触发——runTurnBegin / runTurnEnd 在函数内部触发（信号 `windowChange` 是其内部局部变量、不外泄给 caller），所有重构出口都经这两函数、一条不漏；run 外换代（clear/resume/reload）+ 首窗 / 末窗各有触发点。
 2. **窗口内 system prompt byte-equal（按 run 局部成立）**：生效 system prompt 的现取源是 **per-run 局部 prompt**；它在一个 run 内只被本 run 的换代点重建，run 内（含跨多 turn）不动；run 入口 capture 实例权威保证窗口跨多 run 时延续值 byte-equal。**并发 run 各自的局部 prompt 互不干扰**——一个 run 的换代绝不改另一 in-flight run 的生效 prompt。run 入口（onBeforeRun）不重建。
 3. **main 运行体跨 main↔work 持续**：进 work 不触发 main 末窗（main 未销毁）。
 4. **首窗 open / 末窗 close 与实例配对**：任何 onWindowOpen(`instance-start`) 已完成的实例，无论以何路径退场，最终必有且仅有一次末窗 onWindowClose（销毁类 reason）。① reload 换代旧实例末窗 close **必须接在 agent 域 swap 处**（`:651/656`）、**不可依赖 `disposeOldInBackground`**；② 装配回滚（`buildNewResources` 兄弟步骤抛错，`:765`）须对已激活实例补 `dispose("assembly-rollback")`、不静默 GC。
@@ -478,11 +478,11 @@ cli 交互模式（REPL / -p，主用户面）启动时 `setDiagnosticLogger(() 
 **B. core — agent-loop per-run 现取 + 窗口换代信号 + turn-begin/turn-end 返回扩展**
 
 12. `runAgentLoop`（`agent-loop.ts:81`）：**新增可选 `getSystemPrompt?: () => string`，与现有 `systemPrompt?: string` 二选一**，内部归一 `const getSP = params.getSystemPrompt ?? (() => params.systemPrompt ?? "")`；`:88` 一次性解构删除。**agent-loop 内全部 5 处 systemPrompt 消费点一律改 `getSP()` 现取,一处不漏**：`:242`（runTurnBegin 段切换评估）、`:295`（streamLLMCall 主 LLM call）、`:340`（token 校准）、`:431`（runTurnEnd 纯文本路径）、`:537`（runTurnEnd 工具路径）。main agent 走 getSystemPrompt 后 `params.systemPrompt` 恒为 undefined，漏改任一处（尤其三处段切换出口）会让段切换用空 system prompt、缓存安全分叉 prefix 不一致、cache 全 miss。`llm-call.ts` 构造 `request.systemPrompt`（string）不变。**sub-agent 调用点（`loop-runner.ts`）继续传 `systemPrompt: string`、零改动（经归一回退）。**
-13. **窗口换代信号 — 三条出口统一**（§四①.2、§五.3）：`runAgentLoop` 新增可选 `windowLifecycle?: { onChange(reason): Promise<void> }`。
-    - **runTurnEnd**：`TurnEndOutcome` 的 `ok` variant 加 `windowChange?: { reason: "segment-transition" | "compact" }`（`turn-end.ts` 内 `seg.modified` → segment-transition、`ctx.output.modified` → compact）。agent-loop 读 `turnEnd.windowChange` 在下个 turn 前 `await windowLifecycle?.onChange(reason)`。
-    - **runTurnBegin**：改返回 `{ messages, windowChange? }`（不再只返回 `Message[]` 而丢弃 `seg.modified`）；agent-loop 在 runTurnBegin 之后、首个 `streamLLMCall`（`:290`）之前 `await windowLifecycle?.onChange("segment-transition")`。
+13. **窗口换代信号 — 三条出口统一**（§四①.2、§五.3）：`runAgentLoop` / `runTurnBegin` / `runTurnEnd` 接收可选 `windowLifecycle?: { onChange(reason): Promise<void> }`。**触发收敛在重构出口内部，不外泄信号给 caller**：
+    - **runTurnEnd**：内部 `seg.modified` → `segment-transition`、`ctx.output.modified` → `compact` 算出局部 `windowChange`，在 messages 最终化后、返回前直接 `await windowLifecycle?.onChange(reason)`；`TurnEndOutcome` 仍只返回 `{ kind:"ok", messages }`、**不加 `windowChange` 字段**（信号是函数内部局部变量、不交 agent-loop）。
+    - **runTurnBegin**：接收 `windowLifecycle`，段切换时在其内部 `await windowLifecycle?.onChange("segment-transition")`、再返回；返回值不带换代信号。
     - **pre-flight 压缩**：在 orchestrator `run()` 内触发（item 7），不经 agent-loop。
-    - 同步**消除 item12 / item13 的读写侧不一致**：item12 已认 `:242` runTurnBegin 做段切换评估，item13 此处把它纳入换代触发,两侧一致。
+    - **为何内部触发而非返回信号交 caller**：runTurnEnd 有文本末轮 / 工具两条调用路径，返回信号交 agent-loop 自调易漏一条；收敛进 runTurnBegin / runTurnEnd 内部，所有 messages 重构出口都经这两函数，从结构上保证 Inv-1「一条不漏」。
 14. **core**：`AgentEventMap`（`agent-events.ts`）新增 run 内事件 `lifecycle:hook_failed` / `lifecycle:prompt_rebuilt`。首窗 / 末窗（run 外）不进 `AgentEventMap`。**不押 `logDiagnostic`。**
     - **cli/serve 渲染落地（同属本项、不可省略）**：`createRenderSubscribers`（`cli/src/render.ts`）新增对这两事件的订阅 + 用户可见渲染（`hook_failed` 至少一条可见告警；`prompt_rebuilt` 可静默或轻提示）。现行仅订阅 retry/context/security/interrupt，不增订阅 = 声明面>生效面。
 
@@ -508,7 +508,7 @@ cli 交互模式（REPL / -p，主用户面）启动时 `setDiagnosticLogger(() 
 
 **F. core 改动影响面小结**
 
-26. agent-loop 改动:systemPrompt 由"启动取一次"变"每 LLM call 现取本 run 局部 prompt"(向后兼容签名,sub-agent 传固定 string 不受影响);新增 windowLifecycle.onChange 触发(可选,不注入则 no-op)。turn-end 改动:`TurnEndOutcome` 加 `windowChange` 信号。turn-begin 改动:返回类型从 `Message[]` 改为 `{ messages, windowChange? }`(纯增字段/形状,调用方 agent-loop 同步适配)。三处均为受控扩展,sub-agent 与既有 budget-only 兜底路径不受影响。
+26. agent-loop 改动:systemPrompt 由"启动取一次"变"每 LLM call 现取本 run 局部 prompt"(向后兼容签名,sub-agent 传固定 string 不受影响);把可选 `windowLifecycle` 透传给 runTurnBegin / runTurnEnd(不注入则内部 onChange no-op)。turn-end / turn-begin 改动:接收 `windowLifecycle`,在内部(messages 重构后、返回前)直接触发 `onChange`——`TurnEndOutcome` 与 runTurnBegin 返回值**均不带 `windowChange` 字段**(信号收敛为函数内部局部变量、不外泄给 caller,从结构上保证所有重构出口一条不漏)。三处均为受控扩展,sub-agent 与既有 budget-only 兜底路径不受影响(缺省 windowLifecycle → onChange no-op)。
 
 ---
 
@@ -525,5 +525,5 @@ cli 交互模式（REPL / -p，主用户面）启动时 `setDiagnosticLogger(() 
 | 字段 | 值 |
 |---|---|
 | 状态 | ✅ 已落地 —— §十二 A–E（orchestrator 契约 / 双层 holder / core 换代信号 / cli 销毁链 / server async 化）+ D 测试拓扑全部实现并通过全包测试 |
-| 前置依赖 | ① `SkillStore` 暴露 `version(mode)`（单调 + publish-after-commit）✅；② core agent-loop per-run 现取 + windowLifecycle 回调 + turn-end `windowChange` 扩展 + turn-begin 返回扩展 ✅；③ `buildSystemPrompt` segmentOverrides 段覆盖 ✅ |
+| 前置依赖 | ① `SkillStore` 暴露 `version(mode)`（单调 + publish-after-commit）✅；② core agent-loop per-run 现取 + `windowLifecycle` 回调透传 runTurnBegin / runTurnEnd（内部触发 onChange、返回值不带 windowChange 字段）✅；③ `buildSystemPrompt` segmentOverrides 段覆盖 ✅ |
 | 关联文档已回写 | [skill-system.md](./skill-system.md) §3.2/§3.3/§九 已标注注意力窗口边界重建落地；[lifecycle-concepts.md](../drafts/lifecycle-concepts.md) §二已标注四钩子需求实现 |
