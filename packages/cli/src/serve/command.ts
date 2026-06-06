@@ -32,7 +32,7 @@ import {
   type SchedulerEventMap,
   type AgentTurnResult,
   type SchedulerFacade,
-  type LocalSchedulerFacade,
+  LocalSchedulerFacade,
   type TurnContext,
   JournalStore,
   TranscriptStore,
@@ -66,6 +66,7 @@ import { createBuiltinExtraToolsAssembly } from "../runtime/builtin-extra-tools.
 import { parseServerSpecs } from "../runtime/mcp-config.js";
 import { InMemoryTaskListStore } from "../runtime/task-list-stores.js";
 import { registerCliTurnContextProviders } from "../runtime/turn-context-providers.js";
+import { hasNearExternalTask } from "../runtime/scheduler-projection.js";
 import { createCliRuntimeFactory } from "./session-adapter.js";
 import { runEphemeralTurn } from "./ephemeral-executor.js";
 import { loadOrCreateToken } from "./token.js";
@@ -197,8 +198,10 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   // 3. Scheduler facade lazy ref —— 打破循环依赖（标准 IoC 模式）：
   //    scheduleTool → Scheduler → runAgentTurn → ephemeralRuntime → scheduleTool
   let schedulerRef: Scheduler | null = null;
-  // schedule 工具经门面接入——daemon 内直调本进程 Scheduler（LocalSchedulerFacade）。
-  // 注：facade 实例化（schedulerFacadeRef 赋值）是 ensure+facade 接线步骤的落点，当前未接。
+  // schedule 工具经门面接入——daemon 内直调本进程 Scheduler（LocalSchedulerFacade，恒定核心）。
+  // 实例化落点在核心 Scheduler 创建之后（见下）。getSchedulerFacade 惰性返回：会话执行面
+  // （per-session runtimeFactory，装配早于 scheduler）与 ephemeralRuntime 的 schedule 工具
+  // 都经它共用同一实例、直调同一本进程 Scheduler——工具 call 必在 daemon 跑起来后、ref 已就位。
   let schedulerFacadeRef: LocalSchedulerFacade | null = null;
   const getSchedulerFacade = (): SchedulerFacade => {
     if (!schedulerFacadeRef) throw new Error("Scheduler not initialized yet");
@@ -444,6 +447,10 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     },
   });
   schedulerRef = scheduler;
+  // LocalSchedulerFacade —— 在恒定核心装配点实例化一次（绑核心 Scheduler、与执行面正交）：
+  // daemon 内会话执行面 / ephemeralRuntime 的 schedule 工具经 getSchedulerFacade 共用它，
+  // 直调本进程 Scheduler（不绕 RPC）；cli 侧对称用 RpcSchedulerFacade。统一 SchedulerFacade 缝。
+  schedulerFacadeRef = new LocalSchedulerFacade(scheduler, schedulerEventBus);
   await scheduler.start();
 
   // 系统维护任务落地（seed-if-absent、幂等）——handler 已在 systemHandlers 注册。
@@ -611,22 +618,16 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   }
 
   // idle reaper —— 由 PROFILES.idleReap 门控（当前仅 schedule 档：按需拉起的最小宿主要轻）：
-  // 周期检查「无活跃 RPC client + scheduler 无近期 nextRunAt」即空闲退出。退出走正常 shutdown
-  // （drain 在跑任务）、不改 idempotent shutdown 契约——client 下次操作重新 ensure 拉起。near
-  // 窗口覆盖近期 once 任务，让「N 小时后提醒」期间宿主守到触发再退。full serve 长驻、不 idle 退。
+  // 周期检查「无活跃 RPC client + scheduler 无近期【外部】任务」即空闲退出。退出走正常 shutdown
+  // （drain 在跑任务）、不改 idempotent shutdown 契约——client 下次操作重新 ensure 拉起。守候判据
+  // 经 hasNearExternalTask 与启动 ensure 判据共用（同窗口、同 isInternal 过滤）：只守近期外部 / 用户
+  // once 任务（「N 小时后提醒」守到触发再退）；internal 系统维护容忍延迟、不守候、不钉宿主常驻（决策 5）。
+  // full serve 长驻、不 idle 退。
   if (PROFILES[profile].idleReap) {
     const IDLE_CHECK_MS = 60_000;
-    const IDLE_NEAR_WINDOW_MS = 2 * 60 * 60 * 1000;
     const idleTimer = setInterval(() => {
       if (runner.server.connections.size > 0) return;
-      const now = Date.now();
-      const hasNearTask = scheduler.listTasks().some(
-        (t) =>
-          t.enabled &&
-          t.state.nextRunAt &&
-          new Date(t.state.nextRunAt).getTime() - now <= IDLE_NEAR_WINDOW_MS,
-      );
-      if (hasNearTask) return;
+      if (hasNearExternalTask(scheduler.listTasks(), Date.now())) return;
       serverCtx.requestShutdown?.("idle");
     }, IDLE_CHECK_MS);
     idleTimer.unref();

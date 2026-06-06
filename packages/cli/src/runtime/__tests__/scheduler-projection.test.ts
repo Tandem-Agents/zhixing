@@ -6,6 +6,7 @@ import type { ScheduledTask } from "@zhixing/core";
 import {
   readSchedulerSummarySync,
   shouldEnsureOnStartup,
+  hasNearExternalTask,
 } from "../scheduler-projection.js";
 
 function writeStore(path: string, tasks: ScheduledTask[]): void {
@@ -88,6 +89,51 @@ describe("scheduler-projection", () => {
     it("文件不存在 → 空摘要", () => {
       const summary = readSchedulerSummarySync(storePath);
       expect(summary.active).toEqual([]);
+    });
+  });
+
+  describe("hasNearExternalTask（idle reaper / 启动守候 共用判据）", () => {
+    const now = Date.now();
+
+    it("近期外部任务 → true（守候到触发）", () => {
+      expect(hasNearExternalTask([task({ id: "u1", nextRunAt: soon() })], now)).toBe(true);
+    });
+
+    it("仅近期内部任务 → false（internal 容忍延迟、不守候、不钉宿主，决策5）", () => {
+      // 核心修复回归：idle reaper 不该被 internal 维护任务钉成常驻。
+      expect(
+        hasNearExternalTask(
+          [task({ id: "__gc", system: true, nextRunAt: soon() })],
+          now,
+        ),
+      ).toBe(false);
+    });
+
+    it("近期内部 + 远期外部 → false（窗口内只有 internal 不算守候）", () => {
+      expect(
+        hasNearExternalTask(
+          [
+            task({ id: "__gc", system: true, nextRunAt: soon() }),
+            task({ id: "u1", nextRunAt: far() }),
+          ],
+          now,
+        ),
+      ).toBe(false);
+    });
+
+    it("仅远期外部 → false；disabled 外部近期 → false；无 nextRunAt / 空集 → false", () => {
+      expect(hasNearExternalTask([task({ id: "u1", nextRunAt: far() })], now)).toBe(false);
+      expect(
+        hasNearExternalTask([task({ id: "u1", enabled: false, nextRunAt: soon() })], now),
+      ).toBe(false);
+      expect(hasNearExternalTask([task({ id: "u1" })], now)).toBe(false);
+      expect(hasNearExternalTask([], now)).toBe(false);
+    });
+
+    it("自定义 windowMs 生效", () => {
+      const t = task({ id: "u1", nextRunAt: new Date(now + 5_000).toISOString() });
+      expect(hasNearExternalTask([t], now, 1_000)).toBe(false); // 5s 任务 / 1s 窗口
+      expect(hasNearExternalTask([t], now, 10_000)).toBe(true); // 5s 任务 / 10s 窗口
     });
   });
 });

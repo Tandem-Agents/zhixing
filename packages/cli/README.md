@@ -157,7 +157,7 @@ WebSocket:    ws://127.0.0.1:18900/ws  ← JSON-RPC 2.0
 - `SIGTERM`：同 SIGINT 一次
 - `SIGUSR1`（仅 Linux/macOS）：触发停机供 supervisor 重启
 
-**进程锁**：端口监听 + PID 文件双层保护。重复启动会被拒绝（`EADDRINUSE` 或 `ProcessLockError`）。
+**进程锁**：端口监听是**唯一**单例锁——同 `ZHIXING_HOME` 派生同端口，重复启动被 OS 以 `EADDRINUSE` 原子拒绝。PID / port 文件仅是发现辅助（供客户端找到 owner 的端口 / pid），**不是第二把锁**：宿主 listen 成功即 owner，覆盖任何崩溃残留的 PID 文件、不自杀。
 
 ---
 

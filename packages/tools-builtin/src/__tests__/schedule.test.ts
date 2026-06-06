@@ -150,4 +150,45 @@ describe("schedule tool — create behavior (post ADR-007 Phase 3)", () => {
       expect(created?.createdInTurn).toBeUndefined();
     });
   });
+
+  // ─── origin 透传（channel 任务投递回源链） ───
+  // daemon 内会话执行面经 LocalSchedulerFacade 创建任务时，getOrigin 提供的来源会话
+  // （飞书等 channel）须落到 task.origin —— task fire 后据此自动投递回创建它的会话。
+  // 与 createdInTurn 对称：两者都只在 channel 会话产生、REPL/ephemeral 为 undefined。
+
+  it("getOrigin 提供 origin → task.origin 落库（channel 投递回源关键路径）", async () => {
+    await withScheduler(async (scheduler, facade) => {
+      const origin = { channelId: "feishu", to: "ou_xxx" };
+      const tool = createScheduleTool(
+        () => facade,
+        () => origin,
+      );
+      const result = await tool.call(
+        onceInput({ name: "t-with-origin" }),
+        baseContext(),
+      );
+
+      expect(result.isError).toBeFalsy();
+      const created = scheduler
+        .listTasks()
+        .find((t) => t.name === "t-with-origin");
+      expect(created?.origin).toEqual(origin);
+    });
+  });
+
+  it("无 getOrigin（REPL/ephemeral）→ task.origin undefined", async () => {
+    await withScheduler(async (scheduler, facade) => {
+      const tool = createScheduleTool(() => facade);
+      const result = await tool.call(
+        onceInput({ name: "t-no-origin" }),
+        baseContext(),
+      );
+
+      expect(result.isError).toBeFalsy();
+      const created = scheduler
+        .listTasks()
+        .find((t) => t.name === "t-no-origin");
+      expect(created?.origin).toBeUndefined();
+    });
+  });
 });

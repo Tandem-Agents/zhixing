@@ -67,7 +67,7 @@ Daemon 模式要解决的是：**一次 `zhixing serve --daemon` 启动后脱离
 | 状态查询 | — | `zhixing serve status`（PID 存活 + 端口健康 + heartbeat 新鲜度）|
 
 **不可抗力断了怎么办**：
-- **崩溃 / 被 kill -9** → 留下陈旧 PID 文件；下次启动自动清理（`isProcessAlive` + `startTime` 比对 + 抢锁重建，见 [§3.2](#32-pid-文件-schemav2扩展自-process-lockts)）
+- **崩溃 / 被 kill -9** → 留下陈旧 PID 文件；端口随进程死被 OS 释放，下次 ensure / serve 重新 `listen` 成功即 owner，`acquireLock` 覆盖残留 PID 文件（端口才是锁、PID 仅发现辅助，见 [§3.2](#32-pid-文件-schemav2扩展自-process-lockts) 顶部注记）
 - **Level 1 不做自动重启**——那是 Level 2（launchd/systemd 注册）或 Level 3（完整服务化）的能力；M9 的 TD#1 修复只解决飞书 reconnect 期间消息不丢，不是进程级重启
 - **无跨进程重连机制**——CLI 连接 daemon 时每次 `discoverServer` 都会重新读 PID 文件建立 WebSocket；daemon 挂了 CLI 会直接报连接失败，需要手动 `zhixing serve --daemon` 再起
 
@@ -223,6 +223,14 @@ P1 复用而非重建：
 
 ### 3.2 PID 文件 schema（v2，扩展自 process-lock.ts）
 
+> ⚠ **owner 模型更新（scheduler-architecture.md 决策 7，已落地）**：单例锁是**端口 listen 的
+> EADDRINUSE（OS 原子）**，PID 文件仅是**发现辅助、非第二把锁**。本 spec 早期设计的「PID reuse
+> 检测 / stale 判定 / acquireLock 抢锁拒绝」（含下方 `startTime` 复用检测、M2 里程碑步骤、风险表
+> 里 stale 相关条目）**已移除**——`acquireLock` 改覆盖式：owner 由 `listen` 成功确立后覆盖任何
+> 残留 PID 文件、不检测、不自杀（根治 idle 高频起落 + Windows 无 startTime 检测下的「listen 成功却
+> 因残留+复用 PID 自杀」死循环）。`startTime` 字段保留为诊断 + 未来 discoverServer 真实性探测基础。
+> 涉及 PID 锁 / stale / reuse 的历史描述以 `process-lock.ts` 与决策 7 为准。
+
 **路径**：`~/.zhixing/server.pid`
 
 ```json
@@ -241,7 +249,7 @@ P1 复用而非重建：
 ```
 
 - **`pidFileVersion`** —— schema 演化，未来兼容
-- **`startTime`** —— 从 Linux `/proc/<pid>/stat` 字段 22 或 Node `process.uptime()` 推算；用于 PID 复用检测（Hermes 模式）
+- **`startTime`** —— 从 Linux `/proc/<pid>/stat` 字段 22 / macOS `ps -o lstart=` 读取（Windows 为 null）；原用于 PID 复用检测（Hermes 模式），owner 改端口仲裁后该判活用途已移除（见章节顶部注记），现为诊断信息
 - **`logPath`** —— 外部工具 / `serve status` 直接告知用户日志位置
 - **`kind`** —— 为将来 Level 2 daemon worker / bg session 扩展预留
 

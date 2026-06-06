@@ -6,6 +6,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { join } from "node:path";
+import { writeFile } from "node:fs/promises";
 import {
   Scheduler,
   JsonTaskStore,
@@ -17,7 +18,7 @@ import { createTempDir } from "@zhixing/test-utils";
 import { runServer, type RunningServer } from "../lifecycle.js";
 import { createServerContext } from "../context.js";
 import { DEFAULT_SERVER_CONFIG } from "../types.js";
-import { readLock, releaseLock, ProcessLockError } from "../process-lock.js";
+import { readLock, releaseLock } from "../process-lock.js";
 import { CleanupRegistry } from "../cleanup-registry.js";
 
 const TEST_TOKEN = "test-token-lc";
@@ -109,26 +110,21 @@ describe("runServer lifecycle (S2.F)", () => {
     await waiter; // should resolve, not hang
   });
 
-  it("rejects startup if PID file held by another live process", async () => {
-    runner = await startTestServer();
+  it("startup overwrites a live-process pid file instead of self-blocking (port listen is the lock)", async () => {
+    // 预置一个指向活进程（本测试进程）的残留 PID 文件——典型「崩溃残留 + PID 被复用」场景。
+    // 旧实现会让 runServer 在 acquireLock 处抛 ProcessLockError → server.close() 自杀（Windows
+    // 无 startTime 检测时尤甚 → 下次 ensure 撞同一残留再自杀 → 死循环卡死）。新实现 owner 由
+    // 端口 listen 确立、PID 仅发现辅助 → 覆盖残留、正常启动。
+    await writeFile(
+      pidPath,
+      JSON.stringify({ pid: process.pid, port: 18900, startedAt: new Date().toISOString() }),
+      "utf-8",
+    );
 
-    // Try to start a second server with same lock path
-    const ctx = createServerContext({
-      config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
-      version: "0.1.0-test",
-      token: TEST_TOKEN,
-      scheduler,
-    });
+    runner = await startTestServer(); // 不抛 = owner 不自杀
 
-    await expect(
-      runServer({
-        context: ctx,
-        scheduler,
-        lockPaths: { pidPath, portPath },
-        skipSignalHandlers: true,
-        logger: { info() {}, warn() {}, error() {} },
-      }),
-    ).rejects.toBeInstanceOf(ProcessLockError);
+    const lock = await readLock({ pidPath, portPath });
+    expect(lock?.pid).toBe(process.pid); // PID 文件被覆盖为本宿主
   });
 
   it("scheduler is stopped during shutdown", async () => {

@@ -153,4 +153,52 @@ describe("CoreHostConnection", () => {
     client.emit("schedule.completed", { taskId: "t" });
     expect(received).toEqual([{ taskId: "t" }]);
   });
+
+  it("dispose 后 getClient 抛「已释放」", async () => {
+    const conn = new CoreHostConnection({
+      discover: async () => endpoint,
+      spawn: vi.fn(async () => ({ ok: true })),
+      createClient: () => asClient(makeFakeClient()),
+    });
+    await conn.dispose();
+    await expect(conn.getClient()).rejects.toThrow(/已释放/);
+  });
+
+  it("dispose 关闭已建立的连接", async () => {
+    const client = makeFakeClient();
+    const conn = new CoreHostConnection({
+      discover: async () => endpoint,
+      spawn: vi.fn(async () => ({ ok: true })),
+      createClient: () => asClient(client),
+    });
+    await conn.getClient();
+    await conn.dispose();
+    expect(client.close).toHaveBeenCalledOnce();
+  });
+
+  it("dispose 撞在 establish 在途：关掉建立中的连接、不泄漏、getClient 拒绝", async () => {
+    const client = makeFakeClient();
+    let releaseDiscover!: () => void;
+    const gate = new Promise<void>((r) => {
+      releaseDiscover = r;
+    });
+    const conn = new CoreHostConnection({
+      discover: async () => {
+        await gate;
+        return endpoint;
+      },
+      spawn: vi.fn(async () => ({ ok: true })),
+      createClient: () => asClient(client),
+    });
+
+    const pending = conn.getClient(); // establish 卡在 discover gate（在途）
+    const disposing = conn.dispose(); // dispose 撞在在途：抓住 inflight、等其 settle 再关
+    releaseDiscover(); // 放行 → establish 建好 client
+
+    // getClient 见 disposed → 不把建立中的连接赋给 this.client，关掉并拒绝
+    await expect(pending).rejects.toThrow(/连接建立期间被释放/);
+    await disposing;
+    // 建立中的连接被关闭（无 ws 泄漏 + 不守活宿主）
+    expect(client.close).toHaveBeenCalled();
+  });
 });

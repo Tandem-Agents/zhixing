@@ -97,12 +97,14 @@ export async function runServer(opts: RunServerOptions): Promise<RunningServer> 
     schedulerEventBus: opts.schedulerEventBus,
   });
 
-  // 2. 获取 PID 锁（基于实际监听端口）
+  // 2. 写 PID / port 发现文件 —— owner 已由上面的 listen 确立（端口才是单例锁），
+  //    acquireLock 覆盖任何崩溃残留、不因 PID 冲突自杀（见 process-lock.ts）。
   if (!opts.skipProcessLock) {
     try {
       await acquireLock(server.port, opts.lockPaths);
     } catch (err) {
-      // 端口已通过——但 PID 文件被占用？关掉 server 防止泄漏，再抛错
+      // 仅 PID 文件写入 IO 失败（磁盘满 / 权限）才会到这里——此时 server 已 listen 但
+      // cleanup 尚未注册，手动关掉防端口泄漏再传播（fail-fast：发现文件写不了，宿主无法被接入）。
       await server.close();
       throw err;
     }

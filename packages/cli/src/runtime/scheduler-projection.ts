@@ -42,8 +42,35 @@ export function readSchedulerSummarySync(
   return computeStatusSummary(tasks, new Date());
 }
 
-/** ensure 守候窗口：近期任务在此窗口内则宿主守到触发（与 idle reaper 的 near 窗口一致）。 */
+/**
+ * 近期外部任务守候窗口 —— 启动 ensure 守候 与 idle reaper 退出守候**共用**此窗口（经
+ * hasNearExternalTask），不再两处分别硬编码、靠注释维持一致（决策 7：idle near 窗口须 ≥
+ * 决策 1 守候近期 once 任务的窗口；这里取同值，由共用代码坐实而非纪律）。
+ */
 const NEAR_WINDOW_MS = 2 * 60 * 60 * 1000;
+
+/**
+ * 是否有近期外部（用户）任务在 windowMs 内待触发。
+ *
+ * idle reaper 退出守候 与 启动 ensure 守候**共用**此判据：守候是为了不让近期 once 用户任务
+ * （「N 小时后提醒」）在宿主退出 / 未拉起期间到点被判 missed。**internal 系统维护任务不纳入**
+ * （决策 5：容忍延迟、靠启动唤起即可、无需为它守候 / 钉宿主常驻）——与三个结果触达边界一致用
+ * isInternal 区分。caller 各自提供 tasks（daemon idle reaper 传 `scheduler.listTasks()`、cli 启动
+ * 判据传 `readSchedulerTasksSync()`）与 now，判据逻辑单一来源。
+ */
+export function hasNearExternalTask(
+  tasks: ScheduledTask[],
+  now: number,
+  windowMs: number = NEAR_WINDOW_MS,
+): boolean {
+  return tasks.some(
+    (t) =>
+      !isInternal(t) &&
+      t.enabled &&
+      t.state.nextRunAt !== undefined &&
+      new Date(t.state.nextRunAt).getTime() - now <= windowMs,
+  );
+}
 
 /**
  * cli 启动轻检查判据 —— 是否该在启动时主动 ensure 核心宿主（否则纯聊天零后台）。
@@ -75,12 +102,5 @@ export function shouldEnsureOnStartup(
     );
   if (maintenanceDue) return true;
 
-  return tasks
-    .filter((t) => !isInternal(t))
-    .some(
-      (t) =>
-        t.enabled &&
-        t.state.nextRunAt &&
-        new Date(t.state.nextRunAt).getTime() - now <= NEAR_WINDOW_MS,
-    );
+  return hasNearExternalTask(tasks, now);
 }

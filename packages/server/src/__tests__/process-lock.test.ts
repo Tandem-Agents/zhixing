@@ -8,7 +8,6 @@ import {
   readLock,
   isProcessAlive,
   resolveProcessStartTime,
-  ProcessLockError,
 } from "../process-lock.js";
 
 describe("ProcessLock", () => {
@@ -45,21 +44,23 @@ describe("ProcessLock", () => {
     await releaseLock({ pidPath, portPath });
   });
 
-  it("acquireLock fails when another live process holds the lock", async () => {
-    // Write pid file pointing to current process (definitely alive)
+  it("overwrites a live-process pid file (port listen is the real lock, pid file is discovery-only)", async () => {
+    // 残留 PID 文件指向一个活进程（崩溃残留 + PID 被复用的典型场景）。端口 listen 已是单例
+    // 仲裁，acquireLock 只写发现辅助文件 → 直接覆盖、绝不因 PID 冲突自杀。
     await writeFile(
       pidPath,
       JSON.stringify({ pid: process.pid, port: 18900, startedAt: new Date().toISOString() }),
       "utf-8",
     );
 
-    await expect(acquireLock(18901, { pidPath, portPath })).rejects.toBeInstanceOf(
-      ProcessLockError,
-    );
+    await acquireLock(18901, { pidPath, portPath });
+
+    const lock = await readLock({ pidPath, portPath });
+    expect(lock?.pid).toBe(process.pid);
+    expect(lock?.port).toBe(18901); // 新 owner 覆盖
   });
 
-  it("acquireLock recovers from stale pid file (process not alive)", async () => {
-    // Write pid file pointing to clearly invalid PID
+  it("overwrites a stale pid file (dead process)", async () => {
     await writeFile(
       pidPath,
       JSON.stringify({ pid: 999999999, port: 18900, startedAt: "2020-01-01T00:00:00Z" }),
@@ -128,89 +129,32 @@ describe("ProcessLock", () => {
     expect(lock!.port).toBe(18900);
   });
 
-  it("v1 file does NOT trigger stale warning when process is alive", async () => {
-    // 写 v1 文件指向本进程（肯定活着）——若 stale 检测错误报 stale，acquireLock 会成功（覆盖文件）
-    // 期望：视为活进程，acquireLock 抛 ProcessLockError
-    await writeFile(
-      pidPath,
-      JSON.stringify({ pid: process.pid, port: 18900, startedAt: "2026-04-22T10:00:00Z" }),
-      "utf-8",
-    );
-
-    await expect(acquireLock(18901, { pidPath, portPath })).rejects.toBeInstanceOf(
-      ProcessLockError,
-    );
-  });
-
-  it("v2 file with matching startTime treats process as alive", async () => {
-    // 伪造 v2 文件，startTime 能被 resolver 匹配上
+  it("overwrites regardless of startTime — Windows(null) / 复用 / 残留一律覆盖、绝不自杀", async () => {
+    // owner 由端口 listen 确立，PID 文件不再做 reuse 检测、不再有「活进程则拒绝」分支。
+    // 这正是 owner 修复的核心回归：曾让宿主在 Windows（startTime=null、无 reuse 检测）下
+    // 「listen 成功却因崩溃残留 + PID 复用而自杀 → 下次 ensure 撞同一残留再自杀 → 死循环卡死」
+    // 的边角。现在一律覆盖：活进程 + null startTime（最毒的 Windows 场景）也照样接管。
     await writeFile(
       pidPath,
       JSON.stringify({
         pidFileVersion: 2,
-        pid: process.pid,
+        pid: process.pid, // 活进程
         port: 18900,
         startedAt: "2026-04-22T10:00:00Z",
-        startTime: 99999,
+        startTime: null, // Windows：平台不支持 reuse 检测
       }),
       "utf-8",
     );
 
-    await expect(
-      acquireLock(18901, {
-        pidPath,
-        portPath,
-        resolveStartTimeFn: async () => 99999, // 相同 → 同一进程
-      }),
-    ).rejects.toBeInstanceOf(ProcessLockError);
-  });
-
-  it("v2 file with divergent startTime is treated as stale (PID reuse)", async () => {
-    // pid 活，但 startTime 不一致 → PID 被复用
-    await writeFile(
-      pidPath,
-      JSON.stringify({
-        pidFileVersion: 2,
-        pid: process.pid,
-        port: 18900,
-        startedAt: "2020-01-01T00:00:00Z",
-        startTime: 11111,
-      }),
-      "utf-8",
-    );
-
-    // 能覆盖（视为 stale）
     await acquireLock(18901, {
       pidPath,
       portPath,
-      resolveStartTimeFn: async () => 99999, // 不一致
+      resolveStartTimeFn: async () => null,
     });
 
     const lock = await readLock({ pidPath });
-    expect(lock!.port).toBe(18901); // 新锁生效
-  });
-
-  it("v2 file with null startTime falls back to isProcessAlive (platform unsupported)", async () => {
-    // startTime 为 null（平台不支持）→ 跳过 PID reuse 检测，只看 isProcessAlive
-    await writeFile(
-      pidPath,
-      JSON.stringify({
-        pidFileVersion: 2,
-        pid: process.pid,
-        port: 18900,
-        startedAt: "2026-04-22T10:00:00Z",
-        startTime: null,
-      }),
-      "utf-8",
-    );
-
-    await expect(
-      acquireLock(18901, {
-        pidPath,
-        portPath,
-        resolveStartTimeFn: async () => null, // 平台不支持
-      }),
-    ).rejects.toBeInstanceOf(ProcessLockError);
+    expect(lock!.pid).toBe(process.pid);
+    expect(lock!.port).toBe(18901); // 覆盖成功、不自杀
   });
 
   it("resolveProcessStartTime returns a value or null — never throws", async () => {

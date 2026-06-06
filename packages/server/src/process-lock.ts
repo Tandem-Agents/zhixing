@@ -1,27 +1,25 @@
 /**
- * 进程锁 + PID 文件管理（schema v2）
+ * PID / port 发现文件管理（schema v2）。
  *
- * 双层锁机制：
- * 1. 端口锁（startServer 监听已实现）：同端口冲突 → EADDRINUSE
- * 2. PID 文件：写入 ~/.zhixing/server.pid，供 CLI 客户端发现 server、发送信号
+ * **单例锁是端口 listen 的 EADDRINUSE（OS 原子），不是 PID 文件**。同 `ZHIXING_HOME` 派生
+ * 同端口（见 `homeToPort`），两个宿主不可能同时 listen 成功。本模块只负责写 / 读
+ * `~/.zhixing/server.pid`（按 `ZHIXING_HOME` 隔离），供 CLI 客户端发现 owner 的端口 / pid
+ * 并发信号——PID 文件是**发现辅助、非第二把锁**。owner 由 listen 确立后调 `acquireLock`
+ * 覆盖任何残留（stale 或被复用 PID 指向的活进程），不检测、不自杀（详见 `acquireLock` 注释）。
  *
  * Schema v2（对比 v1 扩展字段）：
  * - pidFileVersion: 2
- * - startTime: 进程启动时间（用于 PID reuse 检测，借鉴 Hermes 思路）
- * - argv / kind / version / logPath / host: 诊断 + daemon 级能力（M1-M8 逐步写入）
+ * - startTime: 进程启动时间。**曾用于 PID reuse 检测**（acquireLock 据此判 stale / 拒绝启动）——
+ *   owner 改端口仲裁后该判活用途已移除（见 scheduler-architecture.md 决策 7）；现保留为 PID 文件
+ *   诊断信息 + 未来 discoverServer 真实性探测的数据基础（写入，但当前无判活消费者）。
+ * - argv / kind / version / logPath / host: 诊断 + daemon 级能力。
  *
- * v1 → v2 静默迁移：
- * - 读取时若无 pidFileVersion，视为 v1：补 pidFileVersion=1, startTime=null
- * - 不报 stale 警告，避免用户升级后的虚假告警
- *
- * Stale 判定：
- * - v1 文件：走 isProcessAlive（纯信号检测，PID reuse 无法识别）
- * - v2 文件：isProcessAlive + startTime 比对。runtime 能读到当前 pid 的 startTime
- *   且与文件记录的不一致 → 判 stale（PID 被复用）
+ * v1 → v2 静默迁移：readPidFile 读到无 pidFileVersion 字段视为 v1，补 pidFileVersion=1,
+ * startTime=null（兼容旧文件读取）。
  *
  * Windows 兼容性：
- * - process.kill(pid, 0) 在 Windows 可用（Node 抽象了底层差异）
- * - resolveProcessStartTime 在 Windows / 非 Linux-macOS 返回 null → 降级到纯 isProcessAlive
+ * - process.kill(pid, 0) 在 Windows 可用（isProcessAlive 供 discoverServer 判进程存活）。
+ * - resolveProcessStartTime 在 Windows / 非 Linux-macOS 返回 null（平台不支持，startTime 记 null）。
  */
 
 import { readFile, writeFile, unlink, mkdir } from "node:fs/promises";
@@ -58,13 +56,6 @@ export interface PidFileContents {
   logPath?: string;
 }
 
-export class ProcessLockError extends Error {
-  constructor(message: string, public existing?: PidFileContents) {
-    super(message);
-    this.name = "ProcessLockError";
-  }
-}
-
 // ─── public API ───
 
 export interface AcquireLockOptions extends ProcessLockPaths {
@@ -85,14 +76,18 @@ export interface AcquireLockOptions extends ProcessLockPaths {
 }
 
 /**
- * 尝试获取进程锁。
- * - 文件不存在 / stale → 写入新 PID 文件，成功返回
- * - 文件存在且进程仍在 → 抛 ProcessLockError
+ * 写入本进程的 PID / port 发现文件（确立 owner 的发现记录）。
  *
- * Stale 判定优先级：
- *   1. isProcessAlive(pid) === false → stale
- *   2. 文件有 startTime + runtime 能读到 pid 的 startTime 且不相等 → stale (PID reuse)
- *   3. 否则视为活进程，抛 ProcessLockError
+ * **端口 listen 才是单例锁**——`startServer` 的 `listen` 由 OS 以 `EADDRINUSE` 原子仲裁，
+ * 两个宿主不可能同时占住同一端口（同 `ZHIXING_HOME` 派生同端口，见 `homeToPort`）。调用方
+ * 必须在 listen 成功**之后**调用本函数：此刻 owner 身份已由端口确立，PID / port 文件仅是
+ * **发现辅助**（供 cli 客户端找到 owner 的端口 / pid 发信号），**不是第二把锁**。
+ *
+ * 故本函数遇任何残留文件（stale，或被复用 PID 指向的无关活进程）一律**覆盖**，绝不因 PID
+ * 冲突拒绝或让宿主自杀——真正的“已在运行”由 listen 的 `EADDRINUSE` 表达，不由 PID 文件表达。
+ * 残留来自异常崩溃（未走 `releaseLock`）；idle 高频起落会放大 PID 复用窗口（Windows 无
+ * `startTime`、无 PID-reuse 检测），靠「端口才是真锁、PID 仅发现辅助」兜底。`startTime` 仍写入，
+ * 作为 PID 文件的诊断信息（与 argv / version / logPath 同列）。
  */
 export async function acquireLock(
   port: number,
@@ -101,21 +96,6 @@ export async function acquireLock(
   const pidPath = opts.pidPath ?? getDefaultPidPath();
   const portPath = opts.portPath ?? getDefaultPortPath();
   const resolveStartTime = opts.resolveStartTimeFn ?? resolveProcessStartTime;
-
-  const existing = await readPidFile(pidPath);
-  if (existing) {
-    const stale = await detectStale(existing, resolveStartTime);
-    if (!stale) {
-      throw new ProcessLockError(
-        `Server already running (pid=${existing.pid}, port=${existing.port}). ` +
-          `Pid file: ${pidPath}`,
-        existing,
-      );
-    }
-    // stale → 静默清理
-    await safeUnlink(pidPath);
-    await safeUnlink(portPath);
-  }
 
   const ownPid = process.pid;
   const ownStartTime =
@@ -135,6 +115,7 @@ export async function acquireLock(
   };
 
   await mkdir(dirname(pidPath), { recursive: true });
+  // 覆盖写：发现辅助文件，不读旧值 / 不检测冲突（端口 listen 已是单例仲裁）。
   await writeFile(pidPath, JSON.stringify(contents, null, 2), "utf-8");
   await writeFile(portPath, String(port), "utf-8");
 }
@@ -235,25 +216,6 @@ function normalizePidContents(parsed: Partial<PidFileContents>): PidFileContents
     version: parsed.version,
     logPath: parsed.logPath,
   };
-}
-
-/**
- * 判定 PID 文件是否指向一个已死（或被复用）的进程。
- */
-async function detectStale(
-  existing: PidFileContents,
-  resolveStartTime: (pid: number) => Promise<number | null>,
-): Promise<boolean> {
-  if (!isProcessAlive(existing.pid)) return true;
-
-  // v2 且记录了 startTime + runtime 能读到 → PID reuse 检测
-  if (existing.startTime !== null && existing.startTime !== undefined) {
-    const currentStartTime = await resolveStartTime(existing.pid).catch(() => null);
-    if (currentStartTime !== null && currentStartTime !== existing.startTime) {
-      return true; // PID 被复用
-    }
-  }
-  return false;
 }
 
 async function readLinuxStartTime(pid: number): Promise<number | null> {
