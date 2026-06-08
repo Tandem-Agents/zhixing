@@ -40,9 +40,9 @@ describe("MODEL_CAPABILITIES 内置常量", () => {
 });
 
 describe("UNKNOWN_MODEL_CAPABILITY 兜底", () => {
-  it("optimal 16K / risk 32K（业界基线保守值）", () => {
-    expect(UNKNOWN_MODEL_CAPABILITY.optimalMaxTokens).toBe(16_000);
-    expect(UNKNOWN_MODEL_CAPABILITY.riskMaxTokens).toBe(32_000);
+  it("optimal 64K / risk 128K（未知模型通用默认值）", () => {
+    expect(UNKNOWN_MODEL_CAPABILITY.optimalMaxTokens).toBe(64_000);
+    expect(UNKNOWN_MODEL_CAPABILITY.riskMaxTokens).toBe(128_000);
   });
 
   it("modelId 标记为 <unknown>", () => {
@@ -66,8 +66,8 @@ describe("resolveModelCapability", () => {
   it("未知模型走 UNKNOWN 兜底（modelId 保留规范化后的查询键）", () => {
     const cap = resolveModelCapability("Some-Vendor-LLM");
     expect(cap.modelId).toBe("some-vendor-llm");
-    expect(cap.optimalMaxTokens).toBe(16_000);
-    expect(cap.riskMaxTokens).toBe(32_000);
+    expect(cap.optimalMaxTokens).toBe(64_000);
+    expect(cap.riskMaxTokens).toBe(128_000);
   });
 
   it("override 单字段覆盖：其他字段从内置常量继承", () => {
@@ -92,7 +92,7 @@ describe("resolveModelCapability", () => {
       optimalMaxTokens: 24_000,
     });
     expect(cap.optimalMaxTokens).toBe(24_000); // override 生效
-    expect(cap.riskMaxTokens).toBe(32_000); // UNKNOWN 兜底值
+    expect(cap.riskMaxTokens).toBe(128_000); // UNKNOWN 兜底值
   });
 
   it("空 override 对象等价于不传 override", () => {
@@ -160,8 +160,8 @@ describe("resolveModelCapability 端到端 —— vendor 前缀命中内置表",
   it("不在内置表的 model + 无 override → UNKNOWN 兜底", () => {
     const cap = resolveModelCapability("vendor/unknown-model-x");
     expect(cap.modelId).toBe("unknown-model-x");
-    expect(cap.optimalMaxTokens).toBe(16_000);
-    expect(cap.riskMaxTokens).toBe(32_000);
+    expect(cap.optimalMaxTokens).toBe(64_000);
+    expect(cap.riskMaxTokens).toBe(128_000);
   });
 });
 

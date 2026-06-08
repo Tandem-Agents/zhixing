@@ -57,15 +57,15 @@ export const MODEL_CAPABILITIES: Readonly<Record<string, ModelCapability>> = {
 };
 
 /**
- * 未知模型的兜底阈值 —— 按业界基线保守取值。
+ * 未知模型的兜底阈值 —— modelId 命中不到内置表时使用。
  *
- * `modelId` 留 `<unknown>` 标识；调用方拿到该常量时知道当前没有针对性数据，
- * 用的是保守默认（适合任何模型不报错，但可能"切段过早"略损失累积上下文）。
+ * `modelId` 留 `<unknown>` 标识：当前无针对该模型的实测数据，用通用默认值
+ * （适合任何模型不报错）。
  */
 export const UNKNOWN_MODEL_CAPABILITY: ModelCapability = {
   modelId: "<unknown>",
-  optimalMaxTokens: 16_000,
-  riskMaxTokens: 32_000,
+  optimalMaxTokens: 64_000,
+  riskMaxTokens: 128_000,
 };
 
 /**
