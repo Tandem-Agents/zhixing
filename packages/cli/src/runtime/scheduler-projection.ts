@@ -43,41 +43,12 @@ export function readSchedulerSummarySync(
 }
 
 /**
- * 近期外部任务守候窗口 —— 启动 ensure 守候 与 idle reaper 退出守候**共用**此窗口（经
- * hasNearExternalTask），不再两处分别硬编码、靠注释维持一致（决策 7：idle near 窗口须 ≥
- * 决策 1 守候近期 once 任务的窗口；这里取同值，由共用代码坐实而非纪律）。
- */
-const NEAR_WINDOW_MS = 2 * 60 * 60 * 1000;
-
-/**
- * 是否有近期外部（用户）任务在 windowMs 内待触发。
- *
- * idle reaper 退出守候 与 启动 ensure 守候**共用**此判据：守候是为了不让近期 once 用户任务
- * （「N 小时后提醒」）在宿主退出 / 未拉起期间到点被判 missed。**internal 系统维护任务不纳入**
- * （决策 5：容忍延迟、靠启动唤起即可、无需为它守候 / 钉宿主常驻）——与三个结果触达边界一致用
- * isInternal 区分。caller 各自提供 tasks（daemon idle reaper 传 `scheduler.listTasks()`、cli 启动
- * 判据传 `readSchedulerTasksSync()`）与 now，判据逻辑单一来源。
- */
-export function hasNearExternalTask(
-  tasks: ScheduledTask[],
-  now: number,
-  windowMs: number = NEAR_WINDOW_MS,
-): boolean {
-  return tasks.some(
-    (t) =>
-      !isInternal(t) &&
-      t.enabled &&
-      t.state.nextRunAt !== undefined &&
-      new Date(t.state.nextRunAt).getTime() - now <= windowMs,
-  );
-}
-
-/**
- * cli 启动轻检查判据 —— 是否该在启动时主动 ensure 核心宿主（否则纯聊天零后台）。
+ * cli 启动检查判据 —— 是否该在启动时 ensure 核心宿主（否则无定时任务时零后台）。
  * 命中条件（同步读 scheduler.json 投影）：
- * - 文件不存在（全新 / 首次）—— 视为「系统维护未 seed = 逾期」，需拉起 seed + 跑（破死锁）。
- * - 有内部维护任务逾期，或根本没有内部任务行 —— 同上，无行 = 逾期。
- * - 有近期外部（用户）任务待触发 —— 守候到触发。
+ * - 文件不存在（全新 / 首次）—— 视为「系统维护未 seed = 逾期」，需拉起 seed（破死锁）。
+ * - 有系统维护任务逾期，或根本没有系统维护任务行（无行 = 逾期）。
+ * - 有任一启用的用户（external）任务 —— 不挑触发远近，启动即 ensure 并在运行期保活宿主，
+ *   保证运行期内到点必达。
  */
 export function shouldEnsureOnStartup(
   storePath: string = getSchedulerStorePath(),
@@ -102,5 +73,9 @@ export function shouldEnsureOnStartup(
     );
   if (maintenanceDue) return true;
 
-  return hasNearExternalTask(tasks, now);
+  // 有任一启用的用户任务即拉起——不按窗口挑触发远近。宿主由 cli 连接保活到关闭，
+  // 运行期内任意时刻到点都有宿主在场（必达）；关闭后错过的不补（「关闭不管」）。
+  return tasks.some(
+    (t) => !isInternal(t) && t.enabled && t.state.nextRunAt !== undefined,
+  );
 }

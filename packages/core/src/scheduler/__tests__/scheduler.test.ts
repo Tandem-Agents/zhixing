@@ -867,6 +867,57 @@ describe("Scheduler", () => {
     await scheduler.stop();
   });
 
+  it("系统维护任务关闭期间错过 → 补跑一次（不像用户任务那样跳过）", async () => {
+    const handlerFn = vi
+      .fn()
+      .mockResolvedValue({ status: "ok", summary: "gc done" });
+    const storePath = join(tempDir, "internal-missed.json");
+    let currentNow = new Date("2026-01-01T00:00:00.000Z");
+
+    const make = () =>
+      new Scheduler({
+        store: new JsonTaskStore(storePath),
+        eventBus: createEventBus<SchedulerEventMap>(),
+        runAgentTurn: async () => ({ status: "ok", output: "", durationMs: 0 }),
+        systemHandlers: new Map([["__test-gc", handlerFn]]),
+        now: () => currentNow,
+      });
+
+    // session 1：seed 系统维护任务（cron 每分钟 → nextRunAt=00:01:00）后下线
+    const s1 = make();
+    await s1.start();
+    await s1.ensureSystemTask({
+      id: "__test-gc",
+      name: "test-gc",
+      handler: "__test-gc",
+      schedule: { kind: "cron", expr: "* * * * *" },
+    });
+    await s1.stop();
+
+    // 关闭期间快进过 nextRunAt + grace；session 2 重新上线（onlineSince=01:00:00）
+    currentNow = new Date("2026-01-01T01:00:00.000Z");
+    const s2 = make();
+    await s2.start();
+    await s2.ensureSystemTask({
+      id: "__test-gc",
+      name: "test-gc",
+      handler: "__test-gc",
+      schedule: { kind: "cron", expr: "* * * * *" },
+    }); // 幂等：已存在不动，nextRunAt 仍逾期
+    await s2["timerLoop"].tick();
+
+    // 系统维护任务错过即补跑（与用户任务「不补」相反）：handler 被调用、补跑后 advance
+    // 到未来、不记 lastMissed。
+    expect(handlerFn).toHaveBeenCalledOnce();
+    const updated = s2.getTask("__test-gc")!;
+    expect(updated.state.lastMissed).toBeUndefined();
+    expect(new Date(updated.state.nextRunAt!).getTime()).toBeGreaterThan(
+      currentNow.getTime(),
+    );
+
+    await s2.stop();
+  });
+
   it("同一 task 并发执行时第二个被拒绝（守卫下沉 executeSingleTask）", async () => {
     let releaseFirst: () => void = () => {};
     const firstGate = new Promise<void>((r) => {

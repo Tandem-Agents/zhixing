@@ -306,14 +306,19 @@ export class Scheduler {
     const now = this.now();
 
     // 到点分流（以本次上线时刻为锚，见 isMissedWhileOffline）：应触发于「上线 - 容差」
-    // 之前的，是宿主离线期间真正错过的触发——记「错过」、不补、推进 nextRunAt（once 即
-    // 终止）；其余是在线到点（含被并发推迟很久的），进 ontime 受并发上限执行、未轮到则
-    // 保持 due 等待，绝不因等待时长被误判错过。错过的不占并发额度。
+    // 之前的，是 zhixing 关闭期间真正错过的触发，按任务来源再分流：
+    //   - 用户任务：记「错过」、不补、推进 nextRunAt（once 即终止），尊重「关闭不管」——
+    //     关闭期间错过的提醒不补、不开机轰炸式补。
+    //   - 系统维护任务：补跑一次（幂等、容忍延迟，价值在最终被执行），进 ontime 走与正常
+    //     到点同一执行入口、受同样的并发上限——纯聊天用户无用户任务、不触发运行期保活，
+    //     维护正是靠「错过即补跑」覆盖。
+    // 其余是在线到点（含被并发推迟很久的），同样进 ontime；未轮到则保持 due 等待，绝不因
+    // 等待时长被误判错过。
     const ontime: ScheduledTask[] = [];
     for (const task of dueTasks) {
       const scheduledFor = task.state.nextRunAt;
       if (!scheduledFor) continue;
-      if (this.isMissedWhileOffline(scheduledFor)) {
+      if (this.isMissedWhileOffline(scheduledFor) && !isInternal(task)) {
         await this.markMissed(task, scheduledFor, now);
       } else {
         ontime.push(task);

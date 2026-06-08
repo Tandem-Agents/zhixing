@@ -6,7 +6,6 @@ import type { ScheduledTask } from "@zhixing/core";
 import {
   readSchedulerSummarySync,
   shouldEnsureOnStartup,
-  hasNearExternalTask,
 } from "../scheduler-projection.js";
 
 function writeStore(path: string, tasks: ScheduledTask[]): void {
@@ -59,7 +58,7 @@ describe("scheduler-projection", () => {
       expect(shouldEnsureOnStartup(storePath)).toBe(true);
     });
 
-    it("近期外部任务 → true（守候到触发）", () => {
+    it("有用户任务（近期）→ true（启动 ensure + 运行期保活）", () => {
       writeStore(storePath, [
         task({ id: "__gc", system: true, nextRunAt: far() }),
         task({ id: "u1", nextRunAt: soon() }),
@@ -67,10 +66,24 @@ describe("scheduler-projection", () => {
       expect(shouldEnsureOnStartup(storePath)).toBe(true);
     });
 
-    it("内部未逾期 + 仅远期外部 → false（纯空闲，不拉后台）", () => {
+    it("有用户任务（远期）→ true（不挑触发远近，运行期必达）", () => {
       writeStore(storePath, [
         task({ id: "__gc", system: true, nextRunAt: far() }),
         task({ id: "u1", nextRunAt: far() }),
+      ]);
+      expect(shouldEnsureOnStartup(storePath)).toBe(true);
+    });
+
+    it("内部未逾期 + 无用户任务 → false（无定时任务，零后台）", () => {
+      writeStore(storePath, [task({ id: "__gc", system: true, nextRunAt: far() })]);
+      expect(shouldEnsureOnStartup(storePath)).toBe(false);
+    });
+
+    it("内部未逾期 + 用户任务 disabled/无 nextRunAt → false（不算有效用户任务）", () => {
+      writeStore(storePath, [
+        task({ id: "__gc", system: true, nextRunAt: far() }),
+        task({ id: "u1", enabled: false, nextRunAt: soon() }),
+        task({ id: "u2", nextRunAt: undefined }),
       ]);
       expect(shouldEnsureOnStartup(storePath)).toBe(false);
     });
@@ -89,51 +102,6 @@ describe("scheduler-projection", () => {
     it("文件不存在 → 空摘要", () => {
       const summary = readSchedulerSummarySync(storePath);
       expect(summary.active).toEqual([]);
-    });
-  });
-
-  describe("hasNearExternalTask（idle reaper / 启动守候 共用判据）", () => {
-    const now = Date.now();
-
-    it("近期外部任务 → true（守候到触发）", () => {
-      expect(hasNearExternalTask([task({ id: "u1", nextRunAt: soon() })], now)).toBe(true);
-    });
-
-    it("仅近期内部任务 → false（internal 容忍延迟、不守候、不钉宿主，决策5）", () => {
-      // 核心修复回归：idle reaper 不该被 internal 维护任务钉成常驻。
-      expect(
-        hasNearExternalTask(
-          [task({ id: "__gc", system: true, nextRunAt: soon() })],
-          now,
-        ),
-      ).toBe(false);
-    });
-
-    it("近期内部 + 远期外部 → false（窗口内只有 internal 不算守候）", () => {
-      expect(
-        hasNearExternalTask(
-          [
-            task({ id: "__gc", system: true, nextRunAt: soon() }),
-            task({ id: "u1", nextRunAt: far() }),
-          ],
-          now,
-        ),
-      ).toBe(false);
-    });
-
-    it("仅远期外部 → false；disabled 外部近期 → false；无 nextRunAt / 空集 → false", () => {
-      expect(hasNearExternalTask([task({ id: "u1", nextRunAt: far() })], now)).toBe(false);
-      expect(
-        hasNearExternalTask([task({ id: "u1", enabled: false, nextRunAt: soon() })], now),
-      ).toBe(false);
-      expect(hasNearExternalTask([task({ id: "u1" })], now)).toBe(false);
-      expect(hasNearExternalTask([], now)).toBe(false);
-    });
-
-    it("自定义 windowMs 生效", () => {
-      const t = task({ id: "u1", nextRunAt: new Date(now + 5_000).toISOString() });
-      expect(hasNearExternalTask([t], now, 1_000)).toBe(false); // 5s 任务 / 1s 窗口
-      expect(hasNearExternalTask([t], now, 10_000)).toBe(true); // 5s 任务 / 10s 窗口
     });
   });
 });

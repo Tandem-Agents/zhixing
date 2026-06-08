@@ -66,7 +66,6 @@ import { createBuiltinExtraToolsAssembly } from "../runtime/builtin-extra-tools.
 import { parseServerSpecs } from "../runtime/mcp-config.js";
 import { InMemoryTaskListStore } from "../runtime/task-list-stores.js";
 import { registerCliTurnContextProviders } from "../runtime/turn-context-providers.js";
-import { hasNearExternalTask } from "../runtime/scheduler-projection.js";
 import { createCliRuntimeFactory } from "./session-adapter.js";
 import { runEphemeralTurn } from "./ephemeral-executor.js";
 import { loadOrCreateToken } from "./token.js";
@@ -618,17 +617,16 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   }
 
   // idle reaper —— 由 PROFILES.idleReap 门控（当前仅 schedule 档：按需拉起的最小宿主要轻）：
-  // 周期检查「无活跃 RPC client + scheduler 无近期【外部】任务」即空闲退出。退出走正常 shutdown
-  // （drain 在跑任务）、不改 idempotent shutdown 契约——client 下次操作重新 ensure 拉起。守候判据
-  // 经 hasNearExternalTask 与启动 ensure 判据共用（同窗口、同 isInternal 过滤）：只守近期外部 / 用户
-  // once 任务（「N 小时后提醒」守到触发再退）；internal 系统维护容忍延迟、不守候、不钉宿主常驻（决策 5）。
-  // full serve 长驻、不 idle 退。
+  // 周期检查「无活跃接入面连接」即空闲退出，纯锚连接在场、不看 scheduler 有无近期任务。
+  // 运行期必达由 cli 主动维持连接保活坐实（有用户任务时连接不为空、宿主不退）；cli 关闭、
+  // 连接断即退（「关闭不管」）。退出走正常 shutdown（drain 在跑任务）、不改 idempotent
+  // shutdown 契约——client 下次操作重新 ensure 拉起。full serve 长驻、不 idle 退。
   if (PROFILES[profile].idleReap) {
     const IDLE_CHECK_MS = 60_000;
     const idleTimer = setInterval(() => {
-      if (runner.server.connections.size > 0) return;
-      if (hasNearExternalTask(scheduler.listTasks(), Date.now())) return;
-      serverCtx.requestShutdown?.("idle");
+      if (runner.server.connections.size === 0) {
+        serverCtx.requestShutdown?.("idle");
+      }
     }, IDLE_CHECK_MS);
     idleTimer.unref();
     registry.register("idleReaper.clear", () => clearInterval(idleTimer));
