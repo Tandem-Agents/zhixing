@@ -34,11 +34,11 @@ export interface BuildTurnInput {
   readonly turnIndex: number;
 
   /**
-   * 原始 user 消息（未经 enrichContext / turnContextInjector 增强的版本）。
+   * 原始 user 消息（未经 <context> / turn-context 注入增强的版本）。
    *
-   * 设计（§0.7.8）：持久化的 userMessage 必须是用户真实输入，而不是带 project context /
-   * 动态上下文注入 的内部增强版。AgentRuntime.run 在内部维护 `params.messages` /
-   * `messagesWithContext` 两份引用，调用方传入前者。
+   * 持久化的 userMessage 必须是用户真实输入，而不是带上下文注入的内部增强版。
+   * AgentRuntime.run 在内部维护 `params.messages`（原始）/ `injectedMessages`
+   * （注入后送 LLM）两份引用，调用方传入前者。
    */
   readonly userMessage: Message;
 

@@ -26,7 +26,7 @@
  * - 元协议段在工具段之前:LLM 解析 messages 的基础协议(<system-meta> 标签等)
  *   是看懂工具调用的前置知识,语义上先于工具使用引导
  * - 环境信息放在分界后(每个项目不同),保护静态区缓存前缀
- * - ZHIXING.md 等项目上下文不进 system prompt,通过 <context> 注入 user messages
+ * - 项目上下文（如 ZHIXING.md）不进 system prompt,以保护静态区缓存前缀
  */
 
 import * as os from "node:os";

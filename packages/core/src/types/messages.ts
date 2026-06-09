@@ -116,6 +116,48 @@ export function extractText(message: Message): string {
     .join("");
 }
 
+/** 提取消息中第一个 TextBlock 的文本（找不到返回空串） */
+export function extractFirstText(message: Message): string {
+  const textBlock = message.content.find(
+    (block): block is TextBlock => block.type === "text",
+  );
+  return textBlock?.text ?? "";
+}
+
+/**
+ * 替换消息中第一个 TextBlock 的文本，返回新消息（不改原对象）。
+ * 消息没有 TextBlock 时，在 content 最前插入一个。
+ */
+export function replaceFirstText(message: Message, newText: string): Message {
+  const hasText = message.content.some((block) => block.type === "text");
+
+  if (!hasText) {
+    return {
+      ...message,
+      content: [{ type: "text" as const, text: newText }, ...message.content],
+    };
+  }
+
+  let replaced = false;
+  const newContent = message.content.map((block) => {
+    if (block.type === "text" && !replaced) {
+      replaced = true;
+      return { ...block, text: newText };
+    }
+    return block;
+  });
+
+  return { ...message, content: newContent };
+}
+
+/** 返回最后一条 user 消息的下标；没有则返回 -1 */
+export function findLastUserIndex(messages: readonly Message[]): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]!.role === "user") return i;
+  }
+  return -1;
+}
+
 /** 从 assistant 消息中提取所有工具调用 */
 export function extractToolCalls(message: Message): ToolUseBlock[] {
   return message.content.filter(

@@ -10,7 +10,12 @@
  * - 可组合：注册 provider 即可扩展，无需改注入管道
  */
 
-import type { Message, TextBlock } from "../types/messages.js";
+import type { Message } from "../types/messages.js";
+import {
+  extractFirstText,
+  findLastUserIndex,
+  replaceFirstText,
+} from "../types/messages.js";
 import type { TaskStatusSummary } from "../scheduler/types.js";
 import type { TaskItem } from "../conversation/types.js";
 
@@ -285,42 +290,6 @@ export class TurnContextInjector {
 }
 
 // ─── Message 操作辅助 ───
-
-function findLastUserIndex(messages: readonly Message[]): number {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i]!.role === "user") return i;
-  }
-  return -1;
-}
-
-function extractFirstText(message: Message): string {
-  const textBlock = message.content.find(
-    (b): b is TextBlock => b.type === "text",
-  );
-  return textBlock?.text ?? "";
-}
-
-function replaceFirstText(message: Message, newText: string): Message {
-  const hasText = message.content.some((b) => b.type === "text");
-
-  if (!hasText) {
-    return {
-      ...message,
-      content: [{ type: "text" as const, text: newText }, ...message.content],
-    };
-  }
-
-  let replaced = false;
-  const newContent = message.content.map((block) => {
-    if (block.type === "text" && !replaced) {
-      replaced = true;
-      return { ...block, text: newText };
-    }
-    return block;
-  });
-
-  return { ...message, content: newContent };
-}
 
 /**
  * 去除已注入的 <turn-context>...</turn-context> 块。

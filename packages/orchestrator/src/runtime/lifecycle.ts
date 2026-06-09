@@ -103,8 +103,18 @@ export interface LifecycleWindowOpenContext extends LifecycleContextBase {
 export interface LifecycleBeforeRunContext extends LifecycleContextBase {
   readonly conversationId?: string;
   readonly turnIndex: number;
-  /** 本次 run 输入（只读，enrich 前的用户原始输入） */
+  /** 该 run 是否其所在注意力窗口的首个 run（窗口可在 run 内换代，按 run 入口时
+   *  所在窗口判定）—— 供订阅者区分「每窗口首 run 才做」与「每 run 都做」。 */
+  readonly isWindowFirstRun: boolean;
+  /** 本次 run 输入（只读：观测 + 读取用户这条说了什么） */
   readonly messages: readonly Message[];
+  /**
+   * 贡献式注入出口：递交要注入「当前 run 用户消息」的内容。运行体收齐所有订阅者的
+   * 贡献后拼成一个 <context> 块、前缀到当前 run 的用户消息；传 null / 不调 = 不注。
+   * 注到哪条、怎么包、什么顺序归运行体（与 onWindowOpen 的 updateSystemPromptSegment
+   * 同范式）—— 订阅者不改 messages、不自己找位置或去重。
+   */
+  injectUserContext(content: string | null): void;
 }
 
 export interface LifecycleAfterRunContext extends LifecycleContextBase {
@@ -132,8 +142,9 @@ export interface AgentRuntimeLifecycle {
    *  任何订阅者按需用 —— 这是 cache 安全的窗口级上下文更新点。 */
   onWindowOpen?(ctx: LifecycleWindowOpenContext): Promise<void> | void;
 
-  /** ② 每次 run 前：run() 入口、agent-loop 启动前调。观测即将发送的 messages
-   *  + 异步副作用。不重建 system prompt（run 边界在窗口内）。 */
+  /** ② 每次 run 前：run() 入口、agent-loop 启动前调 —— run 前唯一业务介入点。
+   *  观测即将发送的 messages、异步副作用，以及经 ctx.injectUserContext 向当前 run
+   *  用户消息贡献注入内容。不重建 system prompt（run 边界在窗口内）。 */
   onBeforeRun?(ctx: LifecycleBeforeRunContext): Promise<void> | void;
 
   /** ③ 每次 run 后：run() 产出 RunResult 后调。观测 + 状态更新（本轮已结束）。 */

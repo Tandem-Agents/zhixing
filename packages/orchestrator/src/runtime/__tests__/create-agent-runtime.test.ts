@@ -1069,7 +1069,7 @@ describe("createAgentRuntime · 生命周期钩子", () => {
     expect(providerRef.current.calls[0]!.systemPrompt).toContain(SKILL_MARKER);
   });
 
-  it("run() 触发 onBeforeRun(enrich 前 messages) → onAfterRun(RunResult),顺序与字段正确", async () => {
+  it("run() 触发 onBeforeRun(观测原始输入 messages) → onAfterRun(RunResult),顺序与字段正确", async () => {
     providerRef.current = new MockLLMProvider([{ text: "done" }]);
     const order: string[] = [];
     let beforeMsgCount: number | undefined;
@@ -1096,7 +1096,7 @@ describe("createAgentRuntime · 生命周期钩子", () => {
     await runtime.run({ messages: [userMessage("hi")], turnIndex: 7 });
 
     expect(order).toEqual(["before", "after"]);
-    expect(beforeMsgCount).toBe(1); // enrich 前的原始用户输入
+    expect(beforeMsgCount).toBe(1); // onBeforeRun 观测到的是用户原始输入
     expect(afterReason).toBe("completed");
     expect(afterTurnIndex).toBe(7);
   });

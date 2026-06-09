@@ -53,7 +53,6 @@ import {
   createMemoryFlushStrategy,
   DEFAULT_WATCHDOG_POLICY,
   MemoryStore,
-  PeopleStore,
   getMemoryDir,
   getWorkSceneMemoryDir,
   PermissionStore,
@@ -105,12 +104,7 @@ import {
   createMemoryFlushCallLLM,
 } from "./compaction-llm.js";
 import { buildSystemPrompt, type SystemPromptSegment } from "./system-prompt.js";
-import {
-  loadProjectContext,
-  injectContext,
-  enrichContext,
-  type EnrichOptions,
-} from "./project-context.js";
+import { prependContextBlock } from "./user-context.js";
 import {
   createSecureExecuteTool,
   type OnBlockedFn,
@@ -339,8 +333,6 @@ export interface RunParams {
   /** 触发源，落盘为 Turn.source。不指定时字段为 undefined */
   source?: TurnSource;
   onYield?: (event: AgentYield) => void;
-  /** 反思相关选项（上一轮工具调用数、是否已提议过） */
-  enrichOptions?: EnrichOptions;
   /**
    * Turn 级上下文。channel 会话传入含 commitToUser；
    * REPL / 定时任务 ephemeral turn 省略。字段进入每个工具调用的
@@ -448,10 +440,9 @@ export interface CreateAgentRuntimeOptions {
    */
   profile?: AgentRoleProfile;
   /**
-   * 个人记忆域作用域 —— 装配期据此解析整域 root 并注入全部 me/ 访问者
-   * （单一 MemoryStore = 工具 + flush 共用、scoped PeopleStore、
-   * profile-loader），后续不可变。缺省 personal（root = getMemoryDir()，
-   * 对外行为与历史一致）。
+   * 个人记忆域作用域 —— 装配期据此解析整域 root，构造单一 MemoryStore
+   * （memory 工具 + flush strategy 共用），后续不可变。缺省 personal
+   * （root = getMemoryDir()，对外行为与历史一致）。
    */
   memoryScope?:
     | { kind: "personal" }
@@ -609,14 +600,12 @@ export async function createAgentRuntime(
   // 个人记忆域 scope 解析 —— 装配期唯一解析点。从 memoryScope 定整域 root
   // （personal = getMemoryDir() Layer-A 正确默认；workscene = 该场景 me/ 域），
   // 据此构造**单一** MemoryStore（memory 工具 + flush strategy 共用，消除双
-  // 实例）与 scoped PeopleStore（人物检索同源隔离），profile
-  // 经 loadProjectContext 透传同一 root。runtime 生命周期内不变。
+  // 实例）。runtime 生命周期内不变。
   const memoryRoot =
     options.memoryScope?.kind === "workscene"
       ? getWorkSceneMemoryDir(options.memoryScope.sceneId)
       : getMemoryDir();
   const memoryStore = new MemoryStore(memoryRoot);
-  const peopleStore = new PeopleStore(memoryRoot);
 
   // 技能分区跟随场景,与记忆域同源于 memoryScope —— "工作场景"这一个轴同时定
   // 记忆域与技能区:工作场景注入 work 区技能,个人对话注入 main 区。SkillStore
@@ -801,6 +790,9 @@ export async function createAgentRuntime(
   let windowEpochCounter = 0;
   // windowIndex 实例内自增（首窗 0）。仅用于钩子归属 / 日志,并发下不要求精确。
   let windowCounter = 0;
+  // run 入口窗口判据：记录上个 run 入口时所在窗口 index，算 isWindowFirstRun
+  //（当前窗口 != 上次入口窗口 → 本 run 是该窗口首个 run）。-1 = 尚无 run 入口。
+  let lastRunEntryWindowIndex = -1;
 
   const lifecycleBase = (): LifecycleContextBase => ({
     runtimeId,
@@ -900,10 +892,6 @@ export async function createAgentRuntime(
   turnContextInjector.register(
     new TimeProvider(Intl.DateTimeFormat().resolvedOptions().timeZone),
   );
-
-  // 加载项目上下文（ZHIXING.md + 环境信息），注入到首条 user message。
-  // memoryRoot 透传 → profile 从 scoped 记忆域加载（与 store/people 同源）
-  const projectContext = await loadProjectContext(cwd, memoryRoot);
 
   // 解析模型预算信息 —— resolver 保证 info 永不为 undefined。
   // 数据源四层（高 → 低）：
@@ -1289,14 +1277,31 @@ export async function createAgentRuntime(
         },
       };
 
-      // onBeforeRun —— run 边界（窗口内）;观测即将发送的 messages（enrich 前）+
-      // 异步副作用。ALS 外（与 onAfterRun 同侧）、enrichContext 前;不重建 system
-      // prompt（run 入口重建会违反窗口内 byte-equal）。抛错不阻塞 run。
+      // onBeforeRun —— run 前唯一业务介入点（窗口内、ALS 外、与 onAfterRun 同侧）：
+      // 观测即将发送的 messages + 异步副作用,以及经 ctx.injectUserContext 向当前 run
+      // 用户消息贡献注入内容。不重建 system prompt（run 入口重建会违反窗口内
+      // byte-equal）。抛错不阻塞 run。
+      //
+      // isWindowFirstRun：run 入口所在窗口（windowCounter - 1）与上个 run 入口窗口
+      // 比对 —— 这段同步、单线程原子;窗口可在 run 内换代,故按入口时刻判定。
+      const entryWindowIndex = windowCounter - 1;
+      const isWindowFirstRun = entryWindowIndex !== lastRunEntryWindowIndex;
+      lastRunEntryWindowIndex = entryWindowIndex;
+
+      // 订阅者经 injectUserContext 贡献注入内容,运行体收齐后拼一个 <context> 块
+      //（拼装 / 包标签 / 注入位置归运行体,订阅者只递交内容）。
+      const userContextContributions: string[] = [];
       const beforeRunCtx: LifecycleBeforeRunContext = {
         ...lifecycleBase(),
         conversationId: params.conversationId,
         turnIndex: params.turnIndex,
+        isWindowFirstRun,
         messages: params.messages,
+        injectUserContext(content) {
+          if (content !== null && content.trim().length > 0) {
+            userContextContributions.push(content);
+          }
+        },
       };
       for (const sub of lifecycle) {
         try {
@@ -1309,6 +1314,11 @@ export async function createAgentRuntime(
           });
         }
       }
+      // 收齐贡献 → 注入当前 run 用户消息,作为本 run loop 的输入起点。
+      const injectedMessages = prependContextBlock(
+        params.messages,
+        userContextContributions,
+      );
 
       // ALS 包裹整个 run loop 主体 —— 让 Task 工具(及未来任何 closure 工具)
       // 在 call() 内部通过 runContextStorage.getStore() 拿到当前 run 的
@@ -1357,24 +1367,14 @@ export async function createAgentRuntime(
       }
 
       async function runMainLoop(): Promise<RunResult> {
-        // 根据最后一条用户消息检索匹配的人物
-        // scoped 存储由装配期注入，置于 per-run options 之后 → scope 隔离
-        // 不可被调用方 enrichOptions 覆盖
-        const enrichedContext = await enrichContext(
-          projectContext,
-          params.messages,
-          { ...params.enrichOptions, peopleStore },
-        );
-
-        // 将项目上下文 + 匹配的人物注入到首条 user message
-        const messagesWithContext = injectContext(params.messages, enrichedContext);
-
+        // onBeforeRun 订阅者贡献的 <context> 已注入当前 run 用户消息（injectedMessages，
+        // 在 run 入口拼好）。本 loop 从它起步。
+        //
         // pre-flight compact 检查 —— 防止上 run 尾累积到超标、下 run 入口直接送 LLM 爆 context。
         //
-        // 关键设计：跑在 messagesWithContext（含项目上下文与人物注入）上，不在 params.messages。
-        //   params.messages 到 messagesWithContext 的 token 增量可能达数 K（project context +
-        //   动态上下文），在小模型（32K）上可能跨越一个预算阈值。pre-flight 必须看真实输入
-        //   才能做出正确决策。
+        // 关键设计：跑在 injectedMessages（含 onBeforeRun 注入的 <context>）上，不在
+        //   params.messages。注入可能带来数 K token 增量（小模型 32K 上可能跨越预算
+        //   阈值），pre-flight 必须看真实输入才能做出正确决策。
         //
         // turn-context 块（时间、任务状态等）由 agent-loop 在每次 LLM call 之前 per-call inject，
         // pre-flight 这里不预 inject——避免 inject 与 pre-flight 触发的 LLMSummarize 双重处理；
@@ -1383,9 +1383,9 @@ export async function createAgentRuntime(
         // 终止归一化：复用 core 的 `resolveContextManager`，与 agent-loop 内部两条触发点
         // 共享同一判别逻辑（throw / aborted / overflow），避免第三处复制 abort 优先规则
         // 和 AgentError 包装 —— 新加触发点时只需做 shape 映射。
-        let loopMessages = messagesWithContext;
+        let loopMessages = injectedMessages;
 
-        // 原始 user 消息（params.messages 最后一条，未经 enrichContext / turnContextInjector 增强）
+        // 原始 user 消息（params.messages 最后一条，未经 <context> / turn-context 注入增强）
         // —— buildTurn 契约要求持久化 Turn 的 userMessage 是用户真实输入，不是内部增强版
         const originalUserMessage =
           params.messages[params.messages.length - 1] ??
@@ -1408,9 +1408,9 @@ export async function createAgentRuntime(
             }),
             newMessages: [],
             durationMs: Date.now() - startTime,
-            // budget 快照用 messagesWithContext —— 即使 engine 抛错也能给一个保守值；
+            // budget 快照用 injectedMessages —— 即使 engine 抛错也能给一个保守值；
             // turn-context 块由 agent-loop per-LLM-call 注入，不在此 budget 估算里
-            budget: contextEngine.checkBudget(messagesWithContext),
+            budget: contextEngine.checkBudget(injectedMessages),
             compactBefore,
             pendingModeSwitch: workModeAccumulator.getIntent(),
           };
@@ -1419,7 +1419,7 @@ export async function createAgentRuntime(
         const preFlight = await resolveContextManager(
           contextEngine,
           {
-            messages: messagesWithContext,
+            messages: injectedMessages,
             turnCount: 0,
             abortSignal: params.abortSignal,
           },

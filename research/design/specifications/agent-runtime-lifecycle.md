@@ -87,7 +87,7 @@ interface AgentRuntimeLifecycle {
    *  ctx 暴露公共的"更新 system prompt 数据驱动段"接口（§3.2），任何订阅者按需用——这是 cache 安全的窗口级上下文更新点（见 §五）。 */
   onWindowOpen?(ctx: LifecycleWindowOpenContext): Promise<void> | void;
 
-  /** ② 每次 run 前：run() 入口、agent-loop 启动前调。观测即将发送的 messages + 异步副作用。 */
+  /** ② 每次 run 前（run 前唯一业务入口）：run() 入口、agent-loop 启动前调。观测即将发送的 messages、异步副作用，以及经 `injectUserContext` 向当前 run 用户消息贡献注入内容。 */
   onBeforeRun?(ctx: LifecycleBeforeRunContext): Promise<void> | void;
 
   /** ③ 每次 run 后：run() 产出 RunResult 后调。观测 + 状态更新（本轮已结束）。 */
@@ -144,7 +144,10 @@ interface LifecycleWindowOpenContext extends LifecycleContextBase {
 interface LifecycleBeforeRunContext extends LifecycleContextBase {
   readonly conversationId?: string;
   readonly turnIndex: number;
-  readonly messages: readonly Message[];   // 本次 run 输入（只读，enrich 前）
+  readonly isWindowFirstRun: boolean;      // 该 run 是否其所在注意力窗口的首个 run（场景 2 判据）
+  readonly messages: readonly Message[];   // 本次 run 输入（只读：观测 + 看用户这条说了什么）
+  /** 贡献式注入出口：递交要注入「当前 run 用户消息」的内容，runtime 收齐后拼装、包标签、注入；传 null / 不调 = 这条不注。 */
+  injectUserContext(content: string | null): void;
 }
 
 interface LifecycleAfterRunContext extends LifecycleContextBase {
@@ -212,11 +215,33 @@ interface CreateAgentRuntimeOptions {
 
 **失败语义**：首窗（`instance-start`）抛错 → **让 `createAgentRuntime` 失败**（实例未就绪、安全回滚，对齐 work-mode `session.ts:529`）。其余 reason（run 内 / 外换代）抛错 → 不阻断主对话：run 内走 per-run bus emit `lifecycle:hook_failed`、run 外走命令调用方通道（§十一），继续用当前 prompt 跑（窗口换代失败=该窗 skill 索引陈旧，不致命）。
 
-### ② onBeforeRun —— 每次 run 前
+### ② onBeforeRun —— 每次 run 前（run 前唯一业务入口）
 
-**时机**：`run()`（`:855`）内，per-run `eventBus` 创建（`:861`）**且 `decorateRunBus` 渲染装饰挂载（`:966`）之后**、ALS try 块（`:1010`）之前的区间——运行在 `runContextStorage.run` 的 ALS **之外**（与 onAfterRun 同侧），早于 `enrichContext`（`:1029`，在 `:1017` ALS 闭包内）。**务必置于 `:966` 之后**（否则其 emit 的 `lifecycle:*` 事件无渲染订阅、静默丢失，§十一），**不要落进 `:1017` 闭包**。钩子看到的 `messages` 是用户原始输入（enrich 前）。
+run 触发、上下文送进 LLM 之前唯一的业务介入点。**两类职责合一**：① 观测 + 异步副作用；② 经 `injectUserContext` 向当前 run 的用户消息贡献注入内容。run 前不再有第二个注入入口（原 `injectContext` 已删除，§七；它承接过的三项业务见文末「附录」）。
 
-**能力**：观测即将发送的 `messages` + 异步副作用（预热、记录、外部通知）。**不重建 system prompt**——run 前不是注意力窗口边界（窗口跨多 run），run 入口重建会违反窗口内 byte-equal（Inv-2）。system prompt 的窗口边界重建走 onWindowOpen。
+**时机**：`run()`（`:855`）内，per-run `eventBus` 创建（`:861`）**且 `decorateRunBus` 挂载（`:966`）之后**、ALS try 块（`:1010`）之前——在 `runContextStorage.run` 的 ALS **之外**（与 onAfterRun 同侧）。**务必置于 `:966` 之后**（否则 emit 的 `lifecycle:*` 事件无渲染订阅、静默丢失，§十一），**不要落进 `:1017` 闭包**。
+
+#### 注入：贡献式，拼装归 runtime
+
+订阅者只递交「要注什么」（`injectUserContext(content)`），所有订阅者跑完后 runtime 按注册顺序把贡献拼成一个 `<context>` 块、前缀到当前 run 的用户消息——注到哪条、怎么包、什么顺序全归 runtime（与 onWindowOpen 的 `updateSystemPromptSegment`、TurnContextProvider 同范式）。订阅者**不**改 `messages`（只读）、不自己找位置 / 去重。
+
+注进的内容是**发送视图**：随 run 进 `state.messages` 供 LLM 看到，但持久化只存用户原始输入（`buildTurn` 契约）；落盘与否由内容属性定（项目指令 / 启动摘要 / 人物等都是可从源头重生成的临时态、不落盘）。
+
+#### 三个触发场景：一个入口、三种谓词
+
+三场景是同一动作（run 前注入）在不同触发条件下的切分；不为某场景另抽钩子（否则首个 run 会同时触发它与 onBeforeRun、又成多入口）。订阅者注册到 onBeforeRun，按自身归属用 ctx 判据自判：
+
+| 场景 | 谓词 | 典型用途 |
+|---|---|---|
+| 任意 run | 无条件 | 每条消息都注的动态上下文 |
+| 任意窗口首 run | `isWindowFirstRun` | 段切换开新窗后该重注的项目背景 |
+| 本次运行用户首次交互 | 订阅者 loaded flag（对话级用 `conversationId`） | 启动从持久化倒读历史、只此一次 |
+
+- **用户首次交互**直接用 loaded flag：main runtime 上的 run 全是用户交互（定时任务跑在独立 ephemeralRuntime、不碰 main），第一个 run 即首次交互、不必判来源；粒度按对话级（用 `conversationId`、每对话首次各加载一次）。
+- **`isWindowFirstRun`** 因「窗口可在 run 内换代（段切换）」按 run 入口时所在窗口判定。
+- 注几次、何时注由谓词 + 订阅者 once flag 决定，无跨 run 重复，故不需 `<context>` 去重那套。
+
+**不重建 system prompt**：run 前不是注意力窗口边界（窗口跨多 run），run 入口重建违反窗口内 byte-equal（Inv-2）；system prompt 的窗口边界重建走 onWindowOpen。onBeforeRun 只动 user message。
 
 **失败语义**：抛错不阻断 run → emit `lifecycle:hook_failed` 到 per-run bus，继续。
 
@@ -354,7 +379,7 @@ onWindowOpen 的 ctx 暴露**公共方法** `updateSystemPromptSegment(segment, 
 |---|---|---|
 | EventBus（`AgentEventMap`） | per-run、纯观测 | **互补**。本钩子注册式；run 内的 lifecycle 信号（`lifecycle:hook_failed` / `lifecycle:prompt_rebuilt`）走 per-run eventBus（§十一），run 外（首窗 / 末窗）走装配抛错 / 销毁调用方通道 |
 | `TurnContextInjector`（`:213`） | per-LLM-call、注入 user message 末尾 `<turn-context>` 动态块 | **正交**。它管动态区消息注入（高频、不动 system prompt），承接源头②"run 开启往消息注入内容"；onWindowOpen 管静态区 system prompt 在窗口边界重建（低频）。两者不重叠。本 spec 的 `windowLifecycle` / `getSystemPrompt` 注入沿用其同款范式 |
-| `enrichContext` / `injectContext`（`create-agent-runtime.ts:1029/1036`） | per-run、把 projectContext + 匹配人物注入首条 user message | **正交**。它是 runtime 内置的首条消息注入，承接源头①②"在消息中注入内容"的固定部分；本钩子不重复提供消息注入能力（onBeforeRun messages 只读），①的钩子价值是窗口边界的 system prompt 准备（含 skill 重建）。两者不重叠 |
+| `injectContext` / `enrichContext`（原内置首条注入，**已删除**） | 曾 per-run 把 projectContext + 匹配人物注入首条 user message | **已并入 onBeforeRun**。它与 onBeforeRun 并存 = run 前双入口；现 injectContext 删除，注入职责由 onBeforeRun 的 `injectUserContext`（贡献式、§四②）统一承接，承接过的三项业务见文末附录 |
 | `SegmentTransitionHook`（`segment-manager.ts:165-172` 三时刻：beforeSummarize / afterSummarize / beforeNewSegmentStart） | core 段切换流程的内部 hook，含"摘要 LLM call 前中止段切换"的过程内能力；零生产消费者 | **不同层、不构成并存债**。它是 core 段切换机制的内部细粒度扩展点（过程内、可中止），本钩子是 runtime 实例订阅者对窗口边界的响应（边界后通知）。run 内换代信号取自 turn-end / runTurnBegin 的 `windowChange`（§五.3），**不复用、不依赖** SegmentTransitionHook。二者抽象层不同，各自成立 |
 | turn-end 钩子（`runTurnEnd`，core agent-loop 内） | turn 边界、budget + 段切换 | **触发源**。run 内 runTurnEnd 那条窗口换代信号来自其 `windowChange`（§四①.2、§十二 B） |
 | `registerConversationStateReset` / `resetConversationState`（`:223/:235`） | `/clear`、对话级状态重置 | **同范式 + 触发源**。`/clear` 既是 conversation 数据重置、也是注意力窗口换代——在 `/clear` 路径上叠加 onWindowClose(`clear`)/onWindowOpen(`clear`)（§四①.3）。范式（register + 时机调用）一致 |
@@ -468,7 +493,7 @@ cli 交互模式（REPL / -p，主用户面）启动时 `setDiagnosticLogger(() 
 3. **`buildSystemPrompt` 支持段覆盖**（`system-prompt.ts`）：`PromptBuildContext` 新增 `segmentOverrides?: Partial<Record<SystemPromptSegment, string | null>>`；`renderSegment` 每段渲染前先查 `segment in ctx.segmentOverrides ? ctx.segmentOverrides[segment] : 默认渲染`。
 4. **双层 holder**（§五.3）：`:680` 的 `const systemPrompt` 去除；装配期固定段输入 capture；**删 `:677` 的 skillIndex 硬编码注入**（移进 skill 订阅者，§九）。runtime 内部维护**实例级**段覆盖映射 + 实例权威 prompt（首窗 / clear / resume / reload 换代时重拼并单调提交）。
 5. 首窗 onWindowOpen 挂点：strategies 数组结束（`:745-746`）与 return 字面量（`:747`）之间，按序 `await lifecycle[].onWindowOpen({reason:"instance-start", windowIndex:0})`，据收集的段覆盖首次 buildSystemPrompt 建实例权威 prompt；抛错则 reject。注意 `run` 方法体写在 return 字面量内（`:855-1233`），勿插错。
-6. `run()` 内（per-run eventBus `:861` 后、`decorateRunBus` `:966` 后、ALS try `:1010` 前）：**capture 本 run 局部 prompt（初值=实例权威 prompt 当前值）**；按序 `await lifecycle[].onBeforeRun`（ctx 只读 messages/turnIndex/conversationId）；抛错 → emit `lifecycle:hook_failed`。
+6. `run()` 内（per-run eventBus `:861` 后、`decorateRunBus` `:966` 后、ALS try `:1010` 前）：**capture 本 run 局部 prompt（初值=实例权威 prompt 当前值）**；按序 `await lifecycle[].onBeforeRun`（ctx：只读 messages/turnIndex/conversationId + `isWindowFirstRun` + `injectUserContext`）；订阅者经 `injectUserContext` 贡献的内容由 runtime 收齐后拼 `<context>` 块注入当前 run 用户消息（删除原 `injectContext` 内置注入）；抛错 → emit `lifecycle:hook_failed`。
 7. `run()` 内：**pre-flight 压缩**（`resolveContextManager("pre-flight")`）若 `modified` → `await windowLifecycle.onChange("compact")`（重拼本 run 局部 prompt），在进入 `runAgentLoop` 之前。把 `return await runContextStorage.run(...)`（`:1011`）拆为 `const result = await …` → 每个 `await lifecycle[].onAfterRun(result)`（各自 try/catch）→ `return result`（`finally` 仍 disposeAll）；抛错 → emit `lifecycle:hook_failed`。`run()` 透传给 agent-loop 的是 `getSystemPrompt: () => <本 run 局部 prompt>`（`:1162`）+ `windowLifecycle`。
 8. `AgentRuntime` 接口新增 `dispose(reason): Promise<void>`（`:178`）：`reason` 透传末窗 `onWindowClose`；幂等、按序 `await`；失败由销毁调用方 warn（§十一）。
 9. `AgentRuntime` 接口新增 `onAttentionWindowChange(reason): Promise<void>`（run 外窗口换代入口，供 cli `/clear`·`/resume` 调）：内部按序 `await onWindowClose(旧窗) → onWindowOpen(新窗)`，更新实例权威 prompt。
@@ -524,6 +549,41 @@ cli 交互模式（REPL / -p，主用户面）启动时 `setDiagnosticLogger(() 
 
 | 字段 | 值 |
 |---|---|
-| 状态 | ✅ 已落地 —— §十二 A–E（orchestrator 契约 / 双层 holder / core 换代信号 / cli 销毁链 / server async 化）+ D 测试拓扑全部实现并通过全包测试 |
+| 状态 | 四钩子框架 ✅ 已落地 —— §十二 A–E（orchestrator 契约 / 双层 holder / core 换代信号 / cli 销毁链 / server async 化）+ D 测试拓扑全部实现并通过全包测试。**onBeforeRun 收敛为 run 前唯一注入入口（§三.2 / §四②：新增 `injectUserContext` + `isWindowFirstRun`、三场景谓词、删除 injectContext）：设计已定、实现待落地。** |
 | 前置依赖 | ① `SkillStore` 暴露 `version(mode)`（单调 + publish-after-commit）✅；② core agent-loop per-run 现取 + `windowLifecycle` 回调透传 runTurnBegin / runTurnEnd（内部触发 onChange、返回值不带 windowChange 字段）✅；③ `buildSystemPrompt` segmentOverrides 段覆盖 ✅ |
 | 关联文档已回写 | [skill-system.md](./skill-system.md) §3.2/§3.3/§九 已标注注意力窗口边界重建落地；[lifecycle-concepts.md](../drafts/lifecycle-concepts.md) §二已标注四钩子需求实现 |
+
+---
+
+## 附录：injectContext 删除的三项业务（待 two-layer 以订阅者补回）
+
+为守住「run 前唯一入口」，本次直接删除旧的 injectContext 注入器；它承接的三项业务注入随之一并移除、暂时缺失，留待未来作为 onBeforeRun 订阅者重做补回。此处留存现状全貌，供追溯。
+
+injectContext 经 `buildContextBlock` 把一个 `<context>` 块注入「对话首条 user message」，承接三项：
+
+1. **用户画像 profile** —— `loadProfile(memoryRoot)` 从 `~/.zhixing/me/profile.md` 读，`formatProfileForContext` 格式化为 `# User Profile` + name / language / timezone + 自由正文。
+2. **项目指令 instructions** —— `loadInstructions(cwd)` 三层加载（用户级 `~/.zhixing/ZHIXING.md` → 项目级 `./ZHIXING.md` 或 `./.zhixing/ZHIXING.md`，项目级覆盖用户级），套 `# Project Instructions (ZHIXING.md)` 标题注入。
+3. **匹配人物 dynamicContext** —— `enrichContext` 用最新一条 user 消息经 `PeopleStore.matchByMessage` 匹配相关人物，`formatForContext` 格式化注入。
+
+**现状已知限制**（供未来追溯）：
+
+- 三项打包进同一个 `<context>` 块、走同一次 `injectContext`，注入「对话首条」并以 `<context>` 标签去重 → 整段对话实际只注一次。
+- 由此人物匹配被锁死：虽每 run 都 `matchByMessage`，但去重让首条之后 run 匹配到的新人物注不进去 —— **人物匹配实际只在对话首条生效一次**。
+- `ProjectContext.date` 字段被 `loadProjectContext` 加载，却未被 `buildContextBlock` 使用 / 注入 —— 挂空字段。
+
+**未来重构方向**（备忘、非本次范围）：三项拆为独立的 onBeforeRun 订阅者、各按粒度挑场景谓词（profile / instructions 偏「每窗口首 run」、人物匹配偏「每 run」），借「去重消失」解开人物只注一次的限制。
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

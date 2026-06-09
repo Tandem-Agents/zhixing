@@ -14,15 +14,11 @@
  *    - `buildSystemPrompt` / `MAIN_AGENT_SEGMENTS` / `SUB_AGENT_SEGMENTS` /
  *      `CACHE_BOUNDARY` / `renderIdentity` / 相关类型
  *
- * 3. RunParams 字段引用的类型(契约级类型)
- *    - `EnrichOptions` (RunParams.enrichOptions 的类型)
- *
  * **不导出**(internal helper,仅 createAgentRuntime 内部装配使用):
  *   - `subscribeCompactAccumulator` / `CompactAccumulator`
  *   - `trackMessages`
  *   - `createSummarizeCallLLM` / `createMemoryFlushCallLLM`
- *   - `loadProjectContext` / `enrichContext` / `injectContext` /
- *     `REFLECTION_THRESHOLD` / `ProjectContext`
+ *   - `prependContextBlock`(onBeforeRun 注入拼装,内部装配使用)
  *
  * 这些 helper 同包测试通过 `import "../X.js"` 直接消费 sub-module 文件,
  * 不依赖 barrel 暴露。未来如确实需要外部消费,在此处显式追加导出 +
@@ -48,7 +44,6 @@ export {
   type RunParams,
   type RunResult,
 } from "./create-agent-runtime.js";
-export type { EnrichOptions } from "./project-context.js";
 export { runContextStorage, type RunContext } from "./run-context.js";
 export type {
   AgentRuntimeLifecycle,
