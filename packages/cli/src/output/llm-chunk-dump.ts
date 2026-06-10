@@ -172,7 +172,7 @@ export interface LlmChunkDump {
  *
  *   未 configure 直接调 `getLlmChunkDump()` → 默认禁用（零运行成本 noop）。
  *
- *   typical usage（cli REPL / runOnce 入口）：
+ *   typical usage（cli REPL 入口）：
  *   ```
  *   configureLlmChunkDump(options.log === true);
  *   getLlmChunkDump();  // 预热 singleton（详见 attachChunkDumpToBus docstring）

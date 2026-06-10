@@ -4,7 +4,8 @@
 
 import { describe, it, expect, vi } from "vitest";
 import type { AbortReason, AgentResult, AgentYield, Message } from "@zhixing/core";
-import type { AgentRuntime, RunParams, RunResult } from "../../run-agent.js";
+import type { RunResult } from "@zhixing/core";
+import type { AgentRuntime, RunParams } from "@zhixing/orchestrator/runtime";
 import { runEphemeralTurn } from "../ephemeral-executor.js";
 
 interface MockBehavior {

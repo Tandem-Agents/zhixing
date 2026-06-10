@@ -1,7 +1,7 @@
 /**
  * AI 输出区公共导出。
  *
- * createOutputRenderer 是主入口——repl / run-agent 用它替代原 createRenderer。
+ * createOutputRenderer 是主入口——repl / serve 用它替代原 createRenderer。
  * speaker-state 锚字符工厂供工具行 / 闪烁等下游模块复用。
  */
 

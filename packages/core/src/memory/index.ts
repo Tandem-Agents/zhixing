@@ -12,5 +12,7 @@ export type {
 } from "./journal-store.js";
 export type { ProfileData, ProfileMeta } from "./types.js";
 export { getMemoryDir } from "./types.js";
-export { MemoryFlushStrategy, createMemoryFlushStrategy, parseExtractions, FLUSH_EXTRACTION_PROMPT } from "./flush-engine.js";
-export type { FlushLLMFn, FlushEngineConfig, FlushExtraction, FlushResult } from "./flush-engine.js";
+export { MemoryFlusher, MemoryFlushStrategy, createMemoryFlushStrategy, parseExtractions, FLUSH_EXTRACTION_PROMPT } from "./flush-engine.js";
+export type { FlushLLMFn, FlushEngineConfig, FlushExtraction, FlushResult, MemoryFlusherConfig } from "./flush-engine.js";
+export { createMemoryFlushHook } from "./segment-flush-hook.js";
+export type { MemoryFlushHookConfig } from "./segment-flush-hook.js";

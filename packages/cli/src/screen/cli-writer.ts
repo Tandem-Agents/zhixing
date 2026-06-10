@@ -4,7 +4,7 @@
  *
  * 双实现：
  *   - createScreenWriter(screen)：经 ScreenController 协调（cli REPL 持久 chrome 模式）
- *   - createStdoutWriter(stdout)：直接 stdout（runOnce / 非交互 / 测试模式，无 chrome）
+ *   - createStdoutWriter(stdout)：直接 stdout（serve / 非交互 / 测试模式，无 chrome）
  *
  * 设计契约：
  *   - line：独立段，自动补 \n——welcome / slash 命令 / 错误 / 工具卡片等"段落级"内容
@@ -140,7 +140,7 @@ interface StdoutWriterOptions {
 }
 
 /**
- * 直接 stdout 的 CliWriter——runOnce / 非交互 / 测试模式（无 chrome）。
+ * 直接 stdout 的 CliWriter——serve / 非交互 / 测试模式（无 chrome）。
  *
  * 与 ScreenWriter 行为对称：
  *   - line / notify：独立段——确保末尾 \n

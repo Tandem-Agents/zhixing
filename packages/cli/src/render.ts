@@ -14,7 +14,7 @@
  * 接管——renderSummary 已移除。status-bar done 状态永驻显示直到下一次 run_start。
  *
  * 写屏统一经 CliWriter——caller 注入 ScreenWriter（cli REPL 模式协调 chrome）或
- * StdoutWriter（runOnce / 非交互），渲染函数本身不关心后端。这是 chrome 持久不变量的
+ * StdoutWriter（serve / 非交互），渲染函数本身不关心后端。这是 chrome 持久不变量的
  * 类型层强制：函数签名要求 writer 参数，禁止内部直接 console.log / process.stdout.write。
  */
 
@@ -487,9 +487,9 @@ export interface CreateRenderSubscribersOptions {
  *   1. UI 依赖在工厂层显式注入（writer / renderer / screen），而非通过 RunBusContext
  *      反向传递，保持 runtime API 与展示层解耦。
  *   2. writer 是必选——所有渲染必须经 CliWriter 协调，避免直接 console.log 推走 chrome。
- *   3. renderer 缺省时 pauseUI 退化为 no-op：适配 serve / runOnce 路径（retry / compact
+ *   3. renderer 缺省时 pauseUI 退化为 no-op：适配 serve 等非交互路径（retry / compact
  *      事件仍然渲染，只是不再驱动 OutputRenderer 暂停）。
- *   4. screen 缺省时 status-bar 不启用——runOnce / 非交互路径的事件渲染仍然有效，
+ *   4. screen 缺省时 status-bar 不启用——非交互路径的事件渲染仍然有效，
  *      只是不显示动态状态条。
  *   5. 返回的装饰器在 run 结束 finally 调一次，杜绝 listener 跨 run 累积。
  */
@@ -601,7 +601,7 @@ export function createRenderSubscribers(
     // + context-indicator (状态条尾部 "context" 段，合成 "~ Xk (cache Yk)")。
     //
     // 单一启用条件 = `if (screen)`：与 status-bar 同模式，无 chrome 的运行模式
-    // （runOnce / serve）自然不装配两者。不引入额外 ENV / CLI flag —— 常态化展示，
+    // （serve 等）自然不装配两者。不引入额外 ENV / CLI flag —— 常态化展示，
     // 数据可用性自然降级（详见 context-indicator.ts docstring "自然降级"段）。
     //
     // tail 段视觉顺序「[task] │ [context]」由 STATUS_TAIL_IDS 声明顺序唯一决定

@@ -304,7 +304,7 @@ export class ScrollRegion {
   /**
    * 卸载 chrome、撤 DECSTBM、清状态。
    *
-   * 用于 cli 退出 chrome 模式（runOnce 完成 / shutdown 路径）。idempotent：未
+   * 用于 cli 退出 chrome 模式（shutdown 路径）。idempotent：未
    * attached 时 no-op，避免 caller 重复调用。
    *
    * 协议：

@@ -85,7 +85,7 @@ export interface BuiltinTurnContextDeps {
  *     order 同步，让 turn-context 输出顺序稳定（便于人眼对照 / 测试断言）
  *   - 闭包：TaskListProvider 内 getItems 通过 ALS 取 conversationId，缺失时返空
  *     数组 → provider.shouldInject false → 整段跳过（不污染 turn-context）。
- *     ephemeral 路径（定时任务 / --print）天然走这条降级
+ *     ephemeral 路径（定时任务等）天然走这条降级
  *   - 不返回 provider 数组让 caller 自己 register——直接 register 到 runtime 让
  *     helper 是终态（不能被 caller 漏掉某个 provider 的注册）
  */

@@ -581,6 +581,29 @@ describe("evaluate — hooks", () => {
     expect(calls).toEqual(["before", "after", "newSeg"]);
   });
 
+  it("hook ctx 携带被摘段原文（messages = 总输入去掉 buffer 保留尾）与 abortSignal", async () => {
+    const seen: Array<readonly Message[]> = [];
+    const signal = new AbortController().signal;
+    const hook: SegmentTransitionHook = {
+      async afterSummarize(ctx) {
+        seen.push(ctx.messages);
+        expect(ctx.abortSignal).toBe(signal);
+      },
+    };
+    const sm = createSegmentManager(makeConfig({ hooks: [hook], bufferTurns: 2 }));
+
+    const input = makeInput(bigMessages());
+    await sm.evaluate({ ...input, abortSignal: signal });
+
+    expect(seen).toHaveLength(1);
+    const ctxMessages = seen[0]!;
+    // 被摘段 = 输入去掉保留的最近 bufferTurns —— 非空且严格少于全量
+    expect(ctxMessages.length).toBeGreaterThan(0);
+    expect(ctxMessages.length).toBeLessThan(input.messages.length);
+    // 是输入的前缀（最旧的部分先离开窗口）
+    expect(ctxMessages[0]).toBe(input.messages[0]);
+  });
+
   it("hook afterSummarize 收到解析后的 summary", async () => {
     const afterFn = vi.fn(async (_: unknown, summary: ParsedSummary) => {
       expect(summary).toEqual({ facts: "F1", state: "S1", active: "A1" });

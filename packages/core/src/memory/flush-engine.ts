@@ -86,6 +86,87 @@ export interface FlushResult {
   errors: string[];
 }
 
+// ─── 提取核心 ───
+
+export interface MemoryFlusherConfig {
+  readonly callLLM: CompactLLMFn;
+  readonly store: MemoryStore;
+}
+
+/**
+ * 记忆提取核心 —— 从一段对话原文中提取长期记忆并分流持久化
+ * （profile / person / journal）。
+ *
+ * 触发形态无关：段切换 hook 与任何未来挂载点共用同一提取实现；
+ * 自身无状态（store / callLLM 为注入依赖），跨 run 共享安全。
+ */
+export class MemoryFlusher {
+  private readonly callLLM: CompactLLMFn;
+  private readonly store: MemoryStore;
+
+  constructor(config: MemoryFlusherConfig) {
+    this.callLLM = config.callLLM;
+    this.store = config.store;
+  }
+
+  /** 从消息中提取记忆并保存。 */
+  async flush(
+    messages: readonly Message[],
+    opts?: { abortSignal?: AbortSignal },
+  ): Promise<FlushResult> {
+    const extractionMessages = buildExtractionRequest(messages);
+    const rawResponse = await this.callLLM(extractionMessages, opts);
+    const extractions = parseExtractions(rawResponse);
+
+    const errors: string[] = [];
+    let saved = 0;
+
+    for (const ext of extractions) {
+      try {
+        if (ext.category === "journal") {
+          await this.appendJournal(ext);
+        } else {
+          await this.store.save({
+            category: ext.category as MemoryCategory,
+            id: ext.id,
+            meta: ext.meta,
+            content: ext.content,
+          });
+        }
+        saved++;
+      } catch (err) {
+        errors.push(
+          `${ext.category}/${ext.id}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
+    return { extracted: extractions.length, saved, errors };
+  }
+
+  /** Journal 是追加模式：读取已有内容，在末尾追加新条目。 */
+  private async appendJournal(ext: FlushExtraction): Promise<void> {
+    const existing = await this.store.load("journal", ext.id);
+
+    if (existing) {
+      const newContent = `${existing.content}\n\n---\n\n${ext.content}`;
+      await this.store.save({
+        category: "journal",
+        id: ext.id,
+        meta: { ...existing.meta, ...ext.meta },
+        content: newContent,
+      });
+    } else {
+      await this.store.save({
+        category: "journal",
+        id: ext.id,
+        meta: ext.meta,
+        content: ext.content,
+      });
+    }
+  }
+}
+
 // ─── 提取 Prompt ───
 
 export const FLUSH_EXTRACTION_PROMPT = `You are a memory extraction assistant. Analyze the conversation above and extract information worth preserving long-term.
@@ -126,15 +207,16 @@ export class MemoryFlushStrategy implements CompactionStrategy {
   readonly priority = 3;
   readonly requiresLLM = true;
 
-  private readonly callLLM: CompactLLMFn;
-  private readonly store: MemoryStore;
+  private readonly flusher: MemoryFlusher;
   private readonly minMessages: number;
   private readonly minBudgetRatio: number;
   private _lastResult: FlushResult | null = null;
 
   constructor(config: FlushEngineConfig) {
-    this.callLLM = config.callLLM;
-    this.store = config.store;
+    this.flusher = new MemoryFlusher({
+      callLLM: config.callLLM,
+      store: config.store,
+    });
     this.minMessages = config.minMessages ?? 6;
     this.minBudgetRatio = config.minBudgetRatio ?? 0.75;
   }
@@ -177,65 +259,14 @@ export class MemoryFlushStrategy implements CompactionStrategy {
     };
   }
 
-  // ─── 核心逻辑 ───
+  // ─── 核心逻辑（委托 MemoryFlusher）───
 
-  /**
-   * 从消息中提取记忆并保存。
-   */
+  /** 从消息中提取记忆并保存。 */
   async flush(
     messages: readonly Message[],
     opts?: { abortSignal?: AbortSignal },
   ): Promise<FlushResult> {
-    const extractionMessages = buildExtractionRequest(messages);
-    const rawResponse = await this.callLLM(extractionMessages, opts);
-    const extractions = parseExtractions(rawResponse);
-
-    const errors: string[] = [];
-    let saved = 0;
-
-    for (const ext of extractions) {
-      try {
-        if (ext.category === "journal") {
-          await this.appendJournal(ext);
-        } else {
-          await this.store.save({
-            category: ext.category as MemoryCategory,
-            id: ext.id,
-            meta: ext.meta,
-            content: ext.content,
-          });
-        }
-        saved++;
-      } catch (err) {
-        errors.push(`${ext.category}/${ext.id}: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-
-    return { extracted: extractions.length, saved, errors };
-  }
-
-  /**
-   * Journal 是追加模式：读取已有内容，在末尾追加新条目。
-   */
-  private async appendJournal(ext: FlushExtraction): Promise<void> {
-    const existing = await this.store.load("journal", ext.id);
-
-    if (existing) {
-      const newContent = `${existing.content}\n\n---\n\n${ext.content}`;
-      await this.store.save({
-        category: "journal",
-        id: ext.id,
-        meta: { ...existing.meta, ...ext.meta },
-        content: newContent,
-      });
-    } else {
-      await this.store.save({
-        category: "journal",
-        id: ext.id,
-        meta: ext.meta,
-        content: ext.content,
-      });
-    }
+    return await this.flusher.flush(messages, opts);
   }
 }
 

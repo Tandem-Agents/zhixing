@@ -120,7 +120,7 @@ export function createBuiltinExtraToolsAssembly(
 
       // task_list 工具通过 ALS 拿 conversationId —— `runContextStorage` 由
       // `runtime.run({ conversationId })` 入口在 per-run 范围内注入。ephemeral
-      // 路径（定时任务 / --print）未注入时返回 undefined，工具 call 内部检测到
+      // 路径（定时任务等 ephemeral）未注入时返回 undefined，工具 call 内部检测到
       // 直接 isError 拒绝（不污染任何 conversation 的 cache）。
       const taskListTool = taskListService.createTool(
         () => runContextStorage.getStore()?.conversationId,

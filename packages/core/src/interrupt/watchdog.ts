@@ -34,7 +34,7 @@
  *   `interrupt:fired` 由 emitRunEnd 单点收敛), 由 caller 决定终点：
  *     · cli REPL → setupInterruptRendering → cliWriter (chrome scrollback)
  *     · serve daemon → 同一 cli render 路径 → stdout (重定向到 daemon log)
- *     · runOnce → StdoutWriter → stdout
+ *     · serve 等非交互 → StdoutWriter → stdout
  *     · 测试 → mock 订阅
  * - 历史曾在此路径直接 console.warn 兼任"操作员日志"，违反 core 不假设环境
  *   原则 (chrome 模式下的 stderr 写入会破坏 frame model)。当前架构所有 caller

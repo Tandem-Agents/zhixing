@@ -6,7 +6,7 @@
  *
  * 写屏统一经 CliWriter 注入：
  *   - cli REPL 模式：caller 注入 ScreenWriter（背后是 ScreenController frame buffer）
- *   - runOnce / 单次模式：caller 注入 StdoutWriter
+ *   - serve / 管道等非交互模式：caller 注入 StdoutWriter
  *
  * 接续 vs 独立段：流式 chunk 用 writer.appendInline（不补 \n，多次调用同行接续）；
  * 工具卡片 / 错误消息等用 writer.line（独立段，自动补 \n）。这是 frame buffer 模式
@@ -163,7 +163,7 @@ export interface CreateOutputRendererOptions {
   /**
    * 写屏 sink——所有 AI 输出（text / thinking / tool 卡片）经此协调。
    *
-   * REPL 模式注入 createScreenWriter（chrome 协调）；runOnce 模式注入 createStdoutWriter
+   * REPL 模式注入 createScreenWriter（chrome 协调）；非交互模式注入 createStdoutWriter
    * （直写 stdout）；测试模式可注入 mock writer 验证渲染序列。
    */
   readonly writer: CliWriter;
@@ -271,7 +271,7 @@ export function createOutputRenderer(
           //   strip  —— 增量 emit 状态机 + appendInline 字面 forward（保留 block 结构无染色）
           //   raw    —— appendInline 原文转发不解析
           const segFactory = writer.beginReplaceableSegment;
-          // 无 segment 能力的 writer（StdoutWriter：runOnce / pipe / CI）下 render
+          // 无 segment 能力的 writer（StdoutWriter：serve / pipe / CI）下 render
           // 降级 strip —— strip 是 markdown 的纯文本路径（保 block 结构、走
           // appendInline、不依赖 segment），正是无 chrome 环境应走的形态。raw
           // 本身不碰 segment，不受影响。render 模式硬依赖 segment factory，缺失
@@ -301,9 +301,9 @@ export function createOutputRenderer(
 
         const segFactory = writer.beginReplaceableSegment;
         if (!segFactory) {
-          // StdoutWriter (runOnce 模式) 不实现 segment —— 降级为不显示 thinking。
+          // StdoutWriter (非交互模式) 不实现 segment —— 降级为不显示 thinking。
           // thinking 内容仍由 llm-call 累积成 ThinkingBlock 并持久化进 transcript,
-          // 仅缺 cli UI 渲染。这是合理取舍:runOnce 是 batch 模式,无动态 segment 能力。
+          // 仅缺 cli UI 渲染。这是合理取舍:非交互输出无动态 segment 能力。
           break;
         }
 

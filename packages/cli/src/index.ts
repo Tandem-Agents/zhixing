@@ -1,9 +1,9 @@
 /**
  * 知行 CLI 入口
  *
- * 两种运行模式：
- * - 单次模式：zhixing -p "prompt" → 流式输出 → 退出
+ * 运行模式：
  * - 交互模式：zhixing → REPL 多轮对话
+ * - 常驻服务：zhixing serve → daemon（会话执行面 / 通道 / 定时任务）
  */
 
 import chalk from "chalk";
@@ -12,7 +12,6 @@ import { setDiagnosticLogger } from "@zhixing/core";
 import { configureLlmChunkDump, pruneAllLogs } from "./output/llm-chunk-dump.js";
 import { configureKeypressDump } from "./security/keypress-dump.js";
 import { runStartupCheck, type StartupCheckResult } from "./startup.js";
-import { runOnce } from "./run-agent.js";
 import { startRepl } from "./repl.js";
 import { renderError } from "./render.js";
 import { createStdoutWriter } from "./screen/index.js";
@@ -75,20 +74,18 @@ program
   .name("zhixing")
   .description("知行 — 智能体引擎")
   .version("0.1.0")
-  .option("-p, --print <prompt>", "单次模式：执行 prompt 后退出")
   .option("-w, --workspace <path>", "指定工作区目录（安全信任边界）")
   .option("--log", "启用诊断 dump 到 ~/.zhixing/logs/（LLM raw chunk + keypress 路径） —— 排查渲染 / 上下文 / 流式 / 按键输入问题用")
   .action(async (options: {
-    print?: string;
     workspace?: string;
     log?: boolean;
   }) => {
     try {
-      // cli 交互模式（REPL / -p）静默 core 诊断 log（[llm] 请求 / 工具调用等），
+      // cli 交互模式（REPL）静默 core 诊断 log（[llm] 请求 / 工具调用等），
       // 避免污染对话 UI；serve / rpc / serve sub-commands 各自独立 action 不受影响，
       // 保持默认 console.log 输出供运维与调试观察
       setDiagnosticLogger(() => {});
-      // 诊断 dump 启用配置 —— 必须在 startRepl / runOnce 触发 dump 预热之前调用，
+      // 诊断 dump 启用配置 —— 必须在 startRepl 触发 dump 预热之前调用，
       // 否则 singleton cached 为 NOOP 后续无法激活。--log 是唯一开关（无 ENV 兜底）：
       //   - llm-chunk-dump：LLM stream 完整事件流（含 codepoint hex）
       //   - keypress-dump：SelectOperationRegion keypress 路径每节点（confirmation
@@ -98,22 +95,11 @@ program
       const dumpEnabled = options.log === true;
       configureLlmChunkDump(dumpEnabled);
       configureKeypressDump(dumpEnabled);
-      // 启动期检查——任何模式（-p / REPL）下都先确保必要字段就绪
+      // 启动期检查——先确保必要字段就绪
       const startupResult = await runStartupCheck({
         mode: "repl",
       });
       handleStartupResult(startupResult);
-
-      if (options.print) {
-        // runOnce 内部自管 renderer / 渲染装饰,调用方仅传入业务参数。
-        // turn 终止反馈由 status-bar 单点接管（runOnce 无 status-bar——用户看到 stdout
-        // 流式输出 + shell prompt 即知 turn 结束，无需额外摘要行）。
-        await runOnce({
-          prompt: options.print,
-          workspace: options.workspace,
-        });
-        process.exit(0);
-      }
 
       await startRepl({
         workspace: options.workspace,

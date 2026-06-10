@@ -172,10 +172,18 @@ export interface SegmentTransitionHook {
 }
 
 export interface SegmentTransitionContext {
-  /** ephemeral 运行体（定时任务 / --print）无对话身份 —— hook 自行差分持久化副作用 */
+  /** ephemeral 运行体（定时任务等）无对话身份 —— hook 自行差分持久化副作用 */
   readonly conversationId: string | undefined;
   readonly segmentId: string;
   readonly tokensBefore: number;
+  /**
+   * 被摘段消息（只读）—— 即将被摘要替代、离开注意力窗口的原文。
+   * afterSummarize 的记忆提取等 hook 以此为输入：段切换正是从原文蒸馏
+   * 长期信息的自然时刻。
+   */
+  readonly messages: readonly Message[];
+  /** run 中断信号透传 —— hook 内的 LLM 调用必须可中断 */
+  readonly abortSignal?: AbortSignal;
 }
 
 // ─── SegmentManager 输入 / 输出 ───
@@ -183,7 +191,7 @@ export interface SegmentTransitionContext {
 /**
  * SegmentManager.evaluate 输入。
  *
- * conversationId 缺失（ephemeral 路径：定时任务 / --print）→ 照常评估与切段
+ * conversationId 缺失（ephemeral 路径：定时任务等）→ 照常评估与切段
  * （窗口保护对一切运行体生效），仅跳过持久化副作用（segmentMeta / 快照）。
  */
 export interface SegmentManagerInput {

@@ -96,7 +96,7 @@ export interface AgentLoopParams {
    * 触发时走 external reason;parentSignal 触发时走 parent-abort reason,诊断时可区分中断来源。
    * 两者可同时传入 (子 agent 同时受父和外部 scheduler 限时,任一触发都让子 abort)。
    *
-   * 缺省时(REPL / 顶层 agent / 单次 runOnce 等无父场景)创建独立 controller。
+   * 缺省时(REPL / 顶层 agent 等无父场景)创建独立 controller。
    */
   parentSignal?: AbortSignal;
   /** 事件总线（可观测性） */
@@ -174,7 +174,7 @@ export interface AgentLoopParams {
   /**
    * 当前对话 ID —— 段切换路径用它读 task_list 状态、写 segmentMetadata。
    *
-   * 缺省（ephemeral 路径：定时任务 / --print）→ 段评估与切段照常（窗口保护
+   * 缺省（ephemeral 路径：定时任务等）→ 段评估与切段照常（窗口保护
    * 对一切运行体生效），仅跳过持久化副作用（segmentMeta），且无任务清单可读
    * （in-progress 守卫视为无进行中任务）。
    */

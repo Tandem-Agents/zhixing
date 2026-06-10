@@ -35,7 +35,7 @@
  *
  *   不在本模块处理（caller 决定）：
  *     - conversationId 缺失（ephemeral 路径）→ caller 不调 setFarewell
- *     - runOnce 单次模式 / serve daemon → 无 REPL chrome，不调
+ *     - serve daemon 等无 REPL chrome 的模式 → 不调
  *     - 异常退出 → 错误信息已占满 viewport，不调
  *
  *   本模块只负责"给定有效数据时，渲染出对应字符串"。

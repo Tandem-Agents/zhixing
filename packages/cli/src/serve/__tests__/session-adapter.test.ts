@@ -17,7 +17,8 @@ import {
 } from "@zhixing/core";
 import type { SessionRuntime } from "@zhixing/server";
 import { createServerRuntimeAdapter } from "../session-adapter.js";
-import type { AgentRuntime, RunParams, RunResult } from "../../run-agent.js";
+import type { RunResult } from "@zhixing/core";
+import type { AgentRuntime, RunParams } from "@zhixing/orchestrator/runtime";
 
 /** 模拟接受协议：caller（ConversationManager）在持久化成功后推进窗口 */
 function acceptTurn(runtime: SessionRuntime, result: RunResult): void {

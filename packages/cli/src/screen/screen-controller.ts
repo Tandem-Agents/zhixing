@@ -354,7 +354,7 @@ export interface ScreenController {
    * 边界（caller 应处理）：
    *   - 仅在 `everAttached=true` 时实际 emit —— pre-attach 路径 dispose 不写任何
    *     字节（与"保护 shell 原状"原则一致），farewell 也跳过
-   *   - 异常退出 / runOnce 单次模式 / serve daemon → caller 不调 setFarewell
+   *   - 异常退出 / serve daemon 等无 chrome 模式 → caller 不调 setFarewell
    *     即可（默认无告别块）
    */
   setFarewell(text: string | null): void;

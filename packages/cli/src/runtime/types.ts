@@ -35,12 +35,12 @@ export interface RuntimeSessionOptions {
   renderer: OutputRenderer;
   /**
    * 写屏统一接口——所有 EventBus 事件渲染（retry / compact / interrupt 等）经此协调。
-   * REPL 模式注入 ScreenWriter（chrome 协调），runOnce 注入 StdoutWriter（直写）。
+   * REPL 模式注入 ScreenWriter（chrome 协调），serve 等非交互模式注入 StdoutWriter（直写）。
    */
   writer: CliWriter;
   /**
    * 屏幕协调器——cli REPL 模式下注入，启用 status-bar 动态状态展示；
-   * 非 REPL 模式（runOnce）可省略，status-bar 不启用，事件渲染仍经 writer 正常工作。
+   * 非 REPL 模式可省略，status-bar 不启用，事件渲染仍经 writer 正常工作。
    */
   screen?: ScreenController;
   zhixingHome: string;
@@ -82,7 +82,7 @@ export interface RuntimeSessionOptions {
    * orchestrator 装配 SegmentManager 所需的两个抽象接口。
    *
    * cli 装配层在创建 session 之前通过 createCliSegmentDeps 工厂构造，避免每个
-   * createAgent 路径各自重做适配（reload swap / runOnce 路径同样复用一份 deps）。
+   * createAgent 路径各自重做适配（reload swap 路径同样复用一份 deps）。
    *
    * 设计上 segmentDeps 是 required —— cli 始终启用段切换；非 cli 集成路径（纯
    * orchestrator 集成测试）可省略 createCliSegmentDeps，直接调 createAgentRuntime

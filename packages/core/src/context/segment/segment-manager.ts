@@ -190,10 +190,18 @@ export class SegmentManager {
     const conversationId = input.conversationId;
     const segmentId = this.cfg.generateSegmentId();
     const startedAt = this.cfg.clock();
+    // 切分提前到 ctx 构造（纯函数，与摘要 LLM 调用无序依赖）——被摘段原文
+    // 作为 hook 输入随 ctx 交付（记忆提取等消费）
+    const { toSummarize, toPreserve } = splitMessagesPairAware(
+      input.messages,
+      this.cfg.bufferTurns,
+    );
     const ctx: SegmentTransitionContext = {
       conversationId,
       segmentId,
       tokensBefore,
+      messages: toSummarize,
+      abortSignal: input.abortSignal,
     };
 
     await this.cfg.eventBus?.emit("segment:transition_start", {
@@ -281,11 +289,7 @@ export class SegmentManager {
       });
     }
 
-    // ── 拼新段 + 切分 ──
-    const { toSummarize, toPreserve } = splitMessagesPairAware(
-      input.messages,
-      this.cfg.bufferTurns,
-    );
+    // ── 拼新段 ──
     const newSegmentMessages = composeNewSegmentMessages({
       summary,
       recentTurns: toPreserve,

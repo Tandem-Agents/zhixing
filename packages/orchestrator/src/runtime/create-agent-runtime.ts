@@ -49,7 +49,8 @@ import {
   ToolArgumentExtractor,
   emptyUsage,
   createMessageDropStrategy,
-  createMemoryFlushStrategy,
+  MemoryFlusher,
+  createMemoryFlushHook,
   DEFAULT_WATCHDOG_POLICY,
   MemoryStore,
   getMemoryDir,
@@ -326,7 +327,7 @@ export interface RunParams {
    * 当前 conversation id —— 透传到 runContextStorage，工具按需取（用于
    * 在持久化会话中区分写入目标 / 读取上下文）。
    *
-   * 可选：ephemeral 路径（一次性 --print / 定时任务 / 单测 fixture）省略；
+   * 可选：ephemeral 路径（定时任务 / 单测 fixture）省略；
    * 工具收到 undefined 时显式分支处理（拒绝执行 / graceful degrade）。
    */
   conversationId?: string;
@@ -452,7 +453,7 @@ export interface CreateAgentRuntimeOptions {
    *
    * cli 注入会话级单一实例,使 runtime 的索引读 / load_skill 与 cli 侧的 /<name>
    * 唤醒、技能管理面板共享同一锁域(index.json 读改写串行),从根上杜绝跨实例
-   * 并发写丢更新。serve / 一次性 --print / 测试等无 cli 面板的路径不传,走内部
+   * 并发写丢更新。serve / 测试等无 cli 面板的路径不传,走内部
    * 自建即可(技能为全局、库根固定,实例无状态、无生命周期负担)。
    */
   skillStore?: SkillStore;
@@ -925,12 +926,20 @@ export async function createAgentRuntime(
   const summarizeCallLLM = createSummarizeCallLLM(roles, mainThinking);
   const memoryFlushCallLLM = createMemoryFlushCallLLM(roles, lightThinking);
 
+  // 记忆提取 —— 已从 budget 压缩管线迁挂到段切换 afterSummarize：内容被摘要
+  // 替代、离开注意力窗口之时正是从原文蒸馏长期记忆的自然时刻。提取核心
+  // （MemoryFlusher）装配期单例，hook 跨 run 共享（无状态）。
+  const memoryFlushHook = createMemoryFlushHook({
+    flusher: new MemoryFlusher({
+      callLLM: memoryFlushCallLLM,
+      store: memoryStore,
+    }),
+  });
+
   // 策略编排（engine 按 priority asc 执行，到 normal/warning 就 break）：
-  //   priority 3   MemoryFlush     有 LLM 调用 — 仅 usage >= 0.75 触发
   //   priority 5   MessageDrop     免费 — usage < 0.9 触发（超过 0.9 让给 LLMSummarize）
   //   priority 200 LLMSummarize    昂贵 — usage >= 0.9 触发，MessageDrop 让位
   const strategies = [
-    createMemoryFlushStrategy({ callLLM: memoryFlushCallLLM, store: memoryStore }),
     createMessageDropStrategy(),
     createLLMSummarizeStrategy({
       callLLM: summarizeCallLLM,
@@ -1161,6 +1170,9 @@ export async function createAgentRuntime(
             persistence: options.segmentDeps.persistence,
             taskListReader: options.segmentDeps.taskListReader,
             eventBus,
+            // 记忆提取挂段切换时刻（afterSummarize）—— 失败由段管理器降级
+            // warning，绝不阻断切段
+            hooks: [memoryFlushHook],
           })
         : undefined;
 

@@ -272,7 +272,7 @@ export class TaskListService {
       needsPermission: false,
       async call(input): Promise<ToolResult> {
         // ─── Step 1: ephemeral 拒绝 ───
-        // 一次性 run（定时任务 / --print）的 ALS 中 conversationId === undefined，
+        // 一次性 run（定时任务等 ephemeral）的 ALS 中 conversationId === undefined，
         // task_list 无 conversation 绑定可落 —— 拒绝调用且不改 state，避免污染
         // 其他 conversation 的 cache（PR-C1 审查 Bug-1）。
         const conversationId = getConversationId();
@@ -281,7 +281,7 @@ export class TaskListService {
             content:
               "task_list is unavailable in this run: no conversation context bound. " +
               "This tool only works in persistent conversations — not in one-shot runs " +
-              "(e.g. --print) or scheduled task executions.",
+              "(ephemeral) or scheduled task executions.",
             isError: true,
           };
         }
@@ -324,7 +324,7 @@ const TASK_LIST_TOOL_DESCRIPTION =
   "- Use 'completed' to mark finished tasks; do not delete them within the same segment.\n" +
   "- Skip the tool for trivial single-step tasks — it's overhead for the user.\n" +
   "- This tool requires a persistent conversation context. It is unavailable in one-shot runs " +
-  "(--print) and scheduled task executions; calls in those contexts will fail with an error.";
+  "(ephemeral) and scheduled task executions; calls in those contexts will fail with an error.";
 
 // ─── 输入校验 + normalize ───
 
