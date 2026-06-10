@@ -112,3 +112,13 @@ export {
 
 export * from "./segment/index.js";
 
+export type {
+  AcceptRunInput,
+  AttentionWindowState,
+  CreateAttentionWindowOptions,
+  WindowCompact,
+  WindowFoldOutcome,
+  WindowResetReason,
+} from "./window/index.js";
+export { createAttentionWindow } from "./window/index.js";
+

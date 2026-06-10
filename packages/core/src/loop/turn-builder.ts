@@ -17,6 +17,10 @@
 
 import type { AgentResult } from "./types.js";
 import type { Message, ToolResultBlock, ToolUseBlock } from "../types/messages.js";
+import {
+  emptyAssistantMessage,
+  findLastAssistantMessage,
+} from "../types/messages.js";
 import type {
   CompactMarker,
   ToolCallRecord,
@@ -91,7 +95,12 @@ export function buildTurn(input: BuildTurnInput): Turn {
   const { turnIndex, userMessage, newMessages, agentResult, source } = input;
   const timestamp = input.timestamp ?? new Date().toISOString();
 
-  const assistantMessage = findLastAssistant(newMessages) ?? EMPTY_ASSISTANT;
+  // 取最后一条 assistant：tool-loop 场景 newMessages 有多条 assistant
+  // （中间的还在发 tool_use），最后一条才是工具链结束后的总结回复。
+  // 无 assistant（abort / error 在首次 LLM 完成前）→ 空 assistant 兜底，
+  // 保持 Turn 结构完整，调用方不需特判。
+  const assistantMessage =
+    findLastAssistantMessage(newMessages) ?? emptyAssistantMessage();
   const toolCalls = extractToolCalls(newMessages);
 
   return {
@@ -134,35 +143,6 @@ export function resolveTurnTimestamp(compactBefore?: CompactMarker): string {
 }
 
 // ─── 内部辅助 ───
-
-/**
- * 空 assistant 兜底消息 —— 仅在 newMessages 完全不含 assistant 时使用
- * （agent-loop abort 前连一次 LLM 都没完成的极少数路径）。
- *
- * content=[] 是合法 Message；rebuildCanonicalMessages / transcript 消费方都
- * 能正确处理（render 时跳过、token 估算为 0）。相比抛错 / 返回 null，它让调用方
- * 代码路径更均一：无论 run 是否成功落成 turn，都能拿到一个可 persist 的对象。
- */
-const EMPTY_ASSISTANT: Message = { role: "assistant", content: [] };
-
-/**
- * 从 newMessages 尾部倒序找最后一条 assistant 消息。
- *
- * 为什么取最后一条：tool-loop 场景下 newMessages 有多条 assistant
- * （[assistant(含tool_use), tool_result_user, assistant(含tool_use), ..., assistant(纯文本)]）
- * 最后一条是工具链结束后的总结，代表本 turn 最终回复。
- *
- * REPL 此前（repl.ts:1222）取 newMessages[0] 是**独立 bug**，那取到的是第一条
- * assistant（可能还在发 tool_use），不是最终总结。迁移到 buildTurn 后此 bug 自然修复。
- */
-function findLastAssistant(messages: readonly Message[]): Message | undefined {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i]!.role === "assistant") {
-      return messages[i];
-    }
-  }
-  return undefined;
-}
 
 /**
  * 提取 tool_use / tool_result 配对成 ToolCallRecord[]。

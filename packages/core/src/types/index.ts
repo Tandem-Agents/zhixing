@@ -12,9 +12,11 @@ export type {
 } from "./messages.js";
 export {
   assistantMessage,
+  emptyAssistantMessage,
   extractFirstText,
   extractText,
   extractToolCalls,
+  findLastAssistantMessage,
   findLastUserIndex,
   hasToolCalls,
   replaceFirstText,

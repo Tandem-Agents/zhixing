@@ -158,6 +158,35 @@ export function findLastUserIndex(messages: readonly Message[]): number {
   return -1;
 }
 
+/**
+ * 从消息序列尾部倒序找最后一条 assistant 消息；没有则返回 undefined。
+ *
+ * 典型用途：从一个 run 的协议消息序列（[user, assistant(tool_use),
+ * tool_result_user, ..., assistant(总结)]）派生"最终回复"——工具链场景下
+ * 中间有多条 assistant，最后一条才是面向用户的总结。
+ */
+export function findLastAssistantMessage(
+  messages: readonly Message[],
+): Message | undefined {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]!.role === "assistant") return messages[i];
+  }
+  return undefined;
+}
+
+/**
+ * 空 assistant 兜底消息 —— run 在首次 LLM 完成前被中断 / 出错、序列里没有
+ * 任何 assistant 时，用它补齐"用户-助手"配对。content=[] 是合法 Message：
+ * 渲染时跳过、token 估算为 0；让消费方（持久化记录、窗口配对）的代码路径
+ * 均一，无需对"无回复的 run"特判。
+ *
+ * 每次调用返回新对象——消息在系统内按不可变约定流转，共享单例会让任何
+ * 一处意外变更扩散到所有持有者，工厂形态从根上消除该风险。
+ */
+export function emptyAssistantMessage(): Message {
+  return { role: "assistant", content: [] };
+}
+
 /** 从 assistant 消息中提取所有工具调用 */
 export function extractToolCalls(message: Message): ToolUseBlock[] {
   return message.content.filter(
