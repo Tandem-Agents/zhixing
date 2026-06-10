@@ -25,3 +25,5 @@ export { needsNormalize, normalize, rebuildCanonicalMessages } from "./rebuild.j
 
 export type { TranscriptStoreOptions } from "./store.js";
 export { TranscriptStore } from "./store.js";
+
+export * from "./shard/index.js";
