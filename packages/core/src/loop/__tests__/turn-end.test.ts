@@ -294,7 +294,7 @@ describe("runTurnEnd · 参数透传", () => {
   it("ephemeral 路径（conversationId 缺失）→ 透传 undefined 给 segmentManager", async () => {
     const ctx = makeCtx({ messages: [], modified: false });
     const seg = makeSeg({
-      decision: { kind: "pass", reason: "no-conversation" },
+      decision: { kind: "pass", reason: "below-optimal" },
       modified: false,
     });
 

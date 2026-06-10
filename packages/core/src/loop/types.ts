@@ -172,13 +172,11 @@ export interface AgentLoopParams {
    */
   segmentManager?: SegmentManager;
   /**
-   * 当前对话 ID —— 段切换路径需要用它读 task_list 状态、写 segmentMetadata。
+   * 当前对话 ID —— 段切换路径用它读 task_list 状态、写 segmentMetadata。
    *
-   * 缺省（ephemeral 路径：定时任务 / --print）→ 段切换静默 pass，不持久化、
-   * 不读 task_list，与 task_list 工具层 / TaskListProvider 同语义降级。
-   *
-   * 当 segmentManager 注入但 conversationId 缺失时，evaluate 内部会返回
-   * decision.kind="pass", reason="no-conversation"，不会污染段切换观测。
+   * 缺省（ephemeral 路径：定时任务 / --print）→ 段评估与切段照常（窗口保护
+   * 对一切运行体生效），仅跳过持久化副作用（segmentMeta），且无任务清单可读
+   * （in-progress 守卫视为无进行中任务）。
    */
   conversationId?: string;
   /**

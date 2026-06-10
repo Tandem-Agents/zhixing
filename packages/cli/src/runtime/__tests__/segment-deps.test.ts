@@ -20,6 +20,7 @@ import { TaskListService } from "@zhixing/tools-builtin";
 import { InMemoryTaskListStore } from "../task-list-stores.js";
 import {
   createCliSegmentDeps,
+  createServeSegmentDeps,
   createTaskListReaderFromService,
 } from "../segment-deps.js";
 
@@ -147,5 +148,24 @@ describe("createCliSegmentDeps", () => {
       { id: "x", content: "running", status: "in_progress" },
     ]);
     expect(deps.taskListReader.hasInProgress("conv-Z")).toBe(true);
+  });
+});
+
+describe("createServeSegmentDeps", () => {
+  it("taskListReader 与 REPL 同源；persistence 为 no-op（segmentMeta 缺写无害）", async () => {
+    const service = makeTaskListService();
+    const deps = createServeSegmentDeps({ taskListService: service });
+
+    // in-progress 守卫与 REPL 装配同一适配器语义
+    expect(deps.taskListReader.hasInProgress("conv-x")).toBe(false);
+    // no-op persistence：不抛、无副作用 —— serve 未接 ConversationRepository
+    await expect(
+      deps.persistence.appendSegment("conv-x", {
+        segmentId: "seg-1",
+        timestamp: new Date().toISOString(),
+        tokensBefore: 100,
+        tokensAfter: 10,
+      }),
+    ).resolves.toBeUndefined();
   });
 });

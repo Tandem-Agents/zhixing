@@ -5,7 +5,7 @@
  *   - 注入 segmentManager + 触发 trigger 决策 → state.messages 被替换为 newSegmentMessages
  *   - 注入 segmentManager + pass 决策 → state.messages 保持原 newMessages
  *   - 不注入 segmentManager → agent-loop 完全不调段切换路径（向后兼容）
- *   - ephemeral 路径（conversationId 缺失）→ SegmentManager 收到 undefined，自然降级 pass
+ *   - ephemeral 路径（conversationId 缺失）→ 照常评估与切段（窗口保护对一切运行体生效），仅跳过持久化副作用
  *   - segmentManager 失败（compress LLM 抛错）→ agent-loop 不抛错，state 用原 newMessages 继续
  *
  * 测试策略：
@@ -281,14 +281,14 @@ describe("agent-loop × SegmentManager 集成", () => {
     expect(turn2Msgs.length).toBeGreaterThanOrEqual(3);
   });
 
-  it("ephemeral 路径（conversationId 缺失）→ 段切换静默 pass，不调 callLLM / persistence", async () => {
+  it("ephemeral 路径（conversationId 缺失）→ 照常切段，仅跳过 segmentMeta 持久化", async () => {
     const callLLM = vi
       .fn<(req: SegmentSummarizeRequest) => Promise<string>>()
       .mockResolvedValue(SUMMARY_OK);
     const persistence = fakePersistence();
 
     const segmentManager = createSegmentManager({
-      estimator: fakeEstimator(20), // 即使 tokens 超 optimal
+      estimator: fakeEstimator(20), // tokens 超 optimal → trigger
       capability: aggressiveCap,
       callLLM,
       persistence,
@@ -297,15 +297,16 @@ describe("agent-loop × SegmentManager 集成", () => {
     });
 
     const provider = makeToolThenTextProvider("t");
-    await drainAgentLoop(
+    const { result } = await drainAgentLoop(
       baseParams(provider, {
         segmentManager,
         conversationId: undefined,
       }),
     );
 
-    expect(callLLM).not.toHaveBeenCalled();
-    expect(persistence.appendSegment).not.toHaveBeenCalled();
+    expect(result.reason).toBe("completed");
+    expect(callLLM).toHaveBeenCalled(); // 窗口保护照常生效（定时任务同样会超上限）
+    expect(persistence.appendSegment).not.toHaveBeenCalled(); // 唯一的副作用差分
   });
 
   it("不注入 segmentManager → agent-loop 正常工作，不触段切换路径", async () => {

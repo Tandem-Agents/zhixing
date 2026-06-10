@@ -46,6 +46,25 @@ export function createCliSegmentDeps(input: CliSegmentDepsInput): CliSegmentDeps
 }
 
 /**
+ * serve 装配变体 —— serve 进程未接 ConversationRepository，segmentMeta 持久化
+ * 注 no-op（SegmentPersistence 的失败语义本就允许 segmentMeta 缺写：它是独立
+ * 观测元数据流，缺失不影响段切换语义完成度）。taskListReader 照常复用
+ * TaskListService——serve 会话的 in-progress 守卫与 REPL 同源。
+ */
+export function createServeSegmentDeps(input: {
+  readonly taskListService: TaskListService;
+}): CliSegmentDeps {
+  return {
+    taskListReader: createTaskListReaderFromService(input.taskListService),
+    persistence: {
+      async appendSegment() {
+        /* serve 未接 ConversationRepository —— segmentMeta 缺写无害 */
+      },
+    },
+  };
+}
+
+/**
  * 把 TaskListService 适配成 TaskListReader。
  *
  * 实现契约：同步返回（service.getInProgressTasks 走 in-memory cache）；

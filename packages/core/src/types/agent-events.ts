@@ -291,7 +291,7 @@ export type AgentEventMap = {
    */
   "segment:evaluation": {
     decision:
-      | { kind: "pass"; reason: "below-optimal" | "no-conversation" }
+      | { kind: "pass"; reason: "below-optimal" }
       | {
           kind: "defer";
           reason: "in-progress-task";
@@ -307,9 +307,9 @@ export type AgentEventMap = {
     currentTokens: number;
   };
 
-  /** trigger 决策触发，进入压缩流程。 */
+  /** trigger 决策触发，进入压缩流程。ephemeral 运行体无对话身份 → conversationId 缺省。 */
   "segment:transition_start": {
-    conversationId: string;
+    conversationId?: string;
     segmentId: string;
     reason: "optimal-exceeded" | "risk-exceeded";
     currentTokens: number;

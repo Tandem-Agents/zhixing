@@ -45,7 +45,7 @@ export interface SegmentThresholds {
 export type SegmentDecision =
   | {
       readonly kind: "pass";
-      readonly reason: "below-optimal" | "no-conversation";
+      readonly reason: "below-optimal";
     }
   | {
       readonly kind: "defer";
@@ -172,7 +172,8 @@ export interface SegmentTransitionHook {
 }
 
 export interface SegmentTransitionContext {
-  readonly conversationId: string;
+  /** ephemeral 运行体（定时任务 / --print）无对话身份 —— hook 自行差分持久化副作用 */
+  readonly conversationId: string | undefined;
   readonly segmentId: string;
   readonly tokensBefore: number;
 }
@@ -182,8 +183,8 @@ export interface SegmentTransitionContext {
 /**
  * SegmentManager.evaluate 输入。
  *
- * conversationId 缺失（ephemeral 路径：定时任务 / --print）→ 决策直接 pass，
- * 不走压缩流程也不走持久化。与 task_list 工具 / TaskListProvider 同语义对齐。
+ * conversationId 缺失（ephemeral 路径：定时任务 / --print）→ 照常评估与切段
+ * （窗口保护对一切运行体生效），仅跳过持久化副作用（segmentMeta / 快照）。
  */
 export interface SegmentManagerInput {
   readonly messages: readonly Message[];

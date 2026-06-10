@@ -158,23 +158,30 @@ function makeInput(
 
 // ─── ephemeral 路径 ───
 
-describe("evaluate — ephemeral 路径", () => {
-  it("conversationId 缺失 → 静默 pass，无任何 segment 事件", async () => {
+describe("evaluate — ephemeral 路径（窗口保护对一切运行体生效）", () => {
+  it("conversationId 缺失 + 超阈值 → 照常切段，产出 windowCompact", async () => {
     const { bus, events } = captureSegmentEvents();
     const sm = createSegmentManager(
-      makeConfig({ eventBus: bus, capability: { optimalMaxTokens: 0, riskMaxTokens: 0 } }),
+      makeConfig({
+        eventBus: bus,
+        callLLM: fakeLLM(SUMMARY_OK),
+        capability: { optimalMaxTokens: 0, riskMaxTokens: 0 },
+      }),
     );
 
     const result = await sm.evaluate(
-      makeInput([userMsg("hi")], { conversationId: undefined }),
+      makeInput([userMsg("hi"), assistantMsg("yo")], { conversationId: undefined }),
     );
 
-    expect(result.decision).toEqual({ kind: "pass", reason: "no-conversation" });
-    expect(result.modified).toBe(false);
-    expect(events).toHaveLength(0);
+    expect(result.decision.kind).toBe("trigger");
+    expect(result.modified).toBe(true);
+    expect(result.windowCompact).toBeDefined();
+    // 事件照发（可观测性与持久对话一致）
+    expect(events.map((e) => e.event)).toContain("segment:transition_start");
+    expect(events.map((e) => e.event)).toContain("segment:new_started");
   });
 
-  it("ephemeral 路径不调 taskListReader / callLLM / persistence", async () => {
+  it("ephemeral 仅跳过持久化副作用：persistence 不被调、taskListReader 不被调", async () => {
     const callLLM = fakeLLM(SUMMARY_OK);
     const taskListReader = fakeTaskListReader(true);
     const persistence = fakePersistence();
@@ -187,13 +194,25 @@ describe("evaluate — ephemeral 路径", () => {
       }),
     );
 
-    await sm.evaluate(
-      makeInput([userMsg("hi")], { conversationId: undefined }),
+    const result = await sm.evaluate(
+      makeInput([userMsg("hi"), assistantMsg("yo")], { conversationId: undefined }),
     );
 
-    expect(callLLM).not.toHaveBeenCalled();
-    expect(taskListReader.hasInProgress).not.toHaveBeenCalled();
-    expect(persistence.appendSegment).not.toHaveBeenCalled();
+    expect(result.modified).toBe(true); // 切段照常发生（LLM 已调用）
+    expect(callLLM).toHaveBeenCalled();
+    expect(taskListReader.hasInProgress).not.toHaveBeenCalled(); // 无清单可读
+    expect(persistence.appendSegment).not.toHaveBeenCalled(); // 唯一的副作用差分
+  });
+
+  it("conversationId 缺失 + 阈值内 → pass（below-optimal，与持久对话同判据）", async () => {
+    const sm = createSegmentManager(
+      makeConfig({ capability: { optimalMaxTokens: 100_000, riskMaxTokens: 200_000 } }),
+    );
+    const result = await sm.evaluate(
+      makeInput([userMsg("hi")], { conversationId: undefined }),
+    );
+    expect(result.decision).toEqual({ kind: "pass", reason: "below-optimal" });
+    expect(result.modified).toBe(false);
   });
 });
 

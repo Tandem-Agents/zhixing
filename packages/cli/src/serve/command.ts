@@ -64,6 +64,7 @@ import {
 } from "../security/index.js";
 import { createMcpHub } from "@zhixing/mcp";
 import { createBuiltinExtraToolsAssembly } from "../runtime/builtin-extra-tools.js";
+import { createServeSegmentDeps } from "../runtime/segment-deps.js";
 import { parseServerSpecs } from "../runtime/mcp-config.js";
 import { InMemoryTaskListStore } from "../runtime/task-list-stores.js";
 import { registerCliTurnContextProviders } from "../runtime/turn-context-providers.js";
@@ -235,6 +236,14 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     mcpHub,
   );
 
+  // 3c'. 段切换外部依赖 —— serve 全部 runtime（per-session + ephemeral）共享：
+  //   注意力窗口的段保护对一切运行体生效。persistence 为 no-op（serve 未接
+  //   ConversationRepository，segmentMeta 缺写无害）；taskListReader 复用同一
+  //   TaskListService，in-progress 守卫与 REPL 同源。
+  const serveSegmentDeps = createServeSegmentDeps({
+    taskListService: builtinExtraTools.taskListService,
+  });
+
   // 3d. RuntimeFactory —— 会话执行面（接入面）建 per-session runtime 的工厂。schedule 档无
   //   会话执行面，工厂作无副作用留位（不连接、不建目录）。
   //   注：工厂内 createAgentRuntime 是 lazy（session 调用时才建），那时 mcp 接入面 connectAll
@@ -254,6 +263,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
         extraTools,
         decorateRunBus: renderDecorator,
         onSecurityBlocked: createBlockedRenderer(serveWriter),
+        segmentDeps: serveSegmentDeps,
         // Task 工具由默认 mainProfile().enabledTools 含 "Task" 自动装配；
         // 渠道下游(飞书/RPC)可看到子 agent 冒泡事件,renderDecorator 在
         // 非 TTY 模式下退化为只输出 Task 起止帧(子工具中间事件静默,
@@ -349,6 +359,9 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     }),
     decorateRunBus: renderDecorator,
     onSecurityBlocked: createBlockedRenderer(serveWriter),
+    // 段保护同样覆盖 ephemeral 定时任务（无 conversationId 时照常评估与切段，
+    // 仅跳过持久化副作用）——长任务的窗口失控不再依赖 budget 兜底。
+    segmentDeps: serveSegmentDeps,
     // Task 工具由默认 mainProfile().enabledTools 含 "Task" 自动装配；定时任务
     // 的 ephemeral 执行路径同样可派发子 agent 隔离子任务，与持久会话能力对齐。
   });

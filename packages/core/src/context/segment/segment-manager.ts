@@ -2,8 +2,9 @@
  * SegmentManager —— 段切换编排主类。
  *
  * 编排流程：
- *   1. ephemeral 路径：conversationId 缺失 → 静默 pass（不 emit segment 事件，
- *      避免污染观测；与 task_list 工具 / TaskListProvider 同语义降级）
+ *   1. 估算与决策对有无 conversationId 行为一致——窗口保护对一切运行体生效
+ *      （ephemeral 定时任务同样会超注意力上限）；仅持久化副作用（segmentMeta）
+ *      按对话身份差分
  *   2. 估算 currentTokens = system + messages + tools
  *   3. 读 task_list in-progress 状态（cli 装配层注入 reader）
  *   4. 纯函数决策 → SegmentDecision
@@ -155,18 +156,12 @@ export class SegmentManager {
    * 调用一次。返回 modified=true 时替换 state.messages 为 newSegmentMessages。
    */
   async evaluate(input: SegmentManagerInput): Promise<SegmentManagerOutput> {
-    // ephemeral 路径：静默 pass，不 emit segment 事件
-    if (!input.conversationId) {
-      return {
-        decision: { kind: "pass", reason: "no-conversation" },
-        modified: false,
-      };
-    }
-
     const currentTokens = this.estimateTotalTokens(input);
-    const hasInProgressTask = this.cfg.taskListReader.hasInProgress(
-      input.conversationId,
-    );
+    // ephemeral（无 conversationId）照常评估与切段；任务进行中守卫依赖任务
+    // 清单，ephemeral 无清单 → 视为无进行中任务
+    const hasInProgressTask = input.conversationId
+      ? this.cfg.taskListReader.hasInProgress(input.conversationId)
+      : false;
     const decision = decideSegmentAction({
       currentTokens,
       capability: this.cfg.capability,
@@ -192,7 +187,7 @@ export class SegmentManager {
     decision: SegmentDecision & { kind: "trigger" },
     tokensBefore: number,
   ): Promise<SegmentManagerOutput> {
-    const conversationId = input.conversationId as string;
+    const conversationId = input.conversationId;
     const segmentId = this.cfg.generateSegmentId();
     const startedAt = this.cfg.clock();
     const ctx: SegmentTransitionContext = {
@@ -315,20 +310,23 @@ export class SegmentManager {
     // 窗口的视图操作，原文持久化 append-only 不参与。
     // segmentMetadata 是独立观测元数据流（仅服务于段历史 UI），缺失不影响
     // 段切换语义完成度。
-    const meta: SegmentMeta = {
-      segmentId,
-      timestamp: startedAt.toISOString(),
-      tokensBefore,
-      tokensAfter,
-    };
-    try {
-      await this.cfg.persistence.appendSegment(conversationId, meta);
-    } catch (e) {
-      await this.cfg.eventBus?.emit("segment:metadata_persist_failed", {
+    // ephemeral 运行体无对话身份 → 跳过 segmentMeta 持久化（唯一的副作用差分）
+    if (conversationId) {
+      const meta: SegmentMeta = {
         segmentId,
-        error: errorMessage(e),
-      });
-      // 不 return —— 段切换主流程已完成（指令即将通过 segment:new_started 流出）
+        timestamp: startedAt.toISOString(),
+        tokensBefore,
+        tokensAfter,
+      };
+      try {
+        await this.cfg.persistence.appendSegment(conversationId, meta);
+      } catch (e) {
+        await this.cfg.eventBus?.emit("segment:metadata_persist_failed", {
+          segmentId,
+          error: errorMessage(e),
+        });
+        // 不 return —— 段切换主流程已完成（指令即将通过 segment:new_started 流出）
+      }
     }
 
     await this.cfg.eventBus?.emit("segment:new_started", {
