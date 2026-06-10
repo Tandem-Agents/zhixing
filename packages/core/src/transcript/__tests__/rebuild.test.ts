@@ -87,17 +87,28 @@ describe("needsNormalize", () => {
   it("无 compact → false（干净 append-only 流不需要归一化）", () => {
     expect(
       needsNormalize({
-        turns: [makeTurn(0, "2026-01-01T00:00:00Z")],
         compacts: [],
+        turnsBeforeLastCompact: 0,
       }),
     ).toBe(false);
   });
 
-  it("1 compact + 所有 turns 都 post-compact（时间 > compact.ts）→ false", () => {
+  it("1 compact + 所有 turn 行在它之后 → false", () => {
     expect(
       needsNormalize({
-        turns: [makeTurn(0, "2026-01-01T00:10:00Z")],
         compacts: [makeCompact("2026-01-01T00:00:00Z", "s")],
+        turnsBeforeLastCompact: 0,
+      }),
+    ).toBe(false);
+  });
+
+  it("保留 turns 时间戳早于 marker（健康压缩文件）→ false——时间戳不参与判定", () => {
+    // 压缩保留的近期 turns 时间戳天然早于 marker（marker 记压缩时刻），
+    // 物理顺序判定下它们不会被当病文件误杀。
+    expect(
+      needsNormalize({
+        compacts: [makeCompact("2026-01-01T00:10:00Z", "s")],
+        turnsBeforeLastCompact: 0,
       }),
     ).toBe(false);
   });
@@ -105,23 +116,20 @@ describe("needsNormalize", () => {
   it("多 compact → true（老格式可能累积多 marker）", () => {
     expect(
       needsNormalize({
-        turns: [],
         compacts: [
           makeCompact("2026-01-01T00:00:00Z", "s1"),
           makeCompact("2026-01-01T00:05:00Z", "s2"),
         ],
+        turnsBeforeLastCompact: 0,
       }),
     ).toBe(true);
   });
 
-  it("1 compact + 存在 turn.ts <= compact.ts → true（§1.3 bug 遗物）", () => {
+  it("1 compact + 有 turn 行在它之前 → true（先 append turn 再 append compact 的历史遗留形态）", () => {
     expect(
       needsNormalize({
-        turns: [
-          makeTurn(0, "2026-01-01T00:00:00Z"), // = compact.ts
-          makeTurn(1, "2026-01-01T00:10:00Z"), // > compact.ts
-        ],
         compacts: [makeCompact("2026-01-01T00:00:00Z", "s")],
+        turnsBeforeLastCompact: 1,
       }),
     ).toBe(true);
   });
@@ -132,7 +140,7 @@ describe("needsNormalize", () => {
 describe("normalize", () => {
   it("无 compact → 原样返回（带拷贝不共享引用）", () => {
     const turns = [makeTurn(0, "2026-01-01T00:00:00Z")];
-    const result = normalize({ turns, compacts: [] });
+    const result = normalize({ turns, compacts: [], turnsBeforeLastCompact: 0 });
     expect(result.turns).toEqual(turns);
     expect(result.turns).not.toBe(turns); // 新数组
     expect(result.compacts).toEqual([]);
@@ -141,11 +149,15 @@ describe("normalize", () => {
   it("多 compact → 只留最后一个", () => {
     const c1 = makeCompact("2026-01-01T00:00:00Z", "s1");
     const c2 = makeCompact("2026-01-01T00:05:00Z", "s2");
-    const result = normalize({ turns: [], compacts: [c1, c2] });
+    const result = normalize({
+      turns: [],
+      compacts: [c1, c2],
+      turnsBeforeLastCompact: 0,
+    });
     expect(result.compacts).toEqual([c2]);
   });
 
-  it("丢弃 timestamp <= compact 的 turns（§1.3 遗物清理）", () => {
+  it("丢弃文件顺序在最后 compact 之前的 turns（历史遗留形态清理）", () => {
     const preCompactTurn = makeTurn(0, "2026-01-01T00:00:00Z");
     const postCompactTurn = makeTurn(1, "2026-01-01T00:10:00Z");
     const compact = makeCompact("2026-01-01T00:00:00Z", "s");
@@ -153,8 +165,21 @@ describe("normalize", () => {
     const result = normalize({
       turns: [preCompactTurn, postCompactTurn],
       compacts: [compact],
+      turnsBeforeLastCompact: 1,
     });
     expect(result.turns).toEqual([postCompactTurn]);
+  });
+
+  it("保留 turns 时间戳早于 marker → 不丢弃（顺序在 marker 之后即健康）", () => {
+    const retained = makeTurn(0, "2026-01-01T00:00:00Z"); // 早于 marker 时间戳
+    const compact = makeCompact("2026-01-01T00:10:00Z", "s");
+
+    const result = normalize({
+      turns: [retained],
+      compacts: [compact],
+      turnsBeforeLastCompact: 0,
+    });
+    expect(result.turns).toEqual([retained]);
   });
 
   it("归一化结果满足不变量（post-normalize 再次 needsNormalize 返回 false）", () => {
@@ -167,6 +192,7 @@ describe("normalize", () => {
         makeCompact("2026-01-01T00:00:00Z", "s1"),
         makeCompact("2026-01-01T00:05:00Z", "s2"),
       ],
+      turnsBeforeLastCompact: 2,
     };
     const normalized = normalize(noisy);
     expect(needsNormalize(normalized)).toBe(false);

@@ -120,5 +120,9 @@ export type {
   WindowFoldOutcome,
   WindowResetReason,
 } from "./window/index.js";
-export { createAttentionWindow } from "./window/index.js";
+export {
+  createAttentionWindow,
+  restoreAttentionWindowFromCanonical,
+  windowCompactFromMarker,
+} from "./window/index.js";
 

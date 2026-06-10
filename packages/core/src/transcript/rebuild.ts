@@ -66,55 +66,54 @@ export function rebuildCanonicalMessages(
 /**
  * 判断文件加载结果是否需要归一化重写。
  *
- * 需归一化的 3 种情形：
+ * 判定是**纯物理顺序**的：
  *   1. 多于 1 个 compact —— 老格式可能因多次自动 compact 累积多条 marker
- *   2. 有 compact 但存在 `turn.timestamp <= compact.timestamp` —— §1.3 bug 遗物
- *      （老 REPL 先 append turn 再 append compact，timestamp 反序）
+ *   2. 有 turn 行出现在最后一个 compact 行**之前**（`turnsBeforeLastCompact > 0`）
+ *      —— 历史 bug 遗留的"先 append turn 再 append compact"形态；健康文件由
+ *      原子重写产生，compact 永远紧跟 header、计数恒为 0
  *   3. 无 compact —— 不需要归一化（干净的 append-only 流）
  *
- * 约定：无 compact 时返 false（即便多 turns 也是合法的线性流）。
+ * 为什么不按时间戳判：compact 保留的近期 turns 时间戳**天然早于** marker
+ * （marker 记压缩发生时刻、retained 是更早的提交），时间戳判定会把刚保留的
+ * turns 当病文件误删——按文件物理顺序判才与写入算法的真实形态对齐。
  */
 export function needsNormalize(loaded: {
-  readonly turns: readonly Turn[];
   readonly compacts: readonly CompactMarker[];
+  readonly turnsBeforeLastCompact: number;
 }): boolean {
   if (loaded.compacts.length > 1) return true;
   if (loaded.compacts.length === 1) {
-    const lastTime = new Date(loaded.compacts[0]!.timestamp).getTime();
-    return loaded.turns.some(
-      (t) => new Date(t.timestamp).getTime() <= lastTime,
-    );
+    return loaded.turnsBeforeLastCompact > 0;
   }
   return false;
 }
 
 /**
- * 归一化：只保留最后 1 个 compact，丢弃 compact 之前（timestamp <=）的所有 turns。
+ * 归一化：只保留最后 1 个 compact，丢弃文件顺序在它**之前**的所有 turns。
  *
- * 返回新 `{turns, compacts}` 对象（不改原输入，纯函数）。调用方（store.load）
+ * 返回新对象（不改原输入，纯函数）；`turnsBeforeLastCompact` 归零，满足
+ * "归一化结果再判 needsNormalize 必为 false" 的不变量。调用方（store.load）
  * 拿结果重写文件 + 重建 canonical。
  *
- * **有意的数据丢失**：§1.3 bug 在老文件里产生 "turn.ts < compact.ts 但逻辑上
- * turn 是后续" 的矛盾，normalize 选择丢弃这类 turn —— 因为文件顺序已不可恢复，
- * 硬保留会产生二义性（canonical 里会有 summary + 之前的 turn + 之后的 turn 混排）。
- * 新 commitTurn 路径从此杜绝此问题。
+ * **有意的数据丢失**：位于最后 compact 之前的 turn 行是历史 bug 遗留形态，
+ * 其内容已被该 compact 的摘要语义覆盖，硬保留会产生二义性（canonical 里
+ * summary 与被摘内容混排）。原子重写路径不会产生此形态。
  */
 export function normalize(loaded: {
   readonly turns: readonly Turn[];
   readonly compacts: readonly CompactMarker[];
-}): { turns: Turn[]; compacts: CompactMarker[] } {
+  readonly turnsBeforeLastCompact: number;
+}): { turns: Turn[]; compacts: CompactMarker[]; turnsBeforeLastCompact: 0 } {
   if (loaded.compacts.length === 0) {
-    return { turns: [...loaded.turns], compacts: [] };
+    return { turns: [...loaded.turns], compacts: [], turnsBeforeLastCompact: 0 };
   }
 
   const last = loaded.compacts[loaded.compacts.length - 1]!;
-  const lastTime = new Date(last.timestamp).getTime();
-  const keptTurns = loaded.turns.filter(
-    (t) => new Date(t.timestamp).getTime() > lastTime,
-  );
+  const keptTurns = loaded.turns.slice(loaded.turnsBeforeLastCompact);
 
   return {
     turns: keptTurns,
     compacts: [last],
+    turnsBeforeLastCompact: 0,
   };
 }

@@ -27,7 +27,7 @@ import {
   emptyAssistantMessage,
   findLastAssistantMessage,
 } from "../../types/messages.js";
-import { buildCompactSummaryPair } from "../system-meta.js";
+import { buildCompactSummaryPair, detectSystemMetaKind } from "../system-meta.js";
 import type {
   AcceptRunInput,
   AttentionWindowState,
@@ -54,8 +54,14 @@ class AttentionWindow implements AttentionWindowState {
   readonly conversationId?: string;
   private entries: WindowEntry[] = [];
 
-  constructor(options: CreateAttentionWindowOptions) {
+  constructor(
+    options: CreateAttentionWindowOptions,
+    initialEntries?: WindowEntry[],
+  ) {
     this.conversationId = options.conversationId;
+    if (initialEntries) {
+      this.entries.push(...initialEntries);
+    }
     if (options.bootstrap) {
       this.entries.push({ kind: "bootstrap", messages: options.bootstrap });
     }
@@ -137,4 +143,51 @@ export function createAttentionWindow(
   options: CreateAttentionWindowOptions = {},
 ): AttentionWindowState {
   return new AttentionWindow(options);
+}
+
+/**
+ * 从持久化 canonical 重建窗口 —— **过渡期桥**，预算化启动装填落地后删除。
+ *
+ * 现阶段窗口的初始内容仍来自 store 产出的 canonical（`summaryPair? + 严格
+ * 交替的 [user, assistant] 配对`，由 rebuild 算法保证形态）。条目类型必须
+ * 还原准确：summaryPair 若被误标为普通配对，后续折叠的 pairsCompacted 计数
+ * 就会错位——这是该解析必须住在窗口模块内（拥有条目语义）的原因。
+ *
+ * 严格解析、畸形即抛：canonical 只可能来自 store（load / commitTurn /
+ * compactAll 返回值），恒为洁净形；宽容解析只会把数据损坏静默搅进窗口，
+ * 不如在边界上立即暴露。
+ */
+export function restoreAttentionWindowFromCanonical(
+  canonical: readonly Message[],
+  options: CreateAttentionWindowOptions = {},
+): AttentionWindowState {
+  const entries: WindowEntry[] = [];
+  let i = 0;
+
+  if (
+    canonical.length >= 2 &&
+    detectSystemMetaKind(canonical[0]!) === "compact-summary" &&
+    detectSystemMetaKind(canonical[1]!) === "ack"
+  ) {
+    entries.push({
+      kind: "summary",
+      messages: [canonical[0]!, canonical[1]!],
+    });
+    i = 2;
+  }
+
+  for (; i < canonical.length; i += 2) {
+    const user = canonical[i]!;
+    const assistant = canonical[i + 1]; // 奇数尾时为 undefined → 同样判为畸形
+    if (user.role !== "user" || assistant?.role !== "assistant") {
+      throw new Error(
+        `restoreAttentionWindowFromCanonical: canonical 第 ${i} 条起不是 ` +
+          "[user, assistant] 配对——store 产出的 canonical 不应出现此形态，" +
+          "可能是数据损坏",
+      );
+    }
+    entries.push({ kind: "pair", messages: [user, assistant] });
+  }
+
+  return new AttentionWindow(options, entries);
 }

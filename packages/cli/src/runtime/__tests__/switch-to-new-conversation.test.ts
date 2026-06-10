@@ -7,7 +7,11 @@ import type {
   Conversation,
   IConversationRepository,
   ITranscriptStore,
-  Message,
+} from "@zhixing/core";
+import {
+  assistantMessage,
+  restoreAttentionWindowFromCanonical,
+  userMessage,
 } from "@zhixing/core";
 import {
   switchToNewConversation,
@@ -67,7 +71,11 @@ function makeState(
   overrides: Partial<MutableConversationState> = {},
 ): MutableConversationState {
   return {
-    messages: [{ role: "user", content: "old" } as unknown as Message],
+    window: restoreAttentionWindowFromCanonical(
+      [userMessage("old"), assistantMessage("old-reply")],
+      { conversationId: "old-id" },
+    ),
+    pendingInputPrefix: [userMessage("leftover-prefix")],
     store: makeStore(),
     convRepo: makeRepo(),
     conversationId: "old-id",
@@ -120,7 +128,8 @@ describe("switchToNewConversation", () => {
       provider: "test-provider",
     });
     expect(conv.conversationId).toBe("new-id");
-    expect(conv.messages).toEqual([]);
+    expect(conv.window.getMessages()).toEqual([]);
+    expect(conv.pendingInputPrefix).toBeNull();
     expect(conv.turnCounter).toBe(0);
     expect(service.prime).toHaveBeenCalledWith("new-id");
     expect(conv.convRepo.touch).toHaveBeenCalledWith("new-id");

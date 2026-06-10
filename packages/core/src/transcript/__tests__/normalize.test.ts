@@ -65,16 +65,16 @@ describe("Lazy normalize（ADR-TR-5：老文件首次 load 同步归一化）", 
 
     await store.load("c1");
 
-    // 归一化后文件只剩 header + 最后一个 compact（turn 在它之前所以被丢弃）
+    // 归一化后文件只剩 header + 最后一个 compact（turn 行在它之前所以被丢弃）
     const raw = await loadRecords(file);
     expect(raw.compacts).toHaveLength(1);
     expect(raw.compacts[0]!.summary).toBe("新摘要");
-    expect(raw.turns).toHaveLength(0); // 旧 turn 时间戳早于最后 compact → 丢弃
+    expect(raw.turns).toHaveLength(0); // 旧 turn 行位于最后 compact 之前 → 丢弃
   });
 
-  it("§1.3 bug 老格式：turn.ts < compact.ts → load 后 turn 被归一化丢弃，文件干净", async () => {
-    // 场景复现：老 REPL 先 appendTurn（turnA.ts=0）再 appendCompact（compact.ts=5）
-    // 即使逻辑上 turnA 应该是 post-compact，但 ts 反了 → normalize 丢弃 turnA
+  it("老格式：turn 行在 compact 行之前 → load 后 turn 被归一化丢弃，文件干净", async () => {
+    // 场景复现：老 REPL 先 appendTurn 再 appendCompact —— turn 行物理上位于
+    // compact 之前，按顺序判定属被摘内容 → normalize 丢弃
     await store.init("c2", { model: "m", provider: "p" });
 
     const file = path.join(convDir, "c2", "transcript.jsonl");

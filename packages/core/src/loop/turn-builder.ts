@@ -122,14 +122,13 @@ export function buildTurn(input: BuildTurnInput): Turn {
  *   - 无 compactBefore：`new Date().toISOString()`（标准现时）
  *   - 有 compactBefore：`max(现时, compactBefore.timestamp + 1ms)`
  *
- * 为什么需要：`rebuild.needsNormalize / normalize` 用 `turn.timestamp <= compact.timestamp`
- * 判断"该 turn 是否发生在 compact 之前"（§1.3 bug 归一化规则）。compact_end 事件触发
- * 和 run 结束调 buildTurn 都用 `new Date().toISOString()`（毫秒粒度）——极端场景
- * （pre-flight compact 立即 abort / 超快 turn）二者可能同毫秒，老文件 lazy migrate
- * 会把这类 turn 误判为"在 compact 之前"而丢弃。
- *
- * 这个 helper 在 run 层保证 turn.timestamp 严格 > compact.timestamp —— 一行
- * 防御，彻底消除同毫秒误判。buildTurn 保持纯 —— 时序协调是 run 层知识。
+ * 为什么需要：同一次提交里 turn 逻辑上发生在 compact 之后（先摘旧、后落新），
+ * 但二者各自取 `new Date()`（毫秒粒度），极端场景（pre-flight compact 立即
+ * abort / 超快 turn）可能同毫秒甚至反序。本 helper 保证 turn.timestamp 严格
+ * 晚于 marker —— 让落盘记录的时间线与事件真实顺序一致，供展示、诊断与按时间
+ * 排序的消费方直接信赖。归一化判定不依赖时间戳（按文件物理顺序判），数据
+ * 存留不受此影响——这是纯粹的时间线卫生。buildTurn 保持纯 —— 时序协调是
+ * run 层知识。
  *
  * 跨包共享：cli 的 run-agent、server 的 adapter、测试都应通过此函数构造 timestamp。
  */

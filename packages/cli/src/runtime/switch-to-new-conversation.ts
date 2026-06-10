@@ -18,18 +18,23 @@
  */
 
 import type {
+  AttentionWindowState,
   Conversation,
   IConversationRepository,
   ITranscriptStore,
   Message,
 } from "@zhixing/core";
+import { createAttentionWindow } from "@zhixing/core";
 
 /**
  * 切换 active conversation 时需要 mutate 的最小字段集合。helper 直接写这些
  * 字段;caller(repl handler / typeahead callback 等)提供 mutable 引用。
  */
 export interface MutableConversationState {
-  messages: Message[];
+  /** 注意力窗口运行态 —— 换对话即换窗（旧窗整体弃置） */
+  window: AttentionWindowState;
+  /** 一次性输入前缀（工作场景触发句）—— 换对话即作废 */
+  pendingInputPrefix: Message[] | null;
   store: ITranscriptStore;
   convRepo: IConversationRepository;
   conversationId: string | null;
@@ -85,7 +90,8 @@ export async function switchToNewConversation(
     provider: session.runtime.providerId,
   });
   conv.conversationId = created.id;
-  conv.messages = [];
+  conv.window = createAttentionWindow({ conversationId: created.id });
+  conv.pendingInputPrefix = null;
   conv.turnCounter = 0;
   await taskListService.prime(created.id);
   conv.convRepo.touch(created.id).catch(() => {

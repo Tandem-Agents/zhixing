@@ -139,6 +139,7 @@ export async function loadRecords(filePath: string): Promise<{
   turns: Turn[];
   compacts: CompactMarker[];
   corruptedLines: number;
+  turnsBeforeLastCompact: number;
 }> {
   const content = await fs.readFile(filePath, "utf-8");
   return parseRecords(content);
@@ -147,18 +148,27 @@ export async function loadRecords(filePath: string): Promise<{
 /**
  * 从 JSONL 内容字符串解析所有记录。
  * 纯函数，方便测试。
+ *
+ * `turnsBeforeLastCompact`：文件物理顺序中、出现在**最后一个 compact 行之前**
+ * 的 turn 数（无 compact 时为 0）。这是归一化判定的结构事实：健康文件由
+ * 原子重写产生、compact 永远是 header 后第一行（计数 0）；turn 行出现在
+ * compact 之前只可能是历史 bug 遗留的"先 append turn 再 append compact"
+ * 形态。按物理顺序判而不按时间戳猜——压缩保留的近期 turns 时间戳天然早于
+ * marker（marker 记压缩发生时刻），时间戳判定会把它们误杀。
  */
 export function parseRecords(content: string): {
   header: TranscriptHeader | null;
   turns: Turn[];
   compacts: CompactMarker[];
   corruptedLines: number;
+  turnsBeforeLastCompact: number;
 } {
   const lines = content.split("\n").filter(Boolean);
   let header: TranscriptHeader | null = null;
   const turns: Turn[] = [];
   const compacts: CompactMarker[] = [];
   let corruptedLines = 0;
+  let turnsBeforeLastCompact = 0;
 
   for (const line of lines) {
     try {
@@ -169,6 +179,7 @@ export function parseRecords(content: string): {
         turns.push(record);
       } else if (isCompactMarker(record)) {
         compacts.push(record);
+        turnsBeforeLastCompact = turns.length;
       } else {
         corruptedLines++;
       }
@@ -177,7 +188,7 @@ export function parseRecords(content: string): {
     }
   }
 
-  return { header, turns, compacts, corruptedLines };
+  return { header, turns, compacts, corruptedLines, turnsBeforeLastCompact };
 }
 
 // ─── 类型守卫 ───

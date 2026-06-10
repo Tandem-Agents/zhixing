@@ -40,7 +40,7 @@ export interface InfoCommandsDeps {
   /** session.runtime —— reload / 模式切换会 swap，以 getter 注入按调用时读最新实例。 */
   readonly getRuntime: () => AgentRuntime;
   /** 当前对话消息（/status·/usage·/context；对话切换 / turn 会变）。 */
-  readonly getMessages: () => Message[];
+  readonly getMessages: () => readonly Message[];
   /** 当前对话 id（/status）。 */
   readonly getConversationId: () => string | null;
   /** 当前 turn 计数（/model·/usage）。 */

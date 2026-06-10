@@ -8,4 +8,8 @@ export type {
   WindowFoldOutcome,
   WindowResetReason,
 } from "./types.js";
-export { createAttentionWindow } from "./attention-window.js";
+export {
+  createAttentionWindow,
+  restoreAttentionWindowFromCanonical,
+} from "./attention-window.js";
+export { windowCompactFromMarker } from "./compact-marker-bridge.js";

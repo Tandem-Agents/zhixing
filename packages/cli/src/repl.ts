@@ -46,6 +46,10 @@ import {
   buildConversationNamerPrompt,
   type InferConversationName,
   CommandDispatcher,
+  type AttentionWindowState,
+  createAttentionWindow,
+  restoreAttentionWindowFromCanonical,
+  windowCompactFromMarker,
 } from "@zhixing/core";
 import { describeProxy, type ProxyDescription } from "@zhixing/network";
 import { loadConfig, loadCredentials, resolveHomeDir } from "@zhixing/providers";
@@ -114,7 +118,21 @@ import { createReplInterruptRuntime } from "./interrupt/repl-runtime.js";
  * 新实例，值捕获会与 getter 分叉）。
  */
 interface ConversationRuntimeState {
-  messages: Message[];
+  /**
+   * 注意力窗口运行态 —— "给 LLM 看什么"的唯一内存权威。
+   *
+   * 窗口只经 acceptRun / applyCompact / reset 前进；接受顺序固定为
+   * "先持久化成功、后入窗"——持久化失败窗口不前进，下轮在同一基底重试，
+   * 内存与磁盘不再产生漂移。run 输入由本回路瞬态构造
+   * （[...window.getMessages(), 用户消息]），用户消息不预写入任何状态。
+   */
+  window: AttentionWindowState;
+  /**
+   * 一次性输入前缀 —— 工作场景 LLM 触发句的承载。它不是窗口事实（无配对、
+   * 不落盘），本质是"等待随下一个 run 消费的首个用户输入"：随首个成功
+   * accept 的 run 进入发送视图后即清空；持久化只记录该 run 自己的用户消息。
+   */
+  pendingInputPrefix: Message[] | null;
   /** transcript 持久化（main 项目域 / workscene 域各自独立实例） */
   store: TranscriptStore;
   /** conversation meta 仓储（绑各自 ConversationScope） */
@@ -389,7 +407,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     return sanitizeConversationName(raw);
   };
 
-  let messages: Message[] = [];
+  let window: AttentionWindowState | null = null;
   let conversationId: string | null = null;
   let turnCounter = 0;
   // 当前 REPL 接续的对话名称——auto-resume 命中时写入,喂给 welcome chrome 内
@@ -400,11 +418,15 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   // 启动期对话选择策略：统一 auto-resume `convRepo.findLatest()` 最近一条对话,
   // 无 latest 或加载失败则降级到创建 default 新对话。
   // 用户想切换到其它对话或新建命名,进入 REPL 后用 `/resume` / `/new <name>`。
+  // 恢复的历史经 canonical → 窗口重建进入注意力窗口（预算化启动装填落地前的
+  // 过渡形态：启动仍全量加载）。
   const latest = await convRepo.findLatest();
   if (latest) {
     try {
       const loaded = await store.load(latest);
-      messages = loaded.messages;
+      window = restoreAttentionWindowFromCanonical(loaded.messages, {
+        conversationId: latest,
+      });
       conversationId = latest;
       turnCounter = loaded.turnCount;
       const conv = await convRepo.get(latest);
@@ -528,7 +550,10 @@ export async function startRepl(options: ReplOptions): Promise<void> {
 
   // main 域运行态 —— 进入工作模式后此实例原样保留，退出时直接切回（双份持有）。
   const mainConv: ConversationRuntimeState = {
-    messages,
+    // 启动恢复命中时已从 canonical 重建；新建对话从空窗起步
+    window:
+      window ?? createAttentionWindow({ conversationId: conversationId ?? undefined }),
+    pendingInputPrefix: null,
     store,
     convRepo,
     conversationId,
@@ -655,20 +680,24 @@ export async function startRepl(options: ReplOptions): Promise<void> {
               await worksceneRepo.delete(wConv.id).catch(() => {});
             });
           }
-          // 起始 messages 按触发源 × 路径：
-          //   - LLM：[triggerMsg]（触发句须带入否则 power 不知干啥）
-          //   - command-recovery：loaded.messages（接续历史对话）
-          //   - command-create / command-降级：[]（用户随后在 workscene 输入）
+          // 起始内容按触发源 × 路径分流到窗口 / 输入前缀：
+          //   - LLM：触发句进 pendingInputPrefix（power 不知干啥就靠它）——它
+          //     不是窗口事实（无配对、从不落盘），随首个成功 accept 的 run
+          //     进入发送视图后即清空，与"触发句只活到首次提交"的语义一致。
+          //   - command-recovery：loaded.messages（canonical）重建窗口，接续历史。
+          //   - command-create / command-降级：空窗（用户随后在 workscene 输入）。
           //
           // 触发句由主回路显式透传该 turn 构造的原始 userMsg —— 不扫描 canonical
           // 反推：带工具调用的 turn 末尾 tool_result 消息同为 role:"user"
           // （toolResultMessage），按 role 反查会误取工具结果而非用户原句。
-          const startMessages: Message[] =
-            source === "llm" && triggerMsg
-              ? [triggerMsg]
-              : loaded
-                ? loaded.messages
-                : [];
+          const wWindow =
+            loaded !== null
+              ? restoreAttentionWindowFromCanonical(loaded.messages, {
+                  conversationId: wConv.id,
+                })
+              : createAttentionWindow({ conversationId: wConv.id });
+          const wPrefix =
+            source === "llm" && triggerMsg ? [triggerMsg] : null;
           // ③ task_list service cache prime（新建 → 空 items；recovery → 读
           // 已落盘的 task_list state）
           await state.taskListService.prime(wConv.id);
@@ -688,7 +717,8 @@ export async function startRepl(options: ReplOptions): Promise<void> {
           }
           // ⑤ 构造并切 active（纯赋值，最后一步、不可能抛错 → 无需 undo）
           state.conv = {
-            messages: startMessages,
+            window: wWindow,
+            pendingInputPrefix: wPrefix,
             store: wStore,
             convRepo: worksceneRepo,
             conversationId: wConv.id,
@@ -744,7 +774,9 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       // 尚未调用），callText 绑 light（power 的 light = 用户中档）。state.conv
       // 仍 = worksceneConv，持本场景全部消息。
       let digest: string | undefined;
-      const digestPrompt = buildWorksceneDigestPrompt(state.conv.messages);
+      const digestPrompt = buildWorksceneDigestPrompt(
+        state.conv.window.getMessages(),
+      );
       if (digestPrompt) {
         try {
           digest =
@@ -772,12 +804,15 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       routingRepo.setActive(mainConv.convRepo);
       if (worksceneConvId) state.taskListService.clear(worksceneConvId);
 
-      // 仅纪要成功时，append 到 main 运行态消息末尾，以 system-meta 元标签包裹
-      // （主对话据既有 meta-protocol 通用框架识别为机制插入、非自己原话）。
-      // 这是一次性交接上下文：主对话下一 turn 见之，是否长存由主对话自判调
-      // memory 工具；不写个人记忆。
+      // 仅纪要成功时，挂为 main 运行态的一次性输入前缀，以 system-meta 元标签
+      // 包裹（主对话据既有 meta-protocol 通用框架识别为机制插入、非自己原话）。
+      // 这是一次性交接上下文：随主对话下一 run 进入发送视图、被接受后即消费
+      // （不入窗口事实、不落盘），是否长存由主对话自判调 memory 工具；不写个人记忆。
       if (digest) {
-        mainConv.messages.push(buildWorksceneDigestMessage(digest));
+        mainConv.pendingInputPrefix = [
+          ...(mainConv.pendingInputPrefix ?? []),
+          buildWorksceneDigestMessage(digest),
+        ];
       }
       const sepWidth = Math.max(38, (process.stdout.columns ?? 80) - 3);
       const sep = "─".repeat(sepWidth);
@@ -828,7 +863,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     dispatcher: typeaheadDispatcher,
     writer: cliWriter,
     getRuntime: () => session.runtime,
-    getMessages: () => state.conv.messages,
+    getMessages: () => state.conv.window.getMessages(),
     getConversationId: () => state.conv.conversationId,
     getTurnCounter: () => state.conv.turnCounter,
     getNetworkProxy: () => state.networkProxy,
@@ -913,7 +948,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     writer: cliWriter,
     callText: (prompt) => session.runtime.callText(prompt, "main"),
     createSkill: (draft) => session.skillStore.create(draft),
-    getMessages: () => state.conv.messages,
+    getMessages: () => state.conv.window.getMessages(),
     getDefaultMode: () =>
       session.activeMode.kind === "workscene" ? "work" : "main",
     refreshCommands: () => tRegistry.refresh(),
@@ -1346,9 +1381,11 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       }
     }
 
-    // 正常对话
+    // 正常对话 —— 用户消息不预写入任何状态：run 输入瞬态构造
+    // （[...窗口事实, ...一次性前缀, 用户消息]），窗口只在持久化成功后经
+    // acceptRun 前进。失败路径因此天然干净：窗口与前缀原样保留，下轮重试
+    // 同一基底，无需任何回滚动作。
     const userMsg = userMessage(resolvedInput);
-    state.conv.messages.push(userMsg);
     state.running = true;
     renderer.startThinking();
 
@@ -1380,7 +1417,13 @@ export async function startRepl(options: ReplOptions): Promise<void> {
 
     try {
       const runPromise = session.runtime.run({
-        messages: [...state.conv.messages],
+        // run 输入 = 窗口事实 + 一次性前缀（工作场景触发句）+ 本轮用户消息。
+        // 瞬态构造：窗口在 accept 之前不前进，失败即弃，无回滚负担。
+        messages: [
+          ...state.conv.window.getMessages(),
+          ...(state.conv.pendingInputPrefix ?? []),
+          userMsg,
+        ],
         turnIndex: state.conv.turnCounter,
         // 透传当前 conversationId 进 RunContext —— 让工具按需取（在持久化会话中
         // 区分写入目标 / 读取上下文）；ephemeral 路径（无 conversation）自然为
@@ -1393,25 +1436,32 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       state.activeTurnPromise = runPromise;
       const runResult = await runPromise;
       pendingModeSwitch = runResult.pendingModeSwitch;
-      const { newMessages } = runResult;
 
       renderer.stop();
       // turn 终止反馈（耗时 / token / abort 原因 / error 类型 / max_turns）由 status-bar
       // 单点接管——renderSummary 已移除，避免每条 AI 消息底下重复的 "─ 1.6s" 视觉噪音。
       // 状态条 done 永驻显示直到下一次 agent:run_start，新 turn 起始覆盖回 thinking。
 
-      // 单一事实源持久化：
-      //   commitTurn 一次原子写入 turn + compactBefore，返回 canonical messages。
-      //   state.conv.messages = canonical 整体替换，不再分两步 "push newMessages + appendTurn"。
-      //   canonical 自带压缩效果（compactBefore 截断后的末尾 turns + summaryPair），
-      //   下次 run 直接用 state.conv.messages 作为 LLM 输入，跨 run 状态与磁盘严格一致。
+      // 接受协议：先持久化成功、后窗口前进（acceptRun 应用 windowCompact 折叠
+      // 并追加本 run 配对）。过渡期双应用——compactBefore 仍照旧写盘，窗口同步
+      // 折叠，内存与磁盘保持同形；窗口成为唯一事实源后写盘侧将停用 marker。
       if (state.conv.conversationId) {
         try {
-          const canonical = await state.conv.store.commitTurn(state.conv.conversationId, {
+          await state.conv.store.commitTurn(state.conv.conversationId, {
             turn: runResult.turn,
             compactBefore: runResult.compactBefore,
           });
-          state.conv.messages = canonical;
+          state.conv.window.acceptRun({
+            runMessages: [
+              runResult.turn.userMessage,
+              runResult.turn.assistantMessage,
+            ],
+            windowCompact: runResult.compactBefore
+              ? windowCompactFromMarker(runResult.compactBefore)
+              : undefined,
+          });
+          // 一次性前缀已随本 run 进入发送视图并被摘要语境覆盖 → 消费完毕
+          state.conv.pendingInputPrefix = null;
           state.conv.turnCounter++;
           state.conv.convRepo.touch(state.conv.conversationId).catch(() => {});
 
@@ -1428,24 +1478,13 @@ export async function startRepl(options: ReplOptions): Promise<void> {
             convRepo: state.conv.convRepo,
           });
         } catch (err) {
-          // 持久化失败降级：state.conv.messages 按未压缩形态 append newMessages
-          //
-          // 已知代价：runResult.compactBefore 若非空，此降级不应用 compact 截断 ——
-          // 内存 state.conv.messages 会多出一些本应被截断的老 turns，与磁盘不一致。
-          //
-          // 自愈机制：下一轮 run 的 pre-flight contextManager 会重新评估并触发
-          // 新一轮 compact（因为内存超过阈值），恢复状态一致性。
-          // 若进程崩溃并重启，磁盘还是老状态（本次 commitTurn 失败 = 无写入），
-          // load → rebuildCanonicalMessages 直接从磁盘恢复，内存 drift 自然清零。
-          //
-          // 为什么不做复杂的"内存等价 rebuild"：
-          //   a. 持久化失败是罕见事件（磁盘满 / 权限 / EIO），过度设计 ROI 低
-          //   b. 简单 append 保证本轮对话对用户完整展示
-          //   c. 自愈路径已经覆盖长期状态一致性
-          state.conv.messages.push(...newMessages);
+          // 持久化失败 → 窗口不前进：内存与磁盘停在同一基底，下轮重试。
+          // 本轮的对话内容用户已在屏上看到（流式渲染），不会无声丢失；
+          // 但它未成为窗口事实，下轮 LLM 不可见——比"内存 append 造成
+          // 与磁盘漂移、再靠下轮压缩自愈"的旧策略更可预期。
           cliWriter.line(
             chalk.dim(
-              `  [持久化警告] ${err instanceof Error ? err.message : String(err)}`,
+              `  [持久化警告] 本轮对话未写入磁盘，已从上下文丢弃: ${err instanceof Error ? err.message : String(err)}`,
             ),
           );
         }
@@ -1460,13 +1499,20 @@ export async function startRepl(options: ReplOptions): Promise<void> {
           runJournalLifecycle(session.runtime).catch(() => {});
         }
       } else {
-        // 无会话 ID（无持久化）：降级为内存 append，保持对话语义
-        state.conv.messages.push(...newMessages);
+        // 无会话 ID（无持久化，正常 cli 流程不出现）：窗口直接接受本 run，
+        // 与持久化路径同一窗口协议——跨 run 留存的是蒸馏对而非全量协议消息。
+        state.conv.window.acceptRun({
+          runMessages: [
+            runResult.turn.userMessage,
+            runResult.turn.assistantMessage,
+          ],
+        });
+        state.conv.pendingInputPrefix = null;
       }
     } catch (err) {
       renderer.stop();
       renderError(err, cliWriter);
-      state.conv.messages.pop();
+      // 用户消息未预写入任何状态，错误路径无需回滚
     } finally {
       // 释放 stdin keypress ownership + 卸 SIGINT/SIGTERM listener;
       // 恢复 attach 前的 raw mode 状态,让下一轮 typeahead-input / readline 正常工作。

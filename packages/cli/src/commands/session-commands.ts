@@ -24,6 +24,8 @@ import {
   type ArgChoice,
   type ArgSchema,
   type WorkModeSwitchIntent,
+  restoreAttentionWindowFromCanonical,
+  windowCompactFromMarker,
 } from "@zhixing/core";
 import type { AgentRuntime } from "@zhixing/orchestrator/runtime";
 import {
@@ -106,15 +108,19 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
   });
   dispatcher.registerHandler("clear:repl", async () => {
     const conv = deps.getConv();
-    // 走 store.compactAll 写一条 compact marker 原子重写 transcript——内存与磁盘必须同时
-    // 压缩才能让"清空"语义稳定（仅清内存会被下次 commitTurn 内 loadNormalized 把磁盘老
-    // turns 重新拼回 canonical 让历史回流）。
+    // 走 store.compactAll 写一条 compact marker 原子重写 transcript，窗口从返回的
+    // canonical（仅 summaryPair）重建——磁盘与窗口必须同时压缩才能让"清空"语义
+    // 稳定（仅动窗口的话，重启全量加载会把老历史灌回来）。持久化失败窗口不动，
+    // 内存与磁盘停在同一基底。
     if (conv.conversationId) {
       try {
-        conv.messages = await conv.store.compactAll(
+        const canonical = await conv.store.compactAll(
           conv.conversationId,
           "(用户已清空对话历史)",
         );
+        conv.window = restoreAttentionWindowFromCanonical(canonical, {
+          conversationId: conv.conversationId,
+        });
       } catch (err) {
         writer.line(
           chalk.red(
@@ -124,9 +130,10 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
         return {};
       }
     } else {
-      // 无 conversationId 路径（极少见，正常 cli 流程总有 conversation）——仅清内存
-      conv.messages = [];
+      // 无 conversationId 路径（极少见，正常 cli 流程总有 conversation）——仅清窗口
+      conv.window.reset("clear");
     }
+    conv.pendingInputPrefix = null;
 
     // 非致命 warning 收集到本地数组，末尾按 clearScreenToInitial 是否可用分流：chrome
     // 路径（rebuild 会清 scroll region）把 warnings 作为 extraLines 一并注入重建内容避免
@@ -260,7 +267,10 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
 
     try {
       const loaded = await conv.store.load(target.id);
-      conv.messages = loaded.messages;
+      conv.window = restoreAttentionWindowFromCanonical(loaded.messages, {
+        conversationId: target.id,
+      });
+      conv.pendingInputPrefix = null;
       conv.conversationId = target.id;
       conv.turnCounter = loaded.turnCount;
       // 加载目标对话的 task_list 持久化状态到 service cache
@@ -318,7 +328,7 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
   });
   dispatcher.registerHandler("compact:repl", async () => {
     const conv = deps.getConv();
-    if (conv.messages.length < 4) {
+    if (conv.window.getMessages().length < 4) {
       writer.line(chalk.dim("\n  对话历史过短，无需压缩\n"));
       return {};
     }
@@ -326,31 +336,30 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
     try {
       const result = await deps
         .getRuntime()
-        .forceCompact([...conv.messages], conv.turnCounter);
-      if (result.modified) {
-        const pct = Math.round(result.budget.usageRatio * 100);
-        writer.line(chalk.green(`  ✓ 压缩完成，当前上下文占用 ${pct}%\n`));
-        // 走 commitTurn({compactBefore}) 统一持久化入口：仅在事务产生真 summary 时写
-        // marker，原子重写 header + compactBefore + retained turns，返回 canonical 整体
-        // 替换 conv.messages 让内存与磁盘严格一致；无会话 ID 或无真 summary 时降级为纯内存。
-        if (conv.conversationId && result.compactBefore) {
+        .forceCompact([...conv.window.getMessages()], conv.turnCounter);
+      // 窗口只在事务产生真 summary 且 marker 持久化成功后折叠（先盘后窗，与
+      // run 接受协议同纪律）。非摘要型修改（无 marker）不动窗口——那类结果
+      // 既不落盘，落进窗口只会制造与磁盘的漂移。
+      if (result.modified && result.compactBefore) {
+        if (conv.conversationId) {
           try {
-            conv.messages = await conv.store.commitTurn(conv.conversationId, {
+            await conv.store.commitTurn(conv.conversationId, {
               compactBefore: result.compactBefore,
             });
           } catch (err) {
-            // 持久化失败：降级用 forceCompact 返回的内存版 messages
-            conv.messages = result.messages;
             writer.line(
               chalk.dim(
-                `  [持久化警告] ${err instanceof Error ? err.message : String(err)}`,
+                `  [持久化警告] 压缩未生效（窗口未变）: ${err instanceof Error ? err.message : String(err)}\n`,
               ),
             );
+            return {};
           }
-        } else {
-          // 无真 summary（非摘要型策略）或无会话 ID → 仅更新内存
-          conv.messages = result.messages;
         }
+        conv.window.applyCompact(windowCompactFromMarker(result.compactBefore));
+        const pct = Math.round(result.budget.usageRatio * 100);
+        writer.line(chalk.green(`  ✓ 压缩完成，当前上下文占用 ${pct}%\n`));
+      } else if (result.modified) {
+        writer.line(chalk.dim("  压缩未产生摘要，窗口未变\n"));
       } else {
         writer.line(chalk.dim("  已无可压缩内容\n"));
       }

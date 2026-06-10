@@ -12,8 +12,12 @@ import { describe, it, expect, vi } from "vitest";
 import {
   CommandDispatcher,
   DefaultCommandRegistry,
-  type Message,
   type RuntimeContext,
+  assistantMessage,
+  buildCompactSummaryPair,
+  createAttentionWindow,
+  restoreAttentionWindowFromCanonical,
+  userMessage,
 } from "@zhixing/core";
 import {
   registerSessionCommands,
@@ -62,7 +66,10 @@ function setup(convOverrides: Partial<Record<string, unknown>> = {}): Harness {
   const rename = vi.fn(async (id: string, name: string) => ({ id, name }));
 
   const store = {
-    compactAll: vi.fn(async () => [{ role: "system", content: "cleared" }]),
+    // compactAll 返回 store 真实形态的 canonical：summaryPair 两条
+    compactAll: vi.fn(async () => [
+      ...buildCompactSummaryPair("(用户已清空对话历史)"),
+    ]),
     countTurns: vi.fn(async () => 3),
     load: vi.fn(async () => ({ messages: [], turnCount: 9 })),
     commitTurn: vi.fn(async () => []),
@@ -77,7 +84,8 @@ function setup(convOverrides: Partial<Record<string, unknown>> = {}): Harness {
     create: vi.fn(async () => ({ id: "new-id", name: "chat-x" })),
   };
   const conv = {
-    messages: [] as Message[],
+    window: createAttentionWindow({ conversationId: "conv-1" }),
+    pendingInputPrefix: null,
     conversationId: "conv-1",
     turnCounter: 5,
     store,
@@ -126,10 +134,10 @@ describe("registerSessionCommands · 注册", () => {
 });
 
 describe("registerSessionCommands · /clear", () => {
-  it("getConv() 写回 messages（compactAll 结果）+ turnCounter 归零 + 清 task cache", async () => {
+  it("窗口从 compactAll 返回的 canonical 重建（仅 summaryPair）+ turnCounter 归零 + 清 task cache", async () => {
     const h = setup({ turnCounter: 8 });
     await h.dispatcher.dispatch("/clear", RUNTIME);
-    expect(h.conv.messages).toHaveLength(1);
+    expect(h.conv.window.getMessages()).toHaveLength(2);
     expect(h.conv.turnCounter).toBe(0);
     expect(h.taskClear).toHaveBeenCalledWith("conv-1");
   });
@@ -160,7 +168,13 @@ describe("registerSessionCommands · /name", () => {
 
 describe("registerSessionCommands · /compact", () => {
   it("历史过短（<4）→ 直接提示，不调 forceCompact", async () => {
-    const h = setup({ messages: [{ role: "user", content: "hi" }] });
+    const h = setup({
+      // 窗口只有一个配对（2 条消息）< 4
+      window: restoreAttentionWindowFromCanonical([
+        userMessage("hi"),
+        assistantMessage("yo"),
+      ]),
+    });
     await h.dispatcher.dispatch("/compact", RUNTIME);
     expect(visible(h.writer)).toContain("过短");
   });
