@@ -40,7 +40,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { toSafePathSegment } from "../../paths.js";
-import { cleanupOrphanTmp, writeAtomic } from "../serializer.js";
+import { recoverOrphanTmp, writeAtomic } from "../serializer.js";
 import {
   DEFAULT_MAX_SHARD_BYTES,
   SHARD_FORMAT_VERSION,
@@ -127,10 +127,21 @@ export class ShardedTranscriptStore {
     });
   }
 
+  /**
+   * 对话是否有持久化存在 —— 服从"分片文件在，会话就在"不变量：索引可读
+   * **或**目录里有分片文件，任一成立即 true。纯只读探测、不触发自愈写盘
+   * （自愈在读写路径的索引获取处收敛）。
+   */
   async exists(conversationId: string): Promise<boolean> {
     try {
       await fs.access(this.indexFile(conversationId));
       return true;
+    } catch {
+      // 索引层事故不掩盖事实：有分片即会话存在
+    }
+    try {
+      const entries = await fs.readdir(this.transcriptDir(conversationId));
+      return entries.some((e) => SHARD_FILE_PATTERN.test(e));
     } catch {
       return false;
     }
@@ -179,7 +190,11 @@ export class ShardedTranscriptStore {
     });
   }
 
-  /** 读取索引（公开只读视图——倒读原语与未来清理路径共用） */
+  /**
+   * 读取索引 —— 裸读、不自愈（null = 文件缺失或损坏）。
+   * 读路径消费者（倒读原语等）应使用 `ensureReadableIndex`，否则索引层
+   * 事故会让完好的分片对读端"暂时失联"。
+   */
   async readIndex(conversationId: string): Promise<TranscriptIndex | null> {
     try {
       const raw = await fs.readFile(this.indexFile(conversationId), "utf-8");
@@ -187,6 +202,23 @@ export class ShardedTranscriptStore {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * 读路径的索引获取 —— 与写路径同一自愈核：索引缺失 / 损坏时锁内
+   * 收尾 tmp（能恢复则恢复）→ 从分片重建（有素材才落盘）。**决不新建**：
+   * 读一个不存在的对话不产生任何副作用，仍返回 null。
+   *
+   * 快路径（索引可读）零锁零开销；只有异常形态才进锁收敛。
+   */
+  async ensureReadableIndex(
+    conversationId: string,
+  ): Promise<TranscriptIndex | null> {
+    const fast = await this.readIndex(conversationId);
+    if (fast) return fast;
+    return await this.withLock(conversationId, () =>
+      this.ensureIndexInLock(conversationId),
+    );
   }
 
   /** 读取单个分片的全部有效记录行（坏行跳过——崩溃截断容错） */
@@ -226,20 +258,16 @@ export class ShardedTranscriptStore {
   // ─── 锁内实现 ───
 
   /**
-   * 打开对话：读索引（无则建）、推导 nextRunIndex、校核 clear 两步写的
-   * 半成品形态。结果缓存——store 是对话写入的唯一 owner，进程内缓存与
-   * 磁盘一致由锁保证。
+   * 打开对话：收尾索引的崩溃残留 tmp（能恢复则恢复）→ 读索引 → 读不出则
+   * 从分片重建（自愈）→ 真空才新建；随后推导 nextRunIndex、校核 clear
+   * 两步写的半成品形态。结果缓存——store 是对话写入的唯一 owner，进程内
+   * 缓存与磁盘一致由锁保证。
    */
   private async openInLock(conversationId: string): Promise<OpenState> {
     const cached = this.opened.get(conversationId);
     if (cached) return cached;
 
-    if (!this.cleanedIds.has(conversationId)) {
-      this.cleanedIds.add(conversationId);
-      await cleanupOrphanTmp(this.indexFile(conversationId));
-    }
-
-    let index = await this.readIndex(conversationId);
+    let index = await this.ensureIndexInLock(conversationId);
     if (!index) {
       const meta = buildShardMeta(1);
       index = {
@@ -283,6 +311,83 @@ export class ShardedTranscriptStore {
     };
     this.opened.set(conversationId, state);
     return state;
+  }
+
+  /**
+   * 锁内自愈核 —— 读路径（ensureReadableIndex）与写路径（openInLock）共用：
+   * 收尾索引的崩溃残留 tmp（能恢复则恢复）→ 读索引 → 读不出则从分片重建。
+   * 返回 null = 既无索引也无分片（是否新建由调用方按读 / 写语义决定）。
+   */
+  private async ensureIndexInLock(
+    conversationId: string,
+  ): Promise<TranscriptIndex | null> {
+    if (!this.cleanedIds.has(conversationId)) {
+      this.cleanedIds.add(conversationId);
+      await recoverOrphanTmp(this.indexFile(conversationId));
+    }
+
+    const index = await this.readIndex(conversationId);
+    if (index) return index;
+    // 索引缺失 / 损坏 —— 索引只是分片的派生投影，目录里有分片即全量重建。
+    // 决不把已有会话误判为新会话（那会让旧分片失联、rollover 撞号互写）。
+    return await this.rebuildIndexInLock(conversationId);
+  }
+
+  /**
+   * 从分片文件全量重建索引 —— **索引是派生投影，分片原文是唯一真相**。
+   * 索引缺失 / 损坏（替换窗口崩溃、坏块、误删）一律走此自愈："分片文件在，
+   * 会话就在"。返回 null = 目录无分片（真·新会话，由调用方新建）。
+   *
+   * 重建物全部取自分片记录值：shards 按文件名序号升序、createdAt 取分片
+   * header 记录值（沿"清理判据不依赖文件系统时间戳"纪律，header 缺失时
+   * 退化为重建时刻）；activeShardId = 最大序号；lastClearAt = 全部分片中
+   * 最新 ClearRecord 时刻（读边界权威本就在分片内，此处只恢复元数据投影）。
+   * 重建完成即落盘。
+   */
+  private async rebuildIndexInLock(
+    conversationId: string,
+  ): Promise<TranscriptIndex | null> {
+    let entries: string[];
+    try {
+      entries = await fs.readdir(this.transcriptDir(conversationId));
+    } catch {
+      return null; // 目录不存在 = 新会话
+    }
+    const shardFiles = entries.filter((e) => SHARD_FILE_PATTERN.test(e)).sort();
+    if (shardFiles.length === 0) return null;
+
+    const shards: TranscriptShardMeta[] = [];
+    let lastClearAt: string | undefined;
+    for (const file of shardFiles) {
+      const meta: TranscriptShardMeta = {
+        id: file.slice(0, -".jsonl".length),
+        file,
+        createdAt: new Date().toISOString(),
+        isActive: false,
+      };
+      for (const line of await this.readShardLines(conversationId, meta)) {
+        if (line.type === "header") {
+          meta.createdAt = line.createdAt;
+        } else if (
+          line.type === "clear" &&
+          (lastClearAt === undefined || line.timestamp > lastClearAt)
+        ) {
+          lastClearAt = line.timestamp;
+        }
+      }
+      shards.push(meta);
+    }
+    shards[shards.length - 1]!.isActive = true;
+
+    const index: TranscriptIndex = {
+      version: TRANSCRIPT_INDEX_VERSION,
+      conversationId,
+      activeShardId: shards[shards.length - 1]!.id,
+      ...(lastClearAt !== undefined ? { lastClearAt } : {}),
+      shards,
+    };
+    await this.writeIndexInLock(conversationId, index);
+    return index;
   }
 
   /** 超过字节上限且即将写入新 run → 索引先行 rollover，分片文件惰性创建 */
@@ -362,6 +467,9 @@ export class ShardedTranscriptStore {
 }
 
 // ─── 纯辅助 ───
+
+/** 分片文件名形态（零填充 6 位序号）—— exists 探测与索引重建共用 */
+const SHARD_FILE_PATTERN = /^\d{6}\.jsonl$/;
 
 function buildShardMeta(seq: number): TranscriptShardMeta {
   const id = String(seq).padStart(6, "0");

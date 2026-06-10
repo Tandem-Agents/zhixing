@@ -23,16 +23,15 @@ function makeEvent(
 // ─── subscribeCompactAccumulator 累积规则 ───
 
 describe("subscribeCompactAccumulator · 基础累积规则", () => {
-  it("从未 fire 时 getMarker 返回 undefined", () => {
+  it("从未 fire 时 getWindowCompact 返回 undefined", () => {
     const bus = makeBus();
     const acc = subscribeCompactAccumulator(bus);
-    expect(acc.getMarker()).toBeUndefined();
+    expect(acc.getWindowCompact()).toBeUndefined();
   });
 
-  it("一次 fire 含 summary：getMarker 返回 CompactMarker（含 type + timestamp）", async () => {
+  it("一次 fire 含 summary：getWindowCompact 返回窗口重构指令", async () => {
     const bus = makeBus();
     const acc = subscribeCompactAccumulator(bus);
-    const before = Date.now();
 
     await bus.emit(
       "context:compact_end",
@@ -44,20 +43,15 @@ describe("subscribeCompactAccumulator · 基础累积规则", () => {
       }),
     );
 
-    const marker = acc.getMarker();
-    expect(marker).toBeDefined();
-    expect(marker!.type).toBe("compact");
-    expect(marker!.summary).toBe("first summary");
-    expect(marker!.turnsCompacted).toBe(5);
-    expect(marker!.tokensBefore).toBe(2000);
-    expect(marker!.tokensAfter).toBe(800);
-    // timestamp 是有效 ISO 且在事件触发期间
-    const ts = Date.parse(marker!.timestamp);
-    expect(ts).toBeGreaterThanOrEqual(before);
-    expect(ts).toBeLessThanOrEqual(Date.now());
+    const wc = acc.getWindowCompact();
+    expect(wc).toBeDefined();
+    expect(wc!.summary).toBe("first summary");
+    expect(wc!.pairsCompacted).toBe(5);
+    expect(wc!.tokensBefore).toBe(2000);
+    expect(wc!.tokensAfter).toBe(800);
   });
 
-  it("两次 fire 都含 summary：turnsCompacted 累加、summary 取最新、timestamp 取最新", async () => {
+  it("两次 fire 都含 summary：pairsCompacted 累加、summary 取最新", async () => {
     const bus = makeBus();
     const acc = subscribeCompactAccumulator(bus);
 
@@ -65,22 +59,16 @@ describe("subscribeCompactAccumulator · 基础累积规则", () => {
       "context:compact_end",
       makeEvent({ summary: "first", turnsCompacted: 3, tokensBefore: 2000, tokensAfter: 1200 }),
     );
-    const firstTs = acc.getMarker()!.timestamp;
-    // 跨不同毫秒，让第二次 fire 的 timestamp 可区分
-    await new Promise((r) => setTimeout(r, 5));
     await bus.emit(
       "context:compact_end",
       makeEvent({ summary: "second (含前次)", turnsCompacted: 4, tokensBefore: 1500, tokensAfter: 600 }),
     );
 
-    const marker = acc.getMarker()!;
-    expect(marker.type).toBe("compact");
-    expect(marker.summary).toBe("second (含前次)"); // 取最新（新 summary 天然含旧历史）
-    expect(marker.turnsCompacted).toBe(3 + 4);      // 累加
-    expect(marker.tokensBefore).toBe(2000);         // 锚定第一次
-    expect(marker.tokensAfter).toBe(600);           // 取最新
-    // timestamp 覆盖式更新（第二次 fire 的时间）
-    expect(Date.parse(marker.timestamp)).toBeGreaterThan(Date.parse(firstTs));
+    const wc = acc.getWindowCompact()!;
+    expect(wc.summary).toBe("second (含前次)"); // 取最新（新 summary 天然含旧历史）
+    expect(wc.pairsCompacted).toBe(3 + 4);      // 累加
+    expect(wc.tokensBefore).toBe(2000);         // 锚定第一次
+    expect(wc.tokensAfter).toBe(600);           // 取最新
   });
 
   it("多次 fire 中部分无 summary：只累积含 summary 的事务", async () => {
@@ -95,7 +83,7 @@ describe("subscribeCompactAccumulator · 基础累积规则", () => {
       // 无 summary
     }));
 
-    expect(acc.getMarker()).toBeUndefined();   // 非摘要事务不参与累积
+    expect(acc.getWindowCompact()).toBeUndefined();   // 非摘要事务不参与累积
 
     // 后面一次摘要型事务
     await bus.emit("context:compact_end", makeEvent({
@@ -105,12 +93,11 @@ describe("subscribeCompactAccumulator · 基础累积规则", () => {
       tokensAfter: 400,
     }));
 
-    const marker = acc.getMarker()!;
-    expect(marker.type).toBe("compact");
-    expect(marker.summary).toBe("llm summary");
-    expect(marker.turnsCompacted).toBe(7);
-    expect(marker.tokensBefore).toBe(1500);   // 首次摘要型事务的 tokensBefore（不是非摘要型那次的 2000）
-    expect(marker.tokensAfter).toBe(400);
+    const wc = acc.getWindowCompact()!;
+    expect(wc.summary).toBe("llm summary");
+    expect(wc.pairsCompacted).toBe(7);
+    expect(wc.tokensBefore).toBe(1500);   // 首次摘要型事务的 tokensBefore（不是非摘要型那次的 2000）
+    expect(wc.tokensAfter).toBe(400);
   });
 
   it("turnsCompacted 为 undefined 时按 0 处理", async () => {
@@ -126,8 +113,8 @@ describe("subscribeCompactAccumulator · 基础累积规则", () => {
       // 无 turnsCompacted
     }));
 
-    expect(acc.getMarker()?.turnsCompacted).toBe(2);   // 2 + 0 = 2
-    expect(acc.getMarker()?.summary).toBe("second");
+    expect(acc.getWindowCompact()?.pairsCompacted).toBe(2);   // 2 + 0 = 2
+    expect(acc.getWindowCompact()?.summary).toBe("second");
   });
 
   it("onEvent 回调在每次 fire 时被触发（含非摘要事务）", async () => {
@@ -157,7 +144,7 @@ describe("subscribeCompactAccumulator · dispose 语义", () => {
     await bus.emit("context:compact_end", makeEvent({
       summary: "before-dispose", turnsCompacted: 3, tokensBefore: 2000, tokensAfter: 1000,
     }));
-    const before = acc.getMarker();
+    const before = acc.getWindowCompact();
     expect(before?.summary).toBe("before-dispose");
 
     acc.dispose();
@@ -167,9 +154,9 @@ describe("subscribeCompactAccumulator · dispose 语义", () => {
     }));
 
     // dispose 后 listener 被移除，累积状态不受后续 fire 影响
-    const after = acc.getMarker();
+    const after = acc.getWindowCompact();
     expect(after?.summary).toBe("before-dispose");
-    expect(after?.turnsCompacted).toBe(3);
+    expect(after?.pairsCompacted).toBe(3);
   });
 
   it("dispose 幂等：多次调用不抛错", () => {
@@ -198,8 +185,8 @@ describe("subscribeCompactAccumulator · dispose 语义", () => {
     await bus.emit("context:compact_end", makeEvent({
       summary: "first-event", turnsCompacted: 2, tokensBefore: 2000, tokensAfter: 1000,
     }));
-    expect(acc1.getMarker()?.summary).toBe("first-event");
-    expect(acc2.getMarker()?.summary).toBe("first-event");
+    expect(acc1.getWindowCompact()?.summary).toBe("first-event");
+    expect(acc2.getWindowCompact()?.summary).toBe("first-event");
 
     acc1.dispose();  // 只 dispose acc1
 
@@ -208,11 +195,11 @@ describe("subscribeCompactAccumulator · dispose 语义", () => {
     }));
 
     // acc1 已 dispose，不再累积
-    expect(acc1.getMarker()?.summary).toBe("first-event");
-    expect(acc1.getMarker()?.turnsCompacted).toBe(2);
+    expect(acc1.getWindowCompact()?.summary).toBe("first-event");
+    expect(acc1.getWindowCompact()?.pairsCompacted).toBe(2);
     // acc2 仍在订阅
-    expect(acc2.getMarker()?.summary).toBe("second-event");
-    expect(acc2.getMarker()?.turnsCompacted).toBe(2 + 5);
+    expect(acc2.getWindowCompact()?.summary).toBe("second-event");
+    expect(acc2.getWindowCompact()?.pairsCompacted).toBe(2 + 5);
 
     acc2.dispose();
   });

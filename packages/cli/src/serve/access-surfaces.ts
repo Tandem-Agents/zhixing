@@ -16,6 +16,7 @@ import {
 } from "@zhixing/server";
 import { setupChannels } from "./channels.js";
 import { setupDelivery } from "../setup-delivery.js";
+import { loadRunRecords } from "../runtime/load-run-records.js";
 import type { AccessSurface } from "./access-surface.js";
 
 /** MCP —— eager 连接外部 server，使工具目录进入 system prompt。 */
@@ -32,26 +33,24 @@ const conversationSurface: AccessSurface = {
   name: "conversation",
   phase: "pre-server",
   async setup(ctx) {
-    const { transcript, config } = ctx;
+    const { transcript } = ctx;
     ctx.conversations = new ConversationManager(ctx.runtimeFactory, undefined, {
       loadHistory: async (conversationId) => {
         try {
-          if (!(await transcript.exists(conversationId))) return undefined;
-          const loaded = await transcript.load(conversationId);
-          return loaded.messages;
+          // 不做裸文件存在性短路 —— 倒读自带索引自愈（分片文件在，会话
+          // 就在），索引层事故不丢历史。无任何记录（真·新对话 / 刚清空）
+          // → undefined，交 doCreate 按需走 initTranscript（幂等）。
+          const records = await loadRunRecords(transcript, conversationId);
+          return records.length > 0 ? records : undefined;
         } catch {
           return undefined;
         }
       },
       initTranscript: async (conversationId) => {
-        await transcript.init(conversationId, {
-          model: config.llm?.main?.model ?? "default",
-          provider: config.llm?.main?.provider ?? "default",
-        });
+        await transcript.init(conversationId);
       },
-      commitTurn: async (conversationId, payload) => {
-        return await transcript.commitTurn(conversationId, payload);
-      },
+      appendRun: async (conversationId, input) =>
+        await transcript.appendRunRecord(conversationId, input),
       confirmationHub: ctx.confirmationHub,
     });
   },

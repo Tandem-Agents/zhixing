@@ -21,21 +21,22 @@
 import type {
   Conversation,
   IConversationRepository,
-  ITranscriptStore,
-  LoadedTranscript,
+  RunRecord,
+  ShardedTranscriptStore,
 } from "@zhixing/core";
+import { loadRunRecords } from "./load-run-records.js";
 
 export type WorksceneConversation = {
   conversation: Conversation;
-  /** null → create 路径(A 或 C)；非 null → recovery 路径(B) */
-  loaded: LoadedTranscript | null;
+  /** null → create 路径(A 或 C)；非 null → recovery 路径(B)，时间正序 run records */
+  loaded: RunRecord[] | null;
   /** 仅路径 C 携带；caller 在 enter 成功后输出 */
   warning?: string;
 };
 
 export async function acquireWorksceneConversation(
   worksceneRepo: IConversationRepository,
-  wStore: ITranscriptStore,
+  wStore: ShardedTranscriptStore,
 ): Promise<WorksceneConversation> {
   const latestId = await worksceneRepo.findLatest();
 
@@ -48,7 +49,7 @@ export async function acquireWorksceneConversation(
   // 路径 B：latest 存在，尝试恢复
   let loadError: unknown;
   try {
-    const loaded = await wStore.load(latestId);
+    const loaded = await loadRunRecords(wStore, latestId);
     const conv = await worksceneRepo.get(latestId);
     if (conv) return { conversation: conv, loaded };
     // get 返 null（meta.json 缺失/损坏）落空走降级，与 load 抛错统一处理

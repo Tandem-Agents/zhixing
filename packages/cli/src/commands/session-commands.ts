@@ -24,8 +24,8 @@ import {
   type ArgChoice,
   type ArgSchema,
   type WorkModeSwitchIntent,
-  restoreAttentionWindowFromCanonical,
-  windowCompactFromMarker,
+  restoreAttentionWindowFromRecords,
+  countRuns,
 } from "@zhixing/core";
 import type { AgentRuntime } from "@zhixing/orchestrator/runtime";
 import {
@@ -33,6 +33,7 @@ import {
   type MutableConversationState,
 } from "../runtime/switch-to-new-conversation.js";
 import { makeWindowTailGuard } from "../runtime/window-tail-guard.js";
+import { loadRunRecords } from "../runtime/load-run-records.js";
 import type { CliWriter } from "../screen/index.js";
 import { layout } from "../tui/style.js";
 import { formatRelativeTime } from "./format.js";
@@ -109,19 +110,12 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
   });
   dispatcher.registerHandler("clear:repl", async () => {
     const conv = deps.getConv();
-    // 走 store.compactAll 写一条 compact marker 原子重写 transcript，窗口从返回的
-    // canonical（仅 summaryPair）重建——磁盘与窗口必须同时压缩才能让"清空"语义
-    // 稳定（仅动窗口的话，重启全量加载会把老历史灌回来）。持久化失败窗口不动，
-    // 内存与磁盘停在同一基底。
+    // 清空是事件而非销毁：持久层追加一条 clear 记录（倒读原语遇之即止——重启
+    // 重建只见其后内容；旧原文物理仍在，由时间窗清理收走），窗口 reset 清空内存。
+    // 先盘后窗：持久化失败窗口不动，内存与磁盘停在同一基底。
     if (conv.conversationId) {
       try {
-        const canonical = await conv.store.compactAll(
-          conv.conversationId,
-          "(用户已清空对话历史)",
-        );
-        conv.window = restoreAttentionWindowFromCanonical(canonical, {
-          conversationId: conv.conversationId,
-        });
+        await conv.store.appendClear(conv.conversationId);
       } catch (err) {
         writer.line(
           chalk.red(
@@ -130,10 +124,8 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
         );
         return {};
       }
-    } else {
-      // 无 conversationId 路径（极少见，正常 cli 流程总有 conversation）——仅清窗口
-      conv.window.reset("clear");
     }
+    conv.window.reset("clear");
     conv.pendingInputPrefix = null;
 
     // 非致命 warning 收集到本地数组，末尾按 clearScreenToInitial 是否可用分流：chrome
@@ -216,7 +208,7 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
         const c = conversations[i]!;
         const label = c.name ? chalk.white(c.name) : chalk.dim(c.id);
         const time = formatRelativeTime(new Date(c.lastActiveAt));
-        const turnCount = await conv.store.countTurns(c.id);
+        const turnCount = await countRuns(conv.store, c.id);
         const current =
           c.id === conv.conversationId ? chalk.green(" ← 当前") : "";
         writer.line(
@@ -267,22 +259,22 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
     }
 
     try {
-      const loaded = await conv.store.load(target.id);
-      conv.window = restoreAttentionWindowFromCanonical(loaded.messages, {
+      const records = await loadRunRecords(conv.store, target.id);
+      conv.window = restoreAttentionWindowFromRecords(records, {
         conversationId: target.id,
         // 原文 append-only 后全量加载可能失界，按风险上限机械保尾
         tailGuard: makeWindowTailGuard(deps.getRuntime().model),
       });
       conv.pendingInputPrefix = null;
       conv.conversationId = target.id;
-      conv.turnCounter = loaded.turnCount;
+      conv.turnCounter = records.length;
       // 加载目标对话的 task_list 持久化状态到 service cache
       await deps.taskListService.prime(target.id);
       conv.convRepo.touch(conv.conversationId).catch(() => {});
       deps.onConversationChanged();
       writer.line(
         chalk.dim(
-          `\n  已切换到 ${chalk.cyan(target.name)}（${loaded.turnCount} 轮对话）\n`,
+          `\n  已切换到 ${chalk.cyan(target.name)}（${records.length} 轮对话）\n`,
         ),
       );
     } catch (err) {
@@ -343,8 +335,8 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
       // 压缩是注意力窗口的视图操作：产生真 summary 时折叠窗口；原文持久化
       // append-only、不参与压缩（被摘内容仍完整躺在磁盘上）。非摘要型修改
       //（无 marker）不动窗口——窗口只经折叠 / 接受前进。
-      if (result.modified && result.compactBefore) {
-        conv.window.applyCompact(windowCompactFromMarker(result.compactBefore));
+      if (result.modified && result.windowCompact) {
+        conv.window.applyCompact(result.windowCompact);
         const pct = Math.round(result.budget.usageRatio * 100);
         writer.line(chalk.green(`  ✓ 压缩完成，当前上下文占用 ${pct}%\n`));
       } else if (result.modified) {
@@ -386,7 +378,7 @@ function buildResumeArgSchema(deps: SessionCommandsDeps): ArgSchema {
           continue;
         }
         const time = formatRelativeTime(new Date(c.lastActiveAt));
-        const turnCount = await conv.store.countTurns(c.id);
+        const turnCount = await countRuns(conv.store, c.id);
         const current = c.id === conv.conversationId ? " ← 当前" : "";
         choices.push({
           value: c.id,

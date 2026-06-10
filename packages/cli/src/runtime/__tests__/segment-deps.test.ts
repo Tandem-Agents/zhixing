@@ -7,8 +7,8 @@
  *   - persistence 透传 appendSegment 调用到底层 conversationRepo
  *   - 错误透传（底层 throw → persistence 接口 throw）
  *
- * 注意：cli 工厂不再透传 transcript —— transcript marker 通过 segment:new_started
- * 事件流向 orchestrator accumulator，由 run-agent 单点 commitTurn 落盘。
+ * 注意：cli 工厂不透传 transcript —— 窗口折叠指令通过 segment:new_started
+ * 事件流向 orchestrator accumulator，随 RunResult.windowCompact 在 run 边界交给窗口。
  */
 
 import { describe, expect, it, vi } from "vitest";

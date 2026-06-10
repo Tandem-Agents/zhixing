@@ -1,31 +1,12 @@
 /**
- * JSONL 序列化器
+ * 持久化文件写入原语 —— 原子替换与崩溃残留清理。
  *
- * 负责转录记录的磁盘读写。核心设计：
- * - 追加写入：每条记录独立一行，崩溃最多丢失最后一轮
- * - 损坏隔离：单行 JSON 解析失败只跳过该行，不影响其余记录
- * - 首行即 Header：无需额外索引文件
+ * 记录行的解析 / 追加由分片 store 自持（shard/store.ts）；本文件只留与
+ * 具体记录格式无关的文件系统原语，供索引原子重写等共用。
  */
 
 import fs from "node:fs/promises";
 import path from "node:path";
-import type {
-  CompactMarker,
-  TranscriptHeader,
-  TranscriptRecord,
-  Turn,
-} from "./types.js";
-
-// ─── 写入 ───
-
-/** 将一条记录追加到 JSONL 文件末尾 */
-export async function appendRecord(
-  filePath: string,
-  record: TranscriptRecord,
-): Promise<void> {
-  const line = JSON.stringify(record) + "\n";
-  await fs.appendFile(filePath, line, "utf-8");
-}
 
 // ─── 原子写入 ───
 
@@ -40,11 +21,13 @@ export async function appendRecord(
  * 平台差异：
  *   - POSIX (linux/darwin)：`rename(2)` 原子覆盖，一次调用搞定
  *   - Windows：默认走 fallback —— `unlink old → rename tmp`，避免 MoveFileExW 的
- *     边缘场景（共享驱动器、WSL、旧版 NTFS）破坏原子假设；orphan tmp 由
- *     `cleanupOrphanTmp` 启动清理
+ *     边缘场景（共享驱动器、WSL、旧版 NTFS）破坏原子假设。unlink 与 rename
+ *     之间存在"旧已删、新未就位"的崩溃微窗口——但该窗口内的形态是确定的：
+ *     unlink 只发生在 tmp 完整落盘之后，故"目标缺失 + tmp 存在"时 tmp 必为
+ *     完整新内容，`recoverOrphanTmp` 在下次打开时把它 rename 回目标——
+ *     原子替换的承诺跨崩溃成立。
  *
- * DI：`platform` 参数供测试锚定（CLAUDE.md 要求：测试分支 process.platform 必须 DI）。
- * 不传时默认 `process.platform`。
+ * DI：`platform` 参数供测试锚定。不传时默认 `process.platform`。
  */
 export interface WriteAtomicOptions {
   /** 平台 DI，默认 `process.platform` */
@@ -94,12 +77,19 @@ export async function writeAtomic(
 }
 
 /**
- * 清理目录下的孤立 .tmp 文件（来自崩溃残留）。
+ * 收尾目标文件的崩溃残留 tmp —— 能恢复则先恢复，其余清理。
+ *
+ * 恢复判据（与 writeAtomic 的写序构成闭环）：目标文件不存在且存在 tmp，
+ * 只可能是 Windows 替换窗口（unlink 旧文件 → rename tmp）内崩溃——而
+ * unlink 只发生在 tmp 完整写盘之后，故此形态下 tmp 必为完整新内容 →
+ * 取最新一个 rename 回目标。目标文件存在时，全部 tmp 都是 rename 失败 /
+ * 多写竞争的残留 → 直接清理。
  *
  * 只扫 `${basename}.*.tmp` 模式 —— 不会误删用户的其他 .tmp 文件。
- * 失败静默（权限、目录不存在等）—— 清理是 best-effort，不阻塞主流程。
+ * 失败静默（权限、目录不存在等）—— 收尾是 best-effort，不阻塞主流程；
+ * 恢复 rename 失败时保留该 tmp（不销毁恢复素材），留待下次收尾重试。
  */
-export async function cleanupOrphanTmp(targetFilePath: string): Promise<void> {
+export async function recoverOrphanTmp(targetFilePath: string): Promise<void> {
   const dir = path.dirname(targetFilePath);
   const prefix = `${path.basename(targetFilePath)}.`;
 
@@ -109,145 +99,43 @@ export async function cleanupOrphanTmp(targetFilePath: string): Promise<void> {
   } catch {
     return;
   }
+  const tmps = entries.filter(
+    (e) => e.startsWith(prefix) && e.endsWith(".tmp"),
+  );
+  if (tmps.length === 0) return;
+
+  let toDelete = tmps;
+  const targetExists = await fs.access(targetFilePath).then(
+    () => true,
+    () => false,
+  );
+  if (!targetExists) {
+    // 多个 tmp（多次崩溃叠加）按文件名内嵌时间戳取最新的恢复
+    const newest = [...tmps].sort(
+      (a, b) => tmpTimestampOf(b, prefix) - tmpTimestampOf(a, prefix),
+    )[0]!;
+    await fs.rename(path.join(dir, newest), targetFilePath).catch(() => {});
+    toDelete = tmps.filter((e) => e !== newest);
+  }
 
   await Promise.all(
-    entries
-      .filter((e) => e.startsWith(prefix) && e.endsWith(".tmp"))
-      .map((e) => fs.unlink(path.join(dir, e)).catch(() => {})),
+    toDelete.map((e) => fs.unlink(path.join(dir, e)).catch(() => {})),
   );
+}
+
+/** 解析 tmp 文件名内嵌的毫秒时间戳（`{pid}-{ts}-{rand}` 中段）；不可解析按 0 */
+function tmpTimestampOf(entry: string, prefix: string): number {
+  const core = entry.slice(prefix.length, -".tmp".length);
+  const ts = Number(core.split("-")[1]);
+  return Number.isFinite(ts) ? ts : 0;
 }
 
 /**
  * 生成唯一的 tmp 文件名。格式：`{targetPath}.{pid}-{ts}-{rand}.tmp`。
  *
- * pid + 毫秒时间戳 + 随机后缀三重保证并发写不碰撞，即使同一进程内瞬时发起多次
- * commitTurn（实际被锁串行，但构造 tmp 名不依赖锁）。
+ * pid + 毫秒时间戳 + 随机后缀三重保证并发写不碰撞。
  */
 function tmpPathFor(filePath: string): string {
   const uniq = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   return `${filePath}.${uniq}.tmp`;
-}
-
-// ─── 读取 ───
-
-/**
- * 加载完整的 JSONL 文件，按类型分拣记录。
- * 跳过损坏的行（JSON 解析失败或未知 type）。
- */
-export async function loadRecords(filePath: string): Promise<{
-  header: TranscriptHeader | null;
-  turns: Turn[];
-  compacts: CompactMarker[];
-  corruptedLines: number;
-  turnsBeforeLastCompact: number;
-}> {
-  const content = await fs.readFile(filePath, "utf-8");
-  return parseRecords(content);
-}
-
-/**
- * 从 JSONL 内容字符串解析所有记录。
- * 纯函数，方便测试。
- *
- * `turnsBeforeLastCompact`：文件物理顺序中、出现在**最后一个 compact 行之前**
- * 的 turn 数（无 compact 时为 0）。这是归一化判定的结构事实：健康文件由
- * 原子重写产生、compact 永远是 header 后第一行（计数 0）；turn 行出现在
- * compact 之前只可能是历史 bug 遗留的"先 append turn 再 append compact"
- * 形态。按物理顺序判而不按时间戳猜——压缩保留的近期 turns 时间戳天然早于
- * marker（marker 记压缩发生时刻），时间戳判定会把它们误杀。
- */
-export function parseRecords(content: string): {
-  header: TranscriptHeader | null;
-  turns: Turn[];
-  compacts: CompactMarker[];
-  corruptedLines: number;
-  turnsBeforeLastCompact: number;
-} {
-  const lines = content.split("\n").filter(Boolean);
-  let header: TranscriptHeader | null = null;
-  const turns: Turn[] = [];
-  const compacts: CompactMarker[] = [];
-  let corruptedLines = 0;
-  let turnsBeforeLastCompact = 0;
-
-  for (const line of lines) {
-    try {
-      const record = JSON.parse(line) as unknown;
-      if (isTranscriptHeader(record)) {
-        header = record;
-      } else if (isTurn(record)) {
-        turns.push(record);
-      } else if (isCompactMarker(record)) {
-        compacts.push(record);
-        turnsBeforeLastCompact = turns.length;
-      } else {
-        corruptedLines++;
-      }
-    } catch {
-      corruptedLines++;
-    }
-  }
-
-  return { header, turns, compacts, corruptedLines, turnsBeforeLastCompact };
-}
-
-// ─── 类型守卫 ───
-
-/**
- * 判断并归一化 header。旧文件用 sessionId，新文件用 conversationId。
- * 读取时统一映射为 conversationId，写入时只写 conversationId。
- */
-function isTranscriptHeader(value: unknown): value is TranscriptHeader {
-  if (
-    typeof value !== "object" ||
-    value === null ||
-    (value as Record<string, unknown>).type !== "header" ||
-    typeof (value as Record<string, unknown>).version !== "number"
-  ) {
-    return false;
-  }
-  const record = value as Record<string, unknown>;
-  // 旧格式迁移：sessionId → conversationId
-  if (typeof record.sessionId === "string" && !record.conversationId) {
-    record.conversationId = record.sessionId;
-    delete record.sessionId;
-  }
-  return typeof record.conversationId === "string";
-}
-
-function isTurn(value: unknown): value is Turn {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    (value as Record<string, unknown>).type === "turn" &&
-    typeof (value as Record<string, unknown>).turnIndex === "number"
-  );
-}
-
-function isCompactMarker(value: unknown): value is CompactMarker {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    (value as Record<string, unknown>).type === "compact" &&
-    typeof (value as Record<string, unknown>).summary === "string"
-  );
-}
-
-// ─── 辅助工具 ───
-
-/** 统计 JSONL 文件中的 turn 数量 */
-export async function countTurns(filePath: string): Promise<number> {
-  try {
-    const content = await fs.readFile(filePath, "utf-8");
-    const lines = content.split("\n");
-    let count = 0;
-    for (const line of lines) {
-      if (line.includes('"type":"turn"') || line.includes('"type": "turn"')) {
-        count++;
-      }
-    }
-    return count;
-  } catch {
-    return 0;
-  }
 }

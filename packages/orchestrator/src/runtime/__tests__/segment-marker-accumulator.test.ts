@@ -2,13 +2,13 @@
  * subscribeSegmentMarkerAccumulator 单元测试。
  *
  * 与 compact-accumulator 对偶：
- *   - 收集 `segment:new_started` 事件 payload.marker
+ *   - 收集 `segment:new_started` 事件 payload.windowCompact
  *   - 单 run 内重复触发取最新（覆盖式，不累加）
  *   - dispose 幂等
  */
 
 import { describe, expect, it } from "vitest";
-import type { AgentEventMap, CompactMarker } from "@zhixing/core";
+import type { AgentEventMap, WindowCompact } from "@zhixing/core";
 import { EventBus } from "@zhixing/core";
 import { subscribeSegmentMarkerAccumulator } from "../segment-marker-accumulator.js";
 
@@ -16,15 +16,13 @@ function makeBus(): EventBus<AgentEventMap> {
   return new EventBus<AgentEventMap>();
 }
 
-function makeMarker(
+function makeWindowCompact(
   segmentId: string,
-  overrides: Partial<CompactMarker> = {},
-): CompactMarker {
+  overrides: Partial<WindowCompact> = {},
+): WindowCompact {
   return {
-    type: "compact",
-    timestamp: "2026-05-11T10:00:00Z",
     summary: `summary ${segmentId}`,
-    turnsCompacted: 5,
+    pairsCompacted: 5,
     tokensBefore: 100_000,
     tokensAfter: 5_000,
     segmentId,
@@ -34,62 +32,62 @@ function makeMarker(
 }
 
 function makeEvent(
-  marker: CompactMarker,
+  windowCompact: WindowCompact,
 ): AgentEventMap["segment:new_started"] {
   return {
-    segmentId: marker.segmentId!,
+    segmentId: windowCompact.segmentId!,
     bufferTurns: 2,
-    tokensBefore: marker.tokensBefore,
-    tokensAfter: marker.tokensAfter,
-    marker,
+    tokensBefore: windowCompact.tokensBefore,
+    tokensAfter: windowCompact.tokensAfter,
+    windowCompact,
   };
 }
 
 describe("subscribeSegmentMarkerAccumulator", () => {
-  it("从未 fire 时 getMarker 返回 undefined", () => {
+  it("从未 fire 时 getWindowCompact 返回 undefined", () => {
     const bus = makeBus();
     const acc = subscribeSegmentMarkerAccumulator(bus);
-    expect(acc.getMarker()).toBeUndefined();
+    expect(acc.getWindowCompact()).toBeUndefined();
   });
 
-  it("一次 fire 后 getMarker 返回完整 marker", async () => {
+  it("一次 fire 后 getWindowCompact 返回完整 wc", async () => {
     const bus = makeBus();
     const acc = subscribeSegmentMarkerAccumulator(bus);
-    const marker = makeMarker("seg-1");
+    const wc = makeWindowCompact("seg-1");
 
-    await bus.emit("segment:new_started", makeEvent(marker));
+    await bus.emit("segment:new_started", makeEvent(wc));
 
-    expect(acc.getMarker()).toEqual(marker);
+    expect(acc.getWindowCompact()).toEqual(wc);
   });
 
   it("多次 fire 取最新（覆盖式，不累加）", async () => {
     const bus = makeBus();
     const acc = subscribeSegmentMarkerAccumulator(bus);
-    const m1 = makeMarker("seg-1");
-    const m2 = makeMarker("seg-2", { summary: "更新后的摘要" });
+    const m1 = makeWindowCompact("seg-1");
+    const m2 = makeWindowCompact("seg-2", { summary: "更新后的摘要" });
 
     await bus.emit("segment:new_started", makeEvent(m1));
     await bus.emit("segment:new_started", makeEvent(m2));
 
-    expect(acc.getMarker()).toEqual(m2);
-    expect(acc.getMarker()?.segmentId).toBe("seg-2");
+    expect(acc.getWindowCompact()).toEqual(m2);
+    expect(acc.getWindowCompact()?.segmentId).toBe("seg-2");
   });
 
   it("dispose 后 emit 不再被收集", async () => {
     const bus = makeBus();
     const acc = subscribeSegmentMarkerAccumulator(bus);
-    const m1 = makeMarker("seg-before-dispose");
+    const m1 = makeWindowCompact("seg-before-dispose");
 
     await bus.emit("segment:new_started", makeEvent(m1));
-    expect(acc.getMarker()).toEqual(m1);
+    expect(acc.getWindowCompact()).toEqual(m1);
 
     acc.dispose();
 
-    const m2 = makeMarker("seg-after-dispose");
+    const m2 = makeWindowCompact("seg-after-dispose");
     await bus.emit("segment:new_started", makeEvent(m2));
 
     // dispose 后 emit 不再被记录，getMarker 仍是 dispose 前的最后值
-    expect(acc.getMarker()).toEqual(m1);
+    expect(acc.getWindowCompact()).toEqual(m1);
   });
 
   it("dispose 幂等 —— 多次调用不抛错", () => {
@@ -100,10 +98,10 @@ describe("subscribeSegmentMarkerAccumulator", () => {
     expect(() => acc.dispose()).not.toThrow();
   });
 
-  it("marker 保留 segmentId + structuredSummary 等所有字段", async () => {
+  it("wc 保留 segmentId + structuredSummary 等所有字段", async () => {
     const bus = makeBus();
     const acc = subscribeSegmentMarkerAccumulator(bus);
-    const marker = makeMarker("seg-x", {
+    const wc = makeWindowCompact("seg-x", {
       summary: "三段平文本",
       structuredSummary: {
         facts: "事实",
@@ -112,9 +110,9 @@ describe("subscribeSegmentMarkerAccumulator", () => {
       },
     });
 
-    await bus.emit("segment:new_started", makeEvent(marker));
+    await bus.emit("segment:new_started", makeEvent(wc));
 
-    const got = acc.getMarker()!;
+    const got = acc.getWindowCompact()!;
     expect(got.segmentId).toBe("seg-x");
     expect(got.structuredSummary).toEqual({
       facts: "事实",

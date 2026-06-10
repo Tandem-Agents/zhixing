@@ -34,6 +34,7 @@ import {
 import {
   MockLLMProvider,
   SkillStore,
+  deriveToolCalls,
   userMessage,
   type IEventBus,
   type LLMRole,
@@ -336,9 +337,9 @@ describe("createAgentRuntime · per-run 隔离契约", () => {
     // 两次 run 各自只产生本轮 assistant message,不互相累积
     expect(r1.newMessages).toHaveLength(1);
     expect(r2.newMessages).toHaveLength(1);
-    // turn 索引透传无误
-    expect(r1.turn.turnIndex).toBe(0);
-    expect(r2.turn.turnIndex).toBe(1);
+    // 各自 runRecord 携带本轮用户原文
+    expect((r1.runRecord.messages[0]!.content[0] as { text: string }).text).toBe("ask 1");
+    expect((r2.runRecord.messages[0]!.content[0] as { text: string }).text).toBe("ask 2");
   });
 });
 
@@ -592,14 +593,24 @@ describe("createAgentRuntime · Task 装配契约（profile.enabledTools 驱动�
 //     等价覆盖,集成层不重复测同一路径
 
 describe("Task 端到端集成 · 主子隔离 / 并发 / 子 fail / lineage 冒泡", () => {
-  /** 抽出主 turn assistantMessage 的纯文本(便于断言主综合输出) */
-  function getAssistantText(turn: { assistantMessage: { content: readonly unknown[] } }): string {
-    return turn.assistantMessage.content
+  /** 抽出 runRecord 末条 assistant 的纯文本(便于断言主综合输出) */
+  function getAssistantText(record: {
+    messages: readonly { role: string; content: readonly unknown[] }[];
+  }): string {
+    const assistants = record.messages.filter((m) => m.role === "assistant");
+    const last = assistants[assistants.length - 1];
+    if (!last) return "";
+    return last.content
       .filter((b): b is { type: "text"; text: string } =>
         typeof b === "object" && b !== null && (b as { type: string }).type === "text",
       )
       .map((b) => b.text)
       .join("");
+  }
+
+  /** 从 runRecord 派生扁平工具调用清单(断言用,与生产 deriveToolCalls 同源) */
+  function toolCallsOf(record: { messages: readonly unknown[] }) {
+    return deriveToolCalls(record.messages as never);
   }
 
   it("单 Task 端到端:主 turn 只含主 user/主 assistant/Task toolCall 记录(子内部 messages 不冒入主 turn)", async () => {
@@ -624,20 +635,20 @@ describe("Task 端到端集成 · 主子隔离 / 并发 / 子 fail / lineage 冒
 
     expect(result.agentResult.reason).toBe("completed");
 
-    // 主 turn.userMessage 是用户原始消息(非子的"Begin"伪 user message)
+    // runRecord.messages[0] 是用户原始消息(非子的"Begin"伪 user message)
     const userText = (
-      result.turn.userMessage.content[0] as { text: string }
+      result.runRecord.messages[0]!.content[0] as { text: string }
     ).text;
     expect(userText).toBe("user question");
 
     // 主 turn.assistantMessage 是主综合 —— 不含子 final 文本(子文本是 tool_result.content,不是独立 assistant)
-    const assistantText = getAssistantText(result.turn);
+    const assistantText = getAssistantText(result.runRecord);
     expect(assistantText).toContain("[main-only marker]");
     expect(assistantText).not.toContain("[child-only marker]");
 
     // 主 turn.toolCalls 含 Task 一条记录,result 字段(扁平化字符串)含子 final
-    expect(result.turn.toolCalls).toHaveLength(1);
-    const taskCall = result.turn.toolCalls![0]!;
+    expect(toolCallsOf(result.runRecord)).toHaveLength(1);
+    const taskCall = toolCallsOf(result.runRecord)[0]!;
     expect(taskCall.name).toBe("Task");
     expect(taskCall.input).toMatchObject({ description: "research", prompt: "do X" });
     expect(taskCall.result).toContain("[child-only marker]");
@@ -687,20 +698,21 @@ describe("Task 端到端集成 · 主子隔离 / 并发 / 子 fail / lineage 冒
     expect(providerRef.current!.callCount).toBe(5);
 
     // 主 turn 含 3 条 toolCalls,各自 success
-    expect(result.turn.toolCalls).toHaveLength(3);
-    for (const tc of result.turn.toolCalls!) {
+    const calls = toolCallsOf(result.runRecord);
+    expect(calls).toHaveLength(3);
+    for (const tc of calls) {
       expect(tc.name).toBe("Task");
       expect(tc.isError).toBeFalsy();
     }
     // 3 条 result 字符串覆盖 3 个子 final(顺序未定 —— callIndex sync 但完成顺序与
     // 子 finalize 顺序耦合,我们只需断言三者全部出现)
-    const allResults = result.turn.toolCalls!.map((tc) => tc.result).join("\n");
+    const allResults = calls.map((tc) => tc.result).join("\n");
     expect(allResults).toContain("child-final-α");
     expect(allResults).toContain("child-final-β");
     expect(allResults).toContain("child-final-γ");
 
     // 主综合输出
-    expect(getAssistantText(result.turn)).toContain("synthesized A+B+C");
+    expect(getAssistantText(result.runRecord)).toContain("synthesized A+B+C");
   });
 
   it("子 LLM error → tool_result is_error=true,主 agent 继续完成 turn(子 fail 不波及父)", async () => {
@@ -726,15 +738,16 @@ describe("Task 端到端集成 · 主子隔离 / 并发 / 子 fail / lineage 冒
     expect(result.agentResult.reason).toBe("completed");
 
     // toolCalls 含 Task 记录,isError=true
-    expect(result.turn.toolCalls).toHaveLength(1);
-    const taskCall = result.turn.toolCalls![0]!;
+    const errCalls = toolCallsOf(result.runRecord);
+    expect(errCalls).toHaveLength(1);
+    const taskCall = errCalls[0]!;
     expect(taskCall.name).toBe("Task");
     expect(taskCall.isError).toBe(true);
     // type tag 透传:format 为 [Task "<desc>" failed (<type>): <msg>],含真实 AgentErrorType
     expect(taskCall.result).toMatch(/^\[Task "fetch" failed \(provider_error\):/);
 
     // 主 LLM 看到 is_error 后继续输出(spec 强制要求 LLM 在 final response 中暴露 Task 失败)
-    expect(getAssistantText(result.turn)).toContain("acknowledged");
+    expect(getAssistantText(result.runRecord)).toContain("acknowledged");
   });
 
   it("父 listener 收到所有子事件,meta.lineage 各异且严格以 'main/sub-' 开头", async () => {

@@ -19,12 +19,12 @@ import {
   abortWithReason,
   createAttentionWindow,
   createInterruptController,
-  restoreAttentionWindowFromCanonical,
+  restoreAttentionWindowFromRecords,
   userMessage,
   type AbortReason,
   type AttentionWindowState,
-  type Message,
   type AgentYield,
+  type RunRecord,
   type RunResult,
   type TurnSource,
 } from "@zhixing/core";
@@ -49,15 +49,15 @@ interface QueueItem {
 export function createServerRuntimeAdapter(
   sessionId: string,
   agentRuntime: AgentRuntime,
-  initialMessages?: Message[],
+  initialRecords?: RunRecord[],
 ): SessionRuntime {
-  // 注意力窗口 —— "给 LLM 看什么"的唯一内存权威。恢复历史经 canonical →
-  // 窗口重建（预算化启动装填落地前的过渡形态）；窗口只经 acceptRun 前进
-  // （ConversationManager 在持久化 / pending 入列成功后调），run 输入瞬态
+  // 注意力窗口 —— "给 LLM 看什么"的唯一内存权威。恢复历史经持久化 run
+  // records → 窗口重建（预算化启动装填落地前的过渡形态）；窗口只经 acceptRun
+  // 前进（ConversationManager 在持久化 / pending 入列成功后调），run 输入瞬态
   // 构造、失败路径窗口不动——无需任何回滚。
   const window: AttentionWindowState =
-    initialMessages && initialMessages.length > 0
-      ? restoreAttentionWindowFromCanonical(initialMessages, {
+    initialRecords && initialRecords.length > 0
+      ? restoreAttentionWindowFromRecords(initialRecords, {
           conversationId: sessionId,
           // 原文 append-only 后全量加载可能失界，按风险上限机械保尾
           tailGuard: makeWindowTailGuard(agentRuntime.model),
@@ -226,9 +226,9 @@ export interface RuntimeFactoryOptions {
  */
 export function createCliRuntimeFactory(opts: RuntimeFactoryOptions): RuntimeFactory {
   return {
-    async create(sessionId, initialMessages) {
+    async create(sessionId, initialRecords) {
       const agentRuntime = await opts.createAgentRuntime(sessionId);
-      return createServerRuntimeAdapter(sessionId, agentRuntime, initialMessages);
+      return createServerRuntimeAdapter(sessionId, agentRuntime, initialRecords);
     },
   };
 }

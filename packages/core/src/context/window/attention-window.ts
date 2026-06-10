@@ -27,7 +27,7 @@ import {
   emptyAssistantMessage,
   findLastAssistantMessage,
 } from "../../types/messages.js";
-import { buildCompactSummaryPair, detectSystemMetaKind } from "../system-meta.js";
+import { buildCompactSummaryPair } from "../system-meta.js";
 import type {
   AcceptRunInput,
   AttentionWindowState,
@@ -152,7 +152,7 @@ export function createAttentionWindow(
  * 为什么需要：磁盘是 append-only 原文、不再因压缩截断，超长对话全量加载
  * 重建的窗口可能超过模型物理上限——此时段评估想自愈，但摘要 LLM 调用本身
  * 要发送整个超限窗口，自愈失效。护栏在重建时从尾部机械保留（无 LLM、不碰
- * 磁盘）：摘要对放得下则保留，配对从最新往回装，至少保最后一个配对。
+ * 磁盘）：配对从最新往回装，至少保最后一个配对（超限则截断降级）。
  */
 export interface RestoreTailGuard {
   /** 保尾预算（token）——挂模型的风险注意力上限，不挂物理窗口百分比 */
@@ -162,50 +162,39 @@ export interface RestoreTailGuard {
 }
 
 /**
- * 从持久化 canonical 重建窗口 —— **过渡期桥**，预算化启动装填落地后删除。
+ * 从持久化 run records 重建窗口 —— **过渡期桥**，预算化启动装填落地后删除
+ * （届时启动改为"摘要快照 + 预算化倒读"装填，不再全量重建）。
  *
- * 现阶段窗口的初始内容仍来自 store 产出的 canonical（`summaryPair? + 严格
- * 交替的 [user, assistant] 配对`，由 rebuild 算法保证形态）。条目类型必须
- * 还原准确：summaryPair 若被误标为普通配对，后续折叠的 pairsCompacted 计数
- * 就会错位——这是该解析必须住在窗口模块内（拥有条目语义）的原因。
- *
- * 严格解析、畸形即抛：canonical 只可能来自 store（load / commitTurn /
- * compactAll 返回值），恒为洁净形；宽容解析只会把数据损坏静默搅进窗口，
- * 不如在边界上立即暴露。
+ * 每条 record 蒸馏为一个配对 [用户原文, 最终回复]（与运行期接受协议同一
+ * 派生规则），并携带 runIndex —— 折叠时的覆盖锚点在恢复路径同样成立。
+ * records 须按时间正序（调用方把倒读结果反转后传入）。
  */
-export function restoreAttentionWindowFromCanonical(
-  canonical: readonly Message[],
+export function restoreAttentionWindowFromRecords(
+  records: ReadonlyArray<{
+    readonly runIndex: number;
+    readonly messages: readonly Message[];
+  }>,
   options: CreateAttentionWindowOptions & {
     readonly tailGuard?: RestoreTailGuard;
   } = {},
 ): AttentionWindowState {
-  const entries: WindowEntry[] = [];
-  let i = 0;
-
-  if (
-    canonical.length >= 2 &&
-    detectSystemMetaKind(canonical[0]!) === "compact-summary" &&
-    detectSystemMetaKind(canonical[1]!) === "ack"
-  ) {
-    entries.push({
-      kind: "summary",
-      messages: [canonical[0]!, canonical[1]!],
-    });
-    i = 2;
-  }
-
-  for (; i < canonical.length; i += 2) {
-    const user = canonical[i]!;
-    const assistant = canonical[i + 1]; // 奇数尾时为 undefined → 同样判为畸形
-    if (user.role !== "user" || assistant?.role !== "assistant") {
+  const entries: WindowEntry[] = records.map((record) => {
+    const user = record.messages[0];
+    if (!user || user.role !== "user") {
       throw new Error(
-        `restoreAttentionWindowFromCanonical: canonical 第 ${i} 条起不是 ` +
-          "[user, assistant] 配对——store 产出的 canonical 不应出现此形态，" +
-          "可能是数据损坏",
+        "restoreAttentionWindowFromRecords: record.messages 首条必须是用户" +
+          "原文——持久化契约不应出现此形态，可能是数据损坏",
       );
     }
-    entries.push({ kind: "pair", messages: [user, assistant] });
-  }
+    return {
+      kind: "pair" as const,
+      messages: [
+        user,
+        findLastAssistantMessage(record.messages) ?? emptyAssistantMessage(),
+      ] as const,
+      runIndex: record.runIndex,
+    };
+  });
 
   return new AttentionWindow(
     options,
@@ -221,40 +210,28 @@ export function restoreAttentionWindowFromCanonical(
  *      ——但它单独超限时**截断降级**而非硬塞：用户消息保开头（意图）、
  *      assistant 保结尾（结论），机械按比例裁剪，是"超大组放压缩核"思路的
  *      无 LLM 形态；
- *   2. 摘要对放得下剩余额度则保留（高信号蒸馏优先于更多原文）；
- *   3. 余额给更早配对，从新到旧装满即止。
+ *   2. 余额给更早配对，从新到旧装满即止。
+ *
+ * 重建来源是原始 run records，永无摘要条目（摘要只在运行期折叠时产生）。
  */
 function clampEntriesToTail(
   entries: WindowEntry[],
   guard: RestoreTailGuard,
 ): WindowEntry[] {
-  const summary = entries.find((e) => e.kind === "summary");
   const pairs = entries.filter(
     (e): e is Extract<WindowEntry, { kind: "pair" }> => e.kind === "pair",
   );
-
-  if (pairs.length === 0) {
-    return summary &&
-      guard.estimateMessages(summary.messages) <= guard.maxTokens
-      ? [summary]
-      : [];
-  }
+  if (pairs.length === 0) return [];
 
   const last = pairs[pairs.length - 1]!;
   const lastCost = guard.estimateMessages(last.messages);
   if (lastCost > guard.maxTokens) {
-    // 末配对单独超限：截断降级，独占全部预算（摘要与更早配对都放弃——
-    // 硬上限优先，细节留给磁盘上的完整原文与未来的检索召回）
+    // 末配对单独超限：截断降级，独占全部预算（更早配对放弃——硬上限优先，
+    // 细节留给磁盘上的完整原文与未来的检索召回）
     return [truncatePairToBudget(last, guard)];
   }
 
   let budget = guard.maxTokens - lastCost;
-  const keepSummary =
-    summary !== undefined && guard.estimateMessages(summary.messages) <= budget;
-  if (keepSummary) {
-    budget -= guard.estimateMessages(summary!.messages);
-  }
-
   const keptPairs: WindowEntry[] = [last];
   for (let i = pairs.length - 2; i >= 0; i--) {
     const cost = guard.estimateMessages(pairs[i]!.messages);
@@ -263,7 +240,7 @@ function clampEntriesToTail(
     budget -= cost;
   }
 
-  return keepSummary ? [summary!, ...keptPairs] : keptPairs;
+  return keptPairs;
 }
 
 const TAIL_TRUNCATION_NOTE = "…〔启动加载时截断，完整原文在对话历史中〕…";

@@ -9,7 +9,7 @@
  *
  * 责任边界：
  *   helper 只负责"运行 + 按结果决定是否提交"。用户可见的后果（发回复 / 发错误 /
- *   发回执）由 caller 按 runResult.agentResult 决定。commitTurn 失败的日志 /
+ *   发回执）由 caller 按 runResult.agentResult 决定。持久化失败的日志 /
  *   metrics / 告警通过 onCommitFailure hook 由 caller 实施 —— helper 不依赖
  *   具体 logger / eventBus。
  *
@@ -88,8 +88,8 @@ export async function* runTurnWithCommit(
     try {
       await manager.recordTurn(
         conversationId,
-        runResult.turn,
-        runResult.compactBefore,
+        runResult.runRecord,
+        runResult.windowCompact,
       );
     } catch (err) {
       // 持久化失败：窗口未前进、本轮不成为对话事实。不 re-throw —— caller 的

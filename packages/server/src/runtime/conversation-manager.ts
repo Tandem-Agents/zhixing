@@ -15,14 +15,15 @@
  * - 可测试：grace/idle 超时可通过配置注入
  */
 
-import {
-  windowCompactFromMarker,
-  type AbortReason,
-  type CompactMarker,
-  type Message,
-  type Turn,
+import type {
+  AbortReason,
+  AppendRunResult,
+  RunRecord,
+  RunRecordInput,
+  WindowCompact,
 } from "@zhixing/core";
 import type { AbortResult, SessionRuntime, RuntimeFactory } from "./types.js";
+import { EphemeralRunBuffer } from "./ephemeral-run-buffer.js";
 import type { ConfirmationHub } from "../confirmation/hub.js";
 
 // 空 set 复用，避免每次 getObserverConnectionIds 返回新对象
@@ -62,11 +63,12 @@ export interface ManagedSession {
   /** transcript 文件已初始化（防止 promote 重试时重复 init） */
   transcriptInited: boolean;
   /**
-   * ephemeral 模式下累积的待持久化 turns —— 持久化的 append-only 镜像，
-   * 只追加、不因压缩截断（压缩是窗口的视图操作，原文不动）；promote 时
-   * 按序平铺落盘。
+   * ephemeral 模式下的内存事实流缓冲 —— 持久化的 append-only 镜像，
+   * 只追加、不因压缩截断（压缩是窗口的视图操作，原文不动）。每条 run
+   * 入列即由缓冲定格 provisional runIndex（窗口配对锚与 promote 对账共用
+   * 的同一事实）；promote 时按序平铺落盘。
    */
-  pendingTurns: Turn[];
+  readonly pendingRuns: EphemeralRunBuffer;
 }
 
 // ─── 列表信息 ───
@@ -88,38 +90,34 @@ export interface ManagedSessionInfo {
 
 export type OnSessionRelease = (conversationId: string, reason: "grace" | "idle") => void;
 
-/** 加载对话历史的回调。返回 undefined 表示无历史可加载。 */
-export type LoadHistory = (conversationId: string) => Promise<Message[] | undefined>;
+/** 加载对话历史 run records 的回调。返回 undefined 表示无历史可加载。 */
+export type LoadHistory = (
+  conversationId: string,
+) => Promise<RunRecord[] | undefined>;
 
 /** 新对话首次创建时的初始化回调（如写入 transcript header）。 */
 export type InitTranscript = (conversationId: string) => Promise<void>;
 
 /**
- * 原子提交 turn / compact / 两者的回调。
+ * 追加一条原始 run record 的回调 —— 对应分片 store 的 `appendRunRecord`。
  *
- * 对应 `ITranscriptStore.commitTurn` 的签名：
- *   - `{turn}` → append 新 turn
- *   - `{turn, compactBefore}` → 原子重写 + 追加 turn（按 turnsCompacted 截断）
- *   - `{compactBefore}` → 原子重写（无新 turn）
- *
- * 返回值（canonical）不再被消费 —— 内存状态由注意力窗口经接受协议自行前进
- * （recordTurn 在落盘成功后调 `session.runtime.acceptRun`），不从持久化回喂。
- * 签名保持与 store API 一致，待 store 重写时一并收敛。
+ * append-only：持久化只收原文，压缩是窗口的视图操作、不经此回调。
+ * 返回 store 分配的 runIndex，recordTurn 据此推进窗口（覆盖锚点）。
  */
-export type CommitTurn = (
+export type AppendRun = (
   conversationId: string,
-  payload: { turn?: Turn; compactBefore?: CompactMarker },
-) => Promise<Message[]>;
+  input: RunRecordInput,
+) => Promise<AppendRunResult>;
 
 export interface ConversationManagerCallbacks {
   onRelease?: OnSessionRelease;
   loadHistory?: LoadHistory;
   initTranscript?: InitTranscript;
   /**
-   * 原子持久化入口 —— 替代旧 `persistTurn`。
+   * 原子持久化入口。
    *
-   * recordTurn 内部调用此回调落盘，成功后经 SessionRuntime.acceptRun 推进窗口
-   * （返回值不再被消费）。
+   * recordTurn 内部调用此回调追加原文，成功后以返回的 runIndex 经
+   * SessionRuntime.acceptRun 推进窗口。
    *
    * **配置契约（构造函数守卫）**：
    *   - 纯 ephemeral-only 场景（未提供 loadHistory / initTranscript）：可省略
@@ -127,10 +125,10 @@ export interface ConversationManagerCallbacks {
    *     constructor 检测到"部分配置"立即 throw —— 避免配置错误静默失败
    *     （persistent 分支丢消息、promote 错误晋升）。
    *
-   * 运行时契约：recordTurn 的 persistent 分支 / promote 在 `!commitTurn` 时
-   * 不再静默降级 —— 前者 throw，后者 return false 保持 ephemeral。
+   * 运行时契约：recordTurn 的 persistent 分支 / promote 在缺省时不再静默
+   * 降级 —— 前者 throw，后者 return false 保持 ephemeral。
    */
-  commitTurn?: CommitTurn;
+  appendRun?: AppendRun;
   /**
    * 可选 ConfirmationHub —— 提供时每个新建会话的 runtime.confirmationBroker 会
    * 自动 attach；会话释放（delete / grace / idle / disposeAll）前自动 detach。
@@ -164,7 +162,7 @@ export class ConversationManager {
   private readonly onRelease?: OnSessionRelease;
   private readonly loadHistory?: LoadHistory;
   private readonly initTranscript?: InitTranscript;
-  private readonly commitTurnCb?: CommitTurn;
+  private readonly appendRunCb?: AppendRun;
   private readonly confirmationHub?: ConfirmationHub;
   /** conversationId 集合——已 attach 到 hub 的会话，用于 dispose 前反查 + 防重 */
   private readonly attachedBrokers = new Set<string>();
@@ -193,19 +191,19 @@ export class ConversationManager {
       this.onRelease = callbacksOrOnRelease.onRelease;
       this.loadHistory = callbacksOrOnRelease.loadHistory;
       this.initTranscript = callbacksOrOnRelease.initTranscript;
-      this.commitTurnCb = callbacksOrOnRelease.commitTurn;
+      this.appendRunCb = callbacksOrOnRelease.appendRun;
       this.confirmationHub = callbacksOrOnRelease.confirmationHub;
     } else if (loadHistory) {
       this.loadHistory = loadHistory;
     }
 
     // 配置守卫：部分配置即配置错误 —— 提供了持久化信号（loadHistory / initTranscript）
-    // 但没提供 commitTurn，会导致 recordTurn 的 persistent 分支静默丢消息
-    // （adapter.messages 缺本轮 assistant 回复）。fail-fast 在构造阶段暴露。
+    // 但没提供 appendRun，会导致 recordTurn 的 persistent 分支无路可走。
+    // fail-fast 在构造阶段暴露。
     const hasPersistenceIntent = !!(this.loadHistory || this.initTranscript);
-    if (hasPersistenceIntent && !this.commitTurnCb) {
+    if (hasPersistenceIntent && !this.appendRunCb) {
       throw new Error(
-        "ConversationManager: `commitTurn` callback is required when `loadHistory` or `initTranscript` is provided. " +
+        "ConversationManager: `appendRun` callback is required when `loadHistory` or `initTranscript` is provided. " +
           "Ephemeral-only usage should omit all three callbacks.",
       );
     }
@@ -246,11 +244,11 @@ export class ConversationManager {
   }
 
   private async doCreate(id: string, ephemeral: boolean): Promise<ManagedSession> {
-    const initialMessages = ephemeral ? undefined : await this.loadHistory?.(id);
-    if (!initialMessages && !ephemeral && this.initTranscript) {
+    const initialRecords = ephemeral ? undefined : await this.loadHistory?.(id);
+    if (!initialRecords && !ephemeral && this.initTranscript) {
       await this.initTranscript(id);
     }
-    const runtime = await this.factory.create(id, initialMessages);
+    const runtime = await this.factory.create(id, initialRecords);
     const now = new Date().toISOString();
 
     const session: ManagedSession = {
@@ -260,12 +258,10 @@ export class ConversationManager {
       lastActiveAt: now,
       busy: false,
       observers: new Set(),
-      turnCount: initialMessages
-        ? initialMessages.filter(m => m.role === "user").length
-        : 0,
+      turnCount: initialRecords?.length ?? 0,
       ephemeral,
       transcriptInited: !ephemeral,
-      pendingTurns: [],
+      pendingRuns: new EphemeralRunBuffer(),
     };
 
     this.sessions.set(id, session);
@@ -516,42 +512,46 @@ export class ConversationManager {
     return true;
   }
 
-  // ─── Turn 记录 + 晋升（单向数据流） ───
+  // ─── Run 记录 + 晋升（单向数据流） ───
 
   /**
-   * 记录一个完成的 turn，并可选地应用本 run 的 compact 边界。
+   * 记录一个完成的 run，并可选地应用本 run 的窗口折叠指令。
    *
    * 接受协议："先持久化（或 pending 入列）成功、后窗口前进"——成功后调
    * `session.runtime.acceptRun`，窗口应用 windowCompact 折叠并追加本 run
    * 蒸馏对。失败路径不触窗口：内存停在原基底，下轮重试，无需回滚。
    *
-   * 压缩与持久化的分界：compactBefore 只驱动**窗口折叠**（注意力视图）；
+   * 压缩与持久化的分界：windowCompact 只驱动**窗口折叠**（注意力视图）；
    * 持久化（磁盘 / pending）是 append-only 原文，永不因压缩变短——被摘
    * 内容仍完整躺在持久层上。
    *
    * 两条路径：
-   *   - persistent → commitTurn 回调（原子追加原始 turn）→ acceptRun
-   *   - ephemeral → pendingTurns 追加（promote 的平铺落盘原料）→ acceptRun；
-   *     turnCount >= 2 自动 promote
+   *   - persistent → appendRun 回调（追加原始 run record）→ 以返回的 runIndex
+   *     acceptRun（折叠覆盖锚点随配对落进窗口）
+   *   - ephemeral → pendingRuns 追加（promote 的平铺落盘原料）→ acceptRun
+   *     携 **provisional runIndex**（= pending 队列序号）；turnCount >= 2 自动 promote
    */
   async recordTurn(
     conversationId: string,
-    turn: Turn,
-    compactBefore?: CompactMarker,
+    record: RunRecordInput,
+    windowCompact?: WindowCompact,
   ): Promise<void> {
     const session = this.sessions.get(conversationId);
     if (!session) return;
 
     if (session.ephemeral) {
-      // pending 入列即 ephemeral 的"持久化成功"——promote 据此 FIFO 平铺落盘
-      session.pendingTurns.push(turn);
+      // 入列即 ephemeral 的"持久化成功"——缓冲在入列那一刻定格 provisional
+      // runIndex（内存事实流的唯一编号分配点，与 store 同一编号纪律）。
+      // promote 按 FIFO flush 到全新 transcript 时与 store 顺序分配一致
+      //（promote 内对账校验）——persistent 化后窗口配对恒有 runIndex，
+      // 折叠的覆盖锚点不缺。
+      const provisionalRunIndex = session.pendingRuns.enqueue(record);
       session.turnCount++;
 
       session.runtime.acceptRun({
-        runMessages: [turn.userMessage, turn.assistantMessage],
-        windowCompact: compactBefore
-          ? windowCompactFromMarker(compactBefore)
-          : undefined,
+        runMessages: record.messages,
+        runIndex: provisionalRunIndex,
+        windowCompact,
       });
 
       if (session.turnCount >= 2) {
@@ -560,29 +560,28 @@ export class ConversationManager {
       return;
     }
 
-    // persistent 分支：commitTurn 落盘成功后窗口前进
+    // persistent 分支：appendRun 落盘成功后窗口前进
     //
-    // 构造函数已守卫 "有持久化意图必须有 commitTurn"；此处的 assert 是 defense-in-depth ——
+    // 构造函数已守卫 "有持久化意图必须有 appendRun"；此处的 assert 是 defense-in-depth ——
     // 防止有人构造时通过 `undefined as any` 等方式绕过类型检查后在运行时 bite。
-    // 不再静默降级（老实现 `if (cb) { ... }` 会让 adapter 丢本轮 assistant）。
-    if (!this.commitTurnCb) {
+    // 不静默降级（静默会让本轮 run 既不落盘也不报错）。
+    if (!this.appendRunCb) {
       throw new Error(
-        `ConversationManager.recordTurn: persistent session ${conversationId} requires commitTurn callback ` +
-          "(was this manager constructed without commitTurn while the session is not ephemeral?)",
+        `ConversationManager.recordTurn: persistent session ${conversationId} requires appendRun callback ` +
+          "(was this manager constructed without appendRun while the session is not ephemeral?)",
       );
     }
-    await this.commitTurnCb(conversationId, { turn });
+    const { runIndex } = await this.appendRunCb(conversationId, record);
     session.runtime.acceptRun({
-      runMessages: [turn.userMessage, turn.assistantMessage],
-      windowCompact: compactBefore
-        ? windowCompactFromMarker(compactBefore)
-        : undefined,
+      runMessages: record.messages,
+      runIndex,
+      windowCompact,
     });
     session.turnCount++;
   }
 
   /**
-   * 将 ephemeral 会话晋升为 persistent —— 把 pending 的原始 turns 按序
+   * 将 ephemeral 会话晋升为 persistent —— 把 pending 的原始 run records 按序
    * 平铺落盘（append-only，无任何压缩边界参与）。
    *
    * 不触窗口 —— ephemeral 期间窗口已随每次 recordTurn 的接受协议前进；
@@ -597,24 +596,36 @@ export class ConversationManager {
       session.transcriptInited = true;
     }
 
-    // 无 commitTurn 回调：保持 ephemeral 状态，不晋升。
+    // 无 appendRun 回调：保持 ephemeral 状态，不晋升。
     //
-    // 老实现 `else { pendingTurns = []; }` 然后落到 `ephemeral = false` 会导致：
+    // 若清空 pending 后仍置 ephemeral=false 会导致：
     //   1. 本次调用已清空 pending，数据丢失
     //   2. 更严重：ephemeral=false 使后续 recordTurn 走 persistent 分支，
     //      persistent 分支又 throw（见 recordTurn 的 assert）—— 彻底卡死
-    // 返 false 告知调用方"未晋升"，保留 pendingTurns 供后续真正配置了 commitTurn
+    // 返 false 告知调用方"未晋升"，保留 pendingRuns 供后续真正配置了 appendRun
     // 的新 manager 处理（或允许会话继续作为 ephemeral 运行）。
-    if (!this.commitTurnCb) {
+    if (!this.appendRunCb) {
       return false;
     }
 
-    // 逐个 flush：shift 只在单次 commitTurn 成功后执行 —— 任意中间失败 rethrow
-    // 时保留未持久化的 pending（retry 安全）。
-    while (session.pendingTurns.length > 0) {
-      const first = session.pendingTurns[0]!;
-      await this.commitTurnCb(conversationId, { turn: first });
-      session.pendingTurns.shift();
+    // 逐条 flush：出队只在单条 appendRun 成功后执行 —— 任意中间失败 rethrow
+    // 时缓冲保留未持久化尾部（retry 安全）。
+    //
+    // runIndex 对账：窗口配对持有的 provisional runIndex（条目入列时定格的
+    // 事实）必须与 store 实际分配一致——FIFO flush 到全新 transcript 时结构
+    // 上成立；不一致（如 promote 撞上同 id 的旧 transcript）说明窗口锚与
+    // 持久化错位，warn 暴露（窗口锚修正随快照消费者落地，在那之前锚无
+    // 消费者、无实害）。
+    for (let head = session.pendingRuns.peek(); head; head = session.pendingRuns.peek()) {
+      const { runIndex } = await this.appendRunCb(conversationId, head.record);
+      if (runIndex !== head.provisionalRunIndex) {
+        console.warn(
+          `[ConversationManager.promote] runIndex 对账不一致 conv=${conversationId}: ` +
+            `store=${runIndex} provisional=${head.provisionalRunIndex}（transcript 非全新？）` +
+            "—— 窗口折叠锚与持久化错位",
+        );
+      }
+      session.pendingRuns.dequeue();
     }
 
     session.ephemeral = false;

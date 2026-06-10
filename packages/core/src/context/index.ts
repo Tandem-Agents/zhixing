@@ -123,7 +123,6 @@ export type {
 } from "./window/index.js";
 export {
   createAttentionWindow,
-  restoreAttentionWindowFromCanonical,
-  windowCompactFromMarker,
+  restoreAttentionWindowFromRecords,
 } from "./window/index.js";
 

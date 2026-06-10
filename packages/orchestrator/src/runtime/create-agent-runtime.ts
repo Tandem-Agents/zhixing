@@ -13,7 +13,7 @@ import {
   type AgentResult,
   type AgentYield,
   type AgentEventMap,
-  type CompactMarker,
+  type WindowCompact,
   type ConfirmationFallbackStrategy,
   type ContextBudget,
   type IConfirmationBroker,
@@ -32,8 +32,7 @@ import {
   type TurnContextProvider,
   type TurnSource,
   type WatchdogPolicy,
-  buildTurn,
-  resolveTurnTimestamp,
+  buildRunRecord,
   BoundaryRegistry,
   ConfirmationBroker,
   createEventBus,
@@ -266,7 +265,7 @@ export interface AgentRuntime {
   /**
    * 触发所有已注册组件 reset 自身对话级状态。
    *
-   * 调用时机：cli `/clear` 在 `store.compactAll` 之后调一次；
+   * 调用时机：cli `/clear` 在持久层 appendClear 之后调一次；
    * server 在 conversation 切换 / 重置场景按需调。
    *
    * 失败语义：单个 Resettable 抛错 → 收集到聚合错误数组继续后续 reset，
@@ -299,25 +298,26 @@ export interface ForceCompactResult {
   /** 压缩后的预算快照（modelInfo 由 resolver 保证可用，必填） */
   budget: ContextBudget;
   /**
-   * compact 事务的权威元数据（仅当事务产生了 summary 时非空）。
+   * compact 事务产出的窗口重构指令（仅当事务产生了 summary 时非空）。
    *
-   * 由 forceCompact 内部 eventBus 订阅 context:compact_end 并 L1 累积组装。
-   * 消费者：REPL /compact 直接把这个 marker 交给 store.appendCompact 持久化，
-   * 不再自己拼接 "(manual compact)" 等硬编码字符串。
+   * 由 forceCompact 内部 eventBus 订阅 context:compact_end 并累积组装。
+   * 消费者：REPL /compact 把它交给注意力窗口折叠（applyCompact）——
+   * 压缩是窗口的视图操作，不落盘。
    *
    * 为什么 optional：如果 forceCompact 只触发了非摘要型策略（如 MessageDrop /
-   * MemoryFlush），没有 LLM 生成的 summary，此时不该写 compact marker（会产生
-   * 假摘要污染 transcript）。调用方应该判断此字段存在再持久化。
+   * MemoryFlush），没有 LLM 生成的 summary，窗口不该折叠。
+   * 调用方应判断此字段存在再动窗口。
    */
-  compactBefore?: CompactMarker;
+  windowCompact?: WindowCompact;
 }
 
 export interface RunParams {
   messages: Message[];
   /**
-   * 本 turn 序号 —— 由调用方维护的 counter，落盘为 Turn.turnIndex。
+   * 本 turn 序号 —— 由调用方维护的 counter，进生命周期钩子上下文
+   * （LifecycleBeforeRunContext / LifecycleAfterRunContext）供订阅者观测。
    *
-   * - REPL: `state.turnCounter`（每次 commitTurn 成功后 +1）
+   * - REPL: `state.turnCounter`（每次持久化成功后 +1）
    * - server: `ManagedSession.turnCount`
    * - ephemeral / 单次运行：0
    */
@@ -330,7 +330,7 @@ export interface RunParams {
    * 工具收到 undefined 时显式分支处理（拒绝执行 / graceful degrade）。
    */
   conversationId?: string;
-  /** 触发源，落盘为 Turn.source。不指定时字段为 undefined */
+  /** 触发源，落盘为 run record 的 source 字段。不指定时字段为 undefined */
   source?: TurnSource;
   onYield?: (event: AgentYield) => void;
   /**
@@ -1004,7 +1004,7 @@ export async function createAgentRuntime(
       // 独立 eventBus —— 捕获本次 forceCompact 的 compact_end 事件；
       // 和 run() 的外层 eventBus 隔离，不混淆 REPL 的事件流。
       // 两次 onTurnComplete 尝试（初始 + 降阈值重试）共用同一 bus，
-      // 累积订阅保证 compactBefore 包含两次尝试的汇总。
+      // 累积订阅保证 windowCompact 包含两次尝试的汇总。
       const localBus = createEventBus<AgentEventMap>();
       const accumulator = subscribeCompactAccumulator(localBus);
 
@@ -1040,13 +1040,13 @@ export async function createAgentRuntime(
         }
 
         const budget = engine.checkBudget(finalMessages);
-        const compactBefore = accumulator.getMarker();
+        const windowCompact = accumulator.getWindowCompact();
 
         return {
           modified: finalModified,
           messages: finalMessages,
           budget,
-          compactBefore,
+          windowCompact,
         };
       } finally {
         // localBus 本就随函数结束 GC,但显式 dispose 对齐契约,未来若 localBus
@@ -1170,7 +1170,7 @@ export async function createAgentRuntime(
       const disposeRender = options.decorateRunBus?.({ bus: eventBus });
 
       // Compact 累积订阅 —— 多个触发点 fire 时累加 turnsCompacted、
-      // 取最新 summary、锚定 firstTokensBefore。run 结束时读出作为 RunResult.compactBefore。
+      // 取最新 summary、锚定 firstTokensBefore。run 结束时读出作为 RunResult.windowCompact。
       //
       // 数据收集订阅,与展示层正交,留在 runtime 主流程。事件本身的渲染由 decorateRunBus
       // 注入的订阅处理(若有)。
@@ -1386,32 +1386,26 @@ export async function createAgentRuntime(
         let loopMessages = injectedMessages;
 
         // 原始 user 消息（params.messages 最后一条，未经 <context> / turn-context 注入增强）
-        // —— buildTurn 契约要求持久化 Turn 的 userMessage 是用户真实输入，不是内部增强版
+        // —— 持久化输入的 messages[0] 必须是用户真实输入，不是内部增强版
         const originalUserMessage =
           params.messages[params.messages.length - 1] ??
           (userMessage("") as Message);
 
         const buildPreFlightError = (agentResult: AgentResult): RunResult => {
-          // 时序协调：turn.timestamp 必须严格 > compactBefore.timestamp。
-          // 老文件 lazy migrate 用 `turn.ts <= compact.ts` 判丢弃，同毫秒会误伤。
-          // resolveTurnTimestamp 一行防御：max(now, compact.ts+1ms) 消除误判。
-          const compactBefore = accumulator.getMarker();
           return {
             agentResult,
-            turn: buildTurn({
-              turnIndex: params.turnIndex,
+            runRecord: buildRunRecord({
               source: params.source,
               userMessage: originalUserMessage,
               newMessages: [],
               agentResult,
-              timestamp: resolveTurnTimestamp(compactBefore),
             }),
             newMessages: [],
             durationMs: Date.now() - startTime,
             // budget 快照用 injectedMessages —— 即使 engine 抛错也能给一个保守值；
             // turn-context 块由 agent-loop per-LLM-call 注入，不在此 budget 估算里
             budget: contextEngine.checkBudget(injectedMessages),
-            compactBefore,
+            windowCompact: accumulator.getWindowCompact(),
             pendingModeSwitch: workModeAccumulator.getIntent(),
           };
         };
@@ -1538,28 +1532,25 @@ export async function createAgentRuntime(
 
             const budget = contextEngine.checkBudget(allMessages);
 
-            // 时序协调（见 buildPreFlightError 注释）：turn.timestamp > compactBefore.timestamp
-            //
-            // marker 优先级：segment > compact（段切换 marker 含 segmentId +
+            // 指令优先级：segment > compact（段切换指令含 segmentId +
             // structuredSummary 等结构化信息，应优先采用；compact 是 budget 兜底
-            // 路径产生的 marker，单 run 内两者通常不会同时存在 —— attention 触发
+            // 路径的产物，单 run 内两者通常不会同时存在 —— attention 触发
             // 远早于 budget critical）。
-            const compactBefore =
-              segmentAccumulator.getMarker() ?? accumulator.getMarker();
+            const windowCompact =
+              segmentAccumulator.getWindowCompact() ??
+              accumulator.getWindowCompact();
             return {
               agentResult: value,
-              turn: buildTurn({
-                turnIndex: params.turnIndex,
+              runRecord: buildRunRecord({
                 source: params.source,
                 userMessage: originalUserMessage,
                 newMessages,
                 agentResult: value,
-                timestamp: resolveTurnTimestamp(compactBefore),
               }),
               newMessages,
               durationMs: Date.now() - startTime,
               budget,
-              compactBefore,
+              windowCompact,
               pendingModeSwitch: workModeAccumulator.getIntent(),
             };
           }

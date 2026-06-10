@@ -2,7 +2,7 @@
  * 架构契约测试 —— 双 accumulator 协同与优先级。
  *
  * 验证 run-end 关键决策的语义不变量：
- *   compactBefore = segmentAccumulator.getMarker() ?? compactAccumulator.getMarker()
+ *   windowCompact = segmentAcc.getWindowCompact() ?? compactAcc.getWindowCompact()
  *
  * 这是 create-agent-runtime.ts run() 路径的核心选择逻辑。两个 accumulator
  * 在同一 EventBus 上独立工作，监听不同的事件源：
@@ -10,7 +10,7 @@
  *   - segmentAccumulator 监听 segment:new_started —— SegmentManager 走的事件
  *
  * 单 run 内两者通常不会同时触发（attention 阈值远早于 budget critical），
- * 但 marker 选择优先级仍要严格定义：segment > compact（段切换 marker 含
+ * 但指令选择优先级仍要严格定义：segment > compact（段切换指令含
  * segmentId / structuredSummary 等结构化信息，应优先采用）。
  *
  * 本测试用真实 EventBus + 真实两个 accumulator，直接验证：
@@ -22,8 +22,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type {
   AgentEventMap,
-  CompactMarker,
   CompactStrategyContribution,
+  WindowCompact,
 } from "@zhixing/core";
 import { EventBus } from "@zhixing/core";
 import {
@@ -52,12 +52,10 @@ afterEach(() => {
   segmentAcc.dispose();
 });
 
-function segmentMarker(segmentId: string): CompactMarker {
+function segmentCompact(segmentId: string): WindowCompact {
   return {
-    type: "compact",
-    timestamp: "2026-05-11T10:00:00Z",
     summary: `segment summary ${segmentId}`,
-    turnsCompacted: 5,
+    pairsCompacted: 5,
     tokensBefore: 200_000,
     tokensAfter: 5_000,
     segmentId,
@@ -65,13 +63,13 @@ function segmentMarker(segmentId: string): CompactMarker {
   };
 }
 
-async function emitSegment(marker: CompactMarker): Promise<void> {
+async function emitSegment(windowCompact: WindowCompact): Promise<void> {
   await bus.emit("segment:new_started", {
-    segmentId: marker.segmentId!,
+    segmentId: windowCompact.segmentId!,
     bufferTurns: 2,
-    tokensBefore: marker.tokensBefore,
-    tokensAfter: marker.tokensAfter,
-    marker,
+    tokensBefore: windowCompact.tokensBefore,
+    tokensAfter: windowCompact.tokensAfter,
+    windowCompact,
   });
 }
 
@@ -97,56 +95,56 @@ async function emitCompact(opts: {
 }
 
 /**
- * 模拟 create-agent-runtime.ts run-end 处的 marker 选择逻辑：
- *   compactBefore = segmentAcc.getMarker() ?? compactAcc.getMarker()
+ * 模拟 create-agent-runtime.ts run-end 处的指令选择逻辑：
+ *   windowCompact = segmentAcc.getWindowCompact() ?? compactAcc.getWindowCompact()
  */
-function selectMarker(): CompactMarker | undefined {
-  return segmentAcc.getMarker() ?? compactAcc.getMarker();
+function selectWindowCompact(): WindowCompact | undefined {
+  return segmentAcc.getWindowCompact() ?? compactAcc.getWindowCompact();
 }
 
 // ─── 优先级契约 ───
 
 describe("双 accumulator 优先级 —— segment > compact", () => {
   it("两者都未 fire → undefined", () => {
-    expect(selectMarker()).toBeUndefined();
+    expect(selectWindowCompact()).toBeUndefined();
   });
 
-  it("仅 segment fire → 用 segment marker", async () => {
-    await emitSegment(segmentMarker("seg-only"));
+  it("仅 segment fire → 用 segment 指令", async () => {
+    await emitSegment(segmentCompact("seg-only"));
 
-    const selected = selectMarker();
+    const selected = selectWindowCompact();
     expect(selected).toBeDefined();
     expect(selected!.segmentId).toBe("seg-only");
     expect(selected!.structuredSummary).toBeDefined();
   });
 
-  it("仅 compact fire → 用 compact marker（兜底路径）", async () => {
+  it("仅 compact fire → 用 compact 指令（兜底路径）", async () => {
     await emitCompact({ summary: "fallback summary", turnsCompacted: 3 });
 
-    const selected = selectMarker();
+    const selected = selectWindowCompact();
     expect(selected).toBeDefined();
     expect(selected!.summary).toBe("fallback summary");
-    expect(selected!.turnsCompacted).toBe(3);
-    // compact marker 路径不含结构化摘要
+    expect(selected!.pairsCompacted).toBe(3);
+    // compact 指令路径不含结构化摘要
     expect(selected!.segmentId).toBeUndefined();
     expect(selected!.structuredSummary).toBeUndefined();
   });
 
   it("两者都 fire → segment 优先（更丰富结构化信息）", async () => {
     await emitCompact({ summary: "compact summary", turnsCompacted: 3 });
-    await emitSegment(segmentMarker("seg-wins"));
+    await emitSegment(segmentCompact("seg-wins"));
 
-    const selected = selectMarker();
+    const selected = selectWindowCompact();
     expect(selected!.segmentId).toBe("seg-wins");
     expect(selected!.structuredSummary).toBeDefined();
     expect(selected!.summary).toContain("seg-wins"); // segment 的，不是 compact 的
   });
 
   it("两者都 fire（compact 后到也不影响）→ segment 优先", async () => {
-    await emitSegment(segmentMarker("seg-first"));
+    await emitSegment(segmentCompact("seg-first"));
     await emitCompact({ summary: "compact later", turnsCompacted: 3 });
 
-    const selected = selectMarker();
+    const selected = selectWindowCompact();
     expect(selected!.segmentId).toBe("seg-first");
   });
 });
@@ -155,17 +153,17 @@ describe("双 accumulator 优先级 —— segment > compact", () => {
 
 describe("两类事件源互相独立", () => {
   it("segment 事件不写 compact accumulator", async () => {
-    await emitSegment(segmentMarker("seg-1"));
+    await emitSegment(segmentCompact("seg-1"));
 
-    expect(compactAcc.getMarker()).toBeUndefined();
-    expect(segmentAcc.getMarker()).toBeDefined();
+    expect(compactAcc.getWindowCompact()).toBeUndefined();
+    expect(segmentAcc.getWindowCompact()).toBeDefined();
   });
 
   it("compact 事件不写 segment accumulator", async () => {
     await emitCompact({ summary: "x", turnsCompacted: 1 });
 
-    expect(segmentAcc.getMarker()).toBeUndefined();
-    expect(compactAcc.getMarker()).toBeDefined();
+    expect(segmentAcc.getWindowCompact()).toBeUndefined();
+    expect(compactAcc.getWindowCompact()).toBeDefined();
   });
 });
 
@@ -176,28 +174,28 @@ describe("dispose 互不影响", () => {
     segmentAcc.dispose();
     await emitCompact({ summary: "still works", turnsCompacted: 1 });
 
-    expect(compactAcc.getMarker()).toBeDefined();
-    expect(compactAcc.getMarker()!.summary).toBe("still works");
-    expect(segmentAcc.getMarker()).toBeUndefined();
+    expect(compactAcc.getWindowCompact()).toBeDefined();
+    expect(compactAcc.getWindowCompact()!.summary).toBe("still works");
+    expect(segmentAcc.getWindowCompact()).toBeUndefined();
   });
 
   it("dispose compact accumulator 后 segment accumulator 仍工作", async () => {
     compactAcc.dispose();
-    await emitSegment(segmentMarker("seg-survived"));
+    await emitSegment(segmentCompact("seg-survived"));
 
-    expect(segmentAcc.getMarker()).toBeDefined();
-    expect(segmentAcc.getMarker()!.segmentId).toBe("seg-survived");
-    expect(compactAcc.getMarker()).toBeUndefined();
+    expect(segmentAcc.getWindowCompact()).toBeDefined();
+    expect(segmentAcc.getWindowCompact()!.segmentId).toBe("seg-survived");
+    expect(compactAcc.getWindowCompact()).toBeUndefined();
   });
 
   it("dispose 两个 accumulator 都不收集后续事件", async () => {
     segmentAcc.dispose();
     compactAcc.dispose();
 
-    await emitSegment(segmentMarker("seg-after"));
+    await emitSegment(segmentCompact("seg-after"));
     await emitCompact({ summary: "compact after", turnsCompacted: 1 });
 
-    expect(segmentAcc.getMarker()).toBeUndefined();
-    expect(compactAcc.getMarker()).toBeUndefined();
+    expect(segmentAcc.getWindowCompact()).toBeUndefined();
+    expect(compactAcc.getWindowCompact()).toBeUndefined();
   });
 });

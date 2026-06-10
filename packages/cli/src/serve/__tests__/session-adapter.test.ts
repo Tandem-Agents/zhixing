@@ -21,9 +21,7 @@ import type { AgentRuntime, RunParams, RunResult } from "../../run-agent.js";
 
 /** 模拟接受协议：caller（ConversationManager）在持久化成功后推进窗口 */
 function acceptTurn(runtime: SessionRuntime, result: RunResult): void {
-  runtime.acceptRun({
-    runMessages: [result.turn.userMessage, result.turn.assistantMessage],
-  });
+  runtime.acceptRun({ runMessages: result.runRecord.messages });
 }
 
 interface MockBehavior {
@@ -87,14 +85,13 @@ function buildAbortedResult(
       abortReason,
       usage: { inputTokens: 0, outputTokens: 0 },
     },
-    turn: {
-      type: "turn",
-      turnIndex: params.turnIndex,
+    runRecord: {
       timestamp: new Date().toISOString(),
-      userMessage:
+      messages: [
         params.messages[params.messages.length - 1] ??
-        ({ role: "user", content: [] } as Message),
-      assistantMessage: { role: "assistant", content: [] } as Message,
+          ({ role: "user", content: [] } as Message),
+        { role: "assistant", content: [] } as Message,
+      ],
       usage: { inputTokens: 0, outputTokens: 0 },
     },
     newMessages: [],
@@ -132,15 +129,15 @@ function buildResultByReason(
 
   return {
     agentResult: result,
-    turn: {
-      type: "turn",
-      turnIndex: params.turnIndex,
+    runRecord: {
       timestamp: new Date().toISOString(),
-      userMessage:
+      messages: [
         params.messages[params.messages.length - 1] ??
-        ({ role: "user", content: [] } as Message),
-      assistantMessage:
-        reason === "completed" ? assistantMsg : ({ role: "assistant", content: [] } as Message),
+          ({ role: "user", content: [] } as Message),
+        reason === "completed"
+          ? assistantMsg
+          : ({ role: "assistant", content: [] } as Message),
+      ],
       usage: { inputTokens: 1, outputTokens: 1 },
     },
     newMessages,

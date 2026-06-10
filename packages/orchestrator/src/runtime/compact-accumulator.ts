@@ -4,22 +4,22 @@
  * 为什么独立成模块：
  *   - run() 和 forceCompact() 共用此累积逻辑
  *   - 一个 run 内可能从多个触发点(pre-flight / pure-text return / critical
- *     force-apply)多次 fire compact_end;覆盖式订阅会丢失前面事务的 turnsCompacted 贡献,
- *     导致 commitTurn 按错误的 Turn 数截断
+ *     force-apply)多次 fire compact_end;覆盖式订阅会丢失前面事务的折叠贡献,
+ *     导致窗口按错误的配对数折叠
  *
  * 累积规则(L1):
- *   - 只有含 summary 的事务参与累积(非摘要型事务不代表文件 Turn 替代)
- *   - turnsCompacted 累加(本 run 内所有摘要型事务替代的 Turn 数之和)
+ *   - 只有含 summary 的事务参与累积(非摘要型事务不折叠窗口配对)
+ *   - pairsCompacted 累加(本 run 内所有摘要型事务折叠的窗口配对数之和)
  *   - summary 取最新(后一次的 LLM 摘要天然包含前一次,因为 toSummarize 含前次 pair)
  *   - tokensBefore 锚定第一次(事务起点真实值)
  *   - tokensAfter 取最新
  *   - timestamp 取最新(事件触发时刻,对齐持久化"最后一次时间"语义)
  *
- * 直接产出 CompactMarker(core 的权威类型),无中间 CompactInfo。
- * 单一事实源:RunResult.compactBefore 即是此 getter 的返回值。
+ * 直接产出 WindowCompact(core 的权威类型),无中间形态。
+ * 单一事实源:RunResult.windowCompact 即是此 getter 的返回值。
  */
 
-import type { AgentEventMap, CompactMarker, IEventBus } from "@zhixing/core";
+import type { AgentEventMap, IEventBus, WindowCompact } from "@zhixing/core";
 
 /**
  * 累积器句柄 —— `subscribeCompactAccumulator` 的返回值。
@@ -29,8 +29,8 @@ import type { AgentEventMap, CompactMarker, IEventBus } from "@zhixing/core";
  * EventBus 架构),不 dispose 会造成 listener 泄漏。API 形态提前到位,杜绝这类隐蔽 bug。
  */
 export interface CompactAccumulator {
-  /** 读取累积的 CompactMarker;非摘要型事务不参与累积时返 undefined */
-  getMarker(): CompactMarker | undefined;
+  /** 读取累积的窗口重构指令;非摘要型事务不参与累积时返 undefined */
+  getWindowCompact(): WindowCompact | undefined;
   /** 从 eventBus 移除订阅;多次调用幂等(idempotent) */
   dispose(): void;
 }
@@ -58,7 +58,7 @@ export function subscribeCompactAccumulator(
   eventBus: IEventBus<AgentEventMap>,
   onEvent?: (info: AgentEventMap["context:compact_end"]) => void,
 ): CompactAccumulator {
-  let acc: CompactMarker | undefined;
+  let acc: WindowCompact | undefined;
   let firstTokensBefore: number | undefined;
 
   // EventBus.on 返回 Unsubscribe 函数 —— 直接用作 dispose,无需自建 handler 引用管理
@@ -68,10 +68,8 @@ export function subscribeCompactAccumulator(
     if (!info.summary) return;
     if (firstTokensBefore === undefined) firstTokensBefore = info.tokensBefore;
     acc = {
-      type: "compact",
-      timestamp: new Date().toISOString(),
       summary: info.summary,
-      turnsCompacted: (acc?.turnsCompacted ?? 0) + (info.turnsCompacted ?? 0),
+      pairsCompacted: (acc?.pairsCompacted ?? 0) + (info.turnsCompacted ?? 0),
       tokensBefore: firstTokensBefore,
       tokensAfter: info.tokensAfter,
     };
@@ -79,7 +77,7 @@ export function subscribeCompactAccumulator(
 
   let disposed = false;
   return {
-    getMarker: () => acc,
+    getWindowCompact: () => acc,
     dispose: () => {
       if (disposed) return;
       disposed = true;

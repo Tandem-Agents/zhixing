@@ -140,7 +140,7 @@ export interface CompactionResult {
    * MemoryFlush）填 undefined。
    *
    * 消费者：engine 事务化聚合后通过 compact_end 事件暴露给 run-agent；
-   * run-agent 闭包 L1 累积后作为 CompactMarker.summary 写入 transcript。
+   * run 闭包累积后作为窗口重构指令的 summary，由会话层折叠注意力窗口。
    */
   summary?: string;
   /**
@@ -152,9 +152,9 @@ export interface CompactionResult {
    *   2. stripSummaryPlaceholderPair(toSummarize) 去掉上次 compact 的 pair
    *   3. calculateMessageTurns(剩余) 最后 turn 号即本次替代的文件 Turn 数
    *
-   * 消费者：Phase 5 commitTurn({compactBefore}) 按此值切分文件 turns，
-   *   保留末尾 (turns.length - turnsCompacted) 个。turnsCompacted=0 意味着
-   *   "截 0 = 不截"，所以必须精确填充而非硬编码。
+   * 消费者：注意力窗口折叠（WindowCompact.pairsCompacted）按此值从最旧
+   *   截配对。turnsCompacted=0 意味着"截 0 = 不截"，所以必须精确填充而非
+   *   硬编码。持久化是 append-only 原文，不参与压缩。
    *
    * 非摘要型策略不填（undefined）—— 它们不替代文件 Turn，只做粒度内裁剪。
    */

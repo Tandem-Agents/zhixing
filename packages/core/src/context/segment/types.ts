@@ -15,7 +15,7 @@
  */
 
 import type { SegmentMeta } from "../../conversation/types.js";
-import type { CompactMarker } from "../../transcript/types.js";
+import type { WindowCompact } from "../window/types.js";
 import type { Message } from "../../types/messages.js";
 import type { ToolSpec } from "../../types/tools.js";
 
@@ -116,16 +116,16 @@ export type SegmentSummarizeLLMFn = (
 /**
  * 段切换持久化接口 —— 只负责 segmentMetadata 累积写入。
  *
- * **不**承担 transcript marker 写入：marker 通过 `segment:new_started` 事件
- * 流向 orchestrator accumulator，与本 turn 的 transcript 写入在 run 结束时
- * 同一原子事务（commitTurn）落盘，与 LLMSummarize 路径同模式，整个 run 内
- * transcript 写入收敛到唯一路径——杜绝"两条独立写路径并存"类不一致。
+ * **不**承担窗口折叠：折叠指令通过 `segment:new_started` 事件流向
+ * orchestrator accumulator，随 RunResult.windowCompact 在 run 边界交给注意力
+ * 窗口应用，与 LLMSummarize 路径同模式，整个 run 的折叠指令收敛到唯一出口。
+ * 持久化是 append-only 原文，段切换不写 transcript。
  *
  * 实现需保证 atomic + per-id lock（与 conversation.writeMeta 同款）。
  * conversation 不存在时 no-op（与 task_list state 写入同语义）。
  *
- * appendSegment 失败语义：marker 落盘走另一条数据流（事件 → accumulator →
- * commitTurn），与 segmentMetadata 写入解耦；本接口失败不影响段切换主流程
+ * appendSegment 失败语义：窗口折叠走另一条数据流（事件 → accumulator →
+ * RunResult.windowCompact），与 segmentMetadata 写入解耦；本接口失败不影响段切换主流程
  * 完成度，只影响段历史观测元数据完整性。SegmentManager 内部捕获后 emit
  * `segment:transition_failed` 但 `modified: true` 返回（段切换语义上成功）。
  */
@@ -204,5 +204,6 @@ export interface SegmentManagerOutput {
   readonly decision: SegmentDecision;
   readonly modified: boolean;
   readonly newSegmentMessages?: Message[];
-  readonly marker?: CompactMarker;
+  /** 窗口重构指令 —— 经事件流向累积器、随 RunResult 带出，由会话层折叠窗口 */
+  readonly windowCompact?: WindowCompact;
 }

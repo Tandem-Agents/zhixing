@@ -38,12 +38,9 @@ function createMockRuntime(response?: { text: string }): SessionRuntime {
           message: assistantMsg,
           usage: { inputTokens: 10, outputTokens: 5 },
         },
-        turn: {
-          type: "turn",
-          turnIndex: 0,
+        runRecord: {
           timestamp: new Date().toISOString(),
-          userMessage: userMsg,
-          assistantMessage: assistantMsg,
+          messages: [userMsg, assistantMsg],
           usage: { inputTokens: 10, outputTokens: 5 },
           source: "channel",
         },
@@ -201,8 +198,8 @@ describe("InboundRouter", () => {
       expect(recordSpy).toHaveBeenCalled();
     });
 
-    const [, turn] = recordSpy.mock.calls[0];
-    expect(turn.source).toBe("channel");
+    const [, record] = recordSpy.mock.calls[0];
+    expect(record.source).toBe("channel");
   });
 
   it("warns when adapter not found", async () => {
@@ -261,12 +258,9 @@ describe("InboundRouter", () => {
             error: errorMsg,
             usage: { inputTokens: 0, outputTokens: 0 },
           },
-          turn: {
-            type: "turn",
-            turnIndex: 0,
+          runRecord: {
             timestamp: new Date().toISOString(),
-            userMessage: { role: "user", content: [] },
-            assistantMessage: { role: "assistant", content: [] },
+            messages: [{ role: "user", content: [] }],
           },
           newMessages: [],
           durationMs: 0,
@@ -376,12 +370,12 @@ describe("InboundRouter", () => {
             message: assistantMsg,
             usage: { inputTokens: 1, outputTokens: 0 },
           },
-          turn: {
-            type: "turn",
-            turnIndex: 0,
+          runRecord: {
             timestamp: new Date().toISOString(),
-            userMessage: { role: "user", content: [{ type: "text", text: "(mock)" }] },
-            assistantMessage: assistantMsg,
+            messages: [
+              { role: "user", content: [{ type: "text", text: "(mock)" }] },
+              assistantMsg,
+            ],
           },
           newMessages: [assistantMsg],
           durationMs: 0,

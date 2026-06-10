@@ -132,10 +132,10 @@ async function runManagedTurn(
         triggeredBy: String(connection.id),
       },
     };
-    // 走 runTurnWithCommit helper —— 它内部处理 run + recordTurn + 异常 rollback：
-    //   · non-completed / commitTurn throw / runtime throw 三条异常路径都保证
-    //     adapter state 回到 preRun，避免 orphan userMsg 污染下一轮 LLM 输入
-    //   · commitTurn 失败通过 onCommitFailure hook 通知（此处暂未接 logger；
+    // 走 runTurnWithCommit helper —— run + 按结果 recordTurn（先持久化、后入窗）：
+    //   · non-completed / 持久化 throw / runtime throw 三条异常路径下窗口都
+    //     停在 run 前基底，避免 orphan userMsg 污染下一轮 LLM 输入
+    //   · 持久化失败通过 onCommitFailure hook 通知（此处暂未接 logger；
     //     未来需要 observability 时在 hook 里补 logger.warn / metrics）
     const gen = runTurnWithCommit(
       manager,
@@ -155,7 +155,7 @@ async function runManagedTurn(
       if (iter.done) {
         runResult = iter.value;
         // session.complete 事件的契约保持 AgentResult（向后兼容）—— 客户端
-        // 只关心终止原因 + usage + error，不需要 Turn/compactBefore（那是持久化事项）
+        // 只关心终止原因 + usage + error，不需要 runRecord/windowCompact（那是持久化事项）
         connection.notify("session.complete", {
           conversationId,
           sessionId: conversationId,
@@ -166,8 +166,8 @@ async function runManagedTurn(
       connection.notify("session.delta", { conversationId, sessionId: conversationId, delta: iter.value });
     }
 
-    // turnStartedAt 不再用于 Turn.timestamp（buildTurn 已精确设定）—— 保留变量避免
-    // 未来诊断字段需要 turn 入口时间时重新加逻辑。
+    // turnStartedAt 不用作 run record 的 timestamp（buildRunRecord 已精确设定）——
+    // 保留变量避免未来诊断字段需要 turn 入口时间时重新加逻辑。
     void turnStartedAt;
   } catch (err) {
     if (abortController.signal.aborted) return;

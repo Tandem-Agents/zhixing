@@ -15,8 +15,8 @@
 import { describe, it, expect, vi } from "vitest";
 import type {
   AgentYield,
-  IConfirmationBroker,
   Message,
+  RunRecordInput,
   RunResult,
 } from "@zhixing/core";
 import { ConversationManager } from "../conversation-manager.js";
@@ -63,21 +63,17 @@ function createMockRuntime(
         content: [{ type: "text", text: `echo: ${text}` }],
       };
 
+      const usage = { inputTokens: 0, outputTokens: 0 };
+      const record = (msgs: Message[]): RunRecordInput => ({
+        timestamp: new Date().toISOString(),
+        messages: msgs,
+        usage,
+      });
+
       if (reason === "completed") {
         return {
-          agentResult: {
-            reason: "completed",
-            message: assistantMsg,
-            usage: { inputTokens: 0, outputTokens: 0 },
-          },
-          turn: {
-            type: "turn",
-            turnIndex: 0,
-            timestamp: new Date().toISOString(),
-            userMessage: userMsg,
-            assistantMessage: assistantMsg,
-            usage: { inputTokens: 0, outputTokens: 0 },
-          },
+          agentResult: { reason: "completed", message: assistantMsg, usage },
+          runRecord: record([userMsg, assistantMsg]),
           newMessages: [assistantMsg],
           durationMs: 0,
         };
@@ -88,16 +84,9 @@ function createMockRuntime(
           agentResult: {
             reason: "error",
             error: Object.assign(new Error("boom"), { name: "AgentError" }),
-            usage: { inputTokens: 0, outputTokens: 0 },
+            usage,
           } as RunResult["agentResult"],
-          turn: {
-            type: "turn",
-            turnIndex: 0,
-            timestamp: new Date().toISOString(),
-            userMessage: userMsg,
-            assistantMessage: { role: "assistant", content: [] },
-            usage: { inputTokens: 0, outputTokens: 0 },
-          },
+          runRecord: record([userMsg]),
           newMessages: [],
           durationMs: 0,
         };
@@ -105,18 +94,8 @@ function createMockRuntime(
 
       if (reason === "max_turns") {
         return {
-          agentResult: {
-            reason: "max_turns",
-            usage: { inputTokens: 0, outputTokens: 0 },
-          },
-          turn: {
-            type: "turn",
-            turnIndex: 0,
-            timestamp: new Date().toISOString(),
-            userMessage: userMsg,
-            assistantMessage: { role: "assistant", content: [] },
-            usage: { inputTokens: 0, outputTokens: 0 },
-          },
+          agentResult: { reason: "max_turns", usage },
+          runRecord: record([userMsg]),
           newMessages: [],
           durationMs: 0,
         };
@@ -124,18 +103,8 @@ function createMockRuntime(
 
       // aborted
       return {
-        agentResult: {
-          reason: "aborted",
-          usage: { inputTokens: 0, outputTokens: 0 },
-        },
-        turn: {
-          type: "turn",
-          turnIndex: 0,
-          timestamp: new Date().toISOString(),
-          userMessage: userMsg,
-          assistantMessage: { role: "assistant", content: [] },
-          usage: { inputTokens: 0, outputTokens: 0 },
-        },
+        agentResult: { reason: "aborted", usage },
+        runRecord: record([userMsg]),
         newMessages: [],
         durationMs: 0,
       };
@@ -165,6 +134,12 @@ function createFactory(behavior: MockRuntimeBehavior = {}): RuntimeFactory {
   };
 }
 
+/** appendRun 成功 stub —— 返回 store 分配的 runIndex（自增） */
+function appendRunOk() {
+  let next = 0;
+  return vi.fn(async () => ({ runIndex: next++, shardId: "000001" }));
+}
+
 // ─── Tests ───
 
 describe("runTurnWithCommit", () => {
@@ -176,7 +151,7 @@ describe("runTurnWithCommit", () => {
 
   it("[路径 1] completed + recordTurn 成功 → 窗口前进一个蒸馏对", async () => {
     const mgr = new ConversationManager(createFactory(), config, {
-      commitTurn: async () => [],
+      appendRun: appendRunOk(),
     });
 
     await mgr.getOrCreate("c1");
@@ -198,7 +173,7 @@ describe("runTurnWithCommit", () => {
 
   it("[路径 2] completed + recordTurn throw → 窗口不前进 + onCommitFailure 通知", async () => {
     const mgr = new ConversationManager(createFactory(), config, {
-      commitTurn: async () => {
+      appendRun: async () => {
         throw new Error("disk full");
       },
     });
@@ -214,9 +189,9 @@ describe("runTurnWithCommit", () => {
       if (done) { runResult = value; break; }
     }
 
-    // commitTurn 失败 → runResult 仍 return completed
+    // 持久化失败 → runResult 仍 return completed
     expect(runResult!.agentResult.reason).toBe("completed");
-    // adapter state 回到 preRun（空）
+    // 窗口停在 run 前基底（空）
     expect(mgr.get("c2")!.getHistory()).toEqual(preRun);
     // onCommitFailure 被调用
     expect(onCommitFailure).toHaveBeenCalledTimes(1);
@@ -228,9 +203,9 @@ describe("runTurnWithCommit", () => {
   });
 
   it("[路径 3a] non-completed reason=error → 不调 recordTurn，窗口不前进", async () => {
-    const commitTurn = vi.fn().mockResolvedValue([]);
+    const appendRun = appendRunOk();
     const mgr = new ConversationManager(createFactory({ reason: "error" }), config, {
-      commitTurn,
+      appendRun,
     });
 
     await mgr.getOrCreate("c3");
@@ -244,16 +219,16 @@ describe("runTurnWithCommit", () => {
     }
 
     expect(runResult!.agentResult.reason).toBe("error");
-    expect(commitTurn).not.toHaveBeenCalled();    // 非 completed 不调 commitTurn
+    expect(appendRun).not.toHaveBeenCalled();    // 非 completed 不持久化
     expect(mgr.get("c3")!.getHistory()).toEqual(preRun);  // 窗口停在原基底
 
     mgr.disposeAll();
   });
 
   it("[路径 3b] non-completed reason=max_turns → 同样不前进", async () => {
-    const commitTurn = vi.fn().mockResolvedValue([]);
+    const appendRun = appendRunOk();
     const mgr = new ConversationManager(createFactory({ reason: "max_turns" }), config, {
-      commitTurn,
+      appendRun,
     });
 
     await mgr.getOrCreate("c4");
@@ -263,18 +238,18 @@ describe("runTurnWithCommit", () => {
       if (done) break;
     }
 
-    expect(commitTurn).not.toHaveBeenCalled();
+    expect(appendRun).not.toHaveBeenCalled();
     expect(mgr.get("c4")!.getHistory()).toEqual([]);
 
     mgr.disposeAll();
   });
 
   it("[路径 4] runtime throw → 窗口不前进 + rethrow", async () => {
-    const commitTurn = vi.fn().mockResolvedValue([]);
+    const appendRun = appendRunOk();
     const mgr = new ConversationManager(
       createFactory({ throwError: "provider timeout" }),
       config,
-      { commitTurn },
+      { appendRun },
     );
 
     await mgr.getOrCreate("c5");
@@ -283,7 +258,7 @@ describe("runTurnWithCommit", () => {
     const gen = runTurnWithCommit(mgr, "c5", "hi");
     await expect(gen.next()).rejects.toThrow("provider timeout");
 
-    expect(commitTurn).not.toHaveBeenCalled();   // throw 前未到 commit
+    expect(appendRun).not.toHaveBeenCalled();   // throw 前未到 commit
     expect(mgr.get("c5")!.getHistory()).toEqual(preRun);  // 窗口停在原基底
 
     mgr.disposeAll();
@@ -296,7 +271,7 @@ describe("runTurnWithCommit", () => {
     ];
 
     const mgr = new ConversationManager(createFactory({ yields }), config, {
-      commitTurn: async () => [],
+      appendRun: appendRunOk(),
     });
 
     await mgr.getOrCreate("c6");
@@ -316,7 +291,7 @@ describe("runTurnWithCommit", () => {
 
   it("[契约] session 不存在时抛明确错误", async () => {
     const mgr = new ConversationManager(createFactory(), config, {
-      commitTurn: async () => [],
+      appendRun: appendRunOk(),
     });
 
     const gen = runTurnWithCommit(mgr, "nonexistent", "hi");
@@ -326,14 +301,9 @@ describe("runTurnWithCommit", () => {
   });
 
   it("[跨轮防护] non-completed 后内存停在原基底，不产生孤儿 userMsg", async () => {
-    // Run 1：error → 窗口不前进
-    // Run 2：switch behavior 到 completed → 看 messages 里只有本轮 userMsg
+    // error → 窗口不前进，本轮 userMsg 不残留为孤儿
     const mgr = new ConversationManager(createFactory({ reason: "error" }), config, {
-      commitTurn: async (_id, payload) => {
-        // 真实语义：returns [userMsg, assistantMsg]
-        if (!payload.turn) return [];
-        return [payload.turn.userMessage, payload.turn.assistantMessage];
-      },
+      appendRun: appendRunOk(),
     });
 
     await mgr.getOrCreate("c7");

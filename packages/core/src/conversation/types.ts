@@ -38,7 +38,7 @@ export interface Conversation {
   /**
    * 段切换元数据 —— 累积段切换历史。
    *
-   * transcript 中的 CompactMarker 是单 frontier（每次段切换覆盖前 marker，沿用
+   * 窗口中的折叠摘要对是单 frontier（每次段切换取代前一个摘要，沿用
    * normalize 语义）；段历史累积只走这一条数据流。`/clear` 时清空。
    */
   segmentMetadata?: SegmentMetadata;
@@ -71,7 +71,7 @@ export interface TaskListState {
 
 /** 单次段切换的元数据 —— segmentMetadata.segments 数组的元素 */
 export interface SegmentMeta {
-  /** 段唯一标识符，与 CompactMarker.segmentId 关联 */
+  /** 段唯一标识符，与窗口重构指令的 segmentId 关联 */
   segmentId: string;
   /** 段切换发生时刻（ISO timestamp） */
   timestamp: string;

@@ -12,6 +12,7 @@ import type {
   AgentYield,
   IConfirmationBroker,
   Message,
+  RunRecord,
   RunResult,
   TurnContext,
   TurnSource,
@@ -27,14 +28,14 @@ export interface RunTurnOptions {
   abortSignal?: AbortSignal;
   turnContext?: TurnContext;
   /**
-   * 本 turn 序号（落盘为 Turn.turnIndex）—— 由调用方维护的 counter 提供。
+   * 本 turn 序号（进生命周期钩子上下文供观测）—— 由调用方维护的 counter 提供。
    *
    * 对齐 server 路径由 `ManagedSession.turnCount` 提供；
    * 可选 —— 未传时 adapter 默认 0（legacy / 测试路径）。
    */
   turnIndex?: number;
   /**
-   * 触发源，落盘为 Turn.source（"interactive" / "scheduler" / "channel"）。
+   * 触发源，落盘为 run record 的 source 字段（"interactive" / "scheduler" / "channel"）。
    * server 入站消息路径（InboundRouter）默认为 "channel"。
    */
   source?: TurnSource;
@@ -46,8 +47,8 @@ export interface SessionRuntime {
    * 执行一轮对话，AsyncGenerator 流式 yield 事件 → return `RunResult`。
    *
    * **契约变更**：return 值从 `AgentResult` 升级为 `RunResult`
-   * （含 `turn`、`compactBefore?`、`newMessages` + 诊断字段）。
-   * 调用方（InboundRouter / session.ts RPC / 测试）据此走 commitTurn 单一持久化入口。
+   * （含 `runRecord`、`windowCompact?`、`newMessages` + 诊断字段）。
+   * 调用方（InboundRouter / session.ts RPC / 测试）据此走 recordTurn 单一持久化入口。
    *
    * 第二参数兼容两种形式（ADR-007 Phase 2）：
    * - `AbortSignal`（legacy）
@@ -69,9 +70,14 @@ export interface SessionRuntime {
    * 语义：实现方先应用 windowCompact（若有，折叠被摘配对），再从 runMessages
    *   派生本 run 的蒸馏对追加入窗。run 输入由 run(text) 瞬态构造
    *   （[...窗口, 用户消息]），用户消息在 accept 之前不进入任何状态。
+   *
+   * `runIndex`：持久化路径携带 store 分配的序号（折叠覆盖锚点随配对落进窗口）；
+   *   ephemeral 路径携带 provisional 序号（= pending 队列序号，promote FIFO
+   *   flush 到全新 transcript 时与 store 分配一致，promote 内对账校验）。
    */
   acceptRun(input: {
     runMessages: readonly Message[];
+    runIndex?: number;
     windowCompact?: WindowCompact;
   }): void;
   /**
@@ -107,8 +113,8 @@ export interface SessionRuntime {
 }
 
 export interface RuntimeFactory {
-  /** 创建新运行时；sessionId 由 Registry 生成传入，可选注入历史消息用于恢复对话 */
-  create(sessionId: string, initialMessages?: Message[]): Promise<SessionRuntime>;
+  /** 创建新运行时；sessionId 由调用方传入，可选注入历史 run records 用于恢复对话 */
+  create(sessionId: string, initialRecords?: RunRecord[]): Promise<SessionRuntime>;
 }
 
 export interface RuntimeInfo {

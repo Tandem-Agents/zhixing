@@ -40,9 +40,9 @@ export type InferConversationName = (
 
 export interface MaybeAutoNameFirstTurnOptions {
   conversationId: string;
-  /** commitTurn 后 ++ 的值。刚好 === 1 表示第一 turn 完成。 */
+  /** 本轮持久化成功后 ++ 的值。刚好 === 1 表示第一 turn 完成。 */
   turnCounter: number;
-  /** 调用方传 runResult.turn.userMessage —— 命名的稳定信号源 */
+  /** 调用方传 run record 的首条用户消息 —— 命名的稳定信号源 */
   userMessage: Message;
   inferName: InferConversationName;
   convRepo: IConversationRepository;

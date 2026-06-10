@@ -25,7 +25,7 @@ import type { Message } from "./messages.js";
 import type { ToolSpec } from "./tools.js";
 import type { CompactStrategyContribution } from "../context/types.js";
 import type { AbortReason } from "../interrupt/types.js";
-import type { CompactMarker } from "../transcript/types.js";
+import type { WindowCompact } from "../context/window/types.js";
 import type { SecurityEventMap } from "../security/types.js";
 
 /**
@@ -323,7 +323,7 @@ export type AgentEventMap = {
   };
 
   /**
-   * 新段就绪 —— newSegmentMessages 已组装、CompactMarker 已生成、segmentMetadata
+   * 新段就绪 —— newSegmentMessages 已组装、窗口重构指令已生成、segmentMetadata
    * 已尝试写入。**marker 不落 transcript** —— 本事件携带 marker 流向 orchestrator
    * 的累积器、随 RunResult 带出，由会话层在接受协议中折叠注意力窗口
    * （压缩是窗口的视图操作，原文持久化 append-only 不参与）。
@@ -338,8 +338,8 @@ export type AgentEventMap = {
     bufferTurns: number;
     tokensBefore: number;
     tokensAfter: number;
-    /** 段切换 marker —— accumulator 收集后由 run-agent 单点写入 transcript */
-    marker: CompactMarker;
+    /** 窗口重构指令 —— accumulator 收集后随 RunResult 带出，会话层折叠窗口 */
+    windowCompact: WindowCompact;
   };
 
   /**

@@ -78,8 +78,8 @@ export interface RuntimeSessionOptions {
    * 段切换外部依赖 —— taskListReader + persistence。
    *
    * 与 builtinExtraTools 平行：assembly 负责工具装配 / 视图层 service；segmentDeps
-   * 负责把 cli 已有资源（TaskListService + TranscriptStore + ConversationRepository）
-   * 适配为 orchestrator 装配 SegmentManager 所需的两个抽象接口。
+   * 负责把 cli 已有资源（TaskListService + ConversationRepository）适配为
+   * orchestrator 装配 SegmentManager 所需的两个抽象接口。
    *
    * cli 装配层在创建 session 之前通过 createCliSegmentDeps 工厂构造，避免每个
    * createAgent 路径各自重做适配（reload swap / runOnce 路径同样复用一份 deps）。

@@ -1,9 +1,9 @@
 /**
  * createSegmentPersistence 装配测试。
  *
- * SegmentPersistence 接口仅承担 segmentMetadata 累积写入。transcript marker
+ * SegmentPersistence 接口仅承担 segmentMetadata 累积写入。窗口折叠指令
  * 不走本接口（通过 segment:new_started 事件 → orchestrator accumulator →
- * run-agent 单点 commitTurn 路径落盘）。
+ * RunResult.windowCompact 在 run 边界交给窗口）。
  */
 
 import { describe, expect, it, vi } from "vitest";

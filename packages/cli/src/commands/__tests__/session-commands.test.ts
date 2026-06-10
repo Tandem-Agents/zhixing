@@ -14,9 +14,8 @@ import {
   DefaultCommandRegistry,
   type RuntimeContext,
   assistantMessage,
-  buildCompactSummaryPair,
   createAttentionWindow,
-  restoreAttentionWindowFromCanonical,
+  restoreAttentionWindowFromRecords,
   userMessage,
 } from "@zhixing/core";
 import {
@@ -66,13 +65,11 @@ function setup(convOverrides: Partial<Record<string, unknown>> = {}): Harness {
   const rename = vi.fn(async (id: string, name: string) => ({ id, name }));
 
   const store = {
-    // compactAll 返回 store 真实形态的 canonical：summaryPair 两条
-    compactAll: vi.fn(async () => [
-      ...buildCompactSummaryPair("(用户已清空对话历史)"),
-    ]),
-    countTurns: vi.fn(async () => 3),
-    load: vi.fn(async () => ({ messages: [], turnCount: 9 })),
-    commitTurn: vi.fn(async () => []),
+    appendClear: vi.fn(async () => {}),
+    appendRunRecord: vi.fn(async () => ({ runIndex: 0, shardId: "000001" })),
+    // countRuns 经倒读原语触达自愈版索引获取 —— null 即"无记录"
+    ensureReadableIndex: vi.fn(async () => null),
+    readShardLines: vi.fn(async () => []),
     init: vi.fn(async () => {}),
   };
   const convRepo = {
@@ -134,10 +131,14 @@ describe("registerSessionCommands · 注册", () => {
 });
 
 describe("registerSessionCommands · /clear", () => {
-  it("窗口从 compactAll 返回的 canonical 重建（仅 summaryPair）+ turnCounter 归零 + 清 task cache", async () => {
+  it("清空是事件：appendClear 落盘 + 窗口 reset 清空 + turnCounter 归零 + 清 task cache", async () => {
     const h = setup({ turnCounter: 8 });
     await h.dispatcher.dispatch("/clear", RUNTIME);
-    expect(h.conv.window.getMessages()).toHaveLength(2);
+    expect(
+      (h.conv.store as unknown as { appendClear: ReturnType<typeof vi.fn> })
+        .appendClear,
+    ).toHaveBeenCalledWith("conv-1");
+    expect(h.conv.window.getMessages()).toEqual([]);
     expect(h.conv.turnCounter).toBe(0);
     expect(h.taskClear).toHaveBeenCalledWith("conv-1");
   });
@@ -170,9 +171,8 @@ describe("registerSessionCommands · /compact", () => {
   it("历史过短（<4）→ 直接提示，不调 forceCompact", async () => {
     const h = setup({
       // 窗口只有一个配对（2 条消息）< 4
-      window: restoreAttentionWindowFromCanonical([
-        userMessage("hi"),
-        assistantMessage("yo"),
+      window: restoreAttentionWindowFromRecords([
+        { runIndex: 0, messages: [userMessage("hi"), assistantMessage("yo")] },
       ]),
     });
     await h.dispatcher.dispatch("/compact", RUNTIME);

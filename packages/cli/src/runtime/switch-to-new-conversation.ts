@@ -21,8 +21,8 @@ import type {
   AttentionWindowState,
   Conversation,
   IConversationRepository,
-  ITranscriptStore,
   Message,
+  ShardedTranscriptStore,
 } from "@zhixing/core";
 import { createAttentionWindow } from "@zhixing/core";
 
@@ -35,7 +35,7 @@ export interface MutableConversationState {
   window: AttentionWindowState;
   /** 一次性输入前缀（工作场景触发句）—— 换对话即作废 */
   pendingInputPrefix: Message[] | null;
-  store: ITranscriptStore;
+  store: ShardedTranscriptStore;
   convRepo: IConversationRepository;
   conversationId: string | null;
   turnCounter: number;
@@ -85,10 +85,7 @@ export async function switchToNewConversation(
     preferredModel: session.runtime.model,
     preferredProvider: session.runtime.providerId,
   });
-  await conv.store.init(created.id, {
-    model: session.runtime.model,
-    provider: session.runtime.providerId,
-  });
+  await conv.store.init(created.id);
   conv.conversationId = created.id;
   conv.window = createAttentionWindow({ conversationId: created.id });
   conv.pendingInputPrefix = null;

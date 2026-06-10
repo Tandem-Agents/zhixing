@@ -3,7 +3,8 @@
  *
  * 覆盖：append-only 写入与 runIndex 单调性、完整协议消息往返保真、
  * rollover（索引先行 / 文件惰性创建）、清空事件（读边界 + 元数据投影）、
- * 倒读原语（跨分片 / 游标分页）、四形态崩溃恢复、并发串行化。
+ * 倒读原语（跨分片 / 游标分页）、崩溃恢复全形态（含索引缺失 / 损坏的
+ * 全量自愈——索引是分片的派生投影）、并发串行化。
  */
 
 import { beforeEach, describe, expect, it } from "vitest";
@@ -246,6 +247,110 @@ describe("清空事件（读边界 + 元数据投影）", () => {
     await reopened.init("e2");
     const repaired = await reopened.readIndex("e2");
     expect(repaired!.lastClearAt).toBeDefined();
+  });
+});
+
+// ─── 索引自愈 ───
+
+describe("索引自愈：索引是分片的派生投影（分片文件在，会话就在）", () => {
+  it("索引被删 → 打开时从分片全量重建（shards/active/createdAt 与原索引一致），读写无损", async () => {
+    const small = new ShardedTranscriptStore(convDir, {
+      platform: "linux",
+      maxShardBytes: 200,
+    });
+    for (const t of ["零", "一", "二"]) {
+      await small.appendRunRecord("h1", runInput(t));
+    }
+    const indexFile = path.join(convDir, "h1", "transcript", "index.json");
+    const original = JSON.parse(
+      await fs.readFile(indexFile, "utf-8"),
+    ) as TranscriptIndex;
+    await fs.unlink(indexFile);
+
+    const reopened = new ShardedTranscriptStore(convDir, {
+      platform: "linux",
+      maxShardBytes: 200,
+    });
+    // 倒读完整：旧分片不失联
+    expect((await collect(reopened, "h1")).map((r) => r.runIndex)).toEqual([
+      2, 1, 0,
+    ]);
+    // 重建索引与原索引一致（createdAt 取分片 header 记录值，非文件系统时间）
+    const rebuilt = await reopened.readIndex("h1");
+    expect(rebuilt!.shards).toEqual(original.shards);
+    expect(rebuilt!.activeShardId).toBe(original.activeShardId);
+    // 续写：runIndex 连续、rollover 接最大现存序号，不撞号互写
+    const r = await reopened.appendRunRecord("h1", runInput("三"));
+    expect(r).toEqual({ runIndex: 3, shardId: "000004" });
+  });
+
+  it("索引损坏（非法 JSON）→ 同路径自愈，不把已有会话误判为新会话", async () => {
+    await store.appendRunRecord("h2", runInput("一"));
+    await store.appendRunRecord("h2", runInput("二"));
+    const indexFile = path.join(convDir, "h2", "transcript", "index.json");
+    await fs.writeFile(indexFile, "{ corrupted", "utf-8");
+
+    const reopened = new ShardedTranscriptStore(convDir, { platform: "linux" });
+    const r = await reopened.appendRunRecord("h2", runInput("三"));
+    expect(r.runIndex).toBe(2);
+    expect((await collect(reopened, "h2")).map((x) => x.runIndex)).toEqual([
+      2, 1, 0,
+    ]);
+  });
+
+  it("clear 后索引被删 → lastClearAt 从分片 ClearRecord 重建，读边界不受损", async () => {
+    await store.appendRunRecord("h3", runInput("清空前"));
+    await store.appendClear("h3");
+    await store.appendRunRecord("h3", runInput("清空后"));
+    const indexFile = path.join(convDir, "h3", "transcript", "index.json");
+    await fs.unlink(indexFile);
+
+    const reopened = new ShardedTranscriptStore(convDir, { platform: "linux" });
+    await reopened.init("h3");
+    const rebuilt = await reopened.readIndex("h3");
+    expect(rebuilt!.lastClearAt).toBeDefined();
+    // 倒读仍止于 clear 边界
+    expect((await collect(reopened, "h3")).map((r) => r.runIndex)).toEqual([1]);
+    expect(await countRuns(reopened, "h3")).toBe(1);
+  });
+
+  it("替换窗口崩溃（索引缺失 + tmp 在）→ 打开时先恢复 tmp，索引原样回归", async () => {
+    await store.appendRunRecord("h4", runInput("一"));
+    const indexFile = path.join(convDir, "h4", "transcript", "index.json");
+    const original = await fs.readFile(indexFile, "utf-8");
+    // 模拟 win32 unlink → rename 窗口内崩溃：目标缺失、完整 tmp 在
+    await fs.rename(indexFile, `${indexFile}.99-123-abc.tmp`);
+
+    const reopened = new ShardedTranscriptStore(convDir, { platform: "linux" });
+    const r = await reopened.appendRunRecord("h4", runInput("二"));
+    expect(r.runIndex).toBe(1);
+    // 恢复的是原索引本体（非重建）—— 内容含原 shards 记录
+    const recovered = JSON.parse(
+      await fs.readFile(indexFile, "utf-8"),
+    ) as TranscriptIndex;
+    expect(recovered.shards).toEqual(
+      (JSON.parse(original) as TranscriptIndex).shards,
+    );
+  });
+
+  it("索引被删 → exists 仍 true（分片在，会话就在）；真空目录 → false", async () => {
+    await store.appendRunRecord("h6", runInput("一"));
+    const dir = path.join(convDir, "h6", "transcript");
+    await fs.unlink(path.join(dir, "index.json"));
+    expect(await store.exists("h6")).toBe(true);
+
+    await fs.unlink(path.join(dir, "000001.jsonl"));
+    expect(await store.exists("h6")).toBe(false);
+  });
+
+  it("目录真空（无任何分片）→ 仍按新会话初始化", async () => {
+    await store.init("h5");
+    const dir = path.join(convDir, "h5", "transcript");
+    await fs.unlink(path.join(dir, "index.json"));
+    // 无分片文件（init 只建索引，分片惰性创建）→ 重建返回 null → 新会话路径
+    const reopened = new ShardedTranscriptStore(convDir, { platform: "linux" });
+    const r = await reopened.appendRunRecord("h5", runInput("首条"));
+    expect(r).toEqual({ runIndex: 0, shardId: "000001" });
   });
 });
 

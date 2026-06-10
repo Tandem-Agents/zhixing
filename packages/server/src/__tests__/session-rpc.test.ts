@@ -6,7 +6,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import WebSocket from "ws";
-import type { AgentResult, AgentYield, Message, RunResult } from "@zhixing/core";
+import type { AgentResult, AgentYield, Message, RunRecord, RunResult } from "@zhixing/core";
 import { startServer, type ZhixingServerInstance } from "../server.js";
 import { createServerContext } from "../context.js";
 import { ConversationManager } from "../runtime/conversation-manager.js";
@@ -35,8 +35,12 @@ interface MockOptions {
   yieldDelayMs?: number;
 }
 
-function createMockRuntime(sessionId: string, opts: MockOptions = {}, initialMessages?: Message[]): SessionRuntime {
-  let messages: Message[] = initialMessages ? [...initialMessages] : [];
+function createMockRuntime(sessionId: string, opts: MockOptions = {}, initialRecords?: RunRecord[]): SessionRuntime {
+  // 历史重建的窗口侧最小模拟：每条 record 蒸馏为 [首条, 末条]（与 acceptRun 同规则）
+  let messages: Message[] = (initialRecords ?? []).flatMap((r) => [
+    r.messages[0]!,
+    r.messages[r.messages.length - 1]!,
+  ]);
   let aborted = false;
 
   return {
@@ -67,12 +71,9 @@ function createMockRuntime(sessionId: string, opts: MockOptions = {}, initialMes
           message: reply,
           usage: { inputTokens: 5, outputTokens: 5 },
         },
-        turn: {
-          type: "turn",
-          turnIndex: 0,
+        runRecord: {
           timestamp: new Date().toISOString(),
-          userMessage: userMsg,
-          assistantMessage: reply,
+          messages: [userMsg, reply],
           usage: { inputTokens: 5, outputTokens: 5 },
         },
         newMessages: [reply],
@@ -99,8 +100,8 @@ function createMockRuntime(sessionId: string, opts: MockOptions = {}, initialMes
 
 function createMockFactory(opts: MockOptions = {}): RuntimeFactory {
   return {
-    async create(sessionId, initialMessages) {
-      return createMockRuntime(sessionId, opts, initialMessages);
+    async create(sessionId, initialRecords) {
+      return createMockRuntime(sessionId, opts, initialRecords);
     },
   };
 }
@@ -198,28 +199,24 @@ async function connect(port: number): Promise<RpcClient> {
 describe("session.* RPC (S2.D)", () => {
   let server: ZhixingServerInstance;
 
-  // 默认 commitTurn mock：记录持久化调用并维护一份对照 canonical（返回值不再被
-  // recordTurn 消费——窗口经 acceptRun 接受协议自行前进，session.history RPC
-  // 返回的是窗口投影）。
+  // 默认 appendRun mock：按 conversation 自增 runIndex 并记录追加的原文
+  // （窗口经 acceptRun 接受协议自行前进，session.history RPC 返回的是窗口投影）。
   //
   // 不关心持久化具体形态的测试（测 routing / abort / pending queue 等）通过此默认 cb 就够；
-  // 需要断言持久化副作用的测试仍可覆盖式传自己的 commitTurn。
-  const canonicalByConversation = new Map<string, Message[]>();
+  // 需要断言持久化副作用的测试仍可覆盖式传自己的 appendRun。
+  const recordsByConversation = new Map<string, unknown[]>();
 
   async function startWithFactory(factory: RuntimeFactory): Promise<void> {
-    canonicalByConversation.clear();
+    recordsByConversation.clear();
     const conversations = new ConversationManager(factory, {
       graceTimeoutMs: 60_000,
       idleTimeoutMs: 30 * 60_000,
       idleCheckIntervalMs: 999_999,
     }, {
-      commitTurn: async (conversationId, payload) => {
-        const prev = canonicalByConversation.get(conversationId) ?? [];
-        const next = payload.turn
-          ? [...prev, payload.turn.userMessage, payload.turn.assistantMessage]
-          : prev;
-        canonicalByConversation.set(conversationId, next);
-        return next;
+      appendRun: async (conversationId, record) => {
+        const prev = recordsByConversation.get(conversationId) ?? [];
+        recordsByConversation.set(conversationId, [...prev, record]);
+        return { runIndex: prev.length, shardId: "000001" };
       },
     });
     const ctx = createServerContext({
@@ -509,18 +506,16 @@ describe("session.* RPC (S2.D)", () => {
   // ─── TranscriptStore 集成 (Step 7b) ───
 
   it("completed turn is persisted via ConversationManager.recordTurn", async () => {
-    const appendedTurns: Array<{ conversationId: string; turn: unknown }> = [];
+    const appendedRecords: Array<{ conversationId: string; record: { messages: Message[] } }> = [];
 
     const conversations = new ConversationManager(createMockFactory({ deltaCount: 1 }), {
       graceTimeoutMs: 60_000,
       idleTimeoutMs: 30 * 60_000,
       idleCheckIntervalMs: 999_999,
     }, {
-      commitTurn: async (conversationId, payload) => {
-        if (payload.turn) {
-          appendedTurns.push({ conversationId, turn: payload.turn });
-        }
-        return [];
+      appendRun: async (conversationId, record) => {
+        appendedRecords.push({ conversationId, record: { messages: [...record.messages] } });
+        return { runIndex: appendedRecords.length - 1, shardId: "000001" };
       },
     });
     const ctx = createServerContext({
@@ -539,27 +534,26 @@ describe("session.* RPC (S2.D)", () => {
 
     await sleep(50);
 
-    expect(appendedTurns).toHaveLength(1);
-    expect(appendedTurns[0]!.conversationId).toBe(convId);
-    const turn = appendedTurns[0]!.turn as { type: string; userMessage: Message; assistantMessage: Message };
-    expect(turn.type).toBe("turn");
-    expect(turn.userMessage.role).toBe("user");
-    expect(turn.assistantMessage.role).toBe("assistant");
+    expect(appendedRecords).toHaveLength(1);
+    expect(appendedRecords[0]!.conversationId).toBe(convId);
+    const { messages } = appendedRecords[0]!.record;
+    expect(messages[0]!.role).toBe("user");
+    expect(messages[messages.length - 1]!.role).toBe("assistant");
 
     client.close();
   });
 
   it("error turn is NOT persisted via ConversationManager.recordTurn", async () => {
-    const appendedTurns: unknown[] = [];
+    const appendedRecords: unknown[] = [];
 
     const conversations = new ConversationManager(createMockFactory({ throwError: "kaboom" }), {
       graceTimeoutMs: 60_000,
       idleTimeoutMs: 30 * 60_000,
       idleCheckIntervalMs: 999_999,
     }, {
-      commitTurn: async (_cid, payload) => {
-        if (payload.turn) appendedTurns.push(payload.turn);
-        return [];
+      appendRun: async (_cid, record) => {
+        appendedRecords.push(record);
+        return { runIndex: appendedRecords.length - 1, shardId: "000001" };
       },
     });
     const ctx = createServerContext({
@@ -576,39 +570,34 @@ describe("session.* RPC (S2.D)", () => {
     await client.waitNotification("session.complete");
     await sleep(50);
 
-    expect(appendedTurns).toHaveLength(0);
+    expect(appendedRecords).toHaveLength(0);
     client.close();
   });
 
   it("loadHistory restores messages on getOrCreate", async () => {
-    const storedMessages: Message[] = [
-      { role: "user", content: [{ type: "text", text: "previous question" }] },
-      { role: "assistant", content: [{ type: "text", text: "previous answer" }] },
+    const storedRecords: RunRecord[] = [
+      {
+        type: "run",
+        runIndex: 0,
+        timestamp: new Date().toISOString(),
+        messages: [
+          { role: "user", content: [{ type: "text", text: "previous question" }] },
+          { role: "assistant", content: [{ type: "text", text: "previous answer" }] },
+        ],
+      },
     ];
 
     const loadHistory = async (conversationId: string) => {
-      if (conversationId === "conv_restored") return storedMessages;
+      if (conversationId === "conv_restored") return storedRecords;
       return undefined;
     };
 
-    // commitTurn 真实语义：老 canonical + 新 turn 的 user/assistant，
-    // 模拟 TranscriptStore.commitTurn 的 rebuildCanonicalMessages 语义
-    let canonical: Message[] = [...storedMessages];
     const conversations = new ConversationManager(
       createMockFactory({ deltaCount: 1 }),
       { graceTimeoutMs: 60_000, idleTimeoutMs: 30 * 60_000, idleCheckIntervalMs: 999_999 },
       {
         loadHistory,
-        commitTurn: async (_cid, payload) => {
-          if (payload.turn) {
-            canonical = [
-              ...canonical,
-              payload.turn.userMessage,
-              payload.turn.assistantMessage,
-            ];
-          }
-          return canonical;
-        },
+        appendRun: async () => ({ runIndex: storedRecords.length, shardId: "000001" }),
       },
     );
     const ctx = createServerContext({

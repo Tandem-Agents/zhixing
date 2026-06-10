@@ -4,11 +4,11 @@
  * 基于 Node.js readline/promises 的多轮对话循环。
  *
  * 流程：
- * 1. 初始化 TranscriptStore → 创建或恢复会话
+ * 1. 初始化分片 transcript store → 创建或恢复会话
  * 2. readline.question() 获取用户输入
  * 3. 如果是斜杠命令，就地处理
- * 4. 否则追加到对话历史，启动 spinner，运行 Agent Loop
- * 5. Turn 完成后持久化到 JSONL
+ * 4. 否则瞬态构造 run 输入，启动 spinner，运行 Agent Loop
+ * 5. Turn 完成后追加 run record（append-only 原文）并经接受协议推进窗口
  * 6. 回到步骤 2
  */
 
@@ -18,7 +18,7 @@ import chalk from "chalk";
 import {
   userMessage,
   type Message,
-  TranscriptStore,
+  ShardedTranscriptStore,
   getZhixingHome,
   ConversationRepository,
   conversationsDir,
@@ -38,7 +38,7 @@ import {
   type SchedulerEventMap,
   type WorkModeSwitchIntent,
   type Conversation,
-  type LoadedTranscript,
+  type RunRecord,
   extractText,
   buildWorksceneDigestMessage,
   maybeAutoNameFirstTurn,
@@ -48,8 +48,8 @@ import {
   CommandDispatcher,
   type AttentionWindowState,
   createAttentionWindow,
-  restoreAttentionWindowFromCanonical,
-  windowCompactFromMarker,
+  restoreAttentionWindowFromRecords,
+  userMessageOf,
 } from "@zhixing/core";
 import { makeWindowTailGuard } from "./runtime/window-tail-guard.js";
 import { describeProxy, type ProxyDescription } from "@zhixing/network";
@@ -63,6 +63,7 @@ import { ConversationRepoTaskListStore } from "./runtime/task-list-stores.js";
 import { RoutingConversationRepository } from "./runtime/conversation-router.js";
 import { acquireWorksceneConversation } from "./runtime/workscene-conversation.js";
 import { switchToNewConversation } from "./runtime/switch-to-new-conversation.js";
+import { loadRunRecords } from "./runtime/load-run-records.js";
 import { TaskTail } from "./task-tail/index.js";
 import { registerTaskCommands } from "./commands/task-commands.js";
 import { registerInfoCommands } from "./commands/info-commands.js";
@@ -135,7 +136,7 @@ interface ConversationRuntimeState {
    */
   pendingInputPrefix: Message[] | null;
   /** transcript 持久化（main 项目域 / workscene 域各自独立实例） */
-  store: TranscriptStore;
+  store: ShardedTranscriptStore;
   /** conversation meta 仓储（绑各自 ConversationScope） */
   convRepo: ConversationRepository;
   conversationId: string | null;
@@ -340,7 +341,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   const scope: ConversationScope = { kind: "user" };
   const convRepo = new ConversationRepository(scope);
   const convDir = conversationsDir(scope);
-  const store = new TranscriptStore(convDir);
+  const store = new ShardedTranscriptStore(convDir);
 
   // 对话仓储路由核 —— builtinExtraTools(含 TaskListService) 与 segmentDeps 在此
   // 一次性装配并跨 reload 持久，二者构造期即绑定后端 repo、无法重建。插一层
@@ -372,9 +373,9 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   // 段切换外部依赖 —— 跨 reload 持久，封装 taskListReader（适配自 TaskListService）
   // 与 segmentMetadata persistence（接 ConversationRepository）。
   //
-  // 不含 transcript：marker 写入走"emit segment:new_started → orchestrator
-  // accumulator → run-agent 单点 commitTurn"路径，与本 turn 同一原子事务落盘，
-  // cli 装配层无需透传 transcript（与 LLMSummarize 同源、收敛到唯一 transcript 写路径）。
+  // 不含 transcript：段切换产出走"emit segment:new_started → orchestrator
+  // accumulator → RunResult.windowCompact"路径，随 turn 在 run 边界折叠窗口
+  // （压缩是窗口的视图操作，不落盘），cli 装配层无需透传 transcript。
   const segmentDeps = createCliSegmentDeps({
     taskListService: builtinExtraTools.taskListService,
     conversationRepo: routingRepo,
@@ -419,19 +420,19 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   // 启动期对话选择策略：统一 auto-resume `convRepo.findLatest()` 最近一条对话,
   // 无 latest 或加载失败则降级到创建 default 新对话。
   // 用户想切换到其它对话或新建命名,进入 REPL 后用 `/resume` / `/new <name>`。
-  // 恢复的历史经 canonical → 窗口重建进入注意力窗口（预算化启动装填落地前的
-  // 过渡形态：启动仍全量加载）。
+  // 恢复的历史经倒读 run records → 窗口重建进入注意力窗口（预算化启动装填
+  // 落地前的过渡形态：启动仍全量加载）。
   const latest = await convRepo.findLatest();
   if (latest) {
     try {
-      const loaded = await store.load(latest);
-      window = restoreAttentionWindowFromCanonical(loaded.messages, {
+      const records = await loadRunRecords(store, latest);
+      window = restoreAttentionWindowFromRecords(records, {
         conversationId: latest,
         // 原文 append-only 后全量加载可能失界，按风险上限机械保尾
         tailGuard: makeWindowTailGuard(session.runtime.model),
       });
       conversationId = latest;
-      turnCounter = loaded.turnCount;
+      turnCounter = records.length;
       const conv = await convRepo.get(latest);
       resumedConversationName = conv?.name ?? latest;
     } catch {
@@ -439,16 +440,13 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     }
   }
 
-  // 新对话：先创建 Conversation（meta.json），再创建 Transcript（transcript.jsonl）
+  // 新对话：先创建 Conversation（meta.json），再建分片 transcript 索引
   if (!conversationId) {
     const conversation = await convRepo.create({
       preferredModel: session.runtime.model,
       preferredProvider: session.runtime.providerId,
     });
-    await store.init(conversation.id, {
-      model: session.runtime.model,
-      provider: session.runtime.providerId,
-    });
+    await store.init(conversation.id);
     conversationId = conversation.id;
   }
 
@@ -635,7 +633,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
           kind: "workscene",
           sceneId,
         });
-        const wStore = new TranscriptStore(
+        const wStore = new ShardedTranscriptStore(
           conversationsDir({ kind: "workscene", sceneId }),
         );
 
@@ -663,7 +661,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
           // 在 /resume typeahead 里完全无法区分。命名职责交给自动命名机制（第一
           // 轮 turn 完成后用 light LLM 生成精确主题名）统一接管。
           let wConv: Conversation;
-          let loaded: LoadedTranscript | null = null;
+          let loaded: RunRecord[] | null = null;
           if (source === "llm") {
             wConv = await worksceneRepo.create({});
           } else {
@@ -687,7 +685,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
           //   - LLM：触发句进 pendingInputPrefix（power 不知干啥就靠它）——它
           //     不是窗口事实（无配对、从不落盘），随首个成功 accept 的 run
           //     进入发送视图后即清空，与"触发句只活到首次提交"的语义一致。
-          //   - command-recovery：loaded.messages（canonical）重建窗口，接续历史
+          //   - command-recovery：loaded run records 重建窗口，接续历史
           //     （建窗推迟到 enterWorkMode 之后——保尾护栏要按 power 模型的
           //     风险上限取值）。
           //   - command-create / command-降级：空窗（用户随后在 workscene 输入）。
@@ -706,20 +704,14 @@ export async function startRepl(options: ReplOptions): Promise<void> {
           undos.push(async () => {
             await session.exitWorkMode();
           });
-          // enterWorkMode 后 session.runtime=power，transcript 头记准确模型。
-          // recovery 路径 transcript 已存在 → 不 init（init 会覆盖丢数据）。
-          if (loaded === null) {
-            await wStore.init(wConv.id, {
-              model: session.runtime.model,
-              provider: session.runtime.providerId,
-            });
-          }
+          // 建 transcript 索引（幂等：recovery 路径已存在则 no-op）。
+          await wStore.init(wConv.id);
           // ⑤ 构造并切 active（建窗在 enterWorkMode 之后——runtime 已是 power，
           // 护栏取 power 模型的风险上限；纯计算+赋值，不可能抛错 → 无需 undo）
           state.conv = {
             window:
               loaded !== null
-                ? restoreAttentionWindowFromCanonical(loaded.messages, {
+                ? restoreAttentionWindowFromRecords(loaded, {
                     conversationId: wConv.id,
                     tailGuard: makeWindowTailGuard(session.runtime.model),
                   })
@@ -728,7 +720,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
             store: wStore,
             convRepo: worksceneRepo,
             conversationId: wConv.id,
-            turnCounter: loaded?.turnCount ?? 0,
+            turnCounter: loaded?.length ?? 0,
             journalCondenseDone: false,
           };
         } catch (err) {
@@ -1417,7 +1409,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     });
 
     // LLM 工具触发的模式切换意图 —— turn 内只产生意图，本回路在 turn 完全
-    // 落定后（commitTurn + finally 资源释放）于 turn 边界唯一消费。turn 出错
+    // 落定后（持久化 + finally 资源释放）于 turn 边界唯一消费。turn 出错
     // （catch 路径）则 runResult 不可达、保持 undefined → 不切换。
     let pendingModeSwitch: WorkModeSwitchIntent | undefined;
 
@@ -1449,21 +1441,18 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       // 状态条 done 永驻显示直到下一次 agent:run_start，新 turn 起始覆盖回 thinking。
 
       // 接受协议：先持久化成功、后窗口前进（acceptRun 应用 windowCompact 折叠
-      // 并追加本 run 配对）。持久化只追加原始 turn——压缩是注意力窗口的视图
-      // 操作，原文 append-only、永不因压缩变短；窗口是唯一压缩视图。
+      // 并追加本 run 蒸馏对）。持久化只追加原始 run record——压缩是注意力窗口
+      // 的视图操作，原文 append-only、永不因压缩变短；窗口是唯一压缩视图。
       if (state.conv.conversationId) {
         try {
-          await state.conv.store.commitTurn(state.conv.conversationId, {
-            turn: runResult.turn,
-          });
+          const { runIndex } = await state.conv.store.appendRunRecord(
+            state.conv.conversationId,
+            runResult.runRecord,
+          );
           state.conv.window.acceptRun({
-            runMessages: [
-              runResult.turn.userMessage,
-              runResult.turn.assistantMessage,
-            ],
-            windowCompact: runResult.compactBefore
-              ? windowCompactFromMarker(runResult.compactBefore)
-              : undefined,
+            runMessages: runResult.runRecord.messages,
+            runIndex,
+            windowCompact: runResult.windowCompact,
           });
           // 一次性前缀已随本 run 进入发送视图并被摘要语境覆盖 → 消费完毕
           state.conv.pendingInputPrefix = null;
@@ -1478,7 +1467,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
           void maybeAutoNameFirstTurn({
             conversationId: state.conv.conversationId,
             turnCounter: state.conv.turnCounter,
-            userMessage: runResult.turn.userMessage,
+            userMessage: userMessageOf(runResult.runRecord.messages),
             inferName: inferConversationName,
             convRepo: state.conv.convRepo,
           });
@@ -1507,10 +1496,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
         // 无会话 ID（无持久化，正常 cli 流程不出现）：窗口直接接受本 run，
         // 与持久化路径同一窗口协议——跨 run 留存的是蒸馏对而非全量协议消息。
         state.conv.window.acceptRun({
-          runMessages: [
-            runResult.turn.userMessage,
-            runResult.turn.assistantMessage,
-          ],
+          runMessages: runResult.runRecord.messages,
         });
         state.conv.pendingInputPrefix = null;
       }

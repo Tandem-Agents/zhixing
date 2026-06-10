@@ -35,12 +35,9 @@ function createMockRuntime(sessionId: string): SessionRuntime {
           message: assistantMsg,
           usage: { inputTokens: 0, outputTokens: 0 },
         },
-        turn: {
-          type: "turn",
-          turnIndex: 0,
+        runRecord: {
           timestamp: new Date().toISOString(),
-          userMessage: userMsg,
-          assistantMessage: assistantMsg,
+          messages: [userMsg, assistantMsg],
           usage: { inputTokens: 0, outputTokens: 0 },
         },
         newMessages: [assistantMsg],
@@ -149,7 +146,7 @@ describe("ConversationManager", () => {
         idleCheckIntervalMs: 999_999,
       }, {
         initTranscript: async (id) => { inited.push(id); },
-        commitTurn: async () => [], // 配置守卫：有持久化意图必须带 commitTurn
+        appendRun: async () => ({ runIndex: 0, shardId: "000001" }), // 配置守卫：有持久化意图必须带 appendRun
       });
 
       await mgr.getOrCreate("new-conv");
@@ -165,11 +162,18 @@ describe("ConversationManager", () => {
         idleCheckIntervalMs: 999_999,
       }, {
         loadHistory: async () => [
-          { role: "user", content: [{ type: "text", text: "hi" }] },
-          { role: "assistant", content: [{ type: "text", text: "hello" }] },
+          {
+            type: "run" as const,
+            runIndex: 0,
+            timestamp: new Date().toISOString(),
+            messages: [
+              { role: "user" as const, content: [{ type: "text" as const, text: "hi" }] },
+              { role: "assistant" as const, content: [{ type: "text" as const, text: "hello" }] },
+            ],
+          },
         ],
         initTranscript: async (id) => { inited.push(id); },
-        commitTurn: async () => [], // 配置守卫：有持久化意图必须带 commitTurn
+        appendRun: async () => ({ runIndex: 0, shardId: "000001" }), // 配置守卫：有持久化意图必须带 appendRun
       });
 
       const session = await mgr.getOrCreate("existing");
@@ -184,13 +188,16 @@ describe("ConversationManager", () => {
         idleTimeoutMs: 30 * 60_000,
         idleCheckIntervalMs: 999_999,
       }, {
-        loadHistory: async () => [
-          { role: "user", content: [{ type: "text", text: "q1" }] },
-          { role: "assistant", content: [{ type: "text", text: "a1" }] },
-          { role: "user", content: [{ type: "text", text: "q2" }] },
-          { role: "assistant", content: [{ type: "text", text: "a2" }] },
-        ],
-        commitTurn: async () => [], // 配置守卫：有持久化意图必须带 commitTurn
+        loadHistory: async () => [1, 2].map((i) => ({
+          type: "run" as const,
+          runIndex: i - 1,
+          timestamp: new Date().toISOString(),
+          messages: [
+            { role: "user" as const, content: [{ type: "text" as const, text: `q${i}` }] },
+            { role: "assistant" as const, content: [{ type: "text" as const, text: `a${i}` }] },
+          ],
+        })),
+        appendRun: async () => ({ runIndex: 0, shardId: "000001" }), // 配置守卫：有持久化意图必须带 appendRun
       });
 
       const session = await mgr.getOrCreate("restored");
@@ -813,9 +820,9 @@ describe("ConversationManager", () => {
       }, {
         loadHistory: async (id) => { loaded.push(id); return undefined; },
         initTranscript: async (id) => { inited.push(id); },
-        // 构造守卫要求：有持久化意图（loadHistory / initTranscript）必须配 commitTurn。
-        // 本测试只验证 ephemeral 隔离行为，commitTurn 是 no-op 占位。
-        commitTurn: async () => [],
+        // 构造守卫要求：有持久化意图（loadHistory / initTranscript）必须配 appendRun。
+        // 本测试只验证 ephemeral 隔离行为，appendRun 是 no-op 占位。
+        appendRun: async () => ({ runIndex: 0, shardId: "000001" }),
       });
 
       const session = await mgr.getOrCreate(undefined, { ephemeral: true });
@@ -825,76 +832,150 @@ describe("ConversationManager", () => {
       await mgr.disposeAll();
     });
 
-    it("ephemeral session accumulates pendingTurns instead of persisting", async () => {
+    it("ephemeral session accumulates pendingRuns instead of persisting", async () => {
       const persisted: unknown[] = [];
       const mgr = new ConversationManager(createMockFactory(), {
         graceTimeoutMs: 60_000,
         idleTimeoutMs: 30 * 60_000,
         idleCheckIntervalMs: 999_999,
       }, {
-        commitTurn: async (_cid, payload) => {
-          if (payload.turn) persisted.push(payload.turn);
-          return [];
+        appendRun: async (_cid, record) => {
+          persisted.push(record);
+          return { runIndex: persisted.length - 1, shardId: "000001" };
         },
       });
 
       const session = await mgr.getOrCreate("eph-1", { ephemeral: true });
-      const mockTurn = {
-        type: "turn" as const,
-        turnIndex: 0,
+      const mockRecord = {
         timestamp: new Date().toISOString(),
-        userMessage: { role: "user" as const, content: [{ type: "text" as const, text: "hi" }] },
-        assistantMessage: { role: "assistant" as const, content: [{ type: "text" as const, text: "hello" }] },
+        messages: [
+          { role: "user" as const, content: [{ type: "text" as const, text: "hi" }] },
+          { role: "assistant" as const, content: [{ type: "text" as const, text: "hello" }] },
+        ],
         usage: { inputTokens: 1, outputTokens: 1 },
       };
 
-      await mgr.recordTurn("eph-1", mockTurn);
+      await mgr.recordTurn("eph-1", mockRecord);
 
       expect(persisted).toHaveLength(0);
-      expect(session.pendingTurns).toHaveLength(1);
+      expect(session.pendingRuns.size).toBe(1);
       expect(session.turnCount).toBe(1);
       await mgr.disposeAll();
     });
 
+    it("ephemeral acceptRun 携 provisional runIndex（pending 队列序号），promote 对账一致时静默", async () => {
+      const accepted: Array<number | undefined> = [];
+      const runtime = createMockRuntime("eph-prov");
+      const origAccept = runtime.acceptRun.bind(runtime);
+      runtime.acceptRun = (input) => {
+        accepted.push(input.runIndex);
+        origAccept(input);
+      };
+      const factory: RuntimeFactory = { create: async () => runtime };
+
+      let next = 0;
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const mgr = new ConversationManager(factory, {
+          graceTimeoutMs: 60_000,
+          idleTimeoutMs: 30 * 60_000,
+          idleCheckIntervalMs: 999_999,
+        }, {
+          // 全新 transcript：store 从 0 顺序分配 —— 与 provisional 必然一致
+          appendRun: async () => ({ runIndex: next++, shardId: "000001" }),
+        });
+
+        await mgr.getOrCreate("eph-prov", { ephemeral: true });
+        const makeRecord = (idx: number) => ({
+          timestamp: new Date().toISOString(),
+          messages: [
+            { role: "user" as const, content: [{ type: "text" as const, text: `q${idx}` }] },
+            { role: "assistant" as const, content: [{ type: "text" as const, text: `a${idx}` }] },
+          ],
+        });
+        await mgr.recordTurn("eph-prov", makeRecord(0));
+        await mgr.recordTurn("eph-prov", makeRecord(1)); // 触发 auto-promote
+
+        // 窗口配对恒有 runIndex（折叠覆盖锚点在 ephemeral 期就成立）
+        expect(accepted).toEqual([0, 1]);
+        // FIFO flush 到全新 transcript：对账一致，零告警
+        expect(warnSpy).not.toHaveBeenCalled();
+        await mgr.disposeAll();
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it("promote 对账不一致（transcript 非全新）→ warn 暴露窗口锚与持久化错位", async () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        let next = 5; // 模拟同 id 旧 transcript 已有 5 条 —— store 从 5 继续分配
+        const mgr = new ConversationManager(createMockFactory(), {
+          graceTimeoutMs: 60_000,
+          idleTimeoutMs: 30 * 60_000,
+          idleCheckIntervalMs: 999_999,
+        }, {
+          appendRun: async () => ({ runIndex: next++, shardId: "000001" }),
+        });
+
+        const session = await mgr.getOrCreate("eph-stale", { ephemeral: true });
+        const mockRecord = {
+          timestamp: new Date().toISOString(),
+          messages: [
+            { role: "user" as const, content: [{ type: "text" as const, text: "hi" }] },
+            { role: "assistant" as const, content: [{ type: "text" as const, text: "yo" }] },
+          ],
+        };
+        session.pendingRuns.enqueue(mockRecord); // 缓冲定格 provisional = 0
+
+        await mgr.promote("eph-stale");
+        expect(warnSpy).toHaveBeenCalledTimes(1);
+        expect(String(warnSpy.mock.calls[0]![0])).toContain("对账不一致");
+        await mgr.disposeAll();
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
     it("auto-promotes ephemeral session on 2nd turn", async () => {
-      const persisted: Array<{ cid: string; turn: unknown }> = [];
+      const persisted: Array<{ cid: string; record: unknown }> = [];
       const inited: string[] = [];
       const mgr = new ConversationManager(createMockFactory(), {
         graceTimeoutMs: 60_000,
         idleTimeoutMs: 30 * 60_000,
         idleCheckIntervalMs: 999_999,
       }, {
-        commitTurn: async (cid, payload) => {
-          if (payload.turn) persisted.push({ cid, turn: payload.turn });
-          return [];
+        appendRun: async (cid, record) => {
+          persisted.push({ cid, record });
+          return { runIndex: persisted.length - 1, shardId: "000001" };
         },
         initTranscript: async (id) => { inited.push(id); },
       });
 
       const session = await mgr.getOrCreate("eph-auto", { ephemeral: true });
-      const makeTurn = (idx: number) => ({
-        type: "turn" as const,
-        turnIndex: idx,
+      const makeRecord = (idx: number) => ({
         timestamp: new Date().toISOString(),
-        userMessage: { role: "user" as const, content: [{ type: "text" as const, text: `q${idx}` }] },
-        assistantMessage: { role: "assistant" as const, content: [{ type: "text" as const, text: `a${idx}` }] },
+        messages: [
+          { role: "user" as const, content: [{ type: "text" as const, text: `q${idx}` }] },
+          { role: "assistant" as const, content: [{ type: "text" as const, text: `a${idx}` }] },
+        ],
         usage: { inputTokens: 1, outputTokens: 1 },
       });
 
-      await mgr.recordTurn("eph-auto", makeTurn(0));
+      await mgr.recordTurn("eph-auto", makeRecord(0));
       expect(session.ephemeral).toBe(true);
       expect(inited).toEqual([]);
 
-      await mgr.recordTurn("eph-auto", makeTurn(1));
+      await mgr.recordTurn("eph-auto", makeRecord(1));
       expect(session.ephemeral).toBe(false);
       expect(inited).toEqual(["eph-auto"]);
       expect(persisted).toHaveLength(2);
-      expect(session.pendingTurns).toHaveLength(0);
+      expect(session.pendingRuns.size).toBe(0);
       expect(session.turnCount).toBe(2);
       await mgr.disposeAll();
     });
 
-    it("promote() flushes pendingTurns and calls initTranscript", async () => {
+    it("promote() flushes pendingRuns and calls initTranscript", async () => {
       const persisted: unknown[] = [];
       const inited: string[] = [];
       const mgr = new ConversationManager(createMockFactory(), {
@@ -902,30 +983,30 @@ describe("ConversationManager", () => {
         idleTimeoutMs: 30 * 60_000,
         idleCheckIntervalMs: 999_999,
       }, {
-        commitTurn: async (_cid, payload) => {
-          if (payload.turn) persisted.push(payload.turn);
-          return [];
+        appendRun: async (_cid, record) => {
+          persisted.push(record);
+          return { runIndex: persisted.length - 1, shardId: "000001" };
         },
         initTranscript: async (id) => { inited.push(id); },
       });
 
       const session = await mgr.getOrCreate("eph-promote", { ephemeral: true });
-      const mockTurn = {
-        type: "turn" as const,
-        turnIndex: 0,
+      const mockRecord = {
         timestamp: new Date().toISOString(),
-        userMessage: { role: "user" as const, content: [{ type: "text" as const, text: "hi" }] },
-        assistantMessage: { role: "assistant" as const, content: [{ type: "text" as const, text: "hello" }] },
+        messages: [
+          { role: "user" as const, content: [{ type: "text" as const, text: "hi" }] },
+          { role: "assistant" as const, content: [{ type: "text" as const, text: "hello" }] },
+        ],
         usage: { inputTokens: 1, outputTokens: 1 },
       };
-      session.pendingTurns.push(mockTurn);
+      session.pendingRuns.enqueue(mockRecord);
 
       const result = await mgr.promote("eph-promote");
       expect(result).toBe(true);
       expect(session.ephemeral).toBe(false);
       expect(inited).toEqual(["eph-promote"]);
       expect(persisted).toHaveLength(1);
-      expect(session.pendingTurns).toHaveLength(0);
+      expect(session.pendingRuns.size).toBe(0);
       await mgr.disposeAll();
     });
 
@@ -938,30 +1019,30 @@ describe("ConversationManager", () => {
       expect(result2).toBe(false);
     });
 
-    it("persistent session persists turn immediately via recordTurn", async () => {
-      const persisted: Array<{ cid: string; turn: unknown }> = [];
+    it("persistent session persists run immediately via recordTurn", async () => {
+      const persisted: Array<{ cid: string; record: unknown }> = [];
       const mgr = new ConversationManager(createMockFactory(), {
         graceTimeoutMs: 60_000,
         idleTimeoutMs: 30 * 60_000,
         idleCheckIntervalMs: 999_999,
       }, {
-        commitTurn: async (cid, payload) => {
-          if (payload.turn) persisted.push({ cid, turn: payload.turn });
-          return [];
+        appendRun: async (cid, record) => {
+          persisted.push({ cid, record });
+          return { runIndex: persisted.length - 1, shardId: "000001" };
         },
       });
 
       await mgr.getOrCreate("persist-1");
-      const mockTurn = {
-        type: "turn" as const,
-        turnIndex: 0,
+      const mockRecord = {
         timestamp: new Date().toISOString(),
-        userMessage: { role: "user" as const, content: [{ type: "text" as const, text: "hi" }] },
-        assistantMessage: { role: "assistant" as const, content: [{ type: "text" as const, text: "hello" }] },
+        messages: [
+          { role: "user" as const, content: [{ type: "text" as const, text: "hi" }] },
+          { role: "assistant" as const, content: [{ type: "text" as const, text: "hello" }] },
+        ],
         usage: { inputTokens: 1, outputTokens: 1 },
       };
 
-      await mgr.recordTurn("persist-1", mockTurn);
+      await mgr.recordTurn("persist-1", mockRecord);
       expect(persisted).toHaveLength(1);
       expect(persisted[0]!.cid).toBe("persist-1");
 
@@ -991,7 +1072,7 @@ describe("ConversationManager", () => {
     it("promote() is idempotent — partial failure + retry does not duplicate init or turns", async () => {
       let persistCallCount = 0;
       const inited: string[] = [];
-      const persisted: number[] = [];
+      const persisted: string[] = [];
 
       const mgr = new ConversationManager(createMockFactory(), {
         graceTimeoutMs: 60_000,
@@ -999,59 +1080,61 @@ describe("ConversationManager", () => {
         idleCheckIntervalMs: 999_999,
       }, {
         initTranscript: async (id) => { inited.push(id); },
-        commitTurn: async (_cid, payload) => {
+        appendRun: async (_cid, record) => {
           persistCallCount++;
           if (persistCallCount === 2) {
             throw new Error("disk full");
           }
-          if (payload.turn) {
-            persisted.push((payload.turn as { turnIndex: number }).turnIndex);
-          }
-          return [];
+          const first = record.messages[0]!.content[0]!;
+          persisted.push(first.type === "text" ? first.text : "?");
+          // runIndex 按"已成功落盘数"分配 —— 与真实 store 语义一致（失败
+          // 调用不占号），重试路径对账才不误告警
+          return { runIndex: persisted.length - 1, shardId: "000001" };
         },
       });
 
       const session = await mgr.getOrCreate("eph-retry", { ephemeral: true });
-      const makeTurn = (idx: number) => ({
-        type: "turn" as const,
-        turnIndex: idx,
+      const makeRecord = (idx: number) => ({
         timestamp: new Date().toISOString(),
-        userMessage: { role: "user" as const, content: [{ type: "text" as const, text: `q${idx}` }] },
-        assistantMessage: { role: "assistant" as const, content: [{ type: "text" as const, text: `a${idx}` }] },
+        messages: [
+          { role: "user" as const, content: [{ type: "text" as const, text: `q${idx}` }] },
+          { role: "assistant" as const, content: [{ type: "text" as const, text: `a${idx}` }] },
+        ],
         usage: { inputTokens: 1, outputTokens: 1 },
       });
 
-      session.pendingTurns.push(makeTurn(0), makeTurn(1));
+      session.pendingRuns.enqueue(makeRecord(0));
+      session.pendingRuns.enqueue(makeRecord(1));
 
-      // First promote: t0 persists, t1 throws
+      // First promote: r0 persists, r1 throws
       await expect(mgr.promote("eph-retry")).rejects.toThrow("disk full");
       expect(inited).toEqual(["eph-retry"]);
-      expect(persisted).toEqual([0]);
-      expect(session.pendingTurns).toHaveLength(1); // t1 still pending
+      expect(persisted).toEqual(["q0"]);
+      expect(session.pendingRuns.size).toBe(1); // r1 still pending
       expect(session.ephemeral).toBe(true);
       expect(session.transcriptInited).toBe(true);
 
-      // Retry promote: should NOT re-init, should only persist t1
+      // Retry promote: should NOT re-init, should only persist r1
       await mgr.promote("eph-retry");
       expect(inited).toEqual(["eph-retry"]); // NOT called again
-      expect(persisted).toEqual([0, 1]);
-      expect(session.pendingTurns).toHaveLength(0);
+      expect(persisted).toEqual(["q0", "q1"]);
+      expect(session.pendingRuns.size).toBe(0);
       expect(session.ephemeral).toBe(false);
 
       await mgr.disposeAll();
     });
   });
 
-  // ─── 配置守卫（Phase 5 Bug #1/#2 回归守卫） ───
+  // ─── 配置守卫 ───
   //
-  // "persistent 静默丢消息 / promote 错误晋升" 两个 bug 的根源都是
-  // commitTurn 是 optional。这组测试保证：
-  //   1. 构造时部分配置（有 loadHistory/initTranscript 但无 commitTurn）→ throw
+  // "persistent 分支无路可走 / promote 错误晋升" 两类配置错误的根源都是
+  // appendRun 是 optional。这组测试保证：
+  //   1. 构造时部分配置（有 loadHistory/initTranscript 但无 appendRun）→ throw
   //   2. 运行时 persistent 分支无 cb → throw（defense-in-depth）
   //   3. 运行时 promote 无 cb → return false 保持 ephemeral 状态
 
   describe("configuration guards", () => {
-    it("constructor throws if loadHistory is provided without commitTurn", () => {
+    it("constructor throws if loadHistory is provided without appendRun", () => {
       expect(
         () =>
           new ConversationManager(createMockFactory(), {
@@ -1060,12 +1143,12 @@ describe("ConversationManager", () => {
             idleCheckIntervalMs: 999_999,
           }, {
             loadHistory: async () => undefined,
-            // commitTurn 故意缺失
+            // appendRun 故意缺失
           }),
-      ).toThrow(/commitTurn.*required/i);
+      ).toThrow(/appendRun.*required/i);
     });
 
-    it("constructor throws if initTranscript is provided without commitTurn", () => {
+    it("constructor throws if initTranscript is provided without appendRun", () => {
       expect(
         () =>
           new ConversationManager(createMockFactory(), {
@@ -1074,9 +1157,9 @@ describe("ConversationManager", () => {
             idleCheckIntervalMs: 999_999,
           }, {
             initTranscript: async () => {},
-            // commitTurn 故意缺失
+            // appendRun 故意缺失
           }),
-      ).toThrow(/commitTurn.*required/i);
+      ).toThrow(/appendRun.*required/i);
     });
 
     it("constructor allows pure ephemeral-only manager (no persistence callbacks)", () => {
@@ -1100,12 +1183,12 @@ describe("ConversationManager", () => {
           }, {
             loadHistory: async () => undefined,
             initTranscript: async () => {},
-            commitTurn: async () => [],
+            appendRun: async () => ({ runIndex: 0, shardId: "000001" }),
           }),
       ).not.toThrow();
     });
 
-    it("promote() returns false when commitTurn is missing (preserves ephemeral state)", async () => {
+    it("promote() returns false when appendRun is missing (preserves ephemeral state)", async () => {
       // 纯 ephemeral-only manager —— 构造合法（三个 callback 都无）
       const mgr = new ConversationManager(createMockFactory(), {
         graceTimeoutMs: 60_000,
@@ -1114,21 +1197,21 @@ describe("ConversationManager", () => {
       });
 
       const session = await mgr.getOrCreate("eph-no-cb", { ephemeral: true });
-      const mockTurn = {
-        type: "turn" as const,
-        turnIndex: 0,
+      const mockRecord = {
         timestamp: new Date().toISOString(),
-        userMessage: { role: "user" as const, content: [{ type: "text" as const, text: "hi" }] },
-        assistantMessage: { role: "assistant" as const, content: [{ type: "text" as const, text: "hello" }] },
+        messages: [
+          { role: "user" as const, content: [{ type: "text" as const, text: "hi" }] },
+          { role: "assistant" as const, content: [{ type: "text" as const, text: "hello" }] },
+        ],
         usage: { inputTokens: 1, outputTokens: 1 },
       };
-      session.pendingTurns.push(mockTurn);
+      session.pendingRuns.enqueue(mockRecord);
 
-      // promote 必须 return false、不变 ephemeral 标志、不丢 pendingTurns
+      // promote 必须 return false、不变 ephemeral 标志、不丢 pendingRuns
       const ok = await mgr.promote("eph-no-cb");
       expect(ok).toBe(false);
       expect(session.ephemeral).toBe(true);
-      expect(session.pendingTurns).toHaveLength(1);
+      expect(session.pendingRuns.size).toBe(1);
 
       await mgr.disposeAll();
     });

@@ -3,7 +3,12 @@ export { runAgentLoop, drainAgentLoop } from "./agent-loop.js";
 export { streamLLMCall } from "./llm-call.js";
 export { executeToolCalls, COMMITMENT_SIGNAL } from "./tool-executor.js";
 export { MockLLMProvider, mockTextProvider, mockSequenceProvider } from "./mock-provider.js";
-export { buildTurn, resolveTurnTimestamp } from "./turn-builder.js";
+export {
+  buildRunRecord,
+  deriveToolCalls,
+  finalAssistantMessageOf,
+  userMessageOf,
+} from "./run-record-builder.js";
 
 export type {
   AgentLoopParams,
@@ -17,5 +22,5 @@ export type {
   WindowChangeReason,
   WindowLifecycle,
 } from "./types.js";
-export type { BuildTurnInput } from "./turn-builder.js";
+export type { BuildRunRecordInput } from "./run-record-builder.js";
 export type { MockResponse, MockToolCall } from "./mock-provider.js";

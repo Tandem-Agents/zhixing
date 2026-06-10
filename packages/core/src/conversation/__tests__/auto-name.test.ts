@@ -92,7 +92,7 @@ describe("maybeAutoNameFirstTurn — 触发判定", () => {
     expect(repo.rename).not.toHaveBeenCalled();
   });
 
-  it("turnCounter === 0(commitTurn 之前误调)同步 short-circuit", async () => {
+  it("turnCounter === 0(持久化之前误调)同步 short-circuit", async () => {
     const repo = makeStubRepo({ initial: makeConv() });
     const inferName = vi.fn() as unknown as InferConversationName;
 

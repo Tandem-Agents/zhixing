@@ -11,6 +11,5 @@ export type {
 } from "./types.js";
 export {
   createAttentionWindow,
-  restoreAttentionWindowFromCanonical,
+  restoreAttentionWindowFromRecords,
 } from "./attention-window.js";
-export { windowCompactFromMarker } from "./compact-marker-bridge.js";

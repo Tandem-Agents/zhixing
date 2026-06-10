@@ -318,7 +318,7 @@ describe("evaluate — trigger 成功完整契约", () => {
     }
   });
 
-  it("segment:new_started 事件 payload 携带完整 CompactMarker（segmentId + structuredSummary）", async () => {
+  it("segment:new_started 事件 payload 携带完整窗口重构指令（segmentId + structuredSummary）", async () => {
     const { bus, events } = captureSegmentEvents();
     const sm = createSegmentManager(
       makeConfig({
@@ -332,19 +332,18 @@ describe("evaluate — trigger 成功完整契约", () => {
     const newStarted = events.find((e) => e.event === "segment:new_started")!;
     expect(newStarted).toBeDefined();
     const payload = newStarted.payload as AgentEventMap["segment:new_started"];
-    const marker = payload.marker;
-    expect(marker.type).toBe("compact");
-    expect(marker.segmentId).toBe("seg-test-1");
-    expect(marker.structuredSummary).toEqual({
+    const wc = payload.windowCompact;
+    expect(wc.segmentId).toBe("seg-test-1");
+    expect(wc.structuredSummary).toEqual({
       facts: "F1",
       state: "S1",
       active: "A1",
     });
-    expect(marker.timestamp).toBe("2026-05-11T10:00:00.000Z");
-    expect(marker.tokensBefore).toBeGreaterThan(0);
+    expect(wc.pairsCompacted).toBeGreaterThan(0);
+    expect(wc.tokensBefore).toBeGreaterThan(0);
   });
 
-  it("evaluate 返回值的 marker 与 segment:new_started 事件载荷一致", async () => {
+  it("evaluate 返回值的 windowCompact 与 segment:new_started 事件载荷一致", async () => {
     const { bus, events } = captureSegmentEvents();
     const sm = createSegmentManager(
       makeConfig({
@@ -356,13 +355,13 @@ describe("evaluate — trigger 成功完整契约", () => {
     const result = await sm.evaluate(makeInput(makeBigMessages()));
 
     expect(result.modified).toBe(true);
-    expect(result.marker).toBeDefined();
+    expect(result.windowCompact).toBeDefined();
     const newStarted = events.find((e) => e.event === "segment:new_started")!;
     const payload = newStarted.payload as AgentEventMap["segment:new_started"];
-    expect(payload.marker).toEqual(result.marker);
+    expect(payload.windowCompact).toEqual(result.windowCompact);
   });
 
-  it("persistence.appendSegment 收到 SegmentMeta（与 marker 同 segmentId / timestamp）", async () => {
+  it("persistence.appendSegment 收到 SegmentMeta（与指令同 segmentId）", async () => {
     const persistence = fakePersistence();
     const sm = createSegmentManager(
       makeConfig({
@@ -400,7 +399,7 @@ describe("evaluate — trigger 成功完整契约", () => {
     ]);
   });
 
-  it("成功返回 newSegmentMessages + marker", async () => {
+  it("成功返回 newSegmentMessages + windowCompact", async () => {
     const sm = createSegmentManager(
       makeConfig({ generateSegmentId: () => "seg-X" }),
     );
@@ -411,7 +410,7 @@ describe("evaluate — trigger 成功完整契约", () => {
     expect(result.newSegmentMessages).toBeDefined();
     expect(result.newSegmentMessages).toHaveLength(1);
     expect(result.newSegmentMessages![0]!.role).toBe("user");
-    expect(result.marker?.segmentId).toBe("seg-X");
+    expect(result.windowCompact?.segmentId).toBe("seg-X");
   });
 
   it("new_started 事件 payload 含 bufferTurns / tokens", async () => {
@@ -492,8 +491,8 @@ describe("evaluate — 压缩失败", () => {
   });
 
   it("persistence.appendSegment 抛错 → emit 专属 segment:metadata_persist_failed 事件，段切换主流程仍成功", async () => {
-    // 关键不变量：segmentMetadata 是独立观测元数据流，与 transcript marker 写入解耦。
-    // marker 通过 segment:new_started 事件流向 orchestrator accumulator 单点 commit；
+    // 关键不变量：segmentMetadata 是独立观测元数据流，与窗口重构指令解耦。
+    // 指令通过 segment:new_started 事件流向 orchestrator accumulator 随 RunResult 带出；
     // segmentMetadata 缺失只影响段历史 UI 观测，不影响 LLM 视图正确性。
     //
     // 专属事件设计：避免与 transition_failed（段切换整体失败）语义混淆——订阅方
@@ -506,10 +505,10 @@ describe("evaluate — 压缩失败", () => {
 
     const result = await sm.evaluate(makeInput(bigMessages()));
 
-    // 段切换主流程成功（marker 已就绪、newSegmentMessages 已组装）
+    // 段切换主流程成功（指令已就绪、newSegmentMessages 已组装）
     expect(result.modified).toBe(true);
     expect(result.newSegmentMessages).toBeDefined();
-    expect(result.marker).toBeDefined();
+    expect(result.windowCompact).toBeDefined();
 
     // 专属 metadata_persist_failed 事件被 emit（warning 性质，与 transition_failed 解耦）
     const metaFailed = events.find(

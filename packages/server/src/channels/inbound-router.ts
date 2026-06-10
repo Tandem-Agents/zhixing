@@ -477,10 +477,10 @@ export class InboundRouter {
     }
 
     try {
-      // runTurnWithCommit：原子化 run + recordTurn + 异常 rollback。
-      //   · 非 completed / commitTurn throw / runtime throw 三条异常路径均保证
-      //     adapter state 回到 preRun，防止 orphan userMsg 污染下一轮 LLM 输入
-      //   · commitTurn 失败通过 onCommitFailure hook 路由到 logger（observability）
+      // runTurnWithCommit：run + 按结果 recordTurn（接受协议：先持久化、后入窗）。
+      //   · 非 completed / 持久化 throw / runtime throw 三条异常路径下窗口都
+      //     停在 run 前基底，防止 orphan userMsg 污染下一轮 LLM 输入
+      //   · 持久化失败通过 onCommitFailure hook 路由到 logger（observability）
       const gen = runTurnWithCommit(
         this.conversations,
         conversationId,
@@ -514,8 +514,8 @@ export class InboundRouter {
       this.logger.info(`[处理完成] conv=${conversationId} reason=${agentResult?.reason ?? "no-result"}`);
 
       if (runResult && agentResult && agentResult.reason === "completed") {
-        // turnStartedAt 不再用作 Turn.timestamp（buildTurn 在 run 结束时精确设定）——
-        // 保留变量避免未来诊断字段需要 turn 入口时间时重新加逻辑
+        // turnStartedAt 不用作 run record 的 timestamp（buildRunRecord 在 run 结束时
+        // 精确设定）—— 保留变量避免未来诊断字段需要 turn 入口时间时重新加逻辑
         void turnStartedAt;
 
         const content = buildOutboundContent(agentResult);

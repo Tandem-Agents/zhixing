@@ -10,8 +10,9 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   Conversation,
   IConversationRepository,
-  ITranscriptStore,
-  LoadedTranscript,
+  RunRecord,
+  ShardedTranscriptStore,
+  TranscriptIndex,
 } from "@zhixing/core";
 import { acquireWorksceneConversation } from "../workscene-conversation.js";
 
@@ -26,21 +27,28 @@ const mkConv = (id: string, name = id): Conversation =>
     scope: { kind: "workscene", sceneId: "scene-A" },
   }) as unknown as Conversation;
 
-const mkLoaded = (id: string): LoadedTranscript => ({
-  header: {
-    type: "header",
-    version: 1,
-    conversationId: id,
-    name: null,
-    createdAt: "2026-05-21T00:00:00.000Z",
-    model: "test-model",
-    provider: "test-provider",
-  },
+const mkIndex = (id: string): TranscriptIndex => ({
+  version: 1,
+  conversationId: id,
+  activeShardId: "000001",
+  shards: [
+    {
+      id: "000001",
+      file: "000001.jsonl",
+      createdAt: "2026-05-21T00:00:00.000Z",
+      isActive: true,
+    },
+  ],
+});
+
+const mkRunRecord = (runIndex: number): RunRecord => ({
+  type: "run",
+  runIndex,
+  timestamp: "2026-05-21T00:00:00.000Z",
   messages: [
-    { role: "user", content: "hello" },
-    { role: "assistant", content: "hi" },
-  ] as unknown as LoadedTranscript["messages"],
-  turnCount: 1,
+    { role: "user", content: [{ type: "text", text: "hello" }] },
+    { role: "assistant", content: [{ type: "text", text: "hi" }] },
+  ],
 });
 
 function makeRepo(overrides: Partial<IConversationRepository>): IConversationRepository {
@@ -60,18 +68,28 @@ function makeRepo(overrides: Partial<IConversationRepository>): IConversationRep
   } as unknown as IConversationRepository;
 }
 
-function makeStore(overrides: Partial<ITranscriptStore>): ITranscriptStore {
-  return {
+/**
+ * 历史装载走真实倒读原语（readRunsReverse），mock 只供它的两个读底座：
+ * readIndex（null = 无 transcript）+ readShardLines（reject = 读失败降级）。
+ */
+function makeStore(
+  overrides: Partial<ShardedTranscriptStore>,
+): ShardedTranscriptStore {
+  const store = {
     init: vi.fn(),
-    commitTurn: vi.fn(),
-    appendTurn: vi.fn(),
-    appendCompact: vi.fn(),
-    compactAll: vi.fn(),
-    load: vi.fn(),
-    countTurns: vi.fn(),
+    appendRunRecord: vi.fn(),
+    appendClear: vi.fn(),
+    readIndex: vi.fn().mockResolvedValue(null),
+    readShardLines: vi.fn().mockResolvedValue([]),
     exists: vi.fn(),
     ...overrides,
-  } as unknown as ITranscriptStore;
+  };
+  // 倒读原语走自愈版索引获取；mock 委托 readIndex —— 用例只需控制读底座
+  return Object.assign(store, {
+    ensureReadableIndex: vi.fn((id: string) =>
+      (store.readIndex as (x: string) => Promise<unknown>)(id),
+    ),
+  }) as unknown as ShardedTranscriptStore;
 }
 
 describe("acquireWorksceneConversation", () => {
@@ -90,27 +108,27 @@ describe("acquireWorksceneConversation", () => {
     expect(result.warning).toBeUndefined();
     expect(repo.create).toHaveBeenCalledTimes(1);
     expect(repo.create).toHaveBeenCalledWith({});
-    expect(store.load).not.toHaveBeenCalled();
+    expect(store.readIndex).not.toHaveBeenCalled();
   });
 
   it("路径 B：latest 存在 + load + get 均成功 → recovery", async () => {
     const existing = mkConv("existing-id");
-    const loaded = mkLoaded("existing-id");
     const repo = makeRepo({
       findLatest: vi.fn().mockResolvedValue("existing-id"),
       get: vi.fn().mockResolvedValue(existing),
       create: vi.fn(),
     });
     const store = makeStore({
-      load: vi.fn().mockResolvedValue(loaded),
+      readIndex: vi.fn().mockResolvedValue(mkIndex("existing-id")),
+      readShardLines: vi.fn().mockResolvedValue([mkRunRecord(0)]),
     });
 
     const result = await acquireWorksceneConversation(repo, store);
 
     expect(result.conversation).toBe(existing);
-    expect(result.loaded).toBe(loaded);
+    expect(result.loaded).toEqual([mkRunRecord(0)]);
     expect(result.warning).toBeUndefined();
-    expect(store.load).toHaveBeenCalledWith("existing-id");
+    expect(store.readIndex).toHaveBeenCalledWith("existing-id");
     expect(repo.get).toHaveBeenCalledWith("existing-id");
     expect(repo.create).not.toHaveBeenCalled();
   });
@@ -123,7 +141,8 @@ describe("acquireWorksceneConversation", () => {
       create: vi.fn().mockResolvedValue(created),
     });
     const store = makeStore({
-      load: vi.fn().mockRejectedValue(new Error("EBADJSON: corrupted")),
+      readIndex: vi.fn().mockResolvedValue(mkIndex("broken-id")),
+      readShardLines: vi.fn().mockRejectedValue(new Error("EBADJSON: corrupted")),
     });
 
     const result = await acquireWorksceneConversation(repo, store);
@@ -134,20 +153,20 @@ describe("acquireWorksceneConversation", () => {
     expect(result.warning).toContain("EBADJSON: corrupted");
     expect(repo.create).toHaveBeenCalledTimes(1);
     expect(repo.create).toHaveBeenCalledWith({});
-    // get 不应调用（load 已先抛错走 catch）
+    // get 不应调用（装载已先抛错走 catch）
     expect(repo.get).not.toHaveBeenCalled();
   });
 
   it("路径 C-2：latest 存在 + load 成功但 get 返 null → 降级 create + warning 标元数据缺失", async () => {
     const created = mkConv("new-id");
-    const loaded = mkLoaded("ghost-id");
     const repo = makeRepo({
       findLatest: vi.fn().mockResolvedValue("ghost-id"),
       get: vi.fn().mockResolvedValue(null),
       create: vi.fn().mockResolvedValue(created),
     });
     const store = makeStore({
-      load: vi.fn().mockResolvedValue(loaded),
+      readIndex: vi.fn().mockResolvedValue(mkIndex("ghost-id")),
+      readShardLines: vi.fn().mockResolvedValue([mkRunRecord(0)]),
     });
 
     const result = await acquireWorksceneConversation(repo, store);
@@ -166,7 +185,8 @@ describe("acquireWorksceneConversation", () => {
       create: vi.fn().mockResolvedValue(created),
     });
     const store = makeStore({
-      load: vi.fn().mockRejectedValue("string-error-payload"),
+      readIndex: vi.fn().mockResolvedValue(mkIndex("broken-id")),
+      readShardLines: vi.fn().mockRejectedValue("string-error-payload"),
     });
 
     const result = await acquireWorksceneConversation(repo, store);

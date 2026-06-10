@@ -6,11 +6,11 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   Conversation,
   IConversationRepository,
-  ITranscriptStore,
+  ShardedTranscriptStore,
 } from "@zhixing/core";
 import {
   assistantMessage,
-  restoreAttentionWindowFromCanonical,
+  restoreAttentionWindowFromRecords,
   userMessage,
 } from "@zhixing/core";
 import {
@@ -52,27 +52,25 @@ function makeRepo(
 }
 
 function makeStore(
-  overrides: Partial<ITranscriptStore> = {},
-): ITranscriptStore {
+  overrides: Partial<ShardedTranscriptStore> = {},
+): ShardedTranscriptStore {
   return {
     init: vi.fn().mockResolvedValue(undefined),
-    commitTurn: vi.fn(),
-    appendTurn: vi.fn(),
-    appendCompact: vi.fn(),
-    compactAll: vi.fn(),
-    load: vi.fn(),
-    countTurns: vi.fn(),
+    appendRunRecord: vi.fn(),
+    appendClear: vi.fn(),
+    readIndex: vi.fn(),
+    readShardLines: vi.fn(),
     exists: vi.fn(),
     ...overrides,
-  } as unknown as ITranscriptStore;
+  } as unknown as ShardedTranscriptStore;
 }
 
 function makeState(
   overrides: Partial<MutableConversationState> = {},
 ): MutableConversationState {
   return {
-    window: restoreAttentionWindowFromCanonical(
-      [userMessage("old"), assistantMessage("old-reply")],
+    window: restoreAttentionWindowFromRecords(
+      [{ runIndex: 0, messages: [userMessage("old"), assistantMessage("old-reply")] }],
       { conversationId: "old-id" },
     ),
     pendingInputPrefix: [userMessage("leftover-prefix")],
@@ -123,10 +121,7 @@ describe("switchToNewConversation", () => {
       preferredModel: "test-model",
       preferredProvider: "test-provider",
     });
-    expect(conv.store.init).toHaveBeenCalledWith("new-id", {
-      model: "test-model",
-      provider: "test-provider",
-    });
+    expect(conv.store.init).toHaveBeenCalledWith("new-id");
     expect(conv.conversationId).toBe("new-id");
     expect(conv.window.getMessages()).toEqual([]);
     expect(conv.pendingInputPrefix).toBeNull();

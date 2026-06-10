@@ -286,7 +286,7 @@ export class ConversationRepository implements IConversationRepository {
         const parsed = JSON.parse(content) as Conversation &
           Record<string, unknown>;
         // 清理历史已弃用字段 —— writeMeta 会把整个对象 stringify 写回，
-        // 不清理则 phantom 字段长期保留在磁盘上；下次 commitTurn 后自然干净。
+        // 不清理则 phantom 字段长期保留在磁盘上；下次 writeMeta 后自然干净。
         delete parsed.capabilityState;
         return parsed;
       } catch {

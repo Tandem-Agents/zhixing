@@ -33,7 +33,9 @@ export async function* readRunsReverse(
   conversationId: string,
   options: ReadRunsReverseOptions = {},
 ): AsyncGenerator<RunRecordWithRef, void> {
-  const index = await store.readIndex(conversationId);
+  // 自愈版索引获取：索引缺失 / 损坏时从分片重建（分片文件在，会话就在），
+  // 决不因索引层事故让完好的原文对读端失联；对话真不存在时产出为空。
+  const index = await store.ensureReadableIndex(conversationId);
   if (!index) return;
 
   const before = options.before;

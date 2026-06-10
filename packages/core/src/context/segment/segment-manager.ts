@@ -19,7 +19,7 @@
  *      g. beforeNewSegmentStart hooks（失败 → 降级 warning + 继续：压缩成本不浪费）
  *      h. splitMessagesPairAware → toSummarize / toPreserve
  *      i. composeNewSegmentMessages → 新段首条 user message
- *      j. 构造 CompactMarker（含 segmentId + structuredSummary + 平文本 summary 副本）
+ *      j. 构造窗口重构指令（含 segmentId + structuredSummary + 平文本 summary 副本）
  *      k. persistence.appendSegment（segmentMetadata 累积；失败 emit warning 但仍成功）
  *      l. emit new_started 携带 marker → 返回 modified=true
  *   8. trigger 关键失败（压缩失败 / 解析空 / beforeSummarize hook 失败） → emit
@@ -28,11 +28,11 @@
  * 关键不变量：
  *   - 压缩请求 system + tools + messages 与上一轮 byte-equal（cache 完美命中）
  *   - 段切换失败绝不阻塞 turn（agent-loop 拿原 messages 继续，下次再评估）
- *   - **transcript marker 不由 SegmentManager 直接写**：通过 segment:new_started
- *     事件携带 marker 流向 orchestrator accumulator，由 run-agent 在 run 结束时
- *     通过 commitTurn({ turn, compactBefore }) 单点原子写入。与 LLMSummarize 走
- *     context:compact_end → accumulator → commitTurn 路径同模式，整个 run 内
- *     transcript 写入收敛到唯一路径，杜绝"内存切了但磁盘 marker 没写"类不一致
+ *   - **窗口折叠不由 SegmentManager 直接应用**：通过 segment:new_started
+ *     事件携带 windowCompact 流向 orchestrator accumulator，随 RunResult 在
+ *     run 边界由调用方交给注意力窗口折叠。与 LLMSummarize 走 context:compact_end
+ *     → accumulator → RunResult.windowCompact 路径同模式，整个 run 的折叠指令
+ *     收敛到唯一出口；持久化是 append-only 原文，压缩不触碰磁盘
  *   - segmentMetadata 是独立观测元数据流：写入失败不阻断段切换主流程
  *     （marker 已通过事件流转出，下次启动 transcript rebuild 仍能还原新段 LLM 视图；
  *     segmentMetadata 失败仅影响"段历史浏览"未来 UI，不影响 LLM 行为）
@@ -46,7 +46,7 @@ import type { SegmentMeta } from "../../conversation/types.js";
 import type { AgentEventMap } from "../../types/agent-events.js";
 import type { Message } from "../../types/messages.js";
 import type { ToolSpec } from "../../types/tools.js";
-import type { CompactMarker } from "../../transcript/types.js";
+import type { WindowCompact } from "../window/types.js";
 import {
   calculateMessageTurns,
   splitMessagesPairAware,
@@ -298,26 +298,23 @@ export class SegmentManager {
     const tokensAfter = this.cfg.estimator.estimateMessages(newSegmentMessages);
     const turnsCompacted = computeTurnsCompacted(toSummarize);
 
-    const marker: CompactMarker = {
-      type: "compact",
-      timestamp: startedAt.toISOString(),
+    const windowCompact: WindowCompact = {
       summary: flattenSummary(summary),
-      turnsCompacted,
+      structuredSummary: summary,
+      segmentId,
+      pairsCompacted: turnsCompacted,
       tokensBefore,
       tokensAfter,
-      segmentId,
-      structuredSummary: summary,
     };
 
     // segmentMetadata 累积写入 —— 失败走专属 warning 事件，**不**复用 transition_failed
     // （避免"成功 + 失败"事件并存的语义矛盾）。
     //
-    // 设计原因：transcript marker 通过 segment:new_started 事件流向 orchestrator
-    // accumulator，由 run-agent 在 run 结束时与本 turn 一并 commitTurn —— marker
-    // 与 turn 同一原子事务，是新段 LLM 视图的事实源。
+    // 设计原因：窗口重构指令经 segment:new_started 事件流向 orchestrator
+    // accumulator、随 RunResult 带出，由会话层在接受协议中折叠窗口——压缩是
+    // 窗口的视图操作，原文持久化 append-only 不参与。
     // segmentMetadata 是独立观测元数据流（仅服务于段历史 UI），缺失不影响
-    // 段切换语义完成度，也不会让"内存切了但 transcript 没切"出现 —— marker
-    // 已通过事件流转出，后续与本 turn 一并落盘。
+    // 段切换语义完成度。
     const meta: SegmentMeta = {
       segmentId,
       timestamp: startedAt.toISOString(),
@@ -331,7 +328,7 @@ export class SegmentManager {
         segmentId,
         error: errorMessage(e),
       });
-      // 不 return —— 段切换主流程已完成（marker 即将通过 segment:new_started 流出）
+      // 不 return —— 段切换主流程已完成（指令即将通过 segment:new_started 流出）
     }
 
     await this.cfg.eventBus?.emit("segment:new_started", {
@@ -339,14 +336,14 @@ export class SegmentManager {
       bufferTurns: this.cfg.bufferTurns,
       tokensBefore,
       tokensAfter,
-      marker,
+      windowCompact,
     });
 
     return {
       decision,
       modified: true,
       newSegmentMessages,
-      marker,
+      windowCompact,
     };
   }
 

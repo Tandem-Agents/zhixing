@@ -33,7 +33,8 @@ import type {
 } from "../context/types.js";
 import type { SegmentManager } from "../context/segment/segment-manager.js";
 import type { TurnContextInjector } from "../context/turn-context.js";
-import type { CompactMarker, Turn } from "../transcript/types.js";
+import type { RunRecordInput } from "../transcript/shard/types.js";
+import type { WindowCompact } from "../context/window/types.js";
 import type { AbortReason, WatchdogPolicy } from "../interrupt/types.js";
 
 // ─── 注意力窗口换代 ───
@@ -424,13 +425,12 @@ export interface ExecuteToolCallsResult {
  *
  * 和 AgentResult 的区别：
  *   - AgentResult 是 agent-loop 内部的"终止原因"（completed / max_turns / aborted / error）
- *   - RunResult 是外层 runtime 一次 run() 的整体产出，**包装** AgentResult + 持久化单元
- *     + 本 run 压缩边界 + 诊断字段
+ *   - RunResult 是外层 runtime 一次 run() 的整体产出，**包装** AgentResult + 持久化输入
+ *     + 本 run 窗口重构指令 + 诊断字段
  *
- * 设计（详见 research/design/drafts/transcript-retention.md §0.7.1 单向数据流）：
- *   run-agent 闭包订阅 compact_end → 组装 CompactMarker →
- *   RunResult { turn, compactBefore? } → 调用方 →
- *   TranscriptStore.commitTurn → canonical 回喂 state.messages
+ * 数据流：run 闭包订阅压缩 / 段切换事件 → 累积窗口重构指令 →
+ *   RunResult { runRecord, windowCompact? } → 会话层接受协议
+ *   （先追加原始 run record、后折叠并推进注意力窗口）
  *
  * 放在 core/loop 而非 cli 的原因：
  *   - cli 的 AgentRuntime 和 server 的 SessionRuntime 都要 return 此类型
@@ -441,31 +441,32 @@ export interface RunResult {
   readonly agentResult: AgentResult;
 
   /**
-   * 持久化单元 —— 本 run 完整的 user+assistant+toolCalls 记录。
+   * 持久化输入 —— 本 run 的完整协议消息序列（messages = [用户原文,
+   * ...本 run 全部 assistant 与 tool_result 消息]），唯一权威内容字段。
    *
-   * 由 `buildTurn()` 在 run 结束前组装。即使 abort / error 路径也会构造（assistant
-   * 可能为空内容），保证调用方 commitTurn 的入参永远有 turn 可用。
+   * 由 `buildRunRecord()` 在 run 结束前组装。即使 abort / error 路径也会
+   * 构造（可能只有用户消息），保证调用方追加持久化的入参永远可用；
+   * runIndex 由持久化层在追加时分配。
    */
-  readonly turn: Turn;
+  readonly runRecord: RunRecordInput;
 
   /**
-   * 本 run 期间累积的最后一次摘要型 compact 边界。
+   * 本 run 期间累积的窗口重构指令 —— 注意力窗口的折叠依据。
    *
-   * 语义：`turnsCompacted` 是本 run 内**累积替代的文件 Turn 总数**
-   * （多触发点累加，见 L1 累积算法）。commitTurn 按此值切分磁盘 turns
-   * 保留末尾。
+   * 语义：`pairsCompacted` 是本 run 内**累积被摘要替代的窗口配对总数**
+   * （多触发点累加）。它只表达 LLM 发送视图的变化，绝不被解释为持久化
+   * 写入指令——原文 append-only、永不因压缩变短。
    *
-   * 非摘要型压缩（MessageDrop 等）不填此字段 ——
-   * 它们不替代文件 Turn，只做内存级裁剪，不影响持久化边界。
+   * 非摘要型修改不填此字段 —— 窗口只经折叠 / 接受前进。
    */
-  readonly compactBefore?: CompactMarker;
+  readonly windowCompact?: WindowCompact;
 
   /**
    * 本 run yield 流重建的原始新消息增量（与 canonical 正交）。
    *
    * 用途：诊断日志、非 REPL 单次运行的输出显示。
    *
-   * 不用于状态同步（后者由 commitTurn 返回的 canonical 承担）。
+   * 不用于状态同步（窗口经接受协议从 runRecord.messages 自行派生前进）。
    */
   readonly newMessages: Message[];
 
@@ -482,7 +483,7 @@ export interface RunResult {
 
   /**
    * 本 run 内产生的工作模式切换意图（turn 内 emit、RunResult 带出，与
-   * compactBefore 同构）。accumulator last-wins 收集；
+   * windowCompact 同构）。accumulator last-wins 收集；
    * 无 emit 时 undefined。仅意图 —— 切换由 REPL 主回路 turn 边界单一事务
    * 消费执行，本字段不触发任何切换。
    */
