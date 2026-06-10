@@ -52,7 +52,7 @@
 | **RuntimeSession** | 进程 / 连接级资源容器，聚合 main runtime + scheduler + channels + delivery | `create()`→`dispose()` | `cli/runtime/session.ts:84` |
 | **运行体**（agent runtime instance） | 一个 user-facing 主对话 `AgentRuntime` 实例。**钩子订阅者集合的注册单位** | 实例建立→实例销毁 | `orchestrator` `AgentRuntime`（`create-agent-runtime.ts:178`） |
 | **conversation** | 数据层对话记录（id / transcript / scope） | 独立持久化 | `conversation-model.md` |
-| **注意力窗口**（attention window / 段） | 喂给 LLM 的上下文视图——物理层的瞬态派生投影，按模型优质注意力尺寸维护。**onWindowOpen/onWindowClose 的触发单位** | 首窗(编排启动倒读重建)→每次上下文重构(段切换/compact/clear/resume)新生；窗口内 system prompt+tools+历史对话列表 byte-equal | [lifecycle-concepts.md](../drafts/lifecycle-concepts.md) §一；段载体 `core` SegmentManager |
+| **注意力窗口**（attention window / 段） | 喂给 LLM 的上下文视图——物理层的瞬态派生投影，按模型优质注意力尺寸维护。**onWindowOpen/onWindowClose 的触发单位** | 首窗(编排启动经启动装填建窗)→每次上下文重构(段切换/compact/clear/resume)新生；窗口内 system prompt+tools+历史对话列表 byte-equal | [lifecycle-concepts.md](../drafts/lifecycle-concepts.md) §一；段载体 `core` SegmentManager |
 | **run** | 一次 `runtime.run()`=一条用户消息完整往返。**onBeforeRun/onAfterRun 的触发单位** | run_start→run_end | `create-agent-runtime.ts:855` |
 | **turn** | agent-loop 内一次 LLM call（+工具执行） | turn 边界 | `core` agent-loop |
 
@@ -225,7 +225,7 @@ run 触发、上下文送进 LLM 之前唯一的业务介入点。**两类职责
 
 订阅者只递交「要注什么」（`injectUserContext(content)`），所有订阅者跑完后 runtime 按注册顺序把贡献拼成一个 `<context>` 块、前缀到当前 run 的用户消息——注到哪条、怎么包、什么顺序全归 runtime（与 onWindowOpen 的 `updateSystemPromptSegment`、TurnContextProvider 同范式）。订阅者**不**改 `messages`（只读）、不自己找位置 / 去重。
 
-注进的内容是**发送视图**：随 run 进 `state.messages` 供 LLM 看到，但持久化只存用户原始输入（`buildTurn` 契约）；落盘与否由内容属性定（项目指令 / 启动摘要 / 人物等都是可从源头重生成的临时态、不落盘）。
+注进的内容是 **run 瞬态**：随 run 进发送视图供 LLM 看到，但既不进注意力窗口事实、也不落盘——持久化 run record 的 `messages[0]` 恒为用户原文（buildRunRecord 契约）；落盘与否由内容属性定（项目指令 / 人物等都是可从源头重生成的临时态、不落盘）。
 
 #### 三个触发场景：一个入口、三种谓词
 
@@ -235,9 +235,9 @@ run 触发、上下文送进 LLM 之前唯一的业务介入点。**两类职责
 |---|---|---|
 | 任意 run | 无条件 | 每条消息都注的动态上下文 |
 | 任意窗口首 run | `isWindowFirstRun` | 段切换开新窗后该重注的项目背景 |
-| 本次运行用户首次交互 | 订阅者 loaded flag（对话级用 `conversationId`） | 启动从持久化倒读历史、只此一次 |
+| 本次运行用户首次交互 | 订阅者 loaded flag（对话级用 `conversationId`） | 对话级一次性注入（注：启动历史装填**不走本入口**——由 owner 侧装填器在建窗时作为窗口起始条目置入，与 run 成败解耦） |
 
-- **用户首次交互**直接用 loaded flag：main runtime 上的 run 全是用户交互（定时任务跑在独立 ephemeralRuntime、不碰 main），第一个 run 即首次交互、不必判来源；粒度按对话级（用 `conversationId`、每对话首次各加载一次）。
+- **用户首次交互**直接用 loaded flag：main runtime 上的 run 全是用户交互（定时任务跑在独立 ephemeralRuntime、不碰 main），第一个 run 即首次交互、不必判来源；粒度按对话级（用 `conversationId`、每对话首次各加载一次）。启动历史装填曾规划走此场景，已改由 owner 建窗装填承接（订阅者看不见 accept/rollback、失败语义不可控；窗口起始条目则与 run 成败天然解耦）。
 - **`isWindowFirstRun`** 因「窗口可在 run 内换代（段切换）」按 run 入口时所在窗口判定。
 - 注几次、何时注由谓词 + 订阅者 once flag 决定，无跨 run 重复，故不需 `<context>` 去重那套。
 

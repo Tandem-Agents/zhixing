@@ -7,10 +7,11 @@ import type {
   Conversation,
   IConversationRepository,
   ShardedTranscriptStore,
+  SnapshotStore,
 } from "@zhixing/core";
 import {
   assistantMessage,
-  restoreAttentionWindowFromRecords,
+  createAttentionWindow,
   userMessage,
 } from "@zhixing/core";
 import {
@@ -65,16 +66,23 @@ function makeStore(
   } as unknown as ShardedTranscriptStore;
 }
 
+function makeOldWindow() {
+  const window = createAttentionWindow({ conversationId: "old-id" });
+  window.acceptRun({
+    runMessages: [userMessage("old"), assistantMessage("old-reply")],
+    runIndex: 0,
+  });
+  return window;
+}
+
 function makeState(
   overrides: Partial<MutableConversationState> = {},
 ): MutableConversationState {
   return {
-    window: restoreAttentionWindowFromRecords(
-      [{ runIndex: 0, messages: [userMessage("old"), assistantMessage("old-reply")] }],
-      { conversationId: "old-id" },
-    ),
+    window: makeOldWindow(),
     pendingInputPrefix: [userMessage("leftover-prefix")],
     store: makeStore(),
+    snapshots: { write: vi.fn(), list: vi.fn() } as unknown as SnapshotStore,
     convRepo: makeRepo(),
     conversationId: "old-id",
     turnCounter: 5,

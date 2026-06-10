@@ -12,9 +12,8 @@
 import { describe, expect, it } from "vitest";
 import {
   buildCompactSummaryPair,
-  userMessage,
+  buildStartupBootstrapPair,
   type Message,
-  type RunRecord,
   type RunRecordInput,
   type WindowCompact,
 } from "@zhixing/core";
@@ -59,11 +58,11 @@ function stubAgentRuntime(): AgentRuntime {
 
 function windowFactory(): RuntimeFactory {
   return {
-    async create(sessionId, initialRecords) {
+    async create(sessionId, bootstrap) {
       return createServerRuntimeAdapter(
         sessionId,
         stubAgentRuntime(),
-        initialRecords,
+        bootstrap,
       );
     },
   };
@@ -150,20 +149,13 @@ describe("server 会话 × 注意力窗口同形性", () => {
     mgr.disposeAll();
   });
 
-  it("adapter 恢复历史：run records 重建窗口，getHistory 投影一致", async () => {
-    const history: RunRecord[] = [
-      {
-        type: "run",
-        runIndex: 0,
-        timestamp: new Date().toISOString(),
-        messages: [
-          userMessage("旧问题"),
-          { role: "assistant", content: [{ type: "text", text: "旧回答" }] },
-        ],
-      },
-    ];
-    const adapter = createServerRuntimeAdapter("s1", stubAgentRuntime(), history);
-    expect(adapter.getHistory()).toEqual(history[0]!.messages);
-    expect(adapter.getHistory(1)).toEqual([history[0]!.messages[1]]);
+  it("adapter 恢复历史：启动装填对作为窗口起始条目，getHistory 投影一致", async () => {
+    const bootstrapPair = buildStartupBootstrapPair("此前对话回顾");
+    const adapter = createServerRuntimeAdapter("s1", stubAgentRuntime(), {
+      bootstrap: bootstrapPair,
+      turnCount: 3,
+    });
+    expect(adapter.getHistory()).toEqual([...bootstrapPair]);
+    expect(adapter.getHistory(1)).toEqual([bootstrapPair[1]]);
   });
 });

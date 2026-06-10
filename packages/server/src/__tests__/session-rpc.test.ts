@@ -6,11 +6,11 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import WebSocket from "ws";
-import type { AgentResult, AgentYield, Message, RunRecord, RunResult } from "@zhixing/core";
+import type { AgentResult, AgentYield, Message, RunResult } from "@zhixing/core";
 import { startServer, type ZhixingServerInstance } from "../server.js";
 import { createServerContext } from "../context.js";
 import { ConversationManager } from "../runtime/conversation-manager.js";
-import type { SessionRuntime, RuntimeFactory } from "../runtime/types.js";
+import type { ConversationBootstrap, SessionRuntime, RuntimeFactory } from "../runtime/types.js";
 import { DEFAULT_SERVER_CONFIG } from "../types.js";
 import {
   encodeRequest,
@@ -35,12 +35,13 @@ interface MockOptions {
   yieldDelayMs?: number;
 }
 
-function createMockRuntime(sessionId: string, opts: MockOptions = {}, initialRecords?: RunRecord[]): SessionRuntime {
-  // 历史重建的窗口侧最小模拟：每条 record 蒸馏为 [首条, 末条]（与 acceptRun 同规则）
-  let messages: Message[] = (initialRecords ?? []).flatMap((r) => [
-    r.messages[0]!,
-    r.messages[r.messages.length - 1]!,
-  ]);
+function createMockRuntime(
+  sessionId: string,
+  opts: MockOptions = {},
+  bootstrap?: ConversationBootstrap,
+): SessionRuntime {
+  // 历史恢复的窗口侧最小模拟：启动装填对作为窗口起始条目
+  let messages: Message[] = bootstrap?.bootstrap ? [...bootstrap.bootstrap] : [];
   let aborted = false;
 
   return {
@@ -89,6 +90,7 @@ function createMockRuntime(sessionId: string, opts: MockOptions = {}, initialRec
         input.runMessages[0]!,
         input.runMessages[input.runMessages.length - 1]!,
       );
+      return {};
     },
     abort(): boolean {
       aborted = true;
@@ -100,8 +102,8 @@ function createMockRuntime(sessionId: string, opts: MockOptions = {}, initialRec
 
 function createMockFactory(opts: MockOptions = {}): RuntimeFactory {
   return {
-    async create(sessionId, initialRecords) {
-      return createMockRuntime(sessionId, opts, initialRecords);
+    async create(sessionId, bootstrap) {
+      return createMockRuntime(sessionId, opts, bootstrap);
     },
   };
 }
@@ -574,21 +576,17 @@ describe("session.* RPC (S2.D)", () => {
     client.close();
   });
 
-  it("loadHistory restores messages on getOrCreate", async () => {
-    const storedRecords: RunRecord[] = [
-      {
-        type: "run",
-        runIndex: 0,
-        timestamp: new Date().toISOString(),
-        messages: [
-          { role: "user", content: [{ type: "text", text: "previous question" }] },
-          { role: "assistant", content: [{ type: "text", text: "previous answer" }] },
-        ],
-      },
-    ];
+  it("loadHistory restores history on getOrCreate（启动装填对进窗口）", async () => {
+    const restored: ConversationBootstrap = {
+      bootstrap: [
+        { role: "user", content: [{ type: "text", text: "previous question" }] },
+        { role: "assistant", content: [{ type: "text", text: "previous answer" }] },
+      ],
+      turnCount: 1,
+    };
 
     const loadHistory = async (conversationId: string) => {
-      if (conversationId === "conv_restored") return storedRecords;
+      if (conversationId === "conv_restored") return restored;
       return undefined;
     };
 
@@ -597,7 +595,7 @@ describe("session.* RPC (S2.D)", () => {
       { graceTimeoutMs: 60_000, idleTimeoutMs: 30 * 60_000, idleCheckIntervalMs: 999_999 },
       {
         loadHistory,
-        appendRun: async () => ({ runIndex: storedRecords.length, shardId: "000001" }),
+        appendRun: async () => ({ runIndex: 1, shardId: "000001" }),
       },
     );
     const ctx = createServerContext({

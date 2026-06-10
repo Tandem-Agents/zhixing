@@ -12,11 +12,11 @@ import type {
   AgentYield,
   IConfirmationBroker,
   Message,
-  RunRecord,
   RunResult,
   TurnContext,
   TurnSource,
   WindowCompact,
+  WindowFoldOutcome,
 } from "@zhixing/core";
 
 // TurnContext 的唯一定义在 @zhixing/core（types/tools.ts）——此处只做 re-export，
@@ -74,12 +74,15 @@ export interface SessionRuntime {
    * `runIndex`：持久化路径携带 store 分配的序号（折叠覆盖锚点随配对落进窗口）；
    *   ephemeral 路径携带 provisional 序号（= pending 队列序号，promote FIFO
    *   flush 到全新 transcript 时与 store 分配一致，promote 内对账校验）。
+   *
+   * 返回折叠元数据（透传注意力窗口的交出）：发生折叠且被折配对带 runIndex
+   * 时携 coveredThroughRunIndex —— ConversationManager 据此写派生摘要快照。
    */
   acceptRun(input: {
     runMessages: readonly Message[];
     runIndex?: number;
     windowCompact?: WindowCompact;
-  }): void;
+  }): WindowFoldOutcome;
   /**
    * 终止当前 in-flight turn(若有)。
    *
@@ -112,9 +115,24 @@ export interface SessionRuntime {
   readonly confirmationBroker?: IConfirmationBroker;
 }
 
+/**
+ * 会话历史的装填产物 —— loadHistory 回调的返回形态。
+ *
+ * bootstrap 是启动装填对（摘要快照 + 预算化倒读的最近原文渲染成的窗口起始
+ * 条目），由 owner 侧装填器构建；null = 有过会话但无可装内容（如刚清空）。
+ * turnCount 为自最近清空以来的 run 数（turnIndex 计数的初值）。
+ */
+export interface ConversationBootstrap {
+  readonly bootstrap: readonly [Message, Message] | null;
+  readonly turnCount: number;
+}
+
 export interface RuntimeFactory {
-  /** 创建新运行时；sessionId 由调用方传入，可选注入历史 run records 用于恢复对话 */
-  create(sessionId: string, initialRecords?: RunRecord[]): Promise<SessionRuntime>;
+  /** 创建新运行时；sessionId 由调用方传入，可选注入启动装填用于恢复对话 */
+  create(
+    sessionId: string,
+    bootstrap?: ConversationBootstrap,
+  ): Promise<SessionRuntime>;
 }
 
 export interface RuntimeInfo {

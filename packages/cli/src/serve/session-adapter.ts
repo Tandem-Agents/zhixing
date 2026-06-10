@@ -19,23 +19,21 @@ import {
   abortWithReason,
   createAttentionWindow,
   createInterruptController,
-  restoreAttentionWindowFromRecords,
   userMessage,
   type AbortReason,
   type AttentionWindowState,
   type AgentYield,
-  type RunRecord,
   type RunResult,
   type TurnSource,
 } from "@zhixing/core";
 import type {
+  ConversationBootstrap,
   RunTurnOptions,
   RuntimeFactory,
   SessionRuntime,
   TurnContext,
 } from "@zhixing/server";
 import type { AgentRuntime } from "@zhixing/orchestrator/runtime";
-import { makeWindowTailGuard } from "../runtime/window-tail-guard.js";
 
 // ─── 适配器 ───
 
@@ -49,20 +47,16 @@ interface QueueItem {
 export function createServerRuntimeAdapter(
   sessionId: string,
   agentRuntime: AgentRuntime,
-  initialRecords?: RunRecord[],
+  bootstrap?: ConversationBootstrap,
 ): SessionRuntime {
-  // 注意力窗口 —— "给 LLM 看什么"的唯一内存权威。恢复历史经持久化 run
-  // records → 窗口重建（预算化启动装填落地前的过渡形态）；窗口只经 acceptRun
-  // 前进（ConversationManager 在持久化 / pending 入列成功后调），run 输入瞬态
-  // 构造、失败路径窗口不动——无需任何回滚。
-  const window: AttentionWindowState =
-    initialRecords && initialRecords.length > 0
-      ? restoreAttentionWindowFromRecords(initialRecords, {
-          conversationId: sessionId,
-          // 原文 append-only 后全量加载可能失界，按风险上限机械保尾
-          tailGuard: makeWindowTailGuard(agentRuntime.model),
-        })
-      : createAttentionWindow({ conversationId: sessionId });
+  // 注意力窗口 —— "给 LLM 看什么"的唯一内存权威。恢复历史经启动装填对
+  // 作为窗口起始条目（owner 侧装填器已构建，adapter 只装配不读盘）；窗口
+  // 只经 acceptRun 前进（ConversationManager 在持久化 / pending 入列成功后
+  // 调），run 输入瞬态构造、失败路径窗口不动——无需任何回滚。
+  const window: AttentionWindowState = createAttentionWindow({
+    conversationId: sessionId,
+    bootstrap: bootstrap?.bootstrap ?? undefined,
+  });
   let currentController: AbortController | null = null;
 
   return {
@@ -166,8 +160,9 @@ export function createServerRuntimeAdapter(
 
     acceptRun(input) {
       // 接受协议的窗口侧终点：ConversationManager 在持久化 / pending 入列成功
-      // 后调——先应用 windowCompact 折叠，再追加本 run 的蒸馏对。
-      window.acceptRun(input);
+      // 后调——先应用 windowCompact 折叠，再追加本 run 的蒸馏对；折叠元数据
+      //（快照覆盖锚）原样交回。
+      return window.acceptRun(input);
     },
 
     abort(reason?: AbortReason): boolean {
@@ -226,9 +221,9 @@ export interface RuntimeFactoryOptions {
  */
 export function createCliRuntimeFactory(opts: RuntimeFactoryOptions): RuntimeFactory {
   return {
-    async create(sessionId, initialRecords) {
+    async create(sessionId, bootstrap) {
       const agentRuntime = await opts.createAgentRuntime(sessionId);
-      return createServerRuntimeAdapter(sessionId, agentRuntime, initialRecords);
+      return createServerRuntimeAdapter(sessionId, agentRuntime, bootstrap);
     },
   };
 }

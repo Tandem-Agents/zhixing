@@ -9,7 +9,7 @@
  *   - 磁盘 run 数单调不减、倒读回的原文完整
  *   - 窗口折叠形态正确、覆盖锚点（runIndex）经接受协议落进配对元数据
  *   - 清空是事件：读边界生效、物理仍在
- *   - 重启重建（倒读 + restore + 保尾护栏）端到端
+ *   - 重启重建（摘要快照 + 预算化倒读的启动装填）端到端
  */
 
 import { beforeEach, describe, expect, it } from "vitest";
@@ -17,15 +17,14 @@ import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
 import { ShardedTranscriptStore } from "../../../transcript/shard/store.js";
 import { countRuns, readRunsReverse } from "../../../transcript/shard/reader.js";
+import { SnapshotStore } from "../../../transcript/snapshot/store.js";
 import type { RunRecord } from "../../../transcript/shard/types.js";
 import type { Message } from "../../../types/messages.js";
 import { extractFirstText } from "../../../types/messages.js";
 import { buildCompactSummaryPair } from "../../system-meta.js";
+import { buildStartupBootstrap } from "../../bootstrap/build-startup-bootstrap.js";
 import type { AttentionWindowState, WindowCompact } from "../types.js";
-import {
-  createAttentionWindow,
-  restoreAttentionWindowFromRecords,
-} from "../attention-window.js";
+import { createAttentionWindow } from "../attention-window.js";
 
 // ─── 辅助 ───
 
@@ -75,13 +74,32 @@ async function collectRecords(
 }
 
 let store: ShardedTranscriptStore;
+let snapshots: SnapshotStore;
 
 beforeEach(async () => {
   const tmpDir = await createTempDir("window-persistence");
-  store = new ShardedTranscriptStore(path.join(tmpDir, "conversations"), {
-    platform: "linux",
-  });
+  const convDir = path.join(tmpDir, "conversations");
+  store = new ShardedTranscriptStore(convDir, { platform: "linux" });
+  snapshots = new SnapshotStore(convDir, { platform: "linux" });
 });
+
+/** 重启装填（owner 协议）：装填器建装填对 → 作为新窗起始条目 */
+async function reopenWindow(
+  conversationId: string,
+  optimalMaxTokens = 400_000,
+): Promise<AttentionWindowState> {
+  const bootstrap = await buildStartupBootstrap({
+    conversationId,
+    store,
+    snapshots,
+    capability: { optimalMaxTokens },
+    estimator: { estimateMessages: (m) => m.length * 10 },
+  });
+  return createAttentionWindow({
+    conversationId,
+    bootstrap: bootstrap ?? undefined,
+  });
+}
 
 // ─── 契约 ───
 
@@ -145,40 +163,54 @@ describe("窗口 × 持久化分层契约", () => {
     expect(idx).toBe(1);
     expect(await countRuns(store, "c3")).toBe(1);
 
-    // 重启重建只见清空后内容
-    window = restoreAttentionWindowFromRecords(await collectRecords(store, "c3"));
-    expect(window.getMessages()).toEqual(runMessages("清空后"));
+    // 重启装填只见清空后内容
+    window = await reopenWindow("c3");
+    const text = extractFirstText(window.getMessages()[0]!);
+    expect(text).toContain("清空后");
+    expect(text).not.toContain("清空前");
   });
 
-  it("重启重建：倒读 + restore 带 runIndex 锚点，保尾护栏截到预算内", async () => {
+  it("重启装填：摘要快照 + 预算化倒读的最近原文进装填对，窗口以其起步", async () => {
     const w1 = createAttentionWindow({ conversationId: "c4" });
-    // 会话期发生过折叠——磁盘仍全量
+    // 会话期发生折叠，owner 按协议落快照（覆盖锚来自折叠交出）
     for (const [i, t] of ["零", "一", "二", "三"].entries()) {
-      await acceptViaProtocol(
-        store,
-        w1,
-        "c4",
-        runMessages(t),
-        i === 1 ? compact(1, "摘") : undefined,
-      );
+      clock += 1000;
+      const { runIndex } = await store.appendRunRecord("c4", {
+        timestamp: new Date(clock).toISOString(),
+        messages: runMessages(t),
+      });
+      const outcome = w1.acceptRun({
+        runMessages: runMessages(t),
+        runIndex,
+        windowCompact: i === 2 ? compact(2, "前两轮摘要") : undefined,
+      });
+      if (outcome.coveredThroughRunIndex !== undefined) {
+        await snapshots.write("c4", {
+          coveredThroughRunIndex: outcome.coveredThroughRunIndex,
+          structuredSummary: { facts: "前两轮事实", state: "", active: "" },
+          tokensBefore: 10_000,
+          tokensAfter: 1_000,
+        });
+      }
     }
+    expect(await collectRecords(store, "c4")).toHaveLength(4); // 折叠不影响磁盘
 
-    const records = await collectRecords(store, "c4");
-    expect(records).toHaveLength(4); // 折叠不影响磁盘
-
-    // 护栏：每条消息计 10，预算 45 → 保最新 2 个配对
-    const w2 = restoreAttentionWindowFromRecords(records, {
-      conversationId: "c4",
-      tailGuard: {
-        maxTokens: 45,
-        estimateMessages: (m) => m.length * 10,
-      },
-    });
-    const texts = w2.getMessages().map((m) => extractFirstText(m));
-    expect(texts).toEqual(["二", "re:二", "三", "re:三"]);
-
-    // 重建配对携 runIndex —— 折叠覆盖锚点在恢复路径同样成立
-    const outcome = w2.applyCompact(compact(1, "重启后的摘要"));
-    expect(outcome.coveredThroughRunIndex).toBe(2);
+    // 重启：预算（含摘要预留 400）只够最近 2 组原文 → 摘要补足更早脉络
+    //（optimal=1760 → budget=440：2 组×20 + 预留 400）
+    const w2 = await reopenWindow("c4", 1760);
+    const messages = w2.getMessages();
+    expect(messages).toHaveLength(2); // 装填对是唯一起始条目
+    const text = extractFirstText(messages[0]!);
+    expect(text).toContain("前两轮事实"); // 快照摘要（covered=1 < earliest=2）
+    expect(text).toContain("用户：二");
+    expect(text).toContain("用户：三");
+    expect(text).not.toContain("用户：一"); // 预算外原文由摘要承接
+    // 装填对跨 run 存续：接受新 run 后仍在
+    w2.acceptRun({ runMessages: runMessages("新"), runIndex: 4 });
+    expect(extractFirstText(w2.getMessages()[0]!)).toContain("前两轮事实");
+    // 折叠时装填对被摘要对取代（单 frontier）
+    w2.applyCompact(compact(1, "新摘要"));
+    expect(extractFirstText(w2.getMessages()[0]!)).toContain("新摘要");
+    expect(extractFirstText(w2.getMessages()[0]!)).not.toContain("前两轮事实");
   });
 });

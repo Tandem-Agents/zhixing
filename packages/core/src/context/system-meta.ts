@@ -97,6 +97,44 @@ export function buildDroppedTurnsMessage(count: number): Message {
 }
 
 /**
+ * 构造启动装填对 —— 重启 / 切换对话时，owner 把"此前对话的摘要 + 最近原文"
+ * 渲染为一条机制插入的 user/assistant 对，作为注意力窗口的起始条目。
+ *
+ * 角色形态与 compact summaryPair 同模式：user 承载装填内容（标签明确标记
+ * 为机制插入、不冒充用户原话）、assistant 回执保角色交替合法。
+ *
+ * **刻意只提供构造、不进 SystemMetaKind / detectSystemMetaKind /
+ * stripSummaryPlaceholderPair**（与 workscene-digest 同决策）：装填对不属于
+ * 压缩 / 丢弃生命周期——折叠时它作为窗口条目被摘要对整体取代，是窗口的
+ * 结构操作、不靠标签识别；SYSTEM_META_PROMPT_SECTION 的通用框架已覆盖
+ * 任意 kind，不为它改动 system prompt 静态前缀（保字节稳定与前缀缓存）。
+ */
+export function buildStartupBootstrapPair(
+  content: string,
+): readonly [Message, Message] {
+  const escaped = escapeSystemMetaPayload(content);
+  const bootstrapMsg: Message = {
+    role: "user",
+    content: [
+      {
+        type: "text",
+        text: `<system-meta kind="startup-bootstrap">${escaped}</system-meta>`,
+      },
+    ],
+  };
+  const ackMsg: Message = {
+    role: "assistant",
+    content: [
+      {
+        type: "text",
+        text: `<system-meta kind="ack">已接续此前对话</system-meta>`,
+      },
+    ],
+  };
+  return [bootstrapMsg, ackMsg] as const;
+}
+
+/**
  * 构造工作场景退出纪要消息 —— power 退出工作模式时生成的一段交接，append 到
  * 主对话运行态消息末尾，让主对话知道工作场景里做了什么。
  *

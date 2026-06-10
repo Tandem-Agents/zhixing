@@ -23,7 +23,7 @@
 
 import { PROFILES, type ServerProfile } from "./profile.js";
 import type { ZhixingConfig, ZhixingCredentials } from "@zhixing/providers";
-import type { ChannelRegistry, ShardedTranscriptStore } from "@zhixing/core";
+import type { ChannelRegistry, ShardedTranscriptStore, SnapshotStore } from "@zhixing/core";
 import type {
   ConfirmationHub,
   ConversationManager,
@@ -57,6 +57,7 @@ export interface AssemblyContext {
   readonly confirmationHub: ConfirmationHub;
   readonly mcpHub: McpHub;
   readonly transcript: ShardedTranscriptStore;
+  readonly snapshots: SnapshotStore;
   readonly runtimeFactory: RuntimeFactory;
   /**
    * 唯一清理出口（LIFO）。pre-server 接入面的 teardown 走 runServer 后的 shutdown-chain

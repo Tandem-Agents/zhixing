@@ -36,6 +36,7 @@ import {
   type TurnContext,
   JournalStore,
   ShardedTranscriptStore,
+  SnapshotStore,
   conversationsDir,
 } from "@zhixing/core";
 import {
@@ -190,9 +191,10 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     console.log(chalk.dim(`Generated new token: ${tokenInfo.path}`));
   }
 
-  // 2. 分片 transcript store —— 会话执行面接入时读它做历史 / 落盘；schedule 档无副作用留位。
+  // 2. 分片 transcript store + 派生摘要快照 —— 会话执行面接入时读写；schedule 档无副作用留位。
   const convDir = conversationsDir({ kind: "user" });
   const transcript = new ShardedTranscriptStore(convDir);
+  const snapshots = new SnapshotStore(convDir);
 
   // 3. Scheduler facade lazy ref —— 打破循环依赖（标准 IoC 模式）：
   //    scheduleTool → Scheduler → runAgentTurn → ephemeralRuntime → scheduleTool
@@ -306,6 +308,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     confirmationHub,
     mcpHub,
     transcript,
+    snapshots,
     runtimeFactory,
     cleanup: registry,
   };

@@ -24,7 +24,6 @@ import {
   type ArgChoice,
   type ArgSchema,
   type WorkModeSwitchIntent,
-  restoreAttentionWindowFromRecords,
   countRuns,
 } from "@zhixing/core";
 import type { AgentRuntime } from "@zhixing/orchestrator/runtime";
@@ -32,8 +31,10 @@ import {
   switchToNewConversation,
   type MutableConversationState,
 } from "../runtime/switch-to-new-conversation.js";
-import { makeWindowTailGuard } from "../runtime/window-tail-guard.js";
-import { loadRunRecords } from "../runtime/load-run-records.js";
+import {
+  openConversationWindow,
+  writeWindowSnapshot,
+} from "../runtime/conversation-window.js";
 import type { CliWriter } from "../screen/index.js";
 import { layout } from "../tui/style.js";
 import { formatRelativeTime } from "./format.js";
@@ -259,22 +260,36 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
     }
 
     try {
-      const records = await loadRunRecords(conv.store, target.id);
-      conv.window = restoreAttentionWindowFromRecords(records, {
+      const opened = await openConversationWindow({
+        store: conv.store,
+        snapshots: conv.snapshots,
         conversationId: target.id,
-        // 原文 append-only 后全量加载可能失界，按风险上限机械保尾
-        tailGuard: makeWindowTailGuard(deps.getRuntime().model),
+        model: deps.getRuntime().model,
       });
+      conv.window = opened.window;
       conv.pendingInputPrefix = null;
       conv.conversationId = target.id;
-      conv.turnCounter = records.length;
+      conv.turnCounter = opened.turnCount;
       // 加载目标对话的 task_list 持久化状态到 service cache
       await deps.taskListService.prime(target.id);
       conv.convRepo.touch(conv.conversationId).catch(() => {});
+      // 切换对话 = 注意力窗口换代（与 /new、/clear 同纪律）：先清 runtime 内
+      // 对话级组件状态，再触发 onWindowClose(resume)→onWindowOpen(resume)
+      // 重建实例权威 prompt。两步都非致命——失败不阻塞切换。
+      try {
+        await deps.getRuntime().resetConversationState();
+      } catch {
+        /* 非致命：视图层组件 reset 失败不阻塞切换 */
+      }
+      try {
+        await deps.getRuntime().onAttentionWindowChange("resume");
+      } catch {
+        /* 非致命：窗口重建失败不阻塞切换，下个 run 仍用当前 prompt */
+      }
       deps.onConversationChanged();
       writer.line(
         chalk.dim(
-          `\n  已切换到 ${chalk.cyan(target.name)}（${records.length} 轮对话）\n`,
+          `\n  已切换到 ${chalk.cyan(target.name)}（${opened.turnCount} 轮对话）\n`,
         ),
       );
     } catch (err) {
@@ -336,7 +351,17 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
       // append-only、不参与压缩（被摘内容仍完整躺在磁盘上）。非摘要型修改
       //（无 marker）不动窗口——窗口只经折叠 / 接受前进。
       if (result.modified && result.windowCompact) {
-        conv.window.applyCompact(result.windowCompact);
+        const outcome = conv.window.applyCompact(result.windowCompact);
+        // 手动压缩与 run 接受同一快照出口：折叠交出覆盖锚且携结构化摘要
+        // 时落盘（fire-and-forget，失败 helper 内 warn）
+        if (conv.conversationId) {
+          void writeWindowSnapshot(
+            conv.snapshots,
+            conv.conversationId,
+            result.windowCompact,
+            outcome,
+          );
+        }
         const pct = Math.round(result.budget.usageRatio * 100);
         writer.line(chalk.green(`  ✓ 压缩完成，当前上下文占用 ${pct}%\n`));
       } else if (result.modified) {

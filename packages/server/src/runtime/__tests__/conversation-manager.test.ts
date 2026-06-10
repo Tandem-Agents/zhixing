@@ -53,6 +53,7 @@ function createMockRuntime(sessionId: string): SessionRuntime {
         input.runMessages[0]!,
         input.runMessages[input.runMessages.length - 1]!,
       );
+      return {};
     },
     abort(): boolean {
       aborted = true;
@@ -161,17 +162,13 @@ describe("ConversationManager", () => {
         idleTimeoutMs: 30 * 60_000,
         idleCheckIntervalMs: 999_999,
       }, {
-        loadHistory: async () => [
-          {
-            type: "run" as const,
-            runIndex: 0,
-            timestamp: new Date().toISOString(),
-            messages: [
-              { role: "user" as const, content: [{ type: "text" as const, text: "hi" }] },
-              { role: "assistant" as const, content: [{ type: "text" as const, text: "hello" }] },
-            ],
-          },
-        ],
+        loadHistory: async () => ({
+          bootstrap: [
+            { role: "user" as const, content: [{ type: "text" as const, text: "〔装填〕" }] },
+            { role: "assistant" as const, content: [{ type: "text" as const, text: "已接续" }] },
+          ] as const,
+          turnCount: 1,
+        }),
         initTranscript: async (id) => { inited.push(id); },
         appendRun: async () => ({ runIndex: 0, shardId: "000001" }), // 配置守卫：有持久化意图必须带 appendRun
       });
@@ -188,15 +185,7 @@ describe("ConversationManager", () => {
         idleTimeoutMs: 30 * 60_000,
         idleCheckIntervalMs: 999_999,
       }, {
-        loadHistory: async () => [1, 2].map((i) => ({
-          type: "run" as const,
-          runIndex: i - 1,
-          timestamp: new Date().toISOString(),
-          messages: [
-            { role: "user" as const, content: [{ type: "text" as const, text: `q${i}` }] },
-            { role: "assistant" as const, content: [{ type: "text" as const, text: `a${i}` }] },
-          ],
-        })),
+        loadHistory: async () => ({ bootstrap: null, turnCount: 2 }),
         appendRun: async () => ({ runIndex: 0, shardId: "000001" }), // 配置守卫：有持久化意图必须带 appendRun
       });
 
@@ -1122,6 +1111,129 @@ describe("ConversationManager", () => {
       expect(session.ephemeral).toBe(false);
 
       await mgr.disposeAll();
+    });
+  });
+
+  // ─── 派生摘要快照写入 ───
+
+  describe("snapshot 写入", () => {
+    const structuredCompact = {
+      summary: "摘要",
+      structuredSummary: { facts: "f", state: "s", active: "a" },
+      pairsCompacted: 1,
+      tokensBefore: 1000,
+      tokensAfter: 100,
+    };
+    const makeRecord = (text: string) => ({
+      timestamp: new Date().toISOString(),
+      messages: [
+        { role: "user" as const, content: [{ type: "text" as const, text }] },
+        { role: "assistant" as const, content: [{ type: "text" as const, text: `re:${text}` }] },
+      ],
+    });
+
+    /** acceptRun 在折叠时交出锚的 runtime stub */
+    function foldingRuntime(sessionId: string): SessionRuntime {
+      return {
+        sessionId,
+        run: vi.fn(),
+        getHistory: () => [],
+        acceptRun: vi.fn((input: { windowCompact?: unknown }) =>
+          input.windowCompact ? { coveredThroughRunIndex: 0 } : {},
+        ),
+        abort: () => false,
+        dispose: async () => {},
+      } as unknown as SessionRuntime;
+    }
+
+    it("persistent 折叠携结构化摘要 + 锚可得 → 写快照（载荷取折叠交出与指令）", async () => {
+      const writeSnapshot = vi.fn(async () => {});
+      const runtime = foldingRuntime("snap-1");
+      const mgr = new ConversationManager(
+        { create: async () => runtime },
+        { graceTimeoutMs: 60_000, idleTimeoutMs: 30 * 60_000, idleCheckIntervalMs: 999_999 },
+        {
+          appendRun: async () => ({ runIndex: 0, shardId: "000001" }),
+          writeSnapshot,
+        },
+      );
+
+      await mgr.getOrCreate("snap-1");
+      await mgr.recordTurn("snap-1", makeRecord("hi"), structuredCompact);
+
+      expect(writeSnapshot).toHaveBeenCalledTimes(1);
+      expect(writeSnapshot).toHaveBeenCalledWith("snap-1", {
+        coveredThroughRunIndex: 0,
+        structuredSummary: structuredCompact.structuredSummary,
+        tokensBefore: 1000,
+        tokensAfter: 100,
+      });
+      await mgr.disposeAll();
+    });
+
+    it("无结构化摘要 / 无折叠锚 → 不写；快照写失败只 warn 不影响 recordTurn", async () => {
+      const writeSnapshot = vi.fn(async () => {
+        throw new Error("disk full");
+      });
+      const runtime = foldingRuntime("snap-2");
+      const mgr = new ConversationManager(
+        { create: async () => runtime },
+        { graceTimeoutMs: 60_000, idleTimeoutMs: 30 * 60_000, idleCheckIntervalMs: 999_999 },
+        {
+          appendRun: async () => ({ runIndex: 0, shardId: "000001" }),
+          writeSnapshot,
+        },
+      );
+      await mgr.getOrCreate("snap-2");
+
+      // 无 windowCompact → 不写
+      await mgr.recordTurn("snap-2", makeRecord("a"));
+      expect(writeSnapshot).not.toHaveBeenCalled();
+
+      // 折叠 + 结构化摘要 → 写（失败被吞成 warn，recordTurn 不抛）
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        await expect(
+          mgr.recordTurn("snap-2", makeRecord("b"), structuredCompact),
+        ).resolves.toBeUndefined();
+        expect(writeSnapshot).toHaveBeenCalledTimes(1);
+        expect(warnSpy).toHaveBeenCalledTimes(1);
+        expect(String(warnSpy.mock.calls[0]![0])).toContain("快照写入失败");
+      } finally {
+        warnSpy.mockRestore();
+      }
+      const session = mgr.getSession("snap-2")!;
+      expect(session.turnCount).toBe(2); // recordTurn 主流程不受影响
+      await mgr.disposeAll();
+    });
+
+    it("promote 对账不一致 → 锚不可信，该会话快照降级停写", async () => {
+      const writeSnapshot = vi.fn(async () => {});
+      const runtime = foldingRuntime("snap-3");
+      let next = 5; // 模拟撞旧 transcript：store 从 5 续号
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const mgr = new ConversationManager(
+          { create: async () => runtime },
+          { graceTimeoutMs: 60_000, idleTimeoutMs: 30 * 60_000, idleCheckIntervalMs: 999_999 },
+          {
+            appendRun: async () => ({ runIndex: next++, shardId: "000001" }),
+            writeSnapshot,
+          },
+        );
+
+        const session = await mgr.getOrCreate("snap-3", { ephemeral: true });
+        await mgr.recordTurn("snap-3", makeRecord("q0"));
+        await mgr.recordTurn("snap-3", makeRecord("q1")); // auto-promote → 对账不一致
+        expect(session.snapshotAnchorsTrusted).toBe(false);
+
+        // persistent 化后的折叠：锚不可信 → 不写快照
+        await mgr.recordTurn("snap-3", makeRecord("q2"), structuredCompact);
+        expect(writeSnapshot).not.toHaveBeenCalled();
+        await mgr.disposeAll();
+      } finally {
+        warnSpy.mockRestore();
+      }
     });
   });
 

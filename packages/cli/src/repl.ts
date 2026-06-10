@@ -38,7 +38,6 @@ import {
   type SchedulerEventMap,
   type WorkModeSwitchIntent,
   type Conversation,
-  type RunRecord,
   extractText,
   buildWorksceneDigestMessage,
   maybeAutoNameFirstTurn,
@@ -48,10 +47,9 @@ import {
   CommandDispatcher,
   type AttentionWindowState,
   createAttentionWindow,
-  restoreAttentionWindowFromRecords,
+  SnapshotStore,
   userMessageOf,
 } from "@zhixing/core";
-import { makeWindowTailGuard } from "./runtime/window-tail-guard.js";
 import { describeProxy, type ProxyDescription } from "@zhixing/network";
 import { loadConfig, loadCredentials, resolveHomeDir } from "@zhixing/providers";
 import type { TaskListService } from "@zhixing/tools-builtin";
@@ -63,7 +61,10 @@ import { ConversationRepoTaskListStore } from "./runtime/task-list-stores.js";
 import { RoutingConversationRepository } from "./runtime/conversation-router.js";
 import { acquireWorksceneConversation } from "./runtime/workscene-conversation.js";
 import { switchToNewConversation } from "./runtime/switch-to-new-conversation.js";
-import { loadRunRecords } from "./runtime/load-run-records.js";
+import {
+  openConversationWindow,
+  writeWindowSnapshot,
+} from "./runtime/conversation-window.js";
 import { TaskTail } from "./task-tail/index.js";
 import { registerTaskCommands } from "./commands/task-commands.js";
 import { registerInfoCommands } from "./commands/info-commands.js";
@@ -137,6 +138,8 @@ interface ConversationRuntimeState {
   pendingInputPrefix: Message[] | null;
   /** transcript 持久化（main 项目域 / workscene 域各自独立实例） */
   store: ShardedTranscriptStore;
+  /** 派生摘要快照（与 store 同域同目录树）—— 窗口折叠的快照出口 + 装填来源 */
+  snapshots: SnapshotStore;
   /** conversation meta 仓储（绑各自 ConversationScope） */
   convRepo: ConversationRepository;
   conversationId: string | null;
@@ -342,6 +345,7 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   const convRepo = new ConversationRepository(scope);
   const convDir = conversationsDir(scope);
   const store = new ShardedTranscriptStore(convDir);
+  const snapshotStore = new SnapshotStore(convDir);
 
   // 对话仓储路由核 —— builtinExtraTools(含 TaskListService) 与 segmentDeps 在此
   // 一次性装配并跨 reload 持久，二者构造期即绑定后端 repo、无法重建。插一层
@@ -420,19 +424,20 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   // 启动期对话选择策略：统一 auto-resume `convRepo.findLatest()` 最近一条对话,
   // 无 latest 或加载失败则降级到创建 default 新对话。
   // 用户想切换到其它对话或新建命名,进入 REPL 后用 `/resume` / `/new <name>`。
-  // 恢复的历史经倒读 run records → 窗口重建进入注意力窗口（预算化启动装填
-  // 落地前的过渡形态：启动仍全量加载）。
+  // 恢复的历史经启动装填进入注意力窗口：摘要快照 + 预算化倒读的最近原文
+  // 渲染为装填对，作为窗口起始条目（跨 run 存续直到被折叠摘要对取代）。
   const latest = await convRepo.findLatest();
   if (latest) {
     try {
-      const records = await loadRunRecords(store, latest);
-      window = restoreAttentionWindowFromRecords(records, {
+      const opened = await openConversationWindow({
+        store,
+        snapshots: snapshotStore,
         conversationId: latest,
-        // 原文 append-only 后全量加载可能失界，按风险上限机械保尾
-        tailGuard: makeWindowTailGuard(session.runtime.model),
+        model: session.runtime.model,
       });
+      window = opened.window;
       conversationId = latest;
-      turnCounter = records.length;
+      turnCounter = opened.turnCount;
       const conv = await convRepo.get(latest);
       resumedConversationName = conv?.name ?? latest;
     } catch {
@@ -551,11 +556,12 @@ export async function startRepl(options: ReplOptions): Promise<void> {
 
   // main 域运行态 —— 进入工作模式后此实例原样保留，退出时直接切回（双份持有）。
   const mainConv: ConversationRuntimeState = {
-    // 启动恢复命中时已从 canonical 重建；新建对话从空窗起步
+    // 启动恢复命中时已经启动装填建窗；新建对话从空窗起步
     window:
       window ?? createAttentionWindow({ conversationId: conversationId ?? undefined }),
     pendingInputPrefix: null,
     store,
+    snapshots: snapshotStore,
     convRepo,
     conversationId,
     turnCounter,
@@ -633,9 +639,9 @@ export async function startRepl(options: ReplOptions): Promise<void> {
           kind: "workscene",
           sceneId,
         });
-        const wStore = new ShardedTranscriptStore(
-          conversationsDir({ kind: "workscene", sceneId }),
-        );
+        const wsConvDir = conversationsDir({ kind: "workscene", sceneId });
+        const wStore = new ShardedTranscriptStore(wsConvDir);
+        const wSnapshots = new SnapshotStore(wsConvDir);
 
         // 有副作用步骤按序执行，undo 逆序栈在任一步抛错时回退（fail-back）。
         const undos: Array<() => Promise<void> | void> = [];
@@ -661,22 +667,19 @@ export async function startRepl(options: ReplOptions): Promise<void> {
           // 在 /resume typeahead 里完全无法区分。命名职责交给自动命名机制（第一
           // 轮 turn 完成后用 light LLM 生成精确主题名）统一接管。
           let wConv: Conversation;
-          let loaded: RunRecord[] | null = null;
+          let recovered = false;
           if (source === "llm") {
             wConv = await worksceneRepo.create({});
           } else {
-            const acquired = await acquireWorksceneConversation(
-              worksceneRepo,
-              wStore,
-            );
+            const acquired = await acquireWorksceneConversation(worksceneRepo);
             wConv = acquired.conversation;
-            loaded = acquired.loaded;
+            recovered = acquired.recovered;
             acquireWarning = acquired.warning;
           }
           // undo：仅 create 路径（LLM 触发 / 命令触发首次 / 命令触发降级）才
           // push delete —— recovery 路径必须保留用户已有历史对话，不能因
           // 后续 enter 步骤失败被回滚误删。
-          if (loaded === null) {
+          if (!recovered) {
             undos.push(async () => {
               await worksceneRepo.delete(wConv.id).catch(() => {});
             });
@@ -685,9 +688,8 @@ export async function startRepl(options: ReplOptions): Promise<void> {
           //   - LLM：触发句进 pendingInputPrefix（power 不知干啥就靠它）——它
           //     不是窗口事实（无配对、从不落盘），随首个成功 accept 的 run
           //     进入发送视图后即清空，与"触发句只活到首次提交"的语义一致。
-          //   - command-recovery：loaded run records 重建窗口，接续历史
-          //     （建窗推迟到 enterWorkMode 之后——保尾护栏要按 power 模型的
-          //     风险上限取值）。
+          //   - command-recovery：启动装填重建窗口，接续历史（建窗推迟到
+          //     enterWorkMode 之后——装填预算按 power 模型的能力取值）。
           //   - command-create / command-降级：空窗（用户随后在 workscene 输入）。
           //
           // 触发句由主回路显式透传该 turn 构造的原始 userMsg —— 不扫描 canonical
@@ -706,21 +708,26 @@ export async function startRepl(options: ReplOptions): Promise<void> {
           });
           // 建 transcript 索引（幂等：recovery 路径已存在则 no-op）。
           await wStore.init(wConv.id);
-          // ⑤ 构造并切 active（建窗在 enterWorkMode 之后——runtime 已是 power，
-          // 护栏取 power 模型的风险上限；纯计算+赋值，不可能抛错 → 无需 undo）
+          // ⑤ 启动装填建窗并切 active（建窗在 enterWorkMode 之后——runtime
+          // 已是 power，装填预算按 power 模型取值；装填 IO 失败走 undo 回退）
+          const openedW = recovered
+            ? await openConversationWindow({
+                store: wStore,
+                snapshots: wSnapshots,
+                conversationId: wConv.id,
+                model: session.runtime.model,
+              })
+            : null;
           state.conv = {
             window:
-              loaded !== null
-                ? restoreAttentionWindowFromRecords(loaded, {
-                    conversationId: wConv.id,
-                    tailGuard: makeWindowTailGuard(session.runtime.model),
-                  })
-                : createAttentionWindow({ conversationId: wConv.id }),
+              openedW?.window ??
+              createAttentionWindow({ conversationId: wConv.id }),
             pendingInputPrefix: wPrefix,
             store: wStore,
+            snapshots: wSnapshots,
             convRepo: worksceneRepo,
             conversationId: wConv.id,
-            turnCounter: loaded?.length ?? 0,
+            turnCounter: openedW?.turnCount ?? 0,
             journalCondenseDone: false,
           };
         } catch (err) {
@@ -1449,11 +1456,21 @@ export async function startRepl(options: ReplOptions): Promise<void> {
             state.conv.conversationId,
             runResult.runRecord,
           );
-          state.conv.window.acceptRun({
+          const outcome = state.conv.window.acceptRun({
             runMessages: runResult.runRecord.messages,
             runIndex,
             windowCompact: runResult.windowCompact,
           });
+          // 折叠产生结构化摘要 → 顺手落派生快照（启动装填的摘要来源）。
+          // fire-and-forget：写失败 helper 内 warn，绝不阻塞 turn 收尾。
+          if (runResult.windowCompact) {
+            void writeWindowSnapshot(
+              state.conv.snapshots,
+              state.conv.conversationId,
+              runResult.windowCompact,
+              outcome,
+            );
+          }
           // 一次性前缀已随本 run 进入发送视图并被摘要语境覆盖 → 消费完毕
           state.conv.pendingInputPrefix = null;
           state.conv.turnCounter++;

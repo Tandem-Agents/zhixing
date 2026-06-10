@@ -10,13 +10,18 @@
 
 import chalk from "chalk";
 import {
+  buildStartupBootstrap,
+  countRuns,
+  createTokenEstimator,
+} from "@zhixing/core";
+import {
   ConversationManager,
   TextConfirmationRenderer,
   createConfirmationBridge,
 } from "@zhixing/server";
+import { resolveModelCapability } from "@zhixing/providers";
 import { setupChannels } from "./channels.js";
 import { setupDelivery } from "../setup-delivery.js";
-import { loadRunRecords } from "../runtime/load-run-records.js";
 import type { AccessSurface } from "./access-surface.js";
 
 /** MCP —— eager 连接外部 server，使工具目录进入 system prompt。 */
@@ -33,15 +38,25 @@ const conversationSurface: AccessSurface = {
   name: "conversation",
   phase: "pre-server",
   async setup(ctx) {
-    const { transcript } = ctx;
+    const { transcript, snapshots, config } = ctx;
+    // 装填预算按主模型能力取值（serve 会话统一用 main 模型；未知模型有保守兜底）
+    const capability = resolveModelCapability(config.llm?.main?.model ?? "");
     ctx.conversations = new ConversationManager(ctx.runtimeFactory, undefined, {
       loadHistory: async (conversationId) => {
         try {
-          // 不做裸文件存在性短路 —— 倒读自带索引自愈（分片文件在，会话
-          // 就在），索引层事故不丢历史。无任何记录（真·新对话 / 刚清空）
-          // → undefined，交 doCreate 按需走 initTranscript（幂等）。
-          const records = await loadRunRecords(transcript, conversationId);
-          return records.length > 0 ? records : undefined;
+          // 倒读自带索引自愈（分片文件在，会话就在）——计数与装填都不做
+          // 裸文件存在性短路。无任何记录（真·新对话 / 刚清空）→ undefined，
+          // 交 doCreate 按需走 initTranscript（幂等）。
+          const turnCount = await countRuns(transcript, conversationId);
+          if (turnCount === 0) return undefined;
+          const bootstrap = await buildStartupBootstrap({
+            conversationId,
+            store: transcript,
+            snapshots,
+            capability: { optimalMaxTokens: capability.optimalMaxTokens },
+            estimator: createTokenEstimator(),
+          });
+          return { bootstrap, turnCount };
         } catch {
           return undefined;
         }
@@ -51,6 +66,9 @@ const conversationSurface: AccessSurface = {
       },
       appendRun: async (conversationId, input) =>
         await transcript.appendRunRecord(conversationId, input),
+      writeSnapshot: async (conversationId, input) => {
+        await snapshots.write(conversationId, input);
+      },
       confirmationHub: ctx.confirmationHub,
     });
   },

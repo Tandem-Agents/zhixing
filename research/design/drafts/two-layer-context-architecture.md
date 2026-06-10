@@ -278,7 +278,8 @@ interface SegmentSnapshotFile {
 
 - **rollover 后、首次 append 前崩溃**：index 已指向不存在的分片文件 → 读容错视为空分片，下次 append 补建。无修复动作。
 - **append 单行被截断**（进程崩在写中）：JSONL 尾行解析失败 → 读路径丢弃坏尾行（该 run 视为未持久化，与"run 级粒度、崩溃丢整 run"碎片一致）；owner 推导 `nextRunIndex` 时同样跳过坏尾行。
-- **index 原子重写本身**：tmp+rename 原子性兜底，无半成品形态。
+- **index 原子重写本身**：写 tmp → 替换。POSIX `rename` 原子覆盖；Windows 走 unlink → rename，存在"旧已删、新未就位"的崩溃微窗口——但窗口内形态确定（unlink 只发生在 tmp 完整落盘后，故"目标缺失 + tmp 存在"时 tmp 必完整），owner 打开时先收尾 tmp（最新 tmp rename 回目标、其余清理），原子替换的承诺跨崩溃成立。
+- **索引缺失 / 损坏（兜底不变量）**：索引只是分片的派生投影——读（倒读原语）写（owner 打开）两路径共用同一自愈核：索引读不出时扫描目录现存分片全量重建（shards 序号升序、`createdAt` 取分片 header 记录值、active = 最大序号、`lastClearAt` 倒扫分片内 ClearRecord），重建即落盘；目录真空才视为新会话（且只有写路径会新建——读不存在的对话零副作用）。**分片文件在，会话就在**：任何索引层事故都不会把已有会话误判为新会话（误判会让旧分片失联、rollover 撞号互写）。
 - **clear 两步写之间崩溃**（ClearRecord 已落分片、`lastClearAt` 未更新）：读边界不受影响（以分片内 ClearRecord 为权威），受损的只是快照退役判据滞后——若不修，clear 前的最新快照会被"在用豁免"永久保护、又被读边界永久跳过。修复：owner 下次打开推导 `nextRunIndex` 读活跃分片尾行时顺带校核——**尾行是 ClearRecord 且时刻 > `index.lastClearAt` → 补写 index**（owner 写索引合法；崩溃窗口内不可能发生 rollover，ClearRecord 必在活跃分片尾行，只查尾行即完备、零额外扫描）；修复先于任何新写入，一次 open 收敛。
 
 #### 3.1.4 倒读原语（双读端，§二「持久化职责清晰」）
@@ -325,7 +326,10 @@ interface AttentionWindowState {
   readonly conversationId?: string;
   getMessages(): readonly Message[];            // 已接受的窗口事实（不含 in-flight 用户消息）
   acceptRun(input: {
-    runRecord: RunRecord;                       // 窗口内部派生蒸馏对 [messages[0], 末条 assistant]，owner 不拆字段
+    runMessages: readonly Message[];            // 本 run 协议消息序列（首条=用户原文）。窗口内部派生蒸馏对
+                                                // [首条, 末条 assistant]——收消息序列而非 RunRecord 整体,
+                                                // 是为了窗口模块零依赖 transcript 类型(上下文层概念,存储无关);
+                                                // owner 喂 record.messages 即可,仍不拆字段
     runIndex?: number;                          // persistent=持久化返回值（accept 先持久化后窗口,调用时必已可得）;
                                                 // ephemeral=pending 队列序号——promote 按 FIFO flush 到全新 transcript,
                                                 // store 顺序分配必然一致(promote 对账,不一致以 store 为准修正并 warn),
@@ -340,7 +344,7 @@ interface AttentionWindowState {
 }
 ```
 
-**窗口事实的形态 = 蒸馏对**。`acceptRun` 先应用 `windowCompact`（若有：摘要对 `buildCompactSummaryPair(summary)` 置首并**取代其前全部条目**——含 bootstrap 条目与旧摘要对，单 frontier 语义、与今天 marker 覆盖前 marker 一致——再截掉被摘的前 N 个 run 配对，与 `applyCompactBeforeInLock` 同算法，目标从磁盘文件改为内存窗口），再追加从 `runRecord` 派生的配对 `[messages[0], finalAssistantOf(messages)]`——无 assistant 的中断 / 错误 run 派生空 assistant 成对入窗（3.1.2 兜底），与 REPL"完成与中断都接受"的现状语义一致，acceptRun 对任何被接受的 run 都能稳定派生。**窗口条目带元数据**：内部存 `{kind:"bootstrap"} | {kind:"summary"} | {kind:"pair", runIndex?}`（对外 `getMessages()` 仍展平为 `Message[]`）；`pairsCompacted` 只计 pair 条目；runIndex 在 accept 时随持久化返回值记录，是 3.2.3 快照 `coveredThroughRunIndex` 的数据源——折叠时取被折最后一个 pair 的 runIndex（summaryPair 无 runIndex、折叠永不需要它的；`pairsCompacted`（沿现 `turnsCompacted` 数值语义）超过现存配对数时 clamp，与磁盘旧算法 `Math.max(0,…)` 同款；取值保守偏小只造成快照与原文轻微重叠，由装填"严格早于"规则天然吸收）。这**精确保持今天的跨 run 窗口语义**（canonical = [user, assistant] 配对 + summaryPair，`rebuild.ts:57-59` 一手核实）：run 内工具协议消息是 run 瞬态、跨 run 不留存。已知不对称并有意保留：启动装填会把工具轮渲染成可读文本（数据源 `messages`），而进程内跨 run 配对不含工具细节——是现状行为的延续，留作未来校准点，本次不改。
+**窗口事实的形态 = 蒸馏对**。`acceptRun` 先应用 `windowCompact`（若有：摘要对 `buildCompactSummaryPair(summary)` 置首并**取代其前全部条目**——含 bootstrap 条目与旧摘要对，单 frontier 语义、与今天 marker 覆盖前 marker 一致——再截掉被摘的前 N 个 run 配对，与 `applyCompactBeforeInLock` 同算法，目标从磁盘文件改为内存窗口），再追加从 `runMessages` 派生的配对 `[首条, 末条 assistant]`——无 assistant 的中断 / 错误 run 派生空 assistant 成对入窗（3.1.2 兜底），与 REPL"完成与中断都接受"的现状语义一致，acceptRun 对任何被接受的 run 都能稳定派生。**窗口条目带元数据**：内部存 `{kind:"bootstrap"} | {kind:"summary"} | {kind:"pair", runIndex?}`（对外 `getMessages()` 仍展平为 `Message[]`）；`pairsCompacted` 只计 pair 条目；runIndex 在 accept 时随持久化返回值记录，是 3.2.3 快照 `coveredThroughRunIndex` 的数据源——折叠时取被折最后一个 pair 的 runIndex（summaryPair 无 runIndex、折叠永不需要它的；`pairsCompacted`（沿现 `turnsCompacted` 数值语义）超过现存配对数时 clamp，与磁盘旧算法 `Math.max(0,…)` 同款；取值保守偏小只造成快照与原文轻微重叠，由装填"严格早于"规则天然吸收）。这**精确保持今天的跨 run 窗口语义**（canonical = [user, assistant] 配对 + summaryPair，`rebuild.ts:57-59` 一手核实）：run 内工具协议消息是 run 瞬态、跨 run 不留存。已知不对称并有意保留：启动装填会把工具轮渲染成可读文本（数据源 `messages`），而进程内跨 run 配对不含工具细节——是现状行为的延续，留作未来校准点，本次不改。
 
 **accept / rollback 语义**：窗口只在 owner 决定接受时前进。接受策略归 owner（REPL 现状=完成与中断的 run 都落盘都接受；server 沿其现状 preRun 回滚协议`run-turn.ts`），本次不统一两端策略（非需求）。接受顺序固定：**先 `appendRunRecord` 成功、后 `acceptRun`**——持久化失败则窗口不前进（下轮重试同一基底），消灭现状"持久化失败 append newMessages 产生内存漂移"的降级分支。
 
@@ -404,7 +408,7 @@ interface AttentionWindowState {
 
 - **M1 窗口运行态立起**（行为等价步）：AttentionWindowState 落地,repl/server 全部 canonical 回灌点改道;过渡期 windowCompact 双应用（窗口 + 照旧写盘 marker）保持内存与磁盘等价。验收：全量现有测试过;窗口与磁盘 canonical 在所有路径 byte-equal;持久化失败时窗口不前进。
 - **M2 压缩反噬退场**：windowCompact 停写盘（双应用撤一半）,/compact 去落盘,marker 只进窗口;并加**过渡期启动护栏**——磁盘不再截断后 canonical 失界,M4 之前启动仍是全量 load,超长对话重启后窗口可超模型物理上限,此时段评估想自愈、但摘要 LLM 调用本身要发送整个超限窗口,自愈失效;故窗口初始 load 后按 `riskMaxTokens` 机械保尾截断（无 LLM、不碰磁盘,与应急地板同手法）,M4 预算装填落地时删除该护栏。验收：任何段切换/压缩后 transcript 文件不变短;`commitTurn` 不再收到 compactBefore;超长 canonical 启动被护栏截到 risk 以下、随后段评估正常压缩。
-- **M3 持久化分片**：新 store(index/分片/clear 事件/倒读),/clear 切 clear 事件并删 compactAll;旧单文件格式连同 `CompactMarker` 概念整体删除（无迁移,3.1.6）。验收：新对话零根级 transcript.jsonl;旧格式零读写路径、全仓无 CompactMarker 类型;每条 run record 含完整协议 `messages` 且 `messages[0]` 为用户原文;clear 后倒读为空;7M 边界 rollover 正确;崩溃恢复四形态测试过（含 clear 两步写中断的 open 时补写 lastClearAt）。
+- **M3 持久化分片**：新 store(index/分片/clear 事件/倒读),/clear 切 clear 事件并删 compactAll;旧单文件格式连同 `CompactMarker` 概念整体删除（无迁移,3.1.6）。验收：新对话零根级 transcript.jsonl;旧格式零读写路径、全仓无 CompactMarker 类型;每条 run record 含完整协议 `messages` 且 `messages[0]` 为用户原文;clear 后倒读为空;7M 边界 rollover 正确;崩溃恢复全形态测试过（含 clear 两步写中断补写 lastClearAt、Windows 替换窗口 tmp 收尾恢复、索引缺失 / 损坏从分片全量自愈——读写两路径共用）。
 - **M4 启动装填 + 快照**：bootstrap + 快照写读 + owner 建窗装填;cli 的 resume/切换与 server session 挂起的 loadHistory 同步改装填——两端同协议,杜绝"cli 预算装填、server 仍全量灌 canonical"的劈叉(后者即 M2 过渡期启动护栏所防的同款失界敞口);同步回写 agent-runtime-lifecycle.md §四② 三场景表——"启动从持久化倒读历史"一行由 owner 侧装填器承接(本文 3.2.2 落点修正),onBeforeRun 保留其余场景,消除兄弟 spec 矛盾。验收：重启后首 run LLM 见装填对+最近原文且第二 run 仍见(窗口存续);落盘 `messages[0]` 为用户原文——结构性保证,cli 与 server 两端用例仍覆盖;首 run 失败回滚后装填不丢;无快照时纯倒读;M2 过渡期启动护栏已随预算装填删除。
 - **M5 budget 体系退场**：serve 补接 segmentDeps（硬前置,3.2.4）+ ①/pre-flight/三级阈值/strategies 处置 + MemoryFlush 迁挂 + /compact 切段化 + ephemeral 段覆盖 + 应急地板。验收：全仓无 compact 驱动路径;serve 会话与 ephemeral 任务的段切换端到端测试;memory flush 在段切换时触发的集成测试;/compact 强制切段端到端测试（绕过 defer、窗口经 applyCompact 前进、快照含正确 coveredThroughRunIndex、不落盘 transcript）;`cli/runtime/types.ts` 的"budget-only 兜底"注释已同步改写。
 - **M6 GC**：sweep + system task + 快照退役。验收：超期非活跃片删/活跃片永存/单片不删;快照按"超期 && 非(最新且未退役)"单一判据删、退役不提前删;sweep 与 append 并发安全;GC 全程零索引写。

@@ -18,11 +18,17 @@
 import type {
   AbortReason,
   AppendRunResult,
-  RunRecord,
   RunRecordInput,
+  SnapshotInput,
   WindowCompact,
+  WindowFoldOutcome,
 } from "@zhixing/core";
-import type { AbortResult, SessionRuntime, RuntimeFactory } from "./types.js";
+import type {
+  AbortResult,
+  ConversationBootstrap,
+  SessionRuntime,
+  RuntimeFactory,
+} from "./types.js";
 import { EphemeralRunBuffer } from "./ephemeral-run-buffer.js";
 import type { ConfirmationHub } from "../confirmation/hub.js";
 
@@ -69,6 +75,12 @@ export interface ManagedSession {
    * 的同一事实）；promote 时按序平铺落盘。
    */
   readonly pendingRuns: EphemeralRunBuffer;
+  /**
+   * 窗口折叠锚（配对 runIndex）与持久化是否对齐 —— promote 对账不一致时
+   * 置 false：错误的锚会让快照声明错误的覆盖边界（比缺失更糟），此后该
+   * 会话的快照写入降级停写（快照是派生缓存，停写只损失启动连贯性）。
+   */
+  snapshotAnchorsTrusted: boolean;
 }
 
 // ─── 列表信息 ───
@@ -90,10 +102,13 @@ export interface ManagedSessionInfo {
 
 export type OnSessionRelease = (conversationId: string, reason: "grace" | "idle") => void;
 
-/** 加载对话历史 run records 的回调。返回 undefined 表示无历史可加载。 */
+/**
+ * 装载会话历史的回调 —— 返回启动装填产物（摘要快照 + 预算化倒读渲染的
+ * 窗口起始条目 + turn 计数）。返回 undefined 表示无任何历史（新会话）。
+ */
 export type LoadHistory = (
   conversationId: string,
-) => Promise<RunRecord[] | undefined>;
+) => Promise<ConversationBootstrap | undefined>;
 
 /** 新对话首次创建时的初始化回调（如写入 transcript header）。 */
 export type InitTranscript = (conversationId: string) => Promise<void>;
@@ -130,6 +145,17 @@ export interface ConversationManagerCallbacks {
    */
   appendRun?: AppendRun;
   /**
+   * 派生摘要快照写入 —— 对应快照 store 的 `write`。
+   *
+   * recordTurn 在 persistent 会话的窗口折叠产生结构化摘要、且折叠锚可得时
+   * 调用；写失败只 warn（快照是派生缓存，绝不影响 run record 与窗口）。
+   * 省略时快照不落盘（启动装填降级为纯倒读）。
+   */
+  writeSnapshot?: (
+    conversationId: string,
+    input: SnapshotInput,
+  ) => Promise<void>;
+  /**
    * 可选 ConfirmationHub —— 提供时每个新建会话的 runtime.confirmationBroker 会
    * 自动 attach；会话释放（delete / grace / idle / disposeAll）前自动 detach。
    * 未提供时 ConversationManager 行为完全等价。
@@ -163,6 +189,10 @@ export class ConversationManager {
   private readonly loadHistory?: LoadHistory;
   private readonly initTranscript?: InitTranscript;
   private readonly appendRunCb?: AppendRun;
+  private readonly writeSnapshotCb?: (
+    conversationId: string,
+    input: SnapshotInput,
+  ) => Promise<void>;
   private readonly confirmationHub?: ConfirmationHub;
   /** conversationId 集合——已 attach 到 hub 的会话，用于 dispose 前反查 + 防重 */
   private readonly attachedBrokers = new Set<string>();
@@ -192,6 +222,7 @@ export class ConversationManager {
       this.loadHistory = callbacksOrOnRelease.loadHistory;
       this.initTranscript = callbacksOrOnRelease.initTranscript;
       this.appendRunCb = callbacksOrOnRelease.appendRun;
+      this.writeSnapshotCb = callbacksOrOnRelease.writeSnapshot;
       this.confirmationHub = callbacksOrOnRelease.confirmationHub;
     } else if (loadHistory) {
       this.loadHistory = loadHistory;
@@ -244,11 +275,11 @@ export class ConversationManager {
   }
 
   private async doCreate(id: string, ephemeral: boolean): Promise<ManagedSession> {
-    const initialRecords = ephemeral ? undefined : await this.loadHistory?.(id);
-    if (!initialRecords && !ephemeral && this.initTranscript) {
+    const history = ephemeral ? undefined : await this.loadHistory?.(id);
+    if (!history && !ephemeral && this.initTranscript) {
       await this.initTranscript(id);
     }
-    const runtime = await this.factory.create(id, initialRecords);
+    const runtime = await this.factory.create(id, history);
     const now = new Date().toISOString();
 
     const session: ManagedSession = {
@@ -258,10 +289,11 @@ export class ConversationManager {
       lastActiveAt: now,
       busy: false,
       observers: new Set(),
-      turnCount: initialRecords?.length ?? 0,
+      turnCount: history?.turnCount ?? 0,
       ephemeral,
       transcriptInited: !ephemeral,
       pendingRuns: new EphemeralRunBuffer(),
+      snapshotAnchorsTrusted: true,
     };
 
     this.sessions.set(id, session);
@@ -572,12 +604,48 @@ export class ConversationManager {
       );
     }
     const { runIndex } = await this.appendRunCb(conversationId, record);
-    session.runtime.acceptRun({
+    const outcome = session.runtime.acceptRun({
       runMessages: record.messages,
       runIndex,
       windowCompact,
     });
     session.turnCount++;
+    await this.maybeWriteSnapshot(conversationId, session, windowCompact, outcome);
+  }
+
+  /**
+   * 窗口折叠产生结构化摘要时顺手写派生快照（启动装填的摘要来源）。
+   *
+   * 全部条件缺一不写（宁缺毋滥——快照是派生缓存，缺失只是启动连贯性降级）：
+   *   - windowCompact 携结构化摘要（段切换路径产物）
+   *   - 配置了 writeSnapshot 回调（serve 装配注入）
+   *   - 会话的折叠锚可信（promote 对账不一致后停写——错误的覆盖边界比缺失更糟）
+   *   - 折叠交出了覆盖锚（被折配对带 runIndex）
+   * 写失败只 warn：run record 已落盘、窗口已前进，快照绝不反向影响两者。
+   */
+  private async maybeWriteSnapshot(
+    conversationId: string,
+    session: ManagedSession,
+    windowCompact: WindowCompact | undefined,
+    outcome: WindowFoldOutcome,
+  ): Promise<void> {
+    if (!windowCompact?.structuredSummary || !this.writeSnapshotCb) return;
+    if (!session.snapshotAnchorsTrusted) return;
+    const covered = outcome.coveredThroughRunIndex;
+    if (covered === undefined) return;
+    try {
+      await this.writeSnapshotCb(conversationId, {
+        coveredThroughRunIndex: covered,
+        structuredSummary: windowCompact.structuredSummary,
+        tokensBefore: windowCompact.tokensBefore,
+        tokensAfter: windowCompact.tokensAfter,
+      });
+    } catch (err) {
+      console.warn(
+        `[ConversationManager] 快照写入失败 conv=${conversationId}（不影响 run record 与窗口）:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
   }
 
   /**
@@ -619,10 +687,13 @@ export class ConversationManager {
     for (let head = session.pendingRuns.peek(); head; head = session.pendingRuns.peek()) {
       const { runIndex } = await this.appendRunCb(conversationId, head.record);
       if (runIndex !== head.provisionalRunIndex) {
+        // 锚错位 → 该会话快照降级停写：错误的覆盖边界会让启动装填
+        // 重叠 / 缺漏，比没有快照更糟
+        session.snapshotAnchorsTrusted = false;
         console.warn(
           `[ConversationManager.promote] runIndex 对账不一致 conv=${conversationId}: ` +
             `store=${runIndex} provisional=${head.provisionalRunIndex}（transcript 非全新？）` +
-            "—— 窗口折叠锚与持久化错位",
+            "—— 窗口折叠锚与持久化错位，本会话快照写入已停用",
         );
       }
       session.pendingRuns.dequeue();

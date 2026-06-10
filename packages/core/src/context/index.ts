@@ -59,11 +59,14 @@ export type { SystemMetaKind } from "./system-meta.js";
 export {
   buildCompactSummaryPair,
   buildDroppedTurnsMessage,
+  buildStartupBootstrapPair,
   buildWorksceneDigestMessage,
   detectSystemMetaKind,
   stripSummaryPlaceholderPair,
   SYSTEM_META_PROMPT_SECTION,
 } from "./system-meta.js";
+
+export * from "./bootstrap/index.js";
 
 export type { MessageDropConfig } from "./strategies/message-drop.js";
 export {
@@ -116,13 +119,9 @@ export type {
   AcceptRunInput,
   AttentionWindowState,
   CreateAttentionWindowOptions,
-  RestoreTailGuard,
   WindowCompact,
   WindowFoldOutcome,
   WindowResetReason,
 } from "./window/index.js";
-export {
-  createAttentionWindow,
-  restoreAttentionWindowFromRecords,
-} from "./window/index.js";
+export { createAttentionWindow } from "./window/index.js";
 

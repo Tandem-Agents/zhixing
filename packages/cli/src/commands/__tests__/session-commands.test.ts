@@ -15,7 +15,6 @@ import {
   type RuntimeContext,
   assistantMessage,
   createAttentionWindow,
-  restoreAttentionWindowFromRecords,
   userMessage,
 } from "@zhixing/core";
 import {
@@ -53,6 +52,8 @@ interface Harness {
   taskClear: ReturnType<typeof vi.fn>;
   taskPrime: ReturnType<typeof vi.fn>;
   rename: ReturnType<typeof vi.fn>;
+  resetConversationState: ReturnType<typeof vi.fn>;
+  onAttentionWindowChange: ReturnType<typeof vi.fn>;
   dispatcher: CommandDispatcher;
   registry: DefaultCommandRegistry;
   writer: CliWriter & { lines: string[] };
@@ -86,12 +87,15 @@ function setup(convOverrides: Partial<Record<string, unknown>> = {}): Harness {
     conversationId: "conv-1",
     turnCounter: 5,
     store,
+    snapshots: { write: vi.fn(async () => ({})), list: vi.fn(async () => []) },
     convRepo,
     ...convOverrides,
   } as unknown as Conv;
 
   const taskClear = vi.fn();
   const taskPrime = vi.fn(async () => {});
+  const resetConversationState = vi.fn(async () => {});
+  const onAttentionWindowChange = vi.fn(async () => {});
 
   const deps: SessionCommandsDeps = {
     registry,
@@ -102,8 +106,8 @@ function setup(convOverrides: Partial<Record<string, unknown>> = {}): Harness {
       ({
         model: "m",
         providerId: "p",
-        resetConversationState: vi.fn(async () => {}),
-        onAttentionWindowChange: vi.fn(async () => {}),
+        resetConversationState,
+        onAttentionWindowChange,
         forceCompact: vi.fn(async () => ({ modified: false })),
       }) as unknown as ReturnType<SessionCommandsDeps["getRuntime"]>,
     taskListService: { prime: taskPrime, clear: taskClear },
@@ -111,7 +115,17 @@ function setup(convOverrides: Partial<Record<string, unknown>> = {}): Harness {
     clearScreenToInitial: undefined,
   };
   registerSessionCommands(deps);
-  return { conv, taskClear, taskPrime, rename, dispatcher, registry, writer };
+  return {
+    conv,
+    taskClear,
+    taskPrime,
+    rename,
+    resetConversationState,
+    onAttentionWindowChange,
+    dispatcher,
+    registry,
+    writer,
+  };
 }
 
 function visible(writer: { lines: string[] }): string {
@@ -169,12 +183,13 @@ describe("registerSessionCommands · /name", () => {
 
 describe("registerSessionCommands · /compact", () => {
   it("历史过短（<4）→ 直接提示，不调 forceCompact", async () => {
-    const h = setup({
-      // 窗口只有一个配对（2 条消息）< 4
-      window: restoreAttentionWindowFromRecords([
-        { runIndex: 0, messages: [userMessage("hi"), assistantMessage("yo")] },
-      ]),
+    const shortWindow = createAttentionWindow({ conversationId: "conv-1" });
+    shortWindow.acceptRun({
+      runMessages: [userMessage("hi"), assistantMessage("yo")],
+      runIndex: 0,
     });
+    // 窗口只有一个配对（2 条消息）< 4
+    const h = setup({ window: shortWindow });
     await h.dispatcher.dispatch("/compact", RUNTIME);
     expect(visible(h.writer)).toContain("过短");
   });
@@ -185,6 +200,31 @@ describe("registerSessionCommands · /resume", () => {
     const h = setup();
     await h.dispatcher.dispatch("/resume", RUNTIME);
     expect(visible(h.writer)).toContain("没有可切换的对话");
+  });
+
+  it("切换成功 = 窗口换代：装填建窗 + prime + reset + onAttentionWindowChange(resume)", async () => {
+    const h = setup({
+      convRepo: {
+        list: vi.fn(async () => [
+          { id: "conv-2", name: "目标对话", lastActiveAt: new Date().toISOString() },
+        ]),
+        get: vi.fn(async (id: string) =>
+          id === "conv-2" ? { id: "conv-2", name: "目标对话" } : null,
+        ),
+        rename: vi.fn(),
+        clearViewLayerState: vi.fn(async () => {}),
+        touch: vi.fn(async () => {}),
+        create: vi.fn(),
+      },
+    });
+    await h.dispatcher.dispatch("/resume conv-2", RUNTIME);
+
+    expect(h.conv.conversationId).toBe("conv-2");
+    expect(h.taskPrime).toHaveBeenCalledWith("conv-2");
+    // 切换对话 = 注意力窗口换代（与 /new、/clear 同纪律）
+    expect(h.resetConversationState).toHaveBeenCalledTimes(1);
+    expect(h.onAttentionWindowChange).toHaveBeenCalledWith("resume");
+    expect(visible(h.writer)).toContain("已切换到");
   });
 });
 

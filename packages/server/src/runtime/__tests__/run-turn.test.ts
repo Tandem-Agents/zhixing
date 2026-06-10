@@ -118,6 +118,7 @@ function createMockRuntime(
         input.runMessages[0]!,
         input.runMessages[input.runMessages.length - 1]!,
       );
+      return {};
     },
     abort(): boolean { return false; },
     async dispose() {

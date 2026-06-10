@@ -23,6 +23,7 @@ import type {
   IConversationRepository,
   Message,
   ShardedTranscriptStore,
+  SnapshotStore,
 } from "@zhixing/core";
 import { createAttentionWindow } from "@zhixing/core";
 
@@ -36,6 +37,8 @@ export interface MutableConversationState {
   /** 一次性输入前缀（工作场景触发句）—— 换对话即作废 */
   pendingInputPrefix: Message[] | null;
   store: ShardedTranscriptStore;
+  /** 派生摘要快照（与 store 同域）—— /resume 装填与折叠快照出口共用 */
+  snapshots: SnapshotStore;
   convRepo: IConversationRepository;
   conversationId: string | null;
   turnCounter: number;
