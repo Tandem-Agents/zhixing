@@ -54,6 +54,8 @@ function makeCompact(turnsCompacted: number, summary: string): CompactMarker {
 /** 最小 AgentRuntime stub —— 本测试只走 recordTurn 协议，不驱动真实 run */
 function stubAgentRuntime(): AgentRuntime {
   return {
+    // 保尾护栏按模型解析风险上限——未知模型走保守兜底，足够本测试使用
+    model: "test-model",
     dispose: async () => {},
   } as unknown as AgentRuntime;
 }
@@ -79,7 +81,7 @@ const config = {
 // ─── 等价性 ───
 
 describe("server 会话 × 注意力窗口同形性", () => {
-  it("persistent：recordTurn 携 compactBefore → 窗口折叠 + 追加，与磁盘 canonical 形态同构", async () => {
+  it("persistent：compactBefore 只折叠窗口，持久化 append-only 不收 marker", async () => {
     const committed: Array<{ turn?: Turn; compactBefore?: CompactMarker }> = [];
     const mgr = new ConversationManager(windowFactory(), config, {
       commitTurn: async (_cid, payload) => {
@@ -94,19 +96,20 @@ describe("server 会话 × 注意力窗口同形性", () => {
     const marker = makeCompact(1, "首轮摘要");
     await mgr.recordTurn("c1", makeTurn(2), marker);
 
-    // 与磁盘同款形态：summaryPair + 保留配对(t1) + 新配对(t2)
+    // 窗口：蒸馏视图（摘要对 + 保留配对 t1 + 新配对 t2）
     const expected = rebuildCanonicalMessages(
       [makeTurn(1), makeTurn(2)],
       [marker],
     );
-    // timestamp 字段不进消息，逐条消息内容应相等
     expect(mgr.get("c1")!.getHistory()).toEqual(expected);
+    // 持久化：3 条原始 turn 全部追加、任何 payload 不含 compactBefore
     expect(committed).toHaveLength(3);
-    expect(committed[2]!.compactBefore).toBe(marker);
+    expect(committed.every((p) => p.compactBefore === undefined)).toBe(true);
+    expect(committed.map((p) => p.turn?.turnIndex)).toEqual([0, 1, 2]);
     mgr.disposeAll();
   });
 
-  it("ephemeral：窗口与 pending 簿记保持同形（折叠 ≡ 截断+重建），promote 落盘原料正确", async () => {
+  it("ephemeral：pending 是 append-only 镜像（不因折叠截断），promote 平铺落盘", async () => {
     const committed: Array<{ turn?: Turn; compactBefore?: CompactMarker }> = [];
     const mgr = new ConversationManager(windowFactory(), config, {
       commitTurn: async (_cid, payload) => {
@@ -119,22 +122,22 @@ describe("server 会话 × 注意力窗口同形性", () => {
     const session = await mgr.getOrCreate("e1", { ephemeral: true });
 
     await mgr.recordTurn("e1", makeTurn(0));
-    // 窗口 == rebuild(pending)
+    // 无折叠时窗口 == rebuild(pending)
     expect(mgr.get("e1")!.getHistory()).toEqual(
       rebuildCanonicalMessages(session.pendingTurns, []),
     );
 
-    // 第二轮携 compactBefore（摘掉第一轮）→ 触发 auto-promote
+    // 第二轮携 compactBefore（窗口摘掉第一轮）→ 触发 auto-promote
     const marker = makeCompact(1, "ephemeral 摘要");
     await mgr.recordTurn("e1", makeTurn(1), marker);
 
-    // promote 已落盘：头 turn 携 compactBefore
+    // promote 平铺落盘：两条原始 turn 依序追加、均无 marker
     expect(session.ephemeral).toBe(false);
-    expect(committed).toHaveLength(1);
-    expect(committed[0]!.turn?.turnIndex).toBe(1);
-    expect(committed[0]!.compactBefore).toBe(marker);
+    expect(committed).toHaveLength(2);
+    expect(committed.map((p) => p.turn?.turnIndex)).toEqual([0, 1]);
+    expect(committed.every((p) => p.compactBefore === undefined)).toBe(true);
 
-    // 窗口形态 == 落盘后 canonical 形态（summaryPair + t1 配对）
+    // 窗口：蒸馏视图（摘要对 + t1 配对），与全量持久化有意分叉
     expect(mgr.get("e1")!.getHistory()).toEqual(
       rebuildCanonicalMessages([makeTurn(1)], [marker]),
     );

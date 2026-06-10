@@ -273,8 +273,9 @@ export async function runTurnEnd(
   //
   // 段切换失败绝不阻塞 turn —— evaluate 返 modified:false 时拿原 messages 继续。
   //
-  // marker 写盘走 segment:new_started 事件 → orchestrator accumulator →
-  // run-agent 单点 commitTurn 落盘，与 budget summarize 路径同模式。
+  // marker 走 segment:new_started 事件 → orchestrator accumulator → 随
+  // RunResult 带出，由会话层在接受协议中折叠窗口（不落 transcript——
+  // 压缩是窗口的视图操作，原文持久化 append-only 不参与）。
   if (params.segmentManager) {
     const seg = await params.segmentManager.evaluate({
       messages,

@@ -35,6 +35,7 @@ import type {
   TurnContext,
 } from "@zhixing/server";
 import type { AgentRuntime } from "@zhixing/orchestrator/runtime";
+import { makeWindowTailGuard } from "../runtime/window-tail-guard.js";
 
 // ─── 适配器 ───
 
@@ -58,6 +59,8 @@ export function createServerRuntimeAdapter(
     initialMessages && initialMessages.length > 0
       ? restoreAttentionWindowFromCanonical(initialMessages, {
           conversationId: sessionId,
+          // 原文 append-only 后全量加载可能失界，按风险上限机械保尾
+          tailGuard: makeWindowTailGuard(agentRuntime.model),
         })
       : createAttentionWindow({ conversationId: sessionId });
   let currentController: AbortController | null = null;

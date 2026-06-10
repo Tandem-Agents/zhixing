@@ -51,6 +51,7 @@ import {
   restoreAttentionWindowFromCanonical,
   windowCompactFromMarker,
 } from "@zhixing/core";
+import { makeWindowTailGuard } from "./runtime/window-tail-guard.js";
 import { describeProxy, type ProxyDescription } from "@zhixing/network";
 import { loadConfig, loadCredentials, resolveHomeDir } from "@zhixing/providers";
 import type { TaskListService } from "@zhixing/tools-builtin";
@@ -426,6 +427,8 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       const loaded = await store.load(latest);
       window = restoreAttentionWindowFromCanonical(loaded.messages, {
         conversationId: latest,
+        // 原文 append-only 后全量加载可能失界，按风险上限机械保尾
+        tailGuard: makeWindowTailGuard(session.runtime.model),
       });
       conversationId = latest;
       turnCounter = loaded.turnCount;
@@ -684,18 +687,14 @@ export async function startRepl(options: ReplOptions): Promise<void> {
           //   - LLM：触发句进 pendingInputPrefix（power 不知干啥就靠它）——它
           //     不是窗口事实（无配对、从不落盘），随首个成功 accept 的 run
           //     进入发送视图后即清空，与"触发句只活到首次提交"的语义一致。
-          //   - command-recovery：loaded.messages（canonical）重建窗口，接续历史。
+          //   - command-recovery：loaded.messages（canonical）重建窗口，接续历史
+          //     （建窗推迟到 enterWorkMode 之后——保尾护栏要按 power 模型的
+          //     风险上限取值）。
           //   - command-create / command-降级：空窗（用户随后在 workscene 输入）。
           //
           // 触发句由主回路显式透传该 turn 构造的原始 userMsg —— 不扫描 canonical
           // 反推：带工具调用的 turn 末尾 tool_result 消息同为 role:"user"
           // （toolResultMessage），按 role 反查会误取工具结果而非用户原句。
-          const wWindow =
-            loaded !== null
-              ? restoreAttentionWindowFromCanonical(loaded.messages, {
-                  conversationId: wConv.id,
-                })
-              : createAttentionWindow({ conversationId: wConv.id });
           const wPrefix =
             source === "llm" && triggerMsg ? [triggerMsg] : null;
           // ③ task_list service cache prime（新建 → 空 items；recovery → 读
@@ -715,9 +714,16 @@ export async function startRepl(options: ReplOptions): Promise<void> {
               provider: session.runtime.providerId,
             });
           }
-          // ⑤ 构造并切 active（纯赋值，最后一步、不可能抛错 → 无需 undo）
+          // ⑤ 构造并切 active（建窗在 enterWorkMode 之后——runtime 已是 power，
+          // 护栏取 power 模型的风险上限；纯计算+赋值，不可能抛错 → 无需 undo）
           state.conv = {
-            window: wWindow,
+            window:
+              loaded !== null
+                ? restoreAttentionWindowFromCanonical(loaded.messages, {
+                    conversationId: wConv.id,
+                    tailGuard: makeWindowTailGuard(session.runtime.model),
+                  })
+                : createAttentionWindow({ conversationId: wConv.id }),
             pendingInputPrefix: wPrefix,
             store: wStore,
             convRepo: worksceneRepo,
@@ -1443,13 +1449,12 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       // 状态条 done 永驻显示直到下一次 agent:run_start，新 turn 起始覆盖回 thinking。
 
       // 接受协议：先持久化成功、后窗口前进（acceptRun 应用 windowCompact 折叠
-      // 并追加本 run 配对）。过渡期双应用——compactBefore 仍照旧写盘，窗口同步
-      // 折叠，内存与磁盘保持同形；窗口成为唯一事实源后写盘侧将停用 marker。
+      // 并追加本 run 配对）。持久化只追加原始 turn——压缩是注意力窗口的视图
+      // 操作，原文 append-only、永不因压缩变短；窗口是唯一压缩视图。
       if (state.conv.conversationId) {
         try {
           await state.conv.store.commitTurn(state.conv.conversationId, {
             turn: runResult.turn,
-            compactBefore: runResult.compactBefore,
           });
           state.conv.window.acceptRun({
             runMessages: [

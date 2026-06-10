@@ -5,9 +5,9 @@
  * 一个方法）而不是完整的 `IConversationRepository`，让测试 mock 简单、
  * 未来换实现成本低。真实 IConversationRepository 结构兼容。
  *
- * 不承担 transcript marker 写入 —— marker 走"emit segment:new_started → orchestrator
- * accumulator → run-agent 单点 commitTurn"路径，与本 turn 的 transcript 写入是同一
- * 原子事务，整个 run 内 transcript 写入收敛到唯一路径（与 LLMSummarize 同模式）。
+ * marker 不落 transcript —— 它走"emit segment:new_started → orchestrator
+ * accumulator → 随 RunResult 带出"路径，由会话层在接受协议中折叠注意力窗口
+ * （压缩是窗口的视图操作，原文持久化 append-only 不参与）。
  */
 
 import type { SegmentMeta } from "../../conversation/types.js";

@@ -324,12 +324,12 @@ export type AgentEventMap = {
 
   /**
    * 新段就绪 —— newSegmentMessages 已组装、CompactMarker 已生成、segmentMetadata
-   * 已尝试写入。**transcript 的 marker 落盘不由 SegmentManager 直接做**，
-   * 而是通过本事件携带 marker 流向 orchestrator 的累积器，由 run-agent 在
-   * run 结束时通过 `commitTurn({ turn, compactBefore })` 单点原子写入。
+   * 已尝试写入。**marker 不落 transcript** —— 本事件携带 marker 流向 orchestrator
+   * 的累积器、随 RunResult 带出，由会话层在接受协议中折叠注意力窗口
+   * （压缩是窗口的视图操作，原文持久化 append-only 不参与）。
    *
-   * 这样段切换 marker 与本 turn 的 transcript 写入是同一原子事务，杜绝
-   * "marker 已写但 turn 未写"或"内存切了但 transcript 没切"类的状态不一致；
+   * 这样段切换的窗口折叠与本 turn 的接受是同一时点完成，杜绝
+   * "内存切了但接受的窗口没切"类的状态不一致；
    * 与 LLMSummarize 走 `context:compact_end` → accumulator → 单点 commit
    * 同模式，整个 run 内 transcript 写入收敛到唯一路径。
    */

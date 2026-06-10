@@ -32,6 +32,7 @@ import {
   switchToNewConversation,
   type MutableConversationState,
 } from "../runtime/switch-to-new-conversation.js";
+import { makeWindowTailGuard } from "../runtime/window-tail-guard.js";
 import type { CliWriter } from "../screen/index.js";
 import { layout } from "../tui/style.js";
 import { formatRelativeTime } from "./format.js";
@@ -269,6 +270,8 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
       const loaded = await conv.store.load(target.id);
       conv.window = restoreAttentionWindowFromCanonical(loaded.messages, {
         conversationId: target.id,
+        // 原文 append-only 后全量加载可能失界，按风险上限机械保尾
+        tailGuard: makeWindowTailGuard(deps.getRuntime().model),
       });
       conv.pendingInputPrefix = null;
       conv.conversationId = target.id;
@@ -337,24 +340,10 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
       const result = await deps
         .getRuntime()
         .forceCompact([...conv.window.getMessages()], conv.turnCounter);
-      // 窗口只在事务产生真 summary 且 marker 持久化成功后折叠（先盘后窗，与
-      // run 接受协议同纪律）。非摘要型修改（无 marker）不动窗口——那类结果
-      // 既不落盘，落进窗口只会制造与磁盘的漂移。
+      // 压缩是注意力窗口的视图操作：产生真 summary 时折叠窗口；原文持久化
+      // append-only、不参与压缩（被摘内容仍完整躺在磁盘上）。非摘要型修改
+      //（无 marker）不动窗口——窗口只经折叠 / 接受前进。
       if (result.modified && result.compactBefore) {
-        if (conv.conversationId) {
-          try {
-            await conv.store.commitTurn(conv.conversationId, {
-              compactBefore: result.compactBefore,
-            });
-          } catch (err) {
-            writer.line(
-              chalk.dim(
-                `  [持久化警告] 压缩未生效（窗口未变）: ${err instanceof Error ? err.message : String(err)}\n`,
-              ),
-            );
-            return {};
-          }
-        }
         conv.window.applyCompact(windowCompactFromMarker(result.compactBefore));
         const pct = Math.round(result.budget.usageRatio * 100);
         writer.line(chalk.green(`  ✓ 压缩完成，当前上下文占用 ${pct}%\n`));

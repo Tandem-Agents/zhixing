@@ -146,6 +146,22 @@ export function createAttentionWindow(
 }
 
 /**
+ * 启动保尾护栏 —— 全量加载重建窗口时的机械截断配置（过渡期，预算化启动
+ * 装填落地后随 restore 一起删除）。
+ *
+ * 为什么需要：磁盘是 append-only 原文、不再因压缩截断，超长对话全量加载
+ * 重建的窗口可能超过模型物理上限——此时段评估想自愈，但摘要 LLM 调用本身
+ * 要发送整个超限窗口，自愈失效。护栏在重建时从尾部机械保留（无 LLM、不碰
+ * 磁盘）：摘要对放得下则保留，配对从最新往回装，至少保最后一个配对。
+ */
+export interface RestoreTailGuard {
+  /** 保尾预算（token）——挂模型的风险注意力上限，不挂物理窗口百分比 */
+  readonly maxTokens: number;
+  /** token 估算（与运行期同一估算器实现） */
+  estimateMessages(messages: readonly Message[]): number;
+}
+
+/**
  * 从持久化 canonical 重建窗口 —— **过渡期桥**，预算化启动装填落地后删除。
  *
  * 现阶段窗口的初始内容仍来自 store 产出的 canonical（`summaryPair? + 严格
@@ -159,7 +175,9 @@ export function createAttentionWindow(
  */
 export function restoreAttentionWindowFromCanonical(
   canonical: readonly Message[],
-  options: CreateAttentionWindowOptions = {},
+  options: CreateAttentionWindowOptions & {
+    readonly tailGuard?: RestoreTailGuard;
+  } = {},
 ): AttentionWindowState {
   const entries: WindowEntry[] = [];
   let i = 0;
@@ -189,5 +207,134 @@ export function restoreAttentionWindowFromCanonical(
     entries.push({ kind: "pair", messages: [user, assistant] });
   }
 
-  return new AttentionWindow(options, entries);
+  return new AttentionWindow(
+    options,
+    options.tailGuard ? clampEntriesToTail(entries, options.tailGuard) : entries,
+  );
+}
+
+/**
+ * 机械保尾 —— 预算是**硬上限**（护栏存在的全部意义就是让段评估的摘要调用
+ * 发得出去，超限即失效）。优先序：
+ *
+ *   1. 最后一个配对必保（连贯底线：空窗起步让模型对"接续旧对话"完全失忆）
+ *      ——但它单独超限时**截断降级**而非硬塞：用户消息保开头（意图）、
+ *      assistant 保结尾（结论），机械按比例裁剪，是"超大组放压缩核"思路的
+ *      无 LLM 形态；
+ *   2. 摘要对放得下剩余额度则保留（高信号蒸馏优先于更多原文）；
+ *   3. 余额给更早配对，从新到旧装满即止。
+ */
+function clampEntriesToTail(
+  entries: WindowEntry[],
+  guard: RestoreTailGuard,
+): WindowEntry[] {
+  const summary = entries.find((e) => e.kind === "summary");
+  const pairs = entries.filter(
+    (e): e is Extract<WindowEntry, { kind: "pair" }> => e.kind === "pair",
+  );
+
+  if (pairs.length === 0) {
+    return summary &&
+      guard.estimateMessages(summary.messages) <= guard.maxTokens
+      ? [summary]
+      : [];
+  }
+
+  const last = pairs[pairs.length - 1]!;
+  const lastCost = guard.estimateMessages(last.messages);
+  if (lastCost > guard.maxTokens) {
+    // 末配对单独超限：截断降级，独占全部预算（摘要与更早配对都放弃——
+    // 硬上限优先，细节留给磁盘上的完整原文与未来的检索召回）
+    return [truncatePairToBudget(last, guard)];
+  }
+
+  let budget = guard.maxTokens - lastCost;
+  const keepSummary =
+    summary !== undefined && guard.estimateMessages(summary.messages) <= budget;
+  if (keepSummary) {
+    budget -= guard.estimateMessages(summary!.messages);
+  }
+
+  const keptPairs: WindowEntry[] = [last];
+  for (let i = pairs.length - 2; i >= 0; i--) {
+    const cost = guard.estimateMessages(pairs[i]!.messages);
+    if (cost > budget) break;
+    keptPairs.unshift(pairs[i]!);
+    budget -= cost;
+  }
+
+  return keepSummary ? [summary!, ...keptPairs] : keptPairs;
+}
+
+const TAIL_TRUNCATION_NOTE = "…〔启动加载时截断，完整原文在对话历史中〕…";
+
+/**
+ * 把单个超限配对机械裁剪进预算：用户消息保**开头**（提问/任务的意图在前），
+ * assistant 保**结尾**（结论与最终答复在后），按"目标/当前"比例一次性裁剪
+ * （估算器对字符近似线性，乘 0.9 安全系数落在预算内）。
+ *
+ * 有损降级：非文本块（图片等）不保留——截断本就是丢细节换可用性，
+ * 完整原文仍在磁盘上。
+ */
+function truncatePairToBudget(
+  pair: Extract<WindowEntry, { kind: "pair" }>,
+  guard: RestoreTailGuard,
+): WindowEntry {
+  const [user, assistant] = pair.messages;
+  const userText = textOf(user);
+  const assistantText = textOf(assistant);
+  const cost = guard.estimateMessages(pair.messages);
+  const ratio = Math.max(
+    0,
+    Math.min(1, (guard.maxTokens / Math.max(1, cost)) * 0.9),
+  );
+
+  let userKeep = Math.floor(userText.length * ratio);
+  let assistantKeep = Math.floor(assistantText.length * ratio);
+
+  const build = (): readonly [Message, Message] => [
+    {
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: userText.slice(0, userKeep) + TAIL_TRUNCATION_NOTE,
+        },
+      ],
+    },
+    {
+      role: "assistant",
+      content: [
+        {
+          type: "text",
+          text:
+            TAIL_TRUNCATION_NOTE +
+            assistantText.slice(assistantText.length - assistantKeep),
+        },
+      ],
+    },
+  ];
+
+  // 标注自身有开销，极小预算下一次比例裁剪可能仍超限——逐次减半细化，
+  // 保留长度严格收敛到 0，循环必然终止；最差退化为仅剩标注的占位对
+  //（预算小到连标注都放不下时也接受占位——护栏的职责是让窗口可用，
+  // 占位对是该预算下能给出的最大连贯性）。
+  let messages = build();
+  while (
+    guard.estimateMessages(messages) > guard.maxTokens &&
+    userKeep + assistantKeep > 0
+  ) {
+    userKeep = Math.floor(userKeep / 2);
+    assistantKeep = Math.floor(assistantKeep / 2);
+    messages = build();
+  }
+
+  return { kind: "pair", messages, runIndex: pair.runIndex };
+}
+
+function textOf(message: Message): string {
+  return message.content
+    .filter((b): b is { type: "text"; text: string } => b.type === "text")
+    .map((b) => b.text)
+    .join("\n");
 }

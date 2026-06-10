@@ -116,6 +116,7 @@ export type {
   AcceptRunInput,
   AttentionWindowState,
   CreateAttentionWindowOptions,
+  RestoreTailGuard,
   WindowCompact,
   WindowFoldOutcome,
   WindowResetReason,

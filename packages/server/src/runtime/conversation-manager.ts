@@ -61,16 +61,12 @@ export interface ManagedSession {
   ephemeral: boolean;
   /** transcript 文件已初始化（防止 promote 重试时重复 init） */
   transcriptInited: boolean;
-  /** ephemeral 模式下累积的待持久化 turns */
-  pendingTurns: Turn[];
   /**
-   * ephemeral 模式下累积的 compact 边界。
-   *
-   * recordTurn 收到 compactBefore 时按 turnsCompacted 切分 pendingTurns 保留末尾，
-   * 然后覆盖此字段；promote 时作为第一个落盘 turn 的 compactBefore 触发原子截断。
-   * undefined 表示本段 ephemeral 期间未发生 compact。
+   * ephemeral 模式下累积的待持久化 turns —— 持久化的 append-only 镜像，
+   * 只追加、不因压缩截断（压缩是窗口的视图操作，原文不动）；promote 时
+   * 按序平铺落盘。
    */
-  pendingCompact?: CompactMarker;
+  pendingTurns: Turn[];
 }
 
 // ─── 列表信息 ───
@@ -270,7 +266,6 @@ export class ConversationManager {
       ephemeral,
       transcriptInited: !ephemeral,
       pendingTurns: [],
-      pendingCompact: undefined,
     };
 
     this.sessions.set(id, session);
@@ -529,13 +524,15 @@ export class ConversationManager {
    * 接受协议："先持久化（或 pending 入列）成功、后窗口前进"——成功后调
    * `session.runtime.acceptRun`，窗口应用 windowCompact 折叠并追加本 run
    * 蒸馏对。失败路径不触窗口：内存停在原基底，下轮重试，无需回滚。
-   * 过渡期双应用——compactBefore 仍照旧写盘（persistent）/ 截断 pending
-   * （ephemeral），窗口同步折叠，内存与磁盘 / pending 保持同形。
+   *
+   * 压缩与持久化的分界：compactBefore 只驱动**窗口折叠**（注意力视图）；
+   * 持久化（磁盘 / pending）是 append-only 原文，永不因压缩变短——被摘
+   * 内容仍完整躺在持久层上。
    *
    * 两条路径：
-   *   - persistent → commitTurn 回调（原子落盘）→ acceptRun
-   *   - ephemeral → 按 turnsCompacted 切分 pendingTurns，累积 pendingCompact
-   *     （promote 的落盘原料）→ acceptRun；turnCount >= 2 自动 promote
+   *   - persistent → commitTurn 回调（原子追加原始 turn）→ acceptRun
+   *   - ephemeral → pendingTurns 追加（promote 的平铺落盘原料）→ acceptRun；
+   *     turnCount >= 2 自动 promote
    */
   async recordTurn(
     conversationId: string,
@@ -546,20 +543,7 @@ export class ConversationManager {
     if (!session) return;
 
     if (session.ephemeral) {
-      // pending 入列即 ephemeral 的"持久化成功"——promote 据此 FIFO 落盘
-      if (compactBefore) {
-        // 按 turnsCompacted 切分 pendingTurns 保留末尾，pendingCompact 覆盖式记录
-        // （累积已在 run 闭包做过，此处只做边界 swap）
-        const keepCount = Math.max(
-          0,
-          session.pendingTurns.length - compactBefore.turnsCompacted,
-        );
-        // keepCount=0 必须显式给空数组 —— slice(-0) 等价 slice(0) 会返回整个
-        // 数组，全折场景下保留本该丢弃的 turns（与磁盘写入算法同款守卫）。
-        session.pendingTurns =
-          keepCount > 0 ? session.pendingTurns.slice(-keepCount) : [];
-        session.pendingCompact = compactBefore;
-      }
+      // pending 入列即 ephemeral 的"持久化成功"——promote 据此 FIFO 平铺落盘
       session.pendingTurns.push(turn);
       session.turnCount++;
 
@@ -587,10 +571,7 @@ export class ConversationManager {
           "(was this manager constructed without commitTurn while the session is not ephemeral?)",
       );
     }
-    await this.commitTurnCb(conversationId, {
-      turn,
-      compactBefore,
-    });
+    await this.commitTurnCb(conversationId, { turn });
     session.runtime.acceptRun({
       runMessages: [turn.userMessage, turn.assistantMessage],
       windowCompact: compactBefore
@@ -601,17 +582,11 @@ export class ConversationManager {
   }
 
   /**
-   * 将 ephemeral 会话晋升为 persistent。
-   *
-   * 晋升算法：
-   *   1. 若有 pendingCompact + pendingTurns：第一个 turn 带 compactBefore 触发
-   *      原子截断（此时文件为空，keepCount=0 → 落成 header + compact + firstTurn），
-   *      后续 turns 依次 append
-   *   2. 无 pendingCompact：逐个 flush
+   * 将 ephemeral 会话晋升为 persistent —— 把 pending 的原始 turns 按序
+   * 平铺落盘（append-only，无任何压缩边界参与）。
    *
    * 不触窗口 —— ephemeral 期间窗口已随每次 recordTurn 的接受协议前进；
-   * 晋升只是把 pending 原料 FIFO 落盘，磁盘形态与窗口保持同形（同一折叠算法），
-   * 无需再同步。
+   * 窗口是压缩视图、持久化是全量原文，二者本就允许分叉，晋升无需同步。
    */
   async promote(conversationId: string): Promise<boolean> {
     const session = this.sessions.get(conversationId);
@@ -635,19 +610,10 @@ export class ConversationManager {
     }
 
     // 逐个 flush：shift 只在单次 commitTurn 成功后执行 —— 任意中间失败 rethrow
-    // 时保留未持久化的 pending（retry 安全）。头 turn 若有 pendingCompact 则
-    // 带上 compactBefore（触发原子截断）；pendingCompact 仅在首次成功后清除。
+    // 时保留未持久化的 pending（retry 安全）。
     while (session.pendingTurns.length > 0) {
       const first = session.pendingTurns[0]!;
-      if (session.pendingCompact) {
-        await this.commitTurnCb(conversationId, {
-          turn: first,
-          compactBefore: session.pendingCompact,
-        });
-        session.pendingCompact = undefined;
-      } else {
-        await this.commitTurnCb(conversationId, { turn: first });
-      }
+      await this.commitTurnCb(conversationId, { turn: first });
       session.pendingTurns.shift();
     }
 
