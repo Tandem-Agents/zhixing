@@ -15,6 +15,7 @@ import type {
   RunResult,
   TurnContext,
   TurnSource,
+  WindowCompact,
 } from "@zhixing/core";
 
 // TurnContext 的唯一定义在 @zhixing/core（types/tools.ts）——此处只做 re-export，
@@ -56,18 +57,23 @@ export interface SessionRuntime {
     text: string,
     abortSignalOrOptions?: AbortSignal | RunTurnOptions,
   ): AsyncGenerator<AgentYield, RunResult>;
-  /** 当前消息历史（只读拷贝） */
+  /** 当前注意力窗口内容（只读拷贝）—— RPC 历史查询与 messageCount 的数据源 */
   getHistory(limit?: number): Message[];
   /**
-   * 用 canonical messages 覆盖内部 state（单向数据流）。
+   * 接受一个 run —— 注意力窗口前进的唯一入口。
    *
-   * 调用时机：ConversationManager.recordTurn 成功后拿到 commitTurn 返回的 canonical，
-   *   通过此方法回喂到 SessionRuntime —— 内存与磁盘严格一致，下次 run 直接用最新 state。
+   * 调用时机：ConversationManager.recordTurn 在持久化成功（persistent）或
+   *   pending 入列成功（ephemeral）之后调用——"先持久化、后入窗"的接受协议。
+   *   失败路径不调用：窗口停在原基底，下轮重试，无需任何回滚。
    *
-   * 契约：canonical 是包含 compactBefore summary pair + post-compact turns 的完整序列，
-   *   直接替换 SessionRuntime 内部 messages 即可（不是 append）。
+   * 语义：实现方先应用 windowCompact（若有，折叠被摘配对），再从 runMessages
+   *   派生本 run 的蒸馏对追加入窗。run 输入由 run(text) 瞬态构造
+   *   （[...窗口, 用户消息]），用户消息在 accept 之前不进入任何状态。
    */
-  updateMessages(canonical: Message[]): void;
+  acceptRun(input: {
+    runMessages: readonly Message[];
+    windowCompact?: WindowCompact;
+  }): void;
   /**
    * 终止当前 in-flight turn(若有)。
    *

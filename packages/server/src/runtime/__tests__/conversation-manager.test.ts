@@ -27,7 +27,7 @@ function createMockRuntime(sessionId: string): SessionRuntime {
         role: "assistant",
         content: [{ type: "text", text: `echo: ${text}` }],
       };
-      messages.push(userMsg, assistantMsg);
+      // 新协议：run 输入瞬态构造，内部状态只经 acceptRun 前进
       yield { type: "text_delta", text: `echo: ${text}` };
       return {
         agentResult: {
@@ -50,8 +50,12 @@ function createMockRuntime(sessionId: string): SessionRuntime {
     getHistory(limit) {
       return limit ? messages.slice(-limit) : messages;
     },
-    updateMessages(canonical) {
-      messages = [...canonical];
+    acceptRun(input) {
+      // 接受协议的窗口侧最小模拟：追加 [首条, 末条] 蒸馏对
+      messages.push(
+        input.runMessages[0]!,
+        input.runMessages[input.runMessages.length - 1]!,
+      );
     },
     abort(): boolean {
       aborted = true;

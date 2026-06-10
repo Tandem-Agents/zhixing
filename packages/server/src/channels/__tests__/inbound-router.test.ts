@@ -52,7 +52,7 @@ function createMockRuntime(response?: { text: string }): SessionRuntime {
       };
     }) as unknown as SessionRuntime["run"],
     getHistory: () => [],
-    updateMessages: vi.fn(),
+    acceptRun: vi.fn(),
     abort: vi.fn(() => false),
     dispose: vi.fn(),
   };
@@ -273,7 +273,7 @@ describe("InboundRouter", () => {
         };
       }) as unknown as SessionRuntime["run"],
       getHistory: () => [],
-      updateMessages: vi.fn(),
+      acceptRun: vi.fn(),
       abort: vi.fn(),
       dispose: vi.fn(),
     };
@@ -388,7 +388,7 @@ describe("InboundRouter", () => {
         };
       }) as unknown as SessionRuntime["run"],
       getHistory: () => [],
-      updateMessages: vi.fn(),
+      acceptRun: vi.fn(),
       abort: vi.fn(),
       dispose: vi.fn(),
     };

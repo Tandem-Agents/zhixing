@@ -141,8 +141,9 @@ export interface ITranscriptStore {
    * | `{compactBefore}`（手动 /compact） | 原子重写，按 turnsCompacted 切分保留末尾 | `header + compactBefore + retainedTurns` |
    * | `{}` | 非法 | throw `commitTurn requires at least turn or compactBefore` |
    *
-   * 返回 canonical `Message[]`：调用方直接 `state.messages = canonical`（REPL）或
-   * `session.runtime.updateMessages(canonical)`（server）。避免调用方自己再 load + rebuild。
+   * 返回 canonical `Message[]`：当前调用方（REPL / server）不再消费——内存状态由
+   * 注意力窗口经接受协议自行前进，不从持久化回喂；/clear 路径经 compactAll 的
+   * 返回值重建窗口仍依赖 canonical 形态。签名保留为 API 现状，store 重写时收敛。
    */
   commitTurn(
     conversationId: string,

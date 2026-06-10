@@ -42,8 +42,8 @@ function createMockRuntime(sessionId: string, opts: MockOptions = {}, initialMes
   return {
     sessionId,
     async *run(text): AsyncGenerator<AgentYield, RunResult> {
+      // 新协议：run 输入瞬态构造，内部状态只经 acceptRun 前进
       const userMsg: Message = { role: "user", content: [{ type: "text", text: typeof text === "string" ? text : "" }] };
-      messages.push(userMsg);
       if (opts.throwError) {
         throw new Error(opts.throwError);
       }
@@ -59,7 +59,6 @@ function createMockRuntime(sessionId: string, opts: MockOptions = {}, initialMes
         role: "assistant",
         content: [{ type: "text", text: `echo:${text}` }],
       };
-      messages.push(reply);
       yield { type: "turn_complete", turnCount: 1, usage: { inputTokens: 5, outputTokens: 5 } };
 
       return {
@@ -83,8 +82,12 @@ function createMockRuntime(sessionId: string, opts: MockOptions = {}, initialMes
     getHistory(limit) {
       return limit ? messages.slice(-limit) : [...messages];
     },
-    updateMessages(canonical) {
-      messages = [...canonical];
+    acceptRun(input) {
+      // 接受协议的窗口侧最小模拟：追加 [首条, 末条] 蒸馏对
+      messages.push(
+        input.runMessages[0]!,
+        input.runMessages[input.runMessages.length - 1]!,
+      );
     },
     abort(): boolean {
       aborted = true;
@@ -195,9 +198,9 @@ async function connect(port: number): Promise<RpcClient> {
 describe("session.* RPC (S2.D)", () => {
   let server: ZhixingServerInstance;
 
-  // 默认 commitTurn mock：模拟真实持久化语义——返回 "老 canonical + 新 turn 的 user/assistant"。
-  // 这让 runTurnWithCommit 的 completed 分支走 updateMessages(canonical)，
-  // adapter.messages 保有本轮消息，session.history RPC 能返回合理内容。
+  // 默认 commitTurn mock：记录持久化调用并维护一份对照 canonical（返回值不再被
+  // recordTurn 消费——窗口经 acceptRun 接受协议自行前进，session.history RPC
+  // 返回的是窗口投影）。
   //
   // 不关心持久化具体形态的测试（测 routing / abort / pending queue 等）通过此默认 cb 就够；
   // 需要断言持久化副作用的测试仍可覆盖式传自己的 commitTurn。

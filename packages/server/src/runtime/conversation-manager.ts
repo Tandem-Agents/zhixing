@@ -16,7 +16,7 @@
  */
 
 import {
-  rebuildCanonicalMessages,
+  windowCompactFromMarker,
   type AbortReason,
   type CompactMarker,
   type Message,
@@ -106,8 +106,9 @@ export type InitTranscript = (conversationId: string) => Promise<void>;
  *   - `{turn, compactBefore}` → 原子重写 + 追加 turn（按 turnsCompacted 截断）
  *   - `{compactBefore}` → 原子重写（无新 turn）
  *
- * 必须返回 canonical `Message[]` —— ConversationManager.recordTurn 用此回喂给
- * `session.runtime.updateMessages(canonical)`，实现单一事实源。
+ * 返回值（canonical）不再被消费 —— 内存状态由注意力窗口经接受协议自行前进
+ * （recordTurn 在落盘成功后调 `session.runtime.acceptRun`），不从持久化回喂。
+ * 签名保持与 store API 一致，待 store 重写时一并收敛。
  */
 export type CommitTurn = (
   conversationId: string,
@@ -121,7 +122,8 @@ export interface ConversationManagerCallbacks {
   /**
    * 原子持久化入口 —— 替代旧 `persistTurn`。
    *
-   * recordTurn 内部调用此回调落盘并拿 canonical 回喂 SessionRuntime.updateMessages。
+   * recordTurn 内部调用此回调落盘，成功后经 SessionRuntime.acceptRun 推进窗口
+   * （返回值不再被消费）。
    *
    * **配置契约（构造函数守卫）**：
    *   - 纯 ephemeral-only 场景（未提供 loadHistory / initTranscript）：可省略
@@ -524,50 +526,57 @@ export class ConversationManager {
   /**
    * 记录一个完成的 turn，并可选地应用本 run 的 compact 边界。
    *
-   * 返回 canonical `Message[]` —— 内部同时调用 `session.runtime.updateMessages(canonical)`
-   * 回喂 adapter，保证内存与磁盘严格一致（单一事实源）。
+   * 接受协议："先持久化（或 pending 入列）成功、后窗口前进"——成功后调
+   * `session.runtime.acceptRun`，窗口应用 windowCompact 折叠并追加本 run
+   * 蒸馏对。失败路径不触窗口：内存停在原基底，下轮重试，无需回滚。
+   * 过渡期双应用——compactBefore 仍照旧写盘（persistent）/ 截断 pending
+   * （ephemeral），窗口同步折叠，内存与磁盘 / pending 保持同形。
    *
    * 两条路径：
-   *   - persistent → commitTurn 回调（原子落盘 + 返 canonical）→ updateMessages
-   *   - ephemeral → 按 turnsCompacted 切分 pendingTurns，累积 pendingCompact，
-   *     内存版 rebuildCanonicalMessages → updateMessages；turnCount >= 2 自动 promote
+   *   - persistent → commitTurn 回调（原子落盘）→ acceptRun
+   *   - ephemeral → 按 turnsCompacted 切分 pendingTurns，累积 pendingCompact
+   *     （promote 的落盘原料）→ acceptRun；turnCount >= 2 自动 promote
    */
   async recordTurn(
     conversationId: string,
     turn: Turn,
     compactBefore?: CompactMarker,
-  ): Promise<Message[]> {
+  ): Promise<void> {
     const session = this.sessions.get(conversationId);
-    if (!session) return [];
+    if (!session) return;
 
     if (session.ephemeral) {
-      //ephemeral 分支：内存版 canonical 即时算出 + 回喂
+      // pending 入列即 ephemeral 的"持久化成功"——promote 据此 FIFO 落盘
       if (compactBefore) {
         // 按 turnsCompacted 切分 pendingTurns 保留末尾，pendingCompact 覆盖式记录
-        // （N11 累积已在 run-agent 闭包做过，此处只做边界 swap）
+        // （累积已在 run 闭包做过，此处只做边界 swap）
         const keepCount = Math.max(
           0,
           session.pendingTurns.length - compactBefore.turnsCompacted,
         );
-        session.pendingTurns = session.pendingTurns.slice(-keepCount);
+        // keepCount=0 必须显式给空数组 —— slice(-0) 等价 slice(0) 会返回整个
+        // 数组，全折场景下保留本该丢弃的 turns（与磁盘写入算法同款守卫）。
+        session.pendingTurns =
+          keepCount > 0 ? session.pendingTurns.slice(-keepCount) : [];
         session.pendingCompact = compactBefore;
       }
       session.pendingTurns.push(turn);
       session.turnCount++;
 
-      const canonical = rebuildCanonicalMessages(
-        session.pendingTurns,
-        session.pendingCompact ? [session.pendingCompact] : [],
-      );
-      session.runtime.updateMessages(canonical);
+      session.runtime.acceptRun({
+        runMessages: [turn.userMessage, turn.assistantMessage],
+        windowCompact: compactBefore
+          ? windowCompactFromMarker(compactBefore)
+          : undefined,
+      });
 
       if (session.turnCount >= 2) {
         await this.promote(conversationId);
       }
-      return canonical;
+      return;
     }
 
-    // persistent 分支：commitTurn 落盘 + 拿 canonical + 回喂
+    // persistent 分支：commitTurn 落盘成功后窗口前进
     //
     // 构造函数已守卫 "有持久化意图必须有 commitTurn"；此处的 assert 是 defense-in-depth ——
     // 防止有人构造时通过 `undefined as any` 等方式绕过类型检查后在运行时 bite。
@@ -578,13 +587,17 @@ export class ConversationManager {
           "(was this manager constructed without commitTurn while the session is not ephemeral?)",
       );
     }
-    const canonical = await this.commitTurnCb(conversationId, {
+    await this.commitTurnCb(conversationId, {
       turn,
       compactBefore,
     });
-    session.runtime.updateMessages(canonical);
+    session.runtime.acceptRun({
+      runMessages: [turn.userMessage, turn.assistantMessage],
+      windowCompact: compactBefore
+        ? windowCompactFromMarker(compactBefore)
+        : undefined,
+    });
     session.turnCount++;
-    return canonical;
   }
 
   /**
@@ -596,8 +609,9 @@ export class ConversationManager {
    *      后续 turns 依次 append
    *   2. 无 pendingCompact：逐个 flush
    *
-   * 不 updateMessages —— ephemeral 期间已通过 recordTurn 的内存版 canonical 回喂过；
-   * 晋升期间磁盘形态与内存版 canonical 保持一致（算法上等价），无需再触发同步。
+   * 不触窗口 —— ephemeral 期间窗口已随每次 recordTurn 的接受协议前进；
+   * 晋升只是把 pending 原料 FIFO 落盘，磁盘形态与窗口保持同形（同一折叠算法），
+   * 无需再同步。
    */
   async promote(conversationId: string): Promise<boolean> {
     const session = this.sessions.get(conversationId);

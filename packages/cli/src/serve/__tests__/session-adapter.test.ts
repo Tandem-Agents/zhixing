@@ -19,8 +19,11 @@ import type { SessionRuntime } from "@zhixing/server";
 import { createServerRuntimeAdapter } from "../session-adapter.js";
 import type { AgentRuntime, RunParams, RunResult } from "../../run-agent.js";
 
-function commitNewMessages(runtime: SessionRuntime, newMessages: Message[]): void {
-  runtime.updateMessages([...runtime.getHistory(), ...newMessages]);
+/** 模拟接受协议：caller（ConversationManager）在持久化成功后推进窗口 */
+function acceptTurn(runtime: SessionRuntime, result: RunResult): void {
+  runtime.acceptRun({
+    runMessages: [result.turn.userMessage, result.turn.assistantMessage],
+  });
 }
 
 interface MockBehavior {
@@ -185,7 +188,7 @@ describe("createServerRuntimeAdapter", () => {
     expect((yields[0] as { text: string }).text).toBe("hi");
   });
 
-  it("getHistory returns all messages including new ones from run（经 updateMessages 回喂）", async () => {
+  it("getHistory 反映窗口：run 后经 acceptRun 接受，得到本轮蒸馏对", async () => {
     const runtime = createServerRuntimeAdapter("test-2", createMockAgentRuntime());
     const gen = runtime.run("hello");
     let result: RunResult | undefined;
@@ -193,7 +196,7 @@ describe("createServerRuntimeAdapter", () => {
       const { value, done } = await gen.next();
       if (done) { result = value; break; }
     }
-    commitNewMessages(runtime, result!.newMessages);
+    acceptTurn(runtime, result!);
 
     const history = runtime.getHistory();
     expect(history).toHaveLength(2);
@@ -209,11 +212,11 @@ describe("createServerRuntimeAdapter", () => {
 
     const gen = runtime.run("hi");
     await expect(gen.next()).rejects.toThrow("boom");
-    // throw 路径 pop userMsg 防孤儿
+    // 输入瞬态构造，窗口未被触碰
     expect(runtime.getHistory()).toHaveLength(0);
   });
 
-  it("multiple sequential runs accumulate history（每轮经 updateMessages 回喂）", async () => {
+  it("multiple sequential runs accumulate history（每轮经 acceptRun 接受）", async () => {
     const runtime = createServerRuntimeAdapter("test-4", createMockAgentRuntime());
 
     const gen1 = runtime.run("first");
@@ -222,7 +225,7 @@ describe("createServerRuntimeAdapter", () => {
       const { value, done } = await gen1.next();
       if (done) { r1 = value; break; }
     }
-    commitNewMessages(runtime, r1!.newMessages);
+    acceptTurn(runtime, r1!);
 
     const gen2 = runtime.run("second");
     let r2: RunResult | undefined;
@@ -230,25 +233,23 @@ describe("createServerRuntimeAdapter", () => {
       const { value, done } = await gen2.next();
       if (done) { r2 = value; break; }
     }
-    commitNewMessages(runtime, r2!.newMessages);
+    acceptTurn(runtime, r2!);
 
     const history = runtime.getHistory();
     expect(history).toHaveLength(4);
   });
 
-  it("dispose clears history", async () => {
-    const runtime = createServerRuntimeAdapter("test-5", createMockAgentRuntime());
-    const gen = runtime.run("x");
-    let result: RunResult | undefined;
-    while (true) {
-      const { value, done } = await gen.next();
-      if (done) { result = value; break; }
-    }
-    commitNewMessages(runtime, result!.newMessages);
-    expect(runtime.getHistory()).toHaveLength(2);
+  it("dispose 透传底层运行体销毁（窗口随 adapter 一起弃置）", async () => {
+    let disposedWith: string | undefined;
+    const agent = createMockAgentRuntime();
+    (agent as unknown as { dispose: (r: string) => Promise<void> }).dispose =
+      async (reason: string) => {
+        disposedWith = reason;
+      };
+    const runtime = createServerRuntimeAdapter("test-5", agent);
 
     await runtime.dispose();
-    expect(runtime.getHistory()).toHaveLength(0);
+    expect(disposedWith).toBe("session-dispose");
   });
 
   it("getHistory respects limit parameter", async () => {
@@ -259,7 +260,7 @@ describe("createServerRuntimeAdapter", () => {
       const { value, done } = await gen1.next();
       if (done) { r1 = value; break; }
     }
-    commitNewMessages(runtime, r1!.newMessages);
+    acceptTurn(runtime, r1!);
 
     const gen2 = runtime.run("second");
     let r2: RunResult | undefined;
@@ -267,7 +268,7 @@ describe("createServerRuntimeAdapter", () => {
       const { value, done } = await gen2.next();
       if (done) { r2 = value; break; }
     }
-    commitNewMessages(runtime, r2!.newMessages);
+    acceptTurn(runtime, r2!);
 
     const last2 = runtime.getHistory(2);
     expect(last2).toHaveLength(2);
@@ -282,8 +283,8 @@ describe("createServerRuntimeAdapter", () => {
     expect(runtime.confirmationBroker).toBe(agent.confirmationBroker);
   });
 
-  describe("non-completed 路径自修", () => {
-    it("reason=error：return runResult 前 pop userMsg，history 保持空", async () => {
+  describe("失败路径：窗口不前进（无回滚动作可言）", () => {
+    it("reason=error：窗口未被触碰，history 保持空", async () => {
       const runtime = createServerRuntimeAdapter(
         "test-err",
         createMockAgentRuntime({ reason: "error" }),
@@ -298,7 +299,7 @@ describe("createServerRuntimeAdapter", () => {
       expect(runtime.getHistory()).toHaveLength(0);
     });
 
-    it("reason=max_turns：同样 pop userMsg", async () => {
+    it("reason=max_turns：同样不前进", async () => {
       const runtime = createServerRuntimeAdapter(
         "test-max",
         createMockAgentRuntime({ reason: "max_turns" }),
@@ -313,7 +314,7 @@ describe("createServerRuntimeAdapter", () => {
       expect(runtime.getHistory()).toHaveLength(0);
     });
 
-    it("reason=aborted（agent-loop 内部 abort，非 abortSignal）：同样 pop userMsg", async () => {
+    it("reason=aborted（agent-loop 内部 abort，非 abortSignal）：同样不前进", async () => {
       const runtime = createServerRuntimeAdapter(
         "test-abrt",
         createMockAgentRuntime({ reason: "aborted" }),
@@ -328,23 +329,26 @@ describe("createServerRuntimeAdapter", () => {
       expect(runtime.getHistory()).toHaveLength(0);
     });
 
-    it("reason=completed：保留 userMsg 等 caller updateMessages（回归不变）", async () => {
+    it("reason=completed：窗口同样不前进，直到 caller 走接受协议", async () => {
       const runtime = createServerRuntimeAdapter(
         "test-ok",
         createMockAgentRuntime({ reason: "completed" }),
       );
 
       const gen = runtime.run("q");
+      let result: RunResult | undefined;
       while (true) {
-        const { done } = await gen.next();
-        if (done) break;
+        const { value, done } = await gen.next();
+        if (done) { result = value; break; }
       }
 
-      expect(runtime.getHistory()).toHaveLength(1);
-      expect(runtime.getHistory()[0]!.role).toBe("user");
+      // run 结束本身不动窗口——接受是 caller（持久化成功后）的动作
+      expect(runtime.getHistory()).toHaveLength(0);
+      acceptTurn(runtime, result!);
+      expect(runtime.getHistory()).toHaveLength(2);
     });
 
-    it("non-completed 后再次 run 不留下 orphan user 消息（跨 run 防护）", async () => {
+    it("non-completed 后再次 run：内存始终停在原基底（跨 run 防护）", async () => {
       const runtime = createServerRuntimeAdapter(
         "test-seq",
         createMockAgentRuntime({ reason: "error" }),
@@ -392,7 +396,7 @@ describe("createServerRuntimeAdapter", () => {
       expect(runResult?.agentResult.reason).toBe("completed");
     });
 
-    it("in-flight abort:agent loop 通过 abortSignal 自然产 RunResult.aborted,history pop", async () => {
+    it("in-flight abort:agent loop 通过 abortSignal 自然产 RunResult.aborted,窗口不前进", async () => {
       const runtime = createServerRuntimeAdapter(
         "test-inflight-abort",
         createMockAgentRuntime({
@@ -419,7 +423,7 @@ describe("createServerRuntimeAdapter", () => {
       }
       expect(result?.agentResult.reason).toBe("aborted");
 
-      // userMsg 已被 pop —— history 保持空
+      // 窗口未被触碰 —— history 保持空
       expect(runtime.getHistory()).toHaveLength(0);
     });
 
@@ -574,7 +578,7 @@ describe("createServerRuntimeAdapter", () => {
       }
 
       expect(result?.agentResult.reason).toBe("aborted");
-      // userMsg 已 pop
+      // 窗口未被触碰
       expect(runtime.getHistory()).toHaveLength(0);
     });
 

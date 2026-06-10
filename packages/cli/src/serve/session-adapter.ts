@@ -17,9 +17,12 @@
 
 import {
   abortWithReason,
+  createAttentionWindow,
   createInterruptController,
+  restoreAttentionWindowFromCanonical,
   userMessage,
   type AbortReason,
+  type AttentionWindowState,
   type Message,
   type AgentYield,
   type RunResult,
@@ -47,7 +50,16 @@ export function createServerRuntimeAdapter(
   agentRuntime: AgentRuntime,
   initialMessages?: Message[],
 ): SessionRuntime {
-  let messages: Message[] = initialMessages ? [...initialMessages] : [];
+  // 注意力窗口 —— "给 LLM 看什么"的唯一内存权威。恢复历史经 canonical →
+  // 窗口重建（预算化启动装填落地前的过渡形态）；窗口只经 acceptRun 前进
+  // （ConversationManager 在持久化 / pending 入列成功后调），run 输入瞬态
+  // 构造、失败路径窗口不动——无需任何回滚。
+  const window: AttentionWindowState =
+    initialMessages && initialMessages.length > 0
+      ? restoreAttentionWindowFromCanonical(initialMessages, {
+          conversationId: sessionId,
+        })
+      : createAttentionWindow({ conversationId: sessionId });
   let currentController: AbortController | null = null;
 
   return {
@@ -71,10 +83,6 @@ export function createServerRuntimeAdapter(
       const controller = createInterruptController({ parent: abortSignal });
       currentController = controller;
 
-      // 入口必 push,non-completed / throw 分支按 reason 判断 pop —— 防孤儿 userMsg
-      // 的 adapter 层第一道防线(与 runTurnWithCommit 的 updateMessages 回滚是双保险)。
-      messages.push(userMessage(text));
-
       const queue: QueueItem[] = [];
       const waiters: Array<() => void> = [];
       const wakeOne = () => {
@@ -93,7 +101,9 @@ export function createServerRuntimeAdapter(
       // 导致 partial 内容丢失 + abortReason 拿不到 channel 渲染层。
       agentRuntime
         .run({
-          messages: [...messages],
+          // run 输入 = 窗口事实 + 本轮用户消息，瞬态构造——用户消息不预写入
+          // 任何状态，accept 之前窗口不前进。
+          messages: [...window.getMessages(), userMessage(text)],
           turnIndex: turnIndex ?? 0,
           source,
           turnContext,
@@ -131,17 +141,11 @@ export function createServerRuntimeAdapter(
           if (item.kind === "yield") {
             yield item.value!;
           } else if (item.kind === "done") {
-            // non-completed(error / max_turns / aborted)→ pop userMsg 防孤儿。
-            // aborted 路径下,partial assistant_message 已通过 yield 流出去给 channel
-            // 消费,adapter.messages 里仅有本轮 userMsg(无 assistant 配对)→ 必须 pop。
-            const runResult = item.result!;
-            if (runResult.agentResult.reason !== "completed") {
-              messages.pop();
-            }
-            return runResult;
+            // 窗口未被本 run 触碰（输入是瞬态构造的）——non-completed / 持久化
+            // 失败都自然停在原基底，孤儿 userMsg 这一类状态不可能产生。
+            return item.result!;
           } else {
-            // throw 路径(provider 网络错 / 编程错):无对应 assistant,pop userMsg 防孤儿。
-            messages.pop();
+            // throw 路径(provider 网络错 / 编程错)：同上，无状态需要清理。
             throw item.error;
           }
         }
@@ -153,14 +157,14 @@ export function createServerRuntimeAdapter(
     },
 
     getHistory(limit) {
-      return limit ? messages.slice(-limit) : [...messages];
+      const msgs = window.getMessages();
+      return limit ? msgs.slice(-limit) : [...msgs];
     },
 
-    updateMessages(canonical) {
-      // 单一事实源：调用方通过 commitTurn 拿到 canonical 后回喂，
-      // adapter 内部 messages 整体替换（不是 append）—— 下次 run 的 `[...messages]`
-      // 作为 agent-loop 的输入时，自带压缩效果，跨 run 状态与磁盘严格一致。
-      messages = [...canonical];
+    acceptRun(input) {
+      // 接受协议的窗口侧终点：ConversationManager 在持久化 / pending 入列成功
+      // 后调——先应用 windowCompact 折叠，再追加本 run 的蒸馏对。
+      window.acceptRun(input);
     },
 
     abort(reason?: AbortReason): boolean {
@@ -174,7 +178,7 @@ export function createServerRuntimeAdapter(
     },
 
     async dispose() {
-      messages = [];
+      // 窗口随 adapter 一起被弃置（崩溃即弃、重启由历史加载重建——派生视图）。
       // 透传底层运行体末窗 onWindowClose —— serve 每会话经 createAgentRuntime
       // 建 main runtime（首窗 onWindowOpen 已触发）,销毁须触发其末窗。
       await agentRuntime.dispose("session-dispose");
