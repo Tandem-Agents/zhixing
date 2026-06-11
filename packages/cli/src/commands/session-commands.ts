@@ -37,6 +37,7 @@ import {
 } from "../runtime/conversation-window.js";
 import type { CliWriter } from "../screen/index.js";
 import { layout } from "../tui/style.js";
+import { renderHistoryTail } from "../history-tail.js";
 import { formatRelativeTime } from "./format.js";
 
 export interface SessionCommandsDeps {
@@ -292,6 +293,13 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
           `\n  已切换到 ${chalk.cyan(target.name)}（${opened.turnCount} 轮对话）\n`,
         ),
       );
+      // 历史尾巴：切换即见最近几轮变暗摘录（与启动恢复同款"回到工位"展示，
+      // 清空边界由倒读原语保证——刚清空的对话零输出）
+      await renderHistoryTail({
+        store: conv.store,
+        conversationId: target.id,
+        writer,
+      });
     } catch (err) {
       writer.line(
         chalk.red(

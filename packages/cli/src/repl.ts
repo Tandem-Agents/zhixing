@@ -85,6 +85,7 @@ import {
   type RunResult,
 } from "@zhixing/orchestrator/runtime";
 import { renderError } from "./render.js";
+import { renderHistoryTail } from "./history-tail.js";
 import { createOutputRenderer, getLlmChunkDump } from "./output/index.js";
 import {
   createScreenController,
@@ -486,6 +487,14 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   };
   for (const line of initialRegionLines()) cliWriter.line(line);
 
+  // 历史尾巴 —— "回到工位"的用户侧一半：恢复对话时渲染最近几轮变暗摘录
+  //（agent 侧启动装填已"全记得"，用户侧打开即见，信息对称）。新对话无历史
+  // 跳过；输出落 scrollback、不进 initialRegionLines（后者是 resize 重建的
+  // 纯净欢迎块单一来源，历史尾巴与屏内对话同生命周期）。
+  if (resumedConversationName !== null && conversationId !== null) {
+    await renderHistoryTail({ store, conversationId, writer: cliWriter });
+  }
+
   // 清屏回到刚进入交互模式的初始态 —— `/clear` 在清完数据后调用。chrome 终端
   // 走 renderScreen.rebuildAfterResize(整屏清 + scrollback 全清 + chrome 自适应
   // 重画 + region 内容重写,与 firstAttach 同源序列),复用 initialRegionLines
@@ -759,6 +768,17 @@ export async function startRepl(options: ReplOptions): Promise<void> {
         );
         if (acquireWarning) {
           cliWriter.line(chalk.dim(`  ${acquireWarning}\n`));
+        }
+        // 历史尾巴：场景的工位同款"回到工位"展示——/work 的 auto-resume 接续
+        // 了场景对话（agent 已装填记得），用户侧同样要看见。与主对话启动 /
+        // /resume 同一语义同一待遇；新场景对话无历史零输出。enter 成功后
+        // conversationId 必非空，守卫仅为类型收窄。
+        if (state.conv.conversationId !== null) {
+          await renderHistoryTail({
+            store: state.conv.store,
+            conversationId: state.conv.conversationId,
+            writer: cliWriter,
+          });
         }
         taskTail?.refresh();
         return;
