@@ -92,6 +92,7 @@ describe("powerProfile(scene)", () => {
       "web_fetch",
       "load_skill",
       "save_skill",
+      "admit_skill",
       "Task",
     ]);
   });

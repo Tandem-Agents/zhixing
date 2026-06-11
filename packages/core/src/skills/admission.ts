@@ -149,3 +149,52 @@ function parseVerdict(text: string): AdmissionVerdict {
 function failSafe(reason: string): AdmissionVerdict {
   return { decision: "needs-confirm", reason };
 }
+
+// ─── 二段协议支撑件(admit_skill 工具消费) ───
+
+/**
+ * 确认 token 的有效窗口 —— needs-confirm 返回报告到用户确认重调的时限。
+ * 过期即要求重新审查(安全方向);同时是孤儿暂存清扫(sweepStaleStaging)的
+ * 年龄阈值,两者共用一个参数保证"登记还活着的暂存绝不会被当孤儿清掉"。
+ */
+export const ADMISSION_TOKEN_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * 暂存目录内容摘要 —— 二段协议的 artifact 绑定锚:用户确认的必须是审查过的
+ * 那一份,确认重调时重算比对,不一致即拒(防确认与落库之间暂存被改写)。
+ *
+ * 口径:相对路径升序,逐文件 sha256,再对「路径\n文件哈希\n」序列整体 sha256。
+ * 只哈希常规文件(staging 经 acquire 产生、admit 时 symlink 另被拒,此处
+ * 跳过非常规项即可)。
+ */
+export async function computeStagingDigest(dir: string): Promise<string> {
+  const { createHash } = await import("node:crypto");
+  const files: string[] = [];
+  await collectFiles(dir, "", files);
+  files.sort();
+  const agg = createHash("sha256");
+  for (const rel of files) {
+    const content = await fs.readFile(path.join(dir, rel));
+    const fileHash = createHash("sha256").update(content).digest("hex");
+    agg.update(`${rel}\n${fileHash}\n`);
+  }
+  return agg.digest("hex");
+}
+
+async function collectFiles(
+  root: string,
+  rel: string,
+  out: string[],
+): Promise<void> {
+  const entries = await fs.readdir(path.join(root, rel), {
+    withFileTypes: true,
+  });
+  for (const e of entries) {
+    const childRel = rel ? `${rel}/${e.name}` : e.name;
+    if (e.isDirectory()) {
+      await collectFiles(root, childRel, out);
+    } else if (e.isFile()) {
+      out.push(childRel);
+    }
+  }
+}

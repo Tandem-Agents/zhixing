@@ -19,7 +19,13 @@ export type {
 } from "./builtin.js";
 export { scanSkillContent } from "./content-scan.js";
 export type { ContentThreat } from "./content-scan.js";
-export { reviewAdmission, assessSkill, acquireToStaging } from "./admission.js";
+export {
+  reviewAdmission,
+  assessSkill,
+  acquireToStaging,
+  computeStagingDigest,
+  ADMISSION_TOKEN_TTL_MS,
+} from "./admission.js";
 export type {
   AdmissionLlm,
   AdmissionVerdict,

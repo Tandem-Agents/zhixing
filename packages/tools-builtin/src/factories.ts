@@ -11,14 +11,24 @@
  *   3. 在需要启用该工具的 AgentRoleProfile.enabledTools 中加工具名
  */
 
-import type { MemoryStore, SkillMode, SkillStore, ToolDefinition } from "@zhixing/core";
-import { runSkillSavePipeline } from "@zhixing/core";
+import type {
+  AdmissionLlm,
+  MemoryStore,
+  SkillMode,
+  SkillStore,
+  ToolDefinition,
+} from "@zhixing/core";
+import { assessSkill, runSkillSavePipeline } from "@zhixing/core";
 import { createBashTool } from "./bash.js";
 import { createEditTool } from "./edit.js";
 import { createGlobTool } from "./glob.js";
 import { createGrepTool } from "./grep.js";
 import { createMemoryTool } from "./memory.js";
-import { createLoadSkillTool, createSaveSkillTool } from "./skill.js";
+import {
+  createAdmitSkillTool,
+  createLoadSkillTool,
+  createSaveSkillTool,
+} from "./skill.js";
 import { createReadTool } from "./read.js";
 import { createWebFetchTool } from "./web-fetch.js";
 import { createWriteTool } from "./write.js";
@@ -45,10 +55,16 @@ export interface BuiltinToolContext {
    */
   readonly skillStore?: SkillStore;
   /**
-   * 当前运行档的技能模式 —— save_skill 对未显式指定 mode 的草稿按此缺省
-   * (工作场景 → work、主对话 → main)。缺省 "main"。
+   * 当前运行档的技能模式 —— save_skill / admit_skill 对未显式指定 mode 的
+   * 输入按此缺省(工作场景 → work、主对话 → main)。缺省 "main"。
    */
   readonly skillMode?: SkillMode;
+  /**
+   * 接入审查的独立裁判通道(绑 main 档单发,装配期直接注入)—— admit_skill
+   * 启用时必须注入;独立调用、不带对话上下文(运动员 / 裁判分离:外部技能
+   * 可能含 prompt 注入,主模型读过其内容后自身可能被操纵,裁决不归它)。
+   */
+  readonly admissionLlm?: AdmissionLlm;
 }
 
 export type BuiltinToolFactory = (ctx: BuiltinToolContext) => ToolDefinition;
@@ -93,6 +109,24 @@ export const BUILTIN_TOOL_FACTORIES: Readonly<
     const store = ctx.skillStore;
     return createSaveSkillTool(
       (draft) => runSkillSavePipeline(store, draft),
+      ctx.skillMode ?? "main",
+    );
+  },
+  admit_skill: (ctx) => {
+    if (!ctx.skillStore) {
+      throw new Error(
+        "admit_skill 工具需装配期注入 ctx.skillStore —— 缺失说明 SkillStore 未构造并下传,拒绝静默兜底",
+      );
+    }
+    if (!ctx.admissionLlm) {
+      throw new Error(
+        "admit_skill 工具需装配期注入 ctx.admissionLlm(独立裁判通道)—— 缺失即装配契约破坏,拒绝静默兜底",
+      );
+    }
+    const llm = ctx.admissionLlm;
+    return createAdmitSkillTool(
+      ctx.skillStore,
+      (skill) => assessSkill({ llm }, skill),
       ctx.skillMode ?? "main",
     );
   },

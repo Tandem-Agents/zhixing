@@ -18,8 +18,9 @@ import {
 } from "../builtin.js";
 import { skillNameToId } from "../id.js";
 
-/** 首份内置能力的 id —— 与注册集 name 同源派生,测试不硬编码字符串拼写。 */
+/** 内置能力 id —— 与注册集 name 同源派生,测试不硬编码字符串拼写。 */
 const DISTILL_ID = skillNameToId("提炼技能");
+const ADMIT_ID = skillNameToId("接入技能");
 
 let root: string;
 let store: SkillStore;
@@ -62,9 +63,22 @@ describe("builtin 注册集", () => {
   });
 
   it("工具预算红线:每能力 ≤ 1 工具(膨胀即触发暴露形态切换裁决,不得静默超)", () => {
-    const entry = getBuiltinSkill(DISTILL_ID)!;
-    expect(entry.tools).toEqual(["save_skill"]);
-    expect((entry.tools ?? []).length).toBeLessThanOrEqual(1);
+    expect(getBuiltinSkill(DISTILL_ID)!.tools).toEqual(["save_skill"]);
+    expect(getBuiltinSkill(ADMIT_ID)!.tools).toEqual(["admit_skill"]);
+    for (const id of [DISTILL_ID, ADMIT_ID]) {
+      expect((getBuiltinSkill(id)!.tools ?? []).length).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it("「接入技能」已登记:全模式可见、方法含红线段", () => {
+    const entry = getBuiltinSkill(ADMIT_ID);
+    expect(entry).not.toBeNull();
+    expect(entry!.modes).toEqual(["main", "work"]);
+    expect(entry!.body).toContain("原样转述");
+    for (const mode of ["main", "work"] as const) {
+      const ids = builtinIndexEntries(mode, new Set()).map((e) => e.id);
+      expect(ids).toContain(ADMIT_ID);
+    }
   });
 });
 
@@ -142,11 +156,15 @@ describe("builtin 分池不挤占用户 top-N", () => {
     const userTopN = await store.queryTopN("main", n);
     expect(userTopN).toHaveLength(n); // builtin 不占用户名额
 
-    const composed = [
-      ...userTopN,
-      ...builtinIndexEntries("main", new Set(userTopN.map((r) => r.id))),
-    ];
-    expect(composed.length).toBe(n + 1); // 用户满额 + builtin 另列
+    const builtinPool = builtinIndexEntries(
+      "main",
+      new Set(userTopN.map((r) => r.id)),
+    );
+    const composed = [...userTopN, ...builtinPool];
+    // 用户满额不被挤占,builtin 全员在池外另列(条数随注册集自然增长)
+    expect(composed.length).toBe(n + builtinPool.length);
+    expect(builtinPool.length).toBeGreaterThanOrEqual(1);
     expect(composed.map((e) => e.id)).toContain(DISTILL_ID);
+    expect(composed.map((e) => e.id)).toContain(ADMIT_ID);
   });
 });

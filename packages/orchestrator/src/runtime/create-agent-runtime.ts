@@ -627,7 +627,38 @@ export async function createAgentRuntime(
     options.memoryScope?.kind === "workscene" ? "work" : "main";
   const skillStore = options.skillStore ?? new SkillStore(getSkillsRoot());
 
-  const builtinCtx = { proxy: config.network?.proxy, memoryStore, skillStore, skillMode };
+  // 思考控制装配期一次性解析（runtime 生命周期内 config + 解析后的 role 均不变，
+  // 无需 per-run 重算）。三类用途严格分区：
+  //   - roleThinking ：**真实 per-role 映射**（每个 role 按其自身 config 解析），
+  //     沿 llmRoles 同路径下传 ToolExecutionContext 供工具按所用角色扇出；
+  //     不跟随 primaryRole（工具调 ctx.llm.light 就该拿 light 的思考配置）
+  //   - primaryThinking：主对话 loop + Task 子 agent loop（二者均跑
+  //     roles[primaryRole] 单 model）→ 取 roleThinking[primaryRole]
+  //   - lightThinking ：MemoryFlush + callText + 段切换摘要（恒走 roles.light，
+  //     不跟 primaryRole；质量敏感单发（callText main）走 roles.main 用 mainThinking，
+  //     见 secondary-llm-capability ADR-SLLM-009）
+  // 构造位置先于 builtinCtx：单发通道（mainCallLLM）要直接注入工具上下文
+  // （admit_skill 的独立裁判通道），零 lazy 间接层。
+  const roleThinking: ResolvedRoleThinking = {
+    main: resolveRoleThinking(roles.main, config.llm?.main?.thinking),
+    light: resolveRoleThinking(roles.light, config.llm?.light?.thinking),
+    power: resolveRoleThinking(roles.power, config.llm?.power?.thinking),
+  };
+
+  // 单发文本 LLM 调用按档位分流到不同角色——质量敏感单发（callText "main"）
+  // 走 main，记忆提取与 callText 默认档走 light（I/O 边界结构化数据净化）。
+  // 详见 call-llm.ts 的设计注释。
+  const mainCallLLM = createMainCallLLM(roles, roleThinking.main);
+  const lightCallLLM = createLightCallLLM(roles, roleThinking.light);
+
+  const builtinCtx = {
+    proxy: config.network?.proxy,
+    memoryStore,
+    skillStore,
+    skillMode,
+    // 接入审查独立裁判：绑 main 档单发（质量敏感安全裁决）、不带对话上下文
+    admissionLlm: (prompt: string) => mainCallLLM([userMessage(prompt)]),
+  };
   const baseTools: ToolDefinition[] = [];
   for (const name of profile.enabledTools) {
     if (name === "Task") continue; // 后置装配
@@ -709,21 +740,8 @@ export async function createAgentRuntime(
     ),
   );
 
-  // 思考控制装配期一次性解析（runtime 生命周期内 config + 解析后的 role 均不变，
-  // 无需 per-run 重算）。三类用途严格分区：
-  //   - roleThinking ：**真实 per-role 映射**（每个 role 按其自身 config 解析），
-  //     沿 llmRoles 同路径下传 ToolExecutionContext 供工具按所用角色扇出；
-  //     不跟随 primaryRole（工具调 ctx.llm.light 就该拿 light 的思考配置）
-  //   - primaryThinking：主对话 loop + Task 子 agent loop（二者均跑
-  //     roles[primaryRole] 单 model）→ 取 roleThinking[primaryRole]
-  //   - lightThinking ：MemoryFlush + callText + 段切换摘要（恒走 roles.light，
-  //     不跟 primaryRole；质量敏感单发（callText main）走 roles.main 用 mainThinking，
-  //     见 secondary-llm-capability ADR-SLLM-009）
-  const roleThinking: ResolvedRoleThinking = {
-    main: resolveRoleThinking(roles.main, config.llm?.main?.thinking),
-    light: resolveRoleThinking(roles.light, config.llm?.light?.thinking),
-    power: resolveRoleThinking(roles.power, config.llm?.power?.thinking),
-  };
+  // 思考控制与单发通道已在装配早期构造（builtinCtx 之前,见上）;此处仅派生
+  // 主对话档与 light 档别名供下游消费。
   const primaryThinking = roleThinking[primaryRole];
   const lightThinking = roleThinking.light;
 
@@ -929,13 +947,6 @@ export async function createAgentRuntime(
   // 对话级 Resettable 注册表 —— 视图层 stage 实现 Resettable 后在装配期注册，
   // /clear 一并清空。
   const resettables: Resettable[] = [];
-
-  // 单发文本 LLM 调用按档位分流到不同角色——质量敏感单发（callText "main"）
-  // 走 main，记忆提取与 callText 默认档走 light（I/O 边界结构化数据净化）。
-  // 详见 call-llm.ts 的设计注释。
-  const mainThinking = roleThinking.main;
-  const mainCallLLM = createMainCallLLM(roles, mainThinking);
-  const lightCallLLM = createLightCallLLM(roles, lightThinking);
 
   // 记忆提取 —— 挂在段切换 afterSummarize：内容被摘要
   // 替代、离开注意力窗口之时正是从原文蒸馏长期记忆的自然时刻。提取核心

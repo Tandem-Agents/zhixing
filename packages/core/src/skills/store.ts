@@ -390,6 +390,39 @@ export class SkillStore {
     return dir;
   }
 
+  /**
+   * 清理孤儿暂存:删除 staging 区内 mtime 超过 maxAgeMs 的 candidate 目录。
+   *
+   * 二段接入协议的确认 token 只活在工具实例内存——needs-confirm 后进程
+   * 退出 / reload 会留下无主暂存,新实例无登记表无从识别;按目录 mtime 判
+   * 年龄即可安全清扫(刚建的 in-flight 候选在 TTL 窗内不被扫;误删早期
+   * pending 的后果是"重新审查",安全方向)。staging 区不存在 → 零动作。
+   */
+  async sweepStaleStaging(maxAgeMs: number): Promise<number> {
+    const root = stagingRoot(this.root);
+    let entries: { name: string; isDirectory(): boolean }[];
+    try {
+      entries = await fs.readdir(root, { withFileTypes: true });
+    } catch {
+      return 0;
+    }
+    const cutoff = Date.now() - maxAgeMs;
+    let removed = 0;
+    for (const e of entries) {
+      if (!e.isDirectory()) continue;
+      const dir = path.join(root, e.name);
+      try {
+        const stat = await fs.stat(dir);
+        if (stat.mtimeMs >= cutoff) continue;
+        await fs.rm(dir, { recursive: true, force: true });
+        removed += 1;
+      } catch {
+        // 单目录 stat / 删除失败(占用等)跳过,下次清扫再来
+      }
+    }
+    return removed;
+  }
+
   /** 清理一个暂存目录。只接受 staging 区内的路径(防 caller 误传库内其它目录)。 */
   async discardStaging(dir: string): Promise<void> {
     const rel = path.relative(stagingRoot(this.root), path.resolve(dir));

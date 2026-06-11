@@ -25,7 +25,7 @@ export const MAIN_IDENTITY_INSTRUCTIONS = [
  * 主 agent 启用的工具集 —— builtin 与 Task 的权威源。
  *
  * 包含：
- *   - 10 个内置工具（由 BUILTIN_TOOL_FACTORIES 提供实例）
+ *   - 11 个内置工具（由 BUILTIN_TOOL_FACTORIES 提供实例）
  *   - Task（启用子 agent 派发；create-agent-runtime 后置装配）
  *
  * **不含外部依赖型工具**（如 schedule 需要 scheduler ref，由 cli 通过
@@ -43,6 +43,7 @@ const MAIN_ENABLED_TOOLS = [
   "web_fetch",
   "load_skill",
   "save_skill",
+  "admit_skill",
   "Task",
 ] as const;
 
@@ -91,6 +92,8 @@ export interface SubAgentProfileOptions {
  * 保留 load_skill / save_skill：技能库读写的是 ~/.zhixing/skills（app-state，
  * 非 workdir 本地文件），不属被剔除的本地文件类；无 workdir 场景仍可加载
  * work 区技能、也可把对话里的做法沉淀成技能。
+ * **不保留 admit_skill**：接入要读用户给的本地路径（filesystem/read）——
+ * 无 workdir 场景按构造无本地文件操作面,接入回主对话做。
  */
 const WORKSCENE_NON_FILE_TOOLS = [
   "memory",
