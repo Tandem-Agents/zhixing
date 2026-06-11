@@ -26,7 +26,7 @@ export const FEATURE_CHROME = "chrome";
 
 /**
  * 需要 chrome 才能交互的命令（`/config`·`/mcp` 的 alt-screen 编辑器、`/skills` 管理屏、
- * `/skill-new`·`/skill-add` 创作 / 接入屏）共用的可见性规则：无 chrome 终端下补全与
+ * `/skill-add` 接入屏）共用的可见性规则：无 chrome 终端下补全与
  * `/help` 都不列出。这只管"列不列"，硬打名字仍能命中——执行期兜底见 `requireChrome`。
  */
 export const chromeOnlyVisibility: CommandVisibility = {

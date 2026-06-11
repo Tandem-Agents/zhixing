@@ -76,7 +76,6 @@ import { registerConfigCommands } from "./commands/config-commands.js";
 import { SkillCommandSource } from "./commands/skill-command-source.js";
 import { FEATURE_CHROME } from "./commands/command-visibility.js";
 import { registerSkillsCommand } from "./skills/manager-command.js";
-import { registerSkillNewCommand } from "./skills/authoring-command.js";
 import { registerSkillAddCommand } from "./skills/admission-command.js";
 import { PASTE_TOKEN_PATTERN, PasteRegistry } from "./paste-registry.js";
 import { resolveFileRefs } from "./resolve-file-refs.js";
@@ -965,25 +964,9 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     refreshCommands: () => tRegistry.refresh(),
   });
 
-  // /skill-new 创作入口（alt-screen AI 编辑屏）—— 把刚做的事 / 一个想法收成技能。
-  // 注册在 /<name> 动态源之前（撞名探测可见）；LLM 走 main 档单发，落盘经
-  // Store.create，保存后刷新 /<name> 补全让新技能即时可唤醒。
-  registerSkillNewCommand({
-    registry: tRegistry,
-    dispatcher: typeaheadDispatcher,
-    rl,
-    renderer,
-    screen: renderScreen,
-    writer: cliWriter,
-    callText: (prompt) => session.runtime.callText(prompt, "main"),
-    createSkill: (draft) => session.skillStore.create(draft),
-    getMessages: () => state.conv.window.getMessages(),
-    getDefaultMode: () =>
-      session.activeMode.kind === "workscene" ? "work" : "main",
-    refreshCommands: () => tRegistry.refresh(),
-    isLibraryEmpty: async () =>
-      (await session.skillStore.listAll()).length === 0,
-  });
+  // 创建 / 打磨技能无专门入口 —— 走对话流能力内化:模型经索引命中内置方法
+  //「提炼技能」、起草打磨后调 save_skill 落盘;run 收尾的技能版本比对会刷新
+  // /<name> 补全(见上),新技能当轮即可唤起。
 
   // /skill-add 接入入口 —— 外部技能（本地路径）经扫描 + AI 研判后入库。注册在
   // /<name> 动态源之前（撞名探测可见）；研判 LLM 走 main 档，接入后刷新 /<name> 补全。

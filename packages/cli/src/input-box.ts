@@ -33,7 +33,7 @@ import { PASTE_TOKEN_PATTERN } from "./paste-registry.js";
 export interface InputBoxOptions {
   /** 框上方标题（本函数加 bold）。 */
   readonly title: string;
-  /** 标题行前缀字符(已染色);缺省 ▎章节锚。drafting 等态可传别的(如笔帧)替换标题行而不动框。 */
+  /** 标题行前缀字符(已染色);缺省 ▎章节锚。调用方可传别的字符(如动效帧)替换标题行而不动框。 */
   readonly titleGlyph?: string;
   /** 当前输入文本（裸，无 ANSI；可含硬换行）。 */
   readonly draft: string;

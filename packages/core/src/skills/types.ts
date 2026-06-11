@@ -73,7 +73,7 @@ export interface ManagedSkillRecord extends SkillRecord {
 }
 
 /**
- * 创建 / 编辑技能的草稿 —— 由起草引擎产出、用户策展确认后落盘。
+ * 创建 / 打磨技能的草稿 —— 模型在对话流中起草、用户明确同意后经保存管线落盘。
  * id 由 name 派生(skillNameToId),不入草稿;创建恒落 own(本地区)。
  */
 export interface SkillDraft {

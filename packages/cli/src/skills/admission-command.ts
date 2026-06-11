@@ -5,7 +5,7 @@
  *
  * 裁决:`safe` 自动接入;`escalate` 确凿恶意挡死(`--force` 也不越);`needs-confirm` 可疑,
  * 展示威胁 + 研判后收一个确认键(`y` 接入、其它取消),或用户预先带 `--force` 表示"已复核、
- * 接入"。确认读键复用 `createKeyEventStream`(同 /skill-new 的 stdin 接管,不碰 chrome 输入区)。
+ * 接入"。确认读键复用 `createKeyEventStream`(stdin 接管,不碰 chrome 输入区)。
  *
  * 接入源 v1 为本地路径;URL / 仓库由 `acquireToStaging` 的 `SkillImportSource` 按 kind 增量。
  */

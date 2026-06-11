@@ -22,7 +22,7 @@ describe("renderInputBox", () => {
     expect(r.lines.length).toBe(4);
   });
 
-  it("titleGlyph 替换默认 ▎ 标题前缀(drafting 换笔用),框结构不变", () => {
+  it("titleGlyph 替换默认 ▎ 标题前缀(动效帧替换用),框结构不变", () => {
     const def = renderInputBox({ title: "想怎么改", draft: "", cursor: 0, width: 50 });
     const pen = renderInputBox({
       title: "奋笔疾书中",
