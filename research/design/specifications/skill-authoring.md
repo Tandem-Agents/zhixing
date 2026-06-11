@@ -1,4 +1,4 @@
-# 技能（Skill）创建与编辑 — 交互与架构规格
+# 技能（Skill）创建与打磨 — 能力内化规格
 
 <!-- ══════════════════════════ 文档写作规约 · 请勿删除 ══════════════════════════ -->
 > **本文是执行规格(execution spec),不是修订日志。**
@@ -7,119 +7,89 @@
 > **演化方式**:设计变化时**原地修改**,不追加修订段。历史留给 `git log`。
 <!-- ═════════════════════════════════════════════════════════════════════════ -->
 
-> **需求依据**:[drafts/skill-module.md](../drafts/skill-module.md) §2.3 / §3「看得见、管得了」（用户手动沉淀:一次写下、长期复用)。
-> **父规格**:[skill-system.md](./skill-system.md)（Store / 索引 / `load_skill` / 控制面 §五）。本文**详化其「创建 / 编辑」交互面**,不重述 Store 与索引机制。
-> **相关规格**:[input-typeahead.md](./input-typeahead.md)（命令面板）、[cli-ui-design-language.md](./cli-ui-design-language.md)。
-> **事实依据**:对接点均对已落地代码核实,标注 `文件:行/符号`。
+> **需求依据**:[drafts/capability-internalization.md](../drafts/capability-internalization.md)（已定稿:能力内化机制 + 全部裁决）、[drafts/skill-module.md](../drafts/skill-module.md) §2.3 / §3。
+> **父规格**:[skill-system.md](./skill-system.md)（Store / 索引 / `load_skill` / builtin 来源区 / 能力工具注册表）。本文详化**创建与打磨这一个内化能力**,不重述机制层。
+> **事实依据**:对接点均对已落地代码核实,标注 `文件:符号`;未落地件标注归属计划。
 
 ## 〇、定位与范围
 
-本文回答**v1 用户怎么创建 / 编辑一个技能**。v1 = 静态 + 手动,技能管家(v2)尚未存在,**手动沉淀就是 v1 的英雄流程**——用户当天打开是空库,价值全靠"我把我这摊事的做法亲手收下来、之后一致复用"。
+本文回答 **v1 用户怎么创建 / 打磨一个技能**。形态 = **能力内化**:用户面前没有"新建技能"这个功能（无专门入口、无屏）,在对话里说一句"把这套存下来",助手当场拟草稿、来回改、存好、继续。创建技能是通用能力内化机制（父规格 builtin 来源区 + 能力工具注册表）的**首个承载**。
 
-- **本文范围**:创建与编辑的**交互面 + 对接点**——两个创建入口、草稿生成、两路编辑交互(AI 编辑屏 / 外部编辑器)、保存与生效。
-- **不在范围**:技能的发现 / 索引 / 加载 / 唤醒(skill-system.md §三~§五)、外部接入审查(§六 Admission)、自我进化(v2 技能管家)。
-- **v1 边界**:**永远用户发起、必须用户确认才落盘**;不自动创建、不主动弹"要不要存成技能"——那些是 v2 在同一引擎上加的自主触发。
+- **本文范围**:内置方法的内容要求、`save_skill` 工具契约、对话流协议、提议边界、创建路径退役清单。
+- **不在范围**:索引 / 加载 / 唤醒机制（父规格 §三~§五）、外部接入审查（父规格 §六 Admission,`/skill-add` 路径不动）、`/skills` 管理器（独立路径,本次不动）、v2 自主产生（[skill-evolution.md](./skill-evolution.md)）。
+- **v1 边界**:提议有边界（§四）、保存必须用户明确接受（§三）;自动产生 / 迭代是 v2 技能管家在同一管线上加的自主触发。
 
-## 一、核心模型:创建即策展,不是手写
+## 一、核心模型:起草是模型行为,护栏在保存工具
 
-**创建一个技能的最优形态不是"写",是"收"**:用户脑子里是**意图**(「这个做法记下来」「description 再尖一点」「加一条坑」),不是 markdown 的行与语法;而刚刚把事做对的是 agent。所以——
+**判据**（需求文档定稿）:要不要委派 / 切屏,看这件事用户需不需要全程参与。创建技能是创作打磨,需要用户全程在场、紧凑来回——所以内化进主 agent、当面做,不外包子 agent、不开编辑屏。
 
-> **agent 当编辑器,用户用自然语言描述,agent 落笔;用户只做策展(确认 / 微调)。** 用户全程不被要求在终端里手敲 markdown。
+形态拆解,各居其位:
 
-这同时解三层痛点:① 空白页 + YAML schema 的机械摩擦;② 用户写不好那条决定能否被检索命中的 `description`、也拿捏不好正文详略;③ 做法常常已发生在对话里,不该让用户跑去空白页复述。它也正是父规格 §1「skill 越来越由 agent 写下、瘦成指向特定性 + 沉淀教训」的落地形态。
+- **方法**（教"怎么提炼"）= builtin 来源区的一份 SKILL.md（父规格 builtin 节）,索引常驻稳定前缀（独立小额预算池）、命中或用户意图触发时经 `load_skill` 按需加载——与用户技能同走渐进披露管线,零新机制。
+- **起草**（写草稿）= **模型行为,无工具**。草稿就是对话里的一段话,markdown 渲染落对话流（scrollback 原生滚动）;没有起草工具、没有 JSON 中间格式、不花单发 LLM 调用——那是编辑屏时代"表单需要结构化字段"的遗产。修改 = 用户说话、模型改了再贴。**显式权衡**:草稿驻留对话上下文（多轮打磨即多版草稿进窗口）,这是内化形态的已知代价、非缺陷——创作本就是对话的内容;缓解 = 方法要求按改动幅度只贴变化部分（§二.4）+ 段切换自然压缩。
+- **保存**（落盘）= `save_skill` 工具,四不变量的唯一焊接点（§三）。判断全交模型,护栏全在工具——通用 `Write` 给不出这些保证,这正是不开"直接不管"口子的原因。
 
-**起草引擎是 v1/v2 共享插座**:"从上下文蒸馏出一个技能草稿"这个能力,v1 接到**用户触发 + 策展确认**,v2 技能管家接到**自主复盘触发 + 来源边界**——同一引擎、不同触发方。v1 把它造好,v2 即纯增量(对齐父规格 §九铁律)。
+## 二、内置方法(「提炼技能的方法」)的内容要求
 
-## 二、入口与草稿生成
+方法是这个能力的产品灵魂——代码量最小、价值最大。承载形态:builtin SKILL.md（包资源、随版本分发、只读;用户定制走 fork-to-own,父规格 builtin 节）。内容必须覆盖,且**只**以方法文字承载（不进代码）:
 
-**创建入口 `/skill-new`**(agent 起草、用户策展;**先开 AI 编辑屏、再在屏内起草**——立刻见屏,不在主屏干等几秒 LLM)。一个命令按对话上下文自适应,覆盖两种来法:
+1. **何时提议**（§四边界的 prompt 层落地）:仅两种时机——用户显式要求;或一套做法刚被验证走通且置信足够高。只提议、绝不自动保存,被拒不就同一件事重提。
+2. **收自语境**:起草前先一句说清"收的是哪件事"（对话里的哪段 / 用户哪句意图）——猜错用户一句话就能纠;这是旧 UX 评审"收自:X"知情原则的对话流形态。
+3. **瘦版判据**（skill-module §1 定稿形态）:只留用户的特定约定 + 这次的坑 / 最优路径,主动丢通用步骤;`description` 以"什么时候该用"为导向（直接决定日后检索命中）;`mode` 默认按当前场景（工作场景 → `work`,否则 `main`）、用户可改。
+4. **打磨协议**:草稿贴在对话里,邀请用户用大白话指哪改哪;改后只贴变化部分或重贴全文（按改动幅度判断）。
+5. **保存前明确同意**:必须拿到用户明确接受（"存吧 / 就这样 / 保存"）;意图不明就问一句。这是产品层护栏,与 §三系统层护栏双层焊死。
+6. **保存后诚实交代**:按 `save_skill` 返回如实说——存好了、`/<name>` 随时唤起、聊到相关话题会被检索命中（说具体场景,不说"自动想起"——那是 v2 能力,v1 承诺了会失信）;若返回脱敏计数 > 0,告知"已自动抹掉 N 处密钥,不会写进技能"。
+7. **同名即更新**:用户说"把那个技能补一条"时按 upsert 走（§三）,改前确认目标技能、改后同样要明确接受。
 
-1. **从对话(做完某事后)** —— 带最近对话上下文(经 `state.conv.messages` 取、`extractText` 转写成「用户 / 助手: …」),进屏即从对话起草;可附一句指向(命令 rest)作首句意图。
-2. **从意图(冷启动空库)** —— 无对话上下文时进**空白**编辑屏,用户在输入区说的第一句即意图、据此起草骨架。
+## 三、`save_skill` 工具契约（= SkillSavePipeline + 确认护栏的工具包装）
 
-接线**照 `/config`·`/mcp` 的 REPL 层 handler 模式**(`config-command.ts:handleConfigCommand`/`runEditorCommand`):`renderer.stop()` + `rl.pause()` 让出 stdin → 开 AI 编辑屏(§3.1)→ 退出时 `rl.resume()` + `screen.reassertCursorHidden()`,保存后刷新 `/<name>` 补全。注册走命令现代路径(直接挂 `tRegistry` + `CommandDispatcher`,同 `/skills`、task 命令);handler 经闭包注入窄能力(`callText("main")` / `store.create` / 取 messages / 取场景默认 mode),**不写成普通 `CommandDef`** —— 通用分发的 `CommandHandlerContext` 只有 `{ args, rawInput, runtime }`、拿不到这些会话能力(故照 config-command 在 REPL 层装配),也**不走 `execution:"agent"`**(那是父规格 §5.1 `/<name>` 唤醒用、整条发主 agent loop,既非独立会话、也无"开屏"路径)。起草引擎是**单发结构化生成、不进主 agent 回合**。
+**两层正交分解,不混为一谈**:**`SkillSavePipeline`**（核心管线）焊死四不变量,**无触发语义**——谁来的、要不要确认,它不知道也不该知道;**`save_skill`**（唯一新工具,经父规格能力工具注册表登记,v1 直进 `tools[]`,红线:每能力 ≤ 1 工具）= Pipeline + 用户确认护栏的 v1 包装,服务对话流路径。v2 技能管家走 `StewardWriter → SkillSavePipeline` 后台路径（自主落盘 + `stewardCreated` 来源标记,skill-evolution）——复用的是**管线**,不背上工具的确认语义;"用户确认"是产品护栏、"落盘不变量"是系统资产,两者分层、互不污染。
 
-> 父规格 §5.2 设想的「管理器内『新建』视图切换」(管理器与编辑屏同 alt-screen 工作区内切换)v1 未做 —— `/skill-new` 已覆盖两种来法的功能(含冷启动空库),管理器内切换是后续的体验增量。
+**输入**:`{ name, description, body, mode? }`——模型从对话里的定稿草稿组装;`mode` 缺省按当前场景。
 
-**草稿内容**(agent 替用户解决质量与安全,这正是用户做不好的部分):
+**upsert 语义**:`id = skillNameToId(name)`（父规格 §5.1）。own 区无此 id → 创建（`SkillStore.create`）;已有 → 更新（`SkillStore.update`,linked 同名时沿用其 fork-on-edit 与撞名校验语义）。创建与打磨是同一能力、同一工具、同一焊接点;v2 技能管家迭代走同一管线。
 
-- `name`
-- `description` —— 以**「什么时候该用」**为导向(直接决定日后被模型检索命中)
-- 正文 —— **瘦版**:只留用户的特定约定 + 这次的坑 / 最优路径,主动丢通用步骤(父规格 §1 形态)
-- **凭证脱敏(安全关键)** —— 草稿源自对话、对话里可能粘过 secret,而技能会反复加载进上下文、且设计上可分享,危害被放大,**绝不固化进技能**。通用 secret 脱敏建在系统层(供 skill 与未来其他模块共用,非 skill 专属):`scrubSecrets`(`core/src/security/secret-scrubber.ts`)—— 只匹配**高置信**模式(已知服务商密钥前缀 / PEM 私钥块 / JWT / Bearer / 明确的「字段名=值」赋值),**不做高熵串猜测**以免把 git sha / base64 图片等正常长串误当 secret 毁掉正文,命中处替换成带类别占位符。`bi-zhixing-credentials-block`(`builtin-rules.ts:76`)只是挡 AI 读写 credentials.json 的 **path 规则、不含文本扫描模式**,故 scrubber 是自建件、非复用内置规则。
-- `mode` 默认按**当前所处场景**(在工作场景里建 → `work`,否则 `main`),可在策展时由 AI 改(对齐父规格 §七「用户写的由用户定 mode」)
+**四不变量焊接**（`SkillSavePipeline` 本体,执行顺序即管线顺序）:
 
-**起草引擎**(`core/src/skills/drafting.ts`):`draftSkill`(首次,从上下文 / 意图)+ `reviseSkill`(按指令改写),取 `main` 档(质量敏感的撰写任务)产**结构化草稿**(name + description + body + mode)。机制同 `AISecuritySteward`(`ai-steward.ts`)的「一次独立调用 + 解析结构化输出 + fail-safe」范式 —— 注入一个窄 LLM 接口 `(prompt) => Promise<string>`,拼 system 角色 + 上下文 → 单发 → 解析 JSON 草稿(无 JSON / 缺字段即抛:起草失败就是失败、不兜底半成品,与裁判的 fail-safe 不同)→ 过脱敏。**不是工具循环**:起草只是一次结构化生成、不需要工具(authoring 早期措辞写的 `tool-loop` 不准,以此为准)。引擎只收注入的 LLM 接口、不绑运行时,故 v1 在 cli 绑 `callText("main")`、v2 技能管家在 orchestrator 绑自己的通道,同一引擎纯增量(父规格 §九)。**在 AI 编辑屏内被调用**(首次起草 / 后续按指令改写,即 §3.1 的 `editSkill` 访问器),产出落事务草稿态、不直接落盘。
+1. **凭证脱敏**:`scrubSecrets`（`core/src/security/secret-scrubber.ts`,已落地）对 name / description / body 全量过滤,返回命中计数——草稿源自对话、对话里可能粘过 secret,技能会反复进上下文且可分享,绝不固化。
+2. **来源落位**:恒写 `own/<id>/SKILL.md`（本地区,目录即来源,父规格 §二）;builtin / linked 不可写。
+3. **格式与分区**:标准 SKILL.md + YAML frontmatter（`stringifyFrontmatter`,`core/memory/frontmatter.ts`）、`mode` 写 `index.json`、原子写（`writeAtomic`）——全部经 Store 既有写 API,不绕过唯一磁盘访问点。
+4. **索引一致性**:落盘后触发索引产生管线标记重建;生效时机沿既有纪律——`/<name>` 唤醒立即可用（`listAll` 实时扫描）,系统提示词索引在下一个注意力窗口换代时进入稳定前缀（窗口内 systemPrompt byte-equal 不破,父规格 §3.2/3.3）。
 
-## 三、编辑交互(两路,文件为唯一真相源)
+**返回**:`{ id, outcome: "created" | "updated", scrubbedCount, hint }`——`hint` 携 `/<id>` 唤起事实,方法据此向用户诚实交代;`scrubbedCount > 0` 驱动脱敏可见。
 
-两路编辑并存,**单一真相源 = 磁盘上的 SKILL.md 草稿;同一时刻只有一个编辑面在改它**——杜绝"两个编辑器抢一个文件"的竞态。
+**安全归属（系统层护栏,属 `save_skill` 包装层、不属 Pipeline）**:`save_skill` 是持久化副作用工具,按既有安全管线走（副作用工具的边界声明 + 确认策略,✎ 副作用锚渲染）,**不声明 `app-state` 自动放行**——读工具 `load_skill` 的 internal 放行语义（父规格 §四）不适用于写持久资产;用户说"存"后若管线要求确认就确认一次,信任规则沉淀后自然免。静默落盘在机制上不可能（产品层 §二.5 + 系统层双重护栏）。
 
-### 3.1 主路:AI 编辑屏(对话式)
+## 四、提议边界与 v2 关系
 
-一个**专门写的 alt-screen 交互屏**:顶部内容区(渲染 `name` / `description` / 路径 / 正文预览),底部输入区(用户的自然语言指令)。它**不复用** config-editor 的 `runEventLoop`(那是 panel-stack 表单导航器、不是对话式编辑器),**也不复用** `loading` action(其 `renderLoadingFrame` 会 `renderer.clear()` 盖成全屏"请稍候"spinner、把内容预览藏掉 —— `loading.ts:20`);而是复用更低层、合身的原语与模式:
+提议时机与禁止项写进内置方法（§二.1）,不进代码——模型判断、方法约束。v2 技能管家的"自主复盘产生 / 迭代"是**后台路径**:经 `StewardWriter` 走同一 `SkillSavePipeline`（不经 save_skill 工具包装、不背确认语义）+ 来源标记（`stewardCreated`,父规格 §九）+ 自己的门槛,与对话内提议互不替代。v1 不实现任何自动产生。
 
-- **底线 —— 必须走 alt-screen,禁用主 buffer 清屏路径。** 编辑屏进 alternate screen buffer(`\x1b[?1049h`),终端**原子保存** main buffer 整体(scrollback + viewport + chrome + 对话历史),退出(`\x1b[?1049l`)**原子恢复** —— 在 alt buffer 里随便重画都碰不到主对话历史,是**终端层物理隔离、不靠纪律**(`screen-controller.ts` suspend/resume 注释明述此为"不毁主历史"而选的路;DECSTBM 手工清屏那条曾是"历史消失"bug 源,**禁用**)。返回主回路调 `ScreenController.reassertCursorHidden()`(`screen/screen-controller.ts:reassertCursorHidden`)重申 chrome 光标不变量。
-- **复用的原语**(均为中性 `tui/` 的独立件):`Renderer`(`tui/render.ts`,整帧渲染成串、一次 `flush` 的**双缓冲**)、`KeyEventStream`(`tui/input.ts`,`next(signal)` 可取消)、alt-screen 进退 + **三层退出防御**(`finally` + `process.once("exit")` emit `\x1b[?1049l`,`runner.ts:88-94`/`97`/`154`)、**事务草稿**模式(改完不即落盘、`Ctrl+C` 整体丢弃,对标 `WorkingState`,`types.ts:121`)、**注入式异步访问器**模式(面板不感知 LLM,对标 `mcpResolve`,`types.ts:183`)。
-- **专门的事件循环**:`渲染整帧 → await 按键 / 等 editSkill(可取消) → 应用结果`;异步 AI 编辑期间**保留内容区、改完(或流式)就地重画内容**,而非 `loading` 的全屏 spinner 帧——这是与现成 `loading` 的关键区别。
-- **避免耦合债**:上述原语已抽到中性 `tui/`(`tui/render.ts` / `tui/input.ts` / `tui/key-event.ts` / `tui/key-decoder.ts` + 既有 `screen/screen-controller.ts`)—— config-editor、`/skills` 技能管理器(浏览 / 状态操作,父规格 §5.2)与本编辑屏同建其上;skill 侧不反向依赖 config-editor 内部。
+## 五、对话流协议与 UX 原则落点
 
-**核心交互**:用户在底部说需求 → 调注入的 `editSkill(draft, instruction, signal, report)`(内部走起草引擎 §二、按指令改草稿、过脱敏,返回新草稿)→ 内容区**就地重画**(alt buffer 自有、对主对话零影响)。**所有修改(name / description / `mode` / 正文)全经 AI,屏内不设手动可编辑字段** —— 独立编辑会话(AI 上下文 = 这一个技能 + 改动意图,与主对话隔离)。满意 → 确认 → 经注入 writer(对标 `ConfigEditorContext.writers`,`types.ts:321`/`346`)落 Store(§四)。
+| 旧 UX 评审原则 | 内化形态落点 |
+|---|---|
+| 收自:X 语境知情 | 方法 §二.2——起草前模型口头说明 |
+| 脱敏可见 | `save_skill` 返回 `scrubbedCount` → 方法 §二.6 告知（真抹了才说,不无中生有） |
+| 诚实承诺 | 方法 §二.6——只说 v1 真有的（`/<name>` 唤起 + description 检索命中） |
+| 放弃 / 覆盖护栏 | 保存前明确同意（双层焊死,§二.5 + §三）;upsert 改前确认目标 |
 
-**实时同步可行性(已对 screen-controller 核实)**:成立,且稳、无副作用 —— 全部发生在我们独占的 alt buffer 内,主对话被终端冻结保存、碰不到。防闪靠 `Renderer` 的双缓冲(整帧渲染、一次 flush);流式则合并 chunk、约 10–20fps 节流重画。**唯一会破底线的写法是用主 buffer 清屏来画编辑屏 —— 架构上禁用。** 流畅度按"TUI 必须自跑视觉"规约,实现后 `pnpm cli` 实测确认。新建的只是:skill 草稿状态 + 内容 / 输入的渲染与事件循环 + `editSkill` 访问器。
+草稿渲染走各端既有 markdown 投影（cli 的 markdown 渲染 / 渠道卡片）,无任何专属 UI 代码——这是"全接入面可用"验收项的实现方式:能力装配在 runtime 层（方法经 builtin 索引、工具经注册表进 `createAgentRuntime` 装配）,cli / serve / 飞书 / ephemeral 同一管线。
 
-### 3.2 逃生口:外部编辑器(用户自己的 GUI 编辑器)
+## 六、创建路径退役清单
 
-提示"想自己改?按 Ctrl+E 用你的编辑器打开"(底部是自由文本输入,故元命令走控制键 —— `tui/key-event.ts` 为此新增 `ctrl-e`)。**打开是纯确定性问题、不放 AI**(见决策三),实现在 `editor-resolve.ts`。
+随本规格生效退役（三条路径相互独立,`/skills` 管理器与 `/skill-add` admission 不动;config-editor 等其他模块零波及）:
 
-- **编辑器解析(确定性链)**:用户显式配置 → `$VISUAL` → `$EDITOR` → `git config core.editor` → 在 PATH 上探测已知编辑器(code / cursor / subl / idea / zed / nvim / vim)→ OS 兜底(Windows `notepad`、mac `open -t`、linux `nano`)。都没命中 → 退 OS 兜底 + caller 提示固定设一个。探测(which / where)与 spawn 都注入、可纯逻辑单测。`git config core.editor` 这环留了注入位(`gitEditor`)但 v1 REPL 暂未读取 —— env + PATH 探测 + OS 兜底已覆盖常见情形,后续补一次 `git config` 读取即接上。
-- **无闪启动**:`.cmd`/`.bat` 包装(如 `code.cmd`)直接拉会闪一个临时控制台,故 spawn 走 **`windowsHide`**(等价 .NET `CreateNoWindow`)+ detached + `unref`,无窗口启动规避闪屏。(更细的「从 `code.cmd` 推同级 `Code.exe`」精确解析 v1 未做,`windowsHide` 已覆盖;若实测仍有闪再补,按"TUI 必须自跑视觉"规约由 `pnpm cli` 确认。)
-- **不等关闭**:v1 拉起即返回、**不加 `--wait`** —— 用户在 GUI 窗口里改,回屏靠 §3.3 的 mtime 比对一次性重读,比阻塞等关闭轻且稳。
-- **本地 TTY 专用**:`/skill-new` 注册在 typeahead(chrome 本地 cli)路径,故外部编辑器入口在此天然可用;远程 / daemon / 无头没有桌面编辑器 → 那些场景只走 3.1 AI 编辑屏(对话式哪儿都能用,外部编辑器是本地逃生口)。
+- `cli/src/skills/authoring-command.ts` —— `/skill-new` 命令注册撤（typeahead 注册与 dispatcher handler 一并）
+- `cli/src/skills/editor-screen.ts`、`cli/src/skills/editor-controller.ts` —— alt-screen 编辑屏与阶段机
+- `cli/src/skills/editor-resolve.ts` —— 外部编辑器解析链（其唯一消费者是编辑屏 Ctrl+E;"长内容编辑还给用户编辑器"是远期方向,届时另议承载）
+- `core/src/skills/drafting.ts` —— `draftSkill` / `reviseSkill` 起草引擎（起草无工具;其提炼判据融入内置方法 §二.3,不保留代码形态）;`core/src/skills/index.ts` barrel 的 drafting 导出一并摘除
+- `tui/key-event.ts` 的 `ctrl-e`、`composeViewport` 等公共原语**保留**（中性 tui 件,非 skill 专属）
 
-### 3.3 两路的衔接(决策四:文件单一真相源、一次一面)
+保留不动:`scrubSecrets`（系统层,save_skill 复用）、`SkillStore` 全部写 API（save_skill 的落盘后端）、admission 全链、manager 全链。
 
-**不做实时双向回灌**(两个编辑器同时活在一个文件 = 竞态 + fs.watch 边角,重且不稳)。改为:
+## 七、测试拓扑
 
-- 从 AI 编辑屏按 X 跳外部编辑器 = **先把当前草稿落到文件 + 交接**;AI 编辑屏进入"外部编辑中"暂停态(不接受 AI 指令)。
-- 用户在外部编辑器改完(GUI 编辑器在自己窗口,AI 编辑屏的 alt-screen 不受影响)。
-- 回到屏内下一次交互时,比对 mtime、**变了就一次性重读**——非持续 watch、非双向同步。极轻、极稳,两路都保住、任何时刻只一面在写。
-
-## 四、保存与生效
-
-确认 → 经注入 writer 调 Store 写 `own/<id>/SKILL.md`(父规格 §二):`id = skillNameToId(name)`(父规格 §5.1,撞名校验:own 同名遮蔽 linked / 提示改名)、`mode` 写 `index.json`、原子写(`writeAtomic`)。落盘走 **Store 已落地的 own 写 API**:`create(draft)`(新建)/ `update(id, draft)`(改写,linked-only 触发 fork-on-edit、改名时迁移 index 状态与 usage 到新 id + 撞名校验),区别于接入 `linked/` 的 `admit`。落盘后**立即可 `/<name>` 唤醒**,下个会话 / 模式切换由索引产生管线自然纳入(父规格 §三,本步不强制即时重建索引)。
-
-## 五、安全归属
-
-- **凭证脱敏**:起草与每次 `editSkill` 都过脱敏(`scrubSecrets`,§二);通用 scrubber 已建在系统层(`core/src/security/secret-scrubber.ts`),非 skill 专属件。
-- **app-state 内部**:若起草 / 编辑经 agent 侧工具(写 `own/` 草稿)实现,该工具声明 `app-state` 边界、判 `internal` 自动放行(对标 `load_skill`,父规格 §四)。
-- **外部编辑器 spawn 是宿主侧本地操作**:拉起的是用户自己的编辑器进程,非 agent 经工具调用的写入,不经 SecurityPipeline(同 Store 自身 fs 操作,父规格 §六放行落盘的宿主侧写语义);realpath 目录边界仍由 Store 在读写 `own/` 时一处收口(父规格 §一边界判断#1)。
-
-## 六、归属与对接点(汇总)
-
-| 包 | 内容 | 关键对接 |
-|---|---|---|
-| `core/src/skills/` | 起草引擎 `draftSkill` / `reviseSkill` | `drafting.ts`:注入窄 LLM 接口 `(prompt)=>Promise<string>` + 拼 system 角色单发 + 解析 JSON + 过脱敏(同 `ai-steward.ts` 范式,**非 tool-loop**);落盘用 Store 已落地的 `create` / `update`、`skillNameToId`、`writeAtomic` |
-| `core/src/security/` | 通用 secret 脱敏(系统层,首个消费者是 skill) | `secret-scrubber.ts`:`scrubSecrets` 高置信模式(服务商密钥 / PEM / JWT / Bearer / 赋值)+ 带类别占位符;**不复用** `bi-zhixing-credentials-block`(那是 path 规则、无文本扫描) |
-| `orchestrator` | 起草用的 main 档单发 LLM 能力 | `AgentRuntime.callText(_, "main")`(`create-agent-runtime.ts`)—— editSkill 访问器在 **cli** 绑它装配,对标 mcpResolve 的注入处(`config-command.ts`) |
-| `cli` | AI 编辑屏(controller + render + key + alt-screen loop)、外部编辑器解析 + 无闪 spawn、editSkill 访问器装配、`/skill-new` 入口 | `editor-controller.ts` / `editor-screen.ts`(复用 `tui/` 的 `Renderer` / `KeyEventStream` + 三层退出防御,同 `/skills` 管理器、不反依赖 config-editor)、`editor-resolve.ts`(确定性解析链 + `windowsHide` 无闪 + mtime 重读)、`authoring-command.ts`(照 `config-command.ts` 开屏 + 绑 `callText("main")` + `store.create` + 取 `state.conv.messages`);`tui/key-event.ts` 新增 `ctrl-e`;`screen-controller.ts:reassertCursorHidden` |
-
-## 七、v1 → v2 跨版插座
-
-v2 技能管家完整架构见 [skill-evolution.md](./skill-evolution.md);本节只列创作侧给 v2 的复用点。
-
-- **起草引擎**(§二) = v2 技能管家自主复盘新建 / 迭代的**同一引擎**;v1 接"用户触发 + 策展确认",v2 接"自主触发 + 来源边界",纯增量。
-- **`editSkill` 访问器**与起草引擎同源:v2 的自主迭代复用它对已有技能改写。
-- v1 的**用户确认闸门**是 v2「proactive offer(主动提议存成技能)」要替换 / 旁路的那一处,接口预留即可。
-
-## 八、测试拓扑
-
-落地单测全用 mock 注入(LLM / fs / stdin·stdout / editor spawn),无真编辑器真网真 LLM;alt-screen 的进退 / 流畅度 / 键感按"TUI 必须自跑视觉"由 `pnpm cli` 实测(同 `/skills` 管理器,loop 是 I/O、不单测)。
-
-- **secret 脱敏**(`secret-scrubber.test.ts`):各类高置信模式命中 + 占位符替换;正常长串(git sha / base64)不误伤;赋值式保字段名换值;组合去重。
-- **起草引擎**(`drafting.test.ts`):从上下文 / 意图产结构化草稿;mode 默认 / 覆盖;**对话内 secret 不进草稿**(脱敏断言);起草失败即抛(无 JSON / 缺字段)、不兜底;prompt 含上下文与意图。
-- **编辑屏控制器**(`editor-controller.test.ts`):起草成功换草稿 / 失败记错留原草稿 / **放弃等待结果丢弃**;保存交 writer;外部编辑两路衔接(进暂停态、mtime 变了重读、未变保留)。
-- **编辑屏视图 + 按键**(`editor-screen.test.ts`):各阶段渲染(空草稿引导 / 字段 + 正文 / **drafting 保留内容非全屏 spinner** / external 提示 / error);按键映射(输入缓冲 / 回车提交 / Ctrl+S 保存 / Ctrl+E 外部 / Ctrl+C·Esc 放弃 / external 态任意键读回)。
-- **外部编辑器解析**(`editor-resolve.test.ts`):优先级链(configured / VISUAL / EDITOR / git / PATH 探测 / OS 兜底)、空串跳过、spawn 收到 命令 + [...参数, 文件]。
-- **接线纯件**(`authoring-command.test.ts`):对话上下文转写 + 取最近 N 条;外部文件 round-trip(含 mode 保留 / 缺失回落)。
-- **保存生效**:走 Store 已落地的 `create` / `update`(`own/<id>/SKILL.md`、`skillNameToId` 定 id + 撞名、`mode` 写 index、原子写),其测试在 Store 侧;落盘后 `/<name>` 即可唤醒。
+- **save_skill 工具**:upsert 双路（无 id 创建 / 有 id 更新）;对话内 secret 不落盘（脱敏断言 + scrubbedCount 返回）;恒落 own 区、builtin / linked 拒写;mode 缺省与显式;返回字段完整;撞名校验沿 Store 语义。
+- **内置方法注册**:builtin 来源区被发现、索引含其条目、`load_skill` 可加载全文;**负向边界验收在父规格 §十「builtin 边界」逐条钉死**(listAll / listForManagement / slash 零暴露、不写 usage、不进 index.json、分池不挤占、own 遮蔽)——实现本能力时该组用例必须随 builtin 落地一并交付,不得后补。
+- **退役清理**:命令注册表无 `/skill-new`;skills 目录无 editor-* / drafting 残留引用（grep 级断言归 lint / 评审）。
+- **对话流端到端**（实测,非单测）:按"TUI 必须自跑视觉"规约 `pnpm cli` 走一轮——提议 → 草稿 → 改一轮 → 存 → `/<name>` 唤起。
