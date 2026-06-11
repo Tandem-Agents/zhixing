@@ -38,6 +38,9 @@ import {
   ShardedTranscriptStore,
   SnapshotStore,
   conversationsDir,
+  runRetentionSweep,
+  getWorkScenesRoot,
+  getWorkSceneConversationsRoot,
 } from "@zhixing/core";
 import {
   createServerContext,
@@ -54,6 +57,7 @@ import type {
   ZhixingConfig,
   ZhixingCredentials,
 } from "@zhixing/providers";
+import fsp from "node:fs/promises";
 import { runStartupCheck } from "../startup.js";
 import chalk from "chalk";
 import { createAgentRuntime } from "@zhixing/orchestrator/runtime";
@@ -430,6 +434,24 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     }
   };
 
+  // 本 home 全部对话根：用户域 + 各工作场景域。按物理目录枚举——保留清理是
+  // 物理层维护，场景目录存在即纳入，不依赖注册表状态（注册表丢失不该让
+  // 孤儿场景的过期数据永生）。
+  const collectConversationRoots = async (): Promise<string[]> => {
+    const roots = [conversationsDir({ kind: "user" })];
+    try {
+      const entries = await fsp.readdir(getWorkScenesRoot(), {
+        withFileTypes: true,
+      });
+      for (const e of entries) {
+        if (e.isDirectory()) roots.push(getWorkSceneConversationsRoot(e.name));
+      }
+    } catch {
+      // 无工作场景目录——合法空域
+    }
+    return roots;
+  };
+
   const journalStore = new JournalStore();
   const systemHandlers = buildSystemHandlers({
     journal: {
@@ -441,6 +463,10 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
           expired: expired.deleted,
         };
       },
+    },
+    transcript: {
+      runSweep: async () =>
+        runRetentionSweep({ roots: await collectConversationRoots() }),
     },
   });
 
@@ -475,6 +501,14 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     name: "journal-gc",
     handler: "__journal-gc",
     schedule: { kind: "cron", expr: "0 3 * * *" },
+  });
+  // transcript 保留清理（分片 + 摘要快照的时间窗真删）——天级足够（判据
+  // 以天计），与 journal-gc 错开半小时避免维护任务扎堆。
+  await scheduler.ensureSystemTask({
+    id: "__transcript-gc",
+    name: "transcript-gc",
+    handler: "__transcript-gc",
+    schedule: { kind: "cron", expr: "30 3 * * *" },
   });
 
   // ============================================================================

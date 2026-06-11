@@ -6,12 +6,13 @@
  *
  * 命名约定：双下划线前缀 `__` 表示系统内置（用户不可创建/删除）。
  *
- * 当前阶段（S2.E）：
+ * 分层纪律：handler 一律是**薄触发壳**——到点调用对应模块自带的维护能力、
+ * 把返回转成 `{status, summary}`，自身不含任何维护算法（算法归属各模块：
+ * journal 凝练在 JournalStore、transcript 保留清理在持久层 runRetentionSweep）。
+ *
  * - __health-check：周期性健康自检（不依赖外部资源）
  * - __journal-gc：调用 JournalStore 凝练逻辑（如果 store 可用）
- *
- * S3 阶段会追加：
- * - __delivery-retry：扫描 delivery-queue 重试失败投递
+ * - __transcript-gc：调用持久层时间窗保留清理（分片 + 摘要快照）
  */
 
 import type { SystemHandler } from "@zhixing/core";
@@ -81,10 +82,56 @@ export function buildJournalGcHandler(deps: JournalGcDeps = {}): SystemHandler {
   };
 }
 
+// ─── __transcript-gc ───
+
+export interface TranscriptGcDeps {
+  /**
+   * 注入持久层保留清理能力（runRetentionSweep 的闭包，roots 由装配方解析）。
+   * 不提供则 handler 报告未配置——与 journal-gc 同款可缺省模式。
+   */
+  runSweep?: () => Promise<{
+    conversationsScanned: number;
+    shardsDeleted: number;
+    snapshotsDeleted: number;
+    warnings: string[];
+  }>;
+}
+
+export function buildTranscriptGcHandler(
+  deps: TranscriptGcDeps = {},
+): SystemHandler {
+  return async () => {
+    if (!deps.runSweep) {
+      return {
+        status: "ok",
+        summary: "transcript-gc: not configured (no-op)",
+      };
+    }
+    try {
+      const r = await deps.runSweep();
+      // warnings 是单点跳过的聚合（坏索引 / 删被占用文件失败等）——整轮
+      // 仍算成功（幂等，下轮自然重试），计数进 summary 供运维观测
+      return {
+        status: "ok",
+        summary:
+          `transcript-gc: conversations=${r.conversationsScanned} ` +
+          `shards=${r.shardsDeleted} snapshots=${r.snapshotsDeleted} ` +
+          `warnings=${r.warnings.length}`,
+      };
+    } catch (err) {
+      return {
+        status: "error",
+        summary: err instanceof Error ? err.message : String(err),
+      };
+    }
+  };
+}
+
 // ─── 注册器 ───
 
 export interface SystemHandlersOptions {
   journal?: JournalGcDeps;
+  transcript?: TranscriptGcDeps;
   healthCheck?: { onCheck?: () => Promise<{ ok: boolean; details?: string }> };
 }
 
@@ -95,5 +142,6 @@ export function buildSystemHandlers(opts: SystemHandlersOptions = {}): Map<strin
   const map = new Map<string, SystemHandler>();
   map.set("__health-check", buildHealthCheckHandler(opts.healthCheck));
   map.set("__journal-gc", buildJournalGcHandler(opts.journal));
+  map.set("__transcript-gc", buildTranscriptGcHandler(opts.transcript));
   return map;
 }

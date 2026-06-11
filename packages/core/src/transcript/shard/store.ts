@@ -62,6 +62,10 @@ export interface ShardedTranscriptStoreOptions {
   readonly maxShardBytes?: number;
 }
 
+/** transcript 子目录与索引文件名 —— 物理布局的单一来源（清理路径同源消费） */
+export const TRANSCRIPT_DIR_NAME = "transcript";
+export const TRANSCRIPT_INDEX_FILE_NAME = "index.json";
+
 /** 打开态缓存 —— 每对话首次触碰时推导一次，append 快路径零全文件读 */
 interface OpenState {
   index: TranscriptIndex;
@@ -88,12 +92,12 @@ export class ShardedTranscriptStore {
     return path.join(
       this.conversationsDir,
       toSafePathSegment(conversationId),
-      "transcript",
+      TRANSCRIPT_DIR_NAME,
     );
   }
 
   private indexFile(conversationId: string): string {
-    return path.join(this.transcriptDir(conversationId), "index.json");
+    return path.join(this.transcriptDir(conversationId), TRANSCRIPT_INDEX_FILE_NAME);
   }
 
   private shardFile(conversationId: string, meta: TranscriptShardMeta): string {

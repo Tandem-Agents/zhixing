@@ -19,6 +19,9 @@ import {
   type SnapshotInput,
 } from "./types.js";
 
+/** 快照子目录名 —— 物理布局的单一来源（清理路径同源消费） */
+export const SNAPSHOTS_DIR_NAME = "snapshots";
+
 export interface SnapshotStoreOptions {
   /** 平台 DI（原子写的 rename 策略），默认 process.platform */
   readonly platform?: NodeJS.Platform;
@@ -37,7 +40,7 @@ export class SnapshotStore {
     return path.join(
       this.conversationsDir,
       toSafePathSegment(conversationId),
-      "snapshots",
+      SNAPSHOTS_DIR_NAME,
     );
   }
 
