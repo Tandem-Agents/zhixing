@@ -69,6 +69,15 @@ export class SkillStore {
     return this.project({});
   }
 
+  /**
+   * 目录存在性判断(own / linked,**含 disabled**)—— 保存管线的 upsert 路由用:
+   * 已有即 update(禁用的同名也是更新对象,走 create 会撞名)。builtin 不算
+   * "已有"(注册集非目录),对其 id 保存即 fork-to-own。
+   */
+  async has(id: string): Promise<boolean> {
+    return (await this.scan()).has(id);
+  }
+
   /** 按 mode 过滤 + 排序 + 取前 n,供索引产生。与 listAll 共享单一过滤点。 */
   async queryTopN(mode: SkillMode, n: number): Promise<SkillRecord[]> {
     return this.project({ mode, limit: n });
@@ -253,11 +262,19 @@ export class SkillStore {
   }
 
   /**
-   * 按草稿更新一个已存在技能。linked-only 触发 fork-on-edit(先复制到 own 再改)。
-   * 改名(name 派生出不同 id)时迁移 index 状态与 usage 到新 id,并校验新 id 不撞名;
-   * pinned / disabled / createdAt 跨更新保持。
+   * 按草稿更新一个已存在技能的**内容**。linked-only 触发 fork-on-edit(先复制
+   * 到 own 再改)。改名(name 派生出不同 id)时迁移 index 状态与 usage 到新 id,
+   * 并校验新 id 不撞名。状态字段按**意图信号**分治:
+   *   - mode / pinned / createdAt 跨更新保持 —— 更新内容不携带任何分类 / 保护
+   *     意图,缺省值覆盖会把技能静默迁出原模式索引(状态变更归 setState);
+   *   - **disabled 清除(更新即重新启用)** —— 用户亲手打磨内容并确认保存,
+   *     是最强的"我要用它"信号;保持禁用会让"保存成功"与"索引/唤起可见"
+   *     断裂(保存方承诺可唤起,实际却被旧禁用状态压着)。
    */
-  async update(id: string, draft: SkillDraft): Promise<SkillRecord> {
+  async update(
+    id: string,
+    draft: Omit<SkillDraft, "mode">,
+  ): Promise<SkillRecord> {
     const located = await this.locate(id);
     const ownDir =
       located.source === "own" ? located.dir : (await this.fork(id)).dir;
@@ -269,8 +286,9 @@ export class SkillStore {
     }
 
     const prior = (await this.readIndex()).get(id);
+    const mode = prior?.mode ?? "main";
     const pinned = prior?.pinned ?? false;
-    const disabled = prior?.disabled ?? false;
+    const disabled = false; // 更新即重新启用(见上:意图信号分治)
     const createdAt = prior?.createdAt ?? new Date().toISOString();
 
     const file = path.join(ownDir, SKILL_FILE);
@@ -286,7 +304,7 @@ export class SkillStore {
     await this.withIndexLock(async () => {
       const cur = await this.readIndex();
       if (newId !== id) cur.delete(id);
-      cur.set(newId, { id: newId, mode: draft.mode, pinned, disabled, createdAt });
+      cur.set(newId, { id: newId, mode, pinned, disabled, createdAt });
       await this.writeIndex(cur);
       this.bumpStructuralVersion();
     });
@@ -304,7 +322,7 @@ export class SkillStore {
       description: draft.description,
       source: "own",
       dir: ownDir,
-      mode: draft.mode,
+      mode,
       pinned,
       disabled,
       createdAt,

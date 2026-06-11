@@ -12,7 +12,14 @@
  * 判 internal 自动放行,不每次弹确认;不设 maxResultChars,全文须完整入上下文。
  */
 
-import type { SkillTextLoader, ToolDefinition, ToolResult } from "@zhixing/core";
+import type {
+  SkillDraft,
+  SkillMode,
+  SkillSaveOutcome,
+  SkillTextLoader,
+  ToolDefinition,
+  ToolResult,
+} from "@zhixing/core";
 
 export function createLoadSkillTool(loader: SkillTextLoader): ToolDefinition {
   return {
@@ -55,6 +62,102 @@ export function createLoadSkillTool(loader: SkillTextLoader): ToolDefinition {
           content: `加载技能 "${id}" 失败:${
             e instanceof Error ? e.message : String(e)
           }`,
+          isError: true,
+        };
+      }
+    },
+  };
+}
+
+/**
+ * save_skill 对保存管线的最小依赖契约(接口隔离)—— 工具只需"把草稿交给
+ * 管线",不耦合 SkillStore 与管线内部;装配期把 runSkillSavePipeline 绑定
+ * store 后注入,测试可注入轻量 mock。
+ */
+export type SkillSaver = (draft: SkillDraft) => Promise<SkillSaveOutcome>;
+
+/**
+ * save_skill 工具 —— 创建 / 打磨技能的唯一落盘口(upsert:同名即更新)。
+ *
+ * 定位 = SkillSavePipeline + 用户确认护栏的工具包装:四不变量(脱敏 / own
+ * 落位 / 格式 / 索引版本)焊在管线里;本包装层承载用户路径的系统护栏——
+ * **刻意不声明 boundaries**:持久化用户方法资产不该静默放行,无边界声明经
+ * 影响分类 fail-to-confirm 走确认管线(与 load_skill 的 app-state 自动放行
+ * 形成有意不对称:读放行、写确认)。产品层护栏(保存前必须拿到用户明确
+ * 同意)由内置方法「提炼技能」承载,双层互补。
+ */
+export function createSaveSkillTool(
+  saver: SkillSaver,
+  defaultMode: SkillMode,
+): ToolDefinition {
+  return {
+    name: "save_skill",
+    description:
+      "Save a skill (create new, or update when a skill with the same name exists). Call this ONLY after " +
+      "the user has explicitly approved the draft you showed them in conversation (e.g. they said 'save it' " +
+      "or '就这样'). Never call it silently. The pipeline scrubs credentials, writes the standard SKILL.md " +
+      "into the user's own skill area, and refreshes the index. Returns the skill id (usable as /<id>) and " +
+      "how many secrets were scrubbed — relay both honestly to the user.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description: "Skill display name; its id (and /<id> command) derives from this.",
+        },
+        description: {
+          type: "string",
+          description:
+            "One line oriented to WHEN to use the skill (drives future retrieval), not a content summary.",
+        },
+        body: {
+          type: "string",
+          description:
+            "Skill body in markdown: the user's specific conventions, pitfalls, proven steps — no generic knowledge.",
+        },
+        mode: {
+          type: "string",
+          enum: ["main", "work"],
+          description:
+            "Where the skill belongs: 'work' for workscene-specific, 'main' for general. Defaults to the current scene.",
+        },
+      },
+      required: ["name", "description", "body"],
+    },
+
+    isReadOnly: false,
+    isParallelSafe: false, // 写技能库结构性状态(index/目录),串行执行
+    needsPermission: false, // 确认由影响分类管线承担(无边界声明 → 确认),与此字段正交
+
+    async call(input): Promise<ToolResult> {
+      const name = typeof input.name === "string" ? input.name.trim() : "";
+      const description =
+        typeof input.description === "string" ? input.description.trim() : "";
+      const body = typeof input.body === "string" ? input.body.trim() : "";
+      if (!name || !description || !body) {
+        return {
+          content: "save_skill 需要非空的 name / description / body。",
+          isError: true,
+        };
+      }
+      const mode: SkillMode = input.mode === "work" || input.mode === "main"
+        ? input.mode
+        : defaultMode;
+      try {
+        const result = await saver({ name, description, body, mode });
+        const action = result.outcome === "created" ? "新建" : "更新";
+        const lines = [
+          `已${action}技能「${result.name}」(id: ${result.id})。用户可输入 /${result.id} 唤起它。`,
+        ];
+        if (result.scrubbedCount > 0) {
+          lines.push(
+            `对话中有 ${result.scrubbedCount} 处密钥已自动抹掉、不会写进技能 —— 请如实告知用户。`,
+          );
+        }
+        return { content: lines.join("\n"), isError: false };
+      } catch (e) {
+        return {
+          content: `保存技能失败:${e instanceof Error ? e.message : String(e)}`,
           isError: true,
         };
       }

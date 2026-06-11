@@ -10,6 +10,8 @@ export { SkillStore } from "./store.js";
 export { renderSkillIndex } from "./render.js";
 export type { RenderSkillIndexOptions, SkillIndexEntry } from "./render.js";
 export { getBuiltinSkill, builtinIndexEntries } from "./builtin.js";
+export { runSkillSavePipeline } from "./save-pipeline.js";
+export type { SkillSaveOutcome } from "./save-pipeline.js";
 export type {
   BuiltinSkillDef,
   BuiltinSkillEntry,

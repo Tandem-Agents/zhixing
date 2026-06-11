@@ -60,6 +60,12 @@ describe("builtin 注册集", () => {
       expect(entries.map((e: BuiltinIndexEntry) => e.id)).toContain(DISTILL_ID);
     }
   });
+
+  it("工具预算红线:每能力 ≤ 1 工具(膨胀即触发暴露形态切换裁决,不得静默超)", () => {
+    const entry = getBuiltinSkill(DISTILL_ID)!;
+    expect(entry.tools).toEqual(["save_skill"]);
+    expect((entry.tools ?? []).length).toBeLessThanOrEqual(1);
+  });
 });
 
 describe("builtin 读视图边界(负向)", () => {

@@ -47,7 +47,7 @@
 
 **输入**:`{ name, description, body, mode? }`——模型从对话里的定稿草稿组装;`mode` 缺省按当前场景。
 
-**upsert 语义**:`id = skillNameToId(name)`（父规格 §5.1）。own 区无此 id → 创建（`SkillStore.create`）;已有 → 更新（`SkillStore.update`,linked 同名时沿用其 fork-on-edit 与撞名校验语义）。创建与打磨是同一能力、同一工具、同一焊接点;v2 技能管家迭代走同一管线。
+**upsert 语义**:`id = skillNameToId(name)`（父规格 §5.1）。own 区无此 id → 创建（`SkillStore.create`）;已有 → 更新（`SkillStore.update`,linked 同名时沿用其 fork-on-edit 与撞名校验语义）。更新对状态字段按**意图信号**分治:mode / pinned 跨更新保持（草稿缺省值不携带分类 / 保护意图,覆盖会把技能静默迁出原模式索引——mode 变更走 `/skills` 管理器）;**disabled 清除（更新即重新启用）**——用户亲手打磨并确认保存是最强的"我要用它"信号,否则"保存成功"与"索引 / 唤起可见"闭环断裂。创建与打磨是同一能力、同一工具、同一焊接点;v2 技能管家迭代走同一管线。
 
 **四不变量焊接**（`SkillSavePipeline` 本体,执行顺序即管线顺序）:
 

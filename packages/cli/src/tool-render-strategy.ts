@@ -78,6 +78,7 @@ export const TOOL_RENDER_STRATEGY: Readonly<Record<string, ToolRenderStrategy>> 
     write: "side-effect",
     edit: "side-effect",
     schedule: "side-effect",
+    save_skill: "side-effect",
   } as const);
 
 /**

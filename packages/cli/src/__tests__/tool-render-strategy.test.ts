@@ -51,6 +51,7 @@ describe("tool-render-strategy · 单一事实源契约", () => {
       write: "side-effect",
       edit: "side-effect",
       schedule: "side-effect",
+      save_skill: "side-effect",
     });
   });
 

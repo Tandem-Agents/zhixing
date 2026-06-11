@@ -153,12 +153,12 @@ describe("SkillStore update", () => {
       name: "New Name",
       description: "",
       body: "b",
-      mode: "work",
     });
     const all = await store.listAll();
     expect(all.map((r) => r.id)).toEqual(["new-name"]);
     expect(all[0]!.pinned).toBe(true);
-    expect(all[0]!.mode).toBe("work");
+    // mode 跨更新保持(内容更新与状态变更职责分明,mode 变更走 setState)
+    expect(all[0]!.mode).toBe("main");
     const idx = await readIndexFile();
     expect(idx.find((s) => s.id === "old-name")).toBeUndefined();
     expect(idx.find((s) => s.id === "new-name")!.pinned).toBe(true);

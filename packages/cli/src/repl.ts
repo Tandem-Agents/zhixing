@@ -878,6 +878,10 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   // registry 是命令的单一真相源、dispatcher 是统一执行器，任何模式恒在；其上的
   // 交互层（补全 broker + 渲染）才依 chrome 分叉。
   const tRegistry = new DefaultCommandRegistry();
+  // 技能集结构版本快照 —— run 收尾时比对,变了才刷新 /<name> 动态补全候选。
+  // save_skill 在 agent loop 内落盘,cli 无直接信号;版本比对零开销(内存 int)、
+  // 与 runtime 索引重建同源同纪律:结构性写才递增,普通 turn 零动作。
+  let skillVersionSeen = session.skillStore.version("main");
   const typeaheadDispatcher = new CommandDispatcher({ registry: tRegistry });
 
   // info 域命令（help/status/me/model/usage/context/journal/people/tasks）—— 现代路径
@@ -1536,6 +1540,14 @@ export async function startRepl(options: ReplOptions): Promise<void> {
           runMessages: runResult.runRecord.messages,
         });
         state.conv.pendingInputPrefix = null;
+      }
+
+      // 本 run 内技能集变更(save_skill 新建/更新)→ 刷新 slash 补全候选,
+      // 新技能 /<id> 当轮即可唤起(builtin 不在 listAll、天然不进候选)。
+      const skillVersionNow = session.skillStore.version("main");
+      if (skillVersionNow !== skillVersionSeen) {
+        skillVersionSeen = skillVersionNow;
+        tRegistry.refresh();
       }
     } catch (err) {
       renderer.stop();

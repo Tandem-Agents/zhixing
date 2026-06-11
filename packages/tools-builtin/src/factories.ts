@@ -11,13 +11,14 @@
  *   3. 在需要启用该工具的 AgentRoleProfile.enabledTools 中加工具名
  */
 
-import type { MemoryStore, SkillStore, ToolDefinition } from "@zhixing/core";
+import type { MemoryStore, SkillMode, SkillStore, ToolDefinition } from "@zhixing/core";
+import { runSkillSavePipeline } from "@zhixing/core";
 import { createBashTool } from "./bash.js";
 import { createEditTool } from "./edit.js";
 import { createGlobTool } from "./glob.js";
 import { createGrepTool } from "./grep.js";
 import { createMemoryTool } from "./memory.js";
-import { createLoadSkillTool } from "./skill.js";
+import { createLoadSkillTool, createSaveSkillTool } from "./skill.js";
 import { createReadTool } from "./read.js";
 import { createWebFetchTool } from "./web-fetch.js";
 import { createWriteTool } from "./write.js";
@@ -43,6 +44,11 @@ export interface BuiltinToolContext {
    * 启用时必须注入;缺失即装配未按约定构造下传,工厂 fail-fast 而非静默兜底。
    */
   readonly skillStore?: SkillStore;
+  /**
+   * 当前运行档的技能模式 —— save_skill 对未显式指定 mode 的草稿按此缺省
+   * (工作场景 → work、主对话 → main)。缺省 "main"。
+   */
+  readonly skillMode?: SkillMode;
 }
 
 export type BuiltinToolFactory = (ctx: BuiltinToolContext) => ToolDefinition;
@@ -77,6 +83,18 @@ export const BUILTIN_TOOL_FACTORIES: Readonly<
       );
     }
     return createLoadSkillTool(ctx.skillStore);
+  },
+  save_skill: (ctx) => {
+    if (!ctx.skillStore) {
+      throw new Error(
+        "save_skill 工具需装配期注入 ctx.skillStore —— 缺失说明 SkillStore 未构造并下传,拒绝静默兜底",
+      );
+    }
+    const store = ctx.skillStore;
+    return createSaveSkillTool(
+      (draft) => runSkillSavePipeline(store, draft),
+      ctx.skillMode ?? "main",
+    );
   },
   web_fetch: (ctx) => createWebFetchTool({ proxy: ctx.proxy }),
 };

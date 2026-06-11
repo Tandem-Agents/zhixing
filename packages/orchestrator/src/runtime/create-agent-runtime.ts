@@ -627,7 +627,7 @@ export async function createAgentRuntime(
     options.memoryScope?.kind === "workscene" ? "work" : "main";
   const skillStore = options.skillStore ?? new SkillStore(getSkillsRoot());
 
-  const builtinCtx = { proxy: config.network?.proxy, memoryStore, skillStore };
+  const builtinCtx = { proxy: config.network?.proxy, memoryStore, skillStore, skillMode };
   const baseTools: ToolDefinition[] = [];
   for (const name of profile.enabledTools) {
     if (name === "Task") continue; // 后置装配
