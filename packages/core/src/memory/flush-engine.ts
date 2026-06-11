@@ -1,12 +1,11 @@
 /**
  * Memory Flush 引擎 — 上下文压缩时自动提取记忆 (L1.5)
  *
- * 在上下文压缩管线中，L1（ToolResult 截断）之后、L2（消息丢弃）之前执行。
- * 给 LLM 一次机会，从即将被压缩掉的消息中提取值得长期保存的信息。
+ * 在内容即将离开注意力窗口之时（段切换 afterSummarize 挂载），给 LLM 一次
+ * 机会从原文中提取值得长期保存的信息。
  *
  * 设计要点：
- * - 作为 CompactionStrategy 嵌入引擎，零侵入现有管线
- * - 不修改消息（compacted: false），仅执行持久化副作用
+ * - 不修改消息，仅执行持久化副作用
  * - 提取结果分流到记忆支柱 + Journal：
  *   profile（身份信息）、person（关系人）、journal（事件日志）
  * - 提取失败时静默降级——不能因为记忆提取失败阻塞对话
@@ -17,12 +16,7 @@
  */
 
 import type { Message } from "../types/messages.js";
-import type {
-  CompactLLMFn,
-  CompactionContext,
-  CompactionResult,
-  CompactionStrategy,
-} from "../context/types.js";
+import type { TextCallLLMFn } from "../types/llm.js";
 import {
   calculateMessageTurns,
   splitMessagesPairAware,
@@ -31,29 +25,6 @@ import { MemoryStore, type MemoryCategory } from "./memory-store.js";
 
 // ─── 类型 ───
 
-/**
- * Flush 用的 LLM 调用函数。
- *
- * @deprecated 使用 `CompactLLMFn`（等价类型，统一契约）。此别名仅为保留既有导入不破。
- *
- * 迁移指引：`import type { CompactLLMFn } from "@zhixing/core"` 并在构造函数参数中替换。
- * 新签名支持透传 `opts.abortSignal` 到 provider.chat，消除 compact 期间的 abort 竞争。
- */
-export type FlushLLMFn = CompactLLMFn;
-
-export interface FlushEngineConfig {
-  callLLM: CompactLLMFn;
-  store: MemoryStore;
-  /** 最少需要多少条消息才值得做 Flush（默认 6） */
-  minMessages?: number;
-  /**
-   * 触发 Flush 的预算使用比例下限。默认 0.75（warning 线）。
-   *
-   * 设计目的：Flush 每次执行会调用一次 LLM 做提取，预算很低时无必要。
-   * 只在 context 接近预警或更高时才值得付出提取成本。
-   */
-  minBudgetRatio?: number;
-}
 
 /**
  * buildExtractionRequest 的尾部截断 turn 数。
@@ -89,7 +60,7 @@ export interface FlushResult {
 // ─── 提取核心 ───
 
 export interface MemoryFlusherConfig {
-  readonly callLLM: CompactLLMFn;
+  readonly callLLM: TextCallLLMFn;
   readonly store: MemoryStore;
 }
 
@@ -101,7 +72,7 @@ export interface MemoryFlusherConfig {
  * 自身无状态（store / callLLM 为注入依赖），跨 run 共享安全。
  */
 export class MemoryFlusher {
-  private readonly callLLM: CompactLLMFn;
+  private readonly callLLM: TextCallLLMFn;
   private readonly store: MemoryStore;
 
   constructor(config: MemoryFlusherConfig) {
@@ -195,80 +166,6 @@ Respond with ONLY a valid JSON array, no markdown fences, no explanation.`;
 
 // ─── 策略实现 ───
 
-/**
- * Memory Flush 策略 — 优先级 3（L1 之后、L2 之前）。
- *
- * 不修改消息列表，仅将值得保留的信息持久化到记忆存储。
- * 返回 compacted: false 让后续策略（L2/L3）继续执行。
- */
-export class MemoryFlushStrategy implements CompactionStrategy {
-  readonly name = "memory_flush";
-  readonly kind = "flush" as const;
-  readonly priority = 3;
-  readonly requiresLLM = true;
-
-  private readonly flusher: MemoryFlusher;
-  private readonly minMessages: number;
-  private readonly minBudgetRatio: number;
-  private _lastResult: FlushResult | null = null;
-
-  constructor(config: FlushEngineConfig) {
-    this.flusher = new MemoryFlusher({
-      callLLM: config.callLLM,
-      store: config.store,
-    });
-    this.minMessages = config.minMessages ?? 6;
-    this.minBudgetRatio = config.minBudgetRatio ?? 0.75;
-  }
-
-  /** 最近一次 flush 的结果（用于 CLI 渲染和测试） */
-  get lastResult(): FlushResult | null {
-    return this._lastResult;
-  }
-
-  canApply(context: CompactionContext): boolean {
-    // 预算前置：预算未到预警线不值得花一次 LLM 提取
-    if (context.budget.usageRatio < this.minBudgetRatio) return false;
-    return context.messages.length >= this.minMessages;
-  }
-
-  async apply(context: CompactionContext): Promise<CompactionResult> {
-    const { messages, abortSignal } = context;
-
-    try {
-      const result = await this.flush(messages as Message[], { abortSignal });
-      this._lastResult = result;
-    } catch {
-      // Abort 是用户意图（session.abort / grace timer），不是 Flush 失败。
-      // 不 rethrow（engine/agent-loop 链路没有 try-catch，rethrow 会让
-      // agent-loop 抛未捕获错误），也不污染 _lastResult 的 errors。
-      // agent-loop 下一轮主循环迭代会自行检查 abortSignal.aborted 正常停止。
-      if (abortSignal?.aborted) {
-        // 保持 _lastResult 原值（上次成功的 flush 或 null），便于后续诊断
-      } else {
-        this._lastResult = { extracted: 0, saved: 0, errors: ["flush failed"] };
-      }
-    }
-
-    // 不修改消息——Flush 只做副作用（持久化），让后续策略继续压缩
-    return {
-      messages: messages as Message[],
-      tokensBefore: 0,
-      tokensAfter: 0,
-      compacted: false,
-    };
-  }
-
-  // ─── 核心逻辑（委托 MemoryFlusher）───
-
-  /** 从消息中提取记忆并保存。 */
-  async flush(
-    messages: readonly Message[],
-    opts?: { abortSignal?: AbortSignal },
-  ): Promise<FlushResult> {
-    return await this.flusher.flush(messages, opts);
-  }
-}
 
 // ─── 辅助函数 ───
 
@@ -345,6 +242,3 @@ export function parseExtractions(raw: string): FlushExtraction[] {
   }));
 }
 
-export function createMemoryFlushStrategy(config: FlushEngineConfig): MemoryFlushStrategy {
-  return new MemoryFlushStrategy(config);
-}

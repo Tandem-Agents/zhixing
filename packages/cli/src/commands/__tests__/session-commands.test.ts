@@ -233,6 +233,41 @@ describe("registerSessionCommands · /compact", () => {
     expect(visible(h.writer)).toContain("压缩完成");
   });
 
+  it("应急地板降级 → 先呈现降级警示（方式与代价），再报压缩完成", async () => {
+    const window = createAttentionWindow({ conversationId: "conv-1" });
+    for (let i = 0; i < 3; i++) {
+      window.acceptRun({
+        runMessages: [userMessage(`q${i}`), assistantMessage(`a${i}`)],
+        runIndex: i,
+      });
+    }
+    const h = setup(
+      { window },
+      {
+        forceCompact: vi.fn(async () => ({
+          modified: true,
+          messages: [],
+          windowCompact: {
+            summary: "机械截断说明",
+            pairsCompacted: 2,
+            tokensBefore: 1000,
+            tokensAfter: 300,
+          },
+          budget: { usageRatio: 0.3 },
+          emergencyFloor: { droppedTurns: 2, error: "provider down" },
+        })),
+      },
+    );
+
+    await h.dispatcher.dispatch("/compact", RUNTIME);
+
+    const out = visible(h.writer);
+    // 降级知情：有损截断不伪装成正常摘要
+    expect(out).toContain("摘要服务不可用");
+    expect(out).toContain("provider down");
+    expect(out).toContain("压缩完成");
+  });
+
   it("历史过短（<4）→ 直接提示，不调 forceCompact", async () => {
     const shortWindow = createAttentionWindow({ conversationId: "conv-1" });
     shortWindow.acceptRun({

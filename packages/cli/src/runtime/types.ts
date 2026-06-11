@@ -86,7 +86,8 @@ export interface RuntimeSessionOptions {
    *
    * 设计上 segmentDeps 是 required —— cli 始终启用段切换；非 cli 集成路径（纯
    * orchestrator 集成测试）可省略 createCliSegmentDeps，直接调 createAgentRuntime
-   * 时不传 segmentDeps（orchestrator 会优雅降级为 budget-only 兜底）。
+   * 时不传 segmentDeps —— 该路径自此**没有任何窗口压缩**（段切换是唯一压缩
+   * 机制），仅剩测试 / 纯嵌入消费这么用。
    */
   segmentDeps: CliSegmentDeps;
 }

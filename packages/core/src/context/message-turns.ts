@@ -1,14 +1,14 @@
 /**
  * Message Turns — "turn 在消息数组中的视图" 抽象层
  *
- * 这个模块是多个策略与窗口管理（MessageDrop / LLMSummarize /
- * WindowManager / TierCompressor）共享的 turn 视图单一事实源。
+ * 这个模块是切分消费者（段切换 SegmentManager / 记忆提取 MemoryFlusher）
+ * 共享的 turn 视图单一事实源。
  *
  * 概念：
  *   一个 turn = assistant 消息 + 其后续的 tool_result user 消息。
  *   turn 号从 0 开始（turn 0 只含开头的 user），每遇到一个 assistant 递增。
  *
- * 不放在 strategies/ 子目录下 —— 这是跨策略的抽象，不是任何单个策略的私有实现。
+ * 放在 context/ 根 —— 跨消费者共享的抽象，不属于任何单个消费者的私有实现。
  */
 import type { ContentBlock, Message, ToolUseBlock } from "../types/messages.js";
 
@@ -70,7 +70,7 @@ export interface SplitResult {
  *   - preserveRecentTurns >= maxTurn：仅开头的 turn 0（若存在）归入 toSummarize
  *   - 整体消息数 <= preserveRecentTurns 覆盖范围：toSummarize 可能为空
  *
- * 上层策略需自行检查 toSummarize 是否够长再决定压缩（如 LLMSummarize 要求 >= 2 才有摘要价值）。
+ * 上层调用方需自行检查 toSummarize 是否够长再决定压缩。
  */
 export function splitMessagesPairAware(
   messages: readonly Message[],
@@ -114,7 +114,7 @@ export function splitMessagesPairAware(
 /**
  * 断言 messages 中每个 tool_use 块都有对应的 tool_result 块（按 id 匹配）。
  *
- * 用于测试场景和运行时诊断 —— 确保 compact 策略不会破坏 tool 配对。
+ * 用于测试场景和运行时诊断 —— 确保段切换摘要不会破坏 tool 配对。
  * 配对要求：
  *   - 每个 assistant 消息中的 tool_use.id 必须在后续 user 消息的 tool_result 中出现
  *   - tool_result 可以在紧邻的下一条 user 消息，也可以在后续多条 user 消息中

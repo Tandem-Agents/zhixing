@@ -1,9 +1,8 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { createTempDir } from "@zhixing/test-utils";
 import {
-  MemoryFlushStrategy,
+  MemoryFlusher,
   parseExtractions,
-  type FlushLLMFn,
   type FlushExtraction,
 } from "../flush-engine.js";
 import { MemoryStore } from "../memory-store.js";
@@ -24,7 +23,9 @@ const SAMPLE_MESSAGES: Message[] = [
   msg("assistant", "好的张三，已了解你的信息。"),
 ];
 
-function makeLLMFn(response: FlushExtraction[]): FlushLLMFn {
+function makeLLMFn(
+  response: FlushExtraction[],
+): (messages: readonly unknown[]) => Promise<string> {
   return async () => JSON.stringify(response);
 }
 
@@ -82,9 +83,9 @@ describe("parseExtractions", () => {
   });
 });
 
-// ─── MemoryFlushStrategy ───
+// ─── MemoryFlusher（提取核心，触发形态无关）───
 
-describe("MemoryFlushStrategy", () => {
+describe("MemoryFlusher", () => {
   let store: MemoryStore;
 
   beforeEach(async () => {
@@ -92,7 +93,7 @@ describe("MemoryFlushStrategy", () => {
     store = result.store;
   });
 
-  it("从消息中提取信息并保存到记忆", async () => {
+  it("从消息中提取信息并分流保存（profile / person）", async () => {
     const extractions: FlushExtraction[] = [
       {
         category: "profile",
@@ -107,65 +108,40 @@ describe("MemoryFlushStrategy", () => {
         content: "妻子，喜欢爬山",
       },
     ];
+    const flusher = new MemoryFlusher({ callLLM: makeLLMFn(extractions), store });
 
-    const strategy = new MemoryFlushStrategy({
-      callLLM: makeLLMFn(extractions),
-      store,
-    });
+    const result = await flusher.flush(SAMPLE_MESSAGES);
 
-    const result = await strategy.apply({
-      messages: SAMPLE_MESSAGES,
-      budget: { contextWindow: 100000, effectiveWindow: 80000, currentTokens: 70000, usageRatio: 0.875, status: "compact" },
-      currentTurn: 3,
-    });
+    expect(result.extracted).toBe(2);
+    expect(result.saved).toBe(2);
+    expect(result.errors).toHaveLength(0);
 
-    // 不修改消息
-    expect(result.compacted).toBe(false);
-    expect(result.messages).toBe(SAMPLE_MESSAGES);
-
-    // 验证保存结果
-    expect(strategy.lastResult!.extracted).toBe(2);
-    expect(strategy.lastResult!.saved).toBe(2);
-    expect(strategy.lastResult!.errors).toHaveLength(0);
-
-    // 验证文件确实被创建
     const profile = await store.load("profile", "profile");
-    expect(profile).not.toBeNull();
     expect(profile!.meta.name).toBe("张三");
-
     const person = await store.load("person", "wife-xiaoli");
-    expect(person).not.toBeNull();
     expect(person!.content).toContain("爬山");
   });
 
   it("journal 追加模式", async () => {
-    // 先写入一条 journal
     await store.save({
       category: "journal",
       id: "2026-04-10",
       meta: { date: "2026-04-10" },
       content: "上午：讨论了架构设计",
     });
-
-    const extractions: FlushExtraction[] = [
-      {
-        category: "journal",
-        id: "2026-04-10",
-        meta: { date: "2026-04-10" },
-        content: "下午：调试了 Docker 网络问题",
-      },
-    ];
-
-    const strategy = new MemoryFlushStrategy({
-      callLLM: makeLLMFn(extractions),
+    const flusher = new MemoryFlusher({
+      callLLM: makeLLMFn([
+        {
+          category: "journal",
+          id: "2026-04-10",
+          meta: { date: "2026-04-10" },
+          content: "下午：调试了 Docker 网络问题",
+        },
+      ]),
       store,
     });
 
-    await strategy.apply({
-      messages: SAMPLE_MESSAGES,
-      budget: { contextWindow: 100000, effectiveWindow: 80000, currentTokens: 70000, usageRatio: 0.875, status: "compact" },
-      currentTurn: 3,
-    });
+    await flusher.flush(SAMPLE_MESSAGES);
 
     const journal = await store.load("journal", "2026-04-10");
     expect(journal!.content).toContain("上午");
@@ -173,88 +149,42 @@ describe("MemoryFlushStrategy", () => {
     expect(journal!.content).toContain("---");
   });
 
-  it("LLM 返回空数组时不保存", async () => {
-    const strategy = new MemoryFlushStrategy({
-      callLLM: async () => "[]",
-      store,
-    });
-
-    await strategy.apply({
-      messages: SAMPLE_MESSAGES,
-      budget: { contextWindow: 100000, effectiveWindow: 80000, currentTokens: 70000, usageRatio: 0.875, status: "compact" },
-      currentTurn: 3,
-    });
-
-    expect(strategy.lastResult!.extracted).toBe(0);
-    expect(strategy.lastResult!.saved).toBe(0);
+  it("LLM 返回空数组 → 零保存零错误", async () => {
+    const flusher = new MemoryFlusher({ callLLM: async () => "[]", store });
+    const result = await flusher.flush(SAMPLE_MESSAGES);
+    expect(result).toEqual({ extracted: 0, saved: 0, errors: [] });
   });
 
-  it("LLM 调用失败时静默降级", async () => {
-    const strategy = new MemoryFlushStrategy({
-      callLLM: async () => { throw new Error("API error"); },
-      store,
-    });
-
-    const result = await strategy.apply({
-      messages: SAMPLE_MESSAGES,
-      budget: { contextWindow: 100000, effectiveWindow: 80000, currentTokens: 70000, usageRatio: 0.875, status: "compact" },
-      currentTurn: 3,
-    });
-
-    // 不应阻塞压缩管线
-    expect(result.compacted).toBe(false);
-    expect(strategy.lastResult!.errors).toContain("flush failed");
-  });
-
-  it("消息不足时跳过", () => {
-    const strategy = new MemoryFlushStrategy({
-      callLLM: async () => "[]",
-      store,
-      minMessages: 6,
-    });
-
-    const canApply = strategy.canApply({
-      messages: SAMPLE_MESSAGES.slice(0, 3),
-      budget: { contextWindow: 100000, effectiveWindow: 80000, currentTokens: 70000, usageRatio: 0.875, status: "compact" },
-      currentTurn: 1,
-    });
-
-    expect(canApply).toBe(false);
-  });
-
-  it("person 类型正确保存", async () => {
-    const extractions: FlushExtraction[] = [
-      {
-        category: "person",
-        id: "wife-xiaoli",
-        meta: { name: "小丽", relation: "妻子" },
-        content: "喜欢旅游和摄影",
+  it("LLM 调用抛错 → flush 抛出（容错归调用方：段切换 hook 失败降级 warning）", async () => {
+    const flusher = new MemoryFlusher({
+      callLLM: async () => {
+        throw new Error("provider down");
       },
-    ];
-
-    const strategy = new MemoryFlushStrategy({
-      callLLM: makeLLMFn(extractions),
       store,
     });
-
-    await strategy.apply({
-      messages: SAMPLE_MESSAGES,
-      budget: { contextWindow: 100000, effectiveWindow: 80000, currentTokens: 70000, usageRatio: 0.875, status: "compact" },
-      currentTurn: 3,
-    });
-
-    const person = await store.load("person", "wife-xiaoli");
-    expect(person).not.toBeNull();
-    expect(person!.meta.name).toBe("小丽");
-    expect(person!.meta.relation).toBe("妻子");
+    await expect(flusher.flush(SAMPLE_MESSAGES)).rejects.toThrow("provider down");
   });
 
-  it("priority 为 3（介于 L1 和 L2 之间）", () => {
-    const strategy = new MemoryFlushStrategy({
-      callLLM: async () => "[]",
-      store,
+  it("单条保存失败不阻断其余（errors 逐条收集）", async () => {
+    const failing = {
+      save: async (entry: { category: string }) => {
+        if (entry.category === "person") throw new Error("disk full");
+      },
+      load: async () => null,
+    } as unknown as MemoryStore;
+    const flusher = new MemoryFlusher({
+      callLLM: makeLLMFn([
+        { category: "profile", id: "profile", meta: {}, content: "a" },
+        { category: "person", id: "p-1", meta: {}, content: "b" },
+      ]),
+      store: failing,
     });
-    expect(strategy.priority).toBe(3);
-    expect(strategy.name).toBe("memory_flush");
+
+    const result = await flusher.flush(SAMPLE_MESSAGES);
+
+    expect(result.extracted).toBe(2);
+    expect(result.saved).toBe(1);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]).toContain("person/p-1");
   });
 });

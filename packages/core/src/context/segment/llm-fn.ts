@@ -48,6 +48,12 @@ export function createSegmentSummarizeFn(
       if (event.type === "text_delta" && event.text) {
         text += event.text;
       }
+      // 流以 error 事件终止 = 本次调用失败：抛出真实根因，让上层拿到错误
+      // 本体（段管理器据此走自己的重试、应急地板把根因带给诊断与用户），
+      // 而不是把错误静默成空文本、退化为"摘要解析失败"的间接症状。
+      if (event.type === "error") {
+        throw event.error;
+      }
     }
     return text;
   };

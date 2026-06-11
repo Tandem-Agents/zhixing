@@ -219,11 +219,13 @@ describe("StatusBar 状态切换", () => {
     bar.dispose();
   });
 
-  it("compact_start → compacting 状态", async () => {
+  it("segment:transition_start → compacting 状态", async () => {
     const { screen, mainBus, bar } = setup();
     await mainBus.emit("agent:run_start", { prompt: "hi" });
-    await mainBus.emit("context:compact_start", {
-      tokensBefore: 100_000,
+    await mainBus.emit("segment:transition_start", {
+      segmentId: "seg-1",
+      reason: "optimal-exceeded",
+      currentTokens: 100_000,
     } as never);
     expect(screen.statusLines!.join("")).toContain("整理上下文");
     bar.dispose();

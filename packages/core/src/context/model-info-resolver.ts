@@ -1,5 +1,5 @@
 /**
- * ModelBudgetInfo Resolver — 把多源 budget 数据合成 ContextEngine 需要的
+ * ModelBudgetInfo Resolver — 把多源 budget 数据合成预算展示快照需要的
  * `{ contextWindow, maxOutputTokens }`，并显式暴露解析来源。
  *
  * 数据源四层（从高到低）：
@@ -62,7 +62,7 @@ export interface ResolvedModelInfo {
  *
  * 这是 core 层 defensive 兜底——仅当调用方未注入 protocolDefaults 时启用，
  * 正常生产路径（CLI/server）不应触达。设计目的是确保 `info` 永不为 undefined，
- * ContextEngine 永远可启用，避免静默禁用 compact 这类隐蔽故障。
+ * 预算快照永远可计算，避免静默缺失这类隐蔽故障。
  */
 export const CONSERVATIVE_FALLBACK: ModelBudgetInfo = {
   contextWindow: 32_000,

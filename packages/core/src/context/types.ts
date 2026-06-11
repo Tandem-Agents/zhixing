@@ -1,13 +1,8 @@
 /**
- * 上下文管理模块类型定义
+ * 上下文模块基础类型 —— token 估算与预算展示快照。
  *
- * 设计原则：
- * - Token 估算与预算管理分离：估算器只管"多少 token"，预算管理管"该不该压缩"
- * - 百分比阈值替代绝对值：自适应不同模型的上下文窗口大小
- * - 策略可插拔：CompactionStrategy 接口支持注册自定义压缩策略
- *
- * 对比 Claude Code：它硬编码 13K/3K/20K 常量，在小窗口模型上浪费空间。
- * 对比 OpenClaw：它用闭源 estimateTokens，我们完全自研。
+ * 压缩决策已全部归段机制（attention-driven）；预算（ContextBudget）只作
+ * UI 占用展示的纯计算，不再驱动任何压缩。
  */
 
 import type { Message } from "../types/messages.js";
@@ -68,12 +63,13 @@ export interface ContextBudget {
   status: BudgetStatus;
 }
 
+/** 展示分级阈值 —— 仅驱动 {@link ContextBudget.status} 的 UI 占用分级，不驱动任何压缩。 */
 export interface BudgetThresholds {
-  /** 预警阈值（百分比，默认 0.75） */
+  /** 预警阈值（展示分级，默认 0.75） */
   warning: number;
-  /** 自动压缩阈值（百分比，默认 0.85） */
+  /** 建议压缩阈值（展示分级，默认 0.85） */
   compact: number;
-  /** 硬挡阈值（百分比，默认 0.95） */
+  /** 临界阈值（展示分级，默认 0.95） */
   critical: number;
 }
 
@@ -89,200 +85,3 @@ export const DEFAULT_THRESHOLDS: BudgetThresholds = {
  * 防止大额 maxOutput（如 100K）把可用输入空间压得极小。
  */
 export const MAX_OUTPUT_RESERVE = 20_000;
-
-// ─── Tier 压缩阈值 ───
-
-// ─── LLM 调用契约 ───
-
-/**
- * 压缩场景的 LLM 调用函数 —— 所有策略的 LLM 调用统一签名。
- *
- * 为什么统一：之前 FlushLLMFn / SummarizeLLMFn 在不同模块各自定义为 `(msgs) => Promise<string>`，
- * 都没有 abortSignal 透传通道 —— session.abort 期间 compact 会继续跑完，
- * 拖住 session 几秒（daemon 模式下更严重）。
- *
- * 契约：
- *   - messages: 发送给 LLM 的消息列表（已含指令 prompt）
- *   - opts.abortSignal: 上游传入的 abort 信号；实现必须透传给底层 provider.chat
- *
- * 实现方由 caller 按需构造——例如装配期按用途分流到不同角色的 LLM 调用 helper。
- */
-export type CompactLLMFn = (
-  messages: Message[],
-  opts?: { abortSignal?: AbortSignal },
-) => Promise<string>;
-
-// ─── 压缩策略 ───
-
-export interface CompactionContext {
-  readonly messages: readonly Message[];
-  readonly budget: ContextBudget;
-  /** 当前已完成的轮次数 */
-  readonly currentTurn: number;
-  /**
-   * 上游传入的 abort 信号 —— 策略的 LLM 调用必须透传。
-   *
-   * 语义：session.abort / 用户 /abort / daemon grace timer 过期 时触发。
-   * 未设置时策略按无限制运行（测试 / 手动 /compact 场景）。
-   */
-  readonly abortSignal?: AbortSignal;
-}
-
-export interface CompactionResult {
-  messages: Message[];
-  tokensBefore: number;
-  tokensAfter: number;
-  compacted: boolean;
-  /**
-   * 摘要型策略（LLMSummarize）生成的摘要文本。
-   *
-   * 语义：本次压缩替代掉的消息的 LLM 摘要；非摘要型策略（MessageDrop /
-   * MemoryFlush）填 undefined。
-   *
-   * 消费者：engine 事务化聚合后通过 compact_end 事件暴露给 run-agent；
-   * run 闭包累积后作为窗口重构指令的 summary，由会话层折叠注意力窗口。
-   */
-  summary?: string;
-  /**
-   * 本次压缩替代掉的"文件 Turn"数（仅 LLMSummarize 填）。
-   *
-   * 精确定义：compact 发生后，文件里需要丢弃的原 Turn 数。
-   * 算法（见 LLMSummarizeStrategy.apply）：
-   *   1. splitMessagesPairAware(messages, preserveRecentTurns) → toSummarize
-   *   2. stripSummaryPlaceholderPair(toSummarize) 去掉上次 compact 的 pair
-   *   3. calculateMessageTurns(剩余) 最后 turn 号即本次替代的文件 Turn 数
-   *
-   * 消费者：注意力窗口折叠（WindowCompact.pairsCompacted）按此值从最旧
-   *   截配对。turnsCompacted=0 意味着"截 0 = 不截"，所以必须精确填充而非
-   *   硬编码。持久化是 append-only 原文，不参与压缩。
-   *
-   * 非摘要型策略不填（undefined）—— 它们不替代文件 Turn，只做粒度内裁剪。
-   */
-  turnsCompacted?: number;
-}
-
-/**
- * 压缩策略分类 —— 决定 force-apply 识别、诊断分组、UI 渲染。
- *
- * 为什么不用 name 字符串匹配：策略名是 "稳定 ID 但语义任意" 的字段，
- * 未来加 "llm-summarize-v2" / 用户自定义 / 多摘要策略时按 name 匹配会静默错漏。
- * kind 是 "分类维度的一等公民"，跨策略稳定。
- *
- * 分类语义：
- *   - "summarize"：产 summary 替代 turn（LLM 调用）。critical force-apply 的候选。
- *   - "trim"：粒度内裁剪（不替代 turn）。免费。
- *   - "drop"：丢弃消息（不替代 turn，如 MessageDrop）。免费。
- *   - "flush"：外化副作用（如 MemoryFlush 写 store，不改 messages）。LLM 调用但非摘要替代。
- *
- * 扩展约定：新增策略类型时在此加枚举项，同步更新 engine 的 force-apply 候选逻辑。
- */
-export type CompactionStrategyKind =
-  | "summarize"
-  | "trim"
-  | "drop"
-  | "flush";
-
-/**
- * 可插拔的压缩策略接口。
- *
- * 内置策略按优先级：
- * - MemoryFlush  （LLM，提取并持久化）       kind=flush
- * - MessageDrop  （免费，丢弃早期消息）      kind=drop
- * - LLMSummarize （昂贵，LLM 生成摘要）     kind=summarize
- */
-export interface CompactionStrategy {
-  readonly name: string;
-  /**
-   * 策略分类。engine 用此识别 force-apply 候选（kind === "summarize"），
-   * 代替了以前的 `name === "llm-summarize"` 字符串硬编码。
-   */
-  readonly kind: CompactionStrategyKind;
-  /** 优先级（越小越先执行） */
-  readonly priority: number;
-  /** 是否需要调用 LLM（影响成本判断） */
-  readonly requiresLLM: boolean;
-  /** 判断当前状态是否适合执行此策略 */
-  canApply(context: CompactionContext): boolean;
-  /** 执行压缩 */
-  apply(context: CompactionContext): Promise<CompactionResult>;
-}
-
-// ─── 事务化 Compact 事件 Payload 支撑类型 ───
-
-/**
- * 单个 strategy 在 compact 事务内的贡献记录。
- *
- * 事务化 compact_end 事件的 `strategies[]` 数组元素。消费方从这个数组
- * 可以看到每个 strategy 的独立效果，从汇总字段可以看到总效果。
- */
-export interface CompactStrategyContribution {
-  /** strategy.name —— 永远是策略稳定 ID，不带阶段后缀 */
-  readonly name: string;
-  /**
-   * 本次调用所处阶段。
-   *
-   * - undefined / "normal"：strategies 循环内的正常 apply（绝大多数场景）
-   * - "force-apply"：critical 硬挡路径，engine 绕过 canApply 直接调的最后一搏
-   *
-   * 为什么独立字段而非 name 后缀：name 是稳定分组 ID，
-   * 后缀污染会让消费方（UI 分组 / 诊断统计）无法精确区分"不同 strategy"
-   * 和"同 strategy 不同阶段"。分离后 `name + phase` 组合才是唯一键。
-   */
-  readonly phase?: "normal" | "force-apply";
-  /** 本策略是否实际压缩（strategy.apply 返回的 compacted 值） */
-  readonly success: boolean;
-  /** 本策略跑前的 tokens */
-  readonly tokensBefore: number;
-  /** 本策略跑后的 tokens */
-  readonly tokensAfter: number;
-  /** 仅摘要型策略（kind="summarize"）产出；非摘要型为 undefined */
-  readonly summary?: string;
-  /** 仅摘要型策略（kind="summarize"）产出；非摘要型为 undefined */
-  readonly turnsCompacted?: number;
-}
-
-// ─── 上下文管理器 ───
-
-/**
- * 上下文管理 hook —— 在 turn 结束时执行预算检查与压缩。
- *
- * Agent Loop 通过 turn-end 钩子（loop/turn-end.ts）调用此接口，与压缩具体策略
- * 解耦。Agent Loop 只关心：
- *   - 消息是否被修改了
- *   - 修改后的消息列表是什么
- *
- * 同接口也被 orchestrator 装配的 pre-flight / forceCompact 路径直接复用 ——
- * 这些路径不是 turn 边界副作用，不经过 turn-end 钩子，但共享同一接口契约。
- */
-export interface ContextManagerHook {
-  onTurnComplete(state: ContextManagerInput): Promise<ContextManagerOutput>;
-}
-
-export interface ContextManagerInput {
-  readonly messages: readonly Message[];
-  readonly turnCount: number;
-  /**
-   * 上游传入的 abort 信号。engine 会注入到每个 strategy 的 CompactionContext，
-   * 由策略的 LLM 调用透传给 provider。未设置时策略无限制运行。
-   */
-  readonly abortSignal?: AbortSignal;
-}
-
-export interface ContextManagerOutput {
-  messages: Message[];
-  modified: boolean;
-  /**
-   * 硬挡失败标志 —— 事务化后（含 critical force-apply）仍无法压到 non-critical。
-   *
-   * 语义：context 耗尽，即使绕过 canApply 门槛 force-apply LLMSummarize 也救不了
-   * （breaker 熔断 / apply 多次失败 / 或根本没有摘要型策略注册）。
-   *
-   * 消费方契约：
-   *   - agent-loop 在 tool 循环尾 / pure-text return 收到 failed → yield error + 终止 run
-   *     （不硬送 LLM 让 provider 返回 context_length_exceeded）
-   *   - run-agent 在 pre-flight 收到 failed → 直接返回 error RunResult，不进 runAgentLoop
-   *
-   * 默认 undefined 等价于 false —— 向后兼容（现有消费者把 undefined 当正常）。
-   */
-  failed?: boolean;
-}

@@ -1,17 +1,20 @@
 /**
- * 上下文预算管理
+ * 上下文预算计算 —— UI 占用展示的纯函数快照
  *
  * 核心公式（采用 Claude Code 的有效窗口计算）：
  *   effectiveWindow = contextWindow - min(maxOutputTokens, MAX_OUTPUT_RESERVE)
  *
- * 三级百分比阈值（替代 Claude Code 的绝对值 13K/3K）：
+ * 三级百分比阈值（替代 Claude Code 的绝对值 13K/3K）只驱动展示分级：
  *   normal  → usageRatio < 75%
- *   warning → usageRatio ≥ 75%（预警，通知用户）
- *   compact → usageRatio ≥ 85%（自动压缩）
- *   critical → usageRatio ≥ 95%（硬挡/强制压缩）
+ *   warning → usageRatio ≥ 75%（预警提示）
+ *   compact → usageRatio ≥ 85%（建议手动 /compact）
+ *   critical → usageRatio ≥ 95%（临界提示）
  *
  * 百分比比绝对值更好：在 32K 窗口的小模型上，13K buffer 占了 40%；
  * 用 15% 只占 4.8K，留更多空间给用户。
+ *
+ * 窗口压缩本身由段机制全权负责（attention 阈值 / risk-exceeded 应急地板），
+ * 本模块不驱动任何压缩。
  */
 
 import type { BudgetStatus, BudgetThresholds, ContextBudget } from "./types.js";
@@ -67,7 +70,7 @@ export interface ModelBudgetInfo {
  *   currentTokens,
  * );
  * if (budget.status === 'compact') {
- *   // 触发自动压缩
+ *   // UI 提示用户可手动 /compact
  * }
  * ```
  */

@@ -32,6 +32,7 @@ import {
   type MockInstance,
 } from "vitest";
 import {
+  AgentError,
   MockLLMProvider,
   SkillStore,
   deriveToolCalls,
@@ -382,8 +383,35 @@ describe("createAgentRuntime · forceCompact 强制段切换", () => {
     // 新段：摘要对置首 + 保留最近 buffer，严格短于原文
     expect(result.messages.length).toBeLessThan(messages.length + 2);
     expect(result.budget).toBeDefined();
+    // 正常摘要切段无降级信息
+    expect(result.emergencyFloor).toBeUndefined();
     // 端到端：段摘要 + 记忆提取共两次 light 调用（提取挂 afterSummarize）
     expect(providerRef.current!.calls.length).toBe(2);
+  });
+
+  it("摘要 LLM 失败 → 应急地板机械兜底：emergencyFloor 携根因随返回值交付（降级知情）", async () => {
+    // 不可重试错误（auth 不在 retryableTypes）：段管理器 4 次尝试各自快速失败 → 进地板
+    const authError = new AgentError("summarize auth fail", "auth");
+    providerRef.current = new MockLLMProvider([
+      { error: authError },
+      { error: authError },
+      { error: authError },
+      { error: authError },
+    ]);
+
+    const runtime = await createAgentRuntime({});
+    const result = await runtime.forceCompact(sixMessages(), 10);
+
+    expect(result.modified).toBe(true);
+    // 地板产物：机械折叠指令，无结构化摘要（不产快照）
+    expect(result.windowCompact).toBeDefined();
+    expect(result.windowCompact!.structuredSummary).toBeUndefined();
+    // 降级知情：localBus 与 UI 隔离，emergencyFloor 是手动路径唯一的降级交付通道
+    expect(result.emergencyFloor).toBeDefined();
+    expect(result.emergencyFloor!.droppedTurns).toBeGreaterThan(0);
+    // 根因是真实错误链文本（首次 auth 失败 / 连续失败后熔断开），
+    // 不再是"摘要解析失败"的间接症状
+    expect(result.emergencyFloor!.error).toMatch(/auth fail|Circuit breaker/);
   });
 
   it("小窗口（全部消息都在保留 buffer 内）→ 静默不切，零 LLM 调用", async () => {

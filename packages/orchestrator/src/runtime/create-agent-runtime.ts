@@ -10,7 +10,6 @@
 
 import { randomUUID } from "node:crypto";
 import {
-  type AgentResult,
   type AgentYield,
   type AgentEventMap,
   type WindowCompact,
@@ -36,8 +35,6 @@ import {
   BoundaryRegistry,
   ConfirmationBroker,
   createEventBus,
-  createContextEngine,
-  createLLMSummarizeStrategy,
   createSegmentManager,
   createSegmentSummarizeFn,
   createTokenEstimator,
@@ -47,8 +44,6 @@ import {
   wrapStreamWithWatchdog,
   wrapWithCalibration,
   ToolArgumentExtractor,
-  emptyUsage,
-  createMessageDropStrategy,
   MemoryFlusher,
   calculateBudget,
   createMemoryFlushHook,
@@ -59,7 +54,6 @@ import {
   getWorkSceneMemoryDir,
   PermissionStore,
   resolveAgentIdentity,
-  resolveContextManager,
   resolveModelInfo,
   SecurityPipeline,
   setAgentIdentity,
@@ -70,7 +64,6 @@ import {
   runAgentLoop,
   TurnContextInjector,
   TimeProvider,
-  getAbortReason,
   SkillStore,
   getSkillsRoot,
   renderSkillIndex,
@@ -98,13 +91,12 @@ import {
 } from "@zhixing/tools-builtin";
 import { mainProfile } from "../profile/default-profiles.js";
 import type { AgentRoleProfile } from "../profile/agent-role-profile.js";
-import { subscribeCompactAccumulator } from "./compact-accumulator.js";
 import { subscribeSegmentMarkerAccumulator } from "./segment-marker-accumulator.js";
 import { subscribeWorkModeAccumulator } from "./workmode-accumulator.js";
 import {
-  createSummarizeCallLLM,
-  createMemoryFlushCallLLM,
-} from "./compaction-llm.js";
+  createMainCallLLM,
+  createLightCallLLM,
+} from "./call-llm.js";
 import { buildSystemPrompt, type SystemPromptSegment } from "./system-prompt.js";
 import { prependContextBlock } from "./user-context.js";
 import {
@@ -310,6 +302,13 @@ export interface ForceCompactResult {
    * 窗口不该折叠。调用方应判断此字段存在再动窗口。
    */
   windowCompact?: WindowCompact;
+  /**
+   * 应急地板降级信息 —— 摘要 LLM 失败、切段以机械保尾截断完成时携带
+   * （正常摘要切段缺省）。与自动路径的 segment:emergency_floor 事件同语义：
+   * 调用方据此向用户呈现降级方式与代价（先方式与代价、后结果），不让
+   * 有损截断伪装成正常摘要。
+   */
+  emergencyFloor?: { droppedTurns: number; error: string };
 }
 
 export interface RunParams {
@@ -341,7 +340,7 @@ export interface RunParams {
    */
   turnContext?: TurnContext;
   /**
-   * Abort 信号 —— 透传到 agent-loop 和 contextManager（compact 策略内的 LLM 调用）。
+   * Abort 信号 —— 透传到 agent-loop 与段切换内的 LLM 调用。
    * 上游来源：SessionRuntime.abort()、用户 /abort、daemon grace timer。
    * 未设置时所有 LLM 调用无限制运行。
    */
@@ -461,7 +460,7 @@ export interface CreateAgentRuntimeOptions {
    * 主对话槽位 —— 缺省 "main"。决定主对话语义六处（capability /
    * Task provider+model / budget resolveModelInfo / 返回 providerId+model /
    * resilientCallLLM / runAgentLoop）取 roles[primaryRole]，及主对话 loop +
-   * Task 子 agent loop 的思考解析跟随；压缩域按 task 性质分流（LLMSummarize
+   * Task 子 agent loop 的思考解析跟随；单发调用域按性质分流（callText main
    * →roles.main / MemoryFlush+callText→roles.light / 段切换→roles.light，
    * 详见 secondary-llm-capability ADR-SLLM-009）不随 primaryRole 漂移，
    * roleThinking 三角色映射为真实 per-role 不跟随。
@@ -485,7 +484,7 @@ export interface CreateAgentRuntimeOptions {
    * per-run eventBus）构造 SegmentManager，按 turn 边界透传给 agent-loop。
    *
    * 缺省时 SegmentManager 不构造、不透传，agent-loop 走 budget-only 兜底路径
-   * （contextEngine LLMSummarize）。这让小型/极简集成（如纯测试 runtime）
+   * 。这让小型/极简集成（如纯测试 runtime）
    * 不必装配段切换也能跑通；段切换是 cli 装配层的产品能力，不是 runtime 必需。
    */
   segmentDeps?: {
@@ -553,7 +552,7 @@ export async function createAgentRuntime(
   // 主对话槽位 —— 决定主对话语义六处取哪个 role（capability / Task
   // provider+model / budget resolveModelInfo / 返回 providerId+model /
   // resilientCallLLM / runAgentLoop）+ loop 思考解析跟随。压缩域按 task 分流
-  // （LLMSummarize→main / MemoryFlush+callText→light / 段切换→light，详见
+  // （callText main→main / 记忆提取+callText→light / 段切换→light，详见
   // secondary-llm-capability ADR-SLLM-009）不跟随、roleThinking 三角色聚合
   // 不跟随（见下）。缺省 main，工作模式装配传 power。
   const primaryRole = options.primaryRole ?? "main";
@@ -706,7 +705,7 @@ export async function createAgentRuntime(
   //   - primaryThinking：主对话 loop + Task 子 agent loop（二者均跑
   //     roles[primaryRole] 单 model）→ 取 roleThinking[primaryRole]
   //   - lightThinking ：MemoryFlush + callText + 段切换摘要（恒走 roles.light，
-  //     不跟 primaryRole；主对话压缩 LLMSummarize 走 roles.main 用 mainThinking，
+  //     不跟 primaryRole；质量敏感单发（callText main）走 roles.main 用 mainThinking，
   //     见 secondary-llm-capability ADR-SLLM-009）
   const roleThinking: ResolvedRoleThinking = {
     main: resolveRoleThinking(roles.main, config.llm?.main?.thinking),
@@ -919,19 +918,19 @@ export async function createAgentRuntime(
   // /clear 一并清空。
   const resettables: Resettable[] = [];
 
-  // 压缩管线的 LLM 调用按用途分流到不同角色——主对话压缩走 main（摘要质量直接
-  // 关系下一轮 LLM 认知输入），记忆提取走 light（I/O 边界结构化数据净化）。
-  // 详见 compaction-llm.ts 的设计注释。
+  // 单发文本 LLM 调用按档位分流到不同角色——质量敏感单发（callText "main"）
+  // 走 main，记忆提取与 callText 默认档走 light（I/O 边界结构化数据净化）。
+  // 详见 call-llm.ts 的设计注释。
   const mainThinking = roleThinking.main;
-  const summarizeCallLLM = createSummarizeCallLLM(roles, mainThinking);
-  const memoryFlushCallLLM = createMemoryFlushCallLLM(roles, lightThinking);
+  const mainCallLLM = createMainCallLLM(roles, mainThinking);
+  const lightCallLLM = createLightCallLLM(roles, lightThinking);
 
-  // 记忆提取 —— 已从 budget 压缩管线迁挂到段切换 afterSummarize：内容被摘要
+  // 记忆提取 —— 挂在段切换 afterSummarize：内容被摘要
   // 替代、离开注意力窗口之时正是从原文蒸馏长期记忆的自然时刻。提取核心
   // （MemoryFlusher）装配期单例，hook 跨 run 共享（无状态）。
   const memoryFlushHook = createMemoryFlushHook({
     flusher: new MemoryFlusher({
-      callLLM: memoryFlushCallLLM,
+      callLLM: lightCallLLM,
       store: memoryStore,
     }),
   });
@@ -980,19 +979,6 @@ export async function createAgentRuntime(
     };
   };
 
-  // 策略编排（engine 按 priority asc 执行，到 normal/warning 就 break）：
-  //   priority 5   MessageDrop     免费 — usage < 0.9 触发（超过 0.9 让给 LLMSummarize）
-  //   priority 200 LLMSummarize    昂贵 — usage >= 0.9 触发，MessageDrop 让位
-  const strategies = [
-    createMessageDropStrategy(),
-    createLLMSummarizeStrategy({
-      callLLM: summarizeCallLLM,
-      estimator,
-      triggerRatio: 0.9,
-      preserveRecentTurns: 2,
-    }),
-  ];
-
   // 首窗 onWindowOpen（instance-start）—— 订阅者贡献数据驱动段（skill-index 等）,
   // 据此首次 buildSystemPrompt 建实例权威 prompt。抛错让装配失败（实例未就绪、
   // 安全回滚,对齐 work-mode）。createAgentRuntime 为 async,此处 await 合法。
@@ -1040,16 +1026,19 @@ export async function createAgentRuntime(
     },
 
     checkBudget(messages: readonly Message[]): ContextBudget {
-      const engine = createContextEngine(estimator, strategies, { modelInfo: modelBudgetInfo });
-      return engine.checkBudget(messages);
+      // 纯展示计算（压缩决策已全部归段机制）
+      return calculateBudget(
+        modelBudgetInfo,
+        estimator.estimateMessages(messages),
+      );
     },
 
     async callText(prompt: string, role: "main" | "light" = "light"): Promise<string> {
       // 单发 LLM 文本调用入口（无对话历史，独立 ChatRequest 隔离）。按 role 复用已装配
-      // 的角色通道 CompactLLMFn：默认 light（工作场景纪要 / 日志凝练等轻量任务，与
-      // MemoryFlush 同 light 角色）；role="main" 走主档（质量敏感的单发任务，如 MCP
-      // 接入标识推断，与主对话压缩同 main 角色 + mainThinking）。
-      const caller = role === "main" ? summarizeCallLLM : memoryFlushCallLLM;
+      // 的角色通道 TextCallLLMFn：默认 light（工作场景纪要 / 日志凝练等轻量任务，与
+      // 记忆提取同 light 角色）；role="main" 走主档（质量敏感的单发任务，如 MCP
+      // 接入标识推断，带 mainThinking）。
+      const caller = role === "main" ? mainCallLLM : lightCallLLM;
       return caller([userMessage(prompt)]);
     },
 
@@ -1080,6 +1069,13 @@ export async function createAgentRuntime(
         hooks: [memoryFlushHook],
       });
 
+      // localBus 与 UI 隔离，降级信息经返回值显式交付——在 evaluate 期间
+      // 收集 emergency_floor（emit 同步 await，evaluate 返回前必已触发）。
+      let emergencyFloor: ForceCompactResult["emergencyFloor"];
+      localBus.on("segment:emergency_floor", (info) => {
+        emergencyFloor = { droppedTurns: info.droppedTurns, error: info.error };
+      });
+
       const out = await segmentManager.evaluate({
         messages,
         systemPrompt: authoritativePrompt,
@@ -1098,6 +1094,7 @@ export async function createAgentRuntime(
           estimator.estimateMessages(finalMessages),
         ),
         windowCompact: out.windowCompact,
+        emergencyFloor,
       };
     },
 
@@ -1120,15 +1117,6 @@ export async function createAgentRuntime(
         { eventBus },
       );
 
-      // 每次 run 创建带 eventBus 的引擎实例（事件需绑定到当前 run 的 eventBus）。
-      // modelBudgetInfo 由 resolveModelInfo 保证非空 —— compact 永远启用。
-      const contextEngine = createContextEngine(
-        estimator,
-        strategies,
-        { modelInfo: modelBudgetInfo },
-        eventBus,
-      );
-
       // 段切换管理器 —— attention-driven 主路径，与 contextEngine 并列。
       //
       // 内部依赖（orchestrator 解析）：
@@ -1143,14 +1131,8 @@ export async function createAgentRuntime(
       //   - persistence：segmentMetadata 累积写入（transcript marker 不走这条，
       //     走 segment:new_started 事件 → accumulator → run-agent 单点 commit）
       //
-      // segmentDeps 缺省 → 不构造 SegmentManager，agent-loop 走 budget-only 兜底
-      // 路径（contextEngine LLMSummarize 在 critical 时承担兜底）。
-      //
-      // 不变量假设：budget compact 阈值 × contextWindow > optimalMaxTokens。
-      // 这保证 SegmentManager 在 attention 阈值（远早于 budget）先触发，
-      // contextManager 几乎从不在 SegmentManager 评估前改 messages。如果用户
-      // override 让阈值倒置，SegmentManager 会处理已被 LLMSummarize 改过的
-      // messages（套娃压缩，但功能上不破，仅降级摘要质量）。
+      // segmentDeps 缺省 → 不构造 SegmentManager —— 该 run 没有任何窗口压缩
+      // （段切换是唯一压缩机制），仅剩测试 / 纯嵌入消费这么用。
       const segmentWatchdog = params.watchdog ?? DEFAULT_WATCHDOG_POLICY;
       const segmentStreamFactory = makeSegmentStreamFactory(
         eventBus,
@@ -1162,7 +1144,7 @@ export async function createAgentRuntime(
             // capability 是会话所跑的 primaryRole model 的注意力/风险阈值，
             // 复用装配期解析的 primaryModelCapability（与 Task riskMaxTokens 同源）。
             // 段切换摘要 callLLM 与之正交 —— 段切换摘要恒走 roles.light（廉价），不跟 primaryRole
-            //（注：主对话压缩 LLMSummarize 走 roles.main，见 secondary-llm-capability ADR-SLLM-009）。
+            //（注：质量敏感单发 callText main 走 roles.main，见 secondary-llm-capability ADR-SLLM-009）。
             capability: primaryModelCapability,
             callLLM: createSegmentSummarizeFn(
               segmentStreamFactory,
@@ -1182,12 +1164,9 @@ export async function createAgentRuntime(
       // 装饰器自身的 UI 依赖(renderer 实例等)由工厂层 closure 捕获,不入参传递。
       const disposeRender = options.decorateRunBus?.({ bus: eventBus });
 
-      // Compact 累积订阅 —— 多个触发点 fire 时累加 turnsCompacted、
-      // 取最新 summary、锚定 firstTokensBefore。run 结束时读出作为 RunResult.windowCompact。
       //
       // 数据收集订阅,与展示层正交,留在 runtime 主流程。事件本身的渲染由 decorateRunBus
       // 注入的订阅处理(若有)。
-      const accumulator = subscribeCompactAccumulator(eventBus);
 
       // Segment marker 累积订阅 —— attention-driven 段切换 marker 走独立事件流。
       // 与 compact accumulator 对偶：单 run 内段切换最多一次（attention 阈值
@@ -1205,7 +1184,6 @@ export async function createAgentRuntime(
       //     warn ticker 会跨 run 累积,造成内存泄漏与重复渲染);
       //   - dispose 内部异常仅记录日志,不再次 throw,见 safeDispose 注释。
       const disposeAll = (): void => {
-        safeDispose("run.accumulator", () => accumulator.dispose());
         safeDispose("run.segmentAccumulator", () => segmentAccumulator.dispose());
         safeDispose("run.workModeAccumulator", () =>
           workModeAccumulator.dispose(),
@@ -1390,13 +1368,9 @@ export async function createAgentRuntime(
         //   阈值），pre-flight 必须看真实输入才能做出正确决策。
         //
         // turn-context 块（时间、任务状态等）由 agent-loop 在每次 LLM call 之前 per-call inject，
-        // pre-flight 这里不预 inject——避免 inject 与 pre-flight 触发的 LLMSummarize 双重处理；
+
         // turn-context 体积较小（百级 tokens），pre-flight 评估的 under-estimate 不会跨预算阈值。
-        //
-        // 终止归一化：复用 core 的 `resolveContextManager`，与 agent-loop 内部两条触发点
-        // 共享同一判别逻辑（throw / aborted / overflow），避免第三处复制 abort 优先规则
-        // 和 AgentError 包装 —— 新加触发点时只需做 shape 映射。
-        let loopMessages = injectedMessages;
+        const loopMessages = injectedMessages;
 
         // 原始 user 消息（params.messages 最后一条，未经 <context> / turn-context 注入增强）
         // —— 持久化输入的 messages[0] 必须是用户真实输入，不是内部增强版
@@ -1404,64 +1378,6 @@ export async function createAgentRuntime(
           params.messages[params.messages.length - 1] ??
           (userMessage("") as Message);
 
-        const buildPreFlightError = (agentResult: AgentResult): RunResult => {
-          return {
-            agentResult,
-            runRecord: buildRunRecord({
-              source: params.source,
-              userMessage: originalUserMessage,
-              newMessages: [],
-              agentResult,
-            }),
-            newMessages: [],
-            durationMs: Date.now() - startTime,
-            // budget 快照用 injectedMessages —— 即使 engine 抛错也能给一个保守值；
-            // turn-context 块由 agent-loop per-LLM-call 注入，不在此 budget 估算里
-            budget: contextEngine.checkBudget(injectedMessages),
-            windowCompact: accumulator.getWindowCompact(),
-            pendingModeSwitch: workModeAccumulator.getIntent(),
-          };
-        };
-
-        const preFlight = await resolveContextManager(
-          contextEngine,
-          {
-            messages: injectedMessages,
-            turnCount: 0,
-            abortSignal: params.abortSignal,
-          },
-          params.abortSignal,
-          "pre-flight",
-        );
-        switch (preFlight.kind) {
-          case "error":
-            return buildPreFlightError({
-              reason: "error",
-              error: preFlight.error,
-              usage: emptyUsage(),
-            });
-          case "aborted":
-            // pre-flight 阶段 agent-loop 未启动 —— 不 emit 任何 EventBus 事件
-            // (订阅方观察的事件流应是"本次 run 未真启动":无 run_start / fired / run_end);
-            // emit fired 但缺 run_end 会成为孤儿事件破坏中断事件单向蕴含语义。
-            // 仅在 RunResult.agentResult 上同步携带 abortReason,让 REPL renderSummary 能按
-            // 错误码分支显示差异化文本(裸 abort 无类型化 reason 时 fallback 到 { kind: "external" })。
-            // exitDelayMs 不填——pre-flight 阶段无 abort listener 无法测量。
-            return buildPreFlightError({
-              reason: "aborted",
-              usage: emptyUsage(),
-              abortReason: (params.abortSignal && getAbortReason(params.abortSignal))
-                ?? { kind: "external" },
-            });
-          case "ok":
-            if (preFlight.output.modified) {
-              loopMessages = preFlight.output.messages;
-              // pre-flight 压缩改了 messages = 注意力窗口换代 → 重拼本 run 局部
-              // prompt,在进入 agent-loop 之前。
-              await windowLifecycle.onChange("compact");
-            }
-            break;
-        }
 
         // 用 SecurityPipeline 包装工具执行——每次 run() 重新构造 wrapper。
         // 把 turnContext（turnId / emissionTarget / commitToUser）合并到每次 tool.call 的 ToolExecutionContext；core loop 对此无感知。
@@ -1515,7 +1431,6 @@ export async function createAgentRuntime(
             callLLM: resilientCallLLM,
             executeTool: secureExecuteTool,
           },
-          contextManager: contextEngine,
           llmRoles: roles,
           // 各角色生效思考配置，沿 llmRoles 同路径注入到工具 ctx.roleThinking，
           // 让工具 I/O 边界调对应角色（如 WebFetch 蒸馏走 light）遵循用户配置。
@@ -1540,18 +1455,14 @@ export async function createAgentRuntime(
           if (done) {
             const allMessages = [...params.messages, ...newMessages];
 
-            // 校准已下沉到 agent-loop per-LLM-call —— 这里仅 budget 评估用 state.messages
-            // 维度（保 budget 与状态体积同源，与 calibration baseline 双 baseline 设计）。
+            // budget 是纯展示快照（压缩决策已全部归段机制）
+            const budget = calculateBudget(
+              modelBudgetInfo,
+              estimator.estimateMessages(allMessages),
+            );
 
-            const budget = contextEngine.checkBudget(allMessages);
-
-            // 指令优先级：segment > compact（段切换指令含 segmentId +
-            // structuredSummary 等结构化信息，应优先采用；compact 是 budget 兜底
-            // 路径的产物，单 run 内两者通常不会同时存在 —— attention 触发
-            // 远早于 budget critical）。
-            const windowCompact =
-              segmentAccumulator.getWindowCompact() ??
-              accumulator.getWindowCompact();
+            // 窗口重构指令唯一生产者 = 段切换（自动评估 / 应急地板同一出口）
+            const windowCompact = segmentAccumulator.getWindowCompact();
             return {
               agentResult: value,
               runRecord: buildRunRecord({

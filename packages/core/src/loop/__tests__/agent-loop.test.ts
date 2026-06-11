@@ -8,7 +8,6 @@ import { drainAgentLoop, runAgentLoop } from "../agent-loop.js";
 import { MockLLMProvider, mockTextProvider } from "../mock-provider.js";
 import { COMMITMENT_SIGNAL } from "../tool-executor.js";
 import type { AgentLoopParams, AgentYield } from "../types.js";
-import type { ContextManagerHook, ContextManagerInput } from "../../context/types.js";
 
 // ─── 测试辅助 ───
 
@@ -63,233 +62,39 @@ describe("Agent Loop", () => {
       expect(filterYields(yields, "turn_complete")).toHaveLength(0);
     });
 
-    it("pure-text turn 在 return 前触发 contextManager.onTurnComplete (P0-F)", async () => {
-      // 保证社交通道 / 纯聊天场景也能检查 compact。不加这条触发，
-      // 纯聊天到 context 爆也不会触发 compact。
-      const provider = mockTextProvider("hello");
-      const onTurnComplete = vi.fn<[ContextManagerInput], Promise<{ messages: import("../../types/messages.js").Message[]; modified: boolean }>>(
-        async (input) => ({ messages: [...input.messages], modified: false }),
-      );
-      const contextManager: ContextManagerHook = { onTurnComplete };
-
-      await drainAgentLoop(baseParams(provider, { contextManager }));
-
-      expect(onTurnComplete).toHaveBeenCalledTimes(1);
-      const callArg = onTurnComplete.mock.calls[0]![0];
-      // 传入的 messages 必须含 assistant 回复（最新的本轮），否则 compact 决策错漏
-      expect(callArg.messages.length).toBe(2);
-      expect(callArg.messages[1]!.role).toBe("assistant");
-      // turnCount 是本 turn 序号（从 0 开始的第一次 LLM 回复 = turn 1）
-      expect(callArg.turnCount).toBe(1);
-    });
-
-    it("pure-text turn 不提供 contextManager 时照常 return（不强制依赖 contextManager）", async () => {
+    it("pure-text turn 无任何 turn-end 依赖时照常 return", async () => {
       const provider = mockTextProvider("hi");
       const { result } = await drainAgentLoop(baseParams(provider));
       expect(result.reason).toBe("completed");
     });
 
-    it("pure-text 路径 contextManager 返 failed=true → 终止 run, reason=error (P0-L)", async () => {
-      // P0-L 契约：force-apply 后仍 critical → agent-loop 收到 failed 立即终止，
-      // 不进下一次 LLM 调用（否则 provider 会报 context_length_exceeded）。
-      const provider = mockTextProvider("hello");
-      const onTurnComplete = vi.fn<
-        [ContextManagerInput],
-        Promise<{ messages: import("../../types/messages.js").Message[]; modified: boolean; failed?: boolean }>
-      >(async (input) => ({
-        messages: [...input.messages],
-        modified: false,
-        failed: true,
-      }));
-      const contextManager: ContextManagerHook = { onTurnComplete };
-
-      const { result } = await drainAgentLoop(
-        baseParams(provider, { contextManager }),
-      );
-
-      expect(result.reason).toBe("error");
-      if (result.reason === "error") {
-        expect(result.error.type).toBe("context_overflow");
-        expect(result.error.recoverable).toBe(false);
-        expect(result.error.message).toContain("Context exhausted");
-        // pathLabel 自钩子抽取后统一为 "turn-end"（纯文本/工具循环两条路径
-        // 都走 runTurnEnd 同一编排器；caller 路径细节不再泄漏到错误消息）。
-        expect(result.error.message).toContain("turn-end");
-      }
-    });
-
-    it("tool-loop 路径 contextManager 返 failed=true → 终止 run, reason=error (P0-L)", async () => {
-      // P0-L 契约 tool 分支：一轮 tool 执行后 compact 失败 → 不再进 Step 1 LLM 调用。
-      const provider = new MockLLMProvider([
-        { toolCalls: [{ id: "tc1", name: "t", input: {} }] },
-        { text: "should not reach" },
-      ]);
-      const onTurnComplete = vi.fn<
-        [ContextManagerInput],
-        Promise<{ messages: import("../../types/messages.js").Message[]; modified: boolean; failed?: boolean }>
-      >(async (input) => ({
-        messages: [...input.messages],
-        modified: false,
-        failed: true,
-      }));
-      const contextManager: ContextManagerHook = { onTurnComplete };
-
-      const { result } = await drainAgentLoop(
-        baseParams(provider, { tools: [makeTool("t")], contextManager }),
-      );
-
-      expect(result.reason).toBe("error");
-      if (result.reason === "error") {
-        expect(result.error.type).toBe("context_overflow");
-        expect(result.error.recoverable).toBe(false);
-        expect(result.error.message).toContain("Context exhausted");
-        // pathLabel 自钩子抽取后统一为 "turn-end"，见上一测试注释
-        expect(result.error.message).toContain("turn-end");
-      }
-      // 第二次 LLM 调用不应发生 —— failed 提前终止
-      expect(provider.callCount).toBe(1);
-    });
-
     // ─── P0-α: abort + failed 同时发生时 abort 优先 ───
 
-    it("pure-text 路径 abort+failed 同时发生 → reason=aborted（P0-α，abort 优先于 context_overflow）", async () => {
-      // 场景：长 session 中 session.abort 恰好发生在 compact 期间。
-      // strategy 对 abort 静默返 compacted:false → engine 按 critical 返 failed:true。
-      // 若不先查 abortSignal 会把用户 abort 归类为"上下文耗尽"，transcript / UI 全错位。
-      const controller = new AbortController();
-      const provider = mockTextProvider("hello");
-      const onTurnComplete = vi.fn<
-        [ContextManagerInput],
-        Promise<{ messages: import("../../types/messages.js").Message[]; modified: boolean; failed?: boolean }>
-      >(async (input) => {
-        // 模拟 compact 期间 session 被 abort
-        controller.abort();
-        return {
-          messages: [...input.messages],
-          modified: false,
-          failed: true,
-        };
-      });
-      const contextManager: ContextManagerHook = { onTurnComplete };
-
-      const { result } = await drainAgentLoop(
-        baseParams(provider, { contextManager, abortSignal: controller.signal }),
-      );
-
-      expect(result.reason).toBe("aborted");
-    });
-
-    it("tool-loop 路径 abort+failed 同时发生 → reason=aborted（P0-α）", async () => {
-      const controller = new AbortController();
-      const provider = new MockLLMProvider([
-        { toolCalls: [{ id: "tc1", name: "t", input: {} }] },
-        { text: "should not reach" },
-      ]);
-      const onTurnComplete = vi.fn<
-        [ContextManagerInput],
-        Promise<{ messages: import("../../types/messages.js").Message[]; modified: boolean; failed?: boolean }>
-      >(async (input) => {
-        controller.abort();
-        return {
-          messages: [...input.messages],
-          modified: false,
-          failed: true,
-        };
-      });
-      const contextManager: ContextManagerHook = { onTurnComplete };
-
-      const { result } = await drainAgentLoop(
-        baseParams(provider, {
-          tools: [makeTool("t")],
-          contextManager,
-          abortSignal: controller.signal,
-        }),
-      );
-
-      expect(result.reason).toBe("aborted");
-    });
-
-    // ─── P1-δ: contextManager 抛错场景 ───
-
-    it("pure-text 路径 contextManager 抛错 → reason=error (P1-δ, 保护 run_end 事件契约)", async () => {
-      // engine / strategy 抛错时,agent-loop 不能让错误冒泡到 runAgentLoop 外层
-      // (会跳过 emitRunEnd,订阅方看不到运行结束)。应转为 error AgentResult。
-      const provider = mockTextProvider("hello");
-      const contextManager: ContextManagerHook = {
-        onTurnComplete: async () => {
-          throw new Error("simulated engine internal error");
-        },
-      };
-
-      const { result } = await drainAgentLoop(
-        baseParams(provider, { contextManager }),
-      );
-
-      expect(result.reason).toBe("error");
-      if (result.reason === "error") {
-        // toAgentError 把 Error 包装为 AgentError(type="unknown"),保留原 message
-        expect(result.error.message).toBe("simulated engine internal error");
-      }
-    });
-
-    it("tool-loop 路径 contextManager 抛错 → reason=error (P1-δ)", async () => {
-      const provider = new MockLLMProvider([
-        { toolCalls: [{ id: "tc1", name: "t", input: {} }] },
-        { text: "should not reach" },
-      ]);
-      const contextManager: ContextManagerHook = {
-        onTurnComplete: async () => {
-          throw new Error("engine boom");
-        },
-      };
-
-      const { result } = await drainAgentLoop(
-        baseParams(provider, {
-          tools: [makeTool("t")],
-          contextManager,
-        }),
-      );
-
-      expect(result.reason).toBe("error");
-      if (result.reason === "error") {
-        expect(result.error.message).toBe("engine boom");
-      }
-      // 第二次 LLM 调用不应发生
-      expect(provider.callCount).toBe(1);
-    });
 
     // ─── P1-ε: agent:run_end 事件携带 errorType ───
 
     it("agent:run_end 事件在 error 终止时携带 errorType (P1-ε)", async () => {
       // 订阅方可据此做差异化 UX,不再从 error 消息字符串 substring 匹配。
-      const provider = mockTextProvider("hello");
-      const onTurnComplete = vi.fn<
-        [ContextManagerInput],
-        Promise<{ messages: import("../../types/messages.js").Message[]; modified: boolean; failed?: boolean }>
-      >(async (input) => ({
-        messages: [...input.messages],
-        modified: false,
-        failed: true,
-      }));
-      const contextManager: ContextManagerHook = { onTurnComplete };
+      // error 源用 LLM 调用抛错 —— loop 包装为 provider_error，run_end.errorType 取自 error.type。
+      const provider: LLMProvider = {
+        id: "mock",
+        chat: () => {
+          throw new AgentError("llm boom", "llm");
+        },
+      } as unknown as LLMProvider;
       const eventBus = new EventBus<AgentEventMap>();
-      const runEndPayloads: Array<{ reason: string; errorType?: string; error?: string }> = [];
+      const runEndPayloads: Array<{ reason: string; errorType?: string }> = [];
       eventBus.on("agent:run_end", (data) =>
-        runEndPayloads.push({
-          reason: data.reason,
-          errorType: data.errorType,
-          error: data.error,
-        }),
+        runEndPayloads.push({ reason: data.reason, errorType: data.errorType }),
       );
 
-      await drainAgentLoop(
-        baseParams(provider, { contextManager, eventBus }),
+      const { result } = await drainAgentLoop(
+        baseParams(provider, { eventBus }),
       );
 
+      expect(result.reason).toBe("error");
       expect(runEndPayloads).toHaveLength(1);
-      expect(runEndPayloads[0]!.reason).toBe("error");
-      expect(runEndPayloads[0]!.errorType).toBe("context_overflow");
-      expect(runEndPayloads[0]!.error).toContain("Context exhausted");
+      expect(runEndPayloads[0]!.errorType).toBe("provider_error");
     });
 
     it("agent:run_end 事件在 completed 终止时不带 errorType (P1-ε)", async () => {
@@ -1188,7 +993,7 @@ describe("Agent Loop", () => {
     });
 
     it("ext signal 中途 abort → interruptedTurnIndex 等于已完成 turn 数 (state.turnCount)", async () => {
-      // turn 1 中 tool 触发 abort, 后续 turn 1 走完 contextManager(无 contextManager → ok),
+      // turn 1 中 tool 触发 abort, 后续 turn 1 走完 turn-end 副作用,
       // state 推进到 turnCount=1, 下次迭代顶 abort guard 触发 → interruptedTurnIndex=1
       // 验证 interruptedTurnIndex 取 state.turnCount(0-indexed)而不是 newTurnCount(1-indexed 已完成数)
       const ctrl = new AbortController();
@@ -1269,47 +1074,6 @@ describe("Agent Loop", () => {
       expect(provider.callCount).toBe(1);
     });
 
-    it("contextManager 触发的 abort → AgentResult.abortReason 类型化 (非 undefined)", async () => {
-      // 同 P0-α 的 abort+failed 场景, 但额外验证新行为:abortReason 必须类型化,
-      // 否则 REPL renderSummary 走"未知中断"兜底文案、破坏差异化 UX
-      const ctrl = new AbortController();
-      const provider = new MockLLMProvider([
-        { toolCalls: [{ id: "tc1", name: "t", input: {} }] },
-        { text: "never" },
-      ]);
-      const onTurnComplete = vi.fn<
-        [import("../../context/types.js").ContextManagerInput],
-        Promise<{ messages: import("../../types/messages.js").Message[]; modified: boolean; failed?: boolean }>
-      >(async (input) => {
-        ctrl.abort();
-        return { messages: [...input.messages], modified: false, failed: true };
-      });
-
-      const eventBus = new EventBus<AgentEventMap>();
-      let fired: AgentEventMap["interrupt:fired"] | undefined;
-      eventBus.on("interrupt:fired", (e) => { fired = e; });
-
-      const { result } = await drainAgentLoop(
-        baseParams(provider, {
-          tools: [makeTool("t")],
-          contextManager: { onTurnComplete },
-          abortSignal: ctrl.signal,
-          eventBus,
-        }),
-      );
-
-      expect(result.reason).toBe("aborted");
-      if (result.reason === "aborted") {
-        expect(result.abortReason).toBeDefined();
-        expect(result.abortReason?.kind).toBe("external");
-        expect(typeof result.exitDelayMs).toBe("number");
-        expect(result.exitDelayMs).toBeGreaterThanOrEqual(0);
-      }
-      // emit fired 也走 contextManager abort 路径(收敛在 finalizeRun)
-      expect(fired).toBeDefined();
-      expect(fired?.reason?.kind).toBe("external");
-    });
-
     // ─── finalizeRun 单点 abort 优先转换 ───
 
     it("LLM error 路径 + abort 同时满足 → finalizeRun 自动覆盖为 aborted (abort 优先于 error)", async () => {
@@ -1350,20 +1114,17 @@ describe("Agent Loop", () => {
     });
 
     it("pre-text-return completed 路径 + abort 同时 → finalizeRun 覆盖为 aborted (race window 防御)", async () => {
-      // 场景:LLM 返回 pure text,contextManager 内部触发 abort 但返回 ok-ish output
-      // (strategy 不感知 abort,output.failed=false)。resolveContextManager 返回 kind="ok",
-      // toTerminalAgentResult 返 undefined,主路径走 return completed。
-      // 但 controller.signal 已 aborted —— finalizeRun 自动覆盖,避免 abort 被静默丢失。
+      // 场景:LLM 返回 pure text,turn-end 副作用（段评估）期间外部 abort 触发但
+      // 评估返回 modified:false。主路径走 return completed,但 controller.signal
+      // 已 aborted —— finalizeRun 自动覆盖,避免 abort 被静默丢失。
       const ctrl = new AbortController();
       const provider = mockTextProvider("hello");
-      const onTurnComplete = vi.fn<
-        [import("../../context/types.js").ContextManagerInput],
-        Promise<{ messages: import("../../types/messages.js").Message[]; modified: boolean; failed?: boolean }>
-      >(async (input) => {
-        // 模拟 strategy 不感知 abort,返回正常 output
-        ctrl.abort();
-        return { messages: [...input.messages], modified: false, failed: false };
-      });
+      const segmentManager = {
+        evaluate: async () => {
+          ctrl.abort();
+          return { decision: { kind: "pass", reason: "below-optimal" }, modified: false };
+        },
+      } as unknown as import("../../context/segment/segment-manager.js").SegmentManager;
 
       const eventBus = new EventBus<AgentEventMap>();
       let fired: AgentEventMap["interrupt:fired"] | undefined;
@@ -1371,7 +1132,7 @@ describe("Agent Loop", () => {
 
       const { result } = await drainAgentLoop(
         baseParams(provider, {
-          contextManager: { onTurnComplete },
+          segmentManager,
           abortSignal: ctrl.signal,
           eventBus,
         }),

@@ -1,9 +1,9 @@
 /**
- * compaction-llm 路由契约测试
+ * call-llm 路由契约测试
  *
- * 两个 helper 按用途分流到不同角色：
- *   - createSummarizeCallLLM  → roles.main.chat  (主对话压缩，质量直接影响下一轮认知)
- *   - createMemoryFlushCallLLM → roles.light.chat (记忆提取，I/O 边界结构化净化)
+ * 两个 helper 按档位分流到不同角色：
+ *   - createMainCallLLM  → roles.main.chat  (质量敏感单发，产物直接面向用户)
+ *   - createLightCallLLM → roles.light.chat (记忆提取等 I/O 边界结构化净化)
  *
  * 本文件用 spy LLMRoles 反向验证两条路径互不干扰、每条路径的 ChatRequest 透传正确。
  */
@@ -19,9 +19,9 @@ import {
   userMessage,
 } from "@zhixing/core";
 import {
-  createSummarizeCallLLM,
-  createMemoryFlushCallLLM,
-} from "../compaction-llm.js";
+  createMainCallLLM,
+  createLightCallLLM,
+} from "../call-llm.js";
 
 // ─── 测试辅助 ───
 
@@ -67,21 +67,21 @@ function makeSpyRoles(opts: {
   const main = makeSpyRole(opts.mainChunks ?? ["MAIN"]);
   const light = makeSpyRole(opts.lightChunks ?? ["LIGHT"]);
   return {
-    // power 走兜底（compaction-llm 永不调用 power），复用 light spy 仅为满足 LLMRoles 三键
+    // power 走兜底（call-llm 永不调用 power），复用 light spy 仅为满足 LLMRoles 三键
     roles: { main: main.role, light: light.role, power: light.role },
     mainChat: main.chat,
     lightChat: light.chat,
   };
 }
 
-// ─── createSummarizeCallLLM · 主对话压缩走 main ───
+// ─── createMainCallLLM · main 档路由 ───
 
-describe("createSummarizeCallLLM · 路由契约", () => {
+describe("createMainCallLLM · 路由契约", () => {
   it("调用走 main，light 永不被调用", async () => {
     const { roles, mainChat, lightChat } = makeSpyRoles({
       mainChunks: ["summarized"],
     });
-    const callLLM = createSummarizeCallLLM(roles);
+    const callLLM = createMainCallLLM(roles);
 
     const result = await callLLM([userMessage("旧历史")]);
 
@@ -94,7 +94,7 @@ describe("createSummarizeCallLLM · 路由契约", () => {
     const { roles } = makeSpyRoles({
       mainChunks: ["第一段", "第二段", "第三段"],
     });
-    const callLLM = createSummarizeCallLLM(roles);
+    const callLLM = createMainCallLLM(roles);
 
     const result = await callLLM([userMessage("input")]);
 
@@ -103,7 +103,7 @@ describe("createSummarizeCallLLM · 路由契约", () => {
 
   it("空响应直接返回空字符串（caller 自行容错）", async () => {
     const { roles } = makeSpyRoles({ mainChunks: [] });
-    const callLLM = createSummarizeCallLLM(roles);
+    const callLLM = createMainCallLLM(roles);
 
     const result = await callLLM([userMessage("input")]);
 
@@ -112,7 +112,7 @@ describe("createSummarizeCallLLM · 路由契约", () => {
 
   it("abortSignal 透传给 main.chat", async () => {
     const { roles, mainChat } = makeSpyRoles({});
-    const callLLM = createSummarizeCallLLM(roles);
+    const callLLM = createMainCallLLM(roles);
     const ac = new AbortController();
 
     await callLLM([userMessage("input")], { abortSignal: ac.signal });
@@ -123,7 +123,7 @@ describe("createSummarizeCallLLM · 路由契约", () => {
 
   it("ChatRequest 不带 model 字段（由 LLMRole.chat 内部绑定）", async () => {
     const { roles, mainChat } = makeSpyRoles({});
-    const callLLM = createSummarizeCallLLM(roles);
+    const callLLM = createMainCallLLM(roles);
 
     await callLLM([userMessage("input")]);
 
@@ -135,7 +135,7 @@ describe("createSummarizeCallLLM · 路由契约", () => {
 
   it("mainThinking 注入时透传给 main.chat", async () => {
     const { roles, mainChat } = makeSpyRoles({});
-    const callLLM = createSummarizeCallLLM(roles, { mode: "off" });
+    const callLLM = createMainCallLLM(roles, { mode: "off" });
 
     await callLLM([userMessage("input")]);
 
@@ -145,7 +145,7 @@ describe("createSummarizeCallLLM · 路由契约", () => {
 
   it("未注入 mainThinking 时 ChatRequest.thinking 为 undefined", async () => {
     const { roles, mainChat } = makeSpyRoles({});
-    const callLLM = createSummarizeCallLLM(roles);
+    const callLLM = createMainCallLLM(roles);
 
     await callLLM([userMessage("input")]);
 
@@ -155,7 +155,7 @@ describe("createSummarizeCallLLM · 路由契约", () => {
 
   it("messages 原样透传，不做改写", async () => {
     const { roles, mainChat } = makeSpyRoles({});
-    const callLLM = createSummarizeCallLLM(roles);
+    const callLLM = createMainCallLLM(roles);
 
     const inputMsgs: Message[] = [userMessage("a"), userMessage("b")];
     await callLLM(inputMsgs);
@@ -165,14 +165,14 @@ describe("createSummarizeCallLLM · 路由契约", () => {
   });
 });
 
-// ─── createMemoryFlushCallLLM · 记忆提取走 light ───
+// ─── createLightCallLLM · light 档路由 ───
 
-describe("createMemoryFlushCallLLM · 路由契约", () => {
+describe("createLightCallLLM · 路由契约", () => {
   it("调用走 light，main 永不被调用", async () => {
     const { roles, mainChat, lightChat } = makeSpyRoles({
       lightChunks: ["extracted"],
     });
-    const callLLM = createMemoryFlushCallLLM(roles);
+    const callLLM = createLightCallLLM(roles);
 
     const result = await callLLM([userMessage("旧历史")]);
 
@@ -185,7 +185,7 @@ describe("createMemoryFlushCallLLM · 路由契约", () => {
     const { roles } = makeSpyRoles({
       lightChunks: ["第一段", "第二段"],
     });
-    const callLLM = createMemoryFlushCallLLM(roles);
+    const callLLM = createLightCallLLM(roles);
 
     const result = await callLLM([userMessage("input")]);
 
@@ -194,7 +194,7 @@ describe("createMemoryFlushCallLLM · 路由契约", () => {
 
   it("空响应直接返回空字符串（MemoryFlush 经 parseExtractions 自带 try/catch 容错）", async () => {
     const { roles } = makeSpyRoles({ lightChunks: [] });
-    const callLLM = createMemoryFlushCallLLM(roles);
+    const callLLM = createLightCallLLM(roles);
 
     const result = await callLLM([userMessage("input")]);
 
@@ -203,7 +203,7 @@ describe("createMemoryFlushCallLLM · 路由契约", () => {
 
   it("abortSignal 透传给 light.chat", async () => {
     const { roles, lightChat } = makeSpyRoles({});
-    const callLLM = createMemoryFlushCallLLM(roles);
+    const callLLM = createLightCallLLM(roles);
     const ac = new AbortController();
 
     await callLLM([userMessage("input")], { abortSignal: ac.signal });
@@ -214,7 +214,7 @@ describe("createMemoryFlushCallLLM · 路由契约", () => {
 
   it("lightThinking 注入时透传给 light.chat", async () => {
     const { roles, lightChat } = makeSpyRoles({});
-    const callLLM = createMemoryFlushCallLLM(roles, { mode: "off" });
+    const callLLM = createLightCallLLM(roles, { mode: "off" });
 
     await callLLM([userMessage("input")]);
 

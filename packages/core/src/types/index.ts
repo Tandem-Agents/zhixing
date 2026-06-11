@@ -57,6 +57,7 @@ export type {
   StreamToolCallDelta,
   StreamToolCallEnd,
   StreamToolCallStart,
+  TextCallLLMFn,
   TokenUsage,
 } from "./llm.js";
 export {

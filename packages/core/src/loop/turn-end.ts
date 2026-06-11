@@ -13,21 +13,20 @@
  *
  * ─── 为什么需要 ───
  *
- * 历史上 turn 结束副作用（contextManager budget 兜底、segmentManager attention
- * 切段）散落在 agent-loop 主循环里手写多遍，加新 turn 结束副作用必须同步改所有
- * 触发点。本钩子把这个语义提升为单点 —— turn 结束做什么，看这一个函数即可。
+ * 历史上 turn 结束副作用散落在 agent-loop 主循环里手写多遍，加新 turn 结束
+ * 副作用必须同步改所有触发点。本钩子把这个语义提升为单点 —— turn 结束做什么，
+ * 看这一个函数即可。
  *
  * ─── 钩子职责 ───
  *
- *   ① budget-driven 兜底（ContextManager / 窗口百分比触发）
- *   ② attention-driven 切段（SegmentManager / 注意力阈值触发）
- *      —— {@link runTurnBegin}（首个 LLM 调用前一次性）**只**跑 ②、不跑 ①③；
- *      它自带 ② inline（不与本处抽公共 helper，理由见 runTurnBegin 注释）。
- *   ③ 上下文 tokens 快照 emit（estimator + eventBus 注入时）
- *   ④ 未来扩展：metrics / persistence checkpoint / per-turn 任意副作用
+ *   - attention-driven 切段（SegmentManager / 注意力阈值触发，唯一压缩机制）
+ *     —— {@link runTurnBegin}（首个 LLM 调用前一次性）跑同一评估；
+ *     它自带 inline（不与本处抽公共 helper，理由见 runTurnBegin 注释）。
+ *   - 上下文 tokens 快照 emit（estimator + eventBus 注入时）
+ *   - 注意力窗口换代触发（切段重构 messages 后通知 windowLifecycle）
+ *   - 未来扩展：metrics / persistence checkpoint / per-turn 任意副作用
  *
- * 副作用按声明顺序串行执行，前者修改的 messages 自动流入后者；任一副作用返回
- * terminal（如 contextManager error/aborted）立即短路返回，不再继续。
+ * 副作用按声明顺序串行执行，前者修改的 messages 自动流入后者。
  *
  * ─── 扩展点 ───
  *
@@ -53,11 +52,7 @@
  *     AgentResult，由 caller 调 finalizeRun。
  */
 
-import {
-  resolveContextManager,
-  type ContextTermination,
-} from "../context/termination.js";
-import type { ContextManagerHook, ITokenEstimator } from "../context/types.js";
+import type { ITokenEstimator } from "../context/types.js";
 import type { SegmentManager } from "../context/segment/segment-manager.js";
 import type { IEventBus } from "../events/types.js";
 import type { AgentEventMap } from "../types/agent-events.js";
@@ -103,8 +98,6 @@ export interface TurnEndParams {
 
   // ── 配置依赖 ──
 
-  /** budget-driven 兜底（可选；缺省时 budget 步骤静默 no-op） */
-  readonly contextManager?: ContextManagerHook;
   /** attention-driven 段切换（可选；缺省时段切换步骤静默 no-op） */
   readonly segmentManager?: SegmentManager;
   /**
@@ -144,7 +137,7 @@ export interface TurnEndParams {
    */
   readonly anchor?: TokenAnchor;
   /**
-   * 注意力窗口换代回调 —— 本 turn 发生段切换 / budget 压缩（messages 重构=新窗
+   * 注意力窗口换代回调 —— 本 turn 发生段切换（messages 重构=新窗
    * 诞生）时，在 messages 重构完成后由本钩子**内部**触发。装配方（orchestrator）
    * 注入，据此重建 per-run 局部 prompt + 更新实例权威 prompt。缺省（sub-agent /
    * 单测）→ no-op。
@@ -161,7 +154,7 @@ export interface TurnEndParams {
 /**
  * runTurnBegin 入参 —— 仅 ② 段切换所需子集。
  *
- * 刻意比 TurnEndParams 窄：runTurnBegin 不需要 contextManager(①) / usage /
+ * 刻意比 TurnEndParams 窄：runTurnBegin 不需要 usage /
  * tokenEstimator / eventBus / anchor(③)，签名不对调用方"撒谎"需要这些。
  * messages 取 `readonly` —— 直接接受 agent-loop 的 state.messages
  * （`readonly Message[]`），调用方无需先拷贝。
@@ -182,7 +175,7 @@ export interface SegmentSwitchParams {
  * Turn 开始（首个 LLM 调用前）一次性段切换评估 —— 与 runTurnEnd 对称但**只跑 ②**。
  *
  * 为何只 ②：
- *   - ① `contextManager.onTurnComplete` 是"turn 完成"语义钩子；turn 开始时无
+ *   - turn 完成语义的副作用（tokens 快照等）turn 开始时无
  *     已完成 turn、initial messages 非 user/assistant 配对，调它违反钩子契约
  *     （契约由 agent-loop P0-F/P0-L 测试守护）。① 留 turn-end。
  *   - ③ tokens 快照属 turn 结束语义，且首个 call 前 anchor 必缺。
@@ -227,17 +220,13 @@ export async function runTurnBegin(
 /**
  * 执行 turn 结束副作用编排。
  *
- * 串行顺序：
- *   ① budget-driven 兜底（contextManager）
- *   ② attention-driven 切段（segmentManager）
- *   ③ 未来扩展点 —— 在此追加新副作用，保持 messages 链式传递
+ * 串行顺序：段切换 → tokens 快照 → 窗口换代触发；未来副作用在此追加，
+ * 保持 messages 链式传递。
  *
- * 失败语义：
- *   - contextManager terminal（error / aborted）→ 钩子立即短路返回 terminal，
- *     不再调段切换。与原 agent-loop 在 toTerminalAgentResult 后立即 finalizeRun
- *     的行为一致 —— context 失败时不应再花 LLM 成本做段切换。
- *   - segmentManager 失败 → SegmentManager 内部已捕获并 emit transition_failed，
- *     返回 modified=false，钩子拿原 messages 继续。
+ * 失败语义：segmentManager 失败 → SegmentManager 内部已捕获并按终态分流
+ * （终态失败 emit transition_failed；风险档由应急地板机械兜底、以降级方式
+ * 完成），返回 modified=false 时钩子拿原 messages 继续 —— 段切换失败绝不
+ * 阻塞 turn。
  */
 export async function runTurnEnd(
   params: TurnEndParams,
@@ -245,33 +234,7 @@ export async function runTurnEnd(
   let messages = params.messages;
   let windowChange: WindowChangeReason | undefined;
 
-  // ① budget-driven 兜底
-  const ctx = await resolveContextManager(
-    params.contextManager,
-    {
-      messages,
-      turnCount: params.turnCount,
-      abortSignal: params.abortSignal,
-    },
-    params.abortSignal,
-    "turn-end",
-  );
-  const terminal = toTerminalAgentResult(ctx, params.usage);
-  if (terminal) return { kind: "terminal", result: terminal };
-  if (ctx.kind === "ok" && ctx.output.modified) {
-    messages = ctx.output.messages;
-    windowChange = "compact";
-  }
-
-  // ② attention-driven 段切换
-  //
-  // 与 contextManager 并列，是 attention-driven 主路径；contextManager 是
-  // budget-driven 兜底。段切换看的是 contextManager 处理后的 messages —— 隐式
-  // 不变量是 budget compact 阈值 × contextWindow > attention optimalMaxTokens，
-  // 保证 attention 阈值远早于 budget compact 触发；用户颠倒阈值会让段切换
-  // 处理已被 budget summarize 的 messages（功能不破，仅降级摘要质量）。
-  //
-  // 段切换失败绝不阻塞 turn —— evaluate 返 modified:false 时拿原 messages 继续。
+  // attention-driven 段切换（唯一压缩机制）
   //
   // marker 走 segment:new_started 事件 → orchestrator accumulator → 随
   // RunResult 带出，由会话层在接受协议中折叠窗口（不落 transcript——
@@ -291,10 +254,10 @@ export async function runTurnEnd(
     }
   }
 
-  // ③ 上下文 tokens 快照 emit
+  // 上下文 tokens 快照 emit
   //
-  // 反映"下次 LLM 将看到的"上下文占用 —— 必须在 ①② 处理之后估算，让快照与
-  // 真实 LLM 视图一致（contextManager 压缩后 + segmentManager 切段后的 messages）。
+  // 反映"下次 LLM 将看到的"上下文占用 —— 必须在切段处理之后估算，让快照与
+  // 真实 LLM 视图一致。
   //
   // 与 segment:evaluation.currentTokens 的关系：后者是评估副产物（仅 SegmentManager
   // 装配时 emit），本事件是占用快照的一等公民信号（不依赖 SegmentManager）。
@@ -306,8 +269,8 @@ export async function runTurnEnd(
   //     Claude Code 同模式，误差从纯字符估算的 ±20-80% 降到 ±5-15%
   //   - anchor 失效或缺失 → 纯字符估算 fallback，使用 estimator EMA 校准的 factor
   //
-  // 静默语义：tokenEstimator / eventBus 任一缺失即跳过（与 ①②contextManager /
-  // segmentManager 缺失同模式）；订阅方应能容忍事件不到达。
+  // 静默语义：tokenEstimator / eventBus 任一缺失即跳过（与 segmentManager
+  // 缺失同模式）；订阅方应能容忍事件不到达。
   if (params.tokenEstimator && params.eventBus) {
     const totalTokens = computeContextTokens({
       estimator: params.tokenEstimator,
@@ -322,7 +285,7 @@ export async function runTurnEnd(
     });
   }
 
-  // ④ 注意力窗口换代触发 —— 本 turn 的 ①/② 重构了 messages = 新注意力窗口诞生,
+  // 注意力窗口换代触发 —— 本 turn 的切段重构了 messages = 新注意力窗口诞生,
   //    在此(messages 已最终化、下个 LLM call 之前)通知 windowLifecycle 做窗口边界
   //    重建。收敛于此、而非返回信号交 caller 各路径自行触发:runTurnEnd 的所有调用
   //    路径(纯文本末轮 / 工具路径)都经本函数,「所有 messages 重构出口都触发换代」
@@ -339,40 +302,7 @@ export async function runTurnEnd(
   return { kind: "ok", messages };
 }
 
-// ─── ContextTermination → AgentResult 映射 ───
-
-/**
- * 把 context/termination.ts 的判别联合映射到 agent-loop 的 AgentResult。
- *
- * 映射规则：
- *   - kind="ok"      → undefined（非终止，调用方继续流程）
- *   - kind="error"   → { reason: "error", error, usage }
- *   - kind="aborted" → { reason: "aborted", usage }（abortReason 由 finalizeRun 补提）
- *
- * 返回 undefined 而非省略 ok 分支：保持 switch 的类型穷尽性（ContextTermination
- * 加 kind 时 tsc 会报未穷尽错误），避免未来新增 kind 悄悄漏处理。
- *
- * usage 参数：当前 run 累积 usage —— 终止 AgentResult 需要带 usage 让订阅方统计消耗。
- *
- * abortReason / exitDelayMs 不在此处填充 —— finalizeRun 是单点退出 + 单点 abort
- * 优先转换，任何 aborted result 经过 finalizeRun 都会从 controller 补提 abortReason
- * 并算出 exitDelayMs。本函数只做协议层形状映射，不感知 abort 时间数据。
- */
-function toTerminalAgentResult(
-  termination: ContextTermination,
-  usage: TokenUsage,
-): AgentResult | undefined {
-  switch (termination.kind) {
-    case "ok":
-      return undefined;
-    case "error":
-      return { reason: "error", error: termination.error, usage };
-    case "aborted":
-      return { reason: "aborted", usage };
-  }
-}
-
-// ─── ③ tokens 快照计算 ───
+// ─── tokens 快照计算 ───
 
 interface ContextTokensInput {
   readonly estimator: ITokenEstimator;

@@ -9,7 +9,7 @@
  *                                                ↑ ↓
  *                                       (子 agent Task 是分发型工具，由 lineage="main" 的
  *                                        tool_start 切到 task；子 bus 的 tool 事件更新内层 subTool)
- *                          [compact_start]─▶ compacting ─[compact_end]─▶ streaming
+ *        [segment:transition_start]─▶ compacting ─[new_started | transition_failed]─▶ streaming
  *                          [retry_attempt]─▶ retrying ──[next stream]──▶ streaming
  *                          [run_end]──▶ done ──[next run_start]──▶ thinking
  *
@@ -21,7 +21,7 @@
  *     累加（含 cache 命中部分），turn 中括号显示
  *
  * 与 sub-agent-status 的整合：原 setupSubAgentStatus 用 `\r` 单行刷新主 Task 工具调用的
- * `[Task#N: desc] <最近工具>`，与此模块职责完全重叠。Phase 4 后整合于此，按 lineage 区分主/子
+ * `[Task#N: desc] <最近工具>`，与此模块职责完全重叠。后整合于此，按 lineage 区分主/子
  * bus 事件并在 task 状态下嵌套显示。
  */
 
@@ -340,20 +340,27 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
   );
 
   const offCompactStart = eventBus.on(
-    "context:compact_start",
+    "segment:transition_start",
     (payload) => {
       if (!isPhaseRunning(phase)) return;
       const rs = currentRunning(phase);
       phase = {
         kind: "compacting",
         ...rs,
-        tokensBefore: payload.tokensBefore,
+        tokensBefore: payload.currentTokens,
       };
       repaint();
     },
   );
 
-  const offCompactEnd = eventBus.on("context:compact_end", () => {
+  // 成功（new_started）与失败（transition_failed）都收束相位 —— 失败不阻塞对话
+  const offCompactEnd = eventBus.on("segment:new_started", () => {
+    if (phase.kind === "compacting") {
+      phase = transitionTo(phase, "streaming");
+      repaint();
+    }
+  });
+  const offCompactFailed = eventBus.on("segment:transition_failed", () => {
     if (phase.kind === "compacting") {
       phase = transitionTo(phase, "streaming");
       repaint();
@@ -449,6 +456,7 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
       offToolEnd();
       offCompactStart();
       offCompactEnd();
+      offCompactFailed();
       offRetryAttempt();
       offRetrySuccess();
       offInterruptWarn();

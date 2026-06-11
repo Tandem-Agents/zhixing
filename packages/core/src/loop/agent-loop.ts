@@ -40,7 +40,7 @@
  *   消费者 generator.return() 中途打断。携带 abortReason / exitDelayMs。
  * - max_turns：达到 maxTurns 限制（与 abort 平行体系，不携带 abortReason）。
  * - completed：LLM 返回纯文本（无工具调用），正常结束。
- * - error：LLM 调用出错 / contextManager 不可恢复错误 / agent-loop 内部抛错（finally 兜底捕获）。
+ * - error：LLM 调用出错 / agent-loop 内部抛错（finally 兜底捕获）。
  */
 
 import { buildCleanup } from "../interrupt/cleanup.js";
@@ -100,7 +100,7 @@ export async function* runAgentLoop(
 
   // 把外部 abortSignal 当作"一个可能的 abort 源"汇入 controller，loop 内部一律走
   // controller.signal：统一抽象出 abort 写权限（看门狗 / 子 agent fork 都通过 controller 触发）
-  // 与读路径（下游 Provider / 工具 / contextManager 接收 controller.signal，完全透明）。
+  // 与读路径（下游 Provider / 工具接收 controller.signal，完全透明）。
   //
   // parentSignal: 子 agent 路径用,父 abort → 子 controller 自动 abort with parent-abort kind。
   // abortSignal: 外部多源 signal (scheduler / 外部 SDK), 走 external kind。
@@ -167,7 +167,7 @@ export async function* runAgentLoop(
    * interruptedTurnIndex 直接读 state.turnCount（closure 捕获最新值，与"被中断 turn 0-indexed"
    * 语义对应，不取 newTurnCount 即"已完成 turn 数 1-indexed"）。
    *
-   * toolGraceMs 默认 0：abort 不在工具 await 期间 (turn 边界 / LLM 阶段 / contextManager 阶段
+   * toolGraceMs 默认 0：abort 不在工具 await 期间 (turn 边界 / LLM 阶段
    * 等) 时调用方省略；abort 发生在工具 await 期间时调用方按
    * `max(0, abortedDuringToolAt - abortFiredAt)` 计算后传入，反映"工具自身 abort 等待消耗"
    * 让 SLO 监控隔离 loop 框架延迟与工具自身延迟。
@@ -187,7 +187,7 @@ export async function* runAgentLoop(
         // 非 aborted result 但系统已 aborted → 自动覆盖（LLM error / completed / max_turns 路径）
         finalResult = { reason: "aborted", abortReason: detectedReason, usage: result.usage };
       } else if (result.abortReason === undefined) {
-        // 已是 aborted 但 abortReason 缺失 → 从 controller 补提（contextManager terminal 路径）
+        // 已是 aborted 但 abortReason 缺失 → 从 controller 补提
         finalResult = { ...result, abortReason: detectedReason };
       }
     }
@@ -289,7 +289,7 @@ export async function* runAgentLoop(
 
       // ── Step 2: Call LLM ──
       // 接 controller (非 signal):看门狗触发 idle-timeout 时需要 controller.abort() 写权限,
-      // controller 由 agent-loop 持有, signal 全程透传 Provider/工具/contextManager。
+      // controller 由 agent-loop 持有, signal 全程透传 Provider/工具。
       // watchdog 不在本层 fallback 默认值: spec 规定默认 fallback 单点存在于 cli/run-agent.ts
       // 注入边界, 保证用户显式禁用 idle-timer (`{ idleTimeoutMs: 0 }`) 不被 agent-loop 二次覆盖。
       const llmResult = yield* streamLLMCall({
@@ -396,7 +396,7 @@ export async function* runAgentLoop(
       // ── LLM 错误 → 终止 ──
       // 非 abort 的真实 provider 错误 (SDK 抛错 / provider error event)。
       // abort 已在上方分流走 aborted variant,不会进此分支被掩盖为"出错"。
-      // finalizeRun 内部仍有 abort 优先转换兜底 (例如 contextManager 异步触发 abort 的 race
+      // finalizeRun 内部仍有 abort 优先转换兜底 (异步触发 abort 的 race
       // window),双重保护。
       if (llmResult.error) {
         return await finalizeRun({
@@ -416,22 +416,21 @@ export async function* runAgentLoop(
       if (toolCalls.length === 0) {
         // ── Turn 结束钩子 —— 纯文本路径 ──
         //
-        // turn 结束副作用（budget 兜底 + attention 切段 + 未来扩展）统一由 runTurnEnd
+        // turn 结束副作用（attention 切段 + tokens 快照 + 未来扩展）统一由 runTurnEnd
         // 编排，与工具循环路径调用同一钩子（钩子内部不感知 caller 路径）。
         //
         // 钩子返回 messages 不消费 —— 本 run 即将 finalizeRun，下一轮 LLM call 不存在；
         // 段切换 marker 走 segment:new_started 事件 → orchestrator accumulator → 下次
         // run 启动时从 transcript 重建用切段后历史，跨 run 生效。
         //
-        // terminal 来源仍由 contextManager 引发（segmentManager 永不返 terminal）：
+        // turn-end 已无 terminal 来源（segmentManager 永不返 terminal）：
         // aborted 但 abortReason 缺失会在 finalizeRun 内部从 controller 补提，让
-        // contextManager abort 与主循环 abort 在 AgentResult.abortReason 上行为一致。
+        // turn-end 期 abort 与主循环 abort 在 AgentResult.abortReason 上行为一致。
         const turnEnd = await runTurnEnd({
           messages: [...state.messages, llmResult.message],
           turnCount: state.turnCount + 1,
           usage,
           abortSignal: controller.signal,
-          contextManager: params.contextManager,
           segmentManager: params.segmentManager,
           systemPrompt: getSystemPrompt(),
           tools: params.tools ?? [],
@@ -520,7 +519,7 @@ export async function* runAgentLoop(
 
       // ── Turn 结束钩子 —— 工具循环路径 ──
       //
-      // turn 结束副作用（budget 兜底 + attention 切段 + 未来扩展）统一由 runTurnEnd
+      // turn 结束副作用（attention 切段 + tokens 快照 + 未来扩展）统一由 runTurnEnd
       // 编排，与纯文本路径调用同一钩子（钩子内部不感知 caller 路径）。
       //
       // newMessages 构造在 caller 侧完成：本路径需要把 assistant.message + 完整
@@ -528,7 +527,7 @@ export async function* runAgentLoop(
       // 签名；内部不会 mutate 数组）—— 完整 turn 路径仅消费完整结果。
       //
       // 钩子返回 messages 必须消费写回 state.messages —— 下一轮 LLM call 用钩子
-      // 处理后的版本，让 contextManager 的 budget summarize / segmentManager 的
+      // 处理后的版本，让 segmentManager 的
       // attention 切段在本 run 内立即生效。
       const newMessages = [
         ...state.messages,
@@ -540,7 +539,6 @@ export async function* runAgentLoop(
         turnCount: newTurnCount,
         usage,
         abortSignal: controller.signal,
-        contextManager: params.contextManager,
         segmentManager: params.segmentManager,
         systemPrompt: getSystemPrompt(),
         tools: params.tools ?? [],

@@ -2,8 +2,8 @@
  * 段切换模块的类型与接口定义。
  *
  * 模块职责：在对话累积达到 attention 阈值时，把当前段历史压缩为结构化摘要 +
- * 缓冲带，作为新段首条 user message 启动新段。与 ContextEngine 的 budget 兜底
- * 是并列关系（budget-driven vs attention-driven），不是嵌套。
+ * 缓冲带，作为新段首条 user message 启动新段。段切换是系统唯一的窗口压缩
+ * 机制（/compact、自动切段、应急地板是同一机制的三种触发）。
  *
  * 关键抽象（让 SegmentManager 编排层保持单一职责）：
  *   - SegmentThresholds：attention 阈值的结构化兼容子集（避免 core 反向 import providers）
@@ -11,7 +11,7 @@
  *   - SegmentSummarizeLLMFn：压缩 LLM 调用签名（必须携带完整 system + tools，保 cache prefix byte-equal）
  *   - SegmentPersistence：段切换写入路径抽象（与 ConversationRepository / TranscriptStore 解耦）
  *   - TaskListReader：task_list 状态读取抽象（避免 core 反向 import tools-builtin）
- *   - SegmentTransitionHook：扩展点接口（仅预留，第一版无内置实现）
+ *   - SegmentTransitionHook：扩展点接口（记忆提取经 afterSummarize 挂载）
  */
 
 import type { SegmentMeta } from "../../conversation/types.js";
@@ -118,7 +118,7 @@ export type SegmentSummarizeLLMFn = (
  *
  * **不**承担窗口折叠：折叠指令通过 `segment:new_started` 事件流向
  * orchestrator accumulator，随 RunResult.windowCompact 在 run 边界交给注意力
- * 窗口应用，与 LLMSummarize 路径同模式，整个 run 的折叠指令收敛到唯一出口。
+ * 窗口应用——整个 run 的折叠指令收敛到唯一出口。
  * 持久化是 append-only 原文，段切换不写 transcript。
  *
  * 实现需保证 atomic + per-id lock（与 conversation.writeMeta 同款）。
@@ -126,8 +126,9 @@ export type SegmentSummarizeLLMFn = (
  *
  * appendSegment 失败语义：窗口折叠走另一条数据流（事件 → accumulator →
  * RunResult.windowCompact），与 segmentMetadata 写入解耦；本接口失败不影响段切换主流程
- * 完成度，只影响段历史观测元数据完整性。SegmentManager 内部捕获后 emit
- * `segment:transition_failed` 但 `modified: true` 返回（段切换语义上成功）。
+ * 完成度，只影响段历史观测元数据完整性。SegmentManager 内部捕获后 emit 专属
+ * warning 事件 `segment:metadata_persist_failed`（不复用 transition_failed——
+ * 后者是终态失败），段切换照常以 `modified: true` 成功返回。
  */
 export interface SegmentPersistence {
   appendSegment(conversationId: string, meta: SegmentMeta): Promise<void>;

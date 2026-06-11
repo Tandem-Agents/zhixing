@@ -23,7 +23,6 @@ import type { AgentErrorType } from "./errors.js";
 import type { StreamEvent, StopReason, TokenUsage } from "./llm.js";
 import type { Message } from "./messages.js";
 import type { ToolSpec } from "./tools.js";
-import type { CompactStrategyContribution } from "../context/types.js";
 import type { AbortReason } from "../interrupt/types.js";
 import type { WindowCompact } from "../context/window/types.js";
 import type { SecurityEventMap } from "../security/types.js";
@@ -84,7 +83,7 @@ export interface InterruptFiredEvent {
   /**
    * abort 触发瞬间正在执行的工具的 abort 等待消耗(ms)。
    * - abort 发生在工具 await 期间(响应抛 AbortError 或正常 return partial)→ > 0
-   * - abort 发生在工具间隙、LLM 阶段、turn 边界、contextManager 阶段 → 0
+   * - abort 发生在工具间隙、LLM 阶段、turn 边界 → 0
    *
    * 用途:订阅方做 P95 SLO 监控用 `exitDelayMs - toolGraceMs` 隔离 loop 框架延迟与
    * 工具自身延迟,避免合规等待被误统计为框架性能问题。
@@ -191,56 +190,6 @@ export type AgentEventMap = {
 
   // ─── 上下文管理 ───
 
-  /**
-   * 预算检查事件 —— 在 compact 事务前后各 fire 一次。
-   *
-   * phase:
-   *   - "pre-compact": onTurnComplete 初始检查，订阅方据此判断是否需要压缩 UI 预警
-   *   - "post-compact": strategies 循环结束后的状态，订阅方可用于指标对比；
-   *     仅在实际进入 strategies 循环路径上 fire（早退的 normal/warning 场景不 fire）
-   */
-  "context:budget_check": {
-    phase: "pre-compact" | "post-compact";
-    currentTokens: number;
-    effectiveWindow: number;
-    usageRatio: number;
-    status: "normal" | "warning" | "compact" | "critical";
-  };
-
-  /**
-   * compact 事务开始锚点 —— 一次 compact 事务仅 fire 一次，不带 strategy 名。
-   * UI 消费它显示"压缩中"spinner；事务结束时 compact_end 关闭 spinner。
-   *
-   * 事务化规则：仅在第一个 strategy.canApply 通过时 fire；
-   * 如果所有 strategies canApply 都返回 false，compact_start 不 fire。
-   */
-  "context:compact_start": {
-    tokensBefore: number;
-  };
-
-  /**
-   * compact 事务结束 —— 一次 compact 事务仅 fire 一次，payload 汇总所有贡献。
-   *
-   * strategies[]: 本次事务内每个跑过的 strategy 的独立记录（按执行顺序）。
-   * 汇总字段：
-   *   summary     = strategies 中最后一个非空 summary（当前仅 LLMSummarize 产）
-   *   turnsCompacted = 所有 strategy.turnsCompacted 求和（当前仅 LLMSummarize 一个值）
-   *
-   * 幂等保证：compact_start fire 过则必然有对应的 compact_end（try-finally 保护）。
-   */
-  "context:compact_end": {
-    strategies: readonly CompactStrategyContribution[];
-    summary?: string;
-    turnsCompacted?: number;
-    tokensBefore: number;
-    tokensAfter: number;
-  };
-
-  "context:calibrate": {
-    estimated: number;
-    actual: number;
-    newRatio: number;
-  };
 
   /**
    * 上下文 token 快照 —— 每个 turn 结束时由 turn-end 钩子 emit 一次。
@@ -256,7 +205,7 @@ export type AgentEventMap = {
    *   - context:tokens_snapshot 由 turn-end 钩子直接 emit，不依赖 SegmentManager 装配，
    *     是上下文占用的一等公民观测信号；订阅方（UI 指示器 / 诊断面板）应订阅此事件
    *
-   * Emit 时机：turn-end 钩子在 contextManager budget 兜底 + segmentManager 切段处理后，
+   * Emit 时机：turn-end 钩子在 segmentManager 切段处理后，
    * 对最终 messages 估算后 emit；反映"下次 LLM 将看到的"快照而非 turn 开始时的快照。
    *
    * 静默语义：当 turn-end 钩子缺失 tokenEstimator 或 eventBus 任一依赖时不 emit，
@@ -271,16 +220,20 @@ export type AgentEventMap = {
 
   // ─── 段切换 ───
   //
-  // 段切换是 attention-driven 的离散事件，与 context:* 的 budget-driven 兜底
-  // 并列。SegmentManager 在 turn 边界评估当前 tokens 与 attention 阈值，
+  // 段切换是 attention-driven 的离散事件，也是系统唯一的窗口压缩机制。
+  // SegmentManager 在 turn 边界评估当前 tokens 与 attention 阈值，
   // 决策"切段 / 推迟 / pass"。
   //
-  // 事件流（仅 trigger 路径完整 fire 全套）：
-  //   segment:evaluation        每次评估都 fire（含 pass / defer / trigger）
-  //   segment:transition_start  仅 trigger 时
+  // 事件流（仅 trigger 路径完整 fire 全套；终态事件互斥，每次评估至多一个）：
+  //   segment:evaluation         每次评估都 fire（含 pass / defer / trigger）
+  //   segment:transition_start   仅 trigger 时
   //   segment:summarize_complete 压缩 LLM 完成（trigger 成功路径）
-  //   segment:new_started        新段 messages 已组装并落盘（成功完成切段）
-  //   segment:transition_failed  任一环节失败（含压缩 LLM 失败 / 持久化失败）
+  //   segment:new_started        新段 messages 已组装（正常摘要 / 地板降级均发，终态完成）
+  //   segment:emergency_floor    地板降级标记（伴随 new_started，携摘要失败根因）
+  //   segment:transition_failed  终态失败：本轮切换没发生（LLM 失败未进地板 / hook 中止）
+  //   segment:hook_failed / segment:metadata_persist_failed
+  //                              旁路 warning（hook 异常 / 段元数据写入失败），
+  //                              除 beforeSummarize 中止外不影响切段主流程
 
   /**
    * 评估完成，无论是否真切段。decision 字段反映决策结果。
@@ -318,9 +271,15 @@ export type AgentEventMap = {
   /**
    * 应急地板生效：风险阈值已破且摘要 LLM 失败 → 机械保尾截断（无 LLM、
    * 不落盘）。注意力层自己的最后兜底，防 run 失控撑爆物理窗口。
+   *
+   * 事件即终态：地板兜底成功属于"段切换以降级方式完成"——发本事件 +
+   * segment:new_started，**不发 transition_failed**（后者保留给"本轮切换
+   * 没发生"的终态失败）。消费方据此渲染降级警示，无需跨事件对账。
    */
   "segment:emergency_floor": {
     segmentId: string;
+    /** 摘要 LLM 失败的根因 —— 为什么走到机械截断 */
+    error: string;
     droppedTurns: number;
     tokensBefore: number;
     tokensAfter: number;
@@ -341,7 +300,7 @@ export type AgentEventMap = {
    *
    * 这样段切换的窗口折叠与本 turn 的接受是同一时点完成，杜绝
    * "内存切了但接受的窗口没切"类的状态不一致；
-   * 与 LLMSummarize 走 `context:compact_end` → accumulator → 单点 commit
+   * 与折叠指令经 accumulator 单点交付
    * 同模式，整个 run 内 transcript 写入收敛到唯一路径。
    */
   "segment:new_started": {
@@ -396,13 +355,17 @@ export type AgentEventMap = {
   };
 
   /**
-   * 段切换失败 —— 压缩 LLM 失败 / 持久化失败 / 摘要全空 等任一环节失败。
-   * 调用方降级为"不切"，继续按原 messages 跑下一轮；下次 turn 边界再评估。
+   * 段切换终态失败 —— 本轮切换没发生（压缩 LLM 失败且未进应急地板 /
+   * beforeSummarize hook 中止 / 摘要全空 等）。调用方降级为"不切"，
+   * 继续按原 messages 跑下一轮；下次 turn 边界再评估。
+   *
+   * 事件即终态：应急地板兜底成功的路径**不发本事件**（属于"以降级方式
+   * 完成"，走 emergency_floor + new_started）——同一次评估终态事件互斥。
    */
   "segment:transition_failed": {
     segmentId: string;
     error: string;
-    /** true 表示压缩 LLM 重试已耗尽；false 表示其他失败（如持久化抛错）*/
+    /** true 表示压缩 LLM 重试已耗尽；false 表示未到 LLM 阶段的失败（beforeSummarize hook 中止）*/
     retriesExhausted: boolean;
   };
 

@@ -23,17 +23,20 @@
  *      j. 构造窗口重构指令（含 segmentId + structuredSummary + 平文本 summary 副本）
  *      k. persistence.appendSegment（segmentMetadata 累积；失败 emit warning 但仍成功）
  *      l. emit new_started 携带 marker → 返回 modified=true
- *   8. trigger 关键失败（压缩失败 / 解析空 / beforeSummarize hook 失败） → emit
- *      transition_failed → return modified:false（降级不切，agent-loop 拿原 messages 继续）
+ *   8. trigger 关键失败（压缩失败 / 解析空 / beforeSummarize hook 失败）按终态分流，
+ *      同一次 evaluate 终态事件互斥（事件即终态，消费方无需跨事件对账）：
+ *      - risk-exceeded 且非 abort → 应急地板机械截断 → emit emergency_floor（携失败
+ *        根因）+ new_started → return modified:true（段切换以降级方式完成）
+ *      - 其余 → emit transition_failed → return modified:false（本轮切换没发生，
+ *        agent-loop 拿原 messages 继续）
  *
  * 关键不变量：
  *   - 压缩请求 system + tools + messages 与上一轮 byte-equal（cache 完美命中）
  *   - 段切换失败绝不阻塞 turn（agent-loop 拿原 messages 继续，下次再评估）
  *   - **窗口折叠不由 SegmentManager 直接应用**：通过 segment:new_started
  *     事件携带 windowCompact 流向 orchestrator accumulator，随 RunResult 在
- *     run 边界由调用方交给注意力窗口折叠。与 LLMSummarize 走 context:compact_end
- *     → accumulator → RunResult.windowCompact 路径同模式，整个 run 的折叠指令
- *     收敛到唯一出口；持久化是 append-only 原文，压缩不触碰磁盘
+ *     run 边界由调用方交给注意力窗口折叠——整个 run 的折叠指令收敛到
+ *     唯一出口；持久化是 append-only 原文，压缩不触碰磁盘
  *   - segmentMetadata 是独立观测元数据流：写入失败不阻断段切换主流程
  *     （marker 已通过事件流转出，下次启动 transcript rebuild 仍能还原新段 LLM 视图；
  *     segmentMetadata 失败仅影响"段历史浏览"未来 UI，不影响 LLM 行为）
@@ -250,15 +253,15 @@ export class SegmentManager {
         throw new Error("summary parser returned empty triplet");
       }
     } catch (e) {
-      await this.cfg.eventBus?.emit("segment:transition_failed", {
-        segmentId,
-        error: errorMessage(e),
-        retriesExhausted: true,
-      });
       // 应急地板：风险阈值已破（再不切就逼近物理窗口）而摘要 LLM 不可用 →
       // 机械保尾截断兜底（无 LLM、不落盘）。optimal 档失败则等下轮再试——
       // 还有余量，不值得有损降级。abort 是用户意图而非 LLM 不可用，
       // 同样不降级（下轮照常评估）。
+      //
+      // 事件即终态：地板兜底成功 = 段切换以降级方式完成，不发 transition_failed
+      // （摘要失败根因随 emergency_floor 携带）；transition_failed 只保留给
+      // "本轮切换没发生"的终态失败——同一次 evaluate 终态事件互斥，消费方
+      // （UI / 诊断）无需跨事件对账。
       if (decision.reason === "risk-exceeded" && !input.abortSignal?.aborted) {
         return this.applyEmergencyFloor(
           decision,
@@ -266,8 +269,14 @@ export class SegmentManager {
           tokensBefore,
           toSummarize,
           toPreserve,
+          errorMessage(e),
         );
       }
+      await this.cfg.eventBus?.emit("segment:transition_failed", {
+        segmentId,
+        error: errorMessage(e),
+        retriesExhausted: true,
+      });
       return { decision, modified: false };
     }
 
@@ -426,6 +435,9 @@ export class SegmentManager {
    * 应急地板 —— 注意力层自己的最后兜底：被摘段整体替换为机械占位
    * （dropped-turns 标注），保留最近 buffer 原文。有损降级换可用性：
    * 细节仍完整躺在持久化原文上，窗口折叠指令不携结构化摘要（不产快照）。
+   *
+   * summarizeError 是走到地板的根因（摘要 LLM 为何不可用），随
+   * emergency_floor 事件带给诊断与 UI 消费方。
    */
   private async applyEmergencyFloor(
     decision: SegmentDecision & { kind: "trigger" },
@@ -433,6 +445,7 @@ export class SegmentManager {
     tokensBefore: number,
     toSummarize: readonly Message[],
     toPreserve: readonly Message[],
+    summarizeError: string,
   ): Promise<SegmentManagerOutput> {
     const droppedTurns = computeTurnsCompacted(toSummarize);
     const newSegmentMessages = [
@@ -450,6 +463,7 @@ export class SegmentManager {
 
     await this.cfg.eventBus?.emit("segment:emergency_floor", {
       segmentId,
+      error: summarizeError,
       droppedTurns,
       tokensBefore,
       tokensAfter,
@@ -457,7 +471,7 @@ export class SegmentManager {
     // 折叠指令与成功切段共用同一出口：经 segment:new_started 流向
     // orchestrator accumulator、随 RunResult 带出，会话层窗口才会同步折叠。
     // 不发则 run 内 state 已截而跨 run 窗口持续增长——地板在自动路径失效。
-    // emergency_floor 是附加诊断事件，不承担指令交付。
+    // emergency_floor 表达降级方式（诊断 + UI 警示），不承担指令交付。
     await this.cfg.eventBus?.emit("segment:new_started", {
       segmentId,
       bufferTurns: this.cfg.bufferTurns,

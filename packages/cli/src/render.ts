@@ -5,7 +5,7 @@
  * 的 createOutputRenderer 接管；本文件保留剩余的"非流式"渲染：
  *   - renderError：catch 路径 unexpected 异常的兜底
  *   - renderUsageReport / renderContextVisual：/usage 与 /context 命令的可视化
- *   - renderRetry* / renderBudgetStatus / renderCompact*：EventBus 订阅型事件渲染
+ *   - renderRetry* / renderSegment*：EventBus 订阅型事件渲染
  *   - setupInterruptRendering：中断 EventBus 订阅渲染（warn 单次提示 / fired [interrupted] 标记）
  *   - createRenderSubscribers：装载 EventBus 渲染订阅的工厂
  *   - formatAbortReasonSummary：abort 原因诊断文本（供 status-bar / log 共用）
@@ -186,95 +186,57 @@ function formatErrorType(errorType: string): string {
   return labels[errorType] ?? errorType;
 }
 
-// ─── 上下文预算渲染 ───
+// ─── 段切换渲染 ───
 
-/** 渲染上下文预算状态（每轮结束后显示） */
-export function renderBudgetStatus(
-  info: {
-    currentTokens: number;
-    effectiveWindow: number;
-    usageRatio: number;
-    status: string;
-  },
+/** 渲染段切换开始锚点（自动评估触发 / 手动 /compact 不经此——后者走命令反馈） */
+export function renderSegmentStart(
+  info: { currentTokens: number },
   writer: CliWriter,
 ): void {
-  const pct = Math.round(info.usageRatio * 100);
-  const current = formatTokenCount(info.currentTokens);
-  const total = formatTokenCount(info.effectiveWindow);
-  const label = `${pct}% · ${current}/${total} tokens`;
-
-  let colorFn: (s: string) => string;
-  switch (info.status) {
-    case "critical":
-      colorFn = chalk.red;
-      break;
-    case "compact":
-      colorFn = chalk.yellow;
-      break;
-    case "warning":
-      colorFn = chalk.yellow;
-      break;
-    default:
-      colorFn = chalk.dim;
-  }
-
-  writer.line(`  ${colorFn(`[${label}]`)}`);
-}
-
-/**
- * 渲染 compact 事务开始锚点（事务级，不含 strategy 名）。
- *
- * Phase 3 事务化后：每次 compact 事务仅 fire 一次 compact_start，payload
- * 不带单 strategy 名（事务里可能跑多个 strategy，名字在 compact_end 的 strategies 列出）。
- */
-export function renderCompactStart(
-  info: { tokensBefore: number },
-  writer: CliWriter,
-): void {
-  const tokens = formatTokenCount(info.tokensBefore);
+  const tokens = formatTokenCount(info.currentTokens);
   writer.line(
-    `  ${chalk.yellow("⟳")} ${chalk.yellow("压缩中")} ${chalk.dim(`(${tokens} tokens)`)}`,
+    `  ${chalk.yellow("⟳")} ${chalk.yellow("整理上下文中")} ${chalk.dim(`(${tokens} tokens)`)}`,
   );
 }
 
-/**
- * 渲染 compact 事务结束（事务级，汇总所有 strategy 贡献）。
- *
- * 显示策略：
- *   - 任一 strategy.success === true → "压缩完成 X → Y (节省 Z%) (name1 + name2)"
- *   - 全部 success === false         → "压缩无效（所有策略跳过或失败）"
- */
-export function renderCompactEnd(
-  info: {
-    strategies: readonly { name: string; success: boolean }[];
-    tokensBefore: number;
-    tokensAfter: number;
-  },
+/** 渲染段切换完成（新段已开始，含应急地板的机械降级形态） */
+export function renderSegmentEnd(
+  info: { tokensBefore: number; tokensAfter: number },
   writer: CliWriter,
 ): void {
-  const anySuccess = info.strategies.some((s) => s.success);
-  if (anySuccess) {
-    const before = formatTokenCount(info.tokensBefore);
-    const after = formatTokenCount(info.tokensAfter);
-    const savedPct =
-      info.tokensBefore > 0
-        ? Math.round(
-            ((info.tokensBefore - info.tokensAfter) / info.tokensBefore) * 100,
-          )
-        : 0;
-    const activeNames = info.strategies
-      .filter((s) => s.success)
-      .map((s) => s.name)
-      .join(" + ");
-    writer.line(
-      `  ${chalk.green("✓")} ${chalk.dim(`压缩完成: ${before} → ${after} (节省 ${savedPct}%) (${activeNames})`)}`,
-    );
-  } else {
-    const attemptedNames = info.strategies.map((s) => s.name).join(", ");
-    writer.line(
-      `  ${chalk.red("✗")} ${chalk.dim(`压缩无效（尝试: ${attemptedNames}）`)}`,
-    );
-  }
+  const before = formatTokenCount(info.tokensBefore);
+  const after = formatTokenCount(info.tokensAfter);
+  const savedPct =
+    info.tokensBefore > 0
+      ? Math.round(((info.tokensBefore - info.tokensAfter) / info.tokensBefore) * 100)
+      : 0;
+  writer.line(
+    `  ${chalk.green("✓")} ${chalk.dim(`上下文已整理: ${before} → ${after} (节省 ${savedPct}%)`)}`,
+  );
+}
+
+/** 渲染段切换终态失败（本轮没切，不阻塞对话——下轮再评估）。
+ *  事件即终态：应急地板兜底成功不走此处（发 emergency_floor + new_started），
+ *  本渲染与"已整理"绝不在同一次切换中同时出现。 */
+export function renderSegmentFailed(
+  info: { error: string },
+  writer: CliWriter,
+): void {
+  writer.line(
+    `  ${chalk.yellow("⚠")} ${chalk.dim(`上下文整理失败（不影响对话）: ${info.error}`)}`,
+  );
+}
+
+/** 渲染应急地板降级警示 —— 摘要服务不可用、已机械保留最近对话。
+ *  紧随其后的 new_started 渲染"已整理"结果行：先方式与代价、后结果，
+ *  对用户诚实呈现这次整理是有损截断而非正常摘要。 */
+export function renderEmergencyFloor(
+  info: { droppedTurns: number; error: string },
+  writer: CliWriter,
+): void {
+  writer.line(
+    `  ${chalk.yellow("⚠")} ${chalk.dim(`摘要服务不可用（${info.error}），已应急保留最近对话，较早的 ${info.droppedTurns} 轮已截断（完整原文在对话历史中）`)}`,
+  );
 }
 
 function formatTokenCount(n: number): string {
@@ -524,28 +486,27 @@ export function createRenderSubscribers(
     );
 
     unsubs.push(
-      bus.on("context:budget_check", (info) => {
-        if (info.phase !== "pre-compact") return;
-        if (
-          info.status === "warning" ||
-          info.status === "compact" ||
-          info.status === "critical"
-        ) {
-          pauseUI();
-          renderBudgetStatus(info, writer);
-        }
+      bus.on("segment:transition_start", (info) => {
+        pauseUI();
+        renderSegmentStart(info, writer);
       }),
     );
     unsubs.push(
-      bus.on("context:compact_start", (info) => {
+      bus.on("segment:emergency_floor", (info) => {
         pauseUI();
-        renderCompactStart(info, writer);
+        renderEmergencyFloor(info, writer);
       }),
     );
     unsubs.push(
-      bus.on("context:compact_end", (info) => {
+      bus.on("segment:new_started", (info) => {
         pauseUI();
-        renderCompactEnd(info, writer);
+        renderSegmentEnd(info, writer);
+      }),
+    );
+    unsubs.push(
+      bus.on("segment:transition_failed", (info) => {
+        pauseUI();
+        renderSegmentFailed(info, writer);
       }),
     );
 

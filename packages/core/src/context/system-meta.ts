@@ -16,7 +16,7 @@
  * 三种 kind：
  *   - compact-summary: LLM 生成的压缩摘要，替代早期消息
  *   - ack: 紧跟 compact-summary 的 assistant 回执
- *   - dropped-turns: 非摘要型省略占位（MessageDrop / WindowManager 淘汰时）
+ *   - dropped-turns: 非摘要型省略占位（应急地板机械截断时）
  *
  * 为什么用 XML-like 标签：
  *   - LLM 训练数据中 system-* 标签常见，自动识别为元信息
@@ -79,7 +79,7 @@ export function buildCompactSummaryPair(
 }
 
 /**
- * 构造 dropped-turns 占位消息（MessageDrop / WindowManager 淘汰时使用）。
+ * 构造 dropped-turns 占位消息（应急地板机械截断时使用）。
  *
  * 角色设定为 user —— LLM 视角下，省略的历史对话"补丁"以用户发言承载
  * 是自然的（Anthropic API 允许连续 user 消息，LLM 理解为"系统层补充"）。
@@ -202,7 +202,7 @@ export function detectSystemMetaKind(msg: Message): SystemMetaKind | null {
  * 如果 messages 以 compact-summary + ack pair 开头，返回去掉 pair 后的数组；
  * 否则返回原数组。
  *
- * 用途：LLMSummarize.apply 前判断 toSummarize 开头是否有前次压缩的 pair，
+ * 用途：段切换在切分前判断 toSummarize 开头是否有前次压缩的 pair，
  * 有则去掉（不把 placeholder 当实际对话计入"替代轮数"）。
  *
  * 严格只剥 compact-summary + ack —— 不剥 dropped-turns（后者是独立的

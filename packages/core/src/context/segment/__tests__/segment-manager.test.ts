@@ -774,9 +774,14 @@ describe("evaluate — 应急地板（风险档摘要失败的机械兜底）", 
     expect(result.windowCompact!.structuredSummary).toBeUndefined();
     expect(result.windowCompact!.summary).toContain("机械截断");
     expect(result.windowCompact!.pairsCompacted).toBeGreaterThan(0);
-    // 可观测：失败 + 地板两个事件都发
-    expect(events.map((e) => e.event)).toContain("segment:transition_failed");
+    // 事件即终态：地板兜底成功 = 段切换以降级方式完成，不发 transition_failed
+    //（终态事件互斥，消费方无需跨事件对账）；摘要失败根因随 emergency_floor 携带
+    expect(events.map((e) => e.event)).not.toContain("segment:transition_failed");
     expect(events.map((e) => e.event)).toContain("segment:emergency_floor");
+    const floor = events.find((e) => e.event === "segment:emergency_floor")!;
+    const floorPayload = floor.payload as AgentEventMap["segment:emergency_floor"];
+    expect(floorPayload.error).toContain("provider down");
+    expect(floorPayload.droppedTurns).toBeGreaterThan(0);
     // 折叠指令与成功切段共用同一出口：new_started 携机械折叠指令流向
     // orchestrator accumulator → RunResult → 会话层窗口同步折叠（不发则
     // run 内已截而跨 run 窗口持续增长，地板在自动路径失效）
@@ -807,6 +812,8 @@ describe("evaluate — 应急地板（风险档摘要失败的机械兜底）", 
 
     expect(result.modified).toBe(false);
     expect(events.map((e) => e.event)).not.toContain("segment:emergency_floor");
+    // 终态失败：本轮切换没发生 → transition_failed（与地板路径互斥）
+    expect(events.map((e) => e.event)).toContain("segment:transition_failed");
   });
 
   it("risk-exceeded + abort → 不降级（用户意图，不是 LLM 不可用）", async () => {
@@ -817,8 +824,9 @@ describe("evaluate — 应急地板（风险档摘要失败的机械兜底）", 
         controller.abort();
         throw new Error("aborted");
       });
+    const { bus, events } = captureSegmentEvents();
     const sm = createSegmentManager(
-      makeConfig({ callLLM, retries: 0, retryBaseMs: 0 }),
+      makeConfig({ callLLM, eventBus: bus, retries: 0, retryBaseMs: 0 }),
     );
 
     const result = await sm.evaluate({
@@ -827,6 +835,9 @@ describe("evaluate — 应急地板（风险档摘要失败的机械兜底）", 
     });
 
     expect(result.modified).toBe(false);
+    // abort 走终态失败而非地板：不发 emergency_floor，发 transition_failed
+    expect(events.map((e) => e.event)).not.toContain("segment:emergency_floor");
+    expect(events.map((e) => e.event)).toContain("segment:transition_failed");
   });
 });
 

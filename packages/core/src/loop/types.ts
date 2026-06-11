@@ -28,7 +28,6 @@ import type { Message, ToolResultBlock, ToolUseBlock } from "../types/messages.j
 import type { ToolDefinition, ToolExecutionContext, ToolResult } from "../types/tools.js";
 import type {
   ContextBudget,
-  ContextManagerHook,
   ITokenEstimator,
 } from "../context/types.js";
 import type { SegmentManager } from "../context/segment/segment-manager.js";
@@ -39,8 +38,8 @@ import type { AbortReason, WatchdogPolicy } from "../interrupt/types.js";
 
 // ─── 注意力窗口换代 ───
 
-/** 注意力窗口换代的触发原因 —— 段切换 / budget 压缩。 */
-export type WindowChangeReason = "segment-transition" | "compact";
+/** 注意力窗口换代的触发原因（run 内）—— 段切换是唯一压缩机制。 */
+export type WindowChangeReason = "segment-transition";
 
 /**
  * 注意力窗口换代回调契约 —— run 内上下文重构后由 agent-loop 调用。
@@ -104,16 +103,6 @@ export interface AgentLoopParams {
   /** 覆盖默认依赖（用于测试） */
   deps?: Partial<AgentLoopDeps>;
   /**
-   * 上下文管理器 —— budget-driven 兜底（按上下文窗口百分比触发压缩）。
-   *
-   * 每个 turn 结束时由 turn-end 钩子调用 onTurnComplete() 检查预算并按需压缩。
-   * 可选 —— 不传则不做 budget 兜底。
-   *
-   * 与 segmentManager（attention-driven 主路径）在 turn-end 钩子内并列调用，
-   * budget 兜底先于 attention 切段，详见 loop/turn-end.ts。
-   */
-  contextManager?: ContextManagerHook;
-  /**
    * 会话级 LLM 角色集合。注入到每个工具调用的 ToolExecutionContext.llm，
    * 供工具在 I/O 边界使用 light 角色做信息净化（如 WebFetch distill）。
    *
@@ -162,11 +151,11 @@ export interface AgentLoopParams {
    * Attention-driven 段切换管理器 —— attention 阈值触发主路径。
    *
    * 缺省时不做段切换。注入后由 turn-end 钩子在每个 turn 结束时调用一次
-   * `segmentManager.evaluate`（contextManager budget 兜底之后）；返回
+   * `segmentManager.evaluate`；返回
    * modified=true 时用 `newSegmentMessages` 替换 caller 传入的 messages。
    *
-   * 段切换失败绝不阻塞 turn（拿原 messages 继续）；budget 兜底机制
-   * （contextManager）继续承担"上下文真不够时压缩"职责。
+   * 段切换失败绝不阻塞 turn（拿原 messages 继续）；"上下文真不够时的
+   * 机械兜底"由段管理器内部的应急地板承担。
    *
    * 详见 loop/turn-end.ts。
    */
@@ -234,7 +223,7 @@ export interface AgentLoopDeps {
  * ─── 失效语义（自然降级，无需主动 invalidate）───
  *
  * anchor 是"messages[0..baselineMessageCount] 等于 LLM 看到的那批"的不变量
- * 假设。若后续 contextManager 压缩 / SegmentManager 切段让 messages 缩到比
+ * 假设。若后续 SegmentManager 切段让 messages 缩到比
  * baselineMessageCount 还短或前缀变了，消费方应**自动降级到字符估算**（用
  * `messages.length < baselineMessageCount` 判定 + fallback）。
  *

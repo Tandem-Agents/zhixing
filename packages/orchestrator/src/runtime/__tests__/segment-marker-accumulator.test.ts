@@ -1,7 +1,7 @@
 /**
  * subscribeSegmentMarkerAccumulator 单元测试。
  *
- * 与 compact-accumulator 对偶：
+ * 覆盖契约：
  *   - 收集 `segment:new_started` 事件 payload.windowCompact
  *   - 单 run 内重复触发取最新（覆盖式，不累加）
  *   - dispose 幂等

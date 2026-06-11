@@ -370,6 +370,15 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
         } catch {
           /* 非致命：窗口重建失败不阻塞压缩结果 */
         }
+        // 降级知情：地板兜底时先呈现方式与代价，再报结果——有损截断
+        // 不伪装成正常摘要（与自动路径 emergency_floor 渲染同语义）
+        if (result.emergencyFloor) {
+          writer.line(
+            chalk.yellow(
+              `  ⚠ 摘要服务不可用（${result.emergencyFloor.error}），已应急保留最近对话，较早的 ${result.emergencyFloor.droppedTurns} 轮已截断（完整原文在对话历史中）`,
+            ),
+          );
+        }
         const pct = Math.round(result.budget.usageRatio * 100);
         writer.line(chalk.green(`  ✓ 压缩完成，当前上下文占用 ${pct}%\n`));
       } else if (result.modified) {

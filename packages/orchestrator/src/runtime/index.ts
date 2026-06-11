@@ -15,9 +15,8 @@
  *      `CACHE_BOUNDARY` / `renderIdentity` / 相关类型
  *
  * **不导出**(internal helper,仅 createAgentRuntime 内部装配使用):
- *   - `subscribeCompactAccumulator` / `CompactAccumulator`
  *   - `trackMessages`
- *   - `createSummarizeCallLLM` / `createMemoryFlushCallLLM`
+ *   - `createMainCallLLM` / `createLightCallLLM`
  *   - `prependContextBlock`(onBeforeRun 注入拼装,内部装配使用)
  *
  * 这些 helper 同包测试通过 `import "../X.js"` 直接消费 sub-module 文件,

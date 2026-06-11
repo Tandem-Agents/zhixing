@@ -360,7 +360,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     decorateRunBus: renderDecorator,
     onSecurityBlocked: createBlockedRenderer(serveWriter),
     // 段保护同样覆盖 ephemeral 定时任务（无 conversationId 时照常评估与切段，
-    // 仅跳过持久化副作用）——长任务的窗口失控不再依赖 budget 兜底。
+    // 仅跳过持久化副作用）——长任务的窗口安全由段机制全权保障。
     segmentDeps: serveSegmentDeps,
     // Task 工具由默认 mainProfile().enabledTools 含 "Task" 自动装配；定时任务
     // 的 ephemeral 执行路径同样可派发子 agent 隔离子任务，与持久会话能力对齐。
