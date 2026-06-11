@@ -76,7 +76,6 @@ import { registerConfigCommands } from "./commands/config-commands.js";
 import { SkillCommandSource } from "./commands/skill-command-source.js";
 import { FEATURE_CHROME } from "./commands/command-visibility.js";
 import { registerSkillsCommand } from "./skills/manager-command.js";
-import { registerSkillAddCommand } from "./skills/admission-command.js";
 import { PASTE_TOKEN_PATTERN, PasteRegistry } from "./paste-registry.js";
 import { resolveFileRefs } from "./resolve-file-refs.js";
 import {
@@ -968,19 +967,10 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   //「提炼技能」、起草打磨后调 save_skill 落盘;run 收尾的技能版本比对会刷新
   // /<name> 补全(见上),新技能当轮即可唤起。
 
-  // /skill-add 接入入口 —— 外部技能（本地路径）经扫描 + AI 研判后入库。注册在
-  // /<name> 动态源之前（撞名探测可见）；研判 LLM 走 main 档，接入后刷新 /<name> 补全。
-  registerSkillAddCommand({
-    registry: tRegistry,
-    dispatcher: typeaheadDispatcher,
-    rl,
-    renderer,
-    screen: renderScreen,
-    writer: cliWriter,
-    callText: (prompt) => session.runtime.callText(prompt, "main"),
-    skillStore: session.skillStore,
-    refreshCommands: () => tRegistry.refresh(),
-  });
+  // 外部技能接入同样无专门入口 —— 对话流能力内化:模型经索引命中内置方法
+  //「接入技能」、调 admit_skill 走独立审查的二段协议(safe 自动入库 /
+  // escalate 挡死 / needs-confirm 经用户同意后带 token 重调);run 收尾的
+  // 技能版本比对同样覆盖接入后的 /<name> 补全刷新。
 
   // 技能 /<name> 动态唤醒 —— 把技能库投影成 execution:"agent" 命令。注册在
   // builtin / task 命令之后，撞名探测（findExisting）才让核心命令优先。初次 refresh
