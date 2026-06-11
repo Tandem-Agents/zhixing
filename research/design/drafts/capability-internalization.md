@@ -37,6 +37,18 @@
 
 - **四类不变量焊死在保存链路里**（通用 Write 给不出，专门屏也不比工具多任何保证）：① 凭证脱敏（secret 绝不固化进技能）② 来源落位（恒写本地区，目录即来源）③ 索引一致性（技能集变更触发稳定前缀索引重建）④ 落盘格式与分区（标准 SKILL.md / 模式标注）——这四类无触发语义、归 SkillSavePipeline；**归属语义（stewardCreated，v2"只动自己造的"信任边界）是触发方语义，由包装层分别处理**（save_skill 用户路径 / StewardWriter 管家路径），Pipeline 不感知触发方
 
+### 接入技能（第二个内化能力,/skill-add 的对话流化）
+
+- **不暴露专门接入功能点**：`/skill-add <path> --force` 撤;用户自然语言表达（"把 ~/Downloads/xx 这个技能装进来"）即触发;`--force` 自然消亡——"我已复核,直接装"就是自然语言,模型据此带确认重调
+- **形态 = 方法 + 工具（二段协议,artifact 绑定）**：builtin 方法「接入技能」（教模型:何时用、原样转述威胁报告、等明确同意、escalate 如实告知不可商量）+ `admit_skill` 工具封装全管线（staging → 获取 → 静态扫描 + AI 研判 → 分级）。**首调**:safe 直接入库;escalate 拒绝并清暂存;needs-confirm **保留 staging、生成 admissionToken**（绑定 staging 目录 + 内容 digest + verdict + threats + expiresAt,存工具进程内存）,返回报告与 token、不落库。**确认重调**（带 token）:校验 token 存在未过期、重算 staging digest 一致 → `Store.admit` 同一份已审查内容;任何校验失败 → 清暂存、要求重新审查。**用户确认的必须是审查过的那一份**——若重调重新从 path 读取,路径内容可被中途调包（确认 A、落库 B）,artifact 绑定把 TOCTOU 窗口焊死
+- **红线·裁判独立性（与创建能力性质相反——创建删起草工具因为起草是判断,接入的核心环节全是护栏,一个都不能内化给主模型）**：
+  ① AI 研判留在工具内**独立单发**（运动员 / 裁判分离:外部技能可能含 prompt 注入,主模型读过其内容后自身可能已被操纵,裁判必须是不带对话上下文的独立调用,fail-safe 到 needs-confirm 的既有形态原样保留）
+  ② escalate 在工具内**硬挡死**,无任何参数可绕（escalate 不发 token,确认重调无从指向它——结构上无绕行入口,沿"--force 也不越"的既有语义）
+  ③ needs-confirm 同意**双层焊**:产品层——方法要求模型**原样引用**裁判 reason 与威胁清单（不得改写弱化）、等用户明确说"装";系统层——**token 协议本身**（确认重调必须携带绑定已审查内容的 token,digest 校验保证落库的就是用户知情的那一份）。**不叠通用安全确认面板**:安全管线的确认发生在工具执行前、只见入参,而威胁报告产生于执行中,面板接不到报告（时序错位）;且 safe 自动接入是既有定稿,外层面板徒增三重交互——`admit_skill` 声明 **filesystem/read + app-state/write 双边界** + `permissionArgumentKey:"path"`（接入源路径必须进安全管线:工具化后授权方是模型,顶层 path 让 realpath / 禁区规则可见,见 spec §六「安全自描述」）,复核完全由自身两阶段协议承载。与 save_skill 的不对称有可陈述理由:save 的内容用户看着起草（面板确认行为即可）,admit 的内容来自外部,确认必须**绑定内容本身**（token + digest）,面板给不了这个保证
+- **内核零触碰**：core admission.ts（独立裁判 / 静态扫描 / staging 获取与来源无关边界 SkillImportSource）、Store 的 admit / prepareStaging / discardStaging、linked 区语义、运行期 realpath 边界——又一次换入口不换内核
+- **战略收益**：接入在全接入面可用——未来 URL / 仓库接入源恰好只在远程场景才有意义,内化为其铺路;能力数升至 2（< 3 切换阈）、每能力 1 工具,通用内化机制首次按设计增量验证
+- **退役（随实现）**：`cli/skills/admission-command.ts`（单键确认 / --force 解析 / chrome visibility 交互层）及其测试;`/skills` 管理器照旧不动
+
 ### 管理与控制
 
 - **`/skills` 管理器不在本次范围**：管理路径（manager-command → manager-screen）与创建路径零依赖，本次不动；"管理走对话 + 工具、长内容阅读编辑还给用户编辑器"是**远期方向**（cli 是交互平台、阅读编辑非长项），待内化机制验证后另行裁决
@@ -44,7 +56,7 @@
 
 ### 承接与退役（边界：仅创建路径，skill 模块内）
 
-- **创建路径退役**：`/skill-new` 入口、editor-screen、editor-controller 阶段机；manager-screen（`/skills`）与 admission（`/skill-add` 外部接入）均不在列——三条路径相互独立
+- **创建路径退役（已完成）**：`/skill-new` 入口、editor-screen、editor-controller 阶段机；manager-screen（`/skills`）不在列。admission（`/skill-add`）当时不在列,其后另行裁决为第二个内化能力、交互层随之退役（见「接入技能」组）——三条路径相互独立,退役各自成单元
 - **其他模块零波及**：config-editor 等 alt-screen 屏独立自管、零共享；`composeViewport` 是 tui 公共原语，保留
 - **UI 无关内核原样保留**：scrubSecrets 脱敏、admission 审查、SkillStore 落盘——换载体不换内核；旧起草 prompt 不保留形态、其提炼判据融入内置方法（与"起草无工具"一致）
 - **UX 评审产品智慧平移进对话流**（与载体无关）：起草前"收自:X"语境知情、脱敏可见（真抹了才说）、诚实承诺（只说 v1 真有的：`/<name>` 唤起 + description 检索命中）、放弃 / 覆盖前护栏确认
@@ -55,3 +67,4 @@
 
 - **[skill-authoring.md](../specifications/skill-authoring.md)（重写）**：创建路径全部细节——内置方法的内容要求（何时提议、提议边界、收自语境、保存前明确同意、保存后诚实交代）、save_skill 契约（upsert 语义、脱敏计数返回、四不变量焊接、确认管线接入）、对话流协议、退役清单（`/skill-new` / editor-screen / editor-controller）
 - **[skill-system.md](../specifications/skill-system.md)（增量）**：builtin 来源区（包资源、只读、fork-to-own）、索引预算分池、能力工具注册表（只管工具：schema + 不变量钩子 + 暴露形态演化判据，切换阈值为显式参数并写明测量口径）
+- **[skill-system.md](../specifications/skill-system.md) §六（接入内化,就地改造）**：admit_skill 二段协议契约（token 结构 / digest 口径 / TTL 与两层清扫含跨进程孤儿 / 校验序 / filesystem-read + app-state-write 双边界与 permissionArgumentKey / 裁判装配期直接注入）、builtin 方法「接入技能」内容要求、admission-command 退役

@@ -16,7 +16,7 @@
 本文回答 **v1 用户怎么创建 / 打磨一个技能**。形态 = **能力内化**:用户面前没有"新建技能"这个功能（无专门入口、无屏）,在对话里说一句"把这套存下来",助手当场拟草稿、来回改、存好、继续。创建技能是通用能力内化机制（父规格 builtin 来源区 + 能力工具注册表）的**首个承载**。
 
 - **本文范围**:内置方法的内容要求、`save_skill` 工具契约、对话流协议、提议边界、创建路径退役清单。
-- **不在范围**:索引 / 加载 / 唤醒机制（父规格 §三~§五）、外部接入审查（父规格 §六 Admission,`/skill-add` 路径不动）、`/skills` 管理器（独立路径,本次不动）、v2 自主产生（[skill-evolution.md](./skill-evolution.md)）。
+- **不在范围**:索引 / 加载 / 唤醒机制（父规格 §三~§五）、外部接入（第二个内化能力 `admit_skill`,父规格 §六）、`/skills` 管理器（独立路径,不动）、v2 自主产生（[skill-evolution.md](./skill-evolution.md)）。
 - **v1 边界**:提议有边界（§四）、保存必须用户明确接受（§三）;自动产生 / 迭代是 v2 技能管家在同一管线上加的自主触发。
 
 ## 一、核心模型:起草是模型行为,护栏在保存工具
@@ -77,7 +77,7 @@
 
 ## 六、创建路径退役清单
 
-随本规格生效退役（三条路径相互独立,`/skills` 管理器与 `/skill-add` admission 不动;config-editor 等其他模块零波及）:
+随本规格生效退役（三条路径相互独立,`/skills` 管理器不动,接入路径另由其内化单元处理——父规格 §六;config-editor 等其他模块零波及）:
 
 - `cli/src/skills/authoring-command.ts` —— `/skill-new` 命令注册撤（typeahead 注册与 dispatcher handler 一并）
 - `cli/src/skills/editor-screen.ts`、`cli/src/skills/editor-controller.ts` —— alt-screen 编辑屏与阶段机
