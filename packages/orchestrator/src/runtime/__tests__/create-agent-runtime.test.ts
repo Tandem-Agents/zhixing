@@ -35,6 +35,7 @@ import {
   AgentError,
   MockLLMProvider,
   SkillStore,
+  skillNameToId,
   deriveToolCalls,
   userMessage,
   type IEventBus,
@@ -1465,6 +1466,63 @@ describe("createAgentRuntime · 生命周期钩子", () => {
 
     expect(beforeCalled).toBe(true);
     expect(afterCalled).toBe(false);
+  });
+
+  it("内置 skill 订阅者:索引段含 builtin 条目(双池拼装),own 同名时遮蔽", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "ok" }, { text: "ok" }]);
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "skills-lc-builtin-"));
+    try {
+      // 空库:索引段仍含 builtin「提炼技能」(builtin 不依赖用户技能存在)
+      const runtime = await createAgentRuntime({
+        skillStore: new SkillStore(root),
+      });
+      await runtime.run({ messages: [userMessage("hi")], turnIndex: 0 });
+      expect(providerRef.current.calls[0]!.systemPrompt).toContain("提炼技能");
+
+      // own 同名:用户版生效,builtin 条目退出索引(描述以用户版为准)
+      const dir = path.join(root, "own", "distill-fork");
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(
+        path.join(dir, "SKILL.md"),
+        "---\nname: 提炼技能\ndescription: 用户定制版描述\n---\nbody",
+        "utf-8",
+      );
+      const runtime2 = await createAgentRuntime({
+        skillStore: new SkillStore(root),
+      });
+      await runtime2.run({ messages: [userMessage("hi")], turnIndex: 0 });
+      const prompt2 = providerRef.current.calls[1]!.systemPrompt!;
+      expect(prompt2).toContain("用户定制版描述");
+      expect(prompt2).not.toContain("加载本方法来起草");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("内置 skill 订阅者:own 同名 fork 被禁用 → builtin 不回落索引(遮蔽按含 disabled 全集,展示与加载一致)", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "skills-lc-disabled-"));
+    try {
+      const dir = path.join(root, "own", "distill-fork");
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(
+        path.join(dir, "SKILL.md"),
+        "---\nname: 提炼技能\ndescription: 用户定制版描述\n---\nbody",
+        "utf-8",
+      );
+      const store = new SkillStore(root);
+      await store.setState(skillNameToId("提炼技能"), { disabled: true });
+
+      const runtime = await createAgentRuntime({ skillStore: store });
+      await runtime.run({ messages: [userMessage("hi")], turnIndex: 0 });
+      const prompt = providerRef.current.calls[0]!.systemPrompt!;
+      // 禁用 = 该 id 从索引整体消失(用户版剔除、builtin 不得回落——loadText
+      // 指名加载仍出用户版,索引若显示 builtin 文案则展示与加载指向两份内容)
+      expect(prompt).not.toContain("用户定制版描述");
+      expect(prompt).not.toContain("加载本方法来起草");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 
   it("内置 skill 订阅者:version 未变 → 窗口换代零重算(不扫盘)", async () => {

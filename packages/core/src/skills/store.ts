@@ -17,6 +17,7 @@ import { writeAtomic } from "../transcript/serializer.js";
 import { PathGuard } from "../security/path-guard.js";
 import { parseFrontmatter, stringifyFrontmatter } from "../memory/frontmatter.js";
 import { skillNameToId } from "./id.js";
+import { getBuiltinSkill } from "./builtin.js";
 import {
   SKILL_FILE,
   archivedRoot,
@@ -101,19 +102,32 @@ export class SkillStore {
   }
 
   /**
-   * 取技能全文(正文)+ 记一次命中度量。读前经库根 realpath 边界收口,越界即拒;
-   * 不存在即抛。usage 写不标 dirty(频次只被动影响下次排序)。
+   * 取技能全文(正文),按来源分支:
+   *
+   * - own / linked(目录技能,优先 —— own 同名遮蔽 builtin):读前经库根
+   *   realpath 边界收口,越界即拒;读后记一次命中度量(usage 写不标 dirty)。
+   * - builtin(内置能力):注册集直取 —— 包内常量、无路径遍历面;**不写
+   *   usage**(零状态记录:度量属用户域,且 builtin 无度量消费者)。
+   *
+   * 两边都未命中即抛。
    */
   async loadText(
     id: string,
   ): Promise<{ id: string; name: string; body: string }> {
-    const located = await this.locate(id);
-    const file = path.join(located.dir, SKILL_FILE);
-    this.assertWithinRoot(file);
-    const raw = await fs.readFile(file, "utf-8");
-    const { content } = parseFrontmatter(raw);
-    await this.recordHit(id);
-    return { id, name: located.name, body: content };
+    const located = (await this.scan()).get(id);
+    if (located) {
+      const file = path.join(located.dir, SKILL_FILE);
+      this.assertWithinRoot(file);
+      const raw = await fs.readFile(file, "utf-8");
+      const { content } = parseFrontmatter(raw);
+      await this.recordHit(id);
+      return { id, name: located.name, body: content };
+    }
+    const builtin = getBuiltinSkill(id);
+    if (builtin) {
+      return { id, name: builtin.name, body: builtin.body };
+    }
+    throw new Error(`技能 "${id}" 不存在`);
   }
 
   /**

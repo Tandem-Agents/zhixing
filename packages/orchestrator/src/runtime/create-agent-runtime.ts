@@ -67,6 +67,7 @@ import {
   SkillStore,
   getSkillsRoot,
   renderSkillIndex,
+  builtinIndexEntries,
   type SkillMode,
   type Resettable,
   type WindowLifecycle,
@@ -171,9 +172,20 @@ function makeSkillIndexLifecycle(
     async onWindowOpen(ctx) {
       const cur = skillStore.version(skillMode);
       if (cur === builtVersion) return; // 已最新 → 零 IO、零重算、不调接口
-      const next = renderSkillIndex(
-        await skillStore.queryTopN(skillMode, SKILL_INDEX_TOP_N),
+      // 双池拼装:用户池(top-N)+ builtin 池(注册集按模式取,独立小额度、
+      // 不挤占用户额度)。遮蔽必须用**含 disabled 的全集** id——loadText 对
+      // disabled 技能仍按目录优先(禁用只影响索引可见性、指名加载仍可),
+      // 若用剔 disabled 的 listAll 判遮蔽,禁用的 own 同名 fork 会让 builtin
+      // 文案回到索引、加载却出用户版,展示与加载指向两份内容。builtin 随
+      // 版本恒定,不参与版本比对(零开销路径不受影响)。
+      const userTopN = await skillStore.queryTopN(skillMode, SKILL_INDEX_TOP_N);
+      const userIds = new Set(
+        (await skillStore.listForManagement()).map((record) => record.id),
       );
+      const next = renderSkillIndex([
+        ...userTopN,
+        ...builtinIndexEntries(skillMode, userIds),
+      ]);
       ctx.updateSystemPromptSegment("skill-index", next);
       builtVersion = cur;
     },

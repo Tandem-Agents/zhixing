@@ -8,7 +8,13 @@
 export { skillNameToId } from "./id.js";
 export { SkillStore } from "./store.js";
 export { renderSkillIndex } from "./render.js";
-export type { RenderSkillIndexOptions } from "./render.js";
+export type { RenderSkillIndexOptions, SkillIndexEntry } from "./render.js";
+export { getBuiltinSkill, builtinIndexEntries } from "./builtin.js";
+export type {
+  BuiltinSkillDef,
+  BuiltinSkillEntry,
+  BuiltinIndexEntry,
+} from "./builtin.js";
 export { draftSkill, reviseSkill } from "./drafting.js";
 export type {
   SkillDraftLlm,

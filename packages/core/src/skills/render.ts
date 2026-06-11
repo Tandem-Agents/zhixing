@@ -10,8 +10,6 @@
  * 无可见技能 → 返 null,调用方据此跳过该段(不破 byte-equal)。
  */
 
-import type { SkillRecord } from "./types.js";
-
 const HEADER = "## Available Skills";
 const INSTRUCTION =
   "To use a skill, call the `load_skill` tool with the id shown below. Descriptions are brief — load one for full instructions.";
@@ -19,13 +17,23 @@ const INSTRUCTION =
 /** 单条 description 的字符上限(安全网:description 本应简短,超出截断防单条撑爆预算)。 */
 const DEFAULT_MAX_DESCRIPTION_CHARS = 200;
 
+/**
+ * 渲染所需的最小条目形态 —— 接口隔离:渲染只用三个字段,入参不绑完整
+ * SkillRecord(超集天然兼容),builtin 拼池条目无需伪造目录技能的全字段。
+ */
+export interface SkillIndexEntry {
+  id: string;
+  description: string;
+  pinned: boolean;
+}
+
 export interface RenderSkillIndexOptions {
   /** 单条 description 字符上限,默认 200。 */
   maxDescriptionChars?: number;
 }
 
 export function renderSkillIndex(
-  records: readonly SkillRecord[],
+  records: readonly SkillIndexEntry[],
   opts?: RenderSkillIndexOptions,
 ): string | null {
   if (records.length === 0) return null;
