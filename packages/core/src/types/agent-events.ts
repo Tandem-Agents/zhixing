@@ -315,6 +315,17 @@ export type AgentEventMap = {
     currentTokens: number;
   };
 
+  /**
+   * 应急地板生效：风险阈值已破且摘要 LLM 失败 → 机械保尾截断（无 LLM、
+   * 不落盘）。注意力层自己的最后兜底，防 run 失控撑爆物理窗口。
+   */
+  "segment:emergency_floor": {
+    segmentId: string;
+    droppedTurns: number;
+    tokensBefore: number;
+    tokensAfter: number;
+  };
+
   /** 压缩 LLM call 完成并解析出有效摘要。 */
   "segment:summarize_complete": {
     segmentId: string;

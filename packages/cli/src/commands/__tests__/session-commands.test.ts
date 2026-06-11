@@ -59,7 +59,10 @@ interface Harness {
   writer: CliWriter & { lines: string[] };
 }
 
-function setup(convOverrides: Partial<Record<string, unknown>> = {}): Harness {
+function setup(
+  convOverrides: Partial<Record<string, unknown>> = {},
+  runtimeOverrides: Record<string, unknown> = {},
+): Harness {
   const registry = new DefaultCommandRegistry();
   const dispatcher = new CommandDispatcher({ registry });
   const writer = makeWriter();
@@ -109,6 +112,7 @@ function setup(convOverrides: Partial<Record<string, unknown>> = {}): Harness {
         resetConversationState,
         onAttentionWindowChange,
         forceCompact: vi.fn(async () => ({ modified: false })),
+        ...runtimeOverrides,
       }) as unknown as ReturnType<SessionCommandsDeps["getRuntime"]>,
     taskListService: { prime: taskPrime, clear: taskClear },
     onConversationChanged: () => {},
@@ -182,6 +186,53 @@ describe("registerSessionCommands · /name", () => {
 });
 
 describe("registerSessionCommands · /compact", () => {
+  it("强制切段成功 → applyCompact 折叠 + 快照出口 + 窗口换代钩子（compact）", async () => {
+    const window = createAttentionWindow({ conversationId: "conv-1" });
+    for (let i = 0; i < 3; i++) {
+      window.acceptRun({
+        runMessages: [userMessage(`q${i}`), assistantMessage(`a${i}`)],
+        runIndex: i,
+      });
+    }
+    const windowCompact = {
+      summary: "切段摘要",
+      structuredSummary: { facts: "f", state: "s", active: "a" },
+      pairsCompacted: 2,
+      tokensBefore: 1000,
+      tokensAfter: 100,
+    };
+    const snapshotWrite = vi.fn(async () => ({}));
+    const h = setup(
+      { window, snapshots: { write: snapshotWrite, list: vi.fn(async () => []) } },
+      {
+        forceCompact: vi.fn(async () => ({
+          modified: true,
+          messages: [],
+          windowCompact,
+          budget: { usageRatio: 0.1 },
+        })),
+      },
+    );
+
+    await h.dispatcher.dispatch("/compact", RUNTIME);
+
+    // 窗口被折叠：摘要对置首、被折 2 个配对
+    const first = h.conv.window.getMessages()[0]!;
+    const firstBlock = first.content[0]!;
+    expect(firstBlock.type === "text" ? firstBlock.text : "").toContain("切段摘要");
+    // 快照出口：覆盖锚 = 被折最后配对的 runIndex（0、1 被折 → 1）
+    expect(snapshotWrite).toHaveBeenCalledWith(
+      "conv-1",
+      expect.objectContaining({
+        coveredThroughRunIndex: 1,
+        structuredSummary: windowCompact.structuredSummary,
+      }),
+    );
+    // run 外手动压缩 = 窗口换代（与 /clear、/resume 同纪律）
+    expect(h.onAttentionWindowChange).toHaveBeenCalledWith("compact");
+    expect(visible(h.writer)).toContain("压缩完成");
+  });
+
   it("历史过短（<4）→ 直接提示，不调 forceCompact", async () => {
     const shortWindow = createAttentionWindow({ conversationId: "conv-1" });
     shortWindow.acceptRun({

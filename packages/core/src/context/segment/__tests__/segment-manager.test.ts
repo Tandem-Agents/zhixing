@@ -463,8 +463,15 @@ describe("evaluate — 压缩失败", () => {
       .fn<(req: SegmentSummarizeRequest) => Promise<string>>()
       .mockRejectedValue(new Error("provider down"));
     const { bus, events } = captureSegmentEvents();
+    // optimal 档触发（risk 远未到）：失败不降级——应急地板只挂风险档
     const sm = createSegmentManager(
-      makeConfig({ callLLM, eventBus: bus, retries: 2, retryBaseMs: 0 }),
+      makeConfig({
+        callLLM,
+        eventBus: bus,
+        retries: 2,
+        retryBaseMs: 0,
+        capability: { optimalMaxTokens: 100, riskMaxTokens: 1_000_000 },
+      }),
     );
 
     const result = await sm.evaluate(makeInput(bigMessages()));
@@ -497,7 +504,14 @@ describe("evaluate — 压缩失败", () => {
   it("摘要解析三段全空 → emit transition_failed retriesExhausted=true", async () => {
     const callLLM = fakeLLM("纯文本回复没有 XML 标签");
     const { bus, events } = captureSegmentEvents();
-    const sm = createSegmentManager(makeConfig({ callLLM, eventBus: bus }));
+    // optimal 档触发：解析失败不降级（地板只挂风险档）
+    const sm = createSegmentManager(
+      makeConfig({
+        callLLM,
+        eventBus: bus,
+        capability: { optimalMaxTokens: 100, riskMaxTokens: 1_000_000 },
+      }),
+    );
 
     const result = await sm.evaluate(makeInput(bigMessages()));
 
@@ -720,6 +734,99 @@ describe("evaluate — hooks", () => {
     await sm.evaluate(makeInput(bigMessages()));
 
     expect(calls).toEqual(["A"]); // B 不执行
+  });
+});
+
+// ─── 应急地板 ───
+
+describe("evaluate — 应急地板（风险档摘要失败的机械兜底）", () => {
+  function bigMessages(): Message[] {
+    const messages: Message[] = [];
+    for (let i = 0; i < 25; i++) {
+      messages.push(i % 2 === 0 ? userMsg(`q${i}`) : assistantMsg(`a${i}`));
+    }
+    return messages;
+  }
+
+  it("risk-exceeded + 摘要 LLM 全败 → 机械保尾截断：dropped 占位 + 保留尾、无结构化摘要", async () => {
+    const callLLM = vi
+      .fn<(req: SegmentSummarizeRequest) => Promise<string>>()
+      .mockRejectedValue(new Error("provider down"));
+    const { bus, events } = captureSegmentEvents();
+    const sm = createSegmentManager(
+      makeConfig({ callLLM, eventBus: bus, retries: 1, retryBaseMs: 0 }),
+    );
+
+    const input = makeInput(bigMessages());
+    const result = await sm.evaluate(input);
+
+    expect(result.decision.kind).toBe("trigger");
+    expect(result.modified).toBe(true);
+    // 新段 = 机械占位（dropped-turns 标注）+ 最近 buffer 原文
+    const first = result.newSegmentMessages![0]!;
+    const firstBlock = first.content[0]!;
+    expect(firstBlock.type === "text" ? firstBlock.text : "").toContain(
+      "dropped-turns",
+    );
+    expect(result.newSegmentMessages!.length).toBeLessThan(input.messages.length);
+    // 折叠指令：无结构化摘要（不产快照）、机械文本说明
+    expect(result.windowCompact).toBeDefined();
+    expect(result.windowCompact!.structuredSummary).toBeUndefined();
+    expect(result.windowCompact!.summary).toContain("机械截断");
+    expect(result.windowCompact!.pairsCompacted).toBeGreaterThan(0);
+    // 可观测：失败 + 地板两个事件都发
+    expect(events.map((e) => e.event)).toContain("segment:transition_failed");
+    expect(events.map((e) => e.event)).toContain("segment:emergency_floor");
+    // 折叠指令与成功切段共用同一出口：new_started 携机械折叠指令流向
+    // orchestrator accumulator → RunResult → 会话层窗口同步折叠（不发则
+    // run 内已截而跨 run 窗口持续增长，地板在自动路径失效）
+    const started = events.find((e) => e.event === "segment:new_started")!;
+    expect(started).toBeDefined();
+    const startedPayload =
+      started.payload as AgentEventMap["segment:new_started"];
+    expect(startedPayload.windowCompact).toEqual(result.windowCompact);
+    expect(startedPayload.windowCompact.structuredSummary).toBeUndefined();
+  });
+
+  it("optimal-exceeded + 摘要失败 → 不降级（还有余量，等下轮再试）", async () => {
+    const callLLM = vi
+      .fn<(req: SegmentSummarizeRequest) => Promise<string>>()
+      .mockRejectedValue(new Error("provider down"));
+    const { bus, events } = captureSegmentEvents();
+    const sm = createSegmentManager(
+      makeConfig({
+        callLLM,
+        eventBus: bus,
+        retries: 1,
+        retryBaseMs: 0,
+        capability: { optimalMaxTokens: 100, riskMaxTokens: 1_000_000 },
+      }),
+    );
+
+    const result = await sm.evaluate(makeInput(bigMessages()));
+
+    expect(result.modified).toBe(false);
+    expect(events.map((e) => e.event)).not.toContain("segment:emergency_floor");
+  });
+
+  it("risk-exceeded + abort → 不降级（用户意图，不是 LLM 不可用）", async () => {
+    const controller = new AbortController();
+    const callLLM = vi
+      .fn<(req: SegmentSummarizeRequest) => Promise<string>>()
+      .mockImplementation(async () => {
+        controller.abort();
+        throw new Error("aborted");
+      });
+    const sm = createSegmentManager(
+      makeConfig({ callLLM, retries: 0, retryBaseMs: 0 }),
+    );
+
+    const result = await sm.evaluate({
+      ...makeInput(bigMessages()),
+      abortSignal: controller.signal,
+    });
+
+    expect(result.modified).toBe(false);
   });
 });
 

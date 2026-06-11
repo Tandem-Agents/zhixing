@@ -37,7 +37,7 @@ export type DataDrivenSegment = Extract<SystemPromptSegment, "skill-index">;
 export type WindowOpenReason =
   | "instance-start" // 首窗：实例装配
   | "segment-transition" // 段切换产生新窗（run 内）
-  | "compact" // 压缩产生新窗（run 内）
+  | "compact" // 手动 /compact 强制切段产生新窗（run 外）
   | "clear" // /clear 清空后新窗（run 外）
   | "resume"; // /resume 换对话后新窗（run 外）
 
@@ -65,11 +65,12 @@ export type DisposeReason = Extract<
 
 /**
  * run 外注意力窗口换代原因 —— onAttentionWindowChange(reason) 的入参（/clear ·
- * /resume）。run 内换代（段切换 / compact）走 agent-loop 的 windowLifecycle.onChange。
+ * /resume · 手动 /compact）。run 内换代（段切换）走 agent-loop 的
+ * windowLifecycle.onChange。
  */
 export type AttentionWindowChangeReason = Extract<
   WindowOpenReason,
-  "clear" | "resume"
+  "clear" | "resume" | "compact"
 >;
 
 /** 所有 ctx 共享的运行体身份字段。 */

@@ -53,6 +53,7 @@ import {
   splitMessagesPairAware,
 } from "../message-turns.js";
 import type { ITokenEstimator } from "../types.js";
+import { buildDroppedTurnsMessage } from "../system-meta.js";
 import { composeNewSegmentMessages } from "./compose.js";
 import { decideSegmentAction } from "./decision.js";
 import { parseSummary } from "./parser.js";
@@ -196,6 +197,11 @@ export class SegmentManager {
       input.messages,
       this.cfg.bufferTurns,
     );
+    // 无可摘内容（全部消息都在保留 buffer 内）→ 切段无意义，静默不切。
+    // 强制触发（阈值置零的手动压缩）在小窗口上会落到这里。
+    if (toSummarize.length === 0) {
+      return { decision, modified: false };
+    }
     const ctx: SegmentTransitionContext = {
       conversationId,
       segmentId,
@@ -249,6 +255,19 @@ export class SegmentManager {
         error: errorMessage(e),
         retriesExhausted: true,
       });
+      // 应急地板：风险阈值已破（再不切就逼近物理窗口）而摘要 LLM 不可用 →
+      // 机械保尾截断兜底（无 LLM、不落盘）。optimal 档失败则等下轮再试——
+      // 还有余量，不值得有损降级。abort 是用户意图而非 LLM 不可用，
+      // 同样不降级（下轮照常评估）。
+      if (decision.reason === "risk-exceeded" && !input.abortSignal?.aborted) {
+        return this.applyEmergencyFloor(
+          decision,
+          segmentId,
+          tokensBefore,
+          toSummarize,
+          toPreserve,
+        );
+      }
       return { decision, modified: false };
     }
 
@@ -404,11 +423,59 @@ export class SegmentManager {
   }
 
   /**
+   * 应急地板 —— 注意力层自己的最后兜底：被摘段整体替换为机械占位
+   * （dropped-turns 标注），保留最近 buffer 原文。有损降级换可用性：
+   * 细节仍完整躺在持久化原文上，窗口折叠指令不携结构化摘要（不产快照）。
+   */
+  private async applyEmergencyFloor(
+    decision: SegmentDecision & { kind: "trigger" },
+    segmentId: string,
+    tokensBefore: number,
+    toSummarize: readonly Message[],
+    toPreserve: readonly Message[],
+  ): Promise<SegmentManagerOutput> {
+    const droppedTurns = computeTurnsCompacted(toSummarize);
+    const newSegmentMessages = [
+      buildDroppedTurnsMessage(droppedTurns),
+      ...toPreserve,
+    ];
+    const tokensAfter = this.cfg.estimator.estimateMessages(newSegmentMessages);
+
+    const windowCompact: WindowCompact = {
+      summary: `因上下文超限且摘要生成失败，前 ${droppedTurns} 轮对话已被机械截断，完整原文保存在对话历史中`,
+      pairsCompacted: droppedTurns,
+      tokensBefore,
+      tokensAfter,
+    };
+
+    await this.cfg.eventBus?.emit("segment:emergency_floor", {
+      segmentId,
+      droppedTurns,
+      tokensBefore,
+      tokensAfter,
+    });
+    // 折叠指令与成功切段共用同一出口：经 segment:new_started 流向
+    // orchestrator accumulator、随 RunResult 带出，会话层窗口才会同步折叠。
+    // 不发则 run 内 state 已截而跨 run 窗口持续增长——地板在自动路径失效。
+    // emergency_floor 是附加诊断事件，不承担指令交付。
+    await this.cfg.eventBus?.emit("segment:new_started", {
+      segmentId,
+      bufferTurns: this.cfg.bufferTurns,
+      tokensBefore,
+      tokensAfter,
+      windowCompact,
+    });
+
+    return { decision, modified: true, newSegmentMessages, windowCompact };
+  }
+
+  /**
    * 顺序执行 hooks，返回第一个 throw 的错误（或 undefined）。
    *
    * 第一个 hook 抛错即返回，后续 hooks 不再执行 —— 与 hook 顺序契约一致。
    * 调用方根据返回值决定是否中止段切换。
    */
+
   private async runHooksCatch(
     invoker: (hook: SegmentTransitionHook) => Promise<void> | undefined,
   ): Promise<unknown> {

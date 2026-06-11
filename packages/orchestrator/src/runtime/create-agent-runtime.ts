@@ -50,7 +50,9 @@ import {
   emptyUsage,
   createMessageDropStrategy,
   MemoryFlusher,
+  calculateBudget,
   createMemoryFlushHook,
+  toToolSpec,
   DEFAULT_WATCHDOG_POLICY,
   MemoryStore,
   getMemoryDir,
@@ -299,15 +301,13 @@ export interface ForceCompactResult {
   /** 压缩后的预算快照（modelInfo 由 resolver 保证可用，必填） */
   budget: ContextBudget;
   /**
-   * compact 事务产出的窗口重构指令（仅当事务产生了 summary 时非空）。
+   * 强制段切换产出的窗口重构指令（切段成功时非空——含应急地板的机械降级）。
    *
-   * 由 forceCompact 内部 eventBus 订阅 context:compact_end 并累积组装。
-   * 消费者：REPL /compact 把它交给注意力窗口折叠（applyCompact）——
-   * 压缩是窗口的视图操作，不落盘。
+   * 消费者：REPL /compact 把它交给注意力窗口折叠（applyCompact），并按
+   * 折叠交出的覆盖锚写派生快照——压缩是窗口的视图操作，不落盘 transcript。
    *
-   * 为什么 optional：如果 forceCompact 只触发了非摘要型策略（如 MessageDrop /
-   * MemoryFlush），没有 LLM 生成的 summary，窗口不该折叠。
-   * 调用方应判断此字段存在再动窗口。
+   * 为什么 optional：摘要失败且未达风险线、或无可压缩内容时切段不发生，
+   * 窗口不该折叠。调用方应判断此字段存在再动窗口。
    */
   windowCompact?: WindowCompact;
 }
@@ -875,8 +875,8 @@ export async function createAgentRuntime(
     }
   };
 
-  // run 外注意力窗口换代（/clear · /resume）—— 旧窗 close → 新窗 open、更新实例
-  // 权威。close + open 失败聚合抛,不阻断换代后续。
+  // run 外注意力窗口换代（/clear · /resume · /compact）—— 旧窗 close → 新窗
+  // open、更新实例权威。close + open 失败聚合抛,不阻断换代后续。
   const onAttentionWindowChange = async (
     reason: AttentionWindowChangeReason,
   ): Promise<void> => {
@@ -935,6 +935,50 @@ export async function createAgentRuntime(
       store: memoryStore,
     }),
   });
+
+  // 段切换摘要的流装配工厂 —— run 内评估与手动 forceCompact 共用同一条
+  // 保护链（withRetry 重试降级 → watchdog idle 看门狗 → calibration 估算校准），
+  // 杜绝两处装配漂移。bus 按调用方传入（run 用 per-run bus，forceCompact 用
+  // 本地 bus），重试与看门狗事件随之归属正确的事件流。
+  const makeSegmentStreamFactory = (
+    bus: IEventBus<AgentEventMap>,
+    watchdog: WatchdogPolicy,
+  ): SegmentStreamFactory => {
+    const callWithRetry = withRetry(
+      (request) => roles[primaryRole].provider.chat(request),
+      { eventBus: bus },
+    );
+    return (req) => {
+      // 上游 abortSignal 桥接到段切换内部 controller：让 watchdog idle
+      // 触发和上游 abort 共享同一 cancel 通道
+      const controller = new AbortController();
+      if (req.abortSignal) {
+        if (req.abortSignal.aborted) controller.abort();
+        else
+          req.abortSignal.addEventListener("abort", () => controller.abort(), {
+            once: true,
+          });
+      }
+      return wrapWithCalibration(
+        wrapStreamWithWatchdog(
+          callWithRetry({
+            model: req.model,
+            systemPrompt: req.systemPrompt,
+            tools: req.tools,
+            messages: req.messages,
+            // 段切换摘要走 roles.light（model 由 createSegmentSummarizeFn
+            // 绑 roles.light.model），思考控制随实际 role 注入 lightThinking。
+            thinking: lightThinking,
+            abortSignal: controller.signal,
+          }),
+          controller,
+          watchdog,
+          bus,
+        ),
+        { estimator, messages: req.messages },
+      );
+    };
+  };
 
   // 策略编排（engine 按 priority asc 执行，到 normal/warning 就 break）：
   //   priority 5   MessageDrop     免费 — usage < 0.9 触发（超过 0.9 让给 LLMSummarize）
@@ -1010,59 +1054,51 @@ export async function createAgentRuntime(
     },
 
     async forceCompact(messages: Message[], turnCount: number): Promise<ForceCompactResult> {
-      // 独立 eventBus —— 捕获本次 forceCompact 的 compact_end 事件；
-      // 和 run() 的外层 eventBus 隔离，不混淆 REPL 的事件流。
-      // 两次 onTurnComplete 尝试（初始 + 降阈值重试）共用同一 bus，
-      // 累积订阅保证 windowCompact 包含两次尝试的汇总。
-      const localBus = createEventBus<AgentEventMap>();
-      const accumulator = subscribeCompactAccumulator(localBus);
+      // 手动压缩 = 强制段切换：阈值置零 → 任何规模都走 risk-exceeded 强制
+      // trigger，天然绕过 in-progress defer（用户明确要求压缩，不该被推迟）。
+      // 摘要调用复用实例权威 prompt + 冻结 tools——与主对话请求同形，prompt
+      // cache 前缀命中；摘要失败由段管理器的应急地板机械兜底。产物与自动
+      // 切段同构（windowCompact + 可选快照锚），owner 经窗口 applyCompact
+      // 应用——本方法只产指令、不触窗口、不落盘。
+      //
+      // 本地 bus：段事件与 REPL 主事件流隔离（/compact 的用户反馈由调用方
+      // 按 ForceCompactResult 渲染）。记忆提取 hook 照常挂载——手动切段
+      // 与自动切段的蒸馏时刻语义一致。
+      const localBus = createEventBus<AgentEventMap>({ lineage: "main" });
+      const segmentManager = createSegmentManager({
+        estimator,
+        capability: { optimalMaxTokens: 0, riskMaxTokens: 0 },
+        callLLM: createSegmentSummarizeFn(
+          makeSegmentStreamFactory(localBus, DEFAULT_WATCHDOG_POLICY),
+          roles.light.model,
+        ),
+        // 手动压缩无对话身份语境（评估入参不带 conversationId）——
+        // segmentMeta 不写，两个依赖以 no-op / 恒否兜底
+        persistence: { async appendSegment() {} },
+        taskListReader: { hasInProgress: () => false },
+        eventBus: localBus,
+        hooks: [memoryFlushHook],
+      });
 
-      try {
-        const engine = createContextEngine(
-          estimator,
-          strategies,
-          { modelInfo: modelBudgetInfo },
-          localBus,
-        );
-        const result = await engine.onTurnComplete({ messages, turnCount });
+      const out = await segmentManager.evaluate({
+        messages,
+        systemPrompt: authoritativePrompt,
+        tools: tools.map(toToolSpec),
+        turnCount,
+        conversationId: undefined,
+      });
 
-        let finalMessages: Message[];
-        let finalModified: boolean;
-
-        if (!result.modified) {
-          // 自动压缩因阈值未达而跳过，强制用较低阈值重试
-          const forceEngine = createContextEngine(
-            estimator,
-            strategies,
-            {
-              modelInfo: modelBudgetInfo,
-              thresholds: { warning: 0, compact: 0, critical: 0.95 },
-            },
-            localBus,
-          );
-          const forceResult = await forceEngine.onTurnComplete({ messages, turnCount });
-          finalMessages = forceResult.messages;
-          finalModified = forceResult.modified;
-        } else {
-          finalMessages = result.messages;
-          finalModified = result.modified;
-        }
-
-        const budget = engine.checkBudget(finalMessages);
-        const windowCompact = accumulator.getWindowCompact();
-
-        return {
-          modified: finalModified,
-          messages: finalMessages,
-          budget,
-          windowCompact,
-        };
-      } finally {
-        // localBus 本就随函数结束 GC,但显式 dispose 对齐契约,未来若 localBus
-        // 升级为跨调用共享时能自动避免 listener 泄漏。走 safeDispose 与 run() 对称:
-        // dispose throw 不会覆盖 forceCompact 内 LLM summarize / strategy 抛出的原始错误。
-        safeDispose("forceCompact.accumulator", () => accumulator.dispose());
-      }
+      const finalMessages =
+        out.modified && out.newSegmentMessages ? out.newSegmentMessages : messages;
+      return {
+        modified: out.modified,
+        messages: finalMessages,
+        budget: calculateBudget(
+          modelBudgetInfo,
+          estimator.estimateMessages(finalMessages),
+        ),
+        windowCompact: out.windowCompact,
+      };
     },
 
     async run(params: RunParams): Promise<RunResult> {
@@ -1116,45 +1152,10 @@ export async function createAgentRuntime(
       // override 让阈值倒置，SegmentManager 会处理已被 LLMSummarize 改过的
       // messages（套娃压缩，但功能上不破，仅降级摘要质量）。
       const segmentWatchdog = params.watchdog ?? DEFAULT_WATCHDOG_POLICY;
-      const segmentStreamFactory: SegmentStreamFactory = (req) => {
-        // 上游 abortSignal 桥接到段切换内部 controller：让 watchdog idle
-        // 触发和上游 abort 共享同一 cancel 通道
-        const controller = new AbortController();
-        if (req.abortSignal) {
-          if (req.abortSignal.aborted) controller.abort();
-          else
-            req.abortSignal.addEventListener(
-              "abort",
-              () => controller.abort(),
-              { once: true },
-            );
-        }
-        // 装配链(由内到外):resilientCallLLM → wrapStreamWithWatchdog → wrapWithCalibration
-        //   - resilientCallLLM: 重试与降级
-        //   - wrapStreamWithWatchdog: idle 看门狗 + abort race
-        //   - wrapWithCalibration: 每次段切换 LLM call 用真实 inputTokens 校准 estimator
-        //
-        // calibration 不走 EventBus(llm:request_end):段切换 LLM call 与主对话
-        // emit 同型事件,listener 无可靠方式区分归属;流包装层归属精确。
-        return wrapWithCalibration(
-          wrapStreamWithWatchdog(
-            resilientCallLLM({
-              model: req.model,
-              systemPrompt: req.systemPrompt,
-              tools: req.tools,
-              messages: req.messages,
-              // 段切换摘要走 roles.light（model 由 createSegmentSummarizeFn
-              // 绑 roles.light.model），思考控制随实际 role 注入 lightThinking。
-              thinking: lightThinking,
-              abortSignal: controller.signal,
-            }),
-            controller,
-            segmentWatchdog,
-            eventBus,
-          ),
-          { estimator, messages: req.messages },
-        );
-      };
+      const segmentStreamFactory = makeSegmentStreamFactory(
+        eventBus,
+        segmentWatchdog,
+      );
       const segmentManager = options.segmentDeps
         ? createSegmentManager({
             estimator,

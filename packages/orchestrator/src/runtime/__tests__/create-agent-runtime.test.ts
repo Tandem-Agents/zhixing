@@ -343,19 +343,58 @@ describe("createAgentRuntime · per-run 隔离契约", () => {
   });
 });
 
-// ─── 契约 5: forceCompact dispose 防御对称(P1-1 修复) ───
+// ─── 契约 5: forceCompact = 强制段切换 ───
 
-describe("createAgentRuntime · forceCompact safeDispose 对称防御", () => {
-  it("forceCompact() 不抛 dispose 异常即使 localBus 内累积器抛错(防御契约对称 run())", async () => {
-    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
+describe("createAgentRuntime · forceCompact 强制段切换", () => {
+  const SUMMARY_XML = "<facts>F1</facts><state>S1</state><active>A1</active>";
+
+  function sixMessages() {
+    const messages = [];
+    // 10 turns：被摘段（去掉保留 buffer 2 turns）≥ 记忆提取的 minMessages 门槛
+    for (let i = 0; i < 10; i++) {
+      messages.push(userMessage(`q${i}`), {
+        role: "assistant" as const,
+        content: [{ type: "text" as const, text: `a${i}` }],
+      });
+    }
+    return messages;
+  }
+
+  it("强制切段成功：阈值置零绕过 defer，产出 windowCompact（含结构化摘要）+ 新段消息；记忆提取随 afterSummarize 触发", async () => {
+    // 响应序列：① 段摘要（light）② 记忆提取（light，返回空数组 → 零写盘）
+    providerRef.current = new MockLLMProvider([
+      { text: SUMMARY_XML },
+      { text: "[]" },
+    ]);
 
     const runtime = await createAgentRuntime({});
-    // forceCompact 在空消息列表上不会触发任何策略,正常返回
-    // —— 本测试核心断言:无 unhandled rejection / throw,
-    //    证明 finally 块 safeDispose 调用路径稳定
-    await expect(
-      runtime.forceCompact([userMessage("test")], 0),
-    ).resolves.toBeDefined();
+    const messages = sixMessages();
+    const result = await runtime.forceCompact(messages, 10);
+
+    expect(result.modified).toBe(true);
+    expect(result.windowCompact).toBeDefined();
+    expect(result.windowCompact!.structuredSummary).toEqual({
+      facts: "F1",
+      state: "S1",
+      active: "A1",
+    });
+    expect(result.windowCompact!.pairsCompacted).toBeGreaterThan(0);
+    // 新段：摘要对置首 + 保留最近 buffer，严格短于原文
+    expect(result.messages.length).toBeLessThan(messages.length + 2);
+    expect(result.budget).toBeDefined();
+    // 端到端：段摘要 + 记忆提取共两次 light 调用（提取挂 afterSummarize）
+    expect(providerRef.current!.calls.length).toBe(2);
+  });
+
+  it("小窗口（全部消息都在保留 buffer 内）→ 静默不切，零 LLM 调用", async () => {
+    providerRef.current = new MockLLMProvider([{ text: SUMMARY_XML }]);
+
+    const runtime = await createAgentRuntime({});
+    const result = await runtime.forceCompact([userMessage("test")], 0);
+
+    expect(result.modified).toBe(false);
+    expect(result.windowCompact).toBeUndefined();
+    expect(providerRef.current!.calls.length).toBe(0);
   });
 });
 

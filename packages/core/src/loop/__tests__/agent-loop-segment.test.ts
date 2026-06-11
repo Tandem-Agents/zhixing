@@ -128,6 +128,8 @@ describe("agent-loop × SegmentManager 集成", () => {
       persistence,
       taskListReader: fakeReader(),
       retryBaseMs: 0,
+      // run 内 state 消息少，保留 buffer 置零让被摘段非空（集成测试只关心切段链路）
+      bufferTurns: 0,
       generateSegmentId: () => "seg-test",
     });
 
@@ -167,6 +169,8 @@ describe("agent-loop × SegmentManager 集成", () => {
       persistence: fakePersistence(),
       taskListReader: fakeReader(),
       retryBaseMs: 0,
+      // run 内 state 消息少，保留 buffer 置零让被摘段非空（集成测试只关心切段链路）
+      bufferTurns: 0,
       generateSegmentId: () => "seg-begin",
     });
 
@@ -196,6 +200,8 @@ describe("agent-loop × SegmentManager 集成", () => {
       persistence: fakePersistence(),
       taskListReader: fakeReader(),
       retryBaseMs: 0,
+      // run 内 state 消息少，保留 buffer 置零让被摘段非空（集成测试只关心切段链路）
+      bufferTurns: 0,
       generateSegmentId: () => "seg-noop",
     });
 
@@ -224,6 +230,8 @@ describe("agent-loop × SegmentManager 集成", () => {
       persistence: fakePersistence(),
       taskListReader: fakeReader(),
       retryBaseMs: 0,
+      // run 内 state 消息少，保留 buffer 置零让被摘段非空（集成测试只关心切段链路）
+      bufferTurns: 0,
       generateSegmentId: () => "seg-A",
     });
 
@@ -260,6 +268,8 @@ describe("agent-loop × SegmentManager 集成", () => {
       persistence,
       taskListReader: fakeReader(),
       retryBaseMs: 0,
+      // run 内 state 消息少，保留 buffer 置零让被摘段非空（集成测试只关心切段链路）
+      bufferTurns: 0,
     });
 
     const provider = makeToolThenTextProvider("t");
@@ -294,6 +304,8 @@ describe("agent-loop × SegmentManager 集成", () => {
       persistence,
       taskListReader: fakeReader(),
       retryBaseMs: 0,
+      // run 内 state 消息少，保留 buffer 置零让被摘段非空（集成测试只关心切段链路）
+      bufferTurns: 0,
     });
 
     const provider = makeToolThenTextProvider("t");
@@ -329,11 +341,15 @@ describe("agent-loop × SegmentManager 集成", () => {
 
     const segmentManager = createSegmentManager({
       estimator: fakeEstimator(20),
-      capability: aggressiveCap,
+      // optimal 档触发：失败不降级（风险档失败会走应急地板机械截断，
+      // 由段管理器单测覆盖）
+      capability: { optimalMaxTokens: 0, riskMaxTokens: 1_000_000 },
       callLLM,
       persistence: fakePersistence(),
       taskListReader: fakeReader(),
       retryBaseMs: 0,
+      // run 内 state 消息少，保留 buffer 置零让被摘段非空（集成测试只关心切段链路）
+      bufferTurns: 0,
       retries: 1,
     });
 
@@ -371,6 +387,8 @@ describe("agent-loop × SegmentManager 集成", () => {
       persistence: fakePersistence(),
       taskListReader: fakeReader(),
       retryBaseMs: 0,
+      // run 内 state 消息少，保留 buffer 置零让被摘段非空（集成测试只关心切段链路）
+      bufferTurns: 0,
       eventBus,
       generateSegmentId: () => "seg-evt",
     });
@@ -403,6 +421,8 @@ describe("agent-loop × SegmentManager 集成", () => {
       persistence: fakePersistence(),
       taskListReader: reader,
       retryBaseMs: 0,
+      // run 内 state 消息少，保留 buffer 置零让被摘段非空（集成测试只关心切段链路）
+      bufferTurns: 0,
     });
 
     const provider = makeToolThenTextProvider("t");
@@ -428,6 +448,8 @@ describe("agent-loop × SegmentManager 集成", () => {
       persistence: fakePersistence(),
       taskListReader: fakeReader(),
       retryBaseMs: 0,
+      // run 内 state 消息少，保留 buffer 置零让被摘段非空（集成测试只关心切段链路）
+      bufferTurns: 0,
       generateSegmentId: () => "seg-wl",
     });
 
@@ -457,6 +479,8 @@ describe("agent-loop × SegmentManager 集成", () => {
       persistence: fakePersistence(),
       taskListReader: fakeReader(),
       retryBaseMs: 0,
+      // run 内 state 消息少，保留 buffer 置零让被摘段非空（集成测试只关心切段链路）
+      bufferTurns: 0,
       generateSegmentId: () => "seg-nowl",
     });
 

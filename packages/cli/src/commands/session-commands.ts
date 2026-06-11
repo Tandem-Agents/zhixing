@@ -362,6 +362,14 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
             outcome,
           );
         }
+        // run 外手动压缩 = 注意力窗口换代（与 /clear、/resume 同纪律）——
+        // 触发 onWindowClose(compact)→onWindowOpen(compact) 重建实例权威
+        // prompt。失败非致命，不影响已完成的折叠。
+        try {
+          await deps.getRuntime().onAttentionWindowChange("compact");
+        } catch {
+          /* 非致命：窗口重建失败不阻塞压缩结果 */
+        }
         const pct = Math.round(result.budget.usageRatio * 100);
         writer.line(chalk.green(`  ✓ 压缩完成，当前上下文占用 ${pct}%\n`));
       } else if (result.modified) {
