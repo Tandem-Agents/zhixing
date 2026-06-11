@@ -37,6 +37,7 @@ import {
   JournalStore,
   ShardedTranscriptStore,
   SnapshotStore,
+  SkillStore,
   conversationsDir,
   runRetentionSweep,
   getWorkScenesRoot,
@@ -248,6 +249,12 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     taskListService: builtinExtraTools.taskListService,
   });
 
+  // 3c''. 技能库 —— serve 全部 runtime(per-session + ephemeral)共享单实例:
+  //   索引重建靠 store 内存结构版本比对,实例分散会让"会话 A 经 save_skill
+  //   存技能、会话 B 下窗不知道"(各自版本各自计);共享后任一保存,全部
+  //   runtime 下个窗口换代即见。磁盘本就同一目录,共享无额外耦合。
+  const serveSkillStore = new SkillStore();
+
   // 3d. RuntimeFactory —— 会话执行面（接入面）建 per-session runtime 的工厂。schedule 档无
   //   会话执行面，工厂作无副作用留位（不连接、不建目录）。
   //   注：工厂内 createAgentRuntime 是 lazy（session 调用时才建），那时 mcp 接入面 connectAll
@@ -268,6 +275,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
         decorateRunBus: renderDecorator,
         onSecurityBlocked: createBlockedRenderer(serveWriter),
         segmentDeps: serveSegmentDeps,
+        skillStore: serveSkillStore,
         // Task 工具由默认 mainProfile().enabledTools 含 "Task" 自动装配；
         // 渠道下游(飞书/RPC)可看到子 agent 冒泡事件,renderDecorator 在
         // 非 TTY 模式下退化为只输出 Task 起止帧(子工具中间事件静默,
@@ -366,6 +374,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     // 段保护同样覆盖 ephemeral 定时任务（无 conversationId 时照常评估与切段，
     // 仅跳过持久化副作用）——长任务的窗口安全由段机制全权保障。
     segmentDeps: serveSegmentDeps,
+    skillStore: serveSkillStore,
     // Task 工具由默认 mainProfile().enabledTools 含 "Task" 自动装配；定时任务
     // 的 ephemeral 执行路径同样可派发子 agent 隔离子任务，与持久会话能力对齐。
   });
