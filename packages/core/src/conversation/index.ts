@@ -15,6 +15,13 @@ export {
 
 export { ConversationRepository, conversationsDir } from "./repository.js";
 
+export {
+  WORKSCENE_CONVERSATION_PREFIX,
+  worksceneConversationId,
+  parseConversationId,
+  type ParsedConversationId,
+} from "./scope-id.js";
+
 export type {
   InferConversationName,
   MaybeAutoNameFirstTurnOptions,

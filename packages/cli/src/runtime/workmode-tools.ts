@@ -29,10 +29,12 @@ import {
   MemoryStore,
   getWorkSceneMemoryDir,
   type BoundaryCrossing,
+  type IWorkSceneRegistry,
   type JsonSchema,
   type MemoryCategory,
   type ToolDefinition,
 } from "@zhixing/core";
+import { emitWorkModeSwitchIntent } from "@zhixing/orchestrator/runtime";
 import type { IWorkModeController } from "./work-mode-controller.js";
 
 /** 单条记忆片段上限 —— 控制注入主上下文的体量（只读检索非 raw dump）。 */
@@ -60,9 +62,12 @@ function fail(content: string): Promise<{ content: string; isError: true }> {
 
 /**
  * workmode_enter（main-only，needsPermission）—— 用户拍板后 emit 进入意图。
+ *
+ * 只依赖场景注册表(存在性校验);意图经 emitWorkModeSwitchIntent 发当前
+ * run 的 bus——与 controller 解耦,宿主侧装配同样可用。
  */
 export function createWorkmodeEnterTool(
-  controller: IWorkModeController,
+  registry: IWorkSceneRegistry,
 ): ToolDefinition {
   const inputSchema: JsonSchema = {
     type: "object",
@@ -88,9 +93,9 @@ export function createWorkmodeEnterTool(
     async call(input) {
       const sceneId = String(input.sceneId ?? "").trim();
       if (!sceneId) return fail("workmode_enter 需要 sceneId");
-      const scene = await controller.registry.get(sceneId);
+      const scene = await registry.get(sceneId);
       if (!scene) return fail(`工作场景 "${sceneId}" 不存在，未切换`);
-      controller.emitModeSwitch({ kind: "enter", sceneId });
+      emitWorkModeSwitchIntent({ kind: "enter", sceneId });
       return ok(
         `已请求进入工作场景「${scene.name}」，将在本轮结束后切换。请先把本轮回复收尾。`,
       );
@@ -101,13 +106,13 @@ export function createWorkmodeEnterTool(
 /**
  * workmode_exit（power-only，需 confirmation）—— LLM 自判完结 emit 退出意图。
  *
- * 退出和进入对称都要用户拍板：power runtime overlay 一旦弃不可复原（exit fail-forward
- * 到 main 干净态），让用户对"是否真要离开当前 workscene"显式确认。用户主动用
- * `/exit` cli 命令则不经此工具，天然无需确认（用户意图即授权）。
+ * 退出和进入对称都要用户拍板,让用户对"是否真要离开当前 workscene"显式确认。
+ * 用户主动用 `/exit` cli 命令则不经此工具，天然无需确认（用户意图即授权）。
+ *
+ * 零依赖:意图经 emitWorkModeSwitchIntent 发当前 run 的 bus,turn 边界由
+ * 调用方消费——cli 直驱与宿主装配同一工具。
  */
-export function createWorkmodeExitTool(
-  controller: IWorkModeController,
-): ToolDefinition {
+export function createWorkmodeExitTool(): ToolDefinition {
   const inputSchema: JsonSchema = {
     type: "object",
     properties: {},
@@ -123,7 +128,7 @@ export function createWorkmodeExitTool(
     needsPermission: true,
     boundaries: [...AGENT_CONTEXT_SWITCH_BOUNDARIES],
     async call() {
-      controller.emitModeSwitch({ kind: "exit" });
+      emitWorkModeSwitchIntent({ kind: "exit" });
       return ok("已请求退出工作场景，将在本轮结束后返回主对话。");
     },
   };

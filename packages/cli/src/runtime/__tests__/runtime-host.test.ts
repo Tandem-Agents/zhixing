@@ -102,16 +102,45 @@ describe("资产层透传", () => {
     expect(params.extraTools).toBe(tools);
   });
 
-  it("onRuntimeCreated 在会话与 ephemeral 两条发放路径都被调用", async () => {
+  it("onRuntimeCreated 在会话 / 场景 / ephemeral 三条发放路径都被调用", async () => {
     const { options, onRuntimeCreated } = makeHostOptions();
     const host = new RuntimeHost(options);
 
     const conv = await host.createConversationRuntime();
+    const ws = await host.createWorksceneRuntime({
+      id: "s1",
+      name: "场景",
+    } as never);
     const eph = await host.createEphemeralRuntime();
 
-    expect(onRuntimeCreated).toHaveBeenCalledTimes(2);
+    expect(onRuntimeCreated).toHaveBeenCalledTimes(3);
     expect(onRuntimeCreated).toHaveBeenNthCalledWith(1, conv);
-    expect(onRuntimeCreated).toHaveBeenNthCalledWith(2, eph);
+    expect(onRuntimeCreated).toHaveBeenNthCalledWith(2, ws);
+    expect(onRuntimeCreated).toHaveBeenNthCalledWith(3, eph);
+  });
+
+  it("workscene 装配:workdir 为工作区(缺省显式 null)、power 角色与记忆域、spec 进工具装配", async () => {
+    const { options, assembled } = makeHostOptions();
+    const host = new RuntimeHost(options);
+
+    await host.createWorksceneRuntime({
+      id: "s1",
+      name: "场景",
+      workdir: "/proj",
+    } as never);
+    let params = createAgentRuntimeMock.mock.calls[0]![0];
+    expect(params.workspace).toBe("/proj");
+    expect(params.primaryRole).toBe("power");
+    expect(params.memoryScope).toEqual({ kind: "workscene", sceneId: "s1" });
+    expect(params.profile).toBeDefined();
+    expect((assembled[0] as { spec?: { kind: string } }).spec).toEqual({
+      kind: "workscene",
+    });
+
+    // 无 workdir → workspace 显式 null(不回落 host 缺省,杜绝串到 cwd)
+    await host.createWorksceneRuntime({ id: "s2", name: "纯对话场景" } as never);
+    params = createAgentRuntimeMock.mock.calls[1]![0];
+    expect(params.workspace).toBeNull();
   });
 });
 

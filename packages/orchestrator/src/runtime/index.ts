@@ -43,7 +43,11 @@ export {
   type RunParams,
   type RunResult,
 } from "./create-agent-runtime.js";
-export { runContextStorage, type RunContext } from "./run-context.js";
+export {
+  runContextStorage,
+  emitWorkModeSwitchIntent,
+  type RunContext,
+} from "./run-context.js";
 export type {
   AgentRuntimeLifecycle,
   DataDrivenSegment,

@@ -72,7 +72,7 @@
 
 - 逐 token 流式事件跨进程（RPC 订阅）的形态与时延；cli 渲染管线的对接方式
 - runtime 重资产（MCP 连接、技能索引、记忆）归宿主后，cli 侧 /config 热重载的生效协议
-- **工作场景整个状态机归宿主——cli 收编的第二大改造面**（不止"生效协议"）：enterWorkMode 的事务 undo 栈、power runtime overlay、场景独立对话域与记忆域、退出纪要,全部从 repl 进程迁宿主;接入面只投影场景状态
+- **工作场景归宿主——cli 收编的第二大改造面**（不止"生效协议"）：场景独立对话域与记忆域、power 装配、退出纪要全部归宿主;cli 现状的 overlay/undo 栈状态机是单 runtime 槽争用的产物,收编后不迁移而是**消失**(per-conversation 实例下问题不存在);接入面只投影场景状态
 - 打断（abort）的跨接入面语义：cli Esc 打断的是宿主上的 run;排队中的其它接入面输入如何处置
 - 版本偏斜（恒 client 模型经典坑,调度域现状已存在）：cli 升级后旧版本宿主进程仍在跑,RPC 协议与行为不匹配——需版本握手 + 宿主换代机制（LSP / Docker 先例）
 - 宿主可观测性：黑盒 daemon 出问题时用户怎么看日志 / 状态（现有 log 文件之上的产品级透明度）
@@ -117,7 +117,7 @@ cli = 纯接入面(RPC client):
 **迁移前置二:runtime 持有模型收敛为「共享装配资产 + per-conversation 实例」(RuntimeHost)**。两侧现状:cli 的 RuntimeSession 是单会话设计(main 单槽 + workScene 单 overlay 槽、`activeMode` 全局一份)——单槽模型迁宿主撑不住多对话并发(A 对话在 main、B 对话在场景 X,单 activeMode 结构上表达不了);serve 已是正确分层的雏形——重资产(segmentDeps / skillStore / MCP)全 runtime(per-session + ephemeral)共享单实例,runtime 实例 per-conversation 建。**实例必须按对话隔离是代码事实**:AgentRuntime 闭包持有窗口级可变态(`authoritativePrompt` / `windowEpochCounter` / `windowCounter` / `lastRunEntryWindowIndex` / 技能贡献 `builtVersion`),一个实例的设计假定就是服务单一对话的窗口序列,跨对话共享即互相践踏——可变状态的隔离单位必须对齐并发单位。裁决:
 
 - **RuntimeHost 两层结构**:资产层(provider / pipeline / MCP 连接 / 技能库 / 段切换依赖)全 runtime 共享,是 reload 的换代单位;实例层按对话发放轻实例(闭包持窗口级状态),profile 由对话场景属性决定(main / 对应场景的 power)。调度任务的 ephemeral 实例同属此资产层——会话 / 场景 / 任务三类消费者一个模型。reload = 资产重建 + 活跃实例同事务换代(现 RuntimeSession 的 main+power 同事务构建 / 回滚正是其单对话特例)。
-- **workscene 态从全局模式降为对话的静态属性**:场景对话生在场景里、归属创建即定(meta 记 sceneId),不存在"给对话改场景"的动态绑定——cli 现状即如此(enter 切 `state.conv` 到场景对话,exit 切回 main 对话,对话本身不换属性)。send 执行时 ConversationManager 按对话场景属性向 RuntimeHost 取实例,宿主侧**无任何"当前模式"状态需要维护**;场景级状态(undo 栈 / 退出纪要)挂场景条目,不挂 runtime 实例。ManagedSession 持窗口 / turnCounter / 串行点,**不持 runtime 实例**(窗口从 serve 现状的 SessionRuntime wrapper 内挪出)。记忆域单向阀(journal 只在 main 域)判定点随之从全局 activeMode 改锚对话场景属性,单向阀语义不变。
+- **workscene 态从全局模式降为对话的静态属性**:场景对话生在场景里、归属创建即定(meta 记 sceneId),不存在"给对话改场景"的动态绑定——cli 现状即如此(enter 切 `state.conv` 到场景对话,exit 切回 main 对话,对话本身不换属性)。send 执行时 ConversationManager 按对话场景属性向 RuntimeHost 取实例,宿主侧**无任何"当前模式"状态需要维护**;退出纪要是场景记忆域的产物(随实例末窗),不是宿主状态。ManagedSession 持窗口 / turnCounter / 串行点,**不持 runtime 实例**(窗口从 serve 现状的 SessionRuntime wrapper 内挪出)。记忆域单向阀(journal 只在 main 域)判定点随之从全局 activeMode 改锚对话场景属性,单向阀语义不变。
 - **per-conversation 装配差异经执行期上下文取**:RunContext 已携带 `conversationId`,任务投递 origin 本就由会话 id 派生(`parseOriginFromSessionId`)——`scheduleOrigin` 从装配期闭包捕获改为执行期从 RunContext 派生。serve 的 per-conversation factory **升格为 RuntimeHost 实例层**,不退役;收编的只是闭包式对话差异与 wrapper 内的窗口归属。
 
 ### 3.2 投影边界:双通道(渲染零改的关键)
@@ -151,7 +151,7 @@ cli 渲染面本就是两条腿,投影逐腿对应、各自零改:
 | `session.list` / `history` | 对话列表 / 倒读分页 | 已有骨架但均为活跃会话视图:list 现状是 `manager.list()`(仅活跃),改造为 convRepo 全量列表(/resume 候选源);history 现状为活跃会话内存历史(非活跃 notFound),改造为 readRunsReverse 倒读分页、不要求会话活跃 |
 | `session.clear` / `resume` / `compact` / `new` | 会话命令执行体 | cli 命令 handler 变薄:分发在 cli、执行经此 |
 | `session.rename` / `delete` | 对话改名(/name)/ 删除(/resume inline 删除) | delete 既有方法语义是"删除运行时",对齐为含落盘数据删除 |
-| `workscene.enter` / `exit` / `status` | 进出场景与状态查询(语义见裁决 3) | undo 栈 / 退出纪要挂场景条目在宿主;实例随 send 按场景 profile 发放 |
+| `workscene.enter` / `exit` | 取 / 建场景当前对话(原子查询创建)/ touch(语义见裁决 3) | 无状态机、无 status 方法——接入面当前场景是连接级 UI 态,宿主零知识;实例随 send 按场景 profile 发放 |
 | `workscene.list` / `create` / `rename` / `delete` | 场景候选列表 + 登记管理(/work 选择器及 inline CRUD) | 场景注册表读写路径随之收宿主(正常态零直读,见裁决 4) |
 | `confirmation.list` / `resolve`(+Bridge 推送 `pending` / `resolved`) | 确认的可见与应答回程 | 已有骨架;**语义须按裁决 5 升级**(应答权改 origin surface、decision 按信任级分级),现状白名单不可直接复用 |
 | `trust.list` / `revoke` | 信任规则管理(/trust 查看与撤销) | permissionStore 随 runtime 在宿主,规则沉淀经确认链路自然在宿主;此组承接管理面;/mcp、/security 的状态查询同理改问宿主(并入 host.status 族或随实现归位) |
@@ -168,8 +168,9 @@ cli 渲染面本就是两条腿,投影逐腿对应、各自零改:
 
 1. **流式形态**:见 3.2。
 2. **/config 热重载**:编辑器留 cli(TTY 交互),写盘后 `runtime.reload` 触发宿主 blue-green;MCP 连接、技能索引、记忆随 RuntimeHost 在宿主,reload 语义不变、位置变。
-3. **workscene**:场景态迁宿主并降为**对话的静态属性**(见 3.1 迁移前置二)。`workscene.enter` = 宿主登记场景活跃 + 返回场景当前对话(无则创建),接入面切换自己的当前对话指针(连接级 UI 态);`exit` = 接入面切回 main 对话;场景对话的 runtime 实例随 send 按 power profile 发放,场景级状态(undo 栈 / 退出纪要)挂场景条目、随绑定它的活跃对话归零释放(挂既有 grace/idle 生命周期)。多场景多对话并发互不干扰;接入面只投影(模式横幅 = 当前对话场景属性的渲染);任何接入面都可 enter/exit(远期飞书进场景免费获得)。
-   **LLM 触发的进出场景**(turn 内工具产生意图、`RunResult.pendingModeSwitch` 于 turn 边界 last-wins 带出——现状 repl 消费、serve 忽略):收编后意图经**定向通知**(`session.modeSwitchIntent`,先于 complete 发送)只达发起连接——可执行控制意图不随 complete 组播,**跟随权归发起接入面由结构保证**(旁观端物理不可达,不靠客户端自律;旁观提示如需要,只给只读状态)。发起端收到后走 `workscene.enter` / `exit` 同一 RPC 执行体——与 /work 命令的双源汇聚结构保留、汇聚点平移到接入面。enter fail-back / exit fail-forward 的副作用原子性**焊在宿主方法内**,接入面只切指针(纯 UI、无副作用)。
+3. **workscene**:场景态迁宿主并降为**对话的静态属性**(见 3.1 迁移前置二)。`workscene.enter` = 宿主取 / 建场景当前对话并返回(原子查询 / 创建,唯一写副作用是建对话目录——失败即无事发生,接入面不切指针即可,**无 undo 栈、无事务回滚机器**;那些是 cli 单槽 overlay 争用的产物,per-conversation 实例下问题本身不存在);`exit` = 接入面切回 main 对话的指针行为,宿主至多 touch 场景(未来退出纪要的挂点——纪要本身是场景记忆域的产物,随实例末窗,不是宿主方法状态)。场景对话的 runtime 实例随 send 按 power profile 发放,生命周期即 ManagedSession 的 grace/idle。多场景多对话并发互不干扰;接入面的模式横幅 = 当前对话 id 的纯函数派生(解析出 sceneId),场景显示名取自 enter 响应或 list;任何接入面都可 enter/exit(远期飞书进场景免费获得)。
+   **宿主侧执行细化**:①场景对话的全域键编码归属——`ws:<sceneId>:<convId>`(渠道对话 `dm:feishu:x` 的同构先例),解析单点在 core;send 路由(id→power 装配)、持久化路由(id→per-scope store)、目录路由全部纯函数派生,静态属性由结构保证。②管理面(list/create/rename/delete)薄壳直达场景注册表。③**不设 workscene.status**——"接入面当前在哪个场景"是连接级 UI 态,宿主对此零知识;设 status 就是给宿主级 activeMode 留形态复活点。④session.list 保持 user scope——场景是独立工作台,main 列表不混场景对话。
+   **LLM 触发的进出场景**(turn 内工具产生意图、`RunResult.pendingModeSwitch` 于 turn 边界 last-wins 带出——现状 repl 消费、serve 忽略):收编后意图经**定向通知**(`session.modeSwitchIntent`,先于 complete 发送)只达发起连接——可执行控制意图不随 complete 组播,**跟随权归发起接入面由结构保证**(旁观端物理不可达,不靠客户端自律;旁观提示如需要,只给只读状态)。发起端收到后走 `workscene.enter` / `exit` 同一 RPC 执行体——与 /work 命令的双源汇聚结构保留、汇聚点平移到接入面;接入面只切指针(纯 UI、无副作用),宿主侧无事务可回滚。
 4. **失败形态**:ensureHost 自动拉起 + 有限重试 → 失败进**只读浏览 + 引导修复**(对话列表 / 历史直读磁盘——读容错纪律已建,不破单写者;输入区提示宿主不可用与修复指引)。正常态一切读写经 RPC(单接口);直读磁盘仅此降级态,且**只经独立只读通道**(`readRunsReverse` 等 reader 函数——现状已是文件级独立 API,cli 的历史尾巴即此形态),不得为降级态构造 Store 实例,否则 3.7"无 Store 写实例"的结构性验收失效。
 5. **确认归属与协议升级**:弹给发起接入面(turnOrigin 路由已有,ConfirmationHub/Bridge 复用);旁观接入面收"确认进行中"状态事件,**可见不可代答**。现有 `confirmation.resolve` 的语义**不能直接复用**,须升级为终态协议——它的 decision 白名单(仅 allow-once / deny)与应答权(observer 即可答)都建立在"本地 = 进程内 broker、远程 = RPC"的传输形态边界上,cli 收编后该前提瓦解(cli 也走 RPC):
    - **应答权**:resolve 校验"发起接入面"资格(默认仅 origin surface 可答),不再是 observer 即可。
@@ -218,7 +219,7 @@ transcript / skill / memory / snapshot / permission(trust 规则)的全部写入
 2. **RuntimeHost 两层结构**——资产层(provider / MCP / 技能库 / 段切换依赖)+ 实例层(per-conversation 发放、profile 按对话场景属性);serve 的 factory 升格为实例层;`scheduleOrigin` 改执行期 RunContext 派生;reload 改"资产重建 + 活跃实例同事务换代"。
 3. **窗口归 ManagedSession**——从 SessionRuntime wrapper 挪出,ConversationManager 成为窗口 / turnCounter / 接受协议的唯一权威;runTurnWithCommit 补 pendingModeSwitch 透传。
 4. **双通道与通知面**——带外事件转发装饰器(wire envelope / UI 订阅集裁剪 / lineage)、推送改 observer 组播、`session.changed` 会话级通知、`session.subscribe` 登记。
-5. **session / workscene 方法域补全**——rename / delete 语义对齐、history 改 readRunsReverse、list 改全量、workscene 全组(静态属性模型、场景级状态挂场景条目、enter / exit 原子性焊宿主方法内)。
+5. **session / workscene 方法域补全**——rename / delete 语义对齐、history 改 readRunsReverse、list 改全量;workscene 全组(对话静态属性模型:`ws:` 全域键路由、enter 原子查询创建、exit 仅 touch、管理面薄壳——宿主无状态机、无 status 方法,见裁决 3 执行细化)。
 6. **confirmation 升级 + 管理面方法域**——应答权改 origin surface、decision 信任分级;trust / skill / memory 方法组;host.status / version / stop(占用红线三层防线、协议握手用 auth 既有预留位)。
 7. **宿主 profile 升格**——cli 拉起的常驻宿主按配置装配渠道与 MCP(飞书随配置常驻生效)。
 

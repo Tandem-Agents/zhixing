@@ -8,15 +8,14 @@
  *   - 可独立测试：工具单测只需 mock 本接口（断言 emit / registry 调用），
  *     无需起整个 RuntimeSession。
  *
- * 暴露面刻意最小（spec 焊死）：注册表 CRUD（无 guard 操作）+ emit 切换意图 +
- * 带 guard 的删除入口。带 guard 的操作必须通过本接口的语义方法（非 registry 直调），
+ * 暴露面刻意最小（spec 焊死）：注册表 CRUD（无 guard 操作）+ 带 guard 的删除
+ * 入口。带 guard 的操作必须通过本接口的语义方法（非 registry 直调），
  * 让 CLI 命令入口与 LLM 工具入口最终汇聚同一原语，仅触发面不同。
+ * 切换意图的发射不在此接口——经 orchestrator 的 emitWorkModeSwitchIntent
+ * 直发当前 run 的 bus(工具与控制器解耦,宿主装配同一工具)。
  */
 
-import type {
-  IWorkSceneRegistry,
-  WorkModeSwitchIntent,
-} from "@zhixing/core";
+import type { IWorkSceneRegistry } from "@zhixing/core";
 
 export interface IWorkModeController {
   /**
@@ -25,14 +24,6 @@ export interface IWorkModeController {
    * 删活跃场景），不要直接调 registry，走本接口的语义方法**（如 `removeWorkScene`）。
    */
   readonly registry: IWorkSceneRegistry;
-
-  /**
-   * emit 一条模式切换意图到当前 run 的 EventBus —— 用户已拍板（needsPermission
-   * 工具）或 LLM 自判（workmode_exit）后调用。**只产生意图、不执行切换**：
-   * run() 侧 subscribeWorkModeAccumulator 收集、随 RunResult.pendingModeSwitch
-   * 带出，REPL 主回路在 turn 边界唯一消费。非 run 上下文（无 bus）下为 no-op。
-   */
-  emitModeSwitch(intent: WorkModeSwitchIntent): void;
 
   /**
    * 彻底删除工作场景（带 active 守卫）—— CLI `/work remove <id>` 与

@@ -35,6 +35,9 @@ import {
   LocalSchedulerFacade,
   type TurnContext,
   JournalStore,
+  ConversationRepository,
+  FsWorkSceneRegistry,
+  parseConversationId,
   ShardedTranscriptStore,
   SnapshotStore,
   SkillStore,
@@ -76,6 +79,8 @@ import { parseServerSpecs } from "../runtime/mcp-config.js";
 import { InMemoryTaskListStore } from "../runtime/task-list-stores.js";
 import { registerCliTurnContextProviders } from "../runtime/turn-context-providers.js";
 import { createCliRuntimeFactory } from "./session-adapter.js";
+import { createConversationDirectory } from "./conversation-directory.js";
+import { createWorksceneDirectory } from "./workscene-directory.js";
 import { runEphemeralTurn } from "./ephemeral-executor.js";
 import { loadOrCreateToken } from "./token.js";
 import { isDaemonChild } from "./self-exec.js";
@@ -203,6 +208,17 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   const convDir = conversationsDir({ kind: "user" });
   const transcript = new ShardedTranscriptStore(convDir);
   const snapshots = new SnapshotStore(convDir);
+  // 对话目录(盘上事实:清单 / 改名 / 删除 / 倒读)——session.list / history /
+  // rename / delete 的持久层,与 REPL 同 scope(同 home 同目录)。
+  const conversationDirectory = createConversationDirectory({
+    repo: new ConversationRepository({ kind: "user" }),
+    transcript,
+  });
+  // 工作场景域——注册表单例(管理面 + factory 的场景装配路由共用)与场景对话取建。
+  const workSceneRegistry = new FsWorkSceneRegistry();
+  const worksceneDirectory = createWorksceneDirectory({
+    registry: workSceneRegistry,
+  });
 
   // 3. Scheduler facade lazy ref —— 打破循环依赖（标准 IoC 模式）：
   //    scheduleTool → Scheduler → runAgentTurn → ephemeralRuntime → scheduleTool
@@ -312,7 +328,18 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   //   早已完成（pre-server 阶段），故工厂装配可前置、不受 connectAll 时序约束（与 eager 的
   //   ephemeralRuntime 不同——后者须排在接入面之后，见下）。
   const runtimeFactory = createCliRuntimeFactory({
-    createAgentRuntime: () => runtimeHost.createConversationRuntime(),
+    createAgentRuntime: async (sessionId) => {
+      // 对话归属编码在全域键里:ws: 前缀 → 该场景的 power 装配;其余 main。
+      const { scope } = parseConversationId(sessionId);
+      if (scope.kind === "workscene") {
+        const scene = await workSceneRegistry.get(scope.sceneId);
+        if (!scene) {
+          throw new Error(`工作场景 "${scope.sceneId}" 不存在,无法装配会话`);
+        }
+        return runtimeHost.createWorksceneRuntime(scene);
+      }
+      return runtimeHost.createConversationRuntime();
+    },
   });
 
   // 4. CleanupRegistry —— 唯一清理出口。LIFO 语义 + 跨包注入。注册序列封装在
@@ -519,6 +546,8 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     token: tokenInfo.token,
     scheduler,
     conversations: ctx.conversations,
+    conversationDirectory,
+    workscenes: worksceneDirectory,
     channels: ctx.channels,
     confirmationHub,
     runRegistry,

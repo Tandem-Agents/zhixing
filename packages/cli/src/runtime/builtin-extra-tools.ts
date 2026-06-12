@@ -137,18 +137,18 @@ export function createBuiltinExtraToolsAssembly(
 
       // workscene 工具组按 spec.kind 二分注入 —— by-construction 隔离：
       // power runtime 物理不持有 main-only 工具，main 物理不持有 workmode_exit。
+      // exit 零依赖恒装(意图经 ALS 发当前 run 的 bus,宿主与 cli 同一工具);
+      // main 组(enter / 变更审批 / 记忆检索)依赖控制器守卫,仅控制器在场装配。
       const kind = ctx.spec?.kind ?? "main";
-      if (ctx.workModeController) {
+      if (kind === "workscene") {
+        tools.push(createWorkmodeExitTool());
+      } else if (ctx.workModeController) {
         const controller = ctx.workModeController();
-        if (kind === "main") {
-          tools.push(
-            createWorkmodeEnterTool(controller),
-            createWorksceneChangeApproveTool(controller),
-            createWorksceneMemoryQueryTool(controller),
-          );
-        } else {
-          tools.push(createWorkmodeExitTool(controller));
-        }
+        tools.push(
+          createWorkmodeEnterTool(controller.registry),
+          createWorksceneChangeApproveTool(controller),
+          createWorksceneMemoryQueryTool(controller),
+        );
       }
 
       return tools;

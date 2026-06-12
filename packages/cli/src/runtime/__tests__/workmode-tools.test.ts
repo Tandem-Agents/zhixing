@@ -1,13 +1,19 @@
 /**
- * workmode 工具回归 —— 脱离 RuntimeSession，用 mock IWorkModeController 验证：
- *   - enter/exit 只 emit 意图、不执行切换
+ * workmode 工具回归 —— 脱离 RuntimeSession，用 mock 注册表 / controller 验证：
+ *   - enter/exit 只 emit 意图(经 ALS 发当前 run 的 bus)、不执行切换
  *   - enter 对不存在场景 isError 且不 emit
  *   - change_approve 派发到 registry 各 CRUD
  *   - 权限/只读标志符合 by-construction 约束
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MemoryStore, getWorkSceneMemoryDir } from "@zhixing/core";
+import {
+  MemoryStore,
+  createEventBus,
+  getWorkSceneMemoryDir,
+  type AgentEventMap,
+} from "@zhixing/core";
+import { runContextStorage } from "@zhixing/orchestrator/runtime";
 import { createTempDir } from "@zhixing/test-utils";
 import type { IWorkModeController } from "../work-mode-controller.js";
 import {
@@ -20,13 +26,8 @@ import {
 function makeController(
   overrides: Partial<IWorkModeController["registry"]> = {},
   controllerOverrides: Partial<IWorkModeController> = {},
-): IWorkModeController & { emitted: unknown[] } {
-  const emitted: unknown[] = [];
+): IWorkModeController {
   return {
-    emitted,
-    emitModeSwitch: (intent) => {
-      emitted.push(intent);
-    },
     // 带 guard 的删除入口 —— RuntimeSession 实现内含 active 守卫;
     // 这里默认放一个无 guard 的 mock,需要测 guard 行为的 case 用
     // controllerOverrides 注入抛错版本。
@@ -41,10 +42,26 @@ function makeController(
       ...overrides,
     },
     ...controllerOverrides,
-  } as unknown as IWorkModeController & { emitted: unknown[] };
+  } as unknown as IWorkModeController;
 }
 
 const CTX = {} as never;
+
+/**
+ * 在带捕获 bus 的 RunContext 内执行——意图经 emitWorkModeSwitchIntent 发
+ * 当前 run 的 bus(与真实 run 同机制),返回捕获到的意图序列。
+ */
+async function callInRun<T>(
+  fn: () => Promise<T>,
+): Promise<{ result: T; emitted: unknown[] }> {
+  const bus = createEventBus<AgentEventMap>({ lineage: "main" });
+  const emitted: unknown[] = [];
+  bus.on("workmode:switch_requested", (intent) => {
+    emitted.push(intent);
+  });
+  const result = await runContextStorage.run({ bus, lineage: "main" }, fn);
+  return { result, emitted };
+}
 
 describe("workmode_enter", () => {
   it("场景存在 → emit enter 意图、不执行切换", async () => {
@@ -53,40 +70,43 @@ describe("workmode_enter", () => {
         .fn()
         .mockResolvedValue({ id: "s1", name: "场景一", createdAt: "", lastActiveAt: "" }),
     });
-    const tool = createWorkmodeEnterTool(c);
+    const tool = createWorkmodeEnterTool(c.registry);
     expect(tool.needsPermission).toBe(true);
     // boundaries 是真正驱动 confirm 的字段(needsPermission 当前在运行时无消费):
     // 声明 agent-context.switch 让 OperationClassifier 升级到 external → confirm。
     expect(tool.boundaries).toEqual([
       { boundaryType: "agent-context", access: "switch", dynamic: false },
     ]);
-    const r = await tool.call({ sceneId: "s1" }, CTX);
-    expect(r.isError).toBeFalsy();
-    expect(c.emitted).toEqual([{ kind: "enter", sceneId: "s1" }]);
+    const { result, emitted } = await callInRun(() =>
+      tool.call({ sceneId: "s1" }, CTX),
+    );
+    expect(result.isError).toBeFalsy();
+    expect(emitted).toEqual([{ kind: "enter", sceneId: "s1" }]);
   });
 
   it("场景不存在 → isError 且不 emit", async () => {
     const c = makeController(); // get → null
-    const tool = createWorkmodeEnterTool(c);
-    const r = await tool.call({ sceneId: "nope" }, CTX);
-    expect(r.isError).toBe(true);
-    expect(c.emitted).toEqual([]);
+    const tool = createWorkmodeEnterTool(c.registry);
+    const { result, emitted } = await callInRun(() =>
+      tool.call({ sceneId: "nope" }, CTX),
+    );
+    expect(result.isError).toBe(true);
+    expect(emitted).toEqual([]);
   });
 });
 
 describe("workmode_exit", () => {
   it("声明 agent-context.switch → confirm；emit exit 意图", async () => {
-    const c = makeController();
-    const tool = createWorkmodeExitTool(c);
+    const tool = createWorkmodeExitTool();
     // 退出和进入对称都要拍板:声明 agent-context.switch(external → confirm)。
     // 用户主动 /exit cli 命令不经此工具,天然无需确认。
     expect(tool.needsPermission).toBe(true);
     expect(tool.boundaries).toEqual([
       { boundaryType: "agent-context", access: "switch", dynamic: false },
     ]);
-    const r = await tool.call({}, CTX);
-    expect(r.isError).toBeFalsy();
-    expect(c.emitted).toEqual([{ kind: "exit" }]);
+    const { result, emitted } = await callInRun(() => tool.call({}, CTX));
+    expect(result.isError).toBeFalsy();
+    expect(emitted).toEqual([{ kind: "exit" }]);
   });
 });
 

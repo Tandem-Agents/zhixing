@@ -104,6 +104,71 @@ function createMockFactory(opts: MockOptions = {}): RuntimeFactory {
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * 内存版对话目录——以 appendRun 收集的记录为"盘上事实":有 run 即在清单,
+ * 倒读按追加序逆序分页。rename/remove 维护内存 meta 覆盖层。
+ */
+function createMemoryDirectory(
+  records: Map<string, unknown[]>,
+): import("../runtime/conversation-directory.js").ConversationDirectory {
+  const names = new Map<string, string>();
+  const removed = new Set<string>();
+  const exists = (id: string) =>
+    !removed.has(id) && (records.has(id) || names.has(id));
+  return {
+    async list() {
+      const now = new Date().toISOString();
+      return [...records.keys()]
+        .filter((id) => !removed.has(id))
+        .map((id) => ({
+          id,
+          name: names.get(id) ?? id,
+          createdAt: now,
+          lastActiveAt: now,
+          isDefault: false,
+          archived: false,
+        })) as never;
+    },
+    async rename(id, name) {
+      if (!exists(id)) return null;
+      names.set(id, name);
+      const now = new Date().toISOString();
+      return {
+        id,
+        name,
+        createdAt: now,
+        lastActiveAt: now,
+        isDefault: false,
+        archived: false,
+      } as never;
+    },
+    async remove(id) {
+      if (!exists(id)) return false;
+      removed.add(id);
+      return true;
+    },
+    async readRunsReverse(id, opts) {
+      const all = (records.get(id) ?? []) as Array<{ messages: unknown }>;
+      const reversed = all
+        .map((record, runIndex) => ({
+          record: { ...record, runIndex } as never,
+          shardId: "000001",
+        }))
+        .reverse();
+      const start = opts.before
+        ? reversed.findIndex(
+            (r) => (r.record as { runIndex: number }).runIndex < opts.before!.runIndex,
+          )
+        : 0;
+      const slice = start < 0 ? [] : reversed.slice(start);
+      return {
+        runs: slice.slice(0, opts.limit),
+        hasMore: slice.length > opts.limit,
+      };
+    },
+  };
+}
+
 // ─── 客户端辅助 ───
 
 interface RpcClient {
@@ -220,6 +285,7 @@ describe("session.* RPC (S2.D)", () => {
       version: TEST_VERSION,
       token: TEST_TOKEN,
       conversations,
+      conversationDirectory: createMemoryDirectory(recordsByConversation),
     });
     server = await startServer({ context: ctx });
   }
@@ -406,11 +472,14 @@ describe("session.* RPC (S2.D)", () => {
     await client.waitNotification("session.complete");
 
     const list = await client.request("session.list");
+    expect(isSuccessResponse(list)).toBe(true);
     if (isSuccessResponse(list)) {
-      const runtimes = list.result as Array<{ sessionId: string; messageCount: number }>;
-      expect(runtimes).toHaveLength(1);
-      expect(runtimes[0]!.messageCount).toBe(4); // 2 turns × (user + assistant)
+      const { conversations } = list.result as { conversations: Array<{ conversationId: string }> };
+      expect(conversations).toHaveLength(1);
+      expect(conversations[0]!.conversationId).toBe(id1);
     }
+    // 两轮 turn 各落一条 run record(同一运行时复用)
+    expect(recordsByConversation.get(id1)).toHaveLength(2);
 
     client.close();
   });
@@ -433,38 +502,47 @@ describe("session.* RPC (S2.D)", () => {
 
   // ─── session.list ───
 
-  it("session.list returns empty initially", async () => {
+  it("session.list:盘上空 → 空清单(纯内存 ephemeral 不进列表)", async () => {
     await startWithFactory(createMockFactory());
     const client = await connect(server.port);
     await client.request("auth", { token: TEST_TOKEN });
     const r = await client.request("session.list");
     expect(isSuccessResponse(r)).toBe(true);
     if (isSuccessResponse(r)) {
-      expect(r.result).toEqual([]);
+      expect(r.result).toEqual({ conversations: [] });
     }
     client.close();
   });
 
-  it("session.list reflects busy=true during run", async () => {
+  it("session.list:盘上全量叠加活跃态(busy 随 turn 起落)", async () => {
     await startWithFactory(createMockFactory({ deltaCount: 2, yieldDelayMs: 50 }));
     const client = await connect(server.port);
     await client.request("auth", { token: TEST_TOKEN });
 
-    await client.request("session.send", { text: "slow" });
-    // Should be busy now (run still streaming)
+    // 先完成一轮(落盘进清单),再发慢速第二轮观测 busy
+    const first = await client.request("session.send", { text: "warm" });
+    const conversationId = (first as { result: { conversationId: string } }).result.conversationId;
+    await client.waitNotification("session.complete");
+
+    await client.request("session.send", { text: "slow", conversationId });
     const listBusy = await client.request("session.list");
+    expect(isSuccessResponse(listBusy)).toBe(true);
     if (isSuccessResponse(listBusy)) {
-      const runtimes = listBusy.result as Array<{ busy: boolean }>;
-      expect(runtimes[0]!.busy).toBe(true);
+      const { conversations } = listBusy.result as {
+        conversations: Array<{ conversationId: string; active: boolean; busy: boolean }>;
+      };
+      const entry = conversations.find((c) => c.conversationId === conversationId)!;
+      expect(entry.active).toBe(true);
+      expect(entry.busy).toBe(true);
     }
 
     await client.waitNotification("session.complete");
-
-    // After complete, busy should be false
     const listIdle = await client.request("session.list");
     if (isSuccessResponse(listIdle)) {
-      const runtimes = listIdle.result as Array<{ busy: boolean }>;
-      expect(runtimes[0]!.busy).toBe(false);
+      const { conversations } = listIdle.result as {
+        conversations: Array<{ conversationId: string; busy: boolean }>;
+      };
+      expect(conversations.find((c) => c.conversationId === conversationId)!.busy).toBe(false);
     }
 
     client.close();
@@ -472,34 +550,107 @@ describe("session.* RPC (S2.D)", () => {
 
   // ─── session.history ───
 
-  it("session.history returns the message list", async () => {
+  it("session.history:倒读落盘事实流(新→旧),不要求会话活跃", async () => {
     await startWithFactory(createMockFactory({ deltaCount: 1 }));
     const client = await connect(server.port);
     await client.request("auth", { token: TEST_TOKEN });
 
-    const sendResp = await client.request("session.send", { text: "hello" });
-    const sessionId = (sendResp as { result: { sessionId: string } }).result.sessionId;
+    const sendResp = await client.request("session.send", { text: "round-1" });
+    const conversationId = (sendResp as { result: { conversationId: string } }).result.conversationId;
+    await client.waitNotification("session.complete");
+    await client.request("session.send", { text: "round-2", conversationId });
     await client.waitNotification("session.complete");
 
-    const r = await client.request("session.history", { sessionId });
+    const r = await client.request("session.history", { conversationId, limit: 1 });
+    expect(isSuccessResponse(r)).toBe(true);
     if (isSuccessResponse(r)) {
-      const messages = r.result as Message[];
-      expect(messages).toHaveLength(2);
-      expect(messages[0]!.role).toBe("user");
-      expect(messages[1]!.role).toBe("assistant");
+      const page = r.result as {
+        runs: Array<{ record: { messages: Message[] } }>;
+        hasMore: boolean;
+      };
+      // 倒读:首页是最新一轮;更早内容 hasMore
+      expect(page.runs).toHaveLength(1);
+      const block = page.runs[0]!.record.messages[0]!.content[0]!;
+      expect(block.type === "text" && block.text).toBe("round-2");
+      expect(page.hasMore).toBe(true);
     }
     client.close();
   });
 
-  it("session.history returns NOT_FOUND for unknown sessionId", async () => {
+  it("session.history:未知对话产出空页(读容错),不抛 NOT_FOUND", async () => {
     await startWithFactory(createMockFactory());
     const client = await connect(server.port);
     await client.request("auth", { token: TEST_TOKEN });
-    const r = await client.request("session.history", { sessionId: "nope" });
-    expect(isErrorResponse(r)).toBe(true);
-    if (isErrorResponse(r)) {
-      expect(r.error.code).toBe(RPC_ERROR_CODES.NOT_FOUND);
+    const r = await client.request("session.history", { conversationId: "nope" });
+    expect(isSuccessResponse(r)).toBe(true);
+    if (isSuccessResponse(r)) {
+      expect(r.result).toEqual({ runs: [], hasMore: false });
     }
+    client.close();
+  });
+
+  // ─── session.rename ───
+
+  it("session.rename:改名并组播 session.changed{renamed};未知对话 NOT_FOUND", async () => {
+    await startWithFactory(createMockFactory({ deltaCount: 1 }));
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const sendResp = await client.request("session.send", { text: "hi" });
+    const conversationId = (sendResp as { result: { conversationId: string } }).result.conversationId;
+    await client.waitNotification("session.complete");
+
+    const r = await client.request("session.rename", { conversationId, name: "新名字" });
+    expect(isSuccessResponse(r)).toBe(true);
+    if (isSuccessResponse(r)) {
+      expect(r.result).toEqual({ conversationId, name: "新名字" });
+    }
+    const changed = await client.waitNotification("session.changed");
+    expect(changed.params).toEqual({ conversationId, change: "renamed", name: "新名字" });
+
+    const missing = await client.request("session.rename", { conversationId: "nope", name: "x" });
+    expect(isErrorResponse(missing)).toBe(true);
+    if (isErrorResponse(missing)) {
+      expect(missing.error.code).toBe(RPC_ERROR_CODES.NOT_FOUND);
+    }
+    client.close();
+  });
+
+  it("session.rename 对场景对话保持全域键(目录返回库内身份,RPC 层不丢 ws: 前缀)", async () => {
+    await startWithFactory(createMockFactory({ deltaCount: 1 }));
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    // 让 ws: 形对话进入内存目录的"盘上事实"(发一轮 turn 落 record)
+    const wsId = "ws:scene-1:conv_abc";
+    await client.request("session.send", { text: "hi", conversationId: wsId });
+    await client.waitNotification("session.complete");
+
+    const r = await client.request("session.rename", { conversationId: wsId, name: "场景对话名" });
+    expect(isSuccessResponse(r)).toBe(true);
+    if (isSuccessResponse(r)) {
+      expect((r.result as { conversationId: string }).conversationId).toBe(wsId);
+    }
+    client.close();
+  });
+
+  it("session.history 拒绝坏 limit / 坏 before(无界读取与分页失真在边界 fail-fast)", async () => {
+    await startWithFactory(createMockFactory());
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    for (const limit of ["20", 0, -1, 1.5] as unknown[]) {
+      const r = await client.request("session.history", { conversationId: "c", limit });
+      expect(isErrorResponse(r)).toBe(true);
+      if (isErrorResponse(r)) {
+        expect(r.error.code).toBe(RPC_ERROR_CODES.INVALID_PARAMS);
+      }
+    }
+    const badBefore = await client.request("session.history", {
+      conversationId: "c",
+      before: { shardId: 1, runIndex: "x" },
+    });
+    expect(isErrorResponse(badBefore)).toBe(true);
     client.close();
   });
 
@@ -516,8 +667,9 @@ describe("session.* RPC (S2.D)", () => {
 
     await client.request("session.delete", { sessionId });
     const list = await client.request("session.list");
+    expect(isSuccessResponse(list)).toBe(true);
     if (isSuccessResponse(list)) {
-      expect(list.result).toEqual([]);
+      expect(list.result).toEqual({ conversations: [] });
     }
     client.close();
   });
@@ -544,11 +696,15 @@ describe("session.* RPC (S2.D)", () => {
     expect(c2Result.reason).toBe("completed");
 
     const list = await client.request("session.list");
+    expect(isSuccessResponse(list)).toBe(true);
     if (isSuccessResponse(list)) {
-      const runtimes = list.result as Array<{ messageCount: number; pendingCount: number }>;
-      expect(runtimes[0]!.messageCount).toBe(4);
-      expect(runtimes[0]!.pendingCount).toBe(0);
+      const { conversations } = list.result as {
+        conversations: Array<{ pendingCount: number }>;
+      };
+      expect(conversations[0]!.pendingCount).toBe(0);
     }
+    // 串行执行:两轮各落一条 run record
+    expect(recordsByConversation.get(convId)).toHaveLength(2);
 
     client.close();
   });
@@ -715,13 +871,12 @@ describe("session.* RPC (S2.D)", () => {
     expect(isSuccessResponse(sendResp)).toBe(true);
     await client.waitNotification("session.complete");
 
-    const histResp = await client.request("session.history", { conversationId: "conv_restored" });
-    if (isSuccessResponse(histResp)) {
-      const messages = histResp.result as Message[];
-      expect(messages.length).toBeGreaterThanOrEqual(4);
-      expect(messages[0]!.role).toBe("user");
-      expect((messages[0]!.content[0] as { text: string }).text).toBe("previous question");
-    }
+    // 装填对已进窗口:本轮 run 输入 = [装填对..., 新用户消息],mock 取末条回声;
+    // turnCount 从装填值续延(turnIndex 链路)。窗口投影的细粒度断言由
+    // conversation-manager / 同形性测试覆盖,此处锁端到端链路打通。
+    const session = conversations.getSession("conv_restored")!;
+    expect(session.turnCount).toBe(2); // 装填 1 + 本轮 1
+    expect(conversations.getHistory("conv_restored")!.length).toBeGreaterThanOrEqual(4);
     client.close();
   });
 });

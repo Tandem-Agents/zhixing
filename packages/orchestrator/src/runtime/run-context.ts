@@ -19,7 +19,11 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { AgentEventMap, EventBus } from "@zhixing/core";
+import type {
+  AgentEventMap,
+  EventBus,
+  WorkModeSwitchIntent,
+} from "@zhixing/core";
 
 /**
  * Per-run/per-spawn 上下文 —— 跨嵌套异步链路传递的最小集合。
@@ -46,3 +50,15 @@ export interface RunContext {
 }
 
 export const runContextStorage = new AsyncLocalStorage<RunContext>();
+
+/**
+ * 向当前 run 的 EventBus 发模式切换意图 —— turn 内只发意图不执行切换,
+ * accumulator last-wins 收集后随 RunResult.pendingModeSwitch 带出,由调用方
+ * 在 turn 边界唯一消费(REPL 直驱 / 宿主经定向通知交发起接入面)。
+ *
+ * 经 ALS 取 per-run bus(与 task_list 工具取 conversationId 同款机制);
+ * 非 run 上下文(装配期 / 单测)静默 no-op。
+ */
+export function emitWorkModeSwitchIntent(intent: WorkModeSwitchIntent): void {
+  runContextStorage.getStore()?.bus.emit("workmode:switch_requested", intent);
+}

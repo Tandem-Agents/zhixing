@@ -24,7 +24,8 @@ import {
   type AgentRuntime,
   type CreateAgentRuntimeOptions,
 } from "@zhixing/orchestrator/runtime";
-import type { SchedulerFacade } from "@zhixing/core";
+import { powerProfile } from "@zhixing/orchestrator/profile";
+import type { SchedulerFacade, WorkScene } from "@zhixing/core";
 import type { ScheduleToolOrigin } from "@zhixing/tools-builtin";
 import type { BuiltinExtraToolsAssembly } from "./builtin-extra-tools.js";
 
@@ -87,9 +88,24 @@ export class RuntimeHost {
     };
   }
 
-  /** 发放一个会话 runtime 实例——投递 origin 执行期按当前 run 的对话派生。 */
+  /** 发放一个 main 会话 runtime 实例——投递 origin 执行期按当前 run 的对话派生。 */
   async createConversationRuntime(): Promise<AgentRuntime> {
     return this.assemble(this.conversationScheduleOrigin);
+  }
+
+  /**
+   * 发放一个工作场景会话的 runtime 实例——power 装配:场景 workdir 为工作区
+   * (无 workdir 显式 null,by-construction 杜绝串到 cwd)、记忆域绑场景、
+   * power 角色与 profile。场景对话经全域键(ws: 前缀)路由到此。
+   */
+  async createWorksceneRuntime(scene: WorkScene): Promise<AgentRuntime> {
+    return this.assemble(this.conversationScheduleOrigin, {
+      workspace: scene.workdir ?? null,
+      primaryRole: "power",
+      memoryScope: { kind: "workscene", sceneId: scene.id },
+      profile: powerProfile(scene),
+      spec: { kind: "workscene" },
+    });
   }
 
   /**
@@ -102,12 +118,23 @@ export class RuntimeHost {
 
   private async assemble(
     scheduleOrigin: () => ScheduleToolOrigin | null,
+    workscene?: {
+      workspace: string | null;
+      primaryRole: "power";
+      memoryScope: { kind: "workscene"; sceneId: string };
+      profile: ReturnType<typeof powerProfile>;
+      spec: { kind: "workscene" };
+    },
   ): Promise<AgentRuntime> {
     const runtime = await createAgentRuntime({
-      workspace: this.opts.workspace,
+      workspace: workscene ? workscene.workspace : this.opts.workspace,
+      primaryRole: workscene?.primaryRole,
+      memoryScope: workscene?.memoryScope,
+      profile: workscene?.profile,
       extraTools: this.opts.extraTools.assembleTools({
         scheduler: this.opts.scheduler,
         scheduleOrigin,
+        spec: workscene?.spec,
       }),
       decorateRunBus: this.opts.decorateRunBus,
       onSecurityBlocked: this.opts.onSecurityBlocked,

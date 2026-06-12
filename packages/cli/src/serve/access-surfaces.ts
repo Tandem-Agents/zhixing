@@ -10,9 +10,13 @@
 
 import chalk from "chalk";
 import {
+  ShardedTranscriptStore,
+  SnapshotStore,
   buildStartupBootstrap,
+  conversationsDir,
   countRuns,
   createTokenEstimator,
+  parseConversationId,
 } from "@zhixing/core";
 import {
   ConversationManager,
@@ -33,7 +37,7 @@ const mcpSurface: AccessSurface = {
   },
 };
 
-/** 会话执行面 —— 持久用户 / channel 会话（ConversationManager）。 */
+/** 会话执行面 —— 持久用户 / channel / 工作场景会话（ConversationManager）。 */
 const conversationSurface: AccessSurface = {
   name: "conversation",
   phase: "pre-server",
@@ -41,18 +45,43 @@ const conversationSurface: AccessSurface = {
     const { transcript, snapshots, config } = ctx;
     // 装填预算按主模型能力取值（serve 会话统一用 main 模型；未知模型有保守兜底）
     const capability = resolveModelCapability(config.llm?.main?.model ?? "");
+
+    // 持久化路由——对话归属编码在全域键里(ws: 前缀 = 场景对话),持久层
+    // 操作按 scope 选 store、用库内 id。场景库 store 惰性建、按 sceneId 缓存。
+    const sceneStores = new Map<
+      string,
+      { transcript: ShardedTranscriptStore; snapshots: SnapshotStore }
+    >();
+    const storesFor = (conversationId: string) => {
+      const { scope, localId } = parseConversationId(conversationId);
+      if (scope.kind === "workscene") {
+        let entry = sceneStores.get(scope.sceneId);
+        if (!entry) {
+          const dir = conversationsDir(scope);
+          entry = {
+            transcript: new ShardedTranscriptStore(dir),
+            snapshots: new SnapshotStore(dir),
+          };
+          sceneStores.set(scope.sceneId, entry);
+        }
+        return { ...entry, localId };
+      }
+      return { transcript, snapshots, localId: conversationId };
+    };
+
     ctx.conversations = new ConversationManager(ctx.runtimeFactory, undefined, {
       loadHistory: async (conversationId) => {
         try {
+          const s = storesFor(conversationId);
           // 倒读自带索引自愈（分片文件在，会话就在）——计数与装填都不做
           // 裸文件存在性短路。无任何记录（真·新对话 / 刚清空）→ undefined，
           // 交 doCreate 按需走 initTranscript（幂等）。
-          const turnCount = await countRuns(transcript, conversationId);
+          const turnCount = await countRuns(s.transcript, s.localId);
           if (turnCount === 0) return undefined;
           const bootstrap = await buildStartupBootstrap({
-            conversationId,
-            store: transcript,
-            snapshots,
+            conversationId: s.localId,
+            store: s.transcript,
+            snapshots: s.snapshots,
             capability: { optimalMaxTokens: capability.optimalMaxTokens },
             estimator: createTokenEstimator(),
           });
@@ -62,12 +91,16 @@ const conversationSurface: AccessSurface = {
         }
       },
       initTranscript: async (conversationId) => {
-        await transcript.init(conversationId);
+        const s = storesFor(conversationId);
+        await s.transcript.init(s.localId);
       },
-      appendRun: async (conversationId, input) =>
-        await transcript.appendRunRecord(conversationId, input),
+      appendRun: async (conversationId, input) => {
+        const s = storesFor(conversationId);
+        return await s.transcript.appendRunRecord(s.localId, input);
+      },
       writeSnapshot: async (conversationId, input) => {
-        await snapshots.write(conversationId, input);
+        const s = storesFor(conversationId);
+        await s.snapshots.write(s.localId, input);
       },
       confirmationHub: ctx.confirmationHub,
     });

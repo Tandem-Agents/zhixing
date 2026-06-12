@@ -29,11 +29,9 @@ import {
   type IPermissionStore,
   type IWorkSceneRegistry,
   type WorkScene,
-  type WorkModeSwitchIntent,
 } from "@zhixing/core";
 import {
   createAgentRuntime,
-  runContextStorage,
   type AgentRuntime,
 } from "@zhixing/orchestrator/runtime";
 import type { IWorkModeController } from "./work-mode-controller.js";
@@ -251,17 +249,6 @@ export class RuntimeSession implements IWorkModeController {
 
   get registry(): IWorkSceneRegistry {
     return this.workSceneRegistryInstance;
-  }
-
-  /**
-   * emit 模式切换意图到当前 run 的 EventBus —— 经 runContextStorage（与
-   * task_list 工具取 conversationId 同款 ALS 机制）拿 per-run bus。只 emit
-   * 不执行切换；非 run 上下文（无 bus，如装配期/单测）下静默 no-op。
-   */
-  emitModeSwitch(intent: WorkModeSwitchIntent): void {
-    runContextStorage
-      .getStore()
-      ?.bus.emit("workmode:switch_requested", intent);
   }
 
   /**

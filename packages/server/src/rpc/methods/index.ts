@@ -17,7 +17,16 @@ import {
   buildSessionDeleteMethod,
   buildSessionSubscribeMethod,
   buildSessionUnsubscribeMethod,
+  buildSessionRenameMethod,
 } from "./session.js";
+import {
+  buildWorksceneListMethod,
+  buildWorksceneCreateMethod,
+  buildWorksceneRenameMethod,
+  buildWorksceneDeleteMethod,
+  buildWorksceneEnterMethod,
+  buildWorksceneExitMethod,
+} from "./workscene.js";
 import {
   buildScheduleListMethod,
   buildScheduleCreateMethod,
@@ -56,6 +65,14 @@ export function buildBuiltinRegistry(_opts: BuiltinMethodsOptions = {}): Handler
     buildSessionDeleteMethod(),
     buildSessionSubscribeMethod(),
     buildSessionUnsubscribeMethod(),
+    buildSessionRenameMethod(),
+    // workscene.*（场景管理面 + 进出执行体）
+    buildWorksceneListMethod(),
+    buildWorksceneCreateMethod(),
+    buildWorksceneRenameMethod(),
+    buildWorksceneDeleteMethod(),
+    buildWorksceneEnterMethod(),
+    buildWorksceneExitMethod(),
     // schedule.*
     buildScheduleListMethod(),
     buildScheduleCreateMethod(),

@@ -5,7 +5,10 @@
  * - session.list：列出所有活跃运行时元信息
  * - session.history：返回指定运行时的消息历史
  * - session.abort：中止指定运行时当前执行
- * - session.delete：删除运行时
+ * - session.list：盘上全量对话清单叠加活跃态(/resume 候选源)
+ * - session.history：倒读落盘事实流(分页,不要求会话活跃)
+ * - session.rename：对话改名(组播 changed)
+ * - session.delete：活跃运行时释放 + 落盘数据删除
  * - session.subscribe / unsubscribe：observer 登记(订阅即进组播名册)
  *
  * 推送事件(经 observer 名册组播,见 session-broadcast)：
@@ -31,6 +34,7 @@ import { RPC_ERROR_CODES } from "../protocol.js";
 import type { RpcConnection } from "../connection.js";
 import type { ServerContext } from "../../context.js";
 import type { SessionBroadcast } from "../session-broadcast.js";
+import type { ConversationDirectory } from "../../runtime/conversation-directory.js";
 import type { ConversationManager, ManagedSession } from "../../runtime/conversation-manager.js";
 import { runTurnWithCommit } from "../../runtime/run-turn.js";
 
@@ -222,13 +226,33 @@ async function runManagedTurn(
 
 // ─── session.list ───
 
+/**
+ * 对话列表 = 盘上全量(可恢复的事实)叠加活跃态。纯内存 ephemeral 会话不在
+ * 列表内——没落盘即无可恢复,与 /resume 候选语义一致。
+ */
 export function buildSessionListMethod(): MethodEntry {
   return {
     name: "session.list",
     requiresAuth: true,
-    handler(_params, ctx) {
+    async handler(_params, ctx) {
       const manager = requireConversations(ctx.server);
-      return manager.list();
+      const directory = requireDirectory(ctx.server);
+      const conversations = await directory.list();
+      return {
+        conversations: conversations.map((c) => {
+          const active = manager.getSession(c.id);
+          return {
+            conversationId: c.id,
+            name: c.name,
+            createdAt: c.createdAt,
+            lastActiveAt: active?.lastActiveAt ?? c.lastActiveAt,
+            active: !!active,
+            busy: active?.busy ?? false,
+            observerCount: active?.observers.size ?? 0,
+            pendingCount: manager.pendingCount(c.id),
+          };
+        }),
+      };
     },
   };
 }
@@ -239,25 +263,100 @@ interface SessionHistoryParams {
   conversationId?: string;
   /** @deprecated */
   sessionId?: string;
+  /** 单页 run 数上限,默认 20 */
   limit?: number;
+  /** 倒读分页游标——续读上一页末条之前的内容 */
+  before?: { shardId: string; runIndex: number };
 }
 
+const HISTORY_DEFAULT_LIMIT = 20;
+const HISTORY_MAX_LIMIT = 200;
+
+/**
+ * 倒读落盘事实流(新→旧分页),不要求会话活跃——历史是持久层投影,
+ * 注意力窗口(LLM 视图)不经此暴露。
+ */
 export function buildSessionHistoryMethod(): MethodEntry {
   return {
     name: "session.history",
     requiresAuth: true,
-    handler(rawParams, ctx) {
+    async handler(rawParams, ctx) {
       const params = (rawParams ?? {}) as SessionHistoryParams;
       const id = params.conversationId ?? params.sessionId;
       if (typeof id !== "string") {
         throw RpcErrors.invalidParams("session.history requires 'conversationId'");
       }
-      const manager = requireConversations(ctx.server);
-      const history = manager.getHistory(id, params.limit);
-      if (!history) {
-        throw RpcErrors.notFound(`Session not found: ${id}`);
+      // limit / before 严格校验——坏 limit(字符串 / 非正数)会让分页判定
+      // 失真甚至退化为无界读取;接入面统一后 RPC 契约必须 fail-fast。
+      if (params.limit !== undefined) {
+        if (
+          typeof params.limit !== "number" ||
+          !Number.isInteger(params.limit) ||
+          params.limit < 1
+        ) {
+          throw RpcErrors.invalidParams(
+            "session.history 'limit' must be a positive integer",
+          );
+        }
       }
-      return history;
+      if (params.before !== undefined) {
+        if (
+          typeof params.before !== "object" ||
+          params.before === null ||
+          typeof params.before.shardId !== "string" ||
+          typeof params.before.runIndex !== "number"
+        ) {
+          throw RpcErrors.invalidParams(
+            "session.history 'before' must be { shardId: string, runIndex: number }",
+          );
+        }
+      }
+      const directory = requireDirectory(ctx.server);
+      return directory.readRunsReverse(id, {
+        limit: Math.min(params.limit ?? HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT),
+        before: params.before,
+      });
+    },
+  };
+}
+
+// ─── session.rename ───
+
+interface SessionRenameParams {
+  conversationId?: string;
+  name?: string;
+}
+
+export function buildSessionRenameMethod(): MethodEntry {
+  return {
+    name: "session.rename",
+    requiresAuth: true,
+    async handler(rawParams, ctx) {
+      const params = (rawParams ?? {}) as SessionRenameParams;
+      if (typeof params.conversationId !== "string") {
+        throw RpcErrors.invalidParams("session.rename requires 'conversationId'");
+      }
+      if (typeof params.name !== "string" || params.name.trim().length === 0) {
+        throw RpcErrors.invalidParams("session.rename requires non-empty 'name'");
+      }
+      const directory = requireDirectory(ctx.server);
+      const renamed = await directory.rename(
+        params.conversationId,
+        params.name.trim(),
+      );
+      if (!renamed) {
+        throw RpcErrors.notFound(`Session not found: ${params.conversationId}`);
+      }
+      // 会话级变更组播——活跃会话的在场 observer 据此刷新标题;不活跃对话
+      // 名册为空、通知自然无人收(列表视图的跨端刷新策略归接入面接入时定)
+      ctx.server.sessionBroadcast?.(params.conversationId, "session.changed", {
+        conversationId: params.conversationId,
+        change: "renamed",
+        name: renamed.name,
+      });
+      // 返回入参全域键——目录契约返回库内身份(场景对话是 localId),
+      // 全域键(ws: 前缀)由 RPC 层保持,断键即断静态归属路由
+      return { conversationId: params.conversationId, name: renamed.name };
     },
   };
 }
@@ -317,13 +416,17 @@ export function buildSessionDeleteMethod(): MethodEntry {
         throw RpcErrors.invalidParams("session.delete requires 'conversationId'");
       }
       const manager = requireConversations(ctx.server);
+      const directory = ctx.server.conversationDirectory;
       // 会话级变更通知:删除发生在 run 外,双通道(以 run 为边界)覆盖不到——
       // 旁观端无此信号会盯着已删对话继续操作。删除前组播(名册删除后即空)。
       ctx.server.sessionBroadcast?.(id, "session.changed", {
         conversationId: id,
         change: "deleted",
       });
-      if (!(await manager.delete(id))) {
+      // 删除 = 活跃运行时释放 + 落盘数据删除;任一存在即为有效删除
+      const releasedActive = await manager.delete(id);
+      const removedDisk = (await directory?.remove(id)) ?? false;
+      if (!releasedActive && !removedDisk) {
         throw RpcErrors.notFound(`Session not found: ${id}`);
       }
     },
@@ -391,4 +494,14 @@ function requireConversations(server: ServerContext): ConversationManager {
     );
   }
   return server.conversations;
+}
+
+function requireDirectory(server: ServerContext): ConversationDirectory {
+  if (!server.conversationDirectory) {
+    throw new RpcAppError(
+      RPC_ERROR_CODES.INTERNAL_ERROR,
+      "ConversationDirectory not configured on server",
+    );
+  }
+  return server.conversationDirectory;
 }

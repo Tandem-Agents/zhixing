@@ -10,6 +10,8 @@ import type { ServerConfig } from "./types.js";
 import type { ConversationManager } from "./runtime/index.js";
 import type { ConfirmationHub } from "./confirmation/hub.js";
 import type { SessionBroadcast } from "./rpc/session-broadcast.js";
+import type { ConversationDirectory } from "./runtime/conversation-directory.js";
+import type { WorksceneDirectory } from "./runtime/workscene-directory.js";
 
 export interface ServerContext {
   /** 配置（不可变；config.port 是请求的端口，实际端口见 listenAddr） */
@@ -24,6 +26,13 @@ export interface ServerContext {
   scheduler?: Scheduler;
   /** 对话运行时管理器（不传则 session.* 方法不可用） */
   conversations?: ConversationManager;
+  /**
+   * 对话目录(盘上事实:清单 / 改名 / 删除 / 倒读)。装配方注入持久层实现;
+   * 不传则 session.list / history / rename / delete 不可用。
+   */
+  conversationDirectory?: ConversationDirectory;
+  /** 工作场景域(注册表管理 + 场景对话取建)。不传则 workscene.* 不可用。 */
+  workscenes?: WorksceneDirectory;
   /** 通道注册表（不传则不启用通道功能） */
   channels?: ChannelRegistry;
   /**
@@ -58,6 +67,8 @@ export interface CreateContextOptions {
   token: string;
   scheduler?: Scheduler;
   conversations?: ConversationManager;
+  conversationDirectory?: ConversationDirectory;
+  workscenes?: WorksceneDirectory;
   channels?: ChannelRegistry;
   confirmationHub?: ConfirmationHub;
   runRegistry?: RunRegistry;
@@ -71,6 +82,8 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     startedAt: Date.now(),
     scheduler: opts.scheduler,
     conversations: opts.conversations,
+    conversationDirectory: opts.conversationDirectory,
+    workscenes: opts.workscenes,
     channels: opts.channels,
     confirmationHub: opts.confirmationHub,
     runRegistry: opts.runRegistry,

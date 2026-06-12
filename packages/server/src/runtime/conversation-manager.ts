@@ -286,10 +286,12 @@ export class ConversationManager {
 
   private async doCreate(id: string, ephemeral: boolean): Promise<ManagedSession> {
     const history = ephemeral ? undefined : await this.loadHistory?.(id);
+    // factory 先于 initTranscript:装配失败(如对话所属场景已删)时 fail-fast
+    // 在任何写盘之前——否则会在已删除的归属目录里重建空 transcript 壳。
+    const runtime = await this.factory.create(id);
     if (!history && !ephemeral && this.initTranscript) {
       await this.initTranscript(id);
     }
-    const runtime = await this.factory.create(id);
     const now = new Date().toISOString();
 
     const session: ManagedSession = {
