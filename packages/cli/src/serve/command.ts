@@ -61,7 +61,7 @@ import type {
 import fsp from "node:fs/promises";
 import { runStartupCheck } from "../startup.js";
 import chalk from "chalk";
-import { createAgentRuntime } from "@zhixing/orchestrator/runtime";
+import { RuntimeHost } from "../runtime/runtime-host.js";
 import { createRenderSubscribers } from "../render.js";
 import { createStdoutWriter } from "../screen/index.js";
 import {
@@ -255,48 +255,42 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   //   runtime 下个窗口换代即见。磁盘本就同一目录,共享无额外耦合。
   const serveSkillStore = new SkillStore();
 
-  // 3d. RuntimeFactory —— 会话执行面（接入面）建 per-session runtime 的工厂。schedule 档无
-  //   会话执行面，工厂作无副作用留位（不连接、不建目录）。
-  //   注：工厂内 createAgentRuntime 是 lazy（session 调用时才建），那时 mcp 接入面 connectAll
-  //   早已完成（pre-server 阶段），故工厂装配可前置、不受 connectAll 时序约束（与 eager 的
-  //   ephemeralRuntime 不同——后者须排在接入面之后，见下）。
-  const runtimeFactory = createCliRuntimeFactory({
-    createAgentRuntime: async (sessionId: string) => {
-      // 从 sessionId（如 dm:feishu:ou_xxx）解析 origin，用于任务创建时自动捕获投递目标
-      const origin = parseOriginFromSessionId(sessionId);
-      const extraTools = builtinExtraTools.assembleTools({
-        scheduler: getSchedulerFacade,
-        scheduleOrigin: () => origin,
-      });
-
-      const runtime = await createAgentRuntime({
-        workspace: opts.workspace,
-        extraTools,
-        decorateRunBus: renderDecorator,
-        onSecurityBlocked: createBlockedRenderer(serveWriter),
-        segmentDeps: serveSegmentDeps,
-        skillStore: serveSkillStore,
-        // Task 工具由默认 mainProfile().enabledTools 含 "Task" 自动装配；
-        // 渠道下游(飞书/RPC)可看到子 agent 冒泡事件,renderDecorator 在
-        // 非 TTY 模式下退化为只输出 Task 起止帧(子工具中间事件静默,
-        // 避免日志爆炸)。
-      });
-      // 注册 cli builtin TurnContextProvider（SchedulerProvider + TaskListProvider）
-      // 走统一 helper —— 与 REPL 模式同源装配，杜绝两入口不对齐回归。
-      // scheduler 是 lazy ref（顶层 let schedulerRef），LLM 调用时刻 ref 已就绪；
-      // 未就绪时 fallback 空状态保鲁棒性。
+  // 3d. RuntimeHost —— 宿主侧 runtime 装配点:共享资产(skillStore / segmentDeps /
+  //   mcpHub / 渲染装饰)单一持有,会话与 ephemeral 两条发放路径同一装配体。
+  //   投递 origin 执行期从 RunContext 派生,实例装配不再按对话定制。
+  //   turn-context provider 注册收拢进 onRuntimeCreated——scheduler 是 lazy ref
+  //   （顶层 let schedulerRef），LLM 调用时刻 ref 已就绪；未就绪时 fallback 空状态。
+  const runtimeHost = new RuntimeHost({
+    workspace: opts.workspace,
+    skillStore: serveSkillStore,
+    segmentDeps: serveSegmentDeps,
+    extraTools: builtinExtraTools,
+    scheduler: getSchedulerFacade,
+    // 渠道下游(飞书/RPC)可看到子 agent 冒泡事件,renderDecorator 在非 TTY
+    // 模式下退化为只输出 Task 起止帧(子工具中间事件静默,避免日志爆炸)。
+    decorateRunBus: renderDecorator,
+    onSecurityBlocked: createBlockedRenderer(serveWriter),
+    onRuntimeCreated: (runtime) => {
       registerCliTurnContextProviders(runtime, {
         getSchedulerStatus: () =>
           schedulerRef
-          ? computeStatusSummary(
-              schedulerRef.listTasks().filter((t) => !isInternal(t)),
-              new Date(),
-            )
-          : { active: [], recentlyCompleted: [], recentlyFailed: [] },
+            ? computeStatusSummary(
+                schedulerRef.listTasks().filter((t) => !isInternal(t)),
+                new Date(),
+              )
+            : { active: [], recentlyCompleted: [], recentlyFailed: [] },
         taskListService: builtinExtraTools.taskListService,
       });
-      return runtime;
     },
+  });
+
+  // RuntimeFactory —— 会话执行面（接入面）建 per-session runtime 的工厂。schedule 档无
+  //   会话执行面，工厂作无副作用留位（不连接、不建目录）。
+  //   注：工厂内实例发放是 lazy（session 调用时才建），那时 mcp 接入面 connectAll
+  //   早已完成（pre-server 阶段），故工厂装配可前置、不受 connectAll 时序约束（与 eager 的
+  //   ephemeralRuntime 不同——后者须排在接入面之后，见下）。
+  const runtimeFactory = createCliRuntimeFactory({
+    createAgentRuntime: () => runtimeHost.createConversationRuntime(),
   });
 
   // 4. CleanupRegistry —— 唯一清理出口。LIFO 语义 + 跨包注入。注册序列封装在
@@ -360,37 +354,11 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   // 项目上下文加载等启动成本；AgentRuntime.run() 对会话历史无状态（messages 每次传入），
   // 复用安全；token estimator 校准、permission 规则跨任务共享是正收益。
   //
-  // scheduleTool 的 origin：定时任务 AI 若创建子任务，origin=null（非用户发起）。
-  // 用户发起的任务走会话执行面路径，origin 已从 sessionId（dm:feishu:ou_xxx）解析。
-  const ephemeralRuntime = await createAgentRuntime({
-    workspace: opts.workspace,
-    extraTools: builtinExtraTools.assembleTools({
-      scheduler: getSchedulerFacade,
-      // 定时任务自创建子任务 origin=null（非用户发起，渠道无投递目标）
-      scheduleOrigin: () => null,
-    }),
-    decorateRunBus: renderDecorator,
-    onSecurityBlocked: createBlockedRenderer(serveWriter),
-    // 段保护同样覆盖 ephemeral 定时任务（无 conversationId 时照常评估与切段，
-    // 仅跳过持久化副作用）——长任务的窗口安全由段机制全权保障。
-    segmentDeps: serveSegmentDeps,
-    skillStore: serveSkillStore,
-    // Task 工具由默认 mainProfile().enabledTools 含 "Task" 自动装配；定时任务
-    // 的 ephemeral 执行路径同样可派发子 agent 隔离子任务，与持久会话能力对齐。
-  });
-  // ephemeral 定时任务 runtime 也走同一 helper —— 装配契约与 main session runtime
-  // 完全对称。定时任务路径 runtime.run 不传 conversationId，TaskListProvider 闭包
-  // 内 ALS 取不到 → getItems 返 [] → 整段跳过，不污染 turn-context。
-  registerCliTurnContextProviders(ephemeralRuntime, {
-    getSchedulerStatus: () =>
-      schedulerRef
-        ? computeStatusSummary(
-            schedulerRef.listTasks().filter((t) => !isInternal(t)),
-            new Date(),
-          )
-        : { active: [], recentlyCompleted: [], recentlyFailed: [] },
-    taskListService: builtinExtraTools.taskListService,
-  });
+  // 装配经 RuntimeHost 与会话实例完全对称（同资产层、同 turn-context 注册）；
+  // 定时任务路径 runtime.run 不传 conversationId——schedule origin 派生为 null
+  // （任务 AI 自创建子任务非用户发起），TaskListProvider 闭包内 ALS 取不到
+  // → getItems 返 [] → 整段跳过，不污染 turn-context。
+  const ephemeralRuntime = await runtimeHost.createEphemeralRuntime();
 
   // 4c. 把 ephemeralRuntime 的 broker 挂到 hub —— 定时任务的 confirmation 从这里流出。
   //     命名空间用 "ephemeral"（与 conversation broker 的 "conv:${convId}" 命名规约区分）。
@@ -693,16 +661,4 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
 
   // 等待停机 —— 所有清理由 lifecycle.ts 的 shutdown → registry.runAll 统一完成
   await runner.waitForShutdown();
-}
-
-/**
- * 从 sessionId（如 "dm:feishu:ou_xxx"）解析投递 origin。
- * 非 channel 会话返回 null。
- */
-function parseOriginFromSessionId(sessionId: string): { channelId: string; to: string } | null {
-  const parts = sessionId.split(":");
-  if (parts.length >= 3 && parts[0] === "dm") {
-    return { channelId: parts[1]!, to: parts.slice(2).join(":") };
-  }
-  return null;
 }
