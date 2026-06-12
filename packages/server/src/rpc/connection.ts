@@ -27,6 +27,12 @@ export interface RpcConnection {
   readonly id: number;
   /** 是否已通过 auth */
   authenticated: boolean;
+  /**
+   * 连接来源是否 loopback——接入面信任级的判定要素之一:
+   * trusted = authenticated(持 home 凭证)+ loopback(本机接入面)。
+   * 可信面可提交完整确认决策(含持久授权);远程面维持受限白名单。
+   */
+  readonly loopback: boolean;
   /** 客户端自报的元信息（auth 后填充） */
   clientInfo?: { id?: string; version?: string };
   /** 发送 RPC 成功响应 */
@@ -43,8 +49,21 @@ export interface RpcConnection {
   onClose(callback: () => void): () => void;
 }
 
-export function createRpcConnection(socket: WebSocket): RpcConnection {
+/** loopback 地址判定——IPv4 127.0.0.0/8、IPv6 ::1 及其 IPv4 映射形态 */
+export function isLoopbackAddress(address: string | undefined): boolean {
+  if (!address) return false;
+  const normalized = address.startsWith("::ffff:")
+    ? address.slice("::ffff:".length)
+    : address;
+  return normalized === "::1" || normalized.startsWith("127.");
+}
+
+export function createRpcConnection(
+  socket: WebSocket,
+  opts?: { loopback?: boolean },
+): RpcConnection {
   const id = ++nextConnectionId;
+  const loopback = opts?.loopback ?? false;
   let closed = false;
   const closeListeners = new Set<() => void>();
 
@@ -67,6 +86,7 @@ export function createRpcConnection(socket: WebSocket): RpcConnection {
   return {
     id,
     authenticated: false,
+    loopback,
     sendSuccess(messageId, result) {
       safeSend(encodeSuccess(messageId, result));
     },

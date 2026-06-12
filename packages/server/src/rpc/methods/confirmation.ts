@@ -1,9 +1,11 @@
 /**
- * confirmation.* RPC 方法 —— Web UI / IDE 客户端与 ConfirmationHub 的操作入口
+ * confirmation.* RPC 方法 —— RPC 接入面与 ConfirmationHub 的操作入口
  *
- * 参见 remote-confirmation-execution.md §3.9：
+ * 方法：
  *   - `confirmation.list`：列出当前连接可见的 pending（按 observer 过滤）
- *   - `confirmation.resolve`：解决一个 pending（Web UI 按钮点击用）
+ *   - `confirmation.resolve`：应答一个 pending——**仅发起接入面可答**
+ *     (entry 的 turnOrigin.triggeredBy 与 caller 连接匹配),旁观 observer
+ *     可见不可代答;decision 能力按接入面信任级分级(见白名单注释)
  *
  * 推送（不是方法）：
  *   - `confirmation.pending` / `confirmation.resolved` 由 ConfirmationBridge 推送
@@ -20,23 +22,32 @@ import type { ServerContext } from "../../context.js";
 import type { HubEntry } from "../../confirmation/hub.js";
 
 /**
- * 远程 RPC 允许的 ConfirmationDecision.kind 白名单。
+ * ConfirmationDecision.kind 白名单——按接入面信任级分级。
  *
- * 为什么不包含 allow-session / allow-context / allow-global：
- *   持久授权走本地 /trust 命令，远程路径不支持——否则远程客户端可以一键批准后，
- *   在本地 PermissionStore 留下永久规则，绕过本地审计与"用户对持久授权显式拍板"
- *   的契约。
+ * 信任边界在身份而非传输形态:cli 收编后本机接入面同样经 RPC,"进程内 = 可信"
+ * 的旧前提不复存在。trusted = authenticated(持 home 凭证)+ loopback(本机)——
+ * 可信面可提交完整决策(含持久授权,统一沉淀宿主 permissionStore);非可信面
+ * 维持受限白名单,"远程不得沉淀永久规则"的安全意图在身份模型下完整保留
+ * (远程接入面的可信身份模型留待真实需求)。
  *
- * 为什么不包含 cancelled / expired / edit-then-allow：
+ * 两级都不包含 cancelled / expired / edit-then-allow：
  *   - cancelled / expired 不是用户决策——由 broker 内部产生
  *   - edit-then-allow：需要改工具输入，远程 UX 未设计
  *
  * 自由文本拒绝：通过 `{ kind: "deny", reason: "..." }` 表达——RPC 客户端传 reason
  * 即可把理由回流给 AI，无需独立 kind。
  */
-const REMOTE_ALLOWED_KINDS: ReadonlySet<ConfirmationDecision["kind"]> = new Set([
+const RESTRICTED_KINDS: ReadonlySet<ConfirmationDecision["kind"]> = new Set([
   "allow-once",
   "deny",
+]);
+
+const TRUSTED_KINDS: ReadonlySet<ConfirmationDecision["kind"]> = new Set([
+  "allow-once",
+  "deny",
+  "allow-session",
+  "allow-context",
+  "allow-global",
 ]);
 
 // ─── list ───
@@ -134,41 +145,39 @@ export function buildConfirmationResolveMethod(): MethodEntry {
         );
       }
 
-      // ── 2. kind 白名单（spec §2.2：远程路径不支持持久授权） ──
-      if (!REMOTE_ALLOWED_KINDS.has(params.decision.kind as ConfirmationDecision["kind"])) {
+      // ── 2. kind 白名单——按接入面信任级分级 ──
+      //   trusted = authenticated(requiresAuth 已保证)+ loopback(本机)。
+      const trusted = ctx.connection.authenticated && ctx.connection.loopback;
+      const allowedKinds = trusted ? TRUSTED_KINDS : RESTRICTED_KINDS;
+      if (!allowedKinds.has(params.decision.kind as ConfirmationDecision["kind"])) {
         throw RpcErrors.invalidParams(
-          `confirmation.resolve does not support kind "${params.decision.kind}" from remote (allowed: ${[...REMOTE_ALLOWED_KINDS].join(", ")})`,
+          `confirmation.resolve does not support kind "${params.decision.kind}" for this surface (allowed: ${[...allowedKinds].join(", ")})`,
         );
       }
 
-      const hub = requireHub(ctx.server);
-      const conversations = requireConversations(ctx.server);
+      // ── 2b. decision 结构校验——坏结构在边界拒绝,pending 保持未解决 ──
+      //   持久授权决策缺 pattern 若放行,会在执行侧读 pattern 时延迟成运行期
+      //   异常,而 pending 已被消费(不可逆)。
+      validateDecisionShape(params.decision);
 
-      // ── 3. 权限校验 ──
-      //   先查 entry——未找到直接回 "already-resolved-or-not-found"（此时也
-      //   无 conversation 可查，权限无意义）。
-      //   找到后根据 conversationId 判断：
-      //     - 有 conversationId → caller 必须是 observer
-      //     - 无 conversationId（ephemeral）→ MVP 拒绝远程 resolve，等 admin role 体系
+      const hub = requireHub(ctx.server);
+
+      // ── 3. 应答权——仅发起接入面可答 ──
+      //   先查 entry——未找到直接回 "already-resolved-or-not-found"。
+      //   确认是可执行控制:旁观 observer 可见(list / pending 推送)不可代答,
+      //   跟随权由结构保证——entry 的 turnOrigin 必须是 RPC 入口且发起连接
+      //   就是 caller。渠道(飞书)turn 的确认在渠道侧应答,RPC caller 非
+      //   发起面;ephemeral(定时任务)确认无 RPC 发起者,同样拒绝。
       const entry = hub.findEntry(params.requestId);
       if (!entry) {
         return { ok: false, reason: "already-resolved-or-not-found" };
       }
 
       const callerId = String(ctx.connection.id);
-      if (entry.conversationId) {
-        const observerIds = conversations.getObserverConnectionIds(
-          entry.conversationId,
-        );
-        if (!observerIds.has(callerId)) {
-          throw RpcErrors.unauthorized(
-            `Not an observer of conversation "${entry.conversationId}"`,
-          );
-        }
-      } else {
-        // ephemeral（scheduler 触发的 confirmation 等）——当前不允许远程 resolve
+      const origin = entry.request.turnOrigin;
+      if (origin?.channel !== "rpc" || origin.triggeredBy !== callerId) {
         throw RpcErrors.unauthorized(
-          "Remote resolve of ephemeral confirmations is not permitted (requires admin role, not yet implemented)",
+          "Only the originating surface may resolve this confirmation",
         );
       }
 
@@ -183,6 +192,45 @@ export function buildConfirmationResolveMethod(): MethodEntry {
 }
 
 // ─── 工具 ───
+
+/**
+ * decision 的 runtime 结构校验——kind 白名单之后的第二道边界。
+ * 持久授权(allow-session / context / global)必须携带合法 SuggestedPattern
+ * ({ pattern: { tool, argument }, label });deny 的 reason 若有须为字符串。
+ */
+function validateDecisionShape(decision: {
+  kind: string;
+  [key: string]: unknown;
+}): void {
+  if (
+    decision.kind === "allow-session" ||
+    decision.kind === "allow-context" ||
+    decision.kind === "allow-global"
+  ) {
+    const pattern = decision.pattern as
+      | { pattern?: { tool?: unknown; argument?: unknown }; label?: unknown }
+      | undefined;
+    const inner = pattern?.pattern;
+    const valid =
+      !!inner &&
+      typeof inner.tool === "string" &&
+      inner.tool.length > 0 &&
+      typeof inner.argument === "string" &&
+      typeof pattern.label === "string";
+    if (!valid) {
+      throw RpcErrors.invalidParams(
+        `confirmation.resolve kind "${decision.kind}" requires pattern { pattern: { tool, argument }, label }`,
+      );
+    }
+  }
+  if (decision.kind === "deny" && decision.reason !== undefined) {
+    if (typeof decision.reason !== "string") {
+      throw RpcErrors.invalidParams(
+        "confirmation.resolve deny 'reason' must be a string when provided",
+      );
+    }
+  }
+}
 
 function requireHub(server: ServerContext) {
   if (!server.confirmationHub) {

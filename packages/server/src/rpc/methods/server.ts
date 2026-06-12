@@ -13,6 +13,7 @@
  */
 
 import { RpcErrors, type MethodEntry } from "../handlers.js";
+import { PROTOCOL_VERSION } from "../protocol.js";
 
 export interface ServerShutdownParams {
   reason?: string;
@@ -60,25 +61,37 @@ export function buildServerShutdownMethod(): MethodEntry {
 }
 
 /**
- * server.info — 读取运行时摘要（state 文件 + PID 文件 + uptime）。
+ * server.info — 宿主状态权威视图(/host 命令与版本握手的数据源)。
  *
- * 本 Level 使用 ctx 内建数据（startedAt / listenAddr / version），不读文件
- * —— 给状态查询一个可靠的 authoritative 视图（vs serve status 读文件可能 stale）。
- * 未来可扩展更多运维信息。
+ * 使用 ctx 内建数据（startedAt / listenAddr / version / 活跃会话 / 连接数 /
+ * 内存基线 / 工作区 / 日志路径），不读文件—— vs serve status 读文件可能
+ * stale。protocol 供接入面做协议兼容判定(与 auth 握手同源)。
  */
 export function buildServerInfoMethod(): MethodEntry {
   return {
     name: "server.info",
-    requiresAuth: false, // 仅本地可达，info 不含敏感信息
+    // 状态视图含 workspace 路径 / 会话规模等运维信息——要求认证;
+    // 握手前的协议兼容判定由 auth 响应自带的 protocol / version 覆盖。
+    requiresAuth: true,
     handler(_params, ctx) {
+      const conversations = ctx.server.conversations?.list() ?? [];
       return {
         version: ctx.server.version,
+        protocol: PROTOCOL_VERSION,
         pid: process.pid,
         port: ctx.server.listenAddr?.port ?? ctx.server.config.port,
         host: ctx.server.listenAddr?.host ?? ctx.server.config.host,
         startedAt: new Date(ctx.server.startedAt).toISOString(),
         uptimeSec: Math.floor((Date.now() - ctx.server.startedAt) / 1000),
         shutdownAvailable: !!ctx.server.requestShutdown,
+        // 运维观测——占用红线的可见面(活跃会话 / 接入面连接 / 内存基线)
+        activeConversations: conversations.length,
+        busyConversations: conversations.filter((c) => c.busy).length,
+        connectionCount: ctx.server.connectionCount?.() ?? 0,
+        memoryRssBytes: process.memoryUsage().rss,
+        // 宿主单点解析的工作区——接入面的 @ 补全 root 与路径展示取此值
+        workspace: ctx.server.hostInfo?.workspace,
+        logPath: ctx.server.hostInfo?.logPath,
       };
     },
   };

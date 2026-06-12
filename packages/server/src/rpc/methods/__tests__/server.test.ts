@@ -79,13 +79,13 @@ describe("server.shutdown", () => {
 });
 
 describe("server.info", () => {
-  it("returns runtime summary without auth", () => {
+  it("返回宿主状态权威视图(要求认证——含 workspace / 会话规模等运维信息)", () => {
     const ctx = mkCtx({
       listenAddr: { port: 18900, host: "127.0.0.1" },
       requestShutdown: () => {},
     });
     const entry = buildServerInfoMethod();
-    expect(entry.requiresAuth).toBe(false);
+    expect(entry.requiresAuth).toBe(true);
 
     const result = entry.handler({}, ctx) as any;
     expect(result.version).toBe("0.1.0-test");
@@ -94,6 +94,28 @@ describe("server.info", () => {
     expect(result.shutdownAvailable).toBe(true);
     expect(typeof result.uptimeSec).toBe("number");
     expect(result.uptimeSec).toBeGreaterThanOrEqual(0);
+    // 宿主状态权威视图——占用红线可见面与协议兼容判定
+    expect(result.protocol).toBe(1);
+    expect(typeof result.memoryRssBytes).toBe("number");
+    expect(result.memoryRssBytes).toBeGreaterThan(0);
+    expect(result.activeConversations).toBe(0);
+    expect(result.connectionCount).toBe(0);
+  });
+
+  it("叠加活跃会话 / 连接数 / 宿主装配信息(workspace / logPath)", () => {
+    const ctx = mkCtx({
+      conversations: {
+        list: () => [{ busy: true }, { busy: false }],
+      } as never,
+      connectionCount: () => 3,
+      hostInfo: { workspace: "/ws", logPath: "/log/host.log" },
+    });
+    const result = buildServerInfoMethod().handler({}, ctx) as any;
+    expect(result.activeConversations).toBe(2);
+    expect(result.busyConversations).toBe(1);
+    expect(result.connectionCount).toBe(3);
+    expect(result.workspace).toBe("/ws");
+    expect(result.logPath).toBe("/log/host.log");
   });
 
   it("marks shutdownAvailable=false when requestShutdown not wired", () => {

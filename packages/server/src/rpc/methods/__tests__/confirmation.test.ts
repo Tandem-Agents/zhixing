@@ -25,10 +25,15 @@ import {
 
 // ─── 测试辅助 ───
 
-function makeConnection(id: number): RpcConnection {
+function makeConnection(
+  id: number,
+  opts?: { loopback?: boolean },
+): RpcConnection {
   return {
     id,
     authenticated: true,
+    // 测试主路径默认可信面(本机 loopback);受限面测试显式传 false
+    loopback: opts?.loopback ?? true,
     sendSuccess: vi.fn(),
     sendError: vi.fn(),
     notify: vi.fn(),
@@ -54,10 +59,17 @@ function makeContext(
   return { connection, server };
 }
 
-function makeRequest(id: string): ConfirmationRequest {
+/** triggeredBy 缺省 "1"(与默认 caller 连接 id 匹配)——发起接入面即测试主路径 */
+function makeRequest(
+  id: string,
+  turnOrigin?: { channel: string; triggeredBy?: string } | null,
+): ConfirmationRequest {
   const now = Date.now();
   return {
     id,
+    ...(turnOrigin === null
+      ? {}
+      : { turnOrigin: turnOrigin ?? { channel: "rpc", triggeredBy: "1" } }),
     tool: "bash",
     toolInput: { command: "ls" },
     workingDirectory: "/tmp",
@@ -196,7 +208,7 @@ describe("confirmation.list", () => {
 // ─── confirmation.resolve ───
 
 describe("confirmation.resolve", () => {
-  it("caller 是 observer → 成功 resolve 返回 { ok: true }", async () => {
+  it("caller 是发起接入面(origin triggeredBy 匹配)→ 成功 resolve 返回 { ok: true }", async () => {
     const hub = new ConfirmationHub();
     const broker = new ConfirmationBroker();
     broker.onRequest(() => {});
@@ -204,7 +216,6 @@ describe("confirmation.resolve", () => {
 
     const p = broker.requestConfirmation(makeRequest("r1"));
 
-    // conn(1) 是 conv-A 的 observer
     const server = {
       confirmationHub: hub,
       conversations: makeFakeConversations(
@@ -224,19 +235,21 @@ describe("confirmation.resolve", () => {
     expect((await p).kind).toBe("allow-once");
   });
 
-  it("caller 非 observer → 抛 Unauthorized（越权防护）", async () => {
+  it("旁观 observer(非发起者)→ 抛 Unauthorized——可见不可代答由结构保证", async () => {
     const hub = new ConfirmationHub();
     const broker = new ConfirmationBroker();
     broker.onRequest(() => {});
     hub.attach("b1", broker, { conversationId: "conv-A" });
 
-    const p = broker.requestConfirmation(makeRequest("r1"));
+    // 发起者是连接 99;caller 连接 1 即便在 observer 名册也不可代答
+    const p = broker.requestConfirmation(
+      makeRequest("r1", { channel: "rpc", triggeredBy: "99" }),
+    );
 
-    // conn(1) 不是 conv-A 的 observer（conn(99) 才是）
     const server = {
       confirmationHub: hub,
       conversations: makeFakeConversations(
-        new Map([["conv-A", new Set(["99"])]]),
+        new Map([["conv-A", new Set(["1", "99"])]]),
       ),
     } as unknown as ServerContext;
     const ctx = makeContext(server, makeConnection(1));
@@ -256,13 +269,42 @@ describe("confirmation.resolve", () => {
     await p;
   });
 
-  it("ephemeral pending（无 conversationId）→ 拒绝远程 resolve", async () => {
+  it("渠道发起的确认(turnOrigin.channel ≠ rpc)→ RPC caller 拒绝——在渠道侧应答", async () => {
+    const hub = new ConfirmationHub();
+    const broker = new ConfirmationBroker();
+    broker.onRequest(() => {});
+    hub.attach("b1", broker, { conversationId: "dm:feishu:u1" });
+
+    const p = broker.requestConfirmation(
+      makeRequest("rC", { channel: "feishu", triggeredBy: "u1" }),
+    );
+
+    const server = {
+      confirmationHub: hub,
+      conversations: makeFakeConversations(
+        new Map([["dm:feishu:u1", new Set(["1"])]]),
+      ),
+    } as unknown as ServerContext;
+    const ctx = makeContext(server, makeConnection(1));
+
+    expect(() =>
+      buildConfirmationResolveMethod().handler(
+        { requestId: "rC", decision: { kind: "allow-once" } },
+        ctx,
+      ),
+    ).toThrow(RpcAppError);
+
+    broker.resolve("rC", { kind: "allow-once" });
+    await p;
+  });
+
+  it("无 turnOrigin 的 pending(ephemeral / 直驱)→ 拒绝远程 resolve", async () => {
     const hub = new ConfirmationHub();
     const broker = new ConfirmationBroker();
     broker.onRequest(() => {});
     hub.attach("ephemeral", broker); // 无 conversationId
 
-    const p = broker.requestConfirmation(makeRequest("rE"));
+    const p = broker.requestConfirmation(makeRequest("rE", null));
 
     const server = {
       confirmationHub: hub,
@@ -338,14 +380,14 @@ describe("confirmation.resolve", () => {
     await p;
   });
 
-  // ─── kind 白名单（spec §2.2 防远程持久授权） ───
+  // ─── kind 白名单——按接入面信任级分级 ───
 
   it.each([
-    ["allow-session", { pattern: { pattern: { executable: "x", argument: "y" } } }],
-    ["allow-context", { pattern: { pattern: { executable: "x", argument: "y" } } }],
-    ["allow-global", { pattern: { pattern: { executable: "x", argument: "y" } } }],
+    ["allow-session", { pattern: { pattern: { tool: "x", argument: "y" }, label: "x y" } }],
+    ["allow-context", { pattern: { pattern: { tool: "x", argument: "y" }, label: "x y" } }],
+    ["allow-global", { pattern: { pattern: { tool: "x", argument: "y" }, label: "x y" } }],
     ["edit-then-allow", { modifiedInput: {} }],
-  ])("远程 kind='%s' → invalid params（远程路径不支持持久授权 / 编辑）", (kind, extra) => {
+  ])("非可信面(非 loopback)kind='%s' → invalid params(远程不得沉淀永久规则)", (kind, extra) => {
     const hub = new ConfirmationHub();
     const server = {
       confirmationHub: hub,
@@ -353,7 +395,7 @@ describe("confirmation.resolve", () => {
         new Map([["conv-A", new Set(["1"])]]),
       ),
     } as unknown as ServerContext;
-    const ctx = makeContext(server, makeConnection(1));
+    const ctx = makeContext(server, makeConnection(1, { loopback: false }));
 
     const method = buildConfirmationResolveMethod();
     expect(() =>
@@ -364,7 +406,85 @@ describe("confirmation.resolve", () => {
     ).toThrow(RpcAppError);
   });
 
-  it("远程 kind='allow-once' / 'deny'（±reason）→ 都在白名单", async () => {
+  it("可信面 kind='edit-then-allow' 同样拒绝(远程 UX 未设计,两级都不含)", () => {
+    const hub = new ConfirmationHub();
+    const server = {
+      confirmationHub: hub,
+      conversations: makeFakeConversations(new Map()),
+    } as unknown as ServerContext;
+    const ctx = makeContext(server, makeConnection(1));
+
+    expect(() =>
+      buildConfirmationResolveMethod().handler(
+        { requestId: "r1", decision: { kind: "edit-then-allow", modifiedInput: {} } },
+        ctx,
+      ),
+    ).toThrow(RpcAppError);
+  });
+
+  it("可信面持久授权缺 pattern / 坏 pattern 结构 → INVALID_PARAMS,pending 保持未解决", async () => {
+    const hub = new ConfirmationHub();
+    const broker = new ConfirmationBroker();
+    broker.onRequest(() => {});
+    hub.attach("b1", broker, { conversationId: "conv-A" });
+
+    const p = broker.requestConfirmation(makeRequest("rBad"));
+    const server = {
+      confirmationHub: hub,
+      conversations: makeFakeConversations(
+        new Map([["conv-A", new Set(["1"])]]),
+      ),
+    } as unknown as ServerContext;
+    const ctx = makeContext(server, makeConnection(1));
+    const method = buildConfirmationResolveMethod();
+
+    for (const decision of [
+      { kind: "allow-global" }, // 缺 pattern
+      { kind: "allow-context", pattern: {} }, // 缺内层
+      { kind: "allow-session", pattern: { pattern: { tool: "" }, label: "x" } }, // tool 空
+      { kind: "allow-global", pattern: { pattern: { tool: "bash", argument: "ls" } } }, // 缺 label
+      { kind: "deny", reason: 42 }, // reason 坏类型
+    ]) {
+      expect(() =>
+        method.handler({ requestId: "rBad", decision }, ctx),
+      ).toThrow(RpcAppError);
+    }
+    // 坏结构全部在边界拦截——pending 未被消费
+    expect(broker.listPending()).toHaveLength(1);
+
+    broker.resolve("rBad", { kind: "allow-once" });
+    await p;
+  });
+
+  it("可信面(loopback + 已认证)持久授权 kind='allow-global' → 成功,决策原样达 broker", async () => {
+    const hub = new ConfirmationHub();
+    const broker = new ConfirmationBroker();
+    broker.onRequest(() => {});
+    hub.attach("b1", broker, { conversationId: "conv-A" });
+
+    const p = broker.requestConfirmation(makeRequest("rG"));
+    const server = {
+      confirmationHub: hub,
+      conversations: makeFakeConversations(
+        new Map([["conv-A", new Set(["1"])]]),
+      ),
+    } as unknown as ServerContext;
+    const ctx = makeContext(server, makeConnection(1));
+
+    const decision = {
+      kind: "allow-global",
+      pattern: { pattern: { tool: "bash", argument: "ls *" }, label: "bash ls *" },
+    };
+    const result = await invoke<{ ok: boolean }>(
+      buildConfirmationResolveMethod(),
+      { requestId: "rG", decision },
+      ctx,
+    );
+    expect(result.ok).toBe(true);
+    expect((await p).kind).toBe("allow-global");
+  });
+
+  it("可信面 kind='allow-once' / 'deny'（±reason）→ 都在白名单", async () => {
     const hub = new ConfirmationHub();
     const broker = new ConfirmationBroker();
     broker.onRequest(() => {});

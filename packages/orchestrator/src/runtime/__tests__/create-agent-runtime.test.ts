@@ -1556,3 +1556,30 @@ describe("createAgentRuntime · 生命周期钩子", () => {
     expect(closes).toEqual(["assembly-rollback"]);
   });
 });
+
+// ─── 信任上下文装配:场景实例用场景信任(会话锚),非场景维持路径锚 ───
+
+describe("trustContext 装配分叉", () => {
+  it("workscene memoryScope → scene 信任与 scene 权限上下文(allow-context 沉淀进场景语境)", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
+    const runtime = await createAgentRuntime({
+      workspace: null,
+      memoryScope: { kind: "workscene", sceneId: "s1" },
+    });
+    expect(runtime.securityPipeline.getTrust()).toEqual({
+      kind: "scene",
+      sceneId: "s1",
+    });
+    expect(runtime.securityPipeline.getContextId()).toEqual({
+      kind: "scene",
+      sceneId: "s1",
+    });
+  });
+
+  it("非场景实例:无工作区 → global 信任与 main 上下文", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
+    const runtime = await createAgentRuntime({ workspace: null });
+    expect(runtime.securityPipeline.getTrust()).toEqual({ kind: "global" });
+    expect(runtime.securityPipeline.getContextId()).toEqual({ kind: "main" });
+  });
+});

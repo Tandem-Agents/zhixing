@@ -36,6 +36,16 @@ import {
   buildScheduleAbortRunMethod,
 } from "./schedule.js";
 import { buildServerShutdownMethod, buildServerInfoMethod } from "./server.js";
+import { buildTrustListMethod, buildTrustRevokeMethod } from "./trust.js";
+import {
+  buildSkillListMethod,
+  buildSkillSetStateMethod,
+  buildSkillArchiveMethod,
+} from "./skill.js";
+import {
+  buildMemoryJournalStatsMethod,
+  buildMemoryPeopleListMethod,
+} from "./memory.js";
 import {
   buildConfirmationListMethod,
   buildConfirmationResolveMethod,
@@ -83,6 +93,16 @@ export function buildBuiltinRegistry(_opts: BuiltinMethodsOptions = {}): Handler
     // server.*（控制面：shutdown / info）
     buildServerShutdownMethod(),
     buildServerInfoMethod(),
+    // trust.*（信任规则管理面）
+    buildTrustListMethod(),
+    buildTrustRevokeMethod(),
+    // skill.*（技能库管理面 + 补全候选源,写后广播 skill.changed）
+    buildSkillListMethod(),
+    buildSkillSetStateMethod(),
+    buildSkillArchiveMethod(),
+    // memory.*（记忆域查看面,只读）
+    buildMemoryJournalStatsMethod(),
+    buildMemoryPeopleListMethod(),
     // confirmation.*（远程权限确认：list / resolve —— RPC 客户端用；pending/resolved 推送由 ConfirmationBridge 处理）
     buildConfirmationListMethod(),
     buildConfirmationResolveMethod(),

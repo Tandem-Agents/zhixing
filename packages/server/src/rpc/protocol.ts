@@ -60,6 +60,9 @@ export interface JsonRpcError {
 }
 
 /** 标准错误码（spec 定义） */
+/** RPC 协议版本——auth 握手与 server.info 同源,接入面据此做兼容判定 */
+export const PROTOCOL_VERSION = 1;
+
 export const RPC_ERROR_CODES = {
   /** Invalid JSON */
   PARSE_ERROR: -32700,

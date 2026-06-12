@@ -711,10 +711,16 @@ export async function createAgentRuntime(
   const boundaryRegistry: MutableToolBoundaryRegistry =
     BoundaryRegistry.fromTools(baseTools);
   const securityPipeline = new SecurityPipeline({
+    // 工作场景实例用场景信任(会话锚:整会话生效、跟场景身份而非 workdir 偶然
+    // 共享)——allow-context 沉淀进 scene 上下文,与 /trust 的场景语境视角同源。
+    // workdir 仍经 workspace 解析承载文件操作根,与信任锚正交。
+    // 非场景实例维持路径锚:有工作区即 workspace 信任,否则 global。
     trustContext:
-      workspace.path !== null
-        ? { kind: "workspace", dir: workspace.path }
-        : { kind: "global" },
+      options.memoryScope?.kind === "workscene"
+        ? { kind: "scene", sceneId: options.memoryScope.sceneId }
+        : workspace.path !== null
+          ? { kind: "workspace", dir: workspace.path }
+          : { kind: "global" },
     sessionType,
     permissionStore: persistentStore,
     toolBoundaryRegistry: boundaryRegistry,

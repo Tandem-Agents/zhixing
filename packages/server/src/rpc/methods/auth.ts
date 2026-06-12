@@ -17,8 +17,8 @@
 import { timingSafeEqual } from "node:crypto";
 import type { MethodEntry } from "../handlers.js";
 import { RpcErrors } from "../handlers.js";
+import { PROTOCOL_VERSION } from "../protocol.js";
 
-const PROTOCOL_VERSION = 1;
 
 interface AuthParams {
   token?: string;

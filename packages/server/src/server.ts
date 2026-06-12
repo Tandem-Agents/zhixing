@@ -18,7 +18,11 @@ import { isInternal } from "@zhixing/core";
 import { dispatchRest } from "./routes.js";
 import type { ServerContext } from "./context.js";
 import { DEFAULT_SERVER_CONFIG, type ServerConfig } from "./types.js";
-import { createRpcConnection, type RpcConnection } from "./rpc/connection.js";
+import {
+  createRpcConnection,
+  isLoopbackAddress,
+  type RpcConnection,
+} from "./rpc/connection.js";
 import { RpcDispatcher } from "./rpc/dispatcher.js";
 import { HandlerRegistry } from "./rpc/handlers.js";
 import { buildBuiltinRegistry } from "./rpc/methods/index.js";
@@ -89,13 +93,16 @@ export async function startServer(opts: StartServerOptions): Promise<ZhixingServ
       socket.destroy();
       return;
     }
+    // 在 upgrade 时刻捕获来源地址——loopback 与否是连接的固有属性,
+    // 进入接入面信任级判定(trusted = authenticated + loopback)
+    const loopback = isLoopbackAddress(req.socket.remoteAddress);
     wss.handleUpgrade(req, socket, head, (ws) => {
-      attachConnection(ws);
+      attachConnection(ws, loopback);
     });
   });
 
-  function attachConnection(ws: WebSocket): void {
-    const connection = createRpcConnection(ws);
+  function attachConnection(ws: WebSocket, loopback: boolean): void {
+    const connection = createRpcConnection(ws, { loopback });
     connections.add(connection);
 
     ws.on("message", (data) => {
@@ -143,6 +150,14 @@ export async function startServer(opts: StartServerOptions): Promise<ZhixingServ
     const manager = ctx.conversations;
     ctx.sessionBroadcast = createObserverBroadcast({ connections, manager });
   }
+
+  // 回填全连接广播(全局域变更通知,如 skill.changed)与连接计数(server.info)。
+  ctx.broadcastAll = (method, params) => {
+    for (const conn of connections) {
+      if (conn.authenticated && !conn.closed) conn.notify(method, params);
+    }
+  };
+  ctx.connectionCount = () => connections.size;
 
   // EventBus → RPC notification 桥接（订阅 scheduler 等事件，向所有连接广播）。
   // 内部维护任务的运行事件不广播给 client（结果触达：内部静默）——谓词用 ctx.scheduler

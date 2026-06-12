@@ -55,6 +55,7 @@ import {
   ServerStateFile,
   CleanupRegistry,
   createRunEventForwarder,
+  getDefaultLogPath,
   type SessionBroadcast,
   type RunningServer,
   type ProcessLockPaths,
@@ -81,6 +82,11 @@ import { registerCliTurnContextProviders } from "../runtime/turn-context-provide
 import { createCliRuntimeFactory } from "./session-adapter.js";
 import { createConversationDirectory } from "./conversation-directory.js";
 import { createWorksceneDirectory } from "./workscene-directory.js";
+import {
+  createTrustDirectory,
+  createSkillDirectory,
+  createMemoryDirectory,
+} from "./management-directories.js";
 import { runEphemeralTurn } from "./ephemeral-executor.js";
 import { loadOrCreateToken } from "./token.js";
 import { isDaemonChild } from "./self-exec.js";
@@ -219,6 +225,13 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   const worksceneDirectory = createWorksceneDirectory({
     registry: workSceneRegistry,
   });
+  // 管理面三域——trust(盘上持久规则)/ memory(只读查看);skill 目录在
+  // serveSkillStore 创建后装配(共享同一锁域与结构版本)。
+  const trustDirectory = createTrustDirectory({
+    config,
+    cliWorkspace: opts.workspace,
+  });
+  const memoryDirectory = createMemoryDirectory();
 
   // 3. Scheduler facade lazy ref —— 打破循环依赖（标准 IoC 模式）：
   //    scheduleTool → Scheduler → runAgentTurn → ephemeralRuntime → scheduleTool
@@ -548,6 +561,13 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     conversations: ctx.conversations,
     conversationDirectory,
     workscenes: worksceneDirectory,
+    trust: trustDirectory,
+    skills: createSkillDirectory({ skillStore: serveSkillStore }),
+    memory: memoryDirectory,
+    hostInfo: {
+      workspace: opts.workspace,
+      logPath: isChild ? getDefaultLogPath() : undefined,
+    },
     channels: ctx.channels,
     confirmationHub,
     runRegistry,

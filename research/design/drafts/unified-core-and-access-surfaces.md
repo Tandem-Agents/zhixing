@@ -154,11 +154,11 @@ cli 渲染面本就是两条腿,投影逐腿对应、各自零改:
 | `workscene.enter` / `exit` | 取 / 建场景当前对话(原子查询创建)/ touch(语义见裁决 3) | 无状态机、无 status 方法——接入面当前场景是连接级 UI 态,宿主零知识;实例随 send 按场景 profile 发放 |
 | `workscene.list` / `create` / `rename` / `delete` | 场景候选列表 + 登记管理(/work 选择器及 inline CRUD) | 场景注册表读写路径随之收宿主(正常态零直读,见裁决 4) |
 | `confirmation.list` / `resolve`(+Bridge 推送 `pending` / `resolved`) | 确认的可见与应答回程 | 已有骨架;**语义须按裁决 5 升级**(应答权改 origin surface、decision 按信任级分级),现状白名单不可直接复用 |
-| `trust.list` / `revoke` | 信任规则管理(/trust 查看与撤销) | permissionStore 随 runtime 在宿主,规则沉淀经确认链路自然在宿主;此组承接管理面;/mcp、/security 的状态查询同理改问宿主(并入 host.status 族或随实现归位) |
+| `trust.list` / `revoke` | 信任规则管理(/trust 查看与撤销) | 操作盘上持久规则;规则沉淀经确认链路自然在宿主;/mcp、/security 的状态查询同理改问宿主(并入 server.info 族或随实现归位) |
 | `skill.list` / `setState` / `archive` | 技能管理(/skills 列表、启停 / 置顶 / 模式、归档)+ slash 补全候选源 | 现状管理器本地写 `store.setState`(pinned / disabled)与 `store.archive`(目录移至 archived/ + 结构版本递增——语义独立于 setState,不合并),随 skillStore 单写者收宿主;补全候选在收到 3.5 变更通知后经 list 拉取 |
 | `memory.journalStats` / `peopleList` | 记忆域查看(/journal 统计、/people 关系列表) | 现状命令本地直读 JournalStore / PeopleStore;memory 收宿主后按裁决 4 正常态读也经 RPC;journal 生命周期维护(写)收宿主自跑、不设方法 |
 | `runtime.reload` | 配置热重载(blue-green 平移宿主) | config 编辑仍在 cli TTY,落盘后触发 |
-| `host.status` / `host.version` / `host.stop` | 可观测 + 协议握手 + 显式停止(占用红线的手动保底,见裁决 8) | 握手见 3.4 裁决 7;status 携带 resolvedWorkspace 路径——cli 的 @ 补全 root 与路径展示改取宿主解析值,本地 `?? process.cwd()` 兜底随收编消失("任何目录运行效果一致"由宿主单点解析保证);stop = flush 全部会话落盘后优雅退出 |
+| `server.info` / `server.shutdown` | 可观测 + 协议握手 + 显式停止(占用红线的手动保底,见裁决 8) | 实现命名取既有 server 域(`server.shutdown` 已有 serve stop 优雅停机链消费,双名是债):info 即宿主状态权威视图——protocol(兼容判定,见 3.4 裁决 7)、运行时长 / 活跃与忙碌会话 / 连接数 / 内存基线 / 日志路径 / resolvedWorkspace(cli 的 @ 补全 root 与路径展示改取宿主解析值,本地 `?? process.cwd()` 兜底随收编消失);shutdown = flush 全部会话落盘后优雅退出 |
 
 **方法表完备性约束**:凡 cli 命令现存的本地写路径——`convRepo` 的 rename / clearViewLayerState / touch / 删除、场景注册表 CRUD、trust 规则撤销(`store.revoke`)、技能管理(`skillStore.setState` / `skillStore.archive`)——必须全部有对应 RPC 方法承接;任何一条漏掉,阶段 B 后 cli 就残留本地写实例,3.5 的结构性验收即不成立。
 
@@ -220,7 +220,7 @@ transcript / skill / memory / snapshot / permission(trust 规则)的全部写入
 3. **窗口归 ManagedSession**——从 SessionRuntime wrapper 挪出,ConversationManager 成为窗口 / turnCounter / 接受协议的唯一权威;runTurnWithCommit 补 pendingModeSwitch 透传。
 4. **双通道与通知面**——带外事件转发装饰器(wire envelope / UI 订阅集裁剪 / lineage)、推送改 observer 组播、`session.changed` 会话级通知、`session.subscribe` 登记。
 5. **session / workscene 方法域补全**——rename / delete 语义对齐、history 改 readRunsReverse、list 改全量;workscene 全组(对话静态属性模型:`ws:` 全域键路由、enter 原子查询创建、exit 仅 touch、管理面薄壳——宿主无状态机、无 status 方法,见裁决 3 执行细化)。
-6. **confirmation 升级 + 管理面方法域**——应答权改 origin surface、decision 信任分级;trust / skill / memory 方法组;host.status / version / stop(占用红线三层防线、协议握手用 auth 既有预留位)。
+6. **confirmation 升级 + 管理面方法域**——应答权改 origin surface、decision 信任分级;trust / skill / memory 方法组;server.info 扩展为宿主状态权威视图、server.shutdown 即显式停止(占用红线三层防线、协议版本与 auth 握手同源)。
 7. **宿主 profile 升格**——cli 拉起的常驻宿主按配置装配渠道与 MCP(飞书随配置常驻生效)。
 
 ### 阶段 B·cli 收编(步 8–10,核心是一次原子切换)

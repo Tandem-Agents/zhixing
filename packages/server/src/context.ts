@@ -12,6 +12,11 @@ import type { ConfirmationHub } from "./confirmation/hub.js";
 import type { SessionBroadcast } from "./rpc/session-broadcast.js";
 import type { ConversationDirectory } from "./runtime/conversation-directory.js";
 import type { WorksceneDirectory } from "./runtime/workscene-directory.js";
+import type {
+  MemoryDirectory,
+  SkillDirectory,
+  TrustDirectory,
+} from "./runtime/management-directories.js";
 
 export interface ServerContext {
   /** 配置（不可变；config.port 是请求的端口，实际端口见 listenAddr） */
@@ -33,6 +38,21 @@ export interface ServerContext {
   conversationDirectory?: ConversationDirectory;
   /** 工作场景域(注册表管理 + 场景对话取建)。不传则 workscene.* 不可用。 */
   workscenes?: WorksceneDirectory;
+  /** 信任规则管理面。不传则 trust.* 不可用。 */
+  trust?: TrustDirectory;
+  /** 技能库管理面。不传则 skill.* 不可用。 */
+  skills?: SkillDirectory;
+  /** 记忆域查看面。不传则 memory.* 不可用。 */
+  memory?: MemoryDirectory;
+  /** 宿主装配信息(server.info 的运维字段:工作区 / 日志路径)。 */
+  hostInfo?: { workspace?: string; logPath?: string };
+  /** 当前连接数(startServer 回填,server.info 用)。 */
+  connectionCount?: () => number;
+  /**
+   * 向全部已认证连接广播(startServer 回填)——全局域变更通知用
+   * (如 skill.changed);会话域推送走 sessionBroadcast(observer 名册)。
+   */
+  broadcastAll?: (method: string, params: unknown) => void;
   /** 通道注册表（不传则不启用通道功能） */
   channels?: ChannelRegistry;
   /**
@@ -69,6 +89,10 @@ export interface CreateContextOptions {
   conversations?: ConversationManager;
   conversationDirectory?: ConversationDirectory;
   workscenes?: WorksceneDirectory;
+  trust?: TrustDirectory;
+  skills?: SkillDirectory;
+  memory?: MemoryDirectory;
+  hostInfo?: { workspace?: string; logPath?: string };
   channels?: ChannelRegistry;
   confirmationHub?: ConfirmationHub;
   runRegistry?: RunRegistry;
@@ -84,6 +108,10 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     conversations: opts.conversations,
     conversationDirectory: opts.conversationDirectory,
     workscenes: opts.workscenes,
+    trust: opts.trust,
+    skills: opts.skills,
+    memory: opts.memory,
+    hostInfo: opts.hostInfo,
     channels: opts.channels,
     confirmationHub: opts.confirmationHub,
     runRegistry: opts.runRegistry,
