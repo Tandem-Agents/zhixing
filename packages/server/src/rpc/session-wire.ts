@@ -1,0 +1,148 @@
+/**
+ * 会话域 RPC wire 契约 —— 方法结果与推送 payload 的单一真相源。
+ *
+ * 覆盖 session.* 与 workscene.*(场景对话是会话域的场景形态)。server 方法
+ * 实现与接入面设施(cli 的 RpcConversationFacade / RpcWorksceneFacade)共用
+ * 此处类型:发射端以 satisfies / 返回类型钉住构造形状,接入端以同一类型还原,
+ * 协议两侧不各自手写镜像——镜像即漂移点。
+ *
+ * 通知谱:
+ * - session.delta / session.complete —— 主通道(turn 产出流),经 observer 组播
+ * - session.event —— 带外通道,信封类型与转发器内聚在 session-events.ts
+ * - session.changed —— 会话级变更(run 外发生),经同一组播名册
+ * - session.modeSwitchIntent —— 可执行控制意图,仅定向发起连接
+ */
+
+import type {
+  AgentResult,
+  AgentYield,
+  TokenUsage,
+  WorkModeSwitchIntent,
+} from "@zhixing/core";
+
+// ─── wire 投影 ───
+
+/** wire 上的错误形状——结构对象,非 Error 类实例 */
+export interface WireAgentError {
+  name: string;
+  message: string;
+}
+
+/**
+ * AgentResult 的 wire 投影:error 分支的 AgentError 是 Error 类实例,
+ * message / name 是不可枚举的原型属性、JSON 序列化即丢——上 wire 前必须
+ * 投影为结构对象。其余分支纯数据,原样透传。
+ */
+export type WireAgentResult =
+  | Exclude<AgentResult, { reason: "error" }>
+  | {
+      reason: "error";
+      error: WireAgentError;
+      usage: TokenUsage;
+    };
+
+/** 发射端唯一投影点——complete 通知的 result 一律经此上 wire */
+export function toWireAgentResult(result: AgentResult): WireAgentResult {
+  if (result.reason !== "error") return result;
+  return {
+    reason: "error",
+    error: { name: result.error.name, message: result.error.message },
+    usage: result.usage,
+  };
+}
+
+// ─── 通知方法名 ───
+
+/** 会话域全部推送通知的方法名——发射端与订阅端共用,字符串不两侧各写 */
+export const SESSION_NOTIFICATIONS = {
+  delta: "session.delta",
+  complete: "session.complete",
+  event: "session.event",
+  changed: "session.changed",
+  modeSwitchIntent: "session.modeSwitchIntent",
+} as const;
+
+// ─── 通知 payload ───
+
+export interface SessionDeltaPayload {
+  conversationId: string;
+  /** @deprecated 使用 conversationId */
+  sessionId: string;
+  delta: AgentYield;
+}
+
+export interface SessionCompletePayload {
+  conversationId: string;
+  /** @deprecated 使用 conversationId */
+  sessionId: string;
+  result: WireAgentResult;
+}
+
+/**
+ * 会话级变更(run 外发生)。联合成员只列已实现的变更——类型领先实现即
+ * 声明面领先生效面;clear 等执行体落地时随实现扩展。
+ */
+export type SessionChangedPayload =
+  | { conversationId: string; change: "renamed"; name: string }
+  | { conversationId: string; change: "deleted" };
+
+export interface SessionModeSwitchIntentPayload {
+  conversationId: string;
+  intent: WorkModeSwitchIntent;
+}
+
+// ─── 方法结果 ───
+
+export interface SessionSendResult {
+  conversationId: string;
+  /** @deprecated 使用 conversationId */
+  sessionId: string;
+}
+
+/** session.list 条目——盘上事实叠加活跃态 */
+export interface SessionConversationEntry {
+  conversationId: string;
+  name: string;
+  createdAt: string;
+  lastActiveAt: string;
+  active: boolean;
+  busy: boolean;
+  observerCount: number;
+  pendingCount: number;
+}
+
+export interface SessionListResult {
+  conversations: SessionConversationEntry[];
+}
+
+export interface SessionRenameResult {
+  conversationId: string;
+  name: string;
+}
+
+export interface SessionSubscribeResult {
+  subscribed: boolean;
+}
+
+export interface SessionUnsubscribeResult {
+  unsubscribed: boolean;
+}
+
+// ─── workscene 方法结果 ───
+
+export interface WorksceneSummary {
+  sceneId: string;
+  name: string;
+  workdir?: string;
+  lastActiveAt?: string;
+}
+
+export interface WorksceneListResult {
+  scenes: WorksceneSummary[];
+}
+
+export interface WorksceneEnterResult {
+  /** 场景当前对话的全域键(ws: 前缀)——接入面据此切当前对话指针 */
+  conversationId: string;
+  scene: WorksceneSummary;
+}

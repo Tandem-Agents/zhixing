@@ -11,6 +11,7 @@ export * from "./rpc/handlers.js";
 export * from "./rpc/methods/index.js";
 export * from "./rpc/event-bridge.js";
 export * from "./rpc/session-events.js";
+export * from "./rpc/session-wire.js";
 export * from "./rpc/session-broadcast.js";
 export {
   createConfirmationBridge,

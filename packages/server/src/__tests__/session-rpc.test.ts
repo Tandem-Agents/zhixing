@@ -6,6 +6,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import WebSocket from "ws";
+import { AgentError } from "@zhixing/core";
 import type { AgentResult, AgentYield, Message, RunResult } from "@zhixing/core";
 import { startServer, type ZhixingServerInstance } from "../server.js";
 import { createServerContext } from "../context.js";
@@ -31,6 +32,8 @@ interface MockOptions {
   deltaCount?: number;
   /** run 抛出异常 */
   throwError?: string;
+  /** run 正常返回 reason:"error" 的 agentResult(error 为 AgentError 实例) */
+  errorResult?: string;
   /** 每个 yield 的延迟（ms） */
   yieldDelayMs?: number;
   /** RunResult 顶层携带的模式切换意图(complete 通知附带契约的驱动源) */
@@ -53,6 +56,22 @@ function createMockRuntime(
       const text = block && block.type === "text" ? block.text : "";
       if (opts.throwError) {
         throw new Error(opts.throwError);
+      }
+      if (opts.errorResult) {
+        return {
+          agentResult: {
+            reason: "error",
+            error: new AgentError(opts.errorResult, "provider_error", false),
+            usage: { inputTokens: 0, outputTokens: 0 },
+          },
+          runRecord: {
+            timestamp: new Date().toISOString(),
+            messages: [userMsg],
+            usage: { inputTokens: 0, outputTokens: 0 },
+          },
+          newMessages: [],
+          durationMs: 0,
+        };
       }
 
       const count = opts.deltaCount ?? 2;
@@ -338,6 +357,29 @@ describe("session.* RPC (S2.D)", () => {
     expect(completeParams.result.reason).toBe("completed");
     // 无模式切换意图时不附带字段
     expect(completeParams.pendingModeSwitch).toBeUndefined();
+
+    client.close();
+  });
+
+  it("error 终止的 turn:complete.result.error 的 name / message 经真实 wire 保真(AgentError 实例直发会丢的回归锚)", async () => {
+    await startWithFactory(
+      createMockFactory({ deltaCount: 1, errorResult: "provider 炸了" }),
+    );
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    await client.request("session.send", { text: "hi" });
+    const complete = await client.waitNotification("session.complete");
+    const result = (
+      complete.params as {
+        result: { reason: string; error?: { name: string; message: string } };
+      }
+    ).result;
+    // Error 的 name / message 是不可枚举原型属性,实例直上 wire 经 JSON 即丢——
+    // 此处走真实 WebSocket 序列化,锁住发射端的 wire 投影
+    expect(result.reason).toBe("error");
+    expect(result.error?.name).toBe("AgentError");
+    expect(result.error?.message).toBe("provider 炸了");
 
     client.close();
   });

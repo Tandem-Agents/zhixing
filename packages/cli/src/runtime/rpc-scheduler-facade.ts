@@ -1,6 +1,9 @@
 /**
  * RpcSchedulerFacade —— cli 经 RPC 接入核心宿主的 SchedulerFacade 实现。
  *
+ * facade 是方法域封装、不持连接:连接是进程级共享的 CoreHostLink(调度 /
+ * 会话 / 确认域共用一条已认证连接),建立 / 重连 / 释放归连接持有者。
+ *
  * 读写分离：
  * - 写 / 执行（create / update / delete / run）经连接发 RPC（按需 ensure 宿主）。
  * - list 直接读 scheduler.json 从属投影，不拉宿主（磁盘是宿主单写者的只读投影）。
@@ -17,33 +20,27 @@ import {
   type SchedulerFacadeEvent,
   type SchedulerFacadeEventHandler,
 } from "@zhixing/core";
-import {
-  CoreHostConnection,
-  defaultCoreHostConnectionDeps,
-  type CoreHostConnectionDeps,
-} from "./core-host-connection.js";
+import type { CoreHostLink } from "./core-host-connection.js";
 import { readSchedulerTasksSync } from "./scheduler-projection.js";
 
 export interface RpcSchedulerFacadeOptions {
-  /** 连接依赖注入（测试用）；默认走真实 discover / spawn / createClient。 */
-  connectionDeps?: CoreHostConnectionDeps;
+  /** 进程级共享的核心宿主连接。 */
+  connection: CoreHostLink;
   /** scheduler.json 路径（读投影用）；默认 getSchedulerStorePath()。 */
   storePath?: string;
 }
 
 export class RpcSchedulerFacade implements SchedulerFacade {
-  private readonly conn: CoreHostConnection;
+  private readonly link: CoreHostLink;
   private readonly storePath: string;
 
-  constructor(opts: RpcSchedulerFacadeOptions = {}) {
-    this.conn = new CoreHostConnection(
-      opts.connectionDeps ?? defaultCoreHostConnectionDeps(),
-    );
+  constructor(opts: RpcSchedulerFacadeOptions) {
+    this.link = opts.connection;
     this.storePath = opts.storePath ?? getSchedulerStorePath();
   }
 
   async create(spec: TaskSpec): Promise<TaskView> {
-    const client = await this.conn.getClient();
+    const client = await this.link.getClient();
     return client.request<TaskView>("schedule.create", spec);
   }
 
@@ -54,39 +51,29 @@ export class RpcSchedulerFacade implements SchedulerFacade {
   }
 
   async update(id: string, patch: TaskPatch): Promise<TaskView> {
-    const client = await this.conn.getClient();
+    const client = await this.link.getClient();
     return client.request<TaskView>("schedule.update", { id, patch });
   }
 
   async delete(id: string): Promise<void> {
-    const client = await this.conn.getClient();
+    const client = await this.link.getClient();
     await client.request("schedule.delete", { id });
   }
 
   async run(id: string): Promise<AgentTurnResult> {
-    const client = await this.conn.getClient();
+    const client = await this.link.getClient();
     return client.request<AgentTurnResult>("schedule.run", { id });
   }
 
   onEvent(handler: SchedulerFacadeEventHandler): () => void {
     const offs = [
-      this.conn.onNotification("schedule.started", (p) => handler(toStarted(p))),
-      this.conn.onNotification("schedule.completed", (p) => handler(toCompleted(p))),
-      this.conn.onNotification("schedule.disabled", (p) => handler(toDisabled(p))),
+      this.link.onNotification("schedule.started", (p) => handler(toStarted(p))),
+      this.link.onNotification("schedule.completed", (p) => handler(toCompleted(p))),
+      this.link.onNotification("schedule.disabled", (p) => handler(toDisabled(p))),
     ];
     return () => {
       for (const off of offs) off();
     };
-  }
-
-  /** 主动接入核心宿主（不在则拉起）—— cli 启动轻检查命中时调，防系统维护饿死。 */
-  async ensureHost(): Promise<void> {
-    await this.conn.getClient();
-  }
-
-  /** cli 退出时关闭连接 + 清订阅。 */
-  async dispose(): Promise<void> {
-    await this.conn.dispose();
   }
 }
 

@@ -100,6 +100,10 @@ import { BottomInfoModel } from "./bottom-info/index.js";
 import { renderHomeWelcome, renderStartupAdvisories } from "./workbench/index.js";
 import { renderFarewell } from "./farewell/index.js";
 import { RuntimeSession } from "./runtime/session.js";
+import {
+  CoreHostConnection,
+  defaultCoreHostConnectionDeps,
+} from "./runtime/core-host-connection.js";
 import { RpcSchedulerFacade } from "./runtime/rpc-scheduler-facade.js";
 import { shouldEnsureOnStartup } from "./runtime/scheduler-projection.js";
 import {
@@ -318,19 +322,23 @@ export async function startRepl(options: ReplOptions): Promise<void> {
   // 事件来自下面 schedulerFacade.onEvent 经 RPC 订阅核心宿主后桥接到此 bus。
   const schedulerEventBus = createEventBus<SchedulerEventMap>();
 
-  // 调度门面 —— cli 经它接入核心宿主（懒拉起 + 读写分离）。注入 session（schedule 工具 /
-  // turn-context），供 /tasks 命令读投影、订阅任务事件桥回渲染。
-  const schedulerFacade = new RpcSchedulerFacade();
+  // 核心宿主连接 —— cli 进程级唯一(连接即接入面身份单位):调度 / 会话 / 确认域
+  // 经各自 facade 共用这一条已认证连接;懒建立,释放在退出链(本入口持有)。
+  const coreHost = new CoreHostConnection(defaultCoreHostConnectionDeps());
+
+  // 调度门面 —— 方法域封装(读写分离)。注入 session（schedule 工具 / turn-context），
+  // 供 /tasks 命令读投影、订阅任务事件桥回渲染。
+  const schedulerFacade = new RpcSchedulerFacade({ connection: coreHost });
 
   // cli 启动轻检查：纯聊天零后台；仅在「系统维护未 seed / 逾期」或「近期用户任务待触发」
   // 时主动 ensure 核心宿主（防饿死 + 守候近期任务）。fire-and-forget，不阻塞 REPL 启动。
   if (shouldEnsureOnStartup()) {
     // ensure 失败不静默：给一行友好降级提示（不阻塞 REPL 启动）。失败时定时任务
     // 可能不按时触发——让用户可观测，而非零感知丢失。
-    void schedulerFacade.ensureHost().catch((err) => {
+    void coreHost.ensure().catch((err) => {
       cliWriter.notify(
         chalk.yellow(
-          `  ⚠ ${err instanceof Error ? err.message : "定时功能当前不可用"}`,
+          `  ⚠ ${err instanceof Error ? err.message : "核心宿主当前不可用"}`,
         ),
       );
     });
@@ -1176,6 +1184,11 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     // owner（本入口）释放，避免子进程在 CLI 退出后成为孤儿。
     await builtinExtraTools.mcpHub.dispose().catch((err) =>
       cliWriter.line(`[mcpHub.dispose] ${err instanceof Error ? err.message : String(err)}`),
+    );
+    // 核心宿主连接最后释放（各域 facade 共用,须等全部消费者停止）——断开后宿主
+    // 失去本接入面,是否退场由宿主自己的 idle 判定决定。
+    await coreHost.dispose().catch((err) =>
+      cliWriter.line(`[coreHost.dispose] ${err instanceof Error ? err.message : String(err)}`),
     );
     cliWriter.line(chalk.dim("\n再见 👋"));
     process.exit(0);

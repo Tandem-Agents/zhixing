@@ -56,6 +56,7 @@ import {
   CleanupRegistry,
   createRunEventForwarder,
   getDefaultLogPath,
+  SESSION_NOTIFICATIONS,
   type SessionBroadcast,
   type RunningServer,
   type ProcessLockPaths,
@@ -254,7 +255,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     current: null,
   };
   const runEventForwarder = createRunEventForwarder((conversationId, envelope) =>
-    sessionBroadcastRef.current?.(conversationId, "session.event", envelope),
+    sessionBroadcastRef.current?.(conversationId, SESSION_NOTIFICATIONS.event, envelope),
   );
   // 单钩子双装饰:本地日志渲染 + 跨进程转发,各自管理自己的订阅与 dispose
   const serveDecorateRunBus: typeof renderDecorator = (ctx) => {

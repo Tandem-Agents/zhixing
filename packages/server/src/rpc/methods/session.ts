@@ -37,6 +37,20 @@ import type { SessionBroadcast } from "../session-broadcast.js";
 import type { ConversationDirectory } from "../../runtime/conversation-directory.js";
 import type { ConversationManager, ManagedSession } from "../../runtime/conversation-manager.js";
 import { runTurnWithCommit } from "../../runtime/run-turn.js";
+import {
+  SESSION_NOTIFICATIONS,
+  toWireAgentResult,
+  type SessionChangedPayload,
+  type SessionCompletePayload,
+  type SessionConversationEntry,
+  type SessionDeltaPayload,
+  type SessionListResult,
+  type SessionModeSwitchIntentPayload,
+  type SessionRenameResult,
+  type SessionSendResult,
+  type SessionSubscribeResult,
+  type SessionUnsubscribeResult,
+} from "../session-wire.js";
 
 // ─── session.send ───
 
@@ -45,12 +59,6 @@ interface SessionSendParams {
   conversationId?: string;
   /** @deprecated 使用 conversationId */
   sessionId?: string;
-}
-
-interface SessionSendResult {
-  conversationId: string;
-  /** @deprecated 使用 conversationId */
-  sessionId: string;
 }
 
 export function buildSessionSendMethod(): MethodEntry {
@@ -79,7 +87,7 @@ export function buildSessionSendMethod(): MethodEntry {
           runManagedTurn(managed, text, ctx.connection, manager, broadcast),
         // 取消通知是排队发起者的私人回执,不组播——其他端没见过这条排队项
         cancel: () => {
-          ctx.connection.notify("session.complete", {
+          ctx.connection.notify(SESSION_NOTIFICATIONS.complete, {
             conversationId,
             sessionId: conversationId,
             result: {
@@ -87,7 +95,7 @@ export function buildSessionSendMethod(): MethodEntry {
               error: { name: "Cancelled", message: "Pending turn cancelled" },
               usage: { inputTokens: 0, outputTokens: 0 },
             },
-          });
+          } satisfies SessionCompletePayload);
         },
       });
 
@@ -183,21 +191,26 @@ async function runManagedTurn(
         // 发送(同连接有序):客户端收意图暂存,收 complete(turn 落定)即消费,
         // 与 REPL 的 turn 边界消费语义对齐。
         if (runResult.pendingModeSwitch) {
-          connection.notify("session.modeSwitchIntent", {
+          connection.notify(SESSION_NOTIFICATIONS.modeSwitchIntent, {
             conversationId,
             intent: runResult.pendingModeSwitch,
-          });
+          } satisfies SessionModeSwitchIntentPayload);
         }
-        // session.complete 的 result 保持 AgentResult 契约（终止原因 + usage +
-        // error，不带 runRecord/windowCompact——那是持久化事项）,纯结果可组播。
-        push("session.complete", {
+        // session.complete 的 result 保持 AgentResult 语义（终止原因 + usage +
+        // error，不带 runRecord/windowCompact——那是持久化事项）,经 wire 投影
+        // 组播(error 分支的 Error 实例直发会丢 message)。
+        push(SESSION_NOTIFICATIONS.complete, {
           conversationId,
           sessionId: conversationId,
-          result: runResult.agentResult,
-        });
+          result: toWireAgentResult(runResult.agentResult),
+        } satisfies SessionCompletePayload);
         break;
       }
-      push("session.delta", { conversationId, sessionId: conversationId, delta: iter.value });
+      push(SESSION_NOTIFICATIONS.delta, {
+        conversationId,
+        sessionId: conversationId,
+        delta: iter.value,
+      } satisfies SessionDeltaPayload);
     }
 
     // turnStartedAt 不用作 run record 的 timestamp（buildRunRecord 已精确设定）——
@@ -206,7 +219,7 @@ async function runManagedTurn(
   } catch (err) {
     if (abortController.signal.aborted) return;
     const message = err instanceof Error ? err.message : String(err);
-    push("session.complete", {
+    push(SESSION_NOTIFICATIONS.complete, {
       conversationId,
       sessionId: conversationId,
       result: {
@@ -214,7 +227,7 @@ async function runManagedTurn(
         error: { name: "RuntimeError", message },
         usage: { inputTokens: 0, outputTokens: 0 },
       },
-    });
+    } satisfies SessionCompletePayload);
   } finally {
     unsubClose();
     manager.setBusy(conversationId, false);
@@ -234,12 +247,12 @@ export function buildSessionListMethod(): MethodEntry {
   return {
     name: "session.list",
     requiresAuth: true,
-    async handler(_params, ctx) {
+    async handler(_params, ctx): Promise<SessionListResult> {
       const manager = requireConversations(ctx.server);
       const directory = requireDirectory(ctx.server);
       const conversations = await directory.list();
       return {
-        conversations: conversations.map((c) => {
+        conversations: conversations.map((c): SessionConversationEntry => {
           const active = manager.getSession(c.id);
           return {
             conversationId: c.id,
@@ -349,14 +362,17 @@ export function buildSessionRenameMethod(): MethodEntry {
       }
       // 会话级变更组播——活跃会话的在场 observer 据此刷新标题;不活跃对话
       // 名册为空、通知自然无人收(列表视图的跨端刷新策略归接入面接入时定)
-      ctx.server.sessionBroadcast?.(params.conversationId, "session.changed", {
+      ctx.server.sessionBroadcast?.(params.conversationId, SESSION_NOTIFICATIONS.changed, {
         conversationId: params.conversationId,
         change: "renamed",
         name: renamed.name,
-      });
+      } satisfies SessionChangedPayload);
       // 返回入参全域键——目录契约返回库内身份(场景对话是 localId),
       // 全域键(ws: 前缀)由 RPC 层保持,断键即断静态归属路由
-      return { conversationId: params.conversationId, name: renamed.name };
+      return {
+        conversationId: params.conversationId,
+        name: renamed.name,
+      } satisfies SessionRenameResult;
     },
   };
 }
@@ -419,10 +435,10 @@ export function buildSessionDeleteMethod(): MethodEntry {
       const directory = ctx.server.conversationDirectory;
       // 会话级变更通知:删除发生在 run 外,双通道(以 run 为边界)覆盖不到——
       // 旁观端无此信号会盯着已删对话继续操作。删除前组播(名册删除后即空)。
-      ctx.server.sessionBroadcast?.(id, "session.changed", {
+      ctx.server.sessionBroadcast?.(id, SESSION_NOTIFICATIONS.changed, {
         conversationId: id,
         change: "deleted",
-      });
+      } satisfies SessionChangedPayload);
       // 删除 = 活跃运行时释放 + 落盘数据删除;任一存在即为有效删除
       const releasedActive = await manager.delete(id);
       const removedDisk = (await directory?.remove(id)) ?? false;
@@ -448,7 +464,7 @@ export function buildSessionSubscribeMethod(): MethodEntry {
   return {
     name: "session.subscribe",
     requiresAuth: true,
-    handler(rawParams, ctx): { subscribed: boolean } {
+    handler(rawParams, ctx): SessionSubscribeResult {
       const params = (rawParams ?? {}) as SessionSubscribeParams;
       if (typeof params.conversationId !== "string") {
         throw RpcErrors.invalidParams(
@@ -470,7 +486,7 @@ export function buildSessionUnsubscribeMethod(): MethodEntry {
   return {
     name: "session.unsubscribe",
     requiresAuth: true,
-    handler(rawParams, ctx): { unsubscribed: boolean } {
+    handler(rawParams, ctx): SessionUnsubscribeResult {
       const params = (rawParams ?? {}) as SessionSubscribeParams;
       if (typeof params.conversationId !== "string") {
         throw RpcErrors.invalidParams(

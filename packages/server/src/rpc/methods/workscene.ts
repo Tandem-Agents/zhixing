@@ -21,6 +21,11 @@ import { RpcAppError, RpcErrors } from "../handlers.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
 import type { ServerContext } from "../../context.js";
 import type { WorksceneDirectory } from "../../runtime/workscene-directory.js";
+import type {
+  WorksceneEnterResult,
+  WorksceneListResult,
+  WorksceneSummary,
+} from "../session-wire.js";
 
 function requireWorkscenes(server: ServerContext): WorksceneDirectory {
   if (!server.workscenes) {
@@ -37,7 +42,7 @@ function sceneSummary(scene: {
   name: string;
   workdir?: string;
   lastActiveAt?: string;
-}) {
+}): WorksceneSummary {
   return {
     sceneId: scene.id,
     name: scene.name,
@@ -50,7 +55,7 @@ export function buildWorksceneListMethod(): MethodEntry {
   return {
     name: "workscene.list",
     requiresAuth: true,
-    async handler(_params, ctx) {
+    async handler(_params, ctx): Promise<WorksceneListResult> {
       const scenes = await requireWorkscenes(ctx.server).list();
       return { scenes: scenes.map(sceneSummary) };
     },
@@ -164,7 +169,7 @@ export function buildWorksceneEnterMethod(): MethodEntry {
       return {
         conversationId: entered.conversationId,
         scene: sceneSummary(entered.scene),
-      };
+      } satisfies WorksceneEnterResult;
     },
   };
 }

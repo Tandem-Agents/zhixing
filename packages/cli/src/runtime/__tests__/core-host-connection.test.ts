@@ -154,6 +154,95 @@ describe("CoreHostConnection", () => {
     expect(received).toEqual([{ taskId: "t" }]);
   });
 
+  it("活连接上退订即生效——client 再 emit 不触达（回归锚）", async () => {
+    const client = makeFakeClient();
+    const conn = new CoreHostConnection({
+      discover: async () => endpoint,
+      spawn: vi.fn(async () => ({ ok: true })),
+      createClient: () => asClient(client),
+    });
+    await conn.getClient();
+
+    const received: unknown[] = [];
+    const off = conn.onNotification("session.event", (p) => received.push(p));
+    client.emit("session.event", { seq: 0 });
+    expect(received).toHaveLength(1);
+
+    // 连接仍存活时退订——生效面与订阅表是同一张表,删表即停止触达
+    off();
+    client.emit("session.event", { seq: 1 });
+    expect(received).toHaveLength(1);
+  });
+
+  it("同 method 多 handler:单 emit 各触发一次（转发器唯一）,退订其一另一仍触达", async () => {
+    const client = makeFakeClient();
+    const conn = new CoreHostConnection({
+      discover: async () => endpoint,
+      spawn: vi.fn(async () => ({ ok: true })),
+      createClient: () => asClient(client),
+    });
+    await conn.getClient();
+
+    const a: unknown[] = [];
+    const b: unknown[] = [];
+    const offA = conn.onNotification("session.delta", (p) => a.push(p));
+    conn.onNotification("session.delta", (p) => b.push(p));
+
+    client.emit("session.delta", { n: 1 });
+    expect(a).toHaveLength(1);
+    expect(b).toHaveLength(1);
+
+    offA();
+    client.emit("session.delta", { n: 2 });
+    expect(a).toHaveLength(1);
+    expect(b).toHaveLength(2);
+  });
+
+  it("订阅者级错误隔离:同 method 第一个 handler 抛错,后续 handler 仍触达（回归锚）", async () => {
+    const client = makeFakeClient();
+    const conn = new CoreHostConnection({
+      discover: async () => endpoint,
+      spawn: vi.fn(async () => ({ ok: true })),
+      createClient: () => asClient(client),
+    });
+    await conn.getClient();
+
+    const received: unknown[] = [];
+    conn.onNotification("session.event", () => {
+      throw new Error("订阅者崩了");
+    });
+    conn.onNotification("session.event", (p) => received.push(p));
+
+    // 转发器是 client 眼里的单个 handler——隔离粒度必须在转发器内恢复为订阅者
+    client.emit("session.event", { seq: 0 });
+    expect(received).toEqual([{ seq: 0 }]);
+  });
+
+  it("断线重连后订阅仍生效,重连后退订同样立即生效", async () => {
+    const c1 = makeFakeClient();
+    const c2 = makeFakeClient();
+    const clients = [c1, c2];
+    let i = 0;
+    const conn = new CoreHostConnection({
+      discover: async () => endpoint,
+      spawn: vi.fn(async () => ({ ok: true })),
+      createClient: () => asClient(clients[i++]!),
+    });
+
+    const received: unknown[] = [];
+    const off = conn.onNotification("schedule.completed", (p) => received.push(p));
+    await conn.getClient();
+    c1.markClosed();
+    await conn.getClient(); // 重建到 c2,转发器重挂
+
+    c2.emit("schedule.completed", { taskId: "t1" });
+    expect(received).toHaveLength(1);
+
+    off();
+    c2.emit("schedule.completed", { taskId: "t2" });
+    expect(received).toHaveLength(1);
+  });
+
   it("dispose 后 getClient 抛「已释放」", async () => {
     const conn = new CoreHostConnection({
       discover: async () => endpoint,

@@ -575,15 +575,8 @@ export class RuntimeSession implements IWorkModeController {
     this.currentBrokerDetach = null;
     this.confirmationAttach = null;
 
-    // 关闭调度门面——断开 cli 与核心宿主的连接、清订阅。
-    try {
-      await this.opts.schedulerFacade.dispose?.();
-    } catch (err) {
-      console.error(
-        "[RuntimeSession.dispose] schedulerFacade.dispose failed:",
-        err,
-      );
-    }
+    // 调度门面不在此收尾——facade 不持连接,核心宿主连接是进程级共享设施,
+    // 其释放归连接持有者(repl 退出链)。
 
     // main 运行体末窗 onWindowClose（销毁链最后一步）。失败仅 warn,不抛。
     try {

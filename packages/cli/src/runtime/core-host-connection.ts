@@ -1,13 +1,19 @@
 /**
  * CoreHostConnection —— cli 到核心宿主的 RPC 连接生命周期管理。
  *
- * 只负责「确保有一个可用的已认证 RpcClient」，不懂 schedule 语义：
+ * cli 进程级唯一连接:连接即接入面身份单位(observer 登记 / 确认定向推送 /
+ * 换代判定全挂 connection),调度 / 会话 / 确认域经各自 facade 共用这一条
+ * 已认证连接——双连接会把一个 cli 数成两个接入面。
+ *
+ * 只负责「确保有一个可用的已认证 RpcClient」，不懂任何方法域语义：
  * - 懒连接：首次需要时才发现 / 拉起宿主并连上。
  * - 并发去重：多个调用同时要连接时共享同一次建立过程。
  * - 断线重建：宿主 idle 退出后 client 关闭，下次 getClient 重新建立。
- * - 重订阅：重建连接后把持久订阅的 notification handler 重新挂上。
+ * - 持久订阅：client 上每个 method 只挂一个查表转发器,用户 handler 只存在
+ *   于订阅表一层——退订即删表、对活连接立即生效;重连只重挂转发器,
+ *   无 handler 级的双层状态同步(生效面与声明面是同一张表)。
  *
- * 发现不到宿主时按需拉起一个「调度 profile」最小宿主（复用 spawnDaemon，传静默 console
+ * 发现不到宿主时按需拉起核心宿主（复用 spawnDaemon，传静默 console
  * 让它不向终端倾倒原始日志——失败由本层封装成友好错误）。
  */
 
@@ -23,17 +29,29 @@ import { spawnDaemon } from "../serve/daemon.js";
 /** ensure 拉起 / 连接核心宿主失败——cli 捕获后给友好提示，不向用户倒原始日志。 */
 export class CoreHostUnavailableError extends Error {
   constructor(reason: string) {
-    super(`定时功能当前不可用：${reason}`);
+    super(`核心宿主当前不可用：${reason}`);
     this.name = "CoreHostUnavailableError";
   }
 }
 
 type NotificationHandler = (params: unknown) => void;
 
+/**
+ * 连接的窄面 —— 各域设施(RpcSchedulerFacade / RpcConversationFacade /
+ * RpcEventBus 等)依赖此接口而非具体类:设施只需要「请求 + 持久订阅」,
+ * 连接的建立 / 重连 / 释放归进程级持有者,测试也无需绕完整连接装配。
+ */
+export interface CoreHostLink {
+  /** 返回可用的已认证 client;无则发现 / 拉起并连上。 */
+  getClient(): Promise<RpcClient>;
+  /** 持久订阅一个 notification(跨重连有效、被动——不为订阅拉起宿主)。 */
+  onNotification(method: string, handler: NotificationHandler): () => void;
+}
+
 export interface CoreHostConnectionDeps {
   /** 发现已在跑的宿主。 */
   discover: () => Promise<ServerEndpoint>;
-  /** 拉起一个调度 profile 宿主，返回是否成功。 */
+  /** 拉起核心宿主，返回是否成功。 */
   spawn: () => Promise<{ ok: boolean; reason?: string }>;
   /** 建立 RpcClient。 */
   createClient: (url: string) => RpcClient;
@@ -50,8 +68,8 @@ export function defaultCoreHostConnectionDeps(): CoreHostConnectionDeps {
       const result = await spawnDaemon({
         // 不传 --port：child 走按 home 派生的端口（同 home 同端口 → listen 原子仲裁单例、
         // 并发拉起只活一个；不同 home 不同端口、不撞）。实际端口写 PID 文件供 discover。
-        // 不传 --profile：自动拉起与显式 serve 是同一个宿主——装什么由配置说了算
-        // （渠道 / MCP 按配置自适应装配），不由拉起方式决定。
+        // 自动拉起与显式 serve 是同一个宿主——装什么由配置说了算（渠道 / MCP
+        // 按配置自适应装配），不由拉起方式决定。
         forwardedArgs: ["serve"],
         deps: { console: silent },
       });
@@ -61,14 +79,24 @@ export function defaultCoreHostConnectionDeps(): CoreHostConnectionDeps {
   };
 }
 
-export class CoreHostConnection {
+export class CoreHostConnection implements CoreHostLink {
   private client: RpcClient | null = null;
   private connecting: Promise<RpcClient> | null = null;
   private disposed = false;
-  /** 跨重连持久的 notification 订阅：method → handlers。 */
+  /**
+   * 跨重连持久的 notification 订阅：method → handlers。
+   * 这张表就是分发的生效面——client 上的转发器实时查它,退订删表即停止触达。
+   */
   private readonly subscriptions = new Map<string, Set<NotificationHandler>>();
+  /** 当前活 client 上已挂转发器的 method 集合（随连接重建重置）。 */
+  private forwardedMethods = new Set<string>();
 
   constructor(private readonly deps: CoreHostConnectionDeps) {}
+
+  /** 主动确保核心宿主在场并已连上(不在则拉起)——启动轻检查防饿死等场景用。 */
+  async ensure(): Promise<void> {
+    await this.getClient();
+  }
 
   /** 返回可用的已认证 client；无则发现 / 拉起并连上。并发调用共享同一次建立。 */
   async getClient(): Promise<RpcClient> {
@@ -85,6 +113,12 @@ export class CoreHostConnection {
         throw new Error("CoreHostConnection 在连接建立期间被释放");
       }
       this.client = client;
+      // 对账:establish 的挂载循环之后、本赋值之前的 microtask 窗口里新增的
+      // 订阅(onNotification 彼时见不到活连接)在此补挂——attachForwarder 幂等,
+      // 全量循环即对账,「订阅表 = 生效面」在所有时序下成立。
+      for (const method of this.subscriptions.keys()) {
+        this.attachForwarder(client, method);
+      }
       return client;
     } finally {
       this.connecting = null;
@@ -96,11 +130,41 @@ export class CoreHostConnection {
     const client = this.deps.createClient(endpoint.url);
     await client.connect();
     await client.authenticate(endpoint.token);
-    // 重连后恢复所有持久订阅到新 client（旧 client 已关、其 listener 自然失效）
-    for (const [method, handlers] of this.subscriptions) {
-      for (const handler of handlers) client.onNotification(method, handler);
+    // 新连接从零挂转发器（旧 client 的转发器随旧连接关闭自然失效）
+    this.forwardedMethods = new Set();
+    for (const method of this.subscriptions.keys()) {
+      this.attachForwarder(client, method);
     }
     return client;
+  }
+
+  /**
+   * 在 client 上为 method 挂唯一的查表转发器——分发时实时读 subscriptions,
+   * 用户 handler 永不直挂 client,退订只动表即对活连接立即生效。
+   * 转发器不随退订摘除：查空表 no-op,每 method 至多一个、无泄漏面,
+   * 随连接关闭自然失效。
+   */
+  private attachForwarder(client: RpcClient, method: string): void {
+    if (this.forwardedMethods.has(method)) return;
+    this.forwardedMethods.add(method);
+    client.onNotification(method, (params) => {
+      const handlers = this.subscriptions.get(method);
+      if (!handlers) return;
+      // 快照分发——分发中退订不影响本帧可达性（与 EventBus 语义一致）
+      for (const handler of [...handlers]) {
+        // 订阅者级错误隔离——对齐底层 RpcClient 的 per-handler 语义(转发器
+        // 合并多 handler 后,client 的 try/catch 只包到转发器整体,隔离粒度
+        // 必须在此恢复为订阅者):单个订阅者抛错不阻断同 method 的其他订阅者,
+        // 异步 handler 的拒绝同样兜接。传输层静默隔离,可观测性归订阅者
+        // 自身(如 RpcEventBus 的 onListenerError)。
+        try {
+          const result = handler(params) as unknown;
+          if (result instanceof Promise) result.catch(() => {});
+        } catch {
+          // 静默——与 RpcClient 的 listener 错误隔离语义一致
+        }
+      }
+    });
   }
 
   private async discoverOrSpawn(): Promise<ServerEndpoint> {
@@ -114,13 +178,13 @@ export class CoreHostConnection {
         try {
           return await this.deps.discover();
         } catch {
-          throw new CoreHostUnavailableError(spawned.reason ?? "无法拉起调度宿主");
+          throw new CoreHostUnavailableError(spawned.reason ?? "无法拉起核心宿主");
         }
       }
       try {
         return await this.deps.discover();
       } catch {
-        throw new CoreHostUnavailableError("调度宿主已拉起但发现失败");
+        throw new CoreHostUnavailableError("核心宿主已拉起但发现失败");
       }
     }
   }
@@ -136,15 +200,15 @@ export class CoreHostConnection {
       this.subscriptions.set(method, handlers);
     }
     handlers.add(handler);
-    // 已有活连接则立即挂上
+    // 已有活连接则确保该 method 的转发器在场（幂等）
     if (this.client && !this.client.closed) {
-      this.client.onNotification(method, handler);
+      this.attachForwarder(this.client, method);
     }
     return () => {
       handlers.delete(handler);
       if (handlers.size === 0) this.subscriptions.delete(method);
-      // 当前 client 上的该 listener 留到连接关闭自然失效——取消订阅多发生在退出，
-      // 此时连接随即关闭，无需逐个摘除当前 listener。
+      // 退订到此为止即已生效——转发器查表分发,表里没了就不再触达,
+      // 活连接上无需(也不存在)handler 级的摘除动作。
     };
   }
 
