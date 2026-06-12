@@ -1,5 +1,10 @@
 /**
- * SessionRuntime 适配器测试 — 用 mock AgentRuntime 验证 callback → AsyncGenerator 桥接
+ * SessionRuntime 适配器测试 — 用 mock AgentRuntime 验证 callback → AsyncGenerator 桥接。
+ *
+ * adapter 是纯执行体:输入消息由调用方构造(窗口归 ConversationManager,接受协议
+ * 与历史投影的测试在 @zhixing/server 侧),此处只锁协议桥接契约——yield 流转、
+ * RunResult / 错误透传、参数透传(messages / conversationId / turnIndex / source)、
+ * abort 行为、broker 与 dispose 透传。
  *
  * Mock 设计:cooperative 响应 abortSignal —— 真实 AgentLoop 在 abort 触发后通过
  * cleanup 路径返回 `AgentResult.aborted` with abortReason(.then 而非 throw),
@@ -15,14 +20,13 @@ import {
   type AgentYield,
   type Message,
 } from "@zhixing/core";
-import type { SessionRuntime } from "@zhixing/server";
 import { createServerRuntimeAdapter } from "../session-adapter.js";
 import type { RunResult } from "@zhixing/core";
 import type { AgentRuntime, RunParams } from "@zhixing/orchestrator/runtime";
 
-/** 模拟接受协议：caller（ConversationManager）在持久化成功后推进窗口 */
-function acceptTurn(runtime: SessionRuntime, result: RunResult): void {
-  runtime.acceptRun({ runMessages: result.runRecord.messages });
+/** 本轮用户消息构造——run 输入由调用方组装(此处模拟 runTurnWithCommit 的构造) */
+function um(text: string): Message {
+  return { role: "user", content: [{ type: "text", text }] };
 }
 
 interface MockBehavior {
@@ -31,6 +35,8 @@ interface MockBehavior {
   reason?: AgentResult["reason"];
   /** 模拟 LLM 流的延迟,让测试有空间在中途触发 abort */
   yieldDelayMs?: number;
+  /** 捕获 run 收到的参数,供透传契约断言 */
+  capture?: (params: RunParams) => void;
 }
 
 function createMockAgentRuntime(behavior: MockBehavior = {}): AgentRuntime {
@@ -41,6 +47,7 @@ function createMockAgentRuntime(behavior: MockBehavior = {}): AgentRuntime {
     model: "mock-model",
     confirmationBroker: broker,
     async run(params: RunParams): Promise<RunResult> {
+      behavior.capture?.(params);
       if (behavior.throwError) {
         throw new Error(behavior.throwError);
       }
@@ -173,7 +180,7 @@ describe("createServerRuntimeAdapter", () => {
     );
 
     const yields: AgentYield[] = [];
-    const gen = runtime.run("hello");
+    const gen = runtime.run([um("hello")]);
     while (true) {
       const { value, done } = await gen.next();
       if (done) {
@@ -186,20 +193,21 @@ describe("createServerRuntimeAdapter", () => {
     expect((yields[0] as { text: string }).text).toBe("hi");
   });
 
-  it("getHistory 反映窗口：run 后经 acceptRun 接受，得到本轮蒸馏对", async () => {
-    const runtime = createServerRuntimeAdapter("test-2", createMockAgentRuntime());
-    const gen = runtime.run("hello");
-    let result: RunResult | undefined;
-    while (true) {
-      const { value, done } = await gen.next();
-      if (done) { result = value; break; }
-    }
-    acceptTurn(runtime, result!);
+  it("纯执行体透传契约:messages 原样、conversationId=sessionId、turnIndex/source 透传", async () => {
+    let captured: RunParams | undefined;
+    const runtime = createServerRuntimeAdapter(
+      "conv-42",
+      createMockAgentRuntime({ capture: (p) => (captured = p) }),
+    );
 
-    const history = runtime.getHistory();
-    expect(history).toHaveLength(2);
-    expect(history[0]!.role).toBe("user");
-    expect(history[1]!.role).toBe("assistant");
+    const input = [um("ctx"), um("hello")];
+    const gen = runtime.run(input, { turnIndex: 7, source: "channel" });
+    while (!(await gen.next()).done) {/* drain */}
+
+    expect(captured!.messages).toEqual(input);
+    expect(captured!.conversationId).toBe("conv-42");
+    expect(captured!.turnIndex).toBe(7);
+    expect(captured!.source).toBe("channel");
   });
 
   it("propagates errors from agentRuntime.run via throw", async () => {
@@ -208,36 +216,11 @@ describe("createServerRuntimeAdapter", () => {
       createMockAgentRuntime({ throwError: "boom" }),
     );
 
-    const gen = runtime.run("hi");
+    const gen = runtime.run([um("hi")]);
     await expect(gen.next()).rejects.toThrow("boom");
-    // 输入瞬态构造，窗口未被触碰
-    expect(runtime.getHistory()).toHaveLength(0);
   });
 
-  it("multiple sequential runs accumulate history（每轮经 acceptRun 接受）", async () => {
-    const runtime = createServerRuntimeAdapter("test-4", createMockAgentRuntime());
-
-    const gen1 = runtime.run("first");
-    let r1: RunResult | undefined;
-    while (true) {
-      const { value, done } = await gen1.next();
-      if (done) { r1 = value; break; }
-    }
-    acceptTurn(runtime, r1!);
-
-    const gen2 = runtime.run("second");
-    let r2: RunResult | undefined;
-    while (true) {
-      const { value, done } = await gen2.next();
-      if (done) { r2 = value; break; }
-    }
-    acceptTurn(runtime, r2!);
-
-    const history = runtime.getHistory();
-    expect(history).toHaveLength(4);
-  });
-
-  it("dispose 透传底层运行体销毁（窗口随 adapter 一起弃置）", async () => {
+  it("dispose 透传底层运行体销毁", async () => {
     let disposedWith: string | undefined;
     const agent = createMockAgentRuntime();
     (agent as unknown as { dispose: (r: string) => Promise<void> }).dispose =
@@ -250,128 +233,15 @@ describe("createServerRuntimeAdapter", () => {
     expect(disposedWith).toBe("session-dispose");
   });
 
-  it("getHistory respects limit parameter", async () => {
-    const runtime = createServerRuntimeAdapter("test-7", createMockAgentRuntime());
-    const gen1 = runtime.run("first");
-    let r1: RunResult | undefined;
-    while (true) {
-      const { value, done } = await gen1.next();
-      if (done) { r1 = value; break; }
-    }
-    acceptTurn(runtime, r1!);
-
-    const gen2 = runtime.run("second");
-    let r2: RunResult | undefined;
-    while (true) {
-      const { value, done } = await gen2.next();
-      if (done) { r2 = value; break; }
-    }
-    acceptTurn(runtime, r2!);
-
-    const last2 = runtime.getHistory(2);
-    expect(last2).toHaveLength(2);
-    const lastUser = last2[0] as { role: string; content: Array<{ type: string; text: string }> };
-    expect(lastUser.role).toBe("user");
-    expect(lastUser.content[0]!.text).toBe("second");
-  });
-
   it("adapter 透传 AgentRuntime 的 confirmationBroker——远程确认链路依赖", () => {
     const agent = createMockAgentRuntime();
     const runtime = createServerRuntimeAdapter("test-broker", agent);
     expect(runtime.confirmationBroker).toBe(agent.confirmationBroker);
   });
 
-  describe("失败路径：窗口不前进（无回滚动作可言）", () => {
-    it("reason=error：窗口未被触碰，history 保持空", async () => {
-      const runtime = createServerRuntimeAdapter(
-        "test-err",
-        createMockAgentRuntime({ reason: "error" }),
-      );
+  // ─── abort(reason?):fire current controller / 单维度返 boolean ───
 
-      const gen = runtime.run("q");
-      while (true) {
-        const { done } = await gen.next();
-        if (done) break;
-      }
-
-      expect(runtime.getHistory()).toHaveLength(0);
-    });
-
-    it("reason=max_turns：同样不前进", async () => {
-      const runtime = createServerRuntimeAdapter(
-        "test-max",
-        createMockAgentRuntime({ reason: "max_turns" }),
-      );
-
-      const gen = runtime.run("q");
-      while (true) {
-        const { done } = await gen.next();
-        if (done) break;
-      }
-
-      expect(runtime.getHistory()).toHaveLength(0);
-    });
-
-    it("reason=aborted（agent-loop 内部 abort，非 abortSignal）：同样不前进", async () => {
-      const runtime = createServerRuntimeAdapter(
-        "test-abrt",
-        createMockAgentRuntime({ reason: "aborted" }),
-      );
-
-      const gen = runtime.run("q");
-      while (true) {
-        const { done } = await gen.next();
-        if (done) break;
-      }
-
-      expect(runtime.getHistory()).toHaveLength(0);
-    });
-
-    it("reason=completed：窗口同样不前进，直到 caller 走接受协议", async () => {
-      const runtime = createServerRuntimeAdapter(
-        "test-ok",
-        createMockAgentRuntime({ reason: "completed" }),
-      );
-
-      const gen = runtime.run("q");
-      let result: RunResult | undefined;
-      while (true) {
-        const { value, done } = await gen.next();
-        if (done) { result = value; break; }
-      }
-
-      // run 结束本身不动窗口——接受是 caller（持久化成功后）的动作
-      expect(runtime.getHistory()).toHaveLength(0);
-      acceptTurn(runtime, result!);
-      expect(runtime.getHistory()).toHaveLength(2);
-    });
-
-    it("non-completed 后再次 run：内存始终停在原基底（跨 run 防护）", async () => {
-      const runtime = createServerRuntimeAdapter(
-        "test-seq",
-        createMockAgentRuntime({ reason: "error" }),
-      );
-
-      const gen1 = runtime.run("first");
-      while (true) {
-        const { done } = await gen1.next();
-        if (done) break;
-      }
-      expect(runtime.getHistory()).toHaveLength(0);
-
-      const gen2 = runtime.run("second");
-      const { done } = await gen2.next();
-      if (!done) {
-        while (!(await gen2.next()).done) {/* drain */}
-      }
-
-      expect(runtime.getHistory()).toHaveLength(0);
-    });
-  });
-
-  // ─── abort(reason?) 新行为:fire current controller / 单维度返 boolean ───
-
-  describe("abort(reason?) 新行为", () => {
+  describe("abort(reason?)", () => {
     it("无 in-flight 时 abort() 返 false(idle 是正常状态,不抛)", () => {
       const runtime = createServerRuntimeAdapter("test-no-flight", createMockAgentRuntime());
       expect(runtime.abort()).toBe(false);
@@ -385,7 +255,7 @@ describe("createServerRuntimeAdapter", () => {
 
       runtime.abort();
 
-      const gen = runtime.run("normal");
+      const gen = runtime.run([um("normal")]);
       let runResult: RunResult | undefined;
       while (true) {
         const { value, done } = await gen.next();
@@ -394,7 +264,7 @@ describe("createServerRuntimeAdapter", () => {
       expect(runResult?.agentResult.reason).toBe("completed");
     });
 
-    it("in-flight abort:agent loop 通过 abortSignal 自然产 RunResult.aborted,窗口不前进", async () => {
+    it("in-flight abort:agent loop 通过 abortSignal 自然产 RunResult.aborted", async () => {
       const runtime = createServerRuntimeAdapter(
         "test-inflight-abort",
         createMockAgentRuntime({
@@ -403,7 +273,7 @@ describe("createServerRuntimeAdapter", () => {
         }),
       );
 
-      const gen = runtime.run("long task");
+      const gen = runtime.run([um("long task")]);
 
       // 拿到第一个 partial yield
       const first = await gen.next();
@@ -420,9 +290,6 @@ describe("createServerRuntimeAdapter", () => {
         if (done) { result = value; break; }
       }
       expect(result?.agentResult.reason).toBe("aborted");
-
-      // 窗口未被触碰 —— history 保持空
-      expect(runtime.getHistory()).toHaveLength(0);
     });
 
     it("abort 携带 reason → 透传到 agent loop 的 abortSignal(无 parent 时不 wrap)", async () => {
@@ -438,7 +305,7 @@ describe("createServerRuntimeAdapter", () => {
         }),
       );
 
-      const gen = runtime.run("task");
+      const gen = runtime.run([um("task")]);
       await gen.next();
 
       runtime.abort({ kind: "user-cancel", source: "rpc", pressedAt: 12345 });
@@ -458,12 +325,9 @@ describe("createServerRuntimeAdapter", () => {
       });
     });
 
-    it("有 parent abortSignal:abort fire 后 reason 经 fork wrap 为 parent-abort", async () => {
-      // 有 parent abortSignal:createInterruptController({ parent }) 走 forkController
-      // 路径,SessionAdapter 自身的 abort(reason) 触发后,reason 直接是 typed reason
-      // (因为 fire 的是 child 自己的 controller,不经过 parent 的 fork wrap)。
-      // 但若 parent 自己 fire abort,fork listener 会把 parent reason wrap 成
-      // parent-abort{ parentReason }。本测试覆盖 parent 触发 abort 的 wrap 行为。
+    it("有 parent abortSignal:parent 触发 abort 经 fork wrap 为 parent-abort", async () => {
+      // createInterruptController({ parent }) 走 forkController 路径:parent 自己
+      // fire abort 时,fork listener 把 parent reason wrap 成 parent-abort{ parentReason }。
       const runtime = createServerRuntimeAdapter(
         "test-parent-fork",
         createMockAgentRuntime({
@@ -473,7 +337,7 @@ describe("createServerRuntimeAdapter", () => {
       );
 
       const parent = new AbortController();
-      const gen = runtime.run("task", { abortSignal: parent.signal });
+      const gen = runtime.run([um("task")], { abortSignal: parent.signal });
       await gen.next();
 
       // parent 触发 abort,带 typed reason
@@ -506,7 +370,7 @@ describe("createServerRuntimeAdapter", () => {
         }),
       );
 
-      const gen = runtime.run("task");
+      const gen = runtime.run([um("task")]);
       await gen.next();
 
       runtime.abort();
@@ -533,7 +397,7 @@ describe("createServerRuntimeAdapter", () => {
         }),
       );
 
-      const gen = runtime.run("task");
+      const gen = runtime.run([um("task")]);
       await gen.next();
 
       const first = runtime.abort({ kind: "user-cancel", source: "rpc", pressedAt: 1 });
@@ -567,7 +431,7 @@ describe("createServerRuntimeAdapter", () => {
       const ac = new AbortController();
       ac.abort();
 
-      const gen = runtime.run("never runs", ac.signal);
+      const gen = runtime.run([um("never runs")], { abortSignal: ac.signal });
 
       let result: RunResult | undefined;
       while (true) {
@@ -576,14 +440,12 @@ describe("createServerRuntimeAdapter", () => {
       }
 
       expect(result?.agentResult.reason).toBe("aborted");
-      // 窗口未被触碰
-      expect(runtime.getHistory()).toHaveLength(0);
     });
 
     it("turn 完成后 abort 返 false(currentController 已被 finally 清空)", async () => {
       const runtime = createServerRuntimeAdapter("test-after-done", createMockAgentRuntime());
 
-      const gen = runtime.run("ok");
+      const gen = runtime.run([um("ok")]);
       while (true) {
         const { done } = await gen.next();
         if (done) break;

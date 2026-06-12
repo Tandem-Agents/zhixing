@@ -1,11 +1,12 @@
 /**
  * runTurnWithCommit —— 一次 session turn 的"运行 + 提交"编排。
  *
- * 状态模型：run 输入由 adapter 瞬态构造（[...注意力窗口, 用户消息]），用户消息
- * 在被接受之前不进入任何状态；窗口只在 recordTurn 的接受协议（先持久化 /
- * pending 入列成功、后 acceptRun）下前进。因此所有失败路径——non-completed、
- * 持久化抛错、runtime.run 自身抛错——内存都自然停在 run 前基底，孤儿 userMsg
- * 这一类状态不可能产生，无需任何 snapshot / 回滚机器。
+ * 状态模型：run 输入在此瞬态构造（[...注意力窗口, 用户消息]——窗口归
+ * ManagedSession，runtime 是纯执行体），用户消息在被接受之前不进入任何状态；
+ * 窗口只在 recordTurn 的接受协议（先持久化 / pending 入列成功、后 acceptRun）
+ * 下前进。因此所有失败路径——non-completed、持久化抛错、runtime.run 自身
+ * 抛错——内存都自然停在 run 前基底，孤儿 userMsg 这一类状态不可能产生，
+ * 无需任何 snapshot / 回滚机器。
  *
  * 责任边界：
  *   helper 只负责"运行 + 按结果决定是否提交"。用户可见的后果（发回复 / 发错误 /
@@ -17,7 +18,7 @@
  * （partial 内容已经由 yield 流推给用户，但不成为对话事实）。
  */
 
-import type { AgentYield, RunResult } from "@zhixing/core";
+import { userMessage, type AgentYield, type RunResult } from "@zhixing/core";
 import type { ConversationManager } from "./conversation-manager.js";
 import type { RunTurnOptions } from "./types.js";
 
@@ -73,7 +74,12 @@ export async function* runTurnWithCommit(
     );
   }
 
-  const gen = session.runtime.run(text, options);
+  // run 输入 = 窗口事实 + 本轮用户消息,瞬态构造——用户消息不预写入任何状态,
+  // accept 之前窗口不前进。
+  const gen = session.runtime.run(
+    [...session.window.getMessages(), userMessage(text)],
+    options,
+  );
   let runResult: RunResult;
   while (true) {
     const iter = await gen.next();

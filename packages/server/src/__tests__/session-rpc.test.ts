@@ -33,22 +33,24 @@ interface MockOptions {
   throwError?: string;
   /** 每个 yield 的延迟（ms） */
   yieldDelayMs?: number;
+  /** RunResult 顶层携带的模式切换意图(complete 通知附带契约的驱动源) */
+  pendingModeSwitch?: RunResult["pendingModeSwitch"];
 }
 
 function createMockRuntime(
   sessionId: string,
   opts: MockOptions = {},
-  bootstrap?: ConversationBootstrap,
 ): SessionRuntime {
-  // 历史恢复的窗口侧最小模拟：启动装填对作为窗口起始条目
-  let messages: Message[] = bootstrap?.bootstrap ? [...bootstrap.bootstrap] : [];
   let aborted = false;
 
   return {
     sessionId,
-    async *run(text): AsyncGenerator<AgentYield, RunResult> {
-      // 新协议：run 输入瞬态构造，内部状态只经 acceptRun 前进
-      const userMsg: Message = { role: "user", content: [{ type: "text", text: typeof text === "string" ? text : "" }] };
+    // 纯执行体:输入消息由调用方构造(窗口归 ManagedSession),mock 取末条回声
+    async *run(messages): AsyncGenerator<AgentYield, RunResult> {
+      const userMsg: Message =
+        messages[messages.length - 1] ?? { role: "user", content: [] };
+      const block = userMsg.content[0];
+      const text = block && block.type === "text" ? block.text : "";
       if (opts.throwError) {
         throw new Error(opts.throwError);
       }
@@ -79,31 +81,23 @@ function createMockRuntime(
         },
         newMessages: [reply],
         durationMs: 0,
+        ...(opts.pendingModeSwitch
+          ? { pendingModeSwitch: opts.pendingModeSwitch }
+          : {}),
       };
-    },
-    getHistory(limit) {
-      return limit ? messages.slice(-limit) : [...messages];
-    },
-    acceptRun(input) {
-      // 接受协议的窗口侧最小模拟：追加 [首条, 末条] 蒸馏对
-      messages.push(
-        input.runMessages[0]!,
-        input.runMessages[input.runMessages.length - 1]!,
-      );
-      return {};
     },
     abort(): boolean {
       aborted = true;
       return true;
     },
-    dispose() {},
+    async dispose() {},
   };
 }
 
 function createMockFactory(opts: MockOptions = {}): RuntimeFactory {
   return {
-    async create(sessionId, bootstrap) {
-      return createMockRuntime(sessionId, opts, bootstrap);
+    async create(sessionId) {
+      return createMockRuntime(sessionId, opts);
     },
   };
 }
@@ -269,9 +263,33 @@ describe("session.* RPC (S2.D)", () => {
     expect(deltas).toHaveLength(4); // 3 text_delta + 1 turn_complete
 
     const complete = await client.waitNotification("session.complete");
-    const completeParams = complete.params as { sessionId: string; result: AgentResult };
+    const completeParams = complete.params as {
+      sessionId: string;
+      result: AgentResult;
+      pendingModeSwitch?: unknown;
+    };
     expect(completeParams.sessionId).toBe(sessionId);
     expect(completeParams.result.reason).toBe("completed");
+    // 无模式切换意图时不附带字段
+    expect(completeParams.pendingModeSwitch).toBeUndefined();
+
+    client.close();
+  });
+
+  it("session.complete 顶层附带 pendingModeSwitch(turn 内进出场景意图,跟随权归发起接入面)", async () => {
+    await startWithFactory(
+      createMockFactory({
+        deltaCount: 1,
+        pendingModeSwitch: { kind: "enter", sceneId: "scene-1" },
+      }),
+    );
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    await client.request("session.send", { text: "go" });
+    const complete = await client.waitNotification("session.complete");
+    const params = complete.params as { pendingModeSwitch?: unknown };
+    expect(params.pendingModeSwitch).toEqual({ kind: "enter", sceneId: "scene-1" });
 
     client.close();
   });

@@ -3,10 +3,10 @@
  *
  * @zhixing/server 定义了抽象接口 SessionRuntime（AsyncGenerator 风格），
  * @zhixing/cli 的 AgentRuntime 是 callback 风格（onYield + Promise<RunResult>）。
- * 此适配器在两者之间架桥。
+ * 此适配器在两者之间架桥——纯协议适配:会话状态(注意力窗口 / turnCount /
+ * 接受协议)归 ConversationManager,adapter 不持有任何会话状态。
  *
  * 关键设计：
- * - 一个 AgentRuntime 实例对应一个 SessionRuntime（持久化对话历史）
  * - queue + waiter 模式把 onYield 回调转为 AsyncGenerator yield
  * - 每个 turn 创建独立的 InterruptController(`createInterruptController({ parent })`),
  *   把 controller.signal 透传给 agentRuntime.run 让 LLM call / 工具执行链路真正受控
@@ -17,21 +17,16 @@
 
 import {
   abortWithReason,
-  createAttentionWindow,
   createInterruptController,
-  userMessage,
   type AbortReason,
-  type AttentionWindowState,
   type AgentYield,
+  type Message,
   type RunResult,
-  type TurnSource,
 } from "@zhixing/core";
 import type {
-  ConversationBootstrap,
   RunTurnOptions,
   RuntimeFactory,
   SessionRuntime,
-  TurnContext,
 } from "@zhixing/server";
 import type { AgentRuntime } from "@zhixing/orchestrator/runtime";
 
@@ -47,16 +42,7 @@ interface QueueItem {
 export function createServerRuntimeAdapter(
   sessionId: string,
   agentRuntime: AgentRuntime,
-  bootstrap?: ConversationBootstrap,
 ): SessionRuntime {
-  // 注意力窗口 —— "给 LLM 看什么"的唯一内存权威。恢复历史经启动装填对
-  // 作为窗口起始条目（owner 侧装填器已构建，adapter 只装配不读盘）；窗口
-  // 只经 acceptRun 前进（ConversationManager 在持久化 / pending 入列成功后
-  // 调），run 输入瞬态构造、失败路径窗口不动——无需任何回滚。
-  const window: AttentionWindowState = createAttentionWindow({
-    conversationId: sessionId,
-    bootstrap: bootstrap?.bootstrap ?? undefined,
-  });
   let currentController: AbortController | null = null;
 
   return {
@@ -68,16 +54,16 @@ export function createServerRuntimeAdapter(
     confirmationBroker: agentRuntime.confirmationBroker,
 
     async *run(
-      text,
-      abortSignalOrOptions?: AbortSignal | RunTurnOptions,
+      messages: readonly Message[],
+      options?: RunTurnOptions,
     ): AsyncGenerator<AgentYield, RunResult> {
-      const { abortSignal, turnContext, turnIndex, source } = unpackOptions(abortSignalOrOptions);
-
       // 本 turn 专属 controller。caller 传入的 abortSignal(RPC connection close /
       // 上游 abort)作为 parent —— controller 内部用 forkController 实现 parent abort
       // 传播,触发时携带 typed parent reason。已 aborted 的 parent 让子 controller
       // 在创建时就处于 aborted 态,agent loop pre-flight 会自然产 AgentResult.aborted。
-      const controller = createInterruptController({ parent: abortSignal });
+      const controller = createInterruptController({
+        parent: options?.abortSignal,
+      });
       currentController = controller;
 
       const queue: QueueItem[] = [];
@@ -98,15 +84,12 @@ export function createServerRuntimeAdapter(
       // 导致 partial 内容丢失 + abortReason 拿不到 channel 渲染层。
       agentRuntime
         .run({
-          // run 输入 = 窗口事实 + 本轮用户消息，瞬态构造——用户消息不预写入
-          // 任何状态，accept 之前窗口不前进。
-          messages: [...window.getMessages(), userMessage(text)],
-          turnIndex: turnIndex ?? 0,
-          source,
-          turnContext,
-          // sessionId 即 conversationId（ConversationManager 中是同一标识，
-          // RuntimeInfo.sessionId 是 conversationId 的向后兼容别名），透传到
-          // RunContext 让按需取 conversationId 的工具可用（持久化会话上下文）。
+          messages: [...messages],
+          turnIndex: options?.turnIndex ?? 0,
+          source: options?.source,
+          turnContext: options?.turnContext,
+          // sessionId 即 conversationId（ConversationManager 中是同一标识），
+          // 透传到 RunContext 让按需取 conversationId 的工具可用（持久化会话上下文）。
           conversationId: sessionId,
           abortSignal: controller.signal,
           onYield: (event) => {
@@ -138,11 +121,8 @@ export function createServerRuntimeAdapter(
           if (item.kind === "yield") {
             yield item.value!;
           } else if (item.kind === "done") {
-            // 窗口未被本 run 触碰（输入是瞬态构造的）——non-completed / 持久化
-            // 失败都自然停在原基底，孤儿 userMsg 这一类状态不可能产生。
             return item.result!;
           } else {
-            // throw 路径(provider 网络错 / 编程错)：同上，无状态需要清理。
             throw item.error;
           }
         }
@@ -151,18 +131,6 @@ export function createServerRuntimeAdapter(
         // 误清掉新 controller。
         if (currentController === controller) currentController = null;
       }
-    },
-
-    getHistory(limit) {
-      const msgs = window.getMessages();
-      return limit ? msgs.slice(-limit) : [...msgs];
-    },
-
-    acceptRun(input) {
-      // 接受协议的窗口侧终点：ConversationManager 在持久化 / pending 入列成功
-      // 后调——先应用 windowCompact 折叠，再追加本 run 的蒸馏对；折叠元数据
-      //（快照覆盖锚）原样交回。
-      return window.acceptRun(input);
     },
 
     abort(reason?: AbortReason): boolean {
@@ -176,35 +144,10 @@ export function createServerRuntimeAdapter(
     },
 
     async dispose() {
-      // 窗口随 adapter 一起被弃置（崩溃即弃、重启由历史加载重建——派生视图）。
       // 透传底层运行体末窗 onWindowClose —— serve 每会话经 createAgentRuntime
       // 建 main runtime（首窗 onWindowOpen 已触发）,销毁须触发其末窗。
       await agentRuntime.dispose("session-dispose");
     },
-  };
-}
-
-// ─── 工具：兼容 legacy AbortSignal 和 RunTurnOptions 两种第二参 ───
-
-function unpackOptions(
-  arg?: AbortSignal | RunTurnOptions,
-): {
-  abortSignal?: AbortSignal;
-  turnContext?: TurnContext;
-  turnIndex?: number;
-  source?: TurnSource;
-} {
-  if (!arg) return {};
-  // AbortSignal 有 aborted 字段且无 turnContext/abortSignal 字段
-  if ("aborted" in arg && typeof (arg as AbortSignal).aborted === "boolean") {
-    return { abortSignal: arg as AbortSignal };
-  }
-  const opts = arg as RunTurnOptions;
-  return {
-    abortSignal: opts.abortSignal,
-    turnContext: opts.turnContext,
-    turnIndex: opts.turnIndex,
-    source: opts.source,
   };
 }
 
@@ -219,11 +162,13 @@ export interface RuntimeFactoryOptions {
  * 给 @zhixing/server 用的 RuntimeFactory。
  * 每次 create 都新建一个 AgentRuntime（独立 provider 连接、独立工具集）。
  */
-export function createCliRuntimeFactory(opts: RuntimeFactoryOptions): RuntimeFactory {
+export function createCliRuntimeFactory(
+  opts: RuntimeFactoryOptions,
+): RuntimeFactory {
   return {
-    async create(sessionId, bootstrap) {
+    async create(sessionId) {
       const agentRuntime = await opts.createAgentRuntime(sessionId);
-      return createServerRuntimeAdapter(sessionId, agentRuntime, bootstrap);
+      return createServerRuntimeAdapter(sessionId, agentRuntime);
     },
   };
 }

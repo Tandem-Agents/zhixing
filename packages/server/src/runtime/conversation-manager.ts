@@ -1,27 +1,30 @@
 /**
- * ConversationManager — 对话运行时生命周期管理
+ * ConversationManager — 对话生命周期与会话状态的全域权威
  *
- * 规格引用：conversation-model.md §4 (SessionRuntime) + §8 (ConversationManager)
- *
- * 替代 RuntimeRegistry，在其基础上增加：
- * - Observer 跟踪：多个连接可共享同一个 SessionRuntime
+ * 职责：
+ * - 会话状态 owner：注意力窗口("给 LLM 看什么"的唯一内存权威)、turnCount、
+ *   接受协议(先持久化、后入窗)都挂在 ManagedSession 上——SessionRuntime 是
+ *   纯执行体,不持有任何会话状态
+ * - Observer 跟踪：多个连接可共享同一个会话
  * - Grace Period：最后一个 observer 断开后等待 60s 再释放
  * - Idle Timeout：30 分钟无活动自动释放（防止内存泄漏）
  *
  * 设计原则：
- * - 纯运行时关注：管理 SessionRuntime 生命周期，不直接操作持久层
+ * - 持久层经回调注入（appendRun / loadHistory / writeSnapshot），不直接依赖 store
  * - 依赖注入：RuntimeFactory 由外部提供（CLI 或测试）
- * - Drop-in 替代：与 RuntimeRegistry 相同的核心 API（getOrCreate/list/abort/delete）
  * - 可测试：grace/idle 超时可通过配置注入
  */
 
-import type {
-  AbortReason,
-  AppendRunResult,
-  RunRecordInput,
-  SnapshotInput,
-  WindowCompact,
-  WindowFoldOutcome,
+import {
+  createAttentionWindow,
+  type AbortReason,
+  type AppendRunResult,
+  type AttentionWindowState,
+  type Message,
+  type RunRecordInput,
+  type SnapshotInput,
+  type WindowCompact,
+  type WindowFoldOutcome,
 } from "@zhixing/core";
 import type {
   AbortResult,
@@ -58,6 +61,13 @@ const DEFAULT_MAX_PENDING = 5;
 export interface ManagedSession {
   readonly conversationId: string;
   readonly runtime: SessionRuntime;
+  /**
+   * 注意力窗口 —— "给 LLM 看什么"的唯一内存权威,会话状态归 manager 而非
+   * 执行体。恢复历史经启动装填对作为窗口起始条目;窗口只经接受协议前进
+   * (recordTurn 在持久化 / pending 入列成功后调 acceptRun),run 输入瞬态
+   * 构造、失败路径窗口不动——无需任何回滚。
+   */
+  readonly window: AttentionWindowState;
   readonly createdAt: string;
   lastActiveAt: string;
   busy: boolean;
@@ -279,12 +289,16 @@ export class ConversationManager {
     if (!history && !ephemeral && this.initTranscript) {
       await this.initTranscript(id);
     }
-    const runtime = await this.factory.create(id, history);
+    const runtime = await this.factory.create(id);
     const now = new Date().toISOString();
 
     const session: ManagedSession = {
       conversationId: id,
       runtime,
+      window: createAttentionWindow({
+        conversationId: id,
+        bootstrap: history?.bootstrap ?? undefined,
+      }),
       createdAt: now,
       lastActiveAt: now,
       busy: false,
@@ -403,13 +417,24 @@ export class ConversationManager {
     return this.sessions.has(conversationId);
   }
 
+  /**
+   * 当前注意力窗口内容(只读拷贝)—— RPC 历史查询的数据源。
+   * 会话不存在(未活跃)返回 undefined,调用方据此回 not-found。
+   */
+  getHistory(conversationId: string, limit?: number): Message[] | undefined {
+    const session = this.sessions.get(conversationId);
+    if (!session) return undefined;
+    const msgs = session.window.getMessages();
+    return limit ? msgs.slice(-limit) : [...msgs];
+  }
+
   list(): ManagedSessionInfo[] {
     return [...this.sessions.entries()].map(([id, s]) => ({
       conversationId: id,
       sessionId: s.runtime.sessionId,
       createdAt: s.createdAt,
       lastActiveAt: s.lastActiveAt,
-      messageCount: s.runtime.getHistory().length,
+      messageCount: s.window.getMessages().length,
       busy: s.busy,
       observerCount: s.observers.size,
       pendingCount: this.pendingQueues.get(id)?.length ?? 0,
@@ -580,7 +605,7 @@ export class ConversationManager {
       const provisionalRunIndex = session.pendingRuns.enqueue(record);
       session.turnCount++;
 
-      session.runtime.acceptRun({
+      session.window.acceptRun({
         runMessages: record.messages,
         runIndex: provisionalRunIndex,
         windowCompact,
@@ -604,7 +629,7 @@ export class ConversationManager {
       );
     }
     const { runIndex } = await this.appendRunCb(conversationId, record);
-    const outcome = session.runtime.acceptRun({
+    const outcome = session.window.acceptRun({
       runMessages: record.messages,
       runIndex,
       windowCompact,

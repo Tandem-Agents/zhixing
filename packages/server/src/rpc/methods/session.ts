@@ -154,12 +154,17 @@ async function runManagedTurn(
       const iter = await gen.next();
       if (iter.done) {
         runResult = iter.value;
-        // session.complete 事件的契约保持 AgentResult（向后兼容）—— 客户端
-        // 只关心终止原因 + usage + error，不需要 runRecord/windowCompact（那是持久化事项）
+        // session.complete 的 result 保持 AgentResult 契约（终止原因 + usage +
+        // error，不带 runRecord/windowCompact——那是持久化事项）。
+        // pendingModeSwitch 顶层附带：LLM 在 turn 内产生的进出场景意图,
+        // 跟随权归发起接入面——客户端据此走 workscene 执行体,宿主不代切。
         connection.notify("session.complete", {
           conversationId,
           sessionId: conversationId,
           result: runResult.agentResult,
+          ...(runResult.pendingModeSwitch
+            ? { pendingModeSwitch: runResult.pendingModeSwitch }
+            : {}),
         });
         break;
       }
@@ -223,11 +228,11 @@ export function buildSessionHistoryMethod(): MethodEntry {
         throw RpcErrors.invalidParams("session.history requires 'conversationId'");
       }
       const manager = requireConversations(ctx.server);
-      const runtime = manager.get(id);
-      if (!runtime) {
+      const history = manager.getHistory(id, params.limit);
+      if (!history) {
         throw RpcErrors.notFound(`Session not found: ${id}`);
       }
-      return runtime.getHistory(params.limit);
+      return history;
     },
   };
 }

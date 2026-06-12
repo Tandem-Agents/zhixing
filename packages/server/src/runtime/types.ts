@@ -15,8 +15,6 @@ import type {
   RunResult,
   TurnContext,
   TurnSource,
-  WindowCompact,
-  WindowFoldOutcome,
 } from "@zhixing/core";
 
 // TurnContext 的唯一定义在 @zhixing/core（types/tools.ts）——此处只做 re-export，
@@ -44,45 +42,18 @@ export interface RunTurnOptions {
 export interface SessionRuntime {
   readonly sessionId: string;
   /**
-   * 执行一轮对话，AsyncGenerator 流式 yield 事件 → return `RunResult`。
+   * 执行一轮对话——纯执行体:输入消息由调用方构造(窗口事实 + 本轮用户消息),
+   * runtime 不持有任何会话状态。AsyncGenerator 流式 yield 事件 → return
+   * `RunResult`(含 `runRecord`、`windowCompact?`、`newMessages` + 诊断字段),
+   * 调用方据此走 recordTurn 单一持久化入口。
    *
-   * **契约变更**：return 值从 `AgentResult` 升级为 `RunResult`
-   * （含 `runRecord`、`windowCompact?`、`newMessages` + 诊断字段）。
-   * 调用方（InboundRouter / session.ts RPC / 测试）据此走 recordTurn 单一持久化入口。
-   *
-   * 第二参数兼容两种形式（ADR-007 Phase 2）：
-   * - `AbortSignal`（legacy）
-   * - `RunTurnOptions`（含 abortSignal + turnContext + turnIndex + source）
+   * 注意力窗口与接受协议的唯一权威在 ConversationManager(ManagedSession 持
+   * 窗口);失败路径窗口不动,run 输入瞬态构造、无需回滚。
    */
   run(
-    text: string,
-    abortSignalOrOptions?: AbortSignal | RunTurnOptions,
+    messages: readonly Message[],
+    options?: RunTurnOptions,
   ): AsyncGenerator<AgentYield, RunResult>;
-  /** 当前注意力窗口内容（只读拷贝）—— RPC 历史查询与 messageCount 的数据源 */
-  getHistory(limit?: number): Message[];
-  /**
-   * 接受一个 run —— 注意力窗口前进的唯一入口。
-   *
-   * 调用时机：ConversationManager.recordTurn 在持久化成功（persistent）或
-   *   pending 入列成功（ephemeral）之后调用——"先持久化、后入窗"的接受协议。
-   *   失败路径不调用：窗口停在原基底，下轮重试，无需任何回滚。
-   *
-   * 语义：实现方先应用 windowCompact（若有，折叠被摘配对），再从 runMessages
-   *   派生本 run 的蒸馏对追加入窗。run 输入由 run(text) 瞬态构造
-   *   （[...窗口, 用户消息]），用户消息在 accept 之前不进入任何状态。
-   *
-   * `runIndex`：持久化路径携带 store 分配的序号（折叠覆盖锚点随配对落进窗口）；
-   *   ephemeral 路径携带 provisional 序号（= pending 队列序号，promote FIFO
-   *   flush 到全新 transcript 时与 store 分配一致，promote 内对账校验）。
-   *
-   * 返回折叠元数据（透传注意力窗口的交出）：发生折叠且被折配对带 runIndex
-   * 时携 coveredThroughRunIndex —— ConversationManager 据此写派生摘要快照。
-   */
-  acceptRun(input: {
-    runMessages: readonly Message[];
-    runIndex?: number;
-    windowCompact?: WindowCompact;
-  }): WindowFoldOutcome;
   /**
    * 终止当前 in-flight turn(若有)。
    *
@@ -128,20 +99,11 @@ export interface ConversationBootstrap {
 }
 
 export interface RuntimeFactory {
-  /** 创建新运行时；sessionId 由调用方传入，可选注入启动装填用于恢复对话 */
-  create(
-    sessionId: string,
-    bootstrap?: ConversationBootstrap,
-  ): Promise<SessionRuntime>;
-}
-
-export interface RuntimeInfo {
-  sessionId: string;
-  createdAt: string;
-  lastActiveAt: string;
-  messageCount: number;
-  /** 是否正在执行 turn */
-  busy: boolean;
+  /**
+   * 创建新运行时——纯执行体发放。会话历史装填(启动装填对 → 窗口起始条目)
+   * 归 ConversationManager,工厂不感知。
+   */
+  create(sessionId: string): Promise<SessionRuntime>;
 }
 
 /** @deprecated 使用 ManagedSessionInfo (from conversation-manager) 代替 */

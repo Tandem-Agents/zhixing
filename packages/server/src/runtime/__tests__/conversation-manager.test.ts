@@ -853,13 +853,7 @@ describe("ConversationManager", () => {
     });
 
     it("ephemeral acceptRun 携 provisional runIndex（pending 队列序号），promote 对账一致时静默", async () => {
-      const accepted: Array<number | undefined> = [];
       const runtime = createMockRuntime("eph-prov");
-      const origAccept = runtime.acceptRun.bind(runtime);
-      runtime.acceptRun = (input) => {
-        accepted.push(input.runIndex);
-        origAccept(input);
-      };
       const factory: RuntimeFactory = { create: async () => runtime };
 
       let next = 0;
@@ -874,7 +868,14 @@ describe("ConversationManager", () => {
           appendRun: async () => ({ runIndex: next++, shardId: "000001" }),
         });
 
-        await mgr.getOrCreate("eph-prov", { ephemeral: true });
+        const session = await mgr.getOrCreate("eph-prov", { ephemeral: true });
+        // 窗口归 manager：经真窗口的 acceptRun 观测接受协议携带的 runIndex
+        const accepted: Array<number | undefined> = [];
+        const origAccept = session.window.acceptRun.bind(session.window);
+        vi.spyOn(session.window, "acceptRun").mockImplementation((input) => {
+          accepted.push(input.runIndex);
+          return origAccept(input);
+        });
         const makeRecord = (idx: number) => ({
           timestamp: new Date().toISOString(),
           messages: [
@@ -1132,18 +1133,22 @@ describe("ConversationManager", () => {
       ],
     });
 
-    /** acceptRun 在折叠时交出锚的 runtime stub */
+    /** 纯执行体 runtime stub——窗口归 manager,折叠锚经 spy 真窗口控制 */
     function foldingRuntime(sessionId: string): SessionRuntime {
       return {
         sessionId,
         run: vi.fn(),
-        getHistory: () => [],
-        acceptRun: vi.fn((input: { windowCompact?: unknown }) =>
-          input.windowCompact ? { coveredThroughRunIndex: 0 } : {},
-        ),
         abort: () => false,
         dispose: async () => {},
       } as unknown as SessionRuntime;
+    }
+
+    /** 让会话真窗口在携 windowCompact 折叠时交出锚(快照写入的前提条件) */
+    function stubFoldAnchor(session: { window: { acceptRun: (i: never) => unknown } }): void {
+      vi.spyOn(session.window, "acceptRun").mockImplementation(
+        ((input: { windowCompact?: unknown }) =>
+          input.windowCompact ? { coveredThroughRunIndex: 0 } : {}) as never,
+      );
     }
 
     it("persistent 折叠携结构化摘要 + 锚可得 → 写快照（载荷取折叠交出与指令）", async () => {
@@ -1158,7 +1163,8 @@ describe("ConversationManager", () => {
         },
       );
 
-      await mgr.getOrCreate("snap-1");
+      const session = await mgr.getOrCreate("snap-1");
+      stubFoldAnchor(session);
       await mgr.recordTurn("snap-1", makeRecord("hi"), structuredCompact);
 
       expect(writeSnapshot).toHaveBeenCalledTimes(1);
@@ -1184,7 +1190,8 @@ describe("ConversationManager", () => {
           writeSnapshot,
         },
       );
-      await mgr.getOrCreate("snap-2");
+      const snap2 = await mgr.getOrCreate("snap-2");
+      stubFoldAnchor(snap2);
 
       // 无 windowCompact → 不写
       await mgr.recordTurn("snap-2", makeRecord("a"));

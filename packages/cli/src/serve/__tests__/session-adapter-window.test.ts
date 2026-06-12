@@ -1,10 +1,10 @@
 /**
- * server 会话链路的窗口同形性护栏 —— 真实 adapter（注意力窗口）× 真实
- * ConversationManager 接受协议。
+ * server 会话链路的窗口同形性护栏 —— 真实注意力窗口（ManagedSession 持有）×
+ * 真实 ConversationManager 接受协议。
  *
  * REPL 侧的"窗口 × 持久化分层契约"由 core 的等价测试守护；本文件守
  * server 侧特有的两段接缝：
- *   - adapter 的 acceptRun 委托与 getHistory 投影
+ *   - manager 的窗口接受协议与 getHistory 投影（窗口归 manager,adapter 是纯执行体）
  *   - ConversationManager ephemeral 分支的 pending 簿记（append-only 镜像，
  *     不因窗口折叠截断）与窗口蒸馏视图的有意分叉
  */
@@ -58,12 +58,8 @@ function stubAgentRuntime(): AgentRuntime {
 
 function windowFactory(): RuntimeFactory {
   return {
-    async create(sessionId, bootstrap) {
-      return createServerRuntimeAdapter(
-        sessionId,
-        stubAgentRuntime(),
-        bootstrap,
-      );
+    async create(sessionId) {
+      return createServerRuntimeAdapter(sessionId, stubAgentRuntime());
     },
   };
 }
@@ -93,7 +89,7 @@ describe("server 会话 × 注意力窗口同形性", () => {
     await mgr.recordTurn("c1", makeRecord(2), compact);
 
     // 窗口：蒸馏视图（摘要对 + 保留配对 1 + 新配对 2）
-    expect(mgr.get("c1")!.getHistory()).toEqual([
+    expect(mgr.getHistory("c1")).toEqual([
       ...buildCompactSummaryPair("首轮摘要"),
       ...pairMessages(1),
       ...pairMessages(2),
@@ -122,7 +118,7 @@ describe("server 会话 × 注意力窗口同形性", () => {
 
     await mgr.recordTurn("e1", makeRecord(0));
     // 无折叠时窗口 == pending 镜像的蒸馏投影
-    expect(mgr.get("e1")!.getHistory()).toEqual(
+    expect(mgr.getHistory("e1")).toEqual(
       session.pendingRuns.list().flatMap(({ record }) => [
         record.messages[0]!,
         record.messages[record.messages.length - 1]!,
@@ -142,20 +138,24 @@ describe("server 会话 × 注意力窗口同形性", () => {
     ]);
 
     // 窗口：蒸馏视图（摘要对 + 配对 1），与全量持久化有意分叉
-    expect(mgr.get("e1")!.getHistory()).toEqual([
+    expect(mgr.getHistory("e1")).toEqual([
       ...buildCompactSummaryPair("ephemeral 摘要"),
       ...pairMessages(1),
     ]);
     mgr.disposeAll();
   });
 
-  it("adapter 恢复历史：启动装填对作为窗口起始条目，getHistory 投影一致", async () => {
+  it("恢复历史：启动装填对作为窗口起始条目，manager.getHistory 投影一致", async () => {
     const bootstrapPair = buildStartupBootstrapPair("此前对话回顾");
-    const adapter = createServerRuntimeAdapter("s1", stubAgentRuntime(), {
-      bootstrap: bootstrapPair,
-      turnCount: 3,
+    const mgr = new ConversationManager(windowFactory(), config, {
+      loadHistory: async () => ({ bootstrap: bootstrapPair, turnCount: 3 }),
+      appendRun: async () => ({ runIndex: 0, shardId: "000001" }),
     });
-    expect(adapter.getHistory()).toEqual([...bootstrapPair]);
-    expect(adapter.getHistory(1)).toEqual([bootstrapPair[1]]);
+
+    const session = await mgr.getOrCreate("s1");
+    expect(session.turnCount).toBe(3);
+    expect(mgr.getHistory("s1")).toEqual([...bootstrapPair]);
+    expect(mgr.getHistory("s1", 1)).toEqual([bootstrapPair[1]]);
+    mgr.disposeAll();
   });
 });

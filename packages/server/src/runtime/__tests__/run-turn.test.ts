@@ -34,24 +34,27 @@ interface MockRuntimeBehavior {
   readonly throwError?: string;
 }
 
+/** 取输入消息末条(本轮用户消息)的文本——mock 的 echo 源 */
+function lastText(messages: readonly Message[]): string {
+  const last = messages[messages.length - 1];
+  const block = last?.content[0];
+  return block && block.type === "text" ? block.text : "";
+}
+
 function createMockRuntime(
   sessionId: string,
   behavior: MockRuntimeBehavior = {},
 ): SessionRuntime {
-  const messages: Message[] = [];
-
   return {
     sessionId,
-    async *run(text): AsyncGenerator<AgentYield, RunResult> {
+    async *run(messages): AsyncGenerator<AgentYield, RunResult> {
       if (behavior.throwError) {
         throw new Error(behavior.throwError);
       }
 
-      // 新协议：run 输入瞬态构造，内部状态不在 run 中变更
-      const userMsg: Message = {
-        role: "user",
-        content: [{ type: "text", text: typeof text === "string" ? text : "" }],
-      };
+      // 纯执行体：输入由调用方构造（窗口 + 本轮用户消息），mock 取末条回声
+      const text = lastText(messages);
+      const userMsg: Message = messages[messages.length - 1]!;
 
       for (const y of behavior.yields ?? []) {
         yield y;
@@ -109,21 +112,8 @@ function createMockRuntime(
         durationMs: 0,
       };
     },
-    getHistory(limit) {
-      return limit ? messages.slice(-limit) : [...messages];
-    },
-    acceptRun(input) {
-      // 接受协议的窗口侧最小模拟：追加 [首条, 末条] 蒸馏对
-      messages.push(
-        input.runMessages[0]!,
-        input.runMessages[input.runMessages.length - 1]!,
-      );
-      return {};
-    },
     abort(): boolean { return false; },
-    async dispose() {
-      messages.length = 0;
-    },
+    async dispose() {},
   };
 }
 
@@ -165,7 +155,7 @@ describe("runTurnWithCommit", () => {
 
     expect(runResult!.agentResult.reason).toBe("completed");
     // 持久化成功 → recordTurn 经 acceptRun 推进窗口：本轮 [user, assistant] 配对
-    expect(mgr.get("c1")!.getHistory()).toEqual([
+    expect(mgr.getHistory("c1")).toEqual([
       { role: "user", content: [{ type: "text", text: "hello" }] },
       { role: "assistant", content: [{ type: "text", text: "echo: hello" }] },
     ]);
@@ -180,7 +170,7 @@ describe("runTurnWithCommit", () => {
     });
 
     await mgr.getOrCreate("c2");
-    const preRun = mgr.get("c2")!.getHistory(); // 空
+    const preRun = mgr.getHistory("c2"); // 空
     const onCommitFailure = vi.fn();
 
     const gen = runTurnWithCommit(mgr, "c2", "hi", undefined, { onCommitFailure });
@@ -193,7 +183,7 @@ describe("runTurnWithCommit", () => {
     // 持久化失败 → runResult 仍 return completed
     expect(runResult!.agentResult.reason).toBe("completed");
     // 窗口停在 run 前基底（空）
-    expect(mgr.get("c2")!.getHistory()).toEqual(preRun);
+    expect(mgr.getHistory("c2")).toEqual(preRun);
     // onCommitFailure 被调用
     expect(onCommitFailure).toHaveBeenCalledTimes(1);
     expect(onCommitFailure.mock.calls[0]![0]).toBeInstanceOf(Error);
@@ -210,7 +200,7 @@ describe("runTurnWithCommit", () => {
     });
 
     await mgr.getOrCreate("c3");
-    const preRun = mgr.get("c3")!.getHistory();
+    const preRun = mgr.getHistory("c3");
 
     const gen = runTurnWithCommit(mgr, "c3", "hi");
     let runResult: RunResult | undefined;
@@ -221,7 +211,7 @@ describe("runTurnWithCommit", () => {
 
     expect(runResult!.agentResult.reason).toBe("error");
     expect(appendRun).not.toHaveBeenCalled();    // 非 completed 不持久化
-    expect(mgr.get("c3")!.getHistory()).toEqual(preRun);  // 窗口停在原基底
+    expect(mgr.getHistory("c3")).toEqual(preRun);  // 窗口停在原基底
 
     mgr.disposeAll();
   });
@@ -240,7 +230,7 @@ describe("runTurnWithCommit", () => {
     }
 
     expect(appendRun).not.toHaveBeenCalled();
-    expect(mgr.get("c4")!.getHistory()).toEqual([]);
+    expect(mgr.getHistory("c4")).toEqual([]);
 
     mgr.disposeAll();
   });
@@ -254,13 +244,13 @@ describe("runTurnWithCommit", () => {
     );
 
     await mgr.getOrCreate("c5");
-    const preRun = mgr.get("c5")!.getHistory();
+    const preRun = mgr.getHistory("c5");
 
     const gen = runTurnWithCommit(mgr, "c5", "hi");
     await expect(gen.next()).rejects.toThrow("provider timeout");
 
     expect(appendRun).not.toHaveBeenCalled();   // throw 前未到 commit
-    expect(mgr.get("c5")!.getHistory()).toEqual(preRun);  // 窗口停在原基底
+    expect(mgr.getHistory("c5")).toEqual(preRun);  // 窗口停在原基底
 
     mgr.disposeAll();
   });
@@ -315,7 +305,7 @@ describe("runTurnWithCommit", () => {
       const { done } = await gen1.next();
       if (done) break;
     }
-    expect(mgr.get("c7")!.getHistory()).toEqual([]); // 原基底（空）
+    expect(mgr.getHistory("c7")).toEqual([]); // 原基底（空）
 
     mgr.disposeAll();
   });
