@@ -7,7 +7,7 @@
  * 流程：
  *   1. loadConfig + loadCredentials —— schema 损坏 → schema-error
  *   2. validateConfigSemantics —— 含废弃字段 → semantic-error
- *   3. checkModel + checkMessaging（按 mode）—— 缺失则触发编辑器
+ *   3. checkModel —— 缺失则触发编辑器(messaging 可选,不在宿主启动拦截)
  *   4. 编辑器完成 → reload 后返回 ready
  *   5. 全部齐全 → 直接 ready
  *
@@ -34,13 +34,17 @@ import {
   type ZhixingCredentials,
 } from "@zhixing/providers";
 import {
-  checkMessaging,
   checkModel,
   runConfigEditor,
   type SectionId,
 } from "./config-editor/index.js";
 
-export type StartupMode = "repl" | "server" | "schedule";
+/**
+ * 入口模式——repl(交互终端)与 host(核心宿主)。两者都只校 model:
+ * messaging 是可选能力,凭证不全由 channel 装配警告跳过(非致命),
+ * 配置入口是 /config 而非宿主启动拦截。
+ */
+export type StartupMode = "repl" | "host";
 
 /**
  * 启动检查结果——caller 据此决定后续动作。
@@ -116,14 +120,6 @@ export async function runStartupCheck(
     missingLabels.push(...modelIssues.map((i) => i.label));
   }
 
-  if (options.mode === "server") {
-    const messagingIssues = checkMessaging(config, credentials);
-    if (messagingIssues.length > 0) {
-      missingSections.push("messaging");
-      missingLabels.push(...messagingIssues.map((i) => i.label));
-    }
-  }
-
   if (missingSections.length === 0) {
     return { kind: "ready", config, credentials };
   }
@@ -175,10 +171,8 @@ export async function runStartupCheck(
   return { kind: "non-tty", missingLabels };
 }
 
-function pickEditorTitle(mode: StartupMode, sections: SectionId[]): string {
-  if (mode === "repl") return "初始配置";
-  if (sections.length === 1 && sections[0] === "messaging") return "配置消息通道";
-  return "服务模式初始化";
+function pickEditorTitle(mode: StartupMode, _sections: SectionId[]): string {
+  return mode === "repl" ? "初始配置" : "核心宿主初始化";
 }
 
 /**
@@ -189,5 +183,5 @@ function pickWelcomeText(mode: StartupMode): string {
   if (mode === "repl") {
     return "欢迎使用知行。下面填好 API 凭证就能开始使用。";
   }
-  return "欢迎使用知行服务模式。先完成 API 凭证 + 消息通道，启动后即可接入。";
+  return "欢迎使用知行核心宿主。填好 API 凭证即可启动;消息通道可稍后在 /config 配置。";
 }

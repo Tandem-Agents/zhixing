@@ -50,7 +50,9 @@ export function defaultCoreHostConnectionDeps(): CoreHostConnectionDeps {
       const result = await spawnDaemon({
         // 不传 --port：child 走按 home 派生的端口（同 home 同端口 → listen 原子仲裁单例、
         // 并发拉起只活一个；不同 home 不同端口、不撞）。实际端口写 PID 文件供 discover。
-        forwardedArgs: ["serve", "--profile", "schedule"],
+        // 不传 --profile：自动拉起与显式 serve 是同一个宿主——装什么由配置说了算
+        // （渠道 / MCP 按配置自适应装配），不由拉起方式决定。
+        forwardedArgs: ["serve"],
         deps: { console: silent },
       });
       return { ok: result.ok, reason: result.reason };

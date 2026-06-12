@@ -16,7 +16,6 @@ import { startRepl } from "./repl.js";
 import { renderError } from "./render.js";
 import { createStdoutWriter } from "./screen/index.js";
 import { runServeCommand } from "./serve/command.js";
-import { PROFILES, DEFAULT_PROFILE, type ServerProfile } from "./serve/profile.js";
 import { runStopCommand } from "./serve/stop.js";
 import { runStatusCommand } from "./serve/status.js";
 import { runLogsCommand } from "./serve/logs.js";
@@ -172,16 +171,11 @@ const serveCmd = program
   .option("--host <host>", "监听地址（默认 127.0.0.1，仅本地访问）")
   .option("-w, --workspace <path>", "工作区目录")
   .option("--daemon", "后台模式：脱离终端独立运行")
-  .option(
-    "--profile <profile>",
-    "装配档位：full（默认，全量服务）| schedule（最小调度宿主，按需拉起内部用）",
-  )
   .action(async (options: {
     port?: number;
     host?: string;
     workspace?: string;
     daemon?: boolean;
-    profile?: string;
   }) => {
     try {
       await runServeCommand({
@@ -189,10 +183,6 @@ const serveCmd = program
         host: options.host,
         workspace: options.workspace,
         daemon: options.daemon,
-        profile:
-          options.profile && options.profile in PROFILES
-            ? (options.profile as ServerProfile)
-            : DEFAULT_PROFILE,
       });
       process.exit(0);
     } catch (err) {

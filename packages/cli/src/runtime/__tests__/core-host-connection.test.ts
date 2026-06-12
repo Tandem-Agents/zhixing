@@ -68,7 +68,7 @@ describe("CoreHostConnection", () => {
     expect(spawn).not.toHaveBeenCalled();
   });
 
-  it("发现不到则拉起 schedule 宿主再连", async () => {
+  it("发现不到则拉起宿主再连", async () => {
     const client = makeFakeClient();
     let started = false;
     const discover = vi.fn(async () => {

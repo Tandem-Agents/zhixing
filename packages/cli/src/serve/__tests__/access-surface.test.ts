@@ -39,13 +39,6 @@ function ctx(profile: ServerProfile): AssemblyContext {
 }
 
 describe("access-surface 数据驱动装配", () => {
-  it("schedule 档不装任何接入面（恒定核心 only）", async () => {
-    const calls: string[] = [];
-    await setupAccessSurfaces(allSurfaces(calls), ctx("schedule"), "pre-server");
-    await setupAccessSurfaces(allSurfaces(calls), ctx("schedule"), "post-server");
-    expect(calls).toEqual([]);
-  });
-
   it("full 档 pre-server 按数组序装、post-server 单独装 bridge", async () => {
     const calls: string[] = [];
     const surfaces = allSurfaces(calls);

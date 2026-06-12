@@ -93,8 +93,9 @@ import { isDaemonChild } from "./self-exec.js";
 import { spawnDaemon } from "./daemon.js";
 import { homeToPort } from "./host-port.js";
 import { registerTailCleanup, registerCoreCleanup } from "./shutdown-chain.js";
+import { shouldIdleExit } from "./idle-policy.js";
 import { setupAccessSurfaces, type AssemblyContext } from "./access-surface.js";
-import { PROFILES, DEFAULT_PROFILE, type ServerProfile } from "./profile.js";
+import { DEFAULT_PROFILE, type ServerProfile } from "./profile.js";
 import { ACCESS_SURFACES } from "./access-surfaces.js";
 
 const SERVER_VERSION = "0.1.0";
@@ -105,8 +106,6 @@ export interface ServeOptions {
   workspace?: string;
   /** 后台模式：父进程 spawn 一个 detached child 并握手确认就绪 */
   daemon?: boolean;
-  /** 装配档位，默认 full */
-  profile?: ServerProfile;
 }
 
 /**
@@ -143,26 +142,20 @@ function buildForwardedArgs(opts: ServeOptions): string[] {
   if (opts.port !== undefined) args.push("--port", String(opts.port));
   if (opts.host) args.push("--host", opts.host);
   if (opts.workspace) args.push("--workspace", opts.workspace);
-  // profile 中立透传：有则原样传给 child（默认 full 时 opts.profile 为 undefined、不传，child 走默认）。
-  // 不枚举具体 profile 名——加新档位零改。
-  if (opts.profile) args.push("--profile", opts.profile);
   return args;
 }
 
 async function runServerProcess(opts: ServeOptions): Promise<void> {
-  const profile: ServerProfile = opts.profile ?? DEFAULT_PROFILE;
+  const profile: ServerProfile = DEFAULT_PROFILE;
   const zhixingHome = getZhixingHome();
   // 端口按 home 派生（同 home 同端口 → listen 的 EADDRINUSE 原子仲裁单例 + 并发安全；
   // 不同 home 不同端口 → 多实例并行不撞）。用户显式 --port 覆盖。
   const port = opts.port ?? homeToPort(zhixingHome);
   const host = opts.host ?? DEFAULT_SERVER_CONFIG.host;
 
-  // 启动期检查——加载 config + credentials、校验 schema。full 档校验 model + messaging；
-  // schedule 档只校验 model（最小调度宿主不需要通道凭证）。缺字段且 TTY 触发配置编辑器，
-  // 否则 fail-fast。
-  const startupResult = await runStartupCheck({
-    mode: PROFILES[profile].startupMode,
-  });
+  // 启动期检查——加载 config + credentials、校验 schema,只校 model(messaging
+  // 可选,凭证不全由 channel 装配警告跳过)。缺字段且 TTY 触发配置编辑器,否则 fail-fast。
+  const startupResult = await runStartupCheck({ mode: "host" });
 
   if (startupResult.kind !== "ready") {
     if (startupResult.kind === "schema-error") {
@@ -201,7 +194,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   const credentials: ZhixingCredentials = startupResult.credentials;
 
   // ============================================================================
-  // 恒定核心前置 —— 与 profile 无关，schedule / full 都装。接入面 setup 从这里读依赖。
+  // 恒定核心前置 —— 接入面 setup 从这里读依赖。
   // ============================================================================
 
   // 1. token
@@ -717,15 +710,29 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     throw err;
   }
 
-  // idle reaper —— 由 PROFILES.idleReap 门控（当前仅 schedule 档：按需拉起的最小宿主要轻）：
-  // 周期检查「无活跃接入面连接」即空闲退出，纯锚连接在场、不看 scheduler 有无近期任务。
-  // 运行期必达由 cli 主动维持连接保活坐实（有用户任务时连接不为空、宿主不退）；cli 关闭、
-  // 连接断即退（「关闭不管」）。退出走正常 shutdown（drain 在跑任务）、不改 idempotent
-  // shutdown 契约——client 下次操作重新 ensure 拉起。full serve 长驻、不 idle 退。
-  if (PROFILES[profile].idleReap) {
+  // idle reaper —— 仅后台 daemon 装配:前台进程的生命周期归终端(用户
+  // Ctrl+C),reaper 管的是没有终端的后台宿主——这是进程形态差异,不是档位。
+  // 退出条件 = 无人且无事:无活跃 RPC 连接、无活跃远程接入面、无用户待办。
+  // - 接入面在场看真实连接状态而非 registry 对象存在性(配了渠道但全部连接
+  //   失败 = 不在场,废宿主退出胜过空挂、下次拉起重试连接);connecting 算
+  //   在场——断线重连窗口里杀进程会让恢复机制随进程消失。
+  // - 用户待办 = 有 enabled 的非内部任务——定时任务的语义就是"我不在它也跑",
+  //   这是调度 + 投递的核心价值;内部维护任务(retention 等)不算待办,否则
+  //   宿主永不退。
+  // 三者皆无即空闲退出(client 下次操作 ensure 重新拉起)。
+  // 退出走正常 shutdown(drain 在跑任务)、不改 idempotent shutdown 契约。
+  if (isChild) {
     const IDLE_CHECK_MS = 60_000;
     const idleTimer = setInterval(() => {
-      if (runner.server.connections.size === 0) {
+      const exit = shouldIdleExit({
+        connectionCount: runner.server.connections.size,
+        channelStates:
+          ctx.channels?.listStatuses().map((s) => s.state) ?? [],
+        hasUserPendingWork: scheduler
+          .listTasks()
+          .some((t) => !isInternal(t) && t.enabled),
+      });
+      if (exit) {
         serverCtx.requestShutdown?.("idle");
       }
     }, IDLE_CHECK_MS);
