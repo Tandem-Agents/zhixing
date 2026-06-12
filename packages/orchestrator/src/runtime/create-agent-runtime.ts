@@ -200,14 +200,20 @@ function lifecycleErrorMessage(error: unknown): string {
 // ─── 类型 ───
 
 /**
- * 装饰器的入参 —— 仅暴露当前 run 的 EventBus。
+ * 装饰器的入参 —— 当前 run 的 EventBus 与运行身份。
  *
  * 任何 UI 概念(spinner 暂停、终端清屏等)都不应进入 runtime API;
  * UI 类装饰器应通过 closure 捕获自身依赖(如 renderer 实例)在工厂层注入,
  * 保持 runtime 与展示层零耦合。
+ *
+ * conversationId / turnContext 透传自 run 参数——跨进程转发类装饰器据此
+ * 路由事件归属(哪个对话、哪个 turn、谁发起);ephemeral / 测试路径可缺省,
+ * 装饰器应对 undefined 自行分支(如:无对话身份则不转发)。
  */
 export interface RunBusContext {
   bus: IEventBus<AgentEventMap>;
+  conversationId?: string;
+  turnContext?: TurnContext;
 }
 
 /**
@@ -1185,7 +1191,12 @@ export async function createAgentRuntime(
       // 渲染装饰器 —— 调用方自管 retry / context / interrupt 等终端订阅。
       // runtime 主流程不再硬编码任何 UI 订阅,实现 runtime 层与展示层解耦。
       // 装饰器自身的 UI 依赖(renderer 实例等)由工厂层 closure 捕获,不入参传递。
-      const disposeRender = options.decorateRunBus?.({ bus: eventBus });
+      // 运行身份(对话 / turn)透传——跨进程转发类装饰器据此路由事件归属。
+      const disposeRender = options.decorateRunBus?.({
+        bus: eventBus,
+        conversationId: params.conversationId,
+        turnContext: params.turnContext,
+      });
 
       //
       // 数据收集订阅,与展示层正交,留在 runtime 主流程。事件本身的渲染由 decorateRunBus

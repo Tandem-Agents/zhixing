@@ -23,6 +23,7 @@ import { RpcDispatcher } from "./rpc/dispatcher.js";
 import { HandlerRegistry } from "./rpc/handlers.js";
 import { buildBuiltinRegistry } from "./rpc/methods/index.js";
 import { createEventBridge, type DisposeBridge } from "./rpc/event-bridge.js";
+import { createObserverBroadcast } from "./rpc/session-broadcast.js";
 
 export interface ZhixingServerInstance {
   /** 实际监听的端口（监听 0 时由 OS 分配） */
@@ -135,6 +136,13 @@ export async function startServer(opts: StartServerOptions): Promise<ZhixingServ
 
   // 回填实际监听地址到 context，供 status 等端点读取
   ctx.listenAddr = { port: addr.port, host: addr.address };
+
+  // 回填会话域组播——delta / complete / session.event / session.changed 经
+  // observer 名册推送给会话的全部在场接入面(多端同看一个流式 turn 由此成立)。
+  if (ctx.conversations) {
+    const manager = ctx.conversations;
+    ctx.sessionBroadcast = createObserverBroadcast({ connections, manager });
+  }
 
   // EventBus → RPC notification 桥接（订阅 scheduler 等事件，向所有连接广播）。
   // 内部维护任务的运行事件不广播给 client（结果触达：内部静默）——谓词用 ctx.scheduler

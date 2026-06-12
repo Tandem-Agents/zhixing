@@ -51,6 +51,8 @@ import {
   DEFAULT_SERVER_CONFIG,
   ServerStateFile,
   CleanupRegistry,
+  createRunEventForwarder,
+  type SessionBroadcast,
   type RunningServer,
   type ProcessLockPaths,
 } from "@zhixing/server";
@@ -222,6 +224,26 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   const serveWriter = createStdoutWriter();
   const renderDecorator = createRenderSubscribers({ writer: serveWriter });
 
+  // 带外事件转发——per-run bus 的 UI 订阅集事件经统一信封组播给会话 observers
+  // (session.event 通知)。组播设施在 runServer 后才回填(connections 那时才有),
+  // 此处经 lazy ref 闭包接线——与 schedulerRef 同构;未就绪时静默丢弃(装配期
+  // 无会话 turn 流动,丢弃面为零)。
+  const sessionBroadcastRef: { current: SessionBroadcast | null } = {
+    current: null,
+  };
+  const runEventForwarder = createRunEventForwarder((conversationId, envelope) =>
+    sessionBroadcastRef.current?.(conversationId, "session.event", envelope),
+  );
+  // 单钩子双装饰:本地日志渲染 + 跨进程转发,各自管理自己的订阅与 dispose
+  const serveDecorateRunBus: typeof renderDecorator = (ctx) => {
+    const disposeRender = renderDecorator(ctx);
+    const disposeForward = runEventForwarder(ctx);
+    return () => {
+      disposeRender();
+      disposeForward();
+    };
+  };
+
   // 3a. ConfirmationHub —— 远程权限确认聚合层（remote-confirmation-execution.md §3.2）
   //   在会话执行面 / 通道 / ephemeralRuntime / ServerContext 之前创建，以便各组件构造时能接入。
   const confirmationHub = new ConfirmationHub();
@@ -268,7 +290,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     scheduler: getSchedulerFacade,
     // 渠道下游(飞书/RPC)可看到子 agent 冒泡事件,renderDecorator 在非 TTY
     // 模式下退化为只输出 Task 起止帧(子工具中间事件静默,避免日志爆炸)。
-    decorateRunBus: renderDecorator,
+    decorateRunBus: serveDecorateRunBus,
     onSecurityBlocked: createBlockedRenderer(serveWriter),
     onRuntimeCreated: (runtime) => {
       registerCliTurnContextProviders(runtime, {
@@ -532,6 +554,9 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     ctx.textRenderer?.stop();
     throw err;
   }
+
+  // 组播设施已由 startServer 回填到 serverCtx —— 接通带外事件转发的 lazy ref。
+  sessionBroadcastRef.current = serverCtx.sessionBroadcast ?? null;
 
   // runServer resolve 后填 runner，供 post-server 接入面读 server.connections。
   ctx.runner = runner;

@@ -276,7 +276,7 @@ describe("session.* RPC (S2.D)", () => {
     client.close();
   });
 
-  it("session.complete 顶层附带 pendingModeSwitch(turn 内进出场景意图,跟随权归发起接入面)", async () => {
+  it("模式切换意图经 session.modeSwitchIntent 定向发起连接,先于 complete;complete 纯结果不带意图", async () => {
     await startWithFactory(
       createMockFactory({
         deltaCount: 1,
@@ -287,10 +287,95 @@ describe("session.* RPC (S2.D)", () => {
     await client.request("auth", { token: TEST_TOKEN });
 
     await client.request("session.send", { text: "go" });
+    const intent = await client.waitNotification("session.modeSwitchIntent");
+    expect((intent.params as { intent: unknown }).intent).toEqual({
+      kind: "enter",
+      sceneId: "scene-1",
+    });
     const complete = await client.waitNotification("session.complete");
-    const params = complete.params as { pendingModeSwitch?: unknown };
-    expect(params.pendingModeSwitch).toEqual({ kind: "enter", sceneId: "scene-1" });
+    expect(
+      (complete.params as { pendingModeSwitch?: unknown }).pendingModeSwitch,
+    ).toBeUndefined();
 
+    client.close();
+  });
+
+  it("控制意图不组播:旁观 observer 收 complete 但物理收不到 modeSwitchIntent", async () => {
+    await startWithFactory(
+      createMockFactory({
+        deltaCount: 1,
+        pendingModeSwitch: { kind: "enter", sceneId: "scene-1" },
+      }),
+    );
+    const alice = await connect(server.port);
+    const bob = await connect(server.port);
+    await alice.request("auth", { token: TEST_TOKEN });
+    await bob.request("auth", { token: TEST_TOKEN });
+
+    const first = await alice.request("session.send", { text: "round-1" });
+    const conversationId = (first as { result: { conversationId: string } }).result.conversationId;
+    await alice.waitNotification("session.modeSwitchIntent");
+    await alice.waitNotification("session.complete");
+
+    await bob.request("session.subscribe", { conversationId });
+    await alice.request("session.send", { text: "round-2", conversationId });
+
+    // 旁观端:收到组播 complete(纯结果),但意图通知不可达
+    const bobComplete = await bob.waitNotification("session.complete");
+    expect(
+      (bobComplete.params as { pendingModeSwitch?: unknown }).pendingModeSwitch,
+    ).toBeUndefined();
+    await expect(
+      bob.waitNotification("session.modeSwitchIntent", 300),
+    ).rejects.toThrow();
+    // 发起端照常定向收到
+    await alice.waitNotification("session.modeSwitchIntent");
+
+    alice.close();
+    bob.close();
+  });
+
+  it("组播:第二连接 subscribe 后同看流式 turn(delta + complete),unsubscribe 停收;delete 组播 session.changed", async () => {
+    await startWithFactory(createMockFactory({ deltaCount: 1 }));
+    const alice = await connect(server.port);
+    const bob = await connect(server.port);
+    await alice.request("auth", { token: TEST_TOKEN });
+    await bob.request("auth", { token: TEST_TOKEN });
+
+    // alice 开启对话
+    const first = await alice.request("session.send", { text: "round-1" });
+    const conversationId = (first as { result: { conversationId: string } }).result.conversationId;
+    await alice.waitNotification("session.complete");
+
+    // bob 订阅(observer 登记)→ 同看 alice 发起的下一个 turn
+    const sub = await bob.request("session.subscribe", { conversationId });
+    expect(isSuccessResponse(sub) && (sub.result as { subscribed: boolean }).subscribed).toBe(true);
+
+    await alice.request("session.send", { text: "round-2", conversationId });
+    const bobDelta = await bob.waitNotification("session.delta");
+    expect((bobDelta.params as { conversationId: string }).conversationId).toBe(conversationId);
+    const bobComplete = await bob.waitNotification("session.complete");
+    expect((bobComplete.params as { result: AgentResult }).result.reason).toBe("completed");
+    // 发起端照常收到(发起者在名册内)
+    await alice.waitNotification("session.complete");
+
+    // unsubscribe 后 bob 不再收;delete 前的 changed 只发给在册 observer(alice)
+    await bob.request("session.unsubscribe", { conversationId });
+    await alice.request("session.delete", { conversationId });
+    const changed = await alice.waitNotification("session.changed");
+    expect(changed.params).toEqual({ conversationId, change: "deleted" });
+
+    alice.close();
+    bob.close();
+  });
+
+  it("session.subscribe 对不活跃会话返回 subscribed:false", async () => {
+    await startWithFactory(createMockFactory());
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const r = await client.request("session.subscribe", { conversationId: "ghost" });
+    expect(isSuccessResponse(r) && (r.result as { subscribed: boolean }).subscribed).toBe(false);
     client.close();
   });
 

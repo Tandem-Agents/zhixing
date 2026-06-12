@@ -15,6 +15,8 @@ import {
   buildSessionHistoryMethod,
   buildSessionAbortMethod,
   buildSessionDeleteMethod,
+  buildSessionSubscribeMethod,
+  buildSessionUnsubscribeMethod,
 } from "./session.js";
 import {
   buildScheduleListMethod,
@@ -52,6 +54,8 @@ export function buildBuiltinRegistry(_opts: BuiltinMethodsOptions = {}): Handler
     buildSessionHistoryMethod(),
     buildSessionAbortMethod(),
     buildSessionDeleteMethod(),
+    buildSessionSubscribeMethod(),
+    buildSessionUnsubscribeMethod(),
     // schedule.*
     buildScheduleListMethod(),
     buildScheduleCreateMethod(),

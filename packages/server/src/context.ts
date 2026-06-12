@@ -9,6 +9,7 @@ import type { Scheduler, ChannelRegistry, RunRegistry } from "@zhixing/core";
 import type { ServerConfig } from "./types.js";
 import type { ConversationManager } from "./runtime/index.js";
 import type { ConfirmationHub } from "./confirmation/hub.js";
+import type { SessionBroadcast } from "./rpc/session-broadcast.js";
 
 export interface ServerContext {
   /** 配置（不可变；config.port 是请求的端口，实际端口见 listenAddr） */
@@ -38,6 +39,11 @@ export interface ServerContext {
   runRegistry?: RunRegistry;
   /** 实际监听的地址（startServer 监听就绪后回填） */
   listenAddr?: { port: number; host: string };
+  /**
+   * 会话域组播(observer 名册定向推送)。startServer 在 connections 就绪后
+   * 回填;未回填(最小测试 ctx)时 session 推送退化为发起连接单播。
+   */
+  sessionBroadcast?: SessionBroadcast;
   /**
    * 优雅停机触发器（runServer 在 startServer resolve 后同一微任务绑定）。
    * 供 `server.shutdown` RPC handler 使用——handler 不 await，立即 ack 回响应。
