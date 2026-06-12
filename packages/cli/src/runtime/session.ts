@@ -7,18 +7,20 @@
  * 借用注入的 schedulerFacade 接入宿主。
  *
  * 设计要点：
+ * - 零 UI 类型依赖：渲染装配（decorateRunBus）、确认接线（ConfirmationAttachFn）、
+ *   警告输出（onRuntimeWarning）全部经钩子注入，session 只面对函数形接口——
+ *   终端面板与无界面宿主用同一核心、不同钩子实现。
  * - `runtime` 是 getter——每次访问读最新 instance（reload blue-green swap 后自动指向新值；
  *   工作模式下优先 power overlay）。`scheduler` getter 返回注入的 schedulerFacade 单例——
  *   跨 reload 稳定、不随 swap 变（只有 agentRuntime swap）。
- * - dispose 顺序：work overlay 收尾 → detach confirmation renderer → 关 schedulerFacade
+ * - dispose 顺序：work overlay 收尾 → detach 确认接线 → 关 schedulerFacade
  *   连接 → main 运行体末窗 onWindowClose。
- * - confirmationRenderer 通过 attach/detach 模式与 ConfirmationBroker 解耦，跨 reload
+ * - 确认渠道经 attach/detach 钩子与 ConfirmationBroker 解耦，跨 reload
  *   re-attach 到新 broker
  * - PermissionStore 跨 swap 复用——保留用户 session scope 授权（"本次会话允许"）不丢
  * - reload 串行：mutex 防并发；dispose 后调用 reload 返回 failed
  */
 
-import chalk from "chalk";
 import {
   FsWorkSceneRegistry,
   SkillStore,
@@ -45,10 +47,12 @@ import {
   type ZhixingConfig,
   type ZhixingCredentials,
 } from "@zhixing/providers";
-import { createRenderSubscribers } from "../render.js";
 import { readSchedulerSummarySync } from "./scheduler-projection.js";
-import type { TerminalConfirmationRenderer } from "../security/index.js";
-import type { RuntimeSessionOptions, ReloadResult } from "./types.js";
+import type {
+  RuntimeSessionOptions,
+  ReloadResult,
+  ConfirmationAttachFn,
+} from "./types.js";
 import { computeDiff, type DiffResult } from "./diff.js";
 import { parseServerSpecs } from "./mcp-config.js";
 import { ReloadBuildError } from "./errors.js";
@@ -80,8 +84,8 @@ export class RuntimeSession implements IWorkModeController {
   private config: ZhixingConfig;
   private credentials: ZhixingCredentials;
 
-  // confirmation renderer 绑定状态——跨 reload re-attach 到新 broker
-  private attachedRenderer: TerminalConfirmationRenderer | null = null;
+  // 确认接线状态——钩子在 attach 时登记,跨 reload / 模式切换 re-attach 到新 broker
+  private confirmationAttach: ConfirmationAttachFn | null = null;
   private currentBrokerDetach: (() => void) | null = null;
 
   // 工作场景登记单例 —— 纯 fs CRUD,无 async bootstrap / dispose,生命周期
@@ -166,11 +170,7 @@ export class RuntimeSession implements IWorkModeController {
       // 注入会话级单一实例,与 cli 侧 /<name>、管理面板共享锁域(见字段注释)
       skillStore: this.skillStoreInstance,
       extraTools,
-      decorateRunBus: createRenderSubscribers({
-        renderer: this.opts.renderer,
-        writer: this.opts.writer,
-        screen: this.opts.screen,
-      }),
+      decorateRunBus: this.opts.decorateRunBus,
       onSecurityBlocked: this.opts.onSecurityBlocked,
       onUserDenied: this.opts.onUserDenied,
       permissionStore: existingPermissionStore,
@@ -285,47 +285,43 @@ export class RuntimeSession implements IWorkModeController {
   }
 
   /**
-   * 把 confirmation renderer attach 到当前 broker。
+   * 登记确认接线钩子并接到当前 broker。
    *
-   * session 持有 renderer ref 与当前 detach handle；reload 重建 agentRuntime 时
-   * 内部自动 detach 旧 broker、attach 到新 broker，调用方无感。
+   * 确认渠道本体（终端面板 / 转发器）由调用方闭包持有，session 只持钩子与
+   * 当前 detach handle；reload 重建 agentRuntime 时内部自动 detach 旧 broker、
+   * 用同一钩子 attach 到新 broker，调用方无感。
    *
    * 返回 outer detach——调用方退出时调用，session 释放绑定。
    */
-  attachConfirmationRenderer(
-    renderer: TerminalConfirmationRenderer,
-  ): () => void {
-    if (this.attachedRenderer) {
+  attachConfirmation(attach: ConfirmationAttachFn): () => void {
+    if (this.confirmationAttach) {
       throw new Error(
-        "RuntimeSession already has a confirmation renderer attached",
+        "RuntimeSession already has a confirmation channel attached",
       );
     }
-    this.attachedRenderer = renderer;
-    this.currentBrokerDetach = renderer.attach(
-      this.agentRuntime.confirmationBroker,
-    );
+    this.confirmationAttach = attach;
+    this.currentBrokerDetach = attach(this.agentRuntime.confirmationBroker);
 
     return () => {
       this.currentBrokerDetach?.();
       this.currentBrokerDetach = null;
-      this.attachedRenderer = null;
+      this.confirmationAttach = null;
     };
   }
 
   /**
-   * 把已绑定的 confirmation renderer 从旧 broker 切到 target runtime 的
-   * broker。reload（agent 重建带新 broker）与工作模式 enter/exit（runtime
-   * overlay 切换）统一走此方法，消除"内联 vs 方法"两套实现。
+   * 把已登记的确认接线从旧 broker 切到 target runtime 的 broker。reload
+   * （agent 重建带新 broker）与工作模式 enter/exit（runtime overlay 切换）
+   * 统一走此方法，消除"内联 vs 方法"两套实现。
    *
-   * 未 attach renderer（serve / 测试等无终端确认路径）时整体 no-op —— 切
-   * broker 无意义。与 attachConfirmationRenderer 的"首次 attach throw"守卫
-   * 互不干扰：那个守卫只管首次绑定，broker 切换不经它（detach 旧 → attach
-   * 新，attachedRenderer 引用不变）。
+   * 未登记接线（serve / 测试等无确认呈现路径）时整体 no-op —— 切 broker
+   * 无意义。与 attachConfirmation 的"首次 attach throw"守卫互不干扰：那个
+   * 守卫只管首次绑定，broker 切换不经它（detach 旧 → attach 新，钩子引用不变）。
    */
   private swapConfirmationBroker(target: AgentRuntime): void {
-    if (!this.attachedRenderer) return;
+    if (!this.confirmationAttach) return;
     this.currentBrokerDetach?.();
-    this.currentBrokerDetach = this.attachedRenderer.attach(
+    this.currentBrokerDetach = this.confirmationAttach(
       target.confirmationBroker,
     );
   }
@@ -370,10 +366,8 @@ export class RuntimeSession implements IWorkModeController {
     try {
       await work.dispose("workmode-exit");
     } catch (err) {
-      this.opts.writer.notify(
-        chalk.yellow(
-          `  ⚠ 退出工作模式时运行体收尾失败: ${err instanceof Error ? err.message : String(err)}`,
-        ),
+      this.opts.onRuntimeWarning(
+        `退出工作模式时运行体收尾失败: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
     this.workScene = undefined;
@@ -463,10 +457,8 @@ export class RuntimeSession implements IWorkModeController {
         try {
           await oldAgent.dispose("reload-replace");
         } catch (err) {
-          this.opts.writer.notify(
-            chalk.yellow(
-              `  ⚠ 旧运行体收尾失败: ${err instanceof Error ? err.message : String(err)}`,
-            ),
+          this.opts.onRuntimeWarning(
+            `旧运行体收尾失败: ${err instanceof Error ? err.message : String(err)}`,
           );
         }
         this.agentRuntime = built.newAgentRuntime;
@@ -479,10 +471,8 @@ export class RuntimeSession implements IWorkModeController {
         try {
           await oldPower.dispose("reload-replace");
         } catch (err) {
-          this.opts.writer.notify(
-            chalk.yellow(
-              `  ⚠ 旧运行体收尾失败: ${err instanceof Error ? err.message : String(err)}`,
-            ),
+          this.opts.onRuntimeWarning(
+            `旧运行体收尾失败: ${err instanceof Error ? err.message : String(err)}`,
           );
         }
         this.workScene = {
@@ -586,19 +576,17 @@ export class RuntimeSession implements IWorkModeController {
       try {
         await work.dispose("session-dispose");
       } catch (err) {
-        this.opts.writer.notify(
-          chalk.yellow(
-            `  ⚠ 运行体收尾失败: ${err instanceof Error ? err.message : String(err)}`,
-          ),
+        this.opts.onRuntimeWarning(
+          `运行体收尾失败: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
       this.workScene = undefined;
     }
 
-    // 先 detach renderer，防 dispose 后访问已释放的 broker
+    // 先 detach 确认接线，防 dispose 后访问已释放的 broker
     this.currentBrokerDetach?.();
     this.currentBrokerDetach = null;
-    this.attachedRenderer = null;
+    this.confirmationAttach = null;
 
     // 关闭调度门面——断开 cli 与核心宿主的连接、清订阅。
     try {
@@ -614,10 +602,8 @@ export class RuntimeSession implements IWorkModeController {
     try {
       await this.agentRuntime.dispose("session-dispose");
     } catch (err) {
-      this.opts.writer.notify(
-        chalk.yellow(
-          `  ⚠ 运行体收尾失败: ${err instanceof Error ? err.message : String(err)}`,
-        ),
+      this.opts.onRuntimeWarning(
+        `运行体收尾失败: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }

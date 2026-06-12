@@ -69,10 +69,6 @@ vi.mock("../turn-context-providers.js", () => ({
   registerCliTurnContextProviders: vi.fn(),
 }));
 
-vi.mock("../../render.js", () => ({
-  createRenderSubscribers: () => () => () => {},
-}));
-
 const { RuntimeSession } = await import("../session.js");
 
 // ─── 测试辅助 ───
@@ -107,8 +103,8 @@ function makeOptions() {
   return {
     config: { messaging: {} },
     credentials: {},
-    renderer: { stop: vi.fn() },
-    writer: { notify: vi.fn(), line: vi.fn() },
+    decorateRunBus: () => () => {},
+    onRuntimeWarning: vi.fn(),
     zhixingHome: "/tmp/zhixing-home",
     schedulerFacade: { dispose: vi.fn(async () => {}) },
     onSecurityBlocked: vi.fn(),

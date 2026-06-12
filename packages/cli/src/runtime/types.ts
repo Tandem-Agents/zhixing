@@ -2,26 +2,42 @@
  * RuntimeSession 公共契约。
  *
  * 资源所有权约定：
- * - 注入式（caller 持有，session 借用，不在 dispose 中关闭）：renderer / 配置数据
+ * - 注入式（caller 持有，session 借用，不在 dispose 中关闭）：装配钩子 / 配置数据
  * - 注入但 dispose 责任移交 session：schedulerFacade —— caller 创建并注入，但其底层
  *   RPC 连接 / 事件订阅的生命周期随 session，由 session.dispose 调 facade.dispose 关闭
  * - 持有式（session 拥有，通过 dispose 释放）：agentRuntime
+ *
+ * 依赖方向：session 是无 UI 类型依赖的核心——一切呈现面（终端渲染、确认面板、
+ * 警告输出）经装配钩子注入，session 只面对函数形接口。调用方决定钩子实现：
+ * REPL 传 TTY 渲染装配，无界面宿主传转发 / 落日志实现。
  *
  * 调度权威在核心宿主，cli 经注入的 schedulerFacade 接入——session 不再持有本地
  * Scheduler / channels / deliveryStack（cli 是纯交互接入面）。
  */
 
-import type { CreateAgentRuntimeOptions } from "@zhixing/orchestrator/runtime";
+import type {
+  AgentRuntime,
+  CreateAgentRuntimeOptions,
+} from "@zhixing/orchestrator/runtime";
 import type { ZhixingConfig, ZhixingCredentials } from "@zhixing/providers";
 import type { SchedulerFacade } from "@zhixing/core";
-import type { OutputRenderer } from "../output/index.js";
-import type { CliWriter, ScreenController } from "../screen/index.js";
 import type { BuiltinExtraToolsAssembly } from "./builtin-extra-tools.js";
 import type { CliSegmentDeps } from "./segment-deps.js";
 
 /** 从 createAgentRuntime 公共契约推导 callback 类型——避免依赖 orchestrator 内部路径 */
 type OnSecurityBlockedFn = NonNullable<CreateAgentRuntimeOptions["onSecurityBlocked"]>;
 type OnUserDeniedFn = NonNullable<CreateAgentRuntimeOptions["onUserDenied"]>;
+type DecorateRunBusFn = NonNullable<CreateAgentRuntimeOptions["decorateRunBus"]>;
+
+/**
+ * 确认接线钩子——把一个确认呈现渠道接到指定 broker，返回 detach。
+ *
+ * session 在 runtime 重建（reload）与工作模式 enter/exit 时用同一钩子把确认
+ * 渠道切到新 broker；渠道本体（终端面板 / 远程转发）由调用方闭包持有。
+ */
+export type ConfirmationAttachFn = (
+  broker: AgentRuntime["confirmationBroker"],
+) => () => void;
 
 export interface RuntimeSessionOptions {
   /** 启动期已 load 的配置——session 持有用于后续 reload 时与新文件 diff */
@@ -31,18 +47,17 @@ export interface RuntimeSessionOptions {
   /** CLI 指定的工作区目录（仅启动时一次，reload 不读取——reload 永远从配置文件读）。 */
   cliWorkspace?: string;
 
-  /** 顶层资源——session 借用，不在 dispose 中关闭 */
-  renderer: OutputRenderer;
   /**
-   * 写屏统一接口——所有 EventBus 事件渲染（retry / compact / interrupt 等）经此协调。
-   * REPL 模式注入 ScreenWriter（chrome 协调），serve 等非交互模式注入 StdoutWriter（直写）。
+   * Per-run 渲染装饰钩子——透传给 createAgentRuntime，每次 run 在 per-run bus
+   * 上装配订阅。REPL 传 createRenderSubscribers 产物（闭包持 TTY 三件套）；
+   * 无终端路径传转发 / no-op 实现。session 自身不触碰任何 UI 类型。
    */
-  writer: CliWriter;
+  decorateRunBus: DecorateRunBusFn;
   /**
-   * 屏幕协调器——cli REPL 模式下注入，启用 status-bar 动态状态展示；
-   * 非 REPL 模式可省略，status-bar 不启用，事件渲染仍经 writer 正常工作。
+   * 运行时非阻断警告（资源收尾失败等）——session 只报告纯文本事实，
+   * 呈现方式（染色 / 图标 / 落日志）归调用方钩子实现。
    */
-  screen?: ScreenController;
+  onRuntimeWarning: (message: string) => void;
   zhixingHome: string;
   /**
    * 调度门面 —— cli 经它接入核心宿主（RpcSchedulerFacade）。session 把它注入 schedule

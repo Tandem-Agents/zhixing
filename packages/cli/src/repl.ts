@@ -82,7 +82,7 @@ import {
   type AgentRuntime,
   type RunResult,
 } from "@zhixing/orchestrator/runtime";
-import { renderError } from "./render.js";
+import { renderError, createRenderSubscribers } from "./render.js";
 import { renderHistoryTail } from "./history-tail.js";
 import { createOutputRenderer, getLlmChunkDump } from "./output/index.js";
 import {
@@ -388,9 +388,14 @@ export async function startRepl(options: ReplOptions): Promise<void> {
     config,
     credentials,
     cliWorkspace: options.workspace,
-    renderer,
-    writer: cliWriter,
-    screen: renderScreen ?? undefined,
+    // TTY 装配经钩子注入——session 核心零 UI 类型依赖,渲染三件套由此闭包持有
+    decorateRunBus: createRenderSubscribers({
+      renderer,
+      writer: cliWriter,
+      screen: renderScreen ?? undefined,
+    }),
+    onRuntimeWarning: (message) =>
+      cliWriter.notify(chalk.yellow(`  ⚠ ${message}`)),
     zhixingHome,
     schedulerFacade,
     onSecurityBlocked: createBlockedRenderer(cliWriter),
@@ -557,8 +562,8 @@ export async function startRepl(options: ReplOptions): Promise<void> {
       })
     : null;
   if (confirmationRenderer) {
-    // session 持有 renderer 与 broker 的绑定，dispose 时自动 detach
-    session.attachConfirmationRenderer(confirmationRenderer);
+    // session 持接线钩子与 broker 绑定(dispose 时自动 detach);面板本体由本闭包持有
+    session.attachConfirmation((broker) => confirmationRenderer.attach(broker));
   }
 
   // main 域运行态 —— 进入工作模式后此实例原样保留，退出时直接切回（双份持有）。
