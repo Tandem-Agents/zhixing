@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import {
   buildServerShutdownMethod,
   buildServerInfoMethod,
+  buildLlmCompleteMethod,
 } from "../server.js";
 import type { HandlerContext } from "../../handlers.js";
 import { RpcAppError } from "../../handlers.js";
@@ -118,6 +119,28 @@ describe("server.info", () => {
     expect(result.logPath).toBe("/log/host.log");
   });
 
+  it("叠加 MCP 状态快照", () => {
+    const ctx = mkCtx({
+      mcpStatuses: () => [
+        {
+          serverId: "github",
+          transport: "stdio",
+          status: "connected",
+          toolCount: 3,
+        },
+      ],
+    });
+    const result = buildServerInfoMethod().handler({}, ctx) as any;
+    expect(result.mcpServers).toEqual([
+      {
+        serverId: "github",
+        transport: "stdio",
+        status: "connected",
+        toolCount: 3,
+      },
+    ]);
+  });
+
   it("marks shutdownAvailable=false when requestShutdown not wired", () => {
     const ctx = mkCtx({ requestShutdown: undefined });
     const result = buildServerInfoMethod().handler({}, ctx) as any;
@@ -127,5 +150,55 @@ describe("server.info", () => {
   // silence lint on unused import
   it("RpcAppError is a class", () => {
     expect(typeof RpcAppError).toBe("function");
+  });
+});
+
+describe("llm.complete", () => {
+  it("仅可信 loopback 面可调用,并转发 prompt / role", async () => {
+    const complete = vi.fn(async (prompt: string, role?: "main" | "light") =>
+      `${role ?? "default"}:${prompt}`,
+    );
+    const ctx = {
+      ...mkCtx({ llmComplete: complete }),
+      connection: { authenticated: true, loopback: true } as any,
+    };
+    const entry = buildLlmCompleteMethod();
+    expect(entry.requiresAuth).toBe(true);
+
+    await expect(
+      entry.handler({ prompt: "整理 MCP 配置", role: "main" }, ctx),
+    ).resolves.toEqual({ text: "main:整理 MCP 配置" });
+    expect(complete).toHaveBeenCalledWith("整理 MCP 配置", "main");
+  });
+
+  it("拒绝非 loopback / 空 prompt / 非法 role / 未装配执行体", async () => {
+    const entry = buildLlmCompleteMethod();
+    await expect(
+      entry.handler(
+        { prompt: "x" },
+        { ...mkCtx(), connection: { authenticated: true, loopback: false } as any },
+      ),
+    ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+
+    await expect(
+      entry.handler(
+        { prompt: "" },
+        { ...mkCtx({ llmComplete: async () => "x" }), connection: { authenticated: true, loopback: true } as any },
+      ),
+    ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+
+    await expect(
+      entry.handler(
+        { prompt: "x", role: "fast" },
+        { ...mkCtx({ llmComplete: async () => "x" }), connection: { authenticated: true, loopback: true } as any },
+      ),
+    ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+
+    await expect(
+      entry.handler(
+        { prompt: "x" },
+        { ...mkCtx(), connection: { authenticated: true, loopback: true } as any },
+      ),
+    ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INTERNAL_ERROR });
   });
 });

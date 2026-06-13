@@ -12,13 +12,13 @@
  * - session.subscribe / unsubscribe：observer 登记(订阅即进组播名册)
  *
  * 推送事件(经 observer 名册组播,见 session-broadcast)：
- * - session.delta { conversationId, delta: AgentYield } —— 主通道(turn 产出流)
- * - session.complete { conversationId, result: AgentResult }
+ * - session.delta { conversationId, turnId, delta: AgentYield } —— 主通道(turn 产出流)
+ * - session.complete { conversationId, turnId, result: AgentResult }
  * - session.event { ...SessionEventEnvelope } —— 带外通道(见 session-events)
  * - session.changed { conversationId, change } —— 会话级变更(run 外发生)
  *
  * 定向推送(仅发起连接,不组播)：
- * - session.modeSwitchIntent { conversationId, intent } —— 可执行控制意图,
+ * - session.modeSwitchIntent { conversationId, turnId, intent } —— 可执行控制意图,
  *   跟随权归发起接入面由结构保证(旁观端物理不可达)
  */
 
@@ -41,14 +41,22 @@ import {
   SESSION_NOTIFICATIONS,
   toWireAgentResult,
   type SessionChangedPayload,
+  type SessionClearResult,
+  type SessionCompactResult,
+  type SessionContextBudgetResult,
   type SessionCompletePayload,
   type SessionConversationEntry,
   type SessionDeltaPayload,
   type SessionListResult,
   type SessionModeSwitchIntentPayload,
+  type SessionNewResult,
   type SessionRenameResult,
+  type SessionResumeResult,
   type SessionSendResult,
   type SessionSubscribeResult,
+  type SessionTaskListAction,
+  type SessionTaskListResult,
+  type SessionTaskListUpdateResult,
   type SessionUnsubscribeResult,
 } from "../session-wire.js";
 
@@ -57,6 +65,8 @@ import {
 interface SessionSendParams {
   text?: string;
   conversationId?: string;
+  /** 发起端可预分配 turnId,用于避免 loopback 下 complete 先于 send 响应的竞态 */
+  turnId?: string;
   /** @deprecated 使用 conversationId */
   sessionId?: string;
 }
@@ -73,45 +83,63 @@ export function buildSessionSendMethod(): MethodEntry {
       const text = params.text;
 
       const manager = requireConversations(ctx.server);
-      const id = params.conversationId ?? params.sessionId;
-
-      const managed = await manager.getOrCreate(id);
-      const conversationId = managed.conversationId;
+      const id = optionalConversationId(params, "session.send");
+      const turnId =
+        params.turnId !== undefined
+          ? validateTurnId(params.turnId)
+          : generateTurnId();
       const connectionId = String(ctx.connection.id);
-
-      manager.addObserver(conversationId, connectionId);
-
       const broadcast = ctx.server.sessionBroadcast;
-      const status = manager.enqueue(conversationId, {
-        execute: () =>
-          runManagedTurn(managed, text, ctx.connection, manager, broadcast),
-        // 取消通知是排队发起者的私人回执,不组播——其他端没见过这条排队项
-        cancel: () => {
-          ctx.connection.notify(SESSION_NOTIFICATIONS.complete, {
-            conversationId,
-            sessionId: conversationId,
-            result: {
-              reason: "error",
-              error: { name: "Cancelled", message: "Pending turn cancelled" },
-              usage: { inputTokens: 0, outputTokens: 0 },
-            },
-          } satisfies SessionCompletePayload);
-        },
+
+      const admission = await manager.admitTurn({
+        conversationId: id,
+        createConversation: ctx.server.conversationDirectory
+          ? async () => (await ctx.server.conversationDirectory!.create()).id
+          : undefined,
+        exists: existingConversationCheck(ctx.server, id),
+        connectionId,
+        makeTask: (managed) => ({
+          execute: () =>
+            runManagedTurn(
+              managed,
+              text,
+              turnId,
+              ctx.connection,
+              manager,
+              broadcast,
+            ),
+          // 取消通知是排队发起者的私人回执,不组播——其他端没见过这条排队项
+          cancel: () => {
+            ctx.connection.notify(SESSION_NOTIFICATIONS.complete, {
+              conversationId: managed.conversationId,
+              sessionId: managed.conversationId,
+              turnId,
+              result: {
+                reason: "error",
+                error: { name: "Cancelled", message: "Pending turn cancelled" },
+                usage: { inputTokens: 0, outputTokens: 0 },
+              },
+            } satisfies SessionCompletePayload);
+          },
+        }),
       });
 
-      if (status === "full") {
+      if (admission.status === "not-found") {
+        throw RpcErrors.notFound(`Session not found: ${admission.conversationId}`);
+      }
+      if (admission.status === "full") {
         throw new RpcAppError(RPC_ERROR_CODES.BUSY, "Too many pending messages for this conversation");
       }
 
-      if (status === "immediate") {
-        manager.setBusy(conversationId, true);
-        void runManagedTurn(managed, text, ctx.connection, manager, broadcast);
+      if (admission.status === "immediate") {
+        void admission.task.execute();
       }
       // status === "queued": dequeueNext will call execute() when current turn completes
 
       return {
-        conversationId,
-        sessionId: conversationId,
+        conversationId: admission.conversationId,
+        sessionId: admission.conversationId,
+        turnId,
       };
     },
   };
@@ -133,6 +161,7 @@ export function buildSessionSendMethod(): MethodEntry {
 async function runManagedTurn(
   managed: ManagedSession,
   text: string,
+  turnId: string,
   connection: RpcConnection,
   manager: ConversationManager,
   broadcast?: SessionBroadcast,
@@ -158,7 +187,7 @@ async function runManagedTurn(
     //   RPC 入口（Web UI / IDE）触发的 turn——无通道 target，仅走 RPC Bridge 定向推送。
     //   Bridge 用 triggeredBy=connectionId 过滤，只推给发起连接 + 同会话 observer。
     const turnContext: TurnContext = {
-      turnId: generateTurnId(),
+      turnId,
       turnOrigin: {
         channel: "rpc",
         triggeredBy: String(connection.id),
@@ -193,6 +222,7 @@ async function runManagedTurn(
         if (runResult.pendingModeSwitch) {
           connection.notify(SESSION_NOTIFICATIONS.modeSwitchIntent, {
             conversationId,
+            turnId,
             intent: runResult.pendingModeSwitch,
           } satisfies SessionModeSwitchIntentPayload);
         }
@@ -202,6 +232,7 @@ async function runManagedTurn(
         push(SESSION_NOTIFICATIONS.complete, {
           conversationId,
           sessionId: conversationId,
+          turnId,
           result: toWireAgentResult(runResult.agentResult),
         } satisfies SessionCompletePayload);
         break;
@@ -209,6 +240,7 @@ async function runManagedTurn(
       push(SESSION_NOTIFICATIONS.delta, {
         conversationId,
         sessionId: conversationId,
+        turnId,
         delta: iter.value,
       } satisfies SessionDeltaPayload);
     }
@@ -222,6 +254,7 @@ async function runManagedTurn(
     push(SESSION_NOTIFICATIONS.complete, {
       conversationId,
       sessionId: conversationId,
+      turnId,
       result: {
         reason: "error",
         error: { name: "RuntimeError", message },
@@ -261,7 +294,7 @@ export function buildSessionListMethod(): MethodEntry {
             lastActiveAt: active?.lastActiveAt ?? c.lastActiveAt,
             active: !!active,
             busy: active?.busy ?? false,
-            observerCount: active?.observers.size ?? 0,
+            observerCount: manager.getObserverCount(c.id),
             pendingCount: manager.pendingCount(c.id),
           };
         }),
@@ -360,8 +393,8 @@ export function buildSessionRenameMethod(): MethodEntry {
       if (!renamed) {
         throw RpcErrors.notFound(`Session not found: ${params.conversationId}`);
       }
-      // 会话级变更组播——活跃会话的在场 observer 据此刷新标题;不活跃对话
-      // 名册为空、通知自然无人收(列表视图的跨端刷新策略归接入面接入时定)
+      // 会话级变更组播——observer 名册在 conversation 身份层,因此已落盘但
+      // 未激活 runtime 的当前对话也能收到 run 外变更。
       ctx.server.sessionBroadcast?.(params.conversationId, SESSION_NOTIFICATIONS.changed, {
         conversationId: params.conversationId,
         change: "renamed",
@@ -433,16 +466,24 @@ export function buildSessionDeleteMethod(): MethodEntry {
       }
       const manager = requireConversations(ctx.server);
       const directory = ctx.server.conversationDirectory;
-      // 会话级变更通知:删除发生在 run 外,双通道(以 run 为边界)覆盖不到——
-      // 旁观端无此信号会盯着已删对话继续操作。删除前组播(名册删除后即空)。
-      ctx.server.sessionBroadcast?.(id, SESSION_NOTIFICATIONS.changed, {
-        conversationId: id,
-        change: "deleted",
-      } satisfies SessionChangedPayload);
-      // 删除 = 活跃运行时释放 + 落盘数据删除;任一存在即为有效删除
-      const releasedActive = await manager.delete(id);
-      const removedDisk = (await directory?.remove(id)) ?? false;
-      if (!releasedActive && !removedDisk) {
+      // 删除 = 活跃运行时释放 + 落盘数据删除,在 manager 的 id 排他门内原子
+      // 完成(盘删与并发激活串行,busy 拒绝路径下盘不被动)。deleted 只在
+      // 删除成功后、名册清理前组播,旁观端据此停止盯已删对话。
+      const result = await manager.delete(id, {
+        removeDisk: async () => (directory ? directory.remove(id) : false),
+        onDeleted: () =>
+          ctx.server.sessionBroadcast?.(id, SESSION_NOTIFICATIONS.changed, {
+            conversationId: id,
+            change: "deleted",
+          } satisfies SessionChangedPayload),
+      });
+      if (result === "busy") {
+        throw new RpcAppError(
+          RPC_ERROR_CODES.BUSY,
+          "Conversation has an in-flight turn; abort it before deleting",
+        );
+      }
+      if (!result) {
         throw RpcErrors.notFound(`Session not found: ${id}`);
       }
     },
@@ -464,7 +505,7 @@ export function buildSessionSubscribeMethod(): MethodEntry {
   return {
     name: "session.subscribe",
     requiresAuth: true,
-    handler(rawParams, ctx): SessionSubscribeResult {
+    async handler(rawParams, ctx): Promise<SessionSubscribeResult> {
       const params = (rawParams ?? {}) as SessionSubscribeParams;
       if (typeof params.conversationId !== "string") {
         throw RpcErrors.invalidParams(
@@ -472,10 +513,18 @@ export function buildSessionSubscribeMethod(): MethodEntry {
         );
       }
       const manager = requireConversations(ctx.server);
-      // 仅对活跃会话登记(false = 会话不在场);激活会话走 send / resume 路径
+      const active = manager.has(params.conversationId);
+      const exists =
+        active ||
+        (await ctx.server.conversationDirectory?.exists(params.conversationId));
+      if (!exists) return { subscribed: false };
+
+      // observer 是 conversation 身份层名册;已落盘但未激活 runtime 的当前对话
+      // 也必须能收到 rename/delete/clear 这类 run 外变更。
       const subscribed = manager.addObserver(
         params.conversationId,
         String(ctx.connection.id),
+        { allowInactive: true },
       );
       return { subscribed };
     },
@@ -500,7 +549,350 @@ export function buildSessionUnsubscribeMethod(): MethodEntry {
   };
 }
 
+// ─── session.clear ───
+
+interface SessionClearParams {
+  conversationId?: string;
+}
+
+/**
+ * 清空对话——持久层清空(transcript clear 事件 + meta 视图层清理)与活跃会话
+ * 内存窗口重置在 ConversationManager 的**单 conversation 排他临界区**内原子
+ * 完成:维护操作同步占用串行点,并发 send 期间排队、清空后在空窗口上 dequeue,
+ * 杜绝"盘已清却被旧窗 turn 写新流"的污染。busy 时拒绝且盘绝不被动。
+ * 经组播名册发 session.changed cleared——旁观端据此刷新视图。
+ */
+export function buildSessionClearMethod(): MethodEntry {
+  return {
+    name: "session.clear",
+    requiresAuth: true,
+    async handler(rawParams, ctx): Promise<SessionClearResult> {
+      const params = (rawParams ?? {}) as SessionClearParams;
+      if (typeof params.conversationId !== "string") {
+        throw RpcErrors.invalidParams("session.clear requires 'conversationId'");
+      }
+      const id = params.conversationId;
+      const manager = requireConversations(ctx.server);
+      const directory = requireDirectory(ctx.server);
+
+      // 持久层清空收进 manager 的排他临界区(注入 persistClear 回调)——占用
+      // 串行点后才写盘,busy 拒绝路径下盘不被动,原子性由结构保证而非纪律。
+      const outcome = await manager.clear(id, () => directory.clear(id));
+      if (outcome === "busy") {
+        throw new RpcAppError(
+          RPC_ERROR_CODES.BUSY,
+          "Conversation has an in-flight turn; abort it before clearing",
+        );
+      }
+      if (outcome === "not-found") {
+        throw RpcErrors.notFound(`Session not found: ${id}`);
+      }
+
+      ctx.server.sessionBroadcast?.(id, SESSION_NOTIFICATIONS.changed, {
+        conversationId: id,
+        change: "cleared",
+      } satisfies SessionChangedPayload);
+      return { cleared: true };
+    },
+  };
+}
+
+// ─── session.compact ───
+
+interface SessionCompactParams {
+  conversationId?: string;
+}
+
+/**
+ * 手动压缩注意力窗口——激活会话(非活跃经启动装填重建窗口)后由运行体产出
+ * 折叠指令,manager 应用折叠并写派生快照。压缩是窗口的视图操作,不动落盘原文。
+ */
+export function buildSessionCompactMethod(): MethodEntry {
+  return {
+    name: "session.compact",
+    requiresAuth: true,
+    async handler(rawParams, ctx): Promise<SessionCompactResult> {
+      const params = (rawParams ?? {}) as SessionCompactParams;
+      const conversationId = requireConversationId(params, "session.compact");
+      const manager = requireConversations(ctx.server);
+      const result = await manager.compactExisting(
+        conversationId,
+        requiredExistingConversationCheck(ctx.server, conversationId),
+      );
+
+      if (result.status === "busy") {
+        throw new RpcAppError(
+          RPC_ERROR_CODES.BUSY,
+          "Conversation has an in-flight turn; compact after it completes",
+        );
+      }
+      if (result.status === "not-found") {
+        throw RpcErrors.notFound(
+          `Session not found: ${conversationId}`,
+        );
+      }
+      if (result.status === "unsupported") {
+        throw new RpcAppError(
+          RPC_ERROR_CODES.INTERNAL_ERROR,
+          "Runtime does not support manual compaction",
+        );
+      }
+
+      const { outcome } = result;
+      return {
+        modified: outcome.modified && !!outcome.windowCompact,
+        tokensBefore: outcome.windowCompact?.tokensBefore,
+        tokensAfter: outcome.windowCompact?.tokensAfter,
+        emergencyFloor: outcome.emergencyFloor,
+      };
+    },
+  };
+}
+
+// ─── session.contextBudget ───
+
+interface SessionContextBudgetParams {
+  conversationId?: string;
+}
+
+/**
+ * 当前注意力窗口的上下文预算——接入面 /usage /context 的数据面。激活会话
+ * (非活跃经启动装填重建窗口)后由运行体估算。
+ */
+export function buildSessionContextBudgetMethod(): MethodEntry {
+  return {
+    name: "session.contextBudget",
+    requiresAuth: true,
+    async handler(rawParams, ctx): Promise<SessionContextBudgetResult> {
+      const params = (rawParams ?? {}) as SessionContextBudgetParams;
+      const conversationId = requireConversationId(
+        params,
+        "session.contextBudget",
+      );
+      const manager = requireConversations(ctx.server);
+      const result = await manager.inspectContextBudgetExisting(
+        conversationId,
+        requiredExistingConversationCheck(ctx.server, conversationId),
+      );
+      if (result.status === "not-found") {
+        throw RpcErrors.notFound(`Session not found: ${conversationId}`);
+      }
+      if (result.status === "unsupported") {
+        throw new RpcAppError(
+          RPC_ERROR_CODES.INTERNAL_ERROR,
+          "Runtime does not support context budget inspection",
+        );
+      }
+      return {
+        budget: result.budget,
+        turnCount: result.turnCount,
+        calibrationFactor: result.calibrationFactor,
+      };
+    },
+  };
+}
+
+// ─── session.taskListUpdate ───
+
+interface SessionTaskListUpdateParams {
+  conversationId?: string;
+  action?: SessionTaskListAction;
+}
+
+/** /task new·done 的宿主执行体——写单点在宿主 task_list 服务。 */
+export function buildSessionTaskListUpdateMethod(): MethodEntry {
+  return {
+    name: "session.taskListUpdate",
+    requiresAuth: true,
+    async handler(rawParams, ctx): Promise<SessionTaskListUpdateResult> {
+      const params = (rawParams ?? {}) as SessionTaskListUpdateParams;
+      if (typeof params.conversationId !== "string") {
+        throw RpcErrors.invalidParams(
+          "session.taskListUpdate requires 'conversationId'",
+        );
+      }
+      const action = params.action;
+      const validAction =
+        !!action &&
+        ((action.kind === "add" && typeof action.content === "string") ||
+          (action.kind === "done" && typeof action.token === "string"));
+      if (!validAction) {
+        throw RpcErrors.invalidParams(
+          "session.taskListUpdate requires 'action' of kind add{content} or done{token}",
+        );
+      }
+      const conversationId = params.conversationId;
+      const update = ctx.server.taskListUpdate;
+      if (!update) {
+        throw new RpcAppError(
+          RPC_ERROR_CODES.INTERNAL_ERROR,
+          "Task list update executor not configured on server",
+        );
+      }
+      const manager = requireConversations(ctx.server);
+      const result = await manager.runMaintenanceExisting(
+        conversationId,
+        existingConversationCheck(ctx.server, conversationId),
+        () => update(conversationId, action),
+      );
+      if (result.status === "busy") {
+        throw new RpcAppError(
+          RPC_ERROR_CODES.BUSY,
+          "Conversation has an in-flight turn or maintenance operation; update tasks after it completes",
+        );
+      }
+      if (result.status === "not-found") {
+        throw RpcErrors.notFound(`Session not found: ${conversationId}`);
+      }
+      return result.value;
+    },
+  };
+}
+
+// ─── session.taskList ───
+
+interface SessionTaskListParams {
+  conversationId?: string;
+}
+
+/** task_list 权威读模型——发起端启动 / 切换 / 清空后同步只读视图。 */
+export function buildSessionTaskListMethod(): MethodEntry {
+  return {
+    name: "session.taskList",
+    requiresAuth: true,
+    async handler(rawParams, ctx): Promise<SessionTaskListResult> {
+      const params = (rawParams ?? {}) as SessionTaskListParams;
+      if (typeof params.conversationId !== "string") {
+        throw RpcErrors.invalidParams(
+          "session.taskList requires 'conversationId'",
+        );
+      }
+      const snapshot = ctx.server.taskListSnapshot;
+      if (!snapshot) {
+        throw new RpcAppError(
+          RPC_ERROR_CODES.INTERNAL_ERROR,
+          "Task list snapshot reader not configured on server",
+        );
+      }
+      return { taskList: await snapshot(params.conversationId) };
+    },
+  };
+}
+
+// ─── session.new ───
+
+/** 建一个 user 域新对话(meta + transcript 壳),返回身份供接入面切指针。 */
+export function buildSessionNewMethod(): MethodEntry {
+  return {
+    name: "session.new",
+    requiresAuth: true,
+    async handler(_params, ctx): Promise<SessionNewResult> {
+      const directory = requireDirectory(ctx.server);
+      const created = await directory.create();
+      return { conversationId: created.id, name: created.name };
+    },
+  };
+}
+
+// ─── session.resume ───
+
+interface SessionResumeParams {
+  conversationId?: string;
+}
+
+/**
+ * 切换到既有对话——touch 最近活跃 + 返回身份与活跃态。接入面据此切指针、
+ * 拉历史尾巴、决定是否 subscribe 旁观进行中的流;窗口装填推迟到首次 send
+ * (getOrCreate 的启动装填),resume 本身不激活运行体。
+ */
+export function buildSessionResumeMethod(): MethodEntry {
+  return {
+    name: "session.resume",
+    requiresAuth: true,
+    async handler(rawParams, ctx): Promise<SessionResumeResult> {
+      const params = (rawParams ?? {}) as SessionResumeParams;
+      if (typeof params.conversationId !== "string") {
+        throw RpcErrors.invalidParams("session.resume requires 'conversationId'");
+      }
+      const directory = requireDirectory(ctx.server);
+      const touched = await directory.touch(params.conversationId);
+      if (!touched) {
+        throw RpcErrors.notFound(`Session not found: ${params.conversationId}`);
+      }
+      const manager = requireConversations(ctx.server);
+      const active = manager.getSession(params.conversationId);
+      return {
+        // 返回入参全域键——与 rename 同纪律,目录契约返回库内身份
+        conversationId: params.conversationId,
+        name: touched.name,
+        active: !!active,
+        busy: active?.busy ?? false,
+      };
+    },
+  };
+}
+
 // ─── 工具 ───
+
+interface ConversationIdParams {
+  conversationId?: unknown;
+  sessionId?: unknown;
+}
+
+function validateConversationId(value: unknown, method: string): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw RpcErrors.invalidParams(
+      `${method} requires non-empty 'conversationId'`,
+    );
+  }
+  return value;
+}
+
+function validateTurnId(value: unknown): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw RpcErrors.invalidParams(
+      "session.send 'turnId' must be a non-empty string",
+    );
+  }
+  return value;
+}
+
+function optionalConversationId(
+  params: ConversationIdParams,
+  method: string,
+): string | undefined {
+  if (params.conversationId !== undefined) {
+    return validateConversationId(params.conversationId, method);
+  }
+  if (params.sessionId !== undefined) {
+    return validateConversationId(params.sessionId, method);
+  }
+  return undefined;
+}
+
+function requireConversationId(
+  params: ConversationIdParams,
+  method: string,
+): string {
+  return validateConversationId(params.conversationId, method);
+}
+
+function existingConversationCheck(
+  server: ServerContext,
+  conversationId: string | undefined,
+): (() => Promise<boolean>) | undefined {
+  if (!conversationId) return undefined;
+  const directory = server.conversationDirectory;
+  return directory ? () => directory.exists(conversationId) : undefined;
+}
+
+function requiredExistingConversationCheck(
+  server: ServerContext,
+  conversationId: string,
+): () => Promise<boolean> {
+  const directory = requireDirectory(server);
+  return () => directory.exists(conversationId);
+}
 
 function requireConversations(server: ServerContext): ConversationManager {
   if (!server.conversations) {

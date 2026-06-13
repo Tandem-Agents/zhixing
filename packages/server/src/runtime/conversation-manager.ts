@@ -29,6 +29,7 @@ import {
 import type {
   AbortResult,
   ConversationBootstrap,
+  RuntimeCompactOutcome,
   SessionRuntime,
   RuntimeFactory,
 } from "./types.js";
@@ -173,6 +174,25 @@ export interface ConversationManagerCallbacks {
    * 参见 remote-confirmation-execution.md §3.2。
    */
   confirmationHub?: ConfirmationHub;
+  /**
+   * turn 持久化成功后的维护钩子——所有入口(RPC / 渠道)的 turn 都经
+   * recordTurn,此处是宿主侧 turn 后维护(自动命名 / journal 凝练等)的
+   * 唯一汇聚点。同步签名 fire-and-forget:实现自行 void 异步工作并兜错,
+   * 钩子失败绝不影响已完成的持久化与窗口推进。
+   */
+  onTurnCommitted?: (info: TurnCommittedInfo) => void;
+}
+
+/** onTurnCommitted 的入参——本次 turn 落定后的会话事实快照 */
+export interface TurnCommittedInfo {
+  readonly conversationId: string;
+  /** 本 turn 落定后的累计 turn 数(首轮 = 1) */
+  readonly turnCount: number;
+  /** 本 run 的全部消息(含用户消息与助手回复) */
+  readonly runMessages: readonly Message[];
+  readonly ephemeral: boolean;
+  /** 该会话的运行体(维护任务的 callText 推理通道) */
+  readonly runtime: SessionRuntime;
 }
 
 // ─── 待处理任务 ───
@@ -182,13 +202,61 @@ export interface PendingTask {
   cancel: () => void;
 }
 
+type ConversationExists = () => Promise<boolean>;
+
+export type TurnAdmissionResult =
+  | {
+      status: "immediate" | "queued";
+      conversationId: string;
+      managed: ManagedSession;
+      task: PendingTask;
+    }
+  | { status: "full"; conversationId: string }
+  | { status: "not-found"; conversationId: string };
+
+export type ContextBudgetInspectionResult =
+  | {
+      status: "done";
+      budget: ReturnType<NonNullable<SessionRuntime["checkBudget"]>>;
+      turnCount: number;
+      calibrationFactor: number;
+    }
+  | { status: "not-found" }
+  | { status: "unsupported" };
+
 // ─── ConversationManager ───
 
 export class ConversationManager {
   private readonly sessions = new Map<string, ManagedSession>();
+  /**
+   * observer 名册是 conversation 身份层状态,不是活跃 runtime 状态。
+   *
+   * 一个接入面可以正在"看"某个已落盘但尚未激活运行体的 conversation:
+   * `/resume` / `session.new` 只切身份指针,第一次 send 才创建 ManagedSession。
+   * 因此名册必须独立于 sessions,否则 idle 当前对话收不到 rename/delete/clear
+   * 这类 run 外变更。
+   */
+  private readonly observers = new Map<string, Set<string>>();
   private readonly creating = new Map<string, Promise<ManagedSession>>();
   private readonly graceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly pendingQueues = new Map<string, PendingTask[]>();
+  /**
+   * 正在执行删除终结的 conversationId。
+   *
+   * 这是 idLocks 的可见状态位：idLocks 负责 FIFO 串行,但 `getOrCreate`
+   * 的 promise 会在后续 delete 锁任务执行前先把 session 交还给调用方。
+   * delete 发起瞬间立此标记,让创建完成的 session 以 busy=true 出生,
+   * 从而保证调用方即便先恢复也只能排队,最终由 delete 统一取消。
+   */
+  private readonly deleting = new Set<string>();
+  /**
+   * 单 conversationId 串行门(promise 链 mutex)——覆盖"激活(getOrCreate
+   * 的 doCreate/loadHistory)与 run 外写操作(clear / delete)在会话尚未
+   * 活跃时仍可能撞车的读/写操作。活跃后的 turn 串行由 busy + pendingQueues
+   * 承担(粒度更细、带界队列);本门只串"激活 vs run 外写",二者都从写后的
+   * 事实流出发,杜绝"盘已清/已删却被并发 send 装入旧历史"。
+   */
+  private readonly idLocks = new Map<string, Promise<unknown>>();
   private idleInterval: ReturnType<typeof setInterval> | null = null;
 
   private readonly factory: RuntimeFactory;
@@ -204,6 +272,7 @@ export class ConversationManager {
     input: SnapshotInput,
   ) => Promise<void>;
   private readonly confirmationHub?: ConfirmationHub;
+  private readonly onTurnCommitted?: (info: TurnCommittedInfo) => void;
   /** conversationId 集合——已 attach 到 hub 的会话，用于 dispose 前反查 + 防重 */
   private readonly attachedBrokers = new Set<string>();
   /**
@@ -234,6 +303,7 @@ export class ConversationManager {
       this.appendRunCb = callbacksOrOnRelease.appendRun;
       this.writeSnapshotCb = callbacksOrOnRelease.writeSnapshot;
       this.confirmationHub = callbacksOrOnRelease.confirmationHub;
+      this.onTurnCommitted = callbacksOrOnRelease.onTurnCommitted;
     } else if (loadHistory) {
       this.loadHistory = loadHistory;
     }
@@ -275,13 +345,37 @@ export class ConversationManager {
     const inflight = this.creating.get(id);
     if (inflight) return inflight;
 
-    const promise = this.doCreate(id, options?.ephemeral ?? false);
+    // 激活(doCreate 内 loadHistory 读盘)经 id 串行门——与同 id 的 clear
+    // 互斥:clear 在途时此处等待,clear 完成后从清空后的事实流装填。
+    const promise = this.withIdLock(id, () =>
+      this.doCreate(id, options?.ephemeral ?? false),
+    );
     this.creating.set(id, promise);
     try {
       return await promise;
     } finally {
       this.creating.delete(id);
     }
+  }
+
+  /**
+   * 单 conversationId 串行门:把 fn 链在该 id 当前在途操作之后同步执行。
+   * 读取当前 tail 与挂上新 tail 一气呵成(无 await 间隙),不同调用者各自
+   * 链在前者之后,严格 FIFO 互斥;前者成功或失败都不阻断链(`.then(_,_)`)。
+   */
+  private withIdLock<T>(id: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.idLocks.get(id) ?? Promise.resolve();
+    const result = prev.then(fn, fn);
+    // tail 吞掉成败,既作为后续者的串行锚,也用于"我是末尾才清理"判定
+    const tail = result.then(
+      () => {},
+      () => {},
+    );
+    this.idLocks.set(id, tail);
+    void tail.then(() => {
+      if (this.idLocks.get(id) === tail) this.idLocks.delete(id);
+    });
+    return result;
   }
 
   private async doCreate(id: string, ephemeral: boolean): Promise<ManagedSession> {
@@ -303,8 +397,8 @@ export class ConversationManager {
       }),
       createdAt: now,
       lastActiveAt: now,
-      busy: false,
-      observers: new Set(),
+      busy: this.deleting.has(id),
+      observers: this.getOrCreateObserverSet(id),
       turnCount: history?.turnCount ?? 0,
       ephemeral,
       transcriptInited: !ephemeral,
@@ -315,6 +409,102 @@ export class ConversationManager {
     this.sessions.set(id, session);
     this.attachToHub(id, runtime);
     return session;
+  }
+
+  /**
+   * 显式 conversationId 的启动装填门禁。
+   *
+   * `exists` 必须在 manager 的 id 串行门内执行,否则 RPC 层会形成
+   * "exists=true → delete 完成 → getOrCreate 又 initTranscript" 的复活竞态。
+   * 无持久目录的最小测试/ephemeral 场景可不传 exists,保持旧的纯内存语义。
+   */
+  private async getOrCreateExisting(
+    conversationId: string,
+    exists?: ConversationExists,
+  ): Promise<ManagedSession | undefined> {
+    const active = this.sessions.get(conversationId);
+    if (active) {
+      active.lastActiveAt = new Date().toISOString();
+      this.clearGraceTimer(conversationId);
+      return active;
+    }
+
+    return this.withIdLock(conversationId, async () => {
+      const activeAfterWait = this.sessions.get(conversationId);
+      if (activeAfterWait) {
+        activeAfterWait.lastActiveAt = new Date().toISOString();
+        this.clearGraceTimer(conversationId);
+        return activeAfterWait;
+      }
+      if (exists && !(await exists())) return undefined;
+      return this.doCreate(conversationId, false);
+    });
+  }
+
+  /**
+   * turn 准入的唯一 owner 入口。
+   *
+   * 它把"身份解析/存在性门禁/运行体激活/observer 入册/排队或 busy 占位"
+   * 收进同一个结构里。调用方拿到 immediate 后只负责启动返回的 task;
+   * queued/full/not-found 均已在 owner 内形成确定状态,不会在 RPC 层留下
+   * 可被 delete/clear 插入的半开放窗口。
+   */
+  async admitTurn(input: {
+    conversationId?: string;
+    createConversation?: () => Promise<string>;
+    exists?: ConversationExists;
+    connectionId: string;
+    makeTask: (managed: ManagedSession) => PendingTask;
+  }): Promise<TurnAdmissionResult> {
+    if (input.conversationId) {
+      const active = this.sessions.get(input.conversationId);
+      if (active) {
+        return this.admitTurnForSession(
+          active,
+          input.connectionId,
+          input.makeTask,
+        );
+      }
+    }
+
+    const managed = input.conversationId
+      ? await this.getOrCreateExisting(input.conversationId, input.exists)
+      : await this.getOrCreate(await input.createConversation?.());
+
+    if (!managed) {
+      return {
+        status: "not-found",
+        conversationId: input.conversationId!,
+      };
+    }
+
+    return this.admitTurnForSession(managed, input.connectionId, input.makeTask);
+  }
+
+  private admitTurnForSession(
+    managed: ManagedSession,
+    connectionId: string,
+    makeTask: (managed: ManagedSession) => PendingTask,
+  ): TurnAdmissionResult {
+    managed.lastActiveAt = new Date().toISOString();
+    this.clearGraceTimer(managed.conversationId);
+    const task = makeTask(managed);
+    const status = this.enqueue(managed.conversationId, task);
+    if (status === "full") {
+      return { status: "full", conversationId: managed.conversationId };
+    }
+
+    this.addObserver(managed.conversationId, connectionId);
+    if (status === "immediate") {
+      this.setBusy(managed.conversationId, true);
+    }
+
+    return {
+      status,
+      conversationId: managed.conversationId,
+      managed,
+      task,
+    };
   }
 
   // ─── ConfirmationHub 接入（remote-confirmation-execution.md §3.2） ───
@@ -349,15 +539,39 @@ export class ConversationManager {
 
   // ─── Observer 管理 ───
 
+  private getOrCreateObserverSet(conversationId: string): Set<string> {
+    let observers = this.observers.get(conversationId);
+    if (!observers) {
+      observers = new Set();
+      this.observers.set(conversationId, observers);
+    }
+    return observers;
+  }
+
+  private maybeDropEmptyObserverSet(conversationId: string): void {
+    const observers = this.observers.get(conversationId);
+    if (!observers || observers.size > 0) return;
+    if (this.sessions.has(conversationId)) return;
+    this.observers.delete(conversationId);
+  }
+
   /**
-   * 添加观察者连接。清除任何挂起的 grace timer。
-   * 返回 false 表示会话不存在。
+   * 添加观察者连接。
+   *
+   * 默认只允许活跃会话;RPC `session.subscribe` 在目录层确认 conversation
+   * 身份存在后传 `allowInactive`，从而支持已落盘但未激活 runtime 的当前对话
+   * 收到 run 外变更通知。
    */
-  addObserver(conversationId: string, connectionId: string): boolean {
+  addObserver(
+    conversationId: string,
+    connectionId: string,
+    opts?: { allowInactive?: boolean },
+  ): boolean {
     const session = this.sessions.get(conversationId);
-    if (!session) return false;
-    session.observers.add(connectionId);
-    this.clearGraceTimer(conversationId);
+    if (!session && !opts?.allowInactive) return false;
+    const observers = this.getOrCreateObserverSet(conversationId);
+    observers.add(connectionId);
+    if (session) this.clearGraceTimer(conversationId);
     return true;
   }
 
@@ -365,12 +579,14 @@ export class ConversationManager {
    * 移除观察者连接。如果没有剩余观察者且不在 busy 状态，启动 grace timer。
    */
   removeObserver(conversationId: string, connectionId: string): void {
+    const observers = this.observers.get(conversationId);
+    if (!observers) return;
+    observers.delete(connectionId);
     const session = this.sessions.get(conversationId);
-    if (!session) return;
-    session.observers.delete(connectionId);
-    if (session.observers.size === 0 && !session.busy) {
+    if (session && observers.size === 0 && !session.busy) {
       this.startGraceTimer(conversationId);
     }
+    this.maybeDropEmptyObserverSet(conversationId);
   }
 
   /**
@@ -378,19 +594,20 @@ export class ConversationManager {
    * 典型场景：WebSocket 断开时批量清理。
    */
   removeObserverFromAll(connectionId: string): void {
-    for (const [convId, session] of this.sessions) {
-      if (session.observers.has(connectionId)) {
-        session.observers.delete(connectionId);
-        if (session.observers.size === 0 && !session.busy) {
-          this.startGraceTimer(convId);
-        }
+    for (const [convId, observers] of this.observers) {
+      if (!observers.has(connectionId)) continue;
+      observers.delete(connectionId);
+      const session = this.sessions.get(convId);
+      if (session && observers.size === 0 && !session.busy) {
+        this.startGraceTimer(convId);
       }
+      this.maybeDropEmptyObserverSet(convId);
     }
   }
 
   /** 查询会话的当前观察者数量 */
   getObserverCount(conversationId: string): number {
-    return this.sessions.get(conversationId)?.observers.size ?? 0;
+    return this.observers.get(conversationId)?.size ?? 0;
   }
 
   /**
@@ -402,7 +619,7 @@ export class ConversationManager {
    * （remote-confirmation-execution.md §3.9）。
    */
   getObserverConnectionIds(conversationId: string): ReadonlySet<string> {
-    return this.sessions.get(conversationId)?.observers ?? EMPTY_OBSERVER_SET;
+    return this.observers.get(conversationId) ?? EMPTY_OBSERVER_SET;
   }
 
   // ─── 查询 ───
@@ -438,7 +655,7 @@ export class ConversationManager {
       lastActiveAt: s.lastActiveAt,
       messageCount: s.window.getMessages().length,
       busy: s.busy,
-      observerCount: s.observers.size,
+      observerCount: this.getObserverCount(id),
       pendingCount: this.pendingQueues.get(id)?.length ?? 0,
       ephemeral: s.ephemeral,
     }));
@@ -457,7 +674,7 @@ export class ConversationManager {
       const queue = this.pendingQueues.get(conversationId);
       if (queue && queue.length > 0) {
         this.dequeueNext(conversationId);
-      } else if (session.observers.size === 0) {
+      } else if (this.getObserverCount(conversationId) === 0) {
         this.startGraceTimer(conversationId);
       }
       // event-driven drain:从 busy 到 idle 的下降沿,若 abortAllAndWait 在等且
@@ -616,6 +833,7 @@ export class ConversationManager {
       if (session.turnCount >= 2) {
         await this.promote(conversationId);
       }
+      this.notifyTurnCommitted(session, record);
       return;
     }
 
@@ -638,6 +856,308 @@ export class ConversationManager {
     });
     session.turnCount++;
     await this.maybeWriteSnapshot(conversationId, session, windowCompact, outcome);
+    this.notifyTurnCommitted(session, record);
+  }
+
+  /** 持久化成功后触发维护钩子——钩子抛错不反向影响已落定的 turn。 */
+  private notifyTurnCommitted(
+    session: ManagedSession,
+    record: RunRecordInput,
+  ): void {
+    if (!this.onTurnCommitted) return;
+    try {
+      this.onTurnCommitted({
+        conversationId: session.conversationId,
+        turnCount: session.turnCount,
+        runMessages: record.messages,
+        ephemeral: session.ephemeral,
+        runtime: session.runtime,
+      });
+    } catch (err) {
+      console.warn(
+        `[ConversationManager] onTurnCommitted 钩子失败 conv=${session.conversationId}(不影响已落定 turn):`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+
+  // ─── 会话命令执行体(run 外窗口操作) ───
+
+  /**
+   * 同步占用活跃会话的串行点做一次 run 外维护(clear / compact)。
+   *
+   * check-and-set 一气呵成、其间无 await——这是消除 TOCTOU 的关键:维护操作
+   * 在开头同步把 busy 置真,并发 send 经 enqueue 即见 busy 而排队(不会在
+   * "检查不忙"与"占用"之间挤进一个跑在旧窗口上的 turn)。维护的 async 工作
+   * (持久层清空 / LLM 摘要 / 窗口重置)全程持有 busy;release 经 setBusy(false)
+   * 把排队的 send 在维护产出的新窗口上 dequeue。
+   *
+   * 返回活跃会话(已占用,调用方须 finally setBusy(false))/ "busy"(进行中
+   * turn 或另一维护占用,拒绝)/ "not-active"(不在活跃集,无内存窗口)。
+   */
+  private acquireExclusive(
+    conversationId: string,
+  ): ManagedSession | "busy" | "not-active" {
+    const session = this.sessions.get(conversationId);
+    if (!session) return "not-active";
+    if (session.busy) return "busy";
+    // 同步占用——此后到 setBusy(false) 之间任何 send 的 enqueue 都见 busy 排队
+    session.busy = true;
+    session.lastActiveAt = new Date().toISOString();
+    this.clearGraceTimer(conversationId);
+    return session;
+  }
+
+  /**
+   * 清空对话——双层互斥各司其职,杜绝"盘已清却被并发操作看旧状态记新流":
+   *
+   * - **busy 串行点**(活跃会话):`acquireExclusive` **同步**占用(调用即占,
+   *   无微任务间隙),并发 send 经 enqueue 立即排队,清空后在空窗口 dequeue。
+   * - **id 串行门**(非活跃会话):`withIdLock` 与同 id 的 getOrCreate 激活
+   *   (doCreate/loadHistory 读盘)严格 FIFO 互斥——并发 send 的激活排在 clear
+   *   之后,从清空后的事实流装填,不读旧历史。等门期间若被激活,门内复用 busy
+   *   快路。
+   *
+   * 返回:"cleared"(活跃,盘+窗同事务清)/ "cleared-inactive"(非活跃,仅盘清)
+   * / "not-found"(盘上无此对话)/ "busy"(进行中 turn,拒绝、盘未动)。
+   */
+  async clear(
+    conversationId: string,
+    persistClear: () => Promise<boolean>,
+  ): Promise<"cleared" | "cleared-inactive" | "not-found" | "busy"> {
+    // 活跃快路:同步占用 busy(无微任务间隙——这是并发 send 立即见忙的关键)
+    const acquired = this.acquireExclusive(conversationId);
+    if (acquired === "busy") return "busy";
+    if (acquired !== "not-active") {
+      return this.clearActiveSession(acquired, persistClear);
+    }
+    // 非活跃:经 id 门与激活互斥;门内再判活跃(等门期间可能被一次 send 激活)
+    return this.withIdLock(conversationId, async () => {
+      const acq2 = this.acquireExclusive(conversationId);
+      if (acq2 === "busy") return "busy";
+      if (acq2 !== "not-active") {
+        return this.clearActiveSession(acq2, persistClear);
+      }
+      // 仍非活跃:无内存窗口;持 id 门写盘,并发 send 的激活排在其后从空盘装填
+      return (await persistClear()) ? "cleared-inactive" : "not-found";
+    });
+  }
+
+  /**
+   * 清空一个**已同步占用 busy** 的活跃会话(调用方经 acquireExclusive 占用)——
+   * 持久层清空(在占用之后,busy 拒绝路径下盘不被动)+ 内存窗口重置 + 运行体
+   * 换代钩子;finally 释放 busy(排队的 send 在空窗口 dequeue)。
+   */
+  private async clearActiveSession(
+    session: ManagedSession,
+    persistClear: () => Promise<boolean>,
+  ): Promise<"cleared" | "not-found"> {
+    try {
+      if (!(await persistClear())) return "not-found";
+      session.window.reset("clear");
+      session.turnCount = 0;
+      // 运行体能力可选:缺失时窗口已清,内存语义即"清空",降级可接受
+      await session.runtime.resetConversationState?.().catch(() => {});
+      await session.runtime.onAttentionWindowChange?.("clear").catch(() => {});
+      return "cleared";
+    } finally {
+      this.setBusy(session.conversationId, false);
+    }
+  }
+
+  /**
+   * 在会话 owner 内执行一次 run 外视图态维护。
+   *
+   * 用途:task_list 这类不跑 LLM、但会写 conversation meta / 推送视图变更的
+   * 操作。它必须与 clear / delete / send 共享同一 per-conversation 串行点:
+   * - 活跃会话:同步占用 busy,并发 send 排队,并发 clear/delete 见 busy 拒绝。
+   * - 非活跃会话:走 id 门,与同 id 激活 / clear / delete 的读写互斥。
+   *
+   * 不在这里判断 conversation 是否存在;持久层执行体负责给出自己的失败语义。
+   */
+  async runMaintenance<T>(
+    conversationId: string,
+    fn: () => Promise<T>,
+  ): Promise<{ status: "done"; value: T } | { status: "busy" }> {
+    const acquired = this.acquireExclusive(conversationId);
+    if (acquired === "busy") return { status: "busy" };
+    if (acquired !== "not-active") {
+      return this.runActiveMaintenance(acquired, fn);
+    }
+
+    return this.withIdLock(conversationId, async () => {
+      const acq2 = this.acquireExclusive(conversationId);
+      if (acq2 === "busy") return { status: "busy" };
+      if (acq2 !== "not-active") {
+        return this.runActiveMaintenance(acq2, fn);
+      }
+      return { status: "done", value: await fn() };
+    });
+  }
+
+  async runMaintenanceExisting<T>(
+    conversationId: string,
+    exists: ConversationExists | undefined,
+    fn: () => Promise<T>,
+  ): Promise<
+    | { status: "done"; value: T }
+    | { status: "busy" }
+    | { status: "not-found" }
+  > {
+    const acquired = this.acquireExclusive(conversationId);
+    if (acquired === "busy") return { status: "busy" };
+    if (acquired !== "not-active") {
+      return this.runActiveMaintenance(acquired, fn);
+    }
+
+    return this.withIdLock(conversationId, async () => {
+      const acq2 = this.acquireExclusive(conversationId);
+      if (acq2 === "busy") return { status: "busy" };
+      if (acq2 !== "not-active") {
+        return this.runActiveMaintenance(acq2, fn);
+      }
+      if (exists && !(await exists())) return { status: "not-found" };
+      return { status: "done", value: await fn() };
+    });
+  }
+
+  private async runActiveMaintenance<T>(
+    session: ManagedSession,
+    fn: () => Promise<T>,
+  ): Promise<{ status: "done"; value: T }> {
+    try {
+      return { status: "done", value: await fn() };
+    } finally {
+      this.setBusy(session.conversationId, false);
+    }
+  }
+
+  /**
+   * 手动压缩会话窗口——运行体产出窗口重构指令,此处应用折叠 + 写派生快照
+   * (与 recordTurn 的折叠共用 maybeWriteSnapshot)+ 窗口换代钩子。全程持有
+   * 串行点:forceCompact 的 LLM 摘要 async 期间并发 send 排队,不会与折叠
+   * 撞窗口。调用方须先 getOrCreate 激活会话。
+   */
+  async compact(
+    conversationId: string,
+  ): Promise<
+    | { status: "done"; outcome: RuntimeCompactOutcome }
+    | { status: "not-active" }
+    | { status: "busy" }
+    | { status: "unsupported" }
+  > {
+    const acquired = this.acquireExclusive(conversationId);
+    if (acquired === "not-active") return { status: "not-active" };
+    if (acquired === "busy") return { status: "busy" };
+    return this.compactAcquired(conversationId, acquired);
+  }
+
+  async compactExisting(
+    conversationId: string,
+    exists?: ConversationExists,
+  ): Promise<
+    | { status: "done"; outcome: RuntimeCompactOutcome }
+    | { status: "not-found" }
+    | { status: "busy" }
+    | { status: "unsupported" }
+  > {
+    const active = this.acquireExclusive(conversationId);
+    if (active === "busy") return { status: "busy" };
+    if (active !== "not-active") {
+      return this.compactAcquired(conversationId, active);
+    }
+
+    const acquired = await this.acquireInactiveExistingExclusive(
+      conversationId,
+      exists,
+    );
+    if (acquired === "busy") return { status: "busy" };
+    if (acquired === "not-found") return { status: "not-found" };
+    return this.compactAcquired(conversationId, acquired);
+  }
+
+  private async acquireInactiveExistingExclusive(
+    conversationId: string,
+    exists?: ConversationExists,
+  ): Promise<ManagedSession | "busy" | "not-found"> {
+    return this.withIdLock(conversationId, async () => {
+      const acq2 = this.acquireExclusive(conversationId);
+      if (acq2 === "busy") return "busy";
+      if (acq2 !== "not-active") return acq2;
+      if (exists && !(await exists())) return "not-found";
+      const managed = await this.doCreate(conversationId, false);
+      const acquiredAfterCreate = this.acquireExclusive(managed.conversationId);
+      if (acquiredAfterCreate === "not-active") return "not-found";
+      return acquiredAfterCreate;
+    });
+  }
+
+  private async compactAcquired(
+    conversationId: string,
+    acquired: ManagedSession,
+  ): Promise<
+    | { status: "done"; outcome: RuntimeCompactOutcome }
+    | { status: "busy" }
+    | { status: "unsupported" }
+  > {
+    try {
+      if (!acquired.runtime.forceCompact) return { status: "unsupported" };
+      const outcome = await acquired.runtime.forceCompact(
+        [...acquired.window.getMessages()],
+        acquired.turnCount,
+      );
+      if (outcome.windowCompact) {
+        const foldOutcome = acquired.window.applyCompact(outcome.windowCompact);
+        await this.maybeWriteSnapshot(
+          conversationId,
+          acquired,
+          outcome.windowCompact,
+          foldOutcome,
+        );
+        await acquired.runtime
+          .onAttentionWindowChange?.("compact")
+          .catch(() => {});
+      }
+      return { status: "done", outcome };
+    } finally {
+      this.setBusy(conversationId, false);
+    }
+  }
+
+  async inspectContextBudgetExisting(
+    conversationId: string,
+    exists?: ConversationExists,
+  ): Promise<ContextBudgetInspectionResult> {
+    const active = this.sessions.get(conversationId);
+    if (active) {
+      active.lastActiveAt = new Date().toISOString();
+      this.clearGraceTimer(conversationId);
+      return this.inspectContextBudget(active);
+    }
+
+    return this.withIdLock(conversationId, async () => {
+      const activeAfterWait = this.sessions.get(conversationId);
+      if (activeAfterWait) {
+        activeAfterWait.lastActiveAt = new Date().toISOString();
+        this.clearGraceTimer(conversationId);
+        return this.inspectContextBudget(activeAfterWait);
+      }
+      if (exists && !(await exists())) return { status: "not-found" };
+      const managed = await this.doCreate(conversationId, false);
+      return this.inspectContextBudget(managed);
+    });
+  }
+
+  private inspectContextBudget(
+    session: ManagedSession,
+  ): ContextBudgetInspectionResult {
+    if (!session.runtime.checkBudget) return { status: "unsupported" };
+    return {
+      status: "done",
+      budget: session.runtime.checkBudget([...session.window.getMessages()]),
+      turnCount: session.turnCount,
+      calibrationFactor: session.runtime.calibrationFactor ?? 1,
+    };
   }
 
   /**
@@ -788,21 +1308,95 @@ export class ConversationManager {
     this.pendingQueues.delete(conversationId);
   }
 
-  async delete(conversationId: string): Promise<boolean> {
-    const session = this.sessions.get(conversationId);
-    if (!session) return false;
-    this.clearPendingQueue(conversationId);
-    this.clearGraceTimer(conversationId);
-    this.detachFromHub(conversationId);
-    // 末窗 onWindowClose（serve main runtime 销毁）—— await 让 flush 完成;失败
-    // 不阻断删除（与销毁链"不阻断"语义一致）。
-    try {
-      await session.runtime.dispose();
-    } catch (err) {
-      console.error("[ConversationManager.delete] runtime.dispose failed:", err);
+  /**
+   * 删除对话——活跃运行时释放 + 落盘数据删除(经注入 removeDisk),与 clear /
+   * compact 同一 per-conversation 生命周期串行,两层互斥各司其职:
+   *
+   * - **busy 拒绝**(承载不变量):活跃会话有 in-flight turn 时返回 "busy"。
+   *   不可拔掉在飞会话——`runtime.dispose` 只是末窗收尾、不 abort/drain,
+   *   delete 后会话移出活跃集,而 in-flight turn 末尾的 `session.complete`
+   *   走 observer 组播查的是已删会话的空名册 → 发起端的 sendTurn 永等不到
+   *   complete 而挂死。须先 abort(发起端经 in-flight cleanup 拿到 complete、
+   *   pending 各 cancel),再删。
+   * - **id 串行门**(withIdLock):盘删与同 id 的 getOrCreate 激活
+   *   (doCreate/loadHistory)严格 FIFO——杜绝"删盘途中被装填半截 / 删盘后又被
+   *   一次 send 孤儿重建在已删存储上"。这是与 clear 同源的 run 外写竞态闭合。
+   *
+   * `onDeleted` 在删除成功后、observer 名册清理前回调,供 RPC 组播 deleted。
+   *
+   * 返回:true(活跃释放或盘删任一成功)/ false(均无,对话不存在)/ "busy"。
+   */
+  async delete(
+    conversationId: string,
+    opts?: {
+      removeDisk?: () => Promise<boolean>;
+      onDeleted?: () => void;
+    },
+  ): Promise<boolean | "busy"> {
+    if (this.deleting.has(conversationId)) return "busy";
+
+    // 活跃快路:同步占用 busy(check 与 set 间无 await——这是并发 send 立即见忙
+    // 排队的关键,避免在"已广播 deleted / 正在 dispose"的半死会话上以 immediate
+    // 启动新 turn)。busy 占用后,会话直到本删除把它移出 sessions 前不会被另一
+    // 删除/clear 抢占(它们同步见 busy 即 "busy")。
+    const activeNow = this.sessions.get(conversationId);
+    if (activeNow) {
+      if (activeNow.busy) return "busy";
+      activeNow.busy = true;
     }
-    this.sessions.delete(conversationId);
-    return true;
+    this.deleting.add(conversationId);
+
+    // id 门:终结的盘删与同 id 的 getOrCreate 激活严格 FIFO。活跃会话删除
+    // 期间仍留在 sessions 里但已 busy,并发 send 只能排队;盘删成功后统一取消
+    // 队列,盘删失败则释放 busy 让队列继续,避免"删盘失败但运行体已丢"。
+    try {
+      return await this.withIdLock(conversationId, async () => {
+        // 必须在锁内重读:delete 可能排在 getOrCreate/doCreate 后面,入口处
+        // 尚无 active session,但门内已经有刚创建出的 session 等待终结。
+        const session = this.sessions.get(conversationId);
+        if (session) {
+          session.busy = true;
+          // busy 自快路起一直持有——会话保证仍在;async 终结全程并发 send 排队。
+          this.clearGraceTimer(conversationId);
+        }
+
+        const removed = (await opts?.removeDisk?.()) ?? false;
+        const deleted = !!session || removed;
+        if (!deleted) return false;
+
+        if (session) {
+          this.detachFromHub(conversationId);
+          // 末窗 onWindowClose（serve main runtime 销毁）—— await 让 flush 完成;
+          // 失败不阻断删除（与销毁链"不阻断"语义一致）。
+          try {
+            await session.runtime.dispose();
+          } catch (err) {
+            console.error("[ConversationManager.delete] runtime.dispose failed:", err);
+          }
+          this.sessions.delete(conversationId);
+          // 终结态与维护态(clear/compact)的释放语义不同:维护态 setBusy(false)
+          // 把排队 send dequeue 到新窗口继续;删除态会话已不存在,排队 send 必须
+          // 取消——cancel 钩子向发起端发 complete(error),不留 sendTurn 挂死。
+          this.clearPendingQueue(conversationId);
+        }
+
+        opts?.onDeleted?.();
+        this.observers.delete(conversationId);
+        return true;
+      });
+    } catch (err) {
+      // removeDisk 是 delete 的事实边界。它失败时不能终结运行体,否则 RPC 层
+      // 会看到"删除失败",但 owner 已丢 active session。恢复 busy 后让 delete
+      // 期间排队的 turn 正常继续。
+      const session = this.sessions.get(conversationId);
+      if (session?.busy) {
+        this.deleting.delete(conversationId);
+        this.setBusy(conversationId, false);
+      }
+      throw err;
+    } finally {
+      this.deleting.delete(conversationId);
+    }
   }
 
   /** 释放所有运行时资源（Server 关闭时调用）。async —— 透传各会话末窗 onWindowClose。 */
@@ -813,6 +1407,7 @@ export class ConversationManager {
     }
     for (const timer of this.graceTimers.values()) clearTimeout(timer);
     this.graceTimers.clear();
+    this.deleting.clear();
     if (this.idleInterval) {
       clearInterval(this.idleInterval);
       this.idleInterval = null;
@@ -827,6 +1422,7 @@ export class ConversationManager {
     }
     this.sessions.clear();
     this.attachedBrokers.clear();
+    this.observers.clear();
   }
 
   // ─── Grace Period ───
@@ -856,7 +1452,7 @@ export class ConversationManager {
   ): Promise<void> {
     const session = this.sessions.get(conversationId);
     if (!session) return;
-    if (session.observers.size > 0 || session.busy) return;
+    if (this.getObserverCount(conversationId) > 0 || session.busy) return;
     this.clearPendingQueue(conversationId);
     this.detachFromHub(conversationId);
     try {
@@ -868,6 +1464,7 @@ export class ConversationManager {
       );
     }
     this.sessions.delete(conversationId);
+    this.maybeDropEmptyObserverSet(conversationId);
     this.onRelease?.(conversationId, reason);
   }
 
@@ -907,6 +1504,7 @@ export class ConversationManager {
           );
         }
         this.sessions.delete(id);
+        this.maybeDropEmptyObserverSet(id);
         this.onRelease?.(id, "idle");
       }
     }

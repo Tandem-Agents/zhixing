@@ -16,6 +16,8 @@
 import type {
   AgentResult,
   AgentYield,
+  ContextBudget,
+  TaskListState,
   TokenUsage,
   WorkModeSwitchIntent,
 } from "@zhixing/core";
@@ -68,6 +70,8 @@ export interface SessionDeltaPayload {
   conversationId: string;
   /** @deprecated 使用 conversationId */
   sessionId: string;
+  /** 本次 turn 的身份,用于发起端把 delta/complete 与 send 返回精确关联 */
+  turnId: string;
   delta: AgentYield;
 }
 
@@ -75,19 +79,30 @@ export interface SessionCompletePayload {
   conversationId: string;
   /** @deprecated 使用 conversationId */
   sessionId: string;
+  /** 本次 turn 的身份,与 session.send 返回值一致 */
+  turnId: string;
   result: WireAgentResult;
 }
 
 /**
  * 会话级变更(run 外发生)。联合成员只列已实现的变更——类型领先实现即
- * 声明面领先生效面;clear 等执行体落地时随实现扩展。
+ * 声明面领先生效面。
  */
 export type SessionChangedPayload =
   | { conversationId: string; change: "renamed"; name: string }
-  | { conversationId: string; change: "deleted" };
+  | { conversationId: string; change: "deleted" }
+  | { conversationId: string; change: "cleared" }
+  /**
+   * task_list 视图层状态变更(meta 变更的一种)——接入面屏底任务区据此实时
+   * 刷新。taskList 为 tools-builtin 的 TaskListState 快照(null = 已清空),
+   * server 不依赖该包、以透传形声明,发射端与消费端同源同包类型。
+   */
+  | { conversationId: string; change: "taskList"; taskList: TaskListState | null };
 
 export interface SessionModeSwitchIntentPayload {
   conversationId: string;
+  /** 产生该模式切换意图的 turn 身份 */
+  turnId: string;
   intent: WorkModeSwitchIntent;
 }
 
@@ -97,6 +112,8 @@ export interface SessionSendResult {
   conversationId: string;
   /** @deprecated 使用 conversationId */
   sessionId: string;
+  /** 本次 send 对应的 turn 身份;delta/complete/modeSwitchIntent 均携同值 */
+  turnId: string;
 }
 
 /** session.list 条目——盘上事实叠加活跃态 */
@@ -126,6 +143,56 @@ export interface SessionSubscribeResult {
 
 export interface SessionUnsubscribeResult {
   unsubscribed: boolean;
+}
+
+export interface SessionClearResult {
+  cleared: true;
+}
+
+export interface SessionNewResult {
+  conversationId: string;
+  name: string;
+}
+
+export interface SessionResumeResult {
+  conversationId: string;
+  name: string;
+  /** 会话当前是否活跃(活跃则 subscribe 可立即开始旁观进行中的流) */
+  active: boolean;
+  busy: boolean;
+}
+
+/** /task new·done 的动作形(执行体在宿主,语义单一定义于装配实现) */
+export type SessionTaskListAction =
+  | { kind: "add"; content: string }
+  | { kind: "done"; token: string };
+
+export interface SessionTaskListUpdateResult {
+  ok: boolean;
+  /** 用户可读反馈(成功与失败都有——接入面原样呈现) */
+  message: string;
+  /** 写后权威快照——发起端用它同步只读视图,不依赖 observer 广播回环。 */
+  taskList: TaskListState | null;
+}
+
+export interface SessionTaskListResult {
+  /** 宿主权威快照;无状态时为 null。 */
+  taskList: TaskListState | null;
+}
+
+export interface SessionContextBudgetResult {
+  budget: ContextBudget;
+  turnCount: number;
+  calibrationFactor: number;
+}
+
+export interface SessionCompactResult {
+  /** 是否真的发生了折叠(false = 无可压缩内容 / 未达执行条件) */
+  modified: boolean;
+  tokensBefore?: number;
+  tokensAfter?: number;
+  /** 摘要降级信息——以机械保尾截断完成时携带,接入面须如实呈现降级方式 */
+  emergencyFloor?: { droppedTurns: number; error: string };
 }
 
 // ─── workscene 方法结果 ───

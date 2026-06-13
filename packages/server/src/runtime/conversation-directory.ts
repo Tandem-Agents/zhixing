@@ -27,8 +27,20 @@ export interface RunsPage {
 export interface ConversationDirectory {
   /** 盘上全量对话清单(未归档),新→旧排序 */
   list(): Promise<Conversation[]>;
+  /** 对话身份是否存在(meta 层存在即为真,不激活运行体、不写最近活跃时刻) */
+  exists(id: string): Promise<boolean>;
+  /** 建一个 user 域新对话(meta + transcript 壳),返回完整 meta */
+  create(): Promise<Conversation>;
   /** 改名;对话不存在返回 null */
   rename(id: string, name: string): Promise<Conversation | null>;
+  /** 更新最近活跃时刻(切换到该对话即"使用"),返回更新后 meta;不存在 null */
+  touch(id: string): Promise<Conversation | null>;
+  /**
+   * 清空对话的盘上事实——transcript 追加 clear 事件(倒读遇之即止,旧原文
+   * 物理仍在、由时间窗清理收走)+ meta 视图层状态清理(task_list / 段切换
+   * 历史;身份字段保留)。不存在返回 false。
+   */
+  clear(id: string): Promise<boolean>;
   /** 删除落盘数据(meta + transcript + 派生);不存在返回 false */
   remove(id: string): Promise<boolean>;
   /** 倒读落盘 run 序列(读容错:索引事故自愈,对话不存在产出空页) */

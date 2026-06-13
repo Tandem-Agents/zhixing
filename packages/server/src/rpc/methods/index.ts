@@ -18,6 +18,13 @@ import {
   buildSessionSubscribeMethod,
   buildSessionUnsubscribeMethod,
   buildSessionRenameMethod,
+  buildSessionClearMethod,
+  buildSessionCompactMethod,
+  buildSessionContextBudgetMethod,
+  buildSessionNewMethod,
+  buildSessionResumeMethod,
+  buildSessionTaskListUpdateMethod,
+  buildSessionTaskListMethod,
 } from "./session.js";
 import {
   buildWorksceneListMethod,
@@ -35,7 +42,11 @@ import {
   buildScheduleRunMethod,
   buildScheduleAbortRunMethod,
 } from "./schedule.js";
-import { buildServerShutdownMethod, buildServerInfoMethod } from "./server.js";
+import {
+  buildServerShutdownMethod,
+  buildServerInfoMethod,
+  buildLlmCompleteMethod,
+} from "./server.js";
 import { buildTrustListMethod, buildTrustRevokeMethod } from "./trust.js";
 import {
   buildSkillListMethod,
@@ -76,6 +87,14 @@ export function buildBuiltinRegistry(_opts: BuiltinMethodsOptions = {}): Handler
     buildSessionSubscribeMethod(),
     buildSessionUnsubscribeMethod(),
     buildSessionRenameMethod(),
+    // session 命令执行体(cli 命令 handler 变薄后的宿主侧执行)
+    buildSessionClearMethod(),
+    buildSessionCompactMethod(),
+    buildSessionContextBudgetMethod(),
+    buildSessionNewMethod(),
+    buildSessionResumeMethod(),
+    buildSessionTaskListUpdateMethod(),
+    buildSessionTaskListMethod(),
     // workscene.*（场景管理面 + 进出执行体）
     buildWorksceneListMethod(),
     buildWorksceneCreateMethod(),
@@ -90,9 +109,10 @@ export function buildBuiltinRegistry(_opts: BuiltinMethodsOptions = {}): Handler
     buildScheduleDeleteMethod(),
     buildScheduleRunMethod(),
     buildScheduleAbortRunMethod(),
-    // server.*（控制面：shutdown / info）
+    // server.*（控制面：shutdown / info）+ llm 轻推理通道(可信面)
     buildServerShutdownMethod(),
     buildServerInfoMethod(),
+    buildLlmCompleteMethod(),
     // trust.*（信任规则管理面）
     buildTrustListMethod(),
     buildTrustRevokeMethod(),

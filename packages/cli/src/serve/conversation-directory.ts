@@ -15,6 +15,7 @@ import {
   readRunsReverse,
   type Conversation,
   type ConversationScope,
+  type IConversationRepository,
   type RunRecordWithRef,
 } from "@zhixing/core";
 import type {
@@ -23,35 +24,90 @@ import type {
 } from "@zhixing/server";
 
 interface ScopeHandles {
-  repo: ConversationRepository;
+  repo: IConversationRepository;
   transcript: ShardedTranscriptStore;
+}
+
+interface ConversationRepoRoute {
+  repo: IConversationRepository;
+  /** scope 库内的 conversation id。 */
+  localId: string;
 }
 
 export function createConversationDirectory(deps: {
   repo: ConversationRepository;
   transcript: ShardedTranscriptStore;
+  /**
+   * task_list 进程内 cache 的清理钩子(可选)——clear 抹掉 meta 里的
+   * task_list 盘上状态,cache 与盘是同一数据的两层,在同一实现点维护一致性。
+   */
+  clearTaskListCache?: (conversationId: string) => void;
+  /**
+   * 宿主级 repo 路由(可选)——task_list store 与目录 clear 共用同一 repo 实例,
+   * 保证同一 meta.json 的并发写不会因各自 new repository 绕开 per-id 锁。
+   */
+  repoForConversationId?: (conversationId: string) => ConversationRepoRoute;
 }): ConversationDirectory {
   const sceneHandles = new Map<string, ScopeHandles>();
 
   const handlesFor = (conversationId: string): ScopeHandles & { localId: string } => {
+    const routed = deps.repoForConversationId?.(conversationId);
     const { scope, localId } = parseConversationId(conversationId);
     if (scope.kind === "workscene") {
       let entry = sceneHandles.get(scope.sceneId);
       if (!entry) {
         entry = {
-          repo: new ConversationRepository(scope as ConversationScope),
+          repo: routed?.repo ?? new ConversationRepository(scope as ConversationScope),
           transcript: new ShardedTranscriptStore(conversationsDir(scope)),
         };
         sceneHandles.set(scope.sceneId, entry);
       }
-      return { ...entry, localId };
+      return { ...entry, localId: routed?.localId ?? localId };
     }
-    return { repo: deps.repo, transcript: deps.transcript, localId: conversationId };
+    return {
+      repo: routed?.repo ?? deps.repo,
+      transcript: deps.transcript,
+      localId: routed?.localId ?? localId,
+    };
   };
 
   return {
     list() {
       return deps.repo.list();
+    },
+
+    async exists(id): Promise<boolean> {
+      const h = handlesFor(id);
+      return (await h.repo.get(h.localId)) !== null;
+    },
+
+    async create(): Promise<Conversation> {
+      // user 域新对话:meta + transcript 壳一并建——身份即刻进列表
+      const created = await deps.repo.create({});
+      await deps.transcript.init(created.id);
+      return created;
+    },
+
+    async touch(id): Promise<Conversation | null> {
+      const h = handlesFor(id);
+      try {
+        await h.repo.touch(h.localId);
+        return await h.repo.get(h.localId);
+      } catch {
+        return null;
+      }
+    },
+
+    async clear(id): Promise<boolean> {
+      const h = handlesFor(id);
+      const existing = await h.repo.get(h.localId);
+      if (!existing) return false;
+      // 先 transcript clear 事件(倒读边界),后 meta 视图层清理——任一失败
+      // 即中止,调用方收到错误、不发 cleared 通知
+      await h.transcript.appendClear(h.localId);
+      await h.repo.clearViewLayerState(h.localId);
+      deps.clearTaskListCache?.(id);
+      return true;
     },
 
     async rename(id, name): Promise<Conversation | null> {

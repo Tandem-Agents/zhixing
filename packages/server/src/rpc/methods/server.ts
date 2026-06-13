@@ -12,8 +12,8 @@
  * - **防御性 null 检查**：requestShutdown 未绑定时抛 RpcErrors.internal
  */
 
-import { RpcErrors, type MethodEntry } from "../handlers.js";
-import { PROTOCOL_VERSION } from "../protocol.js";
+import { RpcAppError, RpcErrors, type MethodEntry } from "../handlers.js";
+import { PROTOCOL_VERSION, RPC_ERROR_CODES } from "../protocol.js";
 
 export interface ServerShutdownParams {
   reason?: string;
@@ -92,7 +92,58 @@ export function buildServerInfoMethod(): MethodEntry {
         // 宿主单点解析的工作区——接入面的 @ 补全 root 与路径展示取此值
         workspace: ctx.server.hostInfo?.workspace,
         logPath: ctx.server.hostInfo?.logPath,
+        // MCP 连接状态快照——/mcp 管理器的状态显示数据面(未装配为空)
+        mcpServers: ctx.server.mcpStatuses?.() ?? [],
       };
+    },
+  };
+}
+
+// ─── llm.complete ───
+
+interface LlmCompleteParams {
+  prompt?: string;
+  role?: unknown;
+}
+
+/**
+ * llm.complete — 接入面的轻推理通道(单发文本,无对话历史)。
+ *
+ * 服务管理流程的小段推理(/mcp 接入向导的源解析 / 提取等),不是对话面——
+ * 对话经 session.send。仅可信面(authenticated + loopback)可用:LLM 调用
+ * 消耗用户配额,与 confirmation 持久授权同一信任判据。
+ */
+export function buildLlmCompleteMethod(): MethodEntry {
+  return {
+    name: "llm.complete",
+    requiresAuth: true,
+    async handler(rawParams, ctx): Promise<{ text: string }> {
+      if (!(ctx.connection.authenticated && ctx.connection.loopback)) {
+        throw RpcErrors.invalidParams(
+          "llm.complete is only available to trusted (loopback) surfaces",
+        );
+      }
+      const params = (rawParams ?? {}) as LlmCompleteParams;
+      if (typeof params.prompt !== "string" || params.prompt.length === 0) {
+        throw RpcErrors.invalidParams("llm.complete requires non-empty 'prompt'");
+      }
+      if (
+        params.role !== undefined &&
+        params.role !== "main" &&
+        params.role !== "light"
+      ) {
+        throw RpcErrors.invalidParams(
+          "llm.complete 'role' must be \"main\" or \"light\"",
+        );
+      }
+      const complete = ctx.server.llmComplete;
+      if (!complete) {
+        throw new RpcAppError(
+          RPC_ERROR_CODES.INTERNAL_ERROR,
+          "LLM completion channel not configured on server",
+        );
+      }
+      return { text: await complete(params.prompt, params.role) };
     },
   };
 }

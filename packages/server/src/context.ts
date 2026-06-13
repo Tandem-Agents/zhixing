@@ -5,7 +5,12 @@
  * 通过显式传递（而不是单例）保持可测试性。
  */
 
-import type { Scheduler, ChannelRegistry, RunRegistry } from "@zhixing/core";
+import type {
+  Scheduler,
+  ChannelRegistry,
+  RunRegistry,
+  TaskListState,
+} from "@zhixing/core";
 import type { ServerConfig } from "./types.js";
 import type { ConversationManager } from "./runtime/index.js";
 import type { ConfirmationHub } from "./confirmation/hub.js";
@@ -46,6 +51,33 @@ export interface ServerContext {
   memory?: MemoryDirectory;
   /** 宿主装配信息(server.info 的运维字段:工作区 / 日志路径)。 */
   hostInfo?: { workspace?: string; logPath?: string };
+  /**
+   * MCP 连接状态快照(server.info 扩展字段,/mcp 状态显示的数据面)。
+   * 结构与 MCP hub 的 serverStatuses 兼容(server 不依赖 mcp 包,结构形声明)。
+   */
+  mcpStatuses?: () => Array<{
+    serverId: string;
+    transport: string;
+    status: string;
+    toolCount: number;
+    error?: string;
+  }>;
+  /**
+   * 轻推理通道(llm.complete 执行体,仅可信面)——/mcp 接入向导等管理流程
+   * 的单发文本调用。装配方注入(如 ephemeral runtime 的 callText)。
+   */
+  llmComplete?: (prompt: string, role?: "main" | "light") => Promise<string>;
+  /**
+   * task_list 用户侧动作执行体(session.taskListUpdate)——写单点在宿主的
+   * task_list 服务,动作语义由装配实现定义。返回写后权威快照,让发起
+   * 接入面同步只读视图,不依赖 observer 广播回环。
+   */
+  taskListUpdate?: (
+    conversationId: string,
+    action: { kind: "add"; content: string } | { kind: "done"; token: string },
+  ) => Promise<{ ok: boolean; message: string; taskList: TaskListState | null }>;
+  /** task_list 权威快照(session.taskList 读模型)。 */
+  taskListSnapshot?: (conversationId: string) => Promise<TaskListState | null>;
   /** 当前连接数(startServer 回填,server.info 用)。 */
   connectionCount?: () => number;
   /**
@@ -93,6 +125,10 @@ export interface CreateContextOptions {
   skills?: SkillDirectory;
   memory?: MemoryDirectory;
   hostInfo?: { workspace?: string; logPath?: string };
+  mcpStatuses?: ServerContext["mcpStatuses"];
+  llmComplete?: (prompt: string, role?: "main" | "light") => Promise<string>;
+  taskListUpdate?: ServerContext["taskListUpdate"];
+  taskListSnapshot?: ServerContext["taskListSnapshot"];
   channels?: ChannelRegistry;
   confirmationHub?: ConfirmationHub;
   runRegistry?: RunRegistry;
@@ -112,6 +148,10 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     skills: opts.skills,
     memory: opts.memory,
     hostInfo: opts.hostInfo,
+    mcpStatuses: opts.mcpStatuses,
+    llmComplete: opts.llmComplete,
+    taskListUpdate: opts.taskListUpdate,
+    taskListSnapshot: opts.taskListSnapshot,
     channels: opts.channels,
     confirmationHub: opts.confirmationHub,
     runRegistry: opts.runRegistry,

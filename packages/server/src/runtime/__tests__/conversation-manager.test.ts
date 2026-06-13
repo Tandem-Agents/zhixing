@@ -299,6 +299,20 @@ describe("ConversationManager", () => {
       expect(manager.addObserver("nope", "conn-1")).toBe(false);
     });
 
+    it("allowInactive observer lives outside active session and cleans up on disconnect", () => {
+      expect(
+        manager.addObserver("idle-conv", "conn-1", { allowInactive: true }),
+      ).toBe(true);
+      expect(manager.getObserverCount("idle-conv")).toBe(1);
+      expect([...manager.getObserverConnectionIds("idle-conv")]).toEqual([
+        "conn-1",
+      ]);
+
+      manager.removeObserverFromAll("conn-1");
+      expect(manager.getObserverCount("idle-conv")).toBe(0);
+      expect([...manager.getObserverConnectionIds("idle-conv")]).toEqual([]);
+    });
+
     it("addObserver is idempotent for same connectionId", async () => {
       await manager.getOrCreate("a");
       manager.addObserver("a", "conn-1");
@@ -573,7 +587,7 @@ describe("ConversationManager", () => {
       expect(manager.has("a")).toBe(false);
     });
 
-    it("cancels all pending tasks on delete", async () => {
+    it("delete in-flight 会话(busy)被拒返回 busy;pending 不被 delete 取消(取消是 abort 的职责)", async () => {
       await manager.getOrCreate("a");
       manager.setBusy("a", true);
 
@@ -587,9 +601,15 @@ describe("ConversationManager", () => {
         cancel: () => { cancelled.push("task-2"); },
       });
 
-      await manager.delete("a");
+      // 不可拔掉在飞会话——delete 返回 busy,pending 原样保留(否则 in-flight
+      // turn 的 complete 组播到删后空名册,发起端永等不到)
+      expect(await manager.delete("a")).toBe("busy");
+      expect(cancelled).toEqual([]);
+      expect(manager.pendingCount("a")).toBe(2);
+
+      // 取消由 abort 承担(与"先 abort 再删"的纪律一致)
+      manager.abort("a");
       expect(cancelled).toEqual(["task-1", "task-2"]);
-      expect(manager.pendingCount("a")).toBe(0);
     });
 
     it("cancels all pending tasks on disposeAll", async () => {
@@ -1453,6 +1473,632 @@ describe("ConversationManager", () => {
       await mgr.delete("conv-A");
       // 立即重建应无 INV-H1 冲突
       await expect(mgr.getOrCreate("conv-A")).resolves.toBeDefined();
+
+      await mgr.disposeAll();
+    });
+  });
+
+  // ─── 会话命令执行体(run 外窗口操作)与 turn 后维护钩子 ───
+
+  describe("clear / compact / onTurnCommitted", () => {
+    /** 带持久化回调的 manager(persistent 路径)+ 可注入运行体能力 */
+    function makePersistentManager(opts?: {
+      runtimeExtras?: Partial<SessionRuntime>;
+      onTurnCommitted?: (info: import("../conversation-manager.js").TurnCommittedInfo) => void;
+    }) {
+      let nextRunIndex = 0;
+      const factory: RuntimeFactory = {
+        async create(sessionId) {
+          return {
+            ...createMockRuntime(sessionId),
+            ...opts?.runtimeExtras,
+          } as SessionRuntime;
+        },
+      };
+      return new ConversationManager(
+        factory,
+        { graceTimeoutMs: 60_000, idleTimeoutMs: 30 * 60_000, idleCheckIntervalMs: 999_999 },
+        {
+          loadHistory: async () => undefined,
+          initTranscript: async () => {},
+          appendRun: async () => ({ runIndex: nextRunIndex++ }),
+          onTurnCommitted: opts?.onTurnCommitted,
+        },
+      );
+    }
+
+    const runRecord = (text: string) => ({
+      timestamp: new Date().toISOString(),
+      messages: [
+        { role: "user" as const, content: [{ type: "text" as const, text }] },
+        { role: "assistant" as const, content: [{ type: "text" as const, text: `echo:${text}` }] },
+      ],
+      usage: { inputTokens: 0, outputTokens: 0 },
+    });
+
+    it("clear:窗口+turnCount 归零、运行体钩子被调、持久层 persistClear 在临界区调;busy 拒绝;不活跃 persist 即 cleared-inactive", async () => {
+      const resetSpy = vi.fn(async () => {});
+      const windowChangeSpy = vi.fn(async () => {});
+      const mgr = makePersistentManager({
+        runtimeExtras: {
+          resetConversationState: resetSpy,
+          onAttentionWindowChange: windowChangeSpy,
+        },
+      });
+      const persist = vi.fn(async () => true);
+
+      const session = await mgr.getOrCreate("conv-clear");
+      await mgr.recordTurn("conv-clear", runRecord("你好"));
+      expect(session.window.getMessages().length).toBeGreaterThan(0);
+      expect(session.turnCount).toBe(1);
+
+      expect(await mgr.clear("conv-clear", persist)).toBe("cleared");
+      expect(persist).toHaveBeenCalledOnce();
+      expect(session.window.getMessages()).toHaveLength(0);
+      expect(session.turnCount).toBe(0);
+      expect(session.busy).toBe(false); // 释放后串行点归还
+      expect(resetSpy).toHaveBeenCalledOnce();
+      expect(windowChangeSpy).toHaveBeenCalledWith("clear");
+
+      // busy 拒绝且 persist 绝不被调(盘不被动)
+      mgr.setBusy("conv-clear", true);
+      const persistDuringBusy = vi.fn(async () => true);
+      expect(await mgr.clear("conv-clear", persistDuringBusy)).toBe("busy");
+      expect(persistDuringBusy).not.toHaveBeenCalled();
+      mgr.setBusy("conv-clear", false);
+
+      // 不活跃:无内存窗口,persist 成功即 cleared-inactive;persist 报无即 not-found
+      expect(await mgr.clear("conv-nonexistent", async () => true)).toBe(
+        "cleared-inactive",
+      );
+      expect(await mgr.clear("conv-nonexistent", async () => false)).toBe(
+        "not-found",
+      );
+      await mgr.disposeAll();
+    });
+
+    it("clear 原子性:persistClear 延迟期间并发 send 排队(不在旧窗口起 turn),清空后在空窗口 dequeue（回归锚）", async () => {
+      const mgr = makePersistentManager();
+      const session = await mgr.getOrCreate("conv-race");
+      await mgr.recordTurn("conv-race", runRecord("旧历史"));
+      expect(session.window.getMessages().length).toBeGreaterThan(0);
+
+      // 慢 persistClear 模拟"写盘边界"在途;期间发并发 send
+      let releasePersist!: () => void;
+      const persistGate = new Promise<void>((r) => {
+        releasePersist = r;
+      });
+      const clearPromise = mgr.clear("conv-race", async () => {
+        await persistGate;
+        return true;
+      });
+
+      // persist 在途时 clear 已同步占用串行点——此刻 send 的 enqueue 必见 busy
+      // 而排队(不会拿到"不忙"在旧窗口上立即起一个 turn)
+      let ranOnMessages: number | null = null;
+      const status = mgr.enqueue("conv-race", {
+        execute: async () => {
+          ranOnMessages = session.window.getMessages().length;
+        },
+        cancel: () => {},
+      });
+      expect(status).toBe("queued");
+
+      // 放行清空 → 窗口重置 → 释放 → 排队的 send 在空窗口上 dequeue 执行
+      releasePersist();
+      expect(await clearPromise).toBe("cleared");
+      await Promise.resolve();
+      await Promise.resolve();
+      // 关键断言:并发 send 跑在 clear 后的空窗口上(0),而非 clear 前旧历史
+      expect(ranOnMessages).toBe(0);
+
+      await mgr.disposeAll();
+    });
+
+    it("runMaintenance 与 send 共用 owner 串行点:维护在途时 send 排队,忙碌时拒绝维护", async () => {
+      const mgr = makePersistentManager();
+      await mgr.getOrCreate("conv-maint");
+
+      let releaseMaintenance!: () => void;
+      const maintenanceGate = new Promise<void>((r) => {
+        releaseMaintenance = r;
+      });
+      const maintenance = mgr.runMaintenance("conv-maint", async () => {
+        await maintenanceGate;
+        return "done";
+      });
+
+      let ran = false;
+      const status = mgr.enqueue("conv-maint", {
+        execute: async () => {
+          ran = true;
+        },
+        cancel: () => {},
+      });
+      expect(status).toBe("queued");
+      expect(ran).toBe(false);
+
+      releaseMaintenance();
+      expect(await maintenance).toEqual({ status: "done", value: "done" });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(ran).toBe(true);
+
+      mgr.setBusy("conv-maint", true);
+      let calledWhileBusy = false;
+      expect(
+        await mgr.runMaintenance("conv-maint", async () => {
+          calledWhileBusy = true;
+        }),
+      ).toEqual({ status: "busy" });
+      expect(calledWhileBusy).toBe(false);
+      mgr.setBusy("conv-maint", false);
+
+      await mgr.disposeAll();
+    });
+
+    it("admitTurn 对活跃 idle 会话同步占位:同一调用栈内 delete 只能看到 busy", async () => {
+      const mgr = makePersistentManager();
+      await mgr.getOrCreate("conv-admit");
+
+      const admissionPromise = mgr.admitTurn({
+        conversationId: "conv-admit",
+        connectionId: "conn-1",
+        makeTask: () => ({
+          execute: async () => {},
+          cancel: () => {},
+        }),
+      });
+
+      expect(mgr.list()[0]!.busy).toBe(true);
+      expect(await mgr.delete("conv-admit")).toBe("busy");
+      const admission = await admissionPromise;
+      expect(admission.status).toBe("immediate");
+
+      mgr.setBusy("conv-admit", false);
+      await mgr.disposeAll();
+    });
+
+    it("clear 原子性(非活跃):persistClear 延迟期间并发 getOrCreate 经 id 门等待,激活时 loadHistory 看到清空后的盘、不读旧历史（回归锚）", async () => {
+      // 可变"盘":persistClear 内置真后 loadHistory 返回空(清空后事实流)
+      let diskCleared = false;
+      // 激活时 loadHistory 看到的盘状态——id 门生效则必为 true(等到 clear 后)
+      let loadSawClearedDisk: boolean | null = null;
+      let releasePersist!: () => void;
+      const persistGate = new Promise<void>((r) => {
+        releasePersist = r;
+      });
+
+      const mgr = new ConversationManager(
+        createMockFactory(),
+        {
+          graceTimeoutMs: 60_000,
+          idleTimeoutMs: 30 * 60_000,
+          idleCheckIntervalMs: 999_999,
+        },
+        {
+          loadHistory: async () => {
+            loadSawClearedDisk = diskCleared;
+            return diskCleared
+              ? undefined
+              : {
+                  bootstrap: [
+                    { role: "user", content: [{ type: "text", text: "旧问" }] },
+                    {
+                      role: "assistant",
+                      content: [{ type: "text", text: "旧答" }],
+                    },
+                  ] as const,
+                  turnCount: 1,
+                };
+          },
+          initTranscript: async () => {},
+          appendRun: async () => ({ runIndex: 0 }),
+        },
+      );
+
+      // 对话未激活。clear 的 persistClear 慢(等 gate),其内部清盘。
+      const clearPromise = mgr.clear("conv-inactive", async () => {
+        await persistGate;
+        diskCleared = true;
+        return true;
+      });
+      // clear 在途(持 id 门)时并发激活——必须排在 clear 之后
+      const activatePromise = mgr.getOrCreate("conv-inactive");
+
+      releasePersist();
+      expect(await clearPromise).toBe("cleared-inactive");
+      const session = await activatePromise;
+
+      // 关键:激活的 loadHistory 跑在 clear 之后(看到清空后的盘),装入空窗
+      expect(loadSawClearedDisk).toBe(true);
+      expect(session.window.getMessages()).toHaveLength(0);
+
+      await mgr.disposeAll();
+    });
+
+    it("delete 终结态排他:active idle 会话 dispose 延迟期间并发 send 不能启动新 turn(排队后取消、发起端收 complete)（回归锚）", async () => {
+      let releaseDispose!: () => void;
+      const disposeGate = new Promise<void>((r) => {
+        releaseDispose = r;
+      });
+      const mgr = makePersistentManager({
+        runtimeExtras: {
+          dispose: async () => {
+            await disposeGate;
+          },
+        },
+      });
+      await mgr.getOrCreate("conv-del3"); // 活跃但 idle(not busy)
+
+      const deletePromise = mgr.delete("conv-del3"); // dispose 卡在 gate
+
+      // delete 已同步占 busy → 并发 send 的 enqueue 必排队,绝不 immediate 起 turn
+      let turnStarted = false;
+      let cancelled = false;
+      const status = mgr.enqueue("conv-del3", {
+        execute: async () => {
+          turnStarted = true;
+        },
+        cancel: () => {
+          cancelled = true;
+        },
+      });
+      expect(status).toBe("queued");
+
+      releaseDispose();
+      expect(await deletePromise).toBe(true);
+
+      // 会话已删:排队的 send 被 clearPendingQueue 取消(cancel 钩子=发起端收
+      // complete error),绝不在半死会话上启动 turn
+      expect(turnStarted).toBe(false);
+      expect(cancelled).toBe(true);
+
+      await mgr.disposeAll();
+    });
+
+    it("delete 失败原子性:removeDisk 抛错时保留 active 会话、释放 busy、排队 turn 继续", async () => {
+      let releaseRemove!: () => void;
+      let removeEntered!: () => void;
+      const removeStarted = new Promise<void>((r) => {
+        removeEntered = r;
+      });
+      const removeGate = new Promise<void>((r) => {
+        releaseRemove = r;
+      });
+      let disposed = false;
+      const mgr = makePersistentManager({
+        runtimeExtras: {
+          dispose: async () => {
+            disposed = true;
+          },
+        },
+      });
+      const session = await mgr.getOrCreate("conv-del-fail");
+
+      const deletePromise = mgr.delete("conv-del-fail", {
+        removeDisk: async () => {
+          removeEntered();
+          await removeGate;
+          throw new Error("disk failed");
+        },
+      });
+      await removeStarted;
+
+      const executed: string[] = [];
+      const status = mgr.enqueue("conv-del-fail", {
+        execute: async () => {
+          executed.push("run");
+          mgr.setBusy("conv-del-fail", false);
+        },
+        cancel: () => {
+          executed.push("cancel");
+        },
+      });
+      expect(status).toBe("queued");
+
+      releaseRemove();
+      await expect(deletePromise).rejects.toThrow("disk failed");
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(disposed).toBe(false);
+      expect(mgr.has("conv-del-fail")).toBe(true);
+      expect(session.busy).toBe(false);
+      expect(mgr.pendingCount("conv-del-fail")).toBe(0);
+      expect(executed).toEqual(["run"]);
+
+      await mgr.disposeAll();
+    });
+
+    it("admitTurn 显式 id 的存在性检查在 id 门内:delete 在途时不会删除后复活", async () => {
+      let diskExists = true;
+      let releaseRemove!: () => void;
+      const removeGate = new Promise<void>((r) => {
+        releaseRemove = r;
+      });
+      let createCalls = 0;
+
+      const mgr = new ConversationManager(
+        {
+          async create(sessionId) {
+            createCalls++;
+            return createMockRuntime(sessionId);
+          },
+        },
+        {
+          graceTimeoutMs: 60_000,
+          idleTimeoutMs: 30 * 60_000,
+          idleCheckIntervalMs: 999_999,
+        },
+        {
+          loadHistory: async () => undefined,
+          initTranscript: async () => {},
+          appendRun: async () => ({ runIndex: 0 }),
+        },
+      );
+
+      const deletePromise = mgr.delete("conv-admit-race", {
+        removeDisk: async () => {
+          await removeGate;
+          diskExists = false;
+          return true;
+        },
+      });
+      const admissionPromise = mgr.admitTurn({
+        conversationId: "conv-admit-race",
+        exists: async () => diskExists,
+        connectionId: "conn-1",
+        makeTask: () => ({
+          execute: async () => {},
+          cancel: () => {},
+        }),
+      });
+
+      releaseRemove();
+      expect(await deletePromise).toBe(true);
+      expect(await admissionPromise).toEqual({
+        status: "not-found",
+        conversationId: "conv-admit-race",
+      });
+      expect(createCalls).toBe(0);
+
+      await mgr.disposeAll();
+    });
+
+    it("compactExisting 显式 id 的存在性检查在 id 门内:delete 在途时不激活运行体", async () => {
+      let diskExists = true;
+      let releaseRemove!: () => void;
+      const removeGate = new Promise<void>((r) => {
+        releaseRemove = r;
+      });
+      let createCalls = 0;
+
+      const mgr = new ConversationManager(
+        {
+          async create(sessionId) {
+            createCalls++;
+            return {
+              ...createMockRuntime(sessionId),
+              forceCompact: async () => ({ modified: false }),
+            } as SessionRuntime;
+          },
+        },
+        {
+          graceTimeoutMs: 60_000,
+          idleTimeoutMs: 30 * 60_000,
+          idleCheckIntervalMs: 999_999,
+        },
+        {
+          loadHistory: async () => undefined,
+          initTranscript: async () => {},
+          appendRun: async () => ({ runIndex: 0 }),
+        },
+      );
+
+      const deletePromise = mgr.delete("conv-compact-race", {
+        removeDisk: async () => {
+          await removeGate;
+          diskExists = false;
+          return true;
+        },
+      });
+      const compactPromise = mgr.compactExisting(
+        "conv-compact-race",
+        async () => diskExists,
+      );
+
+      releaseRemove();
+      expect(await deletePromise).toBe(true);
+      expect(await compactPromise).toEqual({ status: "not-found" });
+      expect(createCalls).toBe(0);
+
+      await mgr.disposeAll();
+    });
+
+    it("delete 原子性:创建中会话被删除时,刚创建出的运行体也被终结且排队 turn 被取消（回归锚）", async () => {
+      let releaseFactory!: () => void;
+      const factoryGate = new Promise<void>((r) => {
+        releaseFactory = r;
+      });
+      let releaseDispose!: () => void;
+      const disposeGate = new Promise<void>((r) => {
+        releaseDispose = r;
+      });
+      const disposed: string[] = [];
+
+      const mgr = new ConversationManager(
+        {
+          async create(sessionId) {
+            await factoryGate;
+            const runtime = createMockRuntime(sessionId);
+            return {
+              ...runtime,
+              async dispose() {
+                disposed.push(sessionId);
+                await disposeGate;
+                await runtime.dispose?.();
+              },
+            } as SessionRuntime;
+          },
+        },
+        {
+          graceTimeoutMs: 60_000,
+          idleTimeoutMs: 30 * 60_000,
+          idleCheckIntervalMs: 999_999,
+        },
+      );
+
+      const createPromise = mgr.getOrCreate("conv-del-creating");
+      await Promise.resolve(); // 让 doCreate 进入 factory.create 并卡在 gate
+      const deletePromise = mgr.delete("conv-del-creating", {
+        removeDisk: async () => true,
+      });
+
+      releaseFactory();
+      const created = await createPromise;
+      expect(created.busy).toBe(true);
+
+      let turnStarted = false;
+      let cancelled = false;
+      expect(
+        mgr.enqueue("conv-del-creating", {
+          execute: async () => {
+            turnStarted = true;
+          },
+          cancel: () => {
+            cancelled = true;
+          },
+        }),
+      ).toBe("queued");
+
+      releaseDispose();
+      expect(await deletePromise).toBe(true);
+
+      expect(disposed).toEqual(["conv-del-creating"]);
+      expect(mgr.has("conv-del-creating")).toBe(false);
+      expect(turnStarted).toBe(false);
+      expect(cancelled).toBe(true);
+
+      await mgr.disposeAll();
+    });
+
+    it("delete 原子性:removeDisk 延迟期间并发 getOrCreate 经 id 门等待,激活时 loadHistory 看到删除后的盘（回归锚）", async () => {
+      let diskRemoved = false;
+      let loadSawRemovedDisk: boolean | null = null;
+      let releaseRemove!: () => void;
+      const removeGate = new Promise<void>((r) => {
+        releaseRemove = r;
+      });
+
+      const mgr = new ConversationManager(
+        createMockFactory(),
+        {
+          graceTimeoutMs: 60_000,
+          idleTimeoutMs: 30 * 60_000,
+          idleCheckIntervalMs: 999_999,
+        },
+        {
+          loadHistory: async () => {
+            loadSawRemovedDisk = diskRemoved;
+            return diskRemoved
+              ? undefined
+              : {
+                  bootstrap: [
+                    { role: "user", content: [{ type: "text", text: "旧问" }] },
+                    {
+                      role: "assistant",
+                      content: [{ type: "text", text: "旧答" }],
+                    },
+                  ] as const,
+                  turnCount: 1,
+                };
+          },
+          initTranscript: async () => {},
+          appendRun: async () => ({ runIndex: 0 }),
+        },
+      );
+
+      // 非活跃对话,delete 的 removeDisk 慢(持 id 门)
+      const deletePromise = mgr.delete("conv-del2", {
+        removeDisk: async () => {
+          await removeGate;
+          diskRemoved = true;
+          return true;
+        },
+      });
+      // delete 在途时并发激活——必须排在 delete 之后
+      const activatePromise = mgr.getOrCreate("conv-del2");
+
+      releaseRemove();
+      expect(await deletePromise).toBe(true);
+      const session = await activatePromise;
+
+      // 激活的 loadHistory 跑在 delete 之后(看到删除后的盘),装入空窗
+      expect(loadSawRemovedDisk).toBe(true);
+      expect(session.window.getMessages()).toHaveLength(0);
+
+      await mgr.disposeAll();
+    });
+
+    it("compact:运行体折叠指令应用到窗口;无 forceCompact 能力返回 unsupported", async () => {
+      const mgr = makePersistentManager({
+        runtimeExtras: {
+          forceCompact: async () => ({
+            modified: true,
+            windowCompact: {
+              summary: "压缩摘要",
+              pairsCompacted: 2,
+              tokensBefore: 1000,
+              tokensAfter: 100,
+            },
+          }),
+        },
+      });
+
+      const session = await mgr.getOrCreate("conv-compact");
+      await mgr.recordTurn("conv-compact", runRecord("一"));
+      await mgr.recordTurn("conv-compact", runRecord("二"));
+      const before = session.window.getMessages().length;
+
+      const result = await mgr.compact("conv-compact");
+      expect(result.status).toBe("done");
+      if (result.status === "done") {
+        expect(result.outcome.windowCompact?.tokensAfter).toBe(100);
+      }
+      // 两配对折叠为一个摘要对——窗口条目数应少于折叠前
+      expect(session.window.getMessages().length).toBeLessThan(before);
+
+      const noCap = makePersistentManager();
+      await noCap.getOrCreate("conv-nocap");
+      expect((await noCap.compact("conv-nocap")).status).toBe("unsupported");
+
+      await mgr.disposeAll();
+      await noCap.disposeAll();
+    });
+
+    it("recordTurn 持久化成功后触发 onTurnCommitted(turnCount / runMessages / runtime);钩子抛错不影响落定", async () => {
+      const committed: Array<{ conversationId: string; turnCount: number }> = [];
+      const mgr = makePersistentManager({
+        onTurnCommitted: (info) => {
+          committed.push({
+            conversationId: info.conversationId,
+            turnCount: info.turnCount,
+          });
+          throw new Error("维护钩子崩了");
+        },
+      });
+
+      const session = await mgr.getOrCreate("conv-hook");
+      await mgr.recordTurn("conv-hook", runRecord("首轮"));
+      // 钩子抛错被吞:turn 照常落定(窗口前进 + turnCount 推进)
+      expect(session.turnCount).toBe(1);
+      expect(session.window.getMessages().length).toBeGreaterThan(0);
+      expect(committed).toEqual([{ conversationId: "conv-hook", turnCount: 1 }]);
+
+      await mgr.recordTurn("conv-hook", runRecord("次轮"));
+      expect(committed).toHaveLength(2);
+      expect(committed[1]?.turnCount).toBe(2);
 
       await mgr.disposeAll();
     });

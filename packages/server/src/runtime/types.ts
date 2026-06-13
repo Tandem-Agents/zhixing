@@ -10,11 +10,13 @@
 import type {
   AbortReason,
   AgentYield,
+  ContextBudget,
   IConfirmationBroker,
   Message,
   RunResult,
   TurnContext,
   TurnSource,
+  WindowCompact,
 } from "@zhixing/core";
 
 // TurnContext 的唯一定义在 @zhixing/core（types/tools.ts）——此处只做 re-export，
@@ -84,6 +86,49 @@ export interface SessionRuntime {
    * 参见 remote-confirmation-execution.md §3.2（Hub 聚合 per-runtime broker）。
    */
   readonly confirmationBroker?: IConfirmationBroker;
+
+  // ─── 会话命令执行体所需的运行体能力(可选——adapter 透传底层运行体) ───
+  //
+  // 以下成员服务 run 外的会话命令(清空 / 手动压缩 / 切换对话)与 turn 后维护
+  // (自动命名 / journal 凝练)。测试 stub / 不支持的实现可缺省,方法层对
+  // 缺失能力 fail-fast 报"运行体不支持"。
+
+  /**
+   * 手动触发上下文压缩——返回窗口重构指令(windowCompact),由调用方
+   * (ConversationManager)应用到注意力窗口并写派生快照;运行体自身不触窗口。
+   */
+  forceCompact?(
+    messages: Message[],
+    turnCount: number,
+  ): Promise<RuntimeCompactOutcome>;
+  /** 触发全部已注册组件重置对话级状态(/clear 执行体的内存侧)。 */
+  resetConversationState?(): Promise<void>;
+  /**
+   * run 外注意力窗口换代(清空 / 切换 / 手动压缩后)——旧窗 onWindowClose →
+   * 新窗 onWindowOpen,更新实例权威 prompt。
+   */
+  onAttentionWindowChange?(reason: "clear" | "resume" | "compact"): Promise<void>;
+  /**
+   * 简易单发 LLM 文本调用(无对话历史)——turn 后维护(自动命名 / journal
+   * 凝练)的推理通道。light 档为辅助任务默认。
+   */
+  callText?(prompt: string, role?: "main" | "light"): Promise<string>;
+  /** 查询给定消息列表的上下文预算(接入面 /usage /context 的数据面)。 */
+  checkBudget?(messages: readonly Message[]): ContextBudget;
+  /** Token 估算器校准因子(1.0 = 未校准)——用量展示的辅助信息。 */
+  readonly calibrationFactor?: number;
+}
+
+/**
+ * forceCompact 的结构形产物——与运行体实现方(orchestrator)的返回结构兼容,
+ * server 不依赖 orchestrator 故以结构声明。windowCompact 缺省 = 本次无可压缩
+ * 内容 / 摘要失败未达风险线,窗口不应折叠。
+ */
+export interface RuntimeCompactOutcome {
+  modified: boolean;
+  windowCompact?: WindowCompact;
+  /** 应急地板降级信息——摘要 LLM 失败、以机械保尾截断完成时携带 */
+  emergencyFloor?: { droppedTurns: number; error: string };
 }
 
 /**

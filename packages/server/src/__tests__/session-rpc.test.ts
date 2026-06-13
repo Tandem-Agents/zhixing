@@ -7,7 +7,13 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import WebSocket from "ws";
 import { AgentError } from "@zhixing/core";
-import type { AgentResult, AgentYield, Message, RunResult } from "@zhixing/core";
+import type {
+  AgentResult,
+  AgentYield,
+  Message,
+  RunResult,
+  TaskListState,
+} from "@zhixing/core";
 import { startServer, type ZhixingServerInstance } from "../server.js";
 import { createServerContext } from "../context.js";
 import { ConversationManager } from "../runtime/conversation-manager.js";
@@ -34,6 +40,12 @@ interface MockOptions {
   throwError?: string;
   /** run 正常返回 reason:"error" 的 agentResult(error 为 AgentError 实例) */
   errorResult?: string;
+  /**
+   * 被 abort 后返回 reason:"aborted" 的 RunResult(模拟真实适配器:abort 经
+   * .then(success) 包成 aborted 结果、不 throw)。默认 mock 即便 abort 也
+   * 返回 completed——本选项让 mock 忠实建模"用户取消"的终止投影。
+   */
+  abortYieldsAborted?: boolean;
   /** 每个 yield 的延迟（ms） */
   yieldDelayMs?: number;
   /** RunResult 顶层携带的模式切换意图(complete 通知附带契约的驱动源) */
@@ -79,6 +91,25 @@ function createMockRuntime(
         if (aborted) break;
         if (opts.yieldDelayMs) await sleep(opts.yieldDelayMs);
         yield { type: "text_delta", text: `chunk-${i}` };
+      }
+
+      // 用户取消:真实运行体把 abort 包成 reason:"aborted" 经 .then(success)
+      // 返回(不 throw)。此分支让 runTurnWithCommit 走 return 而非 throw,
+      // runManagedTurn 据此必从 done 路径 push session.complete。
+      if (aborted && opts.abortYieldsAborted) {
+        return {
+          agentResult: {
+            reason: "aborted",
+            usage: { inputTokens: 5, outputTokens: 0 },
+          },
+          runRecord: {
+            timestamp: new Date().toISOString(),
+            messages: [userMsg],
+            usage: { inputTokens: 5, outputTokens: 0 },
+          },
+          newMessages: [],
+          durationMs: 0,
+        };
       }
 
       const reply: Message = {
@@ -132,12 +163,24 @@ function createMemoryDirectory(
 ): import("../runtime/conversation-directory.js").ConversationDirectory {
   const names = new Map<string, string>();
   const removed = new Set<string>();
+  let createdSeq = 0;
   const exists = (id: string) =>
     !removed.has(id) && (records.has(id) || names.has(id));
+  const meta = (id: string) => {
+    const now = new Date().toISOString();
+    return {
+      id,
+      name: names.get(id) ?? id,
+      createdAt: now,
+      lastActiveAt: now,
+      isDefault: false,
+      archived: false,
+    } as never;
+  };
   return {
     async list() {
       const now = new Date().toISOString();
-      return [...records.keys()]
+      return [...new Set([...records.keys(), ...names.keys()])]
         .filter((id) => !removed.has(id))
         .map((id) => ({
           id,
@@ -147,6 +190,24 @@ function createMemoryDirectory(
           isDefault: false,
           archived: false,
         })) as never;
+    },
+    async exists(id) {
+      return exists(id);
+    },
+    async create() {
+      const id = `conv_created_${createdSeq++}`;
+      names.set(id, id);
+      records.set(id, []);
+      return meta(id);
+    },
+    async touch(id) {
+      if (!exists(id)) return null;
+      return meta(id);
+    },
+    async clear(id) {
+      if (!exists(id)) return false;
+      records.set(id, []);
+      return true;
     },
     async rename(id, name) {
       if (!exists(id)) return null;
@@ -334,10 +395,15 @@ describe("session.* RPC (S2.D)", () => {
     const client = await connect(server.port);
     await client.request("auth", { token: TEST_TOKEN });
 
-    const sendResp = await client.request("session.send", { text: "hi" });
+    const sendResp = await client.request("session.send", {
+      text: "hi",
+      turnId: "turn-main",
+    });
     expect(isSuccessResponse(sendResp)).toBe(true);
     const sessionId = (sendResp as { result: { sessionId: string } }).result.sessionId;
+    const returnedTurnId = (sendResp as { result: { turnId: string } }).result.turnId;
     expect(sessionId).toMatch(/^conv_/);
+    expect(returnedTurnId).toBe("turn-main");
 
     // 收 deltas + turn_complete + complete
     const deltas: unknown[] = [];
@@ -346,18 +412,303 @@ describe("session.* RPC (S2.D)", () => {
       deltas.push(n.params);
     }
     expect(deltas).toHaveLength(4); // 3 text_delta + 1 turn_complete
+    expect((deltas[0] as { turnId: string }).turnId).toBe("turn-main");
 
     const complete = await client.waitNotification("session.complete");
     const completeParams = complete.params as {
       sessionId: string;
+      turnId: string;
       result: AgentResult;
       pendingModeSwitch?: unknown;
     };
     expect(completeParams.sessionId).toBe(sessionId);
+    expect(completeParams.turnId).toBe("turn-main");
     expect(completeParams.result.reason).toBe("completed");
     // 无模式切换意图时不附带字段
     expect(completeParams.pendingModeSwitch).toBeUndefined();
 
+    client.close();
+  });
+
+  it("delete in-flight 会话被拒(busy),发起端仍收到 complete——complete 承载不变量回归锚", async () => {
+    // 慢 turn 保持 in-flight
+    await startWithFactory(
+      createMockFactory({ deltaCount: 8, yieldDelayMs: 30 }),
+    );
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const sendResp = await client.request("session.send", { text: "长任务" });
+    const sessionId = (sendResp as { result: { sessionId: string } }).result
+      .sessionId;
+    await client.waitNotification("session.delta"); // turn 已在跑
+
+    // 删除 in-flight 会话 → 必须被拒(否则 complete 组播到删后空名册、发起端挂死)
+    const delResp = await client.request("session.delete", {
+      conversationId: sessionId,
+    });
+    expect(isSuccessResponse(delResp)).toBe(false);
+
+    // 会话未被拔——in-flight turn 正常跑完,发起端收到 complete(不变量保住)
+    const complete = await client.waitNotification("session.complete");
+    expect(
+      (complete.params as { result: { reason: string } }).result.reason,
+    ).toBe("completed");
+
+    client.close();
+  });
+
+  it("用户取消(session.abort)in-flight turn → 仍推 session.complete(reason:aborted)——cli 不卡死的承载性回归锚", async () => {
+    // 慢 turn 保持 in-flight,abort 落在 turn 中途;abortYieldsAborted 让 mock
+    // 忠实建模真实运行体(abort 经 .then(success) 包成 aborted、不 throw)。
+    await startWithFactory(
+      createMockFactory({ deltaCount: 8, yieldDelayMs: 30, abortYieldsAborted: true }),
+    );
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const sendResp = await client.request("session.send", { text: "长任务" });
+    const sessionId = (sendResp as { result: { sessionId: string } }).result
+      .sessionId;
+
+    // 等首帧 delta(turn 已在跑)再取消
+    await client.waitNotification("session.delta");
+    const abortResp = await client.request("session.abort", {
+      conversationId: sessionId,
+    });
+    expect(isSuccessResponse(abortResp)).toBe(true);
+
+    // 取消后服务端仍发终止 complete,reason 为可区分的 aborted——
+    // 等待该通知即等价于 cli 的 sendTurn waiter 落定(无永久挂起)。
+    const complete = await client.waitNotification("session.complete");
+    const result = (complete.params as { result: { reason: string } }).result;
+    expect(result.reason).toBe("aborted");
+
+    client.close();
+  });
+
+  it("session.new 建对话并进列表;session.resume 返回 meta 与活跃态、不存在 notFound", async () => {
+    await startWithFactory(createMockFactory());
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const created = await client.request("session.new");
+    expect(isSuccessResponse(created)).toBe(true);
+    const newId = (created as { result: { conversationId: string } }).result
+      .conversationId;
+
+    const list = await client.request("session.list");
+    const entries = (
+      list as { result: { conversations: Array<{ conversationId: string }> } }
+    ).result.conversations;
+    expect(entries.some((c) => c.conversationId === newId)).toBe(true);
+
+    const resumed = await client.request("session.resume", {
+      conversationId: newId,
+    });
+    expect(isSuccessResponse(resumed)).toBe(true);
+    const r = (
+      resumed as {
+        result: { conversationId: string; active: boolean; busy: boolean };
+      }
+    ).result;
+    expect(r.conversationId).toBe(newId);
+    expect(r.active).toBe(false);
+
+    const missing = await client.request("session.resume", {
+      conversationId: "conv-ghost",
+    });
+    expect(isSuccessResponse(missing)).toBe(false);
+
+    client.close();
+  });
+
+  it("session.clear:清空活跃会话并组播 session.changed cleared;busy 时拒绝", async () => {
+    await startWithFactory(createMockFactory({ deltaCount: 1 }));
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const sendResp = await client.request("session.send", { text: "你好" });
+    const sessionId = (sendResp as { result: { sessionId: string } }).result
+      .sessionId;
+    await client.waitNotification("session.complete");
+
+    const cleared = await client.request("session.clear", {
+      conversationId: sessionId,
+    });
+    expect(isSuccessResponse(cleared)).toBe(true);
+    const changed = await client.waitNotification("session.changed");
+    expect(changed.params).toEqual({
+      conversationId: sessionId,
+      change: "cleared",
+    });
+
+    client.close();
+  });
+
+  it("session.compact:运行体不支持时 INTERNAL_ERROR 报能力缺失", async () => {
+    await startWithFactory(createMockFactory({ deltaCount: 1 }));
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const sendResp = await client.request("session.send", { text: "你好" });
+    const sessionId = (sendResp as { result: { sessionId: string } }).result
+      .sessionId;
+    await client.waitNotification("session.complete");
+
+    const compactResp = await client.request("session.compact", {
+      conversationId: sessionId,
+    });
+    expect(isSuccessResponse(compactResp)).toBe(false);
+
+    client.close();
+  });
+
+  it("session.compact / contextBudget 对不存在会话先 notFound,不激活 runtime", async () => {
+    let createCalls = 0;
+    await startWithFactory({
+      async create(sessionId) {
+        createCalls++;
+        return createMockRuntime(sessionId);
+      },
+    });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const compact = await client.request("session.compact", {
+      conversationId: "ghost",
+    });
+    expect(isErrorResponse(compact)).toBe(true);
+    if (isErrorResponse(compact)) {
+      expect(compact.error.code).toBe(RPC_ERROR_CODES.NOT_FOUND);
+    }
+
+    const budget = await client.request("session.contextBudget", {
+      conversationId: "ghost",
+    });
+    expect(isErrorResponse(budget)).toBe(true);
+    if (isErrorResponse(budget)) {
+      expect(budget.error.code).toBe(RPC_ERROR_CODES.NOT_FOUND);
+    }
+
+    expect(createCalls).toBe(0);
+    const list = await client.request("session.list");
+    expect(isSuccessResponse(list)).toBe(true);
+    if (isSuccessResponse(list)) {
+      expect(list.result).toEqual({ conversations: [] });
+    }
+
+    client.close();
+  });
+
+  it("session.taskListUpdate 返回写后权威快照;session.taskList 可读同源快照", async () => {
+    const taskLists = new Map<string, TaskListState>();
+    const conversations = new ConversationManager(createMockFactory(), {
+      graceTimeoutMs: 60_000,
+      idleTimeoutMs: 30 * 60_000,
+      idleCheckIntervalMs: 999_999,
+    });
+    const ctx = createServerContext({
+      config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
+      version: TEST_VERSION,
+      token: TEST_TOKEN,
+      conversations,
+      taskListSnapshot: async (conversationId) =>
+        taskLists.get(conversationId) ?? null,
+      taskListUpdate: async (conversationId, action) => {
+        const curr = taskLists.get(conversationId) ?? { items: [] };
+        const next: TaskListState =
+          action.kind === "add"
+            ? {
+                items: [
+                  ...curr.items,
+                  { id: "task-1", content: action.content, status: "pending" },
+                ],
+              }
+            : curr;
+        taskLists.set(conversationId, next);
+        return { ok: true, message: "ok", taskList: next };
+      },
+    });
+    server = await startServer({ context: ctx });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const before = await client.request("session.taskList", {
+      conversationId: "conv-task",
+    });
+    expect(isSuccessResponse(before)).toBe(true);
+    expect((before as { result: { taskList: TaskListState | null } }).result.taskList).toBeNull();
+
+    const updated = await client.request("session.taskListUpdate", {
+      conversationId: "conv-task",
+      action: { kind: "add", content: "写周报" },
+    });
+    expect(isSuccessResponse(updated)).toBe(true);
+    const updateResult = (
+      updated as { result: { taskList: TaskListState } }
+    ).result;
+    expect(updateResult.taskList.items[0]?.content).toBe("写周报");
+
+    const after = await client.request("session.taskList", {
+      conversationId: "conv-task",
+    });
+    expect(isSuccessResponse(after)).toBe(true);
+    const readResult = (after as { result: { taskList: TaskListState } }).result;
+    expect(readResult.taskList.items[0]?.content).toBe("写周报");
+
+    client.close();
+  });
+
+  it("session.taskListUpdate 不绕过会话 owner:in-flight turn 期间返回 BUSY 且不写入", async () => {
+    const updates: unknown[] = [];
+    const conversations = new ConversationManager(
+      createMockFactory({ deltaCount: 8, yieldDelayMs: 30 }),
+      {
+        graceTimeoutMs: 60_000,
+        idleTimeoutMs: 30 * 60_000,
+        idleCheckIntervalMs: 999_999,
+      },
+      {
+        appendRun: async (conversationId, record) => {
+          const prev = recordsByConversation.get(conversationId) ?? [];
+          recordsByConversation.set(conversationId, [...prev, record]);
+          return { runIndex: prev.length, shardId: "000001" };
+        },
+      },
+    );
+    const ctx = createServerContext({
+      config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
+      version: TEST_VERSION,
+      token: TEST_TOKEN,
+      conversations,
+      taskListSnapshot: async () => null,
+      taskListUpdate: async (_conversationId, action) => {
+        updates.push(action);
+        return { ok: true, message: "ok", taskList: { items: [] } };
+      },
+    });
+    server = await startServer({ context: ctx });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const sendResp = await client.request("session.send", { text: "长任务" });
+    const conversationId = (
+      sendResp as { result: { conversationId: string } }
+    ).result.conversationId;
+    await client.waitNotification("session.delta");
+
+    const updated = await client.request("session.taskListUpdate", {
+      conversationId,
+      action: { kind: "add", content: "不能插队" },
+    });
+    expect(isErrorResponse(updated)).toBe(true);
+    if (isErrorResponse(updated)) {
+      expect(updated.error.code).toBe(RPC_ERROR_CODES.BUSY);
+    }
+    expect(updates).toEqual([]);
+
+    await client.waitNotification("session.complete", 5000);
     client.close();
   });
 
@@ -477,13 +828,207 @@ describe("session.* RPC (S2.D)", () => {
     bob.close();
   });
 
-  it("session.subscribe 对不活跃会话返回 subscribed:false", async () => {
+  it("session.subscribe 可订阅已落盘但未激活会话;run 外变更照常组播", async () => {
+    await startWithFactory(createMockFactory());
+    const alice = await connect(server.port);
+    const bob = await connect(server.port);
+    await alice.request("auth", { token: TEST_TOKEN });
+    await bob.request("auth", { token: TEST_TOKEN });
+
+    const created = await alice.request("session.new");
+    expect(isSuccessResponse(created)).toBe(true);
+    const conversationId = (created as { result: { conversationId: string } })
+      .result.conversationId;
+
+    const sub = await alice.request("session.subscribe", { conversationId });
+    expect(
+      isSuccessResponse(sub) && (sub.result as { subscribed: boolean }).subscribed,
+    ).toBe(true);
+
+    const list = await bob.request("session.list");
+    expect(isSuccessResponse(list)).toBe(true);
+    if (isSuccessResponse(list)) {
+      const entry = (
+        list.result as {
+          conversations: Array<{
+            conversationId: string;
+            active: boolean;
+            observerCount: number;
+          }>;
+        }
+      ).conversations.find((c) => c.conversationId === conversationId);
+      expect(entry).toMatchObject({
+        active: false,
+        observerCount: 1,
+      });
+    }
+
+    await bob.request("session.rename", { conversationId, name: "新名字" });
+    const renamed = await alice.waitNotification("session.changed");
+    expect(renamed.params).toEqual({
+      conversationId,
+      change: "renamed",
+      name: "新名字",
+    });
+
+    await bob.request("session.delete", { conversationId });
+    const deleted = await alice.waitNotification("session.changed");
+    expect(deleted.params).toEqual({ conversationId, change: "deleted" });
+
+    alice.close();
+    bob.close();
+  });
+
+  it("session.subscribe 对不存在会话返回 subscribed:false", async () => {
     await startWithFactory(createMockFactory());
     const client = await connect(server.port);
     await client.request("auth", { token: TEST_TOKEN });
 
     const r = await client.request("session.subscribe", { conversationId: "ghost" });
     expect(isSuccessResponse(r) && (r.result as { subscribed: boolean }).subscribed).toBe(false);
+    client.close();
+  });
+
+  it("session.send 显式 stale conversationId 不会重建已删事实流", async () => {
+    await startWithFactory(createMockFactory());
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const created = await client.request("session.new");
+    expect(isSuccessResponse(created)).toBe(true);
+    const conversationId = (created as { result: { conversationId: string } })
+      .result.conversationId;
+    await client.request("session.delete", { conversationId });
+
+    const stale = await client.request("session.send", {
+      conversationId,
+      text: "should not resurrect",
+    });
+    expect(isErrorResponse(stale)).toBe(true);
+    if (isErrorResponse(stale)) {
+      expect(stale.error.code).toBe(RPC_ERROR_CODES.NOT_FOUND);
+    }
+    expect(recordsByConversation.get(conversationId)).toHaveLength(0);
+
+    const list = await client.request("session.list");
+    expect(isSuccessResponse(list)).toBe(true);
+    if (isSuccessResponse(list)) {
+      expect(list.result).toEqual({ conversations: [] });
+    }
+
+    client.close();
+  });
+
+  it("session.send 显式 id 与并发 delete 竞争时,存在性检查在 owner 门内,不会删除后复活", async () => {
+    recordsByConversation.clear();
+    const conversationId = "conv_delete_race";
+    recordsByConversation.set(conversationId, []);
+    const directory = createMemoryDirectory(recordsByConversation);
+    let releaseRemove!: () => void;
+    let removeEntered!: () => void;
+    const removeStarted = new Promise<void>((r) => {
+      removeEntered = r;
+    });
+    const removeGate = new Promise<void>((r) => {
+      releaseRemove = r;
+    });
+    const rawRemove = directory.remove.bind(directory);
+    directory.remove = async (id) => {
+      removeEntered();
+      await removeGate;
+      return rawRemove(id);
+    };
+    let createCalls = 0;
+    const conversations = new ConversationManager(
+      {
+        async create(sessionId) {
+          createCalls++;
+          return createMockRuntime(sessionId);
+        },
+      },
+      {
+        graceTimeoutMs: 60_000,
+        idleTimeoutMs: 30 * 60_000,
+        idleCheckIntervalMs: 999_999,
+      },
+      {
+        appendRun: async (id, record) => {
+          const prev = recordsByConversation.get(id) ?? [];
+          recordsByConversation.set(id, [...prev, record]);
+          return { runIndex: prev.length, shardId: "000001" };
+        },
+      },
+    );
+    const ctx = createServerContext({
+      config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
+      version: TEST_VERSION,
+      token: TEST_TOKEN,
+      conversations,
+      conversationDirectory: directory,
+    });
+    server = await startServer({ context: ctx });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const deleting = client.request("session.delete", { conversationId });
+    await removeStarted;
+    const sending = client.request("session.send", {
+      conversationId,
+      text: "should not resurrect",
+    });
+
+    releaseRemove();
+    expect(isSuccessResponse(await deleting)).toBe(true);
+    const sendResp = await sending;
+    expect(isErrorResponse(sendResp)).toBe(true);
+    if (isErrorResponse(sendResp)) {
+      expect(sendResp.error.code).toBe(RPC_ERROR_CODES.NOT_FOUND);
+    }
+    expect(createCalls).toBe(0);
+    expect(recordsByConversation.get(conversationId)).toHaveLength(0);
+
+    client.close();
+  });
+
+  it("session.send 显式空 conversationId 不会按首轮 send 新建会话", async () => {
+    await startWithFactory(createMockFactory());
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const emptyId = await client.request("session.send", {
+      conversationId: "",
+      text: "should not create",
+    });
+    expect(isErrorResponse(emptyId)).toBe(true);
+    if (isErrorResponse(emptyId)) {
+      expect(emptyId.error.code).toBe(RPC_ERROR_CODES.INVALID_PARAMS);
+    }
+
+    const nonStringId = await client.request("session.send", {
+      conversationId: 42,
+      text: "should not create",
+    });
+    expect(isErrorResponse(nonStringId)).toBe(true);
+    if (isErrorResponse(nonStringId)) {
+      expect(nonStringId.error.code).toBe(RPC_ERROR_CODES.INVALID_PARAMS);
+    }
+
+    const nullConversationId = await client.request("session.send", {
+      conversationId: null,
+      sessionId: "conv_should_not_fallback",
+      text: "should not fallback",
+    });
+    expect(isErrorResponse(nullConversationId)).toBe(true);
+    if (isErrorResponse(nullConversationId)) {
+      expect(nullConversationId.error.code).toBe(RPC_ERROR_CODES.INVALID_PARAMS);
+    }
+
+    const list = await client.request("session.list");
+    expect(isSuccessResponse(list)).toBe(true);
+    if (isSuccessResponse(list)) {
+      expect(list.result).toEqual({ conversations: [] });
+    }
+
     client.close();
   });
 
@@ -663,8 +1208,10 @@ describe("session.* RPC (S2.D)", () => {
     const client = await connect(server.port);
     await client.request("auth", { token: TEST_TOKEN });
 
-    // 让 ws: 形对话进入内存目录的"盘上事实"(发一轮 turn 落 record)
+    // 显式 id 引用必须先在目录层有身份;这里用内存目录的盘上事实种子
+    // 模拟场景入口已创建好 local meta,再验证 RPC 层不丢 ws: 全域键。
     const wsId = "ws:scene-1:conv_abc";
+    recordsByConversation.set(wsId, []);
     await client.request("session.send", { text: "hi", conversationId: wsId });
     await client.waitNotification("session.complete");
 
@@ -723,18 +1270,41 @@ describe("session.* RPC (S2.D)", () => {
     const client = await connect(server.port);
     await client.request("auth", { token: TEST_TOKEN });
 
-    const r1 = await client.request("session.send", { text: "first" });
+    const r1 = await client.request("session.send", {
+      text: "first",
+      turnId: "turn-first",
+    });
     const convId = (r1 as { result: { conversationId: string } }).result.conversationId;
+    expect((r1 as { result: { turnId: string } }).result.turnId).toBe(
+      "turn-first",
+    );
 
-    const r2 = await client.request("session.send", { text: "second", conversationId: convId });
+    const r2 = await client.request("session.send", {
+      text: "second",
+      conversationId: convId,
+      turnId: "turn-second",
+    });
     expect(isSuccessResponse(r2)).toBe(true);
+    expect((r2 as { result: { turnId: string } }).result.turnId).toBe(
+      "turn-second",
+    );
 
     const c1 = await client.waitNotification("session.complete");
-    const c1Result = (c1.params as { result: { reason: string } }).result;
+    const c1Params = c1.params as {
+      turnId: string;
+      result: { reason: string };
+    };
+    const c1Result = c1Params.result;
+    expect(c1Params.turnId).toBe("turn-first");
     expect(c1Result.reason).toBe("completed");
 
     const c2 = await client.waitNotification("session.complete");
-    const c2Result = (c2.params as { result: { reason: string } }).result;
+    const c2Params = c2.params as {
+      turnId: string;
+      result: { reason: string };
+    };
+    const c2Result = c2Params.result;
+    expect(c2Params.turnId).toBe("turn-second");
     expect(c2Result.reason).toBe("completed");
 
     const list = await client.request("session.list");
