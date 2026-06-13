@@ -11,6 +11,7 @@ export type {
   ConfirmationOption,
   ConfirmationOptionKind,
   ConfirmationRenderer,
+  ConfirmationRendererPort,
   ConfirmationRequest,
   ConfirmationRequestId,
   DisplayBody,

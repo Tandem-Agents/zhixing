@@ -25,6 +25,12 @@ import type { ConfirmationHub, HubEntry, HubEvent } from "../confirmation/hub.js
 import type { ConversationManager } from "../runtime/conversation-manager.js";
 import type { RpcConnection } from "./connection.js";
 
+/** 确认域推送通知的方法名——发射端(本 Bridge)与接入面订阅端共用 */
+export const CONFIRMATION_NOTIFICATIONS = {
+  pending: "confirmation.pending",
+  resolved: "confirmation.resolved",
+} as const;
+
 export interface ConfirmationBridgeDeps {
   /** 当前活跃的 RPC 连接集合（server.ts 内部维护，通过 ZhixingServerInstance.connections 暴露） */
   connections: ReadonlySet<RpcConnection>;
@@ -76,10 +82,20 @@ export function createConfirmationBridge(
   const unsubHub = hub.onEvent((event: HubEvent) => {
     if (event.type === "request") {
       const targets = resolveTargets(event.entry.conversationId);
-      notifyTargets(targets, "confirmation.pending", buildPendingPayload(event.entry));
+      const base = buildPendingPayload(event.entry);
+      // 摘要按 observer 推送；完整 request 是可操作控制面 payload，只给
+      // 发起本 turn 的可信 RPC 连接。该边界与 confirmation.resolve 的应答权
+      // 同源，避免旁观本机 observer 收到可点击面板却无权应答。
+      for (const conn of targets) {
+        if (!conn.authenticated || conn.closed) continue;
+        const payload = canReceiveFullRequest(event.entry, conn)
+          ? { ...base, request: event.entry.request }
+          : base;
+        conn.notify(CONFIRMATION_NOTIFICATIONS.pending, payload);
+      }
     } else {
       const targets = resolveTargets(event.conversationId);
-      notifyTargets(targets, "confirmation.resolved", {
+      notifyTargets(targets, CONFIRMATION_NOTIFICATIONS.resolved, {
         requestId: event.requestId,
         conversationId: event.conversationId,
         decision: event.decision.kind, // 不暴露 reason / note
@@ -96,6 +112,17 @@ export function createConfirmationBridge(
 }
 
 // ─── 内部工具 ───
+
+function canReceiveFullRequest(entry: HubEntry, conn: RpcConnection): boolean {
+  const origin = entry.request.turnOrigin;
+  return (
+    conn.authenticated &&
+    !conn.closed &&
+    conn.loopback === true &&
+    origin?.channel === "rpc" &&
+    origin.triggeredBy === String(conn.id)
+  );
+}
 
 function buildPendingPayload(entry: HubEntry): {
   requestId: string;

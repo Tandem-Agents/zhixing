@@ -24,7 +24,7 @@ import { createConfirmationBridge } from "../confirmation-bridge.js";
 
 function makeFakeConnection(
   id: number,
-  opts?: { authenticated?: boolean; closed?: boolean },
+  opts?: { authenticated?: boolean; closed?: boolean; loopback?: boolean },
 ): RpcConnection & {
   notifications: Array<{ method: string; params: unknown }>;
 } {
@@ -34,6 +34,7 @@ function makeFakeConnection(
   } = {
     id,
     authenticated: opts?.authenticated ?? true,
+    loopback: opts?.loopback ?? false,
     clientInfo: undefined,
     sendSuccess: vi.fn(),
     sendError: vi.fn(),
@@ -61,6 +62,7 @@ function makeFakeConversations(
 function makeRequest(
   id: string,
   title: string = "Bash 命令",
+  turnOrigin?: ConfirmationRequest["turnOrigin"],
 ): ConfirmationRequest {
   const now = Date.now();
   return {
@@ -78,6 +80,7 @@ function makeRequest(
     contextId: { kind: "main" },
     createdAt: now,
     expiresAt: now + 60_000,
+    ...(turnOrigin ? { turnOrigin } : {}),
   };
 }
 
@@ -113,6 +116,55 @@ describe("ConfirmationBridge — observer-scoped 推送", () => {
     // connB 没收到（非 observer）
     expect(connB.notifications).toHaveLength(0);
 
+    bridge.dispose();
+  });
+
+  it("pending 投影按应答 owner 分流:发起 loopback 附完整 request,旁观与远端仅摘要", async () => {
+    const hub = new ConfirmationHub();
+    const broker = new ConfirmationBroker();
+    broker.onRequest(() => {});
+    hub.attach("b1", broker, { conversationId: "conv-A" });
+
+    const owner = makeFakeConnection(1, { loopback: true });
+    const localObserver = makeFakeConnection(2, { loopback: true });
+    const remote = makeFakeConnection(3, { loopback: false });
+    const conversations = makeFakeConversations(
+      new Map([["conv-A", new Set(["1", "2", "3"])]]),
+    );
+    const bridge = createConfirmationBridge({
+      connections: new Set([owner, localObserver, remote]),
+      hub,
+      conversations,
+    });
+
+    const promise = broker.requestConfirmation(
+      makeRequest("r1", "Bash 命令", { channel: "rpc", triggeredBy: "1" }),
+    );
+
+    const ownerPending = owner.notifications.find(
+      (n) => n.method === "confirmation.pending",
+    )!.params as Record<string, unknown>;
+    const localObserverPending = localObserver.notifications.find(
+      (n) => n.method === "confirmation.pending",
+    )!.params as Record<string, unknown>;
+    const remotePending = remote.notifications.find(
+      (n) => n.method === "confirmation.pending",
+    )!.params as Record<string, unknown>;
+
+    // 发起面:完整请求投影在场(结构化 display / options)——面板能力零降级
+    expect(ownerPending.request).toBeDefined();
+    expect(
+      (ownerPending.request as { display: { body: { kind: string } } }).display
+        .body.kind,
+    ).toBe("bash");
+    // 旁观本机 observer 与远端一样只拿摘要:可见不等于可答
+    expect(localObserverPending).not.toHaveProperty("request");
+    expect(localObserverPending.operationSummary).toBeDefined();
+    expect(remotePending).not.toHaveProperty("request");
+    expect(remotePending.operationSummary).toBeDefined();
+
+    broker.resolve("r1", { kind: "allow-once" });
+    await promise;
     bridge.dispose();
   });
 

@@ -15,6 +15,7 @@ export * from "./rpc/session-wire.js";
 export * from "./rpc/session-broadcast.js";
 export {
   createConfirmationBridge,
+  CONFIRMATION_NOTIFICATIONS,
   type ConfirmationBridge,
   type ConfirmationBridgeDeps,
 } from "./rpc/confirmation-bridge.js";

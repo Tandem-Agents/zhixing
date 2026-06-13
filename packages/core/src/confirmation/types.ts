@@ -285,7 +285,8 @@ export interface ConfirmationRenderer {
   readonly name: string;
   readonly capabilities: RendererCapabilities;
 
-  attach(broker: IConfirmationBroker): () => void;
+  /** 挂到 broker 窄面(进程内 broker 或跨进程适配器皆可)——见 ConfirmationRendererPort */
+  attach(broker: ConfirmationRendererPort): () => void;
   detach(): void;
 }
 
@@ -383,9 +384,35 @@ export type ResolvedListener = (
 export type BrokerUnsubscribe = () => void;
 
 /**
+ * 渲染器消费的 broker 窄面——"收新请求 + 交回决定"。
+ *
+ * 渲染器(终端面板 / 渠道文本)只依赖这两个能力,不依赖完整 broker:
+ * 进程内 broker 与跨进程适配器(接入面经 RPC 收 pending 推送、resolve 走
+ * RPC 回程)都能诚实实现此面——完整 IConfirmationBroker 的队列管理 /
+ * 发起端注册无法跨进程表达,窄面让"面板挂在哪种 broker 上"成为装配决策。
+ */
+export interface ConfirmationRendererPort {
+  /**
+   * 订阅新请求通知——由渲染器调用。
+   * 只有 "showing" 状态的请求会触发监听器；queued 的不会。
+   */
+  onRequest(listener: RequestListener): BrokerUnsubscribe;
+
+  /**
+   * 解决一个 pending 请求——由渲染器调用。
+   * 返回 true 表示已受理；false 表示 id 已经被解决/取消/过期（幂等语义）。
+   * 跨进程实现为受理即真(实际落定经回程异步完成,失败经实现自身的错误通道)。
+   */
+  resolve(
+    requestId: ConfirmationRequestId,
+    decision: ConfirmationDecision,
+  ): boolean;
+}
+
+/**
  * Broker 接口——确认交互系统的核心调度器。
  */
-export interface IConfirmationBroker {
+export interface IConfirmationBroker extends ConfirmationRendererPort {
   /**
    * broker 实例 id —— 用于审计血缘追溯。
    *
@@ -414,12 +441,6 @@ export interface IConfirmationBroker {
   ): Promise<ConfirmationDecision>;
 
   /**
-   * 订阅新请求通知——由渲染器调用。
-   * 只有 "showing" 状态的请求会触发监听器；queued 的不会。
-   */
-  onRequest(listener: RequestListener): BrokerUnsubscribe;
-
-  /**
    * 订阅请求被解决通知——聚合层（如 ConfirmationHub）调用。
    *
    * 任何路径完成时同步触发一次：
@@ -433,15 +454,6 @@ export interface IConfirmationBroker {
    * 以便 Hub 可在外部观察到 decision 前完成索引清理。
    */
   onResolved(listener: ResolvedListener): BrokerUnsubscribe;
-
-  /**
-   * 解决一个 pending 请求——由渲染器调用。
-   * 返回 true 表示成功；false 表示 id 已经被解决/取消/过期（幂等语义）。
-   */
-  resolve(
-    requestId: ConfirmationRequestId,
-    decision: ConfirmationDecision,
-  ): boolean;
 
   /**
    * 取消某个 pending 请求。

@@ -26,9 +26,9 @@ import type {
   ConfirmationDecision,
   ConfirmationOption,
   ConfirmationRenderer,
+  ConfirmationRendererPort,
   ConfirmationRequest,
   DisplayBody,
-  IConfirmationBroker,
   PermissionContextId,
   RendererCapabilities,
   SecurityEventMap,
@@ -89,14 +89,14 @@ export class TerminalConfirmationRenderer implements ConfirmationRenderer {
   readonly name = "terminal";
   readonly capabilities = TERMINAL_RENDERER_CAPABILITIES;
 
-  private broker: IConfirmationBroker | null = null;
+  private broker: ConfirmationRendererPort | null = null;
   private unsub: BrokerUnsubscribe | null = null;
   private currentAbort: AbortController | null = null;
   private detached = false;
 
   constructor(private readonly options: TerminalConfirmationRendererOptions) {}
 
-  attach(broker: IConfirmationBroker): () => void {
+  attach(broker: ConfirmationRendererPort): () => void {
     if (this.broker && this.broker !== broker) {
       throw new Error(
         "TerminalConfirmationRenderer already attached to another broker — detach first",
