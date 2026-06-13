@@ -23,13 +23,20 @@
 
 import { PROFILES, type ServerProfile } from "./profile.js";
 import type { ZhixingConfig, ZhixingCredentials } from "@zhixing/providers";
-import type { ChannelRegistry, ShardedTranscriptStore, SnapshotStore } from "@zhixing/core";
+import type {
+  ChannelRegistry,
+  ConversationRepository,
+  JournalStore,
+  ShardedTranscriptStore,
+  SnapshotStore,
+} from "@zhixing/core";
 import type {
   ConfirmationHub,
   ConversationManager,
   InboundRouter,
   RunningServer,
   CleanupRegistry,
+  SessionBroadcast,
   TextConfirmationRenderer,
   RuntimeFactory,
 } from "@zhixing/server";
@@ -59,6 +66,15 @@ export interface AssemblyContext {
   readonly transcript: ShardedTranscriptStore;
   readonly snapshots: SnapshotStore;
   readonly runtimeFactory: RuntimeFactory;
+  /** user 域对话 meta 仓——turn 后维护(自动命名)与对话目录共用同一实例 */
+  readonly convRepo: ConversationRepository;
+  /** journal 域仓——turn 后维护与系统维护任务共用同一实例 */
+  readonly journalStore: JournalStore;
+  /**
+   * 会话组播 lazy ref(runServer 后回填)——turn 后维护的改名通知等运行期
+   * 推送经此读最新值;装配期为 null,运行期必已就位。
+   */
+  readonly sessionBroadcastRef: { current: SessionBroadcast | null };
   /**
    * 唯一清理出口（LIFO）。pre-server 接入面的 teardown 走 runServer 后的 shutdown-chain
    * 注册（时序约束见文件头）；仅 post-server 接入面在自己 setup 内注册到这里。

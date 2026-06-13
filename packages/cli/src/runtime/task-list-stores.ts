@@ -1,13 +1,13 @@
 /**
  * task_list 持久化层实现 —— TaskListStore 接口的具体后端。
  *
- * 两种实现：
- *   - `ConversationRepoTaskListStore`（cli REPL 模式）：落盘到 conversation
- *     meta.json 的 taskListState 字段。与 `ConversationRepository` 的其它字段
- *     操作共用 per-id 锁 + atomic write，保跨字段并发安全。
- *   - `InMemoryTaskListStore`（cli serve 模式过渡）：进程内 Map 持有。serve 模式
- *     当前没有 conversation meta 持久化路径，先用内存 store 让机制就位；待 serve
- *     模式接入 conversation meta（独立 PR）后切换到 `ConversationRepoTaskListStore`。
+ * 三种实现：
+ *   - `ConversationRepoTaskListStore`：单 scope 落盘到 conversation meta.json 的
+ *     taskListState 字段。与 `ConversationRepository` 的其它字段操作共用 per-id
+ *     锁 + atomic write，保跨字段并发安全。
+ *   - `RoutedConversationRepoTaskListStore`：按全域 conversationId 路由到所属
+ *     scope repo + localId，供核心宿主持久化 user / workscene 等多接入面会话。
+ *   - `InMemoryTaskListStore`：进程内 Map 持有，仅作单测 fixture / 临时无盘场景。
  *
  * 选择哪一种：装配方（`cli/repl.ts` / `cli/serve/command.ts`）按场景决定，注入
  * 给 `createBuiltinExtraToolsAssembly()`。
@@ -16,7 +16,7 @@
 import type { IConversationRepository, TaskListState } from "@zhixing/core";
 import type { TaskListStore } from "@zhixing/tools-builtin";
 
-// ─── cli REPL 模式 ───
+// ─── 持久化 store ───
 
 /**
  * 持久化失败异常 —— store 在 conversation 不存在 / 落盘失败时抛此错。
@@ -69,22 +69,53 @@ export class ConversationRepoTaskListStore implements TaskListStore {
   }
 }
 
-// ─── cli serve 模式（过渡） ───
+export interface ConversationRepoTaskListRoute {
+  repo: IConversationRepository;
+  /** scope 库内的 conversation id。全域 id 只在路由边界出现。 */
+  localId: string;
+}
 
 /**
- * 内存 store —— serve 模式过渡方案。
+ * 核心宿主 task_list store。
  *
- * 适用场景：cli serve 启动的 daemon。serve 模式当前没有 conversation meta
- * 持久化层（不用 `ConversationRepository`），无处落盘。先用内存 store 让 task_list
- * 工具机制就位；进程重启 state 丢失是已知限制。
- *
- * **后续升级路径**（标注，独立 PR）：
- *   1. serve 模式接入 `ConversationRepository`（lazy ensure conversation meta 文件）
- *   2. serve 顶层切换到 `ConversationRepoTaskListStore`
- *   3. 删除本类（或保留作为单测 fixture）
- *
- * 与"用户主对话"完全隔离 —— REPL 和 serve 是独立 cli 进程，各自持有自己的
- * store 实例，cache 互不影响。
+ * host 侧 conversationId 是全域键（如 `ws:<sceneId>:<localId>`），但
+ * `ConversationRepository` 只认识所属 scope 内的 localId。该 store 把路由作为
+ * 显式依赖注入，保证 task_list 写入、目录 clear、运行态持久化都可共享同一套
+ * repo 实例与 per-id 锁，而不是各自偷建仓库导致同一 meta 并发写绕锁。
+ */
+export class RoutedConversationRepoTaskListStore implements TaskListStore {
+  constructor(
+    private readonly route: (conversationId: string) => ConversationRepoTaskListRoute,
+  ) {}
+
+  async load(conversationId: string): Promise<TaskListState | undefined> {
+    const { repo, localId } = this.route(conversationId);
+    const conv = await repo.get(localId);
+    return conv?.taskListState;
+  }
+
+  async save(conversationId: string, state: TaskListState): Promise<void> {
+    const { repo, localId } = this.route(conversationId);
+    const conv = await repo.get(localId);
+    if (!conv) {
+      throw new TaskListPersistenceError(
+        `Conversation "${conversationId}" not found — cannot persist task list.`,
+        conversationId,
+      );
+    }
+    await repo.updateTaskListState(localId, state);
+  }
+
+  async delete(conversationId: string): Promise<void> {
+    const { repo, localId } = this.route(conversationId);
+    await repo.updateTaskListState(localId, undefined);
+  }
+}
+
+// ─── 内存 fixture ───
+
+/**
+ * 内存 store —— 仅用于单测 fixture / 临时无盘场景。
  */
 export class InMemoryTaskListStore implements TaskListStore {
   private readonly states = new Map<string, TaskListState>();

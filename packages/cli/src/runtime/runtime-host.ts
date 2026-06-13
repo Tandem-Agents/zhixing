@@ -28,6 +28,7 @@ import { powerProfile } from "@zhixing/orchestrator/profile";
 import type { SchedulerFacade, WorkScene } from "@zhixing/core";
 import type { ScheduleToolOrigin } from "@zhixing/tools-builtin";
 import type { BuiltinExtraToolsAssembly } from "./builtin-extra-tools.js";
+import type { IWorkModeController } from "./work-mode-controller.js";
 
 /** 从 createAgentRuntime 公共契约推导类型——避免依赖 orchestrator 内部路径 */
 type DecorateRunBusFn = NonNullable<CreateAgentRuntimeOptions["decorateRunBus"]>;
@@ -56,6 +57,13 @@ export interface RuntimeHostOptions {
    * 路径(会话 / ephemeral)都经此调用。
    */
   onRuntimeCreated?: (runtime: AgentRuntime) => void;
+  /**
+   * 工作模式控制器(可选)——提供时会话实例装配 workmode 工具组(main 装
+   * enter / change_approve / memory_query,场景实例装 exit),LLM 由此产生
+   * 进出场景意图(经 run bus 带出、定向通知发起接入面消费)。ephemeral
+   * 实例不装(定时任务无模式语义)。
+   */
+  workModeController?: () => IWorkModeController;
 }
 
 /**
@@ -90,7 +98,9 @@ export class RuntimeHost {
 
   /** 发放一个 main 会话 runtime 实例——投递 origin 执行期按当前 run 的对话派生。 */
   async createConversationRuntime(): Promise<AgentRuntime> {
-    return this.assemble(this.conversationScheduleOrigin);
+    return this.assemble(this.conversationScheduleOrigin, {
+      withWorkmodeTools: true,
+    });
   }
 
   /**
@@ -100,17 +110,21 @@ export class RuntimeHost {
    */
   async createWorksceneRuntime(scene: WorkScene): Promise<AgentRuntime> {
     return this.assemble(this.conversationScheduleOrigin, {
-      workspace: scene.workdir ?? null,
-      primaryRole: "power",
-      memoryScope: { kind: "workscene", sceneId: scene.id },
-      profile: powerProfile(scene),
-      spec: { kind: "workscene" },
+      withWorkmodeTools: true,
+      workscene: {
+        workspace: scene.workdir ?? null,
+        primaryRole: "power",
+        memoryScope: { kind: "workscene", sceneId: scene.id },
+        profile: powerProfile(scene),
+        spec: { kind: "workscene" },
+      },
     });
   }
 
   /**
    * 发放一个 ephemeral runtime 实例(定时任务执行体)——任务 AI 自创建的
-   * 子任务非用户发起、无渠道投递目标,origin 恒 null。
+   * 子任务非用户发起、无渠道投递目标,origin 恒 null;无模式语义,不装
+   * workmode 工具组。
    */
   async createEphemeralRuntime(): Promise<AgentRuntime> {
     return this.assemble(() => null);
@@ -118,14 +132,19 @@ export class RuntimeHost {
 
   private async assemble(
     scheduleOrigin: () => ScheduleToolOrigin | null,
-    workscene?: {
-      workspace: string | null;
-      primaryRole: "power";
-      memoryScope: { kind: "workscene"; sceneId: string };
-      profile: ReturnType<typeof powerProfile>;
-      spec: { kind: "workscene" };
+    opts?: {
+      /** 会话路径装 workmode 工具组(LLM 进出场景意图的产生面) */
+      withWorkmodeTools?: boolean;
+      workscene?: {
+        workspace: string | null;
+        primaryRole: "power";
+        memoryScope: { kind: "workscene"; sceneId: string };
+        profile: ReturnType<typeof powerProfile>;
+        spec: { kind: "workscene" };
+      };
     },
   ): Promise<AgentRuntime> {
+    const workscene = opts?.workscene;
     const runtime = await createAgentRuntime({
       workspace: workscene ? workscene.workspace : this.opts.workspace,
       primaryRole: workscene?.primaryRole,
@@ -135,6 +154,9 @@ export class RuntimeHost {
         scheduler: this.opts.scheduler,
         scheduleOrigin,
         spec: workscene?.spec,
+        workModeController: opts?.withWorkmodeTools
+          ? this.opts.workModeController
+          : undefined,
       }),
       decorateRunBus: this.opts.decorateRunBus,
       onSecurityBlocked: this.opts.onSecurityBlocked,

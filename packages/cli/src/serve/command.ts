@@ -38,6 +38,7 @@ import {
   ConversationRepository,
   FsWorkSceneRegistry,
   parseConversationId,
+  WORKSCENE_CONVERSATION_PREFIX,
   ShardedTranscriptStore,
   SnapshotStore,
   SkillStore,
@@ -57,9 +58,11 @@ import {
   createRunEventForwarder,
   getDefaultLogPath,
   SESSION_NOTIFICATIONS,
+  type SessionChangedPayload,
   type SessionBroadcast,
   type RunningServer,
   type ProcessLockPaths,
+  type ConversationManager,
 } from "@zhixing/server";
 import type {
   ZhixingConfig,
@@ -78,8 +81,12 @@ import { createMcpHub } from "@zhixing/mcp";
 import { createBuiltinExtraToolsAssembly } from "../runtime/builtin-extra-tools.js";
 import { createServeSegmentDeps } from "../runtime/segment-deps.js";
 import { parseServerSpecs } from "../runtime/mcp-config.js";
-import { InMemoryTaskListStore } from "../runtime/task-list-stores.js";
+import {
+  RoutedConversationRepoTaskListStore,
+  type ConversationRepoTaskListRoute,
+} from "../runtime/task-list-stores.js";
 import { registerCliTurnContextProviders } from "../runtime/turn-context-providers.js";
+import { applyTaskListAction } from "../runtime/task-list-actions.js";
 import { createCliRuntimeFactory } from "./session-adapter.js";
 import { createConversationDirectory } from "./conversation-directory.js";
 import { createWorksceneDirectory } from "./workscene-directory.js";
@@ -208,11 +215,32 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   const convDir = conversationsDir({ kind: "user" });
   const transcript = new ShardedTranscriptStore(convDir);
   const snapshots = new SnapshotStore(convDir);
-  // 对话目录(盘上事实:清单 / 改名 / 删除 / 倒读)——session.list / history /
-  // rename / delete 的持久层,与 REPL 同 scope(同 home 同目录)。
+  // user 域对话 meta 仓——对话目录与 turn 后维护(自动命名)共用同一实例。
+  const convRepo = new ConversationRepository({ kind: "user" });
+  const sceneConversationRepos = new Map<string, ConversationRepository>();
+  const repoForConversationId = (
+    conversationId: string,
+  ): ConversationRepoTaskListRoute => {
+    const { scope, localId } = parseConversationId(conversationId);
+    if (scope.kind === "workscene") {
+      let repo = sceneConversationRepos.get(scope.sceneId);
+      if (!repo) {
+        repo = new ConversationRepository(scope);
+        sceneConversationRepos.set(scope.sceneId, repo);
+      }
+      return { repo, localId };
+    }
+    return { repo: convRepo, localId };
+  };
+  // 对话目录(盘上事实:清单 / 建删 / 改名 / 清空 / 倒读)——session.* 命令
+  // 执行体的持久层,与 REPL 同 scope(同 home 同目录)。task_list cache 清理
+  // 经 lazy 闭包接 builtinExtraTools(声明在后,运行期调用时已就位)。
   const conversationDirectory = createConversationDirectory({
-    repo: new ConversationRepository({ kind: "user" }),
+    repo: convRepo,
     transcript,
+    repoForConversationId,
+    clearTaskListCache: (conversationId) =>
+      builtinExtraTools.taskListService.clear(conversationId),
   });
   // 工作场景域——注册表单例(管理面 + factory 的场景装配路由共用)与场景对话取建。
   const workSceneRegistry = new FsWorkSceneRegistry();
@@ -226,6 +254,12 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     cliWorkspace: opts.workspace,
   });
   const memoryDirectory = createMemoryDirectory();
+
+  // ConversationManager lazy ref——会话执行面(access surface)setup 后回填;
+  // workModeController 的删除守卫运行期读(LLM 工具调用必晚于装配完成)。
+  const conversationsRef: { current: ConversationManager | null } = {
+    current: null,
+  };
 
   // 3. Scheduler facade lazy ref —— 打破循环依赖（标准 IoC 模式）：
   //    scheduleTool → Scheduler → runAgentTurn → ephemeralRuntime → scheduleTool
@@ -280,11 +314,21 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
 
   // 3c. Builtin extra tools assembly —— task_list / schedule 工具的装配点，所有
   //   per-session runtime 共享同一 service 单例（cache by sessionId/conversationId）。
-  //   serve 模式当前用 InMemoryTaskListStore 作过渡（serve 未接 ConversationRepository）。
+  //   task_list 盘上状态按全域 conversationId 路由到所属 scope repo；user / workscene
+  //   与目录 clear 共用同一 repo 实例，保 meta 写入锁一致。
   const builtinExtraTools = createBuiltinExtraToolsAssembly(
-    new InMemoryTaskListStore(),
+    new RoutedConversationRepoTaskListStore(repoForConversationId),
     mcpHub,
   );
+  // task_list 状态变更 → 会话级变更组播(meta 变更):接入面屏底任务区的
+  // 实时数据源。装配期 broadcast 未回填时静默丢弃(无会话 turn 流动)。
+  builtinExtraTools.taskListService.subscribe(({ conversationId, state }) => {
+    sessionBroadcastRef.current?.(conversationId, SESSION_NOTIFICATIONS.changed, {
+      conversationId,
+      change: "taskList",
+      taskList: state,
+    } satisfies SessionChangedPayload);
+  });
 
   // 3c'. 段切换外部依赖 —— serve 全部 runtime（per-session + ephemeral）共享：
   //   注意力窗口的段保护对一切运行体生效。persistence 为 no-op（serve 未接
@@ -315,6 +359,22 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     // 模式下退化为只输出 Task 起止帧(子工具中间事件静默,避免日志爆炸)。
     decorateRunBus: serveDecorateRunBus,
     onSecurityBlocked: createBlockedRenderer(serveWriter),
+    // workmode 工具组的控制器——LLM 进出场景意图的产生面在宿主 runtime。
+    // 删除守卫与 workscene.delete RPC 方法同判据:场景对话活跃即拒绝
+    // (物理删会让进行中的记忆写入 / 持久化撞 ENOENT)。
+    workModeController: () => ({
+      registry: workSceneRegistry,
+      async removeWorkScene(id: string): Promise<void> {
+        const scenePrefix = `${WORKSCENE_CONVERSATION_PREFIX}${id}:`;
+        const hasActive = conversationsRef.current
+          ?.list()
+          .some((s) => s.conversationId.startsWith(scenePrefix));
+        if (hasActive) {
+          throw new Error(`工作场景 "${id}" 有活跃会话,请先退出再删除`);
+        }
+        await workSceneRegistry.remove(id);
+      },
+    }),
     onRuntimeCreated: (runtime) => {
       registerCliTurnContextProviders(runtime, {
         getSchedulerStatus: () =>
@@ -372,6 +432,9 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   // 接入面装配 —— 数据驱动。profile 经 PROFILES.surfaces 声明启用哪组接入面，setupAccessSurfaces
   // 按依赖拓扑序遍历、各自 setup（产物写回 ctx）。主干不出现任何 `if (profile === ...)`。
   // ============================================================================
+  // journal 域仓——turn 后维护(conversation 接入面)与系统维护任务共用。
+  const journalStore = new JournalStore();
+
   const ctx: AssemblyContext = {
     profile,
     config,
@@ -382,12 +445,16 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     transcript,
     snapshots,
     runtimeFactory,
+    convRepo,
+    journalStore,
+    sessionBroadcastRef,
     cleanup: registry,
   };
 
   // pre-server 接入面：MCP（connectAll）/ 会话执行面 / 通道 / 投递栈 / 文本确认渲染器。
   // 产物写回 ctx.conversations / channels / inboundRouter / deliveryStack / textRenderer。
   await setupAccessSurfaces(ACCESS_SURFACES, ctx, "pre-server");
+  conversationsRef.current = ctx.conversations ?? null;
 
   // ============================================================================
   // 恒定核心后置 —— 须在 pre-server 接入面之后构造。
@@ -485,7 +552,6 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     return roots;
   };
 
-  const journalStore = new JournalStore();
   const systemHandlers = buildSystemHandlers({
     journal: {
       runJournalLifecycle: async () => {
@@ -561,6 +627,22 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     hostInfo: {
       workspace: opts.workspace,
       logPath: isChild ? getDefaultLogPath() : undefined,
+    },
+    // /mcp 状态显示与接入向导的宿主侧数据面(MCP 连接在宿主)
+    mcpStatuses: () => mcpHub.serverStatuses(),
+    // 轻推理通道(llm.complete,仅可信面)——管理流程的单发文本调用
+    llmComplete: (prompt, role) => ephemeralRuntime.callText(prompt, role),
+    // /task new·done 的执行体——写单点在宿主 task_list 服务,变更经
+    // taskListService.subscribe 的组播自然回流接入面视图
+    taskListUpdate: (conversationId, action) =>
+      applyTaskListAction(
+        builtinExtraTools.taskListService,
+        conversationId,
+        action,
+      ),
+    taskListSnapshot: async (conversationId) => {
+      await builtinExtraTools.taskListService.prime(conversationId);
+      return builtinExtraTools.taskListService.getCached(conversationId);
     },
     channels: ctx.channels,
     confirmationHub,

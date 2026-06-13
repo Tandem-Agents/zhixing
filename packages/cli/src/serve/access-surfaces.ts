@@ -22,10 +22,13 @@ import {
   ConversationManager,
   TextConfirmationRenderer,
   createConfirmationBridge,
+  SESSION_NOTIFICATIONS,
+  type SessionChangedPayload,
 } from "@zhixing/server";
 import { resolveModelCapability } from "@zhixing/providers";
 import { setupChannels } from "./channels.js";
 import { setupDelivery } from "../setup-delivery.js";
+import { createTurnMaintenance } from "./turn-maintenance.js";
 import type { AccessSurface } from "./access-surface.js";
 
 /** MCP —— eager 连接外部 server，使工具目录进入 system prompt。 */
@@ -103,6 +106,24 @@ const conversationSurface: AccessSurface = {
         await s.snapshots.write(s.localId, input);
       },
       confirmationHub: ctx.confirmationHub,
+      // turn 后维护(自动命名 + journal 凝练)——所有入口的 turn 经
+      // recordTurn 唯一汇聚;自动命名成功组播 session.changed renamed,
+      // 各端列表与标题随之刷新。
+      onTurnCommitted: createTurnMaintenance({
+        convRepo: ctx.convRepo,
+        journal: ctx.journalStore,
+        onRenamed: (conversationId, name) => {
+          ctx.sessionBroadcastRef.current?.(
+            conversationId,
+            SESSION_NOTIFICATIONS.changed,
+            {
+              conversationId,
+              change: "renamed",
+              name,
+            } satisfies SessionChangedPayload,
+          );
+        },
+      }),
     });
   },
 };

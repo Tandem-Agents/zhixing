@@ -143,6 +143,39 @@ export function createServerRuntimeAdapter(
       return true;
     },
 
+    // ─── 会话命令执行体能力透传(/clear /compact 与 turn 后维护) ───
+    // 适配器只做协议适配:窗口操作的应用归 ConversationManager,此处原样透出
+    // 底层运行体的能力,返回结构与 server 的结构形声明天然兼容。
+
+    async forceCompact(messages, turnCount) {
+      const result = await agentRuntime.forceCompact([...messages], turnCount);
+      return {
+        modified: result.modified,
+        windowCompact: result.windowCompact,
+        emergencyFloor: result.emergencyFloor,
+      };
+    },
+
+    resetConversationState() {
+      return agentRuntime.resetConversationState();
+    },
+
+    onAttentionWindowChange(reason) {
+      return agentRuntime.onAttentionWindowChange(reason);
+    },
+
+    callText(prompt, role) {
+      return agentRuntime.callText(prompt, role);
+    },
+
+    checkBudget(messages) {
+      return agentRuntime.checkBudget(messages);
+    },
+
+    get calibrationFactor() {
+      return agentRuntime.calibrationFactor;
+    },
+
     async dispose() {
       // 透传底层运行体末窗 onWindowClose —— serve 每会话经 createAgentRuntime
       // 建 main runtime（首窗 onWindowOpen 已触发）,销毁须触发其末窗。

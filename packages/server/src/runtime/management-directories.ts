@@ -46,8 +46,16 @@ export interface SkillDirectory {
   structuralVersion(): number;
 }
 
+/** /journal 展示的扫描投影——统计 + 待办摘要(凝练计划 / 过期数) */
+export interface JournalScanView {
+  stats: JournalStats;
+  /** 待凝练摘要;无计划为 null */
+  condense: { months: number; files: number } | null;
+  expiredCount: number;
+}
+
 /** 记忆域查看 —— /journal 统计与 /people 关系列表的只读执行体 */
 export interface MemoryDirectory {
-  journalStats(): Promise<JournalStats>;
+  journalStats(): Promise<JournalScanView>;
   peopleList(): Promise<PersonEntry[]>;
 }

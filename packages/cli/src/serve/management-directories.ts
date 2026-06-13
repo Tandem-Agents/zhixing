@@ -108,7 +108,19 @@ export function createMemoryDirectory(): MemoryDirectory {
   return {
     async journalStats() {
       const plan = await new JournalStore().scan();
-      return plan.stats;
+      return {
+        stats: plan.stats,
+        condense: plan.condensePlan
+          ? {
+              months: plan.condensePlan.months.length,
+              files: plan.condensePlan.months.reduce(
+                (sum: number, m: { files: string[] }) => sum + m.files.length,
+                0,
+              ),
+            }
+          : null,
+        expiredCount: plan.expiredFiles.length,
+      };
     },
     peopleList() {
       return new PeopleStore().listAll();
