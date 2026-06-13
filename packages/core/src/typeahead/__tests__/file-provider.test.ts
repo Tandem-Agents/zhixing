@@ -47,6 +47,8 @@ beforeAll(async () => {
   await fs.mkdir(path.join(tmpRoot, "src", "utils"), { recursive: true });
   await fs.mkdir(path.join(tmpRoot, "docs"), { recursive: true });
   await fs.mkdir(path.join(tmpRoot, ".hidden"), { recursive: true });
+  await fs.mkdir(path.join(tmpRoot, "dynamic-a"), { recursive: true });
+  await fs.mkdir(path.join(tmpRoot, "dynamic-b"), { recursive: true });
 
   // 创建文件
   const files = [
@@ -57,6 +59,8 @@ beforeAll(async () => {
     ".gitignore",
     "package.json",
     "tsconfig.json",
+    "dynamic-a/a-only.txt",
+    "dynamic-b/b-only.txt",
   ];
   for (const f of files) {
     await fs.writeFile(path.join(tmpRoot, f), "", "utf-8");
@@ -202,6 +206,19 @@ describe("FileProvider.query", () => {
 
     expect(items.length).toBe(1);
     expect(items[0]!.displayText).toBe("index.ts");
+  });
+
+  it("root 函数在每次 query 读取当前 workspace", async () => {
+    let root = path.join(tmpRootDir.getDir(), "dynamic-a");
+    const dynamicProvider = new FileProvider({ root: () => root });
+    const match = dynamicProvider.matchTrigger(makeCtx("@file:"))!;
+
+    const first = await dynamicProvider.query(match, noAbort());
+    expect(first.map((i) => i.displayText)).toEqual(["a-only.txt"]);
+
+    root = path.join(tmpRootDir.getDir(), "dynamic-b");
+    const second = await dynamicProvider.query(match, noAbort());
+    expect(second.map((i) => i.displayText)).toEqual(["b-only.txt"]);
   });
 });
 

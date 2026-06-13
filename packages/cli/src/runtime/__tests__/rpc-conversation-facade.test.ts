@@ -4,22 +4,32 @@
  */
 
 import { describe, it, expect } from "vitest";
-import type { SessionDeltaPayload, SessionChangedPayload } from "@zhixing/server";
+import {
+  RPC_ERROR_CODES,
+  RpcClientError,
+  type SessionDeltaPayload,
+  type SessionChangedPayload,
+} from "@zhixing/server";
 import { RpcConversationFacade } from "../rpc-conversation-facade.js";
 import { makeFakeHostLink } from "./fake-host-link.js";
 
 describe("RpcConversationFacade · 方法域", () => {
-  it("send 携带 text 与可选 conversationId,返回宿主分配的会话身份", async () => {
+  it("send 携带 text / conversationId / turnId,返回宿主回显的 turn 身份", async () => {
     const fake = makeFakeHostLink();
-    fake.setResponder(() => ({ conversationId: "conv-1", sessionId: "conv-1" }));
+    fake.setResponder(() => ({
+      conversationId: "conv-1",
+      sessionId: "conv-1",
+      turnId: "turn-1",
+    }));
     const facade = new RpcConversationFacade(fake.link);
 
-    const result = await facade.send("你好", "conv-1");
+    const result = await facade.send("你好", "conv-1", "turn-1");
     expect(result.conversationId).toBe("conv-1");
+    expect(result.turnId).toBe("turn-1");
     expect(fake.requests).toEqual([
       {
         method: "session.send",
-        params: { text: "你好", conversationId: "conv-1" },
+        params: { text: "你好", conversationId: "conv-1", turnId: "turn-1" },
       },
     ]);
   });
@@ -65,14 +75,18 @@ describe("RpcConversationFacade · 方法域", () => {
     ]);
   });
 
-  it("rename / delete / abort / subscribe / unsubscribe 的方法名与参数", async () => {
+  it("rename / delete / abort / taskList / subscribe / unsubscribe 的方法名与参数", async () => {
     const fake = makeFakeHostLink();
     fake.setResponder((method) =>
       method === "session.rename"
         ? { conversationId: "ws:scene-1:conv-9", name: "新名" }
         : method === "session.subscribe"
           ? { subscribed: true }
-          : {},
+          : method === "session.taskList"
+            ? { taskList: { items: [] } }
+            : method === "session.taskListUpdate"
+              ? { ok: true, message: "ok", taskList: { items: [] } }
+              : {},
     );
     const facade = new RpcConversationFacade(fake.link);
 
@@ -82,6 +96,8 @@ describe("RpcConversationFacade · 方法域", () => {
 
     await facade.delete("conv-1");
     await facade.abort("conv-1");
+    expect((await facade.taskList("conv-1")).taskList).toEqual({ items: [] });
+    await facade.taskListUpdate("conv-1", { kind: "add", content: "x" });
     expect(await facade.subscribe("conv-1")).toBe(true);
     await facade.unsubscribe("conv-1");
 
@@ -89,10 +105,87 @@ describe("RpcConversationFacade · 方法域", () => {
       "session.rename",
       "session.delete",
       "session.abort",
+      "session.taskList",
+      "session.taskListUpdate",
       "session.subscribe",
       "session.unsubscribe",
     ]);
     expect(fake.requests[1]?.params).toEqual({ conversationId: "conv-1" });
+    expect(fake.requests[4]?.params).toEqual({
+      conversationId: "conv-1",
+      action: { kind: "add", content: "x" },
+    });
+  });
+
+  it("new / clear / compact / contextBudget / resume 的方法名与参数", async () => {
+    const fake = makeFakeHostLink();
+    fake.setResponder((method) =>
+      method === "session.new"
+        ? { conversationId: "conv-new", name: "新对话" }
+        : method === "session.compact"
+          ? { modified: true, tokensBefore: 100, tokensAfter: 40 }
+          : method === "session.contextBudget"
+            ? {
+                budget: {
+                  contextWindow: 200_000,
+                  effectiveWindow: 180_000,
+                  currentTokens: 12_000,
+                  usageRatio: 0.067,
+                  status: "normal",
+                },
+                turnCount: 3,
+                calibrationFactor: 1,
+              }
+            : method === "session.resume"
+              ? {
+                  conversationId: "conv-1",
+                  name: "默认对话",
+                  active: true,
+                  busy: false,
+                }
+              : {},
+    );
+    const facade = new RpcConversationFacade(fake.link);
+
+    expect(await facade.newConversation()).toEqual({
+      conversationId: "conv-new",
+      name: "新对话",
+    });
+    await facade.clear("conv-1");
+    expect(await facade.compact("conv-1")).toMatchObject({
+      modified: true,
+      tokensAfter: 40,
+    });
+    expect((await facade.contextBudget("conv-1")).turnCount).toBe(3);
+    expect(await facade.resume("conv-1")).toMatchObject({
+      conversationId: "conv-1",
+      active: true,
+    });
+
+    expect(fake.requests).toEqual([
+      { method: "session.new", params: undefined },
+      { method: "session.clear", params: { conversationId: "conv-1" } },
+      { method: "session.compact", params: { conversationId: "conv-1" } },
+      { method: "session.contextBudget", params: { conversationId: "conv-1" } },
+      { method: "session.resume", params: { conversationId: "conv-1" } },
+    ]);
+  });
+
+  it("resumeIfExists 只把 NOT_FOUND 翻译为 null,其它错误保持异常", async () => {
+    const fake = makeFakeHostLink();
+    const facade = new RpcConversationFacade(fake.link);
+
+    fake.setResponder(() => {
+      throw new RpcClientError(RPC_ERROR_CODES.NOT_FOUND, "Session not found");
+    });
+    await expect(facade.resumeIfExists("missing")).resolves.toBeNull();
+
+    fake.setResponder(() => {
+      throw new RpcClientError(RPC_ERROR_CODES.INTERNAL_ERROR, "boom");
+    });
+    await expect(facade.resumeIfExists("conv-1")).rejects.toMatchObject({
+      code: RPC_ERROR_CODES.INTERNAL_ERROR,
+    });
   });
 });
 
@@ -113,11 +206,13 @@ describe("RpcConversationFacade · 通知还原", () => {
     fake.notify("session.delta", {
       conversationId: "conv-1",
       sessionId: "conv-1",
+      turnId: "turn-1",
       delta: { type: "text_delta", text: "hi" },
     });
     fake.notify("session.complete", {
       conversationId: "conv-1",
       sessionId: "conv-1",
+      turnId: "turn-1",
       result: { reason: "completed" },
     });
     fake.notify("session.changed", {
@@ -127,6 +222,7 @@ describe("RpcConversationFacade · 通知还原", () => {
     });
     fake.notify("session.modeSwitchIntent", {
       conversationId: "conv-1",
+      turnId: "turn-1",
       intent: { kind: "enter", sceneId: "scene-1" },
     });
 
@@ -140,6 +236,7 @@ describe("RpcConversationFacade · 通知还原", () => {
     });
     expect(intents[0]).toEqual({
       conversationId: "conv-1",
+      turnId: "turn-1",
       intent: { kind: "enter", sceneId: "scene-1" },
     });
   });
@@ -154,6 +251,7 @@ describe("RpcConversationFacade · 通知还原", () => {
     fake.notify("session.delta", {
       conversationId: "conv-1",
       sessionId: "conv-1",
+      turnId: "turn-1",
       delta: { type: "text_delta", text: "hi" },
     });
     expect(deltas).toEqual([]);

@@ -17,6 +17,7 @@
  */
 
 import chalk from "chalk";
+import { generateTurnId } from "@zhixing/core";
 import {
   createRpcClient,
   discoverServer,
@@ -173,15 +174,27 @@ async function runSessionSend(
   const done = new Promise<ExitCode>((r) => {
     resolveDone = r;
   });
+  const baseParams = params as Record<string, unknown>;
+  const turnId =
+    typeof baseParams.turnId === "string" && baseParams.turnId.trim().length > 0
+      ? baseParams.turnId
+      : generateTurnId();
+  const requestParams = { ...baseParams, turnId };
 
-  // 订阅通知（在发请求之前，避免 race）
+  // 订阅通知（在发请求之前，避免 race），但只消费本次 turn 的帧。
   const offDelta = client.onNotification("session.delta", (notif) => {
-    const n = notif as { sessionId: string; delta: unknown };
+    const n = notif as { sessionId: string; turnId?: string; delta: unknown };
+    if (n.turnId !== turnId) return;
     const text = formatStreamDelta(n.delta);
     if (text !== null) process.stdout.write(text);
   });
   const offComplete = client.onNotification("session.complete", (notif) => {
-    const n = notif as { sessionId: string; result?: { reason?: string } };
+    const n = notif as {
+      sessionId: string;
+      turnId?: string;
+      result?: { reason?: string };
+    };
+    if (n.turnId !== turnId) return;
     const reason = n.result?.reason ?? "unknown";
     if (raw) {
       console.log("\n" + JSON.stringify(notif));
@@ -199,7 +212,10 @@ async function runSessionSend(
     resolveDone(reason === "completed" ? 0 : 1);
   });
 
-  const sendResult = await client.request<{ sessionId: string }>("session.send", params);
+  const sendResult = await client.request<{ sessionId: string; turnId: string }>(
+    "session.send",
+    requestParams,
+  );
   if (!raw) {
     console.error(chalk.dim(`(sessionId: ${sendResult.sessionId})`));
   }

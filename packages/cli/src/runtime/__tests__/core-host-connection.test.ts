@@ -16,6 +16,19 @@ const endpoint: ServerEndpoint = {
   pid: { pidFileVersion: 2, pid: 1, port: 18900, startTime: null, startedAt: "" },
 };
 
+const nextEndpoint: ServerEndpoint = {
+  url: "ws://127.0.0.1:18901/ws",
+  httpBase: "http://127.0.0.1:18901",
+  token: "tok",
+  pid: {
+    pidFileVersion: 2,
+    pid: 2,
+    port: 18901,
+    startTime: 2,
+    startedAt: "2026-01-01T00:00:01.000Z",
+  },
+};
+
 function makeFakeClient() {
   let closed = false;
   const handlers = new Map<string, Array<(p: unknown) => void>>();
@@ -241,6 +254,78 @@ describe("CoreHostConnection", () => {
     off();
     c2.emit("schedule.completed", { taskId: "t2" });
     expect(received).toHaveLength(1);
+  });
+
+  it("reconnect 主动关闭旧连接,等待旧 endpoint 换代后重连且保留订阅", async () => {
+    const c1 = makeFakeClient();
+    const c2 = makeFakeClient();
+    const clients = [c1, c2];
+    let i = 0;
+    let currentEndpoint = endpoint;
+    const discover = vi.fn(async () => currentEndpoint);
+    const sleep = vi.fn(async () => {
+      currentEndpoint = nextEndpoint;
+    });
+    const conn = new CoreHostConnection({
+      discover,
+      spawn: vi.fn(async () => ({ ok: true })),
+      createClient: () => asClient(clients[i++]!),
+      sleep,
+    });
+
+    await conn.getClient();
+    const received: unknown[] = [];
+    conn.onNotification("session.delta", (p) => received.push(p));
+
+    await conn.reconnect({ timeoutMs: 1000, pollIntervalMs: 1 });
+
+    expect(c1.close).toHaveBeenCalledOnce();
+    expect(sleep).toHaveBeenCalledWith(1);
+    expect(await conn.getClient()).toBe(asClient(c2));
+    c2.emit("session.delta", { n: 1 });
+    expect(received).toEqual([{ n: 1 }]);
+  });
+
+  it("reconnect 撞在建立在途时丢弃旧连接,等待旧 endpoint 换代后连到新 owner", async () => {
+    const c1 = makeFakeClient();
+    const c2 = makeFakeClient();
+    const clients = [c1, c2];
+    let i = 0;
+    let currentEndpoint = endpoint;
+    let firstDiscover = true;
+    let releaseDiscover!: () => void;
+    const discoverGate = new Promise<void>((resolve) => {
+      releaseDiscover = resolve;
+    });
+    const discover = vi.fn(async () => {
+      if (firstDiscover) {
+        firstDiscover = false;
+        await discoverGate;
+        return endpoint;
+      }
+      return currentEndpoint;
+    });
+    const sleep = vi.fn(async () => {
+      currentEndpoint = nextEndpoint;
+    });
+    const conn = new CoreHostConnection({
+      discover,
+      spawn: vi.fn(async () => ({ ok: true })),
+      createClient: () => asClient(clients[i++]!),
+      sleep,
+    });
+
+    const pending = conn.getClient();
+    const reconnecting = conn.reconnect({ timeoutMs: 1000, pollIntervalMs: 1 });
+    const duringReconnect = conn.getClient();
+    releaseDiscover();
+
+    await expect(pending).rejects.toThrow(/换代/);
+    await reconnecting;
+    await expect(duringReconnect).resolves.toBe(asClient(c2));
+    expect(c1.close).toHaveBeenCalledOnce();
+    expect(sleep).toHaveBeenCalledWith(1);
+    expect(await conn.getClient()).toBe(asClient(c2));
   });
 
   it("dispose 后 getClient 抛「已释放」", async () => {

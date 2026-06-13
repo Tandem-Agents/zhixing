@@ -30,9 +30,10 @@ import type {
 export interface FileProviderOptions {
   /**
    * 搜索根目录（绝对路径）—— 接收 `resolvedWorkspace.path`。
-   * FileProvider 不自己调 `process.cwd()`。
+   * FileProvider 不自己调 `process.cwd()`。传函数时每次 query 读取当前值,
+   * 用于宿主换代后 workspace root 动态更新的接入面。
    */
-  readonly root: string;
+  readonly root: string | (() => string);
   /**
    * 单次查询最大返回条目数。防止大目录撑爆渲染器。
    * 默认 100。
@@ -78,11 +79,15 @@ export class FileProvider implements SuggestionProvider {
   readonly supportsGhostText = false;
   readonly supportsChaining = false;
 
-  private readonly root: string;
+  private readonly root: () => string;
   private readonly maxResults: number;
 
   constructor(options: FileProviderOptions) {
-    this.root = path.resolve(options.root);
+    const root = options.root;
+    this.root =
+      typeof root === "function"
+        ? () => path.resolve(root())
+        : () => path.resolve(root);
     this.maxResults = options.maxResults ?? DEFAULT_MAX_RESULTS;
   }
 
@@ -147,7 +152,8 @@ export class FileProvider implements SuggestionProvider {
         explicit: false,
       };
 
-    const resolved = this.resolvePath(query);
+    const root = this.root();
+    const resolved = this.resolvePath(query, root);
     if (signal.aborted) return [];
 
     let entries: import("node:fs").Dirent[];
@@ -183,7 +189,7 @@ export class FileProvider implements SuggestionProvider {
         ? `${resolved.relativeDir}/${entry.name}`
         : entry.name;
       const resolvedAbsPath = path.resolve(resolved.resolvedDir, entry.name);
-      const isOutsideWorkspace = !this.isInsideWorkspace(resolvedAbsPath);
+      const isOutsideWorkspace = !this.isInsideWorkspace(resolvedAbsPath, root);
 
       items.push({
         id: `file:${relativePath}`,
@@ -231,7 +237,7 @@ export class FileProvider implements SuggestionProvider {
    * - `~/foo`  → 用户 home 目录
    * - `/etc`   → 绝对路径
    */
-  private resolvePath(query: string): ResolvedPath {
+  private resolvePath(query: string, root: string): ResolvedPath {
     // 把 query 分成 "目录部分" 和 "前缀部分"
     // 例：query = "src/foo" → dirPart = "src", prefixPart = "foo"
     //     query = "src/"    → dirPart = "src/", prefixPart = ""
@@ -257,7 +263,7 @@ export class FileProvider implements SuggestionProvider {
     }
 
     // 把 dirPart 解析成绝对路径
-    const resolvedDir = this.resolveToAbsolute(dirPart || ".");
+    const resolvedDir = this.resolveToAbsolute(dirPart || ".", root);
 
     // relativeDir：用于拼接候选项的相对路径（正斜杠，不含尾 /）
     const relativeDir = dirPart.replace(/\/$/, "");
@@ -272,22 +278,20 @@ export class FileProvider implements SuggestionProvider {
   /**
    * 把路径片段解析成绝对目录路径。
    */
-  private resolveToAbsolute(segment: string): string {
+  private resolveToAbsolute(segment: string, root: string): string {
     const expanded = expandUserHome(segment);
     if (path.isAbsolute(expanded)) {
       return path.resolve(expanded);
     }
-    return path.resolve(this.root, expanded);
+    return path.resolve(root, expanded);
   }
 
   /**
    * 判断绝对路径是否在 workspace root 内部。
    */
-  private isInsideWorkspace(absPath: string): boolean {
+  private isInsideWorkspace(absPath: string, root: string): boolean {
     const normalized = path.resolve(absPath);
-    return (
-      normalized === this.root || normalized.startsWith(this.root + path.sep)
-    );
+    return normalized === root || normalized.startsWith(root + path.sep);
   }
 }
 

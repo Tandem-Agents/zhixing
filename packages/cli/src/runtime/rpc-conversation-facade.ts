@@ -17,16 +17,27 @@ import type {
   RunsPage,
   RunsPageCursor,
   SessionChangedPayload,
+  SessionCompactResult,
+  SessionContextBudgetResult,
   SessionCompletePayload,
   SessionConversationEntry,
   SessionDeltaPayload,
   SessionListResult,
   SessionModeSwitchIntentPayload,
+  SessionNewResult,
   SessionRenameResult,
+  SessionResumeResult,
   SessionSendResult,
   SessionSubscribeResult,
+  SessionTaskListAction,
+  SessionTaskListResult,
+  SessionTaskListUpdateResult,
 } from "@zhixing/server";
-import { SESSION_NOTIFICATIONS } from "@zhixing/server";
+import {
+  RpcClientError,
+  RPC_ERROR_CODES,
+  SESSION_NOTIFICATIONS,
+} from "@zhixing/server";
 import type { CoreHostLink } from "./core-host-connection.js";
 
 export interface SessionHistoryOptions {
@@ -41,12 +52,17 @@ export class RpcConversationFacade {
 
   // ─── 方法域 ───
 
-  /** 发送一个 turn(经宿主唯一串行点入队);不传 conversationId 由宿主建新对话。 */
-  async send(text: string, conversationId?: string): Promise<SessionSendResult> {
+  /** 发送一个 turn(经宿主唯一串行点入队);turnId 由发起端预分配以闭合通知竞态。 */
+  async send(
+    text: string,
+    conversationId?: string,
+    turnId?: string,
+  ): Promise<SessionSendResult> {
     const client = await this.link.getClient();
     return client.request<SessionSendResult>("session.send", {
       text,
       conversationId,
+      turnId,
     });
   }
 
@@ -91,7 +107,82 @@ export class RpcConversationFacade {
     await client.request("session.abort", { conversationId });
   }
 
-  /** observer 登记(订阅即进组播名册);false = 会话不活跃、未登记。 */
+  /** 建一个新对话(宿主写 meta + transcript 壳),返回身份供切指针。 */
+  async newConversation(): Promise<SessionNewResult> {
+    const client = await this.link.getClient();
+    return client.request<SessionNewResult>("session.new");
+  }
+
+  /** 清空对话(宿主先盘后窗;busy 时 BUSY 拒绝)。 */
+  async clear(conversationId: string): Promise<void> {
+    const client = await this.link.getClient();
+    await client.request("session.clear", { conversationId });
+  }
+
+  /** 手动压缩注意力窗口(宿主执行体)。 */
+  async compact(conversationId: string): Promise<SessionCompactResult> {
+    const client = await this.link.getClient();
+    return client.request<SessionCompactResult>("session.compact", {
+      conversationId,
+    });
+  }
+
+  /** /task new·done 的宿主执行体调用。 */
+  async taskListUpdate(
+    conversationId: string,
+    action: SessionTaskListAction,
+  ): Promise<SessionTaskListUpdateResult> {
+    const client = await this.link.getClient();
+    return client.request<SessionTaskListUpdateResult>(
+      "session.taskListUpdate",
+      { conversationId, action },
+    );
+  }
+
+  /** task_list 宿主权威快照。 */
+  async taskList(conversationId: string): Promise<SessionTaskListResult> {
+    const client = await this.link.getClient();
+    return client.request<SessionTaskListResult>("session.taskList", {
+      conversationId,
+    });
+  }
+
+  /** 当前注意力窗口的上下文预算(/usage /context 的数据面)。 */
+  async contextBudget(
+    conversationId: string,
+  ): Promise<SessionContextBudgetResult> {
+    const client = await this.link.getClient();
+    return client.request<SessionContextBudgetResult>(
+      "session.contextBudget",
+      { conversationId },
+    );
+  }
+
+  /** 切换到既有对话——宿主 touch + 返回 meta 与活跃态。 */
+  async resume(conversationId: string): Promise<SessionResumeResult> {
+    const client = await this.link.getClient();
+    return client.request<SessionResumeResult>("session.resume", {
+      conversationId,
+    });
+  }
+
+  /**
+   * 尝试切换到既有对话。NOT_FOUND 是会话生命周期内的正常竞争结果
+   * (多接入面删除 / 外部清理),在 facade 边界转为 null；其它错误保持异常,
+   * 避免把宿主故障误判成"目标不存在"。
+   */
+  async resumeIfExists(
+    conversationId: string,
+  ): Promise<SessionResumeResult | null> {
+    try {
+      return await this.resume(conversationId);
+    } catch (err) {
+      if (isRpcNotFound(err)) return null;
+      throw err;
+    }
+  }
+
+  /** observer 登记(订阅即进组播名册);false = 对话身份不存在、未登记。 */
   async subscribe(conversationId: string): Promise<boolean> {
     const client = await this.link.getClient();
     const result = await client.request<SessionSubscribeResult>(
@@ -140,4 +231,11 @@ export class RpcConversationFacade {
       handler(p as SessionModeSwitchIntentPayload),
     );
   }
+}
+
+function isRpcNotFound(err: unknown): err is RpcClientError {
+  return (
+    err instanceof RpcClientError &&
+    err.code === RPC_ERROR_CODES.NOT_FOUND
+  );
 }

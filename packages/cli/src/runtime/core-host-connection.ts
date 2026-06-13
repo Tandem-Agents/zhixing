@@ -55,6 +55,10 @@ export interface CoreHostConnectionDeps {
   spawn: () => Promise<{ ok: boolean; reason?: string }>;
   /** 建立 RpcClient。 */
   createClient: (url: string) => RpcClient;
+  /** 测试注入：时间源。 */
+  clock?: () => number;
+  /** 测试注入：等待。 */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /** 默认依赖：发现走 discoverServer、拉起走静默 spawnDaemon、client 走 createRpcClient。 */
@@ -81,7 +85,10 @@ export function defaultCoreHostConnectionDeps(): CoreHostConnectionDeps {
 
 export class CoreHostConnection implements CoreHostLink {
   private client: RpcClient | null = null;
+  private endpoint: ServerEndpoint | null = null;
   private connecting: Promise<RpcClient> | null = null;
+  private reconnecting: Promise<void> | null = null;
+  private lifecycleEpoch = 0;
   private disposed = false;
   /**
    * 跨重连持久的 notification 订阅：method → handlers。
@@ -98,31 +105,67 @@ export class CoreHostConnection implements CoreHostLink {
     await this.getClient();
   }
 
+  /**
+   * 主动换代当前宿主连接,保留持久订阅。
+   *
+   * 用于配置热重载 / 协议换代这类"旧宿主已被要求退出,必须连到新 owner"
+   * 的场景。它不是 dispose:订阅表仍是接入面的声明面,新连接建立后自动重挂。
+   */
+  async reconnect(opts: { timeoutMs?: number; pollIntervalMs?: number } = {}): Promise<void> {
+    if (this.disposed) throw new Error("CoreHostConnection 已释放");
+    if (this.reconnecting) {
+      await this.reconnecting;
+      return;
+    }
+    const task = this.performReconnect(opts);
+    this.reconnecting = task;
+    try {
+      await task;
+    } finally {
+      if (this.reconnecting === task) this.reconnecting = null;
+    }
+  }
+
   /** 返回可用的已认证 client；无则发现 / 拉起并连上。并发调用共享同一次建立。 */
   async getClient(): Promise<RpcClient> {
+    if (this.reconnecting) await this.reconnecting;
+    return this.getClientNow();
+  }
+
+  private async getClientNow(): Promise<RpcClient> {
     if (this.disposed) throw new Error("CoreHostConnection 已释放");
     if (this.client && !this.client.closed) return this.client;
     if (this.connecting) return this.connecting;
-    this.connecting = this.establish();
+    const epoch = this.lifecycleEpoch;
+    const task = this.establishCurrent(epoch);
+    this.connecting = task;
     try {
-      const client = await this.connecting;
-      // dispose 可能在 establish 在途期间发生：此刻关掉刚建立的连接、不赋给 this.client，
-      // 由 dispose 的在途收尾兜底（幂等 close 安全），避免连接泄漏 + 守活宿主。
-      if (this.disposed) {
-        await client.close().catch(() => {});
-        throw new Error("CoreHostConnection 在连接建立期间被释放");
-      }
-      this.client = client;
-      // 对账:establish 的挂载循环之后、本赋值之前的 microtask 窗口里新增的
-      // 订阅(onNotification 彼时见不到活连接)在此补挂——attachForwarder 幂等,
-      // 全量循环即对账,「订阅表 = 生效面」在所有时序下成立。
-      for (const method of this.subscriptions.keys()) {
-        this.attachForwarder(client, method);
-      }
-      return client;
+      return await task;
     } finally {
-      this.connecting = null;
+      if (this.connecting === task) this.connecting = null;
     }
+  }
+
+  private async establishCurrent(epoch: number): Promise<RpcClient> {
+    const client = await this.establish();
+    // dispose 可能在 establish 在途期间发生：此刻关掉刚建立的连接、不赋给 this.client，
+    // 由 dispose 的在途收尾兜底（幂等 close 安全），避免连接泄漏 + 守活宿主。
+    if (this.disposed) {
+      await client.close().catch(() => {});
+      throw new Error("CoreHostConnection 在连接建立期间被释放");
+    }
+    if (epoch !== this.lifecycleEpoch) {
+      await client.close().catch(() => {});
+      throw new Error("CoreHostConnection 在连接建立期间被换代");
+    }
+    this.client = client;
+    // 对账:establish 的挂载循环之后、本赋值之前的 microtask 窗口里新增的
+    // 订阅(onNotification 彼时见不到活连接)在此补挂——attachForwarder 幂等,
+    // 全量循环即对账,「订阅表 = 生效面」在所有时序下成立。
+    for (const method of this.subscriptions.keys()) {
+      this.attachForwarder(client, method);
+    }
+    return client;
   }
 
   private async establish(): Promise<RpcClient> {
@@ -135,6 +178,7 @@ export class CoreHostConnection implements CoreHostLink {
     for (const method of this.subscriptions.keys()) {
       this.attachForwarder(client, method);
     }
+    this.endpoint = endpoint;
     return client;
   }
 
@@ -189,6 +233,66 @@ export class CoreHostConnection implements CoreHostLink {
     }
   }
 
+  private async performReconnect(
+    opts: { timeoutMs?: number; pollIntervalMs?: number },
+  ): Promise<void> {
+    this.lifecycleEpoch += 1;
+    const staleEndpoint = await this.closeCurrentClient();
+    await this.waitForEndpointTurnover(staleEndpoint, opts);
+    await this.getClientNow();
+  }
+
+  private async closeCurrentClient(): Promise<ServerEndpoint | null> {
+    const inflight = this.connecting;
+    const current = this.client;
+    let staleEndpoint = this.endpoint;
+    this.client = null;
+    this.endpoint = null;
+    this.forwardedMethods = new Set();
+    if (current) {
+      await current.close().catch(() => {});
+    }
+    if (inflight) {
+      const client = await inflight.catch(() => null);
+      staleEndpoint = staleEndpoint ?? this.endpoint;
+      if (client) {
+        if (this.client === client) {
+          this.client = null;
+          this.forwardedMethods = new Set();
+        }
+        await client.close().catch(() => {});
+      }
+      this.endpoint = null;
+    }
+    return staleEndpoint;
+  }
+
+  private async waitForEndpointTurnover(
+    staleEndpoint: ServerEndpoint | null,
+    opts: { timeoutMs?: number; pollIntervalMs?: number },
+  ): Promise<void> {
+    if (!staleEndpoint) return;
+    const timeoutMs = opts.timeoutMs ?? 35_000;
+    const pollIntervalMs = opts.pollIntervalMs ?? 100;
+    const clock = this.deps.clock ?? Date.now;
+    const sleep =
+      this.deps.sleep ??
+      ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+    const deadline = clock() + timeoutMs;
+
+    while (clock() < deadline) {
+      try {
+        const endpoint = await this.deps.discover();
+        if (!isSameEndpoint(endpoint, staleEndpoint)) return;
+      } catch (err) {
+        if (err instanceof ServerNotRunningError) return;
+        throw err;
+      }
+      await sleep(pollIntervalMs);
+    }
+    throw new CoreHostUnavailableError("旧核心宿主停机超时，未完成连接换代");
+  }
+
   /**
    * 持久订阅一个 notification（跨重连有效）。**被动**：不主动拉起宿主——只有当连接
    * 因其他操作建立 / 重建时才真正收到事件（无宿主则无事件，符合「无 daemon 无事件」）。
@@ -223,10 +327,21 @@ export class CoreHostConnection implements CoreHostLink {
     if (this.client) {
       const client = this.client;
       this.client = null;
+      this.endpoint = null;
       await client.close();
     }
     if (inflight) {
       await inflight.then((c) => c.close()).catch(() => {});
     }
   }
+}
+
+function isSameEndpoint(a: ServerEndpoint, b: ServerEndpoint): boolean {
+  return (
+    a.url === b.url &&
+    a.pid.pid === b.pid.pid &&
+    a.pid.port === b.pid.port &&
+    a.pid.startTime === b.pid.startTime &&
+    a.pid.startedAt === b.pid.startedAt
+  );
 }
