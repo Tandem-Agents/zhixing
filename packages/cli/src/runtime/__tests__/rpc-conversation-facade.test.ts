@@ -117,7 +117,7 @@ describe("RpcConversationFacade · 方法域", () => {
     });
   });
 
-  it("new / clear / compact / contextBudget / resume 的方法名与参数", async () => {
+  it("new / clear / compact / contextBudget / usage / resume 的方法名与参数", async () => {
     const fake = makeFakeHostLink();
     fake.setResponder((method) =>
       method === "session.new"
@@ -136,6 +136,26 @@ describe("RpcConversationFacade · 方法域", () => {
                 turnCount: 3,
                 calibrationFactor: 1,
               }
+            : method === "session.usage"
+              ? {
+                  budget: {
+                    contextWindow: 200_000,
+                    effectiveWindow: 180_000,
+                    currentTokens: 12_000,
+                    usageRatio: 0.067,
+                    status: "normal",
+                  },
+                  turnCount: 3,
+                  calibrationFactor: 1,
+                  subUsages: [
+                    {
+                      index: 1,
+                      description: "调研",
+                      tokens: 100,
+                      status: "succeeded",
+                    },
+                  ],
+                }
             : method === "session.resume"
               ? {
                   conversationId: "conv-1",
@@ -157,6 +177,7 @@ describe("RpcConversationFacade · 方法域", () => {
       tokensAfter: 40,
     });
     expect((await facade.contextBudget("conv-1")).turnCount).toBe(3);
+    expect((await facade.usage("conv-1")).subUsages).toHaveLength(1);
     expect(await facade.resume("conv-1")).toMatchObject({
       conversationId: "conv-1",
       active: true,
@@ -167,6 +188,7 @@ describe("RpcConversationFacade · 方法域", () => {
       { method: "session.clear", params: { conversationId: "conv-1" } },
       { method: "session.compact", params: { conversationId: "conv-1" } },
       { method: "session.contextBudget", params: { conversationId: "conv-1" } },
+      { method: "session.usage", params: { conversationId: "conv-1" } },
       { method: "session.resume", params: { conversationId: "conv-1" } },
     ]);
   });

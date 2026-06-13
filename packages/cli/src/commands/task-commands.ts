@@ -14,15 +14,17 @@
  * 失败转 friendly error 文本，不抛错。
  */
 
-import { randomUUID } from "node:crypto";
 import type {
   CommandDispatcher,
   CommandHandlerContext,
   CommandHandlerResult,
   ICommandRegistry,
-  TaskItem,
 } from "@zhixing/core";
-import type { TaskListService } from "@zhixing/tools-builtin";
+import type { TaskListState } from "@zhixing/core";
+import type {
+  SessionTaskListAction,
+  SessionTaskListUpdateResult,
+} from "@zhixing/server";
 import { renderTaskList } from "../task-tail/index.js";
 import { tone } from "../tui/index.js";
 
@@ -33,7 +35,15 @@ export interface TaskCommandWriter {
 export interface TaskCommandsOptions {
   readonly registry: ICommandRegistry;
   readonly dispatcher: CommandDispatcher;
-  readonly service: TaskListService;
+  /** 只读视图(宿主组播喂入的缓存)——/tasklist 的数据面。 */
+  readonly service: {
+    getCached(conversationId: string): TaskListState | null;
+  };
+  /** /task new·done 的宿主执行体调用(session.taskListUpdate RPC)。 */
+  readonly update: (
+    conversationId: string,
+    action: SessionTaskListAction,
+  ) => Promise<SessionTaskListUpdateResult>;
   /**
    * 取当前活跃 conversation id —— 应与 TaskTail 同源（来自 cli REPL 当前活跃对话运行态）。
    * 缺失时命令返回 ephemeral 友好提示。
@@ -105,14 +115,19 @@ async function handleTask(
   }
 
   const sub = parseSubcommand(rest);
-  switch (sub.kind) {
-    case "new":
-      await addPending(convId, sub.content, opts);
-      return {};
-    case "done":
-      await markDone(convId, sub.token, opts);
-      return {};
+  const action: SessionTaskListAction =
+    sub.kind === "new"
+      ? { kind: "add", content: sub.content }
+      : { kind: "done", token: sub.token };
+  try {
+    const result = await opts.update(convId, action);
+    opts.writer.line(
+      result.ok ? tone.dim(result.message) : tone.dim(result.message),
+    );
+  } catch (err) {
+    opts.writer.line(tone.error(`✗ 操作失败：${errorMessage(err)}`));
   }
+  return {};
 }
 
 type ParsedSubcommand =
@@ -133,74 +148,6 @@ function parseSubcommand(rest: string): ParsedSubcommand {
   }
   // shortcut：无关键字 → 视为 /task new <rest>
   return { kind: "new", content: rest };
-}
-
-async function addPending(
-  convId: string,
-  content: string,
-  opts: TaskCommandsOptions,
-): Promise<void> {
-  if (!content) {
-    opts.writer.line(tone.dim("用法：/task new <内容>"));
-    return;
-  }
-  try {
-    await opts.service.mutate(convId, (curr) => [
-      ...curr,
-      { id: randomUUID(), content, status: "pending" },
-    ]);
-    opts.writer.line(tone.dim(`✓ 添加："${content}"`));
-  } catch (err) {
-    opts.writer.line(tone.error(`✗ 添加失败：${errorMessage(err)}`));
-  }
-}
-
-async function markDone(
-  convId: string,
-  token: string,
-  opts: TaskCommandsOptions,
-): Promise<void> {
-  if (!token) {
-    opts.writer.line(tone.dim("用法：/task done <序号或 id>"));
-    return;
-  }
-  const items = opts.service.getAllTasks(convId);
-  const target = locateTarget(items, token);
-  if (!target) {
-    opts.writer.line(
-      tone.dim(`未找到任务："${token}"。使用 /tasklist 查看当前列表。`),
-    );
-    return;
-  }
-  if (target.status === "completed") {
-    opts.writer.line(tone.dim(`任务已是 completed 状态："${target.content}"`));
-    return;
-  }
-  try {
-    await opts.service.mutate(convId, (curr) =>
-      curr.map((t) =>
-        t.id === target.id ? { ...t, status: "completed" } : t,
-      ),
-    );
-    opts.writer.line(tone.dim(`✓ 完成："${target.content}"`));
-  } catch (err) {
-    opts.writer.line(tone.error(`✗ 完成失败：${errorMessage(err)}`));
-  }
-}
-
-function locateTarget(
-  items: readonly TaskItem[],
-  token: string,
-): TaskItem | null {
-  // 优先 1-based index（与 /tasklist 序号对应）
-  if (/^\d+$/.test(token)) {
-    const idx = Number.parseInt(token, 10);
-    if (idx >= 1 && idx <= items.length) return items[idx - 1] ?? null;
-  }
-  // 退化为 UUID 前缀匹配（用户从 /tasklist 不直接看到 id，但可从工具结果复制）
-  const matches = items.filter((t) => t.id.startsWith(token));
-  if (matches.length === 1) return matches[0]!;
-  return null;
 }
 
 function errorMessage(err: unknown): string {

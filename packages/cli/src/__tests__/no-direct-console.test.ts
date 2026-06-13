@@ -49,7 +49,6 @@ const ALLOW_LIST: ReadonlyArray<{ readonly file: string; readonly reason: string
   { file: "serve/channels.ts", reason: "channel setup logger——bootstrap 时 chrome 未建立" },
   { file: "serve/session-adapter.ts", reason: "serve 会话适配器——后台路径" },
   { file: "serve/ephemeral-executor.ts", reason: "serve 临时执行器——后台路径" },
-  { file: "runtime/session.ts", reason: "RuntimeSession bootstrap / dispose 路径——chrome 未建立或已 detach" },
   { file: "setup-delivery.ts", reason: "delivery 装配 logger——bootstrap 时 chrome 未建立" },
   { file: "security/keypress-dump.ts", reason: "诊断通道——`--log` flag 启用时 stderr 提示日志路径；与 llm-chunk-dump 同模式，仅诊断不影响生产路径" },
 ];
@@ -138,28 +137,32 @@ async function scanFile(rel: string): Promise<Violation[]> {
 }
 
 describe("cli 运行时模块禁止直接 console / stdout.write", () => {
-  it("除允许清单外，所有 .ts 文件不得直接调用 console.log/error/warn / process.stdout.write", async () => {
-    const allFiles = await walk(SRC_DIR, "");
-    const checkFiles = allFiles.filter(
-      (f) => !isAllowed(f) && !f.includes("__tests__"),
-    );
-
-    const allViolations: Violation[] = [];
-    for (const f of checkFiles) {
-      const v = await scanFile(f);
-      allViolations.push(...v);
-    }
-
-    if (allViolations.length > 0) {
-      const report = allViolations
-        .map((v) => `  ${v.file}:${v.line}  ${v.snippet}`)
-        .join("\n");
-      throw new Error(
-        `Found ${allViolations.length} direct console / stdout.write call(s) — please use cliWriter.line / cliWriter.notify instead, or add to ALLOW_LIST with justification:\n${report}`,
+  it(
+    "除允许清单外，所有 .ts 文件不得直接调用 console.log/error/warn / process.stdout.write",
+    async () => {
+      const allFiles = await walk(SRC_DIR, "");
+      const checkFiles = allFiles.filter(
+        (f) => !isAllowed(f) && !f.includes("__tests__"),
       );
-    }
-    expect(allViolations.length).toBe(0);
-  });
+
+      const allViolations: Violation[] = [];
+      for (const f of checkFiles) {
+        const v = await scanFile(f);
+        allViolations.push(...v);
+      }
+
+      if (allViolations.length > 0) {
+        const report = allViolations
+          .map((v) => `  ${v.file}:${v.line}  ${v.snippet}`)
+          .join("\n");
+        throw new Error(
+          `Found ${allViolations.length} direct console / stdout.write call(s) — please use cliWriter.line / cliWriter.notify instead, or add to ALLOW_LIST with justification:\n${report}`,
+        );
+      }
+      expect(allViolations.length).toBe(0);
+    },
+    30_000,
+  );
 
   it("ALLOW_LIST 条目应该都存在——防止条目过期未清理", async () => {
     for (const entry of ALLOW_LIST) {

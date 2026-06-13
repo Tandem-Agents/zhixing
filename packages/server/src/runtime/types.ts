@@ -13,7 +13,11 @@ import type {
   ContextBudget,
   IConfirmationBroker,
   Message,
+  PermissionContextId,
+  PermissionRule,
+  RiskLevel,
   RunResult,
+  SecurityRule,
   TurnContext,
   TurnSource,
   WindowCompact,
@@ -115,8 +119,48 @@ export interface SessionRuntime {
   callText?(prompt: string, role?: "main" | "light"): Promise<string>;
   /** 查询给定消息列表的上下文预算(接入面 /usage /context 的数据面)。 */
   checkBudget?(messages: readonly Message[]): ContextBudget;
+  /**
+   * 查询当前消息列表里的子 agent 用量拆分(/usage 的补充数据面)。
+   *
+   * 解析规则归运行体实现方：server 不理解 Task 工具的文本 trailer 协议，
+   * 只组合运行体给出的结构化结果，避免接入面或 server 反向解析工具私有格式。
+   */
+  subAgentUsages?(messages: readonly Message[]): readonly RuntimeSubAgentUsageEntry[];
+  /** 查询运行体当前安全状态(/security 的宿主数据面)。 */
+  securitySnapshot?(): RuntimeSecuritySnapshot;
   /** Token 估算器校准因子(1.0 = 未校准)——用量展示的辅助信息。 */
   readonly calibrationFactor?: number;
+}
+
+/** /security 的运行体只读快照——事实源仍在 SecurityPipeline,server 只透结构。 */
+export interface RuntimeSecuritySnapshot {
+  readonly contextId: PermissionContextId;
+  readonly workspacePath: string | null;
+  readonly permissionRules: readonly PermissionRule[];
+  readonly builtinRules: readonly SecurityRule[];
+  readonly rateLimits: readonly { key: string; used: number; limit: number }[];
+  readonly confirmations: readonly {
+    key: string;
+    count: number;
+    highestRisk: RiskLevel;
+  }[];
+}
+
+/** /usage 的子 agent/Task 拆分项。解析由运行体实现方提供，server 只透传结构。 */
+export interface RuntimeSubAgentUsageEntry {
+  /** Task 工具调用顺序索引(1-based,按消息中出现顺序)。 */
+  readonly index: number;
+  /** Task 工具入参 description；缺失时为空串。 */
+  readonly description: string;
+  /** 子 agent 总 token(input + output,不含 cache 维度)。 */
+  readonly tokens: number;
+  /** 成功路径的子工具调用数；failed/aborted 可缺省。 */
+  readonly toolUses?: number;
+  /** 子 dispatch 持续时间(ms)。 */
+  readonly durationMs?: number;
+  /** 子 agent id 前缀，供审计追踪。 */
+  readonly subId?: string;
+  readonly status: "succeeded" | "failed" | "aborted";
 }
 
 /**

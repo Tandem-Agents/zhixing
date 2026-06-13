@@ -41,13 +41,11 @@ import {
   fetchMcpServerSource,
   probeServer,
   searchMcpServers,
-  type McpHub,
+  type McpServerStatus,
 } from "@zhixing/mcp";
 import { layout } from "../tui/index.js";
 import type { CliWriter, ScreenController } from "../screen/index.js";
 import { requireChrome } from "../commands/command-visibility.js";
-import type { RuntimeSession } from "./session.js";
-import type { ReloadResult } from "./types.js";
 
 export interface ConfigCommandDeps {
   rl: readline.Interface;
@@ -56,7 +54,11 @@ export interface ConfigCommandDeps {
    * cli/runtime 循环 import）。
    */
   state: { activeTurnPromise: Promise<unknown> | null };
-  session: RuntimeSession;
+  /**
+   * 配置落盘后触发核心宿主按新配置换代(优雅退出 flush 落盘 → 重新拉起)。
+   * 活跃会话窗口经启动装填从盘上事实流重建——与崩溃恢复同一路径。
+   */
+  requestHostReload: () => Promise<void>;
   /** 仅 stop 接口——结构子类型，与 cli/render 的 Renderer 实现兼容 */
   renderer: { stop: () => void };
   /** 写屏 sink——所有反馈（成功 / 失败 / 防御性提示）经此协调，避免推走 chrome */
@@ -72,7 +74,7 @@ async function runEditorCommand(
   deps: ConfigCommandDeps,
   opts: { sections: SectionId[]; title: string; runtime?: ConfigEditorRuntime },
 ): Promise<void> {
-  const { rl, state, session, renderer, writer } = deps;
+  const { rl, state, renderer, writer } = deps;
 
   // 无 chrome 终端跑不了 alt-screen 编辑器——硬打命令名会绕过 visibility 进到这里，
   // 在动手让出 stdin 之前先友好提示并早退。
@@ -115,14 +117,28 @@ async function runEditorCommand(
 
     switch (editorResult.kind) {
       case "completed": {
-        // 前置等待 in-flight turn——session.reload() 不读 REPL state，由 caller 守护
+        // 前置等待 in-flight turn——宿主换代前先到 turn 边界,进行中的回答不被截断
         if (state.activeTurnPromise) {
           await state.activeTurnPromise.catch(() => {
             // turn 自身的错误已在 turn 路径展示，此处吞掉即可
           });
         }
-        const reloadResult = await session.reload();
-        renderReloadFeedback(reloadResult);
+        try {
+          await deps.requestHostReload();
+          writer.line(
+            chalk.green(
+              `${layout.contentPrefix}✓ 配置已保存,核心宿主已按新配置重启。`,
+            ),
+          );
+        } catch (err) {
+          writer.line(
+            chalk.yellow(
+              `${layout.contentPrefix}⚠ 配置已保存但宿主重启失败：${
+                err instanceof Error ? err.message : String(err)
+              }。下次启动生效。`,
+            ),
+          );
+        }
         break;
       }
       case "cancelled":
@@ -150,29 +166,6 @@ async function runEditorCommand(
     deps.screen?.reassertCursorHidden();
   }
 
-  function renderReloadFeedback(result: ReloadResult): void {
-    switch (result.kind) {
-      case "no-change":
-        writer.line(chalk.dim(`${layout.contentPrefix}(无变更)`));
-        break;
-      case "applied": {
-        const domains = result.changedDomains.join(" + ");
-        writer.line(
-          chalk.green(
-            `${layout.contentPrefix}✓ 配置已保存。下条消息使用新配置（${domains}）。`,
-          ),
-        );
-        break;
-      }
-      case "failed":
-        writer.line(
-          chalk.yellow(
-            `${layout.contentPrefix}⚠ 配置已保存但应用失败：${result.error.message}。下次启动生效。`,
-          ),
-        );
-        break;
-    }
-  }
 }
 
 /** `/config`——基础配置（服务商 / 模型 / 消息通道）。 */
@@ -191,15 +184,19 @@ export async function handleConfigCommand(deps: ConfigCommandDeps): Promise<void
  * （把输入标识解析为候选——事实驱动：查 npm 真实源 + 据源文本提取，面板不感知查源 / LLM）。
  */
 export async function handleMcpCommand(
-  deps: ConfigCommandDeps & { hub: McpHub },
+  deps: ConfigCommandDeps & {
+    /** MCP 连接状态(宿主快照——MCP 连接在核心宿主) */
+    mcpStatuses: () => Promise<McpServerStatus[]>;
+    /** 宿主轻推理通道(llm.complete)——接入向导的源解析 / 提取 */
+    llmComplete: (prompt: string, role?: "main" | "light") => Promise<string>;
+  },
 ): Promise<void> {
   const proxy = loadConfig().network?.proxy;
 
-  // 接入相关的 LLM——走 main 档（callText 的 "main" 通道）：搜索引导的判断 / 从 README 抽
-  // 启动方式的质量直接决定接入成败，是质量敏感任务，不用 light。callText 不收 signal：面板
-  // 取消（Esc）放弃等待、后台结果丢弃即可，无需中断底层调用。
-  const inferLlm: McpSetupLlm = (prompt) =>
-    deps.session.runtime.callText(prompt, "main");
+  // 接入相关的 LLM——走 main 档：搜索引导的判断 / 从 README 抽启动方式的质量
+  // 直接决定接入成败，是质量敏感任务，不用 light。推理在宿主(llm.complete),
+  // 面板取消（Esc）放弃等待、后台结果丢弃即可。
+  const inferLlm: McpSetupLlm = (prompt) => deps.llmComplete(prompt, "main");
 
   // 查源 / 搜索都走 SSRF-safe fetch，proxy 与 hub / probe 同源 config.network.proxy
   const fetchSource = (name: string, sig?: AbortSignal) =>
@@ -207,8 +204,14 @@ export async function handleMcpCommand(
   const search = (query: string, sig?: AbortSignal) =>
     searchMcpServers(query, { proxy, ...(sig ? { signal: sig } : {}) });
 
+  // 连接状态取进屏时刻的宿主快照——管理屏打开期间不实时刷新(编辑器 runtime
+  // 期望同步读;状态权威在宿主,重开 /mcp 即最新)。
+  const statusSnapshot = await deps.mcpStatuses().catch(
+    () => [] as McpServerStatus[],
+  );
+
   const runtime: ConfigEditorRuntime = {
-    mcpServerStatuses: () => deps.hub.serverStatuses(),
+    mcpServerStatuses: () => statusSnapshot,
     mcpProbe: (spec, signal) => probeServer(spec, { signal, proxy }),
     // 统一输入解析：确定性输入直接出候选，裸输入经搜索引导出 choices（onStep 回报当前步骤）
     mcpResolve: (input, signal, onStep) =>

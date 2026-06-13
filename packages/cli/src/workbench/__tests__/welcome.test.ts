@@ -35,20 +35,20 @@ function withFixedWidth<T>(fn: () => T): T {
 }
 
 describe("renderHomeWelcome", () => {
-  it("workspace + model + 已恢复对话完整渲染", () => {
+  it("workspace + model + 当前对话完整渲染", () => {
     const lines = withFixedWidth(() =>
       renderHomeWelcome({
         providerId: "siliconflow",
         model: "DeepSeek-V3",
         workspaceRoot: "/Users/me/project",
-        resumedConversationName: "chat-20260504-41b4",
+        conversationName: "chat-20260504-41b4",
       }),
     );
     expect(lines.map(stripAnsi).join("\n")).toMatchInlineSnapshot(`
       "╭──── ╲ ───────────────────────────────────────────────────────────────────────╮
       │    ▄▄▄                                                                       │
       │   ▌●●▐    知行                                                               │
-      │    ▀▀     已恢复对话 chat-20260504-41b4                                      │
+      │    ▀▀     当前对话 chat-20260504-41b4                                        │
       │                                                                              │
       │   工作目录    /Users/me/project                                              │
       │   模型        siliconflow · DeepSeek-V3                                      │
@@ -83,36 +83,36 @@ describe("renderHomeWelcome", () => {
     expect(stripped[2]!).toContain("●●");
     expect(stripped[2]!).toContain("知行"); // 产品身份在心脏 ●● 位置
     expect(stripped[3]!).toContain("▀▀");
-    expect(stripped[3]!).not.toContain("已恢复对话"); // 新会话 row3 仅 glyph
+    expect(stripped[3]!).not.toContain("当前对话"); // 无会话名时 row3 仅 glyph
   });
 
-  it("有 resumedConversationName 时 row3 inline '已恢复对话 X'", () => {
+  it("有 conversationName 时 row3 inline '当前对话 X'", () => {
     const lines = withFixedWidth(() =>
       renderHomeWelcome({
         providerId: "x",
         model: "y",
-        resumedConversationName: "chat-XXXX",
+        conversationName: "chat-XXXX",
       }),
     );
     const stripped = lines.map(stripAnsi);
     expect(stripped[1]!).not.toContain("知行"); // row1 不变（仅天线）
     expect(stripped[2]!).toContain("知行"); // row2 不变（产品身份）
     expect(stripped[3]!).toContain("▀▀");
-    expect(stripped[3]!).toContain("已恢复对话 chat-XXXX"); // row3 inline 状态
+    expect(stripped[3]!).toContain("当前对话 chat-XXXX"); // row3 inline 状态
   });
 
-  it("已恢复对话用 dim——次要状态告知不抢戏", () => {
+  it("当前对话用 dim——次要状态告知不抢戏", () => {
     const lines = withFixedWidth(() =>
       renderHomeWelcome({
         providerId: "x",
         model: "y",
-        resumedConversationName: "chat-XXXX",
+        conversationName: "chat-XXXX",
       }),
     );
     // row3 包含 dim ANSI 序列（chalk.dim = ESC[2m）
     const row3 = lines[3]!;
     expect(row3).toContain("\x1b[2m");
-    expect(row3).toContain("已恢复对话 chat-XXXX");
+    expect(row3).toContain("当前对话 chat-XXXX");
   });
 
   it("model 行用 dim——保持终端清爽感", () => {

@@ -10,6 +10,7 @@ import { AgentError } from "@zhixing/core";
 import type {
   AgentResult,
   AgentYield,
+  ContextBudget,
   Message,
   RunResult,
   TaskListState,
@@ -17,7 +18,13 @@ import type {
 import { startServer, type ZhixingServerInstance } from "../server.js";
 import { createServerContext } from "../context.js";
 import { ConversationManager } from "../runtime/conversation-manager.js";
-import type { ConversationBootstrap, SessionRuntime, RuntimeFactory } from "../runtime/types.js";
+import type {
+  ConversationBootstrap,
+  RuntimeSubAgentUsageEntry,
+  RuntimeSecuritySnapshot,
+  SessionRuntime,
+  RuntimeFactory,
+} from "../runtime/types.js";
 import { DEFAULT_SERVER_CONFIG } from "../types.js";
 import {
   encodeRequest,
@@ -50,6 +57,12 @@ interface MockOptions {
   yieldDelayMs?: number;
   /** RunResult 顶层携带的模式切换意图(complete 通知附带契约的驱动源) */
   pendingModeSwitch?: RunResult["pendingModeSwitch"];
+  /** /usage /context 的预算能力 */
+  contextBudget?: ContextBudget;
+  /** /usage 的子 agent 拆分能力 */
+  subAgentUsages?: readonly RuntimeSubAgentUsageEntry[];
+  /** /security 的运行体快照能力 */
+  securitySnapshot?: RuntimeSecuritySnapshot;
 }
 
 function createMockRuntime(
@@ -140,6 +153,16 @@ function createMockRuntime(
       aborted = true;
       return true;
     },
+    ...(opts.securitySnapshot
+      ? { securitySnapshot: () => opts.securitySnapshot! }
+      : {}),
+    ...(opts.contextBudget
+      ? {
+          checkBudget: () => opts.contextBudget!,
+          calibrationFactor: 0.95,
+          subAgentUsages: () => opts.subAgentUsages ?? [],
+        }
+      : {}),
     async dispose() {},
   };
 }
@@ -564,7 +587,120 @@ describe("session.* RPC (S2.D)", () => {
     client.close();
   });
 
-  it("session.compact / contextBudget 对不存在会话先 notFound,不激活 runtime", async () => {
+  it("session.security 返回当前运行体安全快照", async () => {
+    await startWithFactory(
+      createMockFactory({
+        deltaCount: 1,
+        securitySnapshot: {
+          contextId: { kind: "main" },
+          workspacePath: null,
+          permissionRules: [],
+          builtinRules: [],
+          rateLimits: [{ key: "bash", used: 1, limit: 5 }],
+          confirmations: [
+            { key: "bash::npm", count: 2, highestRisk: "medium" },
+          ],
+        },
+      }),
+    );
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const sendResp = await client.request("session.send", { text: "你好" });
+    const sessionId = (sendResp as { result: { sessionId: string } }).result
+      .sessionId;
+    await client.waitNotification("session.complete");
+
+    const resp = await client.request("session.security", {
+      conversationId: sessionId,
+    });
+    expect(isSuccessResponse(resp)).toBe(true);
+    if (isSuccessResponse(resp)) {
+      expect(resp.result).toMatchObject({
+        contextId: { kind: "main" },
+        rateLimits: [{ key: "bash", used: 1, limit: 5 }],
+      });
+    }
+
+    client.close();
+  });
+
+  it("session.usage 返回预算与子 agent 拆分", async () => {
+    await startWithFactory(
+      createMockFactory({
+        deltaCount: 1,
+        contextBudget: {
+          contextWindow: 200_000,
+          effectiveWindow: 180_000,
+          currentTokens: 12_000,
+          usageRatio: 0.067,
+          status: "normal",
+        },
+        subAgentUsages: [
+          {
+            index: 1,
+            description: "调研模块结构",
+            tokens: 12_000,
+            toolUses: 2,
+            durationMs: 3000,
+            subId: "abc123",
+            status: "succeeded",
+          },
+        ],
+      }),
+    );
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const sendResp = await client.request("session.send", { text: "你好" });
+    const sessionId = (sendResp as { result: { sessionId: string } }).result
+      .sessionId;
+    await client.waitNotification("session.complete");
+
+    const resp = await client.request("session.usage", {
+      conversationId: sessionId,
+    });
+    expect(isSuccessResponse(resp)).toBe(true);
+    if (isSuccessResponse(resp)) {
+      expect(resp.result).toMatchObject({
+        turnCount: 1,
+        calibrationFactor: 0.95,
+        subUsages: [
+          {
+            index: 1,
+            description: "调研模块结构",
+            tokens: 12_000,
+            status: "succeeded",
+          },
+        ],
+      });
+    }
+
+    client.close();
+  });
+
+  it("session.security:运行体不支持时 INTERNAL_ERROR 报能力缺失", async () => {
+    await startWithFactory(createMockFactory({ deltaCount: 1 }));
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const sendResp = await client.request("session.send", { text: "你好" });
+    const sessionId = (sendResp as { result: { sessionId: string } }).result
+      .sessionId;
+    await client.waitNotification("session.complete");
+
+    const resp = await client.request("session.security", {
+      conversationId: sessionId,
+    });
+    expect(isSuccessResponse(resp)).toBe(false);
+    if (isErrorResponse(resp)) {
+      expect(resp.error.code).toBe(RPC_ERROR_CODES.INTERNAL_ERROR);
+    }
+
+    client.close();
+  });
+
+  it("session.compact / contextBudget / usage / security 对不存在会话先 notFound,不激活 runtime", async () => {
     let createCalls = 0;
     await startWithFactory({
       async create(sessionId) {
@@ -589,6 +725,22 @@ describe("session.* RPC (S2.D)", () => {
     expect(isErrorResponse(budget)).toBe(true);
     if (isErrorResponse(budget)) {
       expect(budget.error.code).toBe(RPC_ERROR_CODES.NOT_FOUND);
+    }
+
+    const usage = await client.request("session.usage", {
+      conversationId: "ghost",
+    });
+    expect(isErrorResponse(usage)).toBe(true);
+    if (isErrorResponse(usage)) {
+      expect(usage.error.code).toBe(RPC_ERROR_CODES.NOT_FOUND);
+    }
+
+    const security = await client.request("session.security", {
+      conversationId: "ghost",
+    });
+    expect(isErrorResponse(security)).toBe(true);
+    if (isErrorResponse(security)) {
+      expect(security.error.code).toBe(RPC_ERROR_CODES.NOT_FOUND);
     }
 
     expect(createCalls).toBe(0);

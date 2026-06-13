@@ -172,6 +172,14 @@ export function createServerRuntimeAdapter(
       return agentRuntime.checkBudget(messages);
     },
 
+    subAgentUsages(messages) {
+      return agentRuntime.subAgentUsages(messages);
+    },
+
+    securitySnapshot() {
+      return agentRuntime.securitySnapshot();
+    },
+
     get calibrationFactor() {
       return agentRuntime.calibrationFactor;
     },

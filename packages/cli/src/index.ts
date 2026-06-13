@@ -73,10 +73,8 @@ program
   .name("zhixing")
   .description("知行 — 智能体引擎")
   .version("0.1.0")
-  .option("-w, --workspace <path>", "指定工作区目录（安全信任边界）")
   .option("--log", "启用诊断 dump 到 ~/.zhixing/logs/（LLM raw chunk + keypress 路径） —— 排查渲染 / 上下文 / 流式 / 按键输入问题用")
   .action(async (options: {
-    workspace?: string;
     log?: boolean;
   }) => {
     try {
@@ -100,9 +98,7 @@ program
       });
       handleStartupResult(startupResult);
 
-      await startRepl({
-        workspace: options.workspace,
-      });
+      await startRepl();
     } catch (err) {
       renderError(err, stdoutWriter);
       process.exit(1);
@@ -169,19 +165,16 @@ const serveCmd = program
   .description("启动常驻服务（HTTP + WebSocket + 调度器）")
   .option("--port <port>", "监听端口", (v) => parseInt(v, 10))
   .option("--host <host>", "监听地址（默认 127.0.0.1，仅本地访问）")
-  .option("-w, --workspace <path>", "工作区目录")
   .option("--daemon", "后台模式：脱离终端独立运行")
   .action(async (options: {
     port?: number;
     host?: string;
-    workspace?: string;
     daemon?: boolean;
   }) => {
     try {
       await runServeCommand({
         port: options.port,
         host: options.host,
-        workspace: options.workspace,
         daemon: options.daemon,
       });
       process.exit(0);

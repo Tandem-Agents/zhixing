@@ -26,7 +26,7 @@ import {
   type IEventBus,
 } from "@zhixing/core";
 import type { DecorateRunBusFn } from "@zhixing/orchestrator/runtime";
-import type { SubAgentUsageEntry } from "./parse-task-usage.js";
+import type { RuntimeSubAgentUsageEntry } from "@zhixing/server";
 import type { OutputRenderer } from "./output/index.js";
 import type { CliWriter, ScreenController } from "./screen/index.js";
 import {
@@ -260,7 +260,7 @@ export function renderUsageReport(
   budget: ContextBudget,
   turnCount: number,
   calibrationFactor: number | undefined,
-  subUsages: readonly SubAgentUsageEntry[] | undefined,
+  subUsages: readonly RuntimeSubAgentUsageEntry[] | undefined,
   writer: CliWriter,
 ): void {
   const pct = Math.round(budget.usageRatio * 100);
@@ -292,7 +292,7 @@ export function renderUsageReport(
 }
 
 /**
- * 把 SubAgentUsageEntry 数组渲染成 /usage 的"子 agent 拆分"段。
+ * 把 RuntimeSubAgentUsageEntry 数组渲染成 /usage 的"子 agent 拆分"段。
  *
  * 排版决策:
  *   - description 截断到 28 字符避免单行过长(中文 / emoji 计算用字符数,v1 简化)
@@ -300,7 +300,7 @@ export function renderUsageReport(
  *   - durationMs → 秒(2 位小数),用户感知尺度优于毫秒原值
  */
 function renderSubAgentUsageSection(
-  entries: readonly SubAgentUsageEntry[],
+  entries: readonly RuntimeSubAgentUsageEntry[],
   writer: CliWriter,
 ): void {
   writer.line(chalk.dim("  ─────────────────────────────"));

@@ -2,10 +2,10 @@
  * config 域命令注册 —— 配置 / 权限 / 安全类命令的模块化原子注册（范式同
  * registerInfoCommands）。覆盖 /config /mcp /trust /security。
  *
- * /config·/mcp 是 alt-screen 编辑器：挂 chromeOnlyVisibility（无 chrome 终端补全与 /help
- * 不列出），执行期 requireChrome 兜底已在 handleConfigCommand 内。/trust 全部交互在 typeahead
- * args dropdown 完成、handler 为 noop；其 ArgChoiceProvider 在本模块构造，securityPipeline
- * 以 getter 注入（随 reload / 模式切换 swap，按调用时读，不在构造期 capture 快照）。
+ * /config·/mcp 是 alt-screen 编辑器(本地 TTY 交互、写盘本地)：保存后经
+ * requestHostReload 触发宿主按新配置换代生效。/trust 执行体在核心宿主
+ * (trust.list / revoke RPC,语境随当前对话派生);/security 同样经宿主
+ * session.security 读取当前对话的安全状态。
  */
 
 import type * as readline from "node:readline/promises";
@@ -15,15 +15,15 @@ import {
   type CommandHandlerContext,
   type ArgSchema,
 } from "@zhixing/core";
-import type { McpHub } from "@zhixing/mcp";
+import type { McpServerStatus } from "@zhixing/mcp";
 import type { CliWriter, ScreenController } from "../screen/index.js";
-import type { RuntimeSession } from "../runtime/session.js";
 import {
   handleConfigCommand,
   handleMcpCommand,
 } from "../runtime/config-command.js";
 import { handleSecurityCommand, handleTrustCommand } from "../security/index.js";
 import { createTrustRuleArgProvider } from "../security/trust-rule-arg-provider.js";
+import type { RpcManagementFacade } from "../runtime/rpc-management-facade.js";
 import { chromeOnlyVisibility } from "./command-visibility.js";
 
 export interface ConfigCommandsDeps {
@@ -35,11 +35,14 @@ export interface ConfigCommandsDeps {
   readonly renderer: { stop: () => void };
   /** chrome 屏幕控制器（无 chrome 为 null）—— config/mcp 编辑器退屏后重申光标隐藏。 */
   readonly screen: ScreenController | null;
-  /** session —— config/mcp 编辑器保存后走 session.reload()，且读 session.runtime。 */
-  readonly session: RuntimeSession;
   /** 当前 in-flight turn promise —— config/mcp reload 前先 await 到 turn 边界。 */
   readonly getActiveTurnPromise: () => Promise<unknown> | null;
-  readonly mcpHub: McpHub;
+  /** 管理面门面(/trust 执行体、/mcp 的宿主侧数据面)。 */
+  readonly management: RpcManagementFacade;
+  /** 当前对话 id —— /trust 的语境派生入参(场景对话见场景上下文规则)。 */
+  readonly getConversationId: () => string;
+  /** 配置落盘后触发核心宿主按新配置换代。 */
+  readonly requestHostReload: () => Promise<void>;
 }
 
 export function registerConfigCommands(deps: ConfigCommandsDeps): void {
@@ -54,7 +57,7 @@ export function registerConfigCommands(deps: ConfigCommandsDeps): void {
         return deps.getActiveTurnPromise();
       },
     },
-    session: deps.session,
+    requestHostReload: deps.requestHostReload,
     renderer: deps.renderer,
     writer,
     screen: deps.screen,
@@ -86,21 +89,26 @@ export function registerConfigCommands(deps: ConfigCommandsDeps): void {
     visibility: chromeOnlyVisibility,
   });
   dispatcher.registerHandler("mcp:repl", async () => {
-    await handleMcpCommand({ ...editorDeps(), hub: deps.mcpHub });
+    await handleMcpCommand({
+      ...editorDeps(),
+      mcpStatuses: async () =>
+        (await deps.management.serverInfo()).mcpServers as McpServerStatus[],
+      llmComplete: (prompt, role) => deps.management.llmComplete(prompt, role),
+    });
     return {};
   });
 
   // ── /trust ──
   // 命令行为（列表 / 撤销）走 handleTrustCommand、target 无关、所有模式可达。typeahead 下
   // 额外挂 args dropdown 面板增强（↑↓ 浏览 + Ctrl+D 双击撤销 + ESC 退出）；面板的物理撤销由
-  // 交互层 onCandidateDelete 的 trust 分支调 store.revoke，与命令行撤销同一 core 能力。
+  // 交互层 onCandidateDelete 的 trust 分支经 RPC 撤销，与命令行撤销同一宿主执行体。
   const trustRuleArgSchema: ArgSchema = {
     kind: "async-enum",
     name: "rule",
     description: "已沉淀的信任规则",
     required: true,
-    provider: createTrustRuleArgProvider(
-      () => deps.session.runtime.securityPipeline,
+    provider: createTrustRuleArgProvider(() =>
+      deps.management.trustList(deps.getConversationId()),
     ),
   };
   registry.register({
@@ -112,14 +120,19 @@ export function registerConfigCommands(deps: ConfigCommandsDeps): void {
     tag: "builtin",
     args: [trustRuleArgSchema],
   });
-  dispatcher.registerHandler("trust:repl", (ctx: CommandHandlerContext) => {
-    const args = typeof ctx.args._rest === "string" ? ctx.args._rest : "";
-    handleTrustCommand(args, {
-      pipeline: deps.session.runtime.securityPipeline,
-      writer,
-    });
-    return {};
-  });
+  dispatcher.registerHandler(
+    "trust:repl",
+    async (ctx: CommandHandlerContext) => {
+      const args = typeof ctx.args._rest === "string" ? ctx.args._rest : "";
+      await handleTrustCommand(args, {
+        listRules: () => deps.management.trustList(deps.getConversationId()),
+        revokeRule: (id) =>
+          deps.management.trustRevoke(id, deps.getConversationId()),
+        writer,
+      });
+      return {};
+    },
+  );
 
   // ── /security ──
   registry.register({
@@ -130,10 +143,10 @@ export function registerConfigCommands(deps: ConfigCommandsDeps): void {
     execution: "local",
     tag: "builtin",
   });
-  dispatcher.registerHandler("security:repl", (ctx: CommandHandlerContext) => {
+  dispatcher.registerHandler("security:repl", async (ctx: CommandHandlerContext) => {
     const args = typeof ctx.args._rest === "string" ? ctx.args._rest : "";
-    handleSecurityCommand(args, {
-      pipeline: deps.session.runtime.securityPipeline,
+    await handleSecurityCommand(args, {
+      status: () => deps.management.securityStatus(deps.getConversationId()),
       writer,
     });
     return {};

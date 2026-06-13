@@ -9,21 +9,19 @@
  */
 
 import {
-  listUserTrustRules,
   type ArgChoice,
   type ArgChoiceProvider,
   type ArgQueryContext,
-  type SecurityPipeline,
+  type PermissionRule,
 } from "@zhixing/core";
 import { formatRuleDescription } from "./trust-rule-format.js";
 
 /**
- * `getPipeline` 是 getter 而非快照 —— securityPipeline 随 session reload / 模式切换被
- * swap，provider 在 startup 构造一次、却要在每次 list() 调用时反映当前 pipeline，故按调用
- * 时读取（值捕获会停留在构造期的旧实例，工作区路径变化后列出过时规则）。
+ * 规则数据经注入的 listRules 取(宿主 trust.list RPC——"哪些规则归用户管"
+ * 的判定与语境派生在宿主单点),provider 每次 list() 实时拉最新。
  */
 export function createTrustRuleArgProvider(
-  getPipeline: () => SecurityPipeline,
+  listRules: () => Promise<PermissionRule[]>,
 ): ArgChoiceProvider {
   return {
     // 管理面板：列出已沉淀规则做就地撤销，无"选中给业务"语义；Enter 在面板内
@@ -33,8 +31,7 @@ export function createTrustRuleArgProvider(
       ctx: ArgQueryContext,
       signal: AbortSignal,
     ): Promise<readonly ArgChoice[]> {
-      const pipeline = getPipeline();
-      const rules = listUserTrustRules(pipeline);
+      const rules = await listRules().catch(() => [] as PermissionRule[]);
       if (signal.aborted) return [];
 
       const query = ctx.query.toLowerCase();

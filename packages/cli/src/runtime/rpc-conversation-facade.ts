@@ -32,6 +32,7 @@ import type {
   SessionTaskListAction,
   SessionTaskListResult,
   SessionTaskListUpdateResult,
+  SessionUsageResult,
 } from "@zhixing/server";
 import {
   RpcClientError,
@@ -156,6 +157,14 @@ export class RpcConversationFacade {
       "session.contextBudget",
       { conversationId },
     );
+  }
+
+  /** /usage 的完整宿主视图：上下文预算 + 子 agent/Task 用量拆分。 */
+  async usage(conversationId: string): Promise<SessionUsageResult> {
+    const client = await this.link.getClient();
+    return client.request<SessionUsageResult>("session.usage", {
+      conversationId,
+    });
   }
 
   /** 切换到既有对话——宿主 touch + 返回 meta 与活跃态。 */

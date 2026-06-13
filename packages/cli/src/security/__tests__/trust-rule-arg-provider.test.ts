@@ -13,8 +13,6 @@
 
 import { describe, expect, it } from "vitest";
 import {
-  PermissionStore,
-  SecurityPipeline,
   type ArgQueryContext,
   type CommandDef,
   type PermissionRule,
@@ -44,19 +42,9 @@ function makeRule(overrides: Partial<PermissionRule> & {
   };
 }
 
-function makePipelineWithRules(rules: PermissionRule[]): SecurityPipeline {
-  const store = new PermissionStore({ rootDir: null });
-  for (const r of rules) {
-    if (r.scope === "builtin") {
-      store.registerBuiltinRules("test-ns", [r]);
-    } else {
-      store.create({ kind: "main" }, r);
-    }
-  }
-  return new SecurityPipeline({
-    trustContext: { kind: "global" },
-    permissionStore: store,
-  });
+/** 宿主 trust.list 的替身——builtin 过滤与语境派生在宿主,此处直接喂用户可管规则 */
+function listRulesOf(rules: PermissionRule[]): () => Promise<PermissionRule[]> {
+  return async () => rules;
 }
 
 function makeCtx(query = ""): ArgQueryContext {
@@ -81,28 +69,20 @@ const NEVER_ABORT = new AbortController().signal;
 
 describe("trustRuleArgProvider", () => {
   describe("候选过滤", () => {
-    it("过滤 builtin 规则（归 /security 不进 /trust）", async () => {
-      const builtin = makeRule({
-        id: "builtin-x",
-        scope: "builtin",
-        tool: "bash",
-        argument: "system-cmd",
-      });
+    it("候选原样渲染注入列表(builtin 过滤与语境派生由宿主 trust.list 保证)", async () => {
       const user = makeRule({ id: "user-y", tool: "bash", argument: "ls" });
-      const pipeline = makePipelineWithRules([builtin, user]);
-      const provider = createTrustRuleArgProvider(() => pipeline);
+      const provider = createTrustRuleArgProvider(listRulesOf([user]));
 
       const choices = await provider.list(makeCtx(), NEVER_ABORT);
       const values = choices.map((c) => (typeof c === "string" ? c : c.value));
-      expect(values).toContain("user-y");
-      expect(values).not.toContain("builtin-x");
+      expect(values).toEqual(["user-y"]);
     });
 
     it("query 大小写不敏感匹配 tool / argument / id", async () => {
       const a = makeRule({ id: "abc-curl-rule", tool: "bash", argument: "curl *" });
       const b = makeRule({ id: "xyz-write-rule", tool: "write", argument: "src/**" });
-      const pipeline = makePipelineWithRules([a, b]);
-      const provider = createTrustRuleArgProvider(() => pipeline);
+      const listRules = listRulesOf([a, b]);
+      const provider = createTrustRuleArgProvider(listRules);
 
       const byTool = await provider.list(makeCtx("WRITE"), NEVER_ABORT);
       expect(byTool.map((c) => (typeof c === "string" ? c : c.value))).toEqual(["xyz-write-rule"]);
@@ -115,8 +95,8 @@ describe("trustRuleArgProvider", () => {
     });
 
     it("signal abort 提前返回空数组", async () => {
-      const pipeline = makePipelineWithRules([makeRule({ id: "r1" })]);
-      const provider = createTrustRuleArgProvider(() => pipeline);
+      const listRules = listRulesOf([makeRule({ id: "r1" })]);
+      const provider = createTrustRuleArgProvider(listRules);
       const ac = new AbortController();
       ac.abort();
       const choices = await provider.list(makeCtx(), ac.signal);
@@ -137,8 +117,8 @@ describe("trustRuleArgProvider", () => {
           { origin: "steward", timestamp: 3 },
         ],
       });
-      const pipeline = makePipelineWithRules([rule]);
-      const provider = createTrustRuleArgProvider(() => pipeline);
+      const listRules = listRulesOf([rule]);
+      const provider = createTrustRuleArgProvider(listRules);
 
       const [choice] = await provider.list(makeCtx(), NEVER_ABORT);
       if (typeof choice !== "object") throw new Error("expected object choice");
@@ -149,8 +129,8 @@ describe("trustRuleArgProvider", () => {
 
     it("label = tool + argument", async () => {
       const rule = makeRule({ tool: "bash", argument: "npm install *" });
-      const pipeline = makePipelineWithRules([rule]);
-      const provider = createTrustRuleArgProvider(() => pipeline);
+      const listRules = listRulesOf([rule]);
+      const provider = createTrustRuleArgProvider(listRules);
       const [choice] = await provider.list(makeCtx(), NEVER_ABORT);
       if (typeof choice !== "object") throw new Error("expected object choice");
       expect(choice.label).toBe("bash npm install *");
@@ -158,8 +138,8 @@ describe("trustRuleArgProvider", () => {
 
     it("未匹配规则显示「未匹配」而非 0 次", async () => {
       const rule = makeRule({ matchCount: 0 });
-      const pipeline = makePipelineWithRules([rule]);
-      const provider = createTrustRuleArgProvider(() => pipeline);
+      const listRules = listRulesOf([rule]);
+      const provider = createTrustRuleArgProvider(listRules);
       const [choice] = await provider.list(makeCtx(), NEVER_ABORT);
       if (typeof choice !== "object") throw new Error("expected object choice");
       expect(choice.description).toContain("未匹配");
@@ -167,8 +147,8 @@ describe("trustRuleArgProvider", () => {
 
     it("contributors 为空时显示 [—]", async () => {
       const rule = makeRule({ contributors: undefined });
-      const pipeline = makePipelineWithRules([rule]);
-      const provider = createTrustRuleArgProvider(() => pipeline);
+      const listRules = listRulesOf([rule]);
+      const provider = createTrustRuleArgProvider(listRules);
       const [choice] = await provider.list(makeCtx(), NEVER_ABORT);
       if (typeof choice !== "object") throw new Error("expected object choice");
       expect(choice.description).toContain("[—]");
@@ -177,20 +157,20 @@ describe("trustRuleArgProvider", () => {
 
   describe("scope 标签按 PermissionContextId.kind 分支", () => {
     it("main → 「主模式」", async () => {
-      const pipeline = makePipelineWithRules([
+      const listRules = listRulesOf([
         makeRule({ contextId: { kind: "main" } }),
       ]);
-      const provider = createTrustRuleArgProvider(() => pipeline);
+      const provider = createTrustRuleArgProvider(listRules);
       const [choice] = await provider.list(makeCtx(), NEVER_ABORT);
       if (typeof choice !== "object") throw new Error("expected object");
       expect(choice.description).toContain("主模式");
     });
 
     it("global scope → 「全局」", async () => {
-      const pipeline = makePipelineWithRules([
+      const listRules = listRulesOf([
         makeRule({ scope: "global", contextId: undefined }),
       ]);
-      const provider = createTrustRuleArgProvider(() => pipeline);
+      const provider = createTrustRuleArgProvider(listRules);
       const [choice] = await provider.list(makeCtx(), NEVER_ABORT);
       if (typeof choice !== "object") throw new Error("expected object");
       expect(choice.description).toContain("全局");
@@ -199,14 +179,14 @@ describe("trustRuleArgProvider", () => {
 
   describe("inlineActions + emptyHint 静态声明", () => {
     it("声明 delete: true（启用 Ctrl+D 双击撤销协议）", () => {
-      const pipeline = makePipelineWithRules([]);
-      const provider = createTrustRuleArgProvider(() => pipeline);
+      const listRules = listRulesOf([]);
+      const provider = createTrustRuleArgProvider(listRules);
       expect(provider.inlineActions).toEqual({ delete: true });
     });
 
     it("emptyHint 包含创建规则引导文案", () => {
-      const pipeline = makePipelineWithRules([]);
-      const provider = createTrustRuleArgProvider(() => pipeline);
+      const listRules = listRulesOf([]);
+      const provider = createTrustRuleArgProvider(listRules);
       expect(provider.emptyHint).toContain("[a]/[g]");
     });
   });

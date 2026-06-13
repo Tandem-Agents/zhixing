@@ -14,8 +14,8 @@
  *                      文字不放此行——紧贴顶边的文字视觉局促，glyph 才是天线延伸
  *   row2（产品身份）—— `▌●●▐    知行`：inline 品牌签名，brand bold；"知行"
  *                      落在心脏 ●● 位置，是稳定的产品身份签名
- *   row3（会话状态）—— ` ▀▀     已恢复对话 X`：inline 当前接续的会话身份，dim；
- *                      新会话或无 resumedConversationName 时仅 glyph 优雅退化
+ *   row3（会话状态）—— ` ▀▀     当前对话 X`：inline 当前会话身份，dim；
+ *                      无 conversationName 时仅 glyph 优雅退化
  *
  * 与初始配置 welcome 的区别：
  *   - 初始配置三行都 inline，是因为有"初始配置 / 标题 / 欢迎语"附加层级
@@ -48,11 +48,11 @@ export interface WorkbenchHomeInfo {
   /** 工作目录绝对路径；省略表示 fallback 到 cwd——该行不渲染 */
   workspaceRoot?: string;
   /**
-   * 当前 REPL 接续的对话名称——锚 row2 inline "已恢复对话 X"。
-   * 省略 = 新会话或会话恢复失败，row2 退化为仅锚 glyph。
+   * 当前 REPL 所在对话名称——锚 row3 inline "当前对话 X"。
+   * 省略 = 调用方没有会话身份可展示，row3 退化为仅锚 glyph。
    * 故意不带轮数（避免视觉繁琐；轮数信息用户可走 /status 查询）。
    */
-  resumedConversationName?: string;
+  conversationName?: string;
 }
 
 // 品牌锚字符常量已抽到 tui/brand-anchor.ts 作为视觉身份单一事实源（welcome /
@@ -64,10 +64,10 @@ function buildHomeBrandAnchor(info: WorkbenchHomeInfo): BrandAnchor {
     tone.brand.bold(BRAND_ANCHOR_GLYPH_ROW2) +
     BRAND_ANCHOR_INLINE_GAP +
     tone.brand.bold("知行");
-  const row3 = info.resumedConversationName
+  const row3 = info.conversationName
     ? tone.brand.bold(BRAND_ANCHOR_GLYPH_ROW3) +
       BRAND_ANCHOR_INLINE_GAP +
-      tone.dim(`已恢复对话 ${info.resumedConversationName}`)
+      tone.dim(`当前对话 ${info.conversationName}`)
     : tone.brand.bold(BRAND_ANCHOR_GLYPH_ROW3);
 
   return {

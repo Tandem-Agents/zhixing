@@ -18,13 +18,26 @@
  */
 
 import type { TaskListState } from "@zhixing/core";
-import type { TaskListService } from "@zhixing/tools-builtin";
 import { STATUS_TAIL_IDS, type ScreenController } from "../screen/index.js";
 import { renderTaskTail } from "./task-tail-render.js";
 
+/**
+ * 任务状态源的窄面——进程内 TaskListService 与 RPC 视图缓存
+ * (TaskListViewCache)同形,装配决定数据从哪来。
+ */
+export interface TaskTailSource {
+  subscribe(
+    listener: (event: {
+      readonly conversationId: string;
+      readonly state: TaskListState | null;
+    }) => void,
+  ): () => void;
+  getCached(conversationId: string): TaskListState | null;
+}
+
 export interface TaskTailOptions {
   readonly screen: ScreenController;
-  readonly service: TaskListService;
+  readonly service: TaskTailSource;
   /**
    * 取当前活跃 conversation id —— 应来自 cli REPL 当前活跃对话运行态
    * （持久化对话场景），不是 task_list 工具的 ALS 路径（仅 turn run 内有效）。

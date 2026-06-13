@@ -1,13 +1,13 @@
 /**
  * session 域命令注册 —— 对话生命周期 + 模式切换的模块化原子注册（范式同
- * registerInfoCommands）。按依赖隔离拆成两个注册函数：
+ * registerInfoCommands）。
  *
- *   - registerSessionCommands：/new /clear /resume /name /compact（对话生命周期）。这些
- *     命令会**读写** active conversation 运行态，故以 `getConv()` getter 注入——模式切换
- *     会整体替换该引用，getter 在调用时解析当前对象、写其字段即写真实状态；session.runtime
- *     同理 getter；taskListService 跨 reload 单例直接注入。
- *   - registerModeCommands：/work /exit（模式切换）。依赖 applyModeSwitch（模式切换唯一
- *     执行点）+ active mode / in-flight turn，与对话生命周期 deps 不相交，故独立窄接口。
+ * 分发在本地、执行体在核心宿主:全部读写经 ConversationController(组合会话 /
+ * 场景 facade 与当前对话指针),cli 不再持有任何窗口 / store 实例。
+ *
+ *   - registerSessionCommands：/new /clear /resume /name /compact（对话生命周期）。
+ *   - registerModeCommands：/work /exit（模式切换）。依赖 applyModeSwitch（模式切换
+ *     唯一执行点）+ active mode / in-flight turn，与对话生命周期 deps 不相交。
  *
  * /resume·/work 的选择器（ArgChoiceProvider）就近在本模块构造、落进 CommandDef.args；其
  * inline 删除 / 改名 / 新建只声明能力，物理执行由 cli 交互层（onCandidateDelete + 主循环
@@ -24,37 +24,28 @@ import {
   type ArgChoice,
   type ArgSchema,
   type WorkModeSwitchIntent,
-  countRuns,
 } from "@zhixing/core";
-import type { AgentRuntime } from "@zhixing/orchestrator/runtime";
-import {
-  switchToNewConversation,
-  type MutableConversationState,
-} from "../runtime/switch-to-new-conversation.js";
-import {
-  openConversationWindow,
-  writeWindowSnapshot,
-} from "../runtime/conversation-window.js";
 import type { CliWriter } from "../screen/index.js";
 import { layout } from "../tui/style.js";
 import { renderHistoryTail } from "../history-tail.js";
+import type { ConversationController } from "../runtime/conversation-controller.js";
 import { formatRelativeTime } from "./format.js";
 
 export interface SessionCommandsDeps {
   readonly registry: ICommandRegistry;
   readonly dispatcher: CommandDispatcher;
   readonly writer: CliWriter;
-  /** 当前活跃对话运行态 —— 模式切换会整体替换引用，以 getter 注入按调用时读最新对象。 */
-  readonly getConv: () => MutableConversationState;
-  /** session.runtime —— reload / 模式切换会 swap，以 getter 注入。 */
-  readonly getRuntime: () => AgentRuntime;
-  /** task_list 服务（process-wide 单例、跨 reload 稳定，直接注入）。 */
-  readonly taskListService: {
-    prime(conversationId: string): Promise<void>;
-    clear(conversationId: string): void;
-  };
+  /** 会话控制器——当前对话指针 + 宿主执行体调用的单一入口。 */
+  readonly controller: ConversationController;
   /** 对话切换成功后通知 cli UI 层刷新（如 TaskTail）。 */
-  readonly onConversationChanged: () => void;
+  readonly onConversationChanged: () => void | Promise<void>;
+  /**
+   * 本接入面主动发起 /clear 前的标记钩子。宿主会把 cleared 组播回发起端,
+   * repl 用该标记区分"本地命令自己的回声"与"其他接入面清空当前对话"。
+   */
+  readonly markLocalClear?: (
+    conversationId: string,
+  ) => (outcome: "success" | "failed") => void;
   /**
    * 把屏幕清回"刚进入交互模式"的初始态（chrome 终端）。/clear 清完数据后调用，
    * extraLines 承接非致命 warning 一并重建；无 chrome 时为 undefined，handler 退回到
@@ -70,7 +61,7 @@ function argRest(ctx: CommandHandlerContext): string {
 }
 
 export function registerSessionCommands(deps: SessionCommandsDeps): void {
-  const { registry, dispatcher, writer } = deps;
+  const { registry, dispatcher, writer, controller } = deps;
 
   // ── /new ──
   registry.register({
@@ -81,15 +72,10 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
     execution: "local",
     tag: "builtin",
   });
-  dispatcher.registerHandler("new:repl", async (ctx) => {
-    const name = argRest(ctx).trim() || undefined;
+  dispatcher.registerHandler("new:repl", async () => {
     try {
-      const created = await switchToNewConversation(
-        deps.getConv(),
-        { runtime: deps.getRuntime() },
-        deps.taskListService,
-        { name, notify: deps.onConversationChanged },
-      );
+      const created = await controller.newConversation();
+      await deps.onConversationChanged();
       writer.line(chalk.dim(`\n  已创建新对话 ${chalk.cyan(created.name)}\n`));
     } catch (err) {
       writer.line(
@@ -111,76 +97,26 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
     tag: "builtin",
   });
   dispatcher.registerHandler("clear:repl", async () => {
-    const conv = deps.getConv();
-    // 清空是事件而非销毁：持久层追加一条 clear 记录（倒读原语遇之即止——重启
-    // 重建只见其后内容；旧原文物理仍在，由时间窗清理收走），窗口 reset 清空内存。
-    // 先盘后窗：持久化失败窗口不动，内存与磁盘停在同一基底。
-    if (conv.conversationId) {
-      try {
-        await conv.store.appendClear(conv.conversationId);
-      } catch (err) {
-        writer.line(
-          chalk.red(
-            `\n  清空失败: ${err instanceof Error ? err.message : String(err)}\n`,
-          ),
-        );
-        return {};
-      }
-    }
-    conv.window.reset("clear");
-    conv.pendingInputPrefix = null;
-
-    // 非致命 warning 收集到本地数组，末尾按 clearScreenToInitial 是否可用分流：chrome
-    // 路径（rebuild 会清 scroll region）把 warnings 作为 extraLines 一并注入重建内容避免
-    // 丢失；legacy 路径（无 rebuild）逐行输出。数组元素是不含 \n 的单行内容。
-    const warnings: string[] = [];
-
-    // 视图层组件通过 Resettable 注册到 runtime；这里一并清空它们的对话级状态。顺序：先
-    // 磁盘清，后视图层 reset —— 失败时内存 messages 仍是 canonical 安全态。
+    // 清空是事件而非销毁:宿主先盘(transcript clear 事件 + meta 视图层清理)
+    // 后窗(活跃窗口归零),busy 时拒绝。
+    const target = controller.current.conversationId;
+    const settleLocalClear = deps.markLocalClear?.(target);
     try {
-      await deps.getRuntime().resetConversationState();
+      await controller.clear();
     } catch (err) {
-      warnings.push(
-        chalk.yellow(
-          `  视图层部分组件 reset 失败（不影响对话清空）: ${err instanceof Error ? err.message : String(err)}`,
+      settleLocalClear?.("failed");
+      writer.line(
+        chalk.red(
+          `\n  清空失败: ${err instanceof Error ? err.message : String(err)}\n`,
         ),
       );
+      return {};
     }
-    // 清空 conversation meta 的视图层状态（task_list / 段切换历史）——/clear 是"重置对话
-    // 内容到新起点"，conversation 身份字段保留不动。
-    if (conv.conversationId) {
-      try {
-        await conv.convRepo.clearViewLayerState(conv.conversationId);
-      } catch (err) {
-        warnings.push(
-          chalk.yellow(
-            `  conversation meta 视图层字段清空失败（不影响对话清空）: ${err instanceof Error ? err.message : String(err)}`,
-          ),
-        );
-      }
-      // task_list service cache 同步清空 —— 磁盘端已由 clearViewLayerState 处理。service
-      // 不实现 Resettable（process-wide 跨 conversation），由本路径显式 clear 维护一致性。
-      deps.taskListService.clear(conv.conversationId);
-    }
-    conv.turnCounter = 0;
-
-    // /clear 既是 conversation 数据重置、也是注意力窗口换代 —— 开新窗触发
-    // onWindowClose(clear)→onWindowOpen(clear),更新实例权威 prompt（重建 skill
-    // 索引等数据驱动段）。失败仅 warn,不阻断清空。
-    try {
-      await deps.getRuntime().onAttentionWindowChange("clear");
-    } catch (err) {
-      warnings.push(
-        chalk.yellow(
-          `  注意力窗口重建失败（不影响对话清空）: ${err instanceof Error ? err.message : String(err)}`,
-        ),
-      );
-    }
-
+    settleLocalClear?.("success");
+    await deps.onConversationChanged();
     if (deps.clearScreenToInitial) {
-      deps.clearScreenToInitial(warnings);
+      deps.clearScreenToInitial();
     } else {
-      for (const w of warnings) writer.line(w);
       writer.line(chalk.dim(`${layout.contentPrefix}对话历史已清空\n`));
     }
     return {};
@@ -197,49 +133,48 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
     args: [buildResumeArgSchema(deps)],
   });
   dispatcher.registerHandler("resume:repl", async (ctx) => {
-    const conv = deps.getConv();
     const input = argRest(ctx).trim();
     if (!input) {
-      const conversations = await conv.convRepo.list();
+      const conversations = await controller.listConversations();
       if (conversations.length === 0) {
         writer.line(chalk.dim("\n  没有可切换的对话\n"));
         return {};
       }
       writer.line(`\n${chalk.bold("  可用对话：")}`);
-      for (let i = 0; i < Math.min(conversations.length, 15); i++) {
-        const c = conversations[i]!;
-        const label = c.name ? chalk.white(c.name) : chalk.dim(c.id);
+      for (const c of conversations.slice(0, 15)) {
+        const label = c.name ? chalk.white(c.name) : chalk.dim(c.conversationId);
         const time = formatRelativeTime(new Date(c.lastActiveAt));
-        const turnCount = await countRuns(conv.store, c.id);
         const current =
-          c.id === conv.conversationId ? chalk.green(" ← 当前") : "";
-        writer.line(
-          `  ${label} ${chalk.dim(`(${time}, ${turnCount} 轮)`)}${current}`,
-        );
+          c.conversationId === controller.current.conversationId
+            ? chalk.green(" ← 当前")
+            : "";
+        writer.line(`  ${label} ${chalk.dim(`(${time})`)}${current}`);
       }
       writer.line(chalk.dim(`\n  使用 /resume <名称或 id> 切换\n`));
       return {};
     }
-    if (input === conv.conversationId) {
+    if (input === controller.current.conversationId) {
       writer.line(chalk.dim("\n  已在当前对话中\n"));
       return {};
     }
 
-    const conversations = await conv.convRepo.list();
+    const conversations = await controller.listConversations();
 
-    // 按 ID 精确匹配
+    // 按 ID 精确匹配,其次唯一名称模糊匹配
     let target: { id: string; name: string } | null = null;
-    const matched = await conv.convRepo.get(input);
-    if (matched) target = { id: matched.id, name: matched.name };
+    const byId = conversations.find((c) => c.conversationId === input);
+    if (byId) target = { id: byId.conversationId, name: byId.name };
 
-    // 按名称模糊匹配
     if (!target) {
       const lowerInput = input.toLowerCase();
       const matches = conversations.filter((c) =>
         c.name.toLowerCase().includes(lowerInput),
       );
       if (matches.length === 1) {
-        target = { id: matches[0]!.id, name: matches[0]!.name };
+        target = {
+          id: matches[0]!.conversationId,
+          name: matches[0]!.name,
+        };
       } else if (matches.length > 1) {
         writer.line(`\n${chalk.bold("  多个匹配：")}`);
         for (const c of matches.slice(0, 10)) {
@@ -255,49 +190,19 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
       writer.line(chalk.red(`\n  对话 "${input}" 不存在\n`));
       return {};
     }
-    if (target.id === conv.conversationId) {
+    if (target.id === controller.current.conversationId) {
       writer.line(chalk.dim("\n  已在当前对话中\n"));
       return {};
     }
 
     try {
-      const opened = await openConversationWindow({
-        store: conv.store,
-        snapshots: conv.snapshots,
-        conversationId: target.id,
-        model: deps.getRuntime().model,
-      });
-      conv.window = opened.window;
-      conv.pendingInputPrefix = null;
-      conv.conversationId = target.id;
-      conv.turnCounter = opened.turnCount;
-      // 加载目标对话的 task_list 持久化状态到 service cache
-      await deps.taskListService.prime(target.id);
-      conv.convRepo.touch(conv.conversationId).catch(() => {});
-      // 切换对话 = 注意力窗口换代（与 /new、/clear 同纪律）：先清 runtime 内
-      // 对话级组件状态，再触发 onWindowClose(resume)→onWindowOpen(resume)
-      // 重建实例权威 prompt。两步都非致命——失败不阻塞切换。
-      try {
-        await deps.getRuntime().resetConversationState();
-      } catch {
-        /* 非致命：视图层组件 reset 失败不阻塞切换 */
-      }
-      try {
-        await deps.getRuntime().onAttentionWindowChange("resume");
-      } catch {
-        /* 非致命：窗口重建失败不阻塞切换，下个 run 仍用当前 prompt */
-      }
-      deps.onConversationChanged();
-      writer.line(
-        chalk.dim(
-          `\n  已切换到 ${chalk.cyan(target.name)}（${opened.turnCount} 轮对话）\n`,
-        ),
-      );
-      // 历史尾巴：切换即见最近几轮变暗摘录（与启动恢复同款"回到工位"展示，
-      // 清空边界由倒读原语保证——刚清空的对话零输出）
-      await renderHistoryTail({
-        store: conv.store,
-        conversationId: target.id,
+      const resumed = await controller.resume(target.id);
+      await deps.onConversationChanged();
+      writer.line(chalk.dim(`\n  已切换到 ${chalk.cyan(resumed.name)}\n`));
+      // 历史尾巴:切换即见最近几轮变暗摘录(与启动恢复同款"回到工位"展示,
+      // 清空边界由宿主倒读原语保证——刚清空的对话零输出)
+      renderHistoryTail({
+        runs: (await controller.history(target.id)).runs.map((r) => r.record),
         writer,
       });
     } catch (err) {
@@ -320,18 +225,21 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
     tag: "builtin",
   });
   dispatcher.registerHandler("name:repl", async (ctx) => {
-    const conv = deps.getConv();
     const name = argRest(ctx).trim();
     if (!name) {
       writer.line(chalk.yellow(`${layout.contentPrefix}用法: /name <名称>\n`));
       return {};
     }
-    if (!conv.conversationId) {
-      writer.line(chalk.yellow(`${layout.contentPrefix}当前会话尚未保存\n`));
-      return {};
+    try {
+      await controller.rename(name);
+      writer.line(chalk.dim(`${layout.contentPrefix}会话已命名为: ${name}\n`));
+    } catch (err) {
+      writer.line(
+        chalk.red(
+          `${layout.contentPrefix}命名失败: ${err instanceof Error ? err.message : String(err)}\n`,
+        ),
+      );
     }
-    await conv.convRepo.rename(conv.conversationId, name);
-    writer.line(chalk.dim(`${layout.contentPrefix}会话已命名为: ${name}\n`));
     return {};
   });
 
@@ -345,41 +253,12 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
     tag: "builtin",
   });
   dispatcher.registerHandler("compact:repl", async () => {
-    const conv = deps.getConv();
-    if (conv.window.getMessages().length < 4) {
-      writer.line(chalk.dim("\n  对话历史过短，无需压缩\n"));
-      return {};
-    }
     writer.line(chalk.yellow("\n  ⟳ 正在压缩上下文..."));
     try {
-      const result = await deps
-        .getRuntime()
-        .forceCompact([...conv.window.getMessages()], conv.turnCounter);
-      // 压缩是注意力窗口的视图操作：产生真 summary 时折叠窗口；原文持久化
-      // append-only、不参与压缩（被摘内容仍完整躺在磁盘上）。非摘要型修改
-      //（无 marker）不动窗口——窗口只经折叠 / 接受前进。
-      if (result.modified && result.windowCompact) {
-        const outcome = conv.window.applyCompact(result.windowCompact);
-        // 手动压缩与 run 接受同一快照出口：折叠交出覆盖锚且携结构化摘要
-        // 时落盘（fire-and-forget，失败 helper 内 warn）
-        if (conv.conversationId) {
-          void writeWindowSnapshot(
-            conv.snapshots,
-            conv.conversationId,
-            result.windowCompact,
-            outcome,
-          );
-        }
-        // run 外手动压缩 = 注意力窗口换代（与 /clear、/resume 同纪律）——
-        // 触发 onWindowClose(compact)→onWindowOpen(compact) 重建实例权威
-        // prompt。失败非致命，不影响已完成的折叠。
-        try {
-          await deps.getRuntime().onAttentionWindowChange("compact");
-        } catch {
-          /* 非致命：窗口重建失败不阻塞压缩结果 */
-        }
-        // 降级知情：地板兜底时先呈现方式与代价，再报结果——有损截断
-        // 不伪装成正常摘要（与自动路径 emergency_floor 渲染同语义）
+      const result = await controller.compact();
+      if (result.modified) {
+        // 降级知情:地板兜底时先呈现方式与代价,再报结果——有损截断
+        // 不伪装成正常摘要(与自动路径 emergency_floor 渲染同语义)
         if (result.emergencyFloor) {
           writer.line(
             chalk.yellow(
@@ -387,10 +266,13 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
             ),
           );
         }
-        const pct = Math.round(result.budget.usageRatio * 100);
-        writer.line(chalk.green(`  ✓ 压缩完成，当前上下文占用 ${pct}%\n`));
-      } else if (result.modified) {
-        writer.line(chalk.dim("  压缩未产生摘要，窗口未变\n"));
+        const before = result.tokensBefore;
+        const after = result.tokensAfter;
+        const tokensText =
+          before !== undefined && after !== undefined
+            ? `${Math.round(before / 1000)}k → ${Math.round(after / 1000)}k tokens`
+            : "窗口已折叠";
+        writer.line(chalk.green(`  ✓ 压缩完成，${tokensText}\n`));
       } else {
         writer.line(chalk.dim("  已无可压缩内容\n"));
       }
@@ -403,9 +285,9 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
 }
 
 /**
- * /resume 的对话选择器 —— async-enum arg，调用时查 convRepo.list() 生成候选。inline 删除
- * 只声明能力（驱动 Ctrl+D UI）；物理删除 + active 切换编排由 cli 交互层 onCandidateDelete
- * 承担，此处不执行。
+ * /resume 的对话选择器 —— async-enum arg，调用时经 RPC 列表生成候选。inline 删除
+ * 只声明能力（驱动 Ctrl+D UI）；物理删除 + active 切换编排由 cli 交互层
+ * onCandidateDelete 承担，此处不执行。
  */
 function buildResumeArgSchema(deps: SessionCommandsDeps): ArgSchema {
   const provider: ArgChoiceProvider = {
@@ -413,8 +295,7 @@ function buildResumeArgSchema(deps: SessionCommandsDeps): ArgSchema {
       ctx: ArgQueryContext,
       signal: AbortSignal,
     ): Promise<readonly ArgChoice[]> {
-      const conv = deps.getConv();
-      const conversations = await conv.convRepo.list();
+      const conversations = await deps.controller.listConversations();
       if (signal.aborted) return [];
 
       const query = ctx.query.toLowerCase();
@@ -423,17 +304,19 @@ function buildResumeArgSchema(deps: SessionCommandsDeps): ArgSchema {
         if (
           query &&
           !c.name.toLowerCase().includes(query) &&
-          !c.id.toLowerCase().includes(query)
+          !c.conversationId.toLowerCase().includes(query)
         ) {
           continue;
         }
         const time = formatRelativeTime(new Date(c.lastActiveAt));
-        const turnCount = await countRuns(conv.store, c.id);
-        const current = c.id === conv.conversationId ? " ← 当前" : "";
+        const current =
+          c.conversationId === deps.controller.current.conversationId
+            ? " ← 当前"
+            : "";
         choices.push({
-          value: c.id,
-          label: c.name || c.id,
-          description: `${time}, ${turnCount} 轮${current}`,
+          value: c.conversationId,
+          label: c.name || c.conversationId,
+          description: `${time}${current}`,
         });
       }
       return choices;
@@ -455,19 +338,16 @@ export interface ModeCommandsDeps {
   readonly registry: ICommandRegistry;
   readonly dispatcher: CommandDispatcher;
   readonly writer: CliWriter;
-  /** 模式切换唯一执行点（先 await in-flight turn 到 turn 边界，再 swap runtime/conv）。 */
-  readonly applyModeSwitch: (
-    intent: WorkModeSwitchIntent,
-    source: "llm" | "command",
-  ) => Promise<void>;
+  /** 模式切换唯一执行点（先 await in-flight turn 到 turn 边界，再切换）。 */
+  readonly applyModeSwitch: (intent: WorkModeSwitchIntent) => Promise<void>;
   /** 当前活跃模式 —— 模式切换会变，以 getter 注入按调用时读。仅读 kind 判别。 */
   readonly getActiveMode: () => { readonly kind: string };
   /** 当前 in-flight turn promise（turn idle 时 null）—— 切换前先 await 到 turn 边界。 */
   readonly getActiveTurnPromise: () => Promise<unknown> | null;
-  /** 工作场景注册表 —— /work 选择器列候选、命令解析 idOrName。 */
-  readonly workSceneRegistry: {
-    list(): Promise<readonly { id: string; name: string; workdir?: string }[]>;
-  };
+  /** 工作场景候选(经 RPC) —— /work 选择器列候选、命令解析 idOrName。 */
+  readonly listScenes: () => Promise<
+    readonly { sceneId: string; name: string; workdir?: string }[]
+  >;
   /** readline —— 主对话 /exit 走 rl.close() 触发完整 cleanup。 */
   readonly rl: { close(): void };
 }
@@ -499,12 +379,12 @@ export function registerModeCommands(deps: ModeCommandsDeps): void {
       return {};
     }
     // <idOrName> → 解析（精确 id 优先，其次唯一名称匹配，与 /resume 同款纪律）。
-    const scenes = await deps.workSceneRegistry.list();
-    let sceneId: string | null = scenes.find((s) => s.id === q)?.id ?? null;
+    const scenes = await deps.listScenes();
+    let sceneId: string | null = scenes.find((s) => s.sceneId === q)?.sceneId ?? null;
     if (!sceneId) {
       const lower = q.toLowerCase();
       const named = scenes.filter((s) => s.name.toLowerCase().includes(lower));
-      if (named.length === 1) sceneId = named[0]!.id;
+      if (named.length === 1) sceneId = named[0]!.sceneId;
       else if (named.length > 1) {
         writer.line(
           chalk.yellow(`\n  多个工作场景匹配 "${q}"，请用精确 id\n`),
@@ -516,11 +396,10 @@ export function registerModeCommands(deps: ModeCommandsDeps): void {
       writer.line(chalk.red(`\n  工作场景 "${q}" 不存在\n`));
       return {};
     }
-    // 命令可能在 turn 运行中输入：先 await in-flight turn 到达 turn 边界（与 hot-reload
-    // 先 await in-flight turn 的既有纪律一致）。
+    // 命令可能在 turn 运行中输入：先 await in-flight turn 到达 turn 边界。
     const turn = deps.getActiveTurnPromise();
     if (turn) await turn.catch(() => {});
-    await deps.applyModeSwitch({ kind: "enter", sceneId }, "command");
+    await deps.applyModeSwitch({ kind: "enter", sceneId });
     return {};
   });
 
@@ -539,18 +418,17 @@ export function registerModeCommands(deps: ModeCommandsDeps): void {
     if (deps.getActiveMode().kind === "workscene") {
       const turn = deps.getActiveTurnPromise();
       if (turn) await turn.catch(() => {});
-      await deps.applyModeSwitch({ kind: "exit" }, "command");
+      await deps.applyModeSwitch({ kind: "exit" });
       return {};
     }
-    // 主对话中：维持原语义——走 rl.close() 让 close 监听器统一执行完整 cleanup
-    // (scheduler / deliveryStack / channels / renderer / confirmation)。
+    // 主对话中：维持原语义——走 rl.close() 让 close 监听器统一执行完整 cleanup。
     deps.rl.close();
     return {};
   });
 }
 
 /**
- * /work 的工作场景选择器 —— async-enum arg，调用时查 workSceneRegistry.list() 生成候选。
+ * /work 的工作场景选择器 —— async-enum arg，调用时经 RPC 列候选。
  * inline 删除 / 改名 / 新建只声明能力；物理删除走交互层 onCandidateDelete，改名 / 新建走
  * 主循环消费 inline-edit-request。
  */
@@ -560,7 +438,7 @@ function buildWorkSceneArgSchema(deps: ModeCommandsDeps): ArgSchema {
       ctx: ArgQueryContext,
       signal: AbortSignal,
     ): Promise<readonly ArgChoice[]> {
-      const scenes = await deps.workSceneRegistry.list();
+      const scenes = await deps.listScenes();
       if (signal.aborted) return [];
 
       const query = ctx.query.toLowerCase();
@@ -569,15 +447,15 @@ function buildWorkSceneArgSchema(deps: ModeCommandsDeps): ArgSchema {
         if (
           query &&
           !s.name.toLowerCase().includes(query) &&
-          !s.id.toLowerCase().includes(query)
+          !s.sceneId.toLowerCase().includes(query)
         ) {
           continue;
         }
         const wd = s.workdir ? ` · ${s.workdir}` : "";
         choices.push({
-          value: s.id,
-          label: s.name || s.id,
-          description: `${s.id}${wd}`,
+          value: s.sceneId,
+          label: s.name || s.sceneId,
+          description: `${s.sceneId}${wd}`,
         });
       }
       return choices;

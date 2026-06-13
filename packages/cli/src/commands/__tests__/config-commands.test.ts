@@ -1,13 +1,12 @@
 /**
  * registerConfigCommands 测试 —— 真实 DefaultCommandRegistry + CommandDispatcher。
  *
- * 重点:注册形态、config/mcp 的 chrome 可见性过滤、以及 /trust 选择器的 getter 修复
- * （securityPipeline 随 session reload swap 后，list() 跟随当前实例——值捕获会停在旧实例）。
- * config/mcp/security 的 handler 体委托给 handleConfigCommand / handleMcpCommand /
- * handleSecurityCommand，各有自身测试，这里不重复 dispatch。
+ * 重点:注册形态、config/mcp 的 chrome 可见性过滤、以及 /trust 选择器经
+ * 管理面 RPC 实时拉取(语境随当前对话派生)。config/mcp 的 handler 体委托给
+ * handleConfigCommand / handleMcpCommand,各有自身测试,这里不重复 dispatch。
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   CommandDispatcher,
   DefaultCommandRegistry,
@@ -40,33 +39,33 @@ function rule(id: string) {
   };
 }
 
-function makePipeline(rules: ReturnType<typeof rule>[]) {
-  return {
-    getPermissionStore: () => ({ list: () => rules }),
-    getContextId: () => ({ kind: "main" }),
-  };
-}
-
 function setup() {
   const registry = new DefaultCommandRegistry();
   const dispatcher = new CommandDispatcher({ registry });
-  // session 可变 —— 测 getter 跟随 securityPipeline swap
-  const session = {
-    runtime: { securityPipeline: makePipeline([rule("r-a")]) },
-  };
+  const trustList = vi.fn(async () => [rule("r-a")] as never[]);
+  const securityStatus = vi.fn(async () => ({
+    contextId: { kind: "main" },
+    workspacePath: null,
+    permissionRules: [],
+    builtinRules: [],
+    rateLimits: [],
+    confirmations: [],
+  }));
+  const lines: string[] = [];
   const deps = {
     registry,
     dispatcher,
-    writer: { line: () => {} },
+    writer: { line: (text: string) => lines.push(text) },
     rl: {},
     renderer: { stop: () => {} },
     screen: null,
-    session,
     getActiveTurnPromise: () => null,
-    mcpHub: {},
+    management: { trustList, securityStatus },
+    getConversationId: () => "conv-1",
+    requestHostReload: async () => {},
   } as unknown as ConfigCommandsDeps;
   registerConfigCommands(deps);
-  return { registry, dispatcher, session };
+  return { registry, dispatcher, trustList, securityStatus, lines };
 }
 
 describe("registerConfigCommands · 注册", () => {
@@ -98,9 +97,9 @@ describe("registerConfigCommands · 注册", () => {
   });
 });
 
-describe("registerConfigCommands · /trust 选择器 getter 修复", () => {
-  it("list() 按调用时读 securityPipeline —— swap 后跟随新实例（非构造期 capture）", async () => {
-    const { registry, session } = setup();
+describe("registerConfigCommands · /trust 选择器", () => {
+  it("list() 每次调用经管理面 RPC 实时拉取并携带当前对话语境", async () => {
+    const { registry, trustList } = setup();
     const trust = registry.findByName("trust");
     const schema = trust?.args?.[0];
     if (!schema || schema.kind !== "async-enum") throw new Error("缺 rule arg");
@@ -112,12 +111,24 @@ describe("registerConfigCommands · /trust 选择器 getter 修复", () => {
     expect(first.map((c) => (typeof c === "string" ? c : c.value))).toEqual([
       "r-a",
     ]);
+    expect(trustList).toHaveBeenCalledWith("conv-1");
 
-    // 模拟 reload swap securityPipeline
-    session.runtime.securityPipeline = makePipeline([rule("r-b")]);
+    // 宿主侧规则变化(撤销 / 新沉淀)——下次打开面板即最新,无本地快照
+    trustList.mockResolvedValueOnce([rule("r-b")] as never[]);
     const second = await provider.list(ctx, signal);
     expect(second.map((c) => (typeof c === "string" ? c : c.value))).toEqual([
       "r-b",
     ]);
+  });
+});
+
+describe("registerConfigCommands · /security", () => {
+  it("状态查询经管理面 RPC 读取当前对话语境", async () => {
+    const { dispatcher, securityStatus, lines } = setup();
+
+    await dispatcher.dispatch("/security", runtime(false));
+
+    expect(securityStatus).toHaveBeenCalledWith("conv-1");
+    expect(lines.join("\n")).toContain("安全状态");
   });
 });

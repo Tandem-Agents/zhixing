@@ -46,6 +46,23 @@ function createMockAgentRuntime(behavior: MockBehavior = {}): AgentRuntime {
     providerId: "mock",
     model: "mock-model",
     confirmationBroker: broker,
+    checkBudget: () => ({
+      contextWindow: 200_000,
+      effectiveWindow: 180_000,
+      currentTokens: 1_000,
+      usageRatio: 0.01,
+      status: "normal",
+    }),
+    subAgentUsages: () => [],
+    securitySnapshot: () => ({
+      contextId: { kind: "main" },
+      workspacePath: null,
+      permissionRules: [],
+      builtinRules: [],
+      rateLimits: [],
+      confirmations: [],
+    }),
+    calibrationFactor: 1,
     async run(params: RunParams): Promise<RunResult> {
       behavior.capture?.(params);
       if (behavior.throwError) {
@@ -237,6 +254,19 @@ describe("createServerRuntimeAdapter", () => {
     const agent = createMockAgentRuntime();
     const runtime = createServerRuntimeAdapter("test-broker", agent);
     expect(runtime.confirmationBroker).toBe(agent.confirmationBroker);
+  });
+
+  it("透传运行体预算 / 子 agent 用量 / 安全快照能力", () => {
+    const agent = createMockAgentRuntime();
+    const runtime = createServerRuntimeAdapter("test-inspect", agent);
+
+    const budget = runtime.checkBudget?.([um("hello")]);
+    expect(budget?.currentTokens).toBe(1_000);
+    expect(runtime.subAgentUsages?.([um("hello")])).toEqual([]);
+    expect(runtime.securitySnapshot?.()).toMatchObject({
+      contextId: { kind: "main" },
+      workspacePath: null,
+    });
   });
 
   // ─── abort(reason?):fire current controller / 单维度返 boolean ───

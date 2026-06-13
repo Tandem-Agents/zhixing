@@ -42,6 +42,7 @@ import {
   type LLMRole,
   type LLMRoles,
   type AgentEventMap,
+  type Message,
   type ToolDefinition,
 } from "@zhixing/core";
 import type { RoleDegradation } from "@zhixing/providers";
@@ -1581,5 +1582,60 @@ describe("trustContext 装配分叉", () => {
     const runtime = await createAgentRuntime({ workspace: null });
     expect(runtime.securityPipeline.getTrust()).toEqual({ kind: "global" });
     expect(runtime.securityPipeline.getContextId()).toEqual({ kind: "main" });
+  });
+
+  it("securitySnapshot 暴露宿主 /security 所需的运行体安全事实", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
+    const runtime = await createAgentRuntime({ workspace: null });
+
+    const snapshot = runtime.securitySnapshot();
+
+    expect(snapshot.contextId).toEqual({ kind: "main" });
+    expect(snapshot.workspacePath).toBeNull();
+    expect(snapshot.permissionRules).toEqual([]);
+    expect(snapshot.builtinRules.length).toBeGreaterThan(0);
+    expect(snapshot.rateLimits).toEqual([]);
+    expect(snapshot.confirmations).toEqual([]);
+  });
+
+  it("subAgentUsages 暴露 /usage 的 Task 拆分结构化视图", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
+    const runtime = await createAgentRuntime({ workspace: null });
+    const messages: Message[] = [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "task-1",
+            name: "Task",
+            input: { description: "调研模块结构", prompt: "do work" },
+          },
+        ],
+      },
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            toolUseId: "task-1",
+            content:
+              "done\n\n<usage>tokens: 12000, tool_uses: 2, duration_ms: 3000, sub_id: abc123</usage>",
+          },
+        ],
+      },
+    ];
+
+    expect(runtime.subAgentUsages(messages)).toEqual([
+      {
+        index: 1,
+        description: "调研模块结构",
+        tokens: 12000,
+        toolUses: 2,
+        durationMs: 3000,
+        subId: "abc123",
+        status: "succeeded",
+      },
+    ]);
   });
 });

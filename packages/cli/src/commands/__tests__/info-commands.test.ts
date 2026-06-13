@@ -1,27 +1,22 @@
 /**
- * registerInfoCommands 测试 —— 通过真实 DefaultCommandRegistry + CommandDispatcher
- * 驱动命令，断言注册形态 + deps getter 接线 + writer 输出。
+ * registerInfoCommands 测试 —— 真实 registry + dispatcher 驱动。
  *
- * 覆盖不依赖真实文件系统的命令（help/model/status/tasks）；me/journal/people 走真实
- * Store I/O，其 handler 体是 repl 迁移过来的逐字拷贝，由 tsc + 形态一致性保证。
+ * 运行时信息(上下文预算 / journal / people)的权威在宿主——经注入的
+ * controller / management 取;模型显示来自本地配置(宿主按同一配置装配)。
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   CommandDispatcher,
   DefaultCommandRegistry,
-  type CommandDef,
-  type Message,
   type RuntimeContext,
-  type SchedulerFacade,
-  type ScheduledTask,
 } from "@zhixing/core";
-import {
-  registerInfoCommands,
-  type InfoCommandsDeps,
-} from "../info-commands.js";
+import { registerInfoCommands } from "../info-commands.js";
 import { stripAnsi } from "../../tui/index.js";
 import type { CliWriter } from "../../screen/index.js";
+import type { ConversationController } from "../../runtime/conversation-controller.js";
+import type { RpcManagementFacade } from "../../runtime/rpc-management-facade.js";
+import type { ZhixingConfig } from "@zhixing/providers";
 
 const RUNTIME: RuntimeContext = {
   sessionBusy: false,
@@ -32,50 +27,96 @@ const RUNTIME: RuntimeContext = {
   now: 0,
 };
 
-function makeWriter(): CliWriter & { lines: string[] } {
+function makeWriter(): CliWriter & { text: () => string } {
   const lines: string[] = [];
   return {
-    lines,
-    line: (text: string) => {
-      lines.push(text);
-    },
-  } as unknown as CliWriter & { lines: string[] };
+    line: (t: string) => lines.push(t),
+    text: () => lines.join("\n"),
+  } as unknown as CliWriter & { text: () => string };
 }
 
-function setup(overrides: Partial<InfoCommandsDeps> = {}) {
+function setup() {
   const registry = new DefaultCommandRegistry();
   const dispatcher = new CommandDispatcher({ registry });
   const writer = makeWriter();
-  const deps: InfoCommandsDeps = {
+  let config = {
+    llm: { main: { provider: "anthropic", model: "claude-x" } },
+  } as unknown as ZhixingConfig;
+  const contextBudget = vi.fn(async () => ({
+    budget: {
+      contextWindow: 200_000,
+      effectiveWindow: 180_000,
+      currentTokens: 1_000,
+      usageRatio: 0.01,
+      status: "normal" as const,
+    },
+    turnCount: 3,
+    calibrationFactor: 1,
+  }));
+  const usage = vi.fn(async () => ({
+    budget: {
+      contextWindow: 200_000,
+      effectiveWindow: 180_000,
+      currentTokens: 1_000,
+      usageRatio: 0.01,
+      status: "normal" as const,
+    },
+    turnCount: 3,
+    calibrationFactor: 1,
+    subUsages: [
+      {
+        index: 1,
+        description: "调研模块结构",
+        tokens: 12_000,
+        toolUses: 2,
+        durationMs: 3000,
+        subId: "abc123",
+        status: "succeeded" as const,
+      },
+    ],
+  }));
+  const controller = {
+    current: {
+      conversationId: "conv-1",
+      name: "当前对话",
+      mode: { kind: "main" as const },
+    },
+    contextBudget,
+    usage,
+  } as unknown as ConversationController;
+  const management = {
+    journalStats: vi.fn(async () => ({
+      stats: { totalFiles: 2, hotCount: 1, warmCount: 1, condensedCount: 0 },
+      condense: null,
+      expiredCount: 0,
+    })),
+    peopleList: vi.fn(async () => []),
+  } as unknown as RpcManagementFacade;
+
+  registerInfoCommands({
     registry,
     dispatcher,
     writer,
-    getRuntime: () =>
-      ({
-        model: "deepseek-v4",
-        providerId: "deepseek",
-        calibrationFactor: 1,
-      }) as unknown as ReturnType<InfoCommandsDeps["getRuntime"]>,
-    getMessages: () => [],
-    getConversationId: () => "conv-1",
-    getTurnCounter: () => 0,
-    getNetworkProxy: () =>
-      ({ resolved: null, mode: "auto", display: "直连" }) as unknown as ReturnType<
-        InfoCommandsDeps["getNetworkProxy"]
-      >,
-    getScheduler: () =>
-      ({ list: async () => [] }) as unknown as SchedulerFacade,
-    ...overrides,
+    getConfig: () => config,
+    controller,
+    getNetworkProxy: () => ({ mode: "off", resolved: null, display: "off" }) as never,
+    getScheduler: () => ({ list: async () => [] }) as never,
+    management,
+  });
+  return {
+    registry,
+    dispatcher,
+    writer,
+    contextBudget,
+    usage,
+    management,
+    setConfig: (next: ZhixingConfig) => {
+      config = next;
+    },
   };
-  registerInfoCommands(deps);
-  return { registry, dispatcher, writer };
 }
 
-function visible(writer: { lines: string[] }): string {
-  return writer.lines.map(stripAnsi).join("\n");
-}
-
-describe("registerInfoCommands · 注册", () => {
+describe("registerInfoCommands", () => {
   it("9 条命令注册为 local，可经 findByName 找到", () => {
     const { registry } = setup();
     for (const name of [
@@ -93,106 +134,74 @@ describe("registerInfoCommands · 注册", () => {
     }
   });
 
-  it("journal/people/tasks 的 category 沿用 tools，其余 info", () => {
-    const { registry } = setup();
-    expect(registry.findByName("journal")?.category).toBe("tools");
-    expect(registry.findByName("people")?.category).toBe("tools");
-    expect(registry.findByName("tasks")?.category).toBe("tools");
-    expect(registry.findByName("status")?.category).toBe("info");
-  });
-});
-
-describe("registerInfoCommands · /help", () => {
-  it("从 registry 派生命令地图（含自身与同库其他命令）", async () => {
-    const { registry, dispatcher, writer } = setup();
-    // 额外注册一条 session 命令，验证 /help 按分类列出
-    registry.register({
-      id: "new:repl",
-      name: "new",
-      description: "创建新对话",
-      category: "session",
-      execution: "local",
-    } satisfies CommandDef);
-
-    await dispatcher.dispatch("/help", RUNTIME);
-    const out = visible(writer);
-    expect(out).toContain("可用命令");
-    expect(out).toContain("/help");
-    expect(out).toContain("/new");
-  });
-});
-
-describe("registerInfoCommands · /model", () => {
-  it("读 getRuntime / getTurnCounter 输出模型信息", async () => {
-    const { dispatcher, writer } = setup({ getTurnCounter: () => 7 });
-    await dispatcher.dispatch("/model", RUNTIME);
-    const out = visible(writer);
-    expect(out).toContain("deepseek-v4");
-    expect(out).toContain("deepseek");
-    expect(out).toContain("7");
-  });
-});
-
-describe("registerInfoCommands · /status", () => {
-  it("聚合消息计数 / 会话 id / 模型 / 代理", async () => {
-    const messages: Message[] = [
-      { role: "user", content: "hi" } as Message,
-      { role: "assistant", content: "yo" } as Message,
-    ];
-    const { dispatcher, writer } = setup({ getMessages: () => messages });
-    await dispatcher.dispatch("/status", RUNTIME);
-    const out = visible(writer);
-    expect(out).toContain("conv-1");
-    expect(out).toContain("1 user, 1 assistant");
-    expect(out).toContain("deepseek-v4");
-  });
-});
-
-describe("registerInfoCommands · /tasks", () => {
-  function task(o: {
-    id: string;
-    name: string;
-    system?: boolean;
-  }): ScheduledTask {
-    return {
-      id: o.id,
-      name: o.name,
-      enabled: true,
-      priority: "normal",
-      schedule: { kind: "interval", everyMs: 60_000 },
-      action: { kind: "agent-turn", prompt: "x" },
-      state: { consecutiveErrors: 0, runCount: 0 },
-      createdAt: "2026-01-01T00:00:00.000Z",
-      updatedAt: "2026-01-01T00:00:00.000Z",
-      system: o.system,
-    };
-  }
-
-  // /tasks 经 SchedulerFacade.list() 读 scheduler.json 投影；测试只需 stub list()。
-  function facadeWith(tasks: ScheduledTask[]): SchedulerFacade {
-    return { list: async () => tasks } as unknown as SchedulerFacade;
-  }
-
-  it("无任务 → 友好提示", async () => {
-    const { dispatcher, writer } = setup({
-      getScheduler: () => facadeWith([]),
-    });
-    await dispatcher.dispatch("/tasks", RUNTIME);
-    expect(visible(writer)).toContain("没有定时任务");
+  it("/status 显示会话名 / 模型(本地配置)/ 代理", async () => {
+    const h = setup();
+    await h.dispatcher.dispatch("/status", RUNTIME);
+    const text = stripAnsi(h.writer.text());
+    expect(text).toContain("当前对话");
+    expect(text).toContain("claude-x");
+    expect(text).toContain("anthropic");
   });
 
-  it("列出外部任务、过滤内部维护任务", async () => {
-    const { dispatcher, writer } = setup({
-      getScheduler: () =>
-        facadeWith([
-          task({ id: "u1", name: "每天提醒" }),
-          task({ id: "__gc", name: "journal-gc", system: true }),
-        ]),
-    });
-    await dispatcher.dispatch("/tasks", RUNTIME);
-    const out = visible(writer);
-    expect(out).toContain("每天提醒");
-    expect(out).not.toContain("journal-gc"); // 内部维护任务被 isInternal 过滤
-    expect(out).toContain("1 个");
+  it("/model 显示本地配置的模型与 provider", async () => {
+    const h = setup();
+    await h.dispatcher.dispatch("/model", RUNTIME);
+    const text = stripAnsi(h.writer.text());
+    expect(text).toContain("claude-x");
+  });
+
+  it("/model 在执行时读取最新配置快照", async () => {
+    const h = setup();
+    h.setConfig({
+      llm: { main: { provider: "openai", model: "gpt-next" } },
+    } as unknown as ZhixingConfig);
+
+    await h.dispatcher.dispatch("/model", RUNTIME);
+
+    const text = stripAnsi(h.writer.text());
+    expect(text).toContain("gpt-next");
+    expect(text).toContain("openai");
+    expect(text).not.toContain("claude-x");
+  });
+
+  it("/journal 经管理面 RPC 渲染扫描投影", async () => {
+    const h = setup();
+    await h.dispatcher.dispatch("/journal", RUNTIME);
+    expect(h.management.journalStats).toHaveBeenCalledOnce();
+    const text = stripAnsi(h.writer.text());
+    expect(text).toContain("日志状态");
+    expect(text).toContain("(2 文件)");
+  });
+
+  it("/people 经管理面 RPC;空网络友好提示", async () => {
+    const h = setup();
+    await h.dispatcher.dispatch("/people", RUNTIME);
+    expect(h.management.peopleList).toHaveBeenCalledOnce();
+    expect(stripAnsi(h.writer.text())).toContain("关系网络为空");
+  });
+
+  it("/context 经宿主上下文预算渲染;失败可观测", async () => {
+    const h = setup();
+    await h.dispatcher.dispatch("/context", RUNTIME);
+    expect(h.contextBudget).toHaveBeenCalledOnce();
+    expect(h.usage).not.toHaveBeenCalled();
+
+    h.contextBudget.mockRejectedValueOnce(new Error("宿主不可用"));
+    await h.dispatcher.dispatch("/context", RUNTIME);
+    expect(stripAnsi(h.writer.text())).toContain("上下文信息不可用");
+  });
+
+  it("/usage 经宿主完整用量视图渲染子 agent 拆分", async () => {
+    const h = setup();
+
+    await h.dispatcher.dispatch("/usage", RUNTIME);
+
+    expect(h.usage).toHaveBeenCalledOnce();
+    expect(h.contextBudget).not.toHaveBeenCalled();
+    const text = stripAnsi(h.writer.text());
+    expect(text).toContain("Token 用量");
+    expect(text).toContain("子 agent 拆分");
+    expect(text).toContain("Task#1");
+    expect(text).toContain("调研模块结构");
   });
 });

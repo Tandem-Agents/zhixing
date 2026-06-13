@@ -21,13 +21,7 @@
  */
 
 import chalk from "chalk";
-import {
-  extractText,
-  readRunsReverse,
-  type Message,
-  type RunRecord,
-  type ShardedTranscriptStore,
-} from "@zhixing/core";
+import { extractText, type Message, type RunRecord } from "@zhixing/core";
 import { layout } from "./tui/style.js";
 import { clampLine } from "./tui/line-width.js";
 import { ANCHOR_AI_DONE } from "./output/speaker-state.js";
@@ -52,23 +46,18 @@ export interface HistoryTail {
 }
 
 /**
- * 倒读最近 maxRuns 条 run 并投影为尾巴（条目时间正序）。
- * 对话不存在 / 空 / 刚清空 → 空 entries（调用方零渲染）。
+ * 把倒序(新→旧)的 run 记录投影为尾巴(条目时间正序)。
+ * 数据来自宿主的 session.history 倒读分页(读通道唯一,清空边界在宿主
+ * 倒读原语层生效——/clear 后空页,尾巴自然不渲染)。
  */
-export async function loadHistoryTail(
-  store: ShardedTranscriptStore,
-  conversationId: string,
+export function projectHistoryTail(
+  runsNewestFirst: readonly RunRecord[],
   maxRuns: number = DEFAULT_TAIL_RUNS,
-): Promise<HistoryTail> {
-  const recent: RunRecord[] = [];
-  for await (const { record } of readRunsReverse(store, conversationId)) {
-    recent.push(record);
-    if (recent.length >= maxRuns) break;
-  }
+): HistoryTail {
+  const recent = runsNewestFirst.slice(0, maxRuns);
   if (recent.length === 0) return { entries: [] };
   const latestAt = recent[0]!.timestamp;
-  recent.reverse();
-  return { entries: recent.map(projectEntry), latestAt };
+  return { entries: [...recent].reverse().map(projectEntry), latestAt };
 }
 
 function projectEntry(record: RunRecord): HistoryTailEntry {
@@ -145,22 +134,17 @@ function relativeTimeOf(iso: string | undefined): string | undefined {
 }
 
 /**
- * 组合入口：读取 + 产行 + 写出。空历史零输出。
- * 读取失败静默跳过——尾巴是纯增益展示，绝不因它阻塞启动 / 切换。
+ * 组合入口：投影 + 产行 + 写出。空历史零输出。
+ * runs 为倒序(新→旧)run 记录——调用方经 RPC history 取得;记录形状以
+ * RunRecord 为准(带索引引用的扩展字段不参与投影)。
  */
-export async function renderHistoryTail(opts: {
-  store: ShardedTranscriptStore;
-  conversationId: string;
+export function renderHistoryTail(opts: {
+  runs: readonly RunRecord[];
   writer: CliWriter;
   width?: number;
   maxRuns?: number;
-}): Promise<void> {
-  let tail: HistoryTail;
-  try {
-    tail = await loadHistoryTail(opts.store, opts.conversationId, opts.maxRuns);
-  } catch {
-    return;
-  }
+}): void {
+  const tail = projectHistoryTail(opts.runs, opts.maxRuns);
   const width = opts.width ?? process.stdout.columns ?? 80;
   for (const line of renderHistoryTailLines(tail, width)) {
     opts.writer.line(line);

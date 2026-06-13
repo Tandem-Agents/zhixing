@@ -21,6 +21,10 @@ import type {
   TokenUsage,
   WorkModeSwitchIntent,
 } from "@zhixing/core";
+import type {
+  RuntimeSecuritySnapshot,
+  RuntimeSubAgentUsageEntry,
+} from "../runtime/types.js";
 
 // ─── wire 投影 ───
 
@@ -185,6 +189,12 @@ export interface SessionContextBudgetResult {
   turnCount: number;
   calibrationFactor: number;
 }
+
+export interface SessionUsageResult extends SessionContextBudgetResult {
+  subUsages: readonly RuntimeSubAgentUsageEntry[];
+}
+
+export type SessionSecurityResult = RuntimeSecuritySnapshot;
 
 export interface SessionCompactResult {
   /** 是否真的发生了折叠(false = 无可压缩内容 / 未达执行条件) */

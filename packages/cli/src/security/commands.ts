@@ -1,34 +1,29 @@
 /**
- * /security 斜杠命令处理器 —— 安全系统状态概览 + 内置策略规则列表（只读）。
+ * /security · /trust 斜杠命令处理器。
  *
- * /trust 的列表交互在 repl.ts 注册为 typeahead args 命令（trustRuleArgProvider），
- * 与 /work /resume 同范式 —— 用户从命令面板 accept /trust 后 typeahead 自动进入
- * args 输入态、立即弹规则候选 dropdown，无需独立 handler。
+ * /trust 执行体在核心宿主(trust.list / revoke RPC);/security 的状态事实
+ * (策略引擎 / 频率限制 / 确认追踪)活在宿主 runtime 内,CLI 只消费
+ * session.security 快照并渲染,不再直连本地 SecurityPipeline。
  */
 
 import chalk from "chalk";
-import {
-  listUserTrustRules,
-  type PermissionContextId,
-  type SecurityPipeline,
-  type SecurityRule,
-} from "@zhixing/core";
+import type { PermissionContextId, PermissionRule, SecurityRule } from "@zhixing/core";
+import type { SessionSecurityResult } from "@zhixing/server";
 import type { CliWriter } from "../screen/index.js";
 import { formatRuleDescription } from "./trust-rule-format.js";
 
 // ─── /security ───
 
 interface SecurityOptions {
-  pipeline: SecurityPipeline;
+  status: () => Promise<SessionSecurityResult>;
   writer: CliWriter;
 }
 
-export function handleSecurityCommand(
+export async function handleSecurityCommand(
   args: string,
   opts: SecurityOptions,
-): void {
+): Promise<void> {
   const subcommand = args.trim().split(/\s+/)[0]?.toLowerCase() ?? "";
-
   if (subcommand === "rules") {
     return showPolicyRules(opts);
   }
@@ -44,46 +39,56 @@ function printSecurityHelp(writer: CliWriter): void {
   writer.line("");
   writer.line("  /security             状态概览（默认）");
   writer.line("  /security rules       列出当前生效的策略规则");
+  writer.line("  /trust                权限规则管理");
   writer.line("");
 }
 
-function showSecurityOverview(opts: SecurityOptions): void {
-  const { pipeline, writer } = opts;
-  const store = pipeline.getPermissionStore();
-  const contextId = pipeline.getContextId();
-  const workspacePath = pipeline.getWorkspace();
-  const guard = pipeline.getExecutionGuard();
-  const tracker = pipeline.getConfirmationTracker();
-  const policy = pipeline.getPolicyEngine();
+async function loadSecuritySnapshot(
+  opts: SecurityOptions,
+): Promise<SessionSecurityResult | null> {
+  try {
+    return await opts.status();
+  } catch (err) {
+    opts.writer.line(
+      chalk.red(
+        `\n  安全状态不可用: ${err instanceof Error ? err.message : String(err)}\n`,
+      ),
+    );
+    return null;
+  }
+}
 
-  const rules = store.list(contextId);
+async function showSecurityOverview(opts: SecurityOptions): Promise<void> {
+  const { writer } = opts;
+  const snapshot = await loadSecuritySnapshot(opts);
+  if (!snapshot) return;
+
+  const rules = snapshot.permissionRules;
   const sessionCount = rules.filter((r) => r.scope === "session").length;
   const ctxCount = rules.filter((r) => r.scope === "context").length;
   const globalCount = rules.filter((r) => r.scope === "global").length;
   const denyCount = rules.filter((r) => r.decision === "deny").length;
 
-  const builtinRules = policy.getActiveRules();
-  const bypassCount = builtinRules.filter((r) => r.bypassImmune).length;
-  const confirmCount = builtinRules.filter((r) => r.action === "confirm").length;
+  const bypassCount = snapshot.builtinRules.filter((r) => r.bypassImmune).length;
+  const confirmCount = snapshot.builtinRules.filter(
+    (r) => r.action === "confirm",
+  ).length;
 
-  const rateSnapshot = guard.getRateLimiter().snapshot();
-  const trackerSnapshot = tracker.snapshot();
-
-  const ctxLabel = formatContextKindLabel(contextId);
-  const ctxIdDisplay = formatContextIdInline(contextId);
+  const ctxLabel = formatContextKindLabel(snapshot.contextId);
+  const ctxIdDisplay = formatContextIdInline(snapshot.contextId);
 
   writer.line("");
   writer.line(chalk.bold("╭─ 安全状态 ─────────────────────────────"));
   writer.line(chalk.bold("│"));
   writer.line(
     `${chalk.bold("│")} ${chalk.dim("上下文:")}    ${chalk.cyan(ctxLabel)}` +
-      (workspacePath ? `  ${chalk.dim(workspacePath)}` : ""),
+      (snapshot.workspacePath ? `  ${chalk.dim(snapshot.workspacePath)}` : ""),
   );
   writer.line(`${chalk.bold("│")} ${chalk.dim("contextId:")} ${chalk.dim(ctxIdDisplay)}`);
   writer.line(chalk.bold("│"));
   writer.line(`${chalk.bold("│")} ${chalk.bold("── 策略规则 ──")}`);
   writer.line(
-    `${chalk.bold("│")} 内置: ${builtinRules.length} 条 (${chalk.red(`${bypassCount} bypassImmune`)} + ${chalk.yellow(`${confirmCount} confirm`)})`,
+    `${chalk.bold("│")} 内置: ${snapshot.builtinRules.length} 条 (${chalk.red(`${bypassCount} bypassImmune`)} + ${chalk.yellow(`${confirmCount} confirm`)})`,
   );
   writer.line(chalk.bold("│"));
   writer.line(`${chalk.bold("│")} ${chalk.bold("── 权限规则 ──")}`);
@@ -96,10 +101,10 @@ function showSecurityOverview(opts: SecurityOptions): void {
   }
   writer.line(chalk.bold("│"));
   writer.line(`${chalk.bold("│")} ${chalk.bold("── 频率限制（最近窗口）──")}`);
-  if (rateSnapshot.length === 0) {
+  if (snapshot.rateLimits.length === 0) {
     writer.line(`${chalk.bold("│")} ${chalk.dim("(无活动)")}`);
   } else {
-    for (const entry of rateSnapshot.slice(0, 8)) {
+    for (const entry of snapshot.rateLimits.slice(0, 8)) {
       const pct = entry.used / entry.limit;
       const bar =
         pct > 0.8 ? chalk.red : pct > 0.5 ? chalk.yellow : chalk.green;
@@ -110,10 +115,10 @@ function showSecurityOverview(opts: SecurityOptions): void {
   }
   writer.line(chalk.bold("│"));
   writer.line(`${chalk.bold("│")} ${chalk.bold("── 确认追踪 ──")}`);
-  if (trackerSnapshot.length === 0) {
+  if (snapshot.confirmations.length === 0) {
     writer.line(`${chalk.bold("│")} ${chalk.dim("(无累计)")}`);
   } else {
-    for (const entry of trackerSnapshot.slice(0, 8)) {
+    for (const entry of snapshot.confirmations.slice(0, 8)) {
       const keyShort = entry.key.replace(/^bash::/, "").slice(0, 30);
       writer.line(
         `${chalk.bold("│")}   ${chalk.cyan(keyShort.padEnd(30))} ${entry.count} 次 ${chalk.dim(`(${entry.highestRisk})`)}`,
@@ -124,12 +129,13 @@ function showSecurityOverview(opts: SecurityOptions): void {
   writer.line("");
 }
 
-function showPolicyRules(opts: SecurityOptions): void {
-  const { pipeline, writer } = opts;
-  const rules: SecurityRule[] = pipeline.getPolicyEngine().getActiveRules();
-  writer.line("");
-  writer.line(chalk.bold(`  策略规则 (${rules.length} 条)`));
-  writer.line(chalk.dim("  ─────────────────────────────────────────────────────"));
+async function showPolicyRules(opts: SecurityOptions): Promise<void> {
+  const snapshot = await loadSecuritySnapshot(opts);
+  if (!snapshot) return;
+  const rules: readonly SecurityRule[] = snapshot.builtinRules;
+  opts.writer.line("");
+  opts.writer.line(chalk.bold(`  策略规则 (${rules.length} 条)`));
+  opts.writer.line(chalk.dim("  ─────────────────────────────────────────────────────"));
   for (const rule of rules) {
     const action =
       rule.action === "block"
@@ -139,30 +145,35 @@ function showPolicyRules(opts: SecurityOptions): void {
           : chalk.green("audit  ");
     const immune = rule.bypassImmune ? chalk.red("[!]") : "   ";
     const sev = rule.severity.padEnd(8);
-    writer.line(
+    opts.writer.line(
       `  ${immune} ${action} ${chalk.dim(sev)} ${chalk.cyan(rule.id.padEnd(28))} ${chalk.dim(rule.name)}`,
     );
   }
-  writer.line(chalk.dim("  ─────────────────────────────────────────────────────"));
-  writer.line(chalk.dim("  [!] = bypassImmune（任何配置都无法覆盖）"));
-  writer.line("");
+  opts.writer.line(chalk.dim("  ─────────────────────────────────────────────────────"));
+  opts.writer.line(chalk.dim("  [!] = bypassImmune（任何配置都无法覆盖）"));
+  opts.writer.line("");
 }
-
 // ─── /trust ───
 
 interface TrustOptions {
-  pipeline: SecurityPipeline;
+  /** 列当前语境的用户可管规则(宿主 trust.list) */
+  listRules: () => Promise<PermissionRule[]>;
+  /** 撤销规则(宿主 trust.revoke);不存在返回 false */
+  revokeRule: (id: string) => Promise<boolean>;
   writer: CliWriter;
 }
 
 /**
  * /trust 的 target 无关命令行为（cli 文本前端）—— 列出 / 撤销用户信任规则。
  *
- * list 取自 core 的 listUserTrustRules、撤销走 IPermissionStore.revoke，能力本身在所有
- * 模式可达；typeahead 模式下另有 trust-rule-arg-provider 的面板增强（浏览 + Ctrl+D），是
- * 同一能力之上的渐进增强，非唯一入口。
+ * 执行体在核心宿主(trust.list / trust.revoke RPC,语境派生与"哪些规则归
+ * 用户管"的判定在宿主单点);typeahead 模式下另有 trust-rule-arg-provider 的
+ * 面板增强（浏览 + Ctrl+D），是同一能力之上的渐进增强，非唯一入口。
  */
-export function handleTrustCommand(args: string, opts: TrustOptions): void {
+export async function handleTrustCommand(
+  args: string,
+  opts: TrustOptions,
+): Promise<void> {
   const trimmed = args.trim();
   const sub = trimmed.split(/\s+/)[0]?.toLowerCase() ?? "";
   if (sub === "revoke") {
@@ -174,9 +185,19 @@ export function handleTrustCommand(args: string, opts: TrustOptions): void {
   return listTrustRules(opts);
 }
 
-function listTrustRules(opts: TrustOptions): void {
-  const { pipeline, writer } = opts;
-  const rules = listUserTrustRules(pipeline);
+async function listTrustRules(opts: TrustOptions): Promise<void> {
+  const { writer } = opts;
+  let rules: PermissionRule[];
+  try {
+    rules = await opts.listRules();
+  } catch (err) {
+    writer.line(
+      chalk.red(
+        `\n  信任规则不可用: ${err instanceof Error ? err.message : String(err)}\n`,
+      ),
+    );
+    return;
+  }
   if (rules.length === 0) {
     writer.line(chalk.dim("\n  暂无信任规则\n"));
     return;
@@ -191,17 +212,25 @@ function listTrustRules(opts: TrustOptions): void {
   writer.line(chalk.dim("\n  撤销: /trust revoke <id>\n"));
 }
 
-function revokeTrustRule(id: string, opts: TrustOptions): void {
-  const { pipeline, writer } = opts;
+async function revokeTrustRule(id: string, opts: TrustOptions): Promise<void> {
+  const { writer } = opts;
   if (!id) {
     writer.line(chalk.yellow("\n  用法: /trust revoke <id>\n"));
     return;
   }
-  const ok = pipeline.getPermissionStore().revoke(id);
-  if (ok) {
-    writer.line(chalk.dim(`\n  已撤销信任规则 ${chalk.cyan(id)}\n`));
-  } else {
-    writer.line(chalk.red(`\n  信任规则 "${id}" 不存在\n`));
+  try {
+    const ok = await opts.revokeRule(id);
+    if (ok) {
+      writer.line(chalk.dim(`\n  已撤销信任规则 ${chalk.cyan(id)}\n`));
+    } else {
+      writer.line(chalk.red(`\n  信任规则 "${id}" 不存在\n`));
+    }
+  } catch (err) {
+    writer.line(
+      chalk.red(
+        `\n  撤销失败: ${err instanceof Error ? err.message : String(err)}\n`,
+      ),
+    );
   }
 }
 

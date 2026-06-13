@@ -30,6 +30,8 @@ import type {
   AbortResult,
   ConversationBootstrap,
   RuntimeCompactOutcome,
+  RuntimeSecuritySnapshot,
+  RuntimeSubAgentUsageEntry,
   SessionRuntime,
   RuntimeFactory,
 } from "./types.js";
@@ -221,6 +223,22 @@ export type ContextBudgetInspectionResult =
       turnCount: number;
       calibrationFactor: number;
     }
+  | { status: "not-found" }
+  | { status: "unsupported" };
+
+export type UsageInspectionResult =
+  | {
+      status: "done";
+      budget: ReturnType<NonNullable<SessionRuntime["checkBudget"]>>;
+      turnCount: number;
+      calibrationFactor: number;
+      subUsages: readonly RuntimeSubAgentUsageEntry[];
+    }
+  | { status: "not-found" }
+  | { status: "unsupported" };
+
+export type SecurityInspectionResult =
+  | { status: "done"; snapshot: RuntimeSecuritySnapshot }
   | { status: "not-found" }
   | { status: "unsupported" };
 
@@ -1158,6 +1176,71 @@ export class ConversationManager {
       turnCount: session.turnCount,
       calibrationFactor: session.runtime.calibrationFactor ?? 1,
     };
+  }
+
+  async inspectUsageExisting(
+    conversationId: string,
+    exists?: ConversationExists,
+  ): Promise<UsageInspectionResult> {
+    const active = this.sessions.get(conversationId);
+    if (active) {
+      active.lastActiveAt = new Date().toISOString();
+      this.clearGraceTimer(conversationId);
+      return this.inspectUsage(active);
+    }
+
+    return this.withIdLock(conversationId, async () => {
+      const activeAfterWait = this.sessions.get(conversationId);
+      if (activeAfterWait) {
+        activeAfterWait.lastActiveAt = new Date().toISOString();
+        this.clearGraceTimer(conversationId);
+        return this.inspectUsage(activeAfterWait);
+      }
+      if (exists && !(await exists())) return { status: "not-found" };
+      const managed = await this.doCreate(conversationId, false);
+      return this.inspectUsage(managed);
+    });
+  }
+
+  private inspectUsage(session: ManagedSession): UsageInspectionResult {
+    if (!session.runtime.checkBudget) return { status: "unsupported" };
+    const messages = [...session.window.getMessages()];
+    return {
+      status: "done",
+      budget: session.runtime.checkBudget(messages),
+      turnCount: session.turnCount,
+      calibrationFactor: session.runtime.calibrationFactor ?? 1,
+      subUsages: session.runtime.subAgentUsages?.(messages) ?? [],
+    };
+  }
+
+  async inspectSecurityExisting(
+    conversationId: string,
+    exists?: ConversationExists,
+  ): Promise<SecurityInspectionResult> {
+    const active = this.sessions.get(conversationId);
+    if (active) {
+      active.lastActiveAt = new Date().toISOString();
+      this.clearGraceTimer(conversationId);
+      return this.inspectSecurity(active);
+    }
+
+    return this.withIdLock(conversationId, async () => {
+      const activeAfterWait = this.sessions.get(conversationId);
+      if (activeAfterWait) {
+        activeAfterWait.lastActiveAt = new Date().toISOString();
+        this.clearGraceTimer(conversationId);
+        return this.inspectSecurity(activeAfterWait);
+      }
+      if (exists && !(await exists())) return { status: "not-found" };
+      const managed = await this.doCreate(conversationId, false);
+      return this.inspectSecurity(managed);
+    });
+  }
+
+  private inspectSecurity(session: ManagedSession): SecurityInspectionResult {
+    if (!session.runtime.securitySnapshot) return { status: "unsupported" };
+    return { status: "done", snapshot: session.runtime.securitySnapshot() };
   }
 
   /**

@@ -111,7 +111,6 @@ const SERVER_VERSION = "0.1.0";
 export interface ServeOptions {
   port?: number;
   host?: string;
-  workspace?: string;
   /** 后台模式：父进程 spawn 一个 detached child 并握手确认就绪 */
   daemon?: boolean;
 }
@@ -149,7 +148,6 @@ function buildForwardedArgs(opts: ServeOptions): string[] {
   const args: string[] = ["serve"];
   if (opts.port !== undefined) args.push("--port", String(opts.port));
   if (opts.host) args.push("--host", opts.host);
-  if (opts.workspace) args.push("--workspace", opts.workspace);
   return args;
 }
 
@@ -251,7 +249,6 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   // serveSkillStore 创建后装配(共享同一锁域与结构版本)。
   const trustDirectory = createTrustDirectory({
     config,
-    cliWorkspace: opts.workspace,
   });
   const memoryDirectory = createMemoryDirectory();
 
@@ -350,7 +347,6 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   //   turn-context provider 注册收拢进 onRuntimeCreated——scheduler 是 lazy ref
   //   （顶层 let schedulerRef），LLM 调用时刻 ref 已就绪；未就绪时 fallback 空状态。
   const runtimeHost = new RuntimeHost({
-    workspace: opts.workspace,
     skillStore: serveSkillStore,
     segmentDeps: serveSegmentDeps,
     extraTools: builtinExtraTools,
@@ -625,7 +621,8 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     skills: createSkillDirectory({ skillStore: serveSkillStore }),
     memory: memoryDirectory,
     hostInfo: {
-      workspace: opts.workspace,
+      // 宿主单点解析的工作区——接入面 @ 补全 root 取此
+      workspace: ephemeralRuntime.resolvedWorkspace.path ?? undefined,
       logPath: isChild ? getDefaultLogPath() : undefined,
     },
     // /mcp 状态显示与接入向导的宿主侧数据面(MCP 连接在宿主)

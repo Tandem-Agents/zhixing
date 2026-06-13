@@ -10,7 +10,7 @@ import {
   renderUsageReport,
   setupInterruptRendering,
 } from "../render.js";
-import type { SubAgentUsageEntry } from "../parse-task-usage.js";
+import type { RuntimeSubAgentUsageEntry } from "@zhixing/server";
 import type { ContextBudget } from "@zhixing/core";
 import type { CliWriter } from "../screen/index.js";
 
@@ -165,7 +165,7 @@ describe("renderUsageReport: 子 agent Task 拆分段", () => {
 
   it("succeeded entry → 显示 ✓ + tokensFmt + tool_uses + duration(秒制)", () => {
     const writer = makeCaptureWriter();
-    const entries: SubAgentUsageEntry[] = [
+    const entries: RuntimeSubAgentUsageEntry[] = [
       {
         index: 1,
         description: "调研模块结构",
@@ -189,7 +189,7 @@ describe("renderUsageReport: 子 agent Task 拆分段", () => {
 
   it("toolUses=1 → 单数 'tool_use'(不带 s)", () => {
     const writer = makeCaptureWriter();
-    const entries: SubAgentUsageEntry[] = [
+    const entries: RuntimeSubAgentUsageEntry[] = [
       {
         index: 1,
         description: "single",
@@ -208,7 +208,7 @@ describe("renderUsageReport: 子 agent Task 拆分段", () => {
 
   it("failed entry → 显示 ⚠ + tokensFmt + (failed) 标识，无 tool_uses 字段", () => {
     const writer = makeCaptureWriter();
-    const entries: SubAgentUsageEntry[] = [
+    const entries: RuntimeSubAgentUsageEntry[] = [
       {
         index: 2,
         description: "查 API",
@@ -229,7 +229,7 @@ describe("renderUsageReport: 子 agent Task 拆分段", () => {
 
   it("aborted entry → 显示 ⏵ + (aborted) 标识", () => {
     const writer = makeCaptureWriter();
-    const entries: SubAgentUsageEntry[] = [
+    const entries: RuntimeSubAgentUsageEntry[] = [
       {
         index: 3,
         description: "总结",
@@ -248,7 +248,7 @@ describe("renderUsageReport: 子 agent Task 拆分段", () => {
 
   it("多 entry → 求和行 Sum 等于各 entry tokens 之和", () => {
     const writer = makeCaptureWriter();
-    const entries: SubAgentUsageEntry[] = [
+    const entries: RuntimeSubAgentUsageEntry[] = [
       {
         index: 1,
         description: "a",
@@ -286,7 +286,7 @@ describe("renderUsageReport: 子 agent Task 拆分段", () => {
   it("description 超过 28 字符 → 截断 + 省略号 …", () => {
     const writer = makeCaptureWriter();
     const longDesc = "a".repeat(50);
-    const entries: SubAgentUsageEntry[] = [
+    const entries: RuntimeSubAgentUsageEntry[] = [
       {
         index: 1,
         description: longDesc,

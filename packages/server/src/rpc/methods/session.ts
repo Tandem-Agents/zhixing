@@ -53,6 +53,8 @@ import {
   type SessionRenameResult,
   type SessionResumeResult,
   type SessionSendResult,
+  type SessionSecurityResult,
+  type SessionUsageResult,
   type SessionSubscribeResult,
   type SessionTaskListAction,
   type SessionTaskListResult,
@@ -688,6 +690,83 @@ export function buildSessionContextBudgetMethod(): MethodEntry {
         turnCount: result.turnCount,
         calibrationFactor: result.calibrationFactor,
       };
+    },
+  };
+}
+
+// ─── session.usage ───
+
+interface SessionUsageParams {
+  conversationId?: string;
+}
+
+/**
+ * /usage 的完整宿主数据面。上下文预算与子 agent/Task 用量拆分来自同一
+ * 当前注意力窗口快照；Task trailer 的解析归运行体实现方，server 只组合结构。
+ */
+export function buildSessionUsageMethod(): MethodEntry {
+  return {
+    name: "session.usage",
+    requiresAuth: true,
+    async handler(rawParams, ctx): Promise<SessionUsageResult> {
+      const params = (rawParams ?? {}) as SessionUsageParams;
+      const conversationId = requireConversationId(params, "session.usage");
+      const manager = requireConversations(ctx.server);
+      const result = await manager.inspectUsageExisting(
+        conversationId,
+        requiredExistingConversationCheck(ctx.server, conversationId),
+      );
+      if (result.status === "not-found") {
+        throw RpcErrors.notFound(`Session not found: ${conversationId}`);
+      }
+      if (result.status === "unsupported") {
+        throw new RpcAppError(
+          RPC_ERROR_CODES.INTERNAL_ERROR,
+          "Runtime does not support usage inspection",
+        );
+      }
+      return {
+        budget: result.budget,
+        turnCount: result.turnCount,
+        calibrationFactor: result.calibrationFactor,
+        subUsages: result.subUsages,
+      };
+    },
+  };
+}
+
+// ─── session.security ───
+
+interface SessionSecurityParams {
+  conversationId?: string;
+}
+
+/**
+ * 当前运行体的安全状态快照——接入面 /security 的数据面。会话不存在不激活
+ * runtime;存在但未活跃时按启动装填激活后读取,与 /usage /context 同纪律。
+ */
+export function buildSessionSecurityMethod(): MethodEntry {
+  return {
+    name: "session.security",
+    requiresAuth: true,
+    async handler(rawParams, ctx): Promise<SessionSecurityResult> {
+      const params = (rawParams ?? {}) as SessionSecurityParams;
+      const conversationId = requireConversationId(params, "session.security");
+      const manager = requireConversations(ctx.server);
+      const result = await manager.inspectSecurityExisting(
+        conversationId,
+        requiredExistingConversationCheck(ctx.server, conversationId),
+      );
+      if (result.status === "not-found") {
+        throw RpcErrors.notFound(`Session not found: ${conversationId}`);
+      }
+      if (result.status === "unsupported") {
+        throw new RpcAppError(
+          RPC_ERROR_CODES.INTERNAL_ERROR,
+          "Runtime does not support security inspection",
+        );
+      }
+      return result.snapshot;
     },
   };
 }

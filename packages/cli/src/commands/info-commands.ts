@@ -1,54 +1,48 @@
 /**
  * info 域命令注册 —— 只读展示类命令的模块化原子注册（范式同 registerTaskCommands）。
  *
- * 覆盖 /help /status /me /model /usage /context /journal /people /tasks。代码模块按
- * "只读展示"语义内聚，与各命令的 `CommandDef.category`（/help 分组字段，沿用现值）正交：
- * journal/people/tasks 的 category 仍是 "tools"，只是注册代码归在 info 模块。
- *
- * deps 注入契约：reload / 模式切换会替换 `session.runtime` 与 `state.conv`，故对它们的
- * 访问一律以 getter 注入、handler 在调用时读取最新值（值捕获会与 getter 分叉）；registry /
- * dispatcher / writer 是稳定单例，直接注入。
+ * 覆盖 /help /status /me /model /usage /context /journal /people /tasks。
+ * 运行时信息(上下文预算 / journal / people)的权威在核心宿主——经会话与
+ * 管理面 RPC 取;模型 / provider 显示取本地配置(宿主按同一配置装配)。
+ * /me 读本地身份画像(纯只读展示,不构造任何记忆域写仓)。
  */
 
 import chalk from "chalk";
 import {
   loadProfile,
   getMemoryDir,
-  JournalStore,
-  PeopleStore,
   isInternal,
-  type Message,
   type SchedulerFacade,
   type ICommandRegistry,
   type CommandDispatcher,
   type CommandHandlerContext,
   type CommandDef,
   type CommandCategory,
+  type PersonEntry,
 } from "@zhixing/core";
-import type { AgentRuntime } from "@zhixing/orchestrator/runtime";
+import type { ZhixingConfig } from "@zhixing/providers";
 import type { ProxyDescription } from "@zhixing/network";
 import { renderUsageReport, renderContextVisual } from "../render.js";
-import { parseTaskUsageFromMessages } from "../parse-task-usage.js";
 import { layout } from "../tui/style.js";
 import type { CliWriter } from "../screen/index.js";
+import type { RpcManagementFacade } from "../runtime/rpc-management-facade.js";
+import type { ConversationController } from "../runtime/conversation-controller.js";
 import { formatRelativeTime } from "./format.js";
 
 export interface InfoCommandsDeps {
   readonly registry: ICommandRegistry;
   readonly dispatcher: CommandDispatcher;
   readonly writer: CliWriter;
-  /** session.runtime —— reload / 模式切换会 swap，以 getter 注入按调用时读最新实例。 */
-  readonly getRuntime: () => AgentRuntime;
-  /** 当前对话消息（/status·/usage·/context；对话切换 / turn 会变）。 */
-  readonly getMessages: () => readonly Message[];
-  /** 当前对话 id（/status）。 */
-  readonly getConversationId: () => string | null;
-  /** 当前 turn 计数（/model·/usage）。 */
-  readonly getTurnCounter: () => number;
+  /** 本地配置——模型 / provider 显示来源;配置热重载后由 getter 读最新快照。 */
+  readonly getConfig: () => ZhixingConfig;
+  /** 会话控制器——当前对话指针与上下文预算(经宿主)的入口 */
+  readonly controller: ConversationController;
   /** 网络代理诊断（/status，display 字段已脱敏）。 */
   readonly getNetworkProxy: () => ProxyDescription;
   /** 调度门面（/tasks 读 scheduler.json 投影，cli 无本地 scheduler）。 */
   readonly getScheduler: () => SchedulerFacade;
+  /** 管理面门面(/journal /people 经宿主只读执行体)。 */
+  readonly management: RpcManagementFacade;
 }
 
 // /help 命令地图的分类显示顺序 + 中文标签——命令分类展示的单一来源。registry.list 已
@@ -133,6 +127,13 @@ function formatTaskSchedule(schedule: {
 
 export function registerInfoCommands(deps: InfoCommandsDeps): void {
   const { registry, dispatcher, writer } = deps;
+  const getModelView = (): { modelDisplay: string; providerDisplay: string } => {
+    const config = deps.getConfig();
+    return {
+      modelDisplay: config.llm?.main?.model ?? "(未配置)",
+      providerDisplay: config.llm?.main?.provider ?? "(未配置)",
+    };
+  };
 
   // /help —— registry 的消费者：把当前命令集渲染成命令地图，按 ctx 过滤 hidden + visibility。
   registry.register({
@@ -157,9 +158,6 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
     tag: "builtin",
   });
   dispatcher.registerHandler("status:repl", () => {
-    const messages = deps.getMessages();
-    const userMsgs = messages.filter((m) => m.role === "user").length;
-    const assistantMsgs = messages.filter((m) => m.role === "assistant").length;
     // ProxyDescription.display 已脱敏（含凭证 URL 安全显示）+ 区分四态 off / auto+null /
     // auto+url / explicit—— mode=auto+null 时 dim 灰色提示直连，其他状态正常色。
     const proxy = deps.getNetworkProxy();
@@ -167,12 +165,16 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
       proxy.resolved === null && proxy.mode === "auto"
         ? chalk.dim(proxy.display)
         : proxy.display;
-    const runtime = deps.getRuntime();
+    const current = deps.controller.current;
+    const modeText =
+      current.mode.kind === "workscene"
+        ? ` ${chalk.dim(`(工作场景: ${current.mode.sceneName})`)}`
+        : "";
+    const { modelDisplay, providerDisplay } = getModelView();
     writer.line(
-      `\n  ${chalk.dim("Session:")} ${deps.getConversationId() ?? "(未保存)"}` +
-        `\n  ${chalk.dim("Messages:")} ${messages.length} (${userMsgs} user, ${assistantMsgs} assistant)` +
-        `\n  ${chalk.dim("Model:")} ${chalk.cyan(runtime.model)}` +
-        `\n  ${chalk.dim("Provider:")} ${runtime.providerId}` +
+      `\n  ${chalk.dim("Session:")} ${current.name}${modeText}` +
+        `\n  ${chalk.dim("Model:")} ${chalk.cyan(modelDisplay)}` +
+        `\n  ${chalk.dim("Provider:")} ${providerDisplay}` +
         `\n  ${chalk.dim("Network proxy:")} ${proxyText}\n`,
     );
     return {};
@@ -230,11 +232,10 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
     tag: "builtin",
   });
   dispatcher.registerHandler("model:repl", () => {
-    const runtime = deps.getRuntime();
+    const { modelDisplay, providerDisplay } = getModelView();
     writer.line(
-      `\n  ${chalk.dim("Model:")} ${chalk.cyan(runtime.model)}` +
-        `\n  ${chalk.dim("Provider:")} ${runtime.providerId}` +
-        `\n  ${chalk.dim("Turns:")} ${deps.getTurnCounter()}\n`,
+      `\n  ${chalk.dim("Model:")} ${chalk.cyan(modelDisplay)}` +
+        `\n  ${chalk.dim("Provider:")} ${providerDisplay}\n`,
     );
     return {};
   });
@@ -247,20 +248,23 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
     execution: "local",
     tag: "builtin",
   });
-  dispatcher.registerHandler("usage:repl", () => {
-    const runtime = deps.getRuntime();
-    const messages = deps.getMessages();
-    const budget = runtime.checkBudget(messages);
-    // 解析 transcript 中所有 Task 工具的 <usage> trailer —— 没有 Task 调用时
-    // parseTaskUsageFromMessages 返回空数组，renderUsageReport 自动跳过子段。
-    const subUsages = parseTaskUsageFromMessages(messages);
-    renderUsageReport(
-      budget,
-      deps.getTurnCounter(),
-      runtime.calibrationFactor,
-      subUsages,
-      writer,
-    );
+  dispatcher.registerHandler("usage:repl", async () => {
+    try {
+      const view = await deps.controller.usage();
+      renderUsageReport(
+        view.budget,
+        view.turnCount,
+        view.calibrationFactor,
+        view.subUsages,
+        writer,
+      );
+    } catch (err) {
+      writer.line(
+        chalk.red(
+          `\n  用量信息不可用: ${err instanceof Error ? err.message : String(err)}\n`,
+        ),
+      );
+    }
     return {};
   });
 
@@ -272,9 +276,17 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
     execution: "local",
     tag: "builtin",
   });
-  dispatcher.registerHandler("context:repl", () => {
-    const budget = deps.getRuntime().checkBudget(deps.getMessages());
-    renderContextVisual(budget, writer);
+  dispatcher.registerHandler("context:repl", async () => {
+    try {
+      const view = await deps.controller.contextBudget();
+      renderContextVisual(view.budget, writer);
+    } catch (err) {
+      writer.line(
+        chalk.red(
+          `\n  上下文信息不可用: ${err instanceof Error ? err.message : String(err)}\n`,
+        ),
+      );
+    }
     return {};
   });
 
@@ -287,9 +299,17 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
     tag: "builtin",
   });
   dispatcher.registerHandler("journal:repl", async () => {
-    const jStore = new JournalStore();
-    const plan = await jStore.scan();
-    const { stats, condensePlan, expiredFiles } = plan;
+    const view = (await deps.management.journalStats()) as {
+      stats: {
+        totalFiles: number;
+        hotCount: number;
+        warmCount: number;
+        condensedCount: number;
+      };
+      condense: { months: number; files: number } | null;
+      expiredCount: number;
+    };
+    const { stats } = view;
 
     if (stats.totalFiles === 0) {
       writer.line(
@@ -305,18 +325,13 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
     writer.line(`  ${chalk.yellow("●")} 温 (>30天): ${stats.warmCount}`);
     writer.line(`  ${chalk.blue("●")} 凝练: ${stats.condensedCount}`);
 
-    if (expiredFiles.length > 0) {
-      writer.line(`  ${chalk.red("●")} 过期待删除: ${expiredFiles.length}`);
+    if (view.expiredCount > 0) {
+      writer.line(`  ${chalk.red("●")} 过期待删除: ${view.expiredCount}`);
     }
-    if (condensePlan) {
-      const monthCount = condensePlan.months.length;
-      const fileCount = condensePlan.months.reduce(
-        (sum: number, m: { files: string[] }) => sum + m.files.length,
-        0,
-      );
+    if (view.condense) {
       writer.line(
         chalk.dim(
-          `\n  💡 ${fileCount} 条日志（${monthCount} 个月）待凝练，首轮对话后自动执行`,
+          `\n  💡 ${view.condense.files} 条日志（${view.condense.months} 个月）待凝练，首轮对话后自动执行`,
         ),
       );
     }
@@ -333,8 +348,7 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
     tag: "builtin",
   });
   dispatcher.registerHandler("people:repl", async () => {
-    const store = new PeopleStore();
-    const people = await store.listAll();
+    const people = (await deps.management.peopleList()) as PersonEntry[];
 
     if (people.length === 0) {
       writer.line(

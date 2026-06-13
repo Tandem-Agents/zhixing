@@ -24,7 +24,11 @@ import {
   type IToolArgumentExtractor,
   type LLMRole,
   type MutableToolBoundaryRegistry,
+  type PermissionContextId,
+  type PermissionRule,
+  type RiskLevel,
   type ResolvedRoleThinking,
+  type SecurityRule,
   type ThinkingConfig,
   type ToolDefinition,
   type TurnContext,
@@ -108,6 +112,10 @@ import {
 import { trackMessages } from "./track-messages.js";
 import { runContextStorage } from "./run-context.js";
 import { createTaskTool } from "../tools/task.js";
+import {
+  parseTaskUsageFromMessages,
+  type TaskUsageEntry,
+} from "../tools/task-usage.js";
 import type {
   AgentRuntimeLifecycle,
   LifecycleContextBase,
@@ -248,6 +256,10 @@ export interface AgentRuntime {
    * 用于质量敏感的单发任务（如 MCP 接入的标识 → 连接方式推断）。
    */
   callText: (prompt: string, role?: "main" | "light") => Promise<string>;
+  /** 当前消息列表里的 Task/sub-agent 用量拆分(/usage 的结构化数据面)。 */
+  subAgentUsages: (messages: readonly Message[]) => readonly TaskUsageEntry[];
+  /** 当前运行体安全状态只读快照（/security 的宿主数据面）。 */
+  securitySnapshot: () => RuntimeSecuritySnapshot;
   /** 当前 Token 估算器的校准因子（1.0 = 未校准） */
   readonly calibrationFactor: number;
   /** 安全管线（用于 /trust /security 命令访问权限规则、审计日志等） */
@@ -303,6 +315,19 @@ export interface AgentRuntime {
    * agent-loop 的 windowLifecycle.onChange 驱动。
    */
   onAttentionWindowChange(reason: AttentionWindowChangeReason): Promise<void>;
+}
+
+export interface RuntimeSecuritySnapshot {
+  readonly contextId: PermissionContextId;
+  readonly workspacePath: string | null;
+  readonly permissionRules: readonly PermissionRule[];
+  readonly builtinRules: readonly SecurityRule[];
+  readonly rateLimits: readonly { key: string; used: number; limit: number }[];
+  readonly confirmations: readonly {
+    key: string;
+    count: number;
+    highestRisk: RiskLevel;
+  }[];
 }
 
 export interface ForceCompactResult {
@@ -1068,6 +1093,10 @@ export async function createAgentRuntime(
       );
     },
 
+    subAgentUsages(messages: readonly Message[]): readonly TaskUsageEntry[] {
+      return parseTaskUsageFromMessages(messages);
+    },
+
     async callText(prompt: string, role: "main" | "light" = "light"): Promise<string> {
       // 单发 LLM 文本调用入口（无对话历史，独立 ChatRequest 隔离）。按 role 复用已装配
       // 的角色通道 TextCallLLMFn：默认 light（工作场景纪要 / 日志凝练等轻量任务，与
@@ -1075,6 +1104,21 @@ export async function createAgentRuntime(
       // 接入标识推断，带 mainThinking）。
       const caller = role === "main" ? mainCallLLM : lightCallLLM;
       return caller([userMessage(prompt)]);
+    },
+
+    securitySnapshot(): RuntimeSecuritySnapshot {
+      const contextId = securityPipeline.getContextId();
+      return {
+        contextId,
+        workspacePath: securityPipeline.getWorkspace(),
+        permissionRules: securityPipeline.getPermissionStore().list(contextId),
+        builtinRules: securityPipeline.getPolicyEngine().getActiveRules(),
+        rateLimits: securityPipeline
+          .getExecutionGuard()
+          .getRateLimiter()
+          .snapshot(),
+        confirmations: securityPipeline.getConfirmationTracker().snapshot(),
+      };
     },
 
     async forceCompact(messages: Message[], turnCount: number): Promise<ForceCompactResult> {
