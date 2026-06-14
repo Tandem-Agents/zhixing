@@ -64,6 +64,7 @@ import { renderFarewell } from "./farewell/index.js";
 import {
   CoreHostConnection,
   defaultCoreHostConnectionDeps,
+  type CoreHostLifecycleNotice,
 } from "./runtime/core-host-connection.js";
 import { RpcSchedulerFacade } from "./runtime/rpc-scheduler-facade.js";
 import { RpcConversationFacade } from "./runtime/rpc-conversation-facade.js";
@@ -80,6 +81,7 @@ import { createCandidateDeleteHandler } from "./runtime/candidate-delete-control
 import { ReplLocalView } from "./runtime/repl-local-view.js";
 import { TerminalConfirmationRenderer } from "./security/index.js";
 import { createReplInterruptRuntime } from "./interrupt/repl-runtime.js";
+import { renderReadOnlyConversationBrowser } from "./runtime/read-only-conversation-browser.js";
 
 // ─── REPL 状态 ───
 
@@ -95,6 +97,78 @@ interface ReplState {
    * 执行前 await 它(切换天然落在 turn 边界)。
    */
   activeTurnPromise: Promise<unknown> | null;
+}
+
+function renderCoreHostLifecycleNotice(
+  writer: CliWriter,
+  notice: CoreHostLifecycleNotice,
+): void {
+  if (notice.kind === "reconnected") {
+    writer.line(
+      chalk.yellow(
+        `${layout.contentPrefix}核心宿主连接已恢复，当前会话会重新订阅。`,
+      ),
+    );
+    return;
+  }
+  if (notice.kind === "host-replaced") {
+    writer.line(
+      chalk.yellow(
+        `${layout.contentPrefix}核心宿主已换代完成，当前会话会继续使用新宿主。`,
+      ),
+    );
+    return;
+  }
+  const suffix =
+    notice.connectionCount === undefined
+      ? "活跃接入面数量暂不可确认，已保守保持旧宿主运行。"
+      : `还有 ${Math.max(0, notice.connectionCount - 1)} 个其它接入面在线，稍后会自动换代。`;
+  writer.line(
+    chalk.yellow(
+      `${layout.contentPrefix}核心宿主版本待更新：当前 ${notice.serverVersion}，cli ${notice.clientVersion}；${suffix}`,
+    ),
+  );
+}
+
+async function ensureCoreHostWithReadOnlyFallback(
+  coreHost: CoreHostConnection,
+  writer: CliWriter,
+): Promise<boolean> {
+  let lastError: unknown;
+  while (true) {
+    try {
+      await coreHost.ensure();
+      if (lastError !== undefined) {
+        writer.line(chalk.green(`${layout.contentPrefix}核心宿主已恢复，继续进入对话。`));
+      }
+      return true;
+    } catch (err) {
+      lastError = err;
+      await renderReadOnlyConversationBrowser({ writer, error: err });
+      if (!process.stdin.isTTY) return false;
+
+      const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+        terminal: true,
+      });
+      try {
+        const answer = (
+          await rl.question(
+            chalk.green(`${layout.contentPrefix}宿主不可用，按 Enter 重试，输入 q 退出：`),
+          )
+        )
+          .trim()
+          .toLowerCase();
+        if (answer === "q" || answer === "quit" || answer === "exit") {
+          return false;
+        }
+      } finally {
+        rl.close();
+      }
+      writer.line("");
+    }
+  }
 }
 
 // ─── REPL 启动语义 ───
@@ -205,7 +279,11 @@ export async function startRepl(): Promise<void> {
 
   // 核心宿主连接 —— cli 进程级唯一(连接即接入面身份单位):调度 / 会话 / 确认 /
   // 管理域经各自 facade 共用这一条已认证连接;释放在退出链(本入口持有)。
-  const coreHost = new CoreHostConnection(defaultCoreHostConnectionDeps());
+  const coreHost = new CoreHostConnection({
+    ...defaultCoreHostConnectionDeps(),
+    onLifecycleNotice: (notice) =>
+      renderCoreHostLifecycleNotice(cliWriter, notice),
+  });
 
   // 各方法域门面——facade 不持连接,只做方法域封装。
   const schedulerFacade = new RpcSchedulerFacade({ connection: coreHost });
@@ -217,18 +295,9 @@ export async function startRepl(): Promise<void> {
   void credentials;
 
   // 会话本身在宿主执行——宿主必须在场,启动即 ensure(不在则拉起)。
-  // 拉起 / 连接失败时给出修复指引退出(只读浏览降级态随故障面单元落地)。
-  try {
-    await coreHost.ensure();
-  } catch (err) {
-    cliWriter.line(
-      chalk.red(
-        `\nzhixing: 核心宿主不可用,无法开始对话: ${err instanceof Error ? err.message : String(err)}`,
-      ),
-    );
-    cliWriter.line(
-      chalk.dim("  可尝试 `zhixing serve --check` 诊断配置,或查看宿主日志。\n"),
-    );
+  // 拉起 / 连接 / 协议失败时进入只读事实面，不启动任何会话写路径。
+  const startupFallbackWriter = renderScreen ? createStdoutWriter() : cliWriter;
+  if (!(await ensureCoreHostWithReadOnlyFallback(coreHost, startupFallbackWriter))) {
     renderScreen?.dispose();
     process.exit(1);
   }
@@ -413,6 +482,12 @@ export async function startRepl(): Promise<void> {
     await syncTaskListView(controller.current.conversationId);
     taskTail?.refresh();
   };
+  coreHost.onLifecycleNotice(async (notice) => {
+    if (notice.kind === "version-pending") return;
+    if (notice.kind === "reconnected" && notice.reason === "manual-reconnect") return;
+    await controller.reattachActiveObserver();
+    await syncCurrentTaskListView();
+  });
   conversationFacade.onChanged((p) => {
     if (p.change === "taskList") {
       taskListView.apply(p.conversationId, p.taskList);

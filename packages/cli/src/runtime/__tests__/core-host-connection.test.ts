@@ -29,17 +29,30 @@ const nextEndpoint: ServerEndpoint = {
   },
 };
 
-function makeFakeClient() {
+function makeFakeClient(opts: {
+  connect?: () => Promise<void>;
+  authenticate?: () => Promise<{
+    protocol: number;
+    protocolRange?: { min: number; max: number };
+    server: { version: string };
+    capabilities: string[];
+  }>;
+  request?: (method: string, params?: unknown) => Promise<unknown>;
+} = {}) {
   let closed = false;
   const handlers = new Map<string, Array<(p: unknown) => void>>();
   const client = {
-    connect: vi.fn(async () => {}),
-    authenticate: vi.fn(async () => ({
-      protocol: 1,
-      server: { version: "test" },
-      capabilities: [] as string[],
-    })),
-    request: vi.fn(async () => ({})),
+    connect: vi.fn(opts.connect ?? (async () => {})),
+    authenticate: vi.fn(
+      opts.authenticate ??
+        (async () => ({
+          protocol: 1,
+          protocolRange: { min: 1, max: 1 },
+          server: { version: "0.1.0" },
+          capabilities: [] as string[],
+        })),
+    ),
+    request: vi.fn(opts.request ?? (async () => ({}))),
     onNotification: vi.fn((m: string, h: (p: unknown) => void) => {
       const arr = handlers.get(m) ?? [];
       arr.push(h);
@@ -77,8 +90,416 @@ describe("CoreHostConnection", () => {
     const got = await conn.getClient();
     expect(got).toBe(asClient(client));
     expect(client.connect).toHaveBeenCalledOnce();
-    expect(client.authenticate).toHaveBeenCalledWith("tok");
+    expect(client.authenticate).toHaveBeenCalledWith("tok", {
+      id: "zhixing-cli",
+      version: "0.1.0",
+    });
     expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it("协议不兼容 → 阻断可写连接且不替换宿主", async () => {
+    const client = makeFakeClient({
+      authenticate: async () => ({
+        protocol: 2,
+        protocolRange: { min: 2, max: 2 },
+        server: { version: "0.1.0" },
+        capabilities: [],
+      }),
+    });
+    const stopUnresponsiveHost = vi.fn(async () => ({ ok: true }));
+    const spawn = vi.fn(async () => ({ ok: true }));
+    const conn = new CoreHostConnection({
+      discover: async () => endpoint,
+      spawn,
+      stopUnresponsiveHost,
+      createClient: () => asClient(client),
+    });
+
+    await expect(conn.getClient()).rejects.toThrow(/RPC 协议不兼容/);
+    expect(stopUnresponsiveHost).not.toHaveBeenCalled();
+    expect(spawn).not.toHaveBeenCalled();
+    expect(client.close).toHaveBeenCalledOnce();
+    expect(conn.getStatus()).toEqual({ kind: "disconnected" });
+  });
+
+  it("旧版本宿主且无其它活跃接入面 → 请求优雅退出、拉起新宿主并连接", async () => {
+    const c1 = makeFakeClient({
+      authenticate: async () => ({
+        protocol: 1,
+        protocolRange: { min: 1, max: 1 },
+        server: { version: "0.0.9" },
+        capabilities: ["session"],
+      }),
+      request: async (method) => {
+        if (method === "server.info") {
+          return { version: "0.0.9", protocol: 1, connectionCount: 1 };
+        }
+        if (method === "server.shutdown") {
+          return { accepted: true };
+        }
+        return {};
+      },
+    });
+    const c2 = makeFakeClient();
+    const clients = [c1, c2];
+    let i = 0;
+    let currentEndpoint = endpoint;
+    const notices: unknown[] = [];
+    const discover = vi.fn(async () => currentEndpoint);
+    const spawn = vi.fn(async () => {
+      currentEndpoint = nextEndpoint;
+      return { ok: true };
+    });
+    const sleep = vi.fn(async () => {
+      currentEndpoint = nextEndpoint;
+    });
+    const conn = new CoreHostConnection({
+      discover,
+      spawn,
+      createClient: () => asClient(clients[i++]!),
+      sleep,
+      onLifecycleNotice: (notice) => notices.push(notice),
+    });
+
+    const got = await conn.getClient();
+
+    expect(got).toBe(asClient(c2));
+    expect(c1.request).toHaveBeenCalledWith("server.shutdown", {
+      reason: "client-version-change",
+    });
+    expect(c1.close).toHaveBeenCalled();
+    expect(spawn).toHaveBeenCalledOnce();
+    expect(sleep).toHaveBeenCalledWith(100);
+    expect(conn.getStatus()).toMatchObject({
+      kind: "connected",
+      serverVersion: "0.1.0",
+      versionState: "current",
+    });
+    expect(notices).toContainEqual({
+      kind: "host-replaced",
+      reason: "version-mismatch",
+      oldVersion: "0.0.9",
+      newVersion: "0.1.0",
+    });
+  });
+
+  it("host-replaced 通知在新连接成为当前连接后发出，handler 可安全重入 getClient", async () => {
+    const c1 = makeFakeClient({
+      authenticate: async () => ({
+        protocol: 1,
+        protocolRange: { min: 1, max: 1 },
+        server: { version: "0.0.9" },
+        capabilities: ["session"],
+      }),
+      request: async (method) => {
+        if (method === "server.info") {
+          return { version: "0.0.9", protocol: 1, connectionCount: 1 };
+        }
+        if (method === "server.shutdown") return { accepted: true };
+        return {};
+      },
+    });
+    const c2 = makeFakeClient();
+    const clients = [c1, c2];
+    let i = 0;
+    let currentEndpoint = endpoint;
+    let conn!: CoreHostConnection;
+    let clientSeenByNotice: RpcClient | null = null;
+    const sleep = vi.fn(async () => {
+      currentEndpoint = nextEndpoint;
+    });
+    conn = new CoreHostConnection({
+      discover: vi.fn(async () => currentEndpoint),
+      spawn: vi.fn(async () => {
+        currentEndpoint = nextEndpoint;
+        return { ok: true };
+      }),
+      createClient: () => asClient(clients[i++]!),
+      sleep,
+      onLifecycleNotice: async (notice) => {
+        if (notice.kind === "host-replaced") {
+          clientSeenByNotice = await conn.getClient();
+        }
+      },
+    });
+
+    const got = await conn.getClient();
+
+    expect(got).toBe(asClient(c2));
+    expect(clientSeenByNotice).toBe(asClient(c2));
+  });
+
+  it("host-replaced 等待异步生命周期订阅者完成后才返回连接", async () => {
+    const c1 = makeFakeClient({
+      authenticate: async () => ({
+        protocol: 1,
+        protocolRange: { min: 1, max: 1 },
+        server: { version: "0.0.9" },
+        capabilities: ["session"],
+      }),
+      request: async (method) => {
+        if (method === "server.info") {
+          return { version: "0.0.9", protocol: 1, connectionCount: 1 };
+        }
+        if (method === "server.shutdown") return { accepted: true };
+        return {};
+      },
+    });
+    const c2 = makeFakeClient();
+    const clients = [c1, c2];
+    let i = 0;
+    let currentEndpoint = endpoint;
+    let releaseNotice!: () => void;
+    const noticeGate = new Promise<void>((resolve) => {
+      releaseNotice = resolve;
+    });
+    let noticeCompleted = false;
+    let resolved = false;
+    const sleep = vi.fn(async () => {
+      currentEndpoint = nextEndpoint;
+    });
+    const conn = new CoreHostConnection({
+      discover: vi.fn(async () => currentEndpoint),
+      spawn: vi.fn(async () => {
+        currentEndpoint = nextEndpoint;
+        return { ok: true };
+      }),
+      createClient: () => asClient(clients[i++]!),
+      sleep,
+      onLifecycleNotice: async (notice) => {
+        if (notice.kind === "host-replaced") {
+          await noticeGate;
+          noticeCompleted = true;
+        }
+      },
+    });
+
+    const pending = conn.getClient().then((client) => {
+      resolved = true;
+      return client;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(resolved).toBe(false);
+    expect(noticeCompleted).toBe(false);
+    releaseNotice();
+    await expect(pending).resolves.toBe(asClient(c2));
+    expect(resolved).toBe(true);
+    expect(noticeCompleted).toBe(true);
+  });
+
+  it("生命周期通知订阅者失败不阻断连接，也不影响后续订阅者", async () => {
+    const c1 = makeFakeClient({
+      authenticate: async () => ({
+        protocol: 1,
+        protocolRange: { min: 1, max: 1 },
+        server: { version: "0.0.9" },
+        capabilities: ["session"],
+      }),
+      request: async (method) => {
+        if (method === "server.info") {
+          return { version: "0.0.9", protocol: 1, connectionCount: 1 };
+        }
+        if (method === "server.shutdown") return { accepted: true };
+        return {};
+      },
+    });
+    const c2 = makeFakeClient();
+    const clients = [c1, c2];
+    let i = 0;
+    let currentEndpoint = endpoint;
+    const seen: unknown[] = [];
+    const sleep = vi.fn(async () => {
+      currentEndpoint = nextEndpoint;
+    });
+    const conn = new CoreHostConnection({
+      discover: vi.fn(async () => currentEndpoint),
+      spawn: vi.fn(async () => {
+        currentEndpoint = nextEndpoint;
+        return { ok: true };
+      }),
+      createClient: () => asClient(clients[i++]!),
+      sleep,
+      onLifecycleNotice: () => {
+        throw new Error("notice renderer failed");
+      },
+    });
+    conn.onLifecycleNotice((notice) => seen.push(notice));
+
+    await expect(conn.getClient()).resolves.toBe(asClient(c2));
+
+    expect(conn.getStatus()).toMatchObject({
+      kind: "connected",
+      serverVersion: "0.1.0",
+      versionState: "current",
+    });
+    expect(seen).toContainEqual({
+      kind: "host-replaced",
+      reason: "version-mismatch",
+      oldVersion: "0.0.9",
+      newVersion: "0.1.0",
+    });
+  });
+
+  it("旧版本宿主但有其它活跃接入面 → 保持连接并标记待更新", async () => {
+    const client = makeFakeClient({
+      authenticate: async () => ({
+        protocol: 1,
+        protocolRange: { min: 1, max: 1 },
+        server: { version: "0.0.9" },
+        capabilities: ["session"],
+      }),
+      request: async (method) => {
+        if (method === "server.info") {
+          return { version: "0.0.9", protocol: 1, connectionCount: 2 };
+        }
+        return {};
+      },
+    });
+    const notices: unknown[] = [];
+    const spawn = vi.fn(async () => ({ ok: true }));
+    const conn = new CoreHostConnection({
+      discover: async () => endpoint,
+      spawn,
+      createClient: () => asClient(client),
+      onLifecycleNotice: (notice) => notices.push(notice),
+    });
+
+    await expect(conn.getClient()).resolves.toBe(asClient(client));
+
+    expect(spawn).not.toHaveBeenCalled();
+    expect(client.request).not.toHaveBeenCalledWith(
+      "server.shutdown",
+      expect.anything(),
+    );
+    expect(conn.getStatus()).toMatchObject({
+      kind: "connected",
+      serverVersion: "0.0.9",
+      versionState: "pending-update",
+      connectionCount: 2,
+    });
+    expect(notices).toContainEqual({
+      kind: "version-pending",
+      clientVersion: "0.1.0",
+      serverVersion: "0.0.9",
+      connectionCount: 2,
+    });
+  });
+
+  it("旧版本宿主待更新后，其它接入面离开时自动换代", async () => {
+    let infoCalls = 0;
+    const c1 = makeFakeClient({
+      authenticate: async () => ({
+        protocol: 1,
+        protocolRange: { min: 1, max: 1 },
+        server: { version: "0.0.9" },
+        capabilities: ["session"],
+      }),
+      request: async (method) => {
+        if (method === "server.info") {
+          infoCalls += 1;
+          return {
+            version: "0.0.9",
+            protocol: 1,
+            connectionCount: infoCalls === 1 ? 2 : 1,
+          };
+        }
+        if (method === "server.shutdown") return { accepted: true };
+        return {};
+      },
+    });
+    const c2 = makeFakeClient();
+    const clients = [c1, c2];
+    let i = 0;
+    let currentEndpoint = endpoint;
+    const notices: unknown[] = [];
+    const sleep = vi.fn(async () => {
+      currentEndpoint = nextEndpoint;
+    });
+    const spawn = vi.fn(async () => {
+      currentEndpoint = nextEndpoint;
+      return { ok: true };
+    });
+    const conn = new CoreHostConnection({
+      discover: vi.fn(async () => currentEndpoint),
+      spawn,
+      createClient: () => asClient(clients[i++]!),
+      sleep,
+      versionRecheckIntervalMs: 1,
+      onLifecycleNotice: (notice) => notices.push(notice),
+    });
+
+    try {
+      await expect(conn.getClient()).resolves.toBe(asClient(c1));
+      expect(conn.getStatus()).toMatchObject({
+        serverVersion: "0.0.9",
+        versionState: "pending-update",
+        connectionCount: 2,
+      });
+
+      await vi.waitFor(() => {
+        expect(conn.getStatus()).toMatchObject({
+          serverVersion: "0.1.0",
+          versionState: "current",
+        });
+      });
+
+      expect(c1.request).toHaveBeenCalledWith("server.shutdown", {
+        reason: "client-version-change",
+      });
+      expect(c1.close).toHaveBeenCalled();
+      expect(spawn).toHaveBeenCalledOnce();
+      expect(notices).toContainEqual({
+        kind: "host-replaced",
+        reason: "version-mismatch",
+        oldVersion: "0.0.9",
+        newVersion: "0.1.0",
+      });
+    } finally {
+      await conn.dispose();
+    }
+  });
+
+  it("旧版本宿主但 server.info 不可读 → 保守保持连接并标记待更新", async () => {
+    const client = makeFakeClient({
+      authenticate: async () => ({
+        protocol: 1,
+        protocolRange: { min: 1, max: 1 },
+        server: { version: "0.0.9" },
+        capabilities: ["session"],
+      }),
+      request: async (method) => {
+        if (method === "server.info") throw new Error("info unavailable");
+        if (method === "server.shutdown") throw new Error("must not shutdown");
+        return {};
+      },
+    });
+    const notices: unknown[] = [];
+    const spawn = vi.fn(async () => ({ ok: true }));
+    const conn = new CoreHostConnection({
+      discover: async () => endpoint,
+      spawn,
+      createClient: () => asClient(client),
+      onLifecycleNotice: (notice) => notices.push(notice),
+    });
+
+    await expect(conn.getClient()).resolves.toBe(asClient(client));
+
+    expect(spawn).not.toHaveBeenCalled();
+    expect(client.request).not.toHaveBeenCalledWith(
+      "server.shutdown",
+      expect.anything(),
+    );
+    expect(conn.getStatus()).toMatchObject({
+      kind: "connected",
+      serverVersion: "0.0.9",
+      versionState: "pending-update",
+    });
+    expect(notices).toContainEqual({
+      kind: "version-pending",
+      clientVersion: "0.1.0",
+      serverVersion: "0.0.9",
+    });
   });
 
   it("发现不到则拉起宿主再连", async () => {
@@ -135,6 +556,121 @@ describe("CoreHostConnection", () => {
     const got = await conn.getClient();
     expect(got).toBe(asClient(c2));
     expect(discover).toHaveBeenCalledTimes(2);
+  });
+
+  it("发现到 PID 存活但连接不可用 → 清理旧宿主、拉起新宿主并连接新 endpoint", async () => {
+    const c1 = makeFakeClient({
+      connect: async () => {
+        throw new Error("connect timeout");
+      },
+    });
+    const c2 = makeFakeClient();
+    const clients = [c1, c2];
+    let i = 0;
+    let currentEndpoint = endpoint;
+    const discover = vi.fn(async () => currentEndpoint);
+    const stopUnresponsiveHost = vi.fn(async () => ({ ok: true }));
+    const spawn = vi.fn(async () => {
+      currentEndpoint = nextEndpoint;
+      return { ok: true };
+    });
+    const conn = new CoreHostConnection({
+      discover,
+      spawn,
+      stopUnresponsiveHost,
+      createClient: () => asClient(clients[i++]!),
+    });
+
+    const got = await conn.getClient();
+
+    expect(got).toBe(asClient(c2));
+    expect(stopUnresponsiveHost).toHaveBeenCalledOnce();
+    expect(stopUnresponsiveHost).toHaveBeenCalledWith(
+      endpoint,
+      expect.any(Error),
+    );
+    expect(spawn).toHaveBeenCalledOnce();
+    expect(discover).toHaveBeenCalledTimes(3);
+    expect(c1.close).toHaveBeenCalledOnce();
+    expect(c2.authenticate).toHaveBeenCalledWith("tok", {
+      id: "zhixing-cli",
+      version: "0.1.0",
+    });
+  });
+
+  it("僵死清理后发现锁已换代 → 直接连接新 endpoint，不再拉起宿主", async () => {
+    const c1 = makeFakeClient({
+      connect: async () => {
+        throw new Error("connect timeout");
+      },
+    });
+    const c2 = makeFakeClient();
+    const clients = [c1, c2];
+    let i = 0;
+    let currentEndpoint = endpoint;
+    const stopUnresponsiveHost = vi.fn(async () => {
+      currentEndpoint = nextEndpoint;
+      return { ok: true };
+    });
+    const spawn = vi.fn(async () => ({ ok: true }));
+    const conn = new CoreHostConnection({
+      discover: vi.fn(async () => currentEndpoint),
+      spawn,
+      stopUnresponsiveHost,
+      createClient: () => asClient(clients[i++]!),
+    });
+
+    await expect(conn.getClient()).resolves.toBe(asClient(c2));
+
+    expect(stopUnresponsiveHost).toHaveBeenCalledWith(
+      endpoint,
+      expect.any(Error),
+    );
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it("僵死宿主清理失败 → 返回 CoreHostUnavailableError 且不拉起新宿主", async () => {
+    const client = makeFakeClient({
+      connect: async () => {
+        throw new Error("ECONNREFUSED");
+      },
+    });
+    const spawn = vi.fn(async () => ({ ok: true }));
+    const conn = new CoreHostConnection({
+      discover: async () => endpoint,
+      spawn,
+      stopUnresponsiveHost: vi.fn(async () => ({
+        ok: false,
+        reason: "permission denied",
+      })),
+      createClient: () => asClient(client),
+    });
+
+    const attempt = conn.getClient();
+    await expect(attempt).rejects.toThrow(CoreHostUnavailableError);
+    await expect(attempt).rejects.toThrow(/清理失败/);
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it("认证失败不触发僵死替换，避免误杀可连接宿主", async () => {
+    const client = makeFakeClient({
+      authenticate: async () => {
+        throw new Error("invalid token");
+      },
+    });
+    const stopUnresponsiveHost = vi.fn(async () => ({ ok: true }));
+    const spawn = vi.fn(async () => ({ ok: true }));
+    const conn = new CoreHostConnection({
+      discover: async () => endpoint,
+      spawn,
+      stopUnresponsiveHost,
+      createClient: () => asClient(client),
+    });
+
+    await expect(conn.getClient()).rejects.toThrow(/invalid token/);
+    expect(stopUnresponsiveHost).not.toHaveBeenCalled();
+    expect(spawn).not.toHaveBeenCalled();
+    expect(client.close).toHaveBeenCalledOnce();
   });
 
   it("拉起失败且重新发现仍不到 → CoreHostUnavailableError", async () => {
@@ -324,7 +860,7 @@ describe("CoreHostConnection", () => {
     await reconnecting;
     await expect(duringReconnect).resolves.toBe(asClient(c2));
     expect(c1.close).toHaveBeenCalledOnce();
-    expect(sleep).toHaveBeenCalledWith(1);
+    expect(sleep).not.toHaveBeenCalled();
     expect(await conn.getClient()).toBe(asClient(c2));
   });
 

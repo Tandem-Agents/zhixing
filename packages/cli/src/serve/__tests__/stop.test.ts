@@ -18,7 +18,13 @@ function mkDeps(overrides: Parameters<typeof runStopCommand>[0] extends infer T
   return {
     // 默认 POSIX 分支——避免在 Windows 开发机上测试误入 Windows 分支触发真实 WebSocket 连接
     platform: "linux" as NodeJS.Platform,
-    readLockFn: vi.fn(async () => ({ pid: 12345, port: 18900, startedAt: "t" })),
+    readLockFn: vi.fn(async () => ({
+      pidFileVersion: 2,
+      pid: 12345,
+      port: 18900,
+      startTime: 1,
+      startedAt: "t",
+    })),
     isProcessAliveFn: vi.fn(() => true),
     releaseLockFn: vi.fn(async () => {}),
     killFn: vi.fn(),
@@ -47,6 +53,48 @@ describe("runStopCommand", () => {
     expect(result.status).toBe("nothing-to-stop");
     expect(deps.killFn).not.toHaveBeenCalled();
     expect(deps.releaseLockFn).toHaveBeenCalled();
+  });
+
+  it("expectedLock 不匹配时不停止当前锁指向的新宿主", async () => {
+    const deps = mkDeps();
+    const result = await runStopCommand({
+      expectedLock: {
+        pidFileVersion: 2,
+        pid: 999,
+        port: 18900,
+        startTime: 9,
+        startedAt: "old",
+      },
+      deps,
+    });
+
+    expect(result.status).toBe("nothing-to-stop");
+    expect(deps.killFn).not.toHaveBeenCalled();
+    expect(deps.releaseLockFn).not.toHaveBeenCalled();
+  });
+
+  it("expectedLock 清理前二次读锁为空时不删除发现文件", async () => {
+    const expectedLock = {
+      pidFileVersion: 2,
+      pid: 12345,
+      port: 18900,
+      startTime: 1,
+      startedAt: "t",
+    };
+    const readLockFn = vi
+      .fn()
+      .mockResolvedValueOnce(expectedLock)
+      .mockResolvedValueOnce(null);
+    const deps = mkDeps({
+      readLockFn,
+      isProcessAliveFn: vi.fn(() => false),
+    });
+
+    const result = await runStopCommand({ expectedLock, deps });
+
+    expect(result.status).toBe("nothing-to-stop");
+    expect(readLockFn).toHaveBeenCalledTimes(2);
+    expect(deps.releaseLockFn).not.toHaveBeenCalled();
   });
 
   it("sends SIGTERM and waits for process to exit gracefully", async () => {

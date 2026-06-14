@@ -20,6 +20,7 @@ import { runStopCommand } from "./serve/stop.js";
 import { runStatusCommand } from "./serve/status.js";
 import { runLogsCommand } from "./serve/logs.js";
 import { runRpcCommand, printRpcHelp } from "./rpc/command.js";
+import { ZHIXING_CLI_VERSION } from "./version.js";
 
 /**
  * 顶层 stdout writer——cli 入口的错误路径 / 启动期渲染没有 ScreenController（chrome
@@ -72,7 +73,7 @@ const program = new Command();
 program
   .name("zhixing")
   .description("知行 — 智能体引擎")
-  .version("0.1.0")
+  .version(ZHIXING_CLI_VERSION)
   .option("--log", "启用诊断 dump 到 ~/.zhixing/logs/（LLM raw chunk + keypress 路径） —— 排查渲染 / 上下文 / 流式 / 按键输入问题用")
   .action(async (options: {
     log?: boolean;

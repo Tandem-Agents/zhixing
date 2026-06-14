@@ -4,7 +4,7 @@
  * 作用：
  * 1. 提供跨平台 graceful shutdown 通道（Windows SIGTERM 等价 force-kill，
  *    必须走应用层 RPC 才能真正优雅）
- * 2. 将来可扩展 server.info / server.reload 等控制方法（Step 18 / Step 20 预留）
+ * 2. 承载 server.info / server.reload 等控制方法
  *
  * `server.shutdown` 设计要点：
  * - **立即 ack**：handler 不 await 实际 shutdown，避免 RPC 自己被 shutdown 切断应答链
@@ -13,7 +13,11 @@
  */
 
 import { RpcAppError, RpcErrors, type MethodEntry } from "../handlers.js";
-import { PROTOCOL_VERSION, RPC_ERROR_CODES } from "../protocol.js";
+import {
+  PROTOCOL_VERSION,
+  RPC_ERROR_CODES,
+  SUPPORTED_PROTOCOL_RANGE,
+} from "../protocol.js";
 
 export interface ServerShutdownParams {
   reason?: string;
@@ -78,6 +82,7 @@ export function buildServerInfoMethod(): MethodEntry {
       return {
         version: ctx.server.version,
         protocol: PROTOCOL_VERSION,
+        protocolRange: SUPPORTED_PROTOCOL_RANGE,
         pid: process.pid,
         port: ctx.server.listenAddr?.port ?? ctx.server.config.port,
         host: ctx.server.listenAddr?.host ?? ctx.server.config.host,

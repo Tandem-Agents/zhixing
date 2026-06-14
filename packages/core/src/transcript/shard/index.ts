@@ -24,7 +24,9 @@ export {
 
 export {
   countRuns,
+  createReadOnlyTranscriptSource,
   readRunsReverse,
   type ReadRunsReverseOptions,
   type RunRecordWithRef,
+  type TranscriptReadSource,
 } from "./reader.js";

@@ -105,8 +105,9 @@ import { shouldIdleExit } from "./idle-policy.js";
 import { setupAccessSurfaces, type AssemblyContext } from "./access-surface.js";
 import { DEFAULT_PROFILE, type ServerProfile } from "./profile.js";
 import { ACCESS_SURFACES } from "./access-surfaces.js";
+import { ZHIXING_CLI_VERSION } from "../version.js";
 
-const SERVER_VERSION = "0.1.0";
+const SERVER_VERSION = ZHIXING_CLI_VERSION;
 
 export interface ServeOptions {
   port?: number;

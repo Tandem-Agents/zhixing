@@ -17,7 +17,7 @@
 import { timingSafeEqual } from "node:crypto";
 import type { MethodEntry } from "../handlers.js";
 import { RpcErrors } from "../handlers.js";
-import { PROTOCOL_VERSION } from "../protocol.js";
+import { PROTOCOL_VERSION, SUPPORTED_PROTOCOL_RANGE } from "../protocol.js";
 
 
 interface AuthParams {
@@ -30,6 +30,7 @@ interface AuthParams {
 
 interface AuthResult {
   protocol: number;
+  protocolRange: typeof SUPPORTED_PROTOCOL_RANGE;
   server: {
     version: string;
   };
@@ -56,6 +57,7 @@ export function buildAuthMethod(): MethodEntry {
 
       return {
         protocol: PROTOCOL_VERSION,
+        protocolRange: SUPPORTED_PROTOCOL_RANGE,
         server: { version: ctx.server.version },
         // S2.C 阶段只有 auth/health；后续阶段动态扩展
         capabilities: collectCapabilities(ctx.server),

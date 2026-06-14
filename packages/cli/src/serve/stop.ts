@@ -36,6 +36,8 @@ export interface StopOptions {
   rpcTimeoutMs?: number;
   /** 是否打印进度（默认 true）*/
   verbose?: boolean;
+  /** 仅当当前 PID 文件仍指向此宿主时才停止；用于连接层僵死替换防误杀。 */
+  expectedLock?: PidFileContents;
   /** 依赖注入，测试用 */
   deps?: StopDeps;
 }
@@ -84,11 +86,21 @@ export async function runStopCommand(opts: StopOptions = {}): Promise<StopResult
     if (verbose) con.log(chalk.dim("Server is not running (no PID file)"));
     return { status: "nothing-to-stop" };
   }
+  if (opts.expectedLock && !isSameLock(lock, opts.expectedLock)) {
+    if (verbose) con.log(chalk.dim("Server lock changed; skip stopping newer host"));
+    return { status: "nothing-to-stop" };
+  }
   const { pid } = lock;
 
   if (!isAlive(pid)) {
     if (verbose) con.log(chalk.yellow(`Found stale PID file (pid=${pid} not alive), cleaning up`));
-    await forceCleanup({ releaseLockFn, statePath, readyMarkerPath });
+    await forceCleanup({
+      releaseLockFn,
+      readLockFn,
+      statePath,
+      readyMarkerPath,
+      expectedLock: opts.expectedLock,
+    });
     return { status: "nothing-to-stop" };
   }
 
@@ -101,9 +113,17 @@ export async function runStopCommand(opts: StopOptions = {}): Promise<StopResult
       rpcTimeoutMs: opts.rpcTimeoutMs ?? 15_000,
       verbose,
       deps,
+      expectedLock: opts.expectedLock,
     });
   }
-  return runStopPosix({ lock, timeoutMs, pollMs, verbose, deps });
+  return runStopPosix({
+    lock,
+    timeoutMs,
+    pollMs,
+    verbose,
+    deps,
+    expectedLock: opts.expectedLock,
+  });
 }
 
 // ─── POSIX 分支 ───
@@ -114,6 +134,7 @@ interface StopInnerOpts {
   pollMs: number;
   verbose: boolean;
   deps: StopDeps;
+  expectedLock?: PidFileContents;
 }
 
 async function runStopPosix(opts: StopInnerOpts): Promise<StopResult> {
@@ -150,7 +171,13 @@ async function runStopPosix(opts: StopInnerOpts): Promise<StopResult> {
     if (verbose) {
       con.log(chalk.green(`Server stopped (pid=${lock.pid}, took=${(took / 1000).toFixed(1)}s)`));
     }
-    await forceCleanup({ releaseLockFn, statePath, readyMarkerPath });
+    await forceCleanup({
+      releaseLockFn,
+      readLockFn: deps.readLockFn ?? readLock,
+      statePath,
+      readyMarkerPath,
+      expectedLock: opts.expectedLock,
+    });
     return { status: "stopped", pid: lock.pid, tookMs: took, path: "signal" };
   }
 
@@ -169,7 +196,13 @@ async function runStopPosix(opts: StopInnerOpts): Promise<StopResult> {
     con.warn(chalk.yellow(`SIGKILL errored (likely already dead): ${reason}`));
   }
   await sleep(pollMs);
-  await forceCleanup({ releaseLockFn, statePath, readyMarkerPath });
+  await forceCleanup({
+    releaseLockFn,
+    readLockFn: deps.readLockFn ?? readLock,
+    statePath,
+    readyMarkerPath,
+    expectedLock: opts.expectedLock,
+  });
   return { status: "force-killed", pid: lock.pid, tookMs: timeoutMs };
 }
 
@@ -212,7 +245,13 @@ async function runStopWindows(opts: StopInnerOpts & { rpcTimeoutMs: number }): P
     if (exited) {
       const took = clock() - start;
       if (verbose) con.log(chalk.green(`Server stopped via RPC (pid=${lock.pid}, took=${(took / 1000).toFixed(1)}s)`));
-      await forceCleanup({ releaseLockFn, statePath, readyMarkerPath });
+      await forceCleanup({
+        releaseLockFn,
+        readLockFn: deps.readLockFn ?? readLock,
+        statePath,
+        readyMarkerPath,
+        expectedLock: opts.expectedLock,
+      });
       return { status: "stopped", pid: lock.pid, tookMs: took, path: "rpc" };
     }
     // 进程仍活 → 降级 taskkill
@@ -237,7 +276,13 @@ async function runStopWindows(opts: StopInnerOpts & { rpcTimeoutMs: number }): P
   if (taskkillExited) {
     const took = clock() - start;
     if (verbose) con.log(chalk.green(`Server stopped via taskkill (pid=${lock.pid}, took=${(took / 1000).toFixed(1)}s)`));
-    await forceCleanup({ releaseLockFn, statePath, readyMarkerPath });
+    await forceCleanup({
+      releaseLockFn,
+      readLockFn: deps.readLockFn ?? readLock,
+      statePath,
+      readyMarkerPath,
+      expectedLock: opts.expectedLock,
+    });
     return { status: "stopped", pid: lock.pid, tookMs: took, path: "signal" };
   }
 
@@ -249,7 +294,13 @@ async function runStopWindows(opts: StopInnerOpts & { rpcTimeoutMs: number }): P
     if (verbose) con.warn(chalk.yellow(`taskkill /F /T errored: ${errMsg(err)}`));
   }
   await sleep(pollMs);
-  await forceCleanup({ releaseLockFn, statePath, readyMarkerPath });
+  await forceCleanup({
+    releaseLockFn,
+    readLockFn: deps.readLockFn ?? readLock,
+    statePath,
+    readyMarkerPath,
+    expectedLock: opts.expectedLock,
+  });
   return { status: "force-killed", pid: lock.pid, tookMs: clock() - start };
 }
 
@@ -277,14 +328,30 @@ async function waitForExit(args: WaitForExitArgs): Promise<{ tookMs: number } | 
 
 interface ForceCleanupOpts {
   releaseLockFn: typeof releaseLock;
+  readLockFn?: typeof readLock;
   statePath: string;
   readyMarkerPath: string;
+  expectedLock?: PidFileContents;
 }
 
 async function forceCleanup(opts: ForceCleanupOpts): Promise<void> {
+  if (opts.expectedLock) {
+    if (!opts.readLockFn) return;
+    const current = await opts.readLockFn().catch(() => null);
+    if (!current || !isSameLock(current, opts.expectedLock)) return;
+  }
   await opts.releaseLockFn().catch(() => {});
   await safeUnlink(opts.statePath);
   await safeUnlink(opts.readyMarkerPath);
+}
+
+function isSameLock(a: PidFileContents, b: PidFileContents): boolean {
+  return (
+    a.pid === b.pid &&
+    a.port === b.port &&
+    a.startTime === b.startTime &&
+    a.startedAt === b.startedAt
+  );
 }
 
 async function safeUnlink(path: string): Promise<void> {

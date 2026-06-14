@@ -59,10 +59,34 @@ export interface JsonRpcError {
   data?: unknown;
 }
 
-/** 标准错误码（spec 定义） */
 /** RPC 协议版本——auth 握手与 server.info 同源,接入面据此做兼容判定 */
 export const PROTOCOL_VERSION = 1;
 
+/** 当前实现支持的协议区间；单版本时 min/max 相同。 */
+export const SUPPORTED_PROTOCOL_RANGE = {
+  min: PROTOCOL_VERSION,
+  max: PROTOCOL_VERSION,
+} as const;
+
+export interface ProtocolRange {
+  readonly min: number;
+  readonly max: number;
+}
+
+export function isProtocolVersionCompatible(
+  protocol: number,
+  range: ProtocolRange = SUPPORTED_PROTOCOL_RANGE,
+): boolean {
+  return (
+    Number.isInteger(protocol) &&
+    Number.isInteger(range.min) &&
+    Number.isInteger(range.max) &&
+    protocol >= range.min &&
+    protocol <= range.max
+  );
+}
+
+/** 标准错误码（spec 定义）与应用错误码。 */
 export const RPC_ERROR_CODES = {
   /** Invalid JSON */
   PARSE_ERROR: -32700,

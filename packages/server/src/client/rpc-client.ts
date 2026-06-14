@@ -37,6 +37,7 @@ export interface RpcClientOptions {
 
 export interface AuthResult {
   protocol: number;
+  protocolRange?: { min: number; max: number };
   server: { version: string };
   capabilities: string[];
 }
