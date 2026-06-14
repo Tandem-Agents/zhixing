@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
 import { ConversationRepository } from "../repository.js";
+import { toSafePathSegment } from "../../paths.js";
 import {
   DEFAULT_CONVERSATION_ID,
   DEFAULT_CONVERSATION_NAME,
@@ -117,6 +118,49 @@ describe("create", () => {
 
     expect(first.id).not.toBe(second.id);
     expect(second.id).toMatch(/^work-\d+$/);
+  });
+});
+
+// ─── ensure ───
+
+describe("ensure", () => {
+  it("按显式 id 创建 meta，已存在时幂等返回原 meta", async () => {
+    const repo = createRepo();
+    const first = await repo.ensure("dm:feishu:ou_xxx");
+
+    expect(first.id).toBe("dm:feishu:ou_xxx");
+    expect(first.name).toBe("dm:feishu:ou_xxx");
+    expect(first.scope).toEqual({ kind: "user" });
+
+    const second = await repo.ensure("dm:feishu:ou_xxx", { name: "ignored" });
+    expect(second).toEqual(first);
+    expect(await repo.list()).toHaveLength(1);
+  });
+
+  it("显式 id 的目录段无碰撞，路径分隔符不进入目录层级", async () => {
+    const repo = createRepo();
+    const ids = ["dm:ch:u", "dm--ch--u", "dm:ch:u/nested\\tail"];
+
+    for (const id of ids) {
+      await repo.ensure(id);
+      expect(await repo.get(id)).toMatchObject({ id });
+    }
+
+    expect((await repo.list()).map((c) => c.id).sort()).toEqual([...ids].sort());
+
+    const unsafeSegment = toSafePathSegment(ids[2]!);
+    expect(unsafeSegment.includes("/") || unsafeSegment.includes("\\")).toBe(false);
+    expect(await fs.readdir(path.join(tmpDir, "conversations"))).toEqual(
+      expect.arrayContaining(ids.map(toSafePathSegment)),
+    );
+  });
+
+  it("default id 仍保持默认对话身份语义", async () => {
+    const repo = createRepo();
+    const conv = await repo.ensure("default");
+
+    expect(conv.isDefault).toBe(true);
+    expect(conv.name).toBe("默认对话");
   });
 });
 

@@ -2,6 +2,7 @@ export type {
   Conversation,
   ConversationScope,
   CreateConversationOptions,
+  EnsureConversationOptions,
   IConversationRepository,
   TaskItem,
   TaskListState,

@@ -37,6 +37,7 @@ function makeFakeConversationRepo(): IConversationRepository & {
     list: vi.fn().mockResolvedValue([]),
     get: vi.fn().mockResolvedValue(null),
     create: vi.fn(),
+    ensure: vi.fn(),
     rename: vi.fn(),
     archive: vi.fn(),
     delete: vi.fn(),

@@ -70,7 +70,7 @@ export function createTurnMaintenance(
 
 /**
  * 首轮自动命名——双查守卫(infer 前后 name 仍为 id 才改)防与用户手动改名竞争;
- * 渠道对话当前无 meta(get 为 null)自然短路,meta 升格后免费获得命名。
+ * 渠道对话在持久会话建立时已有 meta,因此与 CLI 对话共用同一命名路径。
  */
 async function autoNameFirstTurn(
   deps: TurnMaintenanceDeps,

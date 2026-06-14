@@ -96,6 +96,7 @@ export interface IConversationRepository {
   list(opts?: { includeArchived?: boolean }): Promise<Conversation[]>;
   get(id: string): Promise<Conversation | null>;
   create(opts: CreateConversationOptions): Promise<Conversation>;
+  ensure(id: string, opts?: EnsureConversationOptions): Promise<Conversation>;
   rename(id: string, name: string): Promise<Conversation>;
   archive(id: string, archived: boolean): Promise<Conversation>;
   delete(id: string): Promise<void>;
@@ -134,6 +135,13 @@ export interface IConversationRepository {
 }
 
 export interface CreateConversationOptions {
+  name?: string;
+  preferredModel?: string;
+  preferredProvider?: string;
+  scope?: ConversationScope;
+}
+
+export interface EnsureConversationOptions {
   name?: string;
   preferredModel?: string;
   preferredProvider?: string;

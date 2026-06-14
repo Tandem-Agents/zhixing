@@ -223,6 +223,13 @@ function createMemoryDirectory(
       records.set(id, []);
       return meta(id);
     },
+    async ensure(id) {
+      if (!exists(id)) {
+        names.set(id, id);
+        records.set(id, []);
+      }
+      return meta(id);
+    },
     async touch(id) {
       if (!exists(id)) return null;
       return meta(id);

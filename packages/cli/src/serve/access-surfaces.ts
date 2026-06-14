@@ -78,7 +78,7 @@ const conversationSurface: AccessSurface = {
           const s = storesFor(conversationId);
           // 倒读自带索引自愈（分片文件在，会话就在）——计数与装填都不做
           // 裸文件存在性短路。无任何记录（真·新对话 / 刚清空）→ undefined，
-          // 交 doCreate 按需走 initTranscript（幂等）。
+          // 交 doCreate 按需确保持久身份（幂等）。
           const turnCount = await countRuns(s.transcript, s.localId);
           if (turnCount === 0) return undefined;
           const bootstrap = await buildStartupBootstrap({
@@ -96,6 +96,9 @@ const conversationSurface: AccessSurface = {
       initTranscript: async (conversationId) => {
         const s = storesFor(conversationId);
         await s.transcript.init(s.localId);
+      },
+      ensureConversation: async (conversationId) => {
+        await ctx.conversationDirectory.ensure(conversationId);
       },
       appendRun: async (conversationId, input) => {
         const s = storesFor(conversationId);

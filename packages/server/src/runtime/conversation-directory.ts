@@ -31,6 +31,8 @@ export interface ConversationDirectory {
   exists(id: string): Promise<boolean>;
   /** 建一个 user 域新对话(meta + transcript 壳),返回完整 meta */
   create(): Promise<Conversation>;
+  /** 确保指定 conversationId 已有 meta + transcript 壳,已存在则幂等返回 meta */
+  ensure(id: string): Promise<Conversation>;
   /** 改名;对话不存在返回 null */
   rename(id: string, name: string): Promise<Conversation | null>;
   /** 更新最近活跃时刻(切换到该对话即"使用"),返回更新后 meta;不存在 null */

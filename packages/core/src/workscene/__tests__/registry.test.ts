@@ -10,6 +10,7 @@ import {
   getWorkSceneMemoryDir,
   getWorkScenesRoot,
 } from "../paths.js";
+import { toSafePathSegment } from "../../paths.js";
 
 let tmpDir: string;
 let originalHome: string | undefined;
@@ -34,9 +35,11 @@ describe("工作场景路径解析", () => {
     expect(getWorkSceneIndexPath()).toBe(
       path.join(tmpDir, "workscenes", "index.json"),
     );
-    // id 含 ':' → 安全化为 '--'
+    // id 含 ':' → 经共享 safe-segment 原语映射为单个安全目录段
     const dir = getWorkSceneDir("a:b");
-    expect(dir).toBe(path.join(tmpDir, "workscenes", "a--b"));
+    expect(dir).toBe(
+      path.join(tmpDir, "workscenes", toSafePathSegment("a:b")),
+    );
     expect(getWorkSceneMemoryDir("x")).toBe(
       path.join(tmpDir, "workscenes", "x", "me"),
     );

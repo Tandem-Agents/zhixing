@@ -88,6 +88,14 @@ export function createConversationDirectory(deps: {
       return created;
     },
 
+    async ensure(id): Promise<Conversation> {
+      const h = handlesFor(id);
+      const { scope } = parseConversationId(id);
+      const ensured = await h.repo.ensure(h.localId, { scope });
+      await h.transcript.init(h.localId);
+      return ensured;
+    },
+
     async touch(id): Promise<Conversation | null> {
       const h = handlesFor(id);
       try {

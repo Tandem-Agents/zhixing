@@ -80,6 +80,24 @@ describe("conversation directory(持久层实现)", () => {
     });
   });
 
+  it("ensure:显式 id 建 meta + transcript 壳,渠道会话进入 user 列表", async () => {
+    const id = "dm:feishu:ou_xxx";
+
+    const ensured = await directory.ensure(id);
+    expect(ensured.id).toBe(id);
+    expect(ensured.name).toBe(id);
+    expect(await directory.exists(id)).toBe(true);
+    expect((await directory.list()).some((c) => c.id === id)).toBe(true);
+    expect(await directory.readRunsReverse(id, { limit: 5 })).toEqual({
+      runs: [],
+      hasMore: false,
+    });
+
+    const second = await directory.ensure(id);
+    expect(second).toEqual(ensured);
+    expect((await directory.list()).filter((c) => c.id === id)).toHaveLength(1);
+  });
+
   it("touch:不存在返回 null;存在返回最新 meta", async () => {
     expect(await directory.touch("ghost")).toBeNull();
     const created = await repo.create({ name: "活跃" });

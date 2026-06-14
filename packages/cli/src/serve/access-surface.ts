@@ -33,6 +33,7 @@ import type {
 import type {
   ConfirmationHub,
   ConversationManager,
+  ConversationDirectory,
   InboundRouter,
   RunningServer,
   CleanupRegistry,
@@ -68,6 +69,8 @@ export interface AssemblyContext {
   readonly runtimeFactory: RuntimeFactory;
   /** user 域对话 meta 仓——turn 后维护(自动命名)与对话目录共用同一实例 */
   readonly convRepo: ConversationRepository;
+  /** 对话目录——会话执行面经此归口创建 / 确保持久化身份 */
+  readonly conversationDirectory: ConversationDirectory;
   /** journal 域仓——turn 后维护与系统维护任务共用同一实例 */
   readonly journalStore: JournalStore;
   /**

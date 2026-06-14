@@ -443,6 +443,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     snapshots,
     runtimeFactory,
     convRepo,
+    conversationDirectory,
     journalStore,
     sessionBroadcastRef,
     cleanup: registry,
@@ -464,7 +465,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   // 4b. Ephemeral Runtime — 定时任务专用（恒定核心，不属任何接入面）。
   //
   // 为什么独立于会话执行面：
-  // - ConversationManager 为持久用户会话设计，会 initTranscript → 创建 conv_xxx/ 目录、累积
+  // - ConversationManager 为持久用户会话设计，会建立持久身份并累积
   //   消息历史、依赖 idle-reaper 释放。定时任务若走此路径，每次执行都留磁盘痕迹，导致
   //   conversations/ 无限膨胀。
   // - Ephemeral 执行对标 K8s Job / Serverless / Claude Code 子 Agent：任务独立、无身份、

@@ -49,6 +49,7 @@ function makeStubRepo(opts: {
     updateTaskListState: vi.fn(),
     appendSegmentMeta: vi.fn(),
     create: vi.fn(),
+    ensure: vi.fn(),
   };
   repo.get = vi.fn(async (id: string) => {
     repo._getCalls.push(id);

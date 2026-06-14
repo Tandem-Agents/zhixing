@@ -4,8 +4,8 @@
  * 纯文件操作，不涉及 SessionRuntime。
  *
  * 磁盘结构：
- *   用户级:        ~/.zhixing/conversations/<id>/meta.json
- *   workscene 级:  ~/.zhixing/workscenes/<sceneId>/conversations/<id>/meta.json
+ *   用户级:        ~/.zhixing/conversations/<safe-id>/meta.json
+ *   workscene 级:  ~/.zhixing/workscenes/<sceneId>/conversations/<safe-id>/meta.json
  *
  * delete 物理删除整个 conversation 目录（meta + transcript + view layer state），
  * 不可恢复。force:true 让目录已不存在 / 上次中途崩溃残留 partial 都不抛错。
@@ -21,6 +21,7 @@ import type {
   Conversation,
   ConversationScope,
   CreateConversationOptions,
+  EnsureConversationOptions,
   IConversationRepository,
   SegmentMeta,
   SegmentMetadata,
@@ -44,11 +45,25 @@ export function conversationsDir(scope: ConversationScope): string {
 }
 
 function conversationDir(scope: ConversationScope, id: string): string {
-  return path.join(conversationsDir(scope), toSafePathSegment(id));
+  return conversationDirForSegment(scope, toSafePathSegment(id));
+}
+
+function conversationDirForSegment(
+  scope: ConversationScope,
+  pathSegment: string,
+): string {
+  return path.join(conversationsDir(scope), pathSegment);
 }
 
 function metaPath(scope: ConversationScope, id: string): string {
   return path.join(conversationDir(scope, id), "meta.json");
+}
+
+function metaPathForSegment(
+  scope: ConversationScope,
+  pathSegment: string,
+): string {
+  return path.join(conversationDirForSegment(scope, pathSegment), "meta.json");
 }
 
 // ─── ID 生成 ───
@@ -103,7 +118,7 @@ export class ConversationRepository implements IConversationRepository {
 
     const conversations: Conversation[] = [];
     for (const entry of entries) {
-      const meta = await this.readMeta(entry);
+      const meta = await this.readMetaFromPathSegment(entry);
       if (!meta) continue;
       if (!opts?.includeArchived && meta.archived) continue;
       conversations.push(meta);
@@ -138,6 +153,36 @@ export class ConversationRepository implements IConversationRepository {
 
     await this.writeMeta(conversation);
     return conversation;
+  }
+
+  async ensure(
+    id: string,
+    opts: EnsureConversationOptions = {},
+  ): Promise<Conversation> {
+    return this.withMetaLock(id, async () => {
+      const existing = await this.readMetaInLock(id);
+      if (existing) return existing;
+
+      const now = new Date().toISOString();
+      const isDefault = id === DEFAULT_CONVERSATION_ID;
+      const conversation: Conversation = {
+        id,
+        name: opts.name ?? (isDefault ? DEFAULT_CONVERSATION_NAME : id),
+        createdAt: now,
+        lastActiveAt: now,
+        isDefault,
+        archived: false,
+        preferredModel: opts.preferredModel,
+        preferredProvider: opts.preferredProvider,
+        scope: opts.scope ?? this.scope,
+      };
+
+      await writeAtomic(
+        metaPath(this.scope, id),
+        JSON.stringify(conversation, null, 2),
+      );
+      return conversation;
+    });
   }
 
   async rename(id: string, name: string): Promise<Conversation> {
@@ -277,22 +322,51 @@ export class ConversationRepository implements IConversationRepository {
   // ─── 内部方法 ───
 
   private async readMeta(id: string): Promise<Conversation | null> {
-    // Per-id 锁保护读路径：Windows 原子写在 unlink + rename 之间有瞬态文件不存在窗口，
+    // Per-path-segment 锁保护读路径：Windows 原子写在 unlink + rename 之间有瞬态文件不存在窗口，
     // 并发的 readFile 撞上会 ENOENT。读路径走同一把锁，让读看到完整 meta.json，
     // 不会与 writeMeta 的中段步骤竞态。跨 id 读不互斥。
-    return this.withMetaLock(id, async () => {
-      try {
-        const content = await fs.readFile(metaPath(this.scope, id), "utf-8");
-        const parsed = JSON.parse(content) as Conversation &
-          Record<string, unknown>;
-        // 清理历史已弃用字段 —— writeMeta 会把整个对象 stringify 写回，
-        // 不清理则 phantom 字段长期保留在磁盘上；下次 writeMeta 后自然干净。
-        delete parsed.capabilityState;
-        return parsed;
-      } catch {
-        return null;
-      }
-    });
+    return this.withMetaLock(id, () => this.readMetaInLock(id));
+  }
+
+  private async readMetaFromPathSegment(
+    pathSegment: string,
+  ): Promise<Conversation | null> {
+    return this.withMetaLockForPathSegment(pathSegment, () =>
+      this.readMetaFromPathSegmentInLock(pathSegment),
+    );
+  }
+
+  private async readMetaInLock(id: string): Promise<Conversation | null> {
+    try {
+      const content = await fs.readFile(metaPath(this.scope, id), "utf-8");
+      const parsed = JSON.parse(content) as Conversation &
+        Record<string, unknown>;
+      // 清理历史已弃用字段 —— writeMeta 会把整个对象 stringify 写回，
+      // 不清理则 phantom 字段长期保留在磁盘上；下次 writeMeta 后自然干净。
+      delete parsed.capabilityState;
+      return parsed;
+    } catch {
+      return null;
+    }
+  }
+
+  private async readMetaFromPathSegmentInLock(
+    pathSegment: string,
+  ): Promise<Conversation | null> {
+    try {
+      const content = await fs.readFile(
+        metaPathForSegment(this.scope, pathSegment),
+        "utf-8",
+      );
+      const parsed = JSON.parse(content) as Conversation &
+        Record<string, unknown>;
+      // 清理历史已弃用字段 —— writeMeta 会把整个对象 stringify 写回，
+      // 不清理则 phantom 字段长期保留在磁盘上；下次 writeMeta 后自然干净。
+      delete parsed.capabilityState;
+      return parsed;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -317,17 +391,24 @@ export class ConversationRepository implements IConversationRepository {
     id: string,
     fn: () => Promise<T>,
   ): Promise<T> {
-    const prev = this.metaLocks.get(id) ?? Promise.resolve();
+    return this.withMetaLockForPathSegment(toSafePathSegment(id), fn);
+  }
+
+  private async withMetaLockForPathSegment<T>(
+    pathSegment: string,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const prev = this.metaLocks.get(pathSegment) ?? Promise.resolve();
     const result = prev.then(fn);
     const tail = result.then(
       () => {},
       () => {},
     );
-    this.metaLocks.set(id, tail);
+    this.metaLocks.set(pathSegment, tail);
     // 过期锁 GC —— 只在当前 tail 仍是末尾时才清
     tail.then(() => {
-      if (this.metaLocks.get(id) === tail) {
-        this.metaLocks.delete(id);
+      if (this.metaLocks.get(pathSegment) === tail) {
+        this.metaLocks.delete(pathSegment);
       }
     });
     return result;

@@ -46,15 +46,30 @@ async function setupCtx() {
       return stubRuntime(sessionId);
     },
   };
+  const conversationDirectory = {
+    ensure: vi.fn(async (id: string) => {
+      await transcript.init(id);
+      return {
+        id,
+        name: id,
+        createdAt: new Date().toISOString(),
+        lastActiveAt: new Date().toISOString(),
+        isDefault: false,
+        archived: false,
+        scope: { kind: "user" },
+      };
+    }),
+  };
   const ctx = {
     transcript,
     snapshots,
     config: {},
     runtimeFactory,
     confirmationHub: undefined,
+    conversationDirectory,
   } as unknown as AssemblyContext;
   await conversationSurface.setup(ctx);
-  return { transcript, created, ctx, convDir };
+  return { transcript, created, ctx, convDir, conversationDirectory };
 }
 
 describe("conversation 接入面：历史装载服从持久层不变量", () => {
@@ -91,14 +106,15 @@ describe("conversation 接入面：历史装载服从持久层不变量", () => 
     await ctx.conversations!.disposeAll();
   });
 
-  it("真·新对话 → 窗口为空、turnCount 0，initTranscript 建索引", async () => {
-    const { transcript, ctx } = await setupCtx();
+  it("真·新对话 → 窗口为空、turnCount 0，目录 ensure 建索引", async () => {
+    const { transcript, ctx, conversationDirectory } = await setupCtx();
 
     const session = await ctx.conversations!.getOrCreate("fresh");
 
     expect(ctx.conversations!.getHistory("fresh")).toEqual([]);
     expect(session.turnCount).toBe(0);
-    expect(await transcript.exists("fresh")).toBe(true); // initTranscript 已建索引
+    expect(conversationDirectory.ensure).toHaveBeenCalledWith("fresh");
+    expect(await transcript.exists("fresh")).toBe(true);
 
     await ctx.conversations!.disposeAll();
   });

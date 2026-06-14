@@ -179,6 +179,27 @@ describe("ConversationManager", () => {
       await mgr.disposeAll();
     });
 
+    it("calls ensureConversation for persistent sessions even when history exists", async () => {
+      const ensured: string[] = [];
+      const inited: string[] = [];
+      const mgr = new ConversationManager(createMockFactory(), {
+        graceTimeoutMs: 60_000,
+        idleTimeoutMs: 30 * 60_000,
+        idleCheckIntervalMs: 999_999,
+      }, {
+        loadHistory: async () => ({ bootstrap: null, turnCount: 1 }),
+        ensureConversation: async (id) => { ensured.push(id); },
+        initTranscript: async (id) => { inited.push(id); },
+        appendRun: async () => ({ runIndex: 0, shardId: "000001" }),
+      });
+
+      const session = await mgr.getOrCreate("dm:test-ch:user-1");
+      expect(ensured).toEqual(["dm:test-ch:user-1"]);
+      expect(inited).toEqual([]);
+      expect(session.turnCount).toBe(1);
+      await mgr.disposeAll();
+    });
+
     it("initializes turnCount from loaded history", async () => {
       const mgr = new ConversationManager(createMockFactory(), {
         graceTimeoutMs: 60_000,
@@ -819,9 +840,10 @@ describe("ConversationManager", () => {
   // ─── Ephemeral + recordTurn + promote ───
 
   describe("ephemeral sessions", () => {
-    it("creates ephemeral session that skips loadHistory and initTranscript", async () => {
+    it("creates ephemeral session that skips persistence callbacks", async () => {
       const loaded: string[] = [];
       const inited: string[] = [];
+      const ensured: string[] = [];
       const mgr = new ConversationManager(createMockFactory(), {
         graceTimeoutMs: 60_000,
         idleTimeoutMs: 30 * 60_000,
@@ -829,7 +851,8 @@ describe("ConversationManager", () => {
       }, {
         loadHistory: async (id) => { loaded.push(id); return undefined; },
         initTranscript: async (id) => { inited.push(id); },
-        // 构造守卫要求：有持久化意图（loadHistory / initTranscript）必须配 appendRun。
+        ensureConversation: async (id) => { ensured.push(id); },
+        // 构造守卫要求：有持久化意图必须配 appendRun。
         // 本测试只验证 ephemeral 隔离行为，appendRun 是 no-op 占位。
         appendRun: async () => ({ runIndex: 0, shardId: "000001" }),
       });
@@ -838,6 +861,7 @@ describe("ConversationManager", () => {
       expect(session.ephemeral).toBe(true);
       expect(loaded).toEqual([]);
       expect(inited).toEqual([]);
+      expect(ensured).toEqual([]);
       await mgr.disposeAll();
     });
 
@@ -1017,6 +1041,38 @@ describe("ConversationManager", () => {
       expect(inited).toEqual(["eph-promote"]);
       expect(persisted).toHaveLength(1);
       expect(session.pendingRuns.size).toBe(0);
+      await mgr.disposeAll();
+    });
+
+    it("promote() ensures persistent identity before flushing when directory hook exists", async () => {
+      const calls: string[] = [];
+      const mgr = new ConversationManager(createMockFactory(), {
+        graceTimeoutMs: 60_000,
+        idleTimeoutMs: 30 * 60_000,
+        idleCheckIntervalMs: 999_999,
+      }, {
+        ensureConversation: async (id) => { calls.push(`ensure:${id}`); },
+        initTranscript: async (id) => { calls.push(`init:${id}`); },
+        appendRun: async (_cid, record) => {
+          const first = record.messages[0]!.content[0]!;
+          calls.push(first.type === "text" ? `append:${first.text}` : "append:?");
+          return { runIndex: calls.filter((c) => c.startsWith("append:")).length - 1, shardId: "000001" };
+        },
+      });
+
+      const session = await mgr.getOrCreate("eph-ensure", { ephemeral: true });
+      session.pendingRuns.enqueue({
+        timestamp: new Date().toISOString(),
+        messages: [
+          { role: "user" as const, content: [{ type: "text" as const, text: "q0" }] },
+          { role: "assistant" as const, content: [{ type: "text" as const, text: "a0" }] },
+        ],
+      });
+
+      await mgr.promote("eph-ensure");
+
+      expect(calls).toEqual(["ensure:eph-ensure", "append:q0"]);
+      expect(session.ephemeral).toBe(false);
       await mgr.disposeAll();
     });
 
@@ -1268,7 +1324,7 @@ describe("ConversationManager", () => {
   //
   // "persistent 分支无路可走 / promote 错误晋升" 两类配置错误的根源都是
   // appendRun 是 optional。这组测试保证：
-  //   1. 构造时部分配置（有 loadHistory/initTranscript 但无 appendRun）→ throw
+  //   1. 构造时部分配置（有持久化回调但无 appendRun）→ throw
   //   2. 运行时 persistent 分支无 cb → throw（defense-in-depth）
   //   3. 运行时 promote 无 cb → return false 保持 ephemeral 状态
 
@@ -1297,6 +1353,19 @@ describe("ConversationManager", () => {
           }, {
             initTranscript: async () => {},
             // appendRun 故意缺失
+          }),
+      ).toThrow(/appendRun.*required/i);
+    });
+
+    it("constructor throws if ensureConversation is provided without appendRun", () => {
+      expect(
+        () =>
+          new ConversationManager(createMockFactory(), {
+            graceTimeoutMs: 60_000,
+            idleTimeoutMs: 30 * 60_000,
+            idleCheckIntervalMs: 999_999,
+          }, {
+            ensureConversation: async () => {},
           }),
       ).toThrow(/appendRun.*required/i);
     });

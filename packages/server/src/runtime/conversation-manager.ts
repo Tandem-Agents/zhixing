@@ -126,6 +126,9 @@ export type LoadHistory = (
 /** 新对话首次创建时的初始化回调（如写入 transcript header）。 */
 export type InitTranscript = (conversationId: string) => Promise<void>;
 
+/** 确保持久化对话身份已存在（meta + transcript 壳）。 */
+export type EnsureConversation = (conversationId: string) => Promise<void>;
+
 /**
  * 追加一条原始 run record 的回调 —— 对应分片 store 的 `appendRunRecord`。
  *
@@ -142,14 +145,22 @@ export interface ConversationManagerCallbacks {
   loadHistory?: LoadHistory;
   initTranscript?: InitTranscript;
   /**
+   * 持久化身份确保入口。
+   *
+   * 宿主若有 ConversationDirectory，应提供此回调，让确定性外部会话 ID
+   * （如通道 DM / 群聊 ID）在持久会话建立时同步拥有 meta 与 transcript 壳。
+   * 未提供时回退到 initTranscript，兼容纯测试与旧装配。
+   */
+  ensureConversation?: EnsureConversation;
+  /**
    * 原子持久化入口。
    *
    * recordTurn 内部调用此回调追加原文，成功后以返回的 runIndex 经
    * SessionRuntime.acceptRun 推进窗口。
    *
    * **配置契约（构造函数守卫）**：
-   *   - 纯 ephemeral-only 场景（未提供 loadHistory / initTranscript）：可省略
-   *   - 任何持久化意图场景（提供了 loadHistory 或 initTranscript）：**必须提供**
+   *   - 纯 ephemeral-only 场景（未提供持久化回调）：可省略
+   *   - 任何持久化意图场景（提供了 loadHistory / initTranscript / ensureConversation）：**必须提供**
    *     constructor 检测到"部分配置"立即 throw —— 避免配置错误静默失败
    *     （persistent 分支丢消息、promote 错误晋升）。
    *
@@ -284,6 +295,7 @@ export class ConversationManager {
   private readonly onRelease?: OnSessionRelease;
   private readonly loadHistory?: LoadHistory;
   private readonly initTranscript?: InitTranscript;
+  private readonly ensureConversation?: EnsureConversation;
   private readonly appendRunCb?: AppendRun;
   private readonly writeSnapshotCb?: (
     conversationId: string,
@@ -318,6 +330,7 @@ export class ConversationManager {
       this.onRelease = callbacksOrOnRelease.onRelease;
       this.loadHistory = callbacksOrOnRelease.loadHistory;
       this.initTranscript = callbacksOrOnRelease.initTranscript;
+      this.ensureConversation = callbacksOrOnRelease.ensureConversation;
       this.appendRunCb = callbacksOrOnRelease.appendRun;
       this.writeSnapshotCb = callbacksOrOnRelease.writeSnapshot;
       this.confirmationHub = callbacksOrOnRelease.confirmationHub;
@@ -326,14 +339,18 @@ export class ConversationManager {
       this.loadHistory = loadHistory;
     }
 
-    // 配置守卫：部分配置即配置错误 —— 提供了持久化信号（loadHistory / initTranscript）
+    // 配置守卫：部分配置即配置错误 —— 提供了持久化信号（loadHistory / initTranscript / ensureConversation）
     // 但没提供 appendRun，会导致 recordTurn 的 persistent 分支无路可走。
     // fail-fast 在构造阶段暴露。
-    const hasPersistenceIntent = !!(this.loadHistory || this.initTranscript);
+    const hasPersistenceIntent = !!(
+      this.loadHistory ||
+      this.initTranscript ||
+      this.ensureConversation
+    );
     if (hasPersistenceIntent && !this.appendRunCb) {
       throw new Error(
-        "ConversationManager: `appendRun` callback is required when `loadHistory` or `initTranscript` is provided. " +
-          "Ephemeral-only usage should omit all three callbacks.",
+        "ConversationManager: `appendRun` callback is required when persistence callbacks are provided. " +
+          "Ephemeral-only usage should omit all persistence callbacks.",
       );
     }
 
@@ -398,11 +415,11 @@ export class ConversationManager {
 
   private async doCreate(id: string, ephemeral: boolean): Promise<ManagedSession> {
     const history = ephemeral ? undefined : await this.loadHistory?.(id);
-    // factory 先于 initTranscript:装配失败(如对话所属场景已删)时 fail-fast
-    // 在任何写盘之前——否则会在已删除的归属目录里重建空 transcript 壳。
+    // factory 先于持久身份确保:装配失败(如对话所属场景已删)时 fail-fast
+    // 在任何写盘之前——否则会在已删除的归属目录里重建空身份壳。
     const runtime = await this.factory.create(id);
-    if (!history && !ephemeral && this.initTranscript) {
-      await this.initTranscript(id);
+    if (!ephemeral) {
+      await this.ensurePersistentConversation(id, history !== undefined);
     }
     const now = new Date().toISOString();
 
@@ -433,7 +450,7 @@ export class ConversationManager {
    * 显式 conversationId 的启动装填门禁。
    *
    * `exists` 必须在 manager 的 id 串行门内执行,否则 RPC 层会形成
-   * "exists=true → delete 完成 → getOrCreate 又 initTranscript" 的复活竞态。
+   * "exists=true → delete 完成 → getOrCreate 又重建持久身份" 的复活竞态。
    * 无持久目录的最小测试/ephemeral 场景可不传 exists,保持旧的纯内存语义。
    */
   private async getOrCreateExisting(
@@ -1289,11 +1306,6 @@ export class ConversationManager {
     const session = this.sessions.get(conversationId);
     if (!session || !session.ephemeral) return false;
 
-    if (!session.transcriptInited && this.initTranscript) {
-      await this.initTranscript(conversationId);
-      session.transcriptInited = true;
-    }
-
     // 无 appendRun 回调：保持 ephemeral 状态，不晋升。
     //
     // 若清空 pending 后仍置 ephemeral=false 会导致：
@@ -1304,6 +1316,11 @@ export class ConversationManager {
     // 的新 manager 处理（或允许会话继续作为 ephemeral 运行）。
     if (!this.appendRunCb) {
       return false;
+    }
+
+    if (!session.transcriptInited) {
+      await this.ensurePersistentConversation(conversationId, false);
+      session.transcriptInited = true;
     }
 
     // 逐条 flush：出队只在单条 appendRun 成功后执行 —— 任意中间失败 rethrow
@@ -1331,6 +1348,19 @@ export class ConversationManager {
 
     session.ephemeral = false;
     return true;
+  }
+
+  private async ensurePersistentConversation(
+    conversationId: string,
+    hasHistory: boolean,
+  ): Promise<void> {
+    if (this.ensureConversation) {
+      await this.ensureConversation(conversationId);
+      return;
+    }
+    if (!hasHistory && this.initTranscript) {
+      await this.initTranscript(conversationId);
+    }
   }
 
   // ─── Pending Queue ───
