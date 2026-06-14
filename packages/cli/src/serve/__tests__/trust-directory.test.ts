@@ -52,7 +52,10 @@ describe("trust directory(语境派生)", () => {
     );
     seed.create({ kind: "main" }, makeRule("rule-global", "global"));
 
-    const directory = createTrustDirectory({ config: {} as never });
+    const directory = createTrustDirectory({
+      config: {} as never,
+      sessionType: "ci",
+    });
     const sceneConv = worksceneConversationId("s1", "conv_a");
 
     const sceneView = await directory.list(sceneConv);
@@ -71,6 +74,22 @@ describe("trust directory(语境派生)", () => {
     expect(await directory.list(sceneConv)).toHaveLength(1);
   });
 
+  it("无配置的 interactive main 语境回退 cwd workspace,与 runtime 装配一致", async () => {
+    const seed = new PermissionStore();
+    const hash = PermissionStore.workspaceHashFromPath(process.cwd());
+    seed.create(
+      { kind: "workspace", hash },
+      makeRule("rule-cwd", "context", { kind: "workspace", hash }),
+    );
+
+    const directory = createTrustDirectory({
+      config: {} as never,
+      sessionType: "interactive",
+    });
+    const view = await directory.list();
+    expect(view.map((r) => r.id)).toContain("rule-cwd");
+  });
+
   it("配置了工作区 → main 对话语境为 workspace 上下文(与装配同源派生)", async () => {
     const seed = new PermissionStore();
     const hash = PermissionStore.workspaceHashFromPath("/proj");
@@ -80,8 +99,7 @@ describe("trust directory(语境派生)", () => {
     );
 
     const directory = createTrustDirectory({
-      config: {} as never,
-      cliWorkspace: "/proj",
+      config: { workspace: { root: "/proj" } } as never,
     });
     const view = await directory.list();
     expect(view.map((r) => r.id)).toContain("rule-ws");

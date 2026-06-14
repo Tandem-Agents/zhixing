@@ -85,6 +85,7 @@ import {
   getModelCapabilityOverride,
   resolveModelCapability,
   resolveWorkspace,
+  resolveWorkspaceSessionType,
   ROLE_SPECS,
   type ResolvedWorkspace,
   type WorkspaceDirStatus,
@@ -444,8 +445,8 @@ export class LifecycleHookError extends Error {
 export interface CreateAgentRuntimeOptions {
   /**
    * 工作区：
-   *   - string   → cli/配置工作区，经 resolveWorkspace 正常解析
-   *   - undefined → 同上（无 cli 覆盖，resolveWorkspace 按配置/兜底）
+   *   - string   → 运行时显式工作区覆盖(如工作场景 workdir)，经 resolveWorkspace 正常解析
+   *   - undefined → 无运行时覆盖，resolveWorkspace 按配置/兜底
    *   - null     → **显式无工作区**（无 workdir 的工作场景）：跳过
    *     resolveWorkspace，直接 { path:null, source:"none" }，且
    *     workingDirectory 不兜底 cwd —— 与 powerProfile 无文件工具二分
@@ -601,23 +602,21 @@ export async function createAgentRuntime(
   const primaryRole = options.primaryRole ?? "main";
 
   // 应用级身份单例：启动时设一次，后续所有 user-facing 字符串通过
-  // getAgentIdentity() 读取。默认 "知行"，可通过 zhixing.config.json
+  // getAgentIdentity() 读取。默认 "知行"，可通过全局 config.jsonc
   // 的 agent.displayName 覆盖。
   setAgentIdentity(resolveAgentIdentity(config.agent));
 
   const cwd = process.cwd();
 
-  // 工作区解析：按优先级链 CLI > 目录级配置 > 全局配置 > cwd 兜底
-  const sessionType: "interactive" | "ci" = process.stdin.isTTY
-    ? "interactive"
-    : "ci";
+  // 工作区解析：按优先级链运行时显式覆盖 > 全局配置 > cwd 兜底
+  const sessionType = resolveWorkspaceSessionType();
   // workspace === null：显式无工作区（无 workdir 工作场景），跳过解析、
   // 直接 source:"none"；否则按优先级链 resolveWorkspace。
   const workspace: ResolvedWorkspace =
     options.workspace === null
       ? { path: null, source: "none" }
       : resolveWorkspace(config, {
-          cliWorkspace: options.workspace,
+          runtimeWorkspace: options.workspace,
           sessionType,
         });
 
@@ -1573,4 +1572,3 @@ export async function createAgentRuntime(
     },
   };
 }
-

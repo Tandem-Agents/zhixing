@@ -248,7 +248,7 @@ interface CommandVisibility {
 interface RuntimeContext {
   readonly sessionBusy: boolean;
   readonly workspaceId: string | null;
-  /** 当前生效的工作区绝对路径（经过四级解析：CLI > 项目配置 > 全局配置 > cwd fallback） */
+  /** 当前生效的工作区绝对路径（运行时内部显式覆盖 > 全局配置 > cwd fallback） */
   readonly workspace: string;
   readonly cwd: string;
   readonly config: ZhixingConfig;
@@ -1238,7 +1238,7 @@ const broker = new DefaultTypeaheadBroker({ commandRegistry, usageTracker });
 broker.register(new CommandProvider({ registry: commandRegistry }));
 broker.register(new ArgumentProvider({ registry: commandRegistry }));
 // FileProvider 的搜索根基于「当前生效的工作区」，不是 process.cwd()。
-// 工作区经过四级解析（CLI --workspace > 项目配置 > 全局配置 > cwd fallback），
+// 工作区经过统一解析（运行时内部显式覆盖 > 全局配置 > cwd fallback），
 // 由 resolveWorkspace() 决定，和安全系统的信任边界保持一致。
 broker.register(new FileProvider({ root: agentSession.resolvedWorkspace.path ?? process.cwd() }));
 // ...
@@ -1641,7 +1641,7 @@ class ArgumentProvider implements SuggestionProvider {
 
 **目标**：引入第二个 provider，证明 broker 的多 provider + async + abort 机制。
 
-**搜索根目录**：基于「当前生效的工作区」（`resolvedWorkspace.path`），**不是** `process.cwd()`。工作区经过四级解析（CLI `--workspace` > 项目配置 `zhixing.config.json` > 全局配置 `~/.zhixing/config.json` > 交互模式 cwd fallback），由 `resolveWorkspace()` 统一决定。这和安全系统的信任边界一致 —— 工作区内是 `internal`，工作区外是 `external`。
+**搜索根目录**：基于「当前生效的工作区」（`resolvedWorkspace.path`），**不是** `process.cwd()`。工作区经过统一解析（运行时内部显式覆盖 > 全局配置 `~/.zhixing/config.jsonc` > 交互模式 cwd fallback），由 `resolveWorkspace()` 统一决定。这和安全系统的信任边界一致 —— 工作区内是 `internal`，工作区外是 `external`。
 
 路径展开规则：
 - `@src/foo.ts` → 相对于工作区根
@@ -1884,7 +1884,7 @@ class ArgumentProvider implements SuggestionProvider {
 5. **`.zhixing/commands/*.md` frontmatter**：**纯声明**（YAML frontmatter + body 作 prompt 模板）。不支持 `handler:` 指向 JS 文件。JS handler 能力留给未来的 plugin SDK 专项 spec。
 6. **Mid-input trigger 对 bash mode**：**关闭**。bash mode 里 `/` 是 Unix 路径分隔符，开 mid-input 会误判。Step 9 只对 prompt mode 启用。
 7. **参数 schema 的 required 字段**：**支持**。`ArgumentProvider` 检测到必填参数未填时，Enter 不执行，面板显示 `<name> is required` 错误态。
-8. **`@file` 搜索根目录**（2026-04-16 追加）：基于「当前生效的工作区」（`resolvedWorkspace.path`），**不是** `process.cwd()`。工作区经过四级解析（CLI `--workspace` > 项目配置 > 全局配置 > cwd fallback），由 `resolveWorkspace()` 统一决定。FileProvider 构造参数为 `{ root: string }`，不自己调 `process.cwd()`。这保证 `@file` 的搜索范围和安全系统的信任边界一致。
+8. **`@file` 搜索根目录**（2026-04-16 追加）：基于「当前生效的工作区」（`resolvedWorkspace.path`），**不是** `process.cwd()`。工作区经过统一解析（运行时内部显式覆盖 > 全局配置 > cwd fallback），由 `resolveWorkspace()` 统一决定。FileProvider 构造参数为 `{ root: string }`，不自己调 `process.cwd()`。这保证 `@file` 的搜索范围和安全系统的信任边界一致。
 9. **Mid-input trigger 降级为 P2**（2026-04-16 追加）：`requireBoundary=true` 已覆盖"空格后触发"的主流 mid-input 场景（如 `请帮我运行 /backup`）。`requireBoundary=false` 的增量收益极小（仅覆盖中文紧贴 trigger 字符的罕见情况），但引入中文语境误触发风险（`给 @张三 发消息`、`比较 a/b`）。架构已预留 `requireBoundary` 参数，技术上随时可启用。**不做比做错好。**
 
 ---

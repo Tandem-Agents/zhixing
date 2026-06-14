@@ -75,9 +75,15 @@ export {
   loadConfig,
   resolveHomeDir,
   resolveWorkspace,
+  resolveWorkspaceSessionType,
   writeConfig,
 } from "./config-loader.js";
-export type { ResolvedWorkspace, WorkspaceDirStatus, WorkspaceSource } from "./config-loader.js";
+export type {
+  ResolvedWorkspace,
+  WorkspaceDirStatus,
+  WorkspaceSessionType,
+  WorkspaceSource,
+} from "./config-loader.js";
 
 // 凭证加载
 export {

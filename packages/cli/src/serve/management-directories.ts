@@ -18,7 +18,12 @@ import {
   type PermissionRule,
   type SkillStore,
 } from "@zhixing/core";
-import { resolveWorkspace, type ZhixingConfig } from "@zhixing/providers";
+import {
+  resolveWorkspace,
+  resolveWorkspaceSessionType,
+  type WorkspaceSessionType,
+  type ZhixingConfig,
+} from "@zhixing/providers";
 import type {
   MemoryDirectory,
   SkillDirectory,
@@ -27,7 +32,7 @@ import type {
 
 export function createTrustDirectory(deps: {
   config: ZhixingConfig;
-  cliWorkspace?: string;
+  sessionType?: WorkspaceSessionType;
 }): TrustDirectory {
   /**
    * 对话语境 → 权限上下文。与 runtime 装配同源派生:场景对话 → scene 上下文;
@@ -42,9 +47,8 @@ export function createTrustDirectory(deps: {
         return { kind: "scene", sceneId: scope.sceneId };
       }
     }
-    const workspace = resolveWorkspace(deps.config, {
-      cliWorkspace: deps.cliWorkspace,
-    });
+    const sessionType = deps.sessionType ?? resolveWorkspaceSessionType();
+    const workspace = resolveWorkspace(deps.config, { sessionType });
     return workspace.path
       ? {
           kind: "workspace",

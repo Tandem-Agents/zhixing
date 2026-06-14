@@ -21,27 +21,23 @@
 
 ## 决策
 
-采用 **3 层配置级联** 设计：
+采用 **用户全局配置单一来源** 设计：
 
 ```
-环境变量 > 项目配置 > 用户全局配置
+用户全局配置（ZHIXING_CONFIG_PATH 可覆盖文件路径）
 ```
 
 ### 配置文件
 
 | 位置 | 用途 | 提交 Git |
 |------|------|---------|
-| `~/.zhixing/config.json` | 全局默认、API Keys | — |
-| `<project>/zhixing.config.json` | 项目级 provider/model | ✓ |
-| `<project>/.zhixing/config.local.json` | 个人覆盖（未来） | ✗ |
+| `~/.zhixing/config.jsonc` | LLM 角色、消息通道启用列表、workspace、agent / intent / network 等决策层偏好 | — |
 
 ### 配置 Schema
 
 ```typescript
 interface ZhixingConfig {
-  defaultProvider?: string;
-  defaultModel?: string;
-  providers?: Record<string, ProviderConfig>;
+  llm?: Record<string, { provider: string; model: string }>;
   agent?: AgentConfig;          // displayName 等
   workspace?: WorkspaceConfig;  // 工作区配置
 }
@@ -50,8 +46,7 @@ interface WorkspaceConfig {
   /**
    * 工作区根目录——智能体在此范围内的文件操作被视为低影响。
    * 这是用户级偏好（知行是个人助手，不只是开发工具），主要在全局配置中设定。
-   * 全局配置：必须是绝对路径。
-   * 目录级配置：可用相对路径（相对于配置文件所在目录），面向开发者的可选覆盖。
+   * 必须使用绝对路径；这是安全信任边界，不能随启动 cwd 改变。
    */
   root: string;
   /** 工作区内仍需保护的路径（追加到内置保护路径） */
@@ -61,28 +56,23 @@ interface WorkspaceConfig {
 
 ### 关键设计点
 
-1. **首次运行自动生成**全局配置模板（`~/.zhixing/config.json`）
+1. **首次运行自动生成**全局配置模板（`~/.zhixing/config.jsonc`）
 2. **字段级 deep merge**，不是文件级替换
 3. **环境变量永远最高优先**
 4. **`ZHIXING_CONFIG_PATH`** 环境变量可覆盖全局配置路径
 5. **缺失文件 = 跳过**，不报错
-6. **项目配置放根目录** `zhixing.config.json`，可见可发现
-7. **workspace 是用户级偏好**：主要在全局配置中设定（知行是个人助手，workspace 跟着人走不跟着目录走）。目录级配置可选覆盖，面向开发者
-8. **workspace 优先级**：`CLI --workspace` > 目录级配置 > 全局配置（主路径） > `cwd` 兜底。配置文件中设定的工作区不会被运行位置覆盖
-9. **workspace.root 路径解析**：全局配置必须是绝对路径；目录级配置可用相对路径（相对于配置文件所在目录）
+6. **配置单一来源**：用户全局配置 `~/.zhixing/config.jsonc`，不读取 cwd 项目配置
+7. **workspace 是用户级偏好**：在全局配置中设定（知行是个人助手，workspace 跟着人走不跟着目录走）
+8. **workspace 优先级**：运行时内部显式覆盖（如工作场景 workdir） > 全局配置（主路径） > `cwd` 兜底。用户启动命令不提供工作区参数双轨入口
+9. **workspace.root 路径解析**：全局配置必须使用绝对路径；运行时内部覆盖可用相对路径并由调用方上下文解析
 
 ## 理由
 
-### 为什么 3 层而不是 1 层（OpenClaw）或 5 层（Claude Code）
+### 为什么单一来源而不是多层级联
 
-- 1 层不够：无法区分项目级和全局默认。不同项目用不同模型是常见需求
-- 5 层过多：Managed 层是企业噪音；CLI 参数层由调用方自行处理，不属于配置系统
-
-### 为什么项目配置放根目录而不是 `.zhixing/` 隐藏目录
-
-- 对标 `tsconfig.json`、`eslint.config.js` 等——项目根目录一眼可见
-- 降低发现成本，新成员不需要知道隐藏目录的存在
-- Claude Code 的 `.claude/settings.json` 隐藏在子目录中，易被忽略
+- 知行是个人助手，运行地址与效果应一致；cwd 项目层会让启动目录隐式改变系统行为
+- 工作场景需要差异化时应绑定 sceneId，而不是读取某个随机 cwd 下的配置文件
+- 凭证与偏好都保持用户级边界，避免项目目录把个人配置泄漏到 git
 
 ### 为什么自动生成而不是手动创建
 
@@ -94,7 +84,7 @@ interface WorkspaceConfig {
 
 1. **只用环境变量**：太简陋，无法持久化复杂配置
 2. **复刻 Claude Code 5 层**：对个人部署产品过度设计
-3. **复刻 OpenClaw 单文件 + $include**：无项目级支持，多项目切换不便
+3. **复刻 OpenClaw 单文件 + $include**：模块化能力暂不需要，先保持单一事实源
 
 ## 影响
 

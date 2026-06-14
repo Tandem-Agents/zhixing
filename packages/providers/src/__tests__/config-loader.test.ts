@@ -8,6 +8,7 @@ import {
   ConfigSchemaError,
   loadConfig,
   getGlobalConfigPath,
+  resolveWorkspace,
   writeConfig,
 } from "../config-loader.js";
 import { ROLE_RECOMMENDATIONS } from "../role-recommendations.js";
@@ -122,6 +123,23 @@ describe("loadConfig", () => {
     });
 
     expect(config.intent?.cancelKeywords).toEqual(["仅全局"]);
+  });
+
+  it("全局 workspace.root 必须是绝对路径,避免运行目录改写信任边界", () => {
+    const globalDir = path.join(tempHome, ".zhixing");
+    fs.mkdirSync(globalDir, { recursive: true });
+    const configPath = path.join(globalDir, "config.jsonc");
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({ workspace: { root: "relative-workspace" } }),
+    );
+
+    expect(() =>
+      loadConfig({
+        env: { ZHIXING_CONFIG_PATH: configPath },
+        noAutoCreate: true,
+      }),
+    ).toThrow(ConfigSchemaError);
   });
 
   it("自动创建全局配置模板：含 llm.main 默认 + workspace 实际路径 + messaging 空对象", () => {
@@ -314,6 +332,44 @@ describe("applyConfigPatch · 合并语义", () => {
   });
 });
 
+describe("resolveWorkspace", () => {
+  it("运行时显式覆盖优先于全局配置,来源标记为 runtime", () => {
+    const result = resolveWorkspace(
+      { workspace: { root: "/config-workspace" } } as ZhixingConfig,
+      { runtimeWorkspace: "./runtime-workspace" },
+    );
+
+    expect(result.path).toBe(path.resolve("./runtime-workspace"));
+    expect(result.source).toBe("runtime");
+  });
+
+  it("无运行时覆盖时使用全局配置 workspace", () => {
+    const result = resolveWorkspace({
+      workspace: { root: "/global-workspace" },
+    } as ZhixingConfig);
+
+    expect(result).toEqual({
+      path: "/global-workspace",
+      source: "global-config",
+    });
+  });
+
+  it("拒绝相对 global-config workspace,避免同一配置随 cwd 变化", () => {
+    expect(() =>
+      resolveWorkspace({
+        workspace: { root: "relative-workspace" },
+      } as ZhixingConfig),
+    ).toThrow(/绝对路径/);
+  });
+
+  it("交互模式无配置时回退 cwd,CI 模式无配置时无 workspace", () => {
+    expect(resolveWorkspace({} as ZhixingConfig).source).toBe("cwd-fallback");
+    expect(
+      resolveWorkspace({} as ZhixingConfig, { sessionType: "ci" }),
+    ).toEqual({ path: null, source: "none" });
+  });
+});
+
 describe("applyConfigPatch · replace 模式（编辑器权威写入，支持删除）", () => {
   it("id 子表整体替换——patch 省略的 server / channel 被删除", () => {
     const current: Partial<ZhixingConfig> = {
@@ -388,6 +444,15 @@ describe("writeConfig · 端到端持久化", () => {
 
     const entries = fs.readdirSync(tempHome);
     expect(entries.filter((n) => n.endsWith(".tmp"))).toEqual([]);
+  });
+
+  it("拒绝写入相对 workspace.root,防止持久化不稳定信任边界", async () => {
+    await expect(
+      writeConfig(
+        { workspace: { root: "relative-workspace" } } as ZhixingConfig,
+        { homeDir: tempHome },
+      ),
+    ).rejects.toBeInstanceOf(ConfigSchemaError);
   });
 
   it("config.jsonc JSON 损坏 → throw ConfigSchemaError，message 含路径", async () => {

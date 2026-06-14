@@ -110,7 +110,7 @@ export interface RunChildAgentOptions {
   securityPipeline: SecurityPipeline;
   /** 工作区路径(透传 buildSystemPrompt;null 表示无工作区) */
   workspace: string | null;
-  /** 工作区来源标识(cli / directory-config / global-config / cwd-fallback) */
+  /** 工作区来源标识(runtime / global-config / cwd-fallback / none) */
   workspaceSource?: string;
   /** 全局配置文件路径(可选,用于 environment 段渲染) */
   globalConfigPath?: string;

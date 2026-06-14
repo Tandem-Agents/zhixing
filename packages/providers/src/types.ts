@@ -209,19 +209,18 @@ export interface ProviderCredentialEntry {
 }
 
 /**
- * 工作区配置——对应 `zhixing.config.json` 的 `workspace` 字段。
+ * 工作区配置——对应全局 `~/.zhixing/config.jsonc` 的 `workspace` 字段。
  *
  * 工作区是安全系统的信任边界：此目录内的常规文件读写被分类为 internal（低影响），
  * 外部文件操作被分类为 external（需确认）。
  *
  * 这是用户级偏好（知行是个人助手，workspace 跟着人走不跟着目录走），
- * 主要在全局配置 ~/.zhixing/config.json 中设定。
- * 目录级配置可选覆盖，面向开发者。
+ * 在全局配置 ~/.zhixing/config.jsonc 中设定。
  */
 export interface WorkspaceConfig {
   /**
    * 工作区根目录。
-   * 全局配置中必须是绝对路径；目录级配置中可用相对路径（相对于配置文件所在目录）。
+   * 必须使用绝对路径；这是安全信任边界，不能随启动 cwd 改变。
    */
   root: string;
   /** 工作区内仍需保护的路径（追加到内置保护路径，如 .git/、.env 等） */
@@ -229,7 +228,7 @@ export interface WorkspaceConfig {
 }
 
 /**
- * 智能体身份配置——对应 `zhixing.config.json` 的 `agent` 字段。
+ * 智能体身份配置——对应全局 `~/.zhixing/config.jsonc` 的 `agent` 字段。
  * 未提供时 core 的 `resolveAgentIdentity` 会回退到默认值 `"知行"`。
  */
 export interface AgentConfig {
@@ -241,7 +240,7 @@ export interface AgentConfig {
 }
 
 /**
- * 控制意图配置——对应 `zhixing.config.json` 的 `intent` 字段。
+ * 控制意图配置——对应全局 `~/.zhixing/config.jsonc` 的 `intent` 字段。
  *
  * 用于让用户/团队在不改源码的前提下扩展 cancel 关键词集。启动时
  * 与 server 的 `DEFAULT_CANCEL_KEYWORDS` 合并(append 而非 replace,避免误删默认),
@@ -262,9 +261,9 @@ export interface IntentConfig {
 // ─── 消息通道启用条目 ───
 
 /**
- * 单个消息通道的启用条目（对应 zhixing.config.json 的 `messaging.<id>` 字段）。
+ * 单个消息通道的启用条目（对应全局 `~/.zhixing/config.jsonc` 的 `messaging.<id>` 字段）。
  *
- * config.json 是决策层：本条目仅记录"启用 channel <id> 时的功能选项"——
+ * config.jsonc 是决策层：本条目仅记录"启用 channel <id> 时的功能选项"——
  * type / options / defaultTarget 等。**不含**任何凭证或链接字段（appId / appSecret 等）——
  * 那些属于内容层，集中在 credentials.channels.<id>。
  *
@@ -330,9 +329,9 @@ export interface LLMRoleConfig {
 }
 
 /**
- * 顶层配置结构（对应 ~/.zhixing/config.json）。
+ * 顶层配置结构（对应全局 ~/.zhixing/config.jsonc）。
  *
- * config.json 是**决策层**——只记录"启用什么、用哪个"等上层选择。
+ * config.jsonc 是**决策层**——只记录"启用什么、用哪个"等上层选择。
  * 资源完整定义（provider 凭证 + 技术配置 / channel 凭证 + 链接信息）属于
  * **内容层**，集中在 ZhixingCredentials。
  *
@@ -402,7 +401,7 @@ export interface ZhixingConfig {
 }
 
 /**
- * 网络出口配置——对应 `zhixing.config.json` 的 `network` 字段。
+ * 网络出口配置——对应全局 `~/.zhixing/config.jsonc` 的 `network` 字段。
  *
  * 影响所有出站 HTTP（当前消费者：web_fetch；未来：webhook 投递 / MCP HTTP / 第二通道出站）。
  * 详见 [network-egress.md §十三](../../../research/design/specifications/network-egress.md)。
@@ -432,7 +431,7 @@ export interface NetworkConfig {
  *   credentials.providers.<id> ←──refs──── config.llm.main.provider
  *   credentials.channels.<id>  ←──refs──── config.messaging.<id>
  *
- * 不参与项目级配置级联——凭证是用户级单一来源，避免项目级配置泄漏到 git。
+ * 凭证是用户级单一来源，不随启动目录变化，避免个人凭证泄漏到 git。
  */
 export interface ZhixingCredentials {
   /**

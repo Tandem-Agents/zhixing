@@ -209,7 +209,7 @@ private createAgent(
 | 装配项 | main | workscene |
 |---|---|---|
 | primaryRole | `"main"`(缺省) | `"power"` |
-| workspace | `opts.cliWorkspace` | 有 `scene.workdir` → 用之;无 → 显式无根(source:"none"),跳过 resolveWorkspace(见下不变量) |
+| workspace | 无运行时覆盖,由全局配置 / cwd 兜底解析 | 有 `scene.workdir` → 用之;无 → 显式无根(source:"none"),跳过 resolveWorkspace(见下不变量) |
 | memoryScope | `{ kind: "personal" }` | `{ kind: "workscene", sceneId }` |
 | profile | `mainProfile()` | `powerProfile(scene)` |
 

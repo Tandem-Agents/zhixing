@@ -7,8 +7,8 @@
  *
  * 配置文件格式：JSONC（JSON with Comments）—— 支持 `//` 和 `/* *​/` 注释，
  * 让用户编辑时直接看到字段说明。读取用 jsonc-parser；写入仍用标准 JSON.stringify
- * （写入会丢注释，所以 wizard 当前流程仅写 credentials.json，不动 config.json
- * 的注释；未来需要改 config.json 时用 surgical edit 保留注释）。
+ * （写入会丢注释，所以 wizard 当前流程仅写 credentials.json，不动 config.jsonc
+ * 的注释；未来需要改 config.jsonc 时用 surgical edit 保留注释）。
  *
  * 设计决策：
  * - 缺失文件 = 首次运行自动创建全局配置模板
@@ -88,7 +88,9 @@ export function loadConfig(options: {
     globalConfig = readJsonSafe(globalPath);
   }
 
-  return (globalConfig ?? {}) as ZhixingConfig;
+  const config = (globalConfig ?? {}) as ZhixingConfig;
+  assertAbsoluteWorkspaceRoot(config, globalPath);
+  return config;
 }
 
 // ─── 配置写入 ───
@@ -142,6 +144,7 @@ export async function writeConfig(
   }
 
   const merged = applyConfigPatch(current, config, "replace");
+  assertAbsoluteWorkspaceRoot(merged, filePath);
   await writeJsonAtomic(filePath, merged);
 }
 
@@ -220,9 +223,9 @@ function prepareWorkspaceRoot(): string {
 /**
  * 构造 JSONC 配置模板。
  *
- * 含字段说明注释：用户首次启动后用编辑器打开 config.json，直接看到必填 / 选填 /
+ * 含字段说明注释：用户首次启动后用编辑器打开 config.jsonc，直接看到必填 / 选填 /
  * 各字段语义。注释由 jsonc-parser 容忍解析；写入仍走 JSON.stringify（写时丢注释，
- * 但 wizard 当前流程不写 config.json，注释保留）。
+ * 但 wizard 当前流程不写 config.jsonc，注释保留）。
  */
 function buildConfigTemplate(workspaceRoot: string): string {
   // Windows 路径反斜杠在 JSON 字符串中需 escape
@@ -363,6 +366,19 @@ function readJsonSafe(filePath: string): ZhixingConfig | undefined {
   return parsed as ZhixingConfig;
 }
 
+function assertAbsoluteWorkspaceRoot(
+  config: Partial<ZhixingConfig>,
+  filePath: string,
+): void {
+  const root = config.workspace?.root;
+  if (root && !path.isAbsolute(root)) {
+    throw new ConfigSchemaError(
+      `全局配置 workspace.root 必须是绝对路径：${root}`,
+      filePath,
+    );
+  }
+}
+
 // ─── 工作区解析 ───
 
 /**
@@ -370,9 +386,8 @@ function readJsonSafe(filePath: string): ZhixingConfig | undefined {
  * 智能体可据此向用户说明"你的工作区来自 XX 配置"。
  */
 export type WorkspaceSource =
-  | "cli"              // CLI --workspace 参数
-  | "directory-config" // 目录级 zhixing.config.json
-  | "global-config"    // 全局 ~/.zhixing/config.json
+  | "runtime"          // 运行时显式覆盖(如工作场景 workdir),非用户启动参数
+  | "global-config"    // 全局 ~/.zhixing/config.jsonc
   | "cwd-fallback"     // 无配置时回退到当前工作目录
   | "none";            // 非交互模式且无配置
 
@@ -383,8 +398,16 @@ export interface ResolvedWorkspace {
   source: WorkspaceSource;
 }
 
+export type WorkspaceSessionType = "interactive" | "ci";
+
+export function resolveWorkspaceSessionType(
+  isTty: boolean | undefined = process.stdin.isTTY,
+): WorkspaceSessionType {
+  return isTty ? "interactive" : "ci";
+}
+
 /**
- * 按优先级链解析工作区：CLI --workspace > 目录级配置 > 全局配置 > cwd 兜底。
+ * 按优先级链解析工作区：运行时显式覆盖 > 配置 > cwd 兜底。
  *
  * @param config 合并后的配置（loadConfig 返回值）
  * @param options 解析选项
@@ -392,29 +415,24 @@ export interface ResolvedWorkspace {
 export function resolveWorkspace(
   config: ZhixingConfig,
   options: {
-    /** CLI --workspace 参数值 */
-    cliWorkspace?: string;
-    /** 配置来源：合并后的 workspace 字段来自哪层（由 loadConfig 判断） */
-    configSource?: "directory-config" | "global-config";
-    /** 目录级配置文件所在目录（用于解析相对路径） */
-    configDir?: string;
+    /** 运行时显式工作区覆盖(内部装配用,不是用户启动参数) */
+    runtimeWorkspace?: string;
     /** 会话类型 */
-    sessionType?: "interactive" | "ci";
+    sessionType?: WorkspaceSessionType;
   } = {},
 ): ResolvedWorkspace {
-  // 优先级 1：CLI --workspace
-  if (options.cliWorkspace) {
-    return { path: path.resolve(options.cliWorkspace), source: "cli" };
+  // 优先级 1：运行时显式覆盖(如工作场景 workdir)
+  if (options.runtimeWorkspace) {
+    return { path: path.resolve(options.runtimeWorkspace), source: "runtime" };
   }
 
   // 优先级 2/3：配置文件中的 workspace.root
   if (config.workspace?.root) {
     const root = config.workspace.root;
-    const resolved = path.isAbsolute(root)
-      ? root
-      : path.resolve(options.configDir ?? process.cwd(), root);
-    const source = options.configSource ?? "global-config";
-    return { path: resolved, source };
+    if (!path.isAbsolute(root)) {
+      throw new Error(`全局配置 workspace.root 必须是绝对路径：${root}`);
+    }
+    return { path: root, source: "global-config" };
   }
 
   // 优先级 4：交互模式回退到 cwd
@@ -431,7 +449,7 @@ export function resolveWorkspace(
 /**
  * 工作区目录状态——描述 ensureWorkspaceDir 的执行结果。
  * - exists：目录已存在，无需操作
- * - created：首次创建（首次启动或 CLI --workspace 指定新目录）
+ * - created：首次创建（首次启动或运行时显式覆盖指定新目录）
  * - recreated：配置了路径但目录被删除/移动，重新创建
  * - skipped：cwd-fallback 或 null，无需创建
  */
@@ -440,7 +458,7 @@ export type WorkspaceDirStatus = "exists" | "created" | "recreated" | "skipped";
 /**
  * 确保工作区目录存在。
  *
- * 仅在工作区来自配置或 CLI 参数时创建——cwd-fallback 已经是一个存在的目录。
+ * 仅在工作区来自配置或运行时显式覆盖时创建——cwd-fallback 已经是一个存在的目录。
  * 创建失败静默跳过（可能是权限问题），不阻止程序启动。
  */
 export function ensureWorkspaceDir(

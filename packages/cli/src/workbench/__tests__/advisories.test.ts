@@ -16,11 +16,11 @@ import { stripAnsi } from "../../tui/index.js";
 chalk.level = 3;
 
 describe("renderStartupAdvisories — workspace 创建失败警告", () => {
-  it("skipped + cli source + 路径非空 → 黄色 ⚠ + 提示", () => {
+  it("skipped + runtime source + 路径非空 → 黄色 ⚠ + 提示", () => {
     const lines = renderStartupAdvisories({
       workspaceDirStatus: "skipped",
       workspacePath: "/some/blocked/path",
-      workspaceSource: "cli",
+      workspaceSource: "runtime",
     });
     const visible = lines.map(stripAnsi).join("\n");
     expect(lines).toHaveLength(2);
@@ -31,8 +31,8 @@ describe("renderStartupAdvisories — workspace 创建失败警告", () => {
     expect(lines[1]!).toContain("\x1b[33m");
   });
 
-  it("skipped + global-config / directory-config 也触发警告", () => {
-    for (const source of ["global-config", "directory-config"] as const) {
+  it("skipped + global-config 也触发警告", () => {
+    for (const source of ["global-config"] as const) {
       const lines = renderStartupAdvisories({
         workspaceDirStatus: "skipped",
         workspacePath: "/blocked",
@@ -64,7 +64,7 @@ describe("renderStartupAdvisories — workspace 创建失败警告", () => {
     const lines = renderStartupAdvisories({
       workspaceDirStatus: "skipped",
       workspacePath: null,
-      workspaceSource: "cli",
+      workspaceSource: "runtime",
     });
     expect(lines).toEqual([]);
   });
@@ -84,7 +84,7 @@ describe("renderStartupAdvisories — 健康状态不打扰用户", () => {
     const lines = renderStartupAdvisories({
       workspaceDirStatus: "created",
       workspacePath: "/new",
-      workspaceSource: "cli",
+      workspaceSource: "runtime",
     });
     expect(lines).toEqual([]);
   });

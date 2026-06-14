@@ -337,7 +337,7 @@ const BUILTIN_RULES: SecurityRule[] = [
 ### 1.4 规则扩展
 
 ```typescript
-// 项目级规则（zhixing.config.json）
+// 显式项目规则（不是启动目录配置文件自动发现）
 {
   "security": {
     "rules": [
@@ -726,7 +726,7 @@ class BoundaryImpactClassifier implements OperationClassifier {
 
 工作区是"用户信任智能体在哪里操作"的边界。这是一个**用户级偏好**——它跟着人走，不跟着某个代码仓库走。用户整理照片、管理文档、处理下载文件时都需要工作区，这些场景没有"项目"概念。
 
-因此，**工作区的主要配置位置是全局配置（`~/.zhixing/config.json`）**，不是目录级配置。
+因此，**工作区的配置位置是全局配置（`~/.zhixing/config.jsonc`）**，不是启动目录或项目目录。
 
 #### 配置 schema
 
@@ -738,9 +738,8 @@ interface ZhixingConfig {
   workspace?: {
     /**
      * 工作区目录——智能体在此范围内的文件操作被视为低影响。
-     * 全局配置中必须使用绝对路径。
-     * 目录级配置中可使用相对路径（相对于配置文件所在目录）。
-     * 未配置时：CLI 交互模式回退到 cwd，其他模式为 null。
+     * 必须使用绝对路径；这是安全信任边界，不能随启动 cwd 改变。
+     * 未配置时：交互模式回退到 cwd，其他模式为 null。
      */
     root: string;
     /** 工作区内仍需保护的路径（追加到内置保护路径之上） */
@@ -749,7 +748,7 @@ interface ZhixingConfig {
 }
 ```
 
-**主路径——全局配置**（`~/.zhixing/config.json`）：
+**全局配置**（`~/.zhixing/config.jsonc`）：
 
 ```json
 {
@@ -761,32 +760,20 @@ interface ZhixingConfig {
 
 用户配一次，无论在哪里启动 zhixing、通过微信/钉钉触发、还是通过 API 调用，工作区都指向 `D:\Work`。这是大多数用户的唯一需要。
 
-**可选覆盖——目录级配置**（`<dir>/zhixing.config.json`）：
-
-```json
-{
-  "workspace": {
-    "root": ".",
-    "protectedPaths": [".env", ".env.*", "secrets/"]
-  }
-}
-```
-
-面向开发者：在特定代码仓库中运行 zhixing 时，该目录的配置覆盖全局配置。普通用户不需要知道这一层的存在。
+配置单一来源：知行读取用户全局配置，工作区作为个人偏好跟随用户，不随启动目录隐式切换。
 
 #### 优先级：配置优先于运行位置
 
 ```
-CLI --workspace  >  目录级配置  >  全局配置（主路径）  >  cwd 兜底
-   (临时覆盖)      (开发者可选)    (用户偏好)            (未配置时)
+运行时内部显式覆盖  >  全局配置（主路径）  >  cwd 兜底
+  (如工作场景 workdir)    (用户偏好)        (未配置时)
 ```
 
 | 优先级 | 来源 | 说明 |
 |-------|------|------|
-| 1（最高） | `zhixing --workspace /path` | 临时覆盖，本次运行有效 |
-| 2 | 目录级 `zhixing.config.json` → `workspace.root` | 可选，面向开发者的目录级覆盖 |
-| 3 | **全局 `~/.zhixing/config.json` → `workspace.root`** | **主路径——大多数用户在这里配置** |
-| 4（最低） | `process.cwd()` | 兜底——仅在上述三层都未配置时生效 |
+| 1（最高） | 运行时内部显式覆盖（如工作场景 workdir） | 内部编排使用，不暴露为用户启动参数 |
+| 2 | **全局 `~/.zhixing/config.jsonc` → `workspace.root`** | **主路径——用户在这里配置** |
+| 3（最低） | `process.cwd()` | 兜底——仅在无配置时生效 |
 
 **关键设计**：`cwd` 是兜底而非默认。用户在全局配置中设定了工作区后，无论在哪个目录运行 zhixing、从哪个渠道触发，工作区都指向配置的地址，不会被运行位置覆盖。
 
@@ -795,18 +782,18 @@ function resolveWorkspace(
   config: ZhixingConfig,
   options: LaunchOptions,
 ): { path: string | null; source: WorkspaceSource } {
-  // 1. CLI 显式指定
-  if (options.workspace) {
-    return { path: path.resolve(options.workspace), source: 'cli' };
+  // 1. 运行时内部显式覆盖
+  if (options.runtimeWorkspace) {
+    return { path: path.resolve(options.runtimeWorkspace), source: 'runtime' };
   }
 
-  // 2. 配置文件（目录级 > 全局，由 loadConfig 合并后的结果）
+  // 2. 全局配置文件
   if (config.workspace?.root) {
     const root = config.workspace.root;
-    const resolved = path.isAbsolute(root)
-      ? root
-      : path.resolve(options.configDir, root);
-    return { path: resolved, source: options.configSource };
+    if (!path.isAbsolute(root)) {
+      throw new Error('全局配置 workspace.root 必须是绝对路径');
+    }
+    return { path: root, source: 'global-config' };
   }
 
   // 3. 兜底：当前工作目录（仅 CLI 交互模式有意义）
@@ -818,7 +805,7 @@ function resolveWorkspace(
   return { path: null, source: 'none' };
 }
 
-type WorkspaceSource = 'cli' | 'directory-config' | 'global-config' | 'cwd-fallback' | 'none';
+type WorkspaceSource = 'runtime' | 'global-config' | 'cwd-fallback' | 'none';
 ```
 
 **注意**：`resolveWorkspace` 同时返回路径和来源。来源信息用于：
@@ -831,19 +818,15 @@ type WorkspaceSource = 'cli' | 'directory-config' | 'global-config' | 'cwd-fallb
 
 > 当前工作区：D:\Work（来源：全局配置）
 
-或
-
-> 当前工作区：E:\Dev\my-project（来源：目录级配置）
-
 工作区路径和来源通过系统提示注入到智能体上下文中。
 
-**修改**：智能体帮用户修改**全局配置**（`~/.zhixing/config.json`）中的 `workspace.root` 字段。因为对个人助手来说，workspace 是用户级偏好——智能体不应该去某个随机目录创建 `zhixing.config.json`。
+**修改**：智能体帮用户修改**全局配置**（`~/.zhixing/config.jsonc`）中的 `workspace.root` 字段。因为对个人助手来说，workspace 是用户级偏好——智能体不应该去某个随机目录创建启动目录配置文件。
 
 此操作有特殊安全约束：
 
 > **工作区修改是受保护操作——始终需要用户确认，不可跳过。**
 >
-> 工作区 = 信任边界。改变工作区等于改变"哪些操作免确认"的范围，这是安全系统最根本的参数之一。即使用户已创建"允许写入 config.json"的权限规则，修改 workspace 字段仍然触发确认。
+> 工作区 = 信任边界。改变工作区等于改变"哪些操作免确认"的范围，这是安全系统最根本的参数之一。即使用户已创建"允许写入 config.jsonc"的权限规则，修改 workspace 字段仍然触发确认。
 
 实现方式：修改工作区通过专用的命令/工具路径完成，该路径强制走确认流程，不经过通用的文件写入权限匹配。
 
@@ -853,9 +836,8 @@ type WorkspaceSource = 'cli' | 'directory-config' | 'global-config' | 'cwd-fallb
 
 | 配置层 | 允许的路径格式 | 解析锚点 |
 |-------|-------------|---------|
-| **全局配置**（主路径） | **仅绝对路径** | —（无锚点，加载时校验，相对路径报警告） |
-| 目录级配置（可选） | 相对路径或绝对路径 | 配置文件所在目录 |
-| CLI `--workspace` | 相对路径或绝对路径 | 当前工作目录 `cwd` |
+| **全局配置**（主路径） | 仅绝对路径 | 无锚点；配置加载与写入时校验，拒绝相对路径 |
+| 运行时内部显式覆盖 | 相对路径或绝对路径 | 调用方上下文 |
 
 路径解析后，必须经过 `PathGuard.isWithinWorkspace` 的 `realpath` 检查——防止符号链接逃逸。
 
@@ -1370,7 +1352,7 @@ Windows 上：
 对于需要运行不可信代码的场景（如分析恶意仓库），可选启用 Docker 容器隔离：
 
 ```typescript
-// 用户配置（zhixing.config.json）
+// 用户配置（~/.zhixing/config.jsonc）
 {
   "security": {
     "isolation": "container",
