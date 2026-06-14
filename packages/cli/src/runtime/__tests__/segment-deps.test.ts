@@ -158,7 +158,7 @@ describe("createServeSegmentDeps", () => {
 
     // in-progress 守卫与 REPL 装配同一适配器语义
     expect(deps.taskListReader.hasInProgress("conv-x")).toBe(false);
-    // no-op persistence：不抛、无副作用 —— serve 未接 ConversationRepository
+    // no-op persistence：不抛、无副作用 —— serve segmentMeta 暂不落盘
     await expect(
       deps.persistence.appendSegment("conv-x", {
         segmentId: "seg-1",

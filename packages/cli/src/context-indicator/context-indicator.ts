@@ -44,7 +44,7 @@
  *
  * 单一启用条件：调用方注入 `screen`。与 status-bar 同模式 —— render.ts 的
  * `if (screen)` 是唯一开关，无 chrome 的运行模式（serve 等）自然不
- * 装配本组件。无 ENV、无 CLI flag、无 RuntimeSession 配置字段；组件常态化
+ * 装配本组件。无 ENV、无 CLI flag、无运行时配置字段；组件常态化
  * 存在于 REPL 模式。
  *
  * ─── 自然降级（按数据可用性） ───

@@ -1,12 +1,12 @@
 /**
- * 工作模式控制器接口 —— workmode agent 工具与 RuntimeSession 之间的窄接口。
+ * 工作模式控制器接口 —— workmode agent 工具与宿主工作场景 owner 之间的窄接口。
  *
- * 为什么是接口而非直接捕获 RuntimeSession 实例：
- *   - 解循环引用：工具经 assembly 装配，assembly 早于 RuntimeSession 构造；
+ * 为什么是接口而非直接捕获具体宿主实现：
+ *   - 解循环引用：工具经 assembly 装配，assembly 早于 per-runtime 实例发放；
  *     工具捕获本接口（由 ExtraToolsRuntimeContext 的 getter 延迟取），不反向
- *     依赖 cli/runtime/session 具体类。
+ *     依赖 serve / cli 的具体控制器类。
  *   - 可独立测试：工具单测只需 mock 本接口（断言 emit / registry 调用），
- *     无需起整个 RuntimeSession。
+ *     无需起核心宿主。
  *
  * 暴露面刻意最小（spec 焊死）：注册表 CRUD（无 guard 操作）+ 带 guard 的删除
  * 入口。带 guard 的操作必须通过本接口的语义方法（非 registry 直调），
@@ -33,9 +33,9 @@ export interface IWorkModeController {
    * `me/` 与 `conversations/` 目录，物理 rm 后续 memory 写入 / task_list
    * 持久化 / exit digest 全撞 ENOENT。要删活跃场景必须先 `/exit` 退出。
    *
-   * 业务规则归属 session 层（机制与策略分离）：registry 是低层 CRUD 原语，
-   * 不该知道 activeMode；让"唯一持有 activeMode 的 RuntimeSession"做 guard，
-   * 两入口同源经此 chokepoint，guard 不可绕过。
+   * 业务规则归属宿主会话 owner（机制与策略分离）：registry 是低层 CRUD 原语，
+   * 不该知道活跃会话；让"唯一知道场景活跃会话集合的宿主"做 guard，两入口
+   * 同源经此 chokepoint，guard 不可绕过。
    */
   removeWorkScene(id: string): Promise<void>;
 }

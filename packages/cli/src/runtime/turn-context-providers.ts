@@ -7,12 +7,10 @@
  *     - TimeProvider 由 `createAgentRuntime` 内部默认装配（不依赖 cli 资源）
  *     - SchedulerProvider 和 TaskListProvider 依赖 cli 注入的 Scheduler / TaskListService
  *
- *   后两者需要在每一个 user-facing runtime 装配点全部注册：REPL 侧（bootstrap /
- *   reload 重建 main / 进入工作模式建 power / reload 在工作模式连带重建 power）
- *   由 RuntimeSession 内单一 attachTurnContextProviders 封装统一调用本 helper；
- *   serve 侧（per-session / ephemeral）各自直接调用本 helper。本 helper 把"该
- *   注册什么"和"注册逻辑细节"集中一处，各 caller 只提供"如何取 scheduler 状态
- *   + 哪个 service"两个 deps。
+ *   后两者需要在每一个 user-facing runtime 装配点全部注册：核心宿主的
+ *   RuntimeHost 在会话 / 场景 / ephemeral 实例发放后统一调用本 helper。本
+ *   helper 把"该注册什么"和"注册逻辑细节"集中一处，caller 只提供"如何取
+ *   scheduler 状态 + 哪个 service"两个 deps。
  *
  * 为什么单独成文件 / 不塞进 BuiltinExtraToolsAssembly：
  *   - assembly 的语义是"task_list-aware 工具/服务集合"——把 SchedulerProvider 塞进

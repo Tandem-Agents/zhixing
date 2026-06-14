@@ -2,8 +2,8 @@
  * 工作模式 agent 工具 —— 经 builtinExtraTools.assembleTools 按 spec.kind 注入。
  *
  * 设计要点：
- *   - 工具只捕获 {@link IWorkModeController} 窄接口（不反依赖 RuntimeSession
- *     具体类），故可脱离 session 用 mock 接口单测。
+ *   - 工具只捕获 {@link IWorkModeController} 窄接口（不反依赖宿主具体类），
+ *     故可脱离核心宿主用 mock 接口单测。
  *   - 切换类工具（enter/exit）**只 emit 意图、不执行切换**：run() 侧 accumulator
  *     收集、随 RunResult 带出，REPL 主回路 turn 边界唯一 applyModeSwitch 消费。
  *     工具 call 体返回的文本提示 LLM「切换将在本 turn 结束后发生」，让其先把

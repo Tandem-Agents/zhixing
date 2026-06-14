@@ -1,5 +1,5 @@
 /**
- * cli 装配层 SegmentManager 外部依赖工厂 —— REPL + serve 共享。
+ * cli 装配层 SegmentManager 外部依赖工厂 —— 核心宿主 runtime 发放路径共享。
  *
  * 段切换的"内部依赖"（provider / model capability / estimator / eventBus）由
  * orchestrator 在 createAgentRuntime 内部解析；"外部依赖"由 cli 装配层注入：
@@ -13,9 +13,8 @@
  *     orchestrator accumulator、随 RunResult 带出，由会话层在接受协议中折叠
  *     注意力窗口（压缩是窗口的视图操作，原文持久化 append-only 不参与）。
  *
- * 抽离独立 helper 而非内联到 RuntimeSession：REPL bootstrap / REPL reload swap /
- * serve per-session / serve ephemeral 四个装配点共享同一工厂——避免任一处
- * 漏装、避免"两入口不对齐"类回归。
+ * 抽离独立 helper 而非散落到各发放路径：会话 / 场景 / ephemeral 共享同一
+ * 工厂——避免任一处漏装、避免"两入口不对齐"类回归。
  */
 
 import {
@@ -46,10 +45,10 @@ export function createCliSegmentDeps(input: CliSegmentDepsInput): CliSegmentDeps
 }
 
 /**
- * serve 装配变体 —— serve 进程未接 ConversationRepository，segmentMeta 持久化
- * 注 no-op（SegmentPersistence 的失败语义本就允许 segmentMeta 缺写：它是独立
- * 观测元数据流，缺失不影响段切换语义完成度）。taskListReader 照常复用
- * TaskListService——serve 会话的 in-progress 守卫与 REPL 同源。
+ * serve 装配变体 —— serve 当前未把 segmentMeta persistence 接到 conversation
+ * repo，故注 no-op（SegmentPersistence 的失败语义本就允许 segmentMeta 缺写：
+ * 它是独立观测元数据流，缺失不影响段切换语义完成度）。taskListReader 照常
+ * 复用 TaskListService——serve 会话的 in-progress 守卫与宿主执行面同源。
  */
 export function createServeSegmentDeps(input: {
   readonly taskListService: TaskListService;
@@ -58,7 +57,7 @@ export function createServeSegmentDeps(input: {
     taskListReader: createTaskListReaderFromService(input.taskListService),
     persistence: {
       async appendSegment() {
-        /* serve 未接 ConversationRepository —— segmentMeta 缺写无害 */
+        /* serve segmentMeta persistence 暂不落盘 —— 缺写无害 */
       },
     },
   };

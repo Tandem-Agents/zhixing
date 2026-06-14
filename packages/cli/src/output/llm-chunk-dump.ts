@@ -205,7 +205,7 @@ export function getLlmChunkDump(): LlmChunkDump {
 }
 
 /**
- * 把 chunk-dump 挂到 RuntimeSession 的 EventBus —— 订阅 llm:stream_event 与
+ * 把 chunk-dump 挂到每次 run 的 EventBus —— 订阅 llm:stream_event 与
  * agent:run_end，分别对应 chunk 记录与 turn 边界。返回 unsubscribe 用于装饰器
  * cleanup（与 createRenderSubscribers 的 lifecycle 对齐）。
  *

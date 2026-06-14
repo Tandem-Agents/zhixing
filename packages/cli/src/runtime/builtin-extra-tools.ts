@@ -1,5 +1,5 @@
 /**
- * builtin extra tools 装配 —— cli REPL + serve 共享的"外部依赖型工具"装配点。
+ * builtin extra tools 装配 —— 核心宿主共享的"外部依赖型工具"装配点。
  *
  * 背景：
  *   "外部依赖型工具"指需要 cli 注入运行时依赖（Scheduler / ConversationRepository
@@ -8,7 +8,7 @@
  *   装配路径。
  *
  * 为什么集中到一个 assembly：
- *   - REPL（`cli/runtime/session.ts`）和 serve（`cli/serve/command.ts`）原本各
+ *   - 旧 REPL 本地 runtime 和 serve（`cli/serve/command.ts`）原本各
  *     自装配 scheduleTool，导致 task_list 接入时 serve 漏装配（PR-C1 审查 Gap-1）
  *   - 集中后两入口共用一处装配代码，新工具加入只改 assembly 一处，杜绝"两入口不
  *     对齐"类 bug
@@ -16,7 +16,7 @@
  *     "service 跨 runtime 复用 + 工具实例随 runtime 重建"的契约由 assembly 强制
  *
  * 生命周期约束：
- *   - assembly 自身是 process-wide 单例（cli 进程级），跨 runtime swap 持续
+ *   - assembly 自身是 process-wide 单例（宿主进程级），跨 runtime 实例持续
  *   - `assembleTools()` 每次 runtime 创建时调一次，返回**新的 ToolDefinition 数组**
  *     （工具实例闭包引用 assembly 内 service —— 不同 runtime 看到的工具对象 ≠，但
  *     行为一致）
@@ -52,7 +52,7 @@ import {
  */
 export interface ExtraToolsRuntimeContext {
   scheduler: () => SchedulerFacade;
-  /** 定时任务源 origin（可选） —— serve 模式按 sessionId 解析投递目标，REPL 模式不传 */
+  /** 定时任务源 origin（可选）—— 会话实例执行期派生，ephemeral 恒 null */
   scheduleOrigin?: () => ScheduleToolOrigin | null;
   /**
    * 本次 runtime 的模式 —— 决定追加哪组 workscene 工具（by-construction 隔离：
@@ -61,9 +61,9 @@ export interface ExtraToolsRuntimeContext {
    */
   spec?: { kind: "main" } | { kind: "workscene" };
   /**
-   * 工作模式控制器 getter —— assembly 早于 RuntimeSession 构造，故用 getter
-   * 延迟取（与 `scheduler` getter 同构解鸡生蛋）。仅 workmode 工具组需要，
-   * spec=main/workscene 任一组非空时必须提供。
+   * 工作模式控制器 getter —— assembly 早于 per-runtime 实例发放，故用 getter
+   * 延迟取（与 `scheduler` getter 同构解鸡生蛋）。仅 main 组 workmode 工具需要；
+   * workscene 的 exit 工具零依赖。
    */
   workModeController?: () => IWorkModeController;
 }
@@ -85,7 +85,7 @@ export interface BuiltinExtraToolsAssembly {
   /**
    * 装配某次 runtime 创建用的 extra tools 实例。
    *
-   * 每次 runtime 创建（首次 bootstrap / reload swap / serve 新 session）调一次，
+   * 每次 runtime 创建（会话 / 场景 / ephemeral 实例发放）调一次，
    * 返回新的 ToolDefinition 数组。工具内部都闭包引用 assembly 持有的 service /
    * scheduler getter —— state 共享但实例独立。
    */
@@ -95,12 +95,12 @@ export interface BuiltinExtraToolsAssembly {
 // ─── 工厂 ───
 
 /**
- * 创建 builtin extra tools assembly —— REPL / serve 顶层各调一次。
+ * 创建 builtin extra tools assembly —— 宿主资产层构建时创建一次。
  *
  * `taskListStore` 决定 task_list 持久化层：
- *   - REPL 模式：传 `ConversationRepoTaskListStore`（落盘到 conversation meta）
- *   - serve 模式：当前传 `InMemoryTaskListStore`（过渡，进程重启丢失），待 serve
- *     接入 conversation meta 后切换
+ *   - 单 scope：传 `ConversationRepoTaskListStore`（落盘到 conversation meta）
+ *   - 核心宿主：传 `RoutedConversationRepoTaskListStore`（按全域 conversationId
+ *     路由到 user / workscene 等 scope repo）
  */
 export function createBuiltinExtraToolsAssembly(
   taskListStore: TaskListStore,

@@ -2,7 +2,7 @@
  * RuntimeHost —— 宿主侧 runtime 装配点:共享装配资产单一持有,按消费者发放实例。
  *
  * 两层结构:
- * - 资产层(构造注入):workspace / 技能库 / 段切换依赖 / extra tools assembly
+ * - 资产层(构造注入):技能库 / 段切换依赖 / extra tools assembly
  *   (含 MCP hub)/ 调度门面 getter / 渲染装饰与安全回调钩子——全部实例共享,
  *   是配置换代的单位。
  * - 实例层(按需发放):每个对话一个 runtime 实例——AgentRuntime 闭包持有窗口级
@@ -39,8 +39,6 @@ type SegmentDepsOption = CreateAgentRuntimeOptions["segmentDeps"];
 type SkillStoreOption = CreateAgentRuntimeOptions["skillStore"];
 
 export interface RuntimeHostOptions {
-  /** 工作区目录——所有实例同一解析值("任何目录运行效果一致"由宿主单点解析保证) */
-  workspace?: string;
   /** 技能库单实例——索引结构版本跨全部实例一致,任一保存全员下窗即见 */
   skillStore: SkillStoreOption;
   /** 段切换外部依赖——注意力窗口的段保护对一切运行体生效 */
@@ -146,7 +144,7 @@ export class RuntimeHost {
   ): Promise<AgentRuntime> {
     const workscene = opts?.workscene;
     const runtime = await createAgentRuntime({
-      workspace: workscene ? workscene.workspace : this.opts.workspace,
+      workspace: workscene ? workscene.workspace : undefined,
       primaryRole: workscene?.primaryRole,
       memoryScope: workscene?.memoryScope,
       profile: workscene?.profile,

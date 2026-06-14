@@ -2,8 +2,9 @@
  * RuntimeHost 装配契约 —— 资产透传、两条发放路径、origin 执行期派生。
  *
  * 范围:锁 host 这一层"装配参数从哪来、origin 何时定"——
- *   - 资产层透传:skillStore / segmentDeps / decorateRunBus / workspace 按引用直达
- *     createAgentRuntime;extra tools 经 assembly 装配
+ *   - 资产层透传:skillStore / segmentDeps / decorateRunBus 按引用直达
+ *     createAgentRuntime;extra tools 经 assembly 装配;main/ephemeral 工作区由
+ *     createAgentRuntime 按配置解析,host 不持用户启动覆盖
  *   - 会话路径:scheduleOrigin 执行期从 RunContext 的 conversationId 派生
  *     (渠道会话解析出投递目标、本地对话与无上下文时 null),装配期不绑定对话
  *   - ephemeral 路径:origin 恒 null
@@ -44,7 +45,6 @@ function makeHostOptions() {
   const decorateRunBus = () => () => {};
   const tools = [{ name: "schedule" }];
   const options = {
-    workspace: "/ws",
     skillStore,
     segmentDeps,
     extraTools: {
@@ -87,7 +87,7 @@ describe("parseOriginFromConversationId", () => {
 });
 
 describe("资产层透传", () => {
-  it("skillStore / segmentDeps / decorateRunBus / workspace 按引用直达装配", async () => {
+  it("skillStore / segmentDeps / decorateRunBus 按引用直达装配,main 不注入 workspace 覆盖", async () => {
     const { options, skillStore, segmentDeps, decorateRunBus, tools } =
       makeHostOptions();
     const host = new RuntimeHost(options);
@@ -98,7 +98,7 @@ describe("资产层透传", () => {
     expect(params.skillStore).toBe(skillStore);
     expect(params.segmentDeps).toBe(segmentDeps);
     expect(params.decorateRunBus).toBe(decorateRunBus);
-    expect(params.workspace).toBe("/ws");
+    expect(params.workspace).toBeUndefined();
     expect(params.extraTools).toBe(tools);
   });
 

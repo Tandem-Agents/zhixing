@@ -49,7 +49,7 @@ export type WindowCloseReason =
   | "clear"
   | "resume"
   // —— 实例销毁（末窗收尾，实例退场）——
-  | "session-dispose" // RuntimeSession 整体销毁（cli dispose / serve 会话驱逐）
+  | "session-dispose" // 会话实例整体销毁（cli 断开 / serve 会话驱逐）
   | "workmode-exit" // exitWorkMode 丢弃 work 运行体
   | "reload-replace" // reload 换代、退役旧实例
   | "assembly-rollback"; // 装配事务回滚、实例从未上位

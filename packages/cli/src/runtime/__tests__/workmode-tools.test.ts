@@ -1,5 +1,5 @@
 /**
- * workmode 工具回归 —— 脱离 RuntimeSession，用 mock 注册表 / controller 验证：
+ * workmode 工具回归 —— 脱离核心宿主，用 mock 注册表 / controller 验证：
  *   - enter/exit 只 emit 意图(经 ALS 发当前 run 的 bus)、不执行切换
  *   - enter 对不存在场景 isError 且不 emit
  *   - change_approve 派发到 registry 各 CRUD
@@ -28,7 +28,7 @@ function makeController(
   controllerOverrides: Partial<IWorkModeController> = {},
 ): IWorkModeController {
   return {
-    // 带 guard 的删除入口 —— RuntimeSession 实现内含 active 守卫;
+    // 带 guard 的删除入口 —— 宿主实现内含 active 守卫;
     // 这里默认放一个无 guard 的 mock,需要测 guard 行为的 case 用
     // controllerOverrides 注入抛错版本。
     removeWorkScene: vi.fn().mockResolvedValue(undefined),
@@ -134,7 +134,7 @@ describe("workscene_change_approve", () => {
   });
 
   it("remove 触发 active guard → 工具返回 isError、不抛", async () => {
-    // 模拟 RuntimeSession.removeWorkScene 抛 active-scene guard 错误
+    // 模拟宿主 removeWorkScene 抛 active-scene guard 错误
     const c = makeController(
       {},
       {

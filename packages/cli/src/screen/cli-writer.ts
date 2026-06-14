@@ -16,7 +16,7 @@
  * 使用约束（强制）：
  *   - cli 模块禁止直接 console.log / process.stdout.write—— no-direct-console.test.ts 拦截
  *   - 所有渲染函数（render*）必须接受 CliWriter，由 caller 注入对应实现
- *   - 长生命周期 caller（如 OutputRenderer / RuntimeSession）持有 CliWriter 引用，
+ *   - 长生命周期 caller（如 OutputRenderer / REPL 控制器）持有 CliWriter 引用，
  *     不重复构建
  */
 
