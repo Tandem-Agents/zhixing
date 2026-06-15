@@ -2,7 +2,7 @@
 
 > **定位**：梳理"一个智能体核心单例 + 多个可插拔接入面"的需求与方向——cli / 飞书 / RPC 等作为可开关、可共存的接入面，支撑用户在不同入口完成**同一份工作**（多端协同、跨端连续）。
 >
-> **状态**：🏗 需求碎片定稿（§二）+ 架构设计至可执行（§三）+ 执行计划已定（§四，11 步三阶段）;实现未启动。
+> **状态**：主线架构已进入实现与实测收口;当前补充运行控制交互设计（`/status` / `/stop` / 普通退出 / 非交互停止安全）已定，待按补充单元实现。
 >
 > **与调度器模块的关系**：本模块与 [scheduler-architecture.md](./scheduler-architecture.md) 共享同一地基——「核心宿主（agent core host）」。核心宿主由调度器那一轮先立起（最小形态：仅调度）；本模块在该宿主之上长"会话共享 / 多端协同"这一层，**不重起核心宿主**。两者是同一架构哲学（核心单例 + 多接入面）的不同层：功能上独立、地基上共享。
 >
@@ -59,7 +59,7 @@
 
 - **宿主恒为独立进程，cli 恒为接入面（已裁决）**。寄生形态（宿主驻 cli 进程、离场时切换为常驻）= 双模式代码路径 + 在场 ↔ 离场的状态迁移正确性，是把"切换"当问题去解；恒独立进程让切换问题**整个不存在**（消灭问题优于解决它），且调度域已做同样选择（cli 不自起 Scheduler）。代价 = 本地多一跳 loopback RPC，由「体验约束」组守住
 - **会话状态本就在宿主 → "切换"消解**：cli 离场 = 断一个 observer（grace 期托底），运行态不丢；cli 在场常态 = 宿主在场（ensureHost 已有）。不存在"状态迁移"，只有"接入面增减"
-- **轻量性不破**：未开远程接入、无待办时不强制常驻——生命周期沿「接入面在场 → 核心在场」既有模型
+- **轻量性不破**：未开远程接入、无 activeWork 且无 keepAliveWork 时不强制常驻——生命周期沿「接入面在场 → 核心在场」既有模型;已启用的用户定时任务属于 keepAliveWork,它不是正在运行的工作,但会保留宿主在场以兑现"我不在它也跑"的调度承诺
 - **资源代价诚实记录**：恒独立进程意味着聊天时恒两个 node 进程（两份 V8,各数十 MB 起）——行业常态（LSP / Docker 同模型）且有 idle 回收兜底,但「要轻」原则要求把它写在明面:宿主内存基线纳入验收观测,不藏在"架构更优"叙事后面
 
 ### 接入面体验约束
@@ -166,11 +166,30 @@ cli 渲染面本就是两条腿,投影逐腿对应、各自零改:
 | `skill.list` / `setState` / `archive` | 技能管理(/skills 列表、启停 / 置顶 / 模式、归档)+ slash 补全候选源 | 现状管理器本地写 `store.setState`(pinned / disabled)与 `store.archive`(目录移至 archived/ + 结构版本递增——语义独立于 setState,不合并),随 skillStore 单写者收宿主;补全候选在收到 3.5 变更通知后经 list 拉取 |
 | `memory.journalStats` / `peopleList` | 记忆域查看(/journal 统计、/people 关系列表) | 现状命令本地直读 JournalStore / PeopleStore;memory 收宿主后按裁决 4 正常态读也经 RPC;journal 生命周期维护(写)收宿主自跑、不设方法 |
 | `runtime.reload` | 配置热重载(blue-green 平移宿主) | config 编辑仍在 cli TTY,落盘后触发 |
-| `server.info` / `server.shutdown` | 可观测 + 协议握手 + 显式停止(占用红线的手动保底,见裁决 8) | 实现命名取既有 server 域(`server.shutdown` 已有 serve stop 优雅停机链消费,双名是债):info 即宿主状态权威视图——protocol(兼容判定,见 3.4 裁决 7)、运行时长 / 活跃与忙碌会话 / 连接数 / 内存基线 / 日志路径 / resolvedWorkspace(cli 的 @ 补全 root 与路径展示改取宿主解析值,本地 `?? process.cwd()` 兜底随收编消失);shutdown = flush 全部会话落盘后优雅退出 |
+| `server.info` / `server.shutdown` | 状态权威视图 + 协议握手 + 显式停止的 RPC 原语(占用红线的手动保底,见裁决 8) | RPC 仍取既有 server 域(`server.shutdown` 已有 serve stop 优雅停机链消费),但用户入口不暴露 host / daemon 概念:info 投影到交互内 `/status` 只读展示,shutdown 投影到交互内 `/stop` 控制动作;info 是 `/status` 与运行控制判定的单一权威数据源,含 protocol(兼容判定,见 3.4 裁决 7)、运行时长、接入面摘要(当前终端 / 飞书 / 其它终端)、活跃与忙碌会话、activeWork / deferredWork / keepAliveWork 权威快照、生命周期阶段、最近错误、reload / reconnect 状态、内存基线、日志路径、resolvedWorkspace(cli 的 @ 补全 root 与路径展示改取宿主解析值,本地 `?? process.cwd()` 兜底随收编消失);activeWork 是用户可见"正在处理"的汇总,必须细分为 cancellableWork 与 drainOnlyWork:cancellableWork 只包含会话 busy turn / pending queue 与 scheduler in-flight run,可被取消;drainOnlyWork 只包含用户可见 delivery/outbox 正在发送或可立即 drain 的未完成项,不可取消、只能主动 drain 或等待;activeWork 明确排除 conversation task_list 待办、未来计划但未运行的 schedule、已持久化等待重试的投递;deferredWork 表达已持久化但当前不可立即发送的用户可见投递,停止时保留、下次启动继续尝试,不阻塞 drain;keepAliveWork 只表达"会让宿主继续在场的未来用户工作"(如 enabled 非内部 schedule),不算可取消的当前工作;不得让 `/stop`、`zz serve stop` 各自拼状态;shutdown 支持策略化停止:`immediate` 空闲即时停、`drain` 拒新后主动 drain drainOnlyWork 并等 activeWork 清空再停、`cancel` 取消 cancellableWork 后继续 drain drainOnlyWork 再停 |
 
 **方法表完备性约束**:凡 cli 命令现存的本地写路径——`convRepo` 的 rename / clearViewLayerState / touch / 删除、场景注册表 CRUD、trust 规则撤销(`store.revoke`)、技能管理(`skillStore.setState` / `skillStore.archive`)——必须全部有对应 RPC 方法承接;任何一条漏掉,阶段 B 后 cli 就残留本地写实例,3.5 的结构性验收即不成立。
 
 命令系统(registry / dispatcher,ADR-009 形态)不动——会话命令的 handler 实现从直驱改为 facade 调用,分发架构零改。
+
+**用户可见的运行控制语义**:用户不需要理解 host / daemon / server。产品语义只有三件事:看状态、停止知行、退出当前终端。
+
+- `/status` 只读,回答"知行现在是什么状态",不混入停止 / 重启等操作。展示项按用户语言组织:当前终端、飞书 / 其它接入面、运行中任务、排队消息、未送达消息、已启用定时任务、最近错误、日志位置;末尾只给提示:"如需完全停止知行,输入 `/stop`。"
+- `zz serve status` 保留为非交互诊断 / 脚本只读入口,只回答进程四态与日志位置,不替代交互内 `/status`,也不承载停止 / 重启操作。它的文案必须保持"按需打开 `zz` 会自动恢复 / 启动"的用户语言,不得把用户带回 host / daemon 心智。
+- `/stop` 是独立控制指令,语义是"停止知行的后台运行能力",不是退出当前终端。它必须先说明影响再确认,复杂度随风险分级:
+  - 确认交互统一调用 [选择模块架构](./selection-module-architecture.md) 的 `SelectionService`:选项最多 5 个、一次看完、无滚动;选择模块只返回结构化结果,业务动作仍由 `/stop` handler 执行。
+  - 无其它接入面、无 activeWork、无 deferredWork、无 keepAliveWork:`停止知行并退出当前终端? 下次打开 zz 会自动启动。` 选项:停止 / 取消。
+  - 有飞书或其它终端在线,或有 keepAliveWork:`停止知行后,飞书将暂时无法回复,其它终端会断开,已启用的定时任务在知行再次启动前不会执行。下次打开 zz 会自动启动。` 选项:停止 / 取消。文案按实际存在项裁剪,不展示不存在的影响。
+  - 有 cancellableWork 或 drainOnlyWork:`知行正在处理工作。` 选项按实际工作类型生成:始终提供"等已接收工作完成后停止"与"返回";只有存在 cancellableWork 时才提供"取消当前可取消工作并停止",且必须二次确认;若只有 drainOnlyWork,不得展示取消选项。普通 task_list 待办与已持久化等待重试的投递不触发此档位。
+  - 只有 deferredWork 而无 activeWork 时,停止前只提示:`还有未送达消息,会保留并在下次启动后继续尝试。` 不要求用户等待,也不静默丢弃。
+- 普通退出只退出当前接入面,不等价于停止知行。退出后在 shell 前给一行低打扰提示:
+  - 无其它接入面、无 activeWork、无 deferredWork、无 keepAliveWork:`已退出当前终端。知行会在空闲后自动停止。`
+  - 飞书在线:`已退出当前终端。知行仍在飞书中运行。`
+  - 其它终端在线:`已退出当前终端。知行仍在其它终端中运行。`
+  - 有 activeWork:`已退出当前终端。知行仍在处理任务,完成后会按空闲策略停止。`
+  - 有 deferredWork:`已退出当前终端。仍有未送达消息,会在后台继续尝试;若知行空闲停止,下次启动后继续尝试。`
+  - 有 keepAliveWork:`已退出当前终端。知行仍在后台等待已启用的定时任务。`
+  - 多个条件同时存在时合并为一句,优先说明用户最关心的影响,例如:`已退出当前终端。知行仍在飞书中运行,并有任务正在处理。`
 
 ### 3.4 逐条裁决(开放问题 → 决策)
 
@@ -186,10 +205,11 @@ cli 渲染面本就是两条腿,投影逐腿对应、各自零改:
    - cli 确认面板能力**零降级**是此升级的验收锚;不为持久授权另起本地 broker / localConfirmation 旁路。
 6. **会话命令归属**:见 3.3 表——分发在 cli、执行体在宿主,handler 变薄不变形。
 7. **版本偏斜**:握手交换 **protocolVersion(兼容区间)**,与 build 版本分开判。协议兼容 → 正常运行;build 不同仅作换代信号:宿主无其它活跃接入面 → cli 请求宿主优雅退出并拉起新版本,有其它活跃端 → 状态行提示"宿主版本待更新"、择机换代。**协议不兼容 → 禁止写操作**,进只读浏览 + 引导修复(复用裁决 4 的降级形态)——不允许 schema 不匹配的带病运行。
-8. **可观测性与占用防线**:`/host` 命令(状态:运行时长 / 活跃会话 / 接入面 / 内存基线 / 日志路径);宿主重启 / 换代在 cli 状态行提示。**异常占用不释放是红线**,三层防线:
-   - **正常层**:无接入面且无待办 → idle 自动退出(既有);per-home 单例端口仲裁保证宿主永不堆积(既有)。
-   - **手动保底**:主入口是交互内 `/host stop`——停止是带上下文的决策,面板展示活跃会话 / pending 任务 / 进行中 turn,用户选择等待完成 / 取消工作 / 立即停止;宿主 flush 全部会话落盘后优雅退出,下次 zz 自动重拉。`zz host stop` 仅为非交互应急保底(脚本 / 交互不可用时):默认安全——经 RPC 查活跃工作,存在则拒绝并提示进交互处理(或有界等待后退出提示),绝不静默杀掉进行中的工作;RPC 不通且 PID 存活则落入下方僵死处置分支。**不设 --force 参数**——交互决策不塞进命令行参数。
+8. **可观测性与占用防线**:用户可见模型是"知行是否仍在运行",不是"host / daemon / server 是否还活着"。交互语义以 3.3「用户可见的运行控制语义」为单一权威:`/status` 只读、`/stop` 独立控制、普通退出只退出当前接入面。宿主重启 / 换代在 cli 状态行提示,但文案仍以"知行正在应用配置 / 正在恢复连接 / 后台服务已重启"表达,不要求用户理解进程模型。**异常占用不释放是红线**,三层防线:
+   - **正常层**:无接入面、无 activeWork 且无 keepAliveWork → idle 自动退出(既有);per-home 单例端口仲裁保证宿主永不堆积(既有)。enabled 非内部 schedule 属于 keepAliveWork,会阻止 idle 退出;内部维护任务不算 keepAliveWork;已持久化等待重试的投递属于 deferredWork,不阻止 idle 退出,下次宿主启动后继续尝试。
+   - **手动保底**:主入口是交互内 `/stop`——停止是带上下文的决策,不是"退出当前终端"。确认面由 `SelectionService` 承载,展示其它接入面、activeWork(按 cancellableWork / drainOnlyWork 分组)、deferredWork 与 keepAliveWork 摘要,并说明影响:当前终端会退出,飞书 / 其它远程接入会暂时不可用,已启用的定时任务在知行再次启动前不会执行,未送达消息会保留到下次启动继续尝试,下次 `zz` 会自动重新启动。若有进行中工作,用户选择等待完成 / 取消当前可取消工作并停止 / 返回;等待完成必须先进入 quiescing,通过宿主级写闸门拒绝所有新工作入口(通道入站、RPC `session.send`、新的 scheduler timer fire、手动 `schedule.run` 以及会产生新工作或启用未来 fire 的 schedule 写操作),但保留 `/status`、取消、停止确认等控制读写,随后主动触发 delivery ready queue drain,并等待 outbox idle 与会话 / scheduler activeWork 清空后 shutdown;不得只依赖 delivery 定时器或已有 activeFlush。取消只覆盖 cancellableWork(会话 turn、会话排队消息与 scheduler in-flight run),不可取消的 drainOnlyWork 仍要主动 drain 或等待,已持久化等待重试的投递保留;宿主 flush 全部会话落盘后优雅退出。`zz serve stop` 仅为非交互应急保底(脚本 / 交互不可用时):默认安全——经 RPC 查同一份运行控制快照,存在其它接入面、activeWork 或 keepAliveWork 则拒绝并提示进交互处理,不复刻交互选择,绝不静默杀掉进行中的工作或暂停用户定时任务;deferredWork 不阻止非交互停止,因为它已持久化且可下次启动继续;RPC 不通且 PID 存活则落入下方僵死处置分支。**不设 --force 参数**——交互决策不塞进命令行参数。
    - **僵死处置**:ensureHost 连接超时但 PID 存活 → 判定僵死 → 终止旧进程(SIGTERM,限时不退则 SIGKILL)→ 重拉新宿主(客户端发现现状不做 stale 检查,此判定在连接层补上)。已接受数据零丢失由接受协议保证(同崩溃恢复路径)。
+   - **普通退出提示**:退出 cli 只表示离开当前接入面,不自动停止知行。若飞书 / 其它终端 / activeWork / deferredWork / keepAliveWork 仍在,退出终端前后给低打扰提示:"已退出当前终端,知行仍在飞书中运行 / 仍在处理任务 / 有未送达消息 / 已启用定时任务会继续生效;如需完全停止,重新打开 `zz` 后输入 `/stop`。"若无其它接入面、无 activeWork、无 deferredWork 且无 keepAliveWork,提示"知行会在空闲后自动停止"。
    不做内存水位自杀一类的主动防线——正常占用可用,异常由上述三层兜住,不引入误杀正常负载的机制。
 9. **abort**:见 3.3 表。
 10. **渠道对话升格**:对话在**持久化时刻**写 meta.json(name = 渠道身份显示名)——persistent 会话建立即写,ephemeral 会话随 promote 落盘补写(ephemeral 纯内存、建立时无处可写,EphemeralRunBuffer 机制与 meta 升格正交、保留不动)。落盘对话全量进列表、cli 可 /resume;隐式分离退场的对象是「落盘却不写 meta 以藏出列表」的约定。
@@ -213,13 +233,15 @@ transcript / skill / memory / snapshot / permission(trust 规则)的全部写入
 - **单 owner**:结构性验收——cli 进程无 Store 写实例、无窗口实例(grep 级 + 架构评审);**所有管理命令零本地写**(/name、/resume inline 删除、/work 场景 CRUD、/clear 视图态清理、/trust 撤销、/skills 启停 / 置顶 / 模式 / 归档全部经 RPC);grep 验收对象 = cli 侧 convRepo / 场景注册表 / permissionStore / skillStore / 记忆域仓(JournalStore / PeopleStore / MemoryStore)/ transcript / snapshot 的全部写调用与实例构造。
 - **功能全谱经 RPC**:对话 / 流式 / 工具事件 / 确认(**含持久授权全选项**,见裁决 5)/ 段切换提示 / /clear / /resume / /compact / workscene / reload / 技能(索引随宿主 runtime、slash 补全随事件刷新)在 cli 全部如常。
 - **多端连续**:飞书对话进统一会话事实,cli 可见可续;cli 接续飞书会话默认不回显到飞书,只有显式"回复到飞书 / 发给对方"才投递到 channel;多 observer 同看一个流式 turn。
-- **生命周期**:cli 离场 grace 接管、宿主 idle 退出、版本换代握手生效;**宿主非优雅崩溃可恢复**——已接受的 run 零丢失(接受协议先持久化后入窗),进行中 turn 丢弃,cli 收到连接断后自动 ensureHost 重连并提示(恒独立进程模型的新增故障面,须有显式验收)。**占用红线**(裁决 8):关闭全部接入面且无待办 → idle 窗口后宿主进程必退(进程级验证);`/host stop` 后进程必退且数据落盘;`zz host stop` 在存在活跃工作时默认拒绝、绝不静默杀;僵死宿主可被 ensureHost 判定并替换。
+- **生命周期**:cli 离场 grace 接管、宿主 idle 退出、版本换代握手生效;**宿主非优雅崩溃可恢复**——已接受的 run 零丢失(接受协议先持久化后入窗),进行中 turn 丢弃,cli 收到连接断后自动 ensureHost 重连并提示(恒独立进程模型的新增故障面,须有显式验收)。**占用红线**(裁决 8):关闭全部接入面且无 activeWork / keepAliveWork → idle 窗口后宿主进程必退(进程级验证);enabled 非内部 schedule 会作为 keepAliveWork 阻止 idle 退出;已持久化等待重试的投递不阻止 idle,但必须在下次启动后继续尝试;`/status` 只读展示知行运行状态与接入面占用;普通退出在飞书 / 其它终端 / activeWork / deferredWork / keepAliveWork 仍在时给明确提示;`/stop` 经影响确认后进程必退且数据落盘,其中"等已接收工作完成后停止"必须先关闭所有新工作入口,主动 drain delivery/outbox ready 工作,再等 activeWork 清空;取消路径只取消 cancellableWork,drainOnlyWork 不被误标为可取消;`zz serve stop` 在存在其它接入面、activeWork 或 keepAliveWork 时默认拒绝、绝不静默杀;僵死宿主可被 ensureHost 判定并替换。
 
 ---
 
 ## 四、执行计划
 
-> 11 步,每步构成一个值得提交的完整单元:绿色构建 + 全量测试 + 独立 commit。依赖:1→2→3 严格串行(地基);4 / 5 / 6 在 3 之后可并行;7 只依赖 6 的 host 方法;8 可与阶段 A 后期并行;9 须等 A 全部完成;10 在 9 后;11 收尾。3.7 验收纲在第 9、10、11 步后各做一次端到端实测(多端连续组需配飞书实测)。
+> 主线 11 步每步构成一个值得提交的完整单元:绿色构建 + 全量测试 + 独立 commit。依赖:1→2→3 严格串行(地基);4 / 5 / 6 在 3 之后可并行;7 只依赖 6 的 host 方法;8 可与阶段 A 后期并行;9 须等 A 全部完成;10 在 9 后;11 收尾。3.7 验收纲在第 9、10、11 步后各做一次端到端实测(多端连续组需配飞书实测)。
+
+> `/stop` 的交互前置已完成:独立选择模块已作为 CLI TUI 基础设施落地。后续实现只接入 `SelectionService`,不得新造停止专用选择面板。
 
 ### 阶段 A·宿主能力完备化(步 1–7,期间 cli 行为零变化)
 
@@ -228,7 +250,7 @@ transcript / skill / memory / snapshot / permission(trust 规则)的全部写入
 3. **窗口归 ManagedSession**——从 SessionRuntime wrapper 挪出,ConversationManager 成为窗口 / turnCounter / 接受协议的唯一权威;runTurnWithCommit 补 pendingModeSwitch 透传。
 4. **双通道与通知面**——带外事件转发装饰器(wire envelope / UI 订阅集裁剪 / lineage)、推送改 observer 组播、`session.changed` 会话级通知、`session.subscribe` 登记。
 5. **session / workscene 方法域补全**——rename / delete 语义对齐、history 改 readRunsReverse、list 改全量;workscene 全组(对话静态属性模型:`ws:` 全域键路由、enter 原子查询创建、exit 仅 touch、管理面薄壳——宿主无状态机、无 status 方法,见裁决 3 执行细化)。
-6. **confirmation 升级 + 管理面方法域**——应答权改 origin surface、decision 信任分级;trust / skill / memory 方法组;server.info 扩展为宿主状态权威视图、server.shutdown 即显式停止(占用红线三层防线、协议版本与 auth 握手同源)。
+6. **confirmation 升级 + 管理面方法域**——应答权改 origin surface、decision 信任分级;trust / skill / memory 方法组;server.info 扩展为知行运行状态权威视图(`/status` 只读投影),server.shutdown 作为 `/stop` 与非交互应急停止的底层原语(占用红线三层防线、协议版本与 auth 握手同源)。
 7. **宿主 profile 升格**——cli 拉起的常驻宿主按配置装配渠道与 MCP(飞书随配置常驻生效)。
 
 ### 阶段 B·cli 收编(步 8–10,核心是一次原子切换)
@@ -240,3 +262,7 @@ transcript / skill / memory / snapshot / permission(trust 规则)的全部写入
 ### 阶段 C·对话域统一(步 11)
 
 11. **meta 升格与清理**——持久化时刻写 meta(ephemeral 随 promote 补)、渠道对话进列表可 /resume、隐式分离退场、两域残留约定清理(含 serve 的 InMemoryTaskListStore 统一)。
+
+### 补充单元·运行控制交互收口
+
+12. **运行控制交互收口**——把 3.3 与裁决 8 的用户语义落成一个完整提交单元:先引入宿主 activity snapshot provider,由 server 统一聚合会话 busy/pending、runRegistry size、delivery/outbox active/deferred stats、enabled 非内部 schedule、接入面状态与生命周期阶段;`server.info` 暴露 activeWork、cancellableWork、drainOnlyWork、deferredWork、keepAliveWork、最近错误、reload / reconnect 状态与 quiescing/stopping 阶段。activeWork 是 cancellableWork + drainOnlyWork 的用户可见汇总:cancellableWork 只包含会话 busy/pending 与 scheduler in-flight,可被取消;drainOnlyWork 只包含 delivery/outbox 正在发送或可立即 drain 的用户可见投递,不可取消但停止前必须主动 drain 或等待;activeWork 排除 task_list 待办、未来计划但未运行的 schedule、已持久化等待重试的投递;deferredWork 只表达已持久化但当前不可立即发送的用户可见投递,停止时保留、下次启动继续尝试,不阻塞 drain;keepAliveWork 只由 enabled 非内部 schedule 等未来用户工作组成,阻止 idle 退出但不算当前可取消工作。`/status` 改为该快照的只读用户投影,展示当前终端、飞书 / 其它接入面、运行中工作、排队消息、未送达消息、已启用定时任务、最近错误与日志位置,仅提示用 `/stop` 完全停止;`zz serve status` 保留为非交互诊断 / 脚本只读入口,只显示四态、pid / port / uptime / log 等运维信息,不替代 `/status`;`/stop` 调用 `SelectionService` 承载影响确认,由 handler 基于同一份 `server.info` 分级生成选项,再按选择调用停止策略:空闲即时停、拒新并等待 activeWork 清空后停、取消 cancellableWork 后继续 drainOnlyWork 再停、返回。拒新必须通过宿主级写闸门覆盖所有新工作入口:InboundRouter 新入站、RPC `session.send`、新的 scheduler timer fire、手动 `schedule.run`、以及会产生新工作或启用未来 fire 的 schedule 写操作;读状态、取消与停止控制入口继续可用,防止等待期间继续接收新工作且不锁死控制面。等待完成路径必须主动调用 delivery.flush 处理 ready queue,再等待 outbox idle 与会话 / scheduler activeWork 清空;不得只等待既有 activeFlush 或 delivery 定时器。取消只覆盖 cancellableWork;若仍有 drainOnlyWork,继续执行同一 drain 流程;已持久化等待重试的投递保留到下次启动。最终通过 `server.shutdown` 的策略化入口优雅退出。普通退出只断开当前接入面,若飞书 / 其它终端 / activeWork / deferredWork / keepAliveWork 仍在则给低打扰提示;`zz serve stop` 保持非交互保底,先经 RPC 读取同一份运行控制快照,存在其它接入面、activeWork 或 keepAliveWork 则拒绝并引导回交互内 `/stop`,deferredWork 不阻止停止但必须保留;RPC 不通且 PID 存活才进入僵死处置链路。验收以用户语义为准:不暴露 host / daemon 概念,不新增 `--force`,不静默杀掉进行中的工作、不暂停用户定时任务、不丢未送达消息。
