@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { InboundRouter } from "../inbound-router.js";
 import { ConversationManager } from "../../runtime/conversation-manager.js";
 import { ConfirmationHub } from "../../confirmation/hub.js";
+import { SESSION_NOTIFICATIONS } from "../../rpc/session-wire.js";
+import type { SessionBroadcast } from "../../rpc/session-broadcast.js";
 import {
   ConfirmationBroker,
   createEventBus,
@@ -106,6 +108,7 @@ describe("InboundRouter", () => {
   function setup(options?: {
     adapter?: ChannelAdapter;
     runtime?: SessionRuntime;
+    sessionBroadcast?: SessionBroadcast;
   }) {
     const adapter = options?.adapter ?? createMockAdapter();
     const factory = createMockRuntimeFactory(options?.runtime);
@@ -121,7 +124,14 @@ describe("InboundRouter", () => {
     });
     channels.register(adapter);
 
-    const router = new InboundRouter({ conversations, channels, logger });
+    const router = new InboundRouter({
+      conversations,
+      channels,
+      logger,
+      sessionBroadcast: options?.sessionBroadcast
+        ? () => options.sessionBroadcast
+        : undefined,
+    });
 
     return { adapter, factory, conversations, channels, router };
   }
@@ -158,6 +168,40 @@ describe("InboundRouter", () => {
 
     const [target] = (adapter.send as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(target.to).toBe("grp-1");
+  });
+
+  it("projects channel turn output to session observers and keeps channel reply", async () => {
+    const sessionBroadcast = vi.fn<SessionBroadcast>();
+    const { adapter, router } = setup({ sessionBroadcast });
+
+    await router.handleMessage(dmMessage());
+
+    await vi.waitFor(() => {
+      expect(adapter.send).toHaveBeenCalled();
+    });
+
+    const deltaCall = sessionBroadcast.mock.calls.find(
+      ([, method]) => method === SESSION_NOTIFICATIONS.delta,
+    );
+    const completeCall = sessionBroadcast.mock.calls.find(
+      ([, method]) => method === SESSION_NOTIFICATIONS.complete,
+    );
+
+    expect(deltaCall).toBeDefined();
+    expect(deltaCall![0]).toBe("dm:test-ch:user-1");
+    expect(deltaCall![2]).toMatchObject({
+      conversationId: "dm:test-ch:user-1",
+      delta: { type: "text_delta", text: "Hello from agent" },
+    });
+    expect(completeCall).toBeDefined();
+    expect(completeCall![0]).toBe("dm:test-ch:user-1");
+    expect(completeCall![2]).toMatchObject({
+      conversationId: "dm:test-ch:user-1",
+      result: { reason: "completed" },
+    });
+
+    const [, content] = (adapter.send as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(content.text).toBe("Hello from agent");
   });
 
   it("creates conversation via ConversationManager", async () => {

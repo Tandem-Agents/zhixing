@@ -12,10 +12,10 @@ import {
   generateTurnId,
   isFreeTextDeny,
   type AgentResult,
-  type RunResult,
 } from "@zhixing/core";
 import type { ConversationManager, ManagedSession } from "../runtime/conversation-manager.js";
-import { runTurnWithCommit } from "../runtime/run-turn.js";
+import type { SessionBroadcast } from "../rpc/session-broadcast.js";
+import { projectSessionTurn } from "../rpc/session-turn-stream.js";
 import type { ConfirmationHub } from "../confirmation/hub.js";
 import {
   APPROVE_KEYWORDS,
@@ -75,6 +75,11 @@ export interface InboundRouterOptions {
    * non-control 的 stub)。
    */
   intentClassifier?: IntentClassifier;
+  /**
+   * 会话 observer 组播 getter。channel 消息属于同一 conversation 事实,
+   * 其 assistant 输出也要投影给正在旁观该会话的接入面。
+   */
+  sessionBroadcast?: () => SessionBroadcast | null | undefined;
 }
 
 export class InboundRouter {
@@ -84,6 +89,7 @@ export class InboundRouter {
   private outboxRegistry?: OutboxRegistry;
   private readonly confirmationHub?: ConfirmationHub;
   private readonly intentClassifier: IntentClassifier;
+  private readonly sessionBroadcast?: () => SessionBroadcast | null | undefined;
   /** graceful shutdown 期间拒新标记 —— `refuseNewMessages()` 置 false */
   private acceptingNew = true;
 
@@ -93,6 +99,7 @@ export class InboundRouter {
     this.logger = options.logger;
     this.outboxRegistry = options.outboxRegistry;
     this.confirmationHub = options.confirmationHub;
+    this.sessionBroadcast = options.sessionBroadcast;
     // 默认 classifier 注入 confirmation 词集让启动期互斥校验实际生效;
     // 显式注入的 classifier 自负其责(测试场景 / 关闭 cancel 能力等)。
     this.intentClassifier =
@@ -438,7 +445,7 @@ export class InboundRouter {
     this.logger.info(`[开始处理] conv=${conversationId} text="${msg.text}"`);
 
     // 构造 turnContext，把 commitToUser 绑定到当前 user target
-    //   - turnId 用于观测 + 作为 Outbox Turn Slot 的 key（Phase 3）
+    //   - turnId 用于观测 + 作为 Outbox Turn Slot 的 key
     //   - commitToUser 让工具（如 schedule）可直接发 commitment 消息，不依赖 LLM 叙述
     //   - outboxRegistry 未绑定时 commitToUser 为 undefined → 工具降级为 LLM 叙述路径
     const replyTarget = buildReplyTarget(msg);
@@ -461,8 +468,7 @@ export class InboundRouter {
               },
             })
         : undefined,
-      // 远程确认回程地址（remote-confirmation-execution.md §3.3）：
-      //   通道用户消息触发的 turn，任何 confirmation 请求按此 target 路由回原对话。
+      // 通道用户消息触发的 turn，任何 confirmation 请求按此 target 路由回原对话。
       turnOrigin: {
         channel: msg.channelId,
         target: replyTarget,
@@ -470,46 +476,43 @@ export class InboundRouter {
       },
     };
 
-    // Phase 3：turn 启动即 open slot，让本 turn 内工具创建的任务（afterSlot=turnId）
-    // 被阻塞到本 turn 的最终回复之后才发出。TTL 兜底防 slot 泄漏（INV-4）。
+    // turn 启动即 open slot，让本 turn 内工具创建的任务被阻塞到本 turn
+    // 的最终回复之后才发出。TTL 兜底防 slot 泄漏。
     if (this.outboxRegistry) {
       this.outboxRegistry.of(replyTarget).openSlot({ slotId: turnId });
     }
 
     try {
-      // runTurnWithCommit：run + 按结果 recordTurn（接受协议：先持久化、后入窗）。
-      //   · 非 completed / 持久化 throw / runtime throw 三条异常路径下窗口都
-      //     停在 run 前基底，防止 orphan userMsg 污染下一轮 LLM 输入
-      //   · 持久化失败通过 onCommitFailure hook 路由到 logger（observability）
-      const gen = runTurnWithCommit(
-        this.conversations,
-        conversationId,
-        msg.text,
-        {
+      const projection = await projectSessionTurn({
+        manager: this.conversations,
+        managed,
+        text: msg.text,
+        turnId,
+        runOptions: {
           turnContext,
           turnIndex: managed.turnCount,
           source: "channel",
         },
-        {
+        hooks: {
           onCommitFailure: (err) => {
             this.logger.warn(
               `[持久化失败] conv=${conversationId}: ${errMsg(err)} (adapter state 已 rollback)`,
             );
           },
         },
-      );
-      let runResult: RunResult | undefined;
+        notify: (method, params) => {
+          this.sessionBroadcast?.()?.(conversationId, method, params);
+        },
+      });
 
-      while (true) {
-        const iter = await gen.next();
-        if (iter.done) {
-          runResult = iter.value;
-          break;
-        }
-        // inbound-router 消费 yield 但不 forward（channel 不做 streaming；
-        // session.ts RPC 路径才用 session.delta 推送）
+      if (projection.kind === "error") {
+        throw projection.error;
+      }
+      if (projection.kind === "aborted") {
+        return;
       }
 
+      const runResult = projection.runResult;
       const agentResult = runResult?.agentResult;
       this.logger.info(`[处理完成] conv=${conversationId} reason=${agentResult?.reason ?? "no-result"}`);
 
@@ -577,7 +580,7 @@ export class InboundRouter {
         turnId,
       ).catch(() => {});
     } finally {
-      // Phase 3 安全网：若 slot 仍 pending（理论不该发生——上面三个分支之一必填了它），
+      // slot 安全网：若 slot 仍 pending（理论不该发生——上面三个分支之一必填了它），
       // abandon 以释放 afterSlot 等待者，防止因意外路径导致 task-fire 悬挂到 TTL。
       // 对已终态 slot 的 abandon 是 no-op（outbox.ts slot 状态机保证）。
       if (this.outboxRegistry) {

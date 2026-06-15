@@ -15,6 +15,7 @@ import {
   createDefaultIntentClassifier,
   type ConversationManager,
   type ConfirmationHub,
+  type SessionBroadcast,
 } from "@zhixing/server";
 import type {
   MessagingChannelEntry,
@@ -70,6 +71,8 @@ export interface SetupChannelsOptions {
    * 静态互斥校验生效——配错关键词跟 confirmation 集合冲突会立即 throw。
    */
   cancelKeywords?: readonly string[];
+  /** 会话 observer 组播 getter；server 启动后才会返回真实函数。 */
+  sessionBroadcast?: () => SessionBroadcast | null;
 }
 
 export interface SetupChannelsResult {
@@ -88,6 +91,7 @@ export async function setupChannels(
     logger,
     confirmationHub,
     cancelKeywords,
+    sessionBroadcast,
   } = options;
 
   const eventBus = createEventBus<ChannelEventMap>();
@@ -130,6 +134,7 @@ export async function setupChannels(
       logger,
       confirmationHub,
       intentClassifier,
+      sessionBroadcast,
     });
   }
 

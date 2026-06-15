@@ -162,6 +162,7 @@ const channelSurface: AccessSurface = {
         logger: channelLogger,
         confirmationHub,
         cancelKeywords: config.intent?.cancelKeywords,
+        sessionBroadcast: () => ctx.sessionBroadcastRef.current,
       });
       ctx.channels = result.registry;
       ctx.inboundRouter = result.router;

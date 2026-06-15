@@ -25,7 +25,6 @@
 import {
   abortWithReason,
   generateTurnId,
-  type RunResult,
   type TurnContext,
 } from "@zhixing/core";
 import type { MethodEntry } from "../handlers.js";
@@ -36,17 +35,15 @@ import type { ServerContext } from "../../context.js";
 import type { SessionBroadcast } from "../session-broadcast.js";
 import type { ConversationDirectory } from "../../runtime/conversation-directory.js";
 import type { ConversationManager, ManagedSession } from "../../runtime/conversation-manager.js";
-import { runTurnWithCommit } from "../../runtime/run-turn.js";
+import { projectSessionTurn } from "../session-turn-stream.js";
 import {
   SESSION_NOTIFICATIONS,
-  toWireAgentResult,
   type SessionChangedPayload,
   type SessionClearResult,
   type SessionCompactResult,
   type SessionContextBudgetResult,
   type SessionCompletePayload,
   type SessionConversationEntry,
-  type SessionDeltaPayload,
   type SessionListResult,
   type SessionModeSwitchIntentPayload,
   type SessionNewResult,
@@ -185,9 +182,7 @@ async function runManagedTurn(
   const turnStartedAt = new Date().toISOString();
 
   try {
-    // 远程确认回程地址（remote-confirmation-execution.md §3.3）：
-    //   RPC 入口（Web UI / IDE）触发的 turn——无通道 target，仅走 RPC Bridge 定向推送。
-    //   Bridge 用 triggeredBy=connectionId 过滤，只推给发起连接 + 同会话 observer。
+    // RPC 入口触发的 turn 无通道 target，确认请求按连接身份定向回发起端。
     const turnContext: TurnContext = {
       turnId,
       turnOrigin: {
@@ -195,74 +190,35 @@ async function runManagedTurn(
         triggeredBy: String(connection.id),
       },
     };
-    // 走 runTurnWithCommit helper —— run + 按结果 recordTurn（先持久化、后入窗）：
-    //   · non-completed / 持久化 throw / runtime throw 三条异常路径下窗口都
-    //     停在 run 前基底，避免 orphan userMsg 污染下一轮 LLM 输入
-    //   · 持久化失败通过 onCommitFailure hook 通知（此处暂未接 logger；
-    //     未来需要 observability 时在 hook 里补 logger.warn / metrics）
-    const gen = runTurnWithCommit(
+    await projectSessionTurn({
       manager,
-      conversationId,
+      managed,
       text,
-      {
+      turnId,
+      runOptions: {
         abortSignal: abortController.signal,
         turnContext,
         turnIndex: managed.turnCount,
         source: "channel",
       },
-    );
-    let runResult: RunResult | undefined;
-
-    while (true) {
-      const iter = await gen.next();
-      if (iter.done) {
-        runResult = iter.value;
+      notify: push,
+      abortSignal: abortController.signal,
+      onModeSwitchIntent: (intent) => {
         // 模式切换意图是可执行的控制字段,只定向发起连接——跟随权归发起
         // 接入面由结构保证(旁观端物理收不到),不靠客户端自律。先于 complete
         // 发送(同连接有序):客户端收意图暂存,收 complete(turn 落定)即消费,
         // 与 REPL 的 turn 边界消费语义对齐。
-        if (runResult.pendingModeSwitch) {
-          connection.notify(SESSION_NOTIFICATIONS.modeSwitchIntent, {
-            conversationId,
-            turnId,
-            intent: runResult.pendingModeSwitch,
-          } satisfies SessionModeSwitchIntentPayload);
-        }
-        // session.complete 的 result 保持 AgentResult 语义（终止原因 + usage +
-        // error，不带 runRecord/windowCompact——那是持久化事项）,经 wire 投影
-        // 组播(error 分支的 Error 实例直发会丢 message)。
-        push(SESSION_NOTIFICATIONS.complete, {
+        connection.notify(SESSION_NOTIFICATIONS.modeSwitchIntent, {
           conversationId,
-          sessionId: conversationId,
           turnId,
-          result: toWireAgentResult(runResult.agentResult),
-        } satisfies SessionCompletePayload);
-        break;
-      }
-      push(SESSION_NOTIFICATIONS.delta, {
-        conversationId,
-        sessionId: conversationId,
-        turnId,
-        delta: iter.value,
-      } satisfies SessionDeltaPayload);
-    }
+          intent,
+        } satisfies SessionModeSwitchIntentPayload);
+      },
+    });
 
     // turnStartedAt 不用作 run record 的 timestamp（buildRunRecord 已精确设定）——
     // 保留变量避免未来诊断字段需要 turn 入口时间时重新加逻辑。
     void turnStartedAt;
-  } catch (err) {
-    if (abortController.signal.aborted) return;
-    const message = err instanceof Error ? err.message : String(err);
-    push(SESSION_NOTIFICATIONS.complete, {
-      conversationId,
-      sessionId: conversationId,
-      turnId,
-      result: {
-        reason: "error",
-        error: { name: "RuntimeError", message },
-        usage: { inputTokens: 0, outputTokens: 0 },
-      },
-    } satisfies SessionCompletePayload);
   } finally {
     unsubClose();
     manager.setBusy(conversationId, false);
