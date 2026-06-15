@@ -114,6 +114,7 @@ export type {
   SelectOption,
   SelectResult,
 } from "./select-types.js";
+export * from "./selection/index.js";
 
 // raw mode 测试辅助 —— 跨 modal 验证 refcount / 测试间隔离用
 export {
