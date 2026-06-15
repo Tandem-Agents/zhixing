@@ -75,6 +75,7 @@ export interface SetupChannelsOptions {
 export interface SetupChannelsResult {
   registry: ChannelRegistry;
   router: InboundRouter | null;
+  connectionTask: Promise<void>;
 }
 
 export async function setupChannels(
@@ -92,6 +93,11 @@ export async function setupChannels(
   const eventBus = createEventBus<ChannelEventMap>();
 
   let router: InboundRouter | null = null;
+  const connectionJobs: Array<{
+    configId: string;
+    adapterId: string;
+    config: ChannelConfig;
+  }> = [];
 
   const registry = new ChannelRegistry({
     eventBus,
@@ -157,17 +163,44 @@ export async function setupChannels(
         : undefined,
     };
 
-    try {
-      await registry.connect(adapter.id, channelConfig);
-      logger.info("Channel '%s' connected", id);
-    } catch (err) {
-      logger.error(
-        "Channel '%s' failed to connect (non-fatal): %s",
-        id,
-        err instanceof Error ? err.message : String(err),
-      );
-    }
+    connectionJobs.push({
+      configId: id,
+      adapterId: adapter.id,
+      config: channelConfig,
+    });
   }
 
-  return { registry, router };
+  const connectionTask = connectConfiguredChannels({
+    registry,
+    jobs: connectionJobs,
+    logger,
+  });
+
+  return { registry, router, connectionTask };
+}
+
+async function connectConfiguredChannels(options: {
+  registry: ChannelRegistry;
+  jobs: readonly {
+    configId: string;
+    adapterId: string;
+    config: ChannelConfig;
+  }[];
+  logger: ChannelLogger;
+}): Promise<void> {
+  const { registry, jobs, logger } = options;
+  await Promise.all(
+    jobs.map(async ({ configId, adapterId, config }) => {
+      try {
+        await registry.connect(adapterId, config);
+        logger.info("Channel '%s' connected", configId);
+      } catch (err) {
+        logger.error(
+          "Channel '%s' failed to connect (non-fatal): %s",
+          configId,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    }),
+  );
 }

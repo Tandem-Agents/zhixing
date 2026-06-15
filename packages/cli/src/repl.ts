@@ -69,7 +69,10 @@ import {
 import { RpcSchedulerFacade } from "./runtime/rpc-scheduler-facade.js";
 import { RpcConversationFacade } from "./runtime/rpc-conversation-facade.js";
 import { RpcWorksceneFacade } from "./runtime/rpc-workscene-facade.js";
-import { RpcManagementFacade } from "./runtime/rpc-management-facade.js";
+import {
+  RpcManagementFacade,
+  type ServerInfoResult,
+} from "./runtime/rpc-management-facade.js";
 import { RpcEventBus } from "./runtime/rpc-event-bus.js";
 import { RpcConfirmationBroker } from "./runtime/rpc-confirmation-broker.js";
 import { createObservedTurnPresenter } from "./runtime/observed-turn-presenter.js";
@@ -98,6 +101,25 @@ interface ReplState {
    * 执行前 await 它(切换天然落在 turn 边界)。
    */
   activeTurnPromise: Promise<unknown> | null;
+}
+
+async function waitForReloadStatus(
+  management: RpcManagementFacade,
+  opts: { timeoutMs?: number; intervalMs?: number } = {},
+): Promise<ServerInfoResult | null> {
+  const timeoutMs = opts.timeoutMs ?? 10_000;
+  const intervalMs = opts.intervalMs ?? 300;
+  const deadline = Date.now() + timeoutMs;
+
+  let lastInfo: ServerInfoResult | null = null;
+  do {
+    lastInfo = await management.serverInfo().catch(() => null);
+    const channels = lastInfo?.channels ?? [];
+    if (channels.every((s) => s.state !== "connecting")) return lastInfo;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  } while (Date.now() < deadline);
+
+  return lastInfo;
 }
 
 function renderCoreHostLifecycleNotice(
@@ -725,9 +747,11 @@ export async function startRepl(): Promise<void> {
       // 新宿主(按新配置装配)。重连后刷新本地派生视图并重挂当前会话 observer。
       await managementFacade.serverShutdown("config-reload").catch(() => {});
       await coreHost.reconnect();
+      const reloadStatus = await waitForReloadStatus(managementFacade);
       await localView.refresh();
       await controller.reattachActiveObserver();
       await syncCurrentTaskListView();
+      return reloadStatus ? { channels: reloadStatus.channels } : undefined;
     },
   });
 

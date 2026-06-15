@@ -20,6 +20,7 @@ import type { CliWriter, ScreenController } from "../screen/index.js";
 import {
   handleConfigCommand,
   handleMcpCommand,
+  type HostReloadResult,
 } from "../runtime/config-command.js";
 import { handleSecurityCommand, handleTrustCommand } from "../security/index.js";
 import { createTrustRuleArgProvider } from "../security/trust-rule-arg-provider.js";
@@ -42,7 +43,7 @@ export interface ConfigCommandsDeps {
   /** 当前对话 id —— /trust 的语境派生入参(场景对话见场景上下文规则)。 */
   readonly getConversationId: () => string;
   /** 配置落盘后触发核心宿主按新配置换代。 */
-  readonly requestHostReload: () => Promise<void>;
+  readonly requestHostReload: () => Promise<HostReloadResult | void>;
 }
 
 export function registerConfigCommands(deps: ConfigCommandsDeps): void {

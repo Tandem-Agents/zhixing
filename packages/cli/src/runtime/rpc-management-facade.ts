@@ -7,7 +7,7 @@
  * 此处按消费面做最小结构声明。
  */
 
-import type { PermissionRule, SkillMode } from "@zhixing/core";
+import type { ChannelStatus, PermissionRule, SkillMode } from "@zhixing/core";
 import {
   RPC_ERROR_CODES,
   RpcClientError,
@@ -43,6 +43,7 @@ export interface ServerInfoResult {
   memoryRssBytes: number;
   workspace?: string | null;
   logPath?: string;
+  channels?: ChannelStatus[];
   [key: string]: unknown;
 }
 

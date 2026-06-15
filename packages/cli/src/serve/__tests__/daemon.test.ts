@@ -98,7 +98,7 @@ describe("spawnDaemon", () => {
     });
 
     expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/PID file never appeared/);
+    expect(r.reason).toContain("未进入可发现状态");
   });
 
   it("fails when child pid is no longer alive", async () => {
@@ -120,7 +120,7 @@ describe("spawnDaemon", () => {
     });
 
     expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/exited before becoming ready/);
+    expect(r.reason).toContain("在就绪前退出");
   });
 
   it("fails when .ready marker never appears", async () => {
@@ -143,7 +143,7 @@ describe("spawnDaemon", () => {
     });
 
     expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/\.ready marker never appeared/);
+    expect(r.reason).toContain("尚未完成就绪标记");
   });
 
   it("fails when health endpoint never returns 200", async () => {
@@ -165,7 +165,7 @@ describe("spawnDaemon", () => {
     });
 
     expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/Health endpoint never returned 200/);
+    expect(r.reason).toContain("健康检查");
   });
 
   it("calls child.unref() after spawn", async () => {

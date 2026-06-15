@@ -17,6 +17,7 @@
 
 import * as readline from "node:readline/promises";
 import chalk from "chalk";
+import type { ChannelStatus } from "@zhixing/core";
 import {
   getCredentialsPath,
   getGlobalConfigPath,
@@ -58,7 +59,7 @@ export interface ConfigCommandDeps {
    * 配置落盘后触发核心宿主按新配置换代(优雅退出 flush 落盘 → 重新拉起)。
    * 活跃会话窗口经启动装填从盘上事实流重建——与崩溃恢复同一路径。
    */
-  requestHostReload: () => Promise<void>;
+  requestHostReload: () => Promise<HostReloadResult | void>;
   /** 仅 stop 接口——结构子类型，与 cli/render 的 Renderer 实现兼容 */
   renderer: { stop: () => void };
   /** 写屏 sink——所有反馈（成功 / 失败 / 防御性提示）经此协调，避免推走 chrome */
@@ -68,6 +69,62 @@ export interface ConfigCommandDeps {
    * modal，退出回到 chrome 后由它重申"硬件光标隐藏"不变量（光标可见性的单一来源）。
    */
   screen: ScreenController | null;
+}
+
+export interface HostReloadResult {
+  channels?: readonly ChannelStatus[];
+}
+
+export function formatHostReloadChannelMessages(
+  result: HostReloadResult | void,
+): string[] {
+  const channels = result?.channels ?? [];
+  if (channels.length === 0) return [];
+
+  const connected = channels.filter((s) => s.state === "connected");
+  const connecting = channels.filter((s) => s.state === "connecting");
+  const failed = channels.filter((s) => s.state === "error");
+  const disconnected = channels.filter((s) => s.state === "disconnected");
+  const lines: string[] = [];
+
+  if (connected.length > 0) {
+    lines.push(
+      chalk.green(
+        `${layout.contentPrefix}✓ 消息通道已连接：${connected
+          .map((s) => s.channelId)
+          .join("、")}`,
+      ),
+    );
+  }
+  if (connecting.length > 0) {
+    lines.push(
+      chalk.yellow(
+        `${layout.contentPrefix}… 消息通道仍在后台连接：${connecting
+          .map((s) => s.channelId)
+          .join("、")}`,
+      ),
+    );
+  }
+  if (failed.length > 0) {
+    lines.push(
+      chalk.yellow(
+        `${layout.contentPrefix}⚠ 消息通道连接失败：${failed
+          .map((s) => `${s.channelId}${s.error ? `（${s.error}）` : ""}`)
+          .join("、")}`,
+      ),
+    );
+  }
+  if (disconnected.length > 0) {
+    lines.push(
+      chalk.yellow(
+        `${layout.contentPrefix}⚠ 消息通道未连接：${disconnected
+          .map((s) => s.channelId)
+          .join("、")}`,
+      ),
+    );
+  }
+
+  return lines;
 }
 
 async function runEditorCommand(
@@ -124,18 +181,21 @@ async function runEditorCommand(
           });
         }
         try {
-          await deps.requestHostReload();
+          const reloadResult = await deps.requestHostReload();
           writer.line(
             chalk.green(
               `${layout.contentPrefix}✓ 配置已保存,核心宿主已按新配置重启。`,
             ),
           );
+          for (const line of formatHostReloadChannelMessages(reloadResult)) {
+            writer.line(line);
+          }
         } catch (err) {
           writer.line(
             chalk.yellow(
-              `${layout.contentPrefix}⚠ 配置已保存但宿主重启失败：${
+              `${layout.contentPrefix}⚠ 配置已保存，但未能确认核心宿主已重载：${
                 err instanceof Error ? err.message : String(err)
-              }。下次启动生效。`,
+              }。新配置已落盘，下次启动会生效。`,
             ),
           );
         }

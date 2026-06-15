@@ -13,6 +13,7 @@ import {
   getMemoryDir,
   isInternal,
   type SchedulerFacade,
+  type ChannelStatus,
   type ICommandRegistry,
   type CommandDispatcher,
   type CommandHandlerContext,
@@ -125,6 +126,19 @@ function formatTaskSchedule(schedule: {
   }
 }
 
+function formatChannelStatus(status: ChannelStatus): string {
+  switch (status.state) {
+    case "connected":
+      return `${chalk.green("●")} ${status.channelId}: connected`;
+    case "connecting":
+      return `${chalk.yellow("●")} ${status.channelId}: connecting`;
+    case "error":
+      return `${chalk.yellow("●")} ${status.channelId}: error${status.error ? ` (${status.error})` : ""}`;
+    case "disconnected":
+      return `${chalk.dim("○")} ${status.channelId}: disconnected`;
+  }
+}
+
 export function registerInfoCommands(deps: InfoCommandsDeps): void {
   const { registry, dispatcher, writer } = deps;
   const getModelView = (): { modelDisplay: string; providerDisplay: string } => {
@@ -157,7 +171,7 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
     execution: "local",
     tag: "builtin",
   });
-  dispatcher.registerHandler("status:repl", () => {
+  dispatcher.registerHandler("status:repl", async () => {
     // ProxyDescription.display 已脱敏（含凭证 URL 安全显示）+ 区分四态 off / auto+null /
     // auto+url / explicit—— mode=auto+null 时 dim 灰色提示直连，其他状态正常色。
     const proxy = deps.getNetworkProxy();
@@ -171,11 +185,19 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
         ? ` ${chalk.dim(`(工作场景: ${current.mode.sceneName})`)}`
         : "";
     const { modelDisplay, providerDisplay } = getModelView();
+    const hostInfo = await deps.management.serverInfo().catch(() => null);
+    const channelLines =
+      hostInfo?.channels && hostInfo.channels.length > 0
+        ? `\n  ${chalk.dim("Channels:")}\n    ${hostInfo.channels
+            .map(formatChannelStatus)
+            .join("\n    ")}`
+        : "";
     writer.line(
       `\n  ${chalk.dim("Session:")} ${current.name}${modeText}` +
         `\n  ${chalk.dim("Model:")} ${chalk.cyan(modelDisplay)}` +
         `\n  ${chalk.dim("Provider:")} ${providerDisplay}` +
-        `\n  ${chalk.dim("Network proxy:")} ${proxyText}\n`,
+        `\n  ${chalk.dim("Network proxy:")} ${proxyText}` +
+        `${channelLines}\n`,
     );
     return {};
   });

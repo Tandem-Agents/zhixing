@@ -1,11 +1,11 @@
 /**
  * 接入面单元定义 —— 把 runServerProcess 里各接入面的内联装配等价搬成自包含 setup 单元。
  *
- * 数组 ACCESS_SURFACES 的顺序 = pre-server 依赖拓扑序（conversation→channel→delivery→
- * text-renderer），setupAccessSurfaces 按此序遍历。每个 setup 内聚自己的运行时条件
- * （如 channel 判 messaging 配置）与失败处理；profile 是否启用由 PROFILES.surfaces 决定、
- * 不在 setup 内判 profile。teardown 策略见 access-surface.ts 文件头（pre-server 走
- * shutdown-chain、post-server 在 setup 内自注册）。
+ * 数组 ACCESS_SURFACES 的顺序 = pre-server 依赖拓扑序（conversation→channel 门面
+ * →delivery→text-renderer），setupAccessSurfaces 按此序遍历。每个 setup 内聚自己的
+ * 运行时条件（如 channel 判 messaging 配置）与失败处理；profile 是否启用由
+ * PROFILES.surfaces 决定、不在 setup 内判 profile。teardown 策略见 access-surface.ts
+ * 文件头（pre-server 走 shutdown-chain、post-server 在 setup 内自注册）。
  */
 
 import chalk from "chalk";
@@ -131,7 +131,7 @@ const conversationSurface: AccessSurface = {
   },
 };
 
-/** 社交通道 —— 依赖会话执行面 + messaging 配置；setup 失败非致命。 */
+/** 社交通道 —— 先装稳定门面，外部连接异步进入状态机；setup 失败非致命。 */
 const channelSurface: AccessSurface = {
   name: "channel",
   phase: "pre-server",

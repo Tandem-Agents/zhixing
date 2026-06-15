@@ -85,6 +85,7 @@ function setup() {
     usage,
   } as unknown as ConversationController;
   const management = {
+    serverInfo: vi.fn(async () => ({ channels: [] })),
     journalStats: vi.fn(async () => ({
       stats: { totalFiles: 2, hotCount: 1, warmCount: 1, condensedCount: 0 },
       condense: null,
@@ -141,6 +142,19 @@ describe("registerInfoCommands", () => {
     expect(text).toContain("当前对话");
     expect(text).toContain("claude-x");
     expect(text).toContain("anthropic");
+  });
+
+  it("/status 显示宿主通道状态", async () => {
+    const h = setup();
+    (h.management.serverInfo as any).mockResolvedValueOnce({
+      channels: [{ channelId: "feishu", state: "connecting" }],
+    } as never);
+
+    await h.dispatcher.dispatch("/status", RUNTIME);
+
+    const text = stripAnsi(h.writer.text());
+    expect(text).toContain("Channels");
+    expect(text).toContain("feishu: connecting");
   });
 
   it("/model 显示本地配置的模型与 provider", async () => {

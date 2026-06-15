@@ -99,6 +99,8 @@ export function buildServerInfoMethod(): MethodEntry {
         logPath: ctx.server.hostInfo?.logPath,
         // MCP 连接状态快照——/mcp 管理器的状态显示数据面(未装配为空)
         mcpServers: ctx.server.mcpStatuses?.() ?? [],
+        // 社交通道状态快照——核心 ready 与外部通道 ready 分离，接入面据此给出真实反馈。
+        channels: ctx.server.channels?.listStatuses() ?? [],
       };
     },
   };

@@ -9,7 +9,7 @@
  *
  * 真实装配拓扑有交织（核心 Scheduler 构造期吃 delivery 接入面、confirmationBridge 依赖
  * runServer 之后的 connections），故接入面带 phase：
- * - pre-server：runServer 之前装（MCP / 会话执行面 / channel / delivery / 文本确认渲染器）。
+ * - pre-server：runServer 之前装（MCP / 会话执行面 / channel 门面 / delivery / 文本确认渲染器）。
  * - post-server：runServer 之后装（confirmationBridge，依赖 server.connections）。
  * 核心 Scheduler 排在 pre-server 接入面之后构造（读 ctx.deliveryStack）。
  *

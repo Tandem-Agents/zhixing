@@ -420,7 +420,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     cleanup: registry,
   };
 
-  // pre-server 接入面：MCP（connectAll）/ 会话执行面 / 通道 / 投递栈 / 文本确认渲染器。
+  // pre-server 接入面：MCP（connectAll）/ 会话执行面 / 通道门面 / 投递栈 / 文本确认渲染器。
   // 产物写回 ctx.conversations / channels / inboundRouter / deliveryStack / textRenderer。
   await setupAccessSurfaces(ACCESS_SURFACES, ctx, "pre-server");
   conversationsRef.current = ctx.conversations ?? null;

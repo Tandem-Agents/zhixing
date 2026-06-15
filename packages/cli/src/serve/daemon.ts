@@ -132,7 +132,7 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<SpawnDaemon
   }
 
   // 5. 失败路径
-  con.error(chalk.red(`Daemon startup failed: ${handshake.reason ?? "unknown"}`));
+  con.error(chalk.red(`核心宿主启动未完成: ${handshake.reason ?? "unknown"}`));
   await printLogTail(logPath, 20, { readFileFn: deps.readFileFn, console: con });
   return { ok: false, reason: handshake.reason, logPath };
 }
@@ -191,24 +191,24 @@ async function startupHandshake(opts: HandshakeOpts): Promise<HandshakeResult> {
   if (!lastLock) {
     return {
       ok: false,
-      reason: "PID file never appeared within timeout (child may have crashed during init)",
+      reason: "核心宿主在等待时间内仍未进入可发现状态",
     };
   }
   if (!isAlive(lastLock.pid)) {
     return {
       ok: false,
-      reason: `Child pid ${lastLock.pid} exited before becoming ready`,
+      reason: `核心宿主进程 ${lastLock.pid} 在就绪前退出`,
     };
   }
   if (!sawReadyMarker) {
     return {
       ok: false,
-      reason: ".ready marker never appeared (child reached PID-lock but never finished init)",
+      reason: "核心宿主已启动但尚未完成就绪标记",
     };
   }
   return {
     ok: false,
-    reason: "Health endpoint never returned 200 within timeout",
+    reason: "核心宿主健康检查在等待时间内仍未通过",
   };
 }
 

@@ -141,6 +141,26 @@ describe("server.info", () => {
     ]);
   });
 
+  it("叠加通道状态快照", () => {
+    const ctx = mkCtx({
+      channels: {
+        listStatuses: () => [
+          {
+            channelId: "feishu",
+            state: "connecting",
+          },
+        ],
+      } as never,
+    });
+    const result = buildServerInfoMethod().handler({}, ctx) as any;
+    expect(result.channels).toEqual([
+      {
+        channelId: "feishu",
+        state: "connecting",
+      },
+    ]);
+  });
+
   it("marks shutdownAvailable=false when requestShutdown not wired", () => {
     const ctx = mkCtx({ requestShutdown: undefined });
     const result = buildServerInfoMethod().handler({}, ctx) as any;
