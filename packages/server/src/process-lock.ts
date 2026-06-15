@@ -65,7 +65,7 @@ export interface AcquireLockOptions extends ProcessLockPaths {
   kind?: string;
   /** zhixing 版本号 */
   version?: string;
-  /** daemon 日志文件路径（非 daemon 可省）*/
+  /** 后台宿主日志文件路径（前台宿主可省）*/
   logPath?: string;
   /** 参数向量；默认 process.argv */
   argv?: string[];

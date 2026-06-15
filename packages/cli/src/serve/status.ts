@@ -1,5 +1,5 @@
 /**
- * `zhixing serve status` — 查询后台 daemon 的四态状态
+ * `zhixing serve status` — 查询后台宿主的四态状态
  *
  * 四态（spec §3.3.4）：
  *   running            —— PID 活 + /api/health 200 + heartbeat < 2×阈值
@@ -207,10 +207,10 @@ function printReportHuman(
 
   if (report.status === "stale") {
     con.log();
-    con.log(chalk.dim("    Run `zhixing serve --daemon` to replace."));
+    con.log(chalk.dim("    Run `zhixing` to replace the background host on demand."));
   } else if (report.status === "stopped") {
     con.log();
-    con.log(chalk.dim("    Run `zhixing serve --daemon` to start."));
+    con.log(chalk.dim("    Run `zhixing` to start the background host on demand."));
   }
 }
 

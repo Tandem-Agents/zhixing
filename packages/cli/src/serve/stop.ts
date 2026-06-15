@@ -1,5 +1,5 @@
 /**
- * `zhixing serve stop` — 停止后台 daemon
+ * `zhixing serve stop` — 停止后台宿主
  *
  * POSIX 流程：
  *   readLock → SIGTERM → 轮询 isProcessAlive → 超时 SIGKILL → 强制清理

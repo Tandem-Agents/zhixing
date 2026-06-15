@@ -31,7 +31,7 @@ import {
 } from "./self-exec.js";
 
 export interface SpawnDaemonOptions {
-  /** 传给 child 的 CLI 参数（不含 --daemon；应含 "serve" 及其子选项）*/
+  /** 传给后台 child 的 CLI 参数；应含 "serve" 及其子选项。 */
   forwardedArgs: string[];
   /** 日志文件路径覆盖 */
   logPath?: string;

@@ -3,7 +3,7 @@
  *
  * 运行模式：
  * - 交互模式：zhixing → REPL 多轮对话
- * - 常驻服务：zhixing serve → daemon（会话执行面 / 通道 / 定时任务）
+ * - 常驻服务：zhixing serve → 核心宿主（会话执行面 / 通道 / 定时任务）
  */
 
 import chalk from "chalk";
@@ -166,17 +166,14 @@ const serveCmd = program
   .description("启动常驻服务（HTTP + WebSocket + 调度器）")
   .option("--port <port>", "监听端口", (v) => parseInt(v, 10))
   .option("--host <host>", "监听地址（默认 127.0.0.1，仅本地访问）")
-  .option("--daemon", "后台模式：脱离终端独立运行")
   .action(async (options: {
     port?: number;
     host?: string;
-    daemon?: boolean;
   }) => {
     try {
       await runServeCommand({
         port: options.port,
         host: options.host,
-        daemon: options.daemon,
       });
       process.exit(0);
     } catch (err) {
@@ -185,7 +182,7 @@ const serveCmd = program
     }
   });
 
-// zhixing serve stop —— 停止后台 daemon
+// zhixing serve stop —— 停止后台宿主
 serveCmd
   .command("stop")
   .description("停止后台运行的 server（SIGTERM，30s 超时 SIGKILL 兜底）")
@@ -204,7 +201,7 @@ serveCmd
 // zhixing serve logs —— 查看日志（默认尾部 50 行；--tail 持续跟踪）
 serveCmd
   .command("logs")
-  .description("查看后台 daemon 日志")
+  .description("查看后台宿主日志")
   .option("--tail", "持续跟踪（类 tail -f）")
   .option("--lines <n>", "显示行数（默认 50）", (v) => parseInt(v, 10))
   .action(async (options: { tail?: boolean; lines?: number }) => {
@@ -217,7 +214,7 @@ serveCmd
     }
   });
 
-// zhixing serve status —— 查询后台 daemon 状态
+// zhixing serve status —— 查询后台宿主状态
 serveCmd
   .command("status")
   .description("查询 server 运行状态（running / running-unhealthy / stopped / stale）")

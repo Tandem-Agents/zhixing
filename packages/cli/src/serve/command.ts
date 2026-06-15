@@ -98,7 +98,6 @@ import {
 import { runEphemeralTurn } from "./ephemeral-executor.js";
 import { loadOrCreateToken } from "./token.js";
 import { isDaemonChild } from "./self-exec.js";
-import { spawnDaemon } from "./daemon.js";
 import { homeToPort } from "./host-port.js";
 import { registerTailCleanup, registerCoreCleanup } from "./shutdown-chain.js";
 import { shouldIdleExit } from "./idle-policy.js";
@@ -112,44 +111,16 @@ const SERVER_VERSION = ZHIXING_CLI_VERSION;
 export interface ServeOptions {
   port?: number;
   host?: string;
-  /** 后台模式：父进程 spawn 一个 detached child 并握手确认就绪 */
-  daemon?: boolean;
 }
 
 /**
  * `zhixing serve` 入口。
  *
- * 三种进入方式：
- * 1. 前台 (`zhixing serve`) → 直接跑 server 逻辑（现状）
- * 2. 父进程 (`zhixing serve --daemon`，非 child) → spawn daemon child 后返回
- * 3. Daemon child (env `ZHIXING_DAEMON_CHILD=1`) → 跟前台一样跑 server，但 stdio
- *    已被父进程重定向到 log 文件
- *
- * 分支 1 和 3 走同一条代码路径——server 本身不感知 daemon 概念。
+ * 用户显式运行时是前台宿主；CLI 自动拉起时通过 env 标记进入后台 child，
+ * 两者走同一条 server 逻辑，差异只在进程形态和 stdio/log 装配。
  */
 export async function runServeCommand(opts: ServeOptions): Promise<void> {
-  // 分支 2：父进程需要 fork 出 detached child
-  if (opts.daemon && !isDaemonChild()) {
-    const forwardedArgs = buildForwardedArgs(opts);
-    const result = await spawnDaemon({ forwardedArgs });
-    if (!result.ok) {
-      process.exit(1);
-    }
-    return; // 父进程退出，child 继续运行
-  }
-
-  // 分支 1 + 3：实际 server 运行
   await runServerProcess(opts);
-}
-
-/**
- * 从 ServeOptions 重建传给 child 的 argv（不含 --daemon，child 应走分支 1）。
- */
-function buildForwardedArgs(opts: ServeOptions): string[] {
-  const args: string[] = ["serve"];
-  if (opts.port !== undefined) args.push("--port", String(opts.port));
-  if (opts.host) args.push("--host", opts.host);
-  return args;
 }
 
 async function runServerProcess(opts: ServeOptions): Promise<void> {
@@ -262,10 +233,10 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   // 3. Scheduler facade lazy ref —— 打破循环依赖（标准 IoC 模式）：
   //    scheduleTool → Scheduler → runAgentTurn → ephemeralRuntime → scheduleTool
   let schedulerRef: Scheduler | null = null;
-  // schedule 工具经门面接入——daemon 内直调本进程 Scheduler（LocalSchedulerFacade，恒定核心）。
+  // schedule 工具经门面接入——后台宿主内直调本进程 Scheduler（LocalSchedulerFacade，恒定核心）。
   // 实例化落点在核心 Scheduler 创建之后（见下）。getSchedulerFacade 惰性返回：会话执行面
   // （per-session runtimeFactory，装配早于 scheduler）与 ephemeralRuntime 的 schedule 工具
-  // 都经它共用同一实例、直调同一本进程 Scheduler——工具 call 必在 daemon 跑起来后、ref 已就位。
+  // 都经它共用同一实例、直调同一本进程 Scheduler——工具 call 必在后台宿主跑起来后、ref 已就位。
   let schedulerFacadeRef: LocalSchedulerFacade | null = null;
   const getSchedulerFacade = (): SchedulerFacade => {
     if (!schedulerFacadeRef) throw new Error("Scheduler not initialized yet");
@@ -273,7 +244,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   };
 
   // serve 模式无 spinner —— 不传 renderer,pauseUI 退化为 no-op。
-  // 写屏走 stdout writer（serve 是后台 daemon 无 chrome），retry/compact 等事件
+  // 写屏走 stdout writer（后台宿主无 chrome），retry/compact 等事件
   // 直接打到 stdout 日志。工厂结果在多个 runtime 之间共享:每次 runtime.run() 各自
   // 装配独立 listener,工厂自身无跨 run 状态,共享安全且节省一次函数创建开销。
   const serveWriter = createStdoutWriter();
@@ -586,7 +557,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   });
   schedulerRef = scheduler;
   // LocalSchedulerFacade —— 在恒定核心装配点实例化一次（绑核心 Scheduler、与执行面正交）：
-  // daemon 内会话执行面 / ephemeralRuntime 的 schedule 工具经 getSchedulerFacade 共用它，
+  // 后台宿主内会话执行面 / ephemeralRuntime 的 schedule 工具经 getSchedulerFacade 共用它，
   // 直调本进程 Scheduler（不绕 RPC）；cli 侧对称用 RpcSchedulerFacade。统一 SchedulerFacade 缝。
   schedulerFacadeRef = new LocalSchedulerFacade(scheduler, schedulerEventBus);
   await scheduler.start();
@@ -745,9 +716,9 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   // Post-runServer 启动步骤（startup guard 包裹）
   //   不变量：runServer 已 resolve → server listening + PID 锁持有 + registry 全注册完毕。
   //   此后若任何步骤抛错（markReady / banner 等），必须走 runner.shutdown 让 registry 完整跑完，
-  //   否则 daemon child 会孤儿化 + PID 锁/state 文件残留 —— 下次启动被假 "already running" 误挡。
+  //   否则后台 child 会孤儿化 + PID 锁/state 文件残留 —— 下次启动被假 "already running" 误挡。
   try {
-    // markReady + markRunning + heartbeat（仅 daemon child）
+    // markReady + markRunning + heartbeat（仅后台 child）
     // 紧邻调用：running 才是稳态；ready 仅作为 .ready marker 的语义锚点
     if (stateFile) {
       await stateFile.markReady({
@@ -792,7 +763,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     throw err;
   }
 
-  // idle reaper —— 仅后台 daemon 装配:前台进程的生命周期归终端(用户
+  // idle reaper —— 仅后台宿主装配:前台进程的生命周期归终端(用户
   // Ctrl+C),reaper 管的是没有终端的后台宿主——这是进程形态差异,不是档位。
   // 退出条件 = 无人且无事:无活跃 RPC 连接、无活跃远程接入面、无用户待办。
   // - 接入面在场看真实连接状态而非 registry 对象存在性(配了渠道但全部连接

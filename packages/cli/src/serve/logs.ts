@@ -1,5 +1,5 @@
 /**
- * `zhixing serve logs` — 查看 daemon 日志
+ * `zhixing serve logs` — 查看后台宿主日志
  *
  * 两个模式：
  *   默认：读 ~/.zhixing/server.log → 打印最后 N 行（默认 50）

@@ -222,7 +222,7 @@ export function getLlmChunkDump(): LlmChunkDump {
  *   预热位置：cli REPL 入口（`startRepl` 函数最开头）。预热后 cached handle
  *   保留，本函数内复用，零 stderr 副作用。
  *
- *   serve daemon 模式无 chrome（stdio 重定向到 daemon 日志文件），不受此约束——
+ *   后台宿主模式无 chrome（stdio 重定向到宿主日志文件），不受此约束——
  *   stderr 写入直接落到日志文件，与渲染无关。
  */
 export function attachChunkDumpToBus(

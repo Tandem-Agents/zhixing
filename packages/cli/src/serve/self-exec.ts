@@ -34,7 +34,7 @@ export class UnsupportedSelfExecError extends Error {
 export interface SelfExecArgs {
   /** Node binary 绝对路径（process.execPath）*/
   command: string;
-  /** [entryScript, ...forwardedArgs]——不含 --daemon */
+  /** [entryScript, ...forwardedArgs] */
   args: string[];
   /** 过滤后 + 附加 ZHIXING_DAEMON_CHILD=1 的 env */
   env: NodeJS.ProcessEnv;
