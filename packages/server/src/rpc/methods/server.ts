@@ -12,23 +12,53 @@
  * - **防御性 null 检查**：requestShutdown 未绑定时抛 RpcErrors.internal
  */
 
+import { isInternal } from "@zhixing/core";
 import { RpcAppError, RpcErrors, type MethodEntry } from "../handlers.js";
 import {
   PROTOCOL_VERSION,
   RPC_ERROR_CODES,
   SUPPORTED_PROTOCOL_RANGE,
 } from "../protocol.js";
+import type { ServerShutdownStrategy } from "../../context.js";
 
 export interface ServerShutdownParams {
   reason?: string;
   timeoutMs?: number;
+  strategy?: ServerShutdownStrategy;
 }
 
 export interface ServerShutdownResult {
   accepted: true;
   phase: "stopping";
+  strategy: ServerShutdownStrategy;
   /** ISO timestamp；仅参考，实际完成时机取决于清理链 */
   estimatedCompleteAt: string;
+}
+
+interface RuntimeControlWorkItem {
+  id: string;
+  kind: "conversation" | "scheduler" | "delivery" | "schedule";
+  label: string;
+  count: number;
+}
+
+interface RuntimeControlSnapshot {
+  accessSurfaces: {
+    rpcConnections: number;
+    currentConnectionId?: number;
+    otherRpcConnections: number;
+    channels: unknown[];
+    liveChannels: unknown[];
+  };
+  activeWork: {
+    count: number;
+    cancellableCount: number;
+    drainOnlyCount: number;
+    cancellableWork: RuntimeControlWorkItem[];
+    drainOnlyWork: RuntimeControlWorkItem[];
+  };
+  deferredWork: RuntimeControlWorkItem[];
+  keepAliveWork: RuntimeControlWorkItem[];
 }
 
 /**
@@ -44,6 +74,7 @@ export function buildServerShutdownMethod(): MethodEntry {
       const p = (params ?? {}) as ServerShutdownParams;
       const reason = (typeof p.reason === "string" && p.reason.trim()) || "rpc.server.shutdown";
       const timeoutMs = typeof p.timeoutMs === "number" && p.timeoutMs > 0 ? p.timeoutMs : 30_000;
+      const strategy = normalizeShutdownStrategy(p.strategy);
 
       const trigger = ctx.server.requestShutdown;
       if (!trigger) {
@@ -53,11 +84,18 @@ export function buildServerShutdownMethod(): MethodEntry {
 
       // 立即返回 ack；shutdown 异步执行，handler 不 await
       // （await 会导致 RPC 连接自己被 server.close 切断，client 收不到响应）
-      trigger(reason);
+      if (strategy === "immediate") {
+        trigger(reason);
+      } else {
+        void runShutdownStrategy(strategy, timeoutMs, ctx).finally(() => {
+          trigger(`${reason}:${strategy}`);
+        });
+      }
 
       return {
         accepted: true,
         phase: "stopping",
+        strategy,
         estimatedCompleteAt: new Date(Date.now() + timeoutMs).toISOString(),
       };
     },
@@ -65,7 +103,7 @@ export function buildServerShutdownMethod(): MethodEntry {
 }
 
 /**
- * server.info — 宿主状态权威视图(/host 命令与版本握手的数据源)。
+ * server.info — 宿主状态权威视图(/status 与版本握手的数据源)。
  *
  * 使用 ctx 内建数据（startedAt / listenAddr / version / 活跃会话 / 连接数 /
  * 内存基线 / 工作区 / 日志路径），不读文件—— vs serve status 读文件可能
@@ -79,6 +117,7 @@ export function buildServerInfoMethod(): MethodEntry {
     requiresAuth: true,
     handler(_params, ctx) {
       const conversations = ctx.server.conversations?.list() ?? [];
+      const runtimeControl = buildRuntimeControlSnapshot(ctx);
       return {
         version: ctx.server.version,
         protocol: PROTOCOL_VERSION,
@@ -101,9 +140,175 @@ export function buildServerInfoMethod(): MethodEntry {
         mcpServers: ctx.server.mcpStatuses?.() ?? [],
         // 社交通道状态快照——核心 ready 与外部通道 ready 分离，接入面据此给出真实反馈。
         channels: ctx.server.channels?.listStatuses() ?? [],
+        accessSurfaces: runtimeControl.accessSurfaces,
+        activeWork: runtimeControl.activeWork,
+        deferredWork: runtimeControl.deferredWork,
+        keepAliveWork: runtimeControl.keepAliveWork,
       };
     },
   };
+}
+
+function normalizeShutdownStrategy(value: unknown): ServerShutdownStrategy {
+  if (value === undefined) return "immediate";
+  if (value === "immediate" || value === "drain" || value === "cancel") return value;
+  throw RpcErrors.invalidParams(
+    'server.shutdown strategy must be "immediate", "drain", or "cancel"',
+  );
+}
+
+async function runShutdownStrategy(
+  strategy: ServerShutdownStrategy,
+  timeoutMs: number,
+  ctx: Parameters<NonNullable<MethodEntry["handler"]>>[1],
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  if (strategy === "cancel") {
+    const reason = { kind: "external" as const, origin: "server-shutdown" };
+    await Promise.allSettled([
+      ctx.server.conversations?.abortAllAndWait(reason, timeoutMs),
+      ctx.server.runRegistry?.abortAllAndWait(reason, timeoutMs),
+      flushDeliveryBeforeDeadline(ctx, deadline),
+    ]);
+    return;
+  }
+  if (strategy === "drain") {
+    await waitForActiveWorkToDrain(ctx, deadline);
+    await flushDeliveryBeforeDeadline(ctx, deadline);
+  }
+}
+
+async function waitForActiveWorkToDrain(
+  ctx: Parameters<NonNullable<MethodEntry["handler"]>>[1],
+  deadline: number,
+): Promise<void> {
+  while (Date.now() < deadline) {
+    if (currentCancellableWorkCount(ctx) === 0) return;
+    await sleep(Math.min(200, Math.max(0, deadline - Date.now())));
+  }
+}
+
+async function flushDeliveryBeforeDeadline(
+  ctx: Parameters<NonNullable<MethodEntry["handler"]>>[1],
+  deadline: number,
+): Promise<void> {
+  const flushDelivery = ctx.server.runtimeControl?.flushDelivery;
+  if (!flushDelivery) return;
+  const remaining = Math.max(0, deadline - Date.now());
+  if (remaining <= 0) return;
+  await Promise.race([flushDelivery().catch(() => {}), sleep(remaining)]);
+}
+
+async function sleep(ms: number): Promise<void> {
+  if (ms <= 0) return;
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
+}
+
+function currentCancellableWorkCount(
+  ctx: Parameters<NonNullable<MethodEntry["handler"]>>[1],
+): number {
+  const conversationWork = (ctx.server.conversations?.list() ?? []).reduce(
+    (sum, conversation) =>
+      sum +
+      (conversation.busy ? 1 : 0) +
+      Math.max(0, Number(conversation.pendingCount ?? 0)),
+    0,
+  );
+  return conversationWork + (ctx.server.runRegistry?.size() ?? 0);
+}
+
+function buildRuntimeControlSnapshot(
+  ctx: Parameters<NonNullable<MethodEntry["handler"]>>[1],
+): RuntimeControlSnapshot {
+  const channels = ctx.server.channels?.listStatuses() ?? [];
+  const liveChannels = channels.filter(
+    (s) => s.state === "connected" || s.state === "connecting",
+  );
+  const rpcConnections = ctx.server.connectionCount?.() ?? 0;
+  const currentConnectionId =
+    typeof ctx.connection.id === "number" ? ctx.connection.id : undefined;
+  const otherRpcConnections =
+    currentConnectionId === undefined ? rpcConnections : Math.max(0, rpcConnections - 1);
+
+  const cancellableWork: RuntimeControlWorkItem[] = [];
+  for (const conversation of ctx.server.conversations?.list() ?? []) {
+    const pendingCount = Number(conversation.pendingCount ?? 0);
+    const count = (conversation.busy ? 1 : 0) + pendingCount;
+    if (count <= 0) continue;
+    cancellableWork.push({
+      id: `conversation:${conversation.conversationId}`,
+      kind: "conversation",
+      label: conversation.conversationId,
+      count,
+    });
+  }
+
+  const runCount = ctx.server.runRegistry?.size() ?? 0;
+  if (runCount > 0) {
+    cancellableWork.push({
+      id: "scheduler:runs",
+      kind: "scheduler",
+      label: "正在执行的定时任务",
+      count: runCount,
+    });
+  }
+
+  const deferredWork: RuntimeControlWorkItem[] = [];
+  const deliveryStats = ctx.server.runtimeControl?.deliveryStats?.();
+  const deferredCount = deliveryStats === undefined ? 0 : Math.max(0, deliveryStats.queued);
+  if (deferredCount > 0) {
+    deferredWork.push({
+      id: "delivery:queue",
+      kind: "delivery",
+      label: "待投递消息",
+      count: deferredCount,
+    });
+  }
+
+  const keepAliveTasks =
+    ctx.server.scheduler?.listTasks().filter((task) => task.enabled && !isInternal(task)) ??
+    [];
+  const keepAliveWork =
+    keepAliveTasks.length > 0
+      ? [
+          {
+            id: "scheduler:enabled",
+            kind: "schedule" as const,
+            label: "已启用定时任务",
+            count: keepAliveTasks.length,
+          },
+        ]
+      : [];
+
+  const cancellableCount = sumCounts(cancellableWork);
+  const drainOnlyWork: RuntimeControlWorkItem[] = [];
+  const drainOnlyCount = sumCounts(drainOnlyWork);
+
+  return {
+    accessSurfaces: {
+      rpcConnections,
+      currentConnectionId,
+      otherRpcConnections,
+      channels,
+      liveChannels,
+    },
+    activeWork: {
+      count: cancellableCount + drainOnlyCount,
+      cancellableCount,
+      drainOnlyCount,
+      cancellableWork,
+      drainOnlyWork,
+    },
+    deferredWork,
+    keepAliveWork,
+  };
+}
+
+function sumCounts(items: readonly RuntimeControlWorkItem[]): number {
+  return items.reduce((sum, item) => sum + item.count, 0);
 }
 
 // ─── llm.complete ───

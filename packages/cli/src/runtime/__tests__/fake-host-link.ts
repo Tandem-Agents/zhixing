@@ -13,10 +13,11 @@ export interface RecordedRequest {
   params: unknown;
 }
 
-export function makeFakeHostLink() {
+export function makeFakeHostLink(opts: { connected?: boolean } = {}) {
   const requests: RecordedRequest[] = [];
   const handlers = new Map<string, Set<(params: unknown) => void>>();
   let responder: (method: string, params: unknown) => unknown = () => ({});
+  const connected = opts.connected ?? true;
 
   const client = {
     request: async (method: string, params?: unknown) => {
@@ -27,6 +28,7 @@ export function makeFakeHostLink() {
 
   const link: CoreHostLink = {
     getClient: async () => client,
+    getConnectedClient: () => (connected ? client : null),
     onNotification: (method, handler) => {
       let set = handlers.get(method);
       if (!set) {
@@ -64,6 +66,7 @@ export function makeUnreachableHostLink(): CoreHostLink {
     getClient: async () => {
       throw new Error("不应连接宿主");
     },
+    getConnectedClient: () => null,
     onNotification: () => () => {},
   };
 }

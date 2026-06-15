@@ -57,6 +57,7 @@ import {
 import { detectTerminalCapability } from "./screen/terminal-capability.js";
 import { layout } from "./tui/style.js";
 import { InlineTextPromptRegion } from "./tui/inline-text-prompt.js";
+import { createSelectionService } from "./tui/selection/index.js";
 import { InputController } from "./typeahead-input.js";
 import { BottomInfoModel } from "./bottom-info/index.js";
 import { renderHomeWelcome } from "./workbench/index.js";
@@ -120,6 +121,46 @@ async function waitForReloadStatus(
   } while (Date.now() < deadline);
 
   return lastInfo;
+}
+
+function countRuntimeItems(items: unknown): number {
+  if (!Array.isArray(items)) return 0;
+  return items.reduce((sum, item) => {
+    const count =
+      typeof item === "object" &&
+      item !== null &&
+      typeof (item as { count?: unknown }).count === "number"
+        ? (item as { count: number }).count
+        : 0;
+    return sum + Math.max(0, count);
+  }, 0);
+}
+
+function formatNormalExitHint(info: ServerInfoResult | null): string | null {
+  if (!info) return null;
+  const access = info.accessSurfaces;
+  const otherTerminals =
+    typeof access?.otherRpcConnections === "number"
+      ? Math.max(0, access.otherRpcConnections)
+      : Math.max(0, (info.connectionCount ?? 1) - 1);
+  const liveChannels = access?.liveChannels ?? (info.channels ?? []).filter(
+    (s) => s.state === "connected" || s.state === "connecting",
+  );
+  const activeWork =
+    typeof info.activeWork?.count === "number"
+      ? Math.max(0, info.activeWork.count)
+      : Math.max(0, info.busyConversations ?? 0);
+  const deferred = countRuntimeItems(info.deferredWork);
+  const keepAlive = countRuntimeItems(info.keepAliveWork);
+  const parts = [
+    otherTerminals > 0 ? `其他终端 ${otherTerminals}` : "",
+    liveChannels.length > 0 ? liveChannels.map((s) => s.channelId).join("、") : "",
+    activeWork > 0 ? `运行中工作 ${activeWork}` : "",
+    deferred > 0 ? `未送达消息 ${deferred}` : "",
+    keepAlive > 0 ? `已启用定时任务 ${keepAlive}` : "",
+  ].filter(Boolean);
+  if (parts.length === 0) return null;
+  return `已退出当前终端；知行仍在后台处理：${parts.join("；")}。需要停止请输入 /stop。`;
 }
 
 function renderCoreHostLifecycleNotice(
@@ -678,6 +719,16 @@ export async function startRepl(): Promise<void> {
   // 交互层（补全 broker + 渲染）才依 chrome 分叉。
   const tRegistry = new DefaultCommandRegistry();
   const typeaheadDispatcher = new CommandDispatcher({ registry: tRegistry });
+  let inputController: InputController | null = null;
+  let stopRequested = false;
+  const selectionService = createSelectionService({
+    screen: renderScreen ?? undefined,
+    stdin: process.stdin,
+    stdout: process.stdout,
+    beforeShow: () => inputController?.suspend(),
+    afterShow: () => inputController?.resume(),
+    isInteractive: () => Boolean(process.stdin.isTTY && process.stdout.isTTY),
+  });
 
   // info 域命令（help/status/me/model/usage/context/journal/people/tasks）。
   // 运行时信息(model / usage / context)的权威在宿主——经管理面 RPC 取。
@@ -690,6 +741,11 @@ export async function startRepl(): Promise<void> {
     getNetworkProxy: () => localView.networkProxy,
     getScheduler: () => schedulerFacade,
     management: managementFacade,
+    selection: selectionService,
+    requestExit: () => {
+      stopRequested = true;
+      rl.close();
+    },
   });
 
   // session 域命令（new/clear/resume/name/compact）—— 分发在此、执行体在宿主,
@@ -863,7 +919,6 @@ export async function startRepl(): Promise<void> {
   // 持久输入区——typeahead 模式下绑定 renderScreen（与 renderer / EventBus 渲染共用同一
   // 屏幕协调器），inputController 长生命周期持有 buffer / chrome / panel / paste，turn 间不
   // cleanup；主循环每轮 await inputController.waitOnce() 拿下次用户输入。
-  let inputController: InputController | null = null;
   if (useTypeahead && typeaheadBroker) {
     // 底部信息行内容容器(来源无关)。本期唯一来源是 InputController 自身
     // (输入态 → "esc 清空");未来其他来源(系统事件等)持本引用 set 即可。
@@ -921,6 +976,12 @@ export async function startRepl(): Promise<void> {
   });
 
   rl.on("close", async () => {
+    const exitHint = stopRequested
+      ? null
+      : await managementFacade
+          .serverInfoIfConnected()
+          .then(formatNormalExitHint)
+          .catch(() => null);
     renderer.stop();
     // UI 订阅先撤(tail / 确认面板 / 带外投影 / 会话订阅),再断连接——
     // 避免连接关闭期间残留事件触发已无效的渲染。
@@ -934,6 +995,9 @@ export async function startRepl(): Promise<void> {
     await coreHost.dispose().catch((err) =>
       cliWriter.line(`[coreHost.dispose] ${err instanceof Error ? err.message : String(err)}`),
     );
+    if (exitHint) {
+      cliWriter.line(chalk.dim(`\n${exitHint}`));
+    }
     cliWriter.line(chalk.dim("\n再见 👋"));
     process.exit(0);
   });

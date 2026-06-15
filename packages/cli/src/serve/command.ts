@@ -617,6 +617,17 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     channels: ctx.channels,
     confirmationHub,
     runRegistry,
+    runtimeControl: {
+      deliveryStats: () => ctx.deliveryStack?.delivery.stats() ?? {
+        queued: 0,
+        delivered: 0,
+        failed: 0,
+        retrying: 0,
+      },
+      flushDelivery: async () => {
+        await ctx.deliveryStack?.delivery.flush();
+      },
+    },
   });
 
   // runServer 之前：尾部清理（LIFO 最后执行 —— releaseLock / state 文件）

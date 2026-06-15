@@ -31,10 +31,37 @@ export interface SkillListResult {
   structuralVersion: number;
 }
 
+export type ServerShutdownStrategy = "immediate" | "drain" | "cancel";
+
+export interface RuntimeControlWorkItem {
+  id: string;
+  kind: "conversation" | "scheduler" | "delivery" | "schedule";
+  label: string;
+  count: number;
+}
+
+export interface ServerAccessSurfaces {
+  rpcConnections: number;
+  currentConnectionId?: number;
+  otherRpcConnections: number;
+  channels: ChannelStatus[];
+  liveChannels: ChannelStatus[];
+}
+
+export interface ServerActiveWork {
+  count: number;
+  cancellableCount: number;
+  drainOnlyCount: number;
+  cancellableWork: RuntimeControlWorkItem[];
+  drainOnlyWork: RuntimeControlWorkItem[];
+}
+
 export interface ServerInfoResult {
   version: string;
   protocol: number;
   pid: number;
+  port?: number;
+  host?: string;
   startedAt: string;
   uptimeSec: number;
   activeConversations: number;
@@ -44,7 +71,17 @@ export interface ServerInfoResult {
   workspace?: string | null;
   logPath?: string;
   channels?: ChannelStatus[];
+  accessSurfaces?: ServerAccessSurfaces;
+  activeWork?: ServerActiveWork;
+  deferredWork?: RuntimeControlWorkItem[];
+  keepAliveWork?: RuntimeControlWorkItem[];
   [key: string]: unknown;
+}
+
+export interface ServerShutdownRequest {
+  reason?: string;
+  timeoutMs?: number;
+  strategy?: ServerShutdownStrategy;
 }
 
 export class RpcManagementFacade {
@@ -137,10 +174,21 @@ export class RpcManagementFacade {
     return client.request<ServerInfoResult>("server.info");
   }
 
-  /** 请求宿主优雅退出(flush 落盘)——/config 热重载的换代通道。 */
-  async serverShutdown(reason?: string): Promise<void> {
+  /** 只读取当前已连接宿主状态；无连接时返回 null，不发现、不拉起。 */
+  async serverInfoIfConnected(): Promise<ServerInfoResult | null> {
+    const client = this.link.getConnectedClient?.();
+    if (!client) return null;
+    return client.request<ServerInfoResult>("server.info").catch(() => null);
+  }
+
+  /** 请求宿主优雅退出(flush 落盘)——/config 热重载与运行控制共用通道。 */
+  async serverShutdown(request?: string | ServerShutdownRequest): Promise<void> {
     const client = await this.link.getClient();
-    await client.request("server.shutdown", { reason });
+    const params =
+      typeof request === "string" || request === undefined
+        ? { reason: request }
+        : request;
+    await client.request("server.shutdown", params);
   }
 
   // ─── llm(可信面轻推理通道) ───

@@ -93,6 +93,8 @@ interface EstablishedClient {
 export interface CoreHostLink {
   /** 返回可用的已认证 client;无则发现 / 拉起并连上。 */
   getClient(): Promise<RpcClient>;
+  /** 返回当前已连接 client；不发现、不拉起宿主。 */
+  getConnectedClient?(): RpcClient | null;
   /** 持久订阅一个 notification(跨重连有效、被动——不为订阅拉起宿主)。 */
   onNotification(method: string, handler: NotificationHandler): () => void;
 }
@@ -148,6 +150,9 @@ export function defaultCoreHostConnectionDeps(): CoreHostConnectionDeps {
         deps: { console: silent },
       });
       if (result.status === "error") {
+        return { ok: false, reason: result.reason };
+      }
+      if (result.status === "refused") {
         return { ok: false, reason: result.reason };
       }
       return { ok: true };
@@ -222,6 +227,10 @@ export class CoreHostConnection implements CoreHostLink {
   async getClient(): Promise<RpcClient> {
     if (this.reconnecting) await this.reconnecting;
     return this.getClientNow();
+  }
+
+  getConnectedClient(): RpcClient | null {
+    return this.client && !this.client.closed ? this.client : null;
   }
 
   private async getClientNow(): Promise<RpcClient> {

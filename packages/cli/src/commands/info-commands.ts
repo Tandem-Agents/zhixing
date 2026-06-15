@@ -26,9 +26,19 @@ import type { ProxyDescription } from "@zhixing/network";
 import { renderUsageReport, renderContextVisual } from "../render.js";
 import { layout } from "../tui/style.js";
 import type { CliWriter } from "../screen/index.js";
-import type { RpcManagementFacade } from "../runtime/rpc-management-facade.js";
+import type {
+  RpcManagementFacade,
+  RuntimeControlWorkItem,
+  ServerActiveWork,
+  ServerInfoResult,
+} from "../runtime/rpc-management-facade.js";
 import type { ConversationController } from "../runtime/conversation-controller.js";
 import { formatRelativeTime } from "./format.js";
+import type { SelectionService, SelectionOption } from "../tui/selection/index.js";
+import {
+  SelectionBusyError,
+  SelectionUnavailableError,
+} from "../tui/selection/index.js";
 
 export interface InfoCommandsDeps {
   readonly registry: ICommandRegistry;
@@ -44,6 +54,10 @@ export interface InfoCommandsDeps {
   readonly getScheduler: () => SchedulerFacade;
   /** 管理面门面(/journal /people 经宿主只读执行体)。 */
   readonly management: RpcManagementFacade;
+  /** 通用选择服务。/stop 使用它承载交互式决策。 */
+  readonly selection?: SelectionService;
+  /** /stop 成功发出停机请求后关闭当前终端接入面。 */
+  readonly requestExit?: () => void;
 }
 
 // /help 命令地图的分类显示顺序 + 中文标签——命令分类展示的单一来源。registry.list 已
@@ -129,14 +143,178 @@ function formatTaskSchedule(schedule: {
 function formatChannelStatus(status: ChannelStatus): string {
   switch (status.state) {
     case "connected":
-      return `${chalk.green("●")} ${status.channelId}: connected`;
+      return `${chalk.green("●")} ${status.channelId}: 已连接`;
     case "connecting":
-      return `${chalk.yellow("●")} ${status.channelId}: connecting`;
+      return `${chalk.yellow("●")} ${status.channelId}: 连接中`;
     case "error":
-      return `${chalk.yellow("●")} ${status.channelId}: error${status.error ? ` (${status.error})` : ""}`;
+      return `${chalk.yellow("●")} ${status.channelId}: 异常${status.error ? ` (${status.error})` : ""}`;
     case "disconnected":
-      return `${chalk.dim("○")} ${status.channelId}: disconnected`;
+      return `${chalk.dim("○")} ${status.channelId}: 未连接`;
   }
+}
+
+function countWork(items: readonly RuntimeControlWorkItem[] | undefined): number {
+  return (items ?? []).reduce((sum, item) => sum + Math.max(0, item.count), 0);
+}
+
+function formatWorkItems(items: readonly RuntimeControlWorkItem[] | undefined): string {
+  const list = items ?? [];
+  if (list.length === 0) return "无";
+  return list.map((item) => `${item.label} x${item.count}`).join("、");
+}
+
+function liveChannels(hostInfo: ServerInfoResult | null): ChannelStatus[] {
+  const fromSnapshot = hostInfo?.accessSurfaces?.liveChannels;
+  if (fromSnapshot) return fromSnapshot;
+  return (hostInfo?.channels ?? []).filter(
+    (s) => s.state === "connected" || s.state === "connecting",
+  );
+}
+
+function activeWork(hostInfo: ServerInfoResult | null): ServerActiveWork {
+  return (
+    hostInfo?.activeWork ?? {
+      count: hostInfo?.busyConversations ?? 0,
+      cancellableCount: hostInfo?.busyConversations ?? 0,
+      drainOnlyCount: 0,
+      cancellableWork: [],
+      drainOnlyWork: [],
+    }
+  );
+}
+
+function otherRpcConnections(hostInfo: ServerInfoResult | null): number {
+  const projected = hostInfo?.accessSurfaces?.otherRpcConnections;
+  if (typeof projected === "number") return Math.max(0, projected);
+  return Math.max(0, (hostInfo?.connectionCount ?? 1) - 1);
+}
+
+function renderRuntimeControlStatus(
+  hostInfo: ServerInfoResult | null,
+  writer: CliWriter,
+): void {
+  if (!hostInfo) {
+    writer.line(chalk.yellow("  宿主状态暂不可用。"));
+    return;
+  }
+
+  const live = liveChannels(hostInfo);
+  const otherRpc = otherRpcConnections(hostInfo);
+  const work = activeWork(hostInfo);
+  const deferredCount = countWork(hostInfo.deferredWork);
+  const keepAliveCount = countWork(hostInfo.keepAliveWork);
+  const host = hostInfo.host ?? "127.0.0.1";
+  const port = hostInfo.port ?? "?";
+
+  writer.line(`  ${chalk.dim("运行服务:")} pid ${hostInfo.pid} · ${host}:${port}`);
+  writer.line(
+    `  ${chalk.dim("接入面:")} 当前终端` +
+      (otherRpc > 0 ? ` · 其他终端 ${otherRpc}` : "") +
+      (live.length > 0 ? ` · ${live.map((s) => s.channelId).join("、")}` : ""),
+  );
+  writer.line(
+    `  ${chalk.dim("运行中:")} ${
+      work.count > 0
+        ? `可取消 ${work.cancellableCount} · 等待投递 ${work.drainOnlyCount}`
+        : "无"
+    }`,
+  );
+  if (work.count > 0) {
+    writer.line(`    ${chalk.dim("可取消:")} ${formatWorkItems(work.cancellableWork)}`);
+    writer.line(`    ${chalk.dim("仅等待:")} ${formatWorkItems(work.drainOnlyWork)}`);
+  }
+  writer.line(
+    `  ${chalk.dim("未送达:")} ${deferredCount > 0 ? `${deferredCount} 条待重试` : "无"}`,
+  );
+  writer.line(
+    `  ${chalk.dim("定时任务:")} ${keepAliveCount > 0 ? `${keepAliveCount} 个已启用` : "无"}`,
+  );
+  if (hostInfo.logPath) {
+    writer.line(`  ${chalk.dim("日志:")} ${hostInfo.logPath}`);
+  }
+  writer.line(chalk.dim("  需要停止知行请输入 /stop。\n"));
+}
+
+type StopChoice = "stop" | "wait" | "cancel-work-stop" | "cancel";
+
+function buildStopBody(hostInfo: ServerInfoResult | null): string[] {
+  if (!hostInfo) {
+    return ["当前无法读取宿主状态。为避免误停，先取消并稍后重试。"];
+  }
+  const body: string[] = [];
+  const otherRpc = otherRpcConnections(hostInfo);
+  const live = liveChannels(hostInfo);
+  const work = activeWork(hostInfo);
+  const deferredCount = countWork(hostInfo.deferredWork);
+  const keepAliveCount = countWork(hostInfo.keepAliveWork);
+
+  if (otherRpc > 0 || live.length > 0) {
+    const surfaces = [
+      otherRpc > 0 ? `其他终端 ${otherRpc}` : "",
+      live.length > 0 ? live.map((s) => s.channelId).join("、") : "",
+    ].filter(Boolean);
+    body.push(`停止后会断开其他接入面：${surfaces.join("；")}`);
+  }
+  if (work.count > 0) {
+    body.push(
+      `当前有运行中的工作：可取消 ${work.cancellableCount}，等待投递 ${work.drainOnlyCount}。`,
+    );
+  }
+  if (deferredCount > 0) {
+    body.push(`还有 ${deferredCount} 条未送达消息，会保留并在下次启动后重试。`);
+  }
+  if (keepAliveCount > 0) {
+    body.push(`有 ${keepAliveCount} 个已启用定时任务，停止后不会继续触发。`);
+  }
+  if (body.length === 0) body.push("当前没有其他接入面或运行中的工作。");
+  return body;
+}
+
+function buildStopOptions(
+  hostInfo: ServerInfoResult | null,
+): SelectionOption<StopChoice>[] {
+  const work = activeWork(hostInfo);
+  if (!hostInfo) {
+    return [{ value: "cancel", label: "取消", hotkey: "c", tone: "primary" }];
+  }
+  if (work.count > 0) {
+    const options: SelectionOption<StopChoice>[] = [
+      {
+        value: "wait",
+        label: "等待完成后停止",
+        description: "先 flush 可投递消息，再请求宿主退出",
+        hotkey: "w",
+        tone: "primary",
+      },
+    ];
+    if (work.cancellableCount > 0) {
+      options.push({
+        value: "cancel-work-stop",
+        label: "取消工作并停止",
+        description: "中断当前对话/任务后退出宿主",
+        hotkey: "x",
+        tone: "danger",
+      });
+    }
+    options.push({ value: "cancel", label: "返回", hotkey: "c", tone: "muted" });
+    return options;
+  }
+  return [
+    {
+      value: "stop",
+      label: "停止知行",
+      description: "关闭宿主，当前终端也会退出",
+      hotkey: "s",
+      tone: "danger",
+    },
+    { value: "cancel", label: "返回", hotkey: "c", tone: "muted" },
+  ];
+}
+
+function shutdownStrategyForChoice(choice: StopChoice): "immediate" | "drain" | "cancel" {
+  if (choice === "wait") return "drain";
+  if (choice === "cancel-work-stop") return "cancel";
+  return "immediate";
 }
 
 export function registerInfoCommands(deps: InfoCommandsDeps): void {
@@ -166,7 +344,7 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
   registry.register({
     id: "status:repl",
     name: "status",
-    description: "显示会话状态",
+    description: "查看当前运行状态",
     category: "info",
     execution: "local",
     tag: "builtin",
@@ -188,7 +366,7 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
     const hostInfo = await deps.management.serverInfo().catch(() => null);
     const channelLines =
       hostInfo?.channels && hostInfo.channels.length > 0
-        ? `\n  ${chalk.dim("Channels:")}\n    ${hostInfo.channels
+        ? `\n  ${chalk.dim("通道:")}\n    ${hostInfo.channels
             .map(formatChannelStatus)
             .join("\n    ")}`
         : "";
@@ -199,6 +377,55 @@ export function registerInfoCommands(deps: InfoCommandsDeps): void {
         `\n  ${chalk.dim("Network proxy:")} ${proxyText}` +
         `${channelLines}\n`,
     );
+    renderRuntimeControlStatus(hostInfo, writer);
+    return {};
+  });
+
+  registry.register({
+    id: "stop:repl",
+    name: "stop",
+    description: "停止知行",
+    category: "tools",
+    execution: "local",
+    tag: "builtin",
+  });
+  dispatcher.registerHandler("stop:repl", async () => {
+    const selection = deps.selection;
+    if (!selection) {
+      writer.line(chalk.yellow("\n  当前终端不支持选择交互，未执行停止。\n"));
+      return {};
+    }
+
+    const hostInfo = await deps.management.serverInfo().catch(() => null);
+    try {
+      const result = await selection.choose<StopChoice>({
+        id: "server-stop",
+        title: "停止知行",
+        body: buildStopBody(hostInfo),
+        options: buildStopOptions(hostInfo),
+        initialValue: activeWork(hostInfo).count > 0 ? "wait" : hostInfo ? "stop" : "cancel",
+        submitLabel: "确认",
+        cancelLabel: "返回",
+      });
+      if (result.kind !== "selected" || result.value === "cancel") {
+        writer.line(chalk.dim("\n  已取消停止。\n"));
+        return {};
+      }
+
+      await deps.management.serverShutdown({
+        reason: "user-stop",
+        strategy: shutdownStrategyForChoice(result.value),
+        timeoutMs: 30_000,
+      });
+      writer.line(chalk.yellow("\n  正在停止知行，当前终端将退出。\n"));
+      deps.requestExit?.();
+    } catch (err) {
+      if (err instanceof SelectionUnavailableError || err instanceof SelectionBusyError) {
+        writer.line(chalk.yellow(`\n  无法打开选择面板：${err.message}\n`));
+        return {};
+      }
+      throw err;
+    }
     return {};
   });
 

@@ -10,6 +10,7 @@ import type {
   ChannelRegistry,
   RunRegistry,
   TaskListState,
+  DeliveryStats,
 } from "@zhixing/core";
 import type { ServerConfig } from "./types.js";
 import type { ConversationManager } from "./runtime/index.js";
@@ -22,6 +23,13 @@ import type {
   SkillDirectory,
   TrustDirectory,
 } from "./runtime/management-directories.js";
+
+export type ServerShutdownStrategy = "immediate" | "drain" | "cancel";
+
+export interface RuntimeControlAdapter {
+  deliveryStats?: () => DeliveryStats;
+  flushDelivery?: () => Promise<void>;
+}
 
 export interface ServerContext {
   /** 配置（不可变；config.port 是请求的端口，实际端口见 listenAddr） */
@@ -98,6 +106,8 @@ export interface ServerContext {
    * 与 scheduler 一起初始化。
    */
   runRegistry?: RunRegistry;
+  /** 运行控制需要的可选事实源与动作钩子，由宿主装配层注入。 */
+  runtimeControl?: RuntimeControlAdapter;
   /** 实际监听的地址（startServer 监听就绪后回填） */
   listenAddr?: { port: number; host: string };
   /**
@@ -132,6 +142,7 @@ export interface CreateContextOptions {
   channels?: ChannelRegistry;
   confirmationHub?: ConfirmationHub;
   runRegistry?: RunRegistry;
+  runtimeControl?: RuntimeControlAdapter;
 }
 
 export function createServerContext(opts: CreateContextOptions): ServerContext {
@@ -155,5 +166,6 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     channels: opts.channels,
     confirmationHub: opts.confirmationHub,
     runRegistry: opts.runRegistry,
+    runtimeControl: opts.runtimeControl,
   };
 }

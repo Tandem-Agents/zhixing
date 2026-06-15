@@ -77,6 +77,58 @@ describe("server.shutdown", () => {
     expect(eta).toBeGreaterThanOrEqual(before + 60_000);
     expect(eta).toBeLessThanOrEqual(Date.now() + 60_000 + 100);
   });
+
+  it("drain strategy waits for active work before triggering shutdown", async () => {
+    vi.useFakeTimers();
+    try {
+      const trigger = vi.fn();
+      let busy = true;
+      const ctx = mkCtx({
+        requestShutdown: trigger,
+        conversations: {
+          list: () => [{ conversationId: "conv-1", busy, pendingCount: 0 }],
+        } as never,
+        runtimeControl: { flushDelivery: vi.fn(async () => {}) },
+      });
+
+      const result = buildServerShutdownMethod().handler(
+        { reason: "user-stop", strategy: "drain", timeoutMs: 1_000 },
+        ctx,
+      ) as any;
+
+      expect(result.strategy).toBe("drain");
+      expect(trigger).not.toHaveBeenCalled();
+      busy = false;
+      await vi.advanceTimersByTimeAsync(200);
+      expect(trigger).toHaveBeenCalledWith("user-stop:drain");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("drain strategy does not let delivery flush block shutdown forever", async () => {
+    vi.useFakeTimers();
+    try {
+      const trigger = vi.fn();
+      const ctx = mkCtx({
+        requestShutdown: trigger,
+        conversations: { list: () => [] } as never,
+        runtimeControl: { flushDelivery: vi.fn(() => new Promise<void>(() => {})) },
+      });
+
+      const result = buildServerShutdownMethod().handler(
+        { reason: "user-stop", strategy: "drain", timeoutMs: 100 },
+        ctx,
+      ) as any;
+
+      expect(result.strategy).toBe("drain");
+      expect(trigger).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(trigger).toHaveBeenCalledWith("user-stop:drain");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe("server.info", () => {
@@ -158,6 +210,64 @@ describe("server.info", () => {
         channelId: "feishu",
         state: "connecting",
       },
+    ]);
+  });
+
+  it("叠加运行控制投影", () => {
+    const ctx = {
+      ...mkCtx({
+        conversations: {
+          list: () => [
+            {
+              conversationId: "conv-1",
+              busy: true,
+              pendingCount: 2,
+            },
+          ],
+        } as never,
+        runRegistry: { size: () => 1 } as never,
+        scheduler: {
+          listTasks: () => [
+            { id: "user-task", enabled: true, system: false },
+            { id: "system-task", enabled: true, system: true },
+            { id: "disabled-task", enabled: false, system: false },
+          ],
+        } as never,
+        runtimeControl: {
+          deliveryStats: () => ({
+            queued: 3,
+            delivered: 0,
+            failed: 0,
+            retrying: 1,
+          }),
+        },
+        channels: {
+          listStatuses: () => [
+            { channelId: "feishu", state: "connected" },
+            { channelId: "slack", state: "disconnected" },
+          ],
+        } as never,
+        connectionCount: () => 2,
+      }),
+      connection: { id: 7, authenticated: true } as never,
+    };
+
+    const result = buildServerInfoMethod().handler({}, ctx) as any;
+
+    expect(result.accessSurfaces.otherRpcConnections).toBe(1);
+    expect(result.accessSurfaces.liveChannels).toEqual([
+      { channelId: "feishu", state: "connected" },
+    ]);
+    expect(result.activeWork.count).toBe(4);
+    expect(result.activeWork.cancellableWork).toMatchObject([
+      { id: "conversation:conv-1", count: 3 },
+      { id: "scheduler:runs", count: 1 },
+    ]);
+    expect(result.deferredWork).toMatchObject([
+      { id: "delivery:queue", count: 3 },
+    ]);
+    expect(result.keepAliveWork).toMatchObject([
+      { id: "scheduler:enabled", count: 1 },
     ]);
   });
 

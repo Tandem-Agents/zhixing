@@ -2,7 +2,7 @@
  * `zhixing serve stop` — 停止后台宿主
  *
  * POSIX 流程：
- *   readLock → SIGTERM → 轮询 isProcessAlive → 超时 SIGKILL → 强制清理
+ *   readLock → RPC server.shutdown → 轮询 isProcessAlive → 失败时 SIGTERM/SIGKILL → 强制清理
  *
  * Windows 流程（SIGTERM 在 Windows 等价 force-kill，必须走应用层）：
  *   readLock → RPC server.shutdown (15s) → 轮询 → 超时 taskkill /T → 再超时 taskkill /F /T → 强制清理
@@ -32,7 +32,7 @@ export interface StopOptions {
   timeoutMs?: number;
   /** 轮询间隔，默认 300ms */
   pollMs?: number;
-  /** RPC graceful 超时（Windows 路径），默认 15_000ms */
+  /** RPC graceful 超时，默认 15_000ms */
   rpcTimeoutMs?: number;
   /** 是否打印进度（默认 true）*/
   verbose?: boolean;
@@ -65,7 +65,19 @@ export type StopResult =
   | { status: "nothing-to-stop" }
   | { status: "stopped"; pid: number; tookMs: number; path: "signal" | "rpc" }
   | { status: "force-killed"; pid: number; tookMs: number }
+  | { status: "refused"; pid: number; reason: string; blockers: string[] }
   | { status: "error"; pid: number; reason: string };
+
+export class StopRefusedError extends Error {
+  override readonly name = "StopRefusedError";
+
+  constructor(
+    message: string,
+    readonly blockers: string[],
+  ) {
+    super(message);
+  }
+}
 
 export async function runStopCommand(opts: StopOptions = {}): Promise<StopResult> {
   const deps = opts.deps ?? {};
@@ -120,6 +132,7 @@ export async function runStopCommand(opts: StopOptions = {}): Promise<StopResult
     lock,
     timeoutMs,
     pollMs,
+    rpcTimeoutMs: opts.rpcTimeoutMs ?? 15_000,
     verbose,
     deps,
     expectedLock: opts.expectedLock,
@@ -132,21 +145,69 @@ interface StopInnerOpts {
   lock: PidFileContents;
   timeoutMs: number;
   pollMs: number;
+  rpcTimeoutMs: number;
   verbose: boolean;
   deps: StopDeps;
   expectedLock?: PidFileContents;
 }
 
 async function runStopPosix(opts: StopInnerOpts): Promise<StopResult> {
-  const { lock, timeoutMs, pollMs, verbose, deps } = opts;
+  const { lock, timeoutMs, pollMs, rpcTimeoutMs, verbose, deps } = opts;
   const con = deps.console ?? console;
   const isAlive = deps.isProcessAliveFn ?? isProcessAlive;
   const killFn = deps.killFn ?? ((pid, sig) => process.kill(pid, sig));
   const clock = deps.clock ?? Date.now;
   const sleep = deps.sleep ?? ((ms) => new Promise<void>((r) => setTimeout(r, ms)));
   const releaseLockFn = deps.releaseLockFn ?? releaseLock;
+  const rpcShutdown = deps.rpcShutdownFn ?? defaultRpcShutdown;
   const statePath = deps.statePath ?? getDefaultStatePath();
   const readyMarkerPath = deps.readyMarkerPath ?? getDefaultReadyMarkerPath();
+  const start = clock();
+
+  if (verbose) con.log(chalk.dim(`Graceful stop via server.shutdown RPC (pid=${lock.pid})...`));
+  try {
+    await rpcShutdown(lock, rpcTimeoutMs);
+    const exited = await waitForExit({
+      pid: lock.pid,
+      deadline: clock() + timeoutMs,
+      pollMs,
+      clock,
+      sleep,
+      isAlive,
+    });
+    if (exited) {
+      const took = clock() - start;
+      if (verbose) {
+        con.log(chalk.green(`Server stopped via RPC (pid=${lock.pid}, took=${(took / 1000).toFixed(1)}s)`));
+      }
+      await forceCleanup({
+        releaseLockFn,
+        readLockFn: deps.readLockFn ?? readLock,
+        statePath,
+        readyMarkerPath,
+        expectedLock: opts.expectedLock,
+      });
+      return { status: "stopped", pid: lock.pid, tookMs: took, path: "rpc" };
+    }
+    if (verbose) con.warn(chalk.yellow("RPC ack'd but process still alive, falling back to SIGTERM"));
+  } catch (err) {
+    if (err instanceof StopRefusedError) {
+      if (verbose) {
+        con.warn(chalk.yellow(`Stop refused: ${err.message}`));
+        for (const blocker of err.blockers) {
+          con.warn(chalk.yellow(`  - ${blocker}`));
+        }
+      }
+      return {
+        status: "refused",
+        pid: lock.pid,
+        reason: err.message,
+        blockers: err.blockers,
+      };
+    }
+    const reason = err instanceof Error ? err.message : String(err);
+    if (verbose) con.warn(chalk.yellow(`RPC shutdown failed: ${reason}. Falling back to SIGTERM.`));
+  }
 
   if (verbose) con.log(chalk.dim(`Sending SIGTERM to pid ${lock.pid}...`));
   try {
@@ -229,6 +290,20 @@ async function runStopWindows(opts: StopInnerOpts & { rpcTimeoutMs: number }): P
     await rpcShutdown(lock, rpcTimeoutMs);
     rpcOk = true;
   } catch (err) {
+    if (err instanceof StopRefusedError) {
+      if (verbose) {
+        con.warn(chalk.yellow(`Stop refused: ${err.message}`));
+        for (const blocker of err.blockers) {
+          con.warn(chalk.yellow(`  - ${blocker}`));
+        }
+      }
+      return {
+        status: "refused",
+        pid: lock.pid,
+        reason: err.message,
+        blockers: err.blockers,
+      };
+    }
     const reason = err instanceof Error ? err.message : String(err);
     if (verbose) con.warn(chalk.yellow(`RPC shutdown failed: ${reason}. Falling back to taskkill.`));
   }
@@ -374,10 +449,67 @@ async function defaultRpcShutdown(lock: PidFileContents, timeoutMs: number): Pro
   await client.connect();
   try {
     await client.authenticate(token);
-    await client.request("server.shutdown", { reason: "serve-stop", timeoutMs });
+    const info = await client.request<ServerStopInfo>("server.info");
+    const blockers = getStopBlockers(info);
+    if (blockers.length > 0) {
+      throw new StopRefusedError(
+        "当前还有接入面或工作在运行，请在交互模式使用 /stop",
+        blockers,
+      );
+    }
+    await client.request("server.shutdown", {
+      reason: "serve-stop",
+      timeoutMs,
+      strategy: "immediate",
+    });
   } finally {
     await client.close().catch(() => {});
   }
+}
+
+interface ServerStopInfo {
+  connectionCount?: number;
+  channels?: Array<{ channelId: string; state: string }>;
+  accessSurfaces?: {
+    otherRpcConnections?: number;
+    liveChannels?: Array<{ channelId: string; state: string }>;
+  };
+  activeWork?: { count?: number };
+  keepAliveWork?: Array<{ label?: string; count?: number }>;
+}
+
+function getStopBlockers(info: ServerStopInfo): string[] {
+  const blockers: string[] = [];
+  const otherConnections =
+    typeof info.accessSurfaces?.otherRpcConnections === "number"
+      ? info.accessSurfaces.otherRpcConnections
+      : Math.max(0, (info.connectionCount ?? 1) - 1);
+  if (otherConnections > 0) {
+    blockers.push(`还有 ${otherConnections} 个终端连接`);
+  }
+
+  const liveChannels =
+    info.accessSurfaces?.liveChannels ??
+    (info.channels ?? []).filter(
+      (s) => s.state === "connected" || s.state === "connecting",
+    );
+  if (liveChannels.length > 0) {
+    blockers.push(`还有接入面在线：${liveChannels.map((s) => s.channelId).join("、")}`);
+  }
+
+  const activeWork = Math.max(0, info.activeWork?.count ?? 0);
+  if (activeWork > 0) {
+    blockers.push(`还有 ${activeWork} 项运行中的工作`);
+  }
+
+  const keepAlive = (info.keepAliveWork ?? []).reduce(
+    (sum, item) => sum + Math.max(0, item.count ?? 0),
+    0,
+  );
+  if (keepAlive > 0) {
+    blockers.push(`还有 ${keepAlive} 个已启用定时任务`);
+  }
+  return blockers;
 }
 
 async function defaultTaskkill(pid: number, force: boolean): Promise<void> {

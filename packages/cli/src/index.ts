@@ -190,7 +190,8 @@ serveCmd
   .action(async (options: { timeout?: number }) => {
     try {
       const result = await runStopCommand({ timeoutMs: options.timeout });
-      const exitCode = result.status === "error" ? 1 : 0;
+      const exitCode =
+        result.status === "error" || result.status === "refused" ? 1 : 0;
       process.exit(exitCode);
     } catch (err) {
       renderError(err, stdoutWriter);

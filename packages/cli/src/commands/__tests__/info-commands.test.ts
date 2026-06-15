@@ -17,6 +17,7 @@ import type { CliWriter } from "../../screen/index.js";
 import type { ConversationController } from "../../runtime/conversation-controller.js";
 import type { RpcManagementFacade } from "../../runtime/rpc-management-facade.js";
 import type { ZhixingConfig } from "@zhixing/providers";
+import type { SelectionService } from "../../tui/selection/index.js";
 
 const RUNTIME: RuntimeContext = {
   sessionBusy: false,
@@ -35,7 +36,7 @@ function makeWriter(): CliWriter & { text: () => string } {
   } as unknown as CliWriter & { text: () => string };
 }
 
-function setup() {
+function setup(options: { selection?: SelectionService; requestExit?: () => void } = {}) {
   const registry = new DefaultCommandRegistry();
   const dispatcher = new CommandDispatcher({ registry });
   const writer = makeWriter();
@@ -85,7 +86,22 @@ function setup() {
     usage,
   } as unknown as ConversationController;
   const management = {
-    serverInfo: vi.fn(async () => ({ channels: [] })),
+    serverInfo: vi.fn(async () => ({
+      pid: 123,
+      port: 19869,
+      connectionCount: 1,
+      channels: [],
+      activeWork: {
+        count: 0,
+        cancellableCount: 0,
+        drainOnlyCount: 0,
+        cancellableWork: [],
+        drainOnlyWork: [],
+      },
+      deferredWork: [],
+      keepAliveWork: [],
+    })),
+    serverShutdown: vi.fn(async () => {}),
     journalStats: vi.fn(async () => ({
       stats: { totalFiles: 2, hotCount: 1, warmCount: 1, condensedCount: 0 },
       condense: null,
@@ -103,6 +119,8 @@ function setup() {
     getNetworkProxy: () => ({ mode: "off", resolved: null, display: "off" }) as never,
     getScheduler: () => ({ list: async () => [] }) as never,
     management,
+    selection: options.selection,
+    requestExit: options.requestExit,
   });
   return {
     registry,
@@ -118,11 +136,12 @@ function setup() {
 }
 
 describe("registerInfoCommands", () => {
-  it("9 条命令注册为 local，可经 findByName 找到", () => {
+  it("10 条命令注册为 local，可经 findByName 找到", () => {
     const { registry } = setup();
     for (const name of [
       "help",
       "status",
+      "stop",
       "me",
       "model",
       "usage",
@@ -142,19 +161,75 @@ describe("registerInfoCommands", () => {
     expect(text).toContain("当前对话");
     expect(text).toContain("claude-x");
     expect(text).toContain("anthropic");
+    expect(text).toContain("接入面");
+    expect(text).toContain("/stop");
   });
 
   it("/status 显示宿主通道状态", async () => {
     const h = setup();
     (h.management.serverInfo as any).mockResolvedValueOnce({
       channels: [{ channelId: "feishu", state: "connecting" }],
+      activeWork: {
+        count: 0,
+        cancellableCount: 0,
+        drainOnlyCount: 0,
+        cancellableWork: [],
+        drainOnlyWork: [],
+      },
+      deferredWork: [],
+      keepAliveWork: [],
     } as never);
 
     await h.dispatcher.dispatch("/status", RUNTIME);
 
     const text = stripAnsi(h.writer.text());
-    expect(text).toContain("Channels");
-    expect(text).toContain("feishu: connecting");
+    expect(text).toContain("通道");
+    expect(text).toContain("feishu: 连接中");
+  });
+
+  it("/stop 经选择服务发出停止请求", async () => {
+    const choose = vi.fn(async () => ({ kind: "selected", value: "stop" as const }));
+    const requestExit = vi.fn();
+    const h = setup({
+      selection: { choose } as unknown as SelectionService,
+      requestExit,
+    });
+
+    await h.dispatcher.dispatch("/stop", RUNTIME);
+
+    expect(choose).toHaveBeenCalledOnce();
+    expect(h.management.serverShutdown).toHaveBeenCalledWith({
+      reason: "user-stop",
+      strategy: "immediate",
+      timeoutMs: 30_000,
+    });
+    expect(requestExit).toHaveBeenCalledOnce();
+  });
+
+  it("/stop 有运行中工作时默认等待完成", async () => {
+    const choose = vi.fn(async () => ({ kind: "selected", value: "wait" as const }));
+    const h = setup({ selection: { choose } as unknown as SelectionService });
+    (h.management.serverInfo as any).mockResolvedValueOnce({
+      activeWork: {
+        count: 1,
+        cancellableCount: 1,
+        drainOnlyCount: 0,
+        cancellableWork: [{ id: "conversation:1", label: "conv-1", count: 1 }],
+        drainOnlyWork: [],
+      },
+      deferredWork: [],
+      keepAliveWork: [],
+      accessSurfaces: { otherRpcConnections: 0, liveChannels: [] },
+    });
+
+    await h.dispatcher.dispatch("/stop", RUNTIME);
+
+    expect(choose).toHaveBeenCalledWith(
+      expect.objectContaining({ initialValue: "wait" }),
+    );
+    expect(h.management.serverShutdown).toHaveBeenCalledWith(
+      expect.objectContaining({ strategy: "drain" }),
+    );
   });
 
   it("/model 显示本地配置的模型与 provider", async () => {

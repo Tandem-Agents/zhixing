@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { runStopCommand } from "../stop.js";
+import { StopRefusedError, runStopCommand } from "../stop.js";
 
 function mkClock() {
   let t = 0;
@@ -28,6 +28,9 @@ function mkDeps(overrides: Parameters<typeof runStopCommand>[0] extends infer T
     isProcessAliveFn: vi.fn(() => true),
     releaseLockFn: vi.fn(async () => {}),
     killFn: vi.fn(),
+    rpcShutdownFn: vi.fn(async () => {
+      throw new Error("RPC unavailable");
+    }),
     clock: mkClock(),
     sleep: vi.fn(async () => {}),
     console: { log: vi.fn(), warn: vi.fn(), error: vi.fn() },
@@ -111,9 +114,23 @@ describe("runStopCommand", () => {
     });
     const result = await runStopCommand({ timeoutMs: 5000, deps });
     expect(result.status).toBe("stopped");
+    expect(deps.rpcShutdownFn).toHaveBeenCalled();
     expect(deps.killFn).toHaveBeenCalledWith(12345, "SIGTERM");
     expect(deps.killFn).not.toHaveBeenCalledWith(12345, "SIGKILL");
     expect(deps.releaseLockFn).toHaveBeenCalled();
+  });
+
+  it("POSIX: RPC 拒绝停止时不降级 SIGTERM", async () => {
+    const deps = mkDeps({
+      rpcShutdownFn: vi.fn(async () => {
+        throw new StopRefusedError("还有其他接入面", ["还有 1 个终端连接"]);
+      }),
+    });
+
+    const result = await runStopCommand({ timeoutMs: 5000, deps });
+
+    expect(result.status).toBe("refused");
+    expect(deps.killFn).not.toHaveBeenCalled();
   });
 
   it("falls back to SIGKILL on timeout", async () => {
@@ -209,6 +226,21 @@ describe("runStopCommand — Windows path", () => {
     expect(deps.taskkillFn).toHaveBeenCalledWith(12345, false); // /T（非强制）
     // 进程早退 → /F /T 不该被调
     expect(deps.taskkillFn).not.toHaveBeenCalledWith(12345, true);
+  });
+
+  it("Windows: RPC 拒绝停止时不降级 taskkill", async () => {
+    const deps = mkDeps({
+      platform: "win32",
+      rpcShutdownFn: vi.fn(async () => {
+        throw new StopRefusedError("还有其他接入面", ["还有 1 个终端连接"]);
+      }),
+      taskkillFn: vi.fn(),
+    });
+
+    const result = await runStopCommand({ timeoutMs: 5000, deps });
+
+    expect(result.status).toBe("refused");
+    expect(deps.taskkillFn).not.toHaveBeenCalled();
   });
 
   it("Windows: RPC fails + taskkill /T times out → escalate to taskkill /F /T", async () => {
