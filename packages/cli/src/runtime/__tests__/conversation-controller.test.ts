@@ -97,12 +97,26 @@ function conversationEntry(
   };
 }
 
-function makeController(f: ReturnType<typeof makeFakes>, onYield = vi.fn()) {
+function makeController(
+  f: ReturnType<typeof makeFakes>,
+  onYield = vi.fn(),
+  observed: {
+    onObservedTurnDelta?: (turn: {
+      conversationId: string;
+      turnId?: string;
+    }) => void;
+    onObservedTurnComplete?: (turn: {
+      conversationId: string;
+      turnId?: string;
+    }) => void;
+  } = {},
+) {
   const controller = new ConversationController(
     {
       conversation: f.conversation as unknown as RpcConversationFacade,
       workscene: f.workscene as unknown as RpcWorksceneFacade,
       onYield,
+      ...observed,
     },
     initial,
   );
@@ -298,6 +312,70 @@ describe("ConversationController", () => {
 
     expect(onYield).toHaveBeenCalledTimes(1);
     expect(onYield).toHaveBeenCalledWith(frame);
+  });
+
+  it("同一当前对话的非本地 turn 会标记为旁观 turn", () => {
+    const f = makeFakes();
+    const onYield = vi.fn();
+    const onObservedTurnDelta = vi.fn();
+    const onObservedTurnComplete = vi.fn();
+    makeController(f, onYield, {
+      onObservedTurnDelta,
+      onObservedTurnComplete,
+    });
+
+    const frame: AgentYield = { type: "text_delta", text: "remote" };
+    f.emit.delta({
+      conversationId: "conv-1",
+      turnId: "turn-remote",
+      delta: frame,
+    });
+    f.emit.complete({
+      conversationId: "conv-1",
+      sessionId: "conv-1",
+      turnId: "turn-remote",
+      result: { reason: "completed" },
+    });
+
+    expect(onYield).toHaveBeenCalledWith(frame);
+    expect(onObservedTurnDelta).toHaveBeenCalledWith({
+      conversationId: "conv-1",
+      turnId: "turn-remote",
+    });
+    expect(onObservedTurnComplete).toHaveBeenCalledWith({
+      conversationId: "conv-1",
+      turnId: "turn-remote",
+    });
+  });
+
+  it("本地 turn 不触发旁观 turn 通知", async () => {
+    const f = makeFakes();
+    const onObservedTurnDelta = vi.fn();
+    const onObservedTurnComplete = vi.fn();
+    const { controller } = makeController(f, vi.fn(), {
+      onObservedTurnDelta,
+      onObservedTurnComplete,
+    });
+
+    const turn = controller.sendTurn("local turn");
+    await Promise.resolve();
+    const turnId = f.conversation.send.mock.calls[0]![2] as string;
+
+    f.emit.delta({
+      conversationId: "conv-1",
+      turnId,
+      delta: { type: "text_delta", text: "own" },
+    });
+    f.emit.complete({
+      conversationId: "conv-1",
+      sessionId: "conv-1",
+      turnId,
+      result: { reason: "completed" },
+    });
+
+    await turn;
+    expect(onObservedTurnDelta).not.toHaveBeenCalled();
+    expect(onObservedTurnComplete).not.toHaveBeenCalled();
   });
 
   it("sendTurn:本地等待期间只渲染本 turn 的 delta,不混入同对话上一轮输出", async () => {

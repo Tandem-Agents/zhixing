@@ -71,11 +71,20 @@ export interface ConversationControllerOptions {
   workscene: RpcWorksceneFacade;
   /** 主通道还原:当前对话的 AgentYield 流(渲染器 handleEvent 的喂入点) */
   onYield: (event: AgentYield) => void;
+  /** 同一当前对话里,非本接入面发起的 turn 开始产出。 */
+  onObservedTurnDelta?: (turn: ObservedTurnNotification) => void;
+  /** 同一当前对话里,非本接入面发起的 turn 已落定。 */
+  onObservedTurnComplete?: (turn: ObservedTurnNotification) => void;
 }
 
 export interface InitialConversationSelection {
   active: ActiveConversation;
   resumedConversationName: string | null;
+}
+
+export interface ObservedTurnNotification {
+  conversationId: string;
+  turnId?: string;
 }
 
 /** 由全域键派生模式视图;场景名后补(enter 响应 / list 查询) */
@@ -142,6 +151,17 @@ export class ConversationController {
         if (p.conversationId !== this.active.conversationId) return;
         const localTurnId = this.localTurnsByConversation.get(p.conversationId);
         if (localTurnId && p.turnId !== localTurnId) return;
+        if (
+          !this.isLocalTurn({
+            conversationId: p.conversationId,
+            turnId: p.turnId,
+          })
+        ) {
+          this.opts.onObservedTurnDelta?.({
+            conversationId: p.conversationId,
+            turnId: p.turnId,
+          });
+        }
         this.opts.onYield(p.delta);
       }),
       // 控制意图:仅发起连接可达,先于 complete;暂存到 turn 落定统一消费
@@ -150,7 +170,21 @@ export class ConversationController {
       }),
       opts.conversation.onComplete((p) => {
         const waiter = this.waiters.get(p.turnId);
-        if (!waiter) return;
+        if (!waiter) {
+          if (
+            p.conversationId === this.active.conversationId &&
+            !this.isLocalTurn({
+              conversationId: p.conversationId,
+              turnId: p.turnId,
+            })
+          ) {
+            this.opts.onObservedTurnComplete?.({
+              conversationId: p.conversationId,
+              turnId: p.turnId,
+            });
+          }
+          return;
+        }
         this.waiters.delete(p.turnId);
         const intent = this.pendingIntents.get(p.turnId);
         this.pendingIntents.delete(p.turnId);
@@ -164,6 +198,13 @@ export class ConversationController {
 
   get current(): ActiveConversation {
     return this.active;
+  }
+
+  isLocalTurn(turn: ObservedTurnNotification): boolean {
+    if (!turn.turnId) return false;
+    return (
+      this.localTurnsByConversation.get(turn.conversationId) === turn.turnId
+    );
   }
 
   /** 启动当前指针对应的 observer 订阅。非活跃会话返回 false 时静默降级。 */

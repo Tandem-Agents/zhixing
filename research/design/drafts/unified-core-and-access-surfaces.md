@@ -137,6 +137,14 @@ cli 渲染面本就是两条腿,投影逐腿对应、各自零改:
 
 **会话级变更通知(非 run 期,第三类推送)**:现状全部具名通知只有 delta / complete,两通道又都以 run 为边界——而 /clear、改名、对话删除发生在 run 外,旁观端零信号则多端视图腐烂(盯着已清窗口继续输入、列表残留已删对话)。裁决:`session.changed`(cleared / renamed / deleted / meta 变更)经同一组播名册推送,接入面据此刷新或退出视图;通知不是方法、不进方法表。**旁观端的 user 消息投影**:发起消息经带外 `agent:run_start` 的 `prompt` 字段获得(机制现成),wire envelope 的 `meta` 携带 `turnOrigin` 以标注发起接入面。
 
+**跨接入面的投递边界:事实统一,屏幕不镜像**。飞书不是远程终端镜像,而是社交通道里的对话入口;cli 是本机工作台、控制台、深度操作面。二者共享同一智能体与同一会话事实,但不是对等屏幕。裁决:
+
+- 飞书消息必须进入统一 conversation;飞书发起的 turn 默认回复飞书,cli 打开同一会话时可看历史、可接续、可按 observer 语义旁观。
+- cli 接续飞书会话时,消息写入同一 conversation,默认只在 cli 呈现,**不自动回显到飞书**。
+- 只有用户明确选择"回复到飞书 / 发给对方 / 继续在飞书答复"时,才经 channel adapter 投递到飞书。
+- 不做"飞书 ↔ cli 实时双向回显":那会把飞书变成终端日志窗口,让本机路径、权限、工具过程、工作流状态刷进移动端 / 办公 IM,带来噪音与隐私风险。
+- 因此统一的是会话事实与执行权威,不是所有接入面的屏幕输出;各接入面按自身语境投影同一事实流。
+
 两通道不并轨:把 yield 产出流硬并进观测 bus 是 core 事件模型变更,波及渠道与子 agent,违背零改原则。逐 token 一条 WS 通知,loopback 微秒级;预留 batch 参数(默认不开,实测超标才开)。
 
 ### 3.3 会话域 RPC 协议(方法表)
@@ -204,7 +212,7 @@ transcript / skill / memory / snapshot / permission(trust 规则)的全部写入
 - **体验底线**:首 token 延迟增量与流式帧率无感(loopback);`zz` 打开到可输入不显著变长(宿主拉起 / 连接与 cli 启动并行);宿主内存基线纳入观测。
 - **单 owner**:结构性验收——cli 进程无 Store 写实例、无窗口实例(grep 级 + 架构评审);**所有管理命令零本地写**(/name、/resume inline 删除、/work 场景 CRUD、/clear 视图态清理、/trust 撤销、/skills 启停 / 置顶 / 模式 / 归档全部经 RPC);grep 验收对象 = cli 侧 convRepo / 场景注册表 / permissionStore / skillStore / 记忆域仓(JournalStore / PeopleStore / MemoryStore)/ transcript / snapshot 的全部写调用与实例构造。
 - **功能全谱经 RPC**:对话 / 流式 / 工具事件 / 确认(**含持久授权全选项**,见裁决 5)/ 段切换提示 / /clear / /resume / /compact / workscene / reload / 技能(索引随宿主 runtime、slash 补全随事件刷新)在 cli 全部如常。
-- **多端连续**:飞书对话 cli 可见可续;cli 对话飞书(同会话 id)可续;多 observer 同看一个流式 turn。
+- **多端连续**:飞书对话进统一会话事实,cli 可见可续;cli 接续飞书会话默认不回显到飞书,只有显式"回复到飞书 / 发给对方"才投递到 channel;多 observer 同看一个流式 turn。
 - **生命周期**:cli 离场 grace 接管、宿主 idle 退出、版本换代握手生效;**宿主非优雅崩溃可恢复**——已接受的 run 零丢失(接受协议先持久化后入窗),进行中 turn 丢弃,cli 收到连接断后自动 ensureHost 重连并提示(恒独立进程模型的新增故障面,须有显式验收)。**占用红线**(裁决 8):关闭全部接入面且无待办 → idle 窗口后宿主进程必退(进程级验证);`/host stop` 后进程必退且数据落盘;`zz host stop` 在存在活跃工作时默认拒绝、绝不静默杀;僵死宿主可被 ensureHost 判定并替换。
 
 ---

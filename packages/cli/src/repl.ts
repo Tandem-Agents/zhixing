@@ -72,6 +72,7 @@ import { RpcWorksceneFacade } from "./runtime/rpc-workscene-facade.js";
 import { RpcManagementFacade } from "./runtime/rpc-management-facade.js";
 import { RpcEventBus } from "./runtime/rpc-event-bus.js";
 import { RpcConfirmationBroker } from "./runtime/rpc-confirmation-broker.js";
+import { createObservedTurnPresenter } from "./runtime/observed-turn-presenter.js";
 import {
   ConversationController,
   selectInitialConversation,
@@ -310,12 +311,23 @@ export async function startRepl(): Promise<void> {
   const { active: initialActive, resumedConversationName } =
     await selectInitialConversation(conversationFacade);
 
+  let controller: ConversationController;
+  const observedTurnPresenter = createObservedTurnPresenter({
+    writer: cliWriter,
+    flushOutput: () => renderer.stop(),
+    isLocalTurn: (turn) => controller.isLocalTurn(turn),
+  });
+
   // 会话控制器——当前对话指针 + turn 编排(send → delta 喂渲染 → complete)。
-  const controller = new ConversationController(
+  controller = new ConversationController(
     {
       conversation: conversationFacade,
       workscene: worksceneFacade,
       onYield: (e) => renderer.handleEvent(e),
+      onObservedTurnDelta: (turn) =>
+        observedTurnPresenter.onObservedTurnDelta(turn),
+      onObservedTurnComplete: (turn) =>
+        observedTurnPresenter.onObservedTurnComplete(turn),
     },
     initialActive,
   );
@@ -324,13 +336,21 @@ export async function startRepl(): Promise<void> {
   // 带外通道——宿主 per-run bus 的 UI 订阅集事件经信封还原为本地投影 bus,
   // createRenderSubscribers(retry / segment / interrupt / status-bar)零改挂接。
   // "只投当前对话"是接入面 UI 态,经 filter 注入。
+  const renderSubscribers = createRenderSubscribers({
+    renderer,
+    writer: cliWriter,
+    screen: renderScreen ?? undefined,
+  });
   const rpcEventBus = new RpcEventBus({
     link: coreHost,
-    decorate: createRenderSubscribers({
-      renderer,
-      writer: cliWriter,
-      screen: renderScreen ?? undefined,
-    }),
+    decorate: (ctx) => {
+      const disposeObserved = observedTurnPresenter.decorateRunBus(ctx);
+      const disposeRender = renderSubscribers(ctx);
+      return () => {
+        disposeRender();
+        disposeObserved();
+      };
+    },
     filter: (envelope) =>
       envelope.conversationId === controller.current.conversationId,
     onListenerError: (err) =>
