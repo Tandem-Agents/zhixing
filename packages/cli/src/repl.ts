@@ -565,7 +565,7 @@ export async function startRepl(): Promise<void> {
     terminal: !capability.ok,
   });
 
-  // 挂载终端确认渲染器到会话 broker。渲染器生命周期绑到 REPL 退出：rl.on("close") 里 detach。
+  // 挂载终端确认渲染器到会话 broker。渲染器生命周期绑到 REPL 统一退出尾部。
   //
   // 共存协议（chrome inline SelectOperationRegion）：
   //   - SelectOperationRegion 通过 ScreenController.attachInput 接入 chrome inline，
@@ -1042,45 +1042,11 @@ export async function startRepl(): Promise<void> {
     flushDeferredStartupNotices();
   }
 
-  // close 监听器 + 主循环的协作信号：
-  //
-  // 异步 cleanup 监听器（下方）会跑 dispose / "再见 👋" / process.exit，含 await
-  // 可能挂起多个 tick；期间 /exit 等命令的 handler 已 resolve，主循环若 continue
-  // 进入下一轮 readInputLine 会渲染新 box，与"再见 👋"输出视觉重叠。
-  //
-  // 同步监听器立即设 flag，主循环顶部检查 flag 直接 break——不渲染新 box；
-  // 异步 cleanup 沿原 timeline 跑完，最终 process.exit。两个监听器按注册顺序
-  // 同步触发（同步部分），共同表达"REPL 正在关闭"的协作语义。
+  // close 只表达"有人请求普通退出"。真正的退出提示、屏幕归还、连接释放
+  // 统一在主循环尾部执行，避免 /exit 与 Ctrl+C 各自维护不同 cleanup 顺序。
   let replShuttingDown = false;
   rl.on("close", () => {
     replShuttingDown = true;
-  });
-
-  rl.on("close", async () => {
-    const exitHint = stopRequested
-      ? null
-      : await managementFacade
-          .serverInfoIfConnected()
-          .then(formatNormalExitHint)
-          .catch(() => null);
-    renderer.stop();
-    // UI 订阅先撤(tail / 确认面板 / 带外投影 / 会话订阅),再断连接——
-    // 避免连接关闭期间残留事件触发已无效的渲染。
-    taskTail?.dispose();
-    detachConfirmation?.();
-    rpcConfirmationBroker.dispose();
-    rpcEventBus.dispose();
-    controller.dispose();
-    // 核心宿主连接最后释放（各域 facade 共用,须等全部消费者停止）——断开后宿主
-    // 失去本接入面,是否退场由宿主自己的 idle 判定决定。
-    await coreHost.dispose().catch((err) =>
-      cliWriter.line(`[coreHost.dispose] ${err instanceof Error ? err.message : String(err)}`),
-    );
-    if (exitHint) {
-      cliWriter.line(chalk.dim(`\n${exitHint}`));
-    }
-    cliWriter.line(chalk.dim("\n再见 👋"));
-    process.exit(0);
   });
 
   // ── Scheduler 事件 → 终端渲染 ──
@@ -1350,6 +1316,22 @@ export async function startRepl(): Promise<void> {
 
   // 循环退出后释放屏幕协调资源——typeahead path 的 Ctrl+C 由 input.waitOnce()
   // 捕获并 resolve cancelled，break 跳出循环后此处真正释放 input + screen。
+  const exitHint = stopRequested
+    ? null
+    : await managementFacade
+        .serverInfoIfConnected()
+        .then(formatNormalExitHint)
+        .catch(() => null);
+  const farewellConversationId = controller.current.conversationId;
+  renderer.stop();
+  // UI 订阅先撤(tail / 确认面板 / 带外投影 / 会话订阅),再断连接——
+  // 避免连接关闭期间残留事件触发已无效的渲染。
+  taskTail?.dispose();
+  detachConfirmation?.();
+  rpcConfirmationBroker.dispose();
+  rpcEventBus.dispose();
+  controller.dispose();
+
   if (inputController) {
     inputController.stop();
   }
@@ -1359,13 +1341,26 @@ export async function startRepl(): Promise<void> {
   // 自管（清屏序列之后）。详见 ScreenController.setFarewell docstring。
   if (renderScreen) {
     renderScreen.setFarewell(
-      renderFarewell({ conversationId: controller.current.conversationId }),
+      renderFarewell({ conversationId: farewellConversationId, exitHint }),
     );
   }
+
+  // 核心宿主连接最后释放（各域 facade 共用,须等全部消费者停止）——断开后宿主
+  // 失去本接入面,是否退场由宿主自己的 idle 判定决定。
+  await coreHost.dispose().catch((err) =>
+    cliWriter.line(`[coreHost.dispose] ${err instanceof Error ? err.message : String(err)}`),
+  );
 
   renderScreen?.dispose();
 
   // 关闭 readline——typeahead 路径下 break 跳出循环后必须显式 close，否则 readline 持
   // stdin 让事件循环不空，进程不退出。Legacy 路径下 readline 已 close，幂等 no-op。
   rl.close();
+  if (!renderScreen) {
+    if (exitHint) {
+      cliWriter.line(chalk.dim(`\n${exitHint}`));
+    }
+    cliWriter.line(chalk.dim("\n再见 👋"));
+  }
+  process.exit(0);
 }

@@ -77,6 +77,18 @@ describe("renderFarewell · 字节布局", () => {
     expect(headerA).toBe(headerB);
   });
 
+  it("可把普通退出提示放进告别块，确保 Ctrl+C 等路径退出后仍可见", () => {
+    const plain = stripAnsi(
+      renderFarewell({
+        conversationId: "chat-test",
+        exitHint: "已退出当前终端；知行仍在飞书中运行。",
+      }),
+    );
+
+    expect(plain).toContain("chat-test");
+    expect(plain).toContain("已退出当前终端；知行仍在飞书中运行。");
+  });
+
   // ANSI 着色由 chalk 在 TTY 环境自动启用 —— 单测环境 chalk 检测到 non-TTY 时
   // 关闭颜色码，所以不在此断言"必含 ANSI 序列"（与 chalk 设计意图一致）。
 });

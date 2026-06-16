@@ -20,9 +20,9 @@
  *
  * ─── 设计原则 ───
  *
- *   1. **信息克制**：只展示对话 ID —— 用户最关心的"我下次怎么回来"已由 zhixing
- *      默认恢复机制解决（直接打 `zhixing` 即接续最近对话），续聊命令冗余。
- *      用时 / 轮数 / token 数都是"过程数据"，不属于"临别要传达的核心"。
+ *   1. **信息克制**：默认只展示对话 ID；若普通退出后知行仍在其它接入面
+ *      或后台工作中运行，caller 可传入一行低打扰提示。用时 / 轮数 / token
+ *      数都是"过程数据"，不属于"临别要传达的核心"。
  *   2. **纯函数**：输入 FarewellData → 输出字符串，无副作用，易测试 + 易替换
  *   3. **可扩展**：FarewellData 是接口，未来加字段（季节性 logo / 告别词 /
  *      session stats）只动接口 + 此函数实现 + 调用方装配数据，ScreenController
@@ -53,12 +53,15 @@ import {
 /**
  * 告别块数据 —— 渲染所需的全部字段。
  *
- * 当前只 conversationId 一个字段；未来扩展（如 farewellQuote / sessionStats /
- * seasonalLogo 等）在此加可选字段，renderFarewell 自动支持。
+ * 只承载退出时必须留下的最小信息：当前对话 ID，以及可选的一行运行状态提示。
+ * 未来扩展（如 farewellQuote / sessionStats / seasonalLogo 等）在此加可选字段，
+ * renderFarewell 自动支持。
  */
 export interface FarewellData {
   /** 当前对话 ID（用户退出时正在聊的会话标识，默认恢复机制会续接此对话）*/
   readonly conversationId: string;
+  /** 普通退出后的运行状态提示。空值表示没有额外影响需要提示。 */
+  readonly exitHint?: string | null;
 }
 
 /**
@@ -74,7 +77,9 @@ export interface FarewellData {
  *   行 3: "   " + ROW1                            ← 机器人头顶 ▄▄▄
  *   行 4: "  " + ROW2 + GAP + "知行"              ← 机器人脸 + 标识
  *   行 5: "   " + ROW3 + GAP + conversationId     ← 机器人下巴 + 对话 ID
- *   行 6: ""                                      ← 末空行（shell prompt 不贴脸）
+ *   行 6: ""                                      ← 有提示时的间隔行（可选）
+ *   行 7: exitHint                                ← 普通退出后的运行状态提示（可选）
+ *   行 N: ""                                      ← 末空行（shell prompt 不贴脸）
  *
  * 注意：BRAND_ANCHOR_GLYPH_ROW1/2/3 字符常量内部已含前导空格（详见 tui/brand-anchor.ts），
  * 此处的额外 indent 在常量前补齐让三行视觉对齐 + 整段统一左边距。
@@ -102,13 +107,18 @@ export function renderFarewell(data: FarewellData): string {
   const robotRow1 = INDENT + robot1;
   const robotRow2 = INDENT + robot2 + BRAND_ANCHOR_INLINE_GAP + brand;
   const robotRow3 = INDENT + robot3 + BRAND_ANCHOR_INLINE_GAP + convId;
+  const hint = data.exitHint?.trim();
 
-  return [
+  const lines = [
     "", // 首空行
     antennaLine,
     robotRow1,
     robotRow2,
     robotRow3,
-    "", // 末空行
-  ].join("\n") + "\n";
+  ];
+  if (hint) {
+    lines.push("", INDENT + tone.dim(hint));
+  }
+  lines.push(""); // 末空行
+  return lines.join("\n") + "\n";
 }
