@@ -3,7 +3,8 @@
  *
  * 运行模式：
  * - 交互模式：zhixing → REPL 多轮对话
- * - 常驻服务：zhixing serve → 核心宿主（会话执行面 / 通道 / 定时任务）
+ * - 运行控制：zhixing status / zhixing stop → 查看或停止知行
+ * - 宿主启动：zhixing serve → 核心宿主（由交互入口按需拉起，保留给内部与诊断）
  */
 
 import chalk from "chalk";
@@ -70,6 +71,37 @@ function handleStartupResult(result: StartupCheckResult): void {
 
 const program = new Command();
 
+async function handleStopAction(): Promise<void> {
+  try {
+    const result = await runStopCommand();
+    const exitCode =
+      result.status === "error" || result.status === "refused" ? 1 : 0;
+    process.exit(exitCode);
+  } catch (err) {
+    renderError(err, stdoutWriter);
+    process.exit(1);
+  }
+}
+
+async function handleStatusAction(): Promise<void> {
+  try {
+    const report = await runStatusCommand();
+    // exit code: 0 running, 1 running-unhealthy, 2 stopped, 3 stale
+    const exitCode =
+      report.status === "running"
+        ? 0
+        : report.status === "running-unhealthy"
+          ? 1
+          : report.status === "stopped"
+            ? 2
+            : 3;
+    process.exit(exitCode);
+  } catch (err) {
+    renderError(err, stdoutWriter);
+    process.exit(1);
+  }
+}
+
 program
   .name("zhixing")
   .description("知行 — 智能体引擎")
@@ -105,6 +137,17 @@ program
       process.exit(1);
     }
   });
+
+// ─── zhixing status / stop（用户运行控制入口） ───
+program
+  .command("status")
+  .description("查看知行运行状态")
+  .action(handleStatusAction);
+
+program
+  .command("stop")
+  .description("停止知行")
+  .action(handleStopAction);
 
 // ─── zhixing rpc <method> [args]（连接 server 的 RPC 客户端） ───
 //
@@ -182,22 +225,11 @@ const serveCmd = program
     }
   });
 
-// zhixing serve stop —— 停止后台宿主
+// zhixing serve stop —— 兼容入口；用户入口是 zhixing stop
 serveCmd
-  .command("stop")
-  .description("停止后台运行的 server（SIGTERM，30s 超时 SIGKILL 兜底）")
-  .option("--timeout <ms>", "优雅停机超时（ms）", (v) => parseInt(v, 10))
-  .action(async (options: { timeout?: number }) => {
-    try {
-      const result = await runStopCommand({ timeoutMs: options.timeout });
-      const exitCode =
-        result.status === "error" || result.status === "refused" ? 1 : 0;
-      process.exit(exitCode);
-    } catch (err) {
-      renderError(err, stdoutWriter);
-      process.exit(1);
-    }
-  });
+  .command("stop", { hidden: true })
+  .description("兼容入口：停止知行")
+  .action(handleStopAction);
 
 // zhixing serve logs —— 查看日志（默认尾部 50 行；--tail 持续跟踪）
 serveCmd
@@ -215,29 +247,11 @@ serveCmd
     }
   });
 
-// zhixing serve status —— 查询后台宿主状态
+// zhixing serve status —— 兼容入口；用户入口是 zhixing status
 serveCmd
-  .command("status")
-  .description("查询 server 运行状态（running / running-unhealthy / stopped / stale）")
-  .option("--json", "输出 JSON（便于脚本解析）")
-  .action(async (options: { json?: boolean }) => {
-    try {
-      const report = await runStatusCommand({ json: options.json });
-      // exit code: 0 running, 1 running-unhealthy, 2 stopped, 3 stale
-      const exitCode =
-        report.status === "running"
-          ? 0
-          : report.status === "running-unhealthy"
-            ? 1
-            : report.status === "stopped"
-              ? 2
-              : 3;
-      process.exit(exitCode);
-    } catch (err) {
-      renderError(err, stdoutWriter);
-      process.exit(1);
-    }
-  });
+  .command("status", { hidden: true })
+  .description("兼容入口：查看知行运行状态")
+  .action(handleStatusAction);
 
 // pnpm run 会将 `--` 原样传递给脚本，导致 Commander 将后续选项误认为位置参数。
 // 移除 argv 中首个独立的 `--`，使 `-p` 等选项正常解析。

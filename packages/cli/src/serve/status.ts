@@ -1,5 +1,7 @@
 /**
- * `zhixing serve status` — 查询后台宿主的四态状态
+ * `zhixing status` — 查询知行运行四态
+ *
+ * `zhixing serve status` 仅作为兼容入口复用同一实现。
  *
  * 四态（spec §3.3.4）：
  *   running            —— PID 活 + /api/health 200 + heartbeat < 2×阈值
@@ -9,7 +11,7 @@
  *
  * 输出：
  *   默认：彩色一行摘要 + pid/port/uptime/log 细节
- *   --json：结构化 JSON，便于脚本解析
+ *   json 选项仅供内部调用与测试使用，不暴露为用户命令参数。
  *
  * 所有外部依赖通过 deps 注入，测试可 mock 掉 health HTTP + state 文件读取。
  */

@@ -1,5 +1,7 @@
 /**
- * `zhixing serve stop` — 停止后台宿主
+ * `zhixing stop` — 停止知行
+ *
+ * `zhixing serve stop` 仅作为兼容入口复用同一实现。
  *
  * POSIX 流程：
  *   readLock → RPC server.shutdown → 轮询 isProcessAlive → 失败时 SIGTERM/SIGKILL → 强制清理
@@ -38,6 +40,8 @@ export interface StopOptions {
   verbose?: boolean;
   /** 仅当当前 PID 文件仍指向此宿主时才停止；用于连接层僵死替换防误杀。 */
   expectedLock?: PidFileContents;
+  /** 尊重其它在线接入面 / 工作 blocker。用户显式 stop 默认不启用。 */
+  respectBlockers?: boolean;
   /** 依赖注入，测试用 */
   deps?: StopDeps;
 }
@@ -48,7 +52,11 @@ export interface StopDeps {
   releaseLockFn?: typeof releaseLock;
   killFn?: (pid: number, signal: NodeJS.Signals | 0) => void;
   /** Windows 分支：发送 RPC server.shutdown */
-  rpcShutdownFn?: (lock: PidFileContents, timeoutMs: number) => Promise<void>;
+  rpcShutdownFn?: (
+    lock: PidFileContents,
+    timeoutMs: number,
+    opts?: RpcShutdownOptions,
+  ) => Promise<void>;
   /** Windows 分支：调用 taskkill */
   taskkillFn?: (pid: number, force: boolean) => Promise<void>;
   clock?: () => number;
@@ -79,6 +87,10 @@ export class StopRefusedError extends Error {
   }
 }
 
+interface RpcShutdownOptions {
+  respectBlockers: boolean;
+}
+
 export async function runStopCommand(opts: StopOptions = {}): Promise<StopResult> {
   const deps = opts.deps ?? {};
   const con = deps.console ?? console;
@@ -95,11 +107,11 @@ export async function runStopCommand(opts: StopOptions = {}): Promise<StopResult
   // 1. readLock
   const lock = await readLockFn().catch(() => null);
   if (!lock) {
-    if (verbose) con.log(chalk.dim("Server is not running (no PID file)"));
+    if (verbose) con.log(chalk.dim("知行未运行"));
     return { status: "nothing-to-stop" };
   }
   if (opts.expectedLock && !isSameLock(lock, opts.expectedLock)) {
-    if (verbose) con.log(chalk.dim("Server lock changed; skip stopping newer host"));
+    if (verbose) con.log(chalk.dim("知行运行实例已变化，跳过停止"));
     return { status: "nothing-to-stop" };
   }
   const { pid } = lock;
@@ -126,6 +138,7 @@ export async function runStopCommand(opts: StopOptions = {}): Promise<StopResult
       verbose,
       deps,
       expectedLock: opts.expectedLock,
+      respectBlockers: opts.respectBlockers ?? false,
     });
   }
   return runStopPosix({
@@ -136,6 +149,7 @@ export async function runStopCommand(opts: StopOptions = {}): Promise<StopResult
     verbose,
     deps,
     expectedLock: opts.expectedLock,
+    respectBlockers: opts.respectBlockers ?? false,
   });
 }
 
@@ -149,6 +163,7 @@ interface StopInnerOpts {
   verbose: boolean;
   deps: StopDeps;
   expectedLock?: PidFileContents;
+  respectBlockers: boolean;
 }
 
 async function runStopPosix(opts: StopInnerOpts): Promise<StopResult> {
@@ -164,9 +179,11 @@ async function runStopPosix(opts: StopInnerOpts): Promise<StopResult> {
   const readyMarkerPath = deps.readyMarkerPath ?? getDefaultReadyMarkerPath();
   const start = clock();
 
-  if (verbose) con.log(chalk.dim(`Graceful stop via server.shutdown RPC (pid=${lock.pid})...`));
+  if (verbose) con.log(chalk.dim("正在停止知行..."));
   try {
-    await rpcShutdown(lock, rpcTimeoutMs);
+    await rpcShutdown(lock, rpcTimeoutMs, {
+      respectBlockers: opts.respectBlockers,
+    });
     const exited = await waitForExit({
       pid: lock.pid,
       deadline: clock() + timeoutMs,
@@ -178,7 +195,7 @@ async function runStopPosix(opts: StopInnerOpts): Promise<StopResult> {
     if (exited) {
       const took = clock() - start;
       if (verbose) {
-        con.log(chalk.green(`Server stopped via RPC (pid=${lock.pid}, took=${(took / 1000).toFixed(1)}s)`));
+        con.log(chalk.green(`知行已停止，用时 ${(took / 1000).toFixed(1)}s`));
       }
       await forceCleanup({
         releaseLockFn,
@@ -193,7 +210,7 @@ async function runStopPosix(opts: StopInnerOpts): Promise<StopResult> {
   } catch (err) {
     if (err instanceof StopRefusedError) {
       if (verbose) {
-        con.warn(chalk.yellow(`Stop refused: ${err.message}`));
+        con.warn(chalk.yellow(`无法停止知行：${err.message}`));
         for (const blocker of err.blockers) {
           con.warn(chalk.yellow(`  - ${blocker}`));
         }
@@ -206,10 +223,10 @@ async function runStopPosix(opts: StopInnerOpts): Promise<StopResult> {
       };
     }
     const reason = err instanceof Error ? err.message : String(err);
-    if (verbose) con.warn(chalk.yellow(`RPC shutdown failed: ${reason}. Falling back to SIGTERM.`));
+    if (verbose) con.warn(chalk.yellow(`停止请求失败：${reason}。尝试直接结束进程。`));
   }
 
-  if (verbose) con.log(chalk.dim(`Sending SIGTERM to pid ${lock.pid}...`));
+  if (verbose) con.log(chalk.dim("正在结束知行进程..."));
   try {
     killFn(lock.pid, "SIGTERM");
   } catch (err) {
@@ -230,7 +247,7 @@ async function runStopPosix(opts: StopInnerOpts): Promise<StopResult> {
   if (exited) {
     const took = exited.tookMs;
     if (verbose) {
-      con.log(chalk.green(`Server stopped (pid=${lock.pid}, took=${(took / 1000).toFixed(1)}s)`));
+      con.log(chalk.green(`知行已停止，用时 ${(took / 1000).toFixed(1)}s`));
     }
     await forceCleanup({
       releaseLockFn,
@@ -246,7 +263,7 @@ async function runStopPosix(opts: StopInnerOpts): Promise<StopResult> {
   if (verbose) {
     con.warn(
       chalk.yellow(
-        `Graceful shutdown timed out after ${(timeoutMs / 1000).toFixed(0)}s, sending SIGKILL`,
+        `知行未在 ${(timeoutMs / 1000).toFixed(0)}s 内停止，正在强制结束。`,
       ),
     );
   }
@@ -285,14 +302,16 @@ async function runStopWindows(opts: StopInnerOpts & { rpcTimeoutMs: number }): P
 
   // 1. 尝试 RPC graceful
   let rpcOk = false;
-  if (verbose) con.log(chalk.dim(`Graceful stop via server.shutdown RPC (pid=${lock.pid})...`));
+  if (verbose) con.log(chalk.dim("正在停止知行..."));
   try {
-    await rpcShutdown(lock, rpcTimeoutMs);
+    await rpcShutdown(lock, rpcTimeoutMs, {
+      respectBlockers: opts.respectBlockers,
+    });
     rpcOk = true;
   } catch (err) {
     if (err instanceof StopRefusedError) {
       if (verbose) {
-        con.warn(chalk.yellow(`Stop refused: ${err.message}`));
+        con.warn(chalk.yellow(`无法停止知行：${err.message}`));
         for (const blocker of err.blockers) {
           con.warn(chalk.yellow(`  - ${blocker}`));
         }
@@ -305,7 +324,7 @@ async function runStopWindows(opts: StopInnerOpts & { rpcTimeoutMs: number }): P
       };
     }
     const reason = err instanceof Error ? err.message : String(err);
-    if (verbose) con.warn(chalk.yellow(`RPC shutdown failed: ${reason}. Falling back to taskkill.`));
+    if (verbose) con.warn(chalk.yellow(`停止请求失败：${reason}。尝试直接结束进程。`));
   }
 
   if (rpcOk) {
@@ -319,7 +338,7 @@ async function runStopWindows(opts: StopInnerOpts & { rpcTimeoutMs: number }): P
     });
     if (exited) {
       const took = clock() - start;
-      if (verbose) con.log(chalk.green(`Server stopped via RPC (pid=${lock.pid}, took=${(took / 1000).toFixed(1)}s)`));
+      if (verbose) con.log(chalk.green(`知行已停止，用时 ${(took / 1000).toFixed(1)}s`));
       await forceCleanup({
         releaseLockFn,
         readLockFn: deps.readLockFn ?? readLock,
@@ -330,11 +349,11 @@ async function runStopWindows(opts: StopInnerOpts & { rpcTimeoutMs: number }): P
       return { status: "stopped", pid: lock.pid, tookMs: took, path: "rpc" };
     }
     // 进程仍活 → 降级 taskkill
-    if (verbose) con.warn(chalk.yellow("RPC ack'd but process still alive, escalating to taskkill"));
+    if (verbose) con.warn(chalk.yellow("停止请求已发送，但知行仍在运行，正在结束进程。"));
   }
 
   // 2. taskkill /T（graceful kill + children）
-  if (verbose) con.log(chalk.dim(`Running taskkill /T for pid ${lock.pid}...`));
+  if (verbose) con.log(chalk.dim("正在结束知行进程..."));
   try {
     await taskkill(lock.pid, false);
   } catch (err) {
@@ -350,7 +369,7 @@ async function runStopWindows(opts: StopInnerOpts & { rpcTimeoutMs: number }): P
   });
   if (taskkillExited) {
     const took = clock() - start;
-    if (verbose) con.log(chalk.green(`Server stopped via taskkill (pid=${lock.pid}, took=${(took / 1000).toFixed(1)}s)`));
+    if (verbose) con.log(chalk.green(`知行已停止，用时 ${(took / 1000).toFixed(1)}s`));
     await forceCleanup({
       releaseLockFn,
       readLockFn: deps.readLockFn ?? readLock,
@@ -362,7 +381,7 @@ async function runStopWindows(opts: StopInnerOpts & { rpcTimeoutMs: number }): P
   }
 
   // 3. taskkill /F /T（强杀）
-  if (verbose) con.warn(chalk.yellow(`taskkill /T timed out; escalating to /F /T`));
+  if (verbose) con.warn(chalk.yellow("知行未及时停止，正在强制结束。"));
   try {
     await taskkill(lock.pid, true);
   } catch (err) {
@@ -438,7 +457,11 @@ async function safeUnlink(path: string): Promise<void> {
   }
 }
 
-async function defaultRpcShutdown(lock: PidFileContents, timeoutMs: number): Promise<void> {
+async function defaultRpcShutdown(
+  lock: PidFileContents,
+  timeoutMs: number,
+  opts: RpcShutdownOptions = { respectBlockers: false },
+): Promise<void> {
   const host = lock.host ?? "127.0.0.1";
   const url = `ws://${host}:${lock.port}/ws`;
   const tokenPath = getDefaultTokenPath();
@@ -449,18 +472,17 @@ async function defaultRpcShutdown(lock: PidFileContents, timeoutMs: number): Pro
   await client.connect();
   try {
     await client.authenticate(token);
-    const info = await client.request<ServerStopInfo>("server.info");
-    const blockers = getStopBlockers(info);
-    if (blockers.length > 0) {
-      throw new StopRefusedError(
-        "当前还有接入面或工作在运行，请在交互模式使用 /stop",
-        blockers,
-      );
+    if (opts.respectBlockers) {
+      const info = await client.request<ServerStopInfo>("server.info");
+      const blockers = getStopBlockers(info);
+      if (blockers.length > 0) {
+        throw new StopRefusedError("当前还有接入面或工作在运行", blockers);
+      }
     }
     await client.request("server.shutdown", {
       reason: "serve-stop",
       timeoutMs,
-      strategy: "immediate",
+      strategy: "cancel",
     });
   } finally {
     await client.close().catch(() => {});

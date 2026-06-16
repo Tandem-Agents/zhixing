@@ -120,6 +120,46 @@ describe("runStopCommand", () => {
     expect(deps.releaseLockFn).toHaveBeenCalled();
   });
 
+  it("用户显式 stop 默认请求完整停止，不把在线接入面当成本地 blocker", async () => {
+    let aliveCalls = 0;
+    const deps = mkDeps({
+      rpcShutdownFn: vi.fn(async () => {}),
+      isProcessAliveFn: vi.fn(() => {
+        aliveCalls += 1;
+        return aliveCalls === 1;
+      }),
+    });
+
+    const result = await runStopCommand({ timeoutMs: 5000, deps });
+
+    expect(result.status).toBe("stopped");
+    expect(deps.rpcShutdownFn).toHaveBeenCalledWith(
+      expect.objectContaining({ pid: 12345 }),
+      15_000,
+      { respectBlockers: false },
+    );
+    expect(deps.killFn).not.toHaveBeenCalled();
+  });
+
+  it("内部安全替换可显式要求尊重 blocker", async () => {
+    let aliveCalls = 0;
+    const deps = mkDeps({
+      rpcShutdownFn: vi.fn(async () => {}),
+      isProcessAliveFn: vi.fn(() => {
+        aliveCalls += 1;
+        return aliveCalls === 1;
+      }),
+    });
+
+    await runStopCommand({ timeoutMs: 5000, respectBlockers: true, deps });
+
+    expect(deps.rpcShutdownFn).toHaveBeenCalledWith(
+      expect.objectContaining({ pid: 12345 }),
+      15_000,
+      { respectBlockers: true },
+    );
+  });
+
   it("POSIX: RPC 拒绝停止时不降级 SIGTERM", async () => {
     const deps = mkDeps({
       rpcShutdownFn: vi.fn(async () => {

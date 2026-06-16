@@ -345,7 +345,7 @@ function printSuccessBanner(
   con.log(chalk.dim(`  PID:   ${pid}`));
   con.log(chalk.dim(`  Port:  ${port}`));
   con.log(chalk.dim(`  Log:   ${logPath}`));
-  con.log(chalk.dim(`  Stop:  zhixing serve stop`));
+  con.log(chalk.dim(`  Stop:  zhixing stop`));
   con.log();
 }
 

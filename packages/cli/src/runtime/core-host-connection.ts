@@ -107,7 +107,7 @@ export interface CoreHostConnectionDeps {
   discover: () => Promise<ServerEndpoint>;
   /** 拉起核心宿主，返回是否成功。 */
   spawn: () => Promise<{ ok: boolean; reason?: string; recoverable?: boolean }>;
-  /** 停止 PID 存活但连接不可用的宿主。默认复用 serve stop 的优雅/强制清理链。 */
+  /** 停止 PID 存活但连接不可用的宿主。默认复用显式停止的优雅/强制清理链。 */
   stopUnresponsiveHost?: (
     endpoint: ServerEndpoint,
     cause: unknown,
@@ -157,6 +157,7 @@ export function defaultCoreHostConnectionDeps(): CoreHostConnectionDeps {
         verbose: false,
         timeoutMs: 10_000,
         expectedLock: endpoint.pid,
+        respectBlockers: true,
         deps: { console: silent },
       });
       if (result.status === "error") {

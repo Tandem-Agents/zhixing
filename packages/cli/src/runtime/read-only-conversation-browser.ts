@@ -149,7 +149,7 @@ function formatMaybeRelative(iso: string): string | null {
 function renderRepairHint(writer: CliWriter): void {
   writer.line(
     chalk.dim(
-      `${layout.contentPrefix}需要排查时，可运行 zz serve status 查看运行状态，或用 zz serve logs 查看日志。`,
+      `${layout.contentPrefix}需要排查时，可运行 zz status 查看运行状态，或用 zz serve logs 查看日志。`,
     ),
   );
   writer.line("");
