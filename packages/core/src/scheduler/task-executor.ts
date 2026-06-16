@@ -15,6 +15,7 @@ import type {
   SystemHandler,
 } from "./types.js";
 import type { SchedulerConfig } from "./config.js";
+import type { DeliveryTarget } from "../channels/types.js";
 
 export interface TaskExecutorDeps {
   runAgentTurn: (params: AgentTurnParams) => Promise<AgentTurnResult>;
@@ -58,11 +59,9 @@ export async function executeTask(
         tools: task.action.tools,
         abortSignal: timeoutController.signal,
         context: "scheduled-task",
-        // 为远程确认注入回程地址：task.origin（dm:channel:user 解析）→ deliveryTarget
+        // 为远程确认注入回程地址：显式目标优先，其次回到创建任务的入口。
         taskId: task.id,
-        deliveryTarget: task.origin
-          ? { channelId: task.origin.channelId, to: task.origin.to }
-          : undefined,
+        deliveryTarget: resolveTaskDeliveryTarget(task),
       });
     }
 
@@ -102,4 +101,13 @@ export async function executeTask(
     clearTimeout(timeout);
     parentSignal?.removeEventListener("abort", onParentAbort);
   }
+}
+
+function resolveTaskDeliveryTarget(
+  task: ScheduledTask,
+): DeliveryTarget | undefined {
+  if (task.delivery?.kind === "channel") {
+    return { channelId: task.delivery.channel, to: task.delivery.to };
+  }
+  return task.origin;
 }

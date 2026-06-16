@@ -6,8 +6,8 @@
  * 重连 / 释放归连接持有者。
  *
  * 方法调用按需 ensure 宿主;通知订阅(onDelta / onComplete / onChanged /
- * onModeSwitchIntent)走连接的持久订阅——跨重连有效且被动,不为订阅拉起
- * 宿主。payload 类型取自 server 的 wire 契约单源,两侧不各自手写镜像。
+ * onActivity / onModeSwitchIntent)走连接的持久订阅——跨重连有效且被动,
+ * 不为订阅拉起宿主。payload 类型取自 server 的 wire 契约单源,两侧不各自手写镜像。
  *
  * handler 收到的 payload 含 conversationId——"当前对话"是接入面 UI 态,
  * 过滤归调用方,facade 对此零知识。
@@ -17,6 +17,7 @@ import type {
   RunsPage,
   RunsPageCursor,
   SessionChangedPayload,
+  SessionActivityPayload,
   SessionCompactResult,
   SessionContextBudgetResult,
   SessionCompletePayload,
@@ -226,6 +227,13 @@ export class RpcConversationFacade {
   onChanged(handler: (payload: SessionChangedPayload) => void): () => void {
     return this.link.onNotification(SESSION_NOTIFICATIONS.changed, (p) =>
       handler(p as SessionChangedPayload),
+    );
+  }
+
+  /** 非当前会话活动提示——不含内容,由接入面决定刷新列表或低噪提示。 */
+  onActivity(handler: (payload: SessionActivityPayload) => void): () => void {
+    return this.link.onNotification(SESSION_NOTIFICATIONS.activity, (p) =>
+      handler(p as SessionActivityPayload),
     );
   }
 

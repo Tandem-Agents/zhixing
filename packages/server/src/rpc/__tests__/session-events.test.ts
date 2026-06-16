@@ -5,7 +5,7 @@
  * (llm:request_start 摘要、segment:new_started 去 windowCompact)、
  * seq 单调、meta 携 lineage / turnOrigin、无对话身份 no-op、dispose 解除订阅。
  *
- * broadcast:按 observer 名册过滤连接,未认证 / 已关闭连接不收。
+ * broadcast:observer 内容组播按名册过滤连接;activity 工作台提示排除当前 observer。
  */
 
 import { describe, expect, it, vi } from "vitest";
@@ -14,7 +14,10 @@ import {
   createRunEventForwarder,
   type SessionEventEnvelope,
 } from "../session-events.js";
-import { createObserverBroadcast } from "../session-broadcast.js";
+import {
+  createActivityBroadcast,
+  createObserverBroadcast,
+} from "../session-broadcast.js";
 import type { RpcConnection } from "../connection.js";
 import type { ConversationManager } from "../../runtime/conversation-manager.js";
 
@@ -159,6 +162,49 @@ describe("createObserverBroadcast", () => {
     expect(a.notify).toHaveBeenCalledWith("session.delta", { x: 1 });
     expect(b.notify).toHaveBeenCalledWith("session.delta", { x: 1 });
     expect(outside.notify).not.toHaveBeenCalled();
+    expect(unauthed.notify).not.toHaveBeenCalled();
+    expect(closed.notify).not.toHaveBeenCalled();
+  });
+});
+
+describe("createActivityBroadcast", () => {
+  function makeConn(id: string, opts?: { authenticated?: boolean; closed?: boolean }) {
+    return {
+      id,
+      authenticated: opts?.authenticated ?? true,
+      closed: opts?.closed ?? false,
+      notify: vi.fn(),
+    } as unknown as RpcConnection & { notify: ReturnType<typeof vi.fn> };
+  }
+
+  it("只通知非当前 observer 的已认证活跃连接", () => {
+    const currentObserver = makeConn("1");
+    const otherWorkbench = makeConn("2");
+    const unauthed = makeConn("3", { authenticated: false });
+    const closed = makeConn("4", { closed: true });
+    const manager = {
+      getObserverConnectionIds: (cid: string) =>
+        cid === "c1" ? new Set(["1"]) : new Set(),
+    } as unknown as ConversationManager;
+
+    const broadcast = createActivityBroadcast({
+      connections: new Set([currentObserver, otherWorkbench, unauthed, closed]),
+      manager,
+    });
+    const payload = {
+      conversationId: "c1",
+      source: "feishu",
+      lastActiveAt: "2026-01-01T00:00:00.000Z",
+      unreadHint: true,
+      listInvalidated: true,
+    };
+    broadcast(payload);
+
+    expect(currentObserver.notify).not.toHaveBeenCalled();
+    expect(otherWorkbench.notify).toHaveBeenCalledWith(
+      "session.activity",
+      payload,
+    );
     expect(unauthed.notify).not.toHaveBeenCalled();
     expect(closed.notify).not.toHaveBeenCalled();
   });

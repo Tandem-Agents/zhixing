@@ -25,6 +25,7 @@ function makeFakes() {
   const handlers = {
     delta: [] as Handler<never>[],
     complete: [] as Handler<never>[],
+    activity: [] as Handler<never>[],
     intent: [] as Handler<never>[],
   };
   const conversation = {
@@ -39,6 +40,10 @@ function makeFakes() {
     },
     onComplete: (h: Handler<never>) => {
       handlers.complete.push(h);
+      return () => {};
+    },
+    onActivity: (h: Handler<never>) => {
+      handlers.activity.push(h);
       return () => {};
     },
     onModeSwitchIntent: (h: Handler<never>) => {
@@ -70,6 +75,7 @@ function makeFakes() {
   const emit = {
     delta: (p: unknown) => handlers.delta.forEach((h) => h(p as never)),
     complete: (p: unknown) => handlers.complete.forEach((h) => h(p as never)),
+    activity: (p: unknown) => handlers.activity.forEach((h) => h(p as never)),
     intent: (p: unknown) => handlers.intent.forEach((h) => h(p as never)),
   };
   return { conversation, workscene, emit };
@@ -109,6 +115,7 @@ function makeController(
       conversationId: string;
       turnId?: string;
     }) => void;
+    onActivity?: (activity: unknown) => void;
   } = {},
 ) {
   const controller = new ConversationController(
@@ -312,6 +319,38 @@ describe("ConversationController", () => {
 
     expect(onYield).toHaveBeenCalledTimes(1);
     expect(onYield).toHaveBeenCalledWith(frame);
+  });
+
+  it("activity 只通知非当前对话,不进入主渲染", () => {
+    const f = makeFakes();
+    const onYield = vi.fn();
+    const onActivity = vi.fn();
+    makeController(f, onYield, { onActivity });
+
+    f.emit.activity({
+      conversationId: "conv-1",
+      source: "feishu",
+      lastActiveAt: "2026-01-01T00:00:00.000Z",
+      unreadHint: true,
+      listInvalidated: true,
+    });
+    f.emit.activity({
+      conversationId: "conv-other",
+      source: "feishu",
+      lastActiveAt: "2026-01-01T00:00:00.000Z",
+      unreadHint: true,
+      listInvalidated: true,
+    });
+
+    expect(onYield).not.toHaveBeenCalled();
+    expect(onActivity).toHaveBeenCalledTimes(1);
+    expect(onActivity).toHaveBeenCalledWith({
+      conversationId: "conv-other",
+      source: "feishu",
+      lastActiveAt: "2026-01-01T00:00:00.000Z",
+      unreadHint: true,
+      listInvalidated: true,
+    });
   });
 
   it("同一当前对话的非本地 turn 会标记为旁观 turn", () => {

@@ -11,8 +11,8 @@
  *   器负责 dispose),host 只管装配。
  *
  * 对话级差异经执行期上下文取,不做装配期定制:schedule 工具的投递 origin 在工具
- * 执行时从 RunContext 的 conversationId 派生——同一装配闭包服务全部对话。子 agent
- * 工具白名单不含 schedule,RunContext 不透传 conversationId 到子链路无影响。
+ * 执行时从 RunContext 的 turnOrigin 派生——同一装配闭包服务全部对话。对话身份
+ * 不承载外部 App 来源,来源只作为回复和通知目标。
  *
  * onRuntimeCreated 是发放后的统一装配后置钩子(turn-context provider 注册等):
  * 会话与 ephemeral 两条发放路径都经此,杜绝"某入口漏注册"类不对齐。
@@ -25,7 +25,7 @@ import {
   type CreateAgentRuntimeOptions,
 } from "@zhixing/orchestrator/runtime";
 import { powerProfile } from "@zhixing/orchestrator/profile";
-import type { SchedulerFacade, WorkScene } from "@zhixing/core";
+import type { SchedulerFacade, TurnOrigin, WorkScene } from "@zhixing/core";
 import type { ScheduleToolOrigin } from "@zhixing/tools-builtin";
 import type { BuiltinExtraToolsAssembly } from "./builtin-extra-tools.js";
 import type { IWorkModeController } from "./work-mode-controller.js";
@@ -64,37 +64,29 @@ export interface RuntimeHostOptions {
   workModeController?: () => IWorkModeController;
 }
 
-/**
- * 从会话 id(如 "dm:feishu:ou_xxx")解析定时任务投递 origin。
- * 非渠道会话(本地对话 / ephemeral)返回 null——任务无渠道投递目标。
- */
-export function parseOriginFromConversationId(
-  conversationId: string,
+/** 从 turn 来源解析定时任务投递目标；无来源目标时不做隐式通知。 */
+export function resolveScheduleOriginFromTurnOrigin(
+  turnOrigin: TurnOrigin | undefined,
 ): ScheduleToolOrigin | null {
-  const parts = conversationId.split(":");
-  if (parts.length >= 3 && parts[0] === "dm") {
-    return { channelId: parts[1]!, to: parts.slice(2).join(":") };
-  }
-  return null;
+  return turnOrigin?.target ? { ...turnOrigin.target } : null;
 }
 
 export class RuntimeHost {
   /**
    * 会话实例共用的 origin 派生闭包——执行期从 RunContext 读当前 run 的
-   * conversationId 再解析,装配期不绑定任何对话。
+   * turnOrigin,装配期不绑定任何对话或接入面。
    */
   private readonly conversationScheduleOrigin: () => ScheduleToolOrigin | null;
 
   constructor(private readonly opts: RuntimeHostOptions) {
     this.conversationScheduleOrigin = () => {
-      const conversationId = runContextStorage.getStore()?.conversationId;
-      return conversationId
-        ? parseOriginFromConversationId(conversationId)
-        : null;
+      return resolveScheduleOriginFromTurnOrigin(
+        runContextStorage.getStore()?.turnOrigin,
+      );
     };
   }
 
-  /** 发放一个 main 会话 runtime 实例——投递 origin 执行期按当前 run 的对话派生。 */
+  /** 发放一个 main 会话 runtime 实例——投递 origin 执行期按当前 turn 来源派生。 */
   async createConversationRuntime(): Promise<AgentRuntime> {
     return this.assemble(this.conversationScheduleOrigin, {
       withWorkmodeTools: true,

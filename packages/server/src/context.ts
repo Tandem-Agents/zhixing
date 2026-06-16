@@ -15,7 +15,10 @@ import type {
 import type { ServerConfig } from "./types.js";
 import type { ConversationManager } from "./runtime/index.js";
 import type { ConfirmationHub } from "./confirmation/hub.js";
-import type { SessionBroadcast } from "./rpc/session-broadcast.js";
+import type {
+  SessionActivityBroadcast,
+  SessionBroadcast,
+} from "./rpc/session-broadcast.js";
 import type { ConversationDirectory } from "./runtime/conversation-directory.js";
 import type { WorksceneDirectory } from "./runtime/workscene-directory.js";
 import type {
@@ -115,6 +118,10 @@ export interface ServerContext {
    * 回填;未回填(最小测试 ctx)时 session 推送退化为发起连接单播。
    */
   sessionBroadcast?: SessionBroadcast;
+  /**
+   * 工作台类接入面的非当前会话活动提示。它不携内容,也不发给当前 observer。
+   */
+  sessionActivityBroadcast?: SessionActivityBroadcast;
   /**
    * 优雅停机触发器（runServer 在 startServer resolve 后同一微任务绑定）。
    * 供 `server.shutdown` RPC handler 使用——handler 不 await，立即 ack 回响应。

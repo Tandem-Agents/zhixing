@@ -15,6 +15,7 @@ import {
   createDefaultIntentClassifier,
   type ConversationManager,
   type ConfirmationHub,
+  type SessionActivityBroadcast,
   type SessionBroadcast,
 } from "@zhixing/server";
 import type {
@@ -73,6 +74,8 @@ export interface SetupChannelsOptions {
   cancelKeywords?: readonly string[];
   /** 会话 observer 组播 getter；server 启动后才会返回真实函数。 */
   sessionBroadcast?: () => SessionBroadcast | null;
+  /** 非当前会话活动提示 getter；server 启动后才会返回真实函数。 */
+  sessionActivityBroadcast?: () => SessionActivityBroadcast | null;
 }
 
 export interface SetupChannelsResult {
@@ -92,6 +95,7 @@ export async function setupChannels(
     confirmationHub,
     cancelKeywords,
     sessionBroadcast,
+    sessionActivityBroadcast,
   } = options;
 
   const eventBus = createEventBus<ChannelEventMap>();
@@ -135,6 +139,7 @@ export async function setupChannels(
       confirmationHub,
       intentClassifier,
       sessionBroadcast,
+      sessionActivityBroadcast,
     });
   }
 

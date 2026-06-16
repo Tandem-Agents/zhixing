@@ -5,8 +5,8 @@
  *   - 资产层透传:skillStore / segmentDeps / decorateRunBus 按引用直达
  *     createAgentRuntime;extra tools 经 assembly 装配;main/ephemeral 工作区由
  *     createAgentRuntime 按配置解析,host 不持用户启动覆盖
- *   - 会话路径:scheduleOrigin 执行期从 RunContext 的 conversationId 派生
- *     (渠道会话解析出投递目标、本地对话与无上下文时 null),装配期不绑定对话
+ *   - 会话路径:scheduleOrigin 执行期从 RunContext 的 turnOrigin 派生
+ *     (渠道入口带投递目标、本地对话与无上下文时 null),装配期不绑定对话
  *   - ephemeral 路径:origin 恒 null
  *   - onRuntimeCreated:两条发放路径都被调用(杜绝"某入口漏注册")
  *
@@ -25,7 +25,7 @@ vi.mock("@zhixing/orchestrator/runtime", async (orig) => {
   return { ...actual, createAgentRuntime: createAgentRuntimeMock };
 });
 
-const { RuntimeHost, parseOriginFromConversationId } = await import(
+const { RuntimeHost, resolveScheduleOriginFromTurnOrigin } = await import(
   "../runtime-host.js"
 );
 const { runContextStorage } = await import("@zhixing/orchestrator/runtime");
@@ -70,19 +70,22 @@ beforeEach(() => {
   }));
 });
 
-describe("parseOriginFromConversationId", () => {
-  it("渠道会话 id 解析出投递目标;本地对话与异形 id 返回 null", () => {
-    expect(parseOriginFromConversationId("dm:feishu:ou_abc")).toEqual({
+describe("resolveScheduleOriginFromTurnOrigin", () => {
+  it("从 turnOrigin 读取投递目标;无来源目标返回 null", () => {
+    expect(
+      resolveScheduleOriginFromTurnOrigin({
+        channel: "feishu",
+        target: { channelId: "feishu", to: "ou_abc" },
+        triggeredBy: "ou_abc",
+      }),
+    ).toEqual({
       channelId: "feishu",
       to: "ou_abc",
     });
-    // to 段含冒号时整段保留
-    expect(parseOriginFromConversationId("dm:feishu:a:b")).toEqual({
-      channelId: "feishu",
-      to: "a:b",
-    });
-    expect(parseOriginFromConversationId("conv_123")).toBeNull();
-    expect(parseOriginFromConversationId("dm:feishu")).toBeNull();
+    expect(resolveScheduleOriginFromTurnOrigin(undefined)).toBeNull();
+    expect(
+      resolveScheduleOriginFromTurnOrigin({ channel: "cli" }),
+    ).toBeNull();
   });
 });
 
@@ -145,7 +148,7 @@ describe("资产层透传", () => {
 });
 
 describe("schedule origin 派生", () => {
-  it("会话路径:执行期从 RunContext 读 conversationId——渠道会话出 origin、本地对话 null、无上下文 null", async () => {
+  it("会话路径:执行期从 RunContext 读 turnOrigin——渠道入口出 origin、本地对话 null、无上下文 null", async () => {
     const { options, assembled } = makeHostOptions();
     const host = new RuntimeHost(options);
     await host.createConversationRuntime();
@@ -154,10 +157,19 @@ describe("schedule origin 派生", () => {
     // 无 RunContext(装配期 / 测试裸调)→ null
     expect(getOrigin()).toBeNull();
 
-    // 渠道会话 run 内 → 解析出投递目标
+    // 渠道入口 run 内 → 使用来源投递目标
     const bus = { on: vi.fn(), emit: vi.fn() } as never;
     runContextStorage.run(
-      { bus, lineage: "main", conversationId: "dm:feishu:ou_x" },
+      {
+        bus,
+        lineage: "main",
+        conversationId: "default",
+        turnOrigin: {
+          channel: "feishu",
+          target: { channelId: "feishu", to: "ou_x" },
+          triggeredBy: "ou_x",
+        },
+      },
       () => {
         expect(getOrigin()).toEqual({ channelId: "feishu", to: "ou_x" });
       },
@@ -165,14 +177,14 @@ describe("schedule origin 派生", () => {
 
     // 本地对话 run 内 → null
     runContextStorage.run(
-      { bus, lineage: "main", conversationId: "conv_local" },
+      { bus, lineage: "main", conversationId: "default" },
       () => {
         expect(getOrigin()).toBeNull();
       },
     );
   });
 
-  it("同一会话装配闭包服务不同对话——同实例在不同 RunContext 下派生不同 origin", async () => {
+  it("同一会话装配闭包服务不同来源——同实例在不同 RunContext 下派生不同 origin", async () => {
     const { options, assembled } = makeHostOptions();
     const host = new RuntimeHost(options);
     await host.createConversationRuntime();
@@ -180,11 +192,29 @@ describe("schedule origin 派生", () => {
     const bus = { on: vi.fn(), emit: vi.fn() } as never;
 
     runContextStorage.run(
-      { bus, lineage: "main", conversationId: "dm:feishu:ou_a" },
+      {
+        bus,
+        lineage: "main",
+        conversationId: "default",
+        turnOrigin: {
+          channel: "feishu",
+          target: { channelId: "feishu", to: "ou_a" },
+          triggeredBy: "ou_a",
+        },
+      },
       () => expect(getOrigin()).toEqual({ channelId: "feishu", to: "ou_a" }),
     );
     runContextStorage.run(
-      { bus, lineage: "main", conversationId: "dm:feishu:ou_b" },
+      {
+        bus,
+        lineage: "main",
+        conversationId: "default",
+        turnOrigin: {
+          channel: "feishu",
+          target: { channelId: "feishu", to: "ou_b" },
+          triggeredBy: "ou_b",
+        },
+      },
       () => expect(getOrigin()).toEqual({ channelId: "feishu", to: "ou_b" }),
     );
   });
@@ -198,7 +228,16 @@ describe("schedule origin 派生", () => {
 
     expect(getOrigin()).toBeNull();
     runContextStorage.run(
-      { bus, lineage: "main", conversationId: "dm:feishu:ou_x" },
+      {
+        bus,
+        lineage: "main",
+        conversationId: "default",
+        turnOrigin: {
+          channel: "feishu",
+          target: { channelId: "feishu", to: "ou_x" },
+          triggeredBy: "ou_x",
+        },
+      },
       () => {
         expect(getOrigin()).toBeNull();
       },

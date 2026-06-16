@@ -9,6 +9,7 @@ import {
   RpcClientError,
   type SessionDeltaPayload,
   type SessionChangedPayload,
+  type SessionActivityPayload,
 } from "@zhixing/server";
 import { RpcConversationFacade } from "../rpc-conversation-facade.js";
 import { makeFakeHostLink } from "./fake-host-link.js";
@@ -212,17 +213,19 @@ describe("RpcConversationFacade · 方法域", () => {
 });
 
 describe("RpcConversationFacade · 通知还原", () => {
-  it("onDelta / onComplete / onChanged / onModeSwitchIntent 收到原样 payload", () => {
+  it("onDelta / onComplete / onChanged / onActivity / onModeSwitchIntent 收到原样 payload", () => {
     const fake = makeFakeHostLink();
     const facade = new RpcConversationFacade(fake.link);
 
     const deltas: SessionDeltaPayload[] = [];
     const changes: SessionChangedPayload[] = [];
+    const activities: SessionActivityPayload[] = [];
     const completes: unknown[] = [];
     const intents: unknown[] = [];
     facade.onDelta((p) => deltas.push(p));
     facade.onComplete((p) => completes.push(p));
     facade.onChanged((p) => changes.push(p));
+    facade.onActivity((p) => activities.push(p));
     facade.onModeSwitchIntent((p) => intents.push(p));
 
     fake.notify("session.delta", {
@@ -242,6 +245,13 @@ describe("RpcConversationFacade · 通知还原", () => {
       change: "renamed",
       name: "新名",
     });
+    fake.notify("session.activity", {
+      conversationId: "conv-other",
+      source: "feishu",
+      lastActiveAt: "2026-01-01T00:00:00.000Z",
+      unreadHint: true,
+      listInvalidated: true,
+    });
     fake.notify("session.modeSwitchIntent", {
       conversationId: "conv-1",
       turnId: "turn-1",
@@ -255,6 +265,13 @@ describe("RpcConversationFacade · 通知还原", () => {
       conversationId: "conv-1",
       change: "renamed",
       name: "新名",
+    });
+    expect(activities[0]).toEqual({
+      conversationId: "conv-other",
+      source: "feishu",
+      lastActiveAt: "2026-01-01T00:00:00.000Z",
+      unreadHint: true,
+      listInvalidated: true,
     });
     expect(intents[0]).toEqual({
       conversationId: "conv-1",

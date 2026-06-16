@@ -9,12 +9,21 @@
 
 import type { RpcConnection } from "./connection.js";
 import type { ConversationManager } from "../runtime/conversation-manager.js";
+import {
+  SESSION_NOTIFICATIONS,
+  type SessionActivityPayload,
+} from "./session-wire.js";
 
 /** 组播一条通知给会话的全部 observer 连接 */
 export type SessionBroadcast = (
   conversationId: string,
   method: string,
   params: unknown,
+) => void;
+
+/** 工作台类接入面的非当前会话活动提示组播。 */
+export type SessionActivityBroadcast = (
+  payload: SessionActivityPayload,
 ) => void;
 
 export function createObserverBroadcast(deps: {
@@ -32,6 +41,22 @@ export function createObserverBroadcast(deps: {
       ) {
         conn.notify(method, params);
       }
+    }
+  };
+}
+
+export function createActivityBroadcast(deps: {
+  connections: ReadonlySet<RpcConnection>;
+  manager: ConversationManager;
+}): SessionActivityBroadcast {
+  return (payload) => {
+    const currentObservers = deps.manager.getObserverConnectionIds(
+      payload.conversationId,
+    );
+    for (const conn of deps.connections) {
+      if (!conn.authenticated || conn.closed) continue;
+      if (currentObservers.has(String(conn.id))) continue;
+      conn.notify(SESSION_NOTIFICATIONS.activity, payload);
     }
   };
 }

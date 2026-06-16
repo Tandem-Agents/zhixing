@@ -37,6 +37,7 @@ import type {
   InboundRouter,
   RunningServer,
   CleanupRegistry,
+  SessionActivityBroadcast,
   SessionBroadcast,
   TextConfirmationRenderer,
   RuntimeFactory,
@@ -78,6 +79,11 @@ export interface AssemblyContext {
    * 推送经此读最新值;装配期为 null,运行期必已就位。
    */
   readonly sessionBroadcastRef: { current: SessionBroadcast | null };
+  /**
+   * 工作台活动提示 lazy ref(runServer 后回填)。它只传非内容活动信号,不承担
+   * 当前对话的内容回显。
+   */
+  readonly sessionActivityBroadcastRef: { current: SessionActivityBroadcast | null };
   /**
    * 唯一清理出口（LIFO）。pre-server 接入面的 teardown 走 runServer 后的 shutdown-chain
    * 注册（时序约束见文件头）；仅 post-server 接入面在自己 setup 内注册到这里。

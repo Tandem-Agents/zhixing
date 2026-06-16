@@ -59,6 +59,7 @@ import {
   getDefaultLogPath,
   SESSION_NOTIFICATIONS,
   type SessionChangedPayload,
+  type SessionActivityBroadcast,
   type SessionBroadcast,
   type RunningServer,
   type ProcessLockPaths,
@@ -257,6 +258,9 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   const sessionBroadcastRef: { current: SessionBroadcast | null } = {
     current: null,
   };
+  const sessionActivityBroadcastRef: { current: SessionActivityBroadcast | null } = {
+    current: null,
+  };
   const runEventForwarder = createRunEventForwarder((conversationId, envelope) =>
     sessionBroadcastRef.current?.(conversationId, SESSION_NOTIFICATIONS.event, envelope),
   );
@@ -417,6 +421,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     conversationDirectory,
     journalStore,
     sessionBroadcastRef,
+    sessionActivityBroadcastRef,
     cleanup: registry,
   };
 
@@ -663,6 +668,8 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
 
   // 组播设施已由 startServer 回填到 serverCtx —— 接通带外事件转发的 lazy ref。
   sessionBroadcastRef.current = serverCtx.sessionBroadcast ?? null;
+  sessionActivityBroadcastRef.current =
+    serverCtx.sessionActivityBroadcast ?? null;
 
   // runServer resolve 后填 runner，供 post-server 接入面读 server.connections。
   ctx.runner = runner;

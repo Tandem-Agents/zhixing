@@ -81,7 +81,7 @@ describe("DefaultDeliveryRouter", () => {
       expect(router.resolve({}, c)).toEqual(feishu);
     });
 
-    it("skips trigger channel when disconnected", () => {
+    it("returns null when trigger channel is disconnected", () => {
       const c = ctx({
         channelStatus: new Map([
           ["feishu", "disconnected"],
@@ -93,10 +93,10 @@ describe("DefaultDeliveryRouter", () => {
           ["dingtalk", dingtalk],
         ]),
       });
-      expect(router.resolve({}, c)).toEqual(dingtalk);
+      expect(router.resolve({}, c)).toBeNull();
     });
 
-    it("skips trigger channel when no default target configured", () => {
+    it("returns null when trigger channel has no default target configured", () => {
       const c = ctx({
         channelStatus: new Map([
           ["feishu", "connected"],
@@ -105,14 +105,14 @@ describe("DefaultDeliveryRouter", () => {
         triggerChannel: "feishu",
         channelDefaults: new Map([["dingtalk", dingtalk]]),
       });
-      expect(router.resolve({}, c)).toEqual(dingtalk);
+      expect(router.resolve({}, c)).toBeNull();
     });
   });
 
-  // ── 3. 活跃度排序 ──
+  // ── 3. 不做隐式目标猜测 ──
 
-  describe("activity-based routing", () => {
-    it("picks most recently active channel", () => {
+  describe("no implicit target guessing", () => {
+    it("does not pick the most recently active channel", () => {
       const now = Date.now();
       const c = ctx({
         channelStatus: new Map([
@@ -128,10 +128,10 @@ describe("DefaultDeliveryRouter", () => {
           ["dingtalk", dingtalk],
         ]),
       });
-      expect(router.resolve({}, c)).toEqual(dingtalk);
+      expect(router.resolve({}, c)).toBeNull();
     });
 
-    it("prefers default channel as tiebreaker when no activity", () => {
+    it("does not use default channel without an explicit notification target", () => {
       const c = ctx({
         channelStatus: new Map([
           ["feishu", "connected"],
@@ -143,10 +143,10 @@ describe("DefaultDeliveryRouter", () => {
         ]),
         defaultChannel: "dingtalk",
       });
-      expect(router.resolve({}, c)).toEqual(dingtalk);
+      expect(router.resolve({}, c)).toBeNull();
     });
 
-    it("skips disconnected channels even if most active", () => {
+    it("does not fall through from disconnected active channel to another channel", () => {
       const now = Date.now();
       const c = ctx({
         channelStatus: new Map([
@@ -162,10 +162,10 @@ describe("DefaultDeliveryRouter", () => {
           ["dingtalk", dingtalk],
         ]),
       });
-      expect(router.resolve({}, c)).toEqual(dingtalk);
+      expect(router.resolve({}, c)).toBeNull();
     });
 
-    it("skips connected channels without default target", () => {
+    it("does not fall through to another channel when active channel has no default target", () => {
       const c = ctx({
         channelStatus: new Map([
           ["feishu", "connected"],
@@ -174,7 +174,7 @@ describe("DefaultDeliveryRouter", () => {
         channelActivity: new Map([["feishu", new Date()]]),
         channelDefaults: new Map([["dingtalk", dingtalk]]),
       });
-      expect(router.resolve({}, c)).toEqual(dingtalk);
+      expect(router.resolve({}, c)).toBeNull();
     });
   });
 
@@ -227,17 +227,17 @@ describe("DefaultDeliveryRouter", () => {
       defaultChannel: "slack",
     });
 
-    it("explicit > trigger > activity", () => {
+    it("explicit > trigger", () => {
       expect(router.resolve({ explicit: feishu }, fullCtx)).toEqual(feishu);
     });
 
-    it("trigger > activity (no explicit)", () => {
+    it("trigger wins when there is no explicit target", () => {
       expect(router.resolve({}, fullCtx)).toEqual(dingtalk);
     });
 
-    it("activity > default (no trigger)", () => {
+    it("no explicit target and no trigger returns null even with activity/default facts", () => {
       const noTrigger = { ...fullCtx, triggerChannel: undefined };
-      expect(router.resolve({}, noTrigger)).toEqual(slack);
+      expect(router.resolve({}, noTrigger)).toBeNull();
     });
   });
 });

@@ -22,6 +22,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type {
   AgentEventMap,
   EventBus,
+  TurnOrigin,
   WorkModeSwitchIntent,
 } from "@zhixing/core";
 
@@ -47,6 +48,11 @@ export interface RunContext {
    * graceful degrade），不要兜底编造。
    */
   conversationId?: string;
+  /**
+   * 当前 turn 的来源入口。对话身份不再承载外部 App 来源；需要回源投递、
+   * 远程确认或通知目标时从这里读取明确目标。
+   */
+  turnOrigin?: TurnOrigin;
 }
 
 export const runContextStorage = new AsyncLocalStorage<RunContext>();

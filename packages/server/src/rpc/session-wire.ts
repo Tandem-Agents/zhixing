@@ -10,6 +10,7 @@
  * - session.delta / session.complete —— 主通道(turn 产出流),经 observer 组播
  * - session.event —— 带外通道,信封类型与转发器内聚在 session-events.ts
  * - session.changed —— 会话级变更(run 外发生),经同一组播名册
+ * - session.activity —— 非当前对话的低噪活动提示,只给工作台类接入面
  * - session.modeSwitchIntent —— 可执行控制意图,仅定向发起连接
  */
 
@@ -65,6 +66,7 @@ export const SESSION_NOTIFICATIONS = {
   complete: "session.complete",
   event: "session.event",
   changed: "session.changed",
+  activity: "session.activity",
   modeSwitchIntent: "session.modeSwitchIntent",
 } as const;
 
@@ -108,6 +110,19 @@ export interface SessionModeSwitchIntentPayload {
   /** 产生该模式切换意图的 turn 身份 */
   turnId: string;
   intent: WorkModeSwitchIntent;
+}
+
+/**
+ * 非当前会话的活动提示。它不是内容流:不携带用户文本或助手回复,只用于让
+ * CLI 这类工作台刷新列表、标未读或显示低噪提示。当前正在观察该会话的连接
+ * 仍通过 delta / complete 收完整内容。
+ */
+export interface SessionActivityPayload {
+  conversationId: string;
+  source: string;
+  lastActiveAt: string;
+  unreadHint: boolean;
+  listInvalidated: boolean;
 }
 
 // ─── 方法结果 ───

@@ -14,7 +14,10 @@ import {
   type AgentResult,
 } from "@zhixing/core";
 import type { ConversationManager, ManagedSession } from "../runtime/conversation-manager.js";
-import type { SessionBroadcast } from "../rpc/session-broadcast.js";
+import type {
+  SessionActivityBroadcast,
+  SessionBroadcast,
+} from "../rpc/session-broadcast.js";
 import { projectSessionTurn } from "../rpc/session-turn-stream.js";
 import type { ConfirmationHub } from "../confirmation/hub.js";
 import {
@@ -80,6 +83,10 @@ export interface InboundRouterOptions {
    * 其 assistant 输出也要投影给正在旁观该会话的接入面。
    */
   sessionBroadcast?: () => SessionBroadcast | null | undefined;
+  /**
+   * 非当前会话活动提示。只面向工作台类接入面,不携带消息内容。
+   */
+  sessionActivityBroadcast?: () => SessionActivityBroadcast | null | undefined;
 }
 
 export class InboundRouter {
@@ -90,6 +97,10 @@ export class InboundRouter {
   private readonly confirmationHub?: ConfirmationHub;
   private readonly intentClassifier: IntentClassifier;
   private readonly sessionBroadcast?: () => SessionBroadcast | null | undefined;
+  private readonly sessionActivityBroadcast?: () =>
+    | SessionActivityBroadcast
+    | null
+    | undefined;
   /** graceful shutdown 期间拒新标记 —— `refuseNewMessages()` 置 false */
   private acceptingNew = true;
 
@@ -100,6 +111,7 @@ export class InboundRouter {
     this.outboxRegistry = options.outboxRegistry;
     this.confirmationHub = options.confirmationHub;
     this.sessionBroadcast = options.sessionBroadcast;
+    this.sessionActivityBroadcast = options.sessionActivityBroadcast;
     // 默认 classifier 注入 confirmation 词集让启动期互斥校验实际生效;
     // 显式注入的 classifier 自负其责(测试场景 / 关闭 cancel 能力等)。
     this.intentClassifier =
@@ -590,6 +602,13 @@ export class InboundRouter {
       }
       this.logger.info(`[释放] conv=${conversationId} busy=false`);
       this.conversations.setBusy(conversationId, false);
+      this.sessionActivityBroadcast?.()?.({
+        conversationId,
+        source: msg.channelId,
+        lastActiveAt: new Date().toISOString(),
+        unreadHint: true,
+        listInvalidated: true,
+      });
     }
   }
 }

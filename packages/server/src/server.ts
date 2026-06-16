@@ -27,7 +27,10 @@ import { RpcDispatcher } from "./rpc/dispatcher.js";
 import { HandlerRegistry } from "./rpc/handlers.js";
 import { buildBuiltinRegistry } from "./rpc/methods/index.js";
 import { createEventBridge, type DisposeBridge } from "./rpc/event-bridge.js";
-import { createObserverBroadcast } from "./rpc/session-broadcast.js";
+import {
+  createActivityBroadcast,
+  createObserverBroadcast,
+} from "./rpc/session-broadcast.js";
 
 export interface ZhixingServerInstance {
   /** 实际监听的端口（监听 0 时由 OS 分配） */
@@ -149,6 +152,10 @@ export async function startServer(opts: StartServerOptions): Promise<ZhixingServ
   if (ctx.conversations) {
     const manager = ctx.conversations;
     ctx.sessionBroadcast = createObserverBroadcast({ connections, manager });
+    ctx.sessionActivityBroadcast = createActivityBroadcast({
+      connections,
+      manager,
+    });
   }
 
   // 回填全连接广播(全局域变更通知,如 skill.changed)与连接计数(server.info)。

@@ -92,8 +92,8 @@ export interface ScheduledTask {
   schedule: TaskSchedule;
   action: TaskAction;
   delivery?: TaskDelivery;
-  /** 任务创建时捕获的来源上下文（channelId + userId），用于自动投递结果 */
-  origin?: { channelId: string; to: string };
+  /** 任务创建时捕获的来源目标，用于自动把通知投递回发起入口。 */
+  origin?: DeliveryTarget;
   /**
    * 创建此任务的 turn id。
    * 任务 fire 后其投递 entry 的 afterSlot 会被设为此值，

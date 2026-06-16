@@ -395,6 +395,9 @@ export async function startRepl(): Promise<void> {
         observedTurnPresenter.onObservedTurnDelta(turn),
       onObservedTurnComplete: (turn) =>
         observedTurnPresenter.onObservedTurnComplete(turn),
+      onActivity: () => {
+        cliWriter.notify(chalk.dim("  另一个入口有新动态，可用 /resume 查看。"));
+      },
     },
     initialActive,
   );

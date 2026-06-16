@@ -16,13 +16,13 @@ export interface RouteRequest {
 export interface RoutingContext {
   /** 触发来源通道（如任务由飞书消息触发，则为 "feishu"） */
   triggerChannel?: string;
-  /** 各通道最后活跃时间（用户最后发送消息的时间） */
+  /** 各通道最后活跃时间。路由器不据此猜测通知目标，仅保留为状态事实。 */
   channelActivity: Map<string, Date>;
   /** 各通道当前连接状态 */
   channelStatus: Map<string, ChannelState>;
-  /** 用户配置的默认投递通道 */
+  /** 用户配置的默认投递通道。自动通知不以此隐式群发或猜测。 */
   defaultChannel?: string;
-  /** 各通道默认投递目标（自动路由时用于填充 to 字段） */
+  /** 各通道默认投递目标。仅触发来源明确时用于回源补全。 */
   channelDefaults: Map<string, DeliveryTarget>;
 }
 
@@ -50,8 +50,8 @@ export class DefaultDeliveryRouter implements DeliveryRouter {
       if (target) return target;
     }
 
-    // 3. 按活跃度排序，选最近活跃的可达通道
-    return this.findMostActiveChannel(context);
+    // 3. 无明确目标 → 不投递。通知必须有来源或用户显式指定目标。
+    return null;
   }
 
   private isConnected(
@@ -69,27 +69,6 @@ export class DefaultDeliveryRouter implements DeliveryRouter {
     return context.channelDefaults.get(channelId) ?? null;
   }
 
-  private findMostActiveChannel(
-    context: RoutingContext,
-  ): DeliveryTarget | null {
-    const candidates = [...context.channelStatus.entries()]
-      .filter(([, state]) => state === "connected")
-      .map(([id]) => id)
-      .filter((id) => context.channelDefaults.has(id));
-
-    if (candidates.length === 0) return null;
-
-    candidates.sort((a, b) => {
-      const aTime = context.channelActivity.get(a)?.getTime() ?? 0;
-      const bTime = context.channelActivity.get(b)?.getTime() ?? 0;
-      if (bTime !== aTime) return bTime - aTime;
-      if (a === context.defaultChannel) return -1;
-      if (b === context.defaultChannel) return 1;
-      return 0;
-    });
-
-    return context.channelDefaults.get(candidates[0]!)!;
-  }
 }
 
 // ─── 工具函数 ───

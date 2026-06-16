@@ -2,19 +2,20 @@ import {
   type ChannelBindingPolicy,
   type InboundMessage,
   DEFAULT_BINDING_POLICY,
+  DEFAULT_CONVERSATION_ID,
 } from "@zhixing/core";
 
 /**
  * 根据入站消息和归组策略，确定目标 conversationId。
  *
- * 归组规则（server-gateway.md §6.2）：
+ * 归组规则：
  * - thread → per-thread：{channelId}:thread:{threadId}
  * - group  → per-group：{channelId}:group:{groupId}
  *          → per-user-in-group：{channelId}:group:{groupId}:{from}
- * - dm     → per-user：dm:{channelId}:{from}
+ * - dm     → 用户主对话：default
  *
- * DM 归组当前带 channelId 前缀。跨通道会话漫游需要用户身份联邦，
- * 届时可去掉 channelId 前缀实现漫游（不改签名，只改映射逻辑）。
+ * 私聊来源是回复和权限边界，不是对话边界。这样用户从 CLI、飞书、
+ * 微信等入口进入时，仍感觉自己一直在和同一个知行说话。
  */
 export function resolveConversationId(
   msg: InboundMessage,
@@ -33,5 +34,5 @@ export function resolveConversationId(
     return `${msg.channelId}:group:${msg.groupId}`;
   }
 
-  return `dm:${msg.channelId}:${msg.from}`;
+  return DEFAULT_CONVERSATION_ID;
 }

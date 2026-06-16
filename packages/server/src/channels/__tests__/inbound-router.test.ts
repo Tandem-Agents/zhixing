@@ -3,7 +3,10 @@ import { InboundRouter } from "../inbound-router.js";
 import { ConversationManager } from "../../runtime/conversation-manager.js";
 import { ConfirmationHub } from "../../confirmation/hub.js";
 import { SESSION_NOTIFICATIONS } from "../../rpc/session-wire.js";
-import type { SessionBroadcast } from "../../rpc/session-broadcast.js";
+import type {
+  SessionActivityBroadcast,
+  SessionBroadcast,
+} from "../../rpc/session-broadcast.js";
 import {
   ConfirmationBroker,
   createEventBus,
@@ -14,6 +17,7 @@ import {
   type DeliveryResult,
   type InboundMessage,
   ChannelRegistry,
+  DEFAULT_CONVERSATION_ID,
 } from "@zhixing/core";
 import type { SessionRuntime, RuntimeFactory } from "../../runtime/types.js";
 import type { AgentYield, Message, RunResult } from "@zhixing/core";
@@ -109,6 +113,7 @@ describe("InboundRouter", () => {
     adapter?: ChannelAdapter;
     runtime?: SessionRuntime;
     sessionBroadcast?: SessionBroadcast;
+    sessionActivityBroadcast?: SessionActivityBroadcast;
   }) {
     const adapter = options?.adapter ?? createMockAdapter();
     const factory = createMockRuntimeFactory(options?.runtime);
@@ -130,6 +135,9 @@ describe("InboundRouter", () => {
       logger,
       sessionBroadcast: options?.sessionBroadcast
         ? () => options.sessionBroadcast
+        : undefined,
+      sessionActivityBroadcast: options?.sessionActivityBroadcast
+        ? () => options.sessionActivityBroadcast
         : undefined,
     });
 
@@ -172,7 +180,11 @@ describe("InboundRouter", () => {
 
   it("projects channel turn output to session observers and keeps channel reply", async () => {
     const sessionBroadcast = vi.fn<SessionBroadcast>();
-    const { adapter, router } = setup({ sessionBroadcast });
+    const sessionActivityBroadcast = vi.fn<SessionActivityBroadcast>();
+    const { adapter, router } = setup({
+      sessionBroadcast,
+      sessionActivityBroadcast,
+    });
 
     await router.handleMessage(dmMessage());
 
@@ -188,16 +200,23 @@ describe("InboundRouter", () => {
     );
 
     expect(deltaCall).toBeDefined();
-    expect(deltaCall![0]).toBe("dm:test-ch:user-1");
+    expect(deltaCall![0]).toBe(DEFAULT_CONVERSATION_ID);
     expect(deltaCall![2]).toMatchObject({
-      conversationId: "dm:test-ch:user-1",
+      conversationId: DEFAULT_CONVERSATION_ID,
       delta: { type: "text_delta", text: "Hello from agent" },
     });
     expect(completeCall).toBeDefined();
-    expect(completeCall![0]).toBe("dm:test-ch:user-1");
+    expect(completeCall![0]).toBe(DEFAULT_CONVERSATION_ID);
     expect(completeCall![2]).toMatchObject({
-      conversationId: "dm:test-ch:user-1",
+      conversationId: DEFAULT_CONVERSATION_ID,
       result: { reason: "completed" },
+    });
+    expect(sessionActivityBroadcast).toHaveBeenCalledWith({
+      conversationId: DEFAULT_CONVERSATION_ID,
+      source: "test-ch",
+      lastActiveAt: expect.any(String),
+      unreadHint: true,
+      listInvalidated: true,
     });
 
     const [, content] = (adapter.send as ReturnType<typeof vi.fn>).mock.calls[0];
@@ -211,7 +230,7 @@ describe("InboundRouter", () => {
     await router.handleMessage(msg);
 
     await vi.waitFor(() => {
-      expect(conversations.has("dm:test-ch:user-1")).toBe(true);
+      expect(conversations.has(DEFAULT_CONVERSATION_ID)).toBe(true);
     });
   });
 
@@ -521,8 +540,8 @@ describe("InboundRouter", () => {
       const { adapter, router, conversations, brokers } = setupWithHub();
 
       // 预先创建 conversation + pending request
-      await conversations.getOrCreate("dm:test-ch:user-1");
-      const broker = brokers.get("dm:test-ch:user-1")!;
+      await conversations.getOrCreate(DEFAULT_CONVERSATION_ID);
+      const broker = brokers.get(DEFAULT_CONVERSATION_ID)!;
       broker.onRequest(() => {}); // 挂占位避免走非交互兜底
 
       const now = Date.now();
@@ -570,8 +589,8 @@ describe("InboundRouter", () => {
     it("有 pending + 拒绝词 → broker.resolve(deny) + 回执", async () => {
       const { adapter, router, conversations, brokers } = setupWithHub();
 
-      await conversations.getOrCreate("dm:test-ch:user-1");
-      const broker = brokers.get("dm:test-ch:user-1")!;
+      await conversations.getOrCreate(DEFAULT_CONVERSATION_ID);
+      const broker = brokers.get(DEFAULT_CONVERSATION_ID)!;
       broker.onRequest(() => {});
 
       const now = Date.now();
@@ -604,8 +623,8 @@ describe("InboundRouter", () => {
     it("有 pending + 自由文本 → broker.resolve(deny, reason=原文) + 埋点 matched-reason", async () => {
       const { adapter, router, conversations, brokers } = setupWithHub();
 
-      await conversations.getOrCreate("dm:test-ch:user-1");
-      const broker = brokers.get("dm:test-ch:user-1")!;
+      await conversations.getOrCreate(DEFAULT_CONVERSATION_ID);
+      const broker = brokers.get(DEFAULT_CONVERSATION_ID)!;
       broker.onRequest(() => {});
 
       const now = Date.now();
@@ -653,8 +672,8 @@ describe("InboundRouter", () => {
     it("空消息不拦截（正常进入 agent 流程）", async () => {
       const { adapter, router, conversations, brokers } = setupWithHub();
 
-      await conversations.getOrCreate("dm:test-ch:user-1");
-      const broker = brokers.get("dm:test-ch:user-1")!;
+      await conversations.getOrCreate(DEFAULT_CONVERSATION_ID);
+      const broker = brokers.get(DEFAULT_CONVERSATION_ID)!;
       broker.onRequest(() => {});
 
       const now = Date.now();
@@ -692,25 +711,21 @@ describe("InboundRouter", () => {
       await brokerPromise;
     });
 
-    it("多 broker 隔离：B 用户回复不影响 A 的 pending", async () => {
+    it("DM 来源不拆 broker：私聊回复命中用户主对话 pending", async () => {
       const { adapter, router, conversations, brokers } = setupWithHub();
 
-      // A / B 两个不同 conversation
-      await conversations.getOrCreate("dm:test-ch:user-A");
-      await conversations.getOrCreate("dm:test-ch:user-B");
-      const brokerA = brokers.get("dm:test-ch:user-A")!;
-      const brokerB = brokers.get("dm:test-ch:user-B")!;
-      brokerA.onRequest(() => {});
-      brokerB.onRequest(() => {});
+      await conversations.getOrCreate(DEFAULT_CONVERSATION_ID);
+      const broker = brokers.get(DEFAULT_CONVERSATION_ID)!;
+      broker.onRequest(() => {});
 
       const now = Date.now();
-      const reqA: ConfirmationRequest = {
-        id: "req-A",
+      const req: ConfirmationRequest = {
+        id: "req-default",
         tool: "bash",
         toolInput: {},
         workingDirectory: "/tmp",
         display: {
-          title: "Bash A",
+          title: "Bash",
           body: { kind: "bash", command: "ls", commandPreview: "ls" },
           cwd: "/tmp",
         },
@@ -720,25 +735,21 @@ describe("InboundRouter", () => {
         createdAt: now,
         expiresAt: now + 60_000,
       };
-      const promiseA = brokerA.requestConfirmation(reqA);
+      const promise = broker.requestConfirmation(req);
 
-      // B 回复"好"——不应影响 A 的 pending
+      // 私聊来源不再制造独立 conversation，回复进入用户主对话 broker。
       await router.handleMessage(dmMessage("test-ch", "user-B", "好"));
 
-      // A 的 pending 仍在
-      expect(brokerA.listPending()).toHaveLength(1);
-      expect(brokerB.listPending()).toHaveLength(0);
-
-      // 清场
-      brokerA.resolve("req-A", { kind: "allow-once" });
-      await promiseA;
+      expect(await promise).toEqual({ kind: "allow-once" });
+      expect(broker.listPending()).toHaveLength(0);
+      expect(adapter.send).toHaveBeenCalled();
     });
 
     it("broker 已超时/已在其他端 resolve → 埋点 stale + 回执'已被处理'", async () => {
       const { adapter, router, conversations, brokers } = setupWithHub();
 
-      await conversations.getOrCreate("dm:test-ch:user-1");
-      const broker = brokers.get("dm:test-ch:user-1")!;
+      await conversations.getOrCreate(DEFAULT_CONVERSATION_ID);
+      const broker = brokers.get(DEFAULT_CONVERSATION_ID)!;
       broker.onRequest(() => {});
 
       const now = Date.now();
@@ -908,8 +919,8 @@ describe("InboundRouter", () => {
     it("turnOrigin 缺失时跳过身份校验（兼容旧 pending）", async () => {
       const { router, conversations, brokers } = setupWithHub();
 
-      await conversations.getOrCreate("dm:test-ch:user-1");
-      const broker = brokers.get("dm:test-ch:user-1")!;
+      await conversations.getOrCreate(DEFAULT_CONVERSATION_ID);
+      const broker = brokers.get(DEFAULT_CONVERSATION_ID)!;
       broker.onRequest(() => {});
 
       const now = Date.now();
@@ -972,7 +983,7 @@ describe("InboundRouter", () => {
     it("/cancel 关键词 → conversations.abort 调用,reason 是 user-cancel{rpc}", async () => {
       const { adapter, conversations, router } = setup();
       // 先建一个 conversation 让 abort 有目标
-      await conversations.getOrCreate("dm:test-ch:user-1");
+      await conversations.getOrCreate(DEFAULT_CONVERSATION_ID);
 
       const abortSpy = vi.spyOn(conversations, "abort");
 
@@ -980,7 +991,7 @@ describe("InboundRouter", () => {
 
       expect(abortSpy).toHaveBeenCalledTimes(1);
       const [convId, reason] = abortSpy.mock.calls[0]!;
-      expect(convId).toBe("dm:test-ch:user-1");
+      expect(convId).toBe(DEFAULT_CONVERSATION_ID);
       expect(reason?.kind).toBe("user-cancel");
       const r = reason as { kind: "user-cancel"; source: string; pressedAt: number };
       expect(r.source).toBe("rpc");
@@ -995,7 +1006,7 @@ describe("InboundRouter", () => {
 
     it("中文 cancel 关键词同样触发", async () => {
       const { conversations, router } = setup();
-      await conversations.getOrCreate("dm:test-ch:user-1");
+      await conversations.getOrCreate(DEFAULT_CONVERSATION_ID);
       const abortSpy = vi.spyOn(conversations, "abort");
 
       await router.handleMessage(dmMessage("test-ch", "user-1", "中止"));
@@ -1020,13 +1031,13 @@ describe("InboundRouter", () => {
 
     it("有 pending 但无 in-flight → 反馈'已取消队列中的 N 条'", async () => {
       const { adapter, conversations, router } = setup();
-      await conversations.getOrCreate("dm:test-ch:user-1");
-      conversations.setBusy("dm:test-ch:user-1", true);
-      conversations.enqueue("dm:test-ch:user-1", {
+      await conversations.getOrCreate(DEFAULT_CONVERSATION_ID);
+      conversations.setBusy(DEFAULT_CONVERSATION_ID, true);
+      conversations.enqueue(DEFAULT_CONVERSATION_ID, {
         execute: async () => {},
         cancel: () => {},
       });
-      conversations.enqueue("dm:test-ch:user-1", {
+      conversations.enqueue(DEFAULT_CONVERSATION_ID, {
         execute: async () => {},
         cancel: () => {},
       });
@@ -1051,7 +1062,7 @@ describe("InboundRouter", () => {
           abort: vi.fn(() => true), // mock in-flight 存在,abort 返 true
         },
       });
-      await conversations.getOrCreate("dm:test-ch:user-1");
+      await conversations.getOrCreate(DEFAULT_CONVERSATION_ID);
 
       await router.handleMessage(dmMessage("test-ch", "user-1", "/cancel"));
 

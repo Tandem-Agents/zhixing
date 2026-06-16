@@ -28,6 +28,7 @@ import type {
   SessionCompactResult,
   SessionContextBudgetResult,
   SessionChangedPayload,
+  SessionActivityPayload,
   SessionConversationEntry,
   SessionUsageResult,
   WireAgentResult,
@@ -75,6 +76,8 @@ export interface ConversationControllerOptions {
   onObservedTurnDelta?: (turn: ObservedTurnNotification) => void;
   /** 同一当前对话里,非本接入面发起的 turn 已落定。 */
   onObservedTurnComplete?: (turn: ObservedTurnNotification) => void;
+  /** 非当前对话发生外部活动；只用于工作台提示或列表刷新，不携带内容。 */
+  onActivity?: (activity: SessionActivityPayload) => void;
 }
 
 export interface InitialConversationSelection {
@@ -192,6 +195,10 @@ export class ConversationController {
           this.localTurnsByConversation.delete(p.conversationId);
         }
         waiter({ result: p.result, modeSwitchIntent: intent });
+      }),
+      opts.conversation.onActivity((p) => {
+        if (p.conversationId === this.active.conversationId) return;
+        this.opts.onActivity?.(p);
       }),
     ];
   }

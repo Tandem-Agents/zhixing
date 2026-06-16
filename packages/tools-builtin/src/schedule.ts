@@ -20,6 +20,7 @@
 import type { ToolDefinition, ToolExecutionContext, ToolResult } from "@zhixing/core";
 import { isInternal } from "@zhixing/core";
 import type {
+  DeliveryTarget,
   SchedulerFacade,
   ScheduledTask,
   TaskSchedule,
@@ -52,10 +53,7 @@ import type {
  * CLI 中 session/scheduler 的循环初始化依赖：
  * tool 在 session 创建时注入，scheduler 在 session 之后创建。
  */
-export interface ScheduleToolOrigin {
-  channelId: string;
-  to: string;
-}
+export type ScheduleToolOrigin = DeliveryTarget;
 
 export function createScheduleTool(
   getFacade: () => SchedulerFacade,

@@ -1,6 +1,10 @@
 import { describe, it, expect } from "vitest";
 import { resolveConversationId } from "../conversation-binder.js";
-import type { ChannelBindingPolicy, InboundMessage } from "@zhixing/core";
+import {
+  DEFAULT_CONVERSATION_ID,
+  type ChannelBindingPolicy,
+  type InboundMessage,
+} from "@zhixing/core";
 
 function dm(channelId: string, from: string): InboundMessage {
   return { channelId, from, text: "hi", chatType: "dm" };
@@ -15,22 +19,22 @@ function thread(channelId: string, from: string, threadId: string): InboundMessa
 }
 
 describe("resolveConversationId", () => {
-  describe("DM (per-user)", () => {
-    it("uses channel + user for DM", () => {
+  describe("DM (user main conversation)", () => {
+    it("uses the user's main conversation for DM", () => {
       const id = resolveConversationId(dm("dingtalk", "user-1"));
-      expect(id).toBe("dm:dingtalk:user-1");
+      expect(id).toBe(DEFAULT_CONVERSATION_ID);
     });
 
-    it("different users get different conversations", () => {
+    it("different DM senders share the same personal conversation", () => {
       const a = resolveConversationId(dm("dingtalk", "user-1"));
       const b = resolveConversationId(dm("dingtalk", "user-2"));
-      expect(a).not.toBe(b);
+      expect(a).toBe(b);
     });
 
-    it("same user on different channels get different conversations (no roaming yet)", () => {
+    it("same DM sender on different channels still maps to the same conversation", () => {
       const a = resolveConversationId(dm("dingtalk", "user-1"));
       const b = resolveConversationId(dm("feishu", "user-1"));
-      expect(a).not.toBe(b);
+      expect(a).toBe(b);
     });
   });
 
@@ -49,9 +53,7 @@ describe("resolveConversationId", () => {
 
   describe("group (per-user-in-group)", () => {
     const policy: ChannelBindingPolicy = {
-      dm: "per-user",
       group: "per-user-in-group",
-      thread: "per-thread",
     };
 
     it("uses channel + groupId + user", () => {
@@ -83,13 +85,13 @@ describe("resolveConversationId", () => {
     it("group without groupId falls back to DM", () => {
       const msg: InboundMessage = { channelId: "ch", from: "u", text: "hi", chatType: "group" };
       const id = resolveConversationId(msg);
-      expect(id).toBe("dm:ch:u");
+      expect(id).toBe(DEFAULT_CONVERSATION_ID);
     });
 
     it("thread without threadId falls back to DM", () => {
       const msg: InboundMessage = { channelId: "ch", from: "u", text: "hi", chatType: "thread" };
       const id = resolveConversationId(msg);
-      expect(id).toBe("dm:ch:u");
+      expect(id).toBe(DEFAULT_CONVERSATION_ID);
     });
   });
 });

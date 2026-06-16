@@ -497,7 +497,7 @@ export class Scheduler {
     }
 
     // 1. 显式配置 → 用它
-    let target: { channelId: string; to: string } | null = null;
+    let target: { channelId: string; to: string; threadId?: string } | null = null;
     if (task.delivery?.kind === "channel") {
       target = { channelId: task.delivery.channel, to: task.delivery.to };
     }

@@ -85,9 +85,13 @@ export interface ChannelStatus {
 // ─── 对话归组策略 ───
 
 export interface ChannelBindingPolicy {
-  dm: "per-user";
+  /**
+   * 群聊是否按群共享一条会话,或按群内成员拆分。
+   *
+   * 私聊固定进入用户主对话;thread 固定按 threadId 归组。它们不是 adapter
+   * 可选择的策略,避免接入面把来源误当成对话边界。
+   */
   group: "per-group" | "per-user-in-group";
-  thread: "per-thread";
 }
 
 // ─── ChannelContext（Server 注入给适配器的上下文） ───
@@ -138,7 +142,5 @@ export interface ChannelAdapter {
 // ─── 默认归组策略 ───
 
 export const DEFAULT_BINDING_POLICY: ChannelBindingPolicy = {
-  dm: "per-user",
   group: "per-group",
-  thread: "per-thread",
 };

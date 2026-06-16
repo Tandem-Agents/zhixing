@@ -1411,6 +1411,7 @@ export async function createAgentRuntime(
             bus: eventBus,
             lineage: "main",
             conversationId: params.conversationId,
+            turnOrigin: params.turnContext?.turnOrigin,
           },
           async (): Promise<RunResult> => {
             return await runMainLoop();
