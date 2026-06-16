@@ -5,7 +5,7 @@
  * 1. resolveSelfExec 拿 { command, args, env }
  * 2. 打开日志文件 fd（append）
  * 3. spawn + detach + unref + 父进程立即 close(fd)
- * 4. startupHandshake 5s 轮询：PID 文件 + .ready marker + /api/health 200（三项皆需）
+ * 4. startupHandshake 轮询：PID 文件 + .ready marker + /api/health 200（三项皆需）
  * 5. 成功 → 打印横幅
  *    失败 → 打印日志尾部 20 行 → 调用方 exit(1)
  *
@@ -62,6 +62,12 @@ export interface SpawnDaemonDeps {
 
 export interface SpawnDaemonResult {
   ok: boolean;
+  /**
+   * ready: 已发现可连接服务。
+   * starting: 本次 child 没有明确失败，但恢复窗口内尚未发现可连接服务。
+   * failed: 本次 child 已失败，且没有其它健康 owner 可接管。
+   */
+  status: "ready" | "starting" | "failed";
   pid?: number;
   port?: number;
   /** 失败原因（仅 ok=false 时填）*/
@@ -91,7 +97,7 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<SpawnDaemon
   } catch (err) {
     if (err instanceof UnsupportedSelfExecError) {
       con.error(chalk.red(err.message));
-      return { ok: false, reason: err.message, logPath };
+      return { ok: false, status: "failed", reason: err.message, logPath };
     }
     throw err;
   }
@@ -110,6 +116,12 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<SpawnDaemon
   const spawnOpts = buildDaemonSpawnOptions(logFd, execArgs.env);
   const spawnFn = deps.spawnFn ?? spawn;
   const child = spawnFn(execArgs.command, execArgs.args, spawnOpts);
+  let childExit: ChildExit | null = null;
+  if (typeof child.once === "function") {
+    child.once("exit", (code, signal) => {
+      childExit = { code, signal };
+    });
+  }
   // child.unref() 允许父进程退出时不等子进程
   try {
     child.unref();
@@ -124,23 +136,26 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<SpawnDaemon
     timeoutMs: handshakeTimeoutMs,
     pollIntervalMs,
     deps,
+    spawnedPid: child.pid,
+    getChildExit: () => childExit,
   });
 
   if (handshake.ok) {
     printSuccessBanner(handshake.pid!, handshake.port!, logPath, con);
-    return { ok: true, pid: handshake.pid, port: handshake.port, logPath };
+    return { ok: true, status: "ready", pid: handshake.pid, port: handshake.port, logPath };
   }
 
   // 5. 失败路径
-  con.error(chalk.red(`核心宿主启动未完成: ${handshake.reason ?? "unknown"}`));
+  con.error(chalk.red(`知行服务启动未完成: ${handshake.reason ?? "unknown"}`));
   await printLogTail(logPath, 20, { readFileFn: deps.readFileFn, console: con });
-  return { ok: false, reason: handshake.reason, logPath };
+  return { ok: false, status: handshake.status ?? "failed", reason: handshake.reason, logPath };
 }
 
 // ─── handshake ───
 
 interface HandshakeResult {
   ok: boolean;
+  status?: SpawnDaemonResult["status"];
   pid?: number;
   port?: number;
   reason?: string;
@@ -150,7 +165,16 @@ interface HandshakeOpts {
   timeoutMs: number;
   pollIntervalMs: number;
   deps: SpawnDaemonDeps;
+  spawnedPid?: number;
+  getChildExit?: () => ChildExit | null;
 }
+
+interface ChildExit {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+}
+
+const CHILD_EXIT_DISCOVERY_GRACE_MS = 1000;
 
 async function startupHandshake(opts: HandshakeOpts): Promise<HandshakeResult> {
   const clock = opts.deps.clock ?? Date.now;
@@ -167,6 +191,7 @@ async function startupHandshake(opts: HandshakeOpts): Promise<HandshakeResult> {
 
   let lastLock: PidFileContents | null = null;
   let sawReadyMarker = false;
+  let childExitSeenAt: number | null = null;
 
   while (clock() < deadline) {
     const lock = await safeReadLock(readLockFn);
@@ -179,37 +204,83 @@ async function startupHandshake(opts: HandshakeOpts): Promise<HandshakeResult> {
         if (marker) {
           const healthOk = await checkHealth(lock, httpGet, 500);
           if (healthOk) {
-            return { ok: true, pid: lock.pid, port: lock.port };
+            return { ok: true, status: "ready", pid: lock.pid, port: lock.port };
           }
         }
       }
+    }
+    const childExit = opts.getChildExit?.() ?? null;
+    if (childExit && childExitSeenAt === null) {
+      childExitSeenAt = clock();
+    }
+    if (
+      childExit &&
+      childExitSeenAt !== null &&
+      clock() - childExitSeenAt >= CHILD_EXIT_DISCOVERY_GRACE_MS
+    ) {
+      return {
+        ok: false,
+        status: "failed",
+        reason: formatChildExitReason(opts.spawnedPid, childExit),
+      };
     }
     await sleep(opts.pollIntervalMs);
   }
 
   // 超时——给出具体原因
+  const childExit = opts.getChildExit?.() ?? null;
+  if (childExit) {
+    return {
+      ok: false,
+      status: "failed",
+      reason: formatChildExitReason(opts.spawnedPid, childExit),
+    };
+  }
   if (!lastLock) {
     return {
       ok: false,
-      reason: "核心宿主在等待时间内仍未进入可发现状态",
+      status: "starting",
+      reason: "知行服务仍在启动，暂未进入可连接状态",
     };
   }
   if (!isAlive(lastLock.pid)) {
+    if (opts.spawnedPid !== undefined && lastLock.pid !== opts.spawnedPid) {
+      return {
+        ok: false,
+        status: "starting",
+        reason: "旧的服务状态已失效，新的知行服务仍在启动",
+      };
+    }
     return {
       ok: false,
-      reason: `核心宿主进程 ${lastLock.pid} 在就绪前退出`,
+      status: "failed",
+      reason: `知行服务进程 ${lastLock.pid} 已退出，且没有发现可用服务`,
     };
   }
   if (!sawReadyMarker) {
     return {
       ok: false,
-      reason: "核心宿主已启动但尚未完成就绪标记",
+      status: "starting",
+      reason: "知行服务仍在启动，暂未进入可连接状态",
     };
   }
   return {
     ok: false,
-    reason: "核心宿主健康检查在等待时间内仍未通过",
+    status: "starting",
+    reason: "知行服务正在启动，但暂时还不能连接",
   };
+}
+
+function formatChildExitReason(
+  spawnedPid: number | undefined,
+  exit: ChildExit,
+): string {
+  const pid = spawnedPid === undefined ? "" : ` ${spawnedPid}`;
+  const detail =
+    exit.signal !== null
+      ? `信号 ${exit.signal}`
+      : `退出码 ${exit.code ?? "unknown"}`;
+  return `知行服务进程${pid}已退出（${detail}），且没有发现可用服务`;
 }
 
 async function safeReadLock(fn: typeof readLock): Promise<PidFileContents | null> {

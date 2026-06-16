@@ -40,7 +40,8 @@ describe("read-only conversation browser", () => {
     });
 
     expect(result).toEqual({ conversations: 1, renderedRuns: 1 });
-    expect(lines.join("\n")).toContain("核心宿主不可用");
+    expect(lines.join("\n")).toContain("知行暂时无法启动");
+    expect(lines.join("\n")).not.toContain("host down");
     expect(lines.join("\n")).toContain("最近对话 (chat-b)");
     expect(lines.join("\n")).toContain("用户问题");
     expect(lines.join("\n")).toContain("AI 回复");

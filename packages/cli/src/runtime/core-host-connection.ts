@@ -33,11 +33,13 @@ import { runStopCommand } from "../serve/stop.js";
 import { ZHIXING_CLI_VERSION } from "../version.js";
 
 const DEFAULT_VERSION_RECHECK_INTERVAL_MS = 15_000;
+const DEFAULT_STARTUP_RECOVERY_TIMEOUT_MS = 30_000;
+const DEFAULT_STARTUP_RECOVERY_POLL_MS = 250;
 
 /** ensure 拉起 / 连接核心宿主失败——cli 捕获后给友好提示，不向用户倒原始日志。 */
 export class CoreHostUnavailableError extends Error {
   constructor(reason: string) {
-    super(`核心宿主当前不可用：${reason}`);
+    super(`知行暂时不可用：${reason}`);
     this.name = "CoreHostUnavailableError";
   }
 }
@@ -46,6 +48,7 @@ type NotificationHandler = (params: unknown) => void;
 type LifecycleHandler = (notice: CoreHostLifecycleNotice) => void | Promise<void>;
 
 export type CoreHostLifecycleNotice =
+  | { kind: "starting" }
   | { kind: "reconnected"; reason: "connection-closed" | "manual-reconnect" }
   | {
       kind: "host-replaced";
@@ -103,7 +106,7 @@ export interface CoreHostConnectionDeps {
   /** 发现已在跑的宿主。 */
   discover: () => Promise<ServerEndpoint>;
   /** 拉起核心宿主，返回是否成功。 */
-  spawn: () => Promise<{ ok: boolean; reason?: string }>;
+  spawn: () => Promise<{ ok: boolean; reason?: string; recoverable?: boolean }>;
   /** 停止 PID 存活但连接不可用的宿主。默认复用 serve stop 的优雅/强制清理链。 */
   stopUnresponsiveHost?: (
     endpoint: ServerEndpoint,
@@ -115,6 +118,9 @@ export interface CoreHostConnectionDeps {
   clientVersion?: string;
   /** build 版本待更新时的后台再评估间隔。 */
   versionRecheckIntervalMs?: number;
+  /** 自动拉起后等待可连接服务的恢复窗口。 */
+  startupRecoveryTimeoutMs?: number;
+  startupRecoveryPollMs?: number;
   /** 测试 / UI 注入：连接生命周期提示。 */
   onLifecycleNotice?: LifecycleHandler;
   /** 测试注入：时间源。 */
@@ -139,7 +145,11 @@ export function defaultCoreHostConnectionDeps(): CoreHostConnectionDeps {
         forwardedArgs: ["serve"],
         deps: { console: silent },
       });
-      return { ok: result.ok, reason: result.reason };
+      return {
+        ok: result.ok,
+        reason: result.reason,
+        recoverable: result.status === "starting",
+      };
     },
     stopUnresponsiveHost: async (endpoint) => {
       const silent = { log: () => {}, warn: () => {}, error: () => {} };
@@ -378,41 +388,19 @@ export class CoreHostConnection implements CoreHostLink {
       });
     }
 
-    const spawned = await this.deps.spawn();
-    if (!spawned.ok) {
-      const concurrentReplacement =
-        await this.discoverReplacementEndpoint(staleEndpoint);
-      if (concurrentReplacement) {
-        const established = await this.connectEndpoint(concurrentReplacement, {
-          replaceUnresponsive: false,
-          replaceVersionMismatch: true,
-        });
-        return withLifecycleNotice(established, {
-          kind: "host-replaced",
-          reason: "unresponsive",
-        });
-      }
-      throw new CoreHostUnavailableError(
-        `旧核心宿主已清理，但新宿主拉起失败：${spawned.reason ?? "未知原因"}`,
-      );
-    }
-
-    try {
-      const endpoint = await this.deps.discover();
-      const established = await this.connectEndpoint(endpoint, {
-        replaceUnresponsive: false,
-        replaceVersionMismatch: true,
-      });
-      return withLifecycleNotice(established, {
-        kind: "host-replaced",
-        reason: "unresponsive",
-      });
-    } catch (err) {
-      const reason = err instanceof Error ? err.message : String(err);
-      throw new CoreHostUnavailableError(
-        `核心宿主已重拉但仍不可连接：${reason}`,
-      );
-    }
+    const endpoint = await this.spawnAndDiscoverEndpoint({
+      acceptEndpoint: (candidate) => !isSameEndpoint(candidate, staleEndpoint),
+      unableToStartReason: "旧的知行服务已清理，但新的知行服务启动失败",
+      unableToConnectReason: "旧的知行服务已清理，但新的知行服务暂时无法连接",
+    });
+    const established = await this.connectEndpoint(endpoint, {
+      replaceUnresponsive: false,
+      replaceVersionMismatch: true,
+    });
+    return withLifecycleNotice(established, {
+      kind: "host-replaced",
+      reason: "unresponsive",
+    });
   }
 
   private async handleVersionMismatch(
@@ -465,14 +453,11 @@ export class CoreHostConnection implements CoreHostLink {
     await client.close().catch(() => {});
     await this.waitForEndpointTurnover(endpoint, {});
 
-    const spawned = await this.deps.spawn();
-    if (!spawned.ok) {
-      throw new CoreHostUnavailableError(
-        `旧版本宿主已退出，但新宿主拉起失败：${spawned.reason ?? "未知原因"}`,
-      );
-    }
-
-    const nextEndpoint = await this.deps.discover();
+    const nextEndpoint = await this.spawnAndDiscoverEndpoint({
+      acceptEndpoint: (candidate) => !isSameEndpoint(candidate, endpoint),
+      unableToStartReason: "旧版本知行已退出，但新的知行服务启动失败",
+      unableToConnectReason: "旧版本知行已退出，但新的知行服务暂时无法连接",
+    });
     const established = await this.connectEndpoint(nextEndpoint, {
       replaceUnresponsive: false,
       replaceVersionMismatch: false,
@@ -654,21 +639,77 @@ export class CoreHostConnection implements CoreHostLink {
       return await this.deps.discover();
     } catch (err) {
       if (!(err instanceof ServerNotRunningError)) throw err;
-      const spawned = await this.deps.spawn();
-      if (!spawned.ok) {
-        // spawn 失败可能是并发拉起的败者（赢家宿主已起）——再发现一次再判失败
-        try {
-          return await this.deps.discover();
-        } catch {
-          throw new CoreHostUnavailableError(spawned.reason ?? "无法拉起核心宿主");
-        }
-      }
-      try {
-        return await this.deps.discover();
-      } catch {
-        throw new CoreHostUnavailableError("核心宿主已拉起但发现失败");
-      }
+      return await this.spawnAndDiscoverEndpoint({
+        unableToStartReason: "知行启动失败，且没有发现可用服务",
+        unableToConnectReason: "知行已启动，但暂时无法连接",
+      });
     }
+  }
+
+  private async spawnAndDiscoverEndpoint(opts: {
+    acceptEndpoint?: (endpoint: ServerEndpoint) => boolean;
+    unableToStartReason: string;
+    unableToConnectReason: string;
+  }): Promise<ServerEndpoint> {
+    await this.emitNotice({ kind: "starting" });
+    const spawned = await this.deps.spawn();
+    if (!spawned.ok) {
+      const endpoint = spawned.recoverable
+        ? await this.waitForDiscoverableService({
+            timeoutMs: this.deps.startupRecoveryTimeoutMs ??
+              DEFAULT_STARTUP_RECOVERY_TIMEOUT_MS,
+            pollIntervalMs: this.deps.startupRecoveryPollMs ??
+              DEFAULT_STARTUP_RECOVERY_POLL_MS,
+            acceptEndpoint: opts.acceptEndpoint,
+          })
+        : await this.tryDiscover(opts.acceptEndpoint);
+      if (endpoint) return endpoint;
+      throw new CoreHostUnavailableError(
+        spawned.reason ?? opts.unableToStartReason,
+      );
+    }
+
+    const endpoint = await this.waitForDiscoverableService({
+      timeoutMs: this.deps.startupRecoveryTimeoutMs ??
+        DEFAULT_STARTUP_RECOVERY_TIMEOUT_MS,
+      pollIntervalMs: this.deps.startupRecoveryPollMs ??
+        DEFAULT_STARTUP_RECOVERY_POLL_MS,
+      acceptEndpoint: opts.acceptEndpoint,
+    });
+    if (endpoint) return endpoint;
+    throw new CoreHostUnavailableError(opts.unableToConnectReason);
+  }
+
+  private async tryDiscover(
+    acceptEndpoint?: (endpoint: ServerEndpoint) => boolean,
+  ): Promise<ServerEndpoint | null> {
+    try {
+      const endpoint = await this.deps.discover();
+      return !acceptEndpoint || acceptEndpoint(endpoint) ? endpoint : null;
+    } catch (err) {
+      if (err instanceof ServerNotRunningError) return null;
+      throw err;
+    }
+  }
+
+  private async waitForDiscoverableService(opts: {
+    timeoutMs: number;
+    pollIntervalMs: number;
+    acceptEndpoint?: (endpoint: ServerEndpoint) => boolean;
+  }): Promise<ServerEndpoint | null> {
+    const clock = this.deps.clock ?? Date.now;
+    const sleep =
+      this.deps.sleep ??
+      ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+    const deadline = clock() + opts.timeoutMs;
+
+    while (clock() <= deadline) {
+      const endpoint = await this.tryDiscover(opts.acceptEndpoint);
+      if (endpoint) return endpoint;
+      if (clock() >= deadline) break;
+      await sleep(opts.pollIntervalMs);
+    }
+    return null;
   }
 
   private async performReconnect(

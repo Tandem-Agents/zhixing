@@ -18,11 +18,20 @@ import { spawnDaemon } from "../daemon.js";
 // 不作为 child 识别，避免 resolveSelfExec 受父进程 env 影响
 const baseEnv = { HOME: "/h", PATH: "/bin" };
 
-function makeFakeChild() {
-  return {
+function makeFakeChild(pid = 99999) {
+  const exitHandlers: Array<(code: number | null, signal: NodeJS.Signals | null) => void> = [];
+  const child = {
     unref: vi.fn(),
-    pid: 99999,
+    pid,
+    once: vi.fn((event: string, handler: (code: number | null, signal: NodeJS.Signals | null) => void) => {
+      if (event === "exit") exitHandlers.push(handler);
+      return child;
+    }),
+    emitExit(code: number | null = 1, signal: NodeJS.Signals | null = null) {
+      for (const handler of exitHandlers) handler(code, signal);
+    },
   } as any;
+  return child;
 }
 
 function makeDeps(overrides: Partial<Parameters<typeof spawnDaemon>[0]["deps"]> = {}) {
@@ -98,14 +107,17 @@ describe("spawnDaemon", () => {
     });
 
     expect(r.ok).toBe(false);
-    expect(r.reason).toContain("未进入可发现状态");
+    expect(r.status).toBe("starting");
+    expect(r.reason).toContain("暂未进入可连接状态");
   });
 
   it("fails when child pid is no longer alive", async () => {
     const clock = mkFakeClock();
+    const child = makeFakeChild(12345);
     const deps = makeDeps({
       clock,
       sleep: vi.fn(async () => clock.advance(200)),
+      spawnFn: vi.fn(() => child),
       readLockFn: vi.fn(async () => ({ pid: 12345, port: 18900, startedAt: "t" })),
       isProcessAliveFn: vi.fn(() => false),
       httpGetFn: vi.fn(async () => 200),
@@ -120,7 +132,63 @@ describe("spawnDaemon", () => {
     });
 
     expect(r.ok).toBe(false);
-    expect(r.reason).toContain("在就绪前退出");
+    expect(r.status).toBe("failed");
+    expect(r.reason).toContain("已退出");
+  });
+
+  it("treats stale PID from an old process as starting, not child failure", async () => {
+    const clock = mkFakeClock();
+    const child = makeFakeChild(99999);
+    const deps = makeDeps({
+      clock,
+      sleep: vi.fn(async () => clock.advance(200)),
+      spawnFn: vi.fn(() => child),
+      readLockFn: vi.fn(async () => ({ pid: 12345, port: 18900, startedAt: "old" })),
+      isProcessAliveFn: vi.fn(() => false),
+      httpGetFn: vi.fn(async () => 200),
+    });
+
+    const r = await spawnDaemon({
+      forwardedArgs: ["serve"],
+      logPath: "/tmp/server.log",
+      handshakeTimeoutMs: 1000,
+      pollIntervalMs: 200,
+      deps,
+    });
+
+    expect(r.ok).toBe(false);
+    expect(r.status).toBe("starting");
+    expect(r.reason).toContain("旧的服务状态已失效");
+    expect(r.reason).not.toContain("12345 在就绪前退出");
+  });
+
+  it("fails when spawned child exits and no healthy service appears", async () => {
+    const clock = mkFakeClock();
+    const child = makeFakeChild(99999);
+    const deps = makeDeps({
+      clock,
+      spawnFn: vi.fn(() => child),
+      sleep: vi.fn(async () => {
+        child.emitExit(1, null);
+        clock.advance(200);
+      }),
+      readLockFn: vi.fn(async () => null),
+      isProcessAliveFn: vi.fn(() => true),
+      httpGetFn: vi.fn(async () => 200),
+    });
+
+    const r = await spawnDaemon({
+      forwardedArgs: ["serve"],
+      logPath: "/tmp/server.log",
+      handshakeTimeoutMs: 2000,
+      pollIntervalMs: 200,
+      deps,
+    });
+
+    expect(r.ok).toBe(false);
+    expect(r.status).toBe("failed");
+    expect(r.reason).toContain("99999");
+    expect(r.reason).toContain("没有发现可用服务");
   });
 
   it("fails when .ready marker never appears", async () => {
@@ -143,7 +211,8 @@ describe("spawnDaemon", () => {
     });
 
     expect(r.ok).toBe(false);
-    expect(r.reason).toContain("尚未完成就绪标记");
+    expect(r.status).toBe("starting");
+    expect(r.reason).toContain("暂未进入可连接状态");
   });
 
   it("fails when health endpoint never returns 200", async () => {
@@ -165,7 +234,8 @@ describe("spawnDaemon", () => {
     });
 
     expect(r.ok).toBe(false);
-    expect(r.reason).toContain("健康检查");
+    expect(r.status).toBe("starting");
+    expect(r.reason).toContain("暂时还不能连接");
   });
 
   it("calls child.unref() after spawn", async () => {

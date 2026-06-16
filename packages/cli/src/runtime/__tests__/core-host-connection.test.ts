@@ -460,6 +460,68 @@ describe("CoreHostConnection", () => {
     }
   });
 
+  it("版本换代后新服务仍在启动时持续发现，随后连接新 endpoint", async () => {
+    let currentEndpoint: ServerEndpoint | null = endpoint;
+    const c1 = makeFakeClient({
+      authenticate: async () => ({
+        protocol: 1,
+        protocolRange: { min: 1, max: 1 },
+        server: { version: "0.0.9" },
+        capabilities: ["session"],
+      }),
+      request: async (method) => {
+        if (method === "server.info") {
+          return { version: "0.0.9", protocol: 1, connectionCount: 1 };
+        }
+        if (method === "server.shutdown") {
+          currentEndpoint = null;
+          return { accepted: true };
+        }
+        return {};
+      },
+    });
+    const c2 = makeFakeClient();
+    const clients = [c1, c2];
+    let i = 0;
+    const notices: unknown[] = [];
+    const discover = vi.fn(async () => {
+      if (!currentEndpoint) throw new ServerNotRunningError("starting");
+      return currentEndpoint;
+    });
+    const spawn = vi.fn(async () => ({
+      ok: false,
+      recoverable: true,
+      reason: "知行服务仍在启动",
+    }));
+    let now = 0;
+    const sleep = vi.fn(async (ms: number) => {
+      now += ms;
+      currentEndpoint = nextEndpoint;
+    });
+    const conn = new CoreHostConnection({
+      discover,
+      spawn,
+      createClient: () => asClient(clients[i++]!),
+      clock: () => now,
+      sleep,
+      startupRecoveryTimeoutMs: 1000,
+      startupRecoveryPollMs: 50,
+      onLifecycleNotice: (notice) => notices.push(notice),
+    });
+
+    await expect(conn.getClient()).resolves.toBe(asClient(c2));
+
+    expect(spawn).toHaveBeenCalledOnce();
+    expect(sleep).toHaveBeenCalledWith(50);
+    expect(notices).toContainEqual({ kind: "starting" });
+    expect(notices).toContainEqual({
+      kind: "host-replaced",
+      reason: "version-mismatch",
+      oldVersion: "0.0.9",
+      newVersion: "0.1.0",
+    });
+  });
+
   it("旧版本宿主但 server.info 不可读 → 保守保持连接并标记待更新", async () => {
     const client = makeFakeClient({
       authenticate: async () => ({
@@ -522,6 +584,43 @@ describe("CoreHostConnection", () => {
     await conn.getClient();
     expect(spawn).toHaveBeenCalledOnce();
     expect(discover).toHaveBeenCalledTimes(2);
+  });
+
+  it("拉起仍在进行时持续发现，服务随后可用则正常连接", async () => {
+    const client = makeFakeClient();
+    const notices: unknown[] = [];
+    let discoverCalls = 0;
+    const discover = vi.fn(async () => {
+      discoverCalls += 1;
+      if (discoverCalls < 3) throw new ServerNotRunningError("not running yet");
+      return endpoint;
+    });
+    const spawn = vi.fn(async () => ({
+      ok: false,
+      recoverable: true,
+      reason: "知行服务仍在启动",
+    }));
+    let now = 0;
+    const sleep = vi.fn(async (ms: number) => {
+      now += ms;
+    });
+    const conn = new CoreHostConnection({
+      discover,
+      spawn,
+      createClient: () => asClient(client),
+      clock: () => now,
+      sleep,
+      startupRecoveryTimeoutMs: 1000,
+      startupRecoveryPollMs: 50,
+      onLifecycleNotice: (notice) => notices.push(notice),
+    });
+
+    await expect(conn.getClient()).resolves.toBe(asClient(client));
+
+    expect(spawn).toHaveBeenCalledOnce();
+    expect(discover).toHaveBeenCalledTimes(3);
+    expect(sleep).toHaveBeenCalledWith(50);
+    expect(notices).toContainEqual({ kind: "starting" });
   });
 
   it("并发 getClient 共享同一次建立", async () => {
@@ -596,6 +695,55 @@ describe("CoreHostConnection", () => {
       id: "zhixing-cli",
       version: "0.1.0",
     });
+  });
+
+  it("僵死宿主清理后新服务仍在启动时持续发现，随后连接新 endpoint", async () => {
+    const c1 = makeFakeClient({
+      connect: async () => {
+        throw new Error("connect timeout");
+      },
+    });
+    const c2 = makeFakeClient();
+    const clients = [c1, c2];
+    let i = 0;
+    let currentEndpoint: ServerEndpoint | null = endpoint;
+    const discover = vi.fn(async () => {
+      if (!currentEndpoint) throw new ServerNotRunningError("starting");
+      return currentEndpoint;
+    });
+    const stopUnresponsiveHost = vi.fn(async () => {
+      currentEndpoint = null;
+      return { ok: true };
+    });
+    const spawn = vi.fn(async () => ({
+      ok: false,
+      recoverable: true,
+      reason: "知行服务仍在启动",
+    }));
+    let now = 0;
+    const sleep = vi.fn(async (ms: number) => {
+      now += ms;
+      currentEndpoint = nextEndpoint;
+    });
+    const conn = new CoreHostConnection({
+      discover,
+      spawn,
+      stopUnresponsiveHost,
+      createClient: () => asClient(clients[i++]!),
+      clock: () => now,
+      sleep,
+      startupRecoveryTimeoutMs: 1000,
+      startupRecoveryPollMs: 50,
+    });
+
+    await expect(conn.getClient()).resolves.toBe(asClient(c2));
+
+    expect(stopUnresponsiveHost).toHaveBeenCalledWith(
+      endpoint,
+      expect.any(Error),
+    );
+    expect(spawn).toHaveBeenCalledOnce();
+    expect(sleep).toHaveBeenCalledWith(50);
   });
 
   it("僵死清理后发现锁已换代 → 直接连接新 endpoint，不再拉起宿主", async () => {

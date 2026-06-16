@@ -167,10 +167,14 @@ function renderCoreHostLifecycleNotice(
   writer: CliWriter,
   notice: CoreHostLifecycleNotice,
 ): void {
+  if (notice.kind === "starting") {
+    writer.line(chalk.yellow(`${layout.contentPrefix}知行正在启动，请稍等...`));
+    return;
+  }
   if (notice.kind === "reconnected") {
     writer.line(
       chalk.yellow(
-        `${layout.contentPrefix}核心宿主连接已恢复，当前会话会重新订阅。`,
+        `${layout.contentPrefix}知行连接已恢复，当前会话会继续接续。`,
       ),
     );
     return;
@@ -178,7 +182,7 @@ function renderCoreHostLifecycleNotice(
   if (notice.kind === "host-replaced") {
     writer.line(
       chalk.yellow(
-        `${layout.contentPrefix}核心宿主已换代完成，当前会话会继续使用新宿主。`,
+        `${layout.contentPrefix}知行已完成更新，当前会话会继续接续。`,
       ),
     );
     return;
@@ -189,7 +193,7 @@ function renderCoreHostLifecycleNotice(
       : `还有 ${Math.max(0, notice.connectionCount - 1)} 个其它接入面在线，稍后会自动换代。`;
   writer.line(
     chalk.yellow(
-      `${layout.contentPrefix}核心宿主版本待更新：当前 ${notice.serverVersion}，cli ${notice.clientVersion}；${suffix}`,
+      `${layout.contentPrefix}知行版本待更新：当前 ${notice.serverVersion}，cli ${notice.clientVersion}；${suffix}`,
     ),
   );
 }
@@ -203,7 +207,7 @@ async function ensureCoreHostWithReadOnlyFallback(
     try {
       await coreHost.ensure();
       if (lastError !== undefined) {
-        writer.line(chalk.green(`${layout.contentPrefix}核心宿主已恢复，继续进入对话。`));
+        writer.line(chalk.green(`${layout.contentPrefix}知行已恢复，继续进入对话。`));
       }
       return true;
     } catch (err) {
@@ -219,7 +223,7 @@ async function ensureCoreHostWithReadOnlyFallback(
       try {
         const answer = (
           await rl.question(
-            chalk.green(`${layout.contentPrefix}宿主不可用，按 Enter 重试，输入 q 退出：`),
+            chalk.green(`${layout.contentPrefix}按 Enter 重试，输入 q 退出：`),
           )
         )
           .trim()

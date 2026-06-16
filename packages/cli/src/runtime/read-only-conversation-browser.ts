@@ -1,5 +1,5 @@
 /**
- * 宿主不可用时的只读事实面。
+ * 知行无法进入可写对话时的只读事实面。
  *
  * 这里故意不用 ConversationRepository / ShardedTranscriptStore：降级态只能读
  * 磁盘事实，不能持有任何带写能力的实例。列表与尾巴都从文件级 reader 读出，
@@ -43,17 +43,10 @@ export async function renderReadOnlyConversationBrowser(
   const maxConversations = opts.maxConversations ?? 5;
   const maxRunsPerConversation = opts.maxRunsPerConversation ?? 1;
   const width = opts.width ?? process.stdout.columns ?? 80;
-  const reason = opts.error instanceof Error ? opts.error.message : String(opts.error);
-
   opts.writer.line(
-    chalk.red(`${layout.contentPrefix}核心宿主不可用，已进入只读浏览。`),
+    chalk.red(`${layout.contentPrefix}知行暂时无法启动，已打开最近对话供查看。`),
   );
-  opts.writer.line(chalk.dim(`${layout.contentPrefix}${reason}`));
-  opts.writer.line(
-    chalk.dim(
-      `${layout.contentPrefix}对话写入与新请求已暂停；下面只读取本机已落盘的最近对话。`,
-    ),
-  );
+  opts.writer.line(chalk.dim(`${layout.contentPrefix}对话写入与新请求已暂停；按 Enter 可重试。`));
   opts.writer.line("");
 
   const root = conversationsDir({ kind: "user" });
@@ -156,7 +149,7 @@ function formatMaybeRelative(iso: string): string | null {
 function renderRepairHint(writer: CliWriter): void {
   writer.line(
     chalk.dim(
-      `${layout.contentPrefix}修复建议：运行 zhixing serve status 查看状态，或用 zhixing serve logs 查看宿主日志。`,
+      `${layout.contentPrefix}需要排查时，可运行 zz serve status 查看运行状态，或用 zz serve logs 查看日志。`,
     ),
   );
   writer.line("");
