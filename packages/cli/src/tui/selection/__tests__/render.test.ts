@@ -33,7 +33,73 @@ describe("renderSelectionPanel", () => {
     if (rendered.kind !== "rendered") return;
     expect(stripAnsi(rendered.lines.join("\n"))).toContain("选择下一步");
     expect(stripAnsi(rendered.lines.join("\n"))).toContain("稍后处理");
+    expect(stripAnsi(rendered.lines.join("\n"))).toContain("↑/↓ 选择");
+    expect(stripAnsi(rendered.lines[0] ?? "")).not.toContain("…");
     expect(rendered.lines.every((line) => stringWidth(line) <= 47)).toBe(true);
+  });
+
+  it("keeps hotkeys near labels and descriptions in a compact option row", () => {
+    const request = validateSelectionRequest({
+      title: "停止知行",
+      body: ["停止后会断开其他接入面: feishu"],
+      options: [
+        {
+          value: "stop",
+          label: "停止知行",
+          hotkey: "s",
+          tone: "danger",
+          description: "关闭服务, 当前终端也会退出",
+        },
+        { value: "cancel", label: "返回", hotkey: "c" },
+      ],
+    });
+    const rendered = renderSelectionPanel(
+      request,
+      makeInitialSelectionState(request),
+      { columns: 120, viewportRows: 18, statusRows: 2 },
+    );
+
+    expect(rendered.kind).toBe("rendered");
+    if (rendered.kind !== "rendered") return;
+    const plainLines = rendered.lines.map((renderedLine) => stripAnsi(renderedLine));
+    expect(plainLines.join("\n")).toContain(
+      "停止知行  ·  停止后会断开其他接入面: feishu",
+    );
+    const stopLine = plainLines.find((renderedLine) =>
+      renderedLine.includes("停止知行") && renderedLine.includes("(s)")
+    );
+    expect(stopLine).toBeDefined();
+    expect(stopLine).toContain("停止知行  (s)   关闭服务, 当前终端也会退出");
+    expect(stringWidth(stopLine ?? "")).toBeLessThan(64);
+  });
+
+  it("caps long descriptions before the whole line reaches screen width", () => {
+    const request = validateSelectionRequest({
+      title: "选择操作",
+      body: ["关键说明"],
+      options: [
+        {
+          value: "continue",
+          label: "继续",
+          hotkey: "c",
+          description: "长说明".repeat(80),
+        },
+        { value: "cancel", label: "返回", hotkey: "x" },
+      ],
+    });
+    const rendered = renderSelectionPanel(
+      request,
+      makeInitialSelectionState(request),
+      { columns: 120, viewportRows: 18, statusRows: 2 },
+    );
+
+    expect(rendered.kind).toBe("rendered");
+    if (rendered.kind !== "rendered") return;
+    const optionLine = rendered.lines
+      .map((renderedLine) => stripAnsi(renderedLine))
+      .find((renderedLine) => renderedLine.includes("(c)"));
+    expect(optionLine).toContain("…");
+    expect(stringWidth(optionLine ?? "")).toBeLessThan(72);
   });
 
   it("folds optional body instead of introducing scroll or pagination", () => {
@@ -118,7 +184,7 @@ describe("renderSelectionPanel", () => {
     expect(selectRendered.kind).toBe("rendered");
     if (selectRendered.kind !== "rendered") return;
     expect(stripAnsi(selectRendered.lines.join("\n"))).toContain(
-      "Enter 保存 · Esc 放弃",
+      "Enter 保存 · ↑/↓ 选择 · Esc 放弃",
     );
 
     const inputState = reduceSelection(
