@@ -51,8 +51,10 @@ import {
   createScreenController,
   createScreenWriter,
   createStdoutWriter,
+  createStartupProgressPresenter,
   type CliWriter,
   type ScreenController,
+  type StartupProgressPresenter,
 } from "./screen/index.js";
 import { detectTerminalCapability } from "./screen/terminal-capability.js";
 import { layout } from "./tui/style.js";
@@ -163,12 +165,16 @@ function formatNormalExitHint(info: ServerInfoResult | null): string | null {
   return `已退出当前终端；知行仍在后台处理：${parts.join("；")}。需要停止请输入 /stop。`;
 }
 
-function renderCoreHostLifecycleNotice(
+export function renderCoreHostPersistentLifecycleNotice(
   writer: CliWriter,
   notice: CoreHostLifecycleNotice,
 ): void {
   if (notice.kind === "starting") {
-    writer.line(chalk.yellow(`${layout.contentPrefix}知行正在启动，请稍等...`));
+    writer.line(
+      chalk.yellow(
+        `${layout.contentPrefix}知行正在恢复连接，当前操作会继续等待。`,
+      ),
+    );
     return;
   }
   if (notice.kind === "reconnected") {
@@ -198,9 +204,45 @@ function renderCoreHostLifecycleNotice(
   );
 }
 
+type ReplLifecycleRenderPhase = "initial" | "running";
+
+export function renderCoreHostLifecycleNotice(opts: {
+  writer: CliWriter;
+  phase: ReplLifecycleRenderPhase;
+  startupProgress?: StartupProgressPresenter | null;
+  notice: CoreHostLifecycleNotice;
+  deferNotice?: (
+    notice: Exclude<CoreHostLifecycleNotice, { kind: "starting" }>,
+  ) => void;
+}): void {
+  const { writer, phase, startupProgress, notice, deferNotice } = opts;
+  if (notice.kind === "starting") {
+    if (
+      phase === "initial" &&
+      startupProgress?.acceptsStartupNotices()
+    ) {
+      startupProgress.begin();
+      return;
+    }
+    if (phase === "initial") {
+      writer.line(chalk.yellow(`${layout.contentPrefix}正在打开知行...`));
+      return;
+    }
+    renderCoreHostPersistentLifecycleNotice(writer, notice);
+    return;
+  }
+  startupProgress?.stop();
+  if (phase === "initial" && startupProgress?.acceptsStartupNotices()) {
+    deferNotice?.(notice);
+    return;
+  }
+  renderCoreHostPersistentLifecycleNotice(writer, notice);
+}
+
 async function ensureCoreHostWithReadOnlyFallback(
   coreHost: CoreHostConnection,
   writer: CliWriter,
+  opts: { onAttemptFailed?: () => void } = {},
 ): Promise<boolean> {
   let lastError: unknown;
   while (true) {
@@ -212,6 +254,7 @@ async function ensureCoreHostWithReadOnlyFallback(
       return true;
     } catch (err) {
       lastError = err;
+      opts.onAttemptFailed?.();
       await renderReadOnlyConversationBrowser({ writer, error: err });
       if (!process.stdin.isTTY) return false;
 
@@ -338,6 +381,20 @@ export async function startRepl(): Promise<void> {
     cliWriter = createStdoutWriter();
   }
 
+  const startupProgress = renderScreen
+    ? createStartupProgressPresenter({ stdout: process.stdout })
+    : null;
+  const deferredStartupNotices: Array<
+    Exclude<CoreHostLifecycleNotice, { kind: "starting" }>
+  > = [];
+  let lifecycleRenderPhase: ReplLifecycleRenderPhase = "initial";
+  const flushDeferredStartupNotices = (): void => {
+    const notices = deferredStartupNotices.splice(0);
+    for (const notice of notices) {
+      renderCoreHostPersistentLifecycleNotice(cliWriter, notice);
+    }
+  };
+
   // renderer 接收 cliWriter，所有 AI 输出（text/thinking/tool 卡片）经 writer 协调。
   const renderer = createOutputRenderer({ writer: cliWriter });
 
@@ -350,7 +407,13 @@ export async function startRepl(): Promise<void> {
   const coreHost = new CoreHostConnection({
     ...defaultCoreHostConnectionDeps(),
     onLifecycleNotice: (notice) =>
-      renderCoreHostLifecycleNotice(cliWriter, notice),
+      renderCoreHostLifecycleNotice({
+        writer: cliWriter,
+        phase: lifecycleRenderPhase,
+        startupProgress,
+        notice,
+        deferNotice: (deferred) => deferredStartupNotices.push(deferred),
+      }),
   });
 
   // 各方法域门面——facade 不持连接,只做方法域封装。
@@ -365,7 +428,11 @@ export async function startRepl(): Promise<void> {
   // 会话本身在宿主执行——宿主必须在场,启动即 ensure(不在则拉起)。
   // 拉起 / 连接 / 协议失败时进入只读事实面，不启动任何会话写路径。
   const startupFallbackWriter = renderScreen ? createStdoutWriter() : cliWriter;
-  if (!(await ensureCoreHostWithReadOnlyFallback(coreHost, startupFallbackWriter))) {
+  if (
+    !(await ensureCoreHostWithReadOnlyFallback(coreHost, startupFallbackWriter, {
+      onAttemptFailed: () => startupProgress?.stop(),
+    }))
+  ) {
     renderScreen?.dispose();
     process.exit(1);
   }
@@ -940,7 +1007,10 @@ export async function startRepl(): Promise<void> {
       onCandidateDelete,
       bottomInfo,
     });
+    startupProgress?.disable();
     inputController.start();
+    lifecycleRenderPhase = "running";
+    flushDeferredStartupNotices();
 
     // resize 结束后整屏重建（A 方案）：拖拽过程中 ScreenController 不画
     // （internal-only，无残留），resize 防抖稳定后一次性 \x1b[2J 清屏（保留
@@ -966,6 +1036,10 @@ export async function startRepl(): Promise<void> {
         );
       });
     }
+  } else {
+    startupProgress?.disable();
+    lifecycleRenderPhase = "running";
+    flushDeferredStartupNotices();
   }
 
   // close 监听器 + 主循环的协作信号：

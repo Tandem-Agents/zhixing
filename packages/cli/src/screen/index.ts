@@ -19,4 +19,9 @@ export {
   type CliWriter,
 } from "./cli-writer.js";
 
+export {
+  createStartupProgressPresenter,
+  type StartupProgressPresenter,
+} from "./startup-progress.js";
+
 export { STATUS_TAIL_IDS, type StatusTailId } from "./status-tail-ids.js";
