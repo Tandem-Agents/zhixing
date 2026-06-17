@@ -15,6 +15,7 @@ import {
   type WorkflowInstance,
   type WorkflowInstanceStatus,
   type WorkflowNode,
+  type WorkflowNodeInputIteration,
   type WorkflowNodeRun,
   type WorkflowScheduleEntry,
   WorkflowScheduler,
@@ -183,7 +184,7 @@ export class WorkflowManager {
         instance.instanceId,
         nodeRun.nodeRunId,
         "decision",
-        input.resultOptionId,
+        decisionArtifactValue(decision, input, now),
       );
       return {
         ...instance,
@@ -194,7 +195,7 @@ export class WorkflowManager {
                 ...entry,
                 actor: input.actor,
                 resultOptionId: input.resultOptionId,
-                rationale: input.rationale,
+                rationale: input.rationale ?? entry.rationale,
                 resolvedAt: now,
               }
             : entry,
@@ -761,8 +762,7 @@ function resolveNodeInput(
       constants.push(source.value);
       continue;
     }
-    const iteration =
-      source.iteration === "previous" ? nodeRun.iteration - 1 : nodeRun.iteration;
+    const iteration = resolveInputSourceIteration(source.iteration, nodeRun);
     if (iteration < 0) {
       if (source.optional) continue;
       throw new WorkflowManagerError(
@@ -787,6 +787,15 @@ function resolveNodeInput(
 function readInstanceInput(input: JsonValue, key: string): JsonValue {
   if (isRecord(input) && key in input) return input[key] ?? null;
   return null;
+}
+
+function resolveInputSourceIteration(
+  iteration: WorkflowNodeInputIteration | undefined,
+  nodeRun: WorkflowNodeRun,
+): number {
+  if (iteration === "previous") return nodeRun.iteration - 1;
+  if (iteration === "initial") return 0;
+  return nodeRun.iteration;
 }
 
 function readNodeOutput(
@@ -836,6 +845,37 @@ function activeConditionsFromDecisions(
       },
     ];
   });
+}
+
+function decisionArtifactValue(
+  decision: WorkflowDecisionRecord,
+  input: ResolveWorkflowDecisionInput,
+  resolvedAt: string,
+): JsonValue {
+  const value: Record<string, JsonValue> = {
+    optionId: input.resultOptionId,
+    actor: input.actor,
+    question: decision.question,
+    options: decision.options.map((option) => {
+      const output: Record<string, JsonValue> = {
+        optionId: option.optionId,
+        label: option.label,
+      };
+      if (option.description) output["description"] = option.description;
+      return output;
+    }),
+    resolvedAt,
+  };
+  if (decision.recommendedOptionId) {
+    value["recommendedOptionId"] = decision.recommendedOptionId;
+  }
+  if (decision.rationale) {
+    value["requestRationale"] = decision.rationale;
+  }
+  if (input.rationale) {
+    value["resolutionRationale"] = input.rationale;
+  }
+  return value;
 }
 
 function validatedFromSnapshot(

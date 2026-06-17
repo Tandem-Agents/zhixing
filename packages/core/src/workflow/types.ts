@@ -37,7 +37,7 @@ export type WorkflowNodeRunStatus =
 
 export type WorkflowDecisionActor = "human" | "agent" | "rule";
 
-export type WorkflowNodeInputIteration = "same" | "previous";
+export type WorkflowNodeInputIteration = "same" | "previous" | "initial";
 
 export interface WorkflowActiveCondition {
   readonly conditionId: WorkflowConditionId;

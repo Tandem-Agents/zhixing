@@ -336,6 +336,38 @@ describe("DefinitionValidator", () => {
     expect(validated.entryNodeIds).toEqual(["draft"]);
   });
 
+  it("accepts initial-iteration inputs from upstream nodes", () => {
+    const validated = validator().validate(
+      definition(
+        [
+          node("plan"),
+          node("draft", {
+            inputFrom: [{ kind: "node", nodeId: "plan", iteration: "initial" }],
+          }),
+          node("review", { kind: "gate" }),
+          node("failed", { kind: "notify" }),
+        ],
+        [
+          { from: "plan", to: "draft", kind: "normal" },
+          { from: "draft", to: "review", kind: "normal" },
+          {
+            from: "review",
+            to: "draft",
+            kind: "feedback",
+            condition: "needs_changes",
+            loopPolicy: {
+              maxIterations: 1,
+              stopCondition: "accepted",
+              failureExitNodeId: "failed",
+            },
+          },
+        ],
+      ),
+    );
+
+    expect(validated.entryNodeIds).toEqual(["plan"]);
+  });
+
   it("allows loop policy targets to read the feedback source output", () => {
     const validated = validator().validate(
       definition(

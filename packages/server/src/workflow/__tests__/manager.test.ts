@@ -194,6 +194,21 @@ describe("WorkflowManager", () => {
     expect(resumed.decisions[0]).toMatchObject({
       resultOptionId: "accepted",
       actor: "human",
+      rationale: "Good enough",
+    });
+    expect(
+      resumed.artifacts.find((artifact) => artifact.key === "decision")?.value,
+    ).toEqual({
+      optionId: "accepted",
+      actor: "human",
+      question: "Accept?",
+      options: [
+        { optionId: "accepted", label: "Accept" },
+        { optionId: "needs_changes", label: "Revise" },
+      ],
+      recommendedOptionId: "accepted",
+      resolutionRationale: "Good enough",
+      resolvedAt: "2026-06-17T00:00:00.000Z",
     });
     expect(resumed.nodeRuns.map((run) => `${run.nodeId}:${run.status}`)).toEqual([
       "draft:succeeded",
@@ -354,6 +369,130 @@ describe("WorkflowManager", () => {
     expect(
       done.nodeRuns.filter((run) => run.nodeId === "done").map((run) => run.iteration),
     ).toEqual([1]);
+  });
+
+  it("resolves initial node inputs during feedback iterations", async () => {
+    const draftInputs: unknown[] = [];
+    const manager = managerWith([
+      {
+        executorId: "plan",
+        async run() {
+          return {
+            status: "waiting_decision",
+            decision: {
+              question: "Approve plan?",
+              options: [
+                { optionId: "plan_approved", label: "Approve plan" },
+                { optionId: "plan_blocked", label: "Block plan" },
+              ],
+            },
+          };
+        },
+      },
+      {
+        executorId: "draft",
+        async run(ctx) {
+          draftInputs.push(ctx.input);
+          return { status: "succeeded", output: `draft-${ctx.nodeRun.iteration}` };
+        },
+      },
+      {
+        executorId: "review",
+        async run() {
+          return {
+            status: "waiting_decision",
+            decision: {
+              question: "Review result?",
+              options: [
+                { optionId: "needs_changes", label: "Needs changes" },
+                { optionId: "accepted", label: "Accepted" },
+              ],
+            },
+          };
+        },
+      },
+      outputExecutor("done"),
+    ]);
+
+    const directionPaused = await start(
+      manager,
+      definition(
+        [
+          node("plan", "plan"),
+          node("draft", "draft", {
+            inputFrom: [
+              {
+                kind: "node",
+                nodeId: "plan",
+                artifactKey: "decision",
+                iteration: "initial",
+              },
+              {
+                kind: "node",
+                nodeId: "review",
+                artifactKey: "decision",
+                iteration: "previous",
+                optional: true,
+              },
+            ],
+          }),
+          node("review", "review", { kind: "gate" }),
+          node("done", "done"),
+        ],
+        [
+          {
+            from: "plan",
+            to: "draft",
+            kind: "conditional",
+            condition: "plan_approved",
+          },
+          { from: "draft", to: "review", kind: "normal" },
+          {
+            from: "review",
+            to: "draft",
+            kind: "feedback",
+            condition: "needs_changes",
+            loopPolicy: {
+              maxIterations: 2,
+              stopCondition: "accepted",
+              failureExitNodeId: "done",
+            },
+          },
+          {
+            from: "review",
+            to: "done",
+            kind: "conditional",
+            condition: "accepted",
+          },
+        ],
+      ),
+    );
+
+    const paused0 = await manager.decide({
+      instanceId: directionPaused.instanceId,
+      decisionId: directionPaused.decisions[0]!.decisionId,
+      resultOptionId: "plan_approved",
+      actor: "human",
+    });
+    const reviewDecision0 = paused0.decisions.find(
+      (decision) => !decision.resolvedAt,
+    );
+
+    const paused1 = await manager.decide({
+      instanceId: paused0.instanceId,
+      decisionId: reviewDecision0!.decisionId,
+      resultOptionId: "needs_changes",
+      actor: "human",
+    });
+
+    expect(paused1.status).toBe("waiting_decision");
+    expect(draftInputs).toHaveLength(2);
+    expect(draftInputs[1]).toMatchObject({
+      nodes: {
+        plan: { optionId: "plan_approved" },
+        review: { optionId: "needs_changes" },
+      },
+    });
   });
 
   it("cancels active waiting decisions without resolving them", async () => {

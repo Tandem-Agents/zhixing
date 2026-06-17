@@ -36,7 +36,7 @@ const DEFAULT_POLICY_KEYS = [
 
 const RISK_LEVELS = ["low", "medium", "high", "critical"] as const;
 const NOTIFICATION_TARGETS = ["origin", "explicit", "none"] as const;
-const NODE_INPUT_ITERATIONS = ["same", "previous"] as const;
+const NODE_INPUT_ITERATIONS = ["same", "previous", "initial"] as const;
 
 type UnknownRecord = Record<string, unknown>;
 
