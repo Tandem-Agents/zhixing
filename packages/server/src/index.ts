@@ -20,6 +20,7 @@ export {
   type ConfirmationBridgeDeps,
 } from "./rpc/confirmation-bridge.js";
 export * from "./runtime/index.js";
+export * from "./workflow/index.js";
 export * from "./system-handlers.js";
 export * from "./paths.js";
 export * from "./process-lock.js";

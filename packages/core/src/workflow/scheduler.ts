@@ -1,5 +1,7 @@
 import type {
   NormalizedWorkflowDefinition,
+  NormalizedWorkflowEdge,
+  WorkflowActiveCondition,
   WorkflowBlockedNode,
   WorkflowNode,
   WorkflowNodeId,
@@ -11,8 +13,6 @@ import type {
 } from "./types.js";
 import {
   collectLoopPolicyTargetIds,
-  isConditionActive,
-  isFeedbackEdgeActive,
 } from "./graph.js";
 
 const ACTIVE_STATUSES = new Set<WorkflowNodeRunStatus>([
@@ -31,7 +31,7 @@ const TERMINAL_STATUSES = new Set<WorkflowNodeRunStatus>([
 export class WorkflowScheduler {
   plan(input: WorkflowSchedulerInput): WorkflowSchedulePlan {
     const definition = input.validated.definition;
-    const activeConditions = new Set(input.activeConditionIds ?? []);
+    const activeConditions = createConditionState(input);
     const ready: WorkflowScheduleEntry[] = [];
     const blocked: WorkflowBlockedNode[] = [];
 
@@ -133,7 +133,7 @@ export class WorkflowScheduler {
     node: WorkflowNode,
     definition: NormalizedWorkflowDefinition,
     runs: readonly WorkflowNodeRun[],
-    activeConditions: ReadonlySet<string>,
+    activeConditions: ConditionState,
   ): WorkflowScheduleEntry[] {
     const incoming = definition.edges.filter((edge) => edge.to === node.nodeId);
     const nonFeedbackIncoming = incoming.filter((edge) => edge.kind !== "feedback");
@@ -154,8 +154,16 @@ export class WorkflowScheduler {
     }
 
     for (const edge of nonFeedbackIncoming) {
-      if (!isConditionActive(edge.condition, activeConditions)) continue;
       for (const run of successfulRuns(runs, edge.from)) {
+        if (
+          !isEdgeConditionActive(
+            edge,
+            run.iteration,
+            activeConditions,
+          )
+        ) {
+          continue;
+        }
         candidates.set(run.iteration, {
           nodeId: node.nodeId,
           iteration: run.iteration,
@@ -167,8 +175,19 @@ export class WorkflowScheduler {
     }
 
     for (const edge of feedbackEdges) {
-      if (!isFeedbackEdgeActive(edge, activeConditions)) continue;
+      if (edge.kind !== "feedback" || !edge.loopPolicy) continue;
       for (const run of successfulRuns(runs, edge.from)) {
+        if (
+          !isEdgeConditionActive(edge, run.iteration, activeConditions) ||
+          isConditionActiveFor(
+            edge.loopPolicy.stopCondition,
+            edge.from,
+            run.iteration,
+            activeConditions,
+          )
+        ) {
+          continue;
+        }
         const nextIteration = run.iteration + 1;
         const maxIterations = this.maxFeedbackIterationsFor(edge, definition);
         if (edge.loopPolicy && nextIteration > maxIterations) {
@@ -202,13 +221,13 @@ export class WorkflowScheduler {
     iteration: number,
     definition: NormalizedWorkflowDefinition,
     runs: readonly WorkflowNodeRun[],
-    activeConditions: ReadonlySet<string>,
+    activeConditions: ConditionState,
   ): boolean {
     const incoming = definition.edges.filter(
       (edge) =>
         edge.to === nodeId &&
         edge.kind !== "feedback" &&
-        isConditionActive(edge.condition, activeConditions),
+        isEdgeConditionActive(edge, iteration, activeConditions),
     );
     return incoming.every((edge) =>
       runs.some(
@@ -275,3 +294,44 @@ function latestAttempt(runs: readonly WorkflowNodeRun[]): WorkflowNodeRun | null
 
 export { ACTIVE_STATUSES as WORKFLOW_ACTIVE_NODE_RUN_STATUSES };
 export { TERMINAL_STATUSES as WORKFLOW_TERMINAL_NODE_RUN_STATUSES };
+
+interface ConditionState {
+  readonly global: ReadonlySet<string>;
+  readonly scoped: readonly WorkflowActiveCondition[];
+}
+
+function createConditionState(input: WorkflowSchedulerInput): ConditionState {
+  return {
+    global: new Set(input.activeConditionIds ?? []),
+    scoped: input.activeConditions ?? [],
+  };
+}
+
+function isEdgeConditionActive(
+  edge: NormalizedWorkflowEdge,
+  iteration: number,
+  activeConditions: ConditionState,
+): boolean {
+  return isConditionActiveFor(
+    edge.condition,
+    edge.from,
+    iteration,
+    activeConditions,
+  );
+}
+
+function isConditionActiveFor(
+  conditionId: string | undefined,
+  nodeId: WorkflowNodeId,
+  iteration: number,
+  activeConditions: ConditionState,
+): boolean {
+  if (!conditionId) return true;
+  if (activeConditions.global.has(conditionId)) return true;
+  return activeConditions.scoped.some(
+    (condition) =>
+      condition.conditionId === conditionId &&
+      (condition.nodeId === undefined || condition.nodeId === nodeId) &&
+      (condition.iteration === undefined || condition.iteration === iteration),
+  );
+}

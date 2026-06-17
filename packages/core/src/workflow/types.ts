@@ -39,6 +39,13 @@ export type WorkflowDecisionActor = "human" | "agent" | "rule";
 
 export type WorkflowNodeInputIteration = "same" | "previous";
 
+export interface WorkflowActiveCondition {
+  readonly conditionId: WorkflowConditionId;
+  readonly nodeId?: WorkflowNodeId;
+  readonly iteration?: number;
+  readonly nodeRunId?: WorkflowNodeRunId;
+}
+
 export type WorkflowInputSource =
   | { kind: "instance"; key: string }
   | {
@@ -261,4 +268,5 @@ export interface WorkflowSchedulerInput {
   readonly validated: ValidatedWorkflowDefinition;
   readonly nodeRuns: readonly WorkflowNodeRun[];
   readonly activeConditionIds?: readonly WorkflowConditionId[];
+  readonly activeConditions?: readonly WorkflowActiveCondition[];
 }

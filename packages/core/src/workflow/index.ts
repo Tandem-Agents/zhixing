@@ -21,6 +21,7 @@ export type {
   NormalizedWorkflowDefinition,
   NormalizedWorkflowEdge,
   ValidatedWorkflowDefinition,
+  WorkflowActiveCondition,
   WorkflowArtifact,
   WorkflowArtifactId,
   WorkflowBlockedNode,

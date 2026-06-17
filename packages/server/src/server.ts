@@ -147,6 +147,10 @@ export async function startServer(opts: StartServerOptions): Promise<ZhixingServ
   // 回填实际监听地址到 context，供 status 等端点读取
   ctx.listenAddr = { port: addr.port, host: addr.address };
 
+  void ctx.workflow?.recoverUnfinished().catch((err) => {
+    opts.onError?.(err, { method: "workflow.recoverUnfinished" });
+  });
+
   // 回填会话域组播——delta / complete / session.event / session.changed 经
   // observer 名册推送给会话的全部在场接入面(多端同看一个流式 turn 由此成立)。
   if (ctx.conversations) {

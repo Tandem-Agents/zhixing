@@ -427,4 +427,50 @@ describe("WorkflowScheduler", () => {
       },
     ]);
   });
+
+  it("scopes decision conditions to the node run iteration that produced them", () => {
+    const wf = validated(
+      [node("draft"), node("review", { kind: "gate" }), node("done")],
+      [
+        { from: "draft", to: "review", kind: "normal" },
+        {
+          from: "review",
+          to: "draft",
+          kind: "feedback",
+          condition: "needs_changes",
+          loopPolicy: {
+            maxIterations: 2,
+            stopCondition: "accepted",
+            failureExitNodeId: "done",
+          },
+        },
+        { from: "review", to: "done", kind: "conditional", condition: "accepted" },
+      ],
+    );
+    const scheduler = new WorkflowScheduler();
+
+    const plan = scheduler.plan({
+      validated: wf,
+      activeConditions: [
+        { conditionId: "needs_changes", nodeId: "review", iteration: 0 },
+        { conditionId: "accepted", nodeId: "review", iteration: 1 },
+      ],
+      nodeRuns: [
+        run("draft", "succeeded", { iteration: 0 }),
+        run("review", "succeeded", { iteration: 0 }),
+        run("draft", "succeeded", { iteration: 1 }),
+        run("review", "succeeded", { iteration: 1 }),
+      ],
+    });
+
+    expect(plan.ready).toEqual([
+      {
+        nodeId: "done",
+        iteration: 1,
+        attempt: 0,
+        triggeredByEdgeId: "review->done:conditional:2",
+        reason: "start",
+      },
+    ]);
+  });
 });
