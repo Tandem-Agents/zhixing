@@ -162,7 +162,7 @@ function formatNormalExitHint(info: ServerInfoResult | null): string | null {
     keepAlive > 0 ? `已启用定时任务 ${keepAlive}` : "",
   ].filter(Boolean);
   if (parts.length === 0) return null;
-  return `已退出当前终端；知行仍在后台处理：${parts.join("；")}。需要停止请输入 /stop。`;
+  return `已退出当前终端；知行仍在后台处理：${parts.join("；")}。如需停止服务，请在终端运行 zz stop；或重新打开 zz 后在交互模式输入 /stop。`;
 }
 
 export function renderCoreHostPersistentLifecycleNotice(
