@@ -106,6 +106,19 @@ export class WorkflowManager {
   }
 
   async start(input: StartWorkflowInput): Promise<WorkflowInstance> {
+    const instance = await this.createInstance(input);
+    return this.advance(instance.instanceId);
+  }
+
+  async startDetached(input: StartWorkflowInput): Promise<WorkflowInstance> {
+    const instance = await this.createInstance(input);
+    this.advanceDetached(instance.instanceId);
+    return instance;
+  }
+
+  private async createInstance(
+    input: StartWorkflowInput,
+  ): Promise<WorkflowInstance> {
     this.assertStartInput(input);
     const validated = this.validator.validate(input.definition);
     const now = this.now();
@@ -128,7 +141,7 @@ export class WorkflowManager {
     };
 
     await this.store.create(instance);
-    return this.advance(instanceId);
+    return instance;
   }
 
   get(instanceId: string): Promise<WorkflowInstance | null> {
@@ -140,9 +153,24 @@ export class WorkflowManager {
   }
 
   async decide(input: ResolveWorkflowDecisionInput): Promise<WorkflowInstance> {
+    await this.resolveDecision(input);
+    return this.advance(input.instanceId);
+  }
+
+  async decideDetached(
+    input: ResolveWorkflowDecisionInput,
+  ): Promise<WorkflowInstance> {
+    const instance = await this.resolveDecision(input);
+    this.advanceDetached(input.instanceId);
+    return instance;
+  }
+
+  private async resolveDecision(
+    input: ResolveWorkflowDecisionInput,
+  ): Promise<WorkflowInstance> {
     this.assertDecisionInput(input);
     await this.requireInstance(input.instanceId);
-    await this.store.update(input.instanceId, (instance) => {
+    return this.store.update(input.instanceId, (instance) => {
       const decision = instance.decisions.find(
         (entry) => entry.decisionId === input.decisionId,
       );
@@ -217,8 +245,6 @@ export class WorkflowManager {
         updatedAt: now,
       };
     });
-
-    return this.advance(input.instanceId);
   }
 
   async cancel(instanceId: string, reason: string): Promise<void> {
@@ -248,6 +274,12 @@ export class WorkflowManager {
 
   resume(instanceId: string): Promise<WorkflowInstance> {
     return this.advance(instanceId);
+  }
+
+  async resumeDetached(instanceId: string): Promise<WorkflowInstance> {
+    const instance = await this.requireInstance(instanceId);
+    this.advanceDetached(instanceId);
+    return instance;
   }
 
   async recoverUnfinished(): Promise<WorkflowInstance[]> {
@@ -310,6 +342,16 @@ export class WorkflowManager {
           runs.map((run) => this.executeNodeRun(instanceId, run)),
         );
       }
+    });
+  }
+
+  private advanceDetached(instanceId: string): void {
+    void this.advance(instanceId).catch((error) => {
+      void this.failInstance(instanceId, {
+        code: "workflow.detached_advance_failed",
+        message: error instanceof Error ? error.message : String(error),
+        recoverable: true,
+      }).catch(() => {});
     });
   }
 

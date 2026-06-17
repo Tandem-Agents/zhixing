@@ -21,6 +21,7 @@ import { runStopCommand } from "./serve/stop.js";
 import { runStatusCommand } from "./serve/status.js";
 import { runLogsCommand } from "./serve/logs.js";
 import { runRpcCommand, printRpcHelp } from "./rpc/command.js";
+import { runWorkCommand, type WorkCommandInput } from "./work/command.js";
 import { ZHIXING_CLI_VERSION } from "./version.js";
 
 /**
@@ -102,6 +103,16 @@ async function handleStatusAction(): Promise<void> {
   }
 }
 
+async function handleWorkAction(input: WorkCommandInput): Promise<void> {
+  try {
+    const exitCode = await runWorkCommand(input);
+    process.exit(exitCode);
+  } catch (err) {
+    renderError(err, stdoutWriter);
+    process.exit(1);
+  }
+}
+
 program
   .name("zhixing")
   .description("知行 — 智能体引擎")
@@ -148,6 +159,82 @@ program
   .command("stop")
   .description("停止知行")
   .action(handleStopAction);
+
+// ─── zhixing work（复杂任务可靠执行入口） ───
+const workCmd = program
+  .command("work")
+  .description("用可靠流程处理复杂任务");
+
+workCmd
+  .command("start <goal...>")
+  .description("启动一个复杂任务")
+  .option("--context <text>", "补充上下文")
+  .option("--watch", "持续查看直到需要裁决或结束")
+  .action((goalParts: string[], options: { context?: string; watch?: boolean }) =>
+    handleWorkAction({
+      kind: "start",
+      goal: goalParts.join(" "),
+      ...(options.context !== undefined ? { context: options.context } : {}),
+      watch: options.watch === true,
+    }),
+  );
+
+workCmd
+  .command("status <instanceId>")
+  .description("查看复杂任务状态")
+  .option("--watch", "持续查看直到需要裁决或结束")
+  .action((instanceId: string, options: { watch?: boolean }) =>
+    handleWorkAction({
+      kind: "status",
+      instanceId,
+      watch: options.watch === true,
+    }),
+  );
+
+workCmd
+  .command("decide <instanceId> <optionId>")
+  .description("提交复杂任务裁决")
+  .option("--decision <decisionId>", "待裁决项 id")
+  .option("--rationale <text>", "裁决依据")
+  .option("--watch", "提交后持续查看直到需要裁决或结束")
+  .action((
+    instanceId: string,
+    optionId: string,
+    options: { decision?: string; rationale?: string; watch?: boolean },
+  ) =>
+    handleWorkAction({
+      kind: "decide",
+      instanceId,
+      optionId,
+      ...(options.decision !== undefined ? { decisionId: options.decision } : {}),
+      ...(options.rationale !== undefined ? { rationale: options.rationale } : {}),
+      watch: options.watch === true,
+    }),
+  );
+
+workCmd
+  .command("resume <instanceId>")
+  .description("恢复复杂任务推进")
+  .option("--watch", "持续查看直到需要裁决或结束")
+  .action((instanceId: string, options: { watch?: boolean }) =>
+    handleWorkAction({
+      kind: "resume",
+      instanceId,
+      watch: options.watch === true,
+    }),
+  );
+
+workCmd
+  .command("cancel <instanceId>")
+  .description("取消复杂任务")
+  .option("--reason <text>", "取消原因")
+  .action((instanceId: string, options: { reason?: string }) =>
+    handleWorkAction({
+      kind: "cancel",
+      instanceId,
+      ...(options.reason !== undefined ? { reason: options.reason } : {}),
+    }),
+  );
 
 // ─── zhixing rpc <method> [args]（连接 server 的 RPC 客户端） ───
 //

@@ -18,6 +18,7 @@ interface WorkflowStartParams {
   definition?: unknown;
   definitionId?: unknown;
   origin?: unknown;
+  detach?: unknown;
 }
 
 interface WorkflowInstanceParams {
@@ -30,11 +31,16 @@ interface WorkflowDecisionParams {
   resultOptionId?: unknown;
   actor?: unknown;
   rationale?: unknown;
+  detach?: unknown;
 }
 
 interface WorkflowCancelParams {
   instanceId?: unknown;
   reason?: unknown;
+}
+
+interface WorkflowResumeParams extends WorkflowInstanceParams {
+  detach?: unknown;
 }
 
 export function buildWorkflowStartMethod(): MethodEntry {
@@ -60,7 +66,11 @@ export function buildWorkflowStartMethod(): MethodEntry {
               ),
         origin: params.origin as JsonValue | undefined,
       };
-      return runWorkflowCall(() => requireWorkflow(ctx.server).start(input));
+      return runWorkflowCall(() =>
+        params.detach === true
+          ? requireWorkflow(ctx.server).startDetached(input)
+          : requireWorkflow(ctx.server).start(input),
+      );
     },
   };
 }
@@ -86,29 +96,32 @@ export function buildWorkflowDecideMethod(): MethodEntry {
     requiresAuth: true,
     async handler(rawParams, ctx) {
       const params = (rawParams ?? {}) as WorkflowDecisionParams;
+      const input = {
+        instanceId: requireNonEmptyString(
+          params.instanceId,
+          "workflow.decide requires 'instanceId'",
+        ),
+        decisionId: requireNonEmptyString(
+          params.decisionId,
+          "workflow.decide requires 'decisionId'",
+        ),
+        resultOptionId: requireNonEmptyString(
+          params.resultOptionId,
+          "workflow.decide requires 'resultOptionId'",
+        ),
+        actor: requireDecisionActor(params.actor),
+      };
+      const rationale = params.rationale === undefined
+        ? undefined
+        : requireNonEmptyString(
+            params.rationale,
+            "workflow.decide 'rationale' must be a non-empty string",
+          );
+      const decisionInput = rationale === undefined ? input : { ...input, rationale };
       return runWorkflowCall(() =>
-        requireWorkflow(ctx.server).decide({
-          instanceId: requireNonEmptyString(
-            params.instanceId,
-            "workflow.decide requires 'instanceId'",
-          ),
-          decisionId: requireNonEmptyString(
-            params.decisionId,
-            "workflow.decide requires 'decisionId'",
-          ),
-          resultOptionId: requireNonEmptyString(
-            params.resultOptionId,
-            "workflow.decide requires 'resultOptionId'",
-          ),
-          actor: requireDecisionActor(params.actor),
-          rationale:
-            params.rationale === undefined
-              ? undefined
-              : requireNonEmptyString(
-                  params.rationale,
-                  "workflow.decide 'rationale' must be a non-empty string",
-                ),
-        }),
+        params.detach === true
+          ? requireWorkflow(ctx.server).decideDetached(decisionInput)
+          : requireWorkflow(ctx.server).decide(decisionInput),
       );
     },
   };
@@ -141,14 +154,15 @@ export function buildWorkflowResumeMethod(): MethodEntry {
     name: "workflow.resume",
     requiresAuth: true,
     async handler(rawParams, ctx) {
-      const params = (rawParams ?? {}) as WorkflowInstanceParams;
+      const params = (rawParams ?? {}) as WorkflowResumeParams;
+      const instanceId = requireNonEmptyString(
+        params.instanceId,
+        "workflow.resume requires 'instanceId'",
+      );
       return runWorkflowCall(() =>
-        requireWorkflow(ctx.server).resume(
-          requireNonEmptyString(
-            params.instanceId,
-            "workflow.resume requires 'instanceId'",
-          ),
-        ),
+        params.detach === true
+          ? requireWorkflow(ctx.server).resumeDetached(instanceId)
+          : requireWorkflow(ctx.server).resume(instanceId),
       );
     },
   };
@@ -199,7 +213,7 @@ function requireNonEmptyString(value: unknown, message: string): string {
   return value;
 }
 
-function requireDecisionActor(value: unknown) {
+function requireDecisionActor(value: unknown): "human" | "agent" | "rule" {
   if (value === "human" || value === "agent" || value === "rule") return value;
   throw RpcErrors.invalidParams(
     "workflow.decide requires 'actor' of human, agent, or rule",

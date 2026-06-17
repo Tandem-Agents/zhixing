@@ -18,6 +18,7 @@ import {
   type IConfirmationBroker,
   type IEventBus,
   type Message,
+  DefaultNodeExecutorRegistry,
   type RunResult,
   type ToolResultBlock,
   type IPermissionStore,
@@ -34,6 +35,7 @@ import {
   type TurnContext,
   type TurnContextProvider,
   type TurnSource,
+  type NodeExecutorRegistry,
   type WatchdogPolicy,
   buildRunRecord,
   BoundaryRegistry,
@@ -110,6 +112,13 @@ import {
   type OnBlockedFn,
   type OnUserDeniedFn,
 } from "../security/secure-executor.js";
+import {
+  AgentNodeExecutor,
+  GateNodeExecutor,
+  JoinNodeExecutor,
+  ToolNodeExecutor,
+  TransformNodeExecutor,
+} from "../workflow/index.js";
 import { trackMessages } from "./track-messages.js";
 import { runContextStorage } from "./run-context.js";
 import { createTaskTool } from "../tools/task.js";
@@ -276,6 +285,13 @@ export interface AgentRuntime {
   readonly resolvedWorkspace: ResolvedWorkspace;
   /** 工作区目录状态（exists/created/skipped），供启动展示区分场景 */
   readonly workspaceDirStatus: WorkspaceDirStatus;
+  /**
+   * 基于当前运行体的 provider / tools / security / broker 资产创建 Workflow 节点执行器。
+   * 调用方只拿到 core 层 registry，不需要也不应该读取运行体内部装配闭包。
+   */
+  createWorkflowNodeExecutorRegistry(
+    options?: WorkflowNodeExecutorRegistryOptions,
+  ): NodeExecutorRegistry;
   /** 注册 per-turn 上下文 provider（如 SchedulerProvider），支持后注册 */
   registerTurnContextProvider(provider: TurnContextProvider): void;
   /**
@@ -316,6 +332,12 @@ export interface AgentRuntime {
    * agent-loop 的 windowLifecycle.onChange 驱动。
    */
   onAttentionWindowChange(reason: AttentionWindowChangeReason): Promise<void>;
+}
+
+export interface WorkflowNodeExecutorRegistryOptions {
+  readonly parentLineage?: string;
+  readonly userIntent?: string;
+  readonly turnContext?: TurnContext;
 }
 
 export interface RuntimeSecuritySnapshot {
@@ -1051,6 +1073,53 @@ export async function createAgentRuntime(
     confirmationBroker,
     resolvedWorkspace: workspace,
     workspaceDirStatus,
+
+    createWorkflowNodeExecutorRegistry(
+      registryOptions: WorkflowNodeExecutorRegistryOptions = {},
+    ): NodeExecutorRegistry {
+      const parentLineage = registryOptions.parentLineage ?? "workflow";
+      const workflowBus = createEventBus<AgentEventMap>({
+        lineage: parentLineage,
+      });
+      const registry = new DefaultNodeExecutorRegistry();
+      registry.register(
+        new AgentNodeExecutor({
+          provider: roles[primaryRole].provider,
+          model: roles[primaryRole].model,
+          loopThinking: primaryThinking,
+          roleThinking,
+          llmRoles: roles,
+          securityPipeline,
+          workspace: workspace.path,
+          workspaceSource: workspace.source,
+          globalConfigPath: getGlobalConfigPath(),
+          parentBus: workflowBus,
+          parentLineage,
+          parentBroker: confirmationBroker,
+          parentTools: baseTools,
+          userIntent: registryOptions.userIntent,
+          riskMaxTokens: primaryModelCapability.riskMaxTokens,
+        }),
+      );
+      registry.register(
+        new ToolNodeExecutor({
+          tools: baseTools,
+          securityPipeline,
+          workingDirectory: workspace.path ?? process.cwd(),
+          confirmationBroker,
+          eventBus: workflowBus,
+          sessionType,
+          confirmationFallback: options.confirmationFallback,
+          turnContext: registryOptions.turnContext,
+          llmRoles: roles,
+          roleThinking,
+        }),
+      );
+      registry.register(new GateNodeExecutor());
+      registry.register(new JoinNodeExecutor());
+      registry.register(new TransformNodeExecutor());
+      return registry;
+    },
 
     registerTurnContextProvider(provider: TurnContextProvider): void {
       turnContextInjector.register(provider);

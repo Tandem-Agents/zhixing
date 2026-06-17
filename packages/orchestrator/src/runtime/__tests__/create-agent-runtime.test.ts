@@ -43,7 +43,10 @@ import {
   type LLMRoles,
   type AgentEventMap,
   type Message,
+  type NodeExecutionContext,
   type ToolDefinition,
+  type WorkflowNode,
+  type WorkflowNodeRun,
 } from "@zhixing/core";
 import type { RoleDegradation } from "@zhixing/providers";
 
@@ -1555,6 +1558,54 @@ describe("createAgentRuntime · 生命周期钩子", () => {
     });
     await runtime.dispose("assembly-rollback");
     expect(closes).toEqual(["assembly-rollback"]);
+  });
+});
+
+describe("createAgentRuntime · Workflow 执行器装配", () => {
+  it("基于当前运行体资产创建 registry，且 tool 节点不暴露 Task surface", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
+    const runtime = await createAgentRuntime({});
+
+    const registry = runtime.createWorkflowNodeExecutorRegistry();
+
+    expect(registry.has("workflow.agent")).toBe(true);
+    expect(registry.has("workflow.tool")).toBe(true);
+    expect(registry.has("workflow.gate")).toBe(true);
+    expect(registry.has("workflow.join")).toBe(true);
+    expect(registry.has("workflow.transform")).toBe(true);
+
+    const toolExecutor = registry.get("workflow.tool");
+    expect(toolExecutor).toBeDefined();
+    const result = await toolExecutor!.run({
+      node: {
+        nodeId: "call-task",
+        kind: "tool",
+        executor: {
+          executorId: "workflow.tool",
+          config: {
+            toolName: "Task",
+            input: { description: "nested task", prompt: "do nested work" },
+          },
+        },
+      } as WorkflowNode,
+      nodeRun: {
+        nodeRunId: "run-1",
+        nodeId: "call-task",
+        iteration: 0,
+        attempt: 0,
+        status: "running",
+      } as WorkflowNodeRun,
+      input: { instance: {}, nodes: {}, constants: [] },
+    } satisfies NodeExecutionContext);
+
+    expect(result).toEqual({
+      status: "failed",
+      error: {
+        code: "workflow.tool_missing",
+        message: "Workflow tool not registered: Task",
+        recoverable: true,
+      },
+    });
   });
 });
 
