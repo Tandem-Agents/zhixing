@@ -372,7 +372,11 @@ async function handleBrokerPath(params: {
     stewardReason,
   });
 
-  const decision = await broker.requestConfirmation(request);
+  const decision = await requestConfirmationWithAbort(
+    broker,
+    request,
+    context.abortSignal,
+  );
 
   switch (decision.kind) {
     case "deny": {
@@ -442,6 +446,30 @@ async function handleBrokerPath(params: {
         toolName,
         "not-implemented",
       );
+  }
+}
+
+async function requestConfirmationWithAbort(
+  broker: IConfirmationBroker,
+  request: ReturnType<typeof buildConfirmationRequest>,
+  signal: AbortSignal | undefined,
+): Promise<ConfirmationDecision> {
+  const pending = broker.requestConfirmation(request);
+  if (!signal) return pending;
+
+  if (signal.aborted) {
+    broker.cancel(request.id, "aborted");
+    return { kind: "cancelled", cause: "aborted" };
+  }
+
+  const onAbort = () => {
+    broker.cancel(request.id, "aborted");
+  };
+  signal.addEventListener("abort", onAbort, { once: true });
+  try {
+    return await pending;
+  } finally {
+    signal.removeEventListener("abort", onAbort);
   }
 }
 
