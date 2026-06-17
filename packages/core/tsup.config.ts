@@ -14,6 +14,7 @@ export default defineConfig({
     "src/confirmation/index.ts",
     "src/identity/index.ts",
     "src/scheduler/index.ts",
+    "src/workflow/index.ts",
   ],
   format: ["esm"],
   dts: true,

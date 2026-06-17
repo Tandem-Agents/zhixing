@@ -47,6 +47,10 @@
     "./conversation": {
       "types": "./dist/conversation/index.d.ts",
       "import": "./dist/conversation/index.js"
+    },
+    "./workflow": {
+      "types": "./dist/workflow/index.d.ts",
+      "import": "./dist/workflow/index.js"
     }
   },
   "files": [
