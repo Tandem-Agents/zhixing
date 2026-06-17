@@ -598,6 +598,37 @@ Workflow 必须复用现有安全体系:
 
 ### 9. 首个可执行切片
 
+#### 能力层级与模板定位
+
+层级应该是:
+
+1. **Workflow 基座**:定义、校验、调度、状态、节点执行、裁决、恢复。
+2. **模板层**:复杂编程质量流、研究流、写作流、产品设计流等。
+3. **选择 / 导演层**:判断当前任务该不该用 Workflow、用哪个模板、是否需要切工作场景。
+4. **接入 / 体验层**:在对话里自然呈现进度、裁决、结果。
+
+这个 seed 在第 2 层。
+
+真正缺的是第 3 层:根据 main / 工作模式 / 场景 / 任务类型选择正确工作方法。
+
+因此,复杂编程质量流 seed definition 不是 Workflow 顶层设计,不是用户入口,也不是 Workflow 能否运行的前提。它只是一套具体的编程质量方法,用来验证基座并为后续选择 / 导演层提供可复用模板。
+
+#### 内部运行底座装配边界
+
+Workflow 需要一组只面向宿主和接入面投影的内部运行能力。它们不是用户入口,也不是用户需要学习的操作方式;用户体验仍应由选择 / 导演层和对话内投影层承接。
+
+1. **宿主内 WorkflowManager 装配**:宿主启动时创建 `WorkflowManager`,接入 `JsonWorkflowStore`、`DefinitionValidator` 和节点执行器注册表。作用是让 workflow 状态和推进有统一 owner,避免接入面拥有状态。
+2. **runtime 到节点执行器注册表的装配桥**:`createWorkflowNodeExecutorRegistry()` 用当前 runtime 的 provider、模型、工具、安全管线、confirmation broker 和 EventBus lineage 创建 `AgentNodeExecutor`、`ToolNodeExecutor`、`GateNodeExecutor`、`JoinNodeExecutor`、`TransformNodeExecutor`。作用是保持 server 不反向依赖 orchestrator,同时让 WorkflowManager 拿到真实执行能力。
+3. **detached 推进能力**:`startDetached`、`decideDetached`、`resumeDetached` 允许发起方提交动作后立即拿到 snapshot,后续推进由 WorkflowManager 在宿主内继续执行。作用是支撑长流程、等待裁决、恢复和对话内观察,避免接入面阻塞到下一次裁决或终态。
+4. **workflow RPC 内部控制面**:`workflow.start/get/decide/cancel/resume` 保留为内部控制面,供未来选择 / 导演层和接入面投影调用。它不是用户要直接学习的命令。
+
+边界:
+
+1. 这些能力不得被包装成外部用户命令。
+2. 当前执行器注册表从宿主 runtime 资产创建,只能作为内部装配桥;未来选择 / 导演层必须根据 main / 工作场景 / 场景类型 / workdir / 工具能力选择正确执行上下文。
+3. 编程质量 seed 只能在合适的编程工作场景中被选择;main 模式和其他工作场景不能默认套用它。
+4. 如果未来决定移除这组内部运行能力,清理范围必须覆盖:宿主的 WorkflowManager 装配、runtime 的 `createWorkflowNodeExecutorRegistry`、server workflow RPC 的 detached 参数、WorkflowManager detached 方法和对应测试。
+
 首个可执行切片应服务于当前最真实、最高价值的场景:复杂编程任务质量流。
 
 它不是把代码审查流焊进引擎,而是用一个种子模板验证引擎能力。
