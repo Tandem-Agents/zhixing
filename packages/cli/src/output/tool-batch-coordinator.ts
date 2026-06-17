@@ -49,6 +49,10 @@
 import type { CliWriter } from "../screen/index.js";
 import type { ReplaceableSegmentHandle } from "../screen/screen-controller.js";
 import {
+  formatFileDiffSummary,
+  renderFileDiffBlock,
+} from "../diff/diff-block-renderer.js";
+import {
   type BatchEventSnapshot,
   formatBatchDetailLine,
   formatBatchSummary,
@@ -129,6 +133,7 @@ export interface ToolBatchCoordinator {
 
 interface CreateToolBatchCoordinatorOptions {
   readonly writer: CliWriter;
+  readonly columns?: () => number;
 }
 
 interface BatchState {
@@ -144,6 +149,8 @@ export function createToolBatchCoordinator(
   options: CreateToolBatchCoordinatorOptions,
 ): ToolBatchCoordinator {
   const { writer } = options;
+  const getColumns = (): number =>
+    options.columns?.() ?? process.stdout.columns ?? 80;
   let state: BatchState | null = null;
 
   /**
@@ -207,10 +214,25 @@ export function createToolBatchCoordinator(
       // 复用 batch detail 行格式：`Action target · result` —— 与 batch 详情行的
       // 排版完全一致，让用户在视觉上感知「同一信息密度的工具行」，差异仅在 ✎ 锚
       // 和「永不折叠 + 独立成段」的语义
-      const line = formatBatchDetailLine(event);
+      const artifact =
+        event.result.presentation?.kind === "file-diff"
+          ? event.result.presentation
+          : null;
+      const line =
+        artifact === null
+          ? formatBatchDetailLine(event)
+          : formatFileDiffSummary(artifact);
       writer.line(
         `${layout.contentPrefix}${sideEffectAnchor()} ${tone.dim(line)}`,
       );
+      if (artifact !== null) {
+        for (const diffLine of renderFileDiffBlock({
+          artifact,
+          columns: getColumns(),
+        })) {
+          writer.line(diffLine);
+        }
+      }
     },
 
     recordFailure(event) {

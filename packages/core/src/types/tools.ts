@@ -211,16 +211,65 @@ export interface ToolExecutionContext {
   roleThinking?: ResolvedRoleThinking;
 }
 
+export type ToolPresentationArtifact = FileDiffPresentationArtifact;
+
+export interface FileDiffPresentationArtifact {
+  kind: "file-diff";
+  path: string;
+  operation: "created" | "modified" | "deleted" | "overwritten";
+  changeStats: FileDiffChangeStats;
+  hunks: FileDiffHunk[];
+  truncated?: boolean;
+}
+
+export type FileDiffChangeStats =
+  | {
+      kind: "exact";
+      addedLines: number;
+      removedLines: number;
+    }
+  | {
+      kind: "unavailable";
+      reason: "input-too-large";
+    };
+
+export interface FileDiffHunk {
+  oldStart: number;
+  oldLines: number;
+  newStart: number;
+  newLines: number;
+  lines: FileDiffLine[];
+}
+
+export type FileDiffLine =
+  | {
+      type: "context";
+      oldLineNumber: number;
+      newLineNumber: number;
+      content: string;
+    }
+  | {
+      type: "added";
+      newLineNumber: number;
+      content: string;
+    }
+  | {
+      type: "removed";
+      oldLineNumber: number;
+      content: string;
+    };
+
 /**
  * 工具执行结果
  */
 export interface ToolResult {
   content: string;
   isError?: boolean;
+  presentation?: ToolPresentationArtifact;
 
   /**
    * 提示调用方：本工具已通过 `ToolExecutionContext.commitToUser` 向用户发出可视化反馈，
-   * LLM 应避免再次叙述（参见 ADR-007 Phase 2 / 系统提示中的 commitment 抑制段）。
+   * LLM 应避免再次叙述（参见系统提示中的 commitment 抑制段）。
    *
    * 仅在工具实际调用了 commitToUser 且承诺已发送/入队后置为 true。
    */

@@ -22,6 +22,7 @@
   "dependencies": {
     "@zhixing/core": "workspace:*",
     "@zhixing/network": "workspace:*",
+    "diff": "^9.0.0",
     "glob": "^13.0.6",
     "turndown": "^7.2.0"
   },

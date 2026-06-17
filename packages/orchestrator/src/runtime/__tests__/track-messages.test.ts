@@ -70,6 +70,49 @@ describe("trackMessages", () => {
     expect(pending).toHaveLength(0);
   });
 
+  it("tool_end 的 presentation 不进入 transcript", () => {
+    const { newMessages, pending } = fresh();
+
+    trackMessages(
+      {
+        type: "tool_end",
+        id: "edit-1",
+        name: "edit",
+        duration: 12,
+        result: {
+          content: "Replaced text",
+          presentation: {
+            kind: "file-diff",
+            path: "a.ts",
+            operation: "modified",
+            changeStats: { kind: "exact", addedLines: 1, removedLines: 1 },
+            hunks: [],
+          },
+        },
+      },
+      newMessages,
+      pending,
+    );
+    trackMessages(
+      {
+        type: "turn_complete",
+        turnCount: 1,
+        usage: { inputTokens: 0, outputTokens: 0 },
+      },
+      newMessages,
+      pending,
+    );
+
+    const blocks = newMessages[0]?.content as ToolResultBlock[];
+    expect(blocks[0]).toEqual({
+      type: "tool_result",
+      toolUseId: "edit-1",
+      content: "Replaced text",
+      isError: undefined,
+    });
+    expect(JSON.stringify(blocks)).not.toContain("file-diff");
+  });
+
   it("turn_complete 时 pending 为空 → 不 push 空 user 消息", () => {
     const { newMessages, pending } = fresh();
     trackMessages(

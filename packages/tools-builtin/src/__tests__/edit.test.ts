@@ -39,6 +39,11 @@ describe("Edit Tool", () => {
 
       expect(result.isError).toBeUndefined();
       expect(result.content).toContain("Replaced");
+      expect(result.presentation).toMatchObject({
+        kind: "file-diff",
+        operation: "modified",
+        changeStats: { kind: "exact", addedLines: 1, removedLines: 1 },
+      });
       expect(await readFixture("hello.txt")).toBe("goodbye world");
     });
 
@@ -96,6 +101,13 @@ describe("Edit Tool", () => {
 
       expect(result.isError).toBeUndefined();
       expect(result.content).toContain("Deleted");
+      expect(result.presentation?.kind).toBe("file-diff");
+      if (result.presentation?.kind === "file-diff") {
+        expect(result.presentation.changeStats.kind).toBe("exact");
+        if (result.presentation.changeStats.kind === "exact") {
+          expect(result.presentation.changeStats.removedLines).toBeGreaterThan(0);
+        }
+      }
       expect(await readFixture("delete.txt")).toBe("keep this keep this too");
     });
 

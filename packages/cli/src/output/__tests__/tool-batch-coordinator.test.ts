@@ -125,6 +125,43 @@ function mkFailure(
   };
 }
 
+function mkDiffSuccess(): BatchEventSnapshot {
+  return {
+    name: "edit",
+    input: { path: "auth.ts" },
+    result: {
+      content: "applied",
+      presentation: {
+        kind: "file-diff",
+        path: "src/auth.ts",
+        operation: "modified",
+        changeStats: { kind: "exact", addedLines: 1, removedLines: 1 },
+        hunks: [
+          {
+            oldStart: 4,
+            oldLines: 2,
+            newStart: 4,
+            newLines: 2,
+            lines: [
+              {
+                type: "removed",
+                oldLineNumber: 4,
+                content: "const role = 'user';",
+              },
+              {
+                type: "added",
+                newLineNumber: 4,
+                content: "const role = 'admin';",
+              },
+            ],
+          },
+        ],
+      },
+    },
+    duration: 42,
+  };
+}
+
 /** 最后一个 seg.replace 的 stripped 文本——便于断言渲染内容 */
 function lastReplaceText(writer: ChromeMockWriter): string {
   for (let i = writer.events.length - 1; i >= 0; i--) {
@@ -362,6 +399,26 @@ describe("ToolBatchCoordinator · 副作用工具 recordSideEffect（独立成�
     );
     const kinds = writer.events.map((e) => e.kind);
     expect(kinds).toEqual(["seg.commit", "ensureSegmentBreak", "line"]);
+  });
+
+  it("有 file-diff presentation 时在副作用行下挂 hunk block", () => {
+    const writer = makeChromeMock();
+    const coord = createToolBatchCoordinator({
+      writer,
+      columns: () => 100,
+    });
+    coord.recordSideEffect(mkDiffSuccess());
+
+    const lineTexts = writer.events
+      .filter((e): e is Event & { kind: "line" } => e.kind === "line")
+      .map((e) => stripAnsi(e.text));
+
+    expect(lineTexts).toHaveLength(4);
+    expect(lineTexts[0]).toContain("✎");
+    expect(lineTexts[0]).toContain("Modified auth.ts · +1 -1");
+    expect(lineTexts[1]).toContain("@@ -4,2 +4,2 @@");
+    expect(lineTexts[2]).toContain("- const role = 'user';");
+    expect(lineTexts[3]).toContain("4 + const role = 'admin';");
   });
 
   it("recordSideEffect 后 recordSuccess → 起新探索 batch（副作用不污染 batch）", () => {

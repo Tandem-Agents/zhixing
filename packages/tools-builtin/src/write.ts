@@ -12,6 +12,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { ToolDefinition, ToolResult } from "@zhixing/core";
+import { buildFileDiffArtifact } from "./file-diff.js";
 import { resolveToolPath } from "./utils.js";
 
 export function createWriteTool(): ToolDefinition {
@@ -50,6 +51,8 @@ export function createWriteTool(): ToolDefinition {
         return { content: 'Parameter "content" must be a string.', isError: true };
       }
 
+      const existing = await readExistingText(filePath);
+
       try {
         const dir = path.dirname(filePath);
         await fs.mkdir(dir, { recursive: true });
@@ -59,6 +62,16 @@ export function createWriteTool(): ToolDefinition {
         const lineCount = content.split("\n").length;
         return {
           content: `Successfully wrote ${content.length} chars (${lineCount} lines) to ${filePath}`,
+          ...(existing.readable
+            ? {
+                presentation: buildFileDiffArtifact({
+                  path: filePath,
+                  operation: existing.exists ? "overwritten" : "created",
+                  beforeText: existing.content,
+                  afterText: content,
+                }),
+              }
+            : {}),
         };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
@@ -71,4 +84,23 @@ export function createWriteTool(): ToolDefinition {
       }
     },
   };
+}
+
+type ExistingText =
+  | { readable: true; exists: boolean; content: string }
+  | { readable: false };
+
+async function readExistingText(filePath: string): Promise<ExistingText> {
+  try {
+    return {
+      readable: true,
+      exists: true,
+      content: await fs.readFile(filePath, "utf-8"),
+    };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return { readable: true, exists: false, content: "" };
+    }
+    return { readable: false };
+  }
 }

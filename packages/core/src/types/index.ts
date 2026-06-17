@@ -28,8 +28,13 @@ export {
 export type {
   JsonSchema,
   JsonSchemaProperty,
+  FileDiffChangeStats,
+  FileDiffHunk,
+  FileDiffLine,
+  FileDiffPresentationArtifact,
   ToolDefinition,
   ToolExecutionContext,
+  ToolPresentationArtifact,
   ToolResult,
   ToolSpec,
   TurnContext,

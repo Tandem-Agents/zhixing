@@ -187,7 +187,10 @@ export function createOutputRenderer(
     options.columns ?? process.stdout.columns ?? 80;
   const markdownMode: MarkdownMode = options.markdownMode ?? "render";
   let mdStream: MarkdownStream | null = null;
-  const batchCoordinator = createToolBatchCoordinator({ writer });
+  const batchCoordinator = createToolBatchCoordinator({
+    writer,
+    columns: getColumns,
+  });
 
   /**
    * 已开始但未完成的工具调用 input 缓存——AgentYield.tool_end 不携带 input，

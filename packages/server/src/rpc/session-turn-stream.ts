@@ -6,7 +6,10 @@
  * 接入面复用同一投影语义,避免入口各自消费 generator 后产生漂移。
  */
 
-import type { RunResult } from "@zhixing/core";
+import {
+  stripPresentationFromAgentYield,
+  type RunResult,
+} from "@zhixing/core";
 import type { ManagedSession, ConversationManager } from "../runtime/conversation-manager.js";
 import { runTurnWithCommit, type RunTurnHooks } from "../runtime/run-turn.js";
 import type { RunTurnOptions } from "../runtime/types.js";
@@ -72,7 +75,7 @@ export async function projectSessionTurn(
         conversationId,
         sessionId: conversationId,
         turnId: opts.turnId,
-        delta: iter.value,
+        delta: stripPresentationFromAgentYield(iter.value),
       } satisfies SessionDeltaPayload);
     }
   } catch (err) {

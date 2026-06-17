@@ -2,6 +2,7 @@
 export { runAgentLoop, drainAgentLoop } from "./agent-loop.js";
 export { streamLLMCall } from "./llm-call.js";
 export { executeToolCalls, COMMITMENT_SIGNAL } from "./tool-executor.js";
+export { stripPresentationFromAgentYield } from "./presentation.js";
 export { MockLLMProvider, mockTextProvider, mockSequenceProvider } from "./mock-provider.js";
 export {
   buildRunRecord,

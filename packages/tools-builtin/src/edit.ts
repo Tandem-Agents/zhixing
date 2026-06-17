@@ -17,6 +17,7 @@
 
 import * as fs from "node:fs/promises";
 import type { ToolDefinition, ToolResult } from "@zhixing/core";
+import { buildFileDiffArtifact } from "./file-diff.js";
 import { resolveToolPath } from "./utils.js";
 
 const MAX_RESULT_CHARS = 5_000;
@@ -137,6 +138,12 @@ export function createEditTool(): ToolDefinition {
 
       return {
         content: `${verb} text in ${filePath}${countInfo}`,
+        presentation: buildFileDiffArtifact({
+          path: filePath,
+          operation: "modified",
+          beforeText: content,
+          afterText: newContent,
+        }),
       };
     },
   };

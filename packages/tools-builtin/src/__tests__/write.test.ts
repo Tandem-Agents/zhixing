@@ -24,6 +24,11 @@ describe("Write Tool", () => {
 
     expect(result.isError).toBeUndefined();
     expect(result.content).toContain("Successfully wrote");
+    expect(result.presentation).toMatchObject({
+      kind: "file-diff",
+      operation: "created",
+      changeStats: { kind: "exact", addedLines: 1, removedLines: 0 },
+    });
 
     const written = await fs.readFile(path.join(tmpDir, "new.txt"), "utf-8");
     expect(written).toBe("hello world");
@@ -39,6 +44,11 @@ describe("Write Tool", () => {
     );
 
     expect(result.isError).toBeUndefined();
+    expect(result.presentation).toMatchObject({
+      kind: "file-diff",
+      operation: "overwritten",
+      changeStats: { kind: "exact", addedLines: 1, removedLines: 1 },
+    });
     const written = await fs.readFile(filePath, "utf-8");
     expect(written).toBe("new content");
   });
