@@ -63,13 +63,6 @@ import {
   buildConfirmationListMethod,
   buildConfirmationResolveMethod,
 } from "./confirmation.js";
-import {
-  buildWorkflowCancelMethod,
-  buildWorkflowDecideMethod,
-  buildWorkflowGetMethod,
-  buildWorkflowResumeMethod,
-  buildWorkflowStartMethod,
-} from "./workflow.js";
 
 export interface BuiltinMethodsOptions {
   /** 后续阶段会注入更多依赖（scheduler 等） */
@@ -137,12 +130,6 @@ export function buildBuiltinRegistry(_opts: BuiltinMethodsOptions = {}): Handler
     // confirmation.*（远程权限确认：list / resolve —— RPC 客户端用；pending/resolved 推送由 ConfirmationBridge 处理）
     buildConfirmationListMethod(),
     buildConfirmationResolveMethod(),
-    // workflow.*（内部可靠工作流状态与协调面；展示与真实执行器接入在后续单元）
-    buildWorkflowStartMethod(),
-    buildWorkflowGetMethod(),
-    buildWorkflowDecideMethod(),
-    buildWorkflowCancelMethod(),
-    buildWorkflowResumeMethod(),
   ]);
   return registry;
 }

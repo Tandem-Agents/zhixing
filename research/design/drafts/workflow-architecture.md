@@ -1,5 +1,9 @@
 # Workflow 架构设计
 
+> 状态：已裁撤。本文保留为“声明式 Workflow 方向”的历史探索记录，不再是当前有效架构方案。
+>
+> 当前有效判断见 `research/design/drafts/requirement-thinking-workbench.md`：声明式 Workflow runtime 与 coding-quality seed 退回到零残留；后续方向不再是统一 workflow 引擎，而是基于 subagent 的“多视角发散收敛内功原语”和“复杂任务内建工作方法论”。
+
 ## 一、灵感来源
 
 ### 1. Claude Code 的 /workflows

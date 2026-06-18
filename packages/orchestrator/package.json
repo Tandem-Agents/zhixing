@@ -32,10 +32,6 @@
     "./tools": {
       "types": "./dist/tools/index.d.ts",
       "import": "./dist/tools/index.js"
-    },
-    "./workflow": {
-      "types": "./dist/workflow/index.d.ts",
-      "import": "./dist/workflow/index.js"
     }
   },
   "files": [

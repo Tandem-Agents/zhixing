@@ -9,7 +9,6 @@ export default defineConfig({
     "src/subagent/index.ts",
     "src/confirmation/index.ts",
     "src/tools/index.ts",
-    "src/workflow/index.ts",
   ],
   format: ["esm"],
   dts: true,

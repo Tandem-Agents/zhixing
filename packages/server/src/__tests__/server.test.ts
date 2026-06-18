@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { startServer, type ZhixingServerInstance } from "../server.js";
 import { createServerContext } from "../context.js";
 import { DEFAULT_SERVER_CONFIG } from "../types.js";
@@ -109,28 +109,5 @@ describe("HTTP Server (S2.B)", () => {
 
     // 替换 server 引用避免 afterEach 的双重 close
     server = newServer;
-  });
-
-  it("starts workflow recovery after listen without blocking startup", async () => {
-    await server.close();
-    let recovered!: () => void;
-    const recoveredPromise = new Promise<void>((resolve) => {
-      recovered = resolve;
-    });
-    const recoverUnfinished = vi.fn(async () => {
-      recovered();
-      return [];
-    });
-    const ctx = createServerContext({
-      config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
-      version: TEST_VERSION,
-      token: TEST_TOKEN,
-      workflow: { recoverUnfinished } as never,
-    });
-
-    server = await startServer({ context: ctx });
-    expect(server.port).toBeGreaterThan(0);
-    await recoveredPromise;
-    expect(recoverUnfinished).toHaveBeenCalledOnce();
   });
 });

@@ -42,7 +42,6 @@ export {
   type RunBusContext,
   type RunParams,
   type RunResult,
-  type WorkflowNodeExecutorRegistryOptions,
 } from "./create-agent-runtime.js";
 export {
   runContextStorage,

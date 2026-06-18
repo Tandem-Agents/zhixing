@@ -39,7 +39,6 @@ import {
   FsWorkSceneRegistry,
   parseConversationId,
   WORKSCENE_CONVERSATION_PREFIX,
-  DefinitionValidator,
   ShardedTranscriptStore,
   SnapshotStore,
   SkillStore,
@@ -58,8 +57,6 @@ import {
   CleanupRegistry,
   createRunEventForwarder,
   getDefaultLogPath,
-  JsonWorkflowStore,
-  WorkflowManager,
   SESSION_NOTIFICATIONS,
   type SessionChangedPayload,
   type SessionActivityBroadcast,
@@ -467,15 +464,6 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   //     confirmation 流动，故 attach 落在 textRenderer 接入面之后亦安全。
   confirmationHub.attach("ephemeral", ephemeralRuntime.confirmationBroker);
 
-  const workflowExecutors = ephemeralRuntime.createWorkflowNodeExecutorRegistry();
-  const workflowManager = new WorkflowManager({
-    store: new JsonWorkflowStore(),
-    executors: workflowExecutors,
-    validator: new DefinitionValidator({
-      allowedExecutors: workflowExecutors.list().map((executor) => executor.executorId),
-    }),
-  });
-
   // 4d. Scheduler 装配的恒定核心料件（eventBus / runRegistry / runAgentTurn / systemHandlers）。
   const schedulerEventBus = createEventBus<SchedulerEventMap>();
 
@@ -610,7 +598,6 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     trust: trustDirectory,
     skills: createSkillDirectory({ skillStore: serveSkillStore }),
     memory: memoryDirectory,
-    workflow: workflowManager,
     hostInfo: {
       // 宿主单点解析的工作区——接入面 @ 补全 root 取此
       workspace: ephemeralRuntime.resolvedWorkspace.path ?? undefined,

@@ -415,6 +415,30 @@ describe("createSecureExecuteTool", () => {
       expect(exec.callCount()).toBe(1);
     });
 
+    it("等待用户确认时 turn abort 会取消 broker pending 且不执行工具", async () => {
+      const broker = new ConfirmationBroker();
+      const exec = mockExecute();
+      const { pipeline } = makePipeline();
+      const controller = new AbortController();
+      broker.onRequest(() => {
+        queueMicrotask(() => controller.abort());
+      });
+
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: exec.fn,
+        broker,
+      });
+
+      await expect(
+        wrapped(makeTool("bash"), CONFIRM_TOOL_INPUT, {
+          ...makeContext(),
+          abortSignal: controller.signal,
+        }),
+      ).rejects.toThrow(SecurityBlockError);
+      expect(exec.callCount()).toBe(0);
+    });
+
     it("expired + 默认 fallback (deny) 抛错", async () => {
       const broker = new ConfirmationBroker();
       const exec = mockExecute();

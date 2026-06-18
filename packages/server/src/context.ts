@@ -26,7 +26,6 @@ import type {
   SkillDirectory,
   TrustDirectory,
 } from "./runtime/management-directories.js";
-import type { WorkflowManager } from "./workflow/index.js";
 
 export type ServerShutdownStrategy = "immediate" | "drain" | "cancel";
 
@@ -61,8 +60,6 @@ export interface ServerContext {
   skills?: SkillDirectory;
   /** 记忆域查看面。不传则 memory.* 不可用。 */
   memory?: MemoryDirectory;
-  /** Workflow 状态与协调 owner。不传则 workflow.* 方法不可用。 */
-  workflow?: WorkflowManager;
   /** 宿主装配信息(server.info 的运维字段:工作区 / 日志路径)。 */
   hostInfo?: { workspace?: string; logPath?: string };
   /**
@@ -144,7 +141,6 @@ export interface CreateContextOptions {
   trust?: TrustDirectory;
   skills?: SkillDirectory;
   memory?: MemoryDirectory;
-  workflow?: WorkflowManager;
   hostInfo?: { workspace?: string; logPath?: string };
   mcpStatuses?: ServerContext["mcpStatuses"];
   llmComplete?: (prompt: string, role?: "main" | "light") => Promise<string>;
@@ -169,7 +165,6 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     trust: opts.trust,
     skills: opts.skills,
     memory: opts.memory,
-    workflow: opts.workflow,
     hostInfo: opts.hostInfo,
     mcpStatuses: opts.mcpStatuses,
     llmComplete: opts.llmComplete,
