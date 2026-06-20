@@ -110,18 +110,23 @@ Claude Code 给主 agent 自己使用的一种编排能力。当主 agent 判断
 
 它们的共同底座是 subagent。所以方向不是做一个 graph 引擎，而是建在 subagent 上的两层薄能力：A 是 B 的构件。
 
-### 3. 当前 Workflow 模块不匹配
+### 3. 设计边界
+之前的 Workflow 模块的方向是：声明式 definition + 校验 + 调度 + 持久化 + 写死的 coding-quality 种子。
+这两个需求不应该被抽象成一个让用户理解、配置、管理的统一 workflow 引擎。
 
-当前 Workflow 模块的方向是：声明式 definition + 校验 + 调度 + 持久化 + 写死的 coding-quality 种子。
-
-它和这两个需求都不匹配：
-
+判断边界：
 1. 声明式引擎太重、要预定义，做不了需求 1 这种轻量、瞬时、用完即弃的内功。
 2. 把流程焊成 graph，也不是需求 2 想要的“可微调的工作方法”。
 3. coding-quality seed 把人的经验钉死成固定 DAG，正好违背“不能把流程写死”的真实需求。
 4. 继续改进这个引擎，会变成因为已经建了底座，所以反过来为它找产品理由。
 
-因此，重构第一步不是改进它，而是把声明式引擎和种子砍掉或封存，回到 subagent 地基。
+
+1. 需求 1 要的是轻量、瞬时、用完即弃的质量增强，不是预定义流程。
+2. 需求 2 要的是可微调的工作方法，不是固定节点和固定内容。
+3. 稳定的是方法骨架，动态的是每一步的内容、视角、提示词和收敛标准。
+4. 如果一个方案需要先解释“workflow 是什么、怎么配置、怎么启动”，它就已经偏离了需求本质。
+
+正确方向是把复杂性吞进 agent 的工作方式里，而不是把复杂性包装成一个新功能交给用户。
 
 ### 4. 后续方向
 
@@ -172,7 +177,7 @@ Claude Code 给主 agent 自己使用的一种编排能力。当主 agent 判断
 
 停止追求“统一 workflow 引擎”这个抽象。
 
-前面几轮一直在引擎形态上打转：声明式还是脚本、可恢复还是临场执行。但这其实是在为底座找理由。
+如果讨论一直停在引擎形态上：声明式还是脚本、可恢复还是临场执行，就很容易变成在为底座找理由。
 
 回归本质，Workflow 模块的未来不是一个引擎，而是两个建在 subagent 上的薄能力：
 
@@ -182,113 +187,3 @@ Claude Code 给主 agent 自己使用的一种编排能力。当主 agent 判断
 能力 B 使用能力 A。
 
 这个方向甚至不该叫给用户看的“workflow”。用户不需要使用工作流，用户只需要知行更会组织复杂工作。
-
----
-
-## 回退方案(当前阶段:只退不进)
-
-> 「收敛判断 §3」已定调:重构第一步不是改进声明式引擎,而是砍掉它、回到 subagent 地基。本节把这一步落成可执行方案。**本阶段只退**——前进(能力 A / B)见「收敛判断 §4」,退干净后另立单元,本方案不含。
-
-### 范围与边界
-
-- 退的对象:仅声明式 Workflow 模块(core / server / orchestrator 的 workflow 目录 + 宿主装配 + RPC)。
-- 不碰:`edit` / `write` 的 diff 渲染能力(独立 feature、已验收),以及 subagent / `runChildAgent`、EventBus lineage、confirmation / trust / permission、scheduler、conversation / runtime / tools 等地基。
-- 资产保全:workflow 是一串干净的连续 commit,**git 历史本身就是封存**——删工作树不丢资产,将来真要可精确 cherry-pick;不建归档分支、不留搁置目录(半死代码 = 认知债)。
-- 选型:采纳 `workflow-real-value-lab.md` 的**方案二(删到 subagent 零残留)**;方案一(core-only 保留纯内核)作废——声明式 graph kernel 不是中立资产,它本身就是方向押注。
-
-### 一、裁撤范围核对清单
-
-> 本节不是手工删除步骤,只用于核对 `git revert` 后声明式 Workflow 是否已退干净。执行权威见「五、执行方式」。
-
-**应不再存在的目录 / 文件:**
-
-- `packages/core/src/workflow/`(types / graph / scheduler / validator / executor / index + __tests__)
-- `packages/server/src/workflow/`(manager / store / index + __tests__)
-- `packages/orchestrator/src/workflow/`(agent / tool / gate / join / transform-node-executor / result / config / coding-quality-workflow / index + __tests__)
-- `packages/server/src/rpc/methods/workflow.ts` + `__tests__/workflow.test.ts`
-
-**应不再存在的运行时装配 / public API:**
-
-- 顶层 re-export:`core/src/index.ts`、`server/src/index.ts`、`orchestrator/src/index.ts` 中不再导出 workflow。
-- orchestrator runtime 中不再有 workflow import、`createWorkflowNodeExecutorRegistry`、`WorkflowNodeExecutorRegistryOptions`、`workflowBus` 或对应 re-export / 测试入口。
-- server 中不再有 `WorkflowManager` import、`ServerContext.workflow`、`CreateContextOptions.workflow`、`workflow.*` RPC 注册、`recoverUnfinished` 启动恢复调用或相关测试断言。
-- cli `serve/command.ts` 中不再装配 `JsonWorkflowStore` / `WorkflowManager` / `DefinitionValidator` / `workflowExecutors`,也不再向 context 注入 `workflow: workflowManager`。
-
-**容易漏的非 workflow 路径也必须核对:**
-
-- `packages/core/package.json`
-- `packages/orchestrator/package.json`
-- `packages/core/tsup.config.ts`
-- `packages/orchestrator/tsup.config.ts`
-
-这些文件不在 workflow 目录、部分文件名也不含 workflow,证明本回退不能靠手工清单执行。
-
-**revert 后必须恢复保留的例外:**
-
-- `packages/orchestrator/src/security/secure-executor.ts`:这是通用安全管线增强,让 confirmation broker 在等待用户确认时响应 `abortSignal`;它影响 bash / edit / write 等所有走 broker confirmation 的工具,不是 Workflow 专属能力,不能随 Workflow 回退。
-- `research/design/drafts/workflow-architecture.md`:当前需要保留新的判断版,并补状态头说明该文档已降级为历史探索记录。
-
-**不误伤:** `AgentEventMap` / `NodeExecutorRegistry` / `createEventBus` / `runChildAgent` 等通用件保留;已确认 `AgentNodeExecutor` 只消费 `runChildAgent`、未改子 agent,删 workflow 对 subagent / Task / unified-core / diff 渲染零影响。`diff` 库属 CLI diff 渲染 feature,必须保留。
-
-### 二、架构文档改造
-
-- `workflow-architecture.md`:顶部加状态头——"已裁撤;全文降级为声明式方向的历史探索记录,不再是当前有效方案",指向本工作台结论。**不逐段删、不删文件**(保留探索价值,失效由状态头声明)。
-- `workflow-real-value-lab.md`:标注"已采纳方案二、执行回退",方案一作废。
-- `CLAUDE.md` 模块索引未单列 workflow,无需改。
-
-### 三、验证(收尾一次全量)
-
-- 全量 `pnpm build`:core 的 `index.ts` 少了 workflow 导出 = 公共 d.ts 变化,必须全量重建下游,不能只 `cli:build`。
-- clean 重建或显式清理旧产物,确保 `packages/core/dist/workflow` 和 `packages/orchestrator/dist/workflow` 不再残留。
-- 全量测试绿;各包 `tsc --noEmit` 零错(接口 / 类型删除的残留引用靠 tsc 兜出)。
-- `grep -ri workflow packages/*/src` 用于扫残留,最终判准不是字面零命中,而是**生产代码、运行时装配、public API 和测试入口无 Workflow 产品能力残留**;普通英文注释、历史说明、非运行路径如有必要可保留,但不能形成可启动、可导入、可调用的 workflow 概念。已知允许残留:`packages/core/src/typeahead/types.ts` 中 4 月已有的通用标签 `"workflow"` 示例,它不是本模块能力。
-- serve 冒烟:RPC 方法表无 `workflow.*`、启动不再调 `recoverUnfinished`、subagent / Task / diff 渲染如常。
-- 如曾运行过 Workflow 实例,清理 `~/.zhixing/workflow/instances.json` 这类孤儿运行数据;代码库不再拥有读取或恢复它的能力。
-
-### 四、前进(占位,本阶段不做)
-
-退干净后另立单元,按「收敛判断 §4」建:能力 A(多视角发散→收敛内功原语)+ 能力 B(复杂任务内建工作方法论,B 用 A),共同底座 subagent,对用户隐形、不叫 "workflow"。本方案不含前进实现。
-
-### 五、执行方式:用 git revert,不要手工删 / reset
-
-当前 Workflow 实现是一串连续提交,后面已经有独立且要保留的 CLI diff 成果。因此回退方式应是 **git revert Workflow 实现提交**,而不是手工逐文件删除,也不是 reset 回到 Workflow 前。
-
-本节是唯一执行权威。「一、裁撤范围核对清单」只用于 revert 后核对,不能当手工删除步骤。
-
-需要回退的 Workflow 提交:
-
-1. `2cc3f90 feat(core/workflow): add workflow runtime kernel`
-2. `04b04f8 feat(workflow): add server workflow state coordination`
-3. `dede77f feat(orchestrator/workflow): add workflow node executors`
-4. `e7aeffd feat(workflow): add coding quality seed workflow`
-5. `0989ba0 feat(workflow): add CLI work surface`
-6. `518014f fix(workflow): remove external work command surface`
-
-必须保留的后续成果:
-
-1. `8307da7 docs(cli): add edit diff rendering plan`
-2. `f06da97 feat(cli/diff): render file edit diffs in CLI`
-
-执行策略:
-
-1. 先处理当前已暂存 / 未提交的文档变更,避免和 revert 混在一起。
-2. 使用 `git revert --no-commit 2cc3f90^..518014f` 反向应用上述 Workflow 提交;该范围会按提交历史自动逆序应用,聚成一次回退变更。
-3. 已核实 Workflow 回退范围与 CLI diff 成果零文件重叠,不会误伤 `8307da7` / `f06da97`。
-4. revert 后恢复两个例外文件:`packages/orchestrator/src/security/secure-executor.ts` 和 `research/design/drafts/workflow-architecture.md`;前者保留通用 confirmation abort 能力,后者保留当前判断版并补状态头。
-5. 按「一、裁撤范围核对清单」检查残留。
-6. clean 重建或显式清理旧 dist workflow 产物;如本机存在旧 workflow 实例数据,清理孤儿数据。
-7. 形成一个单独回退提交,表达为移除声明式 Workflow runtime,而不是开启新方向。
-
-为什么不用 reset:
-
-1. reset 到 Workflow 前会误伤后面的 CLI diff 文档和实现成果。
-2. Workflow 的算法资产不需要留在工作树,git 历史本身就是封存。
-3. revert 能保留决策历史,也能让代码库回到零残留状态。
-
-为什么不用手工删:
-
-1. Workflow 涉及 core / server / orchestrator / cli / RPC / runtime 装配 / 测试 / public export,手工删容易漏半截。
-2. 已核实 Workflow 实现串实际影响 46 个文件,其中 package.json、tsup 配置等不在 workflow 目录、文件名也不含 workflow;手工清单天然容易漏。
-3. 这串提交里还夹带了 `secure-executor.ts` 的通用安全增强,它必须保留;revert 后恢复例外文件比手工判断每个改动更可靠。
-4. 这些能力来自连续提交,revert 能天然按提交边界撤销。
-5. 手工删会把“撤销历史实现”和“补充新判断”混在一起,不利于审查。
