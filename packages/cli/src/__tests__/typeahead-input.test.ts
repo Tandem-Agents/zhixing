@@ -40,6 +40,7 @@ import {
 import { InputController, readInputLine, type InputLineResult } from "../typeahead-input.js";
 import type { ScreenController } from "../screen/index.js";
 import { BottomInfoModel } from "../bottom-info/index.js";
+import { PasteRegistry } from "../paste-registry.js";
 
 // PassThrough 非 TTY，chalk 默认禁用颜色——强开 level=3 让 bg / dim 等 ANSI
 // 真实出现在 captured 里供回归断言（与 chalk 在真实 TTY 的输出一致）
@@ -100,6 +101,32 @@ async function typeChars(
   for (const ch of Array.from(text)) {
     await sendSyntheticKey(stdin, { str: ch });
   }
+}
+
+async function pasteText(
+  stdin: NodeJS.ReadableStream,
+  text: string,
+): Promise<void> {
+  for (const ch of Array.from(text)) {
+    if (ch === "\n") {
+      (stdin as unknown as EventEmitter).emit("keypress", "", {
+        name: "return",
+        ctrl: false,
+        meta: false,
+        shift: false,
+        sequence: "\r",
+      });
+      continue;
+    }
+    (stdin as unknown as EventEmitter).emit("keypress", ch, {
+      name: undefined,
+      ctrl: false,
+      meta: false,
+      shift: false,
+      sequence: ch,
+    });
+  }
+  await new Promise((resolve) => setImmediate(resolve));
 }
 
 function makeRuntime(): RuntimeContext {
@@ -1103,6 +1130,71 @@ describe("InputController — suspend/resume 输入态快照恢复", () => {
     controller.resume();
     await new Promise((r) => setImmediate(r));
     expect(stripAnsi(controller.renderLines().join("\n"))).not.toContain("/he");
+
+    controller.stop();
+  });
+});
+
+describe("InputController — 多行粘贴提交历史区", () => {
+  function makeCapturingScreen(): {
+    screen: ScreenController;
+    getScrollbackText: () => string;
+  } {
+    let scrollbackText = "";
+    const screen = {
+      attachInput: vi.fn(),
+      detachInput: vi.fn(),
+      dispose: vi.fn(),
+      requestInputRepaint: vi.fn(),
+      ensureScrollLeadingBlank: vi.fn(),
+      withScrollWrite: vi.fn((render: (write: (text: string) => void) => void) => {
+        render((text) => {
+          scrollbackText += text;
+        });
+      }),
+    } as unknown as ScreenController;
+
+    return {
+      screen,
+      getScrollbackText: () => scrollbackText,
+    };
+  }
+
+  it("长粘贴输入区折叠，提交后历史区写入原文", async () => {
+    const { stdin } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+    const registry = new PasteRegistry();
+    const { screen, getScrollbackText } = makeCapturingScreen();
+    const controller = new InputController({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      screen,
+      stdin,
+      columns: 80,
+      registry,
+    });
+    const resultP = new Promise<InputLineResult>((resolve) => {
+      controller.onSubmit(resolve);
+    });
+    const pasted = ["alpha one", "beta two", "gamma three", "delta four"].join(
+      "\n",
+    );
+
+    controller.start();
+    await pasteText(stdin, pasted);
+    const inputText = stripAnsi(controller.renderLines().join("\n"));
+    expect(inputText).toContain("[Pasted #");
+    expect(inputText).not.toContain("alpha one");
+
+    await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+    const result = await resultP;
+    expect(result).toEqual({ kind: "text", text: pasted });
+
+    const scrollbackText = stripAnsi(getScrollbackText());
+    expect(scrollbackText).toContain("alpha one");
+    expect(scrollbackText).toContain("delta four");
+    expect(scrollbackText).not.toContain("[Pasted #");
 
     controller.stop();
   });

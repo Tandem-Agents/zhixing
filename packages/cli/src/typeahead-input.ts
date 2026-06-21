@@ -965,8 +965,9 @@ export class InputController implements InputRegion {
 
   /**
    * 提交当前 draft：
-   *   - 把"原始 draft"（含占位符）渲染为 historyEcho 写入滚动区
-   *   - expandPastes 还原占位符送给 dispatcher / agent 上层
+   *   - expandPastes 还原占位符，得到提交态 canonical 文本
+   *   - 把 canonical 文本渲染为 historyEcho 写入滚动区
+   *   - canonical 文本送给 dispatcher / agent 上层
    *   - / 前缀自动走 dispatcher，其它走 text 路径
    *   - submit 完成后 buffer.commit + clear，触发 onSubmit；输入区 chrome 自动重画为空 buffer
    */
@@ -974,16 +975,16 @@ export class InputController implements InputRegion {
     if (!this.buffer) return;
 
     const rawDraft = this.buffer.draft;
-    const expanded = this.options.registry
+    const canonicalDraft = this.options.registry
       ? expandPastes(rawDraft, this.options.registry)
       : rawDraft;
-    // 首位 `、` 等输入法别名按 `/` 喂下游 dispatcher;rawDraft 仍是用户原文
-    // 用于 echo 显示,显示/解析在此分叉。基于 rawDraft.trim() 首位(用户原始
-    // 输入意图)判断而非 expanded.trim() 首位:rawDraft 在长 paste 折叠时
-    // 首位是 token `<`,expanded 首位是 paste 内容首字符 —— 若用 expanded
-    // 判断会把"以顿号开头的粘贴文本"误识别为命令。
+    // 首位 `、` 等输入法别名按 `/` 喂下游 dispatcher；rawDraft 是输入态显示
+    // 文本，canonicalDraft 是提交态语义文本，显示/解析在此分叉。基于 rawDraft
+    // 首位判断，而非 canonicalDraft 首位：rawDraft 在长 paste 折叠时首位是 token，
+    // canonicalDraft 首位是 paste 内容首字符，若用后者判断会把“以顿号开头的粘贴
+    // 文本”误识别为命令。
     const text = normalizeLeadingSlashAliasInExpanded(
-      expanded.trim(),
+      canonicalDraft.trim(),
       rawDraft.trim(),
     );
 
@@ -997,13 +998,13 @@ export class InputController implements InputRegion {
     //                            缺失则 chrome 卡在 commit 前的 partial 文本（典型
     //                            现象：home 模式输入 `/cle` 回车后 chrome 仍显示
     //                            `/cle`，详见 acceptSuggestion + broker.accept docstring）
-    //   3. echoSubmittedDraft    把原始 draft 落 scrollback 作为历史
+    //   3. echoSubmittedText     把 canonical 文本落 scrollback 作为历史
     //                            （withScrollWrite 只 appendInline + repaintInputCursor，
     //                            不触发 refreshChrome —— chrome 内容此时已由 #2 同步好）
     //   4. dispatch              async 执行命令
     this.buffer.commit();
     this.syncBroker();
-    this.echoSubmittedDraft(rawDraft);
+    this.echoSubmittedText(canonicalDraft);
 
     if (!text) {
       this.fireSubmit({ kind: "text", text: "" });
@@ -1034,8 +1035,8 @@ export class InputController implements InputRegion {
 
   // ─── echo 写到滚动区（提交 / 取消时把当前内容降级为历史） ───
 
-  private echoSubmittedDraft(rawDraft: string): void {
-    const echoLines = this.buildHistoryEchoLines(rawDraft);
+  private echoSubmittedText(text: string): void {
+    const echoLines = this.buildHistoryEchoLines(text);
     if (echoLines.length === 0) return;
     // 段前空行幂等保证：处理"上一段不带段后空行"的场景（典型：LLM 输出段
     // mdStream.end 仅 emit 单 \n，不含段间空行）。ScreenController 端按 scroll
@@ -1060,11 +1061,11 @@ export class InputController implements InputRegion {
     });
   }
 
-  private buildHistoryEchoLines(rawDraft: string): readonly string[] {
-    if (rawDraft.length === 0) return [];
+  private buildHistoryEchoLines(text: string): readonly string[] {
+    if (text.length === 0) return [];
     const columns = this.getColumns();
     const echoBudget = Math.max(1, columns - 2);
-    const chunks = wrapToWidth(rawDraft, echoBudget, PASTE_TOKEN_PATTERN);
+    const chunks = wrapToWidth(text, echoBudget, PASTE_TOKEN_PATTERN);
     const lines: string[] = [];
     for (const chunk of chunks) {
       const innerText = `  ${chunk}`;
