@@ -1,8 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { wrapKeypressHandler } from "../paste-detector.js";
 
-function tick(ms = 20): Promise<void> {
+function tick(ms = 30): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function drainMicrotasks(): Promise<void> {
+  return Promise.resolve();
 }
 
 const KEY = (name: string) => ({
@@ -130,7 +134,7 @@ describe("wrapKeypressHandler — paste 路径（同步多 keypress）", () => {
     expect(onPaste).toHaveBeenCalledWith("ab");
   });
 
-  it("两次独立 paste（中间 microtask drain）各自触发 onPaste", async () => {
+  it("两次独立 paste（中间超过 idle 窗口）各自触发 onPaste", async () => {
     const onSingle = vi.fn();
     const onPaste = vi.fn();
     const { handler } = wrapKeypressHandler({ onSingle, onPaste });
@@ -157,6 +161,58 @@ describe("wrapKeypressHandler — paste 路径（同步多 keypress）", () => {
     await tick();
 
     expect(onPaste).toHaveBeenCalledWith("你好");
+  });
+
+  it("bracketed paste marker 跨 keypress batch 合并为一次 onPaste", async () => {
+    const onSingle = vi.fn();
+    const onPaste = vi.fn();
+    const { handler } = wrapKeypressHandler({ onSingle, onPaste });
+
+    handler("", KEY("paste-start"));
+    handler("a", KEY("a"));
+    handler("b", KEY("b"));
+    await drainMicrotasks();
+    handler("", KEY("return"));
+    handler("c", KEY("c"));
+    handler("d", KEY("d"));
+    handler("", KEY("paste-end"));
+    await tick();
+
+    expect(onPaste).toHaveBeenCalledTimes(1);
+    expect(onPaste).toHaveBeenCalledWith("ab\ncd");
+    expect(onSingle).not.toHaveBeenCalled();
+  });
+
+  it("无 marker 的相邻 paste chunks 在 idle 前合并", async () => {
+    const onSingle = vi.fn();
+    const onPaste = vi.fn();
+    const { handler } = wrapKeypressHandler({ onSingle, onPaste });
+
+    handler("a", KEY("a"));
+    handler("b", KEY("b"));
+    await drainMicrotasks();
+    handler("c", KEY("c"));
+    handler("d", KEY("d"));
+    await tick();
+
+    expect(onPaste).toHaveBeenCalledTimes(1);
+    expect(onPaste).toHaveBeenCalledWith("abcd");
+    expect(onSingle).not.toHaveBeenCalled();
+  });
+
+  it("paste 后紧接单 keypress 时先提交 paste 再处理单键", async () => {
+    const calls: string[] = [];
+    const onSingle = vi.fn((str: string) => calls.push(`single:${str}`));
+    const onPaste = vi.fn((content: string) => calls.push(`paste:${content}`));
+    const { handler } = wrapKeypressHandler({ onSingle, onPaste });
+
+    handler("a", KEY("a"));
+    handler("b", KEY("b"));
+    await drainMicrotasks();
+    handler("\r", KEY("return"));
+    await tick();
+
+    expect(calls).toEqual(["paste:ab", "single:\r"]);
   });
 });
 

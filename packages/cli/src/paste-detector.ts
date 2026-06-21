@@ -1,29 +1,14 @@
 /**
- * Paste Detector — keypress 层 microtask batcher。
+ * Paste Detector — keypress 层粘贴会话识别。
  *
- * 把粘贴识别为"同步连续多个 keypress"事件，与单字符敲键自然分离：
+ * 目标是向上层暴露稳定的领域事件：单键输入走 onSingle，一次完整粘贴走 onPaste。
+ * 上层不需要理解 bracketed paste marker、stdin chunk 拆分或 readline 同步 emit 细节。
  *
- *   - 用户敲键：物理手指最快间隔 ~50ms，每次单 keypress；下一次 keypress 在新的
- *     macrotask 中触发，前一个 batch 已在 microtask drain 时 flush
- *   - 用户粘贴：终端一次 syscall 写入 stdin，readline 同步循环 emit N 个 keypress
- *     全部在同一 macrotask 内累积；microtask drain 时整 batch 一起 flush
- *
- * 算法：
- *   - 任何 keypress 进 pending batch + queueMicrotask(flush)（已 scheduled 跳过）
- *   - 当前 macrotask 结束 → microtask drain → flush
- *   - flush 时 batch ≥ 2 视为 paste（同步多次 = 粘贴）；batch = 1 单 keypress
- *
- * 为什么用 microtask 而非 setTimeout：
- *   - microtask 在当前 macrotask 末同步 drain，不引入可见延迟
- *   - 同步 emit（粘贴）与异步 emit（敲键间隔）自然分离
- *
- * 为什么不用 stdin "data" 字节流：raw mode 下 stdin chunk 大小不可控（部分平台
- * 字节级流），无法可靠基于 chunk size 判断；readline 同步 emit keypress 是更稳定
- * 的粘贴信号。
- *
- * 为什么不用 bracketed paste mode markers 作主路径：跨终端兼容性差（Windows
- * ConPTY / 部分老终端不可靠）。`\x1b[?2004h` 仍启用——抑制终端"多行粘贴警告"
- * 弹窗，但 paste 检测不依赖 markers。
+ * 识别策略：
+ *   - bracketed paste marker 存在时，以 paste-start / paste-end 包住的内容为一次完整粘贴
+ *   - marker 不存在时，同一 macrotask 内同步出现的多个 keypress 视为一个粘贴片段
+ *   - 相邻粘贴片段在极短 idle 窗口内合并，覆盖终端把一次粘贴拆成多个 data chunk 的情况
+ *   - 单 keypress 仍在 microtask drain 后立即走 onSingle，不引入可见输入延迟
  *
  * 与 raw mode 组件协作：每个 keypress 消费者用 wrapKeypressHandler 包自己的
  * onKeypress；典型用法：
@@ -34,6 +19,8 @@
  */
 
 import type * as readline from "node:readline";
+
+const FALLBACK_PASTE_IDLE_MS = 15;
 
 export interface KeypressBatcherOptions {
   /** 单 keypress 时调用（原 keypress handler 逻辑） */
@@ -61,8 +48,8 @@ interface PendingEvent {
 /**
  * 包装一个 keypress handler，自动按时间窗批量识别 paste 事件。
  *
- * 单一职责：决定 batch ≥ 2 时调 onPaste，batch = 1 时调 onSingle。不维护全局状态、
- * 不识别 bracketed paste markers——caller 自己决定 paste 内容怎么处理。
+ * 单一职责：决定完整 paste session 调 onPaste，普通按键调 onSingle。不维护全局状态，
+ * caller 自己决定 paste 内容怎么处理。
  */
 export function wrapKeypressHandler(
   options: KeypressBatcherOptions,
@@ -70,6 +57,9 @@ export function wrapKeypressHandler(
   let batch: PendingEvent[] = [];
   let scheduled = false;
   let released = false;
+  let bracketedPasteContent: string[] | null = null;
+  let fallbackPasteContent = "";
+  let fallbackPasteTimer: ReturnType<typeof setTimeout> | undefined;
 
   function flush(): void {
     scheduled = false;
@@ -81,13 +71,10 @@ export function wrapKeypressHandler(
     batch = [];
     if (events.length === 0) return;
     if (events.length >= 2) {
-      // paste content 拼接：readline 把 `\r` / `\n` / `\r\n` 解析为 return/enter
-      // keypress，**str 字段为空字符串**——直接用 e.str 拼接会丢失换行符。从 key
-      // 分类还原：return/enter → `\n`；其他用 str（普通字符 keypress）。
-      const content = events.map(eventToContent).join("");
-      options.onPaste(content);
+      appendFallbackPaste(events.map(eventToContent).join(""));
       return;
     }
+    flushFallbackPaste();
     const single = events[0]!;
     options.onSingle(single.str, single.key);
   }
@@ -98,12 +85,83 @@ export function wrapKeypressHandler(
     return e.str;
   }
 
+  function isPasteStart(key: readline.Key | undefined): boolean {
+    return key?.name === "paste-start";
+  }
+
+  function isPasteEnd(key: readline.Key | undefined): boolean {
+    return key?.name === "paste-end";
+  }
+
+  function appendFallbackPaste(content: string): void {
+    if (content.length === 0) return;
+    fallbackPasteContent += content;
+    scheduleFallbackPasteFlush();
+  }
+
+  function scheduleFallbackPasteFlush(): void {
+    clearFallbackPasteTimer();
+    fallbackPasteTimer = setTimeout(
+      flushFallbackPaste,
+      FALLBACK_PASTE_IDLE_MS,
+    );
+  }
+
+  function clearFallbackPasteTimer(): void {
+    if (fallbackPasteTimer === undefined) return;
+    clearTimeout(fallbackPasteTimer);
+    fallbackPasteTimer = undefined;
+  }
+
+  function flushFallbackPaste(): void {
+    clearFallbackPasteTimer();
+    if (fallbackPasteContent.length === 0) return;
+    const content = fallbackPasteContent;
+    fallbackPasteContent = "";
+    if (!released) {
+      options.onPaste(content);
+    }
+  }
+
+  function flushBracketedPaste(): void {
+    const content = bracketedPasteContent?.join("") ?? "";
+    bracketedPasteContent = null;
+    if (content.length > 0) {
+      options.onPaste(content);
+    }
+  }
+
   const handler = (
     str: string,
     key: readline.Key | undefined,
   ): void => {
     if (released) return;
-    batch.push({ str: str ?? "", key });
+    const event = { str: str ?? "", key };
+
+    if (isPasteStart(key)) {
+      flush();
+      flushFallbackPaste();
+      if (bracketedPasteContent !== null) {
+        flushBracketedPaste();
+      }
+      bracketedPasteContent = [];
+      return;
+    }
+
+    if (isPasteEnd(key)) {
+      flush();
+      if (bracketedPasteContent !== null) {
+        flushBracketedPaste();
+      }
+      return;
+    }
+
+    if (bracketedPasteContent !== null) {
+      bracketedPasteContent.push(eventToContent(event));
+      return;
+    }
+
+    batch.push(event);
     if (!scheduled) {
       scheduled = true;
       queueMicrotask(flush);
@@ -115,6 +173,9 @@ export function wrapKeypressHandler(
     release: () => {
       if (released) return;
       released = true;
+      clearFallbackPasteTimer();
+      fallbackPasteContent = "";
+      bracketedPasteContent = null;
       // 残余 flush：单 keypress 转 onSingle 避免末尾按键丢失；多 keypress paste
       // 残骸在 release 时丢弃（cleanup 阶段已 detach，paste 内容无意义）
       const events = batch;

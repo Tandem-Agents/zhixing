@@ -103,10 +103,7 @@ async function typeChars(
   }
 }
 
-async function pasteText(
-  stdin: NodeJS.ReadableStream,
-  text: string,
-): Promise<void> {
+function emitPasteText(stdin: NodeJS.ReadableStream, text: string): void {
   for (const ch of Array.from(text)) {
     if (ch === "\n") {
       (stdin as unknown as EventEmitter).emit("keypress", "", {
@@ -126,7 +123,18 @@ async function pasteText(
       sequence: ch,
     });
   }
-  await new Promise((resolve) => setImmediate(resolve));
+}
+
+async function pasteText(
+  stdin: NodeJS.ReadableStream,
+  text: string,
+): Promise<void> {
+  emitPasteText(stdin, text);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+}
+
+function drainMicrotasks(): Promise<void> {
+  return Promise.resolve();
 }
 
 function makeRuntime(): RuntimeContext {
@@ -1195,6 +1203,107 @@ describe("InputController — 多行粘贴提交历史区", () => {
     expect(scrollbackText).toContain("alpha one");
     expect(scrollbackText).toContain("delta four");
     expect(scrollbackText).not.toContain("[Pasted #");
+
+    controller.stop();
+  });
+
+  it("拆批长粘贴合并为一次输入，不丢前半段", async () => {
+    const { stdin } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+    const registry = new PasteRegistry();
+    const { screen, getScrollbackText } = makeCapturingScreen();
+    const controller = new InputController({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      screen,
+      stdin,
+      columns: 80,
+      registry,
+    });
+    const resultP = new Promise<InputLineResult>((resolve) => {
+      controller.onSubmit(resolve);
+    });
+    const pasted = [
+      "A1 alpha",
+      "A2 beta",
+      "A3 gamma",
+      "A4 delta",
+      "B1 alpha",
+      "B2 beta",
+      "B3 gamma",
+      "B4 delta",
+    ].join("\n");
+    const splitAt = pasted.indexOf("B1 alpha");
+
+    controller.start();
+    emitPasteText(stdin, pasted.slice(0, splitAt));
+    await drainMicrotasks();
+    emitPasteText(stdin, pasted.slice(splitAt));
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    const inputText = stripAnsi(controller.renderLines().join("\n"));
+    expect(inputText).toContain("[Pasted #");
+    expect(inputText).not.toContain("A1 alpha");
+    expect(inputText).not.toContain("B4 delta");
+
+    await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+    const result = await resultP;
+    expect(result).toEqual({ kind: "text", text: pasted });
+
+    const scrollbackText = stripAnsi(getScrollbackText());
+    expect(scrollbackText).toContain("A1 alpha");
+    expect(scrollbackText).toContain("B4 delta");
+    expect(scrollbackText).not.toContain("[Pasted #");
+
+    controller.stop();
+  });
+
+  it("主动第二次长粘贴显示原文并替换旧 token", async () => {
+    const { stdin } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+    const registry = new PasteRegistry();
+    const { screen, getScrollbackText } = makeCapturingScreen();
+    const controller = new InputController({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      screen,
+      stdin,
+      columns: 80,
+      registry,
+    });
+    const resultP = new Promise<InputLineResult>((resolve) => {
+      controller.onSubmit(resolve);
+    });
+    const firstPaste = ["first 1", "first 2", "first 3", "first 4"].join("\n");
+    const secondPaste = [
+      "second 1",
+      "second 2",
+      "second 3",
+      "second 4",
+    ].join("\n");
+
+    controller.start();
+    await pasteText(stdin, firstPaste);
+    expect(stripAnsi(controller.renderLines().join("\n"))).toContain(
+      "[Pasted #",
+    );
+
+    await pasteText(stdin, secondPaste);
+    const inputText = stripAnsi(controller.renderLines().join("\n"));
+    expect(inputText).not.toContain("[Pasted #");
+    expect(inputText).not.toContain("first 1");
+    expect(inputText).toContain("second 1");
+    expect(inputText).toContain("second 4");
+
+    await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+    const result = await resultP;
+    expect(result).toEqual({ kind: "text", text: secondPaste });
+
+    const scrollbackText = stripAnsi(getScrollbackText());
+    expect(scrollbackText).toContain("second 1");
+    expect(scrollbackText).not.toContain("first 1");
 
     controller.stop();
   });

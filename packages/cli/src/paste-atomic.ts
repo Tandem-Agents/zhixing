@@ -4,7 +4,7 @@
  * 占位符（PASTE_TOKEN_PATTERN match 的字符串段）在交互层视为原子单元：
  *   - backspace / delete 一次删整段
  *   - cursor left / right 整段跨过
- *   - 再次粘贴时旧占位符自动 expand 为原内容（保证 buffer 同时只有最新一个占位符）
+ *   - 再次粘贴时旧占位符整体移除，由新粘贴内容按当前产品语义替换
  *
  * 不修改 InputBuffer 内部模型——chars[] 仍是字符序列；原子语义在上层（typeahead-input
  * 的 keypress handler / paste 入口）拦截：

@@ -116,26 +116,77 @@
 - `rawDraft` 仍保留给输入态显示与命令别名 guard，不改动首次 / 二次粘贴展示策略。
 - 新增 `typeahead-input.test.ts` 集成测试，覆盖“输入区折叠 token，提交后历史区写原文，不写 token”。
 
-### 2. 二次长粘贴显示原文的实现可靠性
+### 2. 同一次长粘贴拆批时可能被误判为二次粘贴
 
-**状态**：需求已确认；实现可靠性待审核
+**状态**：已修复，已测试，已构建
 
-**现象**：`finalizePaste()` 会先删除已有 paste token；一旦删除过 token，`bufferWasClean=false`，即使新粘贴内容很长也走 `insertText(content)` 铺开，而不是重新折叠。
+**现象**：输入区已有 paste token 时，用户主动第二次粘贴应显示原文，这是既有功能和当前需求。当前风险在于：同一次真实粘贴如果被底层拆成多个 paste batch，后续 batch 会被误判成“用户主动第二次粘贴”，触发删除旧 token + 插入后半段原文，导致前半段内容丢失。
 
 **事实依据**：
 
 - `finalizePaste()` 中 `shouldFold = registry && shouldFoldPaste(content) && bufferWasClean`。
 - 已有 token 被 `removeAllPasteTokens()` 删除后，`bufferWasClean=false`。
+- `wrapKeypressHandler()` 的当前边界是“同一 macrotask 内同步多 keypress = 一次 paste”；它不理解 bracketed paste 的开始 / 结束边界，也不跨 data chunk 合并。
+- `stdin-ownership.ts` 明确 `readline.emitKeypressEvents(stdin)` 保留 data -> keypress 解码器；paste detector 消费的是 keypress 事件，因此仍受底层 data chunk 边界影响。
+- 本轮内联验证：Node `readline.emitKeypressEvents` 会把 bracketed paste markers 暴露为 `key.name = "paste-start"` / `"paste-end"`，因此 detector 层可以直接识别协议边界，不需要下探到 data 字节层。
+- 本轮内联验证：用 `readline.emitKeypressEvents` 对同一输入分两次 `stdin.write("abcd")` / `stdin.write("efgh")`，detector 产生两次 `onPaste("abcd")` / `onPaste("efgh")`。
+- 本轮内联验证：主动二次粘贴 A 后再粘贴 B，当前行为正确，最终提交 B 原文，registry 从 1 清到 0。
+- 本轮内联验证：模拟同一长粘贴拆成两批，第一批折叠成 token，第二批触发删除旧 token 并插入第二批原文，最终提交只包含第二批，第一批丢失。
+- `paste-atomic.ts` 顶部注释写“再次粘贴时旧占位符自动 expand 为原内容”，但实际 `removeAllPasteTokens()` 是删除旧 token、保留非 token 文本；实现与落地设计一致，顶部注释需要修正，避免误导后续维护。
 
-**产品判断**：输入区首次长粘贴显示缩略、二次粘贴显示原文，是既有交互，也是当前需求。它不是第 1 个问题要改变的对象；但目标是“实现需求且没有问题”，所以仍要确认该实现是否在真实终端粘贴、批次拆分、用户编辑等场景下稳定。
+**审核结论**：
 
-**需要审核的点**：
+- “用户主动第二次粘贴显示原文”不是 bug，是正确需求。
+- “同一次粘贴被拆成多个 paste batch 后丢前半段内容”是真实实现缺陷；它在拆批输入条件下确定触发。
+- 这个问题的根因不在 `finalizePaste()` 的二次粘贴产品策略，而在 paste detector 没有可靠表达“一次粘贴会话”的边界。
 
-- 用户主动第二次粘贴时，应显示原文。
-- 同一次终端粘贴如果被底层拆成多个 batch，不应被误判成用户主动第二次粘贴。
-- 二次粘贴替换 / 展开时，不应造成旧 token 对应内容无提示丢失、registry 残留或输入区错乱。
+**背后需求**：
 
-**本轮处理**：不作为第 1 个问题的修复内容；后续按同一流程审核，若确认有 bug，再单独记录事实证据、目标效果和验收标准。
+- 用户主动第二次粘贴时，意图通常是替换输入态附件；显示原文能让用户直接看见新内容，避免多个大型 token 叠在输入区。
+- 同一次粘贴无论底层被拆成多少 data chunk，都必须作为一个完整材料进入输入区；系统不能因为传输分片改变用户意图。
+- paste detector 的职责是识别“粘贴事件边界”，InputController 的职责是决定“这次粘贴在当前输入态如何呈现”。两层不能混在一起。
+
+**目标效果**：
+
+- 主动第一次长粘贴：输入区显示 token。
+- 主动第二次粘贴：输入区显示第二次粘贴的原文，旧 token 被替换 / 清理。
+- 同一次真实粘贴即使跨多个 data chunk / keypress batch，InputController 也只收到一次完整 paste content，不丢前半段。
+- 粘贴 detector 在支持 bracketed paste markers 的终端上以协议 start/end 作为权威边界。
+- 不支持 markers 的终端走 fallback 合并策略，尽可能把相邻 paste chunks 合成一次 paste；单字符打字不能引入可感知延迟。
+- registry 不残留被替换的旧 token；输入区不出现 token + 大段原文混乱共存。
+
+**最优解决方案**：
+
+- 在 `paste-detector.ts` 内升级为“paste 会话 detector”，而不是在 `typeahead-input.ts` 里补救拆批。
+- 第一优先级：识别 `key.name = "paste-start"` / `"paste-end"`。收到 start marker 后进入 bracketed paste session，跨 macrotask / data chunk 累积内容；收到 end marker 后一次性 `onPaste(fullContent)`。本项目已经启用 bracketed paste mode，当前只是没有利用 markers 做边界。
+- 第二优先级：保留无 marker fallback。fallback 仍用同步多 keypress 识别 paste，但对 paste batch 使用短 idle 合并窗口；单 keypress 仍走 microtask flush，避免普通打字延迟。多个相邻 paste chunks 在 idle 窗口内合并为一次 `onPaste`。
+- `finalizePaste()` 继续保持产品语义：buffer 干净且内容达阈值时折叠；已有 token 时主动二次粘贴显示原文并清理旧 token。它不承担底层 paste 会话边界识别。
+- 修正 `paste-atomic.ts` 顶部注释，把“自动 expand 为原内容”改为“删除旧 token，插入新粘贴内容”，和实现及产品语义对齐。
+
+**架构判断**：
+
+- detector 层负责输入事件分组，InputController 层负责输入态呈现，PasteRegistry 层只负责 token -> content 映射；这是最干净的职责边界。
+- 方案兼容多个接入面：其他 raw-mode 组件仍复用同一个 detector 能力，不需要各自实现粘贴会话合并。
+- 方案经得起未来附件扩展：无论将来 token 代表纯文本、文件片段还是其他输入附件，事件边界都应先在 detector 层确定。
+- 不建议在 `finalizePaste()` 中按时间猜测“这是拆批还是用户第二次粘贴”；那会把终端事件分组问题污染到产品呈现层，形成架构债务。
+
+**验收标准**：
+
+- 主动第一次长粘贴显示 token。
+- 主动第二次粘贴显示原文，提交后只发送第二次粘贴内容。
+- bracketed paste start/content/end 即使跨多个 data writes，也只触发一次 `onPaste(fullContent)`。
+- 无 marker fallback 下，短间隔相邻 paste chunks 合并为一次 paste；普通单字符输入不被延迟成可感知卡顿。
+- 模拟拆批长粘贴时，最终提交内容包含所有 batch，不丢前半段。
+- `paste-detector.test.ts` 和 `typeahead-input.test.ts` 都要补集成测试；不是只测纯函数。
+
+**修复记录**：
+
+- `paste-detector.ts` 从 microtask batcher 升级为 paste session detector，对上层输出“完整粘贴事件”。
+- 支持 `paste-start` / `paste-end` bracketed markers，跨 keypress batch 累积内容，结束时一次性触发 `onPaste(fullContent)`。
+- 无 marker fallback 保留同步多 keypress 识别，并通过短 idle 窗口合并相邻 paste chunks；单 keypress 仍走 microtask 路径。
+- `finalizePaste()` 的产品语义保持不变：首次长粘贴折叠；已有 token 时主动二次粘贴显示原文并替换旧 token。
+- `paste-atomic.ts` 顶部注释已修正为“旧 token 被移除，新粘贴按当前产品语义替换”，避免后续维护误解。
+- 新增 detector 与 typeahead 集成测试，覆盖 bracketed 拆批、fallback 拆批、paste 后单键顺序、拆批长粘贴不丢前半段、主动二次粘贴仍显示原文。
 
 ### 3. `↑` 输入历史复用时 token 可能失活
 
@@ -222,7 +273,7 @@
 
 **事实依据**：
 
-- 粘贴相关 178 个测试全绿。
+- 粘贴相关 183 个测试全绿。
 - 但上述“raw token 被写入 scrollback 历史区”和“输入历史 token 生命周期”的跨模块问题未被测试捕获。
 
 **影响**：paste 子模块各自正确，但跨模块生命周期 bug 漏检。
@@ -243,4 +294,4 @@
 pnpm --filter @zhixing/cli exec vitest run src/__tests__/paste-detector.test.ts src/__tests__/paste-registry.test.ts src/__tests__/paste-expand.test.ts src/__tests__/paste-atomic.test.ts src/__tests__/input-layout.test.ts src/__tests__/typeahead-input.test.ts
 ```
 
-结果：6 个测试文件、178 个测试通过。
+结果：6 个测试文件、183 个测试通过。
