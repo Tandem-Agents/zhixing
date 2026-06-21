@@ -7,6 +7,7 @@ describe("prepareUserTurnInput", () => {
       prepareUserTurnInput("  hello\n", { workspaceRoot: "E:/repo" }),
     ).resolves.toEqual({
       text: "  hello\n",
+      input: { parts: [{ type: "text", text: "  hello\n" }] },
       resolvedFiles: [],
       errors: [],
     });
@@ -35,6 +36,7 @@ describe("prepareUserTurnInput", () => {
     });
     expect(result).toEqual({
       text: "  <file>A</file>  ",
+      input: { parts: [{ type: "text", text: "  <file>A</file>  " }] },
       resolvedFiles: ["E:/repo/a.txt"],
       errors: ["warn"],
     });

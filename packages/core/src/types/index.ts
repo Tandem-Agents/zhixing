@@ -24,6 +24,30 @@ export {
   userMessage,
 } from "./messages.js";
 
+// ─── 用户 turn 输入类型 ───
+export type {
+  ModelInputCapabilities,
+  ModelInputCapabilityOverride,
+  ResolveModelInputCapabilitiesInput,
+  UserInputImagePart,
+  UserInputPart,
+  UserInputTextPart,
+  UserTurnInput,
+  UserTurnInputLike,
+} from "./user-input.js";
+export {
+  extractUserTurnInputText,
+  hasUserTurnInputContent,
+  isNonEmptyUserTurnInput,
+  isUserTurnInput,
+  messageContainsImage,
+  normalizeUserTurnInput,
+  resolveModelInputCapabilities,
+  userMessageFromTurnInput,
+  userTurnInputFromText,
+  validateMessagesAgainstInputCapabilities,
+} from "./user-input.js";
+
 // ─── 工具类型 ───
 export type {
   JsonSchema,

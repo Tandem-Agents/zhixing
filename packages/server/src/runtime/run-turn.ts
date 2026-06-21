@@ -18,7 +18,12 @@
  * （partial 内容已经由 yield 流推给用户，但不成为对话事实）。
  */
 
-import { userMessage, type AgentYield, type RunResult } from "@zhixing/core";
+import {
+  userMessageFromTurnInput,
+  type AgentYield,
+  type RunResult,
+  type UserTurnInputLike,
+} from "@zhixing/core";
 import type { ConversationManager } from "./conversation-manager.js";
 import type { RunTurnOptions } from "./types.js";
 
@@ -52,7 +57,7 @@ export interface RunTurnHooks {
  *
  * @param manager          ConversationManager 实例（提供 recordTurn）
  * @param conversationId   目标会话 ID —— session 必须已 getOrCreate（否则 throw）
- * @param text             用户消息文本
+ * @param input            用户 turn 输入
  * @param options          透传给 runtime.run（abortSignal / turnContext / turnIndex / source）
  * @param hooks            可选回调（onCommitFailure）
  * @returns                AsyncGenerator<AgentYield, RunResult>
@@ -63,7 +68,7 @@ export interface RunTurnHooks {
 export async function* runTurnWithCommit(
   manager: ConversationManager,
   conversationId: string,
-  text: string,
+  input: UserTurnInputLike,
   options?: RunTurnOptions,
   hooks?: RunTurnHooks,
 ): AsyncGenerator<AgentYield, RunResult> {
@@ -77,7 +82,7 @@ export async function* runTurnWithCommit(
   // run 输入 = 窗口事实 + 本轮用户消息,瞬态构造——用户消息不预写入任何状态,
   // accept 之前窗口不前进。
   const gen = session.runtime.run(
-    [...session.window.getMessages(), userMessage(text)],
+    [...session.window.getMessages(), userMessageFromTurnInput(input)],
     options,
   );
   let runResult: RunResult;

@@ -162,6 +162,43 @@ describe("runTurnWithCommit", () => {
     mgr.disposeAll();
   });
 
+  it("结构化用户输入会作为同一条 user message 进入 runtime", async () => {
+    const mgr = new ConversationManager(createFactory(), config, {
+      appendRun: appendRunOk(),
+    });
+
+    await mgr.getOrCreate("c1");
+    const gen = runTurnWithCommit(mgr, "c1", {
+      parts: [
+        { type: "text", text: "看图" },
+        {
+          type: "image",
+          source: { type: "base64", mediaType: "image/png", data: "AAA" },
+        },
+      ],
+    });
+    let runResult: RunResult | undefined;
+    while (true) {
+      const { value, done } = await gen.next();
+      if (done) {
+        runResult = value;
+        break;
+      }
+    }
+
+    expect(runResult!.runRecord.messages[0]).toEqual({
+      role: "user",
+      content: [
+        { type: "text", text: "看图" },
+        {
+          type: "image",
+          source: { type: "base64", mediaType: "image/png", data: "AAA" },
+        },
+      ],
+    });
+    mgr.disposeAll();
+  });
+
   it("[路径 2] completed + recordTurn throw → 窗口不前进 + onCommitFailure 通知", async () => {
     const mgr = new ConversationManager(createFactory(), config, {
       appendRun: async () => {

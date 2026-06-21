@@ -197,6 +197,59 @@ describe("createOpenAICompatibleProvider", () => {
     }
   });
 
+  it("user image block 转为 OpenAI image_url content part，并保留原始顺序", async () => {
+    mockCreate.mockResolvedValue(mockStream([finishChunk("stop")]));
+
+    const provider = createOpenAICompatibleProvider(makeProvider());
+    await collectEvents(
+      provider.chat({
+        model: "test-model",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "看图" },
+              {
+                type: "image",
+                source: {
+                  type: "base64",
+                  mediaType: "image/png",
+                  data: "AAA",
+                },
+              },
+              { type: "text", text: "再看这一张" },
+              {
+                type: "image",
+                source: {
+                  type: "url",
+                  url: "https://example.com/other.png",
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+    const params = mockCreate.mock.calls[0]![0];
+    expect(params.messages[0]).toEqual({
+      role: "user",
+      content: [
+        { type: "text", text: "看图" },
+        {
+          type: "image_url",
+          image_url: { url: "data:image/png;base64,AAA" },
+        },
+        { type: "text", text: "再看这一张" },
+        {
+          type: "image_url",
+          image_url: { url: "https://example.com/other.png" },
+        },
+      ],
+    });
+  });
+
   it("应正确处理工具调用流式响应", async () => {
     mockCreate.mockResolvedValue(
       mockStream([

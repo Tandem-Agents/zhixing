@@ -12,7 +12,11 @@
  * - API Key 支持三种格式统一解析
  */
 
-import type { ModelInfo, ThinkingConfig } from "@zhixing/core";
+import type {
+  ModelInfo,
+  ModelInputCapabilityOverride,
+  ThinkingConfig,
+} from "@zhixing/core";
 import type { ModelCapabilityOverride } from "./model-capability.js";
 
 // ─── 协议类型 ───
@@ -164,6 +168,14 @@ export interface ModelBudgetOverride {
 }
 
 /**
+ * 模型输入能力覆盖条目。
+ *
+ * 用于网关型 / 自定义 provider 为自由填写的 model id 声明可消费的材料形态。
+ * 与 modelOverrides 分开：budget 解决上下文窗口，input capability 解决“能不能理解这类输入”。
+ */
+export type ModelInputCapabilitiesOverride = ModelInputCapabilityOverride;
+
+/**
  * 凭证文件中单个 provider 的完整定义条目（对应 ~/.zhixing/credentials.json 的
  * `providers.<id>` 字段）。
  *
@@ -194,6 +206,14 @@ export interface ProviderCredentialEntry {
    *   - 为新发布的模型名临时注入 budget 信息而不升级适配器
    */
   modelOverrides?: Record<string, ModelBudgetOverride>;
+
+  /**
+   * 模型输入能力覆盖表（key = modelId）。
+   *
+   * 用于声明未进入 preset catalog 的模型能力，例如 `{ images: true }`。
+   * 该信息由 runtime 注入 core 做本地 preflight；不属于 CLI 接入面逻辑。
+   */
+  modelInputCapabilities?: Record<string, ModelInputCapabilitiesOverride>;
 
   /**
    * 用户在配置编辑器中追加的自定义模型 ID 列表（去重保序）。
@@ -492,4 +512,10 @@ export interface ResolvedProvider {
    * 携带，避免下游再触达原始 credentials。
    */
   modelOverrides?: Record<string, ModelBudgetOverride>;
+  /**
+   * 模型输入能力覆盖表（来自 credentials.providers.<id>.modelInputCapabilities）。
+   *
+   * 与 declaredModels 一起用于 runtime 注入 core 的 input capability preflight。
+   */
+  modelInputCapabilities?: Record<string, ModelInputCapabilitiesOverride>;
 }

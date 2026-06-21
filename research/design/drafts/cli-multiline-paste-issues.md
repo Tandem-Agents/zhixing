@@ -21,8 +21,9 @@
 - **直觉标准**：用户不需要理解 PasteRegistry、token、history 或 terminal mode。长粘贴首次进入输入区时折叠，是为了更安静、更可控；一旦发送成为历史消息，用户看到的应是刚交给 agent 的原文。
 - **架构标准**：占位符是 UI 表示，原文是语义内容。两者可以分离，但 canonicalize 边界必须清楚：离开输入态成为已发送消息时，写入 scrollback 和 agent 入口的都应是 canonical 文本。
 - **智能体标准**：agent 收到的必须是用户想交付的原始材料，而不是 `[Pasted #N ...]` 这种 UI handle。否则就是静默污染上下文，危害比显式报错更大。
+- **材料标准**：文本粘贴折叠是输入区降噪，不等同于真正的用户材料输入能力。未来文件、图片、音视频、网页快照、富文本等材料必须作为结构化输入进入核心，CLI 的缩略信息只是接入面展示，不能把文件路径、base64 或 UI token 伪装成用户正文。
 - **保真标准**：trim 只能服务空输入判断、命令识别等控制流。一旦内容被判定为用户正文，CLI 不能裁剪用户材料；代码、patch、YAML、日志等首尾空白都可能有语义。
-- **长期标准**：方案不能只修当前终端和当前输入框。它要经得起原生 scrollback 不可重绘、多个接入面扩展、未来附件类型扩展的考验。
+- **长期标准**：方案不能只修当前终端和当前输入框。它要经得起原生 scrollback 不可重绘、多个接入面扩展、未来材料类型扩展的考验。
 - **可验证标准**：每个重要不变量都必须有测试。尤其是“输入态首次长粘贴显示 token，二次粘贴显示原文”“提交后 scrollback / agent 均为原文”“token 不泄漏成历史区消息”。
 
 ### 当前需求边界澄清
@@ -361,22 +362,154 @@
 - 更新 `leading-slash-alias.ts` 注释，明确 alias 规范化只服务控制流，不裁剪正文 payload。
 - 新增 / 更新测试覆盖：普通正文首尾空白保真、纯空白输入、长粘贴首尾空白保真、paste 以 `/` / `、` 开头不误触发命令、前导空白 slash 与顿号 alias 命令仍可分派、REPL payload 准备与 `@file:` 周围空白保真。
 
-### 5. legacy readline 降级路径没有附件化粘贴能力
+### 5. 用户材料输入尚未一等化，CLI 图片 / 文件粘贴只是首批场景
 
-**状态**：待评估
+**状态**：已实现第一批结构化材料输入；本轮补齐共享模型能力预检、图文顺序保真、MIME 文件头嗅探、材料读错恢复、server 输入契约，已完成定向测试、受影响包全量测试、lint 与全量构建。
 
-**现象**：终端能力探测失败，或 `ZHIXING_INPUT_TYPEAHEAD=legacy/off` 时，REPL 走 `rl.question()`，不经过 paste-detector / PasteRegistry / finalizePaste。
+**降级路径释义**：
+
+- “legacy readline 降级路径”不是指图片 / 文件被降级，而是指 CLI 无法使用 typeahead chrome，或显式设置 `ZHIXING_INPUT_TYPEAHEAD=legacy/off` 时，REPL 退回 `rl.question()` 的低能力文本输入路径。
+- 该路径不经过 `InputController`、`paste-detector`、`PasteRegistry`、`finalizePaste()`，所以没有当前文本长粘贴的折叠 / token / expand 能力。
+- 它是能力边界，不是第 5 个问题的主需求。第 5 个问题的主需求是：用户能把本轮要交给 agent 的材料加入输入，包括文本、图片、文件，以及未来音频、视频、网页快照、富文本等。
+
+**审核结论**：
+
+- 原记录里的 legacy 现象真实，但范围过窄。它只说明备用输入路径没有文本粘贴附件化能力，不能覆盖用户现在表达的“粘贴文件 / 图片”需求。
+- 当前 CLI 的粘贴能力实际是文本能力：终端 keypress / bracketed paste 给到的是文本内容，`PasteRegistry` 存储的是 `string`，`expandPastes()` 返回的是 `string`。
+- 系统不是完全没有图片类型：核心 `ContentBlock` 已有 `ImageBlock`，Anthropic 适配器能把 base64 图片块转成厂商协议。修复前 CLI / RPC / channel 的发起 turn 入口仍以 `text: string` 为主，不会从用户输入构造图片或文件附件消息；第一批落地后 CLI / RPC / server 已能传递结构化 `UserTurnInput`，图片可投影为 `ImageBlock`。
+- `@file:` 当前是正文增强：提交前把文件内容读成文本并替换进 prompt。它不是文件附件语义，也不适合承载图片 / 二进制文件。
+- 通道层类型里有 `mediaUrls` / outbound `media` 字段，但 `InboundRouter` 当前仍把 `msg.text` 作为 turn 文本送入核心，没有把入站媒体转成 agent 输入附件。
+- 用户提出的问题属实，但最优解不能是“图片一套、文件一套、未来音频再补一套”。正确方向是建立一套通用用户材料能力，再用类型化 handler 处理不同材料。
+- 本轮复审补充确认：图片输入能力必须归 core/runtime 统一 preflight，不能写死在 CLI。CLI、飞书、未来 App 都只是材料采集 adapter；是否能发送图片由当前模型输入能力决定。
 
 **事实依据**：
 
-- `repl.ts` 的 legacy 分支直接 `input = await rl.question(...)`。
-- PasteRegistry 只注入到 `InputController` 主路径。
+- `packages/cli/src/paste-registry.ts`：`PasteEntry.content` 是 `string`，token 格式服务文本长粘贴。
+- `packages/cli/src/paste-detector.ts`：`onPaste(content: string)` 只输出文本内容。
+- `packages/cli/src/paste-expand.ts`：`expandPastes(draft, registry)` 产物是 `string`。
+- `packages/cli/src/repl.ts`：主路径把 `PasteRegistry` 注入 `InputController`；legacy 分支直接 `rl.question()`。
+- `packages/cli/src/runtime/conversation-controller.ts`：`sendTurn(text: string)` 只发送文本。
+- `packages/server/src/rpc/methods/session.ts`：`session.send` 校验 `params.text` 为非空字符串，并通过 `runManagedTurn(..., text, ...)` 执行。
+- `packages/server/src/runtime/run-turn.ts`：修复前 `runTurnWithCommit(..., text, ...)` 用 `userMessage(text)` 构造本轮用户消息；第一批落地后改为 `UserTurnInputLike` 并用 `userMessageFromTurnInput()` 投影。
+- `packages/core/src/types/messages.ts`：内部消息类型已有 `ImageBlock`，但 `userMessage(text)` 只创建文本块。
+- `packages/providers/src/adapters/anthropic-messages.ts`：base64 image block 可转 Anthropic image；URL 图片会降级为文本描述。
+- `packages/providers/src/adapters/openai-compatible.ts`：修复前 user 消息转换只提取 text / tool_result，image block 不会成为 OpenAI 兼容协议内容；第一批落地后支持 `image_url`，本轮补修后保留 text / image 的原始顺序。
+- `research/design/problems/multiline-paste-attachment.md` 的旧边界明确把“粘贴图片 / 二进制附件”排除在文本粘贴方案之外；现在用户需求已经把它提升为独立问题。
 
-**影响**：在无 chrome / legacy 输入模式下，多行粘贴可能退回 readline 行编辑行为，不具备长粘贴折叠与占位符 expand 能力。
+**背后需求**：
 
-**倾向修复方向**：先确认 legacy 是否属于必须支持的产品路径。若需要支持，可考虑让 legacy 直接提示“不支持附件化粘贴，请使用支持 chrome 的终端”，或给 legacy 单独接入 bracketed paste / paste registry。
+- 用户真正想做的是“把材料交给智能体”，不是“把某个文件名、base64、路径或占位符塞进 prompt”。材料可以是文字、截图、设计稿、日志文件、PDF、网页、音频、视频，也可以是未来的新类型。
+- 输入区的产品价值是让材料可控：用户能看到本轮附了什么、能删除、能继续输入文字、能在提交前确认。CLI 不应因为材料很大或不可打印，就把输入区变成噪音墙。
+- agent 入口的价值是让材料真实：图片就是图片，文本就是文本，文件就是有 MIME / 来源 / 元数据的文件；不能把 UI 缩略信息当成用户正文，也不能让 provider 自己猜路径。
+- 多接入面的本质要求是“采集不同，语义相同”。CLI、飞书、未来桌面端、浏览器端可以有不同的采集方式，但提交到唯一核心时必须是同一种用户材料模型。
+- 对未来仍然好的产品，不应把“粘贴图片”做成一个孤岛功能。用户长期会期待“这一轮可以带材料”，而不是记住每种材料有不同入口、不同历史行为、不同失败方式。
 
-**需要补测试**：待决策后补。
+**顶层产品判断**：
+
+- 交互对象不是“附件文件”，而是“本轮材料”。附件只是材料的一种来源形态。
+- 输入区展示不是材料本体，只是 handle / chip。它必须简短、可信、可删除；提交后不能变成 prompt 字面量。
+- 支持范围必须诚实：系统可以接收某类材料，不等于当前 provider 一定能理解它。发送前必须做 capability preflight，失败要在本地明确说明。
+- 能力判断必须在共享运行路径发生：core 根据当前模型输入能力检查消息，orchestrator 从 provider catalog 和用户 `modelInputCapabilities` 覆盖注入能力；provider adapter 只负责把已验证的输入编码成厂商协议。
+- 最好的默认体验是“少打扰但不隐瞒”：能发送就发送；不能发送就告诉用户为什么，给出可执行替代，例如换模型、转文本、换解析器或移除附件。
+
+**目标效果**：
+
+- 文本长粘贴保持当前目标：首次显示 `[Pasted #N ...]`，再次粘贴显示原文，提交给 agent / scrollback 的是 canonical 文本。
+- 图片作为材料进入 CLI 输入区后显示图片 chip，例如 `[Image #1 · screenshot.png · 1280x720 · 340KB]`；提交时变成 image part，不变成文本说明。
+- 普通文件作为材料进入 CLI 输入区后显示文件 chip，例如 `[File #2 · report.pdf · 2.1MB]`；第一批只消费安全范围内的文本文件，非文本文件明确报不支持，不把文件名或路径伪装成 prompt。
+- 文本文件可以在安全范围内解析成 text part，同时保留文件来源摘要；二进制文件不能被静默读成乱码。
+- history / scrollback 显示稳定摘要，例如用户文字加附件摘要；不依赖后续展开，也不把本地绝对路径裸露为长期语义。
+- 未来新增音频、视频、网页快照、富文本时，只新增采集 adapter / 类型 handler / provider encoder，不改动核心输入协议和 CLI 基础生命周期。
+
+**最优架构方案**：
+
+- 建立一套通用用户材料模型，而不是为图片、文件、音频分别铺平行链路。核心概念分四层：
+  - `InputDraftItem`：接入面输入态对象，负责 chip / token / 光标 / 删除等 UI 行为，只存在于 CLI 等接入面。
+  - `UserMaterialRef`：材料的稳定引用，包含 `id`、`kind`、`mimeType`、`name`、`size`、`hash`、`source`、`metadata`、`storageRef`。
+  - `UserInputPart`：提交到 server / core 的语义输入，按顺序表达用户正文和材料引用。
+  - `ProviderInputPart`：provider 适配层按模型能力把 `UserInputPart` 编码为厂商格式。
+- 建立 `MaterialStore`，由 server / runtime 所在侧管理材料生命周期。它负责复制或缓存本地文件、去重、大小限制、MIME sniff、图片尺寸、hash、来源记录、清理策略。第一批暂由 CLI 在提交时读取本地文件并转成 `UserTurnInput`，长期不能停留在 CLI 私有存储。
+- 建立 `MaterialHandlerRegistry`，按 `kind + mimeType` 选择类型化处理器。通用框架处理生命周期，handler 处理专业能力：
+  - `text`：编码识别、大小限制、保真正文。
+  - `image`：尺寸、MIME、必要时转 base64 image block。
+  - `file`：文件摘要、文本提取或 provider 文件能力门控。
+  - `audio` / `video`：时长、格式、转写或多模态能力门控。
+  - `webpage`：URL、HTML、正文提取、截图。
+  - `rich_text`：结构保留或转 markdown。
+- 将 CLI 的 `PasteRegistry` 演进为 `InputMaterialRegistry`。文本长粘贴仍可作为 text material 的特殊展示；图片 / 文件 chip 与文本 paste token 共用同一套原子删除、history 保活、submit 转换机制。
+- 扩展 turn 入口：`conversation.send(text: string)` 不应继续作为长期唯一入口。应新增或演进为 `conversation.send(input: UserTurnInput)`，其中包含 `parts: UserInputPart[]` 和必要的 turn metadata。旧 text API 可作为兼容 wrapper。
+- 核心消息层应吸收结构化材料，而不是只靠 `userMessage(text)`。已有 `ImageBlock` 可以承接图片第一阶段；文件类需要新增 `FileBlock` / `AttachmentBlock` 或在 `UserInputPart` 到 `Message.content` 之间做明确投影。
+- core/runtime 层必须有 capability preflight：先判断当前模型是否支持 image / file / audio 等 part，再决定继续发送、解析转换、请求用户确认或明确失败。能力判断来自 provider model catalog 与用户覆盖，但执行点归共享核心路径，不回流到 CLI 写死。
+- 采集 adapter 与材料模型解耦。CLI 首批可靠入口应优先支持路径粘贴 / 拖拽路径 / `/attach path`；直接从系统剪贴板拿图片 bytes 可以作为后续原生 adapter。飞书等通道的 `mediaUrls` 也应进入同一材料模型。
+- legacy readline 保持低能力文本兜底，不复制 rich input 系统。若需要附件能力，应走显式命令或非交互参数，并最终仍提交 `UserTurnInput`，而不是在 legacy 中另建一套 chip 状态机。
+
+**第一批能力边界**：
+
+- 应支持的首批材料类型：文本长粘贴、常见图片、普通本地文件。
+- 常见图片优先支持 `image/png`、`image/jpeg`、`image/gif`、`image/webp`。这些能与现有 `ImageBlock` 对齐，并已具备 Anthropic 与 OpenAI 兼容适配器编码路径；实际发送仍由 core 的模型能力预检决定。
+- 普通本地文件第一版分两类：可安全识别为文本的文件可提取为 text part；非文本文件进入输入区 chip，但提交时在没有 provider 文件能力 / 解析器前明确提示不支持。
+- PDF / Office 不应假装“普通文件都支持理解”。除非接入解析器或 provider 文件能力，否则只能显示为已附加但当前模型不可消费。
+- 终端原生“直接粘贴图片二进制”不是第一版可靠承诺；路径粘贴、拖拽路径、`/attach path` 是 CLI 更稳的产品入口。
+
+**不采用的方案**：
+
+- 不为图片、文件、音频各自写一条从 CLI 到 provider 的专用通道。那会让未来每多一种材料就多一套生命周期和测试矩阵。
+- 不把图片 / 文件内容 base64 后塞进普通文本 prompt。那会污染上下文、浪费 token，也让 provider 能力判断失效。
+- 不把文件路径 token 当成附件能力。路径只是本机线索，不是 agent 可消费的材料；跨接入面、跨设备、持久化恢复都不可靠。
+- 不只在 CLI 的 `PasteRegistry` 里加二进制字段。材料语义必须穿过 server、core、provider、history；停在 CLI 会再次形成 UI handle 泄漏。
+- 不在 legacy `rl.question()` 中重建一套并行附件交互。legacy 应是低能力兜底，不是第二个复杂输入系统。
+- 不静默降级为“把图片名告诉模型”。降级可以存在，但必须是用户可理解、可测试、不会伪装成功的路径。
+
+**架构判断**：
+
+- 这是顶层架构，不是局部修补：接入面负责采集和输入区呈现；`MaterialStore` 负责材料生命周期；core 负责结构化用户消息；provider 负责按能力序列化。这与“多个接入面、唯一核心”一致。
+- 这个方案经得起时间检验：今天接图片和文件，明天接音频、视频、网页、富文本，只扩展 handler 和 provider encoder，不重写 turn 入口和 CLI 输入生命周期。
+- 这个方案也符合智能体本质：agent 的输入不再是被 UI token 污染的字符串，而是用户意图中的材料序列。它能让模型能力、工具解析、上下文预算、安全确认都在正确层级发生。
+- 产品直觉上成立：用户看到的是“我给这一轮附了这些材料”，而不是“我往命令行塞了一串可疑占位符”。这是长期可理解的心智模型。
+
+**验收标准**：
+
+- 需求层：明确区分“材料输入模型”“CLI 采集方式”“provider 消费能力”“legacy 文本兜底”四件事。
+- CLI 主路径：文本 paste、图片、文件都能成为输入态 chip / token；删除、光标跨越、history 保活、submit 转换保持同一生命周期。
+- 核心入口：提交产物能表达有序的 `text + material parts`，不是单个字符串。
+- 存储层：材料有稳定 id、MIME、大小、hash、来源、清理策略；CLI 不持有真实 bytes。
+- provider：至少一个支持图片的 provider 能收到真实 image part；不支持附件的 provider 在发送前明确失败或给出明确转换选择。
+- 文件：文本文件可安全提取；非文本文件在没有 provider / handler 支持时明确提示，不静默塞 prompt。
+- history / scrollback：显示人类可读摘要，不依赖已绘历史的后续展开，不泄漏内部 token。
+- legacy：低能力路径行为明确；不支持 rich attachment 时有可理解提示或显式替代入口。
+- 安全：覆盖大小限制、MIME 判断、workspace 外文件、路径不存在、二进制不可读、用户取消确认等边界。
+- 测试：新增 CLI 输入态测试、material registry 测试、store 测试、RPC / server 输入模型测试、core message 构造测试、provider 能力门控测试、通道媒体归一测试。
+
+**本轮落地边界**：
+
+- 先落结构化 turn 竖切：`UserTurnInput` 从 CLI 经 RPC / server 进入 core，再由 provider 适配器编码，旧 `text: string` 保持兼容 wrapper。
+- CLI 主路径支持“粘贴本地路径”作为第一批材料采集入口；常见图片显示 `[Image #N ...]` chip，文本文件显示 `[File #N ...]` chip。
+- 图片提交时读取为 `ImageBlock`，Anthropic 走已有 base64 image 能力，OpenAI 兼容适配器新增 `image_url` data URL 编码。
+- 文本类文件在大小限制内提取为 text part，并带 `<file path="...">` 包裹；二进制 / PDF 等当前不可消费文件在本地明确失败，不伪装成 prompt 或文件名。
+- 材料 token 与文本 paste token 共用原子编辑、输入历史保活和提交态转换生命周期；submit 前是输入区 chip，submit 后是结构化用户输入。
+- 本轮不承诺终端直接粘贴图片二进制、系统剪贴板文件对象、PDF / Office 解析、音频 / 视频 / 网页快照。它们应沿同一 `UserTurnInput` / handler / provider 能力模型扩展。
+- 长期 `MaterialStore`、hash 去重、跨接入面持久材料引用仍是下一层基础设施；本轮没有把文件路径或 base64 塞进普通正文来制造未来返工。
+
+**修复记录**：
+
+- core 新增 `UserTurnInput` / `UserInputPart`，当前支持 text 与 image，并提供运行时非空校验和 user message 投影。
+- server 的 `session.send` 接受 `input`，同时保留旧 `text`；RPC 边界拒绝空结构化输入，也拒绝 `text` 与 `input` 同时出现的二义性请求。
+- CLI 新增 `InputMaterialRegistry`、材料路径识别与提交解析；图片 / 文本文件通过同一材料 token 生命周期进入 turn。
+- `typeahead-input.ts` 在粘贴路径时生成材料 chip；`paste-atomic.ts` 将材料 token 视作原子输入单元。
+- `prepareUserTurnInput()` 成为 REPL 到 core 的用户输入准备边界，统一处理 `@file:`、材料 token、错误收集和正文保真。
+- RPC conversation facade / controller 接受 `string | UserTurnInput`，让旧文本入口和新结构化入口并存但不分叉语义。
+- OpenAI 兼容 provider 新增 image block 编码；已有 Anthropic image block 路径继续复用。
+- 新增 / 更新测试覆盖 core 输入投影与校验、CLI 材料 ingest / resolve / typeahead、server structured turn、RPC 空 input 拒绝、OpenAI image 编码。
+
+**本轮复审修复记录**：
+
+- core 新增 `ModelInputCapabilities`、能力解析和 `validateMessagesAgainstInputCapabilities()`；`agent-loop` 在调用 provider 前统一拒绝当前模型不支持的图片输入。
+- orchestrator 从当前 provider 的 model catalog 与 `credentials.providers.<id>.modelInputCapabilities` 解析能力，并注入 core；自定义视觉模型可通过用户配置声明 `{ images: true }`。
+- OpenAI 兼容 adapter 保留用户消息中 text / image block 的原始顺序，不再把所有文本提前、所有图片后置。
+- CLI 材料路径识别改为读取有上限的文件头做 MIME sniff；图片扩展名不能绕过魔数识别，图片尺寸读取不再全量读文件。
+- CLI 材料提交解析改为重新 stat 并可恢复处理读错；文件被删除、权限变化或体积变化时返回本轮输入错误，不抛出打断 REPL。
+- server `projectSessionTurn()` 内部类型收紧为 text / input 二选一，避免调用方漏传时静默创建空 turn。
+- server public RPC `session.send` 边界同步收紧为 text / input 二选一；同时传两者直接返回 `INVALID_PARAMS`，避免多接入面客户端传错时静默丢弃其中一个输入源。
 
 ### 6. 缺少端到端粘贴生命周期测试
 
@@ -401,7 +534,7 @@
 
 ## 已验证
 
-运行命令：
+第 1-4 个问题验证命令：
 
 ```bash
 pnpm --filter @zhixing/cli exec vitest run src/__tests__/input-buffer.test.ts src/__tests__/paste-detector.test.ts src/__tests__/paste-registry.test.ts src/__tests__/paste-expand.test.ts src/__tests__/paste-atomic.test.ts src/__tests__/input-layout.test.ts src/__tests__/typeahead-input.test.ts src/__tests__/user-turn-input.test.ts src/runtime/__tests__/leading-slash-alias.test.ts
@@ -409,10 +542,36 @@ pnpm --filter @zhixing/cli exec vitest run src/__tests__/input-buffer.test.ts sr
 
 结果：9 个测试文件、234 个测试通过。
 
-构建命令：
+第 5 个问题定向验证命令：
 
 ```bash
-pnpm cli:build
+pnpm --filter @zhixing/core exec tsc --noEmit && pnpm --filter @zhixing/core exec vitest run src/types/user-input.test.ts src/loop/__tests__/agent-loop.test.ts && pnpm --filter @zhixing/core build
+pnpm --filter @zhixing/cli exec vitest run src/__tests__/input-material.test.ts src/__tests__/user-turn-input.test.ts src/__tests__/typeahead-input.test.ts
+pnpm --filter @zhixing/server exec tsc --noEmit && pnpm --filter @zhixing/server exec vitest run src/rpc/__tests__/session-turn-stream.test.ts src/runtime/__tests__/run-turn.test.ts src/__tests__/session-rpc.test.ts
+pnpm --filter @zhixing/providers exec tsc --noEmit && pnpm --filter @zhixing/providers exec vitest run src/__tests__/openai-compatible.test.ts src/__tests__/resolve.test.ts src/__tests__/llm-roles.test.ts
+pnpm --filter @zhixing/providers build && pnpm --filter @zhixing/orchestrator exec tsc --noEmit
 ```
 
-结果：构建成功。
+结果：全部通过。
+
+受影响包全量验证命令：
+
+```bash
+pnpm --filter @zhixing/core test
+pnpm --filter @zhixing/providers test
+pnpm --filter @zhixing/server test
+pnpm --filter @zhixing/cli test
+```
+
+结果：core 112 个测试文件、1984 个测试通过；providers 11 个测试文件通过、222 个测试通过、3 个跳过；server 30 个测试文件、568 个测试通过；CLI 140 个测试文件、2084 个测试通过。
+
+本轮最终结果：core 112 个测试文件、1987 个测试通过；providers 11 个测试文件通过、1 个跳过、224 个测试通过、3 个跳过；server 30 个测试文件、569 个测试通过；CLI 140 个测试文件、2086 个测试通过。
+
+格式与构建命令：
+
+```bash
+pnpm lint
+pnpm build
+```
+
+结果：全仓 Biome 通过；全量构建成功。

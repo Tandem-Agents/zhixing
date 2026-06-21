@@ -43,6 +43,7 @@ import { SkillCommandSource } from "./commands/skill-command-source.js";
 import { FEATURE_CHROME } from "./commands/command-visibility.js";
 import { registerSkillsCommand } from "./skills/manager-command.js";
 import { PASTE_TOKEN_PATTERN, PasteRegistry } from "./paste-registry.js";
+import { InputMaterialRegistry } from "./input-material-registry.js";
 import { prepareUserTurnInput } from "./user-turn-input.js";
 import { renderError, createRenderSubscribers } from "./render.js";
 import { renderHistoryTail } from "./history-tail.js";
@@ -341,6 +342,7 @@ export async function startRepl(): Promise<void> {
   // 输入草稿做引用保活，确保用户通过 ↑/↓ 找回的占位符仍可 expand。session 退出时
   // 随 startRepl scope 自然 GC，无需显式 clearAll。
   const pasteRegistry = new PasteRegistry();
+  const materialRegistry = new InputMaterialRegistry();
 
   // 终端能力探测——DECSTBM 三区模型要求 TTY 直连 + 现代终端基线。检测失败时
   // fail-fast 降级到 stdout 直写模式（无 chrome），保留基础对话能力
@@ -1004,6 +1006,8 @@ export async function startRepl(): Promise<void> {
       screen: renderScreen ?? undefined,
       placeholder: "输入消息或 / 查看命令",
       registry: pasteRegistry,
+      materialRegistry,
+      workspaceRoot: localView.workspaceRoot ?? process.cwd(),
       onCandidateDelete,
       bottomInfo,
     });
@@ -1245,13 +1249,14 @@ export async function startRepl(): Promise<void> {
     // ── 准备发送给 core 的用户正文 ──
     const preparedInput = await prepareUserTurnInput(input, {
       workspaceRoot: localView.workspaceRoot ?? process.cwd(),
+      materialRegistry,
     });
     if (!preparedInput) continue;
-    const resolvedInput = preparedInput.text;
     if (preparedInput.errors.length > 0) {
       for (const err of preparedInput.errors) {
         cliWriter.line(chalk.yellow(`  ⚠ ${err}`));
       }
+      continue;
     }
 
     // 正常对话 —— send 入队宿主唯一串行点;窗口推进 / 持久化 / 自动命名 /
@@ -1277,7 +1282,7 @@ export async function startRepl(): Promise<void> {
     });
 
     try {
-      const turnPromise = controller.sendTurn(resolvedInput);
+      const turnPromise = controller.sendTurn(preparedInput.input);
       // 暴露给模式切换命令——切换前 await 它,天然落在 turn 边界
       state.activeTurnPromise = turnPromise;
       const outcome = await turnPromise;

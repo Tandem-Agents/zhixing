@@ -49,6 +49,10 @@ import { toAgentError } from "../types/errors.js";
 import { emptyUsage, mergeUsage } from "../types/llm.js";
 import { extractText, extractToolCalls, toolResultMessage } from "../types/messages.js";
 import type { Message } from "../types/messages.js";
+import {
+  resolveModelInputCapabilities,
+  validateMessagesAgainstInputCapabilities,
+} from "../types/user-input.js";
 import { toToolSpec } from "../types/tools.js";
 import { streamLLMCall } from "./llm-call.js";
 import { executeToolCalls } from "./tool-executor.js";
@@ -95,6 +99,12 @@ export async function* runAgentLoop(
   const workingDirectory = params.workingDirectory ?? process.cwd();
   const toolSpecs = tools.map(toToolSpec);
   const deps = resolveDeps(params);
+  const inputCapabilities =
+    params.inputCapabilities ??
+    resolveModelInputCapabilities({
+      model,
+      providerModels: params.provider.models,
+    });
 
   const startTime = Date.now();
 
@@ -285,6 +295,18 @@ export async function* runAgentLoop(
       let messagesForLLM: readonly Message[] = state.messages;
       if (params.turnContextInjector) {
         messagesForLLM = params.turnContextInjector.inject(messagesForLLM);
+      }
+
+      const inputCapabilityError = validateMessagesAgainstInputCapabilities(
+        messagesForLLM,
+        inputCapabilities,
+      );
+      if (inputCapabilityError) {
+        return await finalizeRun({
+          reason: "error",
+          error: inputCapabilityError,
+          usage: state.totalUsage,
+        });
       }
 
       // ── Step 2: Call LLM ──

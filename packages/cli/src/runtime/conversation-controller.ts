@@ -21,6 +21,7 @@ import {
   generateTurnId,
   parseConversationId,
   type AgentYield,
+  type UserTurnInput,
   type WorkModeSwitchIntent,
 } from "@zhixing/core";
 import type {
@@ -258,7 +259,7 @@ export class ConversationController {
    * 推送可能先于 request 响应到达,后挂必丢。send 失败(BUSY / 宿主不可达)
    * 时撤 waiter 并原样抛出。
    */
-  async sendTurn(text: string): Promise<TurnOutcome> {
+  async sendTurn(input: string | UserTurnInput): Promise<TurnOutcome> {
     const target = this.active.conversationId;
     const turnId = generateTurnId();
     const outcome = new Promise<TurnOutcome>((resolve) => {
@@ -266,7 +267,7 @@ export class ConversationController {
     });
     this.localTurnsByConversation.set(target, turnId);
     try {
-      await this.opts.conversation.send(text, target, turnId);
+      await this.opts.conversation.send(input, target, turnId);
       this.observedConversationId = target;
     } catch (err) {
       this.waiters.delete(turnId);

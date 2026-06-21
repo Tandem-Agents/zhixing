@@ -25,6 +25,7 @@ import type {
   TokenUsage,
 } from "../types/llm.js";
 import type { Message, ToolResultBlock, ToolUseBlock } from "../types/messages.js";
+import type { ModelInputCapabilities } from "../types/user-input.js";
 import type { ToolDefinition, ToolExecutionContext, ToolResult } from "../types/tools.js";
 import type {
   ContextBudget,
@@ -57,6 +58,11 @@ export interface AgentLoopParams {
   provider: LLMProvider;
   /** 使用的模型 ID */
   model: string;
+  /**
+   * 当前模型可消费的用户输入形态。缺省时从 provider.models 按 model id 推导；
+   * 未声明的模型按文本模型处理，避免把图片等材料静默送到不支持的 provider。
+   */
+  inputCapabilities?: ModelInputCapabilities;
   /**
    * 该次运行所用 role 的思考控制 —— 装配期按主对话实际 role 注入，
    * 透传到每次 LLM call 的 ChatRequest。缺省 = 不发送思考参数。

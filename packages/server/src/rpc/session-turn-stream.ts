@@ -9,6 +9,8 @@
 import {
   stripPresentationFromAgentYield,
   type RunResult,
+  type UserTurnInput,
+  userTurnInputFromText,
 } from "@zhixing/core";
 import type { ManagedSession, ConversationManager } from "../runtime/conversation-manager.js";
 import { runTurnWithCommit, type RunTurnHooks } from "../runtime/run-turn.js";
@@ -27,10 +29,9 @@ export type ProjectedSessionTurnResult =
   | { kind: "aborted" }
   | { kind: "error"; error: unknown };
 
-export interface ProjectSessionTurnOptions {
+interface ProjectSessionTurnBaseOptions {
   readonly manager: ConversationManager;
   readonly managed: ManagedSession;
-  readonly text: string;
   readonly turnId: string;
   readonly runOptions?: RunTurnOptions;
   readonly hooks?: RunTurnHooks;
@@ -41,16 +42,23 @@ export interface ProjectSessionTurnOptions {
   ) => void;
 }
 
+export type ProjectSessionTurnOptions = ProjectSessionTurnBaseOptions &
+  (
+    | { readonly text: string; readonly input?: never }
+    | { readonly input: UserTurnInput; readonly text?: never }
+  );
+
 export async function projectSessionTurn(
   opts: ProjectSessionTurnOptions,
 ): Promise<ProjectedSessionTurnResult> {
   const conversationId = opts.managed.conversationId;
+  const input = toProjectSessionTurnInput(opts);
 
   try {
     const gen = runTurnWithCommit(
       opts.manager,
       conversationId,
-      opts.text,
+      input,
       opts.runOptions,
       opts.hooks,
     );
@@ -94,4 +102,10 @@ export async function projectSessionTurn(
     } satisfies SessionCompletePayload);
     return { kind: "error", error: err };
   }
+}
+
+function toProjectSessionTurnInput(opts: ProjectSessionTurnOptions): UserTurnInput {
+  if (opts.input !== undefined) return opts.input;
+  if (opts.text !== undefined) return userTurnInputFromText(opts.text);
+  throw new Error("projectSessionTurn requires text or input");
 }

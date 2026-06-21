@@ -78,6 +78,22 @@ describe("resolveProvider", () => {
         "deepseek-chat": { contextWindow: 64000 },
       });
     });
+
+    it("用户在 credentials 提供 modelInputCapabilities → 透传到 ResolvedProvider", () => {
+      const resolved = resolveProvider(
+        "openai",
+        credsWith({
+          openai: {
+            apiKey: "sk-test",
+            modelInputCapabilities: { "gpt-4o": { images: true } },
+          },
+        }),
+      );
+
+      expect(resolved.modelInputCapabilities).toEqual({
+        "gpt-4o": { images: true },
+      });
+    });
   });
 
   // ─── 自定义 provider ───

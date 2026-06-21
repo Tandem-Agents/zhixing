@@ -13,6 +13,9 @@
  */
 
 import { EventEmitter } from "node:events";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { PassThrough } from "node:stream";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import chalk from "chalk";
@@ -41,6 +44,7 @@ import { InputController, readInputLine, type InputLineResult } from "../typeahe
 import type { ScreenController } from "../screen/index.js";
 import { BottomInfoModel } from "../bottom-info/index.js";
 import { PasteRegistry } from "../paste-registry.js";
+import { InputMaterialRegistry } from "../input-material-registry.js";
 
 // PassThrough 非 TTY，chalk 默认禁用颜色——强开 level=3 让 bg / dim 等 ANSI
 // 真实出现在 captured 里供回归断言（与 chalk 在真实 TTY 的输出一致）
@@ -135,6 +139,16 @@ async function pasteText(
 
 function drainMicrotasks(): Promise<void> {
   return Promise.resolve();
+}
+
+function minimalPng(width: number, height: number): Buffer {
+  const bytes = Buffer.alloc(24);
+  bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+  bytes.writeUInt32BE(13, 8);
+  bytes.write("IHDR", 12, "ascii");
+  bytes.writeUInt32BE(width, 16);
+  bytes.writeUInt32BE(height, 20);
+  return bytes;
 }
 
 function makeRuntime(): RuntimeContext {
@@ -1231,6 +1245,48 @@ describe("InputController — 多行粘贴提交历史区", () => {
       getScrollbackText: () => scrollbackText,
     };
   }
+
+  it("粘贴图片路径时输入区显示图片材料 chip", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-input-"));
+    try {
+      const imagePath = path.join(tempDir, "shot.png");
+      await fs.writeFile(imagePath, minimalPng(4, 5));
+      const { stdin } = makeStreams();
+      const { broker, dispatcher } = makeHarness();
+      const materialRegistry = new InputMaterialRegistry();
+      const { screen, getScrollbackText } = makeCapturingScreen();
+      const controller = new InputController({
+        broker,
+        dispatcher,
+        getRuntime: makeRuntime,
+        screen,
+        stdin,
+        columns: 80,
+        materialRegistry,
+        workspaceRoot: tempDir,
+      });
+      const resultP = controller.waitOnce();
+
+      controller.start();
+      await pasteText(stdin, imagePath);
+      const inputText = stripAnsi(controller.renderLines().join("\n"));
+      expect(inputText).toContain("[Image #1 · shot.png · 4x5 ·");
+      expect(inputText).not.toContain(imagePath);
+
+      await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+      const result = await resultP;
+      expect(result.kind).toBe("text");
+      if (result.kind === "text") {
+        expect(result.text).toContain("[Image #1 · shot.png · 4x5 ·");
+      }
+      expect(stripAnsi(getScrollbackText())).toContain("[Image #1 · shot.png");
+      expect(materialRegistry.size).toBe(1);
+
+      controller.stop();
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
 
   it("长粘贴输入区折叠，提交后历史区写入原文", async () => {
     const { stdin } = makeStreams();

@@ -48,10 +48,15 @@ import {
 } from "./paste-registry.js";
 import { expandPastes, PasteReferenceIndex } from "./paste-expand.js";
 import {
-  removeAllPasteTokens,
+  removeAllInputTokens,
   tryAtomicEdit,
   type AtomicEditKind,
 } from "./paste-atomic.js";
+import {
+  extractAliveMaterialIds,
+  type InputMaterialRegistry,
+} from "./input-material-registry.js";
+import { materialTokensFromPastedPaths } from "./input-material-ingest.js";
 import {
   rawModeController,
   type RawModeLease,
@@ -139,6 +144,12 @@ export interface InputControllerOptions {
   /** 粘贴附件 registry（REPL session 级共享） */
   readonly registry?: PasteRegistry;
 
+  /** 用户材料 registry（REPL session 级共享） */
+  readonly materialRegistry?: InputMaterialRegistry;
+
+  /** 工作区根目录，用于把粘贴的相对文件路径解析为本地材料。 */
+  readonly workspaceRoot?: string;
+
   /**
    * 删除选中候选 callback —— Ctrl+D 第二次按下时触发(第一次按下仅标记
    * broker 的 deletePending 准备态)。仅在 typeahead 当前 trigger 的 provider
@@ -207,6 +218,9 @@ export class InputController implements InputRegion {
   /** suspend 时快照的输入态 —— resume 用它恢复 buffer + 重新 query（挂起/恢复对称）。 */
   private suspendedSnapshot: InputBufferSnapshot | null = null;
   private readonly pasteReferenceIndex = new PasteReferenceIndex();
+  private readonly materialReferenceIndex = new PasteReferenceIndex(
+    extractAliveMaterialIds,
+  );
 
   // 渲染缓存（InputRegion 契约要求）
   private cachedLines: readonly string[] = [];
@@ -847,6 +861,11 @@ export class InputController implements InputRegion {
         this.pasteReferenceIndex.update(this.buffer.getRestorableDraftSlots()),
       );
     }
+    if (this.options.materialRegistry) {
+      this.options.materialRegistry.cleanup(
+        this.materialReferenceIndex.update(this.buffer.getRestorableDraftSlots()),
+      );
+    }
     // esc hint 等本控制器贡献的底部信息块必须在 broker.updateInput **之前**同步 ——
     // updateInput 会同步触发一次 repaint 读 model,晚于它写 model 会让本帧读到旧值
     // (打字时 esc 清空 落后一个字符出现 / 消失)。
@@ -878,9 +897,17 @@ export class InputController implements InputRegion {
   private finalizePaste(content: string): void {
     if (!this.buffer || this.state !== "active") return;
 
+    const materializedContent =
+      this.options.materialRegistry && this.options.workspaceRoot
+        ? materialTokensFromPastedPaths(content, this.options.materialRegistry, {
+            workspaceRoot: this.options.workspaceRoot,
+          })
+        : null;
+    const nextContent = materializedContent ?? content;
+
     let bufferWasClean = true;
-    if (this.options.registry) {
-      const removed = removeAllPasteTokens(this.buffer.draft, this.buffer.cursor);
+    if (this.options.registry || this.options.materialRegistry) {
+      const removed = removeAllInputTokens(this.buffer.draft, this.buffer.cursor);
       if (removed) {
         this.buffer.setDraft(removed.draft, removed.cursor);
         bufferWasClean = false;
@@ -888,12 +915,15 @@ export class InputController implements InputRegion {
     }
 
     const shouldFold =
-      !!this.options.registry && shouldFoldPaste(content) && bufferWasClean;
+      materializedContent === null &&
+      !!this.options.registry &&
+      shouldFoldPaste(content) &&
+      bufferWasClean;
     if (shouldFold) {
       const id = this.options.registry!.register(content);
       this.buffer.insertText(this.options.registry!.format(id));
     } else {
-      this.buffer.insertText(content);
+      this.buffer.insertText(nextContent);
     }
     this.syncBroker();
   }
@@ -920,7 +950,9 @@ export class InputController implements InputRegion {
   }
 
   private tryAtomicKeypress(kind: AtomicEditKind): boolean {
-    if (!this.buffer || !this.options.registry) return false;
+    if (!this.buffer || (!this.options.registry && !this.options.materialRegistry)) {
+      return false;
+    }
     const result = tryAtomicEdit(this.buffer.draft, this.buffer.cursor, kind);
     if (!result) return false;
     if (kind === "left" || kind === "right") {

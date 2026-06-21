@@ -35,6 +35,7 @@ import type {
   SessionTaskListUpdateResult,
   SessionUsageResult,
 } from "@zhixing/server";
+import type { UserTurnInput } from "@zhixing/core";
 import {
   RpcClientError,
   RPC_ERROR_CODES,
@@ -56,13 +57,13 @@ export class RpcConversationFacade {
 
   /** 发送一个 turn(经宿主唯一串行点入队);turnId 由发起端预分配以闭合通知竞态。 */
   async send(
-    text: string,
+    input: string | UserTurnInput,
     conversationId?: string,
     turnId?: string,
   ): Promise<SessionSendResult> {
     const client = await this.link.getClient();
     return client.request<SessionSendResult>("session.send", {
-      text,
+      ...(typeof input === "string" ? { text: input } : { input }),
       conversationId,
       turnId,
     });

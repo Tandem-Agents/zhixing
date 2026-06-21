@@ -9,6 +9,7 @@ export type {
   McpServerConfigEntry,
   MessagingChannelEntry,
   ModelBudgetOverride,
+  ModelInputCapabilitiesOverride,
   NetworkConfig,
   Protocol,
   ProviderCredentialEntry,

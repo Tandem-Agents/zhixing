@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { EventBus } from "../../events/event-bus.js";
 import type { AgentEventMap } from "../../types/agent-events.js";
-import type { TokenUsage } from "../../types/llm.js";
+import type { LLMProvider, TokenUsage } from "../../types/llm.js";
 import type { ToolDefinition } from "../../types/tools.js";
 import { userMessage } from "../../types/messages.js";
 import { drainAgentLoop, runAgentLoop } from "../agent-loop.js";
@@ -68,6 +68,38 @@ describe("Agent Loop", () => {
       expect(result.reason).toBe("completed");
     });
 
+    it("模型不支持图片时在调用 provider 前本地拒绝", async () => {
+      const provider = new MockLLMProvider([{ text: "ignored" }]);
+      const { result, yields } = await drainAgentLoop(
+        baseParams(provider, {
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: "看图" },
+                {
+                  type: "image",
+                  source: {
+                    type: "base64",
+                    mediaType: "image/png",
+                    data: "AAA",
+                  },
+                },
+              ],
+            },
+          ],
+        }),
+      );
+
+      expect(result.reason).toBe("error");
+      if (result.reason === "error") {
+        expect(result.error.type).toBe("invalid_request");
+        expect(result.error.message).toContain("不支持图片输入");
+      }
+      expect(provider.callCount).toBe(0);
+      expect(yields).toEqual([]);
+    });
+
     // ─── P0-α: abort + failed 同时发生时 abort 优先 ───
 
 
@@ -79,7 +111,7 @@ describe("Agent Loop", () => {
       const provider: LLMProvider = {
         id: "mock",
         chat: () => {
-          throw new AgentError("llm boom", "llm");
+          throw new Error("llm boom");
         },
       } as unknown as LLMProvider;
       const eventBus = new EventBus<AgentEventMap>();

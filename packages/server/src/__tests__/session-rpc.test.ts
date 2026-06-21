@@ -1203,6 +1203,35 @@ describe("session.* RPC (S2.D)", () => {
     client.close();
   });
 
+  it("session.send rejects empty structured input", async () => {
+    await startWithFactory(createMockFactory());
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+    const r = await client.request("session.send", {
+      input: { parts: [{ type: "text", text: "" }] },
+    });
+    expect(isErrorResponse(r)).toBe(true);
+    if (isErrorResponse(r)) {
+      expect(r.error.code).toBe(RPC_ERROR_CODES.INVALID_PARAMS);
+    }
+    client.close();
+  });
+
+  it("session.send rejects text and structured input together", async () => {
+    await startWithFactory(createMockFactory());
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+    const r = await client.request("session.send", {
+      text: "plain",
+      input: { parts: [{ type: "text", text: "structured" }] },
+    });
+    expect(isErrorResponse(r)).toBe(true);
+    if (isErrorResponse(r)) {
+      expect(r.error.code).toBe(RPC_ERROR_CODES.INVALID_PARAMS);
+    }
+    client.close();
+  });
+
   it("session.send with existing sessionId reuses runtime", async () => {
     await startWithFactory(createMockFactory({ deltaCount: 1 }));
     const client = await connect(server.port);

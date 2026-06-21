@@ -379,6 +379,23 @@ describe("createProviderRoles · 实例化与角色装配", () => {
     });
   });
 
+  it("modelInputCapabilities 从 credentials 透传到 ResolvedProvider", () => {
+    writeFixture(
+      { llm: { main: { provider: "openai", model: "gpt-4o" } } },
+      credsWith({
+        openai: {
+          apiKey: "sk-oai",
+          modelInputCapabilities: { "gpt-4o": { images: true } },
+        },
+      }),
+    );
+    const { resolvedRoles } = createProviderRoles({ env: envFor() });
+
+    expect(resolvedRoles.main.resolved.modelInputCapabilities).toEqual({
+      "gpt-4o": { images: true },
+    });
+  });
+
   it("网关型 provider（preset 无 knownModels）走空 declaredModels —— catalog 兜底交给 protocol-default", () => {
     // minimax preset 当前未声明 knownModels（preset 仅含 baseUrl/protocol/quirks），
     // 适合验证"preset 存在但无 catalog 时 declaredModels 为空"的兜底路径。

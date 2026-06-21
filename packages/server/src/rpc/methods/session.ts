@@ -25,7 +25,10 @@
 import {
   abortWithReason,
   generateTurnId,
+  isNonEmptyUserTurnInput,
   type TurnContext,
+  type UserTurnInput,
+  userTurnInputFromText,
 } from "@zhixing/core";
 import type { MethodEntry } from "../handlers.js";
 import { RpcAppError, RpcErrors } from "../handlers.js";
@@ -61,13 +64,11 @@ import {
 
 // ─── session.send ───
 
-interface SessionSendParams {
-  text?: string;
-  conversationId?: string;
+interface SessionSendParams extends ConversationIdParams {
+  text?: unknown;
+  input?: unknown;
   /** 发起端可预分配 turnId,用于避免 loopback 下 complete 先于 send 响应的竞态 */
-  turnId?: string;
-  /** @deprecated 使用 conversationId */
-  sessionId?: string;
+  turnId?: unknown;
 }
 
 export function buildSessionSendMethod(): MethodEntry {
@@ -76,10 +77,12 @@ export function buildSessionSendMethod(): MethodEntry {
     requiresAuth: true,
     async handler(rawParams, ctx): Promise<SessionSendResult> {
       const params = (rawParams ?? {}) as SessionSendParams;
-      if (typeof params.text !== "string" || params.text.length === 0) {
-        throw RpcErrors.invalidParams("session.send requires non-empty 'text'");
+      const input = normalizeSessionInput(params);
+      if (!input) {
+        throw RpcErrors.invalidParams(
+          "session.send requires non-empty 'text' or 'input'",
+        );
       }
-      const text = params.text;
 
       const manager = requireConversations(ctx.server);
       const id = optionalConversationId(params, "session.send");
@@ -101,7 +104,7 @@ export function buildSessionSendMethod(): MethodEntry {
           execute: () =>
             runManagedTurn(
               managed,
-              text,
+              input,
               turnId,
               ctx.connection,
               manager,
@@ -159,7 +162,7 @@ export function buildSessionSendMethod(): MethodEntry {
  */
 async function runManagedTurn(
   managed: ManagedSession,
-  text: string,
+  input: UserTurnInput,
   turnId: string,
   connection: RpcConnection,
   manager: ConversationManager,
@@ -193,7 +196,7 @@ async function runManagedTurn(
     await projectSessionTurn({
       manager,
       managed,
-      text,
+      input,
       turnId,
       runOptions: {
         abortSignal: abortController.signal,
@@ -226,6 +229,35 @@ async function runManagedTurn(
       manager.removeObserver(conversationId, String(connection.id));
     }
   }
+}
+
+function normalizeSessionInput(params: SessionSendParams): UserTurnInput | null {
+  const hasText = hasProvidedSessionInput(params, "text");
+  const hasInput = hasProvidedSessionInput(params, "input");
+
+  if (hasText && hasInput) {
+    throw RpcErrors.invalidParams(
+      "session.send accepts either 'text' or 'input', not both",
+    );
+  }
+
+  if (hasInput) {
+    if (!isNonEmptyUserTurnInput(params.input)) return null;
+    return params.input;
+  }
+
+  if (typeof params.text === "string" && params.text.length > 0) {
+    return userTurnInputFromText(params.text);
+  }
+
+  return null;
+}
+
+function hasProvidedSessionInput(
+  params: SessionSendParams,
+  key: "text" | "input",
+): boolean {
+  return Object.prototype.hasOwnProperty.call(params, key) && params[key] !== undefined;
 }
 
 // ─── session.list ───

@@ -84,6 +84,7 @@ export function resolveProvider(
     quirks,
     declaredModels: preset?.knownModels ?? [],
     modelOverrides: entry?.modelOverrides,
+    modelInputCapabilities: entry?.modelInputCapabilities,
   };
 }
 

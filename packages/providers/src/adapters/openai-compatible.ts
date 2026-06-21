@@ -265,12 +265,15 @@ function convertMessages(messages: Message[]): OpenAI.ChatCompletionMessageParam
     if (msg.role === "assistant") {
       result.push(convertAssistantMessage(msg));
     } else {
-      // user 消息可能包含 tool_result 和/或 text
+      // user 消息可能包含 tool_result 和/或普通用户内容
       const toolResults = msg.content.filter(
         (b): b is Extract<ContentBlock, { type: "tool_result" }> => b.type === "tool_result",
       );
-      const textBlocks = msg.content.filter(
-        (b): b is Extract<ContentBlock, { type: "text" }> => b.type === "text",
+      const userContentBlocks = msg.content.filter(
+        (
+          b,
+        ): b is Extract<ContentBlock, { type: "text" | "image" }> =>
+          b.type === "text" || b.type === "image",
       );
 
       if (toolResults.length > 0) {
@@ -282,22 +285,60 @@ function convertMessages(messages: Message[]): OpenAI.ChatCompletionMessageParam
             content: tr.content,
           });
         }
-        // 如果还有文本块，作为额外的 user 消息
-        if (textBlocks.length > 0) {
+        // 如果还有用户内容块，作为额外的 user 消息，并保留原始块顺序
+        if (userContentBlocks.length > 0) {
           result.push({
             role: "user",
-            content: textBlocks.map((b) => b.text).join("\n"),
+            content: convertUserContent(userContentBlocks),
           });
         }
       } else {
-        // 纯文本 user 消息
-        const text = textBlocks.map((b) => b.text).join("\n");
-        result.push({ role: "user", content: text || "" });
+        result.push({
+          role: "user",
+          content: convertUserContent(userContentBlocks),
+        });
       }
     }
   }
 
   return result;
+}
+
+function convertUserContent(
+  blocks: readonly Extract<ContentBlock, { type: "text" | "image" }>[],
+): OpenAI.ChatCompletionUserMessageParam["content"] {
+  const hasImage = blocks.some((block) => block.type === "image");
+  if (!hasImage) {
+    return blocks
+      .filter((b): b is Extract<ContentBlock, { type: "text" }> => b.type === "text")
+      .map((b) => b.text)
+      .join("\n") || "";
+  }
+
+  const parts: NonNullable<
+    Exclude<OpenAI.ChatCompletionUserMessageParam["content"], string>
+  > = [];
+  for (const block of blocks) {
+    switch (block.type) {
+      case "text":
+        if (block.text.length > 0) {
+          parts.push({ type: "text", text: block.text });
+        }
+        break;
+      case "image":
+        parts.push({
+          type: "image_url",
+          image_url: {
+            url:
+              block.source.type === "url"
+                ? block.source.url
+                : `data:${block.source.mediaType};base64,${block.source.data}`,
+          },
+        });
+        break;
+    }
+  }
+  return parts;
 }
 
 function convertAssistantMessage(msg: Message): DeepSeekAssistantMessage {

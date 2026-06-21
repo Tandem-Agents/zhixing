@@ -13,6 +13,7 @@
  */
 
 import { PASTE_TOKEN_PATTERN } from "./paste-registry.js";
+import { MATERIAL_TOKEN_PATTERN } from "./input-material-registry.js";
 
 export interface TokenRange {
   /** 占位符在 draft 中的 char 起始（不是 string offset） */
@@ -28,6 +29,16 @@ export interface TokenRange {
  * cursor（char offset）可对比。
  */
 export function findTokenCharRanges(draft: string): TokenRange[] {
+  return findTokenCharRangesByPatterns(draft, [
+    PASTE_TOKEN_PATTERN,
+    MATERIAL_TOKEN_PATTERN,
+  ]);
+}
+
+function findTokenCharRangesByPatterns(
+  draft: string,
+  patterns: readonly RegExp[],
+): TokenRange[] {
   if (draft.length === 0) return [];
   const draftChars = Array.from(draft);
 
@@ -43,15 +54,17 @@ export function findTokenCharRanges(draft: string): TokenRange[] {
   offToChar.set(strOff, charIdx);
 
   const ranges: TokenRange[] = [];
-  for (const m of draft.matchAll(PASTE_TOKEN_PATTERN)) {
-    const startStr = m.index!;
-    const endStr = startStr + m[0].length;
-    const startChar = offToChar.get(startStr);
-    const endChar = offToChar.get(endStr);
-    if (startChar === undefined || endChar === undefined) continue;
-    ranges.push({ start: startChar, end: endChar });
+  for (const pattern of patterns) {
+    for (const m of draft.matchAll(pattern)) {
+      const startStr = m.index!;
+      const endStr = startStr + m[0].length;
+      const startChar = offToChar.get(startStr);
+      const endChar = offToChar.get(endStr);
+      if (startChar === undefined || endChar === undefined) continue;
+      ranges.push({ start: startChar, end: endChar });
+    }
   }
-  return ranges;
+  return ranges.sort((a, b) => a.start - b.start);
 }
 
 export type AtomicEditKind = "backspace" | "delete" | "left" | "right";
@@ -126,7 +139,23 @@ export function removeAllPasteTokens(
   draft: string,
   cursor: number,
 ): AtomicEditResult | null {
+  const ranges = findTokenCharRangesByPatterns(draft, [PASTE_TOKEN_PATTERN]);
+  return removeTokenRanges(draft, cursor, ranges);
+}
+
+export function removeAllInputTokens(
+  draft: string,
+  cursor: number,
+): AtomicEditResult | null {
   const ranges = findTokenCharRanges(draft);
+  return removeTokenRanges(draft, cursor, ranges);
+}
+
+function removeTokenRanges(
+  draft: string,
+  cursor: number,
+  ranges: readonly TokenRange[],
+): AtomicEditResult | null {
   if (ranges.length === 0) return null;
 
   // 倒序构造新 draft：未处理 ranges 的 char index 不被前面删除扰动

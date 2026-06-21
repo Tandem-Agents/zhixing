@@ -76,6 +76,7 @@ import {
   type Resettable,
   type WindowLifecycle,
   type WindowChangeReason,
+  resolveModelInputCapabilities,
 } from "@zhixing/core";
 import {
   createProviderRoles,
@@ -978,6 +979,11 @@ export async function createAgentRuntime(
     console.warn(`[zhixing] ${w.message}`);
   }
   const modelBudgetInfo = resolvedModel.info;
+  const modelInputCapabilities = resolveModelInputCapabilities({
+    model: roles[primaryRole].model,
+    providerModels: roles[primaryRole].provider.models,
+    overrides: resolvedRoles[primaryRole].resolved.modelInputCapabilities,
+  });
   const estimator = createTokenEstimator();
 
   // 对话级 Resettable 注册表 —— 视图层 stage 实现 Resettable 后在装配期注册，
@@ -1492,6 +1498,7 @@ export async function createAgentRuntime(
           model: roles[primaryRole].model,
           // 主对话走 roles[primaryRole]，loop 思考解析同 role（装配期已校验兜底）。
           thinking: primaryThinking,
+          inputCapabilities: modelInputCapabilities,
           tools,
           messages: loopMessages,
           getSystemPrompt: getRunSystemPrompt,
