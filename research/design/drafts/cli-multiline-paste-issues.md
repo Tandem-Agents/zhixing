@@ -21,6 +21,7 @@
 - **直觉标准**：用户不需要理解 PasteRegistry、token、history 或 terminal mode。长粘贴首次进入输入区时折叠，是为了更安静、更可控；一旦发送成为历史消息，用户看到的应是刚交给 agent 的原文。
 - **架构标准**：占位符是 UI 表示，原文是语义内容。两者可以分离，但 canonicalize 边界必须清楚：离开输入态成为已发送消息时，写入 scrollback 和 agent 入口的都应是 canonical 文本。
 - **智能体标准**：agent 收到的必须是用户想交付的原始材料，而不是 `[Pasted #N ...]` 这种 UI handle。否则就是静默污染上下文，危害比显式报错更大。
+- **保真标准**：trim 只能服务空输入判断、命令识别等控制流。一旦内容被判定为用户正文，CLI 不能裁剪用户材料；代码、patch、YAML、日志等首尾空白都可能有语义。
 - **长期标准**：方案不能只修当前终端和当前输入框。它要经得起原生 scrollback 不可重绘、多个接入面扩展、未来附件类型扩展的考验。
 - **可验证标准**：每个重要不变量都必须有测试。尤其是“输入态首次长粘贴显示 token，二次粘贴显示原文”“提交后 scrollback / agent 均为原文”“token 不泄漏成历史区消息”。
 
@@ -275,19 +276,90 @@
 
 ### 4. submit 对展开文本 trim，粘贴原文不完全保真
 
-**状态**：待决策
+**状态**：已修复，已测试，已构建
 
-**现象**：`submit()` 对 `expanded.trim()` 后再发送。长粘贴原文如果有首尾空白、末尾空行、顶层缩进，提交给 agent 时会被裁剪。
+**现象**：长粘贴原文如果有首尾空白、末尾空行、顶层缩进，当前提交链路会把 agent 入口文本裁剪。scrollback history echo 已经使用未裁剪的 `canonicalDraft`，所以用户可见历史区可能是保真的；真正被破坏的是送给上层 / agent 的语义正文。
 
 **事实依据**：
 
-- `typeahead-input.ts` 中 `const text = normalizeLeadingSlashAliasInExpanded(expanded.trim(), rawDraft.trim())`。
+- `typeahead-input.ts` 的 `submit()` 先得到 `canonicalDraft = expandPastes(rawDraft, registry)`，随后调用 `normalizeLeadingSlashAliasInExpanded(canonicalDraft.trim(), rawDraft.trim())` 生成提交给上层的 `text`。
+- 同一个 `submit()` 现在调用 `echoSubmittedText(canonicalDraft)`，history echo 使用的是未 `trim()` 的 canonical 文本；因此第 4 个问题不是 scrollback 显示问题，而是 agent payload 保真问题。
+- `repl.ts` typeahead 路径收到 `{ kind: "text", text }` 后，后续仍执行 `let resolvedInput = input.trim()`，再 `controller.sendTurn(resolvedInput)`。所以即使只修 `submit()`，真正发给 agent 前仍会被裁剪。
+- legacy `rl.question()` 路径先用 `input.trim()` 判断空输入和 slash command；这属于控制流判断。但后续统一 `resolvedInput = input.trim()` 会继续裁剪非命令用户正文。
+- `CommandDispatcher.parseCommandInvocation()` 对命令调用使用 `trimStart()`，并对命令参数 `rest` 做 trim；slash command 是控制语言，继续保持现有 trim 语义是合理的。
+- `normalizeLeadingSlashAliasInExpanded()` 当前注释写调用方传入已 trim 字符串；修复时需要把它的定位明确为“命令控制字符串规范化”，不能让它承担正文 payload 保真。
+- 本轮最小观测确认：粘贴 `"  indented\n  child\nline3\nline4\n\n"` 时，输入区折叠为 token；scrollback 渲染包含前导缩进和末尾空行；但 `InputController` 提交给上层的 text 变成 `"indented\n  child\nline3\nline4"`。
+
+**审核结论**：
+
+- 问题真实，而且比原记录更深：不是单个 `submit()` 局部 trim，而是 typeahead submit 与 REPL sendTurn 之间缺少“控制流文本”和“用户正文 payload”的稳定边界。
+- 影响对象是所有非命令用户正文，长粘贴最容易暴露；普通自然语言通常无感，但代码、YAML、Python、patch、日志、Markdown fenced 内容可能被改语义。
+- 第 1 个问题已解决 scrollback token 泄漏；第 4 个问题要解决 agent payload 保真。两者共享 canonicalDraft，但验收点不同。
 
 **影响**：普通自然语言影响较小；代码、YAML、Python、patch、日志等粘贴内容可能因为首尾空白被改变语义。
 
-**倾向修复方向**：区分“是否空输入 / 是否命令”的判断与“发送正文”。可以用 trim 只做控制流判断，真正 text 保留 expanded 原文；命令路径另行保持现有 trim 语义。
+**背后需求**：
 
-**需要补测试**：粘贴包含前导空格和末尾换行的内容，提交给 text 路径时保持原文。
+- 用户粘贴的是一段完整材料，不是“去掉首尾空白后的自然语言句子”。对于智能体来说，材料边界本身就是上下文。
+- CLI 可以为了识别空输入、slash command、中文输入法 slash alias 使用 trim；但这些是控制流需求，不应污染正文 payload。
+- 命令和正文必须分层：slash command 是 CLI 控制语言，继续用 trimmed command text；普通 text 是用户交给 agent 的材料，必须保留 canonical 原文。
+- `@file:` 替换是正文增强，不是正文规范化；它应在原 payload 上替换引用，并保留引用周围的用户文本和空白。
+
+**目标效果**：
+
+- 长粘贴原文包含前导空格、末尾换行、末尾空行时，输入区仍可折叠，scrollback 显示 canonical 原文，agent 收到的 text 也保持 canonical 原文。
+- 非命令正文只要 `canonicalDraft.trim()` 非空，就按原 canonical 文本发送；trim 只用于判断“这是不是空输入”。
+- 空输入或纯空白输入仍按空输入处理，不产生 agent turn，也不写入有意义的 history echo。
+- `/help`、`  /help`、`、help` 等命令路径保持现有行为：命令识别和分派使用 trimmed / alias-normalized control text。
+- 折叠 paste 内容即使以 `/` 或 `、` 开头，也不能被误判成命令；命令判断仍以 rawDraft 的首位语义为 guard。
+- `@file:` 解析在未裁剪 payload 上执行；没有 `@file:` 时正文完全原样穿透，有 `@file:` 时只替换引用片段，保留周围空白。
+
+**最优解决方案**：
+
+- 在 `typeahead-input.ts` 的 `submit()` 内显式拆出两类文本：
+  - `canonicalDraft`：展开 paste 后的正文 payload，必须保真。
+  - `rawControlText = rawDraft.trim()` / `canonicalControlText = canonicalDraft.trim()`：只用于空输入判断、slash command 识别和 alias 规范化。
+- `submit()` 的分流顺序应是：先算 canonicalDraft；用 `canonicalControlText` 判断是否为空；空则清空输入并返回空提交，不写正文 echo；非空再用 `normalizeLeadingSlashAliasInExpanded(canonicalControlText, rawControlText)` 得到 `commandText`。
+- `commandText.startsWith("/")` 时走 dispatcher，继续发送 commandText，保持命令路径既有 trim 语义。
+- 非命令路径 `fireSubmit({ kind: "text", text: canonicalDraft })`，history echo 也继续使用 canonicalDraft；不要把 trimmed 文本作为用户正文。
+- 在 `repl.ts` 去掉普通正文发送前的统一 `input.trim()`。改为：用 `input.trim()` 只做空输入 guard；真正的 `resolvedInput` 初值必须是 `input` 原文；`resolveFileRefs(resolvedInput, ...)` 在原文上替换；最后 `sendTurn(resolvedInput)`。
+- legacy 路径保留 `trimmed` 作为空输入和命令判断；非命令正文同样交给后续原文 payload 流程，避免 typeahead / legacy 两条接入路径语义分裂。
+- 不引入“paste 专用保真开关”。一旦内容进入 text payload，是否来自 paste 不重要；正文保真是 CLI 接入面向唯一核心提交 user message 的通用契约。
+
+**不采用的方案**：
+
+- 不只修 `typeahead-input.ts`：REPL 后续 `input.trim()` 仍会裁剪 agent payload，属于半修。
+- 不只对 paste token 做特殊判断：二次粘贴显示原文、小粘贴、普通手输缩进代码都会绕过 token；特殊判断会制造行为分裂。
+- 不把所有路径都完全禁止 trim：命令识别、空输入判断、命令参数解析需要 trim；关键是把 trim 限定在控制流层。
+- 不把保真责任下推给 core：core 应接收已经确定的用户消息，CLI 接入面不能把被裁剪的材料交给唯一核心后再期待核心恢复。
+
+**架构判断**：
+
+- 最优边界是：输入态 raw draft 可以有 UI token；提交态 canonicalDraft 是正文事实；control text 是 CLI 命令语言；agent payload 是用户材料。四者不能混用。
+- 这个方案和“多个接入面、唯一核心”契合：保真发生在 CLI 接入面提交 user message 之前，core 不需要理解 CLI token、slash alias 或 readline 行为。
+- 未来扩展文件片段、图片说明、结构化附件时，仍然需要同样的“payload 不被控制流规范化污染”的边界，因此方案不会导致返工。
+- scrollback 不可重绘约束仍成立：history echo 必须一次性写 canonical 文本；agent payload 同样必须在提交边界一次性确定。
+
+**验收标准**：
+
+- 折叠长粘贴包含前导空格和末尾空行时，`InputController` 的 text result 等于完整 canonical 原文。
+- 同一用例的 scrollback history echo 继续显示原文，不显示 token。
+- REPL 发送到 `controller.sendTurn()` 的正文不再被统一 `trim()` 裁剪；需要有覆盖 REPL payload 准备逻辑的测试或抽出的纯函数测试。
+- `/help`、前导空白后的 `/help`、中文顿号 alias 命令仍按命令分派。
+- paste 原文以 `/` 或 `、` 开头但 rawDraft 首位是 paste token 时，仍作为 text payload，不误触发命令。
+- `@file:` 替换保留引用周围的首尾空白；没有 `@file:` 的 text payload 原样穿透。
+- 空输入 / 纯空白输入仍不会发起 agent turn。
+
+**修复记录**：
+
+- `typeahead-input.ts` 的 `submit()` 拆分 `canonicalDraft`、`canonicalControlText`、`rawControlText` 与 `commandText`。
+- 命令是否分派由 raw 控制文本决定；折叠 paste 原文即使以 `/` 或 `、` 开头，也不会被误判为 slash command。
+- 普通正文路径返回未裁剪的 `canonicalDraft`，history echo 继续使用同一份 canonical 文本。
+- 空输入 / 纯空白输入改为清空输入态后返回空提交，不写正文 echo，也不进入输入历史。
+- `repl.ts` 发送前改用 `prepareUserTurnInput()`，trim 只做空输入 guard；真正送 `sendTurn()` 的正文保留原 payload。
+- 新增 `user-turn-input.ts` 作为 REPL payload 准备边界，`@file:` 只替换引用片段并保留周围空白。
+- 更新 `leading-slash-alias.ts` 注释，明确 alias 规范化只服务控制流，不裁剪正文 payload。
+- 新增 / 更新测试覆盖：普通正文首尾空白保真、纯空白输入、长粘贴首尾空白保真、paste 以 `/` / `、` 开头不误触发命令、前导空白 slash 与顿号 alias 命令仍可分派、REPL payload 准备与 `@file:` 周围空白保真。
 
 ### 5. legacy readline 降级路径没有附件化粘贴能力
 
@@ -314,7 +386,7 @@
 
 **事实依据**：
 
-- 粘贴 / 输入生命周期相关 212 个测试全绿。
+- 粘贴 / 输入生命周期相关 234 个测试全绿。
 - 但上述“raw token 被写入 scrollback 历史区”和“输入历史 token 生命周期”的跨模块问题未被测试捕获。
 
 **影响**：paste 子模块各自正确，但跨模块生命周期 bug 漏检。
@@ -325,14 +397,22 @@
 - submit 后 scrollback history echo 显示原文，不显示 token。
 - submit 后 `↑` 恢复并再次 submit，agent / scrollback 仍得到原文，不泄漏死 token。
 - 二次长 paste 显示原文，保持既有输入区行为。
-- paste 内容首尾空白保真（若第 4 项决策为保真）。
+- paste 内容首尾空白在 InputController text result 与 REPL sendTurn payload 中都保真。
 
 ## 已验证
 
 运行命令：
 
 ```bash
-pnpm --filter @zhixing/cli exec vitest run src/__tests__/input-buffer.test.ts src/__tests__/paste-detector.test.ts src/__tests__/paste-registry.test.ts src/__tests__/paste-expand.test.ts src/__tests__/paste-atomic.test.ts src/__tests__/input-layout.test.ts src/__tests__/typeahead-input.test.ts
+pnpm --filter @zhixing/cli exec vitest run src/__tests__/input-buffer.test.ts src/__tests__/paste-detector.test.ts src/__tests__/paste-registry.test.ts src/__tests__/paste-expand.test.ts src/__tests__/paste-atomic.test.ts src/__tests__/input-layout.test.ts src/__tests__/typeahead-input.test.ts src/__tests__/user-turn-input.test.ts src/runtime/__tests__/leading-slash-alias.test.ts
 ```
 
-结果：7 个测试文件、212 个测试通过。
+结果：9 个测试文件、234 个测试通过。
+
+构建命令：
+
+```bash
+pnpm cli:build
+```
+
+结果：构建成功。

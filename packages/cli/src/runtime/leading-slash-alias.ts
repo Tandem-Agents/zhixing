@@ -40,8 +40,8 @@ export function normalizeLeadingSlashAlias(input: string): string {
  * 区间,首位 alias 一定在 token 之前;若 token 在首位则 `guard` 首位就是 `<`
  * 不会命中)。函数据此直接 `target.slice(alias.length)`,无需校验 target 首位。
  *
- * 调用方负责传入已 trim 的字符串(如 submit 路径 `expanded.trim()` /
- * `rawDraft.trim()`),与既有 `text = ...trim()` 语义对齐。
+ * 调用方负责传入已 trim 的控制流字符串。本函数只服务命令识别和别名规范化，
+ * 不应用于裁剪普通正文 payload。
  */
 export function normalizeLeadingSlashAliasInExpanded(
   target: string,

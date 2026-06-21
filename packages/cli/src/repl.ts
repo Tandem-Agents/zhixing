@@ -43,7 +43,7 @@ import { SkillCommandSource } from "./commands/skill-command-source.js";
 import { FEATURE_CHROME } from "./commands/command-visibility.js";
 import { registerSkillsCommand } from "./skills/manager-command.js";
 import { PASTE_TOKEN_PATTERN, PasteRegistry } from "./paste-registry.js";
-import { resolveFileRefs } from "./resolve-file-refs.js";
+import { prepareUserTurnInput } from "./user-turn-input.js";
 import { renderError, createRenderSubscribers } from "./render.js";
 import { renderHistoryTail } from "./history-tail.js";
 import { createOutputRenderer, getLlmChunkDump } from "./output/index.js";
@@ -1242,17 +1242,15 @@ export async function startRepl(): Promise<void> {
       }
     }
 
-    // ── 解析 @file: 引用 ──
-    let resolvedInput = input.trim();
-    if (resolvedInput.includes("@file:")) {
-      const refResult = await resolveFileRefs(resolvedInput, {
-        workspaceRoot: localView.workspaceRoot ?? process.cwd(),
-      });
-      resolvedInput = refResult.text;
-      if (refResult.errors.length > 0) {
-        for (const err of refResult.errors) {
-          cliWriter.line(chalk.yellow(`  ⚠ ${err}`));
-        }
+    // ── 准备发送给 core 的用户正文 ──
+    const preparedInput = await prepareUserTurnInput(input, {
+      workspaceRoot: localView.workspaceRoot ?? process.cwd(),
+    });
+    if (!preparedInput) continue;
+    const resolvedInput = preparedInput.text;
+    if (preparedInput.errors.length > 0) {
+      for (const err of preparedInput.errors) {
+        cliWriter.line(chalk.yellow(`  ⚠ ${err}`));
       }
     }
 

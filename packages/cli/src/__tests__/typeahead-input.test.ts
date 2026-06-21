@@ -250,6 +250,26 @@ describe("readInputLine — 正常对话", () => {
     expect(result).toEqual({ kind: "text", text: "hello" });
   });
 
+  it("普通正文提交保留首尾空白", async () => {
+    const { stdin, stdout } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+
+    const resultP = readInputLine({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      stdin,
+      stdout,
+      columns: 80,
+    });
+
+    await typeChars(stdin, "  hello  ");
+    await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+
+    const result = await resultP;
+    expect(result).toEqual({ kind: "text", text: "  hello  " });
+  });
+
   it("空行 Enter → kind=text 空字符串", async () => {
     const { stdin, stdout } = makeStreams();
     const { broker, dispatcher } = makeHarness();
@@ -261,6 +281,22 @@ describe("readInputLine — 正常对话", () => {
       stdout,
       columns: 80,
     });
+    await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+    expect(await p).toEqual({ kind: "text", text: "" });
+  });
+
+  it("纯空白 Enter → kind=text 空字符串", async () => {
+    const { stdin, stdout } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+    const p = readInputLine({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      stdin,
+      stdout,
+      columns: 80,
+    });
+    await typeChars(stdin, "   ");
     await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
     expect(await p).toEqual({ kind: "text", text: "" });
   });
@@ -369,6 +405,34 @@ describe("readInputLine — 命令分派", () => {
         kind: "unknown",
         commandName: "nothere",
       });
+    }
+  });
+
+  it("submit 层保留前导空白 slash 与顿号 alias 的命令识别", async () => {
+    for (const draft of ["  /nothere", "、nothere"]) {
+      const { stdin, stdout } = makeStreams();
+      const { broker, dispatcher } = makeHarness();
+      const p = readInputLine({
+        broker,
+        dispatcher,
+        getRuntime: makeRuntime,
+        stdin,
+        stdout,
+        columns: 80,
+      });
+
+      await typeChars(stdin, draft);
+      await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+
+      const result = await p;
+      expect(result.kind).toBe("command-dispatched");
+      if (result.kind === "command-dispatched") {
+        expect(result.text).toBe("/nothere");
+        expect(result.dispatchResult).toMatchObject({
+          kind: "unknown",
+          commandName: "nothere",
+        });
+      }
     }
   });
 
@@ -511,7 +575,7 @@ describe("readInputLine — 导航与 Esc", () => {
     await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
 
     const result = await p;
-    expect(result).toMatchObject({ kind: "text", text: "hello" });
+    expect(result).toMatchObject({ kind: "text", text: "hello " });
   });
 
   it("typeahead 活跃时 ↓ 调 moveSelection（不历史浏览）", async () => {
@@ -1205,6 +1269,76 @@ describe("InputController — 多行粘贴提交历史区", () => {
     expect(scrollbackText).not.toContain("[Pasted #");
 
     controller.stop();
+  });
+
+  it("折叠长粘贴提交保留首尾空白", async () => {
+    const { stdin } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+    const registry = new PasteRegistry();
+    const { screen, getScrollbackText } = makeCapturingScreen();
+    const controller = new InputController({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      screen,
+      stdin,
+      columns: 80,
+      registry,
+    });
+    const resultP = controller.waitOnce();
+    const pasted = "  indented\n  child\nline3\nline4\n\n";
+
+    controller.start();
+    await pasteText(stdin, pasted);
+    expect(stripAnsi(controller.renderLines().join("\n"))).toContain(
+      "[Pasted #",
+    );
+
+    await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+    expect(await resultP).toEqual({ kind: "text", text: pasted });
+
+    const scrollbackText = stripAnsi(getScrollbackText());
+    expect(scrollbackText).toContain("    indented");
+    expect(scrollbackText).not.toContain("[Pasted #");
+
+    controller.stop();
+  });
+
+  it("折叠长粘贴以命令触发字符开头时仍作为正文提交", async () => {
+    for (const pasted of [
+      "/clear\nline two\nline three\nline four",
+      "、help\nline two\nline three\nline four",
+    ]) {
+      const { stdin } = makeStreams();
+      const { broker, dispatcher } = makeHarness();
+      const registry = new PasteRegistry();
+      const { screen, getScrollbackText } = makeCapturingScreen();
+      const controller = new InputController({
+        broker,
+        dispatcher,
+        getRuntime: makeRuntime,
+        screen,
+        stdin,
+        columns: 80,
+        registry,
+      });
+
+      controller.start();
+      const resultP = controller.waitOnce();
+      await pasteText(stdin, pasted);
+      expect(stripAnsi(controller.renderLines().join("\n"))).toContain(
+        "[Pasted #",
+      );
+
+      await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+      expect(await resultP).toEqual({ kind: "text", text: pasted });
+
+      const scrollbackText = stripAnsi(getScrollbackText());
+      expect(scrollbackText).toContain(pasted.split("\n")[0]!);
+      expect(scrollbackText).not.toContain("[Pasted #");
+
+      controller.stop();
+    }
   });
 
   it("拆批长粘贴合并为一次输入，不丢前半段", async () => {

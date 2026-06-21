@@ -971,7 +971,8 @@ export class InputController implements InputRegion {
    * 提交当前 draft：
    *   - expandPastes 还原占位符，得到提交态 canonical 文本
    *   - 把 canonical 文本渲染为 historyEcho 写入滚动区
-   *   - canonical 文本送给 dispatcher / agent 上层
+   *   - 普通正文把 canonical 文本送给 agent 上层
+   *   - 命令路径使用 trim 后的控制流文本送给 dispatcher
    *   - / 前缀自动走 dispatcher，其它走 text 路径
    *   - submit 完成后 buffer.commit + clear，触发 onSubmit；输入区 chrome 自动重画为空 buffer
    */
@@ -982,17 +983,18 @@ export class InputController implements InputRegion {
     const canonicalDraft = this.options.registry
       ? expandPastes(rawDraft, this.options.registry)
       : rawDraft;
-    // 首位 `、` 等输入法别名按 `/` 喂下游 dispatcher；rawDraft 是输入态显示
-    // 文本，canonicalDraft 是提交态语义文本，显示/解析在此分叉。基于 rawDraft
-    // 首位判断，而非 canonicalDraft 首位：rawDraft 在长 paste 折叠时首位是 token，
-    // canonicalDraft 首位是 paste 内容首字符，若用后者判断会把“以顿号开头的粘贴
-    // 文本”误识别为命令。
-    const text = normalizeLeadingSlashAliasInExpanded(
-      canonicalDraft.trim(),
-      rawDraft.trim(),
+    const rawControlText = rawDraft.trim();
+    const canonicalControlText = canonicalDraft.trim();
+    const commandText = normalizeLeadingSlashAliasInExpanded(
+      canonicalControlText,
+      rawControlText,
     );
+    // rawDraft 决定是否进入命令语言；canonicalDraft 是正文 payload。长 paste
+    // 折叠时 raw 首位是 token，即使原文以 `/` 或 `、` 开头也必须走正文路径。
+    const shouldDispatchCommand =
+      normalizeLeadingSlashAlias(rawControlText).startsWith("/");
 
-    // 严格顺序：commit → syncBroker → echo → dispatch
+    // 非空提交严格顺序：commit → syncBroker → echo → dispatch
     //
     //   1. buffer.commit()       清空 buffer
     //   2. this.syncBroker()     通知 broker 新（空）buffer → broker 派生空 session →
@@ -1006,20 +1008,22 @@ export class InputController implements InputRegion {
     //                            （withScrollWrite 只 appendInline + repaintInputCursor，
     //                            不触发 refreshChrome —— chrome 内容此时已由 #2 同步好）
     //   4. dispatch              async 执行命令
-    this.buffer.commit();
-    this.syncBroker();
-    this.echoSubmittedText(canonicalDraft);
-
-    if (!text) {
+    if (!canonicalControlText) {
+      this.buffer.clear();
+      this.syncBroker();
       this.fireSubmit({ kind: "text", text: "" });
       return;
     }
 
-    if (text.startsWith("/")) {
+    this.buffer.commit();
+    this.syncBroker();
+    this.echoSubmittedText(canonicalDraft);
+
+    if (shouldDispatchCommand) {
       let dispatchResult: DispatchResult;
       try {
         dispatchResult = await this.options.dispatcher.dispatch(
-          text,
+          commandText,
           this.options.getRuntime(),
         );
       } catch (err) {
@@ -1030,11 +1034,15 @@ export class InputController implements InputRegion {
           commandId: "<unknown>",
         };
       }
-      this.fireSubmit({ kind: "command-dispatched", text, dispatchResult });
+      this.fireSubmit({
+        kind: "command-dispatched",
+        text: commandText,
+        dispatchResult,
+      });
       return;
     }
 
-    this.fireSubmit({ kind: "text", text });
+    this.fireSubmit({ kind: "text", text: canonicalDraft });
   }
 
   // ─── echo 写到滚动区（提交 / 取消时把当前内容降级为历史） ───
