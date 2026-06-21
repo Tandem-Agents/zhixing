@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { InputBuffer } from "../input-buffer.js";
 import { PasteRegistry } from "../paste-registry.js";
-import { expandPastes, extractAliveIds } from "../paste-expand.js";
+import {
+  expandPastes,
+  extractAliveIds,
+  extractAliveIdsFromDrafts,
+  PasteReferenceIndex,
+} from "../paste-expand.js";
 
 describe("expandPastes", () => {
   it("无占位符时原样返回", () => {
@@ -111,6 +117,81 @@ describe("extractAliveIds", () => {
   });
 });
 
+describe("extractAliveIdsFromDrafts", () => {
+  it("跨多份可恢复 draft 聚合 token id 并去重", () => {
+    const r = new PasteRegistry();
+    const id1 = r.register("A");
+    const id2 = r.register("B");
+    const token1 = r.format(id1);
+    const token2 = r.format(id2);
+
+    const ids = extractAliveIdsFromDrafts([
+      `current ${token1}`,
+      `history ${token2}`,
+      `saved ${token1}`,
+      "[Paste #999 +1 lines · 1B]",
+    ]);
+
+    expect(ids.size).toBe(2);
+    expect(ids.has(id1)).toBe(true);
+    expect(ids.has(id2)).toBe(true);
+  });
+
+  it("空 draft 集合返回空 set", () => {
+    expect(extractAliveIdsFromDrafts([]).size).toBe(0);
+  });
+});
+
+describe("PasteReferenceIndex", () => {
+  it("只重新解析新增或内容变化的槽位", () => {
+    const r = new PasteRegistry();
+    const id1 = r.register("A");
+    const id2 = r.register("B");
+    const token1 = r.format(id1);
+    const token2 = r.format(id2);
+    const parsedDrafts: string[] = [];
+    const index = new PasteReferenceIndex((draft) => {
+      parsedDrafts.push(draft);
+      return extractAliveIds(draft);
+    });
+
+    let ids = index.update([
+      { key: "current", draft: `current ${token1}` },
+      { key: "history:1", draft: `history ${token2}` },
+    ]);
+    expect(parsedDrafts).toEqual([`current ${token1}`, `history ${token2}`]);
+    expect(ids.has(id1)).toBe(true);
+    expect(ids.has(id2)).toBe(true);
+
+    parsedDrafts.length = 0;
+    ids = index.update([
+      { key: "current", draft: `current changed ${token1}` },
+      { key: "history:1", draft: `history ${token2}` },
+    ]);
+    expect(parsedDrafts).toEqual([`current changed ${token1}`]);
+    expect(ids.has(id1)).toBe(true);
+    expect(ids.has(id2)).toBe(true);
+
+    parsedDrafts.length = 0;
+    ids = index.update([{ key: "current", draft: `current changed ${token1}` }]);
+    expect(parsedDrafts).toEqual([]);
+    expect(ids.has(id1)).toBe(true);
+    expect(ids.has(id2)).toBe(false);
+  });
+
+  it("clear 清空缓存与 alive ids", () => {
+    const r = new PasteRegistry();
+    const id = r.register("A");
+    const index = new PasteReferenceIndex();
+
+    expect(index.update([{ key: "current", draft: r.format(id) }]).has(id)).toBe(
+      true,
+    );
+    index.clear();
+    expect(index.update([]).size).toBe(0);
+  });
+});
+
 describe("expandPastes + extractAliveIds 联动场景", () => {
   it("orphan 回收典型流程：用户删除占位符 → cleanup 删 entry", () => {
     const r = new PasteRegistry();
@@ -152,5 +233,32 @@ describe("expandPastes + extractAliveIds 联动场景", () => {
     expect(expanded).toBe(
       "请审一下 import x from 'y';\nconst a = 1; 和 function foo() {}",
     );
+  });
+
+  it("输入历史淘汰后，旧 token 不再保活", () => {
+    const buffer = new InputBuffer({ historyLimit: 1 });
+    const registry = new PasteRegistry();
+    const oldId = registry.register("OLD");
+
+    buffer.insertText(registry.format(oldId));
+    buffer.commit();
+    registry.cleanup(
+      extractAliveIdsFromDrafts(
+        buffer.getRestorableDraftSlots().map((slot) => slot.draft),
+      ),
+    );
+    expect(registry.get(oldId)).not.toBeNull();
+
+    const newId = registry.register("NEW");
+    buffer.insertText(registry.format(newId));
+    buffer.commit();
+    registry.cleanup(
+      extractAliveIdsFromDrafts(
+        buffer.getRestorableDraftSlots().map((slot) => slot.draft),
+      ),
+    );
+
+    expect(registry.get(oldId)).toBeNull();
+    expect(registry.get(newId)).not.toBeNull();
   });
 });

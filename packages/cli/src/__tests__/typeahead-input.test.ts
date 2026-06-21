@@ -1307,6 +1307,107 @@ describe("InputController — 多行粘贴提交历史区", () => {
 
     controller.stop();
   });
+
+  it("长粘贴提交后通过输入历史恢复，仍提交原文", async () => {
+    const { stdin } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+    const registry = new PasteRegistry();
+    const { screen, getScrollbackText } = makeCapturingScreen();
+    const controller = new InputController({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      screen,
+      stdin,
+      columns: 80,
+      registry,
+    });
+    const pasted = ["alpha one", "beta two", "gamma three", "delta four"].join(
+      "\n",
+    );
+
+    controller.start();
+    const firstSubmit = controller.waitOnce();
+    await pasteText(stdin, pasted);
+    expect(stripAnsi(controller.renderLines().join("\n"))).toContain(
+      "[Pasted #",
+    );
+    await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+    expect(await firstSubmit).toEqual({ kind: "text", text: pasted });
+    expect(registry.size).toBe(1);
+
+    const secondSubmit = controller.waitOnce();
+    await sendSyntheticKey(stdin, { name: "up", sequence: "\x1b[A" });
+    const recalledText = stripAnsi(controller.renderLines().join("\n"));
+    expect(recalledText).toContain("[Pasted #");
+    expect(recalledText).not.toContain("alpha one");
+
+    await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+    expect(await secondSubmit).toEqual({ kind: "text", text: pasted });
+
+    const scrollbackText = stripAnsi(getScrollbackText());
+    expect(scrollbackText).toContain("alpha one");
+    expect(scrollbackText).toContain("delta four");
+    expect(scrollbackText).not.toContain("[Pasted #");
+
+    controller.stop();
+  });
+
+  it("历史浏览前的未提交粘贴草稿恢复后仍可提交原文", async () => {
+    const { stdin } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+    const registry = new PasteRegistry();
+    const { screen, getScrollbackText } = makeCapturingScreen();
+    const controller = new InputController({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      screen,
+      stdin,
+      columns: 80,
+      registry,
+    });
+    const pasted = [
+      "draft alpha",
+      "draft beta",
+      "draft gamma",
+      "draft delta",
+    ].join("\n");
+
+    controller.start();
+    const oldSubmit = controller.waitOnce();
+    await typeChars(stdin, "old command");
+    await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+    expect(await oldSubmit).toEqual({ kind: "text", text: "old command" });
+
+    const restoredDraftSubmit = controller.waitOnce();
+    await pasteText(stdin, pasted);
+    expect(stripAnsi(controller.renderLines().join("\n"))).toContain(
+      "[Pasted #",
+    );
+    expect(registry.size).toBe(1);
+
+    await sendSyntheticKey(stdin, { name: "up", sequence: "\x1b[A" });
+    expect(stripAnsi(controller.renderLines().join("\n"))).toContain(
+      "old command",
+    );
+    expect(registry.size).toBe(1);
+
+    await sendSyntheticKey(stdin, { name: "down", sequence: "\x1b[B" });
+    const restoredText = stripAnsi(controller.renderLines().join("\n"));
+    expect(restoredText).toContain("[Pasted #");
+    expect(restoredText).not.toContain("draft alpha");
+
+    await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+    expect(await restoredDraftSubmit).toEqual({ kind: "text", text: pasted });
+
+    const scrollbackText = stripAnsi(getScrollbackText());
+    expect(scrollbackText).toContain("draft alpha");
+    expect(scrollbackText).toContain("draft delta");
+    expect(scrollbackText).not.toContain("[Pasted #");
+
+    controller.stop();
+  });
 });
 
 describe("InputController — 底部信息行(bottomInfo)", () => {

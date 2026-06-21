@@ -11,6 +11,13 @@
 
 import { PASTE_TOKEN_PATTERN, type PasteRegistry } from "./paste-registry.js";
 
+export interface DraftReferenceSlot {
+  readonly key: string;
+  readonly draft: string;
+}
+
+type DraftReferenceExtractor = (draft: string) => Set<number>;
+
 /**
  * 把 draft 里的所有占位符替换为对应 registry 内容。倒序替换保证多个占位符
  * 场景下前面的 match offset 不被后面的替换扰动。
@@ -46,8 +53,82 @@ export function expandPastes(draft: string, registry: PasteRegistry): string {
  */
 export function extractAliveIds(draft: string): Set<number> {
   const ids = new Set<number>();
+  collectAliveIds(draft, ids);
+  return ids;
+}
+
+/**
+ * 从多份可恢复 draft 中聚合仍存活的占位符 id。
+ *
+ * 输入历史、当前 draft、历史浏览前草稿都可能在之后回到输入区；只看当前 draft
+ * 会把这些可恢复引用误删。
+ */
+export function extractAliveIdsFromDrafts(
+  drafts: Iterable<string>,
+): Set<number> {
+  const ids = new Set<number>();
+  for (const draft of drafts) {
+    collectAliveIds(draft, ids);
+  }
+  return ids;
+}
+
+/**
+ * 对可恢复 draft 槽位做增量引用索引。
+ *
+ * 热路径只重新解析新增或内容变化的槽位；消失的槽位直接从缓存移除。调用方拿聚合
+ * alive ids 交给 registry.cleanup，不需要扫描所有历史文本。
+ */
+export class PasteReferenceIndex {
+  private readonly slots = new Map<
+    string,
+    { readonly draft: string; readonly ids: ReadonlySet<number> }
+  >();
+
+  constructor(
+    private readonly extract: DraftReferenceExtractor = extractAliveIds,
+  ) {}
+
+  update(slots: Iterable<DraftReferenceSlot>): Set<number> {
+    const aliveSlotKeys = new Set<string>();
+
+    for (const slot of slots) {
+      if (slot.draft.length === 0) continue;
+      aliveSlotKeys.add(slot.key);
+      const cached = this.slots.get(slot.key);
+      if (cached?.draft === slot.draft) continue;
+      this.slots.set(slot.key, {
+        draft: slot.draft,
+        ids: new Set(this.extract(slot.draft)),
+      });
+    }
+
+    for (const key of this.slots.keys()) {
+      if (!aliveSlotKeys.has(key)) {
+        this.slots.delete(key);
+      }
+    }
+
+    return this.aliveIds();
+  }
+
+  clear(): void {
+    this.slots.clear();
+  }
+
+  private aliveIds(): Set<number> {
+    const ids = new Set<number>();
+    for (const slot of this.slots.values()) {
+      for (const id of slot.ids) {
+        ids.add(id);
+      }
+    }
+    return ids;
+  }
+}
+
+function collectAliveIds(draft: string, ids: Set<number>): void {
   for (const m of draft.matchAll(PASTE_TOKEN_PATTERN)) {
     ids.add(parseInt(m[1]!, 10));
   }
-  return ids;
 }

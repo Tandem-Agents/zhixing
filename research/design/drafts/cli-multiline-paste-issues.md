@@ -190,9 +190,9 @@
 
 ### 3. `↑` 输入历史复用时 token 可能失活
 
-**状态**：待审核 / 待定产品目标
+**状态**：已修复，已测试，已构建
 
-**现象**：长粘贴首次提交后，`InputBuffer.commit()` 会把提交前的 raw draft 推入 in-memory 输入历史。若 raw draft 含 `[Pasted #N ...]`，用户按 `↑` 找回时恢复的是 token。与此同时，`submit()` 后 `syncBroker()` 会按当前空 buffer 调用 `registry.cleanup(...)`，可能把对应 paste entry 清掉。再次提交时，这个 token 可能无法 expand，只会作为字面文本进入 agent 或历史区。
+**现象**：长粘贴首次提交后，`InputBuffer.commit()` 会把提交前的 raw draft 推入 in-memory 输入历史。若 raw draft 含 `[Pasted #N ...]`，用户按 `↑` 找回时恢复的是 token。与此同时，`submit()` 后 `syncBroker()` 会按当前空 buffer 调用 `registry.cleanup(...)`，把对应 paste entry 清掉。再次提交时，这个 token 无法 expand，会作为字面文本进入 agent 和 scrollback。
 
 **与第 1 个问题的区别**：
 
@@ -206,31 +206,72 @@
 - `historyPrev()` 直接把 history entry 还原到当前输入 buffer。
 - `submit()` 中 `syncBroker()` 在 `buffer.commit()` 后执行，此时当前 buffer 已空；registry cleanup 只看当前 buffer 中仍存在的 token id。
 - `expandPastes()` 对 unknown id 采用字面 fallback，不会报错，因此死 token 会静默变成普通文本。
+- 本轮 TSX 最小观测确认：长粘贴 token 首次提交前可 expand；`buffer.commit()` + `registry.cleanup(extractAliveIds(buffer.draft))` 后 registry size 变 0；`historyPrev()` 恢复同一个 token 后再次 `expandPastes()` 得到的仍是 token 字面量。
+- 本轮 TSX 最小观测确认：未提交的 token draft 在浏览历史时会被 `InputBuffer` 存入 `savedDraft`；`historyPrev()` 后 cleanup 看不到 `savedDraft` 里的 token，registry size 变 0；`historyNext()` 恢复 saved draft 后同样只能 expand 出 token 字面量。
+- `repl.ts` 当前注释写“commit 后 buffer.draft 含占位符进 history ring buffer；用户按 ↑ 浏览历史时占位符仍可 expand”，与实际代码路径不一致，修复时需要同步修正注释。
+
+**审核结论**：
+
+- 问题真实，且不是低概率边界：只要提交后的 raw history entry 含 token，提交后的 cleanup 就会清掉 registry entry。
+- 影响不止“提交后按 `↑`”：历史浏览态的 `savedDraft` 也是可恢复输入草稿，当前 cleanup 同样看不到。
+- 这是输入态引用生命周期问题，不是 paste token 格式问题，也不是 scrollback 展示问题。
 
 **背后需求**：
 
-- `↑` 输入历史不是历史区展示，而是用户复用上一条输入意图的入口。复用时可以为了输入区可控而显示 token，也可以显示原文，但再次提交必须等价于重新提交原文。
+- `↑` 输入历史不是历史区展示，而是用户复用上一条输入意图的入口。复用时应保留输入区可控性，长粘贴仍显示紧凑 token。
 - 长粘贴 token 如果继续出现在输入态，就必须保持引用完整性；否则 token 这种降噪设计会退化成隐蔽的数据丢失。
 - 用户不应被要求理解 registry 生命周期，也不应承担“这个 token 现在是否还活着”的判断成本。
+- 任何“可被恢复到输入区”的 draft 都是输入态语义的一部分；只看当前 draft 会把历史浏览这种正常交互误判成 orphan。
 
-**待定产品目标**：
+**目标效果**：
 
-- 方案 A：输入历史保存 token，`↑` 恢复时仍显示缩略；registry 生命周期必须覆盖输入历史中的 token，直到 history entry 被淘汰或 token 被编辑破坏。
-- 方案 B：输入历史保存原文，`↑` 恢复时显示原文；实现简单且不依赖 registry，但可能让长文本重新撑满输入区。
-- 当前倾向：先审核真实行为与体验代价，再定方案。无论选 A 还是 B，硬性目标都是再次提交不能把 `[Pasted #N ...]` 字面发给 agent。
+- 长粘贴提交后，`↑` 恢复上一条输入时仍显示 token，不把大段内容重新铺满输入区。
+- `↑` 恢复后再次提交，agent 收到原文，scrollback history echo 显示原文，不显示 token。
+- 用户在有未提交 token draft 时浏览历史，再按 `↓` 回到原 draft，token 仍能 expand。
+- 输入历史 ring buffer 淘汰旧 entry 后，对应 registry entry 可以被 GC；session 退出时 registry 随 REPL scope 释放。
+- 损坏的 token 字符串仍按现有语义处理：不 match regex 的内容不保活，也不强行恢复。
+
+**最优解决方案**：
+
+- 保留输入历史中的 token 表示，不改为保存 canonical 原文。原因：`↑` 是输入复用入口，长粘贴继续折叠才符合“输入区降噪、可控”的产品本质。
+- 把 registry cleanup 的 alive 范围从“当前 buffer draft”提升为“所有可恢复输入 draft”：当前 draft、history entries、以及历史浏览态的 saved draft。
+- 在 `InputBuffer` 暴露只读的稳定槽位查询，例如 `getRestorableDraftSlots()`，返回所有未来可能回到输入区的 draft key + 文本。该 API 保持通用文本语义，不引入 PasteRegistry 依赖。
+- 在 paste 层新增增量引用索引，例如 `PasteReferenceIndex`，按槽位 key 缓存 token id，只对新增或内容变化的槽位重新解析。
+- `syncBroker()` 调用增量索引得到 alive ids 后再 `registry.cleanup(aliveIds)`。这样 commit 后 raw token history entry 能保活；history limit shift 后旧 entry 不再出现在 restorable slots，entry 会自然 GC；普通打字热路径不会重复扫描所有历史大文本。
+- 保持 `submit()` 的 canonical 边界不变：发送给 agent 和 scrollback 的仍是 `expandPastes(rawDraft, registry)`；输入历史保存 raw draft，是输入态表示，不是长期消息存储。
+
+**不采用的方案**：
+
+- 不采用“输入历史保存原文”：虽然实现简单，但会让 `↑` 恢复长粘贴时把大段文本重新撑满输入区，破坏多行粘贴附件化的核心体验。
+- 不采用“registry 全 session 永不 cleanup”：能绕过死 token，但会让大粘贴内容无界保留，绕开 history limit 的内存边界。
+- 不采用“在 `submit()` 后特殊保留刚提交 token”：只能修提交后 `↑`，修不了 `savedDraft`；并且会把生命周期补丁散在提交路径，形成架构债务。
 
 **架构判断**：
 
-- 如果保留 token 作为输入历史显示，就必须把 registry cleanup 从“只看当前 buffer”提升到“看当前 buffer + 输入历史可达 token”。这属于输入态引用生命周期管理。
-- 如果输入历史保存原文，则 `PasteRegistry` 可以继续只服务当前输入态；代价是 `↑` 恢复长文本时不再折叠。
+- 最优边界是：`InputBuffer` 只声明哪些 draft 可被恢复；paste 层只从 draft 集合中提取 token id；`PasteRegistry` 只按 alive id 做存储 GC；`InputController` 负责把三者接起来。
+- 这不会把 paste 业务污染进 `InputBuffer`，也不会让 `PasteRegistry` 理解 history index / savedDraft 细节。
 - 这个问题不受 scrollback 不可重绘限制约束，因为输入历史是应用内存状态，不是终端已绘历史。
+- 方案和“多个接入面、唯一核心”契合：CLI 输入历史是接入面内输入 affordance，不应该进入 core；agent / core 仍只接收 canonical 原文。
+- 未来如果粘贴从纯文本扩展为更通用的输入附件，同样需要“可恢复输入草稿引用集合”这个生命周期边界，因此该方案不会导致未来返工。
 
 **验收标准**：
 
-- 长粘贴提交后，按 `↑` 恢复上一条输入，再次提交时 agent 收到原文，不收到死 token。
+- 长粘贴提交后，registry 不因 buffer 清空而清掉仍在输入历史里的 token entry。
+- 按 `↑` 恢复上一条输入时，输入区显示 token；再次提交时 agent 收到原文，不收到死 token。
 - 再次提交后 scrollback history echo 仍显示原文，不显示 token。
-- 选定方案后补充 UI 验收：`↑` 恢复时显示 token 或显示原文必须与产品目标一致。
-- 补 `typeahead-input.test.ts` 集成测试覆盖完整生命周期。
+- 有未提交 token draft 时按 `↑` 浏览历史，再按 `↓` 回到 saved draft，token 仍能 expand。
+- historyLimit 淘汰含 token 的旧 entry 后，对应 registry entry 会被 cleanup。
+- 用户删除 / 破坏当前 token 时，如果该 token 不再存在于任何可恢复 draft，registry entry 会被 cleanup。
+- 补 `input-buffer.test.ts` 覆盖 restorable draft slots 查询；补 paste 索引单测覆盖增量解析、多槽位聚合和槽位消失；补 `typeahead-input.test.ts` 集成测试覆盖 `↑` 再提交与 `savedDraft` 恢复。
+
+**修复记录**：
+
+- `InputBuffer` 新增 `getRestorableDraftSlots()`，只暴露当前 draft、输入历史和历史浏览前草稿这些可恢复槽位，不引入 paste 依赖。
+- `paste-expand.ts` 新增 `PasteReferenceIndex`，按稳定槽位 key 缓存 token id，只重新解析新增或内容变化的槽位。
+- `InputController.syncBroker()` 改为通过增量索引获得 alive ids 后清理 `PasteRegistry`，提交后的输入历史 token 与历史浏览前草稿 token 都能保活；history limit 淘汰后旧 token 会自然 GC。
+- 普通输入热路径不再重复扫描全部历史大文本；未变化的历史槽位复用索引缓存。
+- `repl.ts` 修正 paste registry 生命周期注释，说明保活依据是可恢复输入草稿集合。
+- 新增 `input-buffer.test.ts`、`paste-expand.test.ts`、`typeahead-input.test.ts` 覆盖 `↑` 再提交、`savedDraft` 恢复、history limit 淘汰和多 draft alive id 聚合。
 
 ### 4. submit 对展开文本 trim，粘贴原文不完全保真
 
@@ -273,7 +314,7 @@
 
 **事实依据**：
 
-- 粘贴相关 183 个测试全绿。
+- 粘贴 / 输入生命周期相关 212 个测试全绿。
 - 但上述“raw token 被写入 scrollback 历史区”和“输入历史 token 生命周期”的跨模块问题未被测试捕获。
 
 **影响**：paste 子模块各自正确，但跨模块生命周期 bug 漏检。
@@ -291,7 +332,7 @@
 运行命令：
 
 ```bash
-pnpm --filter @zhixing/cli exec vitest run src/__tests__/paste-detector.test.ts src/__tests__/paste-registry.test.ts src/__tests__/paste-expand.test.ts src/__tests__/paste-atomic.test.ts src/__tests__/input-layout.test.ts src/__tests__/typeahead-input.test.ts
+pnpm --filter @zhixing/cli exec vitest run src/__tests__/input-buffer.test.ts src/__tests__/paste-detector.test.ts src/__tests__/paste-registry.test.ts src/__tests__/paste-expand.test.ts src/__tests__/paste-atomic.test.ts src/__tests__/input-layout.test.ts src/__tests__/typeahead-input.test.ts
 ```
 
-结果：6 个测试文件、183 个测试通过。
+结果：7 个测试文件、212 个测试通过。

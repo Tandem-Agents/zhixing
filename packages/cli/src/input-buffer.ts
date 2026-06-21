@@ -31,6 +31,16 @@ export interface InputBufferSnapshot {
   readonly cursor: number;
 }
 
+export interface RestorableDraftSlot {
+  readonly key: string;
+  readonly draft: string;
+}
+
+interface HistoryEntry {
+  readonly id: number;
+  readonly draft: string;
+}
+
 /**
  * 一行输入缓冲区。**单线程使用** —— TUI 主循环里同步调用，无并发保护。
  *
@@ -41,10 +51,11 @@ export interface InputBufferSnapshot {
 export class InputBuffer {
   private chars: string[] = [];
   private cursorPos = 0; // 字符偏移
-  private readonly history: string[] = [];
+  private readonly history: HistoryEntry[] = [];
   private historyIndex = -1; // -1 = 不在历史浏览态
   private savedDraft = ""; // 浏览历史前的 draft，用于 ↓ 回到当前
   private readonly historyLimit: number;
+  private nextHistoryEntryId = 1;
 
   constructor(options: InputBufferOptions = {}) {
     this.historyLimit = options.historyLimit ?? HISTORY_LIMIT;
@@ -155,7 +166,10 @@ export class InputBuffer {
   commit(): string {
     const submitted = this.draft;
     if (submitted) {
-      this.history.push(submitted);
+      this.history.push({
+        id: this.nextHistoryEntryId++,
+        draft: submitted,
+      });
       while (this.history.length > this.historyLimit) {
         this.history.shift();
       }
@@ -180,7 +194,7 @@ export class InputBuffer {
       return; // 已经在最早一条
     }
     const entry = this.history[this.historyIndex]!;
-    this.chars = Array.from(entry);
+    this.chars = Array.from(entry.draft);
     this.cursorPos = this.chars.length;
   }
 
@@ -189,7 +203,7 @@ export class InputBuffer {
     if (this.historyIndex < this.history.length - 1) {
       this.historyIndex++;
       const entry = this.history[this.historyIndex]!;
-      this.chars = Array.from(entry);
+      this.chars = Array.from(entry.draft);
       this.cursorPos = this.chars.length;
     } else {
       // 走到末尾：恢复 savedDraft
@@ -202,7 +216,31 @@ export class InputBuffer {
 
   /** 测试用：获取历史副本 */
   getHistory(): readonly string[] {
-    return this.history.slice();
+    return this.history.map((entry) => entry.draft);
+  }
+
+  /**
+   * 返回未来可能恢复到输入区的 draft 槽位。用于外部引用生命周期管理，例如输入态
+   * 临时附件保活；本类只暴露稳定槽位和文本，不理解具体引用格式。
+   */
+  getRestorableDraftSlots(): readonly RestorableDraftSlot[] {
+    const slots: RestorableDraftSlot[] = [];
+    const add = (key: string, draft: string): void => {
+      if (draft.length === 0) return;
+      slots.push({ key, draft });
+    };
+
+    if (this.historyIndex === -1) {
+      add("current", this.draft);
+    }
+    for (const entry of this.history) {
+      add(`history:${entry.id}`, entry.draft);
+    }
+    if (this.historyIndex !== -1) {
+      add("saved-draft", this.savedDraft);
+    }
+
+    return slots;
   }
 
   private exitHistoryBrowse(): void {

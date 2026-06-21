@@ -197,6 +197,50 @@ describe("InputBuffer — History", () => {
     }
     expect(b.getHistory()).toEqual(["c", "d", "e"]);
   });
+
+  it("getRestorableDraftSlots 返回稳定槽位、历史和浏览前草稿", () => {
+    const b = new InputBuffer();
+    b.insertText("history one");
+    b.commit();
+    b.insertText("history two");
+    b.commit();
+    b.insertText("current draft");
+
+    expect(b.getRestorableDraftSlots()).toEqual([
+      { key: "current", draft: "current draft" },
+      { key: "history:1", draft: "history one" },
+      { key: "history:2", draft: "history two" },
+    ]);
+
+    b.historyPrev();
+    expect(b.draft).toBe("history two");
+    expect(b.getRestorableDraftSlots()).toEqual([
+      { key: "history:1", draft: "history one" },
+      { key: "history:2", draft: "history two" },
+      { key: "saved-draft", draft: "current draft" },
+    ]);
+
+    b.historyNext();
+    expect(b.draft).toBe("current draft");
+    expect(b.getRestorableDraftSlots()).toEqual([
+      { key: "current", draft: "current draft" },
+      { key: "history:1", draft: "history one" },
+      { key: "history:2", draft: "history two" },
+    ]);
+  });
+
+  it("getRestorableDraftSlots 遵守 historyLimit 淘汰边界", () => {
+    const b = new InputBuffer({ historyLimit: 2 });
+    for (const s of ["old", "middle", "new"]) {
+      b.insertText(s);
+      b.commit();
+    }
+
+    expect(b.getRestorableDraftSlots()).toEqual([
+      { key: "history:2", draft: "middle" },
+      { key: "history:3", draft: "new" },
+    ]);
+  });
 });
 
 describe("InputBuffer — toTriggerContext", () => {

@@ -337,9 +337,9 @@ export async function startRepl(): Promise<void> {
   //   等原始字节
   setupBracketedPasteMode();
 
-  // 粘贴附件 registry——REPL session 级，多轮 readInputLine 共享。
-  // commit 后 buffer.draft 含占位符进 history ring buffer；用户按 ↑ 浏览历史时
-  // 占位符仍可 expand。session 退出时随 startRepl scope 自然 GC，无需显式 clearAll。
+  // 粘贴附件 registry——REPL session 级，多轮输入共享。InputController 按所有可恢复
+  // 输入草稿做引用保活，确保用户通过 ↑/↓ 找回的占位符仍可 expand。session 退出时
+  // 随 startRepl scope 自然 GC，无需显式 clearAll。
   const pasteRegistry = new PasteRegistry();
 
   // 终端能力探测——DECSTBM 三区模型要求 TTY 直连 + 现代终端基线。检测失败时

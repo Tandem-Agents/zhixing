@@ -46,7 +46,7 @@ import {
   PASTE_TOKEN_PATTERN,
   type PasteRegistry,
 } from "./paste-registry.js";
-import { expandPastes, extractAliveIds } from "./paste-expand.js";
+import { expandPastes, PasteReferenceIndex } from "./paste-expand.js";
 import {
   removeAllPasteTokens,
   tryAtomicEdit,
@@ -206,6 +206,7 @@ export class InputController implements InputRegion {
   private inlineEditHandler: InlineEditHandler | null = null;
   /** suspend 时快照的输入态 —— resume 用它恢复 buffer + 重新 query（挂起/恢复对称）。 */
   private suspendedSnapshot: InputBufferSnapshot | null = null;
+  private readonly pasteReferenceIndex = new PasteReferenceIndex();
 
   // 渲染缓存（InputRegion 契约要求）
   private cachedLines: readonly string[] = [];
@@ -439,6 +440,7 @@ export class InputController implements InputRegion {
     }
     this.buffer = null;
     this.lastSessionState = null;
+    this.pasteReferenceIndex.clear();
   }
 
   /**
@@ -841,7 +843,9 @@ export class InputController implements InputRegion {
   private syncBroker(): void {
     if (!this.buffer || !this.sessionHandleId) return;
     if (this.options.registry) {
-      this.options.registry.cleanup(extractAliveIds(this.buffer.draft));
+      this.options.registry.cleanup(
+        this.pasteReferenceIndex.update(this.buffer.getRestorableDraftSlots()),
+      );
     }
     // esc hint 等本控制器贡献的底部信息块必须在 broker.updateInput **之前**同步 ——
     // updateInput 会同步触发一次 repaint 读 model,晚于它写 model 会让本帧读到旧值
