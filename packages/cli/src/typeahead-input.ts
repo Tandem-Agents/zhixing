@@ -820,6 +820,14 @@ export class InputController implements InputRegion {
       return;
     }
 
+    if (key.name === "delete") {
+      if (!this.tryAtomicKeypress("delete")) {
+        this.buffer.deleteForward();
+      }
+      this.syncBroker();
+      return;
+    }
+
     if (key.name === "left") {
       if (!this.tryAtomicKeypress("left")) {
         this.buffer.moveCursorLeft();

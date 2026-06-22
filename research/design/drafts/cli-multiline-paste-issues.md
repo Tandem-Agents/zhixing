@@ -590,11 +590,11 @@
 
 ### 7. Delete 键没有接入 token 原子编辑契约
 
-**状态**：已确认真实，待修复。
+**状态**：已修复，已测试，已构建。
 
 **现象**：设计与纯函数都声明 token 支持 `backspace / delete / left / right` 原子操作，但主输入控制器只接入了 backspace、left、right，没有接入物理 Delete 键。结果是 cursor 位于 token/chip 起始处时，Delete 键不能按契约整段删除右侧 token/chip。
 
-**审核结论**：问题真实，且是独立于第 5 个问题的小型输入编辑契约遗漏。它不属于材料核心模型，也不是 Ctrl+D 候选删除协议问题；这里说的是键盘上的物理 Delete 键。
+**审核结论**：问题真实，且是独立于第 5 个问题的 CLI 输入接入层漏接。它不属于核心材料模型，不属于 provider 能力问题，也不是 Ctrl+D 候选删除协议问题；这里说的是键盘上的物理 Delete 键。
 
 **事实依据**：
 
@@ -603,8 +603,16 @@
 - `packages/cli/src/input-buffer.ts` 有 `deleteForward()`，说明普通字符的向前删除能力存在。
 - `packages/cli/src/typeahead-input.ts` 当前只在 `backspace` / `left` / `right` 分支调用 `tryAtomicKeypress()`；没有 `key.name === "delete"` 分支。
 - `Ctrl+D` 已被产品设计释放给候选删除协议，并明确不再承担 `deleteForward` 语义；这不影响物理 Delete 键应该作为普通编辑键工作。
+- `packages/cli/src/__tests__/paste-atomic.test.ts` 已覆盖 `tryAtomicEdit(..., "delete")` 的纯函数行为；缺口在 `packages/cli/src/__tests__/typeahead-input.test.ts` 没有物理 Delete 的集成覆盖。
 
 **背后需求**：token/chip 是输入态材料 handle。用户无论从左侧 Delete 还是从右侧 Backspace 删除它，都应得到同一个“整段删除”的结果；否则输入区编辑心智不完整。
+
+**范围判断**：
+
+- 只修 CLI 输入接入层，不改 core、provider、server 或结构化材料协议。
+- 不改 `PasteRegistry` / `InputMaterialRegistry` 的语义；Delete 删除的是输入区 handle，registry 清理仍由现有 `syncBroker()` 的 alive id 机制负责。
+- 不改 `InputBuffer` 内部模型。它继续提供普通字符级 `deleteForward()`；atomic 语义仍在 `typeahead-input.ts` keypress 层拦截。
+- 不恢复 Ctrl+D 的 EOF / deleteForward 语义。Ctrl+D 已是候选删除协议，物理 Delete 才是文本编辑键。
 
 **目标效果**：
 
@@ -613,13 +621,45 @@
 - cursor 不命中 token/chip 时按 Delete：普通向前删一个字符。
 - Ctrl+D 行为不变：继续只服务 typeahead 候选删除协议，不恢复 EOF / deleteForward 语义。
 
-**最优方案**：在 `InputController.handleKeypress()` 增加物理 Delete 键分支，先调用 `tryAtomicKeypress("delete")`，不命中时走 `buffer.deleteForward()`，随后 `syncBroker()`。保持 Ctrl+D 分支不动，避免候选删除协议和文本编辑键混淆。
+**最优方案**：
+
+- 在 `InputController.handleKeypress()` 增加 `key.name === "delete"` 分支，位置放在 backspace 之后、左右移动之前，归入编辑键处理区。
+- 分支内先调用 `tryAtomicKeypress("delete")`；命中则整段删除输入 handle，不命中则调用 `buffer.deleteForward()` 做普通字符级向前删除。
+- 删除后调用 `syncBroker()`，与 backspace / 插入字符保持一致，确保 broker 输入态、registry alive id 清理、底部提示和重绘都走同一条路径。
+- 不新增新的抽象层，也不把 Delete 特判下沉到 `InputBuffer`。现有 `paste-atomic.ts` 已经是正确的输入 handle 原子编辑边界；本问题只需要把 key routing 补齐。
+
+**产品 / 架构判断**：这是最优架构，不是补丁式妥协。输入 handle 的产品本质是“一个可操作的材料占位”，左侧 Delete 和右侧 Backspace 必须对称；而实现上把原子语义留在 CLI 输入控制器，既保护 core 的纯粹性，也避免污染普通字符 buffer。
+
+**修复记录**：
+
+- `InputController.handleKeypress()` 增加物理 Delete 键分支，先走 `tryAtomicKeypress("delete")`，未命中再走 `buffer.deleteForward()`，最后统一 `syncBroker()`。
+- `typeahead-input.test.ts` 补充三条集成测试，覆盖文本 paste token 整段删除、材料 chip 整段删除、普通文本向前删除。
+- Ctrl+D 分支保持不变，继续只服务候选删除协议。
 
 **验收标准**：
 
 - typeahead 集成测试覆盖文本 paste token 与 material chip 的 Delete 整段删除。
 - 普通文本 Delete 仍向前删除一个字符。
 - Ctrl+D 现有候选删除 / no-op 测试保持不变。
+- `paste-atomic.test.ts` 现有纯函数 Delete 覆盖保持通过，作为底层契约回归。
+
+**建议测试策略**：
+
+- 在 `typeahead-input.test.ts` 增加物理 Delete 集成测试：
+  - 长文本粘贴折叠为 `[Pasted #...]` 后，按 Home 再按 Delete，输入区 token 消失，提交结果为空文本。
+  - 图片路径粘贴生成 `[Image #...]` chip 后，按 Home 再按 Delete，输入区 chip 消失，提交结果为空文本且不会解析出 image part。
+  - 普通文本 `abc` 按 Home 再按 Delete，提交结果为 `bc`。
+- 保留并运行现有 Ctrl+D no-op / 候选删除相关测试，证明物理 Delete 与 Ctrl+D 没有语义串线。
+
+**验证命令**：
+
+```bash
+pnpm --filter @zhixing/cli exec tsc --noEmit && pnpm --filter @zhixing/cli exec vitest run src/__tests__/typeahead-input.test.ts src/__tests__/paste-atomic.test.ts src/__tests__/input-buffer.test.ts
+pnpm --filter @zhixing/cli test
+pnpm cli:build
+```
+
+结果：CLI 类型检查通过；定向 3 个测试文件、102 个测试通过；CLI 全量 140 个测试文件、2097 个测试通过；CLI 构建成功。
 
 ## 已验证
 

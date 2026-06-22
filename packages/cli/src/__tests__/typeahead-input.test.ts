@@ -1357,6 +1357,114 @@ describe("InputController — 多行粘贴提交历史区", () => {
     expect(match?.tokenStart).toBe(Array.from(chip).length);
   });
 
+  it("物理 Delete 在文本 paste token 起始处整段删除", async () => {
+    const { stdin } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+    const registry = new PasteRegistry();
+    const { screen } = makeCapturingScreen();
+    const controller = new InputController({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      screen,
+      stdin,
+      columns: 80,
+      registry,
+    });
+    const resultP = controller.waitOnce();
+    const pasted = "alpha\nbeta\ngamma\ndelta";
+
+    controller.start();
+    await pasteText(stdin, pasted);
+    expect(stripAnsi(controller.renderLines().join("\n"))).toContain(
+      "[Pasted #",
+    );
+    expect(registry.size).toBe(1);
+
+    await sendSyntheticKey(stdin, { name: "home", sequence: "\x1b[H" });
+    await sendSyntheticKey(stdin, { name: "delete", sequence: "\x1b[3~" });
+
+    expect(stripAnsi(controller.renderLines().join("\n"))).not.toContain(
+      "[Pasted #",
+    );
+    expect(registry.size).toBe(0);
+
+    await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+    expect(await resultP).toEqual({ kind: "text", text: "" });
+
+    controller.stop();
+  });
+
+  it("物理 Delete 在材料 chip 起始处整段删除", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-input-"));
+    try {
+      const imagePath = path.join(tempDir, "shot.png");
+      await fs.writeFile(imagePath, minimalPng(4, 5));
+      const { stdin } = makeStreams();
+      const { broker, dispatcher } = makeHarness();
+      const materialRegistry = new InputMaterialRegistry();
+      const { screen } = makeCapturingScreen();
+      const controller = new InputController({
+        broker,
+        dispatcher,
+        getRuntime: makeRuntime,
+        screen,
+        stdin,
+        columns: 80,
+        materialRegistry,
+        workspaceRoot: tempDir,
+      });
+      const resultP = controller.waitOnce();
+
+      controller.start();
+      await pasteText(stdin, imagePath);
+      expect(stripAnsi(controller.renderLines().join("\n"))).toContain(
+        "[Image #1 · shot.png",
+      );
+      expect(materialRegistry.size).toBe(1);
+
+      await sendSyntheticKey(stdin, { name: "home", sequence: "\x1b[H" });
+      await sendSyntheticKey(stdin, { name: "delete", sequence: "\x1b[3~" });
+
+      const inputText = stripAnsi(controller.renderLines().join("\n"));
+      expect(inputText).not.toContain("[Image #1");
+      expect(inputText).not.toContain(imagePath);
+      expect(materialRegistry.size).toBe(0);
+
+      await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+      expect(await resultP).toEqual({ kind: "text", text: "" });
+
+      controller.stop();
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("物理 Delete 不命中输入 handle 时向前删除普通字符", async () => {
+    const { stdin } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+    const { screen } = makeCapturingScreen();
+    const controller = new InputController({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      screen,
+      stdin,
+      columns: 80,
+    });
+    const resultP = controller.waitOnce();
+
+    controller.start();
+    await typeChars(stdin, "abc");
+    await sendSyntheticKey(stdin, { name: "home", sequence: "\x1b[H" });
+    await sendSyntheticKey(stdin, { name: "delete", sequence: "\x1b[3~" });
+    await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+
+    expect(await resultP).toEqual({ kind: "text", text: "bc" });
+
+    controller.stop();
+  });
+
   it("长粘贴输入区折叠，提交后历史区写入原文", async () => {
     const { stdin } = makeStreams();
     const { broker, dispatcher } = makeHarness();
