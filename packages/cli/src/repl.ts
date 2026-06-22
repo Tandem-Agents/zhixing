@@ -62,7 +62,7 @@ import { detectTerminalCapability } from "./screen/terminal-capability.js";
 import { layout } from "./tui/style.js";
 import { InlineTextPromptRegion } from "./tui/inline-text-prompt.js";
 import { createSelectionService } from "./tui/selection/index.js";
-import { InputController } from "./typeahead-input.js";
+import { InputController, type PendingTextSubmission } from "./typeahead-input.js";
 import { BottomInfoModel } from "./bottom-info/index.js";
 import { renderHomeWelcome } from "./workbench/index.js";
 import { renderFarewell } from "./farewell/index.js";
@@ -1008,6 +1008,7 @@ export async function startRepl(): Promise<void> {
       registry: pasteRegistry,
       materialRegistry,
       workspaceRoot: localView.workspaceRoot ?? process.cwd(),
+      textSubmitMode: "deferred",
       onCandidateDelete,
       bottomInfo,
     });
@@ -1159,6 +1160,7 @@ export async function startRepl(): Promise<void> {
     if (replShuttingDown) break;
 
     let input: string;
+    let pendingTextSubmission: PendingTextSubmission | null = null;
 
     if (useTypeahead && inputController) {
       // ── Typeahead 路径（持久输入区） ──
@@ -1221,9 +1223,14 @@ export async function startRepl(): Promise<void> {
         if (!applied) continue;
         input = applied.input;
       } else {
-        // kind === "text"
-        if (!result.text) continue;
+        if (!result.text) {
+          if (result.kind === "pending-text") result.reject();
+          continue;
+        }
         input = result.text;
+        if (result.kind === "pending-text") {
+          pendingTextSubmission = result;
+        }
       }
     } else {
       // ── Legacy 路径 ──
@@ -1247,18 +1254,27 @@ export async function startRepl(): Promise<void> {
     }
 
     // ── 准备发送给 core 的用户正文 ──
-    const preparedInput = await prepareUserTurnInput(input, {
-      workspaceRoot: localView.workspaceRoot ?? process.cwd(),
-      materialRegistry,
-    });
-    if (!preparedInput) continue;
+    let preparedInput: Awaited<ReturnType<typeof prepareUserTurnInput>>;
+    try {
+      preparedInput = await prepareUserTurnInput(input, {
+        workspaceRoot: localView.workspaceRoot ?? process.cwd(),
+        materialRegistry,
+      });
+    } catch (err) {
+      pendingTextSubmission?.reject();
+      throw err;
+    }
+    if (!preparedInput) {
+      pendingTextSubmission?.reject();
+      continue;
+    }
     if (preparedInput.errors.length > 0) {
       for (const err of preparedInput.errors) {
         cliWriter.line(chalk.yellow(`  ⚠ ${err}`));
       }
+      pendingTextSubmission?.reject();
       continue;
     }
-
     // 正常对话 —— send 入队宿主唯一串行点;窗口推进 / 持久化 / 自动命名 /
     // journal 维护全在宿主侧随 turn 落定发生,本回路只等 complete。
     state.running = true;
@@ -1282,7 +1298,17 @@ export async function startRepl(): Promise<void> {
     });
 
     try {
-      const turnPromise = controller.sendTurn(preparedInput.input);
+      let inputCommitted = false;
+      const commitAcceptedInput = () => {
+        if (inputCommitted) return;
+        inputCommitted = true;
+        pendingTextSubmission?.commit();
+      };
+      const acceptedTurn = await controller.beginTurn(preparedInput.input, {
+        onAccepted: commitAcceptedInput,
+      });
+      commitAcceptedInput();
+      const turnPromise = acceptedTurn.outcome;
       // 暴露给模式切换命令——切换前 await 它,天然落在 turn 边界
       state.activeTurnPromise = turnPromise;
       const outcome = await turnPromise;
@@ -1303,6 +1329,7 @@ export async function startRepl(): Promise<void> {
         await applyModeSwitch(outcome.modeSwitchIntent);
       }
     } catch (err) {
+      pendingTextSubmission?.reject();
       renderer.stop();
       renderError(err, cliWriter);
     } finally {

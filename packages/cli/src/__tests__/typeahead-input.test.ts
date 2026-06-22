@@ -267,6 +267,26 @@ describe("readInputLine — 正常对话", () => {
     expect(result).toEqual({ kind: "text", text: "hello" });
   });
 
+  it("readInputLine 的 deferred 正文自动提交并保持 text 结果兼容", async () => {
+    const { stdin, stdout } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+
+    const resultP = readInputLine({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      stdin,
+      stdout,
+      columns: 80,
+      textSubmitMode: "deferred",
+    });
+
+    await typeChars(stdin, "hello");
+    await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+
+    expect(await resultP).toEqual({ kind: "text", text: "hello" });
+  });
+
   it("普通正文提交保留首尾空白", async () => {
     const { stdin, stdout } = makeStreams();
     const { broker, dispatcher } = makeHarness();
@@ -341,6 +361,33 @@ describe("readInputLine — 命令分派", () => {
 
     const result = await p;
     // 因为 zero-key execute 把 draft 换成 "/clear"（无尾空格）并直接 submit
+    expect(result.kind).toBe("command-dispatched");
+    if (result.kind === "command-dispatched") {
+      expect(result.dispatchResult.kind).toBe("local-handled");
+    }
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it("deferred 正文提交模式不拦截本地命令分派", async () => {
+    const { stdin, stdout } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+    const handler = vi.fn(() => ({ summary: "cleared" }));
+    dispatcher.registerHandler("clear:builtin", handler);
+
+    const p = readInputLine({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      stdin,
+      stdout,
+      columns: 80,
+      textSubmitMode: "deferred",
+    });
+
+    await typeChars(stdin, "/clear");
+    await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+
+    const result = await p;
     expect(result.kind).toBe("command-dispatched");
     if (result.kind === "command-dispatched") {
       expect(result.dispatchResult.kind).toBe("local-handled");
@@ -1635,6 +1682,113 @@ describe("InputController — 多行粘贴提交历史区", () => {
     expect(scrollbackText).not.toContain("[Pasted #");
 
     controller.stop();
+  });
+
+  it("deferred 正文提交在 commit 前不写历史，commit 后写入原文", async () => {
+    const { stdin } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+    const registry = new PasteRegistry();
+    const { screen, getScrollbackText } = makeCapturingScreen();
+    const controller = new InputController({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      screen,
+      stdin,
+      columns: 80,
+      registry,
+      textSubmitMode: "deferred",
+    });
+    const resultP = controller.waitOnce();
+    const pasted = ["alpha one", "beta two", "gamma three", "delta four"].join(
+      "\n",
+    );
+
+    controller.start();
+    await pasteText(stdin, pasted);
+    expect(stripAnsi(controller.renderLines().join("\n"))).toContain(
+      "[Pasted #",
+    );
+
+    await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+    const result = await resultP;
+    expect(result.kind).toBe("pending-text");
+    if (result.kind === "pending-text") {
+      expect(result.text).toBe(pasted);
+      expect(stripAnsi(getScrollbackText())).toBe("");
+      expect(stripAnsi(controller.renderLines().join("\n"))).toContain(
+        "[Pasted #",
+      );
+
+      await typeChars(stdin, "ignored while pending");
+      expect(stripAnsi(controller.renderLines().join("\n"))).not.toContain(
+        "ignored while pending",
+      );
+
+      result.commit();
+    }
+
+    const scrollbackText = stripAnsi(getScrollbackText());
+    expect(scrollbackText).toContain("alpha one");
+    expect(scrollbackText).toContain("delta four");
+    expect(scrollbackText).not.toContain("[Pasted #");
+    expect(stripAnsi(controller.renderLines().join("\n"))).not.toContain(
+      "[Pasted #",
+    );
+
+    controller.stop();
+  });
+
+  it("deferred 材料提交 reject 时不写历史且保留输入 chip", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-input-"));
+    try {
+      const filePath = path.join(tempDir, "archive.bin");
+      await fs.writeFile(filePath, Buffer.from([0, 1, 2, 3]));
+      const { stdin } = makeStreams();
+      const { broker, dispatcher } = makeHarness();
+      const materialRegistry = new InputMaterialRegistry();
+      const { screen, getScrollbackText } = makeCapturingScreen();
+      const controller = new InputController({
+        broker,
+        dispatcher,
+        getRuntime: makeRuntime,
+        screen,
+        stdin,
+        columns: 80,
+        materialRegistry,
+        workspaceRoot: tempDir,
+        textSubmitMode: "deferred",
+      });
+      const resultP = controller.waitOnce();
+
+      controller.start();
+      await pasteText(stdin, filePath);
+      expect(stripAnsi(controller.renderLines().join("\n"))).toContain(
+        "[File #1 · archive.bin",
+      );
+
+      await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+      const result = await resultP;
+      expect(result.kind).toBe("pending-text");
+      if (result.kind === "pending-text") {
+        const prepared = await prepareUserTurnInput(result.text, {
+          workspaceRoot: tempDir,
+          materialRegistry,
+        });
+        expect(prepared?.errors[0]).toContain("当前版本尚不能直接发送");
+        result.reject();
+      }
+
+      expect(stripAnsi(getScrollbackText())).toBe("");
+      expect(stripAnsi(controller.renderLines().join("\n"))).toContain(
+        "[File #1 · archive.bin",
+      );
+      expect(materialRegistry.size).toBe(1);
+
+      controller.stop();
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
   });
 
   it("折叠长粘贴提交保留首尾空白", async () => {

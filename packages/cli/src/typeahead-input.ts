@@ -94,6 +94,7 @@ function shouldFoldPaste(content: string): boolean {
 
 export type InputLineResult =
   | { readonly kind: "text"; readonly text: string }
+  | PendingTextSubmission
   | {
       readonly kind: "command-dispatched";
       readonly text: string;
@@ -105,6 +106,13 @@ export type InputLineResult =
       readonly editKind: "rename" | "new";
       readonly item?: SuggestionItem;
     };
+
+export interface PendingTextSubmission {
+  readonly kind: "pending-text";
+  readonly text: string;
+  commit(): void;
+  reject(): void;
+}
 
 // ─── 选项 ───
 
@@ -149,6 +157,12 @@ export interface InputControllerOptions {
   readonly workspaceRoot?: string;
 
   /**
+   * 正文提交模式。REPL 可用 deferred 先做 payload 准备，确认可发送后再
+   * 由 InputController 统一清空输入区、写输入历史和 scrollback。
+   */
+  readonly textSubmitMode?: "immediate" | "deferred";
+
+  /**
    * 删除选中候选 callback —— Ctrl+D 第二次按下时触发(第一次按下仅标记
    * broker 的 deletePending 准备态)。仅在 typeahead 当前 trigger 的 provider
    * 通过 `inlineActions.delete` 声明支持删除时生效。callback 负责物理删除 +
@@ -173,7 +187,10 @@ export type TypeaheadInputOptions = InputControllerOptions;
 // ─── 回调签名 ───
 
 export type SubmitHandler = (
-  result: Extract<InputLineResult, { kind: "text" } | { kind: "command-dispatched" }>,
+  result: Extract<
+    InputLineResult,
+    { kind: "text" | "pending-text" | "command-dispatched" }
+  >,
 ) => void | Promise<void>;
 
 export type CancelHandler = (
@@ -186,7 +203,7 @@ export type InlineEditHandler = (
 
 // ─── InputController ───
 
-type ControllerState = "stopped" | "active" | "suspended";
+type ControllerState = "stopped" | "active" | "pending-submit" | "suspended";
 
 export class InputController implements InputRegion {
   private readonly options: InputControllerOptions;
@@ -200,7 +217,7 @@ export class InputController implements InputRegion {
 
   private state: ControllerState = "stopped";
 
-  // 资源句柄（active 时持有，suspended 时释放，stopped 时为 null）
+  // 资源句柄（active / pending-submit 时持有，suspended / stopped 时为 null）
   private buffer: InputBuffer | null = null;
   private sessionHandleId: string | null = null;
   private lastSessionState: TypeaheadSessionState | null = null;
@@ -213,6 +230,7 @@ export class InputController implements InputRegion {
   private submitHandler: SubmitHandler | null = null;
   private cancelHandler: CancelHandler | null = null;
   private inlineEditHandler: InlineEditHandler | null = null;
+  private pendingTextSubmission: PendingTextSubmission | null = null;
   /** suspend 时快照的输入态 —— resume 用它恢复 buffer + 重新 query（挂起/恢复对称）。 */
   private suspendedSnapshot: InputBufferSnapshot | null = null;
   private readonly pasteReferenceIndex = new PasteReferenceIndex();
@@ -291,6 +309,7 @@ export class InputController implements InputRegion {
 
   stop(): void {
     if (this.state === "stopped") return;
+    this.pendingTextSubmission = null;
     // 来源生命周期:本控制器销毁时清除自己贡献的底部信息块,不给容器留残留。
     this.options.bottomInfo?.set("right", BOTTOM_INFO_IDS.escHint, null);
     this.detachResources();
@@ -635,7 +654,10 @@ export class InputController implements InputRegion {
   }
 
   private fireSubmit(
-    result: Extract<InputLineResult, { kind: "text" } | { kind: "command-dispatched" }>,
+    result: Extract<
+      InputLineResult,
+      { kind: "text" | "pending-text" | "command-dispatched" }
+    >,
   ): void {
     const handler = this.submitHandler;
     void Promise.resolve(handler?.(result));
@@ -1009,11 +1031,10 @@ export class InputController implements InputRegion {
   /**
    * 提交当前 draft：
    *   - expandPastes 还原占位符，得到提交态 canonical 文本
-   *   - 把 canonical 文本渲染为 historyEcho 写入滚动区
-   *   - 普通正文把 canonical 文本送给 agent 上层
+   *   - 命令与 immediate 正文会立即写输入历史和 scrollback
+   *   - deferred 正文先交给调用方确认，确认后再写输入历史和 scrollback
    *   - 命令路径使用 trim 后的控制流文本送给 dispatcher
    *   - / 前缀自动走 dispatcher，其它走 text 路径
-   *   - submit 完成后 buffer.commit + clear，触发 onSubmit；输入区 chrome 自动重画为空 buffer
    */
   private async submit(): Promise<void> {
     if (!this.buffer) return;
@@ -1033,7 +1054,7 @@ export class InputController implements InputRegion {
     const shouldDispatchCommand =
       normalizeLeadingSlashAlias(rawControlText).startsWith("/");
 
-    // 非空提交严格顺序：commit → syncBroker → echo → dispatch
+    // 非空立即提交严格顺序：commit → syncBroker → echo → dispatch/notify
     //
     //   1. buffer.commit()       清空 buffer
     //   2. this.syncBroker()     通知 broker 新（空）buffer → broker 派生空 session →
@@ -1046,7 +1067,7 @@ export class InputController implements InputRegion {
     //   3. echoSubmittedText     把 canonical 文本落 scrollback 作为历史
     //                            （withScrollWrite 只 appendInline + repaintInputCursor，
     //                            不触发 refreshChrome —— chrome 内容此时已由 #2 同步好）
-    //   4. dispatch              async 执行命令
+    //   4. dispatch/notify       执行命令或通知调用方正文已提交
     if (!canonicalControlText) {
       this.buffer.clear();
       this.syncBroker();
@@ -1054,11 +1075,8 @@ export class InputController implements InputRegion {
       return;
     }
 
-    this.buffer.commit();
-    this.syncBroker();
-    this.echoSubmittedText(canonicalDraft);
-
     if (shouldDispatchCommand) {
+      this.commitSubmittedText(canonicalDraft);
       let dispatchResult: DispatchResult;
       try {
         dispatchResult = await this.options.dispatcher.dispatch(
@@ -1081,7 +1099,49 @@ export class InputController implements InputRegion {
       return;
     }
 
+    if (this.options.textSubmitMode === "deferred") {
+      this.fireSubmit(this.createPendingTextSubmission(canonicalDraft));
+      return;
+    }
+
+    this.commitSubmittedText(canonicalDraft);
     this.fireSubmit({ kind: "text", text: canonicalDraft });
+  }
+
+  private commitSubmittedText(canonicalText: string): void {
+    if (!this.buffer) return;
+    this.buffer.commit();
+    this.syncBroker();
+    this.echoSubmittedText(canonicalText);
+  }
+
+  private createPendingTextSubmission(canonicalText: string): PendingTextSubmission {
+    const submission: PendingTextSubmission = {
+      kind: "pending-text",
+      text: canonicalText,
+      commit: () => this.settlePendingTextSubmission(submission, "commit"),
+      reject: () => this.settlePendingTextSubmission(submission, "reject"),
+    };
+    this.pendingTextSubmission = submission;
+    this.state = "pending-submit";
+    this.requestRepaint();
+    return submission;
+  }
+
+  private settlePendingTextSubmission(
+    submission: PendingTextSubmission,
+    action: "commit" | "reject",
+  ): void {
+    if (this.pendingTextSubmission !== submission) return;
+    this.pendingTextSubmission = null;
+    if (this.state === "pending-submit") {
+      this.state = "active";
+    }
+    if (action === "commit") {
+      this.commitSubmittedText(submission.text);
+    } else {
+      this.requestRepaint();
+    }
   }
 
   // ─── echo 写到滚动区（提交 / 取消时把当前内容降级为历史） ───
@@ -1149,6 +1209,12 @@ export function readInputLine(
   return new Promise<InputLineResult>((resolve) => {
     const controller = new InputController(options);
     controller.onSubmit((result) => {
+      if (result.kind === "pending-text") {
+        result.commit();
+        controller.stop();
+        resolve({ kind: "text", text: result.text });
+        return;
+      }
       controller.stop();
       resolve(result);
     });

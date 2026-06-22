@@ -53,6 +53,19 @@ export interface TurnOutcome {
   modeSwitchIntent?: WorkModeSwitchIntent;
 }
 
+export interface AcceptedTurn {
+  readonly conversationId: string;
+  readonly turnId: string;
+  readonly outcome: Promise<TurnOutcome>;
+}
+
+export interface BeginTurnOptions {
+  readonly onAccepted?: (turn: {
+    readonly conversationId: string;
+    readonly turnId: string;
+  }) => void;
+}
+
 export type ExitSceneResult =
   | { kind: "not-in-workscene"; active: ActiveConversation }
   | { kind: "returned"; active: ActiveConversation }
@@ -142,6 +155,10 @@ export class ConversationController {
   private readonly waiters = new Map<string, (outcome: TurnOutcome) => void>();
   private readonly pendingIntents = new Map<string, WorkModeSwitchIntent>();
   private readonly localTurnsByConversation = new Map<string, string>();
+  private readonly localTurnAcceptances = new Map<
+    string,
+    (turn: { readonly conversationId: string; readonly turnId: string }) => void
+  >();
   private readonly unsubscribes: Array<() => void>;
 
   constructor(
@@ -155,12 +172,12 @@ export class ConversationController {
         if (p.conversationId !== this.active.conversationId) return;
         const localTurnId = this.localTurnsByConversation.get(p.conversationId);
         if (localTurnId && p.turnId !== localTurnId) return;
-        if (
-          !this.isLocalTurn({
+        if (localTurnId && p.turnId === localTurnId) {
+          this.markLocalTurnAccepted({
             conversationId: p.conversationId,
             turnId: p.turnId,
-          })
-        ) {
+          });
+        } else {
           this.opts.onObservedTurnDelta?.({
             conversationId: p.conversationId,
             turnId: p.turnId,
@@ -195,6 +212,10 @@ export class ConversationController {
         if (this.localTurnsByConversation.get(p.conversationId) === p.turnId) {
           this.localTurnsByConversation.delete(p.conversationId);
         }
+        this.markLocalTurnAccepted({
+          conversationId: p.conversationId,
+          turnId: p.turnId,
+        });
         waiter({ result: p.result, modeSwitchIntent: intent });
       }),
       opts.conversation.onActivity((p) => {
@@ -255,29 +276,52 @@ export class ConversationController {
   // ─── turn 执行 ───
 
   /**
-   * 发送一个 turn 并等待落定。turnId 与 complete waiter 先于 send 挂上——loopback 下
-   * 推送可能先于 request 响应到达,后挂必丢。send 失败(BUSY / 宿主不可达)
-   * 时撤 waiter 并原样抛出。
+   * 发送一个 turn，宿主接受后返回 outcome waiter。turnId 与 complete waiter
+   * 先于 send 挂上——loopback 下推送可能先于 request 响应到达,后挂必丢。
+   * send 失败(BUSY / 宿主不可达)时撤 waiter 并原样抛出。
    */
-  async sendTurn(input: string | UserTurnInput): Promise<TurnOutcome> {
+  async beginTurn(
+    input: string | UserTurnInput,
+    options: BeginTurnOptions = {},
+  ): Promise<AcceptedTurn> {
     const target = this.active.conversationId;
     const turnId = generateTurnId();
     const outcome = new Promise<TurnOutcome>((resolve) => {
       this.waiters.set(turnId, resolve);
     });
     this.localTurnsByConversation.set(target, turnId);
+    if (options.onAccepted) {
+      this.localTurnAcceptances.set(turnId, options.onAccepted);
+    }
     try {
       await this.opts.conversation.send(input, target, turnId);
       this.observedConversationId = target;
+      this.markLocalTurnAccepted({ conversationId: target, turnId });
     } catch (err) {
       this.waiters.delete(turnId);
       this.pendingIntents.delete(turnId);
+      this.localTurnAcceptances.delete(turnId);
       if (this.localTurnsByConversation.get(target) === turnId) {
         this.localTurnsByConversation.delete(target);
       }
       throw err;
     }
-    return outcome;
+    return { conversationId: target, turnId, outcome };
+  }
+
+  /** 发送一个 turn 并等待落定。 */
+  async sendTurn(input: string | UserTurnInput): Promise<TurnOutcome> {
+    return (await this.beginTurn(input)).outcome;
+  }
+
+  private markLocalTurnAccepted(turn: {
+    readonly conversationId: string;
+    readonly turnId: string;
+  }): void {
+    const accept = this.localTurnAcceptances.get(turn.turnId);
+    if (!accept) return;
+    this.localTurnAcceptances.delete(turn.turnId);
+    accept(turn);
   }
 
   /** 打断当前对话的 in-flight turn——complete 随宿主 cleanup 自然到达。 */

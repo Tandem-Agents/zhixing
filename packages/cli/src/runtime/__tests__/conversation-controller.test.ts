@@ -2,7 +2,7 @@
  * ConversationController —— 当前对话指针 + turn 编排的行为锚。
  *
  * 锁住:
- *   - sendTurn:complete waiter 先于 send 挂上(loopback 下推送可先于
+ *   - beginTurn/sendTurn:complete waiter 先于 send 挂上(loopback 下推送可先于
  *     request 响应到达);意图(modeSwitchIntent)暂存随 complete 带出;
  *     send 失败撤 waiter 不泄漏
  *   - 主通道按当前对话过滤喂 onYield(旁观其它对话的帧不进渲染)
@@ -252,6 +252,99 @@ describe("ConversationController", () => {
       "conv-1",
       turnId,
     );
+  });
+
+  it("beginTurn:send 接受后返回 turn 边界;outcome 仍等待 complete 落定", async () => {
+    const f = makeFakes();
+    const { controller } = makeController(f);
+    const onAccepted = vi.fn();
+
+    const acceptedTurn = await controller.beginTurn("queued turn", {
+      onAccepted,
+    });
+    const turnId = f.conversation.send.mock.calls[0]![2] as string;
+    let settled = false;
+    void acceptedTurn.outcome.then(() => {
+      settled = true;
+    });
+
+    expect(acceptedTurn).toMatchObject({
+      conversationId: "conv-1",
+      turnId,
+    });
+    expect(onAccepted).toHaveBeenCalledExactlyOnceWith({
+      conversationId: "conv-1",
+      turnId,
+    });
+    expect(settled).toBe(false);
+
+    f.emit.complete({
+      conversationId: "conv-1",
+      sessionId: "conv-1",
+      turnId,
+      result: { reason: "completed" },
+    });
+    await expect(acceptedTurn.outcome).resolves.toMatchObject({
+      result: { reason: "completed" },
+    });
+  });
+
+  it("beginTurn:本地 delta 早于 send 响应时先触发 accepted 再交给渲染", async () => {
+    const f = makeFakes();
+    let releaseSend = () => {
+      throw new Error("send 未开始");
+    };
+    f.conversation.send.mockImplementationOnce(
+      async (_text: string, _id: string, turnId: string) => {
+        await new Promise<void>((resolve) => {
+          releaseSend = resolve;
+        });
+        return {
+          conversationId: "conv-1",
+          sessionId: "conv-1",
+          turnId,
+        };
+      },
+    );
+    const order: string[] = [];
+    const onAccepted = vi.fn(() => {
+      order.push("accepted");
+    });
+    const onYield = vi.fn(() => {
+      order.push("yield");
+    });
+    const { controller } = makeController(f, onYield);
+
+    const acceptedPromise = controller.beginTurn("queued turn", { onAccepted });
+    await Promise.resolve();
+    const turnId = f.conversation.send.mock.calls[0]![2] as string;
+    const frame: AgentYield = { type: "text_delta", text: "hi" };
+    f.emit.delta({
+      conversationId: "conv-1",
+      turnId,
+      delta: frame,
+    });
+
+    expect(order).toEqual(["accepted", "yield"]);
+    expect(onAccepted).toHaveBeenCalledExactlyOnceWith({
+      conversationId: "conv-1",
+      turnId,
+    });
+    expect(onYield).toHaveBeenCalledWith(frame);
+
+    releaseSend();
+    const acceptedTurn = await acceptedPromise;
+    expect(acceptedTurn.turnId).toBe(turnId);
+    f.emit.complete({
+      conversationId: "conv-1",
+      sessionId: "conv-1",
+      turnId,
+      result: { reason: "completed" },
+    });
+    await expect(acceptedTurn.outcome).resolves.toMatchObject({
+      result: { reason: "completed" },
+    });
+    expect(onAccepted).toHaveBeenCalledTimes(1);
   });
 
   it("sendTurn:同一对话的其它 turn complete 不会误唤醒本地等待", async () => {

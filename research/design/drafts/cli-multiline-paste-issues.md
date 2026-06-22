@@ -746,42 +746,100 @@ pnpm cli:build
 
 ### 9. 材料解析失败前已写入 scrollback
 
-**状态**：已确认真实，待调研最优方案。
+**状态**：已修复，已验证。
 
 **现象**：用户提交包含材料 chip 的输入后，`InputController.submit()` 会先把 raw / canonical 文本写入 CLI scrollback；随后 REPL 才调用 `prepareUserTurnInput()` 解析材料。如果材料解析失败，REPL 会提示错误并跳过 `sendTurn()`，但 scrollback 已经留下了一条看起来已发送的用户历史消息。
 
-**审核结论**：问题真实，属于“输入提交显示边界”与“结构化 payload 准备边界”顺序不一致。文本长粘贴修复后，scrollback 已经使用 canonical 文本；但材料输入引入后，是否能发送必须先由 `prepareUserTurnInput()` 判定。
+**审核结论**：问题真实，属于“输入提交显示边界”与“结构化 payload 准备边界”顺序不一致。文本长粘贴修复后，scrollback 已经使用 canonical 文本；但材料输入引入后，是否能发送必须先由 `prepareUserTurnInput()` 判定。由于 CLI scrollback 是终端原生历史，已写入内容不能可靠撤销，因此必须在写入前完成可发送性确认。
 
 **事实依据**：
 
-- `packages/cli/src/typeahead-input.ts` 的 `submit()` 在 `fireSubmit()` 之前调用 `echoSubmittedText(canonicalDraft)`。
-- `packages/cli/src/repl.ts` 在收到 `InputController` 的 text result 后，才调用 `prepareUserTurnInput(input, { materialRegistry })`。
+- `packages/cli/src/typeahead-input.ts` 的 `submit()` 对非空输入执行 `buffer.commit()`、`syncBroker()`、`echoSubmittedText(canonicalDraft)`，随后才 `fireSubmit({ kind: "text", text: canonicalDraft })`。
+- `packages/cli/src/repl.ts` 在收到 `InputController.waitOnce()` 的 text result 后，才调用 `prepareUserTurnInput(input, { materialRegistry })`。
 - `prepareUserTurnInput()` / `resolveInputMaterials()` 可能返回错误，例如：源文件消失、图片过大、非文本普通文件暂不支持。
 - 当 `preparedInput.errors.length > 0` 时，REPL 打印警告并 `continue`，不会调用 `controller.sendTurn(preparedInput.input)`。
 - 因此 scrollback 中可能存在一条用户消息 chip，但这条消息实际没有进入 agent，也不会进入核心对话事实。
+- `research/internals/screen-rendering/overview.md` 明确当前 CLI 不维护已绘历史状态，滚进 terminal scrollback 的内容归终端管理，应用无法可靠读取、修改或搬回。
+- 现有 `typeahead-input.test.ts` 覆盖成功提交时 history echo 显示 canonical 原文 / material chip，但没有覆盖材料解析失败时不应写入 scrollback。
 
-**背后需求**：scrollback 是用户对“已经发送内容”的信任记录。只要某次输入没有成功进入 agent，就不能提前把它渲染成已发送历史消息；否则用户会误以为 agent 已经看到了材料。
+**背后需求**：scrollback 是用户对“已经发送内容”的信任记录。只要某次输入没有成功被核心接收，就不能提前把它渲染成已发送历史消息；否则用户会误以为 agent 已经看到了材料。
 
 **目标效果**：
 
-- 对所有输入类型，scrollback 只记录已经通过提交准备、即将进入 agent/core 的用户消息。
-- 材料解析失败时，输入内容不应作为已发送历史消息写入 scrollback；用户应看到明确错误，并能继续修正或重新输入。
+- 对所有输入类型，scrollback 只记录已经通过提交准备、并已被核心接收的用户消息。
+- 材料解析失败时，输入内容不应作为已发送历史消息写入 scrollback；用户应看到明确错误，原输入草稿仍留在输入区，便于删除、替换或补充材料。
 - 文本长粘贴仍保持：提交后 scrollback 显示原文，不显示 paste token。
-- 结构化材料成功时，scrollback 显示稳定的人类可读摘要，不泄漏内部 token，也不依赖后续展开。
+- 结构化材料成功时，scrollback 显示稳定的人类可读摘要，不泄漏本地路径，不依赖后续展开。
+- 命令提交继续走本地命令路径；本问题只处理会进入 agent/core 的正文提交。
 
-**初步方案方向**：
+**产品 / 架构判断**：
 
-- 重新划分提交边界：`InputController` 不应在 REPL 完成 `prepareUserTurnInput()` 前把材料输入写入 scrollback。
-- 可以把“提交输入态”和“确认写入历史区”拆成两步：InputController 先产出 raw/canonical draft，REPL 准备 payload 成功后再请求输入区写 history echo。
-- 或者让 InputController 的 submit hook 支持异步 validation/prepare，再在成功后统一 commit + echo；但需要谨慎避免重新引入 chrome 重绘 TOCTOU。
-- 不应在 REPL 里直接重复实现 scrollback echo 样式；历史回显仍应有单一渲染来源。
+- 最优产品语义是“核心已接收才进入历史”。失败的输入应留在 composer，而不是变成一条看似已发送的消息。
+- 最优架构不是给 scrollback 做撤销，也不是让 REPL 复制 history echo 渲染；撤销违背终端原生 scrollback 的硬约束，复制渲染会制造第二套历史样式。
+- 正确边界是：REPL 负责语义准备和是否可发送；InputController 负责输入 buffer、chrome 同步、输入历史和 scrollback echo 的唯一渲染。
+- 该方案经得起未来材料扩展：图片、文件、音频、视频、网页快照等只要提交前准备可能失败，都走同一个提交事务，不为每种材料类型写特殊分支。
+
+**最优方案**：
+
+- 为 typeahead 正文提交建立“待确认提交”语义：按 Enter 后先生成 canonical text，但暂不 `buffer.commit()`、暂不 `echoSubmittedText()`、暂不清空输入区。
+- `InputController` 向 REPL 交出一个待提交对象，包含 canonical text，并提供唯一的 `commit()` / `reject()` 完成入口：
+  - `commit()` 由 `InputController` 内部执行 `buffer.commit()`、`syncBroker()`、`echoSubmittedText(canonicalText)`，然后本轮输入正式完成。
+  - `reject()` 不写 scrollback、不写输入历史、不清空 buffer，只解除待提交状态并重绘输入区。
+- REPL 收到待提交对象后调用 `prepareUserTurnInput()`：
+  - 成功且无 errors：调用 `controller.beginTurn(preparedInput.input)`；宿主接受或本地 turn 首帧先到时再 `commit()`，随后等待 accepted turn 的 `outcome`。
+  - 准备失败或发送被宿主拒绝：打印 warning / error，调用 `reject()`，继续等待用户编辑同一份草稿。
+- `echoSubmittedText()` 继续留在 `InputController` 内，不下沉到 REPL；REPL 只决定“是否提交”，不复制历史回显样式。
+- 命令提交可以保持当前路径：命令是本地控制流，`InputController` 已经持有 dispatcher 并能完整执行；正文提交才需要外部 payload 准备。
+- 待提交期间应防止并发按键修改同一 buffer：可以短暂进入 pending 状态，忽略普通编辑键；成功 commit 或失败 reject 后恢复 active。这样避免异步材料读取期间用户继续输入造成 draft 与 canonical text 分叉。
+- 不引入应用层 scrollback 状态，也不改 `ScreenController` 的历史模型；本问题通过提交时序解决，而不是扩大屏幕架构。
+
+**边界行为**：
+
+- 有效图片 / 文本文件材料提交：准备成功后输入区清空、scrollback 写入材料摘要、agent/core 收到结构化 `UserTurnInput.parts`。
+- 非文本普通文件提交：准备失败，显示错误，不写 scrollback，不调用 `sendTurn()`，输入区保留原 chip。
+- 图片源文件在提交前被删除：准备失败，显示错误，不写 scrollback，不调用 `sendTurn()`，输入区保留原 chip，用户可删除或重新粘贴。
+- 宿主忙 / 宿主不可达导致发送未被接收：显示错误，不写 scrollback，输入区保留原草稿。
+- loopback 下本地 turn 的 delta / complete 早于 send response：先提交用户消息，再渲染 assistant 输出。
+- 文本长粘贴提交：准备成功后 scrollback 仍显示原文，不显示 `[Pasted #...]` token。
+- 本地命令提交：继续由 command dispatcher 处理，不被材料准备事务阻塞。
 
 **验收标准**：
 
 - 粘贴 unsupported binary file 生成 file chip 后提交：显示错误，不调用 `sendTurn()`，scrollback 不出现该 chip / 用户历史消息。
-- 粘贴图片后源文件在提交前消失：显示错误，scrollback 不出现未发送消息。
+- 粘贴图片后源文件在提交前消失：显示错误，不调用 `sendTurn()`，scrollback 不出现未发送消息，输入区仍保留 chip。
+- 宿主返回 BUSY / 发送 RPC 失败：显示错误，scrollback 不出现未发送消息，输入区仍保留草稿。
+- 本地 turn 通知早于 send response：用户消息仍先于 assistant 输出写入 scrollback。
 - 粘贴有效图片 / 文本文件提交成功：scrollback 显示稳定摘要，agent/core 收到结构化 input。
 - 文本长粘贴提交仍显示原文，不泄漏 paste token。
+
+**建议测试策略**：
+
+- 在 `typeahead-input.test.ts` 增加提交事务测试：正文 pending 时成功 `commit()` 才写 scrollback；`reject()` 不写 scrollback 且 draft 保留。
+- 在 REPL 层或可注入 harness 中增加材料失败集成测试：unsupported binary file chip 提交后打印 warning，不调用 `sendTurn()`，scrollback 不出现该用户消息。
+- 增加源文件消失测试：提交前删除图片源文件，验证错误提示、无 scrollback、draft/chip 保留、material registry 仍保活。
+- 保留文本长粘贴成功提交测试，验证延迟 commit 后 history echo 仍显示 canonical 原文。
+- 保留命令分发测试，证明正文提交事务不影响 `/help`、`/clear` 等本地命令路径。
+- 在 `conversation-controller.test.ts` 增加 turn 接受边界测试：`beginTurn()` 只代表宿主已接收，`outcome` 仍等待 complete 落定。
+
+**修复记录**：
+
+- `InputController` 增加 `pending-text` 正文提交结果和 `textSubmitMode: "deferred"` 模式；正文按 Enter 后先进入待确认状态，不立刻清空输入区或写 scrollback。
+- `pending-text.commit()` 由 `InputController` 内部统一执行 `buffer.commit()`、`syncBroker()`、`echoSubmittedText()`；`reject()` 不写历史、不清 buffer，只恢复输入区可编辑状态。
+- `ConversationController` 增加 `beginTurn()`：宿主接受后返回 turnId 和 outcome waiter；并提供本地 turn accepted 回调，send response 或本地 delta / complete 先到都只触发一次；旧 `sendTurn()` 继续兼容并等待 outcome。
+- REPL 持久 typeahead 输入区启用 deferred 模式：`prepareUserTurnInput()` 成功后先 `beginTurn()`，核心接收确认后再 `commit()`；材料解析失败或发送失败时打印 warning / error 并 `reject()`，不会产生假历史消息。
+- 本地命令路径保持立即提交和分发，不经过正文材料准备事务。
+- `readInputLine()` 单次 facade 对误传的 deferred 正文自动 commit 并返回旧的 text 结果，避免向单次调用方泄漏不可用的 pending 对象。
+- `typeahead-input.test.ts` 补充 deferred 正文提交事务、材料失败 reject、命令路径不受影响、单次 facade 兼容性回归；`conversation-controller.test.ts` 补充 accepted turn 边界与本地首帧早于 send response 的竞态回归。
+
+**验证命令**：
+
+```bash
+pnpm --filter @zhixing/cli exec tsc --noEmit && pnpm --filter @zhixing/cli exec vitest run src/runtime/__tests__/conversation-controller.test.ts src/__tests__/typeahead-input.test.ts src/__tests__/user-turn-input.test.ts src/__tests__/input-material.test.ts
+pnpm --filter @zhixing/cli test
+pnpm cli:build
+```
+
+结果：CLI 类型检查通过；定向 4 个测试文件、91 个测试通过；CLI 全量 140 个测试文件、2106 个测试通过；CLI 构建成功。
 
 ## 已验证
 
