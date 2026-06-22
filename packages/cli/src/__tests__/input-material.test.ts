@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { materialTokensFromPastedPaths } from "../input-material-ingest.js";
+import { ingestPastedMaterials } from "../input-material-ingest.js";
 import {
   InputMaterialRegistry,
   MATERIAL_TOKEN_PATTERN,
@@ -26,7 +26,7 @@ describe("input materials", () => {
     await fs.writeFile(imagePath, minimalPng(2, 3));
     const registry = new InputMaterialRegistry();
 
-    const token = materialTokensFromPastedPaths(imagePath, registry, {
+    const token = ingestMaterialToken(imagePath, registry, {
       workspaceRoot: root,
     });
 
@@ -37,10 +37,125 @@ describe("input materials", () => {
   it("普通文本不被误识别为材料路径", () => {
     const registry = new InputMaterialRegistry();
     expect(
-      materialTokensFromPastedPaths("hello world", registry, {
+      ingestPastedMaterials("hello world", registry, {
         workspaceRoot: "E:/repo",
       }),
-    ).toBeNull();
+    ).toEqual({ kind: "not-material" });
+    expect(registry.size).toBe(0);
+  });
+
+  it("普通 URL 不被误识别为失败材料路径", () => {
+    const registry = new InputMaterialRegistry();
+    const result = ingestPastedMaterials("https://example.com/shot.png", registry, {
+      workspaceRoot: "E:/repo",
+    });
+
+    expect(result).toEqual({ kind: "not-material" });
+    expect(registry.size).toBe(0);
+  });
+
+  it("普通引用文本不因引号被误识别为失败材料路径", () => {
+    const registry = new InputMaterialRegistry();
+    const result = ingestPastedMaterials('"hello world"', registry, {
+      workspaceRoot: "E:/repo",
+    });
+
+    expect(result).toEqual({ kind: "not-material" });
+    expect(registry.size).toBe(0);
+  });
+
+  it("批量材料路径部分失败时保留成功材料并返回诊断", async () => {
+    const root = await makeTempDir();
+    const imagePath = path.join(root, "shot.png");
+    const missingPath = path.join(root, "missing.png");
+    await fs.writeFile(imagePath, minimalPng(2, 3));
+    const registry = new InputMaterialRegistry();
+
+    const result = ingestPastedMaterials(`${imagePath}\n${missingPath}`, registry, {
+      workspaceRoot: root,
+    });
+
+    expect(result.kind).toBe("ingested");
+    if (result.kind === "ingested") {
+      expect(result.insertText).toContain("[Image #1 · shot.png · 2x3 ·");
+      expect(result.insertText).not.toContain(missingPath);
+      expect(result.diagnostics).toEqual([
+        {
+          input: missingPath,
+          filePath: missingPath,
+          reason: "unreadable",
+          message: "文件不存在或不可读取",
+        },
+      ]);
+    }
+    expect(registry.size).toBe(1);
+  });
+
+  it("明确路径全部失败时返回空插入内容和诊断", async () => {
+    const root = await makeTempDir();
+    const registry = new InputMaterialRegistry();
+
+    const result = ingestPastedMaterials("missing.png", registry, {
+      workspaceRoot: root,
+    });
+
+    expect(result.kind).toBe("ingested");
+    if (result.kind === "ingested") {
+      expect(result.insertText).toBe("");
+      expect(result.diagnostics).toHaveLength(1);
+      expect(result.diagnostics[0]).toMatchObject({
+        input: "missing.png",
+        filePath: path.join(root, "missing.png"),
+        reason: "unreadable",
+      });
+    }
+    expect(registry.size).toBe(0);
+  });
+
+  it("同一次粘贴里的说明文字与材料按顺序保留", async () => {
+    const root = await makeTempDir();
+    const imagePath = path.join(root, "shot.png");
+    await fs.writeFile(imagePath, minimalPng(2, 3));
+    const registry = new InputMaterialRegistry();
+
+    const result = ingestPastedMaterials(
+      `请看这张图\n${imagePath}\n谢谢`,
+      registry,
+      { workspaceRoot: root },
+    );
+
+    expect(result.kind).toBe("ingested");
+    if (result.kind === "ingested") {
+      expect(result.diagnostics).toEqual([]);
+      expect(result.insertText).toMatch(
+        /^请看这张图\n\[Image #1 · shot\.png · 2x3 · .+\]\n谢谢$/,
+      );
+    }
+    expect(registry.size).toBe(1);
+  });
+
+  it("目录路径作为明确材料失败返回诊断", async () => {
+    const root = await makeTempDir();
+    const dirPath = path.join(root, "assets");
+    await fs.mkdir(dirPath);
+    const registry = new InputMaterialRegistry();
+
+    const result = ingestPastedMaterials(dirPath, registry, {
+      workspaceRoot: root,
+    });
+
+    expect(result.kind).toBe("ingested");
+    if (result.kind === "ingested") {
+      expect(result.insertText).toBe("");
+      expect(result.diagnostics).toEqual([
+        {
+          input: dirPath,
+          filePath: dirPath,
+          reason: "not-file",
+          message: "不是普通文件",
+        },
+      ]);
+    }
     expect(registry.size).toBe(0);
   });
 
@@ -50,7 +165,7 @@ describe("input materials", () => {
     const bytes = minimalPng(1, 1);
     await fs.writeFile(imagePath, bytes);
     const registry = new InputMaterialRegistry();
-    const token = materialTokensFromPastedPaths(imagePath, registry, {
+    const token = ingestMaterialToken(imagePath, registry, {
       workspaceRoot: root,
     })!;
 
@@ -78,7 +193,7 @@ describe("input materials", () => {
     await fs.writeFile(fakeImagePath, "not an image", "utf-8");
     const registry = new InputMaterialRegistry();
 
-    const token = materialTokensFromPastedPaths(fakeImagePath, registry, {
+    const token = ingestMaterialToken(fakeImagePath, registry, {
       workspaceRoot: root,
     });
 
@@ -93,7 +208,7 @@ describe("input materials", () => {
     const imagePath = path.join(root, "shot.png");
     await fs.writeFile(imagePath, minimalPng(1, 1));
     const registry = new InputMaterialRegistry();
-    const token = materialTokensFromPastedPaths(imagePath, registry, {
+    const token = ingestMaterialToken(imagePath, registry, {
       workspaceRoot: root,
     })!;
     await fs.rm(imagePath);
@@ -109,7 +224,7 @@ describe("input materials", () => {
     const filePath = path.join(root, "notes.txt");
     await fs.writeFile(filePath, "alpha\nbeta", "utf-8");
     const registry = new InputMaterialRegistry();
-    const token = materialTokensFromPastedPaths(filePath, registry, {
+    const token = ingestMaterialToken(filePath, registry, {
       workspaceRoot: root,
     })!;
 
@@ -129,7 +244,7 @@ describe("input materials", () => {
     const filePath = path.join(root, "archive.bin");
     await fs.writeFile(filePath, Buffer.from([0, 1, 2, 3]));
     const registry = new InputMaterialRegistry();
-    const token = materialTokensFromPastedPaths(filePath, registry, {
+    const token = ingestMaterialToken(filePath, registry, {
       workspaceRoot: root,
     })!;
 
@@ -146,7 +261,7 @@ describe("input materials", () => {
     const bytes = minimalPng(12, 8);
     await fs.writeFile(imagePath, bytes);
     const registry = new InputMaterialRegistry();
-    const token = materialTokensFromPastedPaths(imagePath, registry, {
+    const token = ingestMaterialToken(imagePath, registry, {
       workspaceRoot: root,
       tokenMaxWidth: 42,
     })!;
@@ -172,6 +287,18 @@ async function makeTempDir(): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-material-"));
   tempDirs.push(dir);
   return dir;
+}
+
+function ingestMaterialToken(
+  content: string,
+  registry: InputMaterialRegistry,
+  options: Parameters<typeof ingestPastedMaterials>[2],
+): string {
+  const result = ingestPastedMaterials(content, registry, options);
+  expect(result.kind).toBe("ingested");
+  if (result.kind !== "ingested") return "";
+  expect(result.diagnostics).toEqual([]);
+  return result.insertText;
 }
 
 function minimalPng(width: number, height: number): Buffer {

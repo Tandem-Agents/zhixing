@@ -54,7 +54,10 @@ import {
   extractAliveMaterialIds,
   type InputMaterialRegistry,
 } from "./input-material-registry.js";
-import { materialTokensFromPastedPaths } from "./input-material-ingest.js";
+import {
+  ingestPastedMaterials,
+  type PastedMaterialIngestDiagnostic,
+} from "./input-material-ingest.js";
 import {
   rawModeController,
   type RawModeLease,
@@ -155,6 +158,11 @@ export interface InputControllerOptions {
 
   /** 工作区根目录，用于把粘贴的相对文件路径解析为本地材料。 */
   readonly workspaceRoot?: string;
+
+  /** 材料粘贴采集失败诊断。诊断属于接入面反馈，不进入用户 draft。 */
+  readonly onMaterialIngestDiagnostics?: (
+    diagnostics: readonly PastedMaterialIngestDiagnostic[],
+  ) => void;
 
   /**
    * 正文提交模式。REPL 可用 deferred 先做 payload 准备，确认可发送后再
@@ -925,17 +933,20 @@ export class InputController implements InputRegion {
   private finalizePaste(content: string): void {
     if (!this.buffer || this.state !== "active") return;
 
-    const materializedContent =
+    const materialIngest =
       this.options.materialRegistry && this.options.workspaceRoot
-        ? materialTokensFromPastedPaths(content, this.options.materialRegistry, {
+        ? ingestPastedMaterials(content, this.options.materialRegistry, {
             workspaceRoot: this.options.workspaceRoot,
             tokenMaxWidth: this.getInputDraftLineWidth(),
           })
-        : null;
-    const nextContent = materializedContent ?? content;
+        : { kind: "not-material" as const };
+    const isMaterialIngest = materialIngest.kind === "ingested";
+    const nextContent = isMaterialIngest ? materialIngest.insertText : content;
+    const shouldInsertContent =
+      !isMaterialIngest || materialIngest.insertText.length > 0;
 
     let removedPasteToken = false;
-    if (this.options.registry) {
+    if (this.options.registry && shouldInsertContent) {
       const removed = removeAllPasteTokens(this.buffer.draft, this.buffer.cursor);
       if (removed) {
         this.buffer.setDraft(removed.draft, removed.cursor);
@@ -944,15 +955,18 @@ export class InputController implements InputRegion {
     }
 
     const shouldFold =
-      materializedContent === null &&
+      !isMaterialIngest &&
       !!this.options.registry &&
       shouldFoldPaste(content) &&
       !removedPasteToken;
     if (shouldFold) {
       const id = this.options.registry!.register(content);
       this.buffer.insertText(this.options.registry!.format(id));
-    } else {
+    } else if (shouldInsertContent) {
       this.buffer.insertText(nextContent);
+    }
+    if (isMaterialIngest && materialIngest.diagnostics.length > 0) {
+      this.options.onMaterialIngestDiagnostics?.(materialIngest.diagnostics);
     }
     this.syncBroker();
   }

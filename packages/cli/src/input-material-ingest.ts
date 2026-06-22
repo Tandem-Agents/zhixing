@@ -14,31 +14,87 @@ export interface PasteMaterialIngestOptions {
   readonly tokenMaxWidth?: number;
 }
 
-export function materialTokensFromPastedPaths(
+export type PastedMaterialIngestResult =
+  | { readonly kind: "not-material" }
+  | {
+      readonly kind: "ingested";
+      readonly insertText: string;
+      readonly diagnostics: readonly PastedMaterialIngestDiagnostic[];
+    };
+
+export type PastedMaterialIngestFailureReason = "unreadable" | "not-file";
+
+export interface PastedMaterialIngestDiagnostic {
+  readonly input: string;
+  readonly filePath: string;
+  readonly reason: PastedMaterialIngestFailureReason;
+  readonly message: string;
+}
+
+interface PastedMaterialLine {
+  readonly raw: string;
+  readonly input: string;
+  readonly quoted: boolean;
+}
+
+export function ingestPastedMaterials(
   content: string,
   registry: InputMaterialRegistry,
   options: PasteMaterialIngestOptions,
-): string | null {
-  const paths = parsePastedPaths(content);
-  if (paths.length === 0) return null;
+): PastedMaterialIngestResult {
+  const lines = parsePastedMaterialLines(content);
+  if (lines.length === 0) return { kind: "not-material" };
 
-  const entries = [];
-  for (const pastedPath of paths) {
-    const filePath = resolvePastedPath(pastedPath, options.workspaceRoot);
+  let hasMaterial = false;
+  let hasExplicitPathFailure = false;
+  const outputLines: string[] = [];
+  const diagnostics: PastedMaterialIngestDiagnostic[] = [];
+
+  for (const line of lines) {
+    if (!line.input) {
+      outputLines.push(line.raw);
+      continue;
+    }
+
+    const filePath = resolvePastedPath(line.input, options.workspaceRoot);
     let stat: fs.Stats;
     try {
       stat = fs.statSync(filePath);
     } catch {
-      return null;
+      if (isExplicitPathLike(line.input, line.quoted)) {
+        hasExplicitPathFailure = true;
+        diagnostics.push({
+          input: line.input,
+          filePath,
+          reason: "unreadable",
+          message: "文件不存在或不可读取",
+        });
+      } else {
+        outputLines.push(line.raw);
+      }
+      continue;
     }
-    if (!stat.isFile()) return null;
+    if (!stat.isFile()) {
+      if (isExplicitPathLike(line.input, line.quoted)) {
+        hasExplicitPathFailure = true;
+        diagnostics.push({
+          input: line.input,
+          filePath,
+          reason: "not-file",
+          message: "不是普通文件",
+        });
+      } else {
+        outputLines.push(line.raw);
+      }
+      continue;
+    }
 
     const header = readFileHeader(filePath, stat.size);
     const mimeType = detectMimeType(filePath, header);
     const kind: InputMaterialKind = mimeType.startsWith("image/")
       ? "image"
       : "file";
-    entries.push({
+    const id = registry.registerLocalFile({
       kind,
       filePath,
       name: path.basename(filePath),
@@ -46,41 +102,69 @@ export function materialTokensFromPastedPaths(
       byteSize: stat.size,
       image: kind === "image" ? readImageMetadata(header, mimeType) : undefined,
     });
+    outputLines.push(registry.format(id, { maxWidth: options.tokenMaxWidth }));
+    hasMaterial = true;
   }
 
-  return entries
-    .map((entry) => {
-      const id = registry.registerLocalFile(entry);
-      return registry.format(id, { maxWidth: options.tokenMaxWidth });
-    })
-    .join("\n");
+  if (!hasMaterial && !hasExplicitPathFailure) return { kind: "not-material" };
+  return {
+    kind: "ingested",
+    insertText: trimEmptyLineEdges(outputLines).join("\n"),
+    diagnostics,
+  };
 }
 
-function parsePastedPaths(content: string): string[] {
-  const normalized = content.replace(/\r\n/g, "\n").trim();
-  if (!normalized) return [];
-  const lines = normalized
-    .split("\n")
-    .map((line) => unquote(line.trim()))
-    .filter(Boolean);
-  if (lines.length === 0) return [];
-  return lines;
+export function formatMaterialIngestDiagnostic(
+  diagnostic: PastedMaterialIngestDiagnostic,
+): string {
+  return `${diagnostic.input} -> ${diagnostic.message}`;
 }
 
-function unquote(input: string): string {
+function parsePastedMaterialLines(content: string): PastedMaterialLine[] {
+  const rawLines = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  const lines = trimEmptyLineEdges(rawLines);
+  return lines.map((raw) => {
+    const unquoted = unquote(raw.trim());
+    return { raw, input: unquoted.value, quoted: unquoted.quoted };
+  });
+}
+
+function unquote(input: string): { value: string; quoted: boolean } {
   if (
     (input.startsWith('"') && input.endsWith('"')) ||
     (input.startsWith("'") && input.endsWith("'"))
   ) {
-    return input.slice(1, -1);
+    return { value: input.slice(1, -1), quoted: true };
   }
-  return input;
+  return { value: input, quoted: false };
 }
 
 function resolvePastedPath(input: string, workspaceRoot: string): string {
   const expanded = expandUserHome(input);
   if (path.isAbsolute(expanded)) return path.resolve(expanded);
   return path.resolve(workspaceRoot, expanded);
+}
+
+function isExplicitPathLike(input: string, quoted: boolean): boolean {
+  if (!input) return false;
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(input)) return false;
+  if (/^(~|\.{1,2})([\\/]|$)/.test(input)) return true;
+  if (/^[a-zA-Z]:[\\/]/.test(input)) return true;
+  if (/^\\\\/.test(input)) return true;
+  if (path.isAbsolute(expandUserHome(input))) return true;
+  if (/[\\/]/.test(input)) return true;
+  if (!quoted && /\s/.test(input)) return false;
+
+  const ext = path.extname(input);
+  return ext.length > 1;
+}
+
+function trimEmptyLineEdges(lines: readonly string[]): string[] {
+  let start = 0;
+  let end = lines.length;
+  while (start < end && lines[start]!.trim() === "") start++;
+  while (end > start && lines[end - 1]!.trim() === "") end--;
+  return lines.slice(start, end);
 }
 
 export function detectMimeType(

@@ -1471,6 +1471,180 @@ describe("InputController — 多行粘贴提交历史区", () => {
     }
   });
 
+  it("批量材料路径部分失败时保留成功材料并提示失败项", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-input-"));
+    try {
+      const imagePath = path.join(tempDir, "shot.png");
+      const missingPath = path.join(tempDir, "missing.png");
+      await fs.writeFile(imagePath, minimalPng(4, 5));
+      const { stdin } = makeStreams();
+      const { broker, dispatcher } = makeHarness();
+      const materialRegistry = new InputMaterialRegistry();
+      const diagnostics: string[] = [];
+      const { screen } = makeCapturingScreen();
+      const controller = new InputController({
+        broker,
+        dispatcher,
+        getRuntime: makeRuntime,
+        screen,
+        stdin,
+        columns: 80,
+        materialRegistry,
+        workspaceRoot: tempDir,
+        onMaterialIngestDiagnostics: (items) => {
+          diagnostics.push(...items.map((item) => item.input));
+        },
+      });
+      const resultP = controller.waitOnce();
+
+      controller.start();
+      await pasteText(stdin, `${imagePath}\n${missingPath}`);
+
+      const inputText = stripAnsi(controller.renderLines().join("\n"));
+      expect(inputText).toContain("[Image #1 · shot.png");
+      expect(inputText).not.toContain(imagePath);
+      expect(inputText).not.toContain(missingPath);
+      expect(diagnostics).toEqual([missingPath]);
+      expect(materialRegistry.size).toBe(1);
+
+      await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+      const result = await resultP;
+      expect(result.kind).toBe("text");
+      if (result.kind === "text") {
+        expect(result.text).toContain("[Image #1");
+        expect(result.text).not.toContain(missingPath);
+        const prepared = await prepareUserTurnInput(result.text, {
+          workspaceRoot: tempDir,
+          materialRegistry,
+        });
+        expect(prepared?.errors).toEqual([]);
+        expect(prepared?.input.parts).toHaveLength(1);
+        expect(prepared?.input.parts[0]).toMatchObject({
+          type: "image",
+          name: "shot.png",
+          mimeType: "image/png",
+        });
+      }
+
+      controller.stop();
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("明确材料路径全部失败时不污染已有草稿", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-input-"));
+    try {
+      const missingPath = path.join(tempDir, "missing.png");
+      const { stdin } = makeStreams();
+      const { broker, dispatcher } = makeHarness();
+      const materialRegistry = new InputMaterialRegistry();
+      const diagnostics: string[] = [];
+      const { screen } = makeCapturingScreen();
+      const controller = new InputController({
+        broker,
+        dispatcher,
+        getRuntime: makeRuntime,
+        screen,
+        stdin,
+        columns: 80,
+        materialRegistry,
+        workspaceRoot: tempDir,
+        onMaterialIngestDiagnostics: (items) => {
+          diagnostics.push(...items.map((item) => item.input));
+        },
+      });
+      const resultP = controller.waitOnce();
+
+      controller.start();
+      await typeChars(stdin, "keep ");
+      await pasteText(stdin, missingPath);
+
+      const inputText = stripAnsi(controller.renderLines().join("\n"));
+      expect(inputText).toContain("keep ");
+      expect(inputText).not.toContain(missingPath);
+      expect(diagnostics).toEqual([missingPath]);
+      expect(materialRegistry.size).toBe(0);
+
+      await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+      expect(await resultP).toEqual({ kind: "text", text: "keep " });
+
+      controller.stop();
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("同一次粘贴里的说明文字与材料按顺序提交", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-input-"));
+    try {
+      const imagePath = path.join(tempDir, "shot.png");
+      await fs.writeFile(imagePath, minimalPng(4, 5));
+      const { stdin } = makeStreams();
+      const { broker, dispatcher } = makeHarness();
+      const materialRegistry = new InputMaterialRegistry();
+      const { screen } = makeCapturingScreen();
+      const controller = new InputController({
+        broker,
+        dispatcher,
+        getRuntime: makeRuntime,
+        screen,
+        stdin,
+        columns: 80,
+        materialRegistry,
+        workspaceRoot: tempDir,
+      });
+      const resultP = controller.waitOnce();
+
+      controller.start();
+      await pasteText(stdin, `请看这张图\n${imagePath}\n谢谢`);
+
+      const inputText = stripAnsi(controller.renderLines().join("\n"));
+      expect(inputText).toContain("请看这张图");
+      expect(inputText).toContain("[Image #1 · shot.png");
+      expect(inputText).toContain("谢谢");
+      expect(inputText.indexOf("请看这张图")).toBeLessThan(
+        inputText.indexOf("[Image #1"),
+      );
+      expect(inputText.indexOf("[Image #1")).toBeLessThan(
+        inputText.indexOf("谢谢"),
+      );
+
+      await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+      const result = await resultP;
+      expect(result.kind).toBe("text");
+      if (result.kind === "text") {
+        const prepared = await prepareUserTurnInput(result.text, {
+          workspaceRoot: tempDir,
+          materialRegistry,
+        });
+        expect(prepared?.errors).toEqual([]);
+        expect(prepared?.input.parts.map((part) => part.type)).toEqual([
+          "text",
+          "image",
+          "text",
+        ]);
+        expect(prepared?.input.parts[0]).toEqual({
+          type: "text",
+          text: "请看这张图\n",
+        });
+        expect(prepared?.input.parts[1]).toMatchObject({
+          type: "image",
+          name: "shot.png",
+          mimeType: "image/png",
+        });
+        expect(prepared?.input.parts[2]).toEqual({
+          type: "text",
+          text: "\n谢谢",
+        });
+      }
+
+      controller.stop();
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("长图片材料 chip 在输入区和历史区都按原子 handle 显示", async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-input-"));
     try {

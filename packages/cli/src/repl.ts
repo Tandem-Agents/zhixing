@@ -45,6 +45,7 @@ import { registerSkillsCommand } from "./skills/manager-command.js";
 import { PasteRegistry } from "./paste-registry.js";
 import { createInputHandleTokenPatterns } from "./input-handle-tokens.js";
 import { InputMaterialRegistry } from "./input-material-registry.js";
+import { formatMaterialIngestDiagnostic } from "./input-material-ingest.js";
 import { prepareUserTurnInput } from "./user-turn-input.js";
 import { renderError, createRenderSubscribers } from "./render.js";
 import { renderHistoryTail } from "./history-tail.js";
@@ -1008,6 +1009,15 @@ export async function startRepl(): Promise<void> {
       registry: pasteRegistry,
       materialRegistry,
       workspaceRoot: localView.workspaceRoot ?? process.cwd(),
+      onMaterialIngestDiagnostics: (diagnostics) => {
+        for (const diagnostic of diagnostics) {
+          cliWriter.line(
+            chalk.yellow(
+              `${layout.contentPrefix}材料未添加: ${formatMaterialIngestDiagnostic(diagnostic)}\n`,
+            ),
+          );
+        }
+      },
       textSubmitMode: "deferred",
       onCandidateDelete,
       bottomInfo,
