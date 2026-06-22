@@ -42,7 +42,8 @@ import { registerConfigCommands } from "./commands/config-commands.js";
 import { SkillCommandSource } from "./commands/skill-command-source.js";
 import { FEATURE_CHROME } from "./commands/command-visibility.js";
 import { registerSkillsCommand } from "./skills/manager-command.js";
-import { PASTE_TOKEN_PATTERN, PasteRegistry } from "./paste-registry.js";
+import { PasteRegistry } from "./paste-registry.js";
+import { createInputHandleTokenPatterns } from "./input-handle-tokens.js";
 import { InputMaterialRegistry } from "./input-material-registry.js";
 import { prepareUserTurnInput } from "./user-turn-input.js";
 import { renderError, createRenderSubscribers } from "./render.js";
@@ -944,9 +945,8 @@ export async function startRepl(): Promise<void> {
     const usageTracker = new UsageTracker({ rootDir: null });
     typeaheadBroker = new DefaultTypeaheadBroker({
       now: () => Date.now(),
-      // 粘贴占位符 token 作 word 边界 —— trigger 反向扫不跨过占位符；用户在 `/file `
-      // 后粘贴长文件路径时，占位符整段不进 trigger query，typeahead 自然退出。
-      wordTerminators: [PASTE_TOKEN_PATTERN],
+      // 输入 handle 作 word 边界，trigger 反向扫不跨过材料或粘贴占位。
+      wordTerminators: createInputHandleTokenPatterns(),
     });
     typeaheadBroker.register(
       new CommandProvider({ registry: tRegistry, usageTracker }),

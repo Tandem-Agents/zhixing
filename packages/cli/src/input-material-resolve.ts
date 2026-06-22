@@ -4,7 +4,7 @@ import type { UserInputPart, UserTurnInput } from "@zhixing/core";
 
 import { detectMimeType } from "./input-material-ingest.js";
 import {
-  MATERIAL_TOKEN_PATTERN,
+  createMaterialTokenPattern,
   type InputMaterialEntry,
   type InputMaterialRegistry,
 } from "./input-material-registry.js";
@@ -26,7 +26,7 @@ export async function resolveInputMaterials(
 ): Promise<ResolveInputMaterialsResult> {
   const parts: UserInputPart[] = [];
   const errors: string[] = [];
-  const matches = Array.from(draft.matchAll(MATERIAL_TOKEN_PATTERN));
+  const matches = Array.from(draft.matchAll(createMaterialTokenPattern()));
   if (matches.length === 0) {
     return { input: { parts: [{ type: "text", text: draft }] }, errors };
   }

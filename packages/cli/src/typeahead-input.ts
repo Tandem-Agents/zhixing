@@ -42,10 +42,8 @@ import {
   recordKeypressEvent,
   recordStdinSnapshot,
 } from "./security/keypress-dump.js";
-import {
-  PASTE_TOKEN_PATTERN,
-  type PasteRegistry,
-} from "./paste-registry.js";
+import { type PasteRegistry } from "./paste-registry.js";
+import { INPUT_HANDLE_TOKEN_PATTERNS } from "./input-handle-tokens.js";
 import { expandPastes, PasteReferenceIndex } from "./paste-expand.js";
 import {
   removeAllInputTokens,
@@ -589,7 +587,7 @@ export class InputController implements InputRegion {
       this.buffer.cursor,
       suffix,
       contentBudget,
-      PASTE_TOKEN_PATTERN,
+      INPUT_HANDLE_TOKEN_PATTERNS,
       this.buffer !== null,
     );
 
@@ -901,6 +899,7 @@ export class InputController implements InputRegion {
       this.options.materialRegistry && this.options.workspaceRoot
         ? materialTokensFromPastedPaths(content, this.options.materialRegistry, {
             workspaceRoot: this.options.workspaceRoot,
+            tokenMaxWidth: this.getInputDraftLineWidth(),
           })
         : null;
     const nextContent = materializedContent ?? content;
@@ -1109,7 +1108,7 @@ export class InputController implements InputRegion {
     if (text.length === 0) return [];
     const columns = this.getColumns();
     const echoBudget = Math.max(1, columns - 2);
-    const chunks = wrapToWidth(text, echoBudget, PASTE_TOKEN_PATTERN);
+    const chunks = wrapToWidth(text, echoBudget, INPUT_HANDLE_TOKEN_PATTERNS);
     const lines: string[] = [];
     for (const chunk of chunks) {
       const innerText = `  ${chunk}`;
@@ -1118,6 +1117,13 @@ export class InputController implements InputRegion {
       lines.push(tone.historyEcho(innerText + padding));
     }
     return lines;
+  }
+
+  private getInputDraftLineWidth(): number {
+    const frameWidth = Math.max(40, this.getColumns());
+    const contentBudget = Math.max(1, frameWidth - 4);
+    const promptVisibleWidth = stringWidth(stripAnsi(this.promptPrefix));
+    return Math.max(1, contentBudget - promptVisibleWidth - 1);
   }
 }
 

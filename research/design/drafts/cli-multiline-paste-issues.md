@@ -22,6 +22,7 @@
 - **架构标准**：占位符是 UI 表示，原文是语义内容。两者可以分离，但 canonicalize 边界必须清楚：离开输入态成为已发送消息时，写入 scrollback 和 agent 入口的都应是 canonical 文本。
 - **智能体标准**：agent 收到的必须是用户想交付的原始材料，而不是 `[Pasted #N ...]` 这种 UI handle。否则就是静默污染上下文，危害比显式报错更大。
 - **材料标准**：文本粘贴折叠是输入区降噪，不等同于真正的用户材料输入能力。未来文件、图片、音视频、网页快照、富文本等材料必须作为结构化输入进入核心，CLI 的缩略信息只是接入面展示，不能把文件路径、base64 或 UI token 伪装成用户正文。
+- **输入 handle 标准**：输入态所有 handle（文本粘贴 token、图片 / 文件 chip、未来音频 / 视频 / 网页快照 chip）必须共用同一套原子编辑、原子渲染、宽度预算和提交转换规则。不能让同一类“用户材料占位”在某些路径是整体、某些路径被字符级切碎。
 - **保真标准**：trim 只能服务空输入判断、命令识别等控制流。一旦内容被判定为用户正文，CLI 不能裁剪用户材料；代码、patch、YAML、日志等首尾空白都可能有语义。
 - **长期标准**：方案不能只修当前终端和当前输入框。它要经得起原生 scrollback 不可重绘、多个接入面扩展、未来材料类型扩展的考验。
 - **可验证标准**：每个重要不变量都必须有测试。尤其是“输入态首次长粘贴显示 token，二次粘贴显示原文”“提交后 scrollback / agent 均为原文”“token 不泄漏成历史区消息”。
@@ -364,7 +365,7 @@
 
 ### 5. 用户材料输入尚未一等化，CLI 图片 / 文件粘贴只是首批场景
 
-**状态**：已实现第一批结构化材料输入；本轮补齐共享模型能力预检、图文顺序保真、MIME 文件头嗅探、材料读错恢复、server 输入契约，已完成定向测试、受影响包全量测试、lint 与全量构建。
+**状态**：已实现第一批结构化材料输入；本轮补齐共享模型能力预检、图文顺序保真、MIME 文件头嗅探、材料读错恢复、server 输入契约，已完成定向测试、受影响包全量测试、lint 与全量构建。重新从头复查后发现 CLI 材料 chip 渲染原子性遗漏，现已补修并完成 CLI 定向测试、CLI 全量测试与 CLI 构建。
 
 **降级路径释义**：
 
@@ -381,6 +382,7 @@
 - 通道层类型里有 `mediaUrls` / outbound `media` 字段，但 `InboundRouter` 当前仍把 `msg.text` 作为 turn 文本送入核心，没有把入站媒体转成 agent 输入附件。
 - 用户提出的问题属实，但最优解不能是“图片一套、文件一套、未来音频再补一套”。正确方向是建立一套通用用户材料能力，再用类型化 handler 处理不同材料。
 - 本轮复审补充确认：图片输入能力必须归 core/runtime 统一 preflight，不能写死在 CLI。CLI、飞书、未来 App 都只是材料采集 adapter；是否能发送图片由当前模型输入能力决定。
+- 重新从头复查确认：第一批材料输入的“编辑原子性”已经接入，但“渲染原子性”没有接入同一套规则。材料 chip 仍可能在输入区 / 历史区被字符级软换行切碎，这是第 5 个问题的真实遗漏子问题。
 
 **事实依据**：
 
@@ -395,6 +397,12 @@
 - `packages/providers/src/adapters/anthropic-messages.ts`：base64 image block 可转 Anthropic image；URL 图片会降级为文本描述。
 - `packages/providers/src/adapters/openai-compatible.ts`：修复前 user 消息转换只提取 text / tool_result，image block 不会成为 OpenAI 兼容协议内容；第一批落地后支持 `image_url`，本轮补修后保留 text / image 的原始顺序。
 - `research/design/problems/multiline-paste-attachment.md` 的旧边界明确把“粘贴图片 / 二进制附件”排除在文本粘贴方案之外；现在用户需求已经把它提升为独立问题。
+- `packages/cli/src/paste-atomic.ts`：`findTokenCharRanges()` 已同时识别 `PASTE_TOKEN_PATTERN` 和 `MATERIAL_TOKEN_PATTERN`，说明材料 chip 在编辑层应被视为原子输入单元。
+- `packages/cli/src/typeahead-input.ts`：`computeRender()` 调 `layoutInputBuffer(..., PASTE_TOKEN_PATTERN, ...)`，`buildHistoryEchoLines()` 调 `wrapToWidth(text, echoBudget, PASTE_TOKEN_PATTERN)`，渲染层仍只把文本 paste token 视作原子区域。
+- 内联验证结果：同一长图片 chip 用 `PASTE_TOKEN_PATTERN` 渲染会被切成 `"[Image #1 · very-long-screen"` / `"shot-name..."` / `"KB]"` 多段；用 `MATERIAL_TOKEN_PATTERN` 才能整体换行。文本 paste token 在当前路径下不会被切碎。
+- `packages/cli/src/input-box.ts`：共享输入框原语也只把 `PASTE_TOKEN_PATTERN` 传给 `layoutInputBuffer()`。当前 inline rename / new 不会产生材料 chip，但这说明“输入 handle 原子规则”还没有抽成共享能力。
+- `packages/cli/src/repl.ts`：`DefaultTypeaheadBroker` 的 `wordTerminators` 只注入 `PASTE_TOKEN_PATTERN`。material chip 没有成为 typeahead 触发器的 word boundary；这会让渲染、编辑、补全三层对同一 handle 的理解不一致。
+- 进一步内联验证：如果仅把 material chip 当成 atomic 区域，超长 chip 会整体换到新行，再被 `renderChrome()` 的 `clampLine()` 截断为 `[Image #1 · extremely-long-screen…`。这比字符级切碎好，但仍不是完整产品解：chip 文案本身需要可视宽度预算。
 
 **背后需求**：
 
@@ -418,6 +426,7 @@
 - 图片作为材料进入 CLI 输入区后显示图片 chip，例如 `[Image #1 · screenshot.png · 1280x720 · 340KB]`；提交时变成 image part，不变成文本说明。
 - 普通文件作为材料进入 CLI 输入区后显示文件 chip，例如 `[File #2 · report.pdf · 2.1MB]`；第一批只消费安全范围内的文本文件，非文本文件明确报不支持，不把文件名或路径伪装成 prompt。
 - 文本文件可以在安全范围内解析成 text part，同时保留文件来源摘要；二进制文件不能被静默读成乱码。
+- 材料 chip 在输入区与历史区都应作为一个不可切碎的 handle 呈现；长文件名或长摘要应在生成 chip 时按可视宽度预算压缩，而不是在渲染时被普通字符级 wrap 切碎。
 - history / scrollback 显示稳定摘要，例如用户文字加附件摘要；不依赖后续展开，也不把本地绝对路径裸露为长期语义。
 - 未来新增音频、视频、网页快照、富文本时，只新增采集 adapter / 类型 handler / provider encoder，不改动核心输入协议和 CLI 基础生命周期。
 
@@ -437,6 +446,8 @@
   - `webpage`：URL、HTML、正文提取、截图。
   - `rich_text`：结构保留或转 markdown。
 - 将 CLI 的 `PasteRegistry` 演进为 `InputMaterialRegistry`。文本长粘贴仍可作为 text material 的特殊展示；图片 / 文件 chip 与文本 paste token 共用同一套原子删除、history 保活、submit 转换机制。
+- 把“输入态 handle 原子规则”提升为 CLI 输入层共享原语，而不是让 caller 分别传 `PASTE_TOKEN_PATTERN` 或 `MATERIAL_TOKEN_PATTERN`。`layoutInputBuffer()`、`wrapToWidth()`、`paste-atomic.ts` 应使用同一份 token/chip 识别规则。
+- chip 文案生成必须有可视宽度预算：材料名称过长时在 chip 内部压缩摘要，保证 chip 作为原子单元时不会撑破输入框或历史回显。渲染层负责整体换行 / 截断兜底，不负责理解材料字段。
 - 扩展 turn 入口：`conversation.send(text: string)` 不应继续作为长期唯一入口。应新增或演进为 `conversation.send(input: UserTurnInput)`，其中包含 `parts: UserInputPart[]` 和必要的 turn metadata。旧 text API 可作为兼容 wrapper。
 - 核心消息层应吸收结构化材料，而不是只靠 `userMessage(text)`。已有 `ImageBlock` 可以承接图片第一阶段；文件类需要新增 `FileBlock` / `AttachmentBlock` 或在 `UserInputPart` 到 `Message.content` 之间做明确投影。
 - core/runtime 层必须有 capability preflight：先判断当前模型是否支持 image / file / audio 等 part，再决定继续发送、解析转换、请求用户确认或明确失败。能力判断来自 provider model catalog 与用户覆盖，但执行点归共享核心路径，不回流到 CLI 写死。
@@ -471,6 +482,7 @@
 
 - 需求层：明确区分“材料输入模型”“CLI 采集方式”“provider 消费能力”“legacy 文本兜底”四件事。
 - CLI 主路径：文本 paste、图片、文件都能成为输入态 chip / token；删除、光标跨越、history 保活、submit 转换保持同一生命周期。
+- CLI 渲染层：文本 paste token、图片 chip、文件 chip 都必须在输入区和历史区按同一原子规则换行，不被字符级切碎；超长文件名以预算内摘要显示。
 - 核心入口：提交产物能表达有序的 `text + material parts`，不是单个字符串。
 - 存储层：材料有稳定 id、MIME、大小、hash、来源、清理策略；CLI 不持有真实 bytes。
 - provider：至少一个支持图片的 provider 能收到真实 image part；不支持附件的 provider 在发送前明确失败或给出明确转换选择。
@@ -511,11 +523,54 @@
 - server `projectSessionTurn()` 内部类型收紧为 text / input 二选一，避免调用方漏传时静默创建空 turn。
 - server public RPC `session.send` 边界同步收紧为 text / input 二选一；同时传两者直接返回 `INVALID_PARAMS`，避免多接入面客户端传错时静默丢弃其中一个输入源。
 
+**重新从头复查追加遗漏：材料 chip 渲染原子性**
+
+- **审核结论**：问题真实，属于第 5 个问题的遗漏子问题；它不推翻结构化材料输入架构，但说明 CLI 输入面的 handle 抽象还没有完整贯穿渲染层。
+- **完整事实链**：
+  - 材料路径粘贴由 `materialTokensFromPastedPaths()` 解析成本地材料，`InputMaterialRegistry.format()` 写入 `[Image #N · ...]` / `[File #N · ...]` chip。
+  - 提交前，`resolveInputMaterials()` 只依赖 chip 中的 id 查 registry；chip 详情文字是输入区展示，不是材料语义来源。
+  - 编辑层已将 `PASTE_TOKEN_PATTERN` 与 `MATERIAL_TOKEN_PATTERN` 都纳入 `findTokenCharRanges()`，所以 Backspace / 左右移动等操作已经把材料 chip 视作原子单元。
+  - 渲染层仍只传 `PASTE_TOKEN_PATTERN`：输入区 `layoutInputBuffer()`、历史区 `wrapToWidth()`、共享 `input-box.ts` 都没有使用 material token 规则。
+  - 补全层也仍只把 paste token 注入 `wordTerminators`；material chip 没有成为 typeahead token 边界。
+  - 只加 material regex 仍不够：超长 chip 会整体换行后被 `renderChrome()` 截断，说明 token 原子化和 chip 文案预算必须一起设计。
+- **背后需求**：用户看到的 chip 是“本轮材料”的可信 handle。它必须像一个整体一样可见、可删、可跨越、可作为词边界；不能在窄终端里变成几段内部字符串，也不能让不同输入子系统各自理解它。
+- **目标效果**：
+  - 图片 / 文件 chip 与文本 paste token 在输入区、历史区、输入历史恢复态都保持同一原子渲染语义。
+  - chip 是可读摘要，不是完整文件路径或完整元数据 dump。长名称要在 chip 内部预算化压缩，优先保留类型、id、可识别文件名、图片尺寸 / 文件大小等关键信息。
+  - typeahead 反向扫描不能跨过 chip；chip 后紧接 `/`、`@` 等触发字符时，chip 应与 paste token 一样被视作 word boundary。
+  - 提交解析仍以 registry id 为准，不能让显示摘要变成语义来源。
+- **不采用的方案**：
+  - 不在 `typeahead-input.ts` 两个调用点临时拼 `PASTE_TOKEN_PATTERN | MATERIAL_TOKEN_PATTERN`。这会漏掉 `input-box.ts`、typeahead word terminators 和未来新 chip 类型。
+  - 不让材料 chip 继续字符级 wrap 来保留更多详情。那破坏“handle 是整体”的产品心智。
+  - 不把完整本地路径、base64 或超长 metadata 塞进 chip。chip 是确认 handle，不是材料本体。
+  - 不把材料 chip 渲染规则下沉到 core。core 只需要结构化材料语义；CLI chip 是接入面展示。
+- **最优方案**：
+  - 新建 CLI 输入 handle 单一规则模块，例如 `input-handle-tokens.ts`，集中导出 `INPUT_HANDLE_TOKEN_PATTERNS`，当前包含文本 paste token 与 material chip；未来音频 / 视频 / 网页快照只在这里注册新 pattern。
+  - 让 `paste-atomic.ts`、`typeahead-input.ts` 输入区 layout、history echo、`input-box.ts`、REPL broker `wordTerminators` 全部消费同一份 handle token patterns。这样编辑、渲染、补全三层共用一个事实源。
+  - 将 `layoutInputBuffer()` 与 `wrapToWidth()` 的 atomic 参数从单个 `RegExp` 扩展为 `RegExp | readonly RegExp[]`，保留现有调用兼容，同时让多类 handle 不需要合成脆弱的大 union regex。
+  - 给 `InputMaterialRegistry.format()` / 材料 chip formatter 增加可视宽度预算能力。预算化规则按字段优先级压缩：保留 label + id；名称做中间省略并尽量保留扩展名；图片尺寸和大小在空间不足时按优先级保留 / 省略；最终 token 仍匹配 `MATERIAL_TOKEN_PATTERN`，解析只取 id。
+  - `InputController.finalizePaste()` 在生成材料 chip 时传入当前输入区可用预算；极窄终端下 `renderChrome()` 继续作为最后防线截断，但正常宽度下 chip 自身应已稳定可读。
+- **修复记录**：
+  - 新增 `input-handle-tokens.ts` 作为 CLI 输入 handle token 单一入口，当前统一注册文本 paste token 与 material chip。
+  - 新增 `tui/atomic-regions.ts`，让布局、换行、编辑层复用同一套多 pattern atomic range 收集逻辑，并避免全局 regex `lastIndex` 污染。
+  - `layoutInputBuffer()` 与 `wrapToWidth()` 扩展为支持 `RegExp | readonly RegExp[]`，输入区、历史回显、共享输入框原语全部改用 `INPUT_HANDLE_TOKEN_PATTERNS`。
+  - REPL `DefaultTypeaheadBroker.wordTerminators` 改用 `INPUT_HANDLE_TOKEN_PATTERNS`，material chip 后紧接 `/`、`@` 等触发字符时与 paste token 一样是词边界。
+  - `InputMaterialRegistry.format()` 增加宽度预算；长文件名中间省略并尽量保留扩展名，图片尺寸 / 大小按空间保留；`InputController.finalizePaste()` 按当前输入区宽度生成 chip，并给软件光标预留一列。
+  - `resolveInputMaterials()` / `extractAliveMaterialIds()` 改用 fresh material token regex，避免全局 `MATERIAL_TOKEN_PATTERN.lastIndex` 影响材料解析。
+  - 复审补修：core typeahead `wordTerminators` 扫描、CLI paste expand / alive id 提取全部改用 fresh regex scanner，避免共享全局 token regex 的 `lastIndex` 污染导致 token/chip 边界漏识别。
+- **测试策略**：
+  - `input-layout.test.ts`：同一 draft 内 paste token + image chip + file chip 都整体换行，不被字符级切碎。
+  - `line-width.test.ts`：`wrapToWidth()` 支持多个 atomic patterns，并对 hard newline 保持现有行为。
+  - `typeahead-input.test.ts`：粘贴长文件名图片路径后输入区和 scrollback 中 chip 不被切碎，提交后仍解析为 image part。
+  - `trigger-matcher` / broker 相关测试：material chip 作为 word terminator，chip 后紧接 `/cmd` 或 `@file` 时触发边界语义与 paste token 一致。
+  - `input-material.test.ts`：材料 chip formatter 对长文件名做预算化摘要，仍能被 `MATERIAL_TOKEN_PATTERN` 匹配，并且 `resolveInputMaterials()` 仍按 id 得到正确材料。
+- **验收标准**：补 CLI layout / width / typeahead / material 单测与集成测试，覆盖长图片 chip、长文件 chip、文本 paste token 同时存在时的输入区、history echo、typeahead 边界和提交解析；断言 chip 不被字符级切碎，超长名称预算化显示，最终 payload 仍是结构化材料。
+
 ### 6. 缺少端到端粘贴生命周期测试
 
-**状态**：待补充
+**状态**：已补充端到端覆盖，已完成定向验证。
 
-**现象**：现有单测覆盖了 detector / registry / expand / atomic / layout，也覆盖普通 typeahead 输入，但没有覆盖带 `PasteRegistry` 的完整 InputController 流程。
+**现象**：原先单测覆盖了 detector / registry / expand / atomic / layout，也覆盖普通 typeahead 输入，但缺少带 `PasteRegistry` 的完整 InputController 流程覆盖。
 
 **事实依据**：
 
@@ -524,13 +579,47 @@
 
 **影响**：paste 子模块各自正确，但跨模块生命周期 bug 漏检。
 
-**倾向修复方向**：在 `typeahead-input.test.ts` 新增集成测试：
+**修复记录**：在 `typeahead-input.test.ts` 新增 / 补齐集成测试：
 
 - 长 paste 折叠为 token，submit 返回 expanded text。
 - submit 后 scrollback history echo 显示原文，不显示 token。
 - submit 后 `↑` 恢复并再次 submit，agent / scrollback 仍得到原文，不泄漏死 token。
 - 二次长 paste 显示原文，保持既有输入区行为。
 - paste 内容首尾空白在 InputController text result 与 REPL sendTurn payload 中都保真。
+- 最新补充覆盖：折叠长粘贴提交结果再经过 `prepareUserTurnInput()`，最终 `UserTurnInput` 仍为原文 text part，确保 REPL 到 agent 的 payload 准备边界不重新引入 token 或裁剪空白。
+
+### 7. Delete 键没有接入 token 原子编辑契约
+
+**状态**：已确认真实，待修复。
+
+**现象**：设计与纯函数都声明 token 支持 `backspace / delete / left / right` 原子操作，但主输入控制器只接入了 backspace、left、right，没有接入物理 Delete 键。结果是 cursor 位于 token/chip 起始处时，Delete 键不能按契约整段删除右侧 token/chip。
+
+**审核结论**：问题真实，且是独立于第 5 个问题的小型输入编辑契约遗漏。它不属于材料核心模型，也不是 Ctrl+D 候选删除协议问题；这里说的是键盘上的物理 Delete 键。
+
+**事实依据**：
+
+- `research/design/problems/multiline-paste-attachment.md` 明确写 typeahead-input 的 keypress 处理应在 `backspace` / `delete` / `left` / `right` 分支内先 try atomic。
+- `packages/cli/src/paste-atomic.ts` 的 `AtomicEditKind` 包含 `"delete"`，`tryAtomicEdit()` 已实现 cursor 紧贴 token 起始时整段删除。
+- `packages/cli/src/input-buffer.ts` 有 `deleteForward()`，说明普通字符的向前删除能力存在。
+- `packages/cli/src/typeahead-input.ts` 当前只在 `backspace` / `left` / `right` 分支调用 `tryAtomicKeypress()`；没有 `key.name === "delete"` 分支。
+- `Ctrl+D` 已被产品设计释放给候选删除协议，并明确不再承担 `deleteForward` 语义；这不影响物理 Delete 键应该作为普通编辑键工作。
+
+**背后需求**：token/chip 是输入态材料 handle。用户无论从左侧 Delete 还是从右侧 Backspace 删除它，都应得到同一个“整段删除”的结果；否则输入区编辑心智不完整。
+
+**目标效果**：
+
+- cursor 在 token/chip 起始处按 Delete：整段删除 token/chip。
+- cursor 在 token/chip 内部按 Delete：整段删除 token/chip，并把 cursor 放到删除点。
+- cursor 不命中 token/chip 时按 Delete：普通向前删一个字符。
+- Ctrl+D 行为不变：继续只服务 typeahead 候选删除协议，不恢复 EOF / deleteForward 语义。
+
+**最优方案**：在 `InputController.handleKeypress()` 增加物理 Delete 键分支，先调用 `tryAtomicKeypress("delete")`，不命中时走 `buffer.deleteForward()`，随后 `syncBroker()`。保持 Ctrl+D 分支不动，避免候选删除协议和文本编辑键混淆。
+
+**验收标准**：
+
+- typeahead 集成测试覆盖文本 paste token 与 material chip 的 Delete 整段删除。
+- 普通文本 Delete 仍向前删除一个字符。
+- Ctrl+D 现有候选删除 / no-op 测试保持不变。
 
 ## 已验证
 
@@ -554,6 +643,54 @@ pnpm --filter @zhixing/providers build && pnpm --filter @zhixing/orchestrator ex
 
 结果：全部通过。
 
+第 5 个问题补充修复定向验证命令：
+
+```bash
+pnpm --filter @zhixing/cli exec tsc --noEmit
+pnpm --filter @zhixing/cli exec vitest run src/__tests__/input-layout.test.ts src/tui/__tests__/line-width.test.ts src/__tests__/input-material.test.ts src/__tests__/typeahead-input.test.ts
+pnpm --filter @zhixing/cli exec vitest run src/__tests__/paste-atomic.test.ts src/__tests__/input-box.test.ts
+```
+
+结果：CLI 类型检查通过；6 个测试文件、210 个测试通过。
+
+第 5 个问题补充修复收尾验证命令：
+
+```bash
+pnpm --filter @zhixing/cli test
+pnpm cli:build
+```
+
+结果：CLI 140 个测试文件、2092 个测试通过；CLI 构建成功。
+
+第 5 个问题补充复审修复定向验证命令：
+
+```bash
+pnpm --filter @zhixing/core exec tsc --noEmit
+pnpm --filter @zhixing/cli exec tsc --noEmit
+pnpm --filter @zhixing/core exec vitest run src/typeahead/__tests__/trigger-matcher.test.ts
+pnpm --filter @zhixing/cli exec vitest run src/__tests__/paste-expand.test.ts src/__tests__/typeahead-input.test.ts
+```
+
+结果：core / CLI 类型检查通过；3 个测试文件、101 个测试通过。
+
+第 5 个问题补充复审修复收尾验证命令：
+
+```bash
+pnpm --filter @zhixing/core test
+pnpm --filter @zhixing/cli test
+pnpm build
+```
+
+结果：core 全量测试通过；CLI 全量测试通过；全量构建成功。
+
+第 6 个问题定向验证命令：
+
+```bash
+pnpm --filter @zhixing/cli exec tsc --noEmit && pnpm --filter @zhixing/cli exec vitest run src/__tests__/typeahead-input.test.ts src/__tests__/user-turn-input.test.ts
+```
+
+结果：2 个测试文件、53 个测试通过。
+
 受影响包全量验证命令：
 
 ```bash
@@ -565,7 +702,7 @@ pnpm --filter @zhixing/cli test
 
 结果：core 112 个测试文件、1984 个测试通过；providers 11 个测试文件通过、222 个测试通过、3 个跳过；server 30 个测试文件、568 个测试通过；CLI 140 个测试文件、2084 个测试通过。
 
-本轮最终结果：core 112 个测试文件、1987 个测试通过；providers 11 个测试文件通过、1 个跳过、224 个测试通过、3 个跳过；server 30 个测试文件、569 个测试通过；CLI 140 个测试文件、2086 个测试通过。
+本轮最终结果：core 112 个测试文件、1987 个测试通过；providers 11 个测试文件通过、1 个跳过、224 个测试通过、3 个跳过；server 30 个测试文件、569 个测试通过；CLI 140 个测试文件、2087 个测试通过。
 
 格式与构建命令：
 

@@ -173,9 +173,7 @@ function computeTerminatorRanges(
 
   const ranges: Array<readonly [number, number]> = [];
   for (const terminator of wordTerminators) {
-    const re = terminator.global
-      ? terminator
-      : new RegExp(terminator.source, terminator.flags + "g");
+    const re = toFreshGlobalRegExp(terminator);
     for (const m of draft.matchAll(re)) {
       const startStr = m.index!;
       const endStr = startStr + m[0].length;
@@ -186,6 +184,11 @@ function computeTerminatorRanges(
     }
   }
   return ranges;
+}
+
+function toFreshGlobalRegExp(pattern: RegExp): RegExp {
+  const flags = pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`;
+  return new RegExp(pattern.source, flags);
 }
 
 function isInTerminatorRange(

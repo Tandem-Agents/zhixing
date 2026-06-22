@@ -256,6 +256,16 @@ describe("wrapToWidth — 启用 atomicRegions（atomic + \\n 硬换行）", () 
   it("多个 atomic 区域分别整体处理", () => {
     expect(wrapToWidth("[ATOM][ATOM]", 8, ATOM)).toEqual(["[ATOM]", "[ATOM]"]);
   });
+
+  it("支持多类 atomic pattern 共用同一换行契约", () => {
+    const ONE = /\[ONE\]/g;
+    const TWO = /\[TWO\]/g;
+    expect(wrapToWidth("abcd[ONE]def[TWO]", 8, [ONE, TWO])).toEqual([
+      "abcd",
+      "[ONE]def",
+      "[TWO]",
+    ]);
+  });
 });
 
 describe("wrapAnsiLine — ANSI-aware 软折行", () => {

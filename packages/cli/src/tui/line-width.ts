@@ -22,6 +22,11 @@ import {
   SGR_RESET,
   stripAnsi,
 } from "./ansi.js";
+import {
+  collectAtomicStringRanges,
+  hasAtomicRegionPatterns,
+  type AtomicRegionPatterns,
+} from "./atomic-regions.js";
 
 // ── CJK + 全角字符范围 ──
 // 来源：Unicode East_Asian_Width=F/W + 常用 CJK blocks。
@@ -146,10 +151,10 @@ export function padEndDisplay(s: string, targetCols: number): string {
 export function wrapToWidth(
   text: string,
   maxWidth: number,
-  atomicRegions?: RegExp,
+  atomicRegions?: AtomicRegionPatterns,
 ): string[] {
   if (maxWidth <= 0) return [text];
-  if (!atomicRegions) {
+  if (!hasAtomicRegionPatterns(atomicRegions)) {
     return wrapPlain(text, maxWidth);
   }
   const segments = text.split("\n");
@@ -189,24 +194,16 @@ function wrapPlain(text: string, maxWidth: number): string[] {
 function wrapWithAtomic(
   segment: string,
   maxWidth: number,
-  atomicRegions: RegExp,
+  atomicRegions: AtomicRegionPatterns,
 ): string[] {
   if (segment.length === 0) return [""];
 
-  // 收集 atomic 区域（matchAll 顺序即 start 升序）；caller 传的 regex 可能不带
-  // `g` flag，强制添加避免 matchAll 抛错
-  const re = atomicRegions.global
-    ? atomicRegions
-    : new RegExp(atomicRegions.source, atomicRegions.flags + "g");
-  const atomics: Array<{ start: number; end: number; content: string; width: number }> = [];
-  for (const m of segment.matchAll(re)) {
-    atomics.push({
-      start: m.index!,
-      end: m.index! + m[0].length,
-      content: m[0],
-      width: stringWidth(m[0]),
-    });
-  }
+  const atomics = collectAtomicStringRanges(segment, atomicRegions).map(
+    (range) => ({
+      ...range,
+      width: stringWidth(range.content),
+    }),
+  );
 
   const lines: string[] = [];
   let current = "";

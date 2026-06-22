@@ -242,6 +242,24 @@ describe("findTriggerToken — @ 触发", () => {
   });
 });
 
+describe("findTriggerToken — wordTerminators", () => {
+  it("global terminator 的 lastIndex 不影响边界识别", () => {
+    const terminator = /\[TERM\]/g;
+    terminator.lastIndex = "[TERM]".length;
+    const draft = "[TERM]/help";
+
+    const match = findTriggerToken(draft, Array.from(draft).length, {
+      triggerChar: "/",
+      requireBoundary: true,
+      wordTerminators: [terminator],
+    });
+
+    expect(match?.token).toBe("/help");
+    expect(match?.tokenStart).toBe("[TERM]".length);
+    expect(terminator.lastIndex).toBe("[TERM]".length);
+  });
+});
+
 describe("findTriggerToken — 自定义 tokenCharClass", () => {
   it("不含点的 token 类：`@file.ts` 的 query 只到 `file`", () => {
     // 默认 class 不含 '.'

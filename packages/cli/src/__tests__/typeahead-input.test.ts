@@ -26,6 +26,7 @@ import {
   CommandProvider,
   DefaultCommandRegistry,
   DefaultTypeaheadBroker,
+  findTriggerToken,
 } from "@zhixing/core";
 import type {
   CommandDef,
@@ -45,6 +46,8 @@ import type { ScreenController } from "../screen/index.js";
 import { BottomInfoModel } from "../bottom-info/index.js";
 import { PasteRegistry } from "../paste-registry.js";
 import { InputMaterialRegistry } from "../input-material-registry.js";
+import { prepareUserTurnInput } from "../user-turn-input.js";
+import { INPUT_HANDLE_TOKEN_PATTERNS } from "../input-handle-tokens.js";
 
 // PassThrough 非 TTY，chalk 默认禁用颜色——强开 level=3 让 bg / dim 等 ANSI
 // 真实出现在 captured 里供回归断言（与 chalk 在真实 TTY 的输出一致）
@@ -1288,6 +1291,72 @@ describe("InputController — 多行粘贴提交历史区", () => {
     }
   });
 
+  it("长图片材料 chip 在输入区和历史区都按原子 handle 显示", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-input-"));
+    try {
+      const longName = `screen-capture-${"abcdef".repeat(8)}.png`;
+      const imagePath = path.join(tempDir, longName);
+      await fs.writeFile(imagePath, minimalPng(4, 5));
+      const { stdin } = makeStreams();
+      const { broker, dispatcher } = makeHarness();
+      const materialRegistry = new InputMaterialRegistry();
+      const { screen, getScrollbackText } = makeCapturingScreen();
+      const controller = new InputController({
+        broker,
+        dispatcher,
+        getRuntime: makeRuntime,
+        screen,
+        stdin,
+        columns: 52,
+        materialRegistry,
+        workspaceRoot: tempDir,
+      });
+      const resultP = controller.waitOnce();
+
+      controller.start();
+      await pasteText(stdin, imagePath);
+      const inputText = stripAnsi(controller.renderLines().join("\n"));
+      expect(inputText).toMatch(/\[Image #1 · [^\]\n]*…[^\]\n]*\.png[^\]\n]*\]/);
+      expect(inputText).not.toContain(longName);
+      expect(inputText).not.toContain(imagePath);
+
+      await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+      const result = await resultP;
+      expect(result.kind).toBe("text");
+
+      const scrollbackText = stripAnsi(getScrollbackText());
+      expect(scrollbackText).toMatch(
+        /\[Image #1 · [^\]\n]*…[^\]\n]*\.png[^\]\n]*\]/,
+      );
+
+      controller.stop();
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("材料 chip 是 typeahead trigger 的词边界", () => {
+    const registry = new InputMaterialRegistry();
+    const id = registry.registerLocalFile({
+      kind: "image",
+      filePath: "E:/repo/shot.png",
+      name: "shot.png",
+      mimeType: "image/png",
+      byteSize: 24,
+      image: { width: 4, height: 5 },
+    });
+    const chip = registry.format(id);
+    const draft = `${chip}/help`;
+    const match = findTriggerToken(draft, Array.from(draft).length, {
+      triggerChar: "/",
+      requireBoundary: true,
+      wordTerminators: INPUT_HANDLE_TOKEN_PATTERNS,
+    });
+
+    expect(match?.token).toBe("/help");
+    expect(match?.tokenStart).toBe(Array.from(chip).length);
+  });
+
   it("长粘贴输入区折叠，提交后历史区写入原文", async () => {
     const { stdin } = makeStreams();
     const { broker, dispatcher } = makeHarness();
@@ -1355,6 +1424,49 @@ describe("InputController — 多行粘贴提交历史区", () => {
 
     const scrollbackText = stripAnsi(getScrollbackText());
     expect(scrollbackText).toContain("    indented");
+    expect(scrollbackText).not.toContain("[Pasted #");
+
+    controller.stop();
+  });
+
+  it("折叠长粘贴经过 payload 准备边界后仍向 agent 发送原文", async () => {
+    const { stdin } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+    const registry = new PasteRegistry();
+    const { screen, getScrollbackText } = makeCapturingScreen();
+    const controller = new InputController({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      screen,
+      stdin,
+      columns: 80,
+      registry,
+    });
+    const resultP = controller.waitOnce();
+    const pasted = "  prompt\n    code\nline3\nline4\n";
+
+    controller.start();
+    await pasteText(stdin, pasted);
+    expect(stripAnsi(controller.renderLines().join("\n"))).toContain(
+      "[Pasted #",
+    );
+
+    await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+    const result = await resultP;
+    expect(result).toEqual({ kind: "text", text: pasted });
+
+    if (result.kind === "text") {
+      const prepared = await prepareUserTurnInput(result.text, {
+        workspaceRoot: "E:/repo",
+      });
+      expect(prepared?.input).toEqual({
+        parts: [{ type: "text", text: pasted }],
+      });
+    }
+
+    const scrollbackText = stripAnsi(getScrollbackText());
+    expect(scrollbackText).toContain("    prompt");
     expect(scrollbackText).not.toContain("[Pasted #");
 
     controller.stop();

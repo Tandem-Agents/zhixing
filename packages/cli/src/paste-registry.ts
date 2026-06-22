@@ -31,6 +31,10 @@
 export const PASTE_TOKEN_PATTERN =
   /\[Pasted #(\d+) \+(\d+) lines · (\d+(?:\.\d+)?)(B|KB|MB)\]/g;
 
+export function createPasteTokenPattern(): RegExp {
+  return new RegExp(PASTE_TOKEN_PATTERN.source, PASTE_TOKEN_PATTERN.flags);
+}
+
 export interface PasteEntry {
   readonly id: number;
   readonly content: string;

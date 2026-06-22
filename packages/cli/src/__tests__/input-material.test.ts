@@ -4,8 +4,12 @@ import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { materialTokensFromPastedPaths } from "../input-material-ingest.js";
-import { InputMaterialRegistry } from "../input-material-registry.js";
+import {
+  InputMaterialRegistry,
+  MATERIAL_TOKEN_PATTERN,
+} from "../input-material-registry.js";
 import { resolveInputMaterials } from "../input-material-resolve.js";
+import { stringWidth } from "../tui/index.js";
 
 const tempDirs: string[] = [];
 
@@ -133,6 +137,34 @@ describe("input materials", () => {
 
     expect(result.input.parts).toEqual([]);
     expect(result.errors[0]).toContain("当前版本尚不能直接发送");
+  });
+
+  it("长材料 chip 按宽度预算压缩且仍按 id 解析", async () => {
+    const root = await makeTempDir();
+    const longName = `screen-capture-${"abcdef".repeat(8)}.png`;
+    const imagePath = path.join(root, longName);
+    const bytes = minimalPng(12, 8);
+    await fs.writeFile(imagePath, bytes);
+    const registry = new InputMaterialRegistry();
+    const token = materialTokensFromPastedPaths(imagePath, registry, {
+      workspaceRoot: root,
+      tokenMaxWidth: 42,
+    })!;
+
+    expect(stringWidth(token)).toBeLessThanOrEqual(42);
+    expect(token).toContain("…");
+    expect(token).toContain(".png");
+    MATERIAL_TOKEN_PATTERN.lastIndex = 0;
+    expect(MATERIAL_TOKEN_PATTERN.test(token)).toBe(true);
+
+    const result = await resolveInputMaterials(token, registry);
+    expect(result.errors).toEqual([]);
+    expect(result.input.parts[0]).toMatchObject({
+      type: "image",
+      name: longName,
+      mimeType: "image/png",
+      size: bytes.length,
+    });
   });
 });
 

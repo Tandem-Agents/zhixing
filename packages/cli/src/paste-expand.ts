@@ -9,7 +9,10 @@
  * 不在此文件或别处独立定义 regex，避免格式漂移。
  */
 
-import { PASTE_TOKEN_PATTERN, type PasteRegistry } from "./paste-registry.js";
+import {
+  createPasteTokenPattern,
+  type PasteRegistry,
+} from "./paste-registry.js";
 
 export interface DraftReferenceSlot {
   readonly key: string;
@@ -26,9 +29,7 @@ type DraftReferenceExtractor = (draft: string) => Set<number>;
  * 保留字面字符串作 fallback，避免崩溃。
  */
 export function expandPastes(draft: string, registry: PasteRegistry): string {
-  // matchAll 每次都要 fresh state——PASTE_TOKEN_PATTERN 有 `g` flag，
-  // matchAll 内部会重置 lastIndex，安全
-  const matches = Array.from(draft.matchAll(PASTE_TOKEN_PATTERN));
+  const matches = Array.from(draft.matchAll(createPasteTokenPattern()));
   if (matches.length === 0) return draft;
 
   let result = draft;
@@ -128,7 +129,7 @@ export class PasteReferenceIndex {
 }
 
 function collectAliveIds(draft: string, ids: Set<number>): void {
-  for (const m of draft.matchAll(PASTE_TOKEN_PATTERN)) {
+  for (const m of draft.matchAll(createPasteTokenPattern())) {
     ids.add(parseInt(m[1]!, 10));
   }
 }

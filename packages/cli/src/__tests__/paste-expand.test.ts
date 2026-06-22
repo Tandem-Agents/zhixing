@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { InputBuffer } from "../input-buffer.js";
-import { PasteRegistry } from "../paste-registry.js";
+import { PasteRegistry, PASTE_TOKEN_PATTERN } from "../paste-registry.js";
 import {
   expandPastes,
   extractAliveIds,
@@ -66,6 +66,16 @@ describe("expandPastes", () => {
     const token = r.format(id);
     expect(expandPastes(`a${token}b`, r)).toBe("aXb");
   });
+
+  it("共享 token regex 的 lastIndex 不影响替换", () => {
+    const r = new PasteRegistry();
+    const id = r.register("CONTENT");
+    const token = r.format(id);
+    PASTE_TOKEN_PATTERN.lastIndex = token.length;
+
+    expect(expandPastes(token, r)).toBe("CONTENT");
+    expect(PASTE_TOKEN_PATTERN.lastIndex).toBe(token.length);
+  });
 });
 
 describe("extractAliveIds", () => {
@@ -114,6 +124,16 @@ describe("extractAliveIds", () => {
     const draft = "[Pasted #999 +1 lines · 1B]";
     const ids = extractAliveIds(draft);
     expect(ids.has(999)).toBe(true);
+  });
+
+  it("共享 token regex 的 lastIndex 不影响 alive id 提取", () => {
+    const r = new PasteRegistry();
+    const id = r.register("X");
+    const token = r.format(id);
+    PASTE_TOKEN_PATTERN.lastIndex = token.length;
+
+    expect(extractAliveIds(token).has(id)).toBe(true);
+    expect(PASTE_TOKEN_PATTERN.lastIndex).toBe(token.length);
   });
 });
 

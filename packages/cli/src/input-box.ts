@@ -28,7 +28,7 @@
 
 import { renderChrome, tone, icon, ANSI, renderHintBar, type KeyHint } from "./tui/index.js";
 import { layoutInputBuffer } from "./input-layout.js";
-import { PASTE_TOKEN_PATTERN } from "./paste-registry.js";
+import { INPUT_HANDLE_TOKEN_PATTERNS } from "./input-handle-tokens.js";
 
 export interface InputBoxOptions {
   /** 框上方标题（本函数加 bold）。 */
@@ -80,7 +80,7 @@ export function renderInputBox(opts: InputBoxOptions): InputBoxResult {
     opts.cursor,
     suffix,
     contentBudget,
-    PASTE_TOKEN_PATTERN,
+    INPUT_HANDLE_TOKEN_PATTERNS,
     true,
   );
   const boxLines = renderChrome({

@@ -223,6 +223,24 @@ describe("layoutInputBuffer — atomicRegions 不切碎", () => {
     expect(r.bodyLines[0]).toBe(`${PROMPT}[ATOM]`);
     expect(r.bodyLines[1]).toBe("  [ATOM]");
   });
+
+  it("支持多类 atomic pattern 共用同一布局契约", () => {
+    const ONE = /\[ONE\]/g;
+    const TWO = /\[TWO\]/g;
+    const r = layoutInputBuffer(
+      PROMPT,
+      "abcd[ONE]def[TWO]",
+      0,
+      "",
+      10,
+      [ONE, TWO],
+    );
+    expect(r.bodyLines).toEqual([
+      `${PROMPT}abcd`,
+      "  [ONE]def",
+      "  [TWO]",
+    ]);
+  });
 });
 
 describe("layoutInputBuffer — \\n 硬换行", () => {

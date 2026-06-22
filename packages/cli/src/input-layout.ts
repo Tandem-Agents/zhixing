@@ -27,6 +27,11 @@
  */
 
 import { ANSI, charWidth, stringWidth, stripAnsi } from "./tui/index.js";
+import {
+  collectAtomicStringRanges,
+  hasAtomicRegionPatterns,
+  type AtomicRegionPatterns,
+} from "./tui/atomic-regions.js";
 
 export interface InputLayoutResult {
   /** 已格式化的多行（首行带 promptPrefix、续行 hanging indent），喂给 renderChrome.body */
@@ -60,7 +65,7 @@ export function layoutInputBuffer(
   cursorChars: number,
   suffix: string,
   contentBudget: number,
-  atomicRegions?: RegExp,
+  atomicRegions?: AtomicRegionPatterns,
   paintVisualCursor?: boolean,
 ): InputLayoutResult {
   const promptVisibleWidth = stringWidth(stripAnsi(promptPrefix));
@@ -70,7 +75,7 @@ export function layoutInputBuffer(
   const lineWidth = Math.max(1, contentBudget - promptVisibleWidth);
 
   const draftChars = Array.from(draft);
-  const atomics = atomicRegions
+  const atomics = hasAtomicRegionPatterns(atomicRegions)
     ? findAtomicCharRanges(draft, draftChars, atomicRegions)
     : [];
 
@@ -244,12 +249,8 @@ function paintVisualCursorInText(text: string, cursorDraftCol: number): string {
 function findAtomicCharRanges(
   draft: string,
   draftChars: string[],
-  atomicRegions: RegExp,
+  atomicRegions: AtomicRegionPatterns,
 ): Array<{ startChar: number; endChar: number; width: number }> {
-  const re = atomicRegions.global
-    ? atomicRegions
-    : new RegExp(atomicRegions.source, atomicRegions.flags + "g");
-
   // 构建 string offset → char index 映射（包含末位）
   const offToChar = new Map<number, number>();
   let strOff = 0;
@@ -262,16 +263,16 @@ function findAtomicCharRanges(
   offToChar.set(strOff, charIdx);
 
   const ranges: Array<{ startChar: number; endChar: number; width: number }> = [];
-  for (const m of draft.matchAll(re)) {
-    const startStr = m.index!;
-    const endStr = startStr + m[0].length;
+  for (const range of collectAtomicStringRanges(draft, atomicRegions)) {
+    const startStr = range.start;
+    const endStr = range.end;
     const startChar = offToChar.get(startStr);
     const endChar = offToChar.get(endStr);
     if (startChar === undefined || endChar === undefined) continue;
     ranges.push({
       startChar,
       endChar,
-      width: stringWidth(m[0]),
+      width: stringWidth(range.content),
     });
   }
   return ranges;

@@ -12,8 +12,9 @@
  *   - 不命中 → 返回 null，caller 走 buffer 原方法（普通字符级编辑）
  */
 
+import { INPUT_HANDLE_TOKEN_PATTERNS } from "./input-handle-tokens.js";
 import { PASTE_TOKEN_PATTERN } from "./paste-registry.js";
-import { MATERIAL_TOKEN_PATTERN } from "./input-material-registry.js";
+import { collectAtomicStringRanges } from "./tui/atomic-regions.js";
 
 export interface TokenRange {
   /** 占位符在 draft 中的 char 起始（不是 string offset） */
@@ -29,10 +30,7 @@ export interface TokenRange {
  * cursor（char offset）可对比。
  */
 export function findTokenCharRanges(draft: string): TokenRange[] {
-  return findTokenCharRangesByPatterns(draft, [
-    PASTE_TOKEN_PATTERN,
-    MATERIAL_TOKEN_PATTERN,
-  ]);
+  return findTokenCharRangesByPatterns(draft, INPUT_HANDLE_TOKEN_PATTERNS);
 }
 
 function findTokenCharRangesByPatterns(
@@ -54,15 +52,11 @@ function findTokenCharRangesByPatterns(
   offToChar.set(strOff, charIdx);
 
   const ranges: TokenRange[] = [];
-  for (const pattern of patterns) {
-    for (const m of draft.matchAll(pattern)) {
-      const startStr = m.index!;
-      const endStr = startStr + m[0].length;
-      const startChar = offToChar.get(startStr);
-      const endChar = offToChar.get(endStr);
-      if (startChar === undefined || endChar === undefined) continue;
-      ranges.push({ start: startChar, end: endChar });
-    }
+  for (const range of collectAtomicStringRanges(draft, patterns)) {
+    const startChar = offToChar.get(range.start);
+    const endChar = offToChar.get(range.end);
+    if (startChar === undefined || endChar === undefined) continue;
+    ranges.push({ start: startChar, end: endChar });
   }
   return ranges.sort((a, b) => a.start - b.start);
 }

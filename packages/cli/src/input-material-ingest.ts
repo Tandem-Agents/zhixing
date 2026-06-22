@@ -11,6 +11,7 @@ import {
 
 export interface PasteMaterialIngestOptions {
   readonly workspaceRoot: string;
+  readonly tokenMaxWidth?: number;
 }
 
 export function materialTokensFromPastedPaths(
@@ -50,7 +51,7 @@ export function materialTokensFromPastedPaths(
   return entries
     .map((entry) => {
       const id = registry.registerLocalFile(entry);
-      return registry.format(id);
+      return registry.format(id, { maxWidth: options.tokenMaxWidth });
     })
     .join("\n");
 }
