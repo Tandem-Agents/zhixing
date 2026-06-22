@@ -38,7 +38,7 @@ interface PastedMaterialLine {
   readonly intent: PathIntent;
 }
 
-type PathIntent = "text" | "candidate-path" | "strong-path";
+type PathIntent = "text" | "material-path" | "source-location";
 
 type ProcessedMaterialLine =
   | { readonly kind: "text"; readonly raw: string }
@@ -46,7 +46,6 @@ type ProcessedMaterialLine =
   | {
       readonly kind: "failure";
       readonly raw: string;
-      readonly intent: Exclude<PathIntent, "text">;
       readonly diagnostic: PastedMaterialIngestDiagnostic;
     };
 
@@ -57,15 +56,22 @@ export function ingestPastedMaterials(
 ): PastedMaterialIngestResult {
   const lines = parsePastedMaterialLines(content);
   if (lines.length === 0) return { kind: "not-material" };
+  if (!isMaterialPathBatch(lines)) return { kind: "not-material" };
 
+  return ingestMaterialPathBatch(lines, registry, options);
+}
+
+function ingestMaterialPathBatch(
+  lines: readonly PastedMaterialLine[],
+  registry: InputMaterialRegistry,
+  options: PasteMaterialIngestOptions,
+): PastedMaterialIngestResult {
   const processed = lines.map((line) =>
     processMaterialLine(line, registry, options),
   );
   const hasMaterial = processed.some((line) => line.kind === "material");
-  const hasStrongPathFailure = processed.some(
-    (line) => line.kind === "failure" && line.intent === "strong-path",
-  );
-  if (!hasMaterial && !hasStrongPathFailure) return { kind: "not-material" };
+  const hasFailure = processed.some((line) => line.kind === "failure");
+  if (!hasMaterial && !hasFailure) return { kind: "not-material" };
 
   const outputLines: string[] = [];
   const diagnostics: PastedMaterialIngestDiagnostic[] = [];
@@ -80,11 +86,8 @@ export function ingestPastedMaterials(
       continue;
     }
 
-    if (line.intent === "strong-path" || hasMaterial) {
-      diagnostics.push(line.diagnostic);
-    } else {
-      outputLines.push(line.raw);
-    }
+    outputLines.push(line.raw);
+    diagnostics.push(line.diagnostic);
   }
 
   return {
@@ -104,17 +107,17 @@ function parsePastedMaterialLines(content: string): PastedMaterialLine[] {
   const rawLines = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
   const lines = trimEmptyLineEdges(rawLines);
   return lines.map((raw) => {
-    const unquoted = unquote(raw.trim());
+    const parsed = unquote(raw.trim());
     return {
       raw,
-      input: unquoted.value,
-      quoted: unquoted.quoted,
-      intent: classifyPathIntent(unquoted.value, unquoted.quoted),
+      input: parsed.value,
+      quoted: parsed.quoted,
+      intent: classifyPathIntent(parsed.value, parsed.quoted),
     };
   });
 }
 
-function unquote(input: string): { value: string; quoted: boolean } {
+function unquote(input: string): { readonly value: string; readonly quoted: boolean } {
   if (
     (input.startsWith('"') && input.endsWith('"')) ||
     (input.startsWith("'") && input.endsWith("'"))
@@ -135,7 +138,7 @@ function processMaterialLine(
   registry: InputMaterialRegistry,
   options: PasteMaterialIngestOptions,
 ): ProcessedMaterialLine {
-  if (!line.input || line.intent === "text") {
+  if (!line.input || line.intent !== "material-path") {
     return { kind: "text", raw: line.raw };
   }
 
@@ -147,12 +150,11 @@ function processMaterialLine(
     return {
       kind: "failure",
       raw: line.raw,
-      intent: line.intent,
       diagnostic: {
         input: line.input,
         filePath,
         reason: "unreadable",
-        message: "文件不存在或不可读取",
+        message: retainedFailureMessage("文件不存在或不可读取"),
       },
     };
   }
@@ -161,12 +163,11 @@ function processMaterialLine(
     return {
       kind: "failure",
       raw: line.raw,
-      intent: line.intent,
       diagnostic: {
         input: line.input,
         filePath,
         reason: "not-file",
-        message: "不是普通文件",
+        message: retainedFailureMessage("不是普通文件"),
       },
     };
   }
@@ -192,16 +193,22 @@ function processMaterialLine(
 
 function classifyPathIntent(input: string, quoted: boolean): PathIntent {
   if (!input) return "text";
+  if (!quoted && isSourceLocationLike(input)) return "source-location";
   if (isUrlLike(input) || isPlainDateLike(input)) return "text";
-  if (isStrongPathLike(input)) return "strong-path";
   if (!quoted && /\s/.test(input)) return "text";
-  if (/[\\/]/.test(input)) return "candidate-path";
-
-  const ext = path.extname(input);
-  return ext.length > 1 ? "candidate-path" : "text";
+  if (isMaterialPathLike(input)) return "material-path";
+  return "text";
 }
 
-function isStrongPathLike(input: string): boolean {
+function isMaterialPathBatch(lines: readonly PastedMaterialLine[]): boolean {
+  const nonEmpty = lines.filter((line) => line.input.length > 0);
+  return (
+    nonEmpty.length > 0 &&
+    nonEmpty.every((line) => line.intent === "material-path")
+  );
+}
+
+function isMaterialPathLike(input: string): boolean {
   if (/^(~|\.{1,2})([\\/]|$)/.test(input)) return true;
   if (/^[a-zA-Z]:[\\/]/.test(input)) return true;
   if (/^[/\\]{2}[^/\\\s]+[/\\][^/\\\s]+/.test(input)) return true;
@@ -213,8 +220,30 @@ function isUrlLike(input: string): boolean {
   return /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(input);
 }
 
+function isSourceLocationLike(input: string): boolean {
+  if (isUrlLike(input)) return false;
+
+  const parenLocation = /\(\d+(?:,\d+)?\)$/.exec(input);
+  if (parenLocation) {
+    return isSourcePathBase(input.slice(0, parenLocation.index));
+  }
+
+  const colonLocation = /:(\d+)(?::(\d+))?$/.exec(input);
+  if (!colonLocation) return false;
+  return isSourcePathBase(input.slice(0, colonLocation.index));
+}
+
+function isSourcePathBase(input: string): boolean {
+  if (!input || /^[a-zA-Z]$/.test(input)) return false;
+  return /[\\/]/.test(input) || /\.[A-Za-z0-9]{1,8}$/.test(input);
+}
+
 function isPlainDateLike(input: string): boolean {
   return /^\d{1,4}[/-]\d{1,2}(?:[/-]\d{1,4})?$/.test(input);
+}
+
+function retainedFailureMessage(message: string): string {
+  return `未添加为材料，原文已保留：${message}`;
 }
 
 function trimEmptyLineEdges(lines: readonly string[]): string[] {

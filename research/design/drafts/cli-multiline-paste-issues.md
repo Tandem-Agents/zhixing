@@ -22,6 +22,7 @@
 - **架构标准**：占位符是 UI 表示，原文是语义内容。两者可以分离，但 canonicalize 边界必须清楚：离开输入态成为已发送消息时，写入 scrollback 和 agent 入口的都应是 canonical 文本。
 - **智能体标准**：agent 收到的必须是用户想交付的原始材料，而不是 `[Pasted #N ...]` 这种 UI handle。否则就是静默污染上下文，危害比显式报错更大。
 - **材料标准**：文本粘贴折叠是输入区降噪，不等同于真正的用户材料输入能力。未来文件、图片、音视频、网页快照、富文本等材料必须作为结构化输入进入核心，CLI 的缩略信息只是接入面展示，不能把文件路径、base64 或 UI token 伪装成用户正文。
+- **路径意图标准**：路径形态只是信号，不等同于用户授权读取本地文件。任何路径采集规则都必须同时保护两件事：失败不能删用户文本，成功不能静默把用户未明确交付的文件内容注入 agent 上下文。
 - **输入 handle 标准**：输入态所有 handle（文本粘贴 token、图片 / 文件 chip、未来音频 / 视频 / 网页快照 chip）必须共用同一套原子编辑、原子渲染、宽度预算和提交转换规则。不能让同一类“用户材料占位”在某些路径是整体、某些路径被字符级切碎。
 - **保真标准**：trim 只能服务空输入判断、命令识别等控制流。一旦内容被判定为用户正文，CLI 不能裁剪用户材料；代码、patch、YAML、日志等首尾空白都可能有语义。
 - **失败语义标准**：只要系统已经判断用户在提交材料，部分失败必须显式反馈并保留可恢复输入，不能整批静默降级成普通文本，让用户误以为材料已经被接收。
@@ -862,13 +863,13 @@ pnpm cli:build
 
 - 用户粘贴路径，本质上是在把本地材料加入本轮输入；路径只是采集线索，不是要交给模型的正文。
 - 一次粘贴可以天然是有序混排：若干材料路径、若干普通说明文字、若干失败路径。系统应该按用户粘贴顺序保留成功材料与说明文字，并显式报告失败材料。
-- 一个路径错了不应让其他有效材料消失；同样，失败路径也不应被静默塞进 prompt，让用户误以为文件已经被 agent 接收。
+- 一个路径错了不应让其他有效材料消失；同样，明确路径失败不应被静默塞进 prompt，让用户误以为文件已经被 agent 接收。无显式前缀的弱候选失败必须保留为普通文本，因为系统无法可靠判断它是路径错误还是用户正文。
 - 失败必须可恢复：用户要知道哪一项没加上、为什么没加上，并能通过删除、修正或重新粘贴继续完成本轮输入。
 
 **目标效果**：
 
 - 多行全是有效材料路径：全部生成 material chip，按粘贴顺序进入输入区。
-- 多行里部分路径有效、部分失败：有效项生成 material chip；失败项不生成材料、不作为普通正文插入，并通过清晰诊断告诉用户。
+- 多行里部分路径有效、部分明确路径失败：有效项生成 material chip；明确失败项不生成材料、不作为普通正文插入，并通过清晰诊断告诉用户。无显式前缀的弱候选失败不诊断、不移除，原样保留为文本。
 - 同一次粘贴里包含普通说明文字和有效路径：普通说明文字保留为 text，路径生成 material chip，整体顺序稳定。
 - 全部都是明确路径但全部失败：输入区不新增伪材料，也不把失败路径静默插入正文；显示失败诊断，原有草稿保持可继续编辑。
 - 多行并不表达材料路径集合，例如自然语言、代码块、日志：仍按文本粘贴处理，不弹材料错误。
@@ -897,23 +898,26 @@ pnpm cli:build
 - `finalizePaste()` 消费新结果：
   - `not-material`：保持现有文本粘贴逻辑，包括二次长粘贴替换文本 token。
   - `ingested`：先按现有规则清理旧文本 paste token，保留已有 material chip；再插入 `insertText`；然后发送 diagnostics；不触发文本长粘贴折叠。
-- 诊断展示走接入面通知，不进入用户正文。CLI 可在 scroll 区打印一条 warning，例如“未添加 1 个材料：missing.png -> 文件不存在”，多项时做数量摘要并列出可读项；输入区只保留成功 chip 与用户原本的普通说明文字。
+- 诊断展示走接入面通知，不进入用户正文。CLI 可在 scroll 区打印一条 warning，例如“未添加 1 个材料：./missing.png -> 文件不存在”，多项时做数量摘要并列出可读项；输入区只保留成功 chip 与用户原本的普通说明文字。
 - 不新增“失败 material chip”作为第一选择。失败 chip 会引入新的原子编辑、提交阻断、history 保活和解析规则；当前问题只需要结构化诊断即可达到产品目标，避免制造新的 handle 债务。
 
 **边界行为**：
 
 - `a.png`、`b.jpg` 都有效：输入区出现两个 image chip。
-- `a.png` 有效、`missing.png` 不存在：输入区保留 `a.png` 的 image chip，`missing.png` 不进入正文，CLI 提示该路径不存在。
+- `a.png` 有效、`./missing.png` 不存在：输入区保留 `a.png` 的 image chip，`./missing.png` 不进入正文，CLI 提示该路径不存在。
+- `a.png` 有效、`missing.png` 不存在：输入区保留 `a.png` 的 image chip，同时保留 `missing.png` 作为普通文本，不提示材料失败。
 - `notes.txt` 有效、`folder/` 是目录：`notes.txt` 生成 file chip，目录项明确提示“不是普通文件”。
 - `请看这张图\nshot.png\n谢谢`：说明文字保留为 text，`shot.png` 生成 image chip，顺序与粘贴一致。
-- `missing.png` 单独粘贴且路径形态明确：不插入正文，提示文件不存在；用户可修正后重新粘贴。
+- `./missing.png`、绝对路径或 UNC 路径单独粘贴且不存在：不插入正文，提示文件不存在；用户可修正后重新粘贴。
+- `missing.png` 单独粘贴且不存在：按普通文本处理，因为它只是弱候选，不足以证明用户要添加材料。
 - 粘贴代码 / 日志中包含类似路径的片段但整体不是路径集合：继续作为文本处理。
 - Windows 带引号路径、空格路径、拖拽产生的多行路径仍应按现有路径解析规则进入同一批量流程。
 
 **验收标准**：
 
 - 补 `input-material.test.ts`：覆盖 `not-material`、全成功、部分成功、全部明确路径失败、材料 + 普通说明文字混排；断言部分失败不再整批 `null`，成功项已注册，失败项有结构化 diagnostic。
-- 补 `typeahead-input.test.ts`：部分有效 / 部分无效路径粘贴后，有效材料 chip 保留，失败路径不出现在 draft，诊断回调可见，普通文本仍不误识别。
+- 补 `typeahead-input.test.ts`：部分有效 / 部分强路径失败粘贴后，有效材料 chip 保留，强路径失败不出现在 draft，诊断回调可见，普通文本仍不误识别。
+- 补弱候选回归：真实材料 + 缺失无前缀候选时，候选行保留为普通文本，不进 diagnostics。
 - 补提交路径回归：部分失败后提交只包含成功材料与用户说明文字；失败诊断不会作为正文发送给 core，也不会写成用户已发送历史。
 - 补全失败路径回归：单个明确不存在路径粘贴时不产生材料 chip、不写正文、给出诊断，原有草稿不被破坏。
 - 保留第 8 个问题回归：后续任意粘贴仍不删除已有 material chip。
@@ -1025,7 +1029,7 @@ pnpm cli:build
 
 ### 12. 粘贴含斜杠的普通多行文本 / 代码会被材料采集静默吞行
 
-**状态**：已修复，已测试，已构建
+**状态**：主问题与失败方向补充边界已修复，已测试，已构建；弱候选成功误采集已拆为第 13 个问题待处理
 
 **现象**：用户粘贴普通多行文本或代码时，只要某些行包含 `/` 或 `\`，当前材料采集会把这些行误判为明确路径。`statSync` 失败后，这些行只进入 diagnostics，不回到输出文本，导致用户输入被静默删行；同时本次粘贴被标记为 `ingested`，绕过文本长粘贴折叠。
 
@@ -1067,21 +1071,21 @@ const x = 1;
 
 - CLI 面向 agent 的最高频工作流之一就是粘贴代码、日志、路径片段和错误堆栈。普通文本保真优先级高于路径粘贴的启发式便利。
 - 材料采集只能在用户意图足够明确时接管输入。启发式不确定时必须回退为普通文本，不能删行、不能误报、不能绕过长粘贴折叠。
-- 同时仍要保留第 10 个问题的产品目标：当用户确实在粘贴一批材料路径，部分成功、部分失败时，成功材料应保留，失败项应提示。
+- 同时仍要保留第 10 个问题的产品目标：当用户确实在粘贴一批材料路径，成功材料应保留；明确路径失败项应提示；弱候选失败项必须文本保真。
 - 用户不应学习“哪些斜杠会触发附件模式”。产品本质是：真实文件材料路径被增强为附件；普通文本无论长得多像路径都必须保真。
 
 **目标效果**：
 
 - 粘贴代码、日志、日期、URL、注释、除法表达式、import 语句等普通文本时，内容完整保留，并按长文本规则折叠或展开。
 - 没有任何真实材料被识别、且没有强路径意图失败时，本次粘贴必须返回 `not-material`，让文本粘贴路径处理，不能产生材料诊断。
-- 至少识别出一个真实材料时，同批次里的失败路径可以诊断；普通说明文字继续保留为文本。
+- 至少识别出一个真实材料时，同批次里的强路径失败可以诊断；弱候选失败行继续保留为普通文本。
 - 明确本地路径意图失败时可以诊断，例如绝对路径、`~/...`、`./...`、`../...`、Windows 盘符、UNC 路径；但 `foo/bar`、`missing.png`、`src/main.ts` 这类无显式前缀的相对片段在没有任何成功材料时必须回退为普通文本。
-- 如果一批粘贴里已有成功材料，无显式前缀的候选路径失败可以作为批内材料失败诊断；这只在“本批已被成功材料确认是材料批次”后成立。
+- 如果一批粘贴里已有成功材料，无显式前缀的候选路径失败时仍按普通文本保留，不因本批存在材料而升级为错误；候选路径成功时自动采集的旧取舍已由第 13 个问题修订。
 
 **架构判断**：
 
 - 最优解是把材料采集拆成“路径意图分类”和“材料注册”两个阶段，而不是在 `statSync` 异常分支里直接决定吞行。
-- 路径意图至少分为三类：强路径、候选路径、普通文本。强路径可以独立触发失败诊断；候选路径只能在本批已有成功材料时参与诊断；普通文本永远保留。
+- 路径意图至少分为三类：强路径、候选路径、普通文本。强路径可以独立触发失败诊断；候选路径失败时回退文本；普通文本永远保留。候选路径成功时自动采集的语义已由第 13 个问题废弃。
 - “是否是材料批次”不能由失败项单独决定，必须由真实 material 成功或强路径失败决定。这样既保留材料批量能力，又把不确定启发式的风险还给文本保真。
 - 不应把修复放在 `finalizePaste()` 里做兜底，因为它已经拿不到逐行路径意图，只能看到 `ingested/not-material`。正确边界在 `input-material-ingest.ts`。
 
@@ -1089,11 +1093,11 @@ const x = 1;
 
 - 在 `input-material-ingest.ts` 内引入明确的数据结构，例如 `ParsedMaterialLine` / `PathIntent`：
   - `text`：普通文本，永远原样进入 `outputLines`。
-  - `candidate-path`：弱路径候选，如无前缀相对路径、带扩展名文件名；只有在本批已有成功材料时，失败才诊断并从输出移除。
+  - `candidate-path`：弱路径候选，如无前缀相对路径、带扩展名文件名；失败时原样保留为文本，不诊断、不移除。成功时自动注册为材料的旧取舍已由第 13 个问题修订。
   - `strong-path`：显式本地路径意图，如绝对路径、home、显式相对路径、Windows 盘符、UNC；失败可诊断。
 - 两阶段处理：
   1. 先逐行 trim / unquote / classify，不在分类阶段吞行。
-  2. 对 `candidate-path` 和 `strong-path` 尝试 stat / register，记录每行的 success / failure / raw。
+  2. 第 12 个主修复曾对 `candidate-path` 和 `strong-path` 尝试 stat / register；第 13 个问题将采集边界进一步收敛为只处理 `strong-path`。
   3. 再根据全局批次事实生成输出：是否存在成功 material、是否存在强路径失败。
 - 收紧路径启发式：
   - URL 明确不是本地材料路径。
@@ -1102,14 +1106,14 @@ const x = 1;
   - 扩展名只能提供候选信号；无成功材料、无强路径形态时，`missing.png` 应保留为普通文本。
   - 带引号本身不等于路径；只有被引号包裹后内容仍满足强路径或候选路径规则时才参与材料采集。
 - 返回策略：
-  - 有成功 material：返回 `ingested`，成功项替换为 chip；普通文本保留；候选 / 强路径失败项诊断并移除。
+  - 有成功 material：返回 `ingested`，成功项替换为 chip；普通文本保留；强路径失败项诊断并移除；候选路径失败项原样保留。成功 material 的来源边界以第 13 个问题修订后的 `strong-path` 为准。
   - 无成功 material、但存在强路径失败：返回 `ingested`，诊断强路径失败；普通文本保留；若没有可插入文本则 `insertText=""`，沿用“明确材料路径全部失败不污染草稿”的语义。
   - 无成功 material、且只有候选路径失败或普通文本：返回 `not-material`，完整交给文本粘贴逻辑。
 - 保持 `finalizePaste()` 的现有分层：`not-material` 才进入文本折叠；`ingested` 不触发文本长粘贴折叠。修复后它会自然得到正确分类。
 
 **不采用的方案**：
 
-- 不采用“把 `/[\\/]` 改成更复杂的单个正则”：正则只能继续堆特例，无法表达“候选路径只有在材料批次成立后才诊断”的产品语义。
+- 不采用“把 `/[\\/]` 改成更复杂的单个正则”：正则只能继续堆特例，无法表达“候选路径成功时增强、失败时保真”的产品语义。
 - 不采用“无成功材料时全部回退文本”：这会让 `./missing.png`、绝对路径、UNC 等明确材料意图失去即时诊断，破坏第 10 个问题的全失败 UX。
 - 不采用“在 `finalizePaste()` 里发现 registry size 没变就回退文本”：它无法区分强路径失败和普通文本误判，也无法正确保留混合批次中的说明文字。
 
@@ -1118,19 +1122,21 @@ const x = 1;
 - 补 `input-material.test.ts`：粘贴含 `return a / b;`、`// see src/main.ts`、`hello\nfoo/bar\nbye` 的普通文本时返回 `not-material`，registry 为空，无 diagnostics。
 - 补 `input-material.test.ts`：`import x from "./foo/bar";`、`2026/06/22`、URL 都返回 `not-material`。
 - 补 `input-material.test.ts`：`missing.png` 这种无显式前缀候选在无成功材料时返回 `not-material`；`./missing.png`、绝对路径、UNC 等强路径失败仍返回诊断。
-- 补 `input-material.test.ts`：有效材料 + 候选缺失路径仍保留成功 chip 并提示失败项；说明文字行完整保留且顺序稳定。
+- 补 `input-material.test.ts`：有效材料 + 候选缺失路径保留成功 chip，同时把候选缺失行作为普通文本保留；说明文字行完整保留且顺序稳定。
 - 补 `typeahead-input.test.ts`：粘贴上述代码块时输入区不丢行；达到长粘贴阈值时仍按文本 paste token 折叠，提交后原文完整。
-- 保留第 10 个问题回归：有效材料 + 缺失路径仍保留成功 chip 并提示失败项；明确材料路径全部失败不污染已有草稿。
+- 保留第 10 个问题回归：有效材料 + 强路径缺失仍保留成功 chip 并提示失败项；明确材料路径全部失败不污染已有草稿。
 
 **修复记录**：
 
+> 以下为第 12 个主问题的上一轮修复记录。该修复解决了“无成功材料时普通含斜杠文本被吞”的主路径；其中“有成功材料时 candidate-path 失败参与诊断并移除”的语义，已被下方补充问题判定为残留边界，后续修复应以补充问题的目标效果为准。
+
 - `input-material-ingest.ts` 把材料采集从“逐行 stat 失败即吞行”改为“路径意图分类 + 批次判定”：
   - `text`：普通文本直接保留，不参与文件 stat。
-  - `candidate-path`：无显式前缀的相对路径片段或带扩展名文件名；成功识别真实文件时变成材料，失败只在本批已有成功材料时诊断。
+  - `candidate-path`：无显式前缀的相对路径片段或带扩展名文件名；上一轮实现中成功识别真实文件时变成材料，失败只在本批已有成功材料时诊断。该成功采集语义已由第 13 个问题修订。
   - `strong-path`：绝对路径、home、显式相对路径、Windows 盘符、UNC；失败可独立诊断。
 - `ingestPastedMaterials()` 先处理所有行得到 material / failure / text，再根据整批是否存在成功材料或强路径失败决定 `not-material` / `ingested`，避免单个弱候选失败把普通文本粘贴升级成材料模式。
-- 保留第 10 个问题语义：真实材料 + 缺失候选路径仍保留成功 chip 并提示失败；明确路径全部失败仍不污染已有草稿。
-- `input-material.test.ts` 补充普通代码、`foo/bar`、import、日期、URL、无前缀缺失文件名、候选路径随成功材料诊断等回归。
+- 上一轮保留第 10 个问题语义：真实材料 + 缺失候选路径仍保留成功 chip 并提示失败；明确路径全部失败仍不污染已有草稿。该候选失败语义已由下方补充问题修订。
+- `input-material.test.ts` 补充普通代码、`foo/bar`、import、日期、URL、无前缀缺失文件名、候选路径随成功材料诊断等回归。候选路径随成功材料诊断这一回归需按补充问题改为“候选失败行保留为文本”。
 - `typeahead-input.test.ts` 补充输入区真实链路：粘贴含斜杠代码不触发材料采集，仍按长文本折叠，提交后原文完整。
 
 **验证命令**：
@@ -1142,6 +1148,341 @@ pnpm cli:build
 ```
 
 结果：CLI 类型检查通过；定向 2 个测试文件、82 个测试通过；CLI 全量 140 个测试文件、2123 个测试通过；CLI 构建成功。
+
+**补充问题：材料批次里的弱候选路径失败仍会吞普通文本行**
+
+**状态**：已修复，已验证，已构建
+
+**现象**：同一次粘贴里只要已有真实材料，当前实现会把其它 `candidate-path` 失败行当作“材料路径打错”处理，只进入 diagnostics，不回写到输入区。结果是普通文本行静默消失。
+
+**最小复现**：
+
+```text
+shot.png
+foo/bar
+bye
+```
+
+当 `workspaceRoot/shot.png` 真实存在时，当前输入区会变成：
+
+```text
+[Image #1 · shot.png · 2x3 · 24B]
+bye
+```
+
+`foo/bar` 被删除，并产生“文件不存在或不可读取”诊断。类似场景还包括 `shot.png + TODO/FIXME + bye`、`请看 + shot.png + a/b + 谢谢`、`notes.md + config.json + 收尾`。
+
+**事实证据**：
+
+- `classifyPathIntent()` 当前把 `foo/bar`、`TODO/FIXME`、`config.json` 归为 `candidate-path`。
+- 修复前 `ingestPastedMaterials()` 的归并条件是 `line.intent === "strong-path" || hasMaterial`；只要同批已有成功材料，candidate failure 就会进入 diagnostics，不会进入 `outputLines`。
+- 本轮直接调用生产函数验证：
+  - `shot.png\nfoo/bar\nbye` 返回 `insertText = "[Image ...]\nbye"`，diagnostics 包含 `foo/bar`。
+  - `shot.png\nTODO/FIXME\nbye` 返回 `insertText = "[Image ...]\nbye"`，diagnostics 包含 `TODO/FIXME`。
+  - `shot.png\nconfig.json\nbye` 返回 `insertText = "[Image ...]\nbye"`，diagnostics 包含 `config.json`。
+  - `shot.png\n./missing.png\nbye` 返回 `insertText = "[Image ...]\nbye"`，diagnostics 包含 `./missing.png`；这是强路径失败，属于应保留的诊断语义。
+- 修复前测试盲区：已有“说明文字 + 材料”的测试只用了 `请看这张图`、`谢谢` 这类 `text` 行；已有“含斜杠普通文本”的测试没有同批成功材料。因此没有覆盖“真实材料 + 弱候选失败文本行”的组合。
+
+**审核结论**：问题真实，是第 12 个问题的残留边界，不是新的架构问题。第 12 个问题已经修复了“无成功材料时普通含斜杠文本被吞”的主路径，但上一版取舍仍允许“有成功材料时弱候选失败被吞”。这仍违反“普通文本保真优先”的产品本质。
+
+**根因**：
+
+- `classifyPathIntent()` 会把无显式前缀但含 `/`、`\` 或扩展名的无空格行分类为 `candidate-path`。
+- `ingestPastedMaterials()` 修复前在 `hasMaterial === true` 时，把所有 `candidate-path` failure 放进 diagnostics，而不是回写原始文本。
+- 这个规则本意是保留“材料批次中相对路径打错也能提示”的体验，但 `candidate-path` 天然模糊，无法可靠区分“打错的材料路径”和“普通短文本”。
+
+**背后需求**：
+
+- 粘贴是用户输入正文的高频主路径，任何启发式增强都不能静默丢文本。
+- 真实材料识别成功后，可以增强那一行；但其它不确定行必须保真，不能因为同批里有材料就提高吞行权限。
+- 相对路径打错的即时提示是次级体验；文本保真是底线体验。
+
+**目标效果**：
+
+- 成功识别的材料继续替换为 chip，并保持图文顺序。
+- 普通文本行即使长得像相对路径，只要不是强路径意图，失败时都原样保留。
+- `strong-path` 失败仍可诊断并不插入，例如绝对路径、`~/...`、`./...`、`../...`、Windows 盘符、UNC 路径。
+- `candidate-path` 失败时不诊断、不移除，回退为普通文本；成功方向的自动采集已由第 13 个问题重新审查。
+- 该结论覆盖上一版第 12 个问题里“本批已有成功材料时 candidate-path 失败参与诊断并移除”的旧取舍。
+
+**非目标 / 保留取舍**：
+
+- 第 12 个补充修复只处理弱候选失败方向；“存在的无前缀候选文件名自动注册为材料”的旧取舍已被第 13 个问题重新判定为缺陷，不再作为长期产品语义保留。
+- 不新增“candidate-path 失败但已保留为文本”的 warning。当前诊断文案语义是“材料未添加”，如果文本已保留，继续告警会制造噪音和误解。
+- 不引入失败 chip。失败 chip 会扩大 handle 生命周期、原子编辑、提交阻断和解析规则，超出本问题需要。
+
+**最优修复方向**：
+
+- 保持 `text / candidate-path / strong-path` 三档分类，不退回正则堆特例。
+- 调整输出归并规则：
+  - `material`：输出 chip。
+  - `text`：输出原文。
+  - `failure + strong-path`：输出诊断，不写入草稿。
+  - `failure + candidate-path`：输出原文，不诊断。
+- `hasMaterial` 只决定本批是否进入 `ingested`，不再赋予 candidate failure 吞文本的权限。
+- 更新第 10 个问题相关验收：真实材料 + 缺失的无显式前缀候选路径，应保留成功 chip，同时把失败候选行作为普通文本保留；若用户需要明确表达材料路径失败，应使用强路径形态。
+
+**验收标准**：
+
+- 补 `input-material.test.ts`：`shot.png\nfoo/bar\nbye` 中 `shot.png` 存在时，结果包含 image chip、`foo/bar`、`bye`，diagnostics 为空。
+- 补 `input-material.test.ts`：真实材料 + `TODO/FIXME`、真实材料 + `config.json` 缺失时，弱候选失败行保留为文本。
+- 补 `input-material.test.ts`：真实材料 + `./missing.png` 仍诊断并移除强路径失败。
+- 补 `typeahead-input.test.ts`：CLI 输入区粘贴“材料 + 含斜杠说明行 + 普通结尾”不丢行，提交后的 `prepareUserTurnInput()` 保持 text/image/text 顺序。
+- 保留第 12 个问题主回归：无成功材料的含斜杠代码 / import / 日期 / URL 仍按普通文本处理。
+
+**修复记录**：
+
+- `input-material-ingest.ts` 将失败行归并收敛到唯一稳定规则：只有 `strong-path` 失败进入 diagnostics 并不写入草稿；`candidate-path` 失败一律回写原文，不诊断、不吞行。
+- `hasMaterial` 只保留“本批是否进入材料摄取结果”的职责，不再参与决定弱候选失败是否可删除用户文本。
+- `input-material.test.ts` 补齐真实材料 + 缺失弱候选文件名、真实材料 + 含斜杠弱候选文本、真实材料 + 明确强路径失败三类回归。
+- `typeahead-input.test.ts` 补齐 CLI 输入链路回归：材料 + `a/b` 说明行 + 普通结尾在输入区保真，提交后仍解析为 text/image/text 有序 parts。
+
+**验证命令**：
+
+```bash
+pnpm --filter @zhixing/cli exec tsc --noEmit && pnpm --filter @zhixing/cli exec vitest run src/__tests__/input-material.test.ts src/__tests__/typeahead-input.test.ts
+pnpm --filter @zhixing/cli test
+pnpm cli:build
+```
+
+结果：CLI 类型检查通过；定向 2 个测试文件、85 个测试通过；CLI 全量 140 个测试文件、2126 个测试通过；CLI 构建成功。
+
+### 13. 弱候选路径成功时会静默采集同名文件并污染上下文
+
+**状态**：已修复，已测试，已构建
+
+**后续边界说明**：本问题只收敛弱候选路径，不再让裸文件名 / 裸相对片段自动采集材料。本节中关于 strong-path 仍按材料路径处理的描述，是第 13 阶段为保留既有路径粘贴能力做出的过渡边界；第 14 个问题已继续把 strong-path 从“单行形态即意图”收敛为“本次粘贴批次级材料意图”。
+
+**现象**：用户粘贴普通文本、文件清单或笔记时，如果某一行恰好是当前工作目录下存在的无前缀候选文件名，CLI 会把这一行静默替换成 material chip；提交后 `prepareUserTurnInput()` 会把文件内容注入 agent payload。用户原本只是写了 `package.json` / `tsconfig.json` 这样的文本，却实际把本地文件全文交给了 agent。
+
+**最小复现**：
+
+```text
+package.json
+tsconfig.json
+```
+
+当 `workspaceRoot` 下两个文件真实存在时，当前输入区会显示两个 `[File #N · ...]` chip；提交后下游解析为两个 `<file path="...">...</file>` text part。
+
+另一个高频复现：
+
+```text
+本周计划
+package.json
+记得测试
+```
+
+当前中间一行会被采集为文件材料，最终 prompt 中静默混入 `package.json` 全文。
+
+**事实证据**：
+
+- `classifyPathIntent()` 会把无空白、带扩展名的 `package.json` / `tsconfig.json` 分类为 `candidate-path`。
+- `processMaterialLine()` 对 `candidate-path` 和 `strong-path` 都执行 `statSync`；只要文件存在且是普通文件，就注册到 `InputMaterialRegistry` 并输出 material chip。
+- `resolveInputMaterialToken()` 对 text-like 文件会读取全文，并注入为 `<file path="...">...</file>` text part。
+- 第 12 个补充修复只修复了 `candidate-path` 失败时吞文本；成功方向仍按“文件存在即材料意图”处理。
+- 本轮直接调用生产函数验证：
+  - `package.json\ntsconfig.json` 在两个文件真实存在时返回 `ingested`，输入区文本变成两个 `[File #N ...]` chip，registry size 为 2。
+  - `本周计划\npackage.json\n记得测试` 在 `package.json` 真实存在时返回 `ingested`，中间行被替换成 `[File #1 ...]` chip。
+  - 对上述 chip 调 `prepareUserTurnInput()` 后，text part 中出现 `<file path=".../package.json">...</file>`，证明文件内容会进入 agent payload。
+  - `./package.json\n./missing.json` 仍表现为强路径语义：成功项生成 chip，失败项进入 diagnostics。这是应保留的明确材料路径行为。
+
+**审核结论**：问题真实，是第 12 个问题同源启发式的反方向残留，也是第 5 个结构化材料输入的产品语义漏洞。第 12 个补充问题已经证明 `candidate-path` 的失败不能证明用户材料意图；同理，文件恰好存在也不能证明用户材料意图。上一版“存在的无前缀候选文件名自动注册为材料”的便利性取舍应推翻。
+
+**根因**：
+
+- `candidate-path` 本质是模糊信号：它既可能是用户要添加的相对路径，也可能是文件清单、讨论文本、笔记、代码片段或命令输出。
+- 当前实现用“文件存在”替代“用户明确意图”，把本地文件读取和 agent payload 注入建立在启发式上。
+- 失败方向的问题可见为丢行；成功方向的问题更隐蔽，表现为上下文污染、token 浪费，以及把用户未明确交付的本地文件内容读入本轮输入。
+
+**背后需求**：
+
+- 任何会读取本地文件并交付给 agent 的能力，都必须要求足够明确的用户意图。
+- 粘贴正文保真优先于路径便利。裸文件名、裸相对片段、文件清单行默认是正文，不应因为本地恰好存在同名文件而改变语义。
+- CLI 可以支持“粘贴路径添加材料”，但触发材料采集的路径形态必须是强路径信号，例如 `./x`、`../x`、`~/x`、绝对路径、Windows 盘符或 UNC。
+
+**目标效果**：
+
+- 粘贴 `package.json`、`tsconfig.json`、`README.md`、`src/main.ts` 等无显式前缀文本时，即使文件存在，也按普通文本保留，不生成 chip、不读取文件、不注入 payload。
+- 粘贴文件清单、目录树、笔记、讨论内容时，内容必须保真。
+- 粘贴 `./package.json`、`../a.txt`、`~/image.png`、绝对路径、Windows 盘符路径、UNC 路径时，仍按材料路径处理：成功生成 chip，失败给诊断。
+- 混合粘贴中，强路径成功可生成材料；同批的裸候选文件名仍保留为普通文本，不被升级为材料。
+
+**产品 / 架构判断**：
+
+- 顶级产品语义应以“用户明确交付什么”为中心。裸文件名是正文，不是附件授权；文件恰好存在只是环境事实，不是用户意图。
+- 对智能体输入而言，静默注入本地文件比显式报错更危险：它污染上下文、浪费 token，并可能把用户没有明确交付的材料送入本轮对话。
+- `candidate-path` 的失败方向已经按文本保真处理；成功方向也必须对称。一个模糊信号不能因为文件存在就升级为读取本地文件的授权。
+- 要求 `./`、`../`、`~/`、绝对路径、Windows 盘符或 UNC 作为材料路径信号，是稳定、可解释、可长期演进的产品边界。
+
+**最优修复方向**：
+
+- 收敛材料采集边界：只有 `strong-path` 进入 `stat / register / diagnostic` 流程；`candidate-path` 不再自动采集，按普通文本保留。
+- 代码组织上不要保留可执行的 `candidate-path` 材料分支。最佳实现是把 `PathIntent` 收敛为 `text | strong-path`，或者让 `classifyPathIntent()` 对弱候选直接返回 `text`；避免未来维护者再次把弱候选接回 `stat / register`。
+- `hasMaterial` 继续只由成功注册的强路径材料决定；强路径失败仍可让本批返回 `ingested` 并上报诊断，保持“明确材料路径全部失败不污染草稿”的语义。
+- 不在 `prepareUserTurnInput()` 兜底拦截，因为到那里已经出现 chip，用户可见语义已经被改写。正确边界在 `input-material-ingest.ts` 的路径意图分类 / 采集阶段。
+- `finalizePaste()` 不需要承载本问题逻辑。它只接收 `ingested / not-material` 结果，正确分层仍是材料摄取模块负责判断“是否有明确材料意图”。
+- REPL / core / provider 不需要改。第 13 个问题只收敛 CLI 粘贴采集入口，不改变已经显式形成 material chip 之后的解析和发送契约。
+
+**不采用的方案**：
+
+- 不采用“只对常见文件名黑名单排除”：`package.json` 只是高频例子，任何存在的裸文件名都可能污染上下文。
+- 不采用“candidate 成功时弹 warning”：采集已经改写输入语义，warning 无法消除静默注入风险，还会让普通笔记粘贴变吵。
+- 不采用“先生成失败 / 待确认 chip”：这会扩大 handle 生命周期、提交阻断和交互复杂度；当前需求只需要用强路径表达明确意图。
+
+**验收标准**：
+
+- 补 `input-material.test.ts`：工作目录存在 `package.json`、`tsconfig.json` 时，粘贴 `package.json\ntsconfig.json` 返回 `not-material`，registry 为空。
+- 补 `input-material.test.ts`：`本周计划\npackage.json\n记得测试` 在 `package.json` 存在时仍返回 `not-material`，原文完整保留。
+- 补 `input-material.test.ts`：`./package.json` 存在时仍生成 file chip；`./missing.json` 不存在时仍返回诊断且不污染草稿。
+- 补 `input-material.test.ts`：强路径材料 + 裸候选文件名混排时，强路径生成 chip，裸候选文件名保留为文本。
+- 补 `input-material.test.ts`：裸 `src/main.ts` 即使真实存在也不生成材料；用户要添加它必须粘贴 `./src/main.ts`。
+- 补 `typeahead-input.test.ts`：CLI 输入区粘贴裸 `package.json` 时不出现 `[File #]` chip，提交后 `prepareUserTurnInput()` 只产生 text part，不读取文件内容。
+- 补 `typeahead-input.test.ts`：CLI 输入区粘贴 `./package.json` 时仍出现 file chip，提交后解析为文件 text part。
+
+**修复记录**：
+
+- `input-material-ingest.ts` 将 `PathIntent` 收敛为 `text | strong-path`，彻底移除可执行的 `candidate-path` 材料采集分支。
+- `classifyPathIntent()` 对弱候选文本直接返回 `text`；裸文件名、裸相对片段、带扩展名文件名不再进入 `stat / register`。
+- 强路径路径保持原语义：`./...`、`../...`、`~/...`、绝对路径、Windows 盘符和 UNC 仍可成功生成 material chip，失败仍返回 diagnostics。
+- `input-material.test.ts` 补齐裸已存在文件名、普通笔记里的裸文件名、裸 `src/main.ts`、明确 `./package.json`、强路径 + 裸候选混排回归。
+- `typeahead-input.test.ts` 补齐输入区真实链路：裸 `package.json` 不显示 `[File #]`，提交准备不读取文件；`./package.json` 仍显示 chip 并解析为文件 text part。
+
+**定向验证命令**：
+
+```bash
+pnpm --filter @zhixing/cli exec tsc --noEmit && pnpm --filter @zhixing/cli exec vitest run src/__tests__/input-material.test.ts src/__tests__/typeahead-input.test.ts
+```
+
+结果：CLI 类型检查通过；定向 2 个测试文件、92 个测试通过。
+
+**收尾验证命令**：
+
+```bash
+pnpm --filter @zhixing/cli test
+pnpm cli:build
+```
+
+结果：CLI 全量 140 个测试文件、2133 个测试通过；CLI 构建成功。
+
+### 14. strong-path 形态仍会把普通命令 / 日志误判为材料意图
+
+**状态**：已修复，已测试，已构建
+
+**现象**：第 13 个问题已移除 `candidate-path` 整档，裸文件名和裸相对片段默认保真为文本。但剩余的 `strong-path` 档仍把 `./...`、`../...`、`~/...`、绝对路径、Windows 盘符和 UNC 当作明确材料意图。这个公理在 CLI agent 的高频粘贴场景里不总成立：shell 命令、命令清单、构建日志、测试失败、堆栈和源码位置行里都会出现 strong-path 形态的普通文本。
+
+**外部审查结论**：认可。外部审查指出，第 13 个问题把“路径形态是模糊信号”贯彻到弱候选，但没有审查 strong-path 的反例；这与本轮我发现的 `./src/main.ts:12` / `C:\...\main.ts:12` 被当作失败材料路径吞掉，是同一根因。它不是第 13 修复的回归，而是路径意图启发式家族最后一档尚未完成产品定性。
+
+**事实证据**：
+
+- `input-material-ingest.ts` 当前 `PathIntent` 已收敛为 `text | strong-path`，`classifyPathIntent()` 只要命中 `isStrongPathLike()` 就进入 `stat / register / diagnostic` 流程。
+- `processMaterialLine()` 对 strong-path 失败返回 `failure`；`ingestPastedMaterials()` 对 failure 只加入 `diagnostics`，不把原始行放回 `outputLines`。
+- `finalizePaste()` 收到 `kind: "ingested"` 后不会再走普通长文本折叠，所以 strong-path 误判会同时造成“删行”和“绕过折叠”。
+- 本轮生产函数探针确认：
+  - `先运行\n./missing-build.sh\n再看输出` 变成 `先运行\n再看输出`，`./missing-build.sh` 被删除并只进入诊断。
+  - `先运行\n./build.sh\n再看输出` 在 `build.sh` 真实存在时变成 `先运行\n[File #1 · build.sh · ...]\n再看输出`，提交准备阶段会读取文件内容注入 agent payload。
+  - `C:\...\src\main.ts:12` 被当作路径 `C:\...\src\main.ts:12` 去 `stat`，失败后插入内容为空。
+  - `./build.sh\nC:\...\src\main.ts:12` 只留下 `build.sh` chip，源码位置行被删除并进入诊断。
+
+**审核结论**：问题真实。第 12 / 13 个问题已经确立“普通文本保真优先于路径便利”，strong-path 失败仍吞行与该原则冲突。strong-path 成功静默注入同样真实，但产品取舍比失败吞行更软：显式 `./foo.png` 很可能就是用户想添加材料；而日志里恰好存在的绝对路径也可能只是正文。二者应在同一个问题下统一审查，因为根因都是“路径形态不能单独证明材料意图”。
+
+**根因**：
+
+- 当前实现是“行级路径形态驱动”：每一行只要像 strong-path，就独立进入 `stat / register / failure`。它没有先判断“本次粘贴整体是不是一个材料路径批次”。
+- `failure` 被设计成“材料批次里的失败项”，但在普通日志 / 命令文本里，strong-path failure 其实只是正文行。当前代码把这两种来源混在一起，所以会吞正文。
+- 成功方向同理：文件存在只能证明环境里有这个文件，不能证明用户在这次粘贴中授权把它作为材料交给 agent。
+
+**背后需求**：
+
+- 用户粘贴命令、日志、错误栈和源码位置时，系统必须保持原文，不应因为某一行像路径就删掉、替换成 chip 或读取文件。
+- 用户粘贴文件路径添加材料时，CLI 仍要提供高效入口；但这个入口必须避免静默破坏正文。
+- agent 收到的必须是用户想交付的材料。误删文本是显性破坏；误读本地文件是隐性上下文污染。
+
+**目标效果**：
+
+- strong-path 失败不能静默删除原始行。无论是否诊断，用户输入区和最终提交内容都必须保留可恢复的原文，除非用户明确确认丢弃。
+- `:line` / `:line:column` 源码位置默认按文本保留，不把整行当本地文件路径，也不尝试读取去掉行号后的文件。
+- 粘贴日志 / 命令清单时，长文本仍按普通文本折叠，不因某个 strong-path 失败项进入 `ingested` 而绕过折叠。
+- strong-path 成功采集需要重新定义安全边界：既不能破坏用户粘贴 `./image.png` 添加材料的便利，也不能在“正文 + 路径样文本”混排中静默读取文件污染上下文。
+- 用户仍可以构造“文字 + 材料”的最终输入：先输入 / 粘贴说明文字，再单独粘贴文件路径生成 chip，或者先粘贴路径生成 chip 后继续输入文字。材料 chip 已有保活与后续粘贴不清空保障，不需要依赖“同一次混排粘贴”完成。
+
+**产品 / 架构判断**：
+
+- 顶级产品边界不是“某行像路径就读文件”，而是“用户是否明确要把这个文件作为本轮材料交给 agent”。路径形态只能提供线索，不能替代意图。
+- 最优架构应把“材料入口”设计成可解释的意图通道，而不是无限调启发式。短期仍可在 CLI 粘贴层收敛规则；长期应走结构化 composer / handle 模型，让材料添加和普通文本天然分层。
+- 失败吞行必须优先修，因为它直接破坏正文保真；成功注入需要结合交互成本和材料便利性一起定性，避免从“自动注入”摇摆到“添加材料过重”。
+- 第 13 个问题中“strong-path = 明确材料意图”的结论只是弱候选收敛后的过渡判断；第 14 个问题把判断提升到批次级，避免继续用单行形态承载完整意图。
+
+**最优解决方案**：
+
+- 在 `input-material-ingest.ts` 引入批次级材料意图判断：先解析本次粘贴的非空行，再判断本次粘贴是否是“材料路径批次”。只有材料路径批次进入 `stat / register / diagnostic`；只要出现普通文本行、源码位置行、命令行参数行，就整体返回 `not-material`，交回普通文本粘贴逻辑处理。
+- 材料路径批次定义：
+  - 去掉首尾空行后，每个非空行都必须是可作为材料路径的强路径候选。
+  - 强路径候选包括 `./...`、`../...`、`~/...`、绝对路径、Windows 盘符路径、UNC 路径；但不包括源码位置和未加引号的含空白命令行。
+  - 带空格路径必须整行加引号；未加引号的 `./build.sh --prod` 默认是命令文本，不是材料路径。
+  - `file:line`、`file:line:column`、`path(line,column)` 等源码位置默认是文本引用，不触发材料采集，也不诊断。
+- 对材料路径批次逐行处理：
+  - 成功解析为普通文件的行生成 material chip。
+  - 失败或目录行不删除原文，原始行回写到 `insertText`，同时给诊断；诊断文案应表达“未添加为材料，原文已保留”，避免用户误以为内容消失。
+  - 同一批次允许“成功 chip + 失败原文 + 诊断”，这样批量添加材料时仍有可恢复反馈。
+- 对非材料路径批次整体保真：
+  - 不做任何 `stat`，不注册材料，不产生诊断，不产生副作用。
+  - 长日志 / 命令清单继续走文本长粘贴折叠；提交后展开为完整原文。
+- 保留单独粘贴路径的高效入口：当用户已在输入区有说明文字时，后续单独粘贴 `./image.png` 仍会生成 chip，因为判断只看“本次粘贴批次”，不是看整个 draft。
+- 不在 `prepareUserTurnInput()` 兜底修正，因为到提交准备阶段 chip 已经出现在输入语义里；真正边界仍在 `input-material-ingest.ts` 的意图分类和采集阶段。
+
+**代码组织方案**：
+
+- 将当前“行级 process 即产生副作用”的流程改成两段：
+  1. `parsePastedMaterialLines()` 只产出 raw / input / quoted / line intent，不访问文件系统。
+  2. `isMaterialPathBatch(lines)` 决定本次粘贴是否进入材料采集；返回 false 时直接 `not-material`，保证无 registry 副作用。
+  3. `ingestMaterialPathBatch(lines)` 才执行 `resolvePastedPath()`、`statSync()`、`registerLocalFile()`。
+- `PathIntent` 建议扩展为 `text | material-path | source-location`，不要再用 `strong-path` 这个名字承载产品语义；`strong-path` 只是 material-path 的一个语法来源。
+- 重新引入 `quoted` 信息，区分 `"./a b.txt"` 这种路径和 `./build.sh --prod` 这种命令。
+- 把源码位置识别做成小型纯函数，例如 `parseSourceLocationSuffix(input)`，从右侧识别 `:line` / `:line:column`，避免误伤 Windows 盘符 `C:\` 的冒号。
+- `finalizePaste()` 不需要新增业务判断，只继续消费 `ingested / not-material`。这能保持接入面输入控制器和材料摄取模块的职责边界。
+
+**不采用的方案**：
+
+- 不采用“strong-path 失败回写原文但仍返回 ingested”作为完整方案：它能修吞行，但仍会让日志绕过长文本折叠，并产生无意义诊断。
+- 不采用“只识别 `:line` 源码位置”作为完整方案：它修一类日志，却无法解决 `./build.sh`、绝对路径行、命令清单等同源误判。
+- 不采用“完全关闭 strong-path 自动材料采集”：这会损害粘贴 / 拖拽单个图片或文件路径的主能力，用户需要更重入口才能添加材料。
+- 不采用“混排正文里继续自动采集存在的路径，同时弹 warning”：输入已经被改写，warning 不能消除上下文污染。
+
+**验收标准**：
+
+- 补 `input-material.test.ts`：`先运行\n./missing-build.sh\n再看输出` 返回 `not-material`，registry 为空，原文由普通文本粘贴路径保留。
+- 补 `input-material.test.ts`：`./src/main.ts:12`、绝对路径 `...\src\main.ts:12`、`file.ts:12:3`、`src/main.ts(12,3)` 等源码位置返回 `not-material`，不生成诊断，不注册材料。
+- 补 `input-material.test.ts`：`./build.sh --prod` 这种未加引号含空白行返回 `not-material`；`"./a b.txt"` 在文件存在时仍生成 material chip。
+- 补 `input-material.test.ts`：`./shot.png` 单独粘贴仍生成 image chip；`./shot.png\n./note.txt` 仍生成有序材料 chip。
+- 补 `input-material.test.ts`：`./shot.png\n./missing.png` 生成 image chip，同时保留 `./missing.png` 原文并返回诊断。
+- 补 `input-material.test.ts`：`请看\n./shot.png\n谢谢` 返回 `not-material`，不读取文件、不生成 chip，完整保真为文本。
+- 补 `typeahead-input.test.ts`：粘贴包含 strong-path 失败行的长日志仍折叠为 `[Pasted #...]`，提交后 agent payload 是完整原文。
+- 补 `typeahead-input.test.ts`：已有说明文字时单独粘贴 `./shot.png` 仍插入 image chip，随后提交得到 text + image 有序 parts，证明用户仍能用分步粘贴构造图文混排。
+
+**修复记录**：
+
+- `input-material-ingest.ts` 改为批次级材料意图判断：`parsePastedMaterialLines()` 只做无副作用解析；`isMaterialPathBatch()` 决定本次粘贴是否进入材料摄取；非材料批次直接返回 `not-material`。
+- `PathIntent` 收敛到产品语义：`text | material-path | source-location`。源码位置、未加引号含空白命令行、说明文字混排都不会触发文件系统访问。
+- 材料路径批次失败项不再被删除：失败行原文回写到 `insertText`，同时返回“未添加为材料，原文已保留”的诊断。
+- 更新旧测试语义：同一次粘贴里的说明文字 + 路径整体按文本保真；需要图文混排时，通过分步粘贴路径生成 chip。
+- `input-material.test.ts` 补齐源码位置、命令行参数、带空格路径加引号、纯路径多材料、纯路径部分失败、混排保真等回归。
+- `typeahead-input.test.ts` 补齐长日志折叠保真、分步粘贴生成 text + image、路径批次失败项原文保留等真实输入链路。
+
+**定向验证命令**：
+
+```bash
+pnpm --filter @zhixing/cli exec tsc --noEmit && pnpm --filter @zhixing/cli exec vitest run src/__tests__/input-material.test.ts src/__tests__/typeahead-input.test.ts
+```
+
+结果：CLI 类型检查通过；定向 2 个测试文件、99 个测试通过。
+
+**收尾验证命令**：
+
+```bash
+pnpm --filter @zhixing/cli test && pnpm cli:build
+```
+
+结果：CLI 全量测试通过，140 个测试文件、2140 个测试通过；CLI 构建通过。
 
 ## 已验证
 

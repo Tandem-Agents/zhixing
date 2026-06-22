@@ -103,7 +103,7 @@ describe("input materials", () => {
     expect(registry.size).toBe(0);
   });
 
-  it("批量材料路径部分失败时保留成功材料并返回诊断", async () => {
+  it("强路径与弱候选混排时整体按普通文本保留", async () => {
     const root = await makeTempDir();
     const imagePath = path.join(root, "shot.png");
     const missingInput = "missing.png";
@@ -114,16 +114,47 @@ describe("input materials", () => {
       workspaceRoot: root,
     });
 
+    expect(result).toEqual({ kind: "not-material" });
+    expect(registry.size).toBe(0);
+  });
+
+  it("强路径与普通斜杠文本混排时整体按普通文本保留", async () => {
+    const root = await makeTempDir();
+    const imagePath = path.join(root, "shot.png");
+    await fs.writeFile(imagePath, minimalPng(2, 3));
+    const registry = new InputMaterialRegistry();
+
+    const result = ingestPastedMaterials(
+      `${imagePath}\nTODO/FIXME\nconfig.json\nbye`,
+      registry,
+      { workspaceRoot: root },
+    );
+
+    expect(result).toEqual({ kind: "not-material" });
+    expect(registry.size).toBe(0);
+  });
+
+  it("批量材料强路径部分失败时保留成功材料并返回诊断", async () => {
+    const root = await makeTempDir();
+    const imagePath = path.join(root, "shot.png");
+    const missingInput = "./missing.png";
+    await fs.writeFile(imagePath, minimalPng(2, 3));
+    const registry = new InputMaterialRegistry();
+
+    const result = ingestPastedMaterials(`${imagePath}\n${missingInput}`, registry, {
+      workspaceRoot: root,
+    });
+
     expect(result.kind).toBe("ingested");
     if (result.kind === "ingested") {
       expect(result.insertText).toContain("[Image #1 · shot.png · 2x3 ·");
-      expect(result.insertText).not.toContain(missingInput);
+      expect(result.insertText).toContain(missingInput);
       expect(result.diagnostics).toEqual([
         {
           input: missingInput,
-          filePath: path.join(root, missingInput),
+          filePath: path.join(root, "missing.png"),
           reason: "unreadable",
-          message: "文件不存在或不可读取",
+          message: "未添加为材料，原文已保留：文件不存在或不可读取",
         },
       ]);
     }
@@ -142,7 +173,50 @@ describe("input materials", () => {
     expect(registry.size).toBe(0);
   });
 
-  it("明确路径全部失败时返回空插入内容和诊断", async () => {
+  it("无显式前缀的已存在文件名按普通文本保留", async () => {
+    const root = await makeTempDir();
+    await fs.writeFile(path.join(root, "package.json"), "{}\n", "utf-8");
+    await fs.writeFile(path.join(root, "tsconfig.json"), "{}\n", "utf-8");
+    const registry = new InputMaterialRegistry();
+
+    const result = ingestPastedMaterials("package.json\ntsconfig.json", registry, {
+      workspaceRoot: root,
+    });
+
+    expect(result).toEqual({ kind: "not-material" });
+    expect(registry.size).toBe(0);
+  });
+
+  it("普通笔记里的已存在裸文件名不被静默采集", async () => {
+    const root = await makeTempDir();
+    await fs.writeFile(path.join(root, "package.json"), "{}\n", "utf-8");
+    const registry = new InputMaterialRegistry();
+
+    const result = ingestPastedMaterials(
+      "本周计划\npackage.json\n记得测试",
+      registry,
+      { workspaceRoot: root },
+    );
+
+    expect(result).toEqual({ kind: "not-material" });
+    expect(registry.size).toBe(0);
+  });
+
+  it("无显式前缀的已存在相对片段按普通文本保留", async () => {
+    const root = await makeTempDir();
+    await fs.mkdir(path.join(root, "src"));
+    await fs.writeFile(path.join(root, "src", "main.ts"), "export {};\n", "utf-8");
+    const registry = new InputMaterialRegistry();
+
+    const result = ingestPastedMaterials("src/main.ts", registry, {
+      workspaceRoot: root,
+    });
+
+    expect(result).toEqual({ kind: "not-material" });
+    expect(registry.size).toBe(0);
+  });
+
+  it("明确路径全部失败时保留原文并返回诊断", async () => {
     const root = await makeTempDir();
     const registry = new InputMaterialRegistry();
 
@@ -152,18 +226,148 @@ describe("input materials", () => {
 
     expect(result.kind).toBe("ingested");
     if (result.kind === "ingested") {
-      expect(result.insertText).toBe("");
+      expect(result.insertText).toBe("./missing.png");
       expect(result.diagnostics).toHaveLength(1);
       expect(result.diagnostics[0]).toMatchObject({
         input: "./missing.png",
         filePath: path.join(root, "missing.png"),
         reason: "unreadable",
+        message: "未添加为材料，原文已保留：文件不存在或不可读取",
       });
     }
     expect(registry.size).toBe(0);
   });
 
-  it("同一次粘贴里的说明文字与材料按顺序保留", async () => {
+  it("明确相对路径成功时仍生成文件材料", async () => {
+    const root = await makeTempDir();
+    await fs.writeFile(path.join(root, "package.json"), "{}\n", "utf-8");
+    const registry = new InputMaterialRegistry();
+
+    const result = ingestPastedMaterials("./package.json", registry, {
+      workspaceRoot: root,
+    });
+
+    expect(result.kind).toBe("ingested");
+    if (result.kind === "ingested") {
+      expect(result.insertText).toContain("[File #1 · package.json ·");
+      expect(result.diagnostics).toEqual([]);
+    }
+    expect(registry.size).toBe(1);
+  });
+
+  it("纯路径批次支持多个材料按顺序生成 chip", async () => {
+    const root = await makeTempDir();
+    await fs.writeFile(path.join(root, "shot.png"), minimalPng(2, 3));
+    await fs.writeFile(path.join(root, "note.txt"), "hello\n", "utf-8");
+    const registry = new InputMaterialRegistry();
+
+    const result = ingestPastedMaterials("./shot.png\n./note.txt", registry, {
+      workspaceRoot: root,
+    });
+
+    expect(result.kind).toBe("ingested");
+    if (result.kind === "ingested") {
+      expect(result.insertText).toMatch(
+        /^\[Image #1 · shot\.png · 2x3 · .+\]\n\[File #2 · note\.txt · .+\]$/,
+      );
+      expect(result.diagnostics).toEqual([]);
+    }
+    expect(registry.size).toBe(2);
+  });
+
+  it("纯路径批次部分失败时保留失败原文并返回诊断", async () => {
+    const root = await makeTempDir();
+    await fs.writeFile(path.join(root, "shot.png"), minimalPng(2, 3));
+    const registry = new InputMaterialRegistry();
+
+    const result = ingestPastedMaterials("./shot.png\n./missing.png", registry, {
+      workspaceRoot: root,
+    });
+
+    expect(result.kind).toBe("ingested");
+    if (result.kind === "ingested") {
+      expect(result.insertText).toContain("[Image #1 · shot.png · 2x3 ·");
+      expect(result.insertText).toContain("./missing.png");
+      expect(result.diagnostics).toEqual([
+        {
+          input: "./missing.png",
+          filePath: path.join(root, "missing.png"),
+          reason: "unreadable",
+          message: "未添加为材料，原文已保留：文件不存在或不可读取",
+        },
+      ]);
+    }
+    expect(registry.size).toBe(1);
+  });
+
+  it("源码位置按普通文本保留", async () => {
+    const root = await makeTempDir();
+    await fs.mkdir(path.join(root, "src"));
+    await fs.writeFile(path.join(root, "src", "main.ts"), "export {};\n", "utf-8");
+    const absoluteLocation = `${path.join(root, "src", "main.ts")}:12:3`;
+
+    for (const content of [
+      "./src/main.ts:12",
+      "./src/main.ts:12:3",
+      absoluteLocation,
+      "src/main.ts:12:3",
+      "src/main.ts(12,3)",
+    ]) {
+      const registry = new InputMaterialRegistry();
+      expect(
+        ingestPastedMaterials(content, registry, { workspaceRoot: root }),
+      ).toEqual({ kind: "not-material" });
+      expect(registry.size).toBe(0);
+    }
+  });
+
+  it("未加引号的含空白强路径按命令文本保留", async () => {
+    const root = await makeTempDir();
+    await fs.writeFile(path.join(root, "build.sh"), "echo build\n", "utf-8");
+    const registry = new InputMaterialRegistry();
+
+    const result = ingestPastedMaterials("./build.sh --prod", registry, {
+      workspaceRoot: root,
+    });
+
+    expect(result).toEqual({ kind: "not-material" });
+    expect(registry.size).toBe(0);
+  });
+
+  it("带空格路径整行加引号时仍生成文件材料", async () => {
+    const root = await makeTempDir();
+    await fs.writeFile(path.join(root, "a b.txt"), "hello", "utf-8");
+    const registry = new InputMaterialRegistry();
+
+    const result = ingestPastedMaterials('"./a b.txt"', registry, {
+      workspaceRoot: root,
+    });
+
+    expect(result.kind).toBe("ingested");
+    if (result.kind === "ingested") {
+      expect(result.insertText).toContain("[File #1 · a b.txt ·");
+      expect(result.diagnostics).toEqual([]);
+    }
+    expect(registry.size).toBe(1);
+  });
+
+  it("强路径材料与裸候选文件名混排时整体按普通文本保留", async () => {
+    const root = await makeTempDir();
+    await fs.writeFile(path.join(root, "package.json"), "{}\n", "utf-8");
+    await fs.writeFile(path.join(root, "README.md"), "# demo\n", "utf-8");
+    const registry = new InputMaterialRegistry();
+
+    const result = ingestPastedMaterials(
+      "./package.json\nREADME.md\nbye",
+      registry,
+      { workspaceRoot: root },
+    );
+
+    expect(result).toEqual({ kind: "not-material" });
+    expect(registry.size).toBe(0);
+  });
+
+  it("同一次粘贴里的说明文字与强路径整体按普通文本保留", async () => {
     const root = await makeTempDir();
     const imagePath = path.join(root, "shot.png");
     await fs.writeFile(imagePath, minimalPng(2, 3));
@@ -175,14 +379,8 @@ describe("input materials", () => {
       { workspaceRoot: root },
     );
 
-    expect(result.kind).toBe("ingested");
-    if (result.kind === "ingested") {
-      expect(result.diagnostics).toEqual([]);
-      expect(result.insertText).toMatch(
-        /^请看这张图\n\[Image #1 · shot\.png · 2x3 · .+\]\n谢谢$/,
-      );
-    }
-    expect(registry.size).toBe(1);
+    expect(result).toEqual({ kind: "not-material" });
+    expect(registry.size).toBe(0);
   });
 
   it("目录路径作为明确材料失败返回诊断", async () => {
@@ -197,13 +395,13 @@ describe("input materials", () => {
 
     expect(result.kind).toBe("ingested");
     if (result.kind === "ingested") {
-      expect(result.insertText).toBe("");
+      expect(result.insertText).toBe(dirPath);
       expect(result.diagnostics).toEqual([
         {
           input: dirPath,
           filePath: dirPath,
           reason: "not-file",
-          message: "不是普通文件",
+          message: "未添加为材料，原文已保留：不是普通文件",
         },
       ]);
     }

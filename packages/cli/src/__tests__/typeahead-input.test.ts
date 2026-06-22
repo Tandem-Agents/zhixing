@@ -1405,6 +1405,66 @@ describe("InputController — 多行粘贴提交历史区", () => {
     }
   });
 
+  it("已有说明文字时单独粘贴图片路径仍按材料提交", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-input-"));
+    try {
+      const imagePath = path.join(tempDir, "shot.png");
+      await fs.writeFile(imagePath, minimalPng(4, 5));
+      const { stdin } = makeStreams();
+      const { broker, dispatcher } = makeHarness();
+      const materialRegistry = new InputMaterialRegistry();
+      const { screen } = makeCapturingScreen();
+      const controller = new InputController({
+        broker,
+        dispatcher,
+        getRuntime: makeRuntime,
+        screen,
+        stdin,
+        columns: 80,
+        materialRegistry,
+        workspaceRoot: tempDir,
+      });
+      const resultP = controller.waitOnce();
+
+      controller.start();
+      await typeChars(stdin, "请看 ");
+      await pasteText(stdin, "./shot.png");
+
+      const inputText = stripAnsi(controller.renderLines().join("\n"));
+      expect(inputText).toContain("请看 ");
+      expect(inputText).toContain("[Image #1 · shot.png");
+      expect(inputText).not.toContain("./shot.png");
+
+      await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+      const result = await resultP;
+      expect(result.kind).toBe("text");
+      if (result.kind === "text") {
+        const prepared = await prepareUserTurnInput(result.text, {
+          workspaceRoot: tempDir,
+          materialRegistry,
+        });
+        expect(prepared?.errors).toEqual([]);
+        expect(prepared?.input.parts.map((part) => part.type)).toEqual([
+          "text",
+          "image",
+        ]);
+        expect(prepared?.input.parts[0]).toEqual({
+          type: "text",
+          text: "请看 ",
+        });
+        expect(prepared?.input.parts[1]).toMatchObject({
+          type: "image",
+          name: "shot.png",
+          mimeType: "image/png",
+        });
+      }
+
+      controller.stop();
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("连续粘贴多个图片路径时保留全部材料 chip", async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-input-"));
     try {
@@ -1503,7 +1563,7 @@ describe("InputController — 多行粘贴提交历史区", () => {
       const inputText = stripAnsi(controller.renderLines().join("\n"));
       expect(inputText).toContain("[Image #1 · shot.png");
       expect(inputText).not.toContain(imagePath);
-      expect(inputText).not.toContain(missingPath);
+      expect(inputText).toContain(missingPath);
       expect(diagnostics).toEqual([missingPath]);
       expect(materialRegistry.size).toBe(1);
 
@@ -1512,17 +1572,24 @@ describe("InputController — 多行粘贴提交历史区", () => {
       expect(result.kind).toBe("text");
       if (result.kind === "text") {
         expect(result.text).toContain("[Image #1");
-        expect(result.text).not.toContain(missingPath);
+        expect(result.text).toContain(missingPath);
         const prepared = await prepareUserTurnInput(result.text, {
           workspaceRoot: tempDir,
           materialRegistry,
         });
         expect(prepared?.errors).toEqual([]);
-        expect(prepared?.input.parts).toHaveLength(1);
+        expect(prepared?.input.parts.map((part) => part.type)).toEqual([
+          "image",
+          "text",
+        ]);
         expect(prepared?.input.parts[0]).toMatchObject({
           type: "image",
           name: "shot.png",
           mimeType: "image/png",
+        });
+        expect(prepared?.input.parts[1]).toEqual({
+          type: "text",
+          text: `\n${missingPath}`,
         });
       }
 
@@ -1583,6 +1650,114 @@ describe("InputController — 多行粘贴提交历史区", () => {
     }
   });
 
+  it("粘贴含 strong-path 失败行的长日志仍按文本折叠并保真提交", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-input-"));
+    try {
+      const { stdin } = makeStreams();
+      const { broker, dispatcher } = makeHarness();
+      const registry = new PasteRegistry();
+      const materialRegistry = new InputMaterialRegistry();
+      const diagnostics: string[] = [];
+      const { screen } = makeCapturingScreen();
+      const controller = new InputController({
+        broker,
+        dispatcher,
+        getRuntime: makeRuntime,
+        screen,
+        stdin,
+        columns: 80,
+        registry,
+        materialRegistry,
+        workspaceRoot: tempDir,
+        onMaterialIngestDiagnostics: (items) => {
+          diagnostics.push(...items.map((item) => item.input));
+        },
+      });
+      const resultP = controller.waitOnce();
+      const pasted = [
+        "Error: command failed",
+        "./missing-build.sh",
+        "  at runTask",
+        "done",
+      ].join("\n");
+
+      controller.start();
+      await pasteText(stdin, pasted);
+
+      const inputText = stripAnsi(controller.renderLines().join("\n"));
+      expect(inputText).toContain("[Pasted #");
+      expect(inputText).not.toContain("./missing-build.sh");
+      expect(diagnostics).toEqual([]);
+      expect(materialRegistry.size).toBe(0);
+      expect(registry.size).toBe(1);
+
+      await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+      expect(await resultP).toEqual({ kind: "text", text: pasted });
+
+      controller.stop();
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("同一次粘贴里的说明文字与强路径按普通文本保留", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-input-"));
+    try {
+      const imagePath = path.join(tempDir, "shot.png");
+      await fs.writeFile(imagePath, minimalPng(4, 5));
+      const { stdin } = makeStreams();
+      const { broker, dispatcher } = makeHarness();
+      const materialRegistry = new InputMaterialRegistry();
+      const diagnostics: string[] = [];
+      const { screen } = makeCapturingScreen();
+      const controller = new InputController({
+        broker,
+        dispatcher,
+        getRuntime: makeRuntime,
+        screen,
+        stdin,
+        columns: 80,
+        materialRegistry,
+        workspaceRoot: tempDir,
+        onMaterialIngestDiagnostics: (items) => {
+          diagnostics.push(...items.map((item) => item.input));
+        },
+      });
+      const resultP = controller.waitOnce();
+
+      controller.start();
+      await pasteText(stdin, `请看\n${imagePath}\na/b\n谢谢`);
+
+      const inputText = stripAnsi(controller.renderLines().join("\n"));
+      expect(inputText).toContain("请看");
+      expect(inputText).toContain(imagePath);
+      expect(inputText).toContain("a/b");
+      expect(inputText).toContain("谢谢");
+      expect(inputText).not.toContain("[Image #");
+      expect(diagnostics).toEqual([]);
+      expect(materialRegistry.size).toBe(0);
+
+      await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+      const result = await resultP;
+      expect(result.kind).toBe("text");
+      if (result.kind === "text") {
+        expect(result.text).toBe(`请看\n${imagePath}\na/b\n谢谢`);
+        const prepared = await prepareUserTurnInput(result.text, {
+          workspaceRoot: tempDir,
+          materialRegistry,
+        });
+        expect(prepared?.errors).toEqual([]);
+        expect(prepared?.input.parts).toEqual([
+          { type: "text", text: `请看\n${imagePath}\na/b\n谢谢` },
+        ]);
+      }
+
+      controller.stop();
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("明确材料路径全部失败时不污染已有草稿", async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-input-"));
     try {
@@ -1613,12 +1788,12 @@ describe("InputController — 多行粘贴提交历史区", () => {
 
       const inputText = stripAnsi(controller.renderLines().join("\n"));
       expect(inputText).toContain("keep ");
-      expect(inputText).not.toContain(missingPath);
+      expect(inputText).toContain(missingPath);
       expect(diagnostics).toEqual([missingPath]);
       expect(materialRegistry.size).toBe(0);
 
       await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
-      expect(await resultP).toEqual({ kind: "text", text: "keep " });
+      expect(await resultP).toEqual({ kind: "text", text: `keep ${missingPath}` });
 
       controller.stop();
     } finally {
@@ -1626,7 +1801,115 @@ describe("InputController — 多行粘贴提交历史区", () => {
     }
   });
 
-  it("同一次粘贴里的说明文字与材料按顺序提交", async () => {
+  it("裸文件名即使存在也按普通文本提交", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-input-"));
+    try {
+      await fs.writeFile(
+        path.join(tempDir, "package.json"),
+        '{ "name": "demo" }\n',
+        "utf-8",
+      );
+      const { stdin } = makeStreams();
+      const { broker, dispatcher } = makeHarness();
+      const materialRegistry = new InputMaterialRegistry();
+      const { screen } = makeCapturingScreen();
+      const controller = new InputController({
+        broker,
+        dispatcher,
+        getRuntime: makeRuntime,
+        screen,
+        stdin,
+        columns: 80,
+        materialRegistry,
+        workspaceRoot: tempDir,
+      });
+      const resultP = controller.waitOnce();
+
+      controller.start();
+      await pasteText(stdin, "本周计划\npackage.json\n记得测试");
+
+      const inputText = stripAnsi(controller.renderLines().join("\n"));
+      expect(inputText).toContain("本周计划");
+      expect(inputText).toContain("package.json");
+      expect(inputText).toContain("记得测试");
+      expect(inputText).not.toContain("[File #");
+      expect(materialRegistry.size).toBe(0);
+
+      await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+      const result = await resultP;
+      expect(result.kind).toBe("text");
+      if (result.kind === "text") {
+        expect(result.text).toBe("本周计划\npackage.json\n记得测试");
+        const prepared = await prepareUserTurnInput(result.text, {
+          workspaceRoot: tempDir,
+          materialRegistry,
+        });
+        expect(prepared?.errors).toEqual([]);
+        expect(prepared?.input.parts).toEqual([
+          { type: "text", text: "本周计划\npackage.json\n记得测试" },
+        ]);
+        expect(JSON.stringify(prepared?.input.parts)).not.toContain("<file path=");
+      }
+
+      controller.stop();
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("明确相对文件路径仍按材料提交", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-input-"));
+    try {
+      const filePath = path.join(tempDir, "package.json");
+      await fs.writeFile(filePath, '{ "name": "demo" }\n', "utf-8");
+      const { stdin } = makeStreams();
+      const { broker, dispatcher } = makeHarness();
+      const materialRegistry = new InputMaterialRegistry();
+      const { screen } = makeCapturingScreen();
+      const controller = new InputController({
+        broker,
+        dispatcher,
+        getRuntime: makeRuntime,
+        screen,
+        stdin,
+        columns: 80,
+        materialRegistry,
+        workspaceRoot: tempDir,
+      });
+      const resultP = controller.waitOnce();
+
+      controller.start();
+      await pasteText(stdin, "./package.json");
+
+      const inputText = stripAnsi(controller.renderLines().join("\n"));
+      expect(inputText).toContain("[File #1 · package.json");
+      expect(inputText).not.toContain("./package.json");
+      expect(materialRegistry.size).toBe(1);
+
+      await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+      const result = await resultP;
+      expect(result.kind).toBe("text");
+      if (result.kind === "text") {
+        const prepared = await prepareUserTurnInput(result.text, {
+          workspaceRoot: tempDir,
+          materialRegistry,
+        });
+        expect(prepared?.errors).toEqual([]);
+        expect(prepared?.input.parts).toEqual([
+          {
+            type: "text",
+            text: `<file path="${filePath.replace(/\\/g, "/")}">\n{ "name": "demo" }\n\n</file>`,
+          },
+        ]);
+      }
+
+      controller.stop();
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("同一次粘贴里的说明文字与强路径按普通文本提交", async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-input-"));
     try {
       const imagePath = path.join(tempDir, "shot.png");
@@ -1652,42 +1935,24 @@ describe("InputController — 多行粘贴提交历史区", () => {
 
       const inputText = stripAnsi(controller.renderLines().join("\n"));
       expect(inputText).toContain("请看这张图");
-      expect(inputText).toContain("[Image #1 · shot.png");
+      expect(inputText).toContain(imagePath);
       expect(inputText).toContain("谢谢");
-      expect(inputText.indexOf("请看这张图")).toBeLessThan(
-        inputText.indexOf("[Image #1"),
-      );
-      expect(inputText.indexOf("[Image #1")).toBeLessThan(
-        inputText.indexOf("谢谢"),
-      );
+      expect(inputText).not.toContain("[Image #");
+      expect(materialRegistry.size).toBe(0);
 
       await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
       const result = await resultP;
       expect(result.kind).toBe("text");
       if (result.kind === "text") {
+        expect(result.text).toBe(`请看这张图\n${imagePath}\n谢谢`);
         const prepared = await prepareUserTurnInput(result.text, {
           workspaceRoot: tempDir,
           materialRegistry,
         });
         expect(prepared?.errors).toEqual([]);
-        expect(prepared?.input.parts.map((part) => part.type)).toEqual([
-          "text",
-          "image",
-          "text",
+        expect(prepared?.input.parts).toEqual([
+          { type: "text", text: `请看这张图\n${imagePath}\n谢谢` },
         ]);
-        expect(prepared?.input.parts[0]).toEqual({
-          type: "text",
-          text: "请看这张图\n",
-        });
-        expect(prepared?.input.parts[1]).toMatchObject({
-          type: "image",
-          name: "shot.png",
-          mimeType: "image/png",
-        });
-        expect(prepared?.input.parts[2]).toEqual({
-          type: "text",
-          text: "\n谢谢",
-        });
       }
 
       controller.stop();
