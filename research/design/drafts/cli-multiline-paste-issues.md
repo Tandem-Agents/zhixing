@@ -937,6 +937,169 @@ pnpm cli:build
 
 结果：CLI 类型检查通过；定向 2 个测试文件、78 个测试通过；CLI 全量 140 个测试文件、2115 个测试通过；CLI 构建成功。
 
+### 11. material chip 缺少来源边界，`@file` / 普通文本同形字符串会被当附件解析
+
+**状态**：已修复，已测试，已构建
+
+**现象**：用户输入、`@file:` 展开正文、日志或代码里只要出现 `[Image #N ...]` / `[File #N ...]` 这种与 material chip 同形的普通文本，并且当前 session 的 `InputMaterialRegistry` 中存在同 id 材料，提交准备链路就会把这段普通文本当作真实附件解析。`@file` 是最确定触发面：文件正文里出现 chip 字面量时，正文会被切成 `text + image + text`；若对应材料源文件不可读，还会错误阻断一次本应只是普通文本的提交。
+
+**审核结论**：问题真实，根因是 material chip 的“显示字符串”和“语义引用”没有来源边界。它不是 `@file` 读取能力问题，也不是 material registry 生命周期问题；真正问题是 `prepareUserTurnInput()` 把 `@file` 展开后的整段字符串继续交给 `resolveInputMaterials()` 扫描，而 `resolveInputMaterials()` 只按 regex + id 解析，不知道 match 来自输入区真实 handle、用户手写普通文本，还是外部文件正文。
+
+**事实证据**：
+
+- `user-turn-input.ts` 中 `prepareUserTurnInput()` 当前顺序是：先调用 `resolveFileRefs()` 得到 `refResult.text`，再调用 `resolveInputMaterials(refResult.text, materialRegistry)`。
+- `input-material-resolve.ts` 的 `resolveInputMaterials()` 在整段字符串上 `matchAll(createMaterialTokenPattern())`，只取 token id 查 registry；它没有来源信息，也不校验 token 里的 `Image` / `File` 标签是否与 registry entry 类型一致。
+- 最小观测 1：registry 里有 id=1 的 image 时，直接提交普通文本 `[Image #1 · arbitrary literal]`，结果是 `image` part，而不是 text。
+- 最小观测 2：提交普通文本 `[File #1 · arbitrary literal]`，即使 label 是 `File`，只要 registry 的 #1 是 image，结果仍是 `image` part。
+- 最小观测 3：让 `resolveRefs` 返回 `<file>...\n[Image #1 · arbitrary literal]\n</file>`，结果变成 `text + image + text`；未知 id（如 `#999`）才会保留为普通 text。
+- 现有 `user-turn-input.test.ts` 只覆盖普通正文、空白输入、`@file` 周围空白保真；`input-material.test.ts` 只覆盖真实 chip 解析，没有覆盖同形普通文本 / `@file` 展开文本不应二次解析的边界。
+
+**背后需求**：
+
+- material chip 是输入区 UI handle，不是用户正文语法。用户和文件内容里出现相同字面量时，默认必须按普通文本保真。
+- 只有系统通过材料采集能力创建并留在当前输入语义中的 handle，才能转换为结构化材料 part。
+- `@file` 是正文增强：它把文件正文作为 text 交给 agent。文件正文不能因为恰好长得像 CLI chip，就越权变成附件。
+- 用户不需要理解 registry id、chip 格式或 session 生命周期。系统必须保护“UI 显示”和“语义输入”的边界。
+
+**目标效果**：
+
+- 输入区真实 material chip 提交后仍解析为结构化 `UserTurnInput.parts`。
+- `@file` 展开的文件正文即使包含 `[Image #1 ...]` / `[File #1 ...]` 字面量，也保留在 text part 中，不变成材料、不触发材料读取错误。
+- 普通手写 / 粘贴文本中的同形 chip 字面量不应因为 registry 中有同 id entry 就自动变成附件；至少不能让 `@file` 等系统生成的新 text 被二次扫描成附件。
+- 同一条输入里同时有真实 material chip 与 `@file` 引用时，真实 chip 解析为 image / file 能力；`@file` 正文保持 text；顺序稳定。
+- `PreparedUserTurnInput.text` 继续作为“文本投影”保留 `@file` 展开结果与 material chip 显示字符串；真正发送给 core 的是 `input.parts`。scrollback echo 仍由 deferred commit 写用户原始输入，不因本问题展开 `@file` 正文。
+
+**架构判断**：
+
+- 最优边界不是扩大 regex 黑名单，也不是在 `@file` 内容里转义 `[Image #...]`。这些都是文本补丁，会继续让未来音频、视频、网页快照等 handle 重复踩坑。
+- 正确抽象是“来源感知的提交准备管线”：把原始输入先切成有来源的片段，再对不同来源执行不同转换。真实 handle 片段走材料解析；text 片段走 `@file` 展开；`@file` 生成的新 text 不再进入 material scanner。
+- 当前 `InputBuffer` 仍是字符串模型，短期可以先在 `prepareUserTurnInput()` 内建立提交期 segment pipeline，解决 `@file` / 生成文本二次解析；长期最优形态是输入 composer 内部升级为 text segment + handle segment，这样手写同形 token 也天然只是 text，不再依赖显示字符串承担语义引用。
+- 为避免未来返工，本轮修复应把 material 解析能力从“扫描整段字符串”收束为“解析已识别的 handle 片段”。即使暂时仍从原始 draft token 化出 handle 片段，也要让 API 形态朝结构化 composer 兼容。
+
+**最优修复方向**：
+
+- 在 `user-turn-input.ts` 引入提交期片段模型，例如：
+  - `text`：来自用户原始文本或 `@file` 展开的文本。
+  - `material-handle`：来自原始输入中识别出的 material chip 片段。
+- `prepareUserTurnInput()` 改为来源感知流程：
+  1. 在原始 input 上先按 material token 切分成有序片段，不对后续生成文本再次扫描 material token。
+  2. 对 `text` 片段分别执行 `resolveFileRefs()`；累计 `resolvedFiles` / `errors`，并把展开后的内容作为 text part 候选。
+  3. 对 `material-handle` 片段按 id 查 registry；未知 id 或类型标签不匹配时保留为 text，避免伪 token 越权解析。
+  4. 对真实材料 entry 调用共享的 material resolve 能力，把 image 转成 image part，把文本文件转成带来源的 text part，把不可发送材料返回 errors。
+  5. 最后合并相邻 text part，保持用户输入顺序。
+- 重构 `input-material-resolve.ts`：保留“解析一段 draft 中 material token”的兼容函数给旧测试使用，但内部应拆出“解析单个 material handle / entry”的函数，供新的 segment pipeline 直接调用。避免新代码继续依赖整段字符串二次扫描。
+- `PreparedUserTurnInput.text` 的生成规则：拼接所有 text 片段的 `@file` 展开结果和原始 material chip 显示字符串，保持现有调试 / 测试语义；不要用它作为 source of truth 去反推材料。
+- REPL 的 deferred 提交流程不变：准备成功并被核心接收后才 commit；准备失败仍 reject，scrollback 不写假历史。
+
+**不采用的方案**：
+
+- 不采用“让 `@file` 展开时转义 `[Image #...]`”：这会把 CLI UI token 泄漏进文件正文处理规则，未来每种 handle 都要补一遍。
+- 不采用“要求 material token 详情完全匹配 registry.format(id)”作为主方案：宽度预算会产生多个合法展示形态，且复制出来的真实 chip 仍可能混入普通文本，无法解决来源问题。
+- 不采用“把 `@file` 放到 material 解析之后再跑整段文本”：这会让 material 生成的文本文件内容再次被 `@file` 解析，制造新的二次转换污染。
+
+**验收标准**：
+
+- 补 `user-turn-input.test.ts`：`@file` 展开正文包含活着的 image chip 字面量时，结果仍是 text part，不产生 image part，不产生材料读取错误。
+- 补组合测试：真实 material chip + `@file` 引用同时存在时，真实 chip 解析为 image；`@file` 正文中的 chip 字面量保留为 text；顺序正确。
+- 补同形普通文本测试：`[Image #1 · arbitrary literal]` / `[File #1 · arbitrary literal]` 不应仅凭 registry 同 id 就解析为材料；如果当前阶段受字符串 composer 限制无法完全关闭，必须至少通过类型标签校验与来源分段锁住 `@file` / 生成文本边界，并在后续结构化 composer 中彻底消除。
+- 补未知 id / 类型标签不匹配测试：未知 id 保留 text；label 与 registry entry kind 不一致时保留 text。
+- 保留现有真实材料提交测试：输入区真实 image chip 仍解析为 image part；文本文件 chip 仍解析为带来源的 text part；材料读取错误仍能阻断提交且不写 scrollback。
+
+**修复记录**：
+
+- `input-material-resolve.ts` 拆出 `resolveInputMaterialToken()`，把“解析可信 material handle”从“扫描整段字符串”中分离出来。
+- `InputMaterialRegistry` 记录自身实际格式化过的 chip 字符串；material 解析必须同时满足 registry id 存在、label 与 entry 类型一致、token 是 registry 生成过的显示 token，避免普通同形文本仅凭 id 越权解析。
+- `user-turn-input.ts` 改为来源感知提交期分段：先在原始 input 上切出 text / material-handle 片段；仅 text 片段执行 `@file` 展开；`@file` 生成的新文本不再二次扫描 material chip。
+- `PreparedUserTurnInput.text` 保持文本投影：text 片段使用 `@file` 展开结果，material handle 片段保留原 chip 显示字符串；core payload 以 `input.parts` 为准。
+- `user-turn-input.test.ts` 补充回归：`@file` 展开正文里的 chip 字面量保持 text；真实 chip + `@file` 混排按来源分别处理；label 不匹配、未由 registry 格式化过的同 id chip 字面量保持 text。
+
+**验证命令**：
+
+```bash
+pnpm --filter @zhixing/cli exec tsc --noEmit && pnpm --filter @zhixing/cli exec vitest run src/__tests__/user-turn-input.test.ts src/__tests__/input-material.test.ts src/__tests__/typeahead-input.test.ts
+pnpm --filter @zhixing/cli test
+pnpm cli:build
+```
+
+结果：CLI 类型检查通过；定向 3 个测试文件、85 个测试通过；CLI 全量 140 个测试文件、2119 个测试通过；CLI 构建成功。
+
+### 12. 粘贴含斜杠的普通多行文本 / 代码会被材料采集静默吞行
+
+**状态**：已确认，待修复
+
+**现象**：用户粘贴普通多行文本或代码时，只要某些行包含 `/` 或 `\`，当前材料采集会把这些行误判为明确路径。`statSync` 失败后，这些行只进入 diagnostics，不回到输出文本，导致用户输入被静默删行；同时本次粘贴被标记为 `ingested`，绕过文本长粘贴折叠。
+
+**审核结论**：问题真实，是第 10 个问题修复后引入的高频回归。第 10 个问题要解决“真实材料批次部分失败不能整批退化”，但当前实现把“任意含斜杠行”当成材料失败项，破坏了“粘贴代码 / 日志必须保真”这个更基础的主路径需求。
+
+**事实证据**：
+
+- `input-material-ingest.ts` 对每个非空行执行 `resolvePastedPath()` + `fs.statSync()`。
+- `isExplicitPathLike()` 当前把任意 `/` 或 `\` 判为明确路径信号，而且这个判断早于“未加引号且含空白则不像路径”的防线。
+- 最小观测输入：
+
+```text
+function f() {
+  return a / b;
+}
+// see src/main.ts
+const x = 1;
+```
+
+当前 `ingestPastedMaterials()` 返回：
+
+```text
+function f() {
+}
+const x = 1;
+```
+
+并产生两条“文件不存在或不可读取”诊断，registry size 为 0。
+
+- 因为返回 `kind: "ingested"`，`finalizePaste()` 认为这是材料粘贴，`shouldFold=false`，原本应按普通长文本折叠的内容会直接插入残缺文本。
+
+**背后需求**：
+
+- CLI 面向 agent 的最高频工作流之一就是粘贴代码、日志、路径片段和错误堆栈。普通文本保真优先级高于路径粘贴的启发式便利。
+- 材料采集只能在用户意图足够明确时接管输入。启发式不确定时必须回退为普通文本，不能删行、不能误报、不能绕过长粘贴折叠。
+- 同时仍要保留第 10 个问题的产品目标：当用户确实在粘贴一批材料路径，部分成功、部分失败时，成功材料应保留，失败项应提示。
+
+**目标效果**：
+
+- 粘贴代码、日志、日期、URL 片段、注释、除法表达式、import 语句等普通文本时，内容完整保留，并按长文本规则折叠或展开。
+- 没有任何真实材料被识别时，本次粘贴必须返回 `not-material`，让文本粘贴路径处理，不能产生材料诊断。
+- 至少识别出一个真实材料时，同批次里的明确失败路径可以诊断；普通说明文字继续保留为文本。
+- 单行或多行强路径意图，例如绝对路径、`~/...`、`./...`、`../...`、带引号路径，可以继续作为材料路径处理；但普通含斜杠文本不能仅凭斜杠被吞掉。
+
+**架构判断**：
+
+- 最优解是把材料采集拆成“路径意图分类”和“材料注册”两个阶段，而不是在 `statSync` 异常分支里直接决定吞行。
+- 路径意图至少应分为三类：强路径、候选路径、普通文本。强路径失败可以独立诊断；候选路径只有在本次粘贴已确认是材料批次时才诊断；普通文本永远保留。
+- “是否是材料批次”不能由失败项单独决定，必须由真实 material 成功或强路径意图决定。这样既保留材料批量能力，又把不确定启发式的风险还给文本保真。
+
+**最优修复方向**：
+
+- 重构 `ingestPastedMaterials()` 为两阶段流程：
+  - 第一阶段逐行规范化并分类：空行、普通文本、强路径、候选路径。
+  - 第二阶段只对路径类行做 stat / register；记录成功 material、失败项和原始行。
+- 收紧路径启发式：
+  - URL 明确不是本地材料路径。
+  - 未加引号且包含普通空白的行默认是文本，除非它具备绝对路径、home、显式相对路径、Windows 盘符、UNC 等强路径形态。
+  - 单纯包含 `/` 或 `\` 只能算候选路径，不能单独触发吞行。
+  - 扩展名、路径分隔符等弱信号在“已有成功材料的批次”中可用于诊断失败项；没有成功材料时应回退为普通文本。
+- 返回策略：
+  - 有成功 material：返回 `ingested`，插入成功 chip 与普通说明文字，对强路径 / 候选路径失败项给 diagnostics。
+  - 无成功 material、无强路径失败：返回 `not-material`，完整交给文本粘贴逻辑。
+  - 无成功 material、但存在强路径失败：返回 `ingested` 诊断强路径失败，不插入伪材料；是否保留原有草稿按第 10 个问题的全失败语义执行。
+- 保持 `finalizePaste()` 的现有分层：`not-material` 才能进入文本折叠；`ingested` 不触发文本长粘贴折叠。
+
+**验收标准**：
+
+- 补 `input-material.test.ts`：粘贴含 `return a / b;`、`// see src/main.ts`、`hello\nfoo/bar\nbye` 的普通文本时返回 `not-material`，registry 为空，无 diagnostics。
+- 补 `typeahead-input.test.ts`：粘贴上述代码块时输入区不丢行；达到长粘贴阈值时仍按文本 paste token 折叠，提交后原文完整。
+- 保留第 10 个问题回归：有效材料 + 缺失路径仍保留成功 chip 并提示失败项。
+- 补强路径失败测试：单独粘贴明确绝对路径 / `./missing.png` 等强路径失败时仍有诊断，不静默当作成功材料。
+- 补普通文本误判防线：URL、注释、除法表达式、import 语句、日期片段不触发材料采集。
+
 ## 已验证
 
 第 1-4 个问题验证命令：

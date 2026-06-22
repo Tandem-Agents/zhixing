@@ -41,6 +41,7 @@ export class InputMaterialRegistry {
   private nextId = 1;
   private readonly byId = new Map<number, InputMaterialEntry>();
   private readonly byFilePath = new Map<string, number>();
+  private readonly formattedTokensById = new Map<number, Set<string>>();
 
   registerLocalFile(input: RegisterLocalMaterialInput): number {
     const existingId = this.byFilePath.get(input.filePath);
@@ -71,13 +72,25 @@ export class InputMaterialRegistry {
     const entry = this.byId.get(id);
     if (!entry) return `[File #${id} · unavailable]`;
     const label = entry.kind === "image" ? "Image" : "File";
-    return formatMaterialToken(label, entry, options.maxWidth);
+    const token = formatMaterialToken(label, entry, options.maxWidth);
+    let tokens = this.formattedTokensById.get(id);
+    if (!tokens) {
+      tokens = new Set<string>();
+      this.formattedTokensById.set(id, tokens);
+    }
+    tokens.add(token);
+    return token;
+  }
+
+  isKnownToken(id: number, token: string): boolean {
+    return this.formattedTokensById.get(id)?.has(token) === true;
   }
 
   cleanup(aliveIds: ReadonlySet<number>): void {
     for (const [id, entry] of this.byId) {
       if (aliveIds.has(id)) continue;
       this.byId.delete(id);
+      this.formattedTokensById.delete(id);
       if (this.byFilePath.get(entry.filePath) === id) {
         this.byFilePath.delete(entry.filePath);
       }
@@ -87,6 +100,7 @@ export class InputMaterialRegistry {
   clearAll(): void {
     this.byId.clear();
     this.byFilePath.clear();
+    this.formattedTokensById.clear();
     this.nextId = 1;
   }
 

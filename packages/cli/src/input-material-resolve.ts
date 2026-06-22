@@ -6,6 +6,7 @@ import { detectMimeType } from "./input-material-ingest.js";
 import {
   createMaterialTokenPattern,
   type InputMaterialEntry,
+  type InputMaterialKind,
   type InputMaterialRegistry,
 } from "./input-material-registry.js";
 
@@ -17,6 +18,14 @@ export interface ResolveInputMaterialsOptions {
 export interface ResolveInputMaterialsResult {
   readonly input: UserTurnInput;
   readonly errors: readonly string[];
+}
+
+export type InputMaterialTokenLabel = "Image" | "File";
+
+export interface ResolveInputMaterialTokenInput {
+  readonly token: string;
+  readonly label: InputMaterialTokenLabel;
+  readonly id: number;
 }
 
 export async function resolveInputMaterials(
@@ -38,13 +47,17 @@ export async function resolveInputMaterials(
       pushText(parts, draft.slice(offset, start));
     }
 
-    const id = parseInt(match[2]!, 10);
-    const entry = registry.get(id);
-    if (!entry) {
-      pushText(parts, match[0]);
-    } else {
-      await pushMaterial(parts, errors, entry, options);
-    }
+    const tokenResult = await resolveInputMaterialToken(
+      {
+        token: match[0],
+        label: match[1] as InputMaterialTokenLabel,
+        id: parseInt(match[2]!, 10),
+      },
+      registry,
+      options,
+    );
+    pushParts(parts, tokenResult.input.parts);
+    errors.push(...tokenResult.errors);
     offset = start + match[0].length;
   }
 
@@ -52,6 +65,27 @@ export async function resolveInputMaterials(
     pushText(parts, draft.slice(offset));
   }
 
+  return { input: { parts }, errors };
+}
+
+export async function resolveInputMaterialToken(
+  token: ResolveInputMaterialTokenInput,
+  registry: InputMaterialRegistry,
+  options: ResolveInputMaterialsOptions = {},
+): Promise<ResolveInputMaterialsResult> {
+  const parts: UserInputPart[] = [];
+  const errors: string[] = [];
+  const entry = registry.get(token.id);
+  if (
+    !entry ||
+    token.label !== tokenLabelForKind(entry.kind) ||
+    !registry.isKnownToken(token.id, token.token)
+  ) {
+    pushText(parts, token.token);
+    return { input: { parts }, errors };
+  }
+
+  await pushMaterial(parts, errors, entry, options);
   return { input: { parts }, errors };
 }
 
@@ -113,6 +147,10 @@ async function pushMaterial(
   pushText(parts, `<file path="${entry.filePath.replace(/\\/g, "/")}">\n${content}\n</file>`);
 }
 
+function tokenLabelForKind(kind: InputMaterialKind): InputMaterialTokenLabel {
+  return kind === "image" ? "Image" : "File";
+}
+
 async function statLocalFile(
   entry: InputMaterialEntry,
   errors: string[],
@@ -162,6 +200,16 @@ function pushText(parts: UserInputPart[], text: string): void {
     return;
   }
   parts.push({ type: "text", text });
+}
+
+function pushParts(parts: UserInputPart[], nextParts: readonly UserInputPart[]): void {
+  for (const part of nextParts) {
+    if (part.type === "text") {
+      pushText(parts, part.text);
+    } else {
+      parts.push(part);
+    }
+  }
 }
 
 function isTextLike(mimeType: string): boolean {
