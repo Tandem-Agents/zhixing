@@ -93,6 +93,7 @@ describe("input materials", () => {
       'import x from "./foo/bar";',
       "2026/06/22",
       "https://example.com/shot.png",
+      "file:///tmp/shot.png",
     ]) {
       expect(
         ingestPastedMaterials(content, registry, {
@@ -309,9 +310,13 @@ describe("input materials", () => {
     for (const content of [
       "./src/main.ts:12",
       "./src/main.ts:12:3",
+      '"./src/main.ts:12:3"',
       absoluteLocation,
+      `"${absoluteLocation}"`,
       "src/main.ts:12:3",
+      '"src/main.ts:12:3"',
       "src/main.ts(12,3)",
+      '"src/main.ts(12,3)"',
     ]) {
       const registry = new InputMaterialRegistry();
       expect(
@@ -349,6 +354,214 @@ describe("input materials", () => {
       expect(result.diagnostics).toEqual([]);
     }
     expect(registry.size).toBe(1);
+  });
+
+  it("POSIX 风格转义空格路径生成文件材料", async () => {
+    const root = await makeTempDir();
+    await fs.writeFile(path.join(root, "a b.txt"), "hello", "utf-8");
+    const registry = new InputMaterialRegistry();
+
+    const result = ingestPastedMaterials("./a\\ b.txt", registry, {
+      workspaceRoot: root,
+    });
+
+    expect(result.kind).toBe("ingested");
+    if (result.kind === "ingested") {
+      expect(result.insertText).toContain("[File #1 · a b.txt ·");
+      expect(result.diagnostics).toEqual([]);
+    }
+    expect(registry.size).toBe(1);
+  });
+
+  it("POSIX shell 转义路径生成文件材料", async () => {
+    const root = await makeTempDir();
+    const cases = [
+      { input: "./a\\ \\(1\\).txt", name: "a (1).txt" },
+      { input: "./a\\&b.txt", name: "a&b.txt" },
+      { input: "./a\\#b.txt", name: "a#b.txt" },
+      { input: "./a\\;b.txt", name: "a;b.txt" },
+      { input: "./a\\ b\\&c.txt", name: "a b&c.txt" },
+    ];
+    for (const item of cases) {
+      await fs.writeFile(path.join(root, item.name), "hello", "utf-8");
+      const registry = new InputMaterialRegistry();
+
+      const result = ingestPastedMaterials(item.input, registry, {
+        workspaceRoot: root,
+      });
+
+      expect(result.kind).toBe("ingested");
+      if (result.kind === "ingested") {
+        expect(result.insertText).toContain(`[File #1 · ${item.name} ·`);
+        expect(result.diagnostics).toEqual([]);
+      }
+      expect(registry.size).toBe(1);
+    }
+  });
+
+  it("同一行多个 POSIX 风格转义空格路径生成有序材料 chip", async () => {
+    const root = await makeTempDir();
+    await fs.writeFile(path.join(root, "a b.txt"), "hello", "utf-8");
+    await fs.writeFile(path.join(root, "c d.txt"), "world", "utf-8");
+    const registry = new InputMaterialRegistry();
+
+    const result = ingestPastedMaterials("./a\\ b.txt ./c\\ d.txt", registry, {
+      workspaceRoot: root,
+    });
+
+    expect(result.kind).toBe("ingested");
+    if (result.kind === "ingested") {
+      expect(result.insertText).toMatch(
+        /^\[File #1 · a b\.txt · .+\]\n\[File #2 · c d\.txt · .+\]$/,
+      );
+      expect(result.diagnostics).toEqual([]);
+    }
+    expect(registry.size).toBe(2);
+  });
+
+  it("同一行多个 POSIX shell 转义路径生成有序材料 chip", async () => {
+    const root = await makeTempDir();
+    await fs.writeFile(path.join(root, "a&b.txt"), "hello", "utf-8");
+    await fs.writeFile(path.join(root, "c#d.txt"), "world", "utf-8");
+    const registry = new InputMaterialRegistry();
+
+    const result = ingestPastedMaterials("./a\\&b.txt ./c\\#d.txt", registry, {
+      workspaceRoot: root,
+    });
+
+    expect(result.kind).toBe("ingested");
+    if (result.kind === "ingested") {
+      expect(result.insertText).toMatch(
+        /^\[File #1 · a&b\.txt · .+\]\n\[File #2 · c#d\.txt · .+\]$/,
+      );
+      expect(result.diagnostics).toEqual([]);
+    }
+    expect(registry.size).toBe(2);
+  });
+
+  it("同一行转义空格路径与 quoted path 混排时生成有序材料 chip", async () => {
+    const root = await makeTempDir();
+    await fs.writeFile(path.join(root, "a b.txt"), "hello", "utf-8");
+    await fs.writeFile(path.join(root, "c d.txt"), "world", "utf-8");
+    const registry = new InputMaterialRegistry();
+
+    const result = ingestPastedMaterials('./a\\ b.txt "./c d.txt"', registry, {
+      workspaceRoot: root,
+    });
+
+    expect(result.kind).toBe("ingested");
+    if (result.kind === "ingested") {
+      expect(result.insertText).toMatch(
+        /^\[File #1 · a b\.txt · .+\]\n\[File #2 · c d\.txt · .+\]$/,
+      );
+      expect(result.diagnostics).toEqual([]);
+    }
+    expect(registry.size).toBe(2);
+  });
+
+  it("同一行多个 quoted path 生成有序材料 chip", async () => {
+    const root = await makeTempDir();
+    const firstPath = path.join(root, "shot.png");
+    const secondPath = path.join(root, "note.txt");
+    await fs.writeFile(firstPath, minimalPng(2, 3));
+    await fs.writeFile(secondPath, "hello\n", "utf-8");
+    const registry = new InputMaterialRegistry();
+
+    const result = ingestPastedMaterials(`"${firstPath}" "${secondPath}"`, registry, {
+      workspaceRoot: root,
+    });
+
+    expect(result.kind).toBe("ingested");
+    if (result.kind === "ingested") {
+      expect(result.insertText).toMatch(
+        /^\[Image #1 · shot\.png · 2x3 · .+\]\n\[File #2 · note\.txt · .+\]$/,
+      );
+      expect(result.diagnostics).toEqual([]);
+    }
+    expect(registry.size).toBe(2);
+  });
+
+  it("同一行 quoted path 部分失败时保留失败 token 并返回诊断", async () => {
+    const root = await makeTempDir();
+    const imagePath = path.join(root, "shot.png");
+    await fs.writeFile(imagePath, minimalPng(2, 3));
+    const registry = new InputMaterialRegistry();
+
+    const result = ingestPastedMaterials(`"${imagePath}" "./missing.png"`, registry, {
+      workspaceRoot: root,
+    });
+
+    expect(result.kind).toBe("ingested");
+    if (result.kind === "ingested") {
+      expect(result.insertText).toContain("[Image #1 · shot.png · 2x3 ·");
+      expect(result.insertText).toContain('"./missing.png"');
+      expect(result.diagnostics).toEqual([
+        {
+          input: "./missing.png",
+          filePath: path.join(root, "missing.png"),
+          reason: "unreadable",
+          message: "未添加为材料，原文已保留：文件不存在或不可读取",
+        },
+      ]);
+    }
+    expect(registry.size).toBe(1);
+  });
+
+  it("同一行多个未加引号裸路径按普通文本保留", async () => {
+    const root = await makeTempDir();
+    await fs.writeFile(path.join(root, "shot.png"), minimalPng(2, 3));
+    await fs.writeFile(path.join(root, "note.txt"), "hello\n", "utf-8");
+    const registry = new InputMaterialRegistry();
+
+    const result = ingestPastedMaterials("./shot.png ./note.txt", registry, {
+      workspaceRoot: root,
+    });
+
+    expect(result).toEqual({ kind: "not-material" });
+    expect(registry.size).toBe(0);
+  });
+
+  it("命令里的 POSIX 转义路径按普通文本保留", async () => {
+    const root = await makeTempDir();
+    await fs.writeFile(path.join(root, "a b.txt"), "hello", "utf-8");
+    await fs.writeFile(path.join(root, "a&b.txt"), "hello", "utf-8");
+
+    for (const content of ["echo ./a\\ b.txt", "echo ./a\\&b.txt"]) {
+      const registry = new InputMaterialRegistry();
+      const result = ingestPastedMaterials(content, registry, {
+        workspaceRoot: root,
+      });
+
+      expect(result).toEqual({ kind: "not-material" });
+      expect(registry.size).toBe(0);
+    }
+  });
+
+  it("Windows 反斜杠路径不被 POSIX shell 转义改写", () => {
+    const registry = new InputMaterialRegistry();
+    const input = "C:\\Users\\me\\a\\&b.txt";
+
+    const result = ingestPastedMaterials(input, registry, {
+      workspaceRoot: "E:/repo",
+    });
+
+    expect(result.kind).toBe("ingested");
+    if (result.kind === "ingested") {
+      expect(result.insertText).toBe(input);
+      expect(result.diagnostics[0]?.input).toBe(input);
+    }
+    expect(registry.size).toBe(0);
+  });
+
+  it("未加引号 Windows 风格带空格路径按普通文本保留", async () => {
+    const registry = new InputMaterialRegistry();
+
+    const result = ingestPastedMaterials("C:\\Users\\me\\a b.txt", registry, {
+      workspaceRoot: "E:/repo",
+    });
+
+    expect(result).toEqual({ kind: "not-material" });
+    expect(registry.size).toBe(0);
   });
 
   it("强路径材料与裸候选文件名混排时整体按普通文本保留", async () => {

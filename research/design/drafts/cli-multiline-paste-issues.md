@@ -862,7 +862,7 @@ pnpm cli:build
 **背后需求**：
 
 - 用户粘贴路径，本质上是在把本地材料加入本轮输入；路径只是采集线索，不是要交给模型的正文。
-- 一次粘贴可以天然是有序混排：若干材料路径、若干普通说明文字、若干失败路径。系统应该按用户粘贴顺序保留成功材料与说明文字，并显式报告失败材料。
+- 一次材料路径粘贴可以包含多个路径，其中部分成功、部分失败。系统应该按用户粘贴顺序保留成功材料，并显式报告失败材料。说明文字与材料的同次混排语义已在第 14 个问题收敛为“整体按文本保真”，用户可通过分步输入构造文字 + 材料。
 - 一个路径错了不应让其他有效材料消失；同样，明确路径失败不应被静默塞进 prompt，让用户误以为文件已经被 agent 接收。无显式前缀的弱候选失败必须保留为普通文本，因为系统无法可靠判断它是路径错误还是用户正文。
 - 失败必须可恢复：用户要知道哪一项没加上、为什么没加上，并能通过删除、修正或重新粘贴继续完成本轮输入。
 
@@ -870,7 +870,7 @@ pnpm cli:build
 
 - 多行全是有效材料路径：全部生成 material chip，按粘贴顺序进入输入区。
 - 多行里部分路径有效、部分明确路径失败：有效项生成 material chip；明确失败项不生成材料、不作为普通正文插入，并通过清晰诊断告诉用户。无显式前缀的弱候选失败不诊断、不移除，原样保留为文本。
-- 同一次粘贴里包含普通说明文字和有效路径：普通说明文字保留为 text，路径生成 material chip，整体顺序稳定。
+- 同一次粘贴里包含普通说明文字和有效路径：第 14 个问题后整体按文本保真，不生成 material chip、不访问文件系统；需要文字 + 材料时，先输入说明文字再单独粘贴路径，或先粘贴路径生成 chip 后继续输入文字。
 - 全部都是明确路径但全部失败：输入区不新增伪材料，也不把失败路径静默插入正文；显示失败诊断，原有草稿保持可继续编辑。
 - 多行并不表达材料路径集合，例如自然语言、代码块、日志：仍按文本粘贴处理，不弹材料错误。
 - 材料失败反馈只属于接入面采集体验；提交到 core 的仍是结构化 `UserTurnInput.parts`，不把失败提示伪装成用户正文。
@@ -887,18 +887,18 @@ pnpm cli:build
 
 - 将 `materialTokensFromPastedPaths()` 替换或升级为 `ingestPastedMaterials()`，返回判别联合，而不是 `string | null`：
   - `not-material`：整段粘贴不应按材料处理，调用方继续走普通文本粘贴 / 长粘贴折叠。
-  - `ingested`：返回 `insertText` 与 `diagnostics`。`insertText` 只包含成功 material chip 与明确普通说明文字；`diagnostics` 记录失败路径、失败原因、原始行。
+  - `ingested`：返回 `insertText` 与 `diagnostics`。`insertText` 包含成功 material chip 和失败项保留原文；`diagnostics` 记录失败路径、失败原因、原始行。
 - 将路径识别拆成两层：
   - 行级规范化：处理 CRLF、首尾空白、整行引号、拖拽产生的多行路径。
   - 行级分类：已存在普通文件 -> material；明确路径形态但不存在 / 是目录 -> diagnostic；不像路径的行 -> text。
 - 普通文本误判防线：
   - 如果没有任何 material，也没有明确路径形态失败项，则返回 `not-material`。
-  - 如果至少有一个 material，则允许同批次中的普通说明文字作为 text 保留，并让明确路径失败项进入 diagnostics。
-  - 如果全部行都是明确路径形态但全部失败，则返回 `ingested`，`insertText` 为空，diagnostics 告知未添加材料。
+  - 如果至少有一个 material，则允许同批次中的明确路径失败项进入 diagnostics，并保留失败项原文。
+  - 如果全部行都是明确路径形态但全部失败，则返回 `ingested`，保留失败项原文，diagnostics 告知未添加材料。
 - `finalizePaste()` 消费新结果：
   - `not-material`：保持现有文本粘贴逻辑，包括二次长粘贴替换文本 token。
   - `ingested`：先按现有规则清理旧文本 paste token，保留已有 material chip；再插入 `insertText`；然后发送 diagnostics；不触发文本长粘贴折叠。
-- 诊断展示走接入面通知，不进入用户正文。CLI 可在 scroll 区打印一条 warning，例如“未添加 1 个材料：./missing.png -> 文件不存在”，多项时做数量摘要并列出可读项；输入区只保留成功 chip 与用户原本的普通说明文字。
+- 诊断展示走接入面通知，不进入用户正文。CLI 可在 scroll 区打印一条 warning，例如“未添加 1 个材料：./missing.png -> 文件不存在”，多项时做数量摘要并列出可读项；输入区保留成功 chip 与失败项原文。
 - 不新增“失败 material chip”作为第一选择。失败 chip 会引入新的原子编辑、提交阻断、history 保活和解析规则；当前问题只需要结构化诊断即可达到产品目标，避免制造新的 handle 债务。
 
 **边界行为**：
@@ -907,7 +907,7 @@ pnpm cli:build
 - `a.png` 有效、`./missing.png` 不存在：输入区保留 `a.png` 的 image chip，`./missing.png` 不进入正文，CLI 提示该路径不存在。
 - `a.png` 有效、`missing.png` 不存在：输入区保留 `a.png` 的 image chip，同时保留 `missing.png` 作为普通文本，不提示材料失败。
 - `notes.txt` 有效、`folder/` 是目录：`notes.txt` 生成 file chip，目录项明确提示“不是普通文件”。
-- `请看这张图\nshot.png\n谢谢`：说明文字保留为 text，`shot.png` 生成 image chip，顺序与粘贴一致。
+- `请看这张图\n./shot.png\n谢谢`：第 14 个问题后整体按普通文本保真；不会生成 image chip。用户要图文混排时，用分步粘贴路径生成 chip。
 - `./missing.png`、绝对路径或 UNC 路径单独粘贴且不存在：不插入正文，提示文件不存在；用户可修正后重新粘贴。
 - `missing.png` 单独粘贴且不存在：按普通文本处理，因为它只是弱候选，不足以证明用户要添加材料。
 - 粘贴代码 / 日志中包含类似路径的片段但整体不是路径集合：继续作为文本处理。
@@ -915,10 +915,10 @@ pnpm cli:build
 
 **验收标准**：
 
-- 补 `input-material.test.ts`：覆盖 `not-material`、全成功、部分成功、全部明确路径失败、材料 + 普通说明文字混排；断言部分失败不再整批 `null`，成功项已注册，失败项有结构化 diagnostic。
+- 补 `input-material.test.ts`：覆盖 `not-material`、全成功、部分成功、全部明确路径失败、材料路径批次失败项保留原文；断言部分失败不再整批 `null`，成功项已注册，失败项有结构化 diagnostic。
 - 补 `typeahead-input.test.ts`：部分有效 / 部分强路径失败粘贴后，有效材料 chip 保留，强路径失败不出现在 draft，诊断回调可见，普通文本仍不误识别。
 - 补弱候选回归：真实材料 + 缺失无前缀候选时，候选行保留为普通文本，不进 diagnostics。
-- 补提交路径回归：部分失败后提交只包含成功材料与用户说明文字；失败诊断不会作为正文发送给 core，也不会写成用户已发送历史。
+- 补提交路径回归：部分失败后提交只包含成功材料与失败项保留原文；失败诊断不会作为正文发送给 core，也不会写成用户已发送历史。
 - 补全失败路径回归：单个明确不存在路径粘贴时不产生材料 chip、不写正文、给出诊断，原有草稿不被破坏。
 - 保留第 8 个问题回归：后续任意粘贴仍不删除已有 material chip。
 
@@ -926,10 +926,10 @@ pnpm cli:build
 
 - `input-material-ingest.ts` 新增 `ingestPastedMaterials()`，把材料粘贴采集结果升级为 `not-material` / `ingested` 判别联合；`ingested` 同时返回 `insertText` 与结构化 `diagnostics`，旧的二值 token 返回接口已移除。
 - 路径行处理拆成规范化、路径形态判断、文件 stat、材料注册四步；普通文本、URL、普通引用文本不会被误判为失败材料路径。
-- 部分成功时只登记成功材料，失败项不进入 `InputMaterialRegistry`、不插入用户 draft；材料 + 普通说明文字按粘贴顺序保留。
+- 部分成功时只登记成功材料，失败项不进入 `InputMaterialRegistry`，失败项原文保留在 draft 中，避免静默吞掉用户输入。
 - `InputController.finalizePaste()` 改为消费结构化 ingest 结果：材料批次不触发文本长粘贴折叠；已有材料 chip 继续保留；全失败且无可插入内容时不破坏已有草稿。
 - `InputController` 增加材料采集诊断回调，REPL 将诊断显示为独立 warning，不把错误提示写进用户正文或已发送历史。
-- `input-material.test.ts` 补充普通 URL、普通引用文本、部分失败、全部失败、目录失败、说明文字 + 材料混排测试；`typeahead-input.test.ts` 补充部分失败、全失败不污染草稿、说明文字 + 材料有序提交集成测试。
+- `input-material.test.ts` 补充普通 URL、普通引用文本、部分失败、全部失败、目录失败、同次说明文字 + 路径整体保真测试；`typeahead-input.test.ts` 补充部分失败、全失败不污染草稿、分步说明文字 + 材料有序提交集成测试。
 
 **验证命令**：
 
@@ -1483,6 +1483,191 @@ pnpm --filter @zhixing/cli test && pnpm cli:build
 ```
 
 结果：CLI 全量测试通过，140 个测试文件、2140 个测试通过；CLI 构建通过。
+
+### 15. 材料路径 paste tokenizer 缺失，拖拽 / 粘贴路径格式覆盖不足
+
+**状态**：主线已修复，已验证；补充问题已修复，已验证，已构建
+
+**现象**：第 14 个问题把材料采集边界收敛为“本次粘贴批次级材料意图”，但当前批次解析仍是“每行一个已规范化路径”。它能处理换行分隔路径和整行加引号的单个空格路径，但不能处理终端拖拽 / 粘贴常见的 shell-like 路径 token 形态。
+
+**事实证据**：
+
+- `input-material-ingest.ts` 当前 `parsePastedMaterialLines()` 只按换行切分，然后对每一行做 `trim / unquote / classify`；没有 shell-like tokenizer。
+- 生产函数探针确认：`./a.txt\n./b.txt` 能生成 2 个 file chip。
+- 生产函数探针确认：`"./a b.txt"` 能生成 file chip。
+- 生产函数探针确认：`./a\ b.txt` 返回 `not-material`，不会添加材料。
+- 生产函数探针确认：`"./a.txt" "./b.txt"` 被当成一个坏路径，返回“未添加为材料，原文已保留”的 diagnostic，不会添加两个材料。
+- 生产函数探针确认：Windows 绝对路径同一行多个 quoted token，例如 `"C:\...\a.txt" "C:\...\b.txt"`，也会被当成一个坏路径，不会添加两个材料。
+- 生产函数探针确认：未加引号的带空格路径，例如 `C:\...\a b.txt`，被保真为普通文本，不会误采集。
+- `research/design/drafts/work-scene-workdir-binding.md` 的终端调研已记录 macOS Terminal / iTerm2 拖拽可能产生反斜杠转义空格路径，说明 `./a\ b.txt` 不是人造边界。
+
+**审核结论**：问题真实，但不是第 14 个问题的回归。第 14 个问题解决“路径形态误判普通正文”；本问题解决“用户明确在粘贴 / 拖拽材料路径时，路径 token 解析能力不足”。二者应分开处理，避免把文本保真边界和路径 tokenizer 边界混在一起。
+
+**背后需求**：
+
+- CLI 首批可靠材料入口是路径粘贴 / 拖拽路径 / 未来 `/attach path`。用户不应该为了添加带空格路径或多个拖拽文件，先手工改成“一行一个规范路径”。
+- tokenizer 必须只服务于“材料路径批次”，不能重新扩大普通文本误采集范围。
+- 路径解析失败必须保留原文，不能回到吞行或静默注入的旧问题。
+
+**产品原则**：
+
+- 用户粘贴正文时，系统必须保真；用户明确粘贴材料路径时，系统才替用户注册材料。
+- tokenizer 只能识别带有明确路径边界信号的 token：换行、完整引号、反斜杠转义空格。单纯“空格分隔的多个裸路径”不是可靠意图信号，不能为了便利牺牲正文安全。
+- 失败不删除：任何路径采集失败都只能给诊断并把原文留在输入区；普通正文不能因为 tokenizer 误判成材料路径而绕过长文本折叠。
+
+**目标效果**：
+
+- 换行分隔路径继续支持：`./a.txt\n./b.txt` 生成两个材料 chip。
+- 整行加引号的带空格路径继续支持：`"./a b.txt"` 生成材料 chip。
+- 反斜杠转义空格路径应支持：`./a\ b.txt` 应解析为 `./a b.txt` 并生成材料 chip。
+- 同一行多个 quoted path 支持为材料批次：`"./a.txt" "./b.txt"`、`"C:\...\a.txt" "C:\...\b.txt"` 生成多个有序 chip。
+- 同一行多个未加引号的裸路径不自动采集：`./a.txt ./b.txt`、`C:\...\a.txt C:\...\b.txt` 保真为普通文本，除非后续有明确终端事实证明这是稳定拖拽格式并且不会污染命令文本。
+- 普通命令仍必须保真：`./build.sh --prod` 不能因为引入 tokenizer 又被误采集为材料。
+- 普通说明 + 路径同一次粘贴仍整体保真：`请看这张图\n./shot.png` 不生成 chip；要添加材料，用户分次粘贴路径或使用未来显式 attach 入口。
+
+**产品 / 架构判断**：
+
+- 顶级边界仍是“意图先于形态”：tokenizer 不能让普通文本重新变成隐式文件读取授权。
+- 最优实现不应把 path split 写进 `finalizePaste()`。正确位置仍是 `input-material-ingest.ts` 的无副作用解析阶段：先把一次粘贴解析为材料路径 token 序列或普通文本，再决定是否进入材料采集。
+- tokenizer 应是平台可解释、规则有限的纯函数。不要为了覆盖所有 shell 语法引入不可控解析器，也不要把不同终端的模糊格式全部承诺为材料入口。
+- `finalizePaste()`、`materialRegistry`、`resolveInputMaterials()` 不需要改变；它们已经表达了“材料 chip 是输入区 token，提交时按顺序解析成 parts”的正确架构。本问题只补齐“路径文本到材料 token”的前置解析能力。
+- 解析模型应从“行”升级为“item”：一次粘贴可以解析出多个材料 path item，每个 item 保存原始 token、规范化路径、引用状态和来源行。这样未来支持 `/attach`、富文本、网页快照时也能复用同一个“先解析为材料 item，再交给 registry”的形状。
+
+**最优解决方案**：
+
+1. 在 `input-material-ingest.ts` 增加纯解析函数，把当前 `parsePastedMaterialLines()` 升级为 item parser。输入仍是原始 paste content，输出是 `not-material` 或材料 path item 列表。
+2. 解析顺序：
+   - 先规范换行，去掉首尾空白行，保留内部行边界。
+   - 每行先尝试严格 token 化；支持完整 single quote / double quote token，支持 POSIX 路径里的反斜杠转义空格。
+   - 如果一行只有一个 token，保持现有整行路径行为，同时补上 `./a\ b.txt` / `/Users/x/My\ Doc/a.png` 这类转义空格路径。
+   - 如果一行有多个 token，只有所有 token 都是 quoted path 或带转义空格的显式 material path，且整行没有普通正文残留时，才作为同一批材料。
+   - 任意一行存在普通文本、命令参数、源码位置、URL、日期或不可解释 token，整次粘贴回退为普通文本，不访问文件系统。
+3. 转义规则保持窄口径：
+   - POSIX / macOS 路径只解 `\ ` 为空格；不做变量展开、glob、命令替换、通配符、环境变量或 shell 引号求值。
+   - Windows 路径里的反斜杠继续视为路径分隔符；带空格 Windows 路径必须靠引号表达。
+4. 材料采集仍沿用现有 `processMaterialLine()` 语义：成功注册 chip，失败输出原文并给 diagnostic；多 item 输出按顺序生成 chip，推荐以换行分隔 chip，保证输入区可读、可删、提交顺序稳定。
+5. 不在本问题支持 `file://` URI、SSH 远端路径、tmux/screen 特殊格式或任意 shell 命令解析。这些格式缺少稳定跨平台事实，默认保真为普通文本。
+
+**不采纳方案**：
+
+- 不引入完整 shell parser：能力过宽，会重新制造隐式读取本地文件的安全边界问题。
+- 不把任意空格分隔的 strong path 列表当材料：这会误伤命令、日志、参数说明。
+- 不在 `finalizePaste()` 特判路径字符串：那会把接入面编辑逻辑和材料 ingest 规则绑死，破坏核心能力可复用性。
+- 不为了单次“说明 + 路径”混排便利破坏批次闸门；这类交互应交给未来显式 attach 入口，而不是靠启发式猜测。
+
+**验收标准**：
+
+- 补 `input-material.test.ts`：`"./a b.txt"`、`./a\ b.txt` 都能解析到同一个真实文件。
+- 补 `input-material.test.ts`：`"./a.txt" "./b.txt"`、Windows quoted path 列表生成两个有序 chip。
+- 补 `input-material.test.ts`：`./a.txt ./b.txt`、未加引号 Windows path 列表保真为普通文本。
+- 补 `input-material.test.ts`：`./build.sh --prod`、`echo ./a\ b.txt` 不触发材料采集。
+- 补 `input-material.test.ts`：`file:///tmp/a.png`、`src/main.ts:12:3`、URL、日期仍保真。
+- 补 `input-material.test.ts`：材料 token 中某个路径不存在时，原始 token 保留、已有材料仍生成 chip、诊断准确，不吞行。
+- 补 `typeahead-input.test.ts`：真实输入区粘贴终端拖拽格式时 chip 与提交 parts 顺序正确。
+
+**修复记录**：
+
+- `input-material-ingest.ts` 将材料路径解析从行级模型升级为 item 模型；同一行可以解析出多个明确 path token，但只有整批 item 都是材料路径时才访问文件系统。
+- tokenizer 保持窄口径：支持整行 / 多 token quoted path，支持 POSIX 风格反斜杠转义空格路径；不做 shell 展开、glob、变量替换或 `file://` URI 解析。
+- 多 token 行必须具备明确边界；`"./a.txt" "./b.txt"` 会生成两个有序 chip，`./a.txt ./b.txt`、`echo ./a\ b.txt`、未加引号 Windows 风格带空格路径都保真为普通文本。
+- 材料批次中单项失败时，失败 token 原文保留并返回 diagnostic；不会吞行，也不会把失败提示写进用户正文。
+- `input-material.test.ts` 和 `typeahead-input.test.ts` 补齐转义空格路径、同一行 quoted path 列表、模糊裸路径列表、命令行保真、`file://` 保真、提交 parts 顺序等回归。
+- 覆盖性复审后补齐同一行多个 POSIX 转义空格路径、POSIX 转义路径与 quoted path 混排，以及真实 Windows 普通空格路径保真的单元测试，避免 tokenizer 明确边界语义只由单路径用例间接覆盖。
+- 再次全链路复审发现 quoted source-location 会绕过源码位置保护进入材料诊断；已将 source-location 分类提升到 quoted 判断之前。引号只表达文本边界，不改变“源码位置是文本引用”的产品语义。
+- `input-material.test.ts` 补齐 quoted 相对 / 绝对 / 裸源码位置保真；`typeahead-input.test.ts` 补齐含 quoted source-location 的长日志仍折叠为文本 paste token、无材料诊断、提交原文。
+
+**验证计划**：
+
+```bash
+pnpm --filter @zhixing/cli exec tsc --noEmit && pnpm --filter @zhixing/cli exec vitest run src/__tests__/input-material.test.ts src/__tests__/typeahead-input.test.ts
+pnpm --filter @zhixing/cli test && pnpm cli:build
+```
+
+**验证结果**：
+
+- `pnpm --filter @zhixing/cli exec tsc --noEmit && pnpm --filter @zhixing/cli exec vitest run src/__tests__/input-material.test.ts src/__tests__/typeahead-input.test.ts` 通过；定向 2 个测试文件、107 个测试通过。
+- `pnpm --filter @zhixing/cli test` 通过；CLI 140 个测试文件、2148 个测试通过。
+- `pnpm cli:build` 通过；CLI 构建产物已更新。
+- 覆盖性补充后，`pnpm --filter @zhixing/cli exec tsc --noEmit && pnpm --filter @zhixing/cli exec vitest run src/__tests__/input-material.test.ts` 通过；单文件 37 个测试通过。
+- quoted source-location 修复后，`pnpm --filter @zhixing/cli exec tsc --noEmit && pnpm --filter @zhixing/cli exec vitest run src/__tests__/input-material.test.ts src/__tests__/typeahead-input.test.ts` 通过；定向 2 个测试文件、110 个测试通过。
+- `pnpm --filter @zhixing/cli test` 通过；CLI 140 个测试文件、2151 个测试通过。
+- `pnpm cli:build` 通过；CLI 构建产物已更新。
+
+#### 第 15 个问题补充：POSIX shell 转义字符覆盖不足
+
+**状态**：已修复，已验证，已构建
+
+**现象**：第 15 个问题已支持 quoted path、反斜杠转义空格路径、同一行多个明确 path token，但 tokenizer 目前只把 `\ ` 还原为空格。对 POSIX / shell 风格路径中常见的其它反斜杠转义字符，例如 `\(`、`\)`、`\&`、`\#`、`\;`，即使真实文件存在，也会按带反斜杠的字面路径去 `stat`，导致材料添加失败。
+
+**审核结论**：问题真实，属于第 15 个问题的 tokenizer 覆盖补充，不是新的架构问题。当前实现已经把普通文本保真、批次闸门、提交事务、scrollback 原文、材料 chip 生命周期等主链路收敛住；这里缺的是“已经被识别为明确材料路径 token 后，POSIX 路径反斜杠转义的规范化能力”。
+
+**事实证据**：
+
+- 生产函数探针确认：真实存在 `a (1).txt` 时，粘贴 `"./a (1).txt"` 能生成 `[File #1 · a (1).txt · ...]`。
+- 生产函数探针确认：同一个真实文件用 `./a\ \(1\).txt` 粘贴时，结果为 `ingested`，但 `registrySize = 0`，并返回 `unreadable` diagnostic；失败原因是解析后的 input 仍包含 `\(` / `\)`。
+- 生产函数探针确认：真实存在 `a&b.txt`、`a#b.txt`、`a;b.txt` 时，`./a\&b.txt`、`./a\#b.txt`、`./a\;b.txt` 均失败并保留原文。
+- 生产函数探针确认：真实存在 `a b&c.txt` 时，`./a\ b\&c.txt` 仍失败；当前只还原空格，后续 `\&` 原样进入 `stat` 路径。
+- 生产函数探针确认：`./a\&b.txt ./c\#d.txt` 当前返回 `not-material`，因为这些 token 没被标记为明确边界；这说明问题同时影响“单路径解析”和“同一行多个 escaped path token”。
+- 生产函数探针确认：`echo ./a\&b.txt` 与 `说明\n./a\&b.txt` 当前均返回 `not-material`，批次闸门对命令 / 说明混排仍有效；补修不应破坏这个保护。
+- 生产函数探针确认：`./a\ b.txt` 与 `./unicode\ 名.txt` 已能成功生成材料 chip，说明问题集中在非空白转义字符，而不是路径批次闸门或 registry。
+- 当前 `readUnquotedToken()` 只在 `ch === "\\" && next is whitespace` 时解转义；其它反斜杠一律作为普通字符进入 `value`。
+
+**背后需求**：
+
+- 用户通过终端拖拽或从 shell 里复制路径时，拿到的经常不是纯文件系统路径，而是 shell-safe 的路径表达。只支持空格转义会让一部分真实文件路径看似明确、实际无法添加。
+- CLI 的材料入口应该把“明确材料路径 token”可靠转换成文件系统路径；否则用户会看到原文和诊断，却不理解为什么同一个文件加引号能成功、拖拽格式却失败。
+- 这仍然不能扩展成完整 shell 解释器。材料入口要帮助用户处理稳定的 path escaping，而不是执行 shell 语义。
+
+**目标效果**：
+
+- POSIX 明确路径 token 中的 shell 反斜杠转义应被还原为文件系统路径字符：`./a\ \(1\).txt` 解析为 `./a (1).txt`，`./a\&b.txt` 解析为 `./a&b.txt`。
+- 只在 POSIX 明确路径 token 上做转义还原：`./`、`../`、`~/`、`/` 开头的 token。普通正文、命令行、URL、源码位置、Windows 路径不能被新规则改写。
+- 同一行多个 POSIX shell-escaped path token 应按顺序生成多个 chip；但普通空格分隔裸路径列表仍不自动采集。
+- 保持批次闸门不变：整次粘贴只有全是材料路径 item 时才访问文件系统；说明文字 + 路径仍整体保真为普通文本。
+- 失败语义不变：路径不存在或不可读时保留原 token，并给“未添加为材料，原文已保留”的 diagnostic。
+
+**最优解决方案**：
+
+1. 在 `input-material-ingest.ts` 的 tokenizer 层引入窄口径 POSIX path unescape。该能力只属于 unquoted POSIX path token，不进入 `finalizePaste()`、`resolveInputMaterials()` 或 registry。
+2. 将 token 元数据从“是否转义空白”提升为“是否发生 shell path escape”。当前 `escapedWhitespace` 命名只能表达一种字符，后续应改为更准确的 `escaped` / `shellEscaped`，并让 `hasExplicitTokenBoundary()` 基于 quoted 或 shell-escaped 判断。
+3. `readUnquotedToken()` 仍逐字符扫描，但只在 token 原始前缀满足 `isPosixEscapedPathToken(raw)` 时应用 POSIX path unescape；非 POSIX token 即使包含反斜杠，也回退为原文 token，不扩大普通文本面。
+4. 转义字符集保持白名单，而不是完整 shell parser。建议定义小型 `POSIX_PATH_ESCAPE_CHARS`，覆盖空白和终端拖拽 / shell path 中稳定需要转义的语法字符，例如反斜杠、引号、空白、括号、方括号、花括号、`&`、`;`、`|`、`<`、`>`、`*`、`?`、`!`、`#`、`$`、反引号。白名单之外的 `\x` 保留原样，避免把真实文件名里的反斜杠或未知终端格式错误改写。
+5. 多 token 边界保持保守：同一行多个 token 只有在每个 token 都有明确边界时才作为材料批次。quoted token 和 shell-escaped token 是明确边界；`./a.txt ./b.txt` 这类纯裸路径列表继续保真为普通文本，避免重新打开命令 / 参数误采集风险。
+6. Windows 路径保持原样。`C:\Users\me\a b.txt` 仍按普通文本保真，带空格 Windows 路径继续要求引号；不能把 Windows 分隔符误当 POSIX escape。
+
+**方案审核**：
+
+- 正确性：该方案只改变“明确 POSIX path token 的规范化”，不改变批次闸门、材料注册、失败回写、提交解析等已稳定不变量。
+- 集成性：`finalizePaste()` 仍只消费 `ingested / not-material`；材料 chip 生命周期、原子编辑、提交 parts 顺序无需新分支。
+- 覆盖性：需要同时补“成功解转义”“多 token”“命令 / 说明混排保真”“Windows 不受影响”“typeahead 真实提交”五类测试，才能证明不会破坏前面问题。
+- 产品判断：这是顶级架构下的正确收敛点。它补的是材料入口的路径规范化能力，不把 shell 语义、文件读取授权或 UI 表示泄漏到其它层，能经得起未来 `/attach`、图片、普通文件和更多材料类型扩展。
+
+**验收标准**：
+
+- 补 `input-material.test.ts`：`./a\ \(1\).txt` 能添加真实 `a (1).txt`。
+- 补 `input-material.test.ts`：`./a\&b.txt`、`./a\#b.txt`、`./a\;b.txt` 能添加对应真实文件。
+- 补 `input-material.test.ts`：同一行多个 POSIX escaped token 仍按顺序生成多个 chip。
+- 补 `input-material.test.ts`：`echo ./a\&b.txt`、普通文本里的 `\&` 不触发材料采集。
+- 补 `input-material.test.ts`：Windows 反斜杠路径不被 POSIX unescape 破坏。
+- 补 `typeahead-input.test.ts`：真实输入区粘贴 `./a\ \(1\).txt` 显示 File chip，提交后进入 material part。
+
+**修复记录**：
+
+- `input-material-ingest.ts` 将 token 元数据从 `escapedWhitespace` 收敛为 `shellEscaped`，表达“该 token 是否发生过明确 shell path escape”，同一行多 token 边界由 quoted 或 shell-escaped 决定。
+- 新增窄口径 `decodePosixShellPathToken()`：只对 `./`、`../`、`~/`、`/` 开头的 unquoted POSIX path token 生效；按白名单还原空白、括号、`&`、`;`、`#` 等稳定 shell path escape 字符；不做变量展开、glob、命令替换或完整 shell 求值。
+- Windows 路径和非 POSIX token 保持原样，避免把反斜杠分隔符误当 POSIX escape。
+- 批次闸门、失败回写、材料注册、提交解析均未增加新分支；本次只补“明确材料路径 token -> 文件系统路径”的规范化。
+- `input-material.test.ts` 补齐单路径 shell escape、多 token shell escape、命令混排保真、Windows 不被 POSIX unescape 破坏等回归。
+- `typeahead-input.test.ts` 补齐真实输入区粘贴 `./a\ \(1\).txt` 显示 File chip 且提交为 material part 的集成回归。
+
+**验证结果**：
+
+```bash
+pnpm --filter @zhixing/cli exec tsc --noEmit && pnpm --filter @zhixing/cli exec vitest run src/__tests__/input-material.test.ts src/__tests__/typeahead-input.test.ts
+pnpm --filter @zhixing/cli test && pnpm cli:build
+```
+
+结果：CLI 类型检查通过；定向 2 个测试文件、114 个测试通过；CLI 全量 140 个测试文件、2155 个测试通过；CLI 构建通过。
 
 ## 已验证
 

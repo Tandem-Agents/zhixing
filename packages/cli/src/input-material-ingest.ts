@@ -31,16 +31,17 @@ export interface PastedMaterialIngestDiagnostic {
   readonly message: string;
 }
 
-interface PastedMaterialLine {
+interface PastedMaterialItem {
   readonly raw: string;
   readonly input: string;
   readonly quoted: boolean;
+  readonly shellEscaped: boolean;
   readonly intent: PathIntent;
 }
 
 type PathIntent = "text" | "material-path" | "source-location";
 
-type ProcessedMaterialLine =
+type ProcessedMaterialItem =
   | { readonly kind: "text"; readonly raw: string }
   | { readonly kind: "material"; readonly token: string }
   | {
@@ -54,40 +55,40 @@ export function ingestPastedMaterials(
   registry: InputMaterialRegistry,
   options: PasteMaterialIngestOptions,
 ): PastedMaterialIngestResult {
-  const lines = parsePastedMaterialLines(content);
-  if (lines.length === 0) return { kind: "not-material" };
-  if (!isMaterialPathBatch(lines)) return { kind: "not-material" };
+  const items = parsePastedMaterialItems(content);
+  if (items.length === 0) return { kind: "not-material" };
+  if (!isMaterialPathBatch(items)) return { kind: "not-material" };
 
-  return ingestMaterialPathBatch(lines, registry, options);
+  return ingestMaterialPathBatch(items, registry, options);
 }
 
 function ingestMaterialPathBatch(
-  lines: readonly PastedMaterialLine[],
+  items: readonly PastedMaterialItem[],
   registry: InputMaterialRegistry,
   options: PasteMaterialIngestOptions,
 ): PastedMaterialIngestResult {
-  const processed = lines.map((line) =>
-    processMaterialLine(line, registry, options),
+  const processed = items.map((item) =>
+    processMaterialItem(item, registry, options),
   );
-  const hasMaterial = processed.some((line) => line.kind === "material");
-  const hasFailure = processed.some((line) => line.kind === "failure");
+  const hasMaterial = processed.some((item) => item.kind === "material");
+  const hasFailure = processed.some((item) => item.kind === "failure");
   if (!hasMaterial && !hasFailure) return { kind: "not-material" };
 
   const outputLines: string[] = [];
   const diagnostics: PastedMaterialIngestDiagnostic[] = [];
 
-  for (const line of processed) {
-    if (line.kind === "text") {
-      outputLines.push(line.raw);
+  for (const item of processed) {
+    if (item.kind === "text") {
+      outputLines.push(item.raw);
       continue;
     }
-    if (line.kind === "material") {
-      outputLines.push(line.token);
+    if (item.kind === "material") {
+      outputLines.push(item.token);
       continue;
     }
 
-    outputLines.push(line.raw);
-    diagnostics.push(line.diagnostic);
+    outputLines.push(item.raw);
+    diagnostics.push(item.diagnostic);
   }
 
   return {
@@ -103,18 +104,160 @@ export function formatMaterialIngestDiagnostic(
   return `${diagnostic.input} -> ${diagnostic.message}`;
 }
 
-function parsePastedMaterialLines(content: string): PastedMaterialLine[] {
+function parsePastedMaterialItems(content: string): PastedMaterialItem[] {
   const rawLines = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
   const lines = trimEmptyLineEdges(rawLines);
-  return lines.map((raw) => {
-    const parsed = unquote(raw.trim());
-    return {
+  return lines.flatMap((raw) => parsePastedMaterialLineItems(raw));
+}
+
+function parsePastedMaterialLineItems(rawLine: string): PastedMaterialItem[] {
+  const trimmed = rawLine.trim();
+  if (trimmed.length === 0) {
+    return [createPastedMaterialItem(rawLine, "", false, false)];
+  }
+
+  const tokens = tokenizePastedMaterialLine(trimmed);
+  if (!tokens || tokens.length === 0) return [parseSinglePastedMaterialItem(rawLine)];
+
+  if (tokens.length === 1) {
+    const token = tokens[0]!;
+    return [
+      createPastedMaterialItem(
+        rawLine,
+        token.value,
+        token.quoted,
+        token.shellEscaped,
+      ),
+    ];
+  }
+
+  if (!tokens.every(hasExplicitTokenBoundary)) {
+    return [parseSinglePastedMaterialItem(rawLine)];
+  }
+
+  return tokens.map((token) =>
+    createPastedMaterialItem(
+      token.raw,
+      token.value,
+      token.quoted,
+      token.shellEscaped,
+    ),
+  );
+}
+
+interface PastedMaterialToken {
+  readonly raw: string;
+  readonly value: string;
+  readonly quoted: boolean;
+  readonly shellEscaped: boolean;
+}
+
+function tokenizePastedMaterialLine(input: string): PastedMaterialToken[] | null {
+  const tokens: PastedMaterialToken[] = [];
+  let index = 0;
+
+  while (index < input.length) {
+    while (index < input.length && /\s/.test(input[index]!)) index++;
+    if (index >= input.length) break;
+
+    const quote = input[index];
+    if (quote === '"' || quote === "'") {
+      const token = readQuotedToken(input, index, quote);
+      if (!token) return null;
+      if (
+        token.nextIndex < input.length &&
+        !/\s/.test(input[token.nextIndex]!)
+      ) {
+        return null;
+      }
+      tokens.push(token.token);
+      index = token.nextIndex;
+      continue;
+    }
+
+    const token = readUnquotedToken(input, index);
+    tokens.push(token.token);
+    index = token.nextIndex;
+  }
+
+  return tokens;
+}
+
+function readQuotedToken(
+  input: string,
+  start: number,
+  quote: string,
+): { readonly token: PastedMaterialToken; readonly nextIndex: number } | null {
+  let index = start + 1;
+  let value = "";
+  while (index < input.length) {
+    const ch = input[index]!;
+    if (ch === quote) {
+      return {
+        token: {
+          raw: input.slice(start, index + 1),
+          value,
+          quoted: true,
+          shellEscaped: false,
+        },
+        nextIndex: index + 1,
+      };
+    }
+    value += ch;
+    index++;
+  }
+
+  return null;
+}
+
+function readUnquotedToken(
+  input: string,
+  start: number,
+): { readonly token: PastedMaterialToken; readonly nextIndex: number } {
+  let index = start;
+
+  while (index < input.length) {
+    const ch = input[index]!;
+    if (/\s/.test(ch)) break;
+    if (ch === "\\" && index + 1 < input.length && /\s/.test(input[index + 1]!)) {
+      index += 2;
+      continue;
+    }
+    index++;
+  }
+
+  const raw = input.slice(start, index);
+  const decoded = decodePosixShellPathToken(raw);
+
+  return {
+    token: {
       raw,
-      input: parsed.value,
-      quoted: parsed.quoted,
-      intent: classifyPathIntent(parsed.value, parsed.quoted),
-    };
-  });
+      value: decoded.value,
+      quoted: false,
+      shellEscaped: decoded.shellEscaped,
+    },
+    nextIndex: index,
+  };
+}
+
+function parseSinglePastedMaterialItem(raw: string): PastedMaterialItem {
+  const parsed = unquote(raw.trim());
+  return createPastedMaterialItem(raw, parsed.value, parsed.quoted, false);
+}
+
+function createPastedMaterialItem(
+  raw: string,
+  input: string,
+  quoted: boolean,
+  shellEscaped: boolean,
+): PastedMaterialItem {
+  return {
+    raw,
+    input,
+    quoted,
+    shellEscaped,
+    intent: classifyPathIntent(input, quoted, shellEscaped),
+  };
 }
 
 function unquote(input: string): { readonly value: string; readonly quoted: boolean } {
@@ -133,25 +276,25 @@ function resolvePastedPath(input: string, workspaceRoot: string): string {
   return path.resolve(workspaceRoot, expanded);
 }
 
-function processMaterialLine(
-  line: PastedMaterialLine,
+function processMaterialItem(
+  item: PastedMaterialItem,
   registry: InputMaterialRegistry,
   options: PasteMaterialIngestOptions,
-): ProcessedMaterialLine {
-  if (!line.input || line.intent !== "material-path") {
-    return { kind: "text", raw: line.raw };
+): ProcessedMaterialItem {
+  if (!item.input || item.intent !== "material-path") {
+    return { kind: "text", raw: item.raw };
   }
 
-  const filePath = resolvePastedPath(line.input, options.workspaceRoot);
+  const filePath = resolvePastedPath(item.input, options.workspaceRoot);
   let stat: fs.Stats;
   try {
     stat = fs.statSync(filePath);
   } catch {
     return {
       kind: "failure",
-      raw: line.raw,
+      raw: item.raw,
       diagnostic: {
-        input: line.input,
+        input: item.input,
         filePath,
         reason: "unreadable",
         message: retainedFailureMessage("文件不存在或不可读取"),
@@ -162,9 +305,9 @@ function processMaterialLine(
   if (!stat.isFile()) {
     return {
       kind: "failure",
-      raw: line.raw,
+      raw: item.raw,
       diagnostic: {
-        input: line.input,
+        input: item.input,
         filePath,
         reason: "not-file",
         message: retainedFailureMessage("不是普通文件"),
@@ -191,21 +334,92 @@ function processMaterialLine(
   };
 }
 
-function classifyPathIntent(input: string, quoted: boolean): PathIntent {
+function classifyPathIntent(
+  input: string,
+  quoted: boolean,
+  shellEscaped: boolean,
+): PathIntent {
   if (!input) return "text";
-  if (!quoted && isSourceLocationLike(input)) return "source-location";
+  if (isSourceLocationLike(input)) return "source-location";
   if (isUrlLike(input) || isPlainDateLike(input)) return "text";
-  if (!quoted && /\s/.test(input)) return "text";
+  if (!quoted && !shellEscaped && /\s/.test(input)) return "text";
   if (isMaterialPathLike(input)) return "material-path";
   return "text";
 }
 
-function isMaterialPathBatch(lines: readonly PastedMaterialLine[]): boolean {
-  const nonEmpty = lines.filter((line) => line.input.length > 0);
+function isMaterialPathBatch(items: readonly PastedMaterialItem[]): boolean {
+  const nonEmpty = items.filter((item) => item.input.length > 0);
   return (
     nonEmpty.length > 0 &&
-    nonEmpty.every((line) => line.intent === "material-path")
+    nonEmpty.every((item) => item.intent === "material-path")
   );
+}
+
+function hasExplicitTokenBoundary(token: PastedMaterialToken): boolean {
+  return token.quoted || token.shellEscaped;
+}
+
+function isPosixEscapedPathToken(raw: string): boolean {
+  return /^(~|\.{1,2})\//.test(raw) || raw.startsWith("/");
+}
+
+const POSIX_PATH_ESCAPE_CHARS = new Set([
+  "\\",
+  '"',
+  "'",
+  " ",
+  "\t",
+  "(",
+  ")",
+  "[",
+  "]",
+  "{",
+  "}",
+  "&",
+  ";",
+  "|",
+  "<",
+  ">",
+  "*",
+  "?",
+  "!",
+  "#",
+  "$",
+  "`",
+]);
+
+function decodePosixShellPathToken(
+  raw: string,
+): { readonly value: string; readonly shellEscaped: boolean } {
+  if (!isPosixEscapedPathToken(raw)) {
+    return { value: raw, shellEscaped: false };
+  }
+
+  let value = "";
+  let shellEscaped = false;
+  for (let index = 0; index < raw.length; index++) {
+    const ch = raw[index]!;
+    if (ch !== "\\" || index + 1 >= raw.length) {
+      value += ch;
+      continue;
+    }
+
+    const next = raw[index + 1]!;
+    if (!isPosixPathEscapeChar(next)) {
+      value += ch;
+      continue;
+    }
+
+    value += next;
+    shellEscaped = true;
+    index++;
+  }
+
+  return { value, shellEscaped };
+}
+
+function isPosixPathEscapeChar(ch: string): boolean {
+  return /\s/.test(ch) || POSIX_PATH_ESCAPE_CHARS.has(ch);
 }
 
 function isMaterialPathLike(input: string): boolean {
