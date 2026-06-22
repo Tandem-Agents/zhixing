@@ -661,6 +661,128 @@ pnpm cli:build
 
 结果：CLI 类型检查通过；定向 3 个测试文件、102 个测试通过；CLI 全量 140 个测试文件、2097 个测试通过；CLI 构建成功。
 
+### 8. 材料 chip 会被后续任意粘贴静默替换
+
+**状态**：已修复，已验证。
+
+**现象**：用户先粘贴图片 / 文件路径生成材料 chip 后，再粘贴任意内容，旧材料 chip 会被 `finalizePaste()` 静默删除。文本长粘贴的“主动第二次粘贴替换旧 token”是既有需求；但材料 chip 是本轮输入材料，不应被普通后续粘贴隐式移除。
+
+**审核结论**：问题真实，属于 CLI 输入组合策略错误。它不是核心材料解析能力缺失，也不是 Delete / Backspace 原子编辑问题；根因是 `finalizePaste()` 把“文本 paste token 的二次替换规则”错误套到了“材料 chip”上。
+
+**事实依据**：
+
+- `packages/cli/src/typeahead-input.ts` 的 `finalizePaste()` 会先尝试 `materialTokensFromPastedPaths()`，把本次粘贴的本地文件路径转成 material chip。
+- 随后 `finalizePaste()` 调用 `removeAllInputTokens(this.buffer.draft, this.buffer.cursor)` 清理已有输入 handle。
+- `removeAllInputTokens()` 使用 `INPUT_HANDLE_TOKEN_PATTERNS`，会同时匹配文本 paste token 和 material chip。
+- 因此已有 `[Image #N ...]` / `[File #N ...]` 时，用户再粘贴普通提示词、另一张图、另一个文件，旧材料 chip 会在新内容插入前被删除。
+- `packages/cli/src/input-material-resolve.ts` 的 `resolveInputMaterials()` 已经支持按输入顺序输出 text / image / file-derived text parts，核心 payload 形态不是瓶颈。
+- 原多行粘贴设计中二次粘贴清理的是 `removeAllPasteTokens()`，目标是文本 paste token 的折叠占位；材料 chip 是后续新增的输入 handle，不应继承该替换规则。
+- 现有测试覆盖了“主动第二次长文本粘贴替换旧 paste token”和 Delete 键删除 material chip；但没有覆盖“材料 chip 后继续粘贴文本 / 材料应保留已有材料”的组合输入场景。
+
+**背后需求**：材料 chip 表达的是“本轮要一起交给 agent 的材料”。用户应该能先贴图，再追加提示词；也应该能连续贴多张图 / 多个文件。除非用户显式删除 chip，系统不应把已有材料从本轮输入里静默拿掉。
+
+**目标效果**：
+
+- 文本长粘贴 token 继续保持既有需求：已有文本 paste token 时，主动第二次长文本粘贴替换旧 token 并显示原文。
+- 材料 chip 不参与“二次文本粘贴替换旧 token”规则。用户粘贴文本、图片路径、文件路径时，已有材料 chip 默认保留。
+- 多个材料可以在同一轮输入里共存，并按输入顺序提交为结构化 `UserTurnInput.parts`。
+- 用户仍可用 Backspace / Delete / 选区编辑等显式动作删除材料 chip；删除后 registry cleanup 回收材料。
+
+**产品 / 架构判断**：
+
+- 这是一个输入接入面的组合语义问题，不应把材料能力重新绑回 CLI，也不应改 core 的 `UserTurnInput` 结构。
+- 文本 paste token 是“长文本显示压缩”，材料 chip 是“本轮输入材料引用”；二者都长得像输入 handle，但产品语义不同。
+- 最优架构是保持通用 input handle 的原子编辑 / 渲染能力，同时把“二次粘贴自动替换”收窄为文本 paste token 的专属策略。
+- 该方案经得起未来扩展：音频、视频、网页快照、富文本等未来材料都可以继续作为 material handle 参与组合，而不会被文本粘贴规则误删。
+
+**最优方案**：
+
+- `finalizePaste()` 保留“先识别本次粘贴是否为材料”的流程：本地图片 / 文件路径仍生成 material chip；普通文本仍按文本粘贴处理。
+- 把粘贴前清理从 `removeAllInputTokens()` 改为 `removeAllPasteTokens()`：只移除已有文本 paste token，不移除 material chip。
+- 用清晰变量表达“本次是否移除了旧文本 paste token”，不要再用容易误导的 `bufferWasClean` 表达全部输入 handle 状态。
+- 折叠判断保持文本专属：只有本次不是材料、存在 paste registry、内容满足长粘贴阈值、且没有刚移除旧 paste token 时，才生成新的 paste token。
+- 新 material chip 按当前 cursor 插入；已有材料 chip 保留，后续 `syncBroker()` 继续根据 draft 中活跃 token 回收 registry。
+- 保持 `INPUT_HANDLE_TOKEN_PATTERNS` 的职责不变：它仍用于通用原子编辑、布局测宽、word boundary，不参与二次粘贴替换策略。
+- 保留 `removeAllInputTokens()` 作为“显式清空全部输入 handle”的底层工具，不在普通粘贴路径使用。
+
+**边界行为**：
+
+- 已有 image chip 后粘贴普通文本：image chip 保留，文本插入当前 cursor，提交时形成有序 text + image parts。
+- 已有 image chip 后再粘贴图片路径：两个 image chip 共存，提交时形成两个 image parts，顺序跟输入区一致。
+- 已有 text paste token 后再次长文本粘贴：旧 paste token 被移除，第二次粘贴显示原文，既有需求不变。
+- 已有 text paste token 后粘贴材料路径：旧 paste token 被移除，新 material chip 插入；这是文本 token 替换规则与材料插入规则的自然组合。
+- 同时存在 text paste token 和 material chip 时再次粘贴：只移除 text paste token，material chip 保留。
+
+**验收标准**：
+
+- 已有 image chip 后粘贴普通文本：chip 保留，文本追加，最终 `prepareUserTurnInput()` 得到 text + image part。
+- 已有 image chip 后再粘贴另一个图片路径：两个 chip 都保留，最终得到两个 image part，顺序正确。
+- 已有文本 paste token 后再次长文本粘贴：继续按既有需求替换旧 token 并显示第二次粘贴原文。
+- 显式 Delete / Backspace 删除 material chip 后，material registry 能正确 cleanup。
+
+**建议测试策略**：
+
+- 在 `typeahead-input.test.ts` 增加集成测试：image chip 后粘贴普通文本，draft / 提交结果都保留 chip 和文本，`prepareUserTurnInput()` 输出顺序正确。
+- 在 `typeahead-input.test.ts` 增加集成测试：连续粘贴两个图片路径，输入区保留两个 chip，最终输出两个 image parts。
+- 保留并强化现有二次长文本粘贴测试：证明 `removeAllPasteTokens()` 替代 `removeAllInputTokens()` 后，旧文本 paste token 仍被正确替换。
+- 在 `paste-atomic.test.ts` 增加纯函数测试：`removeAllPasteTokens()` 删除文本 paste token 但保留 material chip，防止未来再次把两类 handle 混用。
+
+**修复记录**：
+
+- `InputController.finalizePaste()` 的粘贴前清理从 `removeAllInputTokens()` 收窄为 `removeAllPasteTokens()`，普通粘贴不再隐式删除 material chip。
+- `finalizePaste()` 用 `removedPasteToken` 表达是否刚移除了旧文本 paste token，折叠决策仍只服务文本长粘贴。
+- `paste-atomic.test.ts` 补充纯函数回归：删除文本 paste token 时保留材料 chip。
+- `typeahead-input.test.ts` 补充两条集成回归：材料 chip 后粘贴普通文本、连续粘贴多个图片路径，均保留材料并按输入顺序提交。
+
+**验证命令**：
+
+```bash
+pnpm --filter @zhixing/cli exec tsc --noEmit && pnpm --filter @zhixing/cli exec vitest run src/__tests__/paste-atomic.test.ts src/__tests__/typeahead-input.test.ts
+pnpm --filter @zhixing/cli test
+pnpm cli:build
+```
+
+结果：CLI 类型检查通过；定向 2 个测试文件、83 个测试通过；CLI 全量 140 个测试文件、2100 个测试通过；CLI 构建成功。
+
+### 9. 材料解析失败前已写入 scrollback
+
+**状态**：已确认真实，待调研最优方案。
+
+**现象**：用户提交包含材料 chip 的输入后，`InputController.submit()` 会先把 raw / canonical 文本写入 CLI scrollback；随后 REPL 才调用 `prepareUserTurnInput()` 解析材料。如果材料解析失败，REPL 会提示错误并跳过 `sendTurn()`，但 scrollback 已经留下了一条看起来已发送的用户历史消息。
+
+**审核结论**：问题真实，属于“输入提交显示边界”与“结构化 payload 准备边界”顺序不一致。文本长粘贴修复后，scrollback 已经使用 canonical 文本；但材料输入引入后，是否能发送必须先由 `prepareUserTurnInput()` 判定。
+
+**事实依据**：
+
+- `packages/cli/src/typeahead-input.ts` 的 `submit()` 在 `fireSubmit()` 之前调用 `echoSubmittedText(canonicalDraft)`。
+- `packages/cli/src/repl.ts` 在收到 `InputController` 的 text result 后，才调用 `prepareUserTurnInput(input, { materialRegistry })`。
+- `prepareUserTurnInput()` / `resolveInputMaterials()` 可能返回错误，例如：源文件消失、图片过大、非文本普通文件暂不支持。
+- 当 `preparedInput.errors.length > 0` 时，REPL 打印警告并 `continue`，不会调用 `controller.sendTurn(preparedInput.input)`。
+- 因此 scrollback 中可能存在一条用户消息 chip，但这条消息实际没有进入 agent，也不会进入核心对话事实。
+
+**背后需求**：scrollback 是用户对“已经发送内容”的信任记录。只要某次输入没有成功进入 agent，就不能提前把它渲染成已发送历史消息；否则用户会误以为 agent 已经看到了材料。
+
+**目标效果**：
+
+- 对所有输入类型，scrollback 只记录已经通过提交准备、即将进入 agent/core 的用户消息。
+- 材料解析失败时，输入内容不应作为已发送历史消息写入 scrollback；用户应看到明确错误，并能继续修正或重新输入。
+- 文本长粘贴仍保持：提交后 scrollback 显示原文，不显示 paste token。
+- 结构化材料成功时，scrollback 显示稳定的人类可读摘要，不泄漏内部 token，也不依赖后续展开。
+
+**初步方案方向**：
+
+- 重新划分提交边界：`InputController` 不应在 REPL 完成 `prepareUserTurnInput()` 前把材料输入写入 scrollback。
+- 可以把“提交输入态”和“确认写入历史区”拆成两步：InputController 先产出 raw/canonical draft，REPL 准备 payload 成功后再请求输入区写 history echo。
+- 或者让 InputController 的 submit hook 支持异步 validation/prepare，再在成功后统一 commit + echo；但需要谨慎避免重新引入 chrome 重绘 TOCTOU。
+- 不应在 REPL 里直接重复实现 scrollback echo 样式；历史回显仍应有单一渲染来源。
+
+**验收标准**：
+
+- 粘贴 unsupported binary file 生成 file chip 后提交：显示错误，不调用 `sendTurn()`，scrollback 不出现该 chip / 用户历史消息。
+- 粘贴图片后源文件在提交前消失：显示错误，scrollback 不出现未发送消息。
+- 粘贴有效图片 / 文本文件提交成功：scrollback 显示稳定摘要，agent/core 收到结构化 input。
+- 文本长粘贴提交仍显示原文，不泄漏 paste token。
+
 ## 已验证
 
 第 1-4 个问题验证命令：

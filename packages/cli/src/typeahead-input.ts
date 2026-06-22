@@ -46,7 +46,7 @@ import { type PasteRegistry } from "./paste-registry.js";
 import { INPUT_HANDLE_TOKEN_PATTERNS } from "./input-handle-tokens.js";
 import { expandPastes, PasteReferenceIndex } from "./paste-expand.js";
 import {
-  removeAllInputTokens,
+  removeAllPasteTokens,
   tryAtomicEdit,
   type AtomicEditKind,
 } from "./paste-atomic.js";
@@ -912,12 +912,12 @@ export class InputController implements InputRegion {
         : null;
     const nextContent = materializedContent ?? content;
 
-    let bufferWasClean = true;
-    if (this.options.registry || this.options.materialRegistry) {
-      const removed = removeAllInputTokens(this.buffer.draft, this.buffer.cursor);
+    let removedPasteToken = false;
+    if (this.options.registry) {
+      const removed = removeAllPasteTokens(this.buffer.draft, this.buffer.cursor);
       if (removed) {
         this.buffer.setDraft(removed.draft, removed.cursor);
-        bufferWasClean = false;
+        removedPasteToken = true;
       }
     }
 
@@ -925,7 +925,7 @@ export class InputController implements InputRegion {
       materializedContent === null &&
       !!this.options.registry &&
       shouldFoldPaste(content) &&
-      bufferWasClean;
+      !removedPasteToken;
     if (shouldFold) {
       const id = this.options.registry!.register(content);
       this.buffer.insertText(this.options.registry!.format(id));

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { PasteRegistry } from "../paste-registry.js";
+import { InputMaterialRegistry } from "../input-material-registry.js";
 import {
   findTokenCharRanges,
   removeAllPasteTokens,
@@ -233,5 +234,27 @@ describe("removeAllPasteTokens", () => {
     const result = removeAllPasteTokens(draft, 0);
     expect(result).not.toBeNull();
     expect(result!.draft).toBe("请审一下  谢谢");
+  });
+
+  it("只删除文本粘贴 token，保留材料 chip", () => {
+    const pasteRegistry = new PasteRegistry();
+    const materialRegistry = new InputMaterialRegistry();
+    const pasteToken = pasteRegistry.format(pasteRegistry.register("X"));
+    const materialId = materialRegistry.registerLocalFile({
+      kind: "image",
+      filePath: "E:/repo/shot.png",
+      name: "shot.png",
+      mimeType: "image/png",
+      byteSize: 24,
+      image: { width: 4, height: 5 },
+    });
+    const materialChip = materialRegistry.format(materialId);
+    const draft = `${materialChip} ${pasteToken} tail`;
+
+    const result = removeAllPasteTokens(draft, Array.from(draft).length);
+
+    expect(result).not.toBeNull();
+    expect(result!.draft).toBe(`${materialChip}  tail`);
+    expect(result!.cursor).toBe(Array.from(result!.draft).length);
   });
 });

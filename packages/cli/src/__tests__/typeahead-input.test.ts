@@ -1291,6 +1291,139 @@ describe("InputController — 多行粘贴提交历史区", () => {
     }
   });
 
+  it("材料 chip 后粘贴普通文本时保留材料并按输入顺序提交", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-input-"));
+    try {
+      const imagePath = path.join(tempDir, "shot.png");
+      await fs.writeFile(imagePath, minimalPng(4, 5));
+      const { stdin } = makeStreams();
+      const { broker, dispatcher } = makeHarness();
+      const registry = new PasteRegistry();
+      const materialRegistry = new InputMaterialRegistry();
+      const { screen } = makeCapturingScreen();
+      const controller = new InputController({
+        broker,
+        dispatcher,
+        getRuntime: makeRuntime,
+        screen,
+        stdin,
+        columns: 80,
+        registry,
+        materialRegistry,
+        workspaceRoot: tempDir,
+      });
+      const resultP = controller.waitOnce();
+
+      controller.start();
+      await pasteText(stdin, imagePath);
+      await pasteText(stdin, " 请描述这张图");
+
+      const inputText = stripAnsi(controller.renderLines().join("\n"));
+      expect(inputText).toContain("[Image #1 · shot.png");
+      expect(inputText).toContain("请描述这张图");
+      expect(inputText).not.toContain(imagePath);
+
+      await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+      const result = await resultP;
+      expect(result.kind).toBe("text");
+      if (result.kind === "text") {
+        expect(result.text).toContain("[Image #1");
+        expect(result.text).toContain("请描述这张图");
+        expect(result.text.indexOf("[Image #1")).toBeLessThan(
+          result.text.indexOf("请描述这张图"),
+        );
+        const prepared = await prepareUserTurnInput(result.text, {
+          workspaceRoot: tempDir,
+          materialRegistry,
+        });
+        expect(prepared?.errors).toEqual([]);
+        expect(prepared?.input.parts.map((part) => part.type)).toEqual([
+          "image",
+          "text",
+        ]);
+        expect(prepared?.input.parts[0]).toMatchObject({
+          type: "image",
+          name: "shot.png",
+          mimeType: "image/png",
+        });
+        expect(prepared?.input.parts[1]).toEqual({
+          type: "text",
+          text: " 请描述这张图",
+        });
+      }
+
+      controller.stop();
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("连续粘贴多个图片路径时保留全部材料 chip", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-input-"));
+    try {
+      const firstImagePath = path.join(tempDir, "first.png");
+      const secondImagePath = path.join(tempDir, "second.png");
+      await fs.writeFile(firstImagePath, minimalPng(4, 5));
+      await fs.writeFile(secondImagePath, minimalPng(6, 7));
+      const { stdin } = makeStreams();
+      const { broker, dispatcher } = makeHarness();
+      const registry = new PasteRegistry();
+      const materialRegistry = new InputMaterialRegistry();
+      const { screen } = makeCapturingScreen();
+      const controller = new InputController({
+        broker,
+        dispatcher,
+        getRuntime: makeRuntime,
+        screen,
+        stdin,
+        columns: 80,
+        registry,
+        materialRegistry,
+        workspaceRoot: tempDir,
+      });
+      const resultP = controller.waitOnce();
+
+      controller.start();
+      await pasteText(stdin, firstImagePath);
+      await pasteText(stdin, secondImagePath);
+
+      const inputText = stripAnsi(controller.renderLines().join("\n"));
+      expect(inputText).toContain("[Image #1 · first.png");
+      expect(inputText).toContain("[Image #2 · second.png");
+      expect(inputText).not.toContain(firstImagePath);
+      expect(inputText).not.toContain(secondImagePath);
+
+      await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+      const result = await resultP;
+      expect(result.kind).toBe("text");
+      if (result.kind === "text") {
+        const prepared = await prepareUserTurnInput(result.text, {
+          workspaceRoot: tempDir,
+          materialRegistry,
+        });
+        expect(prepared?.errors).toEqual([]);
+        expect(prepared?.input.parts.map((part) => part.type)).toEqual([
+          "image",
+          "image",
+        ]);
+        expect(prepared?.input.parts[0]).toMatchObject({
+          type: "image",
+          name: "first.png",
+          mimeType: "image/png",
+        });
+        expect(prepared?.input.parts[1]).toMatchObject({
+          type: "image",
+          name: "second.png",
+          mimeType: "image/png",
+        });
+      }
+
+      controller.stop();
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("长图片材料 chip 在输入区和历史区都按原子 handle 显示", async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-input-"));
     try {
