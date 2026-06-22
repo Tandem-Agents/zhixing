@@ -35,7 +35,20 @@ interface PastedMaterialLine {
   readonly raw: string;
   readonly input: string;
   readonly quoted: boolean;
+  readonly intent: PathIntent;
 }
+
+type PathIntent = "text" | "candidate-path" | "strong-path";
+
+type ProcessedMaterialLine =
+  | { readonly kind: "text"; readonly raw: string }
+  | { readonly kind: "material"; readonly token: string }
+  | {
+      readonly kind: "failure";
+      readonly raw: string;
+      readonly intent: Exclude<PathIntent, "text">;
+      readonly diagnostic: PastedMaterialIngestDiagnostic;
+    };
 
 export function ingestPastedMaterials(
   content: string,
@@ -45,68 +58,35 @@ export function ingestPastedMaterials(
   const lines = parsePastedMaterialLines(content);
   if (lines.length === 0) return { kind: "not-material" };
 
-  let hasMaterial = false;
-  let hasExplicitPathFailure = false;
+  const processed = lines.map((line) =>
+    processMaterialLine(line, registry, options),
+  );
+  const hasMaterial = processed.some((line) => line.kind === "material");
+  const hasStrongPathFailure = processed.some(
+    (line) => line.kind === "failure" && line.intent === "strong-path",
+  );
+  if (!hasMaterial && !hasStrongPathFailure) return { kind: "not-material" };
+
   const outputLines: string[] = [];
   const diagnostics: PastedMaterialIngestDiagnostic[] = [];
 
-  for (const line of lines) {
-    if (!line.input) {
+  for (const line of processed) {
+    if (line.kind === "text") {
       outputLines.push(line.raw);
       continue;
     }
-
-    const filePath = resolvePastedPath(line.input, options.workspaceRoot);
-    let stat: fs.Stats;
-    try {
-      stat = fs.statSync(filePath);
-    } catch {
-      if (isExplicitPathLike(line.input, line.quoted)) {
-        hasExplicitPathFailure = true;
-        diagnostics.push({
-          input: line.input,
-          filePath,
-          reason: "unreadable",
-          message: "文件不存在或不可读取",
-        });
-      } else {
-        outputLines.push(line.raw);
-      }
-      continue;
-    }
-    if (!stat.isFile()) {
-      if (isExplicitPathLike(line.input, line.quoted)) {
-        hasExplicitPathFailure = true;
-        diagnostics.push({
-          input: line.input,
-          filePath,
-          reason: "not-file",
-          message: "不是普通文件",
-        });
-      } else {
-        outputLines.push(line.raw);
-      }
+    if (line.kind === "material") {
+      outputLines.push(line.token);
       continue;
     }
 
-    const header = readFileHeader(filePath, stat.size);
-    const mimeType = detectMimeType(filePath, header);
-    const kind: InputMaterialKind = mimeType.startsWith("image/")
-      ? "image"
-      : "file";
-    const id = registry.registerLocalFile({
-      kind,
-      filePath,
-      name: path.basename(filePath),
-      mimeType,
-      byteSize: stat.size,
-      image: kind === "image" ? readImageMetadata(header, mimeType) : undefined,
-    });
-    outputLines.push(registry.format(id, { maxWidth: options.tokenMaxWidth }));
-    hasMaterial = true;
+    if (line.intent === "strong-path" || hasMaterial) {
+      diagnostics.push(line.diagnostic);
+    } else {
+      outputLines.push(line.raw);
+    }
   }
 
-  if (!hasMaterial && !hasExplicitPathFailure) return { kind: "not-material" };
   return {
     kind: "ingested",
     insertText: trimEmptyLineEdges(outputLines).join("\n"),
@@ -125,7 +105,12 @@ function parsePastedMaterialLines(content: string): PastedMaterialLine[] {
   const lines = trimEmptyLineEdges(rawLines);
   return lines.map((raw) => {
     const unquoted = unquote(raw.trim());
-    return { raw, input: unquoted.value, quoted: unquoted.quoted };
+    return {
+      raw,
+      input: unquoted.value,
+      quoted: unquoted.quoted,
+      intent: classifyPathIntent(unquoted.value, unquoted.quoted),
+    };
   });
 }
 
@@ -145,18 +130,91 @@ function resolvePastedPath(input: string, workspaceRoot: string): string {
   return path.resolve(workspaceRoot, expanded);
 }
 
-function isExplicitPathLike(input: string, quoted: boolean): boolean {
-  if (!input) return false;
-  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(input)) return false;
-  if (/^(~|\.{1,2})([\\/]|$)/.test(input)) return true;
-  if (/^[a-zA-Z]:[\\/]/.test(input)) return true;
-  if (/^\\\\/.test(input)) return true;
-  if (path.isAbsolute(expandUserHome(input))) return true;
-  if (/[\\/]/.test(input)) return true;
-  if (!quoted && /\s/.test(input)) return false;
+function processMaterialLine(
+  line: PastedMaterialLine,
+  registry: InputMaterialRegistry,
+  options: PasteMaterialIngestOptions,
+): ProcessedMaterialLine {
+  if (!line.input || line.intent === "text") {
+    return { kind: "text", raw: line.raw };
+  }
+
+  const filePath = resolvePastedPath(line.input, options.workspaceRoot);
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(filePath);
+  } catch {
+    return {
+      kind: "failure",
+      raw: line.raw,
+      intent: line.intent,
+      diagnostic: {
+        input: line.input,
+        filePath,
+        reason: "unreadable",
+        message: "文件不存在或不可读取",
+      },
+    };
+  }
+
+  if (!stat.isFile()) {
+    return {
+      kind: "failure",
+      raw: line.raw,
+      intent: line.intent,
+      diagnostic: {
+        input: line.input,
+        filePath,
+        reason: "not-file",
+        message: "不是普通文件",
+      },
+    };
+  }
+
+  const header = readFileHeader(filePath, stat.size);
+  const mimeType = detectMimeType(filePath, header);
+  const kind: InputMaterialKind = mimeType.startsWith("image/")
+    ? "image"
+    : "file";
+  const id = registry.registerLocalFile({
+    kind,
+    filePath,
+    name: path.basename(filePath),
+    mimeType,
+    byteSize: stat.size,
+    image: kind === "image" ? readImageMetadata(header, mimeType) : undefined,
+  });
+  return {
+    kind: "material",
+    token: registry.format(id, { maxWidth: options.tokenMaxWidth }),
+  };
+}
+
+function classifyPathIntent(input: string, quoted: boolean): PathIntent {
+  if (!input) return "text";
+  if (isUrlLike(input) || isPlainDateLike(input)) return "text";
+  if (isStrongPathLike(input)) return "strong-path";
+  if (!quoted && /\s/.test(input)) return "text";
+  if (/[\\/]/.test(input)) return "candidate-path";
 
   const ext = path.extname(input);
-  return ext.length > 1;
+  return ext.length > 1 ? "candidate-path" : "text";
+}
+
+function isStrongPathLike(input: string): boolean {
+  if (/^(~|\.{1,2})([\\/]|$)/.test(input)) return true;
+  if (/^[a-zA-Z]:[\\/]/.test(input)) return true;
+  if (/^[/\\]{2}[^/\\\s]+[/\\][^/\\\s]+/.test(input)) return true;
+  if (/^[/\\]{2}/.test(input)) return false;
+  return path.isAbsolute(expandUserHome(input));
+}
+
+function isUrlLike(input: string): boolean {
+  return /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(input);
+}
+
+function isPlainDateLike(input: string): boolean {
+  return /^\d{1,4}[/-]\d{1,2}(?:[/-]\d{1,4})?$/.test(input);
 }
 
 function trimEmptyLineEdges(lines: readonly string[]): string[] {

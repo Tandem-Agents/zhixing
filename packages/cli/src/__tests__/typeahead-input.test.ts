@@ -1532,10 +1532,61 @@ describe("InputController — 多行粘贴提交历史区", () => {
     }
   });
 
+  it("粘贴含斜杠代码时不触发材料采集且仍按长文本折叠", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-input-"));
+    try {
+      const { stdin } = makeStreams();
+      const { broker, dispatcher } = makeHarness();
+      const registry = new PasteRegistry();
+      const materialRegistry = new InputMaterialRegistry();
+      const diagnostics: string[] = [];
+      const { screen } = makeCapturingScreen();
+      const controller = new InputController({
+        broker,
+        dispatcher,
+        getRuntime: makeRuntime,
+        screen,
+        stdin,
+        columns: 80,
+        registry,
+        materialRegistry,
+        workspaceRoot: tempDir,
+        onMaterialIngestDiagnostics: (items) => {
+          diagnostics.push(...items.map((item) => item.input));
+        },
+      });
+      const resultP = controller.waitOnce();
+      const pasted = [
+        "function f() {",
+        "  return a / b;",
+        "}",
+        "// see src/main.ts",
+        "const x = 1;",
+      ].join("\n");
+
+      controller.start();
+      await pasteText(stdin, pasted);
+
+      const inputText = stripAnsi(controller.renderLines().join("\n"));
+      expect(inputText).toContain("[Pasted #");
+      expect(inputText).not.toContain("return a / b");
+      expect(diagnostics).toEqual([]);
+      expect(materialRegistry.size).toBe(0);
+      expect(registry.size).toBe(1);
+
+      await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+      expect(await resultP).toEqual({ kind: "text", text: pasted });
+
+      controller.stop();
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it("明确材料路径全部失败时不污染已有草稿", async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "zhixing-input-"));
     try {
-      const missingPath = path.join(tempDir, "missing.png");
+      const missingPath = `.${path.sep}missing.png`;
       const { stdin } = makeStreams();
       const { broker, dispatcher } = makeHarness();
       const materialRegistry = new InputMaterialRegistry();

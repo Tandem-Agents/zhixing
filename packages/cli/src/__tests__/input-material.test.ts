@@ -64,25 +64,64 @@ describe("input materials", () => {
     expect(registry.size).toBe(0);
   });
 
+  it("含斜杠的普通代码和文本不被材料采集吞行", () => {
+    const registry = new InputMaterialRegistry();
+    const code = [
+      "function f() {",
+      "  return a / b;",
+      "}",
+      "// see src/main.ts",
+      "const x = 1;",
+    ].join("\n");
+
+    expect(
+      ingestPastedMaterials(code, registry, {
+        workspaceRoot: "E:/repo",
+      }),
+    ).toEqual({ kind: "not-material" });
+    expect(
+      ingestPastedMaterials("hello\nfoo/bar\nbye", registry, {
+        workspaceRoot: "E:/repo",
+      }),
+    ).toEqual({ kind: "not-material" });
+    expect(registry.size).toBe(0);
+  });
+
+  it("import、日期和 URL 等普通斜杠文本不触发材料模式", () => {
+    const registry = new InputMaterialRegistry();
+    for (const content of [
+      'import x from "./foo/bar";',
+      "2026/06/22",
+      "https://example.com/shot.png",
+    ]) {
+      expect(
+        ingestPastedMaterials(content, registry, {
+          workspaceRoot: "E:/repo",
+        }),
+      ).toEqual({ kind: "not-material" });
+    }
+    expect(registry.size).toBe(0);
+  });
+
   it("批量材料路径部分失败时保留成功材料并返回诊断", async () => {
     const root = await makeTempDir();
     const imagePath = path.join(root, "shot.png");
-    const missingPath = path.join(root, "missing.png");
+    const missingInput = "missing.png";
     await fs.writeFile(imagePath, minimalPng(2, 3));
     const registry = new InputMaterialRegistry();
 
-    const result = ingestPastedMaterials(`${imagePath}\n${missingPath}`, registry, {
+    const result = ingestPastedMaterials(`${imagePath}\n${missingInput}`, registry, {
       workspaceRoot: root,
     });
 
     expect(result.kind).toBe("ingested");
     if (result.kind === "ingested") {
       expect(result.insertText).toContain("[Image #1 · shot.png · 2x3 ·");
-      expect(result.insertText).not.toContain(missingPath);
+      expect(result.insertText).not.toContain(missingInput);
       expect(result.diagnostics).toEqual([
         {
-          input: missingPath,
-          filePath: missingPath,
+          input: missingInput,
+          filePath: path.join(root, missingInput),
           reason: "unreadable",
           message: "文件不存在或不可读取",
         },
@@ -91,11 +130,23 @@ describe("input materials", () => {
     expect(registry.size).toBe(1);
   });
 
-  it("明确路径全部失败时返回空插入内容和诊断", async () => {
+  it("无显式前缀的缺失文件名按普通文本保留", async () => {
     const root = await makeTempDir();
     const registry = new InputMaterialRegistry();
 
     const result = ingestPastedMaterials("missing.png", registry, {
+      workspaceRoot: root,
+    });
+
+    expect(result).toEqual({ kind: "not-material" });
+    expect(registry.size).toBe(0);
+  });
+
+  it("明确路径全部失败时返回空插入内容和诊断", async () => {
+    const root = await makeTempDir();
+    const registry = new InputMaterialRegistry();
+
+    const result = ingestPastedMaterials("./missing.png", registry, {
       workspaceRoot: root,
     });
 
@@ -104,7 +155,7 @@ describe("input materials", () => {
       expect(result.insertText).toBe("");
       expect(result.diagnostics).toHaveLength(1);
       expect(result.diagnostics[0]).toMatchObject({
-        input: "missing.png",
+        input: "./missing.png",
         filePath: path.join(root, "missing.png"),
         reason: "unreadable",
       });
