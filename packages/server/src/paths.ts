@@ -41,14 +41,14 @@ export function getDefaultServerActiveLogPath(): string {
   return join(getDefaultServerLogDirPath(), "server.log");
 }
 
-/** ~/.zhixing/server.log —— 当前 daemon 默认日志；接入治理后作为旧路径迁移 / 兼容来源 */
+/** ~/.zhixing/server.log —— 旧版 daemon 日志；只作为迁移 / 兼容来源 */
 export function getLegacyServerLogPath(): string {
   return join(getZhixingHome(), "server.log");
 }
 
-/** ~/.zhixing/server.log —— daemon child stdout/stderr 重定向目标 */
+/** ~/.zhixing/logs/server/server.log —— daemon child stdout/stderr 重定向目标 */
 export function getDefaultLogPath(): string {
-  return getLegacyServerLogPath();
+  return getDefaultServerActiveLogPath();
 }
 
 /** ~/.zhixing/server.token —— RPC 客户端认证用共享 token */

@@ -54,6 +54,7 @@ import {
   ConfirmationHub,
   DEFAULT_SERVER_CONFIG,
   ServerStateFile,
+  ServerLogLifecycle,
   CleanupRegistry,
   createRunEventForwarder,
   getDefaultLogPath,
@@ -127,6 +128,18 @@ export async function runServeCommand(opts: ServeOptions): Promise<void> {
 async function runServerProcess(opts: ServeOptions): Promise<void> {
   const profile: ServerProfile = DEFAULT_PROFILE;
   const zhixingHome = getZhixingHome();
+  const isChild = isDaemonChild();
+  const daemonLogPath = isChild ? getDefaultLogPath() : undefined;
+  const serverLogLifecycle = isChild
+    ? new ServerLogLifecycle({
+        logger: {
+          info: (msg) => console.log(chalk.dim(`[server-log] ${msg}`)),
+          error: (msg, err) =>
+            console.error(chalk.red(`[server-log] ${msg}`), err instanceof Error ? err.message : err),
+        },
+      })
+    : undefined;
+  await serverLogLifecycle?.start();
   // 端口按 home 派生（同 home 同端口 → listen 的 EADDRINUSE 原子仲裁单例 + 并发安全；
   // 不同 home 不同端口 → 多实例并行不撞）。用户显式 --port 覆盖。
   const port = opts.port ?? homeToPort(zhixingHome);
@@ -390,9 +403,13 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
         console.error(chalk.red(`[cleanup] ${msg}`), err instanceof Error ? err.message : err),
     },
   });
+  if (serverLogLifecycle) {
+    registry.register("serverLogLifecycle.stop", () => {
+      serverLogLifecycle.stop();
+    });
+  }
 
   // 4a. Daemon child 才启用 ServerStateFile——前台模式不写 state 文件
-  const isChild = isDaemonChild();
   const stateFile = isChild ? new ServerStateFile() : undefined;
   const heartbeatTimerRef: { current: NodeJS.Timeout | null } = { current: null };
 
@@ -601,7 +618,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     hostInfo: {
       // 宿主单点解析的工作区——接入面 @ 补全 root 取此
       workspace: ephemeralRuntime.resolvedWorkspace.path ?? undefined,
-      logPath: isChild ? getDefaultLogPath() : undefined,
+      logPath: daemonLogPath,
     },
     // /mcp 状态显示与接入向导的宿主侧数据面(MCP 连接在宿主)
     mcpStatuses: () => mcpHub.serverStatuses(),
@@ -647,6 +664,10 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
       schedulerEventBus,
       cleanupRegistry: registry,
       lockPaths, // 与 registerTailCleanup 使用同一引用——acquire/release 路径一致
+      processInfo: {
+        version: SERVER_VERSION,
+        logPath: daemonLogPath,
+      },
       logger: {
         info: (msg) => console.log(chalk.dim(`[server] ${msg}`)),
         warn: (msg) => console.warn(chalk.yellow(`[server] ${msg}`)),

@@ -2,7 +2,7 @@
  * `zhixing serve logs` — 查看后台宿主日志
  *
  * 两个模式：
- *   默认：读 ~/.zhixing/server.log → 打印最后 N 行（默认 50）
+ *   默认：读 ~/.zhixing/logs/server/server.log → 打印最后 N 行（默认 50）
  *   --tail：持续跟踪模式（每 500ms poll，文件增长则增量输出新内容）
  *
  * 为什么用轮询而非 fs.watch：

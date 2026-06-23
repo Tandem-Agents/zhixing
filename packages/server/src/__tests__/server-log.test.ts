@@ -37,10 +37,10 @@ describe("server log path model", () => {
     });
   });
 
-  it("keeps the current daemon log path separate from the governed active path", () => {
+  it("uses the governed active log path as the daemon log path", () => {
     process.env.ZHIXING_HOME = join("tmp", "zhixing-home");
 
-    expect(getDefaultLogPath()).toBe(getLegacyServerLogPath());
+    expect(getDefaultLogPath()).toBe(getDefaultServerActiveLogPath());
     expect(getLegacyServerLogPath()).not.toBe(getDefaultServerActiveLogPath());
   });
 });

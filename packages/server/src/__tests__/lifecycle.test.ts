@@ -92,6 +92,32 @@ describe("runServer lifecycle (S2.F)", () => {
     expect(lockAfter).toBeNull();
   });
 
+  it("writes process metadata to the PID discovery file", async () => {
+    const ctx = createServerContext({
+      config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
+      version: "0.1.0-test",
+      token: TEST_TOKEN,
+      scheduler,
+    });
+
+    runner = await runServer({
+      context: ctx,
+      scheduler,
+      lockPaths: { pidPath, portPath },
+      processInfo: {
+        version: "0.1.0-test",
+        logPath: "/home/zx/logs/server/server.log",
+      },
+      skipSignalHandlers: true,
+      logger: { info() {}, warn() {}, error() {} },
+    });
+
+    const lock = await readLock({ pidPath, portPath });
+    expect(lock?.version).toBe("0.1.0-test");
+    expect(lock?.logPath).toBe("/home/zx/logs/server/server.log");
+    expect(lock?.host).toBe(runner.server.host);
+  });
+
   it("shutdown is idempotent — calling twice resolves both", async () => {
     runner = await startTestServer();
 

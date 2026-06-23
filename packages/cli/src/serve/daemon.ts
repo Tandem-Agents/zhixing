@@ -22,6 +22,8 @@ import {
   isProcessAlive,
   getDefaultLogPath,
   getDefaultReadyMarkerPath,
+  prepareServerLogForWrite,
+  SERVER_LOG_ACTIVE_OPEN_FLAGS,
   type PidFileContents,
 } from "@zhixing/server";
 import {
@@ -56,6 +58,7 @@ export interface SpawnDaemonDeps {
   /** 覆盖 open/mkdir（测试用）*/
   openFn?: (path: string, flags: string) => Promise<{ fd: number; close: () => Promise<void> }>;
   mkdirFn?: (path: string, opts: { recursive: true }) => Promise<string | undefined>;
+  prepareServerLogForWriteFn?: typeof prepareServerLogForWrite;
   /** .ready marker 路径覆盖（测试用；默认 ~/.zhixing/server.ready）*/
   readyMarkerPath?: string;
 }
@@ -85,7 +88,7 @@ export interface SpawnDaemonResult {
  */
 export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<SpawnDaemonResult> {
   const deps = opts.deps ?? {};
-  const logPath = opts.logPath ?? getDefaultLogPath();
+  let logPath = opts.logPath ?? getDefaultLogPath();
   const handshakeTimeoutMs = opts.handshakeTimeoutMs ?? 5000;
   const pollIntervalMs = opts.pollIntervalMs ?? 200;
   const con = deps.console ?? console;
@@ -108,8 +111,12 @@ export async function spawnDaemon(opts: SpawnDaemonOptions): Promise<SpawnDaemon
     const h = await open(p, flags);
     return { fd: h.fd, close: () => h.close() };
   });
+  if (!opts.logPath) {
+    const prepareLogPath = deps.prepareServerLogForWriteFn ?? prepareServerLogForWrite;
+    logPath = (await prepareLogPath()).logPath;
+  }
   await mkdirFn(dirname(logPath), { recursive: true });
-  const logHandle = await openFn(logPath, "a");
+  const logHandle = await openFn(logPath, SERVER_LOG_ACTIVE_OPEN_FLAGS);
   const logFd = logHandle.fd;
 
   // 3. spawn + detach + unref + close fd

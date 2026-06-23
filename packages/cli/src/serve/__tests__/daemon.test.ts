@@ -13,6 +13,7 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
+import { SERVER_LOG_ACTIVE_OPEN_FLAGS } from "@zhixing/server";
 import { spawnDaemon } from "../daemon.js";
 
 // 不作为 child 识别，避免 resolveSelfExec 受父进程 env 影响
@@ -86,6 +87,47 @@ describe("spawnDaemon", () => {
     expect(r.port).toBe(18900);
     expect(deps.spawnFn).toHaveBeenCalledOnce();
     expect(deps.openFn).toHaveBeenCalledOnce();
+  });
+
+  it("prepares and opens the governed default log path for daemon stdio", async () => {
+    const clock = mkFakeClock();
+    const deps = makeDeps({
+      clock,
+      sleep: vi.fn(async () => clock.advance(200)),
+      prepareServerLogForWriteFn: vi.fn(async () => ({
+        logPath: "/home/zx/logs/server/server.log",
+        migratedLegacy: false,
+        removedLegacy: false,
+        transition: {
+          kind: "initialize-active",
+          paths: {
+            dirPath: "/home/zx/logs/server",
+            activeLogPath: "/home/zx/logs/server/server.log",
+            legacyLogPath: "/home/zx/server.log",
+          },
+          readPath: "/home/zx/logs/server/server.log",
+          writePath: "/home/zx/logs/server/server.log",
+        },
+      })),
+      readLockFn: vi.fn(async () => ({ pid: 12345, port: 18900, startedAt: "t" })),
+      isProcessAliveFn: vi.fn(() => true),
+      httpGetFn: vi.fn(async () => 200),
+    });
+
+    const result = await spawnDaemon({
+      forwardedArgs: ["serve"],
+      handshakeTimeoutMs: 1000,
+      pollIntervalMs: 200,
+      deps,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.logPath).toBe("/home/zx/logs/server/server.log");
+    expect(deps.prepareServerLogForWriteFn).toHaveBeenCalledOnce();
+    expect(deps.openFn).toHaveBeenCalledWith(
+      "/home/zx/logs/server/server.log",
+      SERVER_LOG_ACTIVE_OPEN_FLAGS,
+    );
   });
 
   it("times out when PID never appears", async () => {

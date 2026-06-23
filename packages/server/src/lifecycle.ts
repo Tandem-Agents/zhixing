@@ -44,6 +44,7 @@ import { startServer, type StartServerOptions, type ZhixingServerInstance } from
 import {
   acquireLock,
   releaseLock,
+  type AcquireLockOptions,
   type ProcessLockPaths,
 } from "./process-lock.js";
 import { CleanupRegistry } from "./cleanup-registry.js";
@@ -53,6 +54,8 @@ export interface RunServerOptions extends StartServerOptions {
   scheduler?: Scheduler;
   /** 进程锁文件路径覆盖 */
   lockPaths?: ProcessLockPaths;
+  /** 写入 PID 发现文件的诊断元数据 */
+  processInfo?: Pick<AcquireLockOptions, "argv" | "host" | "kind" | "logPath" | "version">;
   /** 跳过进程锁（测试用） */
   skipProcessLock?: boolean;
   /** 跳过信号处理器注册（测试用——避免污染 vitest 进程信号处理器） */
@@ -101,7 +104,11 @@ export async function runServer(opts: RunServerOptions): Promise<RunningServer> 
   //    acquireLock 覆盖任何崩溃残留、不因 PID 冲突自杀（见 process-lock.ts）。
   if (!opts.skipProcessLock) {
     try {
-      await acquireLock(server.port, opts.lockPaths);
+      await acquireLock(server.port, {
+        ...opts.lockPaths,
+        ...opts.processInfo,
+        host: opts.processInfo?.host ?? server.host,
+      });
     } catch (err) {
       // 仅 PID 文件写入 IO 失败（磁盘满 / 权限）才会到这里——此时 server 已 listen 但
       // cleanup 尚未注册，手动关掉防端口泄漏再传播（fail-fast：发现文件写不了，宿主无法被接入）。

@@ -1,7 +1,32 @@
-import { describe, it, expect, vi } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
+import { join } from "node:path";
 import { runLogsCommand } from "../logs.js";
 
+const ORIGINAL_ZHIXING_HOME = process.env.ZHIXING_HOME;
+
+afterEach(() => {
+  if (ORIGINAL_ZHIXING_HOME === undefined) delete process.env.ZHIXING_HOME;
+  else process.env.ZHIXING_HOME = ORIGINAL_ZHIXING_HOME;
+});
+
 describe("runLogsCommand — default mode", () => {
+  it("reads the governed active server log path by default", async () => {
+    process.env.ZHIXING_HOME = join("tmp", "zhixing-home");
+    const readFile = vi.fn(async () => "line");
+
+    await runLogsCommand({
+      deps: {
+        readFileFn: readFile,
+        console: { log: vi.fn(), error: vi.fn() },
+      },
+    });
+
+    expect(readFile).toHaveBeenCalledWith(
+      join("tmp", "zhixing-home", "logs", "server", "server.log"),
+      "utf-8",
+    );
+  });
+
   it("prints last N lines of log file", async () => {
     const content = Array.from({ length: 100 }, (_, i) => `line ${i + 1}`).join("\n");
     const log = vi.fn();
