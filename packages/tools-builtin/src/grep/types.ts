@@ -8,6 +8,12 @@ export type GrepRegexDialect = "line-regexp";
 export type GrepCaseSensitivity = "sensitive" | "ascii-insensitive";
 export type GrepExecutorName = GrepResultsDiagnostics["executor"];
 export type GrepCapabilityMode = GrepResultsDiagnostics["capabilityMode"];
+export type GrepExecutorUnsupportedReason =
+  | "unavailable"
+  | "unsupported-regex"
+  | "unsupported-file-policy"
+  | "unsupported-encoding"
+  | "unsupported-budget";
 
 export interface GrepQuery {
   workingDirectory: string;
@@ -20,6 +26,10 @@ export interface GrepQuery {
   contextLines: number;
   maxResultChars: number;
   maxLineChars: number;
+  maxMatchedFiles?: number;
+  maxMatchedLines?: number;
+  maxScannedFiles?: number;
+  timeoutMs?: number;
 }
 
 export interface GrepSearchResult {
@@ -63,4 +73,58 @@ export interface CompiledLineRegexp {
 
 export interface CompileLineRegexpOptions {
   caseSensitivity?: GrepCaseSensitivity;
+}
+
+export interface GrepSearchPlan {
+  query: GrepQuery;
+  absoluteSearchPath: string;
+  regexp: CompiledLineRegexp;
+}
+
+export type GrepSearchPlanCreation =
+  | { ok: true; plan: GrepSearchPlan }
+  | { ok: false; error: GrepSearchError };
+
+export type GrepExecutorQualification =
+  | {
+      executable: true;
+      capabilityMode: GrepCapabilityMode;
+      notes?: string[];
+    }
+  | {
+      executable: false;
+      reason: GrepExecutorUnsupportedReason;
+      notes?: string[];
+    };
+
+export type GrepSearchExecution =
+  | { ok: true; result: GrepSearchResult }
+  | { ok: false; error: GrepSearchError };
+
+export type GrepSearchError =
+  | { code: "invalid-query"; message: string }
+  | { code: "invalid-pattern"; message: string }
+  | { code: "path-not-found"; path: string; message: string }
+  | { code: "executor-unavailable"; message: string; notes?: string[] }
+  | {
+      code: "unsupported-query";
+      reason: GrepExecutorUnsupportedReason;
+      message: string;
+      notes?: string[];
+    }
+  | { code: "timeout"; message: string; elapsedMs?: number }
+  | { code: "aborted"; message: string }
+  | { code: "internal-error"; message: string };
+
+export interface GrepSearchOptions {
+  abortSignal?: AbortSignal;
+}
+
+export interface GrepSearchExecutor {
+  name: GrepExecutorName;
+  qualify(plan: GrepSearchPlan): Promise<GrepExecutorQualification>;
+  search(
+    plan: GrepSearchPlan,
+    options?: GrepSearchOptions,
+  ): Promise<GrepSearchExecution>;
 }
