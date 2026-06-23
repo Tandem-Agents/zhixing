@@ -113,6 +113,73 @@ describe("trackMessages", () => {
     expect(JSON.stringify(blocks)).not.toContain("file-diff");
   });
 
+  it("tool_end 的 grep presentation 不进入 transcript", () => {
+    const { newMessages, pending } = fresh();
+
+    trackMessages(
+      {
+        type: "tool_end",
+        id: "grep-1",
+        name: "grep",
+        duration: 8,
+        result: {
+          content: "Found 1 matching line in 1 file",
+          presentation: {
+            kind: "grep-results",
+            query: {
+              pattern: "\\bfoo\\b",
+              searchPath: "src",
+              outputMode: "content",
+              regexDialect: "line-regexp",
+              caseSensitivity: "sensitive",
+              contextLines: 0,
+            },
+            files: [
+              {
+                displayPath: "src/app.ts",
+                matches: [
+                  {
+                    line: 3,
+                    text: { text: "const foo = 1;", truncated: false },
+                    contextBefore: [],
+                    contextAfter: [],
+                  },
+                ],
+              },
+            ],
+            matchedFileCount: 1,
+            matchedLineCount: 1,
+            truncated: false,
+            diagnostics: {
+              executor: "node",
+              capabilityMode: "fallback",
+            },
+          },
+        },
+      },
+      newMessages,
+      pending,
+    );
+    trackMessages(
+      {
+        type: "turn_complete",
+        turnCount: 1,
+        usage: { inputTokens: 0, outputTokens: 0 },
+      },
+      newMessages,
+      pending,
+    );
+
+    const blocks = newMessages[0]?.content as ToolResultBlock[];
+    expect(blocks[0]).toEqual({
+      type: "tool_result",
+      toolUseId: "grep-1",
+      content: "Found 1 matching line in 1 file",
+      isError: undefined,
+    });
+    expect(JSON.stringify(blocks)).not.toContain("grep-results");
+  });
+
   it("turn_complete 时 pending 为空 → 不 push 空 user 消息", () => {
     const { newMessages, pending } = fresh();
     trackMessages(

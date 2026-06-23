@@ -211,7 +211,65 @@ export interface ToolExecutionContext {
   roleThinking?: ResolvedRoleThinking;
 }
 
-export type ToolPresentationArtifact = FileDiffPresentationArtifact;
+export type ToolPresentationArtifact =
+  | FileDiffPresentationArtifact
+  | GrepResultsPresentationArtifact;
+
+export interface GrepResultsPresentationArtifact {
+  kind: "grep-results";
+  query: GrepResultsQuerySummary;
+  files: GrepResultsFile[];
+  matchedFileCount: number;
+  matchedLineCount: number;
+  truncated: boolean;
+  diagnostics: GrepResultsDiagnostics;
+}
+
+export interface GrepResultsQuerySummary {
+  pattern: string;
+  searchPath?: string;
+  glob?: string;
+  outputMode: "content" | "files" | "count";
+  regexDialect: "line-regexp";
+  caseSensitivity: "sensitive" | "ascii-insensitive";
+  contextLines: number;
+}
+
+export interface GrepResultsFile {
+  displayPath: string;
+  matches: GrepResultsMatch[];
+}
+
+export interface GrepResultsMatch {
+  line: number;
+  text: GrepResultsLineText;
+  contextBefore: GrepResultsContextLine[];
+  contextAfter: GrepResultsContextLine[];
+}
+
+export interface GrepResultsContextLine {
+  line: number;
+  text: GrepResultsLineText;
+}
+
+export type GrepResultsLineText =
+  | {
+      text: string;
+      truncated: false;
+    }
+  | {
+      text: string;
+      truncated: true;
+      omittedScalars: number;
+    };
+
+export interface GrepResultsDiagnostics {
+  executor: "ripgrep" | "node";
+  capabilityMode: "native" | "fallback" | "degraded";
+  scannedFileCount?: number;
+  elapsedMs?: number;
+  notes?: string[];
+}
 
 export interface FileDiffPresentationArtifact {
   kind: "file-diff";
