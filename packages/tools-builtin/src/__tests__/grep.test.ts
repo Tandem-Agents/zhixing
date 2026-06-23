@@ -1,5 +1,7 @@
+import { Buffer } from "node:buffer";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import type { GrepResultsPresentationArtifact, ToolResult } from "@zhixing/core";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createTempDir } from "@zhixing/test-utils";
 import { createGrepTool } from "../grep.js";
@@ -20,6 +22,20 @@ describe("Grep Tool", () => {
     await fs.writeFile(filePath, content, "utf-8");
   }
 
+  async function writeFixtureBytes(relativePath: string, content: Buffer): Promise<void> {
+    const filePath = path.join(tmpDir, relativePath);
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, content);
+  }
+
+  function expectGrepPresentation(result: ToolResult): GrepResultsPresentationArtifact {
+    expect(result.presentation?.kind).toBe("grep-results");
+    if (result.presentation?.kind !== "grep-results") {
+      throw new Error("Expected grep-results presentation");
+    }
+    return result.presentation;
+  }
+
   // ──────────────────────────────────────
   // 基本搜索
   // ──────────────────────────────────────
@@ -33,6 +49,22 @@ describe("Grep Tool", () => {
       expect(result.isError).toBeUndefined();
       expect(result.content).toContain("hello world");
       expect(result.content).toContain("hello.ts");
+
+      const presentation = expectGrepPresentation(result);
+      expect(presentation).toMatchObject({
+        kind: "grep-results",
+        matchedFileCount: 1,
+        matchedLineCount: 1,
+        query: {
+          pattern: "hello",
+          outputMode: "content",
+          regexDialect: "line-regexp",
+          caseSensitivity: "sensitive",
+          contextLines: 2,
+        },
+      });
+      expect(presentation.files[0]?.displayPath).toBe("hello.ts");
+      expect(JSON.stringify(presentation)).not.toContain(tmpDir);
     });
 
     it("支持正则表达式", async () => {
@@ -43,6 +75,39 @@ describe("Grep Tool", () => {
       expect(result.isError).toBeUndefined();
       expect(result.content).toContain("const foo");
       expect(result.content).toContain("const bar");
+    });
+
+    it("支持 ASCII 大小写不敏感搜索", async () => {
+      await writeFixture("case.ts", "FOO\nfoo\nK");
+
+      const result = await tool.call(
+        {
+          pattern: "foo",
+          case_sensitivity: "ascii-insensitive",
+        },
+        ctx(),
+      );
+
+      expect(result.isError).toBeUndefined();
+      expect(result.content).toContain("FOO");
+      const presentation = expectGrepPresentation(result);
+      expect(presentation.query.caseSensitivity).toBe("ascii-insensitive");
+      expect(presentation.matchedLineCount).toBe(2);
+    });
+
+    it("支持 ASCII 词边界", async () => {
+      await writeFixture("words.ts", "foo\nfoobar\n变量foo变量");
+
+      const result = await tool.call(
+        { pattern: "\\bfoo\\b", context_lines: 0 },
+        ctx(),
+      );
+
+      expect(result.isError).toBeUndefined();
+      const presentation = expectGrepPresentation(result);
+      expect(presentation.matchedLineCount).toBe(2);
+      expect(result.content).toContain("变量foo变量");
+      expect(result.content).not.toContain("foobar");
     });
 
     it("在单个文件中搜索", async () => {
@@ -130,6 +195,13 @@ describe("Grep Tool", () => {
       expect(result.content).toContain("a.ts");
       expect(result.content).toContain("c.ts");
       expect(result.content).not.toContain("b.ts");
+
+      const presentation = expectGrepPresentation(result);
+      expect(presentation.query.outputMode).toBe("files");
+      expect(presentation.files.map((file) => file.displayPath)).toEqual([
+        "a.ts",
+        "c.ts",
+      ]);
     });
 
     it("count 模式返回匹配计数", async () => {
@@ -142,6 +214,10 @@ describe("Grep Tool", () => {
 
       expect(result.isError).toBeUndefined();
       expect(result.content).toContain("3");
+
+      const presentation = expectGrepPresentation(result);
+      expect(presentation.query.outputMode).toBe("count");
+      expect(presentation.matchedLineCount).toBe(3);
     });
   });
 
@@ -213,6 +289,9 @@ describe("Grep Tool", () => {
 
       expect(result.isError).toBeUndefined();
       expect(result.content).toContain("No matches found");
+      const presentation = expectGrepPresentation(result);
+      expect(presentation.files).toEqual([]);
+      expect(presentation.matchedLineCount).toBe(0);
     });
   });
 
@@ -229,7 +308,7 @@ describe("Grep Tool", () => {
     it("无效正则报错", async () => {
       const result = await tool.call({ pattern: "[invalid" }, ctx());
       expect(result.isError).toBe(true);
-      expect(result.content).toContain("Invalid regex");
+      expect(result.content).toContain("line-regexp");
     });
 
     it("不存在的路径报错", async () => {
@@ -259,14 +338,65 @@ describe("Grep Tool", () => {
     });
 
     it("处理多文件匹配", async () => {
-      await writeFixture("a.ts", "common pattern");
       await writeFixture("b.ts", "common pattern");
+      await writeFixture("a.ts", "common pattern");
       await writeFixture("sub/c.ts", "common pattern");
 
       const result = await tool.call({ pattern: "common pattern" }, ctx());
 
       expect(result.isError).toBeUndefined();
       expect(result.content).toContain("3 files");
+      const presentation = expectGrepPresentation(result);
+      expect(presentation.files.map((file) => file.displayPath)).toEqual([
+        "a.ts",
+        "b.ts",
+        "sub/c.ts",
+      ]);
+    });
+
+    it("按核心编码策略搜索 UTF-16 BOM 文件", async () => {
+      await writeFixtureBytes(
+        "utf16.txt",
+        Buffer.concat([
+          Buffer.from([0xff, 0xfe]),
+          Buffer.from("alpha\r\nfoo\r\nomega", "utf16le"),
+        ]),
+      );
+
+      const result = await tool.call({ pattern: "^foo$" }, ctx());
+
+      expect(result.isError).toBeUndefined();
+      const presentation = expectGrepPresentation(result);
+      expect(presentation.files[0]?.matches[0]).toMatchObject({
+        line: 2,
+        text: { text: "foo", truncated: false },
+      });
+    });
+
+    it("按核心行模型处理孤立 CR", async () => {
+      await writeFixture("cr.txt", "foo\rother");
+
+      const result = await tool.call({ pattern: "^other$" }, ctx());
+
+      expect(result.isError).toBeUndefined();
+      const presentation = expectGrepPresentation(result);
+      expect(presentation.files[0]?.matches[0]).toMatchObject({
+        line: 2,
+        text: { text: "other", truncated: false },
+      });
+    });
+
+    it("裁剪超长行并暴露行级截断元数据", async () => {
+      await writeFixture("long.txt", `foo-${"x".repeat(800)}`);
+
+      const result = await tool.call({ pattern: "foo" }, ctx());
+
+      expect(result.isError).toBeUndefined();
+      expect(result.content).toContain("[line truncated:");
+      const presentation = expectGrepPresentation(result);
+      expect(presentation.files[0]?.matches[0]?.text).toMatchObject({
+        truncated: true,
+      });
     });
   });
 

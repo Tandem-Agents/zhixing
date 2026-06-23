@@ -1,4 +1,4 @@
-import type { ToolResult } from "@zhixing/core";
+import type { GrepResultsPresentationArtifact, ToolResult } from "@zhixing/core";
 import type {
   GrepContextLine,
   GrepFileResult,
@@ -14,7 +14,10 @@ export function formatGrepToolResult(result: GrepSearchResult): ToolResult {
       ? formatNoMatches(result)
       : formatMatchesByOutputMode(result);
 
-  return { content };
+  return {
+    content,
+    presentation: buildGrepResultsPresentation(result),
+  };
 }
 
 export function formatGrepSearchError(error: GrepSearchError): ToolResult {
@@ -22,7 +25,32 @@ export function formatGrepSearchError(error: GrepSearchError): ToolResult {
 }
 
 function formatNoMatches(result: GrepSearchResult): string {
-  return `No matching lines found for pattern "${result.query.pattern}".`;
+  return `No matches found for pattern "${result.query.pattern}".`;
+}
+
+function buildGrepResultsPresentation(
+  result: GrepSearchResult,
+): GrepResultsPresentationArtifact {
+  return {
+    kind: "grep-results",
+    query: {
+      pattern: result.query.pattern,
+      searchPath: result.query.searchPath,
+      glob: result.query.glob,
+      outputMode: result.query.outputMode,
+      regexDialect: result.query.regexDialect,
+      caseSensitivity: result.query.caseSensitivity,
+      contextLines: result.query.contextLines,
+    },
+    files: result.files.map((file) => ({
+      displayPath: file.displayPath,
+      matches: file.matches,
+    })),
+    matchedFileCount: result.matchedFileCount,
+    matchedLineCount: result.matchedLineCount,
+    truncated: result.truncated,
+    diagnostics: result.diagnostics,
+  };
 }
 
 function formatMatchesByOutputMode(result: GrepSearchResult): string {
@@ -60,21 +88,41 @@ function formatContent(files: readonly GrepFileResult[]): string {
 
 function formatFileContent(file: GrepFileResult): string {
   const lines = [`── ${file.displayPath} ──`];
+  const rows = new Map<
+    number,
+    { line: number; text: GrepLineText; isMatch: boolean }
+  >();
+
   for (const match of file.matches) {
-    lines.push(...formatMatch(match));
+    for (const line of match.contextBefore) {
+      if (!rows.has(line.line)) {
+        rows.set(line.line, { ...line, isMatch: false });
+      }
+    }
+    rows.set(match.line, {
+      line: match.line,
+      text: match.text,
+      isMatch: true,
+    });
+    for (const line of match.contextAfter) {
+      if (!rows.has(line.line)) {
+        rows.set(line.line, { ...line, isMatch: false });
+      }
+    }
   }
+
+  for (const row of [...rows.values()].sort((a, b) => a.line - b.line)) {
+    lines.push(
+      row.isMatch
+        ? formatMatchedLine(row)
+        : formatContextLine(" ", row),
+    );
+  }
+
   return lines.join("\n");
 }
 
-function formatMatch(match: GrepMatch): string[] {
-  return [
-    ...match.contextBefore.map((line) => formatContextLine(" ", line)),
-    formatMatchedLine(match),
-    ...match.contextAfter.map((line) => formatContextLine(" ", line)),
-  ];
-}
-
-function formatMatchedLine(match: GrepMatch): string {
+function formatMatchedLine(match: Pick<GrepMatch, "line" | "text">): string {
   return `> ${match.line}|${formatLineText(match.text)}`;
 }
 
