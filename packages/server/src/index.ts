@@ -23,6 +23,7 @@ export * from "./runtime/index.js";
 export * from "./system-handlers.js";
 export * from "./paths.js";
 export * from "./server-log.js";
+export * from "./server-log-lifecycle.js";
 export * from "./process-lock.js";
 export * from "./server-state.js";
 export * from "./cleanup-registry.js";

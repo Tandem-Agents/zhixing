@@ -5,6 +5,7 @@ import {
 } from "./paths.js";
 
 export const SERVER_LOG_ACTIVE_FILE_NAME = "server.log";
+export const SERVER_LOG_ACTIVE_OPEN_FLAGS = "a";
 export const SERVER_LOG_ROTATED_FILE_PATTERN =
   /^server-(\d{8})-(\d{6})-(\d{3})-(\d{4,})\.log$/;
 
