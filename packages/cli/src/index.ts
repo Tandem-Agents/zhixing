@@ -20,8 +20,8 @@ import { runServeCommand } from "./serve/command.js";
 import { runStopCommand } from "./serve/stop.js";
 import { runStatusCommand } from "./serve/status.js";
 import { runLogsCommand } from "./serve/logs.js";
-import { runRpcCommand, printRpcHelp } from "./rpc/command.js";
 import { ZHIXING_CLI_VERSION } from "./version.js";
+import { findUnknownTopLevelCommand } from "./command-gate.js";
 
 /**
  * 顶层 stdout writer——cli 入口的错误路径 / 启动期渲染没有 ScreenController（chrome
@@ -71,6 +71,15 @@ function handleStartupResult(result: StartupCheckResult): void {
 
 const program = new Command();
 
+function rejectUnknownTopLevelCommand(argv: string[], command: Command): void {
+  const unknownCommand = findUnknownTopLevelCommand(argv, command);
+  if (!unknownCommand) return;
+
+  console.error(chalk.red(`error: unknown command '${unknownCommand}'`));
+  console.error(chalk.dim("Run `zz --help` to see available commands."));
+  process.exit(1);
+}
+
 async function handleStopAction(): Promise<void> {
   try {
     const result = await runStopCommand();
@@ -112,7 +121,7 @@ program
   }) => {
     try {
       // cli 交互模式（REPL）静默 core 诊断 log（[llm] 请求 / 工具调用等），
-      // 避免污染对话 UI；serve / rpc / serve sub-commands 各自独立 action 不受影响，
+      // 避免污染对话 UI；serve 及其子命令各自独立 action 不受影响，
       // 保持默认 console.log 输出供运维与调试观察
       setDiagnosticLogger(() => {});
       // 诊断 dump 启用配置 —— 必须在 startRepl 触发 dump 预热之前调用，
@@ -148,60 +157,6 @@ program
   .command("stop")
   .description("停止知行")
   .action(handleStopAction);
-
-// ─── zhixing rpc <method> [args]（连接 server 的 RPC 客户端） ───
-//
-// 设计：commander 把 method 之后的所有 token（含 --flag）原样收到 rest，
-// 由 rpc/args.ts 自己解析——避免 commander 对未知 flag 报错。
-program
-  .command("rpc [method] [args...]")
-  .description("调用本地 server 的 RPC 方法（自动发现 + auth）。--watch 模式无需 method")
-  .allowUnknownOption(true)
-  .helpOption(false)
-  .action(async (rawMethod: string | undefined, _args: string[], _opts, cmd) => {
-    // 用 allowUnknownOption + [method] 时，commander 会把 --flag 错误地塞进 method。
-    // 解决：从 process.argv 重新提取真实的 method 和 token 列表。
-    const argv = process.argv;
-    const cmdIdx = argv.indexOf(cmd.name());
-    const allTokens = cmdIdx >= 0 ? argv.slice(cmdIdx + 1) : [];
-
-    // 第一个非 -- 开头的 token 是真正的 method（可能没有）
-    let method: string | undefined;
-    const tokens: string[] = [];
-    let methodPicked = false;
-    for (const t of allTokens) {
-      if (!methodPicked && !t.startsWith("--")) {
-        method = t;
-        methodPicked = true;
-      } else {
-        tokens.push(t);
-      }
-    }
-    void rawMethod; // commander 解析的值不再使用
-
-    // --help / -h 拦截：打印自定义 help 文本
-    if (tokens.includes("--help") || tokens.includes("-h") || method === "help") {
-      printRpcHelp();
-      process.exit(0);
-    }
-
-    const isWatch = tokens.includes("--watch");
-    if (!method && !isWatch) {
-      printRpcHelp();
-      process.exit(2);
-    }
-
-    try {
-      const exitCode = await runRpcCommand({
-        method: method ?? "__watch__",
-        rest: tokens,
-      });
-      process.exit(exitCode);
-    } catch (err) {
-      renderError(err, stdoutWriter);
-      process.exit(2);
-    }
-  });
 
 // ─── zhixing serve（常驻服务模式） ───
 const serveCmd = program
@@ -268,9 +223,10 @@ if (dashIdx !== -1) {
 // 进程间累积 + 用户从此不再写盘的冷目录;写盘内联覆盖单进程内累积。两者
 // 覆盖区间不重叠,缺任何一边都会留下"日志无限增长"的真实漏洞。
 //
-// 全模式覆盖:本调用位于 program.parseAsync 之前,无论后续分发到 REPL / -p /
-// serve / rpc 等哪个 action,都已经过守门。pruneAllLogs 内部 swallow 一切 IO
+// 全模式覆盖:本调用位于 program.parseAsync 之前,无论后续分发到 REPL /
+// serve 等哪个 action,都已经过守门。pruneAllLogs 内部 swallow 一切 IO
 // 失败,不会影响后续主流程。
+rejectUnknownTopLevelCommand(argv, program);
 pruneAllLogs();
 
 program.parseAsync(argv).catch((err: unknown) => {

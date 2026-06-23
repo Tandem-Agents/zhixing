@@ -67,7 +67,7 @@ export function registerTailCleanup(
   //
   // 场景：并发启动两个 daemon，第二个的 acquireLock 失败，command.ts catch 分支会
   // 调 registry.runAll("startup-failure")。若这里无脑 releaseLock，会误删第一个
-  // daemon 的 PID 文件——导致外部 `zhixing rpc` 找不到 server（PID 文件消失），
+  // daemon 的 PID 文件——导致本地协议客户端找不到 server（PID 文件消失），
   // 但第一个 daemon 仍在运行的假死状态。
   //
   // 修复：读 PID 文件，只有 pid === process.pid 才 unlink。非本进程的锁 / 没有锁

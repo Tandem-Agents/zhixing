@@ -9,7 +9,7 @@
  *
  * 例外清单（ALLOW_LIST）：
  *   - 早期路径（chrome 未建立）：bin entry / startup-check 失败
- *   - 后端/非交互路径：serve daemon / rpc client / setup-channels logger
+ *   - 后端/非交互路径：serve daemon / setup-channels logger
  *   - dispose 路径：process.exit 之前的清理日志
  *   - CliWriter 实现本身（StdoutWriter 内部用 stdout.write）
  *   - 测试文件 / 手动测试 (__manual__)
@@ -30,7 +30,7 @@ const SRC_DIR = path.resolve(
  *
  * 规则：每条都附带 reason，让未来审查 PR 时能判断新增条目是否合理。
  *  - bin / startup 入口：chrome 未建立，console 是唯一可用通道
- *  - daemon / RPC：无 chrome 协调（独立进程或 stdout-as-protocol）
+ *  - daemon：无 chrome 协调（独立进程）
  *  - dispose：清理日志在 process.exit 之前，chrome 已 detach
  *  - cli-writer.ts：CliWriter 实现本身，stdout.write 是 StdoutWriter 的合法实现
  *  - __manual__ / __tests__：手动测试 / 单元测试模拟，不是运行时
@@ -39,7 +39,6 @@ const ALLOW_LIST: ReadonlyArray<{ readonly file: string; readonly reason: string
   { file: "index.ts", reason: "bin 入口 startup-check 失败路径——chrome 未建立" },
   { file: "screen/cli-writer.ts", reason: "CliWriter 实现本身——StdoutWriter 直写 stdout 是合法语义" },
   { file: "screen/screen-controller.ts", reason: "ScreenController 实现本身——是 stdout 协调的最底层" },
-  { file: "rpc/command.ts", reason: "RPC 客户端——stdout 是协议输出（非 cli 交互）" },
   { file: "serve/command.ts", reason: "serve daemon——后台进程无 chrome；setup chrome 之前的 logger" },
   { file: "serve/access-surfaces.ts", reason: "serve 接入面装配单元——从 command.ts 抽出的 serve 后台路径，logger 输出走无 chrome daemon 的 console" },
   { file: "serve/daemon.ts", reason: "daemon 启动诊断——chrome 未建立" },

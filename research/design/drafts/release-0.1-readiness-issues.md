@@ -76,13 +76,36 @@
 
 ### 1. `grep` 有两套搜索执行器，但核心工具输出没有统一契约
 
-**状态**：已定位，待方案落地
+**状态**：已完成，已验证，不再阻断 0.1
 
-**现象**：全量执行 `pnpm test` 时，递归测试在 `@zhixing/tools-builtin` 失败退出。单独执行 `pnpm --filter @zhixing/tools-builtin exec vitest run src/__tests__/grep.test.ts --reporter=verbose` 仍稳定失败 2 个用例。
+**当前结论**：问题真实，修复已落地。`grep` 已从“双搜索执行器、双输出契约”收敛为“核心定义搜索语义，ripgrep / Node 只是搜索执行器，统一产出 `GrepSearchResult`，再由核心格式化为 `ToolResult.content` 和 `ToolResult.presentation`”。本问题不再阻断 0.1。
 
-**审核结论**：问题真实，是 0.1 发布阻断。它不是两个断言偶然写窄，而是核心 `grep` 工具缺少统一输出契约：ripgrep 路径直接返回人类可读 stdout，Node fallback 路径返回另一套自定义格式。当前红灯只是最先暴露的两个症状。
+**落地结果**：
 
-**事实证据**：
+- `grep` 核心拆分为 query / plan / line-regexp / text / path / candidate-files / collector / search executor / formatter，工具入口不再直接消费搜索执行器的人类可读输出。
+- `ripgrep` 和 `Node` 搜索执行器都产出同一个 `GrepSearchResult`；`formatGrepToolResult()` 是唯一 LLM-facing 文本格式化器。
+- `ToolResult.presentation.kind === "grep-results"` 已作为结构化投影通道，与 file-diff presentation 同构；接入面不需要解析 `content`。
+- `line-regexp` 成为 0.1 核心搜索语义：逐行、Unicode scalar 匹配单位、ASCII `\w` / `\d` / `\s` / `\b` / `\B`、显式 ASCII 大小写不敏感；高级方言不由执行器静默带入。
+- 行模型、编码、路径、排序、截断、二进制跳过、默认忽略目录、glob 语义都已进入核心契约和测试覆盖。
+- `maxScannedFiles` 已从 `GrepQuery` 移入运行时 `GrepSearchOptions`，作为 Node 执行器保护策略，不再让 ripgrep 被错误判出局。
+- 文件候选发现统一由 `listGrepCandidateFiles()` 定义；Node 直接消费，ripgrep 消费同一候选集合并分批把显式路径交给 `rg`，避免两套 glob 语义漂移。
+- 工作区内合法的 `..foo.ts` 等路径已用统一路径归属判断处理，不会再被误判为工作区外路径。
+
+**当前验证**：
+
+- `pnpm --filter @zhixing/tools-builtin exec tsc --noEmit`：通过。
+- `pnpm --filter @zhixing/tools-builtin test -- src/__tests__/grep-core.test.ts src/__tests__/grep-executors.test.ts src/__tests__/grep.test.ts`：通过，52 个 grep 相关测试通过。
+- `pnpm --filter @zhixing/tools-builtin test`：通过，283 个 tools-builtin 测试通过。
+- `pnpm --filter @zhixing/tools-builtin build`：通过。
+- `where rg` 与 Node `spawn("rg", ["--version"])`：当前环境可找到 `rg`，ripgrep native 路径已被实际执行验证。
+
+**发布前环境检查**：CI / 发布环境仍需保证 Node 进程能 `spawn("rg", ["--version"])`。如果环境缺失 `rg`，系统会可用地回落 Node 执行器，但 ripgrep native 分支不会在该环境被验证；这属于发布环境 checklist，不是 grep 代码架构遗留。
+
+**修复前现象**：全量执行 `pnpm test` 时，递归测试在 `@zhixing/tools-builtin` 失败退出。单独执行 `pnpm --filter @zhixing/tools-builtin exec vitest run src/__tests__/grep.test.ts --reporter=verbose` 仍稳定失败 2 个用例。
+
+**修复前审核结论**：问题真实，是 0.1 发布阻断。它不是两个断言偶然写窄，而是核心 `grep` 工具缺少统一输出契约：ripgrep 路径直接返回人类可读 stdout，Node fallback 路径返回另一套自定义格式。当前红灯只是最先暴露的两个症状。
+
+**修复前事实证据**：
 
 - `pnpm test` 退出码为 1；`@zhixing/tools-builtin` 为 2 个测试文件失败、17 个测试文件通过；3 个测试失败、247 个测试通过。
 - `grep.test.ts` 单独重跑结果：19 个测试中 17 个通过、2 个失败。
@@ -94,7 +117,7 @@
 - 同一 fixture 下，正常 ripgrep 路径输出绝对 Windows 路径和 raw `rg` 分隔符；强制 `rg` 不可用后，Node fallback 输出 `Found 3 matches in 3 files:`、`── src/app.ts ──`、`> 1|...` 这种自定义格式。
 - `rg --json -C2` 已验证可提供结构化事件：`begin`、`match`、`context`、`end`、`summary`，不需要解析 raw 文本 stdout。
 
-**问题全貌**：
+**修复前问题全貌**：
 
 - **核心能力边界不清**：`grep` 属于核心工具能力，不属于 CLI 展示层。CLI、飞书、RPC 或未来 App 消费到的都应该是同一份核心工具结果，而不是各接入面再去理解 ripgrep stdout。
 - **路径契约不一致**：`resolveToolPath()` 先把搜索路径解析成绝对路径，`tryRipgrep()` 再把绝对路径传给 `rg`；`rg` 因而在目录搜索时输出绝对路径和 Windows 反斜杠。Node fallback 在目录搜索时输出相对路径并替换为 `/`。
@@ -111,7 +134,7 @@
 - **排序不一致**：ripgrep 返回顺序和 fallback 递归顺序不被统一归一化；多文件输出可能跨平台、跨文件系统漂移。
 - **截断策略不一致**：ripgrep 由 `execFile` 的 `maxBuffer` 和 `formatOutput()` 截断控制；fallback 只在 content mode 内用 `totalOutputChars` 控制，files/count 路径没有同等模型。
 
-**根因**：
+**修复前根因**：
 
 - 当前 `grep` 实现把“搜索执行器”和“结果渲染”混在一起：`tryRipgrep()` 和 `nodeGrep()` 都直接返回 `ToolResult`。
 - 两个搜索执行器没有共同的中间结果模型，因此无法统一路径、匹配数、文件数、上下文行、排序、截断和输出模式。
@@ -184,48 +207,63 @@
 
 ### 2. `web-fetch` markdown 转换测试在全量测试中出现超时
 
-**状态**：定位中
+**状态**：已验证，当前不可复现，不再阻断 0.1
 
-**现象**：全量执行 `pnpm test` 时，`packages/tools-builtin/src/web-fetch/__tests__/internal.test.ts` 中 “HTML markdown 模式: 用 turndown 转 markdown” 超过 5000ms 超时。
+**当前结论**：旧现象在当前代码和当前环境下不可复现。`web-fetch` 的 HTML markdown 转换没有发现稳定实现缺陷，也没有发现需要架构调整的证据。本问题从 0.1 阻断项降级为“历史测试风险已复验”。
 
-**审核结论**：问题需要更多观测，但按发布标准应视为风险。它单独运行能过，说明可能是并发、动态 import、资源竞争或测试隔离问题。
+**问题全貌**：
 
-**事实证据**：
+- 触发路径只有 `processContent()` 的 HTML + `format: "markdown"` 分支：先解码 body，再动态 `import("turndown")`，实例化 `TurndownService` 后转换 markdown。
+- `text/plain`、`application/json`、HTML + `format: "text"` 都不触发 `turndown` 动态加载。
+- `packages/tools-builtin/src/web-fetch/internal.ts` 和 `packages/tools-builtin/src/web-fetch/__tests__/internal.test.ts` 自加入后没有相关修改；当前没有“已通过代码修复消除超时”的事实。
+- `packages/tools-builtin/src/web-fetch/__tests__/web-fetch.test.ts` mock 的是 `@zhixing/network`，没有 mock `turndown`、全局 timer 或 `processContent()` 所在模块。
+- 当前重复运行未复现超时，说明旧记录不能继续作为稳定发布阻断证据。
 
-- `pnpm test` 全量运行中该用例超时失败。
-- 单独执行 `pnpm --filter @zhixing/tools-builtin exec vitest run src/web-fetch/__tests__/internal.test.ts` 时，该文件 28 个测试通过，用时约 285ms。
-- 相关实现位于 `packages/tools-builtin/src/web-fetch/internal.ts`，markdown 模式会动态加载 `turndown`。
+**当前事实证据**：
+
+- 连续 5 次执行 `pnpm --filter @zhixing/tools-builtin exec vitest run src/web-fetch/__tests__/internal.test.ts --reporter=dot`：全部通过；该文件 28 个测试均通过。
+- 5 次运行中，Vitest 报告的该文件 `tests` 阶段分别约为 844ms、360ms、328ms、324ms、618ms，均未接近默认 5000ms 单测超时。
+- `processContent()` 微基准：首次 HTML markdown 转换约 478.94ms，后续调用约 8.54ms 至 60.21ms。
+- 与历史上较重的 grep / bash 测试同跑：`pnpm --filter @zhixing/tools-builtin exec vitest run src/web-fetch/__tests__/internal.test.ts src/__tests__/grep.test.ts src/__tests__/bash.test.ts --reporter=dot` 通过。
+- 根级 `pnpm test`：通过。
+
+**根因判断**：
+
+- 没有证据支持这是 `web-fetch` 的稳定业务代码缺陷。
+- 当前最佳判断：旧超时是一次全量门禁中的瞬时测试环境 / 资源竞争现象，叠加当时其他红灯导致文档保留为定位中；后续缺少连续复验，才让它继续停留在阻断问题列表。
+- 不应为了一个当前不可复现、微基准远低于 timeout 的历史现象去改产品代码、缓存策略或测试 timeout；那会制造不必要的架构债和错误归因。
 
 **发布影响**：
 
-- 0.1 的发布门禁不能依赖“单独跑能过”。全量测试 flaky 会让后续发布、回归和协作成本变高。
-- `web_fetch` 是网络工具能力，属于用户会直接感知的内置能力。
+- 当前不再阻断 0.1。
+- 若未来再次复现，需要按“测试运行时风险”处理，而不是直接假定 `turndown` 或 `web_fetch` 实现有问题。
 
 **背后需求**：
 
 - HTML -> markdown 的转换应稳定、可预测，测试不应受其他测试文件并发影响。
-- 如果依赖动态 import 或较重初始化，应有缓存、超时预算或测试隔离策略。
+- 发布判断必须来自可重复命令；历史单次失败不能长期代表当前状态。
 
 **目标效果**：
 
-- 全量 `pnpm test` 中该测试稳定通过。
-- 单独运行和递归运行行为一致。
+- `processContent()` 的 HTML markdown 路径在单文件、同包全量、根级全量测试中均稳定通过。
+- 若未来失败，失败报告必须能区分：动态 import 慢、Vitest worker 资源竞争、全局 mock / timer 污染，还是真实转换逻辑错误。
 
-**倾向排查方向**：
+**最优解决方案**：
 
-- 用 `vitest --runInBand` 或限定 worker 数对比，确认是否为并发触发。
-- 给 `processContent()` 的 turndown 初始化加观测或缓存验证，确认是否有首次加载阻塞。
-- 检查同包其他测试是否 mock / 污染全局 fetch、DOM、module cache 或 timers。
+- 当前不改业务代码，不增加模块级 `TurndownService` 缓存，不盲目调大测试 timeout。
+- 将本问题标记为已复验、非阻断；继续由 0.1 发布最低清单中的 `pnpm test` 覆盖。
+- 如果再次出现超时，先补观测：记录 `import("turndown")` 耗时、转换耗时、Vitest worker 并发、同跑测试文件，再基于证据决定是否需要缓存 Turndown 初始化或调整测试隔离。
 
 **验收标准**：
 
-- 连续多次执行 `pnpm --filter @zhixing/tools-builtin test` 通过。
-- 全仓 `pnpm test` 通过。
-- 如果最终判定为测试预算不足，需要用明确证据调整 timeout，而不是盲目加大。
+- 连续多次执行 `packages/tools-builtin/src/web-fetch/__tests__/internal.test.ts` 通过。
+- `pnpm --filter @zhixing/tools-builtin test` 通过。
+- 根级 `pnpm test` 通过。
+- 不因本历史问题修改 `web-fetch` 产品代码或测试 timeout，除非拿到新的可复现证据。
 
 ### 3. 0.1 CLI 必需命令清单尚未从系统事实中固化
 
-**状态**：待处理
+**状态**：定位中
 
 **现象**：当前已经用 help / version / serve help 做了初步 smoke，但 0.1 到底必须保证哪些 CLI 命令可用，还没有形成一份独立于 README 的权威清单。
 
@@ -233,9 +271,44 @@
 
 **事实证据**：
 
-- 当前 `packages/cli/src/index.ts` 暴露了顶层命令、`status`、`stop`、`rpc`、`serve` 以及部分隐藏的 `serve` 子命令。
-- 本轮只验证了 dist 入口的 `--help`、`--version`、`serve --help`，尚未形成完整 smoke 矩阵。
+- `packages/cli/package.json` 的 `bin` 明确把 `zz` 和 `zhixing` 都指向 `./dist/index.js`；本文下列 `zz` 均指这个同一 CLI 入口。
+- 当前外部 CLI 命令注册集中在 `packages/cli/src/index.ts`；未发现其它 Commander 顶层命令注册点。
+- 已用 `node packages/cli/dist/index.js` 的 help / version 路径交叉验证可见命令和隐藏兼容入口的帮助输出；未把 README 作为事实来源。
 - `packages/cli/README.md` 中存在未实现参数，说明不能用 README 作为命令清单来源。
+- 清理前曾确认 `zz rpc [method] [args...]` 是真实存在的外部命令；产品决策是将 RPC 保留为协议能力，把 `zz rpc` 从生产态用户命令树移除。
+
+**已确认真实存在的外部 `zz` 命令**：
+
+- `zz`：进入交互 REPL。
+- `zz status`：查看知行运行状态。
+- `zz stop`：停止知行。
+- `zz serve`：启动常驻服务。
+- `zz serve logs`：查看后台宿主日志。
+- `zz serve status`：隐藏兼容入口，复用 `zz status` 实现。
+- `zz serve stop`：隐藏兼容入口，复用 `zz stop` 实现。
+
+**已确认真实存在的 `zz --...` / option 形态**：
+
+- 全局：`zz --help` / `zz -h`。
+- 全局：`zz --version` / `zz -V`。
+- 全局：`zz --log`。
+- `zz status --help` / `zz status -h`。
+- `zz stop --help` / `zz stop -h`。
+- `zz serve --help` / `zz serve -h`。
+- `zz serve --port <port>`。
+- `zz serve --host <host>`。
+- `zz serve logs --help` / `zz serve logs -h`。
+- `zz serve logs --tail`。
+- `zz serve logs --lines <n>`。
+- `zz serve status --help` / `zz serve status -h`。
+- `zz serve stop --help` / `zz serve stop -h`。
+
+**边界说明**：
+
+- `zz serve`、`zz`、`zz serve logs --tail` 是长运行语义，后续 smoke 不能把它们按“必须立即退出”的基础命令处理。
+- `zz rpc` 不纳入用户外部命令清单；未来自有 App 如需接入核心，应走协议 / API / SDK，而不是 shell out 执行 `zz rpc`。
+- 未发现已实现的外部 `zz logs`、`zz config`、`zz mcp`、`zz task` 等顶层 shell 命令。
+- REPL 内部 `/help`、`/new` 等斜杠命令属于交互接入面内部命令，不纳入本问题的外部 `zz` 命令清单。
 
 **发布影响**：
 
@@ -250,7 +323,7 @@
 **目标效果**：
 
 - 形成一份 0.1 CLI smoke 清单，明确命令、预期输出 / 退出条件、是否允许启动长期服务。
-- help / version / status / serve / rpc 等命令是否纳入 0.1 必保范围，有明确判断依据。
+- help / version / status / serve 等命令是否纳入 0.1 必保范围，有明确判断依据；`rpc` 已明确不作为用户外部命令保留。
 - 后续 README 只能对齐这份清单，不能反向定义它。
 
 **验收标准**：
@@ -321,7 +394,6 @@
   - `--log`
   - `status`
   - `stop`
-  - `rpc [method] [args...]`
   - `serve`
   - `serve --port`
   - `serve --host`
@@ -435,12 +507,15 @@
 - `pnpm lint` 通过。
 - `pnpm -r exec tsc --noEmit` 通过。
 - `pnpm test` 通过。
+- CI / 发布环境中的 Node 进程能执行 `spawn("rg", ["--version"])`；否则必须明确记录 ripgrep native 路径未在该环境验证。
 - 0.1 CLI smoke 清单已从当前入口和产品边界中固化。
 - 纳入清单的 CLI 命令全部按预期通过。
 
 ## 已验证
 
 ### 2026-06-23
+
+#### 修复前基线
 
 - `pnpm -r exec tsc --noEmit`：通过。
 - `pnpm lint`：通过。
@@ -455,3 +530,20 @@
 - `node packages\cli\dist\index.js serve --help`：超时。
 - `node packages\cli\dist\index.js --version`：超时。
 - `git status --short --branch`：工作区干净。
+
+#### 问题 1 修复后补充验证
+
+- `pnpm --filter @zhixing/tools-builtin exec tsc --noEmit`：通过。
+- `pnpm --filter @zhixing/tools-builtin test -- src/__tests__/grep-core.test.ts src/__tests__/grep-executors.test.ts src/__tests__/grep.test.ts`：通过，52 个 grep 相关测试通过。
+- `pnpm --filter @zhixing/tools-builtin test`：通过，283 个 tools-builtin 测试通过。
+- `pnpm --filter @zhixing/tools-builtin build`：通过。
+- `where rg`：当前环境可找到 `rg.exe`。
+- Node `spawn("rg", ["--version"])`：退出码 0，当前环境可实际验证 ripgrep native 路径。
+- `git diff --check`：通过。
+
+#### 问题 2 复验
+
+- `pnpm --filter @zhixing/tools-builtin exec vitest run src/web-fetch/__tests__/internal.test.ts --reporter=dot` 连续 5 次：全部通过；该文件 28 个测试均通过。
+- `processContent()` HTML markdown 微基准：首次转换约 478.94ms，后续调用约 8.54ms 至 60.21ms，未接近默认 5000ms 单测超时。
+- `pnpm --filter @zhixing/tools-builtin exec vitest run src/web-fetch/__tests__/internal.test.ts src/__tests__/grep.test.ts src/__tests__/bash.test.ts --reporter=dot`：通过，68 个测试通过。
+- `pnpm test`：通过。

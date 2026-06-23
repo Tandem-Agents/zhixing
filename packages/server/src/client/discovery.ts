@@ -1,13 +1,13 @@
 /**
  * Server 自动发现
  *
- * 客户端工具（如 zhixing rpc）调用此模块拿到「连接到本地 server 所需的全部信息」：
+ * 本地协议客户端调用此模块拿到「连接到本地 server 所需的全部信息」：
  * - URL（host + port）
  * - token
  *
  * 所有信息从约定路径读取，不假设 server 进程仍在运行——但提供 isProcessAlive 检查能力。
  *
- * 失败时抛 ServerNotRunningError，CLI 可以给出友好提示而非堆栈。
+ * 失败时抛 ServerNotRunningError，上层接入面可以给出友好提示而非堆栈。
  */
 
 import { readFile } from "node:fs/promises";
