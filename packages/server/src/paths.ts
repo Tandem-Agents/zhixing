@@ -31,9 +31,24 @@ export function getDefaultReadyMarkerPath(): string {
   return join(getZhixingHome(), "server.ready");
 }
 
+/** ~/.zhixing/logs/server —— 受生命周期治理的后台宿主日志目录 */
+export function getDefaultServerLogDirPath(): string {
+  return join(getZhixingHome(), "logs", "server");
+}
+
+/** ~/.zhixing/logs/server/server.log —— 受生命周期治理的后台宿主活跃日志 */
+export function getDefaultServerActiveLogPath(): string {
+  return join(getDefaultServerLogDirPath(), "server.log");
+}
+
+/** ~/.zhixing/server.log —— 当前 daemon 默认日志；接入治理后作为旧路径迁移 / 兼容来源 */
+export function getLegacyServerLogPath(): string {
+  return join(getZhixingHome(), "server.log");
+}
+
 /** ~/.zhixing/server.log —— daemon child stdout/stderr 重定向目标 */
 export function getDefaultLogPath(): string {
-  return join(getZhixingHome(), "server.log");
+  return getLegacyServerLogPath();
 }
 
 /** ~/.zhixing/server.token —— RPC 客户端认证用共享 token */
