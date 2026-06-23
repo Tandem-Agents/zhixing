@@ -1,4 +1,6 @@
 import { Buffer } from "node:buffer";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -7,8 +9,11 @@ import {
   compileLineRegexp,
   countUnicodeScalars,
   decodeGrepFileBytes,
+  listGrepCandidateFiles,
+  relativePathWithin,
   sortGrepFiles,
   splitLogicalLines,
+  toGrepCandidateRelativePath,
   toDisplayPath,
   toGrepLineText,
 } from "../grep/core.js";
@@ -20,6 +25,17 @@ describe("grep core semantics", () => {
       const filePath = path.join(workingDirectory, "src", "app.ts");
 
       expect(toDisplayPath(filePath, workingDirectory)).toBe("src/app.ts");
+    });
+
+    it("keeps workspace paths that start with two dots inside the workspace", () => {
+      const workingDirectory = path.resolve("workspace");
+      const filePath = path.join(workingDirectory, "..foo.ts");
+
+      expect(relativePathWithin(workingDirectory, filePath)).toBe("..foo.ts");
+      expect(toDisplayPath(filePath, workingDirectory)).toBe("..foo.ts");
+      expect(toGrepCandidateRelativePath(workingDirectory, filePath)).toBe(
+        "..foo.ts",
+      );
     });
 
     it("projects outside files to normalized absolute display paths", () => {
@@ -44,6 +60,27 @@ describe("grep core semantics", () => {
         "src/b.ts",
       ]);
       expect(comparePosixPathByCodePoint("💡.ts", "😀.ts")).toBeLessThan(0);
+    });
+
+    it("lists candidate files with glob-tool semantics", async () => {
+      const searchRoot = await fs.mkdtemp(
+        path.join(os.tmpdir(), "zhixing-grep-core-"),
+      );
+
+      try {
+        await writeCoreFixture(searchRoot, "top.ts");
+        await writeCoreFixture(searchRoot, "sub/nested.ts");
+        await writeCoreFixture(searchRoot, "top.js");
+
+        const files: string[] = [];
+        for await (const absolutePath of listGrepCandidateFiles(searchRoot, "*.ts")) {
+          files.push(path.relative(searchRoot, absolutePath).replace(/\\/g, "/"));
+        }
+
+        expect(files.sort()).toEqual(["top.ts"]);
+      } finally {
+        await fs.rm(searchRoot, { force: true, recursive: true });
+      }
     });
   });
 
@@ -174,4 +211,13 @@ function utf16be(text: string): Buffer {
     bigEndian[i + 1] = littleEndian[i]!;
   }
   return bigEndian;
+}
+
+async function writeCoreFixture(
+  searchRoot: string,
+  relativePath: string,
+): Promise<void> {
+  const filePath = path.join(searchRoot, relativePath);
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, "content", "utf-8");
 }

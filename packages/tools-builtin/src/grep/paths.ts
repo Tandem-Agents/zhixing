@@ -7,14 +7,36 @@ export function toDisplayPath(
 ): string {
   const resolvedPath = path.resolve(absolutePath);
   const resolvedWorkingDirectory = path.resolve(workingDirectory);
-  const relativePath = path.relative(resolvedWorkingDirectory, resolvedPath);
+  const relativePath = relativePathWithin(
+    resolvedWorkingDirectory,
+    resolvedPath,
+  );
 
-  if (relativePath === "") return ".";
-  if (!relativePath.startsWith("..") && !path.isAbsolute(relativePath)) {
-    return toPosixPath(relativePath);
+  if (relativePath !== null) {
+    return relativePath === "" ? "." : toPosixPath(relativePath);
   }
 
   return toPosixPath(resolvedPath);
+}
+
+export function relativePathWithin(
+  rootPath: string,
+  targetPath: string,
+): string | null {
+  const relativePath = path.relative(
+    path.resolve(rootPath),
+    path.resolve(targetPath),
+  );
+
+  if (
+    relativePath === ".." ||
+    relativePath.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relativePath)
+  ) {
+    return null;
+  }
+
+  return relativePath;
 }
 
 export function sortGrepFiles<T extends Pick<GrepFileResult, "displayPath">>(
@@ -39,6 +61,6 @@ export function comparePosixPathByCodePoint(a: string, b: string): number {
   return aChars.length - bChars.length;
 }
 
-function toPosixPath(filePath: string): string {
+export function toPosixPath(filePath: string): string {
   return filePath.replace(/\\/g, "/");
 }

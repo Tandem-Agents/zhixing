@@ -12,8 +12,7 @@ export type GrepExecutorUnsupportedReason =
   | "unavailable"
   | "unsupported-regex"
   | "unsupported-file-policy"
-  | "unsupported-encoding"
-  | "unsupported-budget";
+  | "unsupported-encoding";
 
 export interface GrepQuery {
   workingDirectory: string;
@@ -28,7 +27,6 @@ export interface GrepQuery {
   maxLineChars: number;
   maxMatchedFiles?: number;
   maxMatchedLines?: number;
-  maxScannedFiles?: number;
   timeoutMs?: number;
 }
 
@@ -118,6 +116,7 @@ export type GrepSearchError =
 
 export interface GrepSearchOptions {
   abortSignal?: AbortSignal;
+  maxScannedFiles?: number;
 }
 
 export interface GrepSearchExecutor {

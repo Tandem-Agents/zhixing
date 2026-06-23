@@ -36,9 +36,7 @@ export async function executeGrepSearch(
       continue;
     }
 
-    return executor.search(planCreation.plan, {
-      abortSignal: options.abortSignal,
-    });
+    return executor.search(planCreation.plan, options);
   }
 
   return {

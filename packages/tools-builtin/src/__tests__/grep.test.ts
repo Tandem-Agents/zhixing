@@ -4,6 +4,7 @@ import * as path from "node:path";
 import type { GrepResultsPresentationArtifact, ToolResult } from "@zhixing/core";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createTempDir } from "@zhixing/test-utils";
+import { isRipgrepAvailable } from "../grep/core.js";
 import { createGrepTool } from "../grep.js";
 
 describe("Grep Tool", () => {
@@ -110,6 +111,18 @@ describe("Grep Tool", () => {
       expect(result.content).not.toContain("foobar");
     });
 
+    it("rg 可用时真实工具入口优先使用 ripgrep 执行器", async () => {
+      if (!(await isRipgrepAvailable())) return;
+
+      await writeFixture("fast.ts", "foo\n");
+
+      const result = await tool.call({ pattern: "foo" }, ctx());
+
+      expect(result.isError).toBeUndefined();
+      const presentation = expectGrepPresentation(result);
+      expect(presentation.diagnostics.executor).toBe("ripgrep");
+    });
+
     it("在单个文件中搜索", async () => {
       await writeFixture("target.ts", "line1\ntarget line\nline3");
       await writeFixture("other.ts", "target in other file");
@@ -157,6 +170,26 @@ describe("Grep Tool", () => {
       expect(result.content).toContain("code.ts");
       expect(result.content).not.toContain("code.js");
       expect(result.content).not.toContain("readme.md");
+    });
+
+    it("保留工作区内以两个点开头的文件名", async () => {
+      await writeFixture("..foo.ts", "searchTerm");
+      await writeFixture("other.js", "searchTerm");
+
+      const result = await tool.call(
+        { pattern: "searchTerm", glob: "*.ts" },
+        ctx(),
+      );
+
+      expect(result.isError).toBeUndefined();
+      expect(result.content).toContain("..foo.ts");
+      expect(result.content).not.toContain(tmpDir);
+
+      const presentation = expectGrepPresentation(result);
+      expect(presentation.files.map((file) => file.displayPath)).toEqual([
+        "..foo.ts",
+      ]);
+      expect(JSON.stringify(presentation)).not.toContain(tmpDir);
     });
 
     it("支持花括号语法", async () => {

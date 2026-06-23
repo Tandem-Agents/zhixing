@@ -12,6 +12,7 @@ import {
   nodeGrepSearchExecutor,
   ripgrepSearchExecutor,
   type GrepQuery,
+  type GrepSearchOptions,
   type GrepSearchExecution,
   type GrepSearchExecutor,
   type GrepSearchResult,
@@ -132,18 +133,28 @@ describe("grep search executors", () => {
     });
   });
 
-  it("falls back to Node when ripgrep cannot satisfy the scan budget", async () => {
+  it("keeps scan limits as Node executor policy without disqualifying ripgrep", async () => {
     await withWorkspace(async (workspace) => {
+      await writeFile(workspace, "a.txt", "foo\n");
       await writeFile(workspace, "src/app.txt", "foo\n");
 
-      const result = await expectOk(
-        await executeGrepSearch(baseQuery(workspace, {
-          maxScannedFiles: 100,
-          pattern: "foo",
-        })),
+      const node = await expectOk(
+        await executeWithNode(baseQuery(workspace, { pattern: "foo" }), {
+          maxScannedFiles: 1,
+        }),
       );
+      expect(node.diagnostics.executor).toBe("node");
+      expect(node.diagnostics.scannedFileCount).toBe(1);
+      expect(node.truncated).toBe(true);
 
-      expect(result.diagnostics.executor).toBe("node");
+      if (await isRipgrepAvailable()) {
+        const routed = await expectOk(
+          await executeGrepSearch(baseQuery(workspace, { pattern: "foo" }), {
+            maxScannedFiles: 1,
+          }),
+        );
+        expect(routed.diagnostics.executor).toBe("ripgrep");
+      }
     });
   });
 
@@ -162,6 +173,47 @@ describe("grep search executors", () => {
       if (await isRipgrepAvailable()) {
         const ripgrep = await expectOk(await executeWithRipgrep(query));
         expect(projectResult(ripgrep)).toEqual(projectResult(node));
+        expect(ripgrep.diagnostics.scannedFileCount).toBe(1);
+      }
+    });
+  });
+
+  it("uses glob-tool semantics for candidate filtering across executors", async () => {
+    await withWorkspace(async (workspace) => {
+      await writeFile(workspace, "top.ts", "foo\n");
+      await writeFile(workspace, "sub/nested.ts", "foo\n");
+
+      const query = baseQuery(workspace, {
+        glob: "*.ts",
+        pattern: "foo",
+      });
+      const node = await expectOk(await executeWithNode(query));
+      expect(node.files.map((file) => file.displayPath)).toEqual(["top.ts"]);
+
+      if (await isRipgrepAvailable()) {
+        const ripgrep = await expectOk(await executeWithRipgrep(query));
+        expect(projectResult(ripgrep)).toEqual(projectResult(node));
+        expect(ripgrep.diagnostics.scannedFileCount).toBe(1);
+      }
+    });
+  });
+
+  it("keeps leading-dot-dot filenames inside the workspace across executors", async () => {
+    await withWorkspace(async (workspace) => {
+      await writeFile(workspace, "..foo.ts", "foo\n");
+      await writeFile(workspace, "other.js", "foo\n");
+
+      const query = baseQuery(workspace, {
+        glob: "*.ts",
+        pattern: "foo",
+      });
+      const node = await expectOk(await executeWithNode(query));
+      expect(node.files.map((file) => file.displayPath)).toEqual(["..foo.ts"]);
+
+      if (await isRipgrepAvailable()) {
+        const ripgrep = await expectOk(await executeWithRipgrep(query));
+        expect(projectResult(ripgrep)).toEqual(projectResult(node));
+        expect(ripgrep.diagnostics.scannedFileCount).toBe(1);
       }
     });
   });
@@ -174,7 +226,7 @@ describe("grep search executors", () => {
       controller.abort();
       const aborted = await executeWithNode(
         baseQuery(workspace, { pattern: "foo" }),
-        controller.signal,
+        { abortSignal: controller.signal },
       );
       expect(aborted).toMatchObject({
         ok: false,
@@ -254,25 +306,26 @@ function baseQuery(
 
 async function executeWithNode(
   query: GrepQuery,
-  abortSignal?: AbortSignal,
+  options: GrepSearchOptions = {},
 ): Promise<GrepSearchExecution> {
-  return executeWithExecutor(nodeGrepSearchExecutor, query, abortSignal);
+  return executeWithExecutor(nodeGrepSearchExecutor, query, options);
 }
 
 async function executeWithRipgrep(
   query: GrepQuery,
+  options: GrepSearchOptions = {},
 ): Promise<GrepSearchExecution> {
-  return executeWithExecutor(ripgrepSearchExecutor, query);
+  return executeWithExecutor(ripgrepSearchExecutor, query, options);
 }
 
 async function executeWithExecutor(
   executor: GrepSearchExecutor,
   query: GrepQuery,
-  abortSignal?: AbortSignal,
+  options: GrepSearchOptions = {},
 ): Promise<GrepSearchExecution> {
   const plan = await createGrepSearchPlan(query);
   if (!plan.ok) return { ok: false, error: plan.error };
-  return executor.search(plan.plan, { abortSignal });
+  return executor.search(plan.plan, options);
 }
 
 async function expectOk(

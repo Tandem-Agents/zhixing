@@ -105,7 +105,6 @@ function validateGrepQuery(query: GrepQuery): GrepSearchError | null {
     validateInteger(query.maxLineChars, "maxLineChars", 0) ??
     validateOptionalInteger(query.maxMatchedFiles, "maxMatchedFiles", 1) ??
     validateOptionalInteger(query.maxMatchedLines, "maxMatchedLines", 1) ??
-    validateOptionalInteger(query.maxScannedFiles, "maxScannedFiles", 1) ??
     validateOptionalInteger(query.timeoutMs, "timeoutMs", 0);
 
   if (integerError !== null) {

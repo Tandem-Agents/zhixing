@@ -1,8 +1,13 @@
 export {
   comparePosixPathByCodePoint,
+  relativePathWithin,
   sortGrepFiles,
   toDisplayPath,
 } from "./paths.js";
+export {
+  listGrepCandidateFiles,
+  toGrepCandidateRelativePath,
+} from "./candidate-files.js";
 export {
   countUnicodeScalars,
   decodeGrepFileBytes,

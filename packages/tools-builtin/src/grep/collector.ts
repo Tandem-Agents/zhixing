@@ -71,17 +71,33 @@ export class GrepResultCollector {
     this.scannedFileCount = scannedFileCount;
   }
 
+  addScannedFileCount(scannedFileCount: number): void {
+    this.scannedFileCount = (this.scannedFileCount ?? 0) + scannedFileCount;
+  }
+
+  getElapsedMs(): number {
+    return Date.now() - this.startedAt;
+  }
+
+  getTimeoutMs(): number {
+    return this.plan.query.timeoutMs ?? GREP_DEFAULT_TIMEOUT_MS;
+  }
+
+  getRemainingTimeoutMs(): number {
+    return Math.max(0, this.getTimeoutMs() - this.getElapsedMs());
+  }
+
   checkExecutionState(): GrepSearchError | null {
     if (this.options.abortSignal?.aborted) {
       return { code: "aborted", message: "Grep search was aborted." };
     }
 
-    const timeoutMs = this.plan.query.timeoutMs ?? GREP_DEFAULT_TIMEOUT_MS;
-    if (Date.now() - this.startedAt >= timeoutMs) {
+    const timeoutMs = this.getTimeoutMs();
+    if (this.getElapsedMs() >= timeoutMs) {
       return {
         code: "timeout",
         message: `Grep search timed out after ${timeoutMs}ms.`,
-        elapsedMs: Date.now() - this.startedAt,
+        elapsedMs: this.getElapsedMs(),
       };
     }
 
@@ -89,7 +105,7 @@ export class GrepResultCollector {
   }
 
   beginFileScan(): boolean {
-    const maxScannedFiles = this.plan.query.maxScannedFiles;
+    const maxScannedFiles = this.options.maxScannedFiles;
     if (
       maxScannedFiles !== undefined &&
       this.scannedFileCount !== undefined &&

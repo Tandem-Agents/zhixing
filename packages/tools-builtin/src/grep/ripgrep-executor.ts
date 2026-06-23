@@ -3,9 +3,9 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as readline from "node:readline";
 import {
-  GREP_DEFAULT_IGNORE_GLOBS,
-  GREP_DEFAULT_TIMEOUT_MS,
-} from "./constants.js";
+  listGrepCandidateFiles,
+  toGrepCandidateRelativePath,
+} from "./candidate-files.js";
 import { GrepResultCollector } from "./collector.js";
 import type {
   GrepSearchError,
@@ -28,6 +28,9 @@ interface RipgrepCommand {
   cwd: string;
 }
 
+const RIPGREP_MAX_PATH_ARGS = 200;
+const RIPGREP_MAX_PATH_ARG_CHARS = 16_000;
+
 class GrepSearchThrownError extends Error {
   constructor(readonly searchError: GrepSearchError) {
     super(searchError.message);
@@ -37,15 +40,7 @@ class GrepSearchThrownError extends Error {
 export const ripgrepSearchExecutor: GrepSearchExecutor = {
   name: "ripgrep",
 
-  async qualify(plan: GrepSearchPlan) {
-    if (plan.query.maxScannedFiles !== undefined) {
-      return {
-        executable: false,
-        reason: "unsupported-budget",
-        notes: ["ripgrep executor cannot prove maxScannedFiles before execution."],
-      };
-    }
-
+  async qualify() {
     if (!(await isRipgrepAvailable())) {
       return {
         executable: false,
@@ -109,7 +104,36 @@ async function* discoverRipgrepCandidateFiles(
   options: GrepSearchOptions,
 ): AsyncIterable<string> {
   const stat = await fs.stat(plan.absoluteSearchPath);
-  const command = buildRipgrepCommand(plan, stat.isFile());
+  const seen = new Set<string>();
+  if (stat.isFile()) {
+    yield* runRipgrepCommand(
+      buildRipgrepCommand(plan, path.dirname(plan.absoluteSearchPath), [
+        path.basename(plan.absoluteSearchPath),
+      ]),
+      collector,
+      options,
+      seen,
+    );
+    return;
+  }
+
+  for await (const paths of listRipgrepPathBatches(plan, collector)) {
+    yield* runRipgrepCommand(
+      buildRipgrepCommand(plan, plan.absoluteSearchPath, paths),
+      collector,
+      options,
+      seen,
+    );
+    if (collector.hasTruncated) break;
+  }
+}
+
+async function* runRipgrepCommand(
+  command: RipgrepCommand,
+  collector: GrepResultCollector,
+  options: GrepSearchOptions,
+  seen: Set<string>,
+): AsyncIterable<string> {
   const child = spawn("rg", command.args, {
     cwd: command.cwd,
     windowsHide: true,
@@ -121,7 +145,6 @@ async function* discoverRipgrepCandidateFiles(
     input: child.stdout,
     crlfDelay: Infinity,
   });
-  const seen = new Set<string>();
   let stderr = "";
   let processError: GrepSearchError | null = null;
 
@@ -132,12 +155,12 @@ async function* discoverRipgrepCandidateFiles(
   const abort = () => {
     fail({ code: "aborted", message: "Grep search was aborted." });
   };
-  const timeoutMs = plan.query.timeoutMs ?? GREP_DEFAULT_TIMEOUT_MS;
+  const timeoutMs = collector.getRemainingTimeoutMs();
   const timeout = setTimeout(() => {
     fail({
       code: "timeout",
-      message: `Grep search timed out after ${timeoutMs}ms.`,
-      elapsedMs: timeoutMs,
+      message: `Grep search timed out after ${collector.getTimeoutMs()}ms.`,
+      elapsedMs: collector.getElapsedMs(),
     });
   }, timeoutMs);
 
@@ -166,7 +189,7 @@ async function* discoverRipgrepCandidateFiles(
 
       if (event.type === "summary") {
         const searches = event.data?.stats?.searches;
-        if (searches !== undefined) collector.setScannedFileCount(searches);
+        if (searches !== undefined) collector.addScannedFileCount(searches);
         continue;
       }
 
@@ -193,14 +216,48 @@ async function* discoverRipgrepCandidateFiles(
   }
 }
 
+async function* listRipgrepPathBatches(
+  plan: GrepSearchPlan,
+  collector: GrepResultCollector,
+): AsyncIterable<string[]> {
+  let paths: string[] = [];
+  let pathArgChars = 0;
+
+  for await (const absolutePath of listGrepCandidateFiles(
+    plan.absoluteSearchPath,
+    plan.query.glob,
+  )) {
+    const stateError = collector.checkExecutionState();
+    if (stateError !== null) throw new GrepSearchThrownError(stateError);
+
+    const relativePath = toGrepCandidateRelativePath(
+      plan.absoluteSearchPath,
+      absolutePath,
+    );
+    if (relativePath === null) continue;
+
+    if (
+      paths.length > 0 &&
+      (paths.length >= RIPGREP_MAX_PATH_ARGS ||
+        pathArgChars + relativePath.length + 1 > RIPGREP_MAX_PATH_ARG_CHARS)
+    ) {
+      yield paths;
+      paths = [];
+      pathArgChars = 0;
+    }
+
+    paths.push(relativePath);
+    pathArgChars += relativePath.length + 1;
+  }
+
+  if (paths.length > 0) yield paths;
+}
+
 function buildRipgrepCommand(
   plan: GrepSearchPlan,
-  isFile: boolean,
+  cwd: string,
+  paths: readonly string[],
 ): RipgrepCommand {
-  const cwd = isFile
-    ? path.dirname(plan.absoluteSearchPath)
-    : plan.absoluteSearchPath;
-  const searchTarget = isFile ? path.basename(plan.absoluteSearchPath) : ".";
   const args = [
     "--json",
     "--line-number",
@@ -213,17 +270,7 @@ function buildRipgrepCommand(
     "1",
   ];
 
-  if (!isFile) {
-    for (const ignore of GREP_DEFAULT_IGNORE_GLOBS) {
-      args.push("--glob", `!${ignore}`);
-    }
-  }
-
-  if (!isFile && plan.query.glob !== undefined) {
-    args.push("--glob", plan.query.glob);
-  }
-
-  args.push("--", plan.regexp.ripgrepSource, searchTarget);
+  args.push("--", plan.regexp.ripgrepSource, ...paths);
   return { args, cwd };
 }
 

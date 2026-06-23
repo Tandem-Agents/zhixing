@@ -81,6 +81,7 @@ export function createGrepTool(): ToolDefinition {
 
       const execution = await executeGrepSearch(queryOrError, {
         abortSignal: context.abortSignal,
+        maxScannedFiles: MAX_SCANNED_FILES,
       });
       if (!execution.ok) return formatGrepSearchError(execution.error);
 
@@ -148,7 +149,6 @@ function buildGrepQuery(
     maxLineChars: MAX_LINE_CHARS,
     maxMatchedFiles: MAX_MATCHED_FILES,
     maxMatchedLines: MAX_MATCHED_LINES,
-    maxScannedFiles: MAX_SCANNED_FILES,
     timeoutMs: DEFAULT_TIMEOUT_MS,
   };
 }
