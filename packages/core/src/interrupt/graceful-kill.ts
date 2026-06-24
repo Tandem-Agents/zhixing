@@ -5,8 +5,8 @@
  * 自身 fork 的孙进程); child 不在自己的进程组时退化为 child.kill("SIGTERM")。
  * 等 graceMs 后, 若仍在跑则升级到 SIGKILL (同样优先进程组,降级到直接 child)。
  *
- * Windows 路径: SIGTERM 不可靠 —— ChildProcess.kill() 在 Windows 上等价于
- * TerminateProcess(强制结束),不走 grace 期。
+ * Windows 路径: SIGTERM 不可靠。用 taskkill /T /F 终止根进程和常规子孙进程;
+ * 若 taskkill 不可用或目标已经退出,退化到 ChildProcess.kill()。
  *
  * 资源回收: sleep 用 controller 控制, race 完成后立即清理 phantom setTimeout,
  * 不让定时器悬挂在 event loop 中(测试 vi.getTimerCount() === 0 可断言)。
@@ -19,7 +19,9 @@
  * 都需要在一处实现。
  */
 
+import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
+import { logDiagnostic } from "../diagnostics.js";
 
 export interface GracefulKillOptions {
   /**
@@ -33,15 +35,20 @@ export interface GracefulKillOptions {
    * 反之亦然)。
    */
   readonly getPlatform?: () => NodeJS.Platform;
+  /**
+   * Windows 进程树终止函数。生产默认使用 taskkill;单测注入 mock,避免真实杀进程。
+   */
+  readonly killWindowsProcessTree?: (pid: number) => Promise<void>;
 }
 
 const DEFAULT_GRACE_MS = 1000;
+const WINDOWS_TASKKILL_TIMEOUT_MS = 5000;
 
 /**
  * 优雅停止子进程, 在 child 退出后 resolve(永不 reject)。
  *
  * - child 已退出 → 立即 resolve
- * - Windows → child.kill() (等价 TerminateProcess) → 等 exit
+ * - Windows → taskkill /T /F 清理常规进程树,失败则 child.kill() 降级 → 等 exit
  * - POSIX → SIGTERM (优先进程组) → graceMs 等待 → 若仍在跑则 SIGKILL → 等 exit
  */
 export async function gracefulKill(
@@ -53,7 +60,18 @@ export async function gracefulKill(
   const platform = (opts.getPlatform ?? (() => process.platform))();
 
   if (platform === "win32") {
-    swallow(() => child.kill());
+    if (child.pid !== undefined) {
+      try {
+        await (opts.killWindowsProcessTree ?? killWindowsProcessTree)(child.pid);
+      } catch (err) {
+        logDiagnostic(
+          `[gracefulKill] Windows process tree kill failed for pid ${child.pid}; falling back to direct child.kill(): ${formatKillError(err)}`,
+        );
+        swallow(() => child.kill());
+      }
+    } else {
+      swallow(() => child.kill());
+    }
     await waitForExit(child);
     return;
   }
@@ -111,6 +129,48 @@ function waitForExit(child: ChildProcess): Promise<void> {
   return new Promise<void>((resolve) => {
     child.once("exit", () => resolve());
   });
+}
+
+function killWindowsProcessTree(pid: number): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn("taskkill.exe", ["/PID", String(pid), "/T", "/F"], {
+      windowsHide: true,
+      stdio: "ignore",
+    });
+
+    let settled = false;
+    const settle = (fn: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
+
+    const timer = setTimeout(() => {
+      settle(() => {
+        swallow(() => child.kill());
+        reject(new Error(`taskkill timed out after ${WINDOWS_TASKKILL_TIMEOUT_MS}ms`));
+      });
+    }, WINDOWS_TASKKILL_TIMEOUT_MS);
+
+    child.once("error", (err) => {
+      settle(() => reject(err));
+    });
+
+    child.once("exit", (code) => {
+      settle(() => {
+        if (code === 0) {
+          resolve();
+        } else {
+          reject(new Error(`taskkill exited with code ${code ?? "null"}`));
+        }
+      });
+    });
+  });
+}
+
+function formatKillError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 /**

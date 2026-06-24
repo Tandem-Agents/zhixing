@@ -404,58 +404,7 @@
 - 它不等价于深度无关的运行时求值证明；若未来轻量白名单模块自身引入重依赖，仍需代码审查或运行时探针发现。
 - 当前白名单模块保持零依赖或极轻依赖，风险可接受；如未来需要更强保证，可补充 `--version` 运行时探针，断言重运行模块未被求值。
 
-### 5. CLI 文档与当前入口不一致，不能作为发布判断依据
-
-**状态**：待处理
-
-**现象**：`packages/cli/README.md` 中的示例和当前 `packages/cli/src/index.ts` 的 Commander 配置不一致。
-
-**审核结论**：问题真实。README 不能作为判断 CLI 应支持哪些命令的依据；真实标准必须来自当前代码、构建产物和 smoke 验证。若 0.1 面向外部用户发布，文档与实际入口不一致需要单独收口。
-
-**事实证据**：
-
-- README 写到“单次 `zhixing -p "prompt"`”。
-- README 示例包含 `zhixing -p ...`、`--provider openai`。
-- README 示例包含 `zhixing serve -m claude-3-5-sonnet`、`zhixing serve -w /path/to/workspace`。
-- 当前 `packages/cli/src/index.ts` 可见的顶层 option / command 包括：
-  - `status`
-  - `stop`
-  - 隐藏诊断 option：`--log`
-  - 隐藏内部入口：`serve`
-  - 隐藏 / 过渡入口：`serve logs`
-- 当前入口未看到 `-p`、`--prompt`、`--provider`、`serve -m`、`serve -w`。
-
-**发布影响**：
-
-- 如果用户照滞后的 README 操作，可能立即失败或进入非预期路径。
-- 如果维护者用 README 反推发布标准，会把历史设想误当成当前系统能力，污染 0.1 判断。
-
-**背后需求**：
-
-- 发布判断必须先从当前系统事实出发：源码入口、构建产物、命令输出、测试和 smoke。
-- 文档更新是发布材料问题，不是定义系统能力的上游来源。
-- 如果某些能力属于近未来规划，应进入 roadmap 或“暂未支持”段落，而不是作为当前能力示例。
-
-**目标效果**：
-
-- 本文和发布清单不再依赖 README 描述来定义 CLI 标准。
-- 当前 CLI 到底需要哪些命令，由 0.1 产品边界、代码入口和 smoke 清单定义。
-- README 如果保留命令示例，必须标注其状态，或改为当前构建产物可验证的命令。
-- `sessionId` / `conversationId` 术语一致，不让 RPC 用户在 0.1 入口面混淆。
-
-**倾向修复方向**：
-
-- 先定义 0.1 的真实 CLI smoke 清单，再回头更新 README。
-- 不为了匹配滞后文档而补大功能；除非该功能被重新确认为 0.1 必需能力。
-- RPC 文档统一到当前真实协议；兼容 alias 可以说明，但主文档只保留一个主术语。
-
-**验收标准**：
-
-- 发布判断文档中不再出现“以 README 描述为准”的标准。
-- 0.1 CLI smoke 清单由当前入口和产品边界直接定义。
-- README 中仍保留的当前能力示例必须有对应 smoke 命令验证；未实现示例移入 roadmap 或删除。
-
-### 6. 根 README 仍停留在研究期表述
+### 5. 根 README 仍停留在研究期表述
 
 **状态**：待处理
 
@@ -491,38 +440,116 @@
 - 新用户只读根 README 能找到当前构建和基础 CLI smoke 的入口，且这些入口来自已验证清单。
 - 根 README 不再包含与当前仓库状态明显冲突的研究期措辞。
 
-### 7. Windows 测试清理出现 EBUSY 警告
+### 6. Bash timeout / abort 后未可靠清理命令进程树
 
-**状态**：非阻断但需记录
+**状态**：已处理，已验证，不再阻断 0.1
 
-**现象**：全量测试中 bash 相关测试文件通过，但 stderr 出现临时目录清理失败警告，错误形态为 Windows `EBUSY`。
+**修复前现象**：`@zhixing/tools-builtin` 的 bash 测试用例本身全绿，但 timeout / abort 相关用例结束后，Windows 上仍有 `PING.EXE` 子进程残留，导致 `createTempDir()` 删除测试工作目录时出现 `EBUSY`。Windows 把问题显形为目录锁；根因是 bash 工具没有拥有整棵命令进程树的生命周期，POSIX 下也存在同类孤儿化风险。
 
-**审核结论**：当前不是红灯，但代表测试隔离 / 进程清理风险。若频繁出现或导致 CI 红灯，应升级为阻断。
+**审核结论**：问题真实，且不是测试基础设施问题。`EBUSY` 只是外显症状，真实问题是 bash 工具在报告 timeout / abort 后，没有保证被启动的命令进程树已经停止。当前实现已改为由 bash 工具拥有 shell 根进程，并在 timeout / abort / 输出超限返回前等待进程树清理完成。
 
-**事实证据**：
+**修复前事实证据**：
 
-- `@zhixing/tools-builtin` 的 bash 测试通过。
-- 测试输出出现 `[test-utils] 清理临时目录失败 ... EBUSY ...`。
+- `pnpm --filter @zhixing/tools-builtin exec vitest run src/__tests__/bash.test.ts --reporter=verbose`：退出码 0，14 个测试通过。
+- 同次输出中，timeout / abort 相关用例出现 4 条 `[test-utils] 清理临时目录失败 ... EBUSY ...`。
+- 测试结束后，系统仍可观察到 4 个 `PING.EXE` 进程，启动时间与上述 timeout / abort 用例一致。
+- `packages/tools-builtin/src/__tests__/bash.test.ts` 在 Windows 下使用 `ping -n 100 127.0.0.1` 模拟长运行命令，并把 `createTempDir("bash")` 目录作为命令工作目录。
+- `packages/tools-builtin/src/bash.ts` 使用 `child_process.exec()`。真实进程树是 shell 子进程启动实际命令子进程；当前 timeout / abort 不能可靠终止整棵进程树。
+- `packages/core/src/interrupt/graceful-kill.ts` 的 POSIX 分支优先 `process.kill(-pid, signal)` 杀进程组，但前提是 child 是独立进程组根；当前 bash 用 `exec()` 且未 detached，进程组 kill 不能覆盖 shell 派生出的孙进程。
+- `gracefulKill()` 的 Windows 分支当前只对直接 child 调 `kill()`，等价于 TerminateProcess 直接 shell child，不覆盖孙进程。
 
-**发布影响**：
+**补充探针**：
 
-- Windows 下仍可能有子进程或文件句柄未完全释放。
-- 未来测试数量增多后，警告可能变成 flaky 失败或污染后续测试。
+- `exec("ping -n 100 127.0.0.1", { timeout: 500 })` 触发回调时，直接 child shell 已被 Node 标记为 killed，但 `PING.EXE` 仍存活，`ParentProcessId` 仍指向原 shell PID；此时删除 cwd 稳定报 `EBUSY`。
+- 手动用 `spawn("cmd.exe", ["/d", "/s", "/c", "ping -n 100 127.0.0.1"])` 启动同一命令，不交给 Node 内置 timeout；在根 shell PID 仍存活时执行 `taskkill /PID <pid> /T /F`，`PING.EXE` 被清理，cwd 可删除。
+- 结论：Windows 上必须在 shell 根进程仍可作为树根时杀整棵进程树；等 `exec` 内置 timeout / maxBuffer 先杀掉 shell 后再补救，已经错过可靠树清理窗口。
+
+**落地结果**：
+
+- `@zhixing/tools-builtin` 的 bash 执行内核已从 `exec()` 切换为显式 `spawn(command, { shell: true })`。
+- POSIX 下 bash shell 以 detached 方式启动，使 `gracefulKill()` 的进程组终止语义真正覆盖子孙进程；Windows 下保留 shell 根 PID，交给 `taskkill /T /F` 清理常规父子进程树。
+- timeout / abort / 输出超限统一走同一个生命周期控制器：先 `await gracefulKill(child)`，再返回 timeout / abort / output-limit 结果。
+- stdout / stderr 改为流式收集，并由 bash runner 统一执行输出字节预算，避免 `exec()` 的 `maxBuffer` 隐式 kill 路径再次绕开进程树清理。
+- `@zhixing/core` 的 `gracefulKill()` Windows 分支已优先使用 `taskkill.exe /PID <pid> /T /F`，失败时再降级为直接 child kill；POSIX 分支继续使用进程组 SIGTERM 到 SIGKILL 的升级链。
+- bash 测试已增加 timeout / abort / 输出超限后的工作目录释放断言，以及引号、空格参数、管道、重定向、环境变量展开和嵌套引号等 shell 解析 parity 覆盖。
+
+**根因**：
+
+- `exec()` 启动 shell 但不让调用方建立可治理的进程树边界。timeout 只保证直接 child 被处理，不等价于“整棵命令进程树已停止”。
+- `exec()` 还隐藏了其它会主动 kill 直接 child 的路径，例如 `maxBuffer` 超限；这些路径同样可能留下 shell 派生出的孙进程。
+- abort 路径中 `void gracefulKill(child)` 后立即返回，工具调用结果先于子进程清理完成。
+- 当前 `gracefulKill()` 在 Windows 上只杀直接 child；在 POSIX 上虽已有进程组 kill 逻辑，但 bash 未用 detached 进程组启动，导致该能力无法真正生效。
+- 因此工具层已经返回 “timed out” / “aborted”，但实际命令仍可能在后台运行并持有 cwd、文件句柄或继续产生副作用。
+
+**问题全貌**：
+
+- 这不是 `createTempDir()` 删除策略的问题；临时目录清理只是最早可见的观测点。
+- 这也不是 bash 测试“用了 ping”导致的测试偶然性；任何通过 shell 再派生出的长运行进程都可能留下同类残留。
+- Windows 因 cwd 锁让问题稳定暴露为 `EBUSY`；POSIX 通常不锁 cwd，泄漏更隐蔽，但“工具返回后孙进程仍运行”的语义风险相同。
+- 当前 bash 工具用 `exec()` 同时承担三件事：shell 启动、输出缓存、timeout kill。它适合短命令便利封装，不适合作为可中止、可治理、跨平台的 agent 工具执行内核。
+- 只修 abort 路径不够；timeout 和输出超限也必须由同一个进程生命周期控制器管理，否则仍会留下另一条泄漏路径。
+
+**修复前发布影响**：
+
+- 这是核心 bash 工具的生命周期语义问题，不只是测试 warning。
+- 0.1 用户或智能体看到 bash 已 timeout / abort 后，命令可能仍在后台继续运行，带来资源泄漏、目录锁、后续命令污染和潜在副作用。
+- Windows 是当前发布验证明确暴露问题的平台；POSIX 下同根因可能表现为孤儿进程而不是目录锁。只要 0.1 发布 bash 工具，本问题应视为阻断。
 
 **背后需求**：
 
-- 测试基础设施应可靠释放进程、stdio、文件句柄和临时目录。
-- 失败时应留下足够诊断信息，而不是只在 teardown 暴露 EBUSY。
+- bash 工具必须拥有它启动的进程生命周期。
+- timeout / abort 不是“返回一个错误字符串”就结束，而是必须让外部命令进入可证明的停止状态。
+- 测试临时目录清理应作为进程生命周期的观测点，而不是用 test-utils 重试或吞 warning 掩盖真实泄漏。
 
 **目标效果**：
 
-- 全量测试不出现 EBUSY 清理警告。
-- 如果 Windows 平台存在不可避免延迟，应在 test-utils 中用受控重试和超时处理。
+- bash 工具在 timeout / abort 返回前，已经完成对子进程树的清理，至少不留下仍运行的命令进程。
+- Windows 下 timeout / abort 用例不再残留 `PING.EXE`，测试临时目录可正常删除，不出现 `EBUSY`。
+- 正常命令、失败命令、stdout / stderr 捕获、退出码和 shell 解析语义保持不变。
+
+**已采用修复方案**：
+
+- 不通过增加 test-utils 删除重试、延迟清理或静默忽略 warning 来解决。
+- 不继续使用 `exec()` 的内置 timeout / `maxBuffer` 作为控制机制；这些机制只能杀直接 child，不能表达“命令进程树已停止”。
+- 把 bash 执行内核改为显式 shell runner：
+  - Windows：`spawn(command, { shell: true })`，保留 shell 根 PID。
+  - POSIX：`spawn(command, { shell: true, detached: true })`，让 shell 成为独立进程组根。
+  - stdout / stderr 改为流式收集并由 runner 自己执行输出字节预算；超限时走同一套进程树终止路径。
+- 增强核心 `gracefulKill()` 为真正的进程树终止 helper：
+  - Windows：优先用系统 `taskkill /PID <pid> /T /F` 终止根进程及其子孙，再等待 root child 退出；`taskkill` 失败时写入诊断日志并降级为 direct child kill，目标已退出类情况不得破坏“中断 helper 永不 reject”的核心契约。
+  - POSIX：沿用进程组 SIGTERM → grace → SIGKILL 语义；调用方必须用 detached root 保证 `process.kill(-pid, signal)` 能覆盖子孙进程。
+- bash timeout / abort / 输出超限统一由 shell runner 自己触发，先调用并等待 `gracefulKill()`，再返回 timeout / abort / output-limit 结果；避免“工具已返回但命令仍运行”的双事实。
+- abort 响应目标从“立即返回但后台清理”调整为“有界等待进程树清理后返回”。Windows `taskkill /T /F` 通常是亚秒级；POSIX 最坏受 grace 窗口约束。外部命令工具的正确性应优先于虚假的即时返回。
+
+**最优方案边界**：
+
+- 进程树终止能力属于核心中断原语，应沉淀在 `@zhixing/core` 的 `gracefulKill()`，避免未来新的外部进程工具各自实现一套 Windows / POSIX 分支。
+- shell 命令的启动、输出流收集、timeout、abort、输出预算属于 bash 工具执行内核，应放在 `@zhixing/tools-builtin` 内部，不把 shell 细节泄漏到 core。
+- 不引入原生依赖或 Windows Job Object 绑定；0.1 采用 Node 标准库 + Windows 系统自带 `taskkill`，实现可部署、可测试、可维护的进程树治理。
+- 不把 `taskkill` 失败静默伪装成成功：`gracefulKill()` 保持永不 reject 的中断原语契约，但 Windows tree-kill 真失败必须进入诊断路径，并清楚降级为 direct child kill；它不等同于 Job Object 级完整隔离。
+- `taskkill /T /F` 覆盖常规父子进程树，但不是 Windows 上对自守护 / 杀前已重父化 / 杀后再 fork 进程的完备隔离。0.1 明确选择它作为无原生依赖的现实治理方案；若未来需要对抗性或自守护进程隔离，再升级到 Job Object 级能力。
+- 从 `exec(command)` 切到显式 spawn shell runner 时必须保持 shell 解析语义。Windows `cmd.exe` 对 `/d /s /c`、整串命令引号、`windowsVerbatimArguments`、管道、重定向、`%VAR%` 展开和嵌套引号很敏感；POSIX `/bin/sh -c` 也要保持旧语义。生命周期治理不能以破坏用户命令解释为代价。
+
+**验证结果**：
+
+- `pnpm --filter @zhixing/core exec tsc -p tsconfig.json --noEmit` 通过。
+- `pnpm --filter @zhixing/tools-builtin exec tsc -p tsconfig.json --noEmit` 通过。
+- `pnpm --filter @zhixing/core exec vitest run src/interrupt/__tests__/graceful-kill.test.ts --reporter=verbose` 通过。
+- `pnpm --filter @zhixing/tools-builtin exec vitest run src/__tests__/bash.test.ts src/web-fetch/__tests__/internal.test.ts --reporter=verbose` 通过。
+- `pnpm --filter @zhixing/core test` 通过。
+- `pnpm --filter @zhixing/tools-builtin test` 通过。
+- 修复后残留进程检查未发现由 bash timeout / abort / 输出超限测试启动的 `PING.EXE` 或长跑 `node.exe`。
+- `pnpm --filter @zhixing/tools-builtin build` 通过。
+- `pnpm build` 通过。
 
 **验收标准**：
 
-- 连续多次运行 bash 相关测试，不再出现临时目录清理失败警告。
-- 若保留警告，必须有明确 issue 或注释说明原因、影响和后续处理条件。
+- 连续多次运行 `packages/tools-builtin/src/__tests__/bash.test.ts`，测试通过且 stderr 不再出现临时目录 `EBUSY` 清理失败。
+- timeout / abort 用例结束后，系统中不残留由测试启动的 `PING.EXE`。
+- 新增或加强测试锁住 timeout / abort / 输出超限后进程树被清理的契约。
+- 新增 shell 解析 parity 测试，覆盖引号、空格参数、管道、重定向、环境变量展开和嵌套命令等常见 shell 语义；Windows 与 POSIX 都要覆盖各自平台路径，确保从 `exec()` 切到显式 shell runner 不改变用户命令行为。
+- 新增 `gracefulKill()` 单元测试覆盖 Windows tree-kill 分支和 fallback 降级路径；POSIX 进程组语义由既有单元测试和 bash detached 调用路径共同锁定。
+- `pnpm --filter @zhixing/tools-builtin test` 通过；`gracefulKill()` 属于共享核心原语，修复收尾需跑受影响的 core 测试和全量构建，确认无构建回归。
 
 ## 0.1 发布最低清单
 

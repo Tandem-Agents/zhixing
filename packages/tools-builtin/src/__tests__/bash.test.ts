@@ -14,6 +14,9 @@ describe("Bash Tool", () => {
   });
 
   const ctx = () => ({ workingDirectory: tmpDir });
+  const expectWorkingDirectoryReleased = async (): Promise<void> => {
+    await expect(fs.rm(tmpDir, { recursive: true, force: true })).resolves.toBeUndefined();
+  };
 
   // ─── 基本执行 ───
 
@@ -78,7 +81,22 @@ describe("Bash Tool", () => {
 
     expect(result.isError).toBe(true);
     expect(result.content.toLowerCase()).toContain("timed out");
+    await expectWorkingDirectoryReleased();
   }, 10_000);
+
+  it("输出超限后命令被终止并释放工作目录", async () => {
+    const command =
+      "node -e \"process.stdout.write('x'.repeat(11 * 1024 * 1024)); setTimeout(() => {}, 100000)\"";
+
+    const result = await tool.call(
+      { command, timeout: 10_000 },
+      ctx(),
+    );
+
+    expect(result.isError).toBe(true);
+    expect(result.content.toLowerCase()).toContain("output exceeded");
+    await expectWorkingDirectoryReleased();
+  }, 15_000);
 
   // ─── stdout + stderr ───
 
@@ -107,7 +125,7 @@ describe("Bash Tool", () => {
 
   // ─── abort 路径 + listener 资源回收 ───
 
-  it("abort 信号触发 → 工具立即返回 ABORT 错误 (不等 grace 期完成)", async () => {
+  it("abort 信号触发 → 清理进程树后返回 ABORT 错误", async () => {
     const isWindows = process.platform === "win32";
     const command = isWindows ? "ping -n 100 127.0.0.1" : "sleep 100";
     const controller = new AbortController();
@@ -117,8 +135,7 @@ describe("Bash Tool", () => {
       { ...ctx(), abortSignal: controller.signal },
     );
 
-    // 100ms 后触发 abort, 上层应在毫秒级响应 (P95 SLO 监控 loop 框架延迟,
-    // 子进程后台 gracefulKill 不阻塞 promise reject)
+    // 100ms 后触发 abort;工具需要有界等待外部进程树清理完成,再返回结果。
     setTimeout(() => controller.abort(), 100);
 
     const t0 = Date.now();
@@ -127,9 +144,9 @@ describe("Bash Tool", () => {
 
     expect(result.isError).toBe(true);
     expect(result.content.toLowerCase()).toContain("abort");
-    // 上限放宽到 1500ms 含 abort 触发延迟 + 测试调度抖动
-    expect(elapsed).toBeLessThan(1500);
-  }, 5_000);
+    expect(elapsed).toBeLessThan(4000);
+    await expectWorkingDirectoryReleased();
+  }, 6_000);
 
   it("已 aborted signal → 工具立即返回 ABORT 错误", async () => {
     const isWindows = process.platform === "win32";
@@ -173,6 +190,7 @@ describe("Bash Tool", () => {
     expect(result.isError).toBe(true);
     expect(result.content.toLowerCase()).toContain("timed out");
     expect(getEventListeners(controller.signal, "abort").length).toBe(before);
+    await expectWorkingDirectoryReleased();
   }, 10_000);
 
   it("abort 触发 → abort listener 被清理 (不残留)", async () => {
@@ -190,5 +208,64 @@ describe("Bash Tool", () => {
     await callPromise;
 
     expect(getEventListeners(controller.signal, "abort").length).toBe(before);
+    await expectWorkingDirectoryReleased();
   }, 5_000);
+
+  // ─── shell 解析语义 ───
+
+  it("保留带空格参数和引号解析语义", async () => {
+    const result = await tool.call(
+      { command: `node -e "console.log(process.argv[1])" "hello shell"` },
+      ctx(),
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain("hello shell");
+  });
+
+  it("保留管道语义", async () => {
+    const isWindows = process.platform === "win32";
+    const command = isWindows
+      ? "echo pipe-ok | findstr pipe-ok"
+      : "printf 'pipe-ok\\n' | grep pipe-ok";
+
+    const result = await tool.call({ command }, ctx());
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain("pipe-ok");
+  });
+
+  it("保留重定向语义", async () => {
+    const isWindows = process.platform === "win32";
+    const command = isWindows
+      ? "echo redirect-ok> redirected.txt && type redirected.txt"
+      : "printf 'redirect-ok' > redirected.txt && cat redirected.txt";
+
+    const result = await tool.call({ command }, ctx());
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain("redirect-ok");
+  });
+
+  it("保留环境变量展开语义", async () => {
+    const isWindows = process.platform === "win32";
+    const command = isWindows
+      ? "echo %OS%"
+      : "ZHIXING_BASH_TEST=env-ok; echo \"$ZHIXING_BASH_TEST\"";
+
+    const result = await tool.call({ command }, ctx());
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain(isWindows ? "Windows" : "env-ok");
+  });
+
+  it("保留嵌套引号语义", async () => {
+    const result = await tool.call(
+      { command: `node -e "console.log(JSON.stringify({ value: 'nested ok' }))"` },
+      ctx(),
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain('"nested ok"');
+  });
 });

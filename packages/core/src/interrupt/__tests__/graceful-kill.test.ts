@@ -176,28 +176,61 @@ describe("gracefulKill: Windows 路径", () => {
     vi.restoreAllMocks();
   });
 
-  it("Windows → 直接 child.kill(), 不发 SIGTERM, 不走 grace 期", async () => {
+  it("Windows → 通过 tree-kill 终止进程树, 不发 SIGTERM, 不走 grace 期", async () => {
     const { child, killCalls, simulateExit } = createMockChild();
     const { calls: pkCalls } = mockProcessKill();
+    const killWindowsProcessTree = vi.fn(async (pid: number) => {
+      expect(pid).toBe(child.pid);
+      simulateExit(null, "SIGTERM");
+    });
 
-    const promise = gracefulKill(child, { getPlatform: () => "win32", graceMs: 1000 });
+    const promise = gracefulKill(child, {
+      getPlatform: () => "win32",
+      graceMs: 1000,
+      killWindowsProcessTree,
+    });
     await vi.advanceTimersByTimeAsync(0);
+    await promise;
+
+    expect(killWindowsProcessTree).toHaveBeenCalledTimes(1);
+    expect(killWindowsProcessTree).toHaveBeenCalledWith(child.pid);
+    expect(killCalls).toEqual([]);
+    // 不调 process.kill (没有进程组语义)
+    expect(pkCalls).toEqual([]);
+  });
+
+  it("Windows tree-kill 失败 → 降级 child.kill()", async () => {
+    const { child, killCalls, simulateExit } = createMockChild();
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    const killWindowsProcessTree = vi.fn(async () => {
+      throw new Error("taskkill failed");
+    });
+
+    const promise = gracefulKill(child, {
+      getPlatform: () => "win32",
+      killWindowsProcessTree,
+    });
+    await Promise.resolve();
+    await Promise.resolve();
     simulateExit(null, "SIGTERM");
     await promise;
 
-    // Windows: 没参数的 child.kill() (等价 TerminateProcess)
+    expect(killWindowsProcessTree).toHaveBeenCalledTimes(1);
     expect(killCalls).toEqual([undefined]);
-    // 不调 process.kill (没有进程组语义)
-    expect(pkCalls).toEqual([]);
+    expect(logSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Windows process tree kill failed"),
+    );
   });
 
   it("Windows + 子进程已退出 → 立即 resolve, 不调 kill", async () => {
     const { child, killCalls, simulateExit } = createMockChild();
     simulateExit(0);
     const { calls: pkCalls } = mockProcessKill();
+    const killWindowsProcessTree = vi.fn(async () => {});
 
-    await gracefulKill(child, { getPlatform: () => "win32" });
+    await gracefulKill(child, { getPlatform: () => "win32", killWindowsProcessTree });
 
+    expect(killWindowsProcessTree).not.toHaveBeenCalled();
     expect(killCalls).toEqual([]);
     expect(pkCalls).toEqual([]);
   });

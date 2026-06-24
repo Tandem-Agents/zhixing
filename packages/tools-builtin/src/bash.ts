@@ -10,21 +10,21 @@
  * - needsPermission: true — 命令执行默认需要确认
  * - 输出大小限制：防止 cat 大文件撑爆上下文
  *
- * 中断行为：interruptBehavior="grace" — abort 触发时调 gracefulKill 异步执行
- * SIGTERM → 1s grace → SIGKILL 升级链 (Windows 直接 kill);上层 promise 立即 reject
- * "ABORT" 让主流程快速响应,子进程清理后台进行不阻塞 abort 传播延迟。
+ * 中断行为：interruptBehavior="grace" — timeout / abort / 输出超限都先清理命令
+ * 进程树,再返回结果。工具返回后不应留下仍运行的外部命令。
  *
- * Phase 2+ 安全增强点（当前不实现）：
+ * 后续安全增强点（当前不实现）：
  * - 危险命令黑名单
  * - 命令 AST 分析
  * - 进程级沙箱
  */
 
-import { exec } from "node:child_process";
+import { spawn } from "node:child_process";
 import { gracefulKill, type ToolDefinition, type ToolResult } from "@zhixing/core";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_RESULT_CHARS = 30_000;
+const MAX_OUTPUT_BUFFER_BYTES = 10 * 1024 * 1024;
 
 export function createBashTool(): ToolDefinition {
   return {
@@ -98,6 +98,13 @@ export function createBashTool(): ToolDefinition {
           return { content: "Command was aborted.", isError: true };
         }
 
+        if (message.includes("OUTPUT_LIMIT")) {
+          return {
+            content: `Command output exceeded ${MAX_OUTPUT_BUFFER_BYTES} bytes: ${command}`,
+            isError: true,
+          };
+        }
+
         return { content: `Command execution failed: ${message}`, isError: true };
       }
     },
@@ -119,64 +126,109 @@ interface ExecResult {
 }
 
 function execCommand(command: string, options: ExecOptions): Promise<ExecResult> {
-  return new Promise((resolve, reject) => {
-    // abortTriggered 区分 exec callback 内 error.killed 的两个来源:
-    //   - false: child 因 exec 内置 timeout 被杀 → 报 TIMEOUT
-    //   - true:  child 因 abort 被 gracefulKill 升级杀 → no-op (promise 已被 onAbort reject)
-    let abortTriggered = false;
-    let onAbort: (() => void) | null = null;
+  if (options.signal?.aborted) {
+    return Promise.reject(new Error("ABORT: Command was aborted"));
+  }
 
-    // 单一清理点: 任何 settle 路径(正常完成 / timeout / abort)都过此处, 防 listener 残留
-    const cleanupAbortListener = (): void => {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let terminating = false;
+    let onAbort: (() => void) | null = null;
+    let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+
+    const cleanup = (): void => {
       if (onAbort && options.signal) {
         options.signal.removeEventListener("abort", onAbort);
         onAbort = null;
       }
+      if (timeoutTimer !== null) {
+        clearTimeout(timeoutTimer);
+        timeoutTimer = null;
+      }
     };
 
-    const child = exec(
+    const child = spawn(
       command,
       {
         cwd: options.cwd,
-        timeout: options.timeout,
-        maxBuffer: 10 * 1024 * 1024, // 10MB buffer
+        shell: true,
+        detached: process.platform !== "win32",
         windowsHide: true,
-      },
-      (error, stdout, stderr) => {
-        cleanupAbortListener();
-
-        if (abortTriggered) {
-          // abort 路径已在 onAbort 内 reject; exec callback 是 SIGTERM/SIGKILL 后回调,
-          // 此处 no-op 避免二次 settle (Promise 协议下二次 reject/resolve 是静默忽略)
-          return;
-        }
-
-        if (error && error.killed) {
-          reject(new Error(`TIMEOUT: Command killed after ${options.timeout}ms`));
-          return;
-        }
-
-        resolve({
-          stdout: stdout ?? "",
-          stderr: stderr ?? "",
-          exitCode: error?.code ?? 0,
-        });
+        stdio: ["ignore", "pipe", "pipe"],
       },
     );
 
+    const settle = (fn: () => void): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      fn();
+    };
+
+    const terminate = (message: string): void => {
+      if (settled || terminating) return;
+      terminating = true;
+      cleanup();
+      void (async () => {
+        await gracefulKill(child);
+        settle(() => reject(new Error(message)));
+      })();
+    };
+
+    const appendChunk = (kind: "stdout" | "stderr", chunk: Buffer | string): void => {
+      if (settled || terminating) return;
+
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      const nextTotal =
+        kind === "stdout" ? stdoutBytes + buffer.length : stderrBytes + buffer.length;
+
+      if (stdoutBytes + stderrBytes + buffer.length > MAX_OUTPUT_BUFFER_BYTES) {
+        terminate(`OUTPUT_LIMIT: Command output exceeded ${MAX_OUTPUT_BUFFER_BYTES} bytes`);
+        return;
+      }
+
+      if (kind === "stdout") {
+        stdoutBytes = nextTotal;
+        stdoutChunks.push(buffer);
+      } else {
+        stderrBytes = nextTotal;
+        stderrChunks.push(buffer);
+      }
+    };
+
+    child.stdout.on("data", (chunk: Buffer | string) => appendChunk("stdout", chunk));
+    child.stderr.on("data", (chunk: Buffer | string) => appendChunk("stderr", chunk));
+
+    child.once("error", (err) => {
+      settle(() => reject(err));
+    });
+
+    child.once("close", (code) => {
+      if (terminating) return;
+      settle(() => {
+        resolve({
+          stdout: Buffer.concat(stdoutChunks).toString("utf-8"),
+          stderr: Buffer.concat(stderrChunks).toString("utf-8"),
+          exitCode: code ?? 1,
+        });
+      });
+    });
+
+    timeoutTimer = setTimeout(() => {
+      terminate(`TIMEOUT: Command killed after ${options.timeout}ms`);
+    }, options.timeout);
+
     if (options.signal) {
       onAbort = () => {
-        abortTriggered = true;
-        cleanupAbortListener();
-        // 后台 SIGTERM → grace → SIGKILL, 不 await: 上层需要快速响应 abort
-        // (P95 SLO ≤ 200ms), 子进程清理异步进行不阻塞 promise reject
-        void gracefulKill(child);
-        reject(new Error("ABORT: Command was aborted"));
+        terminate("ABORT: Command was aborted");
       };
+      options.signal.addEventListener("abort", onAbort, { once: true });
       if (options.signal.aborted) {
         onAbort();
-      } else {
-        options.signal.addEventListener("abort", onAbort);
       }
     }
   });
