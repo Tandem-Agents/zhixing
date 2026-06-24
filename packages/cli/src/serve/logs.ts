@@ -16,9 +16,7 @@
 import chalk from "chalk";
 import { stat as fsStat, readFile, open as fsOpen } from "node:fs/promises";
 import { getDefaultLogPath } from "@zhixing/server";
-
-export const DEFAULT_LOG_LINES = 50;
-export const MAX_LOG_LINES = 5000;
+import { normalizeLogLineCount } from "./log-line-count.js";
 
 export interface LogsOptions {
   /** 默认模式显示的行数，默认 50 */
@@ -55,14 +53,6 @@ export async function runLogsCommand(opts: LogsOptions = {}): Promise<void> {
   } else {
     await printLastLines({ logPath, lines, deps, console: con });
   }
-}
-
-export function normalizeLogLineCount(value: number | undefined): number {
-  if (value === undefined) return DEFAULT_LOG_LINES;
-  if (!Number.isInteger(value) || value < 1 || value > MAX_LOG_LINES) {
-    throw new Error(`--lines 必须是 1 到 ${MAX_LOG_LINES} 的整数`);
-  }
-  return value;
 }
 
 // ─── 默认模式 ───

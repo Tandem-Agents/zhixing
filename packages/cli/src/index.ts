@@ -9,25 +9,27 @@
 
 import chalk from "chalk";
 import { Command, InvalidArgumentError, Option } from "commander";
-import { setDiagnosticLogger } from "@zhixing/core";
-import { configureLlmChunkDump, pruneAllLogs } from "./output/llm-chunk-dump.js";
-import { configureKeypressDump } from "./security/keypress-dump.js";
-import { runStartupCheck, type StartupCheckResult } from "./startup.js";
-import { startRepl } from "./repl.js";
-import { renderError } from "./render.js";
-import { createStdoutWriter } from "./screen/index.js";
-import { runServeCommand } from "./serve/command.js";
-import { runStopCommand } from "./serve/stop.js";
-import { runStatusCommand } from "./serve/status.js";
-import { MAX_LOG_LINES, normalizeLogLineCount, runLogsCommand } from "./serve/logs.js";
+import { createStdoutWriter } from "./screen/cli-writer.js";
+import type { StartupCheckResult } from "./startup.js";
+import { MAX_LOG_LINES, normalizeLogLineCount } from "./serve/log-line-count.js";
 import { ZHIXING_CLI_VERSION } from "./version.js";
 import { findUnknownCommandPath } from "./command-gate.js";
 
-/**
- * 顶层 stdout writer——cli 入口的错误路径 / 启动期渲染没有 ScreenController（chrome
- * 未创建），用 stdout writer 直写。各子命令进入交互模式时各自创建 ScreenWriter。
- */
-const stdoutWriter = createStdoutWriter();
+async function renderActionError(error: unknown): Promise<void> {
+  const writer = createStdoutWriter();
+  try {
+    const { renderError } = await import("./render.js");
+    renderError(error, writer);
+  } catch {
+    const message = error instanceof Error ? error.message : String(error);
+    writer.line(`\n${chalk.red("✗")} ${message}`);
+  }
+}
+
+async function pruneRuntimeLogs(): Promise<void> {
+  const { pruneAllLogs } = await import("./output/llm-chunk-dump.js");
+  pruneAllLogs();
+}
 
 /**
  * 处理 ensureBootstrap 非 ready 状态：报错退出或 cancel 退出。
@@ -82,18 +84,22 @@ function rejectUnknownCommandPath(argv: string[], command: Command): void {
 
 async function handleStopAction(): Promise<void> {
   try {
+    await pruneRuntimeLogs();
+    const { runStopCommand } = await import("./serve/stop.js");
     const result = await runStopCommand();
     const exitCode =
       result.status === "error" || result.status === "refused" ? 1 : 0;
     process.exit(exitCode);
   } catch (err) {
-    renderError(err, stdoutWriter);
+    await renderActionError(err);
     process.exit(1);
   }
 }
 
 async function handleStatusAction(): Promise<void> {
   try {
+    await pruneRuntimeLogs();
+    const { runStatusCommand } = await import("./serve/status.js");
     const report = await runStatusCommand();
     // exit code: 0 running, 1 running-unhealthy, 2 stopped, 3 stale
     const exitCode =
@@ -106,7 +112,7 @@ async function handleStatusAction(): Promise<void> {
             : 3;
     process.exit(exitCode);
   } catch (err) {
-    renderError(err, stdoutWriter);
+    await renderActionError(err);
     process.exit(1);
   }
 }
@@ -137,6 +143,21 @@ program
     log?: boolean;
   }) => {
     try {
+      const [
+        { setDiagnosticLogger },
+        { configureLlmChunkDump, pruneAllLogs },
+        { configureKeypressDump },
+        { runStartupCheck },
+        { startRepl },
+      ] = await Promise.all([
+        import("@zhixing/core"),
+        import("./output/llm-chunk-dump.js"),
+        import("./security/keypress-dump.js"),
+        import("./startup.js"),
+        import("./repl.js"),
+      ]);
+
+      pruneAllLogs();
       // cli 交互模式（REPL）静默 core 诊断 log（[llm] 请求 / 工具调用等），
       // 避免污染对话 UI；serve 及其子命令各自独立 action 不受影响，
       // 保持默认 console.log 输出供运维与调试观察
@@ -159,7 +180,7 @@ program
 
       await startRepl();
     } catch (err) {
-      renderError(err, stdoutWriter);
+      await renderActionError(err);
       process.exit(1);
     }
   });
@@ -181,10 +202,12 @@ const serveCmd = program
   .description("启动常驻服务（HTTP + WebSocket + 调度器）")
   .action(async () => {
     try {
+      await pruneRuntimeLogs();
+      const { runServeCommand } = await import("./serve/command.js");
       await runServeCommand({});
       process.exit(0);
     } catch (err) {
-      renderError(err, stdoutWriter);
+      await renderActionError(err);
       process.exit(1);
     }
   });
@@ -197,10 +220,12 @@ serveCmd
   .option("--lines <n>", "显示行数（默认 50）", parseLogLineCount)
   .action(async (options: { tail?: boolean; lines?: number }) => {
     try {
+      await pruneRuntimeLogs();
+      const { runLogsCommand } = await import("./serve/logs.js");
       await runLogsCommand({ tail: options.tail, lines: options.lines });
       process.exit(0);
     } catch (err) {
-      renderError(err, stdoutWriter);
+      await renderActionError(err);
       process.exit(1);
     }
   });
@@ -213,20 +238,9 @@ if (dashIdx !== -1) {
   argv.splice(dashIdx, 1);
 }
 
-// ─── 启动期日志守门 ───
-//
-// 在任何子命令分发之前巡检一次 ~/.zhixing/logs/ 子目录,把每个目录裁剪到上限。
-// 与 llm-chunk-dump 内部写盘内联的 prune 形成双 trigger 互补:启动巡检覆盖
-// 进程间累积 + 用户从此不再写盘的冷目录;写盘内联覆盖单进程内累积。两者
-// 覆盖区间不重叠,缺任何一边都会留下"日志无限增长"的真实漏洞。
-//
-// 全模式覆盖:本调用位于 program.parseAsync 之前,无论后续分发到 REPL /
-// serve 等哪个 action,都已经过守门。pruneAllLogs 内部 swallow 一切 IO
-// 失败,不会影响后续主流程。
 rejectUnknownCommandPath(argv, program);
-pruneAllLogs();
 
-program.parseAsync(argv).catch((err: unknown) => {
-  renderError(err, stdoutWriter);
+program.parseAsync(argv).catch(async (err: unknown) => {
+  await renderActionError(err);
   process.exit(1);
 });

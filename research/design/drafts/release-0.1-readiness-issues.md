@@ -346,50 +346,63 @@
 - 为每个纳入 smoke 的命令明确预期输出、退出条件和是否允许长运行。
 - 后续 README 只能对齐这份清单，不能反向定义它。
 
-### 4. CLI 构建产物的 help / version 启动延迟
+### 4. CLI 元信息命令启动路径过重
 
-**状态**：已复测，挂起不再复现；仍需决定是否优化启动耗时
+**状态**：已处理。
 
-**现象**：历史上，构建成功后直接执行 CLI dist 入口的基础 help / version 命令没有及时返回。当前构建产物已不再挂起，但仍需要约 3 秒输出。
-
-**审核结论**：历史超时问题已过时，当前不应再按“挂起 / 大概率阻断”处理。真实问题降级为 CLI 元信息命令启动延迟：`--help` / `--version` 能正常退出，但距离“1 秒内返回”的理想目标仍有差距。是否作为 0.1 阻断，以问题 3 中固化的 0.1 CLI smoke 清单和发布体验要求为准。
+**现状**：CLI 元信息路径已改成轻量命令面层。当前构建产物的 `--help` / `--version` / `serve --help` 均能在 1 秒内输出并退出。
 
 **事实证据**：
 
-- 当前构建产物复测：
-  - `node packages\cli\dist\index.js --version`：退出码 0，约 3.9 秒返回。
-  - `node packages\cli\dist\index.js --help`：退出码 0，约 3.0 秒返回。
-  - `node packages\cli\dist\index.js serve --help`：退出码 0，约 3.0 秒返回。
-- 旧证据“约 13 秒未返回，被执行超时中断”属于修复前 / 旧构建产物观察，不再作为当前发布阻断证据。
+- 修复前：`node packages\cli\dist\index.js --version` / `--help` / `serve --help` 约 2.4 到 4.0 秒返回。
+- 修复后：
+  - `node packages\cli\dist\index.js --version`：退出码 0，约 0.33 到 0.46 秒返回。
+  - `node packages\cli\dist\index.js --help`：退出码 0，约 0.33 到 0.44 秒返回。
+  - `node packages\cli\dist\index.js serve --help`：退出码 0，约 0.36 到 0.41 秒返回。
+- 构建产物主入口 `packages/cli/dist/index.js` 已从约 698KB 降到约 8KB；REPL、server、status、logs 等运行模块进入 lazy chunks。
 
-**发布影响**：
+**根因（已确认）**：
 
-- 用户安装后第一反应通常是运行 `--help` 或 `--version`。这些命令不能挂起；当前已满足“不挂起”，但 3 秒级启动仍会影响 CLI 轻量感。
-- 测试、诊断脚本和人工排查都依赖 help / version 是低成本命令。
+- `packages/cli/src/index.ts` 在解析 `--help` / `--version` 前静态加载了 REPL、server、startup、status / stop / logs、日志治理等运行模块。
+- `--help` / `--version` 本质只需要命令定义、隐藏状态、参数 schema 和版本号；不需要加载 REPL、启动检查、server 宿主或日志巡检。
+- 在当前单文件 bundle 模式下，动态 import 仍能把模块体求值延后到首次 import；不需要先引入 code-splitting。真正要避免的是元信息路径上残留任何指向重运行模块的静态 import。
+- parse 前执行的 `pruneAllLogs()` 也不应落在纯元信息路径上；日志治理应在真正进入运行命令前触发。
 
 **背后需求**：
 
-- CLI 的元信息命令应只解析参数并输出，不应启动长生命周期服务、连接 provider、初始化交互 REPL 或等待外部资源。
-- `serve --help` 应显示子命令帮助后立即退出，不应进入 server 启动路径。
+- CLI 元信息命令是用户自发现和诊断入口，应轻量、确定、快速返回。
+- help / version 路径不能启动长生命周期服务、连接 provider、初始化 REPL、执行启动检查或等待外部资源。
+- `serve --help` 只展示隐藏宿主入口的帮助，不进入 server 启动路径。
 
-**目标效果**：
+**已实施方案**：
 
-- `zz --help` 和 `node packages\cli\dist\index.js --help` 在 1 秒内输出帮助并退出。
-- `zz --version` 和 dist 入口 `--version` 在 1 秒内输出版本并退出。
-- `zz serve --help` 只输出 serve 帮助，不启动后台服务。
+- 把 CLI 入口拆成轻量命令面层：只注册命令、help、version、隐藏状态和参数 schema。
+- 各 command action 内部再按需动态加载真实执行模块：REPL、serve、status、stop、logs。
+- 将日志治理从全局 parse 前执行改为运行命令前执行；help / version 路径不触发 `pruneAllLogs()`。
+- 将 `serve logs --lines` 的轻量校验常量 / parser 与日志读取实现解耦，避免为了 help 加载日志和 server 依赖。
+- 硬纪律：元信息路径的静态 import 图必须只包含轻量命令面依赖；不能为复用常量、错误渲染或诊断逻辑静态拉入 core、server、REPL、startup、logs 等运行模块。任何一个漏掉的静态 import 都会让 bundle 回到急切求值。
 
-**倾向排查方向**：
+**效果**：
 
-- 检查 `packages/cli/src/index.ts` 中 program 初始化是否在 help / version 路径加载了过重模块。
-- 检查 parse 前的 `pruneAllLogs()` 是否带来不必要 IO；如果是，应避免 help / version 路径执行非必要启动期守门。
-- 给 CLI 增加最小 smoke 测试，确保 help / version 不回归。
+- `zz --help` / `zz --version` / `zz serve --help` 可在 1 秒内输出并退出。
+- 元信息命令不触发 REPL、server、startup check、provider 初始化或日志巡检。
+- `zz`、`zz status`、`zz stop`、`zz serve`、`zz serve logs` 的原有行为保持不变。
 
-**验收标准**：
+**验收结果**：
 
-- `node packages\cli\dist\index.js --help` 退出码为 0，快速返回。
-- `node packages\cli\dist\index.js --version` 退出码为 0，快速返回。
-- `node packages\cli\dist\index.js serve --help` 退出码为 0，快速返回。
-- 如果项目发布入口是 `zz`，还需要验证 `zz --help`、`zz --version`、`zz serve --help`。
+- `pnpm --filter @zhixing/cli exec tsc -p tsconfig.json --noEmit`：通过。
+- `pnpm --filter @zhixing/cli exec vitest run src/__tests__/entry-import-graph.test.ts src/__tests__/command-gate.test.ts src/serve/__tests__/logs.test.ts`：通过，15 个测试通过。
+- `pnpm cli:build`：通过，构建产物已生成 lazy chunks。
+- `pnpm --filter @zhixing/cli test`：通过，140 个文件、2147 个测试通过。
+- 构建产物 smoke：`--version`、`--help`、`serve --help`、`status --help`、`stop --help`、`serve logs --help` 均退出码 0 且 1 秒内返回。
+- 静态 import 图守卫：`src/__tests__/entry-import-graph.test.ts` 已锁定 `index.ts` 的运行时静态 import 白名单，防止 REPL、server、startup、logs、core 等重模块重新进入元信息路径。
+- 构建产物 smoke：`serve logs --lines 0` 返回非法参数错误；`serve --port 19000` 返回 unknown option，外部命令面清理未回退。
+
+**边界记录**：
+
+- 当前守卫是源码级、深度 1 的静态 import 图约束，覆盖 `index.ts` 直接静态拉入重运行模块这一主要回归风险。
+- 它不等价于深度无关的运行时求值证明；若未来轻量白名单模块自身引入重依赖，仍需代码审查或运行时探针发现。
+- 当前白名单模块保持零依赖或极轻依赖，风险可接受；如未来需要更强保证，可补充 `--version` 运行时探针，断言重运行模块未被求值。
 
 ### 5. CLI 文档与当前入口不一致，不能作为发布判断依据
 
