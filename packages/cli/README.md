@@ -1,18 +1,48 @@
 # @zhixing/cli
 
-> 知行命令行入口 —— 交互对话、单次执行、常驻服务
+> 知行命令行入口 —— 交互对话、运行控制、诊断入口
 
 ## 概览
 
-`zhixing` 命令提供以下运行模式：
+`zz` 和 `zhixing` 指向同一 CLI 入口；下文用 `zz` 表示当前构建产物的真实命令面。
 
-| 模式 | 命令 | 用途 |
-|------|------|------|
-| **REPL** | `zhixing` | 交互式多轮对话（开发主力） |
-| **单次** | `zhixing -p "prompt"` | 流式执行一条 prompt 后退出（脚本/管道） |
-| **服务** | `zhixing serve` | 启动常驻服务（HTTP + WebSocket + 调度器） |
+外部 `zz` 命令是接入面，不是系统功能的默认承载层：
 
-REPL / 单次模式独立运行。服务模式用于启动本地宿主，供正式接入面和内部协议客户端连接。
+- 能放进交互模式的用户功能，原则上不新增外部 `zz <command>`。
+- 外部命令只保留必要、基础、离开交互模式后仍必须可用的控制入口。
+- 历史或隐藏兼容入口只能作为系统事实记录，不能自动上升为用户标准。
+- smoke 清单必须区分“当前实现存在”和“产品必须保留”；不能因为历史入口存在，就把它固化为长期用户承诺。
+
+**当前用户可见的外部 `zz` 命令**：
+
+- `zz`：进入交互 REPL。
+- `zz status`：查看知行运行状态。
+- `zz stop`：停止知行。
+
+**当前真实存在但隐藏 / 过渡中的入口**：
+
+- `zz serve`：内部宿主启动路径；默认 help 不展示，不纳入 0.1 用户 smoke 清单。
+- `zz serve logs`：当前仍可调用的后台宿主日志查看入口；默认顶层 help 不展示，后续应收口到更清晰的诊断入口。
+
+**当前真实存在的 `zz --...` / option 形态**：
+
+- 全局：`zz --help` / `zz -h`。
+- 全局：`zz --version` / `zz -V`。
+- 全局隐藏诊断入口：`zz --log`。
+- `zz status --help` / `zz status -h`。
+- `zz stop --help` / `zz stop -h`。
+- 隐藏 / 过渡入口：`zz serve --help` / `zz serve -h`。
+- 隐藏 / 过渡入口：`zz serve logs --help` / `zz serve logs -h`。
+- 隐藏 / 过渡入口：`zz serve logs --tail`。
+- 隐藏 / 过渡入口：`zz serve logs --lines <n>`，`n` 必须是 1 到 5000 的整数。
+
+**边界说明**：
+
+- `zz`、`zz serve`、`zz serve logs --tail` 是长运行语义，smoke 不能按“必须立即退出”的基础命令处理。
+- `zz serve status` / `zz serve stop` 已从外部命令面清理；运行控制只保留 `zz status` / `zz stop`。
+- `zz serve --port` / `zz serve --host` 已从外部命令面清理；端口和监听地址不作为用户 CLI 参数承诺。
+- 未发现已实现的外部 `zz logs`、`zz config`、`zz mcp`、`zz task` 等顶层 shell 命令。
+- REPL 内部 `/help`、`/new` 等斜杠命令属于交互接入面内部命令，不纳入外部 `zz` 命令清单。
 
 ---
 
@@ -67,10 +97,10 @@ CI / Vault 等场景由启动脚本（用户 / 运维侧）生成 `~/.zhixing/cr
 
 ---
 
-## 模式 1：REPL（交互对话）
+## REPL（交互对话）
 
 ```bash
-zhixing
+zz
 ```
 
 进入交互式多轮对话。所有内置工具（read/write/edit/glob/grep/bash/memory/schedule）开箱可用。
@@ -105,32 +135,23 @@ zhixing
 
 ---
 
-## 模式 2：单次执行
+## 外部运行控制
 
 ```bash
-zhixing -p "用一句话介绍你自己"
+zz status
+zz stop
 ```
 
-适合脚本、CI、管道场景。流式输出后退出，不进入 REPL。
-
-```bash
-# 与其他命令组合
-zhixing -p "总结 README.md" > summary.txt
-zhixing -p "今天天气如何？" --provider openai
-```
+`zz status` 用于查看本机知行运行状态；`zz stop` 用于停止知行后台宿主。
 
 ---
 
-## 模式 3：`zhixing serve`（常驻服务）
+## 隐藏 / 过渡入口：`zz serve`
 
-启动 HTTP + WebSocket 服务，把 Scheduler 从 CLI 进程迁到独立进程。常驻后可被正式接入面和内部协议客户端连接。
+`zz serve` 是内部宿主启动路径，默认帮助不展示，不纳入 0.1 用户 smoke 清单。它启动本地 HTTP + WebSocket 宿主，供正式接入面和内部协议客户端连接。
 
 ```bash
-zhixing serve                       # 默认 127.0.0.1:18900
-zhixing serve --port 19000
-zhixing serve --host 0.0.0.0        # ⚠️ 暴露到局域网，谨慎使用
-zhixing serve -m claude-3-5-sonnet  # 默认模型
-zhixing serve -w /path/to/workspace # 工作区
+zz serve
 ```
 
 **启动后会创建**：
@@ -160,12 +181,22 @@ WebSocket:    ws://127.0.0.1:18900/ws  ← JSON-RPC 2.0
 
 ## 故障排查
 
-### `EADDRINUSE` 启动失败
+### 查看后台宿主日志
 
-端口被占用。改端口或停掉占用进程：
+`zz serve logs` 是当前仍可调用的后台宿主日志查看入口，后续应收口到更清晰的诊断入口。
 
 ```bash
-zhixing serve --port 19000
+zz serve logs
+zz serve logs --tail
+zz serve logs --lines 100
+```
+
+### `EADDRINUSE` 启动失败
+
+端口被占用。优先停掉占用同一 `ZHIXING_HOME` 的旧进程：
+
+```bash
+zz stop
 ```
 
 ### `config.jsonc 含 N 处废弃字段` / `Provider 缺少 API Key`
@@ -175,14 +206,14 @@ zhixing serve --port 19000
 修复路径：
 
 - 按错误消息提示在 `~/.zhixing/config.jsonc` 中删除违反字段
-- 在交互终端跑 `zhixing` 让向导写入 `~/.zhixing/credentials.json`，或手动编辑该文件
+- 在交互终端跑 `zz` 让向导写入 `~/.zhixing/credentials.json`，或手动编辑该文件
 - channel 密字段（appSecret 等）迁移到 `credentials.json` 的 `channels.<id>` 段；非密字段（appId 等）保留在 config.jsonc
 - CI / Vault 用户：由启动脚本生成 `credentials.json`（凭证 plaintext），知行不接受 env 注入语法
 
 ### REPL 启动时报 `首次配置未完成`
 
 启动期 wizard 检测到必要字段缺失：
-- 在交互终端（cmd / PowerShell / bash）直接跑 `zhixing` —— 向导逐字段询问后自动写盘
+- 在交互终端（cmd / PowerShell / bash）直接跑 `zz` —— 向导逐字段询问后自动写盘
 - 非交互场景（CI / pipe）会 fail-fast 退出码 2，必须先在 TTY 终端完成首次配置
 
 检查现有配置：

@@ -115,6 +115,24 @@ describe("runLogsCommand — default mode", () => {
     expect(log).toHaveBeenCalledWith("服务监听中");
     expect(log).toHaveBeenCalledWith("收到消息");
   });
+
+  it("rejects invalid line counts before reading the log", async () => {
+    for (const lines of [0, -1, 1.5, 5001, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const readFile = vi.fn(async () => "line");
+
+      await expect(
+        runLogsCommand({
+          lines,
+          logPath: "/tmp/log",
+          deps: {
+            readFileFn: readFile,
+            console: { log: vi.fn(), error: vi.fn() },
+          },
+        }),
+      ).rejects.toThrow(/--lines/);
+      expect(readFile).not.toHaveBeenCalled();
+    }
+  });
 });
 
 describe("runLogsCommand — tail mode", () => {

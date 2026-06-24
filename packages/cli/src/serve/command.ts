@@ -141,7 +141,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     : undefined;
   await serverLogLifecycle?.start();
   // 端口按 home 派生（同 home 同端口 → listen 的 EADDRINUSE 原子仲裁单例 + 并发安全；
-  // 不同 home 不同端口 → 多实例并行不撞）。用户显式 --port 覆盖。
+  // 不同 home 不同端口 → 多实例并行不撞）。受控内部入口仍可显式传入端口。
   const port = opts.port ?? homeToPort(zhixingHome);
   const host = opts.host ?? DEFAULT_SERVER_CONFIG.host;
 

@@ -97,7 +97,7 @@
 - `pnpm --filter @zhixing/tools-builtin test -- src/__tests__/grep-core.test.ts src/__tests__/grep-executors.test.ts src/__tests__/grep.test.ts`：通过，52 个 grep 相关测试通过。
 - `pnpm --filter @zhixing/tools-builtin test`：通过，283 个 tools-builtin 测试通过。
 - `pnpm --filter @zhixing/tools-builtin build`：通过。
-- `where rg` 与 Node `spawn("rg", ["--version"])`：当前环境可找到 `rg`，ripgrep native 路径已被实际执行验证。
+- 当前验证环境中，`where rg` 与 Node `spawn("rg", ["--version"])` 均可找到 `rg`；ripgrep native 路径已在该环境被实际执行验证。
 
 **发布前环境检查**：CI / 发布环境仍需保证 Node 进程能 `spawn("rg", ["--version"])`。如果环境缺失 `rg`，系统会可用地回落 Node 执行器，但 ripgrep native 分支不会在该环境被验证；这属于发布环境 checklist，不是 grep 代码架构遗留。
 
@@ -281,34 +281,64 @@
 - 历史或隐藏兼容入口只能作为系统事实记录，不能自动上升为 0.1 用户标准。
 - 0.1 smoke 清单必须区分“当前实现存在”和“产品必须保留”；不能因为历史入口存在，就把它固化为长期用户承诺。
 
-**当前真实存在的外部 `zz` 命令**：
+**当前用户可见的外部 `zz` 命令**：
 
 - `zz`：进入交互 REPL。
 - `zz status`：查看知行运行状态。
 - `zz stop`：停止知行。
-- `zz serve`：启动常驻服务。
-- `zz serve logs`：查看后台宿主日志。
+
+**当前真实存在但隐藏 / 过渡中的入口**：
+
+- `zz serve`：内部宿主启动路径；默认 help 不展示，不纳入 0.1 用户 smoke 清单。
+- `zz serve logs`：当前仍可调用的后台宿主日志查看入口；默认顶层 help 不展示，后续应收口到更清晰的诊断入口。
 
 **当前真实存在的 `zz --...` / option 形态**：
 
 - 全局：`zz --help` / `zz -h`。
 - 全局：`zz --version` / `zz -V`。
-- 全局：`zz --log`。
+- 全局隐藏诊断入口：`zz --log`。
 - `zz status --help` / `zz status -h`。
 - `zz stop --help` / `zz stop -h`。
-- `zz serve --help` / `zz serve -h`。
-- `zz serve --port <port>`。
-- `zz serve --host <host>`。
-- `zz serve logs --help` / `zz serve logs -h`。
-- `zz serve logs --tail`。
-- `zz serve logs --lines <n>`。
+- 隐藏 / 过渡入口：`zz serve --help` / `zz serve -h`。
+- 隐藏 / 过渡入口：`zz serve logs --help` / `zz serve logs -h`。
+- 隐藏 / 过渡入口：`zz serve logs --tail`。
+- 隐藏 / 过渡入口：`zz serve logs --lines <n>`，`n` 必须是 1 到 5000 的整数。
 
 **边界说明**：
 
 - `zz`、`zz serve`、`zz serve logs --tail` 是长运行语义，后续 smoke 不能按“必须立即退出”的基础命令处理。
 - `zz serve status` / `zz serve stop` 已从外部命令面清理；运行控制只保留 `zz status` / `zz stop`。
+- `zz serve --port` / `zz serve --host` 已从外部命令面清理；端口和监听地址不作为 0.1 用户 CLI 参数承诺。
 - 未发现已实现的外部 `zz logs`、`zz config`、`zz mcp`、`zz task` 等顶层 shell 命令。
 - REPL 内部 `/help`、`/new` 等斜杠命令属于交互接入面内部命令，不纳入本问题的外部 `zz` 命令清单。
+
+**产品裁决**：
+
+- `zz serve` 的本质是系统内部宿主启动机制，不是 0.1 用户产品动作。
+- 0.1 用户外部入口应围绕“打开知行、查看状态、停止知行、诊断问题”设计，而不是围绕“管理服务进程”设计。
+- `serve`、daemon、host、port、listen 这些运行时概念不应成为普通用户心智。
+- 因此，`zz serve` 不纳入 0.1 用户可见命令和 smoke 清单；实现上可以作为内部启动路径保留，但应从默认 help 中隐藏。
+- `zz serve logs` 当前仍是真实日志查看入口；长期上它也不应绑定在 `serve` 用户心智下，后续应收口到更清晰的诊断入口。
+
+**`--` 形态裁决**：
+
+- 保留 `--help` / `-h`、`--version` / `-V`；它们是 CLI 自发现和发布诊断的底线。
+- 保留 `zz --log` 能力，但从默认 help 中隐藏；它是支持人员引导用户复现问题的诊断开关，不是普通用户产品动作。
+- 保留日志查看的 `--tail` 与 `--lines <n>`；它们是日志读取器的自然控制项。
+- 清理 `zz serve --port <port>`；端口按 `ZHIXING_HOME` 派生是单 owner 仲裁的一部分，手动覆盖可能让同一 home 出现多个 owner。
+- 清理 `zz serve --host <host>`；网络监听暴露是安全级产品能力，不能通过普通 CLI flag 裸露给用户。未来远程 / 移动端访问应走专门的配对、授权和网络安全模型。
+
+**已执行清理**：
+
+- `zz --log` 默认 help 展示已隐藏，能力保留。
+- `zz serve` 默认 help 展示已隐藏，不纳入 0.1 用户 smoke 清单；内部自动拉起仍可走 `serve` 路径。
+- 用户外部面的 `zz serve --port` / `zz serve --host` 已移除；内部 `ServeOptions.port` / `ServeOptions.host` 能力保留，供测试或未来受控入口使用。
+- `zz serve logs --lines <n>` 已增加输入治理：`n` 必须是 1 到 5000 的整数。
+
+**后续收口**：
+
+- 暂时保留 `zz serve logs` 的可调用能力和 `--tail` / `--lines`，但不把 `serve` 命名空间作为长期用户诊断入口；后续若新增更清晰入口，应迁移过去。
+- 基于清理后的真实 CLI 面固化 0.1 smoke 清单。
 
 **下一步**：
 
@@ -316,25 +346,25 @@
 - 为每个纳入 smoke 的命令明确预期输出、退出条件和是否允许长运行。
 - 后续 README 只能对齐这份清单，不能反向定义它。
 
-### 4. CLI 构建产物的 help / version 命令超时
+### 4. CLI 构建产物的 help / version 启动延迟
 
-**状态**：待处理
+**状态**：已复测，挂起不再复现；仍需决定是否优化启动耗时
 
-**现象**：构建成功后，直接执行 CLI dist 入口的基础 help / version 命令没有及时返回。
+**现象**：历史上，构建成功后直接执行 CLI dist 入口的基础 help / version 命令没有及时返回。当前构建产物已不再挂起，但仍需要约 3 秒输出。
 
-**审核结论**：问题真实，且大概率是 0.1 发布阻断。help / version 通常属于 CLI 自发现入口；最终是否作为阻断，以问题 3 中固化的 0.1 CLI smoke 清单为准。
+**审核结论**：历史超时问题已过时，当前不应再按“挂起 / 大概率阻断”处理。真实问题降级为 CLI 元信息命令启动延迟：`--help` / `--version` 能正常退出，但距离“1 秒内返回”的理想目标仍有差距。是否作为 0.1 阻断，以问题 3 中固化的 0.1 CLI smoke 清单和发布体验要求为准。
 
 **事实证据**：
 
-- `pnpm build` 成功。
-- 以下命令均在约 13 秒内未返回，被执行超时中断：
-  - `node packages\cli\dist\index.js --help`
-  - `node packages\cli\dist\index.js serve --help`
-  - `node packages\cli\dist\index.js --version`
+- 当前构建产物复测：
+  - `node packages\cli\dist\index.js --version`：退出码 0，约 3.9 秒返回。
+  - `node packages\cli\dist\index.js --help`：退出码 0，约 3.0 秒返回。
+  - `node packages\cli\dist\index.js serve --help`：退出码 0，约 3.0 秒返回。
+- 旧证据“约 13 秒未返回，被执行超时中断”属于修复前 / 旧构建产物观察，不再作为当前发布阻断证据。
 
 **发布影响**：
 
-- 用户安装后第一反应通常是运行 `--help` 或 `--version`。这些命令挂起会直接破坏 0.1 的可信度。
+- 用户安装后第一反应通常是运行 `--help` 或 `--version`。这些命令不能挂起；当前已满足“不挂起”，但 3 秒级启动仍会影响 CLI 轻量感。
 - 测试、诊断脚本和人工排查都依赖 help / version 是低成本命令。
 
 **背后需求**：
@@ -350,8 +380,8 @@
 
 **倾向排查方向**：
 
-- 检查 `packages/cli/src/index.ts` 中 program 初始化是否在 parse 前执行了长期副作用。
-- 检查默认 action、host ensure、stdin/raw mode、server lifecycle 是否被 help / version 路径提前触发。
+- 检查 `packages/cli/src/index.ts` 中 program 初始化是否在 help / version 路径加载了过重模块。
+- 检查 parse 前的 `pruneAllLogs()` 是否带来不必要 IO；如果是，应避免 help / version 路径执行非必要启动期守门。
 - 给 CLI 增加最小 smoke 测试，确保 help / version 不回归。
 
 **验收标准**：
@@ -375,13 +405,11 @@
 - README 示例包含 `zhixing -p ...`、`--provider openai`。
 - README 示例包含 `zhixing serve -m claude-3-5-sonnet`、`zhixing serve -w /path/to/workspace`。
 - 当前 `packages/cli/src/index.ts` 可见的顶层 option / command 包括：
-  - `--log`
   - `status`
   - `stop`
-  - `serve`
-  - `serve --port`
-  - `serve --host`
-  - `serve logs`
+  - 隐藏诊断 option：`--log`
+  - 隐藏内部入口：`serve`
+  - 隐藏 / 过渡入口：`serve logs`
 - 当前入口未看到 `-p`、`--prompt`、`--provider`、`serve -m`、`serve -w`。
 
 **发布影响**：
@@ -521,9 +549,25 @@
 - `pnpm --filter @zhixing/tools-builtin test -- src/__tests__/grep-core.test.ts src/__tests__/grep-executors.test.ts src/__tests__/grep.test.ts`：通过，52 个 grep 相关测试通过。
 - `pnpm --filter @zhixing/tools-builtin test`：通过，283 个 tools-builtin 测试通过。
 - `pnpm --filter @zhixing/tools-builtin build`：通过。
-- `where rg`：当前环境可找到 `rg.exe`。
-- Node `spawn("rg", ["--version"])`：退出码 0，当前环境可实际验证 ripgrep native 路径。
+- `where rg`：当前验证环境可找到 `rg.exe`。
+- Node `spawn("rg", ["--version"])`：退出码 0，当前验证环境可实际验证 ripgrep native 路径。
 - `git diff --check`：通过。
+
+### 2026-06-24
+
+#### CLI help / version 复测
+
+- `node packages\cli\dist\index.js --version`：退出码 0，约 3.9 秒返回。
+- `node packages\cli\dist\index.js --help`：退出码 0，约 3.0 秒返回。
+- `node packages\cli\dist\index.js serve --help`：退出码 0，约 3.0 秒返回。
+- 结论：历史“约 13 秒超时 / 挂起”不再复现；当前问题降级为 3 秒级启动延迟。
+
+#### ripgrep native 路径复测
+
+- 当前验证环境中，PowerShell `Get-Command rg` 可找到 Codex 环境提供的 `rg.exe`。
+- Node `spawn("rg", ["--version"])`：退出码 0。
+- `pnpm --filter @zhixing/tools-builtin exec vitest run src/__tests__/grep-executors.test.ts`：通过，11 个测试通过，包含 ripgrep 对齐契约测试。
+- 结论：当前验证环境可实际覆盖 ripgrep native 路径；CI / 发布环境仍需独立保证 Node 进程可 `spawn("rg")`。
 
 #### 问题 2 复验
 
