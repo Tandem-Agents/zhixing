@@ -271,7 +271,15 @@
 
 - `packages/cli/package.json` 的 `bin` 明确把 `zz` 和 `zhixing` 都指向 `./dist/index.js`；本文下列 `zz` 均指这个同一 CLI 入口。
 - 当前外部 CLI 命令注册集中在 `packages/cli/src/index.ts`；未发现其它 Commander 顶层命令注册点。
-- 已用构建产物的 help / version 路径交叉验证可见命令和隐藏兼容入口的帮助输出；未把 README 作为事实来源。
+- 已用源码入口和构建产物 help / version 路径交叉验证可见命令；未把 README 作为事实来源。
+
+**CLI 外部命令面原则**：
+
+- `zz` 外部命令是一个接入面，不是系统功能的默认承载层。
+- 能放进交互模式的用户功能，原则上不新增外部 `zz <command>`。
+- 外部命令只保留必要、基础、离开交互模式后仍必须可用的控制入口。
+- 历史或隐藏兼容入口只能作为系统事实记录，不能自动上升为 0.1 用户标准。
+- 0.1 smoke 清单必须区分“当前实现存在”和“产品必须保留”；不能因为历史入口存在，就把它固化为长期用户承诺。
 
 **当前真实存在的外部 `zz` 命令**：
 
@@ -280,8 +288,6 @@
 - `zz stop`：停止知行。
 - `zz serve`：启动常驻服务。
 - `zz serve logs`：查看后台宿主日志。
-- `zz serve status`：隐藏兼容入口，复用 `zz status` 实现。
-- `zz serve stop`：隐藏兼容入口，复用 `zz stop` 实现。
 
 **当前真实存在的 `zz --...` / option 形态**：
 
@@ -296,12 +302,11 @@
 - `zz serve logs --help` / `zz serve logs -h`。
 - `zz serve logs --tail`。
 - `zz serve logs --lines <n>`。
-- `zz serve status --help` / `zz serve status -h`。
-- `zz serve stop --help` / `zz serve stop -h`。
 
 **边界说明**：
 
 - `zz`、`zz serve`、`zz serve logs --tail` 是长运行语义，后续 smoke 不能按“必须立即退出”的基础命令处理。
+- `zz serve status` / `zz serve stop` 已从外部命令面清理；运行控制只保留 `zz status` / `zz stop`。
 - 未发现已实现的外部 `zz logs`、`zz config`、`zz mcp`、`zz task` 等顶层 shell 命令。
 - REPL 内部 `/help`、`/new` 等斜杠命令属于交互接入面内部命令，不纳入本问题的外部 `zz` 命令清单。
 
@@ -376,7 +381,7 @@
   - `serve`
   - `serve --port`
   - `serve --host`
-  - 隐藏的 `serve stop`、`serve status`、`serve logs`
+  - `serve logs`
 - 当前入口未看到 `-p`、`--prompt`、`--provider`、`serve -m`、`serve -w`。
 
 **发布影响**：

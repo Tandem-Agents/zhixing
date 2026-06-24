@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { describe, expect, it } from "vitest";
-import { findUnknownTopLevelCommand } from "../command-gate.js";
+import { findUnknownCommandPath } from "../command-gate.js";
 
 function createProgram(): Command {
   const program = new Command();
@@ -16,10 +16,10 @@ describe("CLI command gate", () => {
     const program = createProgram();
 
     expect(
-      findUnknownTopLevelCommand(["node", "zz", "rpc", "health"], program),
+      findUnknownCommandPath(["node", "zz", "rpc", "health"], program),
     ).toBe("rpc");
     expect(
-      findUnknownTopLevelCommand(
+      findUnknownCommandPath(
         ["node", "zhixing", "rpc", "session.send", "{}"],
         program,
       ),
@@ -38,8 +38,22 @@ describe("CLI command gate", () => {
       ["node", "zz", "stop"],
       ["node", "zz", "serve", "logs"],
     ]) {
-      expect(findUnknownTopLevelCommand(argv, program), argv.join(" ")).toBeNull();
+      expect(findUnknownCommandPath(argv, program), argv.join(" ")).toBeNull();
     }
+  });
+
+  it("rejects removed serve control aliases before serve can start", () => {
+    const program = createProgram();
+
+    expect(findUnknownCommandPath(["node", "zz", "serve", "status"], program)).toBe(
+      "serve status",
+    );
+    expect(findUnknownCommandPath(["node", "zz", "serve", "stop"], program)).toBe(
+      "serve stop",
+    );
+    expect(
+      findUnknownCommandPath(["node", "zz", "serve", "status", "--help"], program),
+    ).toBe("serve status");
   });
 
   it("uses the Commander registry as the single source of truth", () => {
@@ -47,8 +61,13 @@ describe("CLI command gate", () => {
     program.command("diagnose").alias("diag");
 
     expect(
-      findUnknownTopLevelCommand(["node", "zz", "diagnose"], program),
+      findUnknownCommandPath(["node", "zz", "diagnose"], program),
     ).toBeNull();
-    expect(findUnknownTopLevelCommand(["node", "zz", "diag"], program)).toBeNull();
+    expect(findUnknownCommandPath(["node", "zz", "diag"], program)).toBeNull();
+
+    const serve = program.commands.find((cmd) => cmd.name() === "serve")!;
+    serve.command("status");
+
+    expect(findUnknownCommandPath(["node", "zz", "serve", "status"], program)).toBeNull();
   });
 });

@@ -21,7 +21,7 @@ import { runStopCommand } from "./serve/stop.js";
 import { runStatusCommand } from "./serve/status.js";
 import { runLogsCommand } from "./serve/logs.js";
 import { ZHIXING_CLI_VERSION } from "./version.js";
-import { findUnknownTopLevelCommand } from "./command-gate.js";
+import { findUnknownCommandPath } from "./command-gate.js";
 
 /**
  * 顶层 stdout writer——cli 入口的错误路径 / 启动期渲染没有 ScreenController（chrome
@@ -71,8 +71,8 @@ function handleStartupResult(result: StartupCheckResult): void {
 
 const program = new Command();
 
-function rejectUnknownTopLevelCommand(argv: string[], command: Command): void {
-  const unknownCommand = findUnknownTopLevelCommand(argv, command);
+function rejectUnknownCommandPath(argv: string[], command: Command): void {
+  const unknownCommand = findUnknownCommandPath(argv, command);
   if (!unknownCommand) return;
 
   console.error(chalk.red(`error: unknown command '${unknownCommand}'`));
@@ -180,12 +180,6 @@ const serveCmd = program
     }
   });
 
-// zhixing serve stop —— 兼容入口；用户入口是 zhixing stop
-serveCmd
-  .command("stop", { hidden: true })
-  .description("兼容入口：停止知行")
-  .action(handleStopAction);
-
 // zhixing serve logs —— 查看日志（默认尾部 50 行；--tail 持续跟踪）
 serveCmd
   .command("logs")
@@ -201,12 +195,6 @@ serveCmd
       process.exit(1);
     }
   });
-
-// zhixing serve status —— 兼容入口；用户入口是 zhixing status
-serveCmd
-  .command("status", { hidden: true })
-  .description("兼容入口：查看知行运行状态")
-  .action(handleStatusAction);
 
 // pnpm run 会将 `--` 原样传递给脚本，导致 Commander 将后续选项误认为位置参数。
 // 移除 argv 中首个独立的 `--`，使 `-p` 等选项正常解析。
@@ -226,7 +214,7 @@ if (dashIdx !== -1) {
 // 全模式覆盖:本调用位于 program.parseAsync 之前,无论后续分发到 REPL /
 // serve 等哪个 action,都已经过守门。pruneAllLogs 内部 swallow 一切 IO
 // 失败,不会影响后续主流程。
-rejectUnknownTopLevelCommand(argv, program);
+rejectUnknownCommandPath(argv, program);
 pruneAllLogs();
 
 program.parseAsync(argv).catch((err: unknown) => {

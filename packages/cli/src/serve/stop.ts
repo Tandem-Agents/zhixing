@@ -1,8 +1,6 @@
 /**
  * `zhixing stop` — 停止知行
  *
- * `zhixing serve stop` 仅作为兼容入口复用同一实现。
- *
  * POSIX 流程：
  *   readLock → RPC server.shutdown → 轮询 isProcessAlive → 失败时 SIGTERM/SIGKILL → 强制清理
  *

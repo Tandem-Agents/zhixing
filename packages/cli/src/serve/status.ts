@@ -1,9 +1,7 @@
 /**
  * `zhixing status` — 查询知行运行四态
  *
- * `zhixing serve status` 仅作为兼容入口复用同一实现。
- *
- * 四态（spec §3.3.4）：
+ * 四态：
  *   running            —— PID 活 + /api/health 200 + heartbeat < 2×阈值
  *   running-unhealthy  —— PID 活但 health 挂 / heartbeat stale
  *   stopped            —— 无 PID 文件（干净停机）
