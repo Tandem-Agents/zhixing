@@ -1,7 +1,7 @@
-# 两层上下文架构 (Two-Layer Context Architecture)
+# 对话持久化与注意力窗口架构 (Transcript Persistence & Attention Window Architecture)
 
-> **定位**:梳理知行上下文管理的两层结构——物理持久化层(历史对话落盘)与
-> 注意力窗口层(管理给 LLM 的上下文)——各自的职责、触发、响应与边界,作为该子系统的单一参照。
+> **定位**:梳理知行对话持久化层(历史对话落盘)与
+> 注意力窗口层(管理给 LLM 的上下文视图)——各自的职责、触发、响应与边界,作为该子系统的单一参照。
 >
 > **范围约束**:本文聚焦两层的**架构梳理**(各层管什么、按什么触发、如何响应、边界如何划),
 > 不展开与之无关的实现细节;概念的通用生命周期定义见 [lifecycle-concepts.md](lifecycle-concepts.md)。
@@ -73,16 +73,10 @@
   3、活跃文档的定义：一个对话对应只有一个文档是当前正在写的，这个活跃状态 和 用不用没关系，而是 如果这个对话在发生， 持久化写入的话就往这个文档写，那它就是活跃的，而且每个对话至少有一个文档
   3、每一个文档都有一个创建时间，核查的时候（先别管什么时候核查，谁核查），发现文档创建时间距离 现在超过27天丢掉，说一个边界情况，只有一个文档（只有一个它必然是活跃文档）时，即使超过27天了，也不删；永远不删活跃文档；
   4、多个对话并行运行时可能存在的，意味着 多个对话活跃，就有着多个 活跃文档；活跃文档是动态的，只要超过 7m，下一组对话就进入新文档，活跃文档也就是新文档；
-  
-
 
   待落定的两件事（✅ 均已完成，成品见下方对应「确认 / 调研」节；编号保留，供确认节标题「对应上方第 1/2 点」引用）：
   1、周期性持久化维护方案 —— 调度器模块已实现完，基于它设计维护方案。✅ 已落定，见下方「周期性持久化维护方案（确认 · 对应上方第 1 点）」；含什么周期 / 怎么处理 / 谁来处理，以及「要不要加 ai」（已定：不加）。
   2、怎么读的第三点（到底拿多少、拿什么）—— 已先调研最新论文方向与前沿成果作前置，再行架构设计。✅ 已落定，见下方「怎么读」设计灵感池（调研）+「怎么读」架构设计（确认 · 对应上方第 2 点）。
-
-
-
-
 
 ### 周期性持久化维护方案（确认 · 对应上方第 1 点）
 
@@ -97,9 +91,6 @@
 - **要不要加 AI**：不加。清理是 100% 确定性规则（超期 + 非活跃 → 删）、无判断空间；删除不可逆，交概率模型是纯风险；且会把这次重构刚砍掉的「模型 ↔ 持久化」耦合焊回去。AI 的位置留给未来 read 侧的检索召回（「该捞回哪段历史」才是有事实有工具的语义判断），与清理 write 侧正交、互不污染。
 - **语义边界（与 Event Sourcing 唯一真相源的协调）**：保留窗（27 天）内的归档才是「唯一真相源 + 可检索召回」；GC 真删意味着**放弃**窗外数据的真相源地位与召回可能。未来检索召回的范围 = 保留窗内，不得假设能捞回全部历史。
 - **对持久层的反向约束**：① 分片索引须显式记录每片 `{createdAt, isActive}`，`createdAt` 取索引记录值、不依赖文件系统时间戳（Windows birthtime 不可靠、跨平台不一致），GC 判据才稳；同理，最近一次 clear 的时刻须由 owner 落在索引 / 对话元数据（快照退役判定 = `snapshot.createdAt < lastClearAt`，sweep 仍只读元数据、不开分片正文找标记）；② 须能枚举本 home 下所有对话（sweep 遍历的前提；目标态 ConversationRepository 的 list 能力即可）；③ **索引由写入 owner 维护，GC 对索引只读、对分片只删，绝不写索引**——owner 指当前负责该对话写入的 TranscriptStore / 后续持久层写入路径：init 建首片并写索引；run record append 时判断活跃片是否超过 7M；需要 rollover 时把旧活跃片置 inactive、新建活跃片并更新索引。GC 只读索引判出超期非活跃分片 → 直接删这些分片文件、全程不碰索引写；这样从根上消除跨进程并发写索引的冲突，而非给它加锁。根因：GC 在核心宿主进程、cli 写仍在 cli 进程（本模块不迁 cli 对话 / 调度器决策 1），进程内 ADR-TR-8 锁跨不了进程；若 GC 也写索引，整文件原子重写 last-write-wins 会让 cli 刚写的新分片从索引消失或留悬空引用（正确性事故）。索引写于是只剩 owner 写路径，进程内 per-conversation 锁即足够，无需任何跨进程锁。删后索引里短暂的死记录（指向已删分片）由两件轻事化解：读取容错（倒读遇索引指向但已不存在的分片 → 跳过，本就该有的鲁棒性）+ owner 加载 / 写入该对话时惰性剔除死记录（可选，死记录仅占几字节、无害）。残留的「GC 删文件 vs 另一进程读老分片」冲突被幂等吸收：Windows 删被占用文件失败即跳过、下轮再来，POSIX 靠 inode 语义本就安全。原则：消除共享可变写优于锁住它，且省掉一个随 unified-core 单写者到来终将退化的跨进程锁承重件。
-
-
-
 
 ### 「怎么读」设计灵感池（调研 · 对应上方第 2 点）
 
@@ -123,9 +114,6 @@
 - **JIT / 检索召回是未来**：Anthropic just-in-time（维持轻量标识符、运行时按需捞）是另一范式；知行「启动一次倒读、不回头」在无 query 下是合理简化，JIT 思想留给「为未来留口」的检索召回。
 
 > 关键来源：Chroma《Context Rot》、Anthropic《Effective Context Engineering for AI Agents》、《Lost in the Middle》(arxiv 2307.03172)、MemGPT/Letta、Mem0(arxiv 2504.19413)、A-Mem、Zep、Generative Agents(arxiv 2304.03442)、《Memory in the Age of AI Agents: A Survey》(2025-12)。
-
-
-
 
 ### 「怎么读」架构设计（确认 · 对应上方第 2 点）
 
@@ -158,12 +146,6 @@
 > 工程取值待校准：1/4、24K、摘要几百字上限都是工程初值，落地挂真实负载校准、不一次定死；摘要只取严格早于最近原文覆盖范围的段，防与原文重叠矛盾。
 >
 > 本质：启动像人早上回工位——不重读昨天每句话，瞄一眼笔记（摘要）+ 记得刚才在干啥（最近原话），就秒回状态。
-
-
-
-
-
-
 
 设计依据：
 1、单个对话分片放多大结论很集中:MB 级,不是 GB 级;推荐单分片上限 ~10MB(合理区间 4–16MB),个位数 MB 最稳
@@ -394,15 +376,15 @@ interface AttentionWindowState {
 
 ### 3.3 各包改造落点
 
-| 包 | 改造 |
-|---|---|
-| `core/transcript` | store 重写：index + 分片 + `appendRunRecord` / `appendClear` / `TranscriptReader` / `runRetentionSweep`,无 legacy 路径;删除 commitTurn 全家（compactBefore/appendCompact/compactAll）、`CompactMarker` 类型与 `rebuildCanonicalMessages` |
-| `core/context` | 新增 `context/window`（AttentionWindowState）+ `context/bootstrap`（buildStartupBootstrap）;`context/system-meta` 新增 `kind="startup-bootstrap"` 装填对构造器;segment 输出改 `windowCompact`、`SegmentTransitionContext` 扩展被摘段 `messages`（只读）;strategies 三处置;budget.ts 降级为展示计算 |
-| `core/loop` | turn-end ① 删除;RunResult `compactBefore`→`windowCompact`;buildTurn → buildRunRecord——组装 `[userMessage, ...newMessages]` 完整协议序列（现有输入即此,纯函数改返回形态;派生 helper userOf/finalAssistantOf/deriveToolCalls 同居此处） |
-| `orchestrator` | run() pre-flight 块删除;累积器目标字段更名为 `windowCompact`（compact 侧订阅随 M5 engine 退场删除,segment 侧长期保留）;MemoryFlush 迁挂 afterSummarize（3.2.4）;`forceCompact` 重实现为强制段切换（3.2.3） |
-| `cli` | repl run 尾部改 accept 协议(`repl.ts:1408-1414` 回灌点);/clear、切换、resume 三处改造;M7 历史渲染 |
-| `server` | `ConversationManager.recordTurn` 改 accept 协议(去 canonical 回喂);session 挂起的 `loadHistory` 全量加载改启动装填(`access-surfaces.ts:37-45`,与 cli 同一 owner 协议、无 server 特例;adapter 零改动——装填是窗口条目,不碰 user message);ephemeral 分支= pending run records + 同一窗口,promote 仅 flush 落盘 + runIndex 对账(3.2.1) |
-| `cli serve 装配` | `__transcript-gc` seed + 薄壳 handler 注册;两处 `createAgentRuntime`（`serve/command.ts:250`/`:340`）注入 segmentDeps（taskListReader 复用 taskListService、persistence 先 no-op,3.2.4） |
+| 包                  | 改造                                                                                                                                                                                                                                                                                                                                       |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `core/transcript` | store 重写：index + 分片 +`appendRunRecord` / `appendClear` / `TranscriptReader` / `runRetentionSweep`,无 legacy 路径;删除 commitTurn 全家（compactBefore/appendCompact/compactAll）、`CompactMarker` 类型与 `rebuildCanonicalMessages`                                                                                        |
+| `core/context`    | 新增`context/window`（AttentionWindowState）+ `context/bootstrap`（buildStartupBootstrap）;`context/system-meta` 新增 `kind="startup-bootstrap"` 装填对构造器;segment 输出改 `windowCompact`、`SegmentTransitionContext` 扩展被摘段 `messages`（只读）;strategies 三处置;budget.ts 降级为展示计算                            |
+| `core/loop`       | turn-end ① 删除;RunResult`compactBefore`→`windowCompact`;buildTurn → buildRunRecord——组装 `[userMessage, ...newMessages]` 完整协议序列（现有输入即此,纯函数改返回形态;派生 helper userOf/finalAssistantOf/deriveToolCalls 同居此处）                                                                                            |
+| `orchestrator`    | run() pre-flight 块删除;累积器目标字段更名为`windowCompact`（compact 侧订阅随 M5 engine 退场删除,segment 侧长期保留）;MemoryFlush 迁挂 afterSummarize（3.2.4）;`forceCompact` 重实现为强制段切换（3.2.3）                                                                                                                              |
+| `cli`             | repl run 尾部改 accept 协议(`repl.ts:1408-1414` 回灌点);/clear、切换、resume 三处改造;M7 历史渲染                                                                                                                                                                                                                                        |
+| `server`          | `ConversationManager.recordTurn` 改 accept 协议(去 canonical 回喂);session 挂起的 `loadHistory` 全量加载改启动装填(`access-surfaces.ts:37-45`,与 cli 同一 owner 协议、无 server 特例;adapter 零改动——装填是窗口条目,不碰 user message);ephemeral 分支= pending run records + 同一窗口,promote 仅 flush 落盘 + runIndex 对账(3.2.1) |
+| `cli serve 装配`  | `__transcript-gc` seed + 薄壳 handler 注册;两处 `createAgentRuntime`（`serve/command.ts:250`/`:340`）注入 segmentDeps（taskListReader 复用 taskListService、persistence 先 no-op,3.2.4）                                                                                                                                           |
 
 ### 3.4 实施序列（每步独立可验，按依赖锁序）
 
