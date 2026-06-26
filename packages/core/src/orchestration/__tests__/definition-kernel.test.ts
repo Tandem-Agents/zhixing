@@ -22,7 +22,7 @@ const caps: OrchestrationSystemCapsV1 = {
   maxInputChars: 5_000,
   maxOutputChars: 1_000,
   allowedNodeKinds: ["agent"],
-  allowedTools: ["Read", "Grep"],
+  allowedTools: ["read", "grep"],
 };
 
 describe("orchestration definition kernel", () => {
@@ -157,7 +157,7 @@ describe("orchestration definition kernel", () => {
           maxRunMs: 60_000,
           defaultNodeTimeoutMs: 30_000,
           defaultMaxTurns: 1,
-          allowedTools: ["Read", "Bash"],
+          allowedTools: ["read", "bash"],
         },
         nodes: [
           {
@@ -428,7 +428,7 @@ function createDefinition(): OrchestrationDefinitionV1 {
         strategy: "tail",
         maxTokens: 8_000,
       },
-      allowedTools: ["Read", "Grep"],
+      allowedTools: ["read", "grep"],
     },
     input: {
       required: true,
@@ -449,7 +449,7 @@ function createDefinition(): OrchestrationDefinitionV1 {
           format: "text",
         },
         policy: {
-          tools: ["Read", "Grep"],
+          tools: ["read", "grep"],
         },
       },
       {

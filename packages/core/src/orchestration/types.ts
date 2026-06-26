@@ -231,19 +231,39 @@ export interface OrchestrationNodeOutputV1 {
   readonly content: string;
 }
 
+export type OrchestrationErrorOriginV1 =
+  | "validation"
+  | "node"
+  | "abort"
+  | "system";
+
+export interface OrchestrationErrorV1 {
+  readonly type: string;
+  readonly message: string;
+  readonly origin: OrchestrationErrorOriginV1;
+  readonly nodeId?: string;
+}
+
 export interface OrchestrationNodeRunResultV1 {
   readonly nodeId: string;
   readonly status: OrchestrationNodeRunStatusV1;
   readonly output?: OrchestrationNodeOutputV1;
-  readonly error?: string;
+  readonly error?: OrchestrationErrorV1;
+  readonly partial?: string;
   readonly usage?: TokenUsage;
   readonly durationMs: number;
 }
 
 export interface OrchestrationRunResultV1 {
+  readonly runId: string;
   readonly definitionId: string;
   readonly status: "completed" | "failed" | "aborted";
+  readonly outputs: Readonly<Record<string, OrchestrationNodeOutputV1>>;
   readonly nodeResults: Readonly<Record<string, OrchestrationNodeRunResultV1>>;
-  readonly usage?: TokenUsage;
+  readonly errors: {
+    readonly run?: OrchestrationErrorV1;
+    readonly nodes: Readonly<Record<string, OrchestrationErrorV1>>;
+  };
+  readonly usage: TokenUsage;
   readonly durationMs: number;
 }

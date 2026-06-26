@@ -12,6 +12,8 @@ export type {
   OrchestrationContextSnapshotV1,
   OrchestrationContractFormatV1,
   OrchestrationDefinitionV1,
+  OrchestrationErrorOriginV1,
+  OrchestrationErrorV1,
   OrchestrationExecutableV1,
   OrchestrationFailureModeV1,
   OrchestrationInputContractV1,

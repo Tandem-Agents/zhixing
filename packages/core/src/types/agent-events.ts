@@ -393,6 +393,7 @@ export type AgentEventMap = {
   // ─── 编排 ───
 
   "orchestration:validation_failed": {
+    runId: string;
     definitionId?: string;
     issues: readonly OrchestrationEventIssue[];
   };
@@ -419,7 +420,7 @@ export type AgentEventMap = {
     durationMs: number;
     usage?: TokenUsage;
     error?: string;
-    errorType?: AgentErrorType;
+    errorType?: string;
   };
 
   "orchestration:run_end": {
@@ -429,7 +430,7 @@ export type AgentEventMap = {
     durationMs: number;
     usage?: TokenUsage;
     error?: string;
-    errorType?: AgentErrorType;
+    errorType?: string;
   };
 
   // ─── 容错 / 重试 ───
