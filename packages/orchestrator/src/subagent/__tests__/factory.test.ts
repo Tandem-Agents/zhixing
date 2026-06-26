@@ -20,6 +20,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   ConfirmationBroker,
   createEventBus,
+  extractFirstText,
   MockLLMProvider,
   PermissionStore,
   SecurityPipeline,
@@ -284,6 +285,75 @@ describe("runChildAgent · sub-agent profile.enabledTools 过滤", () => {
     const lastCall = provider.calls.at(-1);
     expect(lastCall?.tools?.map((t) => t.name)).toEqual(["read"]);
     expect(lastCall?.tools?.map((t) => t.name)).not.toContain("memory");
+  });
+});
+
+// ─── 背景消息注入 ───
+
+describe("runChildAgent · backgroundMessages", () => {
+  it("背景消息进入子 loop messages,且不拼入 system prompt", async () => {
+    const backgroundMessages = [
+      {
+        role: "user" as const,
+        content: [{ type: "text" as const, text: "主窗口里的用户背景" }],
+      },
+      {
+        role: "assistant" as const,
+        content: [{ type: "text" as const, text: "主窗口里的助手回复" }],
+      },
+    ];
+    const provider = new MockLLMProvider([{ text: "ok" }]);
+
+    const result = await runChildAgent(
+      makeBaseOpts(provider, { backgroundMessages }),
+    );
+
+    expect(result.status).toBe("completed");
+    expect(provider.calls).toHaveLength(1);
+    const call = provider.calls[0]!;
+    expect(call.messages.slice(0, 2)).toEqual(backgroundMessages);
+    expect(extractFirstText(call.messages[2]!)).toBe(
+      'Begin. Your task is in the system prompt under "Your Role".',
+    );
+    expect(call.systemPrompt).toContain("test task description");
+    expect(call.systemPrompt).not.toContain("主窗口里的用户背景");
+    expect(call.systemPrompt).not.toContain("主窗口里的助手回复");
+  });
+
+  it("不同背景消息不改变子 system prompt 字节内容", async () => {
+    const firstProvider = new MockLLMProvider([{ text: "ok" }]);
+    const secondProvider = new MockLLMProvider([{ text: "ok" }]);
+
+    await runChildAgent(
+      makeBaseOpts(firstProvider, {
+        backgroundMessages: [
+          {
+            role: "user",
+            content: [{ type: "text", text: "背景 A" }],
+          },
+        ],
+      }),
+    );
+    await runChildAgent(
+      makeBaseOpts(secondProvider, {
+        backgroundMessages: [
+          {
+            role: "user",
+            content: [{ type: "text", text: "背景 B" }],
+          },
+        ],
+      }),
+    );
+
+    expect(firstProvider.calls[0]!.systemPrompt).toBe(
+      secondProvider.calls[0]!.systemPrompt,
+    );
+    expect(extractFirstText(firstProvider.calls[0]!.messages[0]!)).toBe(
+      "背景 A",
+    );
+    expect(extractFirstText(secondProvider.calls[0]!.messages[0]!)).toBe(
+      "背景 B",
+    );
   });
 });
 

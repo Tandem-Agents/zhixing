@@ -69,11 +69,20 @@ export * from "./segment/index.js";
 
 export type {
   AcceptRunInput,
+  AttentionWindowSnapshotErrorCodeV1,
+  AttentionWindowSnapshotErrorV1,
+  AttentionWindowSnapshotStrategyV1,
+  AttentionWindowSnapshotV1,
   AttentionWindowState,
   CreateAttentionWindowOptions,
+  SnapshotAttentionWindowOptionsV1,
+  SnapshotAttentionWindowResultV1,
   WindowCompact,
   WindowFoldOutcome,
   WindowResetReason,
 } from "./window/index.js";
-export { createAttentionWindow } from "./window/index.js";
+export {
+  createAttentionWindow,
+  snapshotAttentionWindowV1,
+} from "./window/index.js";
 

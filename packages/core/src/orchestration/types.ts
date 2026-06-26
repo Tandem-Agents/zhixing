@@ -1,12 +1,16 @@
 import type { TokenUsage } from "../types/llm.js";
-import type { Message } from "../types/messages.js";
 import type { JsonSchema } from "../types/tools.js";
+import type {
+  AttentionWindowSnapshotStrategyV1,
+  AttentionWindowSnapshotV1,
+} from "../context/window/index.js";
 
 export type OrchestrationSourceModeV1 = "trusted";
 export type OrchestrationNodeKindV1 = "agent";
 export type OrchestrationContractFormatV1 = "text" | "json";
 export type OrchestrationFailureModeV1 = "fail_fast";
-export type OrchestrationContextSnapshotStrategyV1 = "full_or_fail" | "tail";
+export type OrchestrationContextSnapshotStrategyV1 =
+  AttentionWindowSnapshotStrategyV1;
 export type OrchestrationNodeOutputReferenceV1 =
   | "dependencies"
   | readonly string[];
@@ -212,13 +216,8 @@ export type OrchestrationTemplateParamsV1 = Readonly<
   Record<string, OrchestrationTemplateParamV1>
 >;
 
-export interface OrchestrationContextSnapshotV1 {
-  readonly source: "attention_window";
-  readonly strategy: OrchestrationContextSnapshotStrategyV1;
-  readonly messages: readonly Message[];
-  readonly estimatedTokens: number;
-  readonly capturedAt: string;
-}
+export interface OrchestrationContextSnapshotV1
+  extends AttentionWindowSnapshotV1 {}
 
 export type OrchestrationNodeRunStatusV1 =
   | "completed"

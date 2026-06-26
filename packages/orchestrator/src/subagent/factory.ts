@@ -141,6 +141,11 @@ export interface RunChildAgentOptions {
   /** 任务文本(进 system prompt 的 "Your Role" 段,不进 user message) */
   task: string;
   /**
+   * 从父注意力窗口冻结出的只读背景消息。它进入子 loop 的 messages 通道,
+   * 不拼进 system prompt,避免破坏同角色子 agent 的静态 prompt cache 前缀。
+   */
+  backgroundMessages?: readonly Message[];
+  /**
    * 顶层用户原始意图 —— 由父 agent 工具调用的 ctx.userIntent 透传而来，
    * 让子 agent 工具调用时 AI 安全管家仍按顶层用户意图研判（避免子 agent
    * 借助自身收到的 task 文本伪装意图绕过管家）。
@@ -273,8 +278,10 @@ async function runChildAgentInner(
     });
 
     // 极短初始 user message —— 任务全文已在 system prompt 的 "Your Role" 段;
-    // 主 LLM "Begin." 充当唤醒信号,告知子 loop 可以开始
+    // 主 LLM "Begin." 充当唤醒信号,告知子 loop 可以开始。
+    // 背景快照只进 messages 通道,不进 system prompt,保持 prompt cache 静态前缀稳定。
     initialMessages = [
+      ...(opts.backgroundMessages ?? []),
       {
         role: "user",
         content: [
