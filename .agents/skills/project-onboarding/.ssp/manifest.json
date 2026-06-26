@@ -1,0 +1,19 @@
+{
+  "protocol": "stepped-skill",
+  "version": "0.1",
+  "entry": "steps/01-project-overview.md",
+  "steps": [
+    {
+      "id": "01-project-overview",
+      "path": "steps/01-project-overview.md",
+      "next": "steps/02-core-documents.md",
+      "resources": []
+    },
+    {
+      "id": "02-core-documents",
+      "path": "steps/02-core-documents.md",
+      "next": "END",
+      "resources": []
+    }
+  ]
+}

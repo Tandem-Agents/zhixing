@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "stepped-skill-author": {
+      "source": "HJSunDev/stepped-skill-protocol",
+      "sourceType": "github",
+      "skillPath": "skills/stepped-skill-author/SKILL.md",
+      "computedHash": "acb211e4c4eca1fcbbdee605d58871661c938abd0dbd4aa456b6879e09a97ab7"
+    }
+  }
+}
