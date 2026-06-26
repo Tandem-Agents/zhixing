@@ -364,7 +364,7 @@ export interface NormalizedNodeContextV1 {
 export interface NormalizedNodePolicyV1 {
   timeoutMs: number;
   maxTurns: number;
-  maxTokens?: number;
+  maxTokens: number;
   tools: readonly string[];
 }
 ```
@@ -454,8 +454,11 @@ export interface OrchestrationSystemCaps {
   maxParallel: number;
   maxRunMs: number;
   maxNodeTimeoutMs: number;
+  maxNodeTurns: number;
+  maxNodeTokens: number;
   maxContextSnapshotTokens: number;
   maxInstructionChars: number;
+  maxInputChars: number;
   maxOutputChars: number;
   allowedNodeKinds: readonly OrchestrationNodeKindV1[];
   allowedTools: readonly string[];

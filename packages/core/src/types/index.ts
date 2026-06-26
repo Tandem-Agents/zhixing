@@ -107,6 +107,8 @@ export {
 export type {
   AgentEventMap,
   AgentRunEndReason,
+  OrchestrationEventIssue,
+  OrchestrationRunEventStatus,
   WorkModeSwitchIntent,
 } from "./agent-events.js";
 

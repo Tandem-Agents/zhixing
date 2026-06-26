@@ -103,6 +103,14 @@ export type WorkModeSwitchIntent =
   | { kind: "enter"; sceneId: string }
   | { kind: "exit" };
 
+export interface OrchestrationEventIssue {
+  readonly path: string;
+  readonly code: string;
+  readonly message: string;
+}
+
+export type OrchestrationRunEventStatus = "completed" | "failed" | "aborted";
+
 export type AgentEventMap = {
   // ─── Agent 生命周期 ───
 
@@ -381,6 +389,48 @@ export type AgentEventMap = {
 
   "interrupt:warn": InterruptWarnEvent;
   "interrupt:fired": InterruptFiredEvent;
+
+  // ─── 编排 ───
+
+  "orchestration:validation_failed": {
+    definitionId?: string;
+    issues: readonly OrchestrationEventIssue[];
+  };
+
+  "orchestration:run_start": {
+    runId: string;
+    definitionId: string;
+    nodeCount: number;
+    maxParallel: number;
+  };
+
+  "orchestration:node_start": {
+    runId: string;
+    definitionId: string;
+    nodeId: string;
+    nodeKind: "agent";
+  };
+
+  "orchestration:node_end": {
+    runId: string;
+    definitionId: string;
+    nodeId: string;
+    status: OrchestrationRunEventStatus | "skipped";
+    durationMs: number;
+    usage?: TokenUsage;
+    error?: string;
+    errorType?: AgentErrorType;
+  };
+
+  "orchestration:run_end": {
+    runId: string;
+    definitionId: string;
+    status: OrchestrationRunEventStatus;
+    durationMs: number;
+    usage?: TokenUsage;
+    error?: string;
+    errorType?: AgentErrorType;
+  };
 
   // ─── 容错 / 重试 ───
 

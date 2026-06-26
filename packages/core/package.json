@@ -44,6 +44,10 @@
       "types": "./dist/scheduler/index.d.ts",
       "import": "./dist/scheduler/index.js"
     },
+    "./orchestration": {
+      "types": "./dist/orchestration/index.d.ts",
+      "import": "./dist/orchestration/index.js"
+    },
     "./conversation": {
       "types": "./dist/conversation/index.d.ts",
       "import": "./dist/conversation/index.js"
