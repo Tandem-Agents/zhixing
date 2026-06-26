@@ -37,7 +37,14 @@ import {
   type RenderOptions,
 } from "./tui/index.js";
 import { layoutInputBuffer } from "./input-layout.js";
-import { wrapKeypressHandler } from "./paste-detector.js";
+import {
+  wrapKeypressHandler,
+  type KeypressMouseEvent,
+} from "./paste-detector.js";
+import {
+  createSystemClipboardProvider,
+  type ClipboardTextProvider,
+} from "./clipboard-provider.js";
 import {
   recordKeypressEvent,
   recordStdinSnapshot,
@@ -62,6 +69,10 @@ import {
   rawModeController,
   type RawModeLease,
 } from "./tui/_internal/raw-mode.js";
+import {
+  terminalMouseController,
+  type TerminalMouseLease,
+} from "./terminal-mouse.js";
 import {
   acquireStdinOwnership,
   type StdinOwnershipHandle,
@@ -165,6 +176,15 @@ export interface InputControllerOptions {
   ) => void;
 
   /**
+   * 右键粘贴开关。默认开启：active 输入态下启用 SGR mouse tracking，捕获右键
+   * press 后读取系统剪贴板，并走与 Ctrl+V/终端粘贴完全相同的 finalizePaste 管线。
+   */
+  readonly enableMousePaste?: boolean;
+
+  /** 剪贴板 provider（测试 / 宿主适配注入）；默认读取本机系统剪贴板。 */
+  readonly clipboardProvider?: ClipboardTextProvider;
+
+  /**
    * 正文提交模式。REPL 可用 deferred 先做 payload 准备，确认可发送后再
    * 由 InputController 统一清空输入区、写输入历史和 scrollback。
    */
@@ -233,7 +253,14 @@ export class InputController implements InputRegion {
   private batcher: ReturnType<typeof wrapKeypressHandler> | null = null;
   private stdinOwnership: StdinOwnershipHandle | null = null;
   private rawModeLease: RawModeLease | null = null;
+  private mousePasteLease: TerminalMouseLease | null = null;
   private abortListenerAttached = false;
+  private clipboardPasteInFlight = false;
+  private pendingReturnAfterClipboardPaste: {
+    str: string;
+    key: readline.Key | undefined;
+  } | null = null;
+  private readonly clipboardProvider: ClipboardTextProvider;
 
   private submitHandler: SubmitHandler | null = null;
   private cancelHandler: CancelHandler | null = null;
@@ -256,6 +283,8 @@ export class InputController implements InputRegion {
     this.stdout = options.stdout ?? process.stdout;
     this.promptPrefix = options.promptPrefix ?? tone.brand.bold("❯ ");
     this.maxVisibleItems = options.maxVisibleItems ?? 12;
+    this.clipboardProvider =
+      options.clipboardProvider ?? createSystemClipboardProvider();
 
     if (options.screen) {
       this.screen = options.screen;
@@ -464,6 +493,10 @@ export class InputController implements InputRegion {
    * 而不是触发 setRawMode 翻转(0→1)。
    */
   private detachKeypressOnly(): void {
+    if (this.mousePasteLease) {
+      this.mousePasteLease.release();
+      this.mousePasteLease = null;
+    }
     if (this.batcher) {
       this.stdin.off("keypress", this.batcher.handler);
       this.batcher.release();
@@ -479,7 +512,16 @@ export class InputController implements InputRegion {
     }
     this.buffer = null;
     this.lastSessionState = null;
+    this.pendingReturnAfterClipboardPaste = null;
     this.pasteReferenceIndex.clear();
+  }
+
+  private shouldEnableMousePaste(): boolean {
+    return (
+      this.options.enableMousePaste !== false &&
+      !!this.stdin.isTTY &&
+      !!this.stdout.isTTY
+    );
   }
 
   /**
@@ -508,10 +550,14 @@ export class InputController implements InputRegion {
     this.batcher = wrapKeypressHandler({
       onSingle: (str, key) => this.handleKeypress(str, key),
       onPaste: (content) => this.finalizePaste(content),
+      onMouse: (event) => this.handleMouseEvent(event),
     });
     this.stdin.on("keypress", this.batcher.handler);
     if (typeof this.stdin.resume === "function") {
       this.stdin.resume();
+    }
+    if (this.shouldEnableMousePaste()) {
+      this.mousePasteLease = terminalMouseController.acquire(this.stdout);
     }
     // buffer 刚重建(start / resume)—— 立即同步 esc hint 使其与新 buffer 一致,
     // 不依赖后续 syncBroker 是否被调用(resume 空 buffer 不走 syncBroker)。
@@ -694,6 +740,11 @@ export class InputController implements InputRegion {
     });
     if (!key) return;
     if (this.state !== "active" || !this.buffer) return;
+
+    if (key.name === "return" && this.clipboardPasteInFlight) {
+      this.pendingReturnAfterClipboardPaste = { str, key };
+      return;
+    }
 
     if (key.ctrl && key.name === "c") {
       this.echoCancelLine();
@@ -887,6 +938,47 @@ export class InputController implements InputRegion {
       if (str === "\r" || str === "\n") return;
       this.buffer.insertText(str);
       this.syncBroker();
+    }
+  }
+
+  private handleMouseEvent(event: KeypressMouseEvent): void {
+    recordKeypressEvent("typeahead.mouse", {
+      action: event.action,
+      button: event.button,
+      x: event.x,
+      y: event.y,
+      state: this.state,
+      hasBuffer: !!this.buffer,
+    });
+    if (
+      event.protocol !== "sgr" ||
+      event.action !== "press" ||
+      event.button !== "right"
+    ) {
+      return;
+    }
+    if (this.state !== "active" || !this.buffer) return;
+    void this.pasteFromClipboard();
+  }
+
+  private async pasteFromClipboard(): Promise<void> {
+    if (this.clipboardPasteInFlight) return;
+    this.clipboardPasteInFlight = true;
+    try {
+      const content = await this.clipboardProvider.readText();
+      if (!content || this.state !== "active" || !this.buffer) return;
+      this.finalizePaste(content);
+    } catch (err) {
+      recordKeypressEvent("typeahead.mousePaste.failed", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      this.clipboardPasteInFlight = false;
+      const pendingReturn = this.pendingReturnAfterClipboardPaste;
+      this.pendingReturnAfterClipboardPaste = null;
+      if (pendingReturn && this.state === "active" && this.buffer) {
+        this.handleKeypress(pendingReturn.str, pendingReturn.key);
+      }
     }
   }
 

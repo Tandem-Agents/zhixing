@@ -42,6 +42,10 @@ import {
   stripAnsi,
 } from "../tui/index.js";
 import { InputController, readInputLine, type InputLineResult } from "../typeahead-input.js";
+import {
+  _getTerminalMouseRefcount,
+  _resetTerminalMouseRefcountForTests,
+} from "../terminal-mouse.js";
 import type { ScreenController } from "../screen/index.js";
 import { BottomInfoModel } from "../bottom-info/index.js";
 import { PasteRegistry } from "../paste-registry.js";
@@ -74,6 +78,21 @@ function makeStreams() {
       captured = "";
     },
   };
+}
+
+function makeTtyStreams() {
+  const streams = makeStreams();
+  const setRawMode = vi.fn((enabled: boolean) => {
+    (streams.stdin as unknown as { isRaw: boolean }).isRaw = enabled;
+    return streams.stdin;
+  });
+  (streams.stdin as unknown as { isTTY: boolean }).isTTY = true;
+  (streams.stdin as unknown as { setRawMode: typeof setRawMode }).setRawMode =
+    setRawMode;
+  (streams.stdout as unknown as { isTTY: boolean }).isTTY = true;
+  (streams.stdout as unknown as { rows: number }).rows = 24;
+  (streams.stdout as unknown as { columns: number }).columns = 80;
+  return { ...streams, setRawMode };
 }
 
 async function sendSyntheticKey(
@@ -138,6 +157,28 @@ async function pasteText(
 ): Promise<void> {
   emitPasteText(stdin, text);
   await new Promise((resolve) => setTimeout(resolve, 25));
+}
+
+async function emitSgrRightClick(stdin: NodeJS.ReadableStream): Promise<void> {
+  (stdin as unknown as EventEmitter).emit("keypress", "", {
+    name: "undefined",
+    ctrl: false,
+    meta: false,
+    shift: false,
+    sequence: "\x1b[<",
+    code: "[<",
+  });
+  for (const ch of "2;10;5M") {
+    (stdin as unknown as EventEmitter).emit("keypress", ch, {
+      name: ch,
+      ctrl: false,
+      meta: false,
+      shift: false,
+      sequence: ch,
+    });
+  }
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
 }
 
 function drainMicrotasks(): Promise<void> {
@@ -238,10 +279,12 @@ function makeHarness(): Harness {
 
 beforeEach(() => {
   _resetRawModeRefcountForTests();
+  _resetTerminalMouseRefcountForTests();
 });
 
 afterEach(() => {
   _resetRawModeRefcountForTests();
+  _resetTerminalMouseRefcountForTests();
 });
 
 // ─── 端到端场景 ───
@@ -335,6 +378,107 @@ describe("readInputLine — 正常对话", () => {
     });
     await typeChars(stdin, "   ");
     await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+    expect(await p).toEqual({ kind: "text", text: "" });
+  });
+});
+
+describe("readInputLine — 右键粘贴", () => {
+  it("TTY 输入生命周期启用并释放 mouse tracking", async () => {
+    const { stdin, stdout, getCaptured } = makeTtyStreams();
+    const { broker, dispatcher } = makeHarness();
+    const p = readInputLine({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      stdin,
+      stdout,
+      columns: 80,
+    });
+
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(_getTerminalMouseRefcount()).toBe(1);
+    expect(getCaptured()).toContain("\x1b[?1006h\x1b[?1000h");
+
+    await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+
+    expect(await p).toEqual({ kind: "text", text: "" });
+    expect(_getTerminalMouseRefcount()).toBe(0);
+    expect(getCaptured()).toContain("\x1b[?1000l\x1b[?1006l");
+  });
+
+  it("SGR 右键 press 读取剪贴板并按普通正文提交", async () => {
+    const { stdin, stdout } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+    const readText = vi.fn(async () => "from clipboard");
+    const p = readInputLine({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      stdin,
+      stdout,
+      columns: 80,
+      clipboardProvider: { readText },
+    });
+
+    await emitSgrRightClick(stdin);
+    await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+
+    expect(await p).toEqual({ kind: "text", text: "from clipboard" });
+    expect(readText).toHaveBeenCalledTimes(1);
+  });
+
+  it("右键读取剪贴板期间立刻 Enter，会等待粘贴完成后提交", async () => {
+    const { stdin, stdout } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+    let resolveClipboard!: (value: string) => void;
+    const p = readInputLine({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      stdin,
+      stdout,
+      columns: 80,
+      clipboardProvider: {
+        readText: () =>
+          new Promise<string>((resolve) => {
+            resolveClipboard = resolve;
+          }),
+      },
+    });
+
+    let settled = false;
+    void p.then(() => {
+      settled = true;
+    });
+
+    await emitSgrRightClick(stdin);
+    await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(settled).toBe(false);
+
+    resolveClipboard("late clipboard");
+
+    expect(await p).toEqual({ kind: "text", text: "late clipboard" });
+  });
+
+  it("剪贴板为空时右键 mouse 序列不进入输入正文", async () => {
+    const { stdin, stdout } = makeStreams();
+    const { broker, dispatcher } = makeHarness();
+    const p = readInputLine({
+      broker,
+      dispatcher,
+      getRuntime: makeRuntime,
+      stdin,
+      stdout,
+      columns: 80,
+      clipboardProvider: { readText: async () => null },
+    });
+
+    await emitSgrRightClick(stdin);
+    await sendSyntheticKey(stdin, { name: "return", sequence: "\r" });
+
     expect(await p).toEqual({ kind: "text", text: "" });
   });
 });

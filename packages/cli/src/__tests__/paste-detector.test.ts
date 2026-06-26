@@ -1,3 +1,5 @@
+import * as readline from "node:readline";
+import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import { wrapKeypressHandler } from "../paste-detector.js";
 
@@ -213,6 +215,114 @@ describe("wrapKeypressHandler — paste 路径（同步多 keypress）", () => {
     await tick();
 
     expect(calls).toEqual(["paste:ab", "single:\r"]);
+  });
+});
+
+describe("wrapKeypressHandler — SGR mouse 序列", () => {
+  function emitSgrMouse(
+    handler: ReturnType<typeof wrapKeypressHandler>["handler"],
+    code: number,
+    x: number,
+    y: number,
+    final: "M" | "m" = "M",
+  ): void {
+    handler("", {
+      ...KEY("undefined"),
+      sequence: "\x1b[<",
+      code: "[<",
+    } as never);
+    for (const ch of `${code};${x};${y}${final}`) {
+      handler(ch, KEY(ch));
+    }
+  }
+
+  it("右键 press 产出 mouse event，且不污染 single/paste 输入", async () => {
+    const onSingle = vi.fn();
+    const onPaste = vi.fn();
+    const onMouse = vi.fn();
+    const { handler } = wrapKeypressHandler({ onSingle, onPaste, onMouse });
+
+    emitSgrMouse(handler, 2, 10, 5, "M");
+    await tick();
+
+    expect(onMouse).toHaveBeenCalledTimes(1);
+    expect(onMouse).toHaveBeenCalledWith({
+      protocol: "sgr",
+      action: "press",
+      button: "right",
+      x: 10,
+      y: 5,
+      shift: false,
+      meta: false,
+      ctrl: false,
+      rawCode: 2,
+      raw: "\x1b[<2;10;5M",
+    });
+    expect(onSingle).not.toHaveBeenCalled();
+    expect(onPaste).not.toHaveBeenCalled();
+  });
+
+  it("真实 readline.emitKeypressEvents 解码的 SGR 序列可被识别", async () => {
+    const input = new PassThrough();
+    (input as unknown as { isTTY: boolean }).isTTY = true;
+    (input as unknown as { setRawMode: (enabled: boolean) => PassThrough })
+      .setRawMode = () => input;
+
+    const onSingle = vi.fn();
+    const onPaste = vi.fn();
+    const onMouse = vi.fn();
+    const observed: { str: string; sequence?: string; code?: string }[] = [];
+    const { handler, release } = wrapKeypressHandler({
+      onSingle,
+      onPaste,
+      onMouse,
+    });
+
+    readline.emitKeypressEvents(input);
+    input.on("keypress", (str, key) => {
+      observed.push({
+        str: str ?? "",
+        sequence: key?.sequence,
+        code: (key as { code?: string } | undefined)?.code,
+      });
+      handler(str, key);
+    });
+
+    input.write("\x1b[<2;10;5M");
+    await tick();
+    release();
+    input.destroy();
+
+    expect(observed[0]).toMatchObject({
+      str: "",
+      sequence: "\x1b[<",
+      code: "[<",
+    });
+    expect(observed.slice(1).map((event) => event.str).join("")).toBe(
+      "2;10;5M",
+    );
+    expect(onMouse).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "press",
+        button: "right",
+        x: 10,
+        y: 5,
+      }),
+    );
+    expect(onSingle).not.toHaveBeenCalled();
+    expect(onPaste).not.toHaveBeenCalled();
+  });
+
+  it("未注册 onMouse 时也吞掉 mouse 序列，避免 fallback paste 插入坐标", async () => {
+    const onSingle = vi.fn();
+    const onPaste = vi.fn();
+    const { handler } = wrapKeypressHandler({ onSingle, onPaste });
+
+    emitSgrMouse(handler, 2, 10, 5, "M");
+    await tick();
+
+    expect(onSingle).not.toHaveBeenCalled();
+    expect(onPaste).not.toHaveBeenCalled();
   });
 });
 

@@ -882,30 +882,31 @@ export interface OrchestrationRunResult {
 完整链路最多可拆成 5 个独立提交：
 
 1. **Core 编排定义内核**
+
    - 新增 `@zhixing/core` 的 orchestration 类型、schema、validator、normalizer、planner。
    - 新增可信模板实例化入口与 `sourceMode: "trusted"`。
    - 将 `orchestration:*` 事件类型并入 `AgentEventMap`。
    - 覆盖合法定义、循环依赖、未知依赖、预算 / 并发 / 工具 / 输出契约 / snapshot policy 等校验测试。
-
 2. **上下文快照与子 agent 背景注入**
+
    - 在 core 注意力窗口侧实现 `snapshotAttentionWindowV1`，支持 `full_or_fail` 与 `tail`。
    - 为 `runChildAgent` 增加 `backgroundMessages`，让快照进入子 loop messages，而不是 system prompt。
    - 保证 prompt cache 相关 system prompt 仍 byte-equal。
    - 覆盖整窗超限失败、tail 标记、冻结快照、背景消息注入位置等测试。
-
 3. **Orchestrator 编排执行器**
+
    - 新增 `OrchestrationRunner` 与 `AgentNodeExecutor`。
    - runner 只接收 `OrchestrationExecutableV1` 和冻结 snapshot，不依赖 AttentionWindow 类型。
    - 实现 DAG 调度、`maxParallel`、fail-fast、abort 隔离、输出契约校验和 `AgentEventMap` 事件发射。
    - 覆盖并发、串行、依赖等待、节点失败、parent abort、JSON schema 输出失败、事件 lineage 等测试。
-
 4. **多视角首个可信模板消费者**
+
    - 新增多视角发散收敛的受控模板和参数实例化路径。
    - 业务层在调用 runner 前捕获一次主窗口 snapshot，并让并行发散节点共享同一份 snapshot。
    - 上层可以用普通依赖节点表达汇总，但基础设施不引入“收敛”业务语义。
    - 覆盖模板参数边界、共享 snapshot、多节点并发和结果回收测试。
-
 5. **消费场景接入（后置提交，不属于当前基础设施交付）**
+
    - 只有当多视角等上层消费场景正式进入实现时，才把它接到用户入口；当前基础设施阶段不凭空新增用户使用面。
    - 届时普通用户仍不直接接触编排协议，只通过上层产品能力触发编排。
    - 如用户入口需要展示编排进度，再扩展 CLI 状态条和 RPC `UI_EVENT_PROJECTION`，消费既有 `AgentEventMap` 里的 `orchestration:*` 事件。

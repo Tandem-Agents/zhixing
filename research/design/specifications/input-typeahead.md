@@ -1887,6 +1887,28 @@ class ArgumentProvider implements SuggestionProvider {
 8. **`@file` 搜索根目录**（2026-04-16 追加）：基于「当前生效的工作区」（`resolvedWorkspace.path`），**不是** `process.cwd()`。工作区经过统一解析（运行时内部显式覆盖 > 全局配置 > cwd fallback），由 `resolveWorkspace()` 统一决定。FileProvider 构造参数为 `{ root: string }`，不自己调 `process.cwd()`。这保证 `@file` 的搜索范围和安全系统的信任边界一致。
 9. **Mid-input trigger 降级为 P2**（2026-04-16 追加）：`requireBoundary=true` 已覆盖"空格后触发"的主流 mid-input 场景（如 `请帮我运行 /backup`）。`requireBoundary=false` 的增量收益极小（仅覆盖中文紧贴 trigger 字符的罕见情况），但引入中文语境误触发风险（`给 @张三 发消息`、`比较 a/b`）。架构已预留 `requireBoundary` 参数，技术上随时可启用。**不做比做错好。**
 
+### 12.3 已落地追加：右键粘贴（2026-06-26）
+
+**产品行为**：CLI typeahead 输入区 active 且终端支持 TTY 时，用户右击输入区会直接读取系统剪贴板并粘贴到当前 draft。该能力默认开启；`InputControllerOptions.enableMousePaste` 仅作为内部接入 / 测试逃生口，不作为常规用户配置暴露。产品判断：右键粘贴是输入接入面的高频小便利，应像 Claude Code 一样开箱可用。
+
+**架构落点**：
+
+- `terminal-mouse.ts` 负责终端鼠标上报租约：引用计数启停，只开 `DECSET 1006`（SGR 编码）+ `DECSET 1000`（press/release），不启用 `1002/1003` motion / hover，也不启用 `1004` focus tracking。租约跟随 `InputController` keypress 订阅层：输入区 active 时 acquire，`suspend()` 进入确认面板 / config editor / inline selection 等模态时 release，进程 `exit` 钩子兜底关闭。
+- `paste-detector.ts` 在 keypress 层解析 SGR mouse 序列。Node `readline.emitKeypressEvents` 会把 `\x1b[<2;10;5M` 拆为 `ESC[<` + 后续字符；detector 将其重组为 `{ button: "right", action: "press" }`。未注册 `onMouse` 时也吞掉 mouse 序列，避免 `2;10;5M` 之类坐标漏进输入区。
+- `clipboard-provider.ts` 封装系统剪贴板读取并可注入测试。Windows 路径使用 PowerShell `Get-Clipboard -Raw` + `Console.Out.Write` 精确输出，避免对象管线额外追加换行；macOS 用 `pbpaste`，Linux 按 `wl-paste` / `xclip` / `xsel` fallback。
+- `typeahead-input.ts` 把右键视为一次 paste intent：右键 press → `pasteFromClipboard()` → `finalizePaste(content)`。因此右键粘贴与 Ctrl+V / bracketed paste 共用同一条粘贴管线，长粘贴折叠、材料 chip、`PasteRegistry`、提交前后 canonical 展开都不分叉。若右键读取剪贴板期间用户立刻 Enter，Return 会排队到粘贴完成后重放，保持用户动作顺序。
+
+**已知终端限制（接受的取舍，不是实现 bug）**：
+
+- `DECSET 1000` 是终端级 mouse reporting 开关；开启期间终端会把鼠标 press/release 发给应用。部分终端下，原生鼠标拖选文本 / 原生右键菜单需要按 `Shift` 或使用终端自己的绕过方式。这是 xterm mouse tracking 的全局机制，不能只让应用收右键而完全不影响左键。
+- 本实现把影响面压到最小：只在输入区 active 时开启；进入其它模态立即释放；不收 motion/hover；退出兜底关闭；并吞掉无 handler 的 mouse 序列。外部 Claude Code 相关问题（如要求 `--no-mouse` 的 #23581、外部编辑器泄漏 #50032、Ctrl-Z 后残留 #7807、focus 序列漏入输入 #10375）说明该限制真实，但也说明生命周期和序列过滤必须由接入面负责。本实现按这些失败面设计了克制租约与过滤边界。
+- 结论：默认开启成立。该限制对依赖终端原生鼠标选区的用户可能有感知，但对右键粘贴目标用户不是阻断；若未来真实用户反馈显示该取舍不适配特定终端 / 工作流，再通过现有 `enableMousePaste` 接入配置开关，不推翻架构。
+
+**验证边界**：
+
+- 自动化覆盖：`paste-detector.test.ts` 覆盖手工拆分和真实 `readline.emitKeypressEvents` 解码；`typeahead-input.test.ts` 覆盖 TTY 租约启停、右键读取剪贴板、空剪贴板不污染输入、右键后立刻 Enter 的顺序；`terminal-mouse.test.ts` 覆盖引用计数与 `exit` 兜底；`clipboard-provider.test.ts` 覆盖平台命令和 fallback。
+- 自动化不能替代真实终端鼠标点击。涉及新终端 / shell 组合时，仍需手动冒烟：Windows Terminal、conhost 系 shell（如 standalone PowerShell / Git Bash）和 macOS iTerm/Terminal 中实际右击一次，确认右键真粘贴、退出后鼠标上报恢复、没有 escape 序列漏成可见文本。
+
 ---
 
 ## 十三、附录：术语表

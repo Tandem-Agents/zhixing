@@ -27,6 +27,8 @@ export interface KeypressBatcherOptions {
   readonly onSingle: (str: string, key: readline.Key | undefined) => void;
   /** 多 keypress batch 时调用（paste 内容字符串） */
   readonly onPaste: (content: string) => void;
+  /** SGR mouse tracking 事件。未提供时仍会吞掉 mouse 序列，避免污染输入区。 */
+  readonly onMouse?: (event: KeypressMouseEvent) => void;
 }
 
 export interface KeypressBatcherHandle {
@@ -45,6 +47,32 @@ interface PendingEvent {
   key: readline.Key | undefined;
 }
 
+export type MouseButton =
+  | "left"
+  | "middle"
+  | "right"
+  | "release"
+  | "wheel-up"
+  | "wheel-down"
+  | "wheel-left"
+  | "wheel-right"
+  | "unknown";
+
+export interface KeypressMouseEvent {
+  readonly protocol: "sgr";
+  readonly action: "press" | "release";
+  readonly button: MouseButton;
+  /** 1-based terminal column. */
+  readonly x: number;
+  /** 1-based terminal row. */
+  readonly y: number;
+  readonly shift: boolean;
+  readonly meta: boolean;
+  readonly ctrl: boolean;
+  readonly rawCode: number;
+  readonly raw: string;
+}
+
 /**
  * 包装一个 keypress handler，自动按时间窗批量识别 paste 事件。
  *
@@ -60,6 +88,7 @@ export function wrapKeypressHandler(
   let bracketedPasteContent: string[] | null = null;
   let fallbackPasteContent = "";
   let fallbackPasteTimer: ReturnType<typeof setTimeout> | undefined;
+  let sgrMouseBuffer: string | null = null;
 
   function flush(): void {
     scheduled = false;
@@ -91,6 +120,40 @@ export function wrapKeypressHandler(
 
   function isPasteEnd(key: readline.Key | undefined): boolean {
     return key?.name === "paste-end";
+  }
+
+  function isSgrMouseStart(key: readline.Key | undefined): boolean {
+    const code = (key as { code?: string } | undefined)?.code;
+    return key?.sequence === "\x1b[<" || code === "[<";
+  }
+
+  function eventRawText(e: PendingEvent): string {
+    return e.str ?? e.key?.sequence ?? "";
+  }
+
+  function appendSgrMouse(event: PendingEvent): boolean {
+    if (sgrMouseBuffer === null) return false;
+    const raw = eventRawText(event);
+    if (raw.length === 0) return true;
+
+    for (const ch of raw) {
+      if (!/[0-9;Mm]/.test(ch)) {
+        sgrMouseBuffer = null;
+        return true;
+      }
+      sgrMouseBuffer += ch;
+      if (ch === "M" || ch === "m") {
+        const parsed = parseSgrMouse(sgrMouseBuffer);
+        sgrMouseBuffer = null;
+        if (parsed) options.onMouse?.(parsed);
+        return true;
+      }
+      if (sgrMouseBuffer.length > 64) {
+        sgrMouseBuffer = null;
+        return true;
+      }
+    }
+    return true;
   }
 
   function appendFallbackPaste(content: string): void {
@@ -161,6 +224,15 @@ export function wrapKeypressHandler(
       return;
     }
 
+    if (appendSgrMouse(event)) return;
+
+    if (isSgrMouseStart(key)) {
+      flush();
+      flushFallbackPaste();
+      sgrMouseBuffer = "";
+      return;
+    }
+
     batch.push(event);
     if (!scheduled) {
       scheduled = true;
@@ -176,6 +248,7 @@ export function wrapKeypressHandler(
       clearFallbackPasteTimer();
       fallbackPasteContent = "";
       bracketedPasteContent = null;
+      sgrMouseBuffer = null;
       // 残余 flush：单 keypress 转 onSingle 避免末尾按键丢失；多 keypress paste
       // 残骸在 release 时丢弃（cleanup 阶段已 detach，paste 内容无意义）
       const events = batch;
@@ -189,5 +262,48 @@ export function wrapKeypressHandler(
         }
       }
     },
+  };
+}
+
+function parseSgrMouse(raw: string): KeypressMouseEvent | null {
+  const m = raw.match(/^(\d+);(\d+);(\d+)([Mm])$/);
+  if (!m) return null;
+  const rawCode = Number(m[1]);
+  const x = Number(m[2]);
+  const y = Number(m[3]);
+  if (!Number.isFinite(rawCode) || !Number.isFinite(x) || !Number.isFinite(y)) {
+    return null;
+  }
+
+  const wheel = (rawCode & 64) !== 0;
+  const low = rawCode & 3;
+  let button: MouseButton = "unknown";
+  if (wheel) {
+    button =
+      low === 0
+        ? "wheel-up"
+        : low === 1
+          ? "wheel-down"
+          : low === 2
+            ? "wheel-left"
+            : "wheel-right";
+  } else if (m[4] === "m") {
+    button = low === 3 ? "release" : low === 0 ? "left" : low === 1 ? "middle" : "right";
+  } else {
+    button =
+      low === 0 ? "left" : low === 1 ? "middle" : low === 2 ? "right" : "release";
+  }
+
+  return {
+    protocol: "sgr",
+    action: m[4] === "m" ? "release" : "press",
+    button,
+    x,
+    y,
+    shift: (rawCode & 4) !== 0,
+    meta: (rawCode & 8) !== 0,
+    ctrl: (rawCode & 16) !== 0,
+    rawCode,
+    raw: `\x1b[<${raw}`,
   };
 }
