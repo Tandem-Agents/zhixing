@@ -438,6 +438,16 @@ export interface ToolDefinition {
   systemPromptHints?: readonly string[];
 
   /**
+   * 本工具是否可能在成功执行后自行向用户发送可见确认消息，并在 ToolResult 中
+   * 设置 `committedToUser: true`。
+   *
+   * 仅用于 system prompt 聚合方决定是否需要渲染 COMMITMENT_SIGNAL 解释。
+   * 默认 false。不要因为工具"有副作用"就设置；只有实际使用
+   * `ToolExecutionContext.commitToUser` 的工具才应声明。
+   */
+  mayCommitToUser?: boolean;
+
+  /**
    * 权限规则匹配时使用哪个输入字段作为 "argument"（forward-looking 字段）。
    *
    * `PermissionStore` 在匹配 `pattern.argument` glob 时需要从工具参数中提取一个字符串。

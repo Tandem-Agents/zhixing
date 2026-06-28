@@ -8,8 +8,17 @@ import {
   WORKING_MODE_TEXT,
 } from "../system-prompt.js";
 import { subAgentProfile } from "../../profile/default-profiles.js";
-import type { ToolDefinition } from "@zhixing/core";
-import { createWebFetchTool } from "@zhixing/tools-builtin";
+import { MemoryStore, type ToolDefinition } from "@zhixing/core";
+import {
+  createBashTool,
+  createEditTool,
+  createGlobTool,
+  createGrepTool,
+  createMemoryTool,
+  createReadTool,
+  createWebFetchTool,
+  createWriteTool,
+} from "@zhixing/tools-builtin";
 
 // ─── 工具工厂 ───
 
@@ -24,12 +33,12 @@ function stubTool(name: string, overrides?: Partial<ToolDefinition>): ToolDefini
 }
 
 const defaultTools = [
-  stubTool("read"),
-  stubTool("write"),
-  stubTool("edit"),
-  stubTool("glob"),
-  stubTool("grep"),
-  stubTool("bash"),
+  createReadTool(),
+  createWriteTool(),
+  createEditTool(),
+  createGlobTool(),
+  createGrepTool(),
+  createBashTool(),
 ];
 
 // ─── 测试 ───
@@ -60,10 +69,18 @@ describe("buildSystemPrompt", () => {
     expect(prompt).toContain("`bash`");
   });
 
-  it("含 Commitment 信号抑制叙述原则", async () => {
+  it("默认不包含 Commitment 信号说明(当前无生产内置工具声明会直接确认)", async () => {
     const { COMMITMENT_SIGNAL } = await import("@zhixing/core");
     const prompt = buildSystemPrompt(ctx);
-    // 直接引用 core 常量——保证系统提示里的信号字面与 tool-executor 附加到 content 的逐字一致
+    expect(prompt).not.toContain(COMMITMENT_SIGNAL);
+  });
+
+  it("工具声明 mayCommitToUser 时才包含 Commitment 信号说明", async () => {
+    const { COMMITMENT_SIGNAL } = await import("@zhixing/core");
+    const prompt = buildSystemPrompt({
+      ...ctx,
+      tools: [...defaultTools, stubTool("committer", { mayCommitToUser: true })],
+    });
     expect(prompt).toContain(COMMITMENT_SIGNAL);
     expect(prompt).toMatch(/Do NOT restate|not restate/i);
   });
@@ -206,7 +223,7 @@ describe("buildSystemPrompt", () => {
 
   describe("工具段动态适应", () => {
     it("仅有 read 工具时，工具段只包含 read", () => {
-      const prompt = buildSystemPrompt({ ...ctx, tools: [stubTool("read")] });
+      const prompt = buildSystemPrompt({ ...ctx, tools: [createReadTool()] });
       expect(prompt).toContain("`read`");
       expect(prompt).not.toContain("`grep`");
       expect(prompt).not.toContain("`bash`");
@@ -225,8 +242,7 @@ describe("buildSystemPrompt", () => {
     });
 
     it("常规装配下输出 hint-list 工具使用段", () => {
-      const prompt = buildSystemPrompt({ ...ctx, tools: [stubTool("read")] });
-      // 老格式 "Use `X` to ..." 仍然输出
+      const prompt = buildSystemPrompt({ ...ctx, tools: [createReadTool()] });
       expect(prompt).toContain("Use `read` to view file contents");
     });
 
@@ -236,22 +252,22 @@ describe("buildSystemPrompt", () => {
       expect(prompt).toContain("parallel");
     });
 
-    it("含 web_fetch(真实工具)时输出 distill / preapproved hosts / not-search 引导", () => {
+    it("含 web_fetch(真实工具)时输出 distill / not-search 引导,不输出预批准域名清单", () => {
       const prompt = buildSystemPrompt({
         ...ctx,
         tools: [createWebFetchTool()],
       });
       expect(prompt).toContain("`web_fetch`");
       expect(prompt).toMatch(/does not search the web/i);
-      expect(prompt).toMatch(/with `prompt`/i);
-      expect(prompt).toMatch(/without `prompt`/i);
-      expect(prompt).toContain("github.com");
-      expect(prompt).toContain("docs.anthropic.com");
+      expect(prompt).toContain("pass `prompt`");
+      expect(prompt).toContain("omit `prompt`");
+      expect(prompt).not.toContain("Pre-approved hosts");
+      expect(prompt).not.toContain("github.com");
       expect(prompt).toMatch(/Do not invent URLs/i);
     });
 
     it("不含 web_fetch 时无 web_fetch 引导段", () => {
-      const prompt = buildSystemPrompt({ ...ctx, tools: [stubTool("read")] });
+      const prompt = buildSystemPrompt({ ...ctx, tools: [createReadTool()] });
       expect(prompt).not.toContain("`web_fetch`");
       expect(prompt).not.toContain("Pre-approved hosts");
     });
@@ -301,32 +317,30 @@ describe("buildSystemPrompt", () => {
 
       ## Principles
       - Respond in the same language the user uses
-      - When a task requires action, use tools immediately without asking for permission
+      - When the user asks you to act, use the appropriate tools proactively; tool permissions and safety checks still apply
       - Read before edit: always read a file before modifying it to ensure exact text match
       - Edit over write: prefer targeted replacement over full overwrite when modifying existing files
       - Search before act: use glob/grep to discover relevant files before reading or editing
       - If a command fails, analyze the error and try an alternative approach
-      - Show your reasoning when making non-obvious decisions
+      - For non-obvious decisions, briefly state the evidence, assumptions, and tradeoffs
 
       [系统元信息标签]
-      对话历史中可能出现 <system-meta kind="..."> 标签，这是上下文管理机制插入的元信息，不是用户原话：
-      - kind="compact-summary": 之前对话的压缩摘要，已替代早期消息
-      - kind="ack": 紧跟摘要的阅读回执（由你先前发出）
-      - kind="dropped-turns" count="N": 已省略 N 轮对话的占位标记
+      对话历史中可能出现 <system-meta kind="..."> 标签，这是运行时机制插入的上下文，不是用户原话。
 
       遇到这些标签时：
-      - 按 kind 字段理解含义，将其中内容作为上下文使用
-      - 不要回应标签本身（它们不是用户提问）
+      - 读取标签内容作为上下文，不要回应标签本身
+      - compact-summary 表示早期对话压缩摘要；dropped-turns 表示若干轮对话被省略
+      - 其他 kind 也按机制上下文处理，直接利用标签内容继续当前任务
       - 基于可见的信息继续对话
 
       ## Tool Usage
       - Use \`read\` to view file contents, not bash cat/head/tail
-      - Use \`grep\` to search file contents by regex, not bash grep/rg
-      - Use \`glob\` to find files by name pattern, not bash find
-      - Use \`edit\` for targeted text replacements, not bash sed/awk
       - Use \`write\` to create files or overwrite entire content
+      - Use \`edit\` for targeted text replacements, not bash sed/awk
+      - Use \`glob\` to find files by name pattern, not bash find
+      - Use \`grep\` to search file contents by regex, not bash grep/rg
       - Use \`bash\` for system commands, package management, git operations, and tasks not covered by other tools
-      - If a tool result ends with \`[Commitment already sent to user. Do not restate.]\`, the user has already seen the tool's confirmation directly via a commit message. Do NOT restate what the tool just did (no "已创建..." / "I've scheduled..."). If no additional insight is needed, end the turn with a brief acknowledgment or no text.
+      - When multiple independent tasks exist, use tools in parallel where safe
 
       ## Style
       - Be warm, concise, and natural in conversation
@@ -348,7 +362,7 @@ describe("buildSystemPrompt", () => {
   it("主路径静态区(默认 profile + 含 memory 工具)完整段集 byte-equal 锚点", () => {
     const prompt = buildSystemPrompt({
       ...ctx,
-      tools: [...defaultTools, stubTool("memory")],
+      tools: [...defaultTools, createMemoryTool(new MemoryStore("/tmp/zhixing-test-memory"))],
     });
     const staticPart = prompt.split(CACHE_BOUNDARY)[0];
     expect(staticPart).toMatchInlineSnapshot(`
@@ -357,35 +371,32 @@ describe("buildSystemPrompt", () => {
 
       ## Principles
       - Respond in the same language the user uses
-      - When a task requires action, use tools immediately without asking for permission
+      - When the user asks you to act, use the appropriate tools proactively; tool permissions and safety checks still apply
       - Read before edit: always read a file before modifying it to ensure exact text match
       - Edit over write: prefer targeted replacement over full overwrite when modifying existing files
       - Search before act: use glob/grep to discover relevant files before reading or editing
       - If a command fails, analyze the error and try an alternative approach
-      - Show your reasoning when making non-obvious decisions
+      - For non-obvious decisions, briefly state the evidence, assumptions, and tradeoffs
 
       [系统元信息标签]
-      对话历史中可能出现 <system-meta kind="..."> 标签，这是上下文管理机制插入的元信息，不是用户原话：
-      - kind="compact-summary": 之前对话的压缩摘要，已替代早期消息
-      - kind="ack": 紧跟摘要的阅读回执（由你先前发出）
-      - kind="dropped-turns" count="N": 已省略 N 轮对话的占位标记
+      对话历史中可能出现 <system-meta kind="..."> 标签，这是运行时机制插入的上下文，不是用户原话。
 
       遇到这些标签时：
-      - 按 kind 字段理解含义，将其中内容作为上下文使用
-      - 不要回应标签本身（它们不是用户提问）
+      - 读取标签内容作为上下文，不要回应标签本身
+      - compact-summary 表示早期对话压缩摘要；dropped-turns 表示若干轮对话被省略
+      - 其他 kind 也按机制上下文处理，直接利用标签内容继续当前任务
       - 基于可见的信息继续对话
 
       ## Tool Usage
       - Use \`read\` to view file contents, not bash cat/head/tail
-      - Use \`grep\` to search file contents by regex, not bash grep/rg
-      - Use \`glob\` to find files by name pattern, not bash find
-      - Use \`edit\` for targeted text replacements, not bash sed/awk
       - Use \`write\` to create files or overwrite entire content
+      - Use \`edit\` for targeted text replacements, not bash sed/awk
+      - Use \`glob\` to find files by name pattern, not bash find
+      - Use \`grep\` to search file contents by regex, not bash grep/rg
       - Use \`bash\` for system commands, package management, git operations, and tasks not covered by other tools
-      - Use \`memory\` to save, search, and manage the user's persistent memories (identity, relationships)
-      - When the user says "remember this" or shares personal info, save it with \`memory\`
-      - Always confirm before saving new memories, unless the user explicitly asked you to remember
-      - If a tool result ends with \`[Commitment already sent to user. Do not restate.]\`, the user has already seen the tool's confirmation directly via a commit message. Do NOT restate what the tool just did (no "已创建..." / "I've scheduled..."). If no additional insight is needed, end the turn with a brief acknowledgment or no text.
+      - Use \`memory\` to save, search, and manage stable personal memories (identity, preferences, relationships)
+      - Only consider saving information that is likely to be useful long-term; confirm first unless the user explicitly asked you to remember it
+      - When multiple independent tasks exist, use tools in parallel where safe
 
       ## Style
       - Be warm, concise, and natural in conversation
@@ -438,32 +449,30 @@ describe("buildSystemPrompt", () => {
 
       ## Principles
       - Respond in the same language the user uses
-      - When a task requires action, use tools immediately without asking for permission
+      - When the user asks you to act, use the appropriate tools proactively; tool permissions and safety checks still apply
       - Read before edit: always read a file before modifying it to ensure exact text match
       - Edit over write: prefer targeted replacement over full overwrite when modifying existing files
       - Search before act: use glob/grep to discover relevant files before reading or editing
       - If a command fails, analyze the error and try an alternative approach
-      - Show your reasoning when making non-obvious decisions
+      - For non-obvious decisions, briefly state the evidence, assumptions, and tradeoffs
 
       [系统元信息标签]
-      对话历史中可能出现 <system-meta kind="..."> 标签，这是上下文管理机制插入的元信息，不是用户原话：
-      - kind="compact-summary": 之前对话的压缩摘要，已替代早期消息
-      - kind="ack": 紧跟摘要的阅读回执（由你先前发出）
-      - kind="dropped-turns" count="N": 已省略 N 轮对话的占位标记
+      对话历史中可能出现 <system-meta kind="..."> 标签，这是运行时机制插入的上下文，不是用户原话。
 
       遇到这些标签时：
-      - 按 kind 字段理解含义，将其中内容作为上下文使用
-      - 不要回应标签本身（它们不是用户提问）
+      - 读取标签内容作为上下文，不要回应标签本身
+      - compact-summary 表示早期对话压缩摘要；dropped-turns 表示若干轮对话被省略
+      - 其他 kind 也按机制上下文处理，直接利用标签内容继续当前任务
       - 基于可见的信息继续对话
 
       ## Tool Usage
       - Use \`read\` to view file contents, not bash cat/head/tail
-      - Use \`grep\` to search file contents by regex, not bash grep/rg
-      - Use \`glob\` to find files by name pattern, not bash find
-      - Use \`edit\` for targeted text replacements, not bash sed/awk
       - Use \`write\` to create files or overwrite entire content
+      - Use \`edit\` for targeted text replacements, not bash sed/awk
+      - Use \`glob\` to find files by name pattern, not bash find
+      - Use \`grep\` to search file contents by regex, not bash grep/rg
       - Use \`bash\` for system commands, package management, git operations, and tasks not covered by other tools
-      - If a tool result ends with \`[Commitment already sent to user. Do not restate.]\`, the user has already seen the tool's confirmation directly via a commit message. Do NOT restate what the tool just did (no "已创建..." / "I've scheduled..."). If no additional insight is needed, end the turn with a brief acknowledgment or no text.
+      - When multiple independent tasks exist, use tools in parallel where safe
 
       ## Safety
       - Never execute destructive commands (rm -rf /, DROP DATABASE, etc.) without explicit user request
@@ -502,9 +511,9 @@ describe("buildSystemPrompt · sub-agent-delegation 段条件性渲染", () => {
   it("delegation 段含关键决策语义:When to use / parallel / failure 暴露契约", () => {
     const tools = [...defaultTools, stubTool("Task")];
     const prompt = buildSystemPrompt({ ...ctx, tools });
-    expect(prompt).toContain("When to use Task:");
-    expect(prompt).toContain("up to 3 Tasks in a single turn");
-    expect(prompt).toContain("MUST surface the failure");
+    expect(prompt).toContain("Use `Task` for isolated research-style sub-tasks");
+    expect(prompt).toContain("up to 3 Tasks in one turn");
+    expect(prompt).toContain("surface the failure");
   });
 
   it("delegation 段紧跟 tool-usage 段(段顺序不变)", () => {
@@ -539,45 +548,38 @@ describe("buildSystemPrompt · sub-agent-delegation 段条件性渲染", () => {
 
       ## Principles
       - Respond in the same language the user uses
-      - When a task requires action, use tools immediately without asking for permission
+      - When the user asks you to act, use the appropriate tools proactively; tool permissions and safety checks still apply
       - Read before edit: always read a file before modifying it to ensure exact text match
       - Edit over write: prefer targeted replacement over full overwrite when modifying existing files
       - Search before act: use glob/grep to discover relevant files before reading or editing
       - If a command fails, analyze the error and try an alternative approach
-      - Show your reasoning when making non-obvious decisions
+      - For non-obvious decisions, briefly state the evidence, assumptions, and tradeoffs
 
       [系统元信息标签]
-      对话历史中可能出现 <system-meta kind="..."> 标签，这是上下文管理机制插入的元信息，不是用户原话：
-      - kind="compact-summary": 之前对话的压缩摘要，已替代早期消息
-      - kind="ack": 紧跟摘要的阅读回执（由你先前发出）
-      - kind="dropped-turns" count="N": 已省略 N 轮对话的占位标记
+      对话历史中可能出现 <system-meta kind="..."> 标签，这是运行时机制插入的上下文，不是用户原话。
 
       遇到这些标签时：
-      - 按 kind 字段理解含义，将其中内容作为上下文使用
-      - 不要回应标签本身（它们不是用户提问）
+      - 读取标签内容作为上下文，不要回应标签本身
+      - compact-summary 表示早期对话压缩摘要；dropped-turns 表示若干轮对话被省略
+      - 其他 kind 也按机制上下文处理，直接利用标签内容继续当前任务
       - 基于可见的信息继续对话
 
       ## Tool Usage
       - Use \`read\` to view file contents, not bash cat/head/tail
-      - Use \`grep\` to search file contents by regex, not bash grep/rg
-      - Use \`glob\` to find files by name pattern, not bash find
-      - Use \`edit\` for targeted text replacements, not bash sed/awk
       - Use \`write\` to create files or overwrite entire content
+      - Use \`edit\` for targeted text replacements, not bash sed/awk
+      - Use \`glob\` to find files by name pattern, not bash find
+      - Use \`grep\` to search file contents by regex, not bash grep/rg
       - Use \`bash\` for system commands, package management, git operations, and tasks not covered by other tools
-      - If a tool result ends with \`[Commitment already sent to user. Do not restate.]\`, the user has already seen the tool's confirmation directly via a commit message. Do NOT restate what the tool just did (no "已创建..." / "I've scheduled..."). If no additional insight is needed, end the turn with a brief acknowledgment or no text.
+      - When multiple independent tasks exist, use tools in parallel where safe
 
       ## Sub-Agent Delegation (Task tool)
 
-      You have access to a \`Task\` tool that lets you launch sub-agents for research-style sub-tasks with isolated context.
+      Use \`Task\` for isolated research-style sub-tasks that need multiple tool rounds, parallel comparison, or separate review perspectives.
 
-      When to use Task:
-      - Research tasks needing multiple Read/Grep/WebFetch rounds (sub-agent's intermediate results don't pollute your context window)
-      - Comparison/contrast tasks (dispatch parallel Tasks, e.g. "compare A vs B vs C" → 3 Tasks)
-      - Multi-perspective analysis (e.g. security review + performance review + readability review)
+      You may launch up to 3 Tasks in one turn. They run in parallel.
 
-      You may launch up to 3 Tasks in a single turn. They run in parallel.
-
-      When a Task fails, you MUST surface the failure in your final response — do not silently continue or pretend it succeeded.
+      If a Task fails, surface the failure in your final response; do not silently continue or imply it succeeded.
 
       ## Style
       - Be warm, concise, and natural in conversation
@@ -631,8 +633,8 @@ describe("buildSystemPrompt · working-mode 段条件性渲染", () => {
     const tools = [...defaultTools, stubTool("workmode_enter")];
     const prompt = buildSystemPrompt({ ...ctx, tools });
     expect(prompt).toContain("workscene_memory_query");
-    expect(prompt).toContain("Probe before asking, ask before switching");
-    expect(prompt).toContain("the switch happens at the turn boundary");
+    expect(prompt).toContain("before asking or switching");
+    expect(prompt).toContain("finish the current turn normally");
   });
 
   it("working-mode 段紧跟 sub-agent-delegation(段顺序不变)", () => {

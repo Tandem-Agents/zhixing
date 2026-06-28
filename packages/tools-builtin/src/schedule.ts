@@ -27,6 +27,13 @@ import type {
   TaskPriority,
 } from "@zhixing/core";
 
+const SCHEDULE_SYSTEM_PROMPT_HINTS: readonly string[] = [
+  "- Use `schedule` to create, list, update, delete, or run scheduled tasks",
+  "- For reminders, periodic checks, or timed notifications, translate the user's timing into once / interval / cron parameters",
+  "- For cron expressions, default timezone to Asia/Shanghai unless the user specifies otherwise",
+  "- Confirm the schedule with the user before creating it",
+];
+
 // 架构演化记：
 //   ADR-007 Phase 2 引入了 `commitToUser` API + COMMITMENT_SIGNAL，让工具在
 //   创建完 task 后主动发一条确认消息，配合系统提示抑制 LLM 叙述——用来防止
@@ -142,6 +149,7 @@ export function createScheduleTool(
     // 定时任务是知行应用本地状态：写本地数据、无外部副作用 →
     // 经 app-state 边界判 internal（自动放行）。
     boundaries: [{ boundaryType: "app-state", access: "write", dynamic: false }],
+    systemPromptHints: SCHEDULE_SYSTEM_PROMPT_HINTS,
 
     async call(input, context): Promise<ToolResult> {
       const action = input.action as string;

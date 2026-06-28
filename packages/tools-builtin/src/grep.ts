@@ -19,6 +19,9 @@ const MAX_SCANNED_FILES = 10_000;
 const DEFAULT_CONTEXT_LINES = 2;
 const MAX_CONTEXT_LINES = 10;
 const DEFAULT_TIMEOUT_MS = 30_000;
+const GREP_SYSTEM_PROMPT_HINTS: readonly string[] = [
+  "- Use `grep` to search file contents by regex, not bash grep/rg",
+];
 
 export function createGrepTool(): ToolDefinition {
   return {
@@ -73,6 +76,7 @@ export function createGrepTool(): ToolDefinition {
     isReadOnly: true,
     isParallelSafe: true,
     needsPermission: false,
+    systemPromptHints: GREP_SYSTEM_PROMPT_HINTS,
     maxResultChars: MAX_RESULT_CHARS,
 
     async call(input, context): Promise<ToolResult> {

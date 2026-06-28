@@ -15,8 +15,8 @@
 import { PermissionStore, type PermissionRule } from "@zhixing/core";
 
 /**
- * preapproved hosts 单源——同时供 WEB_FETCH_DEFAULT_RULES 与 web-fetch.ts
- * 的 systemPromptHints 使用,避免列表在多处字面值重复。
+ * preapproved hosts 单源——供 WEB_FETCH_DEFAULT_RULES 生成权限规则。
+ * 不进入 system prompt；agent 不需要背权限层明细。
  *
  * 选取标准: 公开技术文档/学习站点,被 LLM 引用频次最高,SSRF 风险低,
  * 内容稳定不易承载诱导内容。新增 host 应满足同样标准。

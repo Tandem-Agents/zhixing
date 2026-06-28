@@ -19,6 +19,9 @@ import { resolveToolPath } from "./utils.js";
 
 const MAX_RESULTS = 200;
 const MAX_RESULT_CHARS = 30_000;
+const GLOB_SYSTEM_PROMPT_HINTS: readonly string[] = [
+  "- Use `glob` to find files by name pattern, not bash find",
+];
 
 const DEFAULT_IGNORE = [
   "**/node_modules/**",
@@ -61,6 +64,7 @@ export function createGlobTool(): ToolDefinition {
     isReadOnly: true,
     isParallelSafe: true,
     needsPermission: false,
+    systemPromptHints: GLOB_SYSTEM_PROMPT_HINTS,
     maxResultChars: MAX_RESULT_CHARS,
 
     async call(input, context): Promise<ToolResult> {

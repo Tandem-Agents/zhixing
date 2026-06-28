@@ -19,6 +19,11 @@
 import type { ToolDefinition, ToolResult } from "@zhixing/core";
 import type { MemoryStore, MemoryCategory } from "@zhixing/core";
 
+const MEMORY_SYSTEM_PROMPT_HINTS: readonly string[] = [
+  "- Use `memory` to save, search, and manage stable personal memories (identity, preferences, relationships)",
+  "- Only consider saving information that is likely to be useful long-term; confirm first unless the user explicitly asked you to remember it",
+];
+
 /**
  * store 由装配期注入（单一 scoped 实例，与 flush strategy 共用）—— 工具不再
  * 自建 `new MemoryStore()`，杜绝双实例与工作场景下写穿个人记忆域。
@@ -86,6 +91,7 @@ export function createMemoryTool(store: MemoryStore): ToolDefinition {
     // 记忆是知行应用本地状态（~/.zhixing/me）：写本地数据、无外部副作用 →
     // 经 app-state 边界判 internal（自动放行）。
     boundaries: [{ boundaryType: "app-state", access: "write", dynamic: false }],
+    systemPromptHints: MEMORY_SYSTEM_PROMPT_HINTS,
 
     async call(input): Promise<ToolResult> {
       const action = input.action as string;

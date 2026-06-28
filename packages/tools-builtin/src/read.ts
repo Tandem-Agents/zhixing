@@ -15,6 +15,9 @@ import type { ToolDefinition, ToolResult } from "@zhixing/core";
 import { addLineNumbers, isBinaryContent, resolveToolPath } from "./utils.js";
 
 const MAX_RESULT_CHARS = 50_000;
+const READ_SYSTEM_PROMPT_HINTS: readonly string[] = [
+  "- Use `read` to view file contents, not bash cat/head/tail",
+];
 
 export function createReadTool(): ToolDefinition {
   return {
@@ -44,6 +47,7 @@ export function createReadTool(): ToolDefinition {
     isReadOnly: true,
     isParallelSafe: true,
     needsPermission: false,
+    systemPromptHints: READ_SYSTEM_PROMPT_HINTS,
     maxResultChars: MAX_RESULT_CHARS,
 
     async call(input, context): Promise<ToolResult> {

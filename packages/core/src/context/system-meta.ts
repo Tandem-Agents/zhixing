@@ -13,10 +13,12 @@
  * 格式：
  *   `<system-meta kind="<kind>">...</system-meta>`
  *
- * 三种 kind：
+ * 常见 kind：
  *   - compact-summary: LLM 生成的压缩摘要，替代早期消息
- *   - ack: 紧跟 compact-summary 的 assistant 回执
+ *   - ack: 机制插入的 assistant 回执，用于保持角色交替
  *   - dropped-turns: 非摘要型省略占位（应急地板机械截断时）
+ *   - startup-bootstrap: 启动 / 恢复时倒读装填的近期上下文
+ *   - workscene-digest: 工作场景退出时注入的交接纪要
  *
  * 为什么用 XML-like 标签：
  *   - LLM 训练数据中 system-* 标签常见，自动识别为元信息
@@ -26,7 +28,7 @@
 
 import type { Message } from "../types/messages.js";
 
-// ─── Kind 类型 ───
+// ─── 需被压缩/丢弃生命周期识别的 kind 类型 ───
 
 export type SystemMetaKind = "compact-summary" | "ack" | "dropped-turns";
 
@@ -107,7 +109,7 @@ export function buildDroppedTurnsMessage(count: number): Message {
  * stripSummaryPlaceholderPair**（与 workscene-digest 同决策）：装填对不属于
  * 压缩 / 丢弃生命周期——折叠时它作为窗口条目被摘要对整体取代，是窗口的
  * 结构操作、不靠标签识别；SYSTEM_META_PROMPT_SECTION 的通用框架已覆盖
- * 任意 kind，不为它改动 system prompt 静态前缀（保字节稳定与前缀缓存）。
+ * 任意 kind，不需要为每个 kind 维护独立枚举。
  */
 export function buildStartupBootstrapPair(
   content: string,
@@ -147,11 +149,10 @@ export function buildStartupBootstrapPair(
  *   - 纪要是“持久交接上下文”，不属于压缩/丢弃生命周期。detectSystemMetaKind
  *     对它返回 null 即正确行为 —— 它该像普通消息一样随对话老化被摘要，绝不
  *     被当作 summary pair 剥离或当作 dropped 标记特殊保留。
- *   - 不改 SYSTEM_META_PROMPT_SECTION：其通用框架（“对话历史中可能出现
+ *   - SYSTEM_META_PROMPT_SECTION 的通用框架（“对话历史中可能出现
  *     <system-meta kind="..."> ……机制插入的元信息，不是用户原话；不要回应
  *     标签本身；将其中内容作为上下文使用”）已泛化覆盖任意 kind，主对话据此
- *     即把纪要识别为机制插入而非自己原话；新增枚举会改动 system prompt 静态
- *     前缀（破坏既有前缀缓存与字节稳定），无必要。
+ *     即把纪要识别为机制插入而非自己原话。
  * 仍走本模块构造：单一事实源 + escape 保护是本模块的职责，ad-hoc 拼串会重蹈
  * “多处各自构造 placeholder”的回归。
  */
@@ -231,14 +232,12 @@ export function stripSummaryPlaceholderPair(
  * 不是用户原话、无需回应本身。
  */
 export const SYSTEM_META_PROMPT_SECTION = `[系统元信息标签]
-对话历史中可能出现 <system-meta kind="..."> 标签，这是上下文管理机制插入的元信息，不是用户原话：
-- kind="compact-summary": 之前对话的压缩摘要，已替代早期消息
-- kind="ack": 紧跟摘要的阅读回执（由你先前发出）
-- kind="dropped-turns" count="N": 已省略 N 轮对话的占位标记
+对话历史中可能出现 <system-meta kind="..."> 标签，这是运行时机制插入的上下文，不是用户原话。
 
 遇到这些标签时：
-- 按 kind 字段理解含义，将其中内容作为上下文使用
-- 不要回应标签本身（它们不是用户提问）
+- 读取标签内容作为上下文，不要回应标签本身
+- compact-summary 表示早期对话压缩摘要；dropped-turns 表示若干轮对话被省略
+- 其他 kind 也按机制上下文处理，直接利用标签内容继续当前任务
 - 基于可见的信息继续对话`;
 
 // ─── 内部辅助 ───

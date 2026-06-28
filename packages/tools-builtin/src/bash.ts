@@ -25,6 +25,9 @@ import { gracefulKill, type ToolDefinition, type ToolResult } from "@zhixing/cor
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_RESULT_CHARS = 30_000;
 const MAX_OUTPUT_BUFFER_BYTES = 10 * 1024 * 1024;
+const BASH_SYSTEM_PROMPT_HINTS: readonly string[] = [
+  "- Use `bash` for system commands, package management, git operations, and tasks not covered by other tools",
+];
 
 export function createBashTool(): ToolDefinition {
   return {
@@ -55,6 +58,7 @@ export function createBashTool(): ToolDefinition {
     needsPermission: true,
     interruptBehavior: "grace",
     permissionArgumentKey: "command",
+    systemPromptHints: BASH_SYSTEM_PROMPT_HINTS,
     maxResultChars: MAX_RESULT_CHARS,
 
     async call(input, context): Promise<ToolResult> {

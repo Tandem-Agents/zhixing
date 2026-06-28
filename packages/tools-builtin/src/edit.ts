@@ -21,6 +21,9 @@ import { buildFileDiffArtifact } from "./file-diff.js";
 import { resolveToolPath } from "./utils.js";
 
 const MAX_RESULT_CHARS = 5_000;
+const EDIT_SYSTEM_PROMPT_HINTS: readonly string[] = [
+  "- Use `edit` for targeted text replacements, not bash sed/awk",
+];
 
 export function createEditTool(): ToolDefinition {
   return {
@@ -63,6 +66,7 @@ export function createEditTool(): ToolDefinition {
     isParallelSafe: false,
     needsPermission: true,
     permissionArgumentKey: "path",
+    systemPromptHints: EDIT_SYSTEM_PROMPT_HINTS,
     maxResultChars: MAX_RESULT_CHARS,
 
     async call(input, context): Promise<ToolResult> {

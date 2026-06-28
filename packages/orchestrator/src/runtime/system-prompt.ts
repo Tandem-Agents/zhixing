@@ -20,7 +20,7 @@
  *
  * 设计决策:
  * - 缓存分界借鉴 Claude Code / OpenClaw,静态区不含任何会话特有信息
- * - 工具使用段从注册的工具列表动态生成,添加/移除工具时自动适应
+ * - 工具使用段从注册工具的 systemPromptHints 动态生成,添加/移除工具时自动适应
  * - 条件段返回 null 时被 buildSystemPrompt 跳过,不留空白(无空段噪声)
  *   —— 让 ctx.tools 不含 memory / Task 时输出 byte-equal 历史,守住既有锚点
  * - 元协议段在工具段之前:LLM 解析 messages 的基础协议(<system-meta> 标签等)
@@ -293,12 +293,12 @@ export function renderIdentity(profile: AgentRoleProfile): string {
 function buildPrinciples(): string {
   return `## Principles
 - Respond in the same language the user uses
-- When a task requires action, use tools immediately without asking for permission
+- When the user asks you to act, use the appropriate tools proactively; tool permissions and safety checks still apply
 - Read before edit: always read a file before modifying it to ensure exact text match
 - Edit over write: prefer targeted replacement over full overwrite when modifying existing files
 - Search before act: use glob/grep to discover relevant files before reading or editing
 - If a command fails, analyze the error and try an alternative approach
-- Show your reasoning when making non-obvious decisions`;
+- For non-obvious decisions, briefly state the evidence, assumptions, and tradeoffs`;
 }
 
 // ─── Segment: Meta Protocol(消息流元信息标签解释) ───
@@ -323,46 +323,12 @@ function buildMetaProtocol(): string {
  * Tools[] 在 session 创建后冻结不变；本函数输出的文本也随之 byte-equal 稳定。
  */
 function buildToolUsage(tools: ToolDefinition[]): string {
-  const names = new Set(tools.map((t) => t.name));
-  return buildToolUsageLines(tools, names);
+  return buildToolUsageLines(tools);
 }
 
-function buildToolUsageLines(
-  tools: ToolDefinition[],
-  names: Set<string>,
-): string {
+function buildToolUsageLines(tools: ToolDefinition[]): string {
   const lines = ["## Tool Usage"];
 
-  if (names.has("read")) {
-    lines.push("- Use `read` to view file contents, not bash cat/head/tail");
-  }
-  if (names.has("grep")) {
-    lines.push("- Use `grep` to search file contents by regex, not bash grep/rg");
-  }
-  if (names.has("glob")) {
-    lines.push("- Use `glob` to find files by name pattern, not bash find");
-  }
-  if (names.has("edit")) {
-    lines.push("- Use `edit` for targeted text replacements, not bash sed/awk");
-  }
-  if (names.has("write")) {
-    lines.push("- Use `write` to create files or overwrite entire content");
-  }
-  if (names.has("bash")) {
-    lines.push("- Use `bash` for system commands, package management, git operations, and tasks not covered by other tools");
-  }
-  if (names.has("memory")) {
-    lines.push("- Use `memory` to save, search, and manage the user's persistent memories (identity, relationships)");
-    lines.push("- When the user says \"remember this\" or shares personal info, save it with `memory`");
-    lines.push("- Always confirm before saving new memories, unless the user explicitly asked you to remember");
-  }
-  if (names.has("schedule")) {
-    lines.push("- Use `schedule` to create, list, update, delete, or run scheduled tasks");
-    lines.push("- When the user wants recurring actions (reminders, periodic checks, timed notifications), create a scheduled task");
-    lines.push('- Convert natural language time to schedule: "每天早上8点" → cron "0 8 * * *", "每30分钟" → interval 1800000, "明天下午3点" → once with ISO datetime');
-    lines.push("- For cron expressions, default timezone to Asia/Shanghai unless the user specifies otherwise");
-    lines.push("- Always confirm the schedule with the user before creating (e.g. \"I'll set up a task to run daily at 8:00 AM\")");
-  }
   for (const tool of tools) {
     if (tool.systemPromptHints) {
       lines.push(...tool.systemPromptHints);
@@ -371,9 +337,11 @@ function buildToolUsageLines(
   if (tools.some((t) => t.isParallelSafe)) {
     lines.push("- When multiple independent tasks exist, use tools in parallel where safe");
   }
-  lines.push(
-    `- If a tool result ends with \`${COMMITMENT_SIGNAL}\`, the user has already seen the tool's confirmation directly via a commit message. Do NOT restate what the tool just did (no "已创建..." / "I've scheduled..."). If no additional insight is needed, end the turn with a brief acknowledgment or no text.`,
-  );
+  if (tools.some((t) => t.mayCommitToUser)) {
+    lines.push(
+      `- If a tool result ends with \`${COMMITMENT_SIGNAL}\`, the tool already sent a user-visible confirmation. Do not restate that confirmation unless you have additional insight.`,
+    );
+  }
 
   return lines.join("\n");
 }
@@ -394,16 +362,11 @@ function buildToolUsageLines(
  */
 export const SUB_AGENT_DELEGATION_TEXT = `## Sub-Agent Delegation (Task tool)
 
-You have access to a \`Task\` tool that lets you launch sub-agents for research-style sub-tasks with isolated context.
+Use \`Task\` for isolated research-style sub-tasks that need multiple tool rounds, parallel comparison, or separate review perspectives.
 
-When to use Task:
-- Research tasks needing multiple Read/Grep/WebFetch rounds (sub-agent's intermediate results don't pollute your context window)
-- Comparison/contrast tasks (dispatch parallel Tasks, e.g. "compare A vs B vs C" → 3 Tasks)
-- Multi-perspective analysis (e.g. security review + performance review + readability review)
+You may launch up to 3 Tasks in one turn. They run in parallel.
 
-You may launch up to 3 Tasks in a single turn. They run in parallel.
-
-When a Task fails, you MUST surface the failure in your final response — do not silently continue or pretend it succeeded.`;
+If a Task fails, surface the failure in your final response; do not silently continue or imply it succeeded.`;
 
 /**
  * Sub-Agent Delegation 段渲染。
@@ -437,19 +400,19 @@ function buildSubAgentDelegation(tools: ToolDefinition[]): string | null {
  */
 export const WORKING_MODE_TEXT = `## Working Mode (work scenes)
 
-A "work scene" is an isolated context for a bounded line of work: its own working directory, its own private memory, and a dedicated model. Entering one switches the whole conversation into that scene; leaving returns to this main conversation.
+A work scene is an isolated context for a bounded line of work, with its own working directory, private memory, and model. Entering one switches the conversation into that scene; leaving returns here.
 
-You have these tools:
-- \`workmode_enter\` — enter a work scene (requires the user to confirm; the switch takes effect at the end of the current turn).
-- \`workscene_memory_query\` — read-only probe of what any work scene already remembers.
-- \`workscene_change_approve\` — create / rename / remove scenes (requires confirmation).
+Tools:
+- \`workmode_enter\`: enter a work scene; the switch takes effect after the current turn.
+- \`workscene_memory_query\`: inspect existing scene memory before deciding.
+- \`workscene_change_approve\`: create, rename, or remove scenes with confirmation.
 
 How to decide:
-- Clear signal (the user explicitly wants to work within a specific bounded context that has — or clearly warrants — its own scene, e.g. "let's work on the cli module of project X"): call \`workmode_enter\` directly with that scene's id. If no scene fits, propose creating one via \`workscene_change_approve\` first.
-- Ambiguous signal: do NOT guess. First \`workscene_memory_query\` to see whether a relevant scene and its accumulated memory already exist, THEN decide — either ask the user a brief clarifying question, or enter the scene that clearly fits. (Probe before asking, ask before switching.)
-- Casual / one-off questions answerable here: stay in the main conversation, do not enter a scene.
+- Clear scene fit: call \`workmode_enter\` with that scene id; if none fits but one is warranted, propose it via \`workscene_change_approve\`.
+- Ambiguous fit: probe with \`workscene_memory_query\` before asking or switching.
+- Casual or one-off questions: stay in the main conversation.
 
-After you call \`workmode_enter\`, finish the current turn normally — the switch happens at the turn boundary, not mid-turn. Do not assume you are already inside the scene.`;
+After \`workmode_enter\`, finish the current turn normally; do not assume you are already inside the scene.`;
 
 /**
  * Working Mode 段渲染。返回 `string | null`：
@@ -502,10 +465,10 @@ function buildEnvironment(ctx: PromptBuildContext): string {
   lines.push(`- Working directory: ${workingDirectory}`);
 
   if (ctx.workspace) {
-    lines.push("- This is the user's configured trusted zone — routine file reads/writes inside are low-impact; operations outside (other system paths, user home, etc.) require explicit user confirmation");
+    lines.push("- This workspace is the user's trusted zone; routine file reads/writes inside are low-impact, while operations outside require clear user intent or confirmation");
     if (ctx.globalConfigPath) {
       lines.push(`- Configured in: ${ctx.globalConfigPath} (field: workspace.root)`);
-      lines.push("- You CAN help the user change the working directory by editing that config file — the security system will ask the user to confirm (this confirmation cannot be skipped). Changes take effect on next session restart.");
+      lines.push("- To change the working directory, edit that config file; confirmation is handled by the security system and changes apply after restart.");
     }
   } else {
     lines.push("- No workspace is configured; the working directory defaults to the CLI launch location and serves as the trusted zone.");

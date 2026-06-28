@@ -3,6 +3,7 @@ import type { Message } from "../../types/messages.js";
 import {
   buildCompactSummaryPair,
   buildDroppedTurnsMessage,
+  buildStartupBootstrapPair,
   buildWorksceneDigestMessage,
   detectSystemMetaKind,
   stripSummaryPlaceholderPair,
@@ -66,6 +67,24 @@ describe("buildWorksceneDigestMessage", () => {
     // 不破坏既有 summary pair 剥离逻辑
     const [s, a] = buildCompactSummaryPair("s");
     expect(stripSummaryPlaceholderPair([msg, s, a])).toEqual([msg, s, a]);
+  });
+});
+
+// ─── buildStartupBootstrapPair ───
+
+describe("buildStartupBootstrapPair", () => {
+  it("构造 startup-bootstrap user + ack assistant 两条机制消息", () => {
+    const [bootstrapMsg, ackMsg] = buildStartupBootstrapPair("刚才在审查 system prompt");
+    expect(bootstrapMsg.role).toBe("user");
+    expect(ackMsg.role).toBe("assistant");
+    const text = (bootstrapMsg.content[0] as { text: string }).text;
+    expect(text.startsWith('<system-meta kind="startup-bootstrap">')).toBe(true);
+    expect(text).toContain("刚才在审查 system prompt");
+  });
+
+  it("刻意不属压缩/丢弃生命周期：detectSystemMetaKind 返回 null", () => {
+    const [bootstrapMsg] = buildStartupBootstrapPair("上下文");
+    expect(detectSystemMetaKind(bootstrapMsg)).toBeNull();
   });
 });
 
@@ -212,10 +231,19 @@ describe("stripSummaryPlaceholderPair", () => {
 // ─── SYSTEM_META_PROMPT_SECTION ───
 
 describe("SYSTEM_META_PROMPT_SECTION", () => {
-  it("包含三种 kind 的说明", () => {
+  it("使用通用规则覆盖任意 system-meta kind", () => {
+    expect(SYSTEM_META_PROMPT_SECTION).toContain('<system-meta kind="...">');
+    expect(SYSTEM_META_PROMPT_SECTION).toContain("标签内容");
+    expect(SYSTEM_META_PROMPT_SECTION).toContain("其他 kind");
+  });
+
+  it("只保留标签内容本身难以理解的短注解", () => {
     expect(SYSTEM_META_PROMPT_SECTION).toContain("compact-summary");
-    expect(SYSTEM_META_PROMPT_SECTION).toContain("ack");
     expect(SYSTEM_META_PROMPT_SECTION).toContain("dropped-turns");
+    expect(SYSTEM_META_PROMPT_SECTION).not.toContain('kind="ack"');
+    expect(SYSTEM_META_PROMPT_SECTION).not.toContain("startup-bootstrap");
+    expect(SYSTEM_META_PROMPT_SECTION).not.toContain("workscene-digest");
+    expect(SYSTEM_META_PROMPT_SECTION).not.toContain("由你先前发出");
   });
 
   it("提示 LLM 不要回应标签本身", () => {

@@ -17,7 +17,6 @@ import {
 } from "@zhixing/core";
 import type { FetchError, NetworkPolicy } from "@zhixing/network";
 import { safeFetch, sanitizeUntrustedText } from "@zhixing/network";
-import { WEB_FETCH_PREAPPROVED_HOSTS } from "./web-fetch-rules.js";
 import {
   DISTILL_SYSTEM_PROMPT,
   buildDistillPrompt,
@@ -39,14 +38,13 @@ const MAX_PROMPT_LENGTH = 1000;
 
 /**
  * 自描述 system-prompt 提示——cli 的 buildToolUsage 自动追加到 ## Tool Usage 段。
- * preapproved hosts 直接拼自 WEB_FETCH_PREAPPROVED_HOSTS,与 builtin rule 同源。
+ * 预批准域名由权限层执行,不进入 system prompt,避免让 agent 背安全规则明细。
  */
 const WEB_FETCH_SYSTEM_PROMPT_HINTS: readonly string[] = [
   "- Use `web_fetch` to read content from a URL the user provided or that you already know — this tool fetches a URL, it does not search the web",
-  "- Two modes: with `prompt`, a light LLM extracts only the requested information (preferred for large pages); without `prompt`, raw Markdown is returned (use for short or specific pages)",
-  `- Pre-approved hosts (no user confirmation needed): ${WEB_FETCH_PREAPPROVED_HOSTS.join(", ")}`,
+  "- For large pages, pass `prompt` so a light LLM extracts only the requested information; omit `prompt` when raw Markdown is needed",
   "- Do not invent URLs — only fetch what the user gave you or what appeared in prior tool results",
-  "- If the user asks a question without a URL, do not call `web_fetch` with a guessed URL — ask for the URL or suggest a search engine",
+  "- If the user asks a question without a URL, ask for the URL or suggest a search engine instead of guessing",
 ];
 
 export interface WebFetchToolOptions {

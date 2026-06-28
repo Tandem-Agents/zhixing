@@ -15,6 +15,10 @@ import type { ToolDefinition, ToolResult } from "@zhixing/core";
 import { buildFileDiffArtifact } from "./file-diff.js";
 import { resolveToolPath } from "./utils.js";
 
+const WRITE_SYSTEM_PROMPT_HINTS: readonly string[] = [
+  "- Use `write` to create files or overwrite entire content",
+];
+
 export function createWriteTool(): ToolDefinition {
   return {
     name: "write",
@@ -41,6 +45,7 @@ export function createWriteTool(): ToolDefinition {
     isParallelSafe: false,
     needsPermission: true,
     permissionArgumentKey: "path",
+    systemPromptHints: WRITE_SYSTEM_PROMPT_HINTS,
     maxResultChars: 1_000,
 
     async call(input, context): Promise<ToolResult> {
