@@ -1,4 +1,8 @@
-export type { ToolCallRecord, TurnSource } from "./types.js";
+export type {
+  RunRecordAdvancementMetadata,
+  ToolCallRecord,
+  TurnSource,
+} from "./types.js";
 
 export { recoverOrphanTmp, writeAtomic } from "./serializer.js";
 export type { WriteAtomicOptions } from "./serializer.js";

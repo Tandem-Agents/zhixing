@@ -90,7 +90,13 @@ describe("写入与 runIndex", () => {
       timestamp: new Date(clock).toISOString(),
       messages,
       usage: { inputTokens: 5, outputTokens: 7 },
-      source: "interactive",
+      source: "advancement",
+      advancement: {
+        sessionId: "adv-1",
+        proxyMessageId: "proxy-1",
+        reviewId: "review-1",
+        rubricFailureHandlingId: "fix-tests",
+      },
     });
 
     const got = await collect(store, "c3");
@@ -103,6 +109,16 @@ describe("写入与 runIndex", () => {
       inputTokens: 5,
       outputTokens: 7,
     });
+    expect(run.type === "run" && run.source).toBe("advancement");
+    expect(run.type === "run" && run.advancement).toEqual({
+      sessionId: "adv-1",
+      proxyMessageId: "proxy-1",
+      reviewId: "review-1",
+      rubricFailureHandlingId: "fix-tests",
+    });
+    expect(run.type === "run" && run.messages[0]).not.toHaveProperty(
+      "advancement",
+    );
   });
 
   it("重开 store 实例：从分片尾行推导 nextRunIndex 继续单调", async () => {

@@ -32,6 +32,10 @@
       "types": "./dist/transcript/index.d.ts",
       "import": "./dist/transcript/index.js"
     },
+    "./advancement": {
+      "types": "./dist/advancement/index.d.ts",
+      "import": "./dist/advancement/index.js"
+    },
     "./memory": {
       "types": "./dist/memory/index.d.ts",
       "import": "./dist/memory/index.js"

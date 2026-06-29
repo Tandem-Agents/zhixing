@@ -170,6 +170,7 @@ export class ShardedTranscriptStore {
         messages: input.messages,
         usage: input.usage,
         source: input.source,
+        advancement: input.advancement,
       };
       await this.appendLineInLock(conversationId, state, record);
       state.nextRunIndex += 1;

@@ -8,7 +8,15 @@
 // ─── 触发源 ───
 
 /** 触发源标识 —— 落盘为 run record 的 source 字段 */
-export type TurnSource = "interactive" | "scheduler" | "channel";
+export type TurnSource = "interactive" | "scheduler" | "channel" | "advancement";
+
+/** 推进侧代理 run 的来源元数据；属于 run record，不进入协议消息。 */
+export interface RunRecordAdvancementMetadata {
+  readonly sessionId: string;
+  readonly proxyMessageId?: string;
+  readonly reviewId?: string;
+  readonly rubricFailureHandlingId?: string;
+}
 
 // ─── 工具调用的派生表示 ───
 

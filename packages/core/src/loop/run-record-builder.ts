@@ -29,7 +29,11 @@ import {
   findLastAssistantMessage,
 } from "../types/messages.js";
 import type { RunRecordInput } from "../transcript/shard/types.js";
-import type { ToolCallRecord, TurnSource } from "../transcript/types.js";
+import type {
+  RunRecordAdvancementMetadata,
+  ToolCallRecord,
+  TurnSource,
+} from "../transcript/types.js";
 
 // ─── 构造 ───
 
@@ -52,8 +56,11 @@ export interface BuildRunRecordInput {
   /** Agent loop 终止结果，仅取 usage（终止原因是运行时控制信号，不进记录） */
   readonly agentResult: AgentResult;
 
-  /** 触发源（"interactive" / "scheduler" / "channel"），由调用方传入 */
+  /** 触发源，由调用方传入并落盘为 run 级元数据 */
   readonly source?: TurnSource;
+
+  /** 推进侧代理 run 的产品层元数据；不进入 Message role/content */
+  readonly advancement?: RunRecordAdvancementMetadata;
 
   /** 时间戳，默认现时；测试 / 确定性构造时可显式覆盖 */
   readonly timestamp?: string;
@@ -66,6 +73,7 @@ export function buildRunRecord(input: BuildRunRecordInput): RunRecordInput {
     messages: [input.userMessage, ...input.newMessages],
     usage: input.agentResult.usage,
     source: input.source,
+    advancement: input.advancement,
   };
 }
 

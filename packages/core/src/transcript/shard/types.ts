@@ -8,7 +8,7 @@
 
 import type { Message } from "../../types/messages.js";
 import type { TokenUsage } from "../../types/llm.js";
-import type { TurnSource } from "../types.js";
+import type { RunRecordAdvancementMetadata, TurnSource } from "../types.js";
 
 // ─── 分片索引 ───
 
@@ -68,6 +68,7 @@ export interface RunRecord {
   messages: Message[];
   usage?: TokenUsage;
   source?: TurnSource;
+  advancement?: RunRecordAdvancementMetadata;
 }
 
 /**
@@ -90,6 +91,7 @@ export interface RunRecordInput {
   messages: Message[];
   usage?: TokenUsage;
   source?: TurnSource;
+  advancement?: RunRecordAdvancementMetadata;
 }
 
 /** appendRunRecord 的结果 —— 供调用方做派生缓存的覆盖锚点等 */
