@@ -8,6 +8,7 @@ export interface SelectionRequest<TValue extends string = string> {
   readonly id?: string;
   readonly title: string;
   readonly body?: readonly string[];
+  readonly details?: SelectionDetailsSpec;
   readonly options: readonly SelectionOption<TValue>[];
   readonly initialValue?: TValue;
   readonly submitLabel?: string;
@@ -23,6 +24,7 @@ export interface SelectionBaseOption<TValue extends string = string> {
   readonly value: TValue;
   readonly label: string;
   readonly description?: string;
+  readonly details?: SelectionDetailsSpec;
   readonly hotkey?: SelectionHotkey;
   readonly tone?: "normal" | "primary" | "danger" | "muted";
   readonly disabled?: boolean;
@@ -56,6 +58,11 @@ export interface SelectionConfirmSpec {
   readonly body?: readonly string[];
   readonly confirmLabel?: string;
   readonly cancelLabel?: string;
+}
+
+export interface SelectionDetailsSpec {
+  readonly title?: string;
+  readonly body: readonly string[];
 }
 
 export type SelectionResult<TValue extends string = string> =
@@ -116,6 +123,14 @@ export function isConfirmOption<TValue extends string>(
   return "confirm" in option && option.confirm !== undefined;
 }
 
+export function getSelectionDetails<TValue extends string>(
+  request: ValidatedSelectionRequest<TValue>,
+  selectedIndex: number,
+): SelectionDetailsSpec | undefined {
+  const optionDetails = request.options[selectedIndex]?.details;
+  return optionDetails ?? request.details;
+}
+
 export function validateSelectionRequest<TValue extends string>(
   request: SelectionRequest<TValue>,
 ): ValidatedSelectionRequest<TValue> {
@@ -137,6 +152,8 @@ export function validateSelectionRequest<TValue extends string>(
   const hotkeys = new Set<string>();
   let firstEnabled = -1;
 
+  validateDetails(request.details, "selection details");
+
   request.options.forEach((option, index) => {
     if (option.label.trim().length === 0) {
       throw new SelectionValidationError(`selection option ${index} label is empty`);
@@ -151,6 +168,7 @@ export function validateSelectionRequest<TValue extends string>(
     if (!option.disabled && firstEnabled === -1) {
       firstEnabled = index;
     }
+    validateDetails(option.details, `selection option details: ${option.value}`);
 
     if (option.disabled && (isInputOption(option) || isConfirmOption(option))) {
       throw new SelectionValidationError(
@@ -218,6 +236,19 @@ export function validateSelectionRequest<TValue extends string>(
     title,
     initialIndex,
   };
+}
+
+function validateDetails(
+  details: SelectionDetailsSpec | undefined,
+  label: string,
+): void {
+  if (!details) return;
+  if (details.title !== undefined && details.title.trim().length === 0) {
+    throw new SelectionValidationError(`${label} title is empty`);
+  }
+  if (details.body.length === 0) {
+    throw new SelectionValidationError(`${label} body is empty`);
+  }
 }
 
 function isValidHotkey(hotkey: string): boolean {

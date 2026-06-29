@@ -22,6 +22,7 @@ import {
   reduceSelection,
 } from "./state.js";
 import {
+  computeDetailsBodyRows,
   computeMaxPanelRows,
   renderSelectionPanel,
   type SelectionRenderOptions,
@@ -139,6 +140,7 @@ export class InlineSelectionRegion<TValue extends string = string>
       this.state,
       action,
       this.request,
+      { detailBodyRows: computeDetailsBodyRows(this.renderOptions()) },
     );
     if (result) {
       this.finish(result);
@@ -223,9 +225,18 @@ function translateKeypress(
     }
     return null;
   }
+  if (state.layer === "details") {
+    if (key?.name === "up") return { kind: "up" };
+    if (key?.name === "down") return { kind: "down" };
+    if (key?.name === "left") return { kind: "left" };
+    if (key?.name === "return") return { kind: "enter" };
+    if (key?.name === "escape") return { kind: "escape" };
+    return null;
+  }
 
   if (key?.name === "up") return { kind: "up" };
   if (key?.name === "down") return { kind: "down" };
+  if (key?.name === "right") return { kind: "details" };
   if (key?.name === "return") return { kind: "enter" };
   if (key?.name === "escape") return { kind: "escape" };
   if (str && !key?.ctrl && !key?.meta && !str.startsWith("\x1b")) {

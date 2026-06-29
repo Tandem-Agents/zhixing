@@ -18,7 +18,11 @@ import {
   makeInitialSelectionState,
   reduceSelection,
 } from "./state.js";
-import { renderSelectionPanel } from "./render.js";
+import {
+  computeDetailsBodyRows,
+  renderSelectionPanel,
+  type SelectionRenderOptions,
+} from "./render.js";
 import type {
   SelectionResult,
   SelectionRunOptions,
@@ -60,11 +64,14 @@ export class LegacySelectionPresenter implements SelectionPresenter {
       let rawModeLease: RawModeLease | null = null;
       let stdinOwnership: StdinOwnershipHandle | null = null;
       let batcher: ReturnType<typeof wrapKeypressHandler> | null = null;
-      const renderOptions = {
+      const renderOptions: SelectionRenderOptions = {
         columns: this.columns ?? this.stdout.columns ?? 80,
         viewportRows: this.viewportRows ?? this.stdout.rows ?? 24,
         statusRows: 0,
         minScrollRows: 1,
+      };
+      const reduceOptions = {
+        detailBodyRows: computeDetailsBodyRows(renderOptions),
       };
 
       const cleanup = (): void => {
@@ -104,7 +111,7 @@ export class LegacySelectionPresenter implements SelectionPresenter {
 
       const applyAction = (action: SelectionAction): void => {
         try {
-          const reduced = reduceSelection(state, action, request);
+          const reduced = reduceSelection(state, action, request, reduceOptions);
           if (reduced.result) {
             finish(reduced.result);
             return;
@@ -182,8 +189,17 @@ function translateKeypress(
     }
     return null;
   }
+  if (state.layer === "details") {
+    if (key?.name === "up") return { kind: "up" };
+    if (key?.name === "down") return { kind: "down" };
+    if (key?.name === "left") return { kind: "left" };
+    if (key?.name === "return") return { kind: "enter" };
+    if (key?.name === "escape") return { kind: "escape" };
+    return null;
+  }
   if (key?.name === "up") return { kind: "up" };
   if (key?.name === "down") return { kind: "down" };
+  if (key?.name === "right") return { kind: "details" };
   if (key?.name === "return") return { kind: "enter" };
   if (key?.name === "escape") return { kind: "escape" };
   if (str && !key?.ctrl && !key?.meta && !str.startsWith("\x1b")) {

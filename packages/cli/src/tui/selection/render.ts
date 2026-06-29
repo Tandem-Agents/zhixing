@@ -2,10 +2,12 @@ import { clampLine, padEndDisplay, stringWidth } from "../line-width.js";
 import { icon, layout, tone } from "../style.js";
 import type { SelectionState } from "./state.js";
 import type {
+  SelectionDetailsSpec,
   SelectionOption,
   ValidatedSelectionRequest,
 } from "./types.js";
 import {
+  getSelectionDetails,
   isConfirmOption,
   isInputOption,
 } from "./types.js";
@@ -23,6 +25,7 @@ export type SelectionRenderResult =
 
 const DEFAULT_MIN_SCROLL_ROWS = 4;
 const MIN_COLUMNS = 24;
+const DETAILS_FIXED_ROWS = 3;
 const HEADER_SEPARATOR = "  ·  ";
 const OPTION_LABEL_GAP = 2;
 const OPTION_HOTKEY_GAP = 3;
@@ -51,6 +54,13 @@ export function renderSelectionPanel<TValue extends string>(
 
   const lineBudget = columns - 1;
   const maxPanelRows = computeMaxPanelRows(options);
+  if (state.layer === "details") {
+    const details = getSelectionDetails(request, state.selectedIndex);
+    if (details) {
+      return renderDetailsPanel(request, state, details, lineBudget, maxPanelRows);
+    }
+  }
+
   const panelCopy = buildPanelCopy(request, state);
   const requiredRows = requiredPanelRows(request);
   if (requiredRows > maxPanelRows) {
@@ -79,6 +89,37 @@ export function renderSelectionPanel<TValue extends string>(
   };
 }
 
+function renderDetailsPanel<TValue extends string>(
+  request: ValidatedSelectionRequest<TValue>,
+  state: SelectionState,
+  details: SelectionDetailsSpec,
+  lineBudget: number,
+  maxPanelRows: number,
+): SelectionRenderResult {
+  const bodyBudget = computeDetailsBodyRowsFromPanelRows(maxPanelRows);
+  if (bodyBudget < 1) {
+    return { kind: "unavailable", reason: "terminal is too short" };
+  }
+
+  const total = details.body.length;
+  const maxOffset = Math.max(0, total - bodyBudget);
+  const start = Math.min(state.detailScrollOffset, maxOffset);
+  const visible = details.body.slice(start, start + bodyBudget);
+  const selectedOption = request.options[state.selectedIndex];
+  const baseSummary = details.title ?? selectedOption?.label ?? "详情";
+  const summary = total > bodyBudget
+    ? `${baseSummary} ${start + 1}-${start + visible.length}/${total}`
+    : baseSummary;
+
+  const lines = [
+    makeSeparator(lineBudget),
+    renderHeader({ title: request.title, summary, body: [] }, lineBudget),
+    ...visible.map((bodyLine) => line(tone.dim(bodyLine), lineBudget)),
+    line(tone.dim("↑/↓ 滚动 · Esc 返回"), lineBudget),
+  ];
+  return { kind: "rendered", lines };
+}
+
 export function computeMaxPanelRows(options: SelectionRenderOptions): number {
   const rows = Math.floor(options.viewportRows);
   if (!Number.isFinite(rows) || rows <= 0) return 0;
@@ -88,6 +129,14 @@ export function computeMaxPanelRows(options: SelectionRenderOptions): number {
     Math.floor(options.minScrollRows ?? DEFAULT_MIN_SCROLL_ROWS),
   );
   return Math.max(0, rows - statusRows - minScrollRows);
+}
+
+export function computeDetailsBodyRows(options: SelectionRenderOptions): number {
+  return computeDetailsBodyRowsFromPanelRows(computeMaxPanelRows(options));
+}
+
+function computeDetailsBodyRowsFromPanelRows(maxPanelRows: number): number {
+  return maxPanelRows - DETAILS_FIXED_ROWS;
 }
 
 function requiredPanelRows<TValue extends string>(
@@ -264,7 +313,10 @@ function renderHint<TValue extends string>(
       confirm?.cancelLabel ?? "返回"
     }`;
   }
-  return `Enter ${request.submitLabel ?? "选择"} · ↑/↓ 选择 · Esc ${
+  const detailsHint = getSelectionDetails(request, state.selectedIndex)
+    ? " · → 详情"
+    : "";
+  return `Enter ${request.submitLabel ?? "选择"} · ↑/↓ 选择${detailsHint} · Esc ${
     request.cancelLabel ?? "取消"
   }`;
 }

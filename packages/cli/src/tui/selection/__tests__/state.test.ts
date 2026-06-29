@@ -37,6 +37,7 @@ describe("selection state reducer", () => {
       selectedIndex: 0,
       layer: "select",
       inputBuffer: "",
+      detailScrollOffset: 0,
     });
 
     const down = reduceSelection(initial, { kind: "down" }, request).state;
@@ -137,6 +138,66 @@ describe("selection state reducer", () => {
       selectedIndex: 3,
       layer: "select",
       inputBuffer: "",
+      detailScrollOffset: 0,
     });
+  });
+
+  it("opens reusable details, scrolls them, and returns without selecting", () => {
+    const request = validateSelectionRequest({
+      title: "选择",
+      details: { title: "完整说明", body: ["一", "二", "三"] },
+      options: [{ value: "continue", label: "继续" }],
+    });
+    const initial = makeInitialSelectionState(request);
+
+    let details = reduceSelection(initial, { kind: "details" }, request).state;
+    expect(details).toMatchObject<Partial<SelectionState>>({
+      layer: "details",
+      selectedIndex: 0,
+      detailScrollOffset: 0,
+    });
+
+    details = reduceSelection(details, { kind: "down" }, request).state;
+    expect(details.detailScrollOffset).toBe(1);
+    details = reduceSelection(details, { kind: "down" }, request).state;
+    details = reduceSelection(details, { kind: "down" }, request).state;
+    expect(details.detailScrollOffset).toBe(2);
+    details = reduceSelection(details, { kind: "up" }, request).state;
+    expect(details.detailScrollOffset).toBe(1);
+
+    const returned = reduceSelection(details, { kind: "left" }, request).state;
+    expect(returned).toMatchObject<Partial<SelectionState>>({
+      layer: "select",
+      detailScrollOffset: 0,
+    });
+  });
+
+  it("clamps details scrolling to the last full page when page size is known", () => {
+    const request = validateSelectionRequest({
+      title: "选择",
+      details: { title: "完整说明", body: ["一", "二", "三", "四", "五"] },
+      options: [{ value: "continue", label: "继续" }],
+    });
+    const reduceOptions = { detailBodyRows: 4 };
+    let details = reduceSelection(
+      makeInitialSelectionState(request),
+      { kind: "details" },
+      request,
+    ).state;
+
+    details = reduceSelection(details, { kind: "down" }, request, reduceOptions).state;
+    details = reduceSelection(details, { kind: "down" }, request, reduceOptions).state;
+    details = reduceSelection(details, { kind: "down" }, request, reduceOptions).state;
+
+    expect(details.detailScrollOffset).toBe(1);
+  });
+
+  it("ignores details action when no details are available", () => {
+    const request = makeRequest();
+    const initial = makeInitialSelectionState(request);
+
+    expect(reduceSelection(initial, { kind: "details" }, request).state).toBe(
+      initial,
+    );
   });
 });

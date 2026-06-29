@@ -7,6 +7,7 @@ import {
   reduceSelection,
 } from "../state.js";
 import {
+  computeDetailsBodyRows,
   computeMaxPanelRows,
   renderSelectionPanel,
 } from "../render.js";
@@ -122,6 +123,107 @@ describe("renderSelectionPanel", () => {
     const plain = stripAnsi(rendered.lines.join("\n"));
     expect(plain).toContain("说明已折叠");
     expect(plain).not.toContain("五");
+  });
+
+  it("renders request details as a scrollable disclosure layer", () => {
+    const request = validateSelectionRequest({
+      title: "选择",
+      details: { title: "完整说明", body: ["一", "二", "三", "四", "五"] },
+      options: [{ value: "a", label: "A" }],
+    });
+    const detailsRenderOptions = {
+      columns: 40,
+      viewportRows: 8,
+      minScrollRows: 1,
+    };
+    const reduceOptions = {
+      detailBodyRows: computeDetailsBodyRows(detailsRenderOptions),
+    };
+    const initial = makeInitialSelectionState(request);
+    const selectRendered = renderSelectionPanel(request, initial, {
+      columns: 40,
+      viewportRows: 10,
+      minScrollRows: 1,
+    });
+    expect(selectRendered.kind).toBe("rendered");
+    if (selectRendered.kind !== "rendered") return;
+    expect(stripAnsi(selectRendered.lines.join("\n"))).toContain("→ 详情");
+
+    const detailsState = reduceSelection(
+      initial,
+      { kind: "details" },
+      request,
+    ).state;
+    const firstPage = renderSelectionPanel(request, detailsState, {
+      ...detailsRenderOptions,
+    });
+    expect(firstPage.kind).toBe("rendered");
+    if (firstPage.kind !== "rendered") return;
+    const firstPlain = stripAnsi(firstPage.lines.join("\n"));
+    expect(firstPlain).toContain("完整说明 1-4/5");
+    expect(firstPlain).toContain("一");
+    expect(firstPlain).not.toContain("五");
+
+    const scrolledState = reduceSelection(
+      detailsState,
+      { kind: "down" },
+      request,
+      reduceOptions,
+    ).state;
+    const secondPage = renderSelectionPanel(request, scrolledState, {
+      ...detailsRenderOptions,
+    });
+    expect(secondPage.kind).toBe("rendered");
+    if (secondPage.kind !== "rendered") return;
+    const secondPlain = stripAnsi(secondPage.lines.join("\n"));
+    expect(secondPlain).toContain("完整说明 2-5/5");
+    expect(secondPlain).toContain("五");
+
+    const bottomState = Array.from({ length: 3 }).reduce(
+      (current) =>
+        reduceSelection(current, { kind: "down" }, request, reduceOptions).state,
+      scrolledState,
+    );
+    const bottomPage = renderSelectionPanel(request, bottomState, {
+      ...detailsRenderOptions,
+    });
+    expect(bottomPage.kind).toBe("rendered");
+    if (bottomPage.kind !== "rendered") return;
+    const bottomPlain = stripAnsi(bottomPage.lines.join("\n"));
+    expect(bottomPlain).toContain("完整说明 2-5/5");
+    expect(bottomPlain).toContain("二");
+    expect(bottomPlain).toContain("五");
+  });
+
+  it("prefers selected option details over request details", () => {
+    const request = validateSelectionRequest({
+      title: "选择",
+      details: { title: "请求详情", body: ["请求"] },
+      options: [
+        {
+          value: "a",
+          label: "A",
+          details: { title: "选项详情", body: ["选项"] },
+        },
+      ],
+    });
+    const detailsState = reduceSelection(
+      makeInitialSelectionState(request),
+      { kind: "details" },
+      request,
+    ).state;
+
+    const rendered = renderSelectionPanel(request, detailsState, {
+      columns: 40,
+      viewportRows: 10,
+      minScrollRows: 1,
+    });
+    expect(rendered.kind).toBe("rendered");
+    if (rendered.kind !== "rendered") return;
+    const plain = stripAnsi(rendered.lines.join("\n"));
+    expect(plain).toContain("选项详情");
+    expect(plain).toContain("选项");
+    expect(plain).not.toContain("请求");
   });
 
   it("refuses tiny terminals instead of rendering a broken panel", () => {

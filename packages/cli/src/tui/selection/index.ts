@@ -7,6 +7,7 @@ export {
   type SelectionCancelCause,
   type SelectionConfirmOption,
   type SelectionConfirmSpec,
+  type SelectionDetailsSpec,
   type SelectionHotkey,
   type SelectionInputOption,
   type SelectionInputSpec,

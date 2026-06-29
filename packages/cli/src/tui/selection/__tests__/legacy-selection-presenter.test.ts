@@ -3,6 +3,7 @@ import { PassThrough } from "node:stream";
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { _getRawModeRefcount, _resetRawModeRefcountForTests } from "../../_internal/raw-mode.js";
+import { stripAnsi } from "../../ansi.js";
 import { LegacySelectionPresenter } from "../legacy-selection-presenter.js";
 import { validateSelectionRequest } from "../types.js";
 
@@ -117,6 +118,33 @@ describe("LegacySelectionPresenter", () => {
       kind: "selected",
       value: "delete",
     });
+    expect(_getRawModeRefcount()).toBe(0);
+  });
+
+  it("opens details and returns to selection without completing", async () => {
+    const stdin = makeStdin();
+    const stdout = makeStdout();
+    const presenter = new LegacySelectionPresenter({ stdin, stdout });
+    const request = validateSelectionRequest({
+      title: "选择",
+      details: { title: "完整说明", body: ["第一行", "第二行"] },
+      options: [{ value: "continue", label: "继续" }],
+    });
+
+    const done = presenter.run(request);
+    await tick();
+    await sendKey(stdin, { name: "right" });
+    await sendKey(stdin, { name: "down" });
+    await sendKey(stdin, { name: "left" });
+    await sendKey(stdin, { name: "return" });
+
+    await expect(done).resolves.toEqual({
+      kind: "selected",
+      value: "continue",
+    });
+    expect(stdout.chunks.map((chunk) => stripAnsi(chunk)).join("\n")).toContain(
+      "完整说明",
+    );
     expect(_getRawModeRefcount()).toBe(0);
   });
 

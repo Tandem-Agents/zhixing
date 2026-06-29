@@ -107,4 +107,38 @@ describe("validateSelectionRequest", () => {
       }),
     ).toThrow(/confirm title is empty/);
   });
+
+  it("validates request and option details as reusable disclosure content", () => {
+    const request = validateSelectionRequest({
+      title: "选择",
+      details: { title: "完整说明", body: ["第一行", "", "第三行"] },
+      options: [
+        {
+          value: "review",
+          label: "查看",
+          details: { body: ["选项详情"] },
+        },
+      ],
+    });
+
+    expect(request.details?.title).toBe("完整说明");
+    expect(request.options[0]?.details?.body).toEqual(["选项详情"]);
+
+    expect(() =>
+      validateSelectionRequest({
+        title: "选择",
+        details: { body: [] },
+        options: [{ value: "a", label: "A" }],
+      }),
+    ).toThrow(/details body is empty/);
+
+    expect(() =>
+      validateSelectionRequest({
+        title: "选择",
+        options: [
+          { value: "a", label: "A", details: { title: " ", body: ["x"] } },
+        ],
+      }),
+    ).toThrow(/option details.*title is empty/);
+  });
 });
