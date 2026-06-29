@@ -494,9 +494,11 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 
 这里的“同构”只指资产目录与索引模式相似，不指直接复用 `SkillStore` 代码。`SkillStore` 绑定 `SKILL.md`、frontmatter、mode、pinned、skill source 等技能语义，不能作为 RubricStore 的实现捷径。若后续确实需要复用，应先提取领域无关的 ManagedAssetStore / ManagedDocumentStore 基础设施，再让 SkillStore 与 RubricStore 分别承载各自协议。
 
+`id` 是 Rubric 的稳定资产身份，首次保存时写入 `RUBRIC.md` frontmatter；后续 `title` 只作为可编辑展示名，不再反向改变资产身份。
+
 第一版只要求：
 
-- `listForMatching()`：返回 title / description / id / mode 等轻量索引。
+- `listForMatching()`：返回 id / title / description 等轻量索引。
 - `load(id)`：加载全文。
 - `saveOwn(draft)`：保存用户确认后的新 Rubric。
 - `archive(id)`：归档。
