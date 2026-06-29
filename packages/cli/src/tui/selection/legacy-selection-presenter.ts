@@ -1,5 +1,3 @@
-import type * as readline from "node:readline";
-
 import { wrapKeypressHandler } from "../../paste-detector.js";
 import {
   rawModeController,
@@ -10,10 +8,7 @@ import {
   type StdinOwnershipHandle,
 } from "../_internal/stdin-ownership.js";
 import type { SelectionPresenter } from "./presenter.js";
-import type {
-  SelectionAction,
-  SelectionState,
-} from "./state.js";
+import type { SelectionAction } from "./state.js";
 import {
   makeInitialSelectionState,
   reduceSelection,
@@ -23,6 +18,7 @@ import {
   renderSelectionPanel,
   type SelectionRenderOptions,
 } from "./render.js";
+import { translateSelectionKeypress } from "./keymap.js";
 import type {
   SelectionResult,
   SelectionRunOptions,
@@ -145,7 +141,7 @@ export class LegacySelectionPresenter implements SelectionPresenter {
                 finish({ kind: "cancelled", cause: "ctrl-d" });
                 return;
               }
-              const action = translateKeypress(str, key, state);
+              const action = translateSelectionKeypress(str, key, state);
               if (action) applyAction(action);
             } catch (err) {
               fail(err);
@@ -173,37 +169,4 @@ export class LegacySelectionPresenter implements SelectionPresenter {
       }
     });
   }
-}
-
-function translateKeypress(
-  str: string,
-  key: readline.Key | undefined,
-  state: SelectionState,
-): SelectionAction | null {
-  if (state.layer === "input") {
-    if (key?.name === "return") return { kind: "enter" };
-    if (key?.name === "escape") return { kind: "escape" };
-    if (key?.name === "backspace") return { kind: "backspace" };
-    if (str && !key?.ctrl && !key?.meta && str !== "\r" && str !== "\n") {
-      return { kind: "char", ch: str };
-    }
-    return null;
-  }
-  if (state.layer === "details") {
-    if (key?.name === "up") return { kind: "up" };
-    if (key?.name === "down") return { kind: "down" };
-    if (key?.name === "left") return { kind: "left" };
-    if (key?.name === "return") return { kind: "enter" };
-    if (key?.name === "escape") return { kind: "escape" };
-    return null;
-  }
-  if (key?.name === "up") return { kind: "up" };
-  if (key?.name === "down") return { kind: "down" };
-  if (key?.name === "right") return { kind: "details" };
-  if (key?.name === "return") return { kind: "enter" };
-  if (key?.name === "escape") return { kind: "escape" };
-  if (str && !key?.ctrl && !key?.meta && !str.startsWith("\x1b")) {
-    return { kind: "hotkey", key: str };
-  }
-  return null;
 }

@@ -27,6 +27,7 @@ import {
   renderSelectionPanel,
   type SelectionRenderOptions,
 } from "./render.js";
+import { translateSelectionKeypress } from "./keymap.js";
 import type {
   SelectionResult,
   ValidatedSelectionRequest,
@@ -121,7 +122,7 @@ export class InlineSelectionRegion<TValue extends string = string>
       return;
     }
 
-    const action = translateKeypress(str, key, this.state);
+    const action = translateSelectionKeypress(str, key, this.state);
     if (!action) return;
     this.applyAction(action);
   }
@@ -202,47 +203,6 @@ export function assertInlineSelectionAvailable(
   if (computeMaxPanelRows(options) <= 0) {
     throw new SelectionUnavailableError("terminal is too short");
   }
-}
-
-function translateKeypress(
-  str: string,
-  key: readline.Key | undefined,
-  state: SelectionState,
-): SelectionAction | null {
-  if (state.layer === "input") {
-    if (key?.name === "return") return { kind: "enter" };
-    if (key?.name === "escape") return { kind: "escape" };
-    if (key?.name === "backspace") return { kind: "backspace" };
-    if (
-      str &&
-      !key?.ctrl &&
-      !key?.meta &&
-      str !== "\r" &&
-      str !== "\n" &&
-      !str.startsWith("\x1b")
-    ) {
-      return { kind: "char", ch: str };
-    }
-    return null;
-  }
-  if (state.layer === "details") {
-    if (key?.name === "up") return { kind: "up" };
-    if (key?.name === "down") return { kind: "down" };
-    if (key?.name === "left") return { kind: "left" };
-    if (key?.name === "return") return { kind: "enter" };
-    if (key?.name === "escape") return { kind: "escape" };
-    return null;
-  }
-
-  if (key?.name === "up") return { kind: "up" };
-  if (key?.name === "down") return { kind: "down" };
-  if (key?.name === "right") return { kind: "details" };
-  if (key?.name === "return") return { kind: "enter" };
-  if (key?.name === "escape") return { kind: "escape" };
-  if (str && !key?.ctrl && !key?.meta && !str.startsWith("\x1b")) {
-    return { kind: "hotkey", key: str };
-  }
-  return null;
 }
 
 function resolveRows(rows: number | (() => number) | undefined): number {
