@@ -12,14 +12,6 @@ import type {
   TaskListState,
   DeliveryStats,
 } from "@zhixing/core";
-import {
-  AdvancementStore,
-  LLMAdvancementAdmissionStrategy,
-  LLMRubricDraftGenerationStrategy,
-  LLMRubricDraftRevisionStrategy,
-  RubricStore,
-  RubricContractBuilder,
-} from "@zhixing/core";
 import type { ServerConfig } from "./types.js";
 import type { ConversationManager } from "./runtime/index.js";
 import type { ConfirmationHub } from "./confirmation/hub.js";
@@ -165,11 +157,6 @@ export interface CreateContextOptions {
 }
 
 export function createServerContext(opts: CreateContextOptions): ServerContext {
-  const advancement =
-    opts.advancement ??
-    (opts.llmComplete
-      ? createDefaultAdvancementController(opts.llmComplete)
-      : undefined);
   return {
     config: opts.config,
     version: opts.version,
@@ -177,7 +164,7 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     startedAt: Date.now(),
     scheduler: opts.scheduler,
     conversations: opts.conversations,
-    advancement,
+    advancement: opts.advancement,
     conversationDirectory: opts.conversationDirectory,
     workscenes: opts.workscenes,
     trust: opts.trust,
@@ -193,25 +180,4 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     runRegistry: opts.runRegistry,
     runtimeControl: opts.runtimeControl,
   };
-}
-
-function createDefaultAdvancementController(
-  complete: NonNullable<CreateContextOptions["llmComplete"]>,
-): AdvancementController {
-  const contractBuilder = new RubricContractBuilder({
-    rubricStore: new RubricStore(),
-    generationStrategy: new LLMRubricDraftGenerationStrategy({
-      complete: (prompt) => complete(prompt, "main"),
-    }),
-    revisionStrategy: new LLMRubricDraftRevisionStrategy({
-      complete: (prompt) => complete(prompt, "main"),
-    }),
-  });
-  return new AdvancementController({
-    store: new AdvancementStore(),
-    admissionStrategy: new LLMAdvancementAdmissionStrategy({
-      complete: (prompt) => complete(prompt, "light"),
-    }),
-    contractBuilder,
-  });
 }

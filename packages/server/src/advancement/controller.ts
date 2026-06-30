@@ -5,10 +5,15 @@ import {
   type AdvancementAdmissionDecision,
   type AdvancementAdmissionStrategy,
   type AdvancementExit,
+  type AdvancementRunReview,
   type AdvancementSession,
+  type ConfirmedRubricSnapshot,
+  type RunRecordInput,
+  type RunRecordRef,
   type RubricContractDraftSnapshot,
   type UserTurnInput,
 } from "@zhixing/core";
+import { randomUUID } from "node:crypto";
 
 export type AdvancementPrepareResult =
   | {
@@ -72,21 +77,63 @@ export interface AdvancementControllerOptions {
   readonly store?: AdvancementStore;
   readonly contractBuilder?: RubricContractBuilder;
   readonly admissionStrategy?: AdvancementAdmissionStrategy;
+  readonly reviewer?: AdvancementRunReviewer;
   readonly now?: () => string;
+  readonly reviewIdGenerator?: () => string;
 }
+
+export interface AdvancementReviewRunInput {
+  readonly sessionId: string;
+  readonly originalUserTask: UserTurnInput;
+  readonly rubric: ConfirmedRubricSnapshot;
+  readonly runIndex: number;
+  readonly runRecord: RunRecordInput;
+  readonly runRecordRef?: RunRecordRef;
+  readonly priorReviews?: readonly AdvancementRunReview[];
+  readonly abortSignal?: AbortSignal;
+}
+
+export interface AdvancementRunReviewer {
+  reviewRun(input: AdvancementReviewRunInput): Promise<AdvancementRunReview>;
+}
+
+export type AdvancementTurnReviewResult =
+  | { readonly kind: "skipped"; readonly reason: "no-active-session" | "not-active" }
+  | {
+      readonly kind: "reviewed";
+      readonly session: AdvancementSession;
+      readonly review: AdvancementRunReview;
+    }
+  | {
+      readonly kind: "completed";
+      readonly session: AdvancementSession;
+      readonly review: AdvancementRunReview;
+      readonly exit: AdvancementExit;
+    }
+  | {
+      readonly kind: "exited";
+      readonly session: AdvancementSession;
+      readonly review: AdvancementRunReview;
+      readonly exit: AdvancementExit;
+    };
 
 export class AdvancementController {
   private readonly store: AdvancementStore;
   private readonly contractBuilder: RubricContractBuilder;
   private readonly admissionStrategy: AdvancementAdmissionStrategy;
+  private readonly reviewer?: AdvancementRunReviewer;
   private readonly now: () => string;
+  private readonly reviewIdGenerator: () => string;
 
   constructor(options: AdvancementControllerOptions = {}) {
     this.store = options.store ?? new AdvancementStore();
     this.contractBuilder = options.contractBuilder ?? new RubricContractBuilder();
     this.admissionStrategy =
       options.admissionStrategy ?? new ConservativeAdvancementAdmissionStrategy();
+    this.reviewer = options.reviewer;
     this.now = options.now ?? (() => new Date().toISOString());
+    this.reviewIdGenerator =
+      options.reviewIdGenerator ?? (() => `adv_review_${randomUUID()}`);
   }
 
   async prepareUserTurn(input: {
@@ -321,6 +368,57 @@ export class AdvancementController {
     );
   }
 
+  async afterTurnCommitted(input: {
+    readonly conversationId: string;
+    readonly runIndex: number;
+    readonly runRecord: RunRecordInput;
+    readonly runRecordRef?: RunRecordRef;
+    readonly abortSignal?: AbortSignal;
+  }): Promise<AdvancementTurnReviewResult> {
+    const session = await this.store.loadActiveSession(input.conversationId);
+    if (!session) return { kind: "skipped", reason: "no-active-session" };
+    if (session.status !== "active") {
+      return { kind: "skipped", reason: "not-active" };
+    }
+    const rubric = session.confirmedRubric;
+    if (!rubric) {
+      const review = this.systemExitReview(
+        input,
+        "推进会话已激活但缺少已确认 Rubric，无法继续可靠验收。",
+      );
+      return await this.persistReviewOutcome(session, review);
+    }
+    if (!this.reviewer) {
+      const review = this.systemExitReview(
+        input,
+        "推进侧验收运行体未装配，无法继续可靠验收。",
+      );
+      return await this.persistReviewOutcome(session, review);
+    }
+
+    let review: AdvancementRunReview;
+    try {
+      review = await this.reviewer.reviewRun({
+        sessionId: session.id,
+        originalUserTask: session.originalUserTask,
+        rubric,
+        runIndex: input.runIndex,
+        runRecord: input.runRecord,
+        runRecordRef: input.runRecordRef,
+        priorReviews: session.runs,
+        abortSignal: input.abortSignal,
+      });
+      assertReviewMatchesAcceptedRun(input, review);
+    } catch (err) {
+      review = this.systemExitReview(
+        input,
+        `推进侧验收运行失败：${errorMessage(err)}`,
+      );
+    }
+
+    return await this.persistReviewOutcome(session, review);
+  }
+
   private async cancelSession(
     conversationId: string,
     sessionId: string,
@@ -344,10 +442,97 @@ export class AdvancementController {
     }
     return session;
   }
+
+  private async persistReviewOutcome(
+    session: AdvancementSession,
+    review: AdvancementRunReview,
+  ): Promise<AdvancementTurnReviewResult> {
+    if (review.decision === "passed") {
+      const exit: AdvancementExit = {
+        reason: "passed",
+        message: "Rubric 已验收通过，任务推进闭环结束。",
+        occurredAt: this.now(),
+      };
+      const completed = await this.store.appendTerminalRunReview(
+        session.conversationId,
+        session.id,
+        review,
+        { type: "completed", exit, timestamp: exit.occurredAt },
+        review.reviewedAt,
+      );
+      return { kind: "completed", session: completed, review, exit };
+    }
+    if (review.decision === "exit") {
+      const exit: AdvancementExit = {
+        reason: review.exitReason ?? "system-error",
+        message: review.unmetCriteria[0] ?? "推进侧判断继续推进已不合适。",
+        occurredAt: this.now(),
+      };
+      const exited = await this.store.appendTerminalRunReview(
+        session.conversationId,
+        session.id,
+        review,
+        { type: "exited", exit, timestamp: exit.occurredAt },
+        review.reviewedAt,
+      );
+      return { kind: "exited", session: exited, review, exit };
+    }
+    const reviewed = await this.store.appendRunReview(
+      session.conversationId,
+      session.id,
+      review,
+      review.reviewedAt,
+    );
+    return { kind: "reviewed", session: reviewed, review };
+  }
+
+  private systemExitReview(
+    input: {
+      readonly runIndex: number;
+      readonly runRecordRef?: RunRecordRef;
+    },
+    message: string,
+  ): AdvancementRunReview {
+    return {
+      id: this.reviewIdGenerator(),
+      runIndex: input.runIndex,
+      runRecordRef: input.runRecordRef,
+      reviewedAt: this.now(),
+      decision: "exit",
+      evidence: [],
+      unmetCriteria: [message],
+      exitReason: "system-error",
+    };
+  }
 }
 
 function errorMessage(err: unknown): string {
   return err instanceof Error && err.message.trim().length > 0
     ? err.message
     : "Rubric contract draft generation failed";
+}
+
+function assertReviewMatchesAcceptedRun(
+  accepted: {
+    readonly runIndex: number;
+    readonly runRecordRef?: RunRecordRef;
+  },
+  review: AdvancementRunReview,
+): void {
+  if (review.runIndex !== accepted.runIndex) {
+    throw new Error(
+      `review runIndex ${review.runIndex} does not match accepted runIndex ${accepted.runIndex}`,
+    );
+  }
+  if (!sameRunRecordRef(review.runRecordRef, accepted.runRecordRef)) {
+    throw new Error("review runRecordRef does not match accepted runRecordRef");
+  }
+}
+
+function sameRunRecordRef(
+  a: RunRecordRef | undefined,
+  b: RunRecordRef | undefined,
+): boolean {
+  if (!a || !b) return a === b;
+  return a.shardId === b.shardId && a.runIndex === b.runIndex;
 }

@@ -7,7 +7,7 @@ const TEST_VERSION = "0.1.0-test";
 const TEST_TOKEN = "test-token-context";
 
 describe("createServerContext", () => {
-  it("有 llmComplete 时默认装配推进控制面", () => {
+  it("llmComplete 不自动启用推进控制面", () => {
     const ctx = createServerContext({
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: TEST_VERSION,
@@ -15,7 +15,7 @@ describe("createServerContext", () => {
       llmComplete: async () => "{}",
     });
 
-    expect(ctx.advancement).toBeInstanceOf(AdvancementController);
+    expect(ctx.advancement).toBeUndefined();
   });
 
   it("显式传入的推进控制面优先于默认装配", () => {

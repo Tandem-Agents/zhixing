@@ -153,6 +153,44 @@ export class AdvancementStore {
     });
   }
 
+  async appendTerminalRunReview(
+    conversationId: string,
+    sessionId: string,
+    review: AdvancementRunReview,
+    terminal: {
+      readonly type: "completed" | "exited";
+      readonly exit: AdvancementExit;
+      readonly timestamp?: string;
+    },
+    timestamp = review.reviewedAt,
+  ): Promise<AdvancementSession> {
+    return await this.withConversationLock(conversationId, async () => {
+      this.assertActiveSession(
+        await this.loadConversationSessionsInLock(conversationId),
+        sessionId,
+      );
+      assertTerminalReviewDecision(review, terminal.type);
+      await this.appendEventsInLock(conversationId, [
+        {
+          type: "run_reviewed",
+          timestamp,
+          sessionId,
+          review,
+        },
+        {
+          type: terminal.type,
+          timestamp: terminal.timestamp ?? terminal.exit.occurredAt,
+          sessionId,
+          exit: terminal.exit,
+        },
+      ]);
+      return this.requireSession(
+        await this.loadConversationSessionsInLock(conversationId),
+        sessionId,
+      );
+    });
+  }
+
   async enqueueProxyMessage(
     conversationId: string,
     sessionId: string,
@@ -364,9 +402,20 @@ export class AdvancementStore {
     conversationId: string,
     event: AdvancementStoreEvent,
   ): Promise<void> {
+    await this.appendEventsInLock(conversationId, [event]);
+  }
+
+  private async appendEventsInLock(
+    conversationId: string,
+    events: readonly AdvancementStoreEvent[],
+  ): Promise<void> {
+    if (events.length === 0) return;
     const file = advancementLogPath(this.root, conversationId);
     await fs.mkdir(path.dirname(file), { recursive: true });
-    await fs.appendFile(file, `${JSON.stringify(event)}\n`);
+    await fs.appendFile(
+      file,
+      `${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
+    );
   }
 
   private async withConversationLock<T>(
@@ -408,6 +457,22 @@ export class AdvancementStore {
       throw new Error(`AdvancementStore: session "${sessionId}" is not active`);
     }
     return session;
+  }
+}
+
+function assertTerminalReviewDecision(
+  review: AdvancementRunReview,
+  terminalType: "completed" | "exited",
+): void {
+  if (terminalType === "completed" && review.decision !== "passed") {
+    throw new Error(
+      `AdvancementStore: completed review must have decision "passed"`,
+    );
+  }
+  if (terminalType === "exited" && review.decision !== "exit") {
+    throw new Error(
+      `AdvancementStore: exited review must have decision "exit"`,
+    );
   }
 }
 

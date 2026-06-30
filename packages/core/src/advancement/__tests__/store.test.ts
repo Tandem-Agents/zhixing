@@ -222,6 +222,58 @@ describe("AdvancementStore", () => {
     ).rejects.toThrow(/outstanding proxy/);
   });
 
+  it("终态 review 与 completed/exited 作为同一个验收结果写入", async () => {
+    const { store } = await makeStore();
+    await store.createSession(createInput());
+    await store.confirmRubric("conv-1", "session-1", confirmed());
+
+    const session = await store.appendTerminalRunReview(
+      "conv-1",
+      "session-1",
+      review({ decision: "passed", unmetCriteria: [] }),
+      {
+        type: "completed",
+        exit: exit("passed"),
+        timestamp: "2026-01-01T00:05:00.000Z",
+      },
+      "2026-01-01T00:02:00.000Z",
+    );
+
+    expect(session.status).toBe("completed");
+    expect(session.runs).toHaveLength(1);
+    expect(await store.loadActiveSession("conv-1")).toBeNull();
+    expect((await store.readEvents("conv-1")).map((event) => event.type)).toEqual([
+      "session_created",
+      "rubric_confirmed",
+      "run_reviewed",
+      "completed",
+    ]);
+  });
+
+  it("拒绝终态事件与 review decision 不一致", async () => {
+    const { store } = await makeStore();
+    await store.createSession(createInput());
+    await store.confirmRubric("conv-1", "session-1", confirmed());
+
+    await expect(
+      store.appendTerminalRunReview(
+        "conv-1",
+        "session-1",
+        review({ decision: "failed" }),
+        { type: "completed", exit: exit("passed") },
+      ),
+    ).rejects.toThrow(/completed review/);
+
+    await expect(
+      store.appendTerminalRunReview(
+        "conv-1",
+        "session-1",
+        review({ decision: "passed", unmetCriteria: [] }),
+        { type: "exited", exit: exit("system-error") },
+      ),
+    ).rejects.toThrow(/exited review/);
+  });
+
   it("待确认 session 可以被取消且不再作为 active session 返回", async () => {
     const { store } = await makeStore();
     await store.createSession(createInput());
@@ -291,6 +343,12 @@ describe("AdvancementStore", () => {
     ).rejects.toThrow(/not active/);
     await expect(
       store.exitSession("conv-1", "session-1", exit("dead-end")),
+    ).rejects.toThrow(/not active/);
+    await expect(
+      store.appendTerminalRunReview("conv-1", "session-1", review(), {
+        type: "exited",
+        exit: exit("system-error"),
+      }),
     ).rejects.toThrow(/not active/);
   });
 
