@@ -1570,7 +1570,10 @@ describe("ConversationManager", () => {
         {
           loadHistory: async () => undefined,
           initTranscript: async () => {},
-          appendRun: async () => ({ runIndex: nextRunIndex++ }),
+          appendRun: async () => ({
+            runIndex: nextRunIndex++,
+            shardId: "000001",
+          }),
           onTurnCommitted: opts?.onTurnCommitted,
         },
       );
@@ -2172,27 +2175,53 @@ describe("ConversationManager", () => {
     });
 
     it("recordTurn 持久化成功后触发 onTurnCommitted(turnCount / runMessages / runtime);钩子抛错不影响落定", async () => {
-      const committed: Array<{ conversationId: string; turnCount: number }> = [];
+      const committed: Array<{
+        conversationId: string;
+        turnId: string;
+        turnCount: number;
+        runIndex: number;
+        runRecordRef: { shardId: string; runIndex: number } | undefined;
+      }> = [];
       const mgr = makePersistentManager({
         onTurnCommitted: (info) => {
           committed.push({
             conversationId: info.conversationId,
+            turnId: info.turnId,
             turnCount: info.turnCount,
+            runIndex: info.runIndex,
+            runRecordRef: info.runRecordRef,
           });
           throw new Error("维护钩子崩了");
         },
       });
 
       const session = await mgr.getOrCreate("conv-hook");
-      await mgr.recordTurn("conv-hook", runRecord("首轮"));
+      await mgr.recordTurn("conv-hook", runRecord("首轮"), undefined, {
+        turnId: "turn-1",
+      });
       // 钩子抛错被吞:turn 照常落定(窗口前进 + turnCount 推进)
       expect(session.turnCount).toBe(1);
       expect(session.window.getMessages().length).toBeGreaterThan(0);
-      expect(committed).toEqual([{ conversationId: "conv-hook", turnCount: 1 }]);
+      expect(committed).toEqual([
+        {
+          conversationId: "conv-hook",
+          turnId: "turn-1",
+          turnCount: 1,
+          runIndex: 0,
+          runRecordRef: { shardId: "000001", runIndex: 0 },
+        },
+      ]);
 
-      await mgr.recordTurn("conv-hook", runRecord("次轮"));
+      await mgr.recordTurn("conv-hook", runRecord("次轮"), undefined, {
+        turnId: "turn-2",
+      });
       expect(committed).toHaveLength(2);
       expect(committed[1]?.turnCount).toBe(2);
+      expect(committed[1]?.runIndex).toBe(1);
+      expect(committed[1]?.runRecordRef).toEqual({
+        shardId: "000001",
+        runIndex: 1,
+      });
 
       await mgr.disposeAll();
     });

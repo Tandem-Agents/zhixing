@@ -22,6 +22,7 @@ import {
   type AttentionWindowState,
   type Message,
   type RunRecordInput,
+  type RunRecordRef,
   type SnapshotInput,
   type WindowCompact,
   type WindowFoldOutcome,
@@ -199,13 +200,25 @@ export interface ConversationManagerCallbacks {
 /** onTurnCommitted 的入参——本次 turn 落定后的会话事实快照 */
 export interface TurnCommittedInfo {
   readonly conversationId: string;
+  /** 本次 turn 的身份；无 turn 上下文时为空串 */
+  readonly turnId: string;
   /** 本 turn 落定后的累计 turn 数(首轮 = 1) */
   readonly turnCount: number;
+  /** 本 run 的完整落定事实 */
+  readonly runRecord: RunRecordInput;
+  /** 对话内 run 序号；ephemeral 会话使用 provisional 序号 */
+  readonly runIndex: number;
+  /** 持久化分片引用；ephemeral 或尚无分片引用时为空 */
+  readonly runRecordRef?: RunRecordRef;
   /** 本 run 的全部消息(含用户消息与助手回复) */
   readonly runMessages: readonly Message[];
   readonly ephemeral: boolean;
   /** 该会话的运行体(维护任务的 callText 推理通道) */
   readonly runtime: SessionRuntime;
+}
+
+export interface RecordTurnOptions {
+  readonly turnId?: string;
 }
 
 // ─── 待处理任务 ───
@@ -846,6 +859,7 @@ export class ConversationManager {
     conversationId: string,
     record: RunRecordInput,
     windowCompact?: WindowCompact,
+    options?: RecordTurnOptions,
   ): Promise<void> {
     const session = this.sessions.get(conversationId);
     if (!session) return;
@@ -868,7 +882,10 @@ export class ConversationManager {
       if (session.turnCount >= 2) {
         await this.promote(conversationId);
       }
-      this.notifyTurnCommitted(session, record);
+      this.notifyTurnCommitted(session, record, {
+        turnId: options?.turnId,
+        runIndex: provisionalRunIndex,
+      });
       return;
     }
 
@@ -883,7 +900,7 @@ export class ConversationManager {
           "(was this manager constructed without appendRun while the session is not ephemeral?)",
       );
     }
-    const { runIndex } = await this.appendRunCb(conversationId, record);
+    const { runIndex, shardId } = await this.appendRunCb(conversationId, record);
     const outcome = session.window.acceptRun({
       runMessages: record.messages,
       runIndex,
@@ -891,19 +908,32 @@ export class ConversationManager {
     });
     session.turnCount++;
     await this.maybeWriteSnapshot(conversationId, session, windowCompact, outcome);
-    this.notifyTurnCommitted(session, record);
+    this.notifyTurnCommitted(session, record, {
+      turnId: options?.turnId,
+      runIndex,
+      runRecordRef: { shardId, runIndex },
+    });
   }
 
   /** 持久化成功后触发维护钩子——钩子抛错不反向影响已落定的 turn。 */
   private notifyTurnCommitted(
     session: ManagedSession,
     record: RunRecordInput,
+    accepted: {
+      readonly turnId?: string;
+      readonly runIndex: number;
+      readonly runRecordRef?: RunRecordRef;
+    },
   ): void {
     if (!this.onTurnCommitted) return;
     try {
       this.onTurnCommitted({
         conversationId: session.conversationId,
+        turnId: accepted.turnId ?? "",
         turnCount: session.turnCount,
+        runRecord: record,
+        runIndex: accepted.runIndex,
+        runRecordRef: accepted.runRecordRef,
         runMessages: record.messages,
         ephemeral: session.ephemeral,
         runtime: session.runtime,

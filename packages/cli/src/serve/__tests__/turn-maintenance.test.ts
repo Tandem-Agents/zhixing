@@ -58,7 +58,13 @@ function makeInfo(overrides?: Partial<TurnCommittedInfo>): TurnCommittedInfo {
   };
   return {
     conversationId: "conv-1",
+    turnId: "turn-1",
     turnCount: 1,
+    runRecord: {
+      timestamp: "2026-01-01T00:00:00.000Z",
+      messages: [userMsg],
+    },
+    runIndex: 0,
     runMessages: [userMsg],
     ephemeral: false,
     runtime: {

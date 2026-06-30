@@ -101,6 +101,7 @@ export async function* runTurnWithCommit(
         conversationId,
         runResult.runRecord,
         runResult.windowCompact,
+        { turnId: options?.turnContext?.turnId },
       );
     } catch (err) {
       // 持久化失败：窗口未前进、本轮不成为对话事实。不 re-throw —— caller 的
