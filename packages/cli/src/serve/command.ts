@@ -610,6 +610,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     token: tokenInfo.token,
     scheduler,
     conversations: ctx.conversations,
+    advancement: ctx.advancement,
     conversationDirectory,
     workscenes: worksceneDirectory,
     trust: trustDirectory,

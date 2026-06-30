@@ -34,6 +34,7 @@ import type {
   ConfirmationHub,
   ConversationManager,
   ConversationDirectory,
+  AdvancementController,
   InboundRouter,
   RunningServer,
   CleanupRegistry,
@@ -92,6 +93,7 @@ export interface AssemblyContext {
 
   // ── 接入面产物（surface.setup 写回） ──
   conversations?: ConversationManager;
+  advancement?: AdvancementController;
   channels?: ChannelRegistry;
   inboundRouter?: InboundRouter | null;
   deliveryStack?: DeliveryStack;

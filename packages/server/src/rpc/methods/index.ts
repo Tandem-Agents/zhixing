@@ -11,6 +11,8 @@ import { buildAuthMethod } from "./auth.js";
 import { buildHealthMethod } from "./health.js";
 import {
   buildSessionSendMethod,
+  buildSessionAdvancementConfirmMethod,
+  buildSessionAdvancementCancelMethod,
   buildSessionListMethod,
   buildSessionHistoryMethod,
   buildSessionAbortMethod,
@@ -82,6 +84,8 @@ export function buildBuiltinRegistry(_opts: BuiltinMethodsOptions = {}): Handler
     buildHealthMethod(),
     // session.*
     buildSessionSendMethod(),
+    buildSessionAdvancementConfirmMethod(),
+    buildSessionAdvancementCancelMethod(),
     buildSessionListMethod(),
     buildSessionHistoryMethod(),
     buildSessionAbortMethod(),

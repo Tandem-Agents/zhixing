@@ -15,6 +15,7 @@ import type {
 import type { ServerConfig } from "./types.js";
 import type { ConversationManager } from "./runtime/index.js";
 import type { ConfirmationHub } from "./confirmation/hub.js";
+import type { AdvancementController } from "./advancement/index.js";
 import type {
   SessionActivityBroadcast,
   SessionBroadcast,
@@ -47,6 +48,8 @@ export interface ServerContext {
   scheduler?: Scheduler;
   /** 对话运行时管理器（不传则 session.* 方法不可用） */
   conversations?: ConversationManager;
+  /** 任务推进闭环控制面。不传则 session.send 保持纯执行语义。 */
+  advancement?: AdvancementController;
   /**
    * 对话目录(盘上事实:清单 / 改名 / 删除 / 倒读)。装配方注入持久层实现;
    * 不传则 session.list / history / rename / delete 不可用。
@@ -136,6 +139,7 @@ export interface CreateContextOptions {
   token: string;
   scheduler?: Scheduler;
   conversations?: ConversationManager;
+  advancement?: AdvancementController;
   conversationDirectory?: ConversationDirectory;
   workscenes?: WorksceneDirectory;
   trust?: TrustDirectory;
@@ -160,6 +164,7 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     startedAt: Date.now(),
     scheduler: opts.scheduler,
     conversations: opts.conversations,
+    advancement: opts.advancement,
     conversationDirectory: opts.conversationDirectory,
     workscenes: opts.workscenes,
     trust: opts.trust,

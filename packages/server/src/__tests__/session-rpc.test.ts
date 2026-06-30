@@ -6,10 +6,16 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import WebSocket from "ws";
-import { AgentError } from "@zhixing/core";
+import {
+  AdvancementStore,
+  AgentError,
+  RubricContractBuilder,
+  RubricStore,
+} from "@zhixing/core";
 import type {
   AgentResult,
   AgentYield,
+  AdvancementAdmissionStrategy,
   ContextBudget,
   Message,
   RunResult,
@@ -34,6 +40,8 @@ import {
   isSuccessResponse,
   isErrorResponse,
 } from "../rpc/protocol.js";
+import { AdvancementController } from "../advancement/controller.js";
+import { createTempDir } from "@zhixing/test-utils";
 
 const TEST_VERSION = "0.1.0-test";
 const TEST_TOKEN = "test-token-session";
@@ -377,7 +385,96 @@ describe("session.* RPC (S2.D)", () => {
   // 需要断言持久化副作用的测试仍可覆盖式传自己的 appendRun。
   const recordsByConversation = new Map<string, unknown[]>();
 
-  async function startWithFactory(factory: RuntimeFactory): Promise<void> {
+  async function createTestAdvancementHarness(): Promise<{
+    controller: AdvancementController;
+    store: AdvancementStore;
+  }>;
+  async function createTestAdvancementHarness(opts: {
+    admissionStrategy?: AdvancementAdmissionStrategy;
+  } = {}): Promise<{
+    controller: AdvancementController;
+    store: AdvancementStore;
+  }> {
+    const root = await createTempDir("server-advancement");
+    const store = new AdvancementStore(`${root}/advancement`);
+    return {
+      store,
+      controller: new AdvancementController({
+        store,
+        contractBuilder: createTestRubricContractBuilder(root),
+        admissionStrategy:
+          opts.admissionStrategy ?? createStartAdvancementAdmissionStrategy(),
+        now: () => "2026-01-01T00:00:00.000Z",
+      }),
+    };
+  }
+
+  async function createTestAdvancementController(): Promise<AdvancementController> {
+    return (await createTestAdvancementHarness()).controller;
+  }
+
+  function createTestRubricContractBuilder(root: string): RubricContractBuilder {
+    return new RubricContractBuilder({
+      rubricStore: new RubricStore(`${root}/rubrics`),
+      generationStrategy: {
+        async generate(input) {
+          return {
+            draftId: `draft-${input.originalTurnId}`,
+            originalTurnId: input.originalTurnId,
+            source: "generated",
+            candidateRubricIds: input.candidateRubrics.map((rubric) => rubric.id),
+            title: "测试推进准则",
+            description: "用于测试推进控制面。",
+            content: {
+              passCriteria: ["测试任务达到可验收状态"],
+              evidenceRequirements: [
+                {
+                  id: "conversation-result",
+                  kind: "conversation-fact",
+                  description: "执行侧说明完成结果。",
+                  required: true,
+                },
+              ],
+              failureHandling: [
+                {
+                  id: "continue",
+                  scenario: "任务尚未完成",
+                  reply: "请继续处理直到达到验收标准。",
+                },
+              ],
+            },
+            createdAt: input.now,
+          };
+        },
+      },
+    });
+  }
+
+  function createStartAdvancementAdmissionStrategy(
+    awaitingAction: "keep-awaiting-confirmation" | "downgrade-to-direct" | "cancel-pending-task" = "keep-awaiting-confirmation",
+  ): AdvancementAdmissionStrategy {
+    return {
+      async decide(input) {
+        if (input.hasOpenAdvancementSession) {
+          return {
+            kind: awaitingAction === "downgrade-to-direct" ? "direct-task" : "question",
+            action: awaitingAction,
+            reason: "test-awaiting-action",
+          };
+        }
+        return {
+          kind: "advancement-task",
+          action: "start-advancement",
+          reason: "test-start",
+        };
+      },
+    };
+  }
+
+  async function startWithFactory(
+    factory: RuntimeFactory,
+    opts: { advancement?: AdvancementController } = {},
+  ): Promise<void> {
     recordsByConversation.clear();
     const conversations = new ConversationManager(factory, {
       graceTimeoutMs: 60_000,
@@ -395,6 +492,7 @@ describe("session.* RPC (S2.D)", () => {
       version: TEST_VERSION,
       token: TEST_TOKEN,
       conversations,
+      advancement: opts.advancement,
       conversationDirectory: createMemoryDirectory(recordsByConversation),
     });
     server = await startServer({ context: ctx });
@@ -457,6 +555,458 @@ describe("session.* RPC (S2.D)", () => {
     // 无模式切换意图时不附带字段
     expect(completeParams.pendingModeSwitch).toBeUndefined();
 
+    client.close();
+  });
+
+  it("session.send 进入推进任务时返回 Rubric 待确认且不执行 main run", async () => {
+    await startWithFactory(createMockFactory(), {
+      advancement: await createTestAdvancementController(),
+    });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const sendResp = await client.request("session.send", {
+      text: "请把测试修到全绿，盯到验收通过",
+      turnId: "turn-adv-1",
+    });
+    expect(isSuccessResponse(sendResp)).toBe(true);
+    if (!isSuccessResponse(sendResp)) return;
+    const result = sendResp.result as {
+      conversationId: string;
+      turnId: string;
+      status: string;
+      advancementSessionId: string;
+      rubricDraftId: string;
+      rubricDraft: { originalTurnId: string };
+    };
+    expect(result.status).toBe("awaiting-rubric-confirmation");
+    expect(result.turnId).toBe("turn-adv-1");
+    expect(result.rubricDraft.originalTurnId).toBe("turn-adv-1");
+    expect(recordsByConversation.get(result.conversationId)).toEqual([]);
+
+    const event = await client.waitNotification("session.event");
+    expect(event.params).toMatchObject({
+      scope: "control",
+      runId: "turn-adv-1",
+      seq: 0,
+      event: "advancement:contract_draft",
+    });
+    client.close();
+  });
+
+  it("session.send 草案生成失败时返回控制面失败且不落空会话", async () => {
+    const root = await createTempDir("server-advancement-contract-failed");
+    await startWithFactory(createMockFactory(), {
+      advancement: new AdvancementController({
+        store: new AdvancementStore(`${root}/advancement`),
+        contractBuilder: new RubricContractBuilder({
+          rubricStore: new RubricStore(`${root}/rubrics`),
+        }),
+        admissionStrategy: createStartAdvancementAdmissionStrategy(),
+      }),
+    });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const sendResp = await client.request("session.send", {
+      text: "请把测试修到全绿，盯到验收通过",
+      turnId: "turn-contract-failed",
+    });
+    expect(isSuccessResponse(sendResp)).toBe(true);
+    if (!isSuccessResponse(sendResp)) return;
+    const result = sendResp.result as {
+      conversationId: string;
+      turnId: string;
+      status: string;
+      error: { message: string };
+    };
+    expect(result.status).toBe("contract-failed");
+    expect(result.turnId).toBe("turn-contract-failed");
+    expect(result.error.message).toContain("no draft generation strategy");
+    expect(recordsByConversation.has(result.conversationId)).toBe(false);
+
+    const event = await client.waitNotification("session.event");
+    expect(event.params).toMatchObject({
+      scope: "control",
+      runId: "turn-contract-failed",
+      seq: 0,
+      event: "advancement:contract_failed",
+      payload: {
+        originalTurnId: "turn-contract-failed",
+        error: { message: result.error.message },
+      },
+    });
+
+    const list = await client.request("session.list");
+    expect(isSuccessResponse(list)).toBe(true);
+    if (isSuccessResponse(list)) {
+      expect(
+        (list.result as { conversations: Array<{ conversationId: string }> })
+          .conversations,
+      ).not.toContainEqual(
+        expect.objectContaining({ conversationId: result.conversationId }),
+      );
+    }
+    client.close();
+  });
+
+  it("session.advancementConfirm 确认后用原始 turnId 执行原任务", async () => {
+    await startWithFactory(createMockFactory({ deltaCount: 0 }), {
+      advancement: await createTestAdvancementController(),
+    });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const sendResp = await client.request("session.send", {
+      text: "请把测试修到全绿，盯到验收通过",
+      turnId: "turn-adv-2",
+    });
+    expect(isSuccessResponse(sendResp)).toBe(true);
+    if (!isSuccessResponse(sendResp)) return;
+    const awaiting = sendResp.result as {
+      conversationId: string;
+      advancementSessionId: string;
+    };
+    await client.waitNotification("session.event");
+
+    const confirmResp = await client.request("session.advancementConfirm", {
+      conversationId: awaiting.conversationId,
+      advancementSessionId: awaiting.advancementSessionId,
+    });
+    expect(isSuccessResponse(confirmResp)).toBe(true);
+    if (!isSuccessResponse(confirmResp)) return;
+    expect(confirmResp.result).toMatchObject({
+      status: "confirmed",
+      turnId: "turn-adv-2",
+      runStatus: "immediate",
+    });
+
+    const event = await client.waitNotification("session.event");
+    expect(event.params).toMatchObject({
+      scope: "control",
+      runId: "turn-adv-2",
+      seq: 1,
+      event: "advancement:contract_confirmed",
+    });
+    const complete = await client.waitNotification("session.complete");
+    expect((complete.params as { turnId: string }).turnId).toBe("turn-adv-2");
+    const records = recordsByConversation.get(awaiting.conversationId) as Array<{
+      messages: Message[];
+    }>;
+    expect(records).toHaveLength(1);
+    expect(records[0]?.messages[0]?.content[0]).toMatchObject({
+      type: "text",
+      text: "请把测试修到全绿，盯到验收通过",
+    });
+    client.close();
+  });
+
+  it("session.advancementCancel 不可取消已确认的 active 推进会话", async () => {
+    const advancement = await createTestAdvancementHarness();
+    await startWithFactory(createMockFactory({ deltaCount: 0 }), {
+      advancement: advancement.controller,
+    });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const sendResp = await client.request("session.send", {
+      text: "请把测试修到全绿，盯到验收通过",
+      turnId: "turn-active-cancel",
+    });
+    expect(isSuccessResponse(sendResp)).toBe(true);
+    if (!isSuccessResponse(sendResp)) return;
+    const awaiting = sendResp.result as {
+      conversationId: string;
+      advancementSessionId: string;
+    };
+    await client.waitNotification("session.event");
+
+    const confirmResp = await client.request("session.advancementConfirm", {
+      conversationId: awaiting.conversationId,
+      advancementSessionId: awaiting.advancementSessionId,
+    });
+    expect(isSuccessResponse(confirmResp)).toBe(true);
+
+    const cancelResp = await client.request("session.advancementCancel", {
+      conversationId: awaiting.conversationId,
+      advancementSessionId: awaiting.advancementSessionId,
+    });
+    expect(isErrorResponse(cancelResp)).toBe(true);
+    if (isErrorResponse(cancelResp)) {
+      expect(cancelResp.error.code).toBe(RPC_ERROR_CODES.INTERNAL_ERROR);
+    }
+    const session = await advancement.store.loadSession(
+      awaiting.conversationId,
+      awaiting.advancementSessionId,
+    );
+    expect(session?.status).toBe("active");
+    client.close();
+  });
+
+  it("session.advancementCancel 可降级为直接执行原始任务", async () => {
+    await startWithFactory(createMockFactory({ deltaCount: 0 }), {
+      advancement: await createTestAdvancementController(),
+    });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const sendResp = await client.request("session.send", {
+      text: "请持续推进到完成",
+      turnId: "turn-adv-3",
+    });
+    expect(isSuccessResponse(sendResp)).toBe(true);
+    if (!isSuccessResponse(sendResp)) return;
+    const awaiting = sendResp.result as {
+      conversationId: string;
+      advancementSessionId: string;
+    };
+    await client.waitNotification("session.event");
+
+    const cancelResp = await client.request("session.advancementCancel", {
+      conversationId: awaiting.conversationId,
+      advancementSessionId: awaiting.advancementSessionId,
+      executeOriginal: true,
+    });
+    expect(isSuccessResponse(cancelResp)).toBe(true);
+    if (!isSuccessResponse(cancelResp)) return;
+    expect(cancelResp.result).toMatchObject({
+      status: "direct-execution",
+      turnId: "turn-adv-3",
+    });
+    const event = await client.waitNotification("session.event");
+    expect(event.params).toMatchObject({
+      scope: "control",
+      runId: "turn-adv-3",
+      seq: 1,
+      event: "advancement:contract_cancelled",
+    });
+    const complete = await client.waitNotification("session.complete");
+    expect((complete.params as { turnId: string }).turnId).toBe("turn-adv-3");
+    expect(recordsByConversation.get(awaiting.conversationId)).toHaveLength(1);
+    client.close();
+  });
+
+  it("session.send 带推进控制面时,显式 stale conversationId 不会写入推进状态", async () => {
+    const advancement = await createTestAdvancementHarness();
+    await startWithFactory(createMockFactory(), {
+      advancement: advancement.controller,
+    });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const created = await client.request("session.new");
+    expect(isSuccessResponse(created)).toBe(true);
+    if (!isSuccessResponse(created)) return;
+    const conversationId = (
+      created.result as { conversationId: string }
+    ).conversationId;
+
+    const deleteResp = await client.request("session.delete", {
+      conversationId,
+    });
+    expect(isSuccessResponse(deleteResp)).toBe(true);
+
+    const sendResp = await client.request("session.send", {
+      conversationId,
+      text: "请把测试修到全绿，盯到验收通过",
+      turnId: "turn-stale-advancement",
+    });
+    expect(isErrorResponse(sendResp)).toBe(true);
+    if (isErrorResponse(sendResp)) {
+      expect(sendResp.error.code).toBe(RPC_ERROR_CODES.NOT_FOUND);
+    }
+    await expect(
+      advancement.store.loadActiveSession(conversationId),
+    ).resolves.toBeNull();
+    client.close();
+  });
+
+  it("session.send 带推进控制面时,忙碌会话仍保持原排队语义", async () => {
+    const root = await createTempDir("server-advancement-busy-direct");
+    const admissionStrategy: AdvancementAdmissionStrategy = {
+      async decide(input) {
+        const text = input.input.parts
+          .map((part) => (part.type === "text" ? part.text : ""))
+          .join(" ");
+        if (text.includes("second")) {
+          throw new Error("busy turn should not run advancement admission");
+        }
+        return {
+          kind: "direct-task",
+          action: "run-direct",
+          reason: "test-direct",
+        };
+      },
+    };
+    await startWithFactory(
+      createMockFactory({ deltaCount: 8, yieldDelayMs: 30 }),
+      {
+        advancement: new AdvancementController({
+          store: new AdvancementStore(`${root}/advancement`),
+          contractBuilder: createTestRubricContractBuilder(root),
+          admissionStrategy,
+        }),
+      },
+    );
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const first = await client.request("session.send", {
+      text: "first",
+      turnId: "turn-busy-first",
+    });
+    expect(isSuccessResponse(first)).toBe(true);
+    if (!isSuccessResponse(first)) return;
+    const conversationId = (
+      first.result as { conversationId: string }
+    ).conversationId;
+    await client.waitNotification("session.delta");
+
+    const second = await client.request("session.send", {
+      conversationId,
+      text: "second",
+      turnId: "turn-busy-second",
+    });
+    expect(isSuccessResponse(second)).toBe(true);
+    if (!isSuccessResponse(second)) return;
+    expect(second.result).toMatchObject({
+      conversationId,
+      turnId: "turn-busy-second",
+    });
+
+    const complete1 = await client.waitNotification("session.complete");
+    expect((complete1.params as { turnId: string }).turnId).toBe(
+      "turn-busy-first",
+    );
+    const complete2 = await client.waitNotification("session.complete");
+    expect((complete2.params as { turnId: string }).turnId).toBe(
+      "turn-busy-second",
+    );
+    expect(recordsByConversation.get(conversationId)).toHaveLength(2);
+    client.close();
+  });
+
+  it("待确认阶段可通过自然语言取消待处理任务且不执行原任务", async () => {
+    const advancement = await createTestAdvancementHarness({
+      admissionStrategy: createStartAdvancementAdmissionStrategy(
+        "cancel-pending-task",
+      ),
+    });
+    await startWithFactory(createMockFactory({ deltaCount: 0 }), {
+      advancement: advancement.controller,
+    });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const sendResp = await client.request("session.send", {
+      text: "请持续推进到完成",
+      turnId: "turn-adv-cancel-original",
+    });
+    expect(isSuccessResponse(sendResp)).toBe(true);
+    if (!isSuccessResponse(sendResp)) return;
+    const awaiting = sendResp.result as {
+      conversationId: string;
+      advancementSessionId: string;
+    };
+    await client.waitNotification("session.event");
+
+    const cancelResp = await client.request("session.send", {
+      conversationId: awaiting.conversationId,
+      text: "取消这次任务，先不做了",
+      turnId: "turn-adv-cancel-command",
+    });
+    expect(isSuccessResponse(cancelResp)).toBe(true);
+    if (!isSuccessResponse(cancelResp)) return;
+    expect(cancelResp.result).toMatchObject({
+      status: "cancelled",
+      turnId: "turn-adv-cancel-command",
+      advancementSessionId: awaiting.advancementSessionId,
+    });
+
+    const event = await client.waitNotification("session.event");
+    expect(event.params).toMatchObject({
+      scope: "control",
+      runId: "turn-adv-cancel-original",
+      seq: 1,
+      event: "advancement:contract_cancelled",
+      payload: {
+        advancementSessionId: awaiting.advancementSessionId,
+        executeOriginal: false,
+      },
+    });
+    await expect(client.waitNotification("session.complete", 100)).rejects.toThrow(
+      "Timeout waiting for notification: session.complete",
+    );
+    expect(recordsByConversation.get(awaiting.conversationId)).toEqual([]);
+    const session = await advancement.store.loadSession(
+      awaiting.conversationId,
+      awaiting.advancementSessionId,
+    );
+    expect(session?.status).toBe("cancelled");
+    expect(session?.exit?.reason).toBe("user-cancelled");
+    client.close();
+  });
+
+  it("待确认阶段按 admission action 降级,不依赖 reason 文案", async () => {
+    const root = await createTempDir("server-advancement-action");
+    const admissionStrategy: AdvancementAdmissionStrategy = {
+      async decide(input) {
+        return input.hasOpenAdvancementSession
+          ? {
+              kind: "direct-task",
+              action: "downgrade-to-direct",
+              reason: "llm says skip contract",
+            }
+          : {
+              kind: "advancement-task",
+              action: "start-advancement",
+              reason: "test-start",
+            };
+      },
+    };
+    await startWithFactory(createMockFactory({ deltaCount: 0 }), {
+      advancement: new AdvancementController({
+        store: new AdvancementStore(`${root}/advancement`),
+        contractBuilder: createTestRubricContractBuilder(root),
+        admissionStrategy,
+      }),
+    });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const sendResp = await client.request("session.send", {
+      text: "请把测试修到全绿",
+      turnId: "turn-action-original",
+    });
+    expect(isSuccessResponse(sendResp)).toBe(true);
+    if (!isSuccessResponse(sendResp)) return;
+    const awaiting = sendResp.result as {
+      conversationId: string;
+    };
+    await client.waitNotification("session.event");
+
+    const downgradeResp = await client.request("session.send", {
+      conversationId: awaiting.conversationId,
+      text: "不要确认了，先直接执行",
+      turnId: "turn-action-command",
+    });
+    expect(isSuccessResponse(downgradeResp)).toBe(true);
+    if (!isSuccessResponse(downgradeResp)) return;
+    expect(downgradeResp.result).toMatchObject({
+      turnId: "turn-action-original",
+    });
+
+    const event = await client.waitNotification("session.event");
+    expect(event.params).toMatchObject({
+      scope: "control",
+      runId: "turn-action-original",
+      event: "advancement:contract_cancelled",
+    });
+    const complete = await client.waitNotification("session.complete");
+    expect((complete.params as { turnId: string }).turnId).toBe(
+      "turn-action-original",
+    );
+    expect(recordsByConversation.get(awaiting.conversationId)).toHaveLength(1);
     client.close();
   });
 

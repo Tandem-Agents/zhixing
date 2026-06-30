@@ -1626,7 +1626,7 @@ export class ConversationManager {
 
 // ─── ID 生成 ───
 
-function generateConversationId(): string {
+export function generateConversationId(): string {
   const ts = Date.now().toString(36);
   const rand = Math.random().toString(36).slice(2, 8);
   return `conv_${ts}_${rand}`;

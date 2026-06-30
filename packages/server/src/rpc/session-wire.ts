@@ -18,6 +18,7 @@ import type {
   AgentResult,
   AgentYield,
   ContextBudget,
+  RubricContractDraftSnapshot,
   TaskListState,
   TokenUsage,
   WorkModeSwitchIntent,
@@ -127,13 +128,58 @@ export interface SessionActivityPayload {
 
 // ─── 方法结果 ───
 
-export interface SessionSendResult {
+export interface SessionAcceptedSendResult {
   conversationId: string;
   /** @deprecated 使用 conversationId */
   sessionId: string;
   /** 本次 send 对应的 turn 身份;delta/complete/modeSwitchIntent 均携同值 */
   turnId: string;
 }
+
+export interface SessionAwaitingRubricResult extends SessionAcceptedSendResult {
+  status: "awaiting-rubric-confirmation";
+  advancementSessionId: string;
+  rubricDraftId: string;
+  rubricDraft: RubricContractDraftSnapshot;
+}
+
+export interface SessionCancelledRubricResult extends SessionAcceptedSendResult {
+  status: "cancelled";
+  advancementSessionId: string;
+}
+
+export interface SessionContractFailedResult extends SessionAcceptedSendResult {
+  status: "contract-failed";
+  error: { message: string };
+}
+
+export type SessionSendResult =
+  | SessionAcceptedSendResult
+  | SessionAwaitingRubricResult
+  | SessionCancelledRubricResult
+  | SessionContractFailedResult;
+
+export interface SessionAdvancementConfirmResult extends SessionAcceptedSendResult {
+  status: "confirmed";
+  advancementSessionId: string;
+  runStatus: "immediate" | "queued";
+}
+
+export type SessionAdvancementCancelResult =
+  | {
+      conversationId: string;
+      sessionId: string;
+      status: "cancelled";
+      advancementSessionId: string;
+    }
+  | {
+      conversationId: string;
+      sessionId: string;
+      turnId: string;
+      status: "direct-execution";
+      advancementSessionId: string;
+      runStatus: "immediate" | "queued";
+    };
 
 /** session.list 条目——盘上事实叠加活跃态 */
 export interface SessionConversationEntry {

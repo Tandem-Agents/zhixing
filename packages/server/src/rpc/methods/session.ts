@@ -26,6 +26,7 @@ import {
   abortWithReason,
   generateTurnId,
   isNonEmptyUserTurnInput,
+  type RubricContractDraftSnapshot,
   type TurnContext,
   type UserTurnInput,
   userTurnInputFromText,
@@ -37,7 +38,6 @@ import type { RpcConnection } from "../connection.js";
 import type { ServerContext } from "../../context.js";
 import type { SessionBroadcast } from "../session-broadcast.js";
 import type { ConversationDirectory } from "../../runtime/conversation-directory.js";
-import type { ConversationManager, ManagedSession } from "../../runtime/conversation-manager.js";
 import { projectSessionTurn } from "../session-turn-stream.js";
 import {
   SESSION_NOTIFICATIONS,
@@ -46,7 +46,11 @@ import {
   type SessionCompactResult,
   type SessionContextBudgetResult,
   type SessionCompletePayload,
+  type SessionAdvancementCancelResult,
+  type SessionAdvancementConfirmResult,
   type SessionConversationEntry,
+  type SessionAwaitingRubricResult,
+  type SessionContractFailedResult,
   type SessionListResult,
   type SessionModeSwitchIntentPayload,
   type SessionNewResult,
@@ -61,7 +65,13 @@ import {
   type SessionTaskListUpdateResult,
   type SessionUnsubscribeResult,
 } from "../session-wire.js";
-
+import type { SessionEventEnvelope } from "../session-events.js";
+import type { AdvancementPrepareResult } from "../../advancement/index.js";
+import {
+  generateConversationId,
+  type ConversationManager,
+  type ManagedSession,
+} from "../../runtime/conversation-manager.js";
 // ─── session.send ───
 
 interface SessionSendParams extends ConversationIdParams {
@@ -92,59 +102,631 @@ export function buildSessionSendMethod(): MethodEntry {
           : generateTurnId();
       const connectionId = String(ctx.connection.id);
       const broadcast = ctx.server.sessionBroadcast;
+      const advancement = ctx.server.advancement;
 
-      const admission = await manager.admitTurn({
-        conversationId: id,
-        createConversation: ctx.server.conversationDirectory
-          ? async () => (await ctx.server.conversationDirectory!.create()).id
-          : undefined,
-        exists: existingConversationCheck(ctx.server, id),
-        connectionId,
-        makeTask: (managed) => ({
-          execute: () =>
-            runManagedTurn(
-              managed,
-              input,
-              turnId,
-              ctx.connection,
-              manager,
-              broadcast,
+      if (advancement) {
+        const preparedId = id ?? generateConversationId();
+        const prepared = await prepareAdvancementUserTurn({
+          manager,
+          server: ctx.server,
+          advancement,
+          conversationId: id,
+          preparedConversationId: preparedId,
+          turnId,
+          input,
+        });
+
+        if (prepared.kind === "owner-busy") {
+          return await sendDirectTurn({
+            manager,
+            conversationId: id,
+            preallocatedConversationId: id ? undefined : preparedId,
+            input,
+            turnId,
+            connectionId,
+            connection: ctx.connection,
+            broadcast,
+            server: ctx.server,
+          });
+        }
+
+        if (prepared.kind === "awaiting-rubric-confirmation") {
+          manager.addObserver(prepared.session.conversationId, connectionId, {
+            allowInactive: true,
+          });
+          notifyAdvancementEvent({
+            conversationId: prepared.session.conversationId,
+            turnId,
+            seq: 0,
+            event: "advancement:contract_draft",
+            payload: {
+              advancementSessionId: prepared.session.id,
+              rubricDraftId: prepared.draft.draftId,
+              rubricDraft: prepared.draft,
+              admission: prepared.admission,
+            },
+            connection: ctx.connection,
+            broadcast,
+          });
+          return awaitingRubricResult(
+            prepared.session.conversationId,
+            turnId,
+            prepared.session.id,
+            prepared.draft,
+          );
+        }
+
+        if (prepared.kind === "contract-failed") {
+          manager.addObserver(prepared.conversationId, connectionId, {
+            allowInactive: true,
+          });
+          notifyAdvancementEvent({
+            conversationId: prepared.conversationId,
+            turnId: prepared.originalTurnId,
+            seq: 0,
+            event: "advancement:contract_failed",
+            payload: {
+              originalTurnId: prepared.originalTurnId,
+              error: prepared.error,
+            },
+            connection: ctx.connection,
+            broadcast,
+          });
+          return contractFailedResult(
+            prepared.conversationId,
+            turnId,
+            prepared.error,
+          );
+        }
+
+        if (prepared.kind === "await-existing-confirmation") {
+          manager.addObserver(prepared.session.conversationId, connectionId, {
+            allowInactive: true,
+          });
+          return awaitingRubricResult(
+            prepared.session.conversationId,
+            turnId,
+            prepared.session.id,
+            prepared.draft,
+          );
+        }
+
+        if (prepared.kind === "direct-original-task") {
+          notifyAdvancementEvent({
+            conversationId: prepared.session.conversationId,
+            turnId: prepared.originalTurnId,
+            seq: 1,
+            event: "advancement:contract_cancelled",
+            payload: {
+              advancementSessionId: prepared.session.id,
+              executeOriginal: true,
+            },
+            connection: ctx.connection,
+            broadcast,
+          });
+          const admitted = await admitAndMaybeStartTurn({
+            manager,
+            conversationId: prepared.session.conversationId,
+            exists: existingConversationCheck(
+              ctx.server,
+              prepared.session.conversationId,
             ),
-          // 取消通知是排队发起者的私人回执,不组播——其他端没见过这条排队项
-          cancel: () => {
-            ctx.connection.notify(SESSION_NOTIFICATIONS.complete, {
-              conversationId: managed.conversationId,
-              sessionId: managed.conversationId,
-              turnId,
-              result: {
-                reason: "error",
-                error: { name: "Cancelled", message: "Pending turn cancelled" },
-                usage: { inputTokens: 0, outputTokens: 0 },
-              },
-            } satisfies SessionCompletePayload);
-          },
-        }),
+            connectionId,
+            input: prepared.originalUserTask,
+            turnId: prepared.originalTurnId,
+            connection: ctx.connection,
+            broadcast,
+          });
+          return {
+            conversationId: admitted.conversationId,
+            sessionId: admitted.conversationId,
+            turnId: admitted.turnId,
+          };
+        }
+
+        if (prepared.kind === "cancelled-pending-task") {
+          manager.addObserver(prepared.session.conversationId, connectionId, {
+            allowInactive: true,
+          });
+          notifyAdvancementEvent({
+            conversationId: prepared.session.conversationId,
+            turnId: prepared.originalTurnId,
+            seq: 1,
+            event: "advancement:contract_cancelled",
+            payload: {
+              advancementSessionId: prepared.session.id,
+              executeOriginal: false,
+              reason: "user-cancelled",
+            },
+            connection: ctx.connection,
+            broadcast,
+          });
+          return {
+            conversationId: prepared.session.conversationId,
+            sessionId: prepared.session.conversationId,
+            turnId,
+            status: "cancelled",
+            advancementSessionId: prepared.session.id,
+          };
+        }
+
+        return await sendDirectTurn({
+          manager,
+          conversationId: id,
+          preallocatedConversationId: id ? undefined : preparedId,
+          input,
+          turnId,
+          connectionId,
+          connection: ctx.connection,
+          broadcast,
+          server: ctx.server,
+        });
+      }
+
+      return await sendDirectTurn({
+        manager,
+        conversationId: id,
+        input,
+        turnId,
+        connectionId,
+        connection: ctx.connection,
+        broadcast,
+        server: ctx.server,
+      });
+    },
+  };
+}
+
+// ─── session.advancementConfirm / session.advancementCancel ───
+
+interface SessionAdvancementActionParams extends ConversationIdParams {
+  advancementSessionId?: unknown;
+}
+
+interface SessionAdvancementCancelParams extends SessionAdvancementActionParams {
+  executeOriginal?: unknown;
+}
+
+export function buildSessionAdvancementConfirmMethod(): MethodEntry {
+  return {
+    name: "session.advancementConfirm",
+    requiresAuth: true,
+    async handler(
+      rawParams,
+      ctx,
+    ): Promise<SessionAdvancementConfirmResult> {
+      const params = (rawParams ?? {}) as SessionAdvancementActionParams;
+      const conversationId = requireConversationId(
+        params,
+        "session.advancementConfirm",
+      );
+      const advancementSessionId = requireAdvancementSessionId(
+        params,
+        "session.advancementConfirm",
+      );
+      const advancement = requireAdvancement(ctx.server);
+      const manager = requireConversations(ctx.server);
+      let confirmed: Awaited<ReturnType<typeof advancement.confirmRubric>>;
+      try {
+        confirmed = await runAdvancementMaintenance({
+          manager,
+          server: ctx.server,
+          conversationId,
+          busyMessage:
+            "Conversation is busy; confirm the Rubric after the current turn completes",
+          fn: () =>
+            advancement.confirmRubric({
+              conversationId,
+              advancementSessionId,
+            }),
+        });
+      } catch (err) {
+        if (err instanceof RpcAppError && err.code === RPC_ERROR_CODES.NOT_FOUND) {
+          await advancement
+            .cancelOpenSession({
+              conversationId,
+              advancementSessionId,
+              reason: "system-error",
+              message:
+                "原始对话已不存在，推进会话已取消以避免悬空状态。",
+            })
+            .catch(() => null);
+        }
+        throw err;
+      }
+      notifyAdvancementEvent({
+        conversationId,
+        turnId: confirmed.originalTurnId,
+        seq: 1,
+        event: "advancement:contract_confirmed",
+        payload: {
+          advancementSessionId: confirmed.session.id,
+          rubricId: confirmed.session.confirmedRubric?.rubricId,
+        },
+        connection: ctx.connection,
+        broadcast: ctx.server.sessionBroadcast,
       });
 
-      if (admission.status === "not-found") {
-        throw RpcErrors.notFound(`Session not found: ${admission.conversationId}`);
+      let admitted: Awaited<ReturnType<typeof admitAndMaybeStartTurn>>;
+      try {
+        admitted = await admitAndMaybeStartTurn({
+          manager,
+          conversationId,
+          exists: existingConversationCheck(ctx.server, conversationId),
+          connectionId: String(ctx.connection.id),
+          input: confirmed.originalUserTask,
+          turnId: confirmed.originalTurnId,
+          connection: ctx.connection,
+          broadcast: ctx.server.sessionBroadcast,
+        });
+      } catch (err) {
+        const cancelled = await advancement
+          .cancelOpenSession({
+            conversationId,
+            advancementSessionId,
+            reason: "system-error",
+            message:
+              "原始任务未能进入执行队列，推进会话已取消以避免悬空状态。",
+          })
+          .catch(() => null);
+        if (cancelled) {
+          notifyAdvancementEvent({
+            conversationId,
+            turnId: confirmed.originalTurnId,
+            seq: 2,
+            event: "advancement:contract_cancelled",
+            payload: {
+              advancementSessionId: cancelled.id,
+              executeOriginal: false,
+              reason: "original-task-admission-failed",
+            },
+            connection: ctx.connection,
+            broadcast: ctx.server.sessionBroadcast,
+          });
+        }
+        throw err;
       }
-      if (admission.status === "full") {
-        throw new RpcAppError(RPC_ERROR_CODES.BUSY, "Too many pending messages for this conversation");
-      }
-
-      if (admission.status === "immediate") {
-        void admission.task.execute();
-      }
-      // status === "queued": dequeueNext will call execute() when current turn completes
 
       return {
-        conversationId: admission.conversationId,
-        sessionId: admission.conversationId,
-        turnId,
+        conversationId: admitted.conversationId,
+        sessionId: admitted.conversationId,
+        turnId: admitted.turnId,
+        status: "confirmed",
+        advancementSessionId: confirmed.session.id,
+        runStatus: admitted.runStatus,
       };
     },
   };
+}
+
+export function buildSessionAdvancementCancelMethod(): MethodEntry {
+  return {
+    name: "session.advancementCancel",
+    requiresAuth: true,
+    async handler(rawParams, ctx): Promise<SessionAdvancementCancelResult> {
+      const params = (rawParams ?? {}) as SessionAdvancementCancelParams;
+      const conversationId = requireConversationId(
+        params,
+        "session.advancementCancel",
+      );
+      const advancementSessionId = requireAdvancementSessionId(
+        params,
+        "session.advancementCancel",
+      );
+      const executeOriginal = params.executeOriginal === true;
+      const advancement = requireAdvancement(ctx.server);
+      const manager = requireConversations(ctx.server);
+      const cancelled = await runAdvancementMaintenance({
+        manager,
+        server: ctx.server,
+        conversationId,
+        busyMessage:
+          "Conversation is busy; cancel the Rubric after the current turn completes",
+        fn: () =>
+          advancement.cancelRubric({
+            conversationId,
+            advancementSessionId,
+            executeOriginal,
+          }),
+      });
+
+      notifyAdvancementEvent({
+        conversationId,
+        turnId:
+          cancelled.kind === "direct-original-task"
+            ? cancelled.originalTurnId
+            : (cancelled.originalTurnId ?? cancelled.session.id),
+        seq: 1,
+        event: "advancement:contract_cancelled",
+        payload: {
+          advancementSessionId: cancelled.session.id,
+          executeOriginal: cancelled.kind === "direct-original-task",
+        },
+        connection: ctx.connection,
+        broadcast: ctx.server.sessionBroadcast,
+      });
+
+      if (cancelled.kind === "cancelled") {
+        return {
+          conversationId,
+          sessionId: conversationId,
+          status: "cancelled",
+          advancementSessionId: cancelled.session.id,
+        };
+      }
+
+      const admitted = await admitAndMaybeStartTurn({
+        manager,
+        conversationId,
+        exists: existingConversationCheck(ctx.server, conversationId),
+        connectionId: String(ctx.connection.id),
+        input: cancelled.originalUserTask,
+        turnId: cancelled.originalTurnId,
+        connection: ctx.connection,
+        broadcast: ctx.server.sessionBroadcast,
+      });
+
+      return {
+        conversationId: admitted.conversationId,
+        sessionId: admitted.conversationId,
+        turnId: admitted.turnId,
+        status: "direct-execution",
+        advancementSessionId: cancelled.session.id,
+        runStatus: admitted.runStatus,
+      };
+    },
+  };
+}
+
+type AdvancementPrepareOwnerResult =
+  | AdvancementPrepareResult
+  | { readonly kind: "owner-busy" };
+
+async function prepareAdvancementUserTurn(input: {
+  readonly manager: ConversationManager;
+  readonly server: ServerContext;
+  readonly advancement: NonNullable<ServerContext["advancement"]>;
+  readonly conversationId?: string;
+  readonly preparedConversationId: string;
+  readonly turnId: string;
+  readonly input: UserTurnInput;
+}): Promise<AdvancementPrepareOwnerResult> {
+  const run = () =>
+    input.advancement.prepareUserTurn({
+      conversationId: input.preparedConversationId,
+      turnId: input.turnId,
+      userInput: input.input,
+      beforeCreateSession: input.conversationId
+        ? undefined
+        : () => ensureConversationShell(input.server, input.preparedConversationId),
+    });
+
+  if (!input.conversationId) {
+    const result = await input.manager.runMaintenance(
+      input.preparedConversationId,
+      run,
+    );
+    return result.status === "busy" ? { kind: "owner-busy" } : result.value;
+  }
+
+  const result = await input.manager.runMaintenanceExisting(
+    input.conversationId,
+    existingConversationCheck(input.server, input.conversationId),
+    run,
+  );
+  if (result.status === "not-found") {
+    throw RpcErrors.notFound(`Session not found: ${input.conversationId}`);
+  }
+  return result.status === "busy" ? { kind: "owner-busy" } : result.value;
+}
+
+async function runAdvancementMaintenance<T>(input: {
+  readonly manager: ConversationManager;
+  readonly server: ServerContext;
+  readonly conversationId: string;
+  readonly busyMessage: string;
+  readonly fn: () => Promise<T>;
+}): Promise<T> {
+  const result = await input.manager.runMaintenanceExisting(
+    input.conversationId,
+    existingConversationCheck(input.server, input.conversationId),
+    input.fn,
+  );
+  if (result.status === "not-found") {
+    throw RpcErrors.notFound(`Session not found: ${input.conversationId}`);
+  }
+  if (result.status === "busy") {
+    throw RpcErrors.busy(input.busyMessage);
+  }
+  return result.value;
+}
+
+interface SendDirectTurnInput {
+  readonly manager: ConversationManager;
+  readonly conversationId?: string;
+  readonly preallocatedConversationId?: string;
+  readonly input: UserTurnInput;
+  readonly turnId: string;
+  readonly connectionId: string;
+  readonly connection: RpcConnection;
+  readonly broadcast?: SessionBroadcast;
+  readonly server: ServerContext;
+}
+
+async function sendDirectTurn(
+  input: SendDirectTurnInput,
+): Promise<SessionSendResult> {
+  const admitted = await admitAndMaybeStartTurn({
+    manager: input.manager,
+    conversationId: input.conversationId,
+    createConversation: createConversationCallback(
+      input.server,
+      input.preallocatedConversationId,
+    ),
+    exists: existingConversationCheck(input.server, input.conversationId),
+    connectionId: input.connectionId,
+    input: input.input,
+    turnId: input.turnId,
+    connection: input.connection,
+    broadcast: input.broadcast,
+  });
+  return {
+    conversationId: admitted.conversationId,
+    sessionId: admitted.conversationId,
+    turnId: admitted.turnId,
+  };
+}
+
+interface AdmitAndMaybeStartTurnInput {
+  readonly manager: ConversationManager;
+  readonly conversationId?: string;
+  readonly createConversation?: () => Promise<string>;
+  readonly exists?: () => Promise<boolean>;
+  readonly connectionId: string;
+  readonly input: UserTurnInput;
+  readonly turnId: string;
+  readonly connection: RpcConnection;
+  readonly broadcast?: SessionBroadcast;
+}
+
+async function admitAndMaybeStartTurn(
+  input: AdmitAndMaybeStartTurnInput,
+): Promise<{
+  conversationId: string;
+  turnId: string;
+  runStatus: "immediate" | "queued";
+}> {
+  const admission = await input.manager.admitTurn({
+    conversationId: input.conversationId,
+    createConversation: input.createConversation,
+    exists: input.exists,
+    connectionId: input.connectionId,
+    makeTask: (managed) => ({
+      execute: () =>
+        runManagedTurn(
+          managed,
+          input.input,
+          input.turnId,
+          input.connection,
+          input.manager,
+          input.broadcast,
+        ),
+      // 取消通知是排队发起者的私人回执,不组播——其他端没见过这条排队项
+      cancel: () => {
+        input.connection.notify(SESSION_NOTIFICATIONS.complete, {
+          conversationId: managed.conversationId,
+          sessionId: managed.conversationId,
+          turnId: input.turnId,
+          result: {
+            reason: "error",
+            error: { name: "Cancelled", message: "Pending turn cancelled" },
+            usage: { inputTokens: 0, outputTokens: 0 },
+          },
+        } satisfies SessionCompletePayload);
+      },
+    }),
+  });
+
+  if (admission.status === "not-found") {
+    throw RpcErrors.notFound(`Session not found: ${admission.conversationId}`);
+  }
+  if (admission.status === "full") {
+    throw new RpcAppError(
+      RPC_ERROR_CODES.BUSY,
+      "Too many pending messages for this conversation",
+    );
+  }
+
+  if (admission.status === "immediate") {
+    void admission.task.execute();
+  }
+
+  return {
+    conversationId: admission.conversationId,
+    turnId: input.turnId,
+    runStatus: admission.status,
+  };
+}
+
+function awaitingRubricResult(
+  conversationId: string,
+  turnId: string,
+  advancementSessionId: string,
+  rubricDraft: RubricContractDraftSnapshot,
+): SessionAwaitingRubricResult {
+  return {
+    conversationId,
+    sessionId: conversationId,
+    turnId,
+    status: "awaiting-rubric-confirmation",
+    advancementSessionId,
+    rubricDraftId: rubricDraft.draftId,
+    rubricDraft,
+  };
+}
+
+function contractFailedResult(
+  conversationId: string,
+  turnId: string,
+  error: { readonly message: string },
+): SessionContractFailedResult {
+  return {
+    conversationId,
+    sessionId: conversationId,
+    turnId,
+    status: "contract-failed",
+    error: { message: error.message },
+  };
+}
+
+function createConversationCallback(
+  server: ServerContext,
+  preallocatedConversationId?: string,
+): (() => Promise<string>) | undefined {
+  const directory = server.conversationDirectory;
+  if (preallocatedConversationId) {
+    return async () => {
+      await directory?.ensure(preallocatedConversationId);
+      return preallocatedConversationId;
+    };
+  }
+  return directory ? async () => (await directory.create()).id : undefined;
+}
+
+async function ensureConversationShell(
+  server: ServerContext,
+  conversationId: string,
+): Promise<void> {
+  await server.conversationDirectory?.ensure(conversationId);
+}
+
+function notifyAdvancementEvent(input: {
+  readonly conversationId: string;
+  readonly turnId: string;
+  readonly seq?: number;
+  readonly event: string;
+  readonly payload: unknown;
+  readonly connection: RpcConnection;
+  readonly broadcast?: SessionBroadcast;
+}): void {
+  const envelope: SessionEventEnvelope = {
+    conversationId: input.conversationId,
+    scope: "control",
+    runId: input.turnId,
+    seq: input.seq ?? 0,
+    event: input.event,
+    payload: input.payload,
+    meta: {},
+  };
+  if (input.broadcast) {
+    input.broadcast(
+      input.conversationId,
+      SESSION_NOTIFICATIONS.event,
+      envelope,
+    );
+  } else {
+    input.connection.notify(SESSION_NOTIFICATIONS.event, envelope);
+  }
 }
 
 /**
@@ -924,6 +1506,21 @@ function validateTurnId(value: unknown): string {
   return value;
 }
 
+function requireAdvancementSessionId(
+  params: SessionAdvancementActionParams,
+  method: string,
+): string {
+  if (
+    typeof params.advancementSessionId !== "string" ||
+    params.advancementSessionId.trim().length === 0
+  ) {
+    throw RpcErrors.invalidParams(
+      `${method} requires non-empty 'advancementSessionId'`,
+    );
+  }
+  return params.advancementSessionId;
+}
+
 function optionalConversationId(
   params: ConversationIdParams,
   method: string,
@@ -969,6 +1566,16 @@ function requireConversations(server: ServerContext): ConversationManager {
     );
   }
   return server.conversations;
+}
+
+function requireAdvancement(server: ServerContext) {
+  if (!server.advancement) {
+    throw new RpcAppError(
+      RPC_ERROR_CODES.INTERNAL_ERROR,
+      "AdvancementController not configured on server",
+    );
+  }
+  return server.advancement;
 }
 
 function requireDirectory(server: ServerContext): ConversationDirectory {
