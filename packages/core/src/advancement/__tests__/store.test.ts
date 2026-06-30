@@ -222,6 +222,37 @@ describe("AdvancementStore", () => {
     ).rejects.toThrow(/outstanding proxy/);
   });
 
+  it("失败 review 与代理消息作为同一个推进结果原子写入", async () => {
+    const { store } = await makeStore();
+    await store.createSession(createInput());
+    await store.confirmRubric("conv-1", "session-1", confirmed());
+
+    const session = await store.appendRunReviewWithProxyMessage(
+      "conv-1",
+      "session-1",
+      review({ proxyMessageId: "proxy-1" }),
+      {
+        id: "proxy-1",
+        sessionId: "session-1",
+        reviewId: "review-1",
+        content: task("请修复失败测试后再继续。"),
+        rubricFailureHandlingId: "fix-tests",
+        variables: { unmet_criteria: "测试通过" },
+        createdAt: "2026-01-01T00:03:00.000Z",
+      },
+      "2026-01-01T00:02:00.000Z",
+    );
+
+    expect(session.runs[0]?.proxyMessageId).toBe("proxy-1");
+    expect(session.outstandingProxyMessageId).toBe("proxy-1");
+    expect((await store.readEvents("conv-1")).map((event) => event.type)).toEqual([
+      "session_created",
+      "rubric_confirmed",
+      "run_reviewed",
+      "proxy_enqueued",
+    ]);
+  });
+
   it("终态 review 与 completed/exited 作为同一个验收结果写入", async () => {
     const { store } = await makeStore();
     await store.createSession(createInput());

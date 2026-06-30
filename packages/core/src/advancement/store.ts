@@ -191,6 +191,59 @@ export class AdvancementStore {
     });
   }
 
+  async appendRunReviewWithProxyMessage(
+    conversationId: string,
+    sessionId: string,
+    review: AdvancementRunReview,
+    proxyMessage: AdvancementProxyMessage,
+    timestamp = review.reviewedAt,
+  ): Promise<AdvancementSession> {
+    return await this.withConversationLock(conversationId, async () => {
+      const session = this.assertActiveSession(
+        await this.loadConversationSessionsInLock(conversationId),
+        sessionId,
+      );
+      if (review.decision !== "failed") {
+        throw new Error(
+          `AdvancementStore: proxy message requires failed review`,
+        );
+      }
+      if (review.proxyMessageId !== proxyMessage.id) {
+        throw new Error(
+          `AdvancementStore: review proxyMessageId must match proxy message`,
+        );
+      }
+      if (session.outstandingProxyMessageId) {
+        throw new Error(
+          `AdvancementStore: session "${sessionId}" already has an outstanding proxy message`,
+        );
+      }
+      if (proxyMessage.sessionId !== sessionId) {
+        throw new Error(
+          `AdvancementStore: proxy message "${proxyMessage.id}" belongs to another session`,
+        );
+      }
+      await this.appendEventsInLock(conversationId, [
+        {
+          type: "run_reviewed",
+          timestamp,
+          sessionId,
+          review,
+        },
+        {
+          type: "proxy_enqueued",
+          timestamp: proxyMessage.createdAt,
+          sessionId,
+          proxyMessage,
+        },
+      ]);
+      return this.requireSession(
+        await this.loadConversationSessionsInLock(conversationId),
+        sessionId,
+      );
+    });
+  }
+
   async enqueueProxyMessage(
     conversationId: string,
     sessionId: string,

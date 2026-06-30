@@ -32,6 +32,19 @@ describe("ConservativeAdvancementAdmissionStrategy", () => {
       reason: "admission-unavailable",
     });
   });
+
+  it("active 推进阶段失败时保守保持推进", async () => {
+    await expect(
+      strategy.decide({
+        input: userTurnInputFromText("我补充一下，失败的是 auth 测试"),
+        hasActiveAdvancementSession: true,
+      }),
+    ).resolves.toEqual({
+      kind: "direct-task",
+      action: "continue-active",
+      reason: "admission-unavailable",
+    });
+  });
 });
 
 describe("LLMAdvancementAdmissionStrategy", () => {
@@ -139,6 +152,44 @@ describe("LLMAdvancementAdmissionStrategy", () => {
       kind: "question",
       action: "keep-awaiting-confirmation",
       reason: "表达存在冲突，需要继续等待确认",
+    });
+  });
+
+  it("active 推进阶段由 LLM 区分补充与接管", async () => {
+    const strategy = new LLMAdvancementAdmissionStrategy({
+      complete: async () =>
+        JSON.stringify({
+          action: "take-over-active",
+          reason: "用户明确接管并改变目标",
+        }),
+    });
+
+    await expect(
+      strategy.decide({
+        input: userTurnInputFromText("停掉这个推进，换成先整理发布说明"),
+        hasActiveAdvancementSession: true,
+      }),
+    ).resolves.toEqual({
+      kind: "direct-task",
+      action: "take-over-active",
+      reason: "用户明确接管并改变目标",
+    });
+  });
+
+  it("active 推进阶段无效输出时保守保持 active", async () => {
+    const strategy = new LLMAdvancementAdmissionStrategy({
+      complete: async () => "not json",
+    });
+
+    await expect(
+      strategy.decide({
+        input: userTurnInputFromText("我补充一个线索"),
+        hasActiveAdvancementSession: true,
+      }),
+    ).resolves.toEqual({
+      kind: "direct-task",
+      action: "continue-active",
+      reason: "admission-unavailable",
     });
   });
 
