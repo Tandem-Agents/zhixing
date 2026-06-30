@@ -1493,7 +1493,7 @@ export class ConversationManager {
           this.clearPendingQueue(conversationId);
         }
 
-        opts?.onDeleted?.();
+        this.notifyDeleted(opts);
         this.observers.delete(conversationId);
         return true;
       });
@@ -1509,6 +1509,14 @@ export class ConversationManager {
       throw err;
     } finally {
       this.deleting.delete(conversationId);
+    }
+  }
+
+  private notifyDeleted(opts?: { onDeleted?: () => void }): void {
+    try {
+      opts?.onDeleted?.();
+    } catch (err) {
+      console.error("[ConversationManager.delete] onDeleted failed:", err);
     }
   }
 

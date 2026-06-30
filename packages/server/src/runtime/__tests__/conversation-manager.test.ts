@@ -1880,6 +1880,31 @@ describe("ConversationManager", () => {
       await mgr.disposeAll();
     });
 
+    it("delete 后置钩子失败不改变已提交的删除事实", async () => {
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const mgr = makePersistentManager();
+      await mgr.getOrCreate("conv-del-hook");
+
+      try {
+        const result = await mgr.delete("conv-del-hook", {
+          removeDisk: async () => true,
+          onDeleted: () => {
+            throw new Error("hook failed");
+          },
+        });
+
+        expect(result).toBe(true);
+        expect(mgr.has("conv-del-hook")).toBe(false);
+        expect(errorSpy).toHaveBeenCalledWith(
+          "[ConversationManager.delete] onDeleted failed:",
+          expect.any(Error),
+        );
+      } finally {
+        errorSpy.mockRestore();
+        await mgr.disposeAll();
+      }
+    });
+
     it("admitTurn 显式 id 的存在性检查在 id 门内:delete 在途时不会删除后复活", async () => {
       let diskExists = true;
       let releaseRemove!: () => void;

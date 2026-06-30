@@ -267,6 +267,20 @@ export class AdvancementController {
     );
   }
 
+  async cancelOpenConversationSession(input: {
+    readonly conversationId: string;
+    readonly reason?: AdvancementExit["reason"];
+    readonly message: string;
+  }): Promise<AdvancementSession | null> {
+    const session = await this.store.loadActiveSession(input.conversationId);
+    if (!session) return null;
+    return await this.cancelSession(
+      input.conversationId,
+      session.id,
+      input.message,
+      input.reason,
+    );
+  }
 
   private async cancelSession(
     conversationId: string,

@@ -4,7 +4,7 @@
  * 用 mock RuntimeFactory（不依赖真实 LLM）。
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import WebSocket from "ws";
 import {
   AdvancementStore,
@@ -741,6 +741,164 @@ describe("session.* RPC (S2.D)", () => {
     );
     expect(session?.status).toBe("active");
     client.close();
+  });
+
+  it("session.advancementConfirm 原对话已删除时取消推进会话", async () => {
+    const advancement = await createTestAdvancementHarness();
+    await startWithFactory(createMockFactory({ deltaCount: 0 }), {
+      advancement: advancement.controller,
+    });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const sendResp = await client.request("session.send", {
+      text: "请把测试修到全绿，盯到验收通过",
+      turnId: "turn-adv-deleted",
+    });
+    expect(isSuccessResponse(sendResp)).toBe(true);
+    if (!isSuccessResponse(sendResp)) return;
+    const awaiting = sendResp.result as {
+      conversationId: string;
+      advancementSessionId: string;
+    };
+
+    const deleteResp = await client.request("session.delete", {
+      conversationId: awaiting.conversationId,
+    });
+    expect(isSuccessResponse(deleteResp)).toBe(true);
+    const deletedSession = await advancement.store.loadSession(
+      awaiting.conversationId,
+      awaiting.advancementSessionId,
+    );
+    expect(deletedSession?.status).toBe("cancelled");
+    expect(deletedSession?.exit).toMatchObject({
+      reason: "user-cancelled",
+      message: "原始对话已删除，推进会话已取消。",
+    });
+    await expect(
+      advancement.store.loadActiveSession(awaiting.conversationId),
+    ).resolves.toBeNull();
+
+    const confirmResp = await client.request("session.advancementConfirm", {
+      conversationId: awaiting.conversationId,
+      advancementSessionId: awaiting.advancementSessionId,
+    });
+    expect(isErrorResponse(confirmResp)).toBe(true);
+    if (isErrorResponse(confirmResp)) {
+      expect(confirmResp.error.code).toBe(RPC_ERROR_CODES.NOT_FOUND);
+    }
+    const session = await advancement.store.loadSession(
+      awaiting.conversationId,
+      awaiting.advancementSessionId,
+    );
+    expect(session?.status).toBe("cancelled");
+    expect(session?.exit?.reason).toBe("user-cancelled");
+    client.close();
+  });
+
+  it("session.delete 终结已确认的 active 推进会话", async () => {
+    const advancement = await createTestAdvancementHarness();
+    await startWithFactory(createMockFactory({ deltaCount: 0 }), {
+      advancement: advancement.controller,
+    });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const sendResp = await client.request("session.send", {
+      text: "请把测试修到全绿，盯到验收通过",
+      turnId: "turn-adv-delete-active",
+    });
+    expect(isSuccessResponse(sendResp)).toBe(true);
+    if (!isSuccessResponse(sendResp)) return;
+    const awaiting = sendResp.result as {
+      conversationId: string;
+      advancementSessionId: string;
+    };
+    await client.waitNotification("session.event");
+
+    const confirmResp = await client.request("session.advancementConfirm", {
+      conversationId: awaiting.conversationId,
+      advancementSessionId: awaiting.advancementSessionId,
+    });
+    expect(isSuccessResponse(confirmResp)).toBe(true);
+    await client.waitNotification("session.event");
+    await client.waitNotification("session.complete");
+
+    const active = await advancement.store.loadSession(
+      awaiting.conversationId,
+      awaiting.advancementSessionId,
+    );
+    expect(active?.status).toBe("active");
+
+    const deleteResp = await client.request("session.delete", {
+      conversationId: awaiting.conversationId,
+    });
+    expect(isSuccessResponse(deleteResp)).toBe(true);
+
+    const session = await advancement.store.loadSession(
+      awaiting.conversationId,
+      awaiting.advancementSessionId,
+    );
+    expect(session?.status).toBe("cancelled");
+    expect(session?.exit).toMatchObject({
+      reason: "user-cancelled",
+      message: "原始对话已删除，推进会话已取消。",
+    });
+    await expect(
+      advancement.store.loadActiveSession(awaiting.conversationId),
+    ).resolves.toBeNull();
+    client.close();
+  });
+
+  it("session.delete 的推进清理失败不改变主对话删除结果", async () => {
+    const advancement = await createTestAdvancementHarness();
+    const cleanupSpy = vi
+      .spyOn(advancement.controller, "cancelOpenConversationSession")
+      .mockRejectedValueOnce(new Error("advancement cleanup failed"));
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    await startWithFactory(createMockFactory({ deltaCount: 0 }), {
+      advancement: advancement.controller,
+    });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    try {
+      const sendResp = await client.request("session.send", {
+        text: "请把测试修到全绿，盯到验收通过",
+        turnId: "turn-delete-cleanup-fails",
+      });
+      expect(isSuccessResponse(sendResp)).toBe(true);
+      if (!isSuccessResponse(sendResp)) return;
+      const awaiting = sendResp.result as {
+        conversationId: string;
+      };
+      await client.waitNotification("session.event");
+
+      const deleteResp = await client.request("session.delete", {
+        conversationId: awaiting.conversationId,
+      });
+      expect(isSuccessResponse(deleteResp)).toBe(true);
+      expect(cleanupSpy).toHaveBeenCalledTimes(1);
+      expect(errorSpy).toHaveBeenCalledWith(
+        "[session.delete] advancement cleanup failed:",
+        expect.any(Error),
+      );
+
+      const list = await client.request("session.list");
+      expect(isSuccessResponse(list)).toBe(true);
+      if (isSuccessResponse(list)) {
+        expect(
+          (list.result as { conversations: Array<{ conversationId: string }> })
+            .conversations,
+        ).not.toContainEqual(
+          expect.objectContaining({ conversationId: awaiting.conversationId }),
+        );
+      }
+    } finally {
+      cleanupSpy.mockRestore();
+      errorSpy.mockRestore();
+      client.close();
+    }
   });
 
   it("session.advancementCancel 可降级为直接执行原始任务", async () => {

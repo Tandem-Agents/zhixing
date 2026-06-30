@@ -1043,11 +1043,12 @@ export function buildSessionDeleteMethod(): MethodEntry {
       // 删除成功后、名册清理前组播,旁观端据此停止盯已删对话。
       const result = await manager.delete(id, {
         removeDisk: async () => (directory ? directory.remove(id) : false),
-        onDeleted: () =>
+        onDeleted: () => {
           ctx.server.sessionBroadcast?.(id, SESSION_NOTIFICATIONS.changed, {
             conversationId: id,
             change: "deleted",
-          } satisfies SessionChangedPayload),
+          } satisfies SessionChangedPayload);
+        },
       });
       if (result === "busy") {
         throw new RpcAppError(
@@ -1057,6 +1058,15 @@ export function buildSessionDeleteMethod(): MethodEntry {
       }
       if (!result) {
         throw RpcErrors.notFound(`Session not found: ${id}`);
+      }
+      try {
+        await ctx.server.advancement?.cancelOpenConversationSession({
+          conversationId: id,
+          reason: "user-cancelled",
+          message: "原始对话已删除，推进会话已取消。",
+        });
+      } catch (err) {
+        console.error("[session.delete] advancement cleanup failed:", err);
       }
     },
   };
