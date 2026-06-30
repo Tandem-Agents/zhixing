@@ -36,6 +36,7 @@
 所以我觉得这个思路很好。
 
 
+
 我其实之前很早就有这个想法了，就是关于主线 Agent 的执行侧，负责推进任务执行的这一条支线（或者说另一条主线，具体是主是支不好定，关键看产品定义上怎么看待它的重要性）。我理解它是另一条主线，即“推进侧”。
 
 按照我们刚才的理解，推进侧只负责：
@@ -48,6 +49,7 @@
 关于主线 Agent 和支线 Agent，就像球员和裁判的关系，他们要分开。
 
 
+
 确实不应该是用户的每一个问题都进入这个推进的流程。比如用户问“今天天气怎么样”、“我的文档中有什么内容”或“这个项目有什么信息”，这种属于问题而非任务，因此需要对问题和任务进行拆分。
 问题是不需要进入这个推进流程的，只有任务需要。
 
@@ -56,7 +58,9 @@
 2. 新增一个判断节点：专门用来判断是否要触发这个流程。
 
 
+
 主agent工作线，也就是 执行侧的 前缀cache不动，推进侧 的 前缀cache也不动，各自工作互不打扰；
+
 
 
 执行侧的这个 Agent，在处理的不是问题而是一个任务的情况下，会进入我们的推进流程。
@@ -94,12 +98,14 @@
 通过这种代替用户回消息的方式，工作将持续推进，直到最终完成。
 
 
+
 推进侧结束工作条件很清晰：
 1、按照结束条件、验收条件通过，完成任务
 2、推进侧判断 执行侧进入 死胡同，无法完成任务
 3、一条底线，不允许 执行侧无限执行；
 
 由主agent 来判断是 问题，还是任务，如果是任务，主agent调用工具，或者以其他形式 触发 推进流程，感觉这个说过了，很清晰；
+
 
 
 推进侧的 类似于 skill 的 规则 名称已定，叫 Rubric（推进准则）；
@@ -166,13 +172,13 @@ ConversationManager（会话 owner / 串行点）
 
 职责分界：
 
-| 组件 | 职责 | 不做 |
-|---|---|---|
-| 执行侧 main runtime | 按用户 / 代理消息执行任务 | 不判断自己是否完成 |
-| AdvancementController | 任务级状态机、调度下一轮 | 不生成执行方案、不替执行侧改文件 |
-| AdvancementRuntime | 按确认版 Rubric 验收、选择未通过处理、判断退出 | 不写主线历史、不每轮找用户确认 |
-| RubricStore | 存储、检索、版本化 Rubric | 不参与 run 调度 |
-| ConversationManager | 串行、持久化、窗口接受、事件组播 | 不内嵌 Rubric 语义 |
+| 组件                  | 职责                                           | 不做                             |
+| --------------------- | ---------------------------------------------- | -------------------------------- |
+| 执行侧 main runtime   | 按用户 / 代理消息执行任务                      | 不判断自己是否完成               |
+| AdvancementController | 任务级状态机、调度下一轮                       | 不生成执行方案、不替执行侧改文件 |
+| AdvancementRuntime    | 按确认版 Rubric 验收、选择未通过处理、判断退出 | 不写主线历史、不每轮找用户确认   |
+| RubricStore           | 存储、检索、版本化 Rubric                      | 不参与 run 调度                  |
+| ConversationManager   | 串行、持久化、窗口接受、事件组播               | 不内嵌 Rubric 语义               |
 
 ### 4. 核心数据模型
 
@@ -520,15 +526,15 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 
 新增事件面：
 
-| 事件 | 时机 | 用途 |
-|---|---|---|
-| `advancement:contract_draft` | Rubric 草案生成 | UI 展示确认面 |
-| `advancement:contract_confirmed` | 用户确认 Rubric | 标记任务进入推进 |
-| `advancement:contract_cancelled` | 用户取消或新真实输入覆盖待确认草案 | 清理确认面与等待态 |
-| `advancement:run_reviewed` | 每轮 run 验收完成 | 展示验收摘要 / 调试 |
-| `advancement:proxy_enqueued` | 代理消息入队 | 显示“推进侧将继续” |
-| `advancement:completed` | 验收通过 | 显示任务完成 |
-| `advancement:exited` | 退出 | 显示退出原因 |
+| 事件                               | 时机                               | 用途                 |
+| ---------------------------------- | ---------------------------------- | -------------------- |
+| `advancement:contract_draft`     | Rubric 草案生成                    | UI 展示确认面        |
+| `advancement:contract_confirmed` | 用户确认 Rubric                    | 标记任务进入推进     |
+| `advancement:contract_cancelled` | 用户取消或新真实输入覆盖待确认草案 | 清理确认面与等待态   |
+| `advancement:run_reviewed`       | 每轮 run 验收完成                  | 展示验收摘要 / 调试  |
+| `advancement:proxy_enqueued`     | 代理消息入队                       | 显示“推进侧将继续” |
+| `advancement:completed`          | 验收通过                           | 显示任务完成         |
+| `advancement:exited`             | 退出                               | 显示退出原因         |
 
 这些事件经 `session.event` 的带外通道发出，不混入 `session.delta` / `session.complete` 的执行流。
 
@@ -542,12 +548,12 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 
 ### 11. 包与代码落点
 
-| 包 | 新增/改造 | 说明 |
-|---|---|---|
-| `@zhixing/core` | `rubrics/`、`advancement/` 基础类型、TurnSource 扩展 | 资产协议、纯类型、存储原语 |
-| `@zhixing/orchestrator` | `AdvancementRuntime`、RubricContractBuilder、推进准入判断、评价 prompt、代理消息构造 | LLM 判断与执行侧 runtime 同层装配 |
-| `@zhixing/server` | `ConversationManager` 接入 `AdvancementController`、RPC 确认方法、事件组播 | 会话 owner 与串行队列 |
-| `@zhixing/cli` | Rubric 确认适配器、代理消息标记、推进事件渲染 | 接入面投影，不持状态；确认交互复用 `SelectionService` |
+| 包                        | 新增/改造                                                                              | 说明                                                   |
+| ------------------------- | -------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| `@zhixing/core`         | `rubrics/`、`advancement/` 基础类型、TurnSource 扩展                               | 资产协议、纯类型、存储原语                             |
+| `@zhixing/orchestrator` | `AdvancementRuntime`、RubricContractBuilder、推进准入判断、评价 prompt、代理消息构造 | LLM 判断与执行侧 runtime 同层装配                      |
+| `@zhixing/server`       | `ConversationManager` 接入 `AdvancementController`、RPC 确认方法、事件组播         | 会话 owner 与串行队列                                  |
+| `@zhixing/cli`          | Rubric 确认适配器、代理消息标记、推进事件渲染                                          | 接入面投影，不持状态；确认交互复用`SelectionService` |
 
 关键改造点：
 
@@ -567,15 +573,15 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 
 旧阶段语义与 §15 的对应关系：
 
-| 原阶段语义 | §15 执行单元 |
-| --- | --- |
-| Rubric 协议与资产 | C1 |
-| 推进会话控制日志 | C3 |
-| 准入与契约控制面 | C4 + C5 |
-| Selection 通用升级 | C2 |
-| 执行后验收 / 取证 / 裁判 | C6 + C7 |
-| 代理续推与队列 | C8 |
-| 窗口、恢复、观测、端到端 | C9 |
+| 原阶段语义               | §15 执行单元 |
+| ------------------------ | ------------- |
+| Rubric 协议与资产        | C1            |
+| 推进会话控制日志         | C3            |
+| 准入与契约控制面         | C4 + C5       |
+| Selection 通用升级       | C2            |
+| 执行后验收 / 取证 / 裁判 | C6 + C7       |
+| 代理续推与队列           | C8            |
+| 窗口、恢复、观测、端到端 | C9            |
 
 后续实施和审查只按 §15 执行；若本节映射与 C1-C9 冲突，以 C1-C9 为准。
 
@@ -631,21 +637,25 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 
 依赖总表：
 
-| 单元 | 依赖 | 可独立审查点 |
-|---|---|---|
-| C1 | 无 | Rubric 协议与资产存储可独立落地 |
-| C2 | 无；若现有 `SelectionService` 已满足确认需求，可作为 no-op 审查单元记录结论 | 选择模块通用能力，不依赖 Rubric 业务 |
-| C3 | C1 | advancement 基础类型、RunRecord 元数据、AdvancementStore |
-| C4 | C1、C3；若确认交互需要 C2 能力，则同时依赖 C2 | 推进准入与 Rubric 契约控制面 |
-| C5 | C2、C4 | CLI 对控制面事件的 SelectionService 适配 |
-| C6 | C1、C3 | 推进侧 evaluator runtime、取证、裁判判定工具，可先以单元测试落地 |
-| C7 | C3、C4、C6 | run accepted 后验收与事件投影 |
-| C8 | C3、C4、C7 | 代理消息续推、队列来源、用户中断处理 |
-| C9 | C1-C8 | 恢复、观测与端到端验收 |
+| 单元 | 依赖                                                                         | 可独立审查点                                                     |
+| ---- | ---------------------------------------------------------------------------- | ---------------------------------------------------------------- |
+| C1   | 无                                                                           | Rubric 协议与资产存储可独立落地                                  |
+| C2   | 无；若现有`SelectionService` 已满足确认需求，可作为 no-op 审查单元记录结论 | 选择模块通用能力，不依赖 Rubric 业务                             |
+| C3   | C1                                                                           | advancement 基础类型、RunRecord 元数据、AdvancementStore         |
+| C4   | C1、C3；若确认交互需要 C2 能力，则同时依赖 C2                                | 推进准入与 Rubric 契约控制面                                     |
+| C5   | C2、C4                                                                       | CLI 对控制面事件的 SelectionService 适配                         |
+| C6   | C1、C3                                                                       | 推进侧 evaluator runtime、取证、裁判判定工具，可先以单元测试落地 |
+| C7   | C3、C4、C6                                                                   | run accepted 后验收与事件投影                                    |
+| C8   | C3、C4、C7                                                                   | 代理消息续推、队列来源、用户中断处理                             |
+| C9   | C1-C8                                                                        | 恢复、观测与端到端验收                                           |
 
 因此，只有 C1 与 C2 可以无前置并行；C6 在 C1+C3 后可与 C4/C5 分支并行推进；C7-C9 是严格后置集成单元。尤其 C9 不是“最后再想想”的补丁，而是全链路恢复与验收的封口单元，不能在 C1-C8 未完成时实施。
 
 #### C1：Rubric 协议与 RubricStore
+
+落地提交：
+
+- `7968622` `feat(core/rubrics): add rubric protocol asset store`
 
 内容：
 
@@ -661,6 +671,11 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 
 #### C2：SelectionService 通用能力升级
 
+落地提交：
+
+- `e63ffe9` `feat(cli/selection): add reusable details disclosure`
+- `b9a441b` `fix(cli/selection): unify keypress translation`
+
 内容：
 
 - 若 Rubric 确认需要详情展开、编辑承接或多步短决策，先升级 `packages/cli/src/tui/selection/` 的通用协议与 presenter。
@@ -675,6 +690,10 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 
 #### C3：推进基础类型、RunRecord 元数据与 AdvancementStore
 
+落地提交：
+
+- `dc0b7f9` `feat(core/advancement): add advancement session control log`
+
 内容：
 
 - 新增 advancement 核心类型、`TurnSource: "advancement"` 与 RunRecord advancement 元数据。
@@ -688,6 +707,13 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 - `AdvancementStore` 命名和职责是否统一。
 
 #### C4：推进准入与 Rubric 契约控制面
+
+落地提交：
+
+- `22a6319` `feat(core/advancement): add rubric admission and contract primitives`
+- `11d54c8` `feat(rpc/events): scope session events for control-plane traffic`
+- `8eff575` `feat(server/advancement): add rubric contract control plane`
+- `3efb6b3` `fix(server/session): clean up advancement state on conversation delete`
 
 内容：
 
