@@ -48,6 +48,7 @@ describe("createRunEventForwarder", () => {
     expect(out).toHaveLength(2);
     expect(out[0]).toMatchObject({
       conversationId: "c1",
+      scope: "run",
       runId: "turn-1",
       seq: 0,
       event: "retry:attempt",

@@ -14,6 +14,8 @@
  * - 同一对话同时至多一个 run(宿主唯一串行点保证)——投影按 conversationId
  *   单槽索引,新 runId 帧到达即拆旧建新(run_end 丢失时的兜底回收);
  * - seq 单调守卫:重复 / 乱序帧丢弃(协议级防御,WS 单连接内本就有序)。
+ * 非 run 控制面事件(如 advancement:*) 由对应控制面监听器消费,发端以
+ * scope 标记归属；本适配器只还原 scope=run 的信封。
  *
  * 订阅经连接的持久订阅(跨重连有效、被动——不为订阅拉起宿主)。"当前对话"
  * 是接入面 UI 态,经 filter 注入——适配器自身不持有它。
@@ -72,6 +74,7 @@ export class RpcEventBus {
 
   private handleEnvelope(envelope: SessionEventEnvelope): void {
     if (this.disposed) return;
+    if (envelope.scope !== "run") return;
     if (this.opts.filter && !this.opts.filter(envelope)) return;
 
     const current = this.projections.get(envelope.conversationId);

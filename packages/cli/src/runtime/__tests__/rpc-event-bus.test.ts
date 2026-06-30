@@ -22,6 +22,7 @@ function envelope(
 ): SessionEventEnvelope {
   return {
     conversationId: "conv-1",
+    scope: "run",
     runId: "run-1",
     payload: {},
     meta: {},
@@ -176,6 +177,25 @@ describe("RpcEventBus · per-run 投影生命周期", () => {
     feed(envelope({ seq: 0, event: "agent:run_start" }));
 
     expect(spy.received).toHaveLength(2);
+  });
+
+  it("控制面事件不进入 per-run 投影,不污染同 runId 的 seq 守卫", () => {
+    const { spy, feed } = makeBus();
+
+    feed(
+      envelope({ seq: 0, scope: "control", event: "advancement:contract_draft" }),
+    );
+    feed(
+      envelope({
+        seq: 1,
+        scope: "control",
+        event: "advancement:contract_confirmed",
+      }),
+    );
+    feed(envelope({ seq: 0, event: "agent:run_start" }));
+
+    expect(spy.contexts).toHaveLength(1);
+    expect(spy.received.map((r) => r.event)).toEqual(["agent:run_start"]);
   });
 
   it("filter 拒绝的信封不进投影——'当前对话'过滤归调用方", () => {

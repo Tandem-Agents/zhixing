@@ -35,8 +35,12 @@ export interface RunEventSource {
 
 // ─── wire 信封 ───
 
+export type SessionEventScope = "run" | "control";
+
 export interface SessionEventEnvelope {
   conversationId: string;
+  /** 事件归属域。发端负责标记，接入面按此分流，避免各端重复维护事件分类。 */
+  scope: SessionEventScope;
   /** 本 run 的标识——取 turn 上下文的 turnId;缺省(无 turn 语境)时为空串 */
   runId: string;
   /** run 内单调递增——接收端跨连接重建顺序 / 去重用 */
@@ -143,6 +147,7 @@ export function createRunEventForwarder(
       bus.on(event, ((payload: unknown, meta?: EventMeta) => {
         broadcast(conversationId, {
           conversationId,
+          scope: "run",
           runId,
           seq: seq++,
           event,
