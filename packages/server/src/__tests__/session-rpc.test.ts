@@ -447,6 +447,24 @@ describe("session.* RPC (S2.D)", () => {
           };
         },
       },
+      revisionStrategy: {
+        async revise(input) {
+          return {
+            ...input.currentDraft,
+            draftId: `revised-${input.currentDraft.draftId}`,
+            source: "generated",
+            title: "修订后的测试推进准则",
+            content: {
+              ...input.currentDraft.content,
+              passCriteria: [
+                ...input.currentDraft.content.passCriteria,
+                input.userFeedback,
+              ],
+            },
+            createdAt: input.now,
+          };
+        },
+      },
     });
   }
 
@@ -647,6 +665,87 @@ describe("session.* RPC (S2.D)", () => {
         expect.objectContaining({ conversationId: result.conversationId }),
       );
     }
+    client.close();
+  });
+
+  it("session.advancementRevise 按用户反馈修订待确认 Rubric 且不执行 main run", async () => {
+    const advancement = await createTestAdvancementHarness();
+    await startWithFactory(createMockFactory(), {
+      advancement: advancement.controller,
+    });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const sendResp = await client.request("session.send", {
+      text: "请把测试修到全绿，盯到验收通过",
+      turnId: "turn-adv-revise",
+    });
+    expect(isSuccessResponse(sendResp)).toBe(true);
+    if (!isSuccessResponse(sendResp)) return;
+    const awaiting = sendResp.result as {
+      conversationId: string;
+      advancementSessionId: string;
+    };
+    await client.waitNotification("session.event");
+
+    const reviseResp = await client.request("session.advancementRevise", {
+      conversationId: awaiting.conversationId,
+      advancementSessionId: awaiting.advancementSessionId,
+      userFeedback: "补充文档验收",
+    });
+    expect(isSuccessResponse(reviseResp)).toBe(true);
+    if (!isSuccessResponse(reviseResp)) return;
+    expect(reviseResp.result).toMatchObject({
+      status: "revised",
+      rubricDraft: {
+        originalTurnId: "turn-adv-revise",
+        title: "修订后的测试推进准则",
+      },
+    });
+    expect(recordsByConversation.get(awaiting.conversationId)).toEqual([]);
+
+    const event = await client.waitNotification("session.event");
+    expect(event.params).toMatchObject({
+      scope: "control",
+      runId: "turn-adv-revise",
+      seq: 1,
+      event: "advancement:contract_draft",
+      payload: {
+        advancementSessionId: awaiting.advancementSessionId,
+        revised: true,
+      },
+    });
+
+    const reviseResp2 = await client.request("session.advancementRevise", {
+      conversationId: awaiting.conversationId,
+      advancementSessionId: awaiting.advancementSessionId,
+      userFeedback: "再补充构建验收",
+    });
+    expect(isSuccessResponse(reviseResp2)).toBe(true);
+    const event2 = await client.waitNotification("session.event");
+    expect(event2.params).toMatchObject({
+      scope: "control",
+      runId: "turn-adv-revise",
+      seq: 2,
+      event: "advancement:contract_draft",
+      payload: {
+        advancementSessionId: awaiting.advancementSessionId,
+        revised: true,
+      },
+    });
+
+    const session = await advancement.store.loadSession(
+      awaiting.conversationId,
+      awaiting.advancementSessionId,
+    );
+    expect(session?.pendingRubricDraft?.title).toBe("修订后的测试推进准则");
+    expect(session?.pendingRubricDraft?.content.passCriteria).toContain(
+      "补充文档验收",
+    );
+    expect(session?.pendingRubricDraft?.content.passCriteria).toContain(
+      "再补充构建验收",
+    );
+    expect(session?.rubricDraftVersion).toBe(2);
     client.close();
   });
 

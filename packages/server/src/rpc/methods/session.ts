@@ -26,6 +26,7 @@ import {
   abortWithReason,
   generateTurnId,
   isNonEmptyUserTurnInput,
+  type AdvancementSession,
   type RubricContractDraftSnapshot,
   type TurnContext,
   type UserTurnInput,
@@ -48,6 +49,7 @@ import {
   type SessionCompletePayload,
   type SessionAdvancementCancelResult,
   type SessionAdvancementConfirmResult,
+  type SessionAdvancementReviseResult,
   type SessionConversationEntry,
   type SessionAwaitingRubricResult,
   type SessionContractFailedResult,
@@ -195,7 +197,7 @@ export function buildSessionSendMethod(): MethodEntry {
           notifyAdvancementEvent({
             conversationId: prepared.session.conversationId,
             turnId: prepared.originalTurnId,
-            seq: 1,
+            seq: nextContractControlSeq(prepared.session),
             event: "advancement:contract_cancelled",
             payload: {
               advancementSessionId: prepared.session.id,
@@ -231,7 +233,7 @@ export function buildSessionSendMethod(): MethodEntry {
           notifyAdvancementEvent({
             conversationId: prepared.session.conversationId,
             turnId: prepared.originalTurnId,
-            seq: 1,
+            seq: nextContractControlSeq(prepared.session),
             event: "advancement:contract_cancelled",
             payload: {
               advancementSessionId: prepared.session.id,
@@ -287,6 +289,10 @@ interface SessionAdvancementCancelParams extends SessionAdvancementActionParams 
   executeOriginal?: unknown;
 }
 
+interface SessionAdvancementReviseParams extends SessionAdvancementActionParams {
+  userFeedback?: unknown;
+}
+
 export function buildSessionAdvancementConfirmMethod(): MethodEntry {
   return {
     name: "session.advancementConfirm",
@@ -337,7 +343,7 @@ export function buildSessionAdvancementConfirmMethod(): MethodEntry {
       notifyAdvancementEvent({
         conversationId,
         turnId: confirmed.originalTurnId,
-        seq: 1,
+        seq: nextContractControlSeq(confirmed.session),
         event: "advancement:contract_confirmed",
         payload: {
           advancementSessionId: confirmed.session.id,
@@ -373,7 +379,7 @@ export function buildSessionAdvancementConfirmMethod(): MethodEntry {
           notifyAdvancementEvent({
             conversationId,
             turnId: confirmed.originalTurnId,
-            seq: 2,
+            seq: nextContractControlSeq(confirmed.session) + 1,
             event: "advancement:contract_cancelled",
             payload: {
               advancementSessionId: cancelled.id,
@@ -394,6 +400,67 @@ export function buildSessionAdvancementConfirmMethod(): MethodEntry {
         status: "confirmed",
         advancementSessionId: confirmed.session.id,
         runStatus: admitted.runStatus,
+      };
+    },
+  };
+}
+
+export function buildSessionAdvancementReviseMethod(): MethodEntry {
+  return {
+    name: "session.advancementRevise",
+    requiresAuth: true,
+    async handler(rawParams, ctx): Promise<SessionAdvancementReviseResult> {
+      const params = (rawParams ?? {}) as SessionAdvancementReviseParams;
+      const conversationId = requireConversationId(
+        params,
+        "session.advancementRevise",
+      );
+      const advancementSessionId = requireAdvancementSessionId(
+        params,
+        "session.advancementRevise",
+      );
+      const userFeedback = requireUserFeedback(
+        params,
+        "session.advancementRevise",
+      );
+      const advancement = requireAdvancement(ctx.server);
+      const manager = requireConversations(ctx.server);
+      const revised = await runAdvancementMaintenance({
+        manager,
+        server: ctx.server,
+        conversationId,
+        busyMessage:
+          "Conversation is busy; revise the Rubric after the current turn completes",
+        fn: () =>
+          advancement.reviseRubricDraft({
+            conversationId,
+            advancementSessionId,
+            userFeedback,
+          }),
+      });
+
+      notifyAdvancementEvent({
+        conversationId,
+        turnId: revised.draft.originalTurnId,
+        seq: revised.session.rubricDraftVersion,
+        event: "advancement:contract_draft",
+        payload: {
+          advancementSessionId: revised.session.id,
+          rubricDraftId: revised.draft.draftId,
+          rubricDraft: revised.draft,
+          revised: true,
+        },
+        connection: ctx.connection,
+        broadcast: ctx.server.sessionBroadcast,
+      });
+
+      return {
+        conversationId,
+        sessionId: conversationId,
+        status: "revised",
+        advancementSessionId: revised.session.id,
+        rubricDraftId: revised.draft.draftId,
+        rubricDraft: revised.draft,
       };
     },
   };
@@ -436,7 +503,7 @@ export function buildSessionAdvancementCancelMethod(): MethodEntry {
           cancelled.kind === "direct-original-task"
             ? cancelled.originalTurnId
             : (cancelled.originalTurnId ?? cancelled.session.id),
-        seq: 1,
+        seq: nextContractControlSeq(cancelled.session),
         event: "advancement:contract_cancelled",
         payload: {
           advancementSessionId: cancelled.session.id,
@@ -1529,6 +1596,27 @@ function requireAdvancementSessionId(
     );
   }
   return params.advancementSessionId;
+}
+
+function requireUserFeedback(
+  params: SessionAdvancementReviseParams,
+  method: string,
+): string {
+  if (
+    typeof params.userFeedback !== "string" ||
+    params.userFeedback.trim().length === 0
+  ) {
+    throw RpcErrors.invalidParams(
+      `${method} requires non-empty 'userFeedback'`,
+    );
+  }
+  return params.userFeedback.trim();
+}
+
+function nextContractControlSeq(
+  session: Pick<AdvancementSession, "rubricDraftVersion">,
+): number {
+  return session.rubricDraftVersion + 1;
 }
 
 function optionalConversationId(

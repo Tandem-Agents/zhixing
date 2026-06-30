@@ -50,6 +50,11 @@ export interface AdvancementConfirmedTurn {
   readonly originalUserTask: UserTurnInput;
 }
 
+export interface AdvancementRevisedDraft {
+  readonly session: AdvancementSession;
+  readonly draft: RubricContractDraftSnapshot;
+}
+
 export type AdvancementCancelResult =
   | {
       readonly kind: "cancelled";
@@ -209,6 +214,40 @@ export class AdvancementController {
       originalTurnId: draft.originalTurnId,
       originalUserTask: confirmed.originalUserTask,
     };
+  }
+
+  async reviseRubricDraft(input: {
+    readonly conversationId: string;
+    readonly advancementSessionId: string;
+    readonly userFeedback: string;
+  }): Promise<AdvancementRevisedDraft> {
+    const session = await this.requireSession(
+      input.conversationId,
+      input.advancementSessionId,
+    );
+    if (session.status !== "awaiting-rubric-confirmation") {
+      throw new Error(
+        `AdvancementController: session "${session.id}" is not awaiting rubric confirmation`,
+      );
+    }
+    const draft = session.pendingRubricDraft;
+    if (!draft) {
+      throw new Error(
+        `AdvancementController: session "${session.id}" has no pending rubric draft`,
+      );
+    }
+    const revised = await this.contractBuilder.reviseDraft({
+      currentDraft: draft,
+      originalUserTask: session.originalUserTask,
+      userFeedback: input.userFeedback,
+    });
+    const updated = await this.store.reviseRubricDraft(
+      input.conversationId,
+      input.advancementSessionId,
+      revised,
+      revised.createdAt,
+    );
+    return { session: updated, draft: revised };
   }
 
   async cancelRubric(input: {

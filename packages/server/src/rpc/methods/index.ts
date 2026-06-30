@@ -12,6 +12,7 @@ import { buildHealthMethod } from "./health.js";
 import {
   buildSessionSendMethod,
   buildSessionAdvancementConfirmMethod,
+  buildSessionAdvancementReviseMethod,
   buildSessionAdvancementCancelMethod,
   buildSessionListMethod,
   buildSessionHistoryMethod,
@@ -85,6 +86,7 @@ export function buildBuiltinRegistry(_opts: BuiltinMethodsOptions = {}): Handler
     // session.*
     buildSessionSendMethod(),
     buildSessionAdvancementConfirmMethod(),
+    buildSessionAdvancementReviseMethod(),
     buildSessionAdvancementCancelMethod(),
     buildSessionListMethod(),
     buildSessionHistoryMethod(),

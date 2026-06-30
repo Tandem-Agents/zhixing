@@ -4,4 +4,5 @@ export {
   type AdvancementConfirmedTurn,
   type AdvancementControllerOptions,
   type AdvancementPrepareResult,
+  type AdvancementRevisedDraft,
 } from "./controller.js";

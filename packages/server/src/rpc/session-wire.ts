@@ -165,6 +165,16 @@ export interface SessionAdvancementConfirmResult extends SessionAcceptedSendResu
   runStatus: "immediate" | "queued";
 }
 
+export interface SessionAdvancementReviseResult {
+  conversationId: string;
+  /** @deprecated 使用 conversationId */
+  sessionId: string;
+  status: "revised";
+  advancementSessionId: string;
+  rubricDraftId: string;
+  rubricDraft: RubricContractDraftSnapshot;
+}
+
 export type SessionAdvancementCancelResult =
   | {
       conversationId: string;
