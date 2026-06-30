@@ -335,7 +335,9 @@ interface AdvancementProxyMessage {
 
 这里的“主 Agent 推进准入策略”属于主 Agent 的任务识别与成本判断策略，不是推进侧裁判。它只回答“这次是否值得启动任务推进闭环”，不制定验收标准，不要求用户补写验收条件。
 
-实现上，准入策略运行在执行 run 之前的控制面：可以使用主 Agent 的身份、会话投影与轻量判断调用，但这次判断不写主线 transcript，不产生 RunRecord，不调用执行工具。这样既满足“主 Agent 判断是否进入推进”，也保证 Rubric 确认发生在第一次执行 run 之前。
+实现上，准入策略运行在执行 run 之前的控制面：使用主 Agent 的身份、会话投影与轻量 LLM 判断调用，但这次判断不写主线 transcript，不产生 RunRecord，不调用执行工具。这样既满足“主 Agent 判断是否进入推进”，也保证 Rubric 确认发生在第一次执行 run 之前。
+
+准入是语义判断，不是关键词匹配。正则、固定词表、硬编码规则不得成为产品级准入路径；它们最多只能作为不可用时的保守降级或显式高置信命令的边界检查。只要用户表达里同时存在升级和降级意味，不能让低层规则抢判，必须交给语义判断或按更能保护用户目标的方向处理。
 
 推进准入的核心不是“用户有没有说成任务”，而是“这次是否值得付出开跑前确认与后续验收成本”。典型进入推进闭环的信号包括：任务存在明确客观完成信号、可能跨多轮 run、失败代价较高、用户显式要求审查/验证/完成到某标准、或需要沉淀可复用 Rubric。轻量、即时、低风险任务应直接执行，避免把重流程压到日常小需求上。
 
@@ -351,11 +353,13 @@ interface AdvancementProxyMessage {
 
 1. `RubricContractBuilder` 用用户任务检索 RubricStore。
 2. 命中：生成 `RubricContractDraft`，展示给用户确认。
-3. 未命中：参考已有 Rubric 与协议规格生成新 Rubric 草案，展示给用户确认。
+3. 未命中：由 Rubric 草案生成策略基于当前任务、候选 Rubric 与协议规格生成新 Rubric 草案，展示给用户确认。
 4. 用户确认后，写入 `AdvancementSession.confirmedRubric`；若是新 Rubric，同步写入 RubricStore。
 5. 会话状态进入 `active`，原始用户任务作为第一条执行 turn 入队。
 
 用户确认只发生在这里。进入 `active` 后，推进侧按确认版 Rubric 自动推进，不再每轮询问用户。
+
+Rubric 草案生成是任务契约生成，不是通用模板填空。未命中 Rubric 时，默认路径应由 LLM 根据当前任务现写场景化验收标准、证据要求和未通过处理；固定通用模板只能作为测试替身，不能成为真实产品行为。若草案生成不可用或失败，应受控返回 `contract-failed`，不得伪造一份通用 Rubric 继续流程。`RubricContractBuilder` 只负责检索、组装、确认和持久化契约流程，草案内容生成必须通过可替换的 generation strategy 接入，避免把智能生成逻辑写死在控制面类里。
 
 Rubric 确认是控制面流程，不是一次执行 run：
 
@@ -550,9 +554,9 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 
 | 包                        | 新增/改造                                                                              | 说明                                                   |
 | ------------------------- | -------------------------------------------------------------------------------------- | ------------------------------------------------------ |
-| `@zhixing/core`         | `rubrics/`、`advancement/` 基础类型、TurnSource 扩展                               | 资产协议、纯类型、存储原语                             |
-| `@zhixing/orchestrator` | `AdvancementRuntime`、RubricContractBuilder、推进准入判断、评价 prompt、代理消息构造 | LLM 判断与执行侧 runtime 同层装配                      |
-| `@zhixing/server`       | `ConversationManager` 接入 `AdvancementController`、RPC 确认方法、事件组播         | 会话 owner 与串行队列                                  |
+| `@zhixing/core`         | `rubrics/`、`advancement/` 基础类型、RubricContractBuilder、准入 / 草案生成策略、TurnSource 扩展 | 资产协议、纯类型、存储原语与可替换策略接口 |
+| `@zhixing/orchestrator` | `AdvancementRuntime`、评价 prompt、代理消息构造 | 推进侧 evaluator runtime 与执行侧 runtime 同层装配 |
+| `@zhixing/server`       | `ConversationManager` 接入 `AdvancementController`、RPC 确认方法、事件组播         | 会话 owner、串行队列与控制面编排                                  |
 | `@zhixing/cli`          | Rubric 确认适配器、代理消息标记、推进事件渲染                                          | 接入面投影，不持状态；确认交互复用`SelectionService` |
 
 关键改造点：
@@ -717,7 +721,8 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 
 内容：
 
-- 实现 `AdvancementAdmissionStrategy`：问题 / 普通任务 / 推进任务。
+- 实现 `AdvancementAdmissionStrategy`：用 LLM 语义判断区分问题 / 普通任务 / 推进任务；硬编码规则不得作为产品级准入路径。
+- 实现可替换的 Rubric 草案生成策略：未命中 Rubric 时由 LLM 生成场景化草案；固定模板只允许作为测试替身，生成失败走 `contract-failed`。
 - 扩展 `session.send` 返回 `awaiting-rubric-confirmation`。
 - 新增确认 / 取消 RPC action；确认后通过 `makeTask` 闭包复用原始 `turnId`，不改 `admitTurn` 接口。
 - 支持自然语言升/降级逃生阀。
@@ -725,10 +730,17 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 审查重点：
 
 - 普通任务是否不被重型流程拖慢。
-- 准入判断是否不要求用户选择模式。
+- 准入判断是否不要求用户选择模式，且没有退回关键词抢判。
+- Rubric 草案是否来自可替换生成策略，真实产品路径没有退回通用固定模板。
 - `turnId` 流转是否符合现有 RPC / `admitTurn` 事实。
 
 #### C5：CLI Rubric 确认适配器
+
+落地提交：
+
+- `625591a` `feat(core/advancement): support rubric draft revision`
+- `6882c21` `feat(server/advancement): expose rubric revision control plane`
+- `47db2f5` `feat(cli/advancement): add rubric contract confirmation flow`
 
 内容：
 

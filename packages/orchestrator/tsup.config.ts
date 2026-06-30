@@ -10,6 +10,7 @@ export default defineConfig({
     "src/confirmation/index.ts",
     "src/tools/index.ts",
     "src/orchestration/index.ts",
+    "src/advancement/index.ts",
   ],
   format: ["esm"],
   dts: true,

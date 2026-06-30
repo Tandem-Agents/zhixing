@@ -11,6 +11,7 @@
  *       `import { runChildAgent } from "@zhixing/orchestrator/subagent"`
  *       `import { resolveSubAgentResolver } from "@zhixing/orchestrator/confirmation"`
  *       `import { createTaskTool } from "@zhixing/orchestrator/tools"`
+ *       `import { createAdvancementRuntime } from "@zhixing/orchestrator/advancement"`
  *
  * 各 sub-path 子树的导出名空间不重叠 —— `export *` 安全且零维护成本
  * (新增导出无需在此处补行;若意外引入同名导出,TS 编译期立即报错)。
@@ -23,3 +24,4 @@ export * from "./subagent/index.js";
 export * from "./confirmation/index.js";
 export * from "./tools/index.js";
 export * from "./orchestration/index.js";
+export * from "./advancement/index.js";

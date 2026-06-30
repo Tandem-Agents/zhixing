@@ -36,6 +36,10 @@
     "./orchestration": {
       "types": "./dist/orchestration/index.d.ts",
       "import": "./dist/orchestration/index.js"
+    },
+    "./advancement": {
+      "types": "./dist/advancement/index.d.ts",
+      "import": "./dist/advancement/index.js"
     }
   },
   "files": [
