@@ -62,6 +62,29 @@ export type SessionEventBroadcast = (
   envelope: SessionEventEnvelope,
 ) => void;
 
+export interface ControlSessionEventInput {
+  readonly conversationId: string;
+  readonly runId: string;
+  readonly seq?: number;
+  readonly event: string;
+  readonly payload: unknown;
+}
+
+/** control 面事件由发端标记 scope，接入面不再靠事件名前缀猜测归属。 */
+export function createControlSessionEventEnvelope(
+  input: ControlSessionEventInput,
+): SessionEventEnvelope {
+  return {
+    conversationId: input.conversationId,
+    scope: "control",
+    runId: input.runId,
+    seq: input.seq ?? 0,
+    event: input.event,
+    payload: input.payload,
+    meta: {},
+  };
+}
+
 // ─── UI 订阅集投影表 ───
 
 type Projector<K extends keyof AgentEventMap> = (

@@ -14,9 +14,11 @@
  *    - `buildSystemPrompt` / `MAIN_AGENT_SEGMENTS` / `SUB_AGENT_SEGMENTS` /
  *      `CACHE_BOUNDARY` / `renderIdentity` / 相关类型
  *
+ * 3. 宿主装配可复用的单发文本调用
+ *    - `createMainCallLLM` / `createLightCallLLM`
+ *
  * **不导出**(internal helper,仅 createAgentRuntime 内部装配使用):
  *   - `trackMessages`
- *   - `createMainCallLLM` / `createLightCallLLM`
  *   - `prependContextBlock`(onBeforeRun 注入拼装,内部装配使用)
  *
  * 这些 helper 同包测试通过 `import "../X.js"` 直接消费 sub-module 文件,
@@ -33,6 +35,10 @@ export {
   type PromptBuildContext,
   type SystemPromptSegment,
 } from "./system-prompt.js";
+export {
+  createLightCallLLM,
+  createMainCallLLM,
+} from "./call-llm.js";
 export {
   createAgentRuntime,
   type AgentRuntime,

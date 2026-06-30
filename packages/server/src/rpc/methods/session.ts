@@ -67,7 +67,7 @@ import {
   type SessionTaskListUpdateResult,
   type SessionUnsubscribeResult,
 } from "../session-wire.js";
-import type { SessionEventEnvelope } from "../session-events.js";
+import { createControlSessionEventEnvelope } from "../session-events.js";
 import type { AdvancementPrepareResult } from "../../advancement/index.js";
 import {
   generateConversationId,
@@ -776,15 +776,13 @@ function notifyAdvancementEvent(input: {
   readonly connection: RpcConnection;
   readonly broadcast?: SessionBroadcast;
 }): void {
-  const envelope: SessionEventEnvelope = {
+  const envelope = createControlSessionEventEnvelope({
     conversationId: input.conversationId,
-    scope: "control",
     runId: input.turnId,
     seq: input.seq ?? 0,
     event: input.event,
     payload: input.payload,
-    meta: {},
-  };
+  });
   if (input.broadcast) {
     input.broadcast(
       input.conversationId,

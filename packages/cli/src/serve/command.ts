@@ -89,6 +89,7 @@ import {
 } from "../runtime/task-list-stores.js";
 import { registerCliTurnContextProviders } from "../runtime/turn-context-providers.js";
 import { applyTaskListAction } from "../runtime/task-list-actions.js";
+import { createServeAdvancementController } from "./advancement-controller.js";
 import { createCliRuntimeFactory } from "./session-adapter.js";
 import { createConversationDirectory } from "./conversation-directory.js";
 import { createWorksceneDirectory } from "./workscene-directory.js";
@@ -329,6 +330,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   //   存技能、会话 B 下窗不知道"(各自版本各自计);共享后任一保存,全部
   //   runtime 下个窗口换代即见。磁盘本就同一目录,共享无额外耦合。
   const serveSkillStore = new SkillStore();
+  const advancementController = createServeAdvancementController();
 
   // 3d. RuntimeHost —— 宿主侧 runtime 装配点:共享资产(skillStore / segmentDeps /
   //   mcpHub / 渲染装饰)单一持有,会话与 ephemeral 两条发放路径同一装配体。
@@ -440,6 +442,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     sessionBroadcastRef,
     sessionActivityBroadcastRef,
     cleanup: registry,
+    advancement: advancementController,
   };
 
   // pre-server 接入面：MCP（connectAll）/ 会话执行面 / 通道门面 / 投递栈 / 文本确认渲染器。

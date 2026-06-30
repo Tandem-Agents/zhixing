@@ -28,6 +28,7 @@ import {
 import { resolveModelCapability } from "@zhixing/providers";
 import { setupChannels } from "./channels.js";
 import { setupDelivery } from "../setup-delivery.js";
+import { createAdvancementReviewMaintenance } from "./advancement-review-maintenance.js";
 import { createTurnMaintenance } from "./turn-maintenance.js";
 import type { AccessSurface } from "./access-surface.js";
 
@@ -72,6 +73,26 @@ const conversationSurface: AccessSurface = {
       return { transcript, snapshots, localId: conversationId };
     };
 
+    const turnMaintenance = createTurnMaintenance({
+      convRepo: ctx.convRepo,
+      journal: ctx.journalStore,
+      onRenamed: (conversationId, name) => {
+        ctx.sessionBroadcastRef.current?.(
+          conversationId,
+          SESSION_NOTIFICATIONS.changed,
+          {
+            conversationId,
+            change: "renamed",
+            name,
+          } satisfies SessionChangedPayload,
+        );
+      },
+    });
+    const advancementReviewMaintenance = createAdvancementReviewMaintenance({
+      advancement: ctx.advancement,
+      sessionBroadcast: () => ctx.sessionBroadcastRef.current,
+    });
+
     ctx.conversations = new ConversationManager(ctx.runtimeFactory, undefined, {
       loadHistory: async (conversationId) => {
         try {
@@ -109,24 +130,12 @@ const conversationSurface: AccessSurface = {
         await s.snapshots.write(s.localId, input);
       },
       confirmationHub: ctx.confirmationHub,
-      // turn 后维护(自动命名 + journal 凝练)——所有入口的 turn 经
-      // recordTurn 唯一汇聚;自动命名成功组播 session.changed renamed,
-      // 各端列表与标题随之刷新。
-      onTurnCommitted: createTurnMaintenance({
-        convRepo: ctx.convRepo,
-        journal: ctx.journalStore,
-        onRenamed: (conversationId, name) => {
-          ctx.sessionBroadcastRef.current?.(
-            conversationId,
-            SESSION_NOTIFICATIONS.changed,
-            {
-              conversationId,
-              change: "renamed",
-              name,
-            } satisfies SessionChangedPayload,
-          );
-        },
-      }),
+      // 所有入口的 accepted turn 经 recordTurn 汇聚；各维护任务各自
+      // fire-and-forget，不能反向影响已落定的对话事实。
+      onTurnCommitted: (info) => {
+        turnMaintenance(info);
+        advancementReviewMaintenance(info);
+      },
     });
   },
 };
