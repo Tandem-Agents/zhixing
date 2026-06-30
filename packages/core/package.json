@@ -32,6 +32,10 @@
       "types": "./dist/transcript/index.d.ts",
       "import": "./dist/transcript/index.js"
     },
+    "./rubrics": {
+      "types": "./dist/rubrics/index.d.ts",
+      "import": "./dist/rubrics/index.js"
+    },
     "./advancement": {
       "types": "./dist/advancement/index.d.ts",
       "import": "./dist/advancement/index.js"

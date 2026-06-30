@@ -9,6 +9,7 @@ export default defineConfig({
     "src/resilience/index.ts",
     "src/context/index.ts",
     "src/session/index.ts",
+    "src/rubrics/index.ts",
     "src/advancement/index.ts",
     "src/memory/index.ts",
     "src/security/index.ts",
