@@ -18,6 +18,9 @@ import type {
   RunsPageCursor,
   SessionChangedPayload,
   SessionActivityPayload,
+  SessionAdvancementCancelResult,
+  SessionAdvancementConfirmResult,
+  SessionAdvancementReviseResult,
   SessionCompactResult,
   SessionContextBudgetResult,
   SessionCompletePayload,
@@ -108,6 +111,50 @@ export class RpcConversationFacade {
   async abort(conversationId: string): Promise<void> {
     const client = await this.link.getClient();
     await client.request("session.abort", { conversationId });
+  }
+
+  /** 确认待审 Rubric 契约，并让宿主用原 turnId 开始执行原任务。 */
+  async confirmAdvancement(
+    conversationId: string,
+    advancementSessionId: string,
+  ): Promise<SessionAdvancementConfirmResult> {
+    const client = await this.link.getClient();
+    return client.request<SessionAdvancementConfirmResult>(
+      "session.advancementConfirm",
+      { conversationId, advancementSessionId },
+    );
+  }
+
+  /**
+   * 取消待审 Rubric 契约；executeOriginal=true 时降级为普通任务执行。
+   */
+  async cancelAdvancement(
+    conversationId: string,
+    advancementSessionId: string,
+    opts: { executeOriginal?: boolean } = {},
+  ): Promise<SessionAdvancementCancelResult> {
+    const client = await this.link.getClient();
+    return client.request<SessionAdvancementCancelResult>(
+      "session.advancementCancel",
+      {
+        conversationId,
+        advancementSessionId,
+        executeOriginal: opts.executeOriginal ?? false,
+      },
+    );
+  }
+
+  /** 按用户反馈修订待审 Rubric 草案，仍停留在确认控制面。 */
+  async reviseAdvancement(
+    conversationId: string,
+    advancementSessionId: string,
+    userFeedback: string,
+  ): Promise<SessionAdvancementReviseResult> {
+    const client = await this.link.getClient();
+    return client.request<SessionAdvancementReviseResult>(
+      "session.advancementRevise",
+      { conversationId, advancementSessionId, userFeedback },
+    );
   }
 
   /** 建一个新对话(宿主写 meta + transcript 壳),返回身份供切指针。 */

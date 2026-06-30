@@ -2,14 +2,14 @@
  * REPL 交互模式 —— 核心宿主的终端接入面。
  *
  * 会话状态的唯一权威在核心宿主(窗口 / turnCounter / 持久化 / runtime 全在
- * 宿主侧);本回路是纯 UI:读输入 → session.send → 主通道 delta 喂渲染 →
- * complete 落定 → 回到输入。命令分发在本地,执行体经 RPC 在宿主。
+ * 宿主侧);本回路是纯 UI:读输入 → session.send → 控制面确认或主通道
+ * delta 喂渲染 → complete 落定 → 回到输入。命令分发在本地,执行体经 RPC 在宿主。
  *
  * 流程：
  * 1. ensure 核心宿主(不在则拉起)→ auto-resume 最近对话(经 session.list)
  * 2. readline / typeahead 获取用户输入
  * 3. 斜杠命令本地分发、宿主执行
- * 4. 否则 sendTurn:发送 + 等待 complete(delta 流随通知实时渲染)
+ * 4. 否则发送用户输入:控制面结果由本地选择面板承接;执行 turn 等待 complete
  * 5. turn 边界消费模式切换意图(宿主定向通知)
  * 6. 回到步骤 2
  */
@@ -62,7 +62,10 @@ import {
 import { detectTerminalCapability } from "./screen/terminal-capability.js";
 import { layout } from "./tui/style.js";
 import { InlineTextPromptRegion } from "./tui/inline-text-prompt.js";
-import { createSelectionService } from "./tui/selection/index.js";
+import {
+  createSelectionService,
+  type SelectionService,
+} from "./tui/selection/index.js";
 import { InputController, type PendingTextSubmission } from "./typeahead-input.js";
 import { BottomInfoModel } from "./bottom-info/index.js";
 import { renderHomeWelcome } from "./workbench/index.js";
@@ -85,8 +88,14 @@ import { createObservedTurnPresenter } from "./runtime/observed-turn-presenter.j
 import {
   ConversationController,
   selectInitialConversation,
+  type AcceptedTurn,
   type ActiveConversation,
+  type AwaitingRubricConfirmationTurn,
 } from "./runtime/conversation-controller.js";
+import {
+  createAdvancementContractSelectionRequest,
+  type AdvancementContractSelectionValue,
+} from "./runtime/advancement-contract-selection.js";
 import { createCandidateDeleteHandler } from "./runtime/candidate-delete-controller.js";
 import { ReplLocalView } from "./runtime/repl-local-view.js";
 import { TerminalConfirmationRenderer } from "./security/index.js";
@@ -240,6 +249,57 @@ export function renderCoreHostLifecycleNotice(opts: {
     return;
   }
   renderCoreHostPersistentLifecycleNotice(writer, notice);
+}
+
+async function resolveAdvancementContractSelection(opts: {
+  pending: AwaitingRubricConfirmationTurn;
+  controller: ConversationController;
+  selection: SelectionService;
+  writer: CliWriter;
+  onAccepted: (turn: { readonly conversationId: string; readonly turnId: string }) => void;
+  onBeforeExecution: () => void;
+}): Promise<AcceptedTurn | null> {
+  let pending = opts.pending;
+  while (true) {
+    const selection = await opts.selection.choose<AdvancementContractSelectionValue>(
+      createAdvancementContractSelectionRequest(pending.rubricDraft),
+    );
+    if (selection.kind === "cancelled" || selection.value === "cancel") {
+      await opts.controller.cancelRubricContract(pending);
+      opts.writer.line(chalk.dim(`${layout.contentPrefix}已取消这次任务。`));
+      return null;
+    }
+    if (selection.value === "edit") {
+      if (!("input" in selection) || !selection.input.trim()) continue;
+      try {
+        pending = await opts.controller.reviseRubricContract(
+          pending,
+          selection.input,
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        opts.writer.line(
+          chalk.yellow(`${layout.contentPrefix}准则修改失败：${message}`),
+        );
+      }
+      continue;
+    }
+    if (selection.value === "direct") {
+      opts.onBeforeExecution();
+      const result = await opts.controller.cancelRubricContract(pending, {
+        executeOriginal: true,
+        onAccepted: opts.onAccepted,
+      });
+      if (result.kind === "direct-execution") return result.turn;
+      opts.writer.line(chalk.dim(`${layout.contentPrefix}已取消这次任务。`));
+      return null;
+    }
+
+    opts.onBeforeExecution();
+    return opts.controller.confirmRubricContract(pending, {
+      onAccepted: opts.onAccepted,
+    });
+  }
 }
 
 async function ensureCoreHostWithReadOnlyFallback(
@@ -1285,8 +1345,8 @@ export async function startRepl(): Promise<void> {
       pendingTextSubmission?.reject();
       continue;
     }
-    // 正常对话 —— send 入队宿主唯一串行点;窗口推进 / 持久化 / 自动命名 /
-    // journal 维护全在宿主侧随 turn 落定发生,本回路只等 complete。
+    // 用户正文 —— send 入队宿主唯一串行点；Rubric 待确认属于控制面，
+    // 真正执行的 turn 才进入 delta/complete 主通道。
     state.running = true;
     renderer.startThinking();
 
@@ -1314,10 +1374,37 @@ export async function startRepl(): Promise<void> {
         inputCommitted = true;
         pendingTextSubmission?.commit();
       };
-      const acceptedTurn = await controller.beginTurn(preparedInput.input, {
+      const startedTurn = await controller.beginUserTurn(preparedInput.input, {
         onAccepted: commitAcceptedInput,
       });
       commitAcceptedInput();
+      let acceptedTurn: AcceptedTurn | null = null;
+      if (startedTurn.kind === "accepted") {
+        acceptedTurn = startedTurn.turn;
+      } else if (startedTurn.kind === "awaiting-rubric-confirmation") {
+        renderer.stop();
+        acceptedTurn = await resolveAdvancementContractSelection({
+          pending: startedTurn,
+          controller,
+          selection: selectionService,
+          writer: cliWriter,
+          onAccepted: commitAcceptedInput,
+          onBeforeExecution: () => renderer.startThinking(),
+        });
+      } else if (startedTurn.kind === "contract-failed") {
+        renderer.stop();
+        cliWriter.line(
+          chalk.yellow(
+            `${layout.contentPrefix}推进准则生成失败：${startedTurn.error.message}`,
+          ),
+        );
+        continue;
+      } else {
+        renderer.stop();
+        cliWriter.line(chalk.dim(`${layout.contentPrefix}已取消这次任务。`));
+        continue;
+      }
+      if (!acceptedTurn) continue;
       const turnPromise = acceptedTurn.outcome;
       // 暴露给模式切换命令——切换前 await 它,天然落在 turn 边界
       state.activeTurnPromise = turnPromise;

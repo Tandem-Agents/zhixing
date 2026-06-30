@@ -26,6 +26,7 @@ import {
 } from "@zhixing/core";
 import type {
   RunsPage,
+  SessionAdvancementCancelResult,
   SessionCompactResult,
   SessionContextBudgetResult,
   SessionChangedPayload,
@@ -34,6 +35,10 @@ import type {
   SessionUsageResult,
   WireAgentResult,
   WorksceneSummary,
+  SessionAwaitingRubricResult,
+  SessionCancelledRubricResult,
+  SessionContractFailedResult,
+  SessionSendResult,
 } from "@zhixing/server";
 import type { RpcConversationFacade } from "./rpc-conversation-facade.js";
 import type { RpcWorksceneFacade } from "./rpc-workscene-facade.js";
@@ -58,6 +63,47 @@ export interface AcceptedTurn {
   readonly turnId: string;
   readonly outcome: Promise<TurnOutcome>;
 }
+
+export interface AwaitingRubricConfirmationTurn {
+  readonly kind: "awaiting-rubric-confirmation";
+  readonly conversationId: string;
+  readonly turnId: string;
+  readonly advancementSessionId: string;
+  readonly rubricDraftId: string;
+  readonly rubricDraft: SessionAwaitingRubricResult["rubricDraft"];
+}
+
+export interface ContractFailedTurn {
+  readonly kind: "contract-failed";
+  readonly conversationId: string;
+  readonly turnId: string;
+  readonly error: { readonly message: string };
+}
+
+export interface CancelledRubricTurn {
+  readonly kind: "cancelled";
+  readonly conversationId: string;
+  readonly turnId: string;
+  readonly advancementSessionId: string;
+}
+
+export type BeginUserTurnResult =
+  | { readonly kind: "accepted"; readonly turn: AcceptedTurn }
+  | AwaitingRubricConfirmationTurn
+  | ContractFailedTurn
+  | CancelledRubricTurn;
+
+export type RubricContractCancelResult =
+  | {
+      readonly kind: "cancelled";
+      readonly conversationId: string;
+      readonly advancementSessionId: string;
+    }
+  | {
+      readonly kind: "direct-execution";
+      readonly advancementSessionId: string;
+      readonly turn: AcceptedTurn;
+    };
 
 export interface BeginTurnOptions {
   readonly onAccepted?: (turn: {
@@ -284,34 +330,223 @@ export class ConversationController {
     input: string | UserTurnInput,
     options: BeginTurnOptions = {},
   ): Promise<AcceptedTurn> {
+    const result = await this.beginUserTurn(input, options);
+    if (result.kind === "accepted") return result.turn;
+    throw new Error(
+      `ConversationController: received control-plane result "${result.kind}" in beginTurn`,
+    );
+  }
+
+  /**
+   * 发送用户输入。普通执行返回 accepted turn；推进准则确认等控制面结果
+   * 不等待 session.complete，由接入面继续承接。
+   */
+  async beginUserTurn(
+    input: string | UserTurnInput,
+    options: BeginTurnOptions = {},
+  ): Promise<BeginUserTurnResult> {
     const target = this.active.conversationId;
     const turnId = generateTurnId();
-    const outcome = new Promise<TurnOutcome>((resolve) => {
-      this.waiters.set(turnId, resolve);
-    });
-    this.localTurnsByConversation.set(target, turnId);
-    if (options.onAccepted) {
-      this.localTurnAcceptances.set(turnId, options.onAccepted);
-    }
+    const outcome = this.attachTurnWaiter(target, turnId, options);
     try {
-      await this.opts.conversation.send(input, target, turnId);
+      const sendResult = await this.opts.conversation.send(input, target, turnId);
       this.observedConversationId = target;
+      if (isAwaitingRubricResult(sendResult)) {
+        this.discardTurnWaiter(target, turnId);
+        return {
+          kind: "awaiting-rubric-confirmation",
+          conversationId: sendResult.conversationId,
+          turnId: sendResult.turnId,
+          advancementSessionId: sendResult.advancementSessionId,
+          rubricDraftId: sendResult.rubricDraftId,
+          rubricDraft: sendResult.rubricDraft,
+        };
+      }
+      if (isContractFailedResult(sendResult)) {
+        this.discardTurnWaiter(target, turnId);
+        return {
+          kind: "contract-failed",
+          conversationId: sendResult.conversationId,
+          turnId: sendResult.turnId,
+          error: sendResult.error,
+        };
+      }
+      if (isCancelledRubricResult(sendResult)) {
+        this.discardTurnWaiter(target, turnId);
+        return {
+          kind: "cancelled",
+          conversationId: sendResult.conversationId,
+          turnId: sendResult.turnId,
+          advancementSessionId: sendResult.advancementSessionId,
+        };
+      }
       this.markLocalTurnAccepted({ conversationId: target, turnId });
     } catch (err) {
-      this.waiters.delete(turnId);
-      this.pendingIntents.delete(turnId);
-      this.localTurnAcceptances.delete(turnId);
-      if (this.localTurnsByConversation.get(target) === turnId) {
-        this.localTurnsByConversation.delete(target);
-      }
+      this.discardTurnWaiter(target, turnId);
       throw err;
     }
-    return { conversationId: target, turnId, outcome };
+    return { kind: "accepted", turn: { conversationId: target, turnId, outcome } };
   }
 
   /** 发送一个 turn 并等待落定。 */
   async sendTurn(input: string | UserTurnInput): Promise<TurnOutcome> {
     return (await this.beginTurn(input)).outcome;
+  }
+
+  async confirmRubricContract(
+    pending: AwaitingRubricConfirmationTurn,
+    options: BeginTurnOptions = {},
+  ): Promise<AcceptedTurn> {
+    const outcome = this.attachTurnWaiter(
+      pending.conversationId,
+      pending.turnId,
+      options,
+    );
+    try {
+      const result = await this.opts.conversation.confirmAdvancement(
+        pending.conversationId,
+        pending.advancementSessionId,
+      );
+      if (result.turnId !== pending.turnId) {
+        throw new Error(
+          `ConversationController: advancement confirm returned unexpected turnId "${result.turnId}"`,
+        );
+      }
+      this.observedConversationId = pending.conversationId;
+      this.markLocalTurnAccepted({
+        conversationId: pending.conversationId,
+        turnId: pending.turnId,
+      });
+      return {
+        conversationId: pending.conversationId,
+        turnId: pending.turnId,
+        outcome,
+      };
+    } catch (err) {
+      this.discardTurnWaiter(pending.conversationId, pending.turnId);
+      throw err;
+    }
+  }
+
+  async cancelRubricContract(
+    pending: AwaitingRubricConfirmationTurn,
+    opts: { executeOriginal?: boolean; onAccepted?: BeginTurnOptions["onAccepted"] } = {},
+  ): Promise<RubricContractCancelResult> {
+    const executeOriginal = opts.executeOriginal ?? false;
+    const outcome = executeOriginal
+      ? this.attachTurnWaiter(pending.conversationId, pending.turnId, {
+          onAccepted: opts.onAccepted,
+        })
+      : null;
+    try {
+      const result = await this.opts.conversation.cancelAdvancement(
+        pending.conversationId,
+        pending.advancementSessionId,
+        { executeOriginal },
+      );
+      if (isDirectExecutionCancelResult(result)) {
+        if (!outcome) {
+          throw new Error(
+            "ConversationController: direct execution returned without an attached turn waiter",
+          );
+        }
+        if (result.turnId !== pending.turnId) {
+          throw new Error(
+            `ConversationController: advancement cancel returned unexpected turnId "${result.turnId}"`,
+          );
+        }
+        this.observedConversationId = pending.conversationId;
+        this.markLocalTurnAccepted({
+          conversationId: pending.conversationId,
+          turnId: pending.turnId,
+        });
+        return {
+          kind: "direct-execution",
+          advancementSessionId: result.advancementSessionId,
+          turn: {
+            conversationId: pending.conversationId,
+            turnId: pending.turnId,
+            outcome,
+          },
+        };
+      }
+      if (outcome) {
+        this.discardTurnWaiter(pending.conversationId, pending.turnId);
+      }
+      return {
+        kind: "cancelled",
+        conversationId: result.conversationId,
+        advancementSessionId: result.advancementSessionId,
+      };
+    } catch (err) {
+      if (outcome) {
+        this.discardTurnWaiter(pending.conversationId, pending.turnId);
+      }
+      throw err;
+    }
+  }
+
+  async reviseRubricContract(
+    pending: AwaitingRubricConfirmationTurn,
+    userFeedback: string,
+  ): Promise<AwaitingRubricConfirmationTurn> {
+    const result = await this.opts.conversation.reviseAdvancement(
+      pending.conversationId,
+      pending.advancementSessionId,
+      userFeedback,
+    );
+    if (result.conversationId !== pending.conversationId) {
+      throw new Error(
+        `ConversationController: advancement revise returned unexpected conversationId "${result.conversationId}"`,
+      );
+    }
+    if (result.advancementSessionId !== pending.advancementSessionId) {
+      throw new Error(
+        `ConversationController: advancement revise returned unexpected advancementSessionId "${result.advancementSessionId}"`,
+      );
+    }
+    if (result.rubricDraft.originalTurnId !== pending.turnId) {
+      throw new Error(
+        `ConversationController: advancement revise returned unexpected turnId "${result.rubricDraft.originalTurnId}"`,
+      );
+    }
+    if (result.rubricDraftId !== result.rubricDraft.draftId) {
+      throw new Error(
+        `ConversationController: advancement revise returned inconsistent rubricDraftId "${result.rubricDraftId}"`,
+      );
+    }
+    return {
+      kind: "awaiting-rubric-confirmation",
+      conversationId: result.conversationId,
+      turnId: result.rubricDraft.originalTurnId,
+      advancementSessionId: result.advancementSessionId,
+      rubricDraftId: result.rubricDraftId,
+      rubricDraft: result.rubricDraft,
+    };
+  }
+
+  private attachTurnWaiter(
+    conversationId: string,
+    turnId: string,
+    options: BeginTurnOptions = {},
+  ): Promise<TurnOutcome> {
+    const outcome = new Promise<TurnOutcome>((resolve) => {
+      this.waiters.set(turnId, resolve);
+    });
+    this.localTurnsByConversation.set(conversationId, turnId);
+    if (options.onAccepted) {
+      this.localTurnAcceptances.set(turnId, options.onAccepted);
+    }
+    return outcome;
+  }
+
+  private discardTurnWaiter(conversationId: string, turnId: string): void {
+    this.waiters.delete(turnId);
+    this.pendingIntents.delete(turnId);
+    this.localTurnAcceptances.delete(turnId);
+    if (this.localTurnsByConversation.get(conversationId) === turnId) {
+      this.localTurnsByConversation.delete(conversationId);
+    }
   }
 
   private markLocalTurnAccepted(turn: {
@@ -512,4 +747,31 @@ function toActiveConversation(input: {
 
 function isMainConversationId(conversationId: string): boolean {
   return parseConversationId(conversationId).scope.kind === "user";
+}
+
+function isAwaitingRubricResult(
+  result: SessionSendResult,
+): result is SessionAwaitingRubricResult {
+  return (
+    "status" in result &&
+    result.status === "awaiting-rubric-confirmation"
+  );
+}
+
+function isContractFailedResult(
+  result: SessionSendResult,
+): result is SessionContractFailedResult {
+  return "status" in result && result.status === "contract-failed";
+}
+
+function isCancelledRubricResult(
+  result: SessionSendResult,
+): result is SessionCancelledRubricResult {
+  return "status" in result && result.status === "cancelled";
+}
+
+function isDirectExecutionCancelResult(
+  result: SessionAdvancementCancelResult,
+): result is Extract<SessionAdvancementCancelResult, { status: "direct-execution" }> {
+  return result.status === "direct-execution";
 }

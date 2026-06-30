@@ -34,6 +34,50 @@ function makeFakes() {
       sessionId: "conv-1",
       turnId,
     })),
+    confirmAdvancement: vi.fn(async (_id: string, _advancementSessionId: string) => ({
+      conversationId: "conv-1",
+      sessionId: "conv-1",
+      turnId: "turn-confirmed",
+      status: "confirmed",
+      advancementSessionId: "adv-1",
+      runStatus: "immediate",
+    })),
+    cancelAdvancement: vi.fn(
+      async (
+        _id: string,
+        _advancementSessionId: string,
+        opts: { executeOriginal?: boolean } = {},
+      ) =>
+        opts.executeOriginal
+          ? {
+              conversationId: "conv-1",
+              sessionId: "conv-1",
+              turnId: "turn-direct",
+              status: "direct-execution",
+              advancementSessionId: "adv-1",
+              runStatus: "immediate",
+            }
+          : {
+              conversationId: "conv-1",
+              sessionId: "conv-1",
+              status: "cancelled",
+              advancementSessionId: "adv-1",
+            },
+    ),
+    reviseAdvancement: vi.fn(
+      async (_id: string, _advancementSessionId: string, _feedback: string) => ({
+        conversationId: "conv-1",
+        sessionId: "conv-1",
+        status: "revised",
+        advancementSessionId: "adv-1",
+        rubricDraftId: "draft-revised",
+        rubricDraft: {
+          ...rubricDraft("turn-rubric"),
+          draftId: "draft-revised",
+          title: "修订后的推进准则",
+        },
+      }),
+    ),
     onDelta: (h: Handler<never>) => {
       handlers.delta.push(h);
       return () => {};
@@ -100,6 +144,36 @@ function conversationEntry(
     busy: false,
     observerCount: 0,
     pendingCount: 0,
+  };
+}
+
+function rubricDraft(turnId: string) {
+  return {
+    draftId: "draft-1",
+    originalTurnId: turnId,
+    source: "generated" as const,
+    candidateRubricIds: [],
+    title: "代码审查",
+    description: "确认开发结果是否满足需求。",
+    content: {
+      passCriteria: ["测试通过"],
+      evidenceRequirements: [
+        {
+          id: "evidence-tests",
+          kind: "test-result" as const,
+          description: "测试结果",
+          required: true,
+        },
+      ],
+      failureHandling: [
+        {
+          id: "retry",
+          scenario: "测试失败",
+          reply: "请修复失败测试后继续。",
+        },
+      ],
+    },
+    createdAt: "2026-01-01T00:00:00.000Z",
   };
 }
 
@@ -287,6 +361,208 @@ describe("ConversationController", () => {
     await expect(acceptedTurn.outcome).resolves.toMatchObject({
       result: { reason: "completed" },
     });
+  });
+
+  it("beginUserTurn:Rubric 待确认是控制面结果,不等待 complete", async () => {
+    const f = makeFakes();
+    const onAccepted = vi.fn();
+    f.conversation.send.mockImplementationOnce(
+      async (_text: string, _id: string, turnId: string) => ({
+        conversationId: "conv-1",
+        sessionId: "conv-1",
+        turnId,
+        status: "awaiting-rubric-confirmation",
+        advancementSessionId: "adv-1",
+        rubricDraftId: "draft-1",
+        rubricDraft: rubricDraft(turnId),
+      }),
+    );
+    const { controller } = makeController(f);
+
+    const result = await controller.beginUserTurn("审查开发结果", {
+      onAccepted,
+    });
+
+    expect(result).toMatchObject({
+      kind: "awaiting-rubric-confirmation",
+      conversationId: "conv-1",
+      advancementSessionId: "adv-1",
+      rubricDraftId: "draft-1",
+    });
+    expect(onAccepted).not.toHaveBeenCalled();
+  });
+
+  it("beginUserTurn:Rubric 草案失败是受控结果,不等待 complete", async () => {
+    const f = makeFakes();
+    f.conversation.send.mockImplementationOnce(
+      async (_text: string, _id: string, turnId: string) => ({
+        conversationId: "conv-1",
+        sessionId: "conv-1",
+        turnId,
+        status: "contract-failed",
+        error: { message: "草案生成失败" },
+      }),
+    );
+    const { controller } = makeController(f);
+
+    await expect(controller.beginUserTurn("审查开发结果")).resolves.toEqual(
+      expect.objectContaining({
+        kind: "contract-failed",
+        error: { message: "草案生成失败" },
+      }),
+    );
+  });
+
+  it("confirmRubricContract:确认后用原 turnId 等待执行 complete", async () => {
+    const f = makeFakes();
+    const { controller } = makeController(f);
+    const onAccepted = vi.fn();
+    const pending = {
+      kind: "awaiting-rubric-confirmation" as const,
+      conversationId: "conv-1",
+      turnId: "turn-rubric",
+      advancementSessionId: "adv-1",
+      rubricDraftId: "draft-1",
+      rubricDraft: rubricDraft("turn-rubric"),
+    };
+    f.conversation.confirmAdvancement.mockResolvedValueOnce({
+      conversationId: "conv-1",
+      sessionId: "conv-1",
+      turnId: "turn-rubric",
+      status: "confirmed",
+      advancementSessionId: "adv-1",
+      runStatus: "immediate",
+    });
+
+    const acceptedTurn = await controller.confirmRubricContract(pending, {
+      onAccepted,
+    });
+    let settled = false;
+    void acceptedTurn.outcome.then(() => {
+      settled = true;
+    });
+
+    expect(f.conversation.confirmAdvancement).toHaveBeenCalledWith(
+      "conv-1",
+      "adv-1",
+    );
+    expect(onAccepted).toHaveBeenCalledExactlyOnceWith({
+      conversationId: "conv-1",
+      turnId: "turn-rubric",
+    });
+    expect(settled).toBe(false);
+
+    f.emit.complete({
+      conversationId: "conv-1",
+      sessionId: "conv-1",
+      turnId: "turn-rubric",
+      result: { reason: "completed" },
+    });
+    await expect(acceptedTurn.outcome).resolves.toMatchObject({
+      result: { reason: "completed" },
+    });
+  });
+
+  it("cancelRubricContract:降级直接执行时复用原 turnId 等待 complete", async () => {
+    const f = makeFakes();
+    const { controller } = makeController(f);
+    const pending = {
+      kind: "awaiting-rubric-confirmation" as const,
+      conversationId: "conv-1",
+      turnId: "turn-rubric",
+      advancementSessionId: "adv-1",
+      rubricDraftId: "draft-1",
+      rubricDraft: rubricDraft("turn-rubric"),
+    };
+    f.conversation.cancelAdvancement.mockResolvedValueOnce({
+      conversationId: "conv-1",
+      sessionId: "conv-1",
+      turnId: "turn-rubric",
+      status: "direct-execution",
+      advancementSessionId: "adv-1",
+      runStatus: "immediate",
+    });
+
+    const result = await controller.cancelRubricContract(pending, {
+      executeOriginal: true,
+    });
+
+    expect(f.conversation.cancelAdvancement).toHaveBeenCalledWith(
+      "conv-1",
+      "adv-1",
+      { executeOriginal: true },
+    );
+    expect(result.kind).toBe("direct-execution");
+    if (result.kind !== "direct-execution") throw new Error("unexpected result");
+    f.emit.complete({
+      conversationId: "conv-1",
+      sessionId: "conv-1",
+      turnId: "turn-rubric",
+      result: { reason: "completed" },
+    });
+    await expect(result.turn.outcome).resolves.toMatchObject({
+      result: { reason: "completed" },
+    });
+  });
+
+  it("reviseRubricContract:按用户反馈取得新版待确认草案", async () => {
+    const f = makeFakes();
+    const { controller } = makeController(f);
+    const pending = {
+      kind: "awaiting-rubric-confirmation" as const,
+      conversationId: "conv-1",
+      turnId: "turn-rubric",
+      advancementSessionId: "adv-1",
+      rubricDraftId: "draft-1",
+      rubricDraft: rubricDraft("turn-rubric"),
+    };
+
+    const revised = await controller.reviseRubricContract(
+      pending,
+      "请增加文档验收",
+    );
+
+    expect(f.conversation.reviseAdvancement).toHaveBeenCalledWith(
+      "conv-1",
+      "adv-1",
+      "请增加文档验收",
+    );
+    expect(revised).toMatchObject({
+      kind: "awaiting-rubric-confirmation",
+      turnId: "turn-rubric",
+      rubricDraftId: "draft-revised",
+      rubricDraft: { title: "修订后的推进准则" },
+    });
+  });
+
+  it("reviseRubricContract:拒绝服务端返回不匹配的原始 turn", async () => {
+    const f = makeFakes();
+    f.conversation.reviseAdvancement.mockResolvedValueOnce({
+      conversationId: "conv-1",
+      sessionId: "conv-1",
+      status: "revised",
+      advancementSessionId: "adv-1",
+      rubricDraftId: "draft-revised",
+      rubricDraft: {
+        ...rubricDraft("turn-other"),
+        draftId: "draft-revised",
+      },
+    });
+    const { controller } = makeController(f);
+
+    await expect(
+      controller.reviseRubricContract(
+        {
+          kind: "awaiting-rubric-confirmation",
+          conversationId: "conv-1",
+          turnId: "turn-rubric",
+          advancementSessionId: "adv-1",
+          rubricDraftId: "draft-1",
+          rubricDraft: rubricDraft("turn-rubric"),
+        },
+        "请增加文档验收",
+      ),
+    ).rejects.toThrow("unexpected turnId");
   });
 
   it("beginTurn:本地 delta 早于 send 响应时先触发 accepted 再交给渲染", async () => {

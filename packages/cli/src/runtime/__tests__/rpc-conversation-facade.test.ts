@@ -118,6 +118,70 @@ describe("RpcConversationFacade · 方法域", () => {
     });
   });
 
+  it("advancement confirm / revise / cancel 透传控制面方法与参数", async () => {
+    const fake = makeFakeHostLink();
+    fake.setResponder((method) =>
+      method === "session.advancementConfirm"
+        ? {
+            conversationId: "conv-1",
+            sessionId: "conv-1",
+            turnId: "turn-1",
+            status: "confirmed",
+            advancementSessionId: "adv-1",
+            runStatus: "immediate",
+          }
+        : method === "session.advancementRevise"
+          ? {
+              conversationId: "conv-1",
+              sessionId: "conv-1",
+              status: "revised",
+              advancementSessionId: "adv-1",
+              rubricDraftId: "draft-2",
+              rubricDraft: { draftId: "draft-2" },
+            }
+        : {
+            conversationId: "conv-1",
+            sessionId: "conv-1",
+            status: "cancelled",
+            advancementSessionId: "adv-1",
+          },
+    );
+    const facade = new RpcConversationFacade(fake.link);
+
+    await expect(
+      facade.confirmAdvancement("conv-1", "adv-1"),
+    ).resolves.toMatchObject({ status: "confirmed", turnId: "turn-1" });
+    await expect(
+      facade.reviseAdvancement("conv-1", "adv-1", "补充文档验收"),
+    ).resolves.toMatchObject({ status: "revised", rubricDraftId: "draft-2" });
+    await expect(
+      facade.cancelAdvancement("conv-1", "adv-1", { executeOriginal: true }),
+    ).resolves.toMatchObject({ status: "cancelled" });
+
+    expect(fake.requests).toEqual([
+      {
+        method: "session.advancementConfirm",
+        params: { conversationId: "conv-1", advancementSessionId: "adv-1" },
+      },
+      {
+        method: "session.advancementRevise",
+        params: {
+          conversationId: "conv-1",
+          advancementSessionId: "adv-1",
+          userFeedback: "补充文档验收",
+        },
+      },
+      {
+        method: "session.advancementCancel",
+        params: {
+          conversationId: "conv-1",
+          advancementSessionId: "adv-1",
+          executeOriginal: true,
+        },
+      },
+    ]);
+  });
+
   it("new / clear / compact / contextBudget / usage / resume 的方法名与参数", async () => {
     const fake = makeFakeHostLink();
     fake.setResponder((method) =>
