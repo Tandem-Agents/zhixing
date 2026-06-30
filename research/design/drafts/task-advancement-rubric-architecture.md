@@ -756,6 +756,10 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 
 #### C6：推进侧运行体、独立取证与裁判判定工具
 
+落地提交：
+
+- `79b6864` `feat(orchestrator/advancement): add advancement evaluator runtime`
+
 内容：
 
 - 实现 `AdvancementRuntime` 专用 evaluator runtime。
@@ -770,6 +774,12 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 - 成本分层是否不牺牲验收可靠性。
 
 #### C7：run 接受后验收与事件投影
+
+落地提交：
+
+- `c0245b6` `feat(server/runtime): expose accepted turn commit facts`
+- `e3a9c75` `feat(server/advancement): review accepted runs after commit`
+- `df358be` `feat(cli/advancement): project run review events`
 
 内容：
 

@@ -107,6 +107,45 @@ export function buildSessionSendMethod(): MethodEntry {
       const advancement = ctx.server.advancement;
 
       if (advancement) {
+        const activePrepared = id
+          ? await prepareActiveAdvancementUserTurn({
+              manager,
+              advancement,
+              conversationId: id,
+              turnId,
+              input,
+            })
+          : null;
+
+        if (activePrepared?.kind === "active-session-taken-over") {
+          notifyAdvancementEvent({
+            conversationId: activePrepared.session.conversationId,
+            turnId,
+            seq: 0,
+            event: "advancement:exited",
+            payload: {
+              advancementSessionId: activePrepared.session.id,
+              exit: activePrepared.exit,
+              admission: activePrepared.admission,
+            },
+            connection: ctx.connection,
+            broadcast,
+          });
+        }
+
+        if (activePrepared?.kind === "active-user-turn") {
+          return await sendDirectTurn({
+            manager,
+            conversationId: id,
+            input,
+            turnId,
+            connectionId,
+            connection: ctx.connection,
+            broadcast,
+            server: ctx.server,
+          });
+        }
+
         const preparedId = id ?? generateConversationId();
         const prepared = await prepareAdvancementUserTurn({
           manager,
@@ -250,6 +289,22 @@ export function buildSessionSendMethod(): MethodEntry {
             status: "cancelled",
             advancementSessionId: prepared.session.id,
           };
+        }
+
+        if (prepared.kind === "active-session-taken-over") {
+          notifyAdvancementEvent({
+            conversationId: prepared.session.conversationId,
+            turnId,
+            seq: 0,
+            event: "advancement:exited",
+            payload: {
+              advancementSessionId: prepared.session.id,
+              exit: prepared.exit,
+              admission: prepared.admission,
+            },
+            connection: ctx.connection,
+            broadcast,
+          });
         }
 
         return await sendDirectTurn({
@@ -549,6 +604,75 @@ type AdvancementPrepareOwnerResult =
   | AdvancementPrepareResult
   | { readonly kind: "owner-busy" };
 
+async function prepareActiveAdvancementUserTurn(input: {
+  readonly manager: ConversationManager;
+  readonly advancement: NonNullable<ServerContext["advancement"]>;
+  readonly conversationId: string;
+  readonly turnId: string;
+  readonly input: UserTurnInput;
+}): Promise<
+  Extract<
+    AdvancementPrepareResult,
+    { readonly kind: "active-user-turn" | "active-session-taken-over" }
+  > | null
+> {
+  const active = await input.advancement.loadActiveSession(input.conversationId);
+  if (active?.status !== "active") return null;
+  if (
+    !active.outstandingProxyMessageId &&
+    input.manager.getBusySource(input.conversationId) !== "advancement"
+  ) {
+    return null;
+  }
+
+  const interruption = interruptAdvancementProxy({
+    manager: input.manager,
+    conversationId: input.conversationId,
+    outstandingProxyMessageId: active.outstandingProxyMessageId,
+  });
+
+  const prepared = await input.advancement.prepareUserTurn({
+    conversationId: input.conversationId,
+    turnId: input.turnId,
+    userInput: input.input,
+  });
+
+  if (prepared.kind === "active-user-turn") {
+    if (interruption.proxyMessageId) {
+      await input.advancement.settleProxyMessage({
+        conversationId: input.conversationId,
+        advancementSessionId: active.id,
+        proxyMessageId: interruption.proxyMessageId,
+      });
+    }
+    return prepared;
+  }
+
+  if (prepared.kind === "active-session-taken-over") return prepared;
+  return null;
+}
+
+function interruptAdvancementProxy(input: {
+  readonly manager: ConversationManager;
+  readonly conversationId: string;
+  readonly outstandingProxyMessageId?: string;
+}): { readonly proxyMessageId?: string } {
+  const cancelledPending = input.manager.cancelPendingBySource(
+    input.conversationId,
+    "advancement",
+  );
+  const abortedInFlight =
+    input.manager.getBusySource(input.conversationId) === "advancement" &&
+    input.manager.abortInFlight(input.conversationId, {
+      kind: "user-cancel",
+      source: "rpc",
+      pressedAt: Date.now(),
+    });
+  return cancelledPending > 0 || abortedInFlight
+    ? { proxyMessageId: input.outstandingProxyMessageId }
+    : {};
+}
+
 async function prepareAdvancementUserTurn(input: {
   readonly manager: ConversationManager;
   readonly server: ServerContext;
@@ -669,6 +793,7 @@ async function admitAndMaybeStartTurn(
     exists: input.exists,
     connectionId: input.connectionId,
     makeTask: (managed) => ({
+      source: "channel",
       execute: () =>
         runManagedTurn(
           managed,
@@ -1059,18 +1184,31 @@ export function buildSessionAbortMethod(): MethodEntry {
   return {
     name: "session.abort",
     requiresAuth: true,
-    handler(rawParams, ctx): void {
+    async handler(rawParams, ctx): Promise<void> {
       const params = (rawParams ?? {}) as SessionAbortParams;
       const id = params.conversationId ?? params.sessionId;
       if (typeof id !== "string") {
         throw RpcErrors.invalidParams("session.abort requires 'conversationId'");
       }
       const manager = requireConversations(ctx.server);
+      const activeAdvancement = await ctx.server.advancement?.loadActiveSession(id);
+      const busySource = manager.getBusySource(id);
       const result = manager.abort(id, {
         kind: "user-cancel",
         source: "rpc",
         pressedAt: Date.now(),
       });
+      if (
+        activeAdvancement?.status === "active" &&
+        activeAdvancement.outstandingProxyMessageId &&
+        (busySource === "advancement" || result.cancelledPending > 0)
+      ) {
+        await ctx.server.advancement?.settleProxyMessage({
+          conversationId: id,
+          advancementSessionId: activeAdvancement.id,
+          proxyMessageId: activeAdvancement.outstandingProxyMessageId,
+        });
+      }
       // RPC client 视角:in-flight 和 pending 都没动 = 没有可取消的对象 → notFound。
       // 任一维度动了 = 取消生效;细分计数 client 当前不消费(IDE 同步场景 pending 通常为 0),
       // 不暴露在 RPC schema 中,留作后续若需要时扩。

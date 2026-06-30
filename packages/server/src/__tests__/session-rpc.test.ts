@@ -480,6 +480,13 @@ describe("session.* RPC (S2.D)", () => {
             reason: "test-awaiting-action",
           };
         }
+        if (input.hasActiveAdvancementSession) {
+          return {
+            kind: "direct-task",
+            action: "continue-active",
+            reason: "test-active-action",
+          };
+        }
         return {
           kind: "advancement-task",
           action: "start-advancement",
