@@ -13,15 +13,20 @@ export type {
 } from "./admission.js";
 export {
   LLMRubricDraftGenerationStrategy,
+  LLMRubricDraftRevisionStrategy,
   RubricContractBuilder,
 } from "./contract.js";
 export type {
   BuildRubricContractDraftInput,
   LLMRubricDraftGenerationStrategyOptions,
+  LLMRubricDraftRevisionStrategyOptions,
+  ReviseRubricContractDraftInput,
   RubricContractComplete,
   RubricContractBuilderOptions,
   RubricDraftGenerationInput,
   RubricDraftGenerationStrategy,
+  RubricDraftRevisionInput,
+  RubricDraftRevisionStrategy,
 } from "./contract.js";
 export {
   ADVANCEMENT_LOG_FILE,

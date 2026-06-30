@@ -8,6 +8,7 @@ import type {
   AdvancementProxyEnqueuedEvent,
   AdvancementProxyMessage,
   AdvancementProxySettledEvent,
+  AdvancementRubricDraftRevisedEvent,
   AdvancementRubricConfirmedEvent,
   AdvancementRunReview,
   AdvancementRunReviewedEvent,
@@ -16,6 +17,7 @@ import type {
   AdvancementStoreEvent,
   ConfirmedRubricSnapshot,
   CreateAdvancementSessionInput,
+  RubricContractDraftSnapshot,
 } from "./types.js";
 
 export class AdvancementStore {
@@ -81,6 +83,44 @@ export class AdvancementStore {
         timestamp,
         sessionId,
         confirmedRubric,
+      });
+      return this.requireSession(
+        await this.loadConversationSessionsInLock(conversationId),
+        sessionId,
+      );
+    });
+  }
+
+  async reviseRubricDraft(
+    conversationId: string,
+    sessionId: string,
+    pendingRubricDraft: RubricContractDraftSnapshot,
+    timestamp = new Date().toISOString(),
+  ): Promise<AdvancementSession> {
+    return await this.withConversationLock(conversationId, async () => {
+      const session = this.requireSession(
+        await this.loadConversationSessionsInLock(conversationId),
+        sessionId,
+      );
+      if (session.status !== "awaiting-rubric-confirmation") {
+        throw new Error(
+          `AdvancementStore: session "${sessionId}" is not awaiting rubric confirmation`,
+        );
+      }
+      if (
+        session.pendingRubricDraft &&
+        pendingRubricDraft.originalTurnId !==
+          session.pendingRubricDraft.originalTurnId
+      ) {
+        throw new Error(
+          `AdvancementStore: revised draft belongs to another turn`,
+        );
+      }
+      await this.appendEventInLock(conversationId, {
+        type: "rubric_draft_revised",
+        timestamp,
+        sessionId,
+        pendingRubricDraft,
       });
       return this.requireSession(
         await this.loadConversationSessionsInLock(conversationId),
@@ -378,6 +418,7 @@ interface MutableAdvancementSession {
   originalUserTask: AdvancementSession["originalUserTask"];
   createdAt: string;
   updatedAt: string;
+  rubricDraftVersion: number;
   pendingRubricDraft?: AdvancementSession["pendingRubricDraft"];
   confirmedRubric?: AdvancementSession["confirmedRubric"];
   runs: AdvancementRunReview[];
@@ -399,6 +440,7 @@ function applyEvent(
         originalUserTask: event.originalUserTask,
         createdAt: event.timestamp,
         updatedAt: event.timestamp,
+        rubricDraftVersion: 0,
         pendingRubricDraft: event.pendingRubricDraft,
         runs: [],
         proxyMessages: [],
@@ -411,6 +453,14 @@ function applyEvent(
       session.updatedAt = event.timestamp;
       session.confirmedRubric = event.confirmedRubric;
       session.pendingRubricDraft = undefined;
+      break;
+    }
+    case "rubric_draft_revised": {
+      const session = sessions.get(event.sessionId);
+      if (!session) return;
+      session.updatedAt = event.timestamp;
+      session.rubricDraftVersion += 1;
+      session.pendingRubricDraft = event.pendingRubricDraft;
       break;
     }
     case "run_reviewed": {
@@ -478,6 +528,7 @@ function freezeSession(session: MutableAdvancementSession): AdvancementSession {
     originalUserTask: session.originalUserTask,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
+    rubricDraftVersion: session.rubricDraftVersion,
     pendingRubricDraft: session.pendingRubricDraft,
     confirmedRubric: session.confirmedRubric,
     runs: [...session.runs],
@@ -513,6 +564,9 @@ function isAdvancementStoreEvent(value: unknown): value is AdvancementStoreEvent
     case "rubric_confirmed":
       return typeof (event as Partial<AdvancementRubricConfirmedEvent>)
         .confirmedRubric === "object";
+    case "rubric_draft_revised":
+      return typeof (event as Partial<AdvancementRubricDraftRevisedEvent>)
+        .pendingRubricDraft === "object";
     case "run_reviewed":
       return typeof (event as Partial<AdvancementRunReviewedEvent>).review ===
         "object";

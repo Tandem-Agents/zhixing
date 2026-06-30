@@ -237,6 +237,37 @@ describe("AdvancementStore", () => {
     expect(await store.loadActiveSession("conv-1")).toBeNull();
   });
 
+  it("待确认 session 可以修订 Rubric 草案并在重放后保留最新版", async () => {
+    const { root, store } = await makeStore();
+    await store.createSession(createInput());
+
+    const revised = await store.reviseRubricDraft(
+      "conv-1",
+      "session-1",
+      {
+        ...draft("draft-revised"),
+        title: "修订后的推进准则",
+        content: {
+          ...draft().content,
+          passCriteria: ["测试通过", "文档说明已更新"],
+        },
+      },
+      "2026-01-01T00:01:00.000Z",
+    );
+
+    expect(revised.status).toBe("awaiting-rubric-confirmation");
+    expect(revised.rubricDraftVersion).toBe(1);
+    expect(revised.pendingRubricDraft?.draftId).toBe("draft-revised");
+    expect(revised.pendingRubricDraft?.content.passCriteria).toContain(
+      "文档说明已更新",
+    );
+
+    const reopened = new AdvancementStore(root);
+    const replayed = await reopened.loadSession("conv-1", "session-1");
+    expect(replayed?.rubricDraftVersion).toBe(1);
+    expect(replayed?.pendingRubricDraft?.title).toBe("修订后的推进准则");
+  });
+
   it("拒绝在非 active session 上记录验收、代理消息和结束事件", async () => {
     const { store } = await makeStore();
     await store.createSession(createInput());

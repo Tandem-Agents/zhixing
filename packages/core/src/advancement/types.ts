@@ -116,6 +116,7 @@ export interface AdvancementSession {
   readonly originalUserTask: UserTurnInput;
   readonly createdAt: string;
   readonly updatedAt: string;
+  readonly rubricDraftVersion: number;
   readonly pendingRubricDraft?: RubricContractDraftSnapshot;
   readonly confirmedRubric?: ConfirmedRubricSnapshot;
   readonly runs: readonly AdvancementRunReview[];
@@ -134,6 +135,7 @@ export interface CreateAdvancementSessionInput {
 
 export type AdvancementStoreEvent =
   | AdvancementSessionCreatedEvent
+  | AdvancementRubricDraftRevisedEvent
   | AdvancementRubricConfirmedEvent
   | AdvancementRunReviewedEvent
   | AdvancementProxyEnqueuedEvent
@@ -148,6 +150,13 @@ export interface AdvancementSessionCreatedEvent {
   readonly sessionId: string;
   readonly conversationId: string;
   readonly originalUserTask: UserTurnInput;
+  readonly pendingRubricDraft: RubricContractDraftSnapshot;
+}
+
+export interface AdvancementRubricDraftRevisedEvent {
+  readonly type: "rubric_draft_revised";
+  readonly timestamp: string;
+  readonly sessionId: string;
   readonly pendingRubricDraft: RubricContractDraftSnapshot;
 }
 

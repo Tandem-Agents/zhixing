@@ -4,6 +4,7 @@ import { createTempDir } from "@zhixing/test-utils";
 import { RubricStore } from "../../rubrics/store.js";
 import {
   LLMRubricDraftGenerationStrategy,
+  LLMRubricDraftRevisionStrategy,
   RubricContractBuilder,
 } from "../contract.js";
 import { userTurnInputFromText } from "../../types/user-input.js";
@@ -103,5 +104,79 @@ describe("RubricContractBuilder", () => {
     expect(draft.title).toBe("导出功能验收准则");
     expect(draft.content.passCriteria).toContain("导出入口可用");
     expect(draft.content.failureHandling[0]?.reply).toContain("继续修正格式问题");
+  });
+
+  it("可用 LLM 修订策略按用户反馈生成新版草案", async () => {
+    const rubricStore = new RubricStore(
+      path.join(await createTempDir("rubric-contract-revise"), "rubrics"),
+    );
+    const builder = new RubricContractBuilder({
+      rubricStore,
+      now: () => "2026-01-01T00:10:00.000Z",
+      revisionStrategy: new LLMRubricDraftRevisionStrategy({
+        complete: async (prompt) => {
+          expect(prompt).toContain("请补充文档验收");
+          expect(prompt).toContain("导出功能验收准则");
+          return JSON.stringify({
+            title: "导出功能与文档验收准则",
+            description: "用于判断导出功能和说明文档是否完成。",
+            passCriteria: ["导出入口可用", "文档说明已更新"],
+            evidenceRequirements: [
+              {
+                id: "diff",
+                kind: "file-diff",
+                description: "核对导出代码和文档变更。",
+                required: true,
+              },
+            ],
+            failureHandling: [
+              {
+                id: "continue",
+                scenario: "导出或文档未达标",
+                reply: "请继续补齐导出功能和文档说明，并给出验证结果。",
+              },
+            ],
+          });
+        },
+      }),
+    });
+
+    const revised = await builder.reviseDraft({
+      currentDraft: {
+        draftId: "draft-old",
+        originalTurnId: "turn-1",
+        source: "generated",
+        candidateRubricIds: ["rubric-nearby"],
+        title: "导出功能验收准则",
+        description: "用于判断导出功能是否完成。",
+        content: {
+          passCriteria: ["导出入口可用"],
+          evidenceRequirements: [
+            {
+              id: "diff",
+              kind: "file-diff",
+              description: "核对导出代码变更。",
+              required: true,
+            },
+          ],
+          failureHandling: [
+            {
+              id: "continue",
+              scenario: "导出未达标",
+              reply: "请继续修正导出功能。",
+            },
+          ],
+        },
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+      originalUserTask: userTurnInputFromText("请把导出功能做到可验收"),
+      userFeedback: "请补充文档验收",
+    });
+
+    expect(revised.draftId).not.toBe("draft-old");
+    expect(revised.originalTurnId).toBe("turn-1");
+    expect(revised.source).toBe("generated");
+    expect(revised.candidateRubricIds).toEqual(["rubric-nearby"]);
+    expect(revised.content.passCriteria).toContain("文档说明已更新");
   });
 });
