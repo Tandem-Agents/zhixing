@@ -67,6 +67,36 @@ function reviewed(
   } as AdvancementTurnReviewResult;
 }
 
+function proxyEnqueued(): AdvancementTurnReviewResult {
+  const review = {
+    id: "review-1",
+    runIndex: 0,
+    reviewedAt: "2026-01-01T00:01:00.000Z",
+    decision: "failed",
+    evidence: [],
+    unmetCriteria: ["测试未全绿"],
+    proxyMessageId: "proxy-1",
+  } as const;
+  const session = {
+    id: "adv-1",
+    conversationId: "conv-1",
+  } as never;
+  return {
+    kind: "proxy-enqueued",
+    session,
+    review,
+    proxyMessage: {
+      id: "proxy-1",
+      sessionId: "adv-1",
+      reviewId: "review-1",
+      content: { parts: [{ type: "text", text: "继续修复" }] },
+      rubricFailureHandlingId: "fix-tests",
+      variables: {},
+      createdAt: "2026-01-01T00:02:00.000Z",
+    },
+  } as AdvancementTurnReviewResult;
+}
+
 describe("createAdvancementReviewMaintenance", () => {
   it("验收完成后发 run_reviewed control 事件", async () => {
     const events: SessionEventEnvelope[] = [];
@@ -123,6 +153,46 @@ describe("createAdvancementReviewMaintenance", () => {
       expect(events[1]?.seq).toBe(1);
       expect(events[1]?.scope).toBe("control");
     }
+  });
+
+  it("proxy-enqueued 会发控制事件并调度代理消息", async () => {
+    const events: SessionEventEnvelope[] = [];
+    const manager = {
+      admitTurn: vi.fn(async () => ({
+        status: "queued",
+        conversationId: "conv-1",
+        managed: {},
+        task: { execute: vi.fn(), cancel: vi.fn() },
+      })),
+    };
+    const maintain = createAdvancementReviewMaintenance({
+      advancement: {
+        afterTurnCommitted: vi.fn(async () => proxyEnqueued()),
+      } as never,
+      conversations: () => manager as never,
+      sessionBroadcast: () => (_conversationId, _method, payload) => {
+        events.push(payload as SessionEventEnvelope);
+      },
+    });
+
+    maintain(makeInfo());
+    await flush();
+    await flush();
+
+    expect(events.map((event) => event.event)).toEqual([
+      "advancement:run_reviewed",
+      "advancement:proxy_enqueued",
+    ]);
+    expect(events[1]).toEqual(
+      expect.objectContaining({
+        scope: "control",
+        runId: "proxy-1",
+        seq: 1,
+      }),
+    );
+    expect(manager.admitTurn).toHaveBeenCalledWith(
+      expect.objectContaining({ conversationId: "conv-1" }),
+    );
   });
 
   it("ephemeral 与 skipped 不发事件", async () => {

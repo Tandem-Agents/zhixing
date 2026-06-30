@@ -1,8 +1,10 @@
 import {
   SESSION_NOTIFICATIONS,
+  ProxyMessageScheduler,
   createControlSessionEventEnvelope,
   type AdvancementController,
   type AdvancementTurnReviewResult,
+  type ConversationManager,
   type SessionBroadcast,
   type TurnCommittedInfo,
 } from "@zhixing/server";
@@ -10,6 +12,7 @@ import {
 export interface AdvancementReviewMaintenanceDeps {
   readonly advancement?: AdvancementController;
   readonly sessionBroadcast: () => SessionBroadcast | null;
+  readonly conversations?: () => ConversationManager | null;
 }
 
 export function createAdvancementReviewMaintenance(
@@ -45,6 +48,7 @@ async function reviewAcceptedTurn(
     runRecordRef: info.runRecordRef,
   });
   emitReviewEvents(deps, info, result);
+  await scheduleProxyMessage(deps, result);
 }
 
 function emitReviewEvents(
@@ -71,6 +75,25 @@ function emitReviewEvents(
     }),
   );
 
+  if (result.kind === "proxy-enqueued") {
+    broadcast(
+      info.conversationId,
+      SESSION_NOTIFICATIONS.event,
+      createControlSessionEventEnvelope({
+        conversationId: info.conversationId,
+        runId: result.proxyMessage.id,
+        seq: 1,
+        event: "advancement:proxy_enqueued",
+        payload: {
+          advancementSessionId: result.session.id,
+          proxyMessageId: result.proxyMessage.id,
+          reviewId: result.review.id,
+        },
+      }),
+    );
+    return;
+  }
+
   if (result.kind !== "completed" && result.kind !== "exited") return;
   broadcast(
     info.conversationId,
@@ -90,4 +113,20 @@ function emitReviewEvents(
       },
     }),
   );
+}
+
+async function scheduleProxyMessage(
+  deps: AdvancementReviewMaintenanceDeps,
+  result: AdvancementTurnReviewResult,
+): Promise<void> {
+  if (result.kind !== "proxy-enqueued") return;
+  const manager = deps.conversations?.();
+  if (!manager) return;
+  await new ProxyMessageScheduler({
+    manager,
+    sessionBroadcast: deps.sessionBroadcast,
+  }).schedule({
+    session: result.session,
+    proxyMessage: result.proxyMessage,
+  });
 }

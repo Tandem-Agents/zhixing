@@ -5,13 +5,16 @@ import {
   type AdvancementAdmissionDecision,
   type AdvancementAdmissionStrategy,
   type AdvancementExit,
+  type AdvancementProxyMessage,
   type AdvancementRunReview,
   type AdvancementSession,
   type ConfirmedRubricSnapshot,
+  type FailureHandlingSpec,
   type RunRecordInput,
   type RunRecordRef,
   type RubricContractDraftSnapshot,
   type UserTurnInput,
+  userTurnInputFromText,
 } from "@zhixing/core";
 import { randomUUID } from "node:crypto";
 
@@ -19,6 +22,17 @@ export type AdvancementPrepareResult =
   | {
       readonly kind: "run-direct";
       readonly admission: AdvancementAdmissionDecision;
+    }
+  | {
+      readonly kind: "active-user-turn";
+      readonly session: AdvancementSession;
+      readonly admission: AdvancementAdmissionDecision;
+    }
+  | {
+      readonly kind: "active-session-taken-over";
+      readonly session: AdvancementSession;
+      readonly admission: AdvancementAdmissionDecision;
+      readonly exit: AdvancementExit;
     }
   | {
       readonly kind: "awaiting-rubric-confirmation";
@@ -80,6 +94,7 @@ export interface AdvancementControllerOptions {
   readonly reviewer?: AdvancementRunReviewer;
   readonly now?: () => string;
   readonly reviewIdGenerator?: () => string;
+  readonly proxyIdGenerator?: () => string;
 }
 
 export interface AdvancementReviewRunInput {
@@ -105,6 +120,12 @@ export type AdvancementTurnReviewResult =
       readonly review: AdvancementRunReview;
     }
   | {
+      readonly kind: "proxy-enqueued";
+      readonly session: AdvancementSession;
+      readonly review: AdvancementRunReview;
+      readonly proxyMessage: AdvancementProxyMessage;
+    }
+  | {
       readonly kind: "completed";
       readonly session: AdvancementSession;
       readonly review: AdvancementRunReview;
@@ -124,6 +145,7 @@ export class AdvancementController {
   private readonly reviewer?: AdvancementRunReviewer;
   private readonly now: () => string;
   private readonly reviewIdGenerator: () => string;
+  private readonly proxyIdGenerator: () => string;
 
   constructor(options: AdvancementControllerOptions = {}) {
     this.store = options.store ?? new AdvancementStore();
@@ -134,6 +156,8 @@ export class AdvancementController {
     this.now = options.now ?? (() => new Date().toISOString());
     this.reviewIdGenerator =
       options.reviewIdGenerator ?? (() => `adv_review_${randomUUID()}`);
+    this.proxyIdGenerator =
+      options.proxyIdGenerator ?? (() => `adv_proxy_${randomUUID()}`);
   }
 
   async prepareUserTurn(input: {
@@ -181,13 +205,33 @@ export class AdvancementController {
     }
 
     if (open?.status === "active") {
+      const admission = await this.admissionStrategy.decide({
+        input: input.userInput,
+        hasActiveAdvancementSession: true,
+      });
+      if (admission.action === "take-over-active") {
+        const exit: AdvancementExit = {
+          reason: "user-took-over",
+          message: "用户接管或改变了当前推进目标，原推进闭环已退出。",
+          occurredAt: this.now(),
+        };
+        const cancelled = await this.store.cancelSession(
+          input.conversationId,
+          open.id,
+          exit,
+          exit.occurredAt,
+        );
+        return {
+          kind: "active-session-taken-over",
+          session: cancelled,
+          admission,
+          exit,
+        };
+      }
       return {
-        kind: "run-direct",
-        admission: {
-          kind: "direct-task",
-          action: "run-direct",
-          reason: "active-session-user-turn",
-        },
+        kind: "active-user-turn",
+        session: open,
+        admission,
       };
     }
 
@@ -368,6 +412,25 @@ export class AdvancementController {
     );
   }
 
+  async loadActiveSession(
+    conversationId: string,
+  ): Promise<AdvancementSession | null> {
+    return await this.store.loadActiveSession(conversationId);
+  }
+
+  async settleProxyMessage(input: {
+    readonly conversationId: string;
+    readonly advancementSessionId: string;
+    readonly proxyMessageId: string;
+  }): Promise<AdvancementSession> {
+    return await this.store.settleProxyMessage(
+      input.conversationId,
+      input.advancementSessionId,
+      input.proxyMessageId,
+      this.now(),
+    );
+  }
+
   async afterTurnCommitted(input: {
     readonly conversationId: string;
     readonly runIndex: number;
@@ -375,11 +438,14 @@ export class AdvancementController {
     readonly runRecordRef?: RunRecordRef;
     readonly abortSignal?: AbortSignal;
   }): Promise<AdvancementTurnReviewResult> {
-    const session = await this.store.loadActiveSession(input.conversationId);
+    let session = await this.store.loadActiveSession(input.conversationId);
     if (!session) return { kind: "skipped", reason: "no-active-session" };
     if (session.status !== "active") {
       return { kind: "skipped", reason: "not-active" };
     }
+    const settled = await this.settleAcceptedProxyRun(session, input);
+    if (isTurnReviewResult(settled)) return settled;
+    session = settled;
     const rubric = session.confirmedRubric;
     if (!rubric) {
       const review = this.systemExitReview(
@@ -477,13 +543,119 @@ export class AdvancementController {
       );
       return { kind: "exited", session: exited, review, exit };
     }
-    const reviewed = await this.store.appendRunReview(
+    return await this.persistProxyOutcome(session, review);
+  }
+
+  private async persistProxyOutcome(
+    session: AdvancementSession,
+    review: AdvancementRunReview,
+  ): Promise<AdvancementTurnReviewResult> {
+    const rubric = session.confirmedRubric;
+    const handling = rubric
+      ? selectFailureHandling(rubric, review.selectedFailureHandlingId)
+      : undefined;
+    if (!handling) {
+      const exit: AdvancementExit = {
+        reason: "dead-end",
+        message: "推进侧未能找到可执行的未通过处理准则，继续推进没有可靠收益。",
+        occurredAt: this.now(),
+      };
+      const exited = await this.store.appendTerminalRunReview(
+        session.conversationId,
+        session.id,
+        {
+          ...review,
+          decision: "exit",
+          exitReason: "dead-end",
+          unmetCriteria:
+            review.unmetCriteria.length > 0
+              ? review.unmetCriteria
+              : [exit.message],
+        },
+        { type: "exited", exit, timestamp: exit.occurredAt },
+        review.reviewedAt,
+      );
+      return {
+        kind: "exited",
+        session: exited,
+        review: exited.runs[exited.runs.length - 1]!,
+        exit,
+      };
+    }
+
+    const proxyMessageId = this.proxyIdGenerator();
+    const variables = buildProxyVariables(review);
+    const proxyMessage: AdvancementProxyMessage = {
+      id: proxyMessageId,
+      sessionId: session.id,
+      reviewId: review.id,
+      content: userTurnInputFromText(renderFailureHandlingReply(handling, variables)),
+      rubricFailureHandlingId: handling.id,
+      variables,
+      createdAt: this.now(),
+    };
+    const reviewWithProxy: AdvancementRunReview = {
+      ...review,
+      selectedFailureHandlingId: handling.id,
+      proxyMessageId,
+    };
+    const updated = await this.store.appendRunReviewWithProxyMessage(
       session.conversationId,
       session.id,
-      review,
+      reviewWithProxy,
+      proxyMessage,
       review.reviewedAt,
     );
-    return { kind: "reviewed", session: reviewed, review };
+    return {
+      kind: "proxy-enqueued",
+      session: updated,
+      review: reviewWithProxy,
+      proxyMessage,
+    };
+  }
+
+  private async settleAcceptedProxyRun(
+    session: AdvancementSession,
+    input: {
+      readonly conversationId: string;
+      readonly runIndex: number;
+      readonly runRecordRef?: RunRecordRef;
+      readonly runRecord: RunRecordInput;
+    },
+  ): Promise<AdvancementSession | AdvancementTurnReviewResult> {
+    if (input.runRecord.source !== "advancement") return session;
+    const proxyMessageId = input.runRecord.advancement?.proxyMessageId;
+    if (
+      !input.runRecord.advancement ||
+      input.runRecord.advancement.sessionId !== session.id ||
+      !proxyMessageId ||
+      !session.outstandingProxyMessageId
+    ) {
+      const review = this.systemExitReview(
+        {
+          runIndex: input.runIndex,
+          runRecordRef: input.runRecordRef,
+        },
+        "推进侧代理 run 缺少匹配的来源元数据，无法可靠继续。",
+      );
+      return await this.persistReviewOutcome(session, review);
+    }
+    if (session.outstandingProxyMessageId !== proxyMessageId) {
+      const review = this.systemExitReview(
+        {
+          runIndex: input.runIndex,
+          runRecordRef: input.runRecordRef,
+        },
+        "推进侧代理 run 与 outstanding proxy 不匹配，无法可靠继续。",
+      );
+      return await this.persistReviewOutcome(session, review);
+    }
+    return await this.store.settleProxyMessage(
+      input.conversationId,
+      session.id,
+      proxyMessageId,
+      this.now(),
+    );
   }
 
   private systemExitReview(
@@ -529,10 +701,53 @@ function assertReviewMatchesAcceptedRun(
   }
 }
 
+function isTurnReviewResult(
+  value: AdvancementSession | AdvancementTurnReviewResult,
+): value is AdvancementTurnReviewResult {
+  if (!("kind" in value)) return false;
+  return (
+    value.kind === "skipped" ||
+    value.kind === "reviewed" ||
+    value.kind === "proxy-enqueued" ||
+    value.kind === "completed" ||
+    value.kind === "exited"
+  );
+}
+
 function sameRunRecordRef(
   a: RunRecordRef | undefined,
   b: RunRecordRef | undefined,
 ): boolean {
   if (!a || !b) return a === b;
   return a.shardId === b.shardId && a.runIndex === b.runIndex;
+}
+
+function selectFailureHandling(
+  rubric: ConfirmedRubricSnapshot,
+  selectedId: string | undefined,
+): FailureHandlingSpec | undefined {
+  const handlers = rubric.content.failureHandling;
+  if (selectedId) {
+    return handlers.find((handler) => handler.id === selectedId);
+  }
+  return handlers[0];
+}
+
+function buildProxyVariables(
+  review: AdvancementRunReview,
+): Readonly<Record<string, string>> {
+  return {
+    unmet_criteria: review.unmetCriteria.join("\n"),
+    review_id: review.id,
+  };
+}
+
+function renderFailureHandlingReply(
+  handling: FailureHandlingSpec,
+  variables: Readonly<Record<string, string>>,
+): string {
+  return handling.reply.replace(/\{([a-zA-Z0-9_]+)\}/g, (match, key) => {
+    const value = variables[key];
+    return value === undefined ? match : value;
+  });
 }

@@ -9,3 +9,9 @@ export {
   type AdvancementRevisedDraft,
   type AdvancementTurnReviewResult,
 } from "./controller.js";
+export {
+  ProxyMessageScheduler,
+  type ProxyMessageSchedulerOptions,
+  type ScheduleProxyMessageInput,
+  type ScheduleProxyMessageResult,
+} from "./proxy-scheduler.js";

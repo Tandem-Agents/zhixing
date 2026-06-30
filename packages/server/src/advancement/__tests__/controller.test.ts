@@ -97,13 +97,44 @@ async function makeStore() {
 }
 
 describe("AdvancementController.afterTurnCommitted", () => {
-  it("active session 的 accepted run 会被验收并持久化 review", async () => {
+  it("active 推进会话中用户接管会退出原推进闭环", async () => {
+    const store = await makeStore();
+    await makeActive(store);
+    const controller = new AdvancementController({
+      store,
+      admissionStrategy: {
+        decide: vi.fn(async () => ({
+          kind: "direct-task",
+          action: "take-over-active",
+          reason: "用户改变目标",
+        })),
+      },
+      now: () => "2026-01-01T00:05:00.000Z",
+    });
+
+    const result = await controller.prepareUserTurn({
+      conversationId: "conv-1",
+      turnId: "turn-user",
+      userInput: task("停掉这个推进，换成发布说明"),
+    });
+
+    expect(result.kind).toBe("active-session-taken-over");
+    const session = await store.loadSession("conv-1", "session-1");
+    expect(session?.status).toBe("cancelled");
+    expect(session?.exit?.reason).toBe("user-took-over");
+  });
+
+  it("failed review 会生成 Rubric 固定代理消息并保持 active", async () => {
     const store = await makeStore();
     await makeActive(store);
     const reviewer = {
       reviewRun: vi.fn(async () => review()),
     };
-    const controller = new AdvancementController({ store, reviewer });
+    const controller = new AdvancementController({
+      store,
+      reviewer,
+      proxyIdGenerator: () => "proxy-1",
+    });
 
     const result = await controller.afterTurnCommitted({
       conversationId: "conv-1",
@@ -112,7 +143,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
       runRecordRef: { shardId: "000001", runIndex: 0 },
     });
 
-    expect(result.kind).toBe("reviewed");
+    expect(result.kind).toBe("proxy-enqueued");
     expect(reviewer.reviewRun).toHaveBeenCalledWith(
       expect.objectContaining({
         sessionId: "session-1",
@@ -123,6 +154,11 @@ describe("AdvancementController.afterTurnCommitted", () => {
     const session = await store.loadSession("conv-1", "session-1");
     expect(session?.status).toBe("active");
     expect(session?.runs).toHaveLength(1);
+    expect(session?.runs[0]?.proxyMessageId).toBe("proxy-1");
+    expect(session?.outstandingProxyMessageId).toBe("proxy-1");
+    expect(session?.proxyMessages[0]?.content).toEqual(
+      task("请修复失败测试后再继续。"),
+    );
   });
 
   it("passed 结论会完成推进会话", async () => {
@@ -145,6 +181,98 @@ describe("AdvancementController.afterTurnCommitted", () => {
     const session = await store.loadSession("conv-1", "session-1");
     expect(session?.status).toBe("completed");
     expect(session?.exit?.reason).toBe("passed");
+  });
+
+  it("accepted proxy run 会先清理 outstanding，再按本轮验收继续推进", async () => {
+    const store = await makeStore();
+    await makeActive(store);
+    await store.enqueueProxyMessage("conv-1", "session-1", {
+      id: "proxy-1",
+      sessionId: "session-1",
+      reviewId: "review-0",
+      content: task("请修复失败测试后再继续。"),
+      rubricFailureHandlingId: "fix-tests",
+      variables: {},
+      createdAt: "2026-01-01T00:02:30.000Z",
+    });
+    const controller = new AdvancementController({
+      store,
+      reviewer: {
+        reviewRun: vi.fn(async () =>
+          review({
+            runIndex: 1,
+            runRecordRef: { shardId: "000001", runIndex: 1 },
+            decision: "passed",
+            unmetCriteria: [],
+          }),
+        ),
+      },
+      now: () => "2026-01-01T00:04:00.000Z",
+    });
+
+    const result = await controller.afterTurnCommitted({
+      conversationId: "conv-1",
+      runIndex: 1,
+      runRecord: {
+        ...runRecord(),
+        source: "advancement",
+        advancement: {
+          sessionId: "session-1",
+          proxyMessageId: "proxy-1",
+          reviewId: "review-0",
+          rubricFailureHandlingId: "fix-tests",
+        },
+      },
+      runRecordRef: { shardId: "000001", runIndex: 1 },
+    });
+
+    expect(result.kind).toBe("completed");
+    const events = await store.readEvents("conv-1");
+    expect(events.map((event) => event.type)).toEqual([
+      "session_created",
+      "rubric_confirmed",
+      "proxy_enqueued",
+      "proxy_settled",
+      "run_reviewed",
+      "completed",
+    ]);
+  });
+
+  it("advancement 来源 run 缺少匹配 metadata 时退出推进", async () => {
+    const store = await makeStore();
+    await makeActive(store);
+    await store.enqueueProxyMessage("conv-1", "session-1", {
+      id: "proxy-1",
+      sessionId: "session-1",
+      reviewId: "review-0",
+      content: task("请修复失败测试后再继续。"),
+      rubricFailureHandlingId: "fix-tests",
+      variables: {},
+      createdAt: "2026-01-01T00:02:30.000Z",
+    });
+    const reviewer = { reviewRun: vi.fn(async () => review()) };
+    const controller = new AdvancementController({
+      store,
+      reviewer,
+      now: () => "2026-01-01T00:04:00.000Z",
+      reviewIdGenerator: () => "review-system-error",
+    });
+
+    const result = await controller.afterTurnCommitted({
+      conversationId: "conv-1",
+      runIndex: 1,
+      runRecord: {
+        ...runRecord(),
+        source: "advancement",
+      },
+      runRecordRef: { shardId: "000001", runIndex: 1 },
+    });
+
+    expect(result.kind).toBe("exited");
+    expect(reviewer.reviewRun).not.toHaveBeenCalled();
+    const session = await store.loadSession("conv-1", "session-1");
+    expect(session?.status).toBe("exited");
+    expect(session?.exit?.reason).toBe("system-error");
   });
 
   it("exit 结论会退出推进会话", async () => {

@@ -91,6 +91,7 @@ const conversationSurface: AccessSurface = {
     const advancementReviewMaintenance = createAdvancementReviewMaintenance({
       advancement: ctx.advancement,
       sessionBroadcast: () => ctx.sessionBroadcastRef.current,
+      conversations: () => ctx.conversations ?? null,
     });
 
     ctx.conversations = new ConversationManager(ctx.runtimeFactory, undefined, {
