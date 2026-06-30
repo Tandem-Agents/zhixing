@@ -24,6 +24,7 @@ import {
   type RunRecordInput,
   type RunRecordRef,
   type SnapshotInput,
+  type TurnSource,
   type WindowCompact,
   type WindowFoldOutcome,
 } from "@zhixing/core";
@@ -75,6 +76,7 @@ export interface ManagedSession {
   readonly createdAt: string;
   lastActiveAt: string;
   busy: boolean;
+  busySource?: TurnSource;
   readonly observers: Set<string>;
   /** 已记录的 turn 数量（用于 turnIndex 计算） */
   turnCount: number;
@@ -224,6 +226,7 @@ export interface RecordTurnOptions {
 // ─── 待处理任务 ───
 
 export interface PendingTask {
+  source?: TurnSource;
   execute: () => Promise<void>;
   cancel: () => void;
 }
@@ -501,7 +504,7 @@ export class ConversationManager {
     conversationId?: string;
     createConversation?: () => Promise<string>;
     exists?: ConversationExists;
-    connectionId: string;
+    connectionId?: string;
     makeTask: (managed: ManagedSession) => PendingTask;
   }): Promise<TurnAdmissionResult> {
     if (input.conversationId) {
@@ -531,7 +534,7 @@ export class ConversationManager {
 
   private admitTurnForSession(
     managed: ManagedSession,
-    connectionId: string,
+    connectionId: string | undefined,
     makeTask: (managed: ManagedSession) => PendingTask,
   ): TurnAdmissionResult {
     managed.lastActiveAt = new Date().toISOString();
@@ -542,9 +545,9 @@ export class ConversationManager {
       return { status: "full", conversationId: managed.conversationId };
     }
 
-    this.addObserver(managed.conversationId, connectionId);
+    if (connectionId) this.addObserver(managed.conversationId, connectionId);
     if (status === "immediate") {
-      this.setBusy(managed.conversationId, true);
+      this.setBusy(managed.conversationId, true, task.source);
     }
 
     return {
@@ -711,14 +714,16 @@ export class ConversationManager {
 
   // ─── 状态操作 ───
 
-  setBusy(conversationId: string, busy: boolean): void {
+  setBusy(conversationId: string, busy: boolean, source?: TurnSource): void {
     const session = this.sessions.get(conversationId);
     if (!session) return;
     session.busy = busy;
     if (busy) {
+      session.busySource = source;
       session.lastActiveAt = new Date().toISOString();
       this.clearGraceTimer(conversationId);
     } else {
+      session.busySource = undefined;
       const queue = this.pendingQueues.get(conversationId);
       if (queue && queue.length > 0) {
         this.dequeueNext(conversationId);
@@ -734,6 +739,22 @@ export class ConversationManager {
         resolve();
       }
     }
+  }
+
+  getBusySource(conversationId: string): TurnSource | undefined {
+    return this.sessions.get(conversationId)?.busySource;
+  }
+
+  /**
+   * 只中止当前 in-flight turn,不清 pending queue。
+   *
+   * 用于系统内部让某类运行让路给真实用户输入的场景。显式用户取消仍应走
+   * `abort`,因为那里的语义包含清空所有待处理消息。
+   */
+  abortInFlight(conversationId: string, reason?: AbortReason): boolean {
+    const session = this.sessions.get(conversationId);
+    if (!session) return false;
+    return session.runtime.abort(reason);
   }
 
   /**
@@ -1408,7 +1429,9 @@ export class ConversationManager {
     }
 
     const queue = this.pendingQueues.get(conversationId) ?? [];
-    if (queue.length >= this.maxPending) {
+    const userPendingCount = queue.filter((item) => item.source !== "advancement")
+      .length;
+    if (task.source !== "advancement" && userPendingCount >= this.maxPending) {
       return "full";
     }
 
@@ -1419,6 +1442,31 @@ export class ConversationManager {
 
   pendingCount(conversationId: string): number {
     return this.pendingQueues.get(conversationId)?.length ?? 0;
+  }
+
+  cancelPendingBySource(conversationId: string, source: TurnSource): number {
+    const queue = this.pendingQueues.get(conversationId);
+    if (!queue) return 0;
+    const remaining: PendingTask[] = [];
+    let cancelled = 0;
+    for (const task of queue) {
+      if (task.source !== source) {
+        remaining.push(task);
+        continue;
+      }
+      try {
+        task.cancel();
+      } catch {
+        // 与 abort 路径一致：单个取消钩子失败不影响其它待处理任务。
+      }
+      cancelled++;
+    }
+    if (remaining.length > 0) {
+      this.pendingQueues.set(conversationId, remaining);
+    } else {
+      this.pendingQueues.delete(conversationId);
+    }
+    return cancelled;
   }
 
   private dequeueNext(conversationId: string): void {
@@ -1437,6 +1485,7 @@ export class ConversationManager {
     }
 
     session.busy = true;
+    session.busySource = task.source;
     session.lastActiveAt = new Date().toISOString();
     this.clearGraceTimer(conversationId);
     void task.execute();

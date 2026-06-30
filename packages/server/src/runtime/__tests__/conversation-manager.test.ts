@@ -550,6 +550,34 @@ describe("ConversationManager", () => {
       await mgr.disposeAll();
     });
 
+    it("advancement pending 不占用户 pending 上限，但仍进入同一串行队列", async () => {
+      const mgr = new ConversationManager(createMockFactory(), {
+        maxPending: 1,
+        graceTimeoutMs: 60_000,
+        idleTimeoutMs: 30 * 60_000,
+        idleCheckIntervalMs: 999_999,
+      });
+      await mgr.getOrCreate("a");
+      mgr.setBusy("a", true, "channel");
+
+      expect(
+        mgr.enqueue("a", { source: "channel", execute: async () => {}, cancel: () => {} }),
+      ).toBe("queued");
+      expect(
+        mgr.enqueue("a", {
+          source: "advancement",
+          execute: async () => {},
+          cancel: () => {},
+        }),
+      ).toBe("queued");
+      expect(
+        mgr.enqueue("a", { source: "channel", execute: async () => {}, cancel: () => {} }),
+      ).toBe("full");
+      expect(mgr.pendingCount("a")).toBe(2);
+
+      await mgr.disposeAll();
+    });
+
     it("dequeues next task when setBusy(false)", async () => {
       await manager.getOrCreate("a");
       manager.setBusy("a", true);
@@ -575,6 +603,54 @@ describe("ConversationManager", () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(executed).toEqual(["task-1", "task-2"]);
       expect(manager.pendingCount("a")).toBe(0);
+    });
+
+    it("可以按来源取消 pending，不影响其它来源任务", async () => {
+      await manager.getOrCreate("a");
+      manager.setBusy("a", true, "channel");
+
+      const cancelled: string[] = [];
+      const executed: string[] = [];
+      manager.enqueue("a", {
+        source: "advancement",
+        execute: async () => { executed.push("proxy"); },
+        cancel: () => { cancelled.push("proxy"); },
+      });
+      manager.enqueue("a", {
+        source: "channel",
+        execute: async () => { executed.push("user"); },
+        cancel: () => { cancelled.push("user"); },
+      });
+
+      expect(manager.cancelPendingBySource("a", "advancement")).toBe(1);
+      expect(cancelled).toEqual(["proxy"]);
+      expect(manager.pendingCount("a")).toBe(1);
+
+      manager.setBusy("a", false);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(executed).toEqual(["user"]);
+    });
+
+    it("abortInFlight 只中止当前运行，不清理 pending queue", async () => {
+      await manager.getOrCreate("a");
+      manager.setBusy("a", true, "advancement");
+
+      const cancelled: string[] = [];
+      const executed: string[] = [];
+      manager.enqueue("a", {
+        source: "channel",
+        execute: async () => { executed.push("user"); },
+        cancel: () => { cancelled.push("user"); },
+      });
+
+      expect(manager.abortInFlight("a", { kind: "user-cancel", source: "rpc" }))
+        .toBe(true);
+      expect(cancelled).toEqual([]);
+      expect(manager.pendingCount("a")).toBe(1);
+
+      manager.setBusy("a", false);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(executed).toEqual(["user"]);
     });
 
     it("does not start grace timer while queue has pending tasks", async () => {

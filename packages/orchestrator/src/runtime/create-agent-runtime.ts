@@ -19,6 +19,7 @@ import {
   type IEventBus,
   type Message,
   type RunResult,
+  type RunRecordAdvancementMetadata,
   type ToolResultBlock,
   type IPermissionStore,
   type IToolArgumentExtractor,
@@ -377,6 +378,8 @@ export interface RunParams {
   conversationId?: string;
   /** 触发源，落盘为 run record 的 source 字段。不指定时字段为 undefined */
   source?: TurnSource;
+  /** 推进侧代理 run 的产品层元数据；不进入 Message role/content */
+  advancement?: RunRecordAdvancementMetadata;
   onYield?: (event: AgentYield) => void;
   /**
    * Turn 级上下文。channel 会话传入含 commitToUser；
@@ -1558,6 +1561,7 @@ export async function createAgentRuntime(
               agentResult: value,
               runRecord: buildRunRecord({
                 source: params.source,
+                advancement: params.advancement,
                 userMessage: originalUserMessage,
                 newMessages,
                 agentResult: value,

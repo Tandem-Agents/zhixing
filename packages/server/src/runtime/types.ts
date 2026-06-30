@@ -17,6 +17,7 @@ import type {
   PermissionRule,
   RiskLevel,
   RunResult,
+  RunRecordAdvancementMetadata,
   SecurityRule,
   TurnContext,
   TurnSource,
@@ -43,6 +44,10 @@ export interface RunTurnOptions {
    * server 入站消息路径（InboundRouter）默认为 "channel"。
    */
   source?: TurnSource;
+  /**
+   * 推进侧代理 turn 的 run 级元数据。它只落 RunRecord，不进入模型消息。
+   */
+  advancement?: RunRecordAdvancementMetadata;
 }
 
 export interface SessionRuntime {

@@ -87,6 +87,7 @@ export function createServerRuntimeAdapter(
           messages: [...messages],
           turnIndex: options?.turnIndex ?? 0,
           source: options?.source,
+          advancement: options?.advancement,
           turnContext: options?.turnContext,
           // sessionId 即 conversationId（ConversationManager 中是同一标识），
           // 透传到 RunContext 让按需取 conversationId 的工具可用（持久化会话上下文）。
