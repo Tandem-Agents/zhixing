@@ -641,8 +641,7 @@ export class AdvancementController {
     if (
       !input.runRecord.advancement ||
       input.runRecord.advancement.sessionId !== session.id ||
-      !proxyMessageId ||
-      !session.outstandingProxyMessageId
+      !proxyMessageId
     ) {
       const review = this.systemExitReview(
         {
@@ -650,6 +649,20 @@ export class AdvancementController {
           runRecordRef: input.runRecordRef,
         },
         "推进侧代理 run 缺少匹配的来源元数据，无法可靠继续。",
+      );
+      return await this.persistReviewOutcome(session, review);
+    }
+    if (!session.outstandingProxyMessageId) {
+      const knownProxy = session.proxyMessages.some(
+        (message) => message.id === proxyMessageId,
+      );
+      if (knownProxy) return session;
+      const review = this.systemExitReview(
+        {
+          runIndex: input.runIndex,
+          runRecordRef: input.runRecordRef,
+        },
+        "推进侧代理 run 来源元数据指向未知代理消息，无法可靠继续。",
       );
       return await this.persistReviewOutcome(session, review);
     }

@@ -92,6 +92,8 @@ const conversationSurface: AccessSurface = {
       advancement: ctx.advancement,
       sessionBroadcast: () => ctx.sessionBroadcastRef.current,
       conversations: () => ctx.conversations ?? null,
+      conversationExists: (conversationId) =>
+        ctx.conversationDirectory.exists(conversationId),
     });
 
     ctx.conversations = new ConversationManager(ctx.runtimeFactory, undefined, {

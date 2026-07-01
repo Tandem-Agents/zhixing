@@ -1,9 +1,6 @@
 import {
-  SESSION_NOTIFICATIONS,
-  ProxyMessageScheduler,
-  createControlSessionEventEnvelope,
+  dispatchAdvancementReviewResult,
   type AdvancementController,
-  type AdvancementTurnReviewResult,
   type ConversationManager,
   type SessionBroadcast,
   type TurnCommittedInfo,
@@ -13,6 +10,7 @@ export interface AdvancementReviewMaintenanceDeps {
   readonly advancement?: AdvancementController;
   readonly sessionBroadcast: () => SessionBroadcast | null;
   readonly conversations?: () => ConversationManager | null;
+  readonly conversationExists?: (conversationId: string) => Promise<boolean>;
 }
 
 export function createAdvancementReviewMaintenance(
@@ -47,86 +45,13 @@ async function reviewAcceptedTurn(
     runRecord: info.runRecord,
     runRecordRef: info.runRecordRef,
   });
-  emitReviewEvents(deps, info, result);
-  await scheduleProxyMessage(deps, result);
-}
-
-function emitReviewEvents(
-  deps: AdvancementReviewMaintenanceDeps,
-  info: TurnCommittedInfo,
-  result: AdvancementTurnReviewResult,
-): void {
-  if (result.kind === "skipped") return;
-  const broadcast = deps.sessionBroadcast();
-  if (!broadcast) return;
-  const runId = info.turnId;
-  broadcast(
-    info.conversationId,
-    SESSION_NOTIFICATIONS.event,
-    createControlSessionEventEnvelope({
-      conversationId: info.conversationId,
-      runId,
-      seq: 0,
-      event: "advancement:run_reviewed",
-      payload: {
-        advancementSessionId: result.session.id,
-        review: result.review,
-      },
-    }),
-  );
-
-  if (result.kind === "proxy-enqueued") {
-    broadcast(
-      info.conversationId,
-      SESSION_NOTIFICATIONS.event,
-      createControlSessionEventEnvelope({
-        conversationId: info.conversationId,
-        runId: result.proxyMessage.id,
-        seq: 1,
-        event: "advancement:proxy_enqueued",
-        payload: {
-          advancementSessionId: result.session.id,
-          proxyMessageId: result.proxyMessage.id,
-          reviewId: result.review.id,
-        },
-      }),
-    );
-    return;
-  }
-
-  if (result.kind !== "completed" && result.kind !== "exited") return;
-  broadcast(
-    info.conversationId,
-    SESSION_NOTIFICATIONS.event,
-    createControlSessionEventEnvelope({
-      conversationId: info.conversationId,
-      runId,
-      seq: 1,
-      event:
-        result.kind === "completed"
-          ? "advancement:completed"
-          : "advancement:exited",
-      payload: {
-        advancementSessionId: result.session.id,
-        reviewId: result.review.id,
-        exit: result.exit,
-      },
-    }),
-  );
-}
-
-async function scheduleProxyMessage(
-  deps: AdvancementReviewMaintenanceDeps,
-  result: AdvancementTurnReviewResult,
-): Promise<void> {
-  if (result.kind !== "proxy-enqueued") return;
-  const manager = deps.conversations?.();
-  if (!manager) return;
-  await new ProxyMessageScheduler({
-    manager,
+  await dispatchAdvancementReviewResult({
     sessionBroadcast: deps.sessionBroadcast,
-  }).schedule({
-    session: result.session,
-    proxyMessage: result.proxyMessage,
+    conversations: deps.conversations,
+    conversationExists: deps.conversationExists,
+  }, {
+    conversationId: info.conversationId,
+    runId: info.turnId,
+    result,
   });
 }

@@ -96,10 +96,18 @@ export async function* runTurnWithCommit(
   }
 
   if (runResult.agentResult.reason === "completed") {
+    const source = runResult.runRecord.source ?? options?.source;
+    const advancement =
+      runResult.runRecord.advancement ?? options?.advancement;
+    const runRecord = {
+      ...runResult.runRecord,
+      ...(source ? { source } : {}),
+      ...(advancement ? { advancement } : {}),
+    };
     try {
       await manager.recordTurn(
         conversationId,
-        runResult.runRecord,
+        runRecord,
         runResult.windowCompact,
         { turnId: options?.turnContext?.turnId },
       );

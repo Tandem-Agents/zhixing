@@ -11,11 +11,13 @@ import type { SessionBroadcast } from "../rpc/session-broadcast.js";
 export interface ProxyMessageSchedulerOptions {
   readonly manager: ConversationManager;
   readonly sessionBroadcast?: () => SessionBroadcast | null;
+  readonly conversationExists?: (conversationId: string) => Promise<boolean>;
 }
 
 export interface ScheduleProxyMessageInput {
   readonly session: AdvancementSession;
   readonly proxyMessage: AdvancementProxyMessage;
+  readonly onTaskSettled?: () => void;
 }
 
 export type ScheduleProxyMessageResult =
@@ -25,18 +27,31 @@ export type ScheduleProxyMessageResult =
 export class ProxyMessageScheduler {
   private readonly manager: ConversationManager;
   private readonly sessionBroadcast: () => SessionBroadcast | null;
+  private readonly conversationExists?: (
+    conversationId: string,
+  ) => Promise<boolean>;
 
   constructor(options: ProxyMessageSchedulerOptions) {
     this.manager = options.manager;
     this.sessionBroadcast = options.sessionBroadcast ?? (() => null);
+    this.conversationExists = options.conversationExists;
   }
 
   async schedule(
     input: ScheduleProxyMessageInput,
   ): Promise<ScheduleProxyMessageResult> {
     const conversationId = input.session.conversationId;
+    let taskSettled = false;
+    const settleTask = () => {
+      if (taskSettled) return;
+      taskSettled = true;
+      input.onTaskSettled?.();
+    };
     const admission = await this.manager.admitTurn({
       conversationId,
+      exists: this.conversationExists
+        ? () => this.conversationExists!(conversationId)
+        : undefined,
       makeTask: (managed) => ({
         source: "advancement",
         execute: async () => {
@@ -56,10 +71,14 @@ export class ProxyMessageScheduler {
                 this.sessionBroadcast()?.(conversationId, method, params),
             });
           } finally {
-            this.manager.setBusy(conversationId, false);
+            try {
+              this.manager.setBusy(conversationId, false);
+            } finally {
+              settleTask();
+            }
           }
         },
-        cancel: () => {},
+        cancel: settleTask,
       }),
     });
 

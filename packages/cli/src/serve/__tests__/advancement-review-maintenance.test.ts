@@ -195,6 +195,49 @@ describe("createAdvancementReviewMaintenance", () => {
     );
   });
 
+  it("proxy 调度必须复用目录存在性门禁，避免删除后复活对话", async () => {
+    let makeTaskCalled = false;
+    const manager = {
+      admitTurn: vi.fn(async (input: {
+        conversationId: string;
+        exists?: () => Promise<boolean>;
+        makeTask: () => unknown;
+      }) => {
+        if (input.exists && !(await input.exists())) {
+          return { status: "not-found", conversationId: input.conversationId };
+        }
+        makeTaskCalled = true;
+        input.makeTask();
+        return {
+          status: "queued",
+          conversationId: input.conversationId,
+          managed: {},
+          task: { execute: vi.fn(), cancel: vi.fn() },
+        };
+      }),
+    };
+    const maintain = createAdvancementReviewMaintenance({
+      advancement: {
+        afterTurnCommitted: vi.fn(async () => proxyEnqueued()),
+      } as never,
+      conversations: () => manager as never,
+      conversationExists: vi.fn(async () => false),
+      sessionBroadcast: () => null,
+    });
+
+    maintain(makeInfo());
+    await flush();
+    await flush();
+
+    expect(manager.admitTurn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        conversationId: "conv-1",
+        exists: expect.any(Function),
+      }),
+    );
+    expect(makeTaskCalled).toBe(false);
+  });
+
   it("ephemeral 与 skipped 不发事件", async () => {
     const events: SessionEventEnvelope[] = [];
     const advancement = {

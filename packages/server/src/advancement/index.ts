@@ -15,3 +15,8 @@ export {
   type ScheduleProxyMessageInput,
   type ScheduleProxyMessageResult,
 } from "./proxy-scheduler.js";
+export {
+  dispatchAdvancementReviewResult,
+  type AdvancementReviewDispatchDeps,
+  type AdvancementReviewDispatchInput,
+} from "./review-dispatch.js";
