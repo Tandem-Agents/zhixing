@@ -1,5 +1,6 @@
 import type { RunRecordRef } from "../transcript/shard/types.js";
 export type { RunRecordAdvancementMetadata } from "../transcript/types.js";
+import type { Message } from "../types/messages.js";
 import type { UserTurnInput } from "../types/user-input.js";
 
 export type AdvancementSessionStatus =
@@ -72,6 +73,45 @@ export interface ReviewEvidence {
   readonly refs?: readonly string[];
 }
 
+export interface AdvancementReviewContextWindowSnapshot {
+  readonly source: "advancement-window";
+  readonly priorReviewCount: number;
+  readonly inputMessageCount: number;
+  readonly outputMessageCount: number;
+  readonly decision: {
+    readonly kind: "pass" | "defer" | "trigger";
+    readonly reason: string;
+    readonly currentTokens?: number;
+    readonly threshold?: number;
+  };
+  readonly compact?: {
+    readonly pairsCompacted: number;
+    readonly tokensBefore: number;
+    readonly tokensAfter: number;
+    readonly segmentId?: string;
+  };
+}
+
+export type AdvancementWindowEntry =
+  | {
+      readonly kind: "summary";
+      readonly messages: readonly [Message, Message];
+    }
+  | {
+      readonly kind: "review";
+      readonly reviewId: string;
+      readonly runIndex: number;
+      readonly messages: readonly [Message, Message];
+    };
+
+export interface AdvancementWindowState {
+  readonly source: "advancement-window";
+  readonly reviewCount: number;
+  readonly entries: readonly AdvancementWindowEntry[];
+  readonly updatedAt: string;
+  readonly lastSnapshot?: AdvancementReviewContextWindowSnapshot;
+}
+
 export type AdvancementExitReason =
   | "passed"
   | "dead-end"
@@ -97,6 +137,12 @@ export interface AdvancementRunReview {
   readonly selectedFailureHandlingId?: string;
   readonly proxyMessageId?: string;
   readonly exitReason?: AdvancementExitReason;
+  readonly contextWindow?: AdvancementReviewContextWindowSnapshot;
+}
+
+export interface AdvancementRunReviewOutput {
+  readonly review: AdvancementRunReview;
+  readonly advancementWindow?: AdvancementWindowState;
 }
 
 export interface AdvancementProxyMessage {
@@ -122,6 +168,7 @@ export interface AdvancementSession {
   readonly runs: readonly AdvancementRunReview[];
   readonly proxyMessages: readonly AdvancementProxyMessage[];
   readonly outstandingProxyMessageId?: string;
+  readonly advancementWindow?: AdvancementWindowState;
   readonly exit?: AdvancementExit;
 }
 
@@ -138,6 +185,7 @@ export type AdvancementStoreEvent =
   | AdvancementRubricDraftRevisedEvent
   | AdvancementRubricConfirmedEvent
   | AdvancementRunReviewedEvent
+  | AdvancementWindowUpdatedEvent
   | AdvancementProxyEnqueuedEvent
   | AdvancementProxySettledEvent
   | AdvancementCompletedEvent
@@ -172,6 +220,13 @@ export interface AdvancementRunReviewedEvent {
   readonly timestamp: string;
   readonly sessionId: string;
   readonly review: AdvancementRunReview;
+}
+
+export interface AdvancementWindowUpdatedEvent {
+  readonly type: "window_updated";
+  readonly timestamp: string;
+  readonly sessionId: string;
+  readonly advancementWindow: AdvancementWindowState;
 }
 
 export interface AdvancementProxyEnqueuedEvent {

@@ -15,6 +15,8 @@ import type {
   AdvancementSession,
   AdvancementSessionCreatedEvent,
   AdvancementStoreEvent,
+  AdvancementWindowState,
+  AdvancementWindowUpdatedEvent,
   ConfirmedRubricSnapshot,
   CreateAdvancementSessionInput,
   RubricContractDraftSnapshot,
@@ -134,18 +136,17 @@ export class AdvancementStore {
     sessionId: string,
     review: AdvancementRunReview,
     timestamp = new Date().toISOString(),
+    advancementWindow?: AdvancementWindowState,
   ): Promise<AdvancementSession> {
     return await this.withConversationLock(conversationId, async () => {
       this.assertActiveSession(
         await this.loadConversationSessionsInLock(conversationId),
         sessionId,
       );
-      await this.appendEventInLock(conversationId, {
-        type: "run_reviewed",
-        timestamp,
-        sessionId,
-        review,
-      });
+      await this.appendEventsInLock(
+        conversationId,
+        runReviewedEvents(sessionId, review, timestamp, advancementWindow),
+      );
       return this.requireSession(
         await this.loadConversationSessionsInLock(conversationId),
         sessionId,
@@ -163,6 +164,7 @@ export class AdvancementStore {
       readonly timestamp?: string;
     },
     timestamp = review.reviewedAt,
+    advancementWindow?: AdvancementWindowState,
   ): Promise<AdvancementSession> {
     return await this.withConversationLock(conversationId, async () => {
       this.assertActiveSession(
@@ -171,12 +173,7 @@ export class AdvancementStore {
       );
       assertTerminalReviewDecision(review, terminal.type);
       await this.appendEventsInLock(conversationId, [
-        {
-          type: "run_reviewed",
-          timestamp,
-          sessionId,
-          review,
-        },
+        ...runReviewedEvents(sessionId, review, timestamp, advancementWindow),
         {
           type: terminal.type,
           timestamp: terminal.timestamp ?? terminal.exit.occurredAt,
@@ -197,6 +194,7 @@ export class AdvancementStore {
     review: AdvancementRunReview,
     proxyMessage: AdvancementProxyMessage,
     timestamp = review.reviewedAt,
+    advancementWindow?: AdvancementWindowState,
   ): Promise<AdvancementSession> {
     return await this.withConversationLock(conversationId, async () => {
       const session = this.assertActiveSession(
@@ -224,12 +222,7 @@ export class AdvancementStore {
         );
       }
       await this.appendEventsInLock(conversationId, [
-        {
-          type: "run_reviewed",
-          timestamp,
-          sessionId,
-          review,
-        },
+        ...runReviewedEvents(sessionId, review, timestamp, advancementWindow),
         {
           type: "proxy_enqueued",
           timestamp: proxyMessage.createdAt,
@@ -529,6 +522,32 @@ function assertTerminalReviewDecision(
   }
 }
 
+function runReviewedEvents(
+  sessionId: string,
+  review: AdvancementRunReview,
+  timestamp: string,
+  advancementWindow: AdvancementWindowState | undefined,
+): AdvancementStoreEvent[] {
+  return [
+    {
+      type: "run_reviewed",
+      timestamp,
+      sessionId,
+      review,
+    },
+    ...(advancementWindow
+      ? [
+          {
+            type: "window_updated" as const,
+            timestamp: advancementWindow.updatedAt,
+            sessionId,
+            advancementWindow,
+          },
+        ]
+      : []),
+  ];
+}
+
 interface MutableAdvancementSession {
   id: string;
   conversationId: string;
@@ -542,6 +561,7 @@ interface MutableAdvancementSession {
   runs: AdvancementRunReview[];
   proxyMessages: AdvancementProxyMessage[];
   outstandingProxyMessageId?: string;
+  advancementWindow?: AdvancementWindowState;
   exit?: AdvancementExit;
 }
 
@@ -586,6 +606,13 @@ function applyEvent(
       if (!session) return;
       session.updatedAt = event.timestamp;
       session.runs.push(event.review);
+      break;
+    }
+    case "window_updated": {
+      const session = sessions.get(event.sessionId);
+      if (!session) return;
+      session.updatedAt = event.timestamp;
+      session.advancementWindow = event.advancementWindow;
       break;
     }
     case "proxy_enqueued": {
@@ -652,6 +679,7 @@ function freezeSession(session: MutableAdvancementSession): AdvancementSession {
     runs: [...session.runs],
     proxyMessages: [...session.proxyMessages],
     outstandingProxyMessageId: session.outstandingProxyMessageId,
+    advancementWindow: session.advancementWindow,
     exit: session.exit,
   };
 }
@@ -688,6 +716,9 @@ function isAdvancementStoreEvent(value: unknown): value is AdvancementStoreEvent
     case "run_reviewed":
       return typeof (event as Partial<AdvancementRunReviewedEvent>).review ===
         "object";
+    case "window_updated":
+      return typeof (event as Partial<AdvancementWindowUpdatedEvent>)
+        .advancementWindow === "object";
     case "proxy_enqueued":
       return typeof (event as Partial<AdvancementProxyEnqueuedEvent>)
         .proxyMessage === "object";

@@ -7,10 +7,12 @@ import { AdvancementStore } from "../store.js";
 import type {
   AdvancementExit,
   AdvancementRunReview,
+  AdvancementWindowState,
   ConfirmedRubricSnapshot,
   CreateAdvancementSessionInput,
   RubricContractDraftSnapshot,
 } from "../types.js";
+import type { Message } from "../../types/messages.js";
 
 function task(text: string) {
   return { parts: [{ type: "text" as const, text }] };
@@ -99,6 +101,36 @@ function exit(reason: AdvancementExit["reason"]): AdvancementExit {
     reason,
     message: "验收通过",
     occurredAt: "2026-01-01T00:05:00.000Z",
+  };
+}
+
+function message(role: Message["role"], text: string): Message {
+  return { role, content: [{ type: "text", text }] };
+}
+
+function windowState(): AdvancementWindowState {
+  return {
+    source: "advancement-window",
+    reviewCount: 1,
+    updatedAt: "2026-01-01T00:02:30.000Z",
+    entries: [
+      {
+        kind: "review",
+        reviewId: "review-1",
+        runIndex: 0,
+        messages: [
+          message("user", "review-1 未满足测试通过"),
+          message("assistant", "继续要求修复失败测试"),
+        ],
+      },
+    ],
+    lastSnapshot: {
+      source: "advancement-window",
+      priorReviewCount: 0,
+      inputMessageCount: 0,
+      outputMessageCount: 0,
+      decision: { kind: "pass", reason: "test" },
+    },
   };
 }
 
@@ -251,6 +283,45 @@ describe("AdvancementStore", () => {
       "run_reviewed",
       "proxy_enqueued",
     ]);
+  });
+
+  it("review 与推进窗口状态作为同一个验收结果持久化并可重放", async () => {
+    const { root, store } = await makeStore();
+    await store.createSession(createInput());
+    await store.confirmRubric("conv-1", "session-1", confirmed());
+    const advancementWindow = windowState();
+
+    const session = await store.appendRunReviewWithProxyMessage(
+      "conv-1",
+      "session-1",
+      review({ proxyMessageId: "proxy-1" }),
+      {
+        id: "proxy-1",
+        sessionId: "session-1",
+        reviewId: "review-1",
+        content: task("请修复失败测试后再继续。"),
+        rubricFailureHandlingId: "fix-tests",
+        variables: { unmet_criteria: "测试通过" },
+        createdAt: "2026-01-01T00:03:00.000Z",
+      },
+      "2026-01-01T00:02:00.000Z",
+      advancementWindow,
+    );
+
+    expect(session.advancementWindow).toEqual(advancementWindow);
+    expect((await store.readEvents("conv-1")).map((event) => event.type)).toEqual([
+      "session_created",
+      "rubric_confirmed",
+      "run_reviewed",
+      "window_updated",
+      "proxy_enqueued",
+    ]);
+
+    const replayed = await new AdvancementStore(root).loadSession(
+      "conv-1",
+      "session-1",
+    );
+    expect(replayed?.advancementWindow).toEqual(advancementWindow);
   });
 
   it("终态 review 与 completed/exited 作为同一个验收结果写入", async () => {
