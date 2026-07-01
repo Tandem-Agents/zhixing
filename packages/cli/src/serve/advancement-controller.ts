@@ -1,5 +1,6 @@
 import {
   AdvancementStore,
+  createSegmentSummarizeFn,
   LLMAdvancementAdmissionStrategy,
   LLMRubricDraftGenerationStrategy,
   LLMRubricDraftRevisionStrategy,
@@ -10,7 +11,13 @@ import {
   type LLMRole,
   type ThinkingConfig,
 } from "@zhixing/core";
-import { createProviderRoles, resolveWorkspace, resolveWorkspaceSessionType } from "@zhixing/providers";
+import {
+  createProviderRoles,
+  getModelCapabilityOverride,
+  resolveModelCapability,
+  resolveWorkspace,
+  resolveWorkspaceSessionType,
+} from "@zhixing/providers";
 import { createAdvancementRuntime } from "@zhixing/orchestrator/advancement";
 import {
   createLightCallLLM,
@@ -33,6 +40,10 @@ export function createServeAdvancementController(): AdvancementController {
   const workspace = resolveWorkspace(config, {
     sessionType: resolveWorkspaceSessionType(),
   });
+  const advancementWindowCapability = resolveModelCapability(
+    roles.main.model,
+    getModelCapabilityOverride(config.modelCapabilityOverrides, roles.main.model),
+  );
 
   const contractBuilder = new RubricContractBuilder({
     rubricStore: new RubricStore(),
@@ -55,6 +66,17 @@ export function createServeAdvancementController(): AdvancementController {
       model: roles.main.model,
       thinking: mainThinking,
       workingDirectory: workspace.path ?? undefined,
+      contextWindow: {
+        capability: advancementWindowCapability,
+        summarize: createSegmentSummarizeFn(
+          (request) =>
+            roles.light.provider.chat({
+              ...request,
+              thinking: lightThinking,
+            }),
+          roles.light.model,
+        ),
+      },
     }),
   });
 }

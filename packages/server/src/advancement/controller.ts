@@ -2,12 +2,15 @@ import {
   AdvancementStore,
   ConservativeAdvancementAdmissionStrategy,
   RubricContractBuilder,
+  createAdvancementWindowReviewEntry,
   type AdvancementAdmissionDecision,
   type AdvancementAdmissionStrategy,
   type AdvancementExit,
   type AdvancementProxyMessage,
   type AdvancementRunReview,
+  type AdvancementRunReviewOutput,
   type AdvancementSession,
+  type AdvancementWindowState,
   type ConfirmedRubricSnapshot,
   type FailureHandlingSpec,
   type RunRecordInput,
@@ -105,11 +108,12 @@ export interface AdvancementReviewRunInput {
   readonly runRecord: RunRecordInput;
   readonly runRecordRef?: RunRecordRef;
   readonly priorReviews?: readonly AdvancementRunReview[];
+  readonly advancementWindow?: AdvancementWindowState;
   readonly abortSignal?: AbortSignal;
 }
 
 export interface AdvancementRunReviewer {
-  reviewRun(input: AdvancementReviewRunInput): Promise<AdvancementRunReview>;
+  reviewRun(input: AdvancementReviewRunInput): Promise<AdvancementRunReviewOutput>;
 }
 
 export type AdvancementTurnReviewResult =
@@ -463,8 +467,9 @@ export class AdvancementController {
     }
 
     let review: AdvancementRunReview;
+    let advancementWindow: AdvancementWindowState | undefined;
     try {
-      review = await this.reviewer.reviewRun({
+      const output = await this.reviewer.reviewRun({
         sessionId: session.id,
         originalUserTask: session.originalUserTask,
         rubric,
@@ -472,17 +477,20 @@ export class AdvancementController {
         runRecord: input.runRecord,
         runRecordRef: input.runRecordRef,
         priorReviews: session.runs,
+        advancementWindow: session.advancementWindow,
         abortSignal: input.abortSignal,
       });
+      ({ review, advancementWindow } = splitReviewOutput(output));
       assertReviewMatchesAcceptedRun(input, review);
     } catch (err) {
+      advancementWindow = undefined;
       review = this.systemExitReview(
         input,
         `推进侧验收运行失败：${errorMessage(err)}`,
       );
     }
 
-    return await this.persistReviewOutcome(session, review);
+    return await this.persistReviewOutcome(session, review, advancementWindow);
   }
 
   private async cancelSession(
@@ -512,6 +520,7 @@ export class AdvancementController {
   private async persistReviewOutcome(
     session: AdvancementSession,
     review: AdvancementRunReview,
+    advancementWindow?: AdvancementWindowState,
   ): Promise<AdvancementTurnReviewResult> {
     if (review.decision === "passed") {
       const exit: AdvancementExit = {
@@ -525,6 +534,7 @@ export class AdvancementController {
         review,
         { type: "completed", exit, timestamp: exit.occurredAt },
         review.reviewedAt,
+        advancementWindow,
       );
       return { kind: "completed", session: completed, review, exit };
     }
@@ -540,15 +550,17 @@ export class AdvancementController {
         review,
         { type: "exited", exit, timestamp: exit.occurredAt },
         review.reviewedAt,
+        advancementWindow,
       );
       return { kind: "exited", session: exited, review, exit };
     }
-    return await this.persistProxyOutcome(session, review);
+    return await this.persistProxyOutcome(session, review, advancementWindow);
   }
 
   private async persistProxyOutcome(
     session: AdvancementSession,
     review: AdvancementRunReview,
+    advancementWindow?: AdvancementWindowState,
   ): Promise<AdvancementTurnReviewResult> {
     const rubric = session.confirmedRubric;
     const handling = rubric
@@ -560,20 +572,20 @@ export class AdvancementController {
         message: "推进侧未能找到可执行的未通过处理准则，继续推进没有可靠收益。",
         occurredAt: this.now(),
       };
+      const exitReview: AdvancementRunReview = {
+        ...review,
+        decision: "exit",
+        exitReason: "dead-end",
+        unmetCriteria:
+          review.unmetCriteria.length > 0 ? review.unmetCriteria : [exit.message],
+      };
       const exited = await this.store.appendTerminalRunReview(
         session.conversationId,
         session.id,
-        {
-          ...review,
-          decision: "exit",
-          exitReason: "dead-end",
-          unmetCriteria:
-            review.unmetCriteria.length > 0
-              ? review.unmetCriteria
-              : [exit.message],
-        },
+        exitReview,
         { type: "exited", exit, timestamp: exit.occurredAt },
         review.reviewedAt,
+        syncAdvancementWindowReview(advancementWindow, exitReview),
       );
       return {
         kind: "exited",
@@ -605,6 +617,7 @@ export class AdvancementController {
       reviewWithProxy,
       proxyMessage,
       review.reviewedAt,
+      syncAdvancementWindowReview(advancementWindow, reviewWithProxy),
     );
     return {
       kind: "proxy-enqueued",
@@ -682,6 +695,28 @@ function errorMessage(err: unknown): string {
   return err instanceof Error && err.message.trim().length > 0
     ? err.message
     : "Rubric contract draft generation failed";
+}
+
+function splitReviewOutput(output: AdvancementRunReviewOutput): {
+  readonly review: AdvancementRunReview;
+  readonly advancementWindow?: AdvancementWindowState;
+} {
+  return output;
+}
+
+function syncAdvancementWindowReview(
+  advancementWindow: AdvancementWindowState | undefined,
+  review: AdvancementRunReview,
+): AdvancementWindowState | undefined {
+  if (!advancementWindow) return undefined;
+  return {
+    ...advancementWindow,
+    entries: advancementWindow.entries.map((entry) =>
+      entry.kind === "review" && entry.reviewId === review.id
+        ? createAdvancementWindowReviewEntry(review)
+        : entry,
+    ),
+  };
 }
 
 function assertReviewMatchesAcceptedRun(

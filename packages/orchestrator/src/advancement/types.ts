@@ -1,5 +1,7 @@
 import type {
   AdvancementRunReview,
+  AdvancementRunReviewOutput,
+  AdvancementWindowState,
   ConfirmedRubricSnapshot,
   ReviewEvidence,
 } from "@zhixing/core/advancement";
@@ -7,12 +9,15 @@ import type {
   LLMProvider,
   RunRecordInput,
   RunRecordRef,
+  SegmentSummarizeLLMFn,
+  SegmentThresholds,
+  ITokenEstimator,
   ThinkingConfig,
   UserTurnInput,
 } from "@zhixing/core";
 
 export interface AdvancementRuntime {
-  reviewRun(input: AdvancementReviewRunInput): Promise<AdvancementRunReview>;
+  reviewRun(input: AdvancementReviewRunInput): Promise<AdvancementRunReviewOutput>;
 }
 
 export interface AdvancementRuntimeOptions {
@@ -20,10 +25,18 @@ export interface AdvancementRuntimeOptions {
   readonly model: string;
   readonly thinking?: ThinkingConfig;
   readonly evidenceProvider?: AdvancementEvidenceProvider;
+  readonly contextWindow?: AdvancementContextWindowOptions;
   readonly maxJudgeTurns?: number;
   readonly workingDirectory?: string;
   readonly now?: () => Date;
   readonly idGenerator?: () => string;
+}
+
+export interface AdvancementContextWindowOptions {
+  readonly capability: SegmentThresholds;
+  readonly summarize: SegmentSummarizeLLMFn;
+  readonly estimator?: ITokenEstimator;
+  readonly bufferTurns?: number;
 }
 
 export interface AdvancementReviewRunInput {
@@ -34,6 +47,7 @@ export interface AdvancementReviewRunInput {
   readonly runRecord: RunRecordInput;
   readonly runRecordRef?: RunRecordRef;
   readonly priorReviews?: readonly AdvancementRunReview[];
+  readonly advancementWindow?: AdvancementWindowState;
   readonly abortSignal?: AbortSignal;
 }
 

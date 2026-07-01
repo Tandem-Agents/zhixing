@@ -1,8 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  assistantMessage,
   MockLLMProvider,
+  type AdvancementRunReview,
+  type AdvancementWindowState,
   type RunRecordInput,
+  type SegmentSummarizeRequest,
   type UserTurnInput,
+  userMessage,
 } from "@zhixing/core";
 import type {
   ConfirmedRubricSnapshot,
@@ -61,7 +66,7 @@ describe("AdvancementRuntime", () => {
       idGenerator: () => "review-1",
     });
 
-    const review = await runtime.reviewRun(baseInput());
+    const { review } = await runtime.reviewRun(baseInput());
 
     expect(review).toMatchObject({
       id: "review-1",
@@ -85,7 +90,7 @@ describe("AdvancementRuntime", () => {
       idGenerator: () => "review-text",
     });
 
-    const review = await runtime.reviewRun(baseInput());
+    const { review } = await runtime.reviewRun(baseInput());
 
     expect(review.decision).toBe("exit");
     expect(review.exitReason).toBe("system-error");
@@ -138,7 +143,7 @@ describe("AdvancementRuntime", () => {
       idGenerator: () => "review-missing-evidence",
     });
 
-    const review = await runtime.reviewRun(baseInput());
+    const { review } = await runtime.reviewRun(baseInput());
 
     expect(review.decision).toBe("exit");
     expect(review.exitReason).toBe("system-error");
@@ -175,7 +180,7 @@ describe("AdvancementRuntime", () => {
       idGenerator: () => "review-failed-without-handler",
     });
 
-    const review = await runtime.reviewRun(baseInput());
+    const { review } = await runtime.reviewRun(baseInput());
 
     expect(review.decision).toBe("exit");
     expect(review.exitReason).toBe("system-error");
@@ -213,7 +218,7 @@ describe("AdvancementRuntime", () => {
       idGenerator: () => "review-fake-evidence",
     });
 
-    const review = await runtime.reviewRun(baseInput());
+    const { review } = await runtime.reviewRun(baseInput());
 
     expect(review.decision).toBe("exit");
     expect(review.exitReason).toBe("system-error");
@@ -261,7 +266,7 @@ describe("AdvancementRuntime", () => {
       idGenerator: () => "review-conflicting-evidence",
     });
 
-    const review = await runtime.reviewRun(baseInput());
+    const { review } = await runtime.reviewRun(baseInput());
 
     expect(review.decision).toBe("exit");
     expect(review.exitReason).toBe("system-error");
@@ -308,7 +313,7 @@ describe("AdvancementRuntime", () => {
       idGenerator: () => "review-rebound-evidence",
     });
 
-    const review = await runtime.reviewRun(baseInput());
+    const { review } = await runtime.reviewRun(baseInput());
 
     expect(review.decision).toBe("exit");
     expect(review.exitReason).toBe("system-error");
@@ -356,7 +361,7 @@ describe("AdvancementRuntime", () => {
       idGenerator: () => "review-wrong-kind",
     });
 
-    const review = await runtime.reviewRun(baseInput());
+    const { review } = await runtime.reviewRun(baseInput());
 
     expect(review.decision).toBe("exit");
     expect(review.exitReason).toBe("system-error");
@@ -403,7 +408,7 @@ describe("AdvancementRuntime", () => {
       idGenerator: () => "review-invalid-schema",
     });
 
-    const review = await runtime.reviewRun(baseInput());
+    const { review } = await runtime.reviewRun(baseInput());
 
     expect(review.decision).toBe("exit");
     expect(review.exitReason).toBe("system-error");
@@ -440,7 +445,7 @@ describe("AdvancementRuntime", () => {
       idGenerator: () => "review-failed",
     });
 
-    const review = await runtime.reviewRun(baseInput());
+    const { review } = await runtime.reviewRun(baseInput());
     const prompt = provider.calls[0]?.messages[0]?.content[0];
 
     expect(review.decision).toBe("failed");
@@ -501,6 +506,136 @@ describe("AdvancementRuntime", () => {
       "previous-review",
     );
   });
+
+  it("推进侧历史判断通过独立窗口压缩后再进入裁判上下文", async () => {
+    const provider = new MockLLMProvider([
+      {
+        toolCalls: [
+          {
+            id: "judge-window",
+            name: ADVANCEMENT_SUBMIT_REVIEW_TOOL,
+            input: {
+              decision: "failed",
+              evidence: [
+                {
+                  id: "run-final-response",
+                  kind: "conversation-fact",
+                  source: "execution-report",
+                  summary: "执行侧还没提供测试通过证据。",
+                },
+              ],
+              unmetCriteria: ["缺少测试通过证据"],
+              selectedFailureHandlingId: "ask-for-tests",
+            },
+          },
+        ],
+      },
+    ]);
+    const summarize = vi.fn(async (_req: SegmentSummarizeRequest) =>
+      [
+        "<facts>较早两次推进判断已经归纳：都缺少测试通过证据。</facts>",
+        "<state>当前仍需继续要求执行侧补齐客观测试结果。</state>",
+        "<active>最近一次判断必须保留原文。</active>",
+      ].join("\n"),
+    );
+    const runtime = createAdvancementRuntime({
+      provider,
+      model: "mock-model",
+      now: () => NOW,
+      idGenerator: () => "review-window",
+      contextWindow: {
+        capability: { optimalMaxTokens: 1, riskMaxTokens: 1_000_000 },
+        summarize,
+        bufferTurns: 1,
+      },
+    });
+
+    const result = await runtime.reviewRun({
+      ...baseInput(),
+      priorReviews: [
+        priorReview("previous-1", 0),
+        priorReview("previous-2", 1),
+        priorReview("previous-3", 2),
+      ],
+    });
+    const { review } = result;
+    const prompt = provider.calls[0]?.messages[0]?.content[0];
+    const text = prompt && "text" in prompt ? prompt.text : "";
+
+    expect(summarize).toHaveBeenCalledTimes(1);
+    expect(text).toContain("较早两次推进判断已经归纳");
+    expect(text).toContain("previous-3");
+    expect(text).not.toContain("previous-1");
+    expect(review.contextWindow).toMatchObject({
+      source: "advancement-window",
+      priorReviewCount: 3,
+      decision: { kind: "trigger" },
+      compact: { pairsCompacted: 2 },
+    });
+    expect(result.advancementWindow).toMatchObject({
+      source: "advancement-window",
+      reviewCount: 4,
+      entries: [
+        { kind: "summary" },
+        { kind: "review", reviewId: "previous-3" },
+        { kind: "review", reviewId: "review-window" },
+      ],
+    });
+  });
+
+  it("推进侧窗口恢复后只追加缺失判断，不重放已折叠历史", async () => {
+    const provider = new MockLLMProvider([
+      {
+        toolCalls: [
+          {
+            id: "judge-window-resume",
+            name: ADVANCEMENT_SUBMIT_REVIEW_TOOL,
+            input: {
+              decision: "failed",
+              evidence: [],
+              unmetCriteria: ["仍缺少测试通过证据"],
+              selectedFailureHandlingId: "ask-for-tests",
+            },
+          },
+        ],
+      },
+    ]);
+    const runtime = createAdvancementRuntime({
+      provider,
+      model: "mock-model",
+      now: () => NOW,
+      idGenerator: () => "review-window-resume",
+    });
+
+    const result = await runtime.reviewRun({
+      ...baseInput(),
+      runIndex: 4,
+      priorReviews: [
+        priorReview("previous-1", 0),
+        priorReview("previous-2", 1),
+        priorReview("previous-3", 2),
+        priorReview("previous-4", 3),
+      ],
+      advancementWindow: persistedWindow(),
+    });
+    const prompt = provider.calls[0]?.messages[0]?.content[0];
+    const text = prompt && "text" in prompt ? prompt.text : "";
+
+    expect(text).toContain("较早推进判断摘要");
+    expect(text).toContain("previous-3");
+    expect(text).toContain("previous-4");
+    expect(text).not.toContain("previous-1");
+    expect(text).not.toContain("previous-2");
+    expect(result.advancementWindow).toMatchObject({
+      reviewCount: 5,
+      entries: [
+        { kind: "summary" },
+        { kind: "review", reviewId: "previous-3" },
+        { kind: "review", reviewId: "previous-4" },
+        { kind: "review", reviewId: "review-window-resume" },
+      ],
+    });
+  });
 });
 
 function baseInput() {
@@ -510,6 +645,44 @@ function baseInput() {
     rubric: rubric(),
     runIndex: 3,
     runRecord: runRecord("我已经修改完成。"),
+  };
+}
+
+function priorReview(id: string, runIndex: number): AdvancementRunReview {
+  return {
+    id,
+    runIndex,
+    reviewedAt: NOW.toISOString(),
+    decision: "failed",
+    evidence: [],
+    unmetCriteria: ["缺少测试通过证据"],
+    selectedFailureHandlingId: "ask-for-tests",
+  };
+}
+
+function persistedWindow(): AdvancementWindowState {
+  return {
+    source: "advancement-window",
+    reviewCount: 3,
+    updatedAt: NOW.toISOString(),
+    entries: [
+      {
+        kind: "summary",
+        messages: [
+          userMessage("较早推进判断摘要"),
+          assistantMessage("收到。"),
+        ],
+      },
+      {
+        kind: "review",
+        reviewId: "previous-3",
+        runIndex: 2,
+        messages: [
+          userMessage(JSON.stringify({ reviewId: "previous-3" })),
+          assistantMessage("previous-3 evidence"),
+        ],
+      },
+    ],
   };
 }
 

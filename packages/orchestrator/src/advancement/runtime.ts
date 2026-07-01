@@ -1,11 +1,24 @@
 import { randomUUID } from "node:crypto";
 import {
+  buildCompactSummaryPair,
+  createAdvancementWindowReviewEntry,
+  createSegmentManager,
+  createTokenEstimator,
   drainAgentLoop,
+  extractText,
   extractUserTurnInputText,
-  userMessage,
+  toToolSpec,
+  type AdvancementReviewContextWindowSnapshot,
   type AdvancementRunReview,
+  type AdvancementRunReviewOutput,
+  type AdvancementWindowEntry,
+  type AdvancementWindowState,
   type ConfirmedRubricSnapshot,
+  type Message,
   type ReviewEvidence,
+  type SegmentDecision,
+  type WindowCompact,
+  userMessage,
 } from "@zhixing/core";
 import type { AgentResult } from "@zhixing/core";
 import {
@@ -49,7 +62,7 @@ class DefaultAdvancementRuntime implements AdvancementRuntime {
 
   async reviewRun(
     input: AdvancementReviewRunInput,
-  ): Promise<AdvancementRunReview> {
+  ): Promise<AdvancementRunReviewOutput> {
     let evidence: ReviewEvidence[];
     try {
       evidence = completeMissingRequiredEvidence({
@@ -60,7 +73,12 @@ class DefaultAdvancementRuntime implements AdvancementRuntime {
         }),
       });
     } catch (error) {
-      return this.systemExitReview(input, `推进侧取证失败：${errorMessage(error)}`);
+      return {
+        review: this.systemExitReview(
+          input,
+          `推进侧取证失败：${errorMessage(error)}`,
+        ),
+      };
     }
 
     const judgeTool = createAdvancementJudgeTool({
@@ -72,13 +90,22 @@ class DefaultAdvancementRuntime implements AdvancementRuntime {
       idGenerator: this.idGenerator,
     });
 
+    const contextWindow = await buildContextWindow({
+      input,
+      options: this.options.contextWindow,
+      systemPrompt: buildJudgeSystemPrompt(),
+      tools: [toToolSpec(judgeTool.tool)],
+    });
+
     try {
       const { result } = await drainAgentLoop({
         provider: this.options.provider,
         model: this.options.model,
         thinking: this.options.thinking,
         systemPrompt: buildJudgeSystemPrompt(),
-        messages: [userMessage(buildJudgePrompt(input, evidence))],
+        messages: [
+          userMessage(buildJudgePrompt(input, evidence, contextWindow.messages)),
+        ],
         tools: [judgeTool.tool],
         maxTurns: this.maxJudgeTurns,
         workingDirectory: this.options.workingDirectory,
@@ -86,15 +113,34 @@ class DefaultAdvancementRuntime implements AdvancementRuntime {
       });
 
       const submitted = judgeTool.getSubmittedReview();
-      if (submitted) return submitted;
+      if (submitted) {
+        return attachContextWindowState(
+          attachContextWindow(submitted, contextWindow.snapshot),
+          contextWindow.acceptReview(submitted, this.now().toISOString()),
+        );
+      }
 
-      return this.systemExitReview(
+      const review = this.systemExitReview(
         input,
         `推进侧裁判未通过 ${ADVANCEMENT_SUBMIT_REVIEW_TOOL} 提交有效结论（${describeAgentResult(result)}）。`,
         evidence,
+        contextWindow.snapshot,
+      );
+      return attachContextWindowState(
+        review,
+        contextWindow.acceptReview(review, review.reviewedAt),
       );
     } catch (error) {
-      return this.systemExitReview(input, `推进侧裁判运行失败：${errorMessage(error)}`, evidence);
+      const review = this.systemExitReview(
+        input,
+        `推进侧裁判运行失败：${errorMessage(error)}`,
+        evidence,
+        contextWindow.snapshot,
+      );
+      return attachContextWindowState(
+        review,
+        contextWindow.acceptReview(review, review.reviewedAt),
+      );
     }
   }
 
@@ -102,6 +148,7 @@ class DefaultAdvancementRuntime implements AdvancementRuntime {
     input: AdvancementReviewRunInput,
     message: string,
     evidence: readonly ReviewEvidence[] = [],
+    contextWindow?: AdvancementReviewContextWindowSnapshot,
   ): AdvancementRunReview {
     return {
       id: this.idGenerator(),
@@ -112,6 +159,7 @@ class DefaultAdvancementRuntime implements AdvancementRuntime {
       evidence,
       unmetCriteria: [message],
       exitReason: "system-error",
+      contextWindow,
     };
   }
 }
@@ -130,6 +178,7 @@ function buildJudgeSystemPrompt(): string {
 function buildJudgePrompt(
   input: AdvancementReviewRunInput,
   evidence: readonly ReviewEvidence[],
+  priorReviewWindow: readonly Message[],
 ): string {
   return [
     "请审查这一轮执行结果。",
@@ -145,7 +194,7 @@ function buildJudgePrompt(
     summarizeRunRecord(input.runRecord),
     "",
     "## 既往推进判断",
-    renderPriorReviews(input.priorReviews ?? []),
+    renderPriorReviewWindow(priorReviewWindow),
     "",
     "## 已收集证据",
     JSON.stringify(evidence, null, 2),
@@ -158,20 +207,211 @@ function buildJudgePrompt(
   ].join("\n");
 }
 
-function renderPriorReviews(reviews: readonly AdvancementRunReview[]): string {
-  if (reviews.length === 0) return "无。";
-  return JSON.stringify(
-    reviews.map((review) => ({
-      id: review.id,
-      runIndex: review.runIndex,
-      decision: review.decision,
-      unmetCriteria: review.unmetCriteria,
-      selectedFailureHandlingId: review.selectedFailureHandlingId,
-      exitReason: review.exitReason,
-    })),
-    null,
-    2,
+async function buildContextWindow(input: {
+  readonly input: AdvancementReviewRunInput;
+  readonly options: AdvancementRuntimeOptions["contextWindow"];
+  readonly systemPrompt: string;
+  readonly tools: ReturnType<typeof toToolSpec>[];
+}): Promise<{
+  readonly messages: readonly Message[];
+  readonly snapshot?: AdvancementReviewContextWindowSnapshot;
+  readonly acceptReview: (
+    review: AdvancementRunReview,
+    updatedAt: string,
+  ) => AdvancementWindowState;
+}> {
+  const priorReviews = input.input.priorReviews ?? [];
+  const entries = restoreWindowEntries(
+    input.input.advancementWindow,
+    priorReviews,
   );
+
+  const beforeMessages = flattenWindowEntries(entries);
+  if (!input.options) {
+    const snapshot: AdvancementReviewContextWindowSnapshot = {
+      source: "advancement-window",
+      priorReviewCount: priorReviews.length,
+      inputMessageCount: beforeMessages.length,
+      outputMessageCount: beforeMessages.length,
+      decision: {
+        kind: "pass",
+        reason: "window-management-not-configured",
+      },
+    };
+    return {
+      messages: beforeMessages,
+      snapshot,
+      acceptReview: (review, updatedAt) =>
+        buildAdvancementWindowState(
+          [...entries, reviewToWindowEntry(review)],
+          priorReviews.length + 1,
+          updatedAt,
+          snapshot,
+        ),
+    };
+  }
+
+  const segment = createSegmentManager({
+    estimator: input.options.estimator ?? createTokenEstimator(),
+    capability: input.options.capability,
+    callLLM: input.options.summarize,
+    persistence: { async appendSegment() {} },
+    taskListReader: { hasInProgress: () => false },
+    ...(input.options.bufferTurns === undefined
+      ? {}
+      : { bufferTurns: input.options.bufferTurns }),
+  });
+  const out = await segment.evaluate({
+    messages: beforeMessages,
+    systemPrompt: input.systemPrompt,
+    tools: input.tools,
+    turnCount: priorReviews.length,
+    conversationId: undefined,
+    abortSignal: input.input.abortSignal,
+  });
+
+  const afterEntries = out.windowCompact
+    ? applyWindowCompact(entries, out.windowCompact)
+    : entries;
+  const afterMessages = flattenWindowEntries(afterEntries);
+  const snapshot: AdvancementReviewContextWindowSnapshot = {
+    source: "advancement-window",
+    priorReviewCount: priorReviews.length,
+    inputMessageCount: beforeMessages.length,
+    outputMessageCount: afterMessages.length,
+    decision: toContextWindowDecision(out.decision),
+    ...(out.windowCompact
+      ? {
+          compact: {
+            pairsCompacted: out.windowCompact.pairsCompacted,
+            tokensBefore: out.windowCompact.tokensBefore,
+            tokensAfter: out.windowCompact.tokensAfter,
+            segmentId: out.windowCompact.segmentId,
+          },
+        }
+      : {}),
+  };
+  return {
+    messages: afterMessages,
+    snapshot,
+    acceptReview: (review, updatedAt) =>
+      buildAdvancementWindowState(
+        [...afterEntries, reviewToWindowEntry(review)],
+        priorReviews.length + 1,
+        updatedAt,
+        snapshot,
+      ),
+  };
+}
+
+function restoreWindowEntries(
+  advancementWindow: AdvancementWindowState | undefined,
+  priorReviews: readonly AdvancementRunReview[],
+): AdvancementWindowEntry[] {
+  const canReuse =
+    advancementWindow &&
+    advancementWindow.source === "advancement-window" &&
+    advancementWindow.reviewCount <= priorReviews.length;
+  const baseEntries = canReuse ? [...advancementWindow.entries] : [];
+  const baseReviewCount = canReuse ? advancementWindow.reviewCount : 0;
+  return [
+    ...baseEntries,
+    ...priorReviews.slice(baseReviewCount).map(reviewToWindowEntry),
+  ];
+}
+
+function flattenWindowEntries(
+  entries: readonly AdvancementWindowEntry[],
+): readonly Message[] {
+  return entries.flatMap((entry) => entry.messages);
+}
+
+function applyWindowCompact(
+  entries: readonly AdvancementWindowEntry[],
+  compact: WindowCompact,
+): readonly AdvancementWindowEntry[] {
+  const reviewEntries = entries.filter(
+    (entry): entry is Extract<AdvancementWindowEntry, { kind: "review" }> =>
+      entry.kind === "review",
+  );
+  const foldedCount = Math.min(
+    Math.max(0, compact.pairsCompacted),
+    reviewEntries.length,
+  );
+  const [summary, ack] = buildCompactSummaryPair(compact.summary);
+  return [
+    { kind: "summary", messages: [summary, ack] },
+    ...reviewEntries.slice(foldedCount),
+  ];
+}
+
+function reviewToWindowEntry(
+  review: AdvancementRunReview,
+): AdvancementWindowEntry {
+  return createAdvancementWindowReviewEntry(review);
+}
+
+function buildAdvancementWindowState(
+  entries: readonly AdvancementWindowEntry[],
+  reviewCount: number,
+  updatedAt: string,
+  snapshot: AdvancementReviewContextWindowSnapshot | undefined,
+): AdvancementWindowState {
+  return {
+    source: "advancement-window",
+    reviewCount,
+    entries,
+    updatedAt,
+    ...(snapshot ? { lastSnapshot: snapshot } : {}),
+  };
+}
+
+function toContextWindowDecision(
+  decision: SegmentDecision,
+): AdvancementReviewContextWindowSnapshot["decision"] {
+  switch (decision.kind) {
+    case "pass":
+      return { kind: "pass", reason: decision.reason };
+    case "defer":
+      return {
+        kind: "defer",
+        reason: decision.reason,
+        currentTokens: decision.currentTokens,
+        threshold: decision.threshold,
+      };
+    case "trigger":
+      return {
+        kind: "trigger",
+        reason: decision.reason,
+        currentTokens: decision.currentTokens,
+        threshold: decision.threshold,
+      };
+  }
+}
+
+function renderPriorReviewWindow(messages: readonly Message[]): string {
+  if (messages.length === 0) return "无。";
+  return messages
+    .map((message, index) => {
+      const text = extractText(message).trim();
+      return `### ${index + 1}. ${message.role}\n${text || "(空)"}`;
+    })
+    .join("\n\n");
+}
+
+function attachContextWindow(
+  review: AdvancementRunReview,
+  contextWindow: AdvancementReviewContextWindowSnapshot | undefined,
+): AdvancementRunReview {
+  if (!contextWindow) return review;
+  return { ...review, contextWindow };
+}
+
+function attachContextWindowState(
+  review: AdvancementRunReview,
+  advancementWindow: AdvancementWindowState,
+): AdvancementRunReviewOutput {
+  return { review, advancementWindow };
 }
 
 function renderRubric(rubric: ConfirmedRubricSnapshot): string {

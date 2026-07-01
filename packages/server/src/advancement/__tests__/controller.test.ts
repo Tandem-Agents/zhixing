@@ -4,7 +4,9 @@ import { createTempDir } from "@zhixing/test-utils";
 import { AdvancementStore } from "@zhixing/core";
 import type {
   AdvancementRunReview,
+  AdvancementWindowState,
   ConfirmedRubricSnapshot,
+  Message,
   RubricContractDraftSnapshot,
   RunRecordInput,
 } from "@zhixing/core";
@@ -80,6 +82,32 @@ function review(extra: Partial<AdvancementRunReview> = {}): AdvancementRunReview
   };
 }
 
+function message(role: Message["role"], text: string): Message {
+  return { role, content: [{ type: "text", text }] };
+}
+
+function windowState(
+  reviewCount: number,
+  reviewId = `review-${reviewCount}`,
+): AdvancementWindowState {
+  return {
+    source: "advancement-window",
+    reviewCount,
+    updatedAt: "2026-01-01T00:03:30.000Z",
+    entries: [
+      {
+        kind: "review",
+        reviewId,
+        runIndex: reviewCount - 1,
+        messages: [
+          message("user", reviewId),
+          message("assistant", `window-${reviewCount}`),
+        ],
+      },
+    ],
+  };
+}
+
 async function makeActive(store: AdvancementStore): Promise<void> {
   await store.createSession({
     id: "session-1",
@@ -128,7 +156,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
     const store = await makeStore();
     await makeActive(store);
     const reviewer = {
-      reviewRun: vi.fn(async () => review()),
+      reviewRun: vi.fn(async () => ({ review: review() })),
     };
     const controller = new AdvancementController({
       store,
@@ -161,12 +189,69 @@ describe("AdvancementController.afterTurnCommitted", () => {
     );
   });
 
+  it("验收运行体复用并持久化推进侧窗口状态", async () => {
+    const store = await makeStore();
+    await makeActive(store);
+    const previousWindow = windowState(1);
+    await store.appendRunReview(
+      "conv-1",
+      "session-1",
+      review({ id: "review-previous" }),
+      "2026-01-01T00:02:00.000Z",
+      previousWindow,
+    );
+    const nextWindow = windowState(2, "review-next");
+    const reviewer = {
+      reviewRun: vi.fn(async () => ({
+        review: review({
+          id: "review-next",
+          runIndex: 1,
+          runRecordRef: { shardId: "000001", runIndex: 1 },
+        }),
+        advancementWindow: nextWindow,
+      })),
+    };
+    const controller = new AdvancementController({
+      store,
+      reviewer,
+      proxyIdGenerator: () => "proxy-1",
+    });
+
+    await controller.afterTurnCommitted({
+      conversationId: "conv-1",
+      runIndex: 1,
+      runRecord: runRecord(),
+      runRecordRef: { shardId: "000001", runIndex: 1 },
+    });
+
+    expect(reviewer.reviewRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        priorReviews: [expect.objectContaining({ id: "review-previous" })],
+        advancementWindow: previousWindow,
+      }),
+    );
+    const session = await store.loadSession("conv-1", "session-1");
+    expect(session?.advancementWindow?.entries[0]).toMatchObject({
+      kind: "review",
+      reviewId: "review-next",
+    });
+    const assistant = session?.advancementWindow?.entries[0]?.messages[1];
+    expect(assistant?.content[0]).toMatchObject({
+      type: "text",
+      text: expect.stringContaining("proxy-1"),
+    });
+  });
+
   it("passed 结论会完成推进会话", async () => {
     const store = await makeStore();
     await makeActive(store);
     const controller = new AdvancementController({
       store,
-      reviewer: { reviewRun: vi.fn(async () => review({ decision: "passed", unmetCriteria: [] })) },
+      reviewer: {
+        reviewRun: vi.fn(async () => ({
+          review: review({ decision: "passed", unmetCriteria: [] }),
+        })),
+      },
       now: () => "2026-01-01T00:04:00.000Z",
     });
 
@@ -199,11 +284,13 @@ describe("AdvancementController.afterTurnCommitted", () => {
       store,
       reviewer: {
         reviewRun: vi.fn(async () =>
-          review({
-            runIndex: 1,
-            runRecordRef: { shardId: "000001", runIndex: 1 },
-            decision: "passed",
-            unmetCriteria: [],
+          ({
+            review: review({
+              runIndex: 1,
+              runRecordRef: { shardId: "000001", runIndex: 1 },
+              decision: "passed",
+              unmetCriteria: [],
+            }),
           }),
         ),
       },
@@ -250,7 +337,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
       variables: {},
       createdAt: "2026-01-01T00:02:30.000Z",
     });
-    const reviewer = { reviewRun: vi.fn(async () => review()) };
+    const reviewer = { reviewRun: vi.fn(async () => ({ review: review() })) };
     const controller = new AdvancementController({
       store,
       reviewer,
@@ -282,10 +369,12 @@ describe("AdvancementController.afterTurnCommitted", () => {
       store,
       reviewer: {
         reviewRun: vi.fn(async () =>
-          review({
-            decision: "exit",
-            exitReason: "dead-end",
-            unmetCriteria: ["继续推进没有收益"],
+          ({
+            review: review({
+              decision: "exit",
+              exitReason: "dead-end",
+              unmetCriteria: ["继续推进没有收益"],
+            }),
           }),
         ),
       },
@@ -307,7 +396,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
 
   it("没有 active session 时跳过且不调用 reviewer", async () => {
     const store = await makeStore();
-    const reviewer = { reviewRun: vi.fn(async () => review()) };
+    const reviewer = { reviewRun: vi.fn(async () => ({ review: review() })) };
     const controller = new AdvancementController({ store, reviewer });
 
     const result = await controller.afterTurnCommitted({
@@ -352,7 +441,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
       await makeActive(store);
       const controller = new AdvancementController({
         store,
-        reviewer: { reviewRun: vi.fn(async () => badReview) },
+        reviewer: { reviewRun: vi.fn(async () => ({ review: badReview })) },
         now: () => "2026-01-01T00:04:00.000Z",
         reviewIdGenerator: () => "review-system-error",
       });
