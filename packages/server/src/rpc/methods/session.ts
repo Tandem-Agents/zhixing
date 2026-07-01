@@ -50,6 +50,7 @@ import {
   type SessionAdvancementCancelResult,
   type SessionAdvancementConfirmResult,
   type SessionAdvancementReviseResult,
+  type SessionAdvancementStateSnapshot,
   type SessionConversationEntry,
   type SessionAwaitingRubricResult,
   type SessionContractFailedResult,
@@ -1047,19 +1048,22 @@ export function buildSessionListMethod(): MethodEntry {
       const directory = requireDirectory(ctx.server);
       const conversations = await directory.list();
       return {
-        conversations: conversations.map((c): SessionConversationEntry => {
-          const active = manager.getSession(c.id);
-          return {
-            conversationId: c.id,
-            name: c.name,
-            createdAt: c.createdAt,
-            lastActiveAt: active?.lastActiveAt ?? c.lastActiveAt,
-            active: !!active,
-            busy: active?.busy ?? false,
-            observerCount: manager.getObserverCount(c.id),
-            pendingCount: manager.pendingCount(c.id),
-          };
-        }),
+        conversations: await Promise.all(
+          conversations.map(async (c): Promise<SessionConversationEntry> => {
+            const active = manager.getSession(c.id);
+            return {
+              conversationId: c.id,
+              name: c.name,
+              createdAt: c.createdAt,
+              lastActiveAt: active?.lastActiveAt ?? c.lastActiveAt,
+              active: !!active,
+              busy: active?.busy ?? false,
+              observerCount: manager.getObserverCount(c.id),
+              pendingCount: manager.pendingCount(c.id),
+              advancement: await loadAdvancementState(ctx.server, c.id),
+            };
+          }),
+        ),
       };
     },
   };
@@ -1682,6 +1686,9 @@ export function buildSessionResumeMethod(): MethodEntry {
         throw RpcErrors.notFound(`Session not found: ${params.conversationId}`);
       }
       const manager = requireConversations(ctx.server);
+      await ctx.server.advancementRecovery?.recoverConversation(
+        params.conversationId,
+      );
       const active = manager.getSession(params.conversationId);
       return {
         // 返回入参全域键——与 rename 同纪律,目录契约返回库内身份
@@ -1689,6 +1696,10 @@ export function buildSessionResumeMethod(): MethodEntry {
         name: touched.name,
         active: !!active,
         busy: active?.busy ?? false,
+        advancement: await loadAdvancementState(
+          ctx.server,
+          params.conversationId,
+        ),
       };
     },
   };
@@ -1732,6 +1743,45 @@ function requireAdvancementSessionId(
     );
   }
   return params.advancementSessionId;
+}
+
+async function loadAdvancementState(
+  server: ServerContext,
+  conversationId: string,
+): Promise<SessionAdvancementStateSnapshot | undefined> {
+  const session = await server.advancement?.loadActiveSession(conversationId);
+  if (!session) return undefined;
+  return projectAdvancementState(session);
+}
+
+function projectAdvancementState(
+  session: AdvancementSession,
+): SessionAdvancementStateSnapshot | undefined {
+  if (
+    session.status !== "awaiting-rubric-confirmation" &&
+    session.status !== "active"
+  ) {
+    return undefined;
+  }
+  const lastReview = session.runs[session.runs.length - 1];
+  return {
+    advancementSessionId: session.id,
+    status: session.status,
+    rubricTitle:
+      session.confirmedRubric?.title ?? session.pendingRubricDraft?.title,
+    rubricDraftId: session.pendingRubricDraft?.draftId,
+    outstandingProxyMessageId: session.outstandingProxyMessageId,
+    ...(lastReview
+      ? {
+          lastReview: {
+            id: lastReview.id,
+            runIndex: lastReview.runIndex,
+            decision: lastReview.decision,
+            reviewedAt: lastReview.reviewedAt,
+          },
+        }
+      : {}),
+  };
 }
 
 function requireUserFeedback(

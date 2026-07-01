@@ -16,6 +16,12 @@ export {
   type ScheduleProxyMessageResult,
 } from "./proxy-scheduler.js";
 export {
+  createAdvancementRecoveryMaintenance,
+  type AdvancementRecoveryMaintenance,
+  type AdvancementRecoveryMaintenanceOptions,
+  type AdvancementRecoveryResult,
+} from "./recovery-maintenance.js";
+export {
   dispatchAdvancementReviewResult,
   type AdvancementReviewDispatchDeps,
   type AdvancementReviewDispatchInput,

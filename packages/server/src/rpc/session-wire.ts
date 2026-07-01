@@ -16,6 +16,8 @@
 
 import type {
   AgentResult,
+  AdvancementReviewDecision,
+  AdvancementSessionStatus,
   AgentYield,
   ContextBudget,
   RubricContractDraftSnapshot,
@@ -191,6 +193,23 @@ export type SessionAdvancementCancelResult =
       runStatus: "immediate" | "queued";
     };
 
+export interface SessionAdvancementStateSnapshot {
+  advancementSessionId: string;
+  status: Extract<
+    AdvancementSessionStatus,
+    "awaiting-rubric-confirmation" | "active"
+  >;
+  rubricTitle?: string;
+  rubricDraftId?: string;
+  outstandingProxyMessageId?: string;
+  lastReview?: {
+    id: string;
+    runIndex: number;
+    decision: AdvancementReviewDecision;
+    reviewedAt: string;
+  };
+}
+
 /** session.list 条目——盘上事实叠加活跃态 */
 export interface SessionConversationEntry {
   conversationId: string;
@@ -201,6 +220,7 @@ export interface SessionConversationEntry {
   busy: boolean;
   observerCount: number;
   pendingCount: number;
+  advancement?: SessionAdvancementStateSnapshot;
 }
 
 export interface SessionListResult {
@@ -235,6 +255,7 @@ export interface SessionResumeResult {
   /** 会话当前是否活跃(活跃则 subscribe 可立即开始旁观进行中的流) */
   active: boolean;
   busy: boolean;
+  advancement?: SessionAdvancementStateSnapshot;
 }
 
 /** /task new·done 的动作形(执行体在宿主,语义单一定义于装配实现) */

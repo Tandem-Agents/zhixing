@@ -57,6 +57,7 @@ import {
   ServerLogLifecycle,
   CleanupRegistry,
   createRunEventForwarder,
+  createAdvancementRecoveryMaintenance,
   getDefaultLogPath,
   SESSION_NOTIFICATIONS,
   type SessionChangedPayload,
@@ -607,6 +608,17 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   // ============================================================================
   // ServerContext + runServer —— 读接入面产物（conversations / channels）。
   // ============================================================================
+  const advancementRecovery =
+    ctx.advancement && ctx.conversations
+      ? createAdvancementRecoveryMaintenance({
+          advancement: ctx.advancement,
+          manager: ctx.conversations,
+          directory: conversationDirectory,
+          sessionBroadcast: () => sessionBroadcastRef.current,
+          logger: console,
+        })
+      : undefined;
+
   const serverCtx = createServerContext({
     config: { ...DEFAULT_SERVER_CONFIG, port, host },
     version: SERVER_VERSION,
@@ -614,6 +626,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     scheduler,
     conversations: ctx.conversations,
     advancement: ctx.advancement,
+    advancementRecovery,
     conversationDirectory,
     workscenes: worksceneDirectory,
     trust: trustDirectory,
@@ -754,6 +767,30 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     registry.register("inboundRouter.refuseNew", () => {
       router.refuseNewMessages();
     });
+  }
+
+  if (advancementRecovery) {
+    try {
+      const recovered = await advancementRecovery.recoverAllOpenSessions();
+      const scheduledCount = recovered.filter(
+        (item) =>
+          item.status === "scheduled" ||
+          item.status === "already-running" ||
+          item.status === "accepted-run-recovered",
+      ).length;
+      if (scheduledCount > 0) {
+        console.log(
+          chalk.dim(
+            `[advancement] recovered ${scheduledCount} active proxy turn(s)`,
+          ),
+        );
+      }
+    } catch (err) {
+      console.warn(
+        chalk.yellow("[advancement] recovery scan failed:"),
+        err instanceof Error ? err.message : err,
+      );
+    }
   }
 
   // Post-runServer 启动步骤（startup guard 包裹）

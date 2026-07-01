@@ -795,6 +795,13 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 
 #### C8：代理消息续推、队列与用户中断
 
+落地提交：
+
+- `efe1ddd` `feat(core/advancement): add active advancement proxy primitives`
+- `c7390fc` `feat(server/runtime): support advancement-sourced queued turns`
+- `db91ed6` `feat(advancement): schedule proxy turns after failed reviews`
+- `8297487` `feat(server/session): handle active advancement user input`
+
 内容：
 
 - 实现 `ProxyMessageScheduler`。

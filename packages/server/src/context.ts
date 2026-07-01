@@ -15,6 +15,7 @@ import type {
 import type { ServerConfig } from "./types.js";
 import type { ConversationManager } from "./runtime/index.js";
 import type { ConfirmationHub } from "./confirmation/hub.js";
+import type { AdvancementRecoveryMaintenance } from "./advancement/index.js";
 import { AdvancementController } from "./advancement/index.js";
 import type {
   SessionActivityBroadcast,
@@ -50,6 +51,8 @@ export interface ServerContext {
   conversations?: ConversationManager;
   /** 任务推进闭环控制面。不传则 session.send 保持纯执行语义。 */
   advancement?: AdvancementController;
+  /** 任务推进恢复维护面。不传则 session.resume/list 只暴露静态推进状态。 */
+  advancementRecovery?: AdvancementRecoveryMaintenance;
   /**
    * 对话目录(盘上事实:清单 / 改名 / 删除 / 倒读)。装配方注入持久层实现;
    * 不传则 session.list / history / rename / delete 不可用。
@@ -140,6 +143,7 @@ export interface CreateContextOptions {
   scheduler?: Scheduler;
   conversations?: ConversationManager;
   advancement?: AdvancementController;
+  advancementRecovery?: AdvancementRecoveryMaintenance;
   conversationDirectory?: ConversationDirectory;
   workscenes?: WorksceneDirectory;
   trust?: TrustDirectory;
@@ -165,6 +169,7 @@ export function createServerContext(opts: CreateContextOptions): ServerContext {
     scheduler: opts.scheduler,
     conversations: opts.conversations,
     advancement: opts.advancement,
+    advancementRecovery: opts.advancementRecovery,
     conversationDirectory: opts.conversationDirectory,
     workscenes: opts.workscenes,
     trust: opts.trust,

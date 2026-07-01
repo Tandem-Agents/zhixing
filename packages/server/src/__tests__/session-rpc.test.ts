@@ -16,8 +16,12 @@ import type {
   AgentResult,
   AgentYield,
   AdvancementAdmissionStrategy,
+  AdvancementProxyMessage,
+  AdvancementRunReview,
+  ConfirmedRubricSnapshot,
   ContextBudget,
   Message,
+  RubricContractDraftSnapshot,
   RunResult,
   TaskListState,
 } from "@zhixing/core";
@@ -41,6 +45,7 @@ import {
   isErrorResponse,
 } from "../rpc/protocol.js";
 import { AdvancementController } from "../advancement/controller.js";
+import { createAdvancementRecoveryMaintenance } from "../advancement/recovery-maintenance.js";
 import { createTempDir } from "@zhixing/test-utils";
 
 const TEST_VERSION = "0.1.0-test";
@@ -184,6 +189,18 @@ function createMockFactory(opts: MockOptions = {}): RuntimeFactory {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function waitUntil(
+  predicate: () => boolean,
+  timeoutMs = 1000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await sleep(10);
+  }
+  throw new Error("waitUntil timed out");
+}
 
 /**
  * 内存版对话目录——以 appendRun 收集的记录为"盘上事实":有 run 即在清单,
@@ -496,11 +513,100 @@ describe("session.* RPC (S2.D)", () => {
     };
   }
 
+  function testUserInput(text: string) {
+    return { parts: [{ type: "text" as const, text }] };
+  }
+
+  function testDraft(originalTurnId: string): RubricContractDraftSnapshot {
+    return {
+      draftId: `draft-${originalTurnId}`,
+      originalTurnId,
+      source: "generated",
+      candidateRubricIds: [],
+      title: "测试推进准则",
+      description: "用于测试推进控制面。",
+      content: {
+        passCriteria: ["测试任务达到可验收状态"],
+        evidenceRequirements: [],
+        failureHandling: [
+          {
+            id: "continue",
+            scenario: "任务尚未完成",
+            reply: "请继续处理直到达到验收标准。",
+          },
+        ],
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+    };
+  }
+
+  function testConfirmedRubric(): ConfirmedRubricSnapshot {
+    return {
+      rubricId: "rubric-recovery",
+      rubricVersion: "v1",
+      title: "确认版测试推进准则",
+      description: "用户确认后的推进准则。",
+      content: testDraft("turn-recovery-original").content,
+      confirmedAt: "2026-01-01T00:01:00.000Z",
+      confirmedBy: "user",
+    };
+  }
+
+  async function seedOutstandingProxySession(
+    store: AdvancementStore,
+    conversationId: string,
+  ): Promise<void> {
+    await store.createSession({
+      id: "adv-recovery",
+      conversationId,
+      originalUserTask: testUserInput("把测试修到全绿"),
+      pendingRubricDraft: testDraft("turn-recovery-original"),
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    await store.confirmRubric(
+      conversationId,
+      "adv-recovery",
+      testConfirmedRubric(),
+    );
+    const review: AdvancementRunReview = {
+      id: "review-recovery",
+      runIndex: 0,
+      reviewedAt: "2026-01-01T00:02:00.000Z",
+      decision: "failed",
+      evidence: [],
+      unmetCriteria: ["测试尚未全绿"],
+      selectedFailureHandlingId: "continue",
+      proxyMessageId: "proxy-recovery",
+    };
+    const proxyMessage: AdvancementProxyMessage = {
+      id: "proxy-recovery",
+      sessionId: "adv-recovery",
+      reviewId: "review-recovery",
+      content: testUserInput("请继续处理直到达到验收标准。"),
+      rubricFailureHandlingId: "continue",
+      variables: {},
+      createdAt: "2026-01-01T00:03:00.000Z",
+    };
+    await store.appendRunReviewWithProxyMessage(
+      conversationId,
+      "adv-recovery",
+      review,
+      proxyMessage,
+    );
+  }
+
   async function startWithFactory(
     factory: RuntimeFactory,
-    opts: { advancement?: AdvancementController } = {},
+    opts: {
+      advancement?: AdvancementController;
+      withAdvancementRecovery?: boolean;
+      seedConversations?: readonly string[];
+    } = {},
   ): Promise<void> {
     recordsByConversation.clear();
+    for (const conversationId of opts.seedConversations ?? []) {
+      recordsByConversation.set(conversationId, []);
+    }
     const conversations = new ConversationManager(factory, {
       graceTimeoutMs: 60_000,
       idleTimeoutMs: 30 * 60_000,
@@ -512,13 +618,23 @@ describe("session.* RPC (S2.D)", () => {
         return { runIndex: prev.length, shardId: "000001" };
       },
     });
+    const conversationDirectory = createMemoryDirectory(recordsByConversation);
+    const advancementRecovery =
+      opts.advancement && opts.withAdvancementRecovery
+        ? createAdvancementRecoveryMaintenance({
+            advancement: opts.advancement,
+            manager: conversations,
+            directory: conversationDirectory,
+          })
+        : undefined;
     const ctx = createServerContext({
       config: { ...DEFAULT_SERVER_CONFIG, port: 0 },
       version: TEST_VERSION,
       token: TEST_TOKEN,
       conversations,
       advancement: opts.advancement,
-      conversationDirectory: createMemoryDirectory(recordsByConversation),
+      advancementRecovery,
+      conversationDirectory,
     });
     server = await startServer({ context: ctx });
   }
@@ -615,6 +731,64 @@ describe("session.* RPC (S2.D)", () => {
       runId: "turn-adv-1",
       seq: 0,
       event: "advancement:contract_draft",
+    });
+    client.close();
+  });
+
+  it("session.list 与 session.resume 暴露当前推进状态快照", async () => {
+    await startWithFactory(createMockFactory(), {
+      advancement: await createTestAdvancementController(),
+    });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const sendResp = await client.request("session.send", {
+      text: "请把测试修到全绿，盯到验收通过",
+      turnId: "turn-adv-state",
+    });
+    expect(isSuccessResponse(sendResp)).toBe(true);
+    if (!isSuccessResponse(sendResp)) return;
+    const awaiting = sendResp.result as {
+      conversationId: string;
+      advancementSessionId: string;
+      rubricDraftId: string;
+    };
+    await client.waitNotification("session.event");
+
+    const listResp = await client.request("session.list");
+    expect(isSuccessResponse(listResp)).toBe(true);
+    if (!isSuccessResponse(listResp)) return;
+    const listed = (
+      listResp.result as {
+        conversations: Array<{
+          conversationId: string;
+          advancement?: {
+            status: string;
+            advancementSessionId: string;
+            rubricDraftId?: string;
+            rubricTitle?: string;
+          };
+        }>;
+      }
+    ).conversations.find((entry) => entry.conversationId === awaiting.conversationId);
+    expect(listed?.advancement).toMatchObject({
+      status: "awaiting-rubric-confirmation",
+      advancementSessionId: awaiting.advancementSessionId,
+      rubricDraftId: awaiting.rubricDraftId,
+      rubricTitle: "测试推进准则",
+    });
+
+    const resumeResp = await client.request("session.resume", {
+      conversationId: awaiting.conversationId,
+    });
+    expect(isSuccessResponse(resumeResp)).toBe(true);
+    if (!isSuccessResponse(resumeResp)) return;
+    expect(resumeResp.result).toMatchObject({
+      conversationId: awaiting.conversationId,
+      advancement: {
+        status: "awaiting-rubric-confirmation",
+        advancementSessionId: awaiting.advancementSessionId,
+      },
     });
     client.close();
   });
@@ -1364,6 +1538,54 @@ describe("session.* RPC (S2.D)", () => {
     });
     expect(isSuccessResponse(missing)).toBe(false);
 
+    client.close();
+  });
+
+  it("session.resume 会恢复 active 推进会话中的 outstanding proxy", async () => {
+    const advancement = await createTestAdvancementHarness();
+    await seedOutstandingProxySession(advancement.store, "conv-recovery");
+    await startWithFactory(createMockFactory({ deltaCount: 0 }), {
+      advancement: advancement.controller,
+      withAdvancementRecovery: true,
+      seedConversations: ["conv-recovery"],
+    });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const resumed = await client.request("session.resume", {
+      conversationId: "conv-recovery",
+    });
+    expect(isSuccessResponse(resumed)).toBe(true);
+    if (!isSuccessResponse(resumed)) return;
+    expect(resumed.result).toMatchObject({
+      conversationId: "conv-recovery",
+      active: true,
+      advancement: {
+        status: "active",
+        advancementSessionId: "adv-recovery",
+        outstandingProxyMessageId: "proxy-recovery",
+        lastReview: {
+          id: "review-recovery",
+          decision: "failed",
+        },
+      },
+    });
+
+    await waitUntil(() => (recordsByConversation.get("conv-recovery") ?? []).length === 1);
+    const record = recordsByConversation.get("conv-recovery")?.[0] as {
+      source?: string;
+      advancement?: { sessionId: string; proxyMessageId: string };
+      messages: Message[];
+    };
+    expect(record.source).toBe("advancement");
+    expect(record.advancement).toMatchObject({
+      sessionId: "adv-recovery",
+      proxyMessageId: "proxy-recovery",
+    });
+    expect(record.messages[0]?.content[0]).toMatchObject({
+      type: "text",
+      text: "请继续处理直到达到验收标准。",
+    });
     client.close();
   });
 
