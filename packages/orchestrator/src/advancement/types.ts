@@ -1,6 +1,5 @@
 import type {
   AdvancementRunReview,
-  AdvancementRunReviewOutput,
   AdvancementWindowState,
   ConfirmedRubricSnapshot,
   EvidenceCapabilitySet,
@@ -17,8 +16,27 @@ import type {
   UserTurnInput,
 } from "@zhixing/core";
 
+/**
+ * 一次验收的结果——结论与挂起是两种语义，不用异常做控制流：
+ * - reviewed：裁判产出了结论（含 fail-closed 的终局 exit）——落盘、驱动闭环。
+ * - deferred：本轮验收未产生结论——基础设施 transient 失败（限流 / 网络 /
+ *   取证 IO）或调用被中止。不落盘 review、不前进已审进度，被审 run 保持
+ *   「已接受未审」态由补审触发点收敛；过夜任务不因一次抖动永久退出。
+ */
+export type AdvancementReviewRunOutcome =
+  | {
+      readonly kind: "reviewed";
+      readonly review: AdvancementRunReview;
+      readonly advancementWindow?: AdvancementWindowState;
+    }
+  | {
+      readonly kind: "deferred";
+      readonly cause: "infrastructure" | "aborted";
+      readonly reason: string;
+    };
+
 export interface AdvancementRuntime {
-  reviewRun(input: AdvancementReviewRunInput): Promise<AdvancementRunReviewOutput>;
+  reviewRun(input: AdvancementReviewRunInput): Promise<AdvancementReviewRunOutcome>;
 }
 
 export interface AdvancementRuntimeOptions {

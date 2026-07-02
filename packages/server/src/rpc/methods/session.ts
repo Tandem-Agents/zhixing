@@ -119,6 +119,11 @@ export function buildSessionSendMethod(): MethodEntry {
           : null;
 
         if (activePrepared?.kind === "active-session-taken-over") {
+          manager.addObserver(
+            activePrepared.session.conversationId,
+            connectionId,
+            { allowInactive: true },
+          );
           notifyAdvancementEvent({
             conversationId: activePrepared.session.conversationId,
             turnId,
@@ -128,10 +133,54 @@ export function buildSessionSendMethod(): MethodEntry {
               advancementSessionId: activePrepared.session.id,
               exit: activePrepared.exit,
               admission: activePrepared.admission,
+              closure: activePrepared.closure,
             },
             connection: ctx.connection,
             broadcast,
           });
+        }
+
+        if (activePrepared?.kind === "rubric-regenerated") {
+          return respondRubricRegenerated({
+            prepared: activePrepared,
+            turnId,
+            connectionId,
+            connection: ctx.connection,
+            broadcast,
+            manager,
+          });
+        }
+
+        if (activePrepared?.kind === "contract-failed") {
+          manager.addObserver(activePrepared.conversationId, connectionId, {
+            allowInactive: true,
+          });
+          notifyAdvancementEvent({
+            conversationId: activePrepared.conversationId,
+            turnId: activePrepared.originalTurnId,
+            seq: 0,
+            event: "advancement:contract_failed",
+            payload: {
+              originalTurnId: activePrepared.originalTurnId,
+              error: activePrepared.error,
+            },
+            connection: ctx.connection,
+            broadcast,
+          });
+          // 修订失败没有改变旧契约，但代理 run 已为处理用户输入被中断——
+          // 用户此刻在场，立即重接被中断的推进，不停摆到下一个触发点。
+          try {
+            await ctx.server.advancementRecovery?.recoverConversation(
+              activePrepared.conversationId,
+            );
+          } catch {
+            // 重接失败交给下一个恢复触发点收敛，不影响受控失败响应。
+          }
+          return contractFailedResult(
+            activePrepared.conversationId,
+            turnId,
+            activePrepared.error,
+          );
         }
 
         if (activePrepared?.kind === "active-user-turn") {
@@ -292,7 +341,21 @@ export function buildSessionSendMethod(): MethodEntry {
           };
         }
 
+        if (prepared.kind === "rubric-regenerated") {
+          return respondRubricRegenerated({
+            prepared,
+            turnId,
+            connectionId,
+            connection: ctx.connection,
+            broadcast,
+            manager,
+          });
+        }
+
         if (prepared.kind === "active-session-taken-over") {
+          manager.addObserver(prepared.session.conversationId, connectionId, {
+            allowInactive: true,
+          });
           notifyAdvancementEvent({
             conversationId: prepared.session.conversationId,
             turnId,
@@ -302,6 +365,7 @@ export function buildSessionSendMethod(): MethodEntry {
               advancementSessionId: prepared.session.id,
               exit: prepared.exit,
               admission: prepared.admission,
+              closure: prepared.closure,
             },
             connection: ctx.connection,
             broadcast,
@@ -614,7 +678,13 @@ async function prepareActiveAdvancementUserTurn(input: {
 }): Promise<
   Extract<
     AdvancementPrepareResult,
-    { readonly kind: "active-user-turn" | "active-session-taken-over" }
+    {
+      readonly kind:
+        | "active-user-turn"
+        | "active-session-taken-over"
+        | "rubric-regenerated"
+        | "contract-failed";
+    }
   > | null
 > {
   const active = await input.advancement.loadActiveSession(input.conversationId);
@@ -650,6 +720,12 @@ async function prepareActiveAdvancementUserTurn(input: {
   }
 
   if (prepared.kind === "active-session-taken-over") return prepared;
+  // 契约再生：旧会话已 exited（折叠即清 outstanding），新 awaiting 已建——
+  // 必须放行给上层发事件与确认面，不得回落到重新分类。
+  if (prepared.kind === "rubric-regenerated") return prepared;
+  // 再生修订失败：旧契约保持 active，但代理已为处理用户输入被中断——
+  // 必须放行给上层受控失败 + 重接，不得回落引发二次分类与二次修订。
+  if (prepared.kind === "contract-failed") return prepared;
   return null;
 }
 
@@ -839,6 +915,60 @@ async function admitAndMaybeStartTurn(
     turnId: input.turnId,
     runStatus: admission.status,
   };
+}
+
+/**
+ * 契约再生的统一响应：旧会话 exited（带收场）+ 新草案确认面，一回合完成。
+ */
+function respondRubricRegenerated(input: {
+  readonly prepared: Extract<
+    AdvancementPrepareResult,
+    { readonly kind: "rubric-regenerated" }
+  >;
+  readonly turnId: string;
+  readonly connectionId: string;
+  readonly connection: RpcConnection;
+  readonly broadcast?: SessionBroadcast;
+  readonly manager: ConversationManager;
+}): SessionAwaitingRubricResult {
+  const { prepared } = input;
+  input.manager.addObserver(prepared.session.conversationId, input.connectionId, {
+    allowInactive: true,
+  });
+  notifyAdvancementEvent({
+    conversationId: prepared.exitedSession.conversationId,
+    turnId: input.turnId,
+    seq: 0,
+    event: "advancement:exited",
+    payload: {
+      advancementSessionId: prepared.exitedSession.id,
+      exit: prepared.exit,
+      admission: prepared.admission,
+      closure: prepared.closure,
+    },
+    connection: input.connection,
+    broadcast: input.broadcast,
+  });
+  notifyAdvancementEvent({
+    conversationId: prepared.session.conversationId,
+    turnId: input.turnId,
+    seq: 1,
+    event: "advancement:contract_draft",
+    payload: {
+      advancementSessionId: prepared.session.id,
+      rubricDraftId: prepared.draft.draftId,
+      rubricDraft: prepared.draft,
+      admission: prepared.admission,
+    },
+    connection: input.connection,
+    broadcast: input.broadcast,
+  });
+  return awaitingRubricResult(
+    prepared.session.conversationId,
+    input.turnId,
+    prepared.session.id,
+    prepared.draft,
+  );
 }
 
 function awaitingRubricResult(

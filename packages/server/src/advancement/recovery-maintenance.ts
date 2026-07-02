@@ -55,6 +55,14 @@ export type AdvancementRecoveryResult =
       readonly runRecordRef: RunRecordRef;
     }
   | {
+      readonly status: "review-deferred";
+      readonly conversationId: string;
+      readonly advancementSessionId: string;
+      readonly runRecordRef: RunRecordRef;
+      readonly cause: "infrastructure" | "aborted";
+      readonly message: string;
+    }
+  | {
       readonly status: "not-found" | "full" | "missing-proxy" | "failed";
       readonly conversationId: string;
       readonly advancementSessionId?: string;
@@ -62,9 +70,21 @@ export type AdvancementRecoveryResult =
       readonly message?: string;
     };
 
+export interface AdvancementRecoveryOptions {
+  /**
+   * 只补审此 runIndex 之前的欠账。turn 提交触发的 catch-up 用它排除
+   * 当轮——当轮由 afterTurnCommitted 正常验收（补审走 scheduleProxy:false，
+   * 吞掉当轮 proxy 调度）。
+   */
+  readonly beforeRunIndex?: number;
+}
+
 export interface AdvancementRecoveryMaintenance {
   recoverAllOpenSessions(): Promise<readonly AdvancementRecoveryResult[]>;
-  recoverConversation(conversationId: string): Promise<AdvancementRecoveryResult>;
+  recoverConversation(
+    conversationId: string,
+    options?: AdvancementRecoveryOptions,
+  ): Promise<AdvancementRecoveryResult>;
 }
 
 export function createAdvancementRecoveryMaintenance(
@@ -97,20 +117,26 @@ class DefaultAdvancementRecoveryMaintenance
     return results;
   }
 
-  recoverConversation(conversationId: string): Promise<AdvancementRecoveryResult> {
+  recoverConversation(
+    conversationId: string,
+    options?: AdvancementRecoveryOptions,
+  ): Promise<AdvancementRecoveryResult> {
     const running = this.recovering.get(conversationId);
     if (running) return running;
-    const recovery = this.recoverConversationOnce(conversationId).finally(() => {
-      if (this.recovering.get(conversationId) === recovery) {
-        this.recovering.delete(conversationId);
-      }
-    });
+    const recovery = this.recoverConversationOnce(conversationId, options).finally(
+      () => {
+        if (this.recovering.get(conversationId) === recovery) {
+          this.recovering.delete(conversationId);
+        }
+      },
+    );
     this.recovering.set(conversationId, recovery);
     return recovery;
   }
 
   private async recoverConversationOnce(
     conversationId: string,
+    options?: AdvancementRecoveryOptions,
   ): Promise<AdvancementRecoveryResult> {
     let session: AdvancementSession | null;
     try {
@@ -125,7 +151,7 @@ class DefaultAdvancementRecoveryMaintenance
 
     let lastRecoveredRun: AdvancementRecoveryResult | undefined;
     while (true) {
-      const acceptedRun = await this.findUnreviewedAcceptedRun(session);
+      const acceptedRun = await this.findUnreviewedAcceptedRun(session, options);
       if (!acceptedRun) break;
       const recovered = await this.recoverAcceptedRun(session, acceptedRun);
       if (recovered.status !== "accepted-run-recovered") return recovered;
@@ -140,7 +166,23 @@ class DefaultAdvancementRecoveryMaintenance
     }
 
     if (!session.outstandingProxyMessageId) {
-      return lastRecoveredRun ?? { status: "no-pending-recovery", conversationId };
+      let rebuilt: Awaited<
+        ReturnType<AdvancementController["rebuildMissingProxyMessage"]>
+      >;
+      try {
+        rebuilt = await this.options.advancement.rebuildMissingProxyMessage(
+          session,
+        );
+      } catch (err) {
+        return this.failed(conversationId, session.id, undefined, err);
+      }
+      if (rebuilt.kind !== "rebuilt") {
+        return (
+          lastRecoveredRun ?? { status: "no-pending-recovery", conversationId }
+        );
+      }
+      session = rebuilt.session;
+      this.emitProxyRebuilt(session, rebuilt.proxyMessage, rebuilt.review);
     }
 
     const proxyMessage = findOutstandingProxyMessage(session);
@@ -230,6 +272,7 @@ class DefaultAdvancementRecoveryMaintenance
 
   private async findUnreviewedAcceptedRun(
     session: AdvancementSession,
+    options?: AdvancementRecoveryOptions,
   ): Promise<
     | {
         readonly record: RunRecord;
@@ -261,6 +304,12 @@ class DefaultAdvancementRecoveryMaintenance
           record.timestamp < session.createdAt
         ) {
           return oldestCandidate(candidates);
+        }
+        if (
+          options?.beforeRunIndex !== undefined &&
+          record.runIndex >= options.beforeRunIndex
+        ) {
+          continue;
         }
         if (isRecoverableAcceptedRun(session, record)) {
           candidates.push({
@@ -309,6 +358,19 @@ class DefaultAdvancementRecoveryMaintenance
           scheduleProxy: false,
         },
       );
+      if (result.kind === "review-deferred") {
+        // 补审本身又挂起：review 没落盘、该 run 仍是未审态。必须中断
+        // 本次恢复（否则扫描循环会反复命中同一 run 空转），等下一个
+        // 恢复触发点重来。
+        return {
+          status: "review-deferred",
+          conversationId: session.conversationId,
+          advancementSessionId: session.id,
+          runRecordRef: accepted.runRecordRef,
+          cause: result.cause,
+          message: result.reason,
+        };
+      }
       return {
         status: "accepted-run-recovered",
         conversationId: session.conversationId,
@@ -324,6 +386,27 @@ class DefaultAdvancementRecoveryMaintenance
         err,
       );
     }
+  }
+
+  private emitProxyRebuilt(
+    session: AdvancementSession,
+    proxyMessage: AdvancementProxyMessage,
+    review: { readonly id: string },
+  ): void {
+    this.options.sessionBroadcast?.()?.(
+      session.conversationId,
+      SESSION_NOTIFICATIONS.event,
+      createControlSessionEventEnvelope({
+        conversationId: session.conversationId,
+        runId: proxyMessage.id,
+        event: "advancement:proxy_enqueued",
+        payload: {
+          advancementSessionId: session.id,
+          proxyMessageId: proxyMessage.id,
+          reviewId: review.id,
+        },
+      }),
+    );
   }
 
   private emitProxyRecovered(

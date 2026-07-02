@@ -727,6 +727,166 @@ describe("AdvancementRuntime", () => {
       ],
     });
   });
+
+  it("既往判断连续同构失败时向裁判注入跨轮僵持信号", async () => {
+    const provider = new MockLLMProvider([
+      {
+        toolCalls: [
+          {
+            id: "judge-stagnant",
+            name: ADVANCEMENT_SUBMIT_REVIEW_TOOL,
+            input: {
+              decision: "exit",
+              exitReason: "dead-end",
+              evidenceIds: [],
+              criteria: UNMET_CRITERIA,
+            },
+          },
+        ],
+      },
+    ]);
+    const runtime = createAdvancementRuntime({
+      provider,
+      model: "mock-model",
+      evidenceProvider: providerWithEvidence([]),
+      now: () => NOW,
+    });
+
+    await runtime.reviewRun({
+      ...baseInput(),
+      priorReviews: [priorReview("prior-1", 1), priorReview("prior-2", 2)],
+    });
+
+    const prompt = extractRequestText(provider.calls[0]!);
+    expect(prompt).toContain("跨轮僵持信号");
+    expect(prompt).toContain("最近 2 轮");
+    expect(prompt).toContain("pc-2");
+  });
+
+  it("既往判断有进展时不注入僵持信号", async () => {
+    const provider = new MockLLMProvider([
+      {
+        toolCalls: [
+          {
+            id: "judge-progress",
+            name: ADVANCEMENT_SUBMIT_REVIEW_TOOL,
+            input: {
+              decision: "passed",
+              evidenceIds: [],
+              criteria: MET_CRITERIA,
+            },
+          },
+        ],
+      },
+    ]);
+    const runtime = createAdvancementRuntime({
+      provider,
+      model: "mock-model",
+      evidenceProvider: providerWithEvidence([]),
+      now: () => NOW,
+    });
+
+    await runtime.reviewRun({
+      ...baseInput(),
+      priorReviews: [priorReview("prior-1", 1)],
+    });
+
+    expect(extractRequestText(provider.calls[0]!)).not.toContain("跨轮僵持信号");
+  });
+
+  it("取证阶段基础设施错误挂起本轮验收，不产生结论", async () => {
+    const provider = new MockLLMProvider([]);
+    const runtime = createAdvancementRuntime({
+      provider,
+      model: "mock-model",
+      evidenceProvider: {
+        async collect() {
+          throw new Error("git unavailable");
+        },
+      },
+      now: () => NOW,
+    });
+
+    const outcome = await runtime.reviewRun(baseInput());
+
+    expect(outcome).toMatchObject({
+      kind: "deferred",
+      cause: "infrastructure",
+      reason: expect.stringContaining("git unavailable"),
+    });
+    expect(provider.callCount).toBe(0);
+  });
+
+  it("裁判调用基础设施错误挂起本轮验收，不落终局", async () => {
+    const provider = new MockLLMProvider([
+      { error: new Error("429 rate limited") },
+    ]);
+    const runtime = createAdvancementRuntime({
+      provider,
+      model: "mock-model",
+      evidenceProvider: providerWithEvidence([]),
+      now: () => NOW,
+    });
+
+    const outcome = await runtime.reviewRun(baseInput());
+
+    expect(outcome).toMatchObject({
+      kind: "deferred",
+      cause: "infrastructure",
+      reason: expect.stringContaining("429 rate limited"),
+    });
+  });
+
+  it("裁判调用被中止时挂起为 aborted，不产生结论", async () => {
+    const provider = new MockLLMProvider([
+      {
+        toolCalls: [
+          {
+            id: "judge-late",
+            name: ADVANCEMENT_SUBMIT_REVIEW_TOOL,
+            input: {
+              decision: "passed",
+              evidenceIds: [],
+              criteria: MET_CRITERIA,
+            },
+          },
+        ],
+      },
+    ]);
+    const runtime = createAdvancementRuntime({
+      provider,
+      model: "mock-model",
+      evidenceProvider: providerWithEvidence([]),
+      now: () => NOW,
+    });
+    const controller = new AbortController();
+    controller.abort();
+
+    const outcome = await runtime.reviewRun({
+      ...baseInput(),
+      abortSignal: controller.signal,
+    });
+
+    expect(outcome).toMatchObject({ kind: "deferred", cause: "aborted" });
+  });
+
+  it("模型拿到完整上下文却未提交结论时按结论性僵持终局", async () => {
+    const provider = new MockLLMProvider([{ text: "我认为任务完成了。" }]);
+    const runtime = createAdvancementRuntime({
+      provider,
+      model: "mock-model",
+      evidenceProvider: providerWithEvidence([]),
+      now: () => NOW,
+      idGenerator: () => "review-stall",
+    });
+
+    const outcome = await runtime.reviewRun(baseInput());
+
+    expect(outcome.kind).toBe("reviewed");
+    if (outcome.kind !== "reviewed") return;
+    expect(outcome.review.decision).toBe("exit");
+    expect(outcome.review.exitReason).toBe("system-error");
+  });
 });
 
 function baseInput() {
@@ -837,4 +997,13 @@ function providerWithEvidence(
       return evidence;
     },
   };
+}
+
+function extractRequestText(call: {
+  readonly messages: ReadonlyArray<{ readonly content: ReadonlyArray<unknown> }>;
+}): string {
+  const part = call.messages[0]?.content[0] as
+    | { type?: string; text?: string }
+    | undefined;
+  return typeof part?.text === "string" ? part.text : "";
 }

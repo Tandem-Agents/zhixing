@@ -623,6 +623,23 @@ function sealContractContent(
   };
 }
 
+/**
+ * 契约反投影：把已确认快照投回草案 content（自然列表、去条目 id）——
+ * 契约再生的预填素材。语义仍是「退出 + 新不可变快照」：反投影产物只是
+ * 新草案的起点，经用户修正与确认后才重新固化。
+ */
+export function projectConfirmedRubricToDraftContent(
+  confirmed: ConfirmedRubricSnapshot,
+): RubricContractContentSnapshot {
+  return {
+    passCriteria: confirmed.content.passCriteria.map((item) => item.text),
+    ...(confirmed.content.evidenceRequirements
+      ? { evidenceRequirements: confirmed.content.evidenceRequirements }
+      : {}),
+    failureHandling: confirmed.content.failureHandling,
+  };
+}
+
 function toRubricDraft(draft: RubricContractDraftSnapshot): RubricDraft {
   return {
     title: draft.title,

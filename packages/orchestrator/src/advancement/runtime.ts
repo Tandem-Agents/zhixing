@@ -4,13 +4,13 @@ import {
   createAdvancementWindowReviewEntry,
   createSegmentManager,
   createTokenEstimator,
+  detectStagnation,
   drainAgentLoop,
   extractText,
   extractUserTurnInputText,
   toToolSpec,
   type AdvancementReviewContextWindowSnapshot,
   type AdvancementRunReview,
-  type AdvancementRunReviewOutput,
   type AdvancementWindowEntry,
   type AdvancementWindowState,
   type ConfirmedRubricSnapshot,
@@ -34,6 +34,7 @@ import {
 import type {
   AdvancementEvidenceProvider,
   AdvancementReviewRunInput,
+  AdvancementReviewRunOutcome,
   AdvancementRuntime,
   AdvancementRuntimeOptions,
 } from "./types.js";
@@ -63,7 +64,7 @@ class DefaultAdvancementRuntime implements AdvancementRuntime {
 
   async reviewRun(
     input: AdvancementReviewRunInput,
-  ): Promise<AdvancementRunReviewOutput> {
+  ): Promise<AdvancementReviewRunOutcome> {
     let evidence: ReviewEvidence[];
     try {
       evidence = completeMissingRequiredEvidence({
@@ -74,16 +75,7 @@ class DefaultAdvancementRuntime implements AdvancementRuntime {
         }),
       });
     } catch (error) {
-      return {
-        review: attachUsage(
-          this.systemExitReview(
-            input,
-            `推进侧取证失败：${errorMessage(error)}`,
-          ),
-          undefined,
-          input,
-        ),
-      };
+      return deferredOutcome(`推进侧取证失败：${errorMessage(error)}`);
     }
 
     const judgeTool = createAdvancementJudgeTool({
@@ -121,10 +113,20 @@ class DefaultAdvancementRuntime implements AdvancementRuntime {
       const submitted = judgeTool.getSubmittedReview();
       if (submitted) {
         const withUsage = attachUsage(submitted, result.usage, input);
-        return attachContextWindowState(
+        return reviewedOutcome(
           attachContextWindow(withUsage, contextWindow.snapshot),
           contextWindow.acceptReview(withUsage, this.now().toISOString()),
         );
+      }
+
+      // 无提交时按 AgentResult 层分流：基础设施错误 / 中止是 transient
+      // 挂起，等补审重来；completed / max_turns 是模型拿到完整上下文却
+      // 没给结论，重试大概率复现——按结论性僵持终局。
+      if (result.reason === "error") {
+        return deferredOutcome(`推进侧裁判调用出错：${result.error.message}`);
+      }
+      if (result.reason === "aborted") {
+        return abortedOutcome();
       }
 
       const review = attachUsage(
@@ -137,25 +139,15 @@ class DefaultAdvancementRuntime implements AdvancementRuntime {
         result.usage,
         input,
       );
-      return attachContextWindowState(
+      return reviewedOutcome(
         review,
         contextWindow.acceptReview(review, review.reviewedAt),
       );
     } catch (error) {
-      const review = attachUsage(
-        this.systemExitReview(
-          input,
-          `推进侧裁判运行失败：${errorMessage(error)}`,
-          evidence,
-          contextWindow.snapshot,
-        ),
-        undefined,
-        input,
-      );
-      return attachContextWindowState(
-        review,
-        contextWindow.acceptReview(review, review.reviewedAt),
-      );
+      if (input.abortSignal?.aborted) {
+        return abortedOutcome();
+      }
+      return deferredOutcome(`推进侧裁判运行失败：${errorMessage(error)}`);
     }
   }
 
@@ -221,6 +213,7 @@ function buildJudgePrompt(
     "",
     "## 既往推进判断",
     renderPriorReviewWindow(priorReviewWindow),
+    ...renderStagnationSection(input.priorReviews),
     "",
     "## 已收集证据",
     JSON.stringify(evidence, null, 2),
@@ -415,6 +408,24 @@ function toContextWindowDecision(
   }
 }
 
+/**
+ * 死胡同检测的机械半边——跨轮对比消费 store 结构化 review 序列
+ * （criterionId 锚定判定集 + 证据指纹），不依赖窗口自然语言记忆；
+ * 信号只是事实，是否退出由裁判 LLM 终判。
+ */
+function renderStagnationSection(
+  priorReviews: readonly AdvancementRunReview[] | undefined,
+): readonly string[] {
+  const signal = detectStagnation(priorReviews ?? []);
+  if (!signal) return [];
+  return [
+    "",
+    "## 跨轮僵持信号（机械对比，供你终判）",
+    `最近 ${signal.stagnantRounds} 轮验收的未满足条目集合与证据均无变化：${signal.unmetCriterionIds.join("、")}。`,
+    "若本轮仍没有新证据、新缺口或新策略，继续发送同类代理消息只会重复消耗——应认真考虑 exit（dead-end）。是否退出由你结合本轮事实终判。",
+  ];
+}
+
 function renderPriorReviewWindow(messages: readonly Message[]): string {
   if (messages.length === 0) return "无。";
   return messages
@@ -450,11 +461,19 @@ function attachUsage(
   };
 }
 
-function attachContextWindowState(
+function reviewedOutcome(
   review: AdvancementRunReview,
   advancementWindow: AdvancementWindowState,
-): AdvancementRunReviewOutput {
-  return { review, advancementWindow };
+): AdvancementReviewRunOutcome {
+  return { kind: "reviewed", review, advancementWindow };
+}
+
+function deferredOutcome(reason: string): AdvancementReviewRunOutcome {
+  return { kind: "deferred", cause: "infrastructure", reason };
+}
+
+function abortedOutcome(): AdvancementReviewRunOutcome {
+  return { kind: "deferred", cause: "aborted", reason: "推进侧裁判调用被中止。" };
 }
 
 function renderRubric(rubric: ConfirmedRubricSnapshot): string {

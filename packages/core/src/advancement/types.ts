@@ -216,7 +216,12 @@ export type AdvancementExitReason =
   | "superseded"
   | "system-error"
   /** required 客观证据超出系统当前独立核验能力——请用户人工验收，不进入无效续推循环。 */
-  | "capability-gap";
+  | "capability-gap"
+  /**
+   * 单会话累计 token 触达失控保险丝阈值——系统边界退出并交付收场。
+   * 由系统审前计量触发，不进裁判 schema。
+   */
+  | "budget-exceeded";
 
 export interface AdvancementExit {
   readonly reason: AdvancementExitReason;

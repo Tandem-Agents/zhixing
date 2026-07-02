@@ -16,7 +16,9 @@ export type AdvancementAdmissionAction =
   | "downgrade-to-direct"
   | "cancel-pending-task"
   | "continue-active"
-  | "take-over-active";
+  | "take-over-active"
+  /** 修正验收标准（接管的子类）：目标不变、契约要改——走旧契约预填的再生流。 */
+  | "revise-rubric";
 
 export interface AdvancementAdmissionDecision {
   readonly kind: AdvancementAdmissionKind;
@@ -134,12 +136,13 @@ ${text}`;
 
 只判断用户这次输入对应的控制动作:
 - continue-active: 用户仍在服务同一目标，只是补充信息、微调执行方式、回应代理消息或继续推进；原 Rubric 保持有效。
+- revise-rubric: 用户在修正验收标准本身（如「第 3 条写错了，应该是 X」「验收里加一条 Y」）——目标不变，但明确要求修改判断任务完成的标准。
 - take-over-active: 用户明确停止/取消/接管推进闭环，或把目标改成另一个任务，使原 Rubric 不再适用。
 
 冲突或不确定表达必须选择 continue-active，避免过早放弃用户原目标。
 
 只返回 JSON，不要解释:
-{"action":"continue-active|take-over-active","reason":"简短原因"}
+{"action":"continue-active|revise-rubric|take-over-active","reason":"简短原因"}
 ${recent}
 用户输入:
 ${text}`;
@@ -188,6 +191,7 @@ function normalizeAdmissionDecision(
   if (input.hasActiveAdvancementSession) {
     if (
       record.action !== "continue-active" &&
+      record.action !== "revise-rubric" &&
       record.action !== "take-over-active"
     ) {
       throw new Error("active admission action is invalid");
@@ -238,7 +242,7 @@ function awaitingDecision(
 function activeDecision(
   action: Extract<
     AdvancementAdmissionAction,
-    "continue-active" | "take-over-active"
+    "continue-active" | "revise-rubric" | "take-over-active"
   >,
   reason: string,
 ): AdvancementAdmissionDecision {

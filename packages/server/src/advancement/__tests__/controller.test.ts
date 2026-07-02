@@ -180,16 +180,21 @@ describe("AdvancementController.afterTurnCommitted", () => {
     });
 
     expect(result.kind).toBe("active-session-taken-over");
+    if (result.kind !== "active-session-taken-over") return;
+    // 有推进事实的接管归 exited 并交付收场；cancelled 只留给无执行事实的关闭。
     const session = await store.loadSession("conv-1", "session-1");
-    expect(session?.status).toBe("cancelled");
+    expect(session?.status).toBe("exited");
     expect(session?.exit?.reason).toBe("user-took-over");
+    expect(result.closure.synthesized).toBe(false);
+    expect(result.closure.summary).toContain("任务推进已退出");
+    expect(result.closure.facts.sessionId).toBe("session-1");
   });
 
   it("failed review 会生成 Rubric 固定代理消息并保持 active", async () => {
     const store = await makeStore();
     await makeActive(store);
     const reviewer = {
-      reviewRun: vi.fn(async () => ({ review: review() })),
+      reviewRun: vi.fn(async () => ({ kind: "reviewed" as const, review: review() })),
     };
     const controller = new AdvancementController({
       store,
@@ -242,6 +247,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
     const nextWindow = windowState(2, "review-next");
     const reviewer = {
       reviewRun: vi.fn(async () => ({
+        kind: "reviewed" as const,
         review: review({
           id: "review-next",
           runIndex: 1,
@@ -288,6 +294,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
       store,
       reviewer: {
         reviewRun: vi.fn(async () => ({
+          kind: "reviewed" as const,
           review: review({
             decision: "passed",
             unmetCriteria: [],
@@ -329,6 +336,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
       reviewer: {
         reviewRun: vi.fn(async () =>
           ({
+            kind: "reviewed" as const,
             review: review({
               runIndex: 1,
               runRecordRef: { shardId: "000001", runIndex: 1 },
@@ -383,7 +391,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
       attribution: review().attribution,
       createdAt: "2026-01-01T00:02:30.000Z",
     });
-    const reviewer = { reviewRun: vi.fn(async () => ({ review: review() })) };
+    const reviewer = { reviewRun: vi.fn(async () => ({ kind: "reviewed" as const, review: review() })) };
     const controller = new AdvancementController({
       store,
       reviewer,
@@ -416,6 +424,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
       reviewer: {
         reviewRun: vi.fn(async () =>
           ({
+            kind: "reviewed" as const,
             review: review({
               decision: "exit",
               exitReason: "dead-end",
@@ -497,7 +506,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
 
   it("没有 active session 时跳过且不调用 reviewer", async () => {
     const store = await makeStore();
-    const reviewer = { reviewRun: vi.fn(async () => ({ review: review() })) };
+    const reviewer = { reviewRun: vi.fn(async () => ({ kind: "reviewed" as const, review: review() })) };
     const controller = new AdvancementController({ store, reviewer });
 
     const result = await controller.afterTurnCommitted({
@@ -510,41 +519,222 @@ describe("AdvancementController.afterTurnCommitted", () => {
     expect(reviewer.reviewRun).not.toHaveBeenCalled();
   });
 
-  it("reviewer 抛错时转为 system-error exit，不让 active session 悬空", async () => {
+  it("累计 usage 触达保险丝阈值时审前退出为 budget-exceeded 并交付收场", async () => {
     const store = await makeStore();
     await makeActive(store);
+    await store.appendRunReview(
+      "conv-1",
+      "session-1",
+      review({
+        usage: {
+          judge: { inputTokens: 500, outputTokens: 300 },
+          run: { inputTokens: 400, outputTokens: 200 },
+        },
+      }),
+      "2026-01-01T00:03:00.000Z",
+    );
+    const reviewer = {
+      reviewRun: vi.fn(async () => ({ kind: "reviewed" as const, review: review() })),
+    };
     const controller = new AdvancementController({
       store,
-      reviewer: { reviewRun: vi.fn(async () => { throw new Error("judge down"); }) },
+      reviewer,
+      sessionTokenBudget: 1000,
       now: () => "2026-01-01T00:04:00.000Z",
-      reviewIdGenerator: () => "review-system-error",
+    });
+
+    const result = await controller.afterTurnCommitted({
+      conversationId: "conv-1",
+      runIndex: 1,
+      runRecord: runRecord(),
+      runRecordRef: { shardId: "000001", runIndex: 1 },
+    });
+
+    expect(result.kind).toBe("exited");
+    if (result.kind !== "exited") return;
+    expect(result.exit.reason).toBe("budget-exceeded");
+    expect(result.exit.message).toContain("成本上限");
+    expect(result.closure.facts.usage.totalTokens).toBeGreaterThanOrEqual(1400);
+    expect(reviewer.reviewRun).not.toHaveBeenCalled();
+    const session = await store.loadSession("conv-1", "session-1");
+    expect(session?.status).toBe("exited");
+    expect(session?.exit?.reason).toBe("budget-exceeded");
+  });
+
+  it("本轮 usage 落账打穿保险丝时不再入队续推，就地 budget-exceeded 终局", async () => {
+    const store = await makeStore();
+    await makeActive(store);
+    const reviewer = {
+      // 本轮 failed review 自带打穿阈值的 usage——审前（既往为 0）放行，
+      // 审后必须拦住下一轮执行。
+      reviewRun: vi.fn(async () => ({
+        kind: "reviewed" as const,
+        review: review({
+          usage: {
+            judge: { inputTokens: 400, outputTokens: 200 },
+            run: { inputTokens: 500, outputTokens: 300 },
+          },
+        }),
+      })),
+    };
+    const controller = new AdvancementController({
+      store,
+      reviewer,
+      sessionTokenBudget: 1000,
+      proxyIdGenerator: () => "proxy-should-not-exist",
+      now: () => "2026-01-01T00:04:00.000Z",
     });
 
     const result = await controller.afterTurnCommitted({
       conversationId: "conv-1",
       runIndex: 0,
       runRecord: runRecord(),
+      runRecordRef: { shardId: "000001", runIndex: 0 },
     });
 
     expect(result.kind).toBe("exited");
+    if (result.kind !== "exited") return;
+    expect(result.exit.reason).toBe("budget-exceeded");
     const session = await store.loadSession("conv-1", "session-1");
     expect(session?.status).toBe("exited");
-    expect(session?.runs[0]?.id).toBe("review-system-error");
-    expect(session?.exit?.reason).toBe("system-error");
+    expect(session?.proxyMessages).toHaveLength(0);
+    expect(session?.outstandingProxyMessageId).toBeUndefined();
+    // 本轮验收事实保留在终局 review 上（归因与 usage 不丢）
+    expect(session?.runs[0]).toMatchObject({
+      decision: "exit",
+      exitReason: "budget-exceeded",
+      unmetCriteria: ["测试仍未全绿"],
+      usage: { run: { inputTokens: 500 } },
+    });
+    // 转化轮裁判选了策略但续推未发出——收场不把「本打算尝试」投影成「已尝试」
+    expect(result.closure.facts.attemptedStrategies).toEqual([]);
   });
 
-  it("reviewer 输出必须绑定当前 accepted run，否则转为 system-error exit", async () => {
-    for (const badReview of [
-      review({ runIndex: 9 }),
-      review({ runRecordRef: { shardId: "000999", runIndex: 0 } }),
+  it("revise-rubric 走契约再生：旧契约 superseded 收场、新草案从反投影预填生成", async () => {
+    const store = await makeStore();
+    await makeActive(store);
+    const reviseDraft = vi.fn(
+      async (input: { currentDraft: RubricContractDraftSnapshot }) => ({
+        ...input.currentDraft,
+        draftId: "draft-regen",
+        content: {
+          ...input.currentDraft.content,
+          passCriteria: [
+            ...input.currentDraft.content.passCriteria,
+            "文档同步更新",
+          ],
+        },
+        createdAt: "2026-01-01T00:06:00.000Z",
+      }),
+    );
+    const controller = new AdvancementController({
+      store,
+      admissionStrategy: {
+        decide: vi.fn(async () => ({
+          kind: "direct-task" as const,
+          action: "revise-rubric" as const,
+          reason: "用户修正验收标准",
+        })),
+      },
+      contractBuilder: { reviseDraft } as never,
+      now: () => "2026-01-01T00:05:00.000Z",
+    });
+
+    const result = await controller.prepareUserTurn({
+      conversationId: "conv-1",
+      turnId: "turn-revise",
+      userInput: task("验收标准加一条：文档同步更新"),
+    });
+
+    expect(result.kind).toBe("rubric-regenerated");
+    if (result.kind !== "rubric-regenerated") return;
+    expect(result.exit.reason).toBe("superseded");
+    expect(result.exitedSession.status).toBe("exited");
+    expect(result.closure.summary).toContain("任务推进已退出");
+    expect(result.draft.content.passCriteria).toEqual([
+      "测试通过",
+      "实现满足需求",
+      "文档同步更新",
+    ]);
+    // 反投影预填：reviseDraft 收到的当前草案来自旧契约（自然列表、素材保留）
+    expect(reviseDraft).toHaveBeenCalledWith(
+      expect.objectContaining({
+        currentDraft: expect.objectContaining({
+          title: "代码审查推进准则",
+          content: expect.objectContaining({
+            passCriteria: ["测试通过", "实现满足需求"],
+          }),
+        }),
+        userFeedback: "验收标准加一条：文档同步更新",
+      }),
+    );
+    const old = await store.loadSession("conv-1", "session-1");
+    expect(old?.status).toBe("exited");
+    const next = await store.loadActiveSession("conv-1");
+    expect(next?.id).toBe("adv_draft-regen");
+    expect(next?.status).toBe("awaiting-rubric-confirmation");
+    expect(next?.originalUserTask).toEqual(task("把测试修到全绿"));
+  });
+
+  it("契约再生的草案修订失败时旧契约保持 active 不受损", async () => {
+    const store = await makeStore();
+    await makeActive(store);
+    const controller = new AdvancementController({
+      store,
+      admissionStrategy: {
+        decide: vi.fn(async () => ({
+          kind: "direct-task" as const,
+          action: "revise-rubric" as const,
+          reason: "用户修正验收标准",
+        })),
+      },
+      contractBuilder: {
+        reviseDraft: vi.fn(async () => {
+          throw new Error("revision provider down");
+        }),
+      } as never,
+    });
+
+    const result = await controller.prepareUserTurn({
+      conversationId: "conv-1",
+      turnId: "turn-revise",
+      userInput: task("验收标准加一条"),
+    });
+
+    expect(result.kind).toBe("contract-failed");
+    const session = await store.loadSession("conv-1", "session-1");
+    expect(session?.status).toBe("active");
+  });
+
+  it("closureSynthesizer 成功时收场用合成文本，失败时降级结构化直出", async () => {
+    for (const synthesizer of [
+      {
+        synthesize: vi.fn(async () => "推进 1 轮后验收通过，测试全绿。"),
+        expectSynthesized: true,
+      },
+      {
+        synthesize: vi.fn(async () => {
+          throw new Error("synth down");
+        }),
+        expectSynthesized: false,
+      },
     ]) {
       const store = await makeStore();
       await makeActive(store);
       const controller = new AdvancementController({
         store,
-        reviewer: { reviewRun: vi.fn(async () => ({ review: badReview })) },
+        reviewer: {
+          reviewRun: vi.fn(async () => ({
+            kind: "reviewed" as const,
+            review: review({
+              decision: "passed",
+              unmetCriteria: [],
+              attribution: passedAttribution(),
+            }),
+          })),
+        },
+        closureSynthesizer: { synthesize: synthesizer.synthesize },
         now: () => "2026-01-01T00:04:00.000Z",
-        reviewIdGenerator: () => "review-system-error",
       });
 
       const result = await controller.afterTurnCommitted({
@@ -554,16 +744,126 @@ describe("AdvancementController.afterTurnCommitted", () => {
         runRecordRef: { shardId: "000001", runIndex: 0 },
       });
 
-      expect(result.kind).toBe("exited");
-      const session = await store.loadSession("conv-1", "session-1");
-      expect(session?.status).toBe("exited");
-      expect(session?.runs[0]).toMatchObject({
-        id: "review-system-error",
-        runIndex: 0,
-        runRecordRef: { shardId: "000001", runIndex: 0 },
-        decision: "exit",
-        exitReason: "system-error",
+      expect(result.kind).toBe("completed");
+      if (result.kind !== "completed") return;
+      expect(synthesizer.synthesize).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: "session-1" }),
+      );
+      expect(result.closure.synthesized).toBe(synthesizer.expectSynthesized);
+      if (synthesizer.expectSynthesized) {
+        expect(result.closure.summary).toBe("推进 1 轮后验收通过，测试全绿。");
+      } else {
+        expect(result.closure.summary).toContain("任务推进已验收通过");
+      }
+      expect(result.closure.facts.criteria).toHaveLength(2);
+    }
+  });
+
+  it("同一 runIndex 已有结论时幂等跳过，不重复验收", async () => {
+    const store = await makeStore();
+    await makeActive(store);
+    await store.appendRunReview(
+      "conv-1",
+      "session-1",
+      review(),
+      "2026-01-01T00:03:00.000Z",
+    );
+    const reviewer = {
+      reviewRun: vi.fn(async () => ({ kind: "reviewed" as const, review: review() })),
+    };
+    const controller = new AdvancementController({ store, reviewer });
+
+    const result = await controller.afterTurnCommitted({
+      conversationId: "conv-1",
+      runIndex: 0,
+      runRecord: runRecord(),
+    });
+
+    expect(result).toEqual({ kind: "skipped", reason: "already-reviewed" });
+    expect(reviewer.reviewRun).not.toHaveBeenCalled();
+  });
+
+  it("reviewer 返回 deferred 时挂起本轮验收，session 保持 active 且不落盘 review", async () => {
+    const store = await makeStore();
+    await makeActive(store);
+    const controller = new AdvancementController({
+      store,
+      reviewer: {
+        reviewRun: vi.fn(async () => ({
+          kind: "deferred" as const,
+          cause: "infrastructure" as const,
+          reason: "推进侧裁判调用出错：rate limited",
+        })),
+      },
+      now: () => "2026-01-01T00:04:00.000Z",
+    });
+
+    const result = await controller.afterTurnCommitted({
+      conversationId: "conv-1",
+      runIndex: 0,
+      runRecord: runRecord(),
+    });
+
+    expect(result).toMatchObject({
+      kind: "review-deferred",
+      cause: "infrastructure",
+      reason: "推进侧裁判调用出错：rate limited",
+    });
+    const session = await store.loadSession("conv-1", "session-1");
+    expect(session?.status).toBe("active");
+    expect(session?.runs).toHaveLength(0);
+  });
+
+  it("reviewer 意外抛错按基础设施挂起，不误落终局", async () => {
+    const store = await makeStore();
+    await makeActive(store);
+    const controller = new AdvancementController({
+      store,
+      reviewer: { reviewRun: vi.fn(async () => { throw new Error("judge down"); }) },
+      now: () => "2026-01-01T00:04:00.000Z",
+    });
+
+    const result = await controller.afterTurnCommitted({
+      conversationId: "conv-1",
+      runIndex: 0,
+      runRecord: runRecord(),
+    });
+
+    expect(result).toMatchObject({
+      kind: "review-deferred",
+      cause: "infrastructure",
+    });
+    const session = await store.loadSession("conv-1", "session-1");
+    expect(session?.status).toBe("active");
+    expect(session?.runs).toHaveLength(0);
+  });
+
+  it("reviewer 输出与 accepted run 绑定不符时抛一致性错误，不落盘任何结论", async () => {
+    for (const badReview of [
+      review({ runIndex: 9 }),
+      review({ runRecordRef: { shardId: "000999", runIndex: 0 } }),
+    ]) {
+      const store = await makeStore();
+      await makeActive(store);
+      const controller = new AdvancementController({
+        store,
+        reviewer: {
+          reviewRun: vi.fn(async () => ({ kind: "reviewed" as const, review: badReview })),
+        },
+        now: () => "2026-01-01T00:04:00.000Z",
       });
+
+      await expect(
+        controller.afterTurnCommitted({
+          conversationId: "conv-1",
+          runIndex: 0,
+          runRecord: runRecord(),
+          runRecordRef: { shardId: "000001", runIndex: 0 },
+        }),
+      ).rejects.toThrow(/does not match accepted/);
+      const session = await store.loadSession("conv-1", "session-1");
+      expect(session?.status).toBe("active");
+      expect(session?.runs).toHaveLength(0);
     }
   });
 });

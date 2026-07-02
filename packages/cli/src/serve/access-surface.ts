@@ -35,6 +35,7 @@ import type {
   ConversationManager,
   ConversationDirectory,
   AdvancementController,
+  AdvancementRecoveryMaintenance,
   InboundRouter,
   RunningServer,
   CleanupRegistry,
@@ -85,6 +86,13 @@ export interface AssemblyContext {
    * 当前对话的内容回显。
    */
   readonly sessionActivityBroadcastRef: { current: SessionActivityBroadcast | null };
+  /**
+   * 推进恢复设施 lazy ref(recovery 依赖 conversations,在接入面之后建成
+   * 回填)——turn 提交的补审 catch-up 经此读最新值。
+   */
+  readonly advancementRecoveryRef: {
+    current: AdvancementRecoveryMaintenance | null;
+  };
   /**
    * 唯一清理出口（LIFO）。pre-server 接入面的 teardown 走 runServer 后的 shutdown-chain
    * 注册（时序约束见文件头）；仅 post-server 接入面在自己 setup 内注册到这里。

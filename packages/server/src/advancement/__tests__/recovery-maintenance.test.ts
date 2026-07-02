@@ -1,7 +1,9 @@
+import fs from "node:fs/promises";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   AdvancementStore,
+  advancementLogPath,
   type AdvancementProxyMessage,
   type AdvancementRunReview,
   type ConfirmedRubricSnapshot,
@@ -11,6 +13,7 @@ import {
 } from "@zhixing/core";
 import { createTempDir } from "@zhixing/test-utils";
 import { AdvancementController } from "../controller.js";
+import { buildAdvancementProxyMessage } from "../proxy-content.js";
 import { createAdvancementRecoveryMaintenance } from "../recovery-maintenance.js";
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -105,6 +108,13 @@ async function makeActiveStore(): Promise<AdvancementStore> {
 }
 
 async function makeConfirmedStore(): Promise<AdvancementStore> {
+  return (await makeConfirmedStoreWithRoot()).store;
+}
+
+async function makeConfirmedStoreWithRoot(): Promise<{
+  store: AdvancementStore;
+  root: string;
+}> {
   const root = path.join(await createTempDir("server-advancement-recovery"), "advancement");
   const store = new AdvancementStore(root);
   await store.createSession({
@@ -115,7 +125,7 @@ async function makeConfirmedStore(): Promise<AdvancementStore> {
     createdAt: "2026-01-01T00:00:00.000Z",
   });
   await store.confirmRubric("conv-1", "adv-1", confirmed());
-  return store;
+  return { store, root };
 }
 
 function directory(exists: boolean, runs: RunRecord[] = []) {
@@ -360,6 +370,7 @@ describe("AdvancementRecoveryMaintenance", () => {
     const events: Array<{ event?: string }> = [];
     const reviewer = {
       reviewRun: vi.fn(async (input: { runIndex: number }) => ({
+        kind: "reviewed" as const,
         review: {
           id: "review-pass",
           runIndex: input.runIndex,
@@ -436,6 +447,7 @@ describe("AdvancementRecoveryMaintenance", () => {
     ];
     const reviewer = {
       reviewRun: vi.fn(async (input: { runIndex: number }) => ({
+        kind: "reviewed" as const,
         review: {
           id: `review-${input.runIndex}`,
           runIndex: input.runIndex,
@@ -528,6 +540,7 @@ describe("AdvancementRecoveryMaintenance", () => {
     const events: Array<{ event?: string }> = [];
     const reviewer = {
       reviewRun: vi.fn(async (input: { runIndex: number }) => ({
+        kind: "reviewed" as const,
         review: {
           id: "review-pass",
           runIndex: input.runIndex,
@@ -605,6 +618,7 @@ describe("AdvancementRecoveryMaintenance", () => {
     };
     const reviewer = {
       reviewRun: vi.fn(async (input: { runIndex: number }) => ({
+        kind: "reviewed" as const,
         review: {
           id: "review-pass",
           runIndex: input.runIndex,
@@ -646,6 +660,177 @@ describe("AdvancementRecoveryMaintenance", () => {
       }),
     );
     await expect(store.loadActiveSession("conv-1")).resolves.toBeNull();
+  });
+
+  it("missing-proxy 自愈：从已持久化 review 确定性重建 byte 等价代理消息并入队调度", async () => {
+    const { store, root } = await makeConfirmedStoreWithRoot();
+    const review = failedReview();
+    const handling = confirmed().content.failureHandling[0]!;
+    const original = buildAdvancementProxyMessage({
+      id: "proxy-1",
+      sessionId: "adv-1",
+      review,
+      handling,
+      rubric: confirmed(),
+      createdAt: "2026-01-01T00:02:30.000Z",
+    });
+    await store.appendRunReviewWithProxyMessage("conv-1", "adv-1", review, original);
+
+    // 模拟 review + proxy 双事件写入被中断：日志掉尾丢 proxy_enqueued 行
+    const file = advancementLogPath(root, "conv-1");
+    const lines = (await fs.readFile(file, "utf-8")).split("\n").filter(Boolean);
+    expect(JSON.parse(lines[lines.length - 1]!).type).toBe("proxy_enqueued");
+    await fs.writeFile(file, `${lines.slice(0, -1).join("\n")}\n`);
+    const broken = await store.loadActiveSession("conv-1");
+    expect(broken?.outstandingProxyMessageId).toBeUndefined();
+    expect(broken?.proxyMessages).toHaveLength(0);
+    expect(broken?.runs[0]?.proxyMessageId).toBe("proxy-1");
+
+    const mgr = manager();
+    const events: Array<{ event?: string }> = [];
+    const recovery = createAdvancementRecoveryMaintenance({
+      advancement: new AdvancementController({ store }),
+      manager: mgr as never,
+      directory: directory(true) as never,
+      sessionBroadcast: () => (_conversationId, _method, payload) => {
+        events.push(payload as { event?: string });
+      },
+    });
+
+    const result = await recovery.recoverConversation("conv-1");
+
+    expect(result).toMatchObject({
+      status: "scheduled",
+      conversationId: "conv-1",
+      advancementSessionId: "adv-1",
+      proxyMessageId: "proxy-1",
+    });
+    const healed = await store.loadActiveSession("conv-1");
+    expect(healed?.outstandingProxyMessageId).toBe("proxy-1");
+    const rebuilt = healed?.proxyMessages[0];
+    expect(rebuilt?.id).toBe("proxy-1");
+    expect(rebuilt?.content).toEqual(original.content);
+    expect(rebuilt?.variables).toEqual(original.variables);
+    expect(rebuilt?.rubricFailureHandlingId).toBe(original.rubricFailureHandlingId);
+    expect(rebuilt?.attribution).toEqual(original.attribution);
+    expect(events.map((event) => event.event)).toEqual([
+      "advancement:proxy_enqueued",
+      "advancement:proxy_recovered",
+    ]);
+
+    // 再恢复一次：谓词不再命中（实体已在），不循环重建
+    const again = await recovery.recoverConversation("conv-1");
+    expect(again.status).toBe("already-scheduled");
+    const enqueued = (await store.readEvents("conv-1")).filter(
+      (event) => event.type === "proxy_enqueued",
+    );
+    expect(enqueued).toHaveLength(1);
+  });
+
+  it("补审 transient 挂起时中断本次恢复：不落盘、不空转、发 review_deferred", async () => {
+    const store = await makeConfirmedStore();
+    const run: RunRecord = {
+      type: "run",
+      runIndex: 0,
+      timestamp: "2026-01-01T00:04:00.000Z",
+      messages: [
+        userMessage("把测试修到全绿"),
+        assistantMessage("改了一部分。"),
+      ],
+      source: "interactive",
+    };
+    const reviewer = {
+      reviewRun: vi.fn(async () => ({
+        kind: "deferred" as const,
+        cause: "infrastructure" as const,
+        reason: "rate limited",
+      })),
+    };
+    const events: Array<{ event?: string }> = [];
+    const recovery = createAdvancementRecoveryMaintenance({
+      advancement: new AdvancementController({ store, reviewer }),
+      manager: manager() as never,
+      directory: directory(true, [run]) as never,
+      sessionBroadcast: () => (_conversationId, _method, payload) => {
+        events.push(payload as { event?: string });
+      },
+    });
+
+    const result = await recovery.recoverConversation("conv-1");
+
+    expect(result).toMatchObject({
+      status: "review-deferred",
+      conversationId: "conv-1",
+      advancementSessionId: "adv-1",
+      cause: "infrastructure",
+      message: "rate limited",
+    });
+    expect(reviewer.reviewRun).toHaveBeenCalledTimes(1);
+    const session = await store.loadActiveSession("conv-1");
+    expect(session?.runs).toHaveLength(0);
+    expect(events.map((event) => event.event)).toEqual([
+      "advancement:review_deferred",
+    ]);
+  });
+
+  it("catch-up 上界排除当轮：只补审 beforeRunIndex 之前的欠账", async () => {
+    const store = await makeConfirmedStore();
+    const runs: RunRecord[] = [0, 1].map((runIndex) => ({
+      type: "run",
+      runIndex,
+      timestamp: `2026-01-01T00:0${runIndex + 4}:00.000Z`,
+      messages: [
+        userMessage("继续"),
+        assistantMessage(`第 ${runIndex} 轮完成。`),
+      ],
+      source: "interactive",
+    }));
+    const reviewer = {
+      reviewRun: vi.fn(async (input: { runIndex: number }) => ({
+        kind: "reviewed" as const,
+        review: {
+          id: `review-${input.runIndex}`,
+          runIndex: input.runIndex,
+          runRecordRef: { shardId: "000001", runIndex: input.runIndex },
+          reviewedAt: "2026-01-01T00:06:00.000Z",
+          decision: "failed" as const,
+          evidence: [],
+          attribution: {
+            criteria: [
+              {
+                criterionId: "pc-1",
+                verdict: "unmet" as const,
+                reason: "测试还没有全绿。",
+              },
+            ],
+          },
+          unmetCriteria: ["测试还没有全绿"],
+          selectedFailureHandlingId: "continue",
+        },
+      })),
+    };
+    const recovery = createAdvancementRecoveryMaintenance({
+      advancement: new AdvancementController({
+        store,
+        reviewer,
+        proxyIdGenerator: () => "proxy-catchup",
+      }),
+      manager: manager() as never,
+      directory: directory(true, runs) as never,
+    });
+
+    const result = await recovery.recoverConversation("conv-1", {
+      beforeRunIndex: 1,
+    });
+
+    expect(reviewer.reviewRun).toHaveBeenCalledTimes(1);
+    expect(reviewer.reviewRun).toHaveBeenCalledWith(
+      expect.objectContaining({ runIndex: 0 }),
+    );
+    expect(result).toMatchObject({
+      status: "scheduled",
+      proxyMessageId: "proxy-catchup",
+    });
   });
 });
 

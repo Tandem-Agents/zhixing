@@ -1,15 +1,24 @@
 export {
   AdvancementController,
+  DEFAULT_SESSION_TOKEN_BUDGET,
   renderRecentContextFromMessages,
   type AdvancementCancelResult,
+  type AdvancementClosureSynthesizer,
   type AdvancementConfirmedTurn,
   type AdvancementControllerOptions,
   type AdvancementPrepareResult,
   type AdvancementReviewRunInput,
+  type AdvancementReviewRunOutcome,
   type AdvancementRunReviewer,
   type AdvancementRevisedDraft,
   type AdvancementTurnReviewResult,
 } from "./controller.js";
+export {
+  buildAdvancementProxyMessage,
+  buildProxyVariables,
+  composeProxyContent,
+  selectFailureHandling,
+} from "./proxy-content.js";
 export {
   ProxyMessageScheduler,
   type ProxyMessageSchedulerOptions,
@@ -20,6 +29,7 @@ export {
   createAdvancementRecoveryMaintenance,
   type AdvancementRecoveryMaintenance,
   type AdvancementRecoveryMaintenanceOptions,
+  type AdvancementRecoveryOptions,
   type AdvancementRecoveryResult,
 } from "./recovery-maintenance.js";
 export {

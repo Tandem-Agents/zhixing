@@ -19,6 +19,7 @@ export type {
   AdvancementEvidenceCollectionInput,
   AdvancementEvidenceProvider,
   AdvancementReviewRunInput,
+  AdvancementReviewRunOutcome,
   AdvancementRuntime,
   AdvancementRuntimeOptions,
 } from "./types.js";

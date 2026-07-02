@@ -37,6 +37,25 @@ function emitReviewEvents(
   const broadcast = deps.sessionBroadcast();
   if (!broadcast) return;
 
+  if (result.kind === "review-deferred") {
+    broadcast(
+      input.conversationId,
+      SESSION_NOTIFICATIONS.event,
+      createControlSessionEventEnvelope({
+        conversationId: input.conversationId,
+        runId: input.runId,
+        seq: 0,
+        event: "advancement:review_deferred",
+        payload: {
+          advancementSessionId: result.session.id,
+          cause: result.cause,
+          reason: result.reason,
+        },
+      }),
+    );
+    return;
+  }
+
   broadcast(
     input.conversationId,
     SESSION_NOTIFICATIONS.event,
@@ -88,6 +107,7 @@ function emitReviewEvents(
         advancementSessionId: result.session.id,
         reviewId: result.review.id,
         exit: result.exit,
+        closure: result.closure,
       },
     }),
   );

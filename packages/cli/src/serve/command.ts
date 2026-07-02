@@ -58,6 +58,7 @@ import {
   CleanupRegistry,
   createRunEventForwarder,
   createAdvancementRecoveryMaintenance,
+  type AdvancementRecoveryMaintenance,
   getDefaultLogPath,
   renderRecentContextFromMessages,
   SESSION_NOTIFICATIONS,
@@ -279,6 +280,11 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   const sessionActivityBroadcastRef: { current: SessionActivityBroadcast | null } = {
     current: null,
   };
+  // 推进恢复设施 lazy ref——recovery 依赖 conversations(接入面产物),建成后回填;
+  // turn 提交触发的补审 catch-up 经此读最新值。
+  const advancementRecoveryRef: { current: AdvancementRecoveryMaintenance | null } = {
+    current: null,
+  };
   const runEventForwarder = createRunEventForwarder((conversationId, envelope) =>
     sessionBroadcastRef.current?.(conversationId, SESSION_NOTIFICATIONS.event, envelope),
   );
@@ -458,6 +464,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     journalStore,
     sessionBroadcastRef,
     sessionActivityBroadcastRef,
+    advancementRecoveryRef,
     cleanup: registry,
     advancement: advancementController,
   };
@@ -648,6 +655,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
           logger: console,
         })
       : undefined;
+  advancementRecoveryRef.current = advancementRecovery ?? null;
 
   const serverCtx = createServerContext({
     config: { ...DEFAULT_SERVER_CONFIG, port, host },

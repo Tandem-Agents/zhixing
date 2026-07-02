@@ -11,6 +11,15 @@ export interface AdvancementReviewMaintenanceDeps {
   readonly sessionBroadcast: () => SessionBroadcast | null;
   readonly conversations?: () => ConversationManager | null;
   readonly conversationExists?: (conversationId: string) => Promise<boolean>;
+  /**
+   * 补审 catch-up 入口（恢复设施的单会话恢复）。turn 提交是三个补审
+   * 触发点之一：先补齐当轮之前的欠账（deferred 挂起 / 崩溃漏审），
+   * 再验收当轮，保证 review 序列时序完整。
+   */
+  readonly recoverConversation?: (
+    conversationId: string,
+    options?: { readonly beforeRunIndex?: number },
+  ) => Promise<unknown>;
 }
 
 export function createAdvancementReviewMaintenance(
@@ -39,6 +48,13 @@ async function reviewAcceptedTurn(
 ): Promise<void> {
   const advancement = deps.advancement;
   if (!advancement) return;
+  try {
+    await deps.recoverConversation?.(info.conversationId, {
+      beforeRunIndex: info.runIndex,
+    });
+  } catch {
+    // catch-up 失败不阻断当轮验收；欠账等下一个补审触发点。
+  }
   const result = await advancement.afterTurnCommitted({
     conversationId: info.conversationId,
     runIndex: info.runIndex,

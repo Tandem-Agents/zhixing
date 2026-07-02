@@ -485,6 +485,19 @@ describe("session.* RPC (S2.D)", () => {
     });
   }
 
+  function createActiveActionAdmissionStrategy(
+    action: "revise-rubric" | "take-over-active",
+  ): AdvancementAdmissionStrategy {
+    return {
+      async decide(input) {
+        if (input.hasActiveAdvancementSession) {
+          return { kind: "direct-task", action, reason: "test-active-action" };
+        }
+        return { kind: "direct-task", action: "run-direct", reason: "test-direct" };
+      },
+    };
+  }
+
   function createStartAdvancementAdmissionStrategy(
     awaitingAction: "keep-awaiting-confirmation" | "downgrade-to-direct" | "cancel-pending-task" = "keep-awaiting-confirmation",
   ): AdvancementAdmissionStrategy {
@@ -1590,6 +1603,153 @@ describe("session.* RPC (S2.D)", () => {
       type: "text",
       text: "请继续处理直到达到验收标准。",
     });
+    client.close();
+  });
+
+  it("session.send 在 active 推进中修正标准会再生契约：旧会话收场退出 + 新草案确认面", async () => {
+    const advancement = await createTestAdvancementHarness({
+      admissionStrategy: createActiveActionAdmissionStrategy("revise-rubric"),
+    });
+    await seedOutstandingProxySession(advancement.store, "conv-revise");
+    await startWithFactory(createMockFactory({ deltaCount: 0 }), {
+      advancement: advancement.controller,
+      seedConversations: ["conv-revise"],
+    });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const resp = await client.request("session.send", {
+      conversationId: "conv-revise",
+      text: "验收标准加一条：文档同步更新",
+      turnId: "turn-revise",
+    });
+    expect(isSuccessResponse(resp)).toBe(true);
+    if (!isSuccessResponse(resp)) return;
+    expect(resp.result).toMatchObject({
+      status: "awaiting-rubric-confirmation",
+    });
+
+    const exitedEvent = await client.waitNotification("session.event");
+    expect(exitedEvent.params).toMatchObject({
+      scope: "control",
+      event: "advancement:exited",
+      payload: {
+        advancementSessionId: "adv-recovery",
+        exit: { reason: "superseded" },
+        closure: { synthesized: false },
+      },
+    });
+    const draftEvent = await client.waitNotification("session.event");
+    expect(draftEvent.params).toMatchObject({
+      scope: "control",
+      event: "advancement:contract_draft",
+    });
+
+    const old = await advancement.store.loadSession("conv-revise", "adv-recovery");
+    expect(old?.status).toBe("exited");
+    expect(old?.exit?.reason).toBe("superseded");
+    const next = await advancement.store.loadActiveSession("conv-revise");
+    expect(next?.status).toBe("awaiting-rubric-confirmation");
+    expect(next?.pendingRubricDraft?.content.passCriteria).toContain(
+      "验收标准加一条：文档同步更新",
+    );
+    client.close();
+  });
+
+  it("session.send 修正标准失败时旧契约保持 active，被中断的推进立即重接", async () => {
+    const root = await createTempDir("server-advancement-revise-fail");
+    const store = new AdvancementStore(`${root}/advancement`);
+    const controller = new AdvancementController({
+      store,
+      admissionStrategy: createActiveActionAdmissionStrategy("revise-rubric"),
+      contractBuilder: {
+        reviseDraft: async () => {
+          throw new Error("revision provider down");
+        },
+      } as never,
+      now: () => "2026-01-01T00:00:00.000Z",
+    });
+    await seedOutstandingProxySession(store, "conv-revise-fail");
+    await startWithFactory(createMockFactory({ deltaCount: 0 }), {
+      advancement: controller,
+      withAdvancementRecovery: true,
+      seedConversations: ["conv-revise-fail"],
+    });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const resp = await client.request("session.send", {
+      conversationId: "conv-revise-fail",
+      text: "验收标准改一下",
+      turnId: "turn-revise-fail",
+    });
+    expect(isSuccessResponse(resp)).toBe(true);
+    if (!isSuccessResponse(resp)) return;
+    expect(resp.result).toMatchObject({ status: "contract-failed" });
+
+    const failedEvent = await client.waitNotification("session.event");
+    expect(failedEvent.params).toMatchObject({
+      scope: "control",
+      event: "advancement:contract_failed",
+    });
+
+    // 旧契约保持 active 不受损
+    const session = await store.loadActiveSession("conv-revise-fail");
+    expect(session?.status).toBe("active");
+    expect(session?.outstandingProxyMessageId).toBe("proxy-recovery");
+
+    // 被中断的推进立即重接：outstanding proxy 被重新调度执行
+    await waitUntil(
+      () => (recordsByConversation.get("conv-revise-fail") ?? []).length === 1,
+    );
+    const record = recordsByConversation.get("conv-revise-fail")?.[0] as {
+      source?: string;
+      advancement?: { proxyMessageId: string };
+    };
+    expect(record.source).toBe("advancement");
+    expect(record.advancement).toMatchObject({
+      proxyMessageId: "proxy-recovery",
+    });
+    client.close();
+  });
+
+  it("session.send 接管 active 推进时发 exited 事件并携带收场报告", async () => {
+    const advancement = await createTestAdvancementHarness({
+      admissionStrategy: createActiveActionAdmissionStrategy("take-over-active"),
+    });
+    await seedOutstandingProxySession(advancement.store, "conv-takeover");
+    await startWithFactory(createMockFactory({ deltaCount: 0 }), {
+      advancement: advancement.controller,
+      seedConversations: ["conv-takeover"],
+    });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const resp = await client.request("session.send", {
+      conversationId: "conv-takeover",
+      text: "先停下，我们聊聊别的",
+      turnId: "turn-takeover",
+    });
+    expect(isSuccessResponse(resp)).toBe(true);
+
+    const exitedEvent = await client.waitNotification("session.event");
+    expect(exitedEvent.params).toMatchObject({
+      scope: "control",
+      event: "advancement:exited",
+      payload: {
+        advancementSessionId: "adv-recovery",
+        exit: { reason: "user-took-over" },
+        closure: {
+          synthesized: false,
+          facts: { sessionId: "adv-recovery" },
+        },
+      },
+    });
+    const session = await advancement.store.loadSession(
+      "conv-takeover",
+      "adv-recovery",
+    );
+    expect(session?.status).toBe("exited");
     client.close();
   });
 

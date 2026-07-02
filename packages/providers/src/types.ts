@@ -400,6 +400,8 @@ export interface ZhixingConfig {
   workspace?: WorkspaceConfig;
   /** 网络出口配置（@zhixing/network 共享底座） */
   network?: NetworkConfig;
+  /** 任务推进闭环配置（单会话保险丝阈值等） */
+  advancement?: AdvancementConfig;
   /**
    * 模型注意力阈值覆盖（罕见场景手动调整）—— map key 是 model ID。
    *
@@ -418,6 +420,18 @@ export interface ZhixingConfig {
    * 模型可换、阈值跟模型走(不是会话级状态)。
    */
   modelCapabilityOverrides?: Record<string, ModelCapabilityOverride>;
+}
+
+/**
+ * 任务推进闭环配置——对应全局 `~/.zhixing/config.jsonc` 的 `advancement` 字段。
+ */
+export interface AdvancementConfig {
+  /**
+   * 单个推进会话的 token 保险丝阈值（全量口径，含裁判与被审 run 两半）。
+   * 缺省用系统内置宽值——正常任务永不触碰，它是失控保险不是推进机制；
+   * 触达即 budget-exceeded 退出并交付收场。
+   */
+  sessionTokenBudget?: number;
 }
 
 /**

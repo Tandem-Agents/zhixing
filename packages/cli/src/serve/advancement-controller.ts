@@ -1,5 +1,6 @@
 import {
   AdvancementStore,
+  buildClosureSynthesisPrompt,
   createSegmentSummarizeFn,
   LLMAdvancementAdmissionStrategy,
   LLMRubricDraftGenerationStrategy,
@@ -89,6 +90,14 @@ export async function createServeAdvancementController(
       : {}),
     ...(deps.onAdmissionTiming
       ? { onAdmissionTiming: deps.onAdmissionTiming }
+      : {}),
+    // 收场合成走轻推理通道；失败由 controller 降级结构化直出。
+    closureSynthesizer: {
+      synthesize: (facts) =>
+        lightCall([userMessage(buildClosureSynthesisPrompt(facts))]),
+    },
+    ...(config.advancement?.sessionTokenBudget !== undefined
+      ? { sessionTokenBudget: config.advancement.sessionTokenBudget }
       : {}),
     contractBuilder,
     reviewer: createAdvancementRuntime({

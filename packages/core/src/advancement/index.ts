@@ -15,7 +15,21 @@ export {
   LLMRubricDraftGenerationStrategy,
   LLMRubricDraftRevisionStrategy,
   RubricContractBuilder,
+  projectConfirmedRubricToDraftContent,
 } from "./contract.js";
+export {
+  buildClosureFacts,
+  buildClosureSynthesisPrompt,
+  renderClosureReport,
+  sumAdvancementUsage,
+} from "./closure.js";
+export type {
+  AdvancementClosureFacts,
+  AdvancementClosureReport,
+  ClosureAttemptedStrategy,
+  ClosureCriterionRow,
+  ClosureUsageTotals,
+} from "./closure.js";
 export type {
   BuildRubricContractDraftInput,
   LLMRubricDraftGenerationStrategyOptions,
@@ -40,5 +54,6 @@ export {
   renderAcceptanceConditions,
   renderReviewAttribution,
 } from "./attribution.js";
+export { detectStagnation, type StagnationSignal } from "./stagnation.js";
 export { createAdvancementWindowReviewEntry } from "./window-state.js";
 export * from "./types.js";

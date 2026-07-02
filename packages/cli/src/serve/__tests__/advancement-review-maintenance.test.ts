@@ -64,6 +64,11 @@ function reviewed(
       message: "done",
       occurredAt: "2026-01-01T00:02:00.000Z",
     },
+    closure: {
+      summary: kind === "completed" ? "任务已验收通过。" : "任务已退出。",
+      synthesized: false,
+      facts: { sessionId: "adv-1" },
+    },
   } as AdvancementTurnReviewResult;
 }
 
@@ -152,6 +157,10 @@ describe("createAdvancementReviewMaintenance", () => {
       ]);
       expect(events[1]?.seq).toBe(1);
       expect(events[1]?.scope).toBe("control");
+      // 收场报告随终态事件交付——不是裸事件名。
+      expect(events[1]?.payload).toMatchObject({
+        closure: expect.objectContaining({ synthesized: false }),
+      });
     }
   });
 
@@ -291,6 +300,88 @@ describe("createAdvancementReviewMaintenance", () => {
     expect(advancement.afterTurnCommitted).toHaveBeenLastCalledWith(
       expect.objectContaining({ runIndex: 1 }),
     );
+  });
+
+  it("turn 提交先 catch-up 欠账（排除当轮）再验收当轮", async () => {
+    const order: string[] = [];
+    const advancement = {
+      afterTurnCommitted: vi.fn(async () => {
+        order.push("review");
+        return reviewed();
+      }),
+    };
+    const recoverConversation = vi.fn(
+      async (_conversationId: string, _options?: { beforeRunIndex?: number }) => {
+        order.push("catch-up");
+        return undefined;
+      },
+    );
+    const maintain = createAdvancementReviewMaintenance({
+      advancement: advancement as never,
+      sessionBroadcast: () => null,
+      recoverConversation,
+    });
+
+    maintain(makeInfo({ runIndex: 5 }));
+    await flush();
+    await flush();
+
+    expect(order).toEqual(["catch-up", "review"]);
+    expect(recoverConversation).toHaveBeenCalledWith("conv-1", {
+      beforeRunIndex: 5,
+    });
+  });
+
+  it("catch-up 失败不阻断当轮验收", async () => {
+    const advancement = {
+      afterTurnCommitted: vi.fn(async () => reviewed()),
+    };
+    const maintain = createAdvancementReviewMaintenance({
+      advancement: advancement as never,
+      sessionBroadcast: () => null,
+      recoverConversation: vi.fn(async () => {
+        throw new Error("recovery down");
+      }),
+    });
+
+    maintain(makeInfo());
+    await flush();
+    await flush();
+
+    expect(advancement.afterTurnCommitted).toHaveBeenCalledTimes(1);
+  });
+
+  it("review-deferred 结果发 review_deferred 事件且不调度代理", async () => {
+    const events: SessionEventEnvelope[] = [];
+    const manager = { admitTurn: vi.fn() };
+    const maintain = createAdvancementReviewMaintenance({
+      advancement: {
+        afterTurnCommitted: vi.fn(async () => ({
+          kind: "review-deferred",
+          session: { id: "adv-1", conversationId: "conv-1" },
+          cause: "infrastructure",
+          reason: "rate limited",
+        })),
+      } as never,
+      conversations: () => manager as never,
+      sessionBroadcast: () => (_conversationId, _method, payload) => {
+        events.push(payload as SessionEventEnvelope);
+      },
+    });
+
+    maintain(makeInfo());
+    await flush();
+    await flush();
+
+    expect(events.map((event) => event.event)).toEqual([
+      "advancement:review_deferred",
+    ]);
+    expect(events[0]?.payload).toMatchObject({
+      advancementSessionId: "adv-1",
+      cause: "infrastructure",
+      reason: "rate limited",
+    });
+    expect(manager.admitTurn).not.toHaveBeenCalled();
   });
 
   it("单次验收失败不阻断同一 conversation 后续验收", async () => {

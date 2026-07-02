@@ -94,6 +94,11 @@ const conversationSurface: AccessSurface = {
       conversations: () => ctx.conversations ?? null,
       conversationExists: (conversationId) =>
         ctx.conversationDirectory.exists(conversationId),
+      recoverConversation: (conversationId, options) =>
+        ctx.advancementRecoveryRef?.current?.recoverConversation(
+          conversationId,
+          options,
+        ) ?? Promise.resolve(),
     });
 
     ctx.conversations = new ConversationManager(ctx.runtimeFactory, undefined, {
