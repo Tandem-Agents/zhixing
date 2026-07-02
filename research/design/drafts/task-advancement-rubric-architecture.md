@@ -600,7 +600,7 @@ AdvancementRuntime 第一版能力：
 - **裁判结论性失败**（模型没调裁判工具、提交非法结论）：fail-closed 落终局 `exit`（`system-error`），正确且已落地——结论层不可信就不能继续自动推进。
 - **基础设施 transient 失败**（限流 / 网络 / 超时，LLM 调用本身抛错）：**不得落盘为终局 review**。本轮验收放弃、不产生 review，`lastReviewedRunIndex` 不前进——该 run 自然成为「已接受未审」状态，由恢复扫描 / 下次唤醒补审（§5.6 第一行，零新机制）。过夜 20 轮任务不能因第 12 轮撞一次 429 就永久退出；与准入侧「LLM 不可用降级不阻塞用户」的韧性设计对称。
 
-> 生效面缺口（收口见 §15 C16）：当前 `catch` 把任何异常一律落 `system-error` 终局且 review 已持久化、恢复无能为力；§7 退出分类此前也未声明 system-error 类别——两类失败混为一谈。
+> 生效面：已落地（C16）——`reviewRun` 返回结果联合 `reviewed | deferred(cause: infrastructure | aborted)`，分流判据在 AgentResult 层（`error` 与取证阶段基础设施错误 → deferred；`completed`/`max_turns` 无有效提交 → 结论性终局；`aborted` → deferred 不落盘）；deferred 不落盘 review、不前进已审进度，发 `advancement:review_deferred`，由三个补审触发点收敛（含 turn 提交先 catch-up 再审当轮，带上界排除当轮防吞调度）；afterTurnCommitted 增设 runIndex 幂等护栏防触发点并发双审。
 
 实现上可以复用 provider 调用、prompt 组装、工具调用、注意力窗口与 SegmentManager 等底层原语，但不得复用执行侧 main runtime 的 loop / tools / lifecycle。若第一版为了装配便利使用 runtime 能力，也必须是专用 evaluator runtime，且只暴露只读取证工具与裁判判定工具，禁用执行工具与主线 transcript 写入。
 
@@ -1129,7 +1129,7 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 - 确认即沉淀的需求语义保留，沉淀物是场景资产而非任务快照（不变量 17）。
 - 近邻治理不阻断用户显式另存的意愿。
 
-#### C16：裁判韧性与恢复自愈（收口单元，未实施）
+#### C16：裁判韧性与恢复自愈（已实现，待提交）
 
 内容：
 
@@ -1143,7 +1143,7 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 - 重建代理消息的 **content** 与原始纯函数产物 byte 等价（模板 + 变量 + 归因渲染全部确定性，归因取自已持久化 review）；`createdAt` 不在等价范围（原始时钟不可知），但 **id 恒复用 `review.proxyMessageId`**——否则重建后「proxyMessageId 缺失于 proxyMessages」谓词依然为真，下次扫描再次命中造成循环重建。
 - 恢复矩阵每一行有对应测试，无隐式中间态。
 
-#### C17：收场交付与契约再生（收口单元，未实施）
+#### C17：收场交付与契约再生（已实现，待提交；CLI 收场呈现随 C11）
 
 内容：
 
