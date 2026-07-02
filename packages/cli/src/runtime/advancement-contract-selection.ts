@@ -72,8 +72,11 @@ function renderRubricDraftDetails(
   appendSection(lines, "通过标准", draft.content.passCriteria);
 
   const evidence = draft.content.evidenceRequirements?.map((item) => {
-    const required = item.required === false ? "可选" : "必需";
-    return `${item.description}（${required}）`;
+    const required = item.required === true ? "必需" : "可选";
+    const located = item.locator?.paths?.length
+      ? `，核验路径：${item.locator.paths.join("、")}`
+      : "";
+    return `${item.description}（${required}${located}）`;
   });
   appendSection(lines, "证据要求", evidence ?? []);
 

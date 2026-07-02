@@ -43,12 +43,20 @@ function draft(): RubricContractDraftSnapshot {
 }
 
 function confirmed(): ConfirmedRubricSnapshot {
+  const content = draft().content;
   return {
     rubricId: "rubric-1",
     rubricVersion: "v1",
     title: "确认版测试推进准则",
     description: "用户确认后的准则。",
-    content: draft().content,
+    content: {
+      passCriteria: content.passCriteria.map((text, index) => ({
+        id: `pc-${index + 1}`,
+        text,
+      })),
+      evidenceRequirements: content.evidenceRequirements,
+      failureHandling: content.failureHandling,
+    },
     confirmedAt: "2026-01-01T00:01:00.000Z",
     confirmedBy: "user",
   };
@@ -61,6 +69,11 @@ function failedReview(): AdvancementRunReview {
     reviewedAt: "2026-01-01T00:02:00.000Z",
     decision: "failed",
     evidence: [],
+    attribution: {
+      criteria: [
+        { criterionId: "pc-1", verdict: "unmet", reason: "测试未通过。" },
+      ],
+    },
     unmetCriteria: ["测试未通过"],
     selectedFailureHandlingId: "continue",
     proxyMessageId: "proxy-1",
@@ -75,6 +88,7 @@ function proxyMessage(): AdvancementProxyMessage {
     content: task("继续修复测试。"),
     rubricFailureHandlingId: "continue",
     variables: {},
+    attribution: failedReview().attribution,
     createdAt: "2026-01-01T00:03:00.000Z",
   };
 }
@@ -353,6 +367,15 @@ describe("AdvancementRecoveryMaintenance", () => {
           reviewedAt: "2026-01-01T00:05:00.000Z",
           decision: "passed" as const,
           evidence: [],
+          attribution: {
+            criteria: [
+              {
+                criterionId: "pc-1",
+                verdict: "met" as const,
+                reason: "测试已全绿。",
+              },
+            ],
+          },
           unmetCriteria: [],
         },
       })),
@@ -421,6 +444,17 @@ describe("AdvancementRecoveryMaintenance", () => {
           decision:
             input.runIndex === 0 ? ("failed" as const) : ("passed" as const),
           evidence: [],
+          attribution: {
+            criteria: [
+              {
+                criterionId: "pc-1",
+                verdict:
+                  input.runIndex === 0 ? ("unmet" as const) : ("met" as const),
+                reason:
+                  input.runIndex === 0 ? "测试还没有全绿。" : "测试已全绿。",
+              },
+            ],
+          },
           unmetCriteria:
             input.runIndex === 0 ? ["测试还没有全绿"] : [],
           selectedFailureHandlingId:
@@ -501,6 +535,15 @@ describe("AdvancementRecoveryMaintenance", () => {
           reviewedAt: "2026-01-01T00:05:00.000Z",
           decision: "passed" as const,
           evidence: [],
+          attribution: {
+            criteria: [
+              {
+                criterionId: "pc-1",
+                verdict: "met" as const,
+                reason: "测试已全绿。",
+              },
+            ],
+          },
           unmetCriteria: [],
         },
       })),
@@ -569,6 +612,15 @@ describe("AdvancementRecoveryMaintenance", () => {
           reviewedAt: "2026-01-01T00:05:00.000Z",
           decision: "passed" as const,
           evidence: [],
+          attribution: {
+            criteria: [
+              {
+                criterionId: "pc-1",
+                verdict: "met" as const,
+                reason: "测试已全绿。",
+              },
+            ],
+          },
           unmetCriteria: [],
         },
       })),

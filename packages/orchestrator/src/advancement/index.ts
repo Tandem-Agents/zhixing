@@ -5,6 +5,12 @@ export {
   summarizeRunRecord,
 } from "./evidence.js";
 export {
+  createFirstPartyEvidenceProvider,
+  detectEvidenceCapabilities,
+  type FirstPartyEvidenceProviderOptions,
+  type GitExecFn,
+} from "./first-party-evidence.js";
+export {
   ADVANCEMENT_SUBMIT_REVIEW_TOOL,
   createAdvancementJudgeTool,
 } from "./judge-tool.js";

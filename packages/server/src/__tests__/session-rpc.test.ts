@@ -541,12 +541,20 @@ describe("session.* RPC (S2.D)", () => {
   }
 
   function testConfirmedRubric(): ConfirmedRubricSnapshot {
+    const content = testDraft("turn-recovery-original").content;
     return {
       rubricId: "rubric-recovery",
       rubricVersion: "v1",
       title: "确认版测试推进准则",
       description: "用户确认后的推进准则。",
-      content: testDraft("turn-recovery-original").content,
+      content: {
+        passCriteria: content.passCriteria.map((text, index) => ({
+          id: `pc-${index + 1}`,
+          text,
+        })),
+        evidenceRequirements: content.evidenceRequirements,
+        failureHandling: content.failureHandling,
+      },
       confirmedAt: "2026-01-01T00:01:00.000Z",
       confirmedBy: "user",
     };
@@ -574,6 +582,11 @@ describe("session.* RPC (S2.D)", () => {
       reviewedAt: "2026-01-01T00:02:00.000Z",
       decision: "failed",
       evidence: [],
+      attribution: {
+        criteria: [
+          { criterionId: "pc-1", verdict: "unmet", reason: "测试尚未全绿。" },
+        ],
+      },
       unmetCriteria: ["测试尚未全绿"],
       selectedFailureHandlingId: "continue",
       proxyMessageId: "proxy-recovery",
@@ -585,6 +598,7 @@ describe("session.* RPC (S2.D)", () => {
       content: testUserInput("请继续处理直到达到验收标准。"),
       rubricFailureHandlingId: "continue",
       variables: {},
+      attribution: review.attribution,
       createdAt: "2026-01-01T00:03:00.000Z",
     };
     await store.appendRunReviewWithProxyMessage(
@@ -1046,15 +1060,13 @@ describe("session.* RPC (S2.D)", () => {
       conversationId: awaiting.conversationId,
     });
     expect(isSuccessResponse(deleteResp)).toBe(true);
-    const deletedSession = await advancement.store.loadSession(
-      awaiting.conversationId,
-      awaiting.advancementSessionId,
-    );
-    expect(deletedSession?.status).toBe("cancelled");
-    expect(deletedSession?.exit).toMatchObject({
-      reason: "user-cancelled",
-      message: "原始对话已删除，推进会话已取消。",
-    });
+    // 控制日志生命周期跟随对话本体——删除后连带清空，会话与数据都不可见
+    await expect(
+      advancement.store.loadSession(
+        awaiting.conversationId,
+        awaiting.advancementSessionId,
+      ),
+    ).resolves.toBeNull();
     await expect(
       advancement.store.loadActiveSession(awaiting.conversationId),
     ).resolves.toBeNull();
@@ -1067,12 +1079,6 @@ describe("session.* RPC (S2.D)", () => {
     if (isErrorResponse(confirmResp)) {
       expect(confirmResp.error.code).toBe(RPC_ERROR_CODES.NOT_FOUND);
     }
-    const session = await advancement.store.loadSession(
-      awaiting.conversationId,
-      awaiting.advancementSessionId,
-    );
-    expect(session?.status).toBe("cancelled");
-    expect(session?.exit?.reason).toBe("user-cancelled");
     client.close();
   });
 
@@ -1115,15 +1121,13 @@ describe("session.* RPC (S2.D)", () => {
     });
     expect(isSuccessResponse(deleteResp)).toBe(true);
 
-    const session = await advancement.store.loadSession(
-      awaiting.conversationId,
-      awaiting.advancementSessionId,
-    );
-    expect(session?.status).toBe("cancelled");
-    expect(session?.exit).toMatchObject({
-      reason: "user-cancelled",
-      message: "原始对话已删除，推进会话已取消。",
-    });
+    // 先取消 open 会话（控制面事件语义），随后控制日志连带删除、数据不可见
+    await expect(
+      advancement.store.loadSession(
+        awaiting.conversationId,
+        awaiting.advancementSessionId,
+      ),
+    ).resolves.toBeNull();
     await expect(
       advancement.store.loadActiveSession(awaiting.conversationId),
     ).resolves.toBeNull();

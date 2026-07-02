@@ -127,11 +127,53 @@ export function buildTranscriptGcHandler(
   };
 }
 
+// ─── __advancement-gc ───
+
+export interface AdvancementGcDeps {
+  /**
+   * 注入推进控制日志的孤儿目录清理能力（AdvancementStore.sweepOrphanDirs
+   * 的闭包，对话存在性判定由装配方解析）。不提供则 handler 报告未配置。
+   */
+  runSweep?: () => Promise<{
+    scanned: number;
+    removed: number;
+    warnings: string[];
+  }>;
+}
+
+export function buildAdvancementGcHandler(
+  deps: AdvancementGcDeps = {},
+): SystemHandler {
+  return async () => {
+    if (!deps.runSweep) {
+      return {
+        status: "ok",
+        summary: "advancement-gc: not configured (no-op)",
+      };
+    }
+    try {
+      const r = await deps.runSweep();
+      return {
+        status: "ok",
+        summary:
+          `advancement-gc: scanned=${r.scanned} removed=${r.removed} ` +
+          `warnings=${r.warnings.length}`,
+      };
+    } catch (err) {
+      return {
+        status: "error",
+        summary: err instanceof Error ? err.message : String(err),
+      };
+    }
+  };
+}
+
 // ─── 注册器 ───
 
 export interface SystemHandlersOptions {
   journal?: JournalGcDeps;
   transcript?: TranscriptGcDeps;
+  advancement?: AdvancementGcDeps;
   healthCheck?: { onCheck?: () => Promise<{ ok: boolean; details?: string }> };
 }
 
@@ -143,5 +185,6 @@ export function buildSystemHandlers(opts: SystemHandlersOptions = {}): Map<strin
   map.set("__health-check", buildHealthCheckHandler(opts.healthCheck));
   map.set("__journal-gc", buildJournalGcHandler(opts.journal));
   map.set("__transcript-gc", buildTranscriptGcHandler(opts.transcript));
+  map.set("__advancement-gc", buildAdvancementGcHandler(opts.advancement));
   return map;
 }

@@ -35,5 +35,10 @@ export {
   getAdvancementRoot,
 } from "./paths.js";
 export { AdvancementStore } from "./store.js";
+export {
+  deriveUnmetCriteriaTexts,
+  renderAcceptanceConditions,
+  renderReviewAttribution,
+} from "./attribution.js";
 export { createAdvancementWindowReviewEntry } from "./window-state.js";
 export * from "./types.js";

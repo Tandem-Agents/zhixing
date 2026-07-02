@@ -47,12 +47,20 @@ function draft(): RubricContractDraftSnapshot {
 }
 
 function confirmed(): ConfirmedRubricSnapshot {
+  const content = draft().content;
   return {
     rubricId: "rubric-code-review",
     rubricVersion: "v1",
     title: "代码审查推进准则",
     description: "用于判断开发任务是否完成",
-    content: draft().content,
+    content: {
+      passCriteria: content.passCriteria.map((text, index) => ({
+        id: `pc-${index + 1}`,
+        text,
+      })),
+      evidenceRequirements: content.evidenceRequirements,
+      failureHandling: content.failureHandling,
+    },
     confirmedAt: "2026-01-01T00:01:00.000Z",
     confirmedBy: "user",
   };
@@ -76,9 +84,34 @@ function review(extra: Partial<AdvancementRunReview> = {}): AdvancementRunReview
     reviewedAt: "2026-01-01T00:03:00.000Z",
     decision: "failed",
     evidence: [],
+    attribution: {
+      criteria: [
+        {
+          criterionId: "pc-1",
+          verdict: "unmet",
+          reason: "测试仍未全绿。",
+          evidenceExcerpt: "vitest: 1 failed",
+        },
+        { criterionId: "pc-2", verdict: "met", reason: "实现已覆盖需求点。" },
+      ],
+    },
     unmetCriteria: ["测试仍未全绿"],
     selectedFailureHandlingId: "fix-tests",
     ...extra,
+  };
+}
+
+function passedAttribution() {
+  return {
+    criteria: [
+      {
+        criterionId: "pc-1",
+        verdict: "met" as const,
+        reason: "测试已全绿。",
+        evidenceExcerpt: "vitest: all passed",
+      },
+      { criterionId: "pc-2", verdict: "met" as const, reason: "实现已覆盖需求点。" },
+    ],
   };
 }
 
@@ -184,9 +217,15 @@ describe("AdvancementController.afterTurnCommitted", () => {
     expect(session?.runs).toHaveLength(1);
     expect(session?.runs[0]?.proxyMessageId).toBe("proxy-1");
     expect(session?.outstandingProxyMessageId).toBe("proxy-1");
-    expect(session?.proxyMessages[0]?.content).toEqual(
-      task("请修复失败测试后再继续。"),
-    );
+    const proxy = session?.proxyMessages[0];
+    expect(proxy?.attribution).toEqual(review().attribution);
+    const contentText =
+      proxy?.content.parts[0]?.type === "text" ? proxy.content.parts[0].text : "";
+    expect(contentText).toContain("请修复失败测试后再继续。");
+    expect(contentText).toContain("【验收判定】");
+    expect(contentText).toContain("测试通过：未满足。测试仍未全绿。");
+    expect(contentText).toContain("证据：vitest: 1 failed");
+    expect(contentText).toContain("实现满足需求：已满足。实现已覆盖需求点。");
   });
 
   it("验收运行体复用并持久化推进侧窗口状态", async () => {
@@ -249,7 +288,11 @@ describe("AdvancementController.afterTurnCommitted", () => {
       store,
       reviewer: {
         reviewRun: vi.fn(async () => ({
-          review: review({ decision: "passed", unmetCriteria: [] }),
+          review: review({
+            decision: "passed",
+            unmetCriteria: [],
+            attribution: passedAttribution(),
+          }),
         })),
       },
       now: () => "2026-01-01T00:04:00.000Z",
@@ -278,6 +321,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
       content: task("请修复失败测试后再继续。"),
       rubricFailureHandlingId: "fix-tests",
       variables: {},
+      attribution: review().attribution,
       createdAt: "2026-01-01T00:02:30.000Z",
     });
     const controller = new AdvancementController({
@@ -290,6 +334,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
               runRecordRef: { shardId: "000001", runIndex: 1 },
               decision: "passed",
               unmetCriteria: [],
+              attribution: passedAttribution(),
             }),
           }),
         ),
@@ -335,6 +380,7 @@ describe("AdvancementController.afterTurnCommitted", () => {
       content: task("请修复失败测试后再继续。"),
       rubricFailureHandlingId: "fix-tests",
       variables: {},
+      attribution: review().attribution,
       createdAt: "2026-01-01T00:02:30.000Z",
     });
     const reviewer = { reviewRun: vi.fn(async () => ({ review: review() })) };
@@ -392,6 +438,61 @@ describe("AdvancementController.afterTurnCommitted", () => {
     const session = await store.loadSession("conv-1", "session-1");
     expect(session?.status).toBe("exited");
     expect(session?.exit?.reason).toBe("dead-end");
+  });
+
+  it("准入判断携带最近会话投影并记录耗时", async () => {
+    const store = await makeStore();
+    const decide = vi.fn(async () => ({
+      kind: "question" as const,
+      action: "run-direct" as const,
+      reason: "test",
+    }));
+    const timings: number[] = [];
+    const controller = new AdvancementController({
+      store,
+      admissionStrategy: { decide },
+      recentContextProvider: async () => "用户：把配置迁移到新格式",
+      onAdmissionTiming: (ms) => timings.push(ms),
+    });
+
+    await controller.prepareUserTurn({
+      conversationId: "conv-projection",
+      turnId: "turn-projection",
+      userInput: task("继续把它弄完"),
+    });
+
+    expect(decide).toHaveBeenCalledWith(
+      expect.objectContaining({
+        recentContext: "用户：把配置迁移到新格式",
+      }),
+    );
+    expect(timings).toHaveLength(1);
+    expect(timings[0]).toBeGreaterThanOrEqual(0);
+  });
+
+  it("投影 provider 失败时按无投影降级，准入照常进行", async () => {
+    const store = await makeStore();
+    const decide = vi.fn(async () => ({
+      kind: "question" as const,
+      action: "run-direct" as const,
+      reason: "test",
+    }));
+    const controller = new AdvancementController({
+      store,
+      admissionStrategy: { decide },
+      recentContextProvider: async () => {
+        throw new Error("history unavailable");
+      },
+    });
+
+    const result = await controller.prepareUserTurn({
+      conversationId: "conv-projection-fail",
+      turnId: "turn-projection-fail",
+      userInput: task("继续"),
+    });
+
+    expect(result.kind).toBe("run-direct");
+    expect(decide.mock.calls.at(-1)?.[0]?.recentContext).toBeUndefined();
   });
 
   it("没有 active session 时跳过且不调用 reviewer", async () => {

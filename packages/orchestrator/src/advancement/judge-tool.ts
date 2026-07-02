@@ -3,9 +3,12 @@ import type {
   AdvancementExitReason,
   AdvancementReviewDecision,
   ConfirmedRubricSnapshot,
-  ObjectiveSignalKind,
+  ReviewAttribution,
+  ReviewCriterionAttribution,
+  ReviewCriterionVerdict,
   ReviewEvidence,
 } from "@zhixing/core/advancement";
+import { deriveUnmetCriteriaTexts } from "@zhixing/core/advancement";
 import type {
   JsonSchema,
   RunRecordRef,
@@ -16,16 +19,6 @@ import { requiresIndependentEvidence } from "./evidence.js";
 
 export const ADVANCEMENT_SUBMIT_REVIEW_TOOL =
   "advancement_submit_review";
-
-const OBJECTIVE_SIGNAL_KINDS = new Set<ObjectiveSignalKind>([
-  "file-diff",
-  "test-result",
-  "build-result",
-  "log",
-  "artifact",
-  "conversation-fact",
-  "none",
-]);
 
 const REVIEW_DECISIONS = new Set<AdvancementReviewDecision>([
   "passed",
@@ -39,6 +32,7 @@ const EXIT_REASONS = new Set<AdvancementExitReason>([
   "user-took-over",
   "superseded",
   "system-error",
+  "capability-gap",
 ]);
 
 export interface CreateAdvancementJudgeToolInput {
@@ -63,8 +57,8 @@ export function createAdvancementJudgeTool(
   const tool: ToolDefinition = {
     name: ADVANCEMENT_SUBMIT_REVIEW_TOOL,
     description:
-      "提交推进侧对本轮执行结果的验收结论。必须只引用已提供的 evidence id，不得编造独立证据。",
-    inputSchema: REVIEW_INPUT_SCHEMA,
+      "提交推进侧对本轮执行结果的验收结论。必须对每条通过标准给出逐条判定；证据以 id 引用已收集列表（证据事实由取证层持有，不接受改写），不得编造。",
+    inputSchema: buildReviewInputSchema(input.rubric),
     isReadOnly: true,
     isParallelSafe: false,
     needsPermission: false,
@@ -98,67 +92,75 @@ export function createAdvancementJudgeTool(
   };
 }
 
-const REVIEW_INPUT_SCHEMA: JsonSchema = {
-  type: "object",
-  additionalProperties: false,
-  required: ["decision", "evidence", "unmetCriteria"],
-  properties: {
-    decision: {
-      type: "string",
-      enum: ["passed", "failed", "exit"],
-      description: "本轮验收结论。",
-    },
-    evidence: {
-      type: "array",
-      description: "裁判采用的证据。每条 id 必须来自已提供的 evidence 列表。",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["id", "kind", "summary"],
-        properties: {
-          id: { type: "string" },
-          kind: {
-            type: "string",
-            enum: [
-              "file-diff",
-              "test-result",
-              "build-result",
-              "log",
-              "artifact",
-              "conversation-fact",
-              "none",
-            ],
-          },
-          summary: { type: "string" },
-          requirementId: { type: "string" },
-          source: {
-            type: "string",
-            enum: ["independent", "execution-report", "user"],
-          },
-          passed: { type: "boolean" },
-          refs: {
-            type: "array",
-            items: { type: "string" },
+function buildReviewInputSchema(rubric: ConfirmedRubricSnapshot): JsonSchema {
+  const criterionIds = rubric.content.passCriteria.map((item) => item.id);
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["decision", "criteria", "evidenceIds"],
+    properties: {
+      decision: {
+        type: "string",
+        enum: ["passed", "failed", "exit"],
+        description: "本轮验收结论。",
+      },
+      criteria: {
+        type: "array",
+        description:
+          "对每条通过标准的逐条判定，必须恰好覆盖全部 criterionId 各一次。未满足项由此派生，不再单独提交。",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["criterionId", "verdict", "reason"],
+          properties: {
+            criterionId: {
+              type: "string",
+              enum: criterionIds,
+              description: "已确认 Rubric 中通过标准的条目 id。",
+            },
+            verdict: {
+              type: "string",
+              enum: ["met", "unmet", "unknown"],
+              description:
+                "met=已满足；unmet=未满足；unknown=无法独立核验、按执行侧报告采信。",
+            },
+            reason: {
+              type: "string",
+              description: "一句话结论性理由，不写思考过程。",
+            },
+            evidenceExcerpt: {
+              type: "string",
+              description: "支撑该判定的独立证据摘录；有独立取证时必填。",
+            },
           },
         },
       },
+      evidenceIds: {
+        type: "array",
+        description:
+          "裁判采用的证据 id 列表，必须来自已提供的 evidence 列表。证据的事实内容（摘要 / 判定 / 来源）由取证层持有，按 id 原样采用——不提交、不改写。",
+        items: { type: "string" },
+      },
+      selectedFailureHandlingId: {
+        type: "string",
+        description: "未通过时选用的 Rubric failureHandling id。",
+      },
+      exitReason: {
+        type: "string",
+        enum: [
+          "dead-end",
+          "user-cancelled",
+          "user-took-over",
+          "superseded",
+          "system-error",
+          "capability-gap",
+        ],
+        description:
+          "退出推进闭环时的原因。required 客观证据超出系统独立核验能力、继续催证也无法解开时用 capability-gap（请用户人工验收），不得循环 failed。",
+      },
     },
-    unmetCriteria: {
-      type: "array",
-      items: { type: "string" },
-      description: "未满足的通过标准。通过时必须为空。",
-    },
-    selectedFailureHandlingId: {
-      type: "string",
-      description: "未通过时选用的 Rubric failureHandling id。",
-    },
-    exitReason: {
-      type: "string",
-      enum: ["dead-end", "user-cancelled", "user-took-over", "superseded", "system-error"],
-      description: "退出推进闭环时的原因。",
-    },
-  },
-};
+  };
+}
 
 function buildSubmittedReview(
   rawInput: Record<string, unknown>,
@@ -174,8 +176,14 @@ function buildSubmittedReview(
     return { ok: false, error: "decision 必须是 passed / failed / exit。" };
   }
 
+  const attributionResult = normalizeSubmittedCriteria(
+    rawInput.criteria,
+    context.rubric,
+  );
+  if (!attributionResult.ok) return attributionResult;
+
   const evidenceResult = normalizeSubmittedEvidence(
-    rawInput.evidence,
+    rawInput.evidenceIds,
     context.availableEvidence,
     new Set(
       (context.rubric.content.evidenceRequirements ?? []).map(
@@ -185,9 +193,6 @@ function buildSubmittedReview(
   );
   if (!evidenceResult.ok) return evidenceResult;
 
-  const unmetCriteria = normalizeStringArray(rawInput.unmetCriteria, "unmetCriteria");
-  if (!unmetCriteria.ok) return unmetCriteria;
-
   const selectedFailureHandlingId = optionalString(
     rawInput.selectedFailureHandlingId,
     "selectedFailureHandlingId",
@@ -196,11 +201,17 @@ function buildSubmittedReview(
   const exitReason = optionalExitReason(rawInput.exitReason);
   if (!exitReason.ok) return exitReason;
 
+  const attribution = attributionResult.attribution;
+  const unmetCriteria = deriveUnmetCriteriaTexts(
+    attribution,
+    context.rubric.content.passCriteria,
+  );
+
   const policyError = validateDecisionPolicy({
     decision: decision as AdvancementReviewDecision,
     selectedFailureHandlingId: selectedFailureHandlingId.value,
     exitReason: exitReason.value,
-    unmetCriteria: unmetCriteria.values,
+    attribution,
     evidence: evidenceResult.evidence,
     rubric: context.rubric,
   });
@@ -215,13 +226,96 @@ function buildSubmittedReview(
       reviewedAt: context.now().toISOString(),
       decision: decision as AdvancementReviewDecision,
       evidence: evidenceResult.evidence,
-      unmetCriteria: unmetCriteria.values,
+      attribution,
+      unmetCriteria,
       selectedFailureHandlingId: selectedFailureHandlingId.value,
       exitReason: exitReason.value,
     },
   };
 }
 
+const CRITERION_VERDICTS = new Set<ReviewCriterionVerdict>([
+  "met",
+  "unmet",
+  "unknown",
+]);
+
+function normalizeSubmittedCriteria(
+  value: unknown,
+  rubric: ConfirmedRubricSnapshot,
+):
+  | { readonly ok: true; readonly attribution: ReviewAttribution }
+  | { readonly ok: false; readonly error: string } {
+  if (!Array.isArray(value)) {
+    return { ok: false, error: "criteria 必须是数组。" };
+  }
+  const knownIds = new Set(rubric.content.passCriteria.map((item) => item.id));
+  const seen = new Set<string>();
+  const criteria: ReviewCriterionAttribution[] = [];
+
+  for (const [index, raw] of value.entries()) {
+    if (!raw || typeof raw !== "object") {
+      return { ok: false, error: `criteria[${index}] 必须是对象。` };
+    }
+    const record = raw as Record<string, unknown>;
+    const criterionId = record.criterionId;
+    if (typeof criterionId !== "string" || !knownIds.has(criterionId)) {
+      return {
+        ok: false,
+        error: `criteria[${index}].criterionId 不属于已确认 Rubric 的条目集。`,
+      };
+    }
+    if (seen.has(criterionId)) {
+      return { ok: false, error: `criterion "${criterionId}" 被重复判定。` };
+    }
+    seen.add(criterionId);
+
+    const verdict = record.verdict;
+    if (
+      typeof verdict !== "string" ||
+      !CRITERION_VERDICTS.has(verdict as never)
+    ) {
+      return {
+        ok: false,
+        error: `criterion "${criterionId}" 的 verdict 必须是 met / unmet / unknown。`,
+      };
+    }
+    const reason = record.reason;
+    if (typeof reason !== "string" || !reason.trim()) {
+      return {
+        ok: false,
+        error: `criterion "${criterionId}" 缺少结论性理由。`,
+      };
+    }
+    const excerpt = optionalString(
+      record.evidenceExcerpt,
+      `criterion "${criterionId}".evidenceExcerpt`,
+    );
+    if (!excerpt.ok) return excerpt;
+
+    criteria.push({
+      criterionId,
+      verdict: verdict as ReviewCriterionVerdict,
+      reason: reason.trim(),
+      ...(excerpt.value ? { evidenceExcerpt: excerpt.value } : {}),
+    });
+  }
+
+  if (seen.size !== knownIds.size) {
+    return {
+      ok: false,
+      error: "criteria 必须恰好覆盖已确认 Rubric 的全部通过标准条目。",
+    };
+  }
+  return { ok: true, attribution: { criteria } };
+}
+
+/**
+ * 证据采用是 id 引用，不是内容提交：持久化的 evidence 恒为取证层的
+ * canonical 对象——摘要、判定、来源、绑定全部由取证层持有，模型没有任何
+ * 字段可以改写（逐字段"复述 + 校验一致"的形态里每个字段都是潜在的校验
+ * 遗漏面）。模型对证据的解读走归因层（criteria 的 reason / evidenceExcerpt）。
+ */
 function normalizeSubmittedEvidence(
   value: unknown,
   availableEvidence: readonly ReviewEvidence[],
@@ -230,7 +324,7 @@ function normalizeSubmittedEvidence(
   | { readonly ok: true; readonly evidence: readonly ReviewEvidence[] }
   | { readonly ok: false; readonly error: string } {
   if (!Array.isArray(value)) {
-    return { ok: false, error: "evidence 必须是数组。" };
+    return { ok: false, error: "evidenceIds 必须是字符串数组。" };
   }
 
   const availableById = new Map(availableEvidence.map((item) => [item.id, item]));
@@ -238,14 +332,10 @@ function normalizeSubmittedEvidence(
   const seen = new Set<string>();
 
   for (const [index, raw] of value.entries()) {
-    if (!raw || typeof raw !== "object") {
-      return { ok: false, error: `evidence[${index}] 必须是对象。` };
+    if (typeof raw !== "string" || !raw.trim()) {
+      return { ok: false, error: `evidenceIds[${index}] 必须是非空字符串。` };
     }
-    const record = raw as Record<string, unknown>;
-    const id = record.id;
-    if (typeof id !== "string" || !id.trim()) {
-      return { ok: false, error: `evidence[${index}].id 必须是非空字符串。` };
-    }
+    const id = raw.trim();
     if (seen.has(id)) {
       return { ok: false, error: `evidence "${id}" 被重复引用。` };
     }
@@ -255,65 +345,16 @@ function normalizeSubmittedEvidence(
     if (!canonical) {
       return { ok: false, error: `evidence "${id}" 不在已收集证据列表中。` };
     }
-
-    const kind = record.kind;
-    if (typeof kind !== "string" || !OBJECTIVE_SIGNAL_KINDS.has(kind as never)) {
-      return { ok: false, error: `evidence "${id}" 的 kind 非法。` };
-    }
-    if (kind !== canonical.kind) {
-      return { ok: false, error: `evidence "${id}" 的 kind 与已收集证据不一致。` };
-    }
-
-    const source = optionalSource(record.source);
-    if (!source.ok) return source;
-    if (source.value && source.value !== canonical.source) {
-      return { ok: false, error: `evidence "${id}" 的 source 与已收集证据不一致。` };
-    }
-
-    const requirementId = optionalString(record.requirementId, `evidence "${id}".requirementId`);
-    if (!requirementId.ok) return requirementId;
-    if (requirementId.value && requirementId.value !== canonical.requirementId) {
-      return {
-        ok: false,
-        error: `evidence "${id}" 的 requirementId 与已收集证据不一致。`,
-      };
-    }
-    const finalRequirementId = canonical.requirementId;
-    if (finalRequirementId && !knownRequirementIds.has(finalRequirementId)) {
+    if (
+      canonical.requirementId &&
+      !knownRequirementIds.has(canonical.requirementId)
+    ) {
       return {
         ok: false,
         error: `evidence "${id}" 绑定了未知的 requirementId。`,
       };
     }
-
-    const refs = normalizeOptionalStringArray(record.refs, `evidence "${id}".refs`);
-    if (!refs.ok) return refs;
-    if (refs.values && !sameStringArray(refs.values, canonical.refs)) {
-      return { ok: false, error: `evidence "${id}" 的 refs 与已收集证据不一致。` };
-    }
-
-    const summary = record.summary;
-    if (typeof summary !== "string" || !summary.trim()) {
-      return { ok: false, error: `evidence "${id}" 缺少 summary。` };
-    }
-
-    const passed = optionalBoolean(record.passed, `evidence "${id}".passed`);
-    if (!passed.ok) return passed;
-    if (
-      canonical.passed !== undefined &&
-      passed.value !== undefined &&
-      passed.value !== canonical.passed
-    ) {
-      return { ok: false, error: `evidence "${id}" 的 passed 与已收集证据不一致。` };
-    }
-    out.push({
-      ...canonical,
-      summary: summary.trim(),
-      requirementId: finalRequirementId,
-      source: canonical.source,
-      passed: canonical.passed ?? passed.value,
-      refs: refs.values ?? canonical.refs,
-    });
+    out.push(canonical);
   }
 
   return { ok: true, evidence: out };
@@ -323,17 +364,20 @@ function validateDecisionPolicy(input: {
   readonly decision: AdvancementReviewDecision;
   readonly selectedFailureHandlingId?: string;
   readonly exitReason?: AdvancementExitReason;
-  readonly unmetCriteria: readonly string[];
+  readonly attribution: ReviewAttribution;
   readonly evidence: readonly ReviewEvidence[];
   readonly rubric: ConfirmedRubricSnapshot;
 }): string | null {
   const failureHandlingIds = new Set(
     input.rubric.content.failureHandling.map((item) => item.id),
   );
+  const unmetCount = input.attribution.criteria.filter(
+    (item) => item.verdict === "unmet",
+  ).length;
 
   if (input.decision === "passed") {
-    if (input.unmetCriteria.length > 0) {
-      return "passed 结论下 unmetCriteria 必须为空。";
+    if (unmetCount > 0) {
+      return "passed 结论下不得存在 unmet 判定。";
     }
     if (input.selectedFailureHandlingId) {
       return "passed 结论不能选择 failureHandling。";
@@ -351,8 +395,8 @@ function validateDecisionPolicy(input: {
     if (!failureHandlingIds.has(input.selectedFailureHandlingId)) {
       return `selectedFailureHandlingId "${input.selectedFailureHandlingId}" 不存在。`;
     }
-    if (input.unmetCriteria.length === 0) {
-      return "failed 结论必须说明 unmetCriteria。";
+    if (unmetCount === 0) {
+      return "failed 结论必须至少有一条 unmet 判定。";
     }
     if (input.exitReason) {
       return "failed 结论不能携带 exitReason。";
@@ -400,38 +444,6 @@ function validateRequiredObjectiveEvidence(
   return null;
 }
 
-function normalizeStringArray(
-  value: unknown,
-  field: string,
-):
-  | { readonly ok: true; readonly values: readonly string[] }
-  | { readonly ok: false; readonly error: string } {
-  if (!Array.isArray(value)) {
-    return { ok: false, error: `${field} 必须是字符串数组。` };
-  }
-  const values: string[] = [];
-  for (const [index, item] of value.entries()) {
-    if (typeof item !== "string") {
-      return { ok: false, error: `${field}[${index}] 必须是字符串。` };
-    }
-    const trimmed = item.trim();
-    if (trimmed) values.push(trimmed);
-  }
-  return { ok: true, values };
-}
-
-function normalizeOptionalStringArray(
-  value: unknown,
-  field: string,
-):
-  | { readonly ok: true; readonly values?: readonly string[] }
-  | { readonly ok: false; readonly error: string } {
-  if (value === undefined) return { ok: true };
-  const normalized = normalizeStringArray(value, field);
-  if (!normalized.ok) return normalized;
-  return { ok: true, values: normalized.values };
-}
-
 function optionalString(
   value: unknown,
   field: string,
@@ -446,19 +458,6 @@ function optionalString(
   return trimmed ? { ok: true, value: trimmed } : { ok: true };
 }
 
-function optionalBoolean(
-  value: unknown,
-  field: string,
-):
-  | { readonly ok: true; readonly value?: boolean }
-  | { readonly ok: false; readonly error: string } {
-  if (value === undefined) return { ok: true };
-  if (typeof value !== "boolean") {
-    return { ok: false, error: `${field} 必须是 boolean。` };
-  }
-  return { ok: true, value };
-}
-
 function optionalExitReason(
   value: unknown,
 ):
@@ -469,28 +468,4 @@ function optionalExitReason(
     return { ok: false, error: "exitReason 非法。" };
   }
   return { ok: true, value: value as AdvancementExitReason };
-}
-
-function optionalSource(
-  value: unknown,
-):
-  | { readonly ok: true; readonly value?: ReviewEvidence["source"] }
-  | { readonly ok: false; readonly error: string } {
-  if (value === undefined) return { ok: true };
-  if (
-    value !== "independent" &&
-    value !== "execution-report" &&
-    value !== "user"
-  ) {
-    return { ok: false, error: "evidence.source 非法。" };
-  }
-  return { ok: true, value };
-}
-
-function sameStringArray(
-  a: readonly string[],
-  b: readonly string[] | undefined,
-): boolean {
-  if (!b || a.length !== b.length) return false;
-  return a.every((value, index) => value === b[index]);
 }

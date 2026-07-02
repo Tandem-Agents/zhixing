@@ -10,12 +10,17 @@ import type {
   RubricIndexEntry,
 } from "../rubrics/types.js";
 import type {
+  ConfirmedRubricContentSnapshot,
   ConfirmedRubricSnapshot,
+  EvidenceCapabilitySet,
+  EvidenceLocator,
   EvidenceRequirementSpec,
   FailureHandlingSpec,
   ObjectiveSignalKind,
+  RubricContractContentSnapshot,
   RubricContractDraftSnapshot,
 } from "./types.js";
+import { EMPTY_EVIDENCE_CAPABILITIES, canBeRequired } from "./types.js";
 import { parseJsonObject } from "./json.js";
 
 export interface BuildRubricContractDraftInput {
@@ -27,6 +32,7 @@ export interface RubricDraftGenerationInput
   extends BuildRubricContractDraftInput {
   readonly taskText: string;
   readonly candidateRubrics: readonly RubricIndexEntry[];
+  readonly evidenceCapabilities: EvidenceCapabilitySet;
   readonly now: string;
 }
 
@@ -43,6 +49,7 @@ export interface ReviseRubricContractDraftInput {
 export interface RubricDraftRevisionInput
   extends ReviseRubricContractDraftInput {
   readonly taskText: string;
+  readonly evidenceCapabilities: EvidenceCapabilitySet;
   readonly now: string;
 }
 
@@ -56,6 +63,11 @@ export interface RubricContractBuilderOptions {
   readonly rubricStore?: RubricStore;
   readonly generationStrategy?: RubricDraftGenerationStrategy;
   readonly revisionStrategy?: RubricDraftRevisionStrategy;
+  /**
+   * 取证能力集——required 落点的约束来源，生成与确认阶段生效。
+   * 缺省为空集：任何客观证据要求都不得标 required（未装配取证时的安全缺省）。
+   */
+  readonly evidenceCapabilities?: EvidenceCapabilitySet;
   readonly now?: () => string;
 }
 
@@ -63,6 +75,7 @@ export class RubricContractBuilder {
   private readonly rubricStore: RubricStore;
   private readonly generationStrategy: RubricDraftGenerationStrategy;
   private readonly revisionStrategy: RubricDraftRevisionStrategy;
+  private readonly evidenceCapabilities: EvidenceCapabilitySet;
   private readonly now: () => string;
 
   constructor(options: RubricContractBuilderOptions = {}) {
@@ -71,6 +84,8 @@ export class RubricContractBuilder {
       options.generationStrategy ?? new UnavailableRubricDraftGenerationStrategy();
     this.revisionStrategy =
       options.revisionStrategy ?? new UnavailableRubricDraftRevisionStrategy();
+    this.evidenceCapabilities =
+      options.evidenceCapabilities ?? EMPTY_EVIDENCE_CAPABILITIES;
     this.now = options.now ?? (() => new Date().toISOString());
   }
 
@@ -91,6 +106,7 @@ export class RubricContractBuilder {
       ...input,
       taskText,
       candidateRubrics: ranked.map((item) => item.rubric).slice(0, 3),
+      evidenceCapabilities: this.evidenceCapabilities,
       now: this.now(),
     });
   }
@@ -107,6 +123,7 @@ export class RubricContractBuilder {
       ...input,
       taskText,
       userFeedback: feedback,
+      evidenceCapabilities: this.evidenceCapabilities,
       now: this.now(),
     });
   }
@@ -125,7 +142,7 @@ export class RubricContractBuilder {
         rubricVersion: asset.updatedAt,
         title: asset.title,
         description: asset.description,
-        content: draft.content,
+        content: sealContractContent(draft.content),
         confirmedAt: this.now(),
         confirmedBy: "user",
       };
@@ -137,7 +154,7 @@ export class RubricContractBuilder {
       rubricVersion: saved.updatedAt,
       title: draft.title,
       description: draft.description,
-      content: draft.content,
+      content: sealContractContent(draft.content),
       confirmedAt: this.now(),
       confirmedBy: "user",
     };
@@ -164,12 +181,15 @@ export class RubricContractBuilder {
       content: {
         passCriteria: asset.document.content.passCriteria,
         evidenceRequirements: asset.document.content.evidenceRequirements.map(
-          (item): EvidenceRequirementSpec => ({
-            id: item.id,
-            kind: inferEvidenceKind(item.text),
-            description: item.text,
-            required: true,
-          }),
+          (item): EvidenceRequirementSpec => {
+            const kind = inferEvidenceKind(item.text);
+            return {
+              id: item.id,
+              kind,
+              description: item.text,
+              required: canBeRequired(kind, undefined, this.evidenceCapabilities),
+            };
+          },
         ),
         failureHandling: asset.document.content.failureHandling.map(
           (item): FailureHandlingSpec => ({
@@ -228,7 +248,10 @@ export class LLMRubricDraftGenerationStrategy
     const parsed = parseJsonObject(
       await this.complete(buildRubricDraftPrompt(input)),
     );
-    const normalized = normalizeGeneratedRubricDraft(parsed);
+    const normalized = normalizeGeneratedRubricDraft(
+      parsed,
+      input.evidenceCapabilities,
+    );
     return {
       draftId: randomUUID(),
       originalTurnId: input.originalTurnId,
@@ -261,7 +284,10 @@ export class LLMRubricDraftRevisionStrategy
     const parsed = parseJsonObject(
       await this.complete(buildRubricDraftRevisionPrompt(input)),
     );
-    const normalized = normalizeGeneratedRubricDraft(parsed);
+    const normalized = normalizeGeneratedRubricDraft(
+      parsed,
+      input.evidenceCapabilities,
+    );
     return {
       draftId: randomUUID(),
       originalTurnId: input.currentDraft.originalTurnId,
@@ -339,6 +365,19 @@ function inferEvidenceKind(text: string): ObjectiveSignalKind {
   return "conversation-fact";
 }
 
+function renderEvidenceCapabilityRules(
+  capabilities: EvidenceCapabilitySet,
+): string {
+  const kinds = capabilities.independentKinds;
+  return [
+    kinds.length > 0
+      ? `- 系统当前能独立核验的证据种类：${kinds.join("、")}；只有这些种类可以标 required:true，其余种类照实写入但 required 必须为 false。`
+      : "- 系统当前没有可独立核验的证据种类：所有 evidenceRequirements 的 required 必须为 false。",
+    "- log / artifact 类证据必须给出 locator.paths（相对工作区的文件路径），否则无法独立核验、不得标 required。",
+    "- file-diff 类可省略 locator（默认核对工作区全部变更）。",
+  ].join("\n");
+}
+
 function buildRubricDraftPrompt(input: RubricDraftGenerationInput): string {
   const candidates =
     input.candidateRubrics.length === 0
@@ -354,8 +393,12 @@ function buildRubricDraftPrompt(input: RubricDraftGenerationInput): string {
 
 要求:
 - 只定义任务完成后如何验收，不写执行步骤。
-- passCriteria 必须贴合当前任务，能被用户或推进侧核对。
+- 这份准则确认后会沉淀入库、供同类场景的任务复用：passCriteria 与 failureHandling 必须写**场景可复用**的表述，不要把本次任务的文件名、专有名词、具体数值写死进标准。
+- title / description 表达场景（什么时候用这份准则），不表达某一次具体任务。
+- 本次任务的具体细节（要核对哪些文件、哪份产物）放进 evidenceRequirements 的 description 与 locator，由它们承载任务级定制。
+- passCriteria 必须可被用户或推进侧逐条核对。
 - evidenceRequirements 描述需要核对的证据；没有客观证据时使用 conversation-fact 或 none。
+${renderEvidenceCapabilityRules(input.evidenceCapabilities)}
 - failureHandling.reply 是未通过时发给执行侧 Agent 的固定推进回复，必须明确、可直接发送。
 - 不要要求用户在发布任务时额外写标准。
 - 只返回 JSON，不要解释。
@@ -366,7 +409,7 @@ JSON 结构:
   "description": "命中场景描述",
   "passCriteria": ["通过标准"],
   "evidenceRequirements": [
-    {"id":"可选 id","kind":"file-diff|test-result|build-result|log|artifact|conversation-fact|none","description":"证据要求","required":true}
+    {"id":"可选 id","kind":"file-diff|test-result|build-result|log|artifact|conversation-fact|none","description":"证据要求","required":true,"locator":{"paths":["相对工作区路径，可选"]}}
   ],
   "failureHandling": [
     {"id":"可选 id","scenario":"未通过场景","reply":"给执行侧 Agent 的固定回复"}
@@ -389,8 +432,10 @@ function buildRubricDraftRevisionPrompt(
 要求:
 - 输出完整草案，不要只输出差异。
 - 保留仍然合理的通过标准、证据要求和未通过处理；只按用户意见修订不合适的部分。
-- passCriteria 必须贴合当前任务，能被用户或推进侧核对。
+- 这份准则确认后会沉淀入库、供同类场景的任务复用：passCriteria 与 failureHandling 必须写**场景可复用**的表述，不要把本次任务的文件名、专有名词、具体数值写死进标准；任务级细节归 evidenceRequirements 的 description 与 locator。
+- passCriteria 必须可被用户或推进侧逐条核对。
 - evidenceRequirements 描述需要核对的证据；没有客观证据时使用 conversation-fact 或 none。
+${renderEvidenceCapabilityRules(input.evidenceCapabilities)}
 - failureHandling.reply 是未通过时发给执行侧 Agent 的固定推进回复，必须明确、可直接发送。
 - 只返回 JSON，不要解释。
 
@@ -400,7 +445,7 @@ JSON 结构:
   "description": "命中场景描述",
   "passCriteria": ["通过标准"],
   "evidenceRequirements": [
-    {"id":"可选 id","kind":"file-diff|test-result|build-result|log|artifact|conversation-fact|none","description":"证据要求","required":true}
+    {"id":"可选 id","kind":"file-diff|test-result|build-result|log|artifact|conversation-fact|none","description":"证据要求","required":true,"locator":{"paths":["相对工作区路径，可选"]}}
   ],
   "failureHandling": [
     {"id":"可选 id","scenario":"未通过场景","reply":"给执行侧 Agent 的固定回复"}
@@ -423,10 +468,10 @@ ${JSON.stringify({
 ${input.userFeedback}`;
 }
 
-function normalizeGeneratedRubricDraft(value: unknown): Pick<
-  RubricContractDraftSnapshot,
-  "title" | "description" | "content"
-> {
+function normalizeGeneratedRubricDraft(
+  value: unknown,
+  capabilities: EvidenceCapabilitySet,
+): Pick<RubricContractDraftSnapshot, "title" | "description" | "content"> {
   if (!value || typeof value !== "object") {
     throw new Error("rubric draft must be an object");
   }
@@ -441,6 +486,7 @@ function normalizeGeneratedRubricDraft(value: unknown): Pick<
       passCriteria: normalizeStringList(record.passCriteria, "passCriteria"),
       evidenceRequirements: normalizeEvidenceRequirements(
         record.evidenceRequirements,
+        capabilities,
       ),
       failureHandling: normalizeFailureHandling(record.failureHandling),
     },
@@ -462,6 +508,7 @@ function normalizeStringList(value: unknown, field: string): string[] {
 
 function normalizeEvidenceRequirements(
   value: unknown,
+  capabilities: EvidenceCapabilitySet,
 ): EvidenceRequirementSpec[] {
   if (!Array.isArray(value)) {
     throw new Error("evidenceRequirements must be an array");
@@ -479,17 +526,30 @@ function normalizeEvidenceRequirements(
       typeof record.kind === "string" && isObjectiveSignalKind(record.kind)
         ? record.kind
         : inferEvidenceKind(description);
+    const locator = normalizeLocator(record.locator);
     return {
       id: normalizeId(record.id, `requirement-${index + 1}`),
       kind,
       description,
-      required: record.required !== false,
+      required:
+        record.required !== false && canBeRequired(kind, locator, capabilities),
+      ...(locator ? { locator } : {}),
     };
   });
   if (out.length === 0) {
     throw new Error("evidenceRequirements must contain at least one item");
   }
   return out;
+}
+
+function normalizeLocator(value: unknown): EvidenceLocator | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+  if (!Array.isArray(record.paths)) return undefined;
+  const paths = record.paths
+    .map((item) => (typeof item === "string" ? item.trim() : ""))
+    .filter(Boolean);
+  return paths.length > 0 ? { paths } : undefined;
 }
 
 function normalizeFailureHandling(value: unknown): FailureHandlingSpec[] {
@@ -542,6 +602,25 @@ function normalizeId(value: unknown, fallback: string): string {
     .replace(/^-+|-+$/g, "")
     .slice(0, 48);
   return normalized || fallback;
+}
+
+/**
+ * 确认固化：给通过标准按序分配条目 id。快照不可变，id 在整个推进会话内恒稳，
+ * 是归因引用、跨轮机械对比与收场标准矩阵的稳定锚；草案与资产层保持自然列表。
+ */
+function sealContractContent(
+  content: RubricContractContentSnapshot,
+): ConfirmedRubricContentSnapshot {
+  return {
+    passCriteria: content.passCriteria.map((text, index) => ({
+      id: `pc-${index + 1}`,
+      text,
+    })),
+    ...(content.evidenceRequirements
+      ? { evidenceRequirements: content.evidenceRequirements }
+      : {}),
+    failureHandling: content.failureHandling,
+  };
 }
 
 function toRubricDraft(draft: RubricContractDraftSnapshot): RubricDraft {

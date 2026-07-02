@@ -18,14 +18,29 @@ import {
   resolveWorkspace,
   resolveWorkspaceSessionType,
 } from "@zhixing/providers";
-import { createAdvancementRuntime } from "@zhixing/orchestrator/advancement";
+import {
+  createAdvancementRuntime,
+  createFirstPartyEvidenceProvider,
+  detectEvidenceCapabilities,
+} from "@zhixing/orchestrator/advancement";
 import {
   createLightCallLLM,
   createMainCallLLM,
 } from "@zhixing/orchestrator/runtime";
 import { AdvancementController } from "@zhixing/server";
 
-export function createServeAdvancementController(): AdvancementController {
+export interface ServeAdvancementControllerDeps {
+  /** 准入投影来源——活跃会话窗口尾部（经 lazy ref 取，未就绪返回 undefined）。 */
+  readonly recentContextProvider?: (
+    conversationId: string,
+  ) => Promise<string | undefined>;
+  /** 准入延迟基线观测（诊断日志）。 */
+  readonly onAdmissionTiming?: (elapsedMs: number) => void;
+}
+
+export async function createServeAdvancementController(
+  deps: ServeAdvancementControllerDeps = {},
+): Promise<AdvancementController> {
   const { roles, config } = createProviderRoles();
   const mainThinking = resolveConfiguredThinking(
     roles.main,
@@ -45,6 +60,14 @@ export function createServeAdvancementController(): AdvancementController {
     getModelCapabilityOverride(config.modelCapabilityOverrides, roles.main.model),
   );
 
+  // 取证能力集是运行时探测的系统事实（git 可用性 / workspace 形态），
+  // 传入草案生成——required 只能落在能力集内的 kind 上；无工作区时
+  // 无从独立取证，能力集为空、不装取证 provider（安全缺省）。
+  const workspacePath = workspace.path ?? undefined;
+  const evidenceCapabilities = workspacePath
+    ? await detectEvidenceCapabilities(workspacePath)
+    : undefined;
+
   const contractBuilder = new RubricContractBuilder({
     rubricStore: new RubricStore(),
     generationStrategy: new LLMRubricDraftGenerationStrategy({
@@ -53,6 +76,7 @@ export function createServeAdvancementController(): AdvancementController {
     revisionStrategy: new LLMRubricDraftRevisionStrategy({
       complete: (prompt) => mainCall([userMessage(prompt)]),
     }),
+    ...(evidenceCapabilities ? { evidenceCapabilities } : {}),
   });
 
   return new AdvancementController({
@@ -60,12 +84,26 @@ export function createServeAdvancementController(): AdvancementController {
     admissionStrategy: new LLMAdvancementAdmissionStrategy({
       complete: (prompt) => lightCall([userMessage(prompt)]),
     }),
+    ...(deps.recentContextProvider
+      ? { recentContextProvider: deps.recentContextProvider }
+      : {}),
+    ...(deps.onAdmissionTiming
+      ? { onAdmissionTiming: deps.onAdmissionTiming }
+      : {}),
     contractBuilder,
     reviewer: createAdvancementRuntime({
       provider: roles.main.provider,
       model: roles.main.model,
       thinking: mainThinking,
-      workingDirectory: workspace.path ?? undefined,
+      workingDirectory: workspacePath,
+      ...(evidenceCapabilities ? { evidenceCapabilities } : {}),
+      ...(workspacePath
+        ? {
+            evidenceProvider: createFirstPartyEvidenceProvider({
+              workspace: workspacePath,
+            }),
+          }
+        : {}),
       contextWindow: {
         capability: advancementWindowCapability,
         summarize: createSegmentSummarizeFn(

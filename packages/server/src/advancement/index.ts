@@ -1,5 +1,6 @@
 export {
   AdvancementController,
+  renderRecentContextFromMessages,
   type AdvancementCancelResult,
   type AdvancementConfirmedTurn,
   type AdvancementControllerOptions,

@@ -16,7 +16,11 @@ import {
   type RunRecordInput,
   type RunRecordRef,
   type RubricContractDraftSnapshot,
+  type Message,
+  type ReviewAttribution,
   type UserTurnInput,
+  extractText,
+  renderReviewAttribution,
   userTurnInputFromText,
 } from "@zhixing/core";
 import { randomUUID } from "node:crypto";
@@ -95,6 +99,15 @@ export interface AdvancementControllerOptions {
   readonly contractBuilder?: RubricContractBuilder;
   readonly admissionStrategy?: AdvancementAdmissionStrategy;
   readonly reviewer?: AdvancementRunReviewer;
+  /**
+   * 最近会话投影提供者——给准入判断喂执行侧窗口尾部的轻量文本，
+   * 让「继续把它弄完」这类上下文依赖输入分类正确。失败按无投影处理。
+   */
+  readonly recentContextProvider?: (
+    conversationId: string,
+  ) => Promise<string | undefined>;
+  /** 准入延迟观测——每次准入 LLM 判断的耗时回调（诊断面，基线数据来源）。 */
+  readonly onAdmissionTiming?: (elapsedMs: number) => void;
   readonly now?: () => string;
   readonly reviewIdGenerator?: () => string;
   readonly proxyIdGenerator?: () => string;
@@ -147,6 +160,10 @@ export class AdvancementController {
   private readonly contractBuilder: RubricContractBuilder;
   private readonly admissionStrategy: AdvancementAdmissionStrategy;
   private readonly reviewer?: AdvancementRunReviewer;
+  private readonly recentContextProvider?: (
+    conversationId: string,
+  ) => Promise<string | undefined>;
+  private readonly onAdmissionTiming?: (elapsedMs: number) => void;
   private readonly now: () => string;
   private readonly reviewIdGenerator: () => string;
   private readonly proxyIdGenerator: () => string;
@@ -157,11 +174,39 @@ export class AdvancementController {
     this.admissionStrategy =
       options.admissionStrategy ?? new ConservativeAdvancementAdmissionStrategy();
     this.reviewer = options.reviewer;
+    this.recentContextProvider = options.recentContextProvider;
+    this.onAdmissionTiming = options.onAdmissionTiming;
     this.now = options.now ?? (() => new Date().toISOString());
     this.reviewIdGenerator =
       options.reviewIdGenerator ?? (() => `adv_review_${randomUUID()}`);
     this.proxyIdGenerator =
       options.proxyIdGenerator ?? (() => `adv_proxy_${randomUUID()}`);
+  }
+
+  /** 准入判断统一出口：喂最近会话投影、计延迟基线；投影失败按无投影降级。 */
+  private async decideAdmission(input: {
+    readonly conversationId: string;
+    readonly userInput: UserTurnInput;
+    readonly hasOpenAdvancementSession?: boolean;
+    readonly hasActiveAdvancementSession?: boolean;
+  }): Promise<AdvancementAdmissionDecision> {
+    let recentContext: string | undefined;
+    try {
+      recentContext = await this.recentContextProvider?.(input.conversationId);
+    } catch {
+      recentContext = undefined;
+    }
+    const startedAt = Date.now();
+    try {
+      return await this.admissionStrategy.decide({
+        input: input.userInput,
+        hasOpenAdvancementSession: input.hasOpenAdvancementSession,
+        hasActiveAdvancementSession: input.hasActiveAdvancementSession,
+        ...(recentContext ? { recentContext } : {}),
+      });
+    } finally {
+      this.onAdmissionTiming?.(Date.now() - startedAt);
+    }
   }
 
   async prepareUserTurn(input: {
@@ -172,8 +217,9 @@ export class AdvancementController {
   }): Promise<AdvancementPrepareResult> {
     const open = await this.store.loadActiveSession(input.conversationId);
     if (open?.status === "awaiting-rubric-confirmation") {
-      const admission = await this.admissionStrategy.decide({
-        input: input.userInput,
+      const admission = await this.decideAdmission({
+        conversationId: input.conversationId,
+        userInput: input.userInput,
         hasOpenAdvancementSession: true,
       });
       if (admission.action === "downgrade-to-direct") {
@@ -209,8 +255,9 @@ export class AdvancementController {
     }
 
     if (open?.status === "active") {
-      const admission = await this.admissionStrategy.decide({
-        input: input.userInput,
+      const admission = await this.decideAdmission({
+        conversationId: input.conversationId,
+        userInput: input.userInput,
         hasActiveAdvancementSession: true,
       });
       if (admission.action === "take-over-active") {
@@ -239,8 +286,9 @@ export class AdvancementController {
       };
     }
 
-    const admission = await this.admissionStrategy.decide({
-      input: input.userInput,
+    const admission = await this.decideAdmission({
+      conversationId: input.conversationId,
+      userInput: input.userInput,
     });
     if (admission.action !== "start-advancement") {
       return { kind: "run-direct", admission };
@@ -416,6 +464,21 @@ export class AdvancementController {
     );
   }
 
+  /**
+   * 删除对话的全部推进控制数据（含孤儿 sweep 用的同一底层能力）——
+   * 控制日志生命周期跟随对话本体，对话删除时连带调用。
+   */
+  async removeConversationData(conversationId: string): Promise<void> {
+    await this.store.removeConversation(conversationId);
+  }
+
+  /** 孤儿控制日志目录清理——对话已不存在时其控制日志没有独立存在意义。 */
+  async sweepOrphanData(
+    isConversationDirAlive: (dirName: string) => Promise<boolean>,
+  ): Promise<{ scanned: number; removed: number; warnings: string[] }> {
+    return await this.store.sweepOrphanDirs(isConversationDirAlive);
+  }
+
   async loadActiveSession(
     conversationId: string,
   ): Promise<AdvancementSession | null> {
@@ -566,7 +629,7 @@ export class AdvancementController {
     const handling = rubric
       ? selectFailureHandling(rubric, review.selectedFailureHandlingId)
       : undefined;
-    if (!handling) {
+    if (!rubric || !handling) {
       const exit: AdvancementExit = {
         reason: "dead-end",
         message: "推进侧未能找到可执行的未通过处理准则，继续推进没有可靠收益。",
@@ -601,9 +664,12 @@ export class AdvancementController {
       id: proxyMessageId,
       sessionId: session.id,
       reviewId: review.id,
-      content: userTurnInputFromText(renderFailureHandlingReply(handling, variables)),
+      content: userTurnInputFromText(
+        composeProxyContent(handling, variables, review.attribution, rubric),
+      ),
       rubricFailureHandlingId: handling.id,
       variables,
+      attribution: review.attribution,
       createdAt: this.now(),
     };
     const reviewWithProxy: AdvancementRunReview = {
@@ -698,6 +764,7 @@ export class AdvancementController {
       reviewedAt: this.now(),
       decision: "exit",
       evidence: [],
+      attribution: { criteria: [] },
       unmetCriteria: [message],
       exitReason: "system-error",
     };
@@ -708,6 +775,34 @@ function errorMessage(err: unknown): string {
   return err instanceof Error && err.message.trim().length > 0
     ? err.message
     : "Rubric contract draft generation failed";
+}
+
+const RECENT_CONTEXT_MESSAGE_CHARS = 200;
+const RECENT_CONTEXT_TOTAL_CHARS = 1200;
+
+/**
+ * 把执行侧窗口尾部消息渲染为准入投影文本——体量硬裁剪，保持准入 prompt
+ * 小体量（投影是分类参考，不是完整上下文）。
+ */
+export function renderRecentContextFromMessages(
+  messages: readonly Message[] | undefined,
+): string | undefined {
+  if (!messages?.length) return undefined;
+  const lines: string[] = [];
+  let total = 0;
+  for (const message of [...messages].reverse()) {
+    const text = extractText(message).trim();
+    if (!text) continue;
+    const clipped =
+      text.length > RECENT_CONTEXT_MESSAGE_CHARS
+        ? `${text.slice(0, RECENT_CONTEXT_MESSAGE_CHARS)}...`
+        : text;
+    const line = `${message.role === "user" ? "用户" : "知行"}：${clipped}`;
+    if (total + line.length > RECENT_CONTEXT_TOTAL_CHARS) break;
+    lines.unshift(line);
+    total += line.length;
+  }
+  return lines.length > 0 ? lines.join("\n") : undefined;
 }
 
 function splitReviewOutput(output: AdvancementRunReviewOutput): {
@@ -798,4 +893,24 @@ function renderFailureHandlingReply(
     const value = variables[key];
     return value === undefined ? match : value;
   });
+}
+
+/**
+ * 代理消息全文 = 意图骨架 + 归因事实块。
+ * 意图骨架来自用户确认的 failureHandling（守推进意图不被改写）；
+ * 归因块把裁判的逐条结论与独立证据事实传给执行侧，判断分歧一轮解开。
+ * 拼装是纯函数：恢复重建按同一 review 重渲染即得 byte 等价的 content。
+ */
+function composeProxyContent(
+  handling: FailureHandlingSpec,
+  variables: Readonly<Record<string, string>>,
+  attribution: ReviewAttribution,
+  rubric: ConfirmedRubricSnapshot,
+): string {
+  const reply = renderFailureHandlingReply(handling, variables);
+  const facts = renderReviewAttribution(
+    attribution,
+    rubric.content.passCriteria,
+  );
+  return facts ? `${reply}\n\n${facts}` : reply;
 }

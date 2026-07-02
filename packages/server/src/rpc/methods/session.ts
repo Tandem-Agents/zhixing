@@ -1275,6 +1275,12 @@ export function buildSessionDeleteMethod(): MethodEntry {
       } catch (err) {
         console.error("[session.delete] advancement cleanup failed:", err);
       }
+      // 控制日志生命周期跟随对话本体——连带删除，失败不影响主对话删除结果。
+      try {
+        await ctx.server.advancement?.removeConversationData(id);
+      } catch (err) {
+        console.error("[session.delete] advancement data removal failed:", err);
+      }
     },
   };
 }

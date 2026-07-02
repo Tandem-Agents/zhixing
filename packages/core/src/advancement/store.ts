@@ -1,6 +1,10 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { advancementLogPath, getAdvancementRoot } from "./paths.js";
+import {
+  advancementConversationDir,
+  advancementLogPath,
+  getAdvancementRoot,
+} from "./paths.js";
 import type {
   AdvancementCompletedEvent,
   AdvancementExit,
@@ -28,6 +32,58 @@ export class AdvancementStore {
 
   constructor(root: string = getAdvancementRoot()) {
     this.root = root;
+  }
+
+  /**
+   * 删除一个对话的全部推进控制数据——控制日志是对话的附属控制面数据，
+   * 生命周期跟随对话本体；对话删除时连带调用。幂等（目录不存在即成功）。
+   */
+  async removeConversation(conversationId: string): Promise<void> {
+    await this.withConversationLock(conversationId, async () => {
+      await fs.rm(advancementConversationDir(this.root, conversationId), {
+        recursive: true,
+        force: true,
+      });
+    });
+  }
+
+  /**
+   * 孤儿目录清理——枚举控制日志根目录，删除对应对话已不存在的目录
+   * （对话侧与本目录同用安全路径投影编码，目录名可直接比对）。
+   * 幂等；单点失败跳过并计入 warnings，不拖垮整轮。
+   */
+  async sweepOrphanDirs(
+    isConversationDirAlive: (dirName: string) => Promise<boolean>,
+  ): Promise<{ scanned: number; removed: number; warnings: string[] }> {
+    const warnings: string[] = [];
+    let scanned = 0;
+    let removed = 0;
+    let dirNames: string[];
+    try {
+      const entries = await fs.readdir(this.root, { withFileTypes: true });
+      dirNames = entries
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name);
+    } catch {
+      return { scanned, removed, warnings };
+    }
+    for (const name of dirNames) {
+      const entry = { name };
+      scanned++;
+      try {
+        if (await isConversationDirAlive(entry.name)) continue;
+        await fs.rm(path.join(this.root, entry.name), {
+          recursive: true,
+          force: true,
+        });
+        removed++;
+      } catch (err) {
+        warnings.push(
+          `${entry.name}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    return { scanned, removed, warnings };
   }
 
   async createSession(
@@ -707,21 +763,49 @@ function isAdvancementStoreEvent(value: unknown): value is AdvancementStoreEvent
         typeof (event as Partial<AdvancementSessionCreatedEvent>)
           .originalUserTask === "object"
       );
-    case "rubric_confirmed":
-      return typeof (event as Partial<AdvancementRubricConfirmedEvent>)
-        .confirmedRubric === "object";
+    case "rubric_confirmed": {
+      // 条目化形状校验——升级前的 legacy 快照（passCriteria: string[]）整条
+      // 隔离：半隔离会让字符串条目穿透到注入渲染与裁判 schema（产出
+      // undefined/null），干净地不可见让旧会话退回 awaiting、可重新确认。
+      const rubric = (event as Partial<AdvancementRubricConfirmedEvent>)
+        .confirmedRubric;
+      if (!rubric || typeof rubric !== "object") return false;
+      const criteria = (rubric as { content?: { passCriteria?: unknown } })
+        .content?.passCriteria;
+      return (
+        Array.isArray(criteria) &&
+        criteria.every(
+          (item) =>
+            !!item &&
+            typeof item === "object" &&
+            typeof (item as { id?: unknown }).id === "string" &&
+            typeof (item as { text?: unknown }).text === "string",
+        )
+      );
+    }
     case "rubric_draft_revised":
       return typeof (event as Partial<AdvancementRubricDraftRevisedEvent>)
         .pendingRubricDraft === "object";
-    case "run_reviewed":
-      return typeof (event as Partial<AdvancementRunReviewedEvent>).review ===
-        "object";
+    case "run_reviewed": {
+      const review = (event as Partial<AdvancementRunReviewedEvent>).review;
+      return (
+        typeof review === "object" &&
+        review !== null &&
+        typeof (review as { attribution?: unknown }).attribution === "object"
+      );
+    }
     case "window_updated":
       return typeof (event as Partial<AdvancementWindowUpdatedEvent>)
         .advancementWindow === "object";
-    case "proxy_enqueued":
-      return typeof (event as Partial<AdvancementProxyEnqueuedEvent>)
-        .proxyMessage === "object";
+    case "proxy_enqueued": {
+      const proxy = (event as Partial<AdvancementProxyEnqueuedEvent>)
+        .proxyMessage;
+      return (
+        typeof proxy === "object" &&
+        proxy !== null &&
+        typeof (proxy as { attribution?: unknown }).attribution === "object"
+      );
+    }
     case "proxy_settled":
       return typeof (event as Partial<AdvancementProxySettledEvent>)
         .proxyMessageId === "string";

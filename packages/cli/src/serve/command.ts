@@ -59,6 +59,7 @@ import {
   createRunEventForwarder,
   createAdvancementRecoveryMaintenance,
   getDefaultLogPath,
+  renderRecentContextFromMessages,
   SESSION_NOTIFICATIONS,
   type SessionChangedPayload,
   type SessionActivityBroadcast,
@@ -91,6 +92,8 @@ import {
 import { registerCliTurnContextProviders } from "../runtime/turn-context-providers.js";
 import { applyTaskListAction } from "../runtime/task-list-actions.js";
 import { createServeAdvancementController } from "./advancement-controller.js";
+import { createAdvancementAcceptanceLifecycle } from "./advancement-acceptance-lifecycle.js";
+import { createConversationAliveCheck } from "./advancement-gc.js";
 import { createCliRuntimeFactory } from "./session-adapter.js";
 import { createConversationDirectory } from "./conversation-directory.js";
 import { createWorksceneDirectory } from "./workscene-directory.js";
@@ -331,7 +334,17 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   //   存技能、会话 B 下窗不知道"(各自版本各自计);共享后任一保存,全部
   //   runtime 下个窗口换代即见。磁盘本就同一目录,共享无额外耦合。
   const serveSkillStore = new SkillStore();
-  const advancementController = createServeAdvancementController();
+  const advancementController = await createServeAdvancementController({
+    // 准入投影：活跃会话窗口尾部（lazy ref，manager 未就绪时无投影）；
+    // 延迟基线进 serve 日志作观测数据。
+    recentContextProvider: async (conversationId) =>
+      renderRecentContextFromMessages(
+        conversationsRef.current?.getHistory(conversationId, 6),
+      ),
+    onAdmissionTiming: (elapsedMs) => {
+      console.log(chalk.dim(`[advancement] admission ${elapsedMs}ms`));
+    },
+  });
 
   // 3d. RuntimeHost —— 宿主侧 runtime 装配点:共享资产(skillStore / segmentDeps /
   //   mcpHub / 渲染装饰)单一持有,会话与 ephemeral 两条发放路径同一装配体。
@@ -343,6 +356,9 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     segmentDeps: serveSegmentDeps,
     extraTools: builtinExtraTools,
     scheduler: getSchedulerFacade,
+    // 推进闭环 active 期间把契约验收条件注入执行侧发送视图——订阅者按
+    // conversationId 运行期查推进会话状态，装配期不绑定任何对话。
+    lifecycle: [createAdvancementAcceptanceLifecycle(advancementController)],
     // 渠道下游(飞书/RPC)可看到子 agent 冒泡事件,renderDecorator 在非 TTY
     // 模式下退化为只输出 Task 起止帧(子工具中间事件静默,避免日志爆炸)。
     decorateRunBus: serveDecorateRunBus,
@@ -562,6 +578,12 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
       runSweep: async () =>
         runRetentionSweep({ roots: await collectConversationRoots() }),
     },
+    advancement: {
+      runSweep: async () =>
+        await advancementController.sweepOrphanData(
+          createConversationAliveCheck(),
+        ),
+    },
   });
 
   // ============================================================================
@@ -603,6 +625,14 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     name: "transcript-gc",
     handler: "__transcript-gc",
     schedule: { kind: "cron", expr: "30 3 * * *" },
+  });
+  // 推进控制日志孤儿清理（对话已删而目录残留）——生命周期跟随对话本体，
+  // 主路径是 session.delete 连带删除，此任务只兜孤儿；继续错开半小时。
+  await scheduler.ensureSystemTask({
+    id: "__advancement-gc",
+    name: "advancement-gc",
+    handler: "__advancement-gc",
+    schedule: { kind: "cron", expr: "0 4 * * *" },
   });
 
   // ============================================================================

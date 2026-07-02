@@ -21,6 +21,21 @@ import {
 
 const NOW = new Date("2026-01-01T00:00:00.000Z");
 
+const MET_CRITERIA = [
+  { criterionId: "pc-1", verdict: "met", reason: "需求已实现。" },
+  {
+    criterionId: "pc-2",
+    verdict: "met",
+    reason: "相关测试已通过。",
+    evidenceExcerpt: "pnpm test passed",
+  },
+];
+
+const UNMET_CRITERIA = [
+  { criterionId: "pc-1", verdict: "met", reason: "需求已实现。" },
+  { criterionId: "pc-2", verdict: "unmet", reason: "缺少测试通过证据。" },
+];
+
 describe("AdvancementRuntime", () => {
   it("通过专用裁判工具提交通过结论", async () => {
     const provider = new MockLLMProvider([
@@ -31,17 +46,8 @@ describe("AdvancementRuntime", () => {
             name: ADVANCEMENT_SUBMIT_REVIEW_TOOL,
             input: {
               decision: "passed",
-              evidence: [
-                {
-                  id: "tests-green",
-                  kind: "test-result",
-                  requirementId: "tests",
-                  source: "independent",
-                  summary: "相关测试已通过。",
-                  passed: true,
-                },
-              ],
-              unmetCriteria: [],
+              evidenceIds: ["tests-green"],
+              criteria: MET_CRITERIA,
             },
           },
         ],
@@ -75,10 +81,186 @@ describe("AdvancementRuntime", () => {
       decision: "passed",
       unmetCriteria: [],
     });
+    expect(review.attribution.criteria).toEqual(MET_CRITERIA);
     expect(review.evidence).toHaveLength(1);
+    // 证据采用是 id 引用：持久化证据恒等于取证层 canonical，模型没有任何
+    // 字段（含 summary）可以改写
+    expect(review.evidence[0]).toEqual({
+      id: "tests-green",
+      kind: "test-result",
+      requirementId: "tests",
+      source: "independent",
+      summary: "pnpm test passed",
+      passed: true,
+    });
     expect(provider.calls[0]?.tools?.map((tool) => tool.name)).toEqual([
       ADVANCEMENT_SUBMIT_REVIEW_TOOL,
     ]);
+  });
+
+  it("review 携带裁判与被审 run 的 usage 两半快照", async () => {
+    const provider = new MockLLMProvider([
+      {
+        toolCalls: [
+          {
+            id: "judge-usage",
+            name: ADVANCEMENT_SUBMIT_REVIEW_TOOL,
+            input: {
+              decision: "failed",
+              evidenceIds: [],
+              criteria: UNMET_CRITERIA,
+              selectedFailureHandlingId: "ask-for-tests",
+            },
+          },
+        ],
+      },
+    ]);
+    const runtime = createAdvancementRuntime({
+      provider,
+      model: "mock-model",
+      now: () => NOW,
+      idGenerator: () => "review-usage",
+    });
+
+    const { review } = await runtime.reviewRun({
+      ...baseInput(),
+      runRecord: {
+        ...runRecord("我已经修改完成。"),
+        usage: { inputTokens: 120, outputTokens: 40 },
+      },
+    });
+
+    expect(review.usage?.run).toEqual({ inputTokens: 120, outputTokens: 40 });
+    expect(review.usage?.judge).toBeDefined();
+  });
+
+  it("裁判可用 capability-gap 退出，能力集事实进入系统提示", async () => {
+    const provider = new MockLLMProvider([
+      {
+        toolCalls: [
+          {
+            id: "judge-gap",
+            name: ADVANCEMENT_SUBMIT_REVIEW_TOOL,
+            input: {
+              decision: "exit",
+              evidenceIds: [],
+              criteria: [
+                { criterionId: "pc-1", verdict: "met", reason: "需求已实现。" },
+                {
+                  criterionId: "pc-2",
+                  verdict: "unknown",
+                  reason: "系统无法独立核验测试结果。",
+                },
+              ],
+              exitReason: "capability-gap",
+            },
+          },
+        ],
+      },
+    ]);
+    const runtime = createAdvancementRuntime({
+      provider,
+      model: "mock-model",
+      evidenceCapabilities: { independentKinds: ["file-diff", "log"] },
+      now: () => NOW,
+      idGenerator: () => "review-gap",
+    });
+
+    const { review } = await runtime.reviewRun(baseInput());
+
+    expect(review.decision).toBe("exit");
+    expect(review.exitReason).toBe("capability-gap");
+    expect(provider.calls[0]?.systemPrompt).toContain("file-diff、log");
+    expect(provider.calls[0]?.systemPrompt).toContain("capability-gap");
+  });
+
+  it("拒绝对同一条通过标准重复判定", async () => {
+    const provider = new MockLLMProvider([
+      {
+        toolCalls: [
+          {
+            id: "judge-dup",
+            name: ADVANCEMENT_SUBMIT_REVIEW_TOOL,
+            input: {
+              decision: "passed",
+              evidenceIds: [],
+              criteria: [MET_CRITERIA[0], MET_CRITERIA[0]],
+            },
+          },
+        ],
+      },
+    ]);
+    const runtime = createAdvancementRuntime({
+      provider,
+      model: "mock-model",
+      now: () => NOW,
+      idGenerator: () => "review-dup",
+    });
+
+    const { review } = await runtime.reviewRun(baseInput());
+
+    expect(review.decision).toBe("exit");
+    expect(review.exitReason).toBe("system-error");
+  });
+
+  it("逐条判定必须恰好覆盖全部通过标准条目", async () => {
+    const provider = new MockLLMProvider([
+      {
+        toolCalls: [
+          {
+            id: "judge-partial",
+            name: ADVANCEMENT_SUBMIT_REVIEW_TOOL,
+            input: {
+              decision: "passed",
+              evidenceIds: [],
+              criteria: [MET_CRITERIA[0]],
+            },
+          },
+        ],
+      },
+    ]);
+    const runtime = createAdvancementRuntime({
+      provider,
+      model: "mock-model",
+      now: () => NOW,
+      idGenerator: () => "review-partial-criteria",
+    });
+
+    const { review } = await runtime.reviewRun(baseInput());
+
+    expect(review.decision).toBe("exit");
+    expect(review.exitReason).toBe("system-error");
+  });
+
+  it("failed 结论的 unmetCriteria 由逐条判定派生为标准文本", async () => {
+    const provider = new MockLLMProvider([
+      {
+        toolCalls: [
+          {
+            id: "judge-derive",
+            name: ADVANCEMENT_SUBMIT_REVIEW_TOOL,
+            input: {
+              decision: "failed",
+              evidenceIds: [],
+              criteria: UNMET_CRITERIA,
+              selectedFailureHandlingId: "ask-for-tests",
+            },
+          },
+        ],
+      },
+    ]);
+    const runtime = createAdvancementRuntime({
+      provider,
+      model: "mock-model",
+      now: () => NOW,
+      idGenerator: () => "review-derived",
+    });
+
+    const { review } = await runtime.reviewRun(baseInput());
+
+    expect(review.decision).toBe("failed");
+    expect(review.unmetCriteria).toEqual(["相关测试通过"]);
+    expect(review.attribution.criteria).toEqual(UNMET_CRITERIA);
   });
 
   it("拒绝纯文本裁判结论并 fail closed", async () => {
@@ -121,16 +303,8 @@ describe("AdvancementRuntime", () => {
             name: ADVANCEMENT_SUBMIT_REVIEW_TOOL,
             input: {
               decision: "passed",
-              evidence: [
-                {
-                  id: "missing-required-tests",
-                  kind: "test-result",
-                  requirementId: "tests",
-                  summary: "没有独立测试结果。",
-                  passed: false,
-                },
-              ],
-              unmetCriteria: [],
+              evidenceIds: ["missing-required-tests"],
+              criteria: MET_CRITERIA,
             },
           },
         ],
@@ -159,15 +333,8 @@ describe("AdvancementRuntime", () => {
             name: ADVANCEMENT_SUBMIT_REVIEW_TOOL,
             input: {
               decision: "failed",
-              evidence: [
-                {
-                  id: "run-final-response",
-                  kind: "conversation-fact",
-                  source: "execution-report",
-                  summary: "执行侧没有说明测试结果。",
-                },
-              ],
-              unmetCriteria: ["缺少测试通过证据"],
+              evidenceIds: ["run-final-response"],
+              criteria: UNMET_CRITERIA,
             },
           },
         ],
@@ -195,17 +362,8 @@ describe("AdvancementRuntime", () => {
             name: ADVANCEMENT_SUBMIT_REVIEW_TOOL,
             input: {
               decision: "passed",
-              evidence: [
-                {
-                  id: "fake-independent-test",
-                  kind: "test-result",
-                  requirementId: "tests",
-                  source: "independent",
-                  summary: "我声称测试通过。",
-                  passed: true,
-                },
-              ],
-              unmetCriteria: [],
+              evidenceIds: ["fake-independent-test"],
+              criteria: MET_CRITERIA,
             },
           },
         ],
@@ -233,17 +391,8 @@ describe("AdvancementRuntime", () => {
             name: ADVANCEMENT_SUBMIT_REVIEW_TOOL,
             input: {
               decision: "passed",
-              evidence: [
-                {
-                  id: "tests-red",
-                  kind: "test-result",
-                  requirementId: "tests",
-                  source: "independent",
-                  summary: "裁判试图把失败测试改判为通过。",
-                  passed: true,
-                },
-              ],
-              unmetCriteria: [],
+              evidenceIds: ["tests-red"],
+              criteria: MET_CRITERIA,
             },
           },
         ],
@@ -281,17 +430,8 @@ describe("AdvancementRuntime", () => {
             name: ADVANCEMENT_SUBMIT_REVIEW_TOOL,
             input: {
               decision: "passed",
-              evidence: [
-                {
-                  id: "unbound-test-output",
-                  kind: "test-result",
-                  requirementId: "tests",
-                  source: "independent",
-                  summary: "裁判试图把未绑定证据挂到 tests 上。",
-                  passed: true,
-                },
-              ],
-              unmetCriteria: [],
+              evidenceIds: ["unbound-test-output"],
+              criteria: MET_CRITERIA,
             },
           },
         ],
@@ -328,17 +468,8 @@ describe("AdvancementRuntime", () => {
             name: ADVANCEMENT_SUBMIT_REVIEW_TOOL,
             input: {
               decision: "passed",
-              evidence: [
-                {
-                  id: "log-ok",
-                  kind: "log",
-                  requirementId: "tests",
-                  source: "independent",
-                  summary: "只有日志证据，不能代替测试结果。",
-                  passed: true,
-                },
-              ],
-              unmetCriteria: [],
+              evidenceIds: ["log-ok"],
+              criteria: MET_CRITERIA,
             },
           },
         ],
@@ -367,7 +498,7 @@ describe("AdvancementRuntime", () => {
     expect(review.exitReason).toBe("system-error");
   });
 
-  it("拒绝不符合工具 schema 的可选字段类型", async () => {
+  it("拒绝非法的证据引用形态", async () => {
     const provider = new MockLLMProvider([
       {
         toolCalls: [
@@ -376,17 +507,8 @@ describe("AdvancementRuntime", () => {
             name: ADVANCEMENT_SUBMIT_REVIEW_TOOL,
             input: {
               decision: "passed",
-              evidence: [
-                {
-                  id: "tests-green",
-                  kind: "test-result",
-                  requirementId: "tests",
-                  source: "independent",
-                  summary: "相关测试已通过。",
-                  passed: "true",
-                },
-              ],
-              unmetCriteria: [],
+              evidenceIds: [{ id: "tests-green" }],
+              criteria: MET_CRITERIA,
             },
           },
         ],
@@ -423,15 +545,8 @@ describe("AdvancementRuntime", () => {
             name: ADVANCEMENT_SUBMIT_REVIEW_TOOL,
             input: {
               decision: "failed",
-              evidence: [
-                {
-                  id: "run-final-response",
-                  kind: "conversation-fact",
-                  source: "execution-report",
-                  summary: "执行侧只给出总结。",
-                },
-              ],
-              unmetCriteria: ["缺少测试通过证据"],
+              evidenceIds: ["run-final-response"],
+              criteria: UNMET_CRITERIA,
               selectedFailureHandlingId: "ask-for-tests",
             },
           },
@@ -464,15 +579,8 @@ describe("AdvancementRuntime", () => {
             name: ADVANCEMENT_SUBMIT_REVIEW_TOOL,
             input: {
               decision: "failed",
-              evidence: [
-                {
-                  id: "run-final-response",
-                  kind: "conversation-fact",
-                  source: "execution-report",
-                  summary: "执行侧只给出总结。",
-                },
-              ],
-              unmetCriteria: ["仍缺少测试通过证据"],
+              evidenceIds: ["run-final-response"],
+              criteria: UNMET_CRITERIA,
               selectedFailureHandlingId: "ask-for-tests",
             },
           },
@@ -488,17 +596,7 @@ describe("AdvancementRuntime", () => {
 
     await runtime.reviewRun({
       ...baseInput(),
-      priorReviews: [
-        {
-          id: "previous-review",
-          runIndex: 2,
-          reviewedAt: NOW.toISOString(),
-          decision: "failed",
-          evidence: [],
-          unmetCriteria: ["缺少测试通过证据"],
-          selectedFailureHandlingId: "ask-for-tests",
-        },
-      ],
+      priorReviews: [priorReview("previous-review", 2)],
     });
     const prompt = provider.calls[0]?.messages[0]?.content[0];
 
@@ -516,15 +614,8 @@ describe("AdvancementRuntime", () => {
             name: ADVANCEMENT_SUBMIT_REVIEW_TOOL,
             input: {
               decision: "failed",
-              evidence: [
-                {
-                  id: "run-final-response",
-                  kind: "conversation-fact",
-                  source: "execution-report",
-                  summary: "执行侧还没提供测试通过证据。",
-                },
-              ],
-              unmetCriteria: ["缺少测试通过证据"],
+              evidenceIds: ["run-final-response"],
+              criteria: UNMET_CRITERIA,
               selectedFailureHandlingId: "ask-for-tests",
             },
           },
@@ -592,8 +683,8 @@ describe("AdvancementRuntime", () => {
             name: ADVANCEMENT_SUBMIT_REVIEW_TOOL,
             input: {
               decision: "failed",
-              evidence: [],
-              unmetCriteria: ["仍缺少测试通过证据"],
+              evidenceIds: [],
+              criteria: UNMET_CRITERIA,
               selectedFailureHandlingId: "ask-for-tests",
             },
           },
@@ -655,6 +746,12 @@ function priorReview(id: string, runIndex: number): AdvancementRunReview {
     reviewedAt: NOW.toISOString(),
     decision: "failed",
     evidence: [],
+    attribution: {
+      criteria: [
+        { criterionId: "pc-1", verdict: "met", reason: "需求已实现。" },
+        { criterionId: "pc-2", verdict: "unmet", reason: "缺少测试通过证据。" },
+      ],
+    },
     unmetCriteria: ["缺少测试通过证据"],
     selectedFailureHandlingId: "ask-for-tests",
   };
@@ -699,7 +796,10 @@ function rubric(): ConfirmedRubricSnapshot {
     confirmedAt: NOW.toISOString(),
     confirmedBy: "user",
     content: {
-      passCriteria: ["需求已实现", "相关测试通过"],
+      passCriteria: [
+        { id: "pc-1", text: "需求已实现" },
+        { id: "pc-2", text: "相关测试通过" },
+      ],
       evidenceRequirements: [
         {
           id: "tests",

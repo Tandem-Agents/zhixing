@@ -53,6 +53,21 @@ export function toSafePathSegment(id: string): string {
   )}`;
 }
 
+/**
+ * toSafePathSegment 的逆函数：把目录段还原为逻辑标识符。
+ * 编码无损可逆（plain 段原文保持、zid- 段是 base64url）。凡需要从磁盘
+ * 目录名反查逻辑 ID 的维护路径（如孤儿清理判活）必须经此还原后走正向
+ * 语义检查，不得拿目录名跨域做字符串比对——不同域对同一逻辑 ID 的
+ * 目录布局可能不同（如对话按 scope 布局用 localId、控制日志用全域键）。
+ */
+export function fromSafePathSegment(segment: string): string {
+  if (!segment.startsWith(ENCODED_PATH_SEGMENT_PREFIX)) return segment;
+  return Buffer.from(
+    segment.slice(ENCODED_PATH_SEGMENT_PREFIX.length),
+    "base64url",
+  ).toString("utf8");
+}
+
 const ENCODED_PATH_SEGMENT_PREFIX = "zid-";
 const PLAIN_SAFE_PATH_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 

@@ -22,6 +22,7 @@ import {
   createAgentRuntime,
   runContextStorage,
   type AgentRuntime,
+  type AgentRuntimeLifecycle,
   type CreateAgentRuntimeOptions,
 } from "@zhixing/orchestrator/runtime";
 import { powerProfile } from "@zhixing/orchestrator/profile";
@@ -55,6 +56,12 @@ export interface RuntimeHostOptions {
    * 路径(会话 / ephemeral)都经此调用。
    */
   onRuntimeCreated?: (runtime: AgentRuntime) => void;
+  /**
+   * 生命周期订阅者集合(资产层共享)——随每个发放实例下发,实例内恒定。
+   * 订阅者按执行期上下文(conversationId 等)自行决定是否介入,装配期不
+   * 按对话定制;无会话身份的 ephemeral run 由订阅者自然跳过。
+   */
+  lifecycle?: readonly AgentRuntimeLifecycle[];
   /**
    * 工作模式控制器(可选)——提供时会话实例装配 workmode 工具组(main 装
    * enter / change_approve / memory_query,场景实例装 exit),LLM 由此产生
@@ -152,6 +159,7 @@ export class RuntimeHost {
       onSecurityBlocked: this.opts.onSecurityBlocked,
       segmentDeps: this.opts.segmentDeps,
       skillStore: this.opts.skillStore,
+      ...(this.opts.lifecycle ? { lifecycle: this.opts.lifecycle } : {}),
     });
     this.opts.onRuntimeCreated?.(runtime);
     return runtime;
