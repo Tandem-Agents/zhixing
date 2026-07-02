@@ -36,6 +36,7 @@ import type {
   SessionTaskListAction,
   SessionTaskListResult,
   SessionTaskListUpdateResult,
+  SessionAdvancementDetailResult,
   SessionUsageResult,
 } from "@zhixing/server";
 import type { UserTurnInput } from "@zhixing/core";
@@ -113,15 +114,20 @@ export class RpcConversationFacade {
     await client.request("session.abort", { conversationId });
   }
 
-  /** 确认待审 Rubric 契约，并让宿主用原 turnId 开始执行原任务。 */
+  /**
+   * 确认待审 Rubric 契约，并让宿主用原 turnId 开始执行原任务。
+   * rubricDraftId 必填——「确认你所见」是协议边界：绑定发起端所见草案
+   * 版本，草案被并发修订后宿主拒绝盲确认。
+   */
   async confirmAdvancement(
     conversationId: string,
     advancementSessionId: string,
+    rubricDraftId: string,
   ): Promise<SessionAdvancementConfirmResult> {
     const client = await this.link.getClient();
     return client.request<SessionAdvancementConfirmResult>(
       "session.advancementConfirm",
-      { conversationId, advancementSessionId },
+      { conversationId, advancementSessionId, rubricDraftId },
     );
   }
 
@@ -214,6 +220,17 @@ export class RpcConversationFacade {
     return client.request<SessionUsageResult>("session.usage", {
       conversationId,
     });
+  }
+
+  /** /advancement 的数据面：推进详情（归因展开 + 终态收场回看）。 */
+  async advancementDetail(
+    conversationId: string,
+  ): Promise<SessionAdvancementDetailResult> {
+    const client = await this.link.getClient();
+    return client.request<SessionAdvancementDetailResult>(
+      "session.advancementDetail",
+      { conversationId },
+    );
   }
 
   /** 切换到既有对话——宿主 touch + 返回 meta 与活跃态。 */

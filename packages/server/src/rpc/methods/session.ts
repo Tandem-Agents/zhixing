@@ -24,6 +24,7 @@
 
 import {
   abortWithReason,
+  buildClosureFacts,
   generateTurnId,
   isNonEmptyUserTurnInput,
   type AdvancementSession,
@@ -49,6 +50,7 @@ import {
   type SessionCompletePayload,
   type SessionAdvancementCancelResult,
   type SessionAdvancementConfirmResult,
+  type SessionAdvancementDetailResult,
   type SessionAdvancementReviseResult,
   type SessionAdvancementStateSnapshot,
   type SessionConversationEntry,
@@ -184,7 +186,7 @@ export function buildSessionSendMethod(): MethodEntry {
         }
 
         if (activePrepared?.kind === "active-user-turn") {
-          return await sendDirectTurn({
+          const accepted = await sendDirectTurn({
             manager,
             conversationId: id,
             input,
@@ -194,6 +196,14 @@ export function buildSessionSendMethod(): MethodEntry {
             broadcast,
             server: ctx.server,
           });
+          // 中途插话可见性：输入被分类为同一目标的补充继续——发起端据此
+          // 告知用户，含是否为处理输入而中止了在跑的推进代理。
+          return {
+            ...accepted,
+            advancementContinuation: {
+              interruptedProxy: activePrepared.interruptedProxy,
+            },
+          };
         }
 
         const preparedId = id ?? generateConversationId();
@@ -241,7 +251,6 @@ export function buildSessionSendMethod(): MethodEntry {
           });
           return awaitingRubricResult(
             prepared.session.conversationId,
-            turnId,
             prepared.session.id,
             prepared.draft,
           );
@@ -276,7 +285,6 @@ export function buildSessionSendMethod(): MethodEntry {
           });
           return awaitingRubricResult(
             prepared.session.conversationId,
-            turnId,
             prepared.session.id,
             prepared.draft,
           );
@@ -372,7 +380,7 @@ export function buildSessionSendMethod(): MethodEntry {
           });
         }
 
-        return await sendDirectTurn({
+        const fallthroughAccepted = await sendDirectTurn({
           manager,
           conversationId: id,
           preallocatedConversationId: id ? undefined : preparedId,
@@ -383,6 +391,16 @@ export function buildSessionSendMethod(): MethodEntry {
           broadcast,
           server: ctx.server,
         });
+        // active 会话无 outstanding 且不 busy 时（proxy 结算后的间隙 /
+        // 验收挂起期），continue-active 走本 fall-through——插话告知与
+        // helper 路径保持一致，不让知情看运气走哪条路径。
+        if (prepared.kind === "active-user-turn") {
+          return {
+            ...fallthroughAccepted,
+            advancementContinuation: { interruptedProxy: false },
+          };
+        }
+        return fallthroughAccepted;
       }
 
       return await sendDirectTurn({
@@ -403,6 +421,8 @@ export function buildSessionSendMethod(): MethodEntry {
 
 interface SessionAdvancementActionParams extends ConversationIdParams {
   advancementSessionId?: unknown;
+  /** 发起端所见草案版本——confirm 据此拒绝「确认到没看过的修订」。 */
+  rubricDraftId?: unknown;
 }
 
 interface SessionAdvancementCancelParams extends SessionAdvancementActionParams {
@@ -430,6 +450,10 @@ export function buildSessionAdvancementConfirmMethod(): MethodEntry {
         params,
         "session.advancementConfirm",
       );
+      const rubricDraftId = requireRubricDraftId(
+        params,
+        "session.advancementConfirm",
+      );
       const advancement = requireAdvancement(ctx.server);
       const manager = requireConversations(ctx.server);
       let confirmed: Awaited<ReturnType<typeof advancement.confirmRubric>>;
@@ -444,6 +468,7 @@ export function buildSessionAdvancementConfirmMethod(): MethodEntry {
             advancement.confirmRubric({
               conversationId,
               advancementSessionId,
+              expectedRubricDraftId: rubricDraftId,
             }),
         });
       } catch (err) {
@@ -676,31 +701,38 @@ async function prepareActiveAdvancementUserTurn(input: {
   readonly turnId: string;
   readonly input: UserTurnInput;
 }): Promise<
-  Extract<
-    AdvancementPrepareResult,
-    {
-      readonly kind:
-        | "active-user-turn"
-        | "active-session-taken-over"
-        | "rubric-regenerated"
-        | "contract-failed";
-    }
-  > | null
+  | (Extract<AdvancementPrepareResult, { readonly kind: "active-user-turn" }> & {
+      /** 为处理本次输入中止了正在执行的推进代理——发起端告知素材。 */
+      readonly interruptedProxy: boolean;
+    })
+  | Extract<
+      AdvancementPrepareResult,
+      {
+        readonly kind:
+          | "active-session-taken-over"
+          | "rubric-regenerated"
+          | "contract-failed";
+      }
+    >
+  | null
 > {
   const active = await input.advancement.loadActiveSession(input.conversationId);
   if (active?.status !== "active") return null;
-  if (
-    !active.outstandingProxyMessageId &&
-    input.manager.getBusySource(input.conversationId) !== "advancement"
-  ) {
-    return null;
-  }
 
-  const interruption = interruptAdvancementProxy({
-    manager: input.manager,
-    conversationId: input.conversationId,
-    outstandingProxyMessageId: active.outstandingProxyMessageId,
-  });
+  // active 会话的用户输入一律先过准入分类——排队与分类正交：对话正忙于
+  // 普通 turn 时输入照样可能是接管 / 修正标准意图，跳过分类会让意图静默
+  // 丢进闭环按旧契约续推。中断只对推进代理（outstanding / advancement
+  // 在跑）执行，为用户让路；普通 turn 不受影响，消息按既有队列语义排队。
+  const advancementEngaged =
+    Boolean(active.outstandingProxyMessageId) ||
+    input.manager.getBusySource(input.conversationId) === "advancement";
+  const interruption = advancementEngaged
+    ? interruptAdvancementProxy({
+        manager: input.manager,
+        conversationId: input.conversationId,
+        outstandingProxyMessageId: active.outstandingProxyMessageId,
+      })
+    : {};
 
   const prepared = await input.advancement.prepareUserTurn({
     conversationId: input.conversationId,
@@ -716,7 +748,10 @@ async function prepareActiveAdvancementUserTurn(input: {
         proxyMessageId: interruption.proxyMessageId,
       });
     }
-    return prepared;
+    return {
+      ...prepared,
+      interruptedProxy: interruption.proxyMessageId !== undefined,
+    };
   }
 
   if (prepared.kind === "active-session-taken-over") return prepared;
@@ -965,22 +1000,26 @@ function respondRubricRegenerated(input: {
   });
   return awaitingRubricResult(
     prepared.session.conversationId,
-    input.turnId,
     prepared.session.id,
     prepared.draft,
   );
 }
 
+/**
+ * awaiting 结果的 turnId 单源：恒取草案的 originalTurnId——它是确认后
+ * 真正执行的 turn 身份，confirm / direct / revise 的校验链都锚定它。
+ * 不接受调用方传 turnId：await-existing（二次 send 命中已有草案）场景下
+ * 本次 send 的 turnId 与原始 turnId 不同，取错会让确认链在客户端断裂。
+ */
 function awaitingRubricResult(
   conversationId: string,
-  turnId: string,
   advancementSessionId: string,
   rubricDraft: RubricContractDraftSnapshot,
 ): SessionAwaitingRubricResult {
   return {
     conversationId,
     sessionId: conversationId,
-    turnId,
+    turnId: rubricDraft.originalTurnId,
     status: "awaiting-rubric-confirmation",
     advancementSessionId,
     rubricDraftId: rubricDraft.draftId,
@@ -1194,6 +1233,44 @@ export function buildSessionListMethod(): MethodEntry {
             };
           }),
         ),
+      };
+    },
+  };
+}
+
+// ─── session.advancementDetail ───
+
+/**
+ * 推进详情查询——归因块「可展开」的数据面。open 会话给当前状态与最近
+ * 一轮验收全量；无 open 给最新终态会话（收场回看）；素材全部来自
+ * AdvancementStore 的已持久化事实（closure facts 随查随算）。
+ */
+export function buildSessionAdvancementDetailMethod(): MethodEntry {
+  return {
+    name: "session.advancementDetail",
+    requiresAuth: true,
+    async handler(rawParams, ctx): Promise<SessionAdvancementDetailResult> {
+      const params = (rawParams ?? {}) as ConversationIdParams;
+      const conversationId = validateConversationId(
+        params.conversationId ?? params.sessionId,
+        "session.advancementDetail",
+      );
+      const advancement = ctx.server.advancement;
+      if (!advancement) return { conversationId, detail: null };
+      const session = await advancement.loadLatestSession(conversationId);
+      if (!session) return { conversationId, detail: null };
+      const lastReview = session.runs[session.runs.length - 1];
+      return {
+        conversationId,
+        detail: {
+          advancementSessionId: session.id,
+          status: session.status,
+          rubricTitle:
+            session.confirmedRubric?.title ?? session.pendingRubricDraft?.title,
+          exit: session.exit,
+          facts: buildClosureFacts(session),
+          ...(lastReview ? { lastReview } : {}),
+        },
       };
     },
   };
@@ -1822,6 +1899,12 @@ export function buildSessionResumeMethod(): MethodEntry {
         throw RpcErrors.notFound(`Session not found: ${params.conversationId}`);
       }
       const manager = requireConversations(ctx.server);
+      // 先入组播名册再恢复——恢复期的推进事件（proxy_recovered /
+      // recovery_failed / 补审结果）必须对触发 resume 的这个用户可见；
+      // 订阅若留给客户端事后补做，事件恒早于订阅、知情面必然丢失。
+      manager.addObserver(params.conversationId, String(ctx.connection.id), {
+        allowInactive: true,
+      });
       await ctx.server.advancementRecovery?.recoverConversation(
         params.conversationId,
       );
@@ -1881,7 +1964,23 @@ function requireAdvancementSessionId(
   return params.advancementSessionId;
 }
 
-async function loadAdvancementState(
+/** 「确认你所见」协议边界：confirm 必须携带发起端所见草案版本。 */
+function requireRubricDraftId(
+  params: SessionAdvancementActionParams,
+  method: string,
+): string {
+  if (
+    typeof params.rubricDraftId !== "string" ||
+    params.rubricDraftId.trim().length === 0
+  ) {
+    throw RpcErrors.invalidParams(
+      `${method} requires non-empty 'rubricDraftId'`,
+    );
+  }
+  return params.rubricDraftId;
+}
+
+export async function loadAdvancementState(
   server: ServerContext,
   conversationId: string,
 ): Promise<SessionAdvancementStateSnapshot | undefined> {
@@ -1906,12 +2005,19 @@ function projectAdvancementState(
     rubricTitle:
       session.confirmedRubric?.title ?? session.pendingRubricDraft?.title,
     rubricDraftId: session.pendingRubricDraft?.draftId,
+    // awaiting 的接入面半边靠它重建确认面——持久化不等于可见性，
+    // 快照必须携带草案全文，接入面才能主动浮现待确认任务。
+    ...(session.status === "awaiting-rubric-confirmation" &&
+    session.pendingRubricDraft
+      ? { pendingRubricDraft: session.pendingRubricDraft }
+      : {}),
     outstandingProxyMessageId: session.outstandingProxyMessageId,
     ...(lastReview
       ? {
           lastReview: {
             id: lastReview.id,
             runIndex: lastReview.runIndex,
+            round: session.runs.length,
             decision: lastReview.decision,
             reviewedAt: lastReview.reviewedAt,
           },

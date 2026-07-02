@@ -16,7 +16,10 @@
 
 import type {
   AgentResult,
+  AdvancementClosureFacts,
+  AdvancementExit,
   AdvancementReviewDecision,
+  AdvancementRunReview,
   AdvancementSessionStatus,
   AgentYield,
   ContextBudget,
@@ -136,6 +139,14 @@ export interface SessionAcceptedSendResult {
   sessionId: string;
   /** 本次 send 对应的 turn 身份;delta/complete/modeSwitchIntent 均携同值 */
   turnId: string;
+  /**
+   * active 推进会话中的输入被分类为补充继续时附带——发起端据此告知
+   * 「已作为当前任务的补充继续推进」；interruptedProxy 表示为处理本次
+   * 输入中止了正在执行的推进代理。
+   */
+  advancementContinuation?: {
+    interruptedProxy: boolean;
+  };
 }
 
 export interface SessionAwaitingRubricResult extends SessionAcceptedSendResult {
@@ -165,6 +176,25 @@ export interface SessionAdvancementConfirmResult extends SessionAcceptedSendResu
   status: "confirmed";
   advancementSessionId: string;
   runStatus: "immediate" | "queued";
+}
+
+/**
+ * 推进详情查询——「判断详情默认折叠、可展开」的展开数据面。
+ * open 会话返回当前状态；无 open 时返回最新终态会话（离线错过收场事件后
+ * 的回看入口）；从未有推进会话则 detail 为 null。
+ * facts 是 core closure 投影（criterionId 锚定标准矩阵含逐条判定理由与
+ * 证据摘录 + 已试策略 + usage 合计），lastReview 携最近一轮采信证据全量。
+ */
+export interface SessionAdvancementDetailResult {
+  conversationId: string;
+  detail: {
+    advancementSessionId: string;
+    status: AdvancementSessionStatus;
+    rubricTitle?: string;
+    exit?: AdvancementExit;
+    facts: AdvancementClosureFacts;
+    lastReview?: AdvancementRunReview;
+  } | null;
 }
 
 export interface SessionAdvancementReviseResult {
@@ -201,10 +231,14 @@ export interface SessionAdvancementStateSnapshot {
   >;
   rubricTitle?: string;
   rubricDraftId?: string;
+  /** awaiting 时携带草案全文——接入面重建确认面（主动浮现）的素材。 */
+  pendingRubricDraft?: RubricContractDraftSnapshot;
   outstandingProxyMessageId?: string;
   lastReview?: {
     id: string;
     runIndex: number;
+    /** 会话内验收轮次（review 计数）——runIndex 是对话全局序号，不可作轮次。 */
+    round: number;
     decision: AdvancementReviewDecision;
     reviewedAt: string;
   };
@@ -314,4 +348,6 @@ export interface WorksceneEnterResult {
   /** 场景当前对话的全域键(ws: 前缀)——接入面据此切当前对话指针 */
   conversationId: string;
   scene: WorksceneSummary;
+  /** 场景对话的推进状态快照——进入场景即呈现，与 resume 同一裁决。 */
+  advancement?: SessionAdvancementStateSnapshot;
 }

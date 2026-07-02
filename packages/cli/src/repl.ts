@@ -84,6 +84,9 @@ import {
 } from "./runtime/rpc-management-facade.js";
 import { RpcEventBus } from "./runtime/rpc-event-bus.js";
 import { RpcConfirmationBroker } from "./runtime/rpc-confirmation-broker.js";
+import type { SessionAdvancementStateSnapshot } from "@zhixing/server";
+import { renderResumedAdvancementNotice } from "./advancement-presentation.js";
+import { createAdvancementControlPresenter } from "./runtime/advancement-control-presenter.js";
 import { createObservedTurnPresenter } from "./runtime/observed-turn-presenter.js";
 import {
   ConversationController,
@@ -264,7 +267,17 @@ async function resolveAdvancementContractSelection(opts: {
     const selection = await opts.selection.choose<AdvancementContractSelectionValue>(
       createAdvancementContractSelectionRequest(pending.rubricDraft),
     );
-    if (selection.kind === "cancelled" || selection.value === "cancel") {
+    if (selection.kind === "cancelled") {
+      // Esc / Ctrl+C 是「先收起面板」，不是取消任务——永久取消只走带
+      // 二次确认的 cancel 选项。awaiting 本就持久化，稍后随时可回来。
+      opts.writer.line(
+        chalk.dim(
+          `${layout.contentPrefix}已收起确认面；任务保持待确认，/resume 回到该对话可继续。`,
+        ),
+      );
+      return null;
+    }
+    if (selection.value === "cancel") {
       await opts.controller.cancelRubricContract(pending);
       opts.writer.line(chalk.dim(`${layout.contentPrefix}已取消这次任务。`));
       return null;
@@ -505,34 +518,24 @@ export async function startRepl(): Promise<void> {
   const localView = new ReplLocalView({ management: managementFacade });
   await localView.refresh();
 
-  // ── 当前对话指针:auto-resume 最近可恢复的一条(session.list 新→旧),无则新建 ──
-  const { active: initialActive, resumedConversationName } =
-    await selectInitialConversation(conversationFacade);
-
+  // ── 带外监听器先于 auto-resume 建立 ──
+  //
+  // 启动 auto-resume 走 session.resume，宿主在 RPC 内同步恢复推进并发出
+  // proxy_recovered / 补审结果 / 收场等事件——监听器若晚于 resume 创建，
+  // 这些事件无人接收，启动恢复的用户可见性缺失。因此监听器先挂；
+  // controller 就绪前的启动窗口全放行：此窗口内本连接只 observe 了
+  // auto-resume 目标，能到达的事件必属目标，放行即精确。
   let controller: ConversationController;
+  let startupWatchAll = true;
+  const watching = (conversationId: string): boolean =>
+    startupWatchAll || controller.isWatching(conversationId);
+
   const observedTurnPresenter = createObservedTurnPresenter({
     writer: cliWriter,
     flushOutput: () => renderer.stop(),
-    isLocalTurn: (turn) => controller.isLocalTurn(turn),
+    // 启动窗口无本地 turn，恒按旁观渲染（恢复 proxy run 的来源标记可见）
+    isLocalTurn: (turn) => (startupWatchAll ? false : controller.isLocalTurn(turn)),
   });
-
-  // 会话控制器——当前对话指针 + turn 编排(send → delta 喂渲染 → complete)。
-  controller = new ConversationController(
-    {
-      conversation: conversationFacade,
-      workscene: worksceneFacade,
-      onYield: (e) => renderer.handleEvent(e),
-      onObservedTurnDelta: (turn) =>
-        observedTurnPresenter.onObservedTurnDelta(turn),
-      onObservedTurnComplete: (turn) =>
-        observedTurnPresenter.onObservedTurnComplete(turn),
-      onActivity: () => {
-        cliWriter.notify(chalk.dim("  另一个入口有新动态，可用 /resume 查看。"));
-      },
-    },
-    initialActive,
-  );
-  await controller.start();
 
   // 带外通道——宿主 per-run bus 的 UI 订阅集事件经信封还原为本地投影 bus,
   // createRenderSubscribers(retry / segment / interrupt / status-bar)零改挂接。
@@ -552,8 +555,9 @@ export async function startRepl(): Promise<void> {
         disposeObserved();
       };
     },
-    filter: (envelope) =>
-      envelope.conversationId === controller.current.conversationId,
+    // isWatching = 当前对话 + 切换型 RPC 进行中的目标——恢复期事件的
+    // 通知帧先于 RPC 响应到达，只认 current 会把它们全部丢掉。
+    filter: (envelope) => watching(envelope.conversationId),
     onListenerError: (err) =>
       cliWriter.notify(
         chalk.yellow(
@@ -561,6 +565,42 @@ export async function startRepl(): Promise<void> {
         ),
       ),
   });
+
+  // 推进控制面监听器——带外通道的第二条腿(scope:"control")：验收摘要 /
+  // 自动续推提示 / 收场报告在对话流中以系统行呈现，推进运行期用户知情。
+  const advancementControlPresenter = createAdvancementControlPresenter({
+    link: coreHost,
+    writer: cliWriter,
+    flushOutput: () => renderer.stop(),
+    filter: (envelope) => watching(envelope.conversationId),
+  });
+
+  // ── 当前对话指针:auto-resume 最近可恢复的一条(session.list 新→旧),无则新建 ──
+  const {
+    active: initialActive,
+    resumedConversationName,
+    advancement: resumedAdvancement,
+  } = await selectInitialConversation(conversationFacade);
+
+  // 会话控制器——当前对话指针 + turn 编排(send → delta 喂渲染 → complete)。
+  controller = new ConversationController(
+    {
+      conversation: conversationFacade,
+      workscene: worksceneFacade,
+      onYield: (e) => renderer.handleEvent(e),
+      onObservedTurnDelta: (turn) =>
+        observedTurnPresenter.onObservedTurnDelta(turn),
+      onObservedTurnComplete: (turn) =>
+        observedTurnPresenter.onObservedTurnComplete(turn),
+      onActivity: () => {
+        cliWriter.notify(chalk.dim("  另一个入口有新动态，可用 /resume 查看。"));
+      },
+    },
+    initialActive,
+  );
+  await controller.start();
+  // 指针已就绪——事件过滤从启动全放行收敛到 isWatching
+  startupWatchAll = false;
 
   // 初始 region 内容(欢迎块)单一来源——启动时逐行写入 + resize-end / clear
   // 整屏重建复用同一生成逻辑。模型 / provider 显示取本地配置(宿主按同一
@@ -774,7 +814,7 @@ export async function startRepl(): Promise<void> {
         return;
       }
       mainReturnTarget = controller.current;
-      let entered: ActiveConversation;
+      let entered: Awaited<ReturnType<typeof controller.enterScene>>;
       try {
         entered = await controller.enterScene(intent.sceneId);
       } catch (err) {
@@ -786,7 +826,9 @@ export async function startRepl(): Promise<void> {
         return;
       }
       const sceneName =
-        entered.mode.kind === "workscene" ? entered.mode.sceneName : intent.sceneId;
+        entered.active.mode.kind === "workscene"
+          ? entered.active.mode.sceneName
+          : intent.sceneId;
       cliWriter.line(
         chalk.dim(
           `\n  ${sep}\n  已进入工作场景 ${chalk.cyan(sceneName)}\n  ${sep}\n`,
@@ -796,15 +838,19 @@ export async function startRepl(): Promise<void> {
       // enter 保证);新场景对话无历史零输出。
       try {
         renderHistoryTail({
-          runs: (await controller.history(entered.conversationId)).runs.map(
-            (r) => r.record,
-          ),
+          runs: (
+            await controller.history(entered.active.conversationId)
+          ).runs.map((r) => r.record),
           writer: cliWriter,
         });
       } catch {
         // 历史尾巴是辅助展示,失败不阻断进入
       }
       await syncCurrentTaskListView();
+      // 场景对话的推进状态呈现——打开会话即浮现，与 resume 同一裁决
+      if (entered.advancement) {
+        await presentResumedAdvancement(entered.advancement);
+      }
       return;
     }
 
@@ -829,6 +875,10 @@ export async function startRepl(): Promise<void> {
       chalk.dim(`\n  ${sep}\n  ${exitMessage}\n  ${sep}\n`),
     );
     await syncCurrentTaskListView();
+    // 返回的主对话有推进状态时呈现——切换即浮现，与 resume 同一裁决
+    if (exitResult.kind !== "not-in-workscene" && exitResult.advancement) {
+      await presentResumedAdvancement(exitResult.advancement);
+    }
   };
 
   // ── 命令系统装配 ──
@@ -887,6 +937,60 @@ export async function startRepl(): Promise<void> {
   });
 
   // session 域命令（new/clear/resume/name/compact）—— 分发在此、执行体在宿主,
+  // 恢复对话的推进状态呈现——持久化不等于可见性：awaiting 主动浮现确认面
+  // （确认后任务执行、输出经既有 delta 流渲染，与多端同看一个 turn 同构），
+  // active 渲染进行中提示。启动 auto-resume 与 /resume 切换共用。
+  const presentResumedAdvancement = async (
+    snapshot: SessionAdvancementStateSnapshot,
+  ): Promise<void> => {
+    // 呈现失败自带告警（所有调用点同一行为）——awaiting 浮现被异常吞掉
+    // 而用户不知情，比呈现本身失败更糟。
+    try {
+      const width = process.stdout.columns ?? 80;
+      cliWriter.ensureSegmentBreak();
+      cliWriter.line(renderResumedAdvancementNotice(snapshot, width));
+      if (snapshot.status !== "awaiting-rubric-confirmation") return;
+      const draft = snapshot.pendingRubricDraft;
+      if (!draft) {
+        // 防御分支：awaiting 却无草案（宿主数据异常）——明说而非留悬念
+        cliWriter.line(
+          chalk.dim(
+            `${layout.contentPrefix}  （草案数据缺失，直接发消息可重新发起任务）`,
+          ),
+        );
+        return;
+      }
+      const accepted = await resolveAdvancementContractSelection({
+        pending: {
+          kind: "awaiting-rubric-confirmation",
+          conversationId: controller.current.conversationId,
+          turnId: draft.originalTurnId,
+          advancementSessionId: snapshot.advancementSessionId,
+          rubricDraftId: draft.draftId,
+          rubricDraft: draft,
+        },
+        controller,
+        selection: selectionService,
+        writer: cliWriter,
+        onAccepted: () => {},
+        onBeforeExecution: () => renderer.startThinking(),
+      });
+      // 确认后的 turn 后台执行，渲染经既有主通道流出；complete 由 outcome
+      // 收束 renderer，不阻塞输入循环。
+      if (accepted) {
+        void accepted.outcome
+          .catch(() => {})
+          .finally(() => renderer.stop());
+      }
+    } catch (err) {
+      cliWriter.line(
+        chalk.yellow(
+          `${layout.contentPrefix}推进任务恢复呈现失败：${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
+    }
+  };
+
   // controller 持当前对话指针。/resume 的对话选择器在模块内构造;inline 删除的
   // 物理执行由下方交互层 onCandidateDelete 承担。
   registerSessionCommands({
@@ -895,6 +999,7 @@ export async function startRepl(): Promise<void> {
     writer: cliWriter,
     controller,
     onConversationChanged: syncCurrentTaskListView,
+    onResumedAdvancement: presentResumedAdvancement,
     markLocalClear: (conversationId) => {
       locallyClearingConversations.add(conversationId);
       return (outcome) => {
@@ -1222,6 +1327,12 @@ export async function startRepl(): Promise<void> {
     }
   };
 
+  // 启动恢复的推进状态呈现——auto-resume 的对话有待确认 / 进行中的推进
+  // 任务时主动浮现，不埋在列表里。
+  if (resumedAdvancement) {
+    await presentResumedAdvancement(resumedAdvancement);
+  }
+
   // REPL 主循环
   while (true) {
     // 检查 close 监听器的同步协作信号——/exit / 双击 Ctrl+C / 终端关闭等任何
@@ -1405,6 +1516,14 @@ export async function startRepl(): Promise<void> {
         continue;
       }
       if (!acceptedTurn) continue;
+      // 中途插话可见性：输入落在 active 推进会话上时一句话告知分类结果，
+      // 有 in-flight 代理被中止时先说明——用户不困惑于「我的话去哪了」。
+      if (acceptedTurn.advancementContinuation) {
+        if (acceptedTurn.advancementContinuation.interruptedProxy) {
+          cliWriter.notify(chalk.dim("  ◆ 已中止当前推进以处理你的输入"));
+        }
+        cliWriter.notify(chalk.dim("  ◆ 已作为当前任务的补充继续推进"));
+      }
       const turnPromise = acceptedTurn.outcome;
       // 暴露给模式切换命令——切换前 await 它,天然落在 turn 边界
       state.activeTurnPromise = turnPromise;
@@ -1457,6 +1576,7 @@ export async function startRepl(): Promise<void> {
   detachConfirmation?.();
   rpcConfirmationBroker.dispose();
   rpcEventBus.dispose();
+  advancementControlPresenter.dispose();
   controller.dispose();
 
   if (inputController) {

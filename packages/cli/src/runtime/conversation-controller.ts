@@ -20,6 +20,7 @@
 import {
   generateTurnId,
   parseConversationId,
+  WORKSCENE_CONVERSATION_PREFIX,
   type AgentYield,
   type UserTurnInput,
   type WorkModeSwitchIntent,
@@ -35,6 +36,8 @@ import type {
   SessionUsageResult,
   WireAgentResult,
   WorksceneSummary,
+  SessionAdvancementDetailResult,
+  SessionAdvancementStateSnapshot,
   SessionAwaitingRubricResult,
   SessionCancelledRubricResult,
   SessionContractFailedResult,
@@ -62,6 +65,10 @@ export interface AcceptedTurn {
   readonly conversationId: string;
   readonly turnId: string;
   readonly outcome: Promise<TurnOutcome>;
+  /** 输入被分类为 active 推进的补充继续时附带——接入面据此告知用户。 */
+  readonly advancementContinuation?: {
+    readonly interruptedProxy: boolean;
+  };
 }
 
 export interface AwaitingRubricConfirmationTurn {
@@ -114,11 +121,17 @@ export interface BeginTurnOptions {
 
 export type ExitSceneResult =
   | { kind: "not-in-workscene"; active: ActiveConversation }
-  | { kind: "returned"; active: ActiveConversation }
+  | {
+      kind: "returned";
+      active: ActiveConversation;
+      /** 返回的主对话有推进状态时携带——切换即呈现。 */
+      advancement?: SessionAdvancementStateSnapshot;
+    }
   | {
       kind: "fallback-latest" | "fallback-new";
       active: ActiveConversation;
       missingConversationId: string;
+      advancement?: SessionAdvancementStateSnapshot;
     };
 
 export type SessionChangeReaction =
@@ -143,6 +156,8 @@ export interface ConversationControllerOptions {
 export interface InitialConversationSelection {
   active: ActiveConversation;
   resumedConversationName: string | null;
+  /** 恢复对话的推进状态快照——awaiting 浮现与 active 提示的素材。 */
+  advancement?: SessionAdvancementStateSnapshot;
 }
 
 export interface ObservedTurnNotification {
@@ -185,6 +200,7 @@ export async function selectInitialConversation(
     return {
       active: toActiveConversation(resumed),
       resumedConversationName: resumed.name,
+      ...(resumed.advancement ? { advancement: resumed.advancement } : {}),
     };
   }
 
@@ -198,6 +214,13 @@ export async function selectInitialConversation(
 export class ConversationController {
   private active: ActiveConversation;
   private observedConversationId: string | null = null;
+  /**
+   * 进行中的切换目标谓词——切换型 RPC（resume / 进出场景）期间宿主会同步
+   * 发出恢复期控制事件，通知帧先于 RPC 响应到达，而 current 要到响应后才
+   * 切换；没有这个过渡窗口的放行，事件恒被「只看当前对话」的过滤丢弃。
+   */
+  private pendingSwitchTarget: ((conversationId: string) => boolean) | null =
+    null;
   private readonly waiters = new Map<string, (outcome: TurnOutcome) => void>();
   private readonly pendingIntents = new Map<string, WorkModeSwitchIntent>();
   private readonly localTurnsByConversation = new Map<string, string>();
@@ -381,11 +404,21 @@ export class ConversationController {
         };
       }
       this.markLocalTurnAccepted({ conversationId: target, turnId });
+      return {
+        kind: "accepted",
+        turn: {
+          conversationId: target,
+          turnId,
+          outcome,
+          ...(sendResult.advancementContinuation
+            ? { advancementContinuation: sendResult.advancementContinuation }
+            : {}),
+        },
+      };
     } catch (err) {
       this.discardTurnWaiter(target, turnId);
       throw err;
     }
-    return { kind: "accepted", turn: { conversationId: target, turnId, outcome } };
   }
 
   /** 发送一个 turn 并等待落定。 */
@@ -406,6 +439,7 @@ export class ConversationController {
       const result = await this.opts.conversation.confirmAdvancement(
         pending.conversationId,
         pending.advancementSessionId,
+        pending.rubricDraftId,
       );
       if (result.turnId !== pending.turnId) {
         throw new Error(
@@ -614,11 +648,40 @@ export class ConversationController {
     return this.opts.conversation.usage(this.active.conversationId);
   }
 
+  /**
+   * 接入面正在看 / 即将看的对话——带外事件（run scope 与推进控制面）的
+   * 过滤谓词。切换型 RPC 期间目标对话的事件同样放行，恢复期知情不丢。
+   */
+  isWatching(conversationId: string): boolean {
+    return (
+      conversationId === this.active.conversationId ||
+      (this.pendingSwitchTarget?.(conversationId) ?? false)
+    );
+  }
+
   /** 切换到既有对话(宿主 touch + 返回 meta),指针随之移动。 */
-  async resume(conversationId: string): Promise<ActiveConversation> {
-    const resumed = await this.opts.conversation.resume(conversationId);
-    await this.switchActive(toActiveConversation(resumed));
-    return this.active;
+  async resume(conversationId: string): Promise<{
+    active: ActiveConversation;
+    advancement?: SessionAdvancementStateSnapshot;
+  }> {
+    this.pendingSwitchTarget = (id) => id === conversationId;
+    try {
+      const resumed = await this.opts.conversation.resume(conversationId);
+      await this.switchActive(toActiveConversation(resumed));
+      return {
+        active: this.active,
+        ...(resumed.advancement ? { advancement: resumed.advancement } : {}),
+      };
+    } finally {
+      this.pendingSwitchTarget = null;
+    }
+  }
+
+  /** /advancement 的数据面：当前对话的推进详情（宿主随查随算）。 */
+  async advancementDetail(): Promise<SessionAdvancementDetailResult> {
+    return await this.opts.conversation.advancementDetail(
+      this.active.conversationId,
+    );
   }
 
   async deleteConversation(conversationId: string): Promise<void> {
@@ -630,14 +693,27 @@ export class ConversationController {
 
   // ─── 工作场景(进出 = 宿主取建对话 + 指针切换) ───
 
-  async enterScene(sceneId: string): Promise<ActiveConversation> {
-    const entered = await this.opts.workscene.enter(sceneId);
-    await this.switchActive({
-      conversationId: entered.conversationId,
-      name: entered.scene.name,
-      mode: deriveMode(entered.conversationId, entered.scene.name),
-    });
-    return this.active;
+  async enterScene(sceneId: string): Promise<{
+    active: ActiveConversation;
+    advancement?: SessionAdvancementStateSnapshot;
+  }> {
+    // 目标对话 id 由宿主 enter 决定，切换期以场景全域键前缀放行
+    this.pendingSwitchTarget = (id) =>
+      id.startsWith(`${WORKSCENE_CONVERSATION_PREFIX}${sceneId}:`);
+    try {
+      const entered = await this.opts.workscene.enter(sceneId);
+      await this.switchActive({
+        conversationId: entered.conversationId,
+        name: entered.scene.name,
+        mode: deriveMode(entered.conversationId, entered.scene.name),
+      });
+      return {
+        active: this.active,
+        ...(entered.advancement ? { advancement: entered.advancement } : {}),
+      };
+    } finally {
+      this.pendingSwitchTarget = null;
+    }
   }
 
   /**
@@ -652,17 +728,36 @@ export class ConversationController {
     if (this.active.mode.kind !== "workscene") {
       return { kind: "not-in-workscene", active: this.active };
     }
-    await this.opts.workscene.exit(this.active.mode.sceneId).catch(() => {});
+    try {
+      return await this.exitSceneInner(this.active.mode.sceneId, mainTarget);
+    } finally {
+      this.pendingSwitchTarget = null;
+    }
+  }
+
+  private async exitSceneInner(
+    sceneId: string,
+    mainTarget: ActiveConversation,
+  ): Promise<ExitSceneResult> {
+    await this.opts.workscene.exit(sceneId).catch(() => {});
+    // 目标可能从 mainTarget 逐级降级到候选——每次 resume 前把切换窗口
+    // 收敛到当次精确目标，不按整个 main 域放行。
+    this.pendingSwitchTarget = (id) => id === mainTarget.conversationId;
     const resumed = await this.opts.conversation.resumeIfExists(
       mainTarget.conversationId,
     );
     if (resumed) {
       await this.switchActive(toMainActive(resumed));
-      return { kind: "returned", active: this.active };
+      return {
+        kind: "returned",
+        active: this.active,
+        ...(resumed.advancement ? { advancement: resumed.advancement } : {}),
+      };
     }
 
     for (const candidate of await this.opts.conversation.list()) {
       if (!isMainConversationId(candidate.conversationId)) continue;
+      this.pendingSwitchTarget = (id) => id === candidate.conversationId;
       const fallback = await this.opts.conversation.resumeIfExists(
         candidate.conversationId,
       );
@@ -672,6 +767,7 @@ export class ConversationController {
           kind: "fallback-latest",
           active: this.active,
           missingConversationId: mainTarget.conversationId,
+          ...(fallback.advancement ? { advancement: fallback.advancement } : {}),
         };
       }
     }

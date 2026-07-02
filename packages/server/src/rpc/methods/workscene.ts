@@ -26,6 +26,7 @@ import type {
   WorksceneListResult,
   WorksceneSummary,
 } from "../session-wire.js";
+import { loadAdvancementState } from "./session.js";
 
 function requireWorkscenes(server: ServerContext): WorksceneDirectory {
   if (!server.workscenes) {
@@ -166,9 +167,25 @@ export function buildWorksceneEnterMethod(): MethodEntry {
         throw RpcErrors.notFound(`Workscene not found: ${params.sceneId}`);
       }
       await workscenes.touch(params.sceneId).catch(() => {});
+      // 场景对话与主对话走同一推进管线——进入场景即恢复停摆的推进并
+      // 呈现推进状态，与 session.resume 同一「打开会话即浮现」裁决：
+      // 先入组播名册再恢复，恢复期控制事件对触发进入的用户可见。
+      ctx.server.conversations?.addObserver(
+        entered.conversationId,
+        String(ctx.connection.id),
+        { allowInactive: true },
+      );
+      await ctx.server.advancementRecovery?.recoverConversation(
+        entered.conversationId,
+      );
+      const advancement = await loadAdvancementState(
+        ctx.server,
+        entered.conversationId,
+      );
       return {
         conversationId: entered.conversationId,
         scene: sceneSummary(entered.scene),
+        ...(advancement ? { advancement } : {}),
       } satisfies WorksceneEnterResult;
     },
   };

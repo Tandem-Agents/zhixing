@@ -519,6 +519,11 @@ export class AdvancementController {
   async confirmRubric(input: {
     readonly conversationId: string;
     readonly advancementSessionId: string;
+    /**
+     * 发起端所见草案版本——「确认你所见」是协议语义，必填强制：
+     * 草案被并发修订后拒绝盲确认，不依赖调用方自觉。
+     */
+    readonly expectedRubricDraftId: string;
   }): Promise<AdvancementConfirmedTurn> {
     const session = await this.requireSession(
       input.conversationId,
@@ -533,6 +538,11 @@ export class AdvancementController {
     if (!draft) {
       throw new Error(
         `AdvancementController: session "${session.id}" has no pending rubric draft`,
+      );
+    }
+    if (draft.draftId !== input.expectedRubricDraftId) {
+      throw new Error(
+        "推进准则草案已被修订，请查看最新内容后再确认。",
       );
     }
     const confirmedRubric = await this.contractBuilder.confirmDraft(draft);
@@ -673,6 +683,23 @@ export class AdvancementController {
     conversationId: string,
   ): Promise<AdvancementSession | null> {
     return await this.store.loadActiveSession(conversationId);
+  }
+
+  /**
+   * 详情查询入口：open 会话优先；无 open 时返回最新的终态会话——
+   * 离线错过收场事件后，收场事实可从持久化 review 序列随时重看。
+   */
+  async loadLatestSession(
+    conversationId: string,
+  ): Promise<AdvancementSession | null> {
+    const sessions = await this.store.loadConversationSessions(conversationId);
+    if (sessions.length === 0) return null;
+    const open = sessions.find(
+      (session) =>
+        session.status === "awaiting-rubric-confirmation" ||
+        session.status === "active",
+    );
+    return open ?? sessions[sessions.length - 1]!;
   }
 
   async settleProxyMessage(input: {

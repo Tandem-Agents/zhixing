@@ -20,6 +20,7 @@ export {
 export {
   buildClosureFacts,
   buildClosureSynthesisPrompt,
+  describeClosureVerdict,
   renderClosureReport,
   sumAdvancementUsage,
 } from "./closure.js";

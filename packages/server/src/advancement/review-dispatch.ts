@@ -67,6 +67,9 @@ function emitReviewEvents(
       payload: {
         advancementSessionId: result.session.id,
         review: result.review,
+        // 会话内验收轮次——review.runIndex 是对话全局 run 序号，不是
+        // 轮次；呈现端的轮次事实只能来自会话 review 计数。
+        reviewRound: result.session.runs.length,
       },
     }),
   );

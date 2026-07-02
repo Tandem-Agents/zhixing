@@ -442,9 +442,11 @@ describe("ConversationController", () => {
       settled = true;
     });
 
+    // 携带发起端所见草案版本——宿主据此拒绝「确认到没看过的修订」
     expect(f.conversation.confirmAdvancement).toHaveBeenCalledWith(
       "conv-1",
       "adv-1",
+      "draft-1",
     );
     expect(onAccepted).toHaveBeenCalledExactlyOnceWith({
       conversationId: "conv-1",
@@ -820,13 +822,13 @@ describe("ConversationController", () => {
     const { controller } = makeController(f);
 
     const entered = await controller.enterScene("scene-1");
-    expect(entered.conversationId).toBe("ws:scene-1:conv-9");
-    expect(entered.mode).toEqual({
+    expect(entered.active.conversationId).toBe("ws:scene-1:conv-9");
+    expect(entered.active.mode).toEqual({
       kind: "workscene",
       sceneId: "scene-1",
       sceneName: "写作场景",
     });
-    expect(controller.current).toBe(entered);
+    expect(controller.current).toBe(entered.active);
 
     const exited = await controller.exitScene(initial);
     expect(exited).toEqual({ kind: "returned", active: initial });
@@ -911,12 +913,64 @@ describe("ConversationController", () => {
     expect(f.conversation.subscribe).toHaveBeenCalledWith("conv-new");
   });
 
+  it("isWatching 在切换型 RPC 期间放行目标对话，完成后收敛回当前对话", async () => {
+    const f = makeFakes();
+    const { controller } = makeController(f);
+    expect(controller.isWatching("conv-1")).toBe(true);
+    expect(controller.isWatching("conv-2")).toBe(false);
+
+    // resume 期间：恢复事件的通知帧先于 RPC 响应到达，目标对话必须放行
+    let observedDuringSwitch: boolean | undefined;
+    f.conversation.resume.mockImplementationOnce(async (id: string) => {
+      observedDuringSwitch = controller.isWatching(id);
+      return { conversationId: id, name: `名-${id}`, mode: { kind: "main" } };
+    });
+    await controller.resume("conv-2");
+    expect(observedDuringSwitch).toBe(true);
+    expect(controller.isWatching("conv-2")).toBe(true); // 已是 current
+    expect(controller.isWatching("conv-1")).toBe(false); // 切换窗口已关闭
+
+    // enterScene 期间：目标 id 由宿主决定，按场景全域键前缀放行
+    let scenePrefixWatched: boolean | undefined;
+    f.workscene.enter.mockImplementationOnce(async (sceneId: string) => {
+      scenePrefixWatched = controller.isWatching(`ws:${sceneId}:conv_main`);
+      return {
+        conversationId: `ws:${sceneId}:conv_main`,
+        scene: { sceneId, name: "场景", createdAt: "t", lastActiveAt: "t" },
+      };
+    });
+    await controller.enterScene("scene-9");
+    expect(scenePrefixWatched).toBe(true);
+
+    // 切换失败也要收敛：finally 清除切换窗口
+    f.conversation.resume.mockRejectedValueOnce(new Error("down"));
+    await expect(controller.resume("conv-ghost")).rejects.toThrow("down");
+    expect(controller.isWatching("conv-ghost")).toBe(false);
+
+    // exitScene 期间：窗口收敛到当次精确目标，不按整个 main 域放行
+    let exitTargetWatched: boolean | undefined;
+    let exitOtherMainWatched: boolean | undefined;
+    f.conversation.resumeIfExists.mockImplementationOnce(async (id: string) => {
+      exitTargetWatched = controller.isWatching(id);
+      exitOtherMainWatched = controller.isWatching("conv-unrelated-main");
+      return { conversationId: id, name: `名-${id}`, mode: { kind: "main" } };
+    });
+    const exited = await controller.exitScene({
+      conversationId: "conv-2",
+      name: "名-conv-2",
+      mode: { kind: "main" },
+    });
+    expect(exited.kind).toBe("returned");
+    expect(exitTargetWatched).toBe(true);
+    expect(exitOtherMainWatched).toBe(false);
+  });
+
   it("resume / newConversation 移动指针并返回新身份", async () => {
     const f = makeFakes();
     const { controller } = makeController(f);
 
     const resumed = await controller.resume("conv-2");
-    expect(resumed.name).toBe("名-conv-2");
+    expect(resumed.active.name).toBe("名-conv-2");
     expect(controller.current.conversationId).toBe("conv-2");
 
     const created = await controller.newConversation();

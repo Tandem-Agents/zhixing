@@ -762,6 +762,105 @@ describe("session.* RPC (S2.D)", () => {
     client.close();
   });
 
+  it("awaiting 期间二次 send 命中已有草案：turnId 恒为 originalTurnId，确认链不断裂", async () => {
+    await startWithFactory(createMockFactory(), {
+      advancement: await createTestAdvancementController(),
+    });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const first = await client.request("session.send", {
+      text: "请把测试修到全绿，盯到验收通过",
+      turnId: "turn-original",
+    });
+    expect(isSuccessResponse(first)).toBe(true);
+    if (!isSuccessResponse(first)) return;
+    const awaiting = first.result as {
+      conversationId: string;
+      advancementSessionId: string;
+      rubricDraftId: string;
+    };
+
+    // 二次 send（新 turnId）命中 await-existing——返回的 turnId 必须仍是
+    // 原始 turnId：它是确认后真正执行的 turn 身份，confirm 校验链锚定它。
+    const second = await client.request("session.send", {
+      conversationId: awaiting.conversationId,
+      text: "这个标准可以吗？",
+      turnId: "turn-second",
+    });
+    expect(isSuccessResponse(second)).toBe(true);
+    if (!isSuccessResponse(second)) return;
+    expect(second.result).toMatchObject({
+      status: "awaiting-rubric-confirmation",
+      turnId: "turn-original",
+      rubricDraftId: awaiting.rubricDraftId,
+    });
+
+    // 确认链走通：confirm 返回的 turnId 与 awaiting 结果一致
+    const confirmed = await client.request("session.advancementConfirm", {
+      conversationId: awaiting.conversationId,
+      advancementSessionId: awaiting.advancementSessionId,
+      rubricDraftId: awaiting.rubricDraftId,
+    });
+    expect(isSuccessResponse(confirmed)).toBe(true);
+    if (!isSuccessResponse(confirmed)) return;
+    expect(confirmed.result).toMatchObject({ turnId: "turn-original" });
+    client.close();
+  });
+
+  it("confirm 绑定草案版本：draftId 过期拒绝盲确认，会话保持 awaiting", async () => {
+    await startWithFactory(createMockFactory(), {
+      advancement: await createTestAdvancementController(),
+    });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const sendResp = await client.request("session.send", {
+      text: "请把测试修到全绿，盯到验收通过",
+      turnId: "turn-draft-bind",
+    });
+    expect(isSuccessResponse(sendResp)).toBe(true);
+    if (!isSuccessResponse(sendResp)) return;
+    const awaiting = sendResp.result as {
+      conversationId: string;
+      advancementSessionId: string;
+      rubricDraftId: string;
+    };
+
+    // 另一端修订草案后，本端拿旧 draftId 确认 → 拒绝
+    const revised = await client.request("session.advancementRevise", {
+      conversationId: awaiting.conversationId,
+      advancementSessionId: awaiting.advancementSessionId,
+      userFeedback: "把文档更新也加入通过标准",
+    });
+    expect(isSuccessResponse(revised)).toBe(true);
+
+    const stale = await client.request("session.advancementConfirm", {
+      conversationId: awaiting.conversationId,
+      advancementSessionId: awaiting.advancementSessionId,
+      rubricDraftId: awaiting.rubricDraftId,
+    });
+    expect(isSuccessResponse(stale)).toBe(false);
+
+    // 协议边界强制：不带 rubricDraftId 一律拒绝——「确认你所见」不依赖
+    // 客户端自觉，非 CLI / 旧调用方也不能盲确认
+    const missing = await client.request("session.advancementConfirm", {
+      conversationId: awaiting.conversationId,
+      advancementSessionId: awaiting.advancementSessionId,
+    });
+    expect(isSuccessResponse(missing)).toBe(false);
+
+    const state = await client.request("session.resume", {
+      conversationId: awaiting.conversationId,
+    });
+    expect(isSuccessResponse(state)).toBe(true);
+    if (!isSuccessResponse(state)) return;
+    expect(state.result).toMatchObject({
+      advancement: { status: "awaiting-rubric-confirmation" },
+    });
+    client.close();
+  });
+
   it("session.list 与 session.resume 暴露当前推进状态快照", async () => {
     await startWithFactory(createMockFactory(), {
       advancement: await createTestAdvancementController(),
@@ -815,6 +914,13 @@ describe("session.* RPC (S2.D)", () => {
       advancement: {
         status: "awaiting-rubric-confirmation",
         advancementSessionId: awaiting.advancementSessionId,
+        // awaiting 携草案全文——接入面据此重建确认面（主动浮现）
+        pendingRubricDraft: {
+          draftId: awaiting.rubricDraftId,
+          content: {
+            passCriteria: ["测试任务达到可验收状态"],
+          },
+        },
       },
     });
     client.close();
@@ -893,6 +999,7 @@ describe("session.* RPC (S2.D)", () => {
     const awaiting = sendResp.result as {
       conversationId: string;
       advancementSessionId: string;
+      rubricDraftId: string;
     };
     await client.waitNotification("session.event");
 
@@ -973,12 +1080,14 @@ describe("session.* RPC (S2.D)", () => {
     const awaiting = sendResp.result as {
       conversationId: string;
       advancementSessionId: string;
+      rubricDraftId: string;
     };
     await client.waitNotification("session.event");
 
     const confirmResp = await client.request("session.advancementConfirm", {
       conversationId: awaiting.conversationId,
       advancementSessionId: awaiting.advancementSessionId,
+      rubricDraftId: awaiting.rubricDraftId,
     });
     expect(isSuccessResponse(confirmResp)).toBe(true);
     if (!isSuccessResponse(confirmResp)) return;
@@ -1025,12 +1134,14 @@ describe("session.* RPC (S2.D)", () => {
     const awaiting = sendResp.result as {
       conversationId: string;
       advancementSessionId: string;
+      rubricDraftId: string;
     };
     await client.waitNotification("session.event");
 
     const confirmResp = await client.request("session.advancementConfirm", {
       conversationId: awaiting.conversationId,
       advancementSessionId: awaiting.advancementSessionId,
+      rubricDraftId: awaiting.rubricDraftId,
     });
     expect(isSuccessResponse(confirmResp)).toBe(true);
 
@@ -1067,6 +1178,7 @@ describe("session.* RPC (S2.D)", () => {
     const awaiting = sendResp.result as {
       conversationId: string;
       advancementSessionId: string;
+      rubricDraftId: string;
     };
 
     const deleteResp = await client.request("session.delete", {
@@ -1087,6 +1199,7 @@ describe("session.* RPC (S2.D)", () => {
     const confirmResp = await client.request("session.advancementConfirm", {
       conversationId: awaiting.conversationId,
       advancementSessionId: awaiting.advancementSessionId,
+      rubricDraftId: awaiting.rubricDraftId,
     });
     expect(isErrorResponse(confirmResp)).toBe(true);
     if (isErrorResponse(confirmResp)) {
@@ -1112,12 +1225,14 @@ describe("session.* RPC (S2.D)", () => {
     const awaiting = sendResp.result as {
       conversationId: string;
       advancementSessionId: string;
+      rubricDraftId: string;
     };
     await client.waitNotification("session.event");
 
     const confirmResp = await client.request("session.advancementConfirm", {
       conversationId: awaiting.conversationId,
       advancementSessionId: awaiting.advancementSessionId,
+      rubricDraftId: awaiting.rubricDraftId,
     });
     expect(isSuccessResponse(confirmResp)).toBe(true);
     await client.waitNotification("session.event");
@@ -1214,6 +1329,7 @@ describe("session.* RPC (S2.D)", () => {
     const awaiting = sendResp.result as {
       conversationId: string;
       advancementSessionId: string;
+      rubricDraftId: string;
     };
     await client.waitNotification("session.event");
 
@@ -1362,6 +1478,7 @@ describe("session.* RPC (S2.D)", () => {
     const awaiting = sendResp.result as {
       conversationId: string;
       advancementSessionId: string;
+      rubricDraftId: string;
     };
     await client.waitNotification("session.event");
 
@@ -1751,6 +1868,179 @@ describe("session.* RPC (S2.D)", () => {
     );
     expect(session?.status).toBe("exited");
     client.close();
+  });
+
+  it("session.advancementDetail 返回 open 会话的归因展开面；无记录时 detail 为 null", async () => {
+    const advancement = await createTestAdvancementHarness();
+    await seedOutstandingProxySession(advancement.store, "conv-detail");
+    await startWithFactory(createMockFactory({ deltaCount: 0 }), {
+      advancement: advancement.controller,
+      seedConversations: ["conv-detail"],
+    });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const resp = await client.request("session.advancementDetail", {
+      conversationId: "conv-detail",
+    });
+    expect(isSuccessResponse(resp)).toBe(true);
+    if (!isSuccessResponse(resp)) return;
+    expect(resp.result).toMatchObject({
+      conversationId: "conv-detail",
+      detail: {
+        advancementSessionId: "adv-recovery",
+        status: "active",
+        rubricTitle: "确认版测试推进准则",
+        facts: {
+          reviewedRunCount: 1,
+          criteria: [
+            {
+              criterionId: "pc-1",
+              verdict: "unmet",
+              reason: "测试尚未全绿。",
+            },
+          ],
+          attemptedStrategies: [
+            { failureHandlingId: "continue", attempts: 1 },
+          ],
+        },
+        lastReview: { id: "review-recovery", decision: "failed" },
+      },
+    });
+
+    const empty = await client.request("session.advancementDetail", {
+      conversationId: "conv-none",
+    });
+    expect(isSuccessResponse(empty)).toBe(true);
+    if (!isSuccessResponse(empty)) return;
+    expect(empty.result).toMatchObject({ detail: null });
+    client.close();
+  });
+
+  it("session.advancementDetail 无 open 会话时返回最新终态会话——离线收场回看", async () => {
+    const advancement = await createTestAdvancementHarness();
+    await seedOutstandingProxySession(advancement.store, "conv-closed");
+    await advancement.store.exitSession(
+      "conv-closed",
+      "adv-recovery",
+      {
+        reason: "user-took-over",
+        message: "用户接管了任务。",
+        occurredAt: "2026-01-01T00:05:00.000Z",
+      },
+      "2026-01-01T00:05:00.000Z",
+    );
+    await startWithFactory(createMockFactory({ deltaCount: 0 }), {
+      advancement: advancement.controller,
+      seedConversations: ["conv-closed"],
+    });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const resp = await client.request("session.advancementDetail", {
+      conversationId: "conv-closed",
+    });
+    expect(isSuccessResponse(resp)).toBe(true);
+    if (!isSuccessResponse(resp)) return;
+    expect(resp.result).toMatchObject({
+      conversationId: "conv-closed",
+      detail: {
+        advancementSessionId: "adv-recovery",
+        status: "exited",
+        exit: { reason: "user-took-over" },
+        facts: {
+          status: "exited",
+          reviewedRunCount: 1,
+          criteria: [{ criterionId: "pc-1", verdict: "unmet" }],
+        },
+      },
+    });
+    client.close();
+  });
+
+  it("session.send 在 active 推进中补充输入时返回 continuation 告知", async () => {
+    const advancement = await createTestAdvancementHarness();
+    await seedOutstandingProxySession(advancement.store, "conv-continue");
+    await startWithFactory(createMockFactory({ deltaCount: 0 }), {
+      advancement: advancement.controller,
+      seedConversations: ["conv-continue"],
+    });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const resp = await client.request("session.send", {
+      conversationId: "conv-continue",
+      text: "补充一下：优先修 fooTest",
+      turnId: "turn-continue",
+    });
+    expect(isSuccessResponse(resp)).toBe(true);
+    if (!isSuccessResponse(resp)) return;
+    expect(resp.result).toMatchObject({
+      turnId: "turn-continue",
+      advancementContinuation: { interruptedProxy: false },
+    });
+    client.close();
+  });
+
+  it("session.send 在无 outstanding 的 active 推进中补充输入同样返回 continuation 告知", async () => {
+    const advancement = await createTestAdvancementHarness();
+    await seedOutstandingProxySession(advancement.store, "conv-continue-b");
+    // proxy 已结算：active 会话无 outstanding 且不 busy——continue-active
+    // 走主流程 fall-through 路径，告知不得看运气走哪条路径。
+    await advancement.store.settleProxyMessage(
+      "conv-continue-b",
+      "adv-recovery",
+      "proxy-recovery",
+      "2026-01-01T00:04:00.000Z",
+    );
+    await startWithFactory(createMockFactory({ deltaCount: 0 }), {
+      advancement: advancement.controller,
+      seedConversations: ["conv-continue-b"],
+    });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const resp = await client.request("session.send", {
+      conversationId: "conv-continue-b",
+      text: "再补充一点背景",
+      turnId: "turn-continue-b",
+    });
+    expect(isSuccessResponse(resp)).toBe(true);
+    if (!isSuccessResponse(resp)) return;
+    expect(resp.result).toMatchObject({
+      turnId: "turn-continue-b",
+      advancementContinuation: { interruptedProxy: false },
+    });
+    client.close();
+  });
+
+  it("session.resume 先入组播名册再恢复推进（handler 直测顺序锚）", async () => {
+    const calls: string[] = [];
+    const serverCtx = {
+      conversationDirectory: {
+        touch: async () => ({ name: "conv" }),
+      },
+      conversations: {
+        addObserver: () => calls.push("addObserver"),
+        getSession: () => undefined,
+      },
+      advancementRecovery: {
+        recoverConversation: async () => {
+          calls.push("recoverConversation");
+          return { status: "no-pending-recovery" };
+        },
+      },
+    } as never;
+
+    const { buildSessionResumeMethod } = await import(
+      "../rpc/methods/session.js"
+    );
+    await buildSessionResumeMethod().handler(
+      { conversationId: "conv-order" },
+      { server: serverCtx, connection: { id: 7 } } as never,
+    );
+
+    expect(calls).toEqual(["addObserver", "recoverConversation"]);
   });
 
   it("session.clear:清空活跃会话并组播 session.changed cleared;busy 时拒绝", async () => {

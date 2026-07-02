@@ -53,9 +53,11 @@ function makeController() {
     rename: vi.fn(async () => {}),
     compact: vi.fn(async () => ({ modified: false })),
     resume: vi.fn(async (id: string) => ({
-      conversationId: id,
-      name: `名字-${id}`,
-      mode: { kind: "main" as const },
+      active: {
+        conversationId: id,
+        name: `名字-${id}`,
+        mode: { kind: "main" as const },
+      },
     })),
     listConversations: vi.fn(async () => [
       {

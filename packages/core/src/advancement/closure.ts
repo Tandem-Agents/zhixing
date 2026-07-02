@@ -155,6 +155,13 @@ const VERDICT_LABELS: Record<ClosureCriterionRow["verdict"], string> = {
   unreviewed: "未验收",
 };
 
+/** 判定的人话——收场渲染与接入面详情呈现共用，不裸露枚举值。 */
+export function describeClosureVerdict(
+  verdict: ClosureCriterionRow["verdict"],
+): string {
+  return VERDICT_LABELS[verdict];
+}
+
 /**
  * 收场报告降级直出——确定性纯文本渲染，不依赖 LLM。
  * LLM 合成失败时它保证退出 / 完成不被阻塞、信息不缺席。

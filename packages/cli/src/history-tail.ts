@@ -22,6 +22,7 @@
 
 import chalk from "chalk";
 import { extractText, type Message, type RunRecord } from "@zhixing/core";
+import { ADVANCEMENT_TURN_LABEL } from "./advancement-presentation.js";
 import { layout } from "./tui/style.js";
 import { clampLine } from "./tui/line-width.js";
 import { ANCHOR_AI_DONE } from "./output/speaker-state.js";
@@ -36,6 +37,8 @@ export interface HistoryTailEntry {
   userText: string;
   /** 最终回复文本（折叠为单行）；run 无 assistant 文本（中断等）时缺省 */
   assistantText?: string;
+  /** 推进侧代理 run——首行不是用户说的话，渲染必须带来源标记。 */
+  fromAdvancement?: boolean;
 }
 
 export interface HistoryTail {
@@ -63,9 +66,11 @@ export function projectHistoryTail(
 function projectEntry(record: RunRecord): HistoryTailEntry {
   const userText = collapseToLine(extractText(record.messages[0]!));
   const lastAssistant = findLastAssistantText(record.messages);
-  return lastAssistant !== undefined
-    ? { userText, assistantText: lastAssistant }
-    : { userText };
+  return {
+    userText,
+    ...(lastAssistant !== undefined ? { assistantText: lastAssistant } : {}),
+    ...(record.source === "advancement" ? { fromAdvancement: true } : {}),
+  };
 }
 
 function findLastAssistantText(
@@ -104,9 +109,12 @@ export function renderHistoryTailLines(
   ];
 
   for (const entry of tail.entries) {
-    lines.push(
-      clampLine(chalk.dim(`${prefix}❯ ${entry.userText}`), maxVisible),
-    );
+    // 来源标记与实时旁观同源：代理续推的首行不是用户说的话，
+    // 明说来源，与真实用户轮（❯）视觉区分。
+    const userLine = entry.fromAdvancement
+      ? `${prefix}◇ ${ADVANCEMENT_TURN_LABEL}: ${entry.userText}`
+      : `${prefix}❯ ${entry.userText}`;
+    lines.push(clampLine(chalk.dim(userLine), maxVisible));
     if (entry.assistantText !== undefined) {
       lines.push(
         clampLine(

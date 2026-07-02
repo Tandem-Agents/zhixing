@@ -7,7 +7,9 @@
  */
 
 import { describe, expect, it } from "vitest";
-import type { WorkScene } from "@zhixing/core";
+import { AdvancementStore, type WorkScene } from "@zhixing/core";
+import { createTempDir } from "@zhixing/test-utils";
+import { AdvancementController } from "../../advancement/controller.js";
 import {
   buildWorksceneListMethod,
   buildWorksceneCreateMethod,
@@ -71,14 +73,17 @@ function memoryWorkscenes(): WorksceneDirectory & { touched: string[] } {
 function makeCtx(opts: {
   workscenes?: WorksceneDirectory;
   activeConversations?: string[];
+  advancement?: AdvancementController;
 }) {
   const server = {
     workscenes: opts.workscenes,
+    advancement: opts.advancement,
     conversations: {
       list: () =>
         (opts.activeConversations ?? []).map((conversationId) => ({
           conversationId,
         })),
+      addObserver: () => {},
     } as unknown as ConversationManager,
   } as unknown as ServerContext;
   return { server, connection: { id: 1 } } as never;
@@ -161,6 +166,90 @@ describe("workscene.* 方法", () => {
     await expect(
       call(buildWorksceneEnterMethod(), { sceneId: "ghost" }, ctx),
     ).rejects.toMatchObject({ code: RPC_ERROR_CODES.NOT_FOUND });
+  });
+
+  it("enter 携带场景对话的推进状态快照——打开场景即呈现待确认任务", async () => {
+    const workscenes = memoryWorkscenes();
+    const created = (await call(
+      buildWorksceneCreateMethod(),
+      { name: "推进场景" },
+      makeCtx({ workscenes }),
+    )) as { sceneId: string };
+    const conversationId = `ws:${created.sceneId}:conv_main`;
+
+    const root = await createTempDir("workscene-advancement");
+    const store = new AdvancementStore(`${root}/advancement`);
+    await store.createSession({
+      id: "adv-ws",
+      conversationId,
+      originalUserTask: { parts: [{ type: "text", text: "把场景任务做完" }] },
+      pendingRubricDraft: {
+        draftId: "draft-ws",
+        originalTurnId: "turn-ws",
+        source: "generated",
+        candidateRubricIds: [],
+        title: "场景任务验收",
+        description: "验收场景任务。",
+        content: {
+          passCriteria: ["任务完成"],
+          evidenceRequirements: [],
+          failureHandling: [
+            { id: "continue", scenario: "未完成", reply: "请继续。" },
+          ],
+        },
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    const ctx = makeCtx({
+      workscenes,
+      advancement: new AdvancementController({ store }),
+    });
+
+    const entered = (await call(
+      buildWorksceneEnterMethod(),
+      { sceneId: created.sceneId },
+      ctx,
+    )) as {
+      conversationId: string;
+      advancement?: { status: string; pendingRubricDraft?: { draftId: string } };
+    };
+    expect(entered.advancement).toMatchObject({
+      status: "awaiting-rubric-confirmation",
+      advancementSessionId: "adv-ws",
+      pendingRubricDraft: { draftId: "draft-ws" },
+    });
+  });
+
+  it("enter 先入组播名册再恢复推进——恢复期事件对触发者可见", async () => {
+    const workscenes = memoryWorkscenes();
+    const created = (await call(
+      buildWorksceneCreateMethod(),
+      { name: "顺序场景" },
+      makeCtx({ workscenes }),
+    )) as { sceneId: string };
+
+    const calls: string[] = [];
+    const server = {
+      workscenes,
+      conversations: {
+        addObserver: () => calls.push("addObserver"),
+      },
+      advancementRecovery: {
+        recoverConversation: async () => {
+          calls.push("recoverConversation");
+          return { status: "no-pending-recovery" };
+        },
+      },
+    } as unknown as ServerContext;
+
+    await call(
+      buildWorksceneEnterMethod(),
+      { sceneId: created.sceneId },
+      { server, connection: { id: 1 } } as never,
+    );
+
+    expect(calls).toEqual(["addObserver", "recoverConversation"]);
   });
 
   it("exit:touch 场景(无其他副作用)", async () => {

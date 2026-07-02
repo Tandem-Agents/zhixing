@@ -9,6 +9,7 @@
 import chalk from "chalk";
 import type { AgentEventMap } from "@zhixing/core";
 import type { DecorateRunBusFn } from "@zhixing/orchestrator";
+import { ADVANCEMENT_TURN_LABEL } from "../advancement-presentation.js";
 import type { CliWriter } from "../screen/index.js";
 import { clampLine } from "../tui/line-width.js";
 import { layout } from "../tui/style.js";
@@ -47,9 +48,10 @@ export class ObservedTurnPresenter {
       conversationId: ctx.conversationId ?? "",
       turnId: ctx.turnContext?.turnId,
     };
+    const originChannel = ctx.turnContext?.turnOrigin?.channel;
     const unsubs = [
       ctx.bus.on("agent:run_start", (payload) =>
-        this.renderPrompt(identity, payload),
+        this.renderPrompt(identity, payload, originChannel),
       ),
       ctx.bus.on("agent:run_end", () => this.scheduleFallbackFlush(identity)),
     ];
@@ -72,6 +74,7 @@ export class ObservedTurnPresenter {
   private renderPrompt(
     identity: ObservedTurnIdentity,
     payload: RunStartPayload,
+    originChannel: string | undefined,
   ): void {
     const prompt = collapsePrompt(payload.prompt);
     if (prompt.length === 0) return;
@@ -80,7 +83,7 @@ export class ObservedTurnPresenter {
 
     this.opts.flushOutput();
     this.opts.writer.ensureSegmentBreak();
-    this.opts.writer.line(this.promptLine(prompt));
+    this.opts.writer.line(this.promptLine(prompt, originChannel));
     active.promptShown = true;
   }
 
@@ -130,12 +133,17 @@ export class ObservedTurnPresenter {
     );
   }
 
-  private promptLine(prompt: string): string {
+  private promptLine(prompt: string, originChannel: string | undefined): string {
     const width = Math.max(
       20,
       this.opts.width?.() ?? process.stdout.columns ?? 80,
     );
-    const label = chalk.dim("❯ 来自另一个接入面:");
+    // 来源标记自解释：推进侧代理消息强到明说，零认知用户不得产生
+    // 「这是我发的吗」的困惑；其它接入面保持既有旁观措辞。
+    const label =
+      originChannel === "advancement"
+        ? chalk.dim(`◇ ${ADVANCEMENT_TURN_LABEL}:`)
+        : chalk.dim("❯ 来自另一个接入面:");
     return clampLine(`${layout.contentPrefix}${label} ${prompt}`, width);
   }
 }

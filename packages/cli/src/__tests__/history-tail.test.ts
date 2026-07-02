@@ -74,6 +74,23 @@ describe("projectHistoryTail", () => {
     expect(tail.entries[0]!.assistantText).toBe("查到了：结论是 X");
   });
 
+  it("advancement 代理 run 投影带来源标记，普通 run 不带", () => {
+    const proxyRun = {
+      ...run("请修复失败测试后再继续。", "已修复。"),
+      source: "advancement",
+    } as RunRecord;
+    const tail = projectHistoryTail(newestFirst(run("普通提问", "回答"), proxyRun));
+
+    expect(tail.entries[0]!.fromAdvancement).toBeUndefined();
+    expect(tail.entries[1]!.fromAdvancement).toBe(true);
+
+    const lines = renderHistoryTailLines(tail, 120);
+    expect(lines.some((line) => line.includes("❯ 普通提问"))).toBe(true);
+    expect(
+      lines.some((line) => line.includes("◇ 知行推进 · 自动续推: 请修复失败测试后再继续。")),
+    ).toBe(true);
+  });
+
   it("run 无 assistant 文本（中断等）→ assistantText 缺省", () => {
     const tail = projectHistoryTail([run("被中断的问题")]);
     expect(tail.entries[0]!.userText).toBe("被中断的问题");

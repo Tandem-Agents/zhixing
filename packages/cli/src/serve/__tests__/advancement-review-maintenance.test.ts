@@ -53,6 +53,7 @@ function reviewed(
   const session = {
     id: "adv-1",
     conversationId: "conv-1",
+    runs: [review],
   } as never;
   if (kind === "reviewed") return { kind, session, review };
   return {
@@ -85,6 +86,7 @@ function proxyEnqueued(): AdvancementTurnReviewResult {
   const session = {
     id: "adv-1",
     conversationId: "conv-1",
+    runs: [review],
   } as never;
   return {
     kind: "proxy-enqueued",

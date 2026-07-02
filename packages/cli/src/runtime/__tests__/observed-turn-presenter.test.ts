@@ -43,11 +43,17 @@ function decorate(
   bus: FakeBus,
   presenter: ReturnType<typeof createObservedTurnPresenter>,
   turnId = "turn-remote",
+  originChannel?: string,
 ) {
   return presenter.decorateRunBus({
     bus: bus as never,
     conversationId: "conv-1",
-    turnContext: { turnId },
+    turnContext: {
+      turnId,
+      ...(originChannel
+        ? { turnOrigin: { channel: originChannel, triggeredBy: turnId } }
+        : {}),
+    },
   });
 }
 
@@ -75,6 +81,26 @@ describe("ObservedTurnPresenter", () => {
     expect(writer.line).toHaveBeenCalledTimes(1);
     expect(writer.line.mock.calls[0]![0]).toContain("来自另一个接入面");
     expect(writer.line.mock.calls[0]![0]).toContain("我们刚才说了什么");
+  });
+
+  it("advancement 代理 run 的旁观边界用推进来源明示，与接入面措辞区分", () => {
+    const bus = new FakeBus();
+    const writer = makeWriter();
+    const presenter = createObservedTurnPresenter({
+      writer,
+      flushOutput: vi.fn(),
+      isLocalTurn: () => false,
+      width: () => 120,
+    });
+    decorate(bus, presenter, "proxy-1", "advancement");
+
+    bus.emit("agent:run_start", { prompt: "请修复失败测试后再继续。" });
+
+    expect(writer.line).toHaveBeenCalledTimes(1);
+    const line = writer.line.mock.calls[0]![0] as string;
+    expect(line).toContain("知行推进 · 自动续推");
+    expect(line).toContain("请修复失败测试后再继续。");
+    expect(line).not.toContain("来自另一个接入面");
   });
 
   it("本地发起的 run_start 不重复渲染输入边界", () => {

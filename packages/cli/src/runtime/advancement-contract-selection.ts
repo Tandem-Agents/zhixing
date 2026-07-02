@@ -7,19 +7,42 @@ export type AdvancementContractSelectionValue =
   | "direct"
   | "cancel";
 
+/**
+ * Rubric 确认面的 framing 纪律（对齐架构文档的呈现裁决）：
+ * - 对齐语气而非流程语气：「我打算按这几条判断任务算不算完成」，不把
+ *   Rubric 概念顶到用户脸上；顺带告知之后还能改（契约再生已支持），
+ *   降低首次确认的心理重量。
+ * - 折叠层级对齐公开 / 私有边界：确认面主体 = 通过标准 + 证据要求
+ *   （「什么算做完」的公开面）；failureHandling 收进详情深层并标注为
+ *   未达标时的续推安排——它是用户确认的契约但不是决策主体。
+ * - matched / generated 差异化确认重量：命中库里已有准则用轻确认一行，
+ *   现场生成才用通读式——source 区分缓解长期确认疲劳。
+ */
 export function createAdvancementContractSelectionRequest(
   draft: RubricContractDraftSnapshot,
 ): SelectionRequest<AdvancementContractSelectionValue> {
   return {
     id: `advancement:${draft.draftId}`,
-    title: "确认推进准则",
-    body: [
-      "知行已为这次任务准备推进准则。确认后，将按这份准则判断任务是否完成。",
-      `Rubric：${draft.title}`,
-      draft.description,
-    ],
+    ...(draft.source === "matched"
+      ? {
+          title: `按「${draft.title}」推进？`,
+          body: [
+            "这次任务命中了你确认过的验收方式，按它判断任务算不算完成。",
+            "细节可展开查看；确认后如果要改，随时可以说。",
+          ],
+        }
+      : {
+          title: "确认怎么算做完",
+          body: [
+            "我打算按下面这几条判断这个任务算不算完成，你看对吗？",
+            ...draft.content.passCriteria.map(
+              (text, index) => `  ${index + 1}. ${text}`,
+            ),
+            "确认后如果要改，随时可以说。",
+          ],
+        }),
     details: {
-      title: "推进准则详情",
+      title: "验收方式详情",
       body: renderRubricDraftDetails(draft),
     },
     options: [
@@ -69,7 +92,7 @@ function renderRubricDraftDetails(
   draft: RubricContractDraftSnapshot,
 ): readonly string[] {
   const lines: string[] = [];
-  appendSection(lines, "通过标准", draft.content.passCriteria);
+  appendSection(lines, "什么算做完（通过标准）", draft.content.passCriteria);
 
   const evidence = draft.content.evidenceRequirements?.map((item) => {
     const required = item.required === true ? "必需" : "可选";
@@ -78,12 +101,18 @@ function renderRubricDraftDetails(
       : "";
     return `${item.description}（${required}${located}）`;
   });
-  appendSection(lines, "证据要求", evidence ?? []);
+  appendSection(lines, "怎么核验（证据要求）", evidence ?? []);
 
+  // 未达标时的续推安排——用户确认的契约内容，但不是确认决策的主体，
+  // 收在详情最深处并说明用途（自动发给知行的催办内容）。
   const failureHandling = draft.content.failureHandling.map(
     (item) => `${item.scenario}：${item.reply}`,
   );
-  appendSection(lines, "未通过时的处理", failureHandling);
+  appendSection(
+    lines,
+    "未达标时的续推安排（自动发给知行的催办内容）",
+    failureHandling,
+  );
 
   return lines;
 }

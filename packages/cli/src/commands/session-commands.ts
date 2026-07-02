@@ -25,6 +25,8 @@ import {
   type ArgSchema,
   type WorkModeSwitchIntent,
 } from "@zhixing/core";
+import type { SessionAdvancementStateSnapshot } from "@zhixing/server";
+import { renderAdvancementDetailLines } from "../advancement-presentation.js";
 import type { CliWriter } from "../screen/index.js";
 import { layout } from "../tui/style.js";
 import { renderHistoryTail } from "../history-tail.js";
@@ -39,6 +41,13 @@ export interface SessionCommandsDeps {
   readonly controller: ConversationController;
   /** 对话切换成功后通知 cli UI 层刷新（如 TaskTail）。 */
   readonly onConversationChanged: () => void | Promise<void>;
+  /**
+   * 切换到的对话带推进状态时的呈现钩子——awaiting 主动浮现确认面、
+   * active 渲染进行中提示。持久化不等于可见性，切换即呈现。
+   */
+  readonly onResumedAdvancement?: (
+    snapshot: SessionAdvancementStateSnapshot,
+  ) => void | Promise<void>;
   /**
    * 本接入面主动发起 /clear 前的标记钩子。宿主会把 cleared 组播回发起端,
    * repl 用该标记区分"本地命令自己的回声"与"其他接入面清空当前对话"。
@@ -144,11 +153,18 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
       for (const c of conversations.slice(0, 15)) {
         const label = c.name ? chalk.white(c.name) : chalk.dim(c.conversationId);
         const time = formatRelativeTime(new Date(c.lastActiveAt));
+        // 推进状态不埋在列表里——待确认 / 推进中的对话在候选里直接可见
+        const advancement =
+          c.advancement?.status === "awaiting-rubric-confirmation"
+            ? chalk.yellow(" [待确认推进任务]")
+            : c.advancement?.status === "active"
+              ? chalk.cyan(" [推进中]")
+              : "";
         const current =
           c.conversationId === controller.current.conversationId
             ? chalk.green(" ← 当前")
             : "";
-        writer.line(`  ${label} ${chalk.dim(`(${time})`)}${current}`);
+        writer.line(`  ${label} ${chalk.dim(`(${time})`)}${advancement}${current}`);
       }
       writer.line(chalk.dim(`\n  使用 /resume <名称或 id> 切换\n`));
       return {};
@@ -198,17 +214,48 @@ export function registerSessionCommands(deps: SessionCommandsDeps): void {
     try {
       const resumed = await controller.resume(target.id);
       await deps.onConversationChanged();
-      writer.line(chalk.dim(`\n  已切换到 ${chalk.cyan(resumed.name)}\n`));
+      writer.line(chalk.dim(`\n  已切换到 ${chalk.cyan(resumed.active.name)}\n`));
       // 历史尾巴:切换即见最近几轮变暗摘录(与启动恢复同款"回到工位"展示,
       // 清空边界由宿主倒读原语保证——刚清空的对话零输出)
       renderHistoryTail({
         runs: (await controller.history(target.id)).runs.map((r) => r.record),
         writer,
       });
+      if (resumed.advancement) {
+        await deps.onResumedAdvancement?.(resumed.advancement);
+      }
     } catch (err) {
       writer.line(
         chalk.red(
           `\n  加载对话失败: ${err instanceof Error ? err.message : String(err)}\n`,
+        ),
+      );
+    }
+    return {};
+  });
+
+  // ── /advancement ──
+  registry.register({
+    id: "advancement:repl",
+    name: "advancement",
+    description: "查看当前对话的任务推进详情（判定归因 / 证据 / 收场回看）",
+    category: "session",
+    execution: "local",
+    tag: "builtin",
+  });
+  dispatcher.registerHandler("advancement:repl", async () => {
+    try {
+      const detail = await controller.advancementDetail();
+      const width = process.stdout.columns ?? 80;
+      writer.line("");
+      for (const row of renderAdvancementDetailLines(detail, width)) {
+        writer.line(row);
+      }
+      writer.line("");
+    } catch (err) {
+      writer.line(
+        chalk.red(
+          `${layout.contentPrefix}推进详情获取失败: ${err instanceof Error ? err.message : String(err)}\n`,
         ),
       );
     }
