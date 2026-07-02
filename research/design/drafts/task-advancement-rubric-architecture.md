@@ -357,7 +357,7 @@ interface ReviewAttribution {
 
 代理消息的内容 = **意图骨架 + 归因事实块**两部分拼装：意图骨架来自 Rubric 的 `failureHandling`（用户确认过的固定推进内容，推进侧只允许填事实变量、不允许改写推进意图）；归因事实块由 `ReviewAttribution` 确定性渲染追加（逐条判定 / 理由 / 独立证据摘录）。裁决理由：failureHandling 守住的是推进**意图**不被改写；而裁判独立取证发现的事实（如"执行侧自述测试通过，独立核验发现 3 个失败"）恰是协议本就允许的"事实变量"的自然延伸——不把它传给执行侧，判断分歧时裁判握着能一击破局的证据却说不出口，闭环原地打转直到死胡同退出。归因只含**结论与证据事实**，不含裁判思考过程与裁判程序——"不外泄裁判过程"的边界照守。
 
-> 生效面缺口（收口见 §15 C14）：当前代理消息变量只有 `unmet_criteria`（字符串 join）与 `review_id` 两个（`buildProxyVariables`），裁判工具产出的 `evidence` 数组完全留在 AdvancementStore、不进代理消息——归因通道未落地。
+> 生效面：已落地（C14）——代理消息 content = failureHandling 意图骨架 + `renderReviewAttribution` 确定性渲染的归因事实块；`attribution` 随 review 与 proxy 持久化。
 
 #### 4.7 AdvancementStore 持久化形态与退役
 
@@ -369,7 +369,7 @@ interface ReviewAttribution {
 - **孤儿目录 GC 兜底**：维护 sweep（沿 `__transcript-gc` 同款「持久层暴露 sweep 能力 + 调度器薄触发壳」模式）枚举 advancement 根目录，删除对应对话已不存在的孤儿目录；删失败跳过、下轮再来，幂等。
 - **不做日志内截断**：单对话控制事件体量远小于对话正文（不含 run 原文），append-only 纪律优先，不引入日志重写。
 
-> 生效面缺口：当前实现对话删除只 append 一条 cancelled 事件、目录永存（`core/advancement` 无任何删除能力），上述两条清理路径均未落地——收口见 §15 C13。
+> 生效面：已落地（C13）——`session.delete` 在取消 open 会话后连带 `removeConversationData` 删除目录（失败只 warn）；`__advancement-gc` 系统任务（天级 cron、沿薄壳模式）经 `sweepOrphanDirs` 清理孤儿目录。判活语义：目录段经 `fromSafePathSegment` 无损还原为 conversationId（安全投影可逆），解析 scope 后按对话侧真实布局做存在性检查——**不做目录名跨域比对**（控制日志目录名是全域键投影、对话侧是 scope 下的 localId 投影，workscene 对话两者不同名，跨域比对会把存活场景会话误判孤儿）。
 
 ### 5. 生命周期流程
 
@@ -387,7 +387,7 @@ interface ReviewAttribution {
 
 实现上，准入策略运行在执行 run 之前的控制面，形态是需求区两方案中的**方案二（独立判断节点）**：一次 light 档 LLM 单发判断调用，不写主线 transcript，不产生 RunRecord，不调用执行工具。选方案二而非「主 Agent run 内工具触发」（方案一）的裁决理由：工具触发意味着先起主 run，与「Rubric 确认发生在第一次执行 run 之前」直接矛盾。
 
-准入判断的输入面（目标态）：当轮用户输入 + 推进会话状态 + **最近会话投影**（执行侧窗口尾部的轻量摘要/末组对话）。没有会话投影，「继续把它弄完」这类上下文依赖输入无法准确分类，而准入误判方向直接决定用户进不进重流程。当前生效面输入只有当轮文本加两个会话状态布尔、无会话投影——收口见 §15 C12。
+准入判断的输入面（目标态）：当轮用户输入 + 推进会话状态 + **最近会话投影**（执行侧窗口尾部的轻量摘要/末组对话）。没有会话投影，「继续把它弄完」这类上下文依赖输入无法准确分类，而准入误判方向直接决定用户进不进重流程。生效面：已落地（C12）——准入输入携带最近会话投影（活跃会话窗口尾部经 `renderRecentContextFromMessages` 硬裁剪的轻量文本，标注为待分类数据防注入），准入耗时经 `onAdmissionTiming` 回调进 serve 诊断日志作延迟基线。已知边界：投影只覆盖内存中已加载的会话——宿主重启后对既有对话的第一条上下文依赖输入恰好无投影（降级为无投影分类，与「未就绪返回 undefined」语义一致）；会话一经激活即恢复。
 
 延迟代价（诚实记录，不藏在「轻量」措辞后面）：advancement 装配开启后，每条非空用户输入（含纯问题）在 main run 之前串行阻塞一次 light 档 LLM 往返——这是全量消息的首 token 延迟税，换取少数任务的推进闭环准入。接受此串行一跳（推测并行执行会预跑带副作用的工具、不可取），但约束是：准入必须恒用 light 档、prompt 保持小体量、LLM 不可用或超时立即走保守兜底（降级为 direct-task，不阻塞用户）；首 token 延迟基线纳入观测，实测不可接受时再校准（如短输入快速通道），不预先建复杂机制。
 
@@ -419,7 +419,7 @@ interface ReviewAttribution {
 - **沉淀治理兜底**：保存前做近邻检测（与既有 Rubric 高相似时提示复用/修订已有条目而非另存新条）；确认即沉淀的需求语义保留，但沉淀的是场景资产、不是任务快照。
 - 本次任务契约仍以 `ConfirmedRubricSnapshot` 快照隔离——库条目后续演化不影响 active 会话，不变。
 
-> 生效面缺口（收口见 §15 C15）：当前生成 prompt 要求「passCriteria 必须贴合当前任务」、无条件另存新条、无近邻检测——库腐化路径完整存在。
+> 生效面：生成契约已场景化（C15）——生成与修订 prompt 均改为「场景可复用表述、任务细节归证据要求与 locator」，自相矛盾消除。近邻检测的**交互半边**（确认面提示复用/改用已有条目）依赖确认面改造，归 C11 一并落地；机制面（candidateRubricIds 相近候选随草案下发）既有。
 
 Rubric 草案生成是任务契约生成，不是通用模板填空。未命中 Rubric 时，默认路径应由 LLM 根据当前任务现写场景化验收标准、证据要求和未通过处理；固定通用模板只能作为测试替身，不能成为真实产品行为。若草案生成不可用或失败，受控失败的形态是：generation strategy 直接抛错（core 层无 `contract-failed` 字面量），由 server 控制面捕获并映射为 `advancement:contract_failed` 控制事件、不落空会话——两层各守其责，绝不伪造一份通用 Rubric 继续流程。`RubricContractBuilder` 只负责检索、组装、确认和持久化契约流程，草案内容生成必须通过可替换的 generation strategy 接入，避免把智能生成逻辑写死在控制面类里。
 
@@ -460,7 +460,7 @@ run 输入 = [...执行侧注意力窗口, 当前用户/代理消息]
 
 裁决依据（§0）：passCriteria 是用户确认过的任务契约公开面，属任务定义的一部分——执行侧知道「什么算完成」才能首轮瞄准真目标，而不是靠失败反馈碎片逐轮逆向拼出标准（标准分 k 批暴露 = 最多 k−1 轮纯由信息不对称制造的完整执行 run + 裁判调用，是全系统最大的可避免成本项）。「执行侧不判断自己是否完成」不变量照守：知道标准 ≠ 自我验收，验收权与独立证据仍在推进侧。failureHandling 模板、裁判过程、Rubric 库索引仍不进执行侧。
 
-> 生效面缺口（收口见 §15 C14）：当前首条执行 turn 只有原始任务原文，passCriteria 全程不下发。
+> 生效面：已落地（C14）——serve 装配注册 `advancement-acceptance-lifecycle` 订阅者，active 期间经 `injectUserContext` 每 run 注入验收条件块（`renderAcceptanceConditions`：通过标准 + 证据要求的完整契约信息，含必需性与核验路径——执行侧知道产物会在哪被核验才能放对地方，与确认面同一口径），终态自然停注；RuntimeHost 新增 lifecycle 订阅者透传。
 
 #### 5.4 run 接受后验收
 
@@ -570,7 +570,11 @@ AdvancementRuntime 第一版能力：
 - **能力集的声明与传递**：类型住 core（纯声明）、探测住 orchestrator（provider 侧运行时探测：git 可用性、workspace 形态），经装配传入草案生成策略输入——required 落点约束在生成与确认阶段生效。
 - **取证路径安全**：只读也守 workspace 边界——locator 路径经 realpath 归一 + 边界校验（复用 PathGuard；symlink 逃逸是权限模块的已知教训），越界路径按「该项证据缺失」处理、不抛权限确认（取证不该变成确认风暴，缺失自有 verdict 上限规则兜底）。
 
-> 生效面缺口（收口见 §15 C10）：当前 `DefaultAdvancementEvidenceProvider` 对全部客观 kind 直接跳过、只重投影执行侧最终回复（`source:"execution-report"`），第一级取证零实现；而裁判护栏已生效（required 客观证据必须 `source:"independent" && passed:true` 才允许 passed）——护栏先于能力落地，导致任何带 `required` 客观证据的 Rubric 结构性无法验收通过。在 C10 之前，草案生成不得产出 `required:true`（即上面「required 与能力集耦合」在能力集为空时的自然推论）——**但生效面现状与此相反**：生成路径对 required 缺省即 true（`contract.ts:486` `required !== false`）、matched 资产路径硬编码 `required:true`（`contract.ts:171`），required 死锁今天在产品路径上真实可触发；C10 必须连带修正 core 侧这两处（它们正是能力集耦合规则的落地点）。
+> 生效面：已落地（C10）——`first-party-evidence.ts` 实现 git 工作区变更只读取证（status 为必需事实源、diff --stat 为摘要增强，unborn HEAD 等无基线场景不连累 status）与 log / artifact 按 locator 定位读取（PathGuard realpath 边界，显式 locator 全越界按证据缺失、绝不降级全量；无 locator 时按执行侧本轮工具触碰路径投影收窄）；`detectEvidenceCapabilities` 运行时探测；core 侧 required 缺省两处已按 `canBeRequired` 能力集约束收敛，required 死锁解除。
+>
+> **verdict 上限的载体（实施决策记录）**：unknown 上限规则的机械可校验部分在 evidence 层（required 独立证据护栏）；criteria 层的上限由裁判 system prompt 硬指令承载（标准条目无 kind、与证据要求无绑定字段，逐条机械校验不可行——两层门裁决本就声明「无需在条目上新增任何标志」）。能力集事实同时喂入裁判 prompt，使裁判能区分「执行侧未产证据（failed 催证）」与「系统无核验能力（capability-gap 退出）」。
+>
+> **已知边界**：① 能力集在宿主启动时探测一次、进程内冻结——中途 `git init` 需重启宿主才进能力集；② 取证根绑全局 workspace（与裁判 workingDirectory 同源）——workscene 会话的推进任务取证落在全局工作区上，场景级取证根随 workscene 归宿主的演进另行对齐。
 
 证据策略分层：
 
@@ -580,7 +584,9 @@ AdvancementRuntime 第一版能力：
 
 验收成本也按可靠性分层：能由确定性证据或轻量模型可靠判断的，不强制每轮使用 main 档；只有语义判断复杂、证据不充分或风险较高时才使用高质量验收档。成本分层不能牺牲验收可靠性，也不能变成固定最大 run 次数。（生效面现状：裁判恒用 main 档、仅推进侧窗口摘要用 light 档——这是「先保可靠性」的正确保守起点，非缺陷；分层属后续校准项，由真实验收成本数据驱动，不预建机制。）
 
-当前 LLM 请求协议没有框架级 structured output / json schema 原语。推进侧不得把裁判结论建立在“纯文本 + 正则 / 宽松 JSON 解析”上；第一版应通过专用裁判工具调用提交结论，工具 input schema 强约束 `decision`、`criteria`（逐条 `criterionId` / `verdict` / `reason` / `evidenceExcerpt`——即 `ReviewAttribution` 的来源，criterionId 必须属于契约快照条目集）、`evidence`、`unmetCriteria`（criteria 中 unmet 条目的投影，校验层核一致性）、`selectedFailureHandlingId`、`exitReason` 等字段，工具执行体只做校验和返回，不产生副作用。
+当前 LLM 请求协议没有框架级 structured output / json schema 原语。推进侧不得把裁判结论建立在“纯文本 + 正则 / 宽松 JSON 解析”上；第一版应通过专用裁判工具调用提交结论，工具 input schema 强约束 `decision`、`criteria`（逐条 `criterionId` / `verdict` / `reason` / `evidenceExcerpt`——即 `ReviewAttribution` 的来源，criterionId 必须属于契约快照条目集）、`evidenceIds`、`selectedFailureHandlingId`、`exitReason` 等字段（`unmetCriteria` 由 criteria 构造派生，不收模型提交），工具执行体只做校验和返回，不产生副作用。
+
+**证据采用是 id 引用，不是内容提交（裁决）**：裁判提交 `evidenceIds` 引用已收集列表，持久化的 evidence 恒为取证层的 canonical 对象——摘要、判定、来源、绑定全部由取证层持有，模型没有任何字段可以改写。裁决理由：「模型复述全字段 + 系统逐字段校验一致」的形态里每个字段都是潜在的校验遗漏面（曾漏掉 summary 造成裁判可改写证据摘要、污染归因链与收场矩阵）；引用化让改写面结构性消失，且与「事实来自工具、判断交 LLM」同源——模型对证据的解读走归因层（criteria 的 reason / evidenceExcerpt），证据事实层零触碰。
 
 **取证信任边界（裁决）**——「独立核验」的强度必须诚实分辨，防线声明不得超出防线覆盖面：
 
@@ -1034,7 +1040,7 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 - 推进侧上下文是否复用现有注意力窗口规则。
 - 全链路是否满足本文不变量。
 
-#### C10：推进侧第一级独立取证（收口单元，未实施）
+#### C10：推进侧第一级独立取证（已实现，待提交）
 
 内容：
 
@@ -1068,7 +1074,7 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 - 渲染只消费既有 wire 事实（RunRecord 元数据 + control 事件），不新增宿主侧状态。
 - 不违反选择模块与渲染层的既有通用性边界。
 
-#### C12：准入会话投影与延迟观测（收口单元，未实施）
+#### C12：准入会话投影与延迟观测（已实现，待提交）
 
 内容：
 
@@ -1081,7 +1087,7 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 - 判断仍为纯控制面：不写主线、不产 RunRecord。
 - 延迟代价有观测数据支撑后续校准决策，不预建快速通道机制。
 
-#### C13：advancement 持久化退役（收口单元，未实施）
+#### C13：advancement 持久化退役（已实现，待提交）
 
 内容：
 
@@ -1094,13 +1100,14 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 - sweep 幂等、单点失败跳过、只删整目录不重写日志。
 - 与 transcript GC 的分层模式一致：算法住持久层，调度层只是触发壳。
 
-#### C14：闭环信息结构（收口单元，未实施）
+#### C14：闭环信息结构（已实现，待提交）
 
 内容：
 
 - 契约验收条件下发：active 会话期间确认版 passCriteria + evidenceRequirements 经 `onBeforeRun.injectUserContext` run 瞬态注入（§5.3 载体裁决——注入进当前 run 用户消息的发送视图文本），终态后停注；生命周期由推进会话状态纯函数派生。**注入订阅者由宿主装配层注册**——物理落点是 `packages/cli` 的 serve 装配（runtime 工厂 / `RuntimeHost.assemble` 现居 cli 包，需新增 lifecycle 透传）；不得经 ConversationManager（守 §3 结构保证）。
-- 归因通路整链：契约快照固化分配 passCriteria 条目 id（§4.4）；裁判工具 schema 扩逐条判定结构 `criteria`（§6）；`AdvancementRunReview.attribution` 持久化（§4.5，系统兜底 review 空 criteria、无迁移义务）；代理消息以确定性渲染的归因事实块下发（§4.6）。`buildProxyVariables` 两变量形态废弃，变量格式表与 unmetCriteria 投影载体（id vs 文本）随本单元定案。
-- rubric-protocol 同步：变量格式表定案后固化进协议（归因附件语义已同步至协议运行契约第 8 条）。
+- 归因通路整链：契约快照固化分配 passCriteria 条目 id（§4.4）；裁判工具 schema 扩逐条判定结构 `criteria`（§6）；`AdvancementRunReview.attribution` 持久化（§4.5，系统兜底 review 空 criteria、无迁移义务）；代理消息以确定性渲染的归因事实块下发（§4.6）。
+- 变量格式表已定案：`{unmet_criteria}`（unmet 条目标准文本、换行分隔，由逐条判定构造派生）、`{review_id}`；归因块非变量、恒定追加。unmetCriteria 投影载体定为标准文本（三个既有消费者——代理变量、exit 消息、窗口条目渲染——都消费文本）。已固化进 rubric-protocol 变量权威格式表。
+- 附带落地：`review.usage` 两半快照（judge 随裁判 AgentResult、run 随被审 RunRecord）随本单元 schema 变更一并填充——保险丝求和的消费端归 C17。
 
 审查重点：
 
@@ -1109,7 +1116,7 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 - 判断分歧场景端到端：执行侧自认已过 + 裁判独立证据相反 → 归因块使下一轮针对性修复，不打转。
 - failureHandling 意图骨架仍是用户确认内容，归因不改写推进意图。
 
-#### C15：Rubric 场景化生成与沉淀治理（收口单元，未实施）
+#### C15：Rubric 场景化生成与沉淀治理（已实现——生成契约半边；近邻交互半边随 C11）
 
 内容：
 
