@@ -223,6 +223,7 @@ interface RunRecord {                     // 一个 run 的完整协议消息序
   type: "run"; runIndex: number; timestamp: string;
   messages: Message[];                    // [用户原文 user, ...本 run 全部 assistant 与 tool_result 消息]
   usage?: TokenUsage; source?: TurnSource;
+  advancement?: RunRecordAdvancementMetadata;   // 推进闭环来源元数据（仅 sessionId 必填）——语义归 task-advancement-rubric-architecture.md §5.5，已随其 C3 落地
 }
 interface ClearRecord {                   // §二「/clear 是事件、不是销毁」
   type: "clear"; timestamp: string;
@@ -330,7 +331,7 @@ interface AttentionWindowState {
 
 **accept / rollback 语义**：窗口只在 owner 决定接受时前进。接受策略归 owner（REPL 现状=完成与中断的 run 都落盘都接受；server 沿其现状 preRun 回滚协议`run-turn.ts`），本次不统一两端策略（非需求）。接受顺序固定：**先 `appendRunRecord` 成功、后 `acceptRun`**——持久化失败则窗口不前进（下轮重试同一基底），消灭现状"持久化失败 append newMessages 产生内存漂移"的降级分支。
 
-**run 瞬态 vs 窗口事实的边界**（一条规则定死）：`onBeforeRun.injectUserContext` 的贡献与 per-LLM-call turn-context 块是 **run 瞬态**——只进该 run 的发送视图、不进窗口事实（窗口配对派生自 runRecord 原文,看不见 runtime 内部注入是特性而非缺陷：要每 run 可见就每 run 重注,谓词自然成立,窗口里也不堆陈旧副本）。进入窗口的非 run 内容只有窗口**自身构造**的两类条目——bootstrap 装填对（3.2.2）与折叠摘要对;不存在任何"改写用户消息"的注入,**用户消息在发送视图、窗口、持久化三处同一（原文）**。
+**run 瞬态 vs 窗口事实的边界**（一条规则定死）：`onBeforeRun.injectUserContext` 的贡献与 per-LLM-call turn-context 块是 **run 瞬态**——只进该 run 的发送视图、不进窗口事实（窗口配对派生自 runRecord 原文,看不见 runtime 内部注入是特性而非缺陷：要每 run 可见就每 run 重注,谓词自然成立,窗口里也不堆陈旧副本）。进入窗口的非 run 内容只有窗口**自身构造**的两类条目——bootstrap 装填对（3.2.2）与折叠摘要对。run 瞬态注入的真实形态是把贡献拼成 `<context>`/`<turn-context>` 块、前缀进当前 run 用户消息的**发送视图文本**（`user-context.ts`,与原文共存于该 run 的 LLM 输入、run 结束即弃）;**窗口与持久化两处的用户消息恒为原文**——落盘 `messages[0]` 即原始输入是结构性保证、窗口配对派生自落盘原文,两处都不被任何注入触碰,用户原文的唯一权威在持久化。
 
 **生命周期**：随注意力窗口生命周期存续（lifecycle-concepts.md §1）；崩溃即弃、重启走启动装填重建（派生视图的代价与自由）；闲置可弃（重建免费），eviction 策略留给宿主层、本次不建。
 
@@ -403,7 +404,7 @@ interface AttentionWindowState {
 3. 目标分片不含 CompactMarker/summaryPair;窗口重构永不缩短 transcript。
 4. 一切读路径（装填/UI/未来召回）止于最近 ClearRecord。
 5. 窗口只经 acceptRun/reset 前进;accept 先持久化后窗口;失败回滚到 preRun 基底。
-6. 启动装填对是窗口起始条目、跨 run 存续直到被折叠摘要对取代;injectUserContext/turn-context 为 run 瞬态不进窗口;用户消息在发送视图/窗口/持久化三处同一（原文）。
+6. 启动装填对是窗口起始条目、跨 run 存续直到被折叠摘要对取代;injectUserContext/turn-context 为 run 瞬态、只活在当前 run 发送视图、不进窗口;窗口与持久化中的用户消息恒为原文（落盘 `messages[0]` 结构性保证）。
 7. 快照可全删而系统照常（仅启动连贯性降级）;快照永不参与窗口/transcript 的权威重建。
 8. ephemeral run 不产生任何持久化写（record/快照/segmentMeta）。
 9. 摘要快照只在 persistent 对话的 run accept 成功后、或 run 外手动 compact 经 `applyCompact` 应用成功后落盘（ephemeral 会话两条路都不写）;`coveredThroughRunIndex` 严格早于装填原文起点。

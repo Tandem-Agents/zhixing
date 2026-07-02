@@ -15,9 +15,10 @@ None
 3. 查找并阅读“统一核心与多接入面 (Unified Core & Access Surfaces)”文档。
 4. 查找并阅读“文件化可编排基础设施 (File-based Orchestration Infrastructure)”文档，理解它如何衔接注意力窗口快照、子 Agent 与 orchestrator 执行层。
 5. 查找并阅读“生命周期概念定义与规范 (Lifecycle Concepts)”文档。
-6. 阅读 `research/internals/screen-rendering/overview.md`。
-7. 如果标题文档不在明显路径下，使用中文标题、英文标题或关键词在仓库中搜索。找不到的文档要明确报告，不要臆造内容。
-8. 输出一份核心架构摘要，把这些文档与上一步的项目地图联系起来。
+6. 查找并阅读“任务推进闭环（Rubric 推进准则）架构”文档，理解它如何基于前述会话、注意力窗口、生命周期与编排地基实现任务推进闭环。
+7. 阅读 `research/internals/screen-rendering/overview.md`。
+8. 如果标题文档不在明显路径下，使用中文标题、英文标题或关键词在仓库中搜索。找不到的文档要明确报告，不要臆造内容。
+9. 输出一份核心架构摘要，把这些文档与上一步的项目地图联系起来。
 
 ## Output
 
