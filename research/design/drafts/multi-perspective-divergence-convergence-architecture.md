@@ -120,13 +120,13 @@ core 基础设施（通用增强，无多视角语义）
 
 职责分界：
 
-| 组件 | 职责 | 不做 |
-| ---- | ---- | ---- |
-| CLI `@` 解析 | 识别触发语法、剥离出问题正文 | 不理解视角与流程 |
-| PerspectivesController | 分配、装配、执行编排、落盘结果 | 不写主线中间过程、不改 owner 串行语义 |
-| AllocationStrategy | 问题 → 视角集合（强 schema） | 不决定档位、不参与执行 |
-| 编排基础设施 | 校验、调度、节点执行、事件 | 不认识"视角/交叉/收敛" |
-| ConversationManager | 串行、busy、abort、落盘接受协议 | 不内嵌多视角语义 |
+| 组件                   | 职责                            | 不做                                  |
+| ---------------------- | ------------------------------- | ------------------------------------- |
+| CLI`@` 解析          | 识别触发语法、剥离出问题正文    | 不理解视角与流程                      |
+| PerspectivesController | 分配、装配、执行编排、落盘结果  | 不写主线中间过程、不改 owner 串行语义 |
+| AllocationStrategy     | 问题 → 视角集合（强 schema）   | 不决定档位、不参与执行                |
+| 编排基础设施           | 校验、调度、节点执行、事件      | 不认识"视角/交叉/收敛"                |
+| ConversationManager    | 串行、busy、abort、落盘接受协议 | 不内嵌多视角语义                      |
 
 ### 4. 核心数据模型
 
@@ -137,12 +137,13 @@ core 基础设施（通用增强，无多视角语义）
 ```typescript
 interface SessionSendParams {
   // 既有字段...
-  engage?: { kind: "perspectives" };
+  engage?: { kind: "perspectives"; question: string };
 }
 ```
 
-- 用户消息**原文落盘**（含 `@` 触发语法——它是用户表达的事实）；编排 run input 用剥离触发语法后的问题正文。
+- 用户消息**原文落盘**（含 `@` 触发语法——它是用户表达的事实）；编排 run input 用整条消息剥离触发标记后的问题正文，`@` 前后的用户正文都必须保留。
 - `engage` 是显式处理方式指令：无推进会话时，该输入不过推进准入分类（用户已指定怎么回答，自动分类没有裁决空间）。
+- `engage.question` 是编排问题正文，由触发解析端一次性确定；server 不从可能已做文件引用展开或材料拼接的消息文本二次推断问题。
 - **与推进会话共存的边界（如实定死）**：active 推进会话下，输入照走既有分类分层，被放行执行时 engage 生效（多视角回答作为主线事实照常进验收）；awaiting 阶段的既有语义是「非降级/取消的输入不执行、只重投确认面」——engage 输入同规则，@ 意图随消息不执行而不生效。不为多视角开旁路特例；若未来 awaiting 支持旁路咨询，多视角随普通输入自然通行（改进归 advancement 模块）。
 - 返回与普通消息一致（immediate / queued），不新增 RPC method——发起意图是消息的属性，不是新动作。
 
@@ -183,7 +184,7 @@ interface RunRecord {
 
 - `messages` = [用户原文 user 消息, 最终版本 assistant 消息]——一问一答，主线窗口自然增长，后续轮次能引用评议结论。
 - `usage` = 全编排汇总（分配 + 全部节点），成本对统计与保险丝口径诚实。
-- `source` 沿用 `interactive`（用户发起）；元数据走 run 级，不进 `Message role/content`（与 advancement 同纪律）。
+- `source` 沿用同路径普通 RPC turn 的 `channel`；元数据走 run 级，不进 `Message role/content`（与 advancement 同纪律）。
 
 ### 5. 生命周期流程
 
@@ -191,7 +192,7 @@ interface RunRecord {
 
 1. CLI 输入预处理识别 `@`：行首 `@` 后跟空格，或行中 `@` 前后皆空格，且后有正文——触发；`@` 后无正文不触发（`email@x.com` 天然不命中）。
    - **与既有 `@` 语义的共存边界（已核实正交）**：CLI 现有 `@` 文件补全（FileProvider typeahead）与 `@file:path` 内容引用（resolveFileRefs）均为 `@` 后跟**非空格**；并发触发恒为 `@` 后跟**空格**——空格即判别符，互不侵占。实施时补全面板对 `@ + 空格` 不弹出（触发细化），`@file:` 引用在同一消息内照常先行解析。
-2. 命中后照常 `session.send`，携带 `engage: { kind: "perspectives" }` 与消息原文。
+2. 命中后照常 `session.send`，携带 `engage: { kind: "perspectives", question: "<整条消息剥离触发标记后的问题正文>" }` 与消息原文。
 3. server 侧 send 编排：advancement 门（awaiting/active 分层规则）先行 → `admitTurn`，`makeTask` 构造多视角 PendingTask。busy 时排队，与普通消息同权。
 
 #### 5.2 执行（PendingTask.execute 闭包内，全程瞬时）
@@ -262,12 +263,12 @@ interface RunRecord {
 
 ### 9. 包与代码落点
 
-| 包 | 新增 / 改造 | 说明 |
-| ---- | ---- | ---- |
-| `@zhixing/core` | template 数组展开；node policy `modelRole` | 通用增强，无业务语义 |
-| `@zhixing/orchestrator` | `AgentNodeExecutor` 按节点 modelRole 选 role 实例 | 消费 llmRoles 既有持有 |
-| `@zhixing/server` | `perspectives/` 门面：AllocationStrategy + 内置编排文档模板 + 装配 + 一等 turn + 落盘；serve 宿主装配（门面实例、真实编排 executor、事件桥）；send 的 engage 编排 | 与 `advancement/` 并列的会话 owner 级能力 |
-| `@zhixing/cli` | `@` 触发解析（输入预处理层）；orchestration 事件进度投影；历史来源标记 | 接入面投影，不持状态 |
+| 包                        | 新增 / 改造                                                                                                                                                         | 说明                                       |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| `@zhixing/core`         | template 数组展开；node policy`modelRole`                                                                                                                         | 通用增强，无业务语义                       |
+| `@zhixing/orchestrator` | `AgentNodeExecutor` 按节点 modelRole 选 role 实例                                                                                                                 | 消费 llmRoles 既有持有                     |
+| `@zhixing/server`       | `perspectives/` 门面：AllocationStrategy + 内置编排文档模板 + 装配 + 一等 turn + 落盘；serve 宿主装配（门面实例、真实编排 executor、事件桥）；send 的 engage 编排 | 与`advancement/` 并列的会话 owner 级能力 |
+| `@zhixing/cli`          | `@` 触发解析（输入预处理层）；orchestration 事件进度投影；历史来源标记                                                                                            | 接入面投影，不持状态                       |
 
 - 内置编排文档以完整 JSONC 文本存于门面模块内单一文件（如 `deliberation-template.ts` 导出模板常量）——语义上就是"一份编排文档"，物理上随构建产物零打包风险；不用代码拼 definition 对象绕过模板与校验管线。
 - wire：`SessionSendParams.engage`、RunRecord `perspectives` 元数据透传（history / RPC / CLI 同源）。
@@ -302,11 +303,11 @@ interface RunRecord {
 
 带依赖的可执行提交链，每单元独立构建、测试、审查：
 
-| 单元 | 内容 | 依赖 |
-| ---- | ---- | ---- |
-| P1 | core 模板有界数组展开（含 params 协议放宽为有界结构化数组、组依赖替换、caps 兜底、测试） | 无 |
-| P2 | core 节点 `modelRole` + orchestrator executor 按 role 选实例（测试） | 无 |
-| P3 | server perspectives 门面：分配 strategy、内置编排文档、装配（档位序列 / clamp / caps 定值）、快照捕获、一等 turn、落盘与元数据、事件桥与透传（测试含端到端替身） | P1、P2 |
-| P4 | serve 宿主装配 + wire `engage` + CLI：创建 `PerspectivesController` 门面实例；提供真实 `PerspectivesOrchestrationExecutor`（`OrchestrationRunnerV1` + `AgentNodeExecutor`）；把门面 `decorateRunBus` 接入既有 `createRunEventForwarder`；`session.send` engage 分支进入多视角 PendingTask；CLI `@` 解析、进度投影、历史标记、失败呈现（e2e） | P3 |
+| 单元 | 内容                                                                                                                                                                                                                                                                                                                                                          | 依赖   |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| P1   | core 模板有界数组展开（含 params 协议放宽为有界结构化数组、组依赖替换、caps 兜底、测试）                                                                                                                                                                                                                                                                      | 无     |
+| P2   | core 节点`modelRole` + orchestrator executor 按 role 选实例（测试）                                                                                                                                                                                                                                                                                         | 无     |
+| P3   | server perspectives 门面：分配 strategy、内置编排文档、装配（档位序列 / clamp / caps 定值）、快照捕获、一等 turn、落盘与元数据、事件桥与透传（测试含端到端替身）                                                                                                                                                                                              | P1、P2 |
+| P4   | serve 宿主装配 + wire`engage` + CLI：创建 `PerspectivesController` 门面实例；提供真实 `PerspectivesOrchestrationExecutor`（`OrchestrationRunnerV1` + `AgentNodeExecutor`）；把门面 `decorateRunBus` 接入既有 `createRunEventForwarder`；`session.send` engage 分支进入多视角 PendingTask；CLI `@` 解析、进度投影、历史标记、失败呈现（e2e） | P3     |
 
 P1 与 P2 可并行；P3 是门面集成单元；P4 是用户可见收口，对应基础设施文档 §16 单元 5 的「消费场景接入」。落盘承载已核实：`ConversationManager.recordTurn(conversationId, record: RunRecordInput, ...)` 接受自由构造的 RunRecordInput、不绑 main runtime——一等 turn 无结构障碍；P3 另须建立与 `runTurnWithCommit` 同构的 per-run 事件桥（§8）。
