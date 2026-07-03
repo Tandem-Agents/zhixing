@@ -49,6 +49,7 @@ const NODE_POLICY_KEYS = new Set([
   "maxTurns",
   "maxTokens",
   "tools",
+  "modelRole",
 ]);
 
 interface PolicyInfo {
@@ -498,6 +499,9 @@ function validateNodePolicy(
   if ("tools" in value) {
     validateToolList(value.tools, `${path}.tools`, definitionAllowedTools, issues);
   }
+  if ("modelRole" in value) {
+    validateModelRole(value.modelRole, `${path}.modelRole`, issues);
+  }
 }
 
 function validateNodeReferences(
@@ -701,6 +705,20 @@ function validateFormat(
   }
 }
 
+function validateModelRole(
+  value: unknown,
+  path: string,
+  issues: OrchestrationValidationIssueV1[],
+): void {
+  if (value !== "main" && value !== "light" && value !== "power") {
+    addIssue(
+      issues,
+      path,
+      "invalid_literal",
+      "modelRole must be main, light, or power.",
+    );
+  }
+}
 
 function validateOptionalSchema(
   value: unknown,

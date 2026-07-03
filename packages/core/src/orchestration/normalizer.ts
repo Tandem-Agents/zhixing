@@ -63,6 +63,9 @@ export function normalizeOrchestrationDefinitionV1(
           policy.defaultMaxTokens ??
           caps.maxNodeTokens,
         tools: [...(nodePolicy.tools ?? [])],
+        ...(nodePolicy.modelRole === undefined
+          ? {}
+          : { modelRole: nodePolicy.modelRole }),
       },
     };
   }

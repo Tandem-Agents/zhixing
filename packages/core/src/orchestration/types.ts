@@ -9,6 +9,7 @@ export type OrchestrationSourceModeV1 = "trusted";
 export type OrchestrationNodeKindV1 = "agent";
 export type OrchestrationContractFormatV1 = "text" | "json";
 export type OrchestrationFailureModeV1 = "fail_fast";
+export type OrchestrationNodeModelRoleV1 = "main" | "light" | "power";
 export type OrchestrationContextSnapshotStrategyV1 =
   AttentionWindowSnapshotStrategyV1;
 export type OrchestrationNodeOutputReferenceV1 =
@@ -111,6 +112,7 @@ export interface OrchestrationNodePolicyV1 {
   readonly maxTurns?: number;
   readonly maxTokens?: number;
   readonly tools?: readonly string[];
+  readonly modelRole?: OrchestrationNodeModelRoleV1;
 }
 
 export interface OrchestrationNodeV1 {
@@ -161,6 +163,7 @@ export interface NormalizedOrchestrationNodePolicyV1 {
   readonly maxTurns: number;
   readonly maxTokens: number;
   readonly tools: readonly string[];
+  readonly modelRole?: OrchestrationNodeModelRoleV1;
 }
 
 export interface NormalizedOrchestrationNodeV1 {

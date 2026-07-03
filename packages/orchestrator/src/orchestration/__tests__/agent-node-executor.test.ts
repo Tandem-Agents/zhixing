@@ -124,6 +124,48 @@ describe("ChildAgentNodeExecutorV1", () => {
     expect(aborted.partial).toBe("stopped midway");
   });
 
+  it("uses a node model role to select the child-agent provider and model", async () => {
+    const mainProvider = new MockLLMProvider([{ text: "main" }]);
+    const powerProvider = new MockLLMProvider([{ text: "power" }]);
+    const mainRole = createRole(mainProvider, "main-model");
+    const powerRole = createRole(powerProvider, "power-model");
+    const powerThinking = { mode: "effort", effort: "high" } as const;
+    let captured: RunChildAgentOptions | undefined;
+    const executor = createAgentNodeExecutorV1({
+      ...createExecutorOptions(mainProvider),
+      model: "main-model",
+      llmRoles: {
+        main: mainRole,
+        light: mainRole,
+        power: powerRole,
+      },
+      roleThinking: {
+        power: powerThinking,
+      },
+      runChildAgent: async (options) => {
+        captured = options;
+        return childResult({ status: "completed", finalAssistantText: "done" });
+      },
+    });
+    const baseNode = createNode();
+
+    const result = await executor.runAgentNode(
+      createNode({
+        policy: {
+          ...baseNode.policy,
+          modelRole: "power",
+        },
+      }),
+      createContext(),
+    );
+
+    expect(result.status).toBe("completed");
+    expect(captured?.provider).toBe(powerProvider);
+    expect(captured?.model).toBe("power-model");
+    expect(captured?.loopThinking).toBe(powerThinking);
+    expect(captured?.llmRoles.power.provider).toBe(powerProvider);
+  });
+
   it("fails loudly when declared node tools are not available in the parent tool set", async () => {
     let called = false;
     const executor = createAgentNodeExecutorV1({
@@ -183,11 +225,7 @@ describe("ChildAgentNodeExecutorV1", () => {
 function createExecutorOptions(
   provider = new MockLLMProvider([{ text: "unused" }]),
 ): Parameters<typeof createAgentNodeExecutorV1>[0] {
-  const role: LLMRole = {
-    provider,
-    model: "mock-model",
-    chat: (request) => provider.chat(request),
-  };
+  const role = createRole(provider, "mock-model");
   const roles: LLMRoles = { main: role, light: role, power: role };
   return {
     provider,
@@ -203,6 +241,14 @@ function createExecutorOptions(
     parentBroker: new ConfirmationBroker({ id: "orchestration-parent-test" }),
     parentTools: [createTool("read"), createTool("write")],
     riskMaxTokens: 10_000,
+  };
+}
+
+function createRole(provider: MockLLMProvider, model: string): LLMRole {
+  return {
+    provider,
+    model,
+    chat: (request) => provider.chat(request),
   };
 }
 

@@ -74,10 +74,11 @@ export class ChildAgentNodeExecutorV1 implements AgentNodeExecutorV1 {
       };
     }
 
+    const selectedModel = selectNodeModel(this.options, node.policy.modelRole);
     const result = await this.runChildAgent({
-      provider: this.options.provider,
-      model: this.options.model,
-      loopThinking: this.options.loopThinking,
+      provider: selectedModel.provider,
+      model: selectedModel.model,
+      loopThinking: selectedModel.loopThinking,
       roleThinking: this.options.roleThinking,
       llmRoles: this.options.llmRoles,
       securityPipeline: this.options.securityPipeline,
@@ -104,6 +105,32 @@ export class ChildAgentNodeExecutorV1 implements AgentNodeExecutorV1 {
 
     return convertChildResult(node, result);
   }
+}
+
+function selectNodeModel(
+  options: AgentNodeExecutorOptionsV1,
+  modelRole: NormalizedOrchestrationNodeV1["policy"]["modelRole"],
+): {
+  readonly provider: LLMProvider;
+  readonly model: string;
+  readonly loopThinking?: ThinkingConfig;
+} {
+  if (modelRole === undefined) {
+    return {
+      provider: options.provider,
+      model: options.model,
+      loopThinking: options.loopThinking,
+    };
+  }
+
+  const role = options.llmRoles[modelRole];
+  return {
+    provider: role.provider,
+    model: role.model,
+    loopThinking:
+      options.roleThinking?.[modelRole] ??
+      (modelRole === "main" ? options.loopThinking : undefined),
+  };
 }
 
 function selectNodeTools(

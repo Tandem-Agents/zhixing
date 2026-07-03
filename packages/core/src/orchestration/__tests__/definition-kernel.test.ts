@@ -420,6 +420,52 @@ describe("orchestration definition kernel", () => {
     expect(issueCodes(overLimit)).toContain("too_large");
   });
 
+  it("validates and normalizes node model roles", () => {
+    const definition = createDefinition();
+    const executable = expectLoadSuccess(
+      loadOrchestrationDefinitionV1(
+        {
+          ...definition,
+          nodes: [
+            {
+              ...definition.nodes[0]!,
+              policy: {
+                ...definition.nodes[0]!.policy,
+                modelRole: "power",
+              },
+            },
+            definition.nodes[1]!,
+            definition.nodes[2]!,
+          ],
+        },
+        caps,
+      ),
+    );
+
+    expect(executable.definition.nodesById["discover"]!.policy.modelRole).toBe(
+      "power",
+    );
+    expect(
+      executable.definition.nodesById["critic"]!.policy.modelRole,
+    ).toBeUndefined();
+
+    const invalid = loadOrchestrationDefinitionV1(
+      {
+        ...definition,
+        nodes: [
+          {
+            ...definition.nodes[0]!,
+            policy: {
+              ...definition.nodes[0]!.policy,
+              modelRole: "heavy",
+            },
+          },
+        ],
+      },
+      caps,
+    );
+    expect(issuePaths(invalid)).toContain("$.nodes[0].policy.modelRole");
+  });
 
   it("rejects run input context without an input contract", () => {
     const definition = createDefinition();
