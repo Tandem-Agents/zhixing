@@ -529,14 +529,14 @@ interface RunRecord {
 
 推进闭环跨多个主线 run，宿主可能崩溃在任意步骤之间。恢复语义按中间态显式枚举，不留隐式行为：
 
-| 中间态 | 判定依据 | 恢复动作 |
-| ------ | -------- | -------- |
-| run 已接受、验收未跑 | 事实流 runIndex > `lastReviewedRunIndex` | 恢复扫描 oldest-first 逐个补审（catch-up 验收，已落地） |
+| 中间态                             | 判定依据                                                                                                                                                                                                                                                                                                              | 恢复动作                                                                                                                                                                                                                                                                                       |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| run 已接受、验收未跑               | 事实流 runIndex >`lastReviewedRunIndex`                                                                                                                                                                                                                                                                             | 恢复扫描 oldest-first 逐个补审（catch-up 验收，已落地）                                                                                                                                                                                                                                        |
 | 验收已跑、review 与 proxy 之间断裂 | **最新 failed review 携带 `proxyMessageId`，但该 proxy 不在 `proxyMessages` 且未 settled**（真实成因：`run_reviewed` 已落盘而 `proxy_enqueued` 行缺失 / 损坏被坏行隔离跳过——此时 `outstandingProxyMessageId` 为空，「outstanding 指向不存在的 proxy」在合法事件折叠下反而造不出来，不能作判定谓词） | **确定性重建**：review 已持久化 `selectedFailureHandlingId` + `unmetCriteria` + 归因，代理消息 content = 模板 + 变量 + 归因渲染的纯函数——重造并补写 `proxy_enqueued` 后入队，不得静默放过。生效面已随 C16 落地：缺失 proxy 由持久化 review 确定性重建并补写 `proxy_enqueued`。 |
-| proxy 已入队未执行 | outstanding proxy 存在且队列中无对应项 | 重接入队（`proxy_recovered`，已落地；scheduled set + busySource 双重去重） |
-| 代理 run 执行中崩溃 | run 未 completed | 不落盘不入窗不验收（completed-gate），恢复按上一行重接 proxy（已落地） |
-| 裁判 transient 失败挂起 | run 已接受但无对应 review（§6 韧性裁决：transient 失败不落盘 review） | 与第一行同一路径自然补审——挂起态不需要新机制。补审触发点共三个：宿主启动全量扫描、`session.resume` 单会话、**同会话下一次 turn 提交时先 catch-up 再审当轮**（afterTurnCommitted 已按会话串行链化）；live 挂起且用户不在场时，最迟在用户回来的第一个动作上收敛 |
-| awaiting 会话跨重启 | status = awaiting-rubric-confirmation | 不进恢复扫描、不自动重发草案事件；快照回投由接入面重建确认面（§5.2 已定） |
+| proxy 已入队未执行                 | outstanding proxy 存在且队列中无对应项                                                                                                                                                                                                                                                                                | 重接入队（`proxy_recovered`，已落地；scheduled set + busySource 双重去重）                                                                                                                                                                                                                   |
+| 代理 run 执行中崩溃                | run 未 completed                                                                                                                                                                                                                                                                                                      | 不落盘不入窗不验收（completed-gate），恢复按上一行重接 proxy（已落地）                                                                                                                                                                                                                         |
+| 裁判 transient 失败挂起            | run 已接受但无对应 review（§6 韧性裁决：transient 失败不落盘 review）                                                                                                                                                                                                                                                | 与第一行同一路径自然补审——挂起态不需要新机制。补审触发点共三个：宿主启动全量扫描、`session.resume` 单会话、**同会话下一次 turn 提交时先 catch-up 再审当轮**（afterTurnCommitted 已按会话串行链化）；live 挂起且用户不在场时，最迟在用户回来的第一个动作上收敛                        |
+| awaiting 会话跨重启                | status = awaiting-rubric-confirmation                                                                                                                                                                                                                                                                                 | 不进恢复扫描、不自动重发草案事件；快照回投由接入面重建确认面（§5.2 已定）                                                                                                                                                                                                                     |
 
 review 与 proxy 的落盘保持同事务原子写（既有 `runReviewedEvents` 纪律）；第二行的断裂态是防御性枚举——即便原子性被未来改动破坏，恢复也有确定性出路。
 
@@ -672,19 +672,19 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 
 新增事件面：
 
-| 事件                               | 时机                               | 用途                 |
-| ---------------------------------- | ---------------------------------- | -------------------- |
-| `advancement:contract_draft`     | Rubric 草案生成                    | UI 展示确认面        |
-| `advancement:contract_confirmed` | 用户确认 Rubric                    | 标记任务进入推进     |
-| `advancement:contract_cancelled` | 用户取消或新真实输入覆盖待确认草案 | 清理确认面与等待态   |
-| `advancement:run_reviewed`       | 每轮 run 验收完成                  | 展示验收摘要 / 调试  |
-| `advancement:proxy_enqueued`     | 代理消息入队                       | 显示“推进侧将继续” |
-| `advancement:completed`          | 验收通过                           | 交付收场报告（验收摘要 + 证据链，§7） |
+| 事件                               | 时机                               | 用途                                        |
+| ---------------------------------- | ---------------------------------- | ------------------------------------------- |
+| `advancement:contract_draft`     | Rubric 草案生成                    | UI 展示确认面                               |
+| `advancement:contract_confirmed` | 用户确认 Rubric                    | 标记任务进入推进                            |
+| `advancement:contract_cancelled` | 用户取消或新真实输入覆盖待确认草案 | 清理确认面与等待态                          |
+| `advancement:run_reviewed`       | 每轮 run 验收完成                  | 展示验收摘要 / 调试                         |
+| `advancement:proxy_enqueued`     | 代理消息入队                       | 显示“推进侧将继续”                        |
+| `advancement:completed`          | 验收通过                           | 交付收场报告（验收摘要 + 证据链，§7）      |
 | `advancement:exited`             | 退出                               | 交付收场报告（标准矩阵 + 卡点 + 建议，§7） |
-| `advancement:contract_failed`    | 草案生成不可用或失败               | 确认面受控失败提示   |
-| `advancement:proxy_recovered`    | 恢复期重接 outstanding 代理消息    | 恢复可观测           |
-| `advancement:recovery_failed`    | 恢复扫描单点失败                   | 恢复可观测 / 诊断    |
-| `advancement:review_deferred`    | 裁判 transient 失败、本轮验收挂起  | 挂起可观测（§6 韧性）|
+| `advancement:contract_failed`    | 草案生成不可用或失败               | 确认面受控失败提示                          |
+| `advancement:proxy_recovered`    | 恢复期重接 outstanding 代理消息    | 恢复可观测                                  |
+| `advancement:recovery_failed`    | 恢复扫描单点失败                   | 恢复可观测 / 诊断                           |
+| `advancement:review_deferred`    | 裁判 transient 失败、本轮验收挂起  | 挂起可观测（§6 韧性）                      |
 
 这些事件经 `session.event` 的带外通道发出（`scope:"control"` 信封，与 `scope:"run"` 的执行事件物理分流），不混入 `session.delta` / `session.complete` 的执行流。
 
@@ -713,11 +713,11 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 
 ### 11. 包与代码落点
 
-| 包                        | 新增/改造                                                                                            | 说明                                                   |
-| ------------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
-| `@zhixing/core`         | `rubrics/`、`advancement/` 基础类型、RubricContractBuilder、准入 / 草案生成策略、TurnSource 扩展 | 资产协议、纯类型、存储原语与可替换策略接口             |
-| `@zhixing/orchestrator` | `AdvancementRuntime`、评价 prompt、代理消息构造                                                    | 推进侧 evaluator runtime 与执行侧 runtime 同层装配     |
-| `@zhixing/server`       | `ServerContext.advancement` 挂载 `AdvancementController`、RPC 确认方法、事件组播                 | 会话 owner、串行队列与控制面编排（CM 不持 advancement 引用，见 §3） |
+| 包                        | 新增/改造                                                                                                         | 说明                                                                                  |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `@zhixing/core`         | `rubrics/`、`advancement/` 基础类型、RubricContractBuilder、准入 / 草案生成策略、TurnSource 扩展              | 资产协议、纯类型、存储原语与可替换策略接口                                            |
+| `@zhixing/orchestrator` | `AdvancementRuntime`、评价 prompt、代理消息构造                                                                 | 推进侧 evaluator runtime 与执行侧 runtime 同层装配                                    |
+| `@zhixing/server`       | `ServerContext.advancement` 挂载 `AdvancementController`、RPC 确认方法、事件组播                              | 会话 owner、串行队列与控制面编排（CM 不持 advancement 引用，见 §3）                  |
 | `@zhixing/cli`          | Rubric 确认适配器、代理消息标记、推进事件渲染；serve 宿主装配：注入订阅者注册 + RuntimeHost lifecycle 透传（C14） | 接入面投影，不持状态；确认交互复用`SelectionService`；宿主装配层现居本包 serve 命令 |
 
 关键改造点：
