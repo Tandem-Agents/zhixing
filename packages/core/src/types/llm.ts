@@ -483,7 +483,17 @@ export interface ResolvedRoleThinking {
  *
  * 实现方由 caller 按需构造——装配期按档位分流到不同角色的调用 helper。
  */
+export interface TextCallLLMResult {
+  readonly text: string;
+  readonly usage?: TokenUsage;
+}
+
 export type TextCallLLMFn = (
   messages: Message[],
   opts?: { abortSignal?: AbortSignal },
 ) => Promise<string>;
+
+export type TextCallLLMWithUsageFn = (
+  messages: Message[],
+  opts?: { abortSignal?: AbortSignal },
+) => Promise<TextCallLLMResult>;

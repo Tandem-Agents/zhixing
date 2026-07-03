@@ -165,8 +165,12 @@ export function createServerRuntimeAdapter(
       return agentRuntime.onAttentionWindowChange(reason);
     },
 
-    callText(prompt, role) {
-      return agentRuntime.callText(prompt, role);
+    callText(prompt, role, opts) {
+      return agentRuntime.callText(prompt, role, opts);
+    },
+
+    callTextWithUsage(prompt, role, opts) {
+      return agentRuntime.callTextWithUsage(prompt, role, opts);
     },
 
     checkBudget(messages) {

@@ -94,6 +94,8 @@ export type {
   StreamToolCallEnd,
   StreamToolCallStart,
   TextCallLLMFn,
+  TextCallLLMResult,
+  TextCallLLMWithUsageFn,
   TokenUsage,
 } from "./llm.js";
 export {

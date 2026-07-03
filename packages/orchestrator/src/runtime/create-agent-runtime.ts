@@ -31,6 +31,7 @@ import {
   type ResolvedRoleThinking,
   type SecurityRule,
   type ThinkingConfig,
+  type TextCallLLMResult,
   type ToolDefinition,
   type TurnContext,
   type TurnContextProvider,
@@ -103,7 +104,9 @@ import { subscribeSegmentMarkerAccumulator } from "./segment-marker-accumulator.
 import { subscribeWorkModeAccumulator } from "./workmode-accumulator.js";
 import {
   createMainCallLLM,
+  createMainCallLLMWithUsage,
   createLightCallLLM,
+  createLightCallLLMWithUsage,
 } from "./call-llm.js";
 import { buildSystemPrompt, type SystemPromptSegment } from "./system-prompt.js";
 import { prependContextBlock } from "./user-context.js";
@@ -258,7 +261,16 @@ export interface AgentRuntime {
    * 默认 `light` 档——Journal condense 等轻量辅助任务；传 `"main"` 走主档，
    * 用于质量敏感的单发任务（如 MCP 接入的标识 → 连接方式推断）。
    */
-  callText: (prompt: string, role?: "main" | "light") => Promise<string>;
+  callText: (
+    prompt: string,
+    role?: "main" | "light",
+    opts?: { abortSignal?: AbortSignal },
+  ) => Promise<string>;
+  callTextWithUsage: (
+    prompt: string,
+    role?: "main" | "light",
+    opts?: { abortSignal?: AbortSignal },
+  ) => Promise<TextCallLLMResult>;
   /** 当前消息列表里的 Task/sub-agent 用量拆分(/usage 的结构化数据面)。 */
   subAgentUsages: (messages: readonly Message[]) => readonly TaskUsageEntry[];
   /** 当前运行体安全状态只读快照（/security 的宿主数据面）。 */
@@ -684,6 +696,14 @@ export async function createAgentRuntime(
   // 详见 call-llm.ts 的设计注释。
   const mainCallLLM = createMainCallLLM(roles, roleThinking.main);
   const lightCallLLM = createLightCallLLM(roles, roleThinking.light);
+  const mainCallLLMWithUsage = createMainCallLLMWithUsage(
+    roles,
+    roleThinking.main,
+  );
+  const lightCallLLMWithUsage = createLightCallLLMWithUsage(
+    roles,
+    roleThinking.light,
+  );
 
   const builtinCtx = {
     proxy: config.network?.proxy,
@@ -1105,13 +1125,27 @@ export async function createAgentRuntime(
       return parseTaskUsageFromMessages(messages);
     },
 
-    async callText(prompt: string, role: "main" | "light" = "light"): Promise<string> {
+    async callText(
+      prompt: string,
+      role: "main" | "light" = "light",
+      opts?: { abortSignal?: AbortSignal },
+    ): Promise<string> {
       // 单发 LLM 文本调用入口（无对话历史，独立 ChatRequest 隔离）。按 role 复用已装配
       // 的角色通道 TextCallLLMFn：默认 light（工作场景纪要 / 日志凝练等轻量任务，与
       // 记忆提取同 light 角色）；role="main" 走主档（质量敏感的单发任务，如 MCP
       // 接入标识推断，带 mainThinking）。
       const caller = role === "main" ? mainCallLLM : lightCallLLM;
-      return caller([userMessage(prompt)]);
+      return caller([userMessage(prompt)], opts);
+    },
+
+    async callTextWithUsage(
+      prompt: string,
+      role: "main" | "light" = "light",
+      opts?: { abortSignal?: AbortSignal },
+    ): Promise<TextCallLLMResult> {
+      const caller =
+        role === "main" ? mainCallLLMWithUsage : lightCallLLMWithUsage;
+      return caller([userMessage(prompt)], opts);
     },
 
     securitySnapshot(): RuntimeSecuritySnapshot {

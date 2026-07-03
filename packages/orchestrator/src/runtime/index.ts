@@ -16,6 +16,7 @@
  *
  * 3. 宿主装配可复用的单发文本调用
  *    - `createMainCallLLM` / `createLightCallLLM`
+ *    - `createMainCallLLMWithUsage` / `createLightCallLLMWithUsage`
  *
  * **不导出**(internal helper,仅 createAgentRuntime 内部装配使用):
  *   - `trackMessages`
@@ -37,7 +38,9 @@ export {
 } from "./system-prompt.js";
 export {
   createLightCallLLM,
+  createLightCallLLMWithUsage,
   createMainCallLLM,
+  createMainCallLLMWithUsage,
 } from "./call-llm.js";
 export {
   createAgentRuntime,

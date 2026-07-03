@@ -20,7 +20,9 @@ import {
 } from "@zhixing/core";
 import {
   createMainCallLLM,
+  createMainCallLLMWithUsage,
   createLightCallLLM,
+  createLightCallLLMWithUsage,
 } from "../call-llm.js";
 
 // ─── 测试辅助 ───
@@ -165,6 +167,22 @@ describe("createMainCallLLM · 路由契约", () => {
   });
 });
 
+describe("createMainCallLLMWithUsage · 用量契约", () => {
+  it("返回文本与 message_end usage", async () => {
+    const { roles } = makeSpyRoles({
+      mainChunks: ["结构化", "分配"],
+    });
+    const callLLM = createMainCallLLMWithUsage(roles);
+
+    const result = await callLLM([userMessage("input")]);
+
+    expect(result).toEqual({
+      text: "结构化分配",
+      usage: { inputTokens: 1, outputTokens: 1 },
+    });
+  });
+});
+
 // ─── createLightCallLLM · light 档路由 ───
 
 describe("createLightCallLLM · 路由契约", () => {
@@ -220,5 +238,21 @@ describe("createLightCallLLM · 路由契约", () => {
 
     const callArg = lightChat.mock.calls[0]![0] as Omit<ChatRequest, "model">;
     expect(callArg.thinking).toEqual({ mode: "off" });
+  });
+});
+
+describe("createLightCallLLMWithUsage · 用量契约", () => {
+  it("走 light 并返回文本与 usage", async () => {
+    const { roles, mainChat, lightChat } = makeSpyRoles({
+      lightChunks: ["轻量", "结果"],
+    });
+    const callLLM = createLightCallLLMWithUsage(roles);
+
+    const result = await callLLM([userMessage("input")]);
+
+    expect(result.text).toBe("轻量结果");
+    expect(result.usage).toEqual({ inputTokens: 1, outputTokens: 1 });
+    expect(lightChat).toHaveBeenCalledOnce();
+    expect(mainChat).not.toHaveBeenCalled();
   });
 });

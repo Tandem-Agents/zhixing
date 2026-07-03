@@ -54,6 +54,11 @@ function createMockAgentRuntime(behavior: MockBehavior = {}): AgentRuntime {
       status: "normal",
     }),
     subAgentUsages: () => [],
+    callText: async () => "text",
+    callTextWithUsage: async () => ({
+      text: "text",
+      usage: { inputTokens: 2, outputTokens: 1 },
+    }),
     securitySnapshot: () => ({
       contextId: { kind: "main" },
       workspacePath: null,
@@ -256,13 +261,18 @@ describe("createServerRuntimeAdapter", () => {
     expect(runtime.confirmationBroker).toBe(agent.confirmationBroker);
   });
 
-  it("透传运行体预算 / 子 agent 用量 / 安全快照能力", () => {
+  it("透传运行体预算 / 子 agent 用量 / 单发文本 / 安全快照能力", async () => {
     const agent = createMockAgentRuntime();
     const runtime = createServerRuntimeAdapter("test-inspect", agent);
 
     const budget = runtime.checkBudget?.([um("hello")]);
     expect(budget?.currentTokens).toBe(1_000);
     expect(runtime.subAgentUsages?.([um("hello")])).toEqual([]);
+    await expect(runtime.callText?.("prompt", "main")).resolves.toBe("text");
+    await expect(runtime.callTextWithUsage?.("prompt", "main")).resolves.toEqual({
+      text: "text",
+      usage: { inputTokens: 2, outputTokens: 1 },
+    });
     expect(runtime.securitySnapshot?.()).toMatchObject({
       contextId: { kind: "main" },
       workspacePath: null,

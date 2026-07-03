@@ -23,7 +23,14 @@
  * 避免重复定义带来的类型漂移。
  */
 
-import type { TextCallLLMFn, LLMRole, LLMRoles, ThinkingConfig } from "@zhixing/core";
+import type {
+  TextCallLLMFn,
+  TextCallLLMWithUsageFn,
+  LLMRole,
+  LLMRoles,
+  TokenUsage,
+  ThinkingConfig,
+} from "@zhixing/core";
 
 /**
  * 把"消费流式响应 → 拼接 text_delta → 返回完整字符串"的模式抽成内部 helper，
@@ -33,12 +40,13 @@ import type { TextCallLLMFn, LLMRole, LLMRoles, ThinkingConfig } from "@zhixing/
  * 记忆提取经 parseExtractions try/catch 自然降级为空数组；callText 消费方
  * 对空文本自带容错。
  */
-function callLLMText(
+function callLLMTextWithUsage(
   role: LLMRole,
   thinking?: ThinkingConfig,
-): TextCallLLMFn {
+): TextCallLLMWithUsageFn {
   return async (messages, opts) => {
     const chunks: string[] = [];
+    let usage: TokenUsage | undefined;
     for await (const event of role.chat({
       messages,
       tools: [],
@@ -47,10 +55,20 @@ function callLLMText(
     })) {
       if (event.type === "text_delta") {
         chunks.push(event.text);
+      } else if (event.type === "message_end") {
+        usage = event.usage;
       }
     }
-    return chunks.join("");
+    return { text: chunks.join(""), usage };
   };
+}
+
+function callLLMText(
+  role: LLMRole,
+  thinking?: ThinkingConfig,
+): TextCallLLMFn {
+  const callWithUsage = callLLMTextWithUsage(role, thinking);
+  return async (messages, opts) => (await callWithUsage(messages, opts)).text;
 }
 
 /**
@@ -66,6 +84,13 @@ export function createMainCallLLM(
   return callLLMText(roles.main, mainThinking);
 }
 
+export function createMainCallLLMWithUsage(
+  roles: LLMRoles,
+  mainThinking?: ThinkingConfig,
+): TextCallLLMWithUsageFn {
+  return callLLMTextWithUsage(roles.main, mainThinking);
+}
+
 /**
  * 创建 light 档单发调用 —— 走 `roles.light`。
  *
@@ -79,4 +104,11 @@ export function createLightCallLLM(
   lightThinking?: ThinkingConfig,
 ): TextCallLLMFn {
   return callLLMText(roles.light, lightThinking);
+}
+
+export function createLightCallLLMWithUsage(
+  roles: LLMRoles,
+  lightThinking?: ThinkingConfig,
+): TextCallLLMWithUsageFn {
+  return callLLMTextWithUsage(roles.light, lightThinking);
 }

@@ -19,6 +19,7 @@ import type {
   RunResult,
   RunRecordAdvancementMetadata,
   SecurityRule,
+  TextCallLLMResult,
   TurnContext,
   TurnSource,
   WindowCompact,
@@ -121,7 +122,16 @@ export interface SessionRuntime {
    * 简易单发 LLM 文本调用(无对话历史)——turn 后维护(自动命名 / journal
    * 凝练)的推理通道。light 档为辅助任务默认。
    */
-  callText?(prompt: string, role?: "main" | "light"): Promise<string>;
+  callText?(
+    prompt: string,
+    role?: "main" | "light",
+    opts?: { abortSignal?: AbortSignal },
+  ): Promise<string>;
+  callTextWithUsage?(
+    prompt: string,
+    role?: "main" | "light",
+    opts?: { abortSignal?: AbortSignal },
+  ): Promise<TextCallLLMResult>;
   /** 查询给定消息列表的上下文预算(接入面 /usage /context 的数据面)。 */
   checkBudget?(messages: readonly Message[]): ContextBudget;
   /**
