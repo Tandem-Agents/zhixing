@@ -9,8 +9,10 @@ import WebSocket from "ws";
 import {
   AdvancementStore,
   AgentError,
+  assistantMessage,
   RubricContractBuilder,
   RubricStore,
+  userMessage,
 } from "@zhixing/core";
 import type {
   AgentResult,
@@ -21,6 +23,7 @@ import type {
   ConfirmedRubricSnapshot,
   ContextBudget,
   Message,
+  OrchestrationRunResultV1,
   RubricContractDraftSnapshot,
   RunResult,
   TaskListState,
@@ -46,6 +49,13 @@ import {
 } from "../rpc/protocol.js";
 import { AdvancementController } from "../advancement/controller.js";
 import { createAdvancementRecoveryMaintenance } from "../advancement/recovery-maintenance.js";
+import {
+  PERSPECTIVES_CONVERGENCE_NODE_ID,
+  PERSPECTIVES_DELIBERATION_DEFINITION_ID,
+  PerspectivesController,
+  type PerspectiveAllocationStrategy,
+  type PerspectivesOrchestrationExecutor,
+} from "../perspectives/index.js";
 import { createTempDir } from "@zhixing/test-utils";
 
 const TEST_VERSION = "0.1.0-test";
@@ -186,6 +196,60 @@ function createMockFactory(opts: MockOptions = {}): RuntimeFactory {
       return createMockRuntime(sessionId, opts);
     },
   };
+}
+
+function createTestPerspectivesController(
+  finalText = "多视角最终版",
+  observed: {
+    readonly allocationQuestions?: string[];
+    readonly runInputs?: string[];
+  } = {},
+): PerspectivesController {
+  const allocationStrategy: PerspectiveAllocationStrategy = {
+    async allocate(input) {
+      observed.allocationQuestions?.push(input.question);
+      return {
+        perspectives: [
+          { name: "产品", charge: "判断用户价值" },
+          { name: "架构", charge: "判断工程边界" },
+        ],
+        usage: { inputTokens: 2, outputTokens: 1 },
+      };
+    },
+  };
+  const orchestrationExecutor: PerspectivesOrchestrationExecutor = {
+    async run(input) {
+      if (typeof input.runInput === "string") {
+        observed.runInputs?.push(input.runInput);
+      }
+      await input.eventBus.emit("orchestration:run_start", {
+        runId: "orch-1",
+        definitionId: PERSPECTIVES_DELIBERATION_DEFINITION_ID,
+        nodeCount: input.executable.definition.nodeIds.length,
+        maxParallel: input.executable.definition.policy.maxParallel,
+      });
+      return {
+        runId: "orch-1",
+        definitionId: PERSPECTIVES_DELIBERATION_DEFINITION_ID,
+        status: "completed",
+        outputs: {
+          [PERSPECTIVES_CONVERGENCE_NODE_ID]: {
+            nodeId: PERSPECTIVES_CONVERGENCE_NODE_ID,
+            format: "text",
+            content: finalText,
+          },
+        },
+        nodeResults: {},
+        errors: { nodes: {} },
+        usage: { inputTokens: 10, outputTokens: 4 },
+        durationMs: 1,
+      } satisfies OrchestrationRunResultV1;
+    },
+  };
+  return new PerspectivesController({
+    allocationStrategy,
+    orchestrationExecutor,
+  });
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -388,6 +452,24 @@ async function connect(port: number): Promise<RpcClient> {
       ws.close();
     },
   };
+}
+
+async function waitCompleteForTurn(
+  client: RpcClient,
+  turnId: string,
+  timeoutMs = 2000,
+): Promise<{ method: string; params: unknown }> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const remainingMs = Math.max(1, deadline - Date.now());
+    const notification = await client.waitNotification(
+      "session.complete",
+      remainingMs,
+    );
+    const params = notification.params as { turnId?: unknown };
+    if (params.turnId === turnId) return notification;
+  }
+  throw new Error(`Timeout waiting for session.complete turnId: ${turnId}`);
 }
 
 // ─── 测试 ───
@@ -626,6 +708,7 @@ describe("session.* RPC (S2.D)", () => {
     factory: RuntimeFactory,
     opts: {
       advancement?: AdvancementController;
+      perspectives?: PerspectivesController;
       withAdvancementRecovery?: boolean;
       seedConversations?: readonly string[];
     } = {},
@@ -661,6 +744,7 @@ describe("session.* RPC (S2.D)", () => {
       conversations,
       advancement: opts.advancement,
       advancementRecovery,
+      perspectives: opts.perspectives,
       conversationDirectory,
     });
     server = await startServer({ context: ctx });
@@ -724,6 +808,148 @@ describe("session.* RPC (S2.D)", () => {
     expect(completeParams.pendingModeSwitch).toBeUndefined();
 
     client.close();
+  });
+
+  it("session.send engage=perspectives runs deliberation and commits only final answer", async () => {
+    const allocationQuestions: string[] = [];
+    const runInputs: string[] = [];
+    await startWithFactory(createMockFactory({ deltaCount: 0 }), {
+      perspectives: createTestPerspectivesController("最终收敛答案", {
+        allocationQuestions,
+        runInputs,
+      }),
+    });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const textWithMaterialTrigger = "引用材料里有 @ 错误正文\n@ 评估这个方案";
+    const sendResp = await client.request("session.send", {
+      text: textWithMaterialTrigger,
+      engage: { kind: "perspectives", question: "评估这个方案" },
+      turnId: "turn-perspective",
+    });
+    expect(isSuccessResponse(sendResp)).toBe(true);
+    const accepted = (sendResp as {
+      result: { conversationId: string; turnId: string };
+    }).result;
+    expect(accepted.turnId).toBe("turn-perspective");
+
+    const textDelta = await client.waitNotification("session.delta");
+    expect(textDelta.params).toMatchObject({
+      conversationId: accepted.conversationId,
+      turnId: "turn-perspective",
+      delta: { type: "text_delta", text: "最终收敛答案" },
+    });
+    const assistantDelta = await client.waitNotification("session.delta");
+    expect(assistantDelta.params).toMatchObject({
+      delta: { type: "assistant_message" },
+    });
+    const turnComplete = await client.waitNotification("session.delta");
+    expect(turnComplete.params).toMatchObject({
+      delta: {
+        type: "turn_complete",
+        usage: { inputTokens: 12, outputTokens: 5 },
+      },
+    });
+    const complete = await client.waitNotification("session.complete");
+    expect(complete.params).toMatchObject({
+      conversationId: accepted.conversationId,
+      turnId: "turn-perspective",
+      result: {
+        reason: "completed",
+        usage: { inputTokens: 12, outputTokens: 5 },
+      },
+    });
+
+    const records = recordsByConversation.get(accepted.conversationId);
+    expect(records).toHaveLength(1);
+    expect(allocationQuestions).toEqual(["评估这个方案"]);
+    expect(runInputs).toEqual(["评估这个方案"]);
+    expect(records?.[0]).toMatchObject({
+      messages: [
+        { role: "user", content: [{ type: "text", text: textWithMaterialTrigger }] },
+        { role: "assistant", content: [{ type: "text", text: "最终收敛答案" }] },
+      ],
+      source: "channel",
+      perspectives: {
+        definitionId: PERSPECTIVES_DELIBERATION_DEFINITION_ID,
+        perspectiveCount: 2,
+      },
+    });
+    client.close();
+  });
+
+  it("queued engage=perspectives cancel only completes the sender's pending turn", async () => {
+    const runInputs: string[] = [];
+    await startWithFactory(
+      createMockFactory({
+        deltaCount: 8,
+        yieldDelayMs: 30,
+        abortYieldsAborted: true,
+      }),
+      {
+        perspectives: createTestPerspectivesController("不应执行", {
+          runInputs,
+        }),
+      },
+    );
+    const alice = await connect(server.port);
+    const bob = await connect(server.port);
+    await alice.request("auth", { token: TEST_TOKEN });
+    await bob.request("auth", { token: TEST_TOKEN });
+
+    const first = await alice.request("session.send", {
+      text: "长任务",
+      turnId: "turn-active-before-perspective",
+    });
+    expect(isSuccessResponse(first)).toBe(true);
+    if (!isSuccessResponse(first)) return;
+    const conversationId = (
+      first.result as { conversationId: string }
+    ).conversationId;
+    await alice.waitNotification("session.delta");
+
+    const subscribe = await bob.request("session.subscribe", { conversationId });
+    expect(isSuccessResponse(subscribe)).toBe(true);
+
+    const queued = await alice.request("session.send", {
+      conversationId,
+      text: "@ 评估这个方案",
+      engage: { kind: "perspectives", question: "评估这个方案" },
+      turnId: "turn-pending-perspective",
+    });
+    expect(isSuccessResponse(queued)).toBe(true);
+    if (!isSuccessResponse(queued)) return;
+    expect(queued.result).toMatchObject({
+      conversationId,
+      turnId: "turn-pending-perspective",
+    });
+
+    const abortResp = await alice.request("session.abort", { conversationId });
+    expect(isSuccessResponse(abortResp)).toBe(true);
+
+    const pendingComplete = await waitCompleteForTurn(
+      alice,
+      "turn-pending-perspective",
+    );
+    expect(pendingComplete.params).toMatchObject({
+      conversationId,
+      turnId: "turn-pending-perspective",
+      result: {
+        reason: "error",
+        error: {
+          name: "Cancelled",
+          message: "Pending perspective turn cancelled",
+        },
+      },
+    });
+    await expect(
+      waitCompleteForTurn(bob, "turn-pending-perspective", 300),
+    ).rejects.toThrow(/Timeout waiting/);
+    expect(runInputs).toEqual([]);
+
+    alice.close();
+    bob.close();
   });
 
   it("session.send 进入推进任务时返回 Rubric 待确认且不执行 main run", async () => {
@@ -805,6 +1031,42 @@ describe("session.* RPC (S2.D)", () => {
     expect(isSuccessResponse(confirmed)).toBe(true);
     if (!isSuccessResponse(confirmed)) return;
     expect(confirmed.result).toMatchObject({ turnId: "turn-original" });
+    client.close();
+  });
+
+  it("awaiting 期间 engage=perspectives 不绕过 Rubric 确认面", async () => {
+    await startWithFactory(createMockFactory(), {
+      advancement: await createTestAdvancementController(),
+      perspectives: createTestPerspectivesController("不应执行的多视角答案"),
+    });
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const first = await client.request("session.send", {
+      text: "请把测试修到全绿，盯到验收通过",
+      turnId: "turn-awaiting-original",
+    });
+    expect(isSuccessResponse(first)).toBe(true);
+    if (!isSuccessResponse(first)) return;
+    const awaiting = first.result as {
+      conversationId: string;
+      rubricDraftId: string;
+    };
+
+    const second = await client.request("session.send", {
+      conversationId: awaiting.conversationId,
+      text: "@ 评估这个方案",
+      engage: { kind: "perspectives", question: "评估这个方案" },
+      turnId: "turn-awaiting-engage",
+    });
+    expect(isSuccessResponse(second)).toBe(true);
+    if (!isSuccessResponse(second)) return;
+    expect(second.result).toMatchObject({
+      status: "awaiting-rubric-confirmation",
+      turnId: "turn-awaiting-original",
+      rubricDraftId: awaiting.rubricDraftId,
+    });
+    expect(recordsByConversation.get(awaiting.conversationId)).toEqual([]);
     client.close();
   });
 

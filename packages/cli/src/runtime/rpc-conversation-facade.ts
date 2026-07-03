@@ -38,6 +38,7 @@ import type {
   SessionTaskListUpdateResult,
   SessionAdvancementDetailResult,
   SessionRubricPersistenceChoice,
+  SessionSendEngage,
   SessionUsageResult,
 } from "@zhixing/server";
 import type { UserTurnInput } from "@zhixing/core";
@@ -65,12 +66,14 @@ export class RpcConversationFacade {
     input: string | UserTurnInput,
     conversationId?: string,
     turnId?: string,
+    options: { readonly engage?: SessionSendEngage } = {},
   ): Promise<SessionSendResult> {
     const client = await this.link.getClient();
     return client.request<SessionSendResult>("session.send", {
       ...(typeof input === "string" ? { text: input } : { input }),
       conversationId,
       turnId,
+      ...(options.engage ? { engage: options.engage } : {}),
     });
   }
 

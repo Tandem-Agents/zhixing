@@ -9,10 +9,15 @@
 
 import type {
   AbortReason,
+  AgentEventMap,
   AgentYield,
   ContextBudget,
+  EventBus,
   IConfirmationBroker,
   Message,
+  OrchestrationContextSnapshotV1,
+  OrchestrationExecutableV1,
+  OrchestrationRunResultV1,
   PermissionContextId,
   PermissionRule,
   RiskLevel,
@@ -132,6 +137,12 @@ export interface SessionRuntime {
     role?: "main" | "light",
     opts?: { abortSignal?: AbortSignal },
   ): Promise<TextCallLLMResult>;
+  /**
+   * 执行已校验的编排定义。具体装配归运行体实现方，server 只按抽象能力调用。
+   */
+  runOrchestrationV1?(
+    params: SessionRuntimeOrchestrationV1Params,
+  ): Promise<OrchestrationRunResultV1>;
   /** 查询给定消息列表的上下文预算(接入面 /usage /context 的数据面)。 */
   checkBudget?(messages: readonly Message[]): ContextBudget;
   /**
@@ -145,6 +156,15 @@ export interface SessionRuntime {
   securitySnapshot?(): RuntimeSecuritySnapshot;
   /** Token 估算器校准因子(1.0 = 未校准)——用量展示的辅助信息。 */
   readonly calibrationFactor?: number;
+}
+
+export interface SessionRuntimeOrchestrationV1Params {
+  readonly executable: OrchestrationExecutableV1;
+  readonly runInput?: unknown;
+  readonly contextSnapshot?: OrchestrationContextSnapshotV1;
+  readonly abortSignal?: AbortSignal;
+  readonly eventBus: EventBus<AgentEventMap>;
+  readonly parentLineage?: string;
 }
 
 /** /security 的运行体只读快照——事实源仍在 SecurityPipeline,server 只透结构。 */

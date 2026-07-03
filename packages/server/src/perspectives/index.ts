@@ -19,6 +19,7 @@ export {
   PERSPECTIVES_DELIBERATION_DEFINITION_ID,
   PERSPECTIVES_DELIBERATION_TEMPLATE,
 } from "./deliberation-template.js";
+export { RuntimePerspectivesOrchestrationExecutor } from "./runtime-executor.js";
 export type {
   PerspectiveAllocation,
   PerspectiveAllocationInput,

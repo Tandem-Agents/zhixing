@@ -42,6 +42,7 @@ import type {
   SessionAwaitingRubricResult,
   SessionCancelledRubricResult,
   SessionContractFailedResult,
+  SessionSendEngage,
   SessionSendResult,
 } from "@zhixing/server";
 import type { RpcConversationFacade } from "./rpc-conversation-facade.js";
@@ -114,6 +115,7 @@ export type RubricContractCancelResult =
     };
 
 export interface BeginTurnOptions {
+  readonly engage?: SessionSendEngage;
   readonly onAccepted?: (turn: {
     readonly conversationId: string;
     readonly turnId: string;
@@ -373,7 +375,11 @@ export class ConversationController {
     const turnId = generateTurnId();
     const outcome = this.attachTurnWaiter(target, turnId, options);
     try {
-      const sendResult = await this.opts.conversation.send(input, target, turnId);
+      const sendResult = options.engage
+        ? await this.opts.conversation.send(input, target, turnId, {
+            engage: options.engage,
+          })
+        : await this.opts.conversation.send(input, target, turnId);
       this.observedConversationId = target;
       if (isAwaitingRubricResult(sendResult)) {
         this.discardTurnWaiter(target, turnId);

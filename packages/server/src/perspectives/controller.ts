@@ -118,13 +118,26 @@ export class PerspectivesController {
         return aborted("template", "perspective turn aborted before orchestration.");
       }
 
-      const orchestration = await this.options.orchestrationExecutor.run({
-        executable: assembly.executable,
-        runInput: question,
-        contextSnapshot: snapshot.snapshot,
-        abortSignal: input.abortSignal,
-        eventBus,
-      });
+      let orchestration: OrchestrationRunResultV1;
+      try {
+        orchestration = await this.options.orchestrationExecutor.run({
+          managed: input.managed,
+          executable: assembly.executable,
+          runInput: question,
+          contextSnapshot: snapshot.snapshot,
+          abortSignal: input.abortSignal,
+          eventBus,
+        });
+      } catch (err) {
+        if (input.abortSignal?.aborted) {
+          return aborted(
+            "orchestration",
+            "perspective orchestration aborted.",
+            allocation.value.usage,
+          );
+        }
+        return failed("orchestration", errorMessage(err), allocation.value.usage);
+      }
       const usage = mergeUsage(
         allocation.value.usage ?? emptyUsage(),
         orchestration.usage,
@@ -189,6 +202,7 @@ export class PerspectivesController {
   > {
     try {
       const allocation = await this.options.allocationStrategy.allocate({
+        managed: input.managed,
         question,
         contextText: renderAllocationContext(snapshotMessages),
         defaultPerspectiveCount: DEFAULT_PERSPECTIVE_COUNT,

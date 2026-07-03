@@ -29,6 +29,7 @@ import {
   generateTurnId,
   getZhixingHome,
   type AgentTurnParams,
+  type AgentEventMap,
   type SchedulerEventMap,
   type AgentTurnResult,
   type SchedulerFacade,
@@ -58,6 +59,9 @@ import {
   CleanupRegistry,
   createRunEventForwarder,
   createAdvancementRecoveryMaintenance,
+  LlmPerspectiveAllocationStrategy,
+  PerspectivesController,
+  RuntimePerspectivesOrchestrationExecutor,
   type AdvancementRecoveryMaintenance,
   getDefaultLogPath,
   renderRecentContextFromMessages,
@@ -297,6 +301,12 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
       disposeForward();
     };
   };
+  const perspectivesController = new PerspectivesController({
+    allocationStrategy: new LlmPerspectiveAllocationStrategy(),
+    orchestrationExecutor: new RuntimePerspectivesOrchestrationExecutor(),
+    createRunEventBus: () => createEventBus<AgentEventMap>(),
+    decorateRunBus: serveDecorateRunBus,
+  });
 
   // 3a. ConfirmationHub —— 远程权限确认聚合层（remote-confirmation-execution.md §3.2）
   //   在会话执行面 / 通道 / ephemeralRuntime / ServerContext 之前创建，以便各组件构造时能接入。
@@ -665,6 +675,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     conversations: ctx.conversations,
     advancement: ctx.advancement,
     advancementRecovery,
+    perspectives: perspectivesController,
     conversationDirectory,
     workscenes: worksceneDirectory,
     trust: trustDirectory,

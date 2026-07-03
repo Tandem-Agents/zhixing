@@ -363,6 +363,24 @@ describe("ConversationController", () => {
     });
   });
 
+  it("beginUserTurn:多视角 engage 透传给宿主 send", async () => {
+    const f = makeFakes();
+    const { controller } = makeController(f);
+
+    const result = await controller.beginUserTurn("@ 审查方案", {
+      engage: { kind: "perspectives", question: "审查方案" },
+    });
+
+    expect(result.kind).toBe("accepted");
+    const turnId = f.conversation.send.mock.calls[0]![2] as string;
+    expect(f.conversation.send).toHaveBeenCalledWith(
+      "@ 审查方案",
+      "conv-1",
+      turnId,
+      { engage: { kind: "perspectives", question: "审查方案" } },
+    );
+  });
+
   it("beginUserTurn:Rubric 待确认是控制面结果,不等待 complete", async () => {
     const f = makeFakes();
     const onAccepted = vi.fn();

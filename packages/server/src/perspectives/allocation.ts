@@ -20,13 +20,14 @@ export type PerspectiveAllocationTextCall = (
 export class LlmPerspectiveAllocationStrategy
   implements PerspectiveAllocationStrategy
 {
-  constructor(private readonly callText: PerspectiveAllocationTextCall) {}
+  constructor(private readonly callText?: PerspectiveAllocationTextCall) {}
 
   async allocate(
     input: PerspectiveAllocationInput,
   ): Promise<PerspectiveAllocation> {
     throwIfAborted(input.abortSignal);
-    const response = await this.callText(buildAllocationPrompt(input), "main", {
+    const callText = this.callText ?? runtimeAllocationTextCall(input);
+    const response = await callText(buildAllocationPrompt(input), "main", {
       abortSignal: input.abortSignal,
     });
     throwIfAborted(input.abortSignal);
@@ -36,6 +37,26 @@ export class LlmPerspectiveAllocationStrategy
       usage: typeof response === "string" ? undefined : response.usage,
     };
   }
+}
+
+function runtimeAllocationTextCall(
+  input: PerspectiveAllocationInput,
+): PerspectiveAllocationTextCall {
+  if (!input.managed) {
+    throw new Error("perspective allocation requires runtime text call support.");
+  }
+
+  const callTextWithUsage = input.managed.runtime.callTextWithUsage;
+  if (callTextWithUsage) {
+    return (prompt, role, opts) => callTextWithUsage(prompt, role, opts);
+  }
+
+  const callText = input.managed.runtime.callText;
+  if (callText) {
+    return (prompt, role, opts) => callText(prompt, role, opts);
+  }
+
+  throw new Error("perspective allocation requires runtime text call support.");
 }
 
 export function normalizePerspectiveAllocation(

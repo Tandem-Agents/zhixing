@@ -35,6 +35,32 @@ describe("RpcConversationFacade · 方法域", () => {
     ]);
   });
 
+  it("send 可携带多视角 engage 意图", async () => {
+    const fake = makeFakeHostLink();
+    fake.setResponder(() => ({
+      conversationId: "conv-1",
+      sessionId: "conv-1",
+      turnId: "turn-1",
+    }));
+    const facade = new RpcConversationFacade(fake.link);
+
+    await facade.send("@ 审查方案", "conv-1", "turn-1", {
+      engage: { kind: "perspectives", question: "审查方案" },
+    });
+
+    expect(fake.requests).toEqual([
+      {
+        method: "session.send",
+        params: {
+          text: "@ 审查方案",
+          conversationId: "conv-1",
+          turnId: "turn-1",
+          engage: { kind: "perspectives", question: "审查方案" },
+        },
+      },
+    ]);
+  });
+
   it("list 还原 conversations 数组", async () => {
     const fake = makeFakeHostLink();
     const entry = {

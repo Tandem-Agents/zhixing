@@ -49,6 +49,7 @@ export {
   type DecorateRunBusFn,
   type ForceCompactResult,
   type RunBusContext,
+  type RunOrchestrationV1Params,
   type RunParams,
   type RunResult,
 } from "./create-agent-runtime.js";

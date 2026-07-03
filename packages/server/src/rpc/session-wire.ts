@@ -119,6 +119,11 @@ export interface SessionModeSwitchIntentPayload {
   intent: WorkModeSwitchIntent;
 }
 
+export type SessionSendEngage = {
+  readonly kind: "perspectives";
+  readonly question: string;
+};
+
 /**
  * 非当前会话的活动提示。它不是内容流:不携带用户文本或助手回复,只用于让
  * CLI 这类工作台刷新列表、标未读或显示低噪提示。当前正在观察该会话的连接

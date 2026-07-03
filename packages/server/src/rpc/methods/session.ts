@@ -24,9 +24,12 @@
 
 import {
   abortWithReason,
+  assistantMessage,
   buildClosureFacts,
+  emptyUsage,
   generateTurnId,
   isNonEmptyUserTurnInput,
+  type AgentYield,
   type AdvancementSession,
   type RubricContractDraftSnapshot,
   type TurnContext,
@@ -48,6 +51,7 @@ import {
   type SessionCompactResult,
   type SessionContextBudgetResult,
   type SessionCompletePayload,
+  type SessionDeltaPayload,
   type SessionAdvancementCancelResult,
   type SessionAdvancementConfirmResult,
   type SessionAdvancementDetailResult,
@@ -62,6 +66,7 @@ import {
   type SessionNewResult,
   type SessionRenameResult,
   type SessionResumeResult,
+  type SessionSendEngage,
   type SessionSendResult,
   type SessionSecurityResult,
   type SessionUsageResult,
@@ -78,11 +83,13 @@ import {
   type ConversationManager,
   type ManagedSession,
 } from "../../runtime/conversation-manager.js";
+import type { PerspectivesTurnResult } from "../../perspectives/index.js";
 // ─── session.send ───
 
 interface SessionSendParams extends ConversationIdParams {
   text?: unknown;
   input?: unknown;
+  engage?: unknown;
   /** 发起端可预分配 turnId,用于避免 loopback 下 complete 先于 send 响应的竞态 */
   turnId?: unknown;
 }
@@ -99,6 +106,7 @@ export function buildSessionSendMethod(): MethodEntry {
           "session.send requires non-empty 'text' or 'input'",
         );
       }
+      const engage = normalizeSessionEngage(params.engage);
 
       const manager = requireConversations(ctx.server);
       const id = optionalConversationId(params, "session.send");
@@ -187,10 +195,11 @@ export function buildSessionSendMethod(): MethodEntry {
         }
 
         if (activePrepared?.kind === "active-user-turn") {
-          const accepted = await sendDirectTurn({
+          const accepted = await sendUserTurn({
             manager,
             conversationId: id,
             input,
+            engage,
             turnId,
             connectionId,
             connection: ctx.connection,
@@ -207,6 +216,23 @@ export function buildSessionSendMethod(): MethodEntry {
           };
         }
 
+        if (
+          engage &&
+          !(await hasAwaitingAdvancementConfirmation(advancement, id))
+        ) {
+          return await sendUserTurn({
+            manager,
+            conversationId: id,
+            input,
+            engage,
+            turnId,
+            connectionId,
+            connection: ctx.connection,
+            broadcast,
+            server: ctx.server,
+          });
+        }
+
         const preparedId = id ?? generateConversationId();
         const prepared = await prepareAdvancementUserTurn({
           manager,
@@ -219,11 +245,12 @@ export function buildSessionSendMethod(): MethodEntry {
         });
 
         if (prepared.kind === "owner-busy") {
-          return await sendDirectTurn({
+          return await sendUserTurn({
             manager,
             conversationId: id,
             preallocatedConversationId: id ? undefined : preparedId,
             input,
+            engage,
             turnId,
             connectionId,
             connection: ctx.connection,
@@ -381,11 +408,12 @@ export function buildSessionSendMethod(): MethodEntry {
           });
         }
 
-        const fallthroughAccepted = await sendDirectTurn({
+        const fallthroughAccepted = await sendUserTurn({
           manager,
           conversationId: id,
           preallocatedConversationId: id ? undefined : preparedId,
           input,
+          engage,
           turnId,
           connectionId,
           connection: ctx.connection,
@@ -404,10 +432,11 @@ export function buildSessionSendMethod(): MethodEntry {
         return fallthroughAccepted;
       }
 
-      return await sendDirectTurn({
+      return await sendUserTurn({
         manager,
         conversationId: id,
         input,
+        engage,
         turnId,
         connectionId,
         connection: ctx.connection,
@@ -772,6 +801,15 @@ async function prepareActiveAdvancementUserTurn(input: {
   return null;
 }
 
+async function hasAwaitingAdvancementConfirmation(
+  advancement: NonNullable<ServerContext["advancement"]>,
+  conversationId: string | undefined,
+): Promise<boolean> {
+  if (!conversationId) return false;
+  const open = await advancement.loadActiveSession(conversationId);
+  return open?.status === "awaiting-rubric-confirmation";
+}
+
 function interruptAdvancementProxy(input: {
   readonly manager: ConversationManager;
   readonly conversationId: string;
@@ -864,6 +902,19 @@ interface SendDirectTurnInput {
   readonly server: ServerContext;
 }
 
+interface SendUserTurnInput extends SendDirectTurnInput {
+  readonly engage?: SessionSendEngage;
+}
+
+async function sendUserTurn(
+  input: SendUserTurnInput,
+): Promise<SessionSendResult> {
+  if (input.engage?.kind === "perspectives") {
+    return sendPerspectiveTurn({ ...input, engage: input.engage });
+  }
+  return sendDirectTurn(input);
+}
+
 async function sendDirectTurn(
   input: SendDirectTurnInput,
 ): Promise<SessionSendResult> {
@@ -888,6 +939,26 @@ async function sendDirectTurn(
   };
 }
 
+async function sendPerspectiveTurn(
+  input: SendDirectTurnInput & { readonly engage: SessionSendEngage },
+): Promise<SessionSendResult> {
+  const perspectives = input.server.perspectives;
+  if (!perspectives) {
+    throw RpcErrors.internal("Perspective engagement is not available.");
+  }
+
+  const admitted = await admitAndMaybeStartPerspectiveTurn({
+    ...input,
+    question: input.engage.question,
+    perspectives,
+  });
+  return {
+    conversationId: admitted.conversationId,
+    sessionId: admitted.conversationId,
+    turnId: admitted.turnId,
+  };
+}
+
 interface AdmitAndMaybeStartTurnInput {
   readonly manager: ConversationManager;
   readonly conversationId?: string;
@@ -898,6 +969,79 @@ interface AdmitAndMaybeStartTurnInput {
   readonly turnId: string;
   readonly connection: RpcConnection;
   readonly broadcast?: SessionBroadcast;
+}
+
+interface AdmitAndMaybeStartPerspectiveTurnInput extends SendDirectTurnInput {
+  readonly perspectives: NonNullable<ServerContext["perspectives"]>;
+  readonly question: string;
+}
+
+async function admitAndMaybeStartPerspectiveTurn(
+  input: AdmitAndMaybeStartPerspectiveTurnInput,
+): Promise<{
+  conversationId: string;
+  turnId: string;
+  runStatus: "immediate" | "queued";
+}> {
+  const admission = await input.manager.admitTurn({
+    conversationId: input.conversationId,
+    createConversation: createConversationCallback(
+      input.server,
+      input.preallocatedConversationId,
+    ),
+    exists: existingConversationCheck(input.server, input.conversationId),
+    connectionId: input.connectionId,
+    makeTask: (managed) => {
+      const task = input.perspectives.createPendingTask({
+        manager: input.manager,
+        managed,
+        originalInput: input.input,
+        question: input.question,
+        turnContext: perspectiveTurnContext(input.turnId, input.connection),
+        source: "channel",
+        onResult: (result) =>
+          notifyPerspectiveTurnResult({
+            result,
+            conversationId: managed.conversationId,
+            turnId: input.turnId,
+            turnCount: managed.turnCount,
+            connection: input.connection,
+            broadcast: input.broadcast,
+          }),
+      });
+      return {
+        ...task,
+        cancel: () => {
+          task.cancel();
+          notifyCancelledPerspectiveTurn({
+            conversationId: managed.conversationId,
+            turnId: input.turnId,
+            connection: input.connection,
+          });
+        },
+      };
+    },
+  });
+
+  if (admission.status === "not-found") {
+    throw RpcErrors.notFound(`Session not found: ${admission.conversationId}`);
+  }
+  if (admission.status === "full") {
+    throw new RpcAppError(
+      RPC_ERROR_CODES.BUSY,
+      "Too many pending messages for this conversation",
+    );
+  }
+
+  if (admission.status === "immediate") {
+    void admission.task.execute();
+  }
+
+  return {
+    conversationId: admission.conversationId,
+    turnId: input.turnId,
+    runStatus: admission.status,
+  };
 }
 
 async function admitAndMaybeStartTurn(
@@ -1181,6 +1325,153 @@ async function runManagedTurn(
   }
 }
 
+function perspectiveTurnContext(
+  turnId: string,
+  connection: RpcConnection,
+): TurnContext {
+  return {
+    turnId,
+    turnOrigin: {
+      channel: "rpc",
+      triggeredBy: String(connection.id),
+    },
+  };
+}
+
+function notifyPerspectiveTurnResult(input: {
+  readonly result: PerspectivesTurnResult;
+  readonly conversationId: string;
+  readonly turnId: string;
+  readonly turnCount: number;
+  readonly connection: RpcConnection;
+  readonly broadcast?: SessionBroadcast;
+}): void {
+  if (input.result.status === "completed") {
+    notifyPerspectiveDelta(input, {
+      type: "text_delta",
+      text: input.result.finalText,
+    });
+    notifyPerspectiveDelta(input, {
+      type: "assistant_message",
+      message: assistantMessage(input.result.finalText),
+    });
+    notifyPerspectiveDelta(input, {
+      type: "turn_complete",
+      turnCount: input.turnCount,
+      usage: input.result.usage,
+    });
+    notifyPerspectiveComplete(input, {
+      reason: "completed",
+      message: assistantMessage(input.result.finalText),
+      usage: input.result.usage,
+    });
+    return;
+  }
+
+  if (input.result.status === "aborted") {
+    notifyPerspectiveComplete(input, {
+      reason: "aborted",
+      usage: input.result.usage ?? emptyUsage(),
+    });
+    return;
+  }
+
+  notifyPerspectiveComplete(input, {
+    reason: "error",
+    error: {
+      name: "PerspectiveError",
+      message: formatPerspectiveFailure(input.result),
+    },
+    usage: input.result.usage ?? emptyUsage(),
+  });
+}
+
+function notifyCancelledPerspectiveTurn(input: {
+  readonly conversationId: string;
+  readonly turnId: string;
+  readonly connection: RpcConnection;
+}): void {
+  input.connection.notify(SESSION_NOTIFICATIONS.complete, {
+    conversationId: input.conversationId,
+    sessionId: input.conversationId,
+    turnId: input.turnId,
+    result: {
+      reason: "error",
+      error: { name: "Cancelled", message: "Pending perspective turn cancelled" },
+      usage: emptyUsage(),
+    },
+  } satisfies SessionCompletePayload);
+}
+
+function notifyPerspectiveDelta(
+  input: {
+    readonly conversationId: string;
+    readonly turnId: string;
+    readonly connection: RpcConnection;
+    readonly broadcast?: SessionBroadcast;
+  },
+  delta: AgentYield,
+): void {
+  const payload = {
+    conversationId: input.conversationId,
+    sessionId: input.conversationId,
+    turnId: input.turnId,
+    delta,
+  } satisfies SessionDeltaPayload;
+  if (input.broadcast) {
+    input.broadcast(input.conversationId, SESSION_NOTIFICATIONS.delta, payload);
+  } else {
+    input.connection.notify(SESSION_NOTIFICATIONS.delta, payload);
+  }
+}
+
+function notifyPerspectiveComplete(
+  input: {
+    readonly conversationId: string;
+    readonly turnId: string;
+    readonly connection: RpcConnection;
+    readonly broadcast?: SessionBroadcast;
+  },
+  result: SessionCompletePayload["result"],
+): void {
+  const payload = {
+    conversationId: input.conversationId,
+    sessionId: input.conversationId,
+    turnId: input.turnId,
+    result,
+  } satisfies SessionCompletePayload;
+  if (input.broadcast) {
+    input.broadcast(input.conversationId, SESSION_NOTIFICATIONS.complete, payload);
+  } else {
+    input.connection.notify(SESSION_NOTIFICATIONS.complete, payload);
+  }
+}
+
+function formatPerspectiveFailure(
+  result: Extract<PerspectivesTurnResult, { readonly status: "failed" }>,
+): string {
+  return `多视角评议失败（${formatPerspectiveStage(result.stage)}）：${result.message}`;
+}
+
+function formatPerspectiveStage(stage: string): string {
+  switch (stage) {
+    case "snapshot":
+      return "上下文快照";
+    case "allocation":
+      return "视角分配";
+    case "template":
+      return "编排模板";
+    case "orchestration":
+      return "编排执行";
+    case "convergence":
+      return "最终收敛";
+    case "commit":
+      return "结果提交";
+    default:
+      return stage;
+  }
+}
+
 function normalizeSessionInput(params: SessionSendParams): UserTurnInput | null {
   const hasText = hasProvidedSessionInput(params, "text");
   const hasInput = hasProvidedSessionInput(params, "input");
@@ -1201,6 +1492,25 @@ function normalizeSessionInput(params: SessionSendParams): UserTurnInput | null 
   }
 
   return null;
+}
+
+function normalizeSessionEngage(value: unknown): SessionSendEngage | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw RpcErrors.invalidParams("session.send 'engage' must be an object");
+  }
+  const engage = value as { kind?: unknown; question?: unknown };
+  if (engage.kind !== "perspectives") {
+    throw RpcErrors.invalidParams("session.send 'engage.kind' is not supported");
+  }
+  if (typeof engage.question !== "string") {
+    throw RpcErrors.invalidParams("session.send 'engage.question' must be a string");
+  }
+  const question = engage.question.trim();
+  if (question.length === 0) {
+    throw RpcErrors.invalidParams("session.send 'engage.question' must not be empty");
+  }
+  return { kind: "perspectives", question };
 }
 
 function hasProvidedSessionInput(

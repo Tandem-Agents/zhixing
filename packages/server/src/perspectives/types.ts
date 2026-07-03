@@ -24,6 +24,7 @@ export interface PerspectiveAllocation {
 }
 
 export interface PerspectiveAllocationInput {
+  readonly managed?: ManagedSession;
   readonly question: string;
   readonly contextText: string;
   readonly defaultPerspectiveCount: number;
@@ -36,6 +37,7 @@ export interface PerspectiveAllocationStrategy {
 }
 
 export interface PerspectivesOrchestrationRunInput {
+  readonly managed: ManagedSession;
   readonly executable: OrchestrationExecutableV1;
   readonly runInput: string;
   readonly contextSnapshot: OrchestrationContextSnapshotV1;

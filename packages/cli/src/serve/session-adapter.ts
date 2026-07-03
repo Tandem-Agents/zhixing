@@ -173,6 +173,13 @@ export function createServerRuntimeAdapter(
       return agentRuntime.callTextWithUsage(prompt, role, opts);
     },
 
+    runOrchestrationV1(params) {
+      if (!agentRuntime.runOrchestrationV1) {
+        throw new Error("AgentRuntime does not support orchestration execution.");
+      }
+      return agentRuntime.runOrchestrationV1(params);
+    },
+
     checkBudget(messages) {
       return agentRuntime.checkBudget(messages);
     },

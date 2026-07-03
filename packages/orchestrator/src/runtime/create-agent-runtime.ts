@@ -12,12 +12,16 @@ import { randomUUID } from "node:crypto";
 import {
   type AgentYield,
   type AgentEventMap,
+  type EventBus,
   type WindowCompact,
   type ConfirmationFallbackStrategy,
   type ContextBudget,
   type IConfirmationBroker,
   type IEventBus,
   type Message,
+  type OrchestrationContextSnapshotV1,
+  type OrchestrationExecutableV1,
+  type OrchestrationRunResultV1,
   type RunResult,
   type RunRecordAdvancementMetadata,
   type ToolResultBlock,
@@ -134,6 +138,10 @@ import type {
   DisposeReason,
   AttentionWindowChangeReason,
 } from "./lifecycle.js";
+import {
+  createAgentNodeExecutorV1,
+  OrchestrationRunnerV1,
+} from "../orchestration/index.js";
 
 /**
  * 注入系统提示词的技能索引上限(按当前模式 top-N)。
@@ -271,6 +279,13 @@ export interface AgentRuntime {
     role?: "main" | "light",
     opts?: { abortSignal?: AbortSignal },
   ) => Promise<TextCallLLMResult>;
+  /**
+   * 执行一份已校验的编排定义。运行体内部持有真实模型角色、安全管线、
+   * confirmation broker 与工具池，因此编排节点执行也必须从这里出发。
+   */
+  runOrchestrationV1?: (
+    params: RunOrchestrationV1Params,
+  ) => Promise<OrchestrationRunResultV1>;
   /** 当前消息列表里的 Task/sub-agent 用量拆分(/usage 的结构化数据面)。 */
   subAgentUsages: (messages: readonly Message[]) => readonly TaskUsageEntry[];
   /** 当前运行体安全状态只读快照（/security 的宿主数据面）。 */
@@ -330,6 +345,15 @@ export interface AgentRuntime {
    * agent-loop 的 windowLifecycle.onChange 驱动。
    */
   onAttentionWindowChange(reason: AttentionWindowChangeReason): Promise<void>;
+}
+
+export interface RunOrchestrationV1Params {
+  readonly executable: OrchestrationExecutableV1;
+  readonly runInput?: unknown;
+  readonly contextSnapshot?: OrchestrationContextSnapshotV1;
+  readonly abortSignal?: AbortSignal;
+  readonly eventBus: EventBus<AgentEventMap>;
+  readonly parentLineage?: string;
 }
 
 export interface RuntimeSecuritySnapshot {
@@ -1146,6 +1170,38 @@ export async function createAgentRuntime(
       const caller =
         role === "main" ? mainCallLLMWithUsage : lightCallLLMWithUsage;
       return caller([userMessage(prompt)], opts);
+    },
+
+    async runOrchestrationV1(
+      params: RunOrchestrationV1Params,
+    ): Promise<OrchestrationRunResultV1> {
+      const nodeExecutor = createAgentNodeExecutorV1({
+        provider: roles[primaryRole].provider,
+        model: roles[primaryRole].model,
+        loopThinking: primaryThinking,
+        roleThinking,
+        llmRoles: roles,
+        securityPipeline,
+        workspace: workspace.path,
+        workspaceSource: workspace.source,
+        globalConfigPath: getGlobalConfigPath(),
+        parentBroker: confirmationBroker,
+        parentTools: tools,
+        riskMaxTokens: primaryModelCapability.riskMaxTokens,
+        userIntent:
+          typeof params.runInput === "string" ? params.runInput : undefined,
+      });
+      const runner = new OrchestrationRunnerV1({
+        bus: params.eventBus,
+        nodeExecutor,
+        parentLineage: params.parentLineage,
+      });
+      return runner.run({
+        executable: params.executable,
+        runInput: params.runInput,
+        contextSnapshot: params.contextSnapshot,
+        abortSignal: params.abortSignal,
+      });
     },
 
     securitySnapshot(): RuntimeSecuritySnapshot {
