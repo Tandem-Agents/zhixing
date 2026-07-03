@@ -91,6 +91,23 @@ describe("projectHistoryTail", () => {
     ).toBe(true);
   });
 
+  it("多视角评议 run 的 assistant 摘录带评议来源标记", () => {
+    const perspectiveRun = {
+      ...run("@ 审查方案", "最终结论"),
+      perspectives: {
+        definitionId: "perspectives.deliberation.v1",
+        perspectiveCount: 3,
+      },
+    } as RunRecord;
+    const tail = projectHistoryTail([perspectiveRun]);
+
+    expect(tail.entries[0]!.perspectiveCount).toBe(3);
+    const lines = renderHistoryTailLines(tail, 120);
+    expect(
+      lines.some((line) => line.includes("◆ 多视角评议 · 3 视角: 最终结论")),
+    ).toBe(true);
+  });
+
   it("run 无 assistant 文本（中断等）→ assistantText 缺省", () => {
     const tail = projectHistoryTail([run("被中断的问题")]);
     expect(tail.entries[0]!.userText).toBe("被中断的问题");

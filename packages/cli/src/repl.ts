@@ -85,6 +85,7 @@ import {
 import { RpcEventBus } from "./runtime/rpc-event-bus.js";
 import { RpcConfirmationBroker } from "./runtime/rpc-confirmation-broker.js";
 import type { SessionAdvancementStateSnapshot } from "@zhixing/server";
+import { prepareSessionSendEngage } from "./session-engage.js";
 import { renderResumedAdvancementNotice } from "./advancement-presentation.js";
 import { createAdvancementControlPresenter } from "./runtime/advancement-control-presenter.js";
 import { createObservedTurnPresenter } from "./runtime/observed-turn-presenter.js";
@@ -1452,13 +1453,15 @@ export async function startRepl(): Promise<void> {
       }
     }
 
+    const userInputOptions = {
+      workspaceRoot: localView.workspaceRoot ?? process.cwd(),
+      materialRegistry,
+    };
+
     // ── 准备发送给 core 的用户正文 ──
     let preparedInput: Awaited<ReturnType<typeof prepareUserTurnInput>>;
     try {
-      preparedInput = await prepareUserTurnInput(input, {
-        workspaceRoot: localView.workspaceRoot ?? process.cwd(),
-        materialRegistry,
-      });
+      preparedInput = await prepareUserTurnInput(input, userInputOptions);
     } catch (err) {
       pendingTextSubmission?.reject();
       throw err;
@@ -1469,6 +1472,24 @@ export async function startRepl(): Promise<void> {
     }
     if (preparedInput.errors.length > 0) {
       for (const err of preparedInput.errors) {
+        cliWriter.line(chalk.yellow(`  ⚠ ${err}`));
+      }
+      pendingTextSubmission?.reject();
+      continue;
+    }
+    let preparedEngage: Awaited<ReturnType<typeof prepareSessionSendEngage>>;
+    try {
+      preparedEngage = await prepareSessionSendEngage(input, userInputOptions);
+    } catch (err) {
+      pendingTextSubmission?.reject();
+      throw err;
+    }
+    const engageErrors = [
+      ...(preparedEngage?.preparedQuestion.errors ?? []),
+      ...(preparedEngage?.kind === "invalid" ? preparedEngage.errors : []),
+    ];
+    if (engageErrors.length) {
+      for (const err of engageErrors) {
         cliWriter.line(chalk.yellow(`  ⚠ ${err}`));
       }
       pendingTextSubmission?.reject();
@@ -1504,6 +1525,9 @@ export async function startRepl(): Promise<void> {
         pendingTextSubmission?.commit();
       };
       const startedTurn = await controller.beginUserTurn(preparedInput.input, {
+        ...(preparedEngage?.kind === "ready"
+          ? { engage: preparedEngage.engage }
+          : {}),
         onAccepted: commitAcceptedInput,
       });
       commitAcceptedInput();

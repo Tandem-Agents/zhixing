@@ -26,7 +26,11 @@ import {
   type IEventBus,
 } from "@zhixing/core";
 import type { DecorateRunBusFn } from "@zhixing/orchestrator/runtime";
-import type { RuntimeSubAgentUsageEntry } from "@zhixing/server";
+import {
+  PERSPECTIVES_CONVERGENCE_NODE_ID,
+  PERSPECTIVES_DELIBERATION_DEFINITION_ID,
+  type RuntimeSubAgentUsageEntry,
+} from "@zhixing/server";
 import type { OutputRenderer } from "./output/index.js";
 import type { CliWriter, ScreenController } from "./screen/index.js";
 import {
@@ -442,6 +446,16 @@ export interface CreateRenderSubscribersOptions {
   readonly screen?: ScreenController;
 }
 
+function renderPerspectiveProgress(
+  pauseUI: () => void,
+  writer: CliWriter,
+  text: string,
+): void {
+  pauseUI();
+  writer.ensureSegmentBreak();
+  writer.line(chalk.dim(`  ◇ ${text}`));
+}
+
 /**
  * 工厂——返回符合 DecorateRunBusFn 契约的装饰器，装载所有 EventBus 订阅型渲染。
  *
@@ -552,6 +566,67 @@ export function createRenderSubscribers(
         pauseUI();
         writer.line(
           chalk.dim(`  ⟳ 系统提示词已随注意力窗口重建 (${info.reason})`),
+        );
+      }),
+    );
+
+    const perspectiveProgress = {
+      runId: "",
+      crossStarted: false,
+      convergenceStarted: false,
+    };
+    unsubs.push(
+      bus.on("orchestration:run_start", (info) => {
+        if (info.definitionId !== PERSPECTIVES_DELIBERATION_DEFINITION_ID) {
+          return;
+        }
+        perspectiveProgress.runId = info.runId;
+        perspectiveProgress.crossStarted = false;
+        perspectiveProgress.convergenceStarted = false;
+        renderPerspectiveProgress(
+          pauseUI,
+          writer,
+          `多视角评议：${info.nodeCount} 个节点开始协作`,
+        );
+      }),
+    );
+    unsubs.push(
+      bus.on("orchestration:node_start", (info) => {
+        if (
+          info.definitionId !== PERSPECTIVES_DELIBERATION_DEFINITION_ID ||
+          info.runId !== perspectiveProgress.runId
+        ) {
+          return;
+        }
+        if (
+          info.nodeId.startsWith("cross-") &&
+          !perspectiveProgress.crossStarted
+        ) {
+          perspectiveProgress.crossStarted = true;
+          renderPerspectiveProgress(pauseUI, writer, "交叉吸收中");
+        }
+        if (
+          info.nodeId === PERSPECTIVES_CONVERGENCE_NODE_ID &&
+          !perspectiveProgress.convergenceStarted
+        ) {
+          perspectiveProgress.convergenceStarted = true;
+          renderPerspectiveProgress(pauseUI, writer, "收敛最终版本中");
+        }
+      }),
+    );
+    unsubs.push(
+      bus.on("orchestration:run_end", (info) => {
+        if (
+          info.definitionId !== PERSPECTIVES_DELIBERATION_DEFINITION_ID ||
+          info.runId !== perspectiveProgress.runId ||
+          info.status === "completed"
+        ) {
+          return;
+        }
+        renderPerspectiveProgress(
+          pauseUI,
+          writer,
+          `多视角评议未完成：${info.error ?? info.status}`,
         );
       }),
     );

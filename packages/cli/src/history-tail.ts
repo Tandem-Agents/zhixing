@@ -39,6 +39,8 @@ export interface HistoryTailEntry {
   assistantText?: string;
   /** 推进侧代理 run——首行不是用户说的话，渲染必须带来源标记。 */
   fromAdvancement?: boolean;
+  /** 多视角评议 run——最终回复来自发散收敛流程，启动尾巴需显式标记。 */
+  perspectiveCount?: number;
 }
 
 export interface HistoryTail {
@@ -70,6 +72,9 @@ function projectEntry(record: RunRecord): HistoryTailEntry {
     userText,
     ...(lastAssistant !== undefined ? { assistantText: lastAssistant } : {}),
     ...(record.source === "advancement" ? { fromAdvancement: true } : {}),
+    ...(record.perspectives?.perspectiveCount
+      ? { perspectiveCount: record.perspectives.perspectiveCount }
+      : {}),
   };
 }
 
@@ -116,9 +121,12 @@ export function renderHistoryTailLines(
       : `${prefix}❯ ${entry.userText}`;
     lines.push(clampLine(chalk.dim(userLine), maxVisible));
     if (entry.assistantText !== undefined) {
+      const assistantPrefix = entry.perspectiveCount
+        ? `${ANCHOR_AI_DONE} 多视角评议 · ${entry.perspectiveCount} 视角:`
+        : ANCHOR_AI_DONE;
       lines.push(
         clampLine(
-          chalk.dim(`${prefix}${ANCHOR_AI_DONE} ${entry.assistantText}`),
+          chalk.dim(`${prefix}${assistantPrefix} ${entry.assistantText}`),
           maxVisible,
         ),
       );

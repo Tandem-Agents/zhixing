@@ -108,6 +108,11 @@ function renderHelpCommands(
     }
   }
 
+  writer.line(`\n  ${chalk.bold("能力入口")}`);
+  writer.line(
+    `    ${chalk.cyan("@".padEnd(14))} ${chalk.dim("多视角发散收敛评议")}`,
+  );
+
   const pluginCount = byCategory.get("plugin")?.length ?? 0;
   if (pluginCount > 0) {
     writer.line(
