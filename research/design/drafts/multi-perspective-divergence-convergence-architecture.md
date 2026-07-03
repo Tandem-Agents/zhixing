@@ -257,7 +257,7 @@ interface RunRecord {
 - 复用 runner 既有 `orchestration:*` 事件（validation_failed / run_start / node_start / node_end / run_end），经 per-run EventBus 与 lineage 冒泡——发端零新增。缺两段：多视角 turn 的 execute 闭包须建立与普通 turn（`runTurnWithCommit`）同构的 per-run 事件桥接入既有 RPC 投影通路；CLI 侧缺 `orchestration:*` 消费者。
 - CLI 投影原则：用户看到的是**评议进度**，不是编排协议。示意：触发后「N 个视角并行思考中…」→「交叉吸收中…」→「收敛中…」→ 最终版本整块呈现。节点粒度细节不默认展示。
 - 历史渲染：带 `perspectives` 元数据的 run，assistant 回复带来源标记（如「◇ 多视角评议 · N 视角」），实时与历史同源（run 级元数据），与 advancement 来源标记同款纪律。
-- 失败呈现：指明失败环节（分配 / 某视角 / 收敛）与结构化原因，不甩协议错误码。
+- 失败呈现：指明失败环节（分配 / 某视角 / 收敛 / 落盘）与结构化原因，不甩协议错误码。
 - 可发现性：藏在语法里的能力零引导等于不存在——`/help` 收录 `@` 触发说明，与既有命令帮助同面呈现（随 P4 验收）。
 
 ### 9. 包与代码落点
@@ -266,7 +266,7 @@ interface RunRecord {
 | ---- | ---- | ---- |
 | `@zhixing/core` | template 数组展开；node policy `modelRole` | 通用增强，无业务语义 |
 | `@zhixing/orchestrator` | `AgentNodeExecutor` 按节点 modelRole 选 role 实例 | 消费 llmRoles 既有持有 |
-| `@zhixing/server` | `perspectives/` 门面：AllocationStrategy + 内置编排文档模板 + 装配 + 一等 turn + 落盘；send 的 engage 编排 | 与 `advancement/` 并列的会话 owner 级能力 |
+| `@zhixing/server` | `perspectives/` 门面：AllocationStrategy + 内置编排文档模板 + 装配 + 一等 turn + 落盘；serve 宿主装配（门面实例、真实编排 executor、事件桥）；send 的 engage 编排 | 与 `advancement/` 并列的会话 owner 级能力 |
 | `@zhixing/cli` | `@` 触发解析（输入预处理层）；orchestration 事件进度投影；历史来源标记 | 接入面投影，不持状态 |
 
 - 内置编排文档以完整 JSONC 文本存于门面模块内单一文件（如 `deliberation-template.ts` 导出模板常量）——语义上就是"一份编排文档"，物理上随构建产物零打包风险；不用代码拼 definition 对象绕过模板与校验管线。
@@ -307,6 +307,6 @@ interface RunRecord {
 | P1 | core 模板有界数组展开（含 params 协议放宽为有界结构化数组、组依赖替换、caps 兜底、测试） | 无 |
 | P2 | core 节点 `modelRole` + orchestrator executor 按 role 选实例（测试） | 无 |
 | P3 | server perspectives 门面：分配 strategy、内置编排文档、装配（档位序列 / clamp / caps 定值）、快照捕获、一等 turn、落盘与元数据、事件桥与透传（测试含端到端替身） | P1、P2 |
-| P4 | wire `engage` + CLI：`@` 解析、进度投影、历史标记、失败呈现（e2e） | P3 |
+| P4 | serve 宿主装配 + wire `engage` + CLI：创建 `PerspectivesController` 门面实例；提供真实 `PerspectivesOrchestrationExecutor`（`OrchestrationRunnerV1` + `AgentNodeExecutor`）；把门面 `decorateRunBus` 接入既有 `createRunEventForwarder`；`session.send` engage 分支进入多视角 PendingTask；CLI `@` 解析、进度投影、历史标记、失败呈现（e2e） | P3 |
 
 P1 与 P2 可并行；P3 是门面集成单元；P4 是用户可见收口，对应基础设施文档 §16 单元 5 的「消费场景接入」。落盘承载已核实：`ConversationManager.recordTurn(conversationId, record: RunRecordInput, ...)` 接受自由构造的 RunRecordInput、不绑 main runtime——一等 turn 无结构障碍；P3 另须建立与 `runTurnWithCommit` 同构的 per-run 事件桥（§8）。
