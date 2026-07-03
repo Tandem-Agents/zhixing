@@ -1,4 +1,5 @@
 import { isPlainObject } from "./internal.js";
+import { ORCHESTRATION_ID_RULE, isOrchestrationId } from "./ids.js";
 import type {
   OrchestrationDefinitionV1,
   OrchestrationSystemCapsV1,
@@ -6,8 +7,6 @@ import type {
   OrchestrationValidationIssueV1,
   OrchestrationValidationResultV1,
 } from "./types.js";
-
-const ID_PATTERN = /^[a-z][a-z0-9-]{0,63}$/;
 
 const DEFINITION_KEYS = new Set([
   "version",
@@ -586,12 +585,12 @@ function validateId(
   issues: OrchestrationValidationIssueV1[],
 ): string | undefined {
   const value = validateRequiredString(object, key, path, issues);
-  if (value !== undefined && !ID_PATTERN.test(value)) {
+  if (value !== undefined && !isOrchestrationId(value)) {
     addIssue(
       issues,
       path,
       "invalid_id",
-      "id must start with a lowercase letter and contain only lowercase letters, numbers, and hyphens.",
+      `id ${ORCHESTRATION_ID_RULE}.`,
     );
   }
   return value;
@@ -701,6 +700,7 @@ function validateFormat(
     addIssue(issues, path, "invalid_literal", "format must be text or json.");
   }
 }
+
 
 function validateOptionalSchema(
   value: unknown,

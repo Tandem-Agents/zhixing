@@ -223,6 +223,7 @@ interface RunRecord {
 {
   "id": "diverge-{{item.index}}",
   "expandForEach": "perspectives",   // 数组参数名
+  "groupId": "diverge",              // 供其它节点依赖整组
   "instruction": "视角:{{item.name}}\n职责:{{item.charge}}\n...",
   "policy": { "modelRole": "{{item.modelRole}}" }
 }
@@ -230,7 +231,9 @@ interface RunRecord {
 
 - 实例化时按数组长度展开为 N 个节点，`{{item.*}}` 是逐项参数作用域，id 注入序号保证唯一。
 - 前提协议放宽（已核实现状）：现行模板参数仅允许 string——params 协议扩展为 `string | 有界结构化数组`（数组元素为 string 叶子的平面对象，深度与长度受校验约束），仍全量经参数校验，不放开任意 JSON。
-- `dependsOn` 引用展开组 id 时替换为全部展开实例 id（「依赖整组」是展开的自然语义）。
+- 展开组必须显式声明 `groupId`，不得由 id 模板隐式推导；`groupId` 使用与节点 id 相同的命名规则，重复或与真实节点 id 撞名时校验拒绝。
+- `nodes[].dependsOn` 引用 `groupId` 时替换为全部展开实例 id（「依赖整组」是展开的自然语义）；替换只作用于节点依赖字段，不递归改写 schema / metadata 等任意同名字段。
+- `expandForEach` 与 `groupId` 是模板控制字段，实例化后不会进入最终 definition。
 - 展开只发生在 template 层：产物是普通静态 definition，validator / normalizer / planner / runner **零改动**；展开后节点数照常受 `caps.maxNodes` 硬校验——展开有界性由既有校验兜底。
 - 通用性：任何「N 个同构节点」编排（多路检索、分片处理、评审小组）都消费此能力。
 

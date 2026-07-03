@@ -211,7 +211,12 @@ export type OrchestrationLoadResultV1 =
   | { readonly ok: true; readonly executable: OrchestrationExecutableV1 }
   | { readonly ok: false; readonly issues: readonly OrchestrationValidationIssueV1[] };
 
-export type OrchestrationTemplateParamV1 = string;
+export type OrchestrationTemplateArrayItemV1 = Readonly<Record<string, string>>;
+export type OrchestrationTemplateArrayParamV1 =
+  readonly OrchestrationTemplateArrayItemV1[];
+export type OrchestrationTemplateParamV1 =
+  | string
+  | OrchestrationTemplateArrayParamV1;
 export type OrchestrationTemplateParamsV1 = Readonly<
   Record<string, OrchestrationTemplateParamV1>
 >;

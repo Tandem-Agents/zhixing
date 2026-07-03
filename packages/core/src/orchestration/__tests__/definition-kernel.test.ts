@@ -127,6 +127,214 @@ describe("orchestration definition kernel", () => {
     );
   });
 
+  it("expands bounded array template nodes before validation", () => {
+    const executable = expectLoadSuccess(
+      instantiateTrustedOrchestrationTemplateV1(
+        createExpandedTemplate(),
+        {
+          subject: "routing",
+          workers: [
+            { name: "alpha", charge: "scan" },
+            { name: "beta", charge: "verify" },
+            { name: "gamma", charge: "summarize" },
+          ],
+        },
+        caps,
+      ),
+    );
+
+    expect(executable.definition.nodeIds).toEqual([
+      "worker-1",
+      "worker-2",
+      "worker-3",
+      "merge",
+    ]);
+    expect(executable.definition.nodesById["worker-2"]!.instruction).toBe(
+      "Worker beta: verify routing.",
+    );
+    expect(executable.plan.dependencies["merge"]).toEqual([
+      "worker-1",
+      "worker-2",
+      "worker-3",
+    ]);
+  });
+
+  it("applies normal caps after template array expansion", () => {
+    const result = instantiateTrustedOrchestrationTemplateV1(
+      createExpandedTemplate(),
+      {
+        subject: "routing",
+        workers: [
+          { name: "one", charge: "a" },
+          { name: "two", charge: "b" },
+          { name: "three", charge: "c" },
+          { name: "four", charge: "d" },
+          { name: "five", charge: "e" },
+          { name: "six", charge: "f" },
+        ],
+      },
+      caps,
+    );
+
+    expect(issueCodes(result)).toContain("too_large");
+  });
+
+  it("rejects invalid template array usage", () => {
+    const nonArray = instantiateTrustedOrchestrationTemplateV1(
+      createExpandedTemplate(),
+      { subject: "routing", workers: "alpha" },
+      caps,
+    );
+    expect(issueCodes(nonArray)).toContain("template_param_invalid");
+
+    const outOfScope = instantiateTrustedOrchestrationTemplateV1(
+      {
+        ...createDefinition(),
+        nodes: [
+          {
+            ...createDefinition().nodes[0]!,
+            instruction: "Use {{item.name}}.",
+          },
+        ],
+      },
+      { subject: "routing" },
+      caps,
+    );
+    expect(issueCodes(outOfScope)).toContain("template_param_missing");
+
+    const nestedItem = instantiateTrustedOrchestrationTemplateV1(
+      createExpandedTemplate(),
+      {
+        subject: "routing",
+        workers: [{ name: "alpha", charge: { text: "scan" } }],
+      } as unknown as OrchestrationTemplateParamsV1,
+      caps,
+    );
+    expect(issueCodes(nestedItem)).toContain("template_param_invalid");
+
+    const prototypeField = instantiateTrustedOrchestrationTemplateV1(
+      {
+        ...createExpandedTemplate(),
+        nodes: [
+          {
+            ...createExpandedTemplate().nodes[0]!,
+            instruction: "Use {{item.__proto__}}.",
+          },
+        ],
+      },
+      {
+        subject: "routing",
+        workers: [{ name: "alpha", charge: "scan" }],
+      },
+      caps,
+    );
+    expect(issueCodes(prototypeField)).toContain("template_param_missing");
+  });
+
+  it("uses only explicit template expansion group ids", () => {
+    const implicit = instantiateTrustedOrchestrationTemplateV1(
+      {
+        ...createExpandedTemplate(),
+        nodes: [
+          {
+            ...createExpandedTemplate().nodes[0]!,
+            groupId: undefined,
+          },
+          createExpandedTemplate().nodes[1]!,
+        ],
+      },
+      {
+        subject: "routing",
+        workers: [{ name: "alpha", charge: "scan" }],
+      },
+      caps,
+    );
+    expect(issueCodes(implicit)).toContain("unknown_reference");
+
+    const colliding = instantiateTrustedOrchestrationTemplateV1(
+      {
+        ...createExpandedTemplate(),
+        nodes: [
+          {
+            id: "worker",
+            kind: "agent",
+            instruction: "Static worker.",
+            output: {
+              required: true,
+              format: "text",
+            },
+          },
+          createExpandedTemplate().nodes[0]!,
+          createExpandedTemplate().nodes[1]!,
+        ],
+      },
+      {
+        subject: "routing",
+        workers: [{ name: "alpha", charge: "scan" }],
+      },
+      caps,
+    );
+    expect(issueCodes(colliding)).toContain("invalid_reference");
+    expect(issuePaths(colliding)).toContain("$.template.nodes[1].groupId");
+
+    const duplicated = instantiateTrustedOrchestrationTemplateV1(
+      {
+        ...createExpandedTemplate(),
+        nodes: [
+          createExpandedTemplate().nodes[0]!,
+          {
+            ...createExpandedTemplate().nodes[0]!,
+            id: "reviewer-{{item.index}}",
+          },
+        ],
+      },
+      {
+        subject: "routing",
+        workers: [{ name: "alpha", charge: "scan" }],
+      },
+      caps,
+    );
+    expect(issueCodes(duplicated)).toContain("duplicate_value");
+  });
+
+  it("replaces expansion group ids only in node dependencies", () => {
+    const template = createExpandedTemplate();
+    const mergeNode = template.nodes[1]!;
+    const executable = expectLoadSuccess(
+      instantiateTrustedOrchestrationTemplateV1(
+        {
+          ...template,
+          nodes: [
+            template.nodes[0]!,
+            {
+              ...mergeNode,
+              output: {
+                required: true,
+                format: "text",
+                schema: {
+                  type: "object",
+                  dependsOn: ["worker"],
+                },
+              },
+            },
+          ],
+        },
+        {
+          subject: "routing",
+          workers: [{ name: "alpha", charge: "scan" }],
+        },
+        caps,
+      ),
+    );
+
+    expect(executable.plan.dependencies["merge"]).toEqual(["worker-1"]);
+    expect(
+      executable.definition.nodesById["merge"]!.output.schema,
+    ).toMatchObject({
+      dependsOn: ["worker"],
+    });
+  });
+
   it("rejects non-string template params", () => {
     const result = instantiateTrustedOrchestrationTemplateV1(
       createDefinition(),
@@ -211,6 +419,7 @@ describe("orchestration definition kernel", () => {
     );
     expect(issueCodes(overLimit)).toContain("too_large");
   });
+
 
   it("rejects run input context without an input contract", () => {
     const definition = createDefinition();
@@ -417,8 +626,8 @@ describe("orchestration definition kernel", () => {
 function createDefinition(): OrchestrationDefinitionV1 {
   return {
     version: 1,
-    id: "multi-perspective",
-    title: "Multi perspective",
+    id: "review-flow",
+    title: "Review flow",
     policy: {
       maxParallel: 2,
       maxRunMs: 60_000,
@@ -470,6 +679,40 @@ function createDefinition(): OrchestrationDefinitionV1 {
         kind: "agent",
         dependsOn: ["discover", "critic"],
         instruction: "Summarize the useful result.",
+        output: {
+          required: true,
+          format: "text",
+        },
+      },
+    ],
+  };
+}
+
+function createExpandedTemplate(): Record<string, unknown> & {
+  nodes: Record<string, unknown>[];
+} {
+  return {
+    ...createDefinition(),
+    nodes: [
+      {
+        id: "worker-{{item.index}}",
+        expandForEach: "workers",
+        groupId: "worker",
+        kind: "agent",
+        instruction: "Worker {{item.name}}: {{item.charge}} {{subject}}.",
+        output: {
+          required: true,
+          format: "text",
+        },
+      },
+      {
+        id: "merge",
+        kind: "agent",
+        dependsOn: ["worker"],
+        instruction: "Merge worker outputs.",
+        context: {
+          includeNodeOutputs: "dependencies",
+        },
         output: {
           required: true,
           format: "text",
