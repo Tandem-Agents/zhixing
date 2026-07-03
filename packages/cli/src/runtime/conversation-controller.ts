@@ -38,6 +38,7 @@ import type {
   WorksceneSummary,
   SessionAdvancementDetailResult,
   SessionAdvancementStateSnapshot,
+  SessionRubricPersistenceChoice,
   SessionAwaitingRubricResult,
   SessionCancelledRubricResult,
   SessionContractFailedResult,
@@ -428,7 +429,9 @@ export class ConversationController {
 
   async confirmRubricContract(
     pending: AwaitingRubricConfirmationTurn,
-    options: BeginTurnOptions = {},
+    options: BeginTurnOptions & {
+      readonly rubricPersistence?: SessionRubricPersistenceChoice;
+    } = {},
   ): Promise<AcceptedTurn> {
     const outcome = this.attachTurnWaiter(
       pending.conversationId,
@@ -440,6 +443,7 @@ export class ConversationController {
         pending.conversationId,
         pending.advancementSessionId,
         pending.rubricDraftId,
+        options.rubricPersistence,
       );
       if (result.turnId !== pending.turnId) {
         throw new Error(

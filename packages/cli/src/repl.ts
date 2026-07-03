@@ -97,6 +97,7 @@ import {
 } from "./runtime/conversation-controller.js";
 import {
   createAdvancementContractSelectionRequest,
+  primaryNearbyCandidate,
   type AdvancementContractSelectionValue,
 } from "./runtime/advancement-contract-selection.js";
 import { createCandidateDeleteHandler } from "./runtime/candidate-delete-controller.js";
@@ -309,6 +310,23 @@ async function resolveAdvancementContractSelection(opts: {
     }
 
     opts.onBeforeExecution();
+    if (selection.value === "update-existing") {
+      const candidate = primaryNearbyCandidate(pending.rubricDraft);
+      if (!candidate) continue;
+      return opts.controller.confirmRubricContract(pending, {
+        onAccepted: opts.onAccepted,
+        rubricPersistence: {
+          kind: "update-existing",
+          rubricId: candidate.id,
+        },
+      });
+    }
+    if (selection.value === "save-new") {
+      return opts.controller.confirmRubricContract(pending, {
+        onAccepted: opts.onAccepted,
+        rubricPersistence: { kind: "save-new" },
+      });
+    }
     return opts.controller.confirmRubricContract(pending, {
       onAccepted: opts.onAccepted,
     });

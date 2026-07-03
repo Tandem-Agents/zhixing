@@ -113,11 +113,27 @@ export interface ConfirmedRubricContentSnapshot {
 
 export type RubricContractSource = "matched" | "generated";
 
+export interface RubricCandidateSnapshot {
+  readonly id: string;
+  readonly title: string;
+  readonly description: string;
+  readonly source: "own" | "linked";
+  readonly matchScore?: number;
+}
+
+export type RubricDraftPersistenceChoice =
+  | { readonly kind: "save-new" }
+  | {
+      readonly kind: "update-existing";
+      readonly rubricId: string;
+    };
+
 export interface RubricContractDraftSnapshot {
   readonly draftId: string;
   readonly originalTurnId: string;
   readonly source: RubricContractSource;
   readonly candidateRubricIds: readonly string[];
+  readonly candidateRubrics?: readonly RubricCandidateSnapshot[];
   readonly title: string;
   readonly description: string;
   readonly content: RubricContractContentSnapshot;

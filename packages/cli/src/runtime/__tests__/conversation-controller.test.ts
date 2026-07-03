@@ -447,6 +447,7 @@ describe("ConversationController", () => {
       "conv-1",
       "adv-1",
       "draft-1",
+      undefined,
     );
     expect(onAccepted).toHaveBeenCalledExactlyOnceWith({
       conversationId: "conv-1",

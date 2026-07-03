@@ -76,4 +76,82 @@ describe("advancement contract selection adapter", () => {
     expect(request.body?.join("\n")).toContain("命中了你确认过的验收方式");
     expect(request.details?.body.join("\n")).toContain("测试通过");
   });
+
+  it("generated 草案有近邻候选时优先提示更新已有并保留另存选择", () => {
+    const request = createAdvancementContractSelectionRequest({
+      draftId: "draft-3",
+      originalTurnId: "turn-3",
+      source: "generated",
+      candidateRubricIds: ["rubric-nearby"],
+      candidateRubrics: [
+        {
+          id: "rubric-nearby",
+          title: "开发结果审查",
+          description: "检查开发任务是否满足需求。",
+          source: "own",
+          matchScore: 0.25,
+        },
+      ],
+      title: "开发验收准则新版",
+      description: "用于判断开发任务是否完成。",
+      content: {
+        passCriteria: ["测试通过"],
+        evidenceRequirements: [],
+        failureHandling: [
+          { id: "fix", scenario: "测试未通过", reply: "请修复。" },
+        ],
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    expect(request.body?.join("\n")).toContain("开发结果审查");
+    expect(request.options.map((option) => option.value)).toEqual([
+      "update-existing",
+      "save-new",
+      "edit",
+      "direct",
+      "cancel",
+    ]);
+    expect(request.initialValue).toBe("update-existing");
+    expect(
+      request.options.find((option) => option.value === "save-new")?.label,
+    ).toBe("另存新准则");
+  });
+
+  it("generated 草案候选未达到近邻阈值时不提示更新已有", () => {
+    const request = createAdvancementContractSelectionRequest({
+      draftId: "draft-4",
+      originalTurnId: "turn-4",
+      source: "generated",
+      candidateRubricIds: ["rubric-low"],
+      candidateRubrics: [
+        {
+          id: "rubric-low",
+          title: "导出结果审查",
+          description: "检查导出任务是否满足需求。",
+          source: "own",
+          matchScore: 0.1,
+        },
+      ],
+      title: "登录验收准则",
+      description: "用于判断登录任务是否完成。",
+      content: {
+        passCriteria: ["登录入口可用"],
+        evidenceRequirements: [],
+        failureHandling: [
+          { id: "fix", scenario: "登录未通过", reply: "请修复。" },
+        ],
+      },
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    expect(request.options.map((option) => option.value)).toEqual([
+      "confirm",
+      "edit",
+      "direct",
+      "cancel",
+    ]);
+    expect(request.initialValue).toBe("confirm");
+    expect(request.body?.join("\n")).not.toContain("很接近");
+  });
 });

@@ -14,6 +14,7 @@ export type {
 export {
   LLMRubricDraftGenerationStrategy,
   LLMRubricDraftRevisionStrategy,
+  RUBRIC_NEARBY_SCORE_THRESHOLD,
   RubricContractBuilder,
   projectConfirmedRubricToDraftContent,
 } from "./contract.js";
@@ -38,6 +39,7 @@ export type {
   ReviseRubricContractDraftInput,
   RubricContractComplete,
   RubricContractBuilderOptions,
+  RubricDraftCandidate,
   RubricDraftGenerationInput,
   RubricDraftGenerationStrategy,
   RubricDraftRevisionInput,

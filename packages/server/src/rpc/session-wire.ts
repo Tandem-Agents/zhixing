@@ -24,6 +24,7 @@ import type {
   AgentYield,
   ContextBudget,
   RubricContractDraftSnapshot,
+  RubricDraftPersistenceChoice,
   TaskListState,
   TokenUsage,
   WorkModeSwitchIntent,
@@ -177,6 +178,8 @@ export interface SessionAdvancementConfirmResult extends SessionAcceptedSendResu
   advancementSessionId: string;
   runStatus: "immediate" | "queued";
 }
+
+export type SessionRubricPersistenceChoice = RubricDraftPersistenceChoice;
 
 /**
  * 推进详情查询——「判断详情默认折叠、可展开」的展开数据面。

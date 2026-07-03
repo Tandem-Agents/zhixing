@@ -1,8 +1,13 @@
-import type { RubricContractDraftSnapshot } from "@zhixing/core";
+import {
+  RUBRIC_NEARBY_SCORE_THRESHOLD,
+  type RubricContractDraftSnapshot,
+} from "@zhixing/core";
 import type { SelectionRequest } from "../tui/selection/index.js";
 
 export type AdvancementContractSelectionValue =
   | "confirm"
+  | "update-existing"
+  | "save-new"
   | "edit"
   | "direct"
   | "cancel";
@@ -21,6 +26,9 @@ export type AdvancementContractSelectionValue =
 export function createAdvancementContractSelectionRequest(
   draft: RubricContractDraftSnapshot,
 ): SelectionRequest<AdvancementContractSelectionValue> {
+  const nearby = primaryNearbyCandidate(draft);
+  const shouldOfferNearbyGovernance =
+    draft.source === "generated" && nearby !== undefined;
   return {
     id: `advancement:${draft.draftId}`,
     ...(draft.source === "matched"
@@ -31,7 +39,19 @@ export function createAdvancementContractSelectionRequest(
             "细节可展开查看；确认后如果要改，随时可以说。",
           ],
         }
-      : {
+      : shouldOfferNearbyGovernance
+        ? {
+            title: "确认怎么算做完",
+            body: [
+              "我打算按下面这几条判断这个任务算不算完成，你看对吗？",
+              ...draft.content.passCriteria.map(
+                (text, index) => `  ${index + 1}. ${text}`,
+              ),
+              `这和已有的「${nearby.title}」很接近，建议更新已有准则，避免准则库堆出一次性条目。`,
+              "也可以另存为新的准则。",
+            ],
+          }
+        : {
           title: "确认怎么算做完",
           body: [
             "我打算按下面这几条判断这个任务算不算完成，你看对吗？",
@@ -46,13 +66,31 @@ export function createAdvancementContractSelectionRequest(
       body: renderRubricDraftDetails(draft),
     },
     options: [
-      {
-        value: "confirm",
-        label: "确认并开始",
-        description: "按这份推进准则执行任务",
-        hotkey: "y",
-        tone: "primary",
-      },
+      ...(shouldOfferNearbyGovernance
+        ? [
+            {
+              value: "update-existing" as const,
+              label: "更新已有并开始",
+              description: `修订「${nearby.title}」并按新版推进`,
+              hotkey: "y",
+              tone: "primary" as const,
+            },
+            {
+              value: "save-new" as const,
+              label: "另存新准则",
+              description: "明确作为新的场景准则沉淀",
+              hotkey: "s",
+            },
+          ]
+        : [
+            {
+              value: "confirm" as const,
+              label: "确认并开始",
+              description: "按这份推进准则执行任务",
+              hotkey: "y",
+              tone: "primary" as const,
+            },
+          ]),
       {
         value: "edit",
         label: "修改准则",
@@ -82,10 +120,26 @@ export function createAdvancementContractSelectionRequest(
         },
       },
     ],
-    initialValue: "confirm",
+    initialValue: shouldOfferNearbyGovernance ? "update-existing" : "confirm",
     submitLabel: "选择",
     cancelLabel: "取消任务",
   };
+}
+
+export function primaryNearbyCandidate(
+  draft: RubricContractDraftSnapshot,
+): NonNullable<RubricContractDraftSnapshot["candidateRubrics"]>[number] | undefined {
+  const id = draft.candidateRubricIds[0];
+  if (!id) return undefined;
+  const candidate = draft.candidateRubrics?.find((item) => item.id === id);
+  if (
+    !candidate ||
+    typeof candidate.matchScore !== "number" ||
+    candidate.matchScore < RUBRIC_NEARBY_SCORE_THRESHOLD
+  ) {
+    return undefined;
+  }
+  return candidate;
 }
 
 function renderRubricDraftDetails(

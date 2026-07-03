@@ -109,6 +109,175 @@ describe("RubricContractBuilder", () => {
     expect(prompts[0]).not.toContain("必须贴合当前任务");
   });
 
+  it("低相似候选仍作为生成参考但不构成治理近邻", async () => {
+    const rubricStore = new RubricStore(
+      path.join(await createTempDir("rubric-contract-low-similarity"), "rubrics"),
+    );
+    await rubricStore.saveOwn({
+      title: "导出结果验收",
+      description: "用于导出任务",
+      content: {
+        passCriteria: ["导出结果可下载"],
+        failureHandling: [{ scenario: "未完成", reply: "继续处理导出。" }],
+      },
+    });
+    const prompts: string[] = [];
+    const builder = new RubricContractBuilder({
+      rubricStore,
+      now: () => "2026-01-01T00:00:00.000Z",
+      generationStrategy: new LLMRubricDraftGenerationStrategy({
+        complete: async (prompt) => {
+          prompts.push(prompt);
+          return JSON.stringify({
+            title: "登录功能验收准则",
+            description: "用于判断登录功能是否完成。",
+            passCriteria: ["登录入口可用"],
+            evidenceRequirements: [
+              {
+                id: "report",
+                kind: "conversation-fact",
+                description: "执行侧说明登录功能的完成情况。",
+                required: false,
+              },
+            ],
+            failureHandling: [
+              { scenario: "登录未达标", reply: "请继续修正登录功能。" },
+            ],
+          });
+        },
+      }),
+    });
+
+    const draft = await builder.buildDraft({
+      originalTurnId: "turn-low-similarity",
+      originalUserTask: userTurnInputFromText("请实现登录功能并验收"),
+    });
+
+    expect(draft.source).toBe("generated");
+    expect(draft.candidateRubricIds).toEqual(["导出结果验收"]);
+    expect(draft.candidateRubrics?.[0]?.title).toBe("导出结果验收");
+    expect(draft.candidateRubrics?.[0]?.matchScore).toBeLessThan(0.2);
+    expect(prompts[0]).toContain("可参考的相近 Rubric:");
+    expect(prompts[0]).toContain("导出结果验收");
+    await expect(builder.confirmDraft(draft, {
+      persistence: { kind: "update-existing", rubricId: "导出结果验收" },
+    })).rejects.toThrow("未达到近邻修订阈值");
+  });
+
+  it("generated 草案可修订近邻 Rubric，避免另存一次性条目", async () => {
+    const rubricStore = new RubricStore(
+      path.join(await createTempDir("rubric-contract-nearby-update"), "rubrics"),
+    );
+    const existing = await rubricStore.saveOwn({
+      title: "导出结果验收",
+      description: "用于导出任务",
+      content: {
+        passCriteria: ["导出结果可下载"],
+        failureHandling: [{ scenario: "未完成", reply: "继续处理导出。" }],
+      },
+    });
+    const builder = new RubricContractBuilder({
+      rubricStore,
+      now: () => "2026-01-01T00:00:00.000Z",
+      generationStrategy: new LLMRubricDraftGenerationStrategy({
+        complete: async () =>
+          JSON.stringify({
+            title: "导出功能验收准则",
+            description: "用于判断导出功能是否完成。",
+            passCriteria: ["导出入口可用", "导出文件内容符合格式"],
+            evidenceRequirements: [
+              {
+                id: "report",
+                kind: "conversation-fact",
+                description: "执行侧说明导出功能的完成情况。",
+                required: false,
+              },
+            ],
+            failureHandling: [
+              {
+                scenario: "导出结果不满足要求",
+                reply: "请继续修正导出功能。",
+              },
+            ],
+          }),
+      }),
+    });
+
+    const draft = await builder.buildDraft({
+      originalTurnId: "turn-nearby-update",
+      originalUserTask: userTurnInputFromText("请把导出功能做到可验收"),
+    });
+    expect(draft.source).toBe("generated");
+    expect(draft.candidateRubricIds[0]).toBe(existing.id);
+    expect(draft.candidateRubrics?.[0]?.title).toBe(existing.title);
+    expect(draft.candidateRubrics?.[0]?.matchScore).toBeGreaterThanOrEqual(0.2);
+
+    const confirmed = await builder.confirmDraft(draft, {
+      persistence: { kind: "update-existing", rubricId: existing.id },
+    });
+
+    expect(confirmed.rubricId).toBe(existing.id);
+    const records = await rubricStore.listForMatching();
+    expect(records).toHaveLength(1);
+    const loaded = await rubricStore.load(existing.id);
+    expect(loaded.document.content.passCriteria).toEqual([
+      "导出入口可用",
+      "导出文件内容符合格式",
+    ]);
+    expect(confirmed.content.passCriteria).toEqual([
+      { id: "pc-1", text: "导出入口可用" },
+      { id: "pc-2", text: "导出文件内容符合格式" },
+    ]);
+  });
+
+  it("generated 草案可按用户选择另存新 Rubric", async () => {
+    const rubricStore = new RubricStore(
+      path.join(await createTempDir("rubric-contract-nearby-save"), "rubrics"),
+    );
+    await rubricStore.saveOwn({
+      title: "导出结果验收",
+      description: "用于导出任务",
+      content: {
+        passCriteria: ["导出结果可下载"],
+        failureHandling: [{ scenario: "未完成", reply: "继续处理导出。" }],
+      },
+    });
+    const builder = new RubricContractBuilder({
+      rubricStore,
+      now: () => "2026-01-01T00:00:00.000Z",
+      generationStrategy: new LLMRubricDraftGenerationStrategy({
+        complete: async () =>
+          JSON.stringify({
+            title: "导出功能验收准则",
+            description: "用于判断导出功能是否完成。",
+            passCriteria: ["导出入口可用"],
+            evidenceRequirements: [
+              {
+                id: "report",
+                kind: "conversation-fact",
+                description: "执行侧说明导出功能的完成情况。",
+                required: false,
+              },
+            ],
+            failureHandling: [
+              { scenario: "导出未达标", reply: "请继续修正导出功能。" },
+            ],
+          }),
+      }),
+    });
+
+    const draft = await builder.buildDraft({
+      originalTurnId: "turn-nearby-save",
+      originalUserTask: userTurnInputFromText("请把导出功能做到可验收"),
+    });
+    const confirmed = await builder.confirmDraft(draft, {
+      persistence: { kind: "save-new" },
+    });
+
+    expect(confirmed.rubricId).toBe("导出功能验收准则");
+    expect(await rubricStore.listForMatching()).toHaveLength(2);
+  });
+
   it("可用 LLM 修订策略按用户反馈生成新版草案", async () => {
     const rubricStore = new RubricStore(
       path.join(await createTempDir("rubric-contract-revise"), "rubrics"),

@@ -17,11 +17,16 @@ import type {
   EvidenceRequirementSpec,
   FailureHandlingSpec,
   ObjectiveSignalKind,
+  RubricCandidateSnapshot,
   RubricContractContentSnapshot,
   RubricContractDraftSnapshot,
+  RubricDraftPersistenceChoice,
 } from "./types.js";
 import { EMPTY_EVIDENCE_CAPABILITIES, canBeRequired } from "./types.js";
 import { parseJsonObject } from "./json.js";
+
+const RUBRIC_MATCH_SCORE_THRESHOLD = 0.3;
+export const RUBRIC_NEARBY_SCORE_THRESHOLD = 0.2;
 
 export interface BuildRubricContractDraftInput {
   readonly originalTurnId: string;
@@ -31,9 +36,13 @@ export interface BuildRubricContractDraftInput {
 export interface RubricDraftGenerationInput
   extends BuildRubricContractDraftInput {
   readonly taskText: string;
-  readonly candidateRubrics: readonly RubricIndexEntry[];
+  readonly candidateRubrics: readonly RubricDraftCandidate[];
   readonly evidenceCapabilities: EvidenceCapabilitySet;
   readonly now: string;
+}
+
+export interface RubricDraftCandidate extends RubricIndexEntry {
+  readonly matchScore: number;
 }
 
 export interface RubricDraftGenerationStrategy {
@@ -97,7 +106,7 @@ export class RubricContractBuilder {
     const ranked = rankRubrics(taskText, candidates);
     const matched = ranked[0];
 
-    if (matched && matched.score >= 0.3) {
+    if (matched && matched.score >= RUBRIC_MATCH_SCORE_THRESHOLD) {
       const asset = await this.rubricStore.load(matched.rubric.id);
       return this.fromRubricAsset(input, asset, ranked);
     }
@@ -105,7 +114,7 @@ export class RubricContractBuilder {
     return await this.generationStrategy.generate({
       ...input,
       taskText,
-      candidateRubrics: ranked.map((item) => item.rubric).slice(0, 3),
+      candidateRubrics: ranked.map(toDraftCandidate).slice(0, 3),
       evidenceCapabilities: this.evidenceCapabilities,
       now: this.now(),
     });
@@ -130,6 +139,7 @@ export class RubricContractBuilder {
 
   async confirmDraft(
     draft: RubricContractDraftSnapshot,
+    opts: { readonly persistence?: RubricDraftPersistenceChoice } = {},
   ): Promise<ConfirmedRubricSnapshot> {
     if (draft.source === "matched") {
       const rubricId = draft.candidateRubricIds[0];
@@ -148,16 +158,40 @@ export class RubricContractBuilder {
       };
     }
 
-    const saved = await this.rubricStore.saveOwn(toRubricDraft(draft));
+    const saved =
+      opts.persistence?.kind === "update-existing"
+        ? await this.updateExistingRubric(draft, opts.persistence.rubricId)
+        : await this.rubricStore.saveOwn(toRubricDraft(draft));
     return {
       rubricId: saved.id,
       rubricVersion: saved.updatedAt,
-      title: draft.title,
-      description: draft.description,
+      title: saved.title,
+      description: saved.description,
       content: sealContractContent(draft.content),
       confirmedAt: this.now(),
       confirmedBy: "user",
     };
+  }
+
+  private async updateExistingRubric(
+    draft: RubricContractDraftSnapshot,
+    rubricId: string,
+  ) {
+    const candidate = draft.candidateRubrics?.find((item) => item.id === rubricId);
+    if (!candidate || !draft.candidateRubricIds.includes(rubricId)) {
+      throw new Error(
+        `RubricContractBuilder: candidate rubric "${rubricId}" 不在草案候选中`,
+      );
+    }
+    if (
+      typeof candidate.matchScore !== "number" ||
+      candidate.matchScore < RUBRIC_NEARBY_SCORE_THRESHOLD
+    ) {
+      throw new Error(
+        `RubricContractBuilder: candidate rubric "${rubricId}" 未达到近邻修订阈值`,
+      );
+    }
+    return await this.rubricStore.updateOwn(rubricId, toRubricDraft(draft, rubricId));
   }
 
   private fromRubricAsset(
@@ -176,6 +210,23 @@ export class RubricContractBuilder {
           .filter((id) => id !== asset.id)
           .slice(0, 2),
       ],
+      candidateRubrics: toCandidateSnapshots([
+        {
+          id: asset.id,
+          title: asset.title,
+          description: asset.description,
+          source: asset.source,
+          createdAt: asset.createdAt,
+          updatedAt: asset.updatedAt,
+          matchScore:
+            ranked.find((item) => item.rubric.id === asset.id)?.score ??
+            RUBRIC_MATCH_SCORE_THRESHOLD,
+        },
+        ...ranked
+          .map(toDraftCandidate)
+          .filter((rubric) => rubric.id !== asset.id)
+          .slice(0, 2),
+      ]),
       title: asset.title,
       description: asset.description,
       content: {
@@ -257,6 +308,7 @@ export class LLMRubricDraftGenerationStrategy
       originalTurnId: input.originalTurnId,
       source: "generated",
       candidateRubricIds: input.candidateRubrics.map((rubric) => rubric.id),
+      candidateRubrics: toCandidateSnapshots(input.candidateRubrics),
       title: normalized.title,
       description: normalized.description,
       content: normalized.content,
@@ -293,6 +345,9 @@ export class LLMRubricDraftRevisionStrategy
       originalTurnId: input.currentDraft.originalTurnId,
       source: "generated",
       candidateRubricIds: input.currentDraft.candidateRubricIds,
+      ...(input.currentDraft.candidateRubrics
+        ? { candidateRubrics: input.currentDraft.candidateRubrics }
+        : {}),
       title: normalized.title,
       description: normalized.description,
       content: normalized.content,
@@ -640,8 +695,33 @@ export function projectConfirmedRubricToDraftContent(
   };
 }
 
-function toRubricDraft(draft: RubricContractDraftSnapshot): RubricDraft {
+function toCandidateSnapshots(
+  rubrics: readonly (RubricIndexEntry & { readonly matchScore?: number })[],
+): RubricCandidateSnapshot[] {
+  return rubrics.map((rubric) => ({
+    id: rubric.id,
+    title: rubric.title,
+    description: rubric.description,
+    source: rubric.source,
+    ...(typeof rubric.matchScore === "number"
+      ? { matchScore: rubric.matchScore }
+      : {}),
+  }));
+}
+
+function toDraftCandidate(item: RankedRubric): RubricDraftCandidate {
   return {
+    ...item.rubric,
+    matchScore: item.score,
+  };
+}
+
+function toRubricDraft(
+  draft: RubricContractDraftSnapshot,
+  id?: string,
+): RubricDraft {
+  return {
+    ...(id ? { id } : {}),
     title: draft.title,
     description: draft.description,
     content: {

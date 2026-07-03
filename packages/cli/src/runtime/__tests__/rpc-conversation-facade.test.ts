@@ -149,7 +149,10 @@ describe("RpcConversationFacade · 方法域", () => {
     const facade = new RpcConversationFacade(fake.link);
 
     await expect(
-      facade.confirmAdvancement("conv-1", "adv-1", "draft-1"),
+      facade.confirmAdvancement("conv-1", "adv-1", "draft-1", {
+        kind: "update-existing",
+        rubricId: "rubric-nearby",
+      }),
     ).resolves.toMatchObject({ status: "confirmed", turnId: "turn-1" });
     await expect(
       facade.reviseAdvancement("conv-1", "adv-1", "补充文档验收"),
@@ -165,6 +168,10 @@ describe("RpcConversationFacade · 方法域", () => {
           conversationId: "conv-1",
           advancementSessionId: "adv-1",
           rubricDraftId: "draft-1",
+          rubricPersistence: {
+            kind: "update-existing",
+            rubricId: "rubric-nearby",
+          },
         },
       },
       {

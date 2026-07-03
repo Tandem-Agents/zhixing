@@ -52,6 +52,7 @@ import {
   type SessionAdvancementConfirmResult,
   type SessionAdvancementDetailResult,
   type SessionAdvancementReviseResult,
+  type SessionRubricPersistenceChoice,
   type SessionAdvancementStateSnapshot,
   type SessionConversationEntry,
   type SessionAwaitingRubricResult,
@@ -423,6 +424,8 @@ interface SessionAdvancementActionParams extends ConversationIdParams {
   advancementSessionId?: unknown;
   /** 发起端所见草案版本——confirm 据此拒绝「确认到没看过的修订」。 */
   rubricDraftId?: unknown;
+  /** generated 草案确认时的沉淀选择；缺省为另存新条。 */
+  rubricPersistence?: unknown;
 }
 
 interface SessionAdvancementCancelParams extends SessionAdvancementActionParams {
@@ -454,6 +457,10 @@ export function buildSessionAdvancementConfirmMethod(): MethodEntry {
         params,
         "session.advancementConfirm",
       );
+      const persistence = parseRubricPersistence(
+        params,
+        "session.advancementConfirm",
+      );
       const advancement = requireAdvancement(ctx.server);
       const manager = requireConversations(ctx.server);
       let confirmed: Awaited<ReturnType<typeof advancement.confirmRubric>>;
@@ -469,6 +476,7 @@ export function buildSessionAdvancementConfirmMethod(): MethodEntry {
               conversationId,
               advancementSessionId,
               expectedRubricDraftId: rubricDraftId,
+              persistence,
             }),
         });
       } catch (err) {
@@ -1978,6 +1986,30 @@ function requireRubricDraftId(
     );
   }
   return params.rubricDraftId;
+}
+
+function parseRubricPersistence(
+  params: SessionAdvancementActionParams,
+  method: string,
+): SessionRubricPersistenceChoice | undefined {
+  const raw = params.rubricPersistence;
+  if (raw === undefined) return undefined;
+  if (typeof raw !== "object" || raw === null) {
+    throw RpcErrors.invalidParams(`${method} has invalid 'rubricPersistence'`);
+  }
+  const value = raw as Record<string, unknown>;
+  if (value.kind === "save-new") {
+    return { kind: "save-new" };
+  }
+  if (value.kind === "update-existing") {
+    if (typeof value.rubricId !== "string" || !value.rubricId.trim()) {
+      throw RpcErrors.invalidParams(
+        `${method} requires non-empty 'rubricPersistence.rubricId'`,
+      );
+    }
+    return { kind: "update-existing", rubricId: value.rubricId };
+  }
+  throw RpcErrors.invalidParams(`${method} has invalid 'rubricPersistence.kind'`);
 }
 
 export async function loadAdvancementState(

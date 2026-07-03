@@ -216,6 +216,65 @@ description: 显式 id 无效
     expect((await readIndex()).map((item) => item.id)).toEqual([record.id]);
   });
 
+  it("updateOwn 修订已有 own 条目并保持 id 不变", async () => {
+    const store = new RubricStore(root);
+    const record = await store.saveOwn({
+      title: "开发验收准则",
+      description: "旧描述",
+      content: {
+        passCriteria: ["旧标准"],
+        failureHandling: [{ scenario: "未完成", reply: "继续。" }],
+      },
+    });
+
+    const updated = await store.updateOwn(record.id, {
+      title: "开发验收准则新版",
+      description: "新描述",
+      content: {
+        passCriteria: ["新标准"],
+        failureHandling: [{ scenario: "未完成", reply: "按新标准继续。" }],
+      },
+    });
+
+    expect(updated.id).toBe(record.id);
+    expect(updated.title).toBe("开发验收准则新版");
+    expect(updated.createdAt).toBe(record.createdAt);
+    expect(updated.updatedAt >= record.updatedAt).toBe(true);
+    const loaded = await store.load(record.id);
+    expect(loaded.document.id).toBe(record.id);
+    expect(loaded.document.content.passCriteria).toEqual(["新标准"]);
+    expect(await exists(path.join(record.dir, "RUBRIC.md"))).toBe(true);
+  });
+
+  it("updateOwn 修订 linked 条目时写入 own 覆盖层，不改 linked 源", async () => {
+    await writeRubric("linked", "linked-dev", {
+      title: "开发验收准则",
+      description: "linked 描述",
+      pass: "linked 标准",
+      reply: "linked 继续。",
+    });
+    const store = new RubricStore(root);
+    const linked = await store.load("开发验收准则");
+    expect(linked.source).toBe("linked");
+
+    const updated = await store.updateOwn(linked.id, {
+      title: "开发验收准则",
+      description: "own 修订",
+      content: {
+        passCriteria: ["own 标准"],
+        failureHandling: [{ scenario: "未完成", reply: "own 继续。" }],
+      },
+    });
+
+    expect(updated.source).toBe("own");
+    const loaded = await store.load(linked.id);
+    expect(loaded.source).toBe("own");
+    expect(loaded.document.content.passCriteria).toEqual(["own 标准"]);
+    expect(
+      await fs.readFile(path.join(root, "linked", "linked-dev", "RUBRIC.md"), "utf-8"),
+    ).toContain("linked 标准");
+  });
+
   it("saveOwn 撞名即拒绝", async () => {
     await writeRubric("own", "existing", { title: "重复准则" });
     const store = new RubricStore(root);

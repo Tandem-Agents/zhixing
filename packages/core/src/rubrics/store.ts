@@ -110,6 +110,50 @@ export class RubricStore {
     };
   }
 
+  async updateOwn(id: string, draft: RubricDraft): Promise<RubricRecord> {
+    const existing = await this.locate(id);
+    const raw = stringifyRubricDraft({ ...draft, id });
+    const document = parseRubricDocument(raw);
+    const documentId = rubricDocumentId(document);
+    if (documentId !== id) {
+      throw new Error(`Rubric id "${documentId}" 与目标 "${id}" 不一致`);
+    }
+
+    const ownRoot = rubricSourceRoot(this.root, "own");
+    const dir =
+      existing.source === "own"
+        ? existing.dir
+        : await this.reserveDir(ownRoot, toSafePathSegment(id));
+    const file = path.join(dir, RUBRIC_FILE);
+    this.assertWithinRoot(file);
+    await fs.mkdir(dir, { recursive: true });
+    await writeAtomic(file, raw);
+
+    const now = new Date().toISOString();
+    const state = await this.withIndexLock(async () => {
+      const cur = await this.readIndex();
+      const prev = cur.get(id);
+      const next = {
+        id,
+        createdAt: prev?.createdAt ?? now,
+        updatedAt: now,
+      };
+      cur.set(id, next);
+      await this.writeIndex(cur);
+      return next;
+    });
+
+    return {
+      id,
+      title: document.title,
+      description: document.description,
+      source: "own",
+      dir,
+      createdAt: state.createdAt,
+      updatedAt: state.updatedAt,
+    };
+  }
+
   async archive(id: string): Promise<void> {
     const located = await this.locate(id);
     await fs.mkdir(rubricsArchivedRoot(this.root), { recursive: true });

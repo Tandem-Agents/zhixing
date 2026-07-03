@@ -14,6 +14,7 @@ import {
   type RunRecordInput,
   type RunRecordRef,
   type RubricContractDraftSnapshot,
+  type RubricDraftPersistenceChoice,
   type Message,
   type UserTurnInput,
   type AdvancementClosureFacts,
@@ -524,6 +525,7 @@ export class AdvancementController {
      * 草案被并发修订后拒绝盲确认，不依赖调用方自觉。
      */
     readonly expectedRubricDraftId: string;
+    readonly persistence?: RubricDraftPersistenceChoice;
   }): Promise<AdvancementConfirmedTurn> {
     const session = await this.requireSession(
       input.conversationId,
@@ -545,7 +547,9 @@ export class AdvancementController {
         "推进准则草案已被修订，请查看最新内容后再确认。",
       );
     }
-    const confirmedRubric = await this.contractBuilder.confirmDraft(draft);
+    const confirmedRubric = await this.contractBuilder.confirmDraft(draft, {
+      persistence: input.persistence,
+    });
     const confirmed = await this.store.confirmRubric(
       input.conversationId,
       input.advancementSessionId,

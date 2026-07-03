@@ -37,6 +37,7 @@ import type {
   SessionTaskListResult,
   SessionTaskListUpdateResult,
   SessionAdvancementDetailResult,
+  SessionRubricPersistenceChoice,
   SessionUsageResult,
 } from "@zhixing/server";
 import type { UserTurnInput } from "@zhixing/core";
@@ -123,11 +124,17 @@ export class RpcConversationFacade {
     conversationId: string,
     advancementSessionId: string,
     rubricDraftId: string,
+    rubricPersistence?: SessionRubricPersistenceChoice,
   ): Promise<SessionAdvancementConfirmResult> {
     const client = await this.link.getClient();
     return client.request<SessionAdvancementConfirmResult>(
       "session.advancementConfirm",
-      { conversationId, advancementSessionId, rubricDraftId },
+      {
+        conversationId,
+        advancementSessionId,
+        rubricDraftId,
+        ...(rubricPersistence ? { rubricPersistence } : {}),
+      },
     );
   }
 
