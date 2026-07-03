@@ -419,7 +419,7 @@ interface ReviewAttribution {
 - **沉淀治理兜底**：保存前做近邻检测（与既有 Rubric 高相似时提示复用/修订已有条目而非另存新条）；确认即沉淀的需求语义保留，但沉淀的是场景资产、不是任务快照。
 - 本次任务契约仍以 `ConfirmedRubricSnapshot` 快照隔离——库条目后续演化不影响 active 会话，不变。
 
-> 生效面：生成契约已场景化（C15）——生成与修订 prompt 均改为「场景可复用表述、任务细节归证据要求与 locator」，自相矛盾消除。近邻检测的**交互半边**（确认面提示复用/改用已有条目）依赖确认面改造，归 C11 一并落地；机制面（candidateRubricIds 相近候选随草案下发）既有。
+> 生效面：生成契约已场景化（C15）——生成与修订 prompt 均改为「场景可复用表述、任务细节归证据要求与 locator」，自相矛盾消除。近邻治理交互已落地（C18）——generated 草案携带达到近邻阈值的候选时，确认面默认提示修订已有条目，且保留「另存新准则」显式选择；确认请求将沉淀选择传回控制面，core 按选择更新 existing own / own 覆盖 linked 或另存新条。
 
 Rubric 草案生成是任务契约生成，不是通用模板填空。未命中 Rubric 时，默认路径应由 LLM 根据当前任务现写场景化验收标准、证据要求和未通过处理；固定通用模板只能作为测试替身，不能成为真实产品行为。若草案生成不可用或失败，受控失败的形态是：generation strategy 直接抛错（core 层无 `contract-failed` 字面量），由 server 控制面捕获并映射为 `advancement:contract_failed` 控制事件、不落空会话——两层各守其责，绝不伪造一份通用 Rubric 继续流程。`RubricContractBuilder` 只负责检索、组装、确认和持久化契约流程，草案内容生成必须通过可替换的 generation strategy 接入，避免把智能生成逻辑写死在控制面类里。
 
@@ -491,7 +491,7 @@ run 输入 = [...执行侧注意力窗口, 当前用户/代理消息]
 用户中途输入要分层处理，不能一概终止推进：
 
 - **补充 / 微调**：用户输入仍服务同一目标，且不改变已确认 Rubric 的通过标准；取消未执行的代理消息，把用户输入作为下一条真实用户 turn 执行，推进会话保持 active，run 接受后继续按原 Rubric 验收。
-- **目标变更 / 接管**：用户输入改变任务目标、改变验收标准、要求停止自动推进，或开启新任务；当前推进会话退出，再按新输入重新准入。**终态归类裁决**：`exited` 与 `cancelled` 按「有无收场意义」切分——已确认且有 review 素材的会话被接管 / 变更时归 `exited`（exitReason: `user-takeover`），**享受 §7 收场交付**（用户接管恰是最想知道「到哪了」的时刻，也是契约再生的前置）；`cancelled` 只留给无收场意义的关闭（awaiting 阶段取消——无执行事实；对话删除——收场无载体），无收场。当前实现对 active 接管恒走 `cancelled`，与本裁决不符——收口见 §15 C17。
+- **目标变更 / 接管**：用户输入改变任务目标、改变验收标准、要求停止自动推进，或开启新任务；当前推进会话退出，再按新输入重新准入。**终态归类裁决**：`exited` 与 `cancelled` 按「有无收场意义」切分——已确认且有 review 素材的会话被接管 / 变更时归 `exited`（exitReason: `user-takeover`），**享受 §7 收场交付**（用户接管恰是最想知道「到哪了」的时刻，也是契约再生的前置）；`cancelled` 只留给无收场意义的关闭（awaiting 阶段取消——无执行事实；对话删除——收场无载体），无收场。生效面已随 C17 落地：active 接管归 `exited` 并交付收场报告。
 - **代理 run 正在执行时用户输入到来**：会话 owner 先调用现有 abort 能力中止 in-flight 代理 run；未 completed 的代理 run 不落盘、不入窗、不触发推进验收。若代理 run 已完成并被接受，则按已接受事实处理，再让新用户输入进入上述分层。
 
 退出：
@@ -532,7 +532,7 @@ interface RunRecord {
 | 中间态 | 判定依据 | 恢复动作 |
 | ------ | -------- | -------- |
 | run 已接受、验收未跑 | 事实流 runIndex > `lastReviewedRunIndex` | 恢复扫描 oldest-first 逐个补审（catch-up 验收，已落地） |
-| 验收已跑、review 与 proxy 之间断裂 | **最新 failed review 携带 `proxyMessageId`，但该 proxy 不在 `proxyMessages` 且未 settled**（真实成因：`run_reviewed` 已落盘而 `proxy_enqueued` 行缺失 / 损坏被坏行隔离跳过——此时 `outstandingProxyMessageId` 为空，「outstanding 指向不存在的 proxy」在合法事件折叠下反而造不出来，不能作判定谓词） | **确定性重建**：review 已持久化 `selectedFailureHandlingId` + `unmetCriteria` + 归因，代理消息 content = 模板 + 变量 + 归因渲染的纯函数——重造并补写 `proxy_enqueued` 后入队，不得静默放过（当前实现对此形态判「无待恢复」静默跳过、会话永久卡死且不发任何事件，是缺口，收口见 §15 C16） |
+| 验收已跑、review 与 proxy 之间断裂 | **最新 failed review 携带 `proxyMessageId`，但该 proxy 不在 `proxyMessages` 且未 settled**（真实成因：`run_reviewed` 已落盘而 `proxy_enqueued` 行缺失 / 损坏被坏行隔离跳过——此时 `outstandingProxyMessageId` 为空，「outstanding 指向不存在的 proxy」在合法事件折叠下反而造不出来，不能作判定谓词） | **确定性重建**：review 已持久化 `selectedFailureHandlingId` + `unmetCriteria` + 归因，代理消息 content = 模板 + 变量 + 归因渲染的纯函数——重造并补写 `proxy_enqueued` 后入队，不得静默放过。生效面已随 C16 落地：缺失 proxy 由持久化 review 确定性重建并补写 `proxy_enqueued`。 |
 | proxy 已入队未执行 | outstanding proxy 存在且队列中无对应项 | 重接入队（`proxy_recovered`，已落地；scheduled set + busySource 双重去重） |
 | 代理 run 执行中崩溃 | run 未 completed | 不落盘不入窗不验收（completed-gate），恢复按上一行重接 proxy（已落地） |
 | 裁判 transient 失败挂起 | run 已接受但无对应 review（§6 韧性裁决：transient 失败不落盘 review） | 与第一行同一路径自然补审——挂起态不需要新机制。补审触发点共三个：宿主启动全量扫描、`session.resume` 单会话、**同会话下一次 turn 提交时先 catch-up 再审当轮**（afterTurnCommitted 已按会话串行链化）；live 挂起且用户不在场时，最迟在用户回来的第一个动作上收敛 |
@@ -709,7 +709,7 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 - **awaiting 主动浮现**：resume / 打开会话时待确认任务优先呈现，不埋在列表里——持久化不等于可见性。
 - **渠道节奏原则**：消息通道（飞书等）的运行期投影用里程碑式批量（确认 / 完成 / 退出必达，逐轮验收摘要聚合），不逐事件刷屏——具体形态归未来渠道投影设计，此处只定原则，**不随 C11（CLI 投影）验收**。
 
-> 生效面缺口（收口见 §15 C11）：以上显示规则中，CLI 当前只落地了「草案确认面」一项。代理消息来源标记无渲染（元数据已随 RunRecord 透传到 wire，但 CLI 对话流不区分）；`run_reviewed` / `completed` / `exited` 无终端消费者（CLI 的 run 投影明确忽略 control scope 事件，控制面监听器只接了 contract 确认流）；「判断详情默认折叠」无渲染载体。产品后果是推进运行期用户不知情：任务自动续推数轮，屏幕上凭空出现与用户消息无区分的代理消息、完成与退出无提示——违反本节显示规则与不变量 5 的产品半边。宿主侧事实与事件均已齐备，缺的只是 CLI 投影。
+> 生效面：已落地（C11）——控制事件经推进控制面监听器（scope:"control" 的第二条腿）渲染为对话流系统行：验收摘要（unmet 全列、逐条归因折叠、尾注 /advancement 展开入口）、自动续推提示、收场报告（completed / exited 随 closure 直出）、验收挂起与恢复提示；「可展开」由 `/advancement` 查看命令落地（`session.advancementDetail` RPC：open 会话给标准矩阵逐条归因 + 判定理由 + 证据摘录 + 采信证据 + 已试策略 + 消耗，无 open 时给最新终态会话的收场回看——离线错过收场事件后随查随算）；代理消息来源标记「知行推进 · 自动续推」实时（turnOrigin）与历史（RunRecord.source）同源明示；awaiting 恢复呈现经 resume / list / workscene enter-exit 快照携草案全文主动重建确认面（切当前对话指针的全部路径统一），/resume 候选列表标注推进状态；确认面 framing 三条（对齐语气、failureHandling 收详情深层并标注用途、matched 轻确认）落地于确认适配器；中途插话经 send 结果的 continuation 标记一句话告知（helper 与 fall-through 两条 active 路径一致，含 in-flight 中止提示）。contract_* 事件不经监听器重放（发起端同步流承载，避免双渲染）。确认链身份纪律（对抗审查修复）：awaiting 结果的 turnId 恒取草案 originalTurnId（不随二次 send 漂移）；confirm 绑定发起端所见 rubricDraftId（协议层必填强制，不依赖客户端自觉），并发修订后拒绝盲确认；Esc / Ctrl+C 只收起确认面不取消任务（永久取消只走带二次确认的 cancel 选项）；active 会话的输入即便对话正忙也先过准入分类（排队与分类正交，接管 / 修正意图不静默丢进闭环），take-over 后的输入统一重新分类；resume / workscene enter 在恢复前先入组播名册，且接入面事件过滤用「当前对话 + 切换型 RPC 进行中的目标」谓词（isWatching，exitScene 逐候选精确收敛）——恢复期通知帧先于 RPC 响应到达，只认当前对话会在消费端把事件丢掉；带外监听器先于启动 auto-resume 建立（controller 就绪前的启动窗口全放行——该窗口内本连接只 observe 了 resume 目标，放行即精确），启动恢复与 /resume 切换走同一套可见性机制；订阅顺序 / 切换窗口 / 启动时序均有测试锚；验收轮次是会话内 review 计数（随事件与快照下发），不是对话全局 runIndex。
 
 ### 11. 包与代码落点
 
@@ -790,7 +790,7 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 
 - 契约验收条件注入：active 期间每 run 发送视图含验收条件块、终态后停注；落盘 `messages[0]` 恒为用户原文、窗口不含注入块；不动 cache 前缀。
 - 归因通道：代理消息含逐条判定 + 理由 + 证据摘录；意图骨架仍来自用户确认的 failureHandling；判断分歧场景（执行侧自认已过、裁判独立证据相反）经归因块一轮解开，不再原地打转。
-- 场景化沉淀：生成草案的 passCriteria 是场景级表述；近邻高相似时提示复用而非另存；库内不出现单次任务快照式条目。
+- 场景化沉淀：生成草案的 passCriteria 是场景级表述；库内不出现单次任务快照式条目。
 - 裁判韧性：transient 异常不落盘 review、`lastReviewedRunIndex` 不前进、恢复扫描补审；结论性失败仍 fail-closed 终局。
 - missing-proxy 自愈：最新 failed review 的 proxyMessageId 缺失于 proxyMessages 且未 settled 时，从 review 确定性重建、补写 proxy_enqueued 后入队，不静默放过。
 - 接管终态：有推进事实的接管归 exited 并交付收场报告；awaiting 取消与对话删除仍为 cancelled、无收场。
@@ -798,6 +798,10 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 - 契约再生：标准修正退出后新草案从旧契约预填，一次确认即可重启推进。
 - 失控保险丝：单会话累计 usage 触达阈值即系统边界退出 + 收场交付；正常任务永不触碰默认阈值。
 - 信任边界（验收载体归 C14 裁判 schema + C10 独立证据）：客观 kind 条目无独立证据时 verdict 恒为 unknown 不得 met；unknown 条目不阻断 passed（两层门：条目层仅拦 unmet、required 拦截在证据层）且在收场矩阵如实呈现。
+
+C18 新增的验收项：
+
+- 近邻沉淀治理：生成草案仍可参考低分候选；只有达到近邻阈值的候选才在确认面默认提示复用 / 修订已有条目而非另存，且用户可显式另存。
 
 ### 14. 不变量
 
@@ -833,7 +837,7 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 
 第三轮审查（实施者推演 + 机械一致性 + 产品旅程三路盲审，含外审复核）修订施工级问题：⑨ 恢复矩阵 missing-proxy 判定谓词按 store 折叠事实修正（§5.6）；⑩ 接管终态归类裁决——有推进事实归 exited 并收场（§5.4）；⑪ C16/C17 对 C14 的依赖补入依赖表；⑫ C10 施工地基裁决（§6 第一级取证施工语义：file-diff = git 工作区变更、locator 定位、能力集探测、capability-gap、路径安全）及 required 缺省生效面事实；⑬ 呈现层 framing 一等化（§10 裁决清单）。
 
-**在 C10-C17 完成前，§13 验收纲未走完，不变量 5 的显示半边与 13 / 15 / 16 / 17 未生效；C9 的「封口」只覆盖 C1-C8 已实现面。**
+上述缺口已由 C10-C18 收口：C9 的「封口」只覆盖 C1-C8 已实现面，最终验收纲以 C18 落地后的 §13 为准。
 
 依赖总表：
 
@@ -856,8 +860,15 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 | C15  | C4                                                                           | Rubric 场景化生成与沉淀治理                                      |
 | C16  | C6、C9、C14（归因重建半边）                                                  | 裁判 transient 韧性 + missing-proxy 自愈 + 恢复契约测试          |
 | C17  | C4、C7、C14（标准矩阵 / criterionId）；CLI 呈现随 C11                        | 收场交付合成 + 契约继承再生                                      |
+| C18  | C11、C15                                                                     | Rubric 近邻沉淀治理交互                                          |
 
-因此，只有 C1 与 C2 可以无前置并行；C6 在 C1+C3 后可与 C4/C5 分支并行推进；C7-C9 是严格后置集成单元。尤其 C9 不是“最后再想想”的补丁，而是全链路恢复与验收的封口单元，不能在 C1-C8 未完成时实施。C10-C15 互相独立、可并行开工；**C16 的归因重建半边与 C17 的标准矩阵依赖 C14 的归因持久化**——C14 先行，两者才能完整验收（各自不依赖归因的半边——补审分流、保险丝计量等——可先行）。全部完成后 §13 验收纲才算走完。收口优先级按承重排序：C14（信息结构是效率天花板、且是 C16/C17 的数据源）与 C10（可靠性支柱）最先，C16（韧性）次之，其余并行。
+因此，只有 C1 与 C2 可以无前置并行；C6 在 C1+C3 后可与 C4/C5 分支并行推进；C7-C9 是严格后置集成单元。尤其 C9 不是“最后再想想”的补丁，而是全链路恢复与验收的封口单元，不能在 C1-C8 未完成时实施。C10-C15 互相独立、可并行开工；**C16 的归因重建半边与 C17 的标准矩阵依赖 C14 的归因持久化**——C14 先行，两者才能完整验收（各自不依赖归因的半边——补审分流、保险丝计量等——可先行）。C18 依赖 C15 的候选机制与 C11 的确认面投影，是沉淀治理的交互收口。全部完成后 §13 验收纲才算走完。收口优先级按承重排序：C14（信息结构是效率天花板、且是 C16/C17 的数据源）与 C10（可靠性支柱）最先，C16（韧性）次之，其余并行。
+
+实际落地波次记录：
+
+- `596b2d1` wave-1：C14 + C10 + C12 + C13 + C15 生成契约半边。组波理由：先落效率天花板、可靠性支柱与可并行的小收口单元。
+- `1f2dfd1` wave-2：C16 + C17。组波理由：二者依赖 C14 的归因持久化与 criterionId 数据源，合并实现可避免恢复、收场、保险丝中间态拆裂。
+- `a58eef2` wave-3：C11。组波理由：CLI 呈现消费前两波产出的事件、收场报告、归因与信任边界语义，作为用户可见收口最后落地。
 
 #### C1：Rubric 协议与 RubricStore
 
@@ -1040,13 +1051,17 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 - 推进侧上下文是否复用现有注意力窗口规则。
 - 全链路是否满足本文不变量。
 
-#### C10：推进侧第一级独立取证（已实现，待提交）
+#### C10：推进侧第一级独立取证
+
+落地提交：
+
+- `596b2d1` `feat(advancement): land wave-1 closure of the advancement loop`
 
 内容：
 
 - 实现第一级取证 evidenceProvider（按 §6「第一级取证施工语义」）：file-diff = git 工作区变更只读读取（非 git / git 不可用则该 kind 不进能力集）；log / artifact 按契约 `locator.paths` 定位读取；产出 `source:"independent"` 证据；生产装配注入，替换空壳默认 provider。
 - `EvidenceRequirementSpec` 扩展可选结构化 `locator`（第一级仅 paths）：草案生成填写、确认面可见可改；file-diff 无 locator 时以工作区全量变更 + 执行侧本轮触碰路径投影兜底；log / artifact 无可执行 locator 不得标 required。
-- 取证能力集：类型住 core、运行时探测住 orchestrator（git 可用性 / workspace 形态），经装配传入草案生成输入——`required:true` 只能落在能力集内的 kind；能力集外的证据要求可写入契约但不构成 passed 硬门槛（§6 裁决）。**连带修正 core 侧 required 缺省**：`contract.ts:486` 缺省 true 与 `:171` matched 硬编码 true 改为按能力集约束（当前生效面与 §6 声明相反、死锁真实可触发）。
+- 取证能力集：类型住 core、运行时探测住 orchestrator（git 可用性 / workspace 形态），经装配传入草案生成输入——`required:true` 只能落在能力集内的 kind；能力集外的证据要求可写入契约但不构成 passed 硬门槛（§6 裁决）。core 侧 required 缺省与 matched 路径已随 C10 改为按能力集约束，避免 required 死锁。
 - 能力缺口退出语义：required 客观证据无法独立核验时走退出请用户裁决（exitReason 新增 `capability-gap`），不进入无效 failed 循环。
 - 取证路径安全：locator 路径 realpath 归一 + workspace 边界校验（复用 PathGuard），越界按证据缺失处理、不抛权限确认。
 - 第二级验证性执行（独立重跑测试/构建，经权限管线）本单元不做，只保证接口不堵。
@@ -1057,7 +1072,11 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 - 不变量 13 自此生效：推进侧对客观信号任务真正独立核验，不再依赖执行侧自述。
 - 取证严格只读、零写副作用；证据与 requirement 的绑定不可伪造（沿既有裁判校验）；symlink / 越界路径不可逃逸 workspace（权限模块 S1 同款教训）。
 
-#### C11：CLI 推进运行期投影与 awaiting 恢复呈现（收口单元，未实施）
+#### C11：CLI 推进运行期投影与 awaiting 恢复呈现
+
+落地提交：
+
+- `a58eef2` `feat(advancement): present advancement progress in CLI`
 
 内容：
 
@@ -1074,7 +1093,11 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 - 渲染只消费既有 wire 事实（RunRecord 元数据 + control 事件），不新增宿主侧状态。
 - 不违反选择模块与渲染层的既有通用性边界。
 
-#### C12：准入会话投影与延迟观测（已实现，待提交）
+#### C12：准入会话投影与延迟观测
+
+落地提交：
+
+- `596b2d1` `feat(advancement): land wave-1 closure of the advancement loop`
 
 内容：
 
@@ -1087,7 +1110,11 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 - 判断仍为纯控制面：不写主线、不产 RunRecord。
 - 延迟代价有观测数据支撑后续校准决策，不预建快速通道机制。
 
-#### C13：advancement 持久化退役（已实现，待提交）
+#### C13：advancement 持久化退役
+
+落地提交：
+
+- `596b2d1` `feat(advancement): land wave-1 closure of the advancement loop`
 
 内容：
 
@@ -1100,7 +1127,11 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 - sweep 幂等、单点失败跳过、只删整目录不重写日志。
 - 与 transcript GC 的分层模式一致：算法住持久层，调度层只是触发壳。
 
-#### C14：闭环信息结构（已实现，待提交）
+#### C14：闭环信息结构
+
+落地提交：
+
+- `596b2d1` `feat(advancement): land wave-1 closure of the advancement loop`
 
 内容：
 
@@ -1116,20 +1147,28 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 - 判断分歧场景端到端：执行侧自认已过 + 裁判独立证据相反 → 归因块使下一轮针对性修复，不打转。
 - failureHandling 意图骨架仍是用户确认内容，归因不改写推进意图。
 
-#### C15：Rubric 场景化生成与沉淀治理（已实现——生成契约半边；近邻交互半边随 C11）
+#### C15：Rubric 场景化生成
+
+落地提交：
+
+- `596b2d1` `feat(advancement): land wave-1 closure of the advancement loop`
 
 内容：
 
 - 草案生成契约修订：passCriteria / failureHandling 写场景可复用标准，任务细节归事实变量与证据要求——消除「贴合当前任务」与协议「表达场景」的自相矛盾（§5.2 裁决）。
-- 沉淀治理：保存前近邻检测，高相似提示复用 / 修订已有条目而非另存新条。
+- 沉淀治理的机制面：草案携带参考候选及评分（candidateRubricIds / candidateRubrics.matchScore），交互面归 C18。
 
 审查重点：
 
 - 生成草案的场景泛化性有专项用例（同场景两个不同任务应命中同一 Rubric）。
 - 确认即沉淀的需求语义保留，沉淀物是场景资产而非任务快照（不变量 17）。
-- 近邻治理不阻断用户显式另存的意愿。
+- 生成输出不把单次任务细节写死进可复用标准。
 
-#### C16：裁判韧性与恢复自愈（已实现，待提交）
+#### C16：裁判韧性与恢复自愈
+
+落地提交：
+
+- `1f2dfd1` `feat(advancement): land wave-2 judge resilience and closure delivery`
 
 内容：
 
@@ -1143,7 +1182,11 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 - 重建代理消息的 **content** 与原始纯函数产物 byte 等价（模板 + 变量 + 归因渲染全部确定性，归因取自已持久化 review）；`createdAt` 不在等价范围（原始时钟不可知），但 **id 恒复用 `review.proxyMessageId`**——否则重建后「proxyMessageId 缺失于 proxyMessages」谓词依然为真，下次扫描再次命中造成循环重建。
 - 恢复矩阵每一行有对应测试，无隐式中间态。
 
-#### C17：收场交付与契约再生（已实现，待提交；CLI 收场呈现随 C11）
+#### C17：收场交付与契约再生
+
+落地提交：
+
+- `1f2dfd1` `feat(advancement): land wave-2 judge resilience and closure delivery`
 
 内容：
 
@@ -1161,3 +1204,16 @@ Rubric 是与 Skill / Rule 同级的一等资产。第一版 Store 采用与 Ski
 - 再生语义仍是「退出 + 新不可变快照」，无中途可变契约。
 - 死胡同判断不依赖推进侧窗口的自然语言记忆；CLI 收场呈现随 C11 验收。
 
+#### C18：Rubric 近邻沉淀治理交互
+
+内容：
+
+- generated 草案存在达到近邻阈值的候选时，确认面默认提示「更新已有并开始」，并保留「另存新准则」选项。
+- 用户选择更新已有时，confirm 请求携带沉淀选择；core 使用草案内容修订候选 Rubric：own 直接更新，linked 通过 own 覆盖层承接用户修订，不改外部 linked 源。
+- 用户选择另存时，仍按新 Rubric 入库，不阻断显式另存意愿。
+
+审查重点：
+
+- 选择模块保持领域无关：只使用普通 option / input / confirm 能力，不新增 Rubric 专属协议。
+- 近邻治理复用既有 `rankRubrics` 评分，只对达到近邻阈值的候选默认优先修订已有条目，避免库被一次性条目污染。
+- 确认后的 Rubric 快照仍不可变；修订影响的是未来复用资产，不改变已确认推进会话的契约快照。
