@@ -36,4 +36,5 @@ export * from "./server.js";
 export * from "./channels/index.js";
 export * from "./confirmation/index.js";
 export * from "./advancement/index.js";
+export * from "./perspectives/index.js";
 export * from "./intent/index.js";

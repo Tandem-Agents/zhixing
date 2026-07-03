@@ -97,6 +97,10 @@ describe("写入与 runIndex", () => {
         reviewId: "review-1",
         rubricFailureHandlingId: "fix-tests",
       },
+      perspectives: {
+        definitionId: "multi-perspective-deliberation",
+        perspectiveCount: 3,
+      },
     });
 
     const got = await collect(store, "c3");
@@ -116,8 +120,15 @@ describe("写入与 runIndex", () => {
       reviewId: "review-1",
       rubricFailureHandlingId: "fix-tests",
     });
+    expect(run.type === "run" && run.perspectives).toEqual({
+      definitionId: "multi-perspective-deliberation",
+      perspectiveCount: 3,
+    });
     expect(run.type === "run" && run.messages[0]).not.toHaveProperty(
       "advancement",
+    );
+    expect(run.type === "run" && run.messages[0]).not.toHaveProperty(
+      "perspectives",
     );
   });
 

@@ -18,6 +18,12 @@ export interface RunRecordAdvancementMetadata {
   readonly rubricFailureHandlingId?: string;
 }
 
+/** 多视角评议 run 的来源元数据；属于 run record，不进入协议消息。 */
+export interface RunRecordPerspectivesMetadata {
+  readonly definitionId: string;
+  readonly perspectiveCount: number;
+}
+
 // ─── 工具调用的派生表示 ───
 
 /**

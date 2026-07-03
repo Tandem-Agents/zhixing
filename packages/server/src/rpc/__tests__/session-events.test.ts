@@ -58,6 +58,37 @@ describe("createRunEventForwarder", () => {
     dispose();
   });
 
+  it("编排事件上 wire，供接入面投影评议进度", () => {
+    const bus = makeBus();
+    const { out, forwarder } = collectEnvelopes();
+    const dispose = forwarder({ bus, conversationId: "c1", turnContext: TURN_CONTEXT });
+
+    bus.emit("orchestration:run_start", {
+      runId: "orch-1",
+      definitionId: "multi-perspective-deliberation",
+      nodeCount: 7,
+      maxParallel: 3,
+    });
+    bus.emit("orchestration:node_end", {
+      runId: "orch-1",
+      definitionId: "multi-perspective-deliberation",
+      nodeId: "converge",
+      status: "completed",
+      durationMs: 120,
+    });
+
+    expect(out.map((event) => event.event)).toEqual([
+      "orchestration:run_start",
+      "orchestration:node_end",
+    ]);
+    expect(out[0]!.payload).toMatchObject({
+      definitionId: "multi-perspective-deliberation",
+      nodeCount: 7,
+    });
+    expect(out[1]!.seq).toBe(1);
+    dispose();
+  });
+
   it("白名单外事件不上 wire(llm:stream_event / tool:call_start / workmode 意图)", () => {
     const bus = makeBus();
     const { out, forwarder } = collectEnvelopes();

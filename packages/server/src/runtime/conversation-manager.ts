@@ -229,6 +229,7 @@ export interface PendingTask {
   source?: TurnSource;
   execute: () => Promise<void>;
   cancel: () => void;
+  abort?: (reason?: AbortReason) => boolean;
 }
 
 type ConversationExists = () => Promise<boolean>;
@@ -285,6 +286,7 @@ export class ConversationManager {
   private readonly creating = new Map<string, Promise<ManagedSession>>();
   private readonly graceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly pendingQueues = new Map<string, PendingTask[]>();
+  private readonly activeTasks = new Map<string, PendingTask>();
   /**
    * 正在执行删除终结的 conversationId。
    *
@@ -548,6 +550,7 @@ export class ConversationManager {
     if (connectionId) this.addObserver(managed.conversationId, connectionId);
     if (status === "immediate") {
       this.setBusy(managed.conversationId, true, task.source);
+      this.activeTasks.set(managed.conversationId, task);
     }
 
     return {
@@ -723,6 +726,7 @@ export class ConversationManager {
       session.lastActiveAt = new Date().toISOString();
       this.clearGraceTimer(conversationId);
     } else {
+      this.activeTasks.delete(conversationId);
       session.busySource = undefined;
       const queue = this.pendingQueues.get(conversationId);
       if (queue && queue.length > 0) {
@@ -754,7 +758,9 @@ export class ConversationManager {
   abortInFlight(conversationId: string, reason?: AbortReason): boolean {
     const session = this.sessions.get(conversationId);
     if (!session) return false;
-    return session.runtime.abort(reason);
+    const runtimeAborted = session.runtime.abort(reason);
+    const taskAborted = this.abortActiveTask(conversationId, reason);
+    return runtimeAborted || taskAborted;
   }
 
   /**
@@ -770,7 +776,9 @@ export class ConversationManager {
     const session = this.sessions.get(conversationId);
     if (!session) return { abortedInFlight: false, cancelledPending: 0 };
 
-    const abortedInFlight = session.runtime.abort(reason);
+    const runtimeAborted = session.runtime.abort(reason);
+    const taskAborted = this.abortActiveTask(conversationId, reason);
+    const abortedInFlight = runtimeAborted || taskAborted;
 
     // pending task 在用户主动 cancel 场景下应该被清理 —— 否则用户发"取消"后,
     // 后续 dequeue 仍会跑这些 pending,与"我让 agent 停"语义违背。
@@ -806,7 +814,9 @@ export class ConversationManager {
   abortAll(reason: AbortReason): number {
     let aborted = 0;
     for (const [id, session] of this.sessions) {
-      if (session.runtime.abort(reason)) aborted++;
+      const runtimeAborted = session.runtime.abort(reason);
+      const taskAborted = this.abortActiveTask(id, reason);
+      if (runtimeAborted || taskAborted) aborted++;
       const queue = this.pendingQueues.get(id);
       if (queue) {
         for (const task of queue) {
@@ -1486,9 +1496,20 @@ export class ConversationManager {
 
     session.busy = true;
     session.busySource = task.source;
+    this.activeTasks.set(conversationId, task);
     session.lastActiveAt = new Date().toISOString();
     this.clearGraceTimer(conversationId);
     void task.execute();
+  }
+
+  private abortActiveTask(conversationId: string, reason?: AbortReason): boolean {
+    const active = this.activeTasks.get(conversationId);
+    if (!active?.abort) return false;
+    try {
+      return active.abort(reason);
+    } catch {
+      return false;
+    }
   }
 
   private clearPendingQueue(conversationId: string): void {

@@ -1,5 +1,6 @@
 export type {
   RunRecordAdvancementMetadata,
+  RunRecordPerspectivesMetadata,
   ToolCallRecord,
   TurnSource,
 } from "./types.js";

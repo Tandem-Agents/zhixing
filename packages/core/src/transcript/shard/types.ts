@@ -8,7 +8,11 @@
 
 import type { Message } from "../../types/messages.js";
 import type { TokenUsage } from "../../types/llm.js";
-import type { RunRecordAdvancementMetadata, TurnSource } from "../types.js";
+import type {
+  RunRecordAdvancementMetadata,
+  RunRecordPerspectivesMetadata,
+  TurnSource,
+} from "../types.js";
 
 // ─── 分片索引 ───
 
@@ -69,6 +73,7 @@ export interface RunRecord {
   usage?: TokenUsage;
   source?: TurnSource;
   advancement?: RunRecordAdvancementMetadata;
+  perspectives?: RunRecordPerspectivesMetadata;
 }
 
 /**
@@ -92,6 +97,7 @@ export interface RunRecordInput {
   usage?: TokenUsage;
   source?: TurnSource;
   advancement?: RunRecordAdvancementMetadata;
+  perspectives?: RunRecordPerspectivesMetadata;
 }
 
 /** appendRunRecord 的结果 —— 供调用方做派生缓存的覆盖锚点等 */

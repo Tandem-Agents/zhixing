@@ -140,6 +140,12 @@ const UI_EVENT_PROJECTION: { [K in keyof AgentEventMap]?: Projector<K> } = {
   // 生命周期钩子提示
   "lifecycle:hook_failed": (p) => p,
   "lifecycle:prompt_rebuilt": (p) => p,
+
+  "orchestration:validation_failed": (p) => p,
+  "orchestration:run_start": (p) => p,
+  "orchestration:node_start": (p) => p,
+  "orchestration:node_end": (p) => p,
+  "orchestration:run_end": (p) => p,
 };
 
 // ─── 转发装饰器 ───
