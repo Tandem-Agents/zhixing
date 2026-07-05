@@ -4,9 +4,9 @@
  * 锁住的语义:
  *   - run_start 建立投影并调用装饰钩子(conversationId / turnContext 还原)
  *   - 事件重放透传信封 lineage(渲染层区分子 agent 帧的依据)
- *   - run_end 派发后拆除(装饰 dispose 被调);孤立 run_end 丢弃
+ *   - run 事件帧只派发，发端 closed 帧负责拆除投影;孤立 agent:run_end 丢弃
  *   - 中途加入(错过 run_start)从当前帧隐式建立投影
- *   - 同会话新 runId 拆旧建新(run_end 丢失的兜底回收)
+ *   - 同会话新 runId 拆旧建新(closed 帧丢失的兜底回收)
  *   - seq 单调守卫、filter 过滤、多对话隔离、dispose 全清
  */
 
@@ -28,6 +28,17 @@ function envelope(
     meta: {},
     ...overrides,
   };
+}
+
+function closedEnvelope(
+  overrides: Partial<SessionEventEnvelope> & { seq: number },
+): SessionEventEnvelope {
+  return envelope({
+    event: "run:closed",
+    payload: null,
+    lifecycle: "closed",
+    ...overrides,
+  });
 }
 
 /** 装饰 spy:记录每次建立的 ctx,并在投影 bus 上挂一个收集 listener */
@@ -110,14 +121,15 @@ describe("RpcEventBus · per-run 投影生命周期", () => {
     });
   });
 
-  it("run_end 派发后拆除投影;下一 run 重新建立", () => {
+  it("agent:run_end 只作为普通事件派发,closed 帧才拆除投影;下一 run 重新建立", () => {
     const { spy, feed } = makeBus();
 
     feed(envelope({ seq: 0, event: "agent:run_start" }));
     feed(envelope({ seq: 1, event: "agent:run_end", payload: { reason: "completed" } }));
+    expect(spy.disposes[0]).not.toHaveBeenCalled();
+    feed(closedEnvelope({ seq: 2 }));
 
     expect(spy.disposes[0]).toHaveBeenCalledTimes(1);
-    // run_end 自身先送达订阅者,再拆除
     expect(spy.received.map((r) => r.event)).toEqual([
       "agent:run_start",
       "agent:run_end",
@@ -149,16 +161,17 @@ describe("RpcEventBus · per-run 投影生命周期", () => {
     ]);
   });
 
-  it("孤立 run_end(无投影在场)丢弃——不建立、不派发", () => {
+  it("孤立 agent:run_end / closed(无投影在场)丢弃——不建立、不派发", () => {
     const { spy, feed } = makeBus();
 
     feed(envelope({ seq: 9, event: "agent:run_end" }));
+    feed(closedEnvelope({ seq: 10 }));
 
     expect(spy.contexts).toHaveLength(0);
     expect(spy.received).toEqual([]);
   });
 
-  it("同会话新 runId 帧到达:拆旧建新(run_end 丢失的兜底回收)", () => {
+  it("同会话新 runId 帧到达:拆旧建新(closed 帧丢失的兜底回收)", () => {
     const { spy, feed } = makeBus();
 
     feed(envelope({ seq: 0, event: "agent:run_start", runId: "run-1" }));
@@ -215,7 +228,7 @@ describe("RpcEventBus · per-run 投影生命周期", () => {
 
     feed(envelope({ seq: 0, event: "agent:run_start", conversationId: "conv-a", runId: "ra" }));
     feed(envelope({ seq: 0, event: "agent:run_start", conversationId: "conv-b", runId: "rb" }));
-    feed(envelope({ seq: 1, event: "agent:run_end", conversationId: "conv-a", runId: "ra" }));
+    feed(closedEnvelope({ seq: 1, conversationId: "conv-a", runId: "ra" }));
 
     expect(spy.contexts.map((c) => c.conversationId)).toEqual(["conv-a", "conv-b"]);
     expect(spy.disposes[0]).toHaveBeenCalledTimes(1);
@@ -237,15 +250,15 @@ describe("RpcEventBus · per-run 投影生命周期", () => {
     expect(spy.received.map((r) => r.event)).toEqual(["agent:run_start"]);
   });
 
-  it("run_end 帧对同帧的 on 与 onAny 订阅者全部可达——分发完成先于投影拆除(回归锚)", () => {
+  it("agent:run_end 帧对同帧的 on 与 onAny 订阅者全部可达", () => {
     const fake = makeFakeHostLink();
     const onHits: string[] = [];
     const anyHits: string[] = [];
     new RpcEventBus({
       link: fake.link,
       decorate: (ctx) => {
-        // on + onAny 双订阅:原 async 逐个 await 的分发会在 on listener 后
-        // yield,teardown 清表导致 onAny 丢 run_end——此形态必须锁住
+        // on + onAny 双订阅:异步逐个 await 的分发会在 on listener 后
+        // yield,若分发中途发生退订 / 清表，onAny 可能丢失本帧。
         ctx.bus.on("agent:run_end", () => {
           onHits.push("run_end");
         });
@@ -262,6 +275,70 @@ describe("RpcEventBus · per-run 投影生命周期", () => {
 
     expect(onHits).toEqual(["run_end"]);
     expect(anyHits).toEqual(["agent:run_start", "agent:run_end"]);
+  });
+
+  it("嵌套子 agent 的 agent:run_end 不会拆掉编排投影,编排结束事件仍可达", () => {
+    const { spy, feed } = makeBus();
+
+    feed(
+      envelope({
+        seq: 0,
+        event: "orchestration:run_start",
+        payload: {
+          runId: "orch-1",
+          definitionId: "multi-perspective-deliberation",
+          nodeCount: 7,
+          maxParallel: 3,
+        },
+        meta: { lineage: "main/orch-orch-1" },
+      }),
+    );
+    feed(
+      envelope({
+        seq: 1,
+        event: "agent:run_end",
+        payload: { reason: "completed" },
+        meta: { lineage: "main/orch-orch-1/node-diverge-1/sub-a3f" },
+      }),
+    );
+    feed(
+      envelope({
+        seq: 2,
+        event: "orchestration:node_start",
+        payload: {
+          runId: "orch-1",
+          definitionId: "multi-perspective-deliberation",
+          nodeId: "cross-1",
+          nodeKind: "agent",
+        },
+        meta: { lineage: "main/orch-orch-1" },
+      }),
+    );
+    feed(
+      envelope({
+        seq: 3,
+        event: "orchestration:run_end",
+        payload: {
+          runId: "orch-1",
+          definitionId: "multi-perspective-deliberation",
+          status: "completed",
+          durationMs: 120,
+        },
+        meta: { lineage: "main/orch-orch-1" },
+      }),
+    );
+
+    expect(spy.contexts).toHaveLength(1);
+    expect(spy.disposes[0]).not.toHaveBeenCalled();
+    expect(spy.received.map((r) => r.event)).toEqual([
+      "orchestration:run_start",
+      "agent:run_end",
+      "orchestration:node_start",
+      "orchestration:run_end",
+    ]);
+
+    feed(closedEnvelope({ seq: 4 }));
+    expect(spy.disposes[0]).toHaveBeenCalledTimes(1);
   });
 
   it("订阅者抛错被隔离并上报,不打断后续分发", () => {

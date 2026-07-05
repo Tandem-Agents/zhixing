@@ -5,14 +5,14 @@
  * 本适配器把信封还原为渲染层所需的 bus 形接口(IEventBus<AgentEventMap>),
  * createRenderSubscribers / status-bar 订阅零改:
  *
- * - 以 agent:run_start / agent:run_end 为边界建立 / 拆除 per-run 投影 bus,
+ * - 以 run 事件帧建立 per-run 投影 bus，以发端 dispose 的关闭帧拆除，
  *   建立时调用注入的装饰钩子(与本地 runtime 的 decorateRunBus 同形)挂渲染
  *   订阅,拆除时 dispose——per-run 装饰生命周期与本地路径完全同构;
  * - 中途加入(turn 进行中订阅,错过 run_start)从当前帧起隐式建立投影;
- *   孤立 run_end(无投影在场)直接丢弃——本端没看过该 run 的任何帧;
+ *   孤立 agent:run_end(无投影在场)直接丢弃——本端没看过该 run 的任何帧;
  * - meta.lineage 从信封透传(渲染层区分子 agent 帧依赖它),不取本地身份;
  * - 同一对话同时至多一个 run(宿主唯一串行点保证)——投影按 conversationId
- *   单槽索引,新 runId 帧到达即拆旧建新(run_end 丢失时的兜底回收);
+ *   单槽索引,新 runId 帧到达即拆旧建新(closed 帧丢失时的兜底回收);
  * - seq 单调守卫:重复 / 乱序帧丢弃(协议级防御,WS 单连接内本就有序)。
  * 非 run 控制面事件(如 advancement:*) 由对应控制面监听器消费,发端以
  * scope 标记归属；本适配器只还原 scope=run 的信封。
@@ -34,7 +34,7 @@ import type { DecorateRunBusFn } from "@zhixing/orchestrator";
 import { SESSION_NOTIFICATIONS, type SessionEventEnvelope } from "@zhixing/server";
 import type { CoreHostLink } from "./core-host-connection.js";
 
-const RUN_END_EVENT = "agent:run_end";
+const AGENT_RUN_END_EVENT = "agent:run_end";
 
 export interface RpcEventBusOptions {
   /** 进程级共享的核心宿主连接。 */
@@ -78,22 +78,26 @@ export class RpcEventBus {
     if (this.opts.filter && !this.opts.filter(envelope)) return;
 
     const current = this.projections.get(envelope.conversationId);
+    if (envelope.lifecycle === "closed") {
+      if (!current || current.runId !== envelope.runId) return;
+      if (envelope.seq <= current.lastSeq) return;
+      current.lastSeq = envelope.seq;
+      this.teardown(envelope.conversationId);
+      return;
+    }
 
     if (current && current.runId === envelope.runId) {
       if (envelope.seq <= current.lastSeq) return;
       current.lastSeq = envelope.seq;
       this.dispatchTo(current, envelope);
-      if (envelope.event === RUN_END_EVENT) {
-        this.teardown(envelope.conversationId);
-      }
       return;
     }
 
     // 新 runId 的帧:同会话串行,新 run 出现即旧 run 已结束——拆旧建新
     if (current) this.teardown(envelope.conversationId);
 
-    // 孤立 run_end(本端无投影在场):没看过该 run 的任何帧,建了即拆无意义
-    if (envelope.event === RUN_END_EVENT) return;
+    // 孤立 agent:run_end(本端无投影在场):没看过该 run 的任何帧,建了即拆无意义
+    if (envelope.event === AGENT_RUN_END_EVENT) return;
 
     const entry = this.establish(envelope);
     this.projections.set(envelope.conversationId, entry);
@@ -238,9 +242,9 @@ class ProjectionBus implements IEventBus<AgentEventMap> {
   /**
    * wire 重放入口——meta 取信封透传的 lineage,非本地 bus 身份。
    *
-   * 同步分发(对齐 core EventBus 的 emitSync 语义):重放源不可等待,且
-   * run_end 帧的分发必须先于投影拆除完成——逐个 await 会 yield 出同步段,
-   * 让 teardown 的 removeAllListeners 插进分发中间(后续订阅者丢帧)。
+   * 同步分发(对齐 core EventBus 的 emitSync 语义):重放源不可等待,且同一帧
+   * 必须对已快照的 on / onAny 订阅者全部可达。逐个 await 会 yield 出同步段,
+   * 让 listener 自身的退订或未来清理动作插进分发中间,导致后续订阅者丢帧。
    */
   dispatchWire(event: string, payload: unknown, meta: EventMeta): void {
     this.dispatchSync(event, payload, meta);

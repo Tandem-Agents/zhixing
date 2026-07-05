@@ -36,16 +36,19 @@ export interface RunEventSource {
 // ─── wire 信封 ───
 
 export type SessionEventScope = "run" | "control";
+export type SessionEventLifecycle = "event" | "closed";
 
 export interface SessionEventEnvelope {
   conversationId: string;
   /** 事件归属域。发端负责标记，接入面按此分流，避免各端重复维护事件分类。 */
   scope: SessionEventScope;
+  /** run 投影生命周期。缺省为 event，closed 只用于接入面释放 per-run 投影。 */
+  lifecycle?: SessionEventLifecycle;
   /** 本 run 的标识——取 turn 上下文的 turnId;缺省(无 turn 语境)时为空串 */
   runId: string;
   /** run 内单调递增——接收端跨连接重建顺序 / 去重用 */
   seq: number;
-  /** AgentEventMap 的事件名 */
+  /** AgentEventMap 的事件名；closed 帧使用保留值，不派发给渲染订阅者。 */
   event: string;
   payload: unknown;
   meta: {
@@ -96,8 +99,8 @@ type Projector<K extends keyof AgentEventMap> = (
  * 值为 payload 裁剪函数(恒等 = 小 payload 全量)。
  */
 const UI_EVENT_PROJECTION: { [K in keyof AgentEventMap]?: Projector<K> } = {
-  // run 边界——接入面据此建立 / 拆除 per-run 投影 bus;run_start 的 prompt
-  // 同时是旁观端的 user 消息来源
+  // agent loop 展示事件。投影生命周期由显式 closed 帧收束，不能用
+  // agent:run_end 推断，否则嵌套子 agent 结束会误拆父 run 投影。
   "agent:run_start": (p) => p,
   "agent:run_end": (p) => p,
 
@@ -155,7 +158,7 @@ const UI_EVENT_PROJECTION: { [K in keyof AgentEventMap]?: Projector<K> } = {
  * 钩子的转发实现,与本地渲染装饰器在装配处组合。
  *
  * per-run 一次装饰:按投影表订阅,事件到达即裁剪、装信封、组播;dispose
- * 随 run 结束解除全部订阅,杜绝 listener 跨 run 累积。
+ * 随 run 结束解除全部订阅并发出关闭帧，杜绝 listener 跨 run 累积。
  */
 export function createRunEventForwarder(
   broadcast: SessionEventBroadcast,
@@ -167,6 +170,7 @@ export function createRunEventForwarder(
     const runId = turnContext?.turnId ?? "";
     const turnOrigin = turnContext?.turnOrigin;
     let seq = 0;
+    let disposed = false;
 
     const unsubs = (
       Object.entries(UI_EVENT_PROJECTION) as Array<
@@ -187,7 +191,19 @@ export function createRunEventForwarder(
     );
 
     return () => {
+      if (disposed) return;
+      disposed = true;
       for (const unsub of unsubs) unsub();
+      broadcast(conversationId, {
+        conversationId,
+        scope: "run",
+        lifecycle: "closed",
+        runId,
+        seq: seq++,
+        event: "run:closed",
+        payload: null,
+        meta: { lineage: bus.lineage, turnOrigin },
+      });
     };
   };
 }

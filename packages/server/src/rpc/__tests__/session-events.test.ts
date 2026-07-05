@@ -3,7 +3,7 @@
  *
  * forwarder:UI 订阅集白名单(集外事件不上 wire)、大 payload 裁剪
  * (llm:request_start 摘要、segment:new_started 去 windowCompact)、
- * seq 单调、meta 携 lineage / turnOrigin、无对话身份 no-op、dispose 解除订阅。
+ * seq 单调、meta 携 lineage / turnOrigin、无对话身份 no-op、dispose 解除订阅并发出关闭帧。
  *
  * broadcast:observer 内容组播按名册过滤连接;activity 工作台提示排除当前 observer。
  */
@@ -131,7 +131,7 @@ describe("createRunEventForwarder", () => {
     });
   });
 
-  it("无对话身份(ephemeral / 测试裸跑)不转发;dispose 解除订阅", () => {
+  it("无对话身份(ephemeral / 测试裸跑)不转发;dispose 解除订阅并发出关闭帧", () => {
     const bus = makeBus();
     const { out, forwarder } = collectEnvelopes();
 
@@ -144,8 +144,20 @@ describe("createRunEventForwarder", () => {
     bus.emit("retry:attempt", { attempt: 1 } as never);
     expect(out).toHaveLength(1);
     dispose();
+    expect(out[out.length - 1]).toMatchObject({
+      conversationId: "c1",
+      scope: "run",
+      lifecycle: "closed",
+      event: "run:closed",
+      payload: null,
+      meta: { lineage: "main" },
+    });
+    dispose();
     bus.emit("retry:attempt", { attempt: 2 } as never);
-    expect(out).toHaveLength(1); // dispose 后不再转发
+    expect(out.map((event) => event.event)).toEqual([
+      "retry:attempt",
+      "run:closed",
+    ]);
   });
 
   it("子 agent 冒泡事件保留子 lineage——渲染层区分主/子帧的依据", () => {
