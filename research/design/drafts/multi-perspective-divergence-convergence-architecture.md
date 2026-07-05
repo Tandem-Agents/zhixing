@@ -159,7 +159,7 @@ interface PerspectiveAllocation {
 ```
 
 - 分配 strategy 输出经强 schema 校验（与推进准入/草案生成同构：LLM 单发 + 结构化输出，禁止宽松解析）。
-- 数量三层强制：分配 prompt 声明「默认 3、上限 5」并内置场景示例（思考需求、审查代码各有哪些视角）；门面装配 clamp 到 5；实例化后节点总数仍受 `caps.maxNodes` 校验。用户在问题里要 7 个，系统按 5 处理。
+- 数量契约：分配 prompt 声明「默认优先 3、至少 2、上限 5」并内置场景示例（思考需求、审查代码各有哪些视角）；默认 3 是分配引导，不是硬性等于 3；门面装配 clamp 到 5，低于 2 视为分配失败；实例化后节点总数仍受 `caps.maxNodes` 校验。用户在问题里要 7 个，系统按 5 处理。
 - 分配调用用 main 档：分配质量决定整场评议质量，单次调用成本相对全流程可忽略。
 
 #### 4.3 档位序列（门面装配逻辑，不进基础设施）
@@ -198,7 +198,7 @@ interface RunRecord {
 #### 5.2 执行（PendingTask.execute 闭包内，全程瞬时）
 
 1. **快照**：从 managed 会话活窗口 `snapshotAttentionWindowV1` 捕获一次只读快照，策略 `tail`（有界尾部；评议不该因窗口超限而失败），上限走 caps。串行点捕获，窗口稳定。
-2. **分配**：AllocationStrategy 以问题正文 + 快照尾部投影为输入，产出视角列表；clamp 上限 5，默认引导 3。
+2. **分配**：AllocationStrategy 以问题正文 + 快照尾部投影为输入，产出视角列表；默认引导 3，合法范围 2 到 5，超过上限 clamp 到 5，低于 2 归为分配失败。
 3. **装配**：视角列表 + 档位序列 + 问题正文 → 模板参数 → `instantiateTrustedOrchestrationTemplateV1`（数组展开在此发生）→ 全量校验 → executable。
 4. **编排执行**：`runOrchestrationV1`。拓扑固化在内置编排文档里：
    - 第一轮 N 个发散节点：同一快照 + 问题正文 + 各自视角 charge，独立产出（互不可见）。
@@ -280,7 +280,7 @@ interface RunRecord {
 - `@` 解析：行首 / 行中空格规则、无正文不触发、`email@x.com` 不误伤、剥离正文正确；与既有 `@` 语义共存——`@file:path` / `@名称` 不误触发并发，同一消息内 `@file:` 引用照常解析。
 - 模板数组展开：N=3/5 展开正确、id 唯一、组依赖替换、超 maxNodes 拒绝、`{{item.*}}` 作用域、非数组参数拒绝。
 - modelRole：schema 校验、缺省回落 executor 级、executor 按 role 选实例。
-- 分配：强 schema 校验、超 5 clamp、失败结构化不执行编排。
+- 分配：强 schema 校验、默认 3 的 prompt 引导、低于 2 失败、超 5 clamp、失败结构化不执行编排。
 - 端到端（执行器可替身）：一问一答落盘、messages[0] 恒用户原文、中间产物零持久化、usage 汇总、perspectives 元数据透传、abort 级联后主线零残留、fail-fast 后不落盘。
 - 快照：三层节点共享同一份、tail 标记、快照进 backgroundMessages 不进 system prompt（基础设施既有锚，消费侧回归）。
 - 推进闭环交互：engage 输入不过准入分类；active 推进会话下多视角 turn 照常进验收。
@@ -293,7 +293,7 @@ interface RunRecord {
 3. 中间过程零持久化；落盘只有用户原文与最终版本一问一答，messages[0] 恒为用户原文。
 4. 编排恒经内置编排文档模板实例化 + 全量校验管线；不得代码内联 definition 绕过校验。
 5. 基础设施增强恒为通用语义，不出现多视角业务字面量；基础设施不为本需求定制耦合。
-6. 视角数默认 3、上限 5，提示词声明 + 装配 clamp + caps 校验三层强制。
+6. 视角数默认引导 3，机制合法范围 2 到 5；提示词声明默认与边界，装配负责低于 2 失败和超 5 clamp，caps 校验兜底节点总量。
 7. 快照一次捕获、全场共享、只读；子 agent system prompt byte-equal。
 8. 主线 cache 前缀不受多视角流程影响。
 9. 失败与中止不落盘半成品。

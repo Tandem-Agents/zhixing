@@ -7,6 +7,7 @@ import type {
 } from "./types.js";
 
 export const DEFAULT_PERSPECTIVE_COUNT = 3;
+export const MIN_PERSPECTIVE_COUNT = 2;
 export const MAX_PERSPECTIVE_COUNT = 5;
 const MAX_NAME_CHARS = 40;
 const MAX_CHARGE_CHARS = 400;
@@ -100,8 +101,10 @@ export function parsePerspectiveAllocationText(text: string): {
 }
 
 function assertPerspectiveSpecs(items: readonly PerspectiveSpec[]): void {
-  if (items.length < 1) {
-    throw new Error("at least one perspective is required.");
+  if (items.length < MIN_PERSPECTIVE_COUNT) {
+    throw new Error(
+      `at least ${MIN_PERSPECTIVE_COUNT} perspectives are required.`,
+    );
   }
   for (const [index, item] of items.entries()) {
     if (item.name.trim().length === 0) {
@@ -126,7 +129,7 @@ function assertPerspectiveSpecs(items: readonly PerspectiveSpec[]): void {
 function buildAllocationPrompt(input: PerspectiveAllocationInput): string {
   const sections = [
     "你是多视角评议的分配节点。请基于用户问题选择最有价值的评议视角。",
-    `默认给出 ${input.defaultPerspectiveCount} 个视角；用户明确要求更多时最多给出 ${input.maxPerspectiveCount} 个，超过上限也只输出 ${input.maxPerspectiveCount} 个。`,
+    `默认优先给出 ${input.defaultPerspectiveCount} 个视角；用户明确要求更少时至少给出 ${MIN_PERSPECTIVE_COUNT} 个；用户明确要求更多时最多给出 ${input.maxPerspectiveCount} 个，超过上限也只输出 ${input.maxPerspectiveCount} 个。`,
     "常见参考：需求思考可包含产品本质、用户体验、架构演进、风险边界；代码审查可包含正确性、集成性、可维护性、测试覆盖、安全边界。",
     "只输出 JSON，不要 markdown，不要解释。",
     'JSON 形态：{"perspectives":[{"name":"视角名","charge":"该视角本轮要负责判断什么"}]}',

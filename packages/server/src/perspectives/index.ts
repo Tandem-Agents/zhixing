@@ -2,6 +2,7 @@ export {
   DEFAULT_PERSPECTIVE_COUNT,
   LlmPerspectiveAllocationStrategy,
   MAX_PERSPECTIVE_COUNT,
+  MIN_PERSPECTIVE_COUNT,
   normalizePerspectiveAllocation,
   parsePerspectiveAllocationText,
   type PerspectiveAllocationTextCall,
