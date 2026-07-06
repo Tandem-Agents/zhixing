@@ -18,7 +18,7 @@ export interface WorkScene {
   name: string;
   /**
    * 工作目录 —— 仅"工作内容涉及本地文件"的场景指定（开发 / 写作）；
-   * 浏览器 / 对话 / 规划类无此属性。创建时绑定，要换须重建场景。
+   * 浏览器 / 对话 / 规划类无此属性。可在创建后绑定、更换或解绑。
    */
   workdir?: string;
   createdAt: string;
@@ -46,6 +46,8 @@ export interface IWorkSceneRegistry {
    */
   remove(id: string): Promise<void>;
   rename(id: string, name: string): Promise<WorkScene>;
+  /** 绑定 / 更换工作目录；传 null 表示解绑并删除 workdir 字段。 */
+  setWorkdir(id: string, workdir: string | null): Promise<WorkScene>;
   /** 刷新 lastActiveAt —— 进入工作场景时调用。 */
   touch(id: string): Promise<void>;
 }

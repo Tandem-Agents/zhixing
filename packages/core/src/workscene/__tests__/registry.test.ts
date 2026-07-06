@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { createTempDir } from "@zhixing/test-utils";
@@ -22,6 +22,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   if (originalHome === undefined) {
     delete process.env.ZHIXING_HOME;
   } else {
@@ -79,6 +80,26 @@ describe("FsWorkSceneRegistry · CRUD", () => {
     expect((await reg.get(scene.id))?.workdir).toBe("/tmp/site");
   });
 
+  it("setWorkdir 可绑定、更换与解绑 workdir", async () => {
+    const reg = new FsWorkSceneRegistry();
+    const scene = await reg.add({ name: "site" });
+
+    const bound = await reg.setWorkdir(scene.id, "/tmp/site-a");
+    expect(bound.workdir).toBe("/tmp/site-a");
+    expect((await reg.get(scene.id))?.workdir).toBe("/tmp/site-a");
+
+    const changed = await reg.setWorkdir(scene.id, "/tmp/site-b");
+    expect(changed.workdir).toBe("/tmp/site-b");
+
+    const cleared = await reg.setWorkdir(scene.id, null);
+    expect(cleared).not.toHaveProperty("workdir");
+    const metaRaw = await fs.readFile(
+      path.join(getWorkSceneDir(scene.id), "meta.json"),
+      "utf-8",
+    );
+    expect(JSON.parse(metaRaw)).not.toHaveProperty("workdir");
+  });
+
   it("同名 add → id 自动去重", async () => {
     const reg = new FsWorkSceneRegistry();
     const a = await reg.add({ name: "demo" });
@@ -123,6 +144,31 @@ describe("FsWorkSceneRegistry · CRUD", () => {
   it("mutate 不存在的场景 → 抛错", async () => {
     const reg = new FsWorkSceneRegistry();
     await expect(reg.rename("nope", "x")).rejects.toThrow(/不存在/);
+  });
+
+  it("orphan meta 不会被直接 id 操作重新看见", async () => {
+    const reg = new FsWorkSceneRegistry();
+    const id = "orphan";
+    await fs.mkdir(getWorkSceneDir(id), { recursive: true });
+    await fs.writeFile(
+      path.join(getWorkSceneDir(id), "meta.json"),
+      JSON.stringify(
+        {
+          id,
+          name: "孤儿场景",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          lastActiveAt: "2026-01-01T00:00:00.000Z",
+        },
+        null,
+        2,
+      ),
+    );
+
+    expect(await reg.get(id)).toBeNull();
+    expect(await reg.list()).toEqual([]);
+    await expect(reg.rename(id, "new")).rejects.toThrow(/不存在/);
+    await expect(reg.setWorkdir(id, "/tmp/site")).rejects.toThrow(/不存在/);
+    await expect(reg.touch(id)).rejects.toThrow(/不存在/);
   });
 
   it("remove → index 摘 id + 系统目录(meta + me + conversations)物理消失", async () => {
@@ -221,5 +267,110 @@ describe("FsWorkSceneRegistry · 并发安全", () => {
       await fs.readFile(getWorkSceneIndexPath(), "utf-8"),
     ) as { scenes: string[] };
     expect(index.scenes.sort()).toEqual(ids);
+  });
+
+  it("remove 进行中同名 add 避让旧物理目录，remove 完成后可复用原 id", async () => {
+    const reg = new FsWorkSceneRegistry();
+    const scene = await reg.add({ name: "same" });
+    await fs.mkdir(path.join(getWorkSceneDir(scene.id), "me"), {
+      recursive: true,
+    });
+    await fs.writeFile(
+      path.join(getWorkSceneDir(scene.id), "me", "profile.md"),
+      "old",
+    );
+
+    const realRm = fs.rm.bind(fs);
+    let releaseRemove = () => {};
+    let markRmStarted = () => {};
+    const rmStarted = new Promise<void>((resolve) => {
+      markRmStarted = resolve;
+    });
+    const rmRelease = new Promise<void>((resolve) => {
+      releaseRemove = resolve;
+    });
+    vi.spyOn(fs, "rm").mockImplementation(async (target, options) => {
+      if (String(target) === getWorkSceneDir(scene.id)) {
+        markRmStarted();
+        await rmRelease;
+      }
+      return realRm(target, options);
+    });
+
+    const removing = reg.remove(scene.id);
+    await rmStarted;
+
+    const duringRemove = await reg.add({ name: "same" });
+    expect(duringRemove.id).toBe("same-2");
+    await expect(
+      fs.stat(path.join(getWorkSceneDir(duringRemove.id), "me", "profile.md")),
+    ).rejects.toThrow();
+
+    releaseRemove();
+    await removing;
+
+    const afterRemove = await reg.add({ name: "same" });
+    expect(afterRemove.id).toBe("same");
+    await expect(
+      fs.stat(path.join(getWorkSceneDir(afterRemove.id), "me", "profile.md")),
+    ).rejects.toThrow();
+  });
+
+  it("同名 add 即使复用原 id，新 meta 写入也排在旧 rm 之后", async () => {
+    const reg = new FsWorkSceneRegistry();
+    const scene = await reg.add({ name: "same" });
+    const sceneDir = getWorkSceneDir(scene.id);
+
+    const realRm = fs.rm.bind(fs);
+    const realStat = fs.stat.bind(fs);
+    let releaseRemove = () => {};
+    let markRmStarted = () => {};
+    let markPhysicalChecked = () => {};
+    const rmStarted = new Promise<void>((resolve) => {
+      markRmStarted = resolve;
+    });
+    const rmRelease = new Promise<void>((resolve) => {
+      releaseRemove = resolve;
+    });
+    const physicalChecked = new Promise<void>((resolve) => {
+      markPhysicalChecked = resolve;
+    });
+
+    vi.spyOn(fs, "rm").mockImplementation(async (target, options) => {
+      if (String(target) === sceneDir) {
+        markRmStarted();
+        await rmRelease;
+      }
+      return realRm(target, options);
+    });
+    vi.spyOn(fs, "stat").mockImplementation(async (target, options) => {
+      if (String(target) === sceneDir) {
+        markPhysicalChecked();
+        throw Object.assign(new Error("missing"), { code: "ENOENT" });
+      }
+      return realStat(target, options);
+    });
+
+    const removing = reg.remove(scene.id);
+    await rmStarted;
+
+    let addSettled = false;
+    const reusing = reg.add({ name: "same" }).finally(() => {
+      addSettled = true;
+    });
+    await physicalChecked;
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(addSettled).toBe(false);
+
+    releaseRemove();
+    await removing;
+
+    const reused = await reusing;
+    expect(reused.id).toBe(scene.id);
+    expect(await reg.get(scene.id)).toEqual(reused);
+    await expect(
+      fs.readFile(path.join(sceneDir, "meta.json"), "utf-8"),
+    ).resolves.toContain('"id": "same"');
   });
 });

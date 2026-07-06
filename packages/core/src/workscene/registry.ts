@@ -10,6 +10,7 @@
  *
  * 并发安全同构复用 conversation repository：per-id meta 锁串行同场景读写、
  * 单一 index 锁串行 index.json 读-改-写、writeAtomic 保单文件写入完整。
+ * index 是成员权威；孤儿目录只参与 id 避让，不会被直接 id 操作重新看见。
  */
 
 import fs from "node:fs/promises";
@@ -74,7 +75,11 @@ export class FsWorkSceneRegistry implements IWorkSceneRegistry {
   }
 
   async get(id: string): Promise<WorkScene | null> {
-    return this.readMeta(id);
+    return this.withIndexLock(async () => {
+      const index = await this.readIndex();
+      if (!index.scenes.includes(id)) return null;
+      return this.readMeta(id);
+    });
   }
 
   async add(opts: { name: string; workdir?: string }): Promise<WorkScene> {
@@ -84,7 +89,7 @@ export class FsWorkSceneRegistry implements IWorkSceneRegistry {
     return this.withIndexLock(async () => {
       const index = await this.readIndex();
       const taken = new Set(index.scenes);
-      const id = this.uniqueId(slugify(opts.name), taken);
+      const id = await this.uniqueId(slugify(opts.name), taken);
       const now = new Date().toISOString();
       const scene: WorkScene = {
         id,
@@ -118,15 +123,17 @@ export class FsWorkSceneRegistry implements IWorkSceneRegistry {
    *     tail 引用，破坏后续同 id 串行不变量
    */
   async remove(id: string): Promise<void> {
+    let removeDir: Promise<void> | undefined;
     await this.withIndexLock(async () => {
       const index = await this.readIndex();
       await this.writeIndex({
         scenes: index.scenes.filter((s) => s !== id),
       });
+      removeDir = this.withMetaLock(id, async () => {
+        await fs.rm(getWorkSceneDir(id), { recursive: true, force: true });
+      });
     });
-    await this.withMetaLock(id, async () => {
-      await fs.rm(getWorkSceneDir(id), { recursive: true, force: true });
-    });
+    await removeDir;
   }
 
   async rename(id: string, name: string): Promise<WorkScene> {
@@ -138,6 +145,19 @@ export class FsWorkSceneRegistry implements IWorkSceneRegistry {
   async touch(id: string): Promise<void> {
     await this.mutateMeta(id, (scene) => {
       scene.lastActiveAt = new Date().toISOString();
+    });
+  }
+
+  async setWorkdir(
+    id: string,
+    workdir: string | null,
+  ): Promise<WorkScene> {
+    return this.mutateMeta(id, (scene) => {
+      if (workdir === null) {
+        delete scene.workdir;
+      } else {
+        scene.workdir = workdir;
+      }
     });
   }
 
@@ -171,17 +191,23 @@ export class FsWorkSceneRegistry implements IWorkSceneRegistry {
     id: string,
     apply: (scene: WorkScene) => void,
   ): Promise<WorkScene> {
-    return this.withMetaLock(id, async () => {
-      const content = await fs
-        .readFile(metaPath(id), "utf-8")
-        .catch(() => null);
-      if (content === null) {
+    return this.withIndexLock(async () => {
+      const index = await this.readIndex();
+      if (!index.scenes.includes(id)) {
         throw new Error(`工作场景 "${id}" 不存在`);
       }
-      const scene = JSON.parse(content) as WorkScene;
-      apply(scene);
-      await writeAtomic(metaPath(id), JSON.stringify(scene, null, 2));
-      return scene;
+      return this.withMetaLock(id, async () => {
+        const content = await fs
+          .readFile(metaPath(id), "utf-8")
+          .catch(() => null);
+        if (content === null) {
+          throw new Error(`工作场景 "${id}" 不存在`);
+        }
+        const scene = JSON.parse(content) as WorkScene;
+        apply(scene);
+        await writeAtomic(metaPath(id), JSON.stringify(scene, null, 2));
+        return scene;
+      });
     });
   }
 
@@ -232,12 +258,38 @@ export class FsWorkSceneRegistry implements IWorkSceneRegistry {
     return result;
   }
 
-  private uniqueId(base: string, taken: Set<string>): string {
-    if (!taken.has(base)) return base;
+  private async uniqueId(base: string, taken: Set<string>): Promise<string> {
+    if (!taken.has(base) && !(await this.physicalSceneDirExists(base))) {
+      return base;
+    }
     for (let i = 2; i <= 100; i++) {
       const candidate = `${base}-${i}`;
-      if (!taken.has(candidate)) return candidate;
+      if (
+        !taken.has(candidate) &&
+        !(await this.physicalSceneDirExists(candidate))
+      ) {
+        return candidate;
+      }
     }
-    return autoSceneId();
+    for (let i = 0; i < 20; i++) {
+      const candidate = autoSceneId();
+      if (
+        !taken.has(candidate) &&
+        !(await this.physicalSceneDirExists(candidate))
+      ) {
+        return candidate;
+      }
+    }
+    throw new Error("无法生成未占用的工作场景 id");
+  }
+
+  private async physicalSceneDirExists(id: string): Promise<boolean> {
+    try {
+      await fs.stat(getWorkSceneDir(id));
+      return true;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      return code !== "ENOENT";
+    }
   }
 }

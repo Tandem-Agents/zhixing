@@ -7,3 +7,9 @@ export {
   getWorkSceneMemoryDir,
   getWorkSceneConversationsRoot,
 } from "./paths.js";
+export {
+  normalizeSceneName,
+  normalizeWorkdir,
+  probeWorkdir,
+  type WorkdirProbeResult,
+} from "./validation.js";
