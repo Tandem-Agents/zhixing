@@ -60,14 +60,15 @@ metadata:
 
 `SKILL.md` 还必须包含：
 
-- 可用的普通 fallback workflow；
-- 简短的 SSP protocol capsule；
+- 极简 entry pointer；
 - entry step 路径；
 - 只声明 entry step 路径，不内联 entry step 或任何其他 step 正文；
+- 不要包含 `Fallback Workflow`；
 - 不要复制任何高保真 step 指令到 `SKILL.md`。
 - 不要列出未来 step 的精确文档清单、资源路径列表或详细检查表；这些内容属于对应 step。
+- 不要在 `SKILL.md` 写完整 step loop、SSP step 数量或未来 `Next` 链。
 
-fallback 不是装饰。即使 agent 只看到 `SKILL.md`，也应该能完成一个低保真版本。
+`SKILL.md` 是普通 Skill 入口，不是完整执行手册。真实执行内容属于 `steps/`。
 
 ## 4. Step 文件要求
 
@@ -99,7 +100,7 @@ fallback 不是装饰。即使 agent 只看到 `SKILL.md`，也应该能完成�
 - `Instructions` 提供足以完成当前阶段的说明，不依赖未来 step。
 - `Output` 命名当前 step 的具体交付物。
 - `Completion Criteria` 明确什么时候当前 step 算完成。
-- `Handoff` 说明下一步所需的最小状态。
+- `Handoff` 说明下一步所需的最小状态，并提示完成当前 step 后再读取 `Next`。
 - `Next` 只能是一个本地 step 路径或 `END`。
 
 SSP v0 中，每个非终止 step 只能有一个 `Next`，整条链必须终止于 `END`。
@@ -136,7 +137,9 @@ Publication package 应包含 `.ssp/manifest.json`。
 - 长句式 `name`，把完整任务标题当目录名。
 - 只表达对象或领域、不表达任务意图的 `name`，例如把“熟悉项目”命名成 `project-core`。
 - 把一个推理任务任意切碎。
-- 在 `SKILL.md` fallback 中预告完整 step 链、未来阶段精确资料清单或高保真步骤细节。
+- 在 `SKILL.md` 中添加 `Fallback Workflow`。
+- 在 `SKILL.md` 中预告完整 step 链、未来阶段精确资料清单或高保真步骤细节。
+- 在 `SKILL.md` 中解释完整 step loop、列出 SSP step 数量或未来 `Next` 链。
 - 在 `SKILL.md` 中内联 entry step 或任何其他 step 正文。
 - 把用户项目文件、仓库文件或任务目标文件列入 `Resources`。
 - 在当前 step 大段预告未来 step。

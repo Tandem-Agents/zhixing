@@ -25,7 +25,7 @@ package-name/
     manifest.json
 ```
 
-包目录名必须与 `SKILL.md` frontmatter 中的 `name` 一致。`name` 同时是用户和 agent 可能直接触发的标识，应该短、稳定、好记，并能表达任务意图；优先 1-3 个英文小写连字符词。单看 `name` 应能大致知道用户想让 agent 做什么。不要只写对象名、项目名或领域名（例如 `xxx-core`），也不要把完整任务描述、所有阶段或项目路径塞进 `name`，这些信息应放在 `description`、fallback 或 step 文件中。
+包目录名必须与 `SKILL.md` frontmatter 中的 `name` 一致。`name` 同时是用户和 agent 可能直接触发的标识，应该短、稳定、好记，并能表达任务意图；优先 1-3 个英文小写连字符词。单看 `name` 应能大致知道用户想让 agent 做什么。不要只写对象名、项目名或领域名（例如 `xxx-core`），也不要把完整任务描述、所有阶段或项目路径塞进 `name`，这些信息应放在 `description` 或 step 文件中。
 
 ## `SKILL.md` Source 契约
 
@@ -50,10 +50,9 @@ metadata:
 - v0 包的 `metadata.stepped-skill.version` 是 `"0.1"`。
 - `metadata.stepped-skill.entry` 是安全的本地 `steps/*.md` 路径。
 - 可选 `metadata.stepped-skill.required-extensions` 是逗号分隔字符串。
-- 正文必须包含完整的 `Fallback Workflow`。
-- 正文必须包含简短的 `Stepped Skill Protocol` 胶囊，说明 entry step 和执行循环。
-- `Fallback Workflow` 必须是低保真普通路径，不得完整复制 step 链、未来 step 的精确资源清单、文档路径列表或详细检查表。高保真阶段说明必须留在对应 step 文件。
-- `SKILL.md` 只能声明 entry step 路径，不得内联 entry step 或任何其他 step 正文。
+- 正文必须包含极简 entry pointer，说明高保真路径从哪个 entry step 开始。
+- 正文不得包含 `Fallback Workflow`。`SKILL.md` 是入口，不是完整执行手册。
+- `SKILL.md` 只能声明 entry step 路径，不得写完整 step loop、SSP step 数量、未来 `Next` 链，不得内联 entry step 或任何其他 step 正文。
 
 ## Step Source 契约
 
@@ -77,6 +76,7 @@ metadata:
 - `Next` 要么是 `END`，要么是安全的本地 `steps/*.md` 路径。
 - 非终止 step 必须包含有用 handoff state。
 - 终止 step 使用 `Next` = `END`。
+- step 的 `Instructions` / `Handoff` 必须让当前 step 自带执行规则：完成当前 step，准备当前 output / handoff，然后读取 `Next`。
 - 不要使用绝对路径、URL、query string、fragment、反斜杠、`..` 或 `.ssp/` resource。
 
 ## Manifest 投影规则
@@ -125,7 +125,7 @@ Manifest 形态：
 没有 validator 时，报告“仅完成手动 SSP 验证”，并检查：
 
 - 普通 Agent Skill frontmatter 合法；
-- `Fallback Workflow` 足以运行；
+- `SKILL.md` 是最小入口，不包含 `Fallback Workflow`；
 - entry path 存在；
 - 每个 step 都有必需章节；
 - 每个 `Resources` 条目都是本地、相对、包内、存在的文件；
