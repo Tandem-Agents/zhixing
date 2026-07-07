@@ -38,6 +38,7 @@ export async function runToolLoop<R>(
       // complete（LLM 调用本身）失败是无法继续的框架级错误
       return { kind: "error", reason: errMsg(err) };
     }
+    if (signal?.aborted) return { kind: "error", reason: "aborted" };
 
     const decision = parseDecision(raw);
 
@@ -66,6 +67,7 @@ export async function runToolLoop<R>(
 
     try {
       const result = await tool.run(decision.input as Record<string, unknown>, signal);
+      if (signal?.aborted) return { kind: "error", reason: "aborted" };
       history.push(`调用 ${tool.name}（${truncate(stringify(decision.input))}）的结果：\n${truncate(stringify(result))}`);
     } catch (err) {
       history.push(`调用 ${tool.name} 失败：${errMsg(err)} 可重试、换个方式或据已知信息收尾。`);

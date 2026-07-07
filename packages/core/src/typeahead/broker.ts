@@ -517,6 +517,21 @@ export class DefaultTypeaheadBroker implements ITypeaheadBroker {
     });
   }
 
+  selectSuggestion(sessionId: string, suggestionId: string): boolean {
+    const session = this.sessions.get(sessionId);
+    if (!session) return false;
+    const newIndex = session.state.suggestions.findIndex(
+      (item) => item.id === suggestionId,
+    );
+    if (newIndex < 0) return false;
+    if (newIndex === session.state.selectedIndex) return true;
+    this.setSessionState(session, {
+      ...session.state,
+      selectedIndex: newIndex,
+    });
+    return true;
+  }
+
   /**
    * 计算 accept 结果——**state-纯函数**：返回 AcceptResult + 发 telemetry 事件，
    * **不动 session state**。caller 负责后续 updateInput / cancelSession 驱动状态变更。

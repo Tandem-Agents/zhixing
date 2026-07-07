@@ -826,6 +826,7 @@ export interface ITypeaheadBroker {
    */
   acceptGhostText(sessionId: string): AcceptResult | null;
   moveSelection(sessionId: string, delta: number): void;
+  selectSuggestion(sessionId: string, suggestionId: string): boolean;
   cancelSession(sessionId: string): void;
 
   /**

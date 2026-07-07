@@ -29,7 +29,7 @@
 越来越多的小场景需要"让 LLM 拿着几个工具、围绕一个目标自主走几步,最后给个结构化答案":接入识别要"搜 npm → 判断 → 挑主流候选",将来的配置向导、诊断、小处理同理。这些场景的共性是:
 
 - **由代码发起**(不是主对话里 LLM 自己起意),目标和工具集都由调用方给定;
-- **工具是少数几个、可信、通常只读**(查询类),无文件写入 / 命令执行那类危险面;
+- **工具是少数几个、由调用方完全注入且可信**;默认用于查询类场景。若场景注入副作用工具,必须在场景层提供执行前用户确认、单次性 / 幂等锁与取消语义;
 - **要 LLM 的判断力**(换个查法、判断相关性、决定够不够了),但**事实只能来自工具的真实返回**;
 - **产出结构化结果**给程序继续用,而非给用户的自由文本。
 
@@ -66,7 +66,7 @@
 
 ### 1.1 工具:`ToolLoopTool`
 
-刻意**不复用** `core/types/tools.ts` 的 `ToolDefinition`——后者带 `needsPermission` / `boundaries` / `ToolExecutionContext` 等为"主 agent 危险工具"设计的重型字段。本原语的工具是调用方注入的可信只读件,只需"给 LLM 的描述 + 代码执行":
+刻意**不复用** `core/types/tools.ts` 的 `ToolDefinition`——后者带 `needsPermission` / `boundaries` / `ToolExecutionContext` 等为"主 agent 危险工具"设计的重型字段。本原语的工具由调用方注入,通常是可信查询件,只需"给 LLM 的描述 + 代码执行":
 
 ```ts
 interface ToolLoopTool<I = Record<string, unknown>, O = unknown> {
@@ -80,6 +80,12 @@ interface ToolLoopTool<I = Record<string, unknown>, O = unknown> {
   run(input: I, signal?: AbortSignal): Promise<O>;
 }
 ```
+
+副作用工具的接入条件不放进通用框架,由场景层在工具 `run` 内保证:
+
+- 执行副作用前必须有明确用户确认,不得让 LLM 自主越过拍板动作;
+- 一次轻量循环内必须有单次性 / 幂等锁,防同一副作用重复执行;
+- 用户取消要作为结构化结果回灌给 LLM,由场景层收尾,不能静默失败或降级成另一条副作用路径。
 
 ### 1.2 任务规格:`ToolLoopSpec<R>`
 

@@ -1393,6 +1393,124 @@ describe("InputController — suspend/resume 输入态快照恢复", () => {
     controller.stop();
   });
 
+  it("工作场景创建后 resume 会重新拉取候选，新场景回到列表首位", async () => {
+    const { stdin } = makeStreams();
+    const registry = new DefaultCommandRegistry();
+    let scenes = [{ value: "scene-old", label: "旧场景" }];
+    registry.register({
+      id: "work:repl",
+      name: "work",
+      description: "进入工作场景",
+      category: "tools",
+      execution: "local",
+      args: [
+        {
+          kind: "async-enum",
+          name: "scene",
+          description: "目标工作场景",
+          required: true,
+          provider: {
+            async list() {
+              return scenes.map((scene) => ({
+                value: scene.value,
+                label: scene.label,
+              }));
+            },
+            mode: "picker",
+            inlineActions: { create: true },
+          },
+        },
+      ],
+    });
+    const broker = new DefaultTypeaheadBroker({ now: () => 1_700_000_000_000 });
+    broker.register(new CommandProvider({ registry }));
+    broker.register(new ArgumentProvider({ registry }));
+    const controller = new InputController({
+      broker,
+      dispatcher: new CommandDispatcher({ registry }),
+      getRuntime: makeRuntime,
+      screen: makeScreen(),
+      stdin,
+      columns: 80,
+    });
+
+    controller.start();
+    await typeChars(stdin, "/work ");
+    expect(stripAnsi(controller.renderLines().join("\n"))).toContain("旧场景");
+
+    controller.suspend();
+    scenes = [
+      { value: "scene-new", label: "新场景" },
+      { value: "scene-old", label: "旧场景" },
+    ];
+    controller.resume();
+    await new Promise((r) => setImmediate(r));
+
+    const frame = stripAnsi(controller.renderLines().join("\n"));
+    expect(frame.indexOf("新场景")).toBeGreaterThanOrEqual(0);
+    expect(frame.indexOf("新场景")).toBeLessThan(frame.indexOf("旧场景"));
+
+    controller.stop();
+  });
+
+  it("工作场景创建后可按新 sceneId 聚焦候选，Enter 指向新场景", async () => {
+    const { stdin } = makeStreams();
+    const registry = new DefaultCommandRegistry();
+    let scenes = [{ value: "scene-old", label: "旧场景" }];
+    registry.register({
+      id: "work:repl",
+      name: "work",
+      description: "进入工作场景",
+      category: "tools",
+      execution: "local",
+      args: [
+        {
+          kind: "async-enum",
+          name: "scene",
+          description: "目标工作场景",
+          required: true,
+          provider: {
+            async list() {
+              return scenes.map((scene) => ({
+                value: scene.value,
+                label: scene.label,
+              }));
+            },
+            mode: "picker",
+            inlineActions: { create: true },
+          },
+        },
+      ],
+    });
+    const broker = new DefaultTypeaheadBroker({ now: () => 1_700_000_000_000 });
+    broker.register(new CommandProvider({ registry }));
+    broker.register(new ArgumentProvider({ registry }));
+    const controller = new InputController({
+      broker,
+      dispatcher: new CommandDispatcher({ registry }),
+      getRuntime: makeRuntime,
+      screen: makeScreen(),
+      stdin,
+      columns: 80,
+    });
+
+    controller.start();
+    await typeChars(stdin, "/work ");
+    controller.suspend();
+    scenes = [
+      { value: "scene-old", label: "旧场景" },
+      { value: "scene-new", label: "新场景" },
+    ];
+    controller.resume();
+    expect(await controller.focusSuggestionByArgValue("scene-new")).toBe(true);
+
+    const frame = stripAnsi(controller.renderLines().join("\n"));
+    expect(frame).toContain("▸ 新场景");
+    expect(frame).not.toContain("▸ 旧场景");
+
+    controller.stop();
+  });
+
   it("空 buffer suspend → resume 无残留（confirm 场景零影响）", async () => {
     const { stdin } = makeStreams();
     const { broker, dispatcher } = makeHarness();

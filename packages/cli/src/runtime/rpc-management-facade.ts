@@ -194,12 +194,44 @@ export class RpcManagementFacade {
   // ─── llm(可信面轻推理通道) ───
 
   /** 单发文本调用(无对话历史)——管理流程(/mcp 接入向导等)的小段推理。 */
-  async llmComplete(prompt: string, role?: "main" | "light"): Promise<string> {
-    const client = await this.link.getClient();
-    const result = await client.request<{ text: string }>("llm.complete", {
+  async llmComplete(
+    prompt: string,
+    role?: "main" | "light",
+    signal?: AbortSignal,
+  ): Promise<string> {
+    if (signal?.aborted) throw abortError(signal);
+    const client = signal
+      ? await abortable(this.link.getClient(), signal)
+      : await this.link.getClient();
+    const request = client.request<{ text: string }>("llm.complete", {
       prompt,
       role,
     });
+    const result = signal ? await abortable(request, signal) : await request;
     return result.text;
   }
+}
+
+function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(abortError(signal));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      reject(abortError(signal));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (err) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(err);
+      },
+    );
+  });
+}
+
+function abortError(signal: AbortSignal): Error {
+  return signal.reason instanceof Error ? signal.reason : new Error("aborted");
 }

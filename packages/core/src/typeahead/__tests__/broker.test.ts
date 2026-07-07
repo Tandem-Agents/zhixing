@@ -358,6 +358,19 @@ describe("DefaultTypeaheadBroker — moveSelection (clamp)", () => {
     broker.moveSelection(handle.id, 1);
     expect(broker.getState(handle.id)?.selectedIndex).toBe(-1);
   });
+
+  it("selectSuggestion 按稳定 id 选中目标候选", () => {
+    const { broker, handle } = setup();
+    expect(broker.selectSuggestion(handle.id, "c")).toBe(true);
+    expect(broker.getState(handle.id)?.selectedIndex).toBe(2);
+  });
+
+  it("selectSuggestion 找不到目标时不改变当前选中项", () => {
+    const { broker, handle } = setup();
+    broker.moveSelection(handle.id, 1);
+    expect(broker.selectSuggestion(handle.id, "missing")).toBe(false);
+    expect(broker.getState(handle.id)?.selectedIndex).toBe(1);
+  });
 });
 
 // ─── Accept ───

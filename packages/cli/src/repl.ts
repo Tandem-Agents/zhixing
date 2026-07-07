@@ -106,7 +106,12 @@ import { createCandidateDeleteHandler } from "./runtime/candidate-delete-control
 import { ReplLocalView } from "./runtime/repl-local-view.js";
 import { TerminalConfirmationRenderer } from "./security/index.js";
 import { createReplInterruptRuntime } from "./interrupt/repl-runtime.js";
+import { attachKeyboardSource } from "./interrupt/keyboard-source.js";
 import { renderReadOnlyConversationBrowser } from "./runtime/read-only-conversation-browser.js";
+import {
+  createWorksceneCreateSelectionRequest,
+  runWorksceneCreateAssist,
+} from "./runtime/workscene-create-assist.js";
 
 // ─── REPL 状态 ───
 
@@ -941,6 +946,12 @@ export async function startRepl(): Promise<void> {
     afterShow: () => inputController?.resume(),
     isInteractive: () => Boolean(process.stdin.isTTY && process.stdout.isTTY),
   });
+  const worksceneCreateSelectionService = createSelectionService({
+    screen: renderScreen ?? undefined,
+    stdin: process.stdin,
+    stdout: process.stdout,
+    isInteractive: () => Boolean(process.stdin.isTTY && process.stdout.isTTY),
+  });
 
   // info 域命令（help/status/me/model/usage/context/journal/people/tasks）。
   // 运行时信息(model / usage / context)的权威在宿主——经管理面 RPC 取。
@@ -1389,12 +1400,15 @@ export async function startRepl(): Promise<void> {
               ? result.item.acceptPayload.metadata.argValue
               : undefined;
           const prefill = isRename ? result.item?.displayText : undefined;
+          let createdSceneIdToFocus: string | null = null;
           inputController.suspend();
           try {
             const text = await new InlineTextPromptRegion({
               prompt: isRename ? "重命名工作场景" : "新建工作场景",
               prefill,
-              placeholder: isRename ? undefined : "场景名称",
+              placeholder: isRename
+                ? undefined
+                : "例如：给论文项目建一个场景，目录在 E:\\paper",
               screen: renderScreen,
             }).run();
             const name = text?.trim();
@@ -1403,7 +1417,69 @@ export async function startRepl(): Promise<void> {
                 if (isRename) {
                   if (sceneId) await worksceneFacade.rename(sceneId, name);
                 } else {
-                  await worksceneFacade.create(name);
+                  let lastAssistProgress = "";
+                  const assistController = new AbortController();
+                  const assistKeyboard = attachKeyboardSource({
+                    controller: assistController,
+                    onDoublePress: () => {},
+                  });
+                  try {
+                    const assist = await runWorksceneCreateAssist(name, {
+                      listScenes: () => worksceneFacade.list(),
+                      complete: (prompt, signal) =>
+                        managementFacade.llmComplete(prompt, "main", signal),
+                      create: (sceneName, workdir) =>
+                        worksceneFacade.create(sceneName, workdir),
+                      confirm: async (proposal, signal) => {
+                        const choice = await worksceneCreateSelectionService.choose(
+                          createWorksceneCreateSelectionRequest(proposal),
+                          { signal },
+                        );
+                        return choice.kind === "selected" && choice.value === "create";
+                      },
+                      askUser: async (question, signal) => {
+                        const answer = await new InlineTextPromptRegion({
+                          prompt: "补充创建信息",
+                          placeholder: question,
+                          screen: renderScreen,
+                          signal,
+                        }).run();
+                        return answer?.trim() || null;
+                      },
+                      onProgress: (message) => {
+                        if (message === lastAssistProgress) return;
+                        lastAssistProgress = message;
+                        cliWriter.line(chalk.dim(`${layout.contentPrefix}${message}`));
+                      },
+                    }, assistController.signal);
+                    if (assist.kind === "fallback") {
+                      cliWriter.line(
+                        chalk.dim(
+                          `\n  智能创建暂不可用，已切回固定名称输入：${assist.reason}\n`,
+                        ),
+                      );
+                      const fallbackText = await new InlineTextPromptRegion({
+                        prompt: "新建工作场景",
+                        prefill: assist.prefill,
+                        placeholder: "场景名称",
+                        screen: renderScreen,
+                      }).run();
+                      const fallbackName = fallbackText?.trim();
+                      if (fallbackName) {
+                        const scene = await worksceneFacade.create(fallbackName);
+                        createdSceneIdToFocus = scene.sceneId;
+                      }
+                    } else if (assist.kind === "created") {
+                      createdSceneIdToFocus = assist.scene.sceneId;
+                      cliWriter.line(
+                        chalk.dim(
+                          `\n  已创建工作场景「${assist.scene.name}」，Enter 可进入\n`,
+                        ),
+                      );
+                    }
+                  } finally {
+                    assistKeyboard.detach();
+                  }
                 }
               } catch (err) {
                 cliWriter.line(
@@ -1417,6 +1493,9 @@ export async function startRepl(): Promise<void> {
             }
           } finally {
             inputController.resume();
+            if (createdSceneIdToFocus) {
+              await inputController.focusSuggestionByArgValue(createdSceneIdToFocus);
+            }
           }
         }
         continue;

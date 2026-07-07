@@ -4,7 +4,8 @@ import type { JsonSchema } from "../types/index.js";
  * 轻量工具 —— 只为"喂给 LLM 的描述 + 代码执行"服务。
  *
  * 刻意不复用主 agent 的 `ToolDefinition`：后者带权限 / 边界 / 执行上下文等为"危险工具"
- * 设计的重型字段；这里的工具是调用方注入的可信只读件（查询类），只需描述 + 执行函数。
+ * 设计的重型字段；这里的工具由调用方注入，默认用于可信查询。若场景注入副作用工具，
+ * 必须由场景层在 run 内提供用户确认、单次性 / 幂等锁与取消语义。
  */
 export interface ToolLoopTool<I = Record<string, unknown>, O = unknown> {
   /** 工具名（LLM 用它指名调用；一个任务内唯一）。 */

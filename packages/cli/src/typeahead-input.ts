@@ -437,6 +437,48 @@ export class InputController implements InputRegion {
     }
   }
 
+  async focusSuggestionByArgValue(
+    argValue: string,
+    opts: { readonly timeoutMs?: number } = {},
+  ): Promise<boolean> {
+    const sessionId = this.sessionHandleId;
+    if (!sessionId) return false;
+
+    const selectFrom = (state: TypeaheadSessionState | null): boolean | null => {
+      if (!state) return false;
+      const target = state.suggestions.find(
+        (item) => item.acceptPayload.metadata?.argValue === argValue,
+      );
+      if (target) {
+        return this.options.broker.selectSuggestion(sessionId, target.id);
+      }
+      return state.loading ? null : false;
+    };
+
+    const immediate = selectFrom(this.options.broker.getState(sessionId));
+    if (immediate !== null) return immediate;
+
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      let unsubscribe: () => void = () => {};
+      const finish = (result: boolean): void => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        unsubscribe();
+        resolve(result);
+      };
+      unsubscribe = this.options.broker.onSessionChange(sessionId, (state) => {
+        const result = selectFrom(state);
+        if (result !== null) finish(result);
+      });
+      timer = setTimeout(() => finish(false), opts.timeoutMs ?? 1000);
+      const current = selectFrom(this.options.broker.getState(sessionId));
+      if (current !== null) finish(current);
+    });
+  }
+
   /**
    * 等待下一次 submit / cancel——一次性 promise，handler 自动 unbind。
    *

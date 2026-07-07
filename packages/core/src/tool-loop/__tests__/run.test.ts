@@ -115,6 +115,34 @@ describe("runToolLoop", () => {
     expect(complete).not.toHaveBeenCalled();
   });
 
+  it("complete 返回时 signal 已 abort → 放弃本轮结果", async () => {
+    const ctrl = new AbortController();
+    const complete = vi.fn(async () => {
+      ctrl.abort();
+      return '{"final":"x"}';
+    });
+    const r = await runToolLoop(spec([]), { complete }, ctrl.signal);
+    expect(r.kind).toBe("error");
+    if (r.kind === "error") expect(r.reason).toBe("aborted");
+  });
+
+  it("工具返回时 signal 已 abort → 不把工具结果回灌为后续依据", async () => {
+    const ctrl = new AbortController();
+    const complete = scripted(
+      '{"call":{"tool":"search","input":{}}}',
+      '{"final":"should-not-run"}',
+    );
+    const search = vi.fn(async () => {
+      ctrl.abort();
+      return ["late"];
+    });
+    const r = await runToolLoop(spec([makeTool("search", search)]), { complete }, ctrl.signal);
+    expect(search).toHaveBeenCalledOnce();
+    expect(complete).toHaveBeenCalledOnce();
+    expect(r.kind).toBe("error");
+    if (r.kind === "error") expect(r.reason).toBe("aborted");
+  });
+
   it("onProgress 报 deciding/calling 事件；回调抛错被吞、不影响结果", async () => {
     const events: string[] = [];
     const onProgress = vi.fn((p: { round: number; phase: string; tool?: string }) => {
