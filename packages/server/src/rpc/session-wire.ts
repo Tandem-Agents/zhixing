@@ -11,7 +11,7 @@
  * - session.event —— 带外通道,信封类型与转发器内聚在 session-events.ts
  * - session.changed —— 会话级变更(run 外发生),经同一组播名册
  * - session.activity —— 非当前对话的低噪活动提示,只给工作台类接入面
- * - session.modeSwitchIntent —— 可执行控制意图,仅定向发起连接
+ * - session.postTurnControlIntent —— 可执行 turn 边界控制意图,仅定向发起连接
  */
 
 import type {
@@ -27,7 +27,7 @@ import type {
   RubricDraftPersistenceChoice,
   TaskListState,
   TokenUsage,
-  WorkModeSwitchIntent,
+  PostTurnControlIntent,
 } from "@zhixing/core";
 import type {
   RuntimeSecuritySnapshot,
@@ -74,7 +74,7 @@ export const SESSION_NOTIFICATIONS = {
   event: "session.event",
   changed: "session.changed",
   activity: "session.activity",
-  modeSwitchIntent: "session.modeSwitchIntent",
+  postTurnControlIntent: "session.postTurnControlIntent",
 } as const;
 
 // ─── 通知 payload ───
@@ -112,11 +112,11 @@ export type SessionChangedPayload =
    */
   | { conversationId: string; change: "taskList"; taskList: TaskListState | null };
 
-export interface SessionModeSwitchIntentPayload {
+export interface SessionPostTurnControlIntentPayload {
   conversationId: string;
-  /** 产生该模式切换意图的 turn 身份 */
+  /** 产生该 turn 边界控制意图的 turn 身份 */
   turnId: string;
-  intent: WorkModeSwitchIntent;
+  intent: PostTurnControlIntent;
 }
 
 export type SessionSendEngage = {
@@ -143,7 +143,7 @@ export interface SessionAcceptedSendResult {
   conversationId: string;
   /** @deprecated 使用 conversationId */
   sessionId: string;
-  /** 本次 send 对应的 turn 身份;delta/complete/modeSwitchIntent 均携同值 */
+  /** 本次 send 对应的 turn 身份;delta/complete/postTurnControlIntent 均携同值 */
   turnId: string;
   /**
    * active 推进会话中的输入被分类为补充继续时附带——发起端据此告知

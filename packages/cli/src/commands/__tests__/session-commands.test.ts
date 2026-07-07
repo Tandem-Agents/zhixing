@@ -160,13 +160,13 @@ describe("registerModeCommands", () => {
     const registry = new DefaultCommandRegistry();
     const dispatcher = new CommandDispatcher({ registry });
     const writer = makeWriter();
-    const applyModeSwitch = vi.fn(async () => {});
+    const applyPostTurnControl = vi.fn(async () => {});
     let mode: { kind: string } = { kind: "main" };
     registerModeCommands({
       registry,
       dispatcher,
       writer,
-      applyModeSwitch,
+      applyPostTurnControl,
       getActiveMode: () => mode,
       getActiveTurnPromise: () => null,
       listScenes: async () => [
@@ -177,7 +177,7 @@ describe("registerModeCommands", () => {
     return {
       dispatcher,
       writer,
-      applyModeSwitch,
+      applyPostTurnControl,
       setMode: (m: { kind: string }) => {
         mode = m;
       },
@@ -187,7 +187,7 @@ describe("registerModeCommands", () => {
   it("/work <场景> → enter 意图经唯一执行点", async () => {
     const h = setupMode();
     await h.dispatcher.dispatch("/work scene-1", RUNTIME);
-    expect(h.applyModeSwitch).toHaveBeenCalledWith({
+    expect(h.applyPostTurnControl).toHaveBeenCalledWith({
       kind: "enter",
       sceneId: "scene-1",
     });
@@ -197,7 +197,7 @@ describe("registerModeCommands", () => {
     const h = setupMode();
     h.setMode({ kind: "workscene" });
     await h.dispatcher.dispatch("/exit", RUNTIME);
-    expect(h.applyModeSwitch).toHaveBeenCalledWith({ kind: "exit" });
+    expect(h.applyPostTurnControl).toHaveBeenCalledWith({ kind: "exit" });
 
     await h.dispatcher.dispatch("/work scene-1", RUNTIME);
     expect(stripAnsi(h.writer.lines.join("\n"))).toContain("已在工作场景中");

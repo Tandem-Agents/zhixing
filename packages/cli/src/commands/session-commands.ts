@@ -1,13 +1,13 @@
 /**
- * session 域命令注册 —— 对话生命周期 + 模式切换的模块化原子注册（范式同
+ * session 域命令注册 —— 对话生命周期 + 工作场景控制的模块化原子注册（范式同
  * registerInfoCommands）。
  *
  * 分发在本地、执行体在核心宿主:全部读写经 ConversationController(组合会话 /
  * 场景 facade 与当前对话指针),cli 不再持有任何窗口 / store 实例。
  *
  *   - registerSessionCommands：/new /clear /resume /name /compact（对话生命周期）。
- *   - registerModeCommands：/work /exit（模式切换）。依赖 applyModeSwitch（模式切换
- *     唯一执行点）+ active mode / in-flight turn，与对话生命周期 deps 不相交。
+ *   - registerModeCommands：/work /exit（工作场景控制）。依赖 applyPostTurnControl
+ *     （turn 边界后的唯一执行点）+ active mode / in-flight turn，与对话生命周期 deps 不相交。
  *
  * /resume·/work 的选择器（ArgChoiceProvider）就近在本模块构造、落进 CommandDef.args；其
  * inline 删除 / 改名 / 新建只声明能力，物理执行由 cli 交互层（onCandidateDelete + 主循环
@@ -23,7 +23,7 @@ import {
   type ArgQueryContext,
   type ArgChoice,
   type ArgSchema,
-  type WorkModeSwitchIntent,
+  type PostTurnControlIntent,
 } from "@zhixing/core";
 import type { SessionAdvancementStateSnapshot } from "@zhixing/server";
 import { renderAdvancementDetailLines } from "../advancement-presentation.js";
@@ -385,9 +385,9 @@ export interface ModeCommandsDeps {
   readonly registry: ICommandRegistry;
   readonly dispatcher: CommandDispatcher;
   readonly writer: CliWriter;
-  /** 模式切换唯一执行点（先 await in-flight turn 到 turn 边界，再切换）。 */
-  readonly applyModeSwitch: (intent: WorkModeSwitchIntent) => Promise<void>;
-  /** 当前活跃模式 —— 模式切换会变，以 getter 注入按调用时读。仅读 kind 判别。 */
+  /** 工作场景控制唯一执行点（先 await in-flight turn 到 turn 边界，再执行）。 */
+  readonly applyPostTurnControl: (intent: PostTurnControlIntent) => Promise<void>;
+  /** 当前活跃模式 —— 工作场景控制会变，以 getter 注入按调用时读。仅读 kind 判别。 */
   readonly getActiveMode: () => { readonly kind: string };
   /** 当前 in-flight turn promise（turn idle 时 null）—— 切换前先 await 到 turn 边界。 */
   readonly getActiveTurnPromise: () => Promise<unknown> | null;
@@ -446,7 +446,7 @@ export function registerModeCommands(deps: ModeCommandsDeps): void {
     // 命令可能在 turn 运行中输入：先 await in-flight turn 到达 turn 边界。
     const turn = deps.getActiveTurnPromise();
     if (turn) await turn.catch(() => {});
-    await deps.applyModeSwitch({ kind: "enter", sceneId });
+    await deps.applyPostTurnControl({ kind: "enter", sceneId });
     return {};
   });
 
@@ -465,7 +465,7 @@ export function registerModeCommands(deps: ModeCommandsDeps): void {
     if (deps.getActiveMode().kind === "workscene") {
       const turn = deps.getActiveTurnPromise();
       if (turn) await turn.catch(() => {});
-      await deps.applyModeSwitch({ kind: "exit" });
+      await deps.applyPostTurnControl({ kind: "exit" });
       return {};
     }
     // 主对话中：维持原语义——走 rl.close() 让 close 监听器统一执行完整 cleanup。

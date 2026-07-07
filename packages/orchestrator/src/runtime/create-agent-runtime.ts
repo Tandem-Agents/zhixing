@@ -105,7 +105,7 @@ import {
 import { mainProfile } from "../profile/default-profiles.js";
 import type { AgentRoleProfile } from "../profile/agent-role-profile.js";
 import { subscribeSegmentMarkerAccumulator } from "./segment-marker-accumulator.js";
-import { subscribeWorkModeAccumulator } from "./workmode-accumulator.js";
+import { subscribePostTurnControlAccumulator } from "./post-turn-control-accumulator.js";
 import {
   createMainCallLLM,
   createMainCallLLMWithUsage,
@@ -1357,9 +1357,10 @@ export async function createAgentRuntime(
       // 等更丰富的结构化信息）。
       const segmentAccumulator = subscribeSegmentMarkerAccumulator(eventBus);
 
-      // 工作模式切换意图收集 —— last-wins 单一意图（非累加）。纯管道:
-      // 仅收集,run 结束带出 RunResult.pendingModeSwitch,不执行任何切换。
-      const workModeAccumulator = subscribeWorkModeAccumulator(eventBus);
+      // post-turn 控制意图收集 —— last-wins 单一意图（非累加）。纯管道:
+      // 仅收集,run 结束带出 RunResult.pendingPostTurnControl,不执行任何控制动作。
+      const postTurnControlAccumulator =
+        subscribePostTurnControlAccumulator(eventBus);
 
       // 资源清理统一入口 —— 每个 dispose 独立 try-catch 隔离故障传播:
       //   - accumulator 抛错不能阻断 disposeRender(否则 CLI 渲染订阅 / interrupt
@@ -1367,8 +1368,8 @@ export async function createAgentRuntime(
       //   - dispose 内部异常仅记录日志,不再次 throw,见 safeDispose 注释。
       const disposeAll = (): void => {
         safeDispose("run.segmentAccumulator", () => segmentAccumulator.dispose());
-        safeDispose("run.workModeAccumulator", () =>
-          workModeAccumulator.dispose(),
+        safeDispose("run.postTurnControlAccumulator", () =>
+          postTurnControlAccumulator.dispose(),
         );
         safeDispose("run.decorate", () => disposeRender?.());
       };
@@ -1660,7 +1661,7 @@ export async function createAgentRuntime(
               durationMs: Date.now() - startTime,
               budget,
               windowCompact,
-              pendingModeSwitch: workModeAccumulator.getIntent(),
+              pendingPostTurnControl: postTurnControlAccumulator.getIntent(),
             };
           }
 

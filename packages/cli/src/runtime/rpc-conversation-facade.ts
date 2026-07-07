@@ -6,7 +6,7 @@
  * 重连 / 释放归连接持有者。
  *
  * 方法调用按需 ensure 宿主;通知订阅(onDelta / onComplete / onChanged /
- * onActivity / onModeSwitchIntent)走连接的持久订阅——跨重连有效且被动,
+ * onActivity / onPostTurnControlIntent)走连接的持久订阅——跨重连有效且被动,
  * 不为订阅拉起宿主。payload 类型取自 server 的 wire 契约单源,两侧不各自手写镜像。
  *
  * handler 收到的 payload 含 conversationId——"当前对话"是接入面 UI 态,
@@ -27,7 +27,7 @@ import type {
   SessionConversationEntry,
   SessionDeltaPayload,
   SessionListResult,
-  SessionModeSwitchIntentPayload,
+  SessionPostTurnControlIntentPayload,
   SessionNewResult,
   SessionRenameResult,
   SessionResumeResult,
@@ -73,6 +73,7 @@ export class RpcConversationFacade {
       ...(typeof input === "string" ? { text: input } : { input }),
       conversationId,
       turnId,
+      surfaceCapabilities: { postTurnControl: true },
       ...(options.engage ? { engage: options.engage } : {}),
     });
   }
@@ -313,14 +314,15 @@ export class RpcConversationFacade {
   }
 
   /**
-   * 模式切换意图(仅发起连接可达,先于 complete 到达)——接入面暂存,
-   * 收到对应 complete(turn 落定)即消费,与 REPL 的 turn 边界消费语义对齐。
+   * turn 边界控制意图(仅发起连接可达,先于 complete 到达)——接入面暂存,
+   * 收到对应 complete(turn 落定)即消费。
    */
-  onModeSwitchIntent(
-    handler: (payload: SessionModeSwitchIntentPayload) => void,
+  onPostTurnControlIntent(
+    handler: (payload: SessionPostTurnControlIntentPayload) => void,
   ): () => void {
-    return this.link.onNotification(SESSION_NOTIFICATIONS.modeSwitchIntent, (p) =>
-      handler(p as SessionModeSwitchIntentPayload),
+    return this.link.onNotification(
+      SESSION_NOTIFICATIONS.postTurnControlIntent,
+      (p) => handler(p as SessionPostTurnControlIntentPayload),
     );
   }
 }

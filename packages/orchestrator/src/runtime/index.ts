@@ -55,7 +55,8 @@ export {
 } from "./create-agent-runtime.js";
 export {
   runContextStorage,
-  emitWorkModeSwitchIntent,
+  emitPostTurnControlIntent,
+  hasPostTurnControlCapability,
   type RunContext,
 } from "./run-context.js";
 export type {

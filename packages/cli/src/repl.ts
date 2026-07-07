@@ -10,7 +10,7 @@
  * 2. readline / typeahead 获取用户输入
  * 3. 斜杠命令本地分发、宿主执行
  * 4. 否则发送用户输入:控制面结果由本地选择面板承接;执行 turn 等待 complete
- * 5. turn 边界消费模式切换意图(宿主定向通知)
+ * 5. turn 边界消费 post-turn 控制意图(宿主定向通知)
  * 6. 回到步骤 2
  */
 
@@ -27,6 +27,7 @@ import {
   type DispatchResult,
   createEventBus,
   type SchedulerEventMap,
+  type PostTurnControlIntent,
   CommandDispatcher,
 } from "@zhixing/core";
 import { loadCredentials, resolveHomeDir } from "@zhixing/providers";
@@ -821,8 +822,8 @@ export async function startRepl(): Promise<void> {
    * 触发句语义:LLM 在 main 对话里产生 enter 意图时,场景新对话的首轮输入
    * 由用户自己给出——切换横幅后输入区即场景对话,用户的下一句话就是首轮。
    */
-  const applyModeSwitch = async (
-    intent: { kind: "enter"; sceneId: string } | { kind: "exit" },
+  const applyPostTurnControl = async (
+    intent: PostTurnControlIntent,
   ): Promise<void> => {
     const sepWidth = Math.max(38, (process.stdout.columns ?? 80) - 3);
     const sep = "─".repeat(sepWidth);
@@ -873,7 +874,11 @@ export async function startRepl(): Promise<void> {
       return;
     }
 
-    // intent.kind === "exit"
+    if (intent.kind !== "exit") {
+      cliWriter.line(chalk.dim("\n  当前接入面暂不支持该工作场景控制请求\n"));
+      return;
+    }
+
     if (controller.current.mode.kind !== "workscene") {
       cliWriter.line(chalk.dim("\n  当前不在工作场景中\n"));
       return;
@@ -1035,13 +1040,13 @@ export async function startRepl(): Promise<void> {
     clearScreenToInitial,
   });
 
-  // 模式切换命令（work/exit）—— applyModeSwitch 是模式切换唯一执行点;
+  // 模式切换命令（work/exit）—— applyPostTurnControl 是控制唯一执行点;
   // 场景候选经 RPC 取。
   registerModeCommands({
     registry: tRegistry,
     dispatcher: typeaheadDispatcher,
     writer: cliWriter,
-    applyModeSwitch,
+    applyPostTurnControl,
     getActiveMode: () => controller.current.mode,
     getActiveTurnPromise: () => state.activeTurnPromise,
     listScenes: () => worksceneFacade.list(),
@@ -1581,10 +1586,10 @@ export async function startRepl(): Promise<void> {
         );
       }
 
-      // turn 边界:消费本轮 LLM 产生的模式切换意图(宿主定向通知,随 complete
-      // 带出;命令触发走 /work·/exit handler 同源 applyModeSwitch)。
-      if (outcome.modeSwitchIntent) {
-        await applyModeSwitch(outcome.modeSwitchIntent);
+      // turn 边界:消费本轮 LLM 产生的 post-turn 控制意图(宿主定向通知,随 complete
+      // 带出;命令触发走 /work·/exit handler 同源 applyPostTurnControl)。
+      if (outcome.postTurnControl) {
+        await applyPostTurnControl(outcome.postTurnControl);
       }
     } catch (err) {
       pendingTextSubmission?.reject();

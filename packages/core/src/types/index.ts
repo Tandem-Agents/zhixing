@@ -112,7 +112,7 @@ export type {
   AgentRunEndReason,
   OrchestrationEventIssue,
   OrchestrationRunEventStatus,
-  WorkModeSwitchIntent,
+  PostTurnControlIntent,
 } from "./agent-events.js";
 
 // ─── 错误类型 ───

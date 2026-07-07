@@ -42,6 +42,15 @@ export interface TurnOrigin {
   target?: DeliveryTarget;
   /** 触发者（用户 ID / connectionId / taskId）——审计 + 推送过滤。 */
   triggeredBy?: string;
+  /**
+   * 发起接入面的能力声明。工具只能据此判断"本 turn 结束后是否有真实 consumer
+   * 承接控制意图"，不得按 channel 名白名单推断。
+   */
+  surface?: {
+    capabilities?: {
+      postTurnControl?: boolean;
+    };
+  };
 }
 
 /**

@@ -3,7 +3,7 @@
  *
  * 锁住:
  *   - beginTurn/sendTurn:complete waiter 先于 send 挂上(loopback 下推送可先于
- *     request 响应到达);意图(modeSwitchIntent)暂存随 complete 带出;
+ *     request 响应到达);post-turn 控制意图暂存随 complete 带出;
  *     send 失败撤 waiter 不泄漏
  *   - 主通道按当前对话过滤喂 onYield(旁观其它对话的帧不进渲染)
  *   - 场景进出 / resume / new 的指针变化与模式派生
@@ -90,7 +90,7 @@ function makeFakes() {
       handlers.activity.push(h);
       return () => {};
     },
-    onModeSwitchIntent: (h: Handler<never>) => {
+    onPostTurnControlIntent: (h: Handler<never>) => {
       handlers.intent.push(h);
       return () => {};
     },
@@ -317,7 +317,7 @@ describe("ConversationController", () => {
 
     const outcome = await turn;
     expect(outcome.result.reason).toBe("completed");
-    expect(outcome.modeSwitchIntent).toEqual({
+    expect(outcome.postTurnControl).toEqual({
       kind: "enter",
       sceneId: "scene-1",
     });

@@ -33,6 +33,7 @@ import { createServerContext } from "../context.js";
 import { ConversationManager } from "../runtime/conversation-manager.js";
 import type {
   ConversationBootstrap,
+  RunTurnOptions,
   RuntimeSubAgentUsageEntry,
   RuntimeSecuritySnapshot,
   SessionRuntime,
@@ -78,8 +79,10 @@ interface MockOptions {
   abortYieldsAborted?: boolean;
   /** 每个 yield 的延迟（ms） */
   yieldDelayMs?: number;
-  /** RunResult 顶层携带的模式切换意图(complete 通知附带契约的驱动源) */
-  pendingModeSwitch?: RunResult["pendingModeSwitch"];
+  /** RunResult 顶层携带的 turn 边界控制意图(定向通知的驱动源) */
+  pendingPostTurnControl?: RunResult["pendingPostTurnControl"];
+  /** 捕获 SessionRuntime.run 的 per-turn options，用于验证 RPC 层注入契约。 */
+  observedRunOptions?: Array<RunTurnOptions | undefined>;
   /** /usage /context 的预算能力 */
   contextBudget?: ContextBudget;
   /** /usage 的子 agent 拆分能力 */
@@ -97,7 +100,8 @@ function createMockRuntime(
   return {
     sessionId,
     // 纯执行体:输入消息由调用方构造(窗口归 ManagedSession),mock 取末条回声
-    async *run(messages): AsyncGenerator<AgentYield, RunResult> {
+    async *run(messages, options): AsyncGenerator<AgentYield, RunResult> {
+      opts.observedRunOptions?.push(options);
       const userMsg: Message =
         messages[messages.length - 1] ?? { role: "user", content: [] };
       const block = userMsg.content[0];
@@ -167,8 +171,8 @@ function createMockRuntime(
         },
         newMessages: [reply],
         durationMs: 0,
-        ...(opts.pendingModeSwitch
-          ? { pendingModeSwitch: opts.pendingModeSwitch }
+        ...(opts.pendingPostTurnControl
+          ? { pendingPostTurnControl: opts.pendingPostTurnControl }
           : {}),
       };
     },
@@ -799,13 +803,13 @@ describe("session.* RPC (S2.D)", () => {
       sessionId: string;
       turnId: string;
       result: AgentResult;
-      pendingModeSwitch?: unknown;
+      pendingPostTurnControl?: unknown;
     };
     expect(completeParams.sessionId).toBe(sessionId);
     expect(completeParams.turnId).toBe("turn-main");
     expect(completeParams.result.reason).toBe("completed");
-    // 无模式切换意图时不附带字段
-    expect(completeParams.pendingModeSwitch).toBeUndefined();
+    // 控制意图走定向通知，不混入 complete 组播。
+    expect(completeParams.pendingPostTurnControl).toBeUndefined();
 
     client.close();
   });
@@ -2646,35 +2650,65 @@ describe("session.* RPC (S2.D)", () => {
     client.close();
   });
 
-  it("模式切换意图经 session.modeSwitchIntent 定向发起连接,先于 complete;complete 纯结果不带意图", async () => {
+  it("session.send 只有在接入面显式声明时才向 runContext 注入 post-turn 控制能力", async () => {
+    const observedRunOptions: Array<RunTurnOptions | undefined> = [];
+    await startWithFactory(
+      createMockFactory({ deltaCount: 0, observedRunOptions }),
+    );
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    await client.request("session.send", { text: "default surface" });
+    await client.waitNotification("session.complete");
+    expect(
+      observedRunOptions.at(-1)?.turnContext?.turnOrigin?.surface,
+    ).toBeUndefined();
+
+    await client.request("session.send", {
+      text: "cli surface",
+      surfaceCapabilities: { postTurnControl: true },
+    });
+    await client.waitNotification("session.complete");
+    expect(
+      observedRunOptions.at(-1)?.turnContext?.turnOrigin?.surface?.capabilities
+        ?.postTurnControl,
+    ).toBe(true);
+
+    client.close();
+  });
+
+  it("post-turn 控制意图经 session.postTurnControlIntent 定向发起连接,先于 complete;complete 纯结果不带意图", async () => {
     await startWithFactory(
       createMockFactory({
         deltaCount: 1,
-        pendingModeSwitch: { kind: "enter", sceneId: "scene-1" },
+        pendingPostTurnControl: { kind: "enter", sceneId: "scene-1" },
       }),
     );
     const client = await connect(server.port);
     await client.request("auth", { token: TEST_TOKEN });
 
-    await client.request("session.send", { text: "go" });
-    const intent = await client.waitNotification("session.modeSwitchIntent");
+    await client.request("session.send", {
+      text: "go",
+      surfaceCapabilities: { postTurnControl: true },
+    });
+    const intent = await client.waitNotification("session.postTurnControlIntent");
     expect((intent.params as { intent: unknown }).intent).toEqual({
       kind: "enter",
       sceneId: "scene-1",
     });
     const complete = await client.waitNotification("session.complete");
     expect(
-      (complete.params as { pendingModeSwitch?: unknown }).pendingModeSwitch,
+      (complete.params as { pendingPostTurnControl?: unknown }).pendingPostTurnControl,
     ).toBeUndefined();
 
     client.close();
   });
 
-  it("控制意图不组播:旁观 observer 收 complete 但物理收不到 modeSwitchIntent", async () => {
+  it("控制意图不组播:旁观 observer 收 complete 但物理收不到 postTurnControlIntent", async () => {
     await startWithFactory(
       createMockFactory({
         deltaCount: 1,
-        pendingModeSwitch: { kind: "enter", sceneId: "scene-1" },
+        pendingPostTurnControl: { kind: "enter", sceneId: "scene-1" },
       }),
     );
     const alice = await connect(server.port);
@@ -2682,24 +2716,31 @@ describe("session.* RPC (S2.D)", () => {
     await alice.request("auth", { token: TEST_TOKEN });
     await bob.request("auth", { token: TEST_TOKEN });
 
-    const first = await alice.request("session.send", { text: "round-1" });
+    const first = await alice.request("session.send", {
+      text: "round-1",
+      surfaceCapabilities: { postTurnControl: true },
+    });
     const conversationId = (first as { result: { conversationId: string } }).result.conversationId;
-    await alice.waitNotification("session.modeSwitchIntent");
+    await alice.waitNotification("session.postTurnControlIntent");
     await alice.waitNotification("session.complete");
 
     await bob.request("session.subscribe", { conversationId });
-    await alice.request("session.send", { text: "round-2", conversationId });
+    await alice.request("session.send", {
+      text: "round-2",
+      conversationId,
+      surfaceCapabilities: { postTurnControl: true },
+    });
 
     // 旁观端:收到组播 complete(纯结果),但意图通知不可达
     const bobComplete = await bob.waitNotification("session.complete");
     expect(
-      (bobComplete.params as { pendingModeSwitch?: unknown }).pendingModeSwitch,
+      (bobComplete.params as { pendingPostTurnControl?: unknown }).pendingPostTurnControl,
     ).toBeUndefined();
     await expect(
-      bob.waitNotification("session.modeSwitchIntent", 300),
+      bob.waitNotification("session.postTurnControlIntent", 300),
     ).rejects.toThrow();
     // 发起端照常定向收到
-    await alice.waitNotification("session.modeSwitchIntent");
+    await alice.waitNotification("session.postTurnControlIntent");
 
     alice.close();
     bob.close();

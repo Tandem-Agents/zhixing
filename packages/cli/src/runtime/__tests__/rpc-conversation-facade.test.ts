@@ -30,7 +30,12 @@ describe("RpcConversationFacade · 方法域", () => {
     expect(fake.requests).toEqual([
       {
         method: "session.send",
-        params: { text: "你好", conversationId: "conv-1", turnId: "turn-1" },
+        params: {
+          text: "你好",
+          conversationId: "conv-1",
+          turnId: "turn-1",
+          surfaceCapabilities: { postTurnControl: true },
+        },
       },
     ]);
   });
@@ -55,6 +60,7 @@ describe("RpcConversationFacade · 方法域", () => {
           text: "@ 审查方案",
           conversationId: "conv-1",
           turnId: "turn-1",
+          surfaceCapabilities: { postTurnControl: true },
           engage: { kind: "perspectives", question: "审查方案" },
         },
       },
@@ -314,7 +320,7 @@ describe("RpcConversationFacade · 方法域", () => {
 });
 
 describe("RpcConversationFacade · 通知还原", () => {
-  it("onDelta / onComplete / onChanged / onActivity / onModeSwitchIntent 收到原样 payload", () => {
+  it("onDelta / onComplete / onChanged / onActivity / onPostTurnControlIntent 收到原样 payload", () => {
     const fake = makeFakeHostLink();
     const facade = new RpcConversationFacade(fake.link);
 
@@ -327,7 +333,7 @@ describe("RpcConversationFacade · 通知还原", () => {
     facade.onComplete((p) => completes.push(p));
     facade.onChanged((p) => changes.push(p));
     facade.onActivity((p) => activities.push(p));
-    facade.onModeSwitchIntent((p) => intents.push(p));
+    facade.onPostTurnControlIntent((p) => intents.push(p));
 
     fake.notify("session.delta", {
       conversationId: "conv-1",
@@ -353,7 +359,7 @@ describe("RpcConversationFacade · 通知还原", () => {
       unreadHint: true,
       listInvalidated: true,
     });
-    fake.notify("session.modeSwitchIntent", {
+    fake.notify("session.postTurnControlIntent", {
       conversationId: "conv-1",
       turnId: "turn-1",
       intent: { kind: "enter", sceneId: "scene-1" },

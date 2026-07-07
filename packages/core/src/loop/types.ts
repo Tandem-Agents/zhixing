@@ -11,7 +11,7 @@
 import type { IEventBus } from "../events/types.js";
 import type {
   AgentEventMap,
-  WorkModeSwitchIntent,
+  PostTurnControlIntent,
 } from "../types/agent-events.js";
 import type { AgentError } from "../types/errors.js";
 import type {
@@ -475,10 +475,10 @@ export interface RunResult {
   readonly budget?: ContextBudget;
 
   /**
-   * 本 run 内产生的工作模式切换意图（turn 内 emit、RunResult 带出，与
-   * windowCompact 同构）。accumulator last-wins 收集；
-   * 无 emit 时 undefined。仅意图 —— 切换由 REPL 主回路 turn 边界单一事务
-   * 消费执行，本字段不触发任何切换。
+   * 本 run 内产生的 turn 边界控制意图（turn 内 emit、RunResult 带出，与
+   * windowCompact 同构）。accumulator last-wins 收集；无 emit 时 undefined。
+   * 仅意图 —— 控制动作由发起接入面在 turn 边界单一事务消费执行，本字段
+   * 不触发任何切换。
    */
-  readonly pendingModeSwitch?: WorkModeSwitchIntent;
+  readonly pendingPostTurnControl?: PostTurnControlIntent;
 }

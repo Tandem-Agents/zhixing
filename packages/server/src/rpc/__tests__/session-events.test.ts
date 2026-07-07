@@ -89,14 +89,14 @@ describe("createRunEventForwarder", () => {
     dispose();
   });
 
-  it("白名单外事件不上 wire(llm:stream_event / tool:call_start / workmode 意图)", () => {
+  it("白名单外事件不上 wire(llm:stream_event / tool:call_start / post-turn 控制意图)", () => {
     const bus = makeBus();
     const { out, forwarder } = collectEnvelopes();
     forwarder({ bus, conversationId: "c1", turnContext: TURN_CONTEXT });
 
     bus.emit("llm:stream_event", { type: "x" } as never);
     bus.emit("tool:call_start", { id: "t1", name: "read", input: {} } as never);
-    bus.emit("workmode:switch_requested", { kind: "exit" } as never);
+    bus.emit("post_turn_control:requested", { kind: "exit" } as never);
 
     expect(out).toHaveLength(0);
   });

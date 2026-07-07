@@ -92,16 +92,14 @@ export interface InterruptFiredEvent {
 }
 
 /**
- * 工作模式切换意图 —— 由 workmode 工具在用户拍板后 emit，accumulator
- * last-wins 收集，run() 带出到 RunResult.pendingModeSwitch。仅意图，不含
- * 执行（切换由 REPL 主回路 turn 边界单一事务消费此意图后执行）。
- *
- * enter / exit 按构造不会同 turn 共存（main-only vs power-only 工具，一 turn
- * 一 runtime）；同 turn 多次 enter 取最后一次（对应用户最后拍板的 sceneId）。
+ * turn 边界控制意图 —— 由需要在本轮结束后改变运行上下文的工具 emit。
+ * accumulator last-wins 收集，run() 带出到 RunResult.pendingPostTurnControl。
+ * 仅意图，不含执行；消费方必须在 turn 边界以单一事务执行。
  */
-export type WorkModeSwitchIntent =
+export type PostTurnControlIntent =
   | { kind: "enter"; sceneId: string }
-  | { kind: "exit" };
+  | { kind: "exit" }
+  | { kind: "set_workdir"; sceneId: string; workdir: string | null };
 
 export interface OrchestrationEventIssue {
   readonly path: string;
@@ -472,13 +470,12 @@ export type AgentEventMap = {
   // ─── 工作模式 ───
 
   /**
-   * 工作模式切换意图请求 —— workmode 工具在用户确认后 emit（main 的
-   * workmode_enter / power 的 workmode_exit）。仅产生意图，不执行切换；
-   * accumulator last-wins 收集后由 run() 带出 RunResult.pendingModeSwitch，
-   * REPL 主回路 turn 边界单一事务消费。命令触发路径不经此事件（直接调
-   * 切换事务）。
+   * turn 边界控制意图请求 —— 工具在用户确认且发起接入面声明可消费后 emit。
+   * accumulator last-wins 收集后由 run() 带出 RunResult.pendingPostTurnControl，
+   * 发起接入面在 turn 边界单一事务消费。命令触发路径不经此事件（直接调
+   * 对应控制事务）。
    */
-  "workmode:switch_requested": WorkModeSwitchIntent;
+  "post_turn_control:requested": PostTurnControlIntent;
 
   // ─── 运行体生命周期钩子（run 内） ───
   //

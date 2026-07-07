@@ -37,8 +37,8 @@ interface ProjectSessionTurnBaseOptions {
   readonly hooks?: RunTurnHooks;
   readonly notify: SessionTurnNotify;
   readonly abortSignal?: AbortSignal;
-  readonly onModeSwitchIntent?: (
-    intent: NonNullable<RunResult["pendingModeSwitch"]>,
+  readonly onPostTurnControlIntent?: (
+    intent: NonNullable<RunResult["pendingPostTurnControl"]>,
   ) => void;
 }
 
@@ -67,8 +67,8 @@ export async function projectSessionTurn(
       const iter = await gen.next();
       if (iter.done) {
         const runResult = iter.value;
-        if (runResult.pendingModeSwitch) {
-          opts.onModeSwitchIntent?.(runResult.pendingModeSwitch);
+        if (runResult.pendingPostTurnControl) {
+          opts.onPostTurnControlIntent?.(runResult.pendingPostTurnControl);
         }
         opts.notify(SESSION_NOTIFICATIONS.complete, {
           conversationId,

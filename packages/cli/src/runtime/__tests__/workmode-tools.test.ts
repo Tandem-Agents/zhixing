@@ -1,6 +1,6 @@
 /**
  * workmode 工具回归 —— 脱离核心宿主,用 mock 工作场景领域服务验证:
- *   - enter/exit 只 emit 意图(经 ALS 发当前 run 的 bus),不执行切换
+ *   - enter/exit 仅在接入面声明可消费时 emit 意图(经 ALS 发当前 run 的 bus),不执行切换
  *   - enter 对不存在场景 isError 且不 emit
  *   - change_approve 派发到领域服务各管理动作
  *   - list / memory_query 都是只读观察工具
@@ -45,18 +45,31 @@ function makeDirectory(
 const CTX = {} as never;
 
 /**
- * 在带捕获 bus 的 RunContext 内执行——意图经 emitWorkModeSwitchIntent 发
+ * 在带捕获 bus 的 RunContext 内执行——意图经 emitPostTurnControlIntent 发
  * 当前 run 的 bus(与真实 run 同机制),返回捕获到的意图序列。
  */
 async function callInRun<T>(
   fn: () => Promise<T>,
+  opts: { readonly postTurnControl?: boolean } = { postTurnControl: true },
 ): Promise<{ result: T; emitted: unknown[] }> {
   const bus = createEventBus<AgentEventMap>({ lineage: "main" });
   const emitted: unknown[] = [];
-  bus.on("workmode:switch_requested", (intent) => {
+  bus.on("post_turn_control:requested", (intent) => {
     emitted.push(intent);
   });
-  const result = await runContextStorage.run({ bus, lineage: "main" }, fn);
+  const result = await runContextStorage.run(
+    {
+      bus,
+      lineage: "main",
+      turnOrigin: {
+        channel: "rpc",
+        surface: {
+          capabilities: { postTurnControl: opts.postTurnControl === true },
+        },
+      },
+    },
+    fn,
+  );
   return { result, emitted };
 }
 
@@ -90,6 +103,26 @@ describe("workmode_enter", () => {
     expect(result.isError).toBe(true);
     expect(emitted).toEqual([]);
   });
+
+  it("接入面无 post-turn consumer → isError 且不 emit", async () => {
+    const directory = makeDirectory({
+      get: vi.fn().mockResolvedValue({
+        id: "s1",
+        name: "场景一",
+        createdAt: "",
+        lastActiveAt: "",
+      }),
+    });
+    const tool = createWorkmodeEnterTool(directory);
+    const { result, emitted } = await callInRun(
+      () => tool.call({ sceneId: "s1" }, CTX),
+      { postTurnControl: false },
+    );
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("暂不支持");
+    expect(emitted).toEqual([]);
+    expect(directory.get).not.toHaveBeenCalled();
+  });
 });
 
 describe("workmode_exit", () => {
@@ -103,6 +136,17 @@ describe("workmode_exit", () => {
     const { result, emitted } = await callInRun(() => tool.call({}, CTX));
     expect(result.isError).toBeFalsy();
     expect(emitted).toEqual([{ kind: "exit" }]);
+  });
+
+  it("接入面无 post-turn consumer → isError 且不 emit", async () => {
+    const tool = createWorkmodeExitTool();
+    const { result, emitted } = await callInRun(
+      () => tool.call({}, CTX),
+      { postTurnControl: false },
+    );
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("暂不支持");
+    expect(emitted).toEqual([]);
   });
 });
 

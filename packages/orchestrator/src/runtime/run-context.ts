@@ -22,8 +22,8 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type {
   AgentEventMap,
   EventBus,
+  PostTurnControlIntent,
   TurnOrigin,
-  WorkModeSwitchIntent,
 } from "@zhixing/core";
 
 /**
@@ -58,13 +58,24 @@ export interface RunContext {
 export const runContextStorage = new AsyncLocalStorage<RunContext>();
 
 /**
- * 向当前 run 的 EventBus 发模式切换意图 —— turn 内只发意图不执行切换,
- * accumulator last-wins 收集后随 RunResult.pendingModeSwitch 带出,由调用方
- * 在 turn 边界唯一消费(REPL 直驱 / 宿主经定向通知交发起接入面)。
+ * 判断当前 turn 发起接入面是否声明了 post-turn 控制消费能力。工具必须先
+ * 通过此门再 emit，避免没有真实 consumer 的接入面收到"本轮后切换"假承诺。
+ */
+export function hasPostTurnControlCapability(): boolean {
+  return (
+    runContextStorage.getStore()?.turnOrigin?.surface?.capabilities
+      ?.postTurnControl === true
+  );
+}
+
+/**
+ * 向当前 run 的 EventBus 发 turn 边界控制意图 —— turn 内只发意图不执行控制,
+ * accumulator last-wins 收集后随 RunResult.pendingPostTurnControl 带出,由调用方
+ * 在 turn 边界唯一消费(当前 CLI 经定向通知消费;其它接入面必须先声明 capability)。
  *
  * 经 ALS 取 per-run bus(与 task_list 工具取 conversationId 同款机制);
  * 非 run 上下文(装配期 / 单测)静默 no-op。
  */
-export function emitWorkModeSwitchIntent(intent: WorkModeSwitchIntent): void {
-  runContextStorage.getStore()?.bus.emit("workmode:switch_requested", intent);
+export function emitPostTurnControlIntent(intent: PostTurnControlIntent): void {
+  runContextStorage.getStore()?.bus.emit("post_turn_control:requested", intent);
 }

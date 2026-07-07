@@ -5,7 +5,7 @@
  *   - 工具只捕获工作场景领域服务窄接口（不反依赖宿主具体类），故可脱离
  *     核心宿主用 mock 接口单测。
  *   - 切换类工具（enter/exit）**只 emit 意图、不执行切换**：run() 侧 accumulator
- *     收集、随 RunResult 带出，REPL 主回路 turn 边界唯一 applyModeSwitch 消费。
+ *     收集、随 RunResult 带出，CLI 主回路 turn 边界唯一 post-turn consumer 消费。
  *     工具 call 体返回的文本提示 LLM「切换将在本 turn 结束后发生」，让其先把
  *     本 turn 收尾。
  *   - by-construction 隔离：注入哪组由 spec.kind 决定（见 assembleTools），
@@ -30,13 +30,18 @@ import {
   getEnabledWorksceneToolActions,
   getWorkSceneMemoryDir,
   getWorksceneToolBoundaries,
+  getWorksceneToolPostTurnControlKind,
   worksceneToolRequiresExplicitConfirmation,
   type JsonSchema,
   type MemoryCategory,
   type ToolDefinition,
   type WorkScene,
+  type WorksceneManagementToolName,
 } from "@zhixing/core";
-import { emitWorkModeSwitchIntent } from "@zhixing/orchestrator/runtime";
+import {
+  emitPostTurnControlIntent,
+  hasPostTurnControlCapability,
+} from "@zhixing/orchestrator/runtime";
 import type { WorksceneDirectory } from "@zhixing/server";
 
 export type WorksceneToolDirectory = Pick<
@@ -55,6 +60,30 @@ function fail(content: string): Promise<{ content: string; isError: true }> {
   return Promise.resolve({ content, isError: true });
 }
 
+function postTurnControlUnsupported(): Promise<{
+  content: string;
+  isError: true;
+}> {
+  return fail("当前接入面暂不支持本轮结束后的工作场景控制，请在 CLI 中操作");
+}
+
+function assertPostTurnControlSupported(
+  toolName: WorksceneManagementToolName,
+):
+  | Promise<{
+      content: string;
+      isError: true;
+    }>
+  | undefined {
+  if (
+    getWorksceneToolPostTurnControlKind(toolName) &&
+    !hasPostTurnControlCapability()
+  ) {
+    return postTurnControlUnsupported();
+  }
+  return undefined;
+}
+
 function appendWorkdirWarning(content: string, warning?: string): string {
   return warning ? `${content}\n提示：${warning}` : content;
 }
@@ -69,9 +98,9 @@ function formatSceneLine(scene: WorkScene): string {
 }
 
 /**
- * workmode_enter（main-only，needsPermission）—— 用户拍板后 emit 进入意图。
+ * workmode_enter（main-only，needsPermission）—— 用户拍板且接入面可消费后 emit 进入意图。
  *
- * 只依赖工作场景领域服务做存在性校验;意图经 emitWorkModeSwitchIntent 发当前
+ * 只依赖工作场景领域服务做存在性校验;意图经 emitPostTurnControlIntent 发当前
  * run 的 bus——与 controller 解耦,宿主侧装配同样可用。
  */
 export function createWorkmodeEnterTool(
@@ -103,9 +132,11 @@ export function createWorkmodeEnterTool(
     async call(input) {
       const sceneId = String(input.sceneId ?? "").trim();
       if (!sceneId) return fail("workmode_enter 需要 sceneId");
+      const unsupported = assertPostTurnControlSupported("workmode_enter");
+      if (unsupported) return unsupported;
       const scene = await workscenes.get(sceneId);
       if (!scene) return fail(`工作场景 "${sceneId}" 不存在，未切换`);
-      emitWorkModeSwitchIntent({ kind: "enter", sceneId });
+      emitPostTurnControlIntent({ kind: "enter", sceneId });
       return ok(
         `已请求进入工作场景「${scene.name}」，将在本轮结束后切换。请先把本轮回复收尾。`,
       );
@@ -119,7 +150,7 @@ export function createWorkmodeEnterTool(
  * 退出和进入对称都要用户拍板,让用户对"是否真要离开当前 workscene"显式确认。
  * 用户主动用 `/exit` cli 命令则不经此工具，天然无需确认（用户意图即授权）。
  *
- * 零依赖:意图经 emitWorkModeSwitchIntent 发当前 run 的 bus,turn 边界由
+ * 零依赖:意图经 emitPostTurnControlIntent 发当前 run 的 bus,turn 边界由
  * 调用方消费——cli 直驱与宿主装配同一工具。
  */
 export function createWorkmodeExitTool(): ToolDefinition {
@@ -140,7 +171,9 @@ export function createWorkmodeExitTool(): ToolDefinition {
       worksceneToolRequiresExplicitConfirmation("workmode_exit"),
     boundaries: getWorksceneToolBoundaries("workmode_exit"),
     async call() {
-      emitWorkModeSwitchIntent({ kind: "exit" });
+      const unsupported = assertPostTurnControlSupported("workmode_exit");
+      if (unsupported) return unsupported;
+      emitPostTurnControlIntent({ kind: "exit" });
       return ok("已请求退出工作场景，将在本轮结束后返回主对话。");
     },
   };

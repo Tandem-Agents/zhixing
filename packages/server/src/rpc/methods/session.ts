@@ -18,7 +18,7 @@
  * - session.changed { conversationId, change } —— 会话级变更(run 外发生)
  *
  * 定向推送(仅发起连接,不组播)：
- * - session.modeSwitchIntent { conversationId, turnId, intent } —— 可执行控制意图,
+ * - session.postTurnControlIntent { conversationId, turnId, intent } —— 可执行 turn 边界控制意图,
  *   跟随权归发起接入面由结构保证(旁观端物理不可达)
  */
 
@@ -62,7 +62,7 @@ import {
   type SessionAwaitingRubricResult,
   type SessionContractFailedResult,
   type SessionListResult,
-  type SessionModeSwitchIntentPayload,
+  type SessionPostTurnControlIntentPayload,
   type SessionNewResult,
   type SessionRenameResult,
   type SessionResumeResult,
@@ -91,8 +91,13 @@ interface SessionSendParams extends ConversationIdParams {
   text?: unknown;
   input?: unknown;
   engage?: unknown;
+  surfaceCapabilities?: unknown;
   /** 发起端可预分配 turnId,用于避免 loopback 下 complete 先于 send 响应的竞态 */
   turnId?: unknown;
+}
+
+interface SessionSurfaceCapabilities {
+  readonly postTurnControl: boolean;
 }
 
 export function buildSessionSendMethod(): MethodEntry {
@@ -108,6 +113,9 @@ export function buildSessionSendMethod(): MethodEntry {
         );
       }
       const engage = normalizeSessionEngage(params.engage);
+      const surfaceCapabilities = normalizeSurfaceCapabilities(
+        params.surfaceCapabilities,
+      );
 
       const manager = requireConversations(ctx.server);
       const id = optionalConversationId(params, "session.send");
@@ -206,6 +214,7 @@ export function buildSessionSendMethod(): MethodEntry {
             connection: ctx.connection,
             broadcast,
             server: ctx.server,
+            surfaceCapabilities,
           });
           // 中途插话可见性：输入被分类为同一目标的补充继续——发起端据此
           // 告知用户，含是否为处理输入而中止了在跑的推进代理。
@@ -231,6 +240,7 @@ export function buildSessionSendMethod(): MethodEntry {
             connection: ctx.connection,
             broadcast,
             server: ctx.server,
+            surfaceCapabilities,
           });
         }
 
@@ -257,6 +267,7 @@ export function buildSessionSendMethod(): MethodEntry {
             connection: ctx.connection,
             broadcast,
             server: ctx.server,
+            surfaceCapabilities,
           });
         }
 
@@ -344,6 +355,7 @@ export function buildSessionSendMethod(): MethodEntry {
             turnId: prepared.originalTurnId,
             connection: ctx.connection,
             broadcast,
+            surfaceCapabilities: { postTurnControl: false },
           });
           return {
             conversationId: admitted.conversationId,
@@ -420,6 +432,7 @@ export function buildSessionSendMethod(): MethodEntry {
           connection: ctx.connection,
           broadcast,
           server: ctx.server,
+          surfaceCapabilities,
         });
         // active 会话无 outstanding 且不 busy 时（proxy 结算后的间隙 /
         // 验收挂起期），continue-active 走本 fall-through——插话告知与
@@ -443,6 +456,7 @@ export function buildSessionSendMethod(): MethodEntry {
         connection: ctx.connection,
         broadcast,
         server: ctx.server,
+        surfaceCapabilities,
       });
     },
   };
@@ -547,6 +561,7 @@ export function buildSessionAdvancementConfirmMethod(): MethodEntry {
           turnId: confirmed.originalTurnId,
           connection: ctx.connection,
           broadcast: ctx.server.sessionBroadcast,
+          surfaceCapabilities: { postTurnControl: false },
         });
       } catch (err) {
         const cancelled = await advancement
@@ -714,6 +729,7 @@ export function buildSessionAdvancementCancelMethod(): MethodEntry {
         turnId: cancelled.originalTurnId,
         connection: ctx.connection,
         broadcast: ctx.server.sessionBroadcast,
+        surfaceCapabilities: { postTurnControl: false },
       });
 
       return {
@@ -901,6 +917,7 @@ interface SendDirectTurnInput {
   readonly connection: RpcConnection;
   readonly broadcast?: SessionBroadcast;
   readonly server: ServerContext;
+  readonly surfaceCapabilities: SessionSurfaceCapabilities;
 }
 
 interface SendUserTurnInput extends SendDirectTurnInput {
@@ -932,6 +949,7 @@ async function sendDirectTurn(
     turnId: input.turnId,
     connection: input.connection,
     broadcast: input.broadcast,
+    surfaceCapabilities: input.surfaceCapabilities,
   });
   return {
     conversationId: admitted.conversationId,
@@ -970,6 +988,7 @@ interface AdmitAndMaybeStartTurnInput {
   readonly turnId: string;
   readonly connection: RpcConnection;
   readonly broadcast?: SessionBroadcast;
+  readonly surfaceCapabilities: SessionSurfaceCapabilities;
 }
 
 interface AdmitAndMaybeStartPerspectiveTurnInput extends SendDirectTurnInput {
@@ -1074,6 +1093,7 @@ async function admitAndMaybeStartTurn(
             input.connection,
             input.manager,
             input.broadcast,
+            input.surfaceCapabilities,
           ),
         // 取消通知是排队发起者的私人回执,不组播——其他端没见过这条排队项
         cancel: () => {
@@ -1284,6 +1304,9 @@ async function runManagedTurn(
   connection: RpcConnection,
   manager: ConversationManager,
   broadcast?: SessionBroadcast,
+  surfaceCapabilities: SessionSurfaceCapabilities = {
+    postTurnControl: false,
+  },
 ): Promise<void> {
   const conversationId = managed.conversationId;
   const push = (method: string, params: unknown): void => {
@@ -1303,11 +1326,19 @@ async function runManagedTurn(
 
   try {
     // RPC 入口触发的 turn 无通道 target，确认请求按连接身份定向回发起端。
+    // post-turn 控制能力必须由发起端声明；RPC 本身不代表有 consumer。
     const turnContext: TurnContext = {
       turnId,
       turnOrigin: {
         channel: "rpc",
         triggeredBy: String(connection.id),
+        ...(surfaceCapabilities.postTurnControl
+          ? {
+              surface: {
+                capabilities: { postTurnControl: true },
+              },
+            }
+          : {}),
       },
     };
     await projectSessionTurn({
@@ -1323,16 +1354,16 @@ async function runManagedTurn(
       },
       notify: push,
       abortSignal: abortController.signal,
-      onModeSwitchIntent: (intent) => {
-        // 模式切换意图是可执行的控制字段,只定向发起连接——跟随权归发起
+      onPostTurnControlIntent: (intent) => {
+        // turn 边界控制意图是可执行的控制字段,只定向发起连接——跟随权归发起
         // 接入面由结构保证(旁观端物理收不到),不靠客户端自律。先于 complete
         // 发送(同连接有序):客户端收意图暂存,收 complete(turn 落定)即消费,
         // 与 REPL 的 turn 边界消费语义对齐。
-        connection.notify(SESSION_NOTIFICATIONS.modeSwitchIntent, {
+        connection.notify(SESSION_NOTIFICATIONS.postTurnControlIntent, {
           conversationId,
           turnId,
           intent,
-        } satisfies SessionModeSwitchIntentPayload);
+        } satisfies SessionPostTurnControlIntentPayload);
       },
     });
 
@@ -1534,6 +1565,19 @@ function normalizeSessionEngage(value: unknown): SessionSendEngage | undefined {
     throw RpcErrors.invalidParams("session.send 'engage.question' must not be empty");
   }
   return { kind: "perspectives", question };
+}
+
+function normalizeSurfaceCapabilities(value: unknown): SessionSurfaceCapabilities {
+  if (value === undefined) return { postTurnControl: false };
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw RpcErrors.invalidParams(
+      "session.send 'surfaceCapabilities' must be an object",
+    );
+  }
+  return {
+    postTurnControl:
+      (value as { postTurnControl?: unknown }).postTurnControl === true,
+  };
 }
 
 function hasProvidedSessionInput(

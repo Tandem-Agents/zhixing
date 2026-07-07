@@ -6,7 +6,7 @@
  *
  * - sendTurn:预分配 turnId → send 入队 → 等待该 turn 的 complete 通知
  *   (turn 落定)→ 带出
- *   暂存的模式切换意图(intent 先于 complete 定向到达,turn 边界统一消费,
+ *   暂存的 turn 边界控制意图(intent 先于 complete 定向到达,turn 边界统一消费,
  *   与 REPL 原有消费语义对齐);
  * - 主通道喂渲染:delta 通知按当前对话过滤后经 onYield 回调交给渲染器——
  *   主渲染管线一行不改;
@@ -23,7 +23,7 @@ import {
   WORKSCENE_CONVERSATION_PREFIX,
   type AgentYield,
   type UserTurnInput,
-  type WorkModeSwitchIntent,
+  type PostTurnControlIntent,
 } from "@zhixing/core";
 import type {
   RunsPage,
@@ -59,8 +59,8 @@ export interface ActiveConversation {
 
 export interface TurnOutcome {
   result: WireAgentResult;
-  /** turn 内 LLM 产生的模式切换意图(定向通知暂存,turn 边界消费) */
-  modeSwitchIntent?: WorkModeSwitchIntent;
+  /** turn 内 LLM 产生的 turn 边界控制意图(定向通知暂存,turn 边界消费) */
+  postTurnControl?: PostTurnControlIntent;
 }
 
 export interface AcceptedTurn {
@@ -225,7 +225,7 @@ export class ConversationController {
   private pendingSwitchTarget: ((conversationId: string) => boolean) | null =
     null;
   private readonly waiters = new Map<string, (outcome: TurnOutcome) => void>();
-  private readonly pendingIntents = new Map<string, WorkModeSwitchIntent>();
+  private readonly pendingPostTurnControls = new Map<string, PostTurnControlIntent>();
   private readonly localTurnsByConversation = new Map<string, string>();
   private readonly localTurnAcceptances = new Map<
     string,
@@ -258,8 +258,8 @@ export class ConversationController {
         this.opts.onYield(p.delta);
       }),
       // 控制意图:仅发起连接可达,先于 complete;暂存到 turn 落定统一消费
-      opts.conversation.onModeSwitchIntent((p) => {
-        this.pendingIntents.set(p.turnId, p.intent);
+      opts.conversation.onPostTurnControlIntent((p) => {
+        this.pendingPostTurnControls.set(p.turnId, p.intent);
       }),
       opts.conversation.onComplete((p) => {
         const waiter = this.waiters.get(p.turnId);
@@ -279,8 +279,8 @@ export class ConversationController {
           return;
         }
         this.waiters.delete(p.turnId);
-        const intent = this.pendingIntents.get(p.turnId);
-        this.pendingIntents.delete(p.turnId);
+        const intent = this.pendingPostTurnControls.get(p.turnId);
+        this.pendingPostTurnControls.delete(p.turnId);
         if (this.localTurnsByConversation.get(p.conversationId) === p.turnId) {
           this.localTurnsByConversation.delete(p.conversationId);
         }
@@ -288,7 +288,7 @@ export class ConversationController {
           conversationId: p.conversationId,
           turnId: p.turnId,
         });
-        waiter({ result: p.result, modeSwitchIntent: intent });
+        waiter({ result: p.result, postTurnControl: intent });
       }),
       opts.conversation.onActivity((p) => {
         if (p.conversationId === this.active.conversationId) return;
@@ -586,7 +586,7 @@ export class ConversationController {
 
   private discardTurnWaiter(conversationId: string, turnId: string): void {
     this.waiters.delete(turnId);
-    this.pendingIntents.delete(turnId);
+    this.pendingPostTurnControls.delete(turnId);
     this.localTurnAcceptances.delete(turnId);
     if (this.localTurnsByConversation.get(conversationId) === turnId) {
       this.localTurnsByConversation.delete(conversationId);
@@ -823,7 +823,7 @@ export class ConversationController {
   dispose(): void {
     for (const unsub of this.unsubscribes) unsub();
     this.waiters.clear();
-    this.pendingIntents.clear();
+    this.pendingPostTurnControls.clear();
     this.localTurnsByConversation.clear();
     this.observedConversationId = null;
   }
