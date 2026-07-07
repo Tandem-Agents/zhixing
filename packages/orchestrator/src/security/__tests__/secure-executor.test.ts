@@ -33,7 +33,10 @@ import {
 
 // ─── 测试辅助 ───
 
-function makeTool(name: string): ToolDefinition {
+function makeTool(
+  name: string,
+  overrides: Partial<ToolDefinition> = {},
+): ToolDefinition {
   return {
     name,
     description: `${name} tool`,
@@ -41,6 +44,7 @@ function makeTool(name: string): ToolDefinition {
     needsPermission: true,
     permissionArgumentKey: name === "bash" ? "command" : undefined,
     call: async () => ({ content: "ok", isError: false }),
+    ...overrides,
   };
 }
 
@@ -474,6 +478,120 @@ describe("createSecureExecuteTool", () => {
       await expect(
         wrapped(makeTool("bash"), CONFIRM_TOOL_INPUT, makeContext()),
       ).rejects.toThrow(SecurityBlockError);
+    });
+  });
+
+  describe("强制逐次拍板", () => {
+    const explicitTool = () =>
+      makeTool("bash", { requiresExplicitConfirmation: true });
+    const command = "curl https://example.com/foo";
+
+    it("即使命中 allow 规则也必须进入 broker", async () => {
+      const broker = new ConfirmationBroker();
+      let capturedReq: ConfirmationRequest | undefined;
+      broker.onRequest((req) => {
+        capturedReq = req;
+        queueMicrotask(() => broker.resolve(req.id, { kind: "allow-once" }));
+      });
+      const exec = mockExecute();
+      const { pipeline, store } = makePipeline();
+      store.create(
+        pipeline.getContextId(),
+        PermissionStore.createRule({
+          pattern: { tool: "bash", argument: "curl *" },
+          decision: "allow",
+          scope: "context",
+          contextId: pipeline.getContextId(),
+        }),
+      );
+
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: exec.fn,
+        broker,
+      });
+
+      await wrapped(explicitTool(), { command }, makeContext());
+
+      expect(capturedReq).toBeDefined();
+      expect(capturedReq?.options.map((o) => o.kind)).toEqual([
+        "allow-once",
+        "deny-with-reason",
+      ]);
+      expect(exec.callCount()).toBe(1);
+    });
+
+    it("跳过 AI 安全管家，直接走 broker", async () => {
+      const broker = new ConfirmationBroker();
+      autoResolveBroker(broker, { kind: "allow-once" });
+      const exec = mockExecute();
+      const { pipeline } = makePipeline();
+      const chat = vi.fn(async function* () {
+        yield {
+          type: "text_delta",
+          text: '{"decision":"safe","reason":"对齐","confidence":0.9}',
+        } as StreamEvent;
+      });
+      const role = { provider: {}, model: "mock", chat };
+      const llm = { main: role, light: role, power: role } as unknown as LLMRoles;
+
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: exec.fn,
+        broker,
+      });
+
+      await wrapped(explicitTool(), { command }, { ...makeContext(), llm });
+
+      expect(chat).not.toHaveBeenCalled();
+      expect(exec.callCount()).toBe(1);
+    });
+
+    it("allow-once 不进入信任沉淀", async () => {
+      const broker = new ConfirmationBroker();
+      autoResolveBroker(broker, { kind: "allow-once" });
+      const exec = mockExecute();
+      const { pipeline, store } = makePipeline();
+      const eventBus = new EventBus<AgentEventMap>();
+      const sedimented: unknown[] = [];
+      eventBus.on("security:rule_sedimented", (p) => sedimented.push(p));
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: exec.fn,
+        broker,
+        eventBus,
+      });
+
+      for (let i = 0; i < 4; i++) {
+        await wrapped(explicitTool(), { command }, makeContext());
+      }
+
+      expect(exec.callCount()).toBe(4);
+      expect(store.list(pipeline.getContextId())).toHaveLength(0);
+      expect(sedimented).toHaveLength(0);
+    });
+
+    it("即使 broker 返回持久允许决策，也只按本次调用放行", async () => {
+      const broker = new ConfirmationBroker();
+      autoResolveBroker(broker, {
+        kind: "allow-global",
+        pattern: {
+          pattern: { tool: "bash", argument: "curl *" },
+          label: '"curl *"',
+        },
+      });
+      const exec = mockExecute();
+      const { pipeline, store } = makePipeline();
+      const wrapped = createSecureExecuteTool({
+        pipeline,
+        originalExecute: exec.fn,
+        broker,
+      });
+
+      await wrapped(explicitTool(), { command }, makeContext());
+
+      expect(exec.callCount()).toBe(1);
+      expect(store.list(pipeline.getContextId())).toHaveLength(0);
     });
   });
 

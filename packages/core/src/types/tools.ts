@@ -392,6 +392,14 @@ export interface ToolDefinition {
   isParallelSafe?: boolean;
   /** 此工具是否需要用户权限确认。默认 true */
   needsPermission?: boolean;
+  /**
+   * 是否每次执行都必须让用户显式拍板。
+   *
+   * 适用于"关系层"或其它不应被权限规则、AI 安全管家、信任沉淀绕过的副作用工具。
+   * 声明后,只要安全策略未直接阻止,执行器都会进入确认 broker;用户只能批准本次
+   * 或拒绝,不会产生会话/上下文/全局授权规则。
+   */
+  requiresExplicitConfirmation?: boolean;
 
   /** 结果的最大字符数，超出时自动截断。不设置则不限制 */
   maxResultChars?: number;

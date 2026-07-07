@@ -217,15 +217,22 @@ export function createSecureExecuteTool(
       );
     }
 
-    // 2. 需要确认 —— 灰色 external 先经 AI 安全管家研判，其余走 broker
-    if (result.requiresConfirmation) {
-      const verdict = await consultSteward({
-        result,
-        context: augmentedContext,
-        turnContext,
-        toolName: tool.name,
-        input,
-      });
+    const requiresExplicitConfirmation =
+      tool.requiresExplicitConfirmation === true;
+    const needsConfirmation =
+      result.requiresConfirmation === true || requiresExplicitConfirmation;
+
+    // 2. 需要确认 —— 灰色 external 可先经 AI 安全管家研判;逐次拍板工具必须直达 broker
+    if (needsConfirmation) {
+      const verdict = requiresExplicitConfirmation
+        ? undefined
+        : await consultSteward({
+            result,
+            context: augmentedContext,
+            turnContext,
+            toolName: tool.name,
+            input,
+          });
       if (verdict && auditor) {
         await auditor.auditStewardReview({
           toolName: tool.name,
@@ -258,6 +265,7 @@ export function createSecureExecuteTool(
           auditor,
           // needs-confirm 时管家给出了研判理由；未触发管家时为 undefined
           stewardReason: verdict?.reason,
+          requiresExplicitConfirmation,
         });
       } else {
         // 管家放行 → 喂信任沉淀（累计达阈值后免管家），跳过 broker、落到下方执行
@@ -344,6 +352,8 @@ async function handleBrokerPath(params: {
   auditor: SecurityAuditor | null;
   /** AI 安全助理的研判理由 —— needs-confirm 经管家时透传给确认请求 */
   stewardReason?: string;
+  /** 工具要求逐次拍板时,broker 决策只对本次调用生效。 */
+  requiresExplicitConfirmation?: boolean;
 }): Promise<void> {
   const {
     broker,
@@ -357,6 +367,7 @@ async function handleBrokerPath(params: {
     onUserDenied,
     auditor,
     stewardReason,
+    requiresExplicitConfirmation,
   } = params;
 
   const request = buildConfirmationRequest({
@@ -370,6 +381,7 @@ async function handleBrokerPath(params: {
     //   → ConfirmationRequest.turnOrigin → Hub / Renderer / Bridge
     turnOrigin: context.turnOrigin,
     stewardReason,
+    requiresExplicitConfirmation,
   });
 
   const decision = await requestConfirmationWithAbort(
@@ -427,6 +439,9 @@ async function handleBrokerPath(params: {
     case "allow-session":
     case "allow-context":
     case "allow-global":
+      if (requiresExplicitConfirmation) {
+        return;
+      }
       await applyBrokerDecision({
         decision,
         pipeline,

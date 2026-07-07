@@ -204,7 +204,10 @@ export function buildConfirmationOptions(
   input: Record<string, unknown>,
   contextId: PermissionContextId,
   sessionType: SessionType,
-  flags?: { bypassImmune?: boolean },
+  flags?: {
+    bypassImmune?: boolean;
+    requiresExplicitConfirmation?: boolean;
+  },
 ): ConfirmationOption[] {
   const { displayName } = getAgentIdentity();
 
@@ -221,8 +224,12 @@ export function buildConfirmationOptions(
   // 1. 允许这一次（默认焦点）
   options.push({ kind: "allow-once", label: "允许这一次", hotkey: "y" });
 
-  // 2-3. 持久授权选项（bypassImmune 时跳过 —— 禁区永不沉淀）
-  if (persistentPattern && !flags?.bypassImmune) {
+  // 2-3. 持久授权选项（禁区与逐次拍板工具都不能沉淀）
+  if (
+    persistentPattern &&
+    !flags?.bypassImmune &&
+    !flags?.requiresExplicitConfirmation
+  ) {
     const arg = persistentPattern.pattern.argument;
     const contextScopeLabel = formatContextScopeLabel(contextId);
     options.push({
@@ -289,6 +296,8 @@ export interface BuildConfirmationRequestParams {
   turnOrigin?: TurnOrigin;
   /** AI 安全助理的研判理由 —— needs-confirm 经管家时透传，渲染给用户说明为何要确认 */
   stewardReason?: string;
+  /** 工具要求逐次显式拍板时,确认面只给一次性批准与拒绝。 */
+  requiresExplicitConfirmation?: boolean;
 }
 
 /**
@@ -322,7 +331,10 @@ export function buildConfirmationRequest(
     input,
     contextId,
     sessionType,
-    { bypassImmune: hasBypassImmune },
+    {
+      bypassImmune: hasBypassImmune,
+      requiresExplicitConfirmation: params.requiresExplicitConfirmation,
+    },
   );
 
   return {

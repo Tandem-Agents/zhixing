@@ -205,6 +205,20 @@ describe("buildConfirmationOptions", () => {
     expect(opts.some((o) => o.kind === "allow-global")).toBe(false);
   });
 
+  it("逐次拍板工具只给 allow-once + deny-with-reason", () => {
+    const opts = buildConfirmationOptions(
+      "workscene_change_approve",
+      { action: "remove", sceneId: "demo" },
+      { kind: "scene", sceneId: "demo" },
+      "interactive",
+      { requiresExplicitConfirmation: true },
+    );
+    expect(opts.map((o) => o.kind)).toEqual([
+      "allow-once",
+      "deny-with-reason",
+    ]);
+  });
+
   it("不生成 allow-with-note / allow-session（broker 仍支持，但 CLI 不暴露）", () => {
     const opts = buildConfirmationOptions(
       "bash",
