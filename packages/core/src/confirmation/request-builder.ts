@@ -35,7 +35,14 @@ import type {
   SecurityRequest,
   SessionType,
 } from "../security/types.js";
-import type { TurnOrigin } from "../types/tools.js";
+import type {
+  ConfirmationDisplayContext,
+  TurnOrigin,
+} from "../types/tools.js";
+import {
+  buildWorksceneToolConfirmationSummary,
+  isWorksceneConfirmationDisplayTool,
+} from "../workscene/index.js";
 
 // ─── 默认超时 ───
 
@@ -70,6 +77,7 @@ export function sanitizeCommandPreview(text: string): string {
 export function buildDisplayBody(
   toolName: string,
   input: Record<string, unknown>,
+  displayContext?: ConfirmationDisplayContext,
 ): DisplayBody {
   const name = toolName.toLowerCase();
 
@@ -97,6 +105,15 @@ export function buildDisplayBody(
   if (name === "read" || name === "view") {
     const path = asString(input["path"] ?? input["file_path"] ?? input["target"]);
     return { kind: "file-read", path };
+  }
+
+  if (isWorksceneConfirmationDisplayTool(name)) {
+    return {
+      kind: "generic",
+      summary: buildWorksceneToolConfirmationSummary(name, input, {
+        displayContext,
+      }),
+    };
   }
 
   // Fallback 通用格式
@@ -298,6 +315,8 @@ export interface BuildConfirmationRequestParams {
   stewardReason?: string;
   /** 工具要求逐次显式拍板时,确认面只给一次性批准与拒绝。 */
   requiresExplicitConfirmation?: boolean;
+  /** 工具定义时已知的同步展示上下文。 */
+  confirmationDisplayContext?: ConfirmationDisplayContext;
 }
 
 /**
@@ -319,7 +338,11 @@ export function buildConfirmationRequest(
   const timeoutMs = params.timeoutMs ?? DEFAULT_CONFIRMATION_TIMEOUT_MS;
   const id = params.id ?? generateRequestId();
 
-  const body = buildDisplayBody(toolName, input);
+  const body = buildDisplayBody(
+    toolName,
+    input,
+    params.confirmationDisplayContext,
+  );
   const title = buildPanelTitle(toolName);
 
   const hasBypassImmune = result.decision?.matchedRules.some(

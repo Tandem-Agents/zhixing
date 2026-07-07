@@ -27,8 +27,10 @@
 
 import {
   MemoryStore,
+  getEnabledWorksceneToolActions,
   getWorkSceneMemoryDir,
-  type BoundaryCrossing,
+  getWorksceneToolBoundaries,
+  worksceneToolRequiresExplicitConfirmation,
   type IWorkSceneRegistry,
   type JsonSchema,
   type MemoryCategory,
@@ -39,18 +41,6 @@ import type { IWorkModeController } from "./work-mode-controller.js";
 
 /** 单条记忆片段上限 —— 控制注入主上下文的体量（只读检索非 raw dump）。 */
 const MEMORY_SNIPPET_CAP = 500;
-
-/**
- * 切换 agent 自身运行态的边界 —— enter / exit 共用。
- *
- * `agent-context.switch` 在 BoundaryImpactClassifier 里映射为 external（见
- * `BOUNDARY_WRITE_IMPACT["agent-context"]`），让分类器把 enter / exit 升级到
- * confirm，让用户对"切换"本身拍板（而不是等切换后子操作再问）。dynamic=false：
- * 工具一旦调用就确定地表达"切换意图"，无需运行时解析参数判断是否触发。
- */
-const AGENT_CONTEXT_SWITCH_BOUNDARIES: readonly BoundaryCrossing[] = [
-  { boundaryType: "agent-context", access: "switch", dynamic: false },
-];
 
 function ok(content: string): Promise<{ content: string }> {
   return Promise.resolve({ content });
@@ -88,8 +78,10 @@ export function createWorkmodeEnterTool(
     isReadOnly: false,
     isParallelSafe: false,
     needsPermission: true,
+    requiresExplicitConfirmation:
+      worksceneToolRequiresExplicitConfirmation("workmode_enter"),
     permissionArgumentKey: "sceneId",
-    boundaries: [...AGENT_CONTEXT_SWITCH_BOUNDARIES],
+    boundaries: getWorksceneToolBoundaries("workmode_enter"),
     async call(input) {
       const sceneId = String(input.sceneId ?? "").trim();
       if (!sceneId) return fail("workmode_enter 需要 sceneId");
@@ -126,7 +118,9 @@ export function createWorkmodeExitTool(): ToolDefinition {
     isReadOnly: false,
     isParallelSafe: false,
     needsPermission: true,
-    boundaries: [...AGENT_CONTEXT_SWITCH_BOUNDARIES],
+    requiresExplicitConfirmation:
+      worksceneToolRequiresExplicitConfirmation("workmode_exit"),
+    boundaries: getWorksceneToolBoundaries("workmode_exit"),
     async call() {
       emitWorkModeSwitchIntent({ kind: "exit" });
       return ok("已请求退出工作场景，将在本轮结束后返回主对话。");
@@ -145,7 +139,7 @@ export function createWorksceneChangeApproveTool(
     properties: {
       action: {
         type: "string",
-        enum: ["add", "remove", "rename"],
+        enum: getEnabledWorksceneToolActions("workscene_change_approve"),
         description: "对工作场景注册表的变更动作",
       },
       name: {
@@ -171,9 +165,11 @@ export function createWorksceneChangeApproveTool(
     isReadOnly: false,
     isParallelSafe: false,
     needsPermission: true,
+    requiresExplicitConfirmation:
+      worksceneToolRequiresExplicitConfirmation("workscene_change_approve"),
     permissionArgumentKey: "action",
     // 写场景注册表落盘文件 → filesystem.write → external → confirm。
-    boundaries: [{ boundaryType: "filesystem", access: "write", dynamic: false }],
+    boundaries: getWorksceneToolBoundaries("workscene_change_approve"),
     async call(input) {
       const action = String(input.action ?? "");
       const name = typeof input.name === "string" ? input.name.trim() : "";

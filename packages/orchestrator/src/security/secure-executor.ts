@@ -266,6 +266,7 @@ export function createSecureExecuteTool(
           // needs-confirm 时管家给出了研判理由；未触发管家时为 undefined
           stewardReason: verdict?.reason,
           requiresExplicitConfirmation,
+          confirmationDisplayContext: tool.confirmationDisplayContext,
         });
       } else {
         // 管家放行 → 喂信任沉淀（累计达阈值后免管家），跳过 broker、落到下方执行
@@ -354,6 +355,8 @@ async function handleBrokerPath(params: {
   stewardReason?: string;
   /** 工具要求逐次拍板时,broker 决策只对本次调用生效。 */
   requiresExplicitConfirmation?: boolean;
+  /** 工具定义时已知的同步展示上下文。 */
+  confirmationDisplayContext?: ToolDefinition["confirmationDisplayContext"];
 }): Promise<void> {
   const {
     broker,
@@ -368,6 +371,7 @@ async function handleBrokerPath(params: {
     auditor,
     stewardReason,
     requiresExplicitConfirmation,
+    confirmationDisplayContext,
   } = params;
 
   const request = buildConfirmationRequest({
@@ -382,6 +386,7 @@ async function handleBrokerPath(params: {
     turnOrigin: context.turnOrigin,
     stewardReason,
     requiresExplicitConfirmation,
+    confirmationDisplayContext,
   });
 
   const decision = await requestConfirmationWithAbort(

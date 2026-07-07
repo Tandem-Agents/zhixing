@@ -92,6 +92,13 @@ export interface TurnContext {
   userIntent?: string;
 }
 
+export interface ConfirmationDisplayContext {
+  readonly workscene?: {
+    readonly sceneId: string;
+    readonly sceneName: string;
+  };
+}
+
 // ─── JSON Schema ───
 
 /**
@@ -400,6 +407,14 @@ export interface ToolDefinition {
    * 或拒绝,不会产生会话/上下文/全局授权规则。
    */
   requiresExplicitConfirmation?: boolean;
+
+  /**
+   * 工具定义时已知的权威展示上下文。
+   *
+   * 确认面只消费这里的同步上下文,不反查业务状态;例如场景内工具可把闭包捕获的
+   * sceneId / sceneName 放进这里,让确认内容展示真实当前场景。
+   */
+  confirmationDisplayContext?: ConfirmationDisplayContext;
 
   /** 结果的最大字符数，超出时自动截断。不设置则不限制 */
   maxResultChars?: number;

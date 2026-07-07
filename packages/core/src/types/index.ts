@@ -63,6 +63,7 @@ export type {
   GrepResultsMatch,
   GrepResultsPresentationArtifact,
   GrepResultsQuerySummary,
+  ConfirmationDisplayContext,
   ToolDefinition,
   ToolExecutionContext,
   ToolPresentationArtifact,

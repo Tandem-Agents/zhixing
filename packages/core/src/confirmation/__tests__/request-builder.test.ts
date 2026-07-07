@@ -11,8 +11,9 @@
  * 测试原则：纯单元测试，不依赖 broker、TUI 或 SecurityPipeline 的复杂状态。
  */
 
+import path from "node:path";
 import { describe, expect, it } from "vitest";
-import type { SecurityMiddlewareResult } from "@zhixing/core";
+import { normalizeWorkdir, type SecurityMiddlewareResult } from "@zhixing/core";
 import {
   buildConfirmationOptions,
   buildConfirmationRequest,
@@ -107,6 +108,37 @@ describe("buildDisplayBody", () => {
     const body = buildDisplayBody("unknown", longInput);
     if (body.kind === "generic") {
       expect(body.summary.length).toBeLessThanOrEqual(200);
+    }
+  });
+
+  it("workscene 工具走共享摘要,完整 workdir 不被 generic JSON 截断", () => {
+    const longPath = path.join(path.sep, "tmp", "zhixing", "x".repeat(180));
+    const body = buildDisplayBody("workscene_change_approve", {
+      action: "set_workdir",
+      sceneId: "scene-1",
+      workdir: longPath,
+    });
+
+    expect(body.kind).toBe("generic");
+    if (body.kind === "generic") {
+      expect(body.summary).toContain("动作：绑定或更换工作目录");
+      expect(body.summary).toContain(`工作目录：${normalizeWorkdir(longPath)}`);
+      expect(body.summary).not.toContain('"workdir"');
+      expect(body.summary).not.toContain("…");
+    }
+  });
+
+  it("workscene current 工具使用同步 displayContext 展示权威当前场景", () => {
+    const body = buildDisplayBody(
+      "workscene_rename_current",
+      { name: "新名称", sceneName: "LLM 不可信名称" },
+      { workscene: { sceneId: "scene-real", sceneName: "权威名称" } },
+    );
+
+    expect(body.kind).toBe("generic");
+    if (body.kind === "generic") {
+      expect(body.summary).toContain("当前场景：权威名称 (scene-real)");
+      expect(body.summary).not.toContain("LLM 不可信名称");
     }
   });
 });
@@ -210,6 +242,20 @@ describe("buildConfirmationOptions", () => {
       "workscene_change_approve",
       { action: "remove", sceneId: "demo" },
       { kind: "scene", sceneId: "demo" },
+      "interactive",
+      { requiresExplicitConfirmation: true },
+    );
+    expect(opts.map((o) => o.kind)).toEqual([
+      "allow-once",
+      "deny-with-reason",
+    ]);
+  });
+
+  it("逐次拍板工具集合由 workscene 工具表驱动时仍只给单次选项", () => {
+    const opts = buildConfirmationOptions(
+      "workmode_enter",
+      { sceneId: "demo" },
+      { kind: "main" },
       "interactive",
       { requiresExplicitConfirmation: true },
     );
@@ -461,5 +507,25 @@ describe("buildConfirmationRequest", () => {
       triggeredBy: "task-42",
     });
     expect(req.turnOrigin?.target).toBeUndefined();
+  });
+
+  it("透传 confirmationDisplayContext 到 DisplayBody 构造", () => {
+    const req = buildConfirmationRequest({
+      toolName: "workscene_rename_current",
+      input: { name: "新名称" },
+      workingDirectory: "/tmp",
+      result: minimalResult(),
+      contextId: { kind: "scene", sceneId: "scene-real" },
+      sessionType: "interactive",
+      confirmationDisplayContext: {
+        workscene: { sceneId: "scene-real", sceneName: "权威名称" },
+      },
+    });
+    expect(req.display.body.kind).toBe("generic");
+    if (req.display.body.kind === "generic") {
+      expect(req.display.body.summary).toContain(
+        "当前场景：权威名称 (scene-real)",
+      );
+    }
   });
 });
