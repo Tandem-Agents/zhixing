@@ -10,6 +10,7 @@ import type {
   AgentEventMap,
   IEventBus,
   PostTurnControlIntent,
+  PostTurnControlOutcome,
 } from "@zhixing/core";
 
 /**
@@ -20,8 +21,8 @@ import type {
  * 会泄漏 listener，API 形态提前到位。
  */
 export interface PostTurnControlAccumulator {
-  /** 读取本 run 最后一次控制意图；从未 emit 时返 undefined */
-  getIntent(): PostTurnControlIntent | undefined;
+  /** 读取本 run 最后一次控制结果；从未 emit 时返 undefined */
+  getOutcome(): PostTurnControlOutcome | undefined;
   /** 从 eventBus 移除订阅；多次调用幂等 */
   dispose(): void;
 }
@@ -42,16 +43,26 @@ export function subscribePostTurnControlAccumulator(
   onEvent?: (intent: AgentEventMap["post_turn_control:requested"]) => void,
 ): PostTurnControlAccumulator {
   let last: PostTurnControlIntent | undefined;
+  const kindsSeen = new Set<PostTurnControlIntent["kind"]>();
 
   const unsubscribe = eventBus.on("post_turn_control:requested", (intent) => {
     onEvent?.(intent);
     // last-wins：同 turn 多次控制请求以最后一次用户确认的意图为准。
     last = intent;
+    kindsSeen.add(intent.kind);
   });
 
   let disposed = false;
   return {
-    getIntent: () => last,
+    getOutcome: () => {
+      if (!last) return undefined;
+      return {
+        intent: last,
+        ...(kindsSeen.size > 1
+          ? { conflict: { kindsSeen: [...kindsSeen] } }
+          : {}),
+      };
+    },
     dispose: () => {
       if (disposed) return;
       disposed = true;

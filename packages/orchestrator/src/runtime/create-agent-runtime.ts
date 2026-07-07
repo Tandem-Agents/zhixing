@@ -1661,7 +1661,7 @@ export async function createAgentRuntime(
               durationMs: Date.now() - startTime,
               budget,
               windowCompact,
-              pendingPostTurnControl: postTurnControlAccumulator.getIntent(),
+              pendingPostTurnControl: postTurnControlAccumulator.getOutcome(),
             };
           }
 

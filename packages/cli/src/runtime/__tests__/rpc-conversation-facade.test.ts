@@ -363,6 +363,7 @@ describe("RpcConversationFacade · 通知还原", () => {
       conversationId: "conv-1",
       turnId: "turn-1",
       intent: { kind: "enter", sceneId: "scene-1" },
+      conflict: { kindsSeen: ["exit", "enter"] },
     });
 
     expect(deltas).toHaveLength(1);
@@ -384,6 +385,7 @@ describe("RpcConversationFacade · 通知还原", () => {
       conversationId: "conv-1",
       turnId: "turn-1",
       intent: { kind: "enter", sceneId: "scene-1" },
+      conflict: { kindsSeen: ["exit", "enter"] },
     });
   });
 

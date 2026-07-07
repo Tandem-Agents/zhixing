@@ -205,17 +205,26 @@ describe("createBuiltinExtraToolsAssembly", () => {
     expect(names).not.toContain("workmode_exit");
   });
 
-  it("spec=workscene → 仅追加 power-only workmode_exit，物理隔离 main-only 工具", () => {
+  it("spec=workscene → 追加 power-only 工具，物理隔离 main-only 工具", () => {
     const assembly = createBuiltinExtraToolsAssembly(new InMemoryTaskListStore(), createMcpHub([]));
     const names = assembly
       .assembleTools({
         scheduler: () => fakeScheduler(),
-        spec: { kind: "workscene" },
+        spec: { kind: "workscene", sceneId: "scene-1", sceneName: "场景一" },
         worksceneDirectory: () => fakeWorkscenes,
       })
       .map((t) => t.name)
       .sort();
-    expect(names).toEqual(["schedule", "task_list", "workmode_exit"].sort());
+    expect(names).toEqual(
+      [
+        "schedule",
+        "task_list",
+        "workmode_exit",
+        "workscene_clear_workdir_current",
+        "workscene_rename_current",
+        "workscene_set_workdir_current",
+      ].sort(),
+    );
     for (const mainOnly of [
       "workmode_enter",
       "workscene_change_approve",

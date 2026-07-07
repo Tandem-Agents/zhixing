@@ -136,8 +136,10 @@ describe("资产层透传", () => {
     expect(params.primaryRole).toBe("power");
     expect(params.memoryScope).toEqual({ kind: "workscene", sceneId: "s1" });
     expect(params.profile).toBeDefined();
-    expect((assembled[0] as { spec?: { kind: string } }).spec).toEqual({
+    expect((assembled[0] as { spec?: unknown }).spec).toEqual({
       kind: "workscene",
+      sceneId: "s1",
+      sceneName: "场景",
     });
 
     // 无 workdir → workspace 显式 null(不回落 host 缺省,杜绝串到 cwd)

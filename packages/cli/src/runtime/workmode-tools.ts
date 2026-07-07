@@ -9,7 +9,7 @@
  *     工具 call 体返回的文本提示 LLM「切换将在本 turn 结束后发生」，让其先把
  *     本 turn 收尾。
  *   - by-construction 隔离：注入哪组由 spec.kind 决定（见 assembleTools），
- *     power runtime 物理不持有 main-only 工具。
+ *     power runtime 物理不持有 main-only 工具，场景内工具只能闭包触达自身 sceneId。
  *
  * 权限策略（**load-bearing 字段是 boundaries，不是 needsPermission**）：
  *   `needsPermission` 在当前实现里只是自描述文档字段（grep 全仓库无运行时消费）。
@@ -25,12 +25,16 @@
  *     天然不需要确认（用户意图即授权）
  */
 
+import { isAbsolute } from "node:path";
 import {
   MemoryStore,
   getEnabledWorksceneToolActions,
   getWorkSceneMemoryDir,
   getWorksceneToolBoundaries,
   getWorksceneToolPostTurnControlKind,
+  normalizeSceneName,
+  normalizeWorkdir,
+  probeWorkdir,
   worksceneToolRequiresExplicitConfirmation,
   type JsonSchema,
   type MemoryCategory,
@@ -48,6 +52,11 @@ export type WorksceneToolDirectory = Pick<
   WorksceneDirectory,
   "list" | "get" | "create" | "rename" | "setWorkdir" | "remove"
 >;
+
+export interface WorksceneCurrentToolContext {
+  readonly sceneId: string;
+  readonly sceneName: string;
+}
 
 /** 单条记忆片段上限 —— 控制注入主上下文的体量（只读检索非 raw dump）。 */
 const MEMORY_SNIPPET_CAP = 500;
@@ -88,6 +97,12 @@ function appendWorkdirWarning(content: string, warning?: string): string {
   return warning ? `${content}\n提示：${warning}` : content;
 }
 
+function currentDisplayContext(scene: WorksceneCurrentToolContext) {
+  return {
+    workscene: { sceneId: scene.sceneId, sceneName: scene.sceneName },
+  };
+}
+
 function formatSceneLine(scene: WorkScene): string {
   const parts = [
     `- ${scene.name} (id: ${scene.id})`,
@@ -95,6 +110,43 @@ function formatSceneLine(scene: WorkScene): string {
   ];
   if (scene.lastActiveAt) parts.push(`  最近使用：${scene.lastActiveAt}`);
   return parts.join("\n");
+}
+
+async function prepareCurrentWorkdir(
+  value: unknown,
+): Promise<
+  | { readonly workdir: string; readonly workdirWarning?: string }
+  | { readonly error: string }
+> {
+  if (typeof value !== "string" || !value.trim()) {
+    return { error: "workscene_set_workdir_current 需要 workdir" };
+  }
+
+  let workdir: string;
+  try {
+    workdir = normalizeWorkdir(value);
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
+
+  if (!isAbsolute(workdir)) return { error: "工作目录必须是绝对路径" };
+
+  const probe = await probeWorkdir(workdir);
+  switch (probe.kind) {
+    case "directory":
+      return { workdir };
+    case "missing":
+      return {
+        workdir,
+        workdirWarning: `工作目录当前不存在，下次进入将自动创建：${workdir}`,
+      };
+    case "non_directory":
+      return { error: "工作目录已存在但不是目录" };
+    case "inaccessible":
+      return { error: `工作目录不可访问(${probe.code})` };
+    case "error":
+      return { error: `工作目录无法确认(${probe.code})` };
+  }
 }
 
 /**
@@ -314,6 +366,139 @@ export function createWorksceneListTool(
       const scenes = await workscenes.list();
       if (scenes.length === 0) return ok("当前没有任何工作场景");
       return ok(scenes.map(formatSceneLine).join("\n\n"));
+    },
+  };
+}
+
+/**
+ * workscene_rename_current（power-only）—— 确认后轻量改当前场景登记名。
+ */
+export function createWorksceneRenameCurrentTool(
+  workscenes: Pick<WorksceneToolDirectory, "rename">,
+  scene: WorksceneCurrentToolContext,
+): ToolDefinition {
+  const inputSchema: JsonSchema = {
+    type: "object",
+    properties: {
+      name: {
+        type: "string",
+        description: "当前工作场景的新名称",
+      },
+    },
+    required: ["name"],
+  };
+  return {
+    name: "workscene_rename_current",
+    description:
+      "重命名当前工作场景。只改当前场景登记名，不退出、不重进；当前窗口里的旧称呼可到下次窗口或重进时自然更新。",
+    inputSchema,
+    isReadOnly: false,
+    isParallelSafe: false,
+    needsPermission: true,
+    requiresExplicitConfirmation:
+      worksceneToolRequiresExplicitConfirmation("workscene_rename_current"),
+    boundaries: getWorksceneToolBoundaries("workscene_rename_current"),
+    confirmationDisplayContext: currentDisplayContext(scene),
+    async call(input) {
+      const rawName = typeof input.name === "string" ? input.name : "";
+      let name: string;
+      try {
+        name = normalizeSceneName(rawName);
+      } catch (err) {
+        return fail(err instanceof Error ? err.message : String(err));
+      }
+      const renamed = await workscenes.rename(scene.sceneId, name);
+      if (!renamed) return fail(`当前工作场景 "${scene.sceneId}" 不存在`);
+      return ok(
+        `已将当前工作场景重命名为「${renamed.name}」。当前窗口可能仍显示旧名称，下次进入或窗口换代后会自然更新。`,
+      );
+    },
+  };
+}
+
+/**
+ * workscene_set_workdir_current（power-only）—— 确认后请求 turn 边界换目录重进。
+ */
+export function createWorksceneSetWorkdirCurrentTool(
+  scene: WorksceneCurrentToolContext,
+): ToolDefinition {
+  const inputSchema: JsonSchema = {
+    type: "object",
+    properties: {
+      workdir: {
+        type: "string",
+        description: "当前工作场景的新工作目录，必须是本机绝对路径",
+      },
+    },
+    required: ["workdir"],
+  };
+  return {
+    name: "workscene_set_workdir_current",
+    description:
+      "更换当前工作场景的工作目录。变更在本轮结束后由 CLI 释放当前场景并按新目录重新进入。",
+    inputSchema,
+    isReadOnly: false,
+    isParallelSafe: false,
+    needsPermission: true,
+    requiresExplicitConfirmation:
+      worksceneToolRequiresExplicitConfirmation("workscene_set_workdir_current"),
+    boundaries: getWorksceneToolBoundaries("workscene_set_workdir_current"),
+    confirmationDisplayContext: currentDisplayContext(scene),
+    async call(input) {
+      const unsupported = assertPostTurnControlSupported(
+        "workscene_set_workdir_current",
+      );
+      if (unsupported) return unsupported;
+      const prepared = await prepareCurrentWorkdir(input.workdir);
+      if ("error" in prepared) return fail(prepared.error);
+      emitPostTurnControlIntent({
+        kind: "set_workdir",
+        sceneId: scene.sceneId,
+        workdir: prepared.workdir,
+      });
+      return ok(
+        appendWorkdirWarning(
+          `已请求将当前工作场景目录更换为：${prepared.workdir}。本轮结束后会按新目录重新进入。`,
+          prepared.workdirWarning,
+        ),
+      );
+    },
+  };
+}
+
+/**
+ * workscene_clear_workdir_current（power-only）—— 显式解除当前场景工作目录绑定。
+ */
+export function createWorksceneClearWorkdirCurrentTool(
+  scene: WorksceneCurrentToolContext,
+): ToolDefinition {
+  const inputSchema: JsonSchema = {
+    type: "object",
+    properties: {},
+  };
+  return {
+    name: "workscene_clear_workdir_current",
+    description:
+      "解除当前工作场景的工作目录绑定。变更在本轮结束后由 CLI 释放当前场景并以无目录工具面重新进入。",
+    inputSchema,
+    isReadOnly: false,
+    isParallelSafe: false,
+    needsPermission: true,
+    requiresExplicitConfirmation:
+      worksceneToolRequiresExplicitConfirmation("workscene_clear_workdir_current"),
+    boundaries: getWorksceneToolBoundaries("workscene_clear_workdir_current"),
+    confirmationDisplayContext: currentDisplayContext(scene),
+    async call() {
+      const unsupported = assertPostTurnControlSupported(
+        "workscene_clear_workdir_current",
+      );
+      if (unsupported) return unsupported;
+      emitPostTurnControlIntent({
+        kind: "set_workdir",
+        sceneId: scene.sceneId,
+        workdir: null,
+      });
+      return ok("已请求解除当前工作场景目录绑定。本轮结束后会以无目录工具面重新进入。");
     },
   };
 }

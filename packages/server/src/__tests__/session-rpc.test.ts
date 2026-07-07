@@ -2681,7 +2681,10 @@ describe("session.* RPC (S2.D)", () => {
     await startWithFactory(
       createMockFactory({
         deltaCount: 1,
-        pendingPostTurnControl: { kind: "enter", sceneId: "scene-1" },
+        pendingPostTurnControl: {
+          intent: { kind: "enter", sceneId: "scene-1" },
+          conflict: { kindsSeen: ["exit", "enter"] },
+        },
       }),
     );
     const client = await connect(server.port);
@@ -2696,6 +2699,9 @@ describe("session.* RPC (S2.D)", () => {
       kind: "enter",
       sceneId: "scene-1",
     });
+    expect((intent.params as { conflict: unknown }).conflict).toEqual({
+      kindsSeen: ["exit", "enter"],
+    });
     const complete = await client.waitNotification("session.complete");
     expect(
       (complete.params as { pendingPostTurnControl?: unknown }).pendingPostTurnControl,
@@ -2708,7 +2714,9 @@ describe("session.* RPC (S2.D)", () => {
     await startWithFactory(
       createMockFactory({
         deltaCount: 1,
-        pendingPostTurnControl: { kind: "enter", sceneId: "scene-1" },
+        pendingPostTurnControl: {
+          intent: { kind: "enter", sceneId: "scene-1" },
+        },
       }),
     );
     const alice = await connect(server.port);

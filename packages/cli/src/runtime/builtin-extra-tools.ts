@@ -37,8 +37,11 @@ import {
   createWorkmodeEnterTool,
   createWorkmodeExitTool,
   createWorksceneChangeApproveTool,
+  createWorksceneClearWorkdirCurrentTool,
   createWorksceneListTool,
   createWorksceneMemoryQueryTool,
+  createWorksceneRenameCurrentTool,
+  createWorksceneSetWorkdirCurrentTool,
   type WorksceneToolDirectory,
 } from "./workmode-tools.js";
 
@@ -60,7 +63,9 @@ export interface ExtraToolsRuntimeContext {
    * power 物理不持有 main-only 工具）。缺省视为 main（serve / 单测等无 workmode
    * 概念的装配点不必显式传）。
    */
-  spec?: { kind: "main" } | { kind: "workscene" };
+  spec?:
+    | { kind: "main" }
+    | { kind: "workscene"; sceneId: string; sceneName: string };
   /**
    * 工作场景领域服务 getter —— assembly 早于 per-runtime 实例发放，故用 getter
    * 延迟取（与 `scheduler` getter 同构解鸡生蛋）。仅 main 组 workmode 工具需要；
@@ -144,6 +149,18 @@ export function createBuiltinExtraToolsAssembly(
       const kind = ctx.spec?.kind ?? "main";
       if (kind === "workscene") {
         tools.push(createWorkmodeExitTool());
+        if (ctx.worksceneDirectory && ctx.spec?.kind === "workscene") {
+          const workscenes = ctx.worksceneDirectory();
+          const scene = {
+            sceneId: ctx.spec.sceneId,
+            sceneName: ctx.spec.sceneName,
+          };
+          tools.push(
+            createWorksceneRenameCurrentTool(workscenes, scene),
+            createWorksceneSetWorkdirCurrentTool(scene),
+            createWorksceneClearWorkdirCurrentTool(scene),
+          );
+        }
       } else if (ctx.worksceneDirectory) {
         const workscenes = ctx.worksceneDirectory();
         tools.push(

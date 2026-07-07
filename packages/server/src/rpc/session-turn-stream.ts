@@ -38,7 +38,7 @@ interface ProjectSessionTurnBaseOptions {
   readonly notify: SessionTurnNotify;
   readonly abortSignal?: AbortSignal;
   readonly onPostTurnControlIntent?: (
-    intent: NonNullable<RunResult["pendingPostTurnControl"]>,
+    control: NonNullable<RunResult["pendingPostTurnControl"]>,
   ) => void;
 }
 

@@ -23,7 +23,7 @@ import {
   WORKSCENE_CONVERSATION_PREFIX,
   type AgentYield,
   type UserTurnInput,
-  type PostTurnControlIntent,
+  type PostTurnControlOutcome,
 } from "@zhixing/core";
 import type {
   RunsPage,
@@ -45,6 +45,7 @@ import type {
   SessionSendEngage,
   SessionSendResult,
 } from "@zhixing/server";
+import { RPC_ERROR_CODES, RpcClientError } from "@zhixing/server";
 import type { RpcConversationFacade } from "./rpc-conversation-facade.js";
 import type { RpcWorksceneFacade } from "./rpc-workscene-facade.js";
 
@@ -60,7 +61,7 @@ export interface ActiveConversation {
 export interface TurnOutcome {
   result: WireAgentResult;
   /** turn 内 LLM 产生的 turn 边界控制意图(定向通知暂存,turn 边界消费) */
-  postTurnControl?: PostTurnControlIntent;
+  postTurnControl?: PostTurnControlOutcome;
 }
 
 export interface AcceptedTurn {
@@ -135,6 +136,23 @@ export type ExitSceneResult =
       active: ActiveConversation;
       missingConversationId: string;
       advancement?: SessionAdvancementStateSnapshot;
+    };
+
+export type SetCurrentSceneWorkdirResult =
+  | {
+      kind: "reentered";
+      active: ActiveConversation;
+      scene: WorksceneSummary;
+      advancement?: SessionAdvancementStateSnapshot;
+    }
+  | { kind: "scene-mismatch"; active: ActiveConversation }
+  | { kind: "scene-missing"; active: ActiveConversation; error: unknown }
+  | { kind: "set-failed"; active: ActiveConversation; error: unknown }
+  | {
+      kind: "enter-failed";
+      active: ActiveConversation;
+      scene: WorksceneSummary;
+      error: unknown;
     };
 
 export type SessionChangeReaction =
@@ -225,7 +243,7 @@ export class ConversationController {
   private pendingSwitchTarget: ((conversationId: string) => boolean) | null =
     null;
   private readonly waiters = new Map<string, (outcome: TurnOutcome) => void>();
-  private readonly pendingPostTurnControls = new Map<string, PostTurnControlIntent>();
+  private readonly pendingPostTurnControls = new Map<string, PostTurnControlOutcome>();
   private readonly localTurnsByConversation = new Map<string, string>();
   private readonly localTurnAcceptances = new Map<
     string,
@@ -259,7 +277,10 @@ export class ConversationController {
       }),
       // 控制意图:仅发起连接可达,先于 complete;暂存到 turn 落定统一消费
       opts.conversation.onPostTurnControlIntent((p) => {
-        this.pendingPostTurnControls.set(p.turnId, p.intent);
+        this.pendingPostTurnControls.set(p.turnId, {
+          intent: p.intent,
+          ...(p.conflict ? { conflict: p.conflict } : {}),
+        });
       }),
       opts.conversation.onComplete((p) => {
         const waiter = this.waiters.get(p.turnId);
@@ -727,6 +748,54 @@ export class ConversationController {
   }
 
   /**
+   * 场景内更换 / 解绑工作目录的 turn 边界事务。
+   *
+   * 先撤当前 observer,让服务层 quiesce 的 in-use 守卫看到真实空闲;落盘成功后
+   * 重新 enter 同一场景,新 runtime 按新目录装配。set 失败时重挂原 observer,
+   * enter 失败交给接入面按退出 fallback 处理。
+   */
+  async setCurrentSceneWorkdirAndReenter(
+    sceneId: string,
+    workdir: string | null,
+  ): Promise<SetCurrentSceneWorkdirResult> {
+    if (
+      this.active.mode.kind !== "workscene" ||
+      this.active.mode.sceneId !== sceneId
+    ) {
+      return { kind: "scene-mismatch", active: this.active };
+    }
+
+    const previousConversationId = this.active.conversationId;
+    if (this.observedConversationId === previousConversationId) {
+      await this.opts.conversation.unsubscribe(previousConversationId).catch(() => {});
+      this.observedConversationId = null;
+    }
+
+    let scene: WorksceneSummary;
+    try {
+      scene = await this.opts.workscene.setWorkdir(sceneId, workdir);
+    } catch (error) {
+      if (isRpcNotFound(error)) {
+        return { kind: "scene-missing", active: this.active, error };
+      }
+      await this.subscribeActive();
+      return { kind: "set-failed", active: this.active, error };
+    }
+
+    try {
+      const entered = await this.enterScene(sceneId);
+      return {
+        kind: "reentered",
+        active: entered.active,
+        scene,
+        ...(entered.advancement ? { advancement: entered.advancement } : {}),
+      };
+    } catch (error) {
+      return { kind: "enter-failed", active: this.active, scene, error };
+    }
+  }
+
+  /**
    * 退出场景:宿主 touch + 指针切回一个真实存在的 main 对话。
    *
    * mainTarget 是接入面本地保存的"进场前主对话"指针;多接入面下它可能
@@ -827,6 +896,13 @@ export class ConversationController {
     this.localTurnsByConversation.clear();
     this.observedConversationId = null;
   }
+}
+
+function isRpcNotFound(error: unknown): error is RpcClientError {
+  return (
+    error instanceof RpcClientError &&
+    error.code === RPC_ERROR_CODES.NOT_FOUND
+  );
 }
 
 function toMainActive(input: {

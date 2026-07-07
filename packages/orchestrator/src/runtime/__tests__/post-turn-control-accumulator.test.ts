@@ -8,9 +8,9 @@ function makeBus(): EventBus<AgentEventMap> {
 }
 
 describe("subscribePostTurnControlAccumulator · last-wins 单一意图", () => {
-  it("从未 emit 时 getIntent 返回 undefined", () => {
+  it("从未 emit 时 getOutcome 返回 undefined", () => {
     const acc = subscribePostTurnControlAccumulator(makeBus());
-    expect(acc.getIntent()).toBeUndefined();
+    expect(acc.getOutcome()).toBeUndefined();
   });
 
   it("emit 一次 → getIntent 原样带出", async () => {
@@ -20,7 +20,9 @@ describe("subscribePostTurnControlAccumulator · last-wins 单一意图", () => 
       kind: "enter",
       sceneId: "scene-a",
     });
-    expect(acc.getIntent()).toEqual({ kind: "enter", sceneId: "scene-a" });
+    expect(acc.getOutcome()).toEqual({
+      intent: { kind: "enter", sceneId: "scene-a" },
+    });
   });
 
   it("同 turn 多次 enter（不同 sceneId）→ 取最后（last-wins）", async () => {
@@ -34,10 +36,12 @@ describe("subscribePostTurnControlAccumulator · last-wins 单一意图", () => 
       kind: "enter",
       sceneId: "scene-b",
     });
-    expect(acc.getIntent()).toEqual({ kind: "enter", sceneId: "scene-b" });
+    expect(acc.getOutcome()).toEqual({
+      intent: { kind: "enter", sceneId: "scene-b" },
+    });
   });
 
-  it("exit 后再 enter → 取最后（纯覆盖，非累加/合并）", async () => {
+  it("exit 后再 enter → 取最后并标记异类冲突", async () => {
     const bus = makeBus();
     const acc = subscribePostTurnControlAccumulator(bus);
     await bus.emit("post_turn_control:requested", { kind: "exit" });
@@ -45,7 +49,28 @@ describe("subscribePostTurnControlAccumulator · last-wins 单一意图", () => 
       kind: "enter",
       sceneId: "scene-x",
     });
-    expect(acc.getIntent()).toEqual({ kind: "enter", sceneId: "scene-x" });
+    expect(acc.getOutcome()).toEqual({
+      intent: { kind: "enter", sceneId: "scene-x" },
+      conflict: { kindsSeen: ["exit", "enter"] },
+    });
+  });
+
+  it("同类重复 set_workdir → last-wins 且不标冲突", async () => {
+    const bus = makeBus();
+    const acc = subscribePostTurnControlAccumulator(bus);
+    await bus.emit("post_turn_control:requested", {
+      kind: "set_workdir",
+      sceneId: "scene-x",
+      workdir: "/a",
+    });
+    await bus.emit("post_turn_control:requested", {
+      kind: "set_workdir",
+      sceneId: "scene-x",
+      workdir: null,
+    });
+    expect(acc.getOutcome()).toEqual({
+      intent: { kind: "set_workdir", sceneId: "scene-x", workdir: null },
+    });
   });
 
   it("onEvent 在覆盖逻辑之前调用（每次 emit 均触发）", async () => {
@@ -75,7 +100,9 @@ describe("subscribePostTurnControlAccumulator · last-wins 单一意图", () => 
       kind: "enter",
       sceneId: "s2",
     });
-    expect(acc.getIntent()).toEqual({ kind: "enter", sceneId: "s1" });
+    expect(acc.getOutcome()).toEqual({
+      intent: { kind: "enter", sceneId: "s1" },
+    });
   });
 
   it("多次订阅互不干扰（独立句柄）", async () => {
@@ -89,17 +116,22 @@ describe("subscribePostTurnControlAccumulator · last-wins 单一意图", () => 
     a.dispose();
     await bus.emit("post_turn_control:requested", { kind: "exit" });
     // a 已 dispose 停在 shared；b 继续收到 exit
-    expect(a.getIntent()).toEqual({ kind: "enter", sceneId: "shared" });
-    expect(b.getIntent()).toEqual({ kind: "exit" });
+    expect(a.getOutcome()).toEqual({
+      intent: { kind: "enter", sceneId: "shared" },
+    });
+    expect(b.getOutcome()).toEqual({
+      intent: { kind: "exit" },
+      conflict: { kindsSeen: ["enter", "exit"] },
+    });
   });
 });
 
 describe("subscribePostTurnControlAccumulator · onEvent 时序契约", () => {
-  it("onEvent 内读 getIntent 拿到的是不含当前事件的旧值", async () => {
+  it("onEvent 内读 getOutcome 拿到的是不含当前事件的旧值", async () => {
     const bus = makeBus();
     const observed: Array<string | undefined> = [];
     const acc = subscribePostTurnControlAccumulator(bus, () => {
-      const cur = acc.getIntent();
+      const cur = acc.getOutcome()?.intent;
       observed.push(cur && cur.kind === "enter" ? cur.sceneId : cur?.kind);
     });
     await bus.emit("post_turn_control:requested", {
@@ -112,6 +144,8 @@ describe("subscribePostTurnControlAccumulator · onEvent 时序契约", () => {
     });
     // 第一次 onEvent 时 last 仍 undefined；第二次时 last 仍是 first
     expect(observed).toEqual([undefined, "first"]);
-    expect(acc.getIntent()).toEqual({ kind: "enter", sceneId: "second" });
+    expect(acc.getOutcome()).toEqual({
+      intent: { kind: "enter", sceneId: "second" },
+    });
   });
 });

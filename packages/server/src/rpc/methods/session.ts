@@ -1354,7 +1354,7 @@ async function runManagedTurn(
       },
       notify: push,
       abortSignal: abortController.signal,
-      onPostTurnControlIntent: (intent) => {
+      onPostTurnControlIntent: (control) => {
         // turn 边界控制意图是可执行的控制字段,只定向发起连接——跟随权归发起
         // 接入面由结构保证(旁观端物理收不到),不靠客户端自律。先于 complete
         // 发送(同连接有序):客户端收意图暂存,收 complete(turn 落定)即消费,
@@ -1362,7 +1362,8 @@ async function runManagedTurn(
         connection.notify(SESSION_NOTIFICATIONS.postTurnControlIntent, {
           conversationId,
           turnId,
-          intent,
+          intent: control.intent,
+          ...(control.conflict ? { conflict: control.conflict } : {}),
         } satisfies SessionPostTurnControlIntentPayload);
       },
     });

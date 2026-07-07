@@ -11,7 +11,7 @@
 import type { IEventBus } from "../events/types.js";
 import type {
   AgentEventMap,
-  PostTurnControlIntent,
+  PostTurnControlOutcome,
 } from "../types/agent-events.js";
 import type { AgentError } from "../types/errors.js";
 import type {
@@ -475,10 +475,10 @@ export interface RunResult {
   readonly budget?: ContextBudget;
 
   /**
-   * 本 run 内产生的 turn 边界控制意图（turn 内 emit、RunResult 带出，与
-   * windowCompact 同构）。accumulator last-wins 收集；无 emit 时 undefined。
-   * 仅意图 —— 控制动作由发起接入面在 turn 边界单一事务消费执行，本字段
-   * 不触发任何切换。
+   * 本 run 内产生的 turn 边界控制结果（turn 内 emit、RunResult 带出，与
+   * windowCompact 同构）。accumulator last-wins 收集最后意图；异类控制请求
+   * 通过 conflict 暴露给接入面提示。仅意图 —— 控制动作由发起接入面在 turn
+   * 边界单一事务消费执行，本字段不触发任何切换。
    */
-  readonly pendingPostTurnControl?: PostTurnControlIntent;
+  readonly pendingPostTurnControl?: PostTurnControlOutcome;
 }

@@ -27,7 +27,7 @@ import {
   type DispatchResult,
   createEventBus,
   type SchedulerEventMap,
-  type PostTurnControlIntent,
+  type PostTurnControlOutcome,
   CommandDispatcher,
 } from "@zhixing/core";
 import { loadCredentials, resolveHomeDir } from "@zhixing/providers";
@@ -127,6 +127,25 @@ interface ReplState {
    * 执行前 await 它(切换天然落在 turn 边界)。
    */
   activeTurnPromise: Promise<unknown> | null;
+}
+
+function formatPostTurnControlIntent(
+  intent: PostTurnControlOutcome["intent"],
+): string {
+  switch (intent.kind) {
+    case "enter":
+      return "进入工作场景";
+    case "exit":
+      return "退出工作场景";
+    case "set_workdir":
+      return intent.workdir ? "更换工作场景目录" : "解除工作场景目录绑定";
+    default:
+      return "工作场景控制";
+  }
+}
+
+function formatErrorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 async function waitForReloadStatus(
@@ -828,10 +847,19 @@ export async function startRepl(): Promise<void> {
    * 由用户自己给出——切换横幅后输入区即场景对话,用户的下一句话就是首轮。
    */
   const applyPostTurnControl = async (
-    intent: PostTurnControlIntent,
+    control: PostTurnControlOutcome,
   ): Promise<void> => {
     const sepWidth = Math.max(38, (process.stdout.columns ?? 80) - 3);
     const sep = "─".repeat(sepWidth);
+    const intent = control.intent;
+
+    if (control.conflict) {
+      cliWriter.line(
+        chalk.dim(
+          `\n  本轮出现多个工作场景控制请求，已按最后一次确认执行：${formatPostTurnControlIntent(intent)}\n`,
+        ),
+      );
+    }
 
     if (intent.kind === "enter") {
       if (controller.current.mode.kind !== "main") {
@@ -879,34 +907,107 @@ export async function startRepl(): Promise<void> {
       return;
     }
 
-    if (intent.kind !== "exit") {
-      cliWriter.line(chalk.dim("\n  当前接入面暂不支持该工作场景控制请求\n"));
+    if (intent.kind === "set_workdir") {
+      if (
+        controller.current.mode.kind !== "workscene" ||
+        controller.current.mode.sceneId !== intent.sceneId
+      ) {
+        cliWriter.line(
+          chalk.dim("\n  工作场景控制请求已过期，当前场景不匹配；将返回主对话\n"),
+        );
+        if (controller.current.mode.kind === "workscene") {
+          await exitToMain();
+        }
+        return;
+      }
+      const changed = await controller.setCurrentSceneWorkdirAndReenter(
+        intent.sceneId,
+        intent.workdir,
+      );
+      if (changed.kind === "reentered") {
+        const mode = changed.active.mode;
+        const sceneName =
+          mode.kind === "workscene" ? mode.sceneName : changed.scene.name;
+        const workdirText = intent.workdir
+          ? `新目录：${changed.scene.workdir ?? intent.workdir}`
+          : "已解除目录绑定";
+        cliWriter.line(
+          chalk.dim(
+            `\n  ${sep}\n  已按更新后的工作场景配置重新进入 ${chalk.cyan(sceneName)}\n  ${workdirText}\n  ${sep}\n`,
+          ),
+        );
+        if (changed.scene.workdirWarning) {
+          cliWriter.line(chalk.dim(`  提示：${changed.scene.workdirWarning}\n`));
+        }
+        await syncCurrentTaskListView();
+        if (changed.advancement) {
+          await presentResumedAdvancement(changed.advancement);
+        }
+        return;
+      }
+      if (changed.kind === "set-failed") {
+        cliWriter.line(
+          chalk.red(
+            `\n  更改工作场景目录失败，已留在原场景：${formatErrorMessage(changed.error)}\n`,
+          ),
+        );
+        await syncCurrentTaskListView();
+        return;
+      }
+      if (changed.kind === "scene-missing") {
+        cliWriter.line(
+          chalk.yellow("\n  当前工作场景已不存在，将返回主对话\n"),
+        );
+        await exitToMain();
+        return;
+      }
+      if (changed.kind === "scene-mismatch") {
+        cliWriter.line(
+          chalk.dim("\n  工作场景控制请求已过期，当前场景不匹配\n"),
+        );
+        return;
+      }
+      cliWriter.line(
+        chalk.red(
+          `\n  工作场景目录已更新，但重新进入失败：${formatErrorMessage(changed.error)}\n`,
+        ),
+      );
+      await exitToMain();
       return;
     }
 
-    if (controller.current.mode.kind !== "workscene") {
-      cliWriter.line(chalk.dim("\n  当前不在工作场景中\n"));
+    if (intent.kind === "exit") {
+      await exitToMain();
       return;
     }
-    // 退出 = 宿主 touch + 指针切回 main。场景实例的收尾(末窗记忆 flush)随
-    // 宿主实例生命周期(grace 到期 dispose)自行发生,不在接入面。
-    const exitResult = await controller.exitScene(mainReturnTarget);
-    mainReturnTarget = controller.current;
-    const exitMessage =
-      exitResult.kind === "returned"
-        ? "已退出工作场景，回到主对话"
-        : exitResult.kind === "fallback-latest"
-          ? `已退出工作场景；原主对话已不存在，已切换到最近主对话 ${chalk.cyan(exitResult.active.name)}`
-          : exitResult.kind === "fallback-new"
-            ? `已退出工作场景；原主对话已不存在，已创建新主对话 ${chalk.cyan(exitResult.active.name)}`
-            : "当前不在工作场景中";
-    cliWriter.line(
-      chalk.dim(`\n  ${sep}\n  ${exitMessage}\n  ${sep}\n`),
-    );
-    await syncCurrentTaskListView();
-    // 返回的主对话有推进状态时呈现——切换即浮现，与 resume 同一裁决
-    if (exitResult.kind !== "not-in-workscene" && exitResult.advancement) {
-      await presentResumedAdvancement(exitResult.advancement);
+
+    cliWriter.line(chalk.dim("\n  当前接入面暂不支持该工作场景控制请求\n"));
+
+    async function exitToMain(): Promise<void> {
+      if (controller.current.mode.kind !== "workscene") {
+        cliWriter.line(chalk.dim("\n  当前不在工作场景中\n"));
+        return;
+      }
+      // 退出 = 宿主 touch + 指针切回 main。场景实例的收尾(末窗记忆 flush)随
+      // 宿主实例生命周期(grace 到期 dispose)自行发生,不在接入面。
+      const exitResult = await controller.exitScene(mainReturnTarget);
+      mainReturnTarget = controller.current;
+      const exitMessage =
+        exitResult.kind === "returned"
+          ? "已退出工作场景，回到主对话"
+          : exitResult.kind === "fallback-latest"
+            ? `已退出工作场景；原主对话已不存在，已切换到最近主对话 ${chalk.cyan(exitResult.active.name)}`
+            : exitResult.kind === "fallback-new"
+              ? `已退出工作场景；原主对话已不存在，已创建新主对话 ${chalk.cyan(exitResult.active.name)}`
+              : "当前不在工作场景中";
+      cliWriter.line(
+        chalk.dim(`\n  ${sep}\n  ${exitMessage}\n  ${sep}\n`),
+      );
+      await syncCurrentTaskListView();
+      // 返回的主对话有推进状态时呈现——切换即浮现，与 resume 同一裁决
+      if (exitResult.kind !== "not-in-workscene" && exitResult.advancement) {
+        await presentResumedAdvancement(exitResult.advancement);
+      }
     }
   };
 
@@ -1057,7 +1158,7 @@ export async function startRepl(): Promise<void> {
     registry: tRegistry,
     dispatcher: typeaheadDispatcher,
     writer: cliWriter,
-    applyPostTurnControl,
+    applyPostTurnControl: (intent) => applyPostTurnControl({ intent }),
     getActiveMode: () => controller.current.mode,
     getActiveTurnPromise: () => state.activeTurnPromise,
     listScenes: () => worksceneFacade.list(),

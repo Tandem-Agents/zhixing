@@ -11,6 +11,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 import type { AgentYield } from "@zhixing/core";
+import { RPC_ERROR_CODES, RpcClientError } from "@zhixing/server";
 import {
   ConversationController,
   selectInitialConversation,
@@ -113,6 +114,11 @@ function makeFakes() {
     enter: vi.fn(async (sceneId: string) => ({
       conversationId: `ws:${sceneId}:conv-9`,
       scene: { sceneId, name: "写作场景" },
+    })),
+    setWorkdir: vi.fn(async (sceneId: string, workdir: string | null) => ({
+      sceneId,
+      name: "写作场景",
+      ...(workdir ? { workdir } : {}),
     })),
     exit: vi.fn(async () => {}),
   };
@@ -307,6 +313,7 @@ describe("ConversationController", () => {
       conversationId: "conv-1",
       turnId,
       intent: { kind: "enter", sceneId: "scene-1" },
+      conflict: { kindsSeen: ["exit", "enter"] },
     });
     f.emit.complete({
       conversationId: "conv-1",
@@ -318,8 +325,8 @@ describe("ConversationController", () => {
     const outcome = await turn;
     expect(outcome.result.reason).toBe("completed");
     expect(outcome.postTurnControl).toEqual({
-      kind: "enter",
-      sceneId: "scene-1",
+      intent: { kind: "enter", sceneId: "scene-1" },
+      conflict: { kindsSeen: ["exit", "enter"] },
     });
     expect(f.conversation.send).toHaveBeenCalledWith(
       "帮我进写作场景",
@@ -854,6 +861,75 @@ describe("ConversationController", () => {
     expect(f.conversation.resumeIfExists).toHaveBeenCalledWith("conv-1");
     expect(f.workscene.exit).toHaveBeenCalledWith("scene-1");
     expect(controller.current).toEqual(initial);
+  });
+
+  it("setCurrentSceneWorkdirAndReenter:撤 observer 后落盘并按新目录重进", async () => {
+    const f = makeFakes();
+    const { controller } = makeController(f);
+
+    await controller.start();
+    await controller.enterScene("scene-1");
+    f.conversation.unsubscribe.mockClear();
+    f.conversation.subscribe.mockClear();
+
+    const result = await controller.setCurrentSceneWorkdirAndReenter(
+      "scene-1",
+      "/tmp/project",
+    );
+
+    expect(result.kind).toBe("reentered");
+    expect(f.conversation.unsubscribe).toHaveBeenCalledWith("ws:scene-1:conv-9");
+    expect(f.workscene.setWorkdir).toHaveBeenCalledWith("scene-1", "/tmp/project");
+    expect(f.workscene.enter).toHaveBeenLastCalledWith("scene-1");
+    expect(controller.current.mode).toEqual({
+      kind: "workscene",
+      sceneId: "scene-1",
+      sceneName: "写作场景",
+    });
+  });
+
+  it("setCurrentSceneWorkdirAndReenter:setWorkdir 失败时重挂原 observer，不切指针", async () => {
+    const f = makeFakes();
+    const { controller } = makeController(f);
+
+    await controller.start();
+    await controller.enterScene("scene-1");
+    f.workscene.setWorkdir.mockRejectedValueOnce(new Error("BUSY"));
+    f.conversation.unsubscribe.mockClear();
+    f.conversation.subscribe.mockClear();
+
+    const result = await controller.setCurrentSceneWorkdirAndReenter(
+      "scene-1",
+      null,
+    );
+
+    expect(result.kind).toBe("set-failed");
+    expect(f.conversation.unsubscribe).toHaveBeenCalledWith("ws:scene-1:conv-9");
+    expect(f.conversation.subscribe).toHaveBeenCalledWith("ws:scene-1:conv-9");
+    expect(controller.current.conversationId).toBe("ws:scene-1:conv-9");
+  });
+
+  it("setCurrentSceneWorkdirAndReenter:场景并发删除时不重挂旧 observer，交给接入面回主对话", async () => {
+    const f = makeFakes();
+    const { controller } = makeController(f);
+
+    await controller.start();
+    await controller.enterScene("scene-1");
+    f.workscene.setWorkdir.mockRejectedValueOnce(
+      new RpcClientError(RPC_ERROR_CODES.NOT_FOUND, "Workscene not found"),
+    );
+    f.conversation.unsubscribe.mockClear();
+    f.conversation.subscribe.mockClear();
+
+    const result = await controller.setCurrentSceneWorkdirAndReenter(
+      "scene-1",
+      "/tmp/project",
+    );
+
+    expect(result.kind).toBe("scene-missing");
+    expect(f.conversation.unsubscribe).toHaveBeenCalledWith("ws:scene-1:conv-9");
+    expect(f.conversation.subscribe).not.toHaveBeenCalled();
+    expect(controller.current.conversationId).toBe("ws:scene-1:conv-9");
   });
 
   it("exitScene:进场前主对话已被其它接入面删除时,跳过 stale 候选并回退到宿主最新 main 对话", async () => {

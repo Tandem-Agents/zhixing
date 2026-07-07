@@ -23,8 +23,11 @@ import {
   createWorkmodeEnterTool,
   createWorkmodeExitTool,
   createWorksceneChangeApproveTool,
+  createWorksceneClearWorkdirCurrentTool,
   createWorksceneListTool,
   createWorksceneMemoryQueryTool,
+  createWorksceneRenameCurrentTool,
+  createWorksceneSetWorkdirCurrentTool,
   type WorksceneToolDirectory,
 } from "../workmode-tools.js";
 
@@ -147,6 +150,89 @@ describe("workmode_exit", () => {
     expect(result.isError).toBe(true);
     expect(result.content).toContain("暂不支持");
     expect(emitted).toEqual([]);
+  });
+});
+
+describe("workscene current tools", () => {
+  const scene = { sceneId: "scene-1", sceneName: "旧场景名" };
+
+  it("rename_current 闭包限当前 sceneId，直接调用领域服务且不 emit", async () => {
+    const rename = vi.fn().mockResolvedValue({
+      id: "scene-1",
+      name: "新场景名",
+      createdAt: "",
+      lastActiveAt: "",
+    });
+    const tool = createWorksceneRenameCurrentTool(makeDirectory({ rename }), scene);
+    expect(tool.requiresExplicitConfirmation).toBe(true);
+    expect(tool.boundaries).toEqual(
+      getWorksceneToolBoundaries("workscene_rename_current"),
+    );
+    expect(tool.confirmationDisplayContext).toEqual({
+      workscene: { sceneId: "scene-1", sceneName: "旧场景名" },
+    });
+
+    const { result, emitted } = await callInRun(() =>
+      tool.call({ name: "  新场景名  " }, CTX),
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(rename).toHaveBeenCalledWith("scene-1", "新场景名");
+    expect(emitted).toEqual([]);
+  });
+
+  it("set_workdir_current 校验目录后 emit set_workdir，不直接落盘", async () => {
+    const workdir = await createTempDir("workscene-current-workdir");
+    const tool = createWorksceneSetWorkdirCurrentTool(scene);
+    expect(tool.requiresExplicitConfirmation).toBe(true);
+    expect(tool.boundaries).toEqual(
+      getWorksceneToolBoundaries("workscene_set_workdir_current"),
+    );
+
+    const { result, emitted } = await callInRun(() =>
+      tool.call({ workdir }, CTX),
+    );
+
+    expect(result.isError).toBeFalsy();
+    expect(emitted).toEqual([{ kind: "set_workdir", sceneId: "scene-1", workdir }]);
+  });
+
+  it("set_workdir_current 缺目录或相对路径 → isError 且不 emit", async () => {
+    const tool = createWorksceneSetWorkdirCurrentTool(scene);
+    const missing = await callInRun(() => tool.call({}, CTX));
+    expect(missing.result.isError).toBe(true);
+    expect(missing.emitted).toEqual([]);
+
+    const relative = await callInRun(() =>
+      tool.call({ workdir: "relative/path" }, CTX),
+    );
+    expect(relative.result.isError).toBe(true);
+    expect(relative.emitted).toEqual([]);
+  });
+
+  it("set_workdir_current 无 post-turn capability → isError 且不 emit", async () => {
+    const tool = createWorksceneSetWorkdirCurrentTool(scene);
+    const { result, emitted } = await callInRun(
+      () => tool.call({ workdir: "C:\\project" }, CTX),
+      { postTurnControl: false },
+    );
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain("暂不支持");
+    expect(emitted).toEqual([]);
+  });
+
+  it("clear_workdir_current emit 显式 null，不用缺参表达解绑", async () => {
+    const tool = createWorksceneClearWorkdirCurrentTool(scene);
+    expect(tool.boundaries).toEqual(
+      getWorksceneToolBoundaries("workscene_clear_workdir_current"),
+    );
+
+    const { result, emitted } = await callInRun(() => tool.call({}, CTX));
+
+    expect(result.isError).toBeFalsy();
+    expect(emitted).toEqual([
+      { kind: "set_workdir", sceneId: "scene-1", workdir: null },
+    ]);
   });
 });
 

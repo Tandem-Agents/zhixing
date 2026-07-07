@@ -113,7 +113,7 @@ export class RuntimeHost {
         primaryRole: "power",
         memoryScope: { kind: "workscene", sceneId: scene.id },
         profile: powerProfile(scene),
-        spec: { kind: "workscene" },
+        spec: { kind: "workscene", sceneId: scene.id, sceneName: scene.name },
       },
     });
   }
@@ -137,7 +137,7 @@ export class RuntimeHost {
         primaryRole: "power";
         memoryScope: { kind: "workscene"; sceneId: string };
         profile: ReturnType<typeof powerProfile>;
-        spec: { kind: "workscene" };
+        spec: { kind: "workscene"; sceneId: string; sceneName: string };
       };
     },
   ): Promise<AgentRuntime> {

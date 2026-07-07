@@ -101,6 +101,15 @@ export type PostTurnControlIntent =
   | { kind: "exit" }
   | { kind: "set_workdir"; sceneId: string; workdir: string | null };
 
+export interface PostTurnControlConflict {
+  readonly kindsSeen: readonly PostTurnControlIntent["kind"][];
+}
+
+export interface PostTurnControlOutcome {
+  readonly intent: PostTurnControlIntent;
+  readonly conflict?: PostTurnControlConflict;
+}
+
 export interface OrchestrationEventIssue {
   readonly path: string;
   readonly code: string;

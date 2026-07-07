@@ -28,6 +28,7 @@ import type {
   TaskListState,
   TokenUsage,
   PostTurnControlIntent,
+  PostTurnControlOutcome,
 } from "@zhixing/core";
 import type {
   RuntimeSecuritySnapshot,
@@ -117,6 +118,7 @@ export interface SessionPostTurnControlIntentPayload {
   /** 产生该 turn 边界控制意图的 turn 身份 */
   turnId: string;
   intent: PostTurnControlIntent;
+  conflict?: PostTurnControlOutcome["conflict"];
 }
 
 export type SessionSendEngage = {

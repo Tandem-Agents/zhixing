@@ -113,6 +113,8 @@ export type {
   OrchestrationEventIssue,
   OrchestrationRunEventStatus,
   PostTurnControlIntent,
+  PostTurnControlOutcome,
+  PostTurnControlConflict,
 } from "./agent-events.js";
 
 // ─── 错误类型 ───

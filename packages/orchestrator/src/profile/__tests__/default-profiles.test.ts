@@ -113,10 +113,13 @@ describe("powerProfile(scene)", () => {
     }
   });
 
-  it("instructions 含基础身份 + 场景名定位 + 退出自判(指向 workmode_exit)；capabilities 同 main", () => {
+  it("instructions 含基础身份、场景内属性管理与退出自判；capabilities 同 main", () => {
     const p = powerProfile(makeScene({ name: "写作场景" }));
     expect(p.instructions).toContain(MAIN_IDENTITY_INSTRUCTIONS);
     expect(p.instructions).toContain("写作场景");
+    expect(p.instructions).toContain("rename this scene");
+    expect(p.instructions).toContain("change its workdir");
+    expect(p.instructions).toContain("clear its workdir binding");
     // 退出自判：显式指向 workmode_exit 工具，而非仅"叙述完成"
     expect(p.instructions).toContain("workmode_exit");
     expect(p.capabilities).toEqual({
