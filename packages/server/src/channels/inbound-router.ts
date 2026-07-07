@@ -263,13 +263,23 @@ export class InboundRouter {
 
     this.logger.info(`[调度] status=${status} busy=${managed.busy} conv=${conversationId}`);
 
-    if (status === "full") {
-      this.logger.warn(`[丢弃] 队列满 conv=${conversationId}`);
+    if (status === "full" || status === "busy") {
+      this.logger.warn(`[丢弃] status=${status} conv=${conversationId}`);
       const replyTarget = buildReplyTarget(msg);
+      const text =
+        status === "busy"
+          ? "场景正在切换或目录变更，请稍后重试。"
+          : "消息队列已满，请稍后再试。";
       await this.emitReply(
         replyTarget,
-        { text: "消息队列已满，请稍后再试。" },
-        { kind: "system", handler: "conversation-queue-full" },
+        { text },
+        {
+          kind: "system",
+          handler:
+            status === "busy"
+              ? "conversation-quiescing"
+              : "conversation-queue-full",
+        },
       ).catch((e) => this.logger.error(`Failed to send busy reply: ${errMsg(e)}`));
       return;
     }

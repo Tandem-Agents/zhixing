@@ -6,7 +6,10 @@ import {
   type Message,
   type RunResult,
 } from "@zhixing/core";
-import { ConversationManager } from "../conversation-manager.js";
+import {
+  ConversationManager,
+  WorksceneBusyError,
+} from "../conversation-manager.js";
 import { ConfirmationHub } from "../../confirmation/hub.js";
 import type { SessionRuntime, RuntimeFactory } from "../types.js";
 
@@ -74,6 +77,14 @@ function createMockFactory(): RuntimeFactory {
       return createMockRuntime(sessionId);
     },
   };
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
 }
 
 // ─── Tests ───
@@ -910,6 +921,277 @@ describe("ConversationManager", () => {
       } finally {
         vi.useFakeTimers();
       }
+    });
+  });
+
+  // ─── Prefix quiesce ───
+
+  describe("quiescePrefix", () => {
+    it("释放匹配前缀的 idle 会话并持闸到 disposer 调用", async () => {
+      const disposed: string[] = [];
+      const mgr = new ConversationManager(
+        {
+          async create(sessionId) {
+            const runtime = createMockRuntime(sessionId);
+            return {
+              ...runtime,
+              async dispose() {
+                disposed.push(sessionId);
+                await runtime.dispose?.();
+              },
+            } as SessionRuntime;
+          },
+        },
+        {
+          graceTimeoutMs: 60_000,
+          idleTimeoutMs: 30 * 60_000,
+          idleCheckIntervalMs: 999_999,
+        },
+      );
+
+      await mgr.getOrCreate("ws:scene-a:one");
+      await mgr.getOrCreate("ws:scene-a:two");
+      await mgr.getOrCreate("ws:scene-b:one");
+
+      const release = await mgr.quiescePrefix("ws:scene-a:");
+
+      expect(disposed.sort()).toEqual(["ws:scene-a:one", "ws:scene-a:two"]);
+      expect(mgr.has("ws:scene-a:one")).toBe(false);
+      expect(mgr.has("ws:scene-a:two")).toBe(false);
+      expect(mgr.has("ws:scene-b:one")).toBe(true);
+
+      await expect(mgr.getOrCreate("ws:scene-a:new")).rejects.toBeInstanceOf(
+        WorksceneBusyError,
+      );
+      expect(
+        mgr.enqueue("ws:scene-a:new", {
+          execute: async () => {},
+          cancel: () => {},
+        }),
+      ).toBe("busy");
+      await expect(mgr.quiescePrefix("ws:scene-a:")).rejects.toBeInstanceOf(
+        WorksceneBusyError,
+      );
+
+      release();
+      await expect(mgr.getOrCreate("ws:scene-a:new")).resolves.toBeDefined();
+      await mgr.disposeAll();
+    });
+
+    it("dispose 抛错仍完成 quiesce 释放并继续释放同前缀其它 idle 会话", async () => {
+      const disposed: string[] = [];
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const mgr = new ConversationManager(
+        {
+          async create(sessionId) {
+            const runtime = createMockRuntime(sessionId);
+            return {
+              ...runtime,
+              async dispose() {
+                disposed.push(sessionId);
+                if (sessionId === "ws:scene-a:bad-dispose") {
+                  throw new Error("flush failed");
+                }
+                await runtime.dispose?.();
+              },
+            } as SessionRuntime;
+          },
+        },
+        {
+          graceTimeoutMs: 60_000,
+          idleTimeoutMs: 30 * 60_000,
+          idleCheckIntervalMs: 999_999,
+        },
+      );
+
+      try {
+        await mgr.getOrCreate("ws:scene-a:bad-dispose");
+        await mgr.getOrCreate("ws:scene-a:good-dispose");
+
+        const release = await mgr.quiescePrefix("ws:scene-a:");
+
+        expect(disposed.sort()).toEqual([
+          "ws:scene-a:bad-dispose",
+          "ws:scene-a:good-dispose",
+        ]);
+        expect(mgr.has("ws:scene-a:bad-dispose")).toBe(false);
+        expect(mgr.has("ws:scene-a:good-dispose")).toBe(false);
+        expect(errorSpy).toHaveBeenCalledWith(
+          "[ConversationManager.quiescePrefix] runtime.dispose failed:",
+          expect.any(Error),
+        );
+        await expect(mgr.getOrCreate("ws:scene-a:new")).rejects.toBeInstanceOf(
+          WorksceneBusyError,
+        );
+
+        release();
+        await expect(mgr.getOrCreate("ws:scene-a:new")).resolves.toBeDefined();
+      } finally {
+        await mgr.disposeAll();
+        errorSpy.mockRestore();
+      }
+    });
+
+    it("creating 命中前缀时直接 BUSY,不会等待旧运行体创建完成", async () => {
+      const gate = deferred();
+      const mgr = new ConversationManager(
+        {
+          async create(sessionId) {
+            await gate.promise;
+            return createMockRuntime(sessionId);
+          },
+        },
+        {
+          graceTimeoutMs: 60_000,
+          idleTimeoutMs: 30 * 60_000,
+          idleCheckIntervalMs: 999_999,
+        },
+      );
+
+      const creating = mgr.getOrCreate("ws:scene-a:creating");
+      await Promise.resolve();
+
+      await expect(mgr.quiescePrefix("ws:scene-a:")).rejects.toBeInstanceOf(
+        WorksceneBusyError,
+      );
+
+      gate.resolve();
+      await expect(creating).resolves.toBeDefined();
+      await mgr.disposeAll();
+    });
+
+    it("无活跃会话但存在 observer 时直接 BUSY", async () => {
+      const mgr = new ConversationManager(createMockFactory(), {
+        graceTimeoutMs: 60_000,
+        idleTimeoutMs: 30 * 60_000,
+        idleCheckIntervalMs: 999_999,
+      });
+
+      expect(
+        mgr.addObserver("ws:scene-a:idle", "conn-1", { allowInactive: true }),
+      ).toBe(true);
+
+      await expect(mgr.quiescePrefix("ws:scene-a:")).rejects.toBeInstanceOf(
+        WorksceneBusyError,
+      );
+      expect(mgr.getObserverCount("ws:scene-a:idle")).toBe(1);
+      await mgr.disposeAll();
+    });
+
+    it("active busy 会话命中前缀时直接 BUSY", async () => {
+      const mgr = new ConversationManager(createMockFactory(), {
+        graceTimeoutMs: 60_000,
+        idleTimeoutMs: 30 * 60_000,
+        idleCheckIntervalMs: 999_999,
+      });
+
+      await mgr.getOrCreate("ws:scene-a:busy");
+      mgr.setBusy("ws:scene-a:busy", true);
+
+      await expect(mgr.quiescePrefix("ws:scene-a:")).rejects.toBeInstanceOf(
+        WorksceneBusyError,
+      );
+
+      expect(mgr.has("ws:scene-a:busy")).toBe(true);
+      expect(mgr.pendingCount("ws:scene-a:busy")).toBe(0);
+      mgr.setBusy("ws:scene-a:busy", false);
+      await mgr.disposeAll();
+    });
+
+    it("pending queue 命中前缀时直接 BUSY,不丢弃排队输入", async () => {
+      const mgr = new ConversationManager(createMockFactory(), {
+        graceTimeoutMs: 60_000,
+        idleTimeoutMs: 30 * 60_000,
+        idleCheckIntervalMs: 999_999,
+      });
+      const session = await mgr.getOrCreate("ws:scene-a:pending");
+      mgr.setBusy("ws:scene-a:pending", true);
+      const cancelled: string[] = [];
+      expect(
+        mgr.enqueue("ws:scene-a:pending", {
+          execute: async () => {},
+          cancel: () => {
+            cancelled.push("pending");
+          },
+        }),
+      ).toBe("queued");
+      session.busy = false;
+
+      await expect(mgr.quiescePrefix("ws:scene-a:")).rejects.toBeInstanceOf(
+        WorksceneBusyError,
+      );
+
+      expect(mgr.pendingCount("ws:scene-a:pending")).toBe(1);
+      expect(cancelled).toEqual([]);
+      await mgr.disposeAll();
+    });
+
+    it("等待所有 idle 会话 dispose 完成后才返回 disposer", async () => {
+      const gate = deferred();
+      const disposed: string[] = [];
+      const mgr = new ConversationManager(
+        {
+          async create(sessionId) {
+            const runtime = createMockRuntime(sessionId);
+            return {
+              ...runtime,
+              async dispose() {
+                disposed.push(sessionId);
+                await gate.promise;
+                await runtime.dispose?.();
+              },
+            } as SessionRuntime;
+          },
+        },
+        {
+          graceTimeoutMs: 60_000,
+          idleTimeoutMs: 30 * 60_000,
+          idleCheckIntervalMs: 999_999,
+        },
+      );
+      await mgr.getOrCreate("ws:scene-a:slow-dispose");
+
+      let completed = false;
+      const quiesce = mgr.quiescePrefix("ws:scene-a:").then((release) => {
+        completed = true;
+        return release;
+      });
+      await Promise.resolve();
+
+      expect(disposed).toEqual(["ws:scene-a:slow-dispose"]);
+      expect(completed).toBe(false);
+      gate.resolve();
+      const release = await quiesce;
+      expect(completed).toBe(true);
+      release();
+      await mgr.disposeAll();
+    });
+
+    it("闸持有期间拦截 admitTurn 与 observer 注册", async () => {
+      const mgr = new ConversationManager(createMockFactory(), {
+        graceTimeoutMs: 60_000,
+        idleTimeoutMs: 30 * 60_000,
+        idleCheckIntervalMs: 999_999,
+      });
+
+      const release = await mgr.quiescePrefix("ws:scene-a:");
+
+      await expect(
+        mgr.admitTurn({
+          conversationId: "ws:scene-a:turn",
+          exists: async () => true,
+          makeTask: () => ({
+            execute: async () => {},
+            cancel: () => {},
+          }),
+        }),
+      ).rejects.toBeInstanceOf(WorksceneBusyError);
+      expect(
+        mgr.addObserver("ws:scene-a:turn", "conn-1", { allowInactive: true }),
+      ).toBe(false);
+
+      release();
+      await mgr.disposeAll();
     });
   });
 

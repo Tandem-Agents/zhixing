@@ -310,6 +310,19 @@ describe("InboundRouter", () => {
     conversations.disposeAll();
   });
 
+  it("sends retry reply when conversation prefix is quiescing", async () => {
+    const { adapter, conversations, router } = setup();
+    vi.spyOn(conversations, "enqueue").mockReturnValue("busy");
+
+    await router.handleMessage(dmMessage("test-ch", "user-1", "during switch"));
+
+    expect(adapter.send).toHaveBeenCalled();
+    const [, content] = (adapter.send as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(content.text).toContain("场景正在切换或目录变更");
+
+    await conversations.disposeAll();
+  });
+
   it("handles agent error and sends error reply", async () => {
     const errorRuntime: SessionRuntime = {
       sessionId: "err",

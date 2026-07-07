@@ -270,6 +270,15 @@ export type SecurityInspectionResult =
   | { status: "not-found" }
   | { status: "unsupported" };
 
+export class WorksceneBusyError extends Error {
+  readonly code = "WORKSCENE_BUSY";
+
+  constructor(message = "Workscene conversations are busy") {
+    super(message);
+    this.name = "WorksceneBusyError";
+  }
+}
+
 // ─── ConversationManager ───
 
 export class ConversationManager {
@@ -287,6 +296,7 @@ export class ConversationManager {
   private readonly graceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly pendingQueues = new Map<string, PendingTask[]>();
   private readonly activeTasks = new Map<string, PendingTask>();
+  private readonly quiescingPrefixes = new Set<string>();
   /**
    * 正在执行删除终结的 conversationId。
    *
@@ -387,6 +397,7 @@ export class ConversationManager {
     options?: { ephemeral?: boolean },
   ): Promise<ManagedSession> {
     if (conversationId && this.sessions.has(conversationId)) {
+      this.assertNotQuiescing(conversationId);
       const session = this.sessions.get(conversationId)!;
       session.lastActiveAt = new Date().toISOString();
       this.clearGraceTimer(conversationId);
@@ -394,6 +405,7 @@ export class ConversationManager {
     }
 
     const id = conversationId ?? generateConversationId();
+    this.assertNotQuiescing(id);
 
     const inflight = this.creating.get(id);
     if (inflight) return inflight;
@@ -432,6 +444,7 @@ export class ConversationManager {
   }
 
   private async doCreate(id: string, ephemeral: boolean): Promise<ManagedSession> {
+    this.assertNotQuiescing(id);
     const history = ephemeral ? undefined : await this.loadHistory?.(id);
     // factory 先于持久身份确保:装配失败(如对话所属场景已删)时 fail-fast
     // 在任何写盘之前——否则会在已删除的归属目录里重建空身份壳。
@@ -477,12 +490,14 @@ export class ConversationManager {
   ): Promise<ManagedSession | undefined> {
     const active = this.sessions.get(conversationId);
     if (active) {
+      this.assertNotQuiescing(conversationId);
       active.lastActiveAt = new Date().toISOString();
       this.clearGraceTimer(conversationId);
       return active;
     }
 
     return this.withIdLock(conversationId, async () => {
+      this.assertNotQuiescing(conversationId);
       const activeAfterWait = this.sessions.get(conversationId);
       if (activeAfterWait) {
         activeAfterWait.lastActiveAt = new Date().toISOString();
@@ -512,6 +527,7 @@ export class ConversationManager {
     if (input.conversationId) {
       const active = this.sessions.get(input.conversationId);
       if (active) {
+        this.assertNotQuiescing(input.conversationId);
         return this.admitTurnForSession(
           active,
           input.connectionId,
@@ -539,10 +555,21 @@ export class ConversationManager {
     connectionId: string | undefined,
     makeTask: (managed: ManagedSession) => PendingTask,
   ): TurnAdmissionResult {
+    this.assertNotQuiescing(managed.conversationId);
     managed.lastActiveAt = new Date().toISOString();
     this.clearGraceTimer(managed.conversationId);
     const task = makeTask(managed);
     const status = this.enqueue(managed.conversationId, task);
+    if (status === "busy") {
+      try {
+        task.cancel();
+      } catch {
+        // 与其它取消路径一致:task 还未交给队列,取消失败不影响 BUSY 语义。
+      }
+      throw new WorksceneBusyError(
+        `Conversation ${managed.conversationId} is being quiesced`,
+      );
+    }
     if (status === "full") {
       return { status: "full", conversationId: managed.conversationId };
     }
@@ -621,6 +648,7 @@ export class ConversationManager {
     connectionId: string,
     opts?: { allowInactive?: boolean },
   ): boolean {
+    if (this.findQuiescingPrefix(conversationId)) return false;
     const session = this.sessions.get(conversationId);
     if (!session && !opts?.allowInactive) return false;
     const observers = this.getOrCreateObserverSet(conversationId);
@@ -747,6 +775,105 @@ export class ConversationManager {
 
   getBusySource(conversationId: string): TurnSource | undefined {
     return this.sessions.get(conversationId)?.busySource;
+  }
+
+  async quiescePrefix(prefix: string): Promise<() => void> {
+    if (!prefix) {
+      throw new Error("ConversationManager.quiescePrefix requires a non-empty prefix");
+    }
+    if (this.hasOverlappingQuiesce(prefix)) {
+      throw new WorksceneBusyError(`Conversation prefix ${prefix} is already quiescing`);
+    }
+
+    this.quiescingPrefixes.add(prefix);
+    try {
+      const busy = this.collectQuiesceBlockers(prefix);
+      if (busy.length > 0) {
+        throw new WorksceneBusyError(
+          `Conversation prefix ${prefix} is busy: ${busy.join(", ")}`,
+        );
+      }
+
+      const releasable = [...this.sessions.entries()].filter(([id]) =>
+        id.startsWith(prefix),
+      );
+      for (const [id, session] of releasable) {
+        await this.releaseForQuiesce(id, session);
+      }
+
+      let disposed = false;
+      return () => {
+        if (disposed) return;
+        disposed = true;
+        this.quiescingPrefixes.delete(prefix);
+      };
+    } catch (err) {
+      this.quiescingPrefixes.delete(prefix);
+      if (err instanceof WorksceneBusyError) throw err;
+      throw new WorksceneBusyError(
+        `Conversation prefix ${prefix} could not be quiesced`,
+      );
+    }
+  }
+
+  private hasOverlappingQuiesce(prefix: string): boolean {
+    for (const active of this.quiescingPrefixes) {
+      if (prefix.startsWith(active) || active.startsWith(prefix)) return true;
+    }
+    return false;
+  }
+
+  private findQuiescingPrefix(conversationId: string): string | undefined {
+    for (const prefix of this.quiescingPrefixes) {
+      if (conversationId.startsWith(prefix)) return prefix;
+    }
+    return undefined;
+  }
+
+  private assertNotQuiescing(conversationId: string): void {
+    const prefix = this.findQuiescingPrefix(conversationId);
+    if (!prefix) return;
+    throw new WorksceneBusyError(
+      `Conversation ${conversationId} is blocked by quiescing prefix ${prefix}`,
+    );
+  }
+
+  private collectQuiesceBlockers(prefix: string): string[] {
+    const blockers = new Set<string>();
+    for (const [id, session] of this.sessions) {
+      if (!id.startsWith(prefix)) continue;
+      if (session.busy) blockers.add(id);
+      if ((this.pendingQueues.get(id)?.length ?? 0) > 0) blockers.add(id);
+      if (this.getObserverCount(id) > 0) blockers.add(id);
+    }
+    for (const id of this.creating.keys()) {
+      if (id.startsWith(prefix)) blockers.add(id);
+    }
+    for (const [id, queue] of this.pendingQueues) {
+      if (id.startsWith(prefix) && queue.length > 0) blockers.add(id);
+    }
+    for (const [id, observers] of this.observers) {
+      if (id.startsWith(prefix) && observers.size > 0) blockers.add(id);
+    }
+    return [...blockers];
+  }
+
+  private async releaseForQuiesce(
+    conversationId: string,
+    session: ManagedSession,
+  ): Promise<void> {
+    this.clearGraceTimer(conversationId);
+    this.detachFromHub(conversationId);
+    try {
+      await session.runtime.dispose();
+    } catch (err) {
+      console.error(
+        "[ConversationManager.quiescePrefix] runtime.dispose failed:",
+        err,
+      );
+    }
+    this.sessions.delete(conversationId);
+    this.maybeDropEmptyObserverSet(conversationId);
   }
 
   /**
@@ -1430,7 +1557,11 @@ export class ConversationManager {
    * 将任务入队。如果 conversation 不忙则返回 "immediate"（调用方应直接执行）。
    * 队列满时返回 "full"。正常入队返回 "queued"。
    */
-  enqueue(conversationId: string, task: PendingTask): "immediate" | "queued" | "full" {
+  enqueue(
+    conversationId: string,
+    task: PendingTask,
+  ): "immediate" | "queued" | "full" | "busy" {
+    if (this.findQuiescingPrefix(conversationId)) return "busy";
     const session = this.sessions.get(conversationId);
     if (!session) return "full";
 
@@ -1696,6 +1827,7 @@ export class ConversationManager {
       const now = Date.now();
       const expired: string[] = [];
       for (const [id, session] of this.sessions) {
+        if (this.findQuiescingPrefix(id)) continue;
         if (session.busy) continue;
         const lastActive = new Date(session.lastActiveAt).getTime();
         if (now - lastActive > this.idleTimeoutMs) {
