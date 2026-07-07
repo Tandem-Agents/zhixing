@@ -41,6 +41,17 @@ export class RpcWorksceneFacade {
     });
   }
 
+  async setWorkdir(
+    sceneId: string,
+    workdir: string | null,
+  ): Promise<WorksceneSummary> {
+    const client = await this.link.getClient();
+    return client.request<WorksceneSummary>("workscene.setWorkdir", {
+      sceneId,
+      workdir,
+    });
+  }
+
   /** 删除场景登记;场景有活跃会话时宿主拒绝(BUSY)。 */
   async delete(sceneId: string): Promise<void> {
     const client = await this.link.getClient();

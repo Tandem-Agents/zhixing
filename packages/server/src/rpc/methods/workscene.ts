@@ -2,7 +2,7 @@
  * workscene.* RPC 方法 —— 工作场景的管理面与进出执行体。
  *
  * 方法：
- * - workscene.list / create / rename / delete：场景登记管理(注册表薄壳)
+ * - workscene.list / create / rename / delete / setWorkdir：场景管理面
  * - workscene.enter：取 / 建场景当前对话,返回全域键——接入面据此切自己的
  *   当前对话指针;"模式"由 id 在后续 send 时纯函数派生,宿主无状态机
  * - workscene.exit：touch 场景(最近使用 / 未来退出纪要挂点)——切回 main
@@ -10,17 +10,19 @@
  *
  * 不设 workscene.status:接入面当前在哪个场景是连接级 UI 态,宿主零知识。
  *
- * delete 守卫:场景有活跃会话(场景对话在 ManagedSession 名册且 busy /
- * 在场)时拒绝——物理删除会让进行中的记忆写入 / 持久化撞 ENOENT。
+ * 业务规则居于 WorksceneDirectory:名称 / workdir 校验、运行态静默、
+ * enter 原子化与删除守卫均不在 RPC handler 内复写。
  */
 
-import { isAbsolute } from "node:path";
-import { WORKSCENE_CONVERSATION_PREFIX } from "@zhixing/core";
 import type { MethodEntry } from "../handlers.js";
 import { RpcAppError, RpcErrors } from "../handlers.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
 import type { ServerContext } from "../../context.js";
-import type { WorksceneDirectory } from "../../runtime/workscene-directory.js";
+import { WorksceneBusyError } from "../../runtime/conversation-manager.js";
+import {
+  WorksceneInputError,
+  type WorksceneDirectory,
+} from "../../runtime/workscene-directory.js";
 import type {
   WorksceneEnterResult,
   WorksceneListResult,
@@ -43,13 +45,37 @@ function sceneSummary(scene: {
   name: string;
   workdir?: string;
   lastActiveAt?: string;
-}): WorksceneSummary {
-  return {
+}, workdirWarning?: string): WorksceneSummary {
+  const summary: WorksceneSummary = {
     sceneId: scene.id,
     name: scene.name,
     workdir: scene.workdir,
     lastActiveAt: scene.lastActiveAt,
   };
+  if (workdirWarning) summary.workdirWarning = workdirWarning;
+  return summary;
+}
+
+async function mapWorksceneErrors<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (err instanceof WorksceneInputError || hasErrorCode(err, "WORKSCENE_INPUT")) {
+      throw RpcErrors.invalidParams(err.message);
+    }
+    if (err instanceof WorksceneBusyError || hasErrorCode(err, "WORKSCENE_BUSY")) {
+      throw RpcErrors.busy(err.message);
+    }
+    throw err;
+  }
+}
+
+function hasErrorCode(err: unknown, code: string): err is Error {
+  return (
+    err instanceof Error &&
+    "code" in err &&
+    (err as Error & { code?: unknown }).code === code
+  );
 }
 
 export function buildWorksceneListMethod(): MethodEntry {
@@ -58,7 +84,7 @@ export function buildWorksceneListMethod(): MethodEntry {
     requiresAuth: true,
     async handler(_params, ctx): Promise<WorksceneListResult> {
       const scenes = await requireWorkscenes(ctx.server).list();
-      return { scenes: scenes.map(sceneSummary) };
+      return { scenes: scenes.map((scene) => sceneSummary(scene)) };
     },
   };
 }
@@ -69,32 +95,25 @@ export function buildWorksceneCreateMethod(): MethodEntry {
     requiresAuth: true,
     async handler(rawParams, ctx) {
       const params = (rawParams ?? {}) as { name?: string; workdir?: unknown };
-      if (typeof params.name !== "string" || params.name.trim().length === 0) {
-        throw RpcErrors.invalidParams("workscene.create requires non-empty 'name'");
+      if (typeof params.name !== "string") {
+        throw RpcErrors.invalidParams("workscene.create requires 'name'");
       }
-      // workdir 落盘后会成为场景实例的 workspace(文件操作根)——非字符串
-      // 必须在边界拒绝;且必须是绝对路径:远程调用方的"相对路径"与宿主
-      // 进程 cwd 毫无关系,解析锚点不可预期,相对即错误输入。
+      const name = params.name;
       if (params.workdir !== undefined) {
-        if (
-          typeof params.workdir !== "string" ||
-          params.workdir.trim().length === 0
-        ) {
+        if (typeof params.workdir !== "string") {
           throw RpcErrors.invalidParams(
-            "workscene.create 'workdir' must be a non-empty string when provided",
-          );
-        }
-        if (!isAbsolute(params.workdir)) {
-          throw RpcErrors.invalidParams(
-            "workscene.create 'workdir' must be an absolute path",
+            "workscene.create 'workdir' must be a string when provided",
           );
         }
       }
-      const scene = await requireWorkscenes(ctx.server).create({
-        name: params.name.trim(),
-        workdir: params.workdir as string | undefined,
-      });
-      return sceneSummary(scene);
+      const workdir = params.workdir as string | undefined;
+      const result = await mapWorksceneErrors(() =>
+        requireWorkscenes(ctx.server).create({
+          name,
+          workdir,
+        }),
+      );
+      return sceneSummary(result.scene, result.workdirWarning);
     },
   };
 }
@@ -108,17 +127,52 @@ export function buildWorksceneRenameMethod(): MethodEntry {
       if (typeof params.sceneId !== "string") {
         throw RpcErrors.invalidParams("workscene.rename requires 'sceneId'");
       }
-      if (typeof params.name !== "string" || params.name.trim().length === 0) {
-        throw RpcErrors.invalidParams("workscene.rename requires non-empty 'name'");
+      const sceneId = params.sceneId;
+      if (typeof params.name !== "string") {
+        throw RpcErrors.invalidParams("workscene.rename requires 'name'");
       }
-      const renamed = await requireWorkscenes(ctx.server).rename(
-        params.sceneId,
-        params.name.trim(),
+      const name = params.name;
+      const renamed = await mapWorksceneErrors(() =>
+        requireWorkscenes(ctx.server).rename(sceneId, name),
       );
       if (!renamed) {
-        throw RpcErrors.notFound(`Workscene not found: ${params.sceneId}`);
+        throw RpcErrors.notFound(`Workscene not found: ${sceneId}`);
       }
       return sceneSummary(renamed);
+    },
+  };
+}
+
+export function buildWorksceneSetWorkdirMethod(): MethodEntry {
+  return {
+    name: "workscene.setWorkdir",
+    requiresAuth: true,
+    async handler(rawParams, ctx) {
+      const params = (rawParams ?? {}) as {
+        sceneId?: string;
+        workdir?: unknown;
+      };
+      if (typeof params.sceneId !== "string") {
+        throw RpcErrors.invalidParams("workscene.setWorkdir requires 'sceneId'");
+      }
+      if (!("workdir" in params)) {
+        throw RpcErrors.invalidParams("workscene.setWorkdir requires 'workdir'");
+      }
+      if (params.workdir !== null && typeof params.workdir !== "string") {
+        throw RpcErrors.invalidParams(
+          "workscene.setWorkdir 'workdir' must be a string or null",
+        );
+      }
+      const result = await mapWorksceneErrors(() =>
+        requireWorkscenes(ctx.server).setWorkdir(
+          params.sceneId!,
+          params.workdir as string | null,
+        ),
+      );
+      if (!result) {
+        throw RpcErrors.notFound(`Workscene not found: ${params.sceneId}`);
+      }
+      return sceneSummary(result.scene, result.workdirWarning);
     },
   };
 }
@@ -132,20 +186,10 @@ export function buildWorksceneDeleteMethod(): MethodEntry {
       if (typeof params.sceneId !== "string") {
         throw RpcErrors.invalidParams("workscene.delete requires 'sceneId'");
       }
-      // active 守卫:该场景的对话有活跃会话时拒绝——物理删除会让进行中的
-      // 记忆写入 / task_list 持久化 / 退出纪要全撞 ENOENT
-      const manager = ctx.server.conversations;
-      const scenePrefix = `${WORKSCENE_CONVERSATION_PREFIX}${params.sceneId}:`;
-      const hasActive = manager
-        ?.list()
-        .some((s) => s.conversationId.startsWith(scenePrefix));
-      if (hasActive) {
-        throw new RpcAppError(
-          RPC_ERROR_CODES.BUSY,
-          `Workscene "${params.sceneId}" has active conversations; exit them first`,
-        );
-      }
-      if (!(await requireWorkscenes(ctx.server).remove(params.sceneId))) {
+      const removed = await mapWorksceneErrors(() =>
+        requireWorkscenes(ctx.server).remove(params.sceneId!),
+      );
+      if (!removed) {
         throw RpcErrors.notFound(`Workscene not found: ${params.sceneId}`);
       }
     },
@@ -162,26 +206,24 @@ export function buildWorksceneEnterMethod(): MethodEntry {
         throw RpcErrors.invalidParams("workscene.enter requires 'sceneId'");
       }
       const workscenes = requireWorkscenes(ctx.server);
-      const entered = await workscenes.enterConversation(params.sceneId);
+      const entered = await mapWorksceneErrors(() =>
+        workscenes.enterScene(params.sceneId!, String(ctx.connection.id)),
+      );
       if (!entered) {
         throw RpcErrors.notFound(`Workscene not found: ${params.sceneId}`);
       }
-      await workscenes.touch(params.sceneId).catch(() => {});
       // 场景对话与主对话走同一推进管线——进入场景即恢复停摆的推进并
       // 呈现推进状态，与 session.resume 同一「打开会话即浮现」裁决：
-      // 先入组播名册再恢复，恢复期控制事件对触发进入的用户可见。
-      ctx.server.conversations?.addObserver(
-        entered.conversationId,
-        String(ctx.connection.id),
-        { allowInactive: true },
-      );
-      await ctx.server.advancementRecovery?.recoverConversation(
-        entered.conversationId,
-      );
-      const advancement = await loadAdvancementState(
-        ctx.server,
-        entered.conversationId,
-      );
+      // 入场事实已由领域服务登记 observer;恢复失败不撤销入场事实。
+      let advancement: Awaited<ReturnType<typeof loadAdvancementState>> | undefined;
+      try {
+        await ctx.server.advancementRecovery?.recoverConversation(
+          entered.conversationId,
+        );
+        advancement = await loadAdvancementState(ctx.server, entered.conversationId);
+      } catch (err) {
+        console.error("[workscene.enter] advancement recovery failed:", err);
+      }
       return {
         conversationId: entered.conversationId,
         scene: sceneSummary(entered.scene),

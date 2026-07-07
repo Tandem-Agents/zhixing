@@ -39,7 +39,6 @@ import {
   ConversationRepository,
   FsWorkSceneRegistry,
   parseConversationId,
-  WORKSCENE_CONVERSATION_PREFIX,
   ShardedTranscriptStore,
   SnapshotStore,
   SkillStore,
@@ -236,10 +235,16 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     clearTaskListCache: (conversationId) =>
       builtinExtraTools.taskListService.clear(conversationId),
   });
+  // ConversationManager lazy ref——会话执行面(access surface)setup 后回填;
+  // 工作场景领域服务与 workmode 工具删除入口运行期读取。
+  const conversationsRef: { current: ConversationManager | null } = {
+    current: null,
+  };
   // 工作场景域——注册表单例(管理面 + factory 的场景装配路由共用)与场景对话取建。
   const workSceneRegistry = new FsWorkSceneRegistry();
   const worksceneDirectory = createWorksceneDirectory({
     registry: workSceneRegistry,
+    conversations: () => conversationsRef.current,
   });
   // 管理面三域——trust(盘上持久规则)/ memory(只读查看);skill 目录在
   // serveSkillStore 创建后装配(共享同一锁域与结构版本)。
@@ -247,12 +252,6 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     config,
   });
   const memoryDirectory = createMemoryDirectory();
-
-  // ConversationManager lazy ref——会话执行面(access surface)setup 后回填;
-  // workModeController 的删除守卫运行期读(LLM 工具调用必晚于装配完成)。
-  const conversationsRef: { current: ConversationManager | null } = {
-    current: null,
-  };
 
   // 3. Scheduler facade lazy ref —— 打破循环依赖（标准 IoC 模式）：
   //    scheduleTool → Scheduler → runAgentTurn → ephemeralRuntime → scheduleTool
@@ -380,19 +379,13 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     decorateRunBus: serveDecorateRunBus,
     onSecurityBlocked: createBlockedRenderer(serveWriter),
     // workmode 工具组的控制器——LLM 进出场景意图的产生面在宿主 runtime。
-    // 删除守卫与 workscene.delete RPC 方法同判据:场景对话活跃即拒绝
-    // (物理删会让进行中的记忆写入 / 持久化撞 ENOENT)。
+    // 删除经工作场景领域服务,与 RPC / CLI 管理入口共用运行态守卫。
     workModeController: () => ({
       registry: workSceneRegistry,
       async removeWorkScene(id: string): Promise<void> {
-        const scenePrefix = `${WORKSCENE_CONVERSATION_PREFIX}${id}:`;
-        const hasActive = conversationsRef.current
-          ?.list()
-          .some((s) => s.conversationId.startsWith(scenePrefix));
-        if (hasActive) {
-          throw new Error(`工作场景 "${id}" 有活跃会话,请先退出再删除`);
+        if (!(await worksceneDirectory.remove(id))) {
+          throw new Error(`工作场景不存在: ${id}`);
         }
-        await workSceneRegistry.remove(id);
       },
     }),
     onRuntimeCreated: (runtime) => {

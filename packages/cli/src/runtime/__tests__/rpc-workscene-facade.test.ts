@@ -23,13 +23,14 @@ describe("RpcWorksceneFacade", () => {
     expect(fake.requests[0]?.method).toBe("workscene.list");
   });
 
-  it("create / rename 携带参数并返回场景摘要", async () => {
+  it("create / rename / setWorkdir 携带参数并返回场景摘要", async () => {
     const fake = makeFakeHostLink();
     fake.setResponder(() => scene);
     const facade = new RpcWorksceneFacade(fake.link);
 
     expect(await facade.create("写作", "E:\\work\\writing")).toEqual(scene);
     expect(await facade.rename("scene-1", "写作二期")).toEqual(scene);
+    expect(await facade.setWorkdir("scene-1", null)).toEqual(scene);
     expect(fake.requests).toEqual([
       {
         method: "workscene.create",
@@ -38,6 +39,10 @@ describe("RpcWorksceneFacade", () => {
       {
         method: "workscene.rename",
         params: { sceneId: "scene-1", name: "写作二期" },
+      },
+      {
+        method: "workscene.setWorkdir",
+        params: { sceneId: "scene-1", workdir: null },
       },
     ]);
   });

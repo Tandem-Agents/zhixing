@@ -63,7 +63,7 @@ export type AdvancementRecoveryResult =
       readonly message: string;
     }
   | {
-      readonly status: "not-found" | "full" | "missing-proxy" | "failed";
+      readonly status: "not-found" | "full" | "busy" | "missing-proxy" | "failed";
       readonly conversationId: string;
       readonly advancementSessionId?: string;
       readonly proxyMessageId?: string;
@@ -431,7 +431,7 @@ class DefaultAdvancementRecoveryMaintenance
   private emitRecoveryFailed(
     result: Extract<
       AdvancementRecoveryResult,
-      { status: "not-found" | "full" | "missing-proxy" | "failed" }
+      { status: "not-found" | "full" | "busy" | "missing-proxy" | "failed" }
     >,
   ): void {
     this.options.sessionBroadcast?.()?.(

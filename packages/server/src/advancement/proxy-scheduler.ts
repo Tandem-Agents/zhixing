@@ -4,7 +4,10 @@ import type {
   RunRecordAdvancementMetadata,
   TurnContext,
 } from "@zhixing/core";
-import type { ConversationManager } from "../runtime/conversation-manager.js";
+import {
+  WorksceneBusyError,
+  type ConversationManager,
+} from "../runtime/conversation-manager.js";
 import { projectSessionTurn } from "../rpc/session-turn-stream.js";
 import type { SessionBroadcast } from "../rpc/session-broadcast.js";
 
@@ -22,7 +25,7 @@ export interface ScheduleProxyMessageInput {
 
 export type ScheduleProxyMessageResult =
   | { readonly status: "immediate" | "queued" }
-  | { readonly status: "not-found" | "full" };
+  | { readonly status: "not-found" | "full" | "busy" };
 
 export class ProxyMessageScheduler {
   private readonly manager: ConversationManager;
@@ -47,40 +50,46 @@ export class ProxyMessageScheduler {
       taskSettled = true;
       input.onTaskSettled?.();
     };
-    const admission = await this.manager.admitTurn({
-      conversationId,
-      exists: this.conversationExists
-        ? () => this.conversationExists!(conversationId)
-        : undefined,
-      makeTask: (managed) => ({
-        source: "advancement",
-        execute: async () => {
-          try {
-            await projectSessionTurn({
-              manager: this.manager,
-              managed,
-              input: input.proxyMessage.content,
-              turnId: input.proxyMessage.id,
-              runOptions: {
-                turnContext: proxyTurnContext(input.proxyMessage),
-                turnIndex: managed.turnCount,
-                source: "advancement",
-                advancement: proxyRunMetadata(input),
-              },
-              notify: (method, params) =>
-                this.sessionBroadcast()?.(conversationId, method, params),
-            });
-          } finally {
+    let admission: Awaited<ReturnType<ConversationManager["admitTurn"]>>;
+    try {
+      admission = await this.manager.admitTurn({
+        conversationId,
+        exists: this.conversationExists
+          ? () => this.conversationExists!(conversationId)
+          : undefined,
+        makeTask: (managed) => ({
+          source: "advancement",
+          execute: async () => {
             try {
-              this.manager.setBusy(conversationId, false);
+              await projectSessionTurn({
+                manager: this.manager,
+                managed,
+                input: input.proxyMessage.content,
+                turnId: input.proxyMessage.id,
+                runOptions: {
+                  turnContext: proxyTurnContext(input.proxyMessage),
+                  turnIndex: managed.turnCount,
+                  source: "advancement",
+                  advancement: proxyRunMetadata(input),
+                },
+                notify: (method, params) =>
+                  this.sessionBroadcast()?.(conversationId, method, params),
+              });
             } finally {
-              settleTask();
+              try {
+                this.manager.setBusy(conversationId, false);
+              } finally {
+                settleTask();
+              }
             }
-          }
-        },
-        cancel: settleTask,
-      }),
-    });
+          },
+          cancel: settleTask,
+        }),
+      });
+    } catch (err) {
+      if (isWorksceneBusyError(err)) return { status: "busy" };
+      throw err;
+    }
 
     if (admission.status === "immediate") {
       void admission.task.execute();
@@ -90,6 +99,15 @@ export class ProxyMessageScheduler {
     }
     return { status: admission.status };
   }
+}
+
+function isWorksceneBusyError(err: unknown): boolean {
+  return (
+    err instanceof WorksceneBusyError ||
+    (err instanceof Error &&
+      "code" in err &&
+      (err as Error & { code?: unknown }).code === "WORKSCENE_BUSY")
+  );
 }
 
 function proxyTurnContext(proxyMessage: AdvancementProxyMessage): TurnContext {

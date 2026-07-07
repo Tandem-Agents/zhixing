@@ -345,6 +345,7 @@ export interface WorksceneSummary {
   sceneId: string;
   name: string;
   workdir?: string;
+  workdirWarning?: string;
   lastActiveAt?: string;
 }
 

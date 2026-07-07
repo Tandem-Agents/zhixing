@@ -80,6 +80,7 @@ import { createControlSessionEventEnvelope } from "../session-events.js";
 import type { AdvancementPrepareResult } from "../../advancement/index.js";
 import {
   generateConversationId,
+  WorksceneBusyError,
   type ConversationManager,
   type ManagedSession,
 } from "../../runtime/conversation-manager.js";
@@ -983,45 +984,50 @@ async function admitAndMaybeStartPerspectiveTurn(
   turnId: string;
   runStatus: "immediate" | "queued";
 }> {
-  const admission = await input.manager.admitTurn({
-    conversationId: input.conversationId,
-    createConversation: createConversationCallback(
-      input.server,
-      input.preallocatedConversationId,
-    ),
-    exists: existingConversationCheck(input.server, input.conversationId),
-    connectionId: input.connectionId,
-    makeTask: (managed) => {
-      const task = input.perspectives.createPendingTask({
-        manager: input.manager,
-        managed,
-        originalInput: input.input,
-        question: input.question,
-        turnContext: perspectiveTurnContext(input.turnId, input.connection),
-        source: "channel",
-        onResult: (result) =>
-          notifyPerspectiveTurnResult({
-            result,
-            conversationId: managed.conversationId,
-            turnId: input.turnId,
-            turnCount: managed.turnCount,
-            connection: input.connection,
-            broadcast: input.broadcast,
-          }),
-      });
-      return {
-        ...task,
-        cancel: () => {
-          task.cancel();
-          notifyCancelledPerspectiveTurn({
-            conversationId: managed.conversationId,
-            turnId: input.turnId,
-            connection: input.connection,
-          });
-        },
-      };
-    },
-  });
+  let admission: Awaited<ReturnType<ConversationManager["admitTurn"]>>;
+  try {
+    admission = await input.manager.admitTurn({
+      conversationId: input.conversationId,
+      createConversation: createConversationCallback(
+        input.server,
+        input.preallocatedConversationId,
+      ),
+      exists: existingConversationCheck(input.server, input.conversationId),
+      connectionId: input.connectionId,
+      makeTask: (managed) => {
+        const task = input.perspectives.createPendingTask({
+          manager: input.manager,
+          managed,
+          originalInput: input.input,
+          question: input.question,
+          turnContext: perspectiveTurnContext(input.turnId, input.connection),
+          source: "channel",
+          onResult: (result) =>
+            notifyPerspectiveTurnResult({
+              result,
+              conversationId: managed.conversationId,
+              turnId: input.turnId,
+              turnCount: managed.turnCount,
+              connection: input.connection,
+              broadcast: input.broadcast,
+            }),
+        });
+        return {
+          ...task,
+          cancel: () => {
+            task.cancel();
+            notifyCancelledPerspectiveTurn({
+              conversationId: managed.conversationId,
+              turnId: input.turnId,
+              connection: input.connection,
+            });
+          },
+        };
+      },
+    });
+  } catch (err) {
+    throwWorksceneBusyAsRpc(err);
+  }
 
   if (admission.status === "not-found") {
     throw RpcErrors.notFound(`Session not found: ${admission.conversationId}`);
@@ -1051,37 +1057,42 @@ async function admitAndMaybeStartTurn(
   turnId: string;
   runStatus: "immediate" | "queued";
 }> {
-  const admission = await input.manager.admitTurn({
-    conversationId: input.conversationId,
-    createConversation: input.createConversation,
-    exists: input.exists,
-    connectionId: input.connectionId,
-    makeTask: (managed) => ({
-      source: "channel",
-      execute: () =>
-        runManagedTurn(
-          managed,
-          input.input,
-          input.turnId,
-          input.connection,
-          input.manager,
-          input.broadcast,
-        ),
-      // 取消通知是排队发起者的私人回执,不组播——其他端没见过这条排队项
-      cancel: () => {
-        input.connection.notify(SESSION_NOTIFICATIONS.complete, {
-          conversationId: managed.conversationId,
-          sessionId: managed.conversationId,
-          turnId: input.turnId,
-          result: {
-            reason: "error",
-            error: { name: "Cancelled", message: "Pending turn cancelled" },
-            usage: { inputTokens: 0, outputTokens: 0 },
-          },
-        } satisfies SessionCompletePayload);
-      },
-    }),
-  });
+  let admission: Awaited<ReturnType<ConversationManager["admitTurn"]>>;
+  try {
+    admission = await input.manager.admitTurn({
+      conversationId: input.conversationId,
+      createConversation: input.createConversation,
+      exists: input.exists,
+      connectionId: input.connectionId,
+      makeTask: (managed) => ({
+        source: "channel",
+        execute: () =>
+          runManagedTurn(
+            managed,
+            input.input,
+            input.turnId,
+            input.connection,
+            input.manager,
+            input.broadcast,
+          ),
+        // 取消通知是排队发起者的私人回执,不组播——其他端没见过这条排队项
+        cancel: () => {
+          input.connection.notify(SESSION_NOTIFICATIONS.complete, {
+            conversationId: managed.conversationId,
+            sessionId: managed.conversationId,
+            turnId: input.turnId,
+            result: {
+              reason: "error",
+              error: { name: "Cancelled", message: "Pending turn cancelled" },
+              usage: { inputTokens: 0, outputTokens: 0 },
+            },
+          } satisfies SessionCompletePayload);
+        },
+      }),
+    });
+  } catch (err) {
+    throwWorksceneBusyAsRpc(err);
+  }
 
   if (admission.status === "not-found") {
     throw RpcErrors.notFound(`Session not found: ${admission.conversationId}`);
@@ -1102,6 +1113,18 @@ async function admitAndMaybeStartTurn(
     turnId: input.turnId,
     runStatus: admission.status,
   };
+}
+
+function throwWorksceneBusyAsRpc(err: unknown): never {
+  if (
+    err instanceof WorksceneBusyError ||
+    (err instanceof Error &&
+      "code" in err &&
+      (err as Error & { code?: unknown }).code === "WORKSCENE_BUSY")
+  ) {
+    throw RpcErrors.busy("场景正在切换或目录变更，请稍后重试。");
+  }
+  throw err;
 }
 
 /**

@@ -6,7 +6,7 @@
  * (不起 WS——session-rpc 已覆盖传输层)。
  */
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { AdvancementStore, type WorkScene } from "@zhixing/core";
 import { createTempDir } from "@zhixing/test-utils";
 import { AdvancementController } from "../../advancement/controller.js";
@@ -14,11 +14,13 @@ import {
   buildWorksceneListMethod,
   buildWorksceneCreateMethod,
   buildWorksceneRenameMethod,
+  buildWorksceneSetWorkdirMethod,
   buildWorksceneDeleteMethod,
   buildWorksceneEnterMethod,
   buildWorksceneExitMethod,
 } from "../methods/workscene.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
+import { WorksceneBusyError } from "../../runtime/conversation-manager.js";
 import type { WorksceneDirectory } from "../../runtime/workscene-directory.js";
 import type { ServerContext } from "../../context.js";
 import type { ConversationManager } from "../../runtime/conversation-manager.js";
@@ -30,6 +32,13 @@ function makeScene(id: string, name = id): WorkScene {
     createdAt: "2026-01-01T00:00:00.000Z",
     lastActiveAt: "2026-01-01T00:00:00.000Z",
   } as WorkScene;
+}
+
+function inputError(message: string): Error {
+  return Object.assign(new Error(message), {
+    name: "WorksceneInputError",
+    code: "WORKSCENE_INPUT",
+  });
 }
 
 function memoryWorkscenes(): WorksceneDirectory & { touched: string[] } {
@@ -47,7 +56,7 @@ function memoryWorkscenes(): WorksceneDirectory & { touched: string[] } {
     async create(opts) {
       const scene = makeScene(`scene-${next++}`, opts.name);
       scenes.set(scene.id, { ...scene, workdir: opts.workdir } as WorkScene);
-      return scenes.get(scene.id)!;
+      return { scene: scenes.get(scene.id)! };
     },
     async rename(id, name) {
       const scene = scenes.get(id);
@@ -59,12 +68,23 @@ function memoryWorkscenes(): WorksceneDirectory & { touched: string[] } {
     async remove(id) {
       return scenes.delete(id);
     },
+    async setWorkdir(id, workdir) {
+      const scene = scenes.get(id);
+      if (!scene) return null;
+      const changed =
+        workdir === null
+          ? ({ ...scene, workdir: undefined } as WorkScene)
+          : ({ ...scene, workdir } as WorkScene);
+      scenes.set(id, changed);
+      return { scene: changed };
+    },
     async touch(id) {
       touched.push(id);
     },
-    async enterConversation(sceneId) {
+    async enterScene(sceneId) {
       const scene = scenes.get(sceneId);
       if (!scene) return null;
+      touched.push(sceneId);
       return { conversationId: `ws:${sceneId}:conv_main`, scene };
     },
   };
@@ -102,12 +122,15 @@ describe("workscene.* 方法", () => {
       sceneId: string;
       name: string;
     };
+    await call(buildWorksceneCreateMethod(), { name: "评审副本" }, ctx);
     expect(created.name).toBe("评审");
 
     const listed = (await call(buildWorksceneListMethod(), {}, ctx)) as {
-      scenes: Array<{ sceneId: string }>;
+      scenes: Array<{ sceneId: string; workdirWarning?: unknown }>;
     };
     expect(listed.scenes.map((s) => s.sceneId)).toContain(created.sceneId);
+    expect(listed.scenes).toHaveLength(2);
+    expect(listed.scenes.every((s) => !("workdirWarning" in s))).toBe(true);
 
     const renamed = (await call(
       buildWorksceneRenameMethod(),
@@ -127,24 +150,105 @@ describe("workscene.* 方法", () => {
     ).rejects.toMatchObject({ code: RPC_ERROR_CODES.NOT_FOUND });
   });
 
-  it("create 边界:相对 workdir 拒绝(远程调用方无'相对于宿主 cwd'语义),绝对路径通过", async () => {
+  it("create 边界:workdir 非字符串拒绝;领域校验错误映射 INVALID_PARAMS", async () => {
     const workscenes = memoryWorkscenes();
     const ctx = makeCtx({ workscenes });
 
     await expect(
-      call(buildWorksceneCreateMethod(), { name: "x", workdir: "rel/path" }, ctx),
-    ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
-    await expect(
       call(buildWorksceneCreateMethod(), { name: "x", workdir: 42 }, ctx),
     ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
 
-    const abs = process.platform === "win32" ? "C:\\proj" : "/proj";
+    const invalidWorkscenes = memoryWorkscenes();
+    invalidWorkscenes.create = async () => {
+      throw inputError("工作目录必须是绝对路径");
+    };
+    await expect(
+      call(
+        buildWorksceneCreateMethod(),
+        { name: "x", workdir: "rel/path" },
+        makeCtx({ workscenes: invalidWorkscenes }),
+      ),
+    ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+
+    const invalidRenameWorkscenes = memoryWorkscenes();
+    invalidRenameWorkscenes.rename = async () => {
+      throw inputError("工作场景名称不能为空");
+    };
+    await expect(
+      call(
+        buildWorksceneRenameMethod(),
+        { sceneId: "scene-1", name: "   " },
+        makeCtx({ workscenes: invalidRenameWorkscenes }),
+      ),
+    ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+
     const created = (await call(
       buildWorksceneCreateMethod(),
-      { name: "绝对", workdir: abs },
+      { name: "任意字符串由领域服务校验", workdir: "host/path" },
       ctx,
     )) as { workdir?: string };
-    expect(created.workdir).toBe(abs);
+    expect(created.workdir).toBe("host/path");
+  });
+
+  it("setWorkdir:缺参 invalidParams、null 解绑、not-found 与 BUSY 映射", async () => {
+    const workscenes = memoryWorkscenes();
+    const ctx = makeCtx({ workscenes });
+    const created = (await call(buildWorksceneCreateMethod(), { name: "开发" }, ctx)) as {
+      sceneId: string;
+    };
+
+    await expect(
+      call(buildWorksceneSetWorkdirMethod(), { sceneId: created.sceneId }, ctx),
+    ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+    await expect(
+      call(
+        buildWorksceneSetWorkdirMethod(),
+        { sceneId: created.sceneId, workdir: 42 },
+        ctx,
+      ),
+    ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+
+    const invalidWorkscenes = memoryWorkscenes();
+    invalidWorkscenes.setWorkdir = async () => {
+      throw inputError("工作目录不能为空");
+    };
+    await expect(
+      call(
+        buildWorksceneSetWorkdirMethod(),
+        { sceneId: created.sceneId, workdir: "   " },
+        makeCtx({ workscenes: invalidWorkscenes }),
+      ),
+    ).rejects.toMatchObject({ code: RPC_ERROR_CODES.INVALID_PARAMS });
+
+    const bound = (await call(
+      buildWorksceneSetWorkdirMethod(),
+      { sceneId: created.sceneId, workdir: "D:\\work" },
+      ctx,
+    )) as { workdir?: string };
+    expect(bound.workdir).toBe("D:\\work");
+
+    const cleared = (await call(
+      buildWorksceneSetWorkdirMethod(),
+      { sceneId: created.sceneId, workdir: null },
+      ctx,
+    )) as { workdir?: string };
+    expect(cleared.workdir).toBeUndefined();
+
+    await expect(
+      call(buildWorksceneSetWorkdirMethod(), { sceneId: "ghost", workdir: null }, ctx),
+    ).rejects.toMatchObject({ code: RPC_ERROR_CODES.NOT_FOUND });
+
+    const busyWorkscenes = memoryWorkscenes();
+    busyWorkscenes.setWorkdir = async () => {
+      throw new WorksceneBusyError("busy");
+    };
+    await expect(
+      call(
+        buildWorksceneSetWorkdirMethod(),
+        { sceneId: created.sceneId, workdir: null },
+        makeCtx({ workscenes: busyWorkscenes }),
+      ),
+    ).rejects.toMatchObject({ code: RPC_ERROR_CODES.BUSY });
   });
 
   it("enter:返回全域键与场景元数据并 touch;场景不存在 NOT_FOUND", async () => {
@@ -221,7 +325,7 @@ describe("workscene.* 方法", () => {
     });
   });
 
-  it("enter 先入组播名册再恢复推进——恢复期事件对触发者可见", async () => {
+  it("enter 先由领域服务完成入场登记再恢复推进——恢复期事件对触发者可见", async () => {
     const workscenes = memoryWorkscenes();
     const created = (await call(
       buildWorksceneCreateMethod(),
@@ -230,11 +334,12 @@ describe("workscene.* 方法", () => {
     )) as { sceneId: string };
 
     const calls: string[] = [];
+    workscenes.enterScene = async (sceneId) => {
+      calls.push("enterScene");
+      return { conversationId: `ws:${sceneId}:conv_main`, scene: makeScene(sceneId) };
+    };
     const server = {
       workscenes,
-      conversations: {
-        addObserver: () => calls.push("addObserver"),
-      },
       advancementRecovery: {
         recoverConversation: async () => {
           calls.push("recoverConversation");
@@ -249,7 +354,40 @@ describe("workscene.* 方法", () => {
       { server, connection: { id: 1 } } as never,
     );
 
-    expect(calls).toEqual(["addObserver", "recoverConversation"]);
+    expect(calls).toEqual(["enterScene", "recoverConversation"]);
+  });
+
+  it("enter 链外推进恢复失败不撤销入场结果", async () => {
+    const workscenes = memoryWorkscenes();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const created = (await call(
+      buildWorksceneCreateMethod(),
+      { name: "恢复失败场景" },
+      makeCtx({ workscenes }),
+    )) as { sceneId: string };
+
+    try {
+      const entered = (await call(
+        buildWorksceneEnterMethod(),
+        { sceneId: created.sceneId },
+        {
+          server: {
+            workscenes,
+            advancementRecovery: {
+              recoverConversation: async () => {
+                throw new Error("recovery failed");
+              },
+            },
+          },
+          connection: { id: 1 },
+        } as never,
+      )) as { conversationId: string; advancement?: unknown };
+
+      expect(entered.conversationId).toBe(`ws:${created.sceneId}:conv_main`);
+      expect(entered.advancement).toBeUndefined();
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it("exit:touch 场景(无其他副作用)", async () => {
@@ -262,7 +400,7 @@ describe("workscene.* 方法", () => {
     expect(workscenes.touched).toEqual(["s1"]);
   });
 
-  it("delete 守卫:场景有活跃会话(ws: 前缀命中)→ BUSY 拒绝", async () => {
+  it("delete 守卫由领域服务生效:BUSY 拒绝", async () => {
     const workscenes = memoryWorkscenes();
     const created = (await call(
       buildWorksceneCreateMethod(),
@@ -270,15 +408,13 @@ describe("workscene.* 方法", () => {
       makeCtx({ workscenes }),
     )) as { sceneId: string };
 
-    const busyCtx = makeCtx({
-      workscenes,
-      activeConversations: [`ws:${created.sceneId}:conv_main`],
-    });
+    workscenes.remove = async () => {
+      throw new WorksceneBusyError("busy");
+    };
+    const busyCtx = makeCtx({ workscenes });
     await expect(
       call(buildWorksceneDeleteMethod(), { sceneId: created.sceneId }, busyCtx),
     ).rejects.toMatchObject({ code: RPC_ERROR_CODES.BUSY });
-    // 场景未被删
-    expect(await workscenes.get(created.sceneId)).not.toBeNull();
   });
 });
 
