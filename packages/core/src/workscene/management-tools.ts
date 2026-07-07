@@ -4,6 +4,7 @@ import { normalizeSceneName, normalizeWorkdir } from "./validation.js";
 
 export type WorksceneManagementToolName =
   | "workscene_change_approve"
+  | "workscene_list"
   | "workmode_enter"
   | "workmode_exit"
   | "workscene_rename_current"
@@ -18,6 +19,7 @@ export type WorksceneManagementAction =
   | "clear_workdir"
   | "enter"
   | "exit"
+  | "list"
   | "rename_current"
   | "set_workdir_current"
   | "clear_workdir_current";
@@ -50,6 +52,10 @@ const FILESYSTEM_WRITE_BOUNDARIES = [
   { boundaryType: "filesystem", access: "write", dynamic: false },
 ] as const satisfies readonly BoundaryCrossing[];
 
+const FILESYSTEM_READ_BOUNDARIES = [
+  { boundaryType: "filesystem", access: "read", dynamic: false },
+] as const satisfies readonly BoundaryCrossing[];
+
 const AGENT_CONTEXT_AND_FILESYSTEM_WRITE_BOUNDARIES = [
   ...AGENT_CONTEXT_SWITCH_BOUNDARIES,
   ...FILESYSTEM_WRITE_BOUNDARIES,
@@ -62,12 +68,21 @@ export const WORKSCENE_MANAGEMENT_TOOLS = {
       add: { label: "创建工作场景" },
       remove: { label: "删除工作场景" },
       rename: { label: "重命名工作场景" },
-      set_workdir: { label: "绑定或更换工作目录", enabled: false },
-      clear_workdir: { label: "解除目录绑定", enabled: false },
+      set_workdir: { label: "绑定或更换工作目录" },
+      clear_workdir: { label: "解除目录绑定" },
     },
     boundaries: FILESYSTEM_WRITE_BOUNDARIES,
     requiresExplicitConfirmation: true,
     confirmationDisplay: "workscene",
+  },
+  workscene_list: {
+    surface: "main",
+    actions: {
+      list: { label: "查看工作场景列表" },
+    },
+    boundaries: FILESYSTEM_READ_BOUNDARIES,
+    requiresExplicitConfirmation: false,
+    confirmationDisplay: "generic",
   },
   workmode_enter: {
     surface: "main",

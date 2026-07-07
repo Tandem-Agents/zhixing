@@ -394,22 +394,26 @@ function buildSubAgentDelegation(tools: ToolDefinition[]): string | null {
  * power runtime 只有 workmode_exit（其退出自判走 powerProfile 身份段，不靠本段）；
  * 子 agent / serve / 无 workmode 装配点无此工具，段缺省、历史输出 byte-equal。
  *
- * 段文本显式引用工具名字面值（workmode_enter / workscene_memory_query /
- * workscene_change_approve）—— 与 sub-agent-delegation 同款"prompt-text 显式
- * 契约"：宁可工具改名时同步本文本，也不动态拼接让段不可静态审查。
+ * 段文本显式引用工具名字面值（workmode_enter / workscene_list /
+ * workscene_memory_query / workscene_change_approve）—— 与 sub-agent-delegation
+ * 同款"prompt-text 显式契约"：宁可工具改名时同步本文本，也不动态拼接让段
+ * 不可静态审查。
  */
 export const WORKING_MODE_TEXT = `## Working Mode (work scenes)
 
-A work scene is an isolated context for a bounded line of work, with its own working directory, private memory, and model. Entering one switches the conversation into that scene; leaving returns here.
+A work scene is an isolated context for a bounded line of work, with optional working directory binding, private memory, and model. Entering one switches the conversation into that scene; leaving returns here.
 
 Tools:
 - \`workmode_enter\`: enter a work scene; the switch takes effect after the current turn.
+- \`workscene_list\`: list scenes and their ids, names, optional workdir bindings, and recent activity.
 - \`workscene_memory_query\`: inspect existing scene memory before deciding.
-- \`workscene_change_approve\`: create, rename, or remove scenes with confirmation.
+- \`workscene_change_approve\`: create, rename, remove, bind/change workdir, or clear workdir with confirmation.
 
 How to decide:
+- Need scene ids or current workdir bindings: call \`workscene_list\`.
 - Clear scene fit: call \`workmode_enter\` with that scene id; if none fits but one is warranted, propose it via \`workscene_change_approve\`.
 - Ambiguous fit: probe with \`workscene_memory_query\` before asking or switching.
+- Workdir management: use \`workscene_change_approve\` action \`set_workdir\` for an explicit directory path, and action \`clear_workdir\` only for an explicit unbind request.
 - Casual or one-off questions: stay in the main conversation.
 
 After \`workmode_enter\`, finish the current turn normally; do not assume you are already inside the scene.`;

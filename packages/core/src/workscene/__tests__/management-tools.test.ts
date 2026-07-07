@@ -14,20 +14,14 @@ import {
 } from "../index.js";
 
 describe("WORKSCENE_MANAGEMENT_TOOLS", () => {
-  it("派生当前已实现的 change_approve action,不提前暴露后续动作", () => {
+  it("派生当前已实现的 change_approve action", () => {
     expect(getEnabledWorksceneToolActions("workscene_change_approve")).toEqual([
       "add",
       "remove",
       "rename",
+      "set_workdir",
+      "clear_workdir",
     ]);
-    expect(
-      WORKSCENE_MANAGEMENT_TOOLS.workscene_change_approve.actions.set_workdir
-        ?.enabled,
-    ).toBe(false);
-    expect(
-      WORKSCENE_MANAGEMENT_TOOLS.workscene_change_approve.actions.clear_workdir
-        ?.enabled,
-    ).toBe(false);
   });
 
   it("边界与逐次拍板声明从同一张表派生", () => {
@@ -37,6 +31,9 @@ describe("WORKSCENE_MANAGEMENT_TOOLS", () => {
     expect(getWorksceneToolBoundaries("workscene_set_workdir_current")).toEqual([
       { boundaryType: "agent-context", access: "switch", dynamic: false },
       { boundaryType: "filesystem", access: "write", dynamic: false },
+    ]);
+    expect(getWorksceneToolBoundaries("workscene_list")).toEqual([
+      { boundaryType: "filesystem", access: "read", dynamic: false },
     ]);
     expect(getWorksceneToolsRequiringExplicitConfirmation().sort()).toEqual(
       [
@@ -48,12 +45,16 @@ describe("WORKSCENE_MANAGEMENT_TOOLS", () => {
         "workscene_set_workdir_current",
       ].sort(),
     );
+    expect(getWorksceneToolsRequiringExplicitConfirmation()).not.toContain(
+      "workscene_list",
+    );
   });
 
   it("确认展示和 post-turn kind 由表声明", () => {
     expect(isWorksceneConfirmationDisplayTool("workscene_change_approve")).toBe(
       true,
     );
+    expect(isWorksceneConfirmationDisplayTool("workscene_list")).toBe(false);
     expect(isWorksceneConfirmationDisplayTool("workmode_enter")).toBe(false);
     expect(getWorksceneToolPostTurnControlKind("workmode_enter")).toBe("enter");
     expect(getWorksceneToolPostTurnControlKind("workmode_exit")).toBe("exit");

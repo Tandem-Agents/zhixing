@@ -14,7 +14,7 @@ import { runContextStorage } from "@zhixing/orchestrator/runtime";
 import { createMcpHub, type McpHub } from "@zhixing/mcp";
 import { createBuiltinExtraToolsAssembly } from "../builtin-extra-tools.js";
 import { InMemoryTaskListStore } from "../task-list-stores.js";
-import type { IWorkModeController } from "../work-mode-controller.js";
+import type { WorksceneToolDirectory } from "../workmode-tools.js";
 
 // ─── 测试 fixture ───
 
@@ -22,8 +22,8 @@ function fakeScheduler(): SchedulerFacade {
   return {} as SchedulerFacade;
 }
 
-// 工厂仅在构造期 capture controller、call 体才用方法，故名集合断言用空桩足够。
-const fakeController = {} as IWorkModeController;
+// 工厂仅在构造期 capture 服务、call 体才用方法，故名集合断言用空桩足够。
+const fakeWorkscenes = {} as WorksceneToolDirectory;
 
 describe("createBuiltinExtraToolsAssembly", () => {
   it("返回的 tools 数组包含 schedule + task_list", () => {
@@ -188,7 +188,7 @@ describe("createBuiltinExtraToolsAssembly", () => {
       .assembleTools({
         scheduler: () => fakeScheduler(),
         spec: { kind: "main" },
-        workModeController: () => fakeController,
+        worksceneDirectory: () => fakeWorkscenes,
       })
       .map((t) => t.name)
       .sort();
@@ -198,6 +198,7 @@ describe("createBuiltinExtraToolsAssembly", () => {
         "task_list",
         "workmode_enter",
         "workscene_change_approve",
+        "workscene_list",
         "workscene_memory_query",
       ].sort(),
     );
@@ -210,7 +211,7 @@ describe("createBuiltinExtraToolsAssembly", () => {
       .assembleTools({
         scheduler: () => fakeScheduler(),
         spec: { kind: "workscene" },
-        workModeController: () => fakeController,
+        worksceneDirectory: () => fakeWorkscenes,
       })
       .map((t) => t.name)
       .sort();
@@ -218,13 +219,14 @@ describe("createBuiltinExtraToolsAssembly", () => {
     for (const mainOnly of [
       "workmode_enter",
       "workscene_change_approve",
+      "workscene_list",
       "workscene_memory_query",
     ]) {
       expect(names).not.toContain(mainOnly);
     }
   });
 
-  it("无 workModeController（serve 等）→ 不追加任何 workmode 工具", () => {
+  it("无 worksceneDirectory（serve 等）→ 不追加任何 workmode 工具", () => {
     const assembly = createBuiltinExtraToolsAssembly(new InMemoryTaskListStore(), createMcpHub([]));
     const names = assembly
       .assembleTools({

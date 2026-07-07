@@ -33,12 +33,13 @@ import {
   type ScheduleToolOrigin,
   type TaskListStore,
 } from "@zhixing/tools-builtin";
-import type { IWorkModeController } from "./work-mode-controller.js";
 import {
   createWorkmodeEnterTool,
   createWorkmodeExitTool,
   createWorksceneChangeApproveTool,
+  createWorksceneListTool,
   createWorksceneMemoryQueryTool,
+  type WorksceneToolDirectory,
 } from "./workmode-tools.js";
 
 // ─── Assembly 接口 ───
@@ -61,11 +62,11 @@ export interface ExtraToolsRuntimeContext {
    */
   spec?: { kind: "main" } | { kind: "workscene" };
   /**
-   * 工作模式控制器 getter —— assembly 早于 per-runtime 实例发放，故用 getter
+   * 工作场景领域服务 getter —— assembly 早于 per-runtime 实例发放，故用 getter
    * 延迟取（与 `scheduler` getter 同构解鸡生蛋）。仅 main 组 workmode 工具需要；
    * workscene 的 exit 工具零依赖。
    */
-  workModeController?: () => IWorkModeController;
+  worksceneDirectory?: () => WorksceneToolDirectory;
 }
 
 export interface BuiltinExtraToolsAssembly {
@@ -138,16 +139,18 @@ export function createBuiltinExtraToolsAssembly(
       // workscene 工具组按 spec.kind 二分注入 —— by-construction 隔离：
       // power runtime 物理不持有 main-only 工具，main 物理不持有 workmode_exit。
       // exit 零依赖恒装(意图经 ALS 发当前 run 的 bus,宿主与 cli 同一工具);
-      // main 组(enter / 变更审批 / 记忆检索)依赖控制器守卫,仅控制器在场装配。
+      // main 组(enter / 变更审批 / 管理列表 / 记忆检索)依赖工作场景领域服务,
+      // 仅服务在场装配。
       const kind = ctx.spec?.kind ?? "main";
       if (kind === "workscene") {
         tools.push(createWorkmodeExitTool());
-      } else if (ctx.workModeController) {
-        const controller = ctx.workModeController();
+      } else if (ctx.worksceneDirectory) {
+        const workscenes = ctx.worksceneDirectory();
         tools.push(
-          createWorkmodeEnterTool(controller.registry),
-          createWorksceneChangeApproveTool(controller),
-          createWorksceneMemoryQueryTool(controller),
+          createWorkmodeEnterTool(workscenes),
+          createWorksceneChangeApproveTool(workscenes),
+          createWorksceneListTool(workscenes),
+          createWorksceneMemoryQueryTool(workscenes),
         );
       }
 

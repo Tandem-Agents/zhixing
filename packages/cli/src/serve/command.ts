@@ -378,16 +378,9 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     // 模式下退化为只输出 Task 起止帧(子工具中间事件静默,避免日志爆炸)。
     decorateRunBus: serveDecorateRunBus,
     onSecurityBlocked: createBlockedRenderer(serveWriter),
-    // workmode 工具组的控制器——LLM 进出场景意图的产生面在宿主 runtime。
-    // 删除经工作场景领域服务,与 RPC / CLI 管理入口共用运行态守卫。
-    workModeController: () => ({
-      registry: workSceneRegistry,
-      async removeWorkScene(id: string): Promise<void> {
-        if (!(await worksceneDirectory.remove(id))) {
-          throw new Error(`工作场景不存在: ${id}`);
-        }
-      },
-    }),
+    // workmode 工具组的领域服务——LLM 管理入口与 RPC / CLI 管理入口共用
+    // 同一校验、静默与运行态守卫。
+    worksceneDirectory: () => worksceneDirectory,
     onRuntimeCreated: (runtime) => {
       registerCliTurnContextProviders(runtime, {
         getSchedulerStatus: () =>

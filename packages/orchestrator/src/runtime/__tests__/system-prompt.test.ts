@@ -632,7 +632,11 @@ describe("buildSystemPrompt · working-mode 段条件性渲染", () => {
   it("段含关键决策语义:先探后问 / turn 边界生效", () => {
     const tools = [...defaultTools, stubTool("workmode_enter")];
     const prompt = buildSystemPrompt({ ...ctx, tools });
+    expect(prompt).toContain("workscene_list");
     expect(prompt).toContain("workscene_memory_query");
+    expect(prompt).toContain("set_workdir");
+    expect(prompt).toContain("clear_workdir");
+    expect(prompt).toContain("optional working directory binding");
     expect(prompt).toContain("before asking or switching");
     expect(prompt).toContain("finish the current turn normally");
   });

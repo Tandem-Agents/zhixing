@@ -29,7 +29,7 @@ import { powerProfile } from "@zhixing/orchestrator/profile";
 import type { SchedulerFacade, TurnOrigin, WorkScene } from "@zhixing/core";
 import type { ScheduleToolOrigin } from "@zhixing/tools-builtin";
 import type { BuiltinExtraToolsAssembly } from "./builtin-extra-tools.js";
-import type { IWorkModeController } from "./work-mode-controller.js";
+import type { WorksceneToolDirectory } from "./workmode-tools.js";
 
 /** 从 createAgentRuntime 公共契约推导类型——避免依赖 orchestrator 内部路径 */
 type DecorateRunBusFn = NonNullable<CreateAgentRuntimeOptions["decorateRunBus"]>;
@@ -63,12 +63,12 @@ export interface RuntimeHostOptions {
    */
   lifecycle?: readonly AgentRuntimeLifecycle[];
   /**
-   * 工作模式控制器(可选)——提供时会话实例装配 workmode 工具组(main 装
-   * enter / change_approve / memory_query,场景实例装 exit),LLM 由此产生
-   * 进出场景意图(经 run bus 带出、定向通知发起接入面消费)。ephemeral
+   * 工作场景领域服务(可选)——提供时会话实例装配 workmode 工具组(main 装
+   * enter / change_approve / list / memory_query,场景实例装 exit),LLM 由此产生
+   * 进出场景意图或主模式管理动作。ephemeral
    * 实例不装(定时任务无模式语义)。
    */
-  workModeController?: () => IWorkModeController;
+  worksceneDirectory?: () => WorksceneToolDirectory;
 }
 
 /** 从 turn 来源解析定时任务投递目标；无来源目标时不做隐式通知。 */
@@ -151,8 +151,8 @@ export class RuntimeHost {
         scheduler: this.opts.scheduler,
         scheduleOrigin,
         spec: workscene?.spec,
-        workModeController: opts?.withWorkmodeTools
-          ? this.opts.workModeController
+        worksceneDirectory: opts?.withWorkmodeTools
+          ? this.opts.worksceneDirectory
           : undefined,
       }),
       decorateRunBus: this.opts.decorateRunBus,

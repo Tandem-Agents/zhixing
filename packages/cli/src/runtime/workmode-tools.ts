@@ -2,8 +2,8 @@
  * 工作模式 agent 工具 —— 经 builtinExtraTools.assembleTools 按 spec.kind 注入。
  *
  * 设计要点：
- *   - 工具只捕获 {@link IWorkModeController} 窄接口（不反依赖宿主具体类），
- *     故可脱离核心宿主用 mock 接口单测。
+ *   - 工具只捕获工作场景领域服务窄接口（不反依赖宿主具体类），故可脱离
+ *     核心宿主用 mock 接口单测。
  *   - 切换类工具（enter/exit）**只 emit 意图、不执行切换**：run() 侧 accumulator
  *     收集、随 RunResult 带出，REPL 主回路 turn 边界唯一 applyModeSwitch 消费。
  *     工具 call 体返回的文本提示 LLM「切换将在本 turn 结束后发生」，让其先把
@@ -15,12 +15,12 @@
  *   `needsPermission` 在当前实现里只是自描述文档字段（grep 全仓库无运行时消费）。
  *   真正驱动 confirm 弹窗的是 `OperationClassifier`：声明 `boundaries` 让分类器
  *   把 enter/exit/change_approve 归到 `agent-context` / `filesystem.write` 这类
- *   external 类，自然升级到 confirm；memory_query 声明 `filesystem.read` 归为
- *   observe，自动放行。声明而非依赖 BoundaryImpactClassifier 的 fail-closed
+ *   external 类，自然升级到 confirm；list / memory_query 声明 `filesystem.read`
+ *   归为 observe，自动放行。声明而非依赖 BoundaryImpactClassifier 的 fail-closed
  *   critical 兜底 —— 那条路径是"忘了声明的最后保底"，不应该作为 intended 行为。
  *
  *   - LLM 调 enter / exit / change_approve → 系统弹 confirm 让用户拍板
- *   - LLM 调 memory_query → 自动放行
+ *   - LLM 调 list / memory_query → 自动放行
  *   - 用户命令 `/work` / `/exit` 走 cli 命令分发，根本不经 SecurityPipeline，
  *     天然不需要确认（用户意图即授权）
  */
@@ -31,13 +31,18 @@ import {
   getWorkSceneMemoryDir,
   getWorksceneToolBoundaries,
   worksceneToolRequiresExplicitConfirmation,
-  type IWorkSceneRegistry,
   type JsonSchema,
   type MemoryCategory,
   type ToolDefinition,
+  type WorkScene,
 } from "@zhixing/core";
 import { emitWorkModeSwitchIntent } from "@zhixing/orchestrator/runtime";
-import type { IWorkModeController } from "./work-mode-controller.js";
+import type { WorksceneDirectory } from "@zhixing/server";
+
+export type WorksceneToolDirectory = Pick<
+  WorksceneDirectory,
+  "list" | "get" | "create" | "rename" | "setWorkdir" | "remove"
+>;
 
 /** 单条记忆片段上限 —— 控制注入主上下文的体量（只读检索非 raw dump）。 */
 const MEMORY_SNIPPET_CAP = 500;
@@ -50,21 +55,34 @@ function fail(content: string): Promise<{ content: string; isError: true }> {
   return Promise.resolve({ content, isError: true });
 }
 
+function appendWorkdirWarning(content: string, warning?: string): string {
+  return warning ? `${content}\n提示：${warning}` : content;
+}
+
+function formatSceneLine(scene: WorkScene): string {
+  const parts = [
+    `- ${scene.name} (id: ${scene.id})`,
+    `  工作目录：${scene.workdir ?? "未绑定"}`,
+  ];
+  if (scene.lastActiveAt) parts.push(`  最近使用：${scene.lastActiveAt}`);
+  return parts.join("\n");
+}
+
 /**
  * workmode_enter（main-only，needsPermission）—— 用户拍板后 emit 进入意图。
  *
- * 只依赖场景注册表(存在性校验);意图经 emitWorkModeSwitchIntent 发当前
+ * 只依赖工作场景领域服务做存在性校验;意图经 emitWorkModeSwitchIntent 发当前
  * run 的 bus——与 controller 解耦,宿主侧装配同样可用。
  */
 export function createWorkmodeEnterTool(
-  registry: IWorkSceneRegistry,
+  workscenes: Pick<WorksceneToolDirectory, "get">,
 ): ToolDefinition {
   const inputSchema: JsonSchema = {
     type: "object",
     properties: {
       sceneId: {
         type: "string",
-        description: "要进入的工作场景 id（用 workscene_memory_query 或场景列表确认 id）",
+        description: "要进入的工作场景 id（用 workscene_list 或 workscene_memory_query 确认 id）",
       },
     },
     required: ["sceneId"],
@@ -85,7 +103,7 @@ export function createWorkmodeEnterTool(
     async call(input) {
       const sceneId = String(input.sceneId ?? "").trim();
       if (!sceneId) return fail("workmode_enter 需要 sceneId");
-      const scene = await registry.get(sceneId);
+      const scene = await workscenes.get(sceneId);
       if (!scene) return fail(`工作场景 "${sceneId}" 不存在，未切换`);
       emitWorkModeSwitchIntent({ kind: "enter", sceneId });
       return ok(
@@ -132,7 +150,10 @@ export function createWorkmodeExitTool(): ToolDefinition {
  * workscene_change_approve（main-only，needsPermission）—— 用户拍板后改注册表。
  */
 export function createWorksceneChangeApproveTool(
-  controller: IWorkModeController,
+  workscenes: Pick<
+    WorksceneToolDirectory,
+    "create" | "remove" | "rename" | "setWorkdir"
+  >,
 ): ToolDefinition {
   const inputSchema: JsonSchema = {
     type: "object",
@@ -148,11 +169,11 @@ export function createWorksceneChangeApproveTool(
       },
       sceneId: {
         type: "string",
-        description: "remove/rename 的目标场景 id",
+        description: "remove/rename/set_workdir/clear_workdir 的目标场景 id",
       },
       workdir: {
         type: "string",
-        description: "add 可选：该场景的工作目录（仅涉本地文件的场景需要）",
+        description: "add 可选、set_workdir 必填：该场景的工作目录（必须是绝对路径）",
       },
     },
     required: ["action"],
@@ -160,7 +181,7 @@ export function createWorksceneChangeApproveTool(
   return {
     name: "workscene_change_approve",
     description:
-      "增删改工作场景注册表（add/remove/rename）。需用户确认。",
+      "增删改工作场景注册表（add/remove/rename/set_workdir/clear_workdir）。需用户确认。",
     inputSchema,
     isReadOnly: false,
     isParallelSafe: false,
@@ -183,24 +204,47 @@ export function createWorksceneChangeApproveTool(
               typeof input.workdir === "string" && input.workdir.trim()
                 ? input.workdir.trim()
                 : undefined;
-            const s = await controller.registry.add({ name, workdir });
-            return ok(`已创建工作场景「${s.name}」（id: ${s.id}）`);
+            const result = await workscenes.create({ name, workdir });
+            return ok(
+              appendWorkdirWarning(
+                `已创建工作场景「${result.scene.name}」（id: ${result.scene.id}）`,
+                result.workdirWarning,
+              ),
+            );
           }
           case "remove": {
             if (!sceneId) return fail("remove 需要 sceneId");
-            // 走 controller.removeWorkScene(带 active guard):active 场景 id
-            // 命中时抛 friendly error,catch 回包到 isError 让 LLM 见错文本。
-            // 虽然本工具是 main-only(power 模式 by-construction 拿不到),
-            // 仍走 guard 入口做 defense-in-depth + 与 CLI 命令同源。
             // 用户的 workdir 不动 —— 那是用户的代码资产,系统不碰。
-            await controller.removeWorkScene(sceneId);
+            const removed = await workscenes.remove(sceneId);
+            if (!removed) return fail(`工作场景 "${sceneId}" 不存在`);
             return ok(`已删除工作场景 ${sceneId}（系统数据已物理清除）`);
           }
           case "rename": {
             if (!sceneId || !name)
               return fail("rename 需要 sceneId 与 name");
-            const s = await controller.registry.rename(sceneId, name);
+            const s = await workscenes.rename(sceneId, name);
+            if (!s) return fail(`工作场景 "${sceneId}" 不存在`);
             return ok(`已重命名为「${s.name}」`);
+          }
+          case "set_workdir": {
+            if (!sceneId) return fail("set_workdir 需要 sceneId");
+            const workdir =
+              typeof input.workdir === "string" ? input.workdir.trim() : "";
+            if (!workdir) return fail("set_workdir 需要 workdir");
+            const result = await workscenes.setWorkdir(sceneId, workdir);
+            if (!result) return fail(`工作场景 "${sceneId}" 不存在`);
+            return ok(
+              appendWorkdirWarning(
+                `已将工作场景「${result.scene.name}」的工作目录设为：${result.scene.workdir}`,
+                result.workdirWarning,
+              ),
+            );
+          }
+          case "clear_workdir": {
+            if (!sceneId) return fail("clear_workdir 需要 sceneId");
+            const result = await workscenes.setWorkdir(sceneId, null);
+            if (!result) return fail(`工作场景 "${sceneId}" 不存在`);
+            return ok(`已解除工作场景「${result.scene.name}」的工作目录绑定`);
           }
           default:
             return fail(`未知 action: ${action}`);
@@ -215,13 +259,40 @@ export function createWorksceneChangeApproveTool(
 }
 
 /**
+ * workscene_list（main-only，只读）—— 查看场景管理元数据。
+ */
+export function createWorksceneListTool(
+  workscenes: Pick<WorksceneToolDirectory, "list">,
+): ToolDefinition {
+  const inputSchema: JsonSchema = {
+    type: "object",
+    properties: {},
+  };
+  return {
+    name: "workscene_list",
+    description:
+      "只读列出工作场景管理元数据（id、名称、工作目录、最近使用时间），用于选择目标场景或查看目录绑定。",
+    inputSchema,
+    isReadOnly: true,
+    isParallelSafe: true,
+    needsPermission: false,
+    boundaries: getWorksceneToolBoundaries("workscene_list"),
+    async call() {
+      const scenes = await workscenes.list();
+      if (scenes.length === 0) return ok("当前没有任何工作场景");
+      return ok(scenes.map(formatSceneLine).join("\n\n"));
+    },
+  };
+}
+
+/**
  * workscene_memory_query（main-only，只读）—— 检索任一/全部工作场景记忆域。
  *
  * v1：按 query 子串搜（无 query 则列目录索引），返回 id + 标题 + 截断片段；
  * 各场景独立 readonly MemoryStore，不写。
  */
 export function createWorksceneMemoryQueryTool(
-  controller: IWorkModeController,
+  workscenes: Pick<WorksceneToolDirectory, "list" | "get">,
 ): ToolDefinition {
   const inputSchema: JsonSchema = {
     type: "object",
@@ -255,10 +326,10 @@ export function createWorksceneMemoryQueryTool(
 
       const scenes = sceneId
         ? await (async () => {
-            const s = await controller.registry.get(sceneId);
+            const s = await workscenes.get(sceneId);
             return s ? [s] : [];
           })()
-        : await controller.registry.list();
+        : await workscenes.list();
 
       if (scenes.length === 0) {
         return ok(
