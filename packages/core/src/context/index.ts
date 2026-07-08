@@ -58,6 +58,8 @@ export {
   SYSTEM_META_PROMPT_SECTION,
 } from "./system-meta.js";
 
+export * from "./guidance/index.js";
+
 export * from "./bootstrap/index.js";
 
 export type {
