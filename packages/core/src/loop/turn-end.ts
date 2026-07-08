@@ -53,16 +53,19 @@
  */
 
 import type { ITokenEstimator } from "../context/types.js";
+import {
+  computeContextTokens,
+  type TokenAnchor,
+} from "../context/token-accounting.js";
 import type { SegmentManager } from "../context/segment/segment-manager.js";
 import type { IEventBus } from "../events/types.js";
 import type { AgentEventMap } from "../types/agent-events.js";
 import type { TokenUsage } from "../types/llm.js";
 import type { Message } from "../types/messages.js";
-import { toToolSpec, type ToolSpec } from "../types/tools.js";
+import { toToolSpec } from "../types/tools.js";
 import type { ToolDefinition } from "../types/tools.js";
 import type {
   AgentResult,
-  TokenAnchor,
   WindowChangeReason,
   WindowLifecycle,
 } from "./types.js";
@@ -275,7 +278,8 @@ export async function runTurnEnd(
     const totalTokens = computeContextTokens({
       estimator: params.tokenEstimator,
       systemPrompt: params.systemPrompt,
-      messages,
+      stateMessages: messages,
+      providerMessages: messages,
       tools: params.tools.map(toToolSpec),
       anchor: params.anchor,
     });
@@ -300,63 +304,4 @@ export async function runTurnEnd(
   //    - 不感知 caller 路径，纯粹按"turn 结束做什么"思考
 
   return { kind: "ok", messages };
-}
-
-// ─── tokens 快照计算 ───
-
-interface ContextTokensInput {
-  readonly estimator: ITokenEstimator;
-  readonly systemPrompt: string;
-  readonly messages: readonly Message[];
-  readonly tools: readonly ToolSpec[];
-  readonly anchor: TokenAnchor | undefined;
-}
-
-/**
- * 计算"下次 LLM 将看到的上下文总 token 数"—— anchor + delta / fallback 字符估算双路径。
- *
- * ─── 路径决策 ───
- *
- *   Anchor 可用（首次 LLM call 之后 + messages 是 anchor 时刻的延伸）：
- *     return anchor.inputTokens + estimator.estimateMessages(messages.slice(baseline))
- *     - 已发送部分按 API 真值锚定（100% 精确）
- *     - 仅自 anchor 以来新增的 messages 后缀做字符估算（增量字节小，绝对误差小）
- *
- *   Anchor 缺失（首次 LLM call 之前）/ 失效（段切段 / 压缩让 messages 缩到比 baseline 短）：
- *     return estimateText(system) + estimateMessages(messages) + estimateTools(tools)
- *     - 三件套全量字符估算 + estimator EMA 校准 factor
- *     - 失效语义靠 `messages.length < anchor.baselineMessageCount` 自然降级，
- *       不需要主动 invalidate —— 下一次 LLM call 成功又会基于新 length 写新 anchor
- *
- * ─── 为什么这个 helper 单独抽出 ───
- *
- * - turn-end 钩子主流程只关心"决定 emit 什么 totalTokens"，路径决策细节内化在此
- *   单点，避免 ③ 步与主控制流耦合
- * - 单一职责 + 纯函数：输入完整、无副作用、易测试（直接断言返回值）
- * - 未来若再加估算路径（如 deepseek-tokenizer 真值），扩展点收敛于此函数体内的
- *   `if-else if-fallback` 链，钩子主流程零改动
- *
- * ─── Anchor 路径的残余误差源 ───
- *
- * - anchor.inputTokens 含本次 LLM call 注入的 turn-context block 字节（~100-300
- *   token），下次估算 `anchor.inputTokens + delta` 时物理上重复计了这部分 ——
- *   业界共识可接受的小高估（< 5%），不做"减去注入字节"的精细修正（YAGNI）
- * - delta 部分的字符估算用 estimator factor，仍受字符权重 ±10% 的天然偏差，
- *   但增量字节小所以绝对误差可控
- */
-function computeContextTokens(input: ContextTokensInput): number {
-  const { estimator, systemPrompt, messages, tools, anchor } = input;
-
-  // Anchor 路径 —— 已发送部分按真值锚定
-  if (anchor && messages.length >= anchor.baselineMessageCount) {
-    const delta = messages.slice(anchor.baselineMessageCount);
-    return anchor.inputTokens + estimator.estimateMessages(delta);
-  }
-
-  // Fallback —— 纯字符估算（首次 LLM call 之前 / anchor 失效）
-  return (
-    estimator.estimateText(systemPrompt) +
-    estimator.estimateMessages(messages) +
-    estimator.estimateTools(tools)
-  );
 }

@@ -315,7 +315,7 @@ describe("runTurnEnd · ③ context:tokens_snapshot emit", () => {
 // ─── ③ Anchor + Delta 路径 ───
 
 describe("runTurnEnd · ③ Anchor + Delta 优先路径", () => {
-  it("anchor 可用且 messages 是延伸 → totalTokens = anchor.inputTokens + estimateMessages(delta)", async () => {
+  it("anchor 可用且 messages 是延伸 → totalTokens = anchor.totalInputTokens + estimateMessages(delta)", async () => {
     const bus = createEventBus<AgentEventMap>();
     const seen: AgentEventMap["context:tokens_snapshot"][] = [];
     bus.on("context:tokens_snapshot", (p) => seen.push(p));
@@ -334,8 +334,8 @@ describe("runTurnEnd · ③ Anchor + Delta 优先路径", () => {
 
     await runTurnEnd(
       baseParams({
-        // baseline=3 时 LLM 看到的 inputTokens=6500
-        anchor: { inputTokens: 6500, baselineMessageCount: 3 },
+        // baseline=3 时 LLM 看到的 totalInputTokens=6500
+        anchor: { totalInputTokens: 6500, baselineMessageCount: 3 },
         // 当前 messages=5 条 → delta = 后 2 条
         messages: [msg("m1"), msg("m2"), msg("m3"), msg("m4"), msg("a:reply")],
         tokenEstimator: estimator,
@@ -364,7 +364,7 @@ describe("runTurnEnd · ③ Anchor + Delta 优先路径", () => {
     await runTurnEnd(
       baseParams({
         // baseline=5 但 messages 缩到 1 条（如 segmentManager 切段）→ anchor 失效
-        anchor: { inputTokens: 6500, baselineMessageCount: 5 },
+        anchor: { totalInputTokens: 6500, baselineMessageCount: 5 },
         messages: [msg("a:summary")],
         tokenEstimator: estimator,
         eventBus: bus,
@@ -400,7 +400,7 @@ describe("runTurnEnd · ③ Anchor + Delta 优先路径", () => {
     expect(seen[0]!.totalTokens).toBe(350);
   });
 
-  it("anchor.baselineMessageCount === messages.length → delta 为空数组 → 仅 anchor.inputTokens", async () => {
+  it("anchor.baselineMessageCount === messages.length → delta 为空数组 → 仅 anchor.totalInputTokens", async () => {
     const bus = createEventBus<AgentEventMap>();
     const seen: AgentEventMap["context:tokens_snapshot"][] = [];
     bus.on("context:tokens_snapshot", (p) => seen.push(p));
@@ -411,7 +411,7 @@ describe("runTurnEnd · ③ Anchor + Delta 优先路径", () => {
 
     await runTurnEnd(
       baseParams({
-        anchor: { inputTokens: 6500, baselineMessageCount: 2 },
+        anchor: { totalInputTokens: 6500, baselineMessageCount: 2 },
         messages: [msg("m1"), msg("m2")], // 与 baseline 完全相等
         tokenEstimator: estimator,
         eventBus: bus,

@@ -15,8 +15,8 @@
  *   I2  getTotalInputTokens(u) ≥ (cacheReadTokens ?? 0) + (cacheWriteTokens ?? 0)
  *   I3  所有 token 计数非负
  *   I4  OpenAI 兼容族：getTotalInputTokens(u) === prompt_tokens（fallback 即正确）
- *   I5  Anthropic：inputTokens 保留 vendor 原值不变（anchor / 校准锚点零位移 ——
- *       这是"token 区不能变差"约束的回归守卫）
+ *   I5  Anthropic：inputTokens 保留 vendor 原值不变，确保仍可诊断 vendor 原始上报；
+ *       请求总量、anchor 与 calibration actual 统一走 getTotalInputTokens
  */
 
 import { describe, expect, it } from "vitest";
@@ -53,7 +53,7 @@ describe("usage-conformance · Anthropic adapter", () => {
     };
     const u = extractUsage(raw);
 
-    // I5：anchor / estimator 校准读的是 inputTokens —— 必须逐字节等于 vendor 原值
+    // I5：vendor 原始主输入字段必须逐字节保留，便于诊断与兼容展示
     expect(u.inputTokens).toBe(300);
     expect(u.totalInputTokens).toBe(49_500);
     expect(getTotalInputTokens(u)).toBe(49_500);

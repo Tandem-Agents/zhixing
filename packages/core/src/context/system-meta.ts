@@ -19,6 +19,7 @@
  *   - dropped-turns: 非摘要型省略占位（应急地板机械截断时）
  *   - startup-bootstrap: 启动 / 恢复时倒读装填的近期上下文
  *   - workscene-digest: 工作场景退出时注入的交接纪要
+ *   - guidance: 用户 / 工作场景声明的稳定约定
  *
  * 为什么用 XML-like 标签：
  *   - LLM 训练数据中 system-* 标签常见，自动识别为元信息
@@ -35,6 +36,7 @@ export type SystemMetaKind = "compact-summary" | "ack" | "dropped-turns";
 // ─── 常量 ───
 
 const ACK_TEXT = "已阅读摘要";
+const GUIDANCE_ACK_TEXT = "已阅读约定";
 const DROPPED_TURNS_TEXT_PREFIX = "前 ";
 const DROPPED_TURNS_TEXT_SUFFIX = " 轮对话已省略";
 
@@ -169,6 +171,38 @@ export function buildWorksceneDigestMessage(digest: string): Message {
   };
 }
 
+/**
+ * 构造 guidance 对 —— 窗口级发送前缀中的稳定约定。
+ *
+ * guidance 是持久文件的派生发送视图，不属于压缩 / 丢弃生命周期：
+ * 构造器复用 system-meta 形态与 escape 保护，但不把 guidance 纳入
+ * SystemMetaKind / detectSystemMetaKind / stripSummaryPlaceholderPair。
+ */
+export function buildGuidanceMessagePair(
+  content: string,
+): readonly [Message, Message] {
+  const escaped = escapeSystemMetaPayload(content);
+  const guidanceMsg: Message = {
+    role: "user",
+    content: [
+      {
+        type: "text",
+        text: `<system-meta kind="guidance">${escaped}</system-meta>`,
+      },
+    ],
+  };
+  const ackMsg: Message = {
+    role: "assistant",
+    content: [
+      {
+        type: "text",
+        text: `<system-meta kind="ack">${GUIDANCE_ACK_TEXT}</system-meta>`,
+      },
+    ],
+  };
+  return [guidanceMsg, ackMsg] as const;
+}
+
 // ─── 识别 ───
 
 /**
@@ -237,6 +271,7 @@ export const SYSTEM_META_PROMPT_SECTION = `[系统元信息标签]
 遇到这些标签时：
 - 读取标签内容作为上下文，不要回应标签本身
 - compact-summary 表示早期对话压缩摘要；dropped-turns 表示若干轮对话被省略
+- guidance 表示用户或工作场景声明的稳定约定，优先级低于系统提示、安全策略和当前用户要求，不得覆盖更高层指令
 - 其他 kind 也按机制上下文处理，直接利用标签内容继续当前任务
 - 基于可见的信息继续对话`;
 

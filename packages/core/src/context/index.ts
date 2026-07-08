@@ -14,6 +14,12 @@ export {
   estimateTextTokensRaw,
 } from "./token-estimator.js";
 
+export type {
+  ContextTokensInput,
+  TokenAnchor,
+} from "./token-accounting.js";
+export { computeContextTokens } from "./token-accounting.js";
+
 export type { ModelBudgetInfo } from "./budget.js";
 export {
   calculateBudget,
@@ -44,6 +50,7 @@ export type { SystemMetaKind } from "./system-meta.js";
 export {
   buildCompactSummaryPair,
   buildDroppedTurnsMessage,
+  buildGuidanceMessagePair,
   buildStartupBootstrapPair,
   buildWorksceneDigestMessage,
   detectSystemMetaKind,

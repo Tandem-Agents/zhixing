@@ -80,7 +80,7 @@ describe("wrapWithCalibration · 透传契约", () => {
 // ─── 校准触发条件 ───
 
 describe("wrapWithCalibration · 校准触发", () => {
-  it("成功完成 + 有 usage + inputTokens > 0 → calibrate 被调", async () => {
+  it("成功完成 + 有 usage + 全量输入大于 0 → calibrate 被调", async () => {
     const estimator = makeEstimator(120);
     await collect(
       wrapWithCalibration(
@@ -101,6 +101,31 @@ describe("wrapWithCalibration · 校准触发", () => {
     ]);
   });
 
+  it("cache 场景用 totalInputTokens 作为 calibration actual", async () => {
+    const estimator = makeEstimator(120);
+    await collect(
+      wrapWithCalibration(
+        streamOf([
+          {
+            type: "message_end",
+            stopReason: "end_turn",
+            usage: {
+              inputTokens: 100,
+              totalInputTokens: 1_000,
+              outputTokens: 30,
+              cacheReadTokens: 900,
+            },
+          },
+        ]),
+        { estimator, messages: makeMessages() },
+      ),
+    );
+
+    expect(estimator.calibrateCalls).toEqual([
+      { estimated: 120, actual: 1_000 },
+    ]);
+  });
+
   it("无 message_end(stream 提前结束)→ usage 为 null,不 calibrate", async () => {
     const estimator = makeEstimator();
     await collect(
@@ -117,7 +142,7 @@ describe("wrapWithCalibration · 校准触发", () => {
     expect(estimator.calibrateCalls).toEqual([]);
   });
 
-  it("usage.inputTokens === 0 → 不 calibrate(样本不可靠)", async () => {
+  it("全量输入为 0 → 不 calibrate(样本不可靠)", async () => {
     const estimator = makeEstimator();
     await collect(
       wrapWithCalibration(

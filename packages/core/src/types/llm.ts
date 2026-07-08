@@ -36,8 +36,11 @@ export interface TokenUsage {
    *     cacheReadTokens / cacheWriteTokens，**不含**在本字段
    *
    * 需要"模型本次实际处理的全量输入"时一律用 {@link getTotalInputTokens}，
-   * 不要直接读本字段 —— 否则在 Anthropic 上会系统性低估。anchor / estimator
-   * 校准等既有消费方按 vendor 原值消费（语义稳定，本次改造刻意不动）。
+   * 不要直接读本字段 —— 否则在 Anthropic 上会系统性低估。
+   *
+   * 直接读本字段只适合明确需要 vendor 原值的展示或诊断场景；请求总量、
+   * token anchor 与 estimator calibration 的 actual 口径必须走
+   * {@link getTotalInputTokens}。
    */
   inputTokens: number;
   outputTokens: number;
@@ -81,9 +84,9 @@ export function emptyUsage(): TokenUsage {
  * = `totalInputTokens`（adapter 显式归一时）`?? inputTokens`（vendor 原值已是
  * 全量，如 OpenAI 兼容族；或 emptyUsage / 非 adapter 构造的兜底）。
  *
- * 想要"模型实际看了多少输入"的消费方（状态区流量、计费、累计）用本函数；
- * 想要 vendor 原始锚点的消费方（anchor / estimator 校准）继续直接读 inputTokens
- * —— 两条路径刻意分离，互不影响。
+ * 想要"模型实际看了多少输入"的消费方（状态区流量、计费、累计、
+ * token anchor、estimator 校准 actual）用本函数。只有明确需要 vendor
+ * 原始主输入字段的诊断场景才直接读 inputTokens。
  *
  * 不变量：返回值 ≥ inputTokens，且 ≥ (cacheReadTokens ?? 0)+(cacheWriteTokens ?? 0)。
  */

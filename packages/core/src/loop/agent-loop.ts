@@ -46,7 +46,7 @@
 import { buildCleanup } from "../interrupt/cleanup.js";
 import { createInterruptController, getAbortReason } from "../interrupt/controller.js";
 import { toAgentError } from "../types/errors.js";
-import { emptyUsage, mergeUsage } from "../types/llm.js";
+import { emptyUsage, getTotalInputTokens, mergeUsage } from "../types/llm.js";
 import { extractText, extractToolCalls, toolResultMessage } from "../types/messages.js";
 import type { Message } from "../types/messages.js";
 import {
@@ -330,38 +330,38 @@ export async function* runAgentLoop(
 
       // ── 估算器校准 + Token Anchor 写入（仅成功无错路径） ──
       //
-      // 两件事共用同一 success guard，依赖的真值来源相同（llmResult.usage.inputTokens）。
-      // abort / provider-error / inputTokens=0 路径全部跳过 —— 这些样本不可靠：
+      // 两件事共用同一 success guard，依赖同一个 provider-normalized input 真值。
+      // abort / provider-error / 全量输入为 0 的路径全部跳过 —— 这些样本不可靠：
       // abort 时 token 数未必返完整、provider error 时 usage 可能未送达、
-      // inputTokens=0 是 abort 在 message_end 之前的防御占位。写入污染样本会让
+      // 全量输入为 0 是 abort 在 message_end 之前的防御占位。写入污染样本会让
       // EMA factor 漂移、anchor 与真实 LLM 视图错位。
       //
       // ─── ① estimator EMA 校准 ───
       //
-      // 用 API 返回的真实 inputTokens 对账本次"实际送入 LLM 的 messages"
+      // 用 API 返回的全量输入真值对账本次"实际送入 LLM 的 messages"
       // （即 messagesForLLM —— TurnContextInjector 注入后），让 calibration 系数与
       // LLM 实际处理的 size 对账，而非与数据层 state.messages 对账：后者会因
       // turn-context 注入产生系统性偏差，让 calibration 系数无法收敛。
       //
-      // **维度对齐契约**：`inputTokens` 是 API 返回的 system + messages + tools
-      // 总 token 真值；estimated 必须用同样的三件套加总。早期版本只 estimate
+      // **维度对齐契约**：actual 是 API 返回的 system + messages + tools
+      // 全量 token 真值；estimated 必须用同样的三件套加总。早期版本只 estimate
       // messagesForLLM，导致 ratio = actual / estimated 被错误放大到 2x+,
       // sliding average 把 calibrationFactor 推到 1.4-2.0，估算永久 +40~80% 偏高。
       // 修复：把 system + tools 也算进 estimated，让 actual 与 estimated 维度严格对齐。
       //
       // ─── ② Token Anchor 写入 ───
       //
-      // 把 "LLM 此刻看到 state.messages.length 条 messages → 实际处理 inputTokens
+      // 把 "LLM 此刻看到 state.messages.length 条 messages → 实际处理 totalInputTokens
       // 个 token" 的真值钉子存到 state.anchor，供下游（如 turn-end ③ tokens 快照）
       // 用 "anchor + delta" 替代 "纯字符估算"路径 —— 已发送部分按 API 真值锚定，
       // 仅自 anchor 以来新增的 messages 后缀做字符估算，业界推测 Claude Code 同模式。
       //
       // 与 estimator 校准正交：anchor 独立于 estimator factor，不依赖 estimator
-      // 是否注入；fallback 字符估算路径仍消费 estimator factor。详见 TokenAnchor docstring。
+      // 是否注入；fallback 字符估算路径仍消费 estimator factor。详见 TokenAnchor 契约。
       const llmCallSuccess =
         !llmResult.aborted &&
         !llmResult.error &&
-        llmResult.usage.inputTokens > 0;
+        getTotalInputTokens(llmResult.usage) > 0;
       if (llmCallSuccess && params.tokenEstimator) {
         const estimated =
           params.tokenEstimator.estimateText(getSystemPrompt()) +
@@ -369,7 +369,7 @@ export async function* runAgentLoop(
           params.tokenEstimator.estimateTools(toolSpecs);
         params.tokenEstimator.calibrate(
           estimated,
-          llmResult.usage.inputTokens,
+          getTotalInputTokens(llmResult.usage),
         );
       }
       if (llmCallSuccess) {
@@ -382,7 +382,7 @@ export async function* runAgentLoop(
         state = {
           ...state,
           anchor: {
-            inputTokens: llmResult.usage.inputTokens,
+            totalInputTokens: getTotalInputTokens(llmResult.usage),
             baselineMessageCount: state.messages.length,
           },
         };

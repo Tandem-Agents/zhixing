@@ -352,10 +352,11 @@ export interface AnthropicUsageLike {
  *
  * 关键语义：Anthropic 的 `input_tokens` 仅是"未命中的新输入"，cache 命中/写入
  * 部分单列在 `cache_read_input_tokens` / `cache_creation_input_tokens`。因此：
- *   - `inputTokens` 保留 vendor 原值（input_tokens）—— anchor / estimator 校准等
- *     既有消费方按此锚定，**刻意不动**，保证依赖它的链路逐字节不变
+ *   - `inputTokens` 保留 vendor 原值（input_tokens），供明确需要 vendor 原始字段
+ *     的诊断 / 展示链路使用
  *   - `totalInputTokens` = 三者之和，给到需要"全量输入"规范口径的消费方
- *     （状态区流量等，经 getTotalInputTokens 读取）
+ *     （请求总量、token anchor、estimator calibration actual 等，经
+ *     getTotalInputTokens 读取）
  *
  * 这是唯一需要显式设 totalInputTokens 的 adapter —— OpenAI 兼容族 prompt_tokens
  * 本就是全量，由 getTotalInputTokens 的 fallback 自然得到。

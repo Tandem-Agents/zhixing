@@ -2,14 +2,14 @@
  * 段切换 LLM 调用的 estimator calibration wrapper —— 透传 stream 同时捕获 usage 校准。
  *
  * 装配位置:`resilientCallLLM → wrapStreamWithWatchdog → wrapWithCalibration`(由外到内层
- * 叠加,与既有 stream wrapper 同形态)。每次段切换 LLM call 完成后用真实 inputTokens
+ * 叠加,与既有 stream wrapper 同形态)。每次段切换 LLM call 完成后用 usage 真值
  * 校准 estimator,让 calibration 系数随段切换路径同步收敛。
  *
  * 不走 EventBus(llm:request_end)的原因:段切换 LLM call 与主对话 LLM call emit
  * 同型事件,listener 无可靠方式区分归属;流包装层归属精确,只看自己经手的 stream。
  *
- * 校准条件与 main agent loop 严格一致:`!aborted && !errored && usage.inputTokens > 0`
- * —— abort / error / 空 usage 全部跳过,这些样本不可靠,会污染滑动平均。
+ * 校准条件与 main agent loop 同口径：actual 走 getTotalInputTokens；
+ * abort / error / 空 usage 全部跳过,这些样本不可靠,会污染滑动平均。
  *
  * 实现采用 async generator:逐事件透传保 stream 行为完全一致(下游消费方看不出
  * wrapper 存在);usage 在 message_end 事件捕获;error event 标记 errored;迭代被
@@ -19,7 +19,11 @@
 
 import type { ITokenEstimator } from "../types.js";
 import type { Message } from "../../types/messages.js";
-import type { StreamEvent, TokenUsage } from "../../types/llm.js";
+import {
+  getTotalInputTokens,
+  type StreamEvent,
+  type TokenUsage,
+} from "../../types/llm.js";
 
 export interface WrapWithCalibrationOptions {
   /** 估算器实例 —— 校准操作的目标(滑动平均会更新其内部系数) */
@@ -51,8 +55,8 @@ export async function* wrapWithCalibration(
   }
 
   // 仅在成功完成且有有效 usage 时校准;abort / error / 空 usage 都跳过
-  if (!errored && usage !== null && usage.inputTokens > 0) {
+  if (!errored && usage !== null && getTotalInputTokens(usage) > 0) {
     const estimated = options.estimator.estimateMessages(options.messages);
-    options.estimator.calibrate(estimated, usage.inputTokens);
+    options.estimator.calibrate(estimated, getTotalInputTokens(usage));
   }
 }
