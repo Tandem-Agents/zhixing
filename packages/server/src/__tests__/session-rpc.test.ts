@@ -185,7 +185,7 @@ function createMockRuntime(
       : {}),
     ...(opts.contextBudget
       ? {
-          checkBudget: () => opts.contextBudget!,
+          estimateConversationRequestBudget: () => opts.contextBudget!,
           calibrationFactor: 0.95,
           subAgentUsages: () => opts.subAgentUsages ?? [],
         }

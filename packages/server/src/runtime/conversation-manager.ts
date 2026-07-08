@@ -247,7 +247,9 @@ export type TurnAdmissionResult =
 export type ContextBudgetInspectionResult =
   | {
       status: "done";
-      budget: ReturnType<NonNullable<SessionRuntime["checkBudget"]>>;
+      budget: ReturnType<
+        NonNullable<SessionRuntime["estimateConversationRequestBudget"]>
+      >;
       turnCount: number;
       calibrationFactor: number;
     }
@@ -257,7 +259,9 @@ export type ContextBudgetInspectionResult =
 export type UsageInspectionResult =
   | {
       status: "done";
-      budget: ReturnType<NonNullable<SessionRuntime["checkBudget"]>>;
+      budget: ReturnType<
+        NonNullable<SessionRuntime["estimateConversationRequestBudget"]>
+      >;
       turnCount: number;
       calibrationFactor: number;
       subUsages: readonly RuntimeSubAgentUsageEntry[];
@@ -1374,10 +1378,14 @@ export class ConversationManager {
   private inspectContextBudget(
     session: ManagedSession,
   ): ContextBudgetInspectionResult {
-    if (!session.runtime.checkBudget) return { status: "unsupported" };
+    if (!session.runtime.estimateConversationRequestBudget) {
+      return { status: "unsupported" };
+    }
     return {
       status: "done",
-      budget: session.runtime.checkBudget([...session.window.getMessages()]),
+      budget: session.runtime.estimateConversationRequestBudget([
+        ...session.window.getMessages(),
+      ]),
       turnCount: session.turnCount,
       calibrationFactor: session.runtime.calibrationFactor ?? 1,
     };
@@ -1408,11 +1416,13 @@ export class ConversationManager {
   }
 
   private inspectUsage(session: ManagedSession): UsageInspectionResult {
-    if (!session.runtime.checkBudget) return { status: "unsupported" };
+    if (!session.runtime.estimateConversationRequestBudget) {
+      return { status: "unsupported" };
+    }
     const messages = [...session.window.getMessages()];
     return {
       status: "done",
-      budget: session.runtime.checkBudget(messages),
+      budget: session.runtime.estimateConversationRequestBudget(messages),
       turnCount: session.turnCount,
       calibrationFactor: session.runtime.calibrationFactor ?? 1,
       subUsages: session.runtime.subAgentUsages?.(messages) ?? [],

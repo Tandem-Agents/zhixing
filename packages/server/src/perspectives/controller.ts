@@ -309,11 +309,11 @@ function renderAllocationContext(messages: readonly Message[]): string {
 }
 
 function estimateMessages(
-  runtime: { checkBudget?: (messages: readonly Message[]) => { currentTokens: number } },
+  runtime: { estimateMessagesTokens?: (messages: readonly Message[]) => number },
   messages: readonly Message[],
 ): number {
-  const budget = runtime.checkBudget?.(messages);
-  if (budget) return budget.currentTokens;
+  const tokens = runtime.estimateMessagesTokens?.(messages);
+  if (tokens !== undefined) return tokens;
   return roughEstimateMessages(messages);
 }
 

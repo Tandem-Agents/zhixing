@@ -149,8 +149,13 @@ export interface SessionRuntime {
   runOrchestrationV1?(
     params: SessionRuntimeOrchestrationV1Params,
   ): Promise<OrchestrationRunResultV1>;
-  /** 查询给定消息列表的上下文预算(接入面 /usage /context 的数据面)。 */
-  checkBudget?(messages: readonly Message[]): ContextBudget;
+  /**
+   * 估算当前窗口下一次 provider 请求的上下文预算(接入面 /usage /context 的数据面)。
+   * 运行体自行补齐 committed system prompt / message prefix / tools。
+   */
+  estimateConversationRequestBudget?(messages: readonly Message[]): ContextBudget;
+  /** 纯消息 token 估算，供 snapshot / perspectives 等消息子集裁剪使用。 */
+  estimateMessagesTokens?(messages: readonly Message[]): number;
   /**
    * 查询当前消息列表里的子 agent 用量拆分(/usage 的补充数据面)。
    *

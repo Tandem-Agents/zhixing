@@ -1521,7 +1521,7 @@ describe("createAgentRuntime · 生命周期钩子", () => {
     expect(mainCall.messages).not.toContainEqual(userMessage("prefix-user"));
   });
 
-  it("run 外 checkBudget 使用 committed prompt、messagePrefix 与 tools 估算请求总量", async () => {
+  it("run 外 estimateConversationRequestBudget 使用 committed prompt、messagePrefix 与 tools 估算请求总量", async () => {
     providerRef.current = new MockLLMProvider([{ text: "ok" }]);
     const runtime = await createAgentRuntime({
       lifecycle: [
@@ -1541,7 +1541,9 @@ describe("createAgentRuntime · 生命周期钩子", () => {
       ],
     });
 
-    const withPrefix = runtime.checkBudget([userMessage("body")]);
+    const withPrefix = runtime.estimateConversationRequestBudget([
+      userMessage("body"),
+    ]);
 
     const runtimeWithoutPrefix = await createAgentRuntime({
       lifecycle: [
@@ -1553,9 +1555,39 @@ describe("createAgentRuntime · 生命周期钩子", () => {
         },
       ],
     });
-    const withoutPrefix = runtimeWithoutPrefix.checkBudget([userMessage("body")]);
+    const withoutPrefix = runtimeWithoutPrefix.estimateConversationRequestBudget([
+      userMessage("body"),
+    ]);
 
     expect(withPrefix.currentTokens).toBeGreaterThan(withoutPrefix.currentTokens);
+  });
+
+  it("estimateMessagesTokens 只估消息本身，不重复计入 committed prefix", async () => {
+    const runtime = await createAgentRuntime({
+      lifecycle: [
+        {
+          id: "prefix-sub",
+          onWindowOpen: (ctx) => {
+            ctx.contributeMessagePrefix([
+              userMessage("prefix-user"),
+              {
+                role: "assistant",
+                content: [{ type: "text", text: "prefix-ack" }],
+              },
+            ]);
+          },
+        },
+      ],
+    });
+    const runtimeWithoutPrefix = await createAgentRuntime({});
+    const messages = [userMessage("body")];
+
+    expect(runtime.estimateMessagesTokens(messages)).toBe(
+      runtimeWithoutPrefix.estimateMessagesTokens(messages),
+    );
+    expect(
+      runtime.estimateConversationRequestBudget(messages).currentTokens,
+    ).toBeGreaterThan(runtime.estimateMessagesTokens(messages));
   });
 
   it("dispose(reason) 触发末窗 onWindowClose(reason 透传),幂等", async () => {

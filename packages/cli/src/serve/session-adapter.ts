@@ -183,8 +183,12 @@ export function createServerRuntimeAdapter(
       return agentRuntime.runOrchestrationV1(params);
     },
 
-    checkBudget(messages) {
-      return agentRuntime.checkBudget(messages);
+    estimateConversationRequestBudget(messages) {
+      return agentRuntime.estimateConversationRequestBudget(messages);
+    },
+
+    estimateMessagesTokens(messages) {
+      return agentRuntime.estimateMessagesTokens(messages);
     },
 
     subAgentUsages(messages) {

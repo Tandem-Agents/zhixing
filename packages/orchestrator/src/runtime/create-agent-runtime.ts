@@ -301,12 +301,16 @@ export interface AgentRuntime {
   model: string;
   run: (params: RunParams) => Promise<RunResult>;
   /**
-   * 查询当前消息列表的上下文预算状态。
+   * 估算当前窗口下一次主对话 provider 请求的上下文预算状态。
    *
-   * modelInfo 由 resolveModelInfo 保证永远可用（即使是保守 fallback），
-   * 因此返回非 optional —— 调用方无需处理 undefined 分支。
+   * 调用方只传窗口消息；运行体内部补齐当前 committed system prompt、
+   * message prefix 与 tools，不持有调用方传入的窗口状态。
    */
-  checkBudget: (messages: readonly Message[]) => ContextBudget;
+  estimateConversationRequestBudget: (
+    messages: readonly Message[],
+  ) => ContextBudget;
+  /** 纯消息 token 估算，用于快照裁剪等不应重复计入固定成本的场景。 */
+  estimateMessagesTokens: (messages: readonly Message[]) => number;
   /** 手动触发上下文压缩，无论当前预算状态如何 */
   forceCompact: (messages: Message[], turnCount: number) => Promise<ForceCompactResult>;
   /**
@@ -1279,7 +1283,7 @@ export async function createAgentRuntime(
       return estimator.calibrationFactor;
     },
 
-    checkBudget(messages: readonly Message[]): ContextBudget {
+    estimateConversationRequestBudget(messages: readonly Message[]): ContextBudget {
       const view = buildCommittedRequestView(messages);
       return calculateBudget(
         modelBudgetInfo,
@@ -1292,6 +1296,10 @@ export async function createAgentRuntime(
           anchor: undefined,
         }),
       );
+    },
+
+    estimateMessagesTokens(messages: readonly Message[]): number {
+      return estimator.estimateMessages(messages);
     },
 
     subAgentUsages(messages: readonly Message[]): readonly TaskUsageEntry[] {

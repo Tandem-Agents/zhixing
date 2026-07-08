@@ -519,14 +519,8 @@ function createRuntime(sessionId: string): SessionRuntime {
       return false;
     },
     async dispose() {},
-    checkBudget(messages: readonly Message[]) {
-      return {
-        contextWindow: 100_000,
-        effectiveWindow: 90_000,
-        currentTokens: Math.max(1, messages.length * 10),
-        usageRatio: 0,
-        status: "normal",
-      };
+    estimateMessagesTokens(messages: readonly Message[]) {
+      return Math.max(1, messages.length * 10);
     },
   };
 }

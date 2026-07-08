@@ -48,13 +48,14 @@ function createMockAgentRuntime(behavior: MockBehavior = {}): AgentRuntime {
     model: "mock-model",
     confirmationBroker: broker,
     drainLifecycleDiagnostics: () => [],
-    checkBudget: () => ({
+    estimateConversationRequestBudget: () => ({
       contextWindow: 200_000,
       effectiveWindow: 180_000,
       currentTokens: 1_000,
       usageRatio: 0.01,
       status: "normal",
     }),
+    estimateMessagesTokens: () => 1_000,
     subAgentUsages: () => [],
     callText: async () => "text",
     callTextWithUsage: async () => ({
@@ -287,7 +288,7 @@ describe("createServerRuntimeAdapter", () => {
     const agent = createMockAgentRuntime();
     const runtime = createServerRuntimeAdapter("test-inspect", agent);
 
-    const budget = runtime.checkBudget?.([um("hello")]);
+    const budget = runtime.estimateConversationRequestBudget?.([um("hello")]);
     expect(budget?.currentTokens).toBe(1_000);
     expect(runtime.subAgentUsages?.([um("hello")])).toEqual([]);
     await expect(runtime.callText?.("prompt", "main")).resolves.toBe("text");
