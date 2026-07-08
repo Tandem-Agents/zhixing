@@ -8,7 +8,7 @@
  * 关键抽象（让 SegmentManager 编排层保持单一职责）：
  *   - SegmentThresholds：attention 阈值的结构化兼容子集（避免 core 反向 import providers）
  *   - SegmentDecision：纯函数决策结果（pass / defer / trigger）
- *   - SegmentSummarizeLLMFn：压缩 LLM 调用签名（必须携带完整 system + tools，保 cache prefix byte-equal）
+ *   - SegmentSummarizeLLMFn：压缩 LLM 调用签名（携带完整 system + tools + 可摘要 messages）
  *   - SegmentPersistence：段切换写入路径抽象（与 ConversationRepository / TranscriptStore 解耦）
  *   - TaskListReader：task_list 状态读取抽象（避免 core 反向 import tools-builtin）
  *   - SegmentTransitionHook：扩展点接口（记忆提取经 afterSummarize 挂载）
@@ -82,14 +82,15 @@ export interface ParsedSummary {
 // ─── 压缩 LLM 调用 ───
 
 /**
- * 压缩 LLM 调用请求 —— 必须携带完整 system + tools + messages，
- * 仅在 messages 末尾追加压缩指令，让请求形态与上一轮 byte-equal，cache 完美命中。
+ * 压缩 LLM 调用请求 —— 必须携带完整 system + tools + 可摘要 messages。
+ * 摘要请求有意不带发送前缀；它只复用主对话的可摘要事实链，在末尾追加压缩指令。
  *
- * 设计警示（违反任一都会让 cache 全部失效，破坏段切换"几乎免费"的物理依据）：
+ * 设计警示：
  *   - 不可省略 tools[] —— tools 是 LLM 请求 prefix 的一部分（OpenAI/Anthropic
  *     wire format 都会序列化进入 cache key），省略后 cache key 错位
  *   - 不可换 model / provider / 账号 —— 跨实例 cache 不共享
- *   - messages 末尾的压缩指令是唯一新 token，其前所有内容必须与上一轮完全相同
+ *   - 摘要请求自身的 system + tools + 可摘要 messages 应保持稳定；不承诺与主对话
+ *     完整 provider messages byte-equal，因为主对话可能额外含发送前缀或 turn-context
  */
 export interface SegmentSummarizeRequest {
   readonly systemPrompt: string;
@@ -196,7 +197,10 @@ export interface SegmentTransitionContext {
  * （窗口保护对一切运行体生效），仅跳过持久化副作用（segmentMeta / 快照）。
  */
 export interface SegmentManagerInput {
+  /** 可摘要事实链；split / summary 只能消费这一份。 */
   readonly messages: readonly Message[];
+  /** 阈值会计用的实发 messages；缺省时回退到 messages 以兼容直接调用。 */
+  readonly providerMessages?: readonly Message[];
   readonly systemPrompt: string;
   readonly tools: readonly ToolSpec[];
   readonly turnCount: number;

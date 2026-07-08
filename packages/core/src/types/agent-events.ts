@@ -172,8 +172,8 @@ export type AgentEventMap = {
      */
     systemPrompt?: string;
     /**
-     * 提交给 LLM 的完整 messages 历史（含 user / assistant / tool 全部 ContentBlock）。
-     * 引用传递无序列化开销；订阅者按需序列化（如 cli `--log` 启用时 dump 到文件）。
+     * 提交给 LLM 的实际 provider messages。它可能包含发送前缀与 turn-context，
+     * 不等同于 loop 持有的 state.messages 事实链。
      */
     messages: readonly Message[];
     /**
@@ -229,7 +229,7 @@ export type AgentEventMap = {
    * 与 llm:request_end.usage 严格区分：
    *   - llm:request_end.usage = 单次 LLM API 调用的真实输入/输出消耗（流量）
    *   - context:tokens_snapshot.totalTokens = 当前上下文窗口的估算占用（占用快照）
-   *     = estimator(systemPrompt) + estimator(messages) + estimator(tools)
+   *     = estimator(systemPrompt) + estimator(providerMessages) + estimator(tools)
    *     反映"下次 LLM 调用将携带多少 tokens"
    *
    * 与 segment:evaluation.currentTokens 的区别：
@@ -244,7 +244,7 @@ export type AgentEventMap = {
    * 订阅方应能容忍事件不到达（UI 显示空 / 占位）。
    */
   "context:tokens_snapshot": {
-    /** estimator 估算的当前上下文占用 token 数 —— system + messages + tools */
+    /** estimator 估算的当前上下文占用 token 数 —— system + providerMessages + tools */
     totalTokens: number;
     /** 本 turn 序号（已 +1，反映"已完成"语义） */
     turnCount: number;

@@ -62,13 +62,14 @@ import type { IEventBus } from "../events/types.js";
 import type { AgentEventMap } from "../types/agent-events.js";
 import type { TokenUsage } from "../types/llm.js";
 import type { Message } from "../types/messages.js";
-import { toToolSpec } from "../types/tools.js";
-import type { ToolDefinition } from "../types/tools.js";
 import type {
   AgentResult,
+  PreparedSendView,
   WindowChangeReason,
   WindowLifecycle,
 } from "./types.js";
+
+export type PrepareSendView = (messages: readonly Message[]) => PreparedSendView;
 
 // ─── 输出 ───
 
@@ -82,6 +83,7 @@ export type TurnEndOutcome =
   | {
       readonly kind: "ok";
       readonly messages: Message[];
+      readonly anchorInvalidated: boolean;
     }
   | { readonly kind: "terminal"; readonly result: AgentResult };
 
@@ -103,16 +105,8 @@ export interface TurnEndParams {
 
   /** attention-driven 段切换（可选；缺省时段切换步骤静默 no-op） */
   readonly segmentManager?: SegmentManager;
-  /**
-   * 段切换 LLM 调用必要：保 cache prefix byte-equal。
-   * 同时也是 ③ tokens 快照估算的 system 部分输入。
-   */
-  readonly systemPrompt: string;
-  /**
-   * 段切换 LLM 调用必要：保 cache prefix byte-equal。
-   * 同时也是 ③ tokens 快照估算的 tools 部分输入。
-   */
-  readonly tools: readonly ToolDefinition[];
+  /** 构造当前 messages 对应的完整发送视图。 */
+  readonly prepareSendView: PrepareSendView;
   /** 段切换 ephemeral 路径判定（缺省 → SegmentManager 内部静默 pass） */
   readonly conversationId?: string;
 
@@ -134,9 +128,9 @@ export interface TurnEndParams {
   /**
    * Token 真值锚点 —— ③ tokens 快照优先用 anchor + delta 路径替代纯字符估算。
    *
-   * 缺省（首次 LLM call 之前）或失效（段切段 / 压缩后 messages.length < baseline）
-   * 时 ③ 步降级到纯字符估算路径（estimator 全量加总），失效契约由 computeContextTokens
-   * 内化处理，调用方无需感知。详见 {@link TokenAnchor}。
+   * 缺省（首次 LLM call 之前）或谱系替换时 ③ 步降级到纯字符估算路径。
+   * computeContextTokens 仍保留长度防御兜底；turn-end 在段切换替换 messages 后会
+   * 主动不传 anchor，避免旧谱系真值配新谱系 delta。
    */
   readonly anchor?: TokenAnchor;
   /**
@@ -165,8 +159,7 @@ export interface TurnEndParams {
 export interface SegmentSwitchParams {
   readonly segmentManager?: SegmentManager;
   readonly messages: readonly Message[];
-  readonly systemPrompt: string;
-  readonly tools: readonly ToolDefinition[];
+  readonly prepareSendView: PrepareSendView;
   readonly turnCount: number;
   readonly conversationId?: string;
   readonly abortSignal: AbortSignal;
@@ -201,21 +194,25 @@ export interface SegmentSwitchParams {
  */
 export async function runTurnBegin(
   params: SegmentSwitchParams,
-): Promise<{ messages: Message[] }> {
-  if (!params.segmentManager) return { messages: [...params.messages] };
+): Promise<{ messages: Message[]; anchorInvalidated: boolean }> {
+  if (!params.segmentManager) {
+    return { messages: [...params.messages], anchorInvalidated: false };
+  }
+  const sendView = params.prepareSendView(params.messages);
   const seg = await params.segmentManager.evaluate({
     messages: params.messages,
-    systemPrompt: params.systemPrompt,
-    tools: params.tools.map(toToolSpec),
+    providerMessages: sendView.providerMessages,
+    systemPrompt: sendView.systemPrompt,
+    tools: sendView.tools,
     turnCount: params.turnCount,
     conversationId: params.conversationId,
     abortSignal: params.abortSignal,
   });
   if (seg.modified && seg.newSegmentMessages) {
     await params.windowLifecycle?.onChange("segment-transition");
-    return { messages: seg.newSegmentMessages };
+    return { messages: seg.newSegmentMessages, anchorInvalidated: true };
   }
-  return { messages: [...params.messages] };
+  return { messages: [...params.messages], anchorInvalidated: false };
 }
 
 // ─── 钩子 ───
@@ -223,7 +220,7 @@ export async function runTurnBegin(
 /**
  * 执行 turn 结束副作用编排。
  *
- * 串行顺序：段切换 → tokens 快照 → 窗口换代触发；未来副作用在此追加，
+ * 串行顺序：段切换 → 窗口换代触发 → tokens 快照；未来副作用在此追加，
  * 保持 messages 链式传递。
  *
  * 失败语义：segmentManager 失败 → SegmentManager 内部已捕获并按终态分流
@@ -236,6 +233,7 @@ export async function runTurnEnd(
 ): Promise<TurnEndOutcome> {
   let messages = params.messages;
   let windowChange: WindowChangeReason | undefined;
+  let anchorInvalidated = false;
 
   // attention-driven 段切换（唯一压缩机制）
   //
@@ -243,10 +241,12 @@ export async function runTurnEnd(
   // RunResult 带出，由会话层在接受协议中折叠窗口（不落 transcript——
   // 压缩是窗口的视图操作，原文持久化 append-only 不参与）。
   if (params.segmentManager) {
+    const sendView = params.prepareSendView(messages);
     const seg = await params.segmentManager.evaluate({
       messages,
-      systemPrompt: params.systemPrompt,
-      tools: params.tools.map(toToolSpec),
+      providerMessages: sendView.providerMessages,
+      systemPrompt: sendView.systemPrompt,
+      tools: sendView.tools,
       turnCount: params.turnCount,
       conversationId: params.conversationId,
       abortSignal: params.abortSignal,
@@ -254,7 +254,14 @@ export async function runTurnEnd(
     if (seg.modified && seg.newSegmentMessages) {
       messages = seg.newSegmentMessages;
       windowChange = "segment-transition";
+      anchorInvalidated = true;
     }
+  }
+
+  // 注意力窗口换代触发必须早于 tokens 快照：换代后 system prompt / message prefix
+  // 可能重建，快照表达的是下一次请求视图，必须现取新窗口径。
+  if (windowChange) {
+    await params.windowLifecycle?.onChange(windowChange);
   }
 
   // 上下文 tokens 快照 emit
@@ -275,13 +282,14 @@ export async function runTurnEnd(
   // 静默语义：tokenEstimator / eventBus 任一缺失即跳过（与 segmentManager
   // 缺失同模式）；订阅方应能容忍事件不到达。
   if (params.tokenEstimator && params.eventBus) {
+    const sendView = params.prepareSendView(messages);
     const totalTokens = computeContextTokens({
       estimator: params.tokenEstimator,
-      systemPrompt: params.systemPrompt,
+      systemPrompt: sendView.systemPrompt,
       stateMessages: messages,
-      providerMessages: messages,
-      tools: params.tools.map(toToolSpec),
-      anchor: params.anchor,
+      providerMessages: sendView.providerMessages,
+      tools: sendView.tools,
+      anchor: anchorInvalidated ? undefined : params.anchor,
     });
     await params.eventBus.emit("context:tokens_snapshot", {
       totalTokens,
@@ -289,19 +297,10 @@ export async function runTurnEnd(
     });
   }
 
-  // 注意力窗口换代触发 —— 本 turn 的切段重构了 messages = 新注意力窗口诞生,
-  //    在此(messages 已最终化、下个 LLM call 之前)通知 windowLifecycle 做窗口边界
-  //    重建。收敛于此、而非返回信号交 caller 各路径自行触发:runTurnEnd 的所有调用
-  //    路径(纯文本末轮 / 工具路径)都经本函数,「所有 messages 重构出口都触发换代」
-  //    从结构上一条不漏。缺省 windowLifecycle(sub-agent / 单测)→ no-op。
-  if (windowChange) {
-    await params.windowLifecycle?.onChange(windowChange);
-  }
-
   // ⑤ 未来扩展点 —— 新副作用直接在此追加：
   //    - 复用上方 messages 变量（链式传递）
   //    - 失败语义按"是否致命"决定：致命返 terminal 短路；非致命降级继续
   //    - 不感知 caller 路径，纯粹按"turn 结束做什么"思考
 
-  return { kind: "ok", messages };
+  return { kind: "ok", messages, anchorInvalidated };
 }

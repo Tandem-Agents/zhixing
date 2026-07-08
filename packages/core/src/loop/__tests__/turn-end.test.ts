@@ -19,6 +19,7 @@ import { AgentError } from "../../types/errors.js";
 import { emptyUsage, type TokenUsage } from "../../types/llm.js";
 import { userMessage, assistantMessage } from "../../types/messages.js";
 import type { Message } from "../../types/messages.js";
+import type { ToolSpec } from "../../types/tools.js";
 import type { SegmentManager } from "../../context/segment/segment-manager.js";
 import type {
   SegmentManagerInput,
@@ -27,6 +28,7 @@ import type {
 import { createEventBus } from "../../events/event-bus.js";
 import type { AgentEventMap } from "../../types/agent-events.js";
 import { runTurnEnd } from "../turn-end.js";
+import type { PreparedSendView } from "../types.js";
 
 // ─── Fixtures ───
 
@@ -38,6 +40,24 @@ function msg(text: string): Message {
 
 const baseUsage: TokenUsage = emptyUsage();
 
+function prepareView(opts?: {
+  systemPrompt?: string;
+  tools?: readonly ToolSpec[];
+  providerMessages?: (messages: readonly Message[]) => readonly Message[];
+  messagesForLLM?: (messages: readonly Message[]) => readonly Message[];
+}) {
+  return (messages: readonly Message[]): PreparedSendView => {
+    const messagesForLLM = opts?.messagesForLLM?.(messages) ?? messages;
+    const providerMessages = opts?.providerMessages?.(messages) ?? messagesForLLM;
+    return {
+      systemPrompt: opts?.systemPrompt ?? "sys",
+      tools: opts?.tools ?? [],
+      stateMessages: messages,
+      messagesForLLM,
+      providerMessages,
+    };
+  };
+}
 
 function makeSeg(
   result: SegmentManagerOutput,
@@ -54,8 +74,7 @@ function baseParams(overrides?: Partial<Parameters<typeof runTurnEnd>[0]>) {
     turnCount: 1,
     usage: baseUsage,
     abortSignal: new AbortController().signal,
-    systemPrompt: "sys",
-    tools: [],
+    prepareSendView: prepareView(),
     ...overrides,
   };
 }
@@ -171,8 +190,7 @@ describe("runTurnEnd · 参数透传", () => {
       turnCount: 7,
       abortSignal: controller.signal,
       segmentManager: seg,
-      systemPrompt: "system-x",
-      tools: [],
+      prepareSendView: prepareView({ systemPrompt: "system-x", tools: [] }),
       conversationId: "conv-xyz",
     }));
 
@@ -182,6 +200,27 @@ describe("runTurnEnd · 参数透传", () => {
     expect(input.turnCount).toBe(7);
     expect(input.conversationId).toBe("conv-xyz");
     expect(input.abortSignal).toBe(controller.signal);
+  });
+
+  it("segmentManager.evaluate 阈值会计接收 providerMessages，但可摘要 messages 仍是 state messages", async () => {
+    const stateMessages = [msg("state")];
+    const prefix = [msg("prefix")];
+    const seg = makeSeg({
+      decision: { kind: "pass", reason: "below-optimal" },
+      modified: false,
+    });
+
+    await runTurnEnd(baseParams({
+      messages: stateMessages,
+      segmentManager: seg,
+      prepareSendView: prepareView({
+        providerMessages: (messages) => [...prefix, ...messages],
+      }),
+    }));
+
+    const input = (seg.evaluate as ReturnType<typeof vi.fn>).mock.calls[0][0] as SegmentManagerInput;
+    expect(input.messages).toBe(stateMessages);
+    expect(input.providerMessages).toEqual([...prefix, ...stateMessages]);
   });
 
   it("ephemeral 路径（conversationId 缺失）→ 透传 undefined 给 segmentManager", async () => {
@@ -238,13 +277,38 @@ describe("runTurnEnd · ③ context:tokens_snapshot emit", () => {
         turnCount: 3,
         tokenEstimator: estimator,
         eventBus: bus,
-        systemPrompt: "system-7",
+        prepareSendView: prepareView({ systemPrompt: "system-7" }),
       }),
     );
 
     expect(seenPayloads).toHaveLength(1);
     expect(seenPayloads[0]!.totalTokens).toBe(8 + 20 + 0);
     expect(seenPayloads[0]!.turnCount).toBe(3);
+  });
+
+  it("tokens 快照用 providerMessages 估算，不把 state messages 当发送视图", async () => {
+    const bus = createEventBus<AgentEventMap>();
+    const seen: AgentEventMap["context:tokens_snapshot"][] = [];
+    bus.on("context:tokens_snapshot", (p) => seen.push(p));
+
+    const estimator = fakeEstimator({
+      text: () => 0,
+      messages: (m) => m.length * 100,
+      tools: () => 0,
+    });
+
+    await runTurnEnd(
+      baseParams({
+        messages: [msg("state")],
+        tokenEstimator: estimator,
+        eventBus: bus,
+        prepareSendView: prepareView({
+          providerMessages: (messages) => [msg("prefix"), ...messages],
+        }),
+      }),
+    );
+
+    expect(seen[0]!.totalTokens).toBe(200);
   });
 
   it("快照消费 segmentManager 切段后的 messages（非 caller 原 messages）", async () => {
@@ -368,12 +432,51 @@ describe("runTurnEnd · ③ Anchor + Delta 优先路径", () => {
         messages: [msg("a:summary")],
         tokenEstimator: estimator,
         eventBus: bus,
-        systemPrompt: "sys",
+        prepareSendView: prepareView({ systemPrompt: "sys" }),
       }),
     );
 
     // fallback: estimateText("sys")=3 + estimateMessages([summary])=10 + tools=0 = 13
     expect(seen[0]!.totalTokens).toBe(13);
+  });
+
+  it("段切换替换消息谱系时即使长度未减少，也失效 anchor 走 fallback", async () => {
+    const bus = createEventBus<AgentEventMap>();
+    const seen: AgentEventMap["context:tokens_snapshot"][] = [];
+    bus.on("context:tokens_snapshot", (p) => seen.push(p));
+
+    const estimator = fakeEstimator({
+      text: () => 1,
+      messages: (m) => m.length * 10,
+      tools: () => 0,
+    });
+    const segOut = [msg("summary"), msg("tail"), msg("a:reply")];
+    const seg = makeSeg({
+      decision: {
+        kind: "trigger",
+        reason: "optimal-exceeded",
+        currentTokens: 100,
+        threshold: 50,
+      },
+      modified: true,
+      newSegmentMessages: segOut,
+    });
+
+    const outcome = await runTurnEnd(
+      baseParams({
+        anchor: { totalInputTokens: 6_500, baselineMessageCount: 3 },
+        messages: [msg("m1"), msg("m2"), msg("m3")],
+        segmentManager: seg,
+        tokenEstimator: estimator,
+        eventBus: bus,
+      }),
+    );
+
+    expect(outcome.kind).toBe("ok");
+    if (outcome.kind === "ok") {
+      expect(outcome.anchorInvalidated).toBe(true);
+    }
+    expect(seen[0]!.totalTokens).toBe(31);
   });
 
   it("anchor 缺失 → fallback 字符估算（首次 LLM call 之前）", async () => {

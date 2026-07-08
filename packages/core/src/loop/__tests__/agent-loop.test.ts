@@ -1563,7 +1563,7 @@ describe("Agent Loop", () => {
             return msgs.length * 10;
           },
           estimateText: () => 0,
-          // calibrate 全量对账契约：estimated 必须含 system + messages + tools，
+          // calibrate 全量对账契约：estimated 必须含 system + providerMessages + tools，
           // 与 API 全量输入真值维度对齐（agent-loop.ts 校准点强制此契约）
           estimateTools: () => 0,
           calibrate: (estimated: number, actual: number) => {
@@ -1624,6 +1624,26 @@ describe("Agent Loop", () => {
 
       expect(calls[0]!.actual).toBe(1_000);
       expect(snapshots[0]!.totalTokens).toBe(1_020);
+    });
+
+    it("发送前缀进入 provider request 与 calibration estimated，但不回写 state", async () => {
+      const provider = mockTextProvider("done");
+      const { estimator, calls, messagesEstimateCalls } = makeMockEstimator();
+      const prefix = [userMessage("prefix")];
+
+      await drainAgentLoop(
+        baseParams(provider, {
+          getMessagePrefix: () => prefix,
+          tokenEstimator: estimator,
+        }),
+      );
+
+      expect(provider.calls[0]!.messages).toEqual([
+        ...prefix,
+        userMessage("Hello"),
+      ]);
+      expect(messagesEstimateCalls).toEqual([2]);
+      expect(calls).toEqual([{ estimated: 20, actual: 100 }]);
     });
 
     it("不注册 estimator → agent-loop 不抛错也不 calibrate", async () => {

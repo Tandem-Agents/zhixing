@@ -19,6 +19,7 @@
 
 import type { ITokenEstimator } from "../types.js";
 import type { Message } from "../../types/messages.js";
+import type { ToolSpec } from "../../types/tools.js";
 import {
   getTotalInputTokens,
   type StreamEvent,
@@ -28,12 +29,16 @@ import {
 export interface WrapWithCalibrationOptions {
   /** 估算器实例 —— 校准操作的目标(滑动平均会更新其内部系数) */
   readonly estimator: ITokenEstimator;
+  /** 段切换 LLM call 实际发送的 system prompt。 */
+  readonly systemPrompt: string;
   /**
    * 段切换 LLM call 实际发送的 messages(已含压缩指令的缓存安全分叉)。
    * 校准与"LLM 实际处理的 size"对账,而非数据层 state.messages —— 后者会因压缩
    * 指令注入产生系统性偏差,让 calibration 系数无法收敛。
    */
   readonly messages: readonly Message[];
+  /** 段切换 LLM call 实际发送的 tools。 */
+  readonly tools: readonly ToolSpec[];
 }
 
 export async function* wrapWithCalibration(
@@ -56,7 +61,10 @@ export async function* wrapWithCalibration(
 
   // 仅在成功完成且有有效 usage 时校准;abort / error / 空 usage 都跳过
   if (!errored && usage !== null && getTotalInputTokens(usage) > 0) {
-    const estimated = options.estimator.estimateMessages(options.messages);
+    const estimated =
+      options.estimator.estimateText(options.systemPrompt) +
+      options.estimator.estimateMessages(options.messages) +
+      options.estimator.estimateTools(options.tools);
     options.estimator.calibrate(estimated, getTotalInputTokens(usage));
   }
 }

@@ -2,8 +2,8 @@
  * 段切换压缩指令模板 —— 缓存安全分叉请求的末尾追加 user message。
  *
  * 请求形态约束：
- *   - system + tools + 上一段完整 messages 全部 byte-equal 上一轮（cache 完美命中）
- *   - 这条指令是末尾追加的 user message，唯一的新 token，几乎免费
+ *   - 摘要请求只携带 system + tools + 可摘要 state messages，不携带发送前缀
+ *   - 这条指令是末尾追加的 user message，避免污染被摘要的事实链
  *
  * 输出契约：LLM 必须返回 <facts>/<state>/<active> 三段 XML 包裹。parser 对单段
  * 缺失做兜底，但 prompt 显式约束仍需保留——降低兜底触发频率、提高摘要质量。

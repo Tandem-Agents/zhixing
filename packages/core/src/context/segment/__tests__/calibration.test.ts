@@ -52,6 +52,19 @@ async function collect(
   return out;
 }
 
+function calibrationOptions(
+  estimator: ITokenEstimator,
+  messages = makeMessages(),
+  systemPrompt = "sys",
+) {
+  return {
+    estimator,
+    systemPrompt,
+    messages,
+    tools: [],
+  };
+}
+
 const USAGE_NORMAL: TokenUsage = { inputTokens: 150, outputTokens: 50 };
 
 // ─── 透传契约 ───
@@ -67,10 +80,7 @@ describe("wrapWithCalibration · 透传契约", () => {
     const estimator = makeEstimator();
 
     const collected = await collect(
-      wrapWithCalibration(streamOf(events), {
-        estimator,
-        messages: makeMessages(),
-      }),
+      wrapWithCalibration(streamOf(events), calibrationOptions(estimator)),
     );
 
     expect(collected).toEqual(events);
@@ -92,12 +102,12 @@ describe("wrapWithCalibration · 校准触发", () => {
             usage: USAGE_NORMAL,
           },
         ]),
-        { estimator, messages: makeMessages() },
+        calibrationOptions(estimator),
       ),
     );
 
     expect(estimator.calibrateCalls).toEqual([
-      { estimated: 120, actual: 150 },
+      { estimated: 240, actual: 150 },
     ]);
   });
 
@@ -117,12 +127,12 @@ describe("wrapWithCalibration · 校准触发", () => {
             },
           },
         ]),
-        { estimator, messages: makeMessages() },
+        calibrationOptions(estimator),
       ),
     );
 
     expect(estimator.calibrateCalls).toEqual([
-      { estimated: 120, actual: 1_000 },
+      { estimated: 240, actual: 1_000 },
     ]);
   });
 
@@ -135,7 +145,7 @@ describe("wrapWithCalibration · 校准触发", () => {
           { type: "text_delta", text: "partial" },
           // 没有 message_end —— 模拟 abort 提前退出
         ]),
-        { estimator, messages: makeMessages() },
+        calibrationOptions(estimator),
       ),
     );
 
@@ -153,7 +163,7 @@ describe("wrapWithCalibration · 校准触发", () => {
             usage: { inputTokens: 0, outputTokens: 0 },
           },
         ]),
-        { estimator, messages: makeMessages() },
+        calibrationOptions(estimator),
       ),
     );
 
@@ -177,7 +187,7 @@ describe("wrapWithCalibration · 校准触发", () => {
             usage: USAGE_NORMAL,
           },
         ]),
-        { estimator, messages: makeMessages() },
+        calibrationOptions(estimator),
       ),
     );
 
@@ -193,10 +203,7 @@ describe("wrapWithCalibration · 校准触发", () => {
 
     await expect(
       collect(
-        wrapWithCalibration(upstream, {
-          estimator,
-          messages: makeMessages(),
-        }),
+        wrapWithCalibration(upstream, calibrationOptions(estimator)),
       ),
     ).rejects.toThrow("upstream boom");
 
@@ -207,6 +214,40 @@ describe("wrapWithCalibration · 校准触发", () => {
 // ─── messages 透传到 estimateMessages ───
 
 describe("wrapWithCalibration · estimate 输入对账", () => {
+  it("estimated 按 systemPrompt + messages + tools 三件套对齐实际请求", async () => {
+    const calibrateCalls: CalibrateCall[] = [];
+    const estimator: ITokenEstimator = {
+      estimateText: (text) => text.length,
+      estimateMessage: () => 0,
+      estimateMessages: (messages) => messages.length * 10,
+      estimateTools: (tools) => tools.length * 100,
+      calibrate: (estimated, actual) => {
+        calibrateCalls.push({ estimated, actual });
+      },
+      get calibrationFactor() {
+        return 1;
+      },
+    };
+
+    await collect(
+      wrapWithCalibration(
+        streamOf([{
+          type: "message_end",
+          stopReason: "end_turn",
+          usage: USAGE_NORMAL,
+        }]),
+        {
+          estimator,
+          systemPrompt: "system",
+          messages: makeMessages(),
+          tools: [{ name: "tool", description: "tool", inputSchema: { type: "object" } }],
+        },
+      ),
+    );
+
+    expect(calibrateCalls).toEqual([{ estimated: 6 + 10 + 100, actual: 150 }]);
+  });
+
   it("estimateMessages 接收 options.messages —— 与 LLM 实际处理的 size 对账", async () => {
     let receivedMessages: readonly Message[] | null = null;
     const estimator: ITokenEstimator = {
@@ -233,7 +274,7 @@ describe("wrapWithCalibration · estimate 输入对账", () => {
             usage: USAGE_NORMAL,
           },
         ]),
-        { estimator, messages: expectedMessages },
+        calibrationOptions(estimator, expectedMessages),
       ),
     );
 

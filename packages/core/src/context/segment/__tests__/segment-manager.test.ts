@@ -313,6 +313,36 @@ describe("evaluate — trigger 成功完整契约", () => {
     return messages;
   }
 
+  it("阈值估算使用 providerMessages，摘要请求仍只消费 state messages", async () => {
+    const callLLM = fakeLLM(SUMMARY_OK);
+    const sm = createSegmentManager(
+      makeConfig({
+        callLLM,
+        capability: { optimalMaxTokens: 50, riskMaxTokens: 200 },
+        bufferTurns: 0,
+      }),
+    );
+    const stateMessages = [userMsg("q"), assistantMsg("a")];
+    const providerMessages = [
+      userMsg("prefix"),
+      ...stateMessages,
+      userMsg("turn-context"),
+      assistantMsg("extra"),
+      userMsg("more"),
+      assistantMsg("more"),
+    ];
+
+    const result = await sm.evaluate(
+      makeInput(stateMessages, { providerMessages }),
+    );
+
+    expect(result.decision.kind).toBe("trigger");
+    expect(callLLM).toHaveBeenCalledTimes(1);
+    const req = callLLM.mock.calls[0]![0]!;
+    expect(req.messages.slice(0, -1)).toEqual(stateMessages);
+    expect(req.messages).not.toContain(providerMessages[0]);
+  });
+
   it("callLLM 接收完整 system + tools + (messages + 末尾压缩指令)", async () => {
     const callLLM = fakeLLM(SUMMARY_OK);
     const sm = createSegmentManager(makeConfig({ callLLM }));
@@ -331,7 +361,7 @@ describe("evaluate — trigger 成功完整契约", () => {
     expect((lastMsg.content[0] as { type: string; text: string }).text).toBe(
       SEGMENT_SUMMARIZE_INSTRUCTION,
     );
-    // 末尾追加前的 messages 与传入完全一致（byte-equal 上一轮的物理实现）
+    // 末尾追加前的 messages 与传入 state messages 完全一致，不带发送前缀
     for (let i = 0; i < messages.length; i++) {
       expect(req.messages[i]).toBe(messages[i]);
     }

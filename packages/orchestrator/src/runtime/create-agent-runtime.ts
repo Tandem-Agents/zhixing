@@ -1141,7 +1141,12 @@ export async function createAgentRuntime(
           watchdog,
           bus,
         ),
-        { estimator, messages: req.messages },
+        {
+          estimator,
+          systemPrompt: req.systemPrompt ?? "",
+          messages: req.messages,
+          tools: req.tools ?? [],
+        },
       );
     };
   };
@@ -1706,7 +1711,7 @@ export async function createAgentRuntime(
           // 让任务状态 / 定时任务 / 时间等动态信息在多 LLM call 之间实时刷新
           turnContextInjector,
           // 估算器 per-LLM-call 校准：agent-loop 在每次成功 LLM call 后用本次实际
-          // 送入的 messagesForLLM 对账 inputTokens，让系数与 LLM 实际处理的 size 对账
+          // 送入 provider 的请求视图对账全量输入真值，让系数与 LLM 实际处理的 size 对账
           tokenEstimator: estimator,
           // 段切换：attention-driven 主路径，按 turn 边界评估 + 可选切段
           segmentManager,

@@ -26,7 +26,7 @@ import type {
 } from "../types/llm.js";
 import type { Message, ToolResultBlock, ToolUseBlock } from "../types/messages.js";
 import type { ModelInputCapabilities } from "../types/user-input.js";
-import type { ToolDefinition, ToolExecutionContext, ToolResult } from "../types/tools.js";
+import type { ToolDefinition, ToolExecutionContext, ToolResult, ToolSpec } from "../types/tools.js";
 import type {
   ContextBudget,
   ITokenEstimator,
@@ -52,6 +52,21 @@ export type WindowChangeReason = "segment-transition";
  */
 export interface WindowLifecycle {
   onChange(reason: WindowChangeReason): Promise<void>;
+}
+
+/**
+ * 单次发送前准备好的请求视图。
+ *
+ * stateMessages 是 loop 持有的事实链；messagesForLLM 是 turn-context 注入后的
+ * 主对话消息；providerMessages 是真正送 provider 的 messages，包含发送前缀。
+ * 可摘要与持久化路径只能看 stateMessages。
+ */
+export interface PreparedSendView {
+  readonly systemPrompt: string;
+  readonly tools: readonly ToolSpec[];
+  readonly stateMessages: readonly Message[];
+  readonly messagesForLLM: readonly Message[];
+  readonly providerMessages: readonly Message[];
 }
 
 // ─── Agent Loop 参数 ───
@@ -84,6 +99,12 @@ export interface AgentLoopParams {
    * 生效。缺省时回退到固定 systemPrompt。
    */
   getSystemPrompt?: () => string;
+  /**
+   * 每次 LLM call 前现取的发送前缀。主对话路径用于注入窗口级稳定约定；
+   * sub-agent / 测试路径缺省为空。返回值只进入 provider 请求视图，不进入
+   * state.messages、摘要输入或 transcript。
+   */
+  getMessagePrefix?: () => readonly Message[];
   /** 初始消息（至少包含一条 user 消息） */
   messages: Message[];
   /** 最大 LLM↔工具交互轮次，达到后终止。默认 100 */
@@ -149,7 +170,7 @@ export interface AgentLoopParams {
    * Token 估算器 —— 仅用于 per-LLM-call 校准。
    *
    * 缺省时不做任何校准（向后兼容）。注册时 agent-loop 在每次成功的 LLM call 后用
-   * `systemPrompt + messagesForLLM + tools` 的估算值与 `getTotalInputTokens(usage)`
+   * `systemPrompt + providerMessages + tools` 的估算值与 `getTotalInputTokens(usage)`
    * 对账，让系数与 LLM 实际处理的完整请求视图对齐，而不是与数据层
    * state.messages 对账（后者会因 turn-context 注入产生系统性偏差）。
    *

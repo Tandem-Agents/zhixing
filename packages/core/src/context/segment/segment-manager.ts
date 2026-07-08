@@ -5,7 +5,7 @@
  *   1. 估算与决策对有无 conversationId 行为一致——窗口保护对一切运行体生效
  *      （ephemeral 定时任务同样会超注意力上限）；仅持久化副作用（segmentMeta）
  *      按对话身份差分
- *   2. 估算 currentTokens = system + messages + tools
+ *   2. 估算 currentTokens = system + providerMessages + tools
  *   3. 读 task_list in-progress 状态（cli 装配层注入 reader）
  *   4. 纯函数决策 → SegmentDecision
  *   5. emit segment:evaluation（pass / defer / trigger 全 fire，可观测全覆盖）
@@ -13,7 +13,7 @@
  *   7. trigger 路径：
  *      a. emit transition_start
  *      b. beforeSummarize hooks（失败 → 中止：还没花 LLM 钱，安全回滚）
- *      c. 压缩 LLM call（含 retry，指数退避；末尾追加压缩指令保 cache prefix byte-equal）
+ *      c. 压缩 LLM call（含 retry，指数退避；只消费可摘要 state messages）
  *      d. parseSummary（XML 三段）→ 全空视为失败
  *      e. emit summarize_complete
  *      f. afterSummarize hooks（失败 → 降级 warning + 继续：压缩成本不浪费）
@@ -31,7 +31,7 @@
  *        agent-loop 拿原 messages 继续）
  *
  * 关键不变量：
- *   - 压缩请求 system + tools + messages 与上一轮 byte-equal（cache 完美命中）
+ *   - 压缩请求不带发送前缀，只消费可摘要 state messages
  *   - 段切换失败绝不阻塞 turn（agent-loop 拿原 messages 继续，下次再评估）
  *   - **窗口折叠不由 SegmentManager 直接应用**：通过 segment:new_started
  *     事件携带 windowCompact 流向 orchestrator accumulator，随 RunResult 在
@@ -380,9 +380,10 @@ export class SegmentManager {
   // ─── 私有 helpers ───
 
   private estimateTotalTokens(input: SegmentManagerInput): number {
+    const messagesForThreshold = input.providerMessages ?? input.messages;
     return (
       this.cfg.estimator.estimateText(input.systemPrompt) +
-      this.cfg.estimator.estimateMessages(input.messages) +
+      this.cfg.estimator.estimateMessages(messagesForThreshold) +
       this.cfg.estimator.estimateTools(input.tools)
     );
   }
@@ -391,8 +392,8 @@ export class SegmentManager {
    * 压缩 LLM call 含 retry。
    *
    * 请求构造：完整 system + tools + (原 messages + 末尾追加压缩指令 user message)。
-   * 末尾追加是缓存安全分叉的物理实现 —— 前 N-1 个 messages 与上一轮 byte-equal，
-   * 最后一条新增 message 是唯一新 token。
+   * 原 messages 是可摘要事实链，不包含发送前缀或 turn-context；最后一条新增
+   * message 是压缩指令。
    */
   private async callSummarizeWithRetry(
     systemPrompt: string,

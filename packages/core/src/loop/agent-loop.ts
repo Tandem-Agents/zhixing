@@ -64,6 +64,7 @@ import type {
   AgentResult,
   AgentYield,
   LoopState,
+  PreparedSendView,
 } from "./types.js";
 
 /**
@@ -93,6 +94,7 @@ export async function* runAgentLoop(
   const { model, thinking, eventBus } = params;
   const getSystemPrompt =
     params.getSystemPrompt ?? (() => params.systemPrompt ?? "");
+  const getMessagePrefix = params.getMessagePrefix ?? (() => []);
   const windowLifecycle = params.windowLifecycle;
   const tools = params.tools ?? [];
   const maxTurns = params.maxTurns ?? 100;
@@ -105,6 +107,24 @@ export async function* runAgentLoop(
       model,
       providerModels: params.provider.models,
     });
+  const prepareSendView = (messages: readonly Message[]): PreparedSendView => {
+    const stateMessages = messages;
+    const messagesForLLM = params.turnContextInjector
+      ? params.turnContextInjector.inject(stateMessages)
+      : stateMessages;
+    const messagePrefix = getMessagePrefix();
+    const providerMessages =
+      messagePrefix.length === 0
+        ? messagesForLLM
+        : [...messagePrefix, ...messagesForLLM];
+    return {
+      systemPrompt: getSystemPrompt(),
+      tools: toolSpecs,
+      stateMessages,
+      messagesForLLM,
+      providerMessages,
+    };
+  };
 
   const startTime = Date.now();
 
@@ -251,8 +271,7 @@ export async function* runAgentLoop(
     const begin = await runTurnBegin({
       segmentManager: params.segmentManager,
       messages: state.messages,
-      systemPrompt: getSystemPrompt(),
-      tools: params.tools ?? [],
+      prepareSendView,
       turnCount: state.turnCount,
       conversationId: params.conversationId,
       abortSignal: controller.signal,
@@ -260,7 +279,11 @@ export async function* runAgentLoop(
       // 重建后下个 getSystemPrompt() 现取新的本 run 局部 prompt。
       windowLifecycle,
     });
-    state = { ...state, messages: begin.messages };
+    state = {
+      ...state,
+      messages: begin.messages,
+      anchor: begin.anchorInvalidated ? undefined : state.anchor,
+    };
 
     while (true) {
       // ── Guard: abort ──
@@ -286,19 +309,16 @@ export async function* runAgentLoop(
 
       // ── Step 1: 准备 LLM 输入（每次 LLM call 之前重做） ──
       //
-      // 顺序：state.messages → turnContextInjector.inject → streamLLMCall。
-      // turn-context 注入是可选的；缺省时 messages 直接透传。
+      // 顺序：state.messages → turnContextInjector.inject → messagePrefix → streamLLMCall。
+      // state.messages 仍是唯一事实链；turn-context 与 messagePrefix 只进入发送视图。
       //
       // 为什么是 per-LLM-call：同一 run() 内 LLM 多次 call 之间 turn-context 状态可能演化
-      // （任务列表、定时任务等），单 run 入口注入一次会让后续 call 看到陈旧内容；
-      // 每次 LLM call 之前重 inject 让最新状态实时可见，inject 内部自动 strip 旧块防累积。
-      let messagesForLLM: readonly Message[] = state.messages;
-      if (params.turnContextInjector) {
-        messagesForLLM = params.turnContextInjector.inject(messagesForLLM);
-      }
+      // （任务列表、定时任务等），messagePrefix 也可能在窗口换代后重建。每次 LLM
+      // call 之前重做发送视图，让请求、校准、快照和段阈值使用同一口径。
+      const sendView = prepareSendView(state.messages);
 
       const inputCapabilityError = validateMessagesAgainstInputCapabilities(
-        messagesForLLM,
+        sendView.messagesForLLM,
         inputCapabilities,
       );
       if (inputCapabilityError) {
@@ -316,11 +336,11 @@ export async function* runAgentLoop(
       // 注入边界, 保证用户显式禁用 idle-timer (`{ idleTimeoutMs: 0 }`) 不被 agent-loop 二次覆盖。
       const llmResult = yield* streamLLMCall({
         deps,
-        messages: messagesForLLM as Message[],
+        messages: sendView.providerMessages as Message[],
         model,
         thinking,
-        systemPrompt: getSystemPrompt(),
-        toolSpecs,
+        systemPrompt: sendView.systemPrompt,
+        toolSpecs: [...sendView.tools],
         controller,
         watchdog: params.watchdog,
         eventBus,
@@ -338,14 +358,13 @@ export async function* runAgentLoop(
       //
       // ─── ① estimator EMA 校准 ───
       //
-      // 用 API 返回的全量输入真值对账本次"实际送入 LLM 的 messages"
-      // （即 messagesForLLM —— TurnContextInjector 注入后），让 calibration 系数与
-      // LLM 实际处理的 size 对账，而非与数据层 state.messages 对账：后者会因
-      // turn-context 注入产生系统性偏差，让 calibration 系数无法收敛。
+      // 用 API 返回的全量输入真值对账本次实际送入 LLM 的 providerMessages，
+      // 让 calibration 系数与 LLM 实际处理的 size 对账，而非与数据层 state.messages
+      // 对账：后者会因 turn-context 与发送前缀产生系统性偏差。
       //
-      // **维度对齐契约**：actual 是 API 返回的 system + messages + tools
+      // **维度对齐契约**：actual 是 API 返回的 system + providerMessages + tools
       // 全量 token 真值；estimated 必须用同样的三件套加总。早期版本只 estimate
-      // messagesForLLM，导致 ratio = actual / estimated 被错误放大到 2x+,
+      // messages，导致 ratio = actual / estimated 被错误放大到 2x+,
       // sliding average 把 calibrationFactor 推到 1.4-2.0，估算永久 +40~80% 偏高。
       // 修复：把 system + tools 也算进 estimated，让 actual 与 estimated 维度严格对齐。
       //
@@ -364,21 +383,18 @@ export async function* runAgentLoop(
         getTotalInputTokens(llmResult.usage) > 0;
       if (llmCallSuccess && params.tokenEstimator) {
         const estimated =
-          params.tokenEstimator.estimateText(getSystemPrompt()) +
-          params.tokenEstimator.estimateMessages(messagesForLLM) +
-          params.tokenEstimator.estimateTools(toolSpecs);
+          params.tokenEstimator.estimateText(sendView.systemPrompt) +
+          params.tokenEstimator.estimateMessages(sendView.providerMessages) +
+          params.tokenEstimator.estimateTools(sendView.tools);
         params.tokenEstimator.calibrate(
           estimated,
           getTotalInputTokens(llmResult.usage),
         );
       }
       if (llmCallSuccess) {
-        // baselineMessageCount 用 state.messages.length 而非 messagesForLLM.length：
-        // turn-context inject 仅给最后一条 user message 加 content block 不改数组长度，
-        // 两者数值相等。用 state.messages 视角与 turn-end 钩子里的 messages 视角对齐
-        // （turn-end 拿到的 newMessages 是 state.messages 的延伸，加了 assistant 与
-        // 可能的 tool_result），delta 切片 messages.slice(baselineMessageCount) 自然是
-        // 自 anchor 以来的新增后缀。
+        // baselineMessageCount 用 state.messages.length 而非 providerMessages.length：
+        // anchor 的真值已包含 system/prefix/turn-context/tools 的固定成本，后续 delta
+        // 只应从事实链 state.messages 切片，避免把发送前缀重复估算。
         state = {
           ...state,
           anchor: {
@@ -454,8 +470,7 @@ export async function* runAgentLoop(
           usage,
           abortSignal: controller.signal,
           segmentManager: params.segmentManager,
-          systemPrompt: getSystemPrompt(),
-          tools: params.tools ?? [],
+          prepareSendView,
           conversationId: params.conversationId,
           tokenEstimator: params.tokenEstimator,
           eventBus: params.eventBus,
@@ -562,8 +577,7 @@ export async function* runAgentLoop(
         usage,
         abortSignal: controller.signal,
         segmentManager: params.segmentManager,
-        systemPrompt: getSystemPrompt(),
-        tools: params.tools ?? [],
+        prepareSendView,
         conversationId: params.conversationId,
         tokenEstimator: params.tokenEstimator,
         eventBus: params.eventBus,
@@ -583,7 +597,7 @@ export async function* runAgentLoop(
         turnCount: newTurnCount,
         totalUsage: usage,
         transition: { reason: "tool_use" },
-        anchor: state.anchor,
+        anchor: turnEnd.anchorInvalidated ? undefined : state.anchor,
       };
     }
   } catch (e) {
