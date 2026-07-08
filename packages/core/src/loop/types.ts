@@ -27,10 +27,7 @@ import type {
 import type { Message, ToolResultBlock, ToolUseBlock } from "../types/messages.js";
 import type { ModelInputCapabilities } from "../types/user-input.js";
 import type { ToolDefinition, ToolExecutionContext, ToolResult, ToolSpec } from "../types/tools.js";
-import type {
-  ContextBudget,
-  ITokenEstimator,
-} from "../context/types.js";
+import type { ITokenEstimator } from "../context/types.js";
 import type { TokenAnchor as ContextTokenAnchor } from "../context/token-accounting.js";
 import type { SegmentManager } from "../context/segment/segment-manager.js";
 import type { TurnContextInjector } from "../context/turn-context.js";
@@ -432,14 +429,6 @@ export interface RunResult {
 
   /** 诊断：本 run 耗时（ms） */
   readonly durationMs: number;
-
-  /**
-   * 诊断：run 结束后的预算快照。
-   *
-   * 可选 —— 极端错误路径（如 pre-flight engine 抛错但 budget
-   * 暂未算出）允许省略；正常路径应填充以便调用方做 UI 预算显示。
-   */
-  readonly budget?: ContextBudget;
 
   /**
    * 本 run 内产生的 turn 边界控制结果（turn 内 emit、RunResult 带出，与

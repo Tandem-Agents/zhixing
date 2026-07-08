@@ -57,6 +57,7 @@ import {
   MemoryFlusher,
   calculateBudget,
   createMemoryFlushHook,
+  computeContextTokens,
   toToolSpec,
   DEFAULT_WATCHDOG_POLICY,
   MemoryStore,
@@ -222,6 +223,47 @@ function lifecycleErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+type PrefixContributionHolder = Map<string, MessagePrefixContribution | null>;
+
+function cloneAndValidateMessagePrefix(
+  messages: MessagePrefixContribution,
+): MessagePrefixContribution {
+  if (messages.length === 0 || messages.length % 2 !== 0) {
+    throw new Error("message prefix contribution must contain user/assistant pairs");
+  }
+  return messages.map((message, index): Message => {
+    const expectedRole = index % 2 === 0 ? "user" : "assistant";
+    if (message.role !== expectedRole) {
+      throw new Error("message prefix contribution must alternate user and assistant messages");
+    }
+    if (message.content.length === 0) {
+      throw new Error("message prefix contribution messages must contain text blocks");
+    }
+    return {
+      role: message.role,
+      content: message.content.map((block) => {
+        if (block.type !== "text") {
+          throw new Error("message prefix contribution only supports text blocks");
+        }
+        return { type: "text", text: block.text };
+      }),
+    };
+  });
+}
+
+function assembleMessagePrefix(
+  lifecycle: readonly AgentRuntimeLifecycle[],
+  contributions: ReadonlyMap<string, MessagePrefixContribution | null>,
+): readonly Message[] {
+  const out: Message[] = [];
+  for (const sub of lifecycle) {
+    const contribution = contributions.get(sub.id);
+    if (!contribution) continue;
+    out.push(...cloneAndValidateMessagePrefix(contribution));
+  }
+  return out;
+}
+
 // ─── 类型 ───
 
 /**
@@ -379,8 +421,6 @@ export interface RuntimeSecuritySnapshot {
 export interface ForceCompactResult {
   modified: boolean;
   messages: Message[];
-  /** 压缩后的预算快照（modelInfo 由 resolver 保证可用，必填） */
-  budget: ContextBudget;
   /**
    * 强制段切换产出的窗口重构指令（切段成功时非空——含应急地板的机械降级）。
    *
@@ -889,6 +929,13 @@ export async function createAgentRuntime(
     makeSkillIndexLifecycle(skillStore, skillMode),
     ...(options.lifecycle ?? []),
   ];
+  const lifecycleIds = new Set<string>();
+  for (const sub of lifecycle) {
+    if (lifecycleIds.has(sub.id)) {
+      throw new Error(`Duplicate lifecycle id: ${sub.id}`);
+    }
+    lifecycleIds.add(sub.id);
+  }
   const runtimeKind = options.runtimeKind ?? "conversation";
   const fixedPromptInputs = {
     profile,
@@ -904,10 +951,12 @@ export async function createAgentRuntime(
     buildSystemPrompt({ ...fixedPromptInputs, segmentOverrides: overrides });
 
   // 实例级 holder（所有 run 共享）—— authoritativePrompt 由首窗 onWindowOpen 建立。
-  const instanceSegmentOverrides: Partial<
+  let instanceSegmentOverrides: Partial<
     Record<SystemPromptSegment, string | null>
   > = {};
+  let instanceMessagePrefixContributions: PrefixContributionHolder = new Map();
   let authoritativePrompt = "";
+  let authoritativeMessagePrefix: readonly Message[] = [];
   // 单调提交：实例权威只接受"更晚换代"的贡献,不被滞后并发 run 回退。windowEpoch
   // 按换代触发顺序递增分配,instanceEpoch 记已提交进实例级的最大 epoch。
   let instanceEpoch = 0;
@@ -961,10 +1010,6 @@ export async function createAgentRuntime(
       }
     },
   });
-  const contributeMessagePrefix = (
-    _messages: MessagePrefixContribution | null,
-  ): void => {};
-
   // 实例级窗口开启 —— 首窗（instance-start）/ run 外换代（clear / resume / reload）。
   // 订阅者经 ctx 写实例级段覆盖,全部跑完后重拼实例权威。collectFailures:
   //   false（首窗）→ 订阅者抛错直接传播（让 createAgentRuntime 失败、安全回滚）;
@@ -975,6 +1020,10 @@ export async function createAgentRuntime(
   ): Promise<Array<{ id: string; error: unknown }>> => {
     const windowIndex = windowCounter++;
     const failures: Array<{ id: string; error: unknown }> = [];
+    const nextSegmentOverrides = { ...instanceSegmentOverrides };
+    const nextPrefixContributions: PrefixContributionHolder = new Map(
+      instanceMessagePrefixContributions,
+    );
     for (const sub of lifecycle) {
       const ctx: LifecycleWindowOpenContext = {
         ...lifecycleBase({
@@ -985,14 +1034,25 @@ export async function createAgentRuntime(
         reason,
         windowIndex,
         updateSystemPromptSegment(segment, content) {
-          instanceSegmentOverrides[segment] = content;
+          nextSegmentOverrides[segment] = content;
         },
-        contributeMessagePrefix,
+        contributeMessagePrefix(messages) {
+          try {
+            nextPrefixContributions.set(
+              sub.id,
+              messages === null ? null : cloneAndValidateMessagePrefix(messages),
+            );
+          } catch (error) {
+            nextPrefixContributions.set(sub.id, null);
+            throw error;
+          }
+        },
       };
       if (collectFailures) {
         try {
           await sub.onWindowOpen?.(ctx);
         } catch (err) {
+          nextPrefixContributions.set(sub.id, null);
           failures.push({ id: sub.id, error: err });
         }
       } else {
@@ -1000,7 +1060,13 @@ export async function createAgentRuntime(
       }
     }
     instanceEpoch = ++windowEpochCounter;
+    instanceSegmentOverrides = nextSegmentOverrides;
+    instanceMessagePrefixContributions = nextPrefixContributions;
     authoritativePrompt = buildPrompt(instanceSegmentOverrides);
+    authoritativeMessagePrefix = assembleMessagePrefix(
+      lifecycle,
+      instanceMessagePrefixContributions,
+    );
     return failures;
   };
 
@@ -1156,6 +1222,16 @@ export async function createAgentRuntime(
   // 安全回滚,对齐 work-mode）。createAgentRuntime 为 async,此处 await 合法。
   await openInstanceWindow("instance-start", false);
 
+  const buildCommittedRequestView = (messages: readonly Message[]) => {
+    const prefix = authoritativeMessagePrefix;
+    return {
+      systemPrompt: authoritativePrompt,
+      providerMessages:
+        prefix.length === 0 ? messages : [...prefix, ...messages],
+      tools: tools.map(toToolSpec),
+    };
+  };
+
   return {
     providerId: roles[primaryRole].provider.id,
     model: roles[primaryRole].model,
@@ -1204,10 +1280,17 @@ export async function createAgentRuntime(
     },
 
     checkBudget(messages: readonly Message[]): ContextBudget {
-      // 纯展示计算（压缩决策已全部归段机制）
+      const view = buildCommittedRequestView(messages);
       return calculateBudget(
         modelBudgetInfo,
-        estimator.estimateMessages(messages),
+        computeContextTokens({
+          estimator,
+          systemPrompt: view.systemPrompt,
+          stateMessages: messages,
+          providerMessages: view.providerMessages,
+          tools: view.tools,
+          anchor: undefined,
+        }),
       );
     },
 
@@ -1319,10 +1402,12 @@ export async function createAgentRuntime(
         emergencyFloor = { droppedTurns: info.droppedTurns, error: info.error };
       });
 
+      const compactView = buildCommittedRequestView(messages);
       const out = await segmentManager.evaluate({
         messages,
-        systemPrompt: authoritativePrompt,
-        tools: tools.map(toToolSpec),
+        providerMessages: compactView.providerMessages,
+        systemPrompt: compactView.systemPrompt,
+        tools: compactView.tools,
         turnCount,
         conversationId: undefined,
       });
@@ -1332,10 +1417,6 @@ export async function createAgentRuntime(
       return {
         modified: out.modified,
         messages: finalMessages,
-        budget: calculateBudget(
-          modelBudgetInfo,
-          estimator.estimateMessages(finalMessages),
-        ),
         windowCompact: out.windowCompact,
         emergencyFloor,
       };
@@ -1449,7 +1530,15 @@ export async function createAgentRuntime(
         Record<SystemPromptSegment, string | null>
       > = { ...instanceSegmentOverrides };
       let localPrompt = authoritativePrompt;
+      let localMessagePrefixContributions: PrefixContributionHolder = new Map(
+        instanceMessagePrefixContributions,
+      );
+      let localMessagePrefix = assembleMessagePrefix(
+        lifecycle,
+        localMessagePrefixContributions,
+      );
       const getRunSystemPrompt = (): string => localPrompt;
+      const getRunMessagePrefix = (): readonly Message[] => localMessagePrefix;
 
       // run 内三条上下文重构出口（runTurnBegin 段切换 / pre-flight 压缩 / runTurnEnd
       // 段切换-压缩）统一经此触发窗口换代：旧窗 onWindowClose → 新窗 onWindowOpen →
@@ -1459,6 +1548,9 @@ export async function createAgentRuntime(
           const myEpoch = ++windowEpochCounter;
           const closingIndex = windowCounter - 1;
           const openingIndex = windowCounter++;
+          const nextInstanceSegmentOverrides = { ...instanceSegmentOverrides };
+          const nextLocalMessagePrefixContributions: PrefixContributionHolder =
+            new Map(localMessagePrefixContributions);
 
           for (const sub of lifecycle) {
             const closeCtx: LifecycleWindowCloseContext = {
@@ -1497,14 +1589,27 @@ export async function createAgentRuntime(
               updateSystemPromptSegment(segment, content) {
                 localSegmentOverrides[segment] = content;
                 if (myEpoch > instanceEpoch) {
-                  instanceSegmentOverrides[segment] = content;
+                  nextInstanceSegmentOverrides[segment] = content;
                 }
               },
-              contributeMessagePrefix,
+              contributeMessagePrefix(messages) {
+                try {
+                  nextLocalMessagePrefixContributions.set(
+                    sub.id,
+                    messages === null
+                      ? null
+                      : cloneAndValidateMessagePrefix(messages),
+                  );
+                } catch (error) {
+                  nextLocalMessagePrefixContributions.set(sub.id, null);
+                  throw error;
+                }
+              },
             };
             try {
               await sub.onWindowOpen?.(openCtx);
             } catch (err) {
+              nextLocalMessagePrefixContributions.set(sub.id, null);
               eventBus.emit("lifecycle:hook_failed", {
                 hookId: sub.id,
                 phase: "onWindowOpen",
@@ -1520,10 +1625,23 @@ export async function createAgentRuntime(
             localPrompt = nextLocal;
             eventBus.emit("lifecycle:prompt_rebuilt", { reason });
           }
+          localMessagePrefixContributions = nextLocalMessagePrefixContributions;
+          localMessagePrefix = assembleMessagePrefix(
+            lifecycle,
+            localMessagePrefixContributions,
+          );
           // 单调更新实例权威 —— 仅当本次换代是迄今最晚的提交。
           if (myEpoch > instanceEpoch) {
             instanceEpoch = myEpoch;
+            instanceSegmentOverrides = nextInstanceSegmentOverrides;
+            instanceMessagePrefixContributions = new Map(
+              nextLocalMessagePrefixContributions,
+            );
             authoritativePrompt = buildPrompt(instanceSegmentOverrides);
+            authoritativeMessagePrefix = assembleMessagePrefix(
+              lifecycle,
+              instanceMessagePrefixContributions,
+            );
           }
         },
       };
@@ -1683,6 +1801,7 @@ export async function createAgentRuntime(
           tools,
           messages: loopMessages,
           getSystemPrompt: getRunSystemPrompt,
+          getMessagePrefix: getRunMessagePrefix,
           eventBus,
           // 工具执行的工作目录：与 system prompt 暴露给 LLM 的 "Working directory"
           // 字段保持一致——workspace 配置存在时用 workspace，否则 fallback 到 cwd。
@@ -1725,14 +1844,6 @@ export async function createAgentRuntime(
           const { value, done } = await gen.next();
 
           if (done) {
-            const allMessages = [...params.messages, ...newMessages];
-
-            // budget 是纯展示快照（压缩决策已全部归段机制）
-            const budget = calculateBudget(
-              modelBudgetInfo,
-              estimator.estimateMessages(allMessages),
-            );
-
             // 窗口重构指令唯一生产者 = 段切换（自动评估 / 应急地板同一出口）
             const windowCompact = segmentAccumulator.getWindowCompact();
             return {
@@ -1746,7 +1857,6 @@ export async function createAgentRuntime(
               }),
               newMessages,
               durationMs: Date.now() - startTime,
-              budget,
               windowCompact,
               pendingPostTurnControl: postTurnControlAccumulator.getOutcome(),
             };

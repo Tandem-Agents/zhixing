@@ -384,7 +384,7 @@ describe("createAgentRuntime · forceCompact 强制段切换", () => {
     expect(result.windowCompact!.pairsCompacted).toBeGreaterThan(0);
     // 新段：摘要对置首 + 保留最近 buffer，严格短于原文
     expect(result.messages.length).toBeLessThan(messages.length + 2);
-    expect(result.budget).toBeDefined();
+    expect("budget" in result).toBe(false);
     // 正常摘要切段无降级信息
     expect(result.emergencyFloor).toBeUndefined();
     // 端到端：段摘要 + 记忆提取共两次 light 调用（提取挂 afterSummarize）
@@ -1200,6 +1200,17 @@ describe("createAgentRuntime · 生命周期钩子", () => {
     ).rejects.toThrow("first window boom");
   });
 
+  it("lifecycle id 重复时装配 fail-fast", async () => {
+    await expect(
+      createAgentRuntime({
+        lifecycle: [
+          { id: "dup" },
+          { id: "dup" },
+        ],
+      }),
+    ).rejects.toThrow("Duplicate lifecycle id: dup");
+  });
+
   it("onBeforeRun 抛错不阻塞 run → emit lifecycle:hook_failed + 继续完成", async () => {
     providerRef.current = new MockLLMProvider([{ text: "ok" }]);
     const failed: { hookId: string; phase: string }[] = [];
@@ -1335,6 +1346,216 @@ describe("createAgentRuntime · 生命周期钩子", () => {
       providerRef.current.calls[1]!.systemPrompt,
     );
     expect(providerRef.current.calls[0]!.systemPrompt).toContain(SKILL_MARKER);
+  });
+
+  it("messagePrefix 进入 provider messages，但不进入 runRecord 或 state messages", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
+
+    const runtime = await createAgentRuntime({
+      lifecycle: [
+        {
+          id: "prefix-sub",
+          onWindowOpen: (ctx) => {
+            ctx.contributeMessagePrefix([
+              userMessage("prefix-user"),
+              { role: "assistant", content: [{ type: "text", text: "prefix-ack" }] },
+            ]);
+          },
+        },
+      ],
+    });
+
+    const result = await runtime.run({
+      messages: [userMessage("real user")],
+      turnIndex: 0,
+    });
+
+    expect(providerRef.current.calls[0]!.messages.map((m) => m.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+    ]);
+    expect(providerRef.current.calls[0]!.messages[0]).toEqual(
+      userMessage("prefix-user"),
+    );
+    expect(providerRef.current.calls[0]!.messages[1]).toEqual({
+      role: "assistant",
+      content: [{ type: "text", text: "prefix-ack" }],
+    });
+    expect(result.runRecord.messages).toHaveLength(2);
+    expect(result.runRecord.messages[0]).toEqual(userMessage("real user"));
+  });
+
+  it("首窗非法 messagePrefix contribution 让 runtime 装配 fail-fast", async () => {
+    await expect(
+      createAgentRuntime({
+        lifecycle: [
+          {
+            id: "prefix-sub",
+            onWindowOpen: (ctx) => {
+              ctx.contributeMessagePrefix([
+                {
+                  role: "assistant",
+                  content: [{ type: "text", text: "bad-start" }],
+                },
+              ]);
+            },
+          },
+        ],
+      }),
+    ).rejects.toThrow("message prefix contribution must contain user/assistant pairs");
+  });
+
+  it("run 外非法 messagePrefix contribution 被 collect，且本窗不沿用旧贡献", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "ok" }, { text: "ok2" }]);
+    let openCount = 0;
+
+    const runtime = await createAgentRuntime({
+      lifecycle: [
+        {
+          id: "prefix-sub",
+          onWindowOpen: (ctx) => {
+            openCount += 1;
+            if (openCount === 1) {
+              ctx.contributeMessagePrefix([
+                userMessage("prefix-user"),
+                {
+                  role: "assistant",
+                  content: [{ type: "text", text: "prefix-ack" }],
+                },
+              ]);
+              return;
+            }
+            ctx.contributeMessagePrefix([
+              {
+                role: "assistant",
+                content: [{ type: "text", text: "bad-start" }],
+              },
+            ]);
+          },
+        },
+      ],
+    });
+
+    await expect(runtime.onAttentionWindowChange("clear")).rejects.toThrow(
+      "onAttentionWindowChange",
+    );
+    await runtime.run({ messages: [userMessage("after clear")], turnIndex: 0 });
+
+    const sentText = providerRef.current.calls[0]!.messages
+      .flatMap((message) => message.content)
+      .filter((block) => block.type === "text")
+      .map((block) => block.text)
+      .join("\n");
+    expect(sentText).toContain("after clear");
+    expect(sentText).not.toContain("prefix-user");
+  });
+
+  it("run 内非法 messagePrefix contribution 走 hook_failed，且本窗不沿用旧贡献", async () => {
+    const summaryXml = "<facts>F1</facts><state>S1</state><active>A1</active>";
+    providerRef.current = new MockLLMProvider([
+      { text: summaryXml },
+      { text: "[]" },
+      { text: "ok" },
+    ]);
+    const failures: AgentEventMap["lifecycle:hook_failed"][] = [];
+    let openCount = 0;
+    const huge = "x".repeat(180_000);
+
+    const runtime = await createAgentRuntime({
+      decorateRunBus: (ctx) => {
+        const off = ctx.bus.on("lifecycle:hook_failed", (event) =>
+          failures.push(event),
+        );
+        return () => off();
+      },
+      lifecycle: [
+        {
+          id: "prefix-sub",
+          onWindowOpen: (ctx) => {
+            openCount += 1;
+            if (openCount === 1) {
+              ctx.contributeMessagePrefix([
+                userMessage("prefix-user"),
+                {
+                  role: "assistant",
+                  content: [{ type: "text", text: "prefix-ack" }],
+                },
+              ]);
+              return;
+            }
+            ctx.contributeMessagePrefix([
+              {
+                role: "assistant",
+                content: [{ type: "text", text: "bad-start" }],
+              },
+            ]);
+          },
+        },
+      ],
+      segmentDeps: {
+        taskListReader: { hasInProgress: () => false },
+        persistence: { appendSegment: vi.fn() },
+      },
+    });
+
+    await runtime.run({
+      messages: [
+        userMessage(huge),
+        { role: "assistant", content: [{ type: "text", text: huge }] },
+        userMessage(huge),
+        { role: "assistant", content: [{ type: "text", text: huge }] },
+        userMessage("small-1"),
+        { role: "assistant", content: [{ type: "text", text: "small-a1" }] },
+        userMessage("small-2"),
+        { role: "assistant", content: [{ type: "text", text: "small-a2" }] },
+      ],
+      turnIndex: 0,
+      conversationId: "conv-prefix-invalid",
+    });
+
+    expect(failures).toMatchObject([
+      { hookId: "prefix-sub", phase: "onWindowOpen" },
+    ]);
+    const mainCall = providerRef.current.calls.at(-1)!;
+    expect(mainCall.messages).not.toContainEqual(userMessage("prefix-user"));
+  });
+
+  it("run 外 checkBudget 使用 committed prompt、messagePrefix 与 tools 估算请求总量", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
+    const runtime = await createAgentRuntime({
+      lifecycle: [
+        {
+          id: "prefix-sub",
+          onWindowOpen: (ctx) => {
+            ctx.updateSystemPromptSegment("skill-index", "SKILL_BUDGET_MARKER");
+            ctx.contributeMessagePrefix([
+              userMessage("prefix-user"),
+              {
+                role: "assistant",
+                content: [{ type: "text", text: "prefix-ack" }],
+              },
+            ]);
+          },
+        },
+      ],
+    });
+
+    const withPrefix = runtime.checkBudget([userMessage("body")]);
+
+    const runtimeWithoutPrefix = await createAgentRuntime({
+      lifecycle: [
+        {
+          id: "prompt-sub",
+          onWindowOpen: (ctx) => {
+            ctx.updateSystemPromptSegment("skill-index", "SKILL_BUDGET_MARKER");
+          },
+        },
+      ],
+    });
+    const withoutPrefix = runtimeWithoutPrefix.checkBudget([userMessage("body")]);
+
+    expect(withPrefix.currentTokens).toBeGreaterThan(withoutPrefix.currentTokens);
   });
 
   it("dispose(reason) 触发末窗 onWindowClose(reason 透传),幂等", async () => {
