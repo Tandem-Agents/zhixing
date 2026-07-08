@@ -16,6 +16,7 @@ import {
   ConfirmationBroker,
   getAbortReason,
   type AbortReason,
+  type AgentEventMap,
   type AgentResult,
   type AgentYield,
   type Message,
@@ -46,6 +47,7 @@ function createMockAgentRuntime(behavior: MockBehavior = {}): AgentRuntime {
     providerId: "mock",
     model: "mock-model",
     confirmationBroker: broker,
+    drainLifecycleDiagnostics: () => [],
     checkBudget: () => ({
       contextWindow: 200_000,
       effectiveWindow: 180_000,
@@ -259,6 +261,26 @@ describe("createServerRuntimeAdapter", () => {
     const agent = createMockAgentRuntime();
     const runtime = createServerRuntimeAdapter("test-broker", agent);
     expect(runtime.confirmationBroker).toBe(agent.confirmationBroker);
+  });
+
+  it("adapter 透传 run 外 lifecycle 诊断 drain 能力", () => {
+    const diagnostics: AgentEventMap["lifecycle:warning"][] = [
+      {
+        hookId: "soft-window",
+        phase: "onWindowOpen",
+        windowIndex: 1,
+        runtimeId: "rt-1",
+        message: "clear degraded",
+      },
+    ];
+    const agent = createMockAgentRuntime();
+    (agent as unknown as {
+      drainLifecycleDiagnostics: () => readonly AgentEventMap["lifecycle:warning"][];
+    }).drainLifecycleDiagnostics = () => diagnostics;
+
+    const runtime = createServerRuntimeAdapter("test-diagnostics", agent);
+
+    expect(runtime.drainLifecycleDiagnostics?.()).toBe(diagnostics);
   });
 
   it("透传运行体预算 / 子 agent 用量 / 单发文本 / 安全快照能力", async () => {

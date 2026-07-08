@@ -20,7 +20,7 @@
  * 无注意力窗口换代，by-construction 不携带本钩子。
  */
 
-import type { Message, RunResult } from "@zhixing/core";
+import type { LifecycleWarningInput, Message, RunResult } from "@zhixing/core";
 import type { SystemPromptSegment } from "./system-prompt.js";
 
 /**
@@ -73,15 +73,27 @@ export type AttentionWindowChangeReason = Extract<
   "clear" | "resume" | "compact"
 >;
 
+/** 运行体种类。conversation 有持久会话身份；ephemeral 是一次性执行体。 */
+export type RuntimeKind = "conversation" | "ephemeral";
+
+/** 窗口级发送前缀贡献。运行体负责校验、拼接与隔离。 */
+export type MessagePrefixContribution = readonly Message[];
+
 /** 所有 ctx 共享的运行体身份字段。 */
 export interface LifecycleContextBase {
   /** 运行体实例唯一 id（装配期生成，仅用于事件归属 / 日志，不持久化） */
   readonly runtimeId: string;
+  readonly runtimeKind: RuntimeKind;
   readonly mode: "main" | "work";
   /** work 运行体的工作场景 id（main 运行体为 undefined） */
   readonly sceneId?: string;
   readonly providerId: string;
   readonly model: string;
+  /**
+   * 订阅者主动报告软降级诊断。订阅者只提供 message，运行体补齐 hookId /
+   * phase / windowIndex / runtimeId 并投递到当前可用诊断通道。
+   */
+  reportLifecycleWarning(event: LifecycleWarningInput): void;
 }
 
 export interface LifecycleWindowOpenContext extends LifecycleContextBase {
@@ -99,6 +111,11 @@ export interface LifecycleWindowOpenContext extends LifecycleContextBase {
    * 拼装归 runtime」同构）。段参数用 DataDrivenSegment 把语义边界钉在类型层。
    */
   updateSystemPromptSegment(segment: DataDrivenSegment, content: string | null): void;
+  /**
+   * 公共接口：贡献本窗口发送前缀。运行体只接受通用 Message[]，不理解任何
+   * ZHIXING.md / guidance 领域语义；传 null 清空本订阅者在本窗的贡献。
+   */
+  contributeMessagePrefix(messages: MessagePrefixContribution | null): void;
 }
 
 export interface LifecycleBeforeRunContext extends LifecycleContextBase {

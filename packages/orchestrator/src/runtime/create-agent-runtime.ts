@@ -128,6 +128,8 @@ import {
 } from "../tools/task-usage.js";
 import type {
   AgentRuntimeLifecycle,
+  RuntimeKind,
+  MessagePrefixContribution,
   LifecycleContextBase,
   LifecycleWindowOpenContext,
   LifecycleWindowCloseContext,
@@ -151,6 +153,7 @@ import {
  * 自然让位(高频技能优先入索引),未来由技能管家(分级 / 淘汰)进一步策展。
  */
 const SKILL_INDEX_TOP_N = 20;
+const LIFECYCLE_DIAGNOSTIC_LIMIT = 100;
 
 // ─── 内部辅助 ───
 
@@ -301,6 +304,10 @@ export interface AgentRuntime {
    * REPL 负责 attach 一个 TerminalConfirmationRenderer 到它。
    */
   readonly confirmationBroker: IConfirmationBroker;
+  /**
+   * 读取并清空 run 外 lifecycle 诊断。run 内诊断直接进入 per-run eventBus。
+   */
+  drainLifecycleDiagnostics(): readonly AgentEventMap["lifecycle:warning"][];
   /** 解析后的工作区信息（路径 + 来源），供启动展示和 RuntimeContext 使用 */
   readonly resolvedWorkspace: ResolvedWorkspace;
   /** 工作区目录状态（exists/created/skipped），供启动展示区分场景 */
@@ -581,6 +588,8 @@ export interface CreateAgentRuntimeOptions {
    * 此处传入的订阅者追加其后。第一版不做运行时 register（首窗语义需装配期注入）。
    */
   lifecycle?: readonly AgentRuntimeLifecycle[];
+  /** 运行体种类。缺省为持久会话运行体；一次性执行体由宿主显式传 ephemeral。 */
+  runtimeKind?: RuntimeKind;
 }
 
 /**
@@ -880,6 +889,7 @@ export async function createAgentRuntime(
     makeSkillIndexLifecycle(skillStore, skillMode),
     ...(options.lifecycle ?? []),
   ];
+  const runtimeKind = options.runtimeKind ?? "conversation";
   const fixedPromptInputs = {
     profile,
     tools,
@@ -908,8 +918,27 @@ export async function createAgentRuntime(
   //（当前窗口 != 上次入口窗口 → 本 run 是该窗口首个 run）。-1 = 尚无 run 入口。
   let lastRunEntryWindowIndex = -1;
 
-  const lifecycleBase = (): LifecycleContextBase => ({
+  const lifecycleDiagnostics: AgentEventMap["lifecycle:warning"][] = [];
+  const pushLifecycleDiagnostic = (
+    payload: AgentEventMap["lifecycle:warning"],
+  ): void => {
+    lifecycleDiagnostics.push(payload);
+    if (lifecycleDiagnostics.length > LIFECYCLE_DIAGNOSTIC_LIMIT) {
+      lifecycleDiagnostics.splice(
+        0,
+        lifecycleDiagnostics.length - LIFECYCLE_DIAGNOSTIC_LIMIT,
+      );
+    }
+  };
+
+  const lifecycleBase = (input: {
+    readonly hookId: string;
+    readonly phase: AgentEventMap["lifecycle:warning"]["phase"];
+    readonly windowIndex: number;
+    readonly eventBus?: IEventBus<AgentEventMap>;
+  }): LifecycleContextBase => ({
     runtimeId,
+    runtimeKind,
     mode: skillMode,
     sceneId:
       options.memoryScope?.kind === "workscene"
@@ -917,7 +946,24 @@ export async function createAgentRuntime(
         : undefined,
     providerId: roles[primaryRole].provider.id,
     model: roles[primaryRole].model,
+    reportLifecycleWarning(event) {
+      const payload: AgentEventMap["lifecycle:warning"] = {
+        hookId: input.hookId,
+        phase: input.phase,
+        windowIndex: input.windowIndex,
+        runtimeId,
+        message: event.message,
+      };
+      if (input.eventBus) {
+        input.eventBus.emitSync("lifecycle:warning", payload);
+      } else {
+        pushLifecycleDiagnostic(payload);
+      }
+    },
   });
+  const contributeMessagePrefix = (
+    _messages: MessagePrefixContribution | null,
+  ): void => {};
 
   // 实例级窗口开启 —— 首窗（instance-start）/ run 外换代（clear / resume / reload）。
   // 订阅者经 ctx 写实例级段覆盖,全部跑完后重拼实例权威。collectFailures:
@@ -929,15 +975,20 @@ export async function createAgentRuntime(
   ): Promise<Array<{ id: string; error: unknown }>> => {
     const windowIndex = windowCounter++;
     const failures: Array<{ id: string; error: unknown }> = [];
-    const ctx: LifecycleWindowOpenContext = {
-      ...lifecycleBase(),
-      reason,
-      windowIndex,
-      updateSystemPromptSegment(segment, content) {
-        instanceSegmentOverrides[segment] = content;
-      },
-    };
     for (const sub of lifecycle) {
+      const ctx: LifecycleWindowOpenContext = {
+        ...lifecycleBase({
+          hookId: sub.id,
+          phase: "onWindowOpen",
+          windowIndex,
+        }),
+        reason,
+        windowIndex,
+        updateSystemPromptSegment(segment, content) {
+          instanceSegmentOverrides[segment] = content;
+        },
+        contributeMessagePrefix,
+      };
       if (collectFailures) {
         try {
           await sub.onWindowOpen?.(ctx);
@@ -960,13 +1011,17 @@ export async function createAgentRuntime(
     reason: WindowCloseReason,
     windowIndex: number,
   ): Promise<Array<{ id: string; error: unknown }>> => {
-    const ctx: LifecycleWindowCloseContext = {
-      ...lifecycleBase(),
-      reason,
-      windowIndex,
-    };
     const failures: Array<{ id: string; error: unknown }> = [];
     for (const sub of lifecycle) {
+      const ctx: LifecycleWindowCloseContext = {
+        ...lifecycleBase({
+          hookId: sub.id,
+          phase: "onWindowClose",
+          windowIndex,
+        }),
+        reason,
+        windowIndex,
+      };
       try {
         await sub.onWindowClose?.(ctx);
       } catch (err) {
@@ -1132,6 +1187,12 @@ export async function createAgentRuntime(
 
     dispose,
     onAttentionWindowChange,
+
+    drainLifecycleDiagnostics(): readonly AgentEventMap["lifecycle:warning"][] {
+      const drained = lifecycleDiagnostics.slice();
+      lifecycleDiagnostics.length = 0;
+      return drained;
+    },
 
     get calibrationFactor(): number {
       return estimator.calibrationFactor;
@@ -1394,12 +1455,17 @@ export async function createAgentRuntime(
           const closingIndex = windowCounter - 1;
           const openingIndex = windowCounter++;
 
-          const closeCtx: LifecycleWindowCloseContext = {
-            ...lifecycleBase(),
-            reason,
-            windowIndex: closingIndex,
-          };
           for (const sub of lifecycle) {
+            const closeCtx: LifecycleWindowCloseContext = {
+              ...lifecycleBase({
+                hookId: sub.id,
+                phase: "onWindowClose",
+                windowIndex: closingIndex,
+                eventBus,
+              }),
+              reason,
+              windowIndex: closingIndex,
+            };
             try {
               await sub.onWindowClose?.(closeCtx);
             } catch (err) {
@@ -1413,18 +1479,24 @@ export async function createAgentRuntime(
 
           // 新窗 open —— 订阅者贡献写本 run 局部段覆盖（重拼本 run 局部 prompt）,
           // 并单调写实例级（给后续新 run,不回退滞后并发 run 的旧值）。
-          const openCtx: LifecycleWindowOpenContext = {
-            ...lifecycleBase(),
-            reason,
-            windowIndex: openingIndex,
-            updateSystemPromptSegment(segment, content) {
-              localSegmentOverrides[segment] = content;
-              if (myEpoch > instanceEpoch) {
-                instanceSegmentOverrides[segment] = content;
-              }
-            },
-          };
           for (const sub of lifecycle) {
+            const openCtx: LifecycleWindowOpenContext = {
+              ...lifecycleBase({
+                hookId: sub.id,
+                phase: "onWindowOpen",
+                windowIndex: openingIndex,
+                eventBus,
+              }),
+              reason,
+              windowIndex: openingIndex,
+              updateSystemPromptSegment(segment, content) {
+                localSegmentOverrides[segment] = content;
+                if (myEpoch > instanceEpoch) {
+                  instanceSegmentOverrides[segment] = content;
+                }
+              },
+              contributeMessagePrefix,
+            };
             try {
               await sub.onWindowOpen?.(openCtx);
             } catch (err) {
@@ -1465,19 +1537,24 @@ export async function createAgentRuntime(
       // 订阅者经 injectUserContext 贡献注入内容,运行体收齐后拼一个 <context> 块
       //（拼装 / 包标签 / 注入位置归运行体,订阅者只递交内容）。
       const userContextContributions: string[] = [];
-      const beforeRunCtx: LifecycleBeforeRunContext = {
-        ...lifecycleBase(),
-        conversationId: params.conversationId,
-        turnIndex: params.turnIndex,
-        isWindowFirstRun,
-        messages: params.messages,
-        injectUserContext(content) {
-          if (content !== null && content.trim().length > 0) {
-            userContextContributions.push(content);
-          }
-        },
-      };
       for (const sub of lifecycle) {
+        const beforeRunCtx: LifecycleBeforeRunContext = {
+          ...lifecycleBase({
+            hookId: sub.id,
+            phase: "onBeforeRun",
+            windowIndex: entryWindowIndex,
+            eventBus,
+          }),
+          conversationId: params.conversationId,
+          turnIndex: params.turnIndex,
+          isWindowFirstRun,
+          messages: params.messages,
+          injectUserContext(content) {
+            if (content !== null && content.trim().length > 0) {
+              userContextContributions.push(content);
+            }
+          },
+        };
         try {
           await sub.onBeforeRun?.(beforeRunCtx);
         } catch (err) {
@@ -1519,13 +1596,18 @@ export async function createAgentRuntime(
         );
         // onAfterRun —— run 产出 RunResult 后（ALS 外、disposeAll 前;若 run() 自身
         // 抛错则不触发,onBeforeRun→onAfterRun 非强配对）。抛错不污染已就绪结果。
-        const afterRunCtx: LifecycleAfterRunContext = {
-          ...lifecycleBase(),
-          conversationId: params.conversationId,
-          turnIndex: params.turnIndex,
-          result,
-        };
         for (const sub of lifecycle) {
+          const afterRunCtx: LifecycleAfterRunContext = {
+            ...lifecycleBase({
+              hookId: sub.id,
+              phase: "onAfterRun",
+              windowIndex: windowCounter - 1,
+              eventBus,
+            }),
+            conversationId: params.conversationId,
+            turnIndex: params.turnIndex,
+            result,
+          };
           try {
             await sub.onAfterRun?.(afterRunCtx);
           } catch (err) {

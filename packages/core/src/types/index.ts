@@ -110,6 +110,9 @@ export {
 export type {
   AgentEventMap,
   AgentRunEndReason,
+  LifecycleHookPhase,
+  LifecycleWarningEvent,
+  LifecycleWarningInput,
   OrchestrationEventIssue,
   OrchestrationRunEventStatus,
   PostTurnControlIntent,

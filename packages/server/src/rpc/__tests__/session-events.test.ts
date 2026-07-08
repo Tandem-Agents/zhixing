@@ -89,6 +89,35 @@ describe("createRunEventForwarder", () => {
     dispose();
   });
 
+  it("lifecycle warning 上 wire，payload 已由 runtime 裁成小诊断结构", () => {
+    const bus = makeBus();
+    const { out, forwarder } = collectEnvelopes();
+    const dispose = forwarder({ bus, conversationId: "c1", turnContext: TURN_CONTEXT });
+
+    bus.emit("lifecycle:warning", {
+      hookId: "zhixing-guidance",
+      phase: "onWindowOpen",
+      windowIndex: 2,
+      runtimeId: "rt-1",
+      message: "guidance load failed; action=empty-guidance",
+    });
+
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({
+      conversationId: "c1",
+      scope: "run",
+      event: "lifecycle:warning",
+      payload: {
+        hookId: "zhixing-guidance",
+        phase: "onWindowOpen",
+        windowIndex: 2,
+        runtimeId: "rt-1",
+        message: "guidance load failed; action=empty-guidance",
+      },
+    });
+    dispose();
+  });
+
   it("白名单外事件不上 wire(llm:stream_event / tool:call_start / post-turn 控制意图)", () => {
     const bus = makeBus();
     const { out, forwarder } = collectEnvelopes();

@@ -118,6 +118,23 @@ export interface OrchestrationEventIssue {
 
 export type OrchestrationRunEventStatus = "completed" | "failed" | "aborted";
 
+export type LifecycleHookPhase =
+  | "onWindowOpen"
+  | "onBeforeRun"
+  | "onAfterRun"
+  | "onWindowClose";
+
+export interface LifecycleWarningInput {
+  readonly message: string;
+}
+
+export interface LifecycleWarningEvent extends LifecycleWarningInput {
+  readonly hookId: string;
+  readonly phase: LifecycleHookPhase;
+  readonly windowIndex: number;
+  readonly runtimeId: string;
+}
+
 export type AgentEventMap = {
   // ─── Agent 生命周期 ───
 
@@ -506,6 +523,15 @@ export type AgentEventMap = {
     phase: "onWindowOpen" | "onBeforeRun" | "onAfterRun" | "onWindowClose";
     error: string;
   };
+
+  /**
+   * 生命周期订阅者主动报告的软降级诊断。
+   *
+   * 与 lifecycle:hook_failed 正交：hook_failed 由 runtime 判定并报告抛错 /
+   * 非法贡献等钩子失败；warning 只承载订阅者已自行降级、但希望用户或宿主可观测
+   * 的非致命问题。hookId / phase / windowIndex / runtimeId 由 runtime 补齐。
+   */
+  "lifecycle:warning": LifecycleWarningEvent;
 
   /**
    * 注意力窗口边界重建后 system prompt 真换（byte-equal 比较不同才 emit）——

@@ -62,6 +62,8 @@ export {
 export type {
   AgentRuntimeLifecycle,
   DataDrivenSegment,
+  MessagePrefixContribution,
+  RuntimeKind,
   LifecycleContextBase,
   LifecycleWindowOpenContext,
   LifecycleBeforeRunContext,

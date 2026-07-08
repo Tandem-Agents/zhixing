@@ -1228,6 +1228,79 @@ describe("createAgentRuntime · 生命周期钩子", () => {
     expect(failed).toContainEqual({ hookId: "flaky", phase: "onBeforeRun" });
   });
 
+  it("reportLifecycleWarning 由 runtime 补齐归属并走 lifecycle:warning", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
+    const warnings: AgentEventMap["lifecycle:warning"][] = [];
+    const hookFailures: AgentEventMap["lifecycle:hook_failed"][] = [];
+    let seenRuntimeKind: string | undefined;
+
+    const runtime = await createAgentRuntime({
+      decorateRunBus: (ctx) => {
+        const offWarning = ctx.bus.on("lifecycle:warning", (event) =>
+          warnings.push(event),
+        );
+        const offHookFailed = ctx.bus.on("lifecycle:hook_failed", (event) =>
+          hookFailures.push(event),
+        );
+        return () => {
+          offWarning();
+          offHookFailed();
+        };
+      },
+      lifecycle: [
+        {
+          id: "soft",
+          onBeforeRun: (ctx) => {
+            seenRuntimeKind = ctx.runtimeKind;
+            ctx.reportLifecycleWarning({ message: "soft degrade" });
+          },
+        },
+      ],
+    });
+
+    await runtime.run({ messages: [userMessage("hi")], turnIndex: 0 });
+
+    expect(seenRuntimeKind).toBe("conversation");
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatchObject({
+      hookId: "soft",
+      phase: "onBeforeRun",
+      windowIndex: 0,
+      message: "soft degrade",
+    });
+    expect(warnings[0]!.runtimeId).toEqual(expect.any(String));
+    expect(hookFailures).toEqual([]);
+  });
+
+  it("run 外 lifecycle warning 进入有界诊断缓冲并可 drain", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
+
+    const runtime = await createAgentRuntime({
+      lifecycle: [
+        {
+          id: "soft-window",
+          onWindowOpen: (ctx) => {
+            if (ctx.reason === "clear") {
+              ctx.reportLifecycleWarning({ message: "clear degraded" });
+            }
+          },
+        },
+      ],
+    });
+
+    await runtime.onAttentionWindowChange("clear");
+
+    const drained = runtime.drainLifecycleDiagnostics();
+    expect(drained).toHaveLength(1);
+    expect(drained[0]).toMatchObject({
+      hookId: "soft-window",
+      phase: "onWindowOpen",
+      windowIndex: 1,
+      message: "clear degraded",
+    });
+    expect(runtime.drainLifecycleDiagnostics()).toEqual([]);
+  });
+
   it("窗口内多 turn:无换代时每个 LLM call 的 systemPrompt byte-equal", async () => {
     providerRef.current = new MockLLMProvider([
       { toolCalls: [{ id: "p1", name: "probe", input: {} }] },

@@ -102,6 +102,12 @@ export interface SessionRuntime {
    */
   readonly confirmationBroker?: IConfirmationBroker;
 
+  /**
+   * 读取并清空 run 外 lifecycle 诊断。run 内诊断走 per-run eventBus；run 外窗口换代
+   * / dispose 无 run bus，由运行体暂存后交给 owner 投影。
+   */
+  drainLifecycleDiagnostics?(): readonly AgentEventMap["lifecycle:warning"][];
+
   // ─── 会话命令执行体所需的运行体能力(可选——adapter 透传底层运行体) ───
   //
   // 以下成员服务 run 外的会话命令(清空 / 手动压缩 / 切换对话)与 turn 后维护
