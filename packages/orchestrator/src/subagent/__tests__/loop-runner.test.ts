@@ -703,5 +703,12 @@ describe("runSubAgentLoop · 无注意力窗口换代", () => {
     expect(provider.calls.length).toBe(3);
     const prompts = provider.calls.map((c) => c.systemPrompt);
     expect(prompts.every((p) => p === "test system")).toBe(true);
+    const sentText = provider.calls
+      .flatMap((call) => call.messages)
+      .flatMap((message) => message.content)
+      .filter((block) => block.type === "text")
+      .map((block) => block.text)
+      .join("\n");
+    expect(sentText).not.toContain('<system-meta kind="guidance">');
   });
 });

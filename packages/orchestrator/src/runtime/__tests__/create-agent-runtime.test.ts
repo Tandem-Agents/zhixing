@@ -33,6 +33,7 @@ import {
 } from "vitest";
 import {
   AgentError,
+  buildGuidanceMessagePair,
   MockLLMProvider,
   SkillStore,
   skillNameToId,
@@ -1386,6 +1387,54 @@ describe("createAgentRuntime · 生命周期钩子", () => {
     expect(result.runRecord.messages[0]).toEqual(userMessage("real user"));
   });
 
+  it("guidance message pair 真实进入 provider 请求，且不进入 runRecord", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
+
+    const runtime = await createAgentRuntime({
+      lifecycle: [
+        {
+          id: "guidance-sub",
+          onWindowOpen: (ctx) => {
+            ctx.contributeMessagePrefix(
+              buildGuidanceMessagePair(
+                [
+                  "# 全局约定",
+                  "scope: global",
+                  "source: ZHIXING_HOME/ZHIXING.md",
+                  "请保持解释简洁",
+                ].join("\n"),
+              ),
+            );
+          },
+        },
+      ],
+    });
+
+    const result = await runtime.run({
+      messages: [userMessage("真实问题")],
+      turnIndex: 0,
+    });
+
+    const sent = providerRef.current.calls[0]!.messages;
+    expect(sent[0]!.role).toBe("user");
+    expect((sent[0]!.content[0] as { type: "text"; text: string }).text).toContain(
+      '<system-meta kind="guidance">',
+    );
+    expect((sent[0]!.content[0] as { type: "text"; text: string }).text).toContain(
+      "source: ZHIXING_HOME/ZHIXING.md",
+    );
+    expect(sent[1]).toEqual({
+      role: "assistant",
+      content: [{ type: "text", text: '<system-meta kind="ack">已阅读约定</system-meta>' }],
+    });
+    expect(sent[2]!.role).toBe("user");
+    expect((sent[2]!.content[0] as { type: "text"; text: string }).text).toContain(
+      "真实问题",
+    );
+    expect(result.runRecord.messages[0]).toEqual(userMessage("真实问题"));
+    expect(JSON.stringify(result.runRecord.messages)).not.toContain("guidance");
+  });
+
   it("首窗非法 messagePrefix contribution 让 runtime 装配 fail-fast", async () => {
     await expect(
       createAgentRuntime({
@@ -1519,6 +1568,68 @@ describe("createAgentRuntime · 生命周期钩子", () => {
     ]);
     const mainCall = providerRef.current.calls.at(-1)!;
     expect(mainCall.messages).not.toContainEqual(userMessage("prefix-user"));
+  });
+
+  it("run 内段切换后重新注入 guidance，provider 请求使用新窗口前缀", async () => {
+    const summaryXml = "<facts>F1</facts><state>S1</state><active>A1</active>";
+    providerRef.current = new MockLLMProvider([
+      { text: summaryXml },
+      { text: "[]" },
+      { text: "ok" },
+    ]);
+    let openCount = 0;
+    const huge = "x".repeat(180_000);
+
+    const runtime = await createAgentRuntime({
+      lifecycle: [
+        {
+          id: "guidance-sub",
+          onWindowOpen: (ctx) => {
+            openCount += 1;
+            ctx.contributeMessagePrefix(
+              buildGuidanceMessagePair(
+                [
+                  `# 窗口 ${openCount} 约定`,
+                  "scope: global",
+                  "source: ZHIXING_HOME/ZHIXING.md",
+                  `窗口${openCount}内容`,
+                ].join("\n"),
+              ),
+            );
+          },
+        },
+      ],
+      segmentDeps: {
+        taskListReader: { hasInProgress: () => false },
+        persistence: { appendSegment: vi.fn() },
+      },
+    });
+
+    await runtime.run({
+      messages: [
+        userMessage(huge),
+        { role: "assistant", content: [{ type: "text", text: huge }] },
+        userMessage(huge),
+        { role: "assistant", content: [{ type: "text", text: huge }] },
+        userMessage("small-1"),
+        { role: "assistant", content: [{ type: "text", text: "small-a1" }] },
+        userMessage("small-2"),
+        { role: "assistant", content: [{ type: "text", text: "small-a2" }] },
+      ],
+      turnIndex: 0,
+      conversationId: "conv-guidance-reopen",
+    });
+
+    expect(openCount).toBeGreaterThanOrEqual(2);
+    const mainCall = providerRef.current.calls.at(-1)!;
+    const sentText = mainCall.messages
+      .flatMap((message) => message.content)
+      .filter((block) => block.type === "text")
+      .map((block) => block.text)
+      .join("\n");
+    expect(sentText).toContain('<system-meta kind="guidance">');
+    expect(sentText).toContain("窗口2内容");
+    expect(sentText).not.toContain("窗口1内容");
   });
 
   it("run 外 estimateConversationRequestBudget 使用 committed prompt、messagePrefix 与 tools 估算请求总量", async () => {

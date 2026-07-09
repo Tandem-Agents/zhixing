@@ -76,6 +76,27 @@ describe("loadLayeredGuidance", () => {
     expect(warnings).toEqual([{ message: "全局约定读取失败：permission denied" }]);
   });
 
+  it("读取边界上报的 warning 会带上 scope label，便于定位降级来源", async () => {
+    const warnings: GuidanceWarningInput[] = [];
+
+    const payload = await loadLayeredGuidance({
+      roots: { homeDir: "/home", workdir: "/work" },
+      readGuidanceFile: async ({ path, reportWarning }) => {
+        if (path === pathJoin("/home", "ZHIXING.md")) {
+          reportWarning({ message: "permission denied at /safe/home/ZHIXING.md" });
+          return null;
+        }
+        return "场景内容";
+      },
+      reportWarning: (event) => warnings.push(event),
+    });
+
+    expect(payload).toContain("场景内容");
+    expect(warnings).toEqual([
+      { message: "全局约定：permission denied at /safe/home/ZHIXING.md" },
+    ]);
+  });
+
   it("不截断非空内容，且发送 payload 不包含物理路径", async () => {
     const longContent = "规则\n".repeat(2_000);
     const physicalPath = "C:\\Users\\me\\.zhixing\\ZHIXING.md";

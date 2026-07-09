@@ -1,6 +1,10 @@
 import path from "node:path";
 
-import { buildGuidanceMessagePair, type Message } from "@zhixing/core";
+import {
+  buildGuidanceMessagePair,
+  loadLayeredGuidance,
+  type Message,
+} from "@zhixing/core";
 import type { LifecycleWindowOpenContext } from "@zhixing/orchestrator/runtime";
 import { describe, expect, it, vi } from "vitest";
 
@@ -92,6 +96,31 @@ describe("createZhixingGuidanceLifecycle", () => {
     expect(errorCtx.prefixes).toEqual([null, null]);
     expect(errorCtx.warnings).toEqual([
       { message: "约定加载失败，已跳过本窗约定：boom" },
+    ]);
+  });
+
+  it("真实 layered guidance 读取降级会透传 scope、path 与 error 到诊断出口", async () => {
+    const ctx = makeWindowOpenContext();
+    const guidancePath = path.join("/home", "ZHIXING.md");
+    const deps = {
+      getZhixingHome: () => "/home",
+      getWorkscene: vi.fn(async () => null),
+      readGuidanceFile: vi.fn(async ({ path: filePath, reportWarning }) => {
+        reportWarning({
+          message: `EACCES: permission denied, open '${filePath}'`,
+        });
+        return null;
+      }),
+      loadLayeredGuidance,
+    };
+
+    await createZhixingGuidanceLifecycle(deps).onWindowOpen?.(ctx);
+
+    expect(ctx.prefixes).toEqual([null, null]);
+    expect(ctx.warnings).toEqual([
+      {
+        message: `全局约定：EACCES: permission denied, open '${guidancePath}'`,
+      },
     ]);
   });
 
