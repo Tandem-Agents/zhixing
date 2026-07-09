@@ -43,6 +43,11 @@ import {
   createContextIndicator,
   type ContextIndicatorHandle,
 } from "./context-indicator/index.js";
+import {
+  createLifecycleWarningDeduper,
+  renderLifecycleWarningLine,
+  type LifecycleWarningDeduper,
+} from "./lifecycle-diagnostics-presentation.js";
 
 // ─── 中断诊断文本 ───
 
@@ -444,6 +449,8 @@ export interface CreateRenderSubscribersOptions {
   readonly writer: CliWriter;
   /** 可选 screen——存在时启用 status-bar 与 context-indicator；不经 writer */
   readonly screen?: ScreenController;
+  /** lifecycle warning 展示去重器；同一终端接入面应与 control 事件展示共享。 */
+  readonly lifecycleWarningDeduper?: LifecycleWarningDeduper;
 }
 
 function renderPerspectiveProgress(
@@ -473,6 +480,8 @@ export function createRenderSubscribers(
   options: CreateRenderSubscribersOptions,
 ): DecorateRunBusFn {
   const { renderer, writer, screen } = options;
+  const lifecycleWarningDeduper =
+    options.lifecycleWarningDeduper ?? createLifecycleWarningDeduper();
   // pauseUI 单点派生：有 renderer 即包装 stop()，否则 no-op
   const pauseUI: () => void = renderer ? () => renderer.stop() : () => {};
 
@@ -550,15 +559,22 @@ export function createRenderSubscribers(
       }),
     );
 
-    // 运行体生命周期钩子（run 内）—— hook_failed 是失败安全网（内置 skill 重建
-    // 每窗静默失败会让索引永久陈旧却无人知,故必须用户可见）;prompt_rebuilt 是
-    // 系统提示词随窗口重建的轻提示。
+    // 运行体生命周期钩子（run 内）—— hook_failed 是失败安全网；warning 是
+    // 订阅者主动报告的软降级，用户需要知道本轮上下文约定是否完整生效。
     unsubs.push(
       bus.on("lifecycle:hook_failed", (info) => {
         pauseUI();
         writer.line(
           `  ${chalk.yellow("⚠")} ${chalk.dim(`生命周期钩子 ${info.hookId} 在 ${info.phase} 失败: ${info.error}`)}`,
         );
+      }),
+    );
+    unsubs.push(
+      bus.on("lifecycle:warning", (info) => {
+        if (!lifecycleWarningDeduper.shouldShow(info)) return;
+        pauseUI();
+        writer.ensureSegmentBreak();
+        writer.line(renderLifecycleWarningLine(info));
       }),
     );
     unsubs.push(

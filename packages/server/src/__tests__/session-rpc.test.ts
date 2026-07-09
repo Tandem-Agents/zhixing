@@ -15,6 +15,7 @@ import {
   userMessage,
 } from "@zhixing/core";
 import type {
+  AgentEventMap,
   AgentResult,
   AgentYield,
   AdvancementAdmissionStrategy,
@@ -89,6 +90,10 @@ interface MockOptions {
   subAgentUsages?: readonly RuntimeSubAgentUsageEntry[];
   /** /security 的运行体快照能力 */
   securitySnapshot?: RuntimeSecuritySnapshot;
+  /** run 外 lifecycle 诊断缓冲 */
+  lifecycleDiagnostics?: readonly AgentEventMap["lifecycle:warning"][];
+  /** run 外窗口换代后追加到诊断缓冲的 warning */
+  windowChangeDiagnostics?: readonly AgentEventMap["lifecycle:warning"][];
 }
 
 function createMockRuntime(
@@ -96,6 +101,7 @@ function createMockRuntime(
   opts: MockOptions = {},
 ): SessionRuntime {
   let aborted = false;
+  let lifecycleDiagnostics = [...(opts.lifecycleDiagnostics ?? [])];
 
   return {
     sessionId,
@@ -190,6 +196,14 @@ function createMockRuntime(
           subAgentUsages: () => opts.subAgentUsages ?? [],
         }
       : {}),
+    drainLifecycleDiagnostics: () => {
+      const drained = lifecycleDiagnostics;
+      lifecycleDiagnostics = [];
+      return drained;
+    },
+    onAttentionWindowChange: async () => {
+      lifecycleDiagnostics.push(...(opts.windowChangeDiagnostics ?? []));
+    },
     async dispose() {},
   };
 }
@@ -810,6 +824,89 @@ describe("session.* RPC (S2.D)", () => {
     expect(completeParams.result.reason).toBe("completed");
     // 控制意图走定向通知，不混入 complete 组播。
     expect(completeParams.pendingPostTurnControl).toBeUndefined();
+
+    client.close();
+  });
+
+  it("session.send broadcasts run-out lifecycle diagnostics as control events", async () => {
+    await startWithFactory(createMockFactory({
+      deltaCount: 0,
+      lifecycleDiagnostics: [
+        {
+          hookId: "zhixing-guidance",
+          phase: "onWindowOpen",
+          runtimeId: "runtime-conv",
+          windowIndex: 0,
+          message: "工作场景约定读取失败，已降级为仅全局约定",
+        },
+      ],
+    }));
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const sendResp = await client.request("session.send", {
+      text: "hi",
+      turnId: "turn-warning",
+    });
+    expect(isSuccessResponse(sendResp)).toBe(true);
+    if (!isSuccessResponse(sendResp)) return;
+
+    const event = await client.waitNotification("session.event");
+    expect(event.params).toMatchObject({
+      conversationId: sendResp.result.conversationId,
+      scope: "control",
+      runId: "turn-warning",
+      event: "lifecycle:warning",
+      payload: {
+        hookId: "zhixing-guidance",
+        message: "工作场景约定读取失败，已降级为仅全局约定",
+      },
+    });
+
+    await client.waitNotification("session.delta");
+    await client.waitNotification("session.complete");
+    client.close();
+  });
+
+  it("session.clear broadcasts run-out lifecycle diagnostics after window reset", async () => {
+    await startWithFactory(createMockFactory({
+      deltaCount: 0,
+      windowChangeDiagnostics: [
+        {
+          hookId: "zhixing-guidance",
+          phase: "onWindowOpen",
+          runtimeId: "runtime-conv",
+          windowIndex: 1,
+          message: "工作场景约定目录不是绝对路径，已跳过场景层",
+        },
+      ],
+    }));
+    const client = await connect(server.port);
+    await client.request("auth", { token: TEST_TOKEN });
+
+    const sendResp = await client.request("session.send", {
+      text: "hi",
+      turnId: "turn-clear-warning",
+    });
+    expect(isSuccessResponse(sendResp)).toBe(true);
+    if (!isSuccessResponse(sendResp)) return;
+    const conversationId = sendResp.result.conversationId;
+    await client.waitNotification("session.delta");
+    await client.waitNotification("session.complete");
+
+    const clearResp = await client.request("session.clear", { conversationId });
+    expect(isSuccessResponse(clearResp)).toBe(true);
+    const event = await client.waitNotification("session.event");
+    expect(event.params).toMatchObject({
+      conversationId,
+      scope: "control",
+      runId: "",
+      event: "lifecycle:warning",
+      payload: {
+        hookId: "zhixing-guidance",
+        message: "工作场景约定目录不是绝对路径，已跳过场景层",
+      },
+    });
 
     client.close();
   });

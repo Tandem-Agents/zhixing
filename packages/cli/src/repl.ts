@@ -48,6 +48,7 @@ import { createInputHandleTokenPatterns } from "./input-handle-tokens.js";
 import { InputMaterialRegistry } from "./input-material-registry.js";
 import { formatMaterialIngestDiagnostic } from "./input-material-ingest.js";
 import { prepareUserTurnInput } from "./user-turn-input.js";
+import { createLifecycleWarningDeduper } from "./lifecycle-diagnostics-presentation.js";
 import { renderError, createRenderSubscribers } from "./render.js";
 import { renderHistoryTail } from "./history-tail.js";
 import { createOutputRenderer, getLlmChunkDump } from "./output/index.js";
@@ -89,6 +90,7 @@ import type { SessionAdvancementStateSnapshot } from "@zhixing/server";
 import { prepareSessionSendEngage } from "./session-engage.js";
 import { renderResumedAdvancementNotice } from "./advancement-presentation.js";
 import { createAdvancementControlPresenter } from "./runtime/advancement-control-presenter.js";
+import { createLifecycleDiagnosticsPresenter } from "./runtime/lifecycle-diagnostics-presenter.js";
 import { createObservedTurnPresenter } from "./runtime/observed-turn-presenter.js";
 import {
   ConversationController,
@@ -584,10 +586,12 @@ export async function startRepl(): Promise<void> {
   // 带外通道——宿主 per-run bus 的 UI 订阅集事件经信封还原为本地投影 bus,
   // createRenderSubscribers(retry / segment / interrupt / status-bar)零改挂接。
   // "只投当前对话"是接入面 UI 态,经 filter 注入。
+  const lifecycleWarningDeduper = createLifecycleWarningDeduper();
   const renderSubscribers = createRenderSubscribers({
     renderer,
     writer: cliWriter,
     screen: renderScreen ?? undefined,
+    lifecycleWarningDeduper,
   });
   const rpcEventBus = new RpcEventBus({
     link: coreHost,
@@ -617,6 +621,13 @@ export async function startRepl(): Promise<void> {
     writer: cliWriter,
     flushOutput: () => renderer.stop(),
     filter: (envelope) => watching(envelope.conversationId),
+  });
+  const lifecycleDiagnosticsPresenter = createLifecycleDiagnosticsPresenter({
+    link: coreHost,
+    writer: cliWriter,
+    flushOutput: () => renderer.stop(),
+    filter: (envelope) => watching(envelope.conversationId),
+    deduper: lifecycleWarningDeduper,
   });
 
   // ── 当前对话指针:auto-resume 最近可恢复的一条(session.list 新→旧),无则新建 ──
@@ -1804,6 +1815,7 @@ export async function startRepl(): Promise<void> {
   rpcConfirmationBroker.dispose();
   rpcEventBus.dispose();
   advancementControlPresenter.dispose();
+  lifecycleDiagnosticsPresenter.dispose();
   controller.dispose();
 
   if (inputController) {

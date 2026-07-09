@@ -22,15 +22,20 @@ interface CapturedWriter extends CliWriter {
   /** 累积 line 调用文本（不含落地 \n，方便单元测试断言原始内容） */
   readonly lines: string[];
   readonly notices: string[];
+  readonly segmentBreaks: number;
 }
 
 function makeCaptureWriter(): CapturedWriter {
   let buffer = "";
+  let segmentBreaks = 0;
   const lines: string[] = [];
   const notices: string[] = [];
   return {
     get buffer() {
       return buffer;
+    },
+    get segmentBreaks() {
+      return segmentBreaks;
     },
     lines,
     notices,
@@ -46,6 +51,9 @@ function makeCaptureWriter(): CapturedWriter {
       notices.push(text);
       buffer += text;
       if (!text.endsWith("\n")) buffer += "\n";
+    },
+    ensureSegmentBreak() {
+      segmentBreaks++;
     },
   } as CapturedWriter;
 }
@@ -413,6 +421,50 @@ describe("createRenderSubscribers: 工厂注入语义", () => {
     const out = stripAnsi(writer.buffer);
     expect(out).toContain("第 2/3 次重试");
     expect(out).toContain("请求超时");
+
+    teardown();
+  });
+
+  it("lifecycle warning 渲染为低噪的约定降级提示", async () => {
+    const writer = makeCaptureWriter();
+    const stop = vi.fn();
+    const bus = createEventBus<AgentEventMap>();
+    const decorator = createRenderSubscribers({
+      writer,
+      renderer: { stop } as never,
+    });
+    const teardown = decorator({ bus, runId: "test", parentBus: null });
+
+    await bus.emit("lifecycle:warning", {
+      hookId: "zhixing-guidance",
+      phase: "onWindowOpen",
+      runtimeId: "runtime-1",
+      windowIndex: 1,
+      message: "工作场景约定读取失败，已降级为仅全局约定",
+    });
+    await bus.emit("lifecycle:warning", {
+      hookId: "zhixing-guidance",
+      phase: "onWindowOpen",
+      runtimeId: "runtime-1",
+      windowIndex: 2,
+      message: "工作场景约定读取失败，已降级为仅全局约定",
+    });
+    await bus.emit("lifecycle:warning", {
+      hookId: "zhixing-guidance",
+      phase: "onWindowOpen",
+      runtimeId: "runtime-1",
+      windowIndex: 3,
+      message: "工作场景约定目录不是绝对路径，已跳过场景层",
+    });
+
+    expect(stop).toHaveBeenCalledTimes(2);
+    expect(writer.segmentBreaks).toBe(2);
+    expect(stripAnsi(writer.lines[0] ?? "")).toBe(
+      "  ⚠ 约定未完全生效：工作场景约定读取失败，已降级为仅全局约定",
+    );
+    expect(stripAnsi(writer.lines[1] ?? "")).toBe(
+      "  ⚠ 约定未完全生效：工作场景约定目录不是绝对路径，已跳过场景层",
+    );
 
     teardown();
   });

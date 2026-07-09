@@ -29,6 +29,7 @@ import {
   emptyUsage,
   generateTurnId,
   isNonEmptyUserTurnInput,
+  type AgentEventMap,
   type AgentYield,
   type AdvancementSession,
   type RubricContractDraftSnapshot,
@@ -1058,6 +1059,14 @@ async function admitAndMaybeStartPerspectiveTurn(
     );
   }
 
+  notifyLifecycleDiagnostics({
+    manager: input.manager,
+    conversationId: admission.conversationId,
+    runId: input.turnId,
+    connection: input.connection,
+    broadcast: input.broadcast,
+  });
+
   if (admission.status === "immediate") {
     void admission.task.execute();
   }
@@ -1123,6 +1132,14 @@ async function admitAndMaybeStartTurn(
       "Too many pending messages for this conversation",
     );
   }
+
+  notifyLifecycleDiagnostics({
+    manager: input.manager,
+    conversationId: admission.conversationId,
+    runId: input.turnId,
+    connection: input.connection,
+    broadcast: input.broadcast,
+  });
 
   if (admission.status === "immediate") {
     void admission.task.execute();
@@ -1271,6 +1288,54 @@ function notifyAdvancementEvent(input: {
     runId: input.turnId,
     seq: input.seq ?? 0,
     event: input.event,
+    payload: input.payload,
+  });
+  if (input.broadcast) {
+    input.broadcast(
+      input.conversationId,
+      SESSION_NOTIFICATIONS.event,
+      envelope,
+    );
+  } else {
+    input.connection.notify(SESSION_NOTIFICATIONS.event, envelope);
+  }
+}
+
+function notifyLifecycleDiagnostics(input: {
+  readonly manager: ConversationManager;
+  readonly conversationId: string;
+  readonly runId?: string;
+  readonly connection: RpcConnection;
+  readonly broadcast?: SessionBroadcast;
+}): void {
+  const diagnostics = input.manager.drainLifecycleDiagnostics(
+    input.conversationId,
+  );
+  diagnostics.forEach((payload, seq) => {
+    notifyLifecycleWarningEvent({
+      conversationId: input.conversationId,
+      runId: input.runId ?? "",
+      seq,
+      payload,
+      connection: input.connection,
+      broadcast: input.broadcast,
+    });
+  });
+}
+
+function notifyLifecycleWarningEvent(input: {
+  readonly conversationId: string;
+  readonly runId: string;
+  readonly seq: number;
+  readonly payload: AgentEventMap["lifecycle:warning"];
+  readonly connection: RpcConnection;
+  readonly broadcast?: SessionBroadcast;
+}): void {
+  const envelope = createControlSessionEventEnvelope({
+    conversationId: input.conversationId,
+    runId: input.runId,
+    seq: input.seq,
+    event: "lifecycle:warning",
     payload: input.payload,
   });
   if (input.broadcast) {
@@ -1976,6 +2041,12 @@ export function buildSessionClearMethod(): MethodEntry {
         throw RpcErrors.notFound(`Session not found: ${id}`);
       }
 
+      notifyLifecycleDiagnostics({
+        manager,
+        conversationId: id,
+        connection: ctx.connection,
+        broadcast: ctx.server.sessionBroadcast,
+      });
       ctx.server.sessionBroadcast?.(id, SESSION_NOTIFICATIONS.changed, {
         conversationId: id,
         change: "cleared",
@@ -2027,6 +2098,12 @@ export function buildSessionCompactMethod(): MethodEntry {
       }
 
       const { outcome } = result;
+      notifyLifecycleDiagnostics({
+        manager,
+        conversationId,
+        connection: ctx.connection,
+        broadcast: ctx.server.sessionBroadcast,
+      });
       return {
         modified: outcome.modified && !!outcome.windowCompact,
         tokensBefore: outcome.windowCompact?.tokensBefore,
@@ -2071,6 +2148,12 @@ export function buildSessionContextBudgetMethod(): MethodEntry {
           "Runtime does not support context budget inspection",
         );
       }
+      notifyLifecycleDiagnostics({
+        manager,
+        conversationId,
+        connection: ctx.connection,
+        broadcast: ctx.server.sessionBroadcast,
+      });
       return {
         budget: result.budget,
         turnCount: result.turnCount,
@@ -2111,6 +2194,12 @@ export function buildSessionUsageMethod(): MethodEntry {
           "Runtime does not support usage inspection",
         );
       }
+      notifyLifecycleDiagnostics({
+        manager,
+        conversationId,
+        connection: ctx.connection,
+        broadcast: ctx.server.sessionBroadcast,
+      });
       return {
         budget: result.budget,
         turnCount: result.turnCount,
@@ -2152,6 +2241,12 @@ export function buildSessionSecurityMethod(): MethodEntry {
           "Runtime does not support security inspection",
         );
       }
+      notifyLifecycleDiagnostics({
+        manager,
+        conversationId,
+        connection: ctx.connection,
+        broadcast: ctx.server.sessionBroadcast,
+      });
       return result.snapshot;
     },
   };

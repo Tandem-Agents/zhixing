@@ -18,6 +18,7 @@
 import {
   createAttentionWindow,
   type AbortReason,
+  type AgentEventMap,
   type AppendRunResult,
   type AttentionWindowState,
   type Message,
@@ -731,6 +732,16 @@ export class ConversationManager {
     if (!session) return undefined;
     const msgs = session.window.getMessages();
     return limit ? msgs.slice(-limit) : [...msgs];
+  }
+
+  drainLifecycleDiagnostics(
+    conversationId: string,
+  ): readonly AgentEventMap["lifecycle:warning"][] {
+    return (
+      this.sessions
+        .get(conversationId)
+        ?.runtime.drainLifecycleDiagnostics?.() ?? []
+    );
   }
 
   list(): ManagedSessionInfo[] {
