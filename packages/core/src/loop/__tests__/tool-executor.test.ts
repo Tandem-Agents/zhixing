@@ -1,7 +1,7 @@
 /**
  * tool-executor 的 ToolExecutionContext 注入契约
  *
- * 覆盖 ctx.llm 字段透传——secondary-llm-capability.md §三 承诺：
+ * 覆盖 ctx.llm 字段透传：
  *   - 不传 llmRoles 时，工具收到的 ctx.llm 为 undefined（消费者必须处理 !ctx.llm）
  *   - 传 llmRoles 时，工具收到的就是 caller 传入的同一实例（不复制、不替换）
  *
@@ -136,6 +136,22 @@ describe("executeToolCalls · ctx.llm 注入契约", () => {
     expect(captured.ctx!.llm).toBe(roles);
   });
 
+  it("每次工具调用都会收到对应 toolCallId", async () => {
+    const captured: CapturedCtx = {};
+    const tool = makeSpyTool(captured);
+
+    await drain(
+      executeToolCalls({
+        toolCalls: [TOOL_CALL],
+        tools: [tool],
+        deps: passthroughDeps,
+        workingDirectory: "/tmp/wd",
+      }),
+    );
+
+    expect(captured.ctx!.toolCallId).toBe("call_1");
+  });
+
   it("多 toolCalls 时每次 ctx.llm 都注入同一实例", async () => {
     const captured1: CapturedCtx = {};
     const captured2: CapturedCtx = {};
@@ -163,6 +179,8 @@ describe("executeToolCalls · ctx.llm 注入契约", () => {
 
     expect(captured1.ctx!.llm).toBe(roles);
     expect(captured2.ctx!.llm).toBe(roles);
+    expect(captured1.ctx!.toolCallId).toBe("c1");
+    expect(captured2.ctx!.toolCallId).toBe("c2");
   });
 });
 
@@ -470,6 +488,56 @@ describe("executeToolCalls · 并发模式", () => {
     expect(result?.abortedDuringToolAt).toBeUndefined();
   });
 
+  it("maxCallsPerTurn:只启动限额内调用,超限项返回配对 isError", async () => {
+    let invokedCount = 0;
+    const tool: ToolDefinition = {
+      ...makeBatchTool("t", () => {
+        invokedCount += 1;
+        return { content: `done-${invokedCount}` };
+      }),
+      maxCallsPerTurn: 3,
+    };
+    const calls4: ToolUseBlock[] = [
+      ...calls3,
+      { type: "tool_use", id: "4", name: "t", input: {} },
+    ];
+
+    const yields: AgentYield[] = [];
+    const gen = executeToolCalls({
+      toolCalls: calls4,
+      tools: [tool],
+      deps: passthroughDeps,
+      workingDirectory: "/tmp",
+    });
+    let result: ExecuteToolCallsResult | undefined;
+    while (true) {
+      const { value, done } = await gen.next();
+      if (done) {
+        result = value;
+        break;
+      }
+      yields.push(value);
+    }
+
+    expect(invokedCount).toBe(3);
+    expect(yields.filter((y) => y.type === "tool_start")).toHaveLength(3);
+
+    const toolEnds = yields.filter((y) => y.type === "tool_end");
+    expect(toolEnds).toHaveLength(4);
+    const rejected = toolEnds.find(
+      (y) => y.type === "tool_end" && y.id === "4",
+    );
+    expect(rejected?.type === "tool_end" && rejected.result.isError).toBe(true);
+    expect(result?.completedResults.map((r) => r.toolUseId)).toEqual([
+      "1",
+      "2",
+      "3",
+      "4",
+    ]);
+    expect(result?.completedResults[3]?.isError).toBe(true);
+    expect(result?.unexecutedToolUses).toEqual([]);
+  });
+
   it("isError 隔离:3 工具 1 throw 非 abort,其他 2 仍各自完成 + isError tool_result", async () => {
     let invokeCount = 0;
     const tool = makeBatchTool("t", () => {
@@ -706,7 +774,7 @@ describe("executeToolCalls · 并发模式", () => {
     expect(elapsed).toBeGreaterThanOrEqual(sleepMs - 10);
   });
 
-  it("ctx 透传契约:并发模式 N 工具均收到正确 workingDirectory / abortSignal / llm 同源引用", async () => {
+  it("ctx 透传契约:并发模式 N 工具均收到正确 workingDirectory / abortSignal / llm / toolCallId", async () => {
     const captured: Array<ToolExecutionContext | undefined> = [];
     const roles = makeStubRoles();
     const ac = new AbortController();
@@ -735,12 +803,12 @@ describe("executeToolCalls · 并发模式", () => {
     );
 
     expect(captured).toHaveLength(3);
-    for (const ctx of captured) {
+    captured.forEach((ctx, index) => {
       expect(ctx).toBeDefined();
-      // 三字段全部同源引用(并发模式共享同一 ctx 对象,串行 per-call 新建但内容相同)
       expect(ctx!.workingDirectory).toBe("/concurrent/wd");
       expect(ctx!.abortSignal).toBe(ac.signal);
       expect(ctx!.llm).toBe(roles);
-    }
+      expect(ctx!.toolCallId).toBe(String(index + 1));
+    });
   });
 });

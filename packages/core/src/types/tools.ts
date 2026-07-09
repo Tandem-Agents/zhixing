@@ -18,7 +18,7 @@ import type {
 import type { LLMRoles, ResolvedRoleThinking } from "./llm.js";
 import type { BoundaryCrossing } from "../security/types.js";
 
-// ─── Turn 上下文（ADR-007 Phase 2） ───
+// ─── Turn 上下文 ───
 
 /**
  * TurnOrigin —— turn 发起入口的元信息。
@@ -28,7 +28,7 @@ import type { BoundaryCrossing } from "../security/types.js";
  *   - 审计：`triggeredBy` 记录是谁触发了这个 turn
  *   - RPC 推送过滤：`channel="rpc"` + `triggeredBy=connectionId` 支持定向通知
  *
- * 3 个 turn 入口的填充约定（remote-confirmation-execution.md §3.3）：
+ * 3 个 turn 入口的填充约定：
  *   - 通道用户消息 → `{ channel: msg.channelId, target: replyTarget, triggeredBy: msg.from }`
  *   - RPC `session.send`（Web UI / IDE）→ `{ channel: "rpc", triggeredBy: connectionId }`
  *   - Scheduler → ephemeralRuntime → `{ channel: "scheduler", target?: task.deliveryTarget, triggeredBy: task.id }`
@@ -142,7 +142,7 @@ export interface JsonSchema {
  * 工具执行上下文 — 传递给工具 call 函数的运行时信息。
  * 随着系统演进会逐步扩展（如权限信息、会话 ID 等）。
  *
- * 从 ADR-007 Phase 2 起，含可选的 turn 元信息（`turnId` / `emissionTarget` / `commitToUser`）：
+ * 含可选的 turn 元信息（`turnId` / `emissionTarget` / `commitToUser`）：
  * - 这些字段在**channel 发起的用户会话 turn** 中有值
  * - REPL 单次命令、定时任务 ephemeral turn 中均为 undefined
  * - 工具若依赖这些字段，必须同时支持"无上下文"路径（降级为 LLM 叙述）
@@ -153,23 +153,24 @@ export interface ToolExecutionContext {
   /** 中止信号，用于取消长时间运行的工具 */
   abortSignal?: AbortSignal;
 
-  // ─── Turn 元信息（可选，ADR-007 Phase 2 引入） ───
+  /** 当前工具调用 id，用于把工具内部派生的子活动关联回父工具调用。 */
+  toolCallId?: string;
+
+  // ─── Turn 元信息（可选） ───
 
   /**
-   * 当前 turn 的全局唯一标识。Phase 2 主要用于日志/事件关联；
-   * Phase 3 起作为 Outbox Turn Slot 的 key，触发因果依赖。
+   * 当前 turn 的全局唯一标识，用于日志、事件关联和跨路径因果追溯。
    */
   turnId?: string;
 
   /**
-   * 当前 turn 绑定的用户目标。Phase 2 作为元信息可见；Phase 3 起供工具记录
-   * `createdInTurn` 到其副作用（如 Scheduled Task）中，实现跨路径因果追溯。
+   * 当前 turn 绑定的用户目标，供工具把副作用归因到用户可见通道。
    */
   emissionTarget?: DeliveryTarget;
 
   /**
    * 直接向用户发送一条 commitment 消息（经 Outbox），不依赖 LLM 后续叙述。
-   * 参见 ADR-007 决策 2 / [message-outbox.md §4.2](../../../../research/design/specifications/message-outbox.md)。
+   * 这是工具直接向用户提交可见结果的统一出口，调用方负责保证消息顺序。
    *
    * 工具的调用契约：
    * - 应仅在该 tool 确实造成了**用户感兴趣的副作用**后调用（如 task 创建成功）
@@ -190,7 +191,7 @@ export interface ToolExecutionContext {
    * 知道把确认请求推回哪个通道对话 / RPC 连接。
    *
    * REPL / 一次性命令下为 undefined（本地 TerminalRenderer 不需要远程路由）。
-   * 参见 remote-confirmation-execution.md §3.3。
+   * 远程接入面会用它把确认请求路由回原会话或 RPC 连接。
    */
   turnOrigin?: TurnOrigin;
 
@@ -229,7 +230,24 @@ export interface ToolExecutionContext {
 
 export type ToolPresentationArtifact =
   | FileDiffPresentationArtifact
-  | GrepResultsPresentationArtifact;
+  | GrepResultsPresentationArtifact
+  | SubAgentResultPresentationArtifact;
+
+export interface SubAgentResultPresentationArtifact {
+  kind: "sub-agent-result";
+  toolCallId: string;
+  subAgentId: string;
+  description: string;
+  status: "succeeded" | "failed" | "aborted";
+  durationMs: number;
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+  };
+  toolUses: number;
+  errorOrAbortReason?: string;
+  diagnostics?: readonly string[];
+}
 
 export interface GrepResultsPresentationArtifact {
   kind: "grep-results";
@@ -429,6 +447,12 @@ export interface ToolDefinition {
   maxResultChars?: number;
 
   /**
+   * 单个工具批次内允许同名工具调用的最大数量。
+   * 未设置表示不限制；超限调用返回输入级 isError，不会进入工具实现。
+   */
+  maxCallsPerTurn?: number;
+
+  /**
    * 此工具跨越的安全边界（forward-looking 字段）。
    *
    * 用于让 `BoundaryImpactClassifier`（OperationClassifier 兜底分类器）
@@ -445,8 +469,7 @@ export interface ToolDefinition {
    * MCP HTTP 工具 / 第三方插件）必须声明，否则 `BoundaryImpactClassifier` 会
    * fail-closed 分类为 critical（每次调用触发 confirm，UX 极差）。
    *
-   * 见 [tool-permission-execution.md](../../../../research/design/specifications/tool-permission-execution.md)
-   * §4.1 与 ADR-TPE-006。
+   * 该字段让新工具通过自描述接入通用边界分类，而不是把工具名写进分类器。
    */
   boundaries?: BoundaryCrossing[];
 
@@ -495,8 +518,7 @@ export interface ToolDefinition {
    * `PermissionStoreOptions.extractArgument`；store 在 match 时优先用此字段、
    * 未声明则降级到内置启发式。
    *
-   * 见 [tool-permission-execution.md](../../../../research/design/specifications/tool-permission-execution.md)
-   * §4.2 与 ADR-TPE-003。
+   * 该字段让权限匹配读取工具声明的主参数，而不是猜测第一个字符串字段。
    */
   permissionArgumentKey?: string;
 

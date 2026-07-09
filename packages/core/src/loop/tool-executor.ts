@@ -94,6 +94,18 @@ interface ExecuteToolCallsParams {
   roleThinking?: ResolvedRoleThinking;
 }
 
+type PlannedToolCall =
+  | {
+      kind: "run";
+      call: ToolUseBlock;
+      tool: ToolDefinition | undefined;
+    }
+  | {
+      kind: "reject";
+      call: ToolUseBlock;
+      result: ToolResult;
+    };
+
 /**
  * 执行一批工具调用。
  *
@@ -109,12 +121,13 @@ export async function* executeToolCalls(
   params: ExecuteToolCallsParams,
 ): AsyncGenerator<AgentYield, ExecuteToolCallsResult> {
   const toolMap = new Map(params.tools.map((t) => [t.name, t]));
+  const plannedCalls = planToolCalls(params.toolCalls, toolMap);
 
-  if (canRunParallel(toolMap, params.toolCalls)) {
-    return yield* runParallelBatch(params, toolMap);
+  if (canRunParallel(plannedCalls)) {
+    return yield* runParallelBatch(params, plannedCalls);
   }
 
-  return yield* runSerialBatch(params, toolMap);
+  return yield* runSerialBatch(params, plannedCalls, toolMap);
 }
 
 /**
@@ -124,6 +137,7 @@ export async function* executeToolCalls(
  */
 async function* runSerialBatch(
   params: ExecuteToolCallsParams,
+  plannedCalls: PlannedToolCall[],
   toolMap: Map<string, ToolDefinition>,
 ): AsyncGenerator<AgentYield, ExecuteToolCallsResult> {
   const {
@@ -142,8 +156,9 @@ async function* runSerialBatch(
   // abort 发生在工具 await 期间时记退出时刻；abort 发生在循环顶 (工具间隙) 时为 undefined
   let abortedDuringToolAt: number | undefined;
 
-  for (let i = 0; i < toolCalls.length; i++) {
-    const call = toolCalls[i]!;
+  for (let i = 0; i < plannedCalls.length; i++) {
+    const planned = plannedCalls[i]!;
+    const call = planned.call;
 
     // 循环顶 abort guard —— abort 发生在工具间隙 (前一工具完成后、本工具开始前)。
     // 比"工具未找到"分支早，保证已 aborted 时不再消耗任何工具。
@@ -153,7 +168,24 @@ async function* runSerialBatch(
       break;
     }
 
-    const tool = toolMap.get(call.name);
+    if (planned.kind === "reject") {
+      results.push({
+        type: "tool_result",
+        toolUseId: call.id,
+        content: planned.result.content,
+        isError: true,
+      });
+      yield {
+        type: "tool_end",
+        id: call.id,
+        name: call.name,
+        result: planned.result,
+        duration: 0,
+      };
+      continue;
+    }
+
+    const tool = planned.tool;
 
     yield { type: "tool_start", id: call.id, name: call.name, input: call.input };
 
@@ -196,6 +228,7 @@ async function* runSerialBatch(
     const context: ToolExecutionContext = {
       workingDirectory,
       abortSignal,
+      toolCallId: call.id,
       llm: llmRoles,
       roleThinking,
     };
@@ -207,9 +240,8 @@ async function* runSerialBatch(
       // 管线步骤：结果截断
       const toolResult = applyMaxResultChars(rawResult, tool.maxResultChars);
 
-      // ADR-007 Phase 2：ToolResult.committedToUser 字段无法通过 LLM 消息协议传递
-      // （ToolResultBlock 只支持 content/isError）。因此把该标记编码到 content
-      // 文本尾部，成为 LLM 可见的信号。系统提示中对应规则识别该标记以抑制叙述。
+      // ToolResultBlock 只支持 content/isError，无法承载 committedToUser。
+      // 因此把该标记编码到 content 尾部，成为 LLM 可见的抑制叙述信号。
       const contentForLLM = toolResult.committedToUser
         ? `${toolResult.content}\n\n${COMMITMENT_SIGNAL}`
         : toolResult.content;
@@ -309,11 +341,11 @@ async function* runSerialBatch(
  *     —— 不在并发分支重复实现这个错误路径
  */
 function canRunParallel(
-  toolMap: Map<string, ToolDefinition>,
-  toolCalls: ToolUseBlock[],
+  plannedCalls: PlannedToolCall[],
 ): boolean {
-  if (toolCalls.length < 2) return false;
-  return toolCalls.every((c) => toolMap.get(c.name)?.isParallelSafe === true);
+  const runnable = plannedCalls.filter((p) => p.kind === "run");
+  if (runnable.length < 2) return false;
+  return runnable.every((p) => p.tool?.isParallelSafe === true);
 }
 
 /**
@@ -340,7 +372,7 @@ function canRunParallel(
  */
 async function* runParallelBatch(
   params: ExecuteToolCallsParams,
-  toolMap: Map<string, ToolDefinition>,
+  plannedCalls: PlannedToolCall[],
 ): AsyncGenerator<AgentYield, ExecuteToolCallsResult> {
   const {
     toolCalls,
@@ -362,8 +394,12 @@ async function* runParallelBatch(
     };
   }
 
+  const runnable = plannedCalls.filter((p): p is Extract<PlannedToolCall, { kind: "run" }> =>
+    p.kind === "run"
+  );
+
   // tool_start 同步全发(批次启动可见性,顺序 = 输入顺序)
-  for (const call of toolCalls) {
+  for (const { call } of runnable) {
     yield { type: "tool_start", id: call.id, name: call.name, input: call.input };
     await eventBus?.emit("tool:call_start", {
       id: call.id,
@@ -372,21 +408,17 @@ async function* runParallelBatch(
     });
   }
 
-  // 共享 ctx:并发模式下 N 个工具共享同一 workingDirectory / abortSignal / llm 引用,
-  // 与串行模式 per-call 新建 ctx 的引用语义等价(三个字段均不应被工具内部 mutate)
-  const ctx: ToolExecutionContext = {
-    workingDirectory,
-    abortSignal,
-    llm: llmRoles,
-    roleThinking,
-  };
-
   const startTime = Date.now();
   const settled = await Promise.allSettled(
-    toolCalls.map((call) => {
-      // canRunParallel 已保证 toolMap.get(call.name) 命中且 isParallelSafe=true
-      const tool = toolMap.get(call.name)!;
-      return deps.executeTool(tool, call.input, ctx);
+    runnable.map(({ call, tool }) => {
+      const ctx: ToolExecutionContext = {
+        workingDirectory,
+        abortSignal,
+        toolCallId: call.id,
+        llm: llmRoles,
+        roleThinking,
+      };
+      return deps.executeTool(tool!, call.input, ctx);
     }),
   );
   const settledAt = performance.now();
@@ -397,10 +429,30 @@ async function* runParallelBatch(
   const unexecutedToolUses: ToolUseBlock[] = [];
   let abortedDuringToolAt: number | undefined;
 
-  for (let i = 0; i < toolCalls.length; i++) {
-    const call = toolCalls[i]!;
-    const tool = toolMap.get(call.name)!;
-    const outcome = settled[i]!;
+  let settledIndex = 0;
+  for (const planned of plannedCalls) {
+    const call = planned.call;
+
+    if (planned.kind === "reject") {
+      results.push({
+        type: "tool_result",
+        toolUseId: call.id,
+        content: planned.result.content,
+        isError: true,
+      });
+
+      yield {
+        type: "tool_end",
+        id: call.id,
+        name: call.name,
+        result: planned.result,
+        duration: 0,
+      };
+      continue;
+    }
+
+    const tool = planned.tool!;
+    const outcome = settled[settledIndex++]!;
 
     if (outcome.status === "fulfilled") {
       const toolResult = applyMaxResultChars(outcome.value, tool.maxResultChars);
@@ -447,7 +499,7 @@ async function* runParallelBatch(
       continue;
     }
 
-    // 非 abort throw → isError tool_result(C6 错误隔离)
+    // 非 abort throw → isError tool_result，保持工具错误隔离
     const errorMessage = err instanceof Error ? err.message : String(err);
     const errorContent = isUserFacingError(err)
       ? errorMessage
@@ -485,12 +537,45 @@ async function* runParallelBatch(
 /**
  * 当 ToolResult.committedToUser=true 时，附加到 tool_result.content 尾部的 LLM 信号文本。
  * 系统提示（buildToolUsage）识别此文本时抑制 LLM 对该工具结果的叙述。
- * 参见 ADR-007 Phase 2 / [message-outbox.md §4.4](../../../../research/design/specifications/message-outbox.md)。
  */
 export const COMMITMENT_SIGNAL =
   "[Commitment already sent to user. Do not restate.]";
 
 // ─── 管线工具函数 ───
+
+function planToolCalls(
+  toolCalls: ToolUseBlock[],
+  toolMap: Map<string, ToolDefinition>,
+): PlannedToolCall[] {
+  const callCounts = new Map<string, number>();
+
+  return toolCalls.map((call) => {
+    const tool = toolMap.get(call.name);
+    const limit = tool?.maxCallsPerTurn;
+    if (typeof limit === "number") {
+      const nextCount = (callCounts.get(call.name) ?? 0) + 1;
+      callCounts.set(call.name, nextCount);
+      if (nextCount > limit) {
+        return {
+          kind: "reject",
+          call,
+          result: createMaxCallsError(call.name, limit),
+        };
+      }
+    }
+
+    return { kind: "run", call, tool };
+  });
+}
+
+function createMaxCallsError(toolName: string, limit: number): ToolResult {
+  return {
+    content:
+      `Tool "${toolName}" can be called at most ${limit} time${limit === 1 ? "" : "s"} in one turn. ` +
+      "This call was not started. Combine the request with an already-started call or retry in a later turn.",
+    isError: true,
+  };
+}
 
 /**
  * 对工具结果应用 maxResultChars 截断。

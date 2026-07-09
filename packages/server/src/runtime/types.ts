@@ -98,7 +98,7 @@ export interface SessionRuntime {
    * `@zhixing/cli` 的 `AgentRuntime` 天然实现（broker 作为 readonly public 字段暴露）；
    * 其它 SessionRuntime 实现（如测试 stub）可以不提供，此时 ConfirmationHub 不接入。
    *
-   * 参见 remote-confirmation-execution.md §3.2（Hub 聚合 per-runtime broker）。
+   * 远程确认通道通过 Hub 聚合 per-runtime broker。
    */
   readonly confirmationBroker?: IConfirmationBroker;
 
@@ -200,8 +200,8 @@ export interface RuntimeSubAgentUsageEntry {
   readonly description: string;
   /** 子 agent 总 token(input + output,不含 cache 维度)。 */
   readonly tokens: number;
-  /** 成功路径的子工具调用数；failed/aborted 可缺省。 */
-  readonly toolUses?: number;
+  /** 子工具调用数，成功、失败和中止三态都有。 */
+  readonly toolUses: number;
   /** 子 dispatch 持续时间(ms)。 */
   readonly durationMs?: number;
   /** 子 agent id 前缀，供审计追踪。 */

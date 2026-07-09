@@ -208,6 +208,21 @@ export type AgentEventMap = {
     resultSize: number;
   };
 
+  "tool:child_start": {
+    parentToolCallId: string;
+    childLineage: string;
+    childAgentId: string;
+    label: string;
+  };
+
+  "tool:child_end": {
+    parentToolCallId: string;
+    childLineage: string;
+    childAgentId: string;
+    status: "succeeded" | "failed" | "aborted";
+    duration: number;
+  };
+
   "tool:permission_request": {
     id: string;
     name: string;
