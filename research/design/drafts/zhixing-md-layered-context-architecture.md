@@ -4,7 +4,7 @@
 
 ### ZHIXING.md · 分层上下文与约定注入
 
-- **触发**：根目录遗留的旧 `ZHIXING.md` 属于已废弃语义，它曾把 agent 语义绑定到运行地址；这与知行"通用个人助手、可运行在任意地址且效果一致"的产品定位相反。旧文件及所有"运行地址承载项目语义"的相关功能、引用都应彻底清理。
+- **触发**：根目录遗留的已废弃 `ZHIXING.md` 曾把 agent 语义绑定到运行地址；这与知行"通用个人助手、可运行在任意地址且效果一致"的产品定位相反。该遗留文件及所有"运行地址承载项目语义"的相关功能、引用都应彻底清理。
 - **用户价值**：用户可以在不同作用域沉淀稳定的工作背景、约定和上下文，让知行进入不同工作环境时自动获得合适背景，同时保持运行地址无特殊意义、上下文前缀稳定、成本可控。
 - **核心需求**：建立知行自己的 `ZHIXING.md` 分层上下文与约定注入机制。它只承载上下文与约定注入，不承载记忆；Claude Code 的同类机制只作参考，不作为标准。当前版本只落地全局系统级与工作场景级，子目录级仅作为未来扩展概念保留。
 - **作用域**：
@@ -15,7 +15,7 @@
 - **注入机制**：`ZHIXING.md` 内容不进入 system prompt，而是在注意力上下文窗口生命周期内的第一条消息中，以结构化标签注入 user message；一个窗口内只注入一次，压缩换窗后重新注入，以保护上下文前缀稳定和缓存命中。
 - **地基约束**：优先复用现有生命周期 / 注意力窗口地基；若地基不足，只能从通用架构角度补强"窗口首条注入"能力，不能为 `ZHIXING.md` 做专用耦合。
 - **已定问题**：全局文件的准确物理位置、全局系统级与工作场景级内容的合并 / 覆盖规则、XML / 类 XML 标签形式及标签命名均已在 §11 定死。
-- **下一步**：新建独立 draft，先盘点旧 `ZHIXING.md` 文件和相关遗留引用，再设计全局系统级与工作场景级的分层加载、窗口首条注入、合并规则与缓存稳定策略，并保留未来扩展到子目录级的架构余地。
+- **下一步**：新建独立 draft，先盘点已废弃的仓库根 `ZHIXING.md` 文件和相关遗留引用，再设计全局系统级与工作场景级的分层加载、窗口首条注入、合并规则与缓存稳定策略，并保留未来扩展到子目录级的架构余地。
 
 ## 用户需求起点
 
@@ -387,7 +387,7 @@ export function createZhixingGuidanceLifecycle(deps: {
 - 领域依赖在装配层收口：`getZhixingHome` 与 `worksceneDirectory.get(sceneId)` 在 lifecycle 内解析成 roots；分层服务只消费 roots、注入式 `readGuidanceFile` 与诊断出口。
 - 注册点定死：`packages/cli/src/serve/command.ts:376` 当前 `lifecycle: [createAdvancementAcceptanceLifecycle(...)]` 处追加 `createZhixingGuidanceLifecycle(...)`，依赖从同一 `RuntimeHost` 装配上下文注入。
 
-### 5. 旧 ZHIXING.md 清理（需求前半）
+### 5. 已废弃的仓库根 ZHIXING.md 清理（需求前半）
 
 清理动作：
 
@@ -399,11 +399,12 @@ export function createZhixingGuidanceLifecycle(deps: {
   ```
 - 每一处结果必须分类处理：
 
-  - 活代码：当前不预设仍存在旧 loader；若复扫发现旧的"运行地址 / cwd 项目语义"加载路径，不得保留，迁到本文机制或删除。
+  - 活代码：当前不预设仍存在已废弃 loader；若复扫发现已废弃的"运行地址 / cwd 项目语义"加载路径，不得保留，迁到本文机制或删除。
   - packages 注释 / prompt 文案：订正为 `<system-meta kind="guidance">` 的窗口级发送前缀机制。
-  - research/spec 旧方案：标明过时或改写到本文新机制，删除"用户级个性化"、`<context>` 首条注入、子目录级本期落地等旧表述。
+  - research/spec 当前规格：改写到本文新机制，删除"用户级个性化"、`<context>` 首条注入、子目录级本期落地等已废弃表述。
+  - research/spec 历史资料：保留真实历史符号名（如 `injectContext` / `loadInstructions` / `# Project Instructions (ZHIXING.md)`）作追溯锚点，但必须明确标注已删除、已废弃或仅供历史背景；不得为了关键词清零把真实符号改成含混中文描述。
   - 需求原文与本文自身：可保留作为来源记录。
-- 收尾同命令复扫；除需求来源与本文外，不应再有旧语义残留。
+- 收尾同命令复扫；目标不是字面零命中，而是确认活代码与当前规格无已废弃运行地址语义残留，历史资料中的命中都有清晰的废弃 / 追溯标注。
 
 ### 6. 运行边界：持久会话 runtime 与一次性执行体
 
@@ -438,7 +439,7 @@ guidance 只作用于有持久会话身份的 user-facing conversation runtime�
 
 ### 9. 测试策略（按影响面分层）
 
-- **② 单测**：作用域链解析（main 只全局 / work 有 workdir 两层 / work 无 workdir 只全局）、缺文件降级、全空返回 null、层叠拼接顺序与 scope/source 裸分节 payload、文件内容全量注入不截断。
+- **② 单测**：作用域链解析（main 只全局 / work 有 workdir 两层 / work 无 workdir 只全局）、缺文件降级、全空返回 null、层叠拼接顺序与 scope/source 裸分节 payload、reader warning 的 scope.label 前缀包装、文件内容全量注入不截断。
 - **③ 读取安全单测**：宿主层 `readGuidanceFile` 覆盖 `PathGuard containment + lstat`：`ENOENT` / `ENOTDIR` 返回 null 且不诊断；symlink / reparse 越界 / 非普通文件 / 权限异常不注入并上报诊断；POSIX `O_NOFOLLOW` 只测为补强，不作为 Windows 语义依赖；不测试 hardlink 拒绝；断言 containment 复用 `PathGuard`，不新建第二套路径判断。
 - **① 单测**：
   - `reportLifecycleWarning`：订阅者只提供 message；runtime 自动补 `hookId` / `phase` / `windowIndex` / `runtimeId`；run 内转发 eventBus 并投影，run 外进入有界 ring buffer，`ConversationManager` 在 runtime 创建后、run 外窗口变更 / compact / dispose 后通过 `drainLifecycleDiagnostics()` drain，并用 `sessionBroadcast + createControlSessionEventEnvelope` 投影。
@@ -500,7 +501,7 @@ guidance 只作用于有持久会话身份的 user-facing conversation runtime�
 | 5 | server budget 接口语义分离 | `SessionRuntime.checkBudget(messages)` 拆为 `estimateConversationRequestBudget(messages)` / `estimateMessagesTokens(messages)`；`ConversationManager.contextBudget` / `session.contextBudget` 只由 owner 传窗口 messages，runtime 私有构造 committed request view；snapshot / perspectives 改用 message-only estimator | server / runtime 测试覆盖请求总量含 systemPrompt / committed prefix / tools、不含 turn-context，runtime 不缓存传入 messages；message-only estimator 不重复计入固定成本 |
 | 6 | guidance 纯服务与宿主安全读取 | `layered-guidance.ts` 实现全局 / 工作场景层叠、scope/source 裸 payload；`read-guidance-file.ts` 在宿主层复用 `PathGuard containment + lstat`，区分缺文件与安全降级 | 单测覆盖层叠顺序、空文件 / 缺文件降级、全量注入不截断、物理路径不进 payload；安全测试覆盖 symlink / reparse 越界 / 非普通文件 / 权限异常诊断，`ENOENT/ENOTDIR` 不诊断 |
 | 7 | guidance lifecycle 消费者与 runtime host 装配 | 新建 `zhixing-guidance-lifecycle.ts`，入口先清空、ephemeral 跳过、场景查询失败保全局、加载成功后自行 `buildGuidanceMessagePair` 并贡献 messages；`runtime-host.ts` / `command.ts` 注入 `runtimeKind`、`worksceneDirectory.get`、`getZhixingHome`、安全读取并注册 lifecycle | 集成测试覆盖 main/work 注入、段切换重注、sub-agent / ephemeral 不注入、异常不沿用旧 prefix、诊断含 scope/path/error/降级结果 |
-| 8 | 旧语义清理与公开契约收口 | 删除仓库根 0 字节 `ZHIXING.md`；按 §5 从仓库根全量复扫并清理旧 `ZHIXING.md` / `Project Instructions` / cache 注释 / 事件契约表述；同步测试与文档引用 | `rg` 复扫除需求来源与本文外无旧语义残留；公开事件契约明确 `context:tokens_snapshot.totalTokens` 与 `llm:request_start.messages` 新语义 |
-| 9 | 全量验收 | 跑核心、orchestrator、server、cli 相关定向测试；最后执行 `pnpm build` 全量重建 | 全量构建通过；关键回归护栏成立：prefix 不落盘、不进摘要、不进窗口事实链，budget/snapshot 反映 prefix 成本 |
+| 8 | 已废弃语义清理与公开契约收口 | 删除仓库根 0 字节 `ZHIXING.md`；按 §5 从仓库根全量复扫并清理已废弃的 `ZHIXING.md` / `Project Instructions` / cache 注释 / 事件契约表述；同步测试与文档引用 | 活代码与当前规格无已废弃语义残留；历史资料保留真实符号名且明确标注已删除 / 已废弃 / 仅供追溯；公开事件契约明确 `context:tokens_snapshot.totalTokens` 与 `llm:request_start.messages` 新语义 |
+| 9 | 全量验收 | 跑核心、orchestrator、server、cli 相关定向测试；最后执行 `pnpm build` 全量重建；补齐第 7 单元遗留端到端验收 | 全量构建通过；关键回归护栏成立：prefix 不落盘、不进摘要、不进窗口事实链，budget/snapshot 反映 prefix 成本；provider 请求真出现 `<system-meta kind="guidance">`、段切换后重注、sub-agent / ephemeral 不注入、诊断含 scope/path/error，且 `layered-guidance` scope 前缀包装有直接测试 |
 
 执行顺序不可重排为会产生中间债务的形态：提交 3 不得在提交 1 的 token 会计原语之前落地；提交 4/5 必须共同保持 runtime / server budget 接口可构建；提交 7 不得早于提交 4 的通用 lifecycle/messagePrefix 地基；提交 8 必须在新机制可运行后执行，避免先删旧引用却没有新路径承接。

@@ -8,7 +8,7 @@
 <!-- ═════════════════════════════════════════════════════════════════════════ -->
 
 > **需求依据**:[drafts/skill-module.md](../drafts/skill-module.md)（需求已定稿）。本文是其**架构实现规格**,不重述需求论证。
-> **相关规格**:[prompt-system.md](./prompt-system.md)、[lightweight-tool-loop.md](./lightweight-tool-loop.md);[ADR-004 工具系统](../architecture/decisions/004-tool-system-architecture.md)。
+> **相关规格**:[agent-runtime-lifecycle.md](./agent-runtime-lifecycle.md)（窗口级 system prompt 重建）、[context-management-v3-redesign.md](./context-management-v3-redesign.md)（cache 边界）、[lightweight-tool-loop.md](./lightweight-tool-loop.md);[ADR-004 工具系统](../architecture/decisions/004-tool-system-architecture.md)。早期 prompt 方案见 [archive/prompt-system.md](./archive/prompt-system.md)，仅作历史背景。
 > **事实依据**:对接点均对已落地代码核实,标注 `文件:行/符号`。
 
 ## 〇、定位与范围

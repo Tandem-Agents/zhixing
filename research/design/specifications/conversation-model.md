@@ -925,7 +925,7 @@ Transcript 持久化层的完整规格(JSONL 行格式 / 文件路径 / 上下�
 核心要点（2026-05-11 更新后）：
 
 - transcript.jsonl 严格 append-only
-- 段内 messages append-only + tools[] / system byte-equal → cache 完美命中
+- 段内 messages append-only + tools[] / system byte-equal → cache 稳定命中
 - 触顶（attention 双档阈值）在 turn 边界整段切，走"缓存安全分叉"一次性 LLM 摘要
 - 段切换复用 `CompactMarker`（扩展 `segmentId` / `structuredSummary` 选填字段）；段历史走 `Conversation.segmentMetadata`
 - `recall_history` / `pinnedMessageIds` / Tier 压缩 / Turn 驱逐机制**已删除**，不再是当前路径

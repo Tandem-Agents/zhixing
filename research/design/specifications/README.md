@@ -10,7 +10,7 @@
 |---|---------|------|------|
 | 001 | Anthropic Messages 适配器 | [anthropic-adapter.md](anthropic-adapter.md) | 待审阅 |
 | 002 | Provider 层演进路线 | [provider-layer-evolution.md](provider-layer-evolution.md) | 待审阅 |
-| 003 | 记忆系统 | [memory-system.md](memory-system.md) | 待审阅 |
+| 003 | 记忆系统 | [memory-system.md](memory-system.md) | 待审阅（记忆线；`ZHIXING.md` 仅作早期背景） |
 | 004 | 智能体运行时（常驻服务 + 智能协调） | [persistent-service.md](persistent-service.md) | 待审阅 |
 | 005 | 安全系统 | [security-system.md](security-system.md) | 待审阅 |
 | 006 | 安全确认交互 | [confirmation-ux.md](confirmation-ux.md) | 待审阅 |
@@ -29,6 +29,14 @@
 | 019 | 轻量工具循环（来源无关原语：代码发起 + 注入工具集 + 多轮 LLM 决策，事实焊死/判断信任） | [lightweight-tool-loop.md](lightweight-tool-loop.md) | 设计中 |
 | 020 | MCP Host（船坞）（连接层 + 映射层 + 事实驱动接入 + 搜索引导） | [mcp-host.md](mcp-host.md) | 部分实施 |
 | 021 | 主对话运行体生命周期钩子（实例建立/run 前/run 后/实例销毁 四阶段 + cache 安全 system prompt 重建 + skill 索引边界重建） | [agent-runtime-lifecycle.md](agent-runtime-lifecycle.md) | 设计中 |
+
+## 历史资料
+
+以下文档只作历史追溯，不作为当前规格依据：
+
+| 主题 | 文档 | 说明 |
+|---|---|---|
+| 早期 prompt / `ZHIXING.md` 方案 | [archive/prompt-system.md](archive/prompt-system.md) | 当前 system prompt 以 `packages/orchestrator/src/runtime/system-prompt.ts`、[agent-runtime-lifecycle.md](agent-runtime-lifecycle.md) 与 [context-management-v3-redesign.md](context-management-v3-redesign.md) 为准；当前 `ZHIXING.md` guidance 机制见 [ZHIXING.md 分层 guidance 架构](../drafts/zhixing-md-layered-context-architecture.md) |
 
 ## 编写规范
 

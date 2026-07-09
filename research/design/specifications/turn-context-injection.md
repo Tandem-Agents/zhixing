@@ -1,5 +1,7 @@
 # Per-Turn 上下文注入架构
 
+> **当前定位**：本文是 `<turn-context>` per-turn 动态上下文机制的规格。它不定义 `ZHIXING.md` / profile 的持久上下文注入；早期首条 `<context>` 示例仅作历史背景，当前 `ZHIXING.md` 机制见 [ZHIXING.md 分层 guidance 架构](../drafts/zhixing-md-layered-context-architecture.md)。
+
 > 规格目标：让 AI 在每一轮对话中拥有实时状态感知——当前时间、定时任务状态、未来可扩展到记忆预取和通道上下文。
 > 调研依据：[dynamic-context-injection.md](../../source-analysis/dynamic-context-injection.md)（openclaw / hermes / claude-code 三方对比）
 
@@ -12,7 +14,7 @@
 | 注入物 | 注入时机 | 注入位置 | 问题 |
 |--------|---------|---------|------|
 | 身份 + 工具 + 原则 | `createAgentRuntime()` 一次 | system prompt | 正确（静态内容） |
-| ZHIXING.md + profile | 首条 user message | `<context>` 标签 | 正确（项目级静态） |
+| 持久工作约定 / profile（历史背景） | 早期首条 user message | `<context>` 标签 | 已迁出本文范围；`ZHIXING.md` 当前由 guidance / messagePrefix 承载，profile 属记忆线 |
 | 当前时间 | `buildEnvironment()` 一次 | system prompt 动态段 | **错误：REPL 全程冻结，serve 每会话冻结** |
 | 定时任务状态 | 无 | 无 | **缺失：AI 完全不知道哪些任务在跑** |
 
@@ -35,21 +37,11 @@
 
 ---
 
-## 3. 两层上下文模型
+## 3. 当前职责边界
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│ Layer A: 项目上下文（Static Context）                  │
-│                                                     │
-│ 注入位置：首条 user message                           │
-│ 注入时机：每次 run() 调用                              │
-│ 格式标签：<context>                                   │
-│ 内容：ZHIXING.md / 用户画像 / 匹配技能 / 反思提示       │
-│ 更新频率：跨轮稳定，仅首条消息包含                       │
-│                                                     │
-│ → 已有实现（project-context.ts），不修改               │
-├─────────────────────────────────────────────────────┤
-│ Layer B: 轮上下文（Turn Context）          ← 新增     │
+│ 轮上下文（Turn Context）                              │
 │                                                     │
 │ 注入位置：最新 user message（当前轮输入）               │
 │ 注入时机：每次 run() 调用                              │
@@ -61,11 +53,19 @@
 └─────────────────────────────────────────────────────┘
 ```
 
+不在本文范围内的持久上下文：
+
+| 内容 | 当前归属 |
+|------|----------|
+| `ZHIXING.md` 持久工作约定 | guidance / messagePrefix 机制 |
+| profile / memory | 记忆线 |
+| 已删除的首条 `<context>` 注入路径 | 仅保留在本文附录作历史追溯 |
+
 **对比参考项目：**
 
 | 维度 | OpenClaw | Hermes | Claude Code | 知行 |
 |------|---------|--------|-------------|------|
-| 注入机制数 | 2（system prompt 分区 + plugin hook） | 1（user message 追加） | 3（section registry + system-reminder + attachments） | **2（静态 `<context>` + 动态 `<turn-context>`）** |
+| 注入机制数 | 2（system prompt 分区 + plugin hook） | 1（user message 追加） | 3（section registry + system-reminder + attachments） | **动态 `<turn-context>`；持久 guidance 属 lifecycle/messagePrefix 机制** |
 | 条件注入 | 无 | 无 | 无（总是注入空列表） | **有（无内容时跳过）** |
 | 结构化 | plugin 自由文本 | 无结构 | XML 标签但无类型 | **Provider 接口 + 类型安全** |
 | 任务状态 | 不注入 | 不注入 | 注入 todo 列表 | **注入调度器状态（含结果摘要）** |
@@ -225,8 +225,6 @@ class TurnContextInjector {
 
   params.messages（调用方传入的完整对话历史）
     │
-    ├─ enrichContext()          — 检索匹配技能 + 反思提示
-    ├─ injectContext()          — 首条 user message 注入 <context>
     ├─ turnContextInjector.inject()  ← 新增：最新 user message 注入 <turn-context>
     │
     ↓
@@ -445,9 +443,8 @@ turnContextInjector.register(new TimeProvider(
 // ... 返回的 AgentRuntime 对象中:
 async run(params: RunParams): Promise<RunResult> {
   // ... 已有逻辑 ...
-  const messagesWithContext = injectContext(params.messages, enrichedContext);
-  const messagesWithTurnContext = turnContextInjector.inject(messagesWithContext);
-  // ← 替换原来的 messagesWithContext，后续用 messagesWithTurnContext
+  const messagesWithTurnContext = turnContextInjector.inject(params.messages);
+  // 后续用 messagesWithTurnContext
   
   const gen = runAgentLoop({
     messages: messagesWithTurnContext,  // ← 包含 turn context
@@ -570,3 +567,20 @@ LayerAssembler 的 Layer 3 已有 `currentTime` 和 `activeTaskHint` 参数，�
 | SessionProvider | 多会话切换时 | 当前会话名称、轮数 |
 
 每个 Provider 只需实现 3 个方法（`id` / `shouldInject` / `render`），注册到 injector 即可。无需改注入管道。
+
+---
+
+## 附录：已删除的首条 `<context>` 注入路径
+
+早期实现曾在 run 管道中先调用 `enrichContext()`，再由 `injectContext()` 把项目上下文、用户画像、匹配技能等内容注入首条 user message 的 `<context>` 块。该路径已经删除；本文正文只描述当前 `<turn-context>` 动态注入机制。
+
+历史管道形态如下，仅供追溯：
+
+```
+params.messages
+  ├─ enrichContext()                    — 检索匹配技能 + 反思提示
+  ├─ injectContext()（已删除历史函数）    — 首条 user message 注入 <context>
+  ├─ turnContextInjector.inject()        — 最新 user message 注入 <turn-context>
+  ↓
+messagesWithAllContext
+```

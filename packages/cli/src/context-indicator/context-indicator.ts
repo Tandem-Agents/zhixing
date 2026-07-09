@@ -5,23 +5,23 @@
  *
  * 在状态条第一行的 "context" 段渲染"下次 LLM 将携带多少 tokens"的快照，
  * 形如 `~ 14k` 或 `~ 14k (cache 9k)`。`~` 前缀强调估算语义，与 status-bar
- * 的 `↑↓ token`（本 run API 真值消耗）严格区分 —— 这是窗口占用快照，
+ * 的 `↑↓ token`（本 run API 真值消耗）严格区分 —— 这是下次请求容量快照，
  * 那是流量消耗累加。
  *
  * ─── 多源合成（核心架构） ───
  *
  * 本指示器消费两个独立信号合成单段展示：
  *
- *   1. `context:tokens_snapshot.totalTokens` —— turn-end 钩子 ③ 步 emit 的
- *      上下文占用，业界推测 Claude Code 同模式 = "已发送部分 API 真值锚定
- *      + 自 anchor 以来新增的 messages 后缀做字符估算"（见 core/loop/turn-end.ts）
+ *   1. `context:tokens_snapshot.totalTokens` —— turn-end emit 的下次 provider
+ *      请求估算输入总量；包含 system prompt、实际 provider messages 与 tools，
+ *      provider messages 中包含窗口级发送前缀，run 内还包含 turn-context
  *
  *   2. `llm:request_end.usage.cacheReadTokens` —— 最近一次 LLM API 调用的
  *      cache 命中真值（数据源 = providers/src/adapters/*-usage.ts 解析）
  *
  * 为什么 CLI 端合成而不是 core 在 context:tokens_snapshot 增加 cache 字段：
  *
- *   - 估算 vs 真值语义边界：context:tokens_snapshot 是 estimator 出的估算
+ *   - 估算 vs 真值语义边界：context:tokens_snapshot 是 estimator 出的请求容量
  *     快照，塞入 API 真值会让事件语义错位
  *   - turn-end 钩子是无状态副作用编排器，要它"记住最近一次 llm:request_end
  *     的 cache 值"等同强行加状态，本质违反钩子设计
@@ -100,7 +100,7 @@ export function createContextIndicator(
     );
   };
 
-  // ① 上下文占用快照 —— turn-end 钩子 ③ 步 emit（anchor + delta / fallback 字符估算）
+  // ① 下次请求容量快照 —— turn-end emit（anchor + delta / fallback 字符估算）
   const offTokens = eventBus.on("context:tokens_snapshot", (payload) => {
     // 防御：totalTokens ≤ 0（异常 emit / 估算器返 0）→ 不刷段，避免出现 "~ 0" 噪声
     if (payload.totalTokens <= 0) return;

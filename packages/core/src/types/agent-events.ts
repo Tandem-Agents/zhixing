@@ -228,9 +228,9 @@ export type AgentEventMap = {
    *
    * 与 llm:request_end.usage 严格区分：
    *   - llm:request_end.usage = 单次 LLM API 调用的真实输入/输出消耗（流量）
-   *   - context:tokens_snapshot.totalTokens = 当前上下文窗口的估算占用（占用快照）
+   *   - context:tokens_snapshot.totalTokens = 下次 provider 请求的估算输入总量
    *     = estimator(systemPrompt) + estimator(providerMessages) + estimator(tools)
-   *     反映"下次 LLM 调用将携带多少 tokens"
+   *     providerMessages 是实际发送视图，包含窗口级发送前缀；在 run 内还包含 turn-context
    *
    * 与 segment:evaluation.currentTokens 的区别：
    *   - segment:evaluation 仅在 SegmentManager 装配时 emit，是评估副产物
@@ -238,13 +238,13 @@ export type AgentEventMap = {
    *     是上下文占用的一等公民观测信号；订阅方（UI 指示器 / 诊断面板）应订阅此事件
    *
    * Emit 时机：turn-end 钩子在 segmentManager 切段处理后，
-   * 对最终 messages 估算后 emit；反映"下次 LLM 将看到的"快照而非 turn 开始时的快照。
+   * 对最终请求视图估算后 emit；反映"下次 LLM 将看到的"快照而非 turn 开始时的快照。
    *
    * 静默语义：当 turn-end 钩子缺失 tokenEstimator 或 eventBus 任一依赖时不 emit，
    * 订阅方应能容忍事件不到达（UI 显示空 / 占位）。
    */
   "context:tokens_snapshot": {
-    /** estimator 估算的当前上下文占用 token 数 —— system + providerMessages + tools */
+    /** estimator 估算的下次 provider 请求输入总量 —— system + providerMessages + tools */
     totalTokens: number;
     /** 本 turn 序号（已 +1，反映"已完成"语义） */
     turnCount: number;

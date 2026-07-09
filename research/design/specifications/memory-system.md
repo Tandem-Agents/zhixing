@@ -1,5 +1,9 @@
 # 知行记忆系统设计方案
 
+> **范围说明**：本文讨论记忆系统。文中的 `ZHIXING.md` 仅作早期产品类比与历史背景；当前 `ZHIXING.md` guidance 不承载记忆、不替代 profile / memory，也不采用本文早期 `# Project Instructions (ZHIXING.md)` 注入语义。
+>
+> **阅读指引**：本文仍可参考的是记忆产品模型、文件化存储、Profile / People / Journal 等长期方向。凡涉及 `<context>` 首条注入、`project-context.ts`、`ZHIXING.md` 预算、Skills 作为 memory 支柱的内容，均为早期方案或待重审内容，不能直接作为当前实现依据。
+
 > 设计日期：2026-04-09
 > 依赖调研：openclaw/memory-system.md、claude-code/memory-system.md
 > 产品定位：个人助手（非编程专用）
@@ -8,7 +12,7 @@
 
 ### 1.1 现状
 
-知行当前的 "个人化" 能力仅有 `ZHIXING.md`——一个扁平的项目指令文件。每次新会话，AI 是一个彻底的陌生人：不知道你是谁、你认识谁、你会什么。
+本文成文时的早期方案把 "个人化" 能力主要理解为 `ZHIXING.md` 这种扁平项目指令文件。该判断仅保留为历史背景；当前 `ZHIXING.md` guidance 与记忆系统已经分线。
 
 ### 1.2 目标
 
@@ -23,7 +27,7 @@
 
 | 类比 | 知行的实现 |
 |------|-----------|
-| ZHIXING.md = 你给新员工的 onboarding doc | 项目指令（已实现） |
+| ZHIXING.md = 你给新员工的 onboarding doc | 早期项目指令类比（历史背景） |
 | Profile = 你的个人名片 | 身份画像（本方案） |
 | People = 你的通讯录 + 备注 | 关系网络（本方案） |
 | Skills = 你的个人技术笔记本 | 技能沉淀（本方案） |
@@ -95,7 +99,7 @@ Auto Memory（模型判断→写入 MEMORY.md）
 │              │ Budget Allocator │ ← Token 预算分配               │
 │              └────────┬────────┘                                 │
 │              ┌────────▼────────┐                                 │
-│              │ <context> 注入   │ → 首条 user message            │
+│              │ 记忆上下文渲染    │ → 注入出口需按当前 runtime 机制重审 │
 │              └─────────────────┘                                 │
 └──────────────────────────────────────────────────────────────────┘
 ```
@@ -105,7 +109,7 @@ Auto Memory（模型判断→写入 MEMORY.md）
 ```
 ~/.zhixing/
 ├── config.json              # 已有：全局配置
-├── ZHIXING.md               # 已有：用户级 AI 指令
+├── ZHIXING.md               # 早期设想：用户级 AI 指令
 ├── me/                      # 新增：个人记忆空间
 │   ├── profile.md           # 身份画像（始终注入，永久）
 │   ├── people/              # 关系网络（按需检索，永久）
@@ -157,8 +161,8 @@ TypeScript, React, Node.js。最近在学 Rust。
 - 构建 zhixing 个人助手项目
 ```
 
-**注入策略**：始终注入到 `<context>` 中，预算上限 500 tokens。
-**为什么不合并到 ZHIXING.md**：ZHIXING.md 是指令（"请这样做"），Profile 是事实（"我是谁"）。前者可提交 Git，后者绝不共享。
+**读取策略**：Profile 是长期身份事实，未来记忆注入时应优先进入候选上下文；具体注入出口需与当前 runtime / lifecycle 机制重新对齐。
+**为什么不合并到 ZHIXING.md**：`ZHIXING.md` guidance 是用户声明的稳定工作约定，Profile 是事实（"我是谁"）。前者可随工作场景共享，后者绝不共享。
 
 #### 支柱 2：关系网络（Relationships）
 
@@ -178,7 +182,7 @@ tags: [family, important]
 - 上次生日送了一条项链
 ```
 
-**注入策略**：按需检索。当用户消息中出现人名（"小丽"）或关系词（"老婆"、"妈妈"）时，匹配 frontmatter 的 `name` 和 `relation` 字段，注入匹配的人物档案。
+**读取策略**：按需检索。当用户消息中出现人名（"小丽"）或关系词（"老婆"、"妈妈"）时，匹配 frontmatter 的 `name` 和 `relation` 字段，作为相关记忆候选。
 
 **关系词映射**（内置）：
 ```
@@ -584,7 +588,9 @@ interface MemoryToolInput {
 
 ## 五、记忆读取路径
 
-### 5.1 上下文注入流程
+### 5.1 早期上下文注入流程（历史示意，需重审）
+
+本节保留早期 memory 方案的读取与注入想法，方便追溯产品目标；其中 `<context>` 首条注入、`ZHIXING.md` 混入同一上下文块、固定预算表等形态已经不符合当前 runtime / guidance 架构。实现前必须按当前 lifecycle、messagePrefix 与记忆线重新设计注入出口。
 
 ```
 用户发送消息
@@ -607,6 +613,7 @@ interface MemoryToolInput {
         │  张三，前端工程师...           │
         │                              │
         │  # Project Instructions      │
+        │  # (ZHIXING.md)              │
         │  （ZHIXING.md 内容）          │
         │                              │
         │  # Relevant Context          │
@@ -622,14 +629,14 @@ interface MemoryToolInput {
         注入到首条 user message
 ```
 
-### 5.2 预算分配
+### 5.2 早期预算分配（历史示意，需重审）
 
 总预算：contextWindow 的 5%（128K 模型约 6400 tokens）
 
 | 区域 | 预算 | 策略 |
 |------|------|------|
 | Profile | 500 tokens | 固定，始终注入 |
-| ZHIXING.md | 2000 tokens | 固定，始终注入 |
+| ZHIXING.md（早期方案） | 2000 tokens | 历史设想；现行 guidance 全量注入、不做专用截断 |
 | 检索记忆 | 剩余（约 3900 tokens） | 动态，按相关性分配 |
 | 环境信息 | 100 tokens | 固定，日期/CWD |
 
@@ -745,7 +752,7 @@ Phase M7: 召回优化 + 效果反馈（未来）  │
 
 **做什么**：
 - `~/.zhixing/me/profile.md` 加载逻辑
-- 始终注入到 `<context>` 中（扩展 `project-context.ts`）
+- 作为长期身份事实进入记忆候选上下文（具体注入出口需按当前 runtime / lifecycle 机制重审）
 - `/me` 斜杠命令（查看当前画像）
 
 **验证**：
@@ -1035,17 +1042,17 @@ interface MemoryToolInput {
 
 **风险**：记忆条目很多（>100）时关键词匹配可能不够精确。但个人助手场景下，关系人通常 <50，技能 <100，关键词匹配应能覆盖。
 
-### ADR-009: 为什么 Profile 独立于 ZHIXING.md
+### ADR-009: 为什么 Profile 独立于 ZHIXING.md（原则仍成立，注入方式需重审）
 
 **背景**：可以把身份信息写进 ZHIXING.md。
 
 **决策**：Profile 独立为 `me/profile.md`。
 
 **理由**：
-- 本质不同：ZHIXING.md 是指令（"请这样做"），Profile 是事实（"我是谁"）
-- 隐私不同：ZHIXING.md 可提交 Git（团队共识），Profile 绝不共享
-- 生命周期不同：ZHIXING.md 按项目变化，Profile 跨项目持久
-- 注入优先级不同：Profile 始终注入且优先级最高
+- 本质不同：`ZHIXING.md` guidance 是工作约定，Profile 是身份事实
+- 隐私不同：`ZHIXING.md` 可按工作场景共享，Profile 绝不共享
+- 生命周期不同：`ZHIXING.md` 按系统 / 工作场景作用域变化，Profile 跨场景持久
+- 生效机制不同：Profile 属记忆线，不能混入 `ZHIXING.md` guidance
 
 ### ADR-010: 为什么先做显式记忆而非自动记忆
 

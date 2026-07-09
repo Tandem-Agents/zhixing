@@ -21,7 +21,7 @@
 
 三条派生设计原则：
 
-- **段内 append-only + tools[] byte-equal** → cache 完美命中
+- **段内 append-only + tools[] byte-equal** → cache 稳定命中
 - **窗口按 token + 按模型驱动**（不按轮）→ 对齐 attention 物理特性
 - **触顶整段切（事件式）** → 段切换走 Anthropic 经验 7「缓存安全分叉」，几乎免费
 
@@ -161,7 +161,7 @@ POST /chat
   system:   [完全同上一轮，byte-equal]
   tools:    [完全同上一轮，byte-equal]
   messages: [上一段完整 raw 历史]
-    ← cache 完美命中
+    ← 摘要分叉内部 cache 稳定命中
   + 末尾追加 user message: <summarize-instruction>...</summarize-instruction>
     ← 仅此段是新 token，几乎免费
 ```

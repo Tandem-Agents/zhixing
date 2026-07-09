@@ -288,7 +288,7 @@ packages/orchestrator/
 | `request-builder.ts` | `cli/src/security/` | `core/src/confirmation/` | `ConfirmationRequest` 的 builder,与类型同包更合理 |
 | `compact-accumulator.ts` | `cli/src/` | `orchestrator/src/runtime/` | runtime 数据收集(订阅 compact 事件累积 marker) |
 | `compaction-llm.ts` | `cli/src/` | `orchestrator/src/runtime/` | 压缩域两 helper 装配:`createSummarizeCallLLM`(LLMSummarize/main) + `createMemoryFlushCallLLM`(MemoryFlush/light),按 task 性质分流(详见 [secondary-llm-capability ADR-SLLM-009](secondary-llm-capability.md)) |
-| `project-context.ts` | `cli/src/` | `orchestrator/src/runtime/` | 项目元信息装配 / enrichContext / injectContext |
+| `project-context.ts` | `cli/src/` | `orchestrator/src/runtime/` | 项目元信息装配 / `enrichContext` / `injectContext`（已删除历史路径） |
 | `system-prompt.ts` | `cli/src/` | `orchestrator/src/runtime/` | M1.6 同步多段重构(主 byte-equal) |
 
 每个模块独立 commit,验证 cli 现有 import 路径(改为从 orchestrator/core re-import)+ 全 e2e 全绿。
@@ -539,9 +539,7 @@ export function buildSystemPrompt(ctx: PromptBuildContext): string;
 
 **子 agent 不继承的内容**(与主 agent 行为差异):
 
-- **项目上下文(ZHIXING.md / enriched skills)** —— 由主 agent 在 Task prompt 中显式提炼
-  相关部分传给子,避免子 system prompt 膨胀。代价是主 agent 需要"挑出相关上下文"的判断力,
-  收益是同角色子 agent 跨 spawn 的**静态前缀 byte-identical**(prompt cache 命中)。
+- **持久工作约定 / 父级上下文** —— 子 agent 不自动继承 `ZHIXING.md` guidance；需要时由主 agent 在 Task prompt 中显式提炼相关部分传给子。这样避免子 system prompt 膨胀；代价是主 agent 需要"挑出相关上下文"的判断力，收益是同角色子 agent 跨 spawn 的**静态前缀 byte-identical**(prompt cache 命中)。
 - **用户记忆段** —— 同上,且 `memory` 工具不在子 agent 工具集里,即使带也用不上。
 
 **为什么参数化 `segments` 而非硬编码主 / 子两条路径**:
@@ -1433,7 +1431,7 @@ Begin. Your task is in the system prompt under "Your Role". Depth: 1/1.
 
 **不含的内容**(子 agent 不继承父上下文):
 
-- ❌ 项目上下文(ZHIXING.md / enriched skills) —— 主 agent 已在 `task` 中显式提炼相关部分
+- ❌ 持久工作约定 / 父级上下文 —— `ZHIXING.md` guidance 不自动继承；需要时由主 agent 在 `task` 中显式提炼相关部分
 - ❌ 父对话历史 —— 子 agent 任务专注,不需要主 agent 与用户的来回上下文
 - ❌ 用户身份段(memory:identity) —— 子不直接对话用户,身份信息无意义
 - ❌ 反思 / 技能注入 —— `memory` 工具不在子 agent 工具集(subAgentSafe:false)
@@ -2030,7 +2028,7 @@ sub agent finalize
 | M1.4 | `EventBus` 扩 hierarchical(`parent` + `lineage`)+ listener `meta` 第二参 | 既有 callsite 零改动(snapshot test);INV-S5 校验 |
 | M1.5 | `ToolDefinition.subAgentSafe` 字段 + 8 个 builtin 声明 | 过滤函数测试 |
 | M1.6 | `AgentRoleProfile` + `mainProfile()` + `subAgentProfile()` + `renderIdentity` + `buildSystemPrompt` 多段重构(基于 M1.2a 的 system-prompt 雏形);抽出 `trackMessages` helper 到 orchestrator/runtime/track-messages.ts(internal,见 M1.7) | 主 agent system prompt byte-equal 旧实现(snapshot test) |
-| **M1.7** | API 治理收尾:`runtime/index.ts` barrel 仅暴露真公共 API(`createAgentRuntime` + 7 类型 / `buildSystemPrompt` 系列 / `EnrichOptions`),internal helper(`subscribeCompactAccumulator` / `trackMessages` / `createSummarizeCallLLM` / `createMemoryFlushCallLLM` / `loadProjectContext` / `enrichContext` / `injectContext` / `REFLECTION_THRESHOLD` / `ProjectContext`)从 barrel 移除;同包测试用 `import "../X.js"` 直访 sub-module。死代码清退:`enrichContextWithSkills` 等 deprecated stub 一并移除,`@deprecated` 不留长期未清退残留。**生命周期契约测试**入位:`create-agent-runtime.test.ts` 覆盖 lineage="main" / decorateRunBus 1:1 / safeDispose 故障隔离 / per-run 隔离。**`safeDispose(label, fn)` 模块级辅助**抽出,`run()` 与 `forceCompact()` 共用同一防御契约 | 新测试全绿(10+ 用例);顶级 barrel d.ts 表面缩减(衡量公共 API 收紧) |
+| **M1.7** | API 治理收尾:`runtime/index.ts` barrel 仅暴露真公共 API(`createAgentRuntime` + 7 类型 / `buildSystemPrompt` 系列 / `EnrichOptions`),internal helper(`subscribeCompactAccumulator` / `trackMessages` / `createSummarizeCallLLM` / `createMemoryFlushCallLLM` / `loadProjectContext` / `enrichContext` / `injectContext`（已删除） / `REFLECTION_THRESHOLD` / `ProjectContext`)从 barrel 移除;同包测试用 `import "../X.js"` 直访 sub-module。死代码清退:`enrichContextWithSkills` 等 deprecated stub 一并移除,`@deprecated` 不留长期未清退残留。**生命周期契约测试**入位:`create-agent-runtime.test.ts` 覆盖 lineage="main" / decorateRunBus 1:1 / safeDispose 故障隔离 / per-run 隔离。**`safeDispose(label, fn)` 模块级辅助**抽出,`run()` 与 `forceCompact()` 共用同一防御契约 | 新测试全绿(10+ 用例);顶级 barrel d.ts 表面缩减(衡量公共 API 收紧) |
 
 **M1 完成后**:零业务功能变化,所有现有 e2e 全绿。
 

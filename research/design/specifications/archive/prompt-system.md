@@ -1,5 +1,7 @@
 # 系统提示词与上下文组装 — 设计方案
 
+> **历史资料，不是当前规格**：本文保留 2026-04-09 的早期 prompt / `ZHIXING.md` 方案，仅供追溯。当前实现请以 `packages/orchestrator/src/runtime/system-prompt.ts`、[context-management-v3-redesign.md](../context-management-v3-redesign.md) 与 [ZHIXING.md 分层 guidance 架构](../../drafts/zhixing-md-layered-context-architecture.md) 为准。文中的 `# Project Instructions (ZHIXING.md)`、首条 `<context>` 注入、子目录级与预算截断均为已废弃设想，不可作为实现依据。
+
 > **状态**: 📐 方案设计（2026-04-09）
 > **依赖**: OpenClaw 源码分析 `prompt-system.md`、Claude Code 社区逆向分析 `prompt-system.md`
 > **前置**: Phase 2 全部完成（Agent Loop + Provider + 工具 + CLI + 容错 + 上下文 + 会话）
@@ -177,9 +179,9 @@ __ZHIXING_CACHE_BOUNDARY__
 
 放在分界后面，每次会话可能不同。
 
-### 2.4 ZHIXING.md — 项目上下文
+### 2.4 ZHIXING.md — 项目上下文（历史方案，已废弃）
 
-#### 发现与加载
+#### 发现与加载（历史方案）
 
 ```
 1. ~/.zhixing/ZHIXING.md          ← 用户级（所有项目通用偏好）
@@ -189,7 +191,7 @@ __ZHIXING_CACHE_BOUNDARY__
 
 更具体的层级覆盖更宽泛的（同 Claude Code）。
 
-#### 注入方式
+#### 注入方式（历史方案）
 
 **不放入 system prompt**（借鉴 Claude Code 的核心洞察）。通过 `<context>` 标签注入到首条 user message 前：
 
@@ -210,12 +212,12 @@ On branch main, clean working tree
 
 **为什么不用 `<system-reminder>`**：我们用自己的标签名 `<context>`，更语义化、更简洁。
 
-#### 预算控制
+#### 预算控制（历史方案，已废弃）
 
-ZHIXING.md 内容受 token 预算限制（默认为有效上下文窗口的 5%）。超出时截断并附加提示：
+早期方案曾计划对 `ZHIXING.md` 做预算截断。现行 guidance 机制已废弃该策略：用户声明全量生效，系统不做专用上限或静默截断。
 
 ```
-[ZHIXING.md 内容超出预算，已截断为前 N 个字符。建议精简内容或拆分为 rules。]
+[早期截断提示示例，当前机制不使用]
 ```
 
 ### 2.5 工具描述策略
@@ -299,7 +301,7 @@ function buildToolUsageSection(tools: ToolDefinition[]): string {
 | Claude Code | 身份定义极简                     | 2 句话身份，不过度约束                               |
 | Claude Code | 缓存分界标记                     | `__ZHIXING_CACHE_BOUNDARY__`               |
 | Claude Code | 工具排序保护缓存                   | 内置工具按名称排序 + 尾部 cache_control               |
-| OpenClaw    | Bootstrap 文件有预算            | ZHIXING.md 有 token 预算上限                    |
+| OpenClaw    | Bootstrap 文件有预算            | 早期曾考虑预算控制，现行 guidance 全量注入、不自动截断 |
 | OpenClaw    | Skills 快照复用                | 首次解析的 prompt 段落缓存在 session 中               |
 | 两者          | 时间信息不放 system              | 日期通过 `<context>` 注入                        |
 
@@ -340,7 +342,7 @@ function buildToolUsageSection(tools: ToolDefinition[]): string {
 
 - `packages/cli/src/system-prompt.ts` 重构
 
-### Phase 3A-2: ZHIXING.md 加载
+### Phase 3A-2: ZHIXING.md 加载（历史路线，已废弃）
 
 **做什么**：
 
@@ -469,4 +471,3 @@ interface AssembledPrompt {
 - Auto Memory 需要长期运行数据和 dreaming 系统，实现成本极高
 - 组织级需要部署基础设施，超出 CLI 工具范畴
 - 渐进策略：先做最小集合，验证价值后再扩展
-

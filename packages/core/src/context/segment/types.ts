@@ -90,7 +90,7 @@ export interface ParsedSummary {
  *     wire format 都会序列化进入 cache key），省略后 cache key 错位
  *   - 不可换 model / provider / 账号 —— 跨实例 cache 不共享
  *   - 摘要请求自身的 system + tools + 可摘要 messages 应保持稳定；不承诺与主对话
- *     完整 provider messages byte-equal，因为主对话可能额外含发送前缀或 turn-context
+ *     完整 provider messages 字节一致，因为主对话可能额外含发送前缀或 turn-context
  */
 export interface SegmentSummarizeRequest {
   readonly systemPrompt: string;

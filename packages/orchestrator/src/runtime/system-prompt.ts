@@ -26,7 +26,7 @@
  * - 元协议段在工具段之前:LLM 解析 messages 的基础协议(<system-meta> 标签等)
  *   是看懂工具调用的前置知识,语义上先于工具使用引导
  * - 环境信息放在分界后(每个项目不同),保护静态区缓存前缀
- * - 项目上下文（如 ZHIXING.md）不进 system prompt,以保护静态区缓存前缀
+ * - 持久工作约定（如 ZHIXING.md guidance）不进 system prompt,由窗口级发送前缀承载
  */
 
 import * as os from "node:os";
@@ -104,7 +104,7 @@ export const MAIN_AGENT_SEGMENTS: readonly SystemPromptSegment[] = [
  *                 风格指引("be concise"等)会让子误解为对话场景
  *
  * 不继承的内容:
- *   - 项目上下文(ZHIXING.md / enriched 动态上下文)—— 由主 agent 在 Task prompt
+ *   - 持久工作约定 / 动态上下文 —— 由主 agent 在 Task prompt
  *     中显式提炼相关部分传给子,避免子 system prompt 膨胀且利于跨 spawn 的
  *     prompt cache 命中(同角色子 agent 的静态前缀 byte-identical)
  *   - 用户记忆段 —— 同上,且 Memory 工具不暴露给子 agent

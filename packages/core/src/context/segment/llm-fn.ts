@@ -8,7 +8,7 @@
  *   - 这样段切换 LLM call 自动继承主对话 LLM call 的容错与中断保护，避免
  *     "段切换路径绕过统一容错"的架构债
  *
- * 关键不变量（违反任一都会让 cache 全部失效）：
+ * 关键不变量（违反任一都会让摘要分叉的 cache key 失稳）：
  *   - systemPrompt + tools + messages 完整透传给底层 stream factory
  *     —— 任何省略 / 重排 / 改字节都会让 cache key 错位
  *   - 用主对话同 provider / 同 model / 同账号 —— 跨实例 cache 不共享
