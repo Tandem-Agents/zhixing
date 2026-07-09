@@ -37,6 +37,7 @@ import {
   type ToolExecutionContext,
 } from "@zhixing/core";
 import {
+  buildTaskToolPrompt,
   createTaskTool,
   formatChildResultAsToolResult,
   TASK_INPUT_SCHEMA,
@@ -68,6 +69,7 @@ function makeReadOnlyTool(name: string): ToolDefinition {
 }
 
 function makeEnv(provider: MockLLMProvider): TaskToolEnv {
+  const childToolNames = ["read", "glob", "grep", "web_fetch"];
   return {
     provider,
     model: "mock-model",
@@ -80,7 +82,8 @@ function makeEnv(provider: MockLLMProvider): TaskToolEnv {
     workspace: process.cwd(),
     workspaceSource: "cwd-fallback",
     parentBroker: new ConfirmationBroker({ id: "parent-broker-test" }),
-    parentTools: [makeReadOnlyTool("read")],
+    parentTools: childToolNames.map(makeReadOnlyTool),
+    childToolNames,
     // 默认大阈值,避免现有测试场景误触发 context_overflow;
     // 专项测试需要触发时单独构造 env 注入更小值
     riskMaxTokens: 10_000_000,
@@ -138,7 +141,7 @@ describe("formatChildResultAsToolResult · completed", () => {
 
     // tokens = inputTokens + outputTokens = 100 + 50 = 150
     expect(tr.content).toMatch(
-      /<usage>tokens: 150, tool_uses: 7, duration_ms: 4321, sub_id: abc123<\/usage>/,
+      /<usage>status: succeeded, tokens: 150, tool_uses: 7, duration_ms: 4321, sub_id: abc123<\/usage>/,
     );
   });
 
@@ -210,7 +213,7 @@ describe("formatChildResultAsToolResult · failed", () => {
     expect(tr.content).toContain('[Task "t" failed: unknown error]');
   });
 
-  it("failed 时 <usage> 不含 tool_uses 字段(只 completed 才暴露)", () => {
+  it("failed 时 <usage> 保留 tool_uses 字段，方便失败成本审计", () => {
     const r = makeResult({
       status: "failed",
       error: { message: "x", type: "y" },
@@ -219,7 +222,9 @@ describe("formatChildResultAsToolResult · failed", () => {
 
     const tr = formatChildResultAsToolResult(r, "t");
 
-    expect(tr.content).not.toContain("tool_uses");
+    expect(tr.content).toMatch(
+      /<usage>status: failed, tokens: 150, tool_uses: 99, duration_ms: 250, sub_id: abc123<\/usage>/,
+    );
   });
 });
 
@@ -313,6 +318,32 @@ describe("TASK_TOOL_PROMPT", () => {
   it("失败处理强制约定:LLM 必须在 final response 中暴露失败", () => {
     expect(TASK_TOOL_PROMPT).toContain("MUST acknowledge the failure");
   });
+
+  it("web_fetch-only 工具面不承诺本地读搜能力", () => {
+    const prompt = buildTaskToolPrompt(["web_fetch"]);
+    expect(prompt).toContain("Available sub-agent tools: web_fetch.");
+    expect(prompt).toContain("URL");
+    expect(prompt).not.toContain("Read");
+    expect(prompt).not.toContain("Glob");
+    expect(prompt).not.toContain("Grep");
+    expect(prompt).not.toContain("local reading");
+    expect(prompt).not.toContain("local search");
+  });
+
+  it("local-only 工具面不承诺 WebFetch / URL 能力", () => {
+    const prompt = buildTaskToolPrompt(["read", "glob", "grep"]);
+    expect(prompt).toContain("Read/Glob/Grep");
+    expect(prompt).not.toContain("WebFetch");
+    expect(prompt).not.toContain("URL");
+    expect(prompt).not.toContain("Fetching");
+  });
+
+  it("完整工具面同时包含本地读搜与网页读取建议", () => {
+    const prompt = buildTaskToolPrompt(["read", "glob", "grep", "web_fetch"]);
+    expect(prompt).toContain("Read/Glob/Grep");
+    expect(prompt).toContain("URL");
+    expect(prompt).toContain("local reading");
+  });
 });
 
 // ─── D. createTaskTool(env) 工具元信息 ───
@@ -342,6 +373,19 @@ describe("createTaskTool · 工具元信息(fail-closed 契约)", () => {
     const provider = new MockLLMProvider([{ text: "ok" }]);
     const tool = createTaskTool(makeEnv(provider));
     expect(tool.interruptBehavior).toBe("cancel");
+  });
+
+  it("description 按实际子工具集生成，避免承诺不存在的工具", () => {
+    const provider = new MockLLMProvider([{ text: "ok" }]);
+    const tool = createTaskTool({
+      ...makeEnv(provider),
+      childToolNames: ["read", "grep"],
+    });
+
+    expect(tool.description).toBe(buildTaskToolPrompt(["read", "grep"]));
+    expect(tool.description).toContain("Available sub-agent tools: read, grep.");
+    expect(tool.description).toContain("Read/Grep");
+    expect(tool.description).not.toContain("WebFetch");
   });
 });
 
@@ -380,39 +424,55 @@ describe("createTaskTool.call · 契约前置校验", () => {
     ).rejects.toThrow(/requires ctx\.abortSignal/);
   });
 
-  it("description 缺失 / 空字符串 / 纯空白 → throw 含 'requires non-empty .description.'", async () => {
+  it("description 缺失 / 空字符串 / 纯空白 → isError 工具结果，主 LLM 可自修正", async () => {
     const provider = new MockLLMProvider([{ text: "ok" }]);
     const tool = createTaskTool(makeEnv(provider));
     const parentBus = createEventBus<AgentEventMap>({ lineage: "main" });
 
-    // 三态等价:undefined / "" / "   " 都应被 trim() 检测为空 → throw
     for (const badDesc of [undefined, "", "   "] as const) {
-      await expect(
-        runContextStorage.run({ bus: parentBus, lineage: "main" }, async () =>
+      const tr = await runContextStorage.run({ bus: parentBus, lineage: "main" }, async () =>
           tool.call(
             { description: badDesc as never, prompt: "valid prompt" },
             makeToolCtx(),
           ),
-        ),
-      ).rejects.toThrow(/requires non-empty 'description'/);
+      );
+      expect(tr.isError).toBe(true);
+      expect(tr.content).toMatch(/'description' must be a (non-empty )?string/);
     }
   });
 
-  it("prompt 缺失 / 空字符串 / 纯空白 → throw 含 'requires non-empty .prompt.'", async () => {
+  it("prompt 缺失 / 空字符串 / 纯空白 → isError 工具结果，主 LLM 可自修正", async () => {
     const provider = new MockLLMProvider([{ text: "ok" }]);
     const tool = createTaskTool(makeEnv(provider));
     const parentBus = createEventBus<AgentEventMap>({ lineage: "main" });
 
     for (const badPrompt of [undefined, "", "\n  \t  "] as const) {
-      await expect(
-        runContextStorage.run({ bus: parentBus, lineage: "main" }, async () =>
+      const tr = await runContextStorage.run({ bus: parentBus, lineage: "main" }, async () =>
           tool.call(
             { description: "valid desc", prompt: badPrompt as never },
             makeToolCtx(),
           ),
-        ),
-      ).rejects.toThrow(/requires non-empty 'prompt'/);
+      );
+      expect(tr.isError).toBe(true);
+      expect(tr.content).toMatch(/'prompt' must be a (non-empty )?string/);
     }
+  });
+
+  it("额外字段 → isError 工具结果，不派生子 agent", async () => {
+    const provider = new MockLLMProvider([{ text: "should not run" }]);
+    const tool = createTaskTool(makeEnv(provider));
+    const parentBus = createEventBus<AgentEventMap>({ lineage: "main" });
+
+    const tr = await runContextStorage.run({ bus: parentBus, lineage: "main" }, async () =>
+      tool.call(
+        { description: "valid desc", prompt: "valid prompt", model: "x" } as never,
+        makeToolCtx(),
+      ),
+    );
+
+    expect(tr.isError).toBe(true);
+    expect(tr.content).toContain("unsupported field(s): model");
+    expect(provider.callCount).toBe(0);
   });
 
   it("description / prompt 含周围空白时 trim() 后接受(非纯空白即合法)", async () => {
@@ -448,7 +508,7 @@ describe("createTaskTool.call · 集成 happy path", () => {
 
     expect(tr.isError).toBe(false);
     expect(tr.content).toContain("sub agent final answer");
-    expect(tr.content).toMatch(/<usage>tokens: \d+, tool_uses: 0, duration_ms: \d+, sub_id: [0-9a-f]{6}<\/usage>/);
+    expect(tr.content).toMatch(/<usage>status: succeeded, tokens: \d+, tool_uses: 0, duration_ms: \d+, sub_id: [0-9a-f]{6}<\/usage>/);
   });
 
   it("provider error → ToolResult 含 [Task X failed (<type>): ...] + isError=true(永不抛) + 透传真实 type/message", async () => {
@@ -479,7 +539,7 @@ describe("createTaskTool.call · 集成 happy path", () => {
       usage: emptyUsage(),
     });
     const tr = formatChildResultAsToolResult(r, "t");
-    expect(tr.content).toMatch(/<usage>tokens: 0, /);
+    expect(tr.content).toMatch(/<usage>status: succeeded, tokens: 0, /);
   });
 
   // 设计契约保护:cache tokens(Anthropic prompt caching 维度)有意不出现
@@ -499,7 +559,7 @@ describe("createTaskTool.call · 集成 happy path", () => {
     const tr = formatChildResultAsToolResult(r, "t");
 
     // tokens 字段的数值是 input + output 之和,不含任何 cache 部分
-    expect(tr.content).toMatch(/<usage>tokens: 150, /);
+    expect(tr.content).toMatch(/<usage>status: succeeded, tokens: 150, /);
     // <usage> 字面层不含任何 cache 关键词,LLM 不会被分项细节污染决策上下文
     expect(tr.content).not.toMatch(/cache/i);
     expect(tr.content).not.toContain("9999");

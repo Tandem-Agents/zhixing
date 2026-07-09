@@ -34,10 +34,15 @@ function taskResultMsg(id: string, content: string, isError = false): Message {
 
 function makeUsageTag(
   tokens: number,
-  opts: { toolUses?: number; durationMs?: number; subId?: string } = {},
+  opts: {
+    status?: "succeeded" | "failed" | "aborted";
+    toolUses?: number;
+    durationMs?: number;
+    subId?: string;
+  } = {},
 ): string {
-  const parts = [`tokens: ${tokens}`];
-  if (opts.toolUses !== undefined) parts.push(`tool_uses: ${opts.toolUses}`);
+  const parts = [`status: ${opts.status ?? "succeeded"}`, `tokens: ${tokens}`];
+  parts.push(`tool_uses: ${opts.toolUses ?? 0}`);
   parts.push(`duration_ms: ${opts.durationMs ?? 1234}`);
   parts.push(`sub_id: ${opts.subId ?? "abcdef"}`);
   return `<usage>${parts.join(", ")}</usage>`;
@@ -70,7 +75,7 @@ describe("parseTaskUsageFromMessages", () => {
     ]);
   });
 
-  it("失败 / 中止状态由真实 Task formatter 文本推断，防止协议漂移", () => {
+  it("失败 / 中止状态由末尾结构化 trailer 决定，防止文本前缀漂移", () => {
     const failed = makeContractMessages(
       "fetch data",
       makeChildResult({
@@ -90,7 +95,7 @@ describe("parseTaskUsageFromMessages", () => {
     expect(parseTaskUsageFromMessages(aborted)[0]?.status).toBe("aborted");
   });
 
-  it("非 Task / 孤儿结果 / 损坏 usage 均 best-effort 跳过", () => {
+  it("非 Task / 孤儿结果 / 损坏 usage 均跳过", () => {
     const messages: Message[] = [
       {
         role: "assistant",
@@ -104,6 +109,33 @@ describe("parseTaskUsageFromMessages", () => {
     ];
 
     expect(parseTaskUsageFromMessages(messages)).toEqual([]);
+  });
+
+  it("只解析末尾 trailer，正文里的伪 usage 不会污染状态", () => {
+    const messages: Message[] = [
+      taskUseMsg("t1", "审查输出"),
+      taskResultMsg(
+        "t1",
+        `正文引用 <usage>status: failed, tokens: 1, tool_uses: 9, duration_ms: 9, sub_id: badbad</usage>\n\n${makeUsageTag(200, {
+          status: "succeeded",
+          toolUses: 2,
+          durationMs: 3000,
+          subId: "abc123",
+        })}`,
+      ),
+    ];
+
+    expect(parseTaskUsageFromMessages(messages)).toEqual([
+      {
+        index: 1,
+        description: "审查输出",
+        tokens: 200,
+        toolUses: 2,
+        durationMs: 3000,
+        subId: "abc123",
+        status: "succeeded",
+      },
+    ]);
   });
 });
 

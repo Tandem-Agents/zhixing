@@ -24,8 +24,7 @@
  * 三态结果折叠:
  *   - `runChildAgent` 永不抛,返 ChildAgentResult { status: completed/failed/aborted }
  *   - `formatChildResultAsToolResult` 折成 ToolResult { content, isError } 给主 LLM
- *   - 失败 / 中止时:开头标注 [Task "<desc>" failed/aborted: <reason>],中段拼接 partial
- *     输出(若有),末尾 <usage> trailer(主 LLM 决策时可观察资源消耗)
+ *   - 三态结果都保留结构化 <usage> trailer，让主 LLM 和用量视图读取同一协议
  */
 
 import {
@@ -35,6 +34,7 @@ import {
   type LLMProvider,
   type LLMRoles,
   type ResolvedRoleThinking,
+  type SubAgentResultPresentationArtifact,
   type SecurityPipeline,
   type ThinkingConfig,
   type ToolDefinition,
@@ -91,6 +91,8 @@ export interface TaskToolEnv {
   parentBroker: IConfirmationBroker;
   /** 父工具集 —— 子工具按 sub-agent profile.enabledTools 过滤后从此派生 */
   parentTools: readonly ToolDefinition[];
+  /** 子 agent 实际可用工具名，用于生成 byte-stable 的 Task 描述。 */
+  childToolNames: readonly string[];
   /**
    * 单次 input tokens 注意力风险阈值 —— 从 ModelCapability.riskMaxTokens 解析。
    *
@@ -156,17 +158,57 @@ export const TASK_TOOL_BOUNDARIES: readonly BoundaryCrossing[] = [
  *   - 失败处理强制约定 —— LLM 必须在 final response 中暴露 Task 失败,不可静默吞掉
  *   - 输出协议:tool_result.content 是 sub final text,主 agent 需自己综合形成对用户的回答
  */
-export const TASK_TOOL_PROMPT = `Launch a sub-agent to perform a research-style sub-task with isolated context.
+const LOCAL_CHILD_TOOL_DISPLAY = {
+  read: "Read",
+  glob: "Glob",
+  grep: "Grep",
+} as const;
+
+function localChildToolNames(childToolNames: readonly string[]): Array<keyof typeof LOCAL_CHILD_TOOL_DISPLAY> {
+  return childToolNames.filter((name): name is keyof typeof LOCAL_CHILD_TOOL_DISPLAY =>
+    Object.prototype.hasOwnProperty.call(LOCAL_CHILD_TOOL_DISPLAY, name),
+  );
+}
+
+function formatToolList(names: readonly (keyof typeof LOCAL_CHILD_TOOL_DISPLAY)[]): string {
+  return names.map((name) => LOCAL_CHILD_TOOL_DISPLAY[name]).join("/");
+}
+
+export function buildTaskToolPrompt(childToolNames: readonly string[]): string {
+  const availableTools = childToolNames.length > 0
+    ? childToolNames.join(", ")
+    : "none";
+  const localTools = localChildToolNames(childToolNames);
+  const hasLocalTools = localTools.length > 0;
+  const hasWebFetch = childToolNames.includes("web_fetch");
+  const localLabel = hasLocalTools ? formatToolList(localTools) : "";
+  const whenToUse = [
+    hasLocalTools
+      ? `- Researching project content across multiple ${localLabel} rounds — intermediate results stay in the sub-agent's context.`
+      : null,
+    hasWebFetch
+      ? `- Fetching and reading a URL or known web page${hasLocalTools ? ", combined with local reading" : ""}.`
+      : null,
+    "- Comparing alternatives (A vs B vs C) — dispatch parallel Tasks, then synthesize.",
+    "- Multi-perspective analysis (e.g. security / performance / readability review) — dispatch parallel Tasks with different prompts.",
+  ].filter((line): line is string => line !== null);
+  const whenNotToUse = [
+    hasLocalTools
+      ? `- Single-file ${localLabel} — use those tools directly. Task is overhead.`
+      : null,
+    "- Simple yes/no factual questions — answer directly.",
+    "- When the user asked something that needs your direct response — sub-agent output is internal, you must still synthesize and respond.",
+  ].filter((line): line is string => line !== null);
+
+  return `Launch a sub-agent to perform a research-style sub-task with isolated context.
+
+Available sub-agent tools: ${availableTools}.
 
 When to use:
-- Researching a topic that requires multiple Read/Grep/WebFetch rounds — sub-agent's intermediate results stay in its own context, not polluting yours.
-- Comparing alternatives (A vs B vs C) — dispatch parallel Tasks, then synthesize.
-- Multi-perspective analysis (e.g. security / performance / readability review) — dispatch parallel Tasks with different prompts.
+${whenToUse.join("\n")}
 
 When NOT to use:
-- Single-file Read / Glob / Grep — use those tools directly. Task is overhead.
-- Simple yes/no factual questions — answer directly.
-- When the user asked something that needs your direct response — sub-agent output is internal, you must still synthesize and respond.
+${whenNotToUse.join("\n")}
 
 Concurrency: You may launch up to 3 Tasks in a single turn. They run in parallel.
 
@@ -177,6 +219,12 @@ Failure handling: If a Task fails, you will receive a tool_result with \`is_erro
 Output format: The sub-agent's final response is returned as the tool_result content. Use it to inform your synthesis. The user does not see the sub-agent's intermediate steps.
 
 Each Task is stateless — you cannot send follow-up messages to a running Task.`;
+}
+
+export const TASK_TOOL_PROMPT = buildTaskToolPrompt(["read", "glob", "grep", "web_fetch"]);
+
+const TASK_MAX_CALLS_PER_TURN = 3;
+const TASK_RESULT_TEXT_MAX_CHARS = 20_000;
 
 // ─── 三态格式化(纯函数) ───
 
@@ -194,19 +242,22 @@ Each Task is stateless — you cannot send follow-up messages to a running Task.
  *   - sub_id 截断到前 6 字符(完整 UUID 36 字符占用过多 token,前缀已足够审计追溯)
  *   - partial 仅在 failed/aborted 才拼接 —— completed 时 finalText 即完整答案,
  *     重复出现的"中段输出"反而污染上下文
- *   - failed/aborted 文本格式与 spec 对齐(LLM 在英文上下文理解最稳定)
+ *   - failed/aborted 文本保持稳定英文前缀，便于主 LLM 理解失败边界
  */
 export function formatChildResultAsToolResult(
   result: ChildAgentResult,
   description: string,
+  toolCallId = "unknown",
 ): ToolResult {
   const usageTag = formatUsageTag(result);
+  const presentation = buildSubAgentPresentation(result, description, toolCallId);
 
   switch (result.status) {
     case "completed":
       return {
-        content: `${result.finalAssistantText}\n\n${usageTag}`,
+        content: `${truncateTaskText(result.finalAssistantText)}\n\n${usageTag}`,
         isError: false,
+        presentation,
       };
 
     case "failed": {
@@ -219,12 +270,14 @@ export function formatChildResultAsToolResult(
       // 比文本前缀("failed:")更可解析,且避免主 LLM 对 message 做 substring 匹配。
       // 缺失场景理论不可达(deriveErrorMeta 总返 type),保留兜底兼容历史结果。
       const typeTag = result.error?.type ? ` (${result.error.type})` : "";
+      const safeDescription = formatDescriptionForPrefix(description);
       const partialBlock = result.partial
-        ? `Partial output:\n${result.partial}\n\n`
+        ? `Partial output:\n${truncateTaskText(result.partial)}\n\n`
         : "";
       return {
-        content: `[Task "${description}" failed${typeTag}: ${errMsg}]\n\n${partialBlock}${usageTag}`,
+        content: `[Task "${safeDescription}" failed${typeTag}: ${errMsg}]\n\n${partialBlock}${usageTag}`,
         isError: true,
+        presentation,
       };
     }
 
@@ -232,12 +285,14 @@ export function formatChildResultAsToolResult(
       const reasonStr = result.abortReason
         ? formatAbortReasonForLLM(result.abortReason)
         : "unknown abort reason";
+      const safeDescription = formatDescriptionForPrefix(description);
       const partialBlock = result.partial
-        ? `Partial output:\n${result.partial}\n\n`
+        ? `Partial output:\n${truncateTaskText(result.partial)}\n\n`
         : "";
       return {
-        content: `[Task "${description}" aborted: ${reasonStr}]\n\n${partialBlock}${usageTag}`,
+        content: `[Task "${safeDescription}" aborted: ${reasonStr}]\n\n${partialBlock}${usageTag}`,
         isError: true,
+        presentation,
       };
     }
   }
@@ -247,8 +302,7 @@ export function formatChildResultAsToolResult(
  * 拼接 <usage> 标签 —— 把子 agent 的资源消耗以紧凑可解析格式暴露给主 LLM。
  *
  * 三态共用同一 helper 保证字段顺序 / 命名一致,主 LLM 学习成本一次性。
- * completed 多 tool_uses 字段(成功时主 LLM 关心子调了多少工具),
- * failed/aborted 省略 —— 失败信号已是主 LLM 决策依据,工具调用次数次要。
+ * 三态都携带 tool_uses / duration_ms，失败和中止同样可审计成本。
  *
  * tokens 字段语义 —— 取 input + output 之和:
  *   - 这是"主 LLM 决策需要的总成本视角"的单值,避免主 LLM 在 tool_result 文本里
@@ -263,13 +317,56 @@ export function formatChildResultAsToolResult(
  */
 function formatUsageTag(result: ChildAgentResult): string {
   const totalTokens = result.usage.inputTokens + result.usage.outputTokens;
-  const fields: string[] = [`tokens: ${totalTokens}`];
-  if (result.status === "completed") {
-    fields.push(`tool_uses: ${result.toolUses}`);
-  }
+  const status = result.status === "completed" ? "succeeded" : result.status;
+  const fields: string[] = [`status: ${status}`, `tokens: ${totalTokens}`];
+  fields.push(`tool_uses: ${result.toolUses}`);
   fields.push(`duration_ms: ${result.durationMs}`);
   fields.push(`sub_id: ${result.subAgentId.slice(0, 6)}`);
   return `<usage>${fields.join(", ")}</usage>`;
+}
+
+function buildSubAgentPresentation(
+  result: ChildAgentResult,
+  description: string,
+  toolCallId: string,
+): SubAgentResultPresentationArtifact {
+  const status = result.status === "completed" ? "succeeded" : result.status;
+  const errorOrAbortReason =
+    result.status === "failed"
+      ? result.error?.message
+      : result.status === "aborted"
+        ? result.abortReason
+          ? formatAbortReasonForLLM(result.abortReason)
+          : "unknown abort reason"
+        : undefined;
+  return {
+    kind: "sub-agent-result",
+    toolCallId,
+    subAgentId: result.subAgentId,
+    description,
+    status,
+    durationMs: result.durationMs,
+    usage: {
+      inputTokens: result.usage.inputTokens,
+      outputTokens: result.usage.outputTokens,
+    },
+    toolUses: result.toolUses,
+    ...(errorOrAbortReason !== undefined && { errorOrAbortReason }),
+  };
+}
+
+function truncateTaskText(text: string): string {
+  if (text.length <= TASK_RESULT_TEXT_MAX_CHARS) return text;
+  const omitted = text.length - TASK_RESULT_TEXT_MAX_CHARS;
+  return `${text.slice(0, TASK_RESULT_TEXT_MAX_CHARS)}\n\n[truncated: ${omitted.toLocaleString()} chars omitted]`;
+}
+
+function formatDescriptionForPrefix(description: string): string {
+  return description
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .replace(/\s+/g, " ")
+    .replace(/"/g, '\\"')
+    .trim();
 }
 
 // ─── 前置契约校验 ───
@@ -300,8 +397,53 @@ interface ValidatedCall {
   prompt: string;
 }
 
-function assertCallContract(
-  input: Record<string, unknown>,
+type ParseTaskInputResult =
+  | { ok: true; description: string; prompt: string }
+  | { ok: false; message: string };
+
+function parseTaskInput(input: Record<string, unknown>): ParseTaskInputResult {
+  const allowed = new Set(["description", "prompt"]);
+  const extra = Object.keys(input).filter((key) => !allowed.has(key));
+  if (extra.length > 0) {
+    return {
+      ok: false,
+      message: `Task tool input error: unsupported field(s): ${extra.join(", ")}`,
+    };
+  }
+
+  if (typeof input.description !== "string") {
+    return {
+      ok: false,
+      message: "Task tool input error: 'description' must be a string.",
+    };
+  }
+  if (typeof input.prompt !== "string") {
+    return {
+      ok: false,
+      message: "Task tool input error: 'prompt' must be a string.",
+    };
+  }
+
+  const description = input.description.trim();
+  if (!description) {
+    return {
+      ok: false,
+      message: "Task tool input error: 'description' must be a non-empty string.",
+    };
+  }
+  const prompt = input.prompt.trim();
+  if (!prompt) {
+    return {
+      ok: false,
+      message: "Task tool input error: 'prompt' must be a non-empty string.",
+    };
+  }
+
+  return { ok: true, description, prompt };
+}
+
+function assertRunContract(
+  parsed: Extract<ParseTaskInputResult, { ok: true }>,
   ctx: ToolExecutionContext,
 ): ValidatedCall {
   const runCtx = runContextStorage.getStore();
@@ -315,19 +457,12 @@ function assertCallContract(
       "Task tool requires ctx.abortSignal — tool-executor must propagate the per-call AbortSignal so the sub-agent loop can be cancelled together with the parent run.",
     );
   }
-  const description = String(input["description"] ?? "").trim();
-  if (!description) {
-    throw new Error(
-      "Task tool requires non-empty 'description' — a short (3-5 word) task summary used in status bar and error labels.",
-    );
-  }
-  const prompt = String(input["prompt"] ?? "").trim();
-  if (!prompt) {
-    throw new Error(
-      "Task tool requires non-empty 'prompt' — the detailed task text passed to the sub-agent's system prompt.",
-    );
-  }
-  return { runCtx, abortSignal: ctx.abortSignal, description, prompt };
+  return {
+    runCtx,
+    abortSignal: ctx.abortSignal,
+    description: parsed.description,
+    prompt: parsed.prompt,
+  };
 }
 
 // ─── 工具工厂 ───
@@ -337,15 +472,12 @@ function assertCallContract(
  * **不**通过 attachTool 后置注入(env 字段需在装配期完整可见,后置注入会破坏依赖完整性)。
  *
  * call() 调用流程:
- *   1. assertCallContract 统一前置契约校验(runCtx / abortSignal / description / prompt)
- *      —— 任一不满足直接 throw,主 agent 看 tool_result.isError 触发自我修正
+ *   1. parseTaskInput 严格校验 LLM 入参，assertRunContract 校验运行上下文
  *   2. 调 runChildAgent —— 永不抛,返 ChildAgentResult 三态
  *   3. formatChildResultAsToolResult 折成 ToolResult 给主 LLM
  *
- * description 字段的处理:仅 Task closure 自持(用于 ToolResult 错误标签 /
- * CLI 状态条 / 未来 audit log),不传 runChildAgent —— 子 agent 任务全文已在
- * system prompt "Your Role" 段,description 是父侧呈现层概念,不是子业务层概念,
- * YAGNI 单一职责。
+ * description 字段的处理:父侧用于状态栏、ToolResult 错误标签与摘要展示；子侧
+ * 通过专用 task message 读取同一结构，不进入 system prompt。
  *
  * 可观察性:子 agent 的事件通过 createEventBus({ parent: parentBus, ... })
  * 自动冒泡到父 bus,父订阅方按 lineage 过滤可看到全部子事件。
@@ -353,18 +485,20 @@ function assertCallContract(
 export function createTaskTool(env: TaskToolEnv): ToolDefinition {
   return {
     name: "Task",
-    description: TASK_TOOL_PROMPT,
+    description: buildTaskToolPrompt(env.childToolNames),
     inputSchema: TASK_INPUT_SCHEMA,
     isReadOnly: false,
     isParallelSafe: true,
+    maxCallsPerTurn: TASK_MAX_CALLS_PER_TURN,
     needsPermission: false,
     interruptBehavior: "cancel",
     boundaries: [...TASK_TOOL_BOUNDARIES],
     call: async (input, ctx): Promise<ToolResult> => {
-      const { runCtx, abortSignal, description, prompt } = assertCallContract(
-        input,
-        ctx,
-      );
+      const parsed = parseTaskInput(input);
+      if (!parsed.ok) return { content: parsed.message, isError: true };
+
+      const { runCtx, abortSignal } = assertRunContract(parsed, ctx);
+      const { description, prompt } = parsed;
 
       const result = await runChildAgent({
         provider: env.provider,
@@ -382,13 +516,15 @@ export function createTaskTool(env: TaskToolEnv): ToolDefinition {
         parentTools: env.parentTools,
         parentSignal: abortSignal,
         task: prompt,
+        taskDescription: description,
+        parentToolCallId: ctx.toolCallId,
         riskMaxTokens: env.riskMaxTokens,
         // 顶层用户意图沿子 agent 链路透传，让子 agent 工具调用时 AI 安全管家
         // 仍按顶层意图研判（子 agent 不能借助 task 文本伪装意图绕过管家）
         userIntent: ctx.userIntent,
       });
 
-      return formatChildResultAsToolResult(result, description);
+      return formatChildResultAsToolResult(result, description, ctx.toolCallId);
     },
   };
 }

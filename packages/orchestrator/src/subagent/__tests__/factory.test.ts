@@ -10,7 +10,7 @@
  *   - 子 lineage 派生:childBus.lineage 严格以 parentLineage 为前缀(EventBus 不变量)
  *   - 子工具过滤:sub-agent profile.enabledTools 包含的工具名才进 childTools
  *   - cleanup discipline:happy 与 error 路径 finally 都触发 bus.removeAllListeners + broker.cancelAll
- *   - INV-S6 永不抛:即使 SecurityPipeline / parentBus 等关键依赖 throw,函数仍返回 failed 而非抛出
+ *   - 永不抛:即使 SecurityPipeline / parentBus 等关键依赖 throw,函数仍返回 failed 而非抛出
  *
  * mock 策略:沿用 loop-runner 测试的真实 SecurityPipeline + ConfirmationBroker + MockLLMProvider,
  * factory 层关注的是装配 / 折叠契约,业务行为已被 loop-runner 测试覆盖
@@ -78,6 +78,7 @@ function makeBaseOpts(
     parentTools: [makeReadOnlyTool("read")],
     parentSignal: new AbortController().signal,
     task: "test task description",
+    taskDescription: "test task",
     // 默认大阈值,避免常规测试场景误触发 context_overflow;专项测试 override
     riskMaxTokens: 10_000_000,
     ...overrides,
@@ -198,9 +199,7 @@ describe("runChildAgent · failed paths", () => {
     expect(result.error?.message).toBe("sub-agent wall-clock timeout");
   }, 5000);
 
-  it("context_overflow 触发 → status=failed + error.type=sub_agent_context_overflow + 切片提示进 message", async () => {
-    // 单次 inputTokens=500 > riskMaxTokens=200 → 触发 context_overflow
-    // 主 LLM 通过 error.message 收到切片提示文本(Task 工具 failed 渲染会拼入 ToolResult)
+  it("明显超限的子任务在派发前预检失败，不消耗 provider 调用", async () => {
     const provider = new MockLLMProvider([
       {
         text: "I attempted but the context is too large.",
@@ -216,9 +215,17 @@ describe("runChildAgent · failed paths", () => {
     expect(result.status).toBe("failed");
     expect(result.error?.type).toBe("sub_agent_context_overflow");
     expect(result.error?.message).toContain("Split the task");
-    // partial 文本仍可抓 —— 与其他 budget 触发同款 partial 复用契约
-    expect(result.partial).toContain("attempted");
-    expect(provider.callCount).toBe(1);
+    expect(result.partial).toBeUndefined();
+    expect(provider.callCount).toBe(0);
+  });
+
+  it("completed 但没有 assistant 文本 → failed(empty_output)，避免静默成功", async () => {
+    const provider = new MockLLMProvider([{ text: "" }]);
+    const result = await runChildAgent(makeBaseOpts(provider));
+
+    expect(result.status).toBe("failed");
+    expect(result.error?.type).toBe("empty_output");
+    expect(result.error?.message).toContain("without an assistant answer");
   });
 });
 
@@ -261,6 +268,43 @@ describe("runChildAgent · lineage 派生", () => {
       expect(lineage.startsWith("main/sub-")).toBe(true);
     }
   });
+
+  it("parentToolCallId 存在时发出可关联的子生命周期事件", async () => {
+    const provider = new MockLLMProvider([{ text: "ok" }]);
+    const parentBus = createEventBus<AgentEventMap>({ lineage: "main" });
+    const events: Array<{ type: string; payload: unknown; lineage?: string }> = [];
+    parentBus.on("tool:child_start", (payload, meta) =>
+      events.push({ type: "start", payload, lineage: meta?.lineage }),
+    );
+    parentBus.on("tool:child_end", (payload, meta) =>
+      events.push({ type: "end", payload, lineage: meta?.lineage }),
+    );
+
+    const result = await runChildAgent(
+      makeBaseOpts(provider, { parentBus, parentToolCallId: "task-call-1" }),
+    );
+
+    expect(result.status).toBe("completed");
+    expect(events).toHaveLength(2);
+    expect(events[0]).toMatchObject({
+      type: "start",
+      lineage: expect.stringMatching(/^main\/sub-/),
+      payload: {
+        parentToolCallId: "task-call-1",
+        childAgentId: result.subAgentId,
+        label: "test task",
+      },
+    });
+    expect(events[1]).toMatchObject({
+      type: "end",
+      lineage: expect.stringMatching(/^main\/sub-/),
+      payload: {
+        parentToolCallId: "task-call-1",
+        childAgentId: result.subAgentId,
+        status: "succeeded",
+      },
+    });
+  });
 });
 
 // ─── 子工具过滤 ───
@@ -291,7 +335,7 @@ describe("runChildAgent · sub-agent profile.enabledTools 过滤", () => {
 // ─── 背景消息注入 ───
 
 describe("runChildAgent · backgroundMessages", () => {
-  it("背景消息进入子 loop messages,且不拼入 system prompt", async () => {
+  it("背景消息进入子 loop messages,任务走专用 user message,且不拼入 system prompt", async () => {
     const backgroundMessages = [
       {
         role: "user" as const,
@@ -312,10 +356,12 @@ describe("runChildAgent · backgroundMessages", () => {
     expect(provider.calls).toHaveLength(1);
     const call = provider.calls[0]!;
     expect(call.messages.slice(0, 2)).toEqual(backgroundMessages);
-    expect(extractFirstText(call.messages[2]!)).toBe(
-      'Begin. Your task is in the system prompt under "Your Role".',
-    );
-    expect(call.systemPrompt).toContain("test task description");
+    expect(JSON.parse(extractFirstText(call.messages[2]!))).toEqual({
+      kind: "sub_agent_task",
+      description: "test task",
+      prompt: "test task description",
+    });
+    expect(call.systemPrompt).not.toContain("test task description");
     expect(call.systemPrompt).not.toContain("主窗口里的用户背景");
     expect(call.systemPrompt).not.toContain("主窗口里的助手回复");
   });
@@ -355,6 +401,38 @@ describe("runChildAgent · backgroundMessages", () => {
       "背景 B",
     );
   });
+
+  it("任务文本变化不改变子 system prompt，只改变专用 task message", async () => {
+    const firstProvider = new MockLLMProvider([{ text: "ok" }]);
+    const secondProvider = new MockLLMProvider([{ text: "ok" }]);
+
+    await runChildAgent(
+      makeBaseOpts(firstProvider, {
+        task: "first task body",
+        taskDescription: "first",
+      }),
+    );
+    await runChildAgent(
+      makeBaseOpts(secondProvider, {
+        task: "second task body",
+        taskDescription: "second",
+      }),
+    );
+
+    expect(firstProvider.calls[0]!.systemPrompt).toBe(
+      secondProvider.calls[0]!.systemPrompt,
+    );
+    expect(JSON.parse(extractFirstText(firstProvider.calls[0]!.messages.at(-1)!))).toEqual({
+      kind: "sub_agent_task",
+      description: "first",
+      prompt: "first task body",
+    });
+    expect(JSON.parse(extractFirstText(secondProvider.calls[0]!.messages.at(-1)!))).toEqual({
+      kind: "sub_agent_task",
+      description: "second",
+      prompt: "second task body",
+    });
+  });
 });
 
 // ─── cleanup discipline ───
@@ -386,9 +464,9 @@ describe("runChildAgent · cleanup discipline", () => {
   });
 });
 
-// ─── INV(永不抛) ───
+// ─── 永不抛契约 ───
 
-describe("runChildAgent · INV 永不抛", () => {
+describe("runChildAgent · 永不抛契约", () => {
   it("loop 启动阶段意外 throw (模拟 ALS 基础设施崩) → 顶层兜底转 failed,不抛出", async () => {
     const provider = new MockLLMProvider([{ text: "ok" }]);
     // spy ALS.run 让它直接 throw,模拟运行期"绝不该抛但抛了"的兜底场景

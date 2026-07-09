@@ -16,7 +16,7 @@
  *      classifyResult / extractFinalAssistantText 折成三态
  *
  * 顶层兜底 try/catch:任何阶段意外漏掉的 throw,最外层捕获转 failed —
- * defense-in-depth,理论上不触发,但保证 INV 在编译期可被静态推理。
+ * defense-in-depth,理论上不触发,但保证永不抛契约在编译期可被静态推理。
  */
 
 import { randomUUID } from "node:crypto";
@@ -24,6 +24,8 @@ import {
   ConfirmationBroker,
   createEventBus,
   emptyUsage,
+  TokenEstimator,
+  toToolSpec,
   type AbortReason,
   type AgentErrorType,
   type AgentEventMap,
@@ -86,6 +88,7 @@ export type SubAgentErrorType =
   | "sub_agent_context_overflow"
   | "loop_error"
   | "assembly_error"
+  | "empty_output"
   | "unexpected_error"
   | "unknown_error";
 
@@ -138,8 +141,12 @@ export interface RunChildAgentOptions {
    * 派生 child controller 自动注入 parent-abort kind,无需本函数手工 fork
    */
   parentSignal: AbortSignal;
-  /** 任务文本(进 system prompt 的 "Your Role" 段,不进 user message) */
+  /** 任务文本，通过专用 user message 注入，不进入 system prompt。 */
   task: string;
+  /** 父侧展示用任务短标签，随同 task message 传给子 agent。 */
+  taskDescription?: string;
+  /** 父工具调用 id，用于把子运行事件关联回 Task 调用。 */
+  parentToolCallId?: string;
   /**
    * 从父注意力窗口冻结出的只读背景消息。它进入子 loop 的 messages 通道,
    * 不拼进 system prompt,避免破坏同角色子 agent 的静态 prompt cache 前缀。
@@ -251,7 +258,7 @@ async function runChildAgentInner(
       nonInteractiveResolver: resolveSubAgentResolver(budget.confirmationPolicy),
     });
 
-    const profile = subAgentProfile({ subAgentId, task: opts.task });
+    const profile = subAgentProfile({ subAgentId });
 
     // 子工具集：按 profile.enabledTools 过滤 parent tools —— profile 是工具
     // 装配的唯一权威源（与主 agent 装配同机制）。声明在 enabledTools 但 parent
@@ -277,9 +284,9 @@ async function runChildAgentInner(
       globalConfigPath: opts.globalConfigPath,
     });
 
-    // 极短初始 user message —— 任务全文已在 system prompt 的 "Your Role" 段;
-    // 主 LLM "Begin." 充当唤醒信号,告知子 loop 可以开始。
-    // 背景快照只进 messages 通道,不进 system prompt,保持 prompt cache 静态前缀稳定。
+    // 任务全文走专用 user message，不进入 system prompt，保持子 agent
+    // 静态角色契约稳定。JSON 字符串让任务文本中的围栏、标题和提示词样本
+    // 都只是数据，不能改写 system 约束。
     initialMessages = [
       ...(opts.backgroundMessages ?? []),
       {
@@ -287,11 +294,32 @@ async function runChildAgentInner(
         content: [
           {
             type: "text",
-            text: 'Begin. Your task is in the system prompt under "Your Role".',
+            text: JSON.stringify({
+              kind: "sub_agent_task",
+              description: opts.taskDescription ?? "",
+              prompt: opts.task,
+            }),
           },
         ],
       },
     ];
+
+    const preflight = preflightContextBudget({
+      systemPrompt,
+      initialMessages,
+      childTools,
+      riskMaxTokens: opts.riskMaxTokens,
+    });
+    if (!preflight.ok) {
+      return buildFailedResult({
+        subAgentId,
+        startTime,
+        error: new Error(
+          "sub-task too large for reliable attention. Split the task into smaller, more focused sub-tasks.",
+        ),
+        errorType: "sub_agent_context_overflow",
+      });
+    }
   } catch (assemblyError) {
     return buildFailedResult({
       subAgentId,
@@ -306,6 +334,7 @@ async function runChildAgentInner(
   let caughtError: unknown = null;
 
   try {
+    await emitChildStart(opts, subAgentId, childLineage, childBus);
     runResult = await runContextStorage.run(
       { bus: childBus, lineage: childLineage },
       () =>
@@ -347,12 +376,14 @@ async function runChildAgentInner(
   }
 
   // 阶段 4:折叠 ChildAgentResult
-  return foldResult({
+  const childResult = foldResult({
     subAgentId,
     startTime,
     runResult,
     caughtError,
   });
+  await emitChildEnd(opts, childResult, childLineage, childBus);
+  return childResult;
 }
 
 // ─── 折叠辅助 ───
@@ -374,6 +405,21 @@ function foldResult(args: FoldArgs): ChildAgentResult {
   const toolUses = runResult?.toolUseCount ?? 0;
 
   if (kind === "completed") {
+    if (finalAssistantText.trim().length === 0) {
+      return {
+        status: "failed",
+        subAgentId,
+        finalAssistantText,
+        usage,
+        toolUses,
+        durationMs,
+        error: {
+          message: "sub-agent completed without an assistant answer",
+          type: "empty_output",
+        },
+        partial: extractPartialText(messages) || undefined,
+      };
+    }
     return {
       status: "completed",
       subAgentId,
@@ -489,6 +535,66 @@ function buildFailedResult(args: FailedArgs): ChildAgentResult {
     durationMs: Date.now() - args.startTime,
     error: { message: errorMessage(args.error), type: args.errorType },
   };
+}
+
+interface PreflightContextBudgetInput {
+  systemPrompt: string;
+  initialMessages: readonly Message[];
+  childTools: readonly ToolDefinition[];
+  riskMaxTokens: number;
+}
+
+const CONTEXT_PREFLIGHT_CLEAR_OVERFLOW_RATIO = 1.1;
+
+function preflightContextBudget(
+  input: PreflightContextBudgetInput,
+): { ok: true } | { ok: false } {
+  if (!Number.isFinite(input.riskMaxTokens) || input.riskMaxTokens <= 0) {
+    return { ok: true };
+  }
+  try {
+    const estimator = new TokenEstimator();
+    const estimated =
+      estimator.estimateText(input.systemPrompt) +
+      estimator.estimateMessages(input.initialMessages) +
+      estimator.estimateTools(input.childTools.map(toToolSpec));
+    return estimated > input.riskMaxTokens * CONTEXT_PREFLIGHT_CLEAR_OVERFLOW_RATIO
+      ? { ok: false }
+      : { ok: true };
+  } catch {
+    return { ok: true };
+  }
+}
+
+async function emitChildStart(
+  opts: RunChildAgentOptions,
+  subAgentId: string,
+  childLineage: string,
+  childBus: EventBus<AgentEventMap>,
+): Promise<void> {
+  if (!opts.parentToolCallId) return;
+  await childBus.emit("tool:child_start", {
+    parentToolCallId: opts.parentToolCallId,
+    childLineage,
+    childAgentId: subAgentId,
+    label: opts.taskDescription ?? "Task",
+  });
+}
+
+async function emitChildEnd(
+  opts: RunChildAgentOptions,
+  result: ChildAgentResult,
+  childLineage: string,
+  childBus: EventBus<AgentEventMap>,
+): Promise<void> {
+  if (!opts.parentToolCallId) return;
+  await childBus.emit("tool:child_end", {
+    parentToolCallId: opts.parentToolCallId,
+    childLineage,
+    childAgentId: result.subAgentId,
+    status: result.status === "completed" ? "succeeded" : result.status,
+    duration: result.durationMs,
+  });
 }
 
 function errorMessage(err: unknown): string {

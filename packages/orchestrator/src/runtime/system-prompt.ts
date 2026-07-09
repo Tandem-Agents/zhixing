@@ -110,7 +110,7 @@ export const MAIN_AGENT_SEGMENTS: readonly SystemPromptSegment[] = [
  *   - 用户记忆段 —— 同上,且 Memory 工具不暴露给子 agent
  *
  * 调用方装配子 agent 时参考:
- *   buildSystemPrompt({ profile: subAgentProfile({ subAgentId, task }),
+ *   buildSystemPrompt({ profile: subAgentProfile({ subAgentId }),
  *                       segments: SUB_AGENT_SEGMENTS, tools: childTools, ... })
  */
 export const SUB_AGENT_SEGMENTS: readonly SystemPromptSegment[] = [

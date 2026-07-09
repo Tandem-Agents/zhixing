@@ -5,7 +5,7 @@
  *
  * 覆盖契约:
  *   1. lineage="main" —— per-run EventBus 必须以 "main" 标记 root,
- *      M2 子 agent 派生 "main/sub-xxx" 路径的前提
+ *      子 agent 派生 "main/sub-xxx" 路径的前提
  *   2. decorateRunBus 调用时序与次数 —— run() 入口调一次,run() finally
  *      调返回的 dispose 一次,严格 1:1
  *   3. safeDispose 故障隔离 —— accumulator dispose / decorator dispose
@@ -164,7 +164,7 @@ function makeDecorateRunBus() {
 // ─── 契约 1: lineage="main" 标记 ───
 
 describe("createAgentRuntime · run() lineage 契约", () => {
-  it("per-run EventBus 必须标记 lineage='main'(M2 子 agent 派生路径的前提)", async () => {
+  it("per-run EventBus 必须标记 lineage='main'(子 agent 派生路径的前提)", async () => {
     providerRef.current = new MockLLMProvider([{ text: "ok" }]);
     const { decorate } = makeDecorateRunBus();
 
@@ -493,7 +493,7 @@ describe("createAgentRuntime · ALS RunContext 透传契约", () => {
   // 并发隔离契约 —— ALS 模型的核心承诺:每次 runtime.run() 走独立 store,
   // 不同 run 的工具 call 取到各自 run 的 bus / lineage,绝不串扰。
   // 这是产品级承诺:未来若服务端单实例多并发 conversation,无需重构 —— 由 Node.js
-  // async_hooks 的 store 隔离保证。spec §15 M2.3 验证清单显式要求此场景覆盖。
+  // async_hooks 的 store 隔离保证。
   it("两个并发 run()(独立 runtime)各自 ALS 上下文不串扰,probeTool 取到自己 run 的 bus", async () => {
     const { runContextStorage } = await import("../run-context.js");
     const captures: Array<{
@@ -2057,7 +2057,7 @@ describe("trustContext 装配分叉", () => {
             type: "tool_result",
             toolUseId: "task-1",
             content:
-              "done\n\n<usage>tokens: 12000, tool_uses: 2, duration_ms: 3000, sub_id: abc123</usage>",
+              "done\n\n<usage>status: succeeded, tokens: 12000, tool_uses: 2, duration_ms: 3000, sub_id: abc123</usage>",
           },
         ],
       },

@@ -103,7 +103,7 @@ import {
   BUILTIN_TOOL_NAMES,
   WEB_FETCH_DEFAULT_RULES,
 } from "@zhixing/tools-builtin";
-import { mainProfile } from "../profile/default-profiles.js";
+import { mainProfile, SUB_AGENT_ENABLED_TOOLS } from "../profile/default-profiles.js";
 import type { AgentRoleProfile } from "../profile/agent-role-profile.js";
 import { subscribeSegmentMarkerAccumulator } from "./segment-marker-accumulator.js";
 import { subscribePostTurnControlAccumulator } from "./post-turn-control-accumulator.js";
@@ -596,8 +596,8 @@ export interface CreateAgentRuntimeOptions {
    * Task provider+model / budget resolveModelInfo / 返回 providerId+model /
    * resilientCallLLM / runAgentLoop）取 roles[primaryRole]，及主对话 loop +
    * Task 子 agent loop 的思考解析跟随；单发调用域按性质分流（callText main
-   * →roles.main / MemoryFlush+callText→roles.light / 段切换→roles.light，
-   * 详见 secondary-llm-capability ADR-SLLM-009）不随 primaryRole 漂移，
+   * →roles.main / MemoryFlush+callText→roles.light / 段切换→roles.light）
+   * 不随 primaryRole 漂移，
    * roleThinking 三角色映射为真实 per-role 不跟随。
    * 工作模式装配 power runtime 时传 "power"。
    */
@@ -689,8 +689,8 @@ export async function createAgentRuntime(
   // 主对话槽位 —— 决定主对话语义六处取哪个 role（capability / Task
   // provider+model / budget resolveModelInfo / 返回 providerId+model /
   // resilientCallLLM / runAgentLoop）+ loop 思考解析跟随。压缩域按 task 分流
-  // （callText main→main / 记忆提取+callText→light / 段切换→light，详见
-  // secondary-llm-capability ADR-SLLM-009）不跟随、roleThinking 三角色聚合
+  // （callText main→main / 记忆提取+callText→light / 段切换→light）不跟随、
+  // roleThinking 三角色聚合
   // 不跟随（见下）。缺省 main，工作模式装配传 power。
   const primaryRole = options.primaryRole ?? "main";
 
@@ -758,8 +758,7 @@ export async function createAgentRuntime(
   //   - primaryThinking：主对话 loop + Task 子 agent loop（二者均跑
   //     roles[primaryRole] 单 model）→ 取 roleThinking[primaryRole]
   //   - lightThinking ：MemoryFlush + callText + 段切换摘要（恒走 roles.light，
-  //     不跟 primaryRole；质量敏感单发（callText main）走 roles.main 用 mainThinking，
-  //     见 secondary-llm-capability ADR-SLLM-009）
+  //     不跟 primaryRole；质量敏感单发（callText main）走 roles.main 用 mainThinking。
   // 构造位置先于 builtinCtx：单发通道（mainCallLLM）要直接注入工具上下文
   // （admit_skill 的独立裁判通道），零 lazy 间接层。
   const roleThinking: ResolvedRoleThinking = {
@@ -882,8 +881,14 @@ export async function createAgentRuntime(
   const primaryThinking = roleThinking[primaryRole];
   const lightThinking = roleThinking.light;
 
+  const childToolNameSet = new Set<string>(SUB_AGENT_ENABLED_TOOLS);
+  const childToolNames = baseTools
+    .filter((tool) => childToolNameSet.has(tool.name))
+    .map((tool) => tool.name)
+    .sort();
+
   let tools: ToolDefinition[] = baseTools;
-  if (profile.enabledTools.includes("Task")) {
+  if (profile.enabledTools.includes("Task") && childToolNames.length > 0) {
     const taskTool = createTaskTool({
       // 子 agent 复用父 primaryRole 的 provider+model；其自身 loop 思考 =
       // primaryThinking（与该 model 配对）；roleThinking 映射供子工具按角色扇出。
@@ -898,6 +903,7 @@ export async function createAgentRuntime(
       globalConfigPath: getGlobalConfigPath(),
       parentBroker: confirmationBroker,
       parentTools: baseTools,
+      childToolNames,
       // sub-agent 复用父 primaryRole model,riskMaxTokens 从同一 capability 解析
       riskMaxTokens: primaryModelCapability.riskMaxTokens,
     });
@@ -912,9 +918,8 @@ export async function createAgentRuntime(
   // systemPrompt 后置到 tools 装配之后 —— Task 工具描述需进 ## Tool Usage 段,LLM
   // 才能学习"何时派 Task / 何时直接调单工具"。
   //
-  // 生效 systemPrompt 不是装配期一个 const,而是双层 holder（prompt cache 死线的
-  // 承重设计,本意见 skill-system.md §3.1 / lifecycle-concepts.md / buildSystemPrompt
-  // 的"调用契约"注释）:
+  // 生效 systemPrompt 不是装配期一个 const,而是双层 holder，配合
+  // buildSystemPrompt 的调用契约守住 prompt cache 的稳定前缀：
   //   - 实例权威 prompt + 实例级段覆盖,由实例级窗口换代维护（首窗 / clear / resume
   //     / reload）,供新 run 起步快照;
   //   - 每个 run 入口 capture 一份本 run 局部 prompt（run() 内）,agent-loop 每个 LLM
@@ -1475,8 +1480,8 @@ export async function createAgentRuntime(
             estimator,
             // capability 是会话所跑的 primaryRole model 的注意力/风险阈值，
             // 复用装配期解析的 primaryModelCapability（与 Task riskMaxTokens 同源）。
-            // 段切换摘要 callLLM 与之正交 —— 段切换摘要恒走 roles.light（廉价），不跟 primaryRole
-            //（注：质量敏感单发 callText main 走 roles.main，见 secondary-llm-capability ADR-SLLM-009）。
+            // 段切换摘要 callLLM 与之正交 —— 段切换摘要恒走 roles.light（廉价），不跟 primaryRole。
+            // 质量敏感单发 callText main 走 roles.main。
             capability: primaryModelCapability,
             callLLM: createSegmentSummarizeFn(
               segmentStreamFactory,

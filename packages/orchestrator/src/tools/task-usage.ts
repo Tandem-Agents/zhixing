@@ -15,8 +15,8 @@ export interface TaskUsageEntry {
   readonly description: string;
   /** 子 agent 总 token(input + output,不含 cache 维度)。 */
   readonly tokens: number;
-  /** 成功路径的子工具调用数；failed/aborted 可缺省。 */
-  readonly toolUses?: number;
+  /** 子工具调用数，成功、失败、中止三态都有。 */
+  readonly toolUses: number;
   /** 子 dispatch 持续时间(ms)。 */
   readonly durationMs?: number;
   /** 子 agent id 前缀，供审计追踪。 */
@@ -25,10 +25,7 @@ export interface TaskUsageEntry {
 }
 
 const USAGE_REGEX =
-  /<usage>tokens:\s*(\d+)(?:,\s*tool_uses:\s*(\d+))?,\s*duration_ms:\s*(\d+),\s*sub_id:\s*([0-9a-f]+)<\/usage>/;
-
-const FAILED_PREFIX = /^\[Task "[^"]*" failed(?:\s*\([^)]*\))?:/;
-const ABORTED_PREFIX = /^\[Task "[^"]*" aborted:/;
+  /<usage>status:\s*(succeeded|failed|aborted),\s*tokens:\s*(\d+),\s*tool_uses:\s*(\d+),\s*duration_ms:\s*(\d+),\s*sub_id:\s*([0-9a-f]+)<\/usage>\s*$/;
 
 export function parseTaskUsageFromMessages(
   messages: readonly Message[],
@@ -61,25 +58,14 @@ export function parseTaskUsageFromMessages(
       const usageMatch = USAGE_REGEX.exec(block.content);
       if (!usageMatch) continue;
 
-      const status: TaskUsageEntry["status"] = FAILED_PREFIX.test(
-        block.content,
-      )
-        ? "failed"
-        : ABORTED_PREFIX.test(block.content)
-          ? "aborted"
-          : "succeeded";
-
       entries.push({
         index: taskCall.order + 1,
         description: taskCall.description,
-        tokens: Number.parseInt(usageMatch[1]!, 10),
-        toolUses:
-          usageMatch[2] !== undefined
-            ? Number.parseInt(usageMatch[2], 10)
-            : undefined,
-        durationMs: Number.parseInt(usageMatch[3]!, 10),
-        subId: usageMatch[4],
-        status,
+        tokens: Number.parseInt(usageMatch[2]!, 10),
+        toolUses: Number.parseInt(usageMatch[3]!, 10),
+        durationMs: Number.parseInt(usageMatch[4]!, 10),
+        subId: usageMatch[5],
+        status: usageMatch[1] as TaskUsageEntry["status"],
       });
     }
   }
