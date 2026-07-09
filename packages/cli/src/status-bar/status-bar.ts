@@ -42,7 +42,8 @@ import {
   formatAbortReasonShort,
   VERBS,
 } from "./verbs.js";
-import { tone, layout } from "../tui/style.js";
+import { tone, layout, getTerminalWidth } from "../tui/style.js";
+import { clampLine } from "../tui/line-width.js";
 import { getToolRenderStrategy } from "../tool-render-strategy.js";
 
 /** 状态条节流频率——动画帧 + 计时秒进位都靠这个 tick 推动 */
@@ -78,12 +79,23 @@ interface RunningState {
 }
 
 interface TaskState extends RunningState {
+  toolCallId: string;
   taskN: number;
   taskDesc: string;
-  /** 已关联到当前 Task 的子 bus lineage */
+  status: "running" | "succeeded" | "failed" | "aborted";
   subLineage: string | null;
-  /** 子 agent 最近一次工具调用名 */
   subToolName: string | null;
+}
+
+interface TaskAggregateState extends RunningState {
+  focusToolCallId: string | null;
+  activeCount: number;
+  focusTaskN: number | null;
+  focusTaskDesc: string | null;
+  focusSubToolName: string | null;
+  completedCount: number;
+  failedCount: number;
+  abortedCount: number;
 }
 
 interface CompactingState extends RunningState {
@@ -133,7 +145,7 @@ type Phase =
   | ({ kind: "thinking" } & RunningState)
   | ({ kind: "streaming" } & RunningState)
   | ({ kind: "tool" } & RunningState & { toolName: string })
-  | ({ kind: "task" } & TaskState)
+  | ({ kind: "task" } & TaskAggregateState)
   | ({ kind: "compacting" } & CompactingState)
   | ({ kind: "retrying" } & RetryingState)
   | ({ kind: "interrupting" } & InterruptingState)
@@ -152,6 +164,8 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
   const { screen, eventBus } = options;
   let phase: Phase = { kind: "idle" };
   let taskCounter = 0;
+  const activeTasks = new Map<string, TaskState>();
+  const childLineageToTaskId = new Map<string, string>();
   let ticker: ReturnType<typeof setInterval> | null = null;
   /**
    * 最近一次 interrupt:fired 捕获的 abort 原因——abort 路径上 fired 严格在 run_end
@@ -160,7 +174,7 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
   let lastAbortReason: AbortReason | null = null;
 
   const isMainLineage = (meta?: EventMeta): boolean =>
-    meta?.lineage === "main";
+    meta?.lineage === undefined || meta.lineage === "main";
   const isSubLineage = (meta?: EventMeta): boolean =>
     typeof meta?.lineage === "string" && meta.lineage.startsWith("main/sub-");
 
@@ -211,17 +225,78 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
     }
   });
 
+  const currentTaskFocus = (): string | null => {
+    if (phase.kind === "task" && activeTasks.has(phase.focusToolCallId ?? "")) {
+      return phase.focusToolCallId;
+    }
+    return activeTasks.keys().next().value ?? null;
+  };
+
+  const toTaskPhase = (
+    rs: RunningState,
+    focusToolCallId: string | null,
+    previousPhase: Phase,
+  ): Phase => {
+    const counts = taskCountsFromPhase(previousPhase);
+    const focus =
+      focusToolCallId && activeTasks.has(focusToolCallId)
+        ? focusToolCallId
+        : activeTasks.keys().next().value ?? null;
+    const focusTask = focus ? activeTasks.get(focus) : undefined;
+    return {
+      kind: "task",
+      ...rs,
+      ...counts,
+      focusToolCallId: focus,
+      activeCount: activeTasks.size,
+      focusTaskN: focusTask?.taskN ?? null,
+      focusTaskDesc: focusTask?.taskDesc ?? null,
+      focusSubToolName: focusTask?.subToolName ?? null,
+    };
+  };
+
+  const taskIdForChildLineage = (lineage: string): string | null => {
+    const exact = childLineageToTaskId.get(lineage);
+    if (exact) return exact;
+    for (const [childLineage, taskId] of childLineageToTaskId) {
+      if (lineage === childLineage || lineage.startsWith(`${childLineage}/`)) {
+        return taskId;
+      }
+    }
+    return null;
+  };
+
+  const finishTask = (
+    toolCallId: string,
+    status: Exclude<TaskState["status"], "running">,
+  ): void => {
+    const task = activeTasks.get(toolCallId);
+    if (task?.subLineage) childLineageToTaskId.delete(task.subLineage);
+    activeTasks.delete(toolCallId);
+    if (phase.kind !== "task") return;
+    phase = {
+      ...phase,
+      completedCount: phase.completedCount + (status === "succeeded" ? 1 : 0),
+      failedCount: phase.failedCount + (status === "failed" ? 1 : 0),
+      abortedCount: phase.abortedCount + (status === "aborted" ? 1 : 0),
+    };
+  };
+
   // ─── EventBus 订阅 ───
 
-  const offRunStart = eventBus.on("agent:run_start", () => {
+  const offRunStart = eventBus.on("agent:run_start", (_payload, meta) => {
+    if (!isMainLineage(meta)) return;
     taskCounter = 0;
+    activeTasks.clear();
+    childLineageToTaskId.clear();
     lastAbortReason = null;
     phase = makeRunning("thinking", Date.now());
     ensureTicker();
     repaint();
   });
 
-  const offStreamEvent = eventBus.on("llm:stream_event", (event) => {
+  const offStreamEvent = eventBus.on("llm:stream_event", (event, meta) => {
+    if (!isMainLineage(meta)) return;
     if (!isPhaseRunning(phase)) return;
     const tokenEstimate = estimateStreamTokens(event);
     if (tokenEstimate > 0) {
@@ -241,8 +316,9 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
     }
   });
 
-  const offRequestEnd = eventBus.on("llm:request_end", (event) => {
+  const offRequestEnd = eventBus.on("llm:request_end", (event, meta) => {
     if (!isPhaseRunning(phase)) return;
+    const mainLineage = isMainLineage(meta);
     // 一次 LLM 请求结束：把本次 usage 累加进 committed，清零流式估算（真值已 commit）。
     // 累加（不是覆盖）保证一轮内多次 LLM 请求（含工具调用循环）的 token 不丢失。
     //
@@ -254,7 +330,7 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
       ...rs,
       committedInput: rs.committedInput + getTotalInputTokens(event.usage),
       committedOutput: rs.committedOutput + (event.usage.outputTokens ?? 0),
-      streamingOutput: 0,
+      streamingOutput: mainLineage ? 0 : rs.streamingOutput,
     }));
     // 立即 repaint——真值落地是 token 显示的关键节点（input 第一次出现 / 多请求累加）
     repaint();
@@ -271,21 +347,27 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
         if (!isPhaseRunning(phase)) return;
         const desc = extractTaskDescription(payload.input);
         taskCounter += 1;
-        const rs = currentRunning(phase);
-        phase = {
-          kind: "task",
-          ...rs,
+        activeTasks.set(payload.id, {
+          toolCallId: payload.id,
+          ...currentRunning(phase),
           taskN: taskCounter,
           taskDesc: desc,
+          status: "running",
           subLineage: null,
           subToolName: null,
-        };
+        });
+        phase = toTaskPhase(currentRunning(phase), payload.id, phase);
         repaint();
         return;
       }
       // 主 bus 普通工具 → 切 tool 状态
       if (isMainLineage(meta)) {
         if (!isPhaseRunning(phase)) return;
+        if (activeTasks.size > 0) {
+          phase = toTaskPhase(currentRunning(phase), currentTaskFocus(), phase);
+          repaint();
+          return;
+        }
         const rs = currentRunning(phase);
         phase = {
           kind: "tool",
@@ -295,17 +377,46 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
         repaint();
         return;
       }
-      // 子 bus（Task 内部工具）→ 当前 task 状态下更新 subToolName
-      if (isSubLineage(meta) && phase.kind === "task") {
-        if (phase.subLineage === null) {
-          phase = { ...phase, subLineage: meta!.lineage!, subToolName: payload.name };
-        } else if (meta!.lineage === phase.subLineage) {
-          phase = { ...phase, subToolName: payload.name };
-        }
+      // 子 bus（Task 内部工具）→ 通过 child lineage 反查父 Task
+      if (isSubLineage(meta) && isPhaseRunning(phase)) {
+        const taskId = taskIdForChildLineage(meta!.lineage!);
+        if (!taskId) return;
+        const task = activeTasks.get(taskId);
+        if (!task) return;
+        activeTasks.set(taskId, {
+          ...task,
+          subLineage: meta!.lineage!,
+          subToolName: payload.name,
+        });
+        phase = toTaskPhase(currentRunning(phase), taskId, phase);
         repaint();
       }
     },
   );
+
+  const offChildStart = eventBus.on("tool:child_start", (payload) => {
+    const task = activeTasks.get(payload.parentToolCallId);
+    if (!task || !isPhaseRunning(phase)) return;
+    childLineageToTaskId.set(payload.childLineage, payload.parentToolCallId);
+    activeTasks.set(payload.parentToolCallId, {
+      ...task,
+      subLineage: payload.childLineage,
+    });
+    phase = toTaskPhase(currentRunning(phase), payload.parentToolCallId, phase);
+    repaint();
+  });
+
+  const offChildEnd = eventBus.on("tool:child_end", (payload) => {
+    childLineageToTaskId.delete(payload.childLineage);
+    const task = activeTasks.get(payload.parentToolCallId);
+    if (task) {
+      activeTasks.set(payload.parentToolCallId, {
+        ...task,
+        status: payload.status,
+        subToolName: null,
+      });
+    }
+  });
 
   const offToolEnd = eventBus.on(
     "tool:call_end",
@@ -313,11 +424,23 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
       // 主 bus 派发型工具完成 → 回 streaming
       if (
         isMainLineage(meta) &&
-        getToolRenderStrategy(payload.name) === "sub-agent-status" &&
-        phase.kind === "task"
+        getToolRenderStrategy(payload.name) === "sub-agent-status"
       ) {
-        const next = transitionTo(phase, "streaming");
-        phase = next;
+        if (!isPhaseRunning(phase)) return;
+        const currentStatus = activeTasks.get(payload.id)?.status;
+        finishTask(
+          payload.id,
+          currentStatus && currentStatus !== "running"
+            ? currentStatus
+            : payload.success === false
+              ? "failed"
+              : "succeeded",
+        );
+        if (activeTasks.size > 0) {
+          phase = toTaskPhase(currentRunning(phase), currentTaskFocus(), phase);
+        } else {
+          phase = transitionTo(phase, "streaming");
+        }
         repaint();
         return;
       }
@@ -327,13 +450,19 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
         repaint();
         return;
       }
+      if (isMainLineage(meta) && isPhaseRunning(phase) && activeTasks.size > 0) {
+        phase = toTaskPhase(currentRunning(phase), currentTaskFocus(), phase);
+        repaint();
+        return;
+      }
       // 子 bus 工具完成 → 清除 subToolName，subLineage 保留等下个 sub tool
-      if (
-        isSubLineage(meta) &&
-        phase.kind === "task" &&
-        meta!.lineage === phase.subLineage
-      ) {
-        phase = { ...phase, subToolName: null };
+      if (isSubLineage(meta) && isPhaseRunning(phase)) {
+        const taskId = taskIdForChildLineage(meta!.lineage!);
+        if (!taskId) return;
+        const task = activeTasks.get(taskId);
+        if (!task) return;
+        activeTasks.set(taskId, { ...task, subToolName: null });
+        phase = toTaskPhase(currentRunning(phase), taskId, phase);
         repaint();
       }
     },
@@ -341,7 +470,8 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
 
   const offCompactStart = eventBus.on(
     "segment:transition_start",
-    (payload) => {
+    (payload, meta) => {
+      if (!isMainLineage(meta)) return;
       if (!isPhaseRunning(phase)) return;
       const rs = currentRunning(phase);
       phase = {
@@ -354,13 +484,15 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
   );
 
   // 成功（new_started）与失败（transition_failed）都收束相位 —— 失败不阻塞对话
-  const offCompactEnd = eventBus.on("segment:new_started", () => {
+  const offCompactEnd = eventBus.on("segment:new_started", (_payload, meta) => {
+    if (!isMainLineage(meta)) return;
     if (phase.kind === "compacting") {
       phase = transitionTo(phase, "streaming");
       repaint();
     }
   });
-  const offCompactFailed = eventBus.on("segment:transition_failed", () => {
+  const offCompactFailed = eventBus.on("segment:transition_failed", (_payload, meta) => {
+    if (!isMainLineage(meta)) return;
     if (phase.kind === "compacting") {
       phase = transitionTo(phase, "streaming");
       repaint();
@@ -369,7 +501,8 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
 
   const offRetryAttempt = eventBus.on(
     "retry:attempt",
-    (payload) => {
+    (payload, meta) => {
+      if (!isMainLineage(meta)) return;
       if (!isPhaseRunning(phase)) return;
       const rs = currentRunning(phase);
       phase = {
@@ -383,14 +516,16 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
     },
   );
 
-  const offRetrySuccess = eventBus.on("retry:success", () => {
+  const offRetrySuccess = eventBus.on("retry:success", (_payload, meta) => {
+    if (!isMainLineage(meta)) return;
     if (phase.kind === "retrying") {
       phase = transitionTo(phase, "streaming");
       repaint();
     }
   });
 
-  const offInterruptWarn = eventBus.on("interrupt:warn", (payload) => {
+  const offInterruptWarn = eventBus.on("interrupt:warn", (payload, meta) => {
+    if (!isMainLineage(meta)) return;
     if (!isPhaseRunning(phase)) return;
     const rs = currentRunning(phase);
     phase = {
@@ -403,11 +538,13 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
 
   // abort 路径上 interrupt:fired 严格在 agent:run_end 之前发出——捕获 reason 用于
   // 构造 done(aborted) 状态。非 abort 路径此事件不会触发，lastAbortReason 保持 null。
-  const offInterruptFired = eventBus.on("interrupt:fired", (payload) => {
+  const offInterruptFired = eventBus.on("interrupt:fired", (payload, meta) => {
+    if (!isMainLineage(meta)) return;
     lastAbortReason = payload.reason;
   });
 
-  const offStreamEventForRecovery = eventBus.on("llm:stream_event", () => {
+  const offStreamEventForRecovery = eventBus.on("llm:stream_event", (_payload, meta) => {
+    if (!isMainLineage(meta)) return;
     // 流恢复活跃 → 退出 interrupting 回到 streaming
     if (phase.kind === "interrupting") {
       phase = transitionTo(phase, "streaming");
@@ -415,7 +552,8 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
     }
   });
 
-  const offRunEnd = eventBus.on("agent:run_end", (payload) => {
+  const offRunEnd = eventBus.on("agent:run_end", (payload, meta) => {
+    if (!isMainLineage(meta)) return;
     const base: DoneStateBase = {
       durationMs: payload.duration,
     };
@@ -453,6 +591,8 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
       offStreamEvent();
       offRequestEnd();
       offToolStart();
+      offChildStart();
+      offChildEnd();
       offToolEnd();
       offCompactStart();
       offCompactEnd();
@@ -487,7 +627,10 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
 function renderPhase(phase: Phase): readonly string[] | null {
   const rawLines = renderPhaseRaw(phase);
   if (rawLines === null) return null;
-  return rawLines.map((line) => `${layout.contentPrefix}${line}`);
+  const columns = getTerminalWidth();
+  return rawLines.map((line) =>
+    clampLine(`${layout.contentPrefix}${line}`, Math.max(1, columns - 1)),
+  );
 }
 
 /** 渲染状态条 raw 行——不含 indent 前缀，由 renderPhase 装饰注入。 */
@@ -517,8 +660,8 @@ function renderPhaseRaw(phase: Phase): readonly string[] | null {
       extra = "等待结果";
       break;
     case "task":
-      mainText = VERBS.task(phase.taskN, phase.taskDesc);
-      if (phase.subToolName) extra = VERBS.toolCalling(phase.subToolName);
+      mainText = renderTaskMainText(phase);
+      if (phase.focusSubToolName) extra = VERBS.toolCalling(phase.focusSubToolName);
       break;
     case "compacting":
       mainText = VERBS.compacting;
@@ -555,6 +698,21 @@ function renderTokens(inputTokens: number, outputTokens: number): string {
   if (inputTokens > 0) segs.push(`↑ ${formatTokens(inputTokens)}`);
   if (outputTokens > 0) segs.push(`↓ ${formatTokens(outputTokens)}`);
   return segs.join(" ");
+}
+
+function renderTaskMainText(phase: Phase & { kind: "task" }): string {
+  const finished = phase.completedCount + phase.failedCount + phase.abortedCount;
+  const suffixParts = [
+    phase.activeCount > 1 ? `${phase.activeCount} 个运行中` : null,
+    finished > 0 ? `${phase.completedCount} 完成` : null,
+    phase.failedCount > 0 ? `${phase.failedCount} 失败` : null,
+    phase.abortedCount > 0 ? `${phase.abortedCount} 中止` : null,
+  ].filter((part): part is string => part !== null);
+  const suffix = suffixParts.length > 0 ? ` · ${suffixParts.join(" ")}` : "";
+  if (phase.focusTaskN !== null && phase.focusTaskDesc !== null) {
+    return `${VERBS.task(phase.focusTaskN, phase.focusTaskDesc)}${suffix}`;
+  }
+  return `子任务${suffix}`;
 }
 
 /**
@@ -636,6 +794,19 @@ function transitionTo(
 ): Phase {
   const rs = currentRunning(phase);
   return { kind, ...rs };
+}
+
+function taskCountsFromPhase(
+  phase: Phase,
+): Pick<TaskAggregateState, "completedCount" | "failedCount" | "abortedCount"> {
+  if (phase.kind !== "task") {
+    return { completedCount: 0, failedCount: 0, abortedCount: 0 };
+  }
+  return {
+    completedCount: phase.completedCount,
+    failedCount: phase.failedCount,
+    abortedCount: phase.abortedCount,
+  };
 }
 
 function phaseStartTime(

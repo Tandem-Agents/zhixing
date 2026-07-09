@@ -8,6 +8,7 @@
  */
 
 import type { AbortReason } from "@zhixing/core";
+import { shortVisibleLabel } from "../subtasks/presentation.js";
 
 /**
  * 「印鉴流转」spinner——知行的视觉签名，4 个图形 ◈ ▣ ■ ◆ 在双轴矩阵上环绕滚动。
@@ -95,10 +96,9 @@ export function formatTokens(n: number): string {
   return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
-/** 截断 description，超过 maxLen 用省略号收尾——CJK 全宽按字符数计简化处理。 */
+/** 截断 description，超过 maxLen 用省略号收尾。 */
 export function truncate(s: string, maxLen: number): string {
-  if (s.length <= maxLen) return s;
-  return `${s.slice(0, maxLen - 1)}…`;
+  return shortVisibleLabel(s, maxLen);
 }
 
 /**

@@ -30,11 +30,16 @@
  */
 
 import chalk from "chalk";
-import type { AgentYield } from "@zhixing/core";
+import type { AgentYield, SubAgentResultPresentationArtifact } from "@zhixing/core";
 import { getToolRenderStrategy } from "../tool-render-strategy.js";
 import type { CliWriter, ReplaceableSegmentHandle } from "../screen/index.js";
 import { stringWidth, wrapToWidth } from "../tui/line-width.js";
 import { layout } from "../tui/style.js";
+import {
+  renderSubtaskSummaryLines,
+  toSubtaskDisplayEntry,
+  type SubtaskDisplayEntry,
+} from "../subtasks/presentation.js";
 import { MarkdownStream, type MarkdownMode } from "./markdown/index.js";
 import { createToolBatchCoordinator } from "./tool-batch-coordinator.js";
 
@@ -191,6 +196,8 @@ export function createOutputRenderer(
     writer,
     columns: getColumns,
   });
+  const pendingSubtaskResults: SubtaskDisplayEntry[] = [];
+  let subtaskResultIndex = 0;
 
   /**
    * 已开始但未完成的工具调用 input 缓存——AgentYield.tool_end 不携带 input，
@@ -210,6 +217,27 @@ export function createOutputRenderer(
       mdStream.end();
       mdStream = null;
     }
+  };
+
+  const flushSubtaskSummary = (): void => {
+    if (pendingSubtaskResults.length === 0) return;
+    batchCoordinator.closeBatch();
+    writer.ensureSegmentBreak();
+    for (const line of renderSubtaskSummaryLines(pendingSubtaskResults, {
+      columns: getColumns(),
+    })) {
+      writer.line(line);
+    }
+    pendingSubtaskResults.length = 0;
+  };
+
+  const recordSubtaskResult = (
+    artifact: SubAgentResultPresentationArtifact,
+  ): void => {
+    subtaskResultIndex += 1;
+    pendingSubtaskResults.push(
+      toSubtaskDisplayEntry(artifact, subtaskResultIndex),
+    );
   };
 
   const flushThinkingNow = (): void => {
@@ -267,6 +295,7 @@ export function createOutputRenderer(
           // ensureSegmentBreak 写段间空行，最后 mdStream 创建时再按需 begin 新
           // segment——保证不触发"single-segment only"约束抛错。
           batchCoordinator.closeBatch();
+          flushSubtaskSummary();
           writer.ensureSegmentBreak();
 
           // MarkdownStream 单一入口分发三档模式：
@@ -300,6 +329,7 @@ export function createOutputRenderer(
         // 在 (异常路径) 先 close,正常路径下 closeThinkingSegment no-op。
         flushTextStream();
         batchCoordinator.closeBatch();
+        flushSubtaskSummary();
         closeThinkingSegment();
 
         const segFactory = writer.beginReplaceableSegment;
@@ -370,8 +400,13 @@ export function createOutputRenderer(
 
       case "tool_end": {
         const strategy = getToolRenderStrategy(event.name);
-        // sub-agent-status（Task）走 status-bar 接管的层次化进度展示——主路径静默
-        if (strategy === "sub-agent-status") break;
+        if (strategy === "sub-agent-status") {
+          const presentation = event.result.presentation;
+          if (presentation?.kind === "sub-agent-result") {
+            recordSubtaskResult(presentation);
+          }
+          break;
+        }
 
         const input = pendingToolInputs.get(event.id) ?? {};
         pendingToolInputs.delete(event.id);
@@ -399,10 +434,12 @@ export function createOutputRenderer(
       case "turn_complete":
         closeThinkingSegment();
         flushTextStream();
+        flushSubtaskSummary();
         batchCoordinator.closeBatch();
         // turn 结束兜底清理——正常路径每个 tool_start 都配对 tool_end，
         // 此处仅防御异常断开（如流被中断时未匹配的 tool_start）
         pendingToolInputs.clear();
+        subtaskResultIndex = 0;
         break;
     }
   };
@@ -424,8 +461,10 @@ export function createOutputRenderer(
       // 还在,这里关闭 (与 markdown segment / batch segment 同模式)
       closeThinkingSegment();
       flushTextStream();
+      flushSubtaskSummary();
       batchCoordinator.dispose();
       pendingToolInputs.clear();
+      subtaskResultIndex = 0;
     },
   };
 }

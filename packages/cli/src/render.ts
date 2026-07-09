@@ -37,7 +37,7 @@ import {
   createStatusBar,
   type StatusBarHandle,
 } from "./status-bar/index.js";
-import { attachChunkDumpToBus } from "./output/index.js";
+import { ANCHOR_SUB_AGENT, attachChunkDumpToBus } from "./output/index.js";
 import { renderAuditEvent } from "./security/terminal-renderer.js";
 import {
   createContextIndicator,
@@ -48,6 +48,16 @@ import {
   renderLifecycleWarningLine,
   type LifecycleWarningDeduper,
 } from "./lifecycle-diagnostics-presentation.js";
+import { renderSubtaskUsageLines } from "./subtasks/presentation.js";
+import { getTerminalWidth } from "./tui/style.js";
+
+function isMainLineage(meta?: { lineage?: string }): boolean {
+  return meta?.lineage === undefined || meta.lineage === "main";
+}
+
+function isSubLineage(meta?: { lineage?: string }): boolean {
+  return typeof meta?.lineage === "string" && meta.lineage.startsWith("main/sub-");
+}
 
 // ─── 中断诊断文本 ───
 
@@ -114,7 +124,8 @@ export function setupInterruptRendering(
   pauseUI: () => void,
   writer: CliWriter,
 ): InterruptRenderingHandle {
-  const onWarn = (e: AgentEventMap["interrupt:warn"]) => {
+  const onWarn = (e: AgentEventMap["interrupt:warn"], meta?: { lineage?: string }) => {
+    if (!isMainLineage(meta)) return;
     pauseUI();
     const remaining = Math.max(0, Math.ceil((e.timeoutMs - e.elapsedMs) / 1000));
     // 用 notify：表达"任意时刻可能触发"的语义，与同步段落 line 区分
@@ -125,7 +136,8 @@ export function setupInterruptRendering(
     );
   };
 
-  const onFired = (_e: AgentEventMap["interrupt:fired"]) => {
+  const onFired = (_e: AgentEventMap["interrupt:fired"], meta?: { lineage?: string }) => {
+    if (!isMainLineage(meta)) return;
     pauseUI();
     // dim [interrupted] 接在 LLM 文本之后形成视觉连续
     writer.line(chalk.dim("[interrupted]"));
@@ -294,71 +306,15 @@ export function renderUsageReport(
   }
 
   if (subUsages && subUsages.length > 0) {
-    renderSubAgentUsageSection(subUsages, writer);
+    for (const line of renderSubtaskUsageLines(subUsages, {
+      columns: getTerminalWidth(),
+    })) {
+      writer.line(line);
+    }
+    writer.line("");
   } else {
     writer.line("");
   }
-}
-
-/**
- * 把 RuntimeSubAgentUsageEntry 数组渲染成 /usage 的"子 agent 拆分"段。
- *
- * 排版决策:
- *   - description 截断到 28 字符避免单行过长(中文 / emoji 计算用字符数,v1 简化)
- *   - 状态字段(toolUses / durationMs)仅 succeeded 显示;failed / aborted 显示 status 文字
- *   - durationMs → 秒(2 位小数),用户感知尺度优于毫秒原值
- */
-function renderSubAgentUsageSection(
-  entries: readonly RuntimeSubAgentUsageEntry[],
-  writer: CliWriter,
-): void {
-  writer.line(chalk.dim("  ─────────────────────────────"));
-  writer.line(
-    `  ${chalk.bold("子 agent 拆分")} ${chalk.dim(`(${entries.length} 个 Task)`)}`,
-  );
-
-  for (const entry of entries) {
-    const desc = truncateForDisplay(entry.description, 28);
-    const tokensFmt = formatTokenCount(entry.tokens);
-    const icon =
-      entry.status === "succeeded"
-        ? chalk.green("✓")
-        : entry.status === "failed"
-          ? chalk.yellow("⚠")
-          : chalk.dim("⏵");
-
-    let extra = "";
-    if (entry.status === "succeeded") {
-      const parts: string[] = [];
-      if (entry.toolUses !== undefined) {
-        parts.push(
-          `${entry.toolUses} tool_use${entry.toolUses === 1 ? "" : "s"}`,
-        );
-      }
-      if (entry.durationMs !== undefined) {
-        parts.push(`${(entry.durationMs / 1000).toFixed(2)}s`);
-      }
-      extra = parts.length > 0 ? chalk.dim(`  (${parts.join(", ")})`) : "";
-    } else {
-      extra = chalk.dim(`  (${entry.status})`);
-    }
-
-    writer.line(
-      `  ${chalk.cyan("+")} Task#${entry.index} ${chalk.dim(`(${desc})`)}  ${icon} ${tokensFmt}${extra}`,
-    );
-  }
-
-  const sum = entries.reduce((acc, e) => acc + e.tokens, 0);
-  writer.line(chalk.dim("  ─────────────────────────────"));
-  writer.line(
-    `  ${chalk.dim("Sum")}            ${formatTokenCount(sum)} ${chalk.dim("(子总计,best-effort 解析)")}`,
-  );
-  writer.line("");
-}
-
-function truncateForDisplay(text: string, maxLen: number): string {
-  if (text.length <= maxLen) return text;
-  return `${text.slice(0, maxLen - 1)}…`;
 }
 
 // ─── /context 命令渲染 ───
@@ -463,6 +419,10 @@ function renderPerspectiveProgress(
   writer.line(chalk.dim(`  ◇ ${text}`));
 }
 
+function renderSubtaskAuditLine(line: string): string {
+  return `  ${chalk.dim(ANCHOR_SUB_AGENT)} ${chalk.dim("子任务安全事件")} ${line.trimStart()}`;
+}
+
 /**
  * 工厂——返回符合 DecorateRunBusFn 契约的装饰器，装载所有 EventBus 订阅型渲染。
  *
@@ -490,44 +450,51 @@ export function createRenderSubscribers(
     const unsubs: Array<() => void> = [];
 
     unsubs.push(
-      bus.on("retry:attempt", (info) => {
+      bus.on("retry:attempt", (info, meta) => {
+        if (!isMainLineage(meta)) return;
         pauseUI();
         renderRetryAttempt(info, writer);
       }),
     );
     unsubs.push(
-      bus.on("retry:success", (info) => {
+      bus.on("retry:success", (info, meta) => {
+        if (!isMainLineage(meta)) return;
         pauseUI();
         renderRetrySuccess(info, writer);
       }),
     );
     unsubs.push(
-      bus.on("retry:exhausted", (info) => {
+      bus.on("retry:exhausted", (info, meta) => {
+        if (!isMainLineage(meta)) return;
         pauseUI();
         renderRetryExhausted(info, writer);
       }),
     );
 
     unsubs.push(
-      bus.on("segment:transition_start", (info) => {
+      bus.on("segment:transition_start", (info, meta) => {
+        if (!isMainLineage(meta)) return;
         pauseUI();
         renderSegmentStart(info, writer);
       }),
     );
     unsubs.push(
-      bus.on("segment:emergency_floor", (info) => {
+      bus.on("segment:emergency_floor", (info, meta) => {
+        if (!isMainLineage(meta)) return;
         pauseUI();
         renderEmergencyFloor(info, writer);
       }),
     );
     unsubs.push(
-      bus.on("segment:new_started", (info) => {
+      bus.on("segment:new_started", (info, meta) => {
+        if (!isMainLineage(meta)) return;
         pauseUI();
         renderSegmentEnd(info, writer);
       }),
     );
     unsubs.push(
-      bus.on("segment:transition_failed", (info) => {
+      bus.on("segment:transition_failed", (info, meta) => {
+        if (!isMainLineage(meta)) return;
         pauseUI();
         renderSegmentFailed(info, writer);
       }),
@@ -541,28 +508,29 @@ export function createRenderSubscribers(
     // 直写双模式）各自做幂等：chrome 模式按 cursor 行级状态 emit 1 空行；直写模式
     // no-op。比 helper 内 `\n` 字面量更解耦：未来段间策略调整在 writer 一处变更。
     unsubs.push(
-      bus.on("security:steward_review", (payload) => {
+      bus.on("security:steward_review", (payload, meta) => {
         const line = renderAuditEvent({ type: "steward_review", payload });
         if (!line) return;
         pauseUI();
         writer.ensureSegmentBreak();
-        writer.line(line);
+        writer.line(isSubLineage(meta) ? renderSubtaskAuditLine(line) : line);
       }),
     );
     unsubs.push(
-      bus.on("security:rule_sedimented", (payload) => {
+      bus.on("security:rule_sedimented", (payload, meta) => {
         const line = renderAuditEvent({ type: "rule_sedimented", payload });
         if (!line) return;
         pauseUI();
         writer.ensureSegmentBreak();
-        writer.line(line);
+        writer.line(isSubLineage(meta) ? renderSubtaskAuditLine(line) : line);
       }),
     );
 
     // 运行体生命周期钩子（run 内）—— hook_failed 是失败安全网；warning 是
     // 订阅者主动报告的软降级，用户需要知道本轮上下文约定是否完整生效。
     unsubs.push(
-      bus.on("lifecycle:hook_failed", (info) => {
+      bus.on("lifecycle:hook_failed", (info, meta) => {
+        if (!isMainLineage(meta)) return;
         pauseUI();
         writer.line(
           `  ${chalk.yellow("⚠")} ${chalk.dim(`生命周期钩子 ${info.hookId} 在 ${info.phase} 失败: ${info.error}`)}`,
@@ -570,7 +538,8 @@ export function createRenderSubscribers(
       }),
     );
     unsubs.push(
-      bus.on("lifecycle:warning", (info) => {
+      bus.on("lifecycle:warning", (info, meta) => {
+        if (!isMainLineage(meta)) return;
         if (!lifecycleWarningDeduper.shouldShow(info)) return;
         pauseUI();
         writer.ensureSegmentBreak();
@@ -578,7 +547,8 @@ export function createRenderSubscribers(
       }),
     );
     unsubs.push(
-      bus.on("lifecycle:prompt_rebuilt", (info) => {
+      bus.on("lifecycle:prompt_rebuilt", (info, meta) => {
+        if (!isMainLineage(meta)) return;
         pauseUI();
         writer.line(
           chalk.dim(`  ⟳ 系统提示词已随注意力窗口重建 (${info.reason})`),
@@ -592,7 +562,8 @@ export function createRenderSubscribers(
       convergenceStarted: false,
     };
     unsubs.push(
-      bus.on("orchestration:run_start", (info) => {
+      bus.on("orchestration:run_start", (info, meta) => {
+        if (!isMainLineage(meta)) return;
         if (info.definitionId !== PERSPECTIVES_DELIBERATION_DEFINITION_ID) {
           return;
         }
@@ -607,7 +578,8 @@ export function createRenderSubscribers(
       }),
     );
     unsubs.push(
-      bus.on("orchestration:node_start", (info) => {
+      bus.on("orchestration:node_start", (info, meta) => {
+        if (!isMainLineage(meta)) return;
         if (
           info.definitionId !== PERSPECTIVES_DELIBERATION_DEFINITION_ID ||
           info.runId !== perspectiveProgress.runId
@@ -631,7 +603,8 @@ export function createRenderSubscribers(
       }),
     );
     unsubs.push(
-      bus.on("orchestration:run_end", (info) => {
+      bus.on("orchestration:run_end", (info, meta) => {
+        if (!isMainLineage(meta)) return;
         if (
           info.definitionId !== PERSPECTIVES_DELIBERATION_DEFINITION_ID ||
           info.runId !== perspectiveProgress.runId ||

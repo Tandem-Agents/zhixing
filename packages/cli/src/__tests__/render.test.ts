@@ -10,6 +10,8 @@ import {
   renderUsageReport,
   setupInterruptRendering,
 } from "../render.js";
+import { renderSubtaskUsageLines } from "../subtasks/presentation.js";
+import { stringWidth } from "../tui/line-width.js";
 import type { RuntimeSubAgentUsageEntry } from "@zhixing/server";
 import type { ContextBudget } from "@zhixing/core";
 import type { CliWriter } from "../screen/index.js";
@@ -159,19 +161,19 @@ describe("renderUsageReport: 子 agent Task 拆分段", () => {
     const out = stripAnsi(writer.buffer);
     expect(out).toContain("Token 用量");
     expect(out).toContain("上下文容量");
-    expect(out).not.toContain("子 agent 拆分");
-    expect(out).not.toContain("Sum");
+    expect(out).not.toContain("子任务拆分");
+    expect(out).not.toContain("子任务总计");
   });
 
   it("subUsages 空数组 → 与不传等价(子段不出现)", () => {
     const writer = makeCaptureWriter();
     renderUsageReport(baseBudget, 3, undefined, [], writer);
     const out = stripAnsi(writer.buffer);
-    expect(out).not.toContain("子 agent 拆分");
-    expect(out).not.toContain("Sum");
+    expect(out).not.toContain("子任务拆分");
+    expect(out).not.toContain("子任务总计");
   });
 
-  it("succeeded entry → 显示 ✓ + tokensFmt + tool_uses + duration(秒制)", () => {
+  it("succeeded entry → 显示 ✓ + tokensFmt + 工具调用数 + duration", () => {
     const writer = makeCaptureWriter();
     const entries: RuntimeSubAgentUsageEntry[] = [
       {
@@ -186,16 +188,16 @@ describe("renderUsageReport: 子 agent Task 拆分段", () => {
     ];
     renderUsageReport(baseBudget, 3, undefined, entries, writer);
     const out = stripAnsi(writer.buffer);
-    expect(out).toContain("子 agent 拆分");
-    expect(out).toContain("Task#1");
+    expect(out).toContain("子任务拆分");
+    expect(out).toContain("#1");
     expect(out).toContain("调研模块结构");
     expect(out).toContain("✓");
-    expect(out).toContain("35.4K");
-    expect(out).toContain("5 tool_uses");
-    expect(out).toContain("8.00s");
+    expect(out).toContain("35.4k");
+    expect(out).toContain("5 次工具调用");
+    expect(out).toContain("8.0s");
   });
 
-  it("toolUses=1 → 单数 'tool_use'(不带 s)", () => {
+  it("toolUses=1 → 显示中文工具调用计数", () => {
     const writer = makeCaptureWriter();
     const entries: RuntimeSubAgentUsageEntry[] = [
       {
@@ -210,17 +212,17 @@ describe("renderUsageReport: 子 agent Task 拆分段", () => {
     ];
     renderUsageReport(baseBudget, 3, undefined, entries, writer);
     const out = stripAnsi(writer.buffer);
-    expect(out).toContain("1 tool_use");
-    expect(out).not.toContain("1 tool_uses");
+    expect(out).toContain("1 次工具调用");
   });
 
-  it("failed entry → 显示 ⚠ + tokensFmt + (failed) 标识，无 tool_uses 字段", () => {
+  it("failed entry → 显示 ⚠ + tokensFmt + 失败标识，并保留工具调用数", () => {
     const writer = makeCaptureWriter();
     const entries: RuntimeSubAgentUsageEntry[] = [
       {
         index: 2,
         description: "查 API",
         tokens: 12_300,
+        toolUses: 0,
         durationMs: 3000,
         subId: "fa11ed",
         status: "failed",
@@ -228,11 +230,11 @@ describe("renderUsageReport: 子 agent Task 拆分段", () => {
     ];
     renderUsageReport(baseBudget, 3, undefined, entries, writer);
     const out = stripAnsi(writer.buffer);
-    expect(out).toContain("Task#2");
+    expect(out).toContain("#2");
     expect(out).toContain("⚠");
-    expect(out).toContain("12.3K");
-    expect(out).toContain("(failed)");
-    expect(out).not.toContain("tool_use");
+    expect(out).toContain("12.3k");
+    expect(out).toContain("失败");
+    expect(out).toContain("0 次工具调用");
   });
 
   it("aborted entry → 显示 ⏵ + (aborted) 标识", () => {
@@ -242,6 +244,7 @@ describe("renderUsageReport: 子 agent Task 拆分段", () => {
         index: 3,
         description: "总结",
         tokens: 2_000,
+        toolUses: 0,
         durationMs: 1500,
         subId: "abc123",
         status: "aborted",
@@ -249,9 +252,9 @@ describe("renderUsageReport: 子 agent Task 拆分段", () => {
     ];
     renderUsageReport(baseBudget, 3, undefined, entries, writer);
     const out = stripAnsi(writer.buffer);
-    expect(out).toContain("Task#3");
+    expect(out).toContain("#3");
     expect(out).toContain("⏵");
-    expect(out).toContain("(aborted)");
+    expect(out).toContain("中止");
   });
 
   it("多 entry → 求和行 Sum 等于各 entry tokens 之和", () => {
@@ -270,6 +273,7 @@ describe("renderUsageReport: 子 agent Task 拆分段", () => {
         index: 2,
         description: "b",
         tokens: 12_300,
+        toolUses: 0,
         durationMs: 1000,
         subId: "222222",
         status: "failed",
@@ -286,9 +290,9 @@ describe("renderUsageReport: 子 agent Task 拆分段", () => {
     ];
     renderUsageReport(baseBudget, 3, undefined, entries, writer);
     const out = stripAnsi(writer.buffer);
-    expect(out).toContain("Sum");
-    expect(out).toContain("55.1K");
-    expect(out).toContain("3 个 Task");
+    expect(out).toContain("子任务总计");
+    expect(out).toContain("55.1k");
+    expect(out).toContain("3 个");
   });
 
   it("description 超过 28 字符 → 截断 + 省略号 …", () => {
@@ -309,6 +313,27 @@ describe("renderUsageReport: 子 agent Task 拆分段", () => {
     const out = stripAnsi(writer.buffer);
     expect(out).toContain("…");
     expect(out).not.toContain("a".repeat(50));
+  });
+
+  it("子任务拆分分隔线按终端宽度渲染", () => {
+    const lines = renderSubtaskUsageLines(
+      [
+        {
+          index: 1,
+          description: "调研模块结构",
+          tokens: 100,
+          toolUses: 1,
+          durationMs: 1000,
+          status: "succeeded",
+        },
+      ],
+      { columns: 40 },
+    );
+    const dividerLines = lines.filter((line) => line.includes("─"));
+    expect(dividerLines).toHaveLength(2);
+    for (const line of dividerLines) {
+      expect(stringWidth(line)).toBe(39);
+    }
   });
 });
 

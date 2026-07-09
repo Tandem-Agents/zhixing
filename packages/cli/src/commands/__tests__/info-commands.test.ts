@@ -280,7 +280,7 @@ describe("registerInfoCommands", () => {
     expect(stripAnsi(h.writer.text())).toContain("上下文信息不可用");
   });
 
-  it("/usage 经宿主完整用量视图渲染子 agent 拆分", async () => {
+  it("/usage 经宿主完整用量视图渲染子任务拆分", async () => {
     const h = setup();
 
     await h.dispatcher.dispatch("/usage", RUNTIME);
@@ -289,8 +289,8 @@ describe("registerInfoCommands", () => {
     expect(h.contextBudget).not.toHaveBeenCalled();
     const text = stripAnsi(h.writer.text());
     expect(text).toContain("Token 用量");
-    expect(text).toContain("子 agent 拆分");
-    expect(text).toContain("Task#1");
+    expect(text).toContain("子任务拆分");
+    expect(text).toContain("#1");
     expect(text).toContain("调研模块结构");
   });
 });

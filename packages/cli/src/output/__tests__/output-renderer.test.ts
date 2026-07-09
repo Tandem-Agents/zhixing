@@ -130,6 +130,66 @@ describe("createOutputRenderer · 工具事件分流", () => {
     expect(writer.events).toEqual([]);
   });
 
+  it("Task presentation 在回合边界落一条聚合摘要，只有失败展开告警行", () => {
+    const writer = makeCaptureWriter();
+    const renderer = createOutputRenderer({ writer, columns: 100 });
+    renderer.handleEvent({
+      type: "tool_end",
+      id: "tc1",
+      name: "Task",
+      result: {
+        content: "ok",
+        isError: false,
+        presentation: {
+          kind: "sub-agent-result",
+          toolCallId: "tc1",
+          subAgentId: "11111111-1111-1111-1111-111111111111",
+          description: "审查 A",
+          status: "succeeded",
+          durationMs: 1000,
+          usage: { inputTokens: 100, outputTokens: 20 },
+          toolUses: 2,
+        },
+      },
+      duration: 100,
+    });
+    renderer.handleEvent({
+      type: "tool_end",
+      id: "tc2",
+      name: "Task",
+      result: {
+        content: "failed",
+        isError: true,
+        presentation: {
+          kind: "sub-agent-result",
+          toolCallId: "tc2",
+          subAgentId: "22222222-2222-2222-2222-222222222222",
+          description: "审查 B",
+          status: "failed",
+          durationMs: 2000,
+          usage: { inputTokens: 200, outputTokens: 30 },
+          toolUses: 1,
+          errorOrAbortReason: "provider timeout",
+        },
+      },
+      duration: 200,
+    });
+
+    expect(writer.buffer).toBe("");
+    renderer.handleEvent({
+      type: "turn_complete",
+      turnCount: 1,
+      usage: { inputTokens: 0, outputTokens: 0 },
+    });
+
+    const out = stripAnsi(writer.buffer);
+    expect(out).toContain("2 个子任务");
+    expect(out).toContain("1 成功 1 失败");
+    expect(out).toContain("子任务 #2");
+    expect(out).toContain("provider timeout");
+    expect(out).not.toContain("子任务 #1");
+  });
+
   it("side-effect 工具 tool_end (success) → 独立成行 ✎（不入 batch，不开 segment）", () => {
     const writer = makeCaptureWriter();
     const renderer = createOutputRenderer({ writer });

@@ -133,12 +133,84 @@ describe("StatusBar 状态切换", () => {
       name: "Task",
       input: { description: "x" },
     });
+    await mainBus.emit("tool:child_start", {
+      parentToolCallId: "t1",
+      childLineage: "main/sub-1",
+      childAgentId: "sub-1",
+      label: "x",
+    });
     await subBus.emit("tool:call_start", {
       id: "sub-t1",
       name: "grep",
       input: {},
     });
     expect(screen.statusLines!.join("")).toContain("调用 grep");
+    bar.dispose();
+  });
+
+  it("子 agent run_start/run_end 不重置主状态栏", async () => {
+    const { screen, mainBus, subBus, bar } = setup();
+    await mainBus.emit("agent:run_start", { prompt: "hi" });
+    await mainBus.emit("tool:call_start", {
+      id: "t1",
+      name: "Task",
+      input: { description: "审查代码" },
+    });
+    const before = screen.statusLines!.join("");
+
+    await subBus.emit("agent:run_start", { prompt: "child" });
+    await subBus.emit("agent:run_end", {
+      reason: "completed",
+      duration: 100,
+      usage: { inputTokens: 10, outputTokens: 1 } as never,
+    });
+
+    const after = screen.statusLines!.join("");
+    expect(before).toContain("子任务");
+    expect(after).toContain("子任务");
+    expect(after).toContain("审查代码");
+    expect(after).not.toContain("用时");
+    bar.dispose();
+  });
+
+  it("同一批多个 Task 用 toolCallId 分槽，完成一个不冲掉另一个", async () => {
+    const { screen, mainBus, bar } = setup();
+    await mainBus.emit("agent:run_start", { prompt: "hi" });
+    await mainBus.emit("tool:call_start", {
+      id: "t1",
+      name: "Task",
+      input: { description: "审查 A" },
+    });
+    await mainBus.emit("tool:call_start", {
+      id: "t2",
+      name: "Task",
+      input: { description: "审查 B" },
+    });
+
+    expect(screen.statusLines!.join("")).toContain("2 个运行中");
+
+    await mainBus.emit("tool:call_end", {
+      id: "t1",
+      name: "Task",
+      success: true,
+      result: { content: "ok", isError: false },
+      duration: 100,
+    } as never);
+
+    const afterFirst = screen.statusLines!.join("");
+    expect(afterFirst).toContain("子任务");
+    expect(afterFirst).toContain("审查 B");
+    expect(afterFirst).toContain("1 完成");
+
+    await mainBus.emit("tool:call_end", {
+      id: "t2",
+      name: "Task",
+      success: true,
+      result: { content: "ok", isError: false },
+      duration: 100,
+    } as never);
+
+    expect(screen.statusLines!.join("")).toContain("回复中");
     bar.dispose();
   });
 

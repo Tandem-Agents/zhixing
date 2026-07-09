@@ -57,7 +57,7 @@
  *   done 状态保留显示同模式），下一次 run 的 first emit 自然覆盖
  */
 
-import type { AgentEventMap, IEventBus } from "@zhixing/core";
+import type { AgentEventMap, EventMeta, IEventBus } from "@zhixing/core";
 import { STATUS_TAIL_IDS, type ScreenController } from "../screen/index.js";
 import { formatTokens } from "../status-bar/verbs.js";
 
@@ -101,7 +101,8 @@ export function createContextIndicator(
   };
 
   // ① 下次请求容量快照 —— turn-end emit（anchor + delta / fallback 字符估算）
-  const offTokens = eventBus.on("context:tokens_snapshot", (payload) => {
+  const offTokens = eventBus.on("context:tokens_snapshot", (payload, meta) => {
+    if (!isMainLineage(meta)) return;
     // 防御：totalTokens ≤ 0（异常 emit / 估算器返 0）→ 不刷段，避免出现 "~ 0" 噪声
     if (payload.totalTokens <= 0) return;
     totalTokens = payload.totalTokens;
@@ -121,7 +122,8 @@ export function createContextIndicator(
   // providers/src/presets.ts siliconflow.quirks 注释），cacheReadTokens 永远是
   // undefined → 永远 null → 永远只显示 `~ Xk` 无 cache 后缀。这是自然降级，
   // 非 bug，非配置缺失。
-  const offRequestEnd = eventBus.on("llm:request_end", (payload) => {
+  const offRequestEnd = eventBus.on("llm:request_end", (payload, meta) => {
+    if (!isMainLineage(meta)) return;
     const next = payload.usage.cacheReadTokens;
     cacheReadTokens = next !== undefined && next > 0 ? next : null;
     repaint();
@@ -167,3 +169,5 @@ function formatContextTokens(
   if (cacheReadTokens === null || cacheReadTokens <= 0) return head;
   return `${head} (cache ${formatTokens(cacheReadTokens)})`;
 }
+  const isMainLineage = (meta?: EventMeta): boolean =>
+    meta?.lineage === undefined || meta.lineage === "main";
