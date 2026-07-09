@@ -28,6 +28,7 @@ import {
   createEventBus,
   generateTurnId,
   getZhixingHome,
+  loadLayeredGuidance,
   type AgentTurnParams,
   type AgentEventMap,
   type SchedulerEventMap,
@@ -97,6 +98,8 @@ import { registerCliTurnContextProviders } from "../runtime/turn-context-provide
 import { applyTaskListAction } from "../runtime/task-list-actions.js";
 import { createServeAdvancementController } from "./advancement-controller.js";
 import { createAdvancementAcceptanceLifecycle } from "./advancement-acceptance-lifecycle.js";
+import { createZhixingGuidanceLifecycle } from "./zhixing-guidance-lifecycle.js";
+import { readGuidanceFile } from "./read-guidance-file.js";
 import { createConversationAliveCheck } from "./advancement-gc.js";
 import { createCliRuntimeFactory } from "./session-adapter.js";
 import { createConversationDirectory } from "./conversation-directory.js";
@@ -373,7 +376,15 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     scheduler: getSchedulerFacade,
     // 推进闭环 active 期间把契约验收条件注入执行侧发送视图——订阅者按
     // conversationId 运行期查推进会话状态，装配期不绑定任何对话。
-    lifecycle: [createAdvancementAcceptanceLifecycle(advancementController)],
+    lifecycle: [
+      createAdvancementAcceptanceLifecycle(advancementController),
+      createZhixingGuidanceLifecycle({
+        getZhixingHome,
+        getWorkscene: (sceneId) => worksceneDirectory.get(sceneId),
+        readGuidanceFile,
+        loadLayeredGuidance,
+      }),
+    ],
     // 渠道下游(飞书/RPC)可看到子 agent 冒泡事件,renderDecorator 在非 TTY
     // 模式下退化为只输出 Task 起止帧(子工具中间事件静默,避免日志爆炸)。
     decorateRunBus: serveDecorateRunBus,

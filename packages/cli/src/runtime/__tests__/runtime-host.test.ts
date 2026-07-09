@@ -103,6 +103,7 @@ describe("资产层透传", () => {
     expect(params.decorateRunBus).toBe(decorateRunBus);
     expect(params.workspace).toBeUndefined();
     expect(params.extraTools).toBe(tools);
+    expect(params.runtimeKind).toBe("conversation");
   });
 
   it("onRuntimeCreated 在会话 / 场景 / ephemeral 三条发放路径都被调用", async () => {
@@ -133,6 +134,7 @@ describe("资产层透传", () => {
     } as never);
     let params = createAgentRuntimeMock.mock.calls[0]![0];
     expect(params.workspace).toBe("/proj");
+    expect(params.runtimeKind).toBe("conversation");
     expect(params.primaryRole).toBe("power");
     expect(params.memoryScope).toEqual({ kind: "workscene", sceneId: "s1" });
     expect(params.profile).toBeDefined();
@@ -146,6 +148,7 @@ describe("资产层透传", () => {
     await host.createWorksceneRuntime({ id: "s2", name: "纯对话场景" } as never);
     params = createAgentRuntimeMock.mock.calls[1]![0];
     expect(params.workspace).toBeNull();
+    expect(params.runtimeKind).toBe("conversation");
   });
 });
 
@@ -225,6 +228,7 @@ describe("schedule origin 派生", () => {
     const { options, assembled } = makeHostOptions();
     const host = new RuntimeHost(options);
     await host.createEphemeralRuntime();
+    expect(createAgentRuntimeMock.mock.calls[0]![0].runtimeKind).toBe("ephemeral");
     const getOrigin = assembled[0]!.scheduleOrigin!;
     const bus = { on: vi.fn(), emit: vi.fn() } as never;
 

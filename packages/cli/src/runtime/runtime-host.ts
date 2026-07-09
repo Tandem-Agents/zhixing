@@ -24,6 +24,7 @@ import {
   type AgentRuntime,
   type AgentRuntimeLifecycle,
   type CreateAgentRuntimeOptions,
+  type RuntimeKind,
 } from "@zhixing/orchestrator/runtime";
 import { powerProfile } from "@zhixing/orchestrator/profile";
 import type { SchedulerFacade, TurnOrigin, WorkScene } from "@zhixing/core";
@@ -97,6 +98,7 @@ export class RuntimeHost {
   async createConversationRuntime(): Promise<AgentRuntime> {
     return this.assemble(this.conversationScheduleOrigin, {
       withWorkmodeTools: true,
+      runtimeKind: "conversation",
     });
   }
 
@@ -115,6 +117,7 @@ export class RuntimeHost {
         profile: powerProfile(scene),
         spec: { kind: "workscene", sceneId: scene.id, sceneName: scene.name },
       },
+      runtimeKind: "conversation",
     });
   }
 
@@ -124,7 +127,7 @@ export class RuntimeHost {
    * workmode 工具组。
    */
   async createEphemeralRuntime(): Promise<AgentRuntime> {
-    return this.assemble(() => null);
+    return this.assemble(() => null, { runtimeKind: "ephemeral" });
   }
 
   private async assemble(
@@ -139,6 +142,7 @@ export class RuntimeHost {
         profile: ReturnType<typeof powerProfile>;
         spec: { kind: "workscene"; sceneId: string; sceneName: string };
       };
+      runtimeKind?: RuntimeKind;
     },
   ): Promise<AgentRuntime> {
     const workscene = opts?.workscene;
@@ -159,6 +163,7 @@ export class RuntimeHost {
       onSecurityBlocked: this.opts.onSecurityBlocked,
       segmentDeps: this.opts.segmentDeps,
       skillStore: this.opts.skillStore,
+      runtimeKind: opts?.runtimeKind ?? "conversation",
       ...(this.opts.lifecycle ? { lifecycle: this.opts.lifecycle } : {}),
     });
     this.opts.onRuntimeCreated?.(runtime);

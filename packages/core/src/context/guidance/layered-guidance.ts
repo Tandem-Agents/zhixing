@@ -77,7 +77,10 @@ export async function loadLayeredGuidance(
       content = await input.readGuidanceFile({
         scopeRoot,
         path: filePath,
-        reportWarning: input.reportWarning,
+        reportWarning: (event) =>
+          input.reportWarning({
+            message: `${scope.label}：${event.message}`,
+          }),
       });
     } catch (err) {
       input.reportWarning({
