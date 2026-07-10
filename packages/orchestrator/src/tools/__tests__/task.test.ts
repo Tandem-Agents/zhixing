@@ -40,7 +40,10 @@ import {
   buildTaskToolPrompt,
   createTaskTool,
   formatChildResultAsToolResult,
+  TASK_DESCRIPTION_MAX_CHARS,
+  TASK_ERROR_REASON_MAX_CHARS,
   TASK_INPUT_SCHEMA,
+  TASK_RESULT_TEXT_MAX_CHARS,
   TASK_TOOL_PROMPT,
   type TaskToolEnv,
 } from "../task.js";
@@ -283,6 +286,59 @@ describe("formatChildResultAsToolResult · aborted", () => {
   });
 });
 
+describe("formatChildResultAsToolResult · 字段边界", () => {
+  it("completed 正文在 20k 内截断且 usage trailer 始终位于末尾", () => {
+    const tr = formatChildResultAsToolResult(
+      makeResult({
+        status: "completed",
+        finalAssistantText: "结".repeat(TASK_RESULT_TEXT_MAX_CHARS + 500),
+      }),
+      "bounded result",
+    );
+    const trailerStart = tr.content.lastIndexOf("\n\n<usage>");
+    expect(trailerStart).toBeGreaterThan(0);
+    const body = tr.content.slice(0, trailerStart);
+    expect(Array.from(body).length).toBeLessThanOrEqual(
+      TASK_RESULT_TEXT_MAX_CHARS,
+    );
+    expect(body).toContain("[truncated]");
+    expect(tr.content).toMatch(/<usage>.*<\/usage>$/);
+  });
+
+  it("失败描述、原因与 partial 独立有界，content 与 presentation 共享同一原因", () => {
+    const tr = formatChildResultAsToolResult(
+      makeResult({
+        status: "failed",
+        error: {
+          type: "provider_error",
+          message: "错".repeat(TASK_ERROR_REASON_MAX_CHARS + 500),
+        },
+        partial: "部".repeat(TASK_RESULT_TEXT_MAX_CHARS + 500),
+      }),
+      "描".repeat(TASK_DESCRIPTION_MAX_CHARS + 500),
+      "task-bounded",
+    );
+    expect(tr.presentation?.kind).toBe("sub-agent-result");
+    if (tr.presentation?.kind !== "sub-agent-result") {
+      throw new Error("expected sub-agent-result presentation");
+    }
+    expect(Array.from(tr.presentation.description).length).toBeLessThanOrEqual(
+      TASK_DESCRIPTION_MAX_CHARS,
+    );
+    expect(
+      Array.from(tr.presentation.errorOrAbortReason ?? "").length,
+    ).toBeLessThanOrEqual(TASK_ERROR_REASON_MAX_CHARS);
+    expect(tr.content).toContain(tr.presentation.errorOrAbortReason!);
+    expect(tr.content).toMatch(/<usage>.*<\/usage>$/);
+    expect(Array.from(tr.content).length).toBeLessThanOrEqual(
+      TASK_DESCRIPTION_MAX_CHARS +
+        TASK_ERROR_REASON_MAX_CHARS +
+        TASK_RESULT_TEXT_MAX_CHARS +
+        500,
+    );
+  });
+});
+
 // ─── B. TASK_INPUT_SCHEMA 严格契约 ───
 
 describe("TASK_INPUT_SCHEMA", () => {
@@ -299,6 +355,12 @@ describe("TASK_INPUT_SCHEMA", () => {
     const props = TASK_INPUT_SCHEMA.properties as Record<string, { type: string }>;
     expect(props["description"]?.type).toBe("string");
     expect(props["prompt"]?.type).toBe("string");
+  });
+
+  it("description schema 与运行期共享同一短标签上限", () => {
+    expect(TASK_INPUT_SCHEMA.properties?.["description"]?.["maxLength"]).toBe(
+      TASK_DESCRIPTION_MAX_CHARS,
+    );
   });
 });
 
@@ -439,6 +501,26 @@ describe("createTaskTool.call · 契约前置校验", () => {
       expect(tr.isError).toBe(true);
       expect(tr.content).toMatch(/'description' must be a (non-empty )?string/);
     }
+  });
+
+  it("description 超出 schema 上限 → 输入级 isError 且不派生子 agent", async () => {
+    const provider = new MockLLMProvider([{ text: "should not run" }]);
+    const tool = createTaskTool(makeEnv(provider));
+    const parentBus = createEventBus<AgentEventMap>({ lineage: "main" });
+    const tr = await runContextStorage.run(
+      { bus: parentBus, lineage: "main" },
+      async () =>
+        tool.call(
+          {
+            description: "描".repeat(TASK_DESCRIPTION_MAX_CHARS + 1),
+            prompt: "valid prompt",
+          },
+          makeToolCtx(),
+        ),
+    );
+    expect(tr.isError).toBe(true);
+    expect(tr.content).toContain(`at most ${TASK_DESCRIPTION_MAX_CHARS}`);
+    expect(provider.callCount).toBe(0);
   });
 
   it("prompt 缺失 / 空字符串 / 纯空白 → isError 工具结果，主 LLM 可自修正", async () => {

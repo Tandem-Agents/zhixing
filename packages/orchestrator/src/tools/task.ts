@@ -103,6 +103,10 @@ export interface TaskToolEnv {
   riskMaxTokens: number;
 }
 
+export const TASK_DESCRIPTION_MAX_CHARS = 160;
+export const TASK_ERROR_REASON_MAX_CHARS = 2_000;
+export const TASK_RESULT_TEXT_MAX_CHARS = 20_000;
+
 /**
  * Task 工具的 input schema —— 严格两字段,LLM 学习成本最低。
  *
@@ -121,6 +125,7 @@ export const TASK_INPUT_SCHEMA: JsonSchema = {
     description: {
       type: "string",
       description: "A short (3-5 word) summary of the task, shown in status bar.",
+      maxLength: TASK_DESCRIPTION_MAX_CHARS,
     },
     prompt: {
       type: "string",
@@ -224,7 +229,6 @@ Each Task is stateless — you cannot send follow-up messages to a running Task.
 export const TASK_TOOL_PROMPT = buildTaskToolPrompt(["read", "glob", "grep", "web_fetch"]);
 
 const TASK_MAX_CALLS_PER_TURN = 3;
-const TASK_RESULT_TEXT_MAX_CHARS = 20_000;
 
 // ─── 三态格式化(纯函数) ───
 
@@ -250,7 +254,14 @@ export function formatChildResultAsToolResult(
   toolCallId = "unknown",
 ): ToolResult {
   const usageTag = formatUsageTag(result);
-  const presentation = buildSubAgentPresentation(result, description, toolCallId);
+  const boundedDescription = boundTaskDescription(description);
+  const errorOrAbortReason = resultErrorOrAbortReason(result);
+  const presentation = buildSubAgentPresentation(
+    result,
+    boundedDescription,
+    toolCallId,
+    errorOrAbortReason,
+  );
 
   switch (result.status) {
     case "completed":
@@ -261,7 +272,7 @@ export function formatChildResultAsToolResult(
       };
 
     case "failed": {
-      const errMsg = result.error?.message ?? "unknown error";
+      const errMsg = errorOrAbortReason ?? "unknown error";
       // type tag 让主 LLM 拿到结构化 error 分类(SubAgentErrorType),据此自主决策:
       //   provider_error / rate_limit → 重试 / 等待
       //   context_overflow / sub_agent_context_overflow → 切片子任务
@@ -270,7 +281,7 @@ export function formatChildResultAsToolResult(
       // 比文本前缀("failed:")更可解析,且避免主 LLM 对 message 做 substring 匹配。
       // 缺失场景理论不可达(deriveErrorMeta 总返 type),保留兜底兼容历史结果。
       const typeTag = result.error?.type ? ` (${result.error.type})` : "";
-      const safeDescription = formatDescriptionForPrefix(description);
+      const safeDescription = formatDescriptionForPrefix(boundedDescription);
       const partialBlock = result.partial
         ? `Partial output:\n${truncateTaskText(result.partial)}\n\n`
         : "";
@@ -282,10 +293,8 @@ export function formatChildResultAsToolResult(
     }
 
     case "aborted": {
-      const reasonStr = result.abortReason
-        ? formatAbortReasonForLLM(result.abortReason)
-        : "unknown abort reason";
-      const safeDescription = formatDescriptionForPrefix(description);
+      const reasonStr = errorOrAbortReason ?? "unknown abort reason";
+      const safeDescription = formatDescriptionForPrefix(boundedDescription);
       const partialBlock = result.partial
         ? `Partial output:\n${truncateTaskText(result.partial)}\n\n`
         : "";
@@ -329,16 +338,9 @@ function buildSubAgentPresentation(
   result: ChildAgentResult,
   description: string,
   toolCallId: string,
+  errorOrAbortReason: string | undefined,
 ): SubAgentResultPresentationArtifact {
   const status = result.status === "completed" ? "succeeded" : result.status;
-  const errorOrAbortReason =
-    result.status === "failed"
-      ? result.error?.message
-      : result.status === "aborted"
-        ? result.abortReason
-          ? formatAbortReasonForLLM(result.abortReason)
-          : "unknown abort reason"
-        : undefined;
   return {
     kind: "sub-agent-result",
     toolCallId,
@@ -356,17 +358,64 @@ function buildSubAgentPresentation(
 }
 
 function truncateTaskText(text: string): string {
-  if (text.length <= TASK_RESULT_TEXT_MAX_CHARS) return text;
-  const omitted = text.length - TASK_RESULT_TEXT_MAX_CHARS;
-  return `${text.slice(0, TASK_RESULT_TEXT_MAX_CHARS)}\n\n[truncated: ${omitted.toLocaleString()} chars omitted]`;
+  return truncateBoundedText(
+    text,
+    TASK_RESULT_TEXT_MAX_CHARS,
+    "\n\n[truncated]",
+  );
 }
 
 function formatDescriptionForPrefix(description: string): string {
-  return description
-    .replace(/[\u0000-\u001f\u007f]/g, " ")
+  return truncateBoundedText(
+    description.replace(/"/g, "'"),
+    TASK_DESCRIPTION_MAX_CHARS,
+    "…",
+  );
+}
+
+function resultErrorOrAbortReason(result: ChildAgentResult): string | undefined {
+  if (result.status === "failed") {
+    return truncateBoundedText(
+      result.error?.message ?? "unknown error",
+      TASK_ERROR_REASON_MAX_CHARS,
+      "\n[truncated]",
+    );
+  }
+  if (result.status === "aborted") {
+    const reason = result.abortReason
+      ? formatAbortReasonForLLM(result.abortReason)
+      : "unknown abort reason";
+    return truncateBoundedText(
+      reason,
+      TASK_ERROR_REASON_MAX_CHARS,
+      "\n[truncated]",
+    );
+  }
+  return undefined;
+}
+
+function boundTaskDescription(description: string): string {
+  const normalized = description
+    .replace(/[\u0000-\u001f\u007f-\u009f\p{Cf}]/gu, " ")
     .replace(/\s+/g, " ")
-    .replace(/"/g, '\\"')
     .trim();
+  return truncateBoundedText(
+    normalized || "(unnamed)",
+    TASK_DESCRIPTION_MAX_CHARS,
+    "…",
+  );
+}
+
+function truncateBoundedText(
+  text: string,
+  maxChars: number,
+  truncationSuffix: string,
+): string {
+  const chars = Array.from(text);
+  if (chars.length <= maxChars) return text;
+  const suffix = Array.from(truncationSuffix);
+  if (suffix.length >= maxChars) return suffix.slice(0, maxChars).join("");
+  return `${chars.slice(0, maxChars - suffix.length).join("")}${truncationSuffix}`;
 }
 
 // ─── 前置契约校验 ───
@@ -424,13 +473,20 @@ function parseTaskInput(input: Record<string, unknown>): ParseTaskInputResult {
     };
   }
 
-  const description = input.description.trim();
-  if (!description) {
+  const rawDescription = input.description.trim();
+  if (!rawDescription) {
     return {
       ok: false,
       message: "Task tool input error: 'description' must be a non-empty string.",
     };
   }
+  if (Array.from(rawDescription).length > TASK_DESCRIPTION_MAX_CHARS) {
+    return {
+      ok: false,
+      message: `Task tool input error: 'description' must contain at most ${TASK_DESCRIPTION_MAX_CHARS} characters.`,
+    };
+  }
+  const description = boundTaskDescription(rawDescription);
   const prompt = input.prompt.trim();
   if (!prompt) {
     return {
