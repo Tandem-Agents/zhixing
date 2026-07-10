@@ -193,7 +193,7 @@ export interface ScreenController {
    *   - text=null / 空字符串 → 移除该 id 的段；其他段不受影响。
    *
    * 渲染规则（chrome 协议）：
-   *   - statusLines 非空 + 任一 tail 段非空 → 段集合拼到第一行末尾
+   *   - statusLines 非空 + 任一 tail 段非空 → 段集合拼到最后一行末尾
    *   - statusLines 空 + 任一 tail 段非空 → 段集合独立成行（加 contentPrefix 与全局对齐）
    *   - 所有 tail 段为空 → 不渲染 tail
    *
@@ -937,7 +937,7 @@ class ScreenControllerImpl implements ScreenController {
 
   /**
    * 按 STATUS_TAIL_IDS 声明顺序拼接所有 tail 段 —— 多段间复用 STATUS_TAIL_SEPARATOR
-   * （与 statusLines[0] ↔ tail 之间使用同一分隔符，视觉一致：A │ B │ C）。
+   * （与最后一条 status 锚点 ↔ tail 之间使用同一分隔符，视觉一致：A │ B │ C）。
    *
    * 视觉顺序由注册表声明顺序唯一决定，与各 source 运行时首次 emit 的时序无关 ——
    * 注册表是命名与顺序的单一权威，避免顺序成为事件时序竞态的隐式产物。
@@ -963,7 +963,7 @@ class ScreenControllerImpl implements ScreenController {
 
   /**
    * status 区高度（不含 input）—— 按双源（statusLines / statusTails 段集合）existence 推导：
-   *   - statusLines 非空：保留原行数（tail 段集合拼到第一行末尾，不占新行）
+   *   - statusLines 非空：保留原行数（tail 段集合拼到最后一行末尾，不占新行）
    *   - statusLines 空 + statusTails 非空：1 行（tail 段集合独立成行）
    *   - 两者都空：0 行
    *
@@ -1000,10 +1000,10 @@ class ScreenControllerImpl implements ScreenController {
     const tailJoined = this.joinStatusTails();
     const allLines: string[] = [];
     if (this.statusLines.length > 0) {
-      // statusLines 非空：第一行拼 tail 段集合（chrome 协议绘制分隔符），其余 status 行不变
+      // statusLines 非空：最后一行是稳定锚点，tail 段集合只拼到该行末尾
       for (let i = 0; i < this.statusLines.length; i++) {
         let line = this.statusLines[i]!;
-        if (i === 0 && tailJoined !== null) {
+        if (i === this.statusLines.length - 1 && tailJoined !== null) {
           line =
             line + ScreenControllerImpl.STATUS_TAIL_SEPARATOR + tailJoined;
         }

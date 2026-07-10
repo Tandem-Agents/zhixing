@@ -185,9 +185,9 @@ describe("createOutputRenderer · 工具事件分流", () => {
     const out = stripAnsi(writer.buffer);
     expect(out).toContain("2 个子任务");
     expect(out).toContain("1 成功 1 失败");
-    expect(out).toContain("子任务 #2");
+    expect(out).toContain("⌬ #2 ⚠ 失败");
     expect(out).toContain("provider timeout");
-    expect(out).not.toContain("子任务 #1");
+    expect(out).not.toContain("⌬ #1");
   });
 
   it("side-effect 工具 tool_end (success) → 独立成行 ✎（不入 batch，不开 segment）", () => {

@@ -6,6 +6,7 @@ import {
 } from "@zhixing/core";
 import { createStatusBar } from "../status-bar.js";
 import { layout } from "../../tui/style.js";
+import { stringWidth } from "../../tui/line-width.js";
 import type { ScreenController, InputRegion } from "../../screen/index.js";
 
 class FakeScreen implements ScreenController {
@@ -120,8 +121,10 @@ describe("StatusBar 状态切换", () => {
       name: "Task",
       input: { description: "审查代码" },
     });
-    expect(screen.statusLines!.join("")).toContain("子任务");
-    expect(screen.statusLines!.join("")).toContain("审查代码");
+    expect(screen.statusLines).toHaveLength(2);
+    expect(screen.statusLines![0]).toContain("审查代码");
+    expect(screen.statusLines![1]).toContain("子任务中");
+    expect(screen.statusLines![1]).not.toContain("审查代码");
     bar.dispose();
   });
 
@@ -144,7 +147,8 @@ describe("StatusBar 状态切换", () => {
       name: "grep",
       input: {},
     });
-    expect(screen.statusLines!.join("")).toContain("调用 grep");
+    expect(screen.statusLines![0]).toContain("grep");
+    expect(screen.statusLines![1]).not.toContain("grep");
     bar.dispose();
   });
 
@@ -187,7 +191,7 @@ describe("StatusBar 状态切换", () => {
       input: { description: "审查 B" },
     });
 
-    expect(screen.statusLines!.join("")).toContain("2 个运行中");
+    expect(screen.statusLines!.join("")).toContain("2 运行");
 
     await mainBus.emit("tool:call_end", {
       id: "t1",
@@ -212,6 +216,111 @@ describe("StatusBar 状态切换", () => {
 
     expect(screen.statusLines!.join("")).toContain("回复中");
     bar.dispose();
+  });
+
+  it("child_end 立即幂等收束计数，父 call_end 只负责关闭调用", async () => {
+    const { screen, mainBus, bar } = setup();
+    await mainBus.emit("agent:run_start", { prompt: "hi" });
+    await mainBus.emit("tool:call_start", {
+      id: "t1",
+      name: "Task",
+      input: { description: "审查 A" },
+    });
+    await mainBus.emit("tool:call_start", {
+      id: "t2",
+      name: "Task",
+      input: { description: "审查 B" },
+    });
+    await mainBus.emit("tool:child_start", {
+      parentToolCallId: "t1",
+      childLineage: "main/sub-a",
+      childAgentId: "sub-a",
+      label: "审查 A",
+    });
+    await mainBus.emit("tool:child_start", {
+      parentToolCallId: "t2",
+      childLineage: "main/sub-b",
+      childAgentId: "sub-b",
+      label: "审查 B",
+    });
+
+    await mainBus.emit("tool:child_end", {
+      parentToolCallId: "t1",
+      childLineage: "main/sub-a",
+      childAgentId: "sub-a",
+      status: "succeeded",
+    });
+    const afterChildEnd = screen.statusLines!.join("");
+    expect(afterChildEnd).toContain("1 运行");
+    expect(afterChildEnd).toContain("1 完成");
+    expect(afterChildEnd).toContain("#2 审查 B");
+
+    const repaintCount = screen.setStatusBarCalls.length;
+    await mainBus.emit("tool:child_end", {
+      parentToolCallId: "t1",
+      childLineage: "main/sub-a",
+      childAgentId: "sub-a",
+      status: "succeeded",
+    });
+    expect(screen.setStatusBarCalls).toHaveLength(repaintCount);
+
+    await mainBus.emit("tool:call_end", {
+      id: "t1",
+      name: "Task",
+      success: true,
+      result: { content: "ok", isError: false },
+      duration: 100,
+    } as never);
+    const afterParentEnd = screen.statusLines!.join("");
+    expect(afterParentEnd).toContain("1 运行");
+    expect(afterParentEnd).toContain("1 完成");
+    bar.dispose();
+  });
+
+  it("Task 详情与稳定锚点在 40/80/120 列均有界且职责分离", async () => {
+    const originalColumns = Object.getOwnPropertyDescriptor(process.stdout, "columns");
+    try {
+      for (const columns of [40, 80, 120]) {
+        Object.defineProperty(process.stdout, "columns", {
+          configurable: true,
+          value: columns,
+        });
+        const { screen, mainBus, subBus, bar } = setup();
+        await mainBus.emit("agent:run_start", { prompt: "hi" });
+        await mainBus.emit("tool:call_start", {
+          id: "t1",
+          name: "Task",
+          input: { description: "检查并发状态与超长中文任务描述" },
+        });
+        await mainBus.emit("tool:child_start", {
+          parentToolCallId: "t1",
+          childLineage: "main/sub-1",
+          childAgentId: "sub-1",
+          label: "检查并发状态",
+        });
+        await subBus.emit("tool:call_start", {
+          id: "sub-t1",
+          name: "grep",
+          input: {},
+        });
+
+        expect(screen.statusLines).toHaveLength(2);
+        expect(screen.statusLines![0]).toContain("⌬");
+        expect(screen.statusLines![0]).toContain("#1");
+        expect(screen.statusLines![1]).toContain("子任务中");
+        expect(screen.statusLines![1]).not.toContain("#1");
+        for (const line of screen.statusLines!) {
+          expect(stringWidth(line)).toBeLessThanOrEqual(columns - 1);
+        }
+        bar.dispose();
+      }
+    } finally {
+      if (originalColumns) {
+        Object.defineProperty(process.stdout, "columns", originalColumns);
+      } else {
+        delete (process.stdout as NodeJS.WriteStream & { columns?: number }).columns;
+      }
+    }
   });
 
   it("agent:run_end completed → done 永驻显示（不再 1.5s 自动消失）", async () => {

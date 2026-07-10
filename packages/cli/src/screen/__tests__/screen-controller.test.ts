@@ -328,7 +328,7 @@ describe("ScreenController · setStatusBar", () => {
 });
 
 describe("ScreenController · setStatusTail（按 id 注册多段：单段语义）", () => {
-  it("statusLines 非空 + tail 非空：tail 拼到第一行末尾，chrome 高度不变", () => {
+  it("statusLines 非空 + tail 非空：tail 拼到最后一行末尾，chrome 高度不变", () => {
     const { out, sc } = makeHarness({ rows: 10 });
     sc.attachInput(makeRegion(["> input"]));
     sc.setStatusBar(["S1", "S2"]);
@@ -337,11 +337,13 @@ describe("ScreenController · setStatusTail（按 id 注册多段：单段语义
     // chrome 起手行 = scrollBottom + 1 = (rows - chromeHeight) + 1 = (10 - 3) + 1 = 8
     // —— 与 setStatusTail 调用前一致，说明 chromeHeight 没变（仍是 3）
     expect(out.buffer).toContain("\x1b[8;1H");
-    // tail 拼到 S1 末尾（含 │ 分隔符）；S2 不动
+    // tail 拼到最后一条稳定锚点 S2，临时详情行 S1 不承载全局 tail
     expect(out.buffer).toContain("S1");
     expect(out.buffer).toContain("│");
     expect(out.buffer).toContain("TAIL");
     expect(out.buffer).toContain("S2");
+    expect(out.buffer.indexOf("S1")).toBeLessThan(out.buffer.indexOf("S2"));
+    expect(out.buffer.indexOf("S2")).toBeLessThan(out.buffer.indexOf("TAIL"));
   });
 
   it("statusLines 空 + tail 非空：tail 独立成行（chrome 高度 = 1 tail + input）", () => {

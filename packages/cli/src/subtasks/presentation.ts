@@ -79,10 +79,10 @@ export function renderSubtaskSummaryLines(
 ): readonly string[] {
   if (entries.length === 0) return [];
   const columns = options.columns ?? 80;
-  const lines: string[] = [fitLine(renderSubtaskAggregate(entries), columns)];
+  const lines: string[] = [...renderSubtaskAggregate(entries, columns)];
   for (const entry of entries) {
     if (entry.status === "succeeded") continue;
-    lines.push(fitLine(renderSubtaskAlert(entry), columns));
+    lines.push(...renderSubtaskAlert(entry, columns));
   }
   return lines;
 }
@@ -107,20 +107,27 @@ export function renderSubtaskUsageLines(
   ];
 
   for (const entry of displayEntries) {
-    lines.push(fitLine(renderSubtaskUsageEntry(entry), columns));
+    lines.push(renderSubtaskUsageEntry(entry, columns));
   }
 
   lines.push(fitLine(tone.dim(renderDivider(columns)), columns));
   lines.push(
-    fitLine(
-      `${layout.contentPrefix}${tone.dim("子任务总计")}     ${formatTokens(totalTokens)}${tone.dim(` · ${totalTools} 次工具调用 · ${formatDuration(totalDuration)}`)}`,
-      columns,
+    appendOptionalSegments(
+      `${layout.contentPrefix}${tone.dim("子任务总计")} · ${formatTokens(totalTokens)}`,
+      [
+        tone.dim(`${totalTools} 次工具调用`),
+        tone.dim(formatDuration(totalDuration)),
+      ],
+      lineBudget(columns),
     ),
   );
   return lines;
 }
 
-function renderSubtaskAggregate(entries: readonly SubtaskDisplayEntry[]): string {
+function renderSubtaskAggregate(
+  entries: readonly SubtaskDisplayEntry[],
+  columns: number,
+): readonly string[] {
   const succeeded = entries.filter((entry) => entry.status === "succeeded").length;
   const failed = entries.filter((entry) => entry.status === "failed").length;
   const aborted = entries.filter((entry) => entry.status === "aborted").length;
@@ -133,23 +140,64 @@ function renderSubtaskAggregate(entries: readonly SubtaskDisplayEntry[]): string
     aborted > 0 ? `${aborted} 中止` : null,
   ].filter((part): part is string => part !== null);
   const statusText = statusParts.length > 0 ? statusParts.join(" ") : "无结果";
-  return `${layout.contentPrefix}${tone.dim(ANCHOR_SUB_AGENT)} ${entries.length} 个子任务 · ${statusText} ${tone.dim(`(${formatTokens(totalTokens)} · ${totalTools} 次工具调用 · ${formatDuration(totalDuration)})`)}`;
+  const budget = lineBudget(columns);
+  const heading = `${layout.contentPrefix}${tone.dim(ANCHOR_SUB_AGENT)} ${entries.length} 个子任务`;
+  const outcome = `${statusText} · ${formatTokens(totalTokens)}`;
+  const combined = `${heading} · ${outcome}`;
+  const optional = [
+    tone.dim(`${totalTools} 次工具调用`),
+    tone.dim(formatDuration(totalDuration)),
+  ];
+  if (stringWidth(combined) <= budget) {
+    return [appendOptionalSegments(combined, optional, budget)];
+  }
+  const compactStatus = [
+    succeeded > 0 ? `${succeeded}✓` : null,
+    failed > 0 ? `${failed}⚠` : null,
+    aborted > 0 ? `${aborted}⏵` : null,
+  ].filter((part): part is string => part !== null).join(" ") || "无结果";
+  return [
+    fitLine(heading, columns),
+    appendOptionalSegments(
+      `${layout.contentPrefix}  ${compactStatus} · ${formatTokens(totalTokens)}`,
+      optional,
+      budget,
+    ),
+  ];
 }
 
-function renderSubtaskAlert(entry: SubtaskDisplayEntry): string {
-  const label = shortVisibleLabel(entry.description, 24);
+function renderSubtaskAlert(
+  entry: SubtaskDisplayEntry,
+  columns: number,
+): readonly string[] {
   const statusText = entry.status === "failed" ? "失败" : "中止";
   const icon = entry.status === "failed" ? tone.warn("⚠") : tone.dim("⏵");
+  const index = entry.index !== undefined ? `#${entry.index}` : "#?";
+  const core = `${layout.contentPrefix}${tone.dim(ANCHOR_SUB_AGENT)} ${index} ${icon} ${statusText} · ${formatTokens(entry.tokens)}`;
   const reason = entry.errorOrAbortReason
-    ? ` · ${shortVisibleLabel(entry.errorOrAbortReason, 36, "未知原因")}`
-    : "";
-  const id = entry.subId ? ` · sub ${entry.subId}` : "";
-  const index = entry.index !== undefined ? ` #${entry.index}` : "";
-  return `${layout.contentPrefix}${tone.dim(ANCHOR_SUB_AGENT)} 子任务${index} ${tone.dim(label)} ${icon} ${statusText}${reason}${id} ${tone.dim(`(${formatTokens(entry.tokens)} · ${entry.toolUses} 次工具调用 · ${formatDuration(entry.durationMs)})`)}`;
+    ? shortVisibleLabel(entry.errorOrAbortReason, 36, "未知原因")
+    : null;
+  const optional = subtaskOptionalSegments(entry);
+  const budget = lineBudget(columns);
+
+  if (reason && stringWidth(`${core} · ${reason} · 文`) > budget) {
+    return [
+      composeDescriptionLine(core, entry.description, [], budget),
+      fitLine(
+        `${layout.contentPrefix}  ${tone.dim("原因")} · ${reason}`,
+        columns,
+      ),
+    ];
+  }
+
+  const required = reason ? `${core} · ${reason}` : core;
+  return [composeDescriptionLine(required, entry.description, optional, budget)];
 }
 
-function renderSubtaskUsageEntry(entry: SubtaskDisplayEntry): string {
-  const label = shortVisibleLabel(entry.description, 28);
+function renderSubtaskUsageEntry(
+  entry: SubtaskDisplayEntry,
+  columns: number,
+): string {
   const statusIcon =
     entry.status === "succeeded"
       ? tone.success("✓")
@@ -159,14 +207,76 @@ function renderSubtaskUsageEntry(entry: SubtaskDisplayEntry): string {
   const statusLabel =
     entry.status === "succeeded"
       ? ""
-      : tone.dim(` · ${entry.status === "failed" ? "失败" : "中止"}`);
+      : ` ${entry.status === "failed" ? "失败" : "中止"}`;
   const index = entry.index !== undefined ? `#${entry.index}` : "#?";
-  const subId = entry.subId ? tone.dim(` · sub ${entry.subId}`) : "";
-  return `${layout.contentPrefix}${tone.dim(ANCHOR_SUB_AGENT)} ${index} ${tone.dim(label)}  ${statusIcon} ${formatTokens(entry.tokens)}${tone.dim(` · ${entry.toolUses} 次工具调用 · ${formatDuration(entry.durationMs)}`)}${statusLabel}${subId}`;
+  const required = `${layout.contentPrefix}${tone.dim(ANCHOR_SUB_AGENT)} ${index} ${statusIcon}${statusLabel} · ${formatTokens(entry.tokens)}`;
+  return composeDescriptionLine(
+    required,
+    entry.description,
+    subtaskOptionalSegments(entry),
+    lineBudget(columns),
+  );
+}
+
+function subtaskOptionalSegments(entry: SubtaskDisplayEntry): readonly string[] {
+  return [
+    tone.dim(`${entry.toolUses} 次工具调用`),
+    tone.dim(formatDuration(entry.durationMs)),
+    ...(entry.subId ? [tone.dim(`sub ${entry.subId}`)] : []),
+  ];
+}
+
+function composeDescriptionLine(
+  required: string,
+  description: string,
+  optional: readonly string[],
+  budget: number,
+): string {
+  if (stringWidth(required) >= budget) return clampLine(required, budget);
+  const minimumDescriptionWidth = 4;
+  const selected: string[] = [];
+  for (const segment of optional) {
+    const candidate = [...selected, segment];
+    const suffixWidth = candidate.reduce(
+      (width, item) => width + stringWidth(` · ${item}`),
+      0,
+    );
+    if (
+      stringWidth(required) + stringWidth(" · ") + minimumDescriptionWidth + suffixWidth <=
+      budget
+    ) {
+      selected.push(segment);
+    }
+  }
+  const suffix = selected.map((segment) => ` · ${segment}`).join("");
+  const descriptionBudget = Math.max(
+    0,
+    budget - stringWidth(required) - stringWidth(" · ") - stringWidth(suffix),
+  );
+  if (descriptionBudget === 0) return required;
+  const label = shortVisibleLabel(description, descriptionBudget);
+  return `${required} · ${tone.dim(label)}${suffix}`;
+}
+
+function appendOptionalSegments(
+  required: string,
+  optional: readonly string[],
+  budget: number,
+): string {
+  let line = required;
+  for (const segment of optional) {
+    const candidate = `${line} · ${segment}`;
+    if (stringWidth(candidate) <= budget) line = candidate;
+  }
+  return clampLine(line, budget);
 }
 
 function fitLine(line: string, columns: number): string {
-  return clampLine(line, Math.max(1, columns - 1));
+  return clampLine(line, lineBudget(columns));
+}
+
+function lineBudget(columns: number): number {
+  return Math.max(1, columns - 1);
 }
 
 function renderDivider(columns: number): string {

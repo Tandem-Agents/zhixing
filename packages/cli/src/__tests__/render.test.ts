@@ -2,17 +2,33 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   AbortReason,
   AgentEventMap,
+  OrchestrationDefinitionV1,
+  OrchestrationSystemCapsV1,
 } from "@zhixing/core";
-import { createEventBus } from "@zhixing/core";
+import {
+  createEventBus,
+  emptyUsage,
+  loadOrchestrationDefinitionV1,
+} from "@zhixing/core";
+import {
+  OrchestrationRunnerV1,
+  type AgentNodeExecutorV1,
+} from "@zhixing/orchestrator";
 import {
   createRenderSubscribers,
   formatAbortReasonSummary,
   renderUsageReport,
   setupInterruptRendering,
 } from "../render.js";
-import { renderSubtaskUsageLines } from "../subtasks/presentation.js";
+import {
+  renderSubtaskSummaryLines,
+  renderSubtaskUsageLines,
+} from "../subtasks/presentation.js";
 import { stringWidth } from "../tui/line-width.js";
-import type { RuntimeSubAgentUsageEntry } from "@zhixing/server";
+import {
+  PERSPECTIVES_DELIBERATION_DEFINITION_ID,
+  type RuntimeSubAgentUsageEntry,
+} from "@zhixing/server";
 import type { ContextBudget } from "@zhixing/core";
 import type { CliWriter } from "../screen/index.js";
 
@@ -335,6 +351,105 @@ describe("renderUsageReport: 子 agent Task 拆分段", () => {
       expect(stringWidth(line)).toBe(39);
     }
   });
+
+  it("窄屏 usage 条目优先保留编号、状态和成本，所有行不触发终端换行", () => {
+    for (const columns of [24, 30, 40]) {
+      const lines = renderSubtaskUsageLines(
+        [
+          {
+            index: 1,
+            description: "检查超长中文描述不会挤掉关键状态",
+            tokens: 123_400,
+            toolUses: 12,
+            durationMs: 98_000,
+            subId: "abcdef",
+            status: "failed",
+          },
+        ],
+        { columns },
+      );
+      const entry = lines.find((line) => stripAnsi(line).includes("#1"));
+      expect(entry).toBeDefined();
+      expect(stripAnsi(entry!)).toContain("⚠");
+      expect(stripAnsi(entry!)).toContain("失败");
+      expect(stripAnsi(entry!)).toContain("123.4k");
+      for (const line of lines) {
+        expect(stringWidth(line)).toBeLessThanOrEqual(columns - 1);
+      }
+    }
+  });
+
+  it("窄屏失败摘要保留核心诊断，必要时拆成两条有界行", () => {
+    for (const columns of [24, 30, 40]) {
+      const lines = renderSubtaskSummaryLines(
+        [
+          {
+            index: 2,
+            description: "读取远端接口并核对返回数据",
+            status: "failed",
+            tokens: 12_300,
+            toolUses: 3,
+            durationMs: 4_000,
+            subId: "fa11ed",
+            errorOrAbortReason: "服务端超时，未取得有效响应",
+          },
+        ],
+        { columns },
+      );
+      const text = stripAnsi(lines.join("\n"));
+      expect(text).toContain("#2");
+      expect(text).toContain("⚠");
+      expect(text).toContain("失败");
+      expect(text).toContain("12.3k");
+      expect(text).toContain("原因");
+      for (const line of lines) {
+        expect(stringWidth(line)).toBeLessThanOrEqual(columns - 1);
+      }
+    }
+  });
+
+  it("24 列混合终态聚合与 usage 总计仍保留全部状态和总成本", () => {
+    const displayEntries = [
+      {
+        index: 1,
+        description: "成功任务",
+        status: "succeeded" as const,
+        tokens: 1_000,
+        toolUses: 1,
+        durationMs: 1_000,
+      },
+      {
+        index: 2,
+        description: "失败任务",
+        status: "failed" as const,
+        tokens: 2_000,
+        toolUses: 1,
+        durationMs: 1_000,
+        errorOrAbortReason: "超时",
+      },
+      {
+        index: 3,
+        description: "中止任务",
+        status: "aborted" as const,
+        tokens: 3_000,
+        toolUses: 1,
+        durationMs: 1_000,
+      },
+    ];
+    const summary = renderSubtaskSummaryLines(displayEntries, { columns: 24 });
+    const aggregateText = stripAnsi(summary.slice(0, 2).join(" "));
+    expect(aggregateText).toContain("1✓");
+    expect(aggregateText).toContain("1⚠");
+    expect(aggregateText).toContain("1⏵");
+    expect(aggregateText).toContain("6.0k");
+
+    const usage = renderSubtaskUsageLines(displayEntries, { columns: 24 });
+    const totalLine = usage.find((line) => stripAnsi(line).includes("子任务总计"));
+    expect(stripAnsi(totalLine ?? "")).toContain("6.0k");
+    for (const line of [...summary, ...usage]) {
+      expect(stringWidth(line)).toBeLessThanOrEqual(23);
+    }
+  });
 });
 
 describe("setupInterruptRendering: 走 CliWriter 协调", () => {
@@ -430,6 +545,46 @@ describe("setupInterruptRendering: 走 CliWriter 协调", () => {
 });
 
 describe("createRenderSubscribers: 工厂注入语义", () => {
+  it("真实 OrchestrationRunner 子 lineage 的多视角进度可见", async () => {
+    const writer = makeCaptureWriter();
+    const bus = createEventBus<AgentEventMap>({ lineage: "main" });
+    const decorator = createRenderSubscribers({ writer });
+    const teardown = decorator({ bus, runId: "test", parentBus: null });
+    const loaded = loadOrchestrationDefinitionV1(
+      createPerspectiveTestDefinition(),
+      perspectiveTestCaps,
+    );
+    if (!loaded.ok) {
+      throw new Error(loaded.issues.map((issue) => issue.message).join("; "));
+    }
+    const nodeExecutor: AgentNodeExecutorV1 = {
+      runAgentNode: async (node) => ({
+        nodeId: node.id,
+        status: "completed",
+        output: {
+          nodeId: node.id,
+          format: "text",
+          content: `${node.id}-done`,
+        },
+        usage: emptyUsage(),
+        durationMs: 1,
+      }),
+    };
+    const runner = new OrchestrationRunnerV1({
+      bus,
+      nodeExecutor,
+      createRunId: () => "perspective-ui-test",
+    });
+
+    await runner.run({ executable: loaded.executable });
+
+    const out = stripAnsi(writer.buffer);
+    expect(out).toContain("多视角评议：3 个节点开始协作");
+    expect(out).toContain("交叉吸收中");
+    expect(out).toContain("收敛最终版本中");
+    teardown();
+  });
+
   it("无 renderer + 仅 writer → pauseUI 退化为 no-op，事件渲染照常", async () => {
     const writer = makeCaptureWriter();
     const bus = createEventBus<AgentEventMap>();
@@ -494,3 +649,57 @@ describe("createRenderSubscribers: 工厂注入语义", () => {
     teardown();
   });
 });
+
+const perspectiveTestCaps: OrchestrationSystemCapsV1 = {
+  maxNodes: 5,
+  maxParallel: 2,
+  maxRunMs: 2_000,
+  maxNodeTimeoutMs: 1_000,
+  maxNodeTurns: 2,
+  maxNodeTokens: 500,
+  maxContextSnapshotTokens: 500,
+  maxInstructionChars: 200,
+  maxInputChars: 200,
+  maxOutputChars: 200,
+  allowedNodeKinds: ["agent"],
+  allowedTools: [],
+};
+
+function createPerspectiveTestDefinition(): OrchestrationDefinitionV1 {
+  const node = (
+    id: string,
+    dependsOn: readonly string[] = [],
+  ): OrchestrationDefinitionV1["nodes"][number] => ({
+    id,
+    kind: "agent",
+    dependsOn: [...dependsOn],
+    instruction: `Run ${id}`,
+    context: {
+      includeRunInput: false,
+      includeContextSnapshot: false,
+      includeNodeOutputs: "dependencies",
+    },
+    output: { required: true, format: "text", maxChars: 100 },
+    policy: { timeoutMs: 500, maxTurns: 2, maxTokens: 200, tools: [] },
+  });
+  return {
+    version: 1,
+    id: PERSPECTIVES_DELIBERATION_DEFINITION_ID,
+    title: "Perspective UI test",
+    policy: {
+      maxParallel: 1,
+      maxRunMs: 1_000,
+      defaultNodeTimeoutMs: 500,
+      defaultMaxTurns: 2,
+      defaultMaxTokens: 200,
+      allowedTools: [],
+      failureMode: "fail_fast",
+    },
+    input: { required: false, format: "text", maxChars: 100 },
+    nodes: [
+      node("diverge-1"),
+      node("cross-1", ["diverge-1"]),
+      node("converge", ["cross-1"]),
+    ],
+  };
+}

@@ -43,8 +43,9 @@ import {
   VERBS,
 } from "./verbs.js";
 import { tone, layout, getTerminalWidth } from "../tui/style.js";
-import { clampLine } from "../tui/line-width.js";
+import { clampLine, stringWidth } from "../tui/line-width.js";
 import { getToolRenderStrategy } from "../tool-render-strategy.js";
+import { ANCHOR_SUB_AGENT } from "../output/speaker-state.js";
 
 /** 状态条节流频率——动画帧 + 计时秒进位都靠这个 tick 推动 */
 const TICK_INTERVAL_MS = 250;
@@ -78,17 +79,25 @@ interface RunningState {
   streamingOutput: number;
 }
 
-interface TaskState extends RunningState {
+type TaskLifecycleStatus =
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "aborted";
+
+interface TaskState {
   toolCallId: string;
   taskN: number;
   taskDesc: string;
-  status: "running" | "succeeded" | "failed" | "aborted";
+  status: TaskLifecycleStatus;
+  parentEnded: boolean;
   subLineage: string | null;
   subToolName: string | null;
 }
 
 interface TaskAggregateState extends RunningState {
   focusToolCallId: string | null;
+  totalCount: number;
   activeCount: number;
   focusTaskN: number | null;
   focusTaskDesc: string | null;
@@ -226,8 +235,12 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
   });
 
   const currentTaskFocus = (): string | null => {
-    if (phase.kind === "task" && activeTasks.has(phase.focusToolCallId ?? "")) {
-      return phase.focusToolCallId;
+    if (phase.kind === "task" && phase.focusToolCallId) {
+      const current = activeTasks.get(phase.focusToolCallId);
+      if (current?.status === "running") return phase.focusToolCallId;
+    }
+    for (const task of activeTasks.values()) {
+      if (task.status === "running") return task.toolCallId;
     }
     return activeTasks.keys().next().value ?? null;
   };
@@ -235,20 +248,19 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
   const toTaskPhase = (
     rs: RunningState,
     focusToolCallId: string | null,
-    previousPhase: Phase,
   ): Phase => {
-    const counts = taskCountsFromPhase(previousPhase);
-    const focus =
-      focusToolCallId && activeTasks.has(focusToolCallId)
-        ? focusToolCallId
-        : activeTasks.keys().next().value ?? null;
+    const counts = deriveTaskCounts(activeTasks.values());
+    const preferred = focusToolCallId ? activeTasks.get(focusToolCallId) : undefined;
+    const focus = preferred?.status === "running"
+      ? preferred.toolCallId
+      : currentTaskFocus();
     const focusTask = focus ? activeTasks.get(focus) : undefined;
     return {
       kind: "task",
       ...rs,
       ...counts,
       focusToolCallId: focus,
-      activeCount: activeTasks.size,
+      totalCount: activeTasks.size,
       focusTaskN: focusTask?.taskN ?? null,
       focusTaskDesc: focusTask?.taskDesc ?? null,
       focusSubToolName: focusTask?.subToolName ?? null,
@@ -264,22 +276,6 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
       }
     }
     return null;
-  };
-
-  const finishTask = (
-    toolCallId: string,
-    status: Exclude<TaskState["status"], "running">,
-  ): void => {
-    const task = activeTasks.get(toolCallId);
-    if (task?.subLineage) childLineageToTaskId.delete(task.subLineage);
-    activeTasks.delete(toolCallId);
-    if (phase.kind !== "task") return;
-    phase = {
-      ...phase,
-      completedCount: phase.completedCount + (status === "succeeded" ? 1 : 0),
-      failedCount: phase.failedCount + (status === "failed" ? 1 : 0),
-      abortedCount: phase.abortedCount + (status === "aborted" ? 1 : 0),
-    };
   };
 
   // ─── EventBus 订阅 ───
@@ -349,14 +345,14 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
         taskCounter += 1;
         activeTasks.set(payload.id, {
           toolCallId: payload.id,
-          ...currentRunning(phase),
           taskN: taskCounter,
           taskDesc: desc,
           status: "running",
+          parentEnded: false,
           subLineage: null,
           subToolName: null,
         });
-        phase = toTaskPhase(currentRunning(phase), payload.id, phase);
+        phase = toTaskPhase(currentRunning(phase), payload.id);
         repaint();
         return;
       }
@@ -364,7 +360,7 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
       if (isMainLineage(meta)) {
         if (!isPhaseRunning(phase)) return;
         if (activeTasks.size > 0) {
-          phase = toTaskPhase(currentRunning(phase), currentTaskFocus(), phase);
+          phase = toTaskPhase(currentRunning(phase), currentTaskFocus());
           repaint();
           return;
         }
@@ -382,13 +378,13 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
         const taskId = taskIdForChildLineage(meta!.lineage!);
         if (!taskId) return;
         const task = activeTasks.get(taskId);
-        if (!task) return;
+        if (!task || task.status !== "running") return;
         activeTasks.set(taskId, {
           ...task,
           subLineage: meta!.lineage!,
           subToolName: payload.name,
         });
-        phase = toTaskPhase(currentRunning(phase), taskId, phase);
+        phase = toTaskPhase(currentRunning(phase), taskId);
         repaint();
       }
     },
@@ -396,26 +392,28 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
 
   const offChildStart = eventBus.on("tool:child_start", (payload) => {
     const task = activeTasks.get(payload.parentToolCallId);
-    if (!task || !isPhaseRunning(phase)) return;
+    if (!task || task.status !== "running" || !isPhaseRunning(phase)) return;
     childLineageToTaskId.set(payload.childLineage, payload.parentToolCallId);
     activeTasks.set(payload.parentToolCallId, {
       ...task,
       subLineage: payload.childLineage,
     });
-    phase = toTaskPhase(currentRunning(phase), payload.parentToolCallId, phase);
+    phase = toTaskPhase(currentRunning(phase), payload.parentToolCallId);
     repaint();
   });
 
   const offChildEnd = eventBus.on("tool:child_end", (payload) => {
     childLineageToTaskId.delete(payload.childLineage);
     const task = activeTasks.get(payload.parentToolCallId);
-    if (task) {
-      activeTasks.set(payload.parentToolCallId, {
-        ...task,
-        status: payload.status,
-        subToolName: null,
-      });
-    }
+    if (!task || task.status !== "running" || !isPhaseRunning(phase)) return;
+    activeTasks.set(payload.parentToolCallId, {
+      ...task,
+      status: payload.status,
+      subLineage: null,
+      subToolName: null,
+    });
+    phase = toTaskPhase(currentRunning(phase), currentTaskFocus());
+    repaint();
   });
 
   const offToolEnd = eventBus.on(
@@ -427,18 +425,26 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
         getToolRenderStrategy(payload.name) === "sub-agent-status"
       ) {
         if (!isPhaseRunning(phase)) return;
-        const currentStatus = activeTasks.get(payload.id)?.status;
-        finishTask(
-          payload.id,
-          currentStatus && currentStatus !== "running"
-            ? currentStatus
-            : payload.success === false
-              ? "failed"
-              : "succeeded",
-        );
-        if (activeTasks.size > 0) {
-          phase = toTaskPhase(currentRunning(phase), currentTaskFocus(), phase);
+        const task = activeTasks.get(payload.id);
+        if (!task) return;
+        if (task.subLineage) childLineageToTaskId.delete(task.subLineage);
+        activeTasks.set(payload.id, {
+          ...task,
+          status:
+            task.status === "running"
+              ? payload.success === false
+                ? "failed"
+                : "succeeded"
+              : task.status,
+          parentEnded: true,
+          subLineage: null,
+          subToolName: null,
+        });
+        if ([...activeTasks.values()].some((entry) => !entry.parentEnded)) {
+          phase = toTaskPhase(currentRunning(phase), currentTaskFocus());
         } else {
+          activeTasks.clear();
+          childLineageToTaskId.clear();
           phase = transitionTo(phase, "streaming");
         }
         repaint();
@@ -451,7 +457,7 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
         return;
       }
       if (isMainLineage(meta) && isPhaseRunning(phase) && activeTasks.size > 0) {
-        phase = toTaskPhase(currentRunning(phase), currentTaskFocus(), phase);
+        phase = toTaskPhase(currentRunning(phase), currentTaskFocus());
         repaint();
         return;
       }
@@ -460,9 +466,9 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
         const taskId = taskIdForChildLineage(meta!.lineage!);
         if (!taskId) return;
         const task = activeTasks.get(taskId);
-        if (!task) return;
+        if (!task || task.status !== "running") return;
         activeTasks.set(taskId, { ...task, subToolName: null });
-        phase = toTaskPhase(currentRunning(phase), taskId, phase);
+        phase = toTaskPhase(currentRunning(phase), taskId);
         repaint();
       }
     },
@@ -554,6 +560,8 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
 
   const offRunEnd = eventBus.on("agent:run_end", (payload, meta) => {
     if (!isMainLineage(meta)) return;
+    activeTasks.clear();
+    childLineageToTaskId.clear();
     const base: DoneStateBase = {
       durationMs: payload.duration,
     };
@@ -625,16 +633,16 @@ export function createStatusBar(options: CreateStatusBarOptions): StatusBarHandl
  * 盒子内的内容由 chrome 自管 padding，与此无关。指引在 `tui/style.ts:layout`。
  */
 function renderPhase(phase: Phase): readonly string[] | null {
-  const rawLines = renderPhaseRaw(phase);
-  if (rawLines === null) return null;
   const columns = getTerminalWidth();
+  const rawLines = renderPhaseRaw(phase, Math.max(1, columns - 1));
+  if (rawLines === null) return null;
   return rawLines.map((line) =>
     clampLine(`${layout.contentPrefix}${line}`, Math.max(1, columns - 1)),
   );
 }
 
 /** 渲染状态条 raw 行——不含 indent 前缀，由 renderPhase 装饰注入。 */
-function renderPhaseRaw(phase: Phase): readonly string[] | null {
+function renderPhaseRaw(phase: Phase, lineBudget: number): readonly string[] | null {
   if (phase.kind === "idle") return null;
   const now = Date.now();
 
@@ -644,6 +652,10 @@ function renderPhaseRaw(phase: Phase): readonly string[] | null {
 
   const spinner = tone.brand(spinnerFrame(now));
   const elapsed = formatDuration(now - phaseStartTime(phase));
+
+  if (phase.kind === "task") {
+    return renderTaskPhase(phase, spinner, elapsed, lineBudget);
+  }
 
   let mainText: string;
   let extra: string | null = null;
@@ -658,10 +670,6 @@ function renderPhaseRaw(phase: Phase): readonly string[] | null {
     case "tool":
       mainText = VERBS.toolCalling(phase.toolName);
       extra = "等待结果";
-      break;
-    case "task":
-      mainText = renderTaskMainText(phase);
-      if (phase.focusSubToolName) extra = VERBS.toolCalling(phase.focusSubToolName);
       break;
     case "compacting":
       mainText = VERBS.compacting;
@@ -700,19 +708,60 @@ function renderTokens(inputTokens: number, outputTokens: number): string {
   return segs.join(" ");
 }
 
-function renderTaskMainText(phase: Phase & { kind: "task" }): string {
-  const finished = phase.completedCount + phase.failedCount + phase.abortedCount;
-  const suffixParts = [
-    phase.activeCount > 1 ? `${phase.activeCount} 个运行中` : null,
-    finished > 0 ? `${phase.completedCount} 完成` : null,
+function renderTaskPhase(
+  phase: Phase & { kind: "task" },
+  spinner: string,
+  elapsed: string,
+  lineBudget: number,
+): readonly string[] {
+  const inputTokens = phase.committedInput;
+  const outputTokens = phase.committedOutput + phase.streamingOutput;
+  const anchorParts = [elapsed];
+  const tokenPart = renderTokens(inputTokens, outputTokens);
+  if (tokenPart.length > 0) anchorParts.push(tokenPart);
+  const anchor = `${spinner} 子任务中 ${tone.dim(`(${anchorParts.join(" · ")})`)}`;
+  return [renderTaskDetail(phase, lineBudget), anchor];
+}
+
+function renderTaskDetail(
+  phase: Phase & { kind: "task" },
+  lineBudget: number,
+): string {
+  const contentBudget = Math.max(1, lineBudget - stringWidth(layout.contentPrefix));
+  const counts = [
+    phase.activeCount > 0 ? `${phase.activeCount} 运行` : null,
+    phase.completedCount > 0 ? `${phase.completedCount} 完成` : null,
     phase.failedCount > 0 ? `${phase.failedCount} 失败` : null,
     phase.abortedCount > 0 ? `${phase.abortedCount} 中止` : null,
   ].filter((part): part is string => part !== null);
-  const suffix = suffixParts.length > 0 ? ` · ${suffixParts.join(" ")}` : "";
-  if (phase.focusTaskN !== null && phase.focusTaskDesc !== null) {
-    return `${VERBS.task(phase.focusTaskN, phase.focusTaskDesc)}${suffix}`;
+  const prefix = `${tone.dim(ANCHOR_SUB_AGENT)} ${phase.totalCount} 个子任务${counts.length > 0 ? ` · ${counts.join(" ")}` : ""}`;
+
+  if (phase.focusTaskN === null || phase.focusTaskDesc === null) {
+    return clampLine(prefix, contentBudget);
   }
-  return `子任务${suffix}`;
+
+  const focusPrefix = ` · #${phase.focusTaskN} `;
+  const toolSuffix = phase.focusSubToolName
+    ? ` · ${sanitizeTaskDetail(phase.focusSubToolName)}`
+    : "";
+  const fixedWidth = stringWidth(prefix) + stringWidth(focusPrefix);
+  const minimumDescriptionWidth = 4;
+  const suffix = fixedWidth + minimumDescriptionWidth + stringWidth(toolSuffix) <= contentBudget
+    ? toolSuffix
+    : "";
+  const descriptionBudget = Math.max(
+    1,
+    contentBudget - fixedWidth - stringWidth(suffix),
+  );
+  const description = clampLine(
+    sanitizeTaskDetail(phase.focusTaskDesc),
+    descriptionBudget,
+  );
+  return clampLine(`${prefix}${focusPrefix}${description}${suffix}`, contentBudget);
+}
+
+function sanitizeTaskDetail(text: string): string {
+  return text.replace(/[\u0000-\u001f\u007f-\u009f\p{Cf}]/gu, " ").replace(/\s+/g, " ").trim();
 }
 
 /**
@@ -796,16 +845,27 @@ function transitionTo(
   return { kind, ...rs };
 }
 
-function taskCountsFromPhase(
-  phase: Phase,
-): Pick<TaskAggregateState, "completedCount" | "failedCount" | "abortedCount"> {
-  if (phase.kind !== "task") {
-    return { completedCount: 0, failedCount: 0, abortedCount: 0 };
+function deriveTaskCounts(
+  tasks: Iterable<TaskState>,
+): Pick<
+  TaskAggregateState,
+  "activeCount" | "completedCount" | "failedCount" | "abortedCount"
+> {
+  let activeCount = 0;
+  let completedCount = 0;
+  let failedCount = 0;
+  let abortedCount = 0;
+  for (const task of tasks) {
+    if (task.status === "running") activeCount += 1;
+    if (task.status === "succeeded") completedCount += 1;
+    if (task.status === "failed") failedCount += 1;
+    if (task.status === "aborted") abortedCount += 1;
   }
   return {
-    completedCount: phase.completedCount,
-    failedCount: phase.failedCount,
-    abortedCount: phase.abortedCount,
+    activeCount,
+    completedCount,
+    failedCount,
+    abortedCount,
   };
 }
 

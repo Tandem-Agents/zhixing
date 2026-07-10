@@ -562,8 +562,7 @@ export function createRenderSubscribers(
       convergenceStarted: false,
     };
     unsubs.push(
-      bus.on("orchestration:run_start", (info, meta) => {
-        if (!isMainLineage(meta)) return;
+      bus.on("orchestration:run_start", (info) => {
         if (info.definitionId !== PERSPECTIVES_DELIBERATION_DEFINITION_ID) {
           return;
         }
@@ -578,8 +577,7 @@ export function createRenderSubscribers(
       }),
     );
     unsubs.push(
-      bus.on("orchestration:node_start", (info, meta) => {
-        if (!isMainLineage(meta)) return;
+      bus.on("orchestration:node_start", (info) => {
         if (
           info.definitionId !== PERSPECTIVES_DELIBERATION_DEFINITION_ID ||
           info.runId !== perspectiveProgress.runId
@@ -603,8 +601,7 @@ export function createRenderSubscribers(
       }),
     );
     unsubs.push(
-      bus.on("orchestration:run_end", (info, meta) => {
-        if (!isMainLineage(meta)) return;
+      bus.on("orchestration:run_end", (info) => {
         if (
           info.definitionId !== PERSPECTIVES_DELIBERATION_DEFINITION_ID ||
           info.runId !== perspectiveProgress.runId ||
