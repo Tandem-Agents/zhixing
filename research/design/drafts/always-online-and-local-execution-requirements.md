@@ -1,6 +1,6 @@
 # 持续在线与本地执行：需求与信息核验
 
-> 架构设计见：[知行分布式运行时架构](./distributed-runtime-architecture.md)。
+> 架构设计见：[知行分布式运行时架构总纲](./distributed-runtime-charter.md)。
 
 ## 一、我的核心问题
 
