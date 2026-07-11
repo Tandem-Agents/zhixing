@@ -2,7 +2,7 @@
 name: git-commit-generator
 description: Generate a commit message by analyzing staged and unstaged git changes. Use when the user asks for help writing a commit message, summarizing git diffs, or reviewing staged changes for commit text.
 disable-model-invocation: true
-argument-hint: [extra requirements]
+argument-hint: "[extra requirements]"
 ---
 
 # Git Commit 生成器
@@ -24,9 +24,10 @@ argument-hint: [extra requirements]
 
 ## 暂存区拆分规则
 
-- 每个提交必须是可独立理解、回滚和验证的真实状态；代码提交必须能独立构建和测试。
-- 优先按功能边界拆；若改动在同一类型、函数或测试里行级交织，拆开会制造未验证中间态，则合并。
-- 代码与文档默认分开；强绑定的小文档可随代码提交。
+拆分标准：先枚举架构不变量，提交边界不得切开任何不变量；一次提交必须形成可独立理解、构建、测试、回滚的终态子集，可以缺能力但不得存在半升级语义或需要靠后续提交修复的中间债务。
+
+- 在上述标准内优先按功能边界拆；属于同一不变量，或在同一类型、函数、迁移与测试中交织且拆开会形成半升级状态的改动必须合并。
+- 代码与文档是否同提交，以能否共同形成真实终态判断：契约或行为说明随代码同步生效时合并，否则分开。
 - 临时文件、运行态文件、协作看板默认不进正式提交，除非用户明确要求。
 - 多个单元合并为一个提交时，在 commit body 按单元分段说明。
 
