@@ -37,6 +37,10 @@ export interface MethodEntry {
   handler: RpcHandler;
 }
 
+export type MethodDescriptor = Readonly<
+  Pick<MethodEntry, "name" | "requiresAuth">
+>;
+
 /**
  * 应用层 RPC 错误。处理器抛出此错误会被转为对应的 JSON-RPC 错误响应。
  */
@@ -83,6 +87,13 @@ export class HandlerRegistry {
 
   get(name: string): MethodEntry | undefined {
     return this.entries.get(name);
+  }
+
+  /** 返回不含处理器引用的注册目录，供诊断与协议基线采集使用。 */
+  list(): readonly MethodDescriptor[] {
+    return [...this.entries.values()]
+      .sort((left, right) => left.name.localeCompare(right.name))
+      .map(({ name, requiresAuth }) => Object.freeze({ name, requiresAuth }));
   }
 
   /**

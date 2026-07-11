@@ -1,0 +1,1021 @@
+{
+  "confirmation": [
+    {
+      "method": "confirmation.pending",
+      "params": {
+        "conversationId": "golden-conversation",
+        "expiresAt": "<expiresAt:number>",
+        "operationDetail": "pwd",
+        "operationSummary": "Run command",
+        "request": {
+          "contextId": {
+            "kind": "main"
+          },
+          "createdAt": "<createdAt:number>",
+          "display": {
+            "body": {
+              "command": "pwd",
+              "commandPreview": "pwd",
+              "kind": "bash"
+            },
+            "cwd": "/workspace",
+            "title": "Run command"
+          },
+          "expiresAt": "<expiresAt:number>",
+          "id": "confirmation-golden",
+          "options": [],
+          "sessionType": "interactive",
+          "tool": "bash",
+          "toolInput": {
+            "command": "pwd"
+          },
+          "turnOrigin": {
+            "channel": "rpc",
+            "triggeredBy": "1"
+          },
+          "workingDirectory": "/workspace"
+        },
+        "requestId": "confirmation-golden",
+        "tool": "bash",
+        "turnOrigin": {
+          "channel": "rpc",
+          "triggeredBy": "1"
+        }
+      }
+    },
+    {
+      "method": "confirmation.resolved",
+      "params": {
+        "conversationId": "golden-conversation",
+        "decision": "allow-once",
+        "requestId": "confirmation-golden",
+        "resolvedAt": "<resolvedAt:number>"
+      }
+    }
+  ],
+  "events": [
+    {
+      "conversationId": "golden-conversation",
+      "event": "retry:attempt",
+      "meta": {
+        "lineage": "main",
+        "turnOrigin": {
+          "channel": "rpc",
+          "triggeredBy": "1"
+        }
+      },
+      "payload": {
+        "attempt": 1,
+        "delayMs": 100,
+        "maxAttempts": 3,
+        "reason": "transient"
+      },
+      "runId": "turn-golden",
+      "scope": "run",
+      "seq": 0
+    },
+    {
+      "conversationId": "golden-conversation",
+      "event": "lifecycle:warning",
+      "meta": {
+        "lineage": "main",
+        "turnOrigin": {
+          "channel": "rpc",
+          "triggeredBy": "1"
+        }
+      },
+      "payload": {
+        "hookId": "golden-hook",
+        "message": "warning",
+        "phase": "onWindowOpen",
+        "runtimeId": "runtime-golden",
+        "windowIndex": 0
+      },
+      "runId": "turn-golden",
+      "scope": "run",
+      "seq": 1
+    },
+    {
+      "conversationId": "golden-conversation",
+      "event": "run:closed",
+      "lifecycle": "closed",
+      "meta": {
+        "lineage": "main",
+        "turnOrigin": {
+          "channel": "rpc",
+          "triggeredBy": "1"
+        }
+      },
+      "payload": null,
+      "runId": "turn-golden",
+      "scope": "run",
+      "seq": 2
+    }
+  ],
+  "persistence": {
+    "conversation": {
+      "archived": false,
+      "createdAt": "<createdAt:string>",
+      "id": "golden-conversation",
+      "isDefault": false,
+      "lastActiveAt": "<lastActiveAt:string>",
+      "name": "Golden conversation",
+      "scope": {
+        "kind": "user"
+      }
+    },
+    "meta": {
+      "archived": false,
+      "createdAt": "<createdAt:string>",
+      "id": "golden-conversation",
+      "isDefault": false,
+      "lastActiveAt": "<lastActiveAt:string>",
+      "name": "Golden conversation",
+      "scope": {
+        "kind": "user"
+      }
+    },
+    "snapshot": [
+      {
+        "conversationId": "golden-conversation",
+        "coveredThroughRunIndex": 0,
+        "createdAt": "<createdAt:string>",
+        "structuredSummary": {
+          "active": "active",
+          "facts": "fact",
+          "state": "state"
+        },
+        "tokensAfter": 20,
+        "tokensBefore": 100,
+        "version": 1
+      }
+    ],
+    "transcript": {
+      "index": {
+        "activeShardId": "000001",
+        "conversationId": "golden-conversation",
+        "shards": [
+          {
+            "createdAt": "<createdAt:string>",
+            "file": "000001.jsonl",
+            "id": "000001",
+            "isActive": true
+          }
+        ],
+        "version": 1
+      },
+      "shard": [
+        {
+          "conversationId": "golden-conversation",
+          "createdAt": "<createdAt:string>",
+          "shardId": "000001",
+          "type": "header",
+          "version": 1
+        },
+        {
+          "messages": [
+            {
+              "content": [
+                {
+                  "text": "hello",
+                  "type": "text"
+                }
+              ],
+              "role": "user"
+            },
+            {
+              "content": [
+                {
+                  "text": "world",
+                  "type": "text"
+                }
+              ],
+              "role": "assistant"
+            }
+          ],
+          "runIndex": 0,
+          "timestamp": "<timestamp:string>",
+          "type": "run",
+          "usage": {
+            "inputTokens": 2,
+            "outputTokens": 1
+          }
+        }
+      ]
+    }
+  },
+  "rpc": [
+    {
+      "emptyRequest": {},
+      "method": "auth",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": false
+    },
+    {
+      "emptyRequest": {},
+      "method": "confirmation.list",
+      "outcome": {
+        "code": -32603,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "confirmation.resolve",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "health",
+      "outcome": {
+        "kind": "result",
+        "shape": {
+          "status": "ok",
+          "uptime": "number",
+          "version": "string"
+        }
+      },
+      "requiresAuth": false
+    },
+    {
+      "emptyRequest": {},
+      "method": "llm.complete",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "memory.journalStats",
+      "outcome": {
+        "code": -32603,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "memory.peopleList",
+      "outcome": {
+        "code": -32603,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "schedule.abortRun",
+      "outcome": {
+        "code": -32603,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "schedule.create",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "schedule.delete",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "schedule.list",
+      "outcome": {
+        "code": -32603,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "schedule.run",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "schedule.update",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "server.info",
+      "outcome": {
+        "kind": "result",
+        "shape": {
+          "accessSurfaces": {
+            "channels": [],
+            "currentConnectionId": "number",
+            "liveChannels": [],
+            "otherRpcConnections": "number",
+            "rpcConnections": "number"
+          },
+          "activeConversations": "number",
+          "activeWork": {
+            "cancellableCount": "number",
+            "cancellableWork": [],
+            "count": "number",
+            "drainOnlyCount": "number",
+            "drainOnlyWork": []
+          },
+          "busyConversations": "number",
+          "channels": [],
+          "connectionCount": "number",
+          "deferredWork": [],
+          "host": "string",
+          "keepAliveWork": [],
+          "mcpServers": [],
+          "memoryRssBytes": "number",
+          "pid": "number",
+          "port": "number",
+          "protocol": "number",
+          "protocolRange": {
+            "max": "number",
+            "min": "number"
+          },
+          "shutdownAvailable": "boolean",
+          "startedAt": "string",
+          "uptimeSec": "number",
+          "version": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "server.shutdown",
+      "outcome": {
+        "code": -32603,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "session.abort",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "session.advancementCancel",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "session.advancementConfirm",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "session.advancementDetail",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "session.advancementRevise",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "session.clear",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "session.compact",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "session.contextBudget",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "session.delete",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "session.history",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "session.list",
+      "outcome": {
+        "code": -32603,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "session.new",
+      "outcome": {
+        "code": -32603,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "session.rename",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "session.resume",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "session.security",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "session.send",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "session.subscribe",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "session.taskList",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "session.taskListUpdate",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "session.unsubscribe",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "session.usage",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "skill.archive",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "skill.list",
+      "outcome": {
+        "code": -32603,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "skill.setState",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "trust.list",
+      "outcome": {
+        "code": -32603,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "trust.revoke",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "workscene.create",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "workscene.delete",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "workscene.enter",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "workscene.exit",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "workscene.list",
+      "outcome": {
+        "code": -32603,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "workscene.rename",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    },
+    {
+      "emptyRequest": {},
+      "method": "workscene.setWorkdir",
+      "outcome": {
+        "code": -32602,
+        "kind": "error",
+        "shape": {
+          "code": "number",
+          "message": "string"
+        }
+      },
+      "requiresAuth": true
+    }
+  ],
+  "session": {
+    "cancel": {
+      "abortResult": {
+        "abortedInFlight": true,
+        "cancelledPending": 0
+      },
+      "notifications": [
+        {
+          "method": "session.delta",
+          "params": {
+            "conversationId": "cancel-conversation",
+            "delta": {
+              "text": "before-cancel",
+              "type": "text_delta"
+            },
+            "sessionId": "cancel-conversation",
+            "turnId": "turn-cancel"
+          }
+        },
+        {
+          "method": "session.complete",
+          "params": {
+            "conversationId": "cancel-conversation",
+            "result": {
+              "reason": "aborted",
+              "usage": {
+                "inputTokens": 1,
+                "outputTokens": 0
+              }
+            },
+            "sessionId": "cancel-conversation",
+            "turnId": "turn-cancel"
+          }
+        }
+      ]
+    },
+    "normal": [
+      {
+        "method": "session.delta",
+        "params": {
+          "conversationId": "golden-conversation",
+          "delta": {
+            "text": "hello",
+            "type": "text_delta"
+          },
+          "sessionId": "golden-conversation",
+          "turnId": "turn-golden"
+        }
+      },
+      {
+        "method": "session.delta",
+        "params": {
+          "conversationId": "golden-conversation",
+          "delta": {
+            "turnCount": 1,
+            "type": "turn_complete",
+            "usage": {
+              "inputTokens": 2,
+              "outputTokens": 1
+            }
+          },
+          "sessionId": "golden-conversation",
+          "turnId": "turn-golden"
+        }
+      },
+      {
+        "method": "session.complete",
+        "params": {
+          "conversationId": "golden-conversation",
+          "result": {
+            "message": {
+              "content": [
+                {
+                  "text": "world",
+                  "type": "text"
+                }
+              ],
+              "role": "assistant"
+            },
+            "reason": "completed",
+            "usage": {
+              "inputTokens": 2,
+              "outputTokens": 1
+            }
+          },
+          "sessionId": "golden-conversation",
+          "turnId": "turn-golden"
+        }
+      }
+    ]
+  },
+  "shutdown": {
+    "cancel": {
+      "calls": [
+        {
+          "action": "abort-conversations",
+          "reason": {
+            "kind": "external",
+            "origin": "server-shutdown"
+          },
+          "timeoutMs": 1000
+        },
+        {
+          "action": "abort-jobs",
+          "reason": {
+            "kind": "external",
+            "origin": "server-shutdown"
+          },
+          "timeoutMs": 1000
+        },
+        {
+          "action": "flush-delivery"
+        },
+        {
+          "action": "shutdown",
+          "reason": "golden-stop:cancel"
+        }
+      ],
+      "result": {
+        "accepted": true,
+        "estimatedCompleteAt": "<estimatedCompleteAt:string>",
+        "phase": "stopping",
+        "strategy": "cancel"
+      }
+    },
+    "drain": {
+      "calls": [
+        {
+          "action": "flush-delivery"
+        },
+        {
+          "action": "shutdown",
+          "reason": "golden-stop:drain"
+        }
+      ],
+      "result": {
+        "accepted": true,
+        "estimatedCompleteAt": "<estimatedCompleteAt:string>",
+        "phase": "stopping",
+        "strategy": "drain"
+      }
+    },
+    "immediate": {
+      "calls": [
+        {
+          "action": "shutdown",
+          "reason": "golden-stop"
+        }
+      ],
+      "result": {
+        "accepted": true,
+        "estimatedCompleteAt": "<estimatedCompleteAt:string>",
+        "phase": "stopping",
+        "strategy": "immediate"
+      }
+    }
+  }
+}

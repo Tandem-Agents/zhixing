@@ -1,0 +1,1255 @@
+{
+  "dependencyGraph": {
+    "development": {
+      "@zhixing/channel-feishu": [],
+      "@zhixing/cli": [
+        "@zhixing/test-utils"
+      ],
+      "@zhixing/core": [
+        "@zhixing/test-utils"
+      ],
+      "@zhixing/mcp": [],
+      "@zhixing/network": [],
+      "@zhixing/orchestrator": [
+        "@zhixing/test-utils"
+      ],
+      "@zhixing/providers": [
+        "@zhixing/test-utils"
+      ],
+      "@zhixing/server": [
+        "@zhixing/test-utils"
+      ],
+      "@zhixing/test-utils": [],
+      "@zhixing/tools-builtin": [
+        "@zhixing/test-utils"
+      ]
+    },
+    "peer": {
+      "@zhixing/channel-feishu": [],
+      "@zhixing/cli": [],
+      "@zhixing/core": [],
+      "@zhixing/mcp": [],
+      "@zhixing/network": [],
+      "@zhixing/orchestrator": [],
+      "@zhixing/providers": [],
+      "@zhixing/server": [],
+      "@zhixing/test-utils": [],
+      "@zhixing/tools-builtin": []
+    },
+    "production": {
+      "@zhixing/channel-feishu": [
+        "@zhixing/core"
+      ],
+      "@zhixing/cli": [
+        "@zhixing/channel-feishu",
+        "@zhixing/core",
+        "@zhixing/mcp",
+        "@zhixing/network",
+        "@zhixing/orchestrator",
+        "@zhixing/providers",
+        "@zhixing/server",
+        "@zhixing/tools-builtin"
+      ],
+      "@zhixing/core": [],
+      "@zhixing/mcp": [
+        "@zhixing/core",
+        "@zhixing/network"
+      ],
+      "@zhixing/network": [],
+      "@zhixing/orchestrator": [
+        "@zhixing/core",
+        "@zhixing/network",
+        "@zhixing/providers",
+        "@zhixing/tools-builtin"
+      ],
+      "@zhixing/providers": [
+        "@zhixing/core"
+      ],
+      "@zhixing/server": [
+        "@zhixing/core"
+      ],
+      "@zhixing/test-utils": [],
+      "@zhixing/tools-builtin": [
+        "@zhixing/core",
+        "@zhixing/network"
+      ]
+    }
+  },
+  "rpcContracts": [
+    {
+      "definition": [
+        "readonly perspectives: NonNullable<ServerContext[\"perspectives\"]>;",
+        "readonly question: string;"
+      ],
+      "kind": "interface",
+      "name": "AdmitAndMaybeStartPerspectiveTurnInput"
+    },
+    {
+      "definition": [
+        "readonly manager: ConversationManager;",
+        "readonly conversationId?: string;",
+        "readonly createConversation?: () => Promise<string>;",
+        "readonly exists?: () => Promise<boolean>;",
+        "readonly connectionId: string;",
+        "readonly input: UserTurnInput;",
+        "readonly turnId: string;",
+        "readonly connection: RpcConnection;",
+        "readonly broadcast?: SessionBroadcast;",
+        "readonly surfaceCapabilities: SessionSurfaceCapabilities;"
+      ],
+      "kind": "interface",
+      "name": "AdmitAndMaybeStartTurnInput"
+    },
+    {
+      "definition": "| AdvancementPrepareResult | { readonly kind: \"owner-busy\" }",
+      "kind": "type",
+      "name": "AdvancementPrepareOwnerResult"
+    },
+    {
+      "definition": [
+        "token?: string;",
+        "client?: { id?: string; version?: string; };"
+      ],
+      "kind": "interface",
+      "name": "AuthParams"
+    },
+    {
+      "definition": [
+        "protocol: number;",
+        "protocolRange: typeof SUPPORTED_PROTOCOL_RANGE;",
+        "server: { version: string; };",
+        "capabilities: string[];"
+      ],
+      "kind": "interface",
+      "name": "AuthResult"
+    },
+    {
+      "definition": [],
+      "kind": "interface",
+      "name": "BuiltinMethodsOptions"
+    },
+    {
+      "definition": [
+        "dispose(): void;"
+      ],
+      "kind": "interface",
+      "name": "ConfirmationBridge"
+    },
+    {
+      "definition": [
+        "connections: ReadonlySet<RpcConnection>;",
+        "hub: ConfirmationHub;",
+        "conversations: ConversationManager;"
+      ],
+      "kind": "interface",
+      "name": "ConfirmationBridgeDeps"
+    },
+    {
+      "definition": [
+        "requestId: string;",
+        "conversationId?: string;",
+        "tool: string;",
+        "operationSummary: string;",
+        "riskLevel?: string;",
+        "expiresAt: number;",
+        "turnOrigin?: unknown;"
+      ],
+      "kind": "interface",
+      "name": "ConfirmationListItem"
+    },
+    {
+      "definition": [
+        "conversationId?: string;"
+      ],
+      "kind": "interface",
+      "name": "ConfirmationListParams"
+    },
+    {
+      "definition": [
+        "items: ConfirmationListItem[];"
+      ],
+      "kind": "interface",
+      "name": "ConfirmationListResult"
+    },
+    {
+      "definition": [
+        "requestId?: string;",
+        "decision?: ConfirmationDecision;"
+      ],
+      "kind": "interface",
+      "name": "ConfirmationResolveParams"
+    },
+    {
+      "definition": [
+        "ok: boolean;",
+        "reason?: string;"
+      ],
+      "kind": "interface",
+      "name": "ConfirmationResolveResult"
+    },
+    {
+      "definition": [
+        "readonly conversationId: string;",
+        "readonly runId: string;",
+        "readonly seq?: number;",
+        "readonly event: string;",
+        "readonly payload: unknown;"
+      ],
+      "kind": "interface",
+      "name": "ControlSessionEventInput"
+    },
+    {
+      "definition": [
+        "conversationId?: unknown;",
+        "sessionId?: unknown;"
+      ],
+      "kind": "interface",
+      "name": "ConversationIdParams"
+    },
+    {
+      "definition": [
+        "registry: HandlerRegistry;",
+        "server: ServerContext;",
+        "onError?: (err: unknown, context: { method?: string; messageId?: string | number | null }) => void;"
+      ],
+      "kind": "interface",
+      "name": "DispatcherDeps"
+    },
+    {
+      "definition": "() => void",
+      "kind": "type",
+      "name": "DisposeBridge"
+    },
+    {
+      "definition": [
+        "connections: ReadonlySet<RpcConnection>;",
+        "schedulerEventBus?: IEventBus<SchedulerEventMap>;",
+        "isInternalTask?: (taskId: string) => boolean;"
+      ],
+      "kind": "interface",
+      "name": "EventBridgeDeps"
+    },
+    {
+      "definition": [
+        "connection: RpcConnection;",
+        "server: ServerContext;"
+      ],
+      "kind": "interface",
+      "name": "HandlerContext"
+    },
+    {
+      "definition": [
+        "code: number;",
+        "message: string;",
+        "data?: unknown;"
+      ],
+      "kind": "interface",
+      "name": "JsonRpcError"
+    },
+    {
+      "definition": [
+        "jsonrpc: \"2.0\";",
+        "id: string | number | null;",
+        "error: JsonRpcError;"
+      ],
+      "kind": "interface",
+      "name": "JsonRpcErrorResponse"
+    },
+    {
+      "definition": "| JsonRpcRequest<TParams> | JsonRpcNotification<TParams> | JsonRpcResponse<TResult>",
+      "kind": "type",
+      "name": "JsonRpcMessage"
+    },
+    {
+      "definition": [
+        "jsonrpc: \"2.0\";",
+        "method: string;",
+        "params?: TParams;"
+      ],
+      "kind": "interface",
+      "name": "JsonRpcNotification"
+    },
+    {
+      "definition": [
+        "jsonrpc: \"2.0\";",
+        "id: string | number;",
+        "method: string;",
+        "params?: TParams;"
+      ],
+      "kind": "interface",
+      "name": "JsonRpcRequest"
+    },
+    {
+      "definition": "| JsonRpcSuccessResponse<TResult> | JsonRpcErrorResponse",
+      "kind": "type",
+      "name": "JsonRpcResponse"
+    },
+    {
+      "definition": [
+        "jsonrpc: \"2.0\";",
+        "id: string | number | null;",
+        "result: TResult;"
+      ],
+      "kind": "interface",
+      "name": "JsonRpcSuccessResponse"
+    },
+    {
+      "definition": [
+        "prompt?: string;",
+        "role?: unknown;"
+      ],
+      "kind": "interface",
+      "name": "LlmCompleteParams"
+    },
+    {
+      "definition": "Readonly< Pick<MethodEntry, \"name\" | \"requiresAuth\"> >",
+      "kind": "type",
+      "name": "MethodDescriptor"
+    },
+    {
+      "definition": [
+        "name: string;",
+        "requiresAuth?: boolean;",
+        "handler: RpcHandler;"
+      ],
+      "kind": "interface",
+      "name": "MethodEntry"
+    },
+    {
+      "definition": "| { kind: \"request\"; message: JsonRpcRequest } | { kind: \"notification\"; message: JsonRpcNotification } | { kind: \"response\"; message: JsonRpcResponse } | { kind: \"error\"; error: JsonRpcError; id: string | number | null }",
+      "kind": "type",
+      "name": "ParseResult"
+    },
+    {
+      "definition": "| { kind: \"settled\"; runResult: RunResult } | { kind: \"aborted\" } | { kind: \"error\"; error: unknown }",
+      "kind": "type",
+      "name": "ProjectedSessionTurnResult"
+    },
+    {
+      "definition": "ProjectSessionTurnBaseOptions & ( | { readonly text: string; readonly input?: never } | { readonly input: UserTurnInput; readonly text?: never } )",
+      "kind": "type",
+      "name": "ProjectSessionTurnOptions"
+    },
+    {
+      "definition": [
+        "readonly min: number;",
+        "readonly max: number;"
+      ],
+      "kind": "interface",
+      "name": "ProtocolRange"
+    },
+    {
+      "definition": [
+        "readonly id: number;",
+        "authenticated: boolean;",
+        "readonly loopback: boolean;",
+        "clientInfo?: { id?: string; version?: string };",
+        "sendSuccess(id: string | number | null, result: unknown): void;",
+        "sendError(id: string | number | null, error: JsonRpcError): void;",
+        "notify(method: string, params?: unknown): void;",
+        "close(code?: number, reason?: string): void;",
+        "readonly closed: boolean;",
+        "onClose(callback: () => void): () => void;"
+      ],
+      "kind": "interface",
+      "name": "RpcConnection"
+    },
+    {
+      "definition": "( params: unknown, ctx: HandlerContext, ) => Promise<unknown> | unknown",
+      "kind": "type",
+      "name": "RpcHandler"
+    },
+    {
+      "definition": [
+        "bus: IEventBus<AgentEventMap>;",
+        "conversationId?: string;",
+        "turnContext?: TurnContext;"
+      ],
+      "kind": "interface",
+      "name": "RunEventSource"
+    },
+    {
+      "definition": [
+        "accessSurfaces: { rpcConnections: number; currentConnectionId?: number; otherRpcConnections: number; channels: unknown[]; liveChannels: unknown[]; };",
+        "activeWork: { count: number; cancellableCount: number; drainOnlyCount: number; cancellableWork: RuntimeControlWorkItem[]; drainOnlyWork: RuntimeControlWorkItem[]; };",
+        "deferredWork: RuntimeControlWorkItem[];",
+        "keepAliveWork: RuntimeControlWorkItem[];"
+      ],
+      "kind": "interface",
+      "name": "RuntimeControlSnapshot"
+    },
+    {
+      "definition": [
+        "id: string;",
+        "kind: \"conversation\" | \"scheduler\" | \"delivery\" | \"schedule\";",
+        "label: string;",
+        "count: number;"
+      ],
+      "kind": "interface",
+      "name": "RuntimeControlWorkItem"
+    },
+    {
+      "definition": [
+        "runId?: string;"
+      ],
+      "kind": "interface",
+      "name": "ScheduleAbortRunParams"
+    },
+    {
+      "definition": [
+        "name?: string;",
+        "description?: string;",
+        "enabled?: boolean;",
+        "priority?: ScheduledTask[\"priority\"];",
+        "schedule?: ScheduledTask[\"schedule\"];",
+        "action?: ScheduledTask[\"action\"];",
+        "delivery?: ScheduledTask[\"delivery\"];"
+      ],
+      "kind": "interface",
+      "name": "ScheduleCreateParams"
+    },
+    {
+      "definition": [
+        "id?: string;"
+      ],
+      "kind": "interface",
+      "name": "ScheduleDeleteParams"
+    },
+    {
+      "definition": [
+        "id?: string;"
+      ],
+      "kind": "interface",
+      "name": "ScheduleRunParams"
+    },
+    {
+      "definition": [
+        "id?: string;",
+        "patch?: Partial< Pick< ScheduledTask, \"name\" | \"description\" | \"enabled\" | \"priority\" | \"schedule\" | \"action\" | \"delivery\" > >;"
+      ],
+      "kind": "interface",
+      "name": "ScheduleUpdateParams"
+    },
+    {
+      "definition": [
+        "readonly manager: ConversationManager;",
+        "readonly conversationId?: string;",
+        "readonly preallocatedConversationId?: string;",
+        "readonly input: UserTurnInput;",
+        "readonly turnId: string;",
+        "readonly connectionId: string;",
+        "readonly connection: RpcConnection;",
+        "readonly broadcast?: SessionBroadcast;",
+        "readonly server: ServerContext;",
+        "readonly surfaceCapabilities: SessionSurfaceCapabilities;"
+      ],
+      "kind": "interface",
+      "name": "SendDirectTurnInput"
+    },
+    {
+      "definition": [
+        "readonly engage?: SessionSendEngage;"
+      ],
+      "kind": "interface",
+      "name": "SendUserTurnInput"
+    },
+    {
+      "definition": [
+        "reason?: string;",
+        "timeoutMs?: number;",
+        "strategy?: ServerShutdownStrategy;"
+      ],
+      "kind": "interface",
+      "name": "ServerShutdownParams"
+    },
+    {
+      "definition": [
+        "accepted: true;",
+        "phase: \"stopping\";",
+        "strategy: ServerShutdownStrategy;",
+        "estimatedCompleteAt: string;"
+      ],
+      "kind": "interface",
+      "name": "ServerShutdownResult"
+    },
+    {
+      "definition": [
+        "conversationId?: string;",
+        "sessionId?: string;"
+      ],
+      "kind": "interface",
+      "name": "SessionAbortParams"
+    },
+    {
+      "definition": [
+        "conversationId: string;",
+        "sessionId: string;",
+        "turnId: string;",
+        "advancementContinuation?: { interruptedProxy: boolean; };"
+      ],
+      "kind": "interface",
+      "name": "SessionAcceptedSendResult"
+    },
+    {
+      "definition": "( payload: SessionActivityPayload, ) => void",
+      "kind": "type",
+      "name": "SessionActivityBroadcast"
+    },
+    {
+      "definition": [
+        "conversationId: string;",
+        "source: string;",
+        "lastActiveAt: string;",
+        "unreadHint: boolean;",
+        "listInvalidated: boolean;"
+      ],
+      "kind": "interface",
+      "name": "SessionActivityPayload"
+    },
+    {
+      "definition": [
+        "advancementSessionId?: unknown;",
+        "rubricDraftId?: unknown;",
+        "rubricPersistence?: unknown;"
+      ],
+      "kind": "interface",
+      "name": "SessionAdvancementActionParams"
+    },
+    {
+      "definition": [
+        "executeOriginal?: unknown;"
+      ],
+      "kind": "interface",
+      "name": "SessionAdvancementCancelParams"
+    },
+    {
+      "definition": "| { conversationId: string; sessionId: string; status: \"cancelled\"; advancementSessionId: string; } | { conversationId: string; sessionId: string; turnId: string; status: \"direct-execution\"; advancementSessionId: string; runStatus: \"immediate\" | \"queued\"; }",
+      "kind": "type",
+      "name": "SessionAdvancementCancelResult"
+    },
+    {
+      "definition": [
+        "status: \"confirmed\";",
+        "advancementSessionId: string;",
+        "runStatus: \"immediate\" | \"queued\";"
+      ],
+      "kind": "interface",
+      "name": "SessionAdvancementConfirmResult"
+    },
+    {
+      "definition": [
+        "conversationId: string;",
+        "detail: { advancementSessionId: string; status: AdvancementSessionStatus; rubricTitle?: string; exit?: AdvancementExit; facts: AdvancementClosureFacts; lastReview?: AdvancementRunReview; } | null;"
+      ],
+      "kind": "interface",
+      "name": "SessionAdvancementDetailResult"
+    },
+    {
+      "definition": [
+        "userFeedback?: unknown;"
+      ],
+      "kind": "interface",
+      "name": "SessionAdvancementReviseParams"
+    },
+    {
+      "definition": [
+        "conversationId: string;",
+        "sessionId: string;",
+        "status: \"revised\";",
+        "advancementSessionId: string;",
+        "rubricDraftId: string;",
+        "rubricDraft: RubricContractDraftSnapshot;"
+      ],
+      "kind": "interface",
+      "name": "SessionAdvancementReviseResult"
+    },
+    {
+      "definition": [
+        "advancementSessionId: string;",
+        "status: Extract< AdvancementSessionStatus, \"awaiting-rubric-confirmation\" | \"active\" >;",
+        "rubricTitle?: string;",
+        "rubricDraftId?: string;",
+        "pendingRubricDraft?: RubricContractDraftSnapshot;",
+        "outstandingProxyMessageId?: string;",
+        "lastReview?: { id: string; runIndex: number; /** 会话内验收轮次（review 计数）——runIndex 是对话全局序号，不可作轮次。 */ round: number; decision: AdvancementReviewDecision; reviewedAt: string; };"
+      ],
+      "kind": "interface",
+      "name": "SessionAdvancementStateSnapshot"
+    },
+    {
+      "definition": [
+        "status: \"awaiting-rubric-confirmation\";",
+        "advancementSessionId: string;",
+        "rubricDraftId: string;",
+        "rubricDraft: RubricContractDraftSnapshot;"
+      ],
+      "kind": "interface",
+      "name": "SessionAwaitingRubricResult"
+    },
+    {
+      "definition": "( conversationId: string, method: string, params: unknown, ) => void",
+      "kind": "type",
+      "name": "SessionBroadcast"
+    },
+    {
+      "definition": [
+        "status: \"cancelled\";",
+        "advancementSessionId: string;"
+      ],
+      "kind": "interface",
+      "name": "SessionCancelledRubricResult"
+    },
+    {
+      "definition": "| { conversationId: string; change: \"renamed\"; name: string } | { conversationId: string; change: \"deleted\" } | { conversationId: string; change: \"cleared\" } /** * task_list 视图层状态变更(meta 变更的一种)——接入面屏底任务区据此实时 * 刷新。taskList 为 tools-builtin 的 TaskListState 快照(null = 已清空), * server 不依赖该包、以透传形声明,发射端与消费端同源同包类型。 */ | { conversationId: string; change: \"taskList\"; taskList: TaskListState | null }",
+      "kind": "type",
+      "name": "SessionChangedPayload"
+    },
+    {
+      "definition": [
+        "conversationId?: string;"
+      ],
+      "kind": "interface",
+      "name": "SessionClearParams"
+    },
+    {
+      "definition": [
+        "cleared: true;"
+      ],
+      "kind": "interface",
+      "name": "SessionClearResult"
+    },
+    {
+      "definition": [
+        "conversationId?: string;"
+      ],
+      "kind": "interface",
+      "name": "SessionCompactParams"
+    },
+    {
+      "definition": [
+        "modified: boolean;",
+        "tokensBefore?: number;",
+        "tokensAfter?: number;",
+        "emergencyFloor?: { droppedTurns: number; error: string };"
+      ],
+      "kind": "interface",
+      "name": "SessionCompactResult"
+    },
+    {
+      "definition": [
+        "conversationId: string;",
+        "sessionId: string;",
+        "turnId: string;",
+        "result: WireAgentResult;"
+      ],
+      "kind": "interface",
+      "name": "SessionCompletePayload"
+    },
+    {
+      "definition": [
+        "conversationId?: string;"
+      ],
+      "kind": "interface",
+      "name": "SessionContextBudgetParams"
+    },
+    {
+      "definition": [
+        "budget: ContextBudget;",
+        "turnCount: number;",
+        "calibrationFactor: number;"
+      ],
+      "kind": "interface",
+      "name": "SessionContextBudgetResult"
+    },
+    {
+      "definition": [
+        "status: \"contract-failed\";",
+        "error: { message: string };"
+      ],
+      "kind": "interface",
+      "name": "SessionContractFailedResult"
+    },
+    {
+      "definition": [
+        "conversationId: string;",
+        "name: string;",
+        "createdAt: string;",
+        "lastActiveAt: string;",
+        "active: boolean;",
+        "busy: boolean;",
+        "observerCount: number;",
+        "pendingCount: number;",
+        "advancement?: SessionAdvancementStateSnapshot;"
+      ],
+      "kind": "interface",
+      "name": "SessionConversationEntry"
+    },
+    {
+      "definition": [
+        "conversationId?: string;",
+        "sessionId?: string;"
+      ],
+      "kind": "interface",
+      "name": "SessionDeleteParams"
+    },
+    {
+      "definition": [
+        "conversationId: string;",
+        "sessionId: string;",
+        "turnId: string;",
+        "delta: AgentYield;"
+      ],
+      "kind": "interface",
+      "name": "SessionDeltaPayload"
+    },
+    {
+      "definition": "( conversationId: string, envelope: SessionEventEnvelope, ) => void",
+      "kind": "type",
+      "name": "SessionEventBroadcast"
+    },
+    {
+      "definition": [
+        "conversationId: string;",
+        "scope: SessionEventScope;",
+        "lifecycle?: SessionEventLifecycle;",
+        "runId: string;",
+        "seq: number;",
+        "event: string;",
+        "payload: unknown;",
+        "meta: { /** emit 来源 bus 的 lineage 路径——渲染层区分主 agent / 子 agent 帧 */ lineage?: string; /** 发起本 turn 的接入面身份——旁观端标注消息来源 */ turnOrigin?: TurnContext[\"turnOrigin\"]; };"
+      ],
+      "kind": "interface",
+      "name": "SessionEventEnvelope"
+    },
+    {
+      "definition": "\"event\" | \"closed\"",
+      "kind": "type",
+      "name": "SessionEventLifecycle"
+    },
+    {
+      "definition": "\"run\" | \"control\"",
+      "kind": "type",
+      "name": "SessionEventScope"
+    },
+    {
+      "definition": [
+        "conversationId?: string;",
+        "sessionId?: string;",
+        "limit?: number;",
+        "before?: { shardId: string; runIndex: number };"
+      ],
+      "kind": "interface",
+      "name": "SessionHistoryParams"
+    },
+    {
+      "definition": [
+        "conversations: SessionConversationEntry[];"
+      ],
+      "kind": "interface",
+      "name": "SessionListResult"
+    },
+    {
+      "definition": [
+        "conversationId: string;",
+        "name: string;"
+      ],
+      "kind": "interface",
+      "name": "SessionNewResult"
+    },
+    {
+      "definition": [
+        "conversationId: string;",
+        "turnId: string;",
+        "intent: PostTurnControlIntent;",
+        "conflict?: PostTurnControlOutcome[\"conflict\"];"
+      ],
+      "kind": "interface",
+      "name": "SessionPostTurnControlIntentPayload"
+    },
+    {
+      "definition": [
+        "conversationId?: string;",
+        "name?: string;"
+      ],
+      "kind": "interface",
+      "name": "SessionRenameParams"
+    },
+    {
+      "definition": [
+        "conversationId: string;",
+        "name: string;"
+      ],
+      "kind": "interface",
+      "name": "SessionRenameResult"
+    },
+    {
+      "definition": [
+        "conversationId?: string;"
+      ],
+      "kind": "interface",
+      "name": "SessionResumeParams"
+    },
+    {
+      "definition": [
+        "conversationId: string;",
+        "name: string;",
+        "active: boolean;",
+        "busy: boolean;",
+        "advancement?: SessionAdvancementStateSnapshot;"
+      ],
+      "kind": "interface",
+      "name": "SessionResumeResult"
+    },
+    {
+      "definition": "RubricDraftPersistenceChoice",
+      "kind": "type",
+      "name": "SessionRubricPersistenceChoice"
+    },
+    {
+      "definition": [
+        "conversationId?: string;"
+      ],
+      "kind": "interface",
+      "name": "SessionSecurityParams"
+    },
+    {
+      "definition": "RuntimeSecuritySnapshot",
+      "kind": "type",
+      "name": "SessionSecurityResult"
+    },
+    {
+      "definition": "{ readonly kind: \"perspectives\"; readonly question: string; }",
+      "kind": "type",
+      "name": "SessionSendEngage"
+    },
+    {
+      "definition": [
+        "text?: unknown;",
+        "input?: unknown;",
+        "engage?: unknown;",
+        "surfaceCapabilities?: unknown;",
+        "turnId?: unknown;"
+      ],
+      "kind": "interface",
+      "name": "SessionSendParams"
+    },
+    {
+      "definition": "| SessionAcceptedSendResult | SessionAwaitingRubricResult | SessionCancelledRubricResult | SessionContractFailedResult",
+      "kind": "type",
+      "name": "SessionSendResult"
+    },
+    {
+      "definition": [
+        "conversationId?: string;"
+      ],
+      "kind": "interface",
+      "name": "SessionSubscribeParams"
+    },
+    {
+      "definition": [
+        "subscribed: boolean;"
+      ],
+      "kind": "interface",
+      "name": "SessionSubscribeResult"
+    },
+    {
+      "definition": [
+        "readonly postTurnControl: boolean;"
+      ],
+      "kind": "interface",
+      "name": "SessionSurfaceCapabilities"
+    },
+    {
+      "definition": "| { kind: \"add\"; content: string } | { kind: \"done\"; token: string }",
+      "kind": "type",
+      "name": "SessionTaskListAction"
+    },
+    {
+      "definition": [
+        "conversationId?: string;"
+      ],
+      "kind": "interface",
+      "name": "SessionTaskListParams"
+    },
+    {
+      "definition": [
+        "taskList: TaskListState | null;"
+      ],
+      "kind": "interface",
+      "name": "SessionTaskListResult"
+    },
+    {
+      "definition": [
+        "conversationId?: string;",
+        "action?: SessionTaskListAction;"
+      ],
+      "kind": "interface",
+      "name": "SessionTaskListUpdateParams"
+    },
+    {
+      "definition": [
+        "ok: boolean;",
+        "message: string;",
+        "taskList: TaskListState | null;"
+      ],
+      "kind": "interface",
+      "name": "SessionTaskListUpdateResult"
+    },
+    {
+      "definition": "(method: string, params: unknown) => void",
+      "kind": "type",
+      "name": "SessionTurnNotify"
+    },
+    {
+      "definition": [
+        "unsubscribed: boolean;"
+      ],
+      "kind": "interface",
+      "name": "SessionUnsubscribeResult"
+    },
+    {
+      "definition": [
+        "conversationId?: string;"
+      ],
+      "kind": "interface",
+      "name": "SessionUsageParams"
+    },
+    {
+      "definition": [
+        "subUsages: readonly RuntimeSubAgentUsageEntry[];"
+      ],
+      "kind": "interface",
+      "name": "SessionUsageResult"
+    },
+    {
+      "definition": [
+        "name: string;",
+        "message: string;"
+      ],
+      "kind": "interface",
+      "name": "WireAgentError"
+    },
+    {
+      "definition": "| Exclude<AgentResult, { reason: \"error\" }> | { reason: \"error\"; error: WireAgentError; usage: TokenUsage; }",
+      "kind": "type",
+      "name": "WireAgentResult"
+    },
+    {
+      "definition": [
+        "conversationId: string;",
+        "scene: WorksceneSummary;",
+        "advancement?: SessionAdvancementStateSnapshot;"
+      ],
+      "kind": "interface",
+      "name": "WorksceneEnterResult"
+    },
+    {
+      "definition": [
+        "scenes: WorksceneSummary[];"
+      ],
+      "kind": "interface",
+      "name": "WorksceneListResult"
+    },
+    {
+      "definition": [
+        "sceneId: string;",
+        "name: string;",
+        "workdir?: string;",
+        "workdirWarning?: string;",
+        "lastActiveAt?: string;"
+      ],
+      "kind": "interface",
+      "name": "WorksceneSummary"
+    }
+  ],
+  "topologyEdges": [
+    {
+      "kind": "import",
+      "references": 2,
+      "sourceZone": "cli/runtime",
+      "target": "cli/serve"
+    },
+    {
+      "kind": "import",
+      "references": 9,
+      "sourceZone": "cli/runtime",
+      "target": "package:@zhixing/core"
+    },
+    {
+      "kind": "import",
+      "references": 3,
+      "sourceZone": "cli/runtime",
+      "target": "package:@zhixing/mcp"
+    },
+    {
+      "kind": "import",
+      "references": 1,
+      "sourceZone": "cli/runtime",
+      "target": "package:@zhixing/network"
+    },
+    {
+      "kind": "import",
+      "references": 5,
+      "sourceZone": "cli/runtime",
+      "target": "package:@zhixing/orchestrator"
+    },
+    {
+      "kind": "import",
+      "references": 2,
+      "sourceZone": "cli/runtime",
+      "target": "package:@zhixing/providers"
+    },
+    {
+      "kind": "import",
+      "references": 8,
+      "sourceZone": "cli/runtime",
+      "target": "package:@zhixing/server"
+    },
+    {
+      "kind": "import",
+      "references": 1,
+      "sourceZone": "cli/runtime",
+      "target": "package:@zhixing/tools-builtin"
+    },
+    {
+      "kind": "type-import",
+      "references": 13,
+      "sourceZone": "cli/runtime",
+      "target": "package:@zhixing/core"
+    },
+    {
+      "kind": "type-import",
+      "references": 2,
+      "sourceZone": "cli/runtime",
+      "target": "package:@zhixing/orchestrator"
+    },
+    {
+      "kind": "type-import",
+      "references": 1,
+      "sourceZone": "cli/runtime",
+      "target": "package:@zhixing/providers"
+    },
+    {
+      "kind": "type-import",
+      "references": 5,
+      "sourceZone": "cli/runtime",
+      "target": "package:@zhixing/server"
+    },
+    {
+      "kind": "type-import",
+      "references": 4,
+      "sourceZone": "cli/runtime",
+      "target": "package:@zhixing/tools-builtin"
+    },
+    {
+      "kind": "dynamic-import",
+      "references": 1,
+      "sourceZone": "cli/serve",
+      "target": "package:@zhixing/channel-feishu"
+    },
+    {
+      "kind": "import",
+      "references": 7,
+      "sourceZone": "cli/serve",
+      "target": "cli/runtime"
+    },
+    {
+      "kind": "import",
+      "references": 2,
+      "sourceZone": "cli/serve",
+      "target": "external:node:http"
+    },
+    {
+      "kind": "import",
+      "references": 15,
+      "sourceZone": "cli/serve",
+      "target": "package:@zhixing/core"
+    },
+    {
+      "kind": "import",
+      "references": 1,
+      "sourceZone": "cli/serve",
+      "target": "package:@zhixing/mcp"
+    },
+    {
+      "kind": "import",
+      "references": 2,
+      "sourceZone": "cli/serve",
+      "target": "package:@zhixing/orchestrator"
+    },
+    {
+      "kind": "import",
+      "references": 3,
+      "sourceZone": "cli/serve",
+      "target": "package:@zhixing/providers"
+    },
+    {
+      "kind": "import",
+      "references": 12,
+      "sourceZone": "cli/serve",
+      "target": "package:@zhixing/server"
+    },
+    {
+      "kind": "type-import",
+      "references": 5,
+      "sourceZone": "cli/serve",
+      "target": "package:@zhixing/core"
+    },
+    {
+      "kind": "type-import",
+      "references": 2,
+      "sourceZone": "cli/serve",
+      "target": "package:@zhixing/mcp"
+    },
+    {
+      "kind": "type-import",
+      "references": 4,
+      "sourceZone": "cli/serve",
+      "target": "package:@zhixing/orchestrator"
+    },
+    {
+      "kind": "type-import",
+      "references": 3,
+      "sourceZone": "cli/serve",
+      "target": "package:@zhixing/providers"
+    },
+    {
+      "kind": "type-import",
+      "references": 7,
+      "sourceZone": "cli/serve",
+      "target": "package:@zhixing/server"
+    },
+    {
+      "kind": "import",
+      "references": 1,
+      "sourceZone": "core/conversation",
+      "target": "core/transcript"
+    },
+    {
+      "kind": "import",
+      "references": 3,
+      "sourceZone": "orchestrator/runtime",
+      "target": "package:@zhixing/core"
+    },
+    {
+      "kind": "import",
+      "references": 1,
+      "sourceZone": "orchestrator/runtime",
+      "target": "package:@zhixing/providers"
+    },
+    {
+      "kind": "import",
+      "references": 1,
+      "sourceZone": "orchestrator/runtime",
+      "target": "package:@zhixing/tools-builtin"
+    },
+    {
+      "kind": "type-import",
+      "references": 6,
+      "sourceZone": "orchestrator/runtime",
+      "target": "package:@zhixing/core"
+    },
+    {
+      "kind": "import",
+      "references": 2,
+      "sourceZone": "server/advancement",
+      "target": "package:@zhixing/core"
+    },
+    {
+      "kind": "import",
+      "references": 5,
+      "sourceZone": "server/advancement",
+      "target": "server/rpc"
+    },
+    {
+      "kind": "import",
+      "references": 1,
+      "sourceZone": "server/advancement",
+      "target": "server/runtime"
+    },
+    {
+      "kind": "type-import",
+      "references": 2,
+      "sourceZone": "server/advancement",
+      "target": "package:@zhixing/core"
+    },
+    {
+      "kind": "type-import",
+      "references": 3,
+      "sourceZone": "server/advancement",
+      "target": "server/rpc"
+    },
+    {
+      "kind": "type-import",
+      "references": 3,
+      "sourceZone": "server/advancement",
+      "target": "server/runtime"
+    },
+    {
+      "kind": "type-import",
+      "references": 3,
+      "sourceZone": "server/confirmation",
+      "target": "package:@zhixing/core"
+    },
+    {
+      "kind": "import",
+      "references": 3,
+      "sourceZone": "server/rpc",
+      "target": "package:@zhixing/core"
+    },
+    {
+      "kind": "import",
+      "references": 4,
+      "sourceZone": "server/rpc",
+      "target": "server/runtime"
+    },
+    {
+      "kind": "type-import",
+      "references": 1,
+      "sourceZone": "server/rpc",
+      "target": "external:ws"
+    },
+    {
+      "kind": "type-import",
+      "references": 7,
+      "sourceZone": "server/rpc",
+      "target": "package:@zhixing/core"
+    },
+    {
+      "kind": "type-import",
+      "references": 1,
+      "sourceZone": "server/rpc",
+      "target": "server/advancement"
+    },
+    {
+      "kind": "type-import",
+      "references": 2,
+      "sourceZone": "server/rpc",
+      "target": "server/confirmation"
+    },
+    {
+      "kind": "type-import",
+      "references": 9,
+      "sourceZone": "server/rpc",
+      "target": "server/runtime"
+    },
+    {
+      "kind": "import",
+      "references": 2,
+      "sourceZone": "server/runtime",
+      "target": "package:@zhixing/core"
+    },
+    {
+      "kind": "type-import",
+      "references": 5,
+      "sourceZone": "server/runtime",
+      "target": "package:@zhixing/core"
+    },
+    {
+      "kind": "type-import",
+      "references": 1,
+      "sourceZone": "server/runtime",
+      "target": "server/confirmation"
+    }
+  ]
+}
