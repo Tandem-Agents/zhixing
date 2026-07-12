@@ -31,9 +31,9 @@ interface Signature { alg: string; keyId: string; sig: string }   // 默认 ed25
 - 有密钥认证域单源：`K(schemaId,v,key,payload) = MAC(key, UTF8("zhixing:" + schemaId + ":v" + v) || 0x00 || JCS(payload))`，输出 §1.1 `KeyConfirmation`；字段自身及同层 finished/authenticator 集合不得进入 payload。当前仅注册 `PairingJoin.confirmation` 与 `PairingFinished.*.keyConfirm`，不得以 `Digest` 代替或把无密钥 `D` 当作密钥确认。
 - **自摘要**：先从完整对象排除 `signature` 与正在计算的自摘要字段，再计算 `D`；随后签名覆盖**含已计算摘要**在内、仅排除 `signature` 的完整对象。当前自摘要注册表唯一包含：`TrustRuleSnapshot.digest`、`ResourceLease.digest`、`UsageReport.digest`、`ConfigAssetRecord.digest`、`CommitEnvelope.envelopeDigest`、`MutationBatch.digest`、`ExecutionManifest.digest`、`JobCommitFence.digest`、`SealedBundle.digest`、`CheckpointEnvelope.digest`。未登记的字段不得被解释为“包含它的对象之摘要”。
 - **无自摘要字段的对象/子对象身份**：签名 DTO 被其他对象按摘要引用时，身份统一为 `D(schemaId, v, 对象去 signature)`，重签不改变身份；当前目标包括 `HomeTrustEvent`、`DispatchEnvelope`、`EvidenceRequest`、`DataPlaneTicket`、`SourceFreezeProof` 与 `PermissionSnapshotLease`，其中 `PermissionLeaseDigest = D("PermissionSnapshotLease",1,PermissionSnapshotLease 去 signature)`。无签名子对象按其命名 schema 直接计算；`AssignmentActivationDigest = D("AssignmentActivationPayload",1,AssignmentActivationPayload)`。
-- **链摘要**：home 信任链的 `prevEventDigest / chainHead.eventDigest` 引用上条 `HomeTrustEvent eventDigest`。assignment 账本固定 `L0 = D("AssignmentLedgerSeed",1,{assignmentId})`，`Ln = D("AssignmentLedgerStep",1,{previous: L(n-1), entry: AssignmentEntry_n})`；`LedgerEvidencePage.chainDigest`、`DispatchRejectionProof.ledgerDigest`、`DispatchConflictProof.receivedLedgerDigest`、`SupersedeProof.ledgerDigest` 与 `CancelProofBody.ledgerDigest` 均引用对应 `recordSeq` 的 `Ln`。`streamDigest` 使用 §5.6 的独立链公式，不混用本规则。
+- **链摘要**：home 信任链 genesis 的 `prevEventDigest = D("HomeTrustChainSeed",1,{homeId})`，后续 `prevEventDigest / chainHead.eventDigest` 引用上条 `HomeTrustEvent eventDigest`。assignment 账本固定 `L0 = D("AssignmentLedgerSeed",1,{assignmentId})`，`Ln = D("AssignmentLedgerStep",1,{previous: L(n-1), entry: AssignmentEntry_n})`；`LedgerEvidencePage.chainDigest`、`DispatchRejectionProof.ledgerDigest`、`DispatchConflictProof.receivedLedgerDigest`、`SupersedeProof.ledgerDigest` 与 `CancelProofBody.ledgerDigest` 均引用对应 `recordSeq` 的 `Ln`。`streamDigest` 使用 §5.6 的独立链公式，不混用本规则。
 - **内容与引用摘要**：`ArtifactRef.digest`、`ContentAssetRef.digest`、`CheckpointEnvelope.chunks[].digest`、`EvidenceRequest.items[].digestHint`、证据 `contentDigest`、副作用 `resultDigest`、投递回执 `receipt.digest` 与恢复验证 `nonceDigest` 恒为各自所指不可变原始字节的 `B(bytes)`；`PairingOffer.issuer.keyFingerprint = B(规范公钥字节)`。`manifestDigest / snapshotDigest / parentDigest / reportDigest / envelopeDigest / requestDigest` 等引用字段必须等于目标对象按本表得到的摘要，不得对引用字段所在对象再哈希。`FinalOutboxRecord.digest / FinalFrame.digest` 固定引用 `SealedBundle.digest`；`AssetIndexEntry.digest` 固定引用对应资产 artifact 的 `ArtifactRef.digest`。
-- **派生子对象摘要**：`ControlEnvelope.payloadDigest`、challenge `displayDigest`、delivery 的 key / `intentDigest` / open / resolution 摘要、uncertain `openFactDigest / factDigest`、system job `paramsDigest`、`TaskDefinitionBody.deliveryPlan.planDigest` 与恢复计划 `activationDigest` 均以各自命名 schemaId 调用 `D`；其中 `paramsDigest = D("SystemJobParams",1,params ?? null)`、`planDigest = D("JobDeliveryPlan",1,{delivery})`。`CredentialExposureRecord.principalFingerprint / CredentialBindingDescriptor.principalFingerprint = D("CredentialPrincipal",1,{service,canonicalProviderPrincipal})`，只允许来自 service-verified 身份核验，`user-alias` 必须省略；`ObservationToken.preStateFingerprint / postStateFingerprint = D("EvidenceObservationState",1,{items})`，items 按请求顺序承载 `{kind,locator,state:{kind:"missing"}|{kind:"present",contentDigest}}`。各节只列 payload 字段，不再另立算法。新增或升版任何 `Digest` 类型字段必须先登记为“自摘要 / 对象身份 / 链 / 内容 / 引用 / 派生”之一；有密钥认证值必须用 `KeyConfirmation`，contracts lint 未命中或多重命中即失败。
+- **派生子对象摘要**：`ControlEnvelope.payloadDigest`、challenge `displayDigest`、delivery 的 key / `intentDigest` / open / resolution 摘要、uncertain `openFactDigest / factDigest`、system job `paramsDigest`、`TaskDefinitionBody.deliveryPlan.planDigest`、`PairingOfferDigest` 与恢复计划 `activationDigest` 均以各自命名 schemaId 调用 `D`；其中 `PairingOfferDigest = D("PairingOffer",1,offer)`、`paramsDigest = D("SystemJobParams",1,params ?? null)`、`planDigest = D("JobDeliveryPlan",1,{delivery})`。`CredentialExposureRecord.principalFingerprint / CredentialBindingDescriptor.principalFingerprint = D("CredentialPrincipal",1,{service,canonicalProviderPrincipal})`，只允许来自 service-verified 身份核验，`user-alias` 必须省略；`ObservationToken.preStateFingerprint / postStateFingerprint = D("EvidenceObservationState",1,{items})`，items 按请求顺序承载 `{kind,locator,state:{kind:"missing"}|{kind:"present",contentDigest}}`。各节只列 payload 字段，不再另立算法。新增或升版任何 `Digest` 类型字段必须先登记为“自摘要 / 对象身份 / 链 / 内容 / 引用 / 派生”之一；有密钥认证值必须用 `KeyConfirmation`，contracts lint 未命中或多重命中即失败。
 - 引用目标注册表（同名字段按所在 DTO 取对应行，禁止按名字猜）：
 
   | 引用字段 | 唯一目标 |
@@ -151,6 +151,7 @@ interface DeviceIdentity { deviceId: string /* "fp:"+multibase(sha256(publicKey)
 type DeviceRole = "anchor"|"executor"|"surface";
 
 type HomeTrustEventBody =
+  | { t: "genesis"; issuer: DeviceIdentity }       // 唯一首事件：seq=0、trustEpoch=1、issuer 自签；prevEventDigest=D("HomeTrustChainSeed",1,{homeId})
   | { t: "enroll"; device: DeviceIdentity; roles: DeviceRole[]; pairingTranscriptDigest: Digest }   // 绑定配对握手 transcript
   | { t: "reenroll"; deviceId: string; pairingTranscriptDigest: Digest }   // domain-reset 后同设备重入：守卫 = 该设备处于 pending-reenroll
                                                                             // 且事件 trustEpoch = reset 后当前 epoch；状态只允许 pending-reenroll → active
@@ -178,8 +179,11 @@ type HomeTrustEventBody =
       // 单设备 home 丢失恢复包**无链上补救**：不存在能授权 reset 的用户凭证，任何原地重置都等于 issuer 自授权；
       // 产品引导走"重建 home"仪式（新 homeId、新链、重新 establish）——旧根加密的备份随之不可用，代价如实告知。
       // reset 后链上无有效根，establish 守卫随之成立。
-  | { t: "issuer-transition"; nextTrustEpoch: number; fromIssuerKeyId: string; toIssuerKeyId: string;
-      toDeviceId: string; reason: "migration"|"disaster-recovery"; signedBy: "issuer"|"recovery-root" };
+  | ({ t: "issuer-transition"; nextTrustEpoch: number; fromIssuerKeyId: string; toIssuerKeyId: string;
+      toDeviceId: string } & (
+        | { reason: "migration"; signedBy: "issuer" }
+        | { reason: "disaster-recovery"; signedBy: "recovery-root" }));
+      // 目标必须是 active anchor；当前 issuer 在 transition 生效前不得被撤销或移除 anchor 角色。
 interface HomeTrustEvent { homeId: Ulid; seq: number; prevEventDigest: Digest;   // 哈希链接，seq 单调
   trustEpoch: number; body: HomeTrustEventBody; at: IsoTime; signature: Signature }
 
@@ -219,7 +223,7 @@ interface PairingOffer { offerId: Ulid; homeId: Ulid;
   method: { kind: "qr-secret" }                  // 二维码内嵌 ≥128-bit 高熵一次性秘密——离线枚举不可行，密钥确认即安全
         | { kind: "short-pake"; suite: string /* PAKE 套件标识，S2 供应链选型、可替换 */ };
   expiresAt: IsoTime /* issuedAt+120s */; singleUse: true;
-  attempts: { max: number /* 初值 3 */; onExhaust: "expire" } }   // 失败限次**仅按 offerId** 持久计数（§下方 pairing 流）+ 指数退避，超限 offer 即刻作废——不按来源计数（来源可伪造）
+  attempts: { max: number /* 初值 3 */; onExhaust: "expire" } }   // 在线尝试**仅按 offerId** 持久计数（§下方 pairing 流）+ 指数退避，超限 offer 即刻作废——不按来源计数（来源可伪造）
 type PairingJoin =                               // 按配对方式判别——两种 join 各自字段完备，缺 auth / 多 auth 的组合类型层不存在
   | { method: "qr-secret";  offerId: Ulid; device: DeviceIdentity; joinerNonce: string;
       confirmation: KeyConfirmation }            // = K("PairingJoinConfirmation",1,K_secret,{offer,join 去 confirmation})——无自引用；高熵秘密的密钥确认
@@ -242,18 +246,20 @@ type PairingFinished =                           // 按配对方式判别——s
   // keyConfirm：**PAKE 会话密钥确认**（= K("PairingFinished",1,KDF(K_pake,"finish"||role),{offerId,transcriptDigest,chainHead,acceptedAt})；
   // finished 整体不入前像，角色进入派生 key，结构性无自引用），任一验证失败即拒绝——
   // 证明"共享短码"的是 keyConfirm 而非设备签名。
-// 失败计数的耐久载体：签发端锚点域 log 新增 `pairing` 逻辑流，记 { t: "pairing-attempt"; offerId; outcome: "failed"|"succeeded" }——
-// 计数键**仅 offerId**（不按来源设备——来源身份可伪造，换伪身份即重置计数；offer 是用户手势产生的稀缺物，单键限次不可绕过），
-// 失败达 attempts.max 即写作废、offer 永久失效。
-// 原子规则：acceptance 全验通过后，`pairing-attempt(succeeded)` 与 trust 流 `enroll` / `reenroll` **同一 CommitEnvelope 原子写**
+// 在线尝试的耐久载体：签发端锚点域 pairing 流先写 `pairing-attempt-started(offerId,offerDigest,attemptId,ordinal,at,retryNotBefore)`；该记录必须在任何
+// secret-dependent 响应前 fsync（PAKE 尤其在返回 issuer round 前），因此攻击者丢弃后续消息也已消耗一次在线尝试。计数键**仅 offerId**
+//（不按来源设备——来源身份可伪造）；ordinal > attempts.max 恒拒绝并作废 offer。验证失败在返回前追加同 attemptId 的 failed；
+// 验证成功只允许消费仍为 started 的 attempt。
+// 原子规则：acceptance 全验通过后，`pairing-attempt-succeeded` 与 trust 流 `enroll` / `reenroll` **同一 CommitEnvelope 原子写**
 //（同锚点进程同物理 log，§4.1）——"offer 已耗尽而设备未入链"与"已入链而 offer 仍可用"两种半提交态不存在；
-// 失败路径先耐久写 `pairing-attempt(failed)` 再向对端返回失败（计数不可丢）；offer 的使用 / 作废状态**只由 pairing 流投影**，
-// 无独立可变状态。验收（随 S2）补：原子点前后崩溃注入、succeeded 重放幂等、并发双 join 的 singleUse 仲裁（恰一胜出）。
+// offer 的使用 / 作废状态**只由 pairing 流投影**，无独立可变状态。验收（随 S2）补：started fsync 前后、返回 PAKE round 前后、
+// 原子成功点前后崩溃注入、succeeded 重放幂等、并发双 join 的 singleUse 仲裁（恰一胜出）。成功响应丢失后的重放从同一权威日志返回
+// 已包含该 trust event 的当前投影，不依赖调用方保留提交前链头；请求内容与 succeeded 记录不一致时拒绝。
 // 验收（随 S2 安全对抗矩阵）：离线字典（截获全部 wire 消息后枚举短码 → 无可校验物）、在线爆破（offerId 单键限次 + 退避 +
 // 超限作废 + 换伪身份不重置）、MITM / 降级（transcript 失配）、重放（singleUse + chainHead）、乱序 / 跳轮各有对抗用例。
 ```
 
-信任事实的唯一形态是签名、单调、哈希链接的 `HomeTrustEvent`（enroll / role-change / revoke / recovery-root / domain-reset / issuer-transition），落锚点域 AuthorityCommitLog 的 `trust` 逻辑流；`HomeTrustRecord` 只是带链头摘要的签名快照投影（含恢复根——投影链上当前有效根，无独立写路径），任何设备可凭事件链重放验证成员、撤销与恢复根的对象、顺序与当前水位。配对 = offer + join（短码分支另经 PakeRound 通道交替多轮）+ **acceptance 收尾**（transcript 摘要双方一致、双向 finished——设备签名绑身份 + PAKE 密钥确认证共享短码、单次 acceptance 绑链头——离线字典 / 在线爆破 / MITM / 降级 / 重放 / 乱序各有机械拒绝点，随 S2 安全对抗矩阵验收）→ 签发者写 `enroll`（reset 后重入写 `reenroll`）事件入链，事件绑定 pairingTranscriptDigest。恢复根在首次启用网格能力（首次配对 / 加密备份 / 迁居）的同一引导流建立：展示恢复包 → 用户保存 → 回读验证（重输校验段）→ 先完成新根检查点的独立复制与真解封验证，再原子激活 `recovery-root(establish)` 并开放该能力（§七）；轮换（主动换 / 泄露置换）走同一用户仪式与原子激活，切换前旧根持续有效；泄露且暂不换新由旧根签 `invalidate`（灾难恢复随之不可用，直至新根建立）；**丢失恢复包走 `domain-reset + establish` 原子计划**（字段合同与守卫见上——issuer 发起 + 第二设备共签恒必填，计划激活后新根与已验证备份同时生效、全设备逐台重新配对回 active；单设备 home 无链上补救，走重建 home 仪式）；单机开箱不生成。验收（随 S2）：issuer 签 rotate / invalidate 必被拒；无 coSign 或共签设备 = issuer 设备的 domain-reset 必被拒（含单设备 home）；已失效旧根签发 issuer-transition / rotate 必被拒；轮换、丢失 reset、泄露、离线设备追赶（含跨 reset 追赶）各有链重放用例。
+信任事实的唯一形态是签名、单调、哈希链接的 `HomeTrustEvent`（genesis / enroll / role-change / revoke / recovery-root / domain-reset / issuer-transition），落锚点域 AuthorityCommitLog 的 `trust` 逻辑流；genesis 是 issuer 自签且必须耐久的唯一首事件，后续投影重建不得依赖日志外锚点；`HomeTrustRecord` 只是带链头摘要的签名快照投影（含恢复根——投影链上当前有效根，无独立写路径），任何设备可凭事件链重放验证成员、撤销与恢复根的对象、顺序与当前水位。配对 = offer + join（短码分支另经 PakeRound 通道交替多轮）+ **acceptance 收尾**（transcript 摘要双方一致、双向 finished——设备签名绑身份 + PAKE 密钥确认证共享短码、单次 acceptance 绑链头——离线字典 / 在线爆破 / MITM / 降级 / 重放 / 乱序各有机械拒绝点，随 S2 安全对抗矩阵验收）→ 签发者写 `enroll`（reset 后重入写 `reenroll`）事件入链，事件绑定 pairingTranscriptDigest。恢复根在首次启用网格能力（首次配对 / 加密备份 / 迁居）的同一引导流建立：展示恢复包 → 用户保存 → 回读验证（重输校验段）→ 先完成新根检查点的独立复制与真解封验证，再原子激活 `recovery-root(establish)` 并开放该能力（§七）；轮换（主动换 / 泄露置换）走同一用户仪式与原子激活，切换前旧根持续有效；泄露且暂不换新由旧根签 `invalidate`（灾难恢复随之不可用，直至新根建立）；**丢失恢复包走 `domain-reset + establish` 原子计划**（字段合同与守卫见上——issuer 发起 + 第二设备共签恒必填，计划激活后新根与已验证备份同时生效、全设备逐台重新配对回 active；单设备 home 无链上补救，走重建 home 仪式）；单机开箱不生成。验收（随 S2）：issuer 签 rotate / invalidate 必被拒；无 coSign 或共签设备 = issuer 设备的 domain-reset 必被拒（含单设备 home）；已失效旧根签发 issuer-transition / rotate 必被拒；轮换、丢失 reset、泄露、离线设备追赶（含跨 reset 追赶）各有链重放用例。
 
 ### 2.2 凭证族（短租约、签名、可验证；全部按用途判别联合，非法组合在类型层不存在）
 
@@ -1002,7 +1008,11 @@ type TransferRecord =      // 物理流固定 transfer:<transferId>；prepared �
   | { t: "aborted";    transferId: string; abort: { decidedBy: string; reason: string; signature: Signature } };
 
 type TrustStreamRecord    = { t: "trust-event"; event: HomeTrustEvent };
-type PairingStreamRecord  = { t: "pairing-attempt"; offerId: Ulid; outcome: "failed"|"succeeded" };   // 爆破限次的耐久计数载体（§2.1）
+type PairingStreamRecord  =
+  | { t: "pairing-attempt-started"; offerId: Ulid; offerDigest: Digest; attemptId: Ulid; ordinal: number; at: IsoTime; retryNotBefore: IsoTime }
+  | { t: "pairing-attempt-failed"; offerId: Ulid; attemptId: Ulid }
+  | { t: "pairing-attempt-succeeded"; offerId: Ulid; attemptId: Ulid; offerDigest: Digest;
+      acceptance: PairingAcceptance; trustEventDigest: Digest };   // 爆破限次、单次消费与响应丢失重放的耐久载体（§2.1）
 type ExposureStreamRecord = { t: "exposure"; record: CredentialExposureRecord };
 type DeliveryEndpointDto =
   | { kind: "channel"; target: DeliveryTargetDto }
@@ -1050,8 +1060,11 @@ type DeliveryStreamRecord =                      // delivery 流 = 投递生命�
 // DeliveryItem adapter 只从 enqueued intent + 后续事实投影 id / attempts / nextAttemptAt / lastError；这些可变字段不得反写权威流。
 type IntentStreamRecord   = { t: "intent"; intent: DeferredGlobalIntent };
 type RecoveryActivationPlan =
-  | { kind: "establish"|"rotate"; rootEvent: HomeTrustEvent }
-  | { kind: "domain-reset-establish"; resetEvent: HomeTrustEvent; rootEvent: HomeTrustEvent };
+  | { kind: "establish"; rootEvent: HomeTrustEvent & { body: Extract<HomeTrustEventBody,{t:"recovery-root";op:"establish"}> } }
+  | { kind: "rotate"; rootEvent: HomeTrustEvent & { body: Extract<HomeTrustEventBody,{t:"recovery-root";op:"rotate"}> } }
+  | { kind: "domain-reset-establish";
+      resetEvent: HomeTrustEvent & { body: Extract<HomeTrustEventBody,{t:"domain-reset"}> };
+      rootEvent: HomeTrustEvent & { body: Extract<HomeTrustEventBody,{t:"recovery-root";op:"establish"}> } };
 interface RecoveryCheckpointVerification {       // 引导端（持新恢复主秘密）**实际回读解封**后签发——"有备份"升级为"验证过能恢复的备份"
   checkpointId: Ulid; recipientKeyId: string; targetId: string;   // targetId = 独立存放目标（配对设备 / 用户指定位置）
   purpose: { kind: "periodic" } | { kind: "root-activation"; activationDigest: Digest };
@@ -1623,7 +1636,7 @@ interface CheckpointEnvelope { v: 1; checkpointId: Ulid; createdAt: IsoTime;
 // 加密载荷首块内含一次性 `verificationNonce`（随机 256-bit）——只有真解封才能读出，是 RecoveryCheckpointVerification 的防伪锚（§4.3）。
 ```
 
-创建即写 `checkpoint` 流记录（§4.3）；周期每日一次 + 迁居前强制一次。**根激活原子边界**：首次 establish / rotate 先生成一条已签名但未生效的 root event；恢复包丢失则先生成连续且均已签名的 `domain-reset + establish` 计划，reset 不得提前单独入链。以候选 `recoveryBackupPublicKey` 生成包含该计划的全量 `CheckpointEnvelope`，耐久写 created，复制到 ≥1 个独立目标；持候选主秘密的引导端必须从该目标实际回读、解封、校验 envelope / manifest / 分块摘要并签 `RecoveryCheckpointVerification`。只有 created→replicated→verification 全链逐字段通过后，锚点才在**同一 CommitEnvelope**原子写入计划内全部 trust event、`checkpoint-verified` 与旧检查点 `checkpoint-superseded`；该提交是新根唯一激活点。rotate / domain-reset 在此之前旧 trust 状态不变，首次 establish 在此之前仍为 no-root / not-ready，任何网格能力不得提前开放。任一前置步骤失败或崩溃只留下未激活候选，可按 checkpointId 幂等续做或 GC，不改变当前根；原子提交后投影必同时得到“当前根 + 对应已验证独立备份”，不存在链上有效新根而备份未验证的窗口。旧根封装备份激活后标记不可用，**不假设可 rewrap**。恢复 = 用户主秘密派生封装私钥解 DEK → 校验 manifest / 分块摘要并应用已绑定的 activation plan → 安全域换代（总纲 §9）；恢复端到端验收随 S9（候选创建 / 复制 / 回读 / 签证 / 原子激活各点崩溃注入，伪造 verification、错 checkpoint / key / digest / target / nonce、计划断链、目标不可达重试、新旧根选择）。
+创建即写 `checkpoint` 流记录（§4.3）；周期每日一次 + 迁居前强制一次。**根激活原子边界**：首次 establish / rotate 先生成一条已签名但未生效的 root event；恢复包丢失则先生成连续且均已签名的 `domain-reset + establish` 计划，reset 不得提前单独入链。以候选 `recoveryBackupPublicKey` 生成包含该计划的全量 `CheckpointEnvelope`，耐久写 created，复制到 ≥1 个独立目标；持候选主秘密的引导端必须从该目标实际回读、解封、校验 envelope / manifest / 分块摘要并签 `RecoveryCheckpointVerification`。只有 created→replicated→verification 全链逐字段通过后，锚点才在**同一 CommitEnvelope**原子写入计划内全部 trust event、`checkpoint-verified` 与旧检查点 `checkpoint-superseded`；该提交是新根唯一激活点。rotate / domain-reset 在此之前旧 trust 状态不变，首次 establish 在此之前仍为 no-root / not-ready，任何网格能力不得提前开放。任一前置步骤失败或崩溃只留下未激活候选，可按 checkpointId 幂等续做或 GC，不改变当前根；原子提交后投影必同时得到“当前根 + 对应已验证独立备份”，不存在链上有效新根而备份未验证的窗口。提交响应丢失时，权威端按 checkpointId 从同一日志重建提交与当前 trust 投影并幂等返回，不要求调用方保留旧链头；异内容重试拒绝。旧根封装备份激活后标记不可用，**不假设可 rewrap**。恢复 = 用户主秘密派生封装私钥解 DEK → 校验 manifest / 分块摘要并应用已绑定的 activation plan → 安全域换代（总纲 §9）；恢复端到端验收随 S9（候选创建 / 复制 / 回读 / 签证 / 原子激活各点崩溃注入，伪造 verification、错 checkpoint / key / digest / target / nonce、计划断链、目标不可达重试、新旧根选择）。
 
 ## 八、落点矩阵（入口 / 操作 × 落点）
 

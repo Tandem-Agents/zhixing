@@ -1,6 +1,7 @@
 import type { TrustRuleSnapshot } from "../security/types.js";
 import type {
   AnchorTransferCommit,
+  CheckpointEnvelope,
   ConversationTransferCommit,
   HomeTrustEvent,
   HomeTrustRecord,
@@ -8,6 +9,8 @@ import type {
   PairingJoin,
   PairingOffer,
   PakeRound,
+  RecoveryActivationPlan,
+  RecoveryCheckpointVerification,
   SourceFreezeProof,
 } from "./identity.js";
 import type {
@@ -69,6 +72,9 @@ export interface WireSchemaMap {
   PairingJoin: PairingJoin;
   PakeRound: PakeRound;
   PairingAcceptance: PairingAcceptance;
+  RecoveryActivationPlan: RecoveryActivationPlan;
+  RecoveryCheckpointVerification: RecoveryCheckpointVerification;
+  CheckpointEnvelope: CheckpointEnvelope;
   TrustRuleSnapshot: TrustRuleSnapshot;
   DataPlaneTicket: DataPlaneTicket;
   ChannelChallengeToken: ChannelChallengeToken;

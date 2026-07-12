@@ -1,4 +1,5 @@
 import type {
+  ArtifactRef,
   Digest,
   IsoTime,
   KeyConfirmation,
@@ -19,6 +20,10 @@ export interface DeviceIdentity {
 export type DeviceRole = "anchor" | "executor" | "surface";
 
 export type HomeTrustEventBody =
+  | {
+      t: "genesis";
+      issuer: DeviceIdentity;
+    }
   | {
       t: "enroll";
       device: DeviceIdentity;
@@ -51,15 +56,17 @@ export type HomeTrustEventBody =
       reason: "recovery-root-lost";
       coSign: { deviceId: string; sig: Signature };
     }
-  | {
+  | ({
       t: "issuer-transition";
       nextTrustEpoch: number;
       fromIssuerKeyId: string;
       toIssuerKeyId: string;
       toDeviceId: string;
-      reason: "migration" | "disaster-recovery";
-      signedBy: "issuer" | "recovery-root";
-    };
+    } &
+      (
+        | { reason: "migration"; signedBy: "issuer" }
+        | { reason: "disaster-recovery"; signedBy: "recovery-root" }
+      ));
 
 export interface HomeTrustEvent extends WireSchemaV1<"HomeTrustEvent"> {
   homeId: Ulid;
@@ -70,6 +77,11 @@ export interface HomeTrustEvent extends WireSchemaV1<"HomeTrustEvent"> {
   at: IsoTime;
   signature: Signature;
 }
+
+export type HomeTrustEventWithBody<Body extends HomeTrustEventBody> = Omit<
+  HomeTrustEvent,
+  "body"
+> & { body: Body };
 
 export interface HomeTrustRecord extends WireSchemaV1<"HomeTrustRecord"> {
   homeId: Ulid;
@@ -197,6 +209,138 @@ export interface PairingAcceptance extends WireSchemaV1<"PairingAcceptance"> {
   chainHead: { seq: number; eventDigest: Digest };
   acceptedAt: IsoTime;
   finished: PairingFinished;
+}
+
+export type PairingStreamRecord =
+  | {
+      t: "pairing-attempt-started";
+      offerId: Ulid;
+      offerDigest: Digest;
+      attemptId: Ulid;
+      ordinal: number;
+      at: IsoTime;
+      retryNotBefore: IsoTime;
+    }
+  | {
+      t: "pairing-attempt-failed";
+      offerId: Ulid;
+      attemptId: Ulid;
+    }
+  | {
+      t: "pairing-attempt-succeeded";
+      offerId: Ulid;
+      attemptId: Ulid;
+      offerDigest: Digest;
+      acceptance: PairingAcceptance;
+      trustEventDigest: Digest;
+    };
+
+export type RecoveryActivationPlan = WireSchemaV1<"RecoveryActivationPlan"> &
+  (
+    | {
+        kind: "establish";
+        rootEvent: HomeTrustEventWithBody<
+          Extract<HomeTrustEventBody, { t: "recovery-root"; op: "establish" }>
+        >;
+      }
+    | {
+        kind: "rotate";
+        rootEvent: HomeTrustEventWithBody<
+          Extract<HomeTrustEventBody, { t: "recovery-root"; op: "rotate" }>
+        >;
+      }
+    | {
+        kind: "domain-reset-establish";
+        resetEvent: HomeTrustEventWithBody<Extract<HomeTrustEventBody, { t: "domain-reset" }>>;
+        rootEvent: HomeTrustEventWithBody<
+          Extract<HomeTrustEventBody, { t: "recovery-root"; op: "establish" }>
+        >;
+      }
+  );
+
+export type RecoveryCheckpointPurpose =
+  | { kind: "periodic" }
+  | { kind: "root-activation"; activationDigest: Digest };
+
+export interface RecoveryCheckpointVerification
+  extends WireSchemaV1<"RecoveryCheckpointVerification"> {
+  checkpointId: Ulid;
+  recipientKeyId: string;
+  targetId: string;
+  purpose: RecoveryCheckpointPurpose;
+  envelopeDigest: Digest;
+  nonceDigest: Digest;
+  verifiedAt: IsoTime;
+  signature: Signature;
+}
+
+export type CheckpointStreamRecord =
+  | {
+      t: "checkpoint-created";
+      checkpointId: Ulid;
+      recipientKeyId: string;
+      purpose: RecoveryCheckpointPurpose;
+      envelopeRef: ArtifactRef;
+      upToLsn: number;
+      envelopeDigest: Digest;
+    }
+  | {
+      t: "checkpoint-replicated";
+      checkpointId: Ulid;
+      recipientKeyId: string;
+      purpose: RecoveryCheckpointPurpose;
+      targetId: string;
+      envelopeDigest: Digest;
+      at: IsoTime;
+    }
+  | {
+      t: "checkpoint-verified";
+      checkpointId: Ulid;
+      recipientKeyId: string;
+      purpose: RecoveryCheckpointPurpose;
+      targetId: string;
+      envelopeDigest: Digest;
+      verification: RecoveryCheckpointVerification;
+    }
+  | {
+      t: "checkpoint-verify-failed";
+      checkpointId: Ulid;
+      recipientKeyId: string;
+      purpose: RecoveryCheckpointPurpose;
+      targetId: string;
+      envelopeDigest: Digest;
+      reason: string;
+      at: IsoTime;
+    }
+  | {
+      t: "checkpoint-superseded";
+      checkpointId: Ulid;
+      supersededBy: Ulid;
+      at: IsoTime;
+    };
+
+export interface CheckpointEnvelope extends WireSchemaV1<"CheckpointEnvelope"> {
+  checkpointId: Ulid;
+  createdAt: IsoTime;
+  alg: {
+    kem: "X25519-HKDF-SHA256";
+    aead: "AES-256-GCM";
+  };
+  recipientKeyId: string;
+  enc: string;
+  wrappedDek: string;
+  nonceBase: string;
+  manifest: {
+    scope: string[];
+    domainRevisions: Record<string, number>;
+    upToLsn: number;
+    purpose:
+      | { kind: "periodic" }
+      | { kind: "root-activation"; plan: RecoveryActivationPlan };
+  };
+  chunks: Array<{ seq: number; digest: Digest; bytes: number }>;
+  digest: Digest;
+  signature: Signature;
 }
 
 export type SecretRef = {

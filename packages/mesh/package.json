@@ -13,6 +13,14 @@
       "types": "./dist/canonical.d.ts",
       "import": "./dist/canonical.js"
     },
+    "./checkpoint": {
+      "types": "./dist/checkpoint.d.ts",
+      "import": "./dist/checkpoint.js"
+    },
+    "./bootstrap-authority": {
+      "types": "./dist/bootstrap-authority.d.ts",
+      "import": "./dist/bootstrap-authority.js"
+    },
     "./blind-relay": {
       "types": "./dist/blind-relay.d.ts",
       "import": "./dist/blind-relay.js"
@@ -29,6 +37,10 @@
       "types": "./dist/outbound-tunnel.d.ts",
       "import": "./dist/outbound-tunnel.js"
     },
+    "./pairing": {
+      "types": "./dist/pairing-public.d.ts",
+      "import": "./dist/pairing-public.js"
+    },
     "./replay-window": {
       "types": "./dist/replay-window.d.ts",
       "import": "./dist/replay-window.js"
@@ -36,6 +48,14 @@
     "./service-registry": {
       "types": "./dist/service-registry.d.ts",
       "import": "./dist/service-registry.js"
+    },
+    "./recovery-root": {
+      "types": "./dist/recovery-root.d.ts",
+      "import": "./dist/recovery-root.js"
+    },
+    "./trust-chain": {
+      "types": "./dist/trust-chain.d.ts",
+      "import": "./dist/trust-chain.js"
     },
     "./transport": {
       "types": "./dist/transport.d.ts",
@@ -46,13 +66,16 @@
       "import": "./dist/errors.js"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsup",
     "test": "vitest run",
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@cipherman/pake-js": "0.1.1",
     "@peculiar/webcrypto": "^1.5.0",
     "@peculiar/x509": "^2.0.0",
     "@zhixing/core": "workspace:*",

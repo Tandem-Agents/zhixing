@@ -1274,7 +1274,7 @@
     },
     {
       "kind": "type-import",
-      "references": 5,
+      "references": 10,
       "sourceZone": "mesh",
       "target": "package:@zhixing/core"
     },
