@@ -1,0 +1,50 @@
+{
+  "name": "@zhixing/owner-kernel",
+  "version": "0.1.0",
+  "description": "知行对话 owner 内核 — 会话权威、运行提交与确认聚合",
+  "type": "module",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./types": {
+      "types": "./dist/types.d.ts",
+      "import": "./dist/types.js"
+    },
+    "./runtime": {
+      "types": "./dist/runtime.d.ts",
+      "import": "./dist/runtime.js"
+    },
+    "./conversation-manager": {
+      "types": "./dist/conversation-manager.d.ts",
+      "import": "./dist/conversation-manager.js"
+    },
+    "./run-turn": {
+      "types": "./dist/run-turn.d.ts",
+      "import": "./dist/run-turn.js"
+    },
+    "./ephemeral-run-buffer": {
+      "types": "./dist/ephemeral-run-buffer.d.ts",
+      "import": "./dist/ephemeral-run-buffer.js"
+    },
+    "./confirmation-hub": {
+      "types": "./dist/confirmation-hub.d.ts",
+      "import": "./dist/confirmation-hub.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@zhixing/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.1",
+    "tsup": "^8.4.0",
+    "typescript": "^5.8.3"
+  }
+}

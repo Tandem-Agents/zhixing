@@ -15,11 +15,11 @@
  */
 
 import type { ConfirmationDecision, ConfirmationRequest } from "@zhixing/core";
+import type { HubEntry } from "@zhixing/owner-kernel/confirmation-hub";
 import type { MethodEntry } from "../handlers.js";
 import { RpcAppError, RpcErrors } from "../handlers.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
 import type { ServerContext } from "../../context.js";
-import type { HubEntry } from "../../confirmation/hub.js";
 
 /**
  * ConfirmationDecision.kind 白名单——按接入面信任级分级。

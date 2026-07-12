@@ -12,16 +12,15 @@ import type {
   TaskListState,
   DeliveryStats,
 } from "@zhixing/core";
-import type { ServerConfig } from "./types.js";
-import type { ConversationManager } from "./runtime/index.js";
-import type { ConfirmationHub } from "./confirmation/hub.js";
-import type { AdvancementRecoveryMaintenance } from "./advancement/index.js";
-import { AdvancementController } from "./advancement/index.js";
-import type { PerspectivesController } from "./perspectives/index.js";
+import type { ConfirmationHub, ConversationManager } from "@zhixing/owner-kernel";
 import type {
   SessionActivityBroadcast,
   SessionBroadcast,
-} from "./rpc/session-broadcast.js";
+} from "@zhixing/rpc/session-broadcast";
+import type { ServerConfig } from "./types.js";
+import type { AdvancementRecoveryMaintenance } from "./advancement/index.js";
+import { AdvancementController } from "./advancement/index.js";
+import type { PerspectivesController } from "./perspectives/index.js";
 import type { ConversationDirectory } from "./runtime/conversation-directory.js";
 import type { WorksceneDirectory } from "./runtime/workscene-directory.js";
 import type {
@@ -109,7 +108,7 @@ export interface ServerContext {
   channels?: ChannelRegistry;
   /**
    * 确认聚合器（不传则远程确认不启用，serve 模式回退到永久 pending → 30min expire → 拒绝）。
-   * 远程权限确认的聚合入口——参见 remote-confirmation-execution.md §3.2。
+   * 远程权限确认的 owner 聚合入口。
    */
   confirmationHub?: ConfirmationHub;
   /**

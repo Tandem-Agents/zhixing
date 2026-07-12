@@ -1,9 +1,6 @@
 /**
  * Server — HTTP 服务核心
  *
- * 当前阶段（S2.B）：node:http 服务 + REST 路由分发。
- * 下一阶段（S2.C）：WebSocket upgrade + RPC 分发器。
- *
  * 设计要点：
  * - 端口监听本身就是单实例锁（重复启动 EADDRINUSE）
  * - close() 等待所有连接关闭后再 resolve（优雅停机）
@@ -15,6 +12,11 @@ import { createServer, type Server as HttpServer } from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 import type { IEventBus, SchedulerEventMap } from "@zhixing/core";
 import { isInternal } from "@zhixing/core";
+import { createEventBridge, type DisposeBridge } from "@zhixing/rpc/event-bridge";
+import {
+  createActivityBroadcast,
+  createObserverBroadcast,
+} from "@zhixing/rpc/session-broadcast";
 import { dispatchRest } from "./routes.js";
 import type { ServerContext } from "./context.js";
 import { DEFAULT_SERVER_CONFIG, type ServerConfig } from "./types.js";
@@ -26,11 +28,6 @@ import {
 import { RpcDispatcher } from "./rpc/dispatcher.js";
 import { HandlerRegistry } from "./rpc/handlers.js";
 import { buildBuiltinRegistry } from "./rpc/methods/index.js";
-import { createEventBridge, type DisposeBridge } from "./rpc/event-bridge.js";
-import {
-  createActivityBroadcast,
-  createObserverBroadcast,
-} from "./rpc/session-broadcast.js";
 
 export interface ZhixingServerInstance {
   /** 实际监听的端口（监听 0 时由 OS 分配） */

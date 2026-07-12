@@ -12,6 +12,10 @@ const environment = update
 
 const commands = [
   ["--filter", "@zhixing/test-utils", "build"],
+  ["--filter", "@zhixing/owner-kernel", "build"],
+  ["--filter", "@zhixing/rpc", "build"],
+  ["--filter", "@zhixing/server", "build"],
+  ["runtime:package-exports"],
   ["--filter", "@zhixing/server", "exec", "vitest", "run", "src/__tests__/distributed-runtime-golden.test.ts"],
   ["--filter", "@zhixing/cli", "exec", "vitest", "run", "src/serve/__tests__/distributed-runtime-golden.test.ts"],
   ["--filter", "@zhixing/server", "exec", "vitest", "run", "src/__tests__/distributed-runtime-structure.test.ts"],

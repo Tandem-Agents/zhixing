@@ -4,11 +4,11 @@ import type {
   RunRecord,
   RunRecordRef,
 } from "@zhixing/core";
+import type { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
+import type { SessionBroadcast } from "@zhixing/rpc/session-broadcast";
+import { createControlSessionEventEnvelope } from "@zhixing/rpc/session-events";
+import { SESSION_NOTIFICATIONS } from "@zhixing/rpc/session-wire";
 import type { ConversationDirectory } from "../runtime/conversation-directory.js";
-import type { ConversationManager } from "../runtime/conversation-manager.js";
-import { createControlSessionEventEnvelope } from "../rpc/session-events.js";
-import type { SessionBroadcast } from "../rpc/session-broadcast.js";
-import { SESSION_NOTIFICATIONS } from "../rpc/session-wire.js";
 import type { AdvancementController } from "./controller.js";
 import {
   ProxyMessageScheduler,

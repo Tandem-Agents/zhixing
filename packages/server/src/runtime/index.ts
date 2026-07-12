@@ -1,7 +1,38 @@
-export * from "./types.js";
+export {
+  ConversationManager,
+  EphemeralRunBuffer,
+  WorksceneBusyError,
+  generateConversationId,
+  runTurnWithCommit,
+  type AbortResult,
+  type AppendRun,
+  type ContextBudgetInspectionResult,
+  type ConversationBootstrap,
+  type ConversationManagerCallbacks,
+  type ConversationManagerConfig,
+  type EnsureConversation,
+  type InitTranscript,
+  type LoadHistory,
+  type ManagedSession,
+  type ManagedSessionInfo,
+  type OnSessionRelease,
+  type PendingRun,
+  type PendingTask,
+  type RecordTurnOptions,
+  type RunTurnHooks,
+  type RunTurnOptions,
+  type RuntimeCompactOutcome,
+  type RuntimeFactory,
+  type RuntimeSecuritySnapshot,
+  type RuntimeSubAgentUsageEntry,
+  type SecurityInspectionResult,
+  type SessionRuntime,
+  type SessionRuntimeOrchestrationV1Params,
+  type TurnAdmissionResult,
+  type TurnCommittedInfo,
+  type TurnContext,
+  type UsageInspectionResult,
+} from "@zhixing/owner-kernel/runtime";
 export * from "./conversation-directory.js";
 export * from "./workscene-directory.js";
 export * from "./management-directories.js";
-export * from "./conversation-manager.js";
-export * from "./ephemeral-run-buffer.js";
-export * from "./run-turn.js";

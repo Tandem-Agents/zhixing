@@ -13,13 +13,16 @@ import {
   isFreeTextDeny,
   type AgentResult,
 } from "@zhixing/core";
-import type { ConversationManager, ManagedSession } from "../runtime/conversation-manager.js";
+import type {
+  ConfirmationHub,
+  ConversationManager,
+  ManagedSession,
+} from "@zhixing/owner-kernel";
 import type {
   SessionActivityBroadcast,
   SessionBroadcast,
-} from "../rpc/session-broadcast.js";
-import { projectSessionTurn } from "../rpc/session-turn-stream.js";
-import type { ConfirmationHub } from "../confirmation/hub.js";
+} from "@zhixing/rpc/session-broadcast";
+import { projectSessionTurn } from "@zhixing/rpc/session-turn-stream";
 import {
   APPROVE_KEYWORDS,
   DENY_KEYWORDS,
@@ -53,7 +56,7 @@ export interface InboundRouterOptions {
   channels: ChannelRegistry;
   logger: ChannelLogger;
   /**
-   * 可选 Outbox 顺序层（ADR-007）。提供时，所有发往用户的回复经 Outbox.post 串行化；
+   * 可选 Outbox 顺序层。提供时，所有发往用户的回复经 Outbox.post 串行化；
    * 未提供时降级为直接 adapter.send（测试/尚未接入 Outbox 的场景）。
    */
   outboxRegistry?: OutboxRegistry;
@@ -64,7 +67,6 @@ export interface InboundRouterOptions {
    *
    * 未提供时 InboundRouter 行为完全等价——所有消息正常排队进入 agent 流程。
    *
-   * 参见 remote-confirmation-execution.md §3.5。
    */
   confirmationHub?: ConfirmationHub;
   /**
@@ -175,7 +177,7 @@ export class InboundRouter {
   /**
    * 处理入站消息。由 ChannelRegistry 的 onMessage 回调触发。
    *
-   * 流程（server-gateway.md §6.1 的 MVP 子集）：
+   * 流程：
    * 1. 对话归组 → conversationId
    * 2. getOrCreate → ManagedSession
    * 3. 并发守卫（enqueue / immediate）
@@ -230,7 +232,7 @@ export class InboundRouter {
       return;
     }
 
-    // ── pending-aware 拦截（remote-confirmation-execution.md §3.5） ──
+    // ── pending-aware 拦截 ──
     // 必须在 conversations.getOrCreate / enqueue **之前**：
     //   · 不占队列位（用户回复不是对 agent 的提问）
     //   · 不触发会话创建（会话已 idle release 的场景 "好" 不应重建会话）
@@ -301,7 +303,7 @@ export class InboundRouter {
    *     反馈"已取消队列中的 N 条待处理消息"
    *   - 都假: 既无 in-flight 也无 pending,反馈"当前没有正在处理的任务"
    *
-   * 反馈直接 `adapter.send` 绕过 Outbox(与 confirmation 回执 §3.7 同源策略) ——
+   * 反馈直接 `adapter.send` 绕过 Outbox，与 confirmation 回执采用同一控制响应策略——
    * Outbox 排队会让控制响应被业务消息延迟,违反"控制响应即时反馈"原则。
    */
   private async handleControlIntent(
@@ -350,14 +352,14 @@ export class InboundRouter {
    *
    * 返回 true 表示已处理（调用方 return 不走 agent 流程）；false 表示未处理（正常排队）。
    *
-   * 语义（remote-confirmation-execution.md §3.5 + §3.6）：
+   * 语义：
    *   - 无 pending → 正常进入 agent 流程
    *   - 空消息 → 不拦截（避免空字符串误命中）
    *   - 匹配允许词集 → broker.resolve(allow-once)
    *   - 匹配拒绝词集 → broker.resolve(deny)
    *   - 其他任意文本 → broker.resolve(deny, reason=整条消息)（自由文本理由）
    *
-   * 埋点（§3.10 事件表）：
+   * 埋点：
    *   - `confirmation.reply.matched-structured`
    *   - `confirmation.reply.matched-reason`
    *   - `confirmation.reply.stale`（broker.resolve 返 false——已超时 / 已在其他端解决）
@@ -388,8 +390,8 @@ export class InboundRouter {
     //   - 不匹配时**不拦截**（return false）—— 让消息走正常 agent 流程，
     //     不触碰 A 的 pending；A 自己回复时仍能正常解决
     //
-    // 已知限制（非本 fix 范围）：A 的 confirmation 消息发到群 target 会被
-    //   全员可见（隐私泄露）——DM 降级需要 adapter 能力扩展，记入 spec §9。
+    // 已知限制：群 target 会向全员展示确认内容。这里的发起者校验只阻止他人
+    //   代答，不解决内容披露；私聊降级需要通道能力合同明确支持后才能实施。
     const originSender = target.request.turnOrigin?.triggeredBy;
     const originChannel = target.request.turnOrigin?.channel;
     if (
@@ -411,7 +413,7 @@ export class InboundRouter {
     const ok = broker!.resolve(target.request.id, decision);
     const channelId = msg.channelId;
 
-    // 埋点（§3.10 契约）：结构化 match vs 自由文本 reason 通过 isFreeTextDeny 辨别
+    // 埋点：结构化 match vs 自由文本 reason 通过 isFreeTextDeny 辨别
     if (!ok) {
       this.logger.info("confirmation.reply.stale", {
         requestId: target.request.id,
@@ -431,14 +433,14 @@ export class InboundRouter {
       });
     }
 
-    // 回执——**控制流直接 adapter.send 绕过 Outbox**（spec §3.7）
+    // 回执——控制流直接 adapter.send 绕过 Outbox
     //
     // 为什么不走 this.emitReply：emitReply 在 outboxRegistry 存在时会走
     //   outbox.post，排在目标 target 已有的 pending entry（如等待 slot fill
     //   的 LLM 回复）之后——用户"好"的回执会被延迟到 LLM 回复之后才到达，
     //   违反"控制响应即时反馈"原则。
     // 语义对齐：TextRenderer 发 confirmation 消息就是直接 adapter.send 绕过
-    //   outbox（§3.7）；对应的回执作为控制响应的另一端，同源同策。
+    //   outbox；对应的回执作为控制响应的另一端，同源同策。
     const replyTarget = buildReplyTarget(msg);
     const replyText = formatResolutionReceipt(target.request, decision, ok);
     const adapter = this.channels.get(replyTarget.channelId);

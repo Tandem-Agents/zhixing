@@ -27,6 +27,8 @@
 代码包(`packages/*`):
 
 - `@zhixing/core` — 核心引擎:Agent Loop、事件系统、工具管线
+- `@zhixing/owner-kernel` — 对话 owner 内核:会话权威、运行提交、确认聚合
+- `@zhixing/rpc` — RPC 投影层:会话流、事件组播、确认桥接
 - `@zhixing/orchestrator` — 编排器:Runtime 装配、子 Agent 生命周期、Task 工具
 - `@zhixing/providers` — LLM Provider 层:协议适配、预设注册、配置解析
 - `@zhixing/tools-builtin` — 内置工具:Read / Write / Edit / Glob / Grep / Bash

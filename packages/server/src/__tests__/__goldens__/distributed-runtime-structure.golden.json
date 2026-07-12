@@ -13,9 +13,11 @@
       "@zhixing/orchestrator": [
         "@zhixing/test-utils"
       ],
+      "@zhixing/owner-kernel": [],
       "@zhixing/providers": [
         "@zhixing/test-utils"
       ],
+      "@zhixing/rpc": [],
       "@zhixing/server": [
         "@zhixing/test-utils"
       ],
@@ -31,7 +33,9 @@
       "@zhixing/mcp": [],
       "@zhixing/network": [],
       "@zhixing/orchestrator": [],
+      "@zhixing/owner-kernel": [],
       "@zhixing/providers": [],
+      "@zhixing/rpc": [],
       "@zhixing/server": [],
       "@zhixing/test-utils": [],
       "@zhixing/tools-builtin": []
@@ -62,11 +66,20 @@
         "@zhixing/providers",
         "@zhixing/tools-builtin"
       ],
+      "@zhixing/owner-kernel": [
+        "@zhixing/core"
+      ],
       "@zhixing/providers": [
         "@zhixing/core"
       ],
+      "@zhixing/rpc": [
+        "@zhixing/core",
+        "@zhixing/owner-kernel"
+      ],
       "@zhixing/server": [
-        "@zhixing/core"
+        "@zhixing/core",
+        "@zhixing/owner-kernel",
+        "@zhixing/rpc"
       ],
       "@zhixing/test-utils": [],
       "@zhixing/tools-builtin": [
@@ -137,7 +150,7 @@
     },
     {
       "definition": [
-        "connections: ReadonlySet<RpcConnection>;",
+        "connections: ReadonlySet<RpcNotificationConnection>;",
         "hub: ConfirmationHub;",
         "conversations: ConversationManager;"
       ],
@@ -222,7 +235,7 @@
     },
     {
       "definition": [
-        "connections: ReadonlySet<RpcConnection>;",
+        "connections: ReadonlySet<RpcNotificationConnection>;",
         "schedulerEventBus?: IEventBus<SchedulerEventMap>;",
         "isInternalTask?: (taskId: string) => boolean;"
       ],
@@ -358,6 +371,17 @@
       "definition": "( params: unknown, ctx: HandlerContext, ) => Promise<unknown> | unknown",
       "kind": "type",
       "name": "RpcHandler"
+    },
+    {
+      "definition": [
+        "readonly id: string | number;",
+        "readonly authenticated: boolean;",
+        "readonly loopback: boolean;",
+        "readonly closed: boolean;",
+        "notify(method: string, params?: unknown): void;"
+      ],
+      "kind": "interface",
+      "name": "RpcNotificationConnection"
     },
     {
       "definition": [
@@ -600,7 +624,7 @@
       "name": "SessionCancelledRubricResult"
     },
     {
-      "definition": "| { conversationId: string; change: \"renamed\"; name: string } | { conversationId: string; change: \"deleted\" } | { conversationId: string; change: \"cleared\" } /** * task_list 视图层状态变更(meta 变更的一种)——接入面屏底任务区据此实时 * 刷新。taskList 为 tools-builtin 的 TaskListState 快照(null = 已清空), * server 不依赖该包、以透传形声明,发射端与消费端同源同包类型。 */ | { conversationId: string; change: \"taskList\"; taskList: TaskListState | null }",
+      "definition": "| { conversationId: string; change: \"renamed\"; name: string } | { conversationId: string; change: \"deleted\" } | { conversationId: string; change: \"cleared\" } /** * task_list 视图层状态变更(meta 变更的一种)——接入面屏底任务区据此实时 * 刷新。taskList 为 tools-builtin 的 TaskListState 快照(null = 已清空), * 投影层不依赖该包、以透传形声明,发射端与消费端同源同包类型。 */ | { conversationId: string; change: \"taskList\"; taskList: TaskListState | null }",
       "kind": "type",
       "name": "SessionChangedPayload"
     },
@@ -1152,20 +1176,56 @@
     {
       "kind": "import",
       "references": 2,
+      "sourceZone": "owner-kernel",
+      "target": "package:@zhixing/core"
+    },
+    {
+      "kind": "type-import",
+      "references": 3,
+      "sourceZone": "owner-kernel",
+      "target": "package:@zhixing/core"
+    },
+    {
+      "kind": "import",
+      "references": 1,
+      "sourceZone": "rpc",
+      "target": "package:@zhixing/core"
+    },
+    {
+      "kind": "import",
+      "references": 1,
+      "sourceZone": "rpc",
+      "target": "package:@zhixing/owner-kernel"
+    },
+    {
+      "kind": "type-import",
+      "references": 4,
+      "sourceZone": "rpc",
+      "target": "package:@zhixing/core"
+    },
+    {
+      "kind": "type-import",
+      "references": 4,
+      "sourceZone": "rpc",
+      "target": "package:@zhixing/owner-kernel"
+    },
+    {
+      "kind": "import",
+      "references": 2,
       "sourceZone": "server/advancement",
       "target": "package:@zhixing/core"
     },
     {
       "kind": "import",
-      "references": 5,
+      "references": 1,
       "sourceZone": "server/advancement",
-      "target": "server/rpc"
+      "target": "package:@zhixing/owner-kernel"
     },
     {
       "kind": "import",
-      "references": 1,
+      "references": 5,
       "sourceZone": "server/advancement",
-      "target": "server/runtime"
+      "target": "package:@zhixing/rpc"
     },
     {
       "kind": "type-import",
@@ -1175,31 +1235,67 @@
     },
     {
       "kind": "type-import",
-      "references": 3,
+      "references": 2,
       "sourceZone": "server/advancement",
-      "target": "server/rpc"
+      "target": "package:@zhixing/owner-kernel"
     },
     {
       "kind": "type-import",
       "references": 3,
+      "sourceZone": "server/advancement",
+      "target": "package:@zhixing/rpc"
+    },
+    {
+      "kind": "type-import",
+      "references": 1,
       "sourceZone": "server/advancement",
       "target": "server/runtime"
     },
     {
+      "kind": "export",
+      "references": 1,
+      "sourceZone": "server/confirmation",
+      "target": "package:@zhixing/owner-kernel"
+    },
+    {
       "kind": "type-import",
-      "references": 3,
+      "references": 2,
       "sourceZone": "server/confirmation",
       "target": "package:@zhixing/core"
     },
     {
+      "kind": "type-import",
+      "references": 1,
+      "sourceZone": "server/confirmation",
+      "target": "package:@zhixing/owner-kernel"
+    },
+    {
+      "kind": "export",
+      "references": 6,
+      "sourceZone": "server/rpc",
+      "target": "package:@zhixing/rpc"
+    },
+    {
       "kind": "import",
-      "references": 3,
+      "references": 2,
       "sourceZone": "server/rpc",
       "target": "package:@zhixing/core"
     },
     {
       "kind": "import",
-      "references": 4,
+      "references": 2,
+      "sourceZone": "server/rpc",
+      "target": "package:@zhixing/owner-kernel"
+    },
+    {
+      "kind": "import",
+      "references": 3,
+      "sourceZone": "server/rpc",
+      "target": "package:@zhixing/rpc"
+    },
+    {
+      "kind": "import",
+      "references": 1,
       "sourceZone": "server/rpc",
       "target": "server/runtime"
     },
@@ -1211,9 +1307,21 @@
     },
     {
       "kind": "type-import",
-      "references": 7,
+      "references": 3,
       "sourceZone": "server/rpc",
       "target": "package:@zhixing/core"
+    },
+    {
+      "kind": "type-import",
+      "references": 1,
+      "sourceZone": "server/rpc",
+      "target": "package:@zhixing/owner-kernel"
+    },
+    {
+      "kind": "type-import",
+      "references": 2,
+      "sourceZone": "server/rpc",
+      "target": "package:@zhixing/rpc"
     },
     {
       "kind": "type-import",
@@ -1223,33 +1331,21 @@
     },
     {
       "kind": "type-import",
-      "references": 2,
-      "sourceZone": "server/rpc",
-      "target": "server/confirmation"
-    },
-    {
-      "kind": "type-import",
-      "references": 9,
+      "references": 4,
       "sourceZone": "server/rpc",
       "target": "server/runtime"
     },
     {
-      "kind": "import",
-      "references": 2,
-      "sourceZone": "server/runtime",
-      "target": "package:@zhixing/core"
-    },
-    {
-      "kind": "type-import",
+      "kind": "export",
       "references": 5,
       "sourceZone": "server/runtime",
-      "target": "package:@zhixing/core"
+      "target": "package:@zhixing/owner-kernel"
     },
     {
       "kind": "type-import",
-      "references": 1,
+      "references": 3,
       "sourceZone": "server/runtime",
-      "target": "server/confirmation"
+      "target": "package:@zhixing/core"
     }
   ]
 }

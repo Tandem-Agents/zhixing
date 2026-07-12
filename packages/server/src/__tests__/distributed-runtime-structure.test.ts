@@ -7,12 +7,17 @@ import { describe, expect, it } from "vitest";
 
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../../../", import.meta.url)));
 const PACKAGES_ROOT = resolve(REPO_ROOT, "packages");
-const RPC_ROOT = resolve(REPO_ROOT, "packages/server/src/rpc");
+const RPC_ROOTS = [
+  resolve(REPO_ROOT, "packages/rpc/src"),
+  resolve(REPO_ROOT, "packages/server/src/rpc"),
+];
 
 const ZONES = [
   ["core/conversation", "packages/core/src/conversation"],
   ["core/transcript", "packages/core/src/transcript"],
   ["orchestrator/runtime", "packages/orchestrator/src/runtime"],
+  ["owner-kernel", "packages/owner-kernel/src"],
+  ["rpc", "packages/rpc/src"],
   ["server/advancement", "packages/server/src/advancement"],
   ["server/confirmation", "packages/server/src/confirmation"],
   ["server/rpc", "packages/server/src/rpc"],
@@ -74,7 +79,7 @@ async function readPackageManifests(): Promise<PackageManifest[]> {
 }
 
 async function scanRpcContracts() {
-  const files = (await walk(RPC_ROOT)).filter(
+  const files = (await Promise.all(RPC_ROOTS.map((root) => walk(root)))).flat().filter(
     (file) =>
       file.endsWith(".ts") &&
       !file.endsWith(".test.ts") &&

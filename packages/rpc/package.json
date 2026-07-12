@@ -1,0 +1,59 @@
+{
+  "name": "@zhixing/rpc",
+  "version": "0.1.0",
+  "description": "知行 RPC 投影层 — 会话流、事件组播与确认桥接",
+  "type": "module",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./connection": {
+      "types": "./dist/connection.d.ts",
+      "import": "./dist/connection.js"
+    },
+    "./server-compat": {
+      "types": "./dist/server-compat.d.ts",
+      "import": "./dist/server-compat.js"
+    },
+    "./session-wire": {
+      "types": "./dist/session-wire.d.ts",
+      "import": "./dist/session-wire.js"
+    },
+    "./session-turn-stream": {
+      "types": "./dist/session-turn-stream.d.ts",
+      "import": "./dist/session-turn-stream.js"
+    },
+    "./session-broadcast": {
+      "types": "./dist/session-broadcast.d.ts",
+      "import": "./dist/session-broadcast.js"
+    },
+    "./session-events": {
+      "types": "./dist/session-events.d.ts",
+      "import": "./dist/session-events.js"
+    },
+    "./confirmation-bridge": {
+      "types": "./dist/confirmation-bridge.d.ts",
+      "import": "./dist/confirmation-bridge.js"
+    },
+    "./event-bridge": {
+      "types": "./dist/event-bridge.d.ts",
+      "import": "./dist/event-bridge.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@zhixing/core": "workspace:*",
+    "@zhixing/owner-kernel": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.1",
+    "tsup": "^8.4.0",
+    "typescript": "^5.8.3"
+  }
+}

@@ -42,9 +42,9 @@ import { RpcAppError, RpcErrors } from "../handlers.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
 import type { RpcConnection } from "../connection.js";
 import type { ServerContext } from "../../context.js";
-import type { SessionBroadcast } from "../session-broadcast.js";
+import type { SessionBroadcast } from "@zhixing/rpc/session-broadcast";
 import type { ConversationDirectory } from "../../runtime/conversation-directory.js";
-import { projectSessionTurn } from "../session-turn-stream.js";
+import { projectSessionTurn } from "@zhixing/rpc/session-turn-stream";
 import {
   SESSION_NOTIFICATIONS,
   type SessionChangedPayload,
@@ -76,15 +76,15 @@ import {
   type SessionTaskListResult,
   type SessionTaskListUpdateResult,
   type SessionUnsubscribeResult,
-} from "../session-wire.js";
-import { createControlSessionEventEnvelope } from "../session-events.js";
+} from "@zhixing/rpc/session-wire";
+import { createControlSessionEventEnvelope } from "@zhixing/rpc/session-events";
 import type { AdvancementPrepareResult } from "../../advancement/index.js";
 import {
   generateConversationId,
   WorksceneBusyError,
   type ConversationManager,
   type ManagedSession,
-} from "../../runtime/conversation-manager.js";
+} from "@zhixing/owner-kernel/conversation-manager";
 import type { PerspectivesTurnResult } from "../../perspectives/index.js";
 // ─── session.send ───
 

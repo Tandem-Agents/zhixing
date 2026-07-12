@@ -14,7 +14,7 @@ import {
   type OrchestrationSystemCapsV1,
   type TokenUsage,
 } from "@zhixing/core";
-import type { PendingTask } from "../runtime/index.js";
+import type { PendingTask } from "@zhixing/owner-kernel/conversation-manager";
 import {
   DEFAULT_PERSPECTIVE_COUNT,
   MAX_PERSPECTIVE_COUNT,

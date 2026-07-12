@@ -11,7 +11,10 @@ import type {
   TurnSource,
   UserTurnInputLike,
 } from "@zhixing/core";
-import type { ConversationManager, ManagedSession } from "../runtime/index.js";
+import type {
+  ConversationManager,
+  ManagedSession,
+} from "@zhixing/owner-kernel/conversation-manager";
 
 export interface PerspectiveSpec {
   readonly name: string;

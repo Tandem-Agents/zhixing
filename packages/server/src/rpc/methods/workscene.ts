@@ -14,20 +14,20 @@
  * enter 原子化与删除守卫均不在 RPC handler 内复写。
  */
 
-import type { MethodEntry } from "../handlers.js";
-import { RpcAppError, RpcErrors } from "../handlers.js";
-import { RPC_ERROR_CODES } from "../protocol.js";
-import type { ServerContext } from "../../context.js";
-import { WorksceneBusyError } from "../../runtime/conversation-manager.js";
-import {
-  WorksceneInputError,
-  type WorksceneDirectory,
-} from "../../runtime/workscene-directory.js";
+import { WorksceneBusyError } from "@zhixing/owner-kernel/conversation-manager";
 import type {
   WorksceneEnterResult,
   WorksceneListResult,
   WorksceneSummary,
-} from "../session-wire.js";
+} from "@zhixing/rpc/session-wire";
+import type { MethodEntry } from "../handlers.js";
+import { RpcAppError, RpcErrors } from "../handlers.js";
+import { RPC_ERROR_CODES } from "../protocol.js";
+import type { ServerContext } from "../../context.js";
+import {
+  WorksceneInputError,
+  type WorksceneDirectory,
+} from "../../runtime/workscene-directory.js";
 import { loadAdvancementState } from "./session.js";
 
 function requireWorkscenes(server: ServerContext): WorksceneDirectory {

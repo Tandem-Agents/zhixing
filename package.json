@@ -18,6 +18,7 @@
     "test:watch": "pnpm -r run test:watch",
     "runtime:baseline": "node scripts/runtime-baseline.mjs",
     "runtime:baseline:update": "node scripts/runtime-baseline.mjs --update",
+    "runtime:package-exports": "node scripts/check-runtime-package-exports.mjs",
     "contracts:typecheck": "pnpm --filter @zhixing/core typecheck:contracts",
     "contracts:lint": "pnpm --filter @zhixing/core lint:contract-schemas",
     "lint": "biome check .",

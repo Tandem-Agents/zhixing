@@ -7,9 +7,9 @@ import type {
 import {
   WorksceneBusyError,
   type ConversationManager,
-} from "../runtime/conversation-manager.js";
-import { projectSessionTurn } from "../rpc/session-turn-stream.js";
-import type { SessionBroadcast } from "../rpc/session-broadcast.js";
+} from "@zhixing/owner-kernel/conversation-manager";
+import type { SessionBroadcast } from "@zhixing/rpc/session-broadcast";
+import { projectSessionTurn } from "@zhixing/rpc/session-turn-stream";
 
 export interface ProxyMessageSchedulerOptions {
   readonly manager: ConversationManager;

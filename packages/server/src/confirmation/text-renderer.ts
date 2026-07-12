@@ -1,22 +1,21 @@
 /**
  * TextConfirmationRenderer —— 远程通道的纯文本确认渲染器
  *
- * 定位（[remote-confirmation-execution.md §3.4]）：
- *   订阅 Hub 的 request 事件 → 按 request.turnOrigin.target 解析通道 + 接收人
+ * 订阅 Hub 的 request 事件 → 按 request.turnOrigin.target 解析通道 + 接收人
  *   → 调 adapter.send 发一条纯文本确认消息 → 结束。
  *
  * **不感知 resolved 事件**——RPC 推送由 ConfirmationBridge 统一处理；
  * 超时 / 取消场景下通道侧无需"更新已失效状态"，用户超时回复会收到 InboundRouter
- * 的"已处理"回执（§3.5 ok=false 分支）。
+ * 的"已处理"回执。
  *
  * 关键不变量：
- *   - **INV-T1**：同一 request 只发一次消息（Hub 的 request 事件对 broker FIFO
+ *   - 同一 request 只发一次消息（Hub 的 request 事件对 broker FIFO
  *     首次 showing 语义天然保证）
- *   - **INV-T2**：adapter.send 失败不重试——记 warn 埋点；broker expiresAt 超时
+ *   - adapter.send 失败不重试——记 warn 埋点；broker expiresAt 超时
  *     兜底 resolved 让系统自然收敛
- *   - **INV-T3**：无"已失效"通道侧更新——文本协议下消息就是消息
+ *   - 无"已失效"通道侧更新——文本协议下消息就是消息
  *
- * 埋点契约（§3.10 事件表）：
+ * 埋点契约：
  *   - `confirmation.remote.sent`
  *   - `confirmation.remote.send-failed`
  *   - `confirmation.remote.no-target`
@@ -29,7 +28,7 @@ import type {
   DeliveryTarget,
   DisplayBody,
 } from "@zhixing/core";
-import type { ConfirmationHub, HubEntry } from "./hub.js";
+import type { ConfirmationHub, HubEntry } from "@zhixing/owner-kernel/confirmation-hub";
 
 // ─── 选项 ───
 
@@ -61,7 +60,7 @@ export class TextConfirmationRenderer {
         // dispatch 内部处理错误（不抛出），await 以串行化同 target 的发送
         void this.dispatch(event.entry);
       }
-      // resolved 事件由 Bridge 统一推 RPC；本渲染器不处理（§3.4 INV-T3）
+      // resolved 事件由 Bridge 统一推 RPC；本渲染器不处理
     });
   }
 
