@@ -17,6 +17,7 @@ const ZONES = [
   ["core/transcript", "packages/core/src/transcript"],
   ["orchestrator/runtime", "packages/orchestrator/src/runtime"],
   ["executor", "packages/executor/src"],
+  ["mesh", "packages/mesh/src"],
   ["owner-kernel", "packages/owner-kernel/src"],
   ["owner-services", "packages/owner-services/src"],
   ["rpc", "packages/rpc/src"],
@@ -62,6 +63,16 @@ describe("distributed runtime structural gates", () => {
       "@zhixing/owner-kernel",
       "@zhixing/runtime-host",
     ]);
+    expect(dependencyGraph.production["@zhixing/mesh"]).toEqual([
+      "@zhixing/core",
+    ]);
+    expect(
+      Object.entries(dependencyGraph.production)
+        .filter(([name, dependencies]) =>
+          name !== "@zhixing/mesh" && dependencies.includes("@zhixing/mesh"),
+        )
+        .map(([name]) => name),
+    ).toEqual([]);
     expect(dependencyGraph.production["@zhixing/executor"]).not.toContain(
       "@zhixing/server",
     );

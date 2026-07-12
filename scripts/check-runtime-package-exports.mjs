@@ -9,6 +9,9 @@ const [
   runtimeHostSessionAdapter,
   executor,
   executorRuntimeRole,
+  mesh,
+  meshHandshake,
+  meshTransport,
 ] = await Promise.all([
   import("../packages/server/dist/index.js"),
   import("../packages/owner-services/dist/index.js"),
@@ -18,6 +21,9 @@ const [
   import("../packages/runtime-host/dist/session-adapter.js"),
   import("../packages/executor/dist/index.js"),
   import("../packages/executor/dist/runtime-role.js"),
+  import("../packages/mesh/dist/index.js"),
+  import("../packages/mesh/dist/handshake.js"),
+  import("../packages/mesh/dist/transport.js"),
 ]);
 
 const retiredServerCompatibilityValues = [
@@ -75,6 +81,12 @@ const executorCanonicalValues = [
   "createInProcessRuntimeFactory",
 ];
 
+const meshCanonicalValues = {
+  connectAuthenticatedMesh: meshHandshake,
+  createAuthenticatedMeshServer: meshHandshake,
+  SecureMeshConnection: meshTransport,
+};
+
 const failures = [];
 for (const name of ownerServiceCanonicalValues) {
   if (ownerServices[name] !== ownerServicesAdvancement[name]) {
@@ -89,6 +101,9 @@ for (const [name, subpath] of Object.entries(runtimeHostCanonicalValues)) {
 }
 for (const name of executorCanonicalValues) {
   if (executor[name] !== executorRuntimeRole[name]) failures.push(`executor:${name}`);
+}
+for (const [name, subpath] of Object.entries(meshCanonicalValues)) {
+  if (mesh[name] !== subpath[name]) failures.push(`mesh:${name}`);
 }
 
 const runtimeHostDeclarations = await Promise.all([

@@ -17,6 +17,7 @@ const commands = [
   ["--filter", "@zhixing/owner-services", "build"],
   ["--filter", "@zhixing/runtime-host", "build"],
   ["--filter", "@zhixing/executor", "build"],
+  ["--filter", "@zhixing/mesh", "build"],
   ["--filter", "@zhixing/server", "build"],
   ["runtime:package-exports"],
   ["--filter", "@zhixing/server", "exec", "vitest", "run", "src/__tests__/distributed-runtime-golden.test.ts"],

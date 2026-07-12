@@ -8,6 +8,7 @@ import type {
   IsoTime,
   JobRunState,
   Message,
+  ProtocolVersion,
   SessionEventProjection,
   Signature,
   TranscriptRunRecord,
@@ -129,7 +130,7 @@ export interface CapabilityDescriptor
   extends WireSchemaV1<"CapabilityDescriptor"> {
   executorId: string;
   revision: number;
-  protocolVersion: string;
+  protocolVersion: ProtocolVersion;
   workspaces: Array<{
     bindingRef: string;
     workspaceBindingRevision: number;

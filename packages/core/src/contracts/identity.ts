@@ -2,6 +2,7 @@ import type {
   Digest,
   IsoTime,
   KeyConfirmation,
+  ProtocolVersion,
   Signature,
   Ulid,
 } from "./foundation.js";
@@ -145,7 +146,7 @@ export interface ConversationTransferCommit
 export interface PairingOffer extends WireSchemaV1<"PairingOffer"> {
   offerId: Ulid;
   homeId: Ulid;
-  protocolVersion: string;
+  protocolVersion: ProtocolVersion;
   issuer: { deviceId: string; keyFingerprint: Digest };
   issuerNonce: string;
   method: { kind: "qr-secret" } | { kind: "short-pake"; suite: string };

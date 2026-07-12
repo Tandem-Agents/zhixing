@@ -12,6 +12,7 @@
         "@zhixing/test-utils"
       ],
       "@zhixing/mcp": [],
+      "@zhixing/mesh": [],
       "@zhixing/network": [],
       "@zhixing/orchestrator": [
         "@zhixing/test-utils"
@@ -37,6 +38,7 @@
       "@zhixing/core": [],
       "@zhixing/executor": [],
       "@zhixing/mcp": [],
+      "@zhixing/mesh": [],
       "@zhixing/network": [],
       "@zhixing/orchestrator": [],
       "@zhixing/owner-kernel": [],
@@ -75,6 +77,9 @@
       "@zhixing/mcp": [
         "@zhixing/core",
         "@zhixing/network"
+      ],
+      "@zhixing/mesh": [
+        "@zhixing/core"
       ],
       "@zhixing/network": [],
       "@zhixing/orchestrator": [
@@ -1248,6 +1253,30 @@
       "references": 1,
       "sourceZone": "executor",
       "target": "package:@zhixing/owner-kernel"
+    },
+    {
+      "kind": "import",
+      "references": 1,
+      "sourceZone": "mesh",
+      "target": "external:node:tls"
+    },
+    {
+      "kind": "type-import",
+      "references": 1,
+      "sourceZone": "mesh",
+      "target": "external:node:net"
+    },
+    {
+      "kind": "type-import",
+      "references": 1,
+      "sourceZone": "mesh",
+      "target": "external:node:tls"
+    },
+    {
+      "kind": "type-import",
+      "references": 5,
+      "sourceZone": "mesh",
+      "target": "package:@zhixing/core"
     },
     {
       "kind": "import",

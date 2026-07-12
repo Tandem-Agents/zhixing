@@ -4,6 +4,7 @@ export type {
   IsoTime,
   JsonValue,
   KeyConfirmation,
+  ProtocolVersion,
   Signature,
   Ulid,
   WireContractV1,

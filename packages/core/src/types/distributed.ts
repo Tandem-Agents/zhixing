@@ -3,6 +3,7 @@ export type Ulid = string;
 export type IsoTime = string;
 export type Digest = string;
 export type KeyConfirmation = string;
+export type ProtocolVersion = string;
 
 export type JsonValue =
   | null
