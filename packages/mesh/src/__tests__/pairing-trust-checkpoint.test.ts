@@ -33,6 +33,7 @@ import {
 import { canonicalize } from "../canonical.js";
 import { DeviceKey, enrollDeviceIdentity } from "../device-identity.js";
 import { createUlid } from "../identifiers.js";
+import { CIPHERMAN_PAIRING_PAKE_SUITES } from "../pairing-pake-cipherman.js";
 import {
   assemblePairingFinished,
   createPairingAcceptanceProof,
@@ -47,6 +48,7 @@ import {
   verifyQrPairingJoin,
 } from "../pairing.js";
 import { RecoveryRoot } from "../recovery-root.js";
+import * as publicMesh from "../index.js";
 import * as publicPairing from "../pairing-public.js";
 import {
   applyTrustEvent,
@@ -197,12 +199,19 @@ describe("pairing protocol", () => {
       protocolVersion: "1",
       now: NOW,
     });
-    const joined = await PakeJoinerSession.start(material.offer, joiner.identity, material.secret, NOW);
+    const joined = await PakeJoinerSession.start(
+      material.offer,
+      joiner.identity,
+      material.secret,
+      CIPHERMAN_PAIRING_PAKE_SUITES,
+      NOW,
+    );
     const issuing = await PakeIssuerSession.respond(
       material.offer,
       joined.join,
       joined.session.firstRound,
       material.secret,
+      CIPHERMAN_PAIRING_PAKE_SUITES,
       NOW,
     );
     const finalRound = joined.session.finish(issuing.responseRound);
@@ -215,24 +224,38 @@ describe("pairing protocol", () => {
     ).not.toContain(material.secret);
     expect(() => issuing.finish(finalRound)).toThrow(/already complete/);
 
-    const wrongJoiner = await PakeJoinerSession.start(material.offer, joiner.identity, material.secret, NOW);
+    const wrongJoiner = await PakeJoinerSession.start(
+      material.offer,
+      joiner.identity,
+      material.secret,
+      CIPHERMAN_PAIRING_PAKE_SUITES,
+      NOW,
+    );
     const wrongIssuer = await PakeIssuerSession.respond(
       material.offer,
       wrongJoiner.join,
       wrongJoiner.session.firstRound,
       "00000000" === material.secret ? "99999999" : "00000000",
+      CIPHERMAN_PAIRING_PAKE_SUITES,
       NOW,
     );
     expect(() => wrongJoiner.session.finish(wrongIssuer.responseRound)).toThrow(/confirmation failed/);
     expect(() => wrongJoiner.session.finish(wrongIssuer.responseRound)).toThrow(/complete or failed/);
 
-    const downgradeJoiner = await PakeJoinerSession.start(material.offer, joiner.identity, material.secret, NOW);
+    const downgradeJoiner = await PakeJoinerSession.start(
+      material.offer,
+      joiner.identity,
+      material.secret,
+      CIPHERMAN_PAIRING_PAKE_SUITES,
+      NOW,
+    );
     const downgradedOffer: PairingOffer = { ...material.offer, protocolVersion: "0" };
     const downgradeIssuer = await PakeIssuerSession.respond(
       downgradedOffer,
       downgradeJoiner.join,
       downgradeJoiner.session.firstRound,
       material.secret,
+      CIPHERMAN_PAIRING_PAKE_SUITES,
       NOW,
     );
     expect(() => downgradeJoiner.session.finish(downgradeIssuer.responseRound)).toThrow(/confirmation failed/);
@@ -242,12 +265,15 @@ describe("pairing protocol", () => {
         joined.join,
         { ...joined.session.firstRound, round: 2 },
         material.secret,
+        CIPHERMAN_PAIRING_PAKE_SUITES,
         NOW,
       ),
     ).rejects.toThrow(/round 1/);
   });
 
   it("charges every PAKE oracle response before sending it and permits only admitted commits", async () => {
+    expect("PakeJoinerSession" in publicMesh).toBe(false);
+    expect("SHORT_PAKE_SUITE" in publicMesh).toBe(false);
     expect("PakeIssuerSession" in publicPairing).toBe(false);
     expect(publicPairing.PairingPakeSuiteRegistry).toBeDefined();
     const issuer = await device("anchor");
@@ -255,7 +281,11 @@ describe("pairing protocol", () => {
     const { projection: genesis } = trustGenesis(issuer);
     const store = new TestAuthority(genesis);
     const offers = new InMemoryPairingOfferRepository();
-    const coordinator = new PairingCommitCoordinator(store, offers);
+    const coordinator = new PairingCommitCoordinator(
+      store,
+      offers,
+      CIPHERMAN_PAIRING_PAKE_SUITES,
+    );
     const material = offers.issueShortCode({
       homeId: genesis.homeId,
       issuer: issuer.identity,
@@ -269,6 +299,7 @@ describe("pairing protocol", () => {
         material.offer,
         joiner.identity,
         material.secret === "00000000" ? "99999999" : "00000000",
+        CIPHERMAN_PAIRING_PAKE_SUITES,
         attemptNow,
       );
       const admitted = await coordinator.beginShortCodeAttempt({
@@ -309,6 +340,7 @@ describe("pairing protocol", () => {
       material.offer,
       joiner.identity,
       material.secret,
+      CIPHERMAN_PAIRING_PAKE_SUITES,
       NOW,
     );
     await expect(
@@ -328,7 +360,13 @@ describe("pairing protocol", () => {
       protocolVersion: "1",
       now: NOW,
     });
-    const joined = await PakeJoinerSession.start(valid.offer, joiner.identity, valid.secret, NOW);
+    const joined = await PakeJoinerSession.start(
+      valid.offer,
+      joiner.identity,
+      valid.secret,
+      CIPHERMAN_PAIRING_PAKE_SUITES,
+      NOW,
+    );
     const admitted = await coordinator.beginShortCodeAttempt({
       current: genesis,
       offer: valid.offer,

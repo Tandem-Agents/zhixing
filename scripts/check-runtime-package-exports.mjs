@@ -11,6 +11,7 @@ const [
   executorRuntimeRole,
   mesh,
   meshHandshake,
+  meshPairing,
   meshTransport,
 ] = await Promise.all([
   import("../packages/server/dist/index.js"),
@@ -23,6 +24,7 @@ const [
   import("../packages/executor/dist/runtime-role.js"),
   import("../packages/mesh/dist/index.js"),
   import("../packages/mesh/dist/handshake.js"),
+  import("../packages/mesh/dist/pairing-public.js"),
   import("../packages/mesh/dist/transport.js"),
 ]);
 
@@ -104,6 +106,9 @@ for (const name of executorCanonicalValues) {
 }
 for (const [name, subpath] of Object.entries(meshCanonicalValues)) {
   if (mesh[name] !== subpath[name]) failures.push(`mesh:${name}`);
+}
+for (const name of Object.keys(meshPairing)) {
+  if (name in mesh) failures.push(`mesh-pairing-root-leak:${name}`);
 }
 
 const runtimeHostDeclarations = await Promise.all([

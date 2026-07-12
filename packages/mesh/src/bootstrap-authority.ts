@@ -25,7 +25,6 @@ import {
   pairingOfferDigest,
   pairingTranscriptDigest,
   PakeIssuerSession,
-  DEFAULT_PAIRING_PAKE_SUITES,
   verifyPairingAcceptance,
   verifyQrPairingJoin,
   type PairingOfferRepository,
@@ -129,7 +128,7 @@ export class PairingCommitCoordinator {
   constructor(
     private readonly authority: BootstrapAuthorityPort,
     private readonly offers: PairingOfferRepository,
-    private readonly pakeSuites: PairingPakeSuiteRegistry = DEFAULT_PAIRING_PAKE_SUITES,
+    private readonly pakeSuites?: PairingPakeSuiteRegistry,
   ) {}
 
   async beginQrAttempt(input: {
@@ -168,6 +167,9 @@ export class PairingCommitCoordinator {
     if (input.offer.method.kind !== "short-pake" || input.join.method !== "short-pake") {
       throw new TypeError("Short-code attempt requires a PAKE offer and join");
     }
+    if (!this.pakeSuites) {
+      throw new TypeError("Short-code pairing requires an explicitly approved PAKE suite");
+    }
     const attempt = await this.beginAttempt(material.offer, now);
     try {
       const session = await PakeIssuerSession.respond(
@@ -175,8 +177,8 @@ export class PairingCommitCoordinator {
         input.join,
         input.joinerRound,
         material.secret,
-        now,
         this.pakeSuites,
+        now,
       );
       let completedRound: PakeRound | undefined;
       let completedSessionKey: Buffer | undefined;

@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "reviewedAt": "2026-07-12",
+  "registry": "https://registry.npmjs.org",
+  "pakeProductionApproval": {
+    "status": "blocked",
+    "implementation": {
+      "name": "@cipherman/pake-js",
+      "version": "0.1.1"
+    },
+    "adapterSource": "src/pairing-pake-cipherman.ts",
+    "exportSubpath": "./pairing-pake-cipherman",
+    "evidence": [],
+    "reason": "The selected SPAKE2+ package is pre-1.0 and has not received an independent professional audit.",
+    "releaseGate": "Before the adapter is built or exported, audit this exact package closure or replace it with a more mature implementation; record immutable review evidence and retain the RFC 9383 vector gate."
+  },
+  "direct": [
+    {
+      "name": "@cipherman/pake-js",
+      "version": "0.1.1",
+      "placement": "devDependencies",
+      "license": "MIT",
+      "repository": "git+https://github.com/alicommit-malp/pake-js.git",
+      "integrity": "sha512-iutxMCmRXYacl3fc19SKFisk1sRD1FNQi7+GWPlnQnFit6l3sUagYOCU2IgRPD8MF3s1HwnkSpqARFUp04+GVQ==",
+      "boundary": "Short-code SPAKE2+ only; application rate limiting, transcript binding and durable admission remain local."
+    },
+    {
+      "name": "@peculiar/webcrypto",
+      "version": "1.7.1",
+      "placement": "dependencies",
+      "license": "MIT",
+      "repository": "https://github.com/PeculiarVentures/webcrypto",
+      "integrity": "sha512-ODOov0sGMJMf3jPonOkgGqPknTsu+DdQ7kD++gz8aI+aFMOMHFbWAA2taqXXVTdP+OTOQR/znGvSpmkeI0WTYQ==",
+      "boundary": "WebCrypto compatibility for certificate issuance only; not the live TLS record layer."
+    },
+    {
+      "name": "@peculiar/x509",
+      "version": "2.0.0",
+      "placement": "dependencies",
+      "license": "MIT",
+      "repository": "git+https://github.com/PeculiarVentures/x509.git",
+      "integrity": "sha512-r10lkuy6BNfRmyYdRAfgu6dq0HOmyIV2OLhXWE3gDEPBdX1b8miztJVyX/UxWhLwemNyDP3CLZHpDxDwSY0xaA==",
+      "boundary": "Short-lived certificate issuance and parsing only; Node TLS and OpenSSL authenticate live sessions."
+    },
+    {
+      "name": "reflect-metadata",
+      "version": "0.2.2",
+      "placement": "dependencies",
+      "license": "Apache-2.0",
+      "repository": "https://github.com/rbuckton/reflect-metadata.git",
+      "integrity": "sha512-urBwgfrvVP/eAyXx4hluJivBKzuEbSQs9rKWCrCkbSxNv8mxPcUZKeuoF3Uy4mJl3Lwprp6yy5/39VWigZ4K6Q==",
+      "boundary": "Decorator metadata required by the X.509 dependency stack; no cryptographic operation."
+    }
+  ],
+  "securityClosure": [
+    { "name": "@cipherman/pake-js", "version": "0.1.1", "via": "direct", "license": "MIT", "repository": "git+https://github.com/alicommit-malp/pake-js.git" },
+    { "name": "@noble/curves", "version": "1.9.7", "via": "@cipherman/pake-js", "license": "MIT", "repository": "git+https://github.com/paulmillr/noble-curves.git" },
+    { "name": "@noble/hashes", "version": "1.8.0", "via": "@noble/curves", "license": "MIT", "repository": "git+https://github.com/paulmillr/noble-hashes.git" },
+    { "name": "@peculiar/asn1-cms", "version": "2.8.0", "via": "@peculiar/x509", "license": "MIT", "repository": "https://github.com/PeculiarVentures/asn1-schema" },
+    { "name": "@peculiar/asn1-csr", "version": "2.8.0", "via": "@peculiar/x509", "license": "MIT", "repository": "https://github.com/PeculiarVentures/asn1-schema" },
+    { "name": "@peculiar/asn1-ecc", "version": "2.8.0", "via": "@peculiar/x509", "license": "MIT", "repository": "https://github.com/PeculiarVentures/asn1-schema" },
+    { "name": "@peculiar/asn1-pfx", "version": "2.8.0", "via": "@peculiar/asn1-pkcs9", "license": "MIT", "repository": "https://github.com/PeculiarVentures/asn1-schema" },
+    { "name": "@peculiar/asn1-pkcs8", "version": "2.8.0", "via": "@peculiar/asn1-pkcs9", "license": "MIT", "repository": "https://github.com/PeculiarVentures/asn1-schema" },
+    { "name": "@peculiar/asn1-pkcs9", "version": "2.8.0", "via": "@peculiar/x509", "license": "MIT", "repository": "https://github.com/PeculiarVentures/asn1-schema" },
+    { "name": "@peculiar/asn1-rsa", "version": "2.8.0", "via": "@peculiar/x509", "license": "MIT", "repository": "https://github.com/PeculiarVentures/asn1-schema" },
+    { "name": "@peculiar/asn1-schema", "version": "2.8.0", "via": "@peculiar/webcrypto", "license": "MIT", "repository": "https://github.com/PeculiarVentures/asn1-schema" },
+    { "name": "@peculiar/asn1-x509", "version": "2.8.0", "via": "@peculiar/x509", "license": "MIT", "repository": "https://github.com/PeculiarVentures/asn1-schema" },
+    { "name": "@peculiar/asn1-x509-attr", "version": "2.8.0", "via": "@peculiar/asn1-cms", "license": "MIT", "repository": "https://github.com/PeculiarVentures/asn1-schema" },
+    { "name": "@peculiar/json-schema", "version": "1.1.12", "via": "@peculiar/webcrypto", "license": "MIT", "repository": "git+https://github.com/PeculiarVentures/json-schema.git" },
+    { "name": "@peculiar/utils", "version": "2.0.3", "via": "@peculiar/webcrypto", "license": "MIT", "repository": "https://github.com/PeculiarVentures/pvtsutils" },
+    { "name": "@peculiar/webcrypto", "version": "1.7.1", "via": "direct", "license": "MIT", "repository": "https://github.com/PeculiarVentures/webcrypto" },
+    { "name": "@peculiar/x509", "version": "2.0.0", "via": "direct", "license": "MIT", "repository": "git+https://github.com/PeculiarVentures/x509.git" },
+    { "name": "asn1js", "version": "3.0.10", "via": "@peculiar/asn1-schema", "license": "BSD-3-Clause", "repository": "https://github.com/PeculiarVentures/ASN1.js" },
+    { "name": "pvtsutils", "version": "1.3.6", "via": "asn1js", "license": "MIT", "repository": "git+https://github.com/PeculiarVentures/pvtsutils" },
+    { "name": "pvutils", "version": "1.1.5", "via": "asn1js", "license": "MIT", "repository": "https://github.com/PeculiarVentures/pvutils.git" },
+    { "name": "reflect-metadata", "version": "0.2.2", "via": "direct", "license": "Apache-2.0", "repository": "https://github.com/rbuckton/reflect-metadata.git" },
+    { "name": "tslib", "version": "1.14.1", "via": "tsyringe", "license": "0BSD", "repository": "https://github.com/Microsoft/tslib.git" },
+    { "name": "tslib", "version": "2.8.1", "via": "@peculiar/webcrypto", "license": "0BSD", "repository": "https://github.com/Microsoft/tslib.git" },
+    { "name": "tsyringe", "version": "4.10.0", "via": "@peculiar/x509", "license": "MIT", "repository": "git+https://github.com/Microsoft/tsyringe.git" },
+    { "name": "webcrypto-core", "version": "1.9.2", "via": "@peculiar/webcrypto", "license": "MIT", "repository": "https://github.com/PeculiarVentures/webcrypto-core" }
+  ],
+  "standardsVectors": [
+    {
+      "suite": "SPAKE2PLUS-P256-SHA256-HKDF-SHA256-HMAC-SHA256",
+      "source": "https://www.rfc-editor.org/rfc/rfc9383.html#appendix-C",
+      "fixture": "src/__tests__/fixtures/rfc9383-spake2plus-p256-sha256.json",
+      "test": "src/__tests__/spake2plus-rfc-vector.test.ts"
+    }
+  ]
+}

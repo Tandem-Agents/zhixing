@@ -7,7 +7,6 @@ import {
   scrypt,
   timingSafeEqual,
 } from "node:crypto";
-import { p256 } from "@cipherman/pake-js/spake2plus";
 import type {
   DeviceIdentity,
   KeyConfirmation,
@@ -28,7 +27,7 @@ const DEFAULT_MAX_ATTEMPTS = 3;
 const QR_SECRET_BYTES = 32;
 const PAKE_CONTEXT = "zhixing-device-pairing-v1";
 
-export const SHORT_PAKE_SUITE = p256.SUITE_NAME;
+export const SHORT_PAKE_SUITE = "SPAKE2PLUS-P256-SHA256-HKDF-SHA256-HMAC-SHA256";
 
 export interface PairingPakeSuite {
   readonly name: string;
@@ -109,23 +108,6 @@ export class PairingPakeSuiteRegistry {
     return suite;
   }
 }
-
-export const DEFAULT_PAIRING_PAKE_SUITES = new PairingPakeSuiteRegistry([
-  {
-    name: p256.SUITE_NAME,
-    mhfOutputBytes: 80,
-    clientShareBytes: 65,
-    serverShareBytes: 65,
-    confirmationBytes: 32,
-    deriveScalars: p256.deriveScalars,
-    registerVerifier: p256.registerVerifier,
-    clientStart: p256.clientStart,
-    clientFinish: p256.clientFinish,
-    serverRespond: p256.serverRespond,
-    deriveKeys: p256.deriveKeys,
-    verifyConfirmation: p256.verifyConfirmation,
-  },
-]);
 
 export interface PairingSigner {
   readonly deviceId: string;
@@ -289,8 +271,8 @@ export class PakeJoinerSession {
     offer: PairingOffer,
     device: DeviceIdentity,
     shortCode: string,
+    suites: PairingPakeSuiteRegistry,
     now = Date.now(),
-    suites = DEFAULT_PAIRING_PAKE_SUITES,
   ): Promise<{ join: Extract<PairingJoin, { method: "short-pake" }>; session: PakeJoinerSession }> {
     assertOfferMethod(offer, "short-pake");
     if (offer.method.kind !== "short-pake") throw new TypeError("Expected short-pake pairing offer");
@@ -399,8 +381,8 @@ export class PakeIssuerSession {
     join: PairingJoin,
     joinerRound: PakeRound,
     shortCode: string,
+    suites: PairingPakeSuiteRegistry,
     now = Date.now(),
-    suites = DEFAULT_PAIRING_PAKE_SUITES,
   ): Promise<PakeIssuerSession> {
     assertOfferUsable(offer, join, now);
     if (offer.method.kind !== "short-pake" || join.method !== "short-pake") {
