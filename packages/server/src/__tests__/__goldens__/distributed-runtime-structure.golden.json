@@ -8,6 +8,9 @@
       "@zhixing/core": [
         "@zhixing/test-utils"
       ],
+      "@zhixing/executor": [
+        "@zhixing/test-utils"
+      ],
       "@zhixing/mcp": [],
       "@zhixing/network": [],
       "@zhixing/orchestrator": [
@@ -32,6 +35,7 @@
       "@zhixing/channel-feishu": [],
       "@zhixing/cli": [],
       "@zhixing/core": [],
+      "@zhixing/executor": [],
       "@zhixing/mcp": [],
       "@zhixing/network": [],
       "@zhixing/orchestrator": [],
@@ -51,6 +55,7 @@
       "@zhixing/cli": [
         "@zhixing/channel-feishu",
         "@zhixing/core",
+        "@zhixing/executor",
         "@zhixing/mcp",
         "@zhixing/network",
         "@zhixing/orchestrator",
@@ -63,6 +68,10 @@
         "@zhixing/tools-builtin"
       ],
       "@zhixing/core": [],
+      "@zhixing/executor": [
+        "@zhixing/owner-kernel",
+        "@zhixing/runtime-host"
+      ],
       "@zhixing/mcp": [
         "@zhixing/core",
         "@zhixing/network"
@@ -1007,12 +1016,6 @@
   ],
   "topologyEdges": [
     {
-      "kind": "export",
-      "references": 4,
-      "sourceZone": "cli/runtime",
-      "target": "package:@zhixing/runtime-host"
-    },
-    {
       "kind": "import",
       "references": 2,
       "sourceZone": "cli/runtime",
@@ -1050,7 +1053,13 @@
     },
     {
       "kind": "import",
-      "references": 8,
+      "references": 5,
+      "sourceZone": "cli/runtime",
+      "target": "package:@zhixing/rpc"
+    },
+    {
+      "kind": "import",
+      "references": 4,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing/server"
     },
@@ -1074,7 +1083,13 @@
     },
     {
       "kind": "type-import",
-      "references": 4,
+      "references": 5,
+      "sourceZone": "cli/runtime",
+      "target": "package:@zhixing/rpc"
+    },
+    {
+      "kind": "type-import",
+      "references": 2,
       "sourceZone": "cli/runtime",
       "target": "package:@zhixing/server"
     },
@@ -1091,10 +1106,10 @@
       "target": "package:@zhixing/channel-feishu"
     },
     {
-      "kind": "export",
+      "kind": "dynamic-import",
       "references": 1,
       "sourceZone": "cli/serve",
-      "target": "package:@zhixing/runtime-host"
+      "target": "package:@zhixing/executor"
     },
     {
       "kind": "import",
@@ -1128,6 +1143,12 @@
     },
     {
       "kind": "import",
+      "references": 2,
+      "sourceZone": "cli/serve",
+      "target": "package:@zhixing/owner-kernel"
+    },
+    {
+      "kind": "import",
       "references": 3,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/owner-services"
@@ -1137,6 +1158,12 @@
       "references": 3,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/providers"
+    },
+    {
+      "kind": "import",
+      "references": 2,
+      "sourceZone": "cli/serve",
+      "target": "package:@zhixing/rpc"
     },
     {
       "kind": "import",
@@ -1152,9 +1179,15 @@
     },
     {
       "kind": "type-import",
-      "references": 5,
+      "references": 6,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/core"
+    },
+    {
+      "kind": "type-import",
+      "references": 1,
+      "sourceZone": "cli/serve",
+      "target": "package:@zhixing/executor"
     },
     {
       "kind": "type-import",
@@ -1170,7 +1203,7 @@
     },
     {
       "kind": "type-import",
-      "references": 1,
+      "references": 5,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/owner-kernel"
     },
@@ -1188,13 +1221,13 @@
     },
     {
       "kind": "type-import",
-      "references": 1,
+      "references": 3,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/rpc"
     },
     {
       "kind": "type-import",
-      "references": 5,
+      "references": 4,
       "sourceZone": "cli/serve",
       "target": "package:@zhixing/server"
     },
@@ -1206,6 +1239,18 @@
     },
     {
       "kind": "import",
+      "references": 1,
+      "sourceZone": "executor",
+      "target": "package:@zhixing/runtime-host"
+    },
+    {
+      "kind": "type-import",
+      "references": 1,
+      "sourceZone": "executor",
+      "target": "package:@zhixing/owner-kernel"
+    },
+    {
+      "kind": "import",
       "references": 3,
       "sourceZone": "orchestrator/runtime",
       "target": "package:@zhixing/core"
@@ -1325,22 +1370,10 @@
       "target": "package:@zhixing/tools-builtin"
     },
     {
-      "kind": "export",
-      "references": 4,
-      "sourceZone": "server/advancement",
-      "target": "package:@zhixing/owner-services"
-    },
-    {
       "kind": "import",
       "references": 1,
       "sourceZone": "server/advancement",
       "target": "package:@zhixing/owner-kernel"
-    },
-    {
-      "kind": "import",
-      "references": 3,
-      "sourceZone": "server/advancement",
-      "target": "package:@zhixing/owner-services"
     },
     {
       "kind": "import",
@@ -1350,33 +1383,15 @@
     },
     {
       "kind": "type-import",
-      "references": 3,
-      "sourceZone": "server/advancement",
-      "target": "package:@zhixing/owner-kernel"
-    },
-    {
-      "kind": "type-import",
       "references": 1,
       "sourceZone": "server/advancement",
       "target": "package:@zhixing/owner-services"
     },
     {
       "kind": "type-import",
-      "references": 4,
+      "references": 1,
       "sourceZone": "server/advancement",
       "target": "package:@zhixing/rpc"
-    },
-    {
-      "kind": "type-import",
-      "references": 1,
-      "sourceZone": "server/advancement",
-      "target": "server/runtime"
-    },
-    {
-      "kind": "export",
-      "references": 1,
-      "sourceZone": "server/confirmation",
-      "target": "package:@zhixing/owner-kernel"
     },
     {
       "kind": "type-import",
@@ -1389,12 +1404,6 @@
       "references": 1,
       "sourceZone": "server/confirmation",
       "target": "package:@zhixing/owner-kernel"
-    },
-    {
-      "kind": "export",
-      "references": 6,
-      "sourceZone": "server/rpc",
-      "target": "package:@zhixing/rpc"
     },
     {
       "kind": "import",
@@ -1455,12 +1464,6 @@
       "references": 4,
       "sourceZone": "server/rpc",
       "target": "server/runtime"
-    },
-    {
-      "kind": "export",
-      "references": 5,
-      "sourceZone": "server/runtime",
-      "target": "package:@zhixing/owner-kernel"
     },
     {
       "kind": "type-import",

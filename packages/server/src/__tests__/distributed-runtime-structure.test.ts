@@ -16,6 +16,7 @@ const ZONES = [
   ["core/conversation", "packages/core/src/conversation"],
   ["core/transcript", "packages/core/src/transcript"],
   ["orchestrator/runtime", "packages/orchestrator/src/runtime"],
+  ["executor", "packages/executor/src"],
   ["owner-kernel", "packages/owner-kernel/src"],
   ["owner-services", "packages/owner-services/src"],
   ["rpc", "packages/rpc/src"],
@@ -57,6 +58,45 @@ describe("distributed runtime structural gates", () => {
       "@zhixing/owner-kernel",
       "@zhixing/tools-builtin",
     ]);
+    expect(dependencyGraph.production["@zhixing/executor"]).toEqual([
+      "@zhixing/owner-kernel",
+      "@zhixing/runtime-host",
+    ]);
+    expect(dependencyGraph.production["@zhixing/executor"]).not.toContain(
+      "@zhixing/server",
+    );
+    expect(dependencyGraph.production["@zhixing/server"]).not.toContain(
+      "@zhixing/executor",
+    );
+    const serveCommandRefs = await readModuleReferences(
+      "packages/cli/src/serve/command.ts",
+    );
+    const topologyCommandRefs = await readModuleReferences(
+      "packages/cli/src/serve/topology-command.ts",
+    );
+    const anchorRoleRefs = await readModuleReferences(
+      "packages/cli/src/serve/anchor-role.ts",
+    );
+    expect(serveCommandRefs).not.toContainEqual({
+      kind: "import",
+      specifier: "@zhixing/executor",
+    });
+    expect(topologyCommandRefs).toContainEqual({
+      kind: "dynamic-import",
+      specifier: "@zhixing/executor",
+    });
+    expect(topologyCommandRefs).toContainEqual({
+      kind: "dynamic-import",
+      specifier: "./anchor-role.js",
+    });
+    expect(anchorRoleRefs).toContainEqual({
+      kind: "dynamic-import",
+      specifier: "./command.js",
+    });
+    expect(anchorRoleRefs).not.toContainEqual({
+      kind: "import",
+      specifier: "./command.js",
+    });
     expect(rpcContracts.length).toBeGreaterThan(40);
     expect(findDuplicateContractNames(rpcContracts)).toEqual([]);
 
@@ -284,6 +324,18 @@ function collectModuleReferences(sourceFile: ts.SourceFile) {
   };
   visit(sourceFile);
   return references;
+}
+
+async function readModuleReferences(repoPath: string) {
+  const file = resolve(REPO_ROOT, repoPath);
+  const sourceText = await readFile(file, "utf8");
+  const sourceFile = ts.createSourceFile(
+    file,
+    sourceText,
+    ts.ScriptTarget.Latest,
+    true,
+  );
+  return collectModuleReferences(sourceFile);
 }
 
 function internalPackageName(specifier: string, packageNames: ReadonlySet<string>) {

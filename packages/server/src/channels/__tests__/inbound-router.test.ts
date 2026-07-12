@@ -1,12 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { InboundRouter } from "../inbound-router.js";
-import { ConversationManager } from "../../runtime/conversation-manager.js";
-import { ConfirmationHub } from "../../confirmation/hub.js";
-import { SESSION_NOTIFICATIONS } from "../../rpc/session-wire.js";
+import { ConfirmationHub, ConversationManager } from "@zhixing/owner-kernel";
+import { SESSION_NOTIFICATIONS } from "@zhixing/rpc";
 import type {
   SessionActivityBroadcast,
   SessionBroadcast,
-} from "../../rpc/session-broadcast.js";
+} from "@zhixing/rpc";
 import {
   ConfirmationBroker,
   createEventBus,
@@ -19,7 +18,7 @@ import {
   ChannelRegistry,
   DEFAULT_CONVERSATION_ID,
 } from "@zhixing/core";
-import type { SessionRuntime, RuntimeFactory } from "../../runtime/types.js";
+import type { SessionRuntime, RuntimeFactory } from "@zhixing/owner-kernel";
 import type { AgentYield, Message, RunResult } from "@zhixing/core";
 
 // ─── Mock 工厂 ───

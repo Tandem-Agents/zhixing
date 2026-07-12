@@ -21,7 +21,7 @@ import {
   type Conversation,
   type JournalStore,
 } from "@zhixing/core";
-import type { TurnCommittedInfo } from "@zhixing/server";
+import type { TurnCommittedInfo } from "@zhixing/owner-kernel";
 
 /** 自动命名所需的 meta 仓窄面 */
 export interface NamerConversationRepo {

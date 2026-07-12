@@ -203,8 +203,11 @@ const serveCmd = program
   .action(async () => {
     try {
       await pruneRuntimeLogs();
-      const { runServeCommand } = await import("./serve/command.js");
-      await runServeCommand({});
+      const {
+        DEFAULT_LOCAL_ROLE_CONFIGURATION,
+        runServeCommand,
+      } = await import("./serve/topology-command.js");
+      await runServeCommand({}, DEFAULT_LOCAL_ROLE_CONFIGURATION);
       process.exit(0);
     } catch (err) {
       await renderActionError(err);

@@ -3,17 +3,20 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { WorksceneBusyError } from "../../runtime/conversation-manager.js";
-import { ProxyMessageScheduler } from "../proxy-scheduler.js";
+import { WorksceneBusyError } from "@zhixing/owner-kernel";
+import { ProxyMessageScheduler } from "@zhixing/owner-services";
+import { createAdvancementProxyTurnPort } from "../adapters.js";
 
 describe("ProxyMessageScheduler", () => {
   it("admitTurn 撞工作场景静默闸时返回 busy 状态", async () => {
     const scheduler = new ProxyMessageScheduler({
-      manager: {
-        admitTurn: async () => {
-          throw new WorksceneBusyError("quiescing");
-        },
-      } as never,
+      proxyTurns: createAdvancementProxyTurnPort({
+        manager: {
+          admitTurn: async () => {
+            throw new WorksceneBusyError("quiescing");
+          },
+        } as never,
+      }),
     });
 
     await expect(

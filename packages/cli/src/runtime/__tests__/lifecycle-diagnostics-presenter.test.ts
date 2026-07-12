@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { SessionEventEnvelope } from "@zhixing/server";
+import type { SessionEventEnvelope } from "@zhixing/rpc";
 import { createLifecycleDiagnosticsPresenter } from "../lifecycle-diagnostics-presenter.js";
 
 const stripAnsi = (s: string): string =>

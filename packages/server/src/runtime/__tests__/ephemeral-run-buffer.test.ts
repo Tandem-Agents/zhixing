@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { RunRecordInput } from "@zhixing/core";
-import { EphemeralRunBuffer } from "../ephemeral-run-buffer.js";
+import { EphemeralRunBuffer } from "@zhixing/owner-kernel";
 
 function record(text: string): RunRecordInput {
   return {

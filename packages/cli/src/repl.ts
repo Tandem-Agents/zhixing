@@ -86,7 +86,7 @@ import {
 } from "./runtime/rpc-management-facade.js";
 import { RpcEventBus } from "./runtime/rpc-event-bus.js";
 import { RpcConfirmationBroker } from "./runtime/rpc-confirmation-broker.js";
-import type { SessionAdvancementStateSnapshot } from "@zhixing/server";
+import type { SessionAdvancementStateSnapshot } from "@zhixing/rpc";
 import { prepareSessionSendEngage } from "./session-engage.js";
 import { renderResumedAdvancementNotice } from "./advancement-presentation.js";
 import { createAdvancementControlPresenter } from "./runtime/advancement-control-presenter.js";

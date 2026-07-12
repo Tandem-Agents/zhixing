@@ -22,7 +22,7 @@ import {
   type DeliveryResult,
   type ConfirmationRequest,
 } from "@zhixing/core";
-import { ConfirmationHub } from "../hub.js";
+import { ConfirmationHub } from "@zhixing/owner-kernel";
 import {
   TextConfirmationRenderer,
   formatConfirmationMessage,

@@ -17,10 +17,12 @@ import {
   type RunRecordInput,
   type WindowCompact,
 } from "@zhixing/core";
-import { ConversationManager } from "@zhixing/server";
-import type { RuntimeFactory } from "@zhixing/server";
+import {
+  ConversationManager,
+  type RuntimeFactory,
+} from "@zhixing/owner-kernel";
 import type { AgentRuntime } from "@zhixing/orchestrator/runtime";
-import { createServerRuntimeAdapter } from "../session-adapter.js";
+import { createOwnerRuntimeAdapter } from "@zhixing/runtime-host/session-adapter";
 
 // ─── 辅助 ───
 
@@ -59,7 +61,7 @@ function stubAgentRuntime(): AgentRuntime {
 function windowFactory(): RuntimeFactory {
   return {
     async create(sessionId) {
-      return createServerRuntimeAdapter(sessionId, stubAgentRuntime());
+      return createOwnerRuntimeAdapter(sessionId, stubAgentRuntime());
     },
   };
 }

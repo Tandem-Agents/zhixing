@@ -25,7 +25,6 @@ import {
 } from "@zhixing/core";
 import type {
   RunTurnOptions,
-  RuntimeFactory,
   SessionRuntime,
 } from "@zhixing/owner-kernel";
 import type { AgentRuntime } from "@zhixing/orchestrator/runtime";
@@ -38,7 +37,6 @@ interface QueueItem {
   result?: RunResult;
   error?: unknown;
 }
-
 export function createOwnerRuntimeAdapter(
   sessionId: string,
   agentRuntime: AgentRuntime,
@@ -207,28 +205,6 @@ export function createOwnerRuntimeAdapter(
       // 透传底层运行体末窗 onWindowClose —— 每个会话经 createAgentRuntime
       // 建 main runtime（首窗 onWindowOpen 已触发）,销毁须触发其末窗。
       await agentRuntime.dispose("session-dispose");
-    },
-  };
-}
-
-// ─── RuntimeFactory 实现 ───
-
-export interface RuntimeHostFactoryOptions {
-  /** 创建 AgentRuntime 的工厂方法（注入避免对 createAgentRuntime 的硬依赖） */
-  createAgentRuntime: (sessionId: string) => Promise<AgentRuntime>;
-}
-
-/**
- * 给 owner-kernel 使用的 RuntimeFactory。
- * 每次 create 都新建一个 AgentRuntime（独立 provider 连接、独立工具集）。
- */
-export function createRuntimeHostFactory(
-  opts: RuntimeHostFactoryOptions,
-): RuntimeFactory {
-  return {
-    async create(sessionId) {
-      const agentRuntime = await opts.createAgentRuntime(sessionId);
-      return createOwnerRuntimeAdapter(sessionId, agentRuntime);
     },
   };
 }

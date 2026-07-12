@@ -21,7 +21,7 @@ import {
   type AdvancementRunReview,
   type ReviewEvidence,
 } from "@zhixing/core";
-import type { SessionAdvancementDetailResult } from "@zhixing/server";
+import type { SessionAdvancementDetailResult } from "@zhixing/rpc";
 import { clampLine } from "./tui/line-width.js";
 import { layout } from "./tui/style.js";
 

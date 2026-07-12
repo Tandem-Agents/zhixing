@@ -4,7 +4,7 @@
 
 import { describe, expect, it } from "vitest";
 import type { ServerContext } from "../../context.js";
-import { WorksceneBusyError } from "../../runtime/conversation-manager.js";
+import { WorksceneBusyError } from "@zhixing/owner-kernel";
 import { buildSessionSendMethod } from "../methods/session.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
 

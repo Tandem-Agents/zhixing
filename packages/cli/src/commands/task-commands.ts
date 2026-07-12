@@ -24,7 +24,7 @@ import type { TaskListState } from "@zhixing/core";
 import type {
   SessionTaskListAction,
   SessionTaskListUpdateResult,
-} from "@zhixing/server";
+} from "@zhixing/rpc";
 import { renderTaskList } from "../task-tail/index.js";
 import { tone } from "../tui/index.js";
 

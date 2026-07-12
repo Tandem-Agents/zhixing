@@ -9,7 +9,7 @@ import {
   type ToolLoopSpec,
   type ToolLoopTool,
 } from "@zhixing/core";
-import type { WorksceneSummary } from "@zhixing/server";
+import type { WorksceneSummary } from "@zhixing/rpc";
 import type { SelectionRequest } from "../tui/selection/index.js";
 
 export interface WorksceneCreateAssistScene {

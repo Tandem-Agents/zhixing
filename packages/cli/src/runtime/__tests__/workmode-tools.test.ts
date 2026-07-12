@@ -29,7 +29,7 @@ import {
   createWorksceneRenameCurrentTool,
   createWorksceneSetWorkdirCurrentTool,
   type WorksceneToolDirectory,
-} from "../workmode-tools.js";
+} from "@zhixing/runtime-host/workmode-tools";
 
 function makeDirectory(
   overrides: Partial<WorksceneToolDirectory> = {},

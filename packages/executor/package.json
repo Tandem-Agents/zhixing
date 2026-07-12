@@ -1,0 +1,34 @@
+{
+  "name": "@zhixing/executor",
+  "version": "0.1.0",
+  "description": "知行执行角色 — 运行宿主组合与执行端口适配",
+  "type": "module",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./runtime-role": {
+      "types": "./dist/runtime-role.d.ts",
+      "import": "./dist/runtime-role.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@zhixing/owner-kernel": "workspace:*",
+    "@zhixing/runtime-host": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.2",
+    "@zhixing/test-utils": "workspace:*",
+    "tsup": "^8.4.0",
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.1"
+  }
+}

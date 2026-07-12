@@ -3,7 +3,6 @@ import { defineConfig } from "tsup";
 export default defineConfig({
   entry: [
     "src/index.ts",
-    "src/server-compat.ts",
     "src/connection.ts",
     "src/session-wire.ts",
     "src/session-turn-stream.ts",

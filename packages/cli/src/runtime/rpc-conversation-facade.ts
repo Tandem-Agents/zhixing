@@ -16,6 +16,8 @@
 import type {
   RunsPage,
   RunsPageCursor,
+} from "@zhixing/server";
+import type {
   SessionChangedPayload,
   SessionActivityPayload,
   SessionAdvancementCancelResult,
@@ -40,13 +42,13 @@ import type {
   SessionRubricPersistenceChoice,
   SessionSendEngage,
   SessionUsageResult,
-} from "@zhixing/server";
+} from "@zhixing/rpc";
 import type { UserTurnInput } from "@zhixing/core";
 import {
   RpcClientError,
   RPC_ERROR_CODES,
-  SESSION_NOTIFICATIONS,
 } from "@zhixing/server";
+import { SESSION_NOTIFICATIONS } from "@zhixing/rpc";
 import type { CoreHostLink } from "./core-host-connection.js";
 
 export interface SessionHistoryOptions {

@@ -13,11 +13,15 @@ import {
   DEFAULT_CANCEL_KEYWORDS,
   InboundRouter,
   createDefaultIntentClassifier,
-  type ConversationManager,
-  type ConfirmationHub,
-  type SessionActivityBroadcast,
-  type SessionBroadcast,
 } from "@zhixing/server";
+import type {
+  ConfirmationHub,
+  ConversationManager,
+} from "@zhixing/owner-kernel";
+import type {
+  SessionActivityBroadcast,
+  SessionBroadcast,
+} from "@zhixing/rpc";
 import type {
   MessagingChannelEntry,
   ZhixingCredentials,

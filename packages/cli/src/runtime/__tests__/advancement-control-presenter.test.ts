@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { SessionEventEnvelope } from "@zhixing/server";
+import type { SessionEventEnvelope } from "@zhixing/rpc";
 import { createAdvancementControlPresenter } from "../advancement-control-presenter.js";
 
 function harness(opts: { filter?: (e: SessionEventEnvelope) => boolean } = {}) {

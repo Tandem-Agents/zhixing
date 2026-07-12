@@ -31,7 +31,7 @@ import type {
 } from "@zhixing/core";
 import { startServer, type ZhixingServerInstance } from "../server.js";
 import { createServerContext } from "../context.js";
-import { ConversationManager } from "../runtime/conversation-manager.js";
+import { ConversationManager } from "@zhixing/owner-kernel";
 import type {
   ConversationBootstrap,
   RunTurnOptions,
@@ -39,7 +39,7 @@ import type {
   RuntimeSecuritySnapshot,
   SessionRuntime,
   RuntimeFactory,
-} from "../runtime/types.js";
+} from "@zhixing/owner-kernel";
 import { DEFAULT_SERVER_CONFIG } from "../types.js";
 import {
   encodeRequest,
@@ -49,8 +49,14 @@ import {
   isSuccessResponse,
   isErrorResponse,
 } from "../rpc/protocol.js";
-import { AdvancementController } from "../advancement/controller.js";
-import { createAdvancementRecoveryMaintenance } from "../advancement/recovery-maintenance.js";
+import {
+  AdvancementController,
+  createAdvancementRecoveryMaintenance,
+} from "@zhixing/owner-services";
+import {
+  createAdvancementEventSink,
+  createAdvancementProxyTurnPort,
+} from "../advancement/adapters.js";
 import {
   PERSPECTIVES_CONVERGENCE_NODE_ID,
   PERSPECTIVES_DELIBERATION_DEFINITION_ID,
@@ -751,8 +757,13 @@ describe("session.* RPC (S2.D)", () => {
       opts.advancement && opts.withAdvancementRecovery
         ? createAdvancementRecoveryMaintenance({
             advancement: opts.advancement,
-            manager: conversations,
             directory: conversationDirectory,
+            proxyTurns: createAdvancementProxyTurnPort({
+              manager: conversations,
+              conversationExists: (conversationId) =>
+                conversationDirectory.exists(conversationId),
+            }),
+            events: createAdvancementEventSink(() => null),
           })
         : undefined;
     const ctx = createServerContext({

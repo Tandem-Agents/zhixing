@@ -22,7 +22,7 @@ import type {
   ConfirmationRequest,
   RequestListener,
 } from "@zhixing/core";
-import { CONFIRMATION_NOTIFICATIONS } from "@zhixing/server";
+import { CONFIRMATION_NOTIFICATIONS } from "@zhixing/rpc";
 import type { CoreHostLink } from "./core-host-connection.js";
 
 export interface RpcConfirmationBrokerOptions {

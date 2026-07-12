@@ -7,8 +7,11 @@ import {
   type RunRecordInput,
   type TokenUsage,
 } from "@zhixing/core";
-import { ConversationManager } from "../../runtime/conversation-manager.js";
-import type { RuntimeFactory, SessionRuntime } from "../../runtime/types.js";
+import {
+  ConversationManager,
+  type RuntimeFactory,
+  type SessionRuntime,
+} from "@zhixing/owner-kernel";
 import {
   PERSPECTIVES_CONVERGENCE_NODE_ID,
   PERSPECTIVES_DELIBERATION_DEFINITION_ID,

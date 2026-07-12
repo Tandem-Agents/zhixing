@@ -11,7 +11,7 @@ import type {
   WorksceneEnterResult,
   WorksceneListResult,
   WorksceneSummary,
-} from "@zhixing/server";
+} from "@zhixing/rpc";
 import type { CoreHostLink } from "./core-host-connection.js";
 
 export class RpcWorksceneFacade {

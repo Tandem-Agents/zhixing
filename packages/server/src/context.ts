@@ -13,9 +13,9 @@ import type {
   DeliveryStats,
 } from "@zhixing/core";
 import type { ConfirmationHub, ConversationManager } from "@zhixing/owner-kernel";
-import {
+import type {
   AdvancementController,
-  type AdvancementRecoveryMaintenance,
+  AdvancementRecoveryMaintenance,
 } from "@zhixing/owner-services";
 import type {
   SessionActivityBroadcast,

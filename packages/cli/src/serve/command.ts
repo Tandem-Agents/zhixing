@@ -52,26 +52,30 @@ import {
   createServerContext,
   runServer,
   buildSystemHandlers,
-  ConfirmationHub,
   DEFAULT_SERVER_CONFIG,
   ServerStateFile,
   ServerLogLifecycle,
   CleanupRegistry,
-  createRunEventForwarder,
   createAdvancementEventSink,
   createAdvancementProxyTurnPort,
   LlmPerspectiveAllocationStrategy,
   PerspectivesController,
   RuntimePerspectivesOrchestrationExecutor,
   getDefaultLogPath,
-  SESSION_NOTIFICATIONS,
-  type SessionChangedPayload,
-  type SessionActivityBroadcast,
-  type SessionBroadcast,
   type RunningServer,
   type ProcessLockPaths,
-  type ConversationManager,
 } from "@zhixing/server";
+import {
+  ConfirmationHub,
+  type ConversationManager,
+} from "@zhixing/owner-kernel";
+import {
+  createRunEventForwarder,
+  SESSION_NOTIFICATIONS,
+  type SessionActivityBroadcast,
+  type SessionBroadcast,
+  type SessionChangedPayload,
+} from "@zhixing/rpc";
 import {
   createAdvancementRecoveryMaintenance,
   renderRecentContextFromMessages,
@@ -87,9 +91,9 @@ import chalk from "chalk";
 import {
   RuntimeHost,
   createBuiltinExtraToolsAssembly,
-  createRuntimeHostFactory,
   createTransientSegmentDeps,
 } from "@zhixing/runtime-host";
+import type { ExecutorRoleModule } from "./role-topology.js";
 import { createRenderSubscribers } from "../render.js";
 import { createStdoutWriter } from "../screen/index.js";
 import {
@@ -139,11 +143,17 @@ export interface ServeOptions {
  * 用户显式运行时是前台宿主；CLI 自动拉起时通过 env 标记进入后台 child，
  * 两者走同一条 server 逻辑，差异只在进程形态和 stdio/log 装配。
  */
-export async function runServeCommand(opts: ServeOptions): Promise<void> {
-  await runServerProcess(opts);
+export async function runServeCommand(
+  opts: ServeOptions,
+  executor: ExecutorRoleModule,
+): Promise<void> {
+  await runServerProcess(opts, executor);
 }
 
-async function runServerProcess(opts: ServeOptions): Promise<void> {
+async function runServerProcess(
+  opts: ServeOptions,
+  executor: ExecutorRoleModule,
+): Promise<void> {
   const profile: ServerProfile = DEFAULT_PROFILE;
   const zhixingHome = getZhixingHome();
   const isChild = isDaemonChild();
@@ -417,7 +427,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   //   注：工厂内实例发放是 lazy（session 调用时才建），那时 mcp 接入面 connectAll
   //   早已完成（pre-server 阶段），故工厂装配可前置、不受 connectAll 时序约束（与 eager 的
   //   ephemeralRuntime 不同——后者须排在接入面之后，见下）。
-  const runtimeFactory = createRuntimeHostFactory({
+  const executorRole = executor.createExecutorRole({
     createAgentRuntime: async (sessionId) => {
       // 对话归属编码在全域键里:ws: 前缀 → 该场景的 power 装配;其余 main。
       const { scope } = parseConversationId(sessionId);
@@ -431,6 +441,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
       return runtimeHost.createConversationRuntime();
     },
   });
+  const runtimeFactory = executor.createInProcessRuntimeFactory(executorRole);
 
   // 4. CleanupRegistry —— 唯一清理出口。LIFO 语义 + 跨包注入。注册序列封装在
   //    shutdown-chain.ts，方便单测顺序正确性。post-server 接入面在自己 setup 内注册到此。

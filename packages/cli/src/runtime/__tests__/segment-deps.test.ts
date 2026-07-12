@@ -1,5 +1,5 @@
 /**
- * createCliSegmentDeps + createTaskListReaderFromService 单元测试。
+ * Segment 运行依赖装配与 TaskListReader 适配测试。
  *
  * 验证：
  *   - TaskListReader 适配契约：service 无 in-progress → false / 有 → true
@@ -19,10 +19,10 @@ import type {
 import { TaskListService } from "@zhixing/tools-builtin";
 import { InMemoryTaskListStore } from "../task-list-stores.js";
 import {
-  createCliSegmentDeps,
-  createServeSegmentDeps,
+  createPersistentSegmentDeps,
+  createTransientSegmentDeps,
   createTaskListReaderFromService,
-} from "../segment-deps.js";
+} from "@zhixing/runtime-host/segment-deps";
 
 function makeTaskListService(): TaskListService {
   return new TaskListService(new InMemoryTaskListStore());
@@ -108,11 +108,11 @@ describe("createTaskListReaderFromService", () => {
   });
 });
 
-// ─── createCliSegmentDeps 装配 ───
+// ─── 持久化 Segment 依赖装配 ───
 
-describe("createCliSegmentDeps", () => {
+describe("createPersistentSegmentDeps", () => {
   it("返回 taskListReader + persistence 两个抽象", () => {
-    const deps = createCliSegmentDeps({
+    const deps = createPersistentSegmentDeps({
       taskListService: makeTaskListService(),
       conversationRepo: makeFakeConversationRepo(),
     });
@@ -127,7 +127,7 @@ describe("createCliSegmentDeps", () => {
 
   it("persistence.appendSegment 透传给 conversationRepo.appendSegmentMeta", async () => {
     const conversationRepo = makeFakeConversationRepo();
-    const deps = createCliSegmentDeps({
+    const deps = createPersistentSegmentDeps({
       taskListService: makeTaskListService(),
       conversationRepo,
     });
@@ -139,7 +139,7 @@ describe("createCliSegmentDeps", () => {
 
   it("taskListReader 接 service 单例 —— 测试时 set 后立即反映", async () => {
     const service = makeTaskListService();
-    const deps = createCliSegmentDeps({
+    const deps = createPersistentSegmentDeps({
       taskListService: service,
       conversationRepo: makeFakeConversationRepo(),
     });
@@ -152,10 +152,10 @@ describe("createCliSegmentDeps", () => {
   });
 });
 
-describe("createServeSegmentDeps", () => {
+describe("createTransientSegmentDeps", () => {
   it("taskListReader 与 REPL 同源；persistence 为 no-op（segmentMeta 缺写无害）", async () => {
     const service = makeTaskListService();
-    const deps = createServeSegmentDeps({ taskListService: service });
+    const deps = createTransientSegmentDeps({ taskListService: service });
 
     // in-progress 守卫与 REPL 装配同一适配器语义
     expect(deps.taskListReader.hasInProgress("conv-x")).toBe(false);

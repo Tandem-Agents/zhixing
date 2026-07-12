@@ -7,10 +7,12 @@ import { describe, it, expect } from "vitest";
 import {
   RPC_ERROR_CODES,
   RpcClientError,
-  type SessionDeltaPayload,
-  type SessionChangedPayload,
-  type SessionActivityPayload,
 } from "@zhixing/server";
+import type {
+  SessionDeltaPayload,
+  SessionChangedPayload,
+  SessionActivityPayload,
+} from "@zhixing/rpc";
 import { RpcConversationFacade } from "../rpc-conversation-facade.js";
 import { makeFakeHostLink } from "./fake-host-link.js";
 

@@ -19,12 +19,14 @@ import {
   parseConversationId,
 } from "@zhixing/core";
 import {
-  ConversationManager,
   TextConfirmationRenderer,
+} from "@zhixing/server";
+import { ConversationManager } from "@zhixing/owner-kernel";
+import {
   createConfirmationBridge,
   SESSION_NOTIFICATIONS,
   type SessionChangedPayload,
-} from "@zhixing/server";
+} from "@zhixing/rpc";
 import { resolveModelCapability } from "@zhixing/providers";
 import { setupChannels } from "./channels.js";
 import { setupDelivery } from "../setup-delivery.js";

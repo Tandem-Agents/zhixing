@@ -7,11 +7,12 @@ import {
   type RunResult,
 } from "@zhixing/core";
 import {
+  ConfirmationHub,
   ConversationManager,
   WorksceneBusyError,
-} from "../conversation-manager.js";
-import { ConfirmationHub } from "../../confirmation/hub.js";
-import type { SessionRuntime, RuntimeFactory } from "../types.js";
+  type SessionRuntime,
+  type RuntimeFactory,
+} from "@zhixing/owner-kernel";
 
 // ─── Mock Runtime ───
 

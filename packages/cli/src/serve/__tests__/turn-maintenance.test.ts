@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, vi } from "vitest";
-import type { TurnCommittedInfo } from "@zhixing/server";
+import type { TurnCommittedInfo } from "@zhixing/owner-kernel";
 import type { Conversation, Message } from "@zhixing/core";
 import { createTurnMaintenance, type NamerConversationRepo } from "../turn-maintenance.js";
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AdvancementController } from "../advancement/controller.js";
+import { AdvancementController } from "@zhixing/owner-services";
 import { createServerContext } from "../context.js";
 import { DEFAULT_SERVER_CONFIG } from "../types.js";
 

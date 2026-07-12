@@ -21,7 +21,7 @@ import {
   type ConfirmationRequest,
   type ConfirmationDecision,
 } from "@zhixing/core";
-import { ConfirmationHub, type HubEvent } from "../hub.js";
+import { ConfirmationHub, type HubEvent } from "@zhixing/owner-kernel";
 
 // ─── 测试辅助 ───
 

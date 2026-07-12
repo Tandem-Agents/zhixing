@@ -31,17 +31,21 @@ import type {
   SnapshotStore,
 } from "@zhixing/core";
 import type {
-  ConfirmationHub,
-  ConversationManager,
   ConversationDirectory,
   InboundRouter,
   RunningServer,
   CleanupRegistry,
+  TextConfirmationRenderer,
+} from "@zhixing/server";
+import type {
+  ConfirmationHub,
+  ConversationManager,
+  RuntimeFactory,
+} from "@zhixing/owner-kernel";
+import type {
   SessionActivityBroadcast,
   SessionBroadcast,
-  TextConfirmationRenderer,
-  RuntimeFactory,
-} from "@zhixing/server";
+} from "@zhixing/rpc";
 import type {
   AdvancementController,
   AdvancementRecoveryMaintenance,

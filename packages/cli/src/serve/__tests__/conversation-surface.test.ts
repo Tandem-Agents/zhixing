@@ -17,7 +17,7 @@ import {
   ShardedTranscriptStore,
   SnapshotStore,
 } from "@zhixing/core";
-import type { RuntimeFactory, SessionRuntime } from "@zhixing/server";
+import type { RuntimeFactory, SessionRuntime } from "@zhixing/owner-kernel";
 import { ACCESS_SURFACES } from "../access-surfaces.js";
 import type { AssemblyContext } from "../access-surface.js";
 

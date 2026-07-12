@@ -5,9 +5,12 @@ import type {
   RunRecordInput,
   RunResult,
 } from "@zhixing/core";
-import { ConversationManager } from "../../runtime/conversation-manager.js";
-import type { RuntimeFactory, SessionRuntime } from "../../runtime/types.js";
-import { projectSessionTurn } from "../session-turn-stream.js";
+import {
+  ConversationManager,
+  type RuntimeFactory,
+  type SessionRuntime,
+} from "@zhixing/owner-kernel";
+import { projectSessionTurn } from "@zhixing/rpc";
 
 function createRuntime(yields: readonly AgentYield[]): SessionRuntime {
   return {

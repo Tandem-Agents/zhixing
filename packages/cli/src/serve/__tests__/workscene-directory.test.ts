@@ -13,7 +13,7 @@ import {
   FsWorkSceneRegistry,
   parseConversationId,
 } from "@zhixing/core";
-import type { ConversationManager } from "@zhixing/server";
+import type { ConversationManager } from "@zhixing/owner-kernel";
 import { createWorksceneDirectory } from "../workscene-directory.js";
 
 let originalHome: string | undefined;

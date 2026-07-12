@@ -17,10 +17,10 @@ import {
   type WorkScene,
 } from "@zhixing/core";
 import {
-  type ConversationManager,
   type WorksceneDirectory,
   type WorksceneWriteResult,
 } from "@zhixing/server";
+import type { ConversationManager } from "@zhixing/owner-kernel";
 import { isAbsolute } from "node:path";
 
 export function createWorksceneDirectory(deps: {

@@ -9,7 +9,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { AdvancementStore, type WorkScene } from "@zhixing/core";
 import { createTempDir } from "@zhixing/test-utils";
-import { AdvancementController } from "../../advancement/controller.js";
+import { AdvancementController } from "@zhixing/owner-services";
 import {
   buildWorksceneListMethod,
   buildWorksceneCreateMethod,
@@ -20,10 +20,10 @@ import {
   buildWorksceneExitMethod,
 } from "../methods/workscene.js";
 import { RPC_ERROR_CODES } from "../protocol.js";
-import { WorksceneBusyError } from "../../runtime/conversation-manager.js";
+import { WorksceneBusyError } from "@zhixing/owner-kernel";
 import type { WorksceneDirectory } from "../../runtime/workscene-directory.js";
 import type { ServerContext } from "../../context.js";
-import type { ConversationManager } from "../../runtime/conversation-manager.js";
+import type { ConversationManager } from "@zhixing/owner-kernel";
 
 function makeScene(id: string, name = id): WorkScene {
   return {

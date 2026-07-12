@@ -15,10 +15,10 @@ import {
   ConfirmationBroker,
   type ConfirmationRequest,
 } from "@zhixing/core";
-import { ConfirmationHub } from "../../confirmation/hub.js";
+import { ConfirmationHub } from "@zhixing/owner-kernel";
 import type { RpcConnection } from "../connection.js";
-import type { ConversationManager } from "../../runtime/conversation-manager.js";
-import { createConfirmationBridge } from "../confirmation-bridge.js";
+import type { ConversationManager } from "@zhixing/owner-kernel";
+import { createConfirmationBridge } from "@zhixing/rpc";
 
 // ─── 测试辅助 ───
 

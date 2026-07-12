@@ -19,9 +19,12 @@ import type {
   RunRecordInput,
   RunResult,
 } from "@zhixing/core";
-import { ConversationManager } from "../conversation-manager.js";
-import { runTurnWithCommit } from "../run-turn.js";
-import type { SessionRuntime, RuntimeFactory } from "../types.js";
+import {
+  ConversationManager,
+  runTurnWithCommit,
+  type SessionRuntime,
+  type RuntimeFactory,
+} from "@zhixing/owner-kernel";
 
 // ─── 可配置 Mock Runtime ───
 

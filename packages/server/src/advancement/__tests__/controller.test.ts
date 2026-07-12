@@ -10,7 +10,7 @@ import type {
   RubricContractDraftSnapshot,
   RunRecordInput,
 } from "@zhixing/core";
-import { AdvancementController } from "../controller.js";
+import { AdvancementController } from "@zhixing/owner-services";
 
 function task(text: string) {
   return { parts: [{ type: "text" as const, text }] };

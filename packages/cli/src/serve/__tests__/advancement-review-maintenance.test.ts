@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import type {
   AdvancementTurnReviewResult,
-  SessionEventEnvelope,
-  TurnCommittedInfo,
-} from "@zhixing/server";
+} from "@zhixing/owner-services";
+import type { TurnCommittedInfo } from "@zhixing/owner-kernel";
+import type { SessionEventEnvelope } from "@zhixing/rpc";
 import type { Message } from "@zhixing/core";
 import { createAdvancementReviewMaintenance } from "../advancement-review-maintenance.js";
 

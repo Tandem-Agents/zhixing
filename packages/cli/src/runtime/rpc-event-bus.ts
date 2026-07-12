@@ -31,7 +31,7 @@ import type {
   WildcardListener,
 } from "@zhixing/core";
 import type { DecorateRunBusFn } from "@zhixing/orchestrator";
-import { SESSION_NOTIFICATIONS, type SessionEventEnvelope } from "@zhixing/server";
+import { SESSION_NOTIFICATIONS, type SessionEventEnvelope } from "@zhixing/rpc";
 import type { CoreHostLink } from "./core-host-connection.js";
 
 const AGENT_RUN_END_EVENT = "agent:run_end";

@@ -46,7 +46,6 @@ const ALLOW_LIST: ReadonlyArray<{ readonly file: string; readonly reason: string
   { file: "serve/status.ts", reason: "status 命令——独立子命令" },
   { file: "serve/stop.ts", reason: "stop 命令——独立子命令" },
   { file: "serve/channels.ts", reason: "channel setup logger——bootstrap 时 chrome 未建立" },
-  { file: "serve/session-adapter.ts", reason: "serve 会话适配器——后台路径" },
   { file: "serve/ephemeral-executor.ts", reason: "serve 临时执行器——后台路径" },
   { file: "setup-delivery.ts", reason: "delivery 装配 logger——bootstrap 时 chrome 未建立" },
   { file: "security/keypress-dump.ts", reason: "诊断通道——`--log` flag 启用时 stderr 提示日志路径；与 llm-chunk-dump 同模式，仅诊断不影响生产路径" },

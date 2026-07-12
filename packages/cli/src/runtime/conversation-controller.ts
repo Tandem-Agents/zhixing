@@ -26,7 +26,6 @@ import {
   type PostTurnControlOutcome,
 } from "@zhixing/core";
 import type {
-  RunsPage,
   SessionAdvancementCancelResult,
   SessionCompactResult,
   SessionContextBudgetResult,
@@ -44,7 +43,8 @@ import type {
   SessionContractFailedResult,
   SessionSendEngage,
   SessionSendResult,
-} from "@zhixing/server";
+} from "@zhixing/rpc";
+import type { RunsPage } from "@zhixing/server";
 import { RPC_ERROR_CODES, RpcClientError } from "@zhixing/server";
 import type { RpcConversationFacade } from "./rpc-conversation-facade.js";
 import type { RpcWorksceneFacade } from "./rpc-workscene-facade.js";

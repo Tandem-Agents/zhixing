@@ -8,7 +8,7 @@
 
 import chalk from "chalk";
 import type { PermissionContextId, PermissionRule, SecurityRule } from "@zhixing/core";
-import type { SessionSecurityResult } from "@zhixing/server";
+import type { SessionSecurityResult } from "@zhixing/rpc";
 import type { CliWriter } from "../screen/index.js";
 import { formatRuleDescription } from "./trust-rule-format.js";
 

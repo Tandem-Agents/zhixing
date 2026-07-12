@@ -1,7 +1,7 @@
 import {
   SESSION_NOTIFICATIONS,
   type SessionEventEnvelope,
-} from "@zhixing/server";
+} from "@zhixing/rpc";
 import {
   createLifecycleWarningDeduper,
   renderLifecycleWarningLine,

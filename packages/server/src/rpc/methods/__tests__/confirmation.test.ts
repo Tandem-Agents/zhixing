@@ -12,10 +12,10 @@ import {
   ConfirmationBroker,
   type ConfirmationRequest,
 } from "@zhixing/core";
-import { ConfirmationHub } from "../../../confirmation/hub.js";
+import { ConfirmationHub } from "@zhixing/owner-kernel";
 import type { ServerContext } from "../../../context.js";
 import type { RpcConnection } from "../../connection.js";
-import type { ConversationManager } from "../../../runtime/conversation-manager.js";
+import type { ConversationManager } from "@zhixing/owner-kernel";
 import type { HandlerContext, MethodEntry } from "../../handlers.js";
 import { RpcAppError } from "../../handlers.js";
 import {

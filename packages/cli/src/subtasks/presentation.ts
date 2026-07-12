@@ -1,5 +1,5 @@
 import type { SubAgentResultPresentationArtifact } from "@zhixing/core";
-import type { RuntimeSubAgentUsageEntry } from "@zhixing/server";
+import type { RuntimeSubAgentUsageEntry } from "@zhixing/owner-kernel";
 import { ANCHOR_SUB_AGENT } from "../output/speaker-state.js";
 import { stripAnsi } from "../tui/ansi.js";
 import { clampLine, stringWidth } from "../tui/line-width.js";

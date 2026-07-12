@@ -12,9 +12,9 @@ import { describe, it, expect, vi } from "vitest";
 import type { SchedulerFacade } from "@zhixing/core";
 import { runContextStorage } from "@zhixing/orchestrator/runtime";
 import { createMcpHub, type McpHub } from "@zhixing/mcp";
-import { createBuiltinExtraToolsAssembly } from "../builtin-extra-tools.js";
+import { createBuiltinExtraToolsAssembly } from "@zhixing/runtime-host/builtin-extra-tools";
 import { InMemoryTaskListStore } from "../task-list-stores.js";
-import type { WorksceneToolDirectory } from "../workmode-tools.js";
+import type { WorksceneToolDirectory } from "@zhixing/runtime-host/workmode-tools";
 
 // ─── 测试 fixture ───
 

@@ -12,14 +12,12 @@ import { describe, expect, it, vi } from "vitest";
 import { createEventBus, type AgentEventMap } from "@zhixing/core";
 import {
   createRunEventForwarder,
-  type SessionEventEnvelope,
-} from "../session-events.js";
-import {
   createActivityBroadcast,
   createObserverBroadcast,
-} from "../session-broadcast.js";
+  type SessionEventEnvelope,
+} from "@zhixing/rpc";
 import type { RpcConnection } from "../connection.js";
-import type { ConversationManager } from "../../runtime/conversation-manager.js";
+import type { ConversationManager } from "@zhixing/owner-kernel";
 
 function makeBus() {
   return createEventBus<AgentEventMap>({ lineage: "main" });

@@ -15,16 +15,17 @@ import {
 } from "@zhixing/core";
 import { assertGolden, createTempDir } from "@zhixing/test-utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ConfirmationHub } from "../confirmation/hub.js";
+import { ConfirmationHub, ConversationManager } from "@zhixing/owner-kernel";
 import { createServerContext } from "../context.js";
 import { buildBuiltinRegistry } from "../rpc/methods/index.js";
 import { buildServerShutdownMethod } from "../rpc/methods/server.js";
-import { createConfirmationBridge } from "../rpc/confirmation-bridge.js";
-import { createRunEventForwarder } from "../rpc/session-events.js";
-import { projectSessionTurn } from "../rpc/session-turn-stream.js";
+import {
+  createConfirmationBridge,
+  createRunEventForwarder,
+  projectSessionTurn,
+} from "@zhixing/rpc";
 import { toJsonRpcError, type HandlerContext } from "../rpc/handlers.js";
-import { ConversationManager } from "../runtime/conversation-manager.js";
-import type { RuntimeFactory, SessionRuntime } from "../runtime/types.js";
+import type { RuntimeFactory, SessionRuntime } from "@zhixing/owner-kernel";
 import { DEFAULT_SERVER_CONFIG } from "../types.js";
 
 const FIXED_NOW = new Date("2026-07-11T12:00:00.000Z");

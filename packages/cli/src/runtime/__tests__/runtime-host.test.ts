@@ -26,7 +26,7 @@ vi.mock("@zhixing/orchestrator/runtime", async (orig) => {
 });
 
 const { RuntimeHost, resolveScheduleOriginFromTurnOrigin } = await import(
-  "../runtime-host.js"
+  "@zhixing/runtime-host/runtime-host"
 );
 const { runContextStorage } = await import("@zhixing/orchestrator/runtime");
 

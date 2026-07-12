@@ -25,7 +25,7 @@ import {
   type ArgSchema,
   type PostTurnControlIntent,
 } from "@zhixing/core";
-import type { SessionAdvancementStateSnapshot } from "@zhixing/server";
+import type { SessionAdvancementStateSnapshot } from "@zhixing/rpc";
 import { renderAdvancementDetailLines } from "../advancement-presentation.js";
 import type { CliWriter } from "../screen/index.js";
 import { layout } from "../tui/style.js";

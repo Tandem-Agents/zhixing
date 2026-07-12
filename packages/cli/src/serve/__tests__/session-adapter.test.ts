@@ -21,7 +21,7 @@ import {
   type AgentYield,
   type Message,
 } from "@zhixing/core";
-import { createServerRuntimeAdapter } from "../session-adapter.js";
+import { createOwnerRuntimeAdapter } from "@zhixing/runtime-host/session-adapter";
 import type { RunResult } from "@zhixing/core";
 import type { AgentRuntime, RunParams } from "@zhixing/orchestrator/runtime";
 
@@ -192,9 +192,9 @@ function sleepWithAbort(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-describe("createServerRuntimeAdapter", () => {
+describe("createOwnerRuntimeAdapter", () => {
   it("yields events from onYield callback then returns final result", async () => {
-    const runtime = createServerRuntimeAdapter(
+    const runtime = createOwnerRuntimeAdapter(
       "test-1",
       createMockAgentRuntime({
         yields: [
@@ -220,7 +220,7 @@ describe("createServerRuntimeAdapter", () => {
 
   it("纯执行体透传契约:messages 原样、conversationId=sessionId、turnIndex/source 透传", async () => {
     let captured: RunParams | undefined;
-    const runtime = createServerRuntimeAdapter(
+    const runtime = createOwnerRuntimeAdapter(
       "conv-42",
       createMockAgentRuntime({ capture: (p) => (captured = p) }),
     );
@@ -236,7 +236,7 @@ describe("createServerRuntimeAdapter", () => {
   });
 
   it("propagates errors from agentRuntime.run via throw", async () => {
-    const runtime = createServerRuntimeAdapter(
+    const runtime = createOwnerRuntimeAdapter(
       "test-3",
       createMockAgentRuntime({ throwError: "boom" }),
     );
@@ -252,7 +252,7 @@ describe("createServerRuntimeAdapter", () => {
       async (reason: string) => {
         disposedWith = reason;
       };
-    const runtime = createServerRuntimeAdapter("test-5", agent);
+    const runtime = createOwnerRuntimeAdapter("test-5", agent);
 
     await runtime.dispose();
     expect(disposedWith).toBe("session-dispose");
@@ -260,7 +260,7 @@ describe("createServerRuntimeAdapter", () => {
 
   it("adapter 透传 AgentRuntime 的 confirmationBroker——远程确认链路依赖", () => {
     const agent = createMockAgentRuntime();
-    const runtime = createServerRuntimeAdapter("test-broker", agent);
+    const runtime = createOwnerRuntimeAdapter("test-broker", agent);
     expect(runtime.confirmationBroker).toBe(agent.confirmationBroker);
   });
 
@@ -279,14 +279,14 @@ describe("createServerRuntimeAdapter", () => {
       drainLifecycleDiagnostics: () => readonly AgentEventMap["lifecycle:warning"][];
     }).drainLifecycleDiagnostics = () => diagnostics;
 
-    const runtime = createServerRuntimeAdapter("test-diagnostics", agent);
+    const runtime = createOwnerRuntimeAdapter("test-diagnostics", agent);
 
     expect(runtime.drainLifecycleDiagnostics?.()).toBe(diagnostics);
   });
 
   it("透传运行体预算 / 子 agent 用量 / 单发文本 / 安全快照能力", async () => {
     const agent = createMockAgentRuntime();
-    const runtime = createServerRuntimeAdapter("test-inspect", agent);
+    const runtime = createOwnerRuntimeAdapter("test-inspect", agent);
 
     const budget = runtime.estimateConversationRequestBudget?.([um("hello")]);
     expect(budget?.currentTokens).toBe(1_000);
@@ -306,12 +306,12 @@ describe("createServerRuntimeAdapter", () => {
 
   describe("abort(reason?)", () => {
     it("无 in-flight 时 abort() 返 false(idle 是正常状态,不抛)", () => {
-      const runtime = createServerRuntimeAdapter("test-no-flight", createMockAgentRuntime());
+      const runtime = createOwnerRuntimeAdapter("test-no-flight", createMockAgentRuntime());
       expect(runtime.abort()).toBe(false);
     });
 
     it("无 in-flight 时 abort 不影响下一轮 run(controller 由 run 入口创建)", async () => {
-      const runtime = createServerRuntimeAdapter(
+    const runtime = createOwnerRuntimeAdapter(
         "test-no-flight-then-run",
         createMockAgentRuntime(),
       );
@@ -328,7 +328,7 @@ describe("createServerRuntimeAdapter", () => {
     });
 
     it("in-flight abort:agent loop 通过 abortSignal 自然产 RunResult.aborted", async () => {
-      const runtime = createServerRuntimeAdapter(
+    const runtime = createOwnerRuntimeAdapter(
         "test-inflight-abort",
         createMockAgentRuntime({
           yields: [{ type: "text_delta", text: "partial" } as AgentYield],
@@ -360,7 +360,7 @@ describe("createServerRuntimeAdapter", () => {
       // 直接是用户传入的 typed reason(无 parent-abort 包装)。
       // 真实 server 路径(RPC connection close → SessionAdapter outer)会有 parent
       // 因此 fork 一层,渲染层走 unwrapParentAbort 拿根因(详见 abort-formatter-zh)。
-      const runtime = createServerRuntimeAdapter(
+    const runtime = createOwnerRuntimeAdapter(
         "test-typed-reason",
         createMockAgentRuntime({
           yields: [{ type: "text_delta", text: "x" } as AgentYield],
@@ -391,7 +391,7 @@ describe("createServerRuntimeAdapter", () => {
     it("有 parent abortSignal:parent 触发 abort 经 fork wrap 为 parent-abort", async () => {
       // createInterruptController({ parent }) 走 forkController 路径:parent 自己
       // fire abort 时,fork listener 把 parent reason wrap 成 parent-abort{ parentReason }。
-      const runtime = createServerRuntimeAdapter(
+    const runtime = createOwnerRuntimeAdapter(
         "test-parent-fork",
         createMockAgentRuntime({
           yields: [{ type: "text_delta", text: "x" } as AgentYield],
@@ -425,7 +425,7 @@ describe("createServerRuntimeAdapter", () => {
     });
 
     it("abort 缺省 reason → external{ origin: session-runtime-abort } 兜底", async () => {
-      const runtime = createServerRuntimeAdapter(
+    const runtime = createOwnerRuntimeAdapter(
         "test-default-reason",
         createMockAgentRuntime({
           yields: [{ type: "text_delta", text: "x" } as AgentYield],
@@ -452,7 +452,7 @@ describe("createServerRuntimeAdapter", () => {
     });
 
     it("幂等:多次 abort 仅第一次返 true,后续返 false 不覆盖原 reason", async () => {
-      const runtime = createServerRuntimeAdapter(
+    const runtime = createOwnerRuntimeAdapter(
         "test-idempotent",
         createMockAgentRuntime({
           yields: [{ type: "text_delta", text: "x" } as AgentYield],
@@ -486,7 +486,7 @@ describe("createServerRuntimeAdapter", () => {
     });
 
     it("已 aborted 的 parent abortSignal:run 入口 controller 立即 aborted,agent pre-flight 返 aborted", async () => {
-      const runtime = createServerRuntimeAdapter(
+    const runtime = createOwnerRuntimeAdapter(
         "test-pre-aborted",
         createMockAgentRuntime(),
       );
@@ -506,7 +506,7 @@ describe("createServerRuntimeAdapter", () => {
     });
 
     it("turn 完成后 abort 返 false(currentController 已被 finally 清空)", async () => {
-      const runtime = createServerRuntimeAdapter("test-after-done", createMockAgentRuntime());
+      const runtime = createOwnerRuntimeAdapter("test-after-done", createMockAgentRuntime());
 
       const gen = runtime.run([um("ok")]);
       while (true) {

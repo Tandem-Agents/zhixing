@@ -5,9 +5,16 @@
  * 当前组件：
  *   - createTempDir: it-scope fail-safe 临时目录（onTestFinished 自动清理）
  *   - createDescribeTempDir: describe-scope 共享临时目录（afterAll 自动清理）
+ *   - defineRuntimeFactoryConformance: 跨拓扑复用的运行工厂合同测试
  */
 
 export { createTempDir, createDescribeTempDir } from "./temp-dir.js";
 export type { DescribeTempDir } from "./temp-dir.js";
 export { assertGolden, normalizeGolden } from "./golden.js";
 export type { GoldenNormalizeOptions } from "./golden.js";
+export {
+  defineRuntimeFactoryConformance,
+  type RuntimeFactoryConformanceHarness,
+  type RuntimeFactoryLike,
+  type RuntimeLike,
+} from "./runtime-factory-conformance.js";

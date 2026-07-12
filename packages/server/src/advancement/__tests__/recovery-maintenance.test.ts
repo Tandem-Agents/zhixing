@@ -12,11 +12,43 @@ import {
   type RunRecord,
 } from "@zhixing/core";
 import { createTempDir } from "@zhixing/test-utils";
-import { AdvancementController } from "../controller.js";
-import { buildAdvancementProxyMessage } from "../proxy-content.js";
-import { createAdvancementRecoveryMaintenance } from "../recovery-maintenance.js";
+import {
+  AdvancementController,
+  buildAdvancementProxyMessage,
+  createAdvancementRecoveryMaintenance as createOwnerAdvancementRecoveryMaintenance,
+  type AdvancementConversationDirectory,
+  type AdvancementRecoveryMaintenance,
+} from "@zhixing/owner-services";
+import type { SessionBroadcast } from "@zhixing/rpc";
+import {
+  createAdvancementEventSink,
+  createAdvancementProxyTurnPort,
+  type AdvancementProxyTurnAdapterOptions,
+} from "../adapters.js";
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+function createAdvancementRecoveryMaintenance(options: {
+  readonly advancement: AdvancementController;
+  readonly manager: AdvancementProxyTurnAdapterOptions["manager"];
+  readonly directory: AdvancementConversationDirectory;
+  readonly sessionBroadcast?: () => SessionBroadcast | null;
+  readonly logger?: Pick<Console, "warn">;
+}): AdvancementRecoveryMaintenance {
+  const sessionBroadcast = options.sessionBroadcast ?? (() => null);
+  return createOwnerAdvancementRecoveryMaintenance({
+    advancement: options.advancement,
+    directory: options.directory,
+    proxyTurns: createAdvancementProxyTurnPort({
+      manager: options.manager,
+      sessionBroadcast,
+      conversationExists: (conversationId) =>
+        options.directory.exists(conversationId),
+    }),
+    events: createAdvancementEventSink(sessionBroadcast),
+    logger: options.logger,
+  });
+}
 
 function task(text: string) {
   return { parts: [{ type: "text" as const, text }] };

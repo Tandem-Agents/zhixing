@@ -7,7 +7,7 @@
 
 import { describe, it, expect, vi } from "vitest";
 import { createEventBus, type SchedulerEventMap } from "@zhixing/core";
-import { createEventBridge } from "../event-bridge.js";
+import { createEventBridge } from "@zhixing/rpc";
 import type { RpcConnection } from "../connection.js";
 
 function fakeConn(): RpcConnection & { notify: ReturnType<typeof vi.fn> } {

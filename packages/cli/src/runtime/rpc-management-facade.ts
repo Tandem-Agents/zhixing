@@ -11,8 +11,8 @@ import type { ChannelStatus, PermissionRule, SkillMode } from "@zhixing/core";
 import {
   RPC_ERROR_CODES,
   RpcClientError,
-  type SessionSecurityResult,
 } from "@zhixing/server";
+import type { SessionSecurityResult } from "@zhixing/rpc";
 import type { CoreHostLink } from "./core-host-connection.js";
 
 /** skill.list 条目——补全候选与管理器消费的最小面(宿主返回 SkillStore 全集) */
