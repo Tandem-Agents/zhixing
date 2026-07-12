@@ -119,6 +119,8 @@ export type {
   PostTurnControlIntent,
   PostTurnControlOutcome,
   PostTurnControlConflict,
+  ProjectedPassthroughEvent,
+  SessionEventProjection,
 } from "./agent-events.js";
 
 // ─── 错误类型 ───
@@ -129,6 +131,18 @@ export {
   isUserFacingError,
   toAgentError,
 } from "./errors.js";
+
+// ─── 分布式运行时合同基础类型 ───
+export type {
+  ArtifactRef,
+  Digest,
+  IsoTime,
+  JsonValue,
+  KeyConfirmation,
+  Signature,
+  Ulid,
+  WireContractV1,
+} from "./distributed.js";
 
 // ─── 可重置组件 ───
 export type { Resettable } from "./resettable.js";

@@ -20,6 +20,8 @@ export type ObjectiveSignalKind =
   | "conversation-fact"
   | "none";
 
+export type EvidenceKind = ObjectiveSignalKind;
+
 /**
  * 证据定位——契约的一部分：草案生成时从任务上下文填写、随契约确认对用户
  * 可见可改，取证不做临场猜测。第一版仅支持路径定位（相对 workspace）；
@@ -323,6 +325,12 @@ export type AdvancementStoreEvent =
   | AdvancementCompletedEvent
   | AdvancementExitedEvent
   | AdvancementCancelledEvent;
+
+/** 分布式控制日志复用现有推进事件，不建立第二套事件模型。 */
+export type AdvancementControlEvent = AdvancementStoreEvent;
+
+/** 分布式读取复用现有推进会话快照。 */
+export type AdvancementSnapshot = AdvancementSession;
 
 export interface AdvancementSessionCreatedEvent {
   readonly type: "session_created";

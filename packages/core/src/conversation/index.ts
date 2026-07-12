@@ -5,8 +5,10 @@ export type {
   EnsureConversationOptions,
   IConversationRepository,
   TaskItem,
+  TaskListOp,
   TaskListState,
   SegmentMeta,
+  SegmentRecord,
   SegmentMetadata,
 } from "./types.js";
 export {

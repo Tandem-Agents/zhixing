@@ -59,6 +59,10 @@
     "./conversation": {
       "types": "./dist/conversation/index.d.ts",
       "import": "./dist/conversation/index.js"
+    },
+    "./contracts": {
+      "types": "./dist/contracts/index.d.ts",
+      "import": "./dist/contracts/index.js"
     }
   },
   "files": [
@@ -66,6 +70,8 @@
   ],
   "scripts": {
     "build": "tsup",
+    "typecheck:contracts": "tsc -p tsconfig.contracts.json",
+    "lint:contract-schemas": "node ../../scripts/lint-distributed-runtime-contracts.mjs && tsc -p tsconfig.contracts.schema.json",
     "test": "vitest run",
     "test:watch": "vitest watch",
     "clean": "rm -rf dist"

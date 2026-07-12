@@ -11,6 +11,7 @@ export type SkillSource = "own" | "linked";
 
 /** 模式分区 —— 决定索引注入哪个 runtime 的系统提示词。权威在 index,frontmatter 不含。 */
 export type SkillMode = "main" | "work";
+export type SkillModeDto = "main" | "work";
 
 /**
  * `index.json` 里每条技能的状态旁路。
@@ -36,6 +37,13 @@ export interface SkillUsage {
   /** 最后一次 load_skill 命中的 ISO 时间。 */
   lastHitAt: string;
   /** 累计命中次数。 */
+  hitCount: number;
+}
+
+/** 技能使用度量的跨边界稳定快照。 */
+export interface SkillUsageRecord {
+  skillId: string;
+  lastHitAt: import("../types/distributed.js").IsoTime;
   hitCount: number;
 }
 

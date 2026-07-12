@@ -556,3 +556,49 @@ export type AgentEventMap = {
     reason: "segment-transition" | "compact";
   };
 } & SecurityEventMap;
+
+/** 可跨运行时边界原样投影的小型事件。 */
+export type ProjectedPassthroughEvent =
+  | "agent:run_start"
+  | "agent:run_end"
+  | "context:tokens_snapshot"
+  | "retry:attempt"
+  | "retry:success"
+  | "retry:exhausted"
+  | "segment:transition_start"
+  | "segment:emergency_floor"
+  | "segment:transition_failed"
+  | "interrupt:warn"
+  | "interrupt:fired"
+  | "security:steward_review"
+  | "security:rule_sedimented"
+  | "lifecycle:hook_failed"
+  | "lifecycle:warning"
+  | "lifecycle:prompt_rebuilt"
+  | "orchestration:validation_failed"
+  | "orchestration:run_start"
+  | "orchestration:node_start"
+  | "orchestration:node_end"
+  | "orchestration:run_end";
+
+/** UI 数据面的封闭事件投影；白名单外事件不能进入 wire。 */
+export type SessionEventProjection =
+  | {
+      [K in ProjectedPassthroughEvent]: {
+        event: K;
+        payload: AgentEventMap[K];
+      };
+    }[ProjectedPassthroughEvent]
+  | {
+      event: "llm:request_start";
+      payload: { model: string; messageCount: number; hasTools: boolean };
+    }
+  | {
+      event: "segment:new_started";
+      payload: {
+        segmentId: string;
+        bufferTurns: number;
+        tokensBefore: number;
+        tokensAfter: number;
+      };
+    };

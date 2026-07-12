@@ -14,6 +14,7 @@ import type { AbortReason } from "../interrupt/types.js";
 // ─── 任务优先级 ───
 
 export type TaskPriority = "low" | "normal" | "high" | "urgent";
+export type TaskPriorityDto = "low" | "normal" | "high" | "urgent";
 
 /**
  * 优先级排序权重（数值越大越先执行）
@@ -37,6 +38,11 @@ export const PRIORITY_WEIGHT: Record<TaskPriority, number> = {
  */
 export type TaskSchedule =
   | { kind: "once"; at: string }
+  | { kind: "interval"; everyMs: number }
+  | { kind: "cron"; expr: string; tz?: string };
+
+export type TaskScheduleDto =
+  | { kind: "once"; at: import("../types/distributed.js").IsoTime }
   | { kind: "interval"; everyMs: number }
   | { kind: "cron"; expr: string; tz?: string };
 

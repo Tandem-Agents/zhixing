@@ -19,6 +19,9 @@ export type TaskView = ScheduledTask;
 /** 创建任务的入参（id / state / 时间戳由内核生成）。 */
 export type TaskSpec = Omit<ScheduledTask, "id" | "state" | "createdAt" | "updatedAt">;
 
+/** 调度任务定义在运行时合同中的唯一别名。 */
+export type ScheduleTaskSpec = TaskSpec;
+
 /** 更新任务的补丁 —— 只允许改这些字段（与 Scheduler.updateTask 对齐）。 */
 export type TaskPatch = Partial<
   Pick<

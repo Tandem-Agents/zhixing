@@ -51,6 +51,23 @@ export interface DeliveryTarget {
   threadId?: string;
 }
 
+/** 投递目标的 wire 白名单，领域类型新增字段不会自动扩权。 */
+export interface DeliveryTargetDto {
+  channelId: string;
+  to: string;
+  threadId?: string;
+}
+
+/** 出站内容的内容寻址快照。 */
+export interface OutboundContentDto {
+  text: string;
+  markdown?: string;
+  media?: Array<{
+    ref: import("../types/distributed.js").ArtifactRef;
+    type: "image" | "file" | "audio" | "video";
+  }>;
+}
+
 // ─── 投递结果 ───
 
 export interface DeliveryResult {

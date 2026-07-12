@@ -41,6 +41,9 @@ export interface WindowCompact {
   readonly tokensAfter: number;
 }
 
+/** 窗口压缩指令在提交合同中的唯一别名。 */
+export type WindowCompactInstruction = WindowCompact;
+
 // ─── 出入参 ───
 
 export interface AcceptRunInput {

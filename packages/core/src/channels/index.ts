@@ -11,10 +11,12 @@ export {
   type ChatType,
   type DeliveryResult,
   type DeliveryTarget,
+  type DeliveryTargetDto,
   type Disposable,
   type HttpHandler,
   type InboundMessage,
   type OutboundContent,
+  type OutboundContentDto,
   DEFAULT_BINDING_POLICY,
 } from "./types.js";
 

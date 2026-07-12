@@ -67,6 +67,9 @@ export interface TaskListState {
   items: readonly TaskItem[];
 }
 
+/** 当前任务清单写入语义的冻结合同。 */
+export type TaskListOp = { op: "set"; state: TaskListState };
+
 // ─── 段切换元数据 ───
 
 /** 单次段切换的元数据 —— segmentMetadata.segments 数组的元素 */
@@ -80,6 +83,9 @@ export interface SegmentMeta {
   /** 压缩后的 token 计数（即摘要 + 缓冲带占用） */
   tokensAfter: number;
 }
+
+/** 段元数据在运行时合同中的唯一别名。 */
+export type SegmentRecord = SegmentMeta;
 
 /** 段切换累积元数据 —— Conversation.segmentMetadata 字段类型 */
 export interface SegmentMetadata {

@@ -11,6 +11,12 @@
  */
 
 export type { TrustContext, TrustLevel } from "./trust.js";
+import type {
+  Digest,
+  IsoTime,
+  Signature,
+  WireSchemaV1,
+} from "../types/distributed.js";
 
 // ─── 会话类型 ───
 
@@ -266,6 +272,18 @@ export interface PermissionRule {
    * 单条 `[{ origin:"user", timestamp: now }]`。
    */
   contributors?: TrustContribution[];
+}
+
+/** 信任规则沿用现有权限规则语义。 */
+export type TrustRule = PermissionRule;
+
+/** 锚点签发、供执行侧验证的规则快照。 */
+export interface TrustRuleSnapshot extends WireSchemaV1<"TrustRuleSnapshot"> {
+  snapshotVersion: number;
+  rules: TrustRule[];
+  generatedAt: IsoTime;
+  digest: Digest;
+  signature: Signature;
 }
 
 /**

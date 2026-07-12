@@ -17,6 +17,7 @@ export type {
   AttentionWindowState,
   CreateAttentionWindowOptions,
   WindowCompact,
+  WindowCompactInstruction,
   WindowFoldOutcome,
   WindowResetReason,
 } from "./types.js";

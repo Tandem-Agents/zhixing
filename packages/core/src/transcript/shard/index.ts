@@ -4,6 +4,7 @@ export type {
   AppendRunResult,
   ClearRecord,
   RunRecord,
+  TranscriptRunRecord,
   RunRecordInput,
   RunRecordRef,
   ShardHeader,

@@ -17,6 +17,7 @@ export default defineConfig({
     "src/identity/index.ts",
     "src/scheduler/index.ts",
     "src/orchestration/index.ts",
+    "src/contracts/index.ts",
   ],
   format: ["esm"],
   dts: true,

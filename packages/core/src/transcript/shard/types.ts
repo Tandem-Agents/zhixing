@@ -76,6 +76,9 @@ export interface RunRecord {
   perspectives?: RunRecordPerspectivesMetadata;
 }
 
+/** 完整 run 记录在提交合同中的唯一别名。 */
+export type TranscriptRunRecord = RunRecord;
+
 /**
  * 清空事件 —— "清空"是事实流里的一个事件、不是销毁：一切读路径（倒读 /
  * 计数 / 未来检索召回）以最近一条 ClearRecord 为硬边界，其前的数据物理仍在、

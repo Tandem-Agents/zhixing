@@ -30,6 +30,8 @@ export type {
   ThreatCategory,
   ToolBoundaryRegistry,
   TrustContribution,
+  TrustRule,
+  TrustRuleSnapshot,
 } from "./types.js";
 
 // 信任上下文
