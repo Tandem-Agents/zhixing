@@ -1,0 +1,115 @@
+import type { AdvancementTurnReviewResult } from "./controller.js";
+import type {
+  AdvancementEventSink,
+  AdvancementProxyTurnPort,
+} from "./ports.js";
+import { ProxyMessageScheduler } from "./proxy-scheduler.js";
+
+export interface AdvancementReviewDispatchDeps {
+  readonly events?: AdvancementEventSink;
+  readonly proxyTurns?: () => AdvancementProxyTurnPort | null;
+}
+
+export interface AdvancementReviewDispatchInput {
+  readonly conversationId: string;
+  readonly runId: string;
+  readonly result: AdvancementTurnReviewResult;
+  readonly emitProxyEnqueued?: boolean;
+  readonly scheduleProxy?: boolean;
+}
+
+export async function dispatchAdvancementReviewResult(
+  deps: AdvancementReviewDispatchDeps,
+  input: AdvancementReviewDispatchInput,
+): Promise<void> {
+  emitReviewEvents(deps, input);
+  if (input.scheduleProxy === false) return;
+  await scheduleProxyMessage(deps, input.result);
+}
+
+function emitReviewEvents(
+  deps: AdvancementReviewDispatchDeps,
+  input: AdvancementReviewDispatchInput,
+): void {
+  const result = input.result;
+  if (result.kind === "skipped") return;
+  const events = deps.events;
+  if (!events) return;
+
+  if (result.kind === "review-deferred") {
+    events.emit({
+      conversationId: input.conversationId,
+      runId: input.runId,
+      seq: 0,
+      event: "advancement:review_deferred",
+      payload: {
+        advancementSessionId: result.session.id,
+        cause: result.cause,
+        reason: result.reason,
+      },
+    });
+    return;
+  }
+
+  events.emit({
+    conversationId: input.conversationId,
+    runId: input.runId,
+    seq: 0,
+    event: "advancement:run_reviewed",
+    payload: {
+      advancementSessionId: result.session.id,
+      review: result.review,
+      // 会话内验收轮次——review.runIndex 是对话全局 run 序号，不是
+      // 轮次；呈现端的轮次事实只能来自会话 review 计数。
+      reviewRound: result.session.runs.length,
+    },
+  });
+
+  if (result.kind === "proxy-enqueued") {
+    if (input.emitProxyEnqueued === false) return;
+    events.emit({
+      conversationId: input.conversationId,
+      runId: result.proxyMessage.id,
+      seq: 1,
+      event: "advancement:proxy_enqueued",
+      payload: {
+        advancementSessionId: result.session.id,
+        proxyMessageId: result.proxyMessage.id,
+        reviewId: result.review.id,
+      },
+    });
+    return;
+  }
+
+  if (result.kind !== "completed" && result.kind !== "exited") return;
+  events.emit({
+    conversationId: input.conversationId,
+    runId: input.runId,
+    seq: 1,
+    event:
+      result.kind === "completed"
+        ? "advancement:completed"
+        : "advancement:exited",
+    payload: {
+      advancementSessionId: result.session.id,
+      reviewId: result.review.id,
+      exit: result.exit,
+      closure: result.closure,
+    },
+  });
+}
+
+async function scheduleProxyMessage(
+  deps: AdvancementReviewDispatchDeps,
+  result: AdvancementTurnReviewResult,
+): Promise<void> {
+  if (result.kind !== "proxy-enqueued") return;
+  const proxyTurns = deps.proxyTurns?.();
+  if (!proxyTurns) return;
+  await new ProxyMessageScheduler({
+    proxyTurns,
+  }).schedule({
+    session: result.session,
+    proxyMessage: result.proxyMessage,
+  });
+}

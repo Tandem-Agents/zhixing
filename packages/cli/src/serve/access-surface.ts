@@ -34,8 +34,6 @@ import type {
   ConfirmationHub,
   ConversationManager,
   ConversationDirectory,
-  AdvancementController,
-  AdvancementRecoveryMaintenance,
   InboundRouter,
   RunningServer,
   CleanupRegistry,
@@ -44,6 +42,10 @@ import type {
   TextConfirmationRenderer,
   RuntimeFactory,
 } from "@zhixing/server";
+import type {
+  AdvancementController,
+  AdvancementRecoveryMaintenance,
+} from "@zhixing/owner-services";
 import type { McpHub } from "@zhixing/mcp";
 import type { DeliveryStack } from "../setup-delivery.js";
 

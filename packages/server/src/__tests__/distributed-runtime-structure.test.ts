@@ -17,7 +17,9 @@ const ZONES = [
   ["core/transcript", "packages/core/src/transcript"],
   ["orchestrator/runtime", "packages/orchestrator/src/runtime"],
   ["owner-kernel", "packages/owner-kernel/src"],
+  ["owner-services", "packages/owner-services/src"],
   ["rpc", "packages/rpc/src"],
+  ["runtime-host", "packages/runtime-host/src"],
   ["server/advancement", "packages/server/src/advancement"],
   ["server/confirmation", "packages/server/src/confirmation"],
   ["server/rpc", "packages/server/src/rpc"],
@@ -45,6 +47,16 @@ describe("distributed runtime structural gates", () => {
 
     expect(findDependencyCycles(dependencyGraph.production)).toEqual([]);
     expect(topology.undeclaredPackageImports).toEqual([]);
+    expect(dependencyGraph.production["@zhixing/owner-services"]).toEqual([
+      "@zhixing/core",
+    ]);
+    expect(dependencyGraph.production["@zhixing/runtime-host"]).toEqual([
+      "@zhixing/core",
+      "@zhixing/mcp",
+      "@zhixing/orchestrator",
+      "@zhixing/owner-kernel",
+      "@zhixing/tools-builtin",
+    ]);
     expect(rpcContracts.length).toBeGreaterThan(40);
     expect(findDuplicateContractNames(rpcContracts)).toEqual([]);
 

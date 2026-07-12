@@ -1,9 +1,13 @@
-import type { ConversationManager } from "@zhixing/owner-kernel/conversation-manager";
+import type { ConversationManager } from "@zhixing/owner-kernel";
+import {
+  dispatchAdvancementReviewResult as dispatchOwnerAdvancementReviewResult,
+  type AdvancementReviewDispatchInput,
+} from "@zhixing/owner-services/advancement/review-dispatch";
 import type { SessionBroadcast } from "@zhixing/rpc/session-broadcast";
-import { createControlSessionEventEnvelope } from "@zhixing/rpc/session-events";
-import { SESSION_NOTIFICATIONS } from "@zhixing/rpc/session-wire";
-import type { AdvancementTurnReviewResult } from "./controller.js";
-import { ProxyMessageScheduler } from "./proxy-scheduler.js";
+import {
+  createAdvancementEventSink,
+  createAdvancementProxyTurnPort,
+} from "./adapters.js";
 
 export interface AdvancementReviewDispatchDeps {
   readonly sessionBroadcast: () => SessionBroadcast | null;
@@ -11,124 +15,29 @@ export interface AdvancementReviewDispatchDeps {
   readonly conversationExists?: (conversationId: string) => Promise<boolean>;
 }
 
-export interface AdvancementReviewDispatchInput {
-  readonly conversationId: string;
-  readonly runId: string;
-  readonly result: AdvancementTurnReviewResult;
-  readonly emitProxyEnqueued?: boolean;
-  readonly scheduleProxy?: boolean;
-}
-
 export async function dispatchAdvancementReviewResult(
   deps: AdvancementReviewDispatchDeps,
   input: AdvancementReviewDispatchInput,
 ): Promise<void> {
-  emitReviewEvents(deps, input);
-  if (input.scheduleProxy === false) return;
-  await scheduleProxyMessage(deps, input.result);
-}
-
-function emitReviewEvents(
-  deps: AdvancementReviewDispatchDeps,
-  input: AdvancementReviewDispatchInput,
-): void {
-  const result = input.result;
-  if (result.kind === "skipped") return;
   const broadcast = deps.sessionBroadcast();
-  if (!broadcast) return;
-
-  if (result.kind === "review-deferred") {
-    broadcast(
-      input.conversationId,
-      SESSION_NOTIFICATIONS.event,
-      createControlSessionEventEnvelope({
-        conversationId: input.conversationId,
-        runId: input.runId,
-        seq: 0,
-        event: "advancement:review_deferred",
-        payload: {
-          advancementSessionId: result.session.id,
-          cause: result.cause,
-          reason: result.reason,
-        },
-      }),
-    );
-    return;
-  }
-
-  broadcast(
-    input.conversationId,
-    SESSION_NOTIFICATIONS.event,
-    createControlSessionEventEnvelope({
-      conversationId: input.conversationId,
-      runId: input.runId,
-      seq: 0,
-      event: "advancement:run_reviewed",
-      payload: {
-        advancementSessionId: result.session.id,
-        review: result.review,
-        // 会话内验收轮次——review.runIndex 是对话全局 run 序号，不是
-        // 轮次；呈现端的轮次事实只能来自会话 review 计数。
-        reviewRound: result.session.runs.length,
+  return dispatchOwnerAdvancementReviewResult(
+    {
+      events: broadcast
+        ? createAdvancementEventSink(() => broadcast)
+        : undefined,
+      proxyTurns: () => {
+        const manager = deps.conversations?.();
+        return manager
+          ? createAdvancementProxyTurnPort({
+              manager,
+              sessionBroadcast: deps.sessionBroadcast,
+              conversationExists: deps.conversationExists,
+            })
+          : null;
       },
-    }),
-  );
-
-  if (result.kind === "proxy-enqueued") {
-    if (input.emitProxyEnqueued === false) return;
-    broadcast(
-      input.conversationId,
-      SESSION_NOTIFICATIONS.event,
-      createControlSessionEventEnvelope({
-        conversationId: input.conversationId,
-        runId: result.proxyMessage.id,
-        seq: 1,
-        event: "advancement:proxy_enqueued",
-        payload: {
-          advancementSessionId: result.session.id,
-          proxyMessageId: result.proxyMessage.id,
-          reviewId: result.review.id,
-        },
-      }),
-    );
-    return;
-  }
-
-  if (result.kind !== "completed" && result.kind !== "exited") return;
-  broadcast(
-    input.conversationId,
-    SESSION_NOTIFICATIONS.event,
-    createControlSessionEventEnvelope({
-      conversationId: input.conversationId,
-      runId: input.runId,
-      seq: 1,
-      event:
-        result.kind === "completed"
-          ? "advancement:completed"
-          : "advancement:exited",
-      payload: {
-        advancementSessionId: result.session.id,
-        reviewId: result.review.id,
-        exit: result.exit,
-        closure: result.closure,
-      },
-    }),
+    },
+    input,
   );
 }
 
-async function scheduleProxyMessage(
-  deps: AdvancementReviewDispatchDeps,
-  result: AdvancementTurnReviewResult,
-): Promise<void> {
-  if (result.kind !== "proxy-enqueued") return;
-  const manager = deps.conversations?.();
-  if (!manager) return;
-  await new ProxyMessageScheduler({
-    manager,
-    sessionBroadcast: deps.sessionBroadcast,
-    conversationExists: deps.conversationExists,
-  }).schedule({
-    session: result.session,
-    proxyMessage: result.proxyMessage,
-  });
-}
+export type { AdvancementReviewDispatchInput };

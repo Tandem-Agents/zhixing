@@ -6,21 +6,19 @@ export {
   type AdvancementClosureSynthesizer,
   type AdvancementConfirmedTurn,
   type AdvancementControllerOptions,
-  type AdvancementConversationDirectory,
   type AdvancementPrepareResult,
   type AdvancementReviewRunInput,
   type AdvancementReviewRunOutcome,
   type AdvancementRunReviewer,
-  type AdvancementRunsPage,
   type AdvancementRevisedDraft,
   type AdvancementTurnReviewResult,
-} from "@zhixing/owner-services/advancement";
+} from "./controller.js";
 export {
   buildAdvancementProxyMessage,
   buildProxyVariables,
   composeProxyContent,
   selectFailureHandling,
-} from "@zhixing/owner-services/advancement/proxy-content";
+} from "./proxy-content.js";
 export {
   ProxyMessageScheduler,
   type ProxyMessageSchedulerOptions,
@@ -39,4 +37,14 @@ export {
   type AdvancementReviewDispatchDeps,
   type AdvancementReviewDispatchInput,
 } from "./review-dispatch.js";
-export * from "./adapters.js";
+export {
+  type AdvancementConversationDirectory,
+  type AdvancementRunsPage,
+} from "./conversation-directory-port.js";
+export {
+  type AdvancementEventSink,
+  type AdvancementPresentationEvent,
+  type AdvancementProxyScheduleResult,
+  type AdvancementProxyTurnPort,
+  type AdvancementProxyTurnRequest,
+} from "./ports.js";

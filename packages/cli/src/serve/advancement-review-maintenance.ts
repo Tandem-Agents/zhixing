@@ -1,9 +1,16 @@
 import {
   dispatchAdvancementReviewResult,
   type AdvancementController,
-  type ConversationManager,
-  type SessionBroadcast,
-  type TurnCommittedInfo,
+  type AdvancementReviewDispatchDeps,
+} from "@zhixing/owner-services";
+import type {
+  ConversationManager,
+  TurnCommittedInfo,
+} from "@zhixing/owner-kernel";
+import type { SessionBroadcast } from "@zhixing/rpc";
+import {
+  createAdvancementEventSink,
+  createAdvancementProxyTurnPort,
 } from "@zhixing/server";
 
 export interface AdvancementReviewMaintenanceDeps {
@@ -26,12 +33,27 @@ export function createAdvancementReviewMaintenance(
   deps: AdvancementReviewMaintenanceDeps,
 ): (info: TurnCommittedInfo) => void {
   const chains = new Map<string, Promise<void>>();
+  const dispatchDeps: AdvancementReviewDispatchDeps = {
+    events: createAdvancementEventSink(deps.sessionBroadcast),
+    proxyTurns: () => {
+      const manager = deps.conversations?.();
+      return manager
+        ? createAdvancementProxyTurnPort({
+            manager,
+            sessionBroadcast: deps.sessionBroadcast,
+            conversationExists: deps.conversationExists,
+          })
+        : null;
+    },
+  };
 
   return (info) => {
     if (!deps.advancement) return;
     if (info.ephemeral) return;
     const previous = chains.get(info.conversationId) ?? Promise.resolve();
-    const current = previous.then(() => reviewAcceptedTurn(deps, info));
+    const current = previous.then(() =>
+      reviewAcceptedTurn(deps, dispatchDeps, info),
+    );
     const tail = current.catch(() => {});
     chains.set(info.conversationId, tail);
     void tail.finally(() => {
@@ -44,6 +66,7 @@ export function createAdvancementReviewMaintenance(
 
 async function reviewAcceptedTurn(
   deps: AdvancementReviewMaintenanceDeps,
+  dispatchDeps: AdvancementReviewDispatchDeps,
   info: TurnCommittedInfo,
 ): Promise<void> {
   const advancement = deps.advancement;
@@ -61,11 +84,7 @@ async function reviewAcceptedTurn(
     runRecord: info.runRecord,
     runRecordRef: info.runRecordRef,
   });
-  await dispatchAdvancementReviewResult({
-    sessionBroadcast: deps.sessionBroadcast,
-    conversations: deps.conversations,
-    conversationExists: deps.conversationExists,
-  }, {
+  await dispatchAdvancementReviewResult(dispatchDeps, {
     conversationId: info.conversationId,
     runId: info.turnId,
     result,

@@ -28,7 +28,7 @@ import {
   createLightCallLLM,
   createMainCallLLM,
 } from "@zhixing/orchestrator/runtime";
-import { AdvancementController } from "@zhixing/server";
+import { AdvancementController } from "@zhixing/owner-services";
 
 export interface ServeAdvancementControllerDeps {
   /** 准入投影来源——活跃会话窗口尾部（经 lazy ref 取，未就绪返回 undefined）。 */

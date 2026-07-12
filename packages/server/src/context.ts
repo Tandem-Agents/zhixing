@@ -13,13 +13,15 @@ import type {
   DeliveryStats,
 } from "@zhixing/core";
 import type { ConfirmationHub, ConversationManager } from "@zhixing/owner-kernel";
+import {
+  AdvancementController,
+  type AdvancementRecoveryMaintenance,
+} from "@zhixing/owner-services";
 import type {
   SessionActivityBroadcast,
   SessionBroadcast,
 } from "@zhixing/rpc/session-broadcast";
 import type { ServerConfig } from "./types.js";
-import type { AdvancementRecoveryMaintenance } from "./advancement/index.js";
-import { AdvancementController } from "./advancement/index.js";
 import type { PerspectivesController } from "./perspectives/index.js";
 import type { ConversationDirectory } from "./runtime/conversation-directory.js";
 import type { WorksceneDirectory } from "./runtime/workscene-directory.js";

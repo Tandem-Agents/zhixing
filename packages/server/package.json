@@ -22,6 +22,7 @@
   "dependencies": {
     "@zhixing/core": "workspace:*",
     "@zhixing/owner-kernel": "workspace:*",
+    "@zhixing/owner-services": "workspace:*",
     "@zhixing/rpc": "workspace:*",
     "ws": "^8.18.0"
   },

@@ -58,13 +58,12 @@ import {
   ServerLogLifecycle,
   CleanupRegistry,
   createRunEventForwarder,
-  createAdvancementRecoveryMaintenance,
+  createAdvancementEventSink,
+  createAdvancementProxyTurnPort,
   LlmPerspectiveAllocationStrategy,
   PerspectivesController,
   RuntimePerspectivesOrchestrationExecutor,
-  type AdvancementRecoveryMaintenance,
   getDefaultLogPath,
-  renderRecentContextFromMessages,
   SESSION_NOTIFICATIONS,
   type SessionChangedPayload,
   type SessionActivityBroadcast,
@@ -73,6 +72,11 @@ import {
   type ProcessLockPaths,
   type ConversationManager,
 } from "@zhixing/server";
+import {
+  createAdvancementRecoveryMaintenance,
+  renderRecentContextFromMessages,
+  type AdvancementRecoveryMaintenance,
+} from "@zhixing/owner-services";
 import type {
   ZhixingConfig,
   ZhixingCredentials,
@@ -80,15 +84,18 @@ import type {
 import fsp from "node:fs/promises";
 import { runStartupCheck } from "../startup.js";
 import chalk from "chalk";
-import { RuntimeHost } from "../runtime/runtime-host.js";
+import {
+  RuntimeHost,
+  createBuiltinExtraToolsAssembly,
+  createRuntimeHostFactory,
+  createTransientSegmentDeps,
+} from "@zhixing/runtime-host";
 import { createRenderSubscribers } from "../render.js";
 import { createStdoutWriter } from "../screen/index.js";
 import {
   createBlockedRenderer,
 } from "../security/index.js";
 import { createMcpHub } from "@zhixing/mcp";
-import { createBuiltinExtraToolsAssembly } from "../runtime/builtin-extra-tools.js";
-import { createServeSegmentDeps } from "../runtime/segment-deps.js";
 import { parseServerSpecs } from "../runtime/mcp-config.js";
 import {
   RoutedConversationRepoTaskListStore,
@@ -101,7 +108,6 @@ import { createAdvancementAcceptanceLifecycle } from "./advancement-acceptance-l
 import { createZhixingGuidanceLifecycle } from "./zhixing-guidance-lifecycle.js";
 import { readGuidanceFile } from "./read-guidance-file.js";
 import { createConversationAliveCheck } from "./advancement-gc.js";
-import { createCliRuntimeFactory } from "./session-adapter.js";
 import { createConversationDirectory } from "./conversation-directory.js";
 import { createWorksceneDirectory } from "./workscene-directory.js";
 import {
@@ -343,7 +349,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   //   注意力窗口的段保护对一切运行体生效。persistence 为 no-op（serve 未接
   //   ConversationRepository，segmentMeta 缺写无害）；taskListReader 复用同一
   //   TaskListService，in-progress 守卫与 REPL 同源。
-  const serveSegmentDeps = createServeSegmentDeps({
+  const serveSegmentDeps = createTransientSegmentDeps({
     taskListService: builtinExtraTools.taskListService,
   });
 
@@ -411,7 +417,7 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
   //   注：工厂内实例发放是 lazy（session 调用时才建），那时 mcp 接入面 connectAll
   //   早已完成（pre-server 阶段），故工厂装配可前置、不受 connectAll 时序约束（与 eager 的
   //   ephemeralRuntime 不同——后者须排在接入面之后，见下）。
-  const runtimeFactory = createCliRuntimeFactory({
+  const runtimeFactory = createRuntimeHostFactory({
     createAgentRuntime: async (sessionId) => {
       // 对话归属编码在全域键里:ws: 前缀 → 该场景的 power 装配;其余 main。
       const { scope } = parseConversationId(sessionId);
@@ -656,9 +662,16 @@ async function runServerProcess(opts: ServeOptions): Promise<void> {
     ctx.advancement && ctx.conversations
       ? createAdvancementRecoveryMaintenance({
           advancement: ctx.advancement,
-          manager: ctx.conversations,
           directory: conversationDirectory,
-          sessionBroadcast: () => sessionBroadcastRef.current,
+          proxyTurns: createAdvancementProxyTurnPort({
+            manager: ctx.conversations,
+            sessionBroadcast: () => sessionBroadcastRef.current,
+            conversationExists: (conversationId) =>
+              conversationDirectory.exists(conversationId),
+          }),
+          events: createAdvancementEventSink(
+            () => sessionBroadcastRef.current,
+          ),
           logger: console,
         })
       : undefined;

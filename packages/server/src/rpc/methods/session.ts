@@ -78,7 +78,7 @@ import {
   type SessionUnsubscribeResult,
 } from "@zhixing/rpc/session-wire";
 import { createControlSessionEventEnvelope } from "@zhixing/rpc/session-events";
-import type { AdvancementPrepareResult } from "../../advancement/index.js";
+import type { AdvancementPrepareResult } from "@zhixing/owner-services";
 import {
   generateConversationId,
   WorksceneBusyError,

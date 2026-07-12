@@ -1,0 +1,54 @@
+{
+  "name": "@zhixing/runtime-host",
+  "version": "0.1.0",
+  "description": "知行运行宿主 — AgentRuntime 装配、工具资产与 owner 适配",
+  "type": "module",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./session-adapter": {
+      "types": "./dist/session-adapter.d.ts",
+      "import": "./dist/session-adapter.js"
+    },
+    "./runtime-host": {
+      "types": "./dist/runtime-host.d.ts",
+      "import": "./dist/runtime-host.js"
+    },
+    "./builtin-extra-tools": {
+      "types": "./dist/builtin-extra-tools.d.ts",
+      "import": "./dist/builtin-extra-tools.js"
+    },
+    "./segment-deps": {
+      "types": "./dist/segment-deps.d.ts",
+      "import": "./dist/segment-deps.js"
+    },
+    "./workmode-tools": {
+      "types": "./dist/workmode-tools.d.ts",
+      "import": "./dist/workmode-tools.js"
+    },
+    "./workscene-port": {
+      "types": "./dist/workscene-port.d.ts",
+      "import": "./dist/workscene-port.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@zhixing/core": "workspace:*",
+    "@zhixing/mcp": "workspace:*",
+    "@zhixing/orchestrator": "workspace:*",
+    "@zhixing/owner-kernel": "workspace:*",
+    "@zhixing/tools-builtin": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.2",
+    "tsup": "^8.4.0",
+    "typescript": "^5.8.3"
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "name": "@zhixing/owner-services",
+  "version": "0.1.0",
+  "description": "知行 owner 领域服务 — 推进控制、审查调度与恢复维护",
+  "type": "module",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./advancement": {
+      "types": "./dist/advancement/index.d.ts",
+      "import": "./dist/advancement/index.js"
+    },
+    "./advancement/controller": {
+      "types": "./dist/advancement/controller.d.ts",
+      "import": "./dist/advancement/controller.js"
+    },
+    "./advancement/proxy-content": {
+      "types": "./dist/advancement/proxy-content.d.ts",
+      "import": "./dist/advancement/proxy-content.js"
+    },
+    "./advancement/proxy-scheduler": {
+      "types": "./dist/advancement/proxy-scheduler.d.ts",
+      "import": "./dist/advancement/proxy-scheduler.js"
+    },
+    "./advancement/recovery-maintenance": {
+      "types": "./dist/advancement/recovery-maintenance.d.ts",
+      "import": "./dist/advancement/recovery-maintenance.js"
+    },
+    "./advancement/review-dispatch": {
+      "types": "./dist/advancement/review-dispatch.d.ts",
+      "import": "./dist/advancement/review-dispatch.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@zhixing/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.1",
+    "tsup": "^8.4.0",
+    "typescript": "^5.8.3"
+  }
+}

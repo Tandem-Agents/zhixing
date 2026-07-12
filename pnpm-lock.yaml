@@ -54,9 +54,21 @@ importers:
       '@zhixing/orchestrator':
         specifier: workspace:*
         version: link:../orchestrator
+      '@zhixing/owner-kernel':
+        specifier: workspace:*
+        version: link:../owner-kernel
+      '@zhixing/owner-services':
+        specifier: workspace:*
+        version: link:../owner-services
       '@zhixing/providers':
         specifier: workspace:*
         version: link:../providers
+      '@zhixing/rpc':
+        specifier: workspace:*
+        version: link:../rpc
+      '@zhixing/runtime-host':
+        specifier: workspace:*
+        version: link:../runtime-host
       '@zhixing/server':
         specifier: workspace:*
         version: link:../server
@@ -208,6 +220,22 @@ importers:
         specifier: ^5.8.3
         version: 5.9.3
 
+  packages/owner-services:
+    dependencies:
+      '@zhixing/core':
+        specifier: workspace:*
+        version: link:../core
+    devDependencies:
+      '@types/node':
+        specifier: ^22.14.1
+        version: 22.19.17
+      tsup:
+        specifier: ^8.4.0
+        version: 8.5.1(postcss@8.5.8)(tsx@4.21.0)(typescript@5.9.3)
+      typescript:
+        specifier: ^5.8.3
+        version: 5.9.3
+
   packages/providers:
     dependencies:
       '@anthropic-ai/sdk':
@@ -258,6 +286,34 @@ importers:
         specifier: ^5.8.3
         version: 5.9.3
 
+  packages/runtime-host:
+    dependencies:
+      '@zhixing/core':
+        specifier: workspace:*
+        version: link:../core
+      '@zhixing/mcp':
+        specifier: workspace:*
+        version: link:../mcp
+      '@zhixing/orchestrator':
+        specifier: workspace:*
+        version: link:../orchestrator
+      '@zhixing/owner-kernel':
+        specifier: workspace:*
+        version: link:../owner-kernel
+      '@zhixing/tools-builtin':
+        specifier: workspace:*
+        version: link:../tools-builtin
+    devDependencies:
+      '@types/node':
+        specifier: ^22.15.2
+        version: 22.19.17
+      tsup:
+        specifier: ^8.4.0
+        version: 8.5.1(postcss@8.5.8)(tsx@4.21.0)(typescript@5.9.3)
+      typescript:
+        specifier: ^5.8.3
+        version: 5.9.3
+
   packages/server:
     dependencies:
       '@zhixing/core':
@@ -266,6 +322,9 @@ importers:
       '@zhixing/owner-kernel':
         specifier: workspace:*
         version: link:../owner-kernel
+      '@zhixing/owner-services':
+        specifier: workspace:*
+        version: link:../owner-services
       '@zhixing/rpc':
         specifier: workspace:*
         version: link:../rpc
