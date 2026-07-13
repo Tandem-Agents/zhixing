@@ -9,6 +9,7 @@ export default defineConfig({
     "src/run-turn.ts",
     "src/ephemeral-run-buffer.ts",
     "src/confirmation-hub.ts",
+    "src/control-admission.ts",
   ],
   format: ["esm"],
   dts: true,

@@ -53,6 +53,52 @@
       }
     }
   ],
+  "controlAdmission": {
+    "controlStates": [
+      "received",
+      "applied",
+      "received",
+      "applied"
+    ],
+    "input": {
+      "legacy": {
+        "body": {
+          "queuedPosition": 0,
+          "runId": "run:golden:input",
+          "t": "input"
+        },
+        "status": "ok",
+        "v": 1
+      },
+      "shadow": {
+        "body": {
+          "queuedPosition": 0,
+          "runId": "run:golden:input",
+          "t": "input"
+        },
+        "status": "ok",
+        "v": 1
+      }
+    },
+    "sessionCreate": {
+      "legacy": {
+        "body": {
+          "conversationId": "conversation-golden-0",
+          "t": "session-create"
+        },
+        "status": "ok",
+        "v": 1
+      },
+      "shadow": {
+        "body": {
+          "conversationId": "conversation-golden-0",
+          "t": "session-create"
+        },
+        "status": "ok",
+        "v": 1
+      }
+    }
+  },
   "events": [
     {
       "conversationId": "golden-conversation",

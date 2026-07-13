@@ -17,7 +17,9 @@
       "@zhixing/orchestrator": [
         "@zhixing/test-utils"
       ],
-      "@zhixing/owner-kernel": [],
+      "@zhixing/owner-kernel": [
+        "@zhixing/test-utils"
+      ],
       "@zhixing/owner-services": [],
       "@zhixing/providers": [
         "@zhixing/test-utils"
@@ -1336,13 +1338,13 @@
     },
     {
       "kind": "import",
-      "references": 2,
+      "references": 6,
       "sourceZone": "owner-kernel",
       "target": "package:@zhixing/core"
     },
     {
       "kind": "type-import",
-      "references": 3,
+      "references": 4,
       "sourceZone": "owner-kernel",
       "target": "package:@zhixing/core"
     },

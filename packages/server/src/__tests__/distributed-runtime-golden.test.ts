@@ -13,12 +13,26 @@ import {
   type RunRecordInput,
   type RunResult,
 } from "@zhixing/core";
+import {
+  FileArtifactStore,
+  FileAuthorityCommitLog,
+} from "@zhixing/core/authority";
+import type { ControlResult } from "@zhixing/core/contracts";
 import { assertGolden, createTempDir } from "@zhixing/test-utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ConfirmationHub, ConversationManager } from "@zhixing/owner-kernel";
+import {
+  ConfirmationHub,
+  ControlAdmissionJournal,
+  ConversationManager,
+  createInitialControlEnvelope,
+} from "@zhixing/owner-kernel";
 import { createServerContext } from "../context.js";
 import { buildBuiltinRegistry } from "../rpc/methods/index.js";
 import { buildServerShutdownMethod } from "../rpc/methods/server.js";
+import {
+  buildSessionNewMethod,
+  buildSessionSendMethod,
+} from "../rpc/methods/session.js";
 import {
   createConfirmationBridge,
   createRunEventForwarder,
@@ -27,6 +41,7 @@ import {
 import { toJsonRpcError, type HandlerContext } from "../rpc/handlers.js";
 import type { RuntimeFactory, SessionRuntime } from "@zhixing/owner-kernel";
 import { DEFAULT_SERVER_CONFIG } from "../types.js";
+import type { ConversationDirectory } from "../runtime/conversation-directory.js";
 
 const FIXED_NOW = new Date("2026-07-11T12:00:00.000Z");
 
@@ -44,6 +59,7 @@ describe("distributed runtime migration behavior golden", () => {
       session: await captureSessionProjection(),
       events: captureSessionEvents(),
       confirmation: await captureConfirmationRoundTrip(),
+      controlAdmission: await captureControlAdmissionShadow(),
       persistence: await capturePersistence(),
       shutdown: await captureShutdownStrategies(),
     };
@@ -121,6 +137,175 @@ async function captureRpcCatalog() {
     }
   }
   return catalog;
+}
+
+async function captureControlAdmissionShadow() {
+  const root = await createTempDir("control-admission-golden");
+  const artifacts = new FileArtifactStore(join(root, "artifacts"));
+  const log = new FileAuthorityCommitLog(join(root, "authority"), artifacts, {
+    clock: () => FIXED_NOW.toISOString(),
+  });
+  const journal = new ControlAdmissionJournal(log, artifacts);
+  const conversations = new ConversationManager(createCompletedFactory(), managerOptions());
+  const directory = createGoldenConversationDirectory();
+  const server = createServerContext({
+    config: { ...DEFAULT_SERVER_CONFIG, port: 18900 },
+    version: "golden",
+    token: "golden-token",
+    conversations,
+    conversationDirectory: directory,
+  });
+  const context = {
+    connection: {
+      id: 1,
+      authenticated: true,
+      loopback: true,
+      closed: false,
+      clientInfo: undefined,
+      sendSuccess() {},
+      sendError() {},
+      notify() {},
+      close() {},
+      onClose: () => () => {},
+    },
+    server,
+  } as HandlerContext;
+  const source = {
+    principal: {
+      surfacePrincipal: "surface:golden",
+      deviceId: "device:golden",
+      connectionId: "1",
+    },
+  } as const;
+
+  try {
+    const legacyCreated = (await buildSessionNewMethod().handler(
+      undefined,
+      context,
+    )) as { conversationId: string; name: string };
+    const createResult: ControlResult = {
+      v: 1,
+      status: "ok",
+      body: { t: "session-create", conversationId: legacyCreated.conversationId },
+    };
+    const createEnvelope = createInitialControlEnvelope({
+      requestId: "request:golden:create",
+      source,
+      at: FIXED_NOW.toISOString(),
+      body: { t: "session-create" },
+    });
+    const shadowCreated = await journal.apply({
+      envelope: createEnvelope,
+      source,
+      prepare: () => ({ result: createResult, authorityRevision: 0 }),
+    });
+
+    const ingress = {
+      kind: "first-party" as const,
+      surfacePrincipal: source.principal.surfacePrincipal,
+      deviceId: source.principal.deviceId,
+      ingressId: "ingress:golden:input",
+      receivedAt: FIXED_NOW.toISOString(),
+      turnOrigin: { channel: "rpc", triggeredBy: source.principal.connectionId },
+    };
+    const inputSource = { principal: source.principal, ingress };
+    const legacySent = (await buildSessionSendMethod().handler(
+      {
+        conversationId: legacyCreated.conversationId,
+        text: "golden shadow input",
+        turnId: "run:golden:input",
+      },
+      context,
+    )) as { conversationId: string; turnId: string };
+    const inputResult: ControlResult = {
+      v: 1,
+      status: "ok",
+      body: { t: "input", runId: legacySent.turnId, queuedPosition: 0 },
+    };
+    const inputEnvelope = createInitialControlEnvelope({
+      requestId: "request:golden:input",
+      source: inputSource,
+      at: FIXED_NOW.toISOString(),
+      body: {
+        t: "input",
+        conversationId: legacySent.conversationId,
+        ingress: { ingressId: ingress.ingressId, source: ingress.kind },
+        input: { parts: [{ type: "text", text: "golden shadow input" }] },
+        ownerEpoch: 0,
+      },
+    });
+    const shadowInput = await journal.apply({
+      envelope: inputEnvelope,
+      source: inputSource,
+      prepare: () => ({ result: inputResult, authorityRevision: 0 }),
+    });
+
+    expect(shadowCreated).toMatchObject({ result: createResult });
+    expect(shadowInput).toMatchObject({ result: inputResult });
+    const commits = await log.readAll();
+    expect(new Set(commits.flatMap((commit) => commit.entries.map((entry) => entry.stream)))).toEqual(
+      new Set(["control"]),
+    );
+    return {
+      sessionCreate: { legacy: createResult, shadow: shadowCreated.result },
+      input: { legacy: inputResult, shadow: shadowInput.result },
+      controlStates: commits.flatMap((commit) =>
+        commit.entries.map((entry) => (entry.body as { t: string }).t),
+      ),
+    };
+  } finally {
+    await conversations.disposeAll();
+  }
+}
+
+function createGoldenConversationDirectory(): ConversationDirectory {
+  const conversations = new Map<string, { id: string; name: string }>();
+  let sequence = 0;
+  const record = (id: string) => {
+    const item = conversations.get(id);
+    if (!item) throw new Error(`Unknown golden conversation: ${id}`);
+    return {
+      ...item,
+      createdAt: FIXED_NOW.toISOString(),
+      lastActiveAt: FIXED_NOW.toISOString(),
+      isDefault: false,
+      archived: false,
+    };
+  };
+  return {
+    async list() {
+      return [...conversations].map(([id]) => record(id));
+    },
+    async exists(id) {
+      return conversations.has(id);
+    },
+    async create() {
+      const id = `conversation-golden-${sequence++}`;
+      conversations.set(id, { id, name: id });
+      return record(id);
+    },
+    async ensure(id) {
+      if (!conversations.has(id)) conversations.set(id, { id, name: id });
+      return record(id);
+    },
+    async rename(id, name) {
+      if (!conversations.has(id)) return null;
+      conversations.set(id, { id, name });
+      return record(id);
+    },
+    async touch(id) {
+      return conversations.has(id) ? record(id) : null;
+    },
+    async clear(id) {
+      return conversations.has(id);
+    },
+    async remove(id) {
+      return conversations.delete(id);
+    },
+    async readRunsReverse() {
+      return { runs: [], hasMore: false };
+    },
+  };
 }
 
 function describeShape(value: unknown, key?: string): unknown {

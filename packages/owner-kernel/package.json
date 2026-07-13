@@ -32,11 +32,16 @@
     "./confirmation-hub": {
       "types": "./dist/confirmation-hub.d.ts",
       "import": "./dist/confirmation-hub.js"
+    },
+    "./control-admission": {
+      "types": "./dist/control-admission.d.ts",
+      "import": "./dist/control-admission.js"
     }
   },
   "files": ["dist"],
   "scripts": {
     "build": "tsup",
+    "test": "vitest run",
     "clean": "rm -rf dist"
   },
   "dependencies": {
@@ -44,7 +49,9 @@
   },
   "devDependencies": {
     "@types/node": "^22.14.1",
+    "@zhixing/test-utils": "workspace:*",
     "tsup": "^8.4.0",
-    "typescript": "^5.8.3"
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.1"
   }
 }

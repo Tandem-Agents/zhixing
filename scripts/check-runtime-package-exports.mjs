@@ -4,6 +4,8 @@ const [
   coreAuthority,
   corePersistence,
   coreProtocol,
+  ownerKernel,
+  ownerKernelControlAdmission,
   server,
   ownerServices,
   ownerServicesAdvancement,
@@ -24,6 +26,8 @@ const [
   import("../packages/core/dist/authority/index.js"),
   import("../packages/core/dist/persistence/index.js"),
   import("../packages/core/dist/protocol/index.js"),
+  import("../packages/owner-kernel/dist/index.js"),
+  import("../packages/owner-kernel/dist/control-admission.js"),
   import("../packages/server/dist/index.js"),
   import("../packages/owner-services/dist/index.js"),
   import("../packages/owner-services/dist/advancement/index.js"),
@@ -67,6 +71,12 @@ const ownerServiceCanonicalValues = [
   "createAdvancementRecoveryMaintenance",
   "dispatchAdvancementReviewResult",
   "renderRecentContextFromMessages",
+];
+
+const ownerKernelControlAdmissionValues = [
+  "ControlAdmissionJournal",
+  "channelSurfacePrincipal",
+  "createInitialControlEnvelope",
 ];
 
 retiredServerCompatibilityValues.push(
@@ -135,6 +145,11 @@ for (const name of [
 for (const name of ownerServiceCanonicalValues) {
   if (ownerServices[name] !== ownerServicesAdvancement[name]) {
     failures.push(`owner-services:${name}`);
+  }
+}
+for (const name of ownerKernelControlAdmissionValues) {
+  if (ownerKernel[name] !== ownerKernelControlAdmission[name]) {
+    failures.push(`owner-kernel-control-admission:${name}`);
   }
 }
 for (const name of retiredServerCompatibilityValues) {

@@ -31,6 +31,11 @@ import type {
   AuthorityGarbageCollectionOptions,
   ProjectionReplayOptions,
   ProjectionReducer,
+  ProjectionCursor,
+  ProjectionTransactionDecision,
+  ProjectionTransactionOptions,
+  ProjectionTransactionResult,
+  ProjectionTransactionReducer,
 } from "./interfaces.js";
 import {
   type AuthorityWalReader,
@@ -38,9 +43,10 @@ import {
   scanAuthorityWalFrames,
 } from "./wal-frame.js";
 
-const MAX_INLINE_LOGICAL_RECORD_BYTES = 32 * 1024;
+export const MAX_INLINE_LOGICAL_RECORD_BYTES = 32 * 1024;
 const DIGEST_PATTERN = /^sha256:[a-f0-9]{64}$/u;
 const STREAM_PATTERN = /^(?:control|publish|governor|final-outbox|trust|exposure|delivery|pairing|checkpoint|(?:run|job|transfer|intent|assignment):[^\u0000-\u001f\u007f]{1,480})$/u;
+const EMPTY_PROJECTION_PREFIX_DIGEST = protocolDigest("AuthorityProjectionPrefix", 1, {});
 
 export interface FileAuthorityCommitLogOptions {
   readonly clock?: () => IsoTime;
@@ -55,12 +61,27 @@ interface VerifiedLogTail {
   readonly modifiedAt: number;
   readonly changedAt: number;
   readonly lastLsn: number;
+  readonly prefixDigest: string;
 }
 
 interface ScannedLog {
   readonly lastLsn: number;
   readonly validBytes: number;
+  readonly prefixDigest: string;
   readonly incompleteTail?: Buffer;
+}
+
+class FileProjectionCursor implements ProjectionCursor {
+  constructor(
+    readonly lsn: number,
+    readonly logPath: string,
+    readonly device: number | undefined,
+    readonly inode: number | undefined,
+    readonly byteOffset: number,
+    readonly modifiedAt: number | undefined,
+    readonly changedAt: number | undefined,
+    readonly prefixDigest: string,
+  ) {}
 }
 
 export class FileAuthorityCommitLog implements AuthorityCommitLog {
@@ -169,6 +190,101 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     });
   }
 
+  async transactProjection<State, Body = JsonValue, Value = void>(
+    initial: State,
+    reducer: ProjectionTransactionReducer<State, Body>,
+    decide: (
+      state: State,
+      context: { readonly lastLsn: number; readonly nextLsn: number },
+    ) => ProjectionTransactionDecision<Body, Value>,
+    options: ProjectionTransactionOptions = {},
+  ): Promise<ProjectionTransactionResult<State, Body, Value>> {
+    const { stream } = options;
+    if (
+      options.cursor !== undefined &&
+      options.afterLsn !== undefined &&
+      options.cursor.lsn !== options.afterLsn
+    ) {
+      throw new TypeError("Projection cursor and afterLsn must identify the same prefix");
+    }
+    const afterLsn = options.cursor?.lsn ?? options.afterLsn ?? 0;
+    if (stream !== undefined) assertStream(stream);
+    assertReplayLsn(afterLsn);
+
+    const candidateReferences = collectArtifactRefs(
+      options.candidateReferences ?? [],
+    );
+    const candidateDigests = new Map(
+      candidateReferences.map((reference) => [reference.digest, reference.bytes]),
+    );
+    const operation = () =>
+      this.#withLogLock(async () => {
+        const replay: Array<{
+          record: LogicalRecord<Body>;
+          envelope: CommitEnvelope<Body>;
+        }> = [];
+        const replayTail = await this.#readProjectionTail(
+          options.cursor,
+          afterLsn,
+          (rawEnvelope) => {
+          const envelope = rawEnvelope as unknown as CommitEnvelope<Body>;
+          for (const record of envelope.entries) {
+            if (stream === undefined || record.stream === stream) {
+              replay.push({ record, envelope });
+            }
+          }
+          },
+        );
+        const { lastLsn } = replayTail;
+        if (afterLsn > lastLsn) {
+          throw new AuthorityStorageError(
+            "commit-log-corrupt",
+            `Projection cursor ${afterLsn} is ahead of commit log LSN ${lastLsn}`,
+          );
+        }
+
+        let state = initial;
+        for (const item of replay) {
+          state = await reducer(state, item.record, item.envelope);
+        }
+        const decision = decide(state, {
+          lastLsn,
+          nextLsn: lastLsn + 1,
+        });
+        if (decision.kind === "return") {
+          return {
+            value: decision.value,
+            state,
+            lastLsn,
+            cursor: replayTail.cursor,
+          };
+        }
+
+        const entries = normalizeEntries(decision.entries);
+        assertTransactionReferencesProtected(
+          collectArtifactRefs(entries),
+          candidateDigests,
+        );
+        const commit = await this.#append(entries);
+        for (const record of commit.entries) {
+          if (stream === undefined || record.stream === stream) {
+            state = await reducer(state, record, commit);
+          }
+        }
+        return {
+          value: decision.value,
+          state,
+          lastLsn: commit.lsn,
+          cursor: this.#projectionCursor(commit.lsn),
+          commit,
+        };
+      });
+
+    return candidateReferences.length === 0
+      ? operation()
+      : this.artifactStore.withPresentReferences(candidateReferences, operation);
+  }
+
   async collectGarbage(
     options: AuthorityGarbageCollectionOptions,
   ): Promise<ArtifactGarbageCollectionResult> {
@@ -191,7 +307,8 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
   async #append<Body>(
     entries: Array<LogicalRecord<Body>>,
   ): Promise<CommitEnvelope<Body>> {
-    const lsn = (await this.#loadLastLsn()) + 1;
+    const previousLsn = await this.#loadLastLsn();
+    const lsn = previousLsn + 1;
     if (!Number.isSafeInteger(lsn)) {
       throw new AuthorityStorageError(
         "commit-log-corrupt",
@@ -205,6 +322,11 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       ...payload,
       envelopeDigest: protocolDigest("CommitEnvelope", 1, payload),
     };
+    const previousPrefixDigest =
+      previousLsn === 0
+        ? EMPTY_PROJECTION_PREFIX_DIGEST
+        : this.#requireVerifiedPrefix(previousLsn);
+    const prefixDigest = advanceProjectionPrefix(previousPrefixDigest, envelope);
     const bytes = Buffer.from(canonicalize(envelope), "utf8");
     const frame = encodeAuthorityWalFrame(bytes);
 
@@ -218,7 +340,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       await handle.close();
     }
     if (!existed) await syncDirectory(this.rootDir);
-    await this.#recordVerifiedTail(lsn);
+    await this.#recordVerifiedTail(lsn, prefixDigest);
     return envelope;
   }
 
@@ -244,26 +366,101 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     if (scanned.incompleteTail) {
       await this.#quarantineTail(scanned.incompleteTail, scanned.validBytes);
     }
-    await this.#recordVerifiedTail(scanned.lastLsn);
+    await this.#recordVerifiedTail(scanned.lastLsn, scanned.prefixDigest);
     return scanned.lastLsn;
   }
 
+  async #readProjectionTail(
+    cursor: ProjectionCursor | undefined,
+    afterLsn: number,
+    visit: (envelope: CommitEnvelope<JsonValue>) => void,
+  ): Promise<{ readonly lastLsn: number; readonly cursor: ProjectionCursor }> {
+    if (cursor !== undefined && !(cursor instanceof FileProjectionCursor)) {
+      throw new TypeError("Projection cursor was not issued by this commit log");
+    }
+    const metadata = await stat(this.logPath).catch((error: unknown) => {
+      if (isNodeError(error, "ENOENT")) return null;
+      throw error;
+    });
+    if (!metadata) {
+      this.#verifiedTail = undefined;
+      return { lastLsn: 0, cursor: this.#projectionCursor(0) };
+    }
+
+    if (cursor && canResumeProjectionCursor(cursor, this.logPath, metadata)) {
+      const scanned = await this.#scanLogFrom(
+        cursor.byteOffset,
+        cursor.lsn,
+        cursor.prefixDigest,
+        visit,
+      );
+      if (scanned.incompleteTail) {
+        await this.#quarantineTail(scanned.incompleteTail, scanned.validBytes);
+      }
+      await this.#recordVerifiedTail(scanned.lastLsn, scanned.prefixDigest);
+      return {
+        lastLsn: scanned.lastLsn,
+        cursor: this.#projectionCursor(scanned.lastLsn),
+      };
+    }
+
+    let observedPrefixDigest = EMPTY_PROJECTION_PREFIX_DIGEST;
+    let prefixMatches =
+      cursor?.lsn === 0 && cursor.prefixDigest === EMPTY_PROJECTION_PREFIX_DIGEST;
+    const lastLsn = await this.#readAndRecover((envelope) => {
+      observedPrefixDigest = advanceProjectionPrefix(observedPrefixDigest, envelope);
+      if (cursor && envelope.lsn === cursor.lsn) {
+        prefixMatches = observedPrefixDigest === cursor.prefixDigest;
+      }
+      if (envelope.lsn > afterLsn) visit(envelope);
+    });
+    if (cursor && cursor.lsn <= lastLsn && !prefixMatches) {
+      throw new AuthorityStorageError(
+        "commit-log-corrupt",
+        "Projection cursor prefix does not match the current commit log",
+      );
+    }
+    return { lastLsn, cursor: this.#projectionCursor(lastLsn) };
+  }
+
   async #scanLog(
+    visit: (envelope: CommitEnvelope<JsonValue>) => void = () => undefined,
+  ): Promise<ScannedLog> {
+    return this.#scanLogFrom(0, 0, EMPTY_PROJECTION_PREFIX_DIGEST, visit);
+  }
+
+  async #scanLogFrom(
+    startOffset: number,
+    previousLsn: number,
+    previousPrefixDigest: string,
     visit: (envelope: CommitEnvelope<JsonValue>) => void = () => undefined,
   ): Promise<ScannedLog> {
     let handle: FileHandle;
     try {
       handle = await open(this.logPath, "r");
     } catch (error) {
-      if (isNodeError(error, "ENOENT")) return { lastLsn: 0, validBytes: 0 };
+      if (isNodeError(error, "ENOENT")) {
+        return {
+          lastLsn: previousLsn,
+          validBytes: startOffset,
+          prefixDigest: previousPrefixDigest,
+        };
+      }
       throw error;
     }
 
-    let expectedLsn = 1;
+    let expectedLsn = previousLsn + 1;
+    let prefixDigest = previousPrefixDigest;
     try {
       const metadata = await handle.stat();
+      if (startOffset > metadata.size) {
+        throw new AuthorityStorageError(
+          "commit-log-corrupt",
+          "Projection cursor is beyond the end of the commit log",
+        );
+      }
       const scanned = await scanAuthorityWalFrames(
-        fileReader(handle, metadata.size),
+        fileReader(handle, metadata.size - startOffset, startOffset),
         (payload) => {
           const envelope = parseEnvelope(payload);
           if (envelope.lsn !== expectedLsn) {
@@ -273,12 +470,14 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
             );
           }
           expectedLsn += 1;
+          prefixDigest = advanceProjectionPrefix(prefixDigest, envelope);
           visit(envelope);
         },
       );
       return {
         lastLsn: expectedLsn - 1,
-        validBytes: scanned.validBytes,
+        validBytes: startOffset + scanned.validBytes,
+        prefixDigest,
         ...(scanned.incompleteTail
           ? { incompleteTail: scanned.incompleteTail }
           : {}),
@@ -314,7 +513,7 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
     }
   }
 
-  async #recordVerifiedTail(lastLsn: number): Promise<void> {
+  async #recordVerifiedTail(lastLsn: number, prefixDigest: string): Promise<void> {
     const metadata = await stat(this.logPath).catch((error: unknown) => {
       if (isNodeError(error, "ENOENT")) return null;
       throw error;
@@ -327,8 +526,51 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
           modifiedAt: metadata.mtimeMs,
           changedAt: metadata.ctimeMs,
           lastLsn,
+          prefixDigest,
         }
       : undefined;
+  }
+
+  #projectionCursor(lastLsn: number): ProjectionCursor {
+    const tail = this.#verifiedTail;
+    if (tail?.lastLsn === lastLsn) {
+      return new FileProjectionCursor(
+        lastLsn,
+        this.logPath,
+        tail.device,
+        tail.inode,
+        tail.bytes,
+        tail.modifiedAt,
+        tail.changedAt,
+        tail.prefixDigest,
+      );
+    }
+    if (lastLsn === 0) {
+      return new FileProjectionCursor(
+        0,
+        this.logPath,
+        undefined,
+        undefined,
+        0,
+        undefined,
+        undefined,
+        EMPTY_PROJECTION_PREFIX_DIGEST,
+      );
+    }
+    throw new AuthorityStorageError(
+      "commit-log-corrupt",
+      "Cannot issue a projection cursor without a verified log prefix",
+    );
+  }
+
+  #requireVerifiedPrefix(lastLsn: number): string {
+    if (this.#verifiedTail?.lastLsn !== lastLsn) {
+      throw new AuthorityStorageError(
+        "commit-log-corrupt",
+        "Commit log tail is missing its verified prefix digest",
+      );
+    }
+    return this.#verifiedTail.prefixDigest;
   }
 
   async #withLogLock<T>(operation: () => Promise<T>): Promise<T> {
@@ -469,7 +711,41 @@ function assertReplayLsn(value: number): void {
   }
 }
 
-function fileReader(handle: FileHandle, size: number): AuthorityWalReader {
+function assertTransactionReferencesProtected(
+  references: readonly ArtifactRef[],
+  candidateDigests: ReadonlyMap<string, number>,
+): void {
+  for (const reference of references) {
+    const protectedBytes = candidateDigests.get(reference.digest);
+    if (protectedBytes === undefined) {
+      throw new TypeError(
+        `Transaction introduced an undeclared artifact reference: ${reference.digest}`,
+      );
+    }
+    if (protectedBytes !== reference.bytes) {
+      throw new TypeError(
+        `Transaction changed the byte count for artifact reference: ${reference.digest}`,
+      );
+    }
+  }
+}
+
+function advanceProjectionPrefix(
+  previousDigest: string,
+  envelope: CommitEnvelope<unknown>,
+): string {
+  return protocolDigest("AuthorityProjectionPrefix", 1, {
+    previousDigest,
+    lsn: envelope.lsn,
+    envelopeDigest: envelope.envelopeDigest,
+  });
+}
+
+function fileReader(
+  handle: FileHandle,
+  size: number,
+  baseOffset = 0,
+): AuthorityWalReader {
   return {
     size,
     async read(offset, length) {
@@ -480,7 +756,7 @@ function fileReader(handle: FileHandle, size: number): AuthorityWalReader {
           buffer,
           total,
           length - total,
-          offset + total,
+          baseOffset + offset + total,
         );
         if (bytesRead === 0) break;
         total += bytesRead;
@@ -488,6 +764,22 @@ function fileReader(handle: FileHandle, size: number): AuthorityWalReader {
       return buffer.subarray(0, total);
     },
   };
+}
+
+function canResumeProjectionCursor(
+  cursor: FileProjectionCursor,
+  logPath: string,
+  metadata: Awaited<ReturnType<typeof stat>>,
+): boolean {
+  return (
+    cursor.logPath === logPath &&
+    cursor.device === metadata.dev &&
+    cursor.inode === metadata.ino &&
+    cursor.byteOffset >= 0 &&
+    cursor.byteOffset === metadata.size &&
+    cursor.modifiedAt === metadata.mtimeMs &&
+    cursor.changedAt === metadata.ctimeMs
+  );
 }
 
 async function fileExists(file: string): Promise<boolean> {

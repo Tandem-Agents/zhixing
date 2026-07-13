@@ -5,6 +5,7 @@ export {
 } from "./artifact-store.js";
 export {
   FileAuthorityCommitLog,
+  MAX_INLINE_LOGICAL_RECORD_BYTES,
   type FileAuthorityCommitLogOptions,
 } from "./commit-log.js";
 export {
@@ -18,4 +19,10 @@ export type {
   AuthorityGarbageCollectionOptions,
   ProjectionReplayOptions,
   ProjectionReducer,
+  ProjectionCursor,
+  ProjectionTransactionContext,
+  ProjectionTransactionDecision,
+  ProjectionTransactionOptions,
+  ProjectionTransactionResult,
+  ProjectionTransactionReducer,
 } from "./interfaces.js";
