@@ -11,11 +11,7 @@ import type { Server as TlsServer, TLSSocket } from "node:tls";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bridgeBlindRelay } from "../blind-relay.js";
 import { DeviceKey, enrollDeviceIdentity } from "../device-identity.js";
-import {
-  connectAuthenticatedMesh,
-  createAuthenticatedMeshServer,
-  type TrustedMeshPeer,
-} from "../handshake.js";
+import type { TrustedMeshPeer } from "../handshake.js";
 import { OutboundMeshTunnel } from "../outbound-tunnel.js";
 import { HandshakeReplayWindow } from "../replay-window.js";
 import { MAX_RUNTIME_TIMER_DELAY_MS } from "../runtime-time.js";
@@ -26,8 +22,10 @@ import {
 import { SecureMeshConnection } from "../session.js";
 import { SocketFrameTransport } from "../socket-transport.js";
 import * as meshPublicApi from "../index.js";
+import { createLiveTlsTestHarness } from "./live-tls-test-harness.js";
 
-const NOW = Date.parse("2026-07-12T00:00:00.000Z");
+const LIVE_TLS_TIME = createLiveTlsTestHarness();
+const NOW = LIVE_TLS_TIME.timestamp;
 const openServers: Array<NetServer | TlsServer> = [];
 
 afterEach(async () => {
@@ -194,7 +192,7 @@ describe("mesh transport foundation", () => {
     const responder = await createDevice("responder");
 
     await expect(
-      createAuthenticatedMeshServer(
+      LIVE_TLS_TIME.createUnboundAuthenticatedServer(
         {
           identity: {
             deviceId: initiator.key.deviceId,
@@ -204,7 +202,7 @@ describe("mesh transport foundation", () => {
           protocolRange: { min: "1", max: "1" },
           authorizePeer: () => true,
           replayWindow: new HandshakeReplayWindow(),
-          now: () => NOW,
+          now: LIVE_TLS_TIME.now,
         },
         () => {},
       ),
@@ -222,7 +220,7 @@ describe("mesh transport foundation", () => {
         rootCertificatePem: initiator.peer.rootCertificatePem,
       };
       const trustedRoot = trustedPeer.rootCertificatePem;
-      const server = await createAuthenticatedMeshServer(
+      const server = await LIVE_TLS_TIME.createUnboundAuthenticatedServer(
         {
           identity: responder.key,
           trustedPeers: [trustedPeer],
@@ -234,13 +232,12 @@ describe("mesh transport foundation", () => {
         },
         () => {},
       );
-      const setSecureContext = vi.spyOn(server, "setSecureContext");
       trustedPeer.rootCertificatePem = "mutated after server construction";
 
       await vi.advanceTimersByTimeAsync(4 * 60_000);
 
-      expect(setSecureContext).toHaveBeenCalledTimes(1);
-      expect(setSecureContext).toHaveBeenCalledWith(
+      expect(server.secureContextUpdates).toHaveLength(1);
+      expect(server.secureContextUpdates[0]).toEqual(
         expect.objectContaining({
           ca: [trustedRoot],
           minVersion: "TLSv1.3",
@@ -250,7 +247,7 @@ describe("mesh transport foundation", () => {
           sessionIdContext: expect.stringMatching(/^[a-f0-9]{32}$/),
         }),
       );
-      server.emit("close");
+      server.close();
     } finally {
       vi.useRealTimers();
     }
@@ -288,7 +285,7 @@ describe("mesh transport foundation", () => {
     const initiator = await createDevice("initiator");
     const responder = await createDevice("responder");
     await expect(
-      createAuthenticatedMeshServer(
+      LIVE_TLS_TIME.createUnboundAuthenticatedServer(
         {
           identity: responder.key,
           trustedPeers: [initiator.peer],
@@ -309,7 +306,7 @@ describe("mesh transport foundation", () => {
     try {
       const initiator = await createDevice("initiator");
       const responder = await createDevice("responder");
-      const server = await createAuthenticatedMeshServer(
+      const server = await LIVE_TLS_TIME.createUnboundAuthenticatedServer(
         {
           identity: responder.key,
           trustedPeers: [initiator.peer],
@@ -321,14 +318,12 @@ describe("mesh transport foundation", () => {
         },
         () => {},
       );
-      const setSecureContext = vi.spyOn(server, "setSecureContext");
-
       await vi.advanceTimersByTimeAsync(1);
-      expect(setSecureContext).not.toHaveBeenCalled();
+      expect(server.secureContextUpdates).toHaveLength(0);
 
       await vi.advanceTimersByTimeAsync(validityMs - validityMs / 5 - 1);
-      expect(setSecureContext).toHaveBeenCalledTimes(1);
-      server.emit("close");
+      expect(server.secureContextUpdates).toHaveLength(1);
+      server.close();
     } finally {
       vi.useRealTimers();
     }
@@ -352,7 +347,7 @@ describe("mesh transport foundation", () => {
       const issueCredential = vi.fn(
         responder.key.issueTlsCredential.bind(responder.key),
       );
-      const server = await createAuthenticatedMeshServer(
+      const server = await LIVE_TLS_TIME.createUnboundAuthenticatedServer(
         {
           identity: {
             deviceId: responder.key.deviceId,
@@ -372,22 +367,20 @@ describe("mesh transport foundation", () => {
       issueCredential
         .mockRejectedValueOnce(new Error("first renewal failure"))
         .mockRejectedValueOnce(new Error("second renewal failure"));
-      const setSecureContext = vi.spyOn(server, "setSecureContext");
-
       await vi.advanceTimersByTimeAsync(validityMs - 60_000);
       expect(issueCredential).toHaveBeenCalledTimes(1);
-      expect(setSecureContext).not.toHaveBeenCalled();
+      expect(server.secureContextUpdates).toHaveLength(0);
       expect(onHandshakeError).toHaveBeenCalledTimes(1);
 
       await vi.advanceTimersByTimeAsync(validityMs / 20);
       expect(issueCredential).toHaveBeenCalledTimes(2);
-      expect(setSecureContext).not.toHaveBeenCalled();
+      expect(server.secureContextUpdates).toHaveLength(0);
       expect(onHandshakeError).toHaveBeenCalledTimes(2);
 
       await vi.advanceTimersByTimeAsync(validityMs / 20);
       expect(issueCredential).toHaveBeenCalledTimes(3);
-      expect(setSecureContext).toHaveBeenCalledTimes(1);
-      server.emit("close");
+      expect(server.secureContextUpdates).toHaveLength(1);
+      server.close();
     } finally {
       vi.useRealTimers();
     }
@@ -404,7 +397,7 @@ describe("mesh transport foundation", () => {
       const issueCredential = vi.fn(
         responder.key.issueTlsCredential.bind(responder.key),
       );
-      const server = await createAuthenticatedMeshServer(
+      const server = await LIVE_TLS_TIME.createUnboundAuthenticatedServer(
         {
           identity: {
             deviceId: responder.key.deviceId,
@@ -425,16 +418,14 @@ describe("mesh transport foundation", () => {
       >();
       issueCredential.mockClear();
       issueCredential.mockImplementationOnce(() => pendingCredential.promise);
-      const setSecureContext = vi.spyOn(server, "setSecureContext");
-
       await vi.advanceTimersByTimeAsync(validityMs - 60_000);
       expect(issueCredential).toHaveBeenCalledTimes(1);
-      server.emit("close");
+      server.close();
       pendingCredential.reject(new Error("issuance finished after shutdown"));
 
       await vi.advanceTimersByTimeAsync(validityMs / 20);
       expect(issueCredential).toHaveBeenCalledTimes(1);
-      expect(setSecureContext).not.toHaveBeenCalled();
+      expect(server.secureContextUpdates).toHaveLength(0);
       expect(onHandshakeError).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
@@ -604,7 +595,7 @@ interface TestDevice {
 }
 
 async function createDevice(name: string): Promise<TestDevice> {
-  const key = await DeviceKey.generate({ now: () => NOW });
+  const key = await DeviceKey.generate({ now: LIVE_TLS_TIME.now });
   return {
     key,
     peer: {
@@ -623,14 +614,13 @@ async function meshServer(
   peers: readonly TrustedMeshPeer[],
   onConnection: (connection: SecureMeshConnection) => void,
 ): Promise<TlsServer> {
-  return await createAuthenticatedMeshServer(
+  return await LIVE_TLS_TIME.createAuthenticatedServer(
     {
       identity: local.key,
       trustedPeers: peers,
       protocolRange: { min: "1", max: "1" },
       authorizePeer: () => true,
       replayWindow: new HandshakeReplayWindow(),
-      now: () => NOW,
     },
     onConnection,
   );
@@ -642,14 +632,13 @@ async function connectClient(
   port: number,
   signal?: AbortSignal,
 ): Promise<SecureMeshConnection> {
-  return await connectAuthenticatedMesh({
+  return await LIVE_TLS_TIME.openAuthenticatedConnection({
     host: "127.0.0.1",
     port,
     identity: local.key,
     trustedPeer: peer,
     protocolRange: { min: "1", max: "1" },
     authorizePeer: () => true,
-    now: () => NOW,
     signal,
   });
 }

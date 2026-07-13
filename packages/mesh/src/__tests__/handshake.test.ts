@@ -1,12 +1,7 @@
 import { constants } from "node:crypto";
 import { once } from "node:events";
 import { connect as connectNet } from "node:net";
-import {
-  connect as connectTls,
-  createServer as createTlsServer,
-  type Server as TlsServer,
-  type TLSSocket,
-} from "node:tls";
+import type { Server as TlsServer, TLSSocket } from "node:tls";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { canonicalize } from "../canonical.js";
 import {
@@ -14,18 +9,19 @@ import {
   enrollDeviceIdentity,
 } from "../device-identity.js";
 import { MeshProtocolError } from "../errors.js";
-import {
-  connectAuthenticatedMesh,
-  createAuthenticatedMeshServer,
-  type MeshProtocolRange,
-  type TrustedMeshPeer,
-} from "../handshake.js";
+import type { MeshProtocolRange, TrustedMeshPeer } from "../handshake.js";
 import { HandshakeReplayWindow } from "../replay-window.js";
 import { MeshServiceRegistry } from "../service-registry.js";
 import { SocketFrameTransport } from "../socket-transport.js";
 import type { SecureMeshConnection } from "../transport.js";
+import {
+  createLiveTlsTestHarness,
+  type CurrentLiveTlsCredential,
+  type ExpiredLiveTlsCredential,
+} from "./live-tls-test-harness.js";
 
-const NOW = Date.parse("2026-07-12T00:00:00.000Z");
+const LIVE_TLS_TIME = createLiveTlsTestHarness();
+const NOW = LIVE_TLS_TIME.timestamp;
 const RANGE = { min: "1", max: "1" } as const;
 const openServers: TlsServer[] = [];
 
@@ -157,14 +153,13 @@ describe("mutually authenticated mesh transport", () => {
     });
     const protocolRange = { min: "1", max: "1" };
 
-    const connecting = connectAuthenticatedMesh({
+    const connecting = LIVE_TLS_TIME.openAuthenticatedConnection({
       identity: devices.initiator.key,
       trustedPeer: devices.responder.peer,
       host: "127.0.0.1",
       port: server.port,
       protocolRange,
       authorizePeer: () => true,
-      now: () => NOW,
     });
     protocolRange.min = "2";
     protocolRange.max = "2";
@@ -200,11 +195,9 @@ describe("mutually authenticated mesh transport", () => {
   it("does not disclose the client certificate to an active server with an untrusted root", async () => {
     const devices = await createDevices();
     const rogue = await createDevice("rogue");
-    const credential = await rogue.key.issueTlsCredential({ now: () => NOW });
+    const credential = await LIVE_TLS_TIME.issueCredential(rogue.key);
     const observedPeer = deferred<ReturnType<TLSSocket["getPeerCertificate"]>>();
-    const rogueServer = createTlsServer({
-      key: credential.privateKeyPem,
-      cert: credential.certificateChainPem,
+    const rogueServer = LIVE_TLS_TIME.createRawServer(credential, {
       ca: devices.initiator.peer.rootCertificatePem,
       minVersion: "TLSv1.3",
       maxVersion: "TLSv1.3",
@@ -302,7 +295,7 @@ describe("mutually authenticated mesh transport", () => {
           "non-canonical-time",
           RANGE,
           NOW,
-          "2026-07-12T00:00:00Z",
+          new Date(NOW).toISOString().replace(/\.\d{3}Z$/u, "Z"),
         ),
       ),
     ).rejects.toBeInstanceOf(Error);
@@ -330,10 +323,12 @@ describe("mutually authenticated mesh transport", () => {
       onConnection,
       onHandshakeError: error.resolve,
     });
-    const expired = await initiator.key.issueTlsCredential({
-      now: () => leafIssuedAt,
-      validityMs: 60 * 60_000,
-    });
+    const expired = LIVE_TLS_TIME.acceptExpiredCredential(
+      await initiator.key.issueTlsCredential({
+        now: () => leafIssuedAt,
+        validityMs: 60 * 60_000,
+      }),
+    );
 
     const rejectedSocket = await openRawTls(expired, responder.peer, server.port);
     await once(rejectedSocket, "close");
@@ -385,16 +380,15 @@ describe("mutually authenticated mesh transport", () => {
 
   it("bounds authenticated frame buffering and resumes only after consumers catch up", async () => {
     const devices = await createDevices();
-    const credential = await devices.responder.key.issueTlsCredential({ now: () => NOW });
+    const credential = await LIVE_TLS_TIME.issueCredential(devices.responder.key);
     const accepted = deferred<{
       transport: SocketFrameTransport;
       pause: ReturnType<typeof vi.spyOn>;
       resume: ReturnType<typeof vi.spyOn>;
     }>();
-    const rawServer = createTlsServer(
+    const rawServer = LIVE_TLS_TIME.createRawServer(
+      credential,
       {
-        key: credential.privateKeyPem,
-        cert: credential.certificateChainPem,
         ca: devices.initiator.peer.rootCertificatePem,
         minVersion: "TLSv1.3",
         maxVersion: "TLSv1.3",
@@ -418,7 +412,7 @@ describe("mutually authenticated mesh transport", () => {
       },
     );
     const port = await listen(rawServer);
-    const clientCredential = await devices.initiator.key.issueTlsCredential({ now: () => NOW });
+    const clientCredential = await LIVE_TLS_TIME.issueCredential(devices.initiator.key);
     const clientSocket = await openRawTls(clientCredential, devices.responder.peer, port);
     const client = new SocketFrameTransport(clientSocket, {
       maxFrameBytes: 64,
@@ -442,16 +436,14 @@ describe("mutually authenticated mesh transport", () => {
 
   it("rejects TLS sockets that are encrypted but not authenticated for mesh use", async () => {
     const rogue = await createDevice("rogue");
-    const credential = await rogue.key.issueTlsCredential({ now: () => NOW });
-    const server = createTlsServer({
-      key: credential.privateKeyPem,
-      cert: credential.certificateChainPem,
+    const credential = await LIVE_TLS_TIME.issueCredential(rogue.key);
+    const server = LIVE_TLS_TIME.createRawServer(credential, {
       minVersion: "TLSv1.3",
       maxVersion: "TLSv1.3",
       ALPNProtocols: ["zhixing-mesh"],
     });
     const port = await listen(server);
-    const socket = connectTls({
+    const socket = await LIVE_TLS_TIME.openUnauthenticatedConnection({
       host: "127.0.0.1",
       port,
       minVersion: "TLSv1.3",
@@ -459,7 +451,6 @@ describe("mutually authenticated mesh transport", () => {
       ALPNProtocols: ["zhixing-mesh"],
       rejectUnauthorized: false,
     });
-    await once(socket, "secureConnect");
 
     expect(socket.authorized).toBe(false);
     expect(() => new SocketFrameTransport(socket)).toThrow(
@@ -471,7 +462,7 @@ describe("mutually authenticated mesh transport", () => {
   it("rejects mismatched identity and trust-root combinations before connecting", async () => {
     const devices = await createDevices();
     await expect(
-      connectAuthenticatedMesh({
+      LIVE_TLS_TIME.openAuthenticatedConnection({
         host: "127.0.0.1",
         port: 1,
         identity: devices.initiator.key,
@@ -481,7 +472,6 @@ describe("mutually authenticated mesh transport", () => {
         },
         protocolRange: RANGE,
         authorizePeer: () => true,
-        now: () => NOW,
       }),
     ).rejects.toMatchObject({ code: "identity-mismatch" });
   });
@@ -493,7 +483,7 @@ interface TestDevice {
 }
 
 async function createDevice(name: string): Promise<TestDevice> {
-  const key = await DeviceKey.generate({ now: () => NOW });
+  const key = await DeviceKey.generate({ now: LIVE_TLS_TIME.now });
   return {
     key,
     peer: {
@@ -531,7 +521,7 @@ async function startServer(
   peers: readonly TrustedMeshPeer[],
   overrides: StartServerOverrides = {},
 ): Promise<{ server: TlsServer; port: number }> {
-  const server = await createAuthenticatedMeshServer(
+  const server = await LIVE_TLS_TIME.createAuthenticatedServer(
     {
       identity: local.key,
       trustedPeers: peers,
@@ -540,7 +530,6 @@ async function startServer(
       handshakeTimeoutMs: overrides.handshakeTimeoutMs,
       replayWindow: overrides.replayWindow ?? new HandshakeReplayWindow(),
       onHandshakeError: overrides.onHandshakeError,
-      now: () => NOW,
     },
     overrides.onConnection ?? (() => {}),
   );
@@ -556,7 +545,7 @@ async function connectClient(
     readonly handshakeTimeoutMs?: number;
   } = {},
 ): Promise<SecureMeshConnection> {
-  return await connectAuthenticatedMesh({
+  return await LIVE_TLS_TIME.openAuthenticatedConnection({
     host: "127.0.0.1",
     port,
     identity: local.key,
@@ -564,7 +553,6 @@ async function connectClient(
     protocolRange: overrides.protocolRange ?? RANGE,
     authorizePeer: () => true,
     handshakeTimeoutMs: overrides.handshakeTimeoutMs,
-    now: () => NOW,
   });
 }
 
@@ -588,7 +576,7 @@ async function rawProtocolHandshake(
   port: number,
   hello: Uint8Array,
 ): Promise<SocketFrameTransport> {
-  const credential = await key.issueTlsCredential({ now: () => NOW });
+  const credential = await LIVE_TLS_TIME.issueCredential(key);
   const socket = await openRawTls(credential, trustedPeer, port);
   const transport = new SocketFrameTransport(socket);
   await transport.send(hello);
@@ -597,15 +585,13 @@ async function rawProtocolHandshake(
 }
 
 async function openRawTls(
-  credential: Awaited<ReturnType<DeviceKey["issueTlsCredential"]>>,
+  credential: CurrentLiveTlsCredential | ExpiredLiveTlsCredential,
   trustedPeer: TrustedMeshPeer,
   port: number,
 ): Promise<TLSSocket> {
-  const socket = connectTls({
+  return await LIVE_TLS_TIME.openRawConnection(credential, {
     host: "127.0.0.1",
     port,
-    key: credential.privateKeyPem,
-    cert: credential.certificateChainPem,
     ca: trustedPeer.rootCertificatePem,
     minVersion: "TLSv1.3",
     maxVersion: "TLSv1.3",
@@ -615,11 +601,6 @@ async function openRawTls(
     checkServerIdentity: () => undefined,
     secureOptions: constants.SSL_OP_NO_TICKET,
   });
-  await Promise.race([
-    once(socket, "secureConnect"),
-    once(socket, "error").then(([error]) => Promise.reject(error)),
-  ]);
-  return socket;
 }
 
 function protocolHello(

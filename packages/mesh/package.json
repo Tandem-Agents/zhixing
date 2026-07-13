@@ -83,6 +83,7 @@
   ],
   "scripts": {
     "build": "tsup",
+    "pretest": "node ../../scripts/check-mesh-live-tls-tests.mjs",
     "test": "vitest run",
     "clean": "rm -rf dist"
   },
