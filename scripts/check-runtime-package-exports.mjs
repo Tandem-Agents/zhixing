@@ -1,6 +1,9 @@
 import { readFile } from "node:fs/promises";
 
 const [
+  coreAuthority,
+  corePersistence,
+  coreProtocol,
   server,
   ownerServices,
   ownerServicesAdvancement,
@@ -18,6 +21,9 @@ const [
   meshCredentialExposure,
   secrets,
 ] = await Promise.all([
+  import("../packages/core/dist/authority/index.js"),
+  import("../packages/core/dist/persistence/index.js"),
+  import("../packages/core/dist/protocol/index.js"),
   import("../packages/server/dist/index.js"),
   import("../packages/owner-services/dist/index.js"),
   import("../packages/owner-services/dist/advancement/index.js"),
@@ -106,6 +112,19 @@ const meshCanonicalValues = {
 };
 
 const failures = [];
+for (const [moduleName, module, names] of [
+  ["core-authority", coreAuthority, ["FileArtifactStore", "FileAuthorityCommitLog"]],
+  [
+    "core-persistence",
+    corePersistence,
+    ["acquireFileLock", "ensureDurableDirectory", "syncDirectory"],
+  ],
+  ["core-protocol", coreProtocol, ["byteDigest", "canonicalize", "protocolBytes", "protocolDigest"]],
+]) {
+  for (const name of names) {
+    if (typeof module[name] !== "function") failures.push(`${moduleName}:${name}`);
+  }
+}
 for (const name of [
   "EncryptedVaultSecretStore",
   "createPlatformSecretStore",

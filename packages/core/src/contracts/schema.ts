@@ -1,4 +1,5 @@
 import type { TrustRuleSnapshot } from "../security/types.js";
+import type { CommitEnvelope } from "./commit-log.js";
 import type {
   AnchorTransferCommit,
   CheckpointEnvelope,
@@ -63,6 +64,7 @@ import type {
 
 /** 顶层 wire schema 的单一类型注册表。 */
 export interface WireSchemaMap {
+  CommitEnvelope: CommitEnvelope;
   HomeTrustEvent: HomeTrustEvent;
   HomeTrustRecord: HomeTrustRecord;
   AnchorTransferCommit: AnchorTransferCommit;

@@ -17,7 +17,7 @@ import type {
   PakeRound,
   Signature,
 } from "@zhixing/core/contracts";
-import { protocolBytes, protocolDigest } from "./canonical.js";
+import { byteDigest, protocolBytes, protocolDigest } from "./canonical.js";
 import { verifyDeviceSignature } from "./device-identity.js";
 import { createUlid } from "./identifiers.js";
 import { decodeCanonicalBase64Url } from "./recovery-root.js";
@@ -553,7 +553,7 @@ function createOffer(
     protocolVersion: input.protocolVersion,
     issuer: {
       deviceId: input.issuer.deviceId,
-      keyFingerprint: `sha256:${createHash("sha256").update(publicKeyBytes).digest("hex")}`,
+      keyFingerprint: byteDigest(publicKeyBytes),
     },
     issuerNonce: randomBytes(32).toString("base64url"),
     method,
@@ -783,9 +783,7 @@ function assertOfferIssuer(offer: PairingOffer, issuer: DeviceIdentity): void {
   if (offer.issuer.deviceId !== issuer.deviceId) {
     throw new TypeError("Pairing offer issuer does not match the accepting device");
   }
-  const fingerprint = `sha256:${createHash("sha256")
-    .update(decodeDevicePublicKey(issuer.publicKey))
-    .digest("hex")}`;
+  const fingerprint = byteDigest(decodeDevicePublicKey(issuer.publicKey));
   if (offer.issuer.keyFingerprint !== fingerprint) {
     throw new TypeError("Pairing offer issuer fingerprint is invalid");
   }

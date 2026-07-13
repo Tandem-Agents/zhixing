@@ -13,7 +13,10 @@ const RPC_ROOTS = [
 ];
 
 const ZONES = [
+  ["core/authority", "packages/core/src/authority"],
   ["core/conversation", "packages/core/src/conversation"],
+  ["core/persistence", "packages/core/src/persistence"],
+  ["core/protocol", "packages/core/src/protocol"],
   ["core/transcript", "packages/core/src/transcript"],
   ["orchestrator/runtime", "packages/orchestrator/src/runtime"],
   ["executor", "packages/executor/src"],

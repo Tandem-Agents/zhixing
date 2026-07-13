@@ -1,5 +1,6 @@
+import { byteDigest as coreByteDigest } from "@zhixing/core/protocol";
 import { describe, expect, it } from "vitest";
-import { canonicalize, protocolDigest } from "../canonical.js";
+import { byteDigest, canonicalize, protocolDigest } from "../canonical.js";
 import {
   DeviceKey,
   deviceIdFromPublicKey,
@@ -20,6 +21,11 @@ describe("mesh protocol cryptography", () => {
     expect(protocolDigest("MeshVector", 1, payload)).toBe(
       "sha256:160673ea20aa515eaa8cb654d900b1ebb07d91a793f8a35f6806d1dccfb21116",
     );
+    const content = Buffer.from("知行", "utf8");
+    expect(byteDigest(content)).toBe(
+      "sha256:680679337a0b8a4a5b17cac0922af99b60eac65eee93d2c97825077b5060b14d",
+    );
+    expect(byteDigest(content)).toBe(coreByteDigest(content));
     expect(() => canonicalize({ value: undefined })).toThrow(TypeError);
     expect(() => canonicalize(new Date(0))).toThrow(TypeError);
   });

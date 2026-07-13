@@ -1,7 +1,6 @@
 import {
   createCipheriv,
   createDecipheriv,
-  createHash,
   diffieHellman,
   generateKeyPairSync,
   hkdfSync,
@@ -15,7 +14,12 @@ import type {
   RecoveryCheckpointVerification,
   Signature,
 } from "@zhixing/core/contracts";
-import { canonicalize, protocolBytes, protocolDigest } from "./canonical.js";
+import {
+  byteDigest,
+  canonicalize,
+  protocolBytes,
+  protocolDigest,
+} from "./canonical.js";
 import { verifyDeviceSignature } from "./device-identity.js";
 import {
   decodeCanonicalBase64Url,
@@ -398,10 +402,6 @@ function decryptAead(key: Uint8Array, nonce: Uint8Array, aad: Uint8Array, sealed
   } catch (error) {
     throw new TypeError("Checkpoint ciphertext authentication failed", { cause: error });
   }
-}
-
-function byteDigest(bytes: Uint8Array): string {
-  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
 function assertNonNegativeInteger(value: number, label: string): void {

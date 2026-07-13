@@ -12,6 +12,7 @@ const environment = update
 
 const commands = [
   ["--filter", "@zhixing/test-utils", "build"],
+  ["--filter", "@zhixing/core", "build"],
   ["--filter", "@zhixing/owner-kernel", "build"],
   ["--filter", "@zhixing/rpc", "build"],
   ["--filter", "@zhixing/owner-services", "build"],

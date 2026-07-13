@@ -8,6 +8,7 @@ const coreRoot = fileURLToPath(
 );
 const sourceRoot = resolve(coreRoot, "src");
 const contractsRoot = resolve(sourceRoot, "contracts");
+const packagesRoot = fileURLToPath(new URL("../packages/", import.meta.url));
 const require = createRequire(new URL("../packages/core/package.json", import.meta.url));
 const ts = require("typescript");
 
@@ -112,6 +113,64 @@ const violations = [];
 const sourceFiles = await walk(sourceRoot);
 const parsedFiles = new Map();
 for (const file of sourceFiles) parsedFiles.set(file, await parse(file));
+
+const protocolByteDigestImplementation = resolve(
+  sourceRoot,
+  "protocol/canonical.ts",
+);
+for (const file of await walk(packagesRoot)) {
+  if (file === protocolByteDigestImplementation) continue;
+  const source = await readFile(file, "utf8");
+  if (!source.includes("sha256:") || !source.includes("createHash")) continue;
+  const tree = ts.createSourceFile(
+    file,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+  const createHashNames = new Set();
+  let constructsSha256 = false;
+  let hasProtocolDigestPrefix = false;
+  function inspect(node) {
+    if (
+      ts.isImportDeclaration(node) &&
+      node.moduleSpecifier.text === "node:crypto" &&
+      node.importClause?.namedBindings &&
+      ts.isNamedImports(node.importClause.namedBindings)
+    ) {
+      for (const element of node.importClause.namedBindings.elements) {
+        if ((element.propertyName ?? element.name).text === "createHash") {
+          createHashNames.add(element.name.text);
+        }
+      }
+    }
+    if (
+      ts.isCallExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      createHashNames.has(node.expression.text) &&
+      node.arguments.length > 0 &&
+      ts.isStringLiteral(node.arguments[0]) &&
+      node.arguments[0].text === "sha256"
+    ) {
+      constructsSha256 = true;
+    }
+    if (
+      ((ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) &&
+        node.text === "sha256:") ||
+      (ts.isTemplateExpression(node) && node.head.text === "sha256:")
+    ) {
+      hasProtocolDigestPrefix = true;
+    }
+    ts.forEachChild(node, inspect);
+  }
+  inspect(tree);
+  if (constructsSha256 && hasProtocolDigestPrefix) {
+    violations.push(
+      `${relative(packagesRoot, file)}: protocol B(bytes) digests must use @zhixing/core/protocol byteDigest`,
+    );
+  }
+}
 
 const wireCompositionTypes = new Set([
   "WireSchemaV1",
