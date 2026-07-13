@@ -6,6 +6,7 @@ const [
   coreProtocol,
   ownerKernel,
   ownerKernelControlAdmission,
+  ownerKernelConversationAssignment,
   server,
   ownerServices,
   ownerServicesAdvancement,
@@ -14,6 +15,7 @@ const [
   runtimeHostSessionAdapter,
   executor,
   executorRuntimeRole,
+  executorAssignmentLedger,
   mesh,
   meshHandshake,
   meshPairing,
@@ -28,6 +30,7 @@ const [
   import("../packages/core/dist/protocol/index.js"),
   import("../packages/owner-kernel/dist/index.js"),
   import("../packages/owner-kernel/dist/control-admission.js"),
+  import("../packages/owner-kernel/dist/conversation-assignment.js"),
   import("../packages/server/dist/index.js"),
   import("../packages/owner-services/dist/index.js"),
   import("../packages/owner-services/dist/advancement/index.js"),
@@ -36,6 +39,7 @@ const [
   import("../packages/runtime-host/dist/session-adapter.js"),
   import("../packages/executor/dist/index.js"),
   import("../packages/executor/dist/runtime-role.js"),
+  import("../packages/executor/dist/assignment-ledger.js"),
   import("../packages/mesh/dist/index.js"),
   import("../packages/mesh/dist/handshake.js"),
   import("../packages/mesh/dist/pairing-public.js"),
@@ -79,6 +83,11 @@ const ownerKernelControlAdmissionValues = [
   "createInitialControlEnvelope",
 ];
 
+const ownerKernelConversationAssignmentValues = [
+  "ConversationRunJournal",
+  "InProcessConversationDispatcher",
+];
+
 retiredServerCompatibilityValues.push(
   ...ownerServiceCanonicalValues,
   "DEFAULT_SESSION_TOKEN_BUDGET",
@@ -107,6 +116,11 @@ const executorCanonicalValues = [
   "createInProcessRuntimeFactory",
 ];
 
+const executorAssignmentLedgerValues = [
+  "ConversationAssignmentLedger",
+  "InProcessAssignmentSubmission",
+];
+
 const meshCanonicalValues = {
   connectAuthenticatedMesh: meshHandshake,
   createAuthenticatedMeshServer: meshHandshake,
@@ -129,7 +143,29 @@ for (const [moduleName, module, names] of [
     corePersistence,
     ["acquireFileLock", "ensureDurableDirectory", "syncDirectory"],
   ],
-  ["core-protocol", coreProtocol, ["byteDigest", "canonicalize", "protocolBytes", "protocolDigest"]],
+  [
+    "core-protocol",
+    coreProtocol,
+    [
+      "advanceAssignmentLedger",
+      "assignmentActivationDigest",
+      "assignmentLedgerSeed",
+      "buildConversationActivationPayload",
+      "byteDigest",
+      "canonicalize",
+      "createSignedConversationEnvelope",
+      "dispatchEnvelopeArtifact",
+      "dispatchEnvelopeDigest",
+      "permissionSnapshotLeaseDigest",
+      "protocolBytes",
+      "protocolDigest",
+      "signConversationActivation",
+      "validateConversationActivation",
+      "validateConversationEnvelope",
+      "validateConversationInteractionMirrorEntry",
+      "validateConversationInteractionOutcome",
+    ],
+  ],
 ]) {
   for (const name of names) {
     if (typeof module[name] !== "function") failures.push(`${moduleName}:${name}`);
@@ -152,6 +188,11 @@ for (const name of ownerKernelControlAdmissionValues) {
     failures.push(`owner-kernel-control-admission:${name}`);
   }
 }
+for (const name of ownerKernelConversationAssignmentValues) {
+  if (ownerKernel[name] !== ownerKernelConversationAssignment[name]) {
+    failures.push(`owner-kernel-conversation-assignment:${name}`);
+  }
+}
 for (const name of retiredServerCompatibilityValues) {
   if (name in server) failures.push(`server-retired-compatibility:${name}`);
 }
@@ -160,6 +201,11 @@ for (const [name, subpath] of Object.entries(runtimeHostCanonicalValues)) {
 }
 for (const name of executorCanonicalValues) {
   if (executor[name] !== executorRuntimeRole[name]) failures.push(`executor:${name}`);
+}
+for (const name of executorAssignmentLedgerValues) {
+  if (executor[name] !== executorAssignmentLedger[name]) {
+    failures.push(`executor-assignment-ledger:${name}`);
+  }
 }
 for (const [name, subpath] of Object.entries(meshCanonicalValues)) {
   if (mesh[name] !== subpath[name]) failures.push(`mesh:${name}`);

@@ -21,6 +21,11 @@ import { SerialTaskQueue } from "../persistence/serial-task-queue.js";
 import { canonicalize, protocolDigest } from "../protocol/index.js";
 import { collectArtifactRefs } from "./artifact-references.js";
 import {
+  collectRegisteredArtifactReferences,
+  collectRegisteredArtifactRoots,
+  type RegisteredArtifactRoot,
+} from "./artifact-retention.js";
+import {
   collectArtifactGarbage,
   FileArtifactStore,
 } from "./artifact-store.js";
@@ -293,11 +298,19 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       loadRetainedReferences: async () => {
         return this.#withLogLock(async () => {
           const references = new Map<string, ArtifactRef>();
+          const registeredRoots: RegisteredArtifactRoot[] = [];
           await this.#readAndRecover((envelope) => {
             for (const ref of collectArtifactRefs(envelope.entries)) {
-              references.set(ref.digest, ref);
+              retainReference(references, ref);
             }
+            registeredRoots.push(...collectRegisteredArtifactRoots(envelope.entries));
           });
+          for (const root of registeredRoots) {
+            const bytes = await this.artifactStore.get(root.ref);
+            for (const ref of collectRegisteredArtifactReferences(root, bytes)) {
+              retainReference(references, ref);
+            }
+          }
           return [...references.values()];
         });
       },
@@ -588,6 +601,20 @@ export class FileAuthorityCommitLog implements AuthorityCommitLog {
       }
     });
   }
+}
+
+function retainReference(
+  references: Map<string, ArtifactRef>,
+  ref: ArtifactRef,
+): void {
+  const existing = references.get(ref.digest);
+  if (existing && existing.bytes !== ref.bytes) {
+    throw new AuthorityStorageError(
+      "invalid-authority-record",
+      `Artifact ${ref.digest} declares conflicting byte counts`,
+    );
+  }
+  references.set(ref.digest, ref);
 }
 
 function normalizeEntries<Body>(

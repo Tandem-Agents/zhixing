@@ -10,6 +10,7 @@ export default defineConfig({
     "src/ephemeral-run-buffer.ts",
     "src/confirmation-hub.ts",
     "src/control-admission.ts",
+    "src/conversation-assignment.ts",
   ],
   format: ["esm"],
   dts: true,

@@ -137,6 +137,9 @@ importers:
 
   packages/executor:
     dependencies:
+      '@zhixing/core':
+        specifier: workspace:*
+        version: link:../core
       '@zhixing/owner-kernel':
         specifier: workspace:*
         version: link:../owner-kernel

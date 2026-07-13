@@ -64,6 +64,7 @@ describe("distributed runtime structural gates", () => {
       "@zhixing/tools-builtin",
     ]);
     expect(dependencyGraph.production["@zhixing/executor"]).toEqual([
+      "@zhixing/core",
       "@zhixing/owner-kernel",
       "@zhixing/runtime-host",
     ]);

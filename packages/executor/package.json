@@ -12,6 +12,10 @@
     "./runtime-role": {
       "types": "./dist/runtime-role.d.ts",
       "import": "./dist/runtime-role.js"
+    },
+    "./assignment-ledger": {
+      "types": "./dist/assignment-ledger.d.ts",
+      "import": "./dist/assignment-ledger.js"
     }
   },
   "files": ["dist"],
@@ -21,6 +25,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@zhixing/core": "workspace:*",
     "@zhixing/owner-kernel": "workspace:*",
     "@zhixing/runtime-host": "workspace:*"
   },

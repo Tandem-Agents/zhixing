@@ -1,1 +1,22 @@
 export { byteDigest, canonicalize, protocolBytes, protocolDigest } from "./canonical.js";
+export {
+  advanceAssignmentLedger,
+  assignmentActivationDigest,
+  assignmentLedgerSeed,
+  buildConversationActivationPayload,
+  createSignedConversationEnvelope,
+  dispatchEnvelopeArtifact,
+  dispatchEnvelopeDigest,
+  permissionSnapshotLeaseDigest,
+  signConversationActivation,
+  validateConversationActivation,
+  validateConversationEnvelope,
+  validateConversationInteractionMirrorEntry,
+  validateConversationInteractionOutcome,
+  type ConversationInteractionMirrorEntry,
+  type ConversationInteractionOutcome,
+  type DispatchEnvelopeArtifact,
+  type ProtocolSignatureVerifier,
+  type ProtocolSigner,
+  type UnsignedConversationEnvelope,
+} from "./assignment.js";

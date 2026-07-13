@@ -78,6 +78,7 @@
       ],
       "@zhixing/core": [],
       "@zhixing/executor": [
+        "@zhixing/core",
         "@zhixing/owner-kernel",
         "@zhixing/runtime-host"
       ],
@@ -1260,7 +1261,7 @@
     },
     {
       "kind": "import",
-      "references": 2,
+      "references": 3,
       "sourceZone": "core/authority",
       "target": "core/protocol"
     },
@@ -1272,9 +1273,21 @@
     },
     {
       "kind": "import",
+      "references": 2,
+      "sourceZone": "executor",
+      "target": "package:@zhixing/core"
+    },
+    {
+      "kind": "import",
       "references": 1,
       "sourceZone": "executor",
       "target": "package:@zhixing/runtime-host"
+    },
+    {
+      "kind": "type-import",
+      "references": 1,
+      "sourceZone": "executor",
+      "target": "package:@zhixing/core"
     },
     {
       "kind": "type-import",
@@ -1338,13 +1351,13 @@
     },
     {
       "kind": "import",
-      "references": 6,
+      "references": 9,
       "sourceZone": "owner-kernel",
       "target": "package:@zhixing/core"
     },
     {
       "kind": "type-import",
-      "references": 4,
+      "references": 5,
       "sourceZone": "owner-kernel",
       "target": "package:@zhixing/core"
     },
