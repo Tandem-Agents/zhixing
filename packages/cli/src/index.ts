@@ -43,6 +43,11 @@ function handleStartupResult(result: StartupCheckResult): void {
     console.error(chalk.dim(`请修复或删除文件后重试：${result.filePath}`));
     process.exit(2);
   }
+  if (result.kind === "secret-store-error") {
+    console.error(chalk.red(`[秘密存储不可用] ${result.message}`));
+    console.error(chalk.dim(`设备本地目录：${result.filePath}`));
+    process.exit(2);
+  }
   if (result.kind === "semantic-error") {
     console.error(
       chalk.red(`[配置错误] ${result.filePath} 含 ${result.issues.length} 处废弃字段：`),

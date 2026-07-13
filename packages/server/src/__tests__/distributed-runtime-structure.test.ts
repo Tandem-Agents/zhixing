@@ -22,6 +22,7 @@ const ZONES = [
   ["owner-services", "packages/owner-services/src"],
   ["rpc", "packages/rpc/src"],
   ["runtime-host", "packages/runtime-host/src"],
+  ["secrets", "packages/secrets/src"],
   ["server/advancement", "packages/server/src/advancement"],
   ["server/confirmation", "packages/server/src/confirmation"],
   ["server/rpc", "packages/server/src/rpc"],
@@ -64,6 +65,9 @@ describe("distributed runtime structural gates", () => {
       "@zhixing/runtime-host",
     ]);
     expect(dependencyGraph.production["@zhixing/mesh"]).toEqual([
+      "@zhixing/core",
+    ]);
+    expect(dependencyGraph.production["@zhixing/secrets"]).toEqual([
       "@zhixing/core",
     ]);
     expect(
@@ -119,7 +123,7 @@ describe("distributed runtime structural gates", () => {
         topologyEdges: topology.edges,
       },
     );
-  }, 15_000);
+  }, 30_000);
 });
 
 async function readPackageManifests(): Promise<PackageManifest[]> {

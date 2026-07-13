@@ -11,9 +11,9 @@
 
 import { isValidServerId, type McpServerSpec } from "@zhixing/mcp";
 import type {
+  McpCredentialProjection,
   McpConfig,
   McpServerConfigEntry,
-  ZhixingCredentials,
 } from "@zhixing/providers";
 
 /**
@@ -25,7 +25,7 @@ import type {
  */
 export function parseServerSpecs(
   mcp: McpConfig | undefined,
-  credentials?: ZhixingCredentials["mcp"],
+  credentials?: McpCredentialProjection["mcp"],
 ): McpServerSpec[] {
   const servers = mcp?.servers;
   if (!servers) return [];

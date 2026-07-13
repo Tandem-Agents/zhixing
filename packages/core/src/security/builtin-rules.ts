@@ -5,7 +5,7 @@
  * - bypassImmune：绝对不可覆盖，保护最敏感的系统资源
  * - confirm：默认拦截但用户可批准，覆盖常见危险操作模式
  *
- * Phase 1 不设 audit 规则——不加过滤的全量 read 审计会产生大量噪音
+ * 不设无过滤的全量 read audit 规则，以免产生无法行动的噪音
  */
 
 import type { SecurityRule } from "./types.js";
@@ -61,7 +61,7 @@ export const BUILTIN_RULES: SecurityRule[] = [
     id: "bi-zhixing-config-write",
     name: "知行配置文件写保护",
     description:
-      "修改知行配置目录需要用户确认——包含工作区设置（安全信任边界）和 API 密钥",
+      "修改知行配置目录需要用户确认——其中包含工作区设置等安全信任边界",
     enabled: true,
     match: { type: "path", paths: [".zhixing/"], access: "write" },
     action: "confirm",
@@ -74,21 +74,43 @@ export const BUILTIN_RULES: SecurityRule[] = [
   },
   {
     id: "bi-zhixing-credentials-block",
-    name: "知行凭证文件隔离",
+    name: "知行秘密存储隔离",
     description:
-      "AI 不可读、不可写 ~/.zhixing/credentials.json——含 provider apiKey、channel secret 等敏感字段",
+      "AI 不可访问 SecretStore 文件族或旧版 credentials.json；只有产品组合根与启动迁移器可以触达",
     enabled: true,
-    match: { type: "path", paths: [".zhixing/credentials.json"], access: "any" },
+    match: {
+      type: "path",
+      paths: [".zhixing/credentials.json", ".zhixing/secret-vault"],
+      access: "any",
+    },
     action: "block",
     bypassImmune: true,
     severity: "critical",
     category: "data_exfiltration",
     source: "builtin",
-    message: "知行凭证文件 ~/.zhixing/credentials.json 不允许 AI 读写——含敏感凭证",
+    message: "知行设备本地凭据与秘密存储不允许 AI 访问",
     suggestion:
-      "若用户需要修改凭证，请告知用户：(1) 文件位置 ~/.zhixing/credentials.json " +
-      "(2) schema：providers.<id>.apiKey、channels.<id>.<field> 与 mcp.<id>.<field> " +
-      "(3) 让用户自己编辑该文件，AI 不参与读写",
+      "如需修改凭据，请让用户在目标设备运行 `zz` 或 `/config`，通过 SecretStore 专用流程完成",
+  },
+  {
+    id: "bi-os-credential-store",
+    name: "系统凭据库隔离",
+    description: "AI 不可通过平台命令读取、导出或改写系统凭据库",
+    enabled: true,
+    match: {
+      type: "command",
+      pattern:
+        "(?:secret-tool|keyctl|cmdkey(?:\\.exe)?|vaultcmd(?:\\.exe)?)(?:[\\\"']?\\s|$)|" +
+        "security[\\\"']?\\s+(?:-[A-Za-z]+\\s+)*(?:find-|add-|delete-|dump-keychain|unlock-keychain|set-keychain-password|import\\b|export\\b)",
+      flags: "i",
+    },
+    action: "block",
+    bypassImmune: true,
+    severity: "critical",
+    category: "data_exfiltration",
+    source: "builtin",
+    message: "系统凭据库不允许 AI 访问",
+    suggestion: "请通过知行的 SecretStore 专用配置流程管理设备凭据",
   },
 
   // ═══ 需确认：默认拦截但用户可批准 ═══

@@ -23,13 +23,13 @@ import { ProviderConfigError, resolveLLMRoles } from "../resolve.js";
 import { bindRole, createProviderRoles } from "../create-provider.js";
 import type {
   ProviderCredentialEntry,
+  ProviderCredentialProjection,
   ZhixingConfig,
-  ZhixingCredentials,
 } from "../types.js";
 
-const noCreds = (): ZhixingCredentials => ({});
+const noCreds = (): ProviderCredentialProjection => ({});
 
-const credsFor = (entries: Record<string, string>): ZhixingCredentials => ({
+const credsFor = (entries: Record<string, string>): ProviderCredentialProjection => ({
   providers: Object.fromEntries(
     Object.entries(entries).map(([id, apiKey]) => [id, { apiKey }]),
   ),
@@ -37,7 +37,7 @@ const credsFor = (entries: Record<string, string>): ZhixingCredentials => ({
 
 const credsWith = (
   entries: Record<string, ProviderCredentialEntry>,
-): ZhixingCredentials => ({
+): ProviderCredentialProjection => ({
   providers: { ...entries },
 });
 
@@ -46,7 +46,7 @@ const baseConfig = (overrides: Partial<ZhixingConfig> = {}): ZhixingConfig => ({
   ...overrides,
 });
 
-const baseCreds = (): ZhixingCredentials => credsFor({ deepseek: "sk-ds" });
+const baseCreds = (): ProviderCredentialProjection => credsFor({ deepseek: "sk-ds" });
 
 describe("resolveLLMRoles · main 直取配置", () => {
   it("main 的 provider+model 直接来自 config.llm.main", () => {
@@ -281,17 +281,17 @@ describe("bindRole · chat 调用时 model 字段实绑契约", () => {
 describe("createProviderRoles · 实例化与角色装配", () => {
   let tmpDir: string;
   let configPath: string;
-  let credentialsPath: string;
+  let fixtureCredentials: ZhixingCredentials;
 
   beforeEach(async () => {
     tmpDir = await createTempDir("llm-roles");
     configPath = path.join(tmpDir, "config.jsonc");
-    credentialsPath = path.join(tmpDir, "credentials.json");
+    fixtureCredentials = {};
   });
 
   function writeFixture(config: ZhixingConfig, creds: ZhixingCredentials): void {
     fs.writeFileSync(configPath, JSON.stringify(config), "utf-8");
-    fs.writeFileSync(credentialsPath, JSON.stringify(creds), "utf-8");
+    fixtureCredentials = creds;
   }
 
   function envFor(): Record<string, string | undefined> {
@@ -300,7 +300,7 @@ describe("createProviderRoles · 实例化与角色装配", () => {
 
   it("缺省 light → main/light 共享同一 LLMProvider 实例", () => {
     writeFixture(baseConfig(), baseCreds());
-    const { roles } = createProviderRoles({ env: envFor() });
+    const { roles } = createProviderRoles({ env: envFor(), credentials: fixtureCredentials });
 
     expect(roles.main.provider).toBe(roles.light.provider);
     expect(roles.main.model).toBe(roles.light.model);
@@ -316,7 +316,7 @@ describe("createProviderRoles · 实例化与角色装配", () => {
       },
       credsFor({ deepseek: "sk-ds", openai: "sk-oai" }),
     );
-    const { roles } = createProviderRoles({ env: envFor() });
+    const { roles } = createProviderRoles({ env: envFor(), credentials: fixtureCredentials });
 
     expect(roles.main.provider).not.toBe(roles.light.provider);
     expect(roles.main.provider.id).toBe("deepseek");
@@ -328,7 +328,7 @@ describe("createProviderRoles · 实例化与角色装配", () => {
       { llm: { main: { provider: "deepseek", model: "deepseek-reasoner" } } },
       baseCreds(),
     );
-    const { roles } = createProviderRoles({ env: envFor() });
+    const { roles } = createProviderRoles({ env: envFor(), credentials: fixtureCredentials });
 
     expect(roles.main.model).toBe("deepseek-reasoner");
     // chat() 是绑定方法——签名不再需要 model 字段
@@ -341,7 +341,7 @@ describe("createProviderRoles · 实例化与角色装配", () => {
       { llm: { main: { provider: "openai", model: "gpt-4o-mini" } } },
       credsFor({ openai: "sk-oai" }),
     );
-    const { roles } = createProviderRoles({ env: envFor() });
+    const { roles } = createProviderRoles({ env: envFor(), credentials: fixtureCredentials });
 
     expect(roles.main.provider.id).toBe("openai");
     expect(roles.main.model).toBe("gpt-4o-mini");
@@ -352,7 +352,7 @@ describe("createProviderRoles · 实例化与角色装配", () => {
       { llm: { main: { provider: "anthropic", model: "claude-sonnet-4-20250514" } } },
       credsFor({ anthropic: "sk-ant" }),
     );
-    const { resolvedRoles } = createProviderRoles({ env: envFor() });
+    const { resolvedRoles } = createProviderRoles({ env: envFor(), credentials: fixtureCredentials });
 
     expect(resolvedRoles.main.resolved.protocol).toBe("anthropic-messages");
     expect(resolvedRoles.main.model).toBe("claude-sonnet-4-20250514");
@@ -372,7 +372,7 @@ describe("createProviderRoles · 实例化与角色装配", () => {
         },
       }),
     );
-    const { resolvedRoles } = createProviderRoles({ env: envFor() });
+    const { resolvedRoles } = createProviderRoles({ env: envFor(), credentials: fixtureCredentials });
 
     expect(resolvedRoles.main.resolved.modelOverrides).toEqual({
       "deepseek-chat": { contextWindow: 64000 },
@@ -389,7 +389,7 @@ describe("createProviderRoles · 实例化与角色装配", () => {
         },
       }),
     );
-    const { resolvedRoles } = createProviderRoles({ env: envFor() });
+    const { resolvedRoles } = createProviderRoles({ env: envFor(), credentials: fixtureCredentials });
 
     expect(resolvedRoles.main.resolved.modelInputCapabilities).toEqual({
       "gpt-4o": { images: true },
@@ -403,7 +403,7 @@ describe("createProviderRoles · 实例化与角色装配", () => {
       { llm: { main: { provider: "minimax", model: "MiniMax-Text-01" } } },
       credsFor({ minimax: "sk-mm" }),
     );
-    const { roles, resolvedRoles } = createProviderRoles({ env: envFor() });
+    const { roles, resolvedRoles } = createProviderRoles({ env: envFor(), credentials: fixtureCredentials });
 
     expect(resolvedRoles.main.resolved.protocol).toBe("openai-compatible");
     expect(resolvedRoles.main.resolved.declaredModels).toEqual([]);

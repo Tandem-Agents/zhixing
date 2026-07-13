@@ -1,7 +1,7 @@
 /**
  * 接入面单元定义 —— 把 runServerProcess 里各接入面的内联装配等价搬成自包含 setup 单元。
  *
- * 数组 ACCESS_SURFACES 的顺序 = pre-server 依赖拓扑序（conversation→channel 门面
+ * createAccessSurfaces 返回数组的顺序 = pre-server 依赖拓扑序（conversation→channel 门面
  * →delivery→text-renderer），setupAccessSurfaces 按此序遍历。每个 setup 内聚自己的
  * 运行时条件（如 channel 判 messaging 配置）与失败处理；profile 是否启用由
  * PROFILES.surfaces 决定、不在 setup 内判 profile。teardown 策略见 access-surface.ts
@@ -27,7 +27,10 @@ import {
   SESSION_NOTIFICATIONS,
   type SessionChangedPayload,
 } from "@zhixing/rpc";
-import { resolveModelCapability } from "@zhixing/providers";
+import {
+  resolveModelCapability,
+  type ChannelCredentialProjection,
+} from "@zhixing/providers";
 import { setupChannels } from "./channels.js";
 import { setupDelivery } from "../setup-delivery.js";
 import { createAdvancementReviewMaintenance } from "./advancement-review-maintenance.js";
@@ -151,11 +154,12 @@ const conversationSurface: AccessSurface = {
 };
 
 /** 社交通道 —— 先装稳定门面，外部连接异步进入状态机；setup 失败非致命。 */
-const channelSurface: AccessSurface = {
-  name: "channel",
-  phase: "pre-server",
-  async setup(ctx) {
-    const { conversations, config, credentials, confirmationHub } = ctx;
+function createChannelSurface(credentials: ChannelCredentialProjection): AccessSurface {
+  return {
+    name: "channel",
+    phase: "pre-server",
+    async setup(ctx) {
+      const { conversations, config, confirmationHub } = ctx;
     if (
       !conversations ||
       !config.messaging ||
@@ -193,8 +197,9 @@ const channelSurface: AccessSurface = {
         ),
       );
     }
-  },
-};
+    },
+  };
+}
 
 /** 投递栈 —— 依赖通道；late-bind Outbox 到 inboundRouter。 */
 const deliverySurface: AccessSurface = {
@@ -270,11 +275,15 @@ const confirmationBridgeSurface: AccessSurface = {
  * 全部接入面单元，按 pre-server 依赖拓扑序排列（post-server 项排最后）。
  * 新增接入面 = 在此加一个单元 + 在 access-surface.ts 的 PROFILES 对应 surfaces 集合加名字。
  */
-export const ACCESS_SURFACES: readonly AccessSurface[] = [
-  mcpSurface,
-  conversationSurface,
-  channelSurface,
-  deliverySurface,
-  textRendererSurface,
-  confirmationBridgeSurface,
-];
+export function createAccessSurfaces(
+  channelCredentials: ChannelCredentialProjection,
+): readonly AccessSurface[] {
+  return [
+    mcpSurface,
+    conversationSurface,
+    createChannelSurface(channelCredentials),
+    deliverySurface,
+    textRendererSurface,
+    confirmationBridgeSurface,
+  ];
+}

@@ -83,18 +83,18 @@ describe("validateNoConfigProviders · config.providers 整个字段废弃", () 
     expect(issues[0]?.field).toBe("providers");
   });
 
-  it("issue.fix 引导迁移到 credentials.providers", () => {
+  it("issue.fix 引导清理公开配置并通过向导写入 SecretStore", () => {
     const config = { providers: {} } as unknown as ZhixingConfig;
     const issue = validateConfigSemantics(config)[0]!;
-    expect(issue.fix).toContain("credentials.json");
-    expect(issue.fix).toContain("providers");
+    expect(issue.fix).toContain("`zz`");
+    expect(issue.fix).toContain("配置向导");
     expect(issue.fix).toContain("llm.main.provider");
   });
 
-  it("issue.reason 引用 credentials.providers 内容层位置", () => {
+  it("issue.reason 指向设备本地 SecretStore", () => {
     const config = { providers: {} } as unknown as ZhixingConfig;
     const issue = validateConfigSemantics(config)[0]!;
-    expect(issue.reason).toContain("credentials.providers");
+    expect(issue.reason).toContain("SecretStore");
   });
 });
 
@@ -118,8 +118,8 @@ describe("validateNoConfigChannels · 旧 channels 字段引导迁移", () => {
     const config = { channels: {} } as unknown as ZhixingConfig;
     const issue = validateConfigSemantics(config)[0]!;
     expect(issue.fix).toContain("messaging");
-    expect(issue.fix).toContain("credentials.json");
-    expect(issue.fix).toContain("channels");
+    expect(issue.fix).toContain("配置向导");
+    expect(issue.fix).toContain("channel");
   });
 });
 
@@ -148,13 +148,13 @@ describe("validateNoMessagingCredentials · messaging 条目不允许 credential
     expect(issues).toHaveLength(2);
   });
 
-  it("issue.fix 引导迁移到 credentials.channels.<id>", () => {
+  it("issue.fix 引导通过配置向导录入对应 channel", () => {
     const config = {
       messaging: { feishu: { credentials: { appId: "x" } } },
     } as unknown as ZhixingConfig;
 
     const issue = validateConfigSemantics(config)[0]!;
-    expect(issue.fix).toContain("credentials.json");
+    expect(issue.fix).toContain("配置向导");
     expect(issue.fix).toContain("feishu");
   });
 });

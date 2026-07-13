@@ -94,7 +94,7 @@ ModelCapability 是**知行代码内置的领域知识**（公开 benchmark 数�
 **优先级**：用户 override > 内置常量 > UNKNOWN 兜底。
 
 **强制约束**：
-- **不进 `credentials.json`**——credentials 是凭证唯一入口，领域知识属于功能配置，进 config.jsonc 才符合身份层不变量
+- **不进 SecretStore**——SecretStore 只承载设备本地秘密，领域知识属于功能配置，进 config.jsonc 才符合身份层不变量
 - **不持久化到 conversation meta**——模型可换，阈值跟模型走
 - **实现时窗口尺寸是传入参数**（不是函数内 hardcode）
 - **按模型分**——不同服务商提供同一模型时共享同一阈值（如 DeepSeek 官方与硅基流动转发同型号 V4-Pro 阈值一致）

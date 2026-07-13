@@ -22,7 +22,7 @@
 | 012 | 内置工具集（@zhixing/tools-builtin） | [tools-builtin.md](tools-builtin.md) | 已实施 |
 | 013 | 可中断 Agent Loop（中断协议 + idle 看门狗 + 协议清理） | [interruptible-agent-loop-execution.md](interruptible-agent-loop-execution.md) | 设计中 |
 | 014 | 子 Agent 体系（Task 工具 + AgentRoleProfile + ChildBroker + hierarchical EventBus） | [subagent-execution.md](subagent-execution.md) | 设计中 |
-| 015 | 用户凭证存储与首次引导（credentials.json + 加载链 + builtin 规则隔离 + 程序级向导） | [credentials-and-onboarding.md](credentials-and-onboarding.md) | 设计中 |
+| 015 | 用户秘密存储与首次引导（SecretStore + 旧明文迁移 + ready 状态 + 程序级向导） | [credentials-and-onboarding.md](credentials-and-onboarding.md) | 已实施 |
 | 016 | RuntimeSession 与配置热重载（REPL 内 `/config` + blue-green swap + 协同生命周期聚合） | [runtime-session-hot-reload.md](runtime-session-hot-reload.md) | 设计中 |
 | 017 | CLI 视觉设计语言（七条核心原则 + 视觉元素规范，覆盖配置编辑器 + REPL + 未来 TUI） | [cli-ui-design-language.md](cli-ui-design-language.md) | 设计中 |
 | 018 | 输入区视觉规范（box chrome + 多行扩展 + typeahead 选中行点阵纹理同源） | [input-zone-visual.md](input-zone-visual.md) | 设计中 |

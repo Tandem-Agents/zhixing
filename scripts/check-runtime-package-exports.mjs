@@ -13,6 +13,10 @@ const [
   meshHandshake,
   meshPairing,
   meshTransport,
+  meshDeviceKeyStore,
+  meshDeviceReadiness,
+  meshCredentialExposure,
+  secrets,
 ] = await Promise.all([
   import("../packages/server/dist/index.js"),
   import("../packages/owner-services/dist/index.js"),
@@ -26,6 +30,10 @@ const [
   import("../packages/mesh/dist/handshake.js"),
   import("../packages/mesh/dist/pairing-public.js"),
   import("../packages/mesh/dist/transport.js"),
+  import("../packages/mesh/dist/device-key-store.js"),
+  import("../packages/mesh/dist/device-readiness.js"),
+  import("../packages/mesh/dist/credential-exposure.js"),
+  import("../packages/secrets/dist/index.js"),
 ]);
 
 const retiredServerCompatibilityValues = [
@@ -87,9 +95,24 @@ const meshCanonicalValues = {
   connectAuthenticatedMesh: meshHandshake,
   createAuthenticatedMeshServer: meshHandshake,
   SecureMeshConnection: meshTransport,
+  persistDeviceKey: meshDeviceKeyStore,
+  loadDeviceKey: meshDeviceKeyStore,
+  deleteDeviceKey: meshDeviceKeyStore,
+  evaluateDeviceReadiness: meshDeviceReadiness,
+  assertDeviceReadyForRole: meshDeviceReadiness,
+  nextDeviceOnboardingStep: meshDeviceReadiness,
+  createCredentialExposureRecord: meshCredentialExposure,
+  projectDeviceCredentialRevocation: meshCredentialExposure,
 };
 
 const failures = [];
+for (const name of [
+  "EncryptedVaultSecretStore",
+  "createPlatformSecretStore",
+  "getPlatformSecretStoreProtectedPaths",
+]) {
+  if (typeof secrets[name] !== "function") failures.push(`secrets:${name}`);
+}
 for (const name of ownerServiceCanonicalValues) {
   if (ownerServices[name] !== ownerServicesAdvancement[name]) {
     failures.push(`owner-services:${name}`);

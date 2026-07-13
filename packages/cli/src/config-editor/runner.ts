@@ -2,7 +2,7 @@
  * 编辑器主循环：panel stack + KeyEvent → Action 派发。
  *
  * 状态层次：
- *   - WorkingState：业务数据（config / credentials / inputBuffer），事务性提交
+ *   - WorkingState：业务数据（config / credentials / inputBuffer），完成前只在内存暂存
  *   - PanelStack：面板导航栈，元素是 PanelDescriptor + 该面板的光标
  *   - 每次 KeyEvent → 当前 panel 的 handler 处理 → 应用 action 到 stack / state
  *

@@ -85,7 +85,7 @@ function makeContext(stdout: FakeStdout): ConfigEditorContext {
     header: {
       workspaceRoot: "/test/ws",
       configPath: "/test/config.toml",
-      credentialsPath: "/test/cred.toml",
+      secretStoreLabel: "设备本地 SecretStore",
     },
     stdin: {} as NodeJS.ReadStream,
     stdout: stdout as unknown as NodeJS.WritableStream,
@@ -128,7 +128,7 @@ describe("config-editor panel 整屏快照", () => {
       │                                                                              │
       │   工作目录    /test/ws                                                       │
       │   配置        /test/config.toml                                              │
-      │   凭证        /test/cred.toml                                                │
+      │   秘密存储    设备本地 SecretStore                                           │
       │                                                                              │
       ╰──────────────────────────────────────────────────────────────────────────────╯
 
@@ -193,7 +193,7 @@ describe("config-editor panel 整屏快照", () => {
       │                                                                              │
       │   工作目录    /test/ws                                                       │
       │   配置        /test/config.toml                                              │
-      │   凭证        /test/cred.toml                                                │
+      │   秘密存储    设备本地 SecretStore                                           │
       │                                                                              │
       ╰──────────────────────────────────────────────────────────────────────────────╯
 

@@ -42,11 +42,63 @@ const SOURCE_PRIORITY: Record<string, number> = {
   user: 3,
 };
 
+export interface PolicyEngineOptions {
+  /**
+   * 由产品组合根声明的本机系统资源绝对路径前缀。它们与静态内置秘密规则同为
+   * bypass-immune block，不能被项目规则、用户规则或确认流程覆盖。
+   */
+  readonly systemProtectedPaths?: readonly string[];
+}
+
+function normalizeSystemProtectedPaths(paths: readonly string[]): string[] {
+  const normalized: string[] = [];
+  const seen = new Set<string>();
+  for (const candidate of paths) {
+    if (typeof candidate !== "string" || candidate.trim().length === 0) {
+      throw new TypeError("System protected paths must be non-empty strings");
+    }
+    if (!path.isAbsolute(candidate)) {
+      throw new TypeError(`System protected path must be absolute: ${candidate}`);
+    }
+    const resolved = path.resolve(candidate);
+    if (path.dirname(resolved) === resolved) {
+      throw new TypeError(`Filesystem root cannot be a system protected path: ${candidate}`);
+    }
+    const identity = process.platform === "win32" ? resolved.toLowerCase() : resolved;
+    if (!seen.has(identity)) {
+      seen.add(identity);
+      normalized.push(resolved);
+    }
+  }
+  return normalized;
+}
+
 export class PolicyEngine implements IPolicyEngine {
   private rules: SecurityRule[] = [];
 
-  constructor() {
+  constructor(options: PolicyEngineOptions = {}) {
     this.loadRules(BUILTIN_RULES);
+    const systemProtectedPaths = normalizeSystemProtectedPaths(
+      options.systemProtectedPaths ?? [],
+    );
+    if (systemProtectedPaths.length > 0) {
+      this.loadRules([
+        {
+          id: "bi-system-protected-paths",
+          name: "宿主秘密路径隔离",
+          description: "AI 不可访问由产品组合根声明的本机秘密文件族",
+          enabled: true,
+          match: { type: "path", paths: systemProtectedPaths, access: "any" },
+          action: "block",
+          bypassImmune: true,
+          severity: "critical",
+          category: "data_exfiltration",
+          source: "builtin",
+          message: "宿主声明的本机秘密文件不允许 AI 访问",
+          suggestion: "请通过对应产品功能修改，不要让 AI 直接读写底层秘密文件",
+        },
+      ]);
+    }
   }
 
   evaluate(request: SecurityRequest): SecurityDecision {
@@ -176,6 +228,9 @@ export class PolicyEngine implements IPolicyEngine {
       const resolvedInput = path.resolve(request.context.cwd, expandedInput);
       // 统一为正斜杠，避免 Windows 反斜杠导致的匹配失败
       const normalizedInput = resolvedInput.replace(/\\/g, "/");
+      const comparableInput = process.platform === "win32"
+        ? normalizedInput.toLowerCase()
+        : normalizedInput;
 
       return spec.paths.some((specPath) => {
         const expandedSpec = expandUserHome(specPath);
@@ -183,16 +238,22 @@ export class PolicyEngine implements IPolicyEngine {
         // 规则路径是绝对路径（如 /etc/）：直接做绝对路径前缀匹配
         if (path.isAbsolute(expandedSpec)) {
           const normalizedSpec = expandedSpec.replace(/\\/g, "/");
-          return normalizedInput.startsWith(normalizedSpec);
+          const comparableSpec = process.platform === "win32"
+            ? normalizedSpec.toLowerCase()
+            : normalizedSpec;
+          return comparableInput.startsWith(comparableSpec);
         }
 
         // 规则路径是相对路径段（如 .git/）：检查它是否作为路径段出现在输入路径中
         // 例如 "/home/user/project/.git/HEAD" 包含路径段 ".git/"
-        const specSegment = expandedSpec.replace(/\\/g, "/");
+        const normalizedSegment = expandedSpec.replace(/\\/g, "/");
+        const specSegment = process.platform === "win32"
+          ? normalizedSegment.toLowerCase()
+          : normalizedSegment;
         const segmentPattern = `/${specSegment}`;
         return (
-          normalizedInput.includes(segmentPattern) ||
-          normalizedInput.startsWith(specSegment)
+          comparableInput.includes(segmentPattern) ||
+          comparableInput.startsWith(specSegment)
         );
       });
     });

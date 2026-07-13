@@ -5,7 +5,7 @@
  * 用同一逻辑——避免分裂实现。
  *
  * 流程：
- *   1. loadConfig + loadCredentials —— schema 损坏 → schema-error
+ *   1. 加载公开配置，并在同一协调区完成旧凭据清退与 SecretStore 加载
  *   2. validateConfigSemantics —— 含废弃字段 → semantic-error
  *   3. checkModel —— 缺失则触发编辑器(messaging 可选,不在宿主启动拦截)
  *   4. 编辑器完成 → reload 后返回 ready
@@ -14,25 +14,27 @@
  * caller 按返回 kind 决定后续：
  *   - ready / completed → 继续启动 REPL / server
  *   - cancelled → process.exit(0)
- *   - 其它（schema-error / semantic-error / non-tty）→ 打印错误 + exit(2)
+ *   - 其它（schema-error / secret-store-error / semantic-error / non-tty）→ 打印错误 + exit(2)
  */
 
 import path from "node:path";
+import type { SecretStorePort } from "@zhixing/core/contracts";
 import {
   ConfigSchemaError,
   CredentialsSchemaError,
-  getCredentialsPath,
   getGlobalConfigPath,
   loadConfig,
-  loadCredentials,
+  loadCredentialsWithLegacyMigration,
   resolveHomeDir,
   validateConfigSemantics,
   writeConfig,
   writeCredentials,
+  type CredentialStoreCoordinator,
   type ConfigSemanticIssue,
   type ZhixingConfig,
   type ZhixingCredentials,
 } from "@zhixing/providers";
+import { createPlatformSecretStore } from "@zhixing/secrets";
 import {
   checkModel,
   runConfigEditor,
@@ -59,6 +61,7 @@ export type StartupCheckResult =
   | { kind: "ready"; config: ZhixingConfig; credentials: ZhixingCredentials }
   | { kind: "cancelled" }
   | { kind: "schema-error"; filePath: string; message: string }
+  | { kind: "secret-store-error"; filePath: string; message: string }
   | { kind: "semantic-error"; filePath: string; issues: ConfigSemanticIssue[] }
   | { kind: "non-tty"; missingLabels: string[] };
 
@@ -71,6 +74,8 @@ export interface RunStartupCheckOptions {
   mode: StartupMode;
   stdin?: NodeJS.ReadStream;
   stdout?: NodeJS.WritableStream;
+  /** SecretStore 覆盖（测试或受管宿主注入）。 */
+  secretStore?: SecretStorePort & CredentialStoreCoordinator;
 }
 
 export async function runStartupCheck(
@@ -86,31 +91,53 @@ export async function runStartupCheck(
   const configPath = explicitHomeDir
     ? path.join(explicitHomeDir, "config.jsonc")
     : getGlobalConfigPath(env);
-  const credentialsPath = getCredentialsPath(credentialsHomeDir);
-
   // 1. load
   let config: ZhixingConfig;
   let credentials: ZhixingCredentials;
   try {
     config = loadConfig({ homeDir: explicitHomeDir, env });
-    credentials = loadCredentials({ homeDir: credentialsHomeDir });
   } catch (err) {
-    if (
-      err instanceof ConfigSchemaError
-      || err instanceof CredentialsSchemaError
-    ) {
-      return { kind: "schema-error", filePath: err.filePath, message: err.message };
-    }
-    throw err;
+    return {
+      kind: "schema-error",
+      filePath: err instanceof ConfigSchemaError ? err.filePath : configPath,
+      message: err instanceof Error ? err.message : "配置文件不可用",
+    };
   }
-
-  // 2. semantic 校验
   const semanticIssues = validateConfigSemantics(config);
   if (semanticIssues.length > 0) {
     return { kind: "semantic-error", filePath: configPath, issues: semanticIssues };
   }
 
-  // 3. 必要字段检测——按 mode 决定 sections
+  let secretStore: SecretStorePort & CredentialStoreCoordinator;
+  try {
+    secretStore =
+      options.secretStore ??
+      createPlatformSecretStore({ homeDir: credentialsHomeDir, env });
+    const secretState = await secretStore.unlockState();
+    if (secretState !== "unlocked") {
+      return {
+        kind: "secret-store-error",
+        filePath: credentialsHomeDir,
+        message: `SecretStore 当前状态：${secretState}`,
+      };
+    }
+    const preparedCredentials = await loadCredentialsWithLegacyMigration({
+      store: secretStore,
+      homeDir: credentialsHomeDir,
+    });
+    credentials = preparedCredentials.credentials;
+  } catch (err) {
+    if (err instanceof CredentialsSchemaError) {
+      return { kind: "schema-error", filePath: err.filePath, message: err.message };
+    }
+    return {
+      kind: "secret-store-error",
+      filePath: credentialsHomeDir,
+      message: err instanceof Error ? err.message : "SecretStore 不可用",
+    };
+  }
+
+  // 2. 必要字段检测——按 mode 决定 sections
   const missingSections: SectionId[] = [];
   const missingLabels: string[] = [];
 
@@ -124,12 +151,12 @@ export async function runStartupCheck(
     return { kind: "ready", config, credentials };
   }
 
-  // 4. 缺失 + 非 TTY → fail-fast
+  // 3. 缺失 + 非 TTY → fail-fast
   if (!isTTY) {
     return { kind: "non-tty", missingLabels };
   }
 
-  // 5. 缺失 + TTY → 跑编辑器
+  // 4. 缺失 + TTY → 跑编辑器
   const title = pickEditorTitle(options.mode, missingSections);
   const welcomeText = pickWelcomeText(options.mode);
   const editorResult = await runConfigEditor({
@@ -138,7 +165,7 @@ export async function runStartupCheck(
     writers: {
       writeConfig: (next) => writeConfig(next, { homeDir: explicitHomeDir, env }),
       writeCredentials: (next) =>
-        writeCredentials(next, { homeDir: credentialsHomeDir }),
+        writeCredentials(next, { store: secretStore }),
     },
     sections: missingSections,
     title,
@@ -146,7 +173,7 @@ export async function runStartupCheck(
     header: {
       workspaceRoot: config.workspace?.root,
       configPath,
-      credentialsPath,
+      secretStoreLabel: "设备本地 SecretStore",
     },
     stdin,
     stdout,
@@ -159,7 +186,12 @@ export async function runStartupCheck(
       homeDir: explicitHomeDir,
       env,
     });
-    const updatedCredentials = loadCredentials({ homeDir: credentialsHomeDir });
+    const updatedCredentials = (
+      await loadCredentialsWithLegacyMigration({
+        store: secretStore,
+        homeDir: credentialsHomeDir,
+      })
+    ).credentials;
     return { kind: "ready", config: updatedConfig, credentials: updatedCredentials };
   }
 

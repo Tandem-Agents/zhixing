@@ -4,12 +4,12 @@ import { ProviderConfigError, resolveFromConfig, resolveProvider } from "../reso
 import {
   DEFAULT_QUIRKS,
   type ProviderCredentialEntry,
-  type ZhixingCredentials,
+  type ProviderCredentialProjection,
 } from "../types.js";
 
-const noCreds = (): ZhixingCredentials => ({});
+const noCreds = (): ProviderCredentialProjection => ({});
 
-const credsFor = (entries: Record<string, string>): ZhixingCredentials => ({
+const credsFor = (entries: Record<string, string>): ProviderCredentialProjection => ({
   providers: Object.fromEntries(
     Object.entries(entries).map(([id, apiKey]) => [id, { apiKey }]),
   ),
@@ -17,7 +17,7 @@ const credsFor = (entries: Record<string, string>): ZhixingCredentials => ({
 
 const credsWith = (
   entries: Record<string, ProviderCredentialEntry>,
-): ZhixingCredentials => ({
+): ProviderCredentialProjection => ({
   providers: { ...entries },
 });
 
@@ -157,26 +157,26 @@ describe("resolveProvider", () => {
   // ─── API Key 缺失（凭证唯一入口） ───
 
   describe("API Key 缺失", () => {
-    it("credentials 没填时抛错并引向 credentials.json", () => {
+    it("credentials 没填时抛错并引向目标设备配置向导", () => {
       expect(() => {
         resolveProvider("deepseek", noCreds());
       }).toThrow(ProviderConfigError);
       expect(() => {
         resolveProvider("deepseek", noCreds());
-      }).toThrow(/credentials\.json/);
+      }).toThrow(/SecretStore/);
       expect(() => {
         resolveProvider("deepseek", noCreds());
       }).toThrow(/缺少 API Key/);
     });
 
-    it("错误消息含 schema 示例引导用户编辑", () => {
+    it("错误消息引导用户在目标设备安全录入", () => {
       try {
         resolveProvider("deepseek", noCreds());
         expect.fail("应抛 ProviderConfigError");
       } catch (err) {
         const message = (err as Error).message;
-        expect(message).toContain("providers");
-        expect(message).toContain("apiKey");
+        expect(message).toContain("目标设备");
+        expect(message).toContain("配置向导");
         expect(message).toContain("zhixing");
       }
     });

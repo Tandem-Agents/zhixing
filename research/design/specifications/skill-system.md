@@ -43,7 +43,7 @@ skill = 可复用的「做某类事的方法」（程序性知识）,按需调�
 
 ## 二、磁盘数据模型
 
-**两层物理分离**(同构于 `config.jsonc` 决策层 / `credentials.json` 内容层、`me/` 记忆层各自独立的既有哲学):
+**两层物理分离**(同构于 `config.jsonc` 决策层 / SecretStore 秘密层、`me/` 记忆层各自独立的既有哲学):
 
 - **内容层** = `SKILL.md`(YAML frontmatter + 正文)+ 同目录附属文件,**与 Agent Skills 生态逐字节兼容**。接入技能原样落盘,**绝不回写其 `SKILL.md`**。
 - **状态层 / 度量层** = zhixing 私有、会变,集中到库根旁路;`SKILL.md` frontmatter **零私有字段**。

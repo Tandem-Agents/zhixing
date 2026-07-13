@@ -193,7 +193,7 @@ export function isMessagingEnabled(state: WorkingState, channelId: string): bool
 // ─── MCP server 字段读写 ───
 //
 // config.mcp.servers 放连接决策（传输方式 + 启动信息 + 启用开关），credentials.mcp
-// 放该 server 的密字段。二者分属两文件、同一 server id 索引——增删改严格成对维护，
+// 放该 server 的密字段。二者分属公开配置与 SecretStore、同一 server id 索引——增删改严格成对维护，
 // 避免残留孤儿凭证。
 
 /** 读某 MCP server 的连接配置（type / command / args / url / enabled）。 */
@@ -250,7 +250,7 @@ export function setMcpServerEnabled(
 
 /**
  * 移除一个 MCP server——同时清 config.mcp.servers 与 credentials.mcp 两处条目，
- * 避免残留孤儿凭证（事务性：随 [完成] 一次落盘）。
+ * 避免在编辑结果中残留孤儿凭据；两处只在 [完成] 后交给组合根持久化。
  */
 export function removeMcpServer(
   state: WorkingState,

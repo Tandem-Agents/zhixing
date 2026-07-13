@@ -18,6 +18,8 @@ import {
   resolveModelCapability,
   resolveWorkspace,
   resolveWorkspaceSessionType,
+  type ProviderCredentialProjection,
+  type ZhixingConfig,
 } from "@zhixing/providers";
 import {
   createAdvancementRuntime,
@@ -31,6 +33,8 @@ import {
 import { AdvancementController } from "@zhixing/owner-services";
 
 export interface ServeAdvancementControllerDeps {
+  readonly config: ZhixingConfig;
+  readonly credentials: ProviderCredentialProjection;
   /** 准入投影来源——活跃会话窗口尾部（经 lazy ref 取，未就绪返回 undefined）。 */
   readonly recentContextProvider?: (
     conversationId: string,
@@ -40,9 +44,12 @@ export interface ServeAdvancementControllerDeps {
 }
 
 export async function createServeAdvancementController(
-  deps: ServeAdvancementControllerDeps = {},
+  deps: ServeAdvancementControllerDeps,
 ): Promise<AdvancementController> {
-  const { roles, config } = createProviderRoles();
+  const { roles, config } = createProviderRoles({
+    config: deps.config,
+    credentials: deps.credentials,
+  });
   const mainThinking = resolveConfiguredThinking(
     roles.main,
     config.llm?.main?.thinking,

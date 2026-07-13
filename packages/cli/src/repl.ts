@@ -30,7 +30,6 @@ import {
   type PostTurnControlOutcome,
   CommandDispatcher,
 } from "@zhixing/core";
-import { loadCredentials, resolveHomeDir } from "@zhixing/providers";
 import { TaskTail } from "./task-tail/index.js";
 import { TaskListViewCache } from "./runtime/task-list-view.js";
 import { registerTaskCommands } from "./commands/task-commands.js";
@@ -544,9 +543,6 @@ export async function startRepl(): Promise<void> {
   const conversationFacade = new RpcConversationFacade(coreHost);
   const worksceneFacade = new RpcWorksceneFacade(coreHost);
   const managementFacade = new RpcManagementFacade(coreHost);
-
-  const credentials = loadCredentials({ homeDir: resolveHomeDir() });
-  void credentials;
 
   // 会话本身在宿主执行——宿主必须在场,启动即 ensure(不在则拉起)。
   // 拉起 / 连接 / 协议失败时进入只读事实面，不启动任何会话写路径。

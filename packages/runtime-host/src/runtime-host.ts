@@ -39,8 +39,13 @@ type OnSecurityBlockedFn = NonNullable<
 >;
 type SegmentDepsOption = CreateAgentRuntimeOptions["segmentDeps"];
 type SkillStoreOption = CreateAgentRuntimeOptions["skillStore"];
+type ProviderConfigurationOption = CreateAgentRuntimeOptions["providerConfiguration"];
 
 export interface RuntimeHostOptions {
+  /** 设备本地 SecretStore 的已解密内存投影，由产品组合根持有并注入。 */
+  providerConfiguration: ProviderConfigurationOption;
+  /** 产品组合根持有的本机秘密路径，逐实例注入安全管线且不可由用户授权覆盖。 */
+  systemProtectedPaths: readonly string[];
   /** 技能库单实例——索引结构版本跨全部实例一致,任一保存全员下窗即见 */
   skillStore: SkillStoreOption;
   /** 段切换外部依赖——注意力窗口的段保护对一切运行体生效 */
@@ -147,6 +152,8 @@ export class RuntimeHost {
   ): Promise<AgentRuntime> {
     const workscene = opts?.workscene;
     const runtime = await createAgentRuntime({
+      providerConfiguration: this.opts.providerConfiguration,
+      systemProtectedPaths: this.opts.systemProtectedPaths,
       workspace: workscene ? workscene.workspace : undefined,
       primaryRole: workscene?.primaryRole,
       memoryScope: workscene?.memoryScope,

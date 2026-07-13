@@ -40,6 +40,7 @@ export { workspaceDirOf } from "./trust.js";
 
 // 策略引擎
 export { PolicyEngine } from "./policy-engine.js";
+export type { PolicyEngineOptions } from "./policy-engine.js";
 
 // 内置规则
 export { BUILTIN_RULES } from "./builtin-rules.js";

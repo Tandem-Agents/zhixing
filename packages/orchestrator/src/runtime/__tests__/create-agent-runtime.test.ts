@@ -135,7 +135,14 @@ vi.mock("@zhixing/providers", async (importOriginal) => {
 });
 
 // 必须在 vi.mock 之后 import,确保 createAgentRuntime 拿到的是 mock 后的 providers
-const { createAgentRuntime } = await import("../create-agent-runtime.js");
+const { createAgentRuntime: createAgentRuntimeImpl } = await import("../create-agent-runtime.js");
+const createAgentRuntime = (
+  options: Omit<Parameters<typeof createAgentRuntimeImpl>[0], "providerConfiguration">,
+) =>
+  createAgentRuntimeImpl({
+    providerConfiguration: { config: {}, credentials: {} },
+    ...options,
+  } as Parameters<typeof createAgentRuntimeImpl>[0]);
 const { mainProfile } = await import("../../profile/default-profiles.js");
 
 // ─── 测试辅助 ───
@@ -2033,6 +2040,25 @@ describe("trustContext 装配分叉", () => {
     expect(snapshot.builtinRules.length).toBeGreaterThan(0);
     expect(snapshot.rateLimits).toEqual([]);
     expect(snapshot.confirmations).toEqual([]);
+  });
+
+  it("把组合根的实际秘密路径注入每个运行体并旁路免疫地阻断", async () => {
+    providerRef.current = new MockLLMProvider([{ text: "ok" }]);
+    const protectedPrefix = path.resolve(process.cwd(), "custom-home", "secret-vault");
+    const runtime = await createAgentRuntime({
+      workspace: null,
+      systemProtectedPaths: [protectedPrefix],
+    });
+
+    const result = await runtime.securityPipeline.evaluate(
+      "read",
+      { path: `${protectedPrefix}.json` },
+      process.cwd(),
+    );
+    expect(result.allowed).toBe(false);
+    expect(result.decision?.matchedRules.map((rule) => rule.id)).toContain(
+      "bi-system-protected-paths",
+    );
   });
 
   it("subAgentUsages 暴露 /usage 的 Task 拆分结构化视图", async () => {

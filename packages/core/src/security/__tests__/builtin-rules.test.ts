@@ -1,14 +1,14 @@
 /**
  * 知行 .zhixing/ 目录的 builtin 规则匹配契约测试
  *
- * 覆盖两条规则与它们的协作语义：
- *   - bi-zhixing-credentials-block：~/.zhixing/credentials.json 任何 access 一律 block；
- *     AI 永远拿不到 apiKey / channel secret，规则携带 message + suggestion 让 AI
- *     转去引导用户自改文件
+ * 覆盖三条规则与它们的协作语义：
+ *   - bi-zhixing-credentials-block：SecretStore 文件族与旧 credentials.json 的任何
+ *     access 一律 block；规则携带 message + suggestion，引导用户走专用配置流程
+ *   - bi-os-credential-store：平台凭据命令一律 block，避免绕过 SecretStore 文件边界
  *   - bi-zhixing-config-write：~/.zhixing/ 写操作走 confirm；用户当面认可 AI 改公开配置
  *
  * 关键不变量：
- *   - 同 path 同时命中两规则时，block > confirm（凭证文件永远不会降级到 confirm）
+ *   - 同 path 同时命中两规则时，block > confirm（秘密存储永远不会降级到 confirm）
  *   - bi-zhixing-config-write 仅 access: write，读 config.json 不命中
  *   - 路径形态（相对路径段 / ~/ 展开 / 绝对路径）三种都被规则吃住
  *   - 元数据契约（bypassImmune / severity / category / source / message / suggestion）
@@ -110,6 +110,26 @@ describe("bi-zhixing-credentials-block · 凭证文件完全隔离", () => {
       expect(decision.action).toBe("block");
     });
 
+    it.each([
+      ".zhixing/secret-vault.json",
+      ".zhixing/secret-vault.key",
+      ".zhixing/secret-vault.json.lock",
+      ".zhixing/secret-vault.json.exclusive.lock",
+      ".zhixing/secret-vault.json.1234.deadbeef.tmp",
+    ])("read/write SecretStore 文件族 %s → block", (filePath) => {
+      const engine = new PolicyEngine();
+      expect(engine.evaluate(readRequest(filePath)).action).toBe("block");
+      expect(engine.evaluate(writeRequest(filePath)).action).toBe("block");
+    });
+
+    it.runIf(process.platform === "win32")(
+      "Windows 大小写别名不能绕过 SecretStore 保护",
+      () => {
+        const engine = new PolicyEngine();
+        expect(engine.evaluate(readRequest(".ZHIXING/SECRET-VAULT.JSON")).action).toBe("block");
+      },
+    );
+
     it("riskLevel = critical（携带 bypassImmune + severity）", () => {
       const engine = new PolicyEngine();
       const decision = engine.evaluate(readRequest(".zhixing/credentials.json"));
@@ -119,15 +139,15 @@ describe("bi-zhixing-credentials-block · 凭证文件完全隔离", () => {
     it("decision.reason 含规则 message —— AI 看到工具失败原因", () => {
       const engine = new PolicyEngine();
       const decision = engine.evaluate(readRequest(".zhixing/credentials.json"));
-      expect(decision.reason).toContain("凭证");
+      expect(decision.reason).toContain("凭据");
     });
 
-    it("decision.suggestion 含 schema 引导 —— AI 能转给用户自改", () => {
+    it("decision.suggestion 引导用户走 SecretStore 专用流程", () => {
       const engine = new PolicyEngine();
       const decision = engine.evaluate(readRequest(".zhixing/credentials.json"));
       expect(decision.suggestion).toBeDefined();
-      expect(decision.suggestion).toContain("credentials.json");
-      expect(decision.suggestion).toContain("apiKey");
+      expect(decision.suggestion).toContain("SecretStore");
+      expect(decision.suggestion).toContain("`zz`");
     });
   });
 
@@ -187,8 +207,35 @@ describe("bi-zhixing-credentials-block · 凭证文件完全隔离", () => {
       if (rule.match.type === "path") {
         expect(rule.match.access).toBe("any");
         expect(rule.match.paths).toContain(".zhixing/credentials.json");
+        expect(rule.match.paths).toContain(".zhixing/secret-vault");
       }
     });
+  });
+});
+
+describe("bi-os-credential-store · 系统凭据命令完全隔离", () => {
+  it.each([
+    "secret-tool lookup service dev.zhixing.secret-vault",
+    "/usr/bin/secret-tool store service x",
+    "security find-generic-password -s dev.zhixing.secret-vault -w",
+    "security -q find-generic-password -s dev.zhixing.secret-vault -w",
+    '"/usr/bin/security" dump-keychain',
+    "cmdkey.exe /list",
+    "vaultcmd /listcreds:\\Windows Credentials",
+    "keyctl show",
+  ])("blocks %s", (command) => {
+    const engine = new PolicyEngine();
+    const decision = engine.evaluate(makeRequest({ tool: "bash", arguments: { command } }));
+    expect(decision.action).toBe("block");
+    expect(decision.matchedRules.some((rule) => rule.id === "bi-os-credential-store")).toBe(true);
+  });
+
+  it("does not block unrelated macOS security tooling", () => {
+    const engine = new PolicyEngine();
+    const decision = engine.evaluate(
+      makeRequest({ tool: "bash", arguments: { command: "security verify-cert -c app.pem" } }),
+    );
+    expect(decision.matchedRules.some((rule) => rule.id === "bi-os-credential-store")).toBe(false);
   });
 });
 
@@ -282,7 +329,7 @@ describe("规则严格度排序：block 优先于 confirm", () => {
     const engine = new PolicyEngine();
     const decision = engine.evaluate(writeRequest(".zhixing/credentials.json"));
     // 排序后首位规则的 message + suggestion 进 decision
-    expect(decision.reason).toContain("凭证");
-    expect(decision.suggestion).toContain("credentials.json");
+    expect(decision.reason).toContain("凭据");
+    expect(decision.suggestion).toContain("SecretStore");
   });
 });

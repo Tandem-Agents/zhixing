@@ -7,8 +7,7 @@
  *
  * 配置文件格式：JSONC（JSON with Comments）—— 支持 `//` 和 `/* *​/` 注释，
  * 让用户编辑时直接看到字段说明。读取用 jsonc-parser；写入仍用标准 JSON.stringify
- * （写入会丢注释，所以 wizard 当前流程仅写 credentials.json，不动 config.jsonc
- * 的注释；未来需要改 config.jsonc 时用 surgical edit 保留注释）。
+ * （写入会丢注释；需要改 config.jsonc 时应使用保留注释的定点编辑）。
  *
  * 设计决策：
  * - 缺失文件 = 首次运行自动创建全局配置模板
@@ -288,7 +287,7 @@ ${powerEntry}
 
   // ─── 启用的消息通道 ───
   // 列出要启用的 channel id；每个 channel 的具体字段（appId / appSecret 等）
-  // 在 ~/.zhixing/credentials.json 的 channels.<id> 段。
+  // 由目标设备的配置向导写入本地 SecretStore。
   // 例：启用飞书 → "messaging": { "feishu": {} }
   "messaging": {}
 

@@ -95,8 +95,10 @@ import {
   resolveWorkspace,
   resolveWorkspaceSessionType,
   ROLE_SPECS,
+  type ProviderCredentialProjection,
   type ResolvedWorkspace,
   type WorkspaceDirStatus,
+  type ZhixingConfig,
 } from "@zhixing/providers";
 import {
   BUILTIN_TOOL_FACTORIES,
@@ -534,6 +536,11 @@ export class LifecycleHookError extends Error {
 }
 
 export interface CreateAgentRuntimeOptions {
+  /** 组合根已从设备本地 SecretStore 解出的配置投影；运行时不得自行触达持久化秘密。 */
+  providerConfiguration: {
+    readonly config: ZhixingConfig;
+    readonly credentials: ProviderCredentialProjection;
+  };
   /**
    * 工作区：
    *   - string   → 运行时显式工作区覆盖(如工作场景 workdir)，经 resolveWorkspace 正常解析
@@ -612,6 +619,8 @@ export interface CreateAgentRuntimeOptions {
    * 注册），同一注入 store 被多次 register 不会累积重复规则。
    */
   permissionStore?: IPermissionStore;
+  /** 产品组合根声明的本机秘密路径；所有工具调用都由安全管线旁路免疫地阻断。 */
+  systemProtectedPaths?: readonly string[];
   /**
    * 段切换外部依赖 —— cli 装配层注入 task_list 读取 + 持久化实现。
    *
@@ -671,7 +680,10 @@ function resolveRoleThinking(
 export async function createAgentRuntime(
   options: CreateAgentRuntimeOptions,
 ): Promise<AgentRuntime> {
-  const { roles, config, resolvedRoles } = createProviderRoles();
+  const { roles, config, resolvedRoles } = createProviderRoles({
+    config: options.providerConfiguration.config,
+    credentials: options.providerConfiguration.credentials,
+  });
 
   // 可选角色降级（显式配了 light/power 但其 provider 凭证/配置缺失）——
   // 已回退 main，不阻断启动；此处打一次可见的非致命告警，保留"不静默掩盖
@@ -848,6 +860,9 @@ export async function createAgentRuntime(
     sessionType,
     permissionStore: persistentStore,
     toolBoundaryRegistry: boundaryRegistry,
+    ...(options.systemProtectedPaths
+      ? { systemProtectedPaths: options.systemProtectedPaths }
+      : {}),
   });
 
   // 确认交互 broker：会话级单例。渲染器由 REPL 在 attach 时注入。

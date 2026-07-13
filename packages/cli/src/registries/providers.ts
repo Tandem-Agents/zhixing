@@ -10,7 +10,7 @@
  * 增加 provider 流程：
  *   1. 这里加一项（label + id + 描述 + 文档链接）
  *   2. 确保 `packages/providers/src/presets.ts` 有对应 preset（baseUrl / protocol / quirks）
- *   3. `credentials.json` 模板加该 provider 占位（packages/providers/src/credentials-loader.ts）
+ *   3. 配置编辑器登记该 provider 的 SecretStore 录入字段
  *
  * 文档链接以 `docUrl` / `modelListDocUrl` 显式声明（first-class 字段）——让
  * input panel 渲染为可点击行（OSC 8），不靠 regex 解析。链接尽量指向**用户

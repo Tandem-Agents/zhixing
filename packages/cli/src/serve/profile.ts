@@ -23,7 +23,7 @@ export const DEFAULT_PROFILE: ServerProfile = "full";
 
 /** profile 行为画像描述符。 */
 export interface ProfileSpec {
-  /** 启用的接入面 name 集合（装配顺序由 ACCESS_SURFACES 数组定，见 access-surface.ts）。 */
+  /** 启用的接入面 name 集合（装配顺序由接入面工厂固定，见 access-surfaces.ts）。 */
   readonly surfaces: readonly string[];
 }
 

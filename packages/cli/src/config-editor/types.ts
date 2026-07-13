@@ -2,7 +2,7 @@
  * 基础配置编辑器类型定义。
  *
  * 三层抽象：
- *   - WorkingState：编辑期暂存的 config / credentials（事务性，仅 [完成] 时落盘）
+ *   - WorkingState：编辑期暂存的 config / credentials（仅 [完成] 后持久化）
  *   - Section：用户视角的配置块（"model" / "messaging"），由 caller 选择启用
  *   - Panel：UI 面板（main / list / entity / input），由状态机栈管理
  *
@@ -96,8 +96,8 @@ export type ModelRole = RoleId;
 /**
  * 编辑期暂存——不直接写文件，所有改动累积到这里。
  *
- * 事务性：[完成] 触发 caller 提供的 writers 一次性落盘；Ctrl+C / 取消则全部丢弃。
- * 防止两文件半致状态（如 apiKey 写了但 main.provider 没写）。
+ * [完成] 后才触发 caller 提供的 writers；Ctrl+C / 取消时全部丢弃。
+ * 持久化完成前，配置与秘密改动只存在于本对象中。
  */
 export interface WorkingState {
   config: ZhixingConfig;
@@ -311,7 +311,7 @@ export interface ConfigEditorContext {
    */
   welcomeText?: string;
   /** 头部展示信息（如 workspace 路径） */
-  header?: { workspaceRoot?: string; configPath: string; credentialsPath: string };
+  header?: { workspaceRoot?: string; configPath: string; secretStoreLabel: string };
   /** I/O 注入点 */
   stdin: NodeJS.ReadStream;
   stdout: NodeJS.WritableStream;

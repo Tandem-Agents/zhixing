@@ -147,7 +147,7 @@ export interface ProviderPreset {
    * 已知 model catalog（可选）。
    *
    * 当前所有 preset 都不内嵌——budget 跟 PROTOCOL_BUDGET_DEFAULTS 一致时，内嵌
-   * 是负维护无价值（详见 research/design/drafts/model-budget-resolution.md §4.3）。
+   * 是负维护无价值（详见 research/design/drafts/model-budget-resolution.md）。
    * 字段保留作扩展点：未来真有 model 的 budget 跟协议族默认显著不同
    * （如 1M context 变体），届时按需补充。
    */
@@ -176,13 +176,12 @@ export interface ModelBudgetOverride {
 export type ModelInputCapabilitiesOverride = ModelInputCapabilityOverride;
 
 /**
- * 凭证文件中单个 provider 的完整定义条目（对应 ~/.zhixing/credentials.json 的
- * `providers.<id>` 字段）。
+ * SecretStore 内存投影中的单个 provider 定义条目。
  *
  * 凭证 + 技术配置都在这里——provider 资源属于"内容层"，集中存放：
  *   - 内置预设 provider（如 siliconflow / openai）：用户只需填 apiKey，其它字段
  *     由内置预设兜底
- *   - 自定义 provider（私有部署 / 代理）：用户在 credentials.json 写完整字段
+ *   - 自定义 provider（私有部署 / 代理）：用户通过配置向导录入完整字段
  *     （apiKey + baseUrl + protocol + 等），不预设
  *
  * 与 ZhixingConfig 的关系：config.llm.main.provider 引用本表的 key；本表是
@@ -285,10 +284,10 @@ export interface IntentConfig {
  *
  * config.jsonc 是决策层：本条目仅记录"启用 channel <id> 时的功能选项"——
  * type / options / defaultTarget 等。**不含**任何凭证或链接字段（appId / appSecret 等）——
- * 那些属于内容层，集中在 credentials.channels.<id>。
+ * 那些属于设备本地秘密层，由 SecretStore 投影为 credentials.channels.<id>。
  *
  * 一个 channel 出现在 config.messaging 即视为启用；setupChannels 取
- * Object.keys(messaging) 作启用列表，从 credentials.channels.<id> 取完整字段。
+ * Object.keys(messaging) 作启用列表，从 SecretStore 的 channel 投影取完整字段。
  *
  * 与 core 的 ChannelConfig 区分：
  * - MessagingChannelEntry 是 config 层的启用条目（无凭证字段）
@@ -335,7 +334,7 @@ export interface McpConfig {
 /**
  * 单个 LLM 角色的 provider+model 选择。
  *
- * - provider：必须是内置预设 ID 或 credentials.providers 表中的 key
+ * - provider：必须是内置预设 ID 或设备本地 provider binding 的 key
  * - model：该 provider 可识别的模型 ID
  */
 export interface LLMRoleConfig {
@@ -381,7 +380,7 @@ export interface ZhixingConfig {
    * 启用的消息通道表（key = channelId，如 "feishu"）。
    *
    * 出现在本表的 channel 视为启用；具体凭证与链接字段（appId / appSecret 等）
-   * 在 credentials.channels.<id>。本表只放功能选项（type / options / defaultTarget）。
+   * 在设备本地 SecretStore。本表只放功能选项（type / options / defaultTarget）。
    */
   messaging?: Record<string, MessagingChannelEntry>;
   /**
@@ -416,7 +415,7 @@ export interface ZhixingConfig {
    *   - 内置阈值与实测不符(model 在自己场景下表现偏离默认)
    *   - 用了不在内置表的私有 / 自部署模型(走 UNKNOWN 兜底想精调)
    *
-   * 不进 credentials.json:领域知识属于功能配置;不持久化到 conversation meta:
+   * 不进 SecretStore：领域知识属于功能配置；不持久化到 conversation meta：
    * 模型可换、阈值跟模型走(不是会话级状态)。
    */
   modelCapabilityOverrides?: Record<string, ModelCapabilityOverride>;
@@ -453,19 +452,19 @@ export interface NetworkConfig {
   proxy?: "auto" | "off" | string;
 }
 
-// ─── 用户级凭证文件 ───
+// ─── 设备本地秘密投影 ───
 
 /**
- * 用户凭证文件结构（对应 ~/.zhixing/credentials.json）。
+ * 设备本地 SecretStore 解锁后的进程内投影。
  *
  * **内容层**——provider 与 channel 资源的完整定义集中在此。与 ZhixingConfig
- * 物理隔离：AI 工具体系完全不可读 / 不可写（由 builtin 安全规则强制隔离）。
+ * 与 ZhixingConfig 物理隔离，不进入 AI、网格、备份或迁移流。
  *
  * 关联机制：通过 id 与 ZhixingConfig 关联——
  *   credentials.providers.<id> ←──refs──── config.llm.main.provider
  *   credentials.channels.<id>  ←──refs──── config.messaging.<id>
  *
- * 凭证是用户级单一来源，不随启动目录变化，避免个人凭证泄漏到 git。
+ * 持久化单一来源是当前设备 SecretStore；本结构只在受信进程内短暂存在。
  */
 export interface ZhixingCredentials {
   /**
@@ -489,11 +488,25 @@ export interface ZhixingCredentials {
   channels?: Record<string, Record<string, string>>;
   /**
    * MCP server 凭证池：按 server id 索引；含远程 server 的 token / apiKey 等密字段，
-   * 具体字段由接入引导按 server 约定。与 channels 同构，自动继承 credentials.json
-   * 的 bypassImmune 隔离（AI 不可读写）。
+   * 具体字段由接入引导按 server 约定。与 channels 同构，只经 SecretStore
+   * 专用流程读写。
    */
   mcp?: Record<string, Record<string, string>>;
 }
+
+type CredentialProjection<K extends keyof ZhixingCredentials> = Readonly<
+  Pick<ZhixingCredentials, K> &
+    Partial<Record<Exclude<keyof ZhixingCredentials, K>, never>>
+>;
+
+/** 运行时 provider 工厂所需的最小秘密投影，不携带 channel / MCP 凭据。 */
+export type ProviderCredentialProjection = CredentialProjection<"providers">;
+
+/** channel 接入面所需的最小秘密投影，不携带 provider / MCP 凭据。 */
+export type ChannelCredentialProjection = CredentialProjection<"channels">;
+
+/** MCP 装配桥接所需的最小秘密投影，不携带 provider / channel 凭据。 */
+export type McpCredentialProjection = CredentialProjection<"mcp">;
 
 // ─── 解析后的 Provider ───
 

@@ -19,7 +19,10 @@
  * 这样"缺什么字段"只在此处定义一次——避免 sections/entity/checks 三处漂移。
  */
 
-import type { ZhixingConfig, ZhixingCredentials } from "@zhixing/providers";
+import type {
+  ProviderCredentialProjection,
+  ZhixingConfig,
+} from "@zhixing/providers";
 import type { ModelRole } from "../types.js";
 
 /**
@@ -60,7 +63,7 @@ export type ModelIssue =
 
 export function checkModel(
   config: ZhixingConfig,
-  credentials: ZhixingCredentials,
+  credentials: ProviderCredentialProjection,
 ): ModelIssue[] {
   const issues: ModelIssue[] = [];
 
@@ -111,7 +114,7 @@ export function checkModel(
  * 的每行就绪态派生共用此谓词，杜绝两处各自判断 key 而漂移。
  */
 export function hasApiKey(
-  credentials: ZhixingCredentials,
+  credentials: ProviderCredentialProjection,
   providerId: string,
 ): boolean {
   return Boolean(credentials.providers?.[providerId]?.apiKey);

@@ -3,8 +3,10 @@
 // 类型导出
 export type {
   AgentConfig,
+  ChannelCredentialProjection,
   IntentConfig,
   LLMRoleConfig,
+  McpCredentialProjection,
   McpConfig,
   McpServerConfigEntry,
   MessagingChannelEntry,
@@ -13,6 +15,7 @@ export type {
   NetworkConfig,
   Protocol,
   ProviderCredentialEntry,
+  ProviderCredentialProjection,
   ProviderPreset,
   ProviderQuirks,
   ResolvedProvider,
@@ -89,10 +92,23 @@ export type {
 // 凭证加载
 export {
   applyCredentialsPatch,
+  CredentialCommitStateUnknownError,
+  CredentialPostCommitError,
+  CredentialRetirementError,
   CredentialsSchemaError,
+  exportCredentialsToLegacyFile,
   getCredentialsPath,
+  legacyCredentialsPresent,
   loadCredentials,
+  loadCredentialsWithLegacyMigration,
+  migrateLegacyCredentials,
   writeCredentials,
+} from "./credentials-loader.js";
+export type {
+  CredentialMutationOptions,
+  CredentialStoreCoordinator,
+  LegacyCredentialExportOptions,
+  LegacyCredentialMigrationOptions,
 } from "./credentials-loader.js";
 
 // 配置语义校验（凭证字段 / 密字段拒绝）

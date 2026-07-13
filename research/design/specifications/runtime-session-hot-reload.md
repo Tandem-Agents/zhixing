@@ -19,7 +19,7 @@
 ### 2.1 范围
 
 - 引入 `RuntimeSession` 类聚合 `agentRuntime` / `scheduler` / `deliveryStack` / `channels` / `permissionStore`
-- 添加 `/config` slash 命令——REPL 内修改 `~/.zhixing/config.json` + `~/.zhixing/credentials.json`
+- 添加 `/config` slash 命令——REPL 内修改公开配置并通过专用流程更新设备本地 SecretStore
 - 添加 `reload()` 流程——blue-green swap 应用配置变更
 - 修复前置 sub-bug：`/resume` `/new` 漏 `convRepo.touch()`、`/exit` 半吊子 cleanup
 - REPL 状态机暴露 `activeTurnPromise`，让 reload 调用方能等 in-flight turn

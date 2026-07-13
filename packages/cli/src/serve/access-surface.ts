@@ -22,7 +22,7 @@
  */
 
 import { PROFILES, type ServerProfile } from "./profile.js";
-import type { ZhixingConfig, ZhixingCredentials } from "@zhixing/providers";
+import type { ZhixingConfig } from "@zhixing/providers";
 import type {
   ChannelRegistry,
   ConversationRepository,
@@ -67,7 +67,6 @@ export interface AssemblyContext {
   // ── 输入（外层准备） ──
   readonly profile: ServerProfile;
   readonly config: ZhixingConfig;
-  readonly credentials: ZhixingCredentials;
   readonly zhixingHome: string;
 
   // ── 恒定核心（接入面 setup 前已建，供其读） ──

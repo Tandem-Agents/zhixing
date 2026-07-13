@@ -14,7 +14,7 @@
  *   不在此重复定义 —— 避免双源不一致
  *
  * 与 `presets.ts`（vendor 技术配置）同性质：领域知识随知行版本演进，**不进
- * `credentials.json`**（凭证唯一入口），用户极少需要覆盖；如需覆盖通过
+ * **SecretStore**，用户极少需要覆盖；如需覆盖通过
  * `config.jsonc` 的 functional 配置入口（与 workspace / llm 等同文件）。
  *
  * 不同服务商提供同一模型时共享同一阈值（如 DeepSeek 官方 / 硅基流动转发

@@ -32,7 +32,7 @@
 |------|---------|--------------------------|
 | **异步集成** | Hermes 必须用后台 asyncio loop + 同步桥接（宿主同步） | 知行全异步（`provider.chat`/`runAgentLoop`/`tool.call` 均 async generator/Promise，`llm.ts:390`、`agent-loop.ts:81`、`tools.ts:354`），MCP 调用直接 `await`，**零桥接负担** |
 | **安全统一** | 三家各起一套：OpenClaw tool-policy group / Claude Code 权限规则三粒度 / Hermes 配置发现期 env 过滤，MCP 工具是旁路 | MCP 工具声明 `boundaries`（`external-service`）→ 走与 builtin 工具**完全相同**的 `SecurityPipeline` + 渐进信任（ADR-004/ADR-006），不是嫁接旁路。`boundary-registry.ts:14` 注释本就为 MCP 预留 |
-| **凭证隔离** | 三家 token 都在配置/env 里（Hermes 还专门做 env 过滤防泄漏） | MCP 凭证落 `credentials.json`，**天然继承 bypassImmune 物理隔离**（`builtin-rules.ts` block 整个 credentials.json 的任何 AI 访问）——AI 工具体系不可读不可写，by-design 安全 |
+| **凭证隔离** | 三家 token 都在配置/env 里（Hermes 还专门做 env 过滤防泄漏） | MCP 凭证只进设备本地 SecretStore；运行时仅向 MCP 装配桥发放 MCP 投影，实际文件族受 bypass-immune 动态路径规则保护 |
 | **生命周期** | 各自 ad-hoc（OpenClaw session manager + idle TTL；Claude Code memoize） | 复用知行既有"进程级单例 + per-runtime 工具实例"模式（工具闭包捕获 assembly 持有的 hub，`builtin-extra-tools.ts:52`），连接归两入口共享的 assembly、由 cli/serve 各自退出链 async dispose |
 | **结果处理** | 三家只做截断（防撑爆） | MCP 巨结果可走 `ctx.llm.light` 蒸馏（与 web_fetch distill 同款，`distill.ts` 的 collectStream 已注释预留复用），不止截断 |
 | **热重载** | 三家多数需重启 | 知行有 `session.reload` + `computeDiff`，MCP 配置变更可热重连 |
@@ -121,7 +121,7 @@ McpHub 由 `builtinExtraTools` assembly 创建持有，作为 assembly 工厂参
 
 - **boundary 分类**：MCP 工具声明 `external-service` 边界 → `BoundaryRegistry.fromTools` 自动注册 → `SecurityPipeline` 的 `BoundaryImpactClassifier` 据此分类（`classifier.ts:310`）。只读工具（access=query）→ observe → 自动放行；非只读（access=invoke）→ external → 触发用户确认。与所有 builtin 工具同一条管线、同一套渐进信任。
 - **server 级预置规则（可选增强）**：用 `permissionStore.registerBuiltinRules("mcp:<server>", rules)`（`permission-store.ts:446`，namespace 约定 `mcp:<server>` 见 `:443` 注释）给某 server 注册默认放行/拒绝规则。builtin 规则严格让位用户池（用户随时可覆盖）。断开时 `unregisterBuiltinRules("mcp:<server>")` 对偶清理。
-- **凭证隔离**：远程 server 凭证在 `credentials.json`，被 `bypassImmune` 规则物理隔离（AI 工具不可读写），无需额外防护。
+- **凭证隔离**：远程 server 凭证在设备本地 SecretStore，只有 CLI 组合根与 MCP 装配桥可获得最小投影；AI 工具不可直接触达。
 - **stdio env 安全**（参考三家共识）：spawn stdio server 时过滤"解释器启动型"危险 env（`NODE_OPTIONS`/`PYTHONPATH`/`DYLD_*` 等）——OpenClaw/Hermes 都做了，知行应复用或新建一个 env 白名单（实现阶段对照 OpenClaw `host-env-security-policy.json` 的清单）。
 - **子 agent 暴露面（by-construction 安全）**：MCP 工具进 `baseTools` 后是 Task 的 `parentTools` 候选，但子 agent 的 `subAgentProfile.enabledTools` 是白名单 `["read","glob","grep"]`（`default-profiles.ts:52`），Task 按它过滤 parentTools（`subagent/factory.ts:248`）——`mcp__*` 不在白名单，**子 agent 天然不暴露 MCP**（fail-closed）。未来若要让子 agent 用 MCP，再设计白名单扩展，当前无需处理。
 
@@ -204,7 +204,7 @@ McpHub 由 `builtinExtraTools` assembly 创建持有，作为 assembly 工厂参
 
 1. **异步零桥接**：知行全异步，MCP `await hub.callTool()` 直连，省掉 Hermes 整个"后台 asyncio loop + 同步桥接"复杂度。
 2. **安全浑然一体**：MCP 工具走与 builtin 完全相同的 `boundaries → SecurityPipeline → 渐进信任`，不是三家那种平行旁路；`boundary-registry` 本就为 MCP 预留接口。
-3. **凭证 by-design 隔离**：MCP token 落 credentials.json 自动被 bypassImmune 物理隔离，AI 工具读不到——三家做不到（token 在普通配置/env）。
+3. **凭证 by-design 隔离**：MCP token 只进设备本地 SecretStore，AI 与其他秘密域均拿不到——三家做不到（token 在普通配置/env）。
 4. **连接/工具两层分离**：连接挂两入口共享的进程级 assembly（cli `RuntimeSession.dispose` / serve `shutdown-chain` 各自 async dispose），工具 per-runtime（闭包捕获 hub）——职责单一、生命周期对齐知行既有模式，且天然覆盖 cli + serve 两入口，比三家把连接/工具/server 混在一起更清晰。
 5. **结果智能蒸馏**：巨结果可走 `ctx.llm.light` 蒸馏，不止截断。
 6. **热重载重连**：配置变更热重连，不需重启。
@@ -228,7 +228,7 @@ McpHub 由 `builtinExtraTools` assembly 创建持有，作为 assembly 工厂参
 
 **阶段二：HTTP transport + 凭证**
 - streamable-http transport（**注入 `@zhixing/network` dispatcher 走 SSRF 防护**，见第三节）；`credentials.mcp` 子表 + loader 合并分支 + `network.proxy` 复用。
-- **验收**：配一个远程 http MCP server（带 token）能连接调用；凭证落 credentials.json 且被 bypassImmune 隔离（AI 读取报 block）；HTTP 出站走 proxy/SSRF；单测。
+- **验收**：配一个远程 http MCP server（带 token）能连接调用；凭证只进 SecretStore 且实际文件族被 bypassImmune 隔离；HTTP 出站走 proxy/SSRF；单测。
 - **独立性**：扩展 transport+凭证，阶段一不回归。
 
 **阶段三：生命周期（async dispose + 热重载重连）**
@@ -263,7 +263,7 @@ McpHub 由 `builtinExtraTools` assembly 创建持有，作为 assembly 工厂参
 - boundaries 自动注册路径成立：MCP 工具进 extraTools→baseTools→`fromTools` 自动 register（`create-agent-runtime.ts:521,552`，已读核验）。
 - 只读放行/非只读确认成立：`BoundaryImpactClassifier.classifyCrossing` access-first（读类 access→observe，否则按 `BOUNDARY_WRITE_IMPACT`，`external-service`→external），已读核验（`classifier.ts:299,322-326`）。
 - 异步链成立：`call()` 是 Promise（`tools.ts:354`），hub.callTool 是 async，全程无同步桥接（`agent-loop.ts` async generator 已核验）。
-- 凭证隔离成立：`bi-zhixing-credentials-block`（`builtin-rules.ts:75-92`）`match` 路径 `.zhixing/credentials.json`、`access:"any"`、`action:"block"`、`bypassImmune:true` 已核实，MCP 凭证落该文件自动被隔离。
+- 凭证隔离成立：SecretStore 文件族由静态默认路径与组合根注入的实际绝对路径双重覆盖，`access:"any"`、`action:"block"`、`bypassImmune:true`；MCP 只消费自己的内存投影。
 
 **第二遍·可行性**：
 - 连接挂载点覆盖两入口：McpHub 归 `builtinExtraTools` assembly（REPL + serve 共享，`command.ts:209`），dispose 由 cli `RuntimeSession.dispose`（`session.ts:799`）与 serve `shutdown-chain`（`command.ts:521`）各自调用；已核验 RuntimeSession 是 cli 专属、serve 无之、AgentRuntime 无 dispose。

@@ -4,16 +4,15 @@
  * 将配置解析 + 协议适配器选择合二为一。
  *
  * 三种创建方式：
- * - createProviderRoles() — 多角色解析（main + light + power），CLI/serve 入口
- * - createProvider()      — 传入显式 ZhixingConfig，单角色 LLMProvider
- * - createProviderDirect()— 指定 provider ID + 可选 ProviderCredentialEntry 覆盖，单角色 LLMProvider
+ * - createProviderRoles — 多角色解析（main + light + power），CLI/serve 入口
+ * - createProvider      — 传入显式 ZhixingConfig，单角色 LLMProvider
+ * - createProviderDirect()— 指定 provider ID + 显式 ProviderCredentialEntry，单角色 LLMProvider
  */
 
 import type { ChatRequest, LLMProvider, LLMRole, LLMRoles } from "@zhixing/core";
 import { createAnthropicProvider } from "./adapters/anthropic-messages.js";
 import { createOpenAICompatibleProvider } from "./adapters/openai-compatible.js";
-import { loadConfig, resolveHomeDir } from "./config-loader.js";
-import { loadCredentials } from "./credentials-loader.js";
+import { loadConfig } from "./config-loader.js";
 import {
   resolveFromConfig,
   resolveLLMRoles,
@@ -23,20 +22,10 @@ import {
 } from "./resolve.js";
 import type {
   ProviderCredentialEntry,
+  ProviderCredentialProjection,
   ResolvedProvider,
   ZhixingConfig,
-  ZhixingCredentials,
 } from "./types.js";
-
-/**
- * 工厂层共用：按 env 推断 ~/.zhixing/ 目录后加载凭证。
- *
- * 让 ZHIXING_CONFIG_PATH 测试覆盖与 credentials 文件保持同目录——
- * 测试用临时目录跑全链路时，credentials 自动从同 tmpdir 取，不污染开发者机器。
- */
-function loadCredentialsFromEnv(env: Record<string, string | undefined>) {
-  return loadCredentials({ homeDir: resolveHomeDir(env) });
-}
 
 /**
  * 根据协议类型选择适配器，创建 LLMProvider。
@@ -76,13 +65,13 @@ export function bindRole(provider: LLMProvider, model: string): LLMRole {
 /**
  * 从完整配置创建 LLMProvider（单角色，main role）。
  *
- * 内部从 ~/.zhixing/credentials.json 加载 apiKey；缺失抛错引向首次配置向导。
+ * 凭据由产品组合根从设备本地 SecretStore 解锁后显式传入；本层不触达持久化秘密。
  */
 export function createProvider(
   config: ZhixingConfig,
+  credentials: ProviderCredentialProjection,
   providerId?: string,
 ): LLMProvider {
-  const credentials = loadCredentialsFromEnv(process.env);
   const resolved = resolveFromConfig(config, credentials, providerId);
   return createFromResolved(resolved);
 }
@@ -90,19 +79,13 @@ export function createProvider(
 /**
  * 快捷方式：直接指定 provider ID 创建 LLMProvider。
  *
- * 两种模式：
- *   - 不传 override：从 ~/.zhixing/credentials.json 加载凭证条目；缺失抛错
- *     引向首次配置向导
- *   - 传 override：完全独立模式——不读文件、不创建模板，仅用 override 字段
- *     构造 ResolvedProvider。测试与 integration 用此模式避免污染开发者机器
+ * 完全独立模式：不读持久化、不创建模板，仅用显式条目构造 ResolvedProvider。
  */
 export function createProviderDirect(
   providerId: string,
-  override?: ProviderCredentialEntry,
+  override: ProviderCredentialEntry,
 ): LLMProvider {
-  const credentials: ZhixingCredentials = override
-    ? { providers: { [providerId]: override } }
-    : loadCredentialsFromEnv(process.env);
+  const credentials: ProviderCredentialProjection = { providers: { [providerId]: override } };
   const resolved = resolveProvider(providerId, credentials);
   return createFromResolved(resolved);
 }
@@ -111,6 +94,8 @@ export function createProviderDirect(
 
 export interface ProviderRolesOptions {
   env?: Record<string, string | undefined>;
+  config?: ZhixingConfig;
+  credentials: ProviderCredentialProjection;
 }
 
 /**
@@ -136,15 +121,15 @@ export interface ProviderRolesResult {
  * 兜底（仍保留调用上下文隔离价值，仅放弃任务专门化/cost 优化）。这是正常状态，
  * 不打印任何提示——/status 命令未来可主动展示当前角色配置供用户决策是否专门化。
  *
- * options.env 仍保留——loadConfig / loadCredentials 需要它推断 ~/.zhixing 目录
- * （ZHIXING_CONFIG_PATH 测试覆盖入口）。env 不再透传给凭证解析器。
+ * options.env 只用于非秘密 config 路径覆盖；凭据必须由组合根显式传入，工厂不
+ * 具备任何持久化秘密读取能力。
  */
 export function createProviderRoles(
-  options: ProviderRolesOptions = {},
+  options: ProviderRolesOptions,
 ): ProviderRolesResult {
   const env = options.env ?? process.env;
-  const config = loadConfig({ env });
-  const credentials = loadCredentialsFromEnv(env);
+  const config = options.config ?? loadConfig({ env });
+  const credentials = options.credentials;
   const resolved = resolveLLMRoles(config, credentials);
 
   const mainProvider = createFromResolved(resolved.main.resolved);

@@ -29,6 +29,18 @@
       "types": "./dist/device-identity.d.ts",
       "import": "./dist/device-identity.js"
     },
+    "./device-key-store": {
+      "types": "./dist/device-key-store.d.ts",
+      "import": "./dist/device-key-store.js"
+    },
+    "./device-readiness": {
+      "types": "./dist/device-readiness.d.ts",
+      "import": "./dist/device-readiness.js"
+    },
+    "./credential-exposure": {
+      "types": "./dist/credential-exposure.d.ts",
+      "import": "./dist/credential-exposure.js"
+    },
     "./handshake": {
       "types": "./dist/handshake.d.ts",
       "import": "./dist/handshake.js"

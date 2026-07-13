@@ -81,10 +81,7 @@ import {
   renderRecentContextFromMessages,
   type AdvancementRecoveryMaintenance,
 } from "@zhixing/owner-services";
-import type {
-  ZhixingConfig,
-  ZhixingCredentials,
-} from "@zhixing/providers";
+import type { ZhixingConfig, ZhixingCredentials } from "@zhixing/providers";
 import fsp from "node:fs/promises";
 import { runStartupCheck } from "../startup.js";
 import chalk from "chalk";
@@ -99,6 +96,7 @@ import { createStdoutWriter } from "../screen/index.js";
 import {
   createBlockedRenderer,
 } from "../security/index.js";
+import { resolveSystemProtectedSecretPaths } from "../security/secret-boundary.js";
 import { createMcpHub } from "@zhixing/mcp";
 import { parseServerSpecs } from "../runtime/mcp-config.js";
 import {
@@ -127,7 +125,7 @@ import { registerTailCleanup, registerCoreCleanup } from "./shutdown-chain.js";
 import { shouldIdleExit } from "./idle-policy.js";
 import { setupAccessSurfaces, type AssemblyContext } from "./access-surface.js";
 import { DEFAULT_PROFILE, type ServerProfile } from "./profile.js";
-import { ACCESS_SURFACES } from "./access-surfaces.js";
+import { createAccessSurfaces } from "./access-surfaces.js";
 import { ZHIXING_CLI_VERSION } from "../version.js";
 
 const SERVER_VERSION = ZHIXING_CLI_VERSION;
@@ -181,6 +179,9 @@ async function runServerProcess(
     if (startupResult.kind === "schema-error") {
       console.error(chalk.red(`[配置错误] ${startupResult.message}`));
       console.error(chalk.dim(`请修复或删除文件后重试：${startupResult.filePath}`));
+    } else if (startupResult.kind === "secret-store-error") {
+      console.error(chalk.red(`[秘密存储不可用] ${startupResult.message}`));
+      console.error(chalk.dim(`设备本地目录：${startupResult.filePath}`));
     } else if (startupResult.kind === "semantic-error") {
       console.error(
         chalk.red(
@@ -212,6 +213,7 @@ async function runServerProcess(
 
   const config: ZhixingConfig = startupResult.config;
   const credentials: ZhixingCredentials = startupResult.credentials;
+  const systemProtectedPaths = resolveSystemProtectedSecretPaths();
 
   // ============================================================================
   // 恒定核心前置 —— 接入面 setup 从这里读依赖。
@@ -326,7 +328,7 @@ async function runServerProcess(
     decorateRunBus: serveDecorateRunBus,
   });
 
-  // 3a. ConfirmationHub —— 远程权限确认聚合层（remote-confirmation-execution.md §3.2）
+  // 3a. ConfirmationHub —— 远程权限确认聚合层（见 remote-confirmation-execution.md）
   //   在会话执行面 / 通道 / ephemeralRuntime / ServerContext 之前创建，以便各组件构造时能接入。
   const confirmationHub = new ConfirmationHub();
 
@@ -368,7 +370,16 @@ async function runServerProcess(
   //   存技能、会话 B 下窗不知道"(各自版本各自计);共享后任一保存,全部
   //   runtime 下个窗口换代即见。磁盘本就同一目录,共享无额外耦合。
   const serveSkillStore = new SkillStore();
+  const providerCredentials = credentials.providers
+    ? { providers: credentials.providers }
+    : {};
+  const channelCredentials = credentials.channels
+    ? { channels: credentials.channels }
+    : {};
+  const accessSurfaces = createAccessSurfaces(channelCredentials);
   const advancementController = await createServeAdvancementController({
+    config,
+    credentials: providerCredentials,
     // 准入投影：活跃会话窗口尾部（lazy ref，manager 未就绪时无投影）；
     // 延迟基线进 serve 日志作观测数据。
     recentContextProvider: async (conversationId) =>
@@ -386,6 +397,11 @@ async function runServerProcess(
   //   turn-context provider 注册收拢进 onRuntimeCreated——scheduler 是 lazy ref
   //   （顶层 let schedulerRef），LLM 调用时刻 ref 已就绪；未就绪时 fallback 空状态。
   const runtimeHost = new RuntimeHost({
+    providerConfiguration: {
+      config,
+      credentials: providerCredentials,
+    },
+    systemProtectedPaths,
     skillStore: serveSkillStore,
     segmentDeps: serveSegmentDeps,
     extraTools: builtinExtraTools,
@@ -476,7 +492,6 @@ async function runServerProcess(
   const ctx: AssemblyContext = {
     profile,
     config,
-    credentials,
     zhixingHome,
     confirmationHub,
     mcpHub,
@@ -495,7 +510,7 @@ async function runServerProcess(
 
   // pre-server 接入面：MCP（connectAll）/ 会话执行面 / 通道门面 / 投递栈 / 文本确认渲染器。
   // 产物写回 ctx.conversations / channels / inboundRouter / deliveryStack / textRenderer。
-  await setupAccessSurfaces(ACCESS_SURFACES, ctx, "pre-server");
+  await setupAccessSurfaces(accessSurfaces, ctx, "pre-server");
   conversationsRef.current = ctx.conversations ?? null;
 
   // ============================================================================
@@ -549,7 +564,7 @@ async function runServerProcess(
       ? `[系统] 这是一个定时任务的自动执行。请直接执行以下指令并输出结果，不要反问用户、不要引导对话。\n\n${params.prompt}`
       : params.prompt;
 
-    // 远程确认回程地址（remote-confirmation-execution.md §3.3）：
+    // 远程确认回程地址（见 remote-confirmation-execution.md）：
     //   scheduler → ephemeralRuntime 路径下，任何工具触发的 confirmation
     //   按 turnOrigin.target 路由回创建任务时的通道对话。
     //   无 target 时（e.g. system 任务、未绑定通道的任务）降级为 defaultTarget / 仅 RPC。
@@ -795,7 +810,7 @@ async function runServerProcess(
 
   // post-server 接入面：confirmationBridge（依赖 runner.server.connections，在自己 setup 内
   // 注册 dispose 到 ctx.cleanup —— LIFO 落在 registerCoreCleanup 之后、即更先执行）。
-  await setupAccessSurfaces(ACCESS_SURFACES, ctx, "post-server");
+  await setupAccessSurfaces(accessSurfaces, ctx, "post-server");
 
   // pre-server 接入面 teardown —— 时序硬约束（必须在 server.close 之前 = runServer 之后注册）
   // 决定它们不能在自己 setup 内自注册，故由主干用 ctx 产物注册到 shutdown-chain。LIFO 顺序：

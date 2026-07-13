@@ -45,6 +45,7 @@ function makeHostOptions() {
   const decorateRunBus = () => () => {};
   const tools = [{ name: "schedule" }];
   const options = {
+    systemProtectedPaths: ["/host/credentials.json", "/host/secret-vault"],
     skillStore,
     segmentDeps,
     extraTools: {
@@ -104,6 +105,7 @@ describe("资产层透传", () => {
     expect(params.workspace).toBeUndefined();
     expect(params.extraTools).toBe(tools);
     expect(params.runtimeKind).toBe("conversation");
+    expect(params.systemProtectedPaths).toBe(options.systemProtectedPaths);
   });
 
   it("onRuntimeCreated 在会话 / 场景 / ephemeral 三条发放路径都被调用", async () => {

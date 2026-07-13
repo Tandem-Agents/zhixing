@@ -1,7 +1,7 @@
 /**
  * Providers 包路径解析中心。
  *
- * 全 providers 包消费的用户级文件路径（config.jsonc / credentials.json）的唯一
+ * 全 providers 包消费的用户级配置路径与旧版明文迁移源路径的唯一
  * 拼接点。其他模块通过本文件取路径，不自拼。
  *
  * 4 级优先级层叠（从高到低）：
@@ -42,7 +42,7 @@ function resolveDir(env: Record<string, string | undefined>): string {
   return getZhixingHome();
 }
 
-/** 全局配置目录——zhixing 数据根（含所有 user-level 配置 / 凭证文件）。 */
+/** 全局配置目录——zhixing 数据根（含公开配置与旧版凭据迁移源）。 */
 export function getGlobalConfigDir(
   env: Record<string, string | undefined> = process.env,
 ): string {
@@ -75,7 +75,7 @@ export function resolveHomeDir(
   return resolveDir(env);
 }
 
-/** 凭证文件路径——caller 显式 homeDir 优先，否则按 env 优先级解析。 */
+/** 旧版明文凭据迁移/显式回滚导出路径。 */
 export function getCredentialsPath(homeDir?: string): string {
   return path.join(homeDir ?? resolveDir(process.env), CREDENTIALS_FILENAME);
 }

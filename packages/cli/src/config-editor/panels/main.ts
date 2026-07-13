@@ -164,7 +164,7 @@ function buildHeaderBody(ctx: ConfigEditorContext): string[] {
   }
   if (ctx.header) {
     rows.push(tone.dim(`配置        ${ctx.header.configPath}`));
-    rows.push(tone.dim(`凭证        ${ctx.header.credentialsPath}`));
+    rows.push(tone.dim(`秘密存储    ${ctx.header.secretStoreLabel}`));
   }
   return rows;
 }

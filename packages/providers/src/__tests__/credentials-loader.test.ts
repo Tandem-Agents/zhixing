@@ -1,316 +1,603 @@
-/**
- * 凭证 loader / writer 测试
- *
- * 关键不变量：
- *   - 文件不存在 + 默认 → 创建模板骨架（含 providers / channels 字段占位）
- *   - 文件不存在 + noAutoCreate → 返回空对象（caller 不创建文件）
- *   - JSON 损坏 → throw CredentialsSchemaError（fail-fast，不 silent）
- *   - 错误消息不泄漏密值（fuzz 含 sk-* 前缀的损坏文件）
- *   - applyCredentialsPatch 默认 merge（id 级 + 字段级合并）；replace 模式整体替换支持删除
- *   - writeCredentials 是权威完整写入（replace）：省略的 id 即删除，未提及的子表保留
- *   - version 字段不主动写入；用户已写时原样保留
- */
-
-import fs from "node:fs";
+import { link, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import type { SecretRef, SecretStorePort } from "@zhixing/core/contracts";
 import { createTempDir } from "@zhixing/test-utils";
+import { describe, expect, it } from "vitest";
 import {
   applyCredentialsPatch,
-  CredentialsSchemaError,
+  CredentialCommitStateUnknownError,
+  exportCredentialsToLegacyFile,
   getCredentialsPath,
+  legacyCredentialsPresent,
   loadCredentials,
+  loadCredentialsWithLegacyMigration,
+  migrateLegacyCredentials,
   writeCredentials,
 } from "../credentials-loader.js";
-import type { ZhixingCredentials } from "../types.js";
 
-let tmpDir: string;
+class MemorySecretStore implements SecretStorePort {
+  readonly values = new Map<string, string>();
+  failOnPut: number | null = null;
+  failOnBindingId: string | null = null;
+  failGenerationDeletes = false;
+  failCommittedMarker = false;
+  onPut?: (ref: SecretRef) => Promise<void>;
+  onGet?: (ref: SecretRef) => Promise<void>;
+  uncoordinatedAccesses = 0;
+  private puts = 0;
+  private exclusiveActive = false;
+  private exclusiveQueue: Promise<void> = Promise.resolve();
 
-beforeEach(async () => {
-  tmpDir = await createTempDir("creds");
-});
-
-describe("loadCredentials", () => {
-  it("文件不存在 + 默认 → 自动创建模板骨架（含字段占位）", () => {
-    const result = loadCredentials({ homeDir: tmpDir });
-
-    // 内存返回值与磁盘内容相同：含 providers + channels 字段结构占位
-    expect(result.providers).toBeDefined();
-    expect(result.providers?.siliconflow).toBeDefined();
-    expect(result.providers?.siliconflow?.apiKey).toBe("");
-    expect(result.channels).toBeDefined();
-    expect(result.channels?.feishu).toBeDefined();
-    expect(result.channels?.feishu?.appId).toBe("");
-    expect(result.channels?.feishu?.appSecret).toBe("");
-
-    // 磁盘文件已创建
-    const created = fs.readFileSync(getCredentialsPath(tmpDir), "utf-8");
-    expect(JSON.parse(created)).toEqual(result);
-  });
-
-  it("文件不存在 + noAutoCreate → 不创建文件，返回空对象", () => {
-    const result = loadCredentials({ homeDir: tmpDir, noAutoCreate: true });
-    expect(result).toEqual({});
-    expect(fs.existsSync(getCredentialsPath(tmpDir))).toBe(false);
-  });
-
-  it("文件合法 → 返回 parsed，providers/channels 完整保留", () => {
-    const filePath = getCredentialsPath(tmpDir);
-    const fixture: ZhixingCredentials = {
-      providers: {
-        siliconflow: { apiKey: "sk-sf" },
-        openai: { apiKey: "sk-oai", baseUrl: "https://my-proxy.com" },
-      },
-      channels: { feishu: { appId: "cli_xxx", appSecret: "sec-1" } },
-    };
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, JSON.stringify(fixture), "utf-8");
-
-    expect(loadCredentials({ homeDir: tmpDir })).toEqual(fixture);
-  });
-
-  it("用户文件含 version 字段 → 原样保留（loader 不篡改）", () => {
-    const filePath = getCredentialsPath(tmpDir);
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(
-      filePath,
-      JSON.stringify({ version: 2, providers: { x: { apiKey: "k" } } }),
-      "utf-8",
-    );
-
-    const result = loadCredentials({ homeDir: tmpDir });
-    expect(result.version).toBe(2);
-  });
-
-  it("JSON 损坏 → throw CredentialsSchemaError，message 含路径不含密值", () => {
-    const filePath = getCredentialsPath(tmpDir);
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, '{"providers": {bad json}', "utf-8");
-
-    let caught: unknown;
+  async runExclusive<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.exclusiveQueue;
+    let release!: () => void;
+    this.exclusiveQueue = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    this.exclusiveActive = true;
     try {
-      loadCredentials({ homeDir: tmpDir });
-    } catch (err) {
-      caught = err;
+      return await operation();
+    } finally {
+      this.exclusiveActive = false;
+      release();
     }
+  }
 
-    expect(caught).toBeInstanceOf(CredentialsSchemaError);
-    const err = caught as CredentialsSchemaError;
-    expect(err.filePath).toBe(filePath);
-    expect(err.message).toContain(filePath);
-    expect(err.message).not.toMatch(/sk-[A-Za-z0-9]/);
+  async put(ref: SecretRef, value: string): Promise<void> {
+    this.trackCoordination();
+    this.puts += 1;
+    if (this.failOnPut !== null && this.puts === this.failOnPut) throw new Error("injected put failure");
+    if (this.failOnBindingId === ref.bindingId) {
+      this.failOnBindingId = null;
+      throw new Error("injected put failure");
+    }
+    if (
+      this.failCommittedMarker &&
+      ref.bindingId.includes("/generation-markers/") &&
+      value.includes('"state":"committed"')
+    ) {
+      this.failCommittedMarker = false;
+      throw new Error("injected marker failure");
+    }
+    this.values.set(key(ref), value);
+    await this.onPut?.(ref);
+  }
+  async get(ref: SecretRef): Promise<string | null> {
+    this.trackCoordination();
+    const value = this.values.get(key(ref)) ?? null;
+    await this.onGet?.(ref);
+    return value;
+  }
+  async delete(ref: SecretRef): Promise<void> {
+    this.trackCoordination();
+    if (this.failGenerationDeletes && ref.bindingId.includes("/generations/")) {
+      throw new Error("injected delete failure");
+    }
+    this.values.delete(key(ref));
+  }
+  async list(prefix: string): Promise<SecretRef[]> {
+    this.trackCoordination();
+    return [...this.values.keys()]
+      .filter((value) => value.startsWith(prefix))
+      .map((value) => {
+        const separator = value.indexOf("/");
+        return { kind: value.slice(0, separator) as SecretRef["kind"], bindingId: value.slice(separator + 1) };
+      });
+  }
+  async unlockState(): Promise<"unlocked"> {
+    this.trackCoordination();
+    return "unlocked";
+  }
+
+  private trackCoordination(): void {
+    if (!this.exclusiveActive) this.uncoordinatedAccesses += 1;
+  }
+}
+
+describe("SecretStore credentials repository", () => {
+  it("round-trips provider, channel and MCP bindings without a plaintext file", async () => {
+    const store = new MemorySecretStore();
+    const credentials = {
+      providers: { deepseek: { apiKey: "sk-provider", baseUrl: "https://example.test" } },
+      channels: { feishu: { appId: "app", appSecret: "channel-secret" } },
+      mcp: { github: { Authorization: "Bearer mcp-secret" } },
+    };
+    await writeCredentials(credentials, { store });
+    expect(await loadCredentials({ store })).toEqual(credentials);
+    expect([...store.values.keys()].filter((value) => value.endsWith("/manifest"))).toEqual([
+      "provider/credentials/v1/manifest",
+    ]);
+    expect([...store.values.keys()].filter((value) => value.includes("/generations/"))).toHaveLength(3);
+    expect([...store.values.keys()].filter((value) => value.includes("/generation-markers/"))).toHaveLength(1);
   });
 
-  it("JSON 损坏 fuzz：文件半截凭证 sk-* → 错误消息不泄漏密值原文", () => {
-    // 模拟用户编辑文件中途断电 / 误删括号，残留 sk- 前缀的部分凭证。
-    // schema error 路径应只引文件位置 + 解析底层描述，不把损坏内容回灌到消息里。
-    const filePath = getCredentialsPath(tmpDir);
-    const FAKE_SECRET = "sk-fuzz0123456789ABCDEFGHIJKLMNOPqrst";
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(
+  it("preserves omitted credential tables while replacing an explicitly supplied table", async () => {
+    const store = new MemorySecretStore();
+    await writeCredentials(
+      {
+        providers: { old: { apiKey: "old" } },
+        channels: { feishu: { appSecret: "channel" } },
+      },
+      { store },
+    );
+    await writeCredentials({ providers: { replacement: { apiKey: "new" } } }, { store });
+
+    expect(await loadCredentials({ store })).toEqual({
+      providers: { replacement: { apiKey: "new" } },
+      channels: { feishu: { appSecret: "channel" } },
+    });
+  });
+
+  it("rejects an oversized binding before creating a credential generation", async () => {
+    const store = new MemorySecretStore();
+    await expect(
+      writeCredentials(
+        { providers: { ["x".repeat(600)]: { apiKey: "secret" } } },
+        { store },
+      ),
+    ).rejects.toThrow("exceeds the SecretStore limit");
+    expect(store.values.size).toBe(0);
+  });
+
+  it("migrates each binding with read-back and removes the plaintext source only after success", async () => {
+    const homeDir = await createTempDir("credential-migrate");
+    const filePath = getCredentialsPath(homeDir);
+    await import("node:fs/promises").then(({ mkdir }) => mkdir(path.dirname(filePath), { recursive: true }));
+    await writeFile(
       filePath,
-      `{"providers":{"siliconflow":{"apiKey":"${FAKE_SECRET}`,
-      "utf-8",
+      JSON.stringify({
+        providers: { deepseek: { apiKey: "sk-provider" } },
+        channels: { feishu: { appSecret: "channel-secret" } },
+      }),
+      "utf8",
     );
+    const store = new MemorySecretStore();
 
-    let caught: unknown;
-    try {
-      loadCredentials({ homeDir: tmpDir });
-    } catch (err) {
-      caught = err;
-    }
-
-    expect(caught).toBeInstanceOf(CredentialsSchemaError);
-    const err = caught as CredentialsSchemaError;
-    expect(err.message).not.toContain(FAKE_SECRET);
-    expect(err.message).not.toMatch(/sk-[A-Za-z0-9]+/);
+    await expect(migrateLegacyCredentials({ homeDir, store })).resolves.toEqual({
+      migrated: true,
+      entries: 2,
+    });
+    await expect(readFile(filePath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await loadCredentials({ store })).toEqual({
+      providers: { deepseek: { apiKey: "sk-provider" } },
+      channels: { feishu: { appSecret: "channel-secret" } },
+    });
   });
 
-  it("空 JSON 对象 → 返回 {} 形态", () => {
-    const filePath = getCredentialsPath(tmpDir);
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(filePath, "{}", "utf-8");
-
-    const result = loadCredentials({ homeDir: tmpDir });
-    expect(result).toEqual({});
-  });
-});
-
-describe("applyCredentialsPatch · 合并语义", () => {
-  it("空 current + 空 patch → 返回空对象（不主动写 version）", () => {
-    expect(applyCredentialsPatch({}, {})).toEqual({});
-  });
-
-  it("patch 显式 version → 保留", () => {
-    const result = applyCredentialsPatch(
-      {},
-      { version: 2 } as Partial<ZhixingCredentials>,
+  it("detects and clears a crash-left plaintext export temp before startup can become ready", async () => {
+    const homeDir = await createTempDir("credential-temp-recovery");
+    const temporary = path.join(
+      homeDir,
+      "credentials.json.4242.0123456789abcdef.tmp",
     );
-    expect(result.version).toBe(2);
+    await writeFile(temporary, '{"providers":{"main":{"apiKey":"plaintext"}}}', "utf8");
+    const store = new MemorySecretStore();
+
+    await expect(legacyCredentialsPresent(homeDir)).resolves.toBe(true);
+    await expect(loadCredentialsWithLegacyMigration({ homeDir, store })).resolves.toEqual({
+      credentials: {},
+      migration: { migrated: false, entries: 0 },
+    });
+    await expect(readFile(temporary, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(legacyCredentialsPresent(homeDir)).resolves.toBe(false);
   });
 
-  it("current 已有 version → patch 未覆盖时保留", () => {
-    const result = applyCredentialsPatch({ version: 2 }, {});
-    expect(result.version).toBe(2);
-  });
-
-  it("追加单 provider 不清除其它 provider", () => {
-    const current: ZhixingCredentials = {
-      providers: {
-        siliconflow: { apiKey: "sk-sf" },
-        openai: { apiKey: "sk-oai" },
-      },
+  it("preserves the legacy empty skeleton so first-run onboarding can fill it", async () => {
+    const homeDir = await createTempDir("credential-skeleton");
+    const filePath = getCredentialsPath(homeDir);
+    const skeleton = {
+      providers: { siliconflow: { apiKey: "" }, deepseek: { apiKey: "" } },
+      channels: { feishu: { appId: "", appSecret: "" } },
     };
-    const result = applyCredentialsPatch(current, {
-      providers: { anthropic: { apiKey: "sk-ant" } },
-    });
+    await writeFile(filePath, JSON.stringify(skeleton), "utf8");
+    const store = new MemorySecretStore();
 
-    expect(result.providers).toEqual({
-      siliconflow: { apiKey: "sk-sf" },
-      openai: { apiKey: "sk-oai" },
-      anthropic: { apiKey: "sk-ant" },
-    });
+    await migrateLegacyCredentials({ homeDir, store });
+    expect(await loadCredentials({ store })).toEqual(skeleton);
+    await expect(readFile(filePath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("修改同 provider id → 字段级合并（不丢未在 patch 提及的字段）", () => {
-    const current: ZhixingCredentials = {
-      providers: {
-        custom: {
-          apiKey: "old",
-          baseUrl: "https://x",
-          protocol: "openai-compatible",
-        },
-      },
-    };
-    const result = applyCredentialsPatch(current, {
-      providers: { custom: { apiKey: "new" } },
-    });
-
-    expect(result.providers?.custom?.apiKey).toBe("new");
-    expect(result.providers?.custom?.baseUrl).toBe("https://x");
-    expect(result.providers?.custom?.protocol).toBe("openai-compatible");
-  });
-
-  it("channels 同样 id 级 + 字段级合并", () => {
-    const current: ZhixingCredentials = {
-      channels: {
-        feishu: { appSecret: "old", botToken: "bt-1" },
-        wecom: { secret: "ws-1" },
-      },
-    };
-    const result = applyCredentialsPatch(current, {
-      channels: { feishu: { appSecret: "new" } },
-    });
-
-    expect(result.channels).toEqual({
-      feishu: { appSecret: "new", botToken: "bt-1" },
-      wecom: { secret: "ws-1" },
-    });
-  });
-
-  it("mcp 同样 id 级 + 字段级合并", () => {
-    const current: ZhixingCredentials = {
-      mcp: {
-        github: { token: "old", apiBase: "u-1" },
-        notion: { token: "n-1" },
-      },
-    };
-    const result = applyCredentialsPatch(current, {
-      mcp: { github: { token: "new" } },
-    });
-
-    expect(result.mcp).toEqual({
-      github: { token: "new", apiBase: "u-1" },
-      notion: { token: "n-1" },
-    });
-  });
-
-  it("patch 未提到的子表保留 current", () => {
-    const current: ZhixingCredentials = {
-      providers: { siliconflow: { apiKey: "sk-sf" } },
-      channels: { feishu: { appSecret: "sec-1" } },
-    };
-    const result = applyCredentialsPatch(current, {
-      providers: { anthropic: { apiKey: "sk-ant" } },
-    });
-
-    expect(result.channels).toEqual({ feishu: { appSecret: "sec-1" } });
-  });
-});
-
-describe("applyCredentialsPatch · replace 模式（编辑器权威写入，支持删除）", () => {
-  it("id 子表整体替换——patch 省略的凭证条目被删除", () => {
-    const current = {
-      providers: { openai: { apiKey: "sk-o" } },
-      mcp: {
-        notion: { NOTION_TOKEN: "ntn" },
-        github: { Authorization: "Bearer x" },
-      },
-    } as ZhixingCredentials;
-    // patch 省略 notion（编辑器删除它）
-    const result = applyCredentialsPatch(
-      current,
-      { mcp: { github: { Authorization: "Bearer x" } } },
-      "replace",
-    );
-    expect(result.mcp).toEqual({ github: { Authorization: "Bearer x" } });
-    // 未提供的 providers 子表保留
-    expect(result.providers).toEqual({ openai: { apiKey: "sk-o" } });
-  });
-});
-
-describe("writeCredentials · 端到端持久化", () => {
-  it("权威写入：id 子表整体替换（省略的条目被删除）+ 未提及子表保留", async () => {
-    const filePath = getCredentialsPath(tmpDir);
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.writeFileSync(
+  it("restores the previous SecretStore state and keeps plaintext when a migration item fails", async () => {
+    const homeDir = await createTempDir("credential-rollback");
+    const filePath = getCredentialsPath(homeDir);
+    await import("node:fs/promises").then(({ mkdir }) => mkdir(path.dirname(filePath), { recursive: true }));
+    await writeFile(
       filePath,
       JSON.stringify({
         providers: {
-          siliconflow: { apiKey: "sk-sf" },
-          openai: { apiKey: "sk-oai" },
+          first: { apiKey: "first" },
+          second: { apiKey: "second" },
         },
-        channels: { feishu: { appSecret: "sec-1" } },
       }),
-      "utf-8",
+      "utf8",
     );
+    const store = new MemorySecretStore();
+    store.values.set("device-key/device/v1/existing", "old-device-key");
+    store.failOnPut = 2;
 
-    // 编辑器权威写入：providers 省略 openai（= 删除它）；不带 channels（代表本入口不管的子表）
-    await writeCredentials(
-      { providers: { siliconflow: { apiKey: "sk-sf" } } },
-      { homeDir: tmpDir },
-    );
-
-    const persisted = JSON.parse(fs.readFileSync(filePath, "utf-8"));
-    // openai 被删除（id 子表整体替换，删除由省略表达）
-    expect(persisted.providers).toEqual({ siliconflow: { apiKey: "sk-sf" } });
-    // 未提及的 channels 子表保留
-    expect(persisted.channels).toEqual({ feishu: { appSecret: "sec-1" } });
+    await expect(migrateLegacyCredentials({ homeDir, store })).rejects.toThrow("明文源文件保持不变");
+    expect(await readFile(filePath, "utf8")).toContain("second");
+    expect([...store.values.entries()]).toEqual([
+      ["device-key/device/v1/existing", "old-device-key"],
+    ]);
   });
 
-  it("文件不存在时 writeCredentials 创建文件（仅含 patch 内容，不主动加 version）", async () => {
-    await writeCredentials(
-      { providers: { siliconflow: { apiKey: "sk-sf" } } },
-      { homeDir: tmpDir },
+  it("rejects malformed nested provider fields before retiring the plaintext source", async () => {
+    const homeDir = await createTempDir("credential-schema");
+    const filePath = getCredentialsPath(homeDir);
+    await import("node:fs/promises").then(({ mkdir }) => mkdir(path.dirname(filePath), { recursive: true }));
+    await writeFile(
+      filePath,
+      JSON.stringify({
+        providers: {
+          deepseek: {
+            apiKey: "secret",
+            quirks: { supportsTools: "yes" },
+          },
+        },
+      }),
+      "utf8",
     );
+    const store = new MemorySecretStore();
 
-    const filePath = getCredentialsPath(tmpDir);
-    expect(fs.existsSync(filePath)).toBe(true);
-    const persisted = JSON.parse(fs.readFileSync(filePath, "utf-8"));
-    expect(persisted).toEqual({
-      providers: { siliconflow: { apiKey: "sk-sf" } },
+    await expect(migrateLegacyCredentials({ homeDir, store })).rejects.toThrow(
+      "supportsTools 必须是布尔值",
+    );
+    expect(await readFile(filePath, "utf8")).toContain("supportsTools");
+    expect(store.values.size).toBe(0);
+  });
+
+  it("rejects linked migration sources instead of reporting false plaintext retirement", async () => {
+    const homeDir = await createTempDir("credential-linked-source");
+    const filePath = getCredentialsPath(homeDir);
+    const secondLink = path.join(homeDir, "credentials-copy.json");
+    await writeFile(filePath, JSON.stringify({ providers: { main: { apiKey: "secret" } } }), "utf8");
+    await link(filePath, secondLink);
+    const store = new MemorySecretStore();
+
+    await expect(migrateLegacyCredentials({ homeDir, store })).rejects.toThrow(
+      "单一普通文件",
+    );
+    expect(await readFile(filePath, "utf8")).toContain("secret");
+    expect(await readFile(secondLink, "utf8")).toContain("secret");
+    expect(store.values.size).toBe(0);
+  });
+
+  it("rolls back activation when the migration source changes before retirement", async () => {
+    const homeDir = await createTempDir("credential-source-race");
+    const filePath = getCredentialsPath(homeDir);
+    await writeFile(filePath, JSON.stringify({ providers: { main: { apiKey: "first" } } }), "utf8");
+    const store = new MemorySecretStore();
+    store.onPut = async (ref) => {
+      if (ref.bindingId.endsWith("/manifest")) {
+        await writeFile(filePath, JSON.stringify({ providers: { main: { apiKey: "second" } } }), "utf8");
+      }
+    };
+
+    await expect(migrateLegacyCredentials({ homeDir, store })).rejects.toThrow(
+      "迁移收尾尚未完成",
+    );
+    expect(await readFile(filePath, "utf8")).toContain("second");
+    expect(await loadCredentials({ store })).toEqual({
+      providers: { main: { apiKey: "first" } },
     });
-    expect(persisted.version).toBeUndefined();
   });
 
-  it("写时不留临时文件", async () => {
-    await writeCredentials(
-      { providers: { siliconflow: { apiKey: "sk-sf" } } },
-      { homeDir: tmpDir },
+  it("never overwrites a different active SecretStore generation with a legacy file", async () => {
+    const homeDir = await createTempDir("credential-conflict");
+    const filePath = getCredentialsPath(homeDir);
+    await writeFile(filePath, JSON.stringify({ providers: { main: { apiKey: "legacy" } } }), "utf8");
+    const store = new MemorySecretStore();
+    await writeCredentials({ providers: { main: { apiKey: "current" } } }, { store });
+
+    await expect(migrateLegacyCredentials({ homeDir, store })).rejects.toThrow(
+      "拒绝用旧明文文件覆盖",
+    );
+    expect(await loadCredentials({ store })).toEqual({
+      providers: { main: { apiKey: "current" } },
+    });
+    expect(await readFile(filePath, "utf8")).toContain("legacy");
+  });
+
+  it("retires a leftover legacy file when it matches the active generation", async () => {
+    const homeDir = await createTempDir("credential-idempotent-retire");
+    const filePath = getCredentialsPath(homeDir);
+    const credentials = {
+      providers: {
+        main: {
+          apiKey: "same",
+          quirks: { supportsTools: true },
+        },
+      },
+    };
+    const store = new MemorySecretStore();
+    await writeCredentials(credentials, { store });
+    const before = new Map(store.values);
+    await writeFile(filePath, JSON.stringify(credentials), "utf8");
+
+    await expect(migrateLegacyCredentials({ homeDir, store })).resolves.toEqual({
+      migrated: true,
+      entries: 1,
+    });
+    await expect(readFile(filePath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    expect(store.values).toEqual(before);
+  });
+
+  it("keeps the previous generation active when the manifest switch fails", async () => {
+    const store = new MemorySecretStore();
+    await writeCredentials({ providers: { old: { apiKey: "old" } } }, { store });
+    store.failOnBindingId = "credentials/v1/manifest";
+    await expect(
+      writeCredentials({ providers: { replacement: { apiKey: "new" } } }, { store }),
+    ).rejects.toThrow("injected put failure");
+    expect(await loadCredentials({ store })).toEqual({ providers: { old: { apiKey: "old" } } });
+  });
+
+  it("reports an unknown commit state and recovers forward when manifest verification cannot be read", async () => {
+    const store = new MemorySecretStore();
+    let manifestWritten = false;
+    store.onPut = async (ref) => {
+      if (ref.bindingId === "credentials/v1/manifest") manifestWritten = true;
+    };
+    store.onGet = async (ref) => {
+      if (manifestWritten && ref.bindingId === "credentials/v1/manifest") {
+        manifestWritten = false;
+        throw new Error("injected manifest read failure");
+      }
+    };
+
+    const error = await writeCredentials(
+      { providers: { main: { apiKey: "committed" } } },
+      { store },
+    ).then(
+      () => undefined,
+      (reason: unknown) => reason,
+    );
+    expect(error).toBeInstanceOf(CredentialCommitStateUnknownError);
+    expect((error as Error).message).toContain("激活状态未知");
+    expect((error as Error).message).not.toContain("明文");
+
+    store.onPut = undefined;
+    store.onGet = undefined;
+    await expect(loadCredentials({ store })).resolves.toEqual({
+      providers: { main: { apiKey: "committed" } },
+    });
+  });
+
+  it("keeps legacy plaintext when both manifest write and verification outcomes are unknown", async () => {
+    const homeDir = await createTempDir("credential-unknown-commit");
+    const filePath = getCredentialsPath(homeDir);
+    await import("node:fs/promises").then(({ mkdir }) =>
+      mkdir(path.dirname(filePath), { recursive: true }),
+    );
+    await writeFile(
+      filePath,
+      JSON.stringify({ providers: { main: { apiKey: "committed" } } }),
+      "utf8",
+    );
+    const store = new MemorySecretStore();
+    let manifestWriteReturnedError = false;
+    store.onPut = async (ref) => {
+      if (ref.bindingId === "credentials/v1/manifest") {
+        manifestWriteReturnedError = true;
+        throw new Error("injected post-write failure");
+      }
+    };
+    store.onGet = async (ref) => {
+      if (manifestWriteReturnedError && ref.bindingId === "credentials/v1/manifest") {
+        manifestWriteReturnedError = false;
+        throw new Error("injected manifest read failure");
+      }
+    };
+
+    await expect(migrateLegacyCredentials({ homeDir, store })).rejects.toThrow(
+      "凭据激活状态未知",
+    );
+    await expect(readFile(filePath, "utf8")).resolves.toContain("committed");
+
+    store.onPut = undefined;
+    store.onGet = undefined;
+    await expect(migrateLegacyCredentials({ homeDir, store })).resolves.toEqual({
+      migrated: true,
+      entries: 1,
+    });
+    await expect(readFile(filePath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("keeps an aborted marker when pre-commit cleanup fails and recovers it without an active manifest", async () => {
+    const store = new MemorySecretStore();
+    store.failOnBindingId = "credentials/v1/manifest";
+    store.failGenerationDeletes = true;
+
+    await expect(
+      writeCredentials({ providers: { staged: { apiKey: "staged" } } }, { store }),
+    ).rejects.toThrow("Uncommitted credential generation cleanup failed");
+    const marker = [...store.values.entries()].find(([key]) =>
+      key.includes("/generation-markers/"),
+    )?.[1];
+    expect(marker).toContain('"state":"aborted"');
+
+    store.failGenerationDeletes = false;
+    expect(await loadCredentials({ store })).toEqual({});
+    expect([...store.values.keys()].some((key) => key.includes("/generations/"))).toBe(false);
+    expect([...store.values.keys()].some((key) => key.includes("/generation-markers/"))).toBe(false);
+  });
+
+  it("persists retirement work across a cleanup failure and completes it on the next read", async () => {
+    const store = new MemorySecretStore();
+    await writeCredentials({ providers: { old: { apiKey: "old" } } }, { store });
+    store.failGenerationDeletes = true;
+
+    await expect(
+      writeCredentials({ providers: { replacement: { apiKey: "new" } } }, { store }),
+    ).rejects.toThrow("提交后收尾尚未完成");
+    store.failGenerationDeletes = false;
+    expect(await loadCredentials({ store })).toEqual({
+      providers: { replacement: { apiKey: "new" } },
+    });
+    expect([...store.values.keys()].filter((value) => value.includes("/generations/"))).toHaveLength(1);
+    expect([...store.values.keys()].filter((value) => value.includes("/generation-markers/"))).toHaveLength(1);
+  });
+
+  it("recovers forward when generation-marker finalization fails after manifest activation", async () => {
+    const store = new MemorySecretStore();
+    store.failCommittedMarker = true;
+
+    await expect(
+      writeCredentials({ providers: { main: { apiKey: "committed" } } }, { store }),
+    ).rejects.toThrow("提交后收尾尚未完成");
+    expect(await loadCredentials({ store })).toEqual({
+      providers: { main: { apiKey: "committed" } },
+    });
+    const marker = [...store.values.entries()].find(([key]) =>
+      key.includes("/generation-markers/"),
+    )?.[1];
+    expect(marker).toContain('"state":"committed"');
+  });
+
+  it("removes an unreachable staged generation even when its creator process is still alive", async () => {
+    const store = new MemorySecretStore();
+    await writeCredentials({ providers: { active: { apiKey: "active" } } }, { store });
+    const generation = "0123456789abcdef";
+    const orphanRef = `provider/credentials/v1/generations/${generation}/${Buffer.from("orphan").toString("base64url")}`;
+    const markerRef = `provider/credentials/v1/generation-markers/${generation}`;
+    store.values.set(orphanRef, JSON.stringify({ apiKey: "orphan" }));
+    store.values.set(
+      markerRef,
+      JSON.stringify({
+        v: 1,
+        pid: process.pid,
+        createdAt: "2026-07-13T00:00:00.000Z",
+        state: "staging",
+        generation,
+        entries: [{ kind: "provider", id: "orphan" }],
+      }),
     );
 
-    const entries = fs.readdirSync(tmpDir);
-    const tmpFiles = entries.filter((name) => name.endsWith(".tmp"));
-    expect(tmpFiles).toEqual([]);
+    expect(await loadCredentials({ store })).toEqual({
+      providers: { active: { apiKey: "active" } },
+    });
+    expect(store.values.has(orphanRef)).toBe(false);
+    expect(store.values.has(markerRef)).toBe(false);
+  });
+
+  it("rechecks the live manifest before cleanup and never deletes a concurrently activated generation", async () => {
+    const store = new MemorySecretStore();
+    await writeCredentials({ providers: { first: { apiKey: "first" } } }, { store });
+    const nextGeneration = "fedcba9876543210";
+    const nextId = Buffer.from("next").toString("base64url");
+    const nextEntryRef = `provider/credentials/v1/generations/${nextGeneration}/${nextId}`;
+    const nextMarkerRef = `provider/credentials/v1/generation-markers/${nextGeneration}`;
+    const nextManifest = JSON.stringify({
+      v: 1,
+      generation: nextGeneration,
+      entries: [{ kind: "provider", id: "next" }],
+    });
+    store.values.set(nextEntryRef, JSON.stringify({ apiKey: "next" }));
+    store.values.set(
+      nextMarkerRef,
+      JSON.stringify({
+        v: 1,
+        pid: process.pid,
+        createdAt: "2026-07-13T00:00:00.000Z",
+        state: "committed",
+        generation: nextGeneration,
+        entries: [{ kind: "provider", id: "next" }],
+      }),
+    );
+    let switched = false;
+    store.onGet = async (ref) => {
+      if (!switched && ref.bindingId.includes("/generations/")) {
+        switched = true;
+        store.values.set("provider/credentials/v1/manifest", nextManifest);
+      }
+    };
+
+    expect(await loadCredentials({ store })).toEqual({
+      providers: { first: { apiKey: "first" } },
+    });
+    delete store.onGet;
+    expect(store.values.has(nextEntryRef)).toBe(true);
+    expect(await loadCredentials({ store })).toEqual({
+      providers: { next: { apiKey: "next" } },
+    });
+  });
+
+  it("publishes concurrent replacements as one complete generation, never a mixed set", async () => {
+    const store = new MemorySecretStore();
+    const left = {
+      providers: { left: { apiKey: "left" } },
+      channels: { left: { token: "l" } },
+      mcp: { left: { token: "l" } },
+    };
+    const right = {
+      providers: { right: { apiKey: "right" } },
+      channels: { right: { token: "r" } },
+      mcp: { right: { token: "r" } },
+    };
+    const outcomes = await Promise.allSettled([
+      writeCredentials(left, { store }),
+      writeCredentials(right, { store }),
+    ]);
+    expect(outcomes.every((outcome) => outcome.status === "fulfilled")).toBe(true);
+    expect(await loadCredentials({ store })).toEqual(right);
+    expect(store.uncoordinatedAccesses).toBe(0);
+  });
+
+  it("requires explicit acknowledgement before exporting a plaintext rollback file", async () => {
+    const homeDir = await createTempDir("credential-export");
+    const store = new MemorySecretStore();
+    await writeCredentials({ providers: { main: { apiKey: "rollback-secret" } } }, { store });
+
+    await expect(
+      exportCredentialsToLegacyFile({
+        homeDir,
+        store,
+        acknowledgePlaintextRisk: false as true,
+      }),
+    ).rejects.toThrow("plaintext-risk acknowledgement");
+    const filePath = await exportCredentialsToLegacyFile({
+      homeDir,
+      store,
+      acknowledgePlaintextRisk: true,
+    });
+    expect(await readFile(filePath, "utf8")).toContain("rollback-secret");
+
+    await writeFile(filePath, "preserve-existing", "utf8");
+    await expect(
+      exportCredentialsToLegacyFile({
+        homeDir,
+        store,
+        acknowledgePlaintextRisk: true,
+      }),
+    ).rejects.toMatchObject({ code: "EEXIST" });
+    await expect(readFile(filePath, "utf8")).resolves.toBe("preserve-existing");
   });
 });
+
+describe("applyCredentialsPatch", () => {
+  it("supports merge and authoritative replacement semantics", () => {
+    const current = {
+      providers: {
+        one: { apiKey: "1", baseUrl: "https://one.test" },
+        two: { apiKey: "2" },
+      },
+    };
+    expect(
+      applyCredentialsPatch(current, { providers: { one: { apiKey: "new" } } }),
+    ).toEqual({
+      providers: {
+        one: { apiKey: "new", baseUrl: "https://one.test" },
+        two: { apiKey: "2" },
+      },
+    });
+    expect(
+      applyCredentialsPatch(current, { providers: { one: { apiKey: "new" } } }, "replace"),
+    ).toEqual({ providers: { one: { apiKey: "new" } } });
+  });
+});
+
+function key(ref: SecretRef): string {
+  return `${ref.kind}/${ref.bindingId}`;
+}

@@ -199,6 +199,8 @@ export interface SecurityPipelineOptions {
    * 执行守卫选项。控制工具 profile、频率限制窗口、共享 limiter 等。
    */
   executionGuard?: ExecutionGuardOptions;
+  /** 产品组合根拥有、任何 AI 工具均不得访问的本机绝对路径前缀。 */
+  systemProtectedPaths?: readonly string[];
 }
 
 /**
@@ -250,7 +252,11 @@ export class SecurityPipeline {
   private readonly contextId: PermissionContextId;
 
   constructor(options: SecurityPipelineOptions = {}) {
-    this.policyEngine = new PolicyEngine();
+    this.policyEngine = new PolicyEngine(
+      options.systemProtectedPaths
+        ? { systemProtectedPaths: options.systemProtectedPaths }
+        : {},
+    );
     this.sessionType = options.sessionType ?? "interactive";
     this.trustContext = options.trustContext ?? { kind: "global" };
     this.contextId = deriveContextId(this.trustContext);

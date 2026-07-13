@@ -64,36 +64,36 @@ pnpm test                      # 运行测试
 node packages/cli/dist/index.js [...]
 ```
 
-首次运行检测必要字段缺失时，在交互终端启动**基础配置编辑器**——五级面板（↑↓ Enter Esc Ctrl+C 导航），完成后事务性写入两份文件。
+首次运行检测必要字段缺失时，在交互终端启动**基础配置编辑器**——五级面板（↑↓ Enter Esc Ctrl+C 导航），完成后写入功能配置与设备本地 SecretStore。
 
 ### 配置文件
 
-知行用户级配置分两份文件——按"功能 vs 内容"分层：
+知行用户级配置按“功能配置 vs 本地秘密”分层：
 
 | 文件 | 内容 | 性质 |
 |---|---|---|
 | `~/.zhixing/config.jsonc` | 决策层：`llm.main`（必填）/ `llm.light` / `llm.power` 角色选择、`messaging` 启用列表、`workspace`、`agent` / `intent` / `network` 等使用偏好。**支持 JSONC 注释**——VSCode 等编辑器原生识别 | AI 可读；写需用户确认 |
-| `~/.zhixing/credentials.json` | 内容层：provider 完整字段（apiKey + baseUrl + protocol + 自定义 model 列表等）、channel 完整字段（appId + appSecret 等所有字段） | AI 不可读、不可写 |
+| 设备本地 SecretStore | provider、channel、MCP 的秘密 binding；桌面使用系统凭据保护，无头设备使用机器绑定加密 vault | 不进入 AI、网格、备份或迁移流 |
 
 ### 字段对称性
 
 ```
-config.llm.main.provider="siliconflow"  ─refs─>  credentials.providers.siliconflow
-config.messaging.feishu={...options}    ─refs─>  credentials.channels.feishu
+config.llm.main.provider="siliconflow"  ─refs─>  SecretStore provider binding
+config.messaging.feishu={...options}    ─refs─>  SecretStore channel binding
 ```
 
-config 是"启用什么 / 用哪个"的引用；credentials 是资源完整定义。
+config 是“启用什么 / 用哪个”的引用；SecretStore 是目标设备的本地秘密来源。
 
 ### apiKey 来源（凭证唯一入口）
 
-1. **`credentials.json`**：`providers.<id>.apiKey`（配置编辑器写入；用户也可手动编辑）
+1. **设备本地 SecretStore**：配置编辑器通过专用流程写入 `provider/<id>` binding
 2. 缺失 → 启动期触发配置编辑器（TTY）或 fail-fast（非 TTY）
 
 `config.jsonc` **不接受**任何形态的凭证字段——启动期 schema 校验会拒绝 `providers` 字段、`channels` 旧名字段、`messaging.<id>.credentials` 嵌入凭证，三段式（违反字段 / 原因 / 修复步骤）引导用户手工修复。
 
-CI / Vault 等场景由启动脚本（用户 / 运维侧）生成 `~/.zhixing/credentials.json`，知行只读 plaintext。
+旧版 `~/.zhixing/credentials.json` 只作为一次性迁移源：逐 binding 写入并回读验证，激活前失败回滚且保留源文件；激活后清退异常则失败关闭并在下次读取继续收敛，不反向覆盖已提交凭据。
 
-配置是用户级单一来源：知行只读取全局 `~/.zhixing/config.jsonc`（决策层），不读取启动目录下的项目级配置；凭证也只来自 `~/.zhixing/credentials.json`，避免随项目泄漏到 git。
+配置是用户级单一来源：知行只读取全局 `~/.zhixing/config.jsonc`（决策层），不读取启动目录下的项目级配置；秘密只从当前设备 SecretStore 解锁，避免随项目或设备迁移泄漏。
 
 ---
 
@@ -206,9 +206,9 @@ zz stop
 修复路径：
 
 - 按错误消息提示在 `~/.zhixing/config.jsonc` 中删除违反字段
-- 在交互终端跑 `zz` 让向导写入 `~/.zhixing/credentials.json`，或手动编辑该文件
-- channel 密字段（appSecret 等）迁移到 `credentials.json` 的 `channels.<id>` 段；非密字段（appId 等）保留在 config.jsonc
-- CI / Vault 用户：由启动脚本生成 `credentials.json`（凭证 plaintext），知行不接受 env 注入语法
+- 在交互终端跑 `zz`，由向导写入设备本地 SecretStore
+- channel 接入字段（appId / appSecret 等）通过配置编辑器写入 SecretStore；config.jsonc 只保留启用项与功能选项
+- 非交互宿主须先在目标设备完成 SecretStore 解锁与凭据配置，不接受明文文件或 env 注入语法
 
 ### REPL 启动时报 `首次配置未完成`
 
@@ -220,7 +220,7 @@ zz stop
 
 ```bash
 cat ~/.zhixing/config.jsonc
-cat ~/.zhixing/credentials.json   # AI 不可读；用户可自己 cat
+# 秘密只能通过 `zz` / `/config` 的专用流程查看或更新，不提供明文读取入口
 ```
 
 ---

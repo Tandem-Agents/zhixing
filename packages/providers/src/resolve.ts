@@ -6,7 +6,7 @@
  * 解析流程：
  * 1. 查找预设（如果是已知 provider）
  * 2. 合并用户配置覆盖预设
- * 3. 从 credentials.json 取 API Key（凭证唯一入口）
+ * 3. 从设备本地 SecretStore 的内存投影取 API Key
  * 4. 验证必填字段
  * 5. 返回 ResolvedProvider
  */
@@ -15,11 +15,11 @@ import { getPreset } from "./presets.js";
 import {
   DEFAULT_QUIRKS,
   type LLMRoleConfig,
+  type ProviderCredentialProjection,
   type ProviderCredentialEntry,
   type ProviderQuirks,
   type ResolvedProvider,
   type ZhixingConfig,
-  type ZhixingCredentials,
 } from "./types.js";
 
 // ─── 错误类型 ───
@@ -45,11 +45,11 @@ export class ProviderConfigError extends Error {
  * 缺 apiKey → 抛 ProviderConfigError 引向首次配置向导。
  *
  * @param providerId - Provider 标识符（如 "deepseek"、"my-custom-gateway"）
- * @param credentials - 凭证文件内容
+ * @param credentials - 组合根从 SecretStore 解出的 provider 凭据投影
  */
 export function resolveProvider(
   providerId: string,
-  credentials: ZhixingCredentials,
+  credentials: ProviderCredentialProjection,
 ): ResolvedProvider {
   const preset = getPreset(providerId);
   const entry = credentials.providers?.[providerId];
@@ -57,7 +57,7 @@ export function resolveProvider(
   const baseUrl = entry?.baseUrl ?? preset?.baseUrl;
   if (!baseUrl) {
     throw new ProviderConfigError(
-      `Provider "${providerId}" 需要配置 baseUrl（不在内置预设列表中，需在 credentials.json 中提供）`,
+      `Provider "${providerId}" 需要配置 baseUrl（不在内置预设列表中，请通过配置向导补齐）`,
       providerId,
     );
   }
@@ -65,7 +65,7 @@ export function resolveProvider(
   const protocol = entry?.protocol ?? preset?.protocol;
   if (!protocol) {
     throw new ProviderConfigError(
-      `Provider "${providerId}" 需要配置 protocol（不在内置预设列表中，需在 credentials.json 中提供）。` +
+      `Provider "${providerId}" 需要配置 protocol（不在内置预设列表中，请通过配置向导补齐）。` +
         `可选值: "openai-compatible" | "anthropic-messages"`,
       providerId,
     );
@@ -96,7 +96,7 @@ export function resolveProvider(
  */
 export function resolveFromConfig(
   config: ZhixingConfig,
-  credentials: ZhixingCredentials,
+  credentials: ProviderCredentialProjection,
   providerId?: string,
 ): ResolvedProvider {
   const id = providerId ?? config.llm?.main?.provider;
@@ -155,7 +155,7 @@ export interface ResolvedLLMRoles {
  */
 export function resolveLLMRoles(
   config: ZhixingConfig,
-  credentials: ZhixingCredentials,
+  credentials: ProviderCredentialProjection,
 ): ResolvedLLMRoles {
   // 单一 fail-fast 边界——把 ZhixingConfig.llm? 的 optional 在此处一次性 narrow，
   // 让下游 helpers 接收已确定形状的字段（避免 TS 跨函数 narrow 失败 / non-null 断言）。
@@ -183,7 +183,7 @@ export function resolveLLMRoles(
 
 function resolveMainRole(
   mainConfig: LLMRoleConfig,
-  credentials: ZhixingCredentials,
+  credentials: ProviderCredentialProjection,
 ): ResolvedLLMRole {
   const resolved = resolveProvider(mainConfig.provider, credentials);
   return { resolved, model: mainConfig.model };
@@ -195,7 +195,7 @@ function resolveMainRole(
  */
 function resolveAuxRole(
   explicit: LLMRoleConfig | undefined,
-  credentials: ZhixingCredentials,
+  credentials: ProviderCredentialProjection,
   fallbackRole: ResolvedLLMRole,
   roleId: "light" | "power",
 ): { role: ResolvedLLMRole; degradation?: RoleDegradation } {
@@ -267,7 +267,7 @@ function buildMissingMainConfigMessage(): string {
 /**
  * 从凭证条目取 API Key。
  *
- * 凭证唯一入口 = `~/.zhixing/credentials.json` 的 providers.<id>.apiKey。
+ * 凭证唯一入口 = 设备本地 SecretStore 的 provider binding。
  * 缺失时抛 ProviderConfigError，引向首次配置向导（不接受任何形态的 fallback）。
  */
 function resolveApiKey(
@@ -278,9 +278,7 @@ function resolveApiKey(
 
   throw new ProviderConfigError(
     `Provider "${providerId}" 缺少 API Key。\n` +
-      `凭证唯一入口是 ~/.zhixing/credentials.json 的 providers.${providerId}.apiKey 字段。\n` +
-      `首次使用建议在 TTY 终端跑 \`zhixing\` 触发引导自动写入；用户也可手动编辑该文件。\n` +
-      `Schema: { "providers": { "${providerId}": { "apiKey": "..." } } }`,
+      `请在目标设备的 TTY 终端运行 \`zhixing\`，通过配置向导写入本地 SecretStore。`,
     providerId,
   );
 }

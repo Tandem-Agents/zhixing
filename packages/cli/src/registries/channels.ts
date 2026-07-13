@@ -11,7 +11,7 @@
  * 增加 channel 流程：
  *   1. 这里加一项（label + id + 必填字段）
  *   2. 确保 channel adapter 实现存在（如 @zhixing/channel-feishu）
- *   3. `credentials.json` 模板加该 channel 占位（packages/providers/src/credentials-loader.ts）
+ *   3. 配置编辑器登记该 channel 的 SecretStore 录入字段
  *
  * 文档链接以 `docUrl` 显式声明在每个 field 上（first-class 字段，不内嵌 hint
  * 文本）——让 input panel 单独渲染为可点击文档行，不靠 regex 解析。

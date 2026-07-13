@@ -3,7 +3,7 @@
  *
  * 与初始配置 / 服务模式启动 / REPL `/config` 命令解耦——caller 按需求传 sections + title。
  *
- * 完成时执行事务性写盘（writeConfig + writeCredentials），保证两文件不会半致状态。
+ * 完成时由组合根分别提交非秘密配置与 SecretStore 凭据投影。
  * 取消 / Ctrl+C 时不写盘，所有改动丢弃。
  */
 

@@ -27,6 +27,7 @@
     "@zhixing/providers": "workspace:*",
     "@zhixing/rpc": "workspace:*",
     "@zhixing/runtime-host": "workspace:*",
+    "@zhixing/secrets": "workspace:*",
     "@zhixing/server": "workspace:*",
     "@zhixing/tools-builtin": "workspace:*",
     "chalk": "^5.4.0",

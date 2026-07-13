@@ -1,3 +1,4 @@
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { PolicyEngine } from "../policy-engine.js";
 import type { SecurityRequest, SecurityRule } from "../types.js";
@@ -48,9 +49,56 @@ describe("PolicyEngine", () => {
         expect(rule.enabled).toBe(true);
       }
     });
+
+    it("拒绝相对路径和文件系统根作为宿主秘密边界", () => {
+      expect(
+        () => new PolicyEngine({ systemProtectedPaths: ["secret-vault"] }),
+      ).toThrow("must be absolute");
+      expect(
+        () =>
+          new PolicyEngine({
+            systemProtectedPaths: [path.parse(process.cwd()).root],
+          }),
+      ).toThrow("Filesystem root");
+    });
   });
 
   describe("bypassImmune 规则", () => {
+    it("宿主注入的实际秘密文件族对读写均阻断且不可被用户规则覆盖", () => {
+      const protectedPrefix = path.resolve(process.cwd(), "custom-home", "secret-vault");
+      const engine = new PolicyEngine({
+        systemProtectedPaths: [protectedPrefix, protectedPrefix],
+      });
+      engine.loadRules([
+        {
+          id: "user-allow-custom-home",
+          name: "allow custom home",
+          description: "test override",
+          enabled: true,
+          match: { type: "path", paths: [protectedPrefix], access: "any" },
+          action: "allow",
+          severity: "low",
+          category: "data_exfiltration",
+          source: "user",
+          message: "allow",
+        },
+      ]);
+
+      for (const request of [
+        makeRequest({ tool: "read", arguments: { path: `${protectedPrefix}.json` } }),
+        writeRequest(`${protectedPrefix}.key.123.tmp`),
+      ]) {
+        const decision = engine.evaluate(request);
+        expect(decision.action).toBe("block");
+        expect(decision.matchedRules.map((rule) => rule.id)).toContain(
+          "bi-system-protected-paths",
+        );
+      }
+      expect(
+        engine.getActiveRules().filter((rule) => rule.id === "bi-system-protected-paths"),
+      ).toHaveLength(1);
+    });
+
     it("阻止写入 .git/ 目录（相对路径）", () => {
       const engine = new PolicyEngine();
       const decision = engine.evaluate(

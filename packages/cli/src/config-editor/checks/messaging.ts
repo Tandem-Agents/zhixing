@@ -11,7 +11,10 @@
  * 输出 `MessagingIssue[]` 同时服务 boot + editor 两类 caller。
  */
 
-import type { ZhixingConfig, ZhixingCredentials } from "@zhixing/providers";
+import type {
+  ChannelCredentialProjection,
+  ZhixingConfig,
+} from "@zhixing/providers";
 import { SUPPORTED_CHANNELS } from "../../registries/index.js";
 
 export interface MessagingIssue {
@@ -29,7 +32,7 @@ export interface MessagingIssue {
  */
 export function checkMessaging(
   config: ZhixingConfig,
-  credentials: ZhixingCredentials,
+  credentials: ChannelCredentialProjection,
 ): MessagingIssue[] {
   const issues: MessagingIssue[] = [];
   const messaging = config.messaging ?? {};

@@ -33,8 +33,8 @@ export interface ConfigSemanticIssue {
  * 启动期 fail-fast 错误——封装一组 issue 并保留 config 文件路径。
  *
  * caller（CLI / serve 入口）捕获后逐项打印 issue，引导用户手工修复。
- * 不内嵌 AI 协助迁移——AI 不能写 credentials.json（被 builtin 规则 block），
- * 也不应该自动改用户文件；让用户用编辑器自改是清晰、安全、尊重主权的路径。
+ * 不内嵌 AI 协助秘密迁移；用户先清理错误的公开配置，再由配置编辑器的
+ * SecretStore 专用流程录入秘密。
  */
 export class ConfigSemanticError extends Error {
   constructor(
@@ -57,7 +57,7 @@ export type ConfigValidator = (config: ZhixingConfig) => ConfigSemanticIssue[];
  * 校验：config.providers 字段不允许存在。
  *
  * provider 资源（apiKey + baseUrl + protocol + quirks 等所有字段）属于内容层，
- * 集中在 credentials.providers.<id>。config.json 只引用 provider id（如
+ * 集中在设备本地 SecretStore。config.json 只引用 provider id（如
  * llm.main.provider），不存放 provider 具体定义。
  */
 const validateNoConfigProviders: ConfigValidator = (config) => {
@@ -69,11 +69,10 @@ const validateNoConfigProviders: ConfigValidator = (config) => {
       field: "providers",
       reason:
         "Provider 资源定义不允许出现在 config.json —— provider 的 apiKey 与技术配置都属于" +
-        "内容层，集中在 credentials.providers.<id>",
+        "秘密层，集中在设备本地 SecretStore",
       fix:
         "在 config.json 中删除整个 providers 字段；" +
-        "把每个 provider 的字段（apiKey + baseUrl + protocol + 等）合并到 " +
-        "~/.zhixing/credentials.json 的 providers.<id> 段；" +
+        "随后运行 `zz`，通过配置向导重新录入每个 provider；" +
         "config.json 只通过 llm.main.provider 引用 provider id",
     },
   ];
@@ -84,7 +83,7 @@ const validateNoConfigProviders: ConfigValidator = (config) => {
  *
  * 旧 schema 用 channels 兼指"启用列表 + 凭证字段"。功能/内容分层后：
  *   - 启用列表 + 功能选项 → config.messaging.<id>
- *   - 凭证 + 链接字段 → credentials.channels.<id>
+ *   - 凭证 + 链接字段 → 设备本地 SecretStore
  *
  * config.channels 出现一律视为旧 schema 残留，引导用户迁移。
  */
@@ -97,12 +96,11 @@ const validateNoConfigChannels: ConfigValidator = (config) => {
       field: "channels",
       reason:
         "config.json 不再使用 channels 字段（已重命名为 messaging 并简化）—— " +
-        "channels 的具体凭证与链接字段属于内容层，集中在 credentials.channels.<id>",
+        "channels 的具体凭证与链接字段属于秘密层，集中在设备本地 SecretStore",
       fix:
         "在 config.json 中：把 channels 改名为 messaging；" +
         "每个 channel 条目只保留 type / options / defaultTarget 等功能选项，" +
-        "把 credentials 字段（appId / appSecret / 等）整体搬到 " +
-        "~/.zhixing/credentials.json 的 channels.<id> 段",
+        "随后运行 `zz`，通过配置向导重新录入 channel 字段",
     },
   ];
 };
@@ -111,7 +109,7 @@ const validateNoConfigChannels: ConfigValidator = (config) => {
  * 校验：config.messaging.<id> 中不允许出现 credentials 字段。
  *
  * messaging 是功能层（启用列表 + 功能选项）；channel 的具体字段（appId / appSecret）
- * 是内容层，必须在 credentials.channels.<id>。
+ * 是秘密层，必须经 SecretStore 专用流程录入。
  */
 const validateNoMessagingCredentials: ConfigValidator = (config) => {
   const issues: ConfigSemanticIssue[] = [];
@@ -127,7 +125,7 @@ const validateNoMessagingCredentials: ConfigValidator = (config) => {
           `不允许出现在 config.json 的 messaging 条目中`,
         fix:
           `在 config.json 中删除 messaging.${channelId}.credentials；` +
-          `把这些字段整体搬到 ~/.zhixing/credentials.json 的 channels.${channelId} 段`,
+          `随后运行 \`zz\`，通过配置向导重新录入 ${channelId} 的 channel 字段`,
       });
     }
   }

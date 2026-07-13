@@ -19,14 +19,14 @@ import * as readline from "node:readline/promises";
 import chalk from "chalk";
 import type { ChannelStatus } from "@zhixing/core";
 import {
-  getCredentialsPath,
   getGlobalConfigPath,
   loadConfig,
-  loadCredentials,
+  loadCredentialsWithLegacyMigration,
   resolveHomeDir,
   writeConfig,
   writeCredentials,
 } from "@zhixing/providers";
+import { createPlatformSecretStore } from "@zhixing/secrets";
 import {
   BASE_CONFIG_SECTION_IDS,
   extractMcpCandidate,
@@ -144,11 +144,14 @@ async function runEditorCommand(
   try {
     const homeDir = resolveHomeDir();
     const configPath = getGlobalConfigPath();
-    const credentialsPath = getCredentialsPath(homeDir);
+    const secretStore = createPlatformSecretStore({ homeDir });
 
     // 重新 load 最新——保证用户外部编辑后的一致性，不复用启动缓存
     const config = loadConfig();
-    const credentials = loadCredentials({ homeDir });
+    const { credentials } = await loadCredentialsWithLegacyMigration({
+      store: secretStore,
+      homeDir,
+    });
 
     const editorResult = await runConfigEditor({
       initialConfig: config,
@@ -159,13 +162,13 @@ async function runEditorCommand(
       header: {
         workspaceRoot: config.workspace?.root,
         configPath,
-        credentialsPath,
+        secretStoreLabel: "设备本地 SecretStore",
       },
       writers: {
         // writeConfig / writeCredentials 即"权威完整写入"——编辑器持有完整配置，写入令文件
         // 等同它，删除某 server / channel 由"省略该 id"表达、真正落盘。
         writeConfig: (next) => writeConfig(next, { homeDir }),
-        writeCredentials: (next) => writeCredentials(next, { homeDir }),
+        writeCredentials: (next) => writeCredentials(next, { store: secretStore }),
       },
       stdin: process.stdin,
       stdout: process.stdout,

@@ -23,8 +23,8 @@ import type {
   SessionBroadcast,
 } from "@zhixing/rpc";
 import type {
+  ChannelCredentialProjection,
   MessagingChannelEntry,
-  ZhixingCredentials,
 } from "@zhixing/providers";
 
 // ─── Adapter Factory ───
@@ -55,13 +55,13 @@ export interface SetupChannelsOptions {
    */
   entries: Record<string, MessagingChannelEntry>;
   /**
-   * 用户级凭证文件——含 channel 完整字段（appId / appSecret 等所有字段）。
+   * 组合根从 SecretStore 解出的 channel-only 投影。
    *
    * setupChannels 内部把 `credentials.channels[id]` 整体作为 ChannelConfig.credentials
    * 传给 ChannelAdapter.connect；channel adapter 收到 Record<string, string>
-   * 形态不变。channel 资源完整定义集中在凭证文件，AI 不可读。
+   * 形态不变；本接入面从类型层无法接触 provider / MCP 凭据。
    */
-  credentials: ZhixingCredentials;
+  credentials: ChannelCredentialProjection;
   /** ConversationManager for inbound routing. Omit for outbound-only mode (REPL). */
   conversations?: ConversationManager;
   logger: ChannelLogger;
@@ -164,7 +164,7 @@ export async function setupChannels(
     registry.register(adapter);
 
     // channel 完整字段（含 appId / appSecret 等）从 credentials.channels.<id> 取——
-    // channel 资源定义集中在凭证文件，config.json 只记录"启用列表 + 功能选项"。
+    // channel 资源定义集中在设备本地 SecretStore，config.json 只记录"启用列表 + 功能选项"。
     const channelCredentials = credentials.channels?.[id] ?? {};
 
     const channelConfig: ChannelConfig = {
