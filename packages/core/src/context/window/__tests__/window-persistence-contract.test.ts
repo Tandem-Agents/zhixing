@@ -114,6 +114,61 @@ describe("窗口 × 持久化分层契约", () => {
     expect(await countRuns(store, "c1")).toBe(3);
   });
 
+  it("权威提交投影与旧接受协议逐项等价且重复重驱不追加", async () => {
+    const legacyWindow = createAttentionWindow({ conversationId: "legacy" });
+    const committedWindow = createAttentionWindow({ conversationId: "committed" });
+    const inputs = [
+      { runId: "run-1", messages: runMessages("一") },
+      { runId: "run-2", messages: runMessages("二"), windowCompact: compact(1, "第一轮摘要") },
+    ];
+
+    for (const [runIndex, input] of inputs.entries()) {
+      clock += 1000;
+      const timestamp = new Date(clock).toISOString();
+      const legacy = await store.appendRunRecord("legacy", {
+        timestamp,
+        messages: input.messages,
+      });
+      const committed = await store.appendCommittedRunRecord("committed", {
+        type: "run",
+        runId: input.runId,
+        runIndex,
+        timestamp,
+        messages: input.messages,
+      });
+      expect(committed).toMatchObject({
+        appended: true,
+        runIndex: legacy.runIndex,
+      });
+      legacyWindow.acceptRun({
+        runMessages: input.messages,
+        runIndex: legacy.runIndex,
+        windowCompact: input.windowCompact,
+      });
+      committedWindow.acceptRun({
+        runMessages: input.messages,
+        runIndex: committed.runIndex,
+        windowCompact: input.windowCompact,
+      });
+    }
+
+    const committedRecords = await collectRecords(store, "committed");
+    expect(
+      committedRecords.map((record) => {
+        const { runId: _, ...legacyShape } = record as RunRecord & { runId?: string };
+        return legacyShape;
+      }),
+    ).toEqual(await collectRecords(store, "legacy"));
+    expect(committedWindow.getMessages()).toEqual(legacyWindow.getMessages());
+
+    const replay = committedRecords[1] as RunRecord & { runId: string };
+    await expect(store.appendCommittedRunRecord("committed", replay)).resolves.toMatchObject({
+      appended: false,
+      runIndex: 1,
+    });
+    expect(await countRuns(store, "committed")).toBe(2);
+  });
+
   it("窗口折叠后：磁盘保留全部原文（只增不减），窗口持有蒸馏形", async () => {
     const window = createAttentionWindow({ conversationId: "c2" });
     await acceptViaProtocol(store, window, "c2", runMessages("零"));

@@ -1,17 +1,32 @@
 import { Buffer } from "node:buffer";
-import type { ArtifactRef, LogicalRecord } from "../contracts/index.js";
-import { canonicalize } from "../protocol/index.js";
+import type { ArtifactRef, LogicalRecord, MutationBatch, SealedBundle } from "../contracts/index.js";
+import {
+  canonicalize,
+  validateConversationSealedBundle,
+  validateMutationBatch,
+} from "../protocol/index.js";
 import { assertArtifactRef, collectArtifactRefs } from "./artifact-references.js";
 import { AuthorityStorageError } from "./errors.js";
 
 type ExecutionKind = "conversation" | "job";
 
-export interface RegisteredArtifactRoot {
-  readonly schema: "DispatchEnvelope";
-  readonly ref: ArtifactRef;
-  readonly assignmentId: string;
-  readonly execution: ExecutionKind;
-}
+export type RegisteredArtifactRoot =
+  | {
+      readonly schema: "DispatchEnvelope";
+      readonly ref: ArtifactRef;
+      readonly assignmentId: string;
+      readonly execution: ExecutionKind;
+    }
+  | {
+      readonly schema: "SealedBundle";
+      readonly ref: ArtifactRef;
+      readonly assignmentId: string;
+    }
+  | {
+      readonly schema: "MutationBatch";
+      readonly ref: ArtifactRef;
+      readonly assignmentId: string;
+    };
 
 export function collectRegisteredArtifactRoots(
   records: readonly LogicalRecord<unknown>[],
@@ -20,34 +35,70 @@ export function collectRegisteredArtifactRoots(
   for (const record of records) {
     const body = plainRecord(record.body);
     if (record.stream.startsWith("run:") || record.stream.startsWith("job:")) {
-      if (body?.t !== "assigned") continue;
+      if (body?.t === "assigned") {
+        roots.push({
+          schema: "DispatchEnvelope",
+          ref: requiredArtifactRef(body.dispatchRef, "Assigned dispatchRef"),
+          assignmentId: requiredString(body.assignmentId, "Assigned assignmentId"),
+          execution: record.stream.startsWith("run:") ? "conversation" : "job",
+        });
+      } else if (body?.t === "committed") {
+        roots.push({
+          schema: "SealedBundle",
+          ref: requiredArtifactRef(plainRecord(body.bundle)?.ref, "Committed bundle ref"),
+          assignmentId: requiredString(body.assignmentId, "Committed assignmentId"),
+        });
+      }
+      continue;
+    }
+    if (record.stream === "publish" && body?.t === "publish-decision") {
       roots.push({
-        schema: "DispatchEnvelope",
-        ref: requiredArtifactRef(body.dispatchRef, "Assigned dispatchRef"),
-        assignmentId: requiredString(body.assignmentId, "Assigned assignmentId"),
-        execution: record.stream.startsWith("run:") ? "conversation" : "job",
+        schema: "MutationBatch",
+        ref: requiredArtifactRef(plainRecord(body.batch)?.ref, "Publish batch ref"),
+        assignmentId: requiredString(body.assignmentId, "Publish assignmentId"),
       });
       continue;
     }
     if (!record.stream.startsWith("assignment:")) continue;
 
     const assignmentBody = plainRecord(body?.body);
-    if (assignmentBody?.t !== "received") continue;
-    const envelope = plainRecord(assignmentBody.envelope);
-    const activation = plainRecord(assignmentBody.activation);
-    const activationRef = plainRecord(activation?.ref);
-    roots.push({
-      schema: "DispatchEnvelope",
-      ref: requiredArtifactRef(envelope?.ref, "Received envelope ref"),
-      assignmentId: requiredString(
-        record.stream.slice("assignment:".length),
-        "Assignment stream id",
-      ),
-      execution: requiredExecution(
-        activationRef?.execution,
-        "Received activation execution",
-      ),
-    });
+    const assignmentId = requiredString(
+      record.stream.slice("assignment:".length),
+      "Assignment stream id",
+    );
+    if (assignmentBody?.t === "received") {
+      const envelope = plainRecord(assignmentBody.envelope);
+      const activation = plainRecord(assignmentBody.activation);
+      const activationRef = plainRecord(activation?.ref);
+      roots.push({
+        schema: "DispatchEnvelope",
+        ref: requiredArtifactRef(envelope?.ref, "Received envelope ref"),
+        assignmentId,
+        execution: requiredExecution(
+          activationRef?.execution,
+          "Received activation execution",
+        ),
+      });
+    } else if (assignmentBody?.t === "bundle_sealed") {
+      roots.push({
+        schema: "SealedBundle",
+        ref: requiredArtifactRef(
+          plainRecord(assignmentBody.bundle)?.ref,
+          "Sealed bundle ref",
+        ),
+        assignmentId,
+      });
+      if (assignmentBody.mutationBatch !== undefined) {
+        roots.push({
+          schema: "MutationBatch",
+          ref: requiredArtifactRef(
+            plainRecord(assignmentBody.mutationBatch)?.ref,
+            "Sealed mutation batch ref",
+          ),
+          assignmentId,
+        });
+      }
+    }
   }
   return roots;
 }
@@ -69,6 +120,20 @@ export function collectRegisteredArtifactReferences(
 
   const envelope = plainRecord(value);
   try {
+    if (root.schema === "SealedBundle") {
+      const bundle = validateConversationSealedBundle(value as SealedBundle);
+      if (bundle.assignmentId !== root.assignmentId) {
+        throw new TypeError("assignmentId does not match its authority record");
+      }
+      return collectArtifactRefs(bundle);
+    }
+    if (root.schema === "MutationBatch") {
+      const batch = validateMutationBatch(value as MutationBatch);
+      if (batch.assignmentId !== root.assignmentId) {
+        throw new TypeError("assignmentId does not match its authority record");
+      }
+      return collectArtifactRefs(batch);
+    }
     if (envelope?.v !== 1) throw new TypeError("version must be 1");
     if (envelope.assignmentId !== root.assignmentId) {
       throw new TypeError("assignmentId does not match its authority record");

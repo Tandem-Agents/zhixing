@@ -20,12 +20,14 @@ import {
   type AbortReason,
   type AgentEventMap,
   type AppendRunResult,
+  type AppendCommittedRunResult,
   type AttentionWindowState,
   type Message,
   type RunRecordInput,
   type RunRecordRef,
   type SnapshotInput,
   type TurnSource,
+  type TranscriptRunRecord,
   type WindowCompact,
   type WindowFoldOutcome,
 } from "@zhixing/core";
@@ -40,6 +42,10 @@ import type {
 } from "./types.js";
 import { EphemeralRunBuffer } from "./ephemeral-run-buffer.js";
 import type { ConfirmationHub } from "./confirmation-hub.js";
+import type {
+  ConversationCommitProjection,
+  ConversationCommitProjectionInput,
+} from "./conversation-assignment.js";
 
 // 空 set 复用，避免每次 getObserverConnectionIds 返回新对象
 const EMPTY_OBSERVER_SET: ReadonlySet<string> = new Set();
@@ -144,6 +150,12 @@ export type AppendRun = (
   input: RunRecordInput,
 ) => Promise<AppendRunResult>;
 
+/** AuthorityCommitLog 已提交 run 的幂等 transcript 投影入口。 */
+export type AppendCommittedRun = (
+  conversationId: string,
+  input: TranscriptRunRecord,
+) => Promise<AppendCommittedRunResult>;
+
 export interface ConversationManagerCallbacks {
   onRelease?: OnSessionRelease;
   loadHistory?: LoadHistory;
@@ -172,6 +184,8 @@ export interface ConversationManagerCallbacks {
    * 降级 —— 前者 throw，后者 return false 保持 ephemeral。
    */
   appendRun?: AppendRun;
+  /** 新提交协议的派生投影；未启用新路径时可以省略。 */
+  appendCommittedRun?: AppendCommittedRun;
   /**
    * 派生摘要快照写入 —— 对应快照 store 的 `write`。
    *
@@ -285,7 +299,7 @@ export class WorksceneBusyError extends Error {
 
 // ─── ConversationManager ───
 
-export class ConversationManager {
+export class ConversationManager implements ConversationCommitProjection {
   private readonly sessions = new Map<string, ManagedSession>();
   /**
    * observer 名册是 conversation 身份层状态,不是活跃 runtime 状态。
@@ -329,6 +343,7 @@ export class ConversationManager {
   private readonly initTranscript?: InitTranscript;
   private readonly ensureConversation?: EnsureConversation;
   private readonly appendRunCb?: AppendRun;
+  private readonly appendCommittedRunCb?: AppendCommittedRun;
   private readonly writeSnapshotCb?: (
     conversationId: string,
     input: SnapshotInput,
@@ -364,6 +379,7 @@ export class ConversationManager {
       this.initTranscript = callbacksOrOnRelease.initTranscript;
       this.ensureConversation = callbacksOrOnRelease.ensureConversation;
       this.appendRunCb = callbacksOrOnRelease.appendRun;
+      this.appendCommittedRunCb = callbacksOrOnRelease.appendCommittedRun;
       this.writeSnapshotCb = callbacksOrOnRelease.writeSnapshot;
       this.confirmationHub = callbacksOrOnRelease.confirmationHub;
       this.onTurnCommitted = callbacksOrOnRelease.onTurnCommitted;
@@ -1083,6 +1099,35 @@ export class ConversationManager {
       turnId: options?.turnId,
       runIndex,
       runRecordRef: { shardId, runIndex },
+    });
+  }
+
+  /**
+   * 将权威 committed fact 物化到旧会话读路径。transcript 回调先幂等落盘，
+   * 只有首次追加才推进当前进程中的窗口与派生快照；重启时窗口由 transcript
+   * 重建，因此 append 与内存更新之间崩溃无需回滚权威提交。
+   */
+  async project(input: ConversationCommitProjectionInput): Promise<void> {
+    if (!this.appendCommittedRunCb) {
+      throw new Error("ConversationManager requires appendCommittedRun for commit projection");
+    }
+    const conversationId = input.conversationId;
+    const accepted = await this.appendCommittedRunCb(conversationId, input.runRecord);
+    if (!accepted.appended) return;
+    const session = this.sessions.get(conversationId);
+    if (!session) return;
+    const outcome = session.window.acceptRun({
+      runMessages: input.runRecord.messages,
+      runIndex: input.runRecord.runIndex,
+      windowCompact: input.windowCompact,
+    });
+    session.turnCount += 1;
+    session.lastActiveAt = input.runRecord.timestamp;
+    await this.maybeWriteSnapshot(conversationId, session, input.windowCompact, outcome);
+    this.notifyTurnCommitted(session, input.runRecord, {
+      turnId: input.runRecord.runId,
+      runIndex: accepted.runIndex,
+      runRecordRef: { shardId: accepted.shardId, runIndex: accepted.runIndex },
     });
   }
 

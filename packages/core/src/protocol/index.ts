@@ -1,5 +1,16 @@
 export { byteDigest, canonicalize, protocolBytes, protocolDigest } from "./canonical.js";
 export {
+  conversationBundleRoots,
+  createConversationSealedBundle,
+  createMutationBatch,
+  mutationBatchArtifact,
+  sealedBundleArtifact,
+  validateConversationSealedBundle,
+  validateMutationBatch,
+  validateTranscriptRunRecord,
+  type ArtifactValue,
+} from "./commit.js";
+export {
   advanceAssignmentLedger,
   assignmentActivationDigest,
   assignmentLedgerSeed,

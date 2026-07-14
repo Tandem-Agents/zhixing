@@ -2,6 +2,7 @@
 
 export type {
   AppendRunResult,
+  AppendCommittedRunResult,
   ClearRecord,
   RunRecord,
   TranscriptRunRecord,

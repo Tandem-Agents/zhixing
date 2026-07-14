@@ -72,6 +72,38 @@ describe("写入与 runIndex", () => {
     expect(r1.runIndex).toBe(1);
   });
 
+  it("幂等物化 committed run，并拒绝跳号或同位置异载荷", async () => {
+    const input = {
+      type: "run" as const,
+      runId: "run-1",
+      runIndex: 0,
+      ...runInput("权威提交"),
+    };
+    await expect(store.appendCommittedRunRecord("committed", input)).resolves.toEqual({
+      runIndex: 0,
+      shardId: "000001",
+      appended: true,
+    });
+    await expect(store.appendCommittedRunRecord("committed", input)).resolves.toEqual({
+      runIndex: 0,
+      shardId: "000001",
+      appended: false,
+    });
+    await expect(
+      store.appendCommittedRunRecord("committed", {
+        ...input,
+        runId: "run-conflict",
+      }),
+    ).rejects.toThrow("conflicts with an existing projection");
+    await expect(
+      store.appendCommittedRunRecord("committed", {
+        ...input,
+        runId: "run-2",
+        runIndex: 2,
+      }),
+    ).rejects.toThrow("not contiguous");
+  });
+
   it("完整协议消息序列往返保真（含工具轮）", async () => {
     const messages: Message[] = [
       { role: "user", content: [{ type: "text", text: "读文件" }] },

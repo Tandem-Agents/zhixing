@@ -16,6 +16,7 @@ import type {
   LedgerEvidencePage,
   PermissionSnapshotLease,
   Signature,
+  TranscriptRunRecord,
 } from "@zhixing/core/contracts";
 import {
   advanceAssignmentLedger,
@@ -25,6 +26,8 @@ import {
   dispatchEnvelopeDigest,
   protocolBytes,
   protocolDigest,
+  createConversationSealedBundle,
+  sealedBundleArtifact,
   type ProtocolSignatureVerifier,
   type ProtocolSigner,
   type UnsignedConversationEnvelope,
@@ -33,6 +36,10 @@ import {
   ConversationRunJournal,
   InProcessConversationDispatcher,
   type AssignmentSubmissionAuthorizer,
+  type ConversationCommitAuthority,
+  type ConversationCommitProjection,
+  type ConversationCommitProjectionInput,
+  type ConversationMutationPublisher,
 } from "@zhixing/owner-kernel/conversation-assignment";
 import { createTempDir } from "@zhixing/test-utils";
 import { describe, expect, it } from "vitest";
@@ -117,7 +124,14 @@ const submission: AssignmentSubmissionAuthorizer = {
   },
 };
 
-async function createUnassignedHarness(options: { maxPendingInteractions?: number } = {}) {
+async function createUnassignedHarness(
+  options: {
+    maxPendingInteractions?: number;
+    authority?: ConversationCommitAuthority;
+    projection?: ConversationCommitProjection;
+    publisher?: ConversationMutationPublisher;
+  } = {},
+) {
   const root = await createTempDir("conversation-assignment");
   const artifacts = new FileArtifactStore(path.join(root, "artifacts"), {
     lockWaitMs: 2_000,
@@ -127,13 +141,47 @@ async function createUnassignedHarness(options: { maxPendingInteractions?: numbe
     lockWaitMs: 2_000,
   });
   const identity = new TestProtocolIdentity();
+  const projected = new Map<string, ConversationCommitProjectionInput>();
+  const authority: ConversationCommitAuthority =
+    options.authority ??
+    {
+      decideAtPrefix(input) {
+        if (
+          input.conversationId !== CONVERSATION_ID ||
+          input.ownerEpoch !== 3 ||
+          input.baseRevision !== 7 ||
+          input.runRecord.runIndex !== 8
+        ) {
+          return {
+            committed: false,
+            error: { code: "revision-conflict", message: "stale conversation base", retryable: false },
+          };
+        }
+        return { committed: true, commitRevision: 8 };
+      },
+    };
+  const projection: ConversationCommitProjection =
+    options.projection ??
+    {
+      async project(input) {
+        const previous = projected.get(input.assignmentId);
+        if (previous && canonicalize(previous) !== canonicalize(input)) {
+          throw new Error("projection identity conflict");
+        }
+        projected.set(input.assignmentId, input);
+      },
+    };
   const journal = new ConversationRunJournal({
     conversationId: CONVERSATION_ID,
+    ownerEpoch: 3,
     log,
     artifacts,
     signer: identity,
     verifier: identity,
     submission,
+    authority,
+    projection,
+    publisher: options.publisher,
   });
   const ledger = new ConversationAssignmentLedger({
     log,
@@ -153,10 +201,28 @@ async function createUnassignedHarness(options: { maxPendingInteractions?: numbe
     queuedPosition: 0,
   });
   const unsigned = createUnsignedEnvelope(identity);
-  return { root, artifacts, log, identity, journal, ledger, unsigned };
+  return {
+    root,
+    artifacts,
+    log,
+    identity,
+    journal,
+    ledger,
+    unsigned,
+    authority,
+    projection,
+    projected,
+  };
 }
 
-async function createHarness(options: { maxPendingInteractions?: number } = {}) {
+async function createHarness(
+  options: {
+    maxPendingInteractions?: number;
+    authority?: ConversationCommitAuthority;
+    projection?: ConversationCommitProjection;
+    publisher?: ConversationMutationPublisher;
+  } = {},
+) {
   const harness = await createUnassignedHarness(options);
   const { journal, unsigned } = harness;
   const dispatch = await journal.assign(unsigned);
@@ -179,6 +245,7 @@ describe("conversation assignment protocol", () => {
 
     const restartedJournal = new ConversationRunJournal({
       conversationId: CONVERSATION_ID,
+      ownerEpoch: 3,
       log: new FileAuthorityCommitLog(harness.log.rootDir, harness.artifacts, {
         clock: () => NOW,
         lockWaitMs: 2_000,
@@ -187,6 +254,8 @@ describe("conversation assignment protocol", () => {
       signer: harness.identity,
       verifier: harness.identity,
       submission,
+      authority: harness.authority,
+      projection: harness.projection,
     });
     expect(await restartedJournal.pendingDispatches()).toHaveLength(1);
     const enabled = new InProcessConversationDispatcher({
@@ -394,7 +463,6 @@ describe("conversation assignment protocol", () => {
       owner: harness.journal,
     });
     await adapter.startAndReport(ASSIGNMENT_ID, submissionContext(harness.unsigned));
-
     await harness.ledger.requestInteraction(ASSIGNMENT_ID, {
       requestId: "interaction-1",
       toolName: "write-file",
@@ -483,32 +551,29 @@ describe("conversation assignment protocol", () => {
       ASSIGNMENT_ID,
       runEndRequest,
     );
-    const bundleRef = await harness.artifacts.put(Buffer.from("sealed bundle", "utf8"));
-    const mutationRef = await harness.artifacts.put(
-      Buffer.from("mutation batch", "utf8"),
-    );
-    await harness.ledger.sealBundle(
-      ASSIGNMENT_ID,
-      { ref: bundleRef },
-      { ref: mutationRef },
-    );
+    const sealInput = {
+      runRecord: {
+        type: "run" as const,
+        runId: RUN_ID,
+        runIndex: 8,
+        timestamp: NOW,
+        messages: [{ role: "user" as const, content: [{ type: "text" as const, text: "hello" }] }],
+      },
+      contentAssets: [],
+      streamFinal: { finalSeq: 1, streamDigest: SHA256_ZERO },
+      usage: { inputTokens: 1, outputTokens: 1, toolCalls: 0 },
+      usageFinal: { reportDigest: SHA256_ZERO, upToUsageSeq: 0 },
+    };
+    await harness.ledger.sealConversationBundle(ASSIGNMENT_ID, sealInput);
     expect(
       await harness.ledger.requestInteraction(ASSIGNMENT_ID, runEndRequest),
     ).toEqual(runEndRecord);
-    await harness.ledger.sealBundle(
-      ASSIGNMENT_ID,
-      { ref: bundleRef },
-      { ref: mutationRef },
-    );
-    const otherMutationRef = await harness.artifacts.put(
-      Buffer.from("different mutation batch", "utf8"),
-    );
+    await harness.ledger.sealConversationBundle(ASSIGNMENT_ID, sealInput);
     await expect(
-      harness.ledger.sealBundle(
-        ASSIGNMENT_ID,
-        { ref: bundleRef },
-        { ref: otherMutationRef },
-      ),
+      harness.ledger.sealConversationBundle(ASSIGNMENT_ID, {
+        ...sealInput,
+        usage: { ...sealInput.usage, outputTokens: 2 },
+      }),
     ).rejects.toThrow("different bundle payload");
     await harness.ledger.acknowledge(ASSIGNMENT_ID, 42);
     expect(
@@ -884,6 +949,701 @@ describe("conversation assignment protocol", () => {
     ).toBe(17);
     expect(await harness.ledger.pendingInteractionMirrors(ASSIGNMENT_ID)).toEqual([]);
   });
+
+  it("commits a sealed conversation exactly once and recovers publish and final response loss", async () => {
+    const applied: Array<Parameters<ConversationMutationPublisher["apply"]>[0]> = [];
+    let failFirstPublish = true;
+    const publisher: ConversationMutationPublisher = {
+      decideGlobalBatchAtPrefix() {
+        throw new Error("global decision is not expected");
+      },
+      async apply(input) {
+        if (failFirstPublish) {
+          failFirstPublish = false;
+          throw new Error("simulated publish crash");
+        }
+        if (!applied.some((item) => item.assignmentId === input.assignmentId && item.seq === input.seq)) {
+          applied.push(input);
+        }
+      },
+    };
+    const harness = await createHarness({ publisher });
+    await harness.ledger.dispatch(
+      harness.dispatch.envelope,
+      harness.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    const adapter = new InProcessAssignmentSubmission({
+      ledger: harness.ledger,
+      owner: harness.journal,
+    });
+    await adapter.startAndReport(ASSIGNMENT_ID, submissionContext(harness.unsigned));
+    expect(await harness.journal.statusHistory(RUN_ID, 0)).toEqual([
+      {
+        v: 1,
+        ref: {
+          execution: "conversation",
+          conversationId: CONVERSATION_ID,
+          runId: RUN_ID,
+          ownerEpoch: 3,
+        },
+        state: "queued",
+        statusRevision: 1,
+        actions: [],
+        at: NOW,
+      },
+      expect.objectContaining({ state: "dispatched", statusRevision: 2, at: NOW }),
+      expect.objectContaining({ state: "running", statusRevision: 3, at: NOW }),
+    ]);
+    await harness.ledger.stageMutation(ASSIGNMENT_ID, {
+      domain: "session",
+      requestId: "mutation-1",
+      mutation: {
+        kind: "task-list-op",
+        op: {
+          op: "set",
+          state: { items: [{ id: "task-1", content: "ship", status: "in_progress" }] },
+        },
+      },
+    });
+    const runRecord: TranscriptRunRecord = {
+      type: "run",
+      runId: RUN_ID,
+      runIndex: 8,
+      timestamp: NOW,
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hello" }] },
+        { role: "assistant", content: [{ type: "text", text: "done" }] },
+      ],
+    };
+    const contentRef = await harness.artifacts.put(Buffer.from("durable-result", "utf8"));
+    const contentAsset = { ...contentRef, kind: "file" as const };
+    const bundle = await harness.ledger.sealConversationBundle(ASSIGNMENT_ID, {
+      runRecord,
+      contentAssets: [contentAsset],
+      streamFinal: { finalSeq: 2, streamDigest: SHA256_ZERO },
+      usage: { inputTokens: 3, outputTokens: 4, toolCalls: 1 },
+      usageFinal: { reportDigest: SHA256_ZERO, upToUsageSeq: 1 },
+    });
+    expect(await harness.journal.pendingFinalFrames()).toEqual([]);
+    await expect(
+      adapter.submitSealedBundle(ASSIGNMENT_ID, submissionContext(harness.unsigned)),
+    ).rejects.toThrow("simulated publish crash");
+    expect(await harness.journal.currentState(RUN_ID)).toBe("committed");
+    expect(harness.projected.get(ASSIGNMENT_ID)).toMatchObject({
+      conversationId: CONVERSATION_ID,
+      commitRevision: 8,
+      digest: bundle.digest,
+      runRecord,
+    });
+    expect(await harness.journal.pendingFinalFrames()).toEqual([
+      {
+        v: 1,
+        conversationId: CONVERSATION_ID,
+        runId: RUN_ID,
+        commitRevision: 8,
+        digest: bundle.digest,
+      },
+    ]);
+
+    const recoveredJournal = new ConversationRunJournal({
+      conversationId: CONVERSATION_ID,
+      ownerEpoch: 3,
+      log: harness.log,
+      artifacts: harness.artifacts,
+      signer: harness.identity,
+      verifier: harness.identity,
+      submission,
+      authority: harness.authority,
+      projection: harness.projection,
+      publisher,
+    });
+    await expect(recoveredJournal.resumePendingPublishing()).resolves.toBe(1);
+    await expect(recoveredJournal.resumePendingPublishing()).resolves.toBe(0);
+    expect(applied).toEqual([
+      {
+        assignmentId: ASSIGNMENT_ID,
+        seq: 1,
+        domain: "session",
+        requestId: "mutation-1",
+        mutation: {
+          kind: "task-list-op",
+          op: {
+            op: "set",
+            state: { items: [{ id: "task-1", content: "ship", status: "in_progress" }] },
+          },
+        },
+        targetRevision: 8,
+      },
+    ]);
+    const committedBeforeReplay = (
+      await harness.log.readStream<{ t?: string }>(`run:${CONVERSATION_ID}`)
+    ).filter((record) => record.body.t === "committed").length;
+    await expect(
+      harness.journal.submitBundle(bundle, submissionContext(harness.unsigned)),
+    ).resolves.toEqual({ committed: true, commitRevision: 8 });
+    expect(
+      (
+        await harness.log.readStream<{ t?: string }>(`run:${CONVERSATION_ID}`)
+      ).filter((record) => record.body.t === "committed"),
+    ).toHaveLength(committedBeforeReplay);
+
+    let failFinal = true;
+    await expect(
+      harness.journal.publishPendingFinals(async () => {
+        if (failFinal) {
+          failFinal = false;
+          throw new Error("simulated final response loss");
+        }
+      }),
+    ).rejects.toThrow("simulated final response loss");
+    expect(await harness.journal.pendingFinalFrames()).toHaveLength(1);
+    expect(await harness.journal.publishPendingFinals(async () => undefined)).toBe(1);
+    expect(await harness.journal.pendingFinalFrames()).toEqual([]);
+    const history = await harness.journal.finalHistory(7);
+    expect(history).toHaveLength(1);
+    expect(history[0]?.bundle.body.runRecord).toEqual(runRecord);
+    expect(history[0]?.bundle.body.contentAssets).toEqual([contentAsset]);
+    expect(await harness.journal.finalHistory(8)).toEqual([]);
+    await expect(
+      harness.log.collectGarbage({ unreferencedBefore: "2099-01-01T00:00:00.000Z" }),
+    ).resolves.toMatchObject({ deleted: 0 });
+    await expect(harness.artifacts.has(contentRef)).resolves.toBe(true);
+    expect(await harness.journal.expirePublishedFinals("2026-07-14T09:00:00.001Z")).toBe(1);
+    expect(await harness.journal.expirePublishedFinals("2026-07-15T09:00:00.001Z")).toBe(0);
+  });
+
+  it("commits global publish conflicts while exposing durable summary and detail", async () => {
+    const publisher: ConversationMutationPublisher = {
+      decideGlobalBatchAtPrefix(input) {
+        return input.records.map((record) => ({
+          seq: record.seq,
+          outcome: {
+            t: "conflicted" as const,
+            error: {
+              code: "revision-conflict" as const,
+              message: "workscene changed",
+              retryable: false,
+            },
+          },
+        }));
+      },
+      async apply() {
+        throw new Error("conflicted mutations must not be applied");
+      },
+    };
+    const harness = await createHarness({ publisher });
+    await harness.ledger.dispatch(
+      harness.dispatch.envelope,
+      harness.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    const adapter = new InProcessAssignmentSubmission({
+      ledger: harness.ledger,
+      owner: harness.journal,
+    });
+    await adapter.startAndReport(ASSIGNMENT_ID, submissionContext(harness.unsigned));
+    await harness.ledger.stageMutation(ASSIGNMENT_ID, {
+      domain: "global",
+      requestId: "mutation-global-1",
+      expected: { anchorEpoch: 9 },
+      mutation: { kind: "workscene-create", name: "Focus" },
+    });
+    const runRecord: TranscriptRunRecord = {
+      type: "run",
+      runId: RUN_ID,
+      runIndex: 8,
+      timestamp: NOW,
+      messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+    };
+    const runRecordRef = await harness.artifacts.put(
+      Buffer.from(canonicalize(runRecord), "utf8"),
+    );
+    const bundle = await harness.ledger.sealConversationBundle(ASSIGNMENT_ID, {
+      runRecord: { ref: runRecordRef },
+      contentAssets: [],
+      streamFinal: { finalSeq: 1, streamDigest: SHA256_ZERO },
+      usage: { inputTokens: 1, outputTokens: 1, toolCalls: 0 },
+      usageFinal: { reportDigest: SHA256_ZERO, upToUsageSeq: 0 },
+    });
+    await expect(
+      adapter.submitSealedBundle(ASSIGNMENT_ID, submissionContext(harness.unsigned)),
+    ).resolves.toEqual({ committed: true, commitRevision: 8 });
+    expect(await harness.journal.pendingFinalFrames()).toEqual([
+      {
+        v: 1,
+        conversationId: CONVERSATION_ID,
+        runId: RUN_ID,
+        commitRevision: 8,
+        digest: bundle.digest,
+        publishConflicts: 1,
+      },
+    ]);
+    expect(await harness.journal.publishConflicts(ASSIGNMENT_ID)).toEqual({
+      conversationId: CONVERSATION_ID,
+      runId: RUN_ID,
+      commitRevision: 8,
+      conflicts: [
+        {
+          seq: 1,
+          mutation: { kind: "workscene-create", name: "Focus" },
+          error: {
+            code: "revision-conflict",
+            message: "workscene changed",
+            retryable: false,
+          },
+        },
+      ],
+    });
+    expect((await harness.journal.finalHistory(7))[0]?.frame.publishConflicts).toBe(1);
+  });
+
+  it("commits from dispatched when the started report is lost and absorbs a late report", async () => {
+    const harness = await createHarness();
+    await harness.ledger.dispatch(
+      harness.dispatch.envelope,
+      harness.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    await harness.ledger.start(ASSIGNMENT_ID);
+    const bundle = await harness.ledger.sealConversationBundle(ASSIGNMENT_ID, {
+      runRecord: {
+        type: "run",
+        runId: RUN_ID,
+        runIndex: 8,
+        timestamp: NOW,
+        messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      },
+      contentAssets: [],
+      streamFinal: { finalSeq: 1, streamDigest: SHA256_ZERO },
+      usage: { inputTokens: 1, outputTokens: 1, toolCalls: 0 },
+      usageFinal: { reportDigest: SHA256_ZERO, upToUsageSeq: 0 },
+    });
+    await expect(
+      harness.journal.submitBundle(bundle, submissionContext(harness.unsigned)),
+    ).resolves.toEqual({ committed: true, commitRevision: 8 });
+    await expect(
+      harness.journal.reportStarted(ASSIGNMENT_ID, submissionContext(harness.unsigned)),
+    ).resolves.toBeUndefined();
+    const ledgerSnapshot = await harness.ledger.queryLedger(
+      ASSIGNMENT_ID,
+      ownerContext(ASSIGNMENT_ID, "executor.queryLedger"),
+    );
+    if ("entries" in ledgerSnapshot) throw new Error("Expected compact ledger snapshot");
+    await expect(
+      harness.journal.reconcileStarted(ASSIGNMENT_ID, ledgerSnapshot),
+    ).resolves.toBeUndefined();
+    expect(await harness.journal.currentState(RUN_ID)).toBe("committed");
+  });
+
+  it("rejects a stale owner instance and a transcript sequence not accepted by session authority", async () => {
+    const wrongIndex = await createHarness();
+    await wrongIndex.ledger.dispatch(
+      wrongIndex.dispatch.envelope,
+      wrongIndex.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    const adapter = new InProcessAssignmentSubmission({
+      ledger: wrongIndex.ledger,
+      owner: wrongIndex.journal,
+    });
+    await adapter.startAndReport(ASSIGNMENT_ID, submissionContext(wrongIndex.unsigned));
+    const wrongIndexBundle = await wrongIndex.ledger.sealConversationBundle(ASSIGNMENT_ID, {
+      runRecord: {
+        type: "run",
+        runId: RUN_ID,
+        runIndex: 9,
+        timestamp: NOW,
+        messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      },
+      contentAssets: [],
+      streamFinal: { finalSeq: 1, streamDigest: SHA256_ZERO },
+      usage: { inputTokens: 1, outputTokens: 1, toolCalls: 0 },
+      usageFinal: { reportDigest: SHA256_ZERO, upToUsageSeq: 0 },
+    });
+    await expect(
+      wrongIndex.journal.submitBundle(
+        wrongIndexBundle,
+        submissionContext(wrongIndex.unsigned),
+      ),
+    ).resolves.toMatchObject({ committed: false, error: { code: "revision-conflict" } });
+
+    const staleOwner = new ConversationRunJournal({
+      conversationId: CONVERSATION_ID,
+      ownerEpoch: 4,
+      log: wrongIndex.log,
+      artifacts: wrongIndex.artifacts,
+      signer: wrongIndex.identity,
+      verifier: wrongIndex.identity,
+      submission,
+      authority: wrongIndex.authority,
+      projection: wrongIndex.projection,
+    });
+    await expect(
+      staleOwner.submitBundle(wrongIndexBundle, submissionContext(wrongIndex.unsigned)),
+    ).resolves.toMatchObject({ committed: false, error: { code: "fence-rejected" } });
+  });
+
+  it("rebuilds a committed conversation projection after a crash without duplicating it", async () => {
+    let failProjection = true;
+    const projected = new Map<string, ConversationCommitProjectionInput>();
+    const projection: ConversationCommitProjection = {
+      async project(input) {
+        if (failProjection) {
+          failProjection = false;
+          throw new Error("simulated projection crash");
+        }
+        const previous = projected.get(input.assignmentId);
+        if (previous && canonicalize(previous) !== canonicalize(input)) {
+          throw new Error("projection identity conflict");
+        }
+        projected.set(input.assignmentId, input);
+      },
+    };
+    const harness = await createHarness({ projection });
+    await harness.ledger.dispatch(
+      harness.dispatch.envelope,
+      harness.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    const adapter = new InProcessAssignmentSubmission({
+      ledger: harness.ledger,
+      owner: harness.journal,
+    });
+    await adapter.startAndReport(ASSIGNMENT_ID, submissionContext(harness.unsigned));
+    await harness.ledger.sealConversationBundle(ASSIGNMENT_ID, {
+      runRecord: {
+        type: "run",
+        runId: RUN_ID,
+        runIndex: 8,
+        timestamp: NOW,
+        messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      },
+      contentAssets: [],
+      streamFinal: { finalSeq: 1, streamDigest: SHA256_ZERO },
+      usage: { inputTokens: 1, outputTokens: 1, toolCalls: 0 },
+      usageFinal: { reportDigest: SHA256_ZERO, upToUsageSeq: 0 },
+    });
+    await expect(
+      adapter.submitSealedBundle(ASSIGNMENT_ID, submissionContext(harness.unsigned)),
+    ).rejects.toThrow("simulated projection crash");
+    expect(await harness.journal.currentState(RUN_ID)).toBe("committed");
+    await expect(harness.journal.resumeCommittedProjections()).resolves.toBe(1);
+    await expect(harness.journal.resumeCommittedProjections()).resolves.toBe(0);
+    expect(projected.get(ASSIGNMENT_ID)?.runRecord.runId).toBe(RUN_ID);
+  });
+
+  it("rejects publish progress that skips a granted mutation", async () => {
+    const harness = await createHarness({
+      publisher: {
+        decideGlobalBatchAtPrefix() {
+          throw new Error("global decision is not expected");
+        },
+        async apply() {
+          throw new Error("pause before publish progress");
+        },
+      },
+    });
+    await harness.ledger.dispatch(
+      harness.dispatch.envelope,
+      harness.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    const adapter = new InProcessAssignmentSubmission({
+      ledger: harness.ledger,
+      owner: harness.journal,
+    });
+    await adapter.startAndReport(ASSIGNMENT_ID, submissionContext(harness.unsigned));
+    for (const [index, content] of ["one", "two"].entries()) {
+      await harness.ledger.stageMutation(ASSIGNMENT_ID, {
+        domain: "session",
+        requestId: `mutation-${index + 1}`,
+        mutation: {
+          kind: "task-list-op",
+          op: {
+            op: "set",
+            state: {
+              items: [{ id: `task-${index + 1}`, content, status: "pending" }],
+            },
+          },
+        },
+      });
+    }
+    const bundle = await harness.ledger.sealConversationBundle(ASSIGNMENT_ID, {
+      runRecord: {
+        type: "run",
+        runId: RUN_ID,
+        runIndex: 8,
+        timestamp: NOW,
+        messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      },
+      contentAssets: [],
+      streamFinal: { finalSeq: 1, streamDigest: SHA256_ZERO },
+      usage: { inputTokens: 1, outputTokens: 1, toolCalls: 0 },
+      usageFinal: { reportDigest: SHA256_ZERO, upToUsageSeq: 0 },
+    });
+    await expect(
+      harness.journal.submitBundle(bundle, submissionContext(harness.unsigned)),
+    ).rejects.toThrow("pause before publish progress");
+    await harness.log.append([
+      {
+        stream: "publish",
+        body: {
+          t: "publish-progress" as const,
+          assignmentId: ASSIGNMENT_ID,
+          domain: "session" as const,
+          upToSeq: 2,
+          state: "settled" as const,
+        },
+      },
+    ]);
+    await expect(harness.journal.resumePendingPublishing()).rejects.toThrow(
+      "skips or misstates",
+    );
+  });
+
+  it("fails closed when publish or final sidecars are not bound to their committed bundle", async () => {
+    const publishHarness = await createHarness({
+      publisher: {
+        decideGlobalBatchAtPrefix() {
+          throw new Error("global decision is not expected");
+        },
+        async apply() {},
+      },
+    });
+    await publishHarness.ledger.dispatch(
+      publishHarness.dispatch.envelope,
+      publishHarness.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    const publishAdapter = new InProcessAssignmentSubmission({
+      ledger: publishHarness.ledger,
+      owner: publishHarness.journal,
+    });
+    await publishAdapter.startAndReport(
+      ASSIGNMENT_ID,
+      submissionContext(publishHarness.unsigned),
+    );
+    const publishBundle = await publishHarness.ledger.sealConversationBundle(ASSIGNMENT_ID, {
+      runRecord: {
+        type: "run",
+        runId: RUN_ID,
+        runIndex: 8,
+        timestamp: NOW,
+        messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      },
+      contentAssets: [],
+      streamFinal: { finalSeq: 1, streamDigest: SHA256_ZERO },
+      usage: { inputTokens: 1, outputTokens: 1, toolCalls: 0 },
+      usageFinal: { reportDigest: SHA256_ZERO, upToUsageSeq: 0 },
+    });
+    await publishHarness.journal.submitBundle(
+      publishBundle,
+      submissionContext(publishHarness.unsigned),
+    );
+    await publishHarness.log.append([
+      {
+        stream: "publish",
+        body: {
+          t: "publish-decision" as const,
+          assignmentId: ASSIGNMENT_ID,
+          batch: { ref: sealedBundleArtifact(publishBundle).ref },
+          sessionCount: 1,
+          globalCount: 0,
+          outcomes: [{ seq: 1, outcome: { t: "granted" as const, targetRevision: 8 } }],
+        },
+      },
+    ]);
+    await expect(publishHarness.journal.resumePendingPublishing()).rejects.toThrow(
+      "bind exactly one committed run",
+    );
+
+    const finalHarness = await createHarness();
+    await finalHarness.ledger.dispatch(
+      finalHarness.dispatch.envelope,
+      finalHarness.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    const finalAdapter = new InProcessAssignmentSubmission({
+      ledger: finalHarness.ledger,
+      owner: finalHarness.journal,
+    });
+    await finalAdapter.startAndReport(ASSIGNMENT_ID, submissionContext(finalHarness.unsigned));
+    const finalBundle = await finalHarness.ledger.sealConversationBundle(ASSIGNMENT_ID, {
+      runRecord: {
+        type: "run",
+        runId: RUN_ID,
+        runIndex: 8,
+        timestamp: NOW,
+        messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      },
+      contentAssets: [],
+      streamFinal: { finalSeq: 1, streamDigest: SHA256_ZERO },
+      usage: { inputTokens: 1, outputTokens: 1, toolCalls: 0 },
+      usageFinal: { reportDigest: SHA256_ZERO, upToUsageSeq: 0 },
+    });
+    await finalHarness.journal.submitBundle(
+      finalBundle,
+      submissionContext(finalHarness.unsigned),
+    );
+    await finalHarness.log.append([
+      {
+        stream: "final-outbox",
+        body: {
+          t: "final" as const,
+          conversationId: CONVERSATION_ID,
+          runId: RUN_ID,
+          commitRevision: 8,
+          digest: SHA256_ZERO,
+          state: "published" as const,
+        },
+      },
+    ]);
+    await expect(finalHarness.journal.pendingFinalFrames()).rejects.toThrow(
+      "transition is invalid",
+    );
+  });
+
+  it("rejects polluted, stale, and incomplete conversation bundles without a second commit", async () => {
+    const publisher: ConversationMutationPublisher = {
+      decideGlobalBatchAtPrefix() {
+        throw new Error("global decision is not expected");
+      },
+      async apply() {},
+    };
+    const harness = await createHarness({ publisher });
+    await harness.ledger.dispatch(
+      harness.dispatch.envelope,
+      harness.dispatch.activation,
+      ownerContext(ASSIGNMENT_ID, "executor.dispatch"),
+    );
+    await harness.ledger.start(ASSIGNMENT_ID);
+    await harness.journal.reportStarted(
+      ASSIGNMENT_ID,
+      submissionContext(harness.unsigned),
+    );
+    await expect(
+      harness.ledger.stageMutation(ASSIGNMENT_ID, {
+        domain: "global",
+        requestId: "polluted-mutation",
+        expected: { anchorEpoch: 9 },
+        mutation: {
+          kind: "workscene-create",
+          name: "Focus",
+          authorityClaim: "attacker-controlled",
+        } as unknown as import("@zhixing/core/contracts").GlobalStagedMutation,
+      }),
+    ).rejects.toThrow("unknown field");
+    await expect(
+      harness.ledger.sealConversationBundle(ASSIGNMENT_ID, {
+        runRecord: {
+          type: "run",
+          runId: RUN_ID,
+          runIndex: 8,
+          timestamp: NOW,
+          messages: [],
+        },
+        contentAssets: [],
+        streamFinal: { finalSeq: 1, streamDigest: SHA256_ZERO },
+        usage: { inputTokens: 0, outputTokens: 0, toolCalls: 0 },
+        usageFinal: { reportDigest: SHA256_ZERO, upToUsageSeq: 0 },
+      }),
+    ).rejects.toThrow("originating user message");
+    await expect(
+      harness.ledger.sealConversationBundle(ASSIGNMENT_ID, {
+        runRecord: {
+          type: "run",
+          runId: RUN_ID,
+          runIndex: 8,
+          timestamp: NOW,
+          messages: [
+            { role: "assistant", content: [{ type: "text", text: "forged origin" }] },
+          ],
+        },
+        contentAssets: [],
+        streamFinal: { finalSeq: 1, streamDigest: SHA256_ZERO },
+        usage: { inputTokens: 0, outputTokens: 0, toolCalls: 0 },
+        usageFinal: { reportDigest: SHA256_ZERO, upToUsageSeq: 0 },
+      }),
+    ).rejects.toThrow("must begin");
+    const bundle = await harness.ledger.sealConversationBundle(ASSIGNMENT_ID, {
+      runRecord: {
+        type: "run",
+        runId: RUN_ID,
+        runIndex: 8,
+        timestamp: NOW,
+        messages: [{ role: "user", content: [{ type: "text", text: "hello" }] }],
+      },
+      contentAssets: [],
+      streamFinal: { finalSeq: 1, streamDigest: SHA256_ZERO },
+      usage: { inputTokens: 1, outputTokens: 1, toolCalls: 0 },
+      usageFinal: { reportDigest: SHA256_ZERO, upToUsageSeq: 0 },
+    });
+    const polluted = { ...bundle, ownerEpoch: 3 } as unknown as typeof bundle;
+    await expect(
+      harness.journal.submitBundle(polluted, submissionContext(harness.unsigned)),
+    ).resolves.toMatchObject({ committed: false, error: { code: "invalid" } });
+
+    const { v: _version, digest: _digest, ...bundlePayload } = bundle;
+    expect(() =>
+      createConversationSealedBundle({
+        ...bundlePayload,
+        body: {
+          ...bundle.body,
+          windowCompact: {
+            summary: "summary",
+            pairsCompacted: 1,
+            tokensBefore: 10,
+            tokensAfter: 5,
+            authorityClaim: "attacker-controlled",
+          } as unknown as import("@zhixing/core/contracts").WindowCompactInstruction,
+        },
+      }),
+    ).toThrow("unknown field");
+    const stale = createConversationSealedBundle({
+      ...bundlePayload,
+      body: {
+        ...bundle.body,
+        baseRevision: 6,
+      },
+    });
+    const staleArtifact = sealedBundleArtifact(stale);
+    await harness.artifacts.put(staleArtifact.bytes);
+    await expect(
+      harness.journal.submitBundle(stale, submissionContext(harness.unsigned)),
+    ).resolves.toMatchObject({ committed: false, error: { code: "fence-rejected" } });
+    expect(await harness.journal.pendingFinalFrames()).toEqual([]);
+
+    const orphanRef = await harness.artifacts.put(Buffer.from("orphan", "utf8"));
+    const overDeclared = createConversationSealedBundle({
+      ...bundlePayload,
+      dependencyArtifacts: [orphanRef],
+    });
+    await harness.artifacts.put(sealedBundleArtifact(overDeclared).bytes);
+    await expect(
+      harness.journal.submitBundle(overDeclared, submissionContext(harness.unsigned)),
+    ).resolves.toMatchObject({ committed: false, error: { code: "invalid" } });
+    expect(await harness.journal.pendingFinalFrames()).toEqual([]);
+
+    const missingContent = createConversationSealedBundle({
+      ...bundlePayload,
+      body: {
+        ...bundle.body,
+        contentAssets: [{ digest: SHA256_ZERO, bytes: 1, kind: "file" }],
+      },
+    });
+    await harness.artifacts.put(sealedBundleArtifact(missingContent).bytes);
+    await expect(
+      harness.journal.submitBundle(missingContent, submissionContext(harness.unsigned)),
+    ).resolves.toMatchObject({ committed: false, error: { code: "missing-base" } });
+    expect(await harness.journal.pendingFinalFrames()).toEqual([]);
+
+    await rm(harness.artifacts.pathFor(sealedBundleArtifact(bundle).ref));
+    await expect(
+      harness.journal.submitBundle(bundle, submissionContext(harness.unsigned)),
+    ).resolves.toMatchObject({ committed: false, error: { code: "missing-base" } });
+    expect(await harness.journal.currentState(RUN_ID)).toBe("running");
+  });
 });
 
 function createUnsignedEnvelope(
@@ -944,6 +1704,7 @@ function createUnsignedEnvelope(
     methods: [
       "submission.mirrorInteractions",
       "submission.reportStarted",
+      "submission.submitBundle",
     ] as AuthorityCapability<"conversation">["methods"],
     resources: [`conversation:${CONVERSATION_ID}`] as AuthorityCapability<"conversation">["resources"],
     assignmentId,

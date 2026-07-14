@@ -138,6 +138,10 @@ const conversationSurface: AccessSurface = {
         const s = storesFor(conversationId);
         return await s.transcript.appendRunRecord(s.localId, input);
       },
+      appendCommittedRun: async (conversationId, input) => {
+        const s = storesFor(conversationId);
+        return await s.transcript.appendCommittedRunRecord(s.localId, input);
+      },
       writeSnapshot: async (conversationId, input) => {
         const s = storesFor(conversationId);
         await s.snapshots.write(s.localId, input);

@@ -114,7 +114,7 @@ export type ScheduleTaskSpecAliasInvariant = Assert<
   Equal<ScheduleTaskSpec, TaskSpec>
 >;
 export type TranscriptRunRecordAliasInvariant = Assert<
-  Equal<TranscriptRunRecord, RunRecord>
+  Equal<TranscriptRunRecord, RunRecord & { runId: string }>
 >;
 export type WindowCompactAliasInvariant = Assert<
   Equal<WindowCompactInstruction, WindowCompact>

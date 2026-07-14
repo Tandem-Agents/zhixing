@@ -39,6 +39,7 @@
 
 import fs from "node:fs/promises";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { toSafePathSegment } from "../../paths.js";
 import { recoverOrphanTmp, writeAtomic } from "../serializer.js";
 import {
@@ -46,12 +47,14 @@ import {
   SHARD_FORMAT_VERSION,
   TRANSCRIPT_INDEX_VERSION,
   type AppendRunResult,
+  type AppendCommittedRunResult,
   type ClearRecord,
   type RunRecord,
   type RunRecordInput,
   type ShardHeader,
   type ShardRecordLine,
   type TranscriptIndex,
+  type TranscriptRunRecord,
   type TranscriptShardMeta,
 } from "./types.js";
 
@@ -176,6 +179,48 @@ export class ShardedTranscriptStore {
       await this.appendLineInLock(conversationId, state, record);
       state.nextRunIndex += 1;
       return { runIndex: record.runIndex, shardId: state.index.activeShardId };
+    });
+  }
+
+  /**
+   * 将 AuthorityCommitLog 中已经提交的 run 幂等物化为 transcript 投影。
+   *
+   * 新 run 必须恰接当前尾部；重驱既有 run 时逐片核对同一 runIndex/runId 与
+   * 完整载荷，完全相同才视为成功。这样即使进程在分片 append 与投影进度落盘
+   * 之间崩溃，恢复也不会产生第二条 transcript 记录。
+   */
+  async appendCommittedRunRecord(
+    conversationId: string,
+    input: TranscriptRunRecord,
+  ): Promise<AppendCommittedRunResult> {
+    if (
+      input.type !== "run" ||
+      typeof input.runId !== "string" ||
+      input.runId.length === 0 ||
+      input.runId.length > 480 ||
+      !Number.isSafeInteger(input.runIndex) ||
+      input.runIndex < 0
+    ) {
+      throw new TypeError("Committed transcript run identity is invalid");
+    }
+    const record = structuredClone(input);
+    return await this.withLock(conversationId, async () => {
+      const state = await this.openInLock(conversationId);
+      if (record.runIndex < state.nextRunIndex) {
+        const existing = await this.findRunInLock(conversationId, state.index, record.runIndex);
+        if (!existing || !("runId" in existing.record) || !isDeepStrictEqual(existing.record, record)) {
+          throw new Error("Committed transcript run conflicts with an existing projection");
+        }
+        return { runIndex: record.runIndex, shardId: existing.shardId, appended: false };
+      }
+      if (record.runIndex !== state.nextRunIndex) {
+        throw new Error("Committed transcript run is not contiguous with the current projection");
+      }
+      await this.rolloverIfNeededInLock(conversationId, state);
+      const shardId = state.index.activeShardId;
+      await this.appendLineInLock(conversationId, state, record);
+      state.nextRunIndex += 1;
+      return { runIndex: record.runIndex, shardId, appended: true };
     });
   }
 
@@ -319,6 +364,21 @@ export class ShardedTranscriptStore {
     return state;
   }
 
+  private async findRunInLock(
+    conversationId: string,
+    index: TranscriptIndex,
+    runIndex: number,
+  ): Promise<{ readonly record: RunRecord | TranscriptRunRecord; readonly shardId: string } | undefined> {
+    for (const meta of [...index.shards].reverse()) {
+      for (const line of await this.readShardLines(conversationId, meta)) {
+        if (line.type === "run" && line.runIndex === runIndex) {
+          return { record: line, shardId: meta.id };
+        }
+      }
+    }
+    return undefined;
+  }
+
   /**
    * 锁内自愈核 —— 读路径（ensureReadableIndex）与写路径（openInLock）共用：
    * 收尾索引的崩溃残留 tmp（能恢复则恢复）→ 读索引 → 读不出则从分片重建。
@@ -427,7 +487,7 @@ export class ShardedTranscriptStore {
   private async appendLineInLock(
     conversationId: string,
     state: OpenState,
-    record: RunRecord | ClearRecord,
+    record: RunRecord | TranscriptRunRecord | ClearRecord,
   ): Promise<void> {
     const active = activeShardOf(state.index);
     const file = this.shardFile(conversationId, active);

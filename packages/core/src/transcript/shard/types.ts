@@ -76,8 +76,8 @@ export interface RunRecord {
   perspectives?: RunRecordPerspectivesMetadata;
 }
 
-/** 完整 run 记录在提交合同中的唯一别名。 */
-export type TranscriptRunRecord = RunRecord;
+/** 跨执行边界提交的 run 记录，以 runId 提供不依赖存储序号的稳定身份。 */
+export type TranscriptRunRecord = RunRecord & { runId: string };
 
 /**
  * 清空事件 —— "清空"是事实流里的一个事件、不是销毁：一切读路径（倒读 /
@@ -89,7 +89,7 @@ export interface ClearRecord {
   timestamp: string;
 }
 
-export type ShardRecordLine = ShardHeader | RunRecord | ClearRecord;
+export type ShardRecordLine = ShardHeader | RunRecord | TranscriptRunRecord | ClearRecord;
 
 // ─── 出入参 ───
 
@@ -107,6 +107,11 @@ export interface RunRecordInput {
 export interface AppendRunResult {
   runIndex: number;
   shardId: string;
+}
+
+/** AuthorityCommitLog 派生投影的追加结果；重复 runId 只返回既有位置。 */
+export interface AppendCommittedRunResult extends AppendRunResult {
+  appended: boolean;
 }
 
 /** 倒读原语的游标 —— 无状态分页：传上一页最早一条的位置，从它之前继续 */

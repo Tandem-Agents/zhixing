@@ -21,14 +21,28 @@ import type {
   LedgerEvidencePage,
   LedgerSnapshot,
   LogicalRecord,
+  SealedBundle,
+  SessionStagedMutation,
+  GlobalStagedMutation,
+  TranscriptRunRecord,
+  WindowCompactInstruction,
+  ContentAssetRef,
 } from "@zhixing/core/contracts";
 import {
   advanceAssignmentLedger,
   assignmentActivationDigest,
   assignmentLedgerSeed,
   canonicalize,
+  conversationBundleRoots,
+  createConversationSealedBundle,
+  createMutationBatch,
   dispatchEnvelopeArtifact,
   dispatchEnvelopeDigest,
+  mutationBatchArtifact,
+  sealedBundleArtifact,
+  validateConversationSealedBundle,
+  validateMutationBatch,
+  validateTranscriptRunRecord,
   validateConversationInteractionMirrorEntry,
   validateConversationInteractionOutcome,
   validateConversationActivation,
@@ -83,6 +97,13 @@ export interface ConversationSubmissionPort {
     entries: readonly ConversationInteractionMirrorEntry[],
     ctx: AuthorityCallContext,
   ): Promise<{ readonly mirroredUpTo: number }>;
+  submitBundle(
+    bundle: SealedBundle,
+    ctx: AuthorityCallContext,
+  ): Promise<
+    | { readonly committed: true; readonly commitRevision: number }
+    | { readonly committed: false; readonly error: AuthorityError }
+  >;
 }
 
 export interface InProcessAssignmentSubmissionOptions {
@@ -100,6 +121,33 @@ export interface InteractionRequestInput {
 }
 
 export type InteractionOutcome = ConversationInteractionOutcome;
+
+export type StagedConversationMutationInput =
+  | {
+      readonly domain: "session";
+      readonly mutation: SessionStagedMutation;
+      readonly requestId: string;
+      readonly expected?: never;
+    }
+  | {
+      readonly domain: "global";
+      readonly mutation: GlobalStagedMutation;
+      readonly requestId: string;
+      readonly expected: { readonly anchorEpoch: number };
+    };
+
+export interface ConversationSealInput {
+  readonly runRecord: TranscriptRunRecord | { readonly ref: ArtifactRef };
+  readonly windowCompact?: WindowCompactInstruction;
+  readonly contentAssets: readonly ContentAssetRef[];
+  readonly streamFinal: { readonly finalSeq: number; readonly streamDigest: string };
+  readonly usage: {
+    readonly inputTokens: number;
+    readonly outputTokens: number;
+    readonly toolCalls: number;
+  };
+  readonly usageFinal: { readonly reportDigest: string; readonly upToUsageSeq: number };
+}
 
 export interface InteractionRecoveryResult {
   readonly pending: ReadonlyArray<
@@ -137,6 +185,8 @@ interface LedgerProjection {
     Extract<AssignmentRecord, { t: "interaction-requested" }>
   >;
   readonly finished: Map<string, FinishedInteraction>;
+  readonly stagedMutations: Array<Extract<AssignmentRecord, { t: "staged-mutation" }>>;
+  readonly mutationRequestIds: Set<string>;
   mirroredUpTo: number;
 }
 
@@ -573,19 +623,169 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
     return { pending: transaction.value.pending, resolved };
   }
 
-  async sealBundle(
+  async stageMutation(
     assignmentId: string,
-    bundle: { readonly ref: ArtifactRef },
-    mutationBatch?: { readonly ref: ArtifactRef },
+    input: StagedConversationMutationInput,
+  ): Promise<{ readonly seq: number }> {
+    const candidate = snapshot(input, "Staged mutation input");
+    const transaction = await this.#transact<{ seq: number }>(assignmentId, (state) => {
+      if (state.phase !== "started") {
+        throw new Error("Assignment can stage mutations only while started");
+      }
+      if (state.mutationRequestIds.has(candidate.requestId)) {
+        const existing = state.stagedMutations.find(
+          (record) => record.requestId === candidate.requestId,
+        );
+        if (
+          !existing ||
+          canonicalize({
+            domain: existing.domain,
+            mutation: existing.mutation,
+            requestId: existing.requestId,
+            ...(existing.expected ? { expected: existing.expected } : {}),
+          }) !== canonicalize(candidate)
+        ) {
+          throw new Error("Staged mutation requestId has a conflicting payload");
+        }
+        return { kind: "return", value: { seq: existing.seq } };
+      }
+      const staged = {
+        v: 1 as const,
+        t: "staged-mutation" as const,
+        seq: state.stagedMutations.length + 1,
+        ...candidate,
+      } as Extract<AssignmentRecord, { t: "staged-mutation" }>;
+      createMutationBatch(assignmentId, [...state.stagedMutations, staged]);
+      return {
+        kind: "append",
+        entries: [assignmentRecord(assignmentId, nextEntry(state, staged))],
+        value: { seq: staged.seq },
+      };
+    });
+    return transaction.value;
+  }
+
+  async sealConversationBundle(
+    assignmentId: string,
+    input: ConversationSealInput,
+  ): Promise<ReturnType<typeof validateConversationSealedBundle>> {
+    const state = await this.#read(assignmentId);
+    if (
+      (state.phase !== "started" && state.phase !== "sealed" && state.phase !== "acked") ||
+      !state.received
+    ) {
+      throw new Error("Assignment cannot seal a conversation result before started");
+    }
+    const envelopeBytes = await this.#artifacts.get(state.received.body.envelope.ref);
+    const envelope = validateConversationEnvelope(
+      JSON.parse(Buffer.from(envelopeBytes).toString("utf8")) as ConversationEnvelope,
+      this.#verifier,
+    );
+    const staged = state.stagedMutations;
+    const runRecordDependencies: ArtifactRef[] = [];
+    if (isReferenceContainer(input.runRecord)) {
+      const bytes = await this.#artifacts.get(input.runRecord.ref);
+      const text = Buffer.from(bytes).toString("utf8");
+      const parsed = JSON.parse(text) as TranscriptRunRecord;
+      if (canonicalize(parsed) !== text) {
+        throw new TypeError("Transcript run record artifact must be canonical JSON");
+      }
+      validateTranscriptRunRecord(parsed, envelope.work.runId);
+      runRecordDependencies.push(...collectArtifactRefs(parsed));
+    } else {
+      validateTranscriptRunRecord(input.runRecord, envelope.work.runId);
+    }
+    let batchValue: import("@zhixing/core/contracts").MutationBatch | undefined;
+    let batchSummary:
+      | { readonly ref: ArtifactRef; readonly sessionCount: number; readonly globalCount: number }
+      | undefined;
+    if (staged.length > 0) {
+      batchValue = createMutationBatch(assignmentId, staged);
+      const artifact = mutationBatchArtifact(batchValue);
+      const stored = await this.#artifacts.put(artifact.bytes);
+      if (canonicalize(stored) !== canonicalize(artifact.ref)) {
+        throw new Error("Mutation batch store returned a different reference");
+      }
+      batchSummary = {
+        ref: artifact.ref,
+        sessionCount: staged.filter((record) => record.domain === "session").length,
+        globalCount: staged.filter((record) => record.domain === "global").length,
+      };
+    }
+    const body = {
+      t: "conversation" as const,
+      runId: envelope.work.runId,
+      conversationId: envelope.work.conversationId,
+      ownerEpoch: envelope.work.ownerEpoch,
+      baseRevision: envelope.work.baseRevision,
+      runRecord: input.runRecord,
+      ...(input.windowCompact ? { windowCompact: input.windowCompact } : {}),
+      contentAssets: [...input.contentAssets].sort((left, right) =>
+        left.digest < right.digest ? -1 : left.digest > right.digest ? 1 : 0,
+      ),
+      ...(batchSummary ? { mutationBatch: batchSummary } : {}),
+    };
+    const rootRefs = conversationBundleRoots(body);
+    const rootDigests = new Set(rootRefs.map((ref) => ref.digest));
+    const dependencyArtifacts = collectArtifactRefs([staged, runRecordDependencies])
+      .filter((ref) => !rootDigests.has(ref.digest))
+      .sort((left, right) => (left.digest < right.digest ? -1 : left.digest > right.digest ? 1 : 0));
+    const bundle = createConversationSealedBundle({
+      assignmentId,
+      executorId: this.#executorId,
+      streamFinal: input.streamFinal,
+      usage: input.usage,
+      usageFinal: input.usageFinal,
+      dependencyArtifacts,
+      body,
+    });
+    const artifact = sealedBundleArtifact(bundle);
+    const stored = await this.#artifacts.put(artifact.bytes);
+    if (canonicalize(stored) !== canonicalize(artifact.ref)) {
+      throw new Error("Sealed bundle store returned a different reference");
+    }
+    for (const ref of [...conversationBundleRoots(bundle.body), ...bundle.dependencyArtifacts]) {
+      if (!(await this.#artifacts.has(ref))) {
+        throw new Error(`Sealed bundle dependency is not present: ${ref.digest}`);
+      }
+    }
+    await this.#recordSealedBundle(
+      assignmentId,
+      bundle,
+      artifact.ref,
+      batchValue,
+    );
+    return bundle;
+  }
+
+  async sealedBundle(assignmentId: string): Promise<SealedBundle> {
+    const state = await this.#read(assignmentId);
+    if (state.phase !== "sealed" && state.phase !== "acked") {
+      throw new Error("Assignment has no sealed bundle");
+    }
+    return this.#loadSealedBundle(state);
+  }
+
+  async #recordSealedBundle(
+    assignmentId: string,
+    bundle: ReturnType<typeof validateConversationSealedBundle>,
+    bundleRef: ArtifactRef,
+    mutationBatch?: import("@zhixing/core/contracts").MutationBatch,
   ): Promise<void> {
-    const references = collectArtifactRefs([bundle, mutationBatch].filter(Boolean));
+    const mutationBatchRef = mutationBatchArtifactReference(mutationBatch);
+    const references = [
+      bundleRef,
+      ...conversationBundleRoots(bundle.body),
+      ...bundle.dependencyArtifacts,
+      ...(mutationBatchRef ? [mutationBatchRef] : []),
+    ];
     const sealed = snapshot(
       {
         v: 1 as const,
         t: "bundle_sealed" as const,
-        bundle: snapshot(bundle, "Sealed bundle reference"),
-        ...(mutationBatch
-          ? { mutationBatch: snapshot(mutationBatch, "Mutation batch reference") }
+        bundle: { ref: snapshot(bundleRef, "Sealed bundle reference") },
+        ...(mutationBatchRef
+          ? { mutationBatch: { ref: snapshot(mutationBatchRef, "Mutation batch reference") } }
           : {}),
       },
       "Bundle sealed record",
@@ -601,6 +801,35 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
         }
         if (state.phase !== "started") {
           throw new Error("Assignment cannot seal a bundle before started");
+        }
+        if (!state.received) {
+          throw corruptLedger("Started assignment has no received record");
+        }
+        const activationRef = state.received.body.activation.ref;
+        if (
+          activationRef.execution !== "conversation" ||
+          bundle.assignmentId !== assignmentId ||
+          bundle.executorId !== this.#executorId ||
+          bundle.body.runId !== activationRef.runId ||
+          bundle.body.conversationId !== activationRef.conversationId
+        ) {
+          throw new Error("Sealed bundle does not bind the received assignment");
+        }
+        if (state.stagedMutations.length === 0) {
+          if (mutationBatch || bundle.body.mutationBatch) {
+            throw new Error("Sealed bundle declares a mutation batch without staged mutations");
+          }
+        } else {
+          if (!mutationBatch || !mutationBatchRef || !bundle.body.mutationBatch) {
+            throw new Error("Sealed bundle omits its staged mutation batch");
+          }
+          const expected = createMutationBatch(assignmentId, state.stagedMutations);
+          if (
+            canonicalize(expected) !== canonicalize(mutationBatch) ||
+            canonicalize(bundle.body.mutationBatch.ref) !== canonicalize(mutationBatchRef)
+          ) {
+            throw new Error("Sealed bundle mutation batch is not the current staged prefix");
+          }
         }
         let nextSeq = state.lastSeq;
         const entries: AssignmentEntry[] = [];
@@ -871,6 +1100,41 @@ export class ConversationAssignmentLedger implements ConversationDispatchPort {
     }
     return references;
   }
+
+  async #loadSealedBundle(
+    state: LedgerProjection,
+  ): Promise<ReturnType<typeof validateConversationSealedBundle>> {
+    if (!state.sealed) throw corruptLedger("Sealed phase has no bundle reference");
+    const bytes = await this.#artifacts.get(state.sealed.bundle.ref);
+    const bundle = validateConversationSealedBundle(
+      JSON.parse(Buffer.from(bytes).toString("utf8")) as SealedBundle,
+    );
+    const artifact = sealedBundleArtifact(bundle);
+    if (canonicalize(artifact.ref) !== canonicalize(state.sealed.bundle.ref)) {
+      throw corruptLedger("Sealed bundle artifact reference is inconsistent");
+    }
+    if (state.sealed.mutationBatch) {
+      if (!bundle.body.mutationBatch) {
+        throw corruptLedger("Ledger mutation batch reference is absent from the bundle");
+      }
+      if (
+        canonicalize(state.sealed.mutationBatch.ref) !==
+        canonicalize(bundle.body.mutationBatch.ref)
+      ) {
+        throw corruptLedger("Ledger mutation batch reference conflicts with the bundle");
+      }
+      const batchBytes = await this.#artifacts.get(state.sealed.mutationBatch.ref);
+      const batch = validateMutationBatch(
+        JSON.parse(Buffer.from(batchBytes).toString("utf8")) as import("@zhixing/core/contracts").MutationBatch,
+      );
+      if (batch.assignmentId !== state.assignmentId) {
+        throw corruptLedger("Mutation batch belongs to a different assignment");
+      }
+    } else if (bundle.body.mutationBatch) {
+      throw corruptLedger("Bundle mutation batch is absent from the ledger seal record");
+    }
+    return bundle;
+  }
 }
 
 function emptyProjection(assignmentId: string): LedgerProjection {
@@ -883,6 +1147,8 @@ function emptyProjection(assignmentId: string): LedgerProjection {
     ledgerBySeq: [],
     requested: new Map(),
     finished: new Map(),
+    stagedMutations: [],
+    mutationRequestIds: new Set(),
     mirroredUpTo: 0,
   };
 }
@@ -928,6 +1194,20 @@ function applyEntry(
       validateConversationInteractionOutcome(body.outcome);
       assertFinishedInteractionFits(state.assignmentId, body);
       state.finished.set(body.requestId, { body, recordSeq: entry.recordSeq, at });
+      return;
+    case "staged-mutation":
+      if (state.phase !== "started") {
+        throw corruptLedger("staged mutation is outside a started assignment");
+      }
+      if (
+        body.seq !== state.stagedMutations.length + 1 ||
+        state.mutationRequestIds.has(body.requestId)
+      ) {
+        throw corruptLedger("staged mutation identity is not contiguous and unique");
+      }
+      createMutationBatch(state.assignmentId, [...state.stagedMutations, body]);
+      state.stagedMutations.push(body);
+      state.mutationRequestIds.add(body.requestId);
       return;
     case "bundle_sealed":
       if (state.phase !== "started") {
@@ -1008,6 +1288,21 @@ export class InProcessAssignmentSubmission {
       await this.#ledger.markInteractionsMirrored(assignmentId, result.mirroredUpTo);
       mirrored += pending.length;
     }
+  }
+
+  async submitSealedBundle(
+    assignmentId: string,
+    ctx: AuthorityCallContext,
+  ): Promise<
+    | { readonly committed: true; readonly commitRevision: number }
+    | { readonly committed: false; readonly error: AuthorityError }
+  > {
+    const bundle = await this.#ledger.sealedBundle(assignmentId);
+    const result = await this.#owner.submitBundle(bundle, ctx);
+    if (result.committed) {
+      await this.#ledger.acknowledge(assignmentId, result.commitRevision);
+    }
+    return result;
   }
 }
 
@@ -1161,6 +1456,21 @@ function assertPlainObject(
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new TypeError(`${label} must be an object`);
   }
+}
+
+function isReferenceContainer(value: unknown): value is { readonly ref: ArtifactRef } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value) &&
+    Object.prototype.hasOwnProperty.call(value, "ref")
+  );
+}
+
+function mutationBatchArtifactReference(
+  batch: import("@zhixing/core/contracts").MutationBatch | undefined,
+): ArtifactRef | undefined {
+  return batch ? mutationBatchArtifact(batch).ref : undefined;
 }
 
 function assertExactKeys(

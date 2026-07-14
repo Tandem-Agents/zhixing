@@ -5,6 +5,7 @@ import {
   type IConfirmationBroker,
   type Message,
   type RunResult,
+  type TranscriptRunRecord,
 } from "@zhixing/core";
 import {
   ConfirmationHub,
@@ -121,6 +122,55 @@ describe("ConversationManager", () => {
       const s2 = await manager.getOrCreate("test-conv");
       expect(s1).toBe(s2);
       expect(manager.list()).toHaveLength(1);
+    });
+
+    it("projects a committed run into the active read path exactly once", async () => {
+      await manager.disposeAll();
+      let persisted: TranscriptRunRecord | undefined;
+      manager = new ConversationManager(
+        createMockFactory(),
+        {
+          graceTimeoutMs: 60_000,
+          idleTimeoutMs: 30 * 60_000,
+          idleCheckIntervalMs: 60_000,
+        },
+        {
+          appendCommittedRun: async (_conversationId, input) => {
+            if (persisted) {
+              expect(input).toEqual(persisted);
+              return { runIndex: input.runIndex, shardId: "000001", appended: false };
+            }
+            persisted = structuredClone(input);
+            return { runIndex: input.runIndex, shardId: "000001", appended: true };
+          },
+        },
+      );
+      const session = await manager.getOrCreate("committed-conversation");
+      const runRecord: TranscriptRunRecord = {
+        type: "run",
+        runId: "run-1",
+        runIndex: 0,
+        timestamp: "2026-07-14T00:00:00.000Z",
+        messages: [
+          { role: "user", content: [{ type: "text", text: "hello" }] },
+          { role: "assistant", content: [{ type: "text", text: "done" }] },
+        ],
+      };
+      const projection = {
+        assignmentId: "assignment-1",
+        conversationId: session.conversationId,
+        commitRevision: 1,
+        digest: `sha256:${"0".repeat(64)}`,
+        runRecord,
+        contentAssets: [],
+      };
+
+      await manager.project(projection);
+      await manager.project(projection);
+
+      expect(session.window.getMessages()).toEqual(runRecord.messages);
+      expect(session.turnCount).toBe(1);
+      expect(persisted).toEqual(runRecord);
     });
 
     it("concurrent getOrCreate with same id creates only one runtime", async () => {

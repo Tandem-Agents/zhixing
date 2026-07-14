@@ -273,3 +273,34 @@ export interface MutationBatch extends WireSchemaV1<"MutationBatch"> {
   count: number;
   digest: Digest;
 }
+
+export type PublishRecord =
+  | {
+      t: "publish-decision";
+      assignmentId: string;
+      batch: { ref: ArtifactRef };
+      sessionCount: number;
+      globalCount: number;
+      outcomes: Array<{
+        seq: number;
+        outcome:
+          | { t: "granted"; targetRevision: number }
+          | { t: "conflicted"; error: AuthorityError };
+      }>;
+    }
+  | {
+      t: "publish-progress";
+      assignmentId: string;
+      domain: "session" | "global";
+      upToSeq: number;
+      state: "pending" | "settled";
+    };
+
+export interface FinalOutboxRecord {
+  t: "final";
+  conversationId: string;
+  runId: string;
+  commitRevision: number;
+  digest: Digest;
+  state: "pending" | "published" | "expired";
+}

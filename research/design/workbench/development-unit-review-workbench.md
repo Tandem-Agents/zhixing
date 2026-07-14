@@ -24,7 +24,7 @@
 | 问题盘点         | 整轮只读；关键原语五项检查与九类核查面全部完成，问题一次收齐                                               | 有问题进入问题裁决；零问题进入冻结准备                   |
 | 问题裁决         | 按根因去重；每项写清事实、完整影响面、最优方案、共同验证范围和验收条件                                     | 集中修复                                                 |
 | 集中修复         | 全部问题一次修完；同根风险反查无遗漏，只做一次合并后的直接验证                                             | 冻结准备                                                 |
-| 冻结准备         | 交付物文件集全部计入派生产物闭包表且结论通过/不适用；事实包完整，计算并冻结交付物指纹                     | 冻结终审                                                 |
+| 冻结准备         | 交付物闭包、事实包与最终验证计划完整；计算并冻结交付物指纹                                                   | 冻结终审                                                 |
 | 冻结终审         | 冻结指纹与事实包；两轮共享机械事实但独立裁决，分别审功能边界及并发、崩溃、安全、资源上界、测试盲区，均零新增 | 最终验证；任一轮有问题则回问题裁决                       |
 | 最终验证         | 受影响包全测、必要构建及导出、golden、安全/结构门禁按依赖顺序各执行一次，全部通过且未修改交付物             | 完成；失败需修改则回问题裁决                             |
 | 完成             | 两轮终审与全部必要验证属于同一份未修改交付物                                                               | 立即结束                                                 |
@@ -34,7 +34,7 @@
 1. **关键原语查透**：对每个状态变化、耐久写、并发竞争或外部副作用，逐项核对唯一事实源、生效/线性化点、崩溃与竞争插点、全部生产者/消费者、时间与空间上界；存在缓存、索引、增量计算、短路或其他快速路径时，以权威事实源上的完整计算为正确性基准，列明成立与失效条件，并用正反例差分验证等价，无法证明则不得冻结；再映射九类核查面。缺一项，问题盘点不得结束。
 2. **先审完再修**：问题盘点整轮只读，只登记问题；全部扫完后按根因合并，一次覆盖生产端、类型组合、消费者、异常终态和测试，再集中修复。
 3. **闭包先于冻结**：问题盘点零问题或集中修复完成后，都必须进入冻结准备。交付物文件集中的每个文件或同类组必须在派生产物闭包表中落账，覆盖其 lockfile、golden、schema/快照及结构/导出基线；无派生项须写明依据。存在未归类项、待核查项或未同步项不得冻结，也不得提前运行包级全测、全量构建或最终门禁。
-4. **昂贵验证只跑一次**：同一冻结指纹两轮终审零新增后，才执行受影响包全测、必要构建及最终门禁；同一目标已有相同输入的有效证据时禁止重跑，失败先归因再决定最小补证。
+4. **昂贵验证只跑一次**：冻结前将最终验证展开为精确命令、输入闭包、依赖顺序和复用证据；组合命令须先展开，剔除已有同输入证据覆盖或范围外的子项，存在“待确定/待计算”不得冻结。两轮终审零新增后按计划执行一次，失败先归因再决定最小补证。
 5. **指纹与事实包决定收敛**：冻结时把架构边界、文件与指纹、关键原语、跨边界消费者、派生产物映射和有效证据组成事实包。两轮终审共享这些机械事实但独立形成结论；交付物变化使结论归零，证据仅按输入闭包失效。最终验证不修改交付物，达到完成条件立即结束。
 
 ### 4. 动态区维护
@@ -68,21 +68,21 @@
 
 ### 当前状态
 
-- **单元**：第 11 单元（conversation assignment 与执行账本）
-- **架构来源**：`research/design/modules/distributed-runtime/specification.md` 的端口、日志、派发纪律及执行计划第 11 项
-- **当前状态**：完成
+- **单元**：第 12 单元（conversation 提交、staged 发布与最终性）
+- **架构来源**：`research/design/modules/distributed-runtime/specification.md` 的提交、发布收敛、终态投递及执行计划第 12 项
+- **当前状态**：单元完成；两轮终审与本单元最终验证通过
 - **连续无新增问题轮数**：2 / 2
 - **交付物是否冻结**：是
-- **交付物文件集**：`packages/core/src/authority/{commit-log.ts,artifact-retention.ts}`；`packages/core/src/protocol/{assignment.ts,index.ts}`；`packages/owner-kernel/{package.json,tsup.config.ts,src/index.ts,src/conversation-assignment.ts}`；`packages/executor/{package.json,tsup.config.ts,src/index.ts,src/assignment-ledger.ts,src/__tests__/assignment-ledger.test.ts}`；`packages/server/src/__tests__/{distributed-runtime-structure.test.ts,__goldens__/distributed-runtime-structure.golden.json}`；`scripts/check-runtime-package-exports.mjs`；`pnpm-lock.yaml`
-- **当前交付物指纹**：`sha256:4cac282fc17a0e908893fd1c1724a02c475b1a515eb1280b7dae51097b324199`
+- **交付物文件集**：core 提交协议/合同/保留注册/导出与 transcript 投影，executor assignment ledger，owner journal/manager，cli 装配，三组定向测试及运行时导出门禁（共 17 个产品文件）
+- **当前交付物指纹**：`f8092b2ace4f3d088801bc337ba20e45c4fc3d75`
 
 ### 固定边界
 
-- **功能范围**：conversation run journal、耐久派发 outbox、ActivationProof、assignment 账本及 received/started/interaction/bundle_sealed/acked 生命周期、幂等重投与进程内适配边界
-- **架构不变量**：artifact 先于引用耐久；assigned 才能派发、received 才能启动；assignmentId 为幂等键；重签同载荷等价、异载荷冲突；账本 recordSeq 与链摘要单调且可重建；新路径不接管生产执行
-- **验收条件**：无日志执行、重复 assignment、同载荷重签、异载荷 conflict、started 上报丢失、交互恢复、账本链与重启重驱测试通过
-- **必要上下游**：AuthorityCommitLog、ArtifactStore、冻结 contracts、协议规范化与签名边界；为后续 conversation 提交和取消收束提供耐久事实
-- **明确不属于本单元**：conversation 提交 CAS 与 staged 发布、取消/重派/uncertain、job、资源治理、mesh 传输、生产切换
+- **功能范围**：executor staged mutation 与不可变封包、owner conversation 栅栏 CAS、publish-decision/续做、内容索引、FinalOutbox 与历史补读
+- **架构不变量**：artifact 先于引用；assignment/ownerEpoch/baseRevision/executor/digest 全字段栅栏；提交、内容索引、发布决定与 final pending 同 envelope 生效；重复/迟到合法提交返回原 revision；发布和通知可从耐久事实续做
+- **验收条件**：字段污染、重复/迟到、缺件、发布崩溃、final 响应丢失、provisional→final 与旧新提交结果等价测试通过
+- **必要上下游**：第 9 单元 AuthorityCommitLog/ArtifactStore、第 11 单元 run journal/assignment ledger、冻结 SealedBundle/MutationBatch/RunSubmissionPort 合同
+- **明确不属于本单元**：取消/重派/uncertain、job、delivery、mesh 资产传输、run stream、生产总切换
 
 ### 派生产物闭包
 
@@ -90,14 +90,14 @@
 
 | 交付物变化（文件或同类组） | 派生关系与必须同步/核对项 | 低成本检查与证据 | 结论 |
 | -------------------------- | ------------------------ | ---------------- | ---- |
-| core protocol 的 assignment 实现与 barrel | 公共运行时符号必须同步运行时导出门禁；不产生 lockfile 或结构拓扑变化 | core 类型检查、构建及运行时导出门禁通过；新增校验函数已列入门禁 | 通过 |
-| core authority 的已注册 artifact 保留解析 | GC 必须从 run/job assigned 与 assignment received 的 `dispatchRef` 解析 DispatchEnvelope 引用闭包；不新增公共导出 | core 类型检查与构建通过；owner/executor 双根、缺件与并发 GC 正反测试通过 | 通过 |
-| owner-kernel 的 package/tsup/barrel/conversation-assignment | 子路径与根导出、workspace 依赖、结构拓扑及 lockfile 必须同步 | package/tsup/barrel 已登记子路径；结构断言/golden 与 lockfile 已覆盖依赖边 | 通过 |
-| executor 的 package/tsup/barrel/assignment-ledger | 子路径与根导出、workspace 依赖、结构拓扑及 lockfile 必须同步 | package/tsup/barrel 已登记子路径；结构断言/golden 与 lockfile 已覆盖依赖边 | 通过 |
-| executor assignment 集成测试 | 无生成产物；必须覆盖协议证明、串行派发、交互资源边界与既有验收 | 直接测试 7/7 通过，含 proof 验签/链摘要及新增正反边界 | 不适用：无派生产物 |
-| server 结构测试与 structure golden | 结构断言和 golden 必须成对反映新包依赖与源码拓扑 | 更新差异仅为 core/authority→core/protocol 引用数 2→3；普通模式复验通过 | 通过 |
-| runtime package export 门禁脚本 | 必须覆盖 core/owner/executor 新公共运行时符号与子路径一致性 | 脚本语法检查及实跑通过 | 通过 |
-| `pnpm-lock.yaml` | 必须与 owner-kernel/executor 新 workspace 依赖闭合；本轮无外部依赖 | importer 已同步且开发阶段安装/构建成功 | 通过 |
+| core 提交协议、合同与类型别名 | SealedBundle/MutationBatch/TranscriptRunRecord 的严格校验、导出与类型不变量 | 源码逐字段对照；四包类型检查及两包构建通过 | 通过 |
+| core artifact 保留注册 | bundle、batch、内容资产及传递依赖均由权威记录接管 | 注册表与提交闭包逐项对照 | 通过 |
+| executor assignment ledger | staged 记录、封包胜负点、artifact 先写后引用、提交/ACK 消费链 | 源码与 D2 定向测试 | 通过 |
+| core transcript 投影与等价测试 | `runId/runIndex` 幂等追加、读侧兼容、窗口折叠与旧路径逐项等价 | shard 21 项、窗口持久化 5 项通过 | 通过 |
+| owner conversation journal | CAS、发布、内容索引、final/history、投影与重放消费者 | U12-01～U12-05 全链修复；D2 通过 | 通过 |
+| owner manager、cli 装配与 server 定向测试 | committed fact 物化到旧 transcript/window/snapshot 读路径 | manager 投影定向测试通过；cli 回调与类型闭合 | 通过 |
+| assignment-ledger 定向测试 | 执行计划 12 的状态、崩溃、污染、跳序和等价验收 | 17/17 通过 | 通过 |
+| 运行时导出门禁 | 新增协议函数必须从声明的包出口可达 | 源导出、构建声明与门禁清单已同步；最终门禁待统一执行 | 通过 |
 
 ### 关键原语核查
 
@@ -105,14 +105,11 @@
 
 | 关键原语 | 唯一事实源 | 生效/线性化点 | 崩溃与竞争插点 | 生产者/消费者 | 时间、空间、重放与队列上界 | 结论 |
 | -------- | ---------- | ------------- | -------------- | ------------- | -------------------------- | ---- |
-| 协议信封与 ActivationProof | 签名 DispatchEnvelope artifact、assigned 所在 CommitEnvelope | assigned fsync 后由其 commit 元数据确定性重建 proof；executor 验签与全字段绑定 | 签发、artifact put、assigned fsync、proof 生成、发送任一点崩溃均由 artifact GC 或 outbox 重驱收敛 | owner journal 生产；executor dispatch/重放消费 | 信封大内容经 ArtifactRef；dependencyArtifacts 规范排序 | 通过 |
-| 派发 artifact 的耐久保留闭包 | run assigned / assignment received 是 `dispatchRef` 的权威保留根；DispatchEnvelope 是已注册复合 artifact | 提交时根与全部内嵌引用共同受 ArtifactStore 锁保护；提交后 GC 从根按注册 schema 恢复引用闭包 | 在场检查后至 fsync 前并发 GC 只能先删后拒或先提交后全保留；缺件 sweep 在删除前失败 | owner assign、executor dispatch 生产；outbox、ledger replay、执行输入消费；AuthorityCommitLog GC 回收 | 闭包按 digest 去重；缺件/错字节 fail-closed，父/root/dependency 同生存期 | 通过 |
-| run 准入与状态投影 | `run:<conversationId>` 的 admitted/state 记录 | admitted+queued 同一 CommitEnvelope | artifact 前写、commit 前后、响应丢失、并发同 ingress/run 由日志临界区线性化 | Control 准入结果生产；assignment/outbox/状态查询消费 | 大输入外置；assignment 仅接受仍 queued、队首且无其他 active 的 run | 通过 |
-| assigned 与耐久派发 outbox | run 流 assigned、state、dispatch-acked | dispatch artifact 先落；assigned+dispatched 单 CommitEnvelope；ACK fsync 停止 outbox | artifact/assigned/send/accepted/ACK 各点均可重驱；并发 assign 由事务复验 | journal 生产；进程内 dispatcher 与后续 mesh adapter 消费 | outbox 仅选择当前 dispatched、未 ACK 的唯一 active assignment | 通过 |
-| executor dispatch 与 received | `assignment:<assignmentId>` 首条 received 或 dispatch-rejected | 全验通过后 received fsync 是唯一激活点 | 并发重复、响应丢失、重签、异载荷均由 assignment 流首事实线性化 | owner outbox 生产；executor ledger 与本地执行 guard 消费 | artifact 先落；冲突零追加；单 assignment 重放有界于日志 | 通过 |
-| assignment 生命周期与链 | assignment 流连续 recordSeq 与摘要链 | 每次 CommitEnvelope 追加；bundle_sealed 为完成胜负点，acked 后收束 | start/seal/ack 重复与崩溃按耐久前缀回放；封包原子补齐 pending 终态 | executor runtime 生产；owner query/recovery、证据页消费 | 证据页至多 256 条；pending 默认 32 且可配置；单记录服从权威字节上限 | 通过 |
-| allow-once 交互与审计镜像 | assignment 流 requested-finished 差集；owner mirror 仅审计 | requested/finished 各自 fsync；owner mirror fsync 后 executor 再推进 watermark | 应答/镜像响应丢失可按 requestId、seq 重放；终态时补 cancelled | executor/交互面生产；数据面、owner journal、恢复器消费 | 完整 executor/owner 记录均受 32 KiB 上限；pending 有界，镜像按可承载批次推进 | 通过 |
-| 进程内 adapter 与能力开关 | owner/executor 两侧耐久事实，不持第二事实源 | enabled=true 才调用派发/查询；started 先落 executor 再上报 owner | disabled 零副作用；started 上报丢失由 queryLedger 恢复 | 单机组合根未来生产；两端窄端口消费 | 无监听、无循环重试；当前生产代码零消费者 | 通过 |
+| SealedBundle 与 MutationBatch | executor assignment 流的 staged 记录与 bundle_sealed；不可变 artifact | bundle_sealed 同 assignment 事务提交 | stage/seal 竞争在事务内复核；artifact 先落、候选引用保护 GC | executor 生产；owner CAS、发布器、history 消费 | inline 记录 32 KiB；大对象 artifact；assignment 封包后禁止继续增长 | 通过 |
+| conversation 栅栏 CAS | 当前 owner 的单物理 AuthorityCommitLog | committed、内容索引、发布决定、state、final 同 envelope | artifact 候选引用保护；当前 epoch/base/runIndex/session 写由同前缀 authority 端口裁决；提交后投影可重驱 | executor 提交；owner journal、manager/transcript 与历史消费者 | 单次 envelope 有 32 KiB/记录上界；revision 严格前进；重放按日志前缀 | 通过 |
+| staged 发布决定与续做 | publish-decision/progress 逻辑流 | CAS envelope 冻结逐条 outcome；幂等 apply 后逐项推进 progress | sidecar 逐字段绑定 committed bundle；apply 前后崩溃可重入；启动可扫描全部 pending | owner CAS 生产；publisher 与 conflict/final 投影消费 | batch 为 artifact；进度只能走下一 granted 项；未结项随日志保留 | 通过 |
+| 内容资产索引 | committed bundle 的 contentAssets | 与 committed 同 envelope | reducer 逐项对照 bundle；缺件在 CAS 前拒绝 | owner CAS 生产；内容治理/GC 消费 | 内容只存引用；artifact 生命周期由日志保留注册约束 | 通过 |
+| FinalOutbox 与历史补读 | RunJournal committed 为最终事实；outbox 为通知桥 | pending 与 commit 同 envelope；published/expired 单调转移 | pending 逐字段绑定 committed bundle；发布成功、状态落盘前崩溃会幂等重发 | owner CAS 生产；observer publisher 与 last-seen history 消费 | 无逐 surface ACK；published 24h 过期；历史按 revision 补读 | 通过 |
 
 ### 覆盖与核查
 
@@ -120,15 +117,15 @@
 
 | 覆盖来源 | 来源项 | 核查面 | 对象或路径 | 问题盘点结论与证据 | 终审一结论与证据 | 终审二结论与证据 |
 | -------- | ------ | ------ | ---------- | ------------------ | ---------------- | ---------------- |
-| 总纲/状态机 | 输入准入串行、queued→dispatched→running | 状态 | run journal、assignment ledger | 有问题：U11-01；单会话可同时写入多条 dispatched assignment | 通过：队首 queued、唯一 active、received 后启动均由权威日志守卫 | 通过：重放、重签、越序与并发竞争均收敛到单一状态前缀 |
-| 执行计划 11 | run journal、派发 outbox、交互生产端 | 入口与生产端 | admit/assign/dispatch/request/finish/seal | 有问题：U11-01、U11-02、U11-06；派发当前性、耐久体积与复合 artifact 保留闭包未封死 | 通过：入口均在耐久事务内复验；派发父件及完整引用集同锁提交 | 通过：恶意自报、缺件、超限和竞争均在追加前拒绝或形成完整事实 |
-| 端口/导出 | owner/executor/protocol 消费者与继承面 | 消费端与继承面 | 进程内 adapter、包根/子路径、后续 mesh 端口 | 通过：生产代码零挂载；导出与依赖方向单向且结构基线已同步 | 通过：全仓反查仅定义与导出，无生产装配或旁路消费者 | 通过：必达消费者可承载，恢复与镜像均从唯一日志重建 |
-| 记录合同 | received/started/interaction/bundle_sealed/acked | 生命周期 | 两本日志投影、outbox、mirror watermark | 有问题：U11-02、U11-06；大交互或积压可越日志上限，且派发复合 artifact 的子引用可先于父被回收 | 通过：两本日志可重建；父/root/dependency 同保留；交互和镜像均有界 | 通过：父件规范解析，子引用缺失或字节冲突在 sweep 前 fail-closed |
-| 不变量/故障矩阵 | artifact→assigned→received→started | 并发与崩溃点 | assign/dispatch/ACK/started/mirror 各 fsync 边界 | 有问题：U11-01、U11-06；日志事务保证局部线性化，但复合 artifact 子引用未与提交及 GC 同锁闭合 | 通过：各 fsync 形成单一可重驱前缀，提交与 GC 共用 artifact→log 锁序 | 通过：GC 先胜则提交拒绝，提交先胜则完整闭包保留；零悬空日志 |
-| 状态机/产品终态 | rejection/conflict/expired/run-end/backpressure | 异常路径与终态 | rejection proof、conflict proof、interaction recovery | 有问题：U11-02；backpressure 终态存在于合同但未用于限制 pending | 通过：拒收、冲突、过期、run-end 与背压均有唯一耐久终态 | 通过：finish×seal、重签×冲突和响应丢失均由首个耐久终态裁决 |
-| 凭证/对抗矩阵 | 签名、绑定、授权、离线 received proof | 安全边界 | envelope/lease/capability/activation、owner-control/assignment principal | 有问题：U11-02；conversation 交互 outcome 未在运行时封死字段与 surface-ticket 分支 | 通过：签名、全字段绑定、principal 方法及 conversation 应答联合均封闭 | 通过：注册解析只读规范内容寻址字节，不执行数据；错 schema/绑定拒绝回收 |
-| 包结构/顺序 | core protocol、owner-kernel、executor | 模块边界 | package graph、subpath、structure golden、生产装配 | 通过：owner 不依赖 executor；executor 不依赖 server；无 listener、无生产切换 | 通过：结构 golden 仅增加既有层内方向计数，无新包边或公共面 | 通过：无新外部依赖、监听、公共导出或生产切换，边界未扩张 |
-| 执行计划验收 | 七项验收与回归证据 | 测试与验收 | assignment-ledger 集成测试、包测试、baseline | 有问题：U11-03、U11-06；主要路径已覆盖，但签名 proof、资源边界及派发闭包 GC 缺少机械断言 | 通过：9 项直接测试及三包 2211 项回归覆盖当前完整交付物 | 通过：双根、缺件零 sweep、GC 竞态及七类验收均有正反机械断言 |
+| 总纲/状态机 | conversation 提交与最终性 | 状态 | dispatched/running→committed、started 乱序、final/history | 有问题：U12-01 | 通过：合法双入口、迟到吸收与终态补读闭合 | 通过：状态单调、重复与乱序均落入既定终态 |
+| 执行计划 12 | 封包、CAS、发布与通知生产端 | 入口与生产端 | ledger seal→RunSubmissionPort→owner CAS | 有问题：U12-02、U12-03 | 通过：先 artifact、同 envelope CAS、投影后置且可重驱 | 通过：入口验权、候选引用与原子提交点完整 |
+| 端口/导出 | 提交消费者与继承面 | 消费端与继承面 | publisher、会话持久化/窗口、history、observer | 有问题：U12-03、U12-05 | 通过：端口边界、旧读路径与启动扫描闭合 | 通过：全仓消费者反查无悬空或双写路径 |
+| 记录合同 | bundle/batch/publish/final 生命周期 | 生命周期 | stage→seal→commit→publish/final→retention | 有问题：U12-04、U12-05 | 通过：全生命周期唯一事实与保留根完整 | 通过：各阶段事实、保留根与回收边界闭合 |
+| 不变量/故障矩阵 | artifact→CAS→publish→final | 并发与崩溃点 | GC 竞态、commit 后崩溃、apply/final 响应丢失 | 有问题：U12-03、U12-05 | 通过：各插点均由耐久事实幂等续做 | 通过：并发重驱、响应丢失及各提交间隙均可收敛 |
+| 状态机/产品终态 | conflict/retry/history | 异常路径与终态 | stale epoch/revision、全局冲突、断线补读 | 有问题：U12-01、U12-02 | 通过：冲突终态、重试与 last-seen 补读闭合 | 通过：拒绝、冲突、历史补读均有唯一可达终态 |
+| 凭证/对抗矩阵 | assignment 提交权限与字段污染 | 安全边界 | authorizer、全字段 fence、严格 DTO、sidecar 篡改 | 有问题：U12-02、U12-04 | 通过：当前权威裁决、严格 schema 与 sidecar 绑定 | 通过：未授权、旧权威、自报字段与污染 sidecar 均 fail-closed |
+| 包结构/顺序 | core/owner/executor | 模块边界 | core 纯合同、executor 不持权威、owner 唯一提交 | 通过：依赖方向正确；缺口均在 owner 合同闭环 | 通过：core→owner→executor/cli 依赖与职责未反转 | 通过：职责与依赖保持单向，未侵入后续单元 |
+| 执行计划验收 | 七项验收与回归证据 | 测试与验收 | 污染、重复/迟到、缺件、两类崩溃、终态、旧新等价 | 有问题：U12-01～U12-05；现有 3 个提交用例未覆盖完整验收 | 通过：D1、D2、D4、D6 覆盖直接验收 | 通过：测试逐项覆盖风险面，未发现结构性盲区 |
 
 ### 问题清单
 
@@ -136,13 +133,11 @@
 
 | 编号 | 事实与证据 | 根本原因 | 完整影响面 | 最优解决方案与验收条件 | 状态 |
 | ---- | ---------- | -------- | ---------- | ---------------------- | ---- |
-| U11-01 | `assign` 只检查目标 run 已 admitted 及 ID 幂等，未要求目标仍 queued、队首且不存在其他 dispatched/running；与对话输入串行和 assignment 当前性冲突 | 只实现了单 run 幂等，遗漏 conversation 级调度不变量 | 生产端：assign；类型组合：同会话多 queued run；消费者：outbox/executor；异常终态：双 active；测试：并发/越序派发 | 在同一 run 流事务内要求目标 state=queued、无其他 active assignment、目标为当前最早 queuedPosition；同一 active queuedPosition 拒绝。验收：越序、并行第二 assignment 零追加，首 run 仍可正常重投 | 已验证 |
-| U11-02 | requested 允许约 128 KiB display，超过 AuthorityCommitLog 单记录 32 KiB；finished outcome 无运行时闭合校验；pending、mirror 批次与 recovery 历史结果无上界 | 交互合同按字段校验，未以耐久记录和积压闭包作为资源边界 | 生产端：request/finish/recover/seal/mirror；类型组合：超大/非法 outcome、积压；消费者：assignment replay、owner mirror、数据面；异常终态：日志拒写/恢复内存尖峰/镜像卡死；测试：边界与分批 | 建 conversation 专型 outcome/mirror 运行时校验；按规范字节限制 requested/finished；限制同时 pending，超限原子写 requested+cancelled(backpressure)；镜像按规范字节分批且 owner 拒绝超限；恢复只返回真实 pending 与本次新增终态。验收：任一记录不越 32 KiB、积压可分批推进、封包 pending 有界 | 已验证 |
-| U11-03 | 现有测试只检查 rejection/conflict proof 外形，未验签或逐项核对 activation/ledger 摘要；U11-01/U11-02 边界无测试 | 测试覆盖了行为结果，但未把证明身份和资源/串行不变量机械化 | 生产端与消费者均不改；测试盲区覆盖 proof、会话串行、大小、backpressure、镜像分批与恢复 | 增加 proof 验签/摘要断言，并为 U11-01/U11-02 的正反边界补直接集成测试；全部新增测试与既有验收共同通过 | 已验证 |
-| U11-04 | 修复把交互记录硬限为权威 32 KiB 的 1/4、镜像批次限为 1/2，并硬编码 pending=16、TTL=24h、reason=2000；这些数值不来自架构或存储合同，且现有 ConfirmationBroker 默认队深为 32 | 把协议形状校验、物理记录上限与产品背压策略混在同一组常量中 | 生产端：request/finish/mirror；类型组合：合法大展示/理由、长 TTL；消费者：确认 UI 与迁移影子；异常终态：过早 backpressure；测试：阈值与等价性 | 以完整 `AssignmentEntry`/owner mirror 记录的规范字节精确服从 32 KiB 权威上限；TTL 只校验正整数与 expires 等式，文本只校验形状并由记录总长约束；pending 上限改为构造选项、默认 32 对齐现有 broker。验收：上限内数据不被任意分数拒绝，越界零追加，可配背压且默认语义等价 | 已验证 |
-| U11-05 | finished outcome 按 executor `AssignmentEntry` 的 32 KiB 上限验收，但同一 outcome 投影为 owner `interaction-mirror` 时会增加 assignmentId、时间和数组包装；临界载荷可在 executor 成功、在 owner 永久拒写 | 只按生产记录计算物理上限，遗漏其必达耐久消费者的最小包装 | 生产端：finish/自动终结；消费者：pendingInteractionMirrors、owner mirror；异常终态：审计水位永久卡住；测试：临界字节载荷 | 对 finished 同时计算最大 recordSeq 下的 executor 记录与单条 owner mirror 记录，任一超过 32 KiB 即在追加前拒绝；replay 同样复验。验收：不存在“生产可写、最小镜像不可写”的 outcome，临界反例零追加 | 已验证 |
-| U11-06 | `assigned` 与 `received` 只直接引用 `dispatchRef`；GC 只扫描日志直接引用。实测父派发 artifact 保留而其内嵌依赖被删除；两侧在场检查与 fsync 之间也未共同持有依赖保护 | 把复合协议 artifact 当成 GC 叶节点，且事务候选只保护父 ref，遗漏其 schema 定义的耐久引用闭包 | 生产端：owner assign、executor dispatch；类型组合：WindowInput root 与 dependencyArtifacts；消费者：outbox、ledger replay、执行输入；异常终态：父在子失、重启/重投 missing-base；测试：owner/received 两种保留根及 GC 竞态 | 建集中、可扩展的已注册 artifact schema 保留解析：GC 识别 run/job assigned 与 assignment received 的 DispatchEnvelope 根并从规范 artifact 提取全部引用；两侧提交把父 ref 与完整引用集共同列为 candidateReferences，使在场检查到 fsync 全程受同一 ArtifactStore 锁保护。验收：未来截止 sweep 后父/root/dependency 全在；任一缺件时 GC/提交 fail-closed；owner 与独立 executor 日志均有直接测试 | 已验证 |
-| U11-07 | 冻结指纹上的构建、导出及行为 golden 均通过，最终 structure 门禁因新增 `artifact-retention.ts` 导致源码拓扑与旧 golden 不一致 | 集中修复新增 core 内部文件后未重新生成并审查其机械派生拓扑快照 | 生产端/类型/消费者/异常终态：均不变；派生产物：server structure golden；测试：唯一结构门禁 | 仅以更新模式运行 structure 测试，审查差异必须精确等于新增 core authority 文件及其既有层内导入；无额外包边或公共导出变化后接受，再以普通模式复验 | 已验证 |
+| U12-01 | `submitBundle` 只接受 running；状态 reducer 不允许 dispatched→committed；late `reportStarted/reconcileStarted` 在 committed 后抛错，与状态机“started 丢失/乱序仍提交”冲突 | started 被误当成提交前置事实，而非可丢失的观测事实 | owner 状态转移、started 两入口、重复/迟到提交、重放 reducer、状态/提交测试 | 允许 dispatched 或 running 的合法 bundle 原子进入 committed；committed 后 started/reconcile 幂等吸收；补 started 丢失、提交后迟到上报与重启重放测试 | 已验证 |
+| U12-02 | CAS 只把 bundle 与旧 assignment 回显对照；未校验 journal 当前 `ownerEpoch`，baseRevision/TranscriptRunRecord.runIndex 也未由当前会话权威投影裁决 | CAS 缺少“当前会话权威快照”的单一决策端口，以历史 assignment 代替当前 epoch/revision/序号事实 | owner CAS、SessionMeta revision、TranscriptRunRecord 顺序、session staged 预检、旧 owner/旧基线攻击面及测试 | 引入同步的会话提交决策端口，在同一 AuthorityCommitLog prefix 上一次裁决当前 ownerEpoch、baseRevision、下一 transcript runIndex、session staged 写并分配严格前进的 commitRevision；旧 epoch/旧基线/错 runIndex 零写入 | 已验证 |
+| U12-03 | committed 后仅发布 mutation/final；没有把 RunRecord、windowCompact、会话元数据投影到旧读路径，也没有可重启重驱的幂等投影入口；“旧新结果等价”测试只比较 bundle 字段 | 把权威 CAS 与派生投影割开后只实现了事实落盘，遗漏提交后投影闭环 | transcript 分片、ConversationManager 窗口/快照、session meta/content 读侧、commit 后崩溃、旧新 golden | 以幂等 `ConversationCommitProjection` 物化 transcript/window/snapshot；journal 枚举重驱 committed；run 严格要求非空且首项为用户；补投影崩溃、重复重驱及真实旧新持久化/窗口逐项等价测试 | 已验证 |
+| U12-04 | publish-decision 重放只校验同 envelope 有 committed，未对照 committed bundle 的 batch ref/计数/outcomes；progress 可越过实际 granted 项；FinalOutbox pending 未核 digest 等于 committed bundle | 跨流 sidecar reducer 只校验共存，不校验与唯一 committed 事实的内容绑定 | publish/conflict/final 读取、重启重放、日志损坏 fail-closed、通知摘要与测试 | 统一从同 envelope 唯一 committed bundle/MutationBatch 复算 sidecar；校验所属 run stream、ref/计数/seq/outcome/digest，progress 只能推进到下一 granted 项；污染立即判坏日志 | 已验证 |
+| U12-05 | `resumePublishing(assignmentId)` 只能由已知 assignment 驱动；commit 后进程退出且 executor 不重投时，没有从日志枚举全部未 settled decision 的恢复入口 | 发布恢复依赖提交调用栈/外部记忆，而非耐久 publish 流自身 | owner 启动恢复、session/global apply、progress、publish 冲突、崩溃测试 | 从 publish projection 按 commit 顺序枚举并重驱全部 pending assignment；单 assignment 内核幂等；测试重启不重投仍 settled、重复恢复零副作用 | 已验证 |
 
 ### 验证计划与证据账本
 
@@ -150,25 +145,16 @@
 
 | 编号 | 证明目标与当前缺口 | 最小命令或检查 | 输入闭包 | 阶段 / 成本 / 实耗 | 结果 | 证据输入指纹 | 状态 |
 | ---- | ------------------ | -------------- | -------- | ------------------ | ---- | ------------ | ---- |
-| D1 | core 新共享合同类型与实现可编译 | `pnpm --filter @zhixing/core exec tsc --noEmit` | core protocol 当前源码 | 直接 / 低 / 16.1s | 通过 | 当前 core 文件哈希 | 有效 |
-| D2 | owner/executor 对共享合同及本地实现类型闭合 | 两包 `tsc --noEmit` | 当前 core 构建声明、owner/executor 源码 | 直接 / 低 / 约 20s | 通过 | 当前相关文件哈希 | 有效 |
-| D3 | Unit 11 行为、故障与新增边界闭合 | executor 定向 `assignment-ledger.test.ts` | 当前 core/owner 构建与 executor 源码/测试 | 直接 / 中 / 12.2s | 7/7 通过 | 当前相关文件哈希 | 有效 |
-| D4 | 修改文件格式与补丁完整性 | 目标 Biome、`git diff --check` | 当前修改源码/测试 | 直接 / 低 / 3.6s | 通过 | 当前相关文件哈希 | 有效 |
-| D5 | 公共导出实际可达且门禁同步 | core/owner 构建、`node scripts/check-runtime-package-exports.mjs`、`node --check` | 当前构建产物与导出脚本 | 冻结准备 / 中 / 约 100s | 通过 | 当前 core/owner/脚本哈希 | 有效 |
-| D6 | U11-04 的权威大小边界、长 TTL 与可配背压 | core/executor 类型检查、core 构建、同一定向测试、目标 Biome | 当前 core/executor 源码与测试 | 直接 / 中 / 约 72s | 类型通过；7/7 测试通过；格式通过 | 新冻结指纹相关文件哈希 | 有效 |
-| D7 | U11-05 的跨日志单条可消费容量闭包 | executor 类型检查、同一定向测试、目标 Biome | 当前 executor 源码与测试、core 权威上限 | 直接 / 中 / 27.8s | 类型通过；临界反例在追加前拒绝；7/7 通过 | 新冻结指纹相关文件哈希 | 有效 |
-| D8 | 最终构建、导出与行为/结构基线在冻结交付物上成立 | `pnpm runtime:baseline:update` | 冻结交付物、构建配置、导出与 golden 门禁 | 最终 / 高 / 205.7s | 构建及全部 runtime baseline 通过 | `sha256:4e8bb66ac6161ce3eb289aaab7cf476c37cc9d915ba768183b7da04c642c6b75` | 有效 |
-| D9 | 受影响包完整回归通过 | 依次运行 core、owner-kernel、executor 全量测试 | 冻结交付物及当前依赖构建产物 | 最终 / 高 / 93.5s | core 132 文件 2187 测试、owner 10 测试、executor 12 测试全部通过 | `sha256:4e8bb66ac6161ce3eb289aaab7cf476c37cc9d915ba768183b7da04c642c6b75` | 有效 |
-| D10 | 最终验证未改写交付物，补丁完整 | 复算交付物指纹、`git diff --check`、`git diff --cached --check` | 最终验证后的工作区与暂存区 | 最终 / 低 / 3.4s | 指纹不变；两类补丁检查通过 | `sha256:4e8bb66ac6161ce3eb289aaab7cf476c37cc9d915ba768183b7da04c642c6b75` | 有效 |
-| D11 | 复合 artifact 传递引用是否受当前 GC 保留 | 临时 FileArtifactStore/AuthorityCommitLog：日志只引用父 artifact，父 JSON 内引用子 artifact，未来截止 sweep | 当前 authority GC 实现 | 诊断 / 低 / 2.5s | `retained=1, deleted=1`；父在、子丢，确认 U11-06 | `sha256:4e8bb66ac6161ce3eb289aaab7cf476c37cc9d915ba768183b7da04c642c6b75` | 诊断 |
-| D12 | U11-06 的提交保护、双耐久根保留与 fail-closed | core/owner/executor 类型检查；core/owner 定向构建；executor assignment 定向测试；目标 Biome 与 diff check | authority 保留解析、两侧提交、assignment 集成测试及直接依赖构建 | 修复直接验证 / 中 / 约 137s | 三包类型通过；构建通过；9/9 测试通过，含双根、缺件零 sweep 与 GC 竞态；格式通过 | `sha256:b075a0871fa8d6d2559a5f6bc12535fa4bbb3bbfe7709f2253fe962a09c33e9d` | 有效 |
-| D13 | 实现源码的包回归、必要构建、导出与行为基线 | 三包全测；runtime baseline 在 structure 步骤前的构建/导出/server 行为/CLI 步骤 | 实现源码、依赖声明、构建配置、导出脚本及行为/CLI golden；不含 structure golden | 最终 / 高 / 约 280s | core 2187、owner 10、executor 14 全绿；必要构建、导出、server 行为与 CLI golden 通过 | 实现文件哈希与当前交付物一致 | 有效 |
-| D14 | U11-07 的 topology 派生差异与当前普通门禁 | structure 更新模式、差异审查、普通模式复验、交付物指纹与 diff check | structure 测试/源码扫描/golden；其余实现文件与 D13 相同 | 修复直接验证 / 低 / 约 25s | 差异仅 core authority 层内既有方向引用数 2→3；普通门禁 1/1 通过；补丁完整 | `sha256:4cac282fc17a0e908893fd1c1724a02c475b1a515eb1280b7dae51097b324199` | 有效 |
-| D15 | 完成态交付物未变化且文件闭包完整 | 复算指纹、工作区/暂存区 diff check、交付文件并集核对 | 当前全部交付文件，不含工作台与构建产物 | 最终 / 低 / 约 4s | 指纹不变；两类补丁检查通过；17 个交付文件全部已归类 | `sha256:4cac282fc17a0e908893fd1c1724a02c475b1a515eb1280b7dae51097b324199` | 有效 |
+| D1 | core/owner/executor/server 新实现类型闭合 | 四包定向 `tsc --noEmit` | 当前 17 个产品文件 | 直接 / 低 / 16.6s（并行墙钟） | 四包通过 | `f8092b2ace4f3d088801bc337ba20e45c4fc3d75` | 有效 |
+| D2 | Unit 12 提交、发布、最终性行为闭合 | executor assignment-ledger 定向测试 | 当前 17 个产品文件 | 直接 / 中 / 26.48s | 17/17 通过 | `f8092b2ace4f3d088801bc337ba20e45c4fc3d75` | 有效 |
+| D3 | 冻结交付物完整回归与必要构建/门禁 | 五个受影响包全测；executor/cli build；server/cli golden；结构与安全门禁 | 冻结交付物 | 最终 / 高 / 284.4s | 五包全测、两包构建、golden 4/4、结构 1/1、三道安全门禁通过；全仓 Biome 唯一失败来自本单元未改的既有测试文件，本单元定向检查通过 | `f8092b2ace4f3d088801bc337ba20e45c4fc3d75` | 有效 |
+| D4 | core 与 owner 构建产物可生成 | 两包按依赖顺序定向 build | 当前 17 个产品文件 | 直接 / 高 / 49.6s | 两包通过 | `f8092b2ace4f3d088801bc337ba20e45c4fc3d75` | 有效 |
+| D5 | 新协议函数可从运行时公开导出 | `pnpm runtime:package-exports` | 当前导出面、构建产物与导出门禁 | 最终 / 高 / 已执行 | 通过 | `f8092b2ace4f3d088801bc337ba20e45c4fc3d75` | 有效 |
+| D6 | committed 投影与旧读路径等价且幂等 | core shard/window 两文件 + server manager 定向测试 | transcript、manager、cli 投影闭包 | 直接 / 中 / 15s | core 26/26；server 1/1 通过 | `f8092b2ace4f3d088801bc337ba20e45c4fc3d75` | 有效 |
 
 ### 终审记录
 
 | 轮次 | 审查侧重 | 矩阵是否完整 | 新增问题 | 交付物指纹 | 结论 |
 | ---- | -------- | ------------ | -------- | ------------ | ---- |
-| 第一轮 | 需求、架构、功能闭环、状态、回归 | 是 | 无 | `sha256:4cac282fc17a0e908893fd1c1724a02c475b1a515eb1280b7dae51097b324199` | 通过 |
-| 第二轮 | 并发、崩溃、安全、资源上界、异常终态、测试盲区 | 是 | 无 | `sha256:4cac282fc17a0e908893fd1c1724a02c475b1a515eb1280b7dae51097b324199` | 通过 |
+| 第一轮 | 需求、架构、功能闭环、状态、回归 | 是 | 0 | `f8092b2ace4f3d088801bc337ba20e45c4fc3d75` | 通过 |
+| 第二轮 | 并发、崩溃、安全、资源上界、异常终态、测试盲区 | 是 | 0 | `f8092b2ace4f3d088801bc337ba20e45c4fc3d75` | 通过 |
