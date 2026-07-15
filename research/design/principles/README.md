@@ -21,3 +21,4 @@
 |---|---|
 | [可重放介质中的控制动作必须有幂等键](idempotent-keys-for-replayable-commands.md) | 无键的一次性动作被重放即二次生效;键 + 耐久消费记录,或把动作隔离出可重放域 |
 | [反复重写的状态改 append-only 换代](append-only-generational-turnover.md) | 不给危险写加锁守卫,而是让危险写不存在:只追加、换代、指针栅栏 |
+| [多执行点合同必须谓词单源](single-source-contract-predicates.md) | 发现两处各自实现同一合同,修复是合并谓词而非补齐检查;单源的是谓词不是调用栈,对账靠注册表/参数化测试 |
